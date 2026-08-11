@@ -1,0 +1,28 @@
+name: upton-pdm
+services:
+  mysql:
+    image: mysql:8.4
+    container_name: upton-pdm-mysql
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:3308:3306"
+    environment:
+      MYSQL_DATABASE: pdm
+      MYSQL_USER: pdm_app
+      MYSQL_PASSWORD: ${PDM_DB_PASSWORD:?PDM_DB_PASSWORD is required}
+      MYSQL_ROOT_PASSWORD: ${PDM_DB_ROOT_PASSWORD:?PDM_DB_ROOT_PASSWORD is required}
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_0900_ai_ci
+      - --default-time-zone=+00:00
+    volumes:
+      - pdm_mysql_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -u root -p$$MYSQL_ROOT_PASSWORD --silent"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+volumes:
+  pdm_mysql_data:
+    name: upton_pdm_mysql_data

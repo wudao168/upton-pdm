@@ -1,0 +1,30 @@
+:root {
+  color-scheme: light;
+  font-family: "Microsoft YaHei UI", "Segoe UI", sans-serif;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  --pdm-bg: #f4f7fb;
+  --pdm-surface: #ffffff;
+  --pdm-surface-muted: #f8fafc;
+  --pdm-sidebar: #1f3148;
+  --pdm-sidebar-active: #2d4969;
+  --pdm-sidebar-text: #d8e4f1;
+  --pdm-text: #27364a;
+  --pdm-muted: #6f8095;
+  --pdm-border: #dbe3ef;
+  --pdm-border-soft: #e8eef5;
+  --pdm-blue: #2f6de0;
+  --pdm-blue-soft: #eaf2ff;
+  --pdm-green: #148252;
+  --pdm-green-soft: #e6f6ee;
+  --pdm-orange: #d77a17;
+  --pdm-orange-soft: #fff3e3;
+  --pdm-danger: #c54a44;
+  --pdm-shadow: rgba(29, 52, 83, 0.13);
+}
+
+* { box-sizing: border-box; }
+html, body, #app { width: 100%; height: 100%; min-width: 320px; min-height: 0; margin: 0; overflow: hidden; }
+body { background: var(--pdm-bg); color: var(--pdm-text); font-size: 13px; }
+button, input { font: inherit; }
+button { cursor: pointer; }

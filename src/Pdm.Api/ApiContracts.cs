@@ -1,0 +1,24 @@
+using Upton.Pdm.Domain;
+
+namespace Upton.Pdm.Api;
+
+public sealed record LoginRequest(string Username, string Password);
+
+public sealed record LoginResponse(string AccessToken, DateTimeOffset ExpiresAt, string Username, string DisplayName, string Role);
+
+public sealed record CheckInRequest(Guid ProjectId, DocumentReferenceNode Root, string Comment);
+
+public sealed record CreateReleasePackageRequest(
+    Guid ProjectId,
+    Guid ReferenceSnapshotId,
+    string Number,
+    string MechanicalBomRevision,
+    string ElectricalBomRevision,
+    string ProcessReviewer,
+    string Approver);
+
+public sealed record ApprovalRequest(ApprovalDecision Decision, string? Comment);
+
+public sealed record StartUploadRequest(Guid ProjectId, string FileName, long TotalLength, string Sha256);
+
+public sealed record CompleteUploadRequest(string RelativeTargetPath);

@@ -1,0 +1,14 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/Pdm.Domain/Pdm.Domain.csproj" />
+    <Project Path="src/Pdm.Application/Pdm.Application.csproj" />
+    <Project Path="src/Pdm.Infrastructure/Pdm.Infrastructure.csproj" />
+    <Project Path="src/Pdm.Api/Pdm.Api.csproj" />
+    <Project Path="src/Pdm.Desktop/Pdm.Desktop.csproj" />
+    <Project Path="src/Pdm.SolidWorks.Addin/Pdm.SolidWorks.Addin.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/Pdm.Domain.Tests/Pdm.Domain.Tests.csproj" />
+    <Project Path="tests/Pdm.Api.Tests/Pdm.Api.Tests.csproj" />
+  </Folder>
+</Solution>

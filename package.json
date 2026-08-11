@@ -1,0 +1,12 @@
+{
+  "name": "upton-pdm",
+  "private": true,
+  "packageManager": "pnpm@11.16.0",
+  "scripts": {
+    "ui:dev": "pnpm --dir src/pdm-ui dev",
+    "ui:build": "pnpm --dir src/pdm-ui build",
+    "ui:typecheck": "pnpm --dir src/pdm-ui typecheck",
+    "ui:test": "pnpm --dir src/pdm-ui test",
+    "ui:e2e": "pnpm --dir src/pdm-ui test:e2e"
+  }
+}
