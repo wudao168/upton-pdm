@@ -58,6 +58,11 @@ public static class ReferenceTreeDiff
                 changes.Add(new ReferenceTreeChange(ReferenceChangeKind.ConfigurationChanged, path, node.Configuration, currentNode.Configuration));
             }
 
+            if (node.Quantity != currentNode.Quantity)
+            {
+                changes.Add(new ReferenceTreeChange(ReferenceChangeKind.QuantityChanged, path, node.Quantity.ToString(), currentNode.Quantity.ToString()));
+            }
+
             if (node.Status != currentNode.Status)
             {
                 changes.Add(new ReferenceTreeChange(ReferenceChangeKind.StatusChanged, path, node.Status.ToString(), currentNode.Status.ToString()));

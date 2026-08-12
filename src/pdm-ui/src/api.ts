@@ -1,4 +1,4 @@
-import type { ApprovalStep, BomItem, DocumentKind, DocumentNode, ProjectSummary, ReferenceStatus, ReleasePackageSummary } from './types'
+import type { ApprovalStep, BomItem, DocumentKind, DocumentNode, DocumentVersionComparison, DocumentVersionSummary, ProjectSummary, ReferenceStatus, ReleasePackageSummary } from './types'
 
 const apiBase = (import.meta.env.VITE_PDM_API_BASE ?? 'http://127.0.0.1:5080').replace(/\/$/, '')
 
@@ -113,6 +113,24 @@ async function requestJson<T>(path: string, init: RequestInit = {}, token?: stri
   }
 
   return response.json() as Promise<T>
+}
+
+export function listDocumentVersions(documentId: string, token: string): Promise<DocumentVersionSummary[]> {
+  return requestJson<DocumentVersionSummary[]>(`/api/documents/${documentId}/versions`, {}, token)
+}
+
+export function compareDocumentVersions(documentId: string, left: string, right: string, token: string): Promise<DocumentVersionComparison> {
+  return requestJson<DocumentVersionComparison>(`/api/documents/${documentId}/versions/compare?left=${encodeURIComponent(left)}&right=${encodeURIComponent(right)}`, {}, token)
+}
+
+export function restoreDocumentVersion(documentId: string, versionId: string, changeNote: string, token: string): Promise<unknown> {
+  return requestJson(`/api/documents/${documentId}/versions/${versionId}/restore`, { method: 'POST', body: JSON.stringify({ changeNote }) }, token)
+}
+
+export async function readDocumentVersionFile(documentId: string, versionId: string, token: string, download: boolean): Promise<Blob> {
+  const response = await fetch(`${apiBase}/api/documents/${documentId}/versions/${versionId}/file?download=${download}`, { headers: { Authorization: `Bearer ${token}` }, cache: 'no-store' })
+  if (!response.ok) throw new PdmApiError(`历史版本文件读取失败（${response.status}）`, response.status)
+  return response.blob()
 }
 
 export async function checkHealth(signal?: AbortSignal): Promise<boolean> {

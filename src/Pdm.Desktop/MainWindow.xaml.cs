@@ -12,6 +12,7 @@ namespace Upton.Pdm.Desktop;
 public partial class MainWindow : Window
 {
     private const string UiHost = "appassets.pdm.local";
+    private readonly string[] startupArgs = Environment.GetCommandLineArgs();
 
     public MainWindow()
     {
@@ -59,9 +60,16 @@ public partial class MainWindow : Window
             {
                 MessageBox.Show(this, $"页面加载失败：{args.WebErrorStatus}", "UPTON PDM");
             }
+            else if (startupArgs.Length >= 5 && string.Equals(startupArgs[1], "--compare", StringComparison.OrdinalIgnoreCase))
+            {
+                var script = $"window.dispatchEvent(new CustomEvent('pdm-open-version-compare', {{ detail: {{ documentId: {Serialize(startupArgs[2])}, leftVersionId: {Serialize(startupArgs[3])}, rightVersionId: {Serialize(startupArgs[4])} }} }}));";
+                _ = WorkspaceView.CoreWebView2.ExecuteScriptAsync(script);
+            }
         };
         WorkspaceView.Source = new Uri($"https://{UiHost}/index.html");
     }
+
+    private static string Serialize(string value) => new JavaScriptSerializer().Serialize(value);
 
     private void OnWebMessageReceived(object? sender, CoreWebView2WebMessageReceivedEventArgs e)
     {

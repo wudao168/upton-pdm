@@ -27,6 +27,12 @@ public enum DocumentLifecycleState
     Obsolete
 }
 
+public enum DocumentVersionStatus
+{
+    Work,
+    Released
+}
+
 public enum ReferenceNodeStatus
 {
     Normal,
@@ -44,7 +50,25 @@ public enum ReferenceChangeKind
     Replaced,
     Moved,
     ConfigurationChanged,
+    QuantityChanged,
     StatusChanged
+}
+
+public enum SnapshotChangeKind
+{
+    Added,
+    Removed,
+    Modified
+}
+
+public enum BomChangeKind
+{
+    Added,
+    Removed,
+    QuantityChanged,
+    MaterialChanged,
+    SpecificationChanged,
+    RevisionChanged
 }
 
 public enum BomKind

@@ -62,6 +62,83 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
         return await FindDocumentAsync(connection, null, documentId, cancellationToken);
     }
 
+    public async Task<PdmDocument> RegisterDocumentAsync(RegisterDocumentCommand command, string actor, CancellationToken cancellationToken)
+    {
+        await using var connection = await OpenAsync(cancellationToken);
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+        var projectActive = await connection.ExecuteScalarAsync<bool?>(new CommandDefinition(
+            "SELECT is_active FROM project WHERE id=@ProjectId FOR UPDATE",
+            new { command.ProjectId },
+            transaction,
+            cancellationToken: cancellationToken));
+        if (projectActive != true)
+        {
+            throw new PdmNotFoundException("项目不存在或已停用。");
+        }
+
+        var documentId = Guid.NewGuid();
+        var now = timeProvider.GetUtcNow();
+        await connection.ExecuteAsync(new CommandDefinition(
+            """
+            INSERT INTO document(id,project_id,drawing_number,name,file_name,kind,lifecycle_state,revision_label,checked_out_by,checked_out_at,row_version,created_at,updated_at)
+            VALUES(@Id,@ProjectId,@DrawingNumber,@Name,@FileName,@Kind,'Work','W1',NULL,NULL,1,@Now,@Now)
+            ON DUPLICATE KEY UPDATE id=id
+            """,
+            new
+            {
+                Id = documentId,
+                command.ProjectId,
+                command.DrawingNumber,
+                command.Name,
+                command.FileName,
+                Kind = command.Kind.ToString(),
+                Now = now.UtcDateTime
+            },
+            transaction,
+            cancellationToken: cancellationToken));
+
+        var row = await connection.QuerySingleAsync<DocumentRow>(new CommandDefinition(
+            """
+            SELECT id, project_id, drawing_number, name, file_name, kind, lifecycle_state, revision_label, checked_out_by, updated_at
+            FROM document WHERE project_id=@ProjectId AND file_name=@FileName
+            """,
+            new { command.ProjectId, command.FileName },
+            transaction,
+            cancellationToken: cancellationToken));
+        await connection.ExecuteAsync(new CommandDefinition(
+            """
+            INSERT INTO document_user_access(document_id,username,can_read,granted_at)
+            VALUES(@DocumentId,@Actor,1,@Now)
+            ON DUPLICATE KEY UPDATE can_read=1
+            """,
+            new { DocumentId = row.Id, Actor = actor, Now = now.UtcDateTime },
+            transaction,
+            cancellationToken: cancellationToken));
+        await transaction.CommitAsync(cancellationToken);
+        return MapDocument(row);
+    }
+
+    public async Task<bool> HasDocumentReadAccessAsync(Guid documentId, string actor, UserRole role, CancellationToken cancellationToken)
+    {
+        if (role == UserRole.Administrator) return true;
+        await using var connection = await OpenAsync(cancellationToken);
+        var value = await connection.ExecuteScalarAsync<int?>(new CommandDefinition(
+            """
+            SELECT CASE
+                WHEN dua.can_read IS NOT NULL THEN dua.can_read
+                WHEN p.owner = @Actor THEN 1
+                ELSE COALESCE(pua.can_read, 0)
+            END
+            FROM document d
+            INNER JOIN project p ON p.id=d.project_id
+            LEFT JOIN project_user_access pua ON pua.project_id=p.id AND pua.username=@Actor
+            LEFT JOIN document_user_access dua ON dua.document_id=d.id AND dua.username=@Actor
+            WHERE d.id=@DocumentId
+            """,
+            new { DocumentId = documentId, Actor = actor }, cancellationToken: cancellationToken));
+        return value == 1;
+    }
+
     public async Task<DocumentReferenceNode?> GetReferenceTreeAsync(Guid projectId, CancellationToken cancellationToken)
     {
         await using var connection = await OpenAsync(cancellationToken);

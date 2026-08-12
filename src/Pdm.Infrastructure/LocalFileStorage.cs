@@ -2,6 +2,7 @@ using System.Security.Cryptography;
 using System.Text.Json;
 using Microsoft.Extensions.Options;
 using Upton.Pdm.Application;
+using Upton.Pdm.Domain;
 
 namespace Upton.Pdm.Infrastructure;
 
@@ -136,6 +137,8 @@ public sealed class LocalFileStorage(IOptions<PdmStorageOptions> options, IPdmRe
         }
 
         File.Move(assembledPath, targetPath);
+        if (relativeTargetPath.Split(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar).Any(segment => string.Equals(segment, ".versions", StringComparison.OrdinalIgnoreCase)))
+            File.SetAttributes(targetPath, File.GetAttributes(targetPath) | FileAttributes.ReadOnly);
         Directory.Delete(GetSessionDirectory(sessionId), true);
         return new StoredFile(Path.GetRelativePath(project.VaultLocation, targetPath), session.TotalLength, actualSha256, timeProvider.GetUtcNow());
     }
@@ -162,6 +165,61 @@ public sealed class LocalFileStorage(IOptions<PdmStorageOptions> options, IPdmRe
         {
             return Task.FromResult(false);
         }
+    }
+
+    public async Task VerifyStoredFileAsync(Project project, StoredFile file, CancellationToken cancellationToken)
+    {
+        var relativeSegments = file.RelativePath.Split(new[] { Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar }, StringSplitOptions.RemoveEmptyEntries);
+        if (relativeSegments.Length == 0 || !string.Equals(relativeSegments[0], ".versions", StringComparison.OrdinalIgnoreCase))
+        {
+            throw new PdmRuleException("历史版本文件必须存放在独立的.versions只读目录中。");
+        }
+
+        var path = StorageLocationPolicy.ResolveUnder(project.VaultLocation, file.RelativePath);
+        if (!File.Exists(path))
+        {
+            throw new PdmNotFoundException("待存档的版本文件不存在。");
+        }
+
+        var info = new FileInfo(path);
+        if (info.Length != file.Length)
+        {
+            throw new PdmConflictException("待存档文件大小与上传记录不一致。");
+        }
+
+        if ((info.Attributes & FileAttributes.ReadOnly) == 0)
+        {
+            throw new PdmConflictException("历史版本文件不是只读文件，不能写入版本记录。");
+        }
+
+        await using var input = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, 256 * 1024, FileOptions.Asynchronous | FileOptions.SequentialScan);
+        var actual = Convert.ToHexString(await SHA256.HashDataAsync(input, cancellationToken));
+        if (!string.Equals(actual, file.Sha256, StringComparison.OrdinalIgnoreCase))
+        {
+            throw new PdmConflictException("待存档文件SHA-256校验失败。");
+        }
+    }
+
+    public async Task<StoredFile> CopyVersionAsync(Project project, StoredFile source, string relativeTargetPath, CancellationToken cancellationToken)
+    {
+        await VerifyStoredFileAsync(project, source, cancellationToken);
+        var sourcePath = StorageLocationPolicy.ResolveUnder(project.VaultLocation, source.RelativePath);
+        var targetPath = StorageLocationPolicy.ResolveUnder(project.VaultLocation, relativeTargetPath);
+        if (File.Exists(targetPath))
+        {
+            throw new PdmConflictException("恢复版本目标文件已存在，不能覆盖。");
+        }
+
+        Directory.CreateDirectory(Path.GetDirectoryName(targetPath)!);
+        await using (var input = new FileStream(sourcePath, FileMode.Open, FileAccess.Read, FileShare.Read, 256 * 1024, FileOptions.Asynchronous | FileOptions.SequentialScan))
+        await using (var output = new FileStream(targetPath, FileMode.CreateNew, FileAccess.Write, FileShare.None, 256 * 1024, FileOptions.Asynchronous | FileOptions.SequentialScan))
+        {
+            await input.CopyToAsync(output, cancellationToken);
+            await output.FlushAsync(cancellationToken);
+        }
+        File.SetAttributes(targetPath, File.GetAttributes(targetPath) | FileAttributes.ReadOnly);
+
+        return new StoredFile(Path.GetRelativePath(project.VaultLocation, targetPath), source.Length, source.Sha256, timeProvider.GetUtcNow());
     }
 
     private string GetSessionDirectory(Guid sessionId) => Path.Combine(StorageLocationPolicy.Normalize(settings.UploadTempRoot), sessionId.ToString("N"));

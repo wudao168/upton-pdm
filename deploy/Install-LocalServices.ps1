@@ -76,10 +76,30 @@ $receipt = Get-Content -LiteralPath $receiptPath -Raw -Encoding UTF8 | ConvertFr
 $secrets = Get-Content -LiteralPath $secretPath -Raw -Encoding UTF8 | ConvertFrom-Json
 $mysqldPath = Join-Path $receipt.mysqlHome 'bin\mysqld.exe'
 $mysqlClient = Join-Path $receipt.mysqlHome 'bin\mysql.exe'
+$mysqlDump = Join-Path $receipt.mysqlHome 'bin\mysqldump.exe'
 $dotnetPath = Join-Path $projectRoot '.dotnet\dotnet.exe'
+$preparedApiUpgrade = Join-Path $localRoot 'api-next'
+$preparedClientUpgrade = Join-Path $localRoot 'staged-client'
+$preparedAddinUpgrade = Join-Path $localRoot 'staged-solidworks-addin'
+$hasPreparedApiUpgrade = Test-Path -LiteralPath (Join-Path $preparedApiUpgrade 'Pdm.Api.dll')
+$hasPreparedClientUpgrade = Test-Path -LiteralPath (Join-Path $preparedClientUpgrade 'Upton.Pdm.Desktop.exe')
+$hasPreparedAddinUpgrade = Test-Path -LiteralPath (Join-Path $preparedAddinUpgrade 'Upton.Pdm.SolidWorks.Addin.dll')
+$hasPreparedUpgrade = $hasPreparedApiUpgrade -or $hasPreparedClientUpgrade -or $hasPreparedAddinUpgrade
 
-if (-not (Test-Path -LiteralPath $mysqldPath) -or -not (Test-Path -LiteralPath $mysqlClient)) {
+if (-not (Test-Path -LiteralPath $mysqldPath) -or -not (Test-Path -LiteralPath $mysqlClient) -or -not (Test-Path -LiteralPath $mysqlDump)) {
     throw 'MySQL binaries are missing from the prepared runtime.'
+}
+
+if ($hasPreparedUpgrade -and -not ($hasPreparedApiUpgrade -and $hasPreparedClientUpgrade -and $hasPreparedAddinUpgrade)) {
+    throw 'The PDM upgrade is incomplete. API, Windows client and SolidWorks add-in must be staged together.'
+}
+
+if ($hasPreparedUpgrade) {
+    $blockingProcesses = Get-Process -Name 'SLDWORKS', 'Upton.Pdm.Desktop' -ErrorAction SilentlyContinue
+    if ($blockingProcesses) {
+        $names = ($blockingProcesses | Select-Object -ExpandProperty ProcessName -Unique) -join ', '
+        throw "Close the PDM Windows client and SolidWorks before the three-part upgrade. Running: $names"
+    }
 }
 
 $mysqlService = Get-Service -Name $mysqlServiceName -ErrorAction SilentlyContinue
@@ -120,8 +140,22 @@ FLUSH PRIVILEGES;
 
 $apiBinaryPath = '"{0}" "{1}"' -f $dotnetPath, $receipt.apiPath
 $apiService = Get-Service -Name $apiServiceName -ErrorAction SilentlyContinue
-$preparedApiUpgrade = Join-Path $localRoot 'api-next'
-$hasPreparedApiUpgrade = Test-Path -LiteralPath (Join-Path $preparedApiUpgrade 'Pdm.Api.dll')
+if ($hasPreparedUpgrade) {
+    $backupRoot = Join-Path $localRoot (Join-Path 'backup' ([DateTimeOffset]::Now.ToString('yyyyMMdd-HHmmss')))
+    $databaseBackupPath = Join-Path $backupRoot 'pdm.sql'
+    New-Item -ItemType Directory -Path $backupRoot -Force | Out-Null
+    foreach ($component in @('api', 'client', 'solidworks-addin')) {
+        $source = Join-Path $localRoot $component
+        if (Test-Path -LiteralPath $source) {
+            Copy-Item -LiteralPath $source -Destination (Join-Path $backupRoot $component) -Recurse -Force
+        }
+    }
+    & $mysqlDump "--defaults-extra-file=$rootClientPath" --single-transaction --routines --triggers --hex-blob "--result-file=$databaseBackupPath" pdm
+    if ($LASTEXITCODE -ne 0) {
+        throw "PDM database backup failed with exit code $LASTEXITCODE. Upgrade files were not switched."
+    }
+}
+
 if ($hasPreparedApiUpgrade -and $null -ne $apiService -and $apiService.Status -ne 'Stopped') {
     & sc.exe failure $apiServiceName reset= 0 actions= '' | Out-Null
     try {
@@ -144,6 +178,10 @@ if ($hasPreparedApiUpgrade -and $null -ne $apiService -and $apiService.Status -n
 if ($hasPreparedApiUpgrade) {
     Copy-Item -Path (Join-Path $preparedApiUpgrade '*') -Destination (Join-Path $localRoot 'api') -Recurse -Force
     Remove-Item -LiteralPath $preparedApiUpgrade -Recurse -Force
+    Copy-Item -Path (Join-Path $preparedClientUpgrade '*') -Destination (Join-Path $localRoot 'client') -Recurse -Force
+    Remove-Item -LiteralPath $preparedClientUpgrade -Recurse -Force
+    Copy-Item -Path (Join-Path $preparedAddinUpgrade '*') -Destination (Join-Path $localRoot 'solidworks-addin') -Recurse -Force
+    Remove-Item -LiteralPath $preparedAddinUpgrade -Recurse -Force
 }
 
 if ($null -eq $apiService) {
@@ -229,6 +267,17 @@ if ($LASTEXITCODE -ne 0) {
     throw "SolidWorks add-in registration failed with exit code $LASTEXITCODE"
 }
 
+$interactiveUser = (Get-CimInstance Win32_ComputerSystem).UserName
+if ([string]::IsNullOrWhiteSpace($interactiveUser)) {
+    $interactiveUser = [Security.Principal.WindowsIdentity]::GetCurrent().Name
+}
+$interactiveUserSid = ([Security.Principal.NTAccount]::new($interactiveUser)).Translate([Security.Principal.SecurityIdentifier]).Value
+$addinStartupRegistryPath = "HKU\$interactiveUserSid\Software\SolidWorks\AddInsStartup\{BCFD8A8A-472B-42E2-AC62-58BC17773650}"
+& reg.exe add $addinStartupRegistryPath /ve /t REG_DWORD /d 1 /f | Out-Null
+if ($LASTEXITCODE -ne 0) {
+    throw "SolidWorks add-in startup registration failed with exit code $LASTEXITCODE"
+}
+
 $status = [ordered]@{
     installedAt = [DateTimeOffset]::Now.ToString('O')
     mysqlService = (Get-Service -Name $mysqlServiceName).Status.ToString()
@@ -238,6 +287,7 @@ $status = [ordered]@{
     apiPort = $health.apiPort
     mysqlPort = $health.mysqlPort
     addinRegistered = Test-Path -LiteralPath 'HKLM:\SOFTWARE\SOLIDWORKS\Addins\{BCFD8A8A-472B-42E2-AC62-58BC17773650}'
+    addinStartupUserSid = $interactiveUserSid
 }
 $status | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $localRoot 'installation-status.json') -Encoding UTF8
 Write-Host 'UPTON PDM local services and SolidWorks add-in are installed.'

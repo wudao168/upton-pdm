@@ -26,18 +26,48 @@ public sealed record StoredFile(
     string Sha256,
     DateTimeOffset StoredAt);
 
+public sealed record DocumentVersionCommit(
+    StoredFile File,
+    string ChangeNote,
+    IReadOnlyDictionary<string, string?> Properties,
+    CadReferenceSnapshot ReferenceSnapshot,
+    IReadOnlyList<BomItem> MechanicalBomSnapshot,
+    IReadOnlyList<BomItem> ElectricalBomSnapshot,
+    Guid? SourceVersionId = null,
+    string? SourceDescription = null);
+
+public sealed record DocumentCheckInResult(
+    PdmDocument Document,
+    DocumentVersion? Version,
+    bool VersionCreated);
+
+public sealed record RegisterDocumentCommand(
+    Guid ProjectId,
+    string DrawingNumber,
+    string Name,
+    string FileName,
+    DocumentKind Kind);
+
 public interface IPdmRepository
 {
     Task<IReadOnlyList<Project>> ListProjectsAsync(CancellationToken cancellationToken);
     Task<Project?> FindProjectAsync(Guid projectId, CancellationToken cancellationToken);
     Task<IReadOnlyList<PdmDocument>> ListDocumentsAsync(Guid projectId, CancellationToken cancellationToken);
     Task<PdmDocument?> FindDocumentAsync(Guid documentId, CancellationToken cancellationToken);
+    Task<PdmDocument> RegisterDocumentAsync(RegisterDocumentCommand command, string actor, CancellationToken cancellationToken);
+    Task<bool> HasDocumentReadAccessAsync(Guid documentId, string actor, UserRole role, CancellationToken cancellationToken);
+    Task<IReadOnlyList<DocumentVersion>> ListDocumentVersionsAsync(Guid documentId, CancellationToken cancellationToken);
+    Task<DocumentVersion?> FindDocumentVersionAsync(Guid documentId, Guid versionId, CancellationToken cancellationToken);
     Task<DocumentReferenceNode?> GetReferenceTreeAsync(Guid projectId, CancellationToken cancellationToken);
     Task<IReadOnlyList<BomItem>> GetBomAsync(Guid projectId, BomKind kind, CancellationToken cancellationToken);
     Task<IReadOnlyList<ReleasePackage>> ListReleasePackagesAsync(Guid projectId, CancellationToken cancellationToken);
     Task<ReleasePackage?> FindReleasePackageAsync(Guid releasePackageId, CancellationToken cancellationToken);
     Task<PdmDocument> CheckoutAsync(Guid documentId, string actor, CancellationToken cancellationToken);
-    Task<PdmDocument> CheckInAsync(Guid documentId, string actor, RevisionLabel nextRevision, CadReferenceSnapshot snapshot, CancellationToken cancellationToken);
+    Task<PdmDocument> CompleteEditWithoutChangesAsync(Guid documentId, string actor, string sha256, CancellationToken cancellationToken);
+    Task<PdmDocument> DiscardCheckoutAsync(Guid documentId, string actor, CancellationToken cancellationToken);
+    Task<DocumentCheckInResult> CheckInVersionAsync(Guid documentId, string actor, DocumentVersionCommit commit, CancellationToken cancellationToken);
+    Task<(PdmDocument Document, DocumentVersion Version)> RestoreVersionAsync(Guid documentId, Guid sourceVersionId, string actor, StoredFile restoredFile, string changeNote, CancellationToken cancellationToken);
+    Task<DocumentVersion> PublishDocumentVersionAsync(Guid documentId, Guid sourceVersionId, Guid releasePackageId, Guid approvalTaskId, string actor, CancellationToken cancellationToken);
     Task<ReleasePackage> CreateReleasePackageAsync(ReleasePackage package, CancellationToken cancellationToken);
     Task<ReleasePackage> DecideApprovalAsync(Guid taskId, string actor, ApprovalDecision decision, string? comment, CancellationToken cancellationToken);
     Task MarkPublishedAsync(Guid releasePackageId, string publishedPath, DateTimeOffset publishedAt, CancellationToken cancellationToken);
@@ -55,6 +85,8 @@ public interface IFileStorage
     Task<StoredFile> CompleteUploadAsync(Guid sessionId, string relativeTargetPath, CancellationToken cancellationToken);
     Task<Stream> OpenReadAsync(string absolutePath, CancellationToken cancellationToken);
     Task<bool> IsAvailableAsync(string location, CancellationToken cancellationToken);
+    Task VerifyStoredFileAsync(Project project, StoredFile file, CancellationToken cancellationToken);
+    Task<StoredFile> CopyVersionAsync(Project project, StoredFile source, string relativeTargetPath, CancellationToken cancellationToken);
 }
 
 public interface IReleasePackagePublisher

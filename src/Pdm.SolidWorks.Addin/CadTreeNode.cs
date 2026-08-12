@@ -23,6 +23,15 @@ internal enum CadReferenceStatus
     Missing
 }
 
+internal enum CadWorkState
+{
+    None,
+    Editable,
+    ModifiedUnsaved,
+    PendingCheckIn,
+    EditingByOther
+}
+
 internal sealed class CadTreeNode
 {
     public Guid NodeId { get; set; } = Guid.NewGuid();
@@ -50,6 +59,12 @@ internal sealed class CadTreeNode
     public string Revision { get; set; } = string.Empty;
 
     public string CheckedOutBy { get; set; }
+
+    public CadWorkState WorkState { get; set; }
+
+    public string LatestVersionSha256 { get; set; } = string.Empty;
+
+    public bool IsModifiedInSolidWorks { get; set; }
 
     public List<CadTreeNode> Children { get; } = new List<CadTreeNode>();
 

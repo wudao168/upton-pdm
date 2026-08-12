@@ -30,4 +30,19 @@ public sealed class RevisionLabelTests
     {
         Assert.Equal(value, RevisionLabel.Parse(value).Display);
     }
+
+    [Fact]
+    public void RestoringOldWork_AdvancesFromCurrentLatest()
+    {
+        var current = RevisionLabel.Parse("W3");
+
+        Assert.Equal("W4", current.NextWork().Display);
+    }
+
+    [Fact]
+    public void RestoringAfterRelease_CreatesNewReleasedBranchWork()
+    {
+        Assert.Equal("A-W1", RevisionLabel.Released('A').NextWork().Display);
+        Assert.Equal("A-W2", RevisionLabel.Parse("A-W1").NextWork().Display);
+    }
 }

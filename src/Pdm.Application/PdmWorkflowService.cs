@@ -2,11 +2,45 @@ using Upton.Pdm.Domain;
 
 namespace Upton.Pdm.Application;
 
-public sealed class PdmWorkflowService(IPdmRepository repository, IReleasePackagePublisher publisher, TimeProvider timeProvider)
+public sealed class PdmWorkflowService(IPdmRepository repository, IFileStorage fileStorage, IReleasePackagePublisher publisher, TimeProvider timeProvider)
 {
+    public async Task<PdmDocument> RegisterDocumentAsync(RegisterDocumentCommand command, string actor, UserRole role, CancellationToken cancellationToken)
+    {
+        RequireRole(role, UserRole.Engineer, UserRole.Administrator);
+        if (string.IsNullOrWhiteSpace(command.DrawingNumber)
+            || string.IsNullOrWhiteSpace(command.Name)
+            || string.IsNullOrWhiteSpace(command.FileName))
+        {
+            throw new PdmRuleException("图号、名称和文件名不能为空。");
+        }
+
+        if (command.Kind is not (DocumentKind.Assembly or DocumentKind.Part or DocumentKind.Drawing))
+        {
+            throw new PdmRuleException("只有SolidWorks装配体、零件和工程图可以登记。");
+        }
+
+        var project = await repository.FindProjectAsync(command.ProjectId, cancellationToken)
+            ?? throw new PdmNotFoundException("项目不存在。");
+        if (!project.IsActive)
+        {
+            throw new PdmConflictException("项目已停用，不能登记图档。");
+        }
+
+        var normalized = command with
+        {
+            DrawingNumber = command.DrawingNumber.Trim(),
+            Name = command.Name.Trim(),
+            FileName = Path.GetFileName(command.FileName.Trim())
+        };
+        var document = await repository.RegisterDocumentAsync(normalized, actor, cancellationToken);
+        await AuditAsync(actor, "document.register", nameof(PdmDocument), document.Id.ToString(), document.FileName, cancellationToken);
+        return document;
+    }
+
     public async Task<PdmDocument> CheckoutAsync(Guid documentId, string actor, UserRole role, CancellationToken cancellationToken)
     {
         RequireRole(role, UserRole.Engineer, UserRole.Administrator);
+        await RequireDocumentReadAccessAsync(documentId, actor, role, cancellationToken);
         var document = await repository.FindDocumentAsync(documentId, cancellationToken)
             ?? throw new PdmNotFoundException("图档不存在。 ");
 
@@ -25,15 +59,34 @@ public sealed class PdmWorkflowService(IPdmRepository repository, IReleasePackag
         return updated;
     }
 
-    public async Task<PdmDocument> CheckInAsync(Guid documentId, string actor, UserRole role, CadReferenceSnapshot snapshot, CancellationToken cancellationToken)
+    public async Task<DocumentCheckInResult> CheckInAsync(
+        Guid documentId,
+        string actor,
+        UserRole role,
+        StoredFile file,
+        string changeNote,
+        IReadOnlyDictionary<string, string?> properties,
+        CadReferenceSnapshot snapshot,
+        CancellationToken cancellationToken)
     {
         RequireRole(role, UserRole.Engineer, UserRole.Administrator);
+        await RequireDocumentReadAccessAsync(documentId, actor, role, cancellationToken);
         var document = await repository.FindDocumentAsync(documentId, cancellationToken)
             ?? throw new PdmNotFoundException("图档不存在。 ");
+
+        if (snapshot.ProjectId != document.ProjectId || snapshot.RootDocumentId != documentId)
+        {
+            throw new PdmRuleException("引用树快照必须属于当前项目和当前图档。");
+        }
 
         if (!string.Equals(document.CheckedOutBy, actor, StringComparison.OrdinalIgnoreCase))
         {
             throw new PdmConflictException("只有当前编辑人员可以提交存档。 ");
+        }
+
+        if (string.IsNullOrWhiteSpace(changeNote))
+        {
+            throw new PdmRuleException("请输入本次变更内容后再提交存档。");
         }
 
         if (snapshot.Root.HasBlockingIssue)
@@ -41,9 +94,111 @@ public sealed class PdmWorkflowService(IPdmRepository repository, IReleasePackag
             throw new PdmRuleException("结构树存在缺失引用，不能提交存档。 ");
         }
 
-        var updated = await repository.CheckInAsync(documentId, actor, document.Revision.NextWork(), snapshot, cancellationToken);
-        await AuditAsync(actor, "document.checkin", nameof(PdmDocument), documentId.ToString(), updated.Revision.Display, cancellationToken);
-        return updated;
+        var project = await repository.FindProjectAsync(document.ProjectId, cancellationToken)
+            ?? throw new PdmNotFoundException("项目不存在。");
+        await fileStorage.VerifyStoredFileAsync(project, file, cancellationToken);
+        var mechanical = await repository.GetBomAsync(document.ProjectId, BomKind.Mechanical, cancellationToken);
+        var electrical = await repository.GetBomAsync(document.ProjectId, BomKind.Electrical, cancellationToken);
+        var result = await repository.CheckInVersionAsync(
+            documentId,
+            actor,
+            new DocumentVersionCommit(file, changeNote.Trim(), properties, snapshot, mechanical, electrical),
+            cancellationToken);
+        if (result.VersionCreated && result.Version is not null)
+        {
+            await AuditAsync(actor, "document.checkin", nameof(DocumentVersion), result.Version.Id.ToString(), result.Version.Revision.Display, cancellationToken);
+        }
+        else
+        {
+            await AuditAsync(actor, "document.edit.complete-unchanged", nameof(PdmDocument), documentId.ToString(), result.Document.Revision.Display, cancellationToken);
+        }
+        return result;
+    }
+
+    public async Task<PdmDocument> CompleteEditWithoutChangesAsync(Guid documentId, string actor, UserRole role, string sha256, CancellationToken cancellationToken)
+    {
+        RequireRole(role, UserRole.Engineer, UserRole.Administrator);
+        await RequireDocumentReadAccessAsync(documentId, actor, role, cancellationToken);
+        if (string.IsNullOrWhiteSpace(sha256))
+        {
+            throw new PdmRuleException("文件指纹不能为空。");
+        }
+
+        var document = await repository.CompleteEditWithoutChangesAsync(documentId, actor, sha256.Trim(), cancellationToken);
+        await AuditAsync(actor, "document.edit.complete-unchanged", nameof(PdmDocument), documentId.ToString(), document.Revision.Display, cancellationToken);
+        return document;
+    }
+
+    public async Task<PdmDocument> DiscardCheckoutAsync(Guid documentId, string actor, UserRole role, CancellationToken cancellationToken)
+    {
+        RequireRole(role, UserRole.Engineer, UserRole.Administrator);
+        await RequireDocumentReadAccessAsync(documentId, actor, role, cancellationToken);
+        var document = await repository.DiscardCheckoutAsync(documentId, actor, cancellationToken);
+        await AuditAsync(actor, "document.checkout.discard", nameof(PdmDocument), documentId.ToString(), document.Revision.Display, cancellationToken);
+        return document;
+    }
+
+    public async Task<(PdmDocument Document, DocumentVersion Version)> RestoreVersionAsync(
+        Guid documentId,
+        Guid sourceVersionId,
+        string actor,
+        UserRole role,
+        string changeNote,
+        CancellationToken cancellationToken)
+    {
+        RequireRole(role, UserRole.Engineer, UserRole.Administrator);
+        var document = await RequireDocumentAsync(documentId, cancellationToken);
+        await RequireDocumentReadAccessAsync(documentId, actor, role, cancellationToken);
+        var source = await repository.FindDocumentVersionAsync(documentId, sourceVersionId, cancellationToken)
+            ?? throw new PdmNotFoundException("历史版本不存在。");
+        var project = await repository.FindProjectAsync(document.ProjectId, cancellationToken)
+            ?? throw new PdmNotFoundException("项目不存在。");
+        var restoredPath = Path.Combine(".versions", document.Id.ToString("N"), Guid.NewGuid().ToString("N"), document.FileName);
+        var restoredFile = await fileStorage.CopyVersionAsync(
+            project,
+            new StoredFile(source.StorageRelativePath, source.FileLength, source.Sha256, source.CreatedAt),
+            restoredPath,
+            cancellationToken);
+        var result = await repository.RestoreVersionAsync(documentId, sourceVersionId, actor, restoredFile, changeNote, cancellationToken);
+        await AuditAsync(actor, "document.version.restore", nameof(DocumentVersion), sourceVersionId.ToString(), $"生成{result.Version.Revision.Display}", cancellationToken);
+        return result;
+    }
+
+    public async Task<DocumentVersionComparison> CompareVersionsAsync(Guid documentId, Guid leftVersionId, Guid rightVersionId, string actor, UserRole role, CancellationToken cancellationToken)
+    {
+        RequireDocumentReadRole(role);
+        await RequireDocumentReadAccessAsync(documentId, actor, role, cancellationToken);
+        _ = await RequireDocumentAsync(documentId, cancellationToken);
+        var left = await repository.FindDocumentVersionAsync(documentId, leftVersionId, cancellationToken)
+            ?? throw new PdmNotFoundException("左侧历史版本不存在。");
+        var right = await repository.FindDocumentVersionAsync(documentId, rightVersionId, cancellationToken)
+            ?? throw new PdmNotFoundException("右侧历史版本不存在。");
+        var comparison = DocumentVersionDiff.Compare(left, right);
+        await AuditAsync(actor, "document.version.compare", nameof(PdmDocument), documentId.ToString(), $"{left.Revision.Display} -> {right.Revision.Display}", cancellationToken);
+        return comparison;
+    }
+
+    public async Task<DocumentVersion> PublishVersionAsync(Guid documentId, Guid sourceVersionId, Guid releasePackageId, Guid approvalTaskId, string actor, UserRole role, CancellationToken cancellationToken)
+    {
+        RequireRole(role, UserRole.Approver, UserRole.Administrator);
+        await RequireDocumentReadAccessAsync(documentId, actor, role, cancellationToken);
+        _ = await RequireDocumentAsync(documentId, cancellationToken);
+        var version = await repository.PublishDocumentVersionAsync(documentId, sourceVersionId, releasePackageId, approvalTaskId, actor, cancellationToken);
+        await AuditAsync(actor, "document.version.publish", nameof(DocumentVersion), version.Id.ToString(), version.Revision.Display, cancellationToken);
+        return version;
+    }
+
+    public async Task AuditVersionReadAsync(Guid documentId, Guid versionId, string actor, UserRole role, string action, CancellationToken cancellationToken)
+    {
+        RequireDocumentReadRole(role);
+        await RequireDocumentReadAccessAsync(documentId, actor, role, cancellationToken);
+        _ = await RequireDocumentAsync(documentId, cancellationToken);
+        if (versionId != Guid.Empty)
+        {
+            _ = await repository.FindDocumentVersionAsync(documentId, versionId, cancellationToken)
+                ?? throw new PdmNotFoundException("历史版本不存在。");
+        }
+        await AuditAsync(actor, action, nameof(DocumentVersion), versionId.ToString(), documentId.ToString(), cancellationToken);
     }
 
     public async Task<ReleasePackage> CreateReleasePackageAsync(
@@ -134,6 +289,18 @@ public sealed class PdmWorkflowService(IPdmRepository repository, IReleasePackag
         {
             throw new PdmRuleException("当前角色无权执行此操作。 ");
         }
+    }
+
+    private async Task<PdmDocument> RequireDocumentAsync(Guid documentId, CancellationToken cancellationToken) =>
+        await repository.FindDocumentAsync(documentId, cancellationToken) ?? throw new PdmNotFoundException("图档不存在。");
+
+    private static void RequireDocumentReadRole(UserRole role) =>
+        RequireRole(role, UserRole.Engineer, UserRole.ProcessReviewer, UserRole.Approver, UserRole.ProductionViewer, UserRole.Administrator);
+
+    private async Task RequireDocumentReadAccessAsync(Guid documentId, string actor, UserRole role, CancellationToken cancellationToken)
+    {
+        if (!await repository.HasDocumentReadAccessAsync(documentId, actor, role, cancellationToken))
+            throw new UnauthorizedAccessException("当前用户没有该项目或图档的读取权限。");
     }
 
     private Task AuditAsync(string actor, string action, string entityType, string entityId, string detail, CancellationToken cancellationToken) =>

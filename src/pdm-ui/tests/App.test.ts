@@ -40,6 +40,15 @@ function installApiMock() {
     if (url.endsWith('/release-packages')) {
       return json([{ id: 'package-1', number: 'RP-REAL-001', state: 2, approvalTasks: [{ stage: 1, assignee: '工艺工程师', decisionBy: '工艺工程师', decision: 0, decidedAt: '2026-08-11T01:00:00Z' }, { stage: 2, assignee: '批准人', decisionBy: null, decision: null, decidedAt: null }], publishedAt: null }])
     }
+    if (url.endsWith('/api/documents/doc-root/versions')) {
+      return json([
+        { id: 'version-w2', documentId: 'doc-root', revision: { display: 'W2' }, status: 'Work', fileLength: 20, sha256: 'B'.repeat(64), createdBy: 'engineer', createdAt: '2026-08-11T02:00:00Z', changeNote: '调整材料' },
+        { id: 'version-w1', documentId: 'doc-root', revision: { display: 'W1' }, status: 'Work', fileLength: 10, sha256: 'A'.repeat(64), createdBy: 'engineer', createdAt: '2026-08-10T02:00:00Z', changeNote: '首次存档' },
+      ])
+    }
+    if (url.includes('/api/documents/doc-root/versions/compare')) {
+      return json({ documentId: 'doc-root', left: { revision: { display: 'W1' }, status: 0, createdBy: 'engineer', createdAt: '2026-08-10T02:00:00Z', changeNote: '首次存档' }, right: { revision: { display: 'W2' }, status: 0, createdBy: 'engineer', createdAt: '2026-08-11T02:00:00Z', changeNote: '调整材料' }, propertyChanges: [{ kind: 2, name: 'Material', previousValue: 'Q235B', currentValue: '304' }], referenceChanges: [{ kind: 5, instancePath: 'ROOT/P-001', previousValue: '1', currentValue: '2' }], bomChanges: [{ kind: 3, drawingNumber: 'P-001', field: '材料', previousValue: 'Q235B', currentValue: '304' }] })
+    }
     return json({ title: `Unexpected URL: ${url}` }, 404)
   }))
 }
@@ -116,5 +125,31 @@ describe('PDM client workspace', () => {
     expect(document.body.textContent).toContain('预览已适合当前窗口')
     expect(document.body.textContent).toContain('当前没有新的系统通知')
     expect(document.body.textContent).toContain('生产发包将在后续阶段开放')
+  })
+
+  it('loads real version choices and renders property, reference and BOM differences', async () => {
+    const wrapper = mount(App, { attachTo: document.body, global: { plugins: [ElementPlus] } })
+    await login(wrapper)
+    await buttonByText(wrapper, '版本对比').trigger('click')
+    await flushPromises()
+
+    expect(document.body.textContent).toContain('W1')
+    expect(document.body.textContent).toContain('W2')
+    expect(document.body.textContent).toContain('Material')
+    expect(document.body.textContent).toContain('ROOT/P-001')
+    expect(document.body.textContent).toContain('BOM差异（1）')
+    expect(document.body.textContent).toContain('不会覆盖当前文件')
+  })
+
+  it('keeps a SolidWorks comparison request until login and real workspace loading finish', async () => {
+    const wrapper = mount(App, { attachTo: document.body, global: { plugins: [ElementPlus] } })
+    window.dispatchEvent(new CustomEvent('pdm-open-version-compare', { detail: { documentId: 'doc-root', leftVersionId: 'version-w1', rightVersionId: 'version-w2' } }))
+    await login(wrapper)
+    await flushPromises()
+
+    expect(document.body.textContent).toContain('图档历史版本对比')
+    expect(document.body.textContent).toContain('W1')
+    expect(document.body.textContent).toContain('W2')
+    expect(document.body.textContent).toContain('数量变化')
   })
 })

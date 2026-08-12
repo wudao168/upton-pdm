@@ -34,6 +34,55 @@ public sealed partial class MySqlPdmRepository
         return updated;
     }
 
+    public async Task<PdmDocument> CompleteEditWithoutChangesAsync(Guid documentId, string actor, string sha256, CancellationToken cancellationToken)
+    {
+        await using var connection = await OpenAsync(cancellationToken);
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+        var current = await connection.QuerySingleOrDefaultAsync<EditLockRow>(new CommandDefinition(
+            "SELECT checked_out_by, row_version FROM document WHERE id=@DocumentId FOR UPDATE",
+            new { DocumentId = documentId }, transaction, cancellationToken: cancellationToken))
+            ?? throw new PdmNotFoundException("图档不存在。");
+        if (!string.Equals(current.CheckedOutBy, actor, StringComparison.OrdinalIgnoreCase)) throw new PdmConflictException("只有当前编辑人员可以结束编辑。");
+        var latestSha256 = await connection.QuerySingleOrDefaultAsync<string>(new CommandDefinition(
+            "SELECT sha256 FROM document_version WHERE document_id=@DocumentId ORDER BY created_at DESC LIMIT 1",
+            new { DocumentId = documentId }, transaction, cancellationToken: cancellationToken));
+        if (string.IsNullOrWhiteSpace(latestSha256)) throw new PdmConflictException("图档尚无存档版本，必须先提交W1。");
+        if (!string.Equals(latestSha256, sha256, StringComparison.OrdinalIgnoreCase)) throw new PdmConflictException("文件已经发生变更，请使用提交存档。");
+        await ReleaseEditLockAsync(connection, transaction, documentId, actor, current.RowVersion, cancellationToken);
+        var updated = await FindDocumentAsync(connection, transaction, documentId, cancellationToken) ?? throw new PdmNotFoundException("图档不存在。");
+        await transaction.CommitAsync(cancellationToken);
+        return updated;
+    }
+
+    public async Task<PdmDocument> DiscardCheckoutAsync(Guid documentId, string actor, CancellationToken cancellationToken)
+    {
+        await using var connection = await OpenAsync(cancellationToken);
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+        var current = await connection.QuerySingleOrDefaultAsync<EditLockRow>(new CommandDefinition(
+            "SELECT checked_out_by, row_version FROM document WHERE id=@DocumentId FOR UPDATE",
+            new { DocumentId = documentId }, transaction, cancellationToken: cancellationToken))
+            ?? throw new PdmNotFoundException("图档不存在。");
+        if (!string.Equals(current.CheckedOutBy, actor, StringComparison.OrdinalIgnoreCase)) throw new PdmConflictException("只有当前编辑人员可以放弃编辑。");
+        await ReleaseEditLockAsync(connection, transaction, documentId, actor, current.RowVersion, cancellationToken);
+        var updated = await FindDocumentAsync(connection, transaction, documentId, cancellationToken) ?? throw new PdmNotFoundException("图档不存在。");
+        await transaction.CommitAsync(cancellationToken);
+        return updated;
+    }
+
+    private async Task ReleaseEditLockAsync(System.Data.Common.DbConnection connection, System.Data.Common.DbTransaction transaction, Guid documentId, string actor, long rowVersion, CancellationToken cancellationToken)
+    {
+        var affected = await connection.ExecuteAsync(new CommandDefinition(
+            "UPDATE document SET checked_out_by=NULL, checked_out_at=NULL, updated_at=@Now, row_version=row_version+1 WHERE id=@DocumentId AND checked_out_by=@Actor AND row_version=@RowVersion",
+            new { DocumentId = documentId, Actor = actor, RowVersion = rowVersion, Now = timeProvider.GetUtcNow().UtcDateTime }, transaction, cancellationToken: cancellationToken));
+        if (affected != 1) throw new PdmConflictException("图档编辑状态已经变化，请刷新后重试。");
+    }
+
+    private sealed class EditLockRow
+    {
+        public string? CheckedOutBy { get; init; }
+        public long RowVersion { get; init; }
+    }
+
     public async Task<PdmDocument> CheckInAsync(Guid documentId, string actor, RevisionLabel nextRevision, CadReferenceSnapshot snapshot, CancellationToken cancellationToken)
     {
         await using var connection = await OpenAsync(cancellationToken);

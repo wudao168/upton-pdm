@@ -8,6 +8,11 @@ namespace Upton.Pdm.SolidWorks;
 
 internal sealed class SolidWorksReferenceTreeScanner
 {
+    private static readonly bool VerboseLoggingEnabled = string.Equals(
+        System.Environment.GetEnvironmentVariable("PDM_ADDIN_VERBOSE_SCAN"),
+        "1",
+        StringComparison.Ordinal);
+
     private readonly ISldWorks application;
 
     public SolidWorksReferenceTreeScanner(ISldWorks application)
@@ -27,7 +32,7 @@ internal sealed class SolidWorksReferenceTreeScanner
         Log(string.Concat("ScanActiveDocument type=", model.GetType(), " title=", model.GetTitle(), " path=", path));
         if (model.GetType() != (int)swDocumentTypes_e.swDocASSEMBLY)
         {
-            return CreateDocumentNode(path, model.GetTitle(), model.ConfigurationManager?.ActiveConfiguration?.Name ?? "默认", model.GetType());
+            return CreateDocumentNode(path, model.GetTitle(), model.ConfigurationManager?.ActiveConfiguration?.Name ?? "默认", model.GetType(), model.GetSaveFlag());
         }
 
         var configuration = model.ConfigurationManager.ActiveConfiguration;
@@ -39,10 +44,16 @@ internal sealed class SolidWorksReferenceTreeScanner
         }
 
         Log(string.Concat("RootComponent name=", rootComponent.Name2, " path=", rootComponent.GetPathName()));
-        return BuildComponent(rootComponent, rootComponent.Name2, new HashSet<string>(StringComparer.OrdinalIgnoreCase), true);
+        var featureTreeRoot = GetFeatureTreeRoot(model);
+        return BuildComponent(rootComponent, rootComponent.Name2, new HashSet<string>(StringComparer.OrdinalIgnoreCase), true, featureTreeRoot);
     }
 
-    private CadTreeNode BuildComponent(IComponent2 component, string instancePath, ISet<string> visitedInstances, bool isRoot)
+    private CadTreeNode BuildComponent(
+        IComponent2 component,
+        string instancePath,
+        ISet<string> visitedInstances,
+        bool isRoot,
+        ITreeControlItem featureTreeItem)
     {
         var componentName = component.Name2 ?? Path.GetFileNameWithoutExtension(component.GetPathName());
         var componentPath = component.GetPathName() ?? string.Empty;
@@ -56,7 +67,8 @@ internal sealed class SolidWorksReferenceTreeScanner
             DisplayName = string.IsNullOrWhiteSpace(componentName) ? Path.GetFileNameWithoutExtension(componentPath) : componentName,
             Kind = DocumentKindFromPath(componentPath, isRoot ? (int)swDocumentTypes_e.swDocASSEMBLY : 0),
             Configuration = component.ReferencedConfiguration ?? string.Empty,
-            Status = GetStatus(component, componentPath)
+            Status = GetStatus(component, componentPath),
+            IsModifiedInSolidWorks = IsModified(component)
         };
 
         if (!visitedInstances.Add(currentPath))
@@ -64,12 +76,117 @@ internal sealed class SolidWorksReferenceTreeScanner
             return node;
         }
 
+        var children = GetOrderedChildren(component, featureTreeItem, isRoot, currentPath);
+        foreach (var childEntry in children)
+        {
+            var child = childEntry.Component;
+            var childPath = string.Concat(currentPath, "/", child.Name2);
+            node.Children.Add(BuildComponent(child, childPath, visitedInstances, false, childEntry.TreeItem));
+        }
+        Log(string.Concat("Node(", currentPath, ") children=", node.Children.Count));
+
+        AddSameNameDrawing(node);
+        return node;
+    }
+
+    private ITreeControlItem GetFeatureTreeRoot(IModelDoc2 model)
+    {
+        try
+        {
+            var featureManager = model.FeatureManager;
+            var root = featureManager?.GetFeatureTreeRootItem2((int)swFeatMgrPane_e.swFeatMgrPaneBottom) as ITreeControlItem
+                ?? featureManager?.GetFeatureTreeRootItem2((int)swFeatMgrPane_e.swFeatMgrPaneTop) as ITreeControlItem;
+            Log(string.Concat("FeatureTreeRoot available=", root != null));
+            return root;
+        }
+        catch (Exception exception)
+        {
+            Log(string.Concat("GetFeatureTreeRootItem2 threw: ", exception));
+            return null;
+        }
+    }
+
+    private List<ComponentTreeEntry> GetOrderedChildren(
+        IComponent2 component,
+        ITreeControlItem featureTreeItem,
+        bool isRoot,
+        string currentPath)
+    {
+        var componentChildren = GetComponentChildren(component, isRoot, currentPath);
+        var ordered = new List<ComponentTreeEntry>();
+        if (featureTreeItem != null)
+        {
+            try
+            {
+                CollectVisualComponentChildren(featureTreeItem, ordered);
+            }
+            catch (Exception exception)
+            {
+                Log(string.Concat("Feature tree traversal(", currentPath, ") threw: ", exception));
+                ordered.Clear();
+            }
+        }
+
+        if (ordered.Count == 0)
+        {
+            foreach (var child in componentChildren)
+            {
+                ordered.Add(new ComponentTreeEntry(child, null));
+            }
+
+            Log(string.Concat("OrderedChildren(", currentPath, ") source=component-api count=", ordered.Count));
+            return ordered;
+        }
+
+        var visualComponentNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var entry in ordered)
+        {
+            visualComponentNames.Add(ComponentKey(entry.Component));
+        }
+
+        foreach (var child in componentChildren)
+        {
+            if (visualComponentNames.Add(ComponentKey(child)))
+            {
+                ordered.Add(new ComponentTreeEntry(child, null));
+                Log(string.Concat("Append component missing from FeatureManager order: ", child.Name2));
+            }
+        }
+
+        Log(string.Concat("OrderedChildren(", currentPath, ") source=feature-manager count=", ordered.Count));
+        return ordered;
+    }
+
+    private static void CollectVisualComponentChildren(ITreeControlItem parent, ICollection<ComponentTreeEntry> result)
+    {
+        var child = parent.GetFirstChild() as ITreeControlItem;
+        while (child != null)
+        {
+            CollectVisualComponentItem(child, result);
+            child = child.GetNext() as ITreeControlItem;
+        }
+    }
+
+    private static void CollectVisualComponentItem(ITreeControlItem item, ICollection<ComponentTreeEntry> result)
+    {
+        if (item.ObjectType == (int)swTreeControlItemType_e.swFeatureManagerItem_Component
+            && item.Object is IComponent2 component)
+        {
+            result.Add(new ComponentTreeEntry(component, item));
+            return;
+        }
+
+        CollectVisualComponentChildren(item, result);
+    }
+
+    private List<IComponent2> GetComponentChildren(IComponent2 component, bool isRoot, string currentPath)
+    {
         object[] children;
         try
         {
             var raw = component.GetChildren();
             Log(string.Concat("GetChildren(", currentPath, ") type=", raw?.GetType().FullName ?? "null"));
-            children = raw as object[] ?? Array.Empty<object>();
+            children = ToObjectArray(raw);
         }
         catch (Exception exception)
         {
@@ -83,34 +200,76 @@ internal sealed class SolidWorksReferenceTreeScanner
             {
                 var assemblyDocument = application.ActiveDoc as IAssemblyDoc;
                 var raw = assemblyDocument?.GetComponents(true);
-                Log(string.Concat("GetComponents(true) type=", raw?.GetType().FullName ?? "null"));
-                children = raw as object[] ?? Array.Empty<object>();
+                Log(string.Concat("GetComponents(true) fallback type=", raw?.GetType().FullName ?? "null"));
+                children = ToObjectArray(raw);
             }
             catch (Exception exception)
             {
-                Log(string.Concat("GetComponents(true) threw: ", exception));
+                Log(string.Concat("GetComponents(true) fallback threw: ", exception));
             }
         }
 
-        foreach (var childObject in children)
+        var components = new List<IComponent2>();
+        foreach (var child in children)
         {
-            if (childObject is not IComponent2 child)
+            if (child is IComponent2 childComponent)
             {
-                Log(string.Concat("Skip child type=", childObject?.GetType().FullName ?? "null"));
-                continue;
+                components.Add(childComponent);
             }
-
-            var childPath = string.Concat(currentPath, "/", child.Name2);
-            node.Children.Add(BuildComponent(child, childPath, visitedInstances, false));
+            else
+            {
+                Log(string.Concat("Skip child type=", child?.GetType().FullName ?? "null"));
+            }
         }
-        Log(string.Concat("Node(", currentPath, ") children=", node.Children.Count));
 
-        AddSameNameDrawing(node);
-        return node;
+        return components;
+    }
+
+    private static object[] ToObjectArray(object value)
+    {
+        if (value is object[] objects)
+        {
+            return objects;
+        }
+
+        if (value is not Array array)
+        {
+            return Array.Empty<object>();
+        }
+
+        var result = new object[array.Length];
+        var index = 0;
+        foreach (var item in array)
+        {
+            result[index++] = item;
+        }
+
+        return result;
+    }
+
+    private static string ComponentKey(IComponent2 component) =>
+        component?.Name2 ?? component?.GetPathName() ?? string.Empty;
+
+    private sealed class ComponentTreeEntry
+    {
+        public ComponentTreeEntry(IComponent2 component, ITreeControlItem treeItem)
+        {
+            Component = component;
+            TreeItem = treeItem;
+        }
+
+        public IComponent2 Component { get; }
+
+        public ITreeControlItem TreeItem { get; }
     }
 
     private static void Log(string message)
     {
+        if (!VerboseLoggingEnabled)
+        {
+            return;
+        }
+
         try
         {
             var directory = Path.Combine(System.Environment.GetFolderPath(System.Environment.SpecialFolder.LocalApplicationData), "UPTON PDM");
@@ -123,7 +282,7 @@ internal sealed class SolidWorksReferenceTreeScanner
         }
     }
 
-    private static CadTreeNode CreateDocumentNode(string path, string title, string configuration, int documentType)
+    private static CadTreeNode CreateDocumentNode(string path, string title, string configuration, int documentType, bool isModified)
     {
         var node = new CadTreeNode
         {
@@ -134,7 +293,8 @@ internal sealed class SolidWorksReferenceTreeScanner
             DisplayName = Path.GetFileNameWithoutExtension(string.IsNullOrWhiteSpace(path) ? title : path),
             Kind = DocumentKindFromPath(path, documentType),
             Configuration = configuration,
-            Status = string.IsNullOrWhiteSpace(path) || File.Exists(path) ? CadReferenceStatus.Normal : CadReferenceStatus.Missing
+            Status = string.IsNullOrWhiteSpace(path) || File.Exists(path) ? CadReferenceStatus.Normal : CadReferenceStatus.Missing,
+            IsModifiedInSolidWorks = isModified
         };
         AddSameNameDrawing(node);
         return node;
@@ -196,6 +356,19 @@ internal sealed class SolidWorksReferenceTreeScanner
         }
 
         return string.IsNullOrWhiteSpace(path) || File.Exists(path) ? CadReferenceStatus.Normal : CadReferenceStatus.Missing;
+    }
+
+    private static bool IsModified(IComponent2 component)
+    {
+        try
+        {
+            return component?.GetModelDoc2() is IModelDoc2 model && model.GetSaveFlag();
+        }
+        catch
+        {
+            // Unresolved and lightweight components may not expose a model document.
+            return false;
+        }
     }
 
     private static CadDocumentKind DocumentKindFromPath(string path, int fallbackDocumentType)

@@ -11,6 +11,7 @@ public sealed class InMemoryPdmRepository : IPdmRepository
     private readonly ConcurrentDictionary<Guid, PdmDocument> documents = new();
     private readonly ConcurrentDictionary<Guid, UserAccount> users = new();
     private readonly ConcurrentDictionary<Guid, ReleasePackage> packages = new();
+    private readonly ConcurrentDictionary<Guid, DocumentVersion> versions = new();
     private readonly ConcurrentQueue<AuditEntry> audits = new();
     private readonly IReadOnlyList<BomItem> bomItems;
     private DocumentReferenceNode referenceTree;
@@ -48,6 +49,51 @@ public sealed class InMemoryPdmRepository : IPdmRepository
         return Task.FromResult(document);
     }
 
+    public Task<PdmDocument> RegisterDocumentAsync(RegisterDocumentCommand command, string actor, CancellationToken cancellationToken)
+    {
+        lock (gate)
+        {
+            if (!projects.TryGetValue(command.ProjectId, out var project) || !project.IsActive)
+            {
+                throw new PdmNotFoundException("项目不存在或已停用。");
+            }
+
+            var existing = documents.Values.FirstOrDefault(document =>
+                document.ProjectId == command.ProjectId
+                && string.Equals(document.FileName, command.FileName, StringComparison.OrdinalIgnoreCase));
+            if (existing is not null)
+            {
+                return Task.FromResult(existing);
+            }
+
+            var document = new PdmDocument(
+                Guid.NewGuid(),
+                command.ProjectId,
+                command.DrawingNumber,
+                command.Name,
+                command.FileName,
+                command.Kind,
+                DocumentLifecycleState.Work,
+                RevisionLabel.InitialWork(),
+                null,
+                DateTimeOffset.UtcNow);
+            documents[document.Id] = document;
+            return Task.FromResult(document);
+        }
+    }
+
+    public Task<bool> HasDocumentReadAccessAsync(Guid documentId, string actor, UserRole role, CancellationToken cancellationToken) =>
+        Task.FromResult(documents.ContainsKey(documentId));
+
+    public Task<IReadOnlyList<DocumentVersion>> ListDocumentVersionsAsync(Guid documentId, CancellationToken cancellationToken) =>
+        Task.FromResult<IReadOnlyList<DocumentVersion>>(versions.Values.Where(version => version.DocumentId == documentId).OrderByDescending(version => version.CreatedAt).ToArray());
+
+    public Task<DocumentVersion?> FindDocumentVersionAsync(Guid documentId, Guid versionId, CancellationToken cancellationToken)
+    {
+        versions.TryGetValue(versionId, out var version);
+        return Task.FromResult(version?.DocumentId == documentId ? version : null);
+    }
+
     public Task<DocumentReferenceNode?> GetReferenceTreeAsync(Guid projectId, CancellationToken cancellationToken) =>
         Task.FromResult<DocumentReferenceNode?>(projectId == SeedData.ProjectId ? referenceTree : null);
 
@@ -83,6 +129,33 @@ public sealed class InMemoryPdmRepository : IPdmRepository
         }
     }
 
+    public Task<PdmDocument> CompleteEditWithoutChangesAsync(Guid documentId, string actor, string sha256, CancellationToken cancellationToken)
+    {
+        lock (gate)
+        {
+            if (!documents.TryGetValue(documentId, out var document)) throw new PdmNotFoundException("图档不存在。");
+            if (!string.Equals(document.CheckedOutBy, actor, StringComparison.OrdinalIgnoreCase)) throw new PdmConflictException("只有当前编辑人员可以结束编辑。");
+            var latest = versions.Values.Where(version => version.DocumentId == documentId).OrderByDescending(version => version.CreatedAt).FirstOrDefault()
+                ?? throw new PdmConflictException("图档尚无存档版本，必须先提交W1。");
+            if (!string.Equals(latest.Sha256, sha256, StringComparison.OrdinalIgnoreCase)) throw new PdmConflictException("文件已经发生变更，请使用提交存档。");
+            var updated = document with { CheckedOutBy = null, UpdatedAt = DateTimeOffset.UtcNow };
+            documents[documentId] = updated;
+            return Task.FromResult(updated);
+        }
+    }
+
+    public Task<PdmDocument> DiscardCheckoutAsync(Guid documentId, string actor, CancellationToken cancellationToken)
+    {
+        lock (gate)
+        {
+            if (!documents.TryGetValue(documentId, out var document)) throw new PdmNotFoundException("图档不存在。");
+            if (!string.Equals(document.CheckedOutBy, actor, StringComparison.OrdinalIgnoreCase)) throw new PdmConflictException("只有当前编辑人员可以放弃编辑。");
+            var updated = document with { CheckedOutBy = null, UpdatedAt = DateTimeOffset.UtcNow };
+            documents[documentId] = updated;
+            return Task.FromResult(updated);
+        }
+    }
+
     public Task<PdmDocument> CheckInAsync(Guid documentId, string actor, RevisionLabel nextRevision, CadReferenceSnapshot snapshot, CancellationToken cancellationToken)
     {
         lock (gate)
@@ -101,6 +174,62 @@ public sealed class InMemoryPdmRepository : IPdmRepository
             documents[documentId] = updated;
             referenceTree = snapshot.Root;
             return Task.FromResult(updated);
+        }
+    }
+
+    public Task<DocumentCheckInResult> CheckInVersionAsync(Guid documentId, string actor, DocumentVersionCommit commit, CancellationToken cancellationToken)
+    {
+        lock (gate)
+        {
+            if (!documents.TryGetValue(documentId, out var document)) throw new PdmNotFoundException("图档不存在。");
+            if (!string.Equals(document.CheckedOutBy, actor, StringComparison.OrdinalIgnoreCase)) throw new PdmConflictException("只有当前编辑人员可以提交存档。");
+            var latest = versions.Values.Where(version => version.DocumentId == documentId).OrderByDescending(version => version.CreatedAt).FirstOrDefault();
+            if (latest is not null && string.Equals(latest.Sha256, commit.File.Sha256, StringComparison.OrdinalIgnoreCase))
+            {
+                var unchanged = document with { CheckedOutBy = null, UpdatedAt = DateTimeOffset.UtcNow };
+                documents[documentId] = unchanged;
+                return Task.FromResult(new DocumentCheckInResult(unchanged, null, false));
+            }
+            var revision = versions.Values.Any(version => version.DocumentId == documentId) || document.Revision.IsReleased ? document.Revision.NextWork() : RevisionLabel.InitialWork();
+            var version = new DocumentVersion(Guid.NewGuid(), documentId, revision, DocumentVersionStatus.Work, commit.File.RelativePath, commit.File.Length, commit.File.Sha256, actor, DateTimeOffset.UtcNow, commit.ChangeNote, commit.Properties, commit.ReferenceSnapshot.Root, commit.MechanicalBomSnapshot, commit.ElectricalBomSnapshot, commit.SourceVersionId, commit.SourceDescription, null, null);
+            versions[version.Id] = version;
+            var updated = document with { CheckedOutBy = null, Revision = revision, State = DocumentLifecycleState.Work, UpdatedAt = version.CreatedAt };
+            documents[documentId] = updated;
+            referenceTree = commit.ReferenceSnapshot.Root;
+            return Task.FromResult(new DocumentCheckInResult(updated, version, true));
+        }
+    }
+
+    public Task<(PdmDocument Document, DocumentVersion Version)> RestoreVersionAsync(Guid documentId, Guid sourceVersionId, string actor, StoredFile restoredFile, string changeNote, CancellationToken cancellationToken)
+    {
+        lock (gate)
+        {
+            if (!documents.TryGetValue(documentId, out var document)) throw new PdmNotFoundException("图档不存在。");
+            if (!versions.TryGetValue(sourceVersionId, out var source) || source.DocumentId != documentId) throw new PdmNotFoundException("历史版本不存在。");
+            var revision = document.Revision.NextWork();
+            var restored = source with { Id = Guid.NewGuid(), Revision = revision, Status = DocumentVersionStatus.Work, StorageRelativePath = restoredFile.RelativePath, FileLength = restoredFile.Length, Sha256 = restoredFile.Sha256, CreatedBy = actor, CreatedAt = DateTimeOffset.UtcNow, ChangeNote = changeNote, SourceVersionId = source.Id, SourceDescription = $"由{source.Revision.Display}恢复生成{revision.Display}", ApprovalTaskId = null, ReleasePackageId = null };
+            versions[restored.Id] = restored;
+            var updated = document with { Revision = revision, State = DocumentLifecycleState.Work, CheckedOutBy = null, UpdatedAt = restored.CreatedAt };
+            documents[documentId] = updated;
+            return Task.FromResult((updated, restored));
+        }
+    }
+
+    public Task<DocumentVersion> PublishDocumentVersionAsync(Guid documentId, Guid sourceVersionId, Guid releasePackageId, Guid approvalTaskId, string actor, CancellationToken cancellationToken)
+    {
+        lock (gate)
+        {
+            if (!documents.TryGetValue(documentId, out var document)) throw new PdmNotFoundException("图档不存在。");
+            if (!versions.TryGetValue(sourceVersionId, out var source) || source.DocumentId != documentId) throw new PdmNotFoundException("待发布工作版本不存在。");
+            if (source.Status != DocumentVersionStatus.Work) throw new PdmConflictException("只能从工作版本生成正式版本。");
+            if (!string.Equals(source.Revision.Display, document.Revision.Display, StringComparison.OrdinalIgnoreCase)) throw new PdmConflictException("只能发布图档当前最新的工作版本。");
+            if (!packages.TryGetValue(releasePackageId, out var package) || package.State is not (ReleasePackageState.Publishing or ReleasePackageState.Published)) throw new PdmConflictException("发布包尚未审批通过，不能生成正式版本。");
+            if (!package.ApprovalTasks.Any(task => task.Id == approvalTaskId && task.Stage == ApprovalStage.Approval && task.Decision == ApprovalDecision.Approved)) throw new PdmConflictException("最终批准记录与发布包不匹配或尚未批准。");
+            var revision = source.Revision.Release();
+            var released = source with { Id = Guid.NewGuid(), Revision = revision, Status = DocumentVersionStatus.Released, CreatedBy = actor, CreatedAt = DateTimeOffset.UtcNow, ChangeNote = $"审批发布{revision.Display}", SourceVersionId = source.Id, SourceDescription = $"由{source.Revision.Display}审批发布", ApprovalTaskId = approvalTaskId, ReleasePackageId = releasePackageId };
+            versions[released.Id] = released;
+            documents[documentId] = document with { Revision = revision, State = DocumentLifecycleState.Released, CheckedOutBy = null, UpdatedAt = released.CreatedAt };
+            return Task.FromResult(released);
         }
     }
 

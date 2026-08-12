@@ -17,6 +17,7 @@ const workspace = usePdmWorkspace()
 type NavKey = 'workbench' | 'documents' | 'bom' | 'approvals' | 'release' | 'changes' | 'audit' | 'settings'
 const activeView = ref<'workbench' | 'documents'>('documents')
 const activeNav = ref<NavKey>('documents')
+const restoreNote = ref('从历史版本恢复生成新的工作版本')
 
 function openDocuments(mode: PreviewMode = 'model') {
   activeView.value = 'documents'
@@ -57,6 +58,32 @@ function handleNavigation(key: NavKey, label: string) {
 function confirmApproval() {
   workspace.approvalDialogOpen.value = false
   ElMessage.info('当前客户端已读取真实发布包；审批写入接口接入后开放提交操作')
+}
+
+function versionStatus(status: 'Work' | 'Released' | 0 | 1) {
+  return status === 'Released' || status === 1 ? '正式版' : '工作版'
+}
+
+function propertyChangeKind(kind: string | number) {
+  return typeof kind === 'string' ? kind : ['新增', '删除', '修改'][kind] ?? String(kind)
+}
+
+function referenceChangeKind(kind: string | number) {
+  return typeof kind === 'string' ? kind : ['新增零件', '删除零件', '替换文件', '移动', '配置变化', '数量变化', '状态变化'][kind] ?? String(kind)
+}
+
+function bomChangeKind(kind: string | number) {
+  return typeof kind === 'string' ? kind : ['物料新增', '物料删除', '数量变化', '材料变化', '规格变化', '版本变化'][kind] ?? String(kind)
+}
+
+async function restoreSelectedVersion() {
+  if (!workspace.leftVersionId.value) return
+  try {
+    await workspace.restoreVersion(workspace.leftVersionId.value, restoreNote.value)
+    ElMessage.success('已从历史版本创建新的工作版本，当前文件未被覆盖')
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '历史版本恢复失败')
+  }
 }
 </script>
 
@@ -116,7 +143,7 @@ function confirmApproval() {
             <p :title="workspace.project.value.vaultLocation">项目负责人：{{ workspace.project.value.owner }}　{{ workspace.project.value.stage }}　图档库：{{ workspace.project.value.vaultName }}</p>
           </div>
           <div class="pdm-page-actions">
-            <button type="button" class="pdm-secondary-action" @click="workspace.versionDrawerOpen.value = true"><GitCompareArrows :size="16" />版本对比</button>
+            <button type="button" class="pdm-secondary-action" @click="workspace.openVersionDrawer()"><GitCompareArrows :size="16" />版本对比</button>
             <button type="button" class="pdm-primary-action" @click="submitApproval"><Send :size="16" />提交审批</button>
           </div>
         </header>
@@ -157,12 +184,28 @@ function confirmApproval() {
       </main>
     </div>
 
-    <el-drawer v-model="workspace.versionDrawerOpen.value" title="版本结构对比" size="420px">
+    <el-drawer v-model="workspace.versionDrawerOpen.value" title="图档历史版本对比" size="680px">
       <div class="pdm-version-summary">
         <strong>{{ workspace.selectedNode.value.drawingNumber }} · {{ workspace.selectedNode.value.version }}</strong>
-        <span>{{ workspace.selectedNode.value.fileName }} · 服务端当前版本</span>
+        <span>{{ workspace.selectedNode.value.fileName }} · 历史版本永久不可变</span>
       </div>
-      <p class="pdm-empty-info">历史版本差异接口尚未提供，当前未使用演示差异数据。</p>
+      <div v-if="workspace.versionLoading.value" class="pdm-empty-info">正在读取版本与快照差异…</div>
+      <p v-else-if="workspace.versionError.value" class="pdm-empty-info">{{ workspace.versionError.value }}</p>
+      <p v-else-if="workspace.versions.value.length === 0" class="pdm-empty-info">该图档尚无版本记录。</p>
+      <template v-else>
+        <div class="pdm-version-selectors">
+          <label>左侧版本<el-select v-model="workspace.leftVersionId.value" @change="workspace.compareVersions"><el-option v-for="version in workspace.versions.value" :key="version.id" :label="`${version.revision.display} · ${version.createdBy} · ${new Date(version.createdAt).toLocaleString()}`" :value="version.id" /></el-select></label>
+          <label>右侧版本<el-select v-model="workspace.rightVersionId.value" @change="workspace.compareVersions"><el-option v-for="version in workspace.versions.value" :key="version.id" :label="`${version.revision.display} · ${version.createdBy} · ${new Date(version.createdAt).toLocaleString()}`" :value="version.id" /></el-select></label>
+        </div>
+        <div class="pdm-version-actions"><button type="button" class="pdm-secondary-action" @click="workspace.openVersionFile(workspace.leftVersionId.value, false)">只读预览左侧</button><button type="button" class="pdm-secondary-action" @click="workspace.openVersionFile(workspace.leftVersionId.value, true)">下载左侧</button></div>
+        <div v-if="workspace.versionComparison.value" class="pdm-diff-sections">
+          <section><h3>版本信息</h3><p>左：{{ workspace.versionComparison.value.left.revision.display }} · {{ versionStatus(workspace.versionComparison.value.left.status) }} · {{ workspace.versionComparison.value.left.createdBy }} · {{ new Date(workspace.versionComparison.value.left.createdAt).toLocaleString() }} · {{ workspace.versionComparison.value.left.changeNote }}</p><p>右：{{ workspace.versionComparison.value.right.revision.display }} · {{ versionStatus(workspace.versionComparison.value.right.status) }} · {{ workspace.versionComparison.value.right.createdBy }} · {{ new Date(workspace.versionComparison.value.right.createdAt).toLocaleString() }} · {{ workspace.versionComparison.value.right.changeNote }}</p></section>
+          <section><h3>属性差异（{{ workspace.versionComparison.value.propertyChanges.length }}）</h3><ul><li v-for="(change, index) in workspace.versionComparison.value.propertyChanges" :key="`p-${index}`">【{{ propertyChangeKind(change.kind) }}】{{ change.name }}：{{ change.previousValue ?? '无' }} → {{ change.currentValue ?? '无' }}</li></ul><p v-if="!workspace.versionComparison.value.propertyChanges.length">无变化</p></section>
+          <section><h3>引用树差异（{{ workspace.versionComparison.value.referenceChanges.length }}）</h3><ul><li v-for="(change, index) in workspace.versionComparison.value.referenceChanges" :key="`r-${index}`">【{{ referenceChangeKind(change.kind) }}】{{ change.instancePath }}：{{ change.previousValue ?? '无' }} → {{ change.currentValue ?? '无' }}</li></ul><p v-if="!workspace.versionComparison.value.referenceChanges.length">无变化</p></section>
+          <section><h3>BOM差异（{{ workspace.versionComparison.value.bomChanges.length }}）</h3><ul><li v-for="(change, index) in workspace.versionComparison.value.bomChanges" :key="`b-${index}`">【{{ bomChangeKind(change.kind) }}】{{ change.drawingNumber }} · {{ change.field }}：{{ change.previousValue ?? '无' }} → {{ change.currentValue ?? '无' }}</li></ul><p v-if="!workspace.versionComparison.value.bomChanges.length">无变化</p></section>
+        </div>
+        <div class="pdm-version-restore"><el-input v-model="restoreNote" maxlength="500" placeholder="填写恢复说明" /><button type="button" class="pdm-primary-action" @click="restoreSelectedVersion">从左侧版本创建新工作版本</button><small>不会覆盖当前文件，也不会修改历史版本。</small></div>
+      </template>
     </el-drawer>
 
     <el-dialog v-model="workspace.approvalDialogOpen.value" title="提交发布包审批" width="520px">

@@ -1,7 +1,7 @@
 import { computed, onMounted, ref } from 'vue'
-import { checkHealth, loadProjectWorkspace, login as apiLogin, PdmApiError, postDesktopMessage } from '../api'
+import { checkHealth, compareDocumentVersions, listDocumentVersions, loadProjectWorkspace, login as apiLogin, PdmApiError, postDesktopMessage, readDocumentVersionFile, restoreDocumentVersion } from '../api'
 import type { AuthSession } from '../api'
-import type { BomItem, DocumentNode, PreviewMode, ProjectSummary, ReleasePackageSummary } from '../types'
+import type { BomItem, DocumentNode, DocumentVersionComparison, DocumentVersionSummary, PreviewMode, ProjectSummary, ReleasePackageSummary } from '../types'
 
 const sessionKey = 'upton-pdm-session'
 
@@ -81,8 +81,15 @@ export function usePdmWorkspace() {
   const loadError = ref('')
   const ready = ref(false)
   const versionDrawerOpen = ref(false)
+  const versions = ref<DocumentVersionSummary[]>([])
+  const leftVersionId = ref('')
+  const rightVersionId = ref('')
+  const versionComparison = ref<DocumentVersionComparison | null>(null)
+  const versionLoading = ref(false)
+  const versionError = ref('')
   const approvalDialogOpen = ref(false)
   let accessToken = ''
+  let pendingVersionComparison: { documentId: string; leftVersionId?: string; rightVersionId?: string } | null = null
 
   const selectedNode = computed(() => findNode(root.value, selectedId.value) ?? root.value)
   const filteredTree = computed(() => filterNode(root.value, searchQuery.value) ?? root.value)
@@ -93,6 +100,58 @@ export function usePdmWorkspace() {
   function selectNode(node: DocumentNode) {
     selectedId.value = node.id
     postDesktopMessage('document-selected', { documentId: node.id, fileName: node.fileName })
+  }
+
+  async function openVersionDrawer(left?: string, right?: string) {
+    versionDrawerOpen.value = true
+    versionLoading.value = true
+    versionError.value = ''
+    versionComparison.value = null
+    try {
+      versions.value = await listDocumentVersions(selectedNode.value.id, accessToken)
+      leftVersionId.value = left && versions.value.some(version => version.id === left) ? left : versions.value.at(-1)?.id ?? ''
+      rightVersionId.value = right && versions.value.some(version => version.id === right) ? right : versions.value[0]?.id ?? ''
+      await compareVersions()
+    } catch (error) {
+      versionError.value = messageFrom(error)
+    } finally {
+      versionLoading.value = false
+    }
+  }
+
+  async function compareVersions() {
+    if (!leftVersionId.value || !rightVersionId.value || leftVersionId.value === rightVersionId.value) {
+      versionComparison.value = null
+      return
+    }
+    versionLoading.value = true
+    versionError.value = ''
+    try {
+      versionComparison.value = await compareDocumentVersions(selectedNode.value.id, leftVersionId.value, rightVersionId.value, accessToken)
+    } catch (error) {
+      versionError.value = messageFrom(error)
+    } finally {
+      versionLoading.value = false
+    }
+  }
+
+  async function openVersionFile(versionId: string, download: boolean) {
+    const blob = await readDocumentVersionFile(selectedNode.value.id, versionId, accessToken, download)
+    const url = URL.createObjectURL(blob)
+    if (download) {
+      const anchor = document.createElement('a')
+      anchor.href = url
+      anchor.download = `${selectedNode.value.drawingNumber}-${versions.value.find(version => version.id === versionId)?.revision.display ?? 'history'}-${selectedNode.value.fileName}`
+      anchor.click()
+    } else {
+      window.open(url, '_blank', 'noopener')
+    }
+    window.setTimeout(() => URL.revokeObjectURL(url), 60_000)
+  }
+
+  async function restoreVersion(versionId: string, changeNote: string) {
+    await restoreDocumentVersion(selectedNode.value.id, versionId, changeNote, accessToken)
+    await Promise.all([reload(), openVersionDrawer(undefined, undefined)])
   }
 
   function openDocument(node = selectedNode.value) {
@@ -139,6 +198,12 @@ export function usePdmWorkspace() {
       selectedId.value = data.root.id
       ready.value = true
       serviceOnline.value = true
+      if (pendingVersionComparison) {
+        const request = pendingVersionComparison
+        pendingVersionComparison = null
+        selectedId.value = request.documentId
+        await openVersionDrawer(request.leftVersionId, request.rightVersionId)
+      }
     } catch (error) {
       ready.value = false
       if (error instanceof PdmApiError && error.status === 401) {
@@ -188,6 +253,18 @@ export function usePdmWorkspace() {
   }
 
   onMounted(async () => {
+    window.addEventListener('pdm-open-version-compare', async (event) => {
+      const detail = (event as CustomEvent<{ documentId?: string; leftVersionId?: string; rightVersionId?: string }>).detail
+      if (!detail?.documentId) return
+      pendingVersionComparison = { documentId: detail.documentId, leftVersionId: detail.leftVersionId, rightVersionId: detail.rightVersionId }
+      if (accessToken && ready.value) {
+        const request = pendingVersionComparison
+        pendingVersionComparison = null
+        selectedId.value = request.documentId
+        await openVersionDrawer(request.leftVersionId, request.rightVersionId)
+      }
+    })
+
     const controller = new AbortController()
     const timer = window.setTimeout(() => controller.abort(), 1600)
     serviceOnline.value = await checkHealth(controller.signal)
@@ -227,9 +304,19 @@ export function usePdmWorkspace() {
     normalCount,
     warningCount,
     versionDrawerOpen,
+    versions,
+    leftVersionId,
+    rightVersionId,
+    versionComparison,
+    versionLoading,
+    versionError,
     approvalDialogOpen,
     selectNode,
     openDocument,
+    openVersionDrawer,
+    compareVersions,
+    openVersionFile,
+    restoreVersion,
     submitApproval,
     login,
     logout,

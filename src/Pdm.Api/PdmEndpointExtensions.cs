@@ -55,6 +55,67 @@ public static class PdmEndpointExtensions
         api.MapGet("/projects/{projectId:guid}/documents", async (Guid projectId, IPdmRepository repository, CancellationToken cancellationToken) =>
             Results.Ok(await repository.ListDocumentsAsync(projectId, cancellationToken)));
 
+        api.MapPost("/projects/{projectId:guid}/documents/register", async (Guid projectId, RegisterDocumentRequest request, HttpContext context, PdmWorkflowService workflow, CancellationToken cancellationToken) =>
+        {
+            var (actor, role) = CurrentUser(context.User);
+            return Results.Ok(await workflow.RegisterDocumentAsync(
+                new RegisterDocumentCommand(projectId, request.DrawingNumber, request.Name, request.FileName, request.Kind),
+                actor,
+                role,
+                cancellationToken));
+        });
+
+        api.MapGet("/documents/{documentId:guid}/versions", async (Guid documentId, HttpContext context, IPdmRepository repository, PdmWorkflowService workflow, CancellationToken cancellationToken) =>
+        {
+            var (actor, role) = CurrentUser(context.User);
+            await workflow.AuditVersionReadAsync(documentId, Guid.Empty, actor, role, "document.version.list", cancellationToken);
+            var versions = await repository.ListDocumentVersionsAsync(documentId, cancellationToken);
+            return Results.Ok(versions);
+        });
+
+        api.MapGet("/documents/{documentId:guid}/versions/{versionId:guid}", async (Guid documentId, Guid versionId, HttpContext context, IPdmRepository repository, PdmWorkflowService workflow, CancellationToken cancellationToken) =>
+        {
+            var (actor, role) = CurrentUser(context.User);
+            var version = await repository.FindDocumentVersionAsync(documentId, versionId, cancellationToken);
+            if (version is null) return Results.NotFound();
+            await workflow.AuditVersionReadAsync(documentId, versionId, actor, role, "document.version.view", cancellationToken);
+            return Results.Ok(version);
+        });
+
+        api.MapGet("/documents/{documentId:guid}/versions/{versionId:guid}/file", async (Guid documentId, Guid versionId, bool download, HttpContext context, IPdmRepository repository, IFileStorage storage, PdmWorkflowService workflow, CancellationToken cancellationToken) =>
+        {
+            var (actor, role) = CurrentUser(context.User);
+            var document = await repository.FindDocumentAsync(documentId, cancellationToken);
+            var version = await repository.FindDocumentVersionAsync(documentId, versionId, cancellationToken);
+            if (document is null || version is null) return Results.NotFound();
+            var project = await repository.FindProjectAsync(document.ProjectId, cancellationToken);
+            if (project is null) return Results.NotFound();
+            await workflow.AuditVersionReadAsync(documentId, versionId, actor, role, download ? "document.version.download" : "document.version.read", cancellationToken);
+            await storage.VerifyStoredFileAsync(project, new StoredFile(version.StorageRelativePath, version.FileLength, version.Sha256, version.CreatedAt), cancellationToken);
+            var path = StorageLocationPolicy.ResolveUnder(project.VaultLocation, version.StorageRelativePath);
+            var stream = await storage.OpenReadAsync(path, cancellationToken);
+            return Results.File(stream, "application/octet-stream", download ? document.FileName : null, enableRangeProcessing: true);
+        });
+
+        api.MapGet("/documents/{documentId:guid}/versions/compare", async (Guid documentId, Guid left, Guid right, HttpContext context, PdmWorkflowService workflow, CancellationToken cancellationToken) =>
+        {
+            var (actor, role) = CurrentUser(context.User);
+            return Results.Ok(await workflow.CompareVersionsAsync(documentId, left, right, actor, role, cancellationToken));
+        });
+
+        api.MapPost("/documents/{documentId:guid}/versions/{versionId:guid}/restore", async (Guid documentId, Guid versionId, RestoreVersionRequest request, HttpContext context, PdmWorkflowService workflow, CancellationToken cancellationToken) =>
+        {
+            var (actor, role) = CurrentUser(context.User);
+            var result = await workflow.RestoreVersionAsync(documentId, versionId, actor, role, request.ChangeNote, cancellationToken);
+            return Results.Ok(new { document = result.Document, version = result.Version });
+        });
+
+        api.MapPost("/documents/{documentId:guid}/versions/publish", async (Guid documentId, PublishDocumentVersionRequest request, HttpContext context, PdmWorkflowService workflow, CancellationToken cancellationToken) =>
+        {
+            var (actor, role) = CurrentUser(context.User);
+            return Results.Ok(await workflow.PublishVersionAsync(documentId, request.SourceVersionId, request.ReleasePackageId, request.ApprovalTaskId, actor, role, cancellationToken));
+        });
+
         api.MapGet("/projects/{projectId:guid}/reference-tree", async (Guid projectId, IPdmRepository repository, CancellationToken cancellationToken) =>
         {
             var tree = await repository.GetReferenceTreeAsync(projectId, cancellationToken);
@@ -80,6 +141,18 @@ public static class PdmEndpointExtensions
             return Results.Ok(await workflow.CheckoutAsync(documentId, actor, role, cancellationToken));
         });
 
+        api.MapPost("/documents/{documentId:guid}/complete-edit", async (Guid documentId, CompleteEditRequest request, HttpContext context, PdmWorkflowService workflow, CancellationToken cancellationToken) =>
+        {
+            var (actor, role) = CurrentUser(context.User);
+            return Results.Ok(await workflow.CompleteEditWithoutChangesAsync(documentId, actor, role, request.Sha256, cancellationToken));
+        });
+
+        api.MapPost("/documents/{documentId:guid}/discard-checkout", async (Guid documentId, HttpContext context, PdmWorkflowService workflow, CancellationToken cancellationToken) =>
+        {
+            var (actor, role) = CurrentUser(context.User);
+            return Results.Ok(await workflow.DiscardCheckoutAsync(documentId, actor, role, cancellationToken));
+        });
+
         api.MapPost("/documents/{documentId:guid}/checkin", async (Guid documentId, CheckInRequest request, HttpContext context, PdmWorkflowService workflow, TimeProvider timeProvider, CancellationToken cancellationToken) =>
         {
             var (actor, role) = CurrentUser(context.User);
@@ -92,7 +165,9 @@ public static class PdmEndpointExtensions
                 actor,
                 request.Root,
                 Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(rootJson))));
-            return Results.Ok(await workflow.CheckInAsync(documentId, actor, role, snapshot, cancellationToken));
+            var file = new StoredFile(request.StorageRelativePath, request.FileLength, request.Sha256, timeProvider.GetUtcNow());
+            var result = await workflow.CheckInAsync(documentId, actor, role, file, request.Comment, request.Properties ?? new Dictionary<string, string?>(), snapshot, cancellationToken);
+            return Results.Ok(new { document = result.Document, version = result.Version, versionCreated = result.VersionCreated });
         });
 
         api.MapPost("/release-packages", async (CreateReleasePackageRequest request, HttpContext context, PdmWorkflowService workflow, CancellationToken cancellationToken) =>

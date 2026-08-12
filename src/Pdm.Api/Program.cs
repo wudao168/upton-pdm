@@ -123,6 +123,14 @@ app.UseCors("PdmClients");
 app.UseAuthentication();
 app.UseAuthorization();
 app.MapPdmEndpoints();
-app.Run();
+try
+{
+    app.Run();
+}
+catch (IOException exception)
+{
+    app.Logger.LogCritical(exception, "PDM API启动失败，请确认5080端口是否已由UptonPdmApi服务占用。");
+    Environment.ExitCode = 1;
+}
 
 public partial class Program;

@@ -52,3 +52,36 @@ export interface ReleasePackageSummary {
   state: string
   steps: ApprovalStep[]
 }
+
+export interface DocumentVersionSummary {
+  id: string
+  documentId: string
+  revision: { display: string }
+  status: 'Work' | 'Released' | 0 | 1
+  fileLength: number
+  sha256: string
+  createdBy: string
+  createdAt: string
+  changeNote: string
+  sourceDescription?: string
+  releasePackageId?: string
+}
+
+export interface VersionChange {
+  kind: string | number
+  name?: string
+  instancePath?: string
+  drawingNumber?: string
+  field?: string
+  previousValue?: string | null
+  currentValue?: string | null
+}
+
+export interface DocumentVersionComparison {
+  documentId: string
+  left: DocumentVersionSummary
+  right: DocumentVersionSummary
+  propertyChanges: VersionChange[]
+  referenceChanges: VersionChange[]
+  bomChanges: VersionChange[]
+}
