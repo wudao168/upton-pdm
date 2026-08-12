@@ -46,6 +46,45 @@ public sealed class DocumentVersionTests
     }
 
     [Fact]
+    public async Task CheckInWithSameFileHash_ReleasesEditLockWithoutCreatingVersion()
+    {
+        var repository = new Infrastructure.InMemoryPdmRepository(TimeProvider.System);
+        var project = Assert.Single(await repository.ListProjectsAsync(CancellationToken.None));
+        var document = await RegisterAndCheckInAsync(repository, project, "P-003", new string('C', 64));
+        document = await repository.CheckoutAsync(document.Id, "engineer", CancellationToken.None);
+        var before = await repository.ListDocumentVersionsAsync(document.Id, CancellationToken.None);
+        var root = ReferenceRoot(document, "engineer");
+        var result = await repository.CheckInVersionAsync(
+            document.Id,
+            "engineer",
+            Commit(project, document, root, new string('C', 64), "no changes"),
+            CancellationToken.None);
+        var after = await repository.ListDocumentVersionsAsync(document.Id, CancellationToken.None);
+
+        Assert.False(result.VersionCreated);
+        Assert.Null(result.Version);
+        Assert.Equal(document.Revision, result.Document.Revision);
+        Assert.Null(result.Document.CheckedOutBy);
+        Assert.Equal(before.Count, after.Count);
+    }
+
+    [Fact]
+    public async Task CompleteEditWithoutChanges_RejectsChangedFileAndDiscardCheckoutReleasesLock()
+    {
+        var repository = new Infrastructure.InMemoryPdmRepository(TimeProvider.System);
+        var project = Assert.Single(await repository.ListProjectsAsync(CancellationToken.None));
+        var document = await RegisterAndCheckInAsync(repository, project, "P-004", new string('D', 64));
+        document = await repository.CheckoutAsync(document.Id, "engineer", CancellationToken.None);
+
+        await Assert.ThrowsAsync<Application.PdmConflictException>(() =>
+            repository.CompleteEditWithoutChangesAsync(document.Id, "engineer", new string('E', 64), CancellationToken.None));
+        var discarded = await repository.DiscardCheckoutAsync(document.Id, "engineer", CancellationToken.None);
+
+        Assert.Null(discarded.CheckedOutBy);
+        Assert.Equal(document.Revision, discarded.Revision);
+    }
+
+    [Fact]
     public async Task CheckIn_BlankChangeNoteIsRejected()
     {
         var repository = new Infrastructure.InMemoryPdmRepository(TimeProvider.System);
@@ -104,4 +143,28 @@ public sealed class DocumentVersionTests
         var bom = new BomItem(Guid.NewGuid(), Guid.NewGuid(), BomKind.Mechanical, 1, "P-001", "Part", bomQuantity, "件", bomMaterial, "10", bomRevision, true);
         return new DocumentVersion(Guid.NewGuid(), documentId, RevisionLabel.Parse(revision), DocumentVersionStatus.Work, "version/file", 10, new string('A', 64), "engineer", DateTimeOffset.UtcNow, revision, new Dictionary<string, string?> { ["Material"] = propertyMaterial }, root, [bom], [], null, null, null, null);
     }
+
+    private static async Task<PdmDocument> RegisterAndCheckInAsync(Infrastructure.InMemoryPdmRepository repository, Project project, string drawingNumber, string sha256)
+    {
+        var document = await repository.RegisterDocumentAsync(
+            new Application.RegisterDocumentCommand(project.Id, drawingNumber, drawingNumber, string.Concat(drawingNumber, ".SLDPRT"), DocumentKind.Part),
+            "engineer",
+            CancellationToken.None);
+        document = await repository.CheckoutAsync(document.Id, "engineer", CancellationToken.None);
+        var root = ReferenceRoot(document, "engineer");
+        var result = await repository.CheckInVersionAsync(document.Id, "engineer", Commit(project, document, root, sha256, "first archive"), CancellationToken.None);
+        return result.Document;
+    }
+
+    private static DocumentReferenceNode ReferenceRoot(PdmDocument document, string actor) =>
+        new(Guid.NewGuid(), document.Id, document.DrawingNumber, document.FileName, document.Name, DocumentKind.Part, "Default", 1, ReferenceNodeStatus.Normal, document.Revision, actor, []);
+
+    private static Application.DocumentVersionCommit Commit(Project project, PdmDocument document, DocumentReferenceNode root, string sha256, string note) =>
+        new(
+            new Application.StoredFile(string.Concat(".versions/", document.DrawingNumber, "/", document.FileName), 128, sha256, DateTimeOffset.UtcNow),
+            note,
+            new Dictionary<string, string?>(),
+            new CadReferenceSnapshot(Guid.NewGuid(), project.Id, document.Id, DateTimeOffset.UtcNow, "engineer", root, new string('F', 64)),
+            [],
+            []);
 }
