@@ -724,7 +724,7 @@ public sealed class PdmAddin : ISwAddin
         }
     }
 
-    private async void OnCheckInRequested(object sender, CadTreeNodeEventArgs eventArgs)
+    private void OnCheckInRequested(object sender, CadTreeNodeEventArgs eventArgs)
     {
         var node = eventArgs.Node;
         if (node == null || !currentProjectId.HasValue || !EnsureServerDocument(node))
@@ -732,47 +732,10 @@ public sealed class PdmAddin : ISwAddin
             return;
         }
 
-        if (node.WorkState == CadWorkState.Editable
-            && !string.IsNullOrWhiteSpace(node.LatestVersionSha256)
-            && !string.IsNullOrWhiteSpace(node.FullPath)
-            && File.Exists(node.FullPath))
-        {
-            try
-            {
-                var currentSha256 = await Task.Run(() => ComputeFileHash(node.FullPath));
-                if (string.Equals(currentSha256, node.LatestVersionSha256, StringComparison.OrdinalIgnoreCase))
-                {
-                    var unchanged = await apiClient.CompleteEditWithoutChangesAsync(node.DocumentId.Value, currentSha256, lifetime.Token);
-                    node.CheckedOutBy = unchanged.CheckedOutBy;
-                    node.Revision = unchanged.Revision?.Display ?? node.Revision;
-                    node.WorkState = CadWorkState.None;
-                    taskPaneControl.SetTree(currentTree);
-                    MessageBox.Show(taskPaneControl, string.Concat("未检测到变更，已结束编辑，版本仍为", node.Revision, "。"), "UPTON PDM", MessageBoxButtons.OK, MessageBoxIcon.Information);
-                    return;
-                }
-            }
-            catch (Exception exception)
-            {
-                ShowError(exception.Message);
-                return;
-            }
-        }
-
         if (node.HasBlockingIssue)
         {
             ShowError("结构树存在缺失引用，不能提交存档。 ");
             return;
-        }
-
-        string changeNote;
-        using (var dialog = new ChangeNoteDialog(node.FileName))
-        {
-            if (dialog.ShowDialog(taskPaneControl) != DialogResult.OK)
-            {
-                return;
-            }
-
-            changeNote = dialog.ChangeNote;
         }
 
         if (Volatile.Read(ref openOperationInProgress) > 0 || Interlocked.Exchange(ref checkInOperationInProgress, 1) != 0)
@@ -784,7 +747,7 @@ public sealed class PdmAddin : ISwAddin
         try
         {
             var projectId = currentProjectId.Value;
-            taskPaneControl.BeginInvoke((Action)(() => PrepareAndCheckInOnSolidWorksThread(node, projectId, changeNote)));
+            taskPaneControl.BeginInvoke((Action)(() => PrepareAndCheckInOnSolidWorksThread(node, projectId)));
         }
         catch (Exception exception)
         {
@@ -824,7 +787,7 @@ public sealed class PdmAddin : ISwAddin
         }
     }
 
-    private async void PrepareAndCheckInOnSolidWorksThread(CadTreeNode node, Guid projectId, string changeNote)
+    private async void PrepareAndCheckInOnSolidWorksThread(CadTreeNode node, Guid projectId)
     {
         var originalDocumentPath = string.Empty;
         var uploadCopyPath = string.Empty;
@@ -858,6 +821,22 @@ public sealed class PdmAddin : ISwAddin
                 return;
             }
 
+            if (!document.GetSaveFlag()
+                && !string.IsNullOrWhiteSpace(node.LatestVersionSha256))
+            {
+                var unchangedSha256 = ComputeFileHash(activePath);
+                if (string.Equals(unchangedSha256, node.LatestVersionSha256, StringComparison.OrdinalIgnoreCase))
+                {
+                    var unchanged = await apiClient.CompleteEditWithoutChangesAsync(node.DocumentId.Value, unchangedSha256, lifetime.Token);
+                    node.CheckedOutBy = unchanged.CheckedOutBy;
+                    node.Revision = unchanged.Revision?.Display ?? node.Revision;
+                    node.WorkState = CadWorkState.None;
+                    taskPaneControl.SetTree(currentTree);
+                    MessageBox.Show(taskPaneControl, string.Concat("未检测到变更，已结束编辑，版本仍为", node.Revision, "。"), "UPTON PDM", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    return;
+                }
+            }
+
             var saveErrors = 0;
             var saveWarnings = 0;
             LogOperation(string.Concat("CheckIn Save3 start path=", activePath));
@@ -867,6 +846,30 @@ public sealed class PdmAddin : ISwAddin
             {
                 ShowError(string.Concat("SolidWorks保存图档失败，未提交存档。错误码：", saveErrors, "，警告码：", saveWarnings));
                 return;
+            }
+
+            var currentSha256 = ComputeFileHash(activePath);
+            if (!string.IsNullOrWhiteSpace(node.LatestVersionSha256)
+                && string.Equals(currentSha256, node.LatestVersionSha256, StringComparison.OrdinalIgnoreCase))
+            {
+                var unchanged = await apiClient.CompleteEditWithoutChangesAsync(node.DocumentId.Value, currentSha256, lifetime.Token);
+                node.CheckedOutBy = unchanged.CheckedOutBy;
+                node.Revision = unchanged.Revision?.Display ?? node.Revision;
+                node.WorkState = CadWorkState.None;
+                taskPaneControl.SetTree(currentTree);
+                MessageBox.Show(taskPaneControl, string.Concat("未检测到变更，已结束编辑，版本仍为", node.Revision, "。"), "UPTON PDM", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
+
+            string changeNote;
+            using (var dialog = new ChangeNoteDialog(node.FileName))
+            {
+                if (dialog.ShowDialog(taskPaneControl) != DialogResult.OK)
+                {
+                    return;
+                }
+
+                changeNote = dialog.ChangeNote;
             }
 
             var modelProperties = ReadModelProperties(document);
