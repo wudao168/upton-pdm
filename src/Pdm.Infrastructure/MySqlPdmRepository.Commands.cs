@@ -137,10 +137,11 @@ public sealed partial class MySqlPdmRepository
             """
             INSERT INTO release_package(
                 id, project_id, package_number, state, reference_snapshot_id, mechanical_bom_revision,
-                electrical_bom_revision, published_at, published_path, row_version, created_at)
+                electrical_bom_revision, mechanical_bom_snapshot_json, electrical_bom_snapshot_json,
+                published_at, published_path, publish_error, row_version, created_at)
             VALUES (
                 @Id, @ProjectId, @PackageNumber, @State, @ReferenceSnapshotId, @MechanicalBomRevision,
-                @ElectricalBomRevision, NULL, NULL, 1, @CreatedAt)
+                @ElectricalBomRevision, @MechanicalBomSnapshot, @ElectricalBomSnapshot, NULL, NULL, NULL, 1, @CreatedAt)
             """,
             new
             {
@@ -151,6 +152,8 @@ public sealed partial class MySqlPdmRepository
                 package.ReferenceSnapshotId,
                 package.MechanicalBomRevision,
                 package.ElectricalBomRevision,
+                MechanicalBomSnapshot = JsonSerializer.Serialize(package.MechanicalBomSnapshot, jsonOptions),
+                ElectricalBomSnapshot = JsonSerializer.Serialize(package.ElectricalBomSnapshot, jsonOptions),
                 CreatedAt = package.CreatedAt.UtcDateTime
             },
             transaction,
@@ -168,6 +171,29 @@ public sealed partial class MySqlPdmRepository
                 cancellationToken: cancellationToken));
         }
 
+        await transaction.CommitAsync(cancellationToken);
+        return package;
+    }
+
+    public async Task<ReleasePackage> SubmitReleasePackageAsync(Guid releasePackageId, string actor, CancellationToken cancellationToken)
+    {
+        await using var connection = await OpenAsync(cancellationToken);
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+        var state = await connection.QuerySingleOrDefaultAsync<string>(new CommandDefinition(
+            "SELECT state FROM release_package WHERE id=@PackageId FOR UPDATE",
+            new { PackageId = releasePackageId }, transaction, cancellationToken: cancellationToken))
+            ?? throw new PdmNotFoundException("发布包不存在。");
+        if (state is not ("Draft" or "Rejected" or "PublishFailed"))
+            throw new PdmConflictException("只有草稿、已驳回或发布失败的发布包可以提交。");
+
+        await connection.ExecuteAsync(new CommandDefinition(
+            "UPDATE approval_task SET decision_by=NULL,decision_value=NULL,decision_comment=NULL,decided_at=NULL WHERE release_package_id=@PackageId",
+            new { PackageId = releasePackageId }, transaction, cancellationToken: cancellationToken));
+        await connection.ExecuteAsync(new CommandDefinition(
+            "UPDATE release_package SET state='ProcessReview',published_at=NULL,published_path=NULL,publish_error=NULL,row_version=row_version+1 WHERE id=@PackageId",
+            new { PackageId = releasePackageId }, transaction, cancellationToken: cancellationToken));
+        var package = await FindReleasePackageAsync(connection, transaction, releasePackageId, cancellationToken)
+            ?? throw new PdmNotFoundException("发布包不存在。");
         await transaction.CommitAsync(cancellationToken);
         return package;
     }
@@ -258,7 +284,7 @@ public sealed partial class MySqlPdmRepository
         var affected = await connection.ExecuteAsync(new CommandDefinition(
             """
             UPDATE release_package
-            SET state = @State, published_at = @PublishedAt, published_path = @PublishedPath, row_version = row_version + 1
+            SET state = @State, published_at = @PublishedAt, published_path = @PublishedPath, publish_error = NULL, row_version = row_version + 1
             WHERE id = @PackageId AND state = @ExpectedState
             """,
             new
@@ -281,12 +307,13 @@ public sealed partial class MySqlPdmRepository
         await using var connection = await OpenAsync(cancellationToken);
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
         await connection.ExecuteAsync(new CommandDefinition(
-            "UPDATE release_package SET state = @State, row_version = row_version + 1 WHERE id = @PackageId AND state = @ExpectedState",
+            "UPDATE release_package SET state = @State, publish_error = @Error, row_version = row_version + 1 WHERE id = @PackageId AND state = @ExpectedState",
             new
             {
                 State = ReleasePackageState.PublishFailed.ToString(),
                 PackageId = releasePackageId,
-                ExpectedState = ReleasePackageState.Publishing.ToString()
+                ExpectedState = ReleasePackageState.Publishing.ToString(),
+                Error = error.Length <= 2000 ? error : error[..2000]
             },
             transaction,
             cancellationToken: cancellationToken));

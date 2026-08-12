@@ -1,3 +1,6 @@
+using System.Security.Cryptography;
+using System.Text;
+using System.Text.Json;
 using Upton.Pdm.Domain;
 
 namespace Upton.Pdm.Application;
@@ -203,10 +206,8 @@ public sealed class PdmWorkflowService(IPdmRepository repository, IFileStorage f
 
     public async Task<ReleasePackage> CreateReleasePackageAsync(
         Guid projectId,
-        Guid referenceSnapshotId,
+        Guid? referenceSnapshotId,
         string number,
-        string mechanicalBomRevision,
-        string electricalBomRevision,
         string processReviewer,
         string approver,
         string actor,
@@ -214,8 +215,25 @@ public sealed class PdmWorkflowService(IPdmRepository repository, IFileStorage f
         CancellationToken cancellationToken)
     {
         RequireRole(role, UserRole.Engineer, UserRole.Administrator);
-        _ = await repository.FindProjectAsync(projectId, cancellationToken)
+        var project = await repository.FindProjectAsync(projectId, cancellationToken)
             ?? throw new PdmNotFoundException("项目不存在。 ");
+
+        if (string.IsNullOrWhiteSpace(number) || number.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0)
+        {
+            throw new PdmRuleException("发布包编号不能为空，且不能包含文件名非法字符。");
+        }
+
+        if (string.IsNullOrWhiteSpace(processReviewer) || string.IsNullOrWhiteSpace(approver))
+        {
+            throw new PdmRuleException("必须指定工艺审核人和批准人。");
+        }
+
+        var snapshot = await repository.GetLatestReferenceSnapshotAsync(projectId, cancellationToken)
+            ?? throw new PdmRuleException("项目尚无已存档的引用树快照，不能创建发布包。");
+        if (referenceSnapshotId.HasValue && referenceSnapshotId.Value != Guid.Empty && referenceSnapshotId.Value != snapshot.SnapshotId)
+        {
+            throw new PdmConflictException("指定的引用树快照不是项目当前最新快照，请刷新后重试。");
+        }
 
         var mechanical = await repository.GetBomAsync(projectId, BomKind.Mechanical, cancellationToken);
         var electrical = await repository.GetBomAsync(projectId, BomKind.Electrical, cancellationToken);
@@ -234,18 +252,83 @@ public sealed class PdmWorkflowService(IPdmRepository repository, IFileStorage f
             packageId,
             projectId,
             number,
-            ReleasePackageState.ProcessReview,
-            referenceSnapshotId,
-            mechanicalBomRevision,
-            electricalBomRevision,
+            ReleasePackageState.Draft,
+            snapshot.SnapshotId,
+            BomRevision("M", mechanical),
+            BomRevision("E", electrical),
             tasks,
             timeProvider.GetUtcNow(),
             null,
-            null);
+            null)
+        {
+            MechanicalBomSnapshot = mechanical.ToArray(),
+            ElectricalBomSnapshot = electrical.ToArray()
+        };
 
         var created = await repository.CreateReleasePackageAsync(package, cancellationToken);
+        await publisher.PrepareAsync(created, project, cancellationToken);
         await AuditAsync(actor, "release-package.create", nameof(ReleasePackage), packageId.ToString(), number, cancellationToken);
         return created;
+    }
+
+    public async Task<IReadOnlyList<BomItem>> ReplaceBomAsync(
+        Guid projectId,
+        BomKind kind,
+        IReadOnlyList<BomItemInput> inputs,
+        string actor,
+        UserRole role,
+        CancellationToken cancellationToken)
+    {
+        RequireRole(role, UserRole.Engineer, UserRole.Administrator);
+        _ = await repository.FindProjectAsync(projectId, cancellationToken)
+            ?? throw new PdmNotFoundException("项目不存在。");
+        if (inputs.Count == 0)
+        {
+            throw new PdmRuleException("BOM至少需要一条物料。");
+        }
+
+        var duplicateSequence = inputs.GroupBy(item => item.Sequence).FirstOrDefault(group => group.Count() > 1);
+        if (duplicateSequence is not null)
+        {
+            throw new PdmRuleException($"BOM序号{duplicateSequence.Key}重复。");
+        }
+
+        var duplicateDrawing = inputs.GroupBy(item => item.DrawingNumber.Trim(), StringComparer.OrdinalIgnoreCase).FirstOrDefault(group => group.Count() > 1);
+        if (duplicateDrawing is not null)
+        {
+            throw new PdmRuleException($"BOM图号{duplicateDrawing.Key}重复。");
+        }
+
+        var items = inputs.OrderBy(item => item.Sequence).Select(input =>
+        {
+            if (input.Sequence <= 0 || input.Quantity <= 0 || string.IsNullOrWhiteSpace(input.DrawingNumber)
+                || string.IsNullOrWhiteSpace(input.Name) || string.IsNullOrWhiteSpace(input.Unit)
+                || string.IsNullOrWhiteSpace(input.Revision))
+            {
+                throw new PdmRuleException("BOM序号、图号、名称、数量、单位和版本必须有效。");
+            }
+
+            return new BomItem(
+                Guid.NewGuid(), projectId, kind, input.Sequence, input.DrawingNumber.Trim(), input.Name.Trim(), input.Quantity,
+                input.Unit.Trim(), NullIfWhiteSpace(input.Material), NullIfWhiteSpace(input.Specification), input.Revision.Trim(), input.IsComplete);
+        }).ToArray();
+
+        var saved = await repository.ReplaceBomAsync(projectId, kind, items, cancellationToken);
+        await AuditAsync(actor, "bom.replace", nameof(BomItem), projectId.ToString(), $"{kind}:{saved.Count}", cancellationToken);
+        return saved;
+    }
+
+    public async Task<ReleasePackage> SubmitReleasePackageAsync(Guid releasePackageId, string actor, UserRole role, CancellationToken cancellationToken)
+    {
+        RequireRole(role, UserRole.Engineer, UserRole.Administrator);
+        var package = await repository.FindReleasePackageAsync(releasePackageId, cancellationToken)
+            ?? throw new PdmNotFoundException("发布包不存在。");
+        var project = await repository.FindProjectAsync(package.ProjectId, cancellationToken)
+            ?? throw new PdmNotFoundException("发布包对应的项目不存在。");
+        await publisher.ValidateAsync(package, project, cancellationToken);
+        var submitted = await repository.SubmitReleasePackageAsync(releasePackageId, actor, cancellationToken);
+        await AuditAsync(actor, package.State == ReleasePackageState.Rejected ? "release-package.resubmit" : "release-package.submit", nameof(ReleasePackage), package.Id.ToString(), package.Number, cancellationToken);
+        return submitted;
     }
 
     public async Task<ReleasePackage> DecideAsync(Guid taskId, string actor, UserRole role, ApprovalDecision decision, string? comment, CancellationToken cancellationToken)
@@ -278,6 +361,11 @@ public sealed class PdmWorkflowService(IPdmRepository repository, IFileStorage f
         }
 
         var publishedAt = timeProvider.GetUtcNow();
+        var releasedVersions = await repository.PublishReleasePackageVersionsAsync(package.Id, package.ApprovalTasks.Single(task => task.Stage == ApprovalStage.Approval).Id, actor, cancellationToken);
+        foreach (var version in releasedVersions)
+        {
+            await AuditAsync(actor, "document.version.publish", nameof(DocumentVersion), version.Id.ToString(), version.Revision.Display, cancellationToken);
+        }
         await repository.MarkPublishedAsync(package.Id, publishedPath, publishedAt, cancellationToken);
         await AuditAsync(actor, "release-package.publish", nameof(ReleasePackage), package.Id.ToString(), publishedPath, cancellationToken);
         return (await repository.FindReleasePackageAsync(package.Id, cancellationToken))!;
@@ -305,4 +393,12 @@ public sealed class PdmWorkflowService(IPdmRepository repository, IFileStorage f
 
     private Task AuditAsync(string actor, string action, string entityType, string entityId, string detail, CancellationToken cancellationToken) =>
         repository.AppendAuditAsync(new AuditEntry(Guid.NewGuid(), timeProvider.GetUtcNow(), actor, action, entityType, entityId, detail), cancellationToken);
+
+    private static string BomRevision(string prefix, IReadOnlyList<BomItem> items)
+    {
+        var json = JsonSerializer.Serialize(items, new JsonSerializerOptions(JsonSerializerDefaults.Web));
+        return $"{prefix}-{Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(json)))[..8]}";
+    }
+
+    private static string? NullIfWhiteSpace(string? value) => string.IsNullOrWhiteSpace(value) ? null : value.Trim();
 }

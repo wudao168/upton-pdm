@@ -40,10 +40,13 @@ export interface BomItem {
 }
 
 export interface ApprovalStep {
+  id: string
   stage: string
   assignee: string
   status: 'done' | 'current' | 'waiting'
   detail: string
+  decision?: string | number
+  comment?: string
 }
 
 export interface ReleasePackageSummary {
@@ -51,6 +54,18 @@ export interface ReleasePackageSummary {
   number: string
   state: string
   steps: ApprovalStep[]
+  publishedPath?: string
+  publishError?: string
+}
+
+export interface AuditEntry {
+  id: string
+  occurredAt: string
+  actor: string
+  action: string
+  entityType: string
+  entityId: string
+  detail: string
 }
 
 export interface DocumentVersionSummary {

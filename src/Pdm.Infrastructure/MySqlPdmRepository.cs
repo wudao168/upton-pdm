@@ -149,6 +149,18 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
         return json is null ? null : JsonSerializer.Deserialize<DocumentReferenceNode>(json, jsonOptions);
     }
 
+    public async Task<CadReferenceSnapshot?> GetLatestReferenceSnapshotAsync(Guid projectId, CancellationToken cancellationToken)
+    {
+        await using var connection = await OpenAsync(cancellationToken);
+        var row = await connection.QuerySingleOrDefaultAsync<ReferenceSnapshotRow>(new CommandDefinition(
+            "SELECT id, project_id, root_document_id, captured_at, captured_by, sha256, root_json FROM reference_snapshot WHERE project_id=@ProjectId ORDER BY captured_at DESC LIMIT 1",
+            new { ProjectId = projectId }, cancellationToken: cancellationToken));
+        if (row is null) return null;
+        var root = JsonSerializer.Deserialize<DocumentReferenceNode>(row.RootJson, jsonOptions)
+            ?? throw new InvalidDataException("引用树快照损坏。");
+        return new CadReferenceSnapshot(row.Id, row.ProjectId, row.RootDocumentId, DateTime.SpecifyKind(row.CapturedAt, DateTimeKind.Utc), row.CapturedBy, root, row.Sha256);
+    }
+
     public async Task<IReadOnlyList<BomItem>> GetBomAsync(Guid projectId, BomKind kind, CancellationToken cancellationToken)
     {
         await using var connection = await OpenAsync(cancellationToken);
@@ -164,12 +176,33 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
         return rows.Select(MapBomItem).ToArray();
     }
 
+    public async Task<IReadOnlyList<BomItem>> ReplaceBomAsync(Guid projectId, BomKind kind, IReadOnlyList<BomItem> items, CancellationToken cancellationToken)
+    {
+        await using var connection = await OpenAsync(cancellationToken);
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+        var exists = await connection.ExecuteScalarAsync<int>(new CommandDefinition(
+            "SELECT COUNT(*) FROM project WHERE id=@ProjectId AND is_active=1 FOR UPDATE",
+            new { ProjectId = projectId }, transaction, cancellationToken: cancellationToken));
+        if (exists != 1) throw new PdmNotFoundException("项目不存在或已停用。");
+        await connection.ExecuteAsync(new CommandDefinition("DELETE FROM bom_item WHERE project_id=@ProjectId AND bom_kind=@Kind", new { ProjectId = projectId, Kind = kind.ToString() }, transaction, cancellationToken: cancellationToken));
+        var now = timeProvider.GetUtcNow().UtcDateTime;
+        foreach (var item in items)
+        {
+            await connection.ExecuteAsync(new CommandDefinition(
+                "INSERT INTO bom_item(id,project_id,bom_kind,sequence_no,drawing_number,name,quantity,unit,material,specification,revision_label,is_complete,row_version,updated_at) VALUES(@Id,@ProjectId,@Kind,@Sequence,@DrawingNumber,@Name,@Quantity,@Unit,@Material,@Specification,@Revision,@IsComplete,1,@Now)",
+                new { item.Id, ProjectId = projectId, Kind = kind.ToString(), item.Sequence, item.DrawingNumber, item.Name, item.Quantity, item.Unit, item.Material, item.Specification, Revision = item.Revision, item.IsComplete, Now = now },
+                transaction, cancellationToken: cancellationToken));
+        }
+        await transaction.CommitAsync(cancellationToken);
+        return items.OrderBy(item => item.Sequence).ToArray();
+    }
+
     public async Task<IReadOnlyList<ReleasePackage>> ListReleasePackagesAsync(Guid projectId, CancellationToken cancellationToken)
     {
         await using var connection = await OpenAsync(cancellationToken);
         var rows = await connection.QueryAsync<ReleasePackageRow>(new CommandDefinition(
             """
-            SELECT id, project_id, package_number, state, reference_snapshot_id, mechanical_bom_revision, electrical_bom_revision, published_at, published_path, created_at
+            SELECT id, project_id, package_number, state, reference_snapshot_id, mechanical_bom_revision, electrical_bom_revision, mechanical_bom_snapshot_json, electrical_bom_snapshot_json, published_at, published_path, publish_error, created_at
             FROM release_package
             WHERE project_id = @ProjectId
             ORDER BY created_at DESC
@@ -207,6 +240,24 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
         return await connection.ExecuteScalarAsync<int>(new CommandDefinition("SELECT COUNT(*) FROM pdm_user", cancellationToken: cancellationToken));
     }
 
+    public async Task<IReadOnlyList<AuditEntry>> ListAuditAsync(string actor, UserRole role, int take, CancellationToken cancellationToken)
+    {
+        await using var connection = await OpenAsync(cancellationToken);
+        var limit = Math.Clamp(take, 1, 500);
+        var rows = await connection.QueryAsync<AuditRow>(new CommandDefinition(
+            role == UserRole.Administrator
+                ? "SELECT id,occurred_at,actor,action_name,entity_type,entity_id,detail_json FROM audit_entry ORDER BY occurred_at DESC LIMIT @Limit"
+                : "SELECT id,occurred_at,actor,action_name,entity_type,entity_id,detail_json FROM audit_entry WHERE actor=@Actor ORDER BY occurred_at DESC LIMIT @Limit",
+            new { Actor = actor, Limit = limit }, cancellationToken: cancellationToken));
+        return rows.Select(row => new AuditEntry(row.Id, DateTime.SpecifyKind(row.OccurredAt, DateTimeKind.Utc), row.Actor, row.ActionName, row.EntityType, row.EntityId, ReadAuditDetail(row.DetailJson))).ToArray();
+    }
+
+    private static string ReadAuditDetail(string json)
+    {
+        using var document = JsonDocument.Parse(json);
+        return document.RootElement.TryGetProperty("detail", out var detail) ? detail.GetString() ?? string.Empty : json;
+    }
+
     private async Task<MySqlConnection> OpenAsync(CancellationToken cancellationToken)
     {
         var connection = new MySqlConnection(connectionString);
@@ -241,7 +292,7 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
     {
         var row = await connection.QuerySingleOrDefaultAsync<ReleasePackageRow>(new CommandDefinition(
             """
-            SELECT id, project_id, package_number, state, reference_snapshot_id, mechanical_bom_revision, electrical_bom_revision, published_at, published_path, created_at
+            SELECT id, project_id, package_number, state, reference_snapshot_id, mechanical_bom_revision, electrical_bom_revision, mechanical_bom_snapshot_json, electrical_bom_snapshot_json, published_at, published_path, publish_error, created_at
             FROM release_package WHERE id = @PackageId
             """,
             new { PackageId = packageId },
@@ -289,7 +340,12 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
             tasks,
             DateTime.SpecifyKind(row.CreatedAt, DateTimeKind.Utc),
             row.PublishedAt is null ? null : new DateTimeOffset(DateTime.SpecifyKind(row.PublishedAt.Value, DateTimeKind.Utc)),
-            row.PublishedPath);
+            row.PublishedPath)
+        {
+            MechanicalBomSnapshot = JsonSerializer.Deserialize<List<BomItem>>(row.MechanicalBomSnapshotJson, new JsonSerializerOptions(JsonSerializerDefaults.Web)) ?? [],
+            ElectricalBomSnapshot = JsonSerializer.Deserialize<List<BomItem>>(row.ElectricalBomSnapshotJson, new JsonSerializerOptions(JsonSerializerDefaults.Web)) ?? [],
+            PublishError = row.PublishError
+        };
     }
 
     private sealed class ProjectRow
@@ -342,9 +398,23 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
         public Guid ReferenceSnapshotId { get; init; }
         public string MechanicalBomRevision { get; init; } = string.Empty;
         public string ElectricalBomRevision { get; init; } = string.Empty;
+        public string MechanicalBomSnapshotJson { get; init; } = "[]";
+        public string ElectricalBomSnapshotJson { get; init; } = "[]";
         public DateTime? PublishedAt { get; init; }
         public string? PublishedPath { get; init; }
+        public string? PublishError { get; init; }
         public DateTime CreatedAt { get; init; }
+    }
+
+    private sealed class ReferenceSnapshotRow
+    {
+        public Guid Id { get; init; }
+        public Guid ProjectId { get; init; }
+        public Guid RootDocumentId { get; init; }
+        public DateTime CapturedAt { get; init; }
+        public string CapturedBy { get; init; } = string.Empty;
+        public string Sha256 { get; init; } = string.Empty;
+        public string RootJson { get; init; } = string.Empty;
     }
 
     private sealed class ApprovalTaskRow
@@ -367,5 +437,16 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
         public string PasswordHash { get; init; } = string.Empty;
         public string Role { get; init; } = string.Empty;
         public bool IsActive { get; init; }
+    }
+
+    private sealed class AuditRow
+    {
+        public Guid Id { get; init; }
+        public DateTime OccurredAt { get; init; }
+        public string Actor { get; init; } = string.Empty;
+        public string ActionName { get; init; } = string.Empty;
+        public string EntityType { get; init; } = string.Empty;
+        public string EntityId { get; init; } = string.Empty;
+        public string DetailJson { get; init; } = "{}";
     }
 }

@@ -13,7 +13,7 @@ public sealed class InMemoryPdmRepository : IPdmRepository
     private readonly ConcurrentDictionary<Guid, ReleasePackage> packages = new();
     private readonly ConcurrentDictionary<Guid, DocumentVersion> versions = new();
     private readonly ConcurrentQueue<AuditEntry> audits = new();
-    private readonly IReadOnlyList<BomItem> bomItems;
+    private readonly List<BomItem> bomItems;
     private DocumentReferenceNode referenceTree;
 
     public InMemoryPdmRepository(TimeProvider timeProvider)
@@ -26,7 +26,7 @@ public sealed class InMemoryPdmRepository : IPdmRepository
         }
 
         referenceTree = SeedData.Tree(documents);
-        bomItems = SeedData.Bom();
+        bomItems = SeedData.Bom().ToList();
         var package = SeedData.ReleasePackage(timeProvider.GetUtcNow());
         packages[package.Id] = package;
     }
@@ -97,8 +97,23 @@ public sealed class InMemoryPdmRepository : IPdmRepository
     public Task<DocumentReferenceNode?> GetReferenceTreeAsync(Guid projectId, CancellationToken cancellationToken) =>
         Task.FromResult<DocumentReferenceNode?>(projectId == SeedData.ProjectId ? referenceTree : null);
 
+    public Task<CadReferenceSnapshot?> GetLatestReferenceSnapshotAsync(Guid projectId, CancellationToken cancellationToken) =>
+        Task.FromResult<CadReferenceSnapshot?>(projectId == SeedData.ProjectId
+            ? new CadReferenceSnapshot(SeedData.SnapshotId, projectId, SeedData.RootDocumentId, DateTimeOffset.UtcNow, "seed", referenceTree, string.Empty)
+            : null);
+
     public Task<IReadOnlyList<BomItem>> GetBomAsync(Guid projectId, BomKind kind, CancellationToken cancellationToken) =>
         Task.FromResult<IReadOnlyList<BomItem>>(bomItems.Where(item => item.ProjectId == projectId && item.Kind == kind).OrderBy(item => item.Sequence).ToArray());
+
+    public Task<IReadOnlyList<BomItem>> ReplaceBomAsync(Guid projectId, BomKind kind, IReadOnlyList<BomItem> items, CancellationToken cancellationToken)
+    {
+        lock (gate)
+        {
+            bomItems.RemoveAll(item => item.ProjectId == projectId && item.Kind == kind);
+            bomItems.AddRange(items);
+            return Task.FromResult<IReadOnlyList<BomItem>>(items.OrderBy(item => item.Sequence).ToArray());
+        }
+    }
 
     public Task<IReadOnlyList<ReleasePackage>> ListReleasePackagesAsync(Guid projectId, CancellationToken cancellationToken) =>
         Task.FromResult<IReadOnlyList<ReleasePackage>>(packages.Values.Where(package => package.ProjectId == projectId).OrderByDescending(package => package.CreatedAt).ToArray());
@@ -233,6 +248,37 @@ public sealed class InMemoryPdmRepository : IPdmRepository
         }
     }
 
+    public Task<IReadOnlyList<DocumentVersion>> PublishReleasePackageVersionsAsync(Guid releasePackageId, Guid approvalTaskId, string actor, CancellationToken cancellationToken)
+    {
+        lock (gate)
+        {
+            if (!packages.TryGetValue(releasePackageId, out var package) || package.State != ReleasePackageState.Publishing)
+                throw new PdmConflictException("发布包尚未进入发布状态。");
+            if (!package.ApprovalTasks.Any(task => task.Id == approvalTaskId && task.Stage == ApprovalStage.Approval && task.Decision == ApprovalDecision.Approved))
+                throw new PdmConflictException("最终批准记录无效。");
+            var released = new List<DocumentVersion>();
+            foreach (var documentId in EnumerateDocumentIds(referenceTree).Distinct())
+            {
+                if (!documents.TryGetValue(documentId, out var document)) continue;
+                var source = versions.Values.Where(version => version.DocumentId == documentId).OrderByDescending(version => version.CreatedAt).FirstOrDefault();
+                if (source is null || source.Status != DocumentVersionStatus.Work || !string.Equals(source.Revision.Display, document.Revision.Display, StringComparison.OrdinalIgnoreCase)) continue;
+                var revision = source.Revision.Release();
+                var version = source with { Id = Guid.NewGuid(), Revision = revision, Status = DocumentVersionStatus.Released, CreatedBy = actor, CreatedAt = DateTimeOffset.UtcNow, ChangeNote = $"审批发布{revision.Display}", SourceVersionId = source.Id, SourceDescription = $"由{source.Revision.Display}审批发布", ApprovalTaskId = approvalTaskId, ReleasePackageId = releasePackageId };
+                versions[version.Id] = version;
+                documents[documentId] = document with { Revision = revision, State = DocumentLifecycleState.Released, CheckedOutBy = null, UpdatedAt = version.CreatedAt };
+                released.Add(version);
+            }
+            return Task.FromResult<IReadOnlyList<DocumentVersion>>(released);
+        }
+    }
+
+    private static IEnumerable<Guid> EnumerateDocumentIds(DocumentReferenceNode node)
+    {
+        if (node.DocumentId.HasValue) yield return node.DocumentId.Value;
+        foreach (var child in node.Children)
+            foreach (var id in EnumerateDocumentIds(child)) yield return id;
+    }
+
     public Task<ReleasePackage> CreateReleasePackageAsync(ReleasePackage package, CancellationToken cancellationToken)
     {
         if (!packages.TryAdd(package.Id, package))
@@ -241,6 +287,20 @@ public sealed class InMemoryPdmRepository : IPdmRepository
         }
 
         return Task.FromResult(package);
+    }
+
+    public Task<ReleasePackage> SubmitReleasePackageAsync(Guid releasePackageId, string actor, CancellationToken cancellationToken)
+    {
+        lock (gate)
+        {
+            if (!packages.TryGetValue(releasePackageId, out var package)) throw new PdmNotFoundException("发布包不存在。");
+            if (package.State is not (ReleasePackageState.Draft or ReleasePackageState.Rejected or ReleasePackageState.PublishFailed))
+                throw new PdmConflictException("只有草稿、已驳回或发布失败的发布包可以提交。");
+            var tasks = package.ApprovalTasks.Select(task => task with { DecisionBy = null, Decision = null, Comment = null, DecidedAt = null }).ToArray();
+            var submitted = package with { State = ReleasePackageState.ProcessReview, ApprovalTasks = tasks, PublishedAt = null, PublishedPath = null, PublishError = null };
+            packages[package.Id] = submitted;
+            return Task.FromResult(submitted);
+        }
     }
 
     public Task<ReleasePackage> DecideApprovalAsync(Guid taskId, string actor, ApprovalDecision decision, string? comment, CancellationToken cancellationToken)
@@ -341,4 +401,7 @@ public sealed class InMemoryPdmRepository : IPdmRepository
         audits.Enqueue(entry);
         return Task.CompletedTask;
     }
+
+    public Task<IReadOnlyList<AuditEntry>> ListAuditAsync(string actor, UserRole role, int take, CancellationToken cancellationToken) =>
+        Task.FromResult<IReadOnlyList<AuditEntry>>(audits.Where(entry => role == UserRole.Administrator || string.Equals(entry.Actor, actor, StringComparison.OrdinalIgnoreCase)).OrderByDescending(entry => entry.OccurredAt).Take(Math.Clamp(take, 1, 500)).ToArray());
 }

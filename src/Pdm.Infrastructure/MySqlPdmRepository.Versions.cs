@@ -114,6 +114,65 @@ public sealed partial class MySqlPdmRepository
         return released;
     }
 
+    public async Task<IReadOnlyList<DocumentVersion>> PublishReleasePackageVersionsAsync(Guid releasePackageId, Guid approvalTaskId, string actor, CancellationToken cancellationToken)
+    {
+        await using var connection = await OpenAsync(cancellationToken);
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+        var package = await connection.QuerySingleOrDefaultAsync<PackagePublishRow>(new CommandDefinition(
+            "SELECT project_id,reference_snapshot_id,state FROM release_package WHERE id=@PackageId FOR UPDATE",
+            new { PackageId = releasePackageId }, transaction, cancellationToken: cancellationToken))
+            ?? throw new PdmNotFoundException("发布包不存在。");
+        if (package.State != ReleasePackageState.Publishing.ToString()) throw new PdmConflictException("发布包尚未进入发布状态。");
+        var taskMatches = await connection.ExecuteScalarAsync<int>(new CommandDefinition(
+            "SELECT COUNT(*) FROM approval_task WHERE id=@ApprovalTaskId AND release_package_id=@PackageId AND stage='Approval' AND decision_value='Approved'",
+            new { ApprovalTaskId = approvalTaskId, PackageId = releasePackageId }, transaction, cancellationToken: cancellationToken));
+        if (taskMatches != 1) throw new PdmConflictException("最终批准记录与发布包不匹配或尚未批准。");
+        var rootJson = await connection.QuerySingleOrDefaultAsync<string>(new CommandDefinition(
+            "SELECT root_json FROM reference_snapshot WHERE id=@SnapshotId AND project_id=@ProjectId",
+            new { SnapshotId = package.ReferenceSnapshotId, package.ProjectId }, transaction, cancellationToken: cancellationToken))
+            ?? throw new PdmConflictException("发布包引用树快照不存在。");
+        var root = JsonSerializer.Deserialize<DocumentReferenceNode>(rootJson, jsonOptions)
+            ?? throw new InvalidDataException("发布包引用树快照损坏。");
+
+        var releasedVersions = new List<DocumentVersion>();
+        foreach (var documentId in EnumerateDocumentIds(root).Distinct())
+        {
+            var locked = await LockDocumentAsync(connection, transaction, documentId, cancellationToken);
+            var sourceRow = await connection.QuerySingleOrDefaultAsync<DocumentVersionRow>(new CommandDefinition(
+                VersionSelect + " WHERE document_id=@DocumentId ORDER BY created_at DESC LIMIT 1",
+                new { DocumentId = documentId }, transaction, cancellationToken: cancellationToken));
+            if (sourceRow is null) continue;
+            var source = MapDocumentVersion(sourceRow);
+            if (source.Status == DocumentVersionStatus.Released) continue;
+            if (!string.Equals(source.Revision.Display, locked.RevisionLabel, StringComparison.OrdinalIgnoreCase))
+                throw new PdmConflictException($"图档{documentId}最新工作版本已变化，发布包不能继续发布。");
+            var revision = source.Revision.Release();
+            var released = source with
+            {
+                Id = Guid.NewGuid(), Revision = revision, Status = DocumentVersionStatus.Released,
+                CreatedBy = actor, CreatedAt = timeProvider.GetUtcNow(), ChangeNote = $"审批发布{revision.Display}",
+                SourceVersionId = source.Id, SourceDescription = $"由{source.Revision.Display}审批发布",
+                ApprovalTaskId = approvalTaskId, ReleasePackageId = releasePackageId
+            };
+            await InsertVersionAsync(connection, transaction, released, cancellationToken);
+            var affected = await connection.ExecuteAsync(new CommandDefinition(
+                "UPDATE document SET revision_label=@Revision,lifecycle_state='Released',checked_out_by=NULL,checked_out_at=NULL,updated_at=@Now,row_version=row_version+1 WHERE id=@DocumentId AND row_version=@RowVersion",
+                new { DocumentId = documentId, Revision = revision.Display, RowVersion = locked.RowVersion, Now = released.CreatedAt.UtcDateTime }, transaction, cancellationToken: cancellationToken));
+            if (affected != 1) throw new PdmConflictException("图档版本已变化，发布包正式版本事务未生效。");
+            releasedVersions.Add(released);
+        }
+
+        await transaction.CommitAsync(cancellationToken);
+        return releasedVersions;
+    }
+
+    private static IEnumerable<Guid> EnumerateDocumentIds(DocumentReferenceNode node)
+    {
+        if (node.DocumentId.HasValue) yield return node.DocumentId.Value;
+        foreach (var child in node.Children)
+            foreach (var id in EnumerateDocumentIds(child)) yield return id;
+    }
+
     private static async Task<RevisionLabel> NextWorkRevisionAsync(DbConnection connection, DbTransaction transaction, LockedDocumentRow document, CancellationToken cancellationToken)
     {
         var current = RevisionLabel.Parse(document.RevisionLabel);
@@ -163,6 +222,7 @@ public sealed partial class MySqlPdmRepository
     private const string VersionSelect = "SELECT id,document_id,revision_label,version_status,storage_relative_path,file_length,sha256,comment,property_snapshot_json,reference_snapshot_json,mechanical_bom_snapshot_json,electrical_bom_snapshot_json,source_version_id,source_description,approval_task_id,release_package_id,created_by,created_at FROM document_version";
 
     private sealed class LockedDocumentRow { public Guid Id { get; init; } public string RevisionLabel { get; init; } = string.Empty; public string? CheckedOutBy { get; init; } public long RowVersion { get; init; } }
+    private sealed class PackagePublishRow { public Guid ProjectId { get; init; } public Guid ReferenceSnapshotId { get; init; } public string State { get; init; } = string.Empty; }
     private sealed class DocumentVersionRow
     {
         public Guid Id { get; init; } public Guid DocumentId { get; init; } public string RevisionLabel { get; init; } = string.Empty; public string VersionStatus { get; init; } = string.Empty;

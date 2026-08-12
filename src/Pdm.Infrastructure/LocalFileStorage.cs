@@ -47,6 +47,9 @@ public sealed class LocalFileStorage(IOptions<PdmStorageOptions> options, IPdmRe
         return session;
     }
 
+    public Task<UploadSession> GetUploadSessionAsync(Guid sessionId, CancellationToken cancellationToken) =>
+        ReadMetadataAsync(sessionId, cancellationToken);
+
     public async Task<UploadSession> WriteChunkAsync(Guid sessionId, int chunkIndex, Stream content, CancellationToken cancellationToken)
     {
         if (chunkIndex < 0)

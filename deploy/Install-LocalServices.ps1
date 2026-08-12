@@ -154,6 +154,13 @@ if ($hasPreparedUpgrade) {
     if ($LASTEXITCODE -ne 0) {
         throw "PDM database backup failed with exit code $LASTEXITCODE. Upgrade files were not switched."
     }
+    $dataBackupRoot = Join-Path $backupRoot 'data'
+    foreach ($dataName in @('vault', 'release')) {
+        $dataSource = Join-Path $localRoot $dataName
+        if (Test-Path -LiteralPath $dataSource) {
+            Copy-Item -LiteralPath $dataSource -Destination (Join-Path $dataBackupRoot $dataName) -Recurse -Force
+        }
+    }
 }
 
 if ($hasPreparedApiUpgrade -and $null -ne $apiService -and $apiService.Status -ne 'Stopped') {

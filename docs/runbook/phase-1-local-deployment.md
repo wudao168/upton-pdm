@@ -10,7 +10,7 @@ PDM 与现有 CRM 完全独立：
 | API 监听端口 | `5080` | `8080` |
 | UI 开发端口 | `5173` | `5174` |
 | 数据库 | `pdm` | 不读取、不修改 |
-| MySQL 容器/卷 | `upton-pdm-mysql` / `upton_pdm_mysql_data` | 不复用 |
+| MySQL 运行时/服务 | `.runtime\mysql-8.4.11-winx64` / `UptonPdmMySQL` | 不复用 |
 | 文件库 | 项目指定的本地绝对路径或 UNC 路径 | 不复用 CRM 文件目录 |
 
 任何端口已被占用时必须停止部署并排查，禁止临时改用 CRM 端口。
@@ -56,19 +56,9 @@ powershell.exe -ExecutionPolicy Bypass -File .\deploy\Build-Phase1.ps1 -Configur
 - `src\Pdm.SolidWorks.Addin\bin\Release\net48\Upton.Pdm.SolidWorks.Addin.dll`
 - `src\Pdm.Api\bin\Release\net10.0\Pdm.Api.dll`
 
-## 启动独立 MySQL
+## 独立 MySQL
 
-主机需要 Docker Desktop 或等价的 Docker Engine。不要连接 CRM 的 `3306` 实例。
-
-```powershell
-Set-Location 'F:\codex file\pdm'
-Copy-Item -LiteralPath .env.example -Destination .env
-# 编辑 .env，替换为真实的 PDM 专用密码；不要提交 .env。
-docker compose up -d mysql
-docker compose ps
-```
-
-`compose.yaml` 只将容器 MySQL 的 `3306` 映射到主机 `127.0.0.1:3308`。
+正式本地部署不依赖 Docker。`Prepare-LocalDeployment.ps1` 准备项目私有的 MySQL 8.4 运行时，`Install-LocalServices.ps1` 将其安装为 `UptonPdmMySQL`，配置文件、数据、日志和临时目录都位于 `.local\mysql`。它只监听 `127.0.0.1:3308`，不得改为 CRM 的 `3306`。
 
 ## 启动 API
 
@@ -107,6 +97,63 @@ powershell.exe -ExecutionPolicy Bypass -File .\deploy\Register-SolidWorksAddin.p
 ```
 
 客户端通过 WebView2 访问内置静态资源，并只连接 `http://127.0.0.1:5080`。目标电脑需安装 Microsoft Edge WebView2 Runtime。
+
+## 日常图档操作
+
+1. 在 SolidWorks 插件中登录并选择项目。
+2. 选中未入库图档后点击“获取权限”，系统先登记图档再取得独占编辑权；已入库图档直接取得独占编辑权。
+3. 在 SolidWorks 中保存图档，再点击“提交存档”，填写变更说明。首次生成 `W1`，之后生成 `W2/W3/...`；未保存、被其他进程占用或引用缺失时不会推进版本。
+4. 无实际文件变化时可结束编辑而不产生新版本；也可“放弃编辑”释放权限，系统不会覆盖本地文件。
+5. 在“版本记录”页签可打开当前版本、从独立只读临时目录打开历史版本，或选择两个版本唤起 Windows 客户端对比。
+6. 从历史版本恢复只创建新的工作版本，不修改历史。例如当前最新为 `W3` 时恢复 `W1` 会生成 `W4`；正式 `A` 之后修改生成 `A-W1`，再次审批发布为 `B`。
+
+## BOM、审批与生产发包
+
+1. Windows 客户端的机械 BOM 读取结构快照；电气 BOM 可手工维护或导入标准 XLSX，并可导出。
+2. 创建发布包后依次提交工艺审核和批准。驳回后修改并重新提交，历史审批记录保留。
+3. 最终批准成功后，系统才把 PDF、DWG、两类 BOM、清单、审批记录和 SHA-256 文件原子投放到项目 `ReleaseLocation`。
+4. 任一文件准备、哈希、审批或投放失败时，发布包不进入已发布状态，生产目录不会出现半成品。
+
+## 全量备份与恢复演练
+
+备份包含 `pdm` 数据库、vault、release、表数量和逐文件 SHA-256 清单，只允许写入 `.local\backup`：
+
+```powershell
+Set-Location 'F:\codex file\pdm'
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\deploy\Backup-LocalPdm.ps1
+```
+
+恢复验收必须使用以 `_qa` 结尾的隔离数据库，不会覆盖正式 `pdm`：
+
+```powershell
+$backup = Get-ChildItem .\.local\backup -Directory |
+    Where-Object { Test-Path (Join-Path $_.FullName 'manifest.json') } |
+    Sort-Object LastWriteTime -Descending |
+    Select-Object -First 1
+
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\deploy\Test-BackupRestore.ps1 `
+    -BackupPath $backup.FullName `
+    -Database pdm_restore_qa
+```
+
+脚本会核对数据库迁移、关键表行数以及全部恢复文件的长度和 SHA-256；任一不一致即失败。
+
+## 一期自动验收入口
+
+```powershell
+# Release 构建和 .NET 测试
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\deploy\Build-Phase1.ps1 -Configuration Release
+
+# 前端单元与 125%/150% 布局回归
+pnpm.cmd --dir .\src\pdm-ui test
+pnpm.cmd --dir .\src\pdm-ui test:e2e
+
+# 隔离 API、版本、审批、发包和断点续传
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\deploy\Test-Phase1Api.ps1 `
+    -Database pdm_phase1_qa -ApiPort 5180
+```
+
+SolidWorks 真实验收必须关闭生产编辑会话，仅对指定装配执行只读打开；当前结果见 `docs\acceptance\phase-1-checklist.md`。
 
 ## 文件存放地点
 

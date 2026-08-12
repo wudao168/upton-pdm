@@ -10,6 +10,11 @@ using Upton.Pdm.Application;
 using Upton.Pdm.Infrastructure;
 
 var builder = WebApplication.CreateBuilder(args);
+var httpUrlOverride = Environment.GetEnvironmentVariable("PDM_HTTP_URL");
+if (!string.IsNullOrWhiteSpace(httpUrlOverride))
+{
+    builder.Configuration["Kestrel:Endpoints:Http:Url"] = httpUrlOverride;
+}
 builder.Host.UseWindowsService(options => options.ServiceName = "UPTON PDM API");
 builder.Logging.ClearProviders();
 builder.Logging.AddConsole();
@@ -23,6 +28,15 @@ if (string.Equals(databaseOptions.Provider, "MySql", StringComparison.OrdinalIgn
     var baseConnectionString = builder.Configuration.GetConnectionString("Pdm")
         ?? throw new InvalidOperationException("ConnectionStrings:Pdm未配置。 ");
     var connectionBuilder = new MySqlConnectionStringBuilder(baseConnectionString);
+    var databaseNameOverride = Environment.GetEnvironmentVariable("PDM_DATABASE_NAME");
+    if (!string.IsNullOrWhiteSpace(databaseNameOverride))
+    {
+        if (databaseNameOverride.Any(character => !char.IsLetterOrDigit(character) && character != '_'))
+        {
+            throw new InvalidOperationException("PDM_DATABASE_NAME只能包含字母、数字和下划线。");
+        }
+        connectionBuilder.Database = databaseNameOverride;
+    }
     var databasePassword = Environment.GetEnvironmentVariable("PDM_DB_PASSWORD");
     if (!string.IsNullOrWhiteSpace(databasePassword))
     {

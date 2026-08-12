@@ -84,12 +84,8 @@ internal sealed class PdmApiClient : IDisposable
     {
         var file = new FileInfo(filePath);
         var originalFile = new FileInfo(originalFilePath);
-        string sha256;
-        using (var input = File.OpenRead(filePath))
-        using (var hash = SHA256.Create())
-        {
-            sha256 = BitConverter.ToString(hash.ComputeHash(input)).Replace("-", string.Empty);
-        }
+        var sha256 = ComputeFileSha256(filePath);
+        var sourceFileSha256 = ComputeFileSha256(originalFilePath);
         var session = await PostJsonAsync<UploadSessionDto>("api/uploads/sessions", new { projectId, fileName = file.Name, totalLength = file.Length, sha256 }, cancellationToken).ConfigureAwait(false);
         using (var input = File.OpenRead(filePath))
         {
@@ -108,14 +104,28 @@ internal sealed class PdmApiClient : IDisposable
         }
         var relative = Path.Combine(".versions", documentId.ToString("N"), Guid.NewGuid().ToString("N"), file.Name);
         var stored = await PostJsonAsync<StoredFileDto>(string.Concat("api/uploads/sessions/", session.Id, "/complete"), new { relativeTargetPath = relative }, cancellationToken).ConfigureAwait(false);
-        return new StoredVersionFile(stored.RelativePath, stored.Length, stored.Sha256, new Dictionary<string, string> { ["FileName"] = originalFile.Name, ["Extension"] = originalFile.Extension, ["LastWriteTimeUtc"] = originalFile.LastWriteTimeUtc.ToString("O") });
+        return new StoredVersionFile(stored.RelativePath, stored.Length, stored.Sha256, new Dictionary<string, string> { ["FileName"] = originalFile.Name, ["Extension"] = originalFile.Extension, ["LastWriteTimeUtc"] = originalFile.LastWriteTimeUtc.ToString("O"), ["SourceFileSha256"] = sourceFileSha256 });
     }
 
-    public async Task<string> DownloadVersionToTempAsync(Guid documentId, Guid versionId, string fileName, CancellationToken cancellationToken)
+    private static string ComputeFileSha256(string path)
+    {
+        using (var input = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
+        using (var hash = SHA256.Create())
+        {
+            return BitConverter.ToString(hash.ComputeHash(input)).Replace("-", string.Empty);
+        }
+    }
+
+    public async Task<string> DownloadVersionToTempAsync(Guid documentId, Guid versionId, string fileName, string revision, CancellationToken cancellationToken)
     {
         var directory = Path.Combine(Path.GetTempPath(), "UPTON-PDM", "history", documentId.ToString("N"), versionId.ToString("N"));
         Directory.CreateDirectory(directory);
-        var path = Path.Combine(directory, Path.GetFileName(fileName));
+        var path = Path.Combine(directory, BuildVersionCopyFileName(fileName, revision, versionId));
+        if (File.Exists(path))
+        {
+            return path;
+        }
+
         var partialPath = path + ".download";
         if (File.Exists(partialPath)) File.Delete(partialPath);
         using (var response = await httpClient.GetAsync(string.Concat("api/documents/", documentId, "/versions/", versionId, "/file?download=false"), cancellationToken).ConfigureAwait(false))
@@ -132,6 +142,29 @@ internal sealed class PdmApiClient : IDisposable
         File.Move(partialPath, path);
         File.SetAttributes(path, File.GetAttributes(path) | FileAttributes.ReadOnly);
         return path;
+    }
+
+    private static string BuildVersionCopyFileName(string fileName, string revision, Guid versionId)
+    {
+        var safeFileName = Path.GetFileName(fileName);
+        var extension = Path.GetExtension(safeFileName);
+        var name = Path.GetFileNameWithoutExtension(safeFileName);
+        var invalidCharacters = new HashSet<char>(Path.GetInvalidFileNameChars());
+        var revisionToken = new StringBuilder();
+        foreach (var character in revision ?? string.Empty)
+        {
+            if (!invalidCharacters.Contains(character) && !char.IsWhiteSpace(character))
+            {
+                revisionToken.Append(character);
+            }
+        }
+
+        if (revisionToken.Length == 0)
+        {
+            revisionToken.Append("VERSION");
+        }
+
+        return string.Concat(name, "__PDM_", revisionToken, "_", versionId.ToString("N").Substring(0, 8), extension);
     }
 
     public void Dispose() => httpClient.Dispose();
@@ -243,6 +276,7 @@ internal sealed class DocumentVersionDto
     public DateTime CreatedAt { get; set; }
     public string ChangeNote { get; set; }
     public string Sha256 { get; set; }
+    public Dictionary<string, string> PropertySnapshot { get; set; }
 }
 
 internal sealed class CheckInResultDto { public DocumentDto Document { get; set; } public DocumentVersionDto Version { get; set; } public bool VersionCreated { get; set; } }

@@ -65,6 +65,7 @@ public sealed class PdmAddin : ISwAddin
             taskPaneControl.SetConnectionState(false, "未登录");
             RefreshTree(false);
             _ = LoginRememberedCredentialsAsync();
+            LogOperation("ConnectToSW success");
             return true;
         }
         catch (Exception exception)
@@ -589,6 +590,7 @@ public sealed class PdmAddin : ISwAddin
                 eventArgs.Node.DocumentId.Value,
                 latest.Id,
                 eventArgs.Node.FileName,
+                latest.Revision?.Display,
                 lifetime.Token);
             QueueOpenDocument(path, DocumentKindFromPath(path), string.Empty);
         }
@@ -684,6 +686,12 @@ public sealed class PdmAddin : ISwAddin
             return;
         }
 
+        if (IsHistoricalPreviewContext(node))
+        {
+            ShowError("历史版本为只读预览，不能获取编辑权限。请关闭历史版本并打开当前工作文件。 ");
+            return;
+        }
+
         try
         {
             if (!node.DocumentId.HasValue)
@@ -727,7 +735,19 @@ public sealed class PdmAddin : ISwAddin
     private void OnCheckInRequested(object sender, CadTreeNodeEventArgs eventArgs)
     {
         var node = eventArgs.Node;
-        if (node == null || !currentProjectId.HasValue || !EnsureServerDocument(node))
+        if (node == null || !currentProjectId.HasValue)
+        {
+            return;
+        }
+
+
+        if (IsHistoricalPreviewContext(node))
+        {
+            ShowError("历史版本为只读预览，不能提交存档。请关闭历史版本并打开当前工作文件。 ");
+            return;
+        }
+
+        if (!EnsureServerDocument(node))
         {
             return;
         }
@@ -759,7 +779,19 @@ public sealed class PdmAddin : ISwAddin
     private async void OnDiscardCheckoutRequested(object sender, CadTreeNodeEventArgs eventArgs)
     {
         var node = eventArgs.Node;
-        if (node == null || !EnsureServerDocument(node))
+        if (node == null)
+        {
+            return;
+        }
+
+
+        if (IsHistoricalPreviewContext(node))
+        {
+            ShowError("历史版本为只读预览，不能更改当前工作文件的编辑状态。请切换到当前工作文件。 ");
+            return;
+        }
+
+        if (!EnsureServerDocument(node))
         {
             return;
         }
@@ -805,6 +837,12 @@ public sealed class PdmAddin : ISwAddin
                 return;
             }
 
+            if (node.IsHistoricalPreview || IsHistoricalPreviewPath(node.FullPath))
+            {
+                ShowError("历史版本为只读预览，不能提交存档。请关闭历史版本并打开当前工作文件。 ");
+                return;
+            }
+
             originalDocumentPath = (application.ActiveDoc as IModelDoc2)?.GetPathName() ?? string.Empty;
             var documentType = ToSolidWorksDocumentType(node.Kind);
             if (documentType == (int)swDocumentTypes_e.swDocNONE)
@@ -818,6 +856,12 @@ public sealed class PdmAddin : ISwAddin
             if (document == null || !PathsEqual(activePath, node.FullPath))
             {
                 ShowError("未能安全激活所选图档，未执行提交存档。");
+                return;
+            }
+
+            if (IsHistoricalPreviewPath(activePath))
+            {
+                ShowError("历史版本为只读预览，不能提交存档。请关闭历史版本并打开当前工作文件。 ");
                 return;
             }
 
@@ -844,7 +888,10 @@ public sealed class PdmAddin : ISwAddin
             LogOperation(string.Concat("CheckIn Save3 end path=", activePath, " saved=", saved, " errors=", saveErrors, " warnings=", saveWarnings));
             if (!saved || saveErrors != 0)
             {
-                ShowError(string.Concat("SolidWorks保存图档失败，未提交存档。错误码：", saveErrors, "，警告码：", saveWarnings));
+                var message = (saveErrors & (int)swFileSaveError_e.swReadOnlySaveError) != 0
+                    ? "当前图档为只读文件，不能提交存档。请确认打开的是当前工作文件，并已获取编辑权限。"
+                    : string.Concat("SolidWorks保存图档失败，未提交存档。错误码：", saveErrors, "，警告码：", saveWarnings);
+                ShowError(message);
                 return;
             }
 
@@ -986,7 +1033,14 @@ public sealed class PdmAddin : ISwAddin
             LogOperation(string.Concat("OpenDoc6 end path=", fullPath, " errors=", openErrors, " warnings=", openWarnings, " null=", document == null));
             if (document == null)
             {
-                ShowError(string.Concat("SolidWorks打开文件失败，错误码：", openErrors));
+                if ((openErrors & (int)swFileLoadError_e.swFileWithSameTitleAlreadyOpen) != 0)
+                {
+                    ShowError("SolidWorks中已打开同名图档，无法同时打开该历史版本。请关闭同名历史窗口后重新获取。");
+                }
+                else
+                {
+                    ShowError(string.Concat("SolidWorks打开文件失败，错误码：", openErrors));
+                }
                 return null;
             }
         }
@@ -1053,6 +1107,51 @@ public sealed class PdmAddin : ISwAddin
         }
     }
 
+    private bool IsHistoricalPreviewContext(CadTreeNode node)
+    {
+        if (node?.IsHistoricalPreview == true || IsHistoricalPreviewPath(node?.FullPath))
+        {
+            return true;
+        }
+
+        var activePath = (application?.ActiveDoc as IModelDoc2)?.GetPathName();
+        return IsHistoricalPreviewPath(activePath);
+    }
+
+    private static bool IsHistoricalPreviewPath(string path)
+    {
+        if (string.IsNullOrWhiteSpace(path))
+        {
+            return false;
+        }
+
+        try
+        {
+            var historyRoot = Path.GetFullPath(Path.Combine(Path.GetTempPath(), "UPTON-PDM", "history"))
+                .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
+                + Path.DirectorySeparatorChar;
+            return Path.GetFullPath(path).StartsWith(historyRoot, StringComparison.OrdinalIgnoreCase);
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private static void MarkHistoricalPreview(CadTreeNode node, bool inheritedPreview)
+    {
+        if (node == null)
+        {
+            return;
+        }
+
+        node.IsHistoricalPreview = inheritedPreview || IsHistoricalPreviewPath(node.FullPath);
+        foreach (var child in node.Children)
+        {
+            MarkHistoricalPreview(child, node.IsHistoricalPreview);
+        }
+    }
+
     private async void OnVersionsRequested(object sender, CadTreeNodeEventArgs eventArgs)
     {
         var documentId = eventArgs.Node.DocumentId;
@@ -1064,7 +1163,8 @@ public sealed class PdmAddin : ISwAddin
         try
         {
             var versions = await apiClient.GetVersionsAsync(documentId.Value, lifetime.Token);
-            if (taskPaneControl.SelectedNode?.DocumentId == documentId) taskPaneControl.ShowVersions(versions);
+            if (taskPaneControl.SelectedNode?.DocumentId == documentId)
+                taskPaneControl.ShowVersions(documentId.Value, eventArgs.Node.FileName, versions);
         }
         catch (Exception exception) { ShowError(exception.Message); }
     }
@@ -1098,7 +1198,12 @@ public sealed class PdmAddin : ISwAddin
     {
         try
         {
-            var path = await apiClient.DownloadVersionToTempAsync(eventArgs.DocumentId, eventArgs.Version.Id, eventArgs.FileName, lifetime.Token);
+            var path = await apiClient.DownloadVersionToTempAsync(
+                eventArgs.DocumentId,
+                eventArgs.Version.Id,
+                eventArgs.FileName,
+                eventArgs.Version.Revision?.Display,
+                lifetime.Token);
             QueueOpenDocument(path, DocumentKindFromPath(path), string.Empty);
         }
         catch (Exception exception) { ShowError(exception.Message); }
@@ -1132,7 +1237,9 @@ public sealed class PdmAddin : ISwAddin
         try
         {
             currentTree = scanner.ScanActiveDocument();
+            MarkHistoricalPreview(currentTree, false);
             taskPaneControl.SetTree(currentTree);
+            LogOperation(string.Concat("RefreshTree success nodes=", CountTreeNodes(currentTree), " path=", currentTree?.FullPath ?? string.Empty));
             if (currentProjectId.HasValue && apiClient.IsAuthenticated)
             {
                 _ = RefreshMetadataAsync(currentProjectId.Value);
@@ -1154,6 +1261,11 @@ public sealed class PdmAddin : ISwAddin
                 ShowError(exception.Message);
             }
         }
+    }
+
+    private static int CountTreeNodes(CadTreeNode node)
+    {
+        return node == null ? 0 : 1 + node.Children.Sum(CountTreeNodes);
     }
 
     private async Task RefreshMetadataAsync(Guid projectId)
@@ -1193,7 +1305,9 @@ public sealed class PdmAddin : ISwAddin
             return;
         }
 
-        if (!string.IsNullOrWhiteSpace(node.FileName) && documents.TryGetValue(node.FileName, out var document))
+        if (!node.IsHistoricalPreview
+            && !string.IsNullOrWhiteSpace(node.FileName)
+            && documents.TryGetValue(node.FileName, out var document))
         {
             node.DocumentId = document.Id;
             node.CheckedOutBy = document.CheckedOutBy;
@@ -1210,31 +1324,28 @@ public sealed class PdmAddin : ISwAddin
     {
         var nodes = EnumerateCadNodes(root).ToArray();
         var latestHashes = new Dictionary<Guid, string>();
-        foreach (var documentId in nodes
-            .Where(IsCheckedOutByCurrentUser)
+        var versionsByDocument = new Dictionary<Guid, IReadOnlyList<DocumentVersionDto>>();
+        var documentIds = nodes
             .Select(node => node.DocumentId)
             .Where(id => id.HasValue)
             .Select(id => id.Value)
-            .Distinct())
+            .Distinct()
+            .ToArray();
+        var versionTasks = documentIds.ToDictionary(documentId => documentId, GetTreeVersionsAsync);
+        await Task.WhenAll(versionTasks.Values);
+        foreach (var pair in versionTasks)
         {
-            try
+            var versions = pair.Value.Result;
+            if (versions != null)
             {
-                var latest = (await apiClient.GetVersionsAsync(documentId, lifetime.Token)).FirstOrDefault();
-                latestHashes[documentId] = latest?.Sha256 ?? string.Empty;
-            }
-            catch (Exception exception)
-            {
-                LogDiagnostic("ApplyWorkingStates.GetVersions", exception);
-                latestHashes[documentId] = string.Empty;
+                versionsByDocument[pair.Key] = versions;
+                var latest = versions.FirstOrDefault();
+                latestHashes[pair.Key] = VersionSourceSha256(latest) ?? string.Empty;
             }
         }
 
         var pathsToHash = nodes
-            .Where(IsCheckedOutByCurrentUser)
-            .Where(node => !node.IsModifiedInSolidWorks
-                && node.DocumentId.HasValue
-                && latestHashes.TryGetValue(node.DocumentId.Value, out var sha256)
-                && !string.IsNullOrWhiteSpace(sha256)
+            .Where(node => node.DocumentId.HasValue
                 && !string.IsNullOrWhiteSpace(node.FullPath)
                 && File.Exists(node.FullPath))
             .Select(node => node.FullPath)
@@ -1247,8 +1358,87 @@ public sealed class PdmAddin : ISwAddin
             node.LatestVersionSha256 = node.DocumentId.HasValue && latestHashes.TryGetValue(node.DocumentId.Value, out var latestSha256)
                 ? latestSha256
                 : string.Empty;
+            node.LatestRevision = node.DocumentId.HasValue
+                && versionsByDocument.TryGetValue(node.DocumentId.Value, out var versions)
+                ? versions.FirstOrDefault()?.Revision?.Display ?? string.Empty
+                : string.Empty;
+            node.CurrentRevision = DetermineCurrentRevision(node, versionsByDocument, localHashes);
             node.WorkState = DetermineWorkState(node, localHashes);
         }
+    }
+
+    private async Task<IReadOnlyList<DocumentVersionDto>> GetTreeVersionsAsync(Guid documentId)
+    {
+        try
+        {
+            return await apiClient.GetVersionsAsync(documentId, lifetime.Token);
+        }
+        catch (Exception exception)
+        {
+            LogDiagnostic("ApplyWorkingStates.GetVersions", exception);
+            return null;
+        }
+    }
+
+    private static string DetermineCurrentRevision(
+        CadTreeNode node,
+        IReadOnlyDictionary<Guid, IReadOnlyList<DocumentVersionDto>> versionsByDocument,
+        IReadOnlyDictionary<string, string> localHashes)
+    {
+        if (!node.DocumentId.HasValue)
+        {
+            return node.IsHistoricalPreview ? "只读预览" : "未入库";
+        }
+
+        if (string.IsNullOrWhiteSpace(node.FullPath) || !File.Exists(node.FullPath))
+        {
+            return "文件缺失";
+        }
+
+        if (!versionsByDocument.TryGetValue(node.DocumentId.Value, out var versions))
+        {
+            return "待识别";
+        }
+
+        if (versions.Count == 0)
+        {
+            return "未存档";
+        }
+
+        if (localHashes.TryGetValue(node.FullPath, out var localSha256))
+        {
+            var matching = versions.FirstOrDefault(version =>
+                VersionMatchesFile(version, localSha256));
+            if (matching != null)
+            {
+                var revision = matching.Revision?.Display ?? "未存档";
+                return node.IsModifiedInSolidWorks ? string.Concat(revision, "*") : revision;
+            }
+
+            return node.IsModifiedInSolidWorks || versions.Any(version => !string.IsNullOrWhiteSpace(VersionSourceSha256(version)))
+                ? "本地修改"
+                : "待识别";
+        }
+
+        return "待识别";
+    }
+
+    private static bool VersionMatchesFile(DocumentVersionDto version, string sha256)
+    {
+        var sourceSha256 = VersionSourceSha256(version);
+        return !string.IsNullOrWhiteSpace(sourceSha256)
+            && string.Equals(sourceSha256, sha256, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static string VersionSourceSha256(DocumentVersionDto version)
+    {
+        if (version?.PropertySnapshot == null)
+        {
+            return null;
+        }
+
+        var property = version.PropertySnapshot.FirstOrDefault(pair => string.Equals(pair.Key, "SourceFileSha256", StringComparison.OrdinalIgnoreCase));
+        return property.Value;
     }
 
     private bool IsCheckedOutByCurrentUser(CadTreeNode node) =>

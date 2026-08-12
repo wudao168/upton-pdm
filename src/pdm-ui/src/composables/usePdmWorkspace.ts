@@ -1,7 +1,7 @@
 import { computed, onMounted, ref } from 'vue'
-import { checkHealth, compareDocumentVersions, listDocumentVersions, loadProjectWorkspace, login as apiLogin, PdmApiError, postDesktopMessage, readDocumentVersionFile, restoreDocumentVersion } from '../api'
+import { checkHealth, compareDocumentVersions, createReleasePackage, decideApproval, exportBom, getStorageStatus, importBom, listAudit, listDocumentVersions, loadProjectWorkspace, login as apiLogin, PdmApiError, postDesktopMessage, readDocumentVersionFile, restoreDocumentVersion, saveBom, submitReleasePackage, uploadReleaseFile } from '../api'
 import type { AuthSession } from '../api'
-import type { BomItem, DocumentNode, DocumentVersionComparison, DocumentVersionSummary, PreviewMode, ProjectSummary, ReleasePackageSummary } from '../types'
+import type { AuditEntry, BomItem, DocumentNode, DocumentVersionComparison, DocumentVersionSummary, PreviewMode, ProjectSummary, ReleasePackageSummary } from '../types'
 
 const sessionKey = 'upton-pdm-session'
 
@@ -74,6 +74,7 @@ export function usePdmWorkspace() {
   const serviceOnline = ref(false)
   const authenticated = ref(false)
   const currentUser = ref('')
+  const currentUsername = ref('')
   const currentRole = ref('')
   const loginPending = ref(false)
   const loginError = ref('')
@@ -88,6 +89,11 @@ export function usePdmWorkspace() {
   const versionLoading = ref(false)
   const versionError = ref('')
   const approvalDialogOpen = ref(false)
+  const operationPending = ref(false)
+  const operationError = ref('')
+  const uploadProgress = ref(0)
+  const auditEntries = ref<AuditEntry[]>([])
+  const storageStatus = ref<{ vaultAvailable: boolean; releaseAvailable: boolean } | null>(null)
   let accessToken = ''
   let pendingVersionComparison: { documentId: string; leftVersionId?: string; rightVersionId?: string } | null = null
 
@@ -158,22 +164,136 @@ export function usePdmWorkspace() {
     postDesktopMessage('open-document', { documentId: node.id, fileName: node.fileName })
   }
 
+  function previewDocument(node = selectedNode.value) {
+    postDesktopMessage('preview-document', { documentId: node.id, fileName: node.fileName, revision: node.version })
+  }
+
   function submitApproval() {
     if (releasePackage.value) approvalDialogOpen.value = true
   }
 
+  async function saveBomItems(kind: 'Mechanical' | 'Electrical', items: BomItem[]) {
+    operationPending.value = true
+    operationError.value = ''
+    try {
+      const saved = await saveBom(project.value.id, kind, items, accessToken)
+      if (kind === 'Mechanical') mechanicalBom.value = saved
+      else electricalBom.value = saved
+    } catch (error) {
+      operationError.value = messageFrom(error)
+      throw error
+    } finally {
+      operationPending.value = false
+    }
+  }
+
+  async function importBomFile(kind: 'Mechanical' | 'Electrical', file: File) {
+    operationPending.value = true
+    operationError.value = ''
+    try {
+      const imported = await importBom(project.value.id, kind, file, accessToken)
+      if (kind === 'Mechanical') mechanicalBom.value = imported
+      else electricalBom.value = imported
+    } catch (error) {
+      operationError.value = messageFrom(error)
+      throw error
+    } finally {
+      operationPending.value = false
+    }
+  }
+
+  async function exportBomFile(kind: 'Mechanical' | 'Electrical') {
+    const blob = await exportBom(project.value.id, kind, accessToken)
+    const url = URL.createObjectURL(blob)
+    const anchor = document.createElement('a')
+    anchor.href = url
+    anchor.download = `${kind.toLocaleLowerCase()}-bom.xlsx`
+    anchor.click()
+    window.setTimeout(() => URL.revokeObjectURL(url), 10_000)
+  }
+
+  async function createPackage(number: string, processReviewer: string, approver: string) {
+    operationPending.value = true
+    operationError.value = ''
+    try {
+      await createReleasePackage(project.value.id, number, processReviewer, approver, accessToken)
+      await reload()
+    } catch (error) {
+      operationError.value = messageFrom(error)
+      throw error
+    } finally {
+      operationPending.value = false
+    }
+  }
+
+  async function uploadPackageFile(file: File) {
+    if (!releasePackage.value) throw new Error('请先创建发布包。')
+    operationPending.value = true
+    operationError.value = ''
+    uploadProgress.value = 0
+    try {
+      await uploadReleaseFile(project.value.id, releasePackage.value.number, file, accessToken, value => { uploadProgress.value = value })
+    } catch (error) {
+      operationError.value = messageFrom(error)
+      throw error
+    } finally {
+      operationPending.value = false
+    }
+  }
+
+  async function submitPackage() {
+    if (!releasePackage.value) throw new Error('当前没有发布包。')
+    operationPending.value = true
+    operationError.value = ''
+    try {
+      await submitReleasePackage(releasePackage.value.id, accessToken)
+      await reload()
+    } catch (error) {
+      operationError.value = messageFrom(error)
+      throw error
+    } finally {
+      operationPending.value = false
+    }
+  }
+
+  async function decideApprovalTask(taskId: string, decision: 'Approved' | 'Rejected', comment: string) {
+    operationPending.value = true
+    operationError.value = ''
+    try {
+      await decideApproval(taskId, decision, comment, accessToken)
+      await reload()
+    } catch (error) {
+      operationError.value = messageFrom(error)
+      throw error
+    } finally {
+      operationPending.value = false
+    }
+  }
+
+  async function loadAuditEntries() {
+    auditEntries.value = await listAudit(accessToken)
+  }
+
+  async function loadStorageStatus() {
+    storageStatus.value = await getStorageStatus(project.value.id, accessToken)
+  }
+
   function applySession(session: AuthSession) {
     accessToken = session.accessToken
+    postDesktopMessage('session-ready', { accessToken: session.accessToken })
     authenticated.value = true
     currentUser.value = session.displayName || session.username
+    currentUsername.value = session.username
     currentRole.value = session.role
     window.sessionStorage.setItem(sessionKey, JSON.stringify(session))
   }
 
   function clearSession() {
     accessToken = ''
+    postDesktopMessage('session-clear')
     authenticated.value = false
     currentUser.value = ''
+    currentUsername.value = ''
     currentRole.value = ''
     ready.value = false
     project.value = emptyProject
@@ -217,11 +337,12 @@ export function usePdmWorkspace() {
     }
   }
 
-  async function login(username: string, password: string) {
+  async function login(username: string, password: string, rememberCredentials = false) {
     loginPending.value = true
     loginError.value = ''
     try {
       const session = await apiLogin(username, password)
+      postDesktopMessage(rememberCredentials ? 'credentials-save' : 'credentials-clear', { username: username.trim(), password })
       applySession(session)
       await reload()
     } catch (error) {
@@ -295,6 +416,7 @@ export function usePdmWorkspace() {
     serviceOnline,
     authenticated,
     currentUser,
+    currentUsername,
     currentRole,
     loginPending,
     loginError,
@@ -311,13 +433,28 @@ export function usePdmWorkspace() {
     versionLoading,
     versionError,
     approvalDialogOpen,
+    operationPending,
+    operationError,
+    uploadProgress,
+    auditEntries,
+    storageStatus,
     selectNode,
     openDocument,
+    previewDocument,
     openVersionDrawer,
     compareVersions,
     openVersionFile,
     restoreVersion,
     submitApproval,
+    saveBomItems,
+    importBomFile,
+    exportBomFile,
+    createPackage,
+    uploadPackageFile,
+    submitPackage,
+    decideApprovalTask,
+    loadAuditEntries,
+    loadStorageStatus,
     login,
     logout,
     reload,

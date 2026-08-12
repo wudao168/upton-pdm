@@ -132,6 +132,30 @@ public static class PdmEndpointExtensions
             return Results.Ok(await repository.GetBomAsync(projectId, bomKind, cancellationToken));
         });
 
+        api.MapPut("/projects/{projectId:guid}/boms/{kind}", async (Guid projectId, string kind, ReplaceBomRequest request, HttpContext context, PdmWorkflowService workflow, CancellationToken cancellationToken) =>
+        {
+            if (!Enum.TryParse<BomKind>(kind, true, out var bomKind)) return Results.BadRequest(new { message = "BOM类型必须是Mechanical或Electrical。" });
+            var (actor, role) = CurrentUser(context.User);
+            return Results.Ok(await workflow.ReplaceBomAsync(projectId, bomKind, request.Items, actor, role, cancellationToken));
+        });
+
+        api.MapPost("/projects/{projectId:guid}/boms/{kind}/import", async (Guid projectId, string kind, IFormFile file, HttpContext context, PdmWorkflowService workflow, CancellationToken cancellationToken) =>
+        {
+            if (!Enum.TryParse<BomKind>(kind, true, out var bomKind)) return Results.BadRequest(new { message = "BOM类型必须是Mechanical或Electrical。" });
+            if (!string.Equals(Path.GetExtension(file.FileName), ".xlsx", StringComparison.OrdinalIgnoreCase)) return Results.BadRequest(new { message = "只支持标准XLSX格式的BOM文件。" });
+            await using var input = file.OpenReadStream();
+            var items = BomWorkbook.Read(input);
+            var (actor, role) = CurrentUser(context.User);
+            return Results.Ok(await workflow.ReplaceBomAsync(projectId, bomKind, items, actor, role, cancellationToken));
+        }).DisableAntiforgery();
+
+        api.MapGet("/projects/{projectId:guid}/boms/{kind}/export", async (Guid projectId, string kind, IPdmRepository repository, CancellationToken cancellationToken) =>
+        {
+            if (!Enum.TryParse<BomKind>(kind, true, out var bomKind)) return Results.BadRequest(new { message = "BOM类型必须是Mechanical或Electrical。" });
+            var items = await repository.GetBomAsync(projectId, bomKind, cancellationToken);
+            return Results.File(BomWorkbook.Write(items), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", $"{kind.ToLowerInvariant()}-bom.xlsx");
+        });
+
         api.MapGet("/projects/{projectId:guid}/release-packages", async (Guid projectId, IPdmRepository repository, CancellationToken cancellationToken) =>
             Results.Ok(await repository.ListReleasePackagesAsync(projectId, cancellationToken)));
 
@@ -177,13 +201,17 @@ public static class PdmEndpointExtensions
                 request.ProjectId,
                 request.ReferenceSnapshotId,
                 request.Number,
-                request.MechanicalBomRevision,
-                request.ElectricalBomRevision,
                 request.ProcessReviewer,
                 request.Approver,
                 actor,
                 role,
                 cancellationToken));
+        });
+
+        api.MapPost("/release-packages/{releasePackageId:guid}/submit", async (Guid releasePackageId, HttpContext context, PdmWorkflowService workflow, CancellationToken cancellationToken) =>
+        {
+            var (actor, role) = CurrentUser(context.User);
+            return Results.Ok(await workflow.SubmitReleasePackageAsync(releasePackageId, actor, role, cancellationToken));
         });
 
         api.MapPost("/approval-tasks/{taskId:guid}/decision", async (Guid taskId, ApprovalRequest request, HttpContext context, PdmWorkflowService workflow, CancellationToken cancellationToken) =>
@@ -194,6 +222,9 @@ public static class PdmEndpointExtensions
 
         api.MapPost("/uploads/sessions", async (StartUploadRequest request, IFileStorage storage, CancellationToken cancellationToken) =>
             Results.Ok(await storage.StartUploadAsync(request.ProjectId, request.FileName, request.TotalLength, request.Sha256, cancellationToken)));
+
+        api.MapGet("/uploads/sessions/{sessionId:guid}", async (Guid sessionId, IFileStorage storage, CancellationToken cancellationToken) =>
+            Results.Ok(await storage.GetUploadSessionAsync(sessionId, cancellationToken)));
 
         api.MapPut("/uploads/sessions/{sessionId:guid}/chunks/{chunkIndex:int}", async (Guid sessionId, int chunkIndex, HttpRequest request, IFileStorage storage, CancellationToken cancellationToken) =>
             Results.Ok(await storage.WriteChunkAsync(sessionId, chunkIndex, request.Body, cancellationToken)));
@@ -213,6 +244,12 @@ public static class PdmEndpointExtensions
             var releaseAvailable = await storage.IsAvailableAsync(project.ReleaseLocation, cancellationToken);
             return Results.Ok(new { projectId, vaultAvailable, releaseAvailable });
         });
+
+        api.MapGet("/audit", async (int? take, HttpContext context, IPdmRepository repository, CancellationToken cancellationToken) =>
+        {
+            var (actor, role) = CurrentUser(context.User);
+            return Results.Ok(await repository.ListAuditAsync(actor, role, take ?? 100, cancellationToken));
+        });
     }
 
     private static async Task<IResult> HealthAsync(IOptions<PdmDatabaseOptions> options, CancellationToken cancellationToken)
@@ -228,9 +265,9 @@ public static class PdmEndpointExtensions
             await using var connection = new MySqlConnection(options.Value.ConnectionString);
             await connection.OpenAsync(cancellationToken);
             await using var command = connection.CreateCommand();
-            command.CommandText = "SELECT 1";
-            _ = await command.ExecuteScalarAsync(cancellationToken);
-            return Results.Ok(new { status = "ok", service = "upton-pdm-api", database = "MySql", apiPort = 5080, mysqlPort = 3308 });
+            command.CommandText = "SELECT DATABASE()";
+            var databaseName = Convert.ToString(await command.ExecuteScalarAsync(cancellationToken));
+            return Results.Ok(new { status = "ok", service = "upton-pdm-api", database = "MySql", databaseName, apiPort = 5080, mysqlPort = 3308 });
         }
         catch (Exception exception)
         {

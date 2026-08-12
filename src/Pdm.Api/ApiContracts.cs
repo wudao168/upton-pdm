@@ -1,3 +1,4 @@
+using Upton.Pdm.Application;
 using Upton.Pdm.Domain;
 
 namespace Upton.Pdm.Api;
@@ -29,12 +30,12 @@ public sealed record PublishDocumentVersionRequest(Guid SourceVersionId, Guid Re
 
 public sealed record CreateReleasePackageRequest(
     Guid ProjectId,
-    Guid ReferenceSnapshotId,
+    Guid? ReferenceSnapshotId,
     string Number,
-    string MechanicalBomRevision,
-    string ElectricalBomRevision,
     string ProcessReviewer,
     string Approver);
+
+public sealed record ReplaceBomRequest(IReadOnlyList<BomItemInput> Items);
 
 public sealed record ApprovalRequest(ApprovalDecision Decision, string? Comment);
 

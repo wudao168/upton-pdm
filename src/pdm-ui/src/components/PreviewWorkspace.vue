@@ -1,16 +1,95 @@
 <script setup lang="ts">
-import { Boxes, Maximize, MoreHorizontal } from '@lucide/vue'
+import { Boxes, FileSearch, Maximize, MoreHorizontal } from '@lucide/vue'
+import { nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { postDesktopMessage } from '../api'
 import type { BomItem, DocumentNode, PreviewMode } from '../types'
 
-defineProps<{ selected: DocumentNode; bom: BomItem[] }>()
+const props = defineProps<{ selected: DocumentNode; bom: BomItem[] }>()
 const mode = defineModel<PreviewMode>('mode', { required: true })
-const emit = defineEmits<{ open: [node: DocumentNode]; fit: []; more: [] }>()
+const emit = defineEmits<{ open: [node: DocumentNode]; preview: [node: DocumentNode]; more: [] }>()
+const previewSlot = ref<HTMLElement>()
+const previewState = ref<'idle' | 'loading' | 'ready' | 'error'>('idle')
+const previewError = ref('')
+let resizeObserver: ResizeObserver | undefined
 
 const tabs: Array<{ value: PreviewMode; label: string }> = [
   { value: 'model', label: '3D预览' },
   { value: 'drawing', label: '2D图纸' },
   { value: 'bom', label: '机械BOM' },
 ]
+
+function reportPreviewBounds() {
+  const slot = previewSlot.value
+  if (!slot || (mode.value !== 'model' && mode.value !== 'drawing')) return
+  const bounds = slot.getBoundingClientRect()
+  if (bounds.width < 1 || bounds.height < 1) return
+  postDesktopMessage('preview-host-bounds', {
+    left: bounds.left,
+    top: bounds.top,
+    width: bounds.width,
+    height: bounds.height,
+    viewportWidth: window.innerWidth,
+    viewportHeight: window.innerHeight,
+    visible: true,
+  })
+}
+
+function hidePreview() {
+  postDesktopMessage('preview-host-hide')
+}
+
+function startPreview() {
+  previewState.value = 'loading'
+  previewError.value = ''
+  reportPreviewBounds()
+  emit('preview', props.selected)
+}
+
+function fitPreview() {
+  if (previewState.value === 'ready') postDesktopMessage('preview-host-fit')
+  else startPreview()
+}
+
+function onPreviewStatus(event: Event) {
+  const detail = (event as CustomEvent<{ state?: string; message?: string }>).detail
+  if (!detail?.state) return
+  if (detail.state === 'loading' || detail.state === 'ready' || detail.state === 'error') {
+    previewState.value = detail.state
+    previewError.value = detail.message ?? ''
+    if (detail.state === 'ready') void nextTick(reportPreviewBounds)
+  }
+}
+
+watch(mode, async () => {
+  hidePreview()
+  previewState.value = 'idle'
+  previewError.value = ''
+  await nextTick()
+  reportPreviewBounds()
+})
+
+watch(() => props.selected.id, () => {
+  hidePreview()
+  previewState.value = 'idle'
+  previewError.value = ''
+})
+
+onMounted(() => {
+  window.addEventListener('resize', reportPreviewBounds)
+  window.addEventListener('pdm-preview-status', onPreviewStatus)
+  if (typeof ResizeObserver !== 'undefined' && previewSlot.value) {
+    resizeObserver = new ResizeObserver(reportPreviewBounds)
+    resizeObserver.observe(previewSlot.value)
+  }
+  void nextTick(reportPreviewBounds)
+})
+
+onBeforeUnmount(() => {
+  hidePreview()
+  resizeObserver?.disconnect()
+  window.removeEventListener('resize', reportPreviewBounds)
+  window.removeEventListener('pdm-preview-status', onPreviewStatus)
+})
 </script>
 
 <template>
@@ -27,7 +106,7 @@ const tabs: Array<{ value: PreviewMode; label: string }> = [
         >{{ tab.label }}</button>
       </div>
       <div class="pdm-preview-actions">
-        <button type="button" aria-label="适合窗口" @click="emit('fit')"><Maximize :size="15" /></button>
+        <button type="button" aria-label="适合窗口" @click="fitPreview"><Maximize :size="15" /></button>
         <button type="button" aria-label="更多操作" @click="emit('more')"><MoreHorizontal :size="17" /></button>
       </div>
     </header>
@@ -40,44 +119,21 @@ const tabs: Array<{ value: PreviewMode; label: string }> = [
     </div>
 
     <div class="pdm-preview-content">
-      <div v-if="mode === 'model'" class="pdm-model-view">
-        <svg viewBox="0 0 640 350" role="img" aria-labelledby="cad-title cad-desc">
-          <title id="cad-title">自动装配线三维模型预览</title>
-          <desc id="cad-desc">展示机架、输送带、机械臂和电气柜的简化三维模型。</desc>
-          <defs>
-            <linearGradient id="machine-top" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#dce8f3" /><stop offset="1" stop-color="#aebfd0" /></linearGradient>
-            <linearGradient id="machine-side" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#91a9be" /><stop offset="1" stop-color="#6f879d" /></linearGradient>
-          </defs>
-          <g class="cad-grid"><path d="M58 282H586M73 260H571M91 238H553M112 216H532" /><path d="M89 300L218 190M175 300L273 190M261 300L328 190M347 300L383 190M433 300L438 190M519 300L493 190" /></g>
-          <ellipse class="cad-shadow" cx="325" cy="280" rx="235" ry="30" />
-          <g class="cad-machine">
-            <path class="cad-side" d="M120 191L478 191L520 219L160 219Z" />
-            <path class="cad-top" d="M120 177L478 177L520 205L160 205Z" />
-            <path class="cad-edge" d="M120 177V191L160 219V205M478 177V191L520 219V205" />
-            <path class="cad-rail" d="M154 185L477 185L492 195L170 195Z" />
-            <path class="cad-belt" d="M180 188L455 188L468 196L193 196Z" />
-            <path class="cad-edge" d="M145 207V274H161V215M477 207V274H493V215M268 211V263H283V212M388 211V263H403V212M134 274H173M465 274H504M257 263H294M377 263H414" />
-          </g>
-          <g class="cad-robot">
-            <path class="cad-side" d="M270 167L318 167L331 177L283 177Z" />
-            <path class="cad-top" d="M278 145L310 145L318 167L270 167Z" />
-            <circle cx="294" cy="143" r="12" /><path d="M294 143L339 116L351 127L309 153Z" /><circle cx="345" cy="121" r="10" /><path d="M350 117L385 91L397 101L355 128Z" /><circle cx="391" cy="96" r="8" /><path d="M396 94L414 104M411 99L420 109" />
-          </g>
-          <g class="cad-cabinet">
-            <path class="cad-side" d="M83 136L135 153V239L83 220Z" /><path class="cad-top" d="M83 136L112 122L164 139L135 153Z" /><path class="cad-cabinet-front" d="M135 153L164 139V224L135 239Z" />
-            <circle cx="148" cy="160" r="3" /><circle cx="148" cy="171" r="3" /><path d="M141 184L156 179V207L141 212Z" />
-          </g>
-          <g class="cad-parts"><path d="M204 176L231 167L253 174L228 183Z" /><path d="M375 176L402 167L424 174L399 183Z" /></g>
-          <g class="cad-dimension"><path d="M112 300H519M112 294V306M519 294V306" /><text x="315" y="320" text-anchor="middle">总长 4200 mm</text></g>
-        </svg>
-      </div>
-
-      <div v-else-if="mode === 'drawing'" class="pdm-drawing-view">
-        <svg viewBox="0 0 640 350" role="img" aria-label="A01-000总装配二维工程图">
-          <rect x="38" y="24" width="564" height="302" class="drawing-frame" />
-          <g class="drawing-lines"><path d="M104 115H320V212H104ZM124 96H300V115M140 212V238M286 212V238M95 238H329M95 232V244M329 232V244" /><circle cx="154" cy="164" r="24" /><circle cx="270" cy="164" r="24" /><path d="M380 90H546V218H380ZM402 112H524V196H402ZM380 238H546V302H380ZM455 238V302M505 238V302M380 263H546" /></g>
-          <g class="drawing-text"><text x="195" y="258">4200</text><text x="390" y="253">图号</text><text x="463" y="253">{{ selected.drawingNumber }}</text><text x="390" y="281">名称</text><text x="463" y="281">{{ selected.name }}</text></g>
-        </svg>
+      <div
+        v-if="mode === 'model' || mode === 'drawing'"
+        ref="previewSlot"
+        class="pdm-real-preview pdm-embedded-preview-slot"
+        :data-preview-state="previewState"
+        aria-label="客户端内嵌eDrawings预览区"
+      >
+        <FileSearch :size="52" />
+        <h3>{{ previewState === 'loading' ? '正在加载 eDrawings…' : mode === 'model' ? 'eDrawings 内嵌三维预览' : 'eDrawings 内嵌图纸预览' }}</h3>
+        <p>{{ selected.fileName }} · {{ selected.version }}</p>
+        <small>文件通过PDM权限校验和SHA-256校验后下载到独立只读缓存，不会覆盖工作文件。</small>
+        <p v-if="previewState === 'error'" class="pdm-preview-error" role="alert">{{ previewError || 'eDrawings加载失败，请重试。' }}</p>
+        <button type="button" class="pdm-primary-action" :disabled="previewState === 'loading'" @click="startPreview">
+          {{ previewState === 'loading' ? '正在加载…' : previewState === 'error' ? '重新加载内嵌预览' : '在客户端内预览' }}
+        </button>
       </div>
 
       <div v-else class="pdm-bom-view">

@@ -4,18 +4,22 @@ import { GitCompareArrows, Send } from '@lucide/vue'
 import { ref } from 'vue'
 import AppHeader from './components/AppHeader.vue'
 import ApprovalPanel from './components/ApprovalPanel.vue'
+import AuditLog from './components/AuditLog.vue'
+import BomManager from './components/BomManager.vue'
 import BomSummary from './components/BomSummary.vue'
 import DocumentTree from './components/DocumentTree.vue'
 import LoginView from './components/LoginView.vue'
 import PreviewWorkspace from './components/PreviewWorkspace.vue'
+import ReleaseCenter from './components/ReleaseCenter.vue'
 import SideNav from './components/SideNav.vue'
+import StorageSettings from './components/StorageSettings.vue'
 import WorkbenchHome from './components/WorkbenchHome.vue'
 import { usePdmWorkspace } from './composables/usePdmWorkspace'
 import type { PreviewMode } from './types'
 
 const workspace = usePdmWorkspace()
 type NavKey = 'workbench' | 'documents' | 'bom' | 'approvals' | 'release' | 'changes' | 'audit' | 'settings'
-const activeView = ref<'workbench' | 'documents'>('documents')
+const activeView = ref<'workbench' | 'documents' | 'bom' | 'release' | 'audit' | 'settings'>('documents')
 const activeNav = ref<NavKey>('documents')
 const restoreNote = ref('从历史版本恢复生成新的工作版本')
 
@@ -30,10 +34,11 @@ function submitApproval() {
     ElMessage.warning('当前项目暂无发布包，暂不能提交审批')
     return
   }
-  workspace.submitApproval()
+  activeView.value = 'release'
+  activeNav.value = 'approvals'
 }
 
-function handleNavigation(key: NavKey, label: string) {
+async function handleNavigation(key: NavKey) {
   if (key === 'workbench') {
     activeView.value = 'workbench'
     activeNav.value = key
@@ -44,20 +49,35 @@ function handleNavigation(key: NavKey, label: string) {
     return
   }
   if (key === 'bom') {
-    openDocuments('bom')
-    return
-  }
-  if (key === 'approvals') {
+    activeView.value = 'bom'
     activeNav.value = key
-    submitApproval()
     return
   }
-  ElMessage.info(`${label}将在后续阶段开放`)
+  if (key === 'approvals' || key === 'release') {
+    activeView.value = 'release'
+    activeNav.value = key
+    return
+  }
+  if (key === 'changes') {
+    openDocuments('model')
+    activeNav.value = key
+    await workspace.openVersionDrawer()
+    return
+  }
+  if (key === 'audit') {
+    activeView.value = 'audit'
+    activeNav.value = key
+    await workspace.loadAuditEntries()
+    return
+  }
+  activeView.value = 'settings'
+  activeNav.value = 'settings'
+  await workspace.loadStorageStatus()
 }
 
-function confirmApproval() {
-  workspace.approvalDialogOpen.value = false
-  ElMessage.info('当前客户端已读取真实发布包；审批写入接口接入后开放提交操作')
+async function runOperation(action: () => Promise<unknown>, success: string) {
+  try { await action(); ElMessage.success(success) }
+  catch (error) { ElMessage.error(error instanceof Error ? error.message : '操作失败') }
 }
 
 function versionStatus(status: 'Work' | 'Released' | 0 | 1) {
@@ -135,6 +155,29 @@ async function restoreSelectedVersion() {
           @documents="openDocuments('model')"
           @bom="openDocuments('bom')"
         />
+        <BomManager
+          v-else-if="activeView === 'bom'"
+          :mechanical="workspace.mechanicalBom.value"
+          :electrical="workspace.electricalBom.value"
+          :pending="workspace.operationPending.value"
+          @save="(kind, items) => runOperation(() => workspace.saveBomItems(kind, items), 'BOM已保存')"
+          @import="(kind, file) => runOperation(() => workspace.importBomFile(kind, file), 'BOM已导入并保存')"
+          @export="(kind) => runOperation(() => workspace.exportBomFile(kind), 'BOM已导出')"
+        />
+        <ReleaseCenter
+          v-else-if="activeView === 'release'"
+          :release-package="workspace.releasePackage.value"
+          :username="workspace.currentUsername.value"
+          :pending="workspace.operationPending.value"
+          :progress="workspace.uploadProgress.value"
+          :error="workspace.operationError.value"
+          @create="(number, reviewer, approver) => runOperation(() => workspace.createPackage(number, reviewer, approver), '发布包草稿已创建，BOM快照已固化')"
+          @upload="(file) => runOperation(() => workspace.uploadPackageFile(file), '发包文件已上传并通过SHA-256校验')"
+          @submit="runOperation(workspace.submitPackage, '发布包已提交工艺审核')"
+          @decide="(taskId, decision, comment) => runOperation(() => workspace.decideApprovalTask(taskId, decision, comment), decision === 'Approved' ? '审批已流转' : '发布包已驳回')"
+        />
+        <AuditLog v-else-if="activeView === 'audit'" :entries="workspace.auditEntries.value" @refresh="runOperation(workspace.loadAuditEntries, '审计记录已刷新')" />
+        <StorageSettings v-else-if="activeView === 'settings'" :project="workspace.project.value" :status="workspace.storageStatus.value" @refresh="runOperation(workspace.loadStorageStatus, '存储可用性已刷新')" />
         <template v-else>
         <header class="pdm-pagebar">
           <div>
@@ -165,8 +208,8 @@ async function restoreSelectedVersion() {
                 :selected="workspace.selectedNode.value"
                 :bom="workspace.mechanicalBom.value"
                 @open="workspace.openDocument"
-                @fit="ElMessage.success('预览已适合当前窗口')"
-                @more="ElMessage.info('更多图档操作将在获取权限和下载接口接入后开放')"
+                @preview="workspace.previewDocument"
+                @more="workspace.openVersionDrawer()"
               />
               <div class="pdm-side-panels">
                 <BomSummary
@@ -208,21 +251,5 @@ async function restoreSelectedVersion() {
       </template>
     </el-drawer>
 
-    <el-dialog v-model="workspace.approvalDialogOpen.value" title="提交发布包审批" width="520px">
-      <div v-if="workspace.releasePackage.value" class="pdm-submit-dialog">
-        <p><strong>{{ workspace.releasePackage.value.number }}</strong> 当前关联数据：</p>
-        <ul>
-          <li>图档结构：{{ workspace.root.value.drawingNumber }} · {{ workspace.root.value.version }}</li>
-          <li>机械BOM：{{ workspace.mechanicalBom.value.length }} 项</li>
-          <li>电气BOM：{{ workspace.electricalBom.value.length }} 项</li>
-          <li>发布状态：{{ workspace.releasePackage.value.state }}</li>
-        </ul>
-        <p class="pdm-dialog-note">当前阶段为真实数据只读展示，尚未调用审批写入接口。</p>
-      </div>
-      <template #footer>
-        <button type="button" class="pdm-secondary-action" @click="workspace.approvalDialogOpen.value = false">取消</button>
-        <button type="button" class="pdm-primary-action" @click="confirmApproval">知道了</button>
-      </template>
-    </el-dialog>
   </div>
 </template>

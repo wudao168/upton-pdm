@@ -1,4 +1,4 @@
-import type { ApprovalStep, BomItem, DocumentKind, DocumentNode, DocumentVersionComparison, DocumentVersionSummary, ProjectSummary, ReferenceStatus, ReleasePackageSummary } from './types'
+import type { ApprovalStep, AuditEntry, BomItem, DocumentKind, DocumentNode, DocumentVersionComparison, DocumentVersionSummary, ProjectSummary, ReferenceStatus, ReleasePackageSummary } from './types'
 
 const apiBase = (import.meta.env.VITE_PDM_API_BASE ?? 'http://127.0.0.1:5080').replace(/\/$/, '')
 
@@ -79,11 +79,13 @@ interface ApiBomItem {
 }
 
 interface ApiApprovalTask {
+  id: string
   stage: number | string
   assignee: string
   decisionBy?: string | null
   decision?: number | string | null
   decidedAt?: string | null
+  comment?: string | null
 }
 
 interface ApiReleasePackage {
@@ -92,12 +94,14 @@ interface ApiReleasePackage {
   state: number | string
   approvalTasks?: ApiApprovalTask[]
   publishedAt?: string | null
+  publishedPath?: string | null
+  publishError?: string | null
 }
 
 async function requestJson<T>(path: string, init: RequestInit = {}, token?: string): Promise<T> {
   const headers = new Headers(init.headers)
   headers.set('Accept', 'application/json')
-  if (init.body) headers.set('Content-Type', 'application/json')
+  if (init.body && !(init.body instanceof FormData)) headers.set('Content-Type', 'application/json')
   if (token) headers.set('Authorization', `Bearer ${token}`)
 
   const response = await fetch(`${apiBase}${path}`, { ...init, headers, cache: 'no-store' })
@@ -147,6 +151,64 @@ export function login(username: string, password: string): Promise<AuthSession> 
     method: 'POST',
     body: JSON.stringify({ username: username.trim(), password }),
   })
+}
+
+export async function saveBom(projectId: string, kind: 'Mechanical' | 'Electrical', items: BomItem[], token: string): Promise<BomItem[]> {
+  const saved = await requestJson<ApiBomItem[]>(`/api/projects/${projectId}/boms/${kind}`, {
+    method: 'PUT',
+    body: JSON.stringify({ items: items.map(item => ({ ...item, isComplete: item.complete })) }),
+  }, token)
+  return saved.map(mapBomItem)
+}
+
+export async function importBom(projectId: string, kind: 'Mechanical' | 'Electrical', file: File, token: string): Promise<BomItem[]> {
+  const form = new FormData()
+  form.append('file', file, file.name)
+  const imported = await requestJson<ApiBomItem[]>(`/api/projects/${projectId}/boms/${kind}/import`, { method: 'POST', body: form }, token)
+  return imported.map(mapBomItem)
+}
+
+export async function exportBom(projectId: string, kind: 'Mechanical' | 'Electrical', token: string): Promise<Blob> {
+  const response = await fetch(`${apiBase}/api/projects/${projectId}/boms/${kind}/export`, { headers: { Authorization: `Bearer ${token}` }, cache: 'no-store' })
+  if (!response.ok) throw new PdmApiError(`BOM导出失败（${response.status}）`, response.status)
+  return response.blob()
+}
+
+export function createReleasePackage(projectId: string, number: string, processReviewer: string, approver: string, token: string): Promise<ApiReleasePackage> {
+  return requestJson('/api/release-packages', { method: 'POST', body: JSON.stringify({ projectId, referenceSnapshotId: null, number, processReviewer, approver }) }, token)
+}
+
+export function submitReleasePackage(releasePackageId: string, token: string): Promise<ApiReleasePackage> {
+  return requestJson(`/api/release-packages/${releasePackageId}/submit`, { method: 'POST' }, token)
+}
+
+export function decideApproval(taskId: string, decision: 'Approved' | 'Rejected', comment: string, token: string): Promise<ApiReleasePackage> {
+  return requestJson(`/api/approval-tasks/${taskId}/decision`, { method: 'POST', body: JSON.stringify({ decision: decision === 'Approved' ? 0 : 1, comment }) }, token)
+}
+
+export async function uploadReleaseFile(projectId: string, packageNumber: string, file: File, token: string, onProgress?: (percent: number) => void): Promise<void> {
+  const extension = file.name.split('.').pop()?.toLocaleLowerCase()
+  if (extension !== 'pdf' && extension !== 'dwg') throw new PdmApiError('生产发包只允许上传PDF或DWG。', 400)
+  const digest = await crypto.subtle.digest('SHA-256', await file.arrayBuffer())
+  const sha256 = [...new Uint8Array(digest)].map(value => value.toString(16).padStart(2, '0')).join('').toUpperCase()
+  const session = await requestJson<{ id: string; chunkSize: number }>(`/api/uploads/sessions`, { method: 'POST', body: JSON.stringify({ projectId, fileName: file.name, totalLength: file.size, sha256 }) }, token)
+  const chunks = Math.ceil(file.size / session.chunkSize)
+  for (let index = 0; index < chunks; index++) {
+    const body = file.slice(index * session.chunkSize, Math.min(file.size, (index + 1) * session.chunkSize))
+    const response = await fetch(`${apiBase}/api/uploads/sessions/${session.id}/chunks/${index}`, { method: 'PUT', headers: { Authorization: `Bearer ${token}` }, body })
+    if (!response.ok) throw new PdmApiError(`发布文件分块${index + 1}上传失败（${response.status}）`, response.status)
+    onProgress?.(Math.round(((index + 1) / chunks) * 100))
+  }
+  const safeName = file.name.replace(/[\\/:*?"<>|]/g, '_')
+  await requestJson(`/api/uploads/sessions/${session.id}/complete`, { method: 'POST', body: JSON.stringify({ relativeTargetPath: `.release-staging/${packageNumber}/drawings/${safeName}` }) }, token)
+}
+
+export function listAudit(token: string): Promise<AuditEntry[]> {
+  return requestJson('/api/audit?take=200', {}, token)
+}
+
+export function getStorageStatus(projectId: string, token: string): Promise<{ vaultAvailable: boolean; releaseAvailable: boolean }> {
+  return requestJson(`/api/projects/${projectId}/storage-status`, {}, token)
 }
 
 export async function loadProjectWorkspace(token: string): Promise<ProjectWorkspaceData> {
@@ -231,21 +293,29 @@ function mapReleasePackage(releasePackage: ApiReleasePackage): ReleasePackageSum
     const done = Boolean(task.decidedAt || task.decisionBy || task.decision !== null && task.decision !== undefined)
     const current = !done && ((state === '工艺审核' && stage === '工艺审核') || (state === '待批准' && stage === '批准'))
     return {
+      id: task.id,
       stage,
       assignee: task.assignee,
       status: done ? 'done' : current ? 'current' : 'waiting',
       detail: task.decidedAt ? formatDate(task.decidedAt) : done ? '已处理' : '待处理',
+      decision: task.decision ?? undefined,
+      comment: task.comment ?? undefined,
     }
   })
 
   steps.push({
+    id: 'production-release',
     stage: '生产发包',
     assignee: '生产部',
     status: state === '已发布' ? 'done' : state === '发布中' ? 'current' : 'waiting',
     detail: releasePackage.publishedAt ? formatDate(releasePackage.publishedAt) : '审批后自动推送',
   })
 
-  return { id: releasePackage.id, number: releasePackage.number, state, steps }
+  return { id: releasePackage.id, number: releasePackage.number, state, steps, publishedPath: releasePackage.publishedPath ?? undefined, publishError: releasePackage.publishError ?? undefined }
+}
+
+export function mapApiReleasePackage(releasePackage: ApiReleasePackage): ReleasePackageSummary {
+  return mapReleasePackage(releasePackage)
 }
 
 function revisionDisplay(revision?: ApiRevision | null): string {

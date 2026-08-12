@@ -69,7 +69,38 @@ function buttonByText(wrapper: ReturnType<typeof mount>, label: string) {
 describe('PDM client workspace', () => {
   beforeEach(() => {
     window.sessionStorage.clear()
+    window.localStorage.clear()
+    Object.defineProperty(window, 'chrome', { configurable: true, value: undefined })
     installApiMock()
+  })
+
+  it('restores credentials from the Windows client and asks the host to save them only after login succeeds', async () => {
+    const postMessage = vi.fn()
+    Object.defineProperty(window, 'chrome', {
+      configurable: true,
+      value: { webview: { postMessage, addEventListener: vi.fn() } },
+    })
+    const wrapper = mount(App, { attachTo: document.body, global: { plugins: [ElementPlus] } })
+
+    expect(postMessage).toHaveBeenCalledWith({ type: 'credentials-request', payload: undefined })
+    window.dispatchEvent(new CustomEvent('pdm-remembered-credentials', {
+      detail: { username: 'engineer', password: 'correct-password', remember: true },
+    }))
+    await flushPromises()
+
+    expect((wrapper.get('input[name="username"]').element as HTMLInputElement).value).toBe('engineer')
+    expect((wrapper.get('input[name="password"]').element as HTMLInputElement).value).toBe('correct-password')
+    expect((wrapper.get('input[name="rememberCredentials"]').element as HTMLInputElement).checked).toBe(true)
+
+    await wrapper.get('form[aria-label="登录PDM"]').trigger('submit')
+    await flushPromises()
+
+    expect(postMessage).toHaveBeenCalledWith({
+      type: 'credentials-save',
+      payload: { username: 'engineer', password: 'correct-password' },
+    })
+    expect(window.localStorage.length).toBe(0)
+    expect(window.sessionStorage.getItem('upton-pdm-session')).not.toContain('correct-password')
   })
 
   it('logs in and renders project, tree, BOM and release data returned by the API', async () => {
@@ -116,15 +147,54 @@ describe('PDM client workspace', () => {
     expect(wrapper.find('[aria-label="项目图档结构"]').exists()).toBe(true)
 
     await buttonByText(wrapper, 'BOM管理').trigger('click')
-    expect(wrapper.get('button[role="tab"][aria-selected="true"]').text()).toBe('机械BOM')
+    expect(wrapper.get('button[role="tab"][aria-selected="true"]').text()).toContain('机械BOM')
+    expect(wrapper.text()).toContain('保存BOM')
 
+    await buttonByText(wrapper, '项目图档').trigger('click')
+    expect(wrapper.text()).toContain('eDrawings 内嵌三维预览')
     await wrapper.get('button[aria-label="适合窗口"]').trigger('click')
     await wrapper.get('button[aria-label="通知"]').trigger('click')
     await buttonByText(wrapper, '生产发包').trigger('click')
     await flushPromises()
-    expect(document.body.textContent).toContain('预览已适合当前窗口')
     expect(document.body.textContent).toContain('当前没有新的系统通知')
-    expect(document.body.textContent).toContain('生产发包将在后续阶段开放')
+    expect(document.body.textContent).toContain('审批与生产发包')
+    expect(document.body.textContent).not.toContain('将在后续阶段开放')
+  })
+
+  it('reserves the document preview area for the embedded eDrawings host without opening a separate web window', async () => {
+    const postMessage = vi.fn()
+    Object.defineProperty(window, 'chrome', {
+      configurable: true,
+      value: { webview: { postMessage, addEventListener: vi.fn() } },
+    })
+    const wrapper = mount(App, { attachTo: document.body, global: { plugins: [ElementPlus] } })
+    await login(wrapper)
+
+    const slot = wrapper.get('[aria-label="客户端内嵌eDrawings预览区"]')
+    vi.spyOn(slot.element, 'getBoundingClientRect').mockReturnValue({
+      x: 260, y: 180, left: 260, top: 180, right: 960, bottom: 700,
+      width: 700, height: 520, toJSON: () => ({}),
+    })
+    window.dispatchEvent(new Event('resize'))
+    await buttonByText(wrapper, '在客户端内预览').trigger('click')
+
+    expect(postMessage).toHaveBeenCalledWith(expect.objectContaining({
+      type: 'preview-host-bounds',
+      payload: expect.objectContaining({ left: 260, top: 180, width: 700, height: 520, visible: true }),
+    }))
+    expect(postMessage).toHaveBeenCalledWith({
+      type: 'preview-document',
+      payload: { documentId: 'doc-root', fileName: 'REAL-ASM-001.SLDASM', revision: 'W2' },
+    })
+
+    window.dispatchEvent(new CustomEvent('pdm-preview-status', { detail: { state: 'ready', fileName: 'REAL-ASM-001.SLDASM' } }))
+    await flushPromises()
+    expect(slot.attributes('data-preview-state')).toBe('ready')
+    await wrapper.get('button[aria-label="适合窗口"]').trigger('click')
+    expect(postMessage).toHaveBeenCalledWith({ type: 'preview-host-fit', payload: undefined })
+
+    await wrapper.get('button[role="tab"]:last-of-type').trigger('click')
+    expect(postMessage).toHaveBeenCalledWith({ type: 'preview-host-hide', payload: undefined })
   })
 
   it('loads real version choices and renders property, reference and BOM differences', async () => {

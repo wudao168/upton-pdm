@@ -58,6 +58,10 @@ internal sealed class CadTreeNode
 
     public string Revision { get; set; } = string.Empty;
 
+    public string CurrentRevision { get; set; } = string.Empty;
+
+    public string LatestRevision { get; set; } = string.Empty;
+
     public string CheckedOutBy { get; set; }
 
     public CadWorkState WorkState { get; set; }
@@ -65,6 +69,8 @@ internal sealed class CadTreeNode
     public string LatestVersionSha256 { get; set; } = string.Empty;
 
     public bool IsModifiedInSolidWorks { get; set; }
+
+    public bool IsHistoricalPreview { get; set; }
 
     public List<CadTreeNode> Children { get; } = new List<CadTreeNode>();
 

@@ -20,6 +20,17 @@ $secretRoot = Join-Path $localRoot 'secrets'
 $secretPath = Join-Path $secretRoot 'pdm-secrets.json'
 $rootClientPath = Join-Path $secretRoot 'mysql-root-client.ini'
 $myIniPath = Join-Path $localRoot 'mysql\my.ini'
+$isUpgrade = $null -ne (Get-Service -Name 'UptonPdmApi' -ErrorAction SilentlyContinue)
+if ($isUpgrade) {
+    $apiOutput = Join-Path $localRoot 'api-next'
+    $clientOutput = Join-Path $localRoot 'staged-client'
+    $addinOutput = Join-Path $localRoot 'staged-solidworks-addin'
+}
+else {
+    $apiOutput = Join-Path $localRoot 'api'
+    $clientOutput = Join-Path $localRoot 'client'
+    $addinOutput = Join-Path $localRoot 'solidworks-addin'
+}
 
 function New-RandomText([int]$byteCount) {
     $bytes = New-Object byte[] $byteCount
@@ -63,6 +74,18 @@ foreach ($directory in @(
     (Join-Path $localRoot 'uploads')
 )) {
     New-Item -ItemType Directory -Path $directory -Force | Out-Null
+}
+
+if ($isUpgrade) {
+    foreach ($directory in @($apiOutput, $clientOutput, $addinOutput)) {
+        $resolvedLocal = [IO.Path]::GetFullPath($localRoot).TrimEnd('\') + '\'
+        $resolvedTarget = [IO.Path]::GetFullPath($directory)
+        if (-not $resolvedTarget.StartsWith($resolvedLocal, [StringComparison]::OrdinalIgnoreCase)) {
+            throw "Upgrade staging path escaped .local: $resolvedTarget"
+        }
+        if (Test-Path -LiteralPath $resolvedTarget) { Remove-Item -LiteralPath $resolvedTarget -Recurse -Force }
+        New-Item -ItemType Directory -Path $resolvedTarget -Force | Out-Null
+    }
 }
 
 if (-not (Test-Path -LiteralPath $secretPath)) {
@@ -176,7 +199,7 @@ try {
         throw 'Release tests failed.'
     }
 
-    & $dotnetPath publish 'src\Pdm.Api\Pdm.Api.csproj' --configuration Release --no-restore --output (Join-Path $localRoot 'api') --nologo
+    & $dotnetPath publish 'src\Pdm.Api\Pdm.Api.csproj' --configuration Release --no-restore --output $apiOutput --nologo
     if ($LASTEXITCODE -ne 0) {
         throw 'API publish failed.'
     }
@@ -185,17 +208,19 @@ finally {
     Pop-Location
 }
 
-Copy-Item -Path (Join-Path $projectRoot 'src\Pdm.Desktop\bin\Release\net48\*') -Destination (Join-Path $localRoot 'client') -Recurse -Force
-Copy-Item -Path (Join-Path $projectRoot 'src\Pdm.SolidWorks.Addin\bin\Release\net48\*') -Destination (Join-Path $localRoot 'solidworks-addin') -Recurse -Force
+Copy-Item -Path (Join-Path $projectRoot 'src\Pdm.Desktop\bin\Release\net48\*') -Destination $clientOutput -Recurse -Force
+Copy-Item -Path (Join-Path $projectRoot 'src\Pdm.SolidWorks.Addin\bin\Release\net48\*') -Destination $addinOutput -Recurse -Force
 
 $desktopDirectory = [Environment]::GetFolderPath('Desktop')
 $shortcutPath = Join-Path $desktopDirectory 'UPTON PDM.lnk'
-$shell = New-Object -ComObject WScript.Shell
-$shortcut = $shell.CreateShortcut($shortcutPath)
-$shortcut.TargetPath = Join-Path $localRoot 'client\Upton.Pdm.Desktop.exe'
-$shortcut.WorkingDirectory = Join-Path $localRoot 'client'
-$shortcut.Description = 'UPTON PDM engineering client'
-$shortcut.Save()
+if (-not $isUpgrade) {
+    $shell = New-Object -ComObject WScript.Shell
+    $shortcut = $shell.CreateShortcut($shortcutPath)
+    $shortcut.TargetPath = Join-Path $localRoot 'client\Upton.Pdm.Desktop.exe'
+    $shortcut.WorkingDirectory = Join-Path $localRoot 'client'
+    $shortcut.Description = 'UPTON PDM engineering client'
+    $shortcut.Save()
+}
 
 $receipt = [ordered]@{
     preparedAt = [DateTimeOffset]::Now.ToString('O')

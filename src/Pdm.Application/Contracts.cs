@@ -48,6 +48,17 @@ public sealed record RegisterDocumentCommand(
     string FileName,
     DocumentKind Kind);
 
+public sealed record BomItemInput(
+    int Sequence,
+    string DrawingNumber,
+    string Name,
+    decimal Quantity,
+    string Unit,
+    string? Material,
+    string? Specification,
+    string Revision,
+    bool IsComplete);
+
 public interface IPdmRepository
 {
     Task<IReadOnlyList<Project>> ListProjectsAsync(CancellationToken cancellationToken);
@@ -59,7 +70,9 @@ public interface IPdmRepository
     Task<IReadOnlyList<DocumentVersion>> ListDocumentVersionsAsync(Guid documentId, CancellationToken cancellationToken);
     Task<DocumentVersion?> FindDocumentVersionAsync(Guid documentId, Guid versionId, CancellationToken cancellationToken);
     Task<DocumentReferenceNode?> GetReferenceTreeAsync(Guid projectId, CancellationToken cancellationToken);
+    Task<CadReferenceSnapshot?> GetLatestReferenceSnapshotAsync(Guid projectId, CancellationToken cancellationToken);
     Task<IReadOnlyList<BomItem>> GetBomAsync(Guid projectId, BomKind kind, CancellationToken cancellationToken);
+    Task<IReadOnlyList<BomItem>> ReplaceBomAsync(Guid projectId, BomKind kind, IReadOnlyList<BomItem> items, CancellationToken cancellationToken);
     Task<IReadOnlyList<ReleasePackage>> ListReleasePackagesAsync(Guid projectId, CancellationToken cancellationToken);
     Task<ReleasePackage?> FindReleasePackageAsync(Guid releasePackageId, CancellationToken cancellationToken);
     Task<PdmDocument> CheckoutAsync(Guid documentId, string actor, CancellationToken cancellationToken);
@@ -68,7 +81,9 @@ public interface IPdmRepository
     Task<DocumentCheckInResult> CheckInVersionAsync(Guid documentId, string actor, DocumentVersionCommit commit, CancellationToken cancellationToken);
     Task<(PdmDocument Document, DocumentVersion Version)> RestoreVersionAsync(Guid documentId, Guid sourceVersionId, string actor, StoredFile restoredFile, string changeNote, CancellationToken cancellationToken);
     Task<DocumentVersion> PublishDocumentVersionAsync(Guid documentId, Guid sourceVersionId, Guid releasePackageId, Guid approvalTaskId, string actor, CancellationToken cancellationToken);
+    Task<IReadOnlyList<DocumentVersion>> PublishReleasePackageVersionsAsync(Guid releasePackageId, Guid approvalTaskId, string actor, CancellationToken cancellationToken);
     Task<ReleasePackage> CreateReleasePackageAsync(ReleasePackage package, CancellationToken cancellationToken);
+    Task<ReleasePackage> SubmitReleasePackageAsync(Guid releasePackageId, string actor, CancellationToken cancellationToken);
     Task<ReleasePackage> DecideApprovalAsync(Guid taskId, string actor, ApprovalDecision decision, string? comment, CancellationToken cancellationToken);
     Task MarkPublishedAsync(Guid releasePackageId, string publishedPath, DateTimeOffset publishedAt, CancellationToken cancellationToken);
     Task MarkPublishFailedAsync(Guid releasePackageId, string error, CancellationToken cancellationToken);
@@ -76,11 +91,13 @@ public interface IPdmRepository
     Task<int> CountUsersAsync(CancellationToken cancellationToken);
     Task CreateUserAsync(UserAccount user, CancellationToken cancellationToken);
     Task AppendAuditAsync(AuditEntry entry, CancellationToken cancellationToken);
+    Task<IReadOnlyList<AuditEntry>> ListAuditAsync(string actor, UserRole role, int take, CancellationToken cancellationToken);
 }
 
 public interface IFileStorage
 {
     Task<UploadSession> StartUploadAsync(Guid projectId, string fileName, long totalLength, string expectedSha256, CancellationToken cancellationToken);
+    Task<UploadSession> GetUploadSessionAsync(Guid sessionId, CancellationToken cancellationToken);
     Task<UploadSession> WriteChunkAsync(Guid sessionId, int chunkIndex, Stream content, CancellationToken cancellationToken);
     Task<StoredFile> CompleteUploadAsync(Guid sessionId, string relativeTargetPath, CancellationToken cancellationToken);
     Task<Stream> OpenReadAsync(string absolutePath, CancellationToken cancellationToken);
@@ -91,6 +108,8 @@ public interface IFileStorage
 
 public interface IReleasePackagePublisher
 {
+    Task PrepareAsync(ReleasePackage package, Project project, CancellationToken cancellationToken);
+    Task ValidateAsync(ReleasePackage package, Project project, CancellationToken cancellationToken);
     Task<string> PublishAsync(ReleasePackage package, Project project, CancellationToken cancellationToken);
 }
 

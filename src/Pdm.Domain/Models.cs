@@ -56,7 +56,14 @@ public sealed record ReleasePackage(
     IReadOnlyList<ApprovalTask> ApprovalTasks,
     DateTimeOffset CreatedAt,
     DateTimeOffset? PublishedAt,
-    string? PublishedPath);
+    string? PublishedPath)
+{
+    public IReadOnlyList<BomItem> MechanicalBomSnapshot { get; init; } = [];
+
+    public IReadOnlyList<BomItem> ElectricalBomSnapshot { get; init; } = [];
+
+    public string? PublishError { get; init; }
+}
 
 public sealed record AuditEntry(
     Guid Id,

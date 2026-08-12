@@ -9,6 +9,23 @@ public sealed class AtomicReleasePackagePublisher(TimeProvider timeProvider) : I
 {
     private static readonly HashSet<string> NativeExtensions = new(StringComparer.OrdinalIgnoreCase) { ".SLDPRT", ".SLDASM", ".SLDDRW" };
 
+    public async Task PrepareAsync(ReleasePackage package, Project project, CancellationToken cancellationToken)
+    {
+        var vaultRoot = StorageLocationPolicy.Normalize(project.VaultLocation);
+        var stagingDirectory = StorageLocationPolicy.ResolveUnder(vaultRoot, Path.Combine(".release-staging", package.Number));
+        Directory.CreateDirectory(stagingDirectory);
+        await File.WriteAllBytesAsync(Path.Combine(stagingDirectory, "mechanical-bom.xlsx"), BomWorkbook.Write(package.MechanicalBomSnapshot), cancellationToken);
+        await File.WriteAllBytesAsync(Path.Combine(stagingDirectory, "electrical-bom.xlsx"), BomWorkbook.Write(package.ElectricalBomSnapshot), cancellationToken);
+    }
+
+    public Task ValidateAsync(ReleasePackage package, Project project, CancellationToken cancellationToken)
+    {
+        var stagingDirectory = StorageLocationPolicy.ResolveUnder(StorageLocationPolicy.Normalize(project.VaultLocation), Path.Combine(".release-staging", package.Number));
+        if (!Directory.Exists(stagingDirectory)) throw new PdmRuleException("发布包暂存目录不存在，请重新准备发布包。");
+        ValidateFiles(Directory.GetFiles(stagingDirectory, "*", SearchOption.AllDirectories));
+        return Task.CompletedTask;
+    }
+
     public async Task<string> PublishAsync(ReleasePackage package, Project project, CancellationToken cancellationToken)
     {
         var vaultRoot = StorageLocationPolicy.Normalize(project.VaultLocation);
@@ -20,15 +37,7 @@ public sealed class AtomicReleasePackagePublisher(TimeProvider timeProvider) : I
         }
 
         var sourceFiles = Directory.GetFiles(stagingDirectory, "*", SearchOption.AllDirectories);
-        if (sourceFiles.Any(path => NativeExtensions.Contains(Path.GetExtension(path))))
-        {
-            throw new PdmRuleException("生产发布包不能包含SolidWorks源文件。 ");
-        }
-
-        RequireFile(sourceFiles, path => string.Equals(Path.GetExtension(path), ".pdf", StringComparison.OrdinalIgnoreCase), "PDF图纸");
-        RequireFile(sourceFiles, path => string.Equals(Path.GetExtension(path), ".dwg", StringComparison.OrdinalIgnoreCase), "DWG图纸");
-        RequireFile(sourceFiles, path => string.Equals(Path.GetFileName(path), "mechanical-bom.xlsx", StringComparison.OrdinalIgnoreCase), "机械BOM XLSX");
-        RequireFile(sourceFiles, path => string.Equals(Path.GetFileName(path), "electrical-bom.xlsx", StringComparison.OrdinalIgnoreCase), "电气BOM XLSX");
+        ValidateFiles(sourceFiles);
 
         Directory.CreateDirectory(releaseRoot);
         var finalDirectory = StorageLocationPolicy.ResolveUnder(releaseRoot, package.Number);
@@ -98,5 +107,15 @@ public sealed class AtomicReleasePackagePublisher(TimeProvider timeProvider) : I
         {
             throw new PdmRuleException($"发布暂存目录缺少{description}。 ");
         }
+    }
+
+    private static void ValidateFiles(IReadOnlyList<string> sourceFiles)
+    {
+        if (sourceFiles.Any(path => NativeExtensions.Contains(Path.GetExtension(path))))
+            throw new PdmRuleException("生产发布包不能包含SolidWorks源文件。 ");
+        RequireFile(sourceFiles, path => string.Equals(Path.GetExtension(path), ".pdf", StringComparison.OrdinalIgnoreCase), "PDF图纸");
+        RequireFile(sourceFiles, path => string.Equals(Path.GetExtension(path), ".dwg", StringComparison.OrdinalIgnoreCase), "DWG图纸");
+        RequireFile(sourceFiles, path => string.Equals(Path.GetFileName(path), "mechanical-bom.xlsx", StringComparison.OrdinalIgnoreCase), "机械BOM XLSX");
+        RequireFile(sourceFiles, path => string.Equals(Path.GetFileName(path), "electrical-bom.xlsx", StringComparison.OrdinalIgnoreCase), "电气BOM XLSX");
     }
 }
