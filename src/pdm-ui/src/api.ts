@@ -1,4 +1,4 @@
-import type { ApprovalStep, AuditEntry, BomItem, DocumentKind, DocumentNode, DocumentVersionComparison, DocumentVersionSummary, ProjectSummary, ReferenceStatus, ReleasePackageSummary } from './types'
+import type { ApprovalStep, AuditEntry, BomItem, CreateProjectInput, CreateSubprojectInput, DocumentKind, DocumentNode, DocumentVersionComparison, DocumentVersionSummary, EquipmentTypeDefinition, PdmCustomer, PdmSystemSettings, PdmUser, ProjectNumberingOptions, ProjectSummary, ReferenceStatus, ReleasePackageSummary } from './types'
 
 const apiBase = (import.meta.env.VITE_PDM_API_BASE ?? 'http://127.0.0.1:5080').replace(/\/$/, '')
 
@@ -19,6 +19,7 @@ export interface AuthSession {
 export interface ProjectWorkspaceData {
   project: ProjectSummary
   root: DocumentNode
+  hasDocuments: boolean
   mechanicalBom: BomItem[]
   electricalBom: BomItem[]
   releasePackage: ReleasePackageSummary | null
@@ -32,6 +33,21 @@ interface ApiProject {
   vaultLocation: string
   releaseLocation: string
   isActive: boolean
+  projectAlias?: string | null
+  organizationId?: string | null
+  organizationName?: string | null
+  projectTypeCode?: string | null
+  equipmentTypeCode?: number | null
+  customerCode?: string | null
+  customerName?: string | null
+  customerProjectSequence?: number | null
+  deviceModel?: string | null
+  signedDate?: string | null
+  quantity?: number
+  parentProjectId?: string | null
+  childSequence?: number | null
+  serialNumbers?: string[]
+  responsibleUsers?: string[]
 }
 
 interface ApiRevision {
@@ -153,6 +169,77 @@ export function login(username: string, password: string): Promise<AuthSession> 
   })
 }
 
+export async function listProjects(token: string): Promise<ProjectSummary[]> {
+  const projects = await requestJson<ApiProject[]>('/api/projects', {}, token)
+  return projects.map(mapProject)
+}
+
+export function getProjectNumberingOptions(token: string): Promise<ProjectNumberingOptions> {
+  return requestJson('/api/project-numbering/options', {}, token)
+}
+
+export function listCustomers(token: string): Promise<PdmCustomer[]> {
+  return requestJson('/api/customers', {}, token)
+}
+
+export function saveCustomer(customer: Partial<PdmCustomer> & Pick<PdmCustomer, 'code' | 'name' | 'isActive'>, token: string): Promise<PdmCustomer> {
+  return requestJson(customer.id ? `/api/customers/${customer.id}` : '/api/customers', {
+    method: customer.id ? 'PUT' : 'POST',
+    body: JSON.stringify({ code: customer.code, name: customer.name, isActive: customer.isActive }),
+  }, token)
+}
+
+export function listUsers(token: string): Promise<PdmUser[]> {
+  return requestJson('/api/users', {}, token)
+}
+
+export async function updateProjectResponsibles(projectId: string, usernames: string[], token: string): Promise<ProjectSummary> {
+  const project = await requestJson<ApiProject>(`/api/projects/${projectId}/responsibles`, { method: 'PUT', body: JSON.stringify({ usernames }) }, token)
+  return mapProject(project)
+}
+
+export function getSystemSettings(token: string): Promise<PdmSystemSettings> {
+  return requestJson('/api/system-settings', {}, token)
+}
+
+export function updateSystemSettings(settings: PdmSystemSettings, token: string): Promise<PdmSystemSettings> {
+  return requestJson('/api/system-settings', { method: 'PUT', body: JSON.stringify(settings) }, token)
+}
+
+export function listEquipmentTypes(token: string): Promise<EquipmentTypeDefinition[]> {
+  return requestJson('/api/system-settings/equipment-types', {}, token)
+}
+
+export function saveEquipmentType(input: EquipmentTypeDefinition, token: string): Promise<EquipmentTypeDefinition> {
+  return requestJson(`/api/system-settings/equipment-types/${input.code}`, {
+    method: 'PUT',
+    body: JSON.stringify({ name: input.name, isActive: input.isActive !== false }),
+  }, token)
+}
+
+export function updateOrganizationCounters(organizationId: string, currentProjectSequence: number, currentSerialSequence: number, token: string): Promise<ProjectNumberingOptions> {
+  return requestJson(`/api/project-numbering/organizations/${organizationId}/counters`, {
+    method: 'PUT',
+    body: JSON.stringify({ currentProjectSequence, currentSerialSequence }),
+  }, token)
+}
+
+export async function createProject(input: CreateProjectInput, token: string): Promise<ProjectSummary> {
+  const project = await requestJson<ApiProject>('/api/projects', {
+    method: 'POST',
+    body: JSON.stringify(input),
+  }, token)
+  return mapProject(project)
+}
+
+export async function createSubproject(parentProjectId: string, input: CreateSubprojectInput, token: string): Promise<ProjectSummary> {
+  const project = await requestJson<ApiProject>(`/api/projects/${parentProjectId}/children`, {
+    method: 'POST',
+    body: JSON.stringify(input),
+  }, token)
+  return mapProject(project)
+}
+
 export async function saveBom(projectId: string, kind: 'Mechanical' | 'Electrical', items: BomItem[], token: string): Promise<BomItem[]> {
   const saved = await requestJson<ApiBomItem[]>(`/api/projects/${projectId}/boms/${kind}`, {
     method: 'PUT',
@@ -211,28 +298,45 @@ export function getStorageStatus(projectId: string, token: string): Promise<{ va
   return requestJson(`/api/projects/${projectId}/storage-status`, {}, token)
 }
 
-export async function loadProjectWorkspace(token: string): Promise<ProjectWorkspaceData> {
-  const projects = await requestJson<ApiProject[]>('/api/projects', {}, token)
-  const project = projects.find((candidate) => candidate.isActive) ?? projects[0]
-  if (!project) throw new PdmApiError('当前账号没有可访问的PDM项目。', 404)
+export async function loadProjectWorkspace(projectId: string, token: string): Promise<ProjectWorkspaceData> {
+  const project = await requestJson<ApiProject>(`/api/projects/${projectId}`, {}, token)
 
   const [documents, referenceRoot, mechanical, electrical, releasePackages] = await Promise.all([
     requestJson<ApiDocument[]>(`/api/projects/${project.id}/documents`, {}, token),
-    requestJson<ApiReferenceNode>(`/api/projects/${project.id}/reference-tree`, {}, token),
+    requestJson<ApiReferenceNode>(`/api/projects/${project.id}/reference-tree`, {}, token).catch(error => {
+      if (error instanceof PdmApiError && error.status === 404) return null
+      throw error
+    }),
     requestJson<ApiBomItem[]>(`/api/projects/${project.id}/boms/Mechanical`, {}, token),
     requestJson<ApiBomItem[]>(`/api/projects/${project.id}/boms/Electrical`, {}, token),
     requestJson<ApiReleasePackage[]>(`/api/projects/${project.id}/release-packages`, {}, token),
   ])
 
   const documentsById = new Map(documents.map((document) => [document.id, document]))
-  const documentsByFileName = new Map(documents.map((document) => [document.fileName.toLocaleLowerCase(), document]))
-
   return {
     project: mapProject(project),
-    root: mapReferenceNode(referenceRoot, documentsById, documentsByFileName),
+    root: referenceRoot
+      ? mapReferenceNode(referenceRoot, documentsById)
+      : emptyProjectRoot(project),
+    hasDocuments: documents.length > 0,
     mechanicalBom: mechanical.map(mapBomItem),
     electricalBom: electrical.map(mapBomItem),
     releasePackage: releasePackages.length > 0 ? mapReleasePackage(releasePackages[0]) : null,
+  }
+}
+
+function emptyProjectRoot(project: ApiProject): DocumentNode {
+  return {
+    id: `project-${project.id}`,
+    drawingNumber: '—',
+    name: '尚未关联SolidWorks图档',
+    fileName: '',
+    kind: 'Assembly',
+    configuration: '—',
+    quantity: 0,
+    version: '—',
+    status: 'Normal',
+    children: [],
   }
 }
 
@@ -247,28 +351,52 @@ function mapProject(project: ApiProject): ProjectSummary {
     vaultName: locationParts.at(-1) ?? project.vaultLocation,
     vaultLocation: project.vaultLocation,
     releaseLocation: project.releaseLocation,
+    projectAlias: project.projectAlias ?? undefined,
+    organizationId: project.organizationId ?? undefined,
+    organizationName: project.organizationName ?? undefined,
+    projectTypeCode: project.projectTypeCode ?? undefined,
+    equipmentTypeCode: project.equipmentTypeCode ?? undefined,
+    customerCode: project.customerCode ?? undefined,
+    customerName: project.customerName ?? undefined,
+    customerProjectSequence: project.customerProjectSequence ?? undefined,
+    deviceModel: project.deviceModel ?? undefined,
+    signedDate: project.signedDate ?? undefined,
+    quantity: project.quantity ?? 1,
+    parentProjectId: project.parentProjectId ?? undefined,
+    childSequence: project.childSequence ?? undefined,
+    serialNumbers: project.serialNumbers ?? [],
+    responsibleUsers: project.responsibleUsers ?? (project.owner ? [project.owner] : []),
   }
 }
 
 function mapReferenceNode(
   node: ApiReferenceNode,
   documentsById: Map<string, ApiDocument>,
-  documentsByFileName: Map<string, ApiDocument>,
 ): DocumentNode {
-  const document = (node.documentId ? documentsById.get(node.documentId) : undefined)
-    ?? documentsByFileName.get(node.fileName.toLocaleLowerCase())
+  const document = node.documentId ? documentsById.get(node.documentId) : undefined
+  const seenInstancePaths = new Set<string>()
+  const children = (node.children ?? [])
+    .filter((child) => {
+      const instancePath = child.instancePath.trim().toLocaleLowerCase('zh-CN')
+      if (!instancePath) return true
+      if (seenInstancePaths.has(instancePath)) return false
+      seenInstancePaths.add(instancePath)
+      return true
+    })
+    .map((child) => mapReferenceNode(child, documentsById))
   return {
-    id: node.documentId ?? node.nodeId,
+    id: node.nodeId || node.instancePath,
+    documentId: node.documentId ?? undefined,
     drawingNumber: document?.drawingNumber ?? node.fileName.replace(/\.[^.]+$/, ''),
-    name: document?.name ?? node.displayName,
+    name: node.displayName || document?.name || node.fileName.replace(/\.[^.]+$/, ''),
     fileName: node.fileName,
     kind: mapDocumentKind(node.kind),
     configuration: node.configuration || '默认',
     quantity: node.quantity,
     version: revisionDisplay(node.revision ?? document?.revision),
     checkedOutBy: node.checkedOutBy ?? document?.checkedOutBy ?? undefined,
-    status: mapReferenceStatus(node.status),
-    children: (node.children ?? []).map((child) => mapReferenceNode(child, documentsById, documentsByFileName)),
+    status: node.documentId ? mapReferenceStatus(node.status) : 'Unregistered',
+    children,
   }
 }
 

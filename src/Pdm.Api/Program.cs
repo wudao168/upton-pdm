@@ -89,7 +89,7 @@ builder.Services.AddScoped<PdmWorkflowService>();
 builder.Services.AddHostedService<PdmBootstrapHostedService>();
 
 builder.Services.AddCors(options => options.AddPolicy("PdmClients", policy => policy
-    .WithOrigins("http://127.0.0.1:5173", "http://localhost:5173", "https://appassets.pdm.local")
+    .WithOrigins("http://127.0.0.1:5173", "http://localhost:5173", "http://127.0.0.1:5175", "http://localhost:5175", "https://appassets.pdm.local")
     .AllowAnyHeader()
     .AllowAnyMethod()));
 builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)

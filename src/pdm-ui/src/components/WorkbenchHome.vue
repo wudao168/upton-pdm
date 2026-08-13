@@ -5,6 +5,7 @@ import type { DocumentNode, ProjectSummary, ReleasePackageSummary } from '../typ
 defineProps<{
   project: ProjectSummary
   selected: DocumentNode
+  hasDocuments: boolean
   documentCount: number
   warningCount: number
   mechanicalCount: number
@@ -45,7 +46,7 @@ const emit = defineEmits<{ documents: []; bom: [] }>()
 
       <article class="pdm-panel pdm-workbench-detail">
         <header class="pdm-panel-heading"><h2>当前工作图档</h2><button type="button" class="pdm-text-action" @click="emit('documents')">查看结构</button></header>
-        <div class="pdm-current-document">
+        <div v-if="hasDocuments" class="pdm-current-document">
           <span><FileCheck2 :size="22" /></span>
           <div><strong>{{ selected.drawingNumber }} · {{ selected.name }}</strong><small>{{ selected.fileName }}</small></div>
           <dl>
@@ -53,6 +54,10 @@ const emit = defineEmits<{ documents: []; bom: [] }>()
             <div><dt>状态</dt><dd>{{ selected.checkedOutBy ? `正在编辑 · ${selected.checkedOutBy}` : '可用' }}</dd></div>
             <div><dt>配置</dt><dd>{{ selected.configuration }}</dd></div>
           </dl>
+        </div>
+        <div v-else class="pdm-project-link-guide">
+          <FolderTree :size="34" />
+          <div><strong>项目尚未关联图纸</strong><p>请在SolidWorks端刷新项目列表，选择“{{ project.code }} · {{ project.name }}”，再提交图纸存档。</p></div>
         </div>
       </article>
 

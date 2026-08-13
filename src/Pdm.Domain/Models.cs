@@ -7,7 +7,61 @@ public sealed record Project(
     string Owner,
     string VaultLocation,
     string ReleaseLocation,
-    bool IsActive);
+    bool IsActive)
+{
+    public string? ProjectAlias { get; init; }
+
+    public Guid? OrganizationId { get; init; }
+
+    public string? OrganizationName { get; init; }
+
+    public string? ProjectTypeCode { get; init; }
+
+    public int? EquipmentTypeCode { get; init; }
+
+    public string? CustomerCode { get; init; }
+
+    public string? CustomerName { get; init; }
+
+    public int? CustomerProjectSequence { get; init; }
+
+    public string? DeviceModel { get; init; }
+
+    public DateOnly? SignedDate { get; init; }
+
+    public int Quantity { get; init; } = 1;
+
+    public Guid? ParentProjectId { get; init; }
+
+    public int? ChildSequence { get; init; }
+
+    public IReadOnlyList<string> SerialNumbers { get; init; } = [];
+
+    public IReadOnlyList<string> ResponsibleUsers { get; init; } = [];
+}
+
+public sealed record ProjectOrganization(
+    Guid Id,
+    string Name,
+    string ProjectCompanyCode,
+    string ModelCompanyCode,
+    string CrmCompanyName,
+    bool IsActive,
+    int CurrentProjectSequence = 0,
+    int CurrentSerialSequence = 0);
+
+public sealed record ProjectTypeDefinition(string Code, string Name, bool IsActive);
+
+public sealed record EquipmentTypeDefinition(int Code, string Name, bool IsActive);
+
+public sealed record PdmCustomer(Guid Id, string Code, string Name, bool IsActive);
+
+public sealed record PdmSystemSettings(string VaultRoot, string ReleaseRoot);
+
+public sealed record ProjectNumberingOptions(
+    IReadOnlyList<ProjectOrganization> Organizations,
+    IReadOnlyList<ProjectTypeDefinition> ProjectTypes,
+    IReadOnlyList<EquipmentTypeDefinition> EquipmentTypes);
 
 public sealed record PdmDocument(
     Guid Id,

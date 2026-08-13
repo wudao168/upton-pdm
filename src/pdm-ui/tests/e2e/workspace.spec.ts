@@ -27,7 +27,10 @@ test.beforeEach(async ({ page }) => {
     const fulfill = (body: unknown, status = 200) => route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(body) })
     if (path === '/health') return fulfill({ status: 'ok' })
     if (path === '/api/auth/login') return fulfill({ accessToken: 'e2e-token', expiresAt: '2099-01-01T00:00:00Z', username: 'engineer', displayName: '真实工程师', role: 'Engineer' })
-    if (path === '/api/projects') return fulfill([{ id: projectId, code: 'PRJ-REAL-001', name: '真实装配项目', owner: '真实工程师', vaultLocation: 'D:\\PDM\\PRJ-REAL-001', releaseLocation: 'D:\\Release\\PRJ-REAL-001', isActive: true }])
+    if (path === '/api/customers') return fulfill([{ id: 'customer-1', code: 'C00465', name: '中山比亚迪电子有限公司', isActive: true }])
+    if (path === '/api/project-numbering/options') return fulfill({ organizations: [{ id: '70000000-0000-0000-0000-000000000001', name: '昆山阿普顿自动化系统有限公司', projectCompanyCode: '7', modelCompanyCode: 'AK', crmCompanyName: '昆山阿普顿自动化系统有限公司' }], projectTypes: [{ code: 'P', name: '标准项目' }], equipmentTypes: [{ code: 2, name: '类型02' }] })
+    if (path === '/api/projects') return fulfill([{ id: projectId, code: 'PRJ-REAL-001', name: '真实装配项目', owner: '真实工程师', vaultLocation: 'D:\\PDM\\PRJ-REAL-001', releaseLocation: 'D:\\Release\\PRJ-REAL-001', isActive: true, quantity: 1, serialNumbers: [] }])
+    if (path === `/api/projects/${projectId}`) return fulfill({ id: projectId, code: 'PRJ-REAL-001', name: '真实装配项目', owner: '真实工程师', vaultLocation: 'D:\\PDM\\PRJ-REAL-001', releaseLocation: 'D:\\Release\\PRJ-REAL-001', isActive: true, quantity: 1, serialNumbers: [] })
     if (path.endsWith('/documents')) return fulfill([{ id: 'doc-root', drawingNumber: 'REAL-ASM-001', name: '真实总装配', fileName: 'REAL-ASM-001.SLDASM', kind: 0, revision: { display: 'W2' }, checkedOutBy: 'engineer' }, { id: 'doc-part', drawingNumber: 'REAL-PRT-001', name: '真实底板', fileName: 'REAL-PRT-001.SLDPRT', kind: 1, revision: { display: 'A' }, checkedOutBy: null }])
     if (path.endsWith('/reference-tree')) return fulfill({ nodeId: 'node-root', documentId: 'doc-root', instancePath: 'REAL-ASM-001', fileName: 'REAL-ASM-001.SLDASM', displayName: '真实总装配', kind: 0, configuration: '默认', quantity: 1, status: 0, revision: null, checkedOutBy: 'engineer', children: referenceChildren })
     if (path.endsWith('/boms/Mechanical')) return fulfill([{ sequence: 1, drawingNumber: 'REAL-PRT-001', name: '真实底板', quantity: 2, unit: '件', material: 'Q235B', specification: '10mm', revision: 'A', isComplete: true }])
@@ -42,13 +45,26 @@ test.beforeEach(async ({ page }) => {
   })
 })
 
-test('engineer logs in and reads the API-backed PDM workspace', async ({ page }) => {
+test('engineer logs in and reads the API-backed PDM workspace', async ({ page }, testInfo) => {
+  await page.addInitScript(() => {
+    Object.defineProperty(window, 'pdmHostMessages', {
+      configurable: true,
+      value: [],
+      writable: true,
+    })
+    Object.defineProperty(window.chrome, 'webview', {
+      configurable: true,
+      value: { postMessage: (message: unknown) => (window as unknown as { pdmHostMessages: unknown[] }).pdmHostMessages.push(message), addEventListener: () => undefined },
+    })
+  })
   await page.goto('/')
 
   await expect(page.getByRole('main').getByText('登录 UPTON PDM')).toBeVisible()
   await page.getByLabel('登录PDM').getByLabel('用户名').fill('engineer')
   await page.getByRole('textbox', { name: '密码' }).fill('correct-password')
   await page.getByRole('button', { name: '登录并加载数据' }).click()
+  await expect(page.getByLabel('项目管理')).toBeVisible()
+  await page.getByRole('button', { name: '进入项目' }).click()
 
   await expect(page.getByText('PRJ-REAL-001 · 真实装配项目')).toBeVisible()
   await expect(page.getByText('真实工程师', { exact: true })).toBeVisible()
@@ -59,6 +75,20 @@ test('engineer logs in and reads the API-backed PDM workspace', async ({ page })
   await expect(page.getByLabel('BOM完整性')).toContainText('1 项待确认')
   await expect(page.getByLabel('当前发布包')).toContainText('RP-REAL-001')
   await expect(page.getByText('PRJ-2026-018')).toHaveCount(0)
+
+  await page.evaluate(() => window.dispatchEvent(new CustomEvent('pdm-solidworks-capability', { detail: { available: true } })))
+  const solidWorksButton = page.getByRole('button', { name: 'SolidWorks打开最新' })
+  await expect(solidWorksButton).toBeEnabled()
+  await page.screenshot({ path: testInfo.outputPath('controlled-open-actions.png'), fullPage: false })
+  await solidWorksButton.click()
+  await expect.poll(() => page.evaluate(() => (window as unknown as { pdmHostMessages: Array<{ type?: string; payload?: { mode?: string } }> }).pdmHostMessages?.filter(message => message.type === 'open-document').at(-1))).toMatchObject({ type: 'open-document', payload: { mode: 'LatestReadOnly' } })
+
+  await page.getByRole('treeitem').first().click({ button: 'right' })
+  const releasedButton = page.getByRole('menuitem', { name: '打开最新正式发布版（只读）' })
+  await expect(releasedButton).toBeVisible()
+  await page.screenshot({ path: testInfo.outputPath('controlled-open-context-menu.png'), fullPage: false })
+  await releasedButton.click()
+  await expect.poll(() => page.evaluate(() => (window as unknown as { pdmHostMessages: Array<{ type?: string; payload?: { mode?: string } }> }).pdmHostMessages?.filter(message => message.type === 'open-document').at(-1))).toMatchObject({ type: 'open-document', payload: { mode: 'LatestReleased' } })
 
   await page.getByRole('tab', { name: '机械BOM' }).click()
   await expect(page.getByRole('row', { name: /1 REAL-PRT-001 真实底板 2 Q235B A/ })).toBeVisible()
@@ -74,6 +104,7 @@ for (const scale of [
     await page.getByRole('textbox', { name: '用户名' }).fill('engineer')
     await page.getByRole('textbox', { name: '密码' }).fill('correct-password')
     await page.getByRole('button', { name: '登录并加载数据' }).click()
+    await page.getByRole('button', { name: '进入项目' }).click()
     await expect(page.getByLabel('项目图档结构')).toBeVisible()
 
     const layout = await page.evaluate(() => {
@@ -99,7 +130,6 @@ for (const scale of [
       ['图纸审批', '审批与生产发包'],
       ['生产发包', '审批与生产发包'],
       ['审计查询', '审计查询'],
-      ['系统设置', '项目存储设置'],
     ] as const
     for (const [buttonName, panelName] of navCases) {
       const button = page.getByRole('button', { name: buttonName === '图纸审批' ? /^图纸审批/ : buttonName, exact: buttonName !== '图纸审批' })
@@ -111,6 +141,8 @@ for (const scale of [
     await page.getByRole('button', { name: '变更管理', exact: true }).click()
     await expect(page.getByText('图档历史版本对比')).toBeVisible()
     await expect(page.getByRole('button', { name: '只读预览左侧' })).toBeEnabled()
+    const drawerLayout = await page.locator('.el-drawer__body').evaluate(element => ({ clientWidth: element.clientWidth, scrollWidth: element.scrollWidth }))
+    expect(drawerLayout.scrollWidth).toBeLessThanOrEqual(drawerLayout.clientWidth)
 
     await page.screenshot({ path: testInfo.outputPath(`workspace-${scale.name}.png`), fullPage: false })
   })

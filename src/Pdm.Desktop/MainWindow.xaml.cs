@@ -1,17 +1,21 @@
 using System;
 using System.Collections.Generic;
+using System.ComponentModel;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Net.Http;
 using System.Net.Http.Headers;
+using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Web.Script.Serialization;
 using System.Windows;
+using System.Windows.Interop;
 using Microsoft.Web.WebView2.Core;
+using WinForms = System.Windows.Forms;
 using WpfMessageBox = System.Windows.MessageBox;
 
 namespace Upton.Pdm.Desktop;
@@ -19,24 +23,50 @@ namespace Upton.Pdm.Desktop;
 public partial class MainWindow : Window
 {
     private const string UiHost = "appassets.pdm.local";
+    private const int WindowMessageSystemCommand = 0x0112;
+    private const int MenuStartWithWindows = 0x1FF0;
+    private const int MenuExit = 0x1FE0;
+    private const uint MenuString = 0x0000;
+    private const uint MenuSeparator = 0x0800;
+    private const uint MenuByCommand = 0x0000;
+    private const uint MenuChecked = 0x0008;
+    private const uint MenuUnchecked = 0x0000;
     private readonly string[] startupArgs = Environment.GetCommandLineArgs();
+    private readonly bool startedWithWindows = Environment.GetCommandLineArgs().Any(argument => string.Equals(argument, "--startup", StringComparison.OrdinalIgnoreCase));
     private readonly HttpClient apiClient = new() { BaseAddress = new Uri("http://127.0.0.1:5080"), Timeout = TimeSpan.FromMinutes(5) };
+    private readonly SolidWorksOpenBridge solidWorksBridge = new();
     private string accessToken = string.Empty;
     private EDrawingsPreviewControl? embeddedPreview;
     private PreviewHostBounds? previewBounds;
     private bool previewDocumentReady;
     private int previewRequestGeneration;
+    private HwndSource? windowSource;
+    private IntPtr systemMenu;
+    private bool startWithWindows;
+    private bool allowClose;
+    private bool trayNoticeShown;
+    private WinForms.NotifyIcon? trayIcon;
+    private WinForms.ToolStripMenuItem? trayStartupItem;
 
     public MainWindow()
     {
         InitializeComponent();
+        SourceInitialized += OnSourceInitialized;
         Loaded += OnLoaded;
         SizeChanged += (_, _) => ApplyPreviewBounds();
-        Closed += (_, _) => DisposeClientResources();
+        StateChanged += OnWindowStateChanged;
+        Closing += OnClosing;
+        Closed += OnClosed;
+        System.Windows.Application.Current.SessionEnding += OnSessionEnding;
     }
 
     private async void OnLoaded(object sender, RoutedEventArgs e)
     {
+        if (startedWithWindows)
+        {
+            HideToNotificationArea(false);
+        }
+
         try
         {
             await InitializeWorkspaceAsync();
@@ -80,6 +110,7 @@ public partial class MainWindow : Window
                 var script = $"window.dispatchEvent(new CustomEvent('pdm-open-version-compare', {{ detail: {{ documentId: {Serialize(startupArgs[2])}, leftVersionId: {Serialize(startupArgs[3])}, rightVersionId: {Serialize(startupArgs[4])} }} }}));";
                 _ = WorkspaceView.CoreWebView2.ExecuteScriptAsync(script);
             }
+            _ = PublishSolidWorksCapabilityAsync();
         };
         WorkspaceView.Source = new Uri($"https://{UiHost}/index.html");
     }
@@ -99,6 +130,22 @@ public partial class MainWindow : Window
         if (type == "credentials-request")
         {
             _ = PublishRememberedCredentialsAsync();
+            return;
+        }
+
+        if (type == "desktop-settings-request")
+        {
+            _ = PublishDesktopSettingsAsync();
+            return;
+        }
+
+        if (type == "desktop-settings-save"
+            && message.TryGetValue("payload", out var desktopSettingsPayloadValue)
+            && desktopSettingsPayloadValue is Dictionary<string, object> desktopSettingsPayload
+            && desktopSettingsPayload.TryGetValue("startWithWindows", out var startWithWindowsValue)
+            && startWithWindowsValue is bool requestedStartWithWindows)
+        {
+            UpdateStartWithWindows(requestedStartWithWindows);
             return;
         }
 
@@ -147,12 +194,74 @@ public partial class MainWindow : Window
             return;
         }
 
-        if ((type == "open-document" || type == "preview-document") &&
+        if (type == "solidworks-capability-request")
+        {
+            _ = PublishSolidWorksCapabilityAsync();
+            return;
+        }
+
+        if (type == "open-document"
+            && message.TryGetValue("payload", out var openPayloadValue)
+            && openPayloadValue is Dictionary<string, object> openPayload)
+        {
+            _ = OpenInSolidWorksAsync(openPayload);
+            return;
+        }
+
+        if (type == "preview-document" &&
             message.TryGetValue("payload", out var payloadValue) &&
             payloadValue is Dictionary<string, object> payload)
         {
             _ = PreviewDocumentAsync(payload);
         }
+    }
+
+    private async Task OpenInSolidWorksAsync(IReadOnlyDictionary<string, object> payload)
+    {
+        try
+        {
+            if (!payload.TryGetValue("projectId", out var projectIdValue)
+                || !Guid.TryParse(projectIdValue as string, out var projectId)
+                || !payload.TryGetValue("documentId", out var documentIdValue)
+                || !Guid.TryParse(documentIdValue as string, out var documentId))
+            {
+                throw new InvalidOperationException("项目或图档标识无效，不能发送到SolidWorks。");
+            }
+
+            var mode = payload.TryGetValue("mode", out var modeValue) ? modeValue as string : "LatestReadOnly";
+            Guid? versionId = null;
+            if (payload.TryGetValue("versionId", out var versionIdValue)
+                && Guid.TryParse(versionIdValue as string, out var parsedVersionId))
+            {
+                versionId = parsedVersionId;
+            }
+
+            await PublishSolidWorksStatusAsync("loading", "正在准备SolidWorks受控打开请求…");
+            var message = await solidWorksBridge.SendAsync(projectId, documentId, versionId, mode ?? "LatestReadOnly", CancellationToken.None);
+            await PublishSolidWorksStatusAsync("ready", message);
+        }
+        catch (Exception exception)
+        {
+            await PublishSolidWorksStatusAsync("error", exception.Message);
+        }
+    }
+
+    private async Task PublishSolidWorksCapabilityAsync()
+    {
+        if (WorkspaceView.CoreWebView2 == null) return;
+        var detail = new { available = solidWorksBridge.IsAvailable };
+        var script = $"window.dispatchEvent(new CustomEvent('pdm-solidworks-capability', {{ detail: {Serialize(detail)} }}));";
+        try { await WorkspaceView.CoreWebView2.ExecuteScriptAsync(script); }
+        catch (InvalidOperationException) { }
+    }
+
+    private async Task PublishSolidWorksStatusAsync(string state, string message)
+    {
+        if (WorkspaceView.CoreWebView2 == null) return;
+        var detail = new { state, message };
+        var script = $"window.dispatchEvent(new CustomEvent('pdm-solidworks-status', {{ detail: {Serialize(detail)} }}));";
+        try { await WorkspaceView.CoreWebView2.ExecuteScriptAsync(script); }
+        catch (InvalidOperationException) { }
     }
 
     private async Task PublishRememberedCredentialsAsync()
@@ -167,6 +276,197 @@ public partial class MainWindow : Window
         var script = $"window.dispatchEvent(new CustomEvent('pdm-remembered-credentials', {{ detail: {Serialize(detail)} }}));";
         await WorkspaceView.CoreWebView2.ExecuteScriptAsync(script);
     }
+
+    private async Task PublishDesktopSettingsAsync(string error = "")
+    {
+        if (WorkspaceView.CoreWebView2 == null) return;
+        var detail = new { available = true, startWithWindows, closeBehavior = "notificationArea", error };
+        var script = $"window.dispatchEvent(new CustomEvent('pdm-desktop-settings', {{ detail: {Serialize(detail)} }}));";
+        try { await WorkspaceView.CoreWebView2.ExecuteScriptAsync(script); }
+        catch (InvalidOperationException) { }
+    }
+
+    private void UpdateStartWithWindows(bool enabled)
+    {
+        try
+        {
+            DesktopStartupSettings.SetEnabled(enabled);
+            startWithWindows = enabled;
+            UpdateSystemMenuCheck();
+            _ = PublishDesktopSettingsAsync();
+        }
+        catch (Exception exception) when (exception is UnauthorizedAccessException || exception is IOException)
+        {
+            _ = PublishDesktopSettingsAsync(exception.Message);
+        }
+    }
+
+    private void OnSourceInitialized(object? sender, EventArgs eventArgs)
+    {
+        var handle = new WindowInteropHelper(this).Handle;
+        windowSource = HwndSource.FromHwnd(handle);
+        windowSource?.AddHook(WindowMessageHook);
+        systemMenu = GetSystemMenu(handle, false);
+        if (systemMenu != IntPtr.Zero)
+        {
+            AppendMenu(systemMenu, MenuSeparator, UIntPtr.Zero, string.Empty);
+            AppendMenu(systemMenu, MenuString, new UIntPtr(MenuStartWithWindows), "随电脑启动");
+            AppendMenu(systemMenu, MenuString, new UIntPtr(MenuExit), "退出 UPTON PDM");
+        }
+
+        try
+        {
+            startWithWindows = DesktopStartupSettings.EnsureConfigured();
+            UpdateSystemMenuCheck();
+        }
+        catch (Exception exception) when (exception is UnauthorizedAccessException || exception is IOException)
+        {
+            startWithWindows = false;
+        }
+        InitializeTrayIcon();
+    }
+
+    private IntPtr WindowMessageHook(IntPtr hwnd, int message, IntPtr wParam, IntPtr lParam, ref bool handled)
+    {
+        if (message != WindowMessageSystemCommand) return IntPtr.Zero;
+        var command = wParam.ToInt32();
+        if (command == MenuStartWithWindows)
+        {
+            UpdateStartWithWindows(!startWithWindows);
+            handled = true;
+        }
+        else if (command == MenuExit)
+        {
+            allowClose = true;
+            Close();
+            handled = true;
+        }
+
+        return IntPtr.Zero;
+    }
+
+    private void UpdateSystemMenuCheck()
+    {
+        if (systemMenu != IntPtr.Zero)
+        {
+            CheckMenuItem(systemMenu, MenuStartWithWindows, MenuByCommand | (startWithWindows ? MenuChecked : MenuUnchecked));
+        }
+        if (trayStartupItem != null)
+        {
+            trayStartupItem.Checked = startWithWindows;
+        }
+    }
+
+    private void OnClosing(object? sender, CancelEventArgs eventArgs)
+    {
+        if (allowClose) return;
+        eventArgs.Cancel = true;
+        HideToNotificationArea(true);
+    }
+
+    private void OnWindowStateChanged(object? sender, EventArgs eventArgs)
+    {
+        if (WindowState == WindowState.Minimized && !allowClose)
+        {
+            HideToNotificationArea(false);
+        }
+    }
+
+    private void InitializeTrayIcon()
+    {
+        var icon = LoadClientIcon();
+
+        var menu = new WinForms.ContextMenuStrip();
+        var openItem = new WinForms.ToolStripMenuItem("打开 UPTON PDM");
+        trayStartupItem = new WinForms.ToolStripMenuItem("随电脑启动") { Checked = startWithWindows };
+        var exitItem = new WinForms.ToolStripMenuItem("退出 UPTON PDM");
+        openItem.Click += (_, _) => RestoreFromNotificationArea();
+        trayStartupItem.Click += (_, _) => UpdateStartWithWindows(!startWithWindows);
+        exitItem.Click += (_, _) => ExitApplication();
+        menu.Items.Add(openItem);
+        menu.Items.Add(trayStartupItem);
+        menu.Items.Add(new WinForms.ToolStripSeparator());
+        menu.Items.Add(exitItem);
+
+        trayIcon = new WinForms.NotifyIcon
+        {
+            Icon = icon,
+            Text = "UPTON PDM",
+            Visible = true,
+            ContextMenuStrip = menu
+        };
+        trayIcon.DoubleClick += (_, _) => RestoreFromNotificationArea();
+    }
+
+    private static System.Drawing.Icon LoadClientIcon()
+    {
+        var resource = System.Windows.Application.GetResourceStream(new Uri("Assets/PdmClient.ico", UriKind.Relative));
+        if (resource?.Stream != null)
+        {
+            using (resource.Stream)
+            using (var embeddedIcon = new System.Drawing.Icon(resource.Stream))
+            {
+                return (System.Drawing.Icon)embeddedIcon.Clone();
+            }
+        }
+
+        var executable = Process.GetCurrentProcess().MainModule?.FileName;
+        return (!string.IsNullOrWhiteSpace(executable)
+                ? System.Drawing.Icon.ExtractAssociatedIcon(executable)
+                : null)
+            ?? (System.Drawing.Icon)System.Drawing.SystemIcons.Application.Clone();
+    }
+
+    private void HideToNotificationArea(bool showNotice)
+    {
+        ShowInTaskbar = false;
+        Hide();
+        if (showNotice && !trayNoticeShown && trayIcon != null)
+        {
+            trayNoticeShown = true;
+            trayIcon.ShowBalloonTip(2500, "UPTON PDM", "客户端正在通知区域运行。双击图标可重新打开。", WinForms.ToolTipIcon.Info);
+        }
+    }
+
+    private void RestoreFromNotificationArea()
+    {
+        ShowInTaskbar = true;
+        Show();
+        WindowState = WindowState.Normal;
+        Activate();
+    }
+
+    private void ExitApplication()
+    {
+        allowClose = true;
+        Close();
+    }
+
+    private void OnSessionEnding(object? sender, SessionEndingCancelEventArgs eventArgs) => allowClose = true;
+
+    private void OnClosed(object? sender, EventArgs eventArgs)
+    {
+        System.Windows.Application.Current.SessionEnding -= OnSessionEnding;
+        windowSource?.RemoveHook(WindowMessageHook);
+        if (trayIcon != null)
+        {
+            trayIcon.Visible = false;
+            trayIcon.ContextMenuStrip?.Dispose();
+            trayIcon.Icon?.Dispose();
+            trayIcon.Dispose();
+            trayIcon = null;
+        }
+        DisposeClientResources();
+    }
+
+    [DllImport("user32.dll")]
+    private static extern IntPtr GetSystemMenu(IntPtr window, bool revert);
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    private static extern bool AppendMenu(IntPtr menu, uint flags, UIntPtr item, string text);
+
+    [DllImport("user32.dll")]
+    private static extern uint CheckMenuItem(IntPtr menu, uint item, uint check);
 
     private static bool TryReadCredentials(
         IReadOnlyDictionary<string, object> message,

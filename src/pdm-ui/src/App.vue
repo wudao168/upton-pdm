@@ -8,8 +8,10 @@ import AuditLog from './components/AuditLog.vue'
 import BomManager from './components/BomManager.vue'
 import BomSummary from './components/BomSummary.vue'
 import DocumentTree from './components/DocumentTree.vue'
+import CustomerManagement from './components/CustomerManagement.vue'
 import LoginView from './components/LoginView.vue'
 import PreviewWorkspace from './components/PreviewWorkspace.vue'
+import ProjectManager from './components/ProjectManager.vue'
 import ReleaseCenter from './components/ReleaseCenter.vue'
 import SideNav from './components/SideNav.vue'
 import StorageSettings from './components/StorageSettings.vue'
@@ -18,9 +20,9 @@ import { usePdmWorkspace } from './composables/usePdmWorkspace'
 import type { PreviewMode } from './types'
 
 const workspace = usePdmWorkspace()
-type NavKey = 'workbench' | 'documents' | 'bom' | 'approvals' | 'release' | 'changes' | 'audit' | 'settings'
-const activeView = ref<'workbench' | 'documents' | 'bom' | 'release' | 'audit' | 'settings'>('documents')
-const activeNav = ref<NavKey>('documents')
+type NavKey = 'projects' | 'customers' | 'workbench' | 'documents' | 'bom' | 'approvals' | 'release' | 'changes' | 'audit' | 'settings'
+const activeView = ref<'projects' | 'customers' | 'workbench' | 'documents' | 'bom' | 'release' | 'audit' | 'settings'>('projects')
+const activeNav = ref<NavKey>('projects')
 const restoreNote = ref('从历史版本恢复生成新的工作版本')
 
 function openDocuments(mode: PreviewMode = 'model') {
@@ -39,6 +41,27 @@ function submitApproval() {
 }
 
 async function handleNavigation(key: NavKey) {
+  if (key === 'projects') {
+    activeView.value = 'projects'
+    activeNav.value = key
+    return
+  }
+  if (key === 'customers') {
+    activeView.value = 'customers'
+    activeNav.value = key
+    return
+  }
+  if (key === 'settings') {
+    activeView.value = 'settings'
+    activeNav.value = key
+    return
+  }
+  if (!workspace.project.value.id) {
+    ElMessage.warning('请先创建项目或从项目中心选择一个项目')
+    activeView.value = 'projects'
+    activeNav.value = 'projects'
+    return
+  }
   if (key === 'workbench') {
     activeView.value = 'workbench'
     activeNav.value = key
@@ -70,9 +93,15 @@ async function handleNavigation(key: NavKey) {
     await workspace.loadAuditEntries()
     return
   }
-  activeView.value = 'settings'
-  activeNav.value = 'settings'
-  await workspace.loadStorageStatus()
+}
+
+async function openManagedProject(projectId: string) {
+  try {
+    await workspace.selectProject(projectId)
+    openDocuments('model')
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '项目加载失败')
+  }
 }
 
 async function runOperation(action: () => Promise<unknown>, success: string) {
@@ -126,6 +155,7 @@ async function restoreSelectedVersion() {
       <SideNav
         :active="activeNav"
         :approval-count="workspace.releasePackage.value ? 1 : 0"
+        :is-administrator="workspace.currentRole.value === 'Administrator'"
         @navigate="handleNavigation"
       />
       <main class="pdm-main">
@@ -138,15 +168,39 @@ async function restoreSelectedVersion() {
           <h1>数据加载失败</h1>
           <p>{{ workspace.loadError.value }}</p>
           <div class="pdm-state-actions">
-            <button type="button" class="pdm-primary-action" @click="workspace.reload">重新加载</button>
+            <button type="button" class="pdm-primary-action" @click="workspace.reload()">重新加载</button>
             <button type="button" class="pdm-secondary-action" @click="workspace.logout">重新登录</button>
           </div>
         </section>
         <template v-else-if="workspace.ready.value">
+        <ProjectManager
+          v-if="activeView === 'projects'"
+          :projects="workspace.projects.value"
+          :numbering-options="workspace.projectNumberingOptions.value"
+          :customers="workspace.customers.value"
+          :users="workspace.users.value"
+          :current-project-id="workspace.project.value.id"
+          :can-create="workspace.currentRole.value === 'Administrator' || workspace.currentRole.value === 'Engineer'"
+          :can-manage="workspace.currentRole.value === 'Administrator'"
+          :pending="workspace.operationPending.value"
+          :on-create="workspace.createProject"
+          :on-create-subproject="workspace.createSubproject"
+          :on-update-counters="workspace.updateOrganizationCounters"
+          :on-update-responsibles="workspace.updateProjectResponsibles"
+          @select="(projectId) => runOperation(() => workspace.selectProject(projectId), '当前项目已切换')"
+          @open="openManagedProject"
+        />
+        <CustomerManagement
+          v-else-if="activeView === 'customers'"
+          :customers="workspace.customers.value"
+          :pending="workspace.operationPending.value"
+          :on-save="workspace.saveCustomer"
+        />
         <WorkbenchHome
-          v-if="activeView === 'workbench'"
+          v-else-if="activeView === 'workbench'"
           :project="workspace.project.value"
           :selected="workspace.selectedNode.value"
+          :has-documents="workspace.hasDocuments.value"
           :document-count="workspace.normalCount.value + workspace.warningCount.value"
           :warning-count="workspace.warningCount.value"
           :mechanical-count="workspace.mechanicalBom.value.length"
@@ -177,13 +231,25 @@ async function restoreSelectedVersion() {
           @decide="(taskId, decision, comment) => runOperation(() => workspace.decideApprovalTask(taskId, decision, comment), decision === 'Approved' ? '审批已流转' : '发布包已驳回')"
         />
         <AuditLog v-else-if="activeView === 'audit'" :entries="workspace.auditEntries.value" @refresh="runOperation(workspace.loadAuditEntries, '审计记录已刷新')" />
-        <StorageSettings v-else-if="activeView === 'settings'" :project="workspace.project.value" :status="workspace.storageStatus.value" @refresh="runOperation(workspace.loadStorageStatus, '存储可用性已刷新')" />
+        <StorageSettings
+          v-else-if="activeView === 'settings'"
+          :settings="workspace.systemSettings.value"
+          :equipment-types="workspace.equipmentTypes.value"
+          :pending="workspace.operationPending.value"
+          :on-save-settings="workspace.saveSystemSettings"
+          :on-save-equipment-type="workspace.saveEquipmentType"
+        />
+        <section v-else-if="!workspace.hasDocuments.value" class="pdm-panel pdm-workspace-state">
+          <h1>项目已创建，尚未关联图纸</h1>
+          <p>请打开SolidWorks插件，刷新项目列表，选择“{{ workspace.project.value.code }} · {{ workspace.project.value.name }}”，再提交图纸存档。</p>
+          <div class="pdm-state-actions"><button type="button" class="pdm-secondary-action" @click="handleNavigation('projects')">返回项目中心</button></div>
+        </section>
         <template v-else>
         <header class="pdm-pagebar">
           <div>
             <div class="pdm-breadcrumb">项目图档 <span>/</span> 设计资料中心</div>
             <h1>{{ workspace.project.value.code }} · {{ workspace.project.value.name }}</h1>
-            <p :title="workspace.project.value.vaultLocation">项目负责人：{{ workspace.project.value.owner }}　{{ workspace.project.value.stage }}　图档库：{{ workspace.project.value.vaultName }}</p>
+            <p :title="workspace.project.value.vaultLocation">项目负责人：{{ workspace.project.value.responsibleUsers.join('、') || '未设置' }}　{{ workspace.project.value.stage }}　图档库：{{ workspace.project.value.vaultName }}</p>
           </div>
           <div class="pdm-page-actions">
             <button type="button" class="pdm-secondary-action" @click="workspace.openVersionDrawer()"><GitCompareArrows :size="16" />版本对比</button>
@@ -200,6 +266,7 @@ async function restoreSelectedVersion() {
             :warning-count="workspace.warningCount.value"
             @select="workspace.selectNode"
             @refresh="workspace.reload"
+            @open="workspace.openDocument"
           />
           <section class="pdm-stage">
             <div class="pdm-preview-layout">
@@ -240,7 +307,7 @@ async function restoreSelectedVersion() {
           <label>左侧版本<el-select v-model="workspace.leftVersionId.value" @change="workspace.compareVersions"><el-option v-for="version in workspace.versions.value" :key="version.id" :label="`${version.revision.display} · ${version.createdBy} · ${new Date(version.createdAt).toLocaleString()}`" :value="version.id" /></el-select></label>
           <label>右侧版本<el-select v-model="workspace.rightVersionId.value" @change="workspace.compareVersions"><el-option v-for="version in workspace.versions.value" :key="version.id" :label="`${version.revision.display} · ${version.createdBy} · ${new Date(version.createdAt).toLocaleString()}`" :value="version.id" /></el-select></label>
         </div>
-        <div class="pdm-version-actions"><button type="button" class="pdm-secondary-action" @click="workspace.openVersionFile(workspace.leftVersionId.value, false)">只读预览左侧</button><button type="button" class="pdm-secondary-action" @click="workspace.openVersionFile(workspace.leftVersionId.value, true)">下载左侧</button></div>
+        <div class="pdm-version-actions"><button type="button" class="pdm-secondary-action" :disabled="!workspace.leftVersionId.value" @click="workspace.openDocument(workspace.selectedNode.value, 'SpecificReadOnly', workspace.leftVersionId.value)">SolidWorks只读打开左侧</button><button type="button" class="pdm-secondary-action" @click="workspace.openVersionFile(workspace.leftVersionId.value, false)">只读预览左侧</button><button type="button" class="pdm-secondary-action" @click="workspace.openVersionFile(workspace.leftVersionId.value, true)">下载左侧</button></div>
         <div v-if="workspace.versionComparison.value" class="pdm-diff-sections">
           <section><h3>版本信息</h3><p>左：{{ workspace.versionComparison.value.left.revision.display }} · {{ versionStatus(workspace.versionComparison.value.left.status) }} · {{ workspace.versionComparison.value.left.createdBy }} · {{ new Date(workspace.versionComparison.value.left.createdAt).toLocaleString() }} · {{ workspace.versionComparison.value.left.changeNote }}</p><p>右：{{ workspace.versionComparison.value.right.revision.display }} · {{ versionStatus(workspace.versionComparison.value.right.status) }} · {{ workspace.versionComparison.value.right.createdBy }} · {{ new Date(workspace.versionComparison.value.right.createdAt).toLocaleString() }} · {{ workspace.versionComparison.value.right.changeNote }}</p></section>
           <section><h3>属性差异（{{ workspace.versionComparison.value.propertyChanges.length }}）</h3><ul><li v-for="(change, index) in workspace.versionComparison.value.propertyChanges" :key="`p-${index}`">【{{ propertyChangeKind(change.kind) }}】{{ change.name }}：{{ change.previousValue ?? '无' }} → {{ change.currentValue ?? '无' }}</li></ul><p v-if="!workspace.versionComparison.value.propertyChanges.length">无变化</p></section>

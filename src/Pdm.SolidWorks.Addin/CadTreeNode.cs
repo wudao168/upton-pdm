@@ -62,11 +62,17 @@ internal sealed class CadTreeNode
 
     public string LatestRevision { get; set; } = string.Empty;
 
+    public Guid? OpenedVersionId { get; set; }
+
+    public string OpenedRevision { get; set; } = string.Empty;
+
     public string CheckedOutBy { get; set; }
 
     public CadWorkState WorkState { get; set; }
 
     public string LatestVersionSha256 { get; set; } = string.Empty;
+
+    public string LatestStoredSha256 { get; set; } = string.Empty;
 
     public bool IsModifiedInSolidWorks { get; set; }
 

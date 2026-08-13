@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { Bell, LogOut } from '@lucide/vue'
+import pdmClientIconUrl from '../assets/pdm-client-icon.png'
 
 defineProps<{ online: boolean; userName?: string }>()
 const emit = defineEmits<{ logout: []; notifications: [] }>()
@@ -8,7 +9,7 @@ const emit = defineEmits<{ logout: []; notifications: [] }>()
 <template>
   <header class="pdm-titlebar">
     <div class="pdm-brand">
-      <span class="pdm-brand__mark" aria-hidden="true">P</span>
+      <img class="pdm-brand__icon" :src="pdmClientIconUrl" alt="" aria-hidden="true">
       <span class="pdm-brand__copy">
         <strong>UPTON PDM</strong>
         <small>产品数据管理客户端</small>

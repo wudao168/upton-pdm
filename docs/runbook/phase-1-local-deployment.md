@@ -96,7 +96,7 @@ powershell.exe -ExecutionPolicy Bypass -File .\deploy\Register-SolidWorksAddin.p
 & 'F:\codex file\pdm\src\Pdm.Desktop\bin\Release\net48\Upton.Pdm.Desktop.exe'
 ```
 
-客户端通过 WebView2 访问内置静态资源，并只连接 `http://127.0.0.1:5080`。目标电脑需安装 Microsoft Edge WebView2 Runtime。
+客户端通过 WebView2 访问内置静态资源，并只连接 `http://127.0.0.1:5080`。目标电脑需安装 Microsoft Edge WebView2 Runtime 和 eDrawings Professional。选择图档并点击“在客户端内预览”后，eDrawings ActiveX 直接显示在主页面图纸预览区，不会打开独立预览窗口。
 
 ## 日常图档操作
 

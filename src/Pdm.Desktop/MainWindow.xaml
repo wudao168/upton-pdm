@@ -3,6 +3,7 @@
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:wfi="clr-namespace:System.Windows.Forms.Integration;assembly=WindowsFormsIntegration"
         xmlns:wv2="clr-namespace:Microsoft.Web.WebView2.Wpf;assembly=Microsoft.Web.WebView2.Wpf"
+        Icon="Assets/PdmClient.ico"
         Title="UPTON PDM 客户端"
         Width="1440"
         Height="900"
@@ -11,7 +12,7 @@
         WindowStartupLocation="CenterScreen"
         Background="{StaticResource WindowBackground}">
     <Grid x:Name="RootGrid">
-        <wv2:WebView2 x:Name="WorkspaceView" />
+        <wv2:WebView2CompositionControl x:Name="WorkspaceView" />
 
         <Canvas x:Name="PreviewOverlay" Panel.ZIndex="20" IsHitTestVisible="True">
             <Border x:Name="PreviewFrame"

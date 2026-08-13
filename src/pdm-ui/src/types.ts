@@ -1,6 +1,7 @@
 export type DocumentKind = 'Assembly' | 'Part' | 'Drawing'
-export type ReferenceStatus = 'Normal' | 'Suppressed' | 'Hidden' | 'Lightweight' | 'Virtual' | 'Missing'
+export type ReferenceStatus = 'Normal' | 'Suppressed' | 'Hidden' | 'Lightweight' | 'Virtual' | 'Missing' | 'Unregistered'
 export type PreviewMode = 'model' | 'drawing' | 'bom'
+export type SolidWorksOpenMode = 'LatestReadOnly' | 'LatestReleased' | 'LatestEdit' | 'SpecificReadOnly'
 
 export interface ProjectSummary {
   id: string
@@ -11,10 +12,65 @@ export interface ProjectSummary {
   vaultName: string
   vaultLocation: string
   releaseLocation: string
+  projectAlias?: string
+  organizationId?: string
+  organizationName?: string
+  projectTypeCode?: string
+  equipmentTypeCode?: number
+  customerCode?: string
+  customerName?: string
+  customerProjectSequence?: number
+  deviceModel?: string
+  signedDate?: string
+  quantity: number
+  parentProjectId?: string
+  childSequence?: number
+  serialNumbers: string[]
+  responsibleUsers: string[]
 }
 
-export interface DocumentNode {
+export interface CreateProjectInput {
+  organizationId: string
+  projectTypeCode: string
+  equipmentTypeCode: number
+  customerId: string
+  name: string
+  projectAlias?: string
+  signedDate: string
+  quantity: number
+}
+
+export interface CreateSubprojectInput {
+  name: string
+  projectAlias?: string
+  quantity: number
+}
+
+export interface ProjectOrganization {
   id: string
+  name: string
+  projectCompanyCode: string
+  modelCompanyCode: string
+  crmCompanyName: string
+  currentProjectSequence: number
+  currentSerialSequence: number
+}
+
+export interface ProjectTypeDefinition { code: string; name: string }
+export interface EquipmentTypeDefinition { code: number; name: string; isActive?: boolean }
+export interface ProjectNumberingOptions {
+  organizations: ProjectOrganization[]
+  projectTypes: ProjectTypeDefinition[]
+  equipmentTypes: EquipmentTypeDefinition[]
+}
+export interface PdmCustomer { id: string; code: string; name: string; isActive: boolean }
+export interface PdmUser { username: string; displayName: string; role: string; isActive: boolean }
+export interface PdmSystemSettings { vaultRoot: string; releaseRoot: string }
+export interface DocumentNode {
+  /** Unique assembly occurrence. Tree selection and rendering must use this value. */
+  id: string
+  /** PDM document identity. Different occurrences of one part intentionally share this value. */
+  documentId?: string
   drawingNumber: string
   name: string
   fileName: string

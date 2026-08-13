@@ -1,14 +1,17 @@
 <script setup lang="ts">
-import { FolderTree, GitPullRequestArrow, History, LayoutDashboard, ListTree, PackageCheck, Settings, Stamp } from '@lucide/vue'
+import { FolderKanban, FolderTree, GitPullRequestArrow, History, LayoutDashboard, ListTree, PackageCheck, Settings, Stamp, UsersRound } from '@lucide/vue'
 
-type NavKey = 'workbench' | 'documents' | 'bom' | 'approvals' | 'release' | 'changes' | 'audit' | 'settings'
+type NavKey = 'projects' | 'customers' | 'workbench' | 'documents' | 'bom' | 'approvals' | 'release' | 'changes' | 'audit' | 'settings'
 
-const props = withDefaults(defineProps<{ active: NavKey; approvalCount?: number }>(), {
+const props = withDefaults(defineProps<{ active: NavKey; approvalCount?: number; isAdministrator?: boolean }>(), {
   approvalCount: 0,
+  isAdministrator: false,
 })
 const emit = defineEmits<{ navigate: [key: NavKey, label: string] }>()
 
 const items = [
+  { key: 'projects', label: '项目管理', icon: FolderKanban },
+  { key: 'customers', label: '客户维护', icon: UsersRound, administratorOnly: true },
   { key: 'workbench', label: '工作台', icon: LayoutDashboard },
   { key: 'documents', label: '项目图档', icon: FolderTree },
   { key: 'bom', label: 'BOM管理', icon: ListTree },
@@ -16,14 +19,15 @@ const items = [
   { key: 'release', label: '生产发包', icon: PackageCheck },
   { key: 'changes', label: '变更管理', icon: GitPullRequestArrow },
   { key: 'audit', label: '审计查询', icon: History },
-] satisfies Array<{ key: NavKey; label: string; icon: typeof LayoutDashboard }>
+] satisfies Array<{ key: NavKey; label: string; icon: typeof LayoutDashboard; administratorOnly?: boolean }>
 </script>
 
 <template>
   <aside class="pdm-sidebar" aria-label="主导航">
     <nav class="pdm-sidebar__nav">
       <button
-        v-for="item in items"
+      v-for="item in items"
+      v-show="!item.administratorOnly || props.isAdministrator"
         :key="item.label"
         type="button"
         class="pdm-nav-item"
@@ -37,6 +41,7 @@ const items = [
       </button>
     </nav>
     <button
+      v-if="props.isAdministrator"
       type="button"
       class="pdm-nav-item pdm-sidebar__settings"
       :class="{ 'is-active': props.active === 'settings' }"

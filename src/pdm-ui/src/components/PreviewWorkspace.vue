@@ -1,15 +1,19 @@
 <script setup lang="ts">
-import { Boxes, FileSearch, Maximize, MoreHorizontal } from '@lucide/vue'
+import { Boxes, FileSearch, Maximize, MoreHorizontal, Pencil, Rotate3D } from '@lucide/vue'
 import { nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { postDesktopMessage } from '../api'
-import type { BomItem, DocumentNode, PreviewMode } from '../types'
+import type { BomItem, DocumentNode, PreviewMode, SolidWorksOpenMode } from '../types'
 
 const props = defineProps<{ selected: DocumentNode; bom: BomItem[] }>()
 const mode = defineModel<PreviewMode>('mode', { required: true })
-const emit = defineEmits<{ open: [node: DocumentNode]; preview: [node: DocumentNode]; more: [] }>()
+const emit = defineEmits<{ open: [node: DocumentNode, mode: SolidWorksOpenMode, versionId?: string]; preview: [node: DocumentNode]; more: [] }>()
 const previewSlot = ref<HTMLElement>()
 const previewState = ref<'idle' | 'loading' | 'ready' | 'error'>('idle')
 const previewError = ref('')
+const solidWorksAvailable = ref(false)
+const solidWorksPending = ref(false)
+const solidWorksMessage = ref('')
+const solidWorksError = ref(false)
 let resizeObserver: ResizeObserver | undefined
 
 const tabs: Array<{ value: PreviewMode; label: string }> = [
@@ -39,10 +43,19 @@ function hidePreview() {
 }
 
 function startPreview() {
+  if (!props.selected.documentId) return
   previewState.value = 'loading'
   previewError.value = ''
   reportPreviewBounds()
   emit('preview', props.selected)
+}
+
+async function restartPreview() {
+  hidePreview()
+  previewState.value = 'idle'
+  previewError.value = ''
+  await nextTick()
+  if (mode.value === 'model' || mode.value === 'drawing') startPreview()
 }
 
 function fitPreview() {
@@ -60,28 +73,48 @@ function onPreviewStatus(event: Event) {
   }
 }
 
-watch(mode, async () => {
-  hidePreview()
-  previewState.value = 'idle'
-  previewError.value = ''
-  await nextTick()
-  reportPreviewBounds()
-})
+function openInSolidWorks(mode: SolidWorksOpenMode) {
+  if (!props.selected.documentId || !solidWorksAvailable.value || solidWorksPending.value) return
+  solidWorksPending.value = true
+  solidWorksError.value = false
+  solidWorksMessage.value = mode === 'LatestEdit' ? '正在准备最新受控文件并获取权限…' : '正在准备最新受控只读版本…'
+  emit('open', props.selected, mode)
+}
+
+function onSolidWorksCapability(event: Event) {
+  solidWorksAvailable.value = Boolean((event as CustomEvent<{ available?: boolean }>).detail?.available)
+}
+
+function onSolidWorksStatus(event: Event) {
+  const detail = (event as CustomEvent<{ state?: string; message?: string }>).detail
+  if (!detail?.state) return
+  solidWorksPending.value = detail.state === 'loading'
+  solidWorksError.value = detail.state === 'error'
+  solidWorksMessage.value = detail.message ?? ''
+}
+
+watch(mode, restartPreview)
 
 watch(() => props.selected.id, () => {
-  hidePreview()
-  previewState.value = 'idle'
-  previewError.value = ''
+  solidWorksPending.value = false
+  solidWorksMessage.value = ''
+  solidWorksError.value = false
+  void restartPreview()
 })
 
 onMounted(() => {
   window.addEventListener('resize', reportPreviewBounds)
   window.addEventListener('pdm-preview-status', onPreviewStatus)
+  window.addEventListener('pdm-solidworks-capability', onSolidWorksCapability)
+  window.addEventListener('pdm-solidworks-status', onSolidWorksStatus)
+  postDesktopMessage('solidworks-capability-request')
   if (typeof ResizeObserver !== 'undefined' && previewSlot.value) {
     resizeObserver = new ResizeObserver(reportPreviewBounds)
     resizeObserver.observe(previewSlot.value)
   }
-  void nextTick(reportPreviewBounds)
+  void nextTick(() => {
+    if (mode.value === 'model' || mode.value === 'drawing') startPreview()
+  })
 })
 
 onBeforeUnmount(() => {
@@ -89,6 +122,8 @@ onBeforeUnmount(() => {
   resizeObserver?.disconnect()
   window.removeEventListener('resize', reportPreviewBounds)
   window.removeEventListener('pdm-preview-status', onPreviewStatus)
+  window.removeEventListener('pdm-solidworks-capability', onSolidWorksCapability)
+  window.removeEventListener('pdm-solidworks-status', onSolidWorksStatus)
 })
 </script>
 
@@ -115,8 +150,25 @@ onBeforeUnmount(() => {
       <span class="pdm-selected-bar__title"><Boxes :size="16" /><strong>{{ selected.drawingNumber }} {{ selected.name }}</strong></span>
       <span>{{ selected.fileName }}</span>
       <span>工作版本 <b>{{ selected.version }}</b></span>
-      <button type="button" class="pdm-selected-status" @click="emit('open', selected)">{{ selected.checkedOutBy ? `正在编辑 · ${selected.checkedOutBy}` : '打开图档' }}</button>
+      <span class="pdm-selected-status">{{ selected.checkedOutBy ? `正在编辑 · ${selected.checkedOutBy}` : '未签出' }}</span>
+      <div class="pdm-solidworks-actions">
+        <button
+          type="button"
+          class="pdm-solidworks-primary"
+          :disabled="!selected.documentId || !solidWorksAvailable || solidWorksPending"
+          :title="solidWorksAvailable ? `从PDM获取${selected.version}并在SolidWorks中只读打开` : '当前电脑未安装SolidWorks或UPTON PDM插件'"
+          @click="openInSolidWorks('LatestReadOnly')"
+        ><Rotate3D :size="15" />SolidWorks打开最新</button>
+        <button
+          type="button"
+          class="pdm-solidworks-edit"
+          :disabled="!selected.documentId || !solidWorksAvailable || solidWorksPending"
+          title="完整下载并校验成功后获取编辑权限"
+          @click="openInSolidWorks('LatestEdit')"
+        ><Pencil :size="14" />获取并编辑</button>
+      </div>
     </div>
+    <p v-if="solidWorksMessage" class="pdm-solidworks-feedback" :class="{ 'is-error': solidWorksError }" role="status">{{ solidWorksMessage }}</p>
 
     <div class="pdm-preview-content">
       <div
@@ -131,8 +183,8 @@ onBeforeUnmount(() => {
         <p>{{ selected.fileName }} · {{ selected.version }}</p>
         <small>文件通过PDM权限校验和SHA-256校验后下载到独立只读缓存，不会覆盖工作文件。</small>
         <p v-if="previewState === 'error'" class="pdm-preview-error" role="alert">{{ previewError || 'eDrawings加载失败，请重试。' }}</p>
-        <button type="button" class="pdm-primary-action" :disabled="previewState === 'loading'" @click="startPreview">
-          {{ previewState === 'loading' ? '正在加载…' : previewState === 'error' ? '重新加载内嵌预览' : '在客户端内预览' }}
+        <button v-if="previewState === 'error'" type="button" class="pdm-primary-action" :disabled="!selected.documentId" @click="startPreview">
+          重新加载内嵌预览
         </button>
       </div>
 

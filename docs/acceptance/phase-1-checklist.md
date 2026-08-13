@@ -46,7 +46,7 @@
 - [x] 审批完成后生成不可变发布包并原子投放生产目录，包含 PDF、DWG、机械/电气 BOM XLSX、清单、审批记录和 SHA-256 校验文件。
 - [x] 版本对比支持左右版本选择、属性差异、引用树差异和 BOM 差异，可只读预览/下载历史文件并从历史版本创建新工作版本。
 - [x] WPF/WebView2 正式客户端在 Windows 125% 与 150% 缩放下通过：整页和壳层高度相等、结构树可独立滚动、7 个导航按钮均可点击、控制台 0 错误。
-- [x] eDrawings Professional ActiveX 已真实嵌入只读预览窗口；缓存文件 SHA-256 校验一致且设置只读属性。
+- [x] eDrawings Professional ActiveX 已嵌入客户端主页面的图纸预览区，不再打开独立预览窗口；缓存文件 SHA-256 校验一致且设置只读属性。
 - [x] 正式客户端窗口收到正常关闭请求后退出码为 0，无残留进程。
 
 ## 性能、备份与恢复
@@ -58,7 +58,7 @@
 ## 自动化与产物证据
 
 - Release 全量构建：0 警告、0 错误。
-- .NET 自动化：23/23 通过；Vitest：6/6 通过；Playwright：3/3 通过。
+- .NET 自动化：23/23 通过；Vitest：7/7 通过；Playwright：3/3 通过。
 - WebView2 缩放证据：`.local\acceptance\webview-125-percent.json`、`.local\acceptance\webview-150-percent.json`。
 - WebView2 截图：`.local\acceptance\webview-125-percent.png`、`.local\acceptance\webview-150-percent.png`。
 - SolidWorks 运行日志：`%LOCALAPPDATA%\UPTON PDM\addin-operations.log`；最后一次真实扫描记录 `nodes=82`，错误日志未新增。

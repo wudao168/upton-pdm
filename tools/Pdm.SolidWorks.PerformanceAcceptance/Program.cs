@@ -2,6 +2,7 @@ using System;
 using System.Collections;
 using System.Diagnostics;
 using System.IO;
+using System.Linq.Expressions;
 using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Web.Script.Serialization;
@@ -10,6 +11,7 @@ using System.Windows.Forms;
 internal static class Program
 {
     private const long TenGigabytes = 10L * 1024 * 1024 * 1024;
+    private static int programmaticSelectionNotifications;
 
     [STAThread]
     private static int Main(string[] args)
@@ -47,6 +49,9 @@ internal static class Program
             }
 
             var control = (Control)Activator.CreateInstance(controlType, true);
+            var nodeSelectedEvent = controlType.GetEvent("NodeSelected", BindingFlags.Instance | BindingFlags.Public)
+                ?? throw new MissingMemberException(controlType.FullName, "NodeSelected");
+            nodeSelectedEvent.AddEventHandler(control, CreateNotificationHandler(nodeSelectedEvent.EventHandlerType));
             form = new Form { Width = 360, Height = 720, ShowInTaskbar = false, Opacity = 0.01 };
             control.Dock = DockStyle.Fill;
             form.Controls.Add(control);
@@ -92,6 +97,7 @@ internal static class Program
                 System.Threading.Thread.Sleep(5);
             }
             expandStopwatch.Stop();
+            programmaticSelectionNotifications = 0;
             var selectionStopwatch = Stopwatch.StartNew();
             controlType.GetMethod("SelectByComponentName", BindingFlags.Instance | BindingFlags.Public)?.Invoke(control, new object[] { "PERF-04900.SLDPRT" });
             Application.DoEvents();
@@ -112,6 +118,7 @@ internal static class Program
                 && expandStopwatch.Elapsed.TotalMilliseconds < 1_500
                 && selectionStopwatch.Elapsed.TotalMilliseconds < 1_500
                 && string.Equals(selectedFileName, "PERF-04900.SLDPRT", StringComparison.Ordinal)
+                && programmaticSelectionNotifications == 0
                 && (stopwatch.Elapsed.TotalMilliseconds <= 1_500 || messageTicks >= 10 && maxHeartbeatGapMilliseconds <= 1_500)
                 && new FileInfo(sparsePath).Length == TenGigabytes;
             var report = new
@@ -124,6 +131,7 @@ internal static class Program
                 expandedBranchMilliseconds = Math.Round(expandStopwatch.Elapsed.TotalMilliseconds, 3),
                 deepSelectionMilliseconds = Math.Round(selectionStopwatch.Elapsed.TotalMilliseconds, 3),
                 selectedFileName,
+                programmaticSelectionNotifications,
                 uiMessageTicks = messageTicks,
                 maxHeartbeatGapMilliseconds = Math.Round(maxHeartbeatGapMilliseconds, 3),
                 rootChildren = tree.Nodes.Count == 1 ? tree.Nodes[0].Nodes.Count : 0,
@@ -184,6 +192,23 @@ internal static class Program
     private static object GetProperty(Type type, object target, string name) =>
         type.GetProperty(name, BindingFlags.Instance | BindingFlags.Public)?.GetValue(target, null)
         ?? throw new MissingMemberException(type.FullName, name);
+
+    private static Delegate CreateNotificationHandler(Type handlerType)
+    {
+        var invoke = handlerType.GetMethod("Invoke") ?? throw new MissingMethodException(handlerType.FullName, "Invoke");
+        var delegateParameters = invoke.GetParameters();
+        var parameters = new ParameterExpression[delegateParameters.Length];
+        for (var index = 0; index < delegateParameters.Length; index++)
+        {
+            parameters[index] = Expression.Parameter(delegateParameters[index].ParameterType, delegateParameters[index].Name);
+        }
+
+        var record = typeof(Program).GetMethod(nameof(RecordProgrammaticSelectionNotification), BindingFlags.Static | BindingFlags.NonPublic)
+            ?? throw new MissingMethodException(typeof(Program).FullName, nameof(RecordProgrammaticSelectionNotification));
+        return Expression.Lambda(handlerType, Expression.Call(record), parameters).Compile();
+    }
+
+    private static void RecordProgrammaticSelectionNotification() => programmaticSelectionNotifications++;
 
     private static void CreateSparseFile(string path, long length)
     {

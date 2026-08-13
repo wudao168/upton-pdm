@@ -1,7 +1,7 @@
 import { computed, onMounted, ref } from 'vue'
-import { checkHealth, compareDocumentVersions, createReleasePackage, decideApproval, exportBom, getStorageStatus, importBom, listAudit, listDocumentVersions, loadProjectWorkspace, login as apiLogin, PdmApiError, postDesktopMessage, readDocumentVersionFile, restoreDocumentVersion, saveBom, submitReleasePackage, uploadReleaseFile } from '../api'
+import { checkHealth, compareDocumentVersions, createProject as createProjectRequest, createSubproject as createSubprojectRequest, createReleasePackage, decideApproval, exportBom, getProjectNumberingOptions, getStorageStatus, getSystemSettings, importBom, listAudit, listCustomers, listDocumentVersions, listEquipmentTypes, listProjects, listUsers, loadProjectWorkspace, login as apiLogin, PdmApiError, postDesktopMessage, readDocumentVersionFile, restoreDocumentVersion, saveBom, saveCustomer as saveCustomerRequest, saveEquipmentType as saveEquipmentTypeRequest, submitReleasePackage, updateOrganizationCounters as updateOrganizationCountersRequest, updateProjectResponsibles as updateProjectResponsiblesRequest, updateSystemSettings as updateSystemSettingsRequest, uploadReleaseFile } from '../api'
 import type { AuthSession } from '../api'
-import type { AuditEntry, BomItem, DocumentNode, DocumentVersionComparison, DocumentVersionSummary, PreviewMode, ProjectSummary, ReleasePackageSummary } from '../types'
+import type { AuditEntry, BomItem, CreateProjectInput, CreateSubprojectInput, DocumentNode, DocumentVersionComparison, DocumentVersionSummary, EquipmentTypeDefinition, PdmCustomer, PdmSystemSettings, PdmUser, PreviewMode, ProjectNumberingOptions, ProjectSummary, ReleasePackageSummary, SolidWorksOpenMode } from '../types'
 
 const sessionKey = 'upton-pdm-session'
 
@@ -14,6 +14,9 @@ const emptyProject: ProjectSummary = {
   vaultName: '',
   vaultLocation: '',
   releaseLocation: '',
+  quantity: 1,
+  serialNumbers: [],
+  responsibleUsers: [],
 }
 
 const emptyRoot: DocumentNode = {
@@ -48,8 +51,9 @@ function filterNode(node: DocumentNode, query: string): DocumentNode | undefined
 }
 
 function countNodes(root: DocumentNode): { normal: number; warning: number } {
-  let normal = root.status === 'Missing' ? 0 : 1
-  let warning = root.status === 'Missing' ? 1 : 0
+  const hasWarning = root.status === 'Missing' || root.status === 'Unregistered'
+  let normal = hasWarning ? 0 : 1
+  let warning = hasWarning ? 1 : 0
   for (const child of root.children) {
     const counts = countNodes(child)
     normal += counts.normal
@@ -63,6 +67,12 @@ function messageFrom(error: unknown): string {
 }
 
 export function usePdmWorkspace() {
+  const projects = ref<ProjectSummary[]>([])
+  const projectNumberingOptions = ref<ProjectNumberingOptions>({ organizations: [], projectTypes: [], equipmentTypes: [] })
+  const customers = ref<PdmCustomer[]>([])
+  const users = ref<PdmUser[]>([])
+  const systemSettings = ref<PdmSystemSettings>({ vaultRoot: '', releaseRoot: '' })
+  const equipmentTypes = ref<EquipmentTypeDefinition[]>([])
   const project = ref<ProjectSummary>(emptyProject)
   const root = ref<DocumentNode>(emptyRoot)
   const mechanicalBom = ref<BomItem[]>([])
@@ -81,6 +91,7 @@ export function usePdmWorkspace() {
   const loading = ref(false)
   const loadError = ref('')
   const ready = ref(false)
+  const hasDocuments = ref(false)
   const versionDrawerOpen = ref(false)
   const versions = ref<DocumentVersionSummary[]>([])
   const leftVersionId = ref('')
@@ -98,14 +109,15 @@ export function usePdmWorkspace() {
   let pendingVersionComparison: { documentId: string; leftVersionId?: string; rightVersionId?: string } | null = null
 
   const selectedNode = computed(() => findNode(root.value, selectedId.value) ?? root.value)
+  const selectedDocumentId = computed(() => selectedNode.value.documentId)
   const filteredTree = computed(() => filterNode(root.value, searchQuery.value) ?? root.value)
-  const nodeCounts = computed(() => ready.value ? countNodes(root.value) : { normal: 0, warning: 0 })
+  const nodeCounts = computed(() => ready.value && hasDocuments.value ? countNodes(root.value) : { normal: 0, warning: 0 })
   const normalCount = computed(() => nodeCounts.value.normal)
   const warningCount = computed(() => nodeCounts.value.warning)
 
   function selectNode(node: DocumentNode) {
     selectedId.value = node.id
-    postDesktopMessage('document-selected', { documentId: node.id, fileName: node.fileName })
+    if (node.documentId) postDesktopMessage('document-selected', { documentId: node.documentId, fileName: node.fileName })
   }
 
   async function openVersionDrawer(left?: string, right?: string) {
@@ -113,8 +125,15 @@ export function usePdmWorkspace() {
     versionLoading.value = true
     versionError.value = ''
     versionComparison.value = null
+    const documentId = selectedDocumentId.value
+    if (!documentId) {
+      versions.value = []
+      versionError.value = '该引用尚未登记到PDM，暂无版本记录。'
+      versionLoading.value = false
+      return
+    }
     try {
-      versions.value = await listDocumentVersions(selectedNode.value.id, accessToken)
+      versions.value = await listDocumentVersions(documentId, accessToken)
       leftVersionId.value = left && versions.value.some(version => version.id === left) ? left : versions.value.at(-1)?.id ?? ''
       rightVersionId.value = right && versions.value.some(version => version.id === right) ? right : versions.value[0]?.id ?? ''
       await compareVersions()
@@ -133,7 +152,7 @@ export function usePdmWorkspace() {
     versionLoading.value = true
     versionError.value = ''
     try {
-      versionComparison.value = await compareDocumentVersions(selectedNode.value.id, leftVersionId.value, rightVersionId.value, accessToken)
+      versionComparison.value = await compareDocumentVersions(selectedDocumentId.value!, leftVersionId.value, rightVersionId.value, accessToken)
     } catch (error) {
       versionError.value = messageFrom(error)
     } finally {
@@ -142,7 +161,9 @@ export function usePdmWorkspace() {
   }
 
   async function openVersionFile(versionId: string, download: boolean) {
-    const blob = await readDocumentVersionFile(selectedNode.value.id, versionId, accessToken, download)
+    const documentId = selectedDocumentId.value
+    if (!documentId) throw new Error('该引用尚未登记到PDM。')
+    const blob = await readDocumentVersionFile(documentId, versionId, accessToken, download)
     const url = URL.createObjectURL(blob)
     if (download) {
       const anchor = document.createElement('a')
@@ -156,16 +177,20 @@ export function usePdmWorkspace() {
   }
 
   async function restoreVersion(versionId: string, changeNote: string) {
-    await restoreDocumentVersion(selectedNode.value.id, versionId, changeNote, accessToken)
+    const documentId = selectedDocumentId.value
+    if (!documentId) throw new Error('该引用尚未登记到PDM。')
+    await restoreDocumentVersion(documentId, versionId, changeNote, accessToken)
     await Promise.all([reload(), openVersionDrawer(undefined, undefined)])
   }
 
-  function openDocument(node = selectedNode.value) {
-    postDesktopMessage('open-document', { documentId: node.id, fileName: node.fileName })
+  function openDocument(node = selectedNode.value, mode: SolidWorksOpenMode = 'LatestReadOnly', versionId?: string) {
+    if (!node.documentId) return
+    postDesktopMessage('open-document', { projectId: project.value.id, documentId: node.documentId, fileName: node.fileName, mode, versionId })
   }
 
   function previewDocument(node = selectedNode.value) {
-    postDesktopMessage('preview-document', { documentId: node.id, fileName: node.fileName, revision: node.version })
+    if (!node.documentId) return
+    postDesktopMessage('preview-document', { documentId: node.documentId, fileName: node.fileName, revision: node.version })
   }
 
   function submitApproval() {
@@ -296,22 +321,65 @@ export function usePdmWorkspace() {
     currentUsername.value = ''
     currentRole.value = ''
     ready.value = false
+    projects.value = []
+    projectNumberingOptions.value = { organizations: [], projectTypes: [], equipmentTypes: [] }
+    customers.value = []
+    users.value = []
+    systemSettings.value = { vaultRoot: '', releaseRoot: '' }
+    equipmentTypes.value = []
     project.value = emptyProject
     root.value = emptyRoot
+    hasDocuments.value = false
     mechanicalBom.value = []
     electricalBom.value = []
     releasePackage.value = null
     window.sessionStorage.removeItem(sessionKey)
   }
 
-  async function reload() {
+  async function reload(projectId?: string) {
     if (!accessToken) return
     loading.value = true
     loadError.value = ''
     try {
-      const data = await loadProjectWorkspace(accessToken)
+      const [loadedProjects, loadedOptions, loadedCustomers] = await Promise.all([
+        listProjects(accessToken),
+        getProjectNumberingOptions(accessToken),
+        listCustomers(accessToken),
+      ])
+      projects.value = loadedProjects
+      projectNumberingOptions.value = loadedOptions
+      customers.value = loadedCustomers
+      if (currentRole.value === 'Administrator') {
+        const [loadedUsers, loadedSettings, loadedEquipmentTypes] = await Promise.all([
+          listUsers(accessToken), getSystemSettings(accessToken), listEquipmentTypes(accessToken),
+        ])
+        users.value = loadedUsers
+        systemSettings.value = loadedSettings
+        equipmentTypes.value = loadedEquipmentTypes
+      } else {
+        users.value = []
+        equipmentTypes.value = []
+      }
+      const selectedProject = projects.value.find(candidate => candidate.id === projectId)
+        ?? projects.value.find(candidate => candidate.id === project.value.id)
+        ?? projects.value.find(candidate => candidate.stage === '进行中')
+        ?? projects.value[0]
+      if (!selectedProject) {
+        project.value = emptyProject
+        root.value = emptyRoot
+        hasDocuments.value = false
+        mechanicalBom.value = []
+        electricalBom.value = []
+        releasePackage.value = null
+        ready.value = true
+        serviceOnline.value = true
+        return
+      }
+
+      const data = await loadProjectWorkspace(selectedProject.id, accessToken)
       project.value = data.project
       root.value = data.root
+      hasDocuments.value = data.hasDocuments
       mechanicalBom.value = data.mechanicalBom
       electricalBom.value = data.electricalBom
       releasePackage.value = data.releasePackage
@@ -335,6 +403,99 @@ export function usePdmWorkspace() {
     } finally {
       loading.value = false
     }
+  }
+
+  async function createProject(input: CreateProjectInput) {
+    operationPending.value = true
+    operationError.value = ''
+    try {
+      const created = await createProjectRequest(input, accessToken)
+      await reload(created.id)
+      return created
+    } catch (error) {
+      operationError.value = messageFrom(error)
+      throw error
+    } finally {
+      operationPending.value = false
+    }
+  }
+
+  async function createSubproject(parentProjectId: string, input: CreateSubprojectInput) {
+    operationPending.value = true
+    operationError.value = ''
+    try {
+      const created = await createSubprojectRequest(parentProjectId, input, accessToken)
+      await reload(created.id)
+      return created
+    } catch (error) {
+      operationError.value = messageFrom(error)
+      throw error
+    } finally {
+      operationPending.value = false
+    }
+  }
+
+  async function updateOrganizationCounters(organizationId: string, currentProjectSequence: number, currentSerialSequence: number) {
+    operationPending.value = true
+    operationError.value = ''
+    try {
+      projectNumberingOptions.value = await updateOrganizationCountersRequest(organizationId, currentProjectSequence, currentSerialSequence, accessToken)
+      return projectNumberingOptions.value
+    } catch (error) {
+      operationError.value = messageFrom(error)
+      throw error
+    } finally {
+      operationPending.value = false
+    }
+  }
+
+  async function saveCustomer(customer: Partial<PdmCustomer> & Pick<PdmCustomer, 'code' | 'name' | 'isActive'>) {
+    operationPending.value = true
+    try {
+      const saved = await saveCustomerRequest(customer, accessToken)
+      await reload(project.value.id)
+      return saved
+    } finally {
+      operationPending.value = false
+    }
+  }
+
+  async function updateProjectResponsibles(projectId: string, usernames: string[]) {
+    operationPending.value = true
+    try {
+      const saved = await updateProjectResponsiblesRequest(projectId, usernames, accessToken)
+      await reload(project.value.id || projectId)
+      return saved
+    } finally {
+      operationPending.value = false
+    }
+  }
+
+  async function saveSystemSettings(settings: PdmSystemSettings) {
+    operationPending.value = true
+    try {
+      systemSettings.value = await updateSystemSettingsRequest(settings, accessToken)
+      return systemSettings.value
+    } finally {
+      operationPending.value = false
+    }
+  }
+
+  async function saveEquipmentType(input: EquipmentTypeDefinition) {
+    operationPending.value = true
+    try {
+      const saved = await saveEquipmentTypeRequest(input, accessToken)
+      const [loadedOptions, loadedEquipmentTypes] = await Promise.all([getProjectNumberingOptions(accessToken), listEquipmentTypes(accessToken)])
+      projectNumberingOptions.value = loadedOptions
+      equipmentTypes.value = loadedEquipmentTypes
+      return saved
+    } finally {
+      operationPending.value = false
+    }
+  }
+
+  async function selectProject(projectId: string) {
+    await reload(projectId)
   }
 
   async function login(username: string, password: string, rememberCredentials = false) {
@@ -404,6 +565,12 @@ export function usePdmWorkspace() {
   })
 
   return {
+    projects,
+    projectNumberingOptions,
+    customers,
+    users,
+    systemSettings,
+    equipmentTypes,
     project,
     root,
     releasePackage,
@@ -423,6 +590,7 @@ export function usePdmWorkspace() {
     loading,
     loadError,
     ready,
+    hasDocuments,
     normalCount,
     warningCount,
     versionDrawerOpen,
@@ -438,6 +606,14 @@ export function usePdmWorkspace() {
     uploadProgress,
     auditEntries,
     storageStatus,
+    createProject,
+    createSubproject,
+    updateOrganizationCounters,
+    saveCustomer,
+    updateProjectResponsibles,
+    saveSystemSettings,
+    saveEquipmentType,
+    selectProject,
     selectNode,
     openDocument,
     previewDocument,

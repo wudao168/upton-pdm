@@ -40,6 +40,20 @@ internal sealed class PdmApiClient : IDisposable
     public Task<List<DocumentDto>> GetDocumentsAsync(Guid projectId, CancellationToken cancellationToken) =>
         GetJsonAsync<List<DocumentDto>>(string.Concat("api/projects/", projectId, "/documents"), cancellationToken);
 
+    public Task<DocumentReferenceNodeDto> GetReferenceTreeAsync(Guid projectId, CancellationToken cancellationToken) =>
+        GetJsonAsync<DocumentReferenceNodeDto>(string.Concat("api/projects/", projectId, "/reference-tree"), cancellationToken);
+
+    public Task<ControlledOpenManifestDto> CreateControlledOpenManifestAsync(
+        Guid documentId,
+        Guid? versionId,
+        bool releasedOnly,
+        bool forEdit,
+        CancellationToken cancellationToken) =>
+        PostJsonAsync<ControlledOpenManifestDto>(
+            string.Concat("api/documents/", documentId, "/open-manifest"),
+            new { versionId, releasedOnly, forEdit },
+            cancellationToken);
+
     public Task<DocumentDto> RegisterDocumentAsync(Guid projectId, CadTreeNode node, CancellationToken cancellationToken) =>
         PostJsonAsync<DocumentDto>(
             string.Concat("api/projects/", projectId, "/documents/register"),
@@ -64,10 +78,30 @@ internal sealed class PdmApiClient : IDisposable
     public Task<DocumentDto> DiscardCheckoutAsync(Guid documentId, CancellationToken cancellationToken) =>
         PostJsonAsync<DocumentDto>(string.Concat("api/documents/", documentId, "/discard-checkout"), new { }, cancellationToken);
 
-    public Task<CheckInResultDto> CheckInAsync(Guid documentId, Guid projectId, CadTreeNode root, string comment, StoredVersionFile storedFile, IReadOnlyDictionary<string, string> modelProperties, CancellationToken cancellationToken) =>
+    public Task<CheckInResultDto> CheckInAsync(
+        Guid documentId,
+        Guid projectId,
+        CadTreeNode root,
+        string comment,
+        StoredVersionFile storedFile,
+        IReadOnlyDictionary<string, string> modelProperties,
+        bool isProjectRoot,
+        bool forceVersion,
+        CancellationToken cancellationToken) =>
         PostJsonAsync<CheckInResultDto>(
             string.Concat("api/documents/", documentId, "/checkin"),
-            new { projectId, root = ToRequestNode(root), comment, storageRelativePath = storedFile.RelativePath, fileLength = storedFile.Length, sha256 = storedFile.Sha256, properties = MergeProperties(storedFile.Properties, modelProperties) },
+            new
+            {
+                projectId,
+                root = ToRequestNode(root),
+                comment,
+                storageRelativePath = storedFile.RelativePath,
+                fileLength = storedFile.Length,
+                sha256 = storedFile.Sha256,
+                properties = MergeProperties(storedFile.Properties, modelProperties),
+                isProjectRoot,
+                forceVersion
+            },
             cancellationToken);
 
     private static Dictionary<string, string> MergeProperties(IReadOnlyDictionary<string, string> fileProperties, IReadOnlyDictionary<string, string> modelProperties)
@@ -144,6 +178,104 @@ internal sealed class PdmApiClient : IDisposable
         return path;
     }
 
+    public async Task<string> DownloadVersionToWorkspaceStageAsync(
+        Guid documentId,
+        Guid versionId,
+        string fileName,
+        string expectedSha256,
+        CancellationToken cancellationToken)
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "UPTON-PDM", "workspace-stage", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        var path = Path.Combine(directory, Path.GetFileName(fileName));
+        var partialPath = path + ".download";
+        try
+        {
+            using (var response = await httpClient.GetAsync(
+                string.Concat("api/documents/", documentId, "/versions/", versionId, "/file?download=false"),
+                cancellationToken).ConfigureAwait(false))
+            {
+                if (!response.IsSuccessStatusCode)
+                {
+                    throw new InvalidOperationException("PDM最新版本文件读取失败。");
+                }
+
+                using (var input = await response.Content.ReadAsStreamAsync().ConfigureAwait(false))
+                using (var output = new FileStream(partialPath, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+                {
+                    await input.CopyToAsync(output).ConfigureAwait(false);
+                }
+            }
+
+            var actualSha256 = ComputeFileSha256(partialPath);
+            if (!string.Equals(actualSha256, expectedSha256, StringComparison.OrdinalIgnoreCase))
+            {
+                throw new InvalidDataException("PDM最新版本文件校验失败，未更新本地工作文件。");
+            }
+
+            File.Move(partialPath, path);
+            return path;
+        }
+        catch
+        {
+            if (File.Exists(partialPath)) File.Delete(partialPath);
+            if (Directory.Exists(directory)) Directory.Delete(directory, true);
+            throw;
+        }
+    }
+
+    public async Task<string> DownloadControlledOpenFileAsync(
+        ControlledOpenFileDto file,
+        string stagingDirectory,
+        CancellationToken cancellationToken)
+    {
+        var relativePath = file.RelativePath ?? file.FileName;
+        var root = Path.GetFullPath(stagingDirectory).TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
+        var path = Path.GetFullPath(Path.Combine(root, relativePath ?? string.Empty));
+        if (!path.StartsWith(root, StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidDataException("PDM打开清单包含无效相对路径。");
+        }
+
+        Directory.CreateDirectory(Path.GetDirectoryName(path));
+        var partialPath = path + ".download";
+        if (File.Exists(partialPath)) File.Delete(partialPath);
+        try
+        {
+            using (var response = await httpClient.GetAsync(
+                string.Concat("api/documents/", file.DocumentId, "/versions/", file.VersionId, "/file?download=false"),
+                HttpCompletionOption.ResponseHeadersRead,
+                cancellationToken).ConfigureAwait(false))
+            {
+                if (!response.IsSuccessStatusCode)
+                {
+                    throw new InvalidOperationException(string.Concat(file.FileName, "的受控版本读取失败。"));
+                }
+
+                using (var input = await response.Content.ReadAsStreamAsync().ConfigureAwait(false))
+                using (var output = new FileStream(partialPath, FileMode.CreateNew, FileAccess.Write, FileShare.None, 256 * 1024, true))
+                {
+                    await input.CopyToAsync(output).ConfigureAwait(false);
+                }
+            }
+
+            var info = new FileInfo(partialPath);
+            if (info.Length != file.FileLength
+                || !string.Equals(ComputeFileSha256(partialPath), file.Sha256, StringComparison.OrdinalIgnoreCase))
+            {
+                throw new InvalidDataException(string.Concat(file.FileName, "的长度或SHA-256校验失败。"));
+            }
+
+            File.Move(partialPath, path);
+            return path;
+        }
+        catch
+        {
+            if (File.Exists(partialPath)) File.Delete(partialPath);
+            throw;
+        }
+    }
+
     private static string BuildVersionCopyFileName(string fileName, string revision, Guid versionId)
     {
         var safeFileName = Path.GetFileName(fileName);
@@ -218,10 +350,43 @@ internal sealed class PdmApiClient : IDisposable
             configuration = node.Configuration,
             quantity = node.Quantity,
             status = (int)node.Status,
-            revision = (object)null,
+            revision = ToRevisionRequest(node.Revision),
             checkedOutBy = node.CheckedOutBy,
             children
         };
+    }
+
+    private static object ToRevisionRequest(string revision)
+    {
+        var normalized = revision?.Trim().ToUpperInvariant();
+        if (string.IsNullOrWhiteSpace(normalized))
+        {
+            return null;
+        }
+
+        if (normalized.Length == 1 && normalized[0] >= 'A' && normalized[0] <= 'Z')
+        {
+            return new { baseRevision = normalized, workIteration = 0, isReleased = true };
+        }
+
+        if (normalized.StartsWith("W", StringComparison.Ordinal)
+            && int.TryParse(normalized.Substring(1), out var workIteration)
+            && workIteration > 0)
+        {
+            return new { baseRevision = (string)null, workIteration, isReleased = false };
+        }
+
+        if (normalized.Length >= 4
+            && normalized[0] >= 'A'
+            && normalized[0] <= 'Z'
+            && string.Equals(normalized.Substring(1, 2), "-W", StringComparison.Ordinal)
+            && int.TryParse(normalized.Substring(3), out workIteration)
+            && workIteration > 0)
+        {
+            return new { baseRevision = normalized.Substring(0, 1), workIteration, isReleased = false };
+        }
+
+        return null;
     }
 
     private static string GetErrorMessage(string status, string body)
@@ -229,6 +394,22 @@ internal sealed class PdmApiClient : IDisposable
         if (string.IsNullOrWhiteSpace(body))
         {
             return string.Concat("PDM服务返回", status, "。 ");
+        }
+
+        try
+        {
+            var problem = new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(body);
+            foreach (var key in new[] { "detail", "message", "title" })
+            {
+                if (problem.TryGetValue(key, out var value) && !string.IsNullOrWhiteSpace(value?.ToString()))
+                {
+                    return value.ToString();
+                }
+            }
+        }
+        catch
+        {
+            // Preserve the original response when it is not JSON problem details.
         }
 
         return body.Length <= 500 ? body : body.Substring(0, 500);
@@ -248,6 +429,8 @@ internal sealed class ProjectDto
     public Guid Id { get; set; }
     public string Code { get; set; }
     public string Name { get; set; }
+    public Guid? ParentProjectId { get; set; }
+    public int? ChildSequence { get; set; }
 
     public override string ToString() => string.Concat(Code, " · ", Name);
 }
@@ -255,6 +438,21 @@ internal sealed class ProjectDto
 internal sealed class RevisionDto
 {
     public string Display { get; set; }
+}
+
+internal sealed class DocumentReferenceNodeDto
+{
+    public Guid? DocumentId { get; set; }
+    public string InstancePath { get; set; }
+    public string FileName { get; set; }
+    public string DisplayName { get; set; }
+    public int Kind { get; set; }
+    public string Configuration { get; set; }
+    public int Quantity { get; set; }
+    public int Status { get; set; }
+    public RevisionDto Revision { get; set; }
+    public string CheckedOutBy { get; set; }
+    public List<DocumentReferenceNodeDto> Children { get; set; }
 }
 
 internal sealed class DocumentDto
@@ -277,9 +475,34 @@ internal sealed class DocumentVersionDto
     public string ChangeNote { get; set; }
     public string Sha256 { get; set; }
     public Dictionary<string, string> PropertySnapshot { get; set; }
+    public DocumentReferenceNodeDto ReferenceSnapshot { get; set; }
 }
 
 internal sealed class CheckInResultDto { public DocumentDto Document { get; set; } public DocumentVersionDto Version { get; set; } public bool VersionCreated { get; set; } }
+internal sealed class ControlledOpenManifestDto
+{
+    public Guid Id { get; set; }
+    public Guid ProjectId { get; set; }
+    public string ProjectCode { get; set; }
+    public Guid RootDocumentId { get; set; }
+    public Guid RootVersionId { get; set; }
+    public string RootRevision { get; set; }
+    public string RootRelativePath { get; set; }
+    public bool ForEdit { get; set; }
+    public List<ControlledOpenFileDto> Files { get; set; }
+}
+internal sealed class ControlledOpenFileDto
+{
+    public Guid DocumentId { get; set; }
+    public Guid VersionId { get; set; }
+    public string Revision { get; set; }
+    public string FileName { get; set; }
+    public string RelativePath { get; set; }
+    public long FileLength { get; set; }
+    public string Sha256 { get; set; }
+    public string Configuration { get; set; }
+    public bool IsRoot { get; set; }
+}
 internal sealed class UploadSessionDto { public Guid Id { get; set; } public int ChunkSize { get; set; } }
 internal sealed class StoredFileDto { public string RelativePath { get; set; } public long Length { get; set; } public string Sha256 { get; set; } }
 internal sealed class StoredVersionFile

@@ -34,12 +34,36 @@ public sealed record DocumentVersionCommit(
     IReadOnlyList<BomItem> MechanicalBomSnapshot,
     IReadOnlyList<BomItem> ElectricalBomSnapshot,
     Guid? SourceVersionId = null,
-    string? SourceDescription = null);
+    string? SourceDescription = null,
+    bool IsProjectRoot = false,
+    bool ForceVersion = false);
 
 public sealed record DocumentCheckInResult(
     PdmDocument Document,
     DocumentVersion? Version,
     bool VersionCreated);
+
+public sealed record ControlledOpenFile(
+    Guid DocumentId,
+    Guid VersionId,
+    string Revision,
+    string FileName,
+    string RelativePath,
+    long FileLength,
+    string Sha256,
+    string Configuration,
+    bool IsRoot);
+
+public sealed record ControlledOpenManifest(
+    Guid Id,
+    Guid ProjectId,
+    string ProjectCode,
+    Guid RootDocumentId,
+    Guid RootVersionId,
+    string RootRevision,
+    string RootRelativePath,
+    bool ForEdit,
+    IReadOnlyList<ControlledOpenFile> Files);
 
 public sealed record RegisterDocumentCommand(
     Guid ProjectId,
@@ -47,6 +71,34 @@ public sealed record RegisterDocumentCommand(
     string Name,
     string FileName,
     DocumentKind Kind);
+
+public sealed record CreateProjectCommand(
+    string Code,
+    string Name,
+    string Owner,
+    string VaultLocation,
+    string ReleaseLocation);
+
+public sealed record CreateNumberedProjectCommand(
+    Guid OrganizationId,
+    string ProjectTypeCode,
+    int EquipmentTypeCode,
+    Guid CustomerId,
+    string Name,
+    string? ProjectAlias,
+    DateOnly SignedDate,
+    int Quantity,
+    string Owner,
+    string VaultLocation,
+    string ReleaseLocation);
+
+public sealed record CreateSubprojectCommand(
+    Guid ParentProjectId,
+    string Name,
+    string? ProjectAlias,
+    int Quantity,
+    string? VaultRoot = null,
+    string? ReleaseRoot = null);
 
 public sealed record BomItemInput(
     int Sequence,
@@ -62,7 +114,23 @@ public sealed record BomItemInput(
 public interface IPdmRepository
 {
     Task<IReadOnlyList<Project>> ListProjectsAsync(CancellationToken cancellationToken);
+    Task<IReadOnlyList<Project>> ListProjectsForUserAsync(string actor, UserRole role, CancellationToken cancellationToken);
     Task<Project?> FindProjectAsync(Guid projectId, CancellationToken cancellationToken);
+    Task<bool> HasProjectReadAccessAsync(Guid projectId, string actor, UserRole role, CancellationToken cancellationToken);
+    Task<Project> CreateProjectAsync(CreateProjectCommand command, string actor, CancellationToken cancellationToken);
+    Task<ProjectNumberingOptions> GetProjectNumberingOptionsAsync(CancellationToken cancellationToken);
+    Task<ProjectNumberingOptions> AdvanceOrganizationCountersAsync(Guid organizationId, int currentProjectSequence, int currentSerialSequence, CancellationToken cancellationToken);
+    Task<IReadOnlyList<PdmCustomer>> ListCustomersAsync(bool includeInactive, CancellationToken cancellationToken);
+    Task<PdmCustomer?> FindCustomerAsync(Guid customerId, CancellationToken cancellationToken);
+    Task<PdmCustomer> SaveCustomerAsync(Guid? customerId, string code, string name, bool isActive, CancellationToken cancellationToken);
+    Task<IReadOnlyList<EquipmentTypeDefinition>> ListEquipmentTypesAsync(bool includeInactive, CancellationToken cancellationToken);
+    Task<EquipmentTypeDefinition> SaveEquipmentTypeAsync(int code, string name, bool isActive, CancellationToken cancellationToken);
+    Task<PdmSystemSettings> GetSystemSettingsAsync(CancellationToken cancellationToken);
+    Task<PdmSystemSettings> UpdateSystemSettingsAsync(PdmSystemSettings settings, CancellationToken cancellationToken);
+    Task<IReadOnlyList<UserAccount>> ListUsersAsync(CancellationToken cancellationToken);
+    Task<Project> SetProjectResponsibleUsersAsync(Guid projectId, IReadOnlyList<string> usernames, CancellationToken cancellationToken);
+    Task<Project> CreateNumberedProjectAsync(CreateNumberedProjectCommand command, CancellationToken cancellationToken);
+    Task<Project> CreateSubprojectAsync(CreateSubprojectCommand command, CancellationToken cancellationToken);
     Task<IReadOnlyList<PdmDocument>> ListDocumentsAsync(Guid projectId, CancellationToken cancellationToken);
     Task<PdmDocument?> FindDocumentAsync(Guid documentId, CancellationToken cancellationToken);
     Task<PdmDocument> RegisterDocumentAsync(RegisterDocumentCommand command, string actor, CancellationToken cancellationToken);

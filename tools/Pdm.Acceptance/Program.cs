@@ -30,6 +30,33 @@ var migrations = (await connection.QueryAsync<string>("SELECT version FROM pdm_s
 var releaseColumns = await connection.ExecuteScalarAsync<int>("SELECT COUNT(*) FROM information_schema.columns WHERE table_schema=DATABASE() AND table_name='release_package' AND column_name IN ('mechanical_bom_snapshot_json','electrical_bom_snapshot_json','publish_error')");
 var tableCountRows = await connection.QueryAsync<DatabaseTableCount>("SELECT 'project' AS TableName,COUNT(*) AS RowCount FROM project UNION ALL SELECT 'document',COUNT(*) FROM document UNION ALL SELECT 'document_version',COUNT(*) FROM document_version UNION ALL SELECT 'reference_snapshot',COUNT(*) FROM reference_snapshot UNION ALL SELECT 'bom_item',COUNT(*) FROM bom_item UNION ALL SELECT 'release_package',COUNT(*) FROM release_package UNION ALL SELECT 'audit_entry',COUNT(*) FROM audit_entry");
 var tableCounts = tableCountRows.ToDictionary(row => row.TableName, row => row.RowCount, StringComparer.Ordinal);
+var projectReferenceRoots = (await connection.QueryAsync<ProjectReferenceRootRow>("""
+    SELECT p.code AS ProjectCode,
+           d.file_name AS RootFileName,
+           JSON_UNQUOTE(JSON_EXTRACT(rs.root_json, '$.fileName')) AS SnapshotRootFileName,
+           rs.captured_at AS CapturedAt
+    FROM project_reference_root prr
+    INNER JOIN project p ON p.id=prr.project_id
+    INNER JOIN reference_snapshot rs ON rs.id=prr.reference_snapshot_id
+    INNER JOIN document d ON d.id=rs.root_document_id
+    ORDER BY p.code
+    """)).ToArray();
+var referenceSnapshotCandidates = (await connection.QueryAsync<ReferenceSnapshotCandidateRow>("""
+    SELECT p.code AS ProjectCode,
+           d.file_name AS RootFileName,
+           d.revision_label AS RootRevision,
+           (SELECT dv.revision_label FROM document_version dv WHERE dv.document_id=d.id ORDER BY dv.created_at DESC, dv.id DESC LIMIT 1) AS LatestVersion,
+           (SELECT dv.created_at FROM document_version dv WHERE dv.document_id=d.id ORDER BY dv.created_at DESC, dv.id DESC LIMIT 1) AS LatestVersionAt,
+           (SELECT COUNT(*) FROM document_version dv WHERE dv.document_id=d.id) AS VersionCount,
+           JSON_UNQUOTE(JSON_EXTRACT(rs.root_json, '$.instancePath')) AS InstancePath,
+           JSON_LENGTH(JSON_EXTRACT(rs.root_json, '$.children')) AS DirectChildCount,
+           rs.captured_at AS CapturedAt
+    FROM reference_snapshot rs
+    INNER JOIN project p ON p.id=rs.project_id
+    INNER JOIN document d ON d.id=rs.root_document_id
+    WHERE d.kind='Assembly'
+    ORDER BY p.code, rs.captured_at DESC, rs.id DESC
+    """)).ToArray();
 var qaPasswordHash = await connection.QuerySingleOrDefaultAsync<string>("SELECT password_hash FROM pdm_user WHERE username='qa_admin'");
 Console.WriteLine(JsonSerializer.Serialize(new
 {
@@ -38,6 +65,8 @@ Console.WriteLine(JsonSerializer.Serialize(new
     expectedMigrationApplied = migrations.Contains("004_phase1_bom_release_workflow", StringComparer.Ordinal),
     releaseColumns,
     tableCounts,
+    projectReferenceRoots,
+    referenceSnapshotCandidates,
     qaAdminExists = qaPasswordHash is not null,
     qaPasswordVerified = qaPasswordHash is not null && new Pbkdf2PasswordService().Verify(Environment.GetEnvironmentVariable("PDM_ACCEPTANCE_ADMIN_PASSWORD") ?? string.Empty, qaPasswordHash)
 }, new JsonSerializerOptions { WriteIndented = true }));
@@ -79,4 +108,25 @@ sealed class DatabaseTableCount
 {
     public required string TableName { get; init; }
     public long RowCount { get; init; }
+}
+
+sealed class ProjectReferenceRootRow
+{
+    public required string ProjectCode { get; init; }
+    public required string RootFileName { get; init; }
+    public required string SnapshotRootFileName { get; init; }
+    public DateTime CapturedAt { get; init; }
+}
+
+sealed class ReferenceSnapshotCandidateRow
+{
+    public required string ProjectCode { get; init; }
+    public required string RootFileName { get; init; }
+    public string? RootRevision { get; init; }
+    public string? LatestVersion { get; init; }
+    public DateTime? LatestVersionAt { get; init; }
+    public int VersionCount { get; init; }
+    public required string InstancePath { get; init; }
+    public int DirectChildCount { get; init; }
+    public DateTime CapturedAt { get; init; }
 }

@@ -73,7 +73,8 @@ internal sealed class SolidWorksReferenceTreeScanner
 
         if (!visitedInstances.Add(currentPath))
         {
-            return node;
+            Log(string.Concat("Skip duplicate component instance: ", currentPath));
+            return null;
         }
 
         var children = GetOrderedChildren(component, featureTreeItem, isRoot, currentPath);
@@ -81,7 +82,11 @@ internal sealed class SolidWorksReferenceTreeScanner
         {
             var child = childEntry.Component;
             var childPath = string.Concat(currentPath, "/", child.Name2);
-            node.Children.Add(BuildComponent(child, childPath, visitedInstances, false, childEntry.TreeItem));
+            var childNode = BuildComponent(child, childPath, visitedInstances, false, childEntry.TreeItem);
+            if (childNode != null)
+            {
+                node.Children.Add(childNode);
+            }
         }
         Log(string.Concat("Node(", currentPath, ") children=", node.Children.Count));
 

@@ -43,21 +43,137 @@ public static class PdmEndpointExtensions
 
         var api = app.MapGroup("/api").RequireAuthorization();
 
-        api.MapGet("/projects", async (IPdmRepository repository, CancellationToken cancellationToken) =>
-            Results.Ok(await repository.ListProjectsAsync(cancellationToken)));
-
-        api.MapGet("/projects/{projectId:guid}", async (Guid projectId, IPdmRepository repository, CancellationToken cancellationToken) =>
+        api.MapGet("/projects", async (HttpContext context, IPdmRepository repository, CancellationToken cancellationToken) =>
         {
+            var (actor, role) = CurrentUser(context.User);
+            return Results.Ok(await repository.ListProjectsForUserAsync(actor, role, cancellationToken));
+        });
+
+        api.MapGet("/project-numbering/options", async (IPdmRepository repository, CancellationToken cancellationToken) =>
+            Results.Ok(await repository.GetProjectNumberingOptionsAsync(cancellationToken)));
+
+        api.MapGet("/customers", async (HttpContext context, IPdmRepository repository, CancellationToken cancellationToken) =>
+        {
+            var (_, role) = CurrentUser(context.User);
+            return Results.Ok(await repository.ListCustomersAsync(role == UserRole.Administrator, cancellationToken));
+        });
+
+        api.MapPost("/customers", async (SaveCustomerRequest request, HttpContext context, PdmWorkflowService workflow, CancellationToken cancellationToken) =>
+        {
+            var (actor, role) = CurrentUser(context.User);
+            var customer = await workflow.SaveCustomerAsync(null, request.Code, request.Name, request.IsActive, actor, role, cancellationToken);
+            return Results.Created($"/api/customers/{customer.Id}", customer);
+        });
+
+        api.MapPut("/customers/{customerId:guid}", async (Guid customerId, SaveCustomerRequest request, HttpContext context, PdmWorkflowService workflow, CancellationToken cancellationToken) =>
+        {
+            var (actor, role) = CurrentUser(context.User);
+            return Results.Ok(await workflow.SaveCustomerAsync(customerId, request.Code, request.Name, request.IsActive, actor, role, cancellationToken));
+        });
+
+        api.MapGet("/users", async (HttpContext context, IPdmRepository repository, CancellationToken cancellationToken) =>
+        {
+            var (_, role) = CurrentUser(context.User);
+            if (role != UserRole.Administrator) return Results.Forbid();
+            var users = await repository.ListUsersAsync(cancellationToken);
+            return Results.Ok(users.Select(user => new { user.Username, user.DisplayName, Role = user.Role.ToString(), user.IsActive }));
+        });
+
+        api.MapGet("/system-settings", async (HttpContext context, IPdmRepository repository, CancellationToken cancellationToken) =>
+        {
+            var (_, role) = CurrentUser(context.User);
+            if (role != UserRole.Administrator) return Results.Forbid();
+            return Results.Ok(await repository.GetSystemSettingsAsync(cancellationToken));
+        });
+
+        api.MapPut("/system-settings", async (UpdateSystemSettingsRequest request, HttpContext context, PdmWorkflowService workflow, CancellationToken cancellationToken) =>
+        {
+            var (actor, role) = CurrentUser(context.User);
+            return Results.Ok(await workflow.UpdateSystemSettingsAsync(request.VaultRoot, request.ReleaseRoot, actor, role, cancellationToken));
+        });
+
+        api.MapGet("/system-settings/equipment-types", async (HttpContext context, IPdmRepository repository, CancellationToken cancellationToken) =>
+        {
+            var (_, role) = CurrentUser(context.User);
+            if (role != UserRole.Administrator) return Results.Forbid();
+            return Results.Ok(await repository.ListEquipmentTypesAsync(true, cancellationToken));
+        });
+
+        api.MapPut("/system-settings/equipment-types/{code:int}", async (int code, SaveEquipmentTypeRequest request, HttpContext context, PdmWorkflowService workflow, CancellationToken cancellationToken) =>
+        {
+            var (actor, role) = CurrentUser(context.User);
+            return Results.Ok(await workflow.SaveEquipmentTypeAsync(code, request.Name, request.IsActive, actor, role, cancellationToken));
+        });
+
+        api.MapPut("/project-numbering/organizations/{organizationId:guid}/counters", async (Guid organizationId, UpdateOrganizationCountersRequest request, HttpContext context, IPdmRepository repository, CancellationToken cancellationToken) =>
+        {
+            var (_, role) = CurrentUser(context.User);
+            if (role != UserRole.Administrator) return Results.Forbid();
+            if (request.CurrentProjectSequence is < 0 or > 99999 || request.CurrentSerialSequence is < 0 or > 9999999)
+                throw new PdmRuleException("项目流水必须为0到99999，序列流水必须为0到9999999。");
+            return Results.Ok(await repository.AdvanceOrganizationCountersAsync(
+                organizationId, request.CurrentProjectSequence, request.CurrentSerialSequence, cancellationToken));
+        });
+
+        api.MapPost("/projects", async (CreateProjectRequest request, HttpContext context, PdmWorkflowService workflow, CancellationToken cancellationToken) =>
+        {
+            var (actor, role) = CurrentUser(context.User);
+            var project = await workflow.CreateNumberedProjectAsync(
+                new CreateNumberedProjectCommand(
+                    request.OrganizationId,
+                    request.ProjectTypeCode,
+                    request.EquipmentTypeCode,
+                    request.CustomerId,
+                    request.Name,
+                    request.ProjectAlias,
+                    request.SignedDate,
+                    request.Quantity,
+                    actor,
+                    string.Empty,
+                    string.Empty),
+                actor,
+                role,
+                cancellationToken);
+            return Results.Created($"/api/projects/{project.Id}", project);
+        });
+
+        api.MapPost("/projects/{projectId:guid}/children", async (Guid projectId, CreateSubprojectRequest request, HttpContext context, PdmWorkflowService workflow, CancellationToken cancellationToken) =>
+        {
+            var (actor, role) = CurrentUser(context.User);
+            var project = await workflow.CreateSubprojectAsync(
+                new CreateSubprojectCommand(projectId, request.Name, request.ProjectAlias, request.Quantity),
+                actor,
+                role,
+                cancellationToken);
+            return Results.Created($"/api/projects/{project.Id}", project);
+        });
+
+        api.MapGet("/projects/{projectId:guid}", async (Guid projectId, HttpContext context, IPdmRepository repository, CancellationToken cancellationToken) =>
+        {
+            var (actor, role) = CurrentUser(context.User);
+            if (!await repository.HasProjectReadAccessAsync(projectId, actor, role, cancellationToken)) return Results.Forbid();
             var project = await repository.FindProjectAsync(projectId, cancellationToken);
             return project is null ? Results.NotFound() : Results.Ok(project);
         });
 
-        api.MapGet("/projects/{projectId:guid}/documents", async (Guid projectId, IPdmRepository repository, CancellationToken cancellationToken) =>
-            Results.Ok(await repository.ListDocumentsAsync(projectId, cancellationToken)));
-
-        api.MapPost("/projects/{projectId:guid}/documents/register", async (Guid projectId, RegisterDocumentRequest request, HttpContext context, PdmWorkflowService workflow, CancellationToken cancellationToken) =>
+        api.MapPut("/projects/{projectId:guid}/responsibles", async (Guid projectId, UpdateProjectResponsiblesRequest request, HttpContext context, PdmWorkflowService workflow, CancellationToken cancellationToken) =>
         {
             var (actor, role) = CurrentUser(context.User);
+            return Results.Ok(await workflow.SetProjectResponsibleUsersAsync(projectId, request.Usernames, actor, role, cancellationToken));
+        });
+
+        api.MapGet("/projects/{projectId:guid}/documents", async (Guid projectId, HttpContext context, IPdmRepository repository, CancellationToken cancellationToken) =>
+        {
+            var (actor, role) = CurrentUser(context.User);
+            return !await repository.HasProjectReadAccessAsync(projectId, actor, role, cancellationToken)
+                ? Results.Forbid()
+                : Results.Ok(await repository.ListDocumentsAsync(projectId, cancellationToken));
+        });
+
+        api.MapPost("/projects/{projectId:guid}/documents/register", async (Guid projectId, RegisterDocumentRequest request, HttpContext context, IPdmRepository repository, PdmWorkflowService workflow, CancellationToken cancellationToken) =>
+        {
+            var (actor, role) = CurrentUser(context.User);
+            if (!await repository.HasProjectReadAccessAsync(projectId, actor, role, cancellationToken)) return Results.Forbid();
             return Results.Ok(await workflow.RegisterDocumentAsync(
                 new RegisterDocumentCommand(projectId, request.DrawingNumber, request.Name, request.FileName, request.Kind),
                 actor,
@@ -97,6 +213,19 @@ public static class PdmEndpointExtensions
             return Results.File(stream, "application/octet-stream", download ? document.FileName : null, enableRangeProcessing: true);
         });
 
+        api.MapPost("/documents/{documentId:guid}/open-manifest", async (Guid documentId, CreateControlledOpenManifestRequest request, HttpContext context, PdmWorkflowService workflow, CancellationToken cancellationToken) =>
+        {
+            var (actor, role) = CurrentUser(context.User);
+            return Results.Ok(await workflow.CreateControlledOpenManifestAsync(
+                documentId,
+                request.VersionId,
+                request.ReleasedOnly,
+                request.ForEdit,
+                actor,
+                role,
+                cancellationToken));
+        });
+
         api.MapGet("/documents/{documentId:guid}/versions/compare", async (Guid documentId, Guid left, Guid right, HttpContext context, PdmWorkflowService workflow, CancellationToken cancellationToken) =>
         {
             var (actor, role) = CurrentUser(context.User);
@@ -116,14 +245,18 @@ public static class PdmEndpointExtensions
             return Results.Ok(await workflow.PublishVersionAsync(documentId, request.SourceVersionId, request.ReleasePackageId, request.ApprovalTaskId, actor, role, cancellationToken));
         });
 
-        api.MapGet("/projects/{projectId:guid}/reference-tree", async (Guid projectId, IPdmRepository repository, CancellationToken cancellationToken) =>
+        api.MapGet("/projects/{projectId:guid}/reference-tree", async (Guid projectId, HttpContext context, IPdmRepository repository, CancellationToken cancellationToken) =>
         {
+            var (actor, role) = CurrentUser(context.User);
+            if (!await repository.HasProjectReadAccessAsync(projectId, actor, role, cancellationToken)) return Results.Forbid();
             var tree = await repository.GetReferenceTreeAsync(projectId, cancellationToken);
             return tree is null ? Results.NotFound() : Results.Ok(tree);
         });
 
-        api.MapGet("/projects/{projectId:guid}/boms/{kind}", async (Guid projectId, string kind, IPdmRepository repository, CancellationToken cancellationToken) =>
+        api.MapGet("/projects/{projectId:guid}/boms/{kind}", async (Guid projectId, string kind, HttpContext context, IPdmRepository repository, CancellationToken cancellationToken) =>
         {
+            var (actor, role) = CurrentUser(context.User);
+            if (!await repository.HasProjectReadAccessAsync(projectId, actor, role, cancellationToken)) return Results.Forbid();
             if (!Enum.TryParse<BomKind>(kind, true, out var bomKind))
             {
                 return Results.BadRequest(new { message = "BOM类型必须是Mechanical或Electrical。" });
@@ -132,32 +265,41 @@ public static class PdmEndpointExtensions
             return Results.Ok(await repository.GetBomAsync(projectId, bomKind, cancellationToken));
         });
 
-        api.MapPut("/projects/{projectId:guid}/boms/{kind}", async (Guid projectId, string kind, ReplaceBomRequest request, HttpContext context, PdmWorkflowService workflow, CancellationToken cancellationToken) =>
+        api.MapPut("/projects/{projectId:guid}/boms/{kind}", async (Guid projectId, string kind, ReplaceBomRequest request, HttpContext context, IPdmRepository repository, PdmWorkflowService workflow, CancellationToken cancellationToken) =>
         {
             if (!Enum.TryParse<BomKind>(kind, true, out var bomKind)) return Results.BadRequest(new { message = "BOM类型必须是Mechanical或Electrical。" });
             var (actor, role) = CurrentUser(context.User);
+            if (!await repository.HasProjectReadAccessAsync(projectId, actor, role, cancellationToken)) return Results.Forbid();
             return Results.Ok(await workflow.ReplaceBomAsync(projectId, bomKind, request.Items, actor, role, cancellationToken));
         });
 
-        api.MapPost("/projects/{projectId:guid}/boms/{kind}/import", async (Guid projectId, string kind, IFormFile file, HttpContext context, PdmWorkflowService workflow, CancellationToken cancellationToken) =>
+        api.MapPost("/projects/{projectId:guid}/boms/{kind}/import", async (Guid projectId, string kind, IFormFile file, HttpContext context, IPdmRepository repository, PdmWorkflowService workflow, CancellationToken cancellationToken) =>
         {
             if (!Enum.TryParse<BomKind>(kind, true, out var bomKind)) return Results.BadRequest(new { message = "BOM类型必须是Mechanical或Electrical。" });
             if (!string.Equals(Path.GetExtension(file.FileName), ".xlsx", StringComparison.OrdinalIgnoreCase)) return Results.BadRequest(new { message = "只支持标准XLSX格式的BOM文件。" });
             await using var input = file.OpenReadStream();
             var items = BomWorkbook.Read(input);
             var (actor, role) = CurrentUser(context.User);
+            if (!await repository.HasProjectReadAccessAsync(projectId, actor, role, cancellationToken)) return Results.Forbid();
             return Results.Ok(await workflow.ReplaceBomAsync(projectId, bomKind, items, actor, role, cancellationToken));
         }).DisableAntiforgery();
 
-        api.MapGet("/projects/{projectId:guid}/boms/{kind}/export", async (Guid projectId, string kind, IPdmRepository repository, CancellationToken cancellationToken) =>
+        api.MapGet("/projects/{projectId:guid}/boms/{kind}/export", async (Guid projectId, string kind, HttpContext context, IPdmRepository repository, CancellationToken cancellationToken) =>
         {
+            var (actor, role) = CurrentUser(context.User);
+            if (!await repository.HasProjectReadAccessAsync(projectId, actor, role, cancellationToken)) return Results.Forbid();
             if (!Enum.TryParse<BomKind>(kind, true, out var bomKind)) return Results.BadRequest(new { message = "BOM类型必须是Mechanical或Electrical。" });
             var items = await repository.GetBomAsync(projectId, bomKind, cancellationToken);
             return Results.File(BomWorkbook.Write(items), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", $"{kind.ToLowerInvariant()}-bom.xlsx");
         });
 
-        api.MapGet("/projects/{projectId:guid}/release-packages", async (Guid projectId, IPdmRepository repository, CancellationToken cancellationToken) =>
-            Results.Ok(await repository.ListReleasePackagesAsync(projectId, cancellationToken)));
+        api.MapGet("/projects/{projectId:guid}/release-packages", async (Guid projectId, HttpContext context, IPdmRepository repository, CancellationToken cancellationToken) =>
+        {
+            var (actor, role) = CurrentUser(context.User);
+            return !await repository.HasProjectReadAccessAsync(projectId, actor, role, cancellationToken)
+                ? Results.Forbid()
+                : Results.Ok(await repository.ListReleasePackagesAsync(projectId, cancellationToken));
+        });
 
         api.MapPost("/documents/{documentId:guid}/checkout", async (Guid documentId, HttpContext context, PdmWorkflowService workflow, CancellationToken cancellationToken) =>
         {
@@ -190,13 +332,24 @@ public static class PdmEndpointExtensions
                 request.Root,
                 Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(rootJson))));
             var file = new StoredFile(request.StorageRelativePath, request.FileLength, request.Sha256, timeProvider.GetUtcNow());
-            var result = await workflow.CheckInAsync(documentId, actor, role, file, request.Comment, request.Properties ?? new Dictionary<string, string?>(), snapshot, cancellationToken);
+            var result = await workflow.CheckInAsync(
+                documentId,
+                actor,
+                role,
+                file,
+                request.Comment,
+                request.Properties ?? new Dictionary<string, string?>(),
+                snapshot,
+                request.IsProjectRoot,
+                request.ForceVersion,
+                cancellationToken);
             return Results.Ok(new { document = result.Document, version = result.Version, versionCreated = result.VersionCreated });
         });
 
-        api.MapPost("/release-packages", async (CreateReleasePackageRequest request, HttpContext context, PdmWorkflowService workflow, CancellationToken cancellationToken) =>
+        api.MapPost("/release-packages", async (CreateReleasePackageRequest request, HttpContext context, IPdmRepository repository, PdmWorkflowService workflow, CancellationToken cancellationToken) =>
         {
             var (actor, role) = CurrentUser(context.User);
+            if (!await repository.HasProjectReadAccessAsync(request.ProjectId, actor, role, cancellationToken)) return Results.Forbid();
             return Results.Ok(await workflow.CreateReleasePackageAsync(
                 request.ProjectId,
                 request.ReferenceSnapshotId,
@@ -220,8 +373,13 @@ public static class PdmEndpointExtensions
             return Results.Ok(await workflow.DecideAsync(taskId, actor, role, request.Decision, request.Comment, cancellationToken));
         });
 
-        api.MapPost("/uploads/sessions", async (StartUploadRequest request, IFileStorage storage, CancellationToken cancellationToken) =>
-            Results.Ok(await storage.StartUploadAsync(request.ProjectId, request.FileName, request.TotalLength, request.Sha256, cancellationToken)));
+        api.MapPost("/uploads/sessions", async (StartUploadRequest request, HttpContext context, IPdmRepository repository, IFileStorage storage, CancellationToken cancellationToken) =>
+        {
+            var (actor, role) = CurrentUser(context.User);
+            return !await repository.HasProjectReadAccessAsync(request.ProjectId, actor, role, cancellationToken)
+                ? Results.Forbid()
+                : Results.Ok(await storage.StartUploadAsync(request.ProjectId, request.FileName, request.TotalLength, request.Sha256, cancellationToken));
+        });
 
         api.MapGet("/uploads/sessions/{sessionId:guid}", async (Guid sessionId, IFileStorage storage, CancellationToken cancellationToken) =>
             Results.Ok(await storage.GetUploadSessionAsync(sessionId, cancellationToken)));
@@ -232,8 +390,10 @@ public static class PdmEndpointExtensions
         api.MapPost("/uploads/sessions/{sessionId:guid}/complete", async (Guid sessionId, CompleteUploadRequest request, IFileStorage storage, CancellationToken cancellationToken) =>
             Results.Ok(await storage.CompleteUploadAsync(sessionId, request.RelativeTargetPath, cancellationToken)));
 
-        api.MapGet("/projects/{projectId:guid}/storage-status", async (Guid projectId, IPdmRepository repository, IFileStorage storage, CancellationToken cancellationToken) =>
+        api.MapGet("/projects/{projectId:guid}/storage-status", async (Guid projectId, HttpContext context, IPdmRepository repository, IFileStorage storage, CancellationToken cancellationToken) =>
         {
+            var (actor, role) = CurrentUser(context.User);
+            if (!await repository.HasProjectReadAccessAsync(projectId, actor, role, cancellationToken)) return Results.Forbid();
             var project = await repository.FindProjectAsync(projectId, cancellationToken);
             if (project is null)
             {
