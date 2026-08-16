@@ -15,6 +15,7 @@ using System.Web.Script.Serialization;
 using System.Windows;
 using System.Windows.Interop;
 using Microsoft.Web.WebView2.Core;
+using Upton.Pdm.LocalSettings;
 using WinForms = System.Windows.Forms;
 using WpfMessageBox = System.Windows.MessageBox;
 
@@ -112,7 +113,8 @@ public partial class MainWindow : Window
             }
             _ = PublishSolidWorksCapabilityAsync();
         };
-        WorkspaceView.Source = new Uri($"https://{UiHost}/index.html");
+        var uiVersion = File.GetLastWriteTimeUtc(indexFile).Ticks;
+        WorkspaceView.Source = new Uri($"https://{UiHost}/index.html?v={uiVersion}");
     }
 
     private static string Serialize(object value) => new JavaScriptSerializer().Serialize(value);
@@ -139,19 +141,32 @@ public partial class MainWindow : Window
             return;
         }
 
-        if (type == "desktop-settings-save"
-            && message.TryGetValue("payload", out var desktopSettingsPayloadValue)
-            && desktopSettingsPayloadValue is Dictionary<string, object> desktopSettingsPayload
-            && desktopSettingsPayload.TryGetValue("startWithWindows", out var startWithWindowsValue)
-            && startWithWindowsValue is bool requestedStartWithWindows)
+        if (type == "workspace-folder-browse")
         {
-            UpdateStartWithWindows(requestedStartWithWindows);
+            BrowseWorkspaceRoot();
             return;
         }
 
-        if (type == "credentials-save" && TryReadCredentials(message, out var username, out var password))
+        if (type == "desktop-settings-save"
+            && message.TryGetValue("payload", out var desktopSettingsPayloadValue)
+            && desktopSettingsPayloadValue is Dictionary<string, object> desktopSettingsPayload)
         {
-            TryUpdateRememberedCredentials(() => RememberedCredentialsStore.Save(username, password));
+            if (desktopSettingsPayload.TryGetValue("startWithWindows", out var startWithWindowsValue)
+                && startWithWindowsValue is bool requestedStartWithWindows)
+            {
+                UpdateStartWithWindows(requestedStartWithWindows);
+            }
+            if (desktopSettingsPayload.TryGetValue("workspaceRoot", out var workspaceRootValue)
+                && workspaceRootValue is string requestedWorkspaceRoot)
+            {
+                UpdateWorkspaceRoot(requestedWorkspaceRoot);
+            }
+            return;
+        }
+
+        if (type == "credentials-save" && TryReadUsername(message, out var username))
+        {
+            TryUpdateRememberedCredentials(() => RememberedCredentialsStore.SaveUsername(username));
             return;
         }
 
@@ -177,6 +192,12 @@ public partial class MainWindow : Window
         if (type == "document-selected" || type == "preview-host-hide")
         {
             HideEmbeddedPreview(true);
+            return;
+        }
+
+        if (type == "preview-host-suspend")
+        {
+            PreviewFrame.Visibility = Visibility.Collapsed;
             return;
         }
 
@@ -271,16 +292,25 @@ public partial class MainWindow : Window
             return;
         }
 
-        var remembered = RememberedCredentialsStore.TryLoad(out var username, out var password);
-        var detail = new { username, password, remember = remembered };
+        var remembered = RememberedCredentialsStore.TryLoadUsername(out var username);
+        var detail = new { username, remember = remembered };
         var script = $"window.dispatchEvent(new CustomEvent('pdm-remembered-credentials', {{ detail: {Serialize(detail)} }}));";
         await WorkspaceView.CoreWebView2.ExecuteScriptAsync(script);
     }
 
-    private async Task PublishDesktopSettingsAsync(string error = "")
+    private async Task PublishDesktopSettingsAsync(string error = "", string message = "")
     {
         if (WorkspaceView.CoreWebView2 == null) return;
-        var detail = new { available = true, startWithWindows, closeBehavior = "notificationArea", error };
+        var detail = new
+        {
+            available = true,
+            startWithWindows,
+            closeBehavior = "notificationArea",
+            workspaceRoot = WorkspaceSettingsStore.GetWorkspaceRoot(),
+            defaultWorkspaceRoot = WorkspaceSettingsStore.DefaultWorkspaceRoot,
+            error,
+            message
+        };
         var script = $"window.dispatchEvent(new CustomEvent('pdm-desktop-settings', {{ detail: {Serialize(detail)} }}));";
         try { await WorkspaceView.CoreWebView2.ExecuteScriptAsync(script); }
         catch (InvalidOperationException) { }
@@ -293,9 +323,42 @@ public partial class MainWindow : Window
             DesktopStartupSettings.SetEnabled(enabled);
             startWithWindows = enabled;
             UpdateSystemMenuCheck();
-            _ = PublishDesktopSettingsAsync();
+            _ = PublishDesktopSettingsAsync(message: "客户端启动设置已保存。");
         }
         catch (Exception exception) when (exception is UnauthorizedAccessException || exception is IOException)
+        {
+            _ = PublishDesktopSettingsAsync(exception.Message);
+        }
+    }
+
+    private void BrowseWorkspaceRoot()
+    {
+        using (var dialog = new WinForms.FolderBrowserDialog
+        {
+            Description = "选择UPTON PDM本地缓存工作区",
+            SelectedPath = WorkspaceSettingsStore.GetWorkspaceRoot(),
+            ShowNewFolderButton = true
+        })
+        {
+            if (dialog.ShowDialog() != WinForms.DialogResult.OK)
+            {
+                return;
+            }
+
+            var detail = new { workspaceRoot = dialog.SelectedPath };
+            var script = $"window.dispatchEvent(new CustomEvent('pdm-workspace-folder-selected', {{ detail: {Serialize(detail)} }}));";
+            _ = WorkspaceView.CoreWebView2?.ExecuteScriptAsync(script);
+        }
+    }
+
+    private void UpdateWorkspaceRoot(string workspaceRoot)
+    {
+        try
+        {
+            var saved = WorkspaceSettingsStore.SaveWorkspaceRoot(workspaceRoot);
+            _ = PublishDesktopSettingsAsync(message: string.Concat("本地工作区已设置为：", saved));
+        }
+        catch (Exception exception) when (exception is UnauthorizedAccessException || exception is IOException || exception is ArgumentException || exception is NotSupportedException)
         {
             _ = PublishDesktopSettingsAsync(exception.Message);
         }
@@ -436,6 +499,8 @@ public partial class MainWindow : Window
         Activate();
     }
 
+    internal void RestoreFromExternalRequest() => RestoreFromNotificationArea();
+
     private void ExitApplication()
     {
         allowClose = true;
@@ -468,23 +533,19 @@ public partial class MainWindow : Window
     [DllImport("user32.dll")]
     private static extern uint CheckMenuItem(IntPtr menu, uint item, uint check);
 
-    private static bool TryReadCredentials(
+    private static bool TryReadUsername(
         IReadOnlyDictionary<string, object> message,
-        out string username,
-        out string password)
+        out string username)
     {
         username = string.Empty;
-        password = string.Empty;
         if (!message.TryGetValue("payload", out var payloadValue)
             || payloadValue is not Dictionary<string, object> payload
-            || !payload.TryGetValue("username", out var usernameValue)
-            || !payload.TryGetValue("password", out var passwordValue))
+            || !payload.TryGetValue("username", out var usernameValue))
         {
             return false;
         }
 
         username = usernameValue as string ?? string.Empty;
-        password = passwordValue as string ?? string.Empty;
         return !string.IsNullOrWhiteSpace(username);
     }
 
@@ -501,7 +562,7 @@ public partial class MainWindow : Window
         {
             WpfMessageBox.Show(
                 this,
-                $"账号和密码保存失败。\n\n{exception.Message}",
+                $"账号保存失败。\n\n{exception.Message}",
                 "UPTON PDM",
                 MessageBoxButton.OK,
                 MessageBoxImage.Warning);
@@ -661,10 +722,18 @@ public partial class MainWindow : Window
         var scaleX = bounds.ViewportWidth > 0 ? WorkspaceView.ActualWidth / bounds.ViewportWidth : 1d;
         var scaleY = bounds.ViewportHeight > 0 ? WorkspaceView.ActualHeight / bounds.ViewportHeight : 1d;
         var origin = WorkspaceView.TranslatePoint(new System.Windows.Point(0, 0), RootGrid);
-        var left = Math.Max(0, origin.X + bounds.Left * scaleX);
-        var top = Math.Max(0, origin.Y + bounds.Top * scaleY);
-        var width = Math.Min(bounds.Width * scaleX, Math.Max(0, RootGrid.ActualWidth - left));
-        var height = Math.Min(bounds.Height * scaleY, Math.Max(0, RootGrid.ActualHeight - top));
+        var viewportLeft = Math.Max(0, origin.X);
+        var viewportTop = Math.Max(0, origin.Y);
+        var viewportRight = Math.Min(RootGrid.ActualWidth, origin.X + WorkspaceView.ActualWidth);
+        var viewportBottom = Math.Min(RootGrid.ActualHeight, origin.Y + WorkspaceView.ActualHeight);
+        var requestedLeft = origin.X + bounds.Left * scaleX;
+        var requestedTop = origin.Y + bounds.Top * scaleY;
+        var left = Math.Max(viewportLeft, requestedLeft);
+        var top = Math.Max(viewportTop, requestedTop);
+        var right = Math.Min(viewportRight, requestedLeft + bounds.Width * scaleX);
+        var bottom = Math.Min(viewportBottom, requestedTop + bounds.Height * scaleY);
+        var width = Math.Max(0, right - left);
+        var height = Math.Max(0, bottom - top);
         if (width < 80 || height < 80)
         {
             PreviewFrame.Visibility = Visibility.Collapsed;

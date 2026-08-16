@@ -7,7 +7,8 @@ namespace Upton.Pdm.Desktop;
 
 internal static class RememberedCredentialsStore
 {
-    private const int FormatVersion = 1;
+    private const int LegacyFormatVersion = 1;
+    private const int FormatVersion = 2;
     private const string FileName = "desktop-login.dat";
     private static readonly byte[] Entropy = Encoding.UTF8.GetBytes("UPTON PDM Desktop login");
 
@@ -16,30 +17,30 @@ internal static class RememberedCredentialsStore
         "UPTON PDM",
         FileName);
 
-    public static bool TryLoad(out string username, out string password)
+    public static bool TryLoadUsername(out string username)
     {
         username = string.Empty;
-        password = string.Empty;
         if (!File.Exists(StoragePath))
         {
             return false;
         }
 
         byte[]? clearBytes = null;
+        var requiresMigration = false;
         try
         {
             var encryptedBytes = File.ReadAllBytes(StoragePath);
             clearBytes = ProtectedData.Unprotect(encryptedBytes, Entropy, DataProtectionScope.CurrentUser);
             using var stream = new MemoryStream(clearBytes, false);
             using var reader = new BinaryReader(stream, Encoding.UTF8);
-            if (reader.ReadInt32() != FormatVersion)
+            var formatVersion = reader.ReadInt32();
+            if (formatVersion != LegacyFormatVersion && formatVersion != FormatVersion)
             {
                 return false;
             }
 
             username = reader.ReadString();
-            password = reader.ReadString();
-            return !string.IsNullOrWhiteSpace(username);
+            requiresMigration = formatVersion == LegacyFormatVersion;
         }
         catch (Exception exception) when (
             exception is IOException
@@ -47,7 +48,6 @@ internal static class RememberedCredentialsStore
             || exception is CryptographicException)
         {
             username = string.Empty;
-            password = string.Empty;
             return false;
         }
         finally
@@ -57,9 +57,32 @@ internal static class RememberedCredentialsStore
                 Array.Clear(clearBytes, 0, clearBytes.Length);
             }
         }
+
+        if (string.IsNullOrWhiteSpace(username))
+        {
+            return false;
+        }
+
+        if (requiresMigration)
+        {
+            try
+            {
+                SaveUsername(username);
+            }
+            catch (Exception exception) when (
+                exception is IOException
+                || exception is UnauthorizedAccessException
+                || exception is CryptographicException)
+            {
+                username = string.Empty;
+                return false;
+            }
+        }
+
+        return true;
     }
 
-    public static void Save(string username, string password)
+    public static void SaveUsername(string username)
     {
         if (string.IsNullOrWhiteSpace(username))
         {
@@ -73,7 +96,6 @@ internal static class RememberedCredentialsStore
             {
                 writer.Write(FormatVersion);
                 writer.Write(username.Trim());
-                writer.Write(password ?? string.Empty);
             }
 
             clearBytes = stream.ToArray();

@@ -28,4 +28,8 @@
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
   </ItemGroup>
+
+  <ItemGroup>
+    <Compile Include="..\Pdm.LocalSettings\WorkspaceSettingsStore.cs" Link="WorkspaceSettingsStore.cs" />
+  </ItemGroup>
 </Project>

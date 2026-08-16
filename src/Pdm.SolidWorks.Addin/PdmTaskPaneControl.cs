@@ -11,26 +11,35 @@ namespace Upton.Pdm.SolidWorks;
 
 internal sealed class PdmTaskPaneControl : UserControl
 {
+    private const int StructureSelectionColumnWidth = 28;
     private static readonly Color InputBorderColor = Color.FromArgb(122, 122, 122);
-    private static readonly Color SubmitAvailableColor = Color.FromArgb(47, 109, 224);
-    private static readonly Color SubmitUnavailableColor = Color.FromArgb(217, 221, 227);
-    private static readonly Color CheckoutAvailableColor = Color.FromArgb(230, 126, 34);
-    private static readonly Color EditingColor = Color.FromArgb(21, 126, 77);
+    private static readonly Color CheckoutAvailableColor = Color.FromArgb(36, 170, 168);
+    private static readonly Color DiscardCheckoutAvailableColor = Color.FromArgb(230, 126, 34);
+    private static readonly Color SubmitAvailableColor = Color.FromArgb(21, 126, 77);
+    private static readonly Color BatchOperationAvailableColor = Color.FromArgb(47, 109, 224);
 
     private readonly Label serviceStatus = new Label();
     private readonly TextBox currentProject = new TextBox();
     private readonly TextBox searchBox = new TextBox();
+    private readonly Label treeHealth = new Label();
     private readonly TreeView structureTree = new TreeView();
     private readonly Panel structureTreeSurface = new Panel();
     private readonly Label selectedFile = new Label();
     private readonly Label selectedMeta = new Label();
+    private readonly Label checkoutReminder = new Label();
     private readonly Button loginButton = new Button();
+    private readonly Button openClientButton = new Button();
     private readonly Button checkoutButton = new Button();
+    private readonly Button discardCheckoutButton = new Button();
     private readonly Button checkinButton = new Button();
     private readonly Button batchOperationButton = new Button();
+    private readonly Button batchPropertyButton = new Button();
     private readonly TabControl tabs = new TabControl();
     private readonly ProjectDocumentsControl projectDocuments = new ProjectDocumentsControl();
+    private readonly AutomaticDrawingControl automaticDrawing = new AutomaticDrawingControl();
+    private CadTreeNode activeDrawingSource;
     private TabPage structureTab;
+    private TabPage automaticDrawingTab;
     private TabPage versionsTab;
     private bool suppressVersionTabRequest;
     private readonly ListView versionList = new ListView();
@@ -45,14 +54,34 @@ internal sealed class PdmTaskPaneControl : UserControl
     private readonly ToolStripMenuItem versionContextRefresh = new ToolStripMenuItem();
     private readonly ToolTip actionToolTip = new ToolTip();
     private readonly ContextMenuStrip structureMenu = new ContextMenuStrip();
-    private readonly ToolStripMenuItem contextOpen = new ToolStripMenuItem();
-    private readonly ToolStripMenuItem contextGetLatest = new ToolStripMenuItem();
+    private readonly ToolStripMenuItem contextOpenWorkingFile = new ToolStripMenuItem();
+    private readonly ToolStripMenuItem contextUpdateLatest = new ToolStripMenuItem();
+    private readonly ToolStripMenuItem contextVersionInfo = new ToolStripMenuItem();
     private readonly ToolStripMenuItem contextCheckout = new ToolStripMenuItem();
     private readonly ToolStripMenuItem contextCheckIn = new ToolStripMenuItem();
     private readonly ToolStripMenuItem contextDiscardCheckout = new ToolStripMenuItem();
+    private readonly ToolStripMenuItem contextGenerateDrawing = new ToolStripMenuItem();
+    private readonly ToolStripMenuItem contextOpenDrawing = new ToolStripMenuItem();
+    private readonly ToolStripMenuItem contextDrawingVersions = new ToolStripMenuItem();
     private readonly ToolStripMenuItem contextVersions = new ToolStripMenuItem();
-    private readonly ToolStripMenuItem contextCompare = new ToolStripMenuItem();
     private readonly ToolStripMenuItem contextRefresh = new ToolStripMenuItem();
+    private readonly ToolStripMenuItem contextEditLatest = new ToolStripMenuItem();
+    private readonly ToolStripMenuItem contextWhereUsed = new ToolStripMenuItem();
+    private readonly ToolStripMenuItem contextRequestRelease = new ToolStripMenuItem();
+    private readonly ToolStripMenuItem contextOpenReleaseCenter = new ToolStripMenuItem();
+    private readonly ToolStripMenuItem contextWithdrawApproval = new ToolStripMenuItem();
+    private readonly ToolStripMenuItem contextObsolete = new ToolStripMenuItem();
+    private readonly ToolStripMenuItem contextZoomSelection = new ToolStripMenuItem();
+    private readonly ToolStripMenuItem contextIsolate = new ToolStripMenuItem();
+    private readonly ToolStripMenuItem contextExitIsolate = new ToolStripMenuItem();
+    private readonly ToolStripMenuItem contextOpenFolder = new ToolStripMenuItem();
+    private readonly ToolStripMenuItem contextRenameDocument = new ToolStripMenuItem();
+    private readonly ToolStripMenuItem contextSelectEligible = new ToolStripMenuItem();
+    private readonly ToolStripMenuItem contextSelectChanged = new ToolStripMenuItem();
+    private readonly ToolStripMenuItem contextSelectMine = new ToolStripMenuItem();
+    private readonly ToolStripMenuItem contextClearSelection = new ToolStripMenuItem();
+    private readonly ToolStripMenuItem contextExpandAll = new ToolStripMenuItem();
+    private readonly ToolStripMenuItem contextCollapseAll = new ToolStripMenuItem();
     private readonly Label contextHint = new Label();
     private readonly Font emphasizedNodeFont;
     private readonly ImageList structureImages;
@@ -64,6 +93,8 @@ internal sealed class PdmTaskPaneControl : UserControl
     private TreeBuildPlan activeTreeBuildPlan;
     private string pendingComponentSelectionName = string.Empty;
     private bool suppressNodeSelectedNotification;
+    private bool suppressTreeCheckEvents;
+    private readonly HashSet<string> checkedCheckInPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
     private IReadOnlyList<ProjectDto> availableProjects = Array.Empty<ProjectDto>();
     private Guid? selectedProjectId;
     private bool projectContextAvailable;
@@ -79,8 +110,10 @@ internal sealed class PdmTaskPaneControl : UserControl
 
         var header = BuildHeader();
         var projectPanel = BuildProjectPanel();
+        ConfigureCheckoutReminder();
         BuildTabs();
         Controls.Add(tabs);
+        Controls.Add(checkoutReminder);
         Controls.Add(projectPanel);
         Controls.Add(header);
     }
@@ -99,19 +132,37 @@ internal sealed class PdmTaskPaneControl : UserControl
     }
 
     public event EventHandler LoginRequested;
+    public event EventHandler OpenClientRequested;
     public event EventHandler RefreshRequested;
     public event EventHandler<CadTreeNodeEventArgs> NodeSelected;
     public event EventHandler<CadTreeNodeEventArgs> OpenRequested;
-    public event EventHandler<CadTreeNodeEventArgs> GetLatestVersionRequested;
+
+    public event EventHandler<CadTreeNodeEventArgs> OpenWorkingFileRequested;
+    public event EventHandler<CadTreeNodeEventArgs> UpdateLatestRequested;
     public event EventHandler<CadTreeNodeEventArgs> CheckoutRequested;
     public event EventHandler<CadTreeNodeEventArgs> CheckInRequested;
     public event EventHandler<CadTreeNodeEventArgs> DiscardCheckoutRequested;
     public event EventHandler BatchOperationRequested;
+    public event EventHandler BatchPropertyEditRequested;
+    public event EventHandler<AutomaticDrawingRequestEventArgs> AutomaticDrawingGenerateRequested;
+    public event EventHandler<AutomaticDrawingRequestEventArgs> AutomaticDrawingOpenRequested;
+    public event EventHandler<AutomaticDrawingRequestEventArgs> AutomaticDrawingImportAnnotationsRequested;
+    public event EventHandler<AutomaticDrawingRequestEventArgs> AutomaticDrawingSubmitRequested;
     public event EventHandler<CadTreeNodeEventArgs> VersionsRequested;
     public event EventHandler<DocumentVersionEventArgs> OpenHistoryRequested;
     public event EventHandler<VersionComparisonEventArgs> CompareVersionsRequested;
     public event EventHandler<ControlledOpenEventArgs> ControlledOpenRequested;
     public event EventHandler<ProjectBrowseEventArgs> ProjectBrowseRequested;
+    public event EventHandler<CadTreeNodeEventArgs> WhereUsedRequested;
+    public event EventHandler<CadTreeNodeEventArgs> RequestReleaseRequested;
+    public event EventHandler<CadTreeNodeEventArgs> WithdrawApprovalRequested;
+    public event EventHandler<CadTreeNodeEventArgs> ObsoleteRequested;
+    public event EventHandler<CadTreeNodeEventArgs> ZoomSelectionRequested;
+    public event EventHandler<CadTreeNodeEventArgs> IsolateRequested;
+    public event EventHandler ExitIsolateRequested;
+    public event EventHandler<CadTreeNodeEventArgs> OpenContainingFolderRequested;
+    public event EventHandler<CadTreeNodeEventArgs> RenameDocumentRequested;
+    public event EventHandler OpenReleaseCenterRequested;
 
     public CadTreeNode SelectedNode => structureTree.SelectedNode?.Tag as CadTreeNode;
 
@@ -124,6 +175,32 @@ internal sealed class PdmTaskPaneControl : UserControl
     {
         if (structureTab != null) tabs.SelectedTab = structureTab;
     });
+
+    public void ShowAutomaticDrawing(CadTreeNode node) => RunOnUiThread(() =>
+    {
+        automaticDrawing.SetSource(node, FindRelatedDrawing(node));
+        if (automaticDrawingTab != null)
+        {
+            tabs.SelectedTab = automaticDrawingTab;
+        }
+    });
+
+    public void SetGeneratedDrawing(CadTreeNode source, string drawingPath) =>
+        RunOnUiThread(() => automaticDrawing.SetGeneratedDrawing(source, drawingPath));
+
+    public void SetActiveDrawingSource(CadTreeNode source) => RunOnUiThread(() =>
+    {
+        activeDrawingSource = source;
+        if (rootNode?.Kind == CadDocumentKind.Drawing)
+        {
+            automaticDrawing.SetSource(source, rootNode);
+        }
+    });
+
+    public void RefreshAutomaticDrawingState() => RunOnUiThread(automaticDrawing.RefreshState);
+
+    public void SetAutomaticDrawingOperationResult(string message) =>
+        RunOnUiThread(() => automaticDrawing.SetOperationResult(message));
 
     public void ShowVersions(Guid documentId, string fileName, IReadOnlyList<DocumentVersionDto> versions)
     {
@@ -164,6 +241,27 @@ internal sealed class PdmTaskPaneControl : UserControl
             serviceStatus.AccessibleDescription = text;
             serviceStatus.ForeColor = online ? Color.FromArgb(72, 210, 186) : Color.FromArgb(255, 184, 86);
         });
+    }
+
+    public void SetCheckoutReminder(string text, bool critical)
+    {
+        RunOnUiThread(() =>
+        {
+            checkoutReminder.Text = text ?? string.Empty;
+            checkoutReminder.BackColor = critical ? Color.FromArgb(255, 236, 232) : Color.FromArgb(255, 247, 225);
+            checkoutReminder.ForeColor = critical ? Color.FromArgb(176, 45, 36) : Color.FromArgb(155, 91, 15);
+            checkoutReminder.Visible = !string.IsNullOrWhiteSpace(text);
+        });
+    }
+
+    private void ConfigureCheckoutReminder()
+    {
+        checkoutReminder.Dock = DockStyle.Top;
+        checkoutReminder.Height = 38;
+        checkoutReminder.Padding = new Padding(8, 5, 8, 5);
+        checkoutReminder.AutoEllipsis = true;
+        checkoutReminder.TextAlign = ContentAlignment.MiddleLeft;
+        checkoutReminder.Visible = false;
     }
 
     public void SetAuthenticatedUser(string displayName, string username)
@@ -226,7 +324,11 @@ internal sealed class PdmTaskPaneControl : UserControl
     public void SetTree(CadTreeNode root)
     {
         rootNode = root;
-        RunOnUiThread(() => RebuildTree(searchBox.Text));
+        RunOnUiThread(() =>
+        {
+            checkedCheckInPaths.Clear();
+            RebuildTree(searchBox.Text);
+        });
     }
 
     public void ClearTree()
@@ -308,32 +410,47 @@ internal sealed class PdmTaskPaneControl : UserControl
 
     private Control BuildProjectPanel()
     {
-        var panel = new Panel { Dock = DockStyle.Top, Height = 108, BackColor = Color.White, Padding = new Padding(12, 7, 12, 8) };
+        var panel = new Panel { Dock = DockStyle.Top, Height = 72, BackColor = Color.White, Padding = new Padding(12, 7, 12, 8) };
         var label = new Label { Text = "当前项目", Dock = DockStyle.Top, Height = 21, ForeColor = Color.FromArgb(90, 107, 128) };
-        var actions = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 2, Margin = Padding.Empty };
+        var actions = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            Height = 36,
+            ColumnCount = 5,
+            RowCount = 1,
+            Margin = Padding.Empty,
+            Padding = new Padding(3)
+        };
         actions.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        actions.RowStyles.Add(new RowStyle(SizeType.Percent, 50));
-        actions.RowStyles.Add(new RowStyle(SizeType.Percent, 50));
+        actions.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 6));
+        var clientButtonColumn = new ColumnStyle(SizeType.Absolute, 60);
+        actions.ColumnStyles.Add(clientButtonColumn);
+        actions.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 6));
+        var userButtonColumn = new ColumnStyle(SizeType.Absolute, 60);
+        actions.ColumnStyles.Add(userButtonColumn);
+        actions.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        actions.SizeChanged += (_, _) =>
+        {
+            MatchProjectButtonWidths(actions, clientButtonColumn, userButtonColumn);
+            projectDocuments.BrowseButtonWidth = userButtonColumn.Width;
+        };
         currentProject.ReadOnly = true;
         currentProject.TabStop = false;
         currentProject.ShortcutsEnabled = false;
+        currentProject.AutoSize = false;
         currentProject.Dock = DockStyle.Fill;
-        currentProject.Margin = new Padding(0, 1, 0, 3);
+        currentProject.Margin = Padding.Empty;
         currentProject.BackColor = Color.White;
         currentProject.AccessibleName = "当前项目号（只读）";
+        openClientButton.Text = "打开客户端";
+        ConfigureStructureToolbarButton(openClientButton);
+        openClientButton.Click += (_, _) => OpenClientRequested?.Invoke(this, EventArgs.Empty);
         loginButton.Text = "登录";
-        loginButton.Dock = DockStyle.Fill;
-        loginButton.Margin = new Padding(0, 3, 0, 0);
-        loginButton.AutoSize = false;
-        loginButton.AutoEllipsis = false;
-        loginButton.TextAlign = ContentAlignment.MiddleCenter;
-        loginButton.UseCompatibleTextRendering = false;
-        loginButton.FlatStyle = FlatStyle.Flat;
-        loginButton.FlatAppearance.BorderColor = InputBorderColor;
-        loginButton.FlatAppearance.BorderSize = 1;
+        ConfigureStructureToolbarButton(loginButton);
         loginButton.Click += (_, _) => LoginRequested?.Invoke(this, EventArgs.Empty);
         actions.Controls.Add(currentProject, 0, 0);
-        actions.Controls.Add(loginButton, 0, 1);
+        actions.Controls.Add(openClientButton, 2, 0);
+        actions.Controls.Add(loginButton, 4, 0);
         panel.Controls.Add(actions);
         panel.Controls.Add(label);
         UpdateCurrentProjectDisplay();
@@ -354,11 +471,23 @@ internal sealed class PdmTaskPaneControl : UserControl
         tabs.Padding = new Point(10, 6);
         structureTab = BuildStructureTab();
         tabs.TabPages.Add(structureTab);
-        var projectTab = new TabPage("项目图档") { BackColor = Color.White, Padding = new Padding(4) };
-        projectDocuments.OpenRequested += (_, args) => ControlledOpenRequested?.Invoke(this, args);
+        var projectTab = new TabPage("项目图档") { BackColor = Color.FromArgb(244, 247, 251), Padding = new Padding(8) };
+        projectDocuments.OpenRequested += (_, args) =>
+        {
+            ControlledOpenRequested?.Invoke(this, args);
+            tabs.SelectedTab = structureTab;
+        };
         projectDocuments.ProjectSelected += (_, args) => ProjectBrowseRequested?.Invoke(this, args);
         projectTab.Controls.Add(projectDocuments);
         tabs.TabPages.Add(projectTab);
+        automaticDrawingTab = new TabPage("自动出图") { BackColor = Color.FromArgb(244, 247, 251), Padding = Padding.Empty };
+        automaticDrawing.GenerateRequested += (_, args) => AutomaticDrawingGenerateRequested?.Invoke(this, args);
+        automaticDrawing.AcquireEditRequested += (_, args) => CheckoutRequested?.Invoke(this, args);
+        automaticDrawing.OpenRequested += (_, args) => AutomaticDrawingOpenRequested?.Invoke(this, args);
+        automaticDrawing.ImportAnnotationsRequested += (_, args) => AutomaticDrawingImportAnnotationsRequested?.Invoke(this, args);
+        automaticDrawing.SubmitRequested += (_, args) => AutomaticDrawingSubmitRequested?.Invoke(this, args);
+        automaticDrawingTab.Controls.Add(automaticDrawing);
+        tabs.TabPages.Add(automaticDrawingTab);
         versionsTab = BuildVersionsTab();
         tabs.TabPages.Add(versionsTab);
         tabs.TabPages.Add(new TabPage("待办") { BackColor = Color.White });
@@ -374,29 +503,41 @@ internal sealed class PdmTaskPaneControl : UserControl
     private TabPage BuildStructureTab()
     {
         var tab = new TabPage("结构树") { BackColor = Color.FromArgb(244, 247, 251), Padding = new Padding(8) };
-        var actions = new TableLayoutPanel { Dock = DockStyle.Top, Height = 36, ColumnCount = 5, RowCount = 1, Margin = Padding.Empty, Padding = new Padding(3) };
+        var actions = new TableLayoutPanel { Dock = DockStyle.Top, Height = 72, ColumnCount = 7, RowCount = 2, Margin = Padding.Empty, Padding = new Padding(3) };
         ConfigureStructureActionColumns(actions);
+        actions.RowStyles.Add(new RowStyle(SizeType.Percent, 50));
+        actions.RowStyles.Add(new RowStyle(SizeType.Percent, 50));
         actions.SizeChanged += (_, _) => ConfigureStructureActionColumns(actions);
 
-        var open = StructureToolbarButton("受控打开");
         checkoutButton.Text = "获取权限";
         ConfigureStructureToolbarButton(checkoutButton);
+        discardCheckoutButton.Text = "放弃编辑";
+        ConfigureStructureToolbarButton(discardCheckoutButton);
         checkinButton.Text = "提交存档";
         ConfigureStructureToolbarButton(checkinButton);
-        ApplyCheckinButtonAppearance(false);
-        open.Click += (_, _) => RaiseSelected(OpenRequested);
         checkoutButton.Click += (_, _) => RaiseSelected(CheckoutRequested);
-        checkinButton.Click += (_, _) => RaiseSelected(CheckInRequested);
-        actions.Controls.Add(open, 0, 0);
-        actions.Controls.Add(checkoutButton, 2, 0);
-        actions.Controls.Add(checkinButton, 4, 0);
-
-        var batchActions = new Panel { Dock = DockStyle.Top, Height = 34, Padding = new Padding(3, 2, 3, 2) };
-        batchOperationButton.Text = "整套装配操作...";
+        discardCheckoutButton.Click += (_, _) => RaiseSelected(DiscardCheckoutRequested);
+        checkinButton.Click += (_, _) => RaiseCheckInRequested();
+        batchOperationButton.Text = "整套操作";
         ConfigureStructureToolbarButton(batchOperationButton);
         batchOperationButton.Click += (_, _) => BatchOperationRequested?.Invoke(this, EventArgs.Empty);
         actionToolTip.SetToolTip(batchOperationButton, "整套获取最新文件及权限，或按子件优先顺序提交存档");
-        batchActions.Controls.Add(batchOperationButton);
+        batchPropertyButton.Text = "批量填写属性 / 改图号";
+        ConfigureStructureToolbarButton(batchPropertyButton);
+        batchPropertyButton.Click += (_, _) => BatchPropertyEditRequested?.Invoke(this, EventArgs.Empty);
+        actionToolTip.SetToolTip(batchPropertyButton, "批量填写全局自定义属性并提交存档；不会修改文件名和装配引用");
+        checkoutButton.Enabled = false;
+        discardCheckoutButton.Enabled = false;
+        checkinButton.Enabled = false;
+        batchOperationButton.Enabled = false;
+        batchPropertyButton.Enabled = false;
+        ApplyStructureActionButtonAppearances();
+        actions.Controls.Add(checkoutButton, 0, 0);
+        actions.Controls.Add(discardCheckoutButton, 2, 0);
+        actions.Controls.Add(checkinButton, 4, 0);
+        actions.Controls.Add(batchOperationButton, 6, 0);
+        actions.Controls.Add(batchPropertyButton, 0, 1);
+        actions.SetColumnSpan(batchPropertyButton, 7);
 
         var searchToolbar = new TableLayoutPanel { Dock = DockStyle.Top, Height = 40, ColumnCount = 1, RowCount = 1, Margin = Padding.Empty };
         searchToolbar.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
@@ -407,16 +548,44 @@ internal sealed class PdmTaskPaneControl : UserControl
         searchBox.TextChanged += (_, _) => RebuildTree(searchBox.Text);
         searchToolbar.Controls.Add(searchBox, 0, 0);
 
+        treeHealth.Dock = DockStyle.Top;
+        treeHealth.Height = 29;
+        treeHealth.Padding = new Padding(6, 5, 6, 3);
+        treeHealth.ForeColor = Color.FromArgb(90, 107, 128);
+        treeHealth.BackColor = Color.FromArgb(247, 249, 252);
+        treeHealth.AutoEllipsis = true;
+        treeHealth.Text = "结构健康：等待读取";
+
         structureTree.Dock = DockStyle.Fill;
         structureTree.BorderStyle = BorderStyle.None;
         structureTree.HideSelection = false;
         structureTree.FullRowSelect = true;
+        structureTree.CheckBoxes = false;
         structureTree.ShowNodeToolTips = true;
         structureTree.ImageList = structureImages;
         structureTree.ItemHeight = Math.Max(structureTree.ItemHeight, 20);
         structureTree.DrawMode = TreeViewDrawMode.OwnerDrawAll;
         structureTree.DrawNode += DrawStructureNode;
         structureTree.BeforeExpand += (_, eventArgs) => MaterializeChildren(eventArgs.Node, activeTreeBuildPlan);
+        structureTree.BeforeCheck += (_, eventArgs) =>
+        {
+            if (!suppressTreeCheckEvents
+                && eventArgs.Action != TreeViewAction.Unknown
+                && (!(eventArgs.Node.Tag is CadTreeNode node) || !CanCheckInNode(node)))
+            {
+                eventArgs.Cancel = true;
+            }
+        };
+        structureTree.AfterCheck += (_, eventArgs) =>
+        {
+            if (suppressTreeCheckEvents || !(eventArgs.Node.Tag is CadTreeNode node))
+            {
+                return;
+            }
+
+            SynchronizeCheckedDocument(node, eventArgs.Node.Checked);
+            UpdateSelected(SelectedNode);
+        };
         structureTreeSurface.Dock = DockStyle.Fill;
         structureTreeSurface.BorderStyle = BorderStyle.FixedSingle;
         structureTreeSurface.BackColor = Color.White;
@@ -438,42 +607,60 @@ internal sealed class PdmTaskPaneControl : UserControl
                 NodeSelected?.Invoke(this, new CadTreeNodeEventArgs(node));
             }
         };
-        structureTree.NodeMouseDoubleClick += (_, eventArgs) =>
-        {
-            if (eventArgs.Node.Tag is CadTreeNode node)
-            {
-                OpenRequested?.Invoke(this, new CadTreeNodeEventArgs(node));
-            }
-        };
         structureTree.MouseDown += (_, eventArgs) =>
         {
-            if (eventArgs.Button == MouseButtons.Right)
+            var rowNode = GetStructureNodeAtRow(eventArgs.Y);
+            if (eventArgs.Button == MouseButtons.Left && eventArgs.X < StructureSelectionColumnWidth)
             {
-                structureTree.SelectedNode = structureTree.GetNodeAt(eventArgs.Location);
+                if (rowNode?.Tag is CadTreeNode model && CanCheckInNode(model))
+                {
+                    structureTree.SelectedNode = rowNode;
+                    rowNode.Checked = !rowNode.Checked;
+                }
+                return;
+            }
+
+            if ((eventArgs.Button == MouseButtons.Left || eventArgs.Button == MouseButtons.Right) && rowNode != null)
+            {
+                structureTree.SelectedNode = rowNode;
             }
         };
 
         var treeHost = new Panel { Dock = DockStyle.Fill, Padding = new Padding(3, 0, 3, 3) };
         treeHost.Controls.Add(structureTreeSurface);
 
-        var detail = new Panel { Dock = DockStyle.Bottom, Height = 55, BackColor = Color.White, Padding = new Padding(9, 7, 9, 5) };
+        var detail = new Panel { Dock = DockStyle.Bottom, Height = 118, BackColor = Color.White, Padding = new Padding(9, 7, 9, 5) };
         selectedFile.Text = "未选择图档";
         selectedFile.Dock = DockStyle.Top;
         selectedFile.Height = 22;
         selectedFile.Font = new Font(Font, FontStyle.Bold);
         selectedMeta.Text = "配置、版本和编辑状态";
         selectedMeta.Dock = DockStyle.Top;
-        selectedMeta.Height = 19;
+        selectedMeta.Height = 80;
         selectedMeta.ForeColor = Color.FromArgb(111, 128, 149);
+        selectedMeta.AutoEllipsis = true;
         detail.Controls.Add(selectedMeta);
         detail.Controls.Add(selectedFile);
 
         tab.Controls.Add(treeHost);
         tab.Controls.Add(detail);
+        tab.Controls.Add(treeHealth);
         tab.Controls.Add(searchToolbar);
-        tab.Controls.Add(batchActions);
         tab.Controls.Add(actions);
         return tab;
+    }
+
+    private TreeNode GetStructureNodeAtRow(int y)
+    {
+        for (var node = structureTree.TopNode; node != null; node = node.NextVisibleNode)
+        {
+            if (y >= node.Bounds.Top && y < node.Bounds.Bottom)
+            {
+                return node;
+            }
+        }
+
+        return null;
     }
 
     private void DrawStructureHeader(object sender, PaintEventArgs eventArgs)
@@ -484,11 +671,13 @@ internal sealed class PdmTaskPaneControl : UserControl
         {
             eventArgs.Graphics.FillRectangle(background, 0, 0, structureTreeSurface.ClientSize.Width, 23);
             eventArgs.Graphics.DrawLine(border, 0, 22, structureTreeSurface.ClientSize.Width, 22);
+            eventArgs.Graphics.DrawLine(border, StructureSelectionColumnWidth, 0, StructureSelectionColumnWidth, structureTreeSurface.ClientSize.Height);
             eventArgs.Graphics.DrawLine(border, nameDividerX, 0, nameDividerX, structureTreeSurface.ClientSize.Height);
             eventArgs.Graphics.DrawLine(border, versionDividerX, 0, versionDividerX, structureTreeSurface.ClientSize.Height);
         }
 
-        TextRenderer.DrawText(eventArgs.Graphics, "名称", Font, new Rectangle(6, 0, Math.Max(0, nameDividerX - 10), 22), Color.FromArgb(70, 82, 96), TextFormatFlags.Left | TextFormatFlags.VerticalCenter);
+        TextRenderer.DrawText(eventArgs.Graphics, "选", Font, new Rectangle(0, 0, StructureSelectionColumnWidth, 22), Color.FromArgb(70, 82, 96), TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
+        TextRenderer.DrawText(eventArgs.Graphics, "名称", Font, new Rectangle(StructureSelectionColumnWidth + 5, 0, Math.Max(0, nameDividerX - StructureSelectionColumnWidth - 9), 22), Color.FromArgb(70, 82, 96), TextFormatFlags.Left | TextFormatFlags.VerticalCenter);
         TextRenderer.DrawText(eventArgs.Graphics, "当前版本 / 最新版本", Font, new Rectangle(nameDividerX + 5, 0, Math.Max(0, versionDividerX - nameDividerX - 9), 22), Color.FromArgb(70, 82, 96), TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
         TextRenderer.DrawText(eventArgs.Graphics, "状态", Font, new Rectangle(versionDividerX + 5, 0, Math.Max(0, structureTreeSurface.ClientSize.Width - versionDividerX - 9), 22), Color.FromArgb(70, 82, 96), TextFormatFlags.Left | TextFormatFlags.VerticalCenter);
     }
@@ -505,11 +694,26 @@ internal sealed class PdmTaskPaneControl : UserControl
         using (var border = new Pen(Color.FromArgb(225, 228, 233)))
         {
             eventArgs.Graphics.FillRectangle(brush, new Rectangle(0, eventArgs.Bounds.Top, structureTree.ClientSize.Width, eventArgs.Bounds.Height));
+            eventArgs.Graphics.DrawLine(border, StructureSelectionColumnWidth, eventArgs.Bounds.Top, StructureSelectionColumnWidth, eventArgs.Bounds.Bottom);
             eventArgs.Graphics.DrawLine(border, nameDividerX, eventArgs.Bounds.Top, nameDividerX, eventArgs.Bounds.Bottom);
             eventArgs.Graphics.DrawLine(border, versionDividerX, eventArgs.Bounds.Top, versionDividerX, eventArgs.Bounds.Bottom);
         }
 
-        var structureBounds = new Rectangle(eventArgs.Bounds.Left, eventArgs.Bounds.Top, Math.Max(0, nameDividerX - eventArgs.Bounds.Left - 4), eventArgs.Bounds.Height);
+        var checkBoxSize = Math.Min(14, Math.Max(10, eventArgs.Bounds.Height - 4));
+        var checkBoxBounds = new Rectangle(
+            Math.Max(2, (StructureSelectionColumnWidth - checkBoxSize) / 2),
+            eventArgs.Bounds.Top + Math.Max(0, (eventArgs.Bounds.Height - checkBoxSize) / 2),
+            checkBoxSize,
+            checkBoxSize);
+        var checkState = eventArgs.Node.Checked ? ButtonState.Checked : ButtonState.Normal;
+        if (model == null || !CanCheckInNode(model))
+        {
+            checkState |= ButtonState.Inactive;
+        }
+        ControlPaint.DrawCheckBox(eventArgs.Graphics, checkBoxBounds, checkState);
+
+        var structureLeft = Math.Max(eventArgs.Bounds.Left, StructureSelectionColumnWidth + 4);
+        var structureBounds = new Rectangle(structureLeft, eventArgs.Bounds.Top, Math.Max(0, nameDividerX - structureLeft - 4), eventArgs.Bounds.Height);
         DrawNodeImage(eventArgs.Graphics, eventArgs.Node, structureBounds, selected);
         structureBounds.X += 20;
         structureBounds.Width = Math.Max(0, structureBounds.Width - 20);
@@ -566,14 +770,34 @@ internal sealed class PdmTaskPaneControl : UserControl
 
     private void BuildStructureContextMenu()
     {
-        contextOpen.Text = "在SolidWorks中打开最新受控版（只读）";
-        contextGetLatest.Text = "重新获取最新受控版";
+        contextOpenWorkingFile.Text = "打开此图档";
+        contextEditLatest.Text = "获取最新版本并编辑";
+        contextUpdateLatest.Text = "更新到最新版本";
+        contextVersionInfo.Enabled = false;
         contextCheckout.Text = "获取权限";
         contextCheckIn.Text = "提交存档";
         contextDiscardCheckout.Text = "放弃编辑";
-        contextVersions.Text = "获取指定版本...";
-        contextCompare.Text = "版本对比";
+        contextGenerateDrawing.Text = "生成工程图...";
+        contextOpenDrawing.Text = "打开关联工程图";
+        contextDrawingVersions.Text = "关联工程图版本...";
+        contextVersions.Text = "选择历史版本...";
         contextRefresh.Text = "刷新结构树";
+        contextWhereUsed.Text = "使用位置...";
+        contextRequestRelease.Text = "申请释放编辑权限...";
+        contextOpenReleaseCenter.Text = "进入审批与发布...";
+        contextWithdrawApproval.Text = "撤回当前审批...";
+        contextObsolete.Text = "作废图档...";
+        contextZoomSelection.Text = "放大所选范围";
+        contextIsolate.Text = "隔离显示";
+        contextExitIsolate.Text = "退出隔离";
+        contextOpenFolder.Text = "在资源管理器中定位";
+        contextRenameDocument.Text = "重命名图档...";
+        contextSelectEligible.Text = "全选可提交项";
+        contextSelectChanged.Text = "选择已修改/待提交";
+        contextSelectMine.Text = "选择我检出的图档";
+        contextClearSelection.Text = "清除选择";
+        contextExpandAll.Text = "全部展开";
+        contextCollapseAll.Text = "全部折叠";
         contextHint.AutoSize = false;
         contextHint.Size = new Size(110, 58);
         contextHint.MinimumSize = contextHint.Size;
@@ -583,14 +807,51 @@ internal sealed class PdmTaskPaneControl : UserControl
         contextHint.ForeColor = Color.FromArgb(111, 128, 149);
         contextHint.BackColor = SystemColors.Menu;
 
-        contextOpen.Click += (_, _) => RaiseSelected(OpenRequested);
-        contextGetLatest.Click += (_, _) => RaiseSelected(GetLatestVersionRequested);
+        contextOpenWorkingFile.Click += (_, _) => RaiseSelected(OpenWorkingFileRequested);
+        contextEditLatest.Click += (_, _) =>
+        {
+            var node = SelectedNode;
+            if (node?.DocumentId.HasValue == true)
+                ControlledOpenRequested?.Invoke(this, new ControlledOpenEventArgs(node, ControlledOpenMode.LatestEdit, null, selectedProjectId));
+        };
+        contextUpdateLatest.Click += (_, _) => RaiseSelected(UpdateLatestRequested);
         contextCheckout.Click += (_, _) => RaiseSelected(CheckoutRequested);
         contextCheckIn.Click += (_, _) => RaiseSelected(CheckInRequested);
         contextDiscardCheckout.Click += (_, _) => RaiseSelected(DiscardCheckoutRequested);
+        contextGenerateDrawing.Click += (_, _) => ShowAutomaticDrawing(SelectedNode);
+        contextOpenDrawing.Click += (_, _) =>
+        {
+            automaticDrawing.SetSource(SelectedNode);
+            automaticDrawing.RequestOpen();
+        };
+        contextDrawingVersions.Click += (_, _) =>
+        {
+            var drawing = FindRelatedDrawing(SelectedNode);
+            if (drawing != null)
+            {
+                VersionsRequested?.Invoke(this, new CadTreeNodeEventArgs(drawing));
+            }
+        };
         contextVersions.Click += (_, _) => RaiseSelected(VersionsRequested);
-        contextCompare.Click += (_, _) => RaiseSelected(VersionsRequested);
         contextRefresh.Click += (_, _) => RefreshRequested?.Invoke(this, EventArgs.Empty);
+        contextWhereUsed.Click += (_, _) => RaiseSelected(WhereUsedRequested);
+        contextRequestRelease.Click += (_, _) => RaiseSelected(RequestReleaseRequested);
+        contextOpenReleaseCenter.Click += (_, _) => OpenReleaseCenterRequested?.Invoke(this, EventArgs.Empty);
+        contextWithdrawApproval.Click += (_, _) => RaiseSelected(WithdrawApprovalRequested);
+        contextObsolete.Click += (_, _) => RaiseSelected(ObsoleteRequested);
+        contextZoomSelection.Click += (_, _) => RaiseSelected(ZoomSelectionRequested);
+        contextIsolate.Click += (_, _) => RaiseSelected(IsolateRequested);
+        contextExitIsolate.Click += (_, _) => ExitIsolateRequested?.Invoke(this, EventArgs.Empty);
+        contextOpenFolder.Click += (_, _) => RaiseSelected(OpenContainingFolderRequested);
+        contextRenameDocument.Click += (_, _) => RaiseSelected(RenameDocumentRequested);
+        contextSelectEligible.Click += (_, _) => SelectTreeDocuments(CanCheckInNode);
+        contextSelectChanged.Click += (_, _) => SelectTreeDocuments(node => CanCheckInNode(node)
+            && (node.IsModifiedInSolidWorks || node.WorkState == CadWorkState.ModifiedUnsaved || node.WorkState == CadWorkState.PendingCheckIn));
+        contextSelectMine.Click += (_, _) => SelectTreeDocuments(node => CanCheckInNode(node)
+            && string.Equals(node.CheckedOutBy, authenticatedUsername, StringComparison.OrdinalIgnoreCase));
+        contextClearSelection.Click += (_, _) => SelectTreeDocuments(_ => false);
+        contextExpandAll.Click += (_, _) => ExpandAllMaterialized();
+        contextCollapseAll.Click += (_, _) => structureTree.CollapseAll();
 
         structureMenu.ShowItemToolTips = true;
         structureMenu.ShowImageMargin = false;
@@ -602,17 +863,35 @@ internal sealed class PdmTaskPaneControl : UserControl
             Margin = Padding.Empty,
             Padding = Padding.Empty
         };
+        var modelMenu = new ToolStripMenuItem("模型显示");
+        modelMenu.DropDownItems.AddRange(new ToolStripItem[] { contextZoomSelection, contextIsolate, contextExitIsolate });
+        var selectionMenu = new ToolStripMenuItem("批量选择与树");
+        selectionMenu.DropDownItems.AddRange(new ToolStripItem[] { contextSelectEligible, contextSelectChanged, contextSelectMine, contextClearSelection, new ToolStripSeparator(), contextExpandAll, contextCollapseAll });
+        var lifecycleMenu = new ToolStripMenuItem("业务状态");
+        lifecycleMenu.DropDownItems.AddRange(new ToolStripItem[] { contextOpenReleaseCenter, contextWithdrawApproval, contextObsolete });
         structureMenu.Items.AddRange(new ToolStripItem[]
         {
-            contextOpen,
-            contextGetLatest,
+            contextOpenWorkingFile,
+            contextEditLatest,
+            contextUpdateLatest,
+            contextVersions,
+            contextVersionInfo,
+            new ToolStripSeparator(),
+            contextWhereUsed,
+            contextOpenFolder,
+            contextRenameDocument,
+            modelMenu,
+            selectionMenu,
+            lifecycleMenu,
             new ToolStripSeparator(),
             contextCheckout,
-            contextCheckIn,
+            contextRequestRelease,
             contextDiscardCheckout,
+            contextCheckIn,
             new ToolStripSeparator(),
-            contextVersions,
-            contextCompare,
+            contextGenerateDrawing,
+            contextOpenDrawing,
+            contextDrawingVersions,
             new ToolStripSeparator(),
             contextRefresh,
             new ToolStripSeparator(),
@@ -642,19 +921,105 @@ internal sealed class PdmTaskPaneControl : UserControl
         var authenticated = !string.IsNullOrWhiteSpace(authenticatedUsername);
         var editing = !string.IsNullOrWhiteSpace(node.CheckedOutBy);
         var editingByCurrentUser = editing
+            && string.Equals(node.CheckedOutBy, authenticatedUsername, StringComparison.OrdinalIgnoreCase)
+            && !node.CheckoutSessionLost;
+        var canRecoverCheckout = node.CheckoutSessionLost
             && string.Equals(node.CheckedOutBy, authenticatedUsername, StringComparison.OrdinalIgnoreCase);
         var canRegister = !registered && localFileExists && canOpenInSolidWorks;
         var historicalPreview = node.IsHistoricalPreview;
+        var lifecycleInReview = string.Equals(node.LifecycleState, "InReview", StringComparison.OrdinalIgnoreCase);
+        var lifecycleObsolete = string.Equals(node.LifecycleState, "Obsolete", StringComparison.OrdinalIgnoreCase);
+        var drawingSource = node.Kind == CadDocumentKind.Part || node.Kind == CadDocumentKind.Assembly;
+        var drawingPath = AutomaticDrawingControl.GetDrawingPath(node);
+        var drawingExists = drawingSource && !string.IsNullOrWhiteSpace(drawingPath) && File.Exists(drawingPath);
+        var relatedDrawing = drawingExists ? FindRelatedDrawing(node) : null;
 
         SetContextState(
-            contextOpen,
-            registered && authenticated && canOpenInSolidWorks,
-            PdmActionReason(registered, authenticated));
-        SetContextState(contextGetLatest, registered && authenticated, PdmActionReason(registered, authenticated));
+            contextOpenWorkingFile,
+            canOpenInSolidWorks && localFileExists && node.Status != CadReferenceStatus.Missing,
+            !canOpenInSolidWorks
+                ? "该文件类型不能在SolidWorks中打开"
+                : !localFileExists || node.Status == CadReferenceStatus.Missing
+                    ? "当前结构引用的本地文件不存在"
+                    : "打开或激活当前结构实际引用的工作图档");
+        SetContextState(contextEditLatest, registered && authenticated && !historicalPreview && !editing && !lifecycleInReview && !lifecycleObsolete && selectedProjectId.HasValue,
+            lifecycleInReview ? "图档正在审批，不能编辑" : lifecycleObsolete ? "图档已作废，不能编辑" : !selectedProjectId.HasValue ? "请先选择当前项目" : "获取整套最新受控文件、取得根图档权限并打开");
 
-        contextCheckout.Text = editing
-            ? string.Concat("正在编辑（", node.CheckedOutBy, "）")
-            : "获取权限";
+        var currentRevision = string.IsNullOrWhiteSpace(node.CurrentRevision)
+            ? string.IsNullOrWhiteSpace(node.Revision) ? "待识别" : node.Revision
+            : node.CurrentRevision;
+        var latestRevision = string.IsNullOrWhiteSpace(node.LatestRevision) ? "待识别" : node.LatestRevision;
+        var hasPendingLocalChange = node.IsModifiedInSolidWorks
+            || node.WorkState == CadWorkState.ModifiedUnsaved
+            || node.WorkState == CadWorkState.PendingCheckIn
+            || currentRevision.EndsWith("*", StringComparison.Ordinal)
+            || string.Equals(currentRevision, "本地修改", StringComparison.Ordinal);
+        var isLatest = !hasPendingLocalChange
+            && !string.IsNullOrWhiteSpace(node.LatestRevision)
+            && string.Equals(currentRevision, node.LatestRevision, StringComparison.OrdinalIgnoreCase);
+        var updateReason = "从PDM获取最新版本并安全更新本地工作文件";
+        if (!registered)
+        {
+            updateReason = "该图档尚未入库";
+        }
+        else if (!authenticated)
+        {
+            updateReason = "请先登录PDM";
+        }
+        else if (historicalPreview)
+        {
+            updateReason = "历史版本为只读预览，不能更新工作区";
+        }
+        else if (editingByCurrentUser)
+        {
+            updateReason = "当前用户正在编辑；请先提交存档或放弃编辑";
+        }
+        else if (editing)
+        {
+            updateReason = string.Concat("当前编辑人员：", node.CheckedOutBy);
+        }
+        else if (hasPendingLocalChange)
+        {
+            updateReason = "存在未保存修改或待提交内容，不能覆盖本地文件";
+        }
+        else if (string.IsNullOrWhiteSpace(node.LatestRevision))
+        {
+            updateReason = "版本信息尚未加载，请刷新结构树";
+        }
+        else if (isLatest)
+        {
+            updateReason = "本地工作文件已是最新版本";
+        }
+        else if (!canOpenInSolidWorks || string.IsNullOrWhiteSpace(node.FullPath))
+        {
+            updateReason = "该文件类型或工作路径不支持更新";
+        }
+        SetContextState(
+            contextUpdateLatest,
+            registered && authenticated && !historicalPreview && !editing && !hasPendingLocalChange
+                && !isLatest && !string.IsNullOrWhiteSpace(node.LatestRevision)
+                && canOpenInSolidWorks && !string.IsNullOrWhiteSpace(node.FullPath),
+            updateReason);
+        contextVersionInfo.Text = registered
+            ? string.Concat("当前 ", currentRevision, " / 最新 ", latestRevision)
+            : "当前 未入库 / 最新 -";
+
+        contextGenerateDrawing.Text = drawingExists ? "更新工程图..." : "生成工程图...";
+        SetContextState(
+            contextGenerateDrawing,
+            drawingSource && localFileExists && !historicalPreview,
+            historicalPreview
+                ? "历史版本不能生成或更新工程图"
+                : drawingSource ? "本地模型不存在，不能生成工程图" : "请选择零件或装配体");
+        SetContextState(
+            contextOpenDrawing,
+            drawingExists,
+            drawingSource ? "尚未生成关联工程图" : "请选择零件或装配体");
+        SetContextState(
+            contextDrawingVersions,
+            relatedDrawing?.DocumentId.HasValue == true && authenticated,
+            relatedDrawing?.DocumentId.HasValue == true ? "请先登录PDM" : "关联工程图尚未入库");
+
         var checkoutReason = PdmActionReason(registered, authenticated);
         if (registered && authenticated && editing)
         {
@@ -664,15 +1029,23 @@ internal sealed class PdmTaskPaneControl : UserControl
         {
             checkoutReason = "首次获取权限时将自动登记该图档";
         }
-        if (historicalPreview)
+        if (node.CheckoutSessionLost)
+        {
+            checkoutReason = "编辑权限已失效；请另存本地修改或重新获取权限";
+        }
+        else if (historicalPreview)
         {
             checkoutReason = "历史版本为只读预览，不能获取编辑权限";
         }
-        SetContextState(contextCheckout, !historicalPreview && authenticated && !editing && (registered || canRegister), checkoutReason);
+        SetContextState(contextCheckout, !historicalPreview && authenticated && (!editing || canRecoverCheckout) && (registered || canRegister), checkoutReason);
 
         var canFirstCheckIn = !historicalPreview && authenticated && canRegister;
         var checkInReason = PdmActionReason(registered, authenticated);
-        if (historicalPreview)
+        if (node.CheckoutSessionLost)
+        {
+            checkInReason = "编辑权限已失效；请另存本地修改或重新获取权限";
+        }
+        else if (historicalPreview)
         {
             checkInReason = "历史版本为只读预览，不能提交存档；请打开当前工作文件";
         }
@@ -705,11 +1078,70 @@ internal sealed class PdmTaskPaneControl : UserControl
                 ? string.Concat("只有当前编辑人员", node.CheckedOutBy, "可以放弃编辑")
                 : registered && authenticated ? "尚未获取该图档的编辑权限" : PdmActionReason(registered, authenticated));
 
-        SetContextState(contextVersions, registered && authenticated, PdmActionReason(registered, authenticated));
-        SetContextState(contextCompare, registered && authenticated, PdmActionReason(registered, authenticated));
-        contextCompare.ToolTipText = contextCompare.Enabled
-            ? "打开版本记录后选择两个版本进行对比"
-            : contextCompare.ToolTipText;
+        SetContextState(contextWhereUsed, registered && authenticated, registered ? "请先登录PDM" : "该图档尚未入库");
+        SetContextState(contextRequestRelease, registered && authenticated && editing && !editingByCurrentUser,
+            editingByCurrentUser ? "当前编辑权限属于您" : editing ? string.Concat("向", node.CheckedOutBy, "申请释放编辑权限") : "该图档当前未被检出");
+        SetContextState(contextOpenFolder, localFileExists, "本地文件不存在");
+        var selectedRoot = rootNode != null
+            && (ReferenceEquals(node, rootNode)
+                || !string.IsNullOrWhiteSpace(node.FullPath) && string.Equals(node.FullPath, rootNode.FullPath, StringComparison.OrdinalIgnoreCase));
+        var renameSupported = (node.Kind == CadDocumentKind.Part || node.Kind == CadDocumentKind.Assembly)
+            && (selectedRoot || !string.IsNullOrWhiteSpace(node.ComponentSelectionName));
+        var rootEditingByCurrentUser = rootNode != null
+            && string.Equals(rootNode.CheckedOutBy, authenticatedUsername, StringComparison.OrdinalIgnoreCase)
+            && !rootNode.CheckoutSessionLost;
+        var renameReason = selectedRoot
+            ? "以新名称保存当前主图档；提交存档后更新PDM当前名称"
+            : "在SolidWorks中重命名所选图档；保存并提交存档后更新PDM当前名称";
+        if (!renameSupported)
+        {
+            renameReason = node.Kind == CadDocumentKind.Drawing
+                ? "工程图暂不支持从结构树重命名"
+                : "SolidWorks未识别到该零部件实例";
+        }
+        else if (!registered)
+        {
+            renameReason = "该图档尚未入库";
+        }
+        else if (!authenticated)
+        {
+            renameReason = "请先登录PDM";
+        }
+        else if (historicalPreview)
+        {
+            renameReason = "历史版本不能重命名";
+        }
+        else if (lifecycleInReview || lifecycleObsolete)
+        {
+            renameReason = lifecycleInReview ? "图档正在审批，不能重命名" : "图档已作废，不能重命名";
+        }
+        else if (!localFileExists)
+        {
+            renameReason = "本地文件不存在";
+        }
+        else if (!editingByCurrentUser)
+        {
+            renameReason = editing ? string.Concat("当前编辑人员：", node.CheckedOutBy) : "请先获取该图档的编辑权限";
+        }
+        else if (!rootEditingByCurrentUser)
+        {
+            renameReason = "重命名会修改装配引用，请先获取当前装配体的编辑权限";
+        }
+        SetContextState(
+            contextRenameDocument,
+            renameSupported && registered && authenticated && !historicalPreview && !lifecycleInReview && !lifecycleObsolete
+                && localFileExists && editingByCurrentUser && rootEditingByCurrentUser,
+            renameReason);
+        SetContextState(contextZoomSelection, !string.IsNullOrWhiteSpace(node.ComponentSelectionName), "请选择装配体中的零部件实例");
+        SetContextState(contextIsolate, !string.IsNullOrWhiteSpace(node.ComponentSelectionName), "请选择装配体中的零部件实例");
+        contextExitIsolate.Enabled = canOpenInSolidWorks;
+        SetContextState(contextOpenReleaseCenter, authenticated && selectedProjectId.HasValue, authenticated ? "请先选择当前项目" : "请先登录PDM");
+        SetContextState(contextWithdrawApproval, registered && authenticated && selectedProjectId.HasValue && lifecycleInReview,
+            lifecycleInReview ? "撤回当前项目审批并恢复工作状态" : "该图档当前不在审批中");
+        SetContextState(contextObsolete, registered && authenticated && !editing && !historicalPreview && !lifecycleInReview && !lifecycleObsolete,
+            lifecycleObsolete ? "图档已作废" : lifecycleInReview ? "请先撤回审批" : editing ? "请先提交或放弃编辑" : "填写原因后受控作废图档");
+
+        SetContextState(contextVersions, registered && authenticated, registered ? "请先登录PDM" : "该图档尚未入库");
 
         if (historicalPreview)
         {
@@ -721,7 +1153,7 @@ internal sealed class PdmTaskPaneControl : UserControl
         }
         else if (!registered)
         {
-            contextHint.Text = "提示：该图档尚未入库，仅支持本地打开";
+            contextHint.Text = "提示：可通过获取权限或提交存档选择归属项目";
         }
         else if (!authenticated)
         {
@@ -729,7 +1161,7 @@ internal sealed class PdmTaskPaneControl : UserControl
         }
         else if (!localFileExists)
         {
-            contextHint.Text = "提示：本地文件不存在，可获取最新或指定版本";
+            contextHint.Text = "提示：本地文件不存在，请从项目图档获取受控版本";
         }
         else if (editing)
         {
@@ -749,6 +1181,36 @@ internal sealed class PdmTaskPaneControl : UserControl
         }
 
         return authenticated ? string.Empty : "请先登录PDM";
+    }
+
+    private CadTreeNode FindRelatedDrawing(CadTreeNode source)
+    {
+        var drawingPath = AutomaticDrawingControl.GetDrawingPath(source);
+        if (string.IsNullOrWhiteSpace(drawingPath) || rootNode == null)
+        {
+            return null;
+        }
+
+        return EnumerateCadTree(rootNode).FirstOrDefault(candidate =>
+            candidate.Kind == CadDocumentKind.Drawing
+            && PathsEqual(candidate.FullPath, drawingPath));
+    }
+
+    private static bool PathsEqual(string left, string right)
+    {
+        if (string.IsNullOrWhiteSpace(left) || string.IsNullOrWhiteSpace(right))
+        {
+            return false;
+        }
+
+        try
+        {
+            return string.Equals(Path.GetFullPath(left), Path.GetFullPath(right), StringComparison.OrdinalIgnoreCase);
+        }
+        catch
+        {
+            return string.Equals(left, right, StringComparison.OrdinalIgnoreCase);
+        }
     }
 
     private static void SetContextState(ToolStripMenuItem item, bool enabled, string disabledReason)
@@ -779,7 +1241,7 @@ internal sealed class PdmTaskPaneControl : UserControl
         openCurrentButton.Text = "只读打开最新受控版";
         openCurrentButton.AutoSize = true;
         openCurrentButton.Click += (_, _) => RaiseSelected(OpenRequested);
-        openHistoryButton.Text = "只读打开历史版本";
+        openHistoryButton.Text = "切换为所选版本";
         openHistoryButton.AutoSize = true;
         openHistoryButton.Click += (_, _) => RaiseOpenHistory();
         compareVersionsButton.Text = "发起版本对比";
@@ -796,14 +1258,16 @@ internal sealed class PdmTaskPaneControl : UserControl
     private void UpdateVersionActions()
     {
         openCurrentButton.Enabled = IsDisplayedDocumentSelected();
-        openHistoryButton.Enabled = displayedVersionDocumentId.HasValue && versionList.SelectedItems.Count == 1;
+        var canSwitchVersion = CanSwitchDisplayedVersion(out var switchReason);
+        openHistoryButton.Enabled = canSwitchVersion && versionList.SelectedItems.Count == 1;
+        actionToolTip.SetToolTip(openHistoryButton, canSwitchVersion ? "将本地工作文件切换为所选版本，并在结构树显示当前/最新版本" : switchReason);
         compareVersionsButton.Enabled = displayedVersionDocumentId.HasValue && versionList.SelectedItems.Count == 2;
     }
 
     private void BuildVersionContextMenu()
     {
-        versionContextGetSelected.Text = "只读打开历史版本";
-        versionContextGetLatest.Text = "只读打开最新受控版";
+        versionContextGetSelected.Text = "切换到所选版本";
+        versionContextGetLatest.Text = "切换到最新版本";
         versionContextOpenCurrent.Text = "只读打开当前受控版";
         versionContextCompare.Text = "版本对比";
         versionContextRefresh.Text = "刷新版本列表";
@@ -843,8 +1307,11 @@ internal sealed class PdmTaskPaneControl : UserControl
     private void UpdateVersionContextMenu()
     {
         var selectionCount = versionList.SelectedItems.Count;
-        versionContextGetSelected.Enabled = displayedVersionDocumentId.HasValue && selectionCount == 1;
-        versionContextGetLatest.Enabled = displayedVersionDocumentId.HasValue && versionList.Items.Count > 0;
+        var canSwitchVersion = CanSwitchDisplayedVersion(out var switchReason);
+        versionContextGetSelected.Enabled = canSwitchVersion && selectionCount == 1;
+        versionContextGetSelected.ToolTipText = canSwitchVersion ? string.Empty : switchReason;
+        versionContextGetLatest.Enabled = canSwitchVersion && versionList.Items.Count > 0;
+        versionContextGetLatest.ToolTipText = canSwitchVersion ? string.Empty : switchReason;
         versionContextOpenCurrent.Enabled = IsDisplayedDocumentSelected();
         versionContextCompare.Enabled = displayedVersionDocumentId.HasValue && selectionCount == 2;
         versionContextRefresh.Enabled = IsDisplayedDocumentSelected();
@@ -869,6 +1336,51 @@ internal sealed class PdmTaskPaneControl : UserControl
     private bool IsDisplayedDocumentSelected() =>
         displayedVersionDocumentId.HasValue && SelectedNode?.DocumentId == displayedVersionDocumentId;
 
+    private bool CanSwitchDisplayedVersion(out string reason)
+    {
+        var node = SelectedNode;
+        if (!IsDisplayedDocumentSelected() || node == null)
+        {
+            reason = "请先在结构树中选择对应图档";
+            return false;
+        }
+        if (string.IsNullOrWhiteSpace(authenticatedUsername))
+        {
+            reason = "请先登录PDM";
+            return false;
+        }
+        if (node.IsHistoricalPreview)
+        {
+            reason = "历史预览目录不能切换工作版本";
+            return false;
+        }
+        if (!string.IsNullOrWhiteSpace(node.CheckedOutBy))
+        {
+            reason = string.Equals(node.CheckedOutBy, authenticatedUsername, StringComparison.OrdinalIgnoreCase)
+                ? "请先提交存档或放弃编辑"
+                : string.Concat("该图档正在由", node.CheckedOutBy, "编辑");
+            return false;
+        }
+        if (node.IsModifiedInSolidWorks
+            || node.WorkState == CadWorkState.ModifiedUnsaved
+            || node.WorkState == CadWorkState.PendingCheckIn)
+        {
+            reason = "存在未保存修改或待提交内容，不能切换版本";
+            return false;
+        }
+        if (string.IsNullOrWhiteSpace(node.FullPath)
+            || node.Kind != CadDocumentKind.Assembly
+                && node.Kind != CadDocumentKind.Part
+                && node.Kind != CadDocumentKind.Drawing)
+        {
+            reason = "该图档没有可切换的本地工作路径";
+            return false;
+        }
+
+        reason = string.Empty;
+        return true;
+    }
+
     private void RaiseOpenHistory()
     {
         if (displayedVersionDocumentId is Guid documentId && versionList.SelectedItems.Count == 1 && versionList.SelectedItems[0].Tag is DocumentVersionDto version)
@@ -886,17 +1398,21 @@ internal sealed class PdmTaskPaneControl : UserControl
         var modelRoot = rootNode;
         if (modelRoot == null)
         {
+            UpdateTreeHealth();
             return;
         }
 
+        UpdateTreeHealth();
+
         var selectedInstancePath = SelectedNode?.InstancePath;
+        var checkedPaths = new HashSet<string>(checkedCheckInPaths, StringComparer.OrdinalIgnoreCase);
         var normalizedFilter = filter?.Trim();
         var generation = Interlocked.Increment(ref treeBuildGeneration);
         CancelActiveTreeBuild();
         Task.Run(() =>
         {
-            var root = BuildTreeNode(modelRoot, normalizedFilter, modelRoot);
-            var relatedDrawings = BuildRelatedDrawingsGroup(modelRoot, normalizedFilter);
+            var root = BuildTreeNode(modelRoot, normalizedFilter, modelRoot, checkedPaths);
+            var relatedDrawings = BuildRelatedDrawingsGroup(modelRoot, normalizedFilter, checkedPaths);
             if (relatedDrawings != null)
             {
                 root?.Nodes.Add(relatedDrawings);
@@ -1176,11 +1692,11 @@ internal sealed class PdmTaskPaneControl : UserControl
         public TreeNode Child { get; }
     }
 
-    private TreeNode BuildTreeNode(CadTreeNode model, string filter, CadTreeNode modelRoot)
+    private TreeNode BuildTreeNode(CadTreeNode model, string filter, CadTreeNode modelRoot, ISet<string> checkedPaths)
     {
         var childNodes = model.Children
             .Where(child => child.Kind != CadDocumentKind.Drawing)
-            .Select(child => BuildTreeNode(child, filter, modelRoot))
+            .Select(child => BuildTreeNode(child, filter, modelRoot, checkedPaths))
             .Where(node => node != null)
             .ToArray();
         var selfMatches = MatchesFilter(model, filter)
@@ -1190,7 +1706,7 @@ internal sealed class PdmTaskPaneControl : UserControl
             return null;
         }
 
-        var isMissing = model.Status == CadReferenceStatus.Missing;
+        var isMissing = model.Status == CadReferenceStatus.Missing && !model.IsRenamePendingSave;
         var status = model.Status == CadReferenceStatus.Normal || isMissing ? string.Empty : string.Concat(" · ", StatusText(model.Status));
         var editTip = isMissing
             ? "\r\n状态：文件缺失"
@@ -1201,7 +1717,8 @@ internal sealed class PdmTaskPaneControl : UserControl
             Tag = model,
             ImageKey = StructureImageKey(model.Kind),
             SelectedImageKey = StructureImageKey(model.Kind),
-            ToolTipText = string.Concat(model.FileName, "\r\n配置：", model.Configuration, editTip)
+            ToolTipText = string.Concat(model.FileName, "\r\n配置：", model.Configuration, editTip),
+            Checked = !string.IsNullOrWhiteSpace(model.FullPath) && checkedPaths.Contains(model.FullPath)
         };
         if (isMissing)
         {
@@ -1256,32 +1773,83 @@ internal sealed class PdmTaskPaneControl : UserControl
     private static ImageList BuildStructureImages()
     {
         var images = new ImageList { ColorDepth = ColorDepth.Depth32Bit, ImageSize = new Size(16, 16), TransparentColor = Color.Transparent };
-        images.Images.Add("assembly", DrawDocumentIcon(Color.FromArgb(233, 174, 45), true));
-        images.Images.Add("part", DrawDocumentIcon(Color.FromArgb(94, 164, 91), false));
+        images.Images.Add("assembly", DrawAssemblyIcon());
+        images.Images.Add("part", DrawPartIcon());
         images.Images.Add("drawing", DrawDrawingIcon());
-        images.Images.Add("other", DrawDocumentIcon(Color.FromArgb(139, 151, 164), false));
+        images.Images.Add("other", DrawOtherDocumentIcon());
         images.Images.Add("group", DrawGroupIcon());
         return images;
     }
 
-    private static Bitmap DrawDocumentIcon(Color fill, bool assembly)
+    private static Bitmap DrawPartIcon()
     {
         var bitmap = new Bitmap(16, 16);
         using (var graphics = Graphics.FromImage(bitmap))
-        using (var brush = new SolidBrush(fill))
-        using (var light = new SolidBrush(ControlPaint.Light(fill)))
-        using (var pen = new Pen(ControlPaint.Dark(fill), 1))
+        using (var top = new SolidBrush(Color.FromArgb(250, 215, 91)))
+        using (var left = new SolidBrush(Color.FromArgb(226, 160, 26)))
+        using (var right = new SolidBrush(Color.FromArgb(191, 118, 5)))
+        using (var outline = new Pen(Color.FromArgb(91, 67, 16), 0.8F))
+        using (var highlight = new Pen(Color.FromArgb(255, 244, 191), 0.45F))
         {
             graphics.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
-            graphics.FillPolygon(brush, new[] { new Point(3, 6), new Point(8, 3), new Point(13, 6), new Point(8, 9) });
-            graphics.FillPolygon(light, new[] { new Point(3, 6), new Point(8, 9), new Point(8, 14), new Point(3, 11) });
-            graphics.FillPolygon(brush, new[] { new Point(8, 9), new Point(13, 6), new Point(13, 11), new Point(8, 14) });
-            graphics.DrawPolygon(pen, new[] { new Point(3, 6), new Point(8, 3), new Point(13, 6), new Point(13, 11), new Point(8, 14), new Point(3, 11) });
-            if (assembly)
-            {
-                graphics.FillEllipse(Brushes.SteelBlue, 1, 1, 5, 5);
-                graphics.DrawEllipse(Pens.White, 2, 2, 3, 3);
-            }
+            graphics.PixelOffsetMode = System.Drawing.Drawing2D.PixelOffsetMode.HighQuality;
+            var topFace = new[] { new PointF(8F, 1.65F), new PointF(13.5F, 4.4F), new PointF(8F, 7.15F), new PointF(2.5F, 4.4F) };
+            var leftFace = new[] { new PointF(2.5F, 4.4F), new PointF(8F, 7.15F), new PointF(8F, 13.6F), new PointF(2.5F, 10.8F) };
+            var rightFace = new[] { new PointF(8F, 7.15F), new PointF(13.5F, 4.4F), new PointF(13.5F, 10.8F), new PointF(8F, 13.6F) };
+            graphics.FillPolygon(top, topFace);
+            graphics.FillPolygon(left, leftFace);
+            graphics.FillPolygon(right, rightFace);
+            graphics.DrawPolygon(outline, topFace);
+            graphics.DrawPolygon(outline, leftFace);
+            graphics.DrawPolygon(outline, rightFace);
+            graphics.DrawLines(highlight, new[] { new PointF(4F, 4.55F), new PointF(8F, 6.55F), new PointF(12F, 4.55F) });
+        }
+        return bitmap;
+    }
+
+    private static Bitmap DrawAssemblyIcon()
+    {
+        var bitmap = new Bitmap(16, 16);
+        using (var graphics = Graphics.FromImage(bitmap))
+        using (var blueTop = new SolidBrush(Color.FromArgb(132, 181, 215)))
+        using (var blueLeft = new SolidBrush(Color.FromArgb(84, 143, 186)))
+        using (var blueRight = new SolidBrush(Color.FromArgb(50, 109, 155)))
+        using (var blueOutline = new Pen(Color.FromArgb(40, 79, 114), 0.75F))
+        using (var frontTopBrush = new SolidBrush(Color.FromArgb(115, 169, 208)))
+        using (var frontLeftBrush = new SolidBrush(Color.FromArgb(63, 127, 174)))
+        using (var frontRightBrush = new SolidBrush(Color.FromArgb(39, 94, 138)))
+        using (var frontOutline = new Pen(Color.FromArgb(35, 79, 114), 0.8F))
+        using (var link = new Pen(Color.FromArgb(36, 106, 158), 0.8F))
+        using (var nodeFill = new SolidBrush(Color.FromArgb(237, 247, 255)))
+        {
+            graphics.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+            graphics.PixelOffsetMode = System.Drawing.Drawing2D.PixelOffsetMode.HighQuality;
+
+            var rearTop = new[] { new PointF(5.2F, 1.7F), new PointF(9.7F, 3.95F), new PointF(5.2F, 6.2F), new PointF(0.75F, 3.95F) };
+            var rearLeft = new[] { new PointF(0.75F, 3.95F), new PointF(5.2F, 6.2F), new PointF(5.2F, 11.05F), new PointF(0.75F, 8.75F) };
+            var rearRight = new[] { new PointF(5.2F, 6.2F), new PointF(9.7F, 3.95F), new PointF(9.7F, 8.75F), new PointF(5.2F, 11.05F) };
+            graphics.FillPolygon(blueTop, rearTop);
+            graphics.FillPolygon(blueLeft, rearLeft);
+            graphics.FillPolygon(blueRight, rearRight);
+            graphics.DrawPolygon(blueOutline, rearTop);
+            graphics.DrawPolygon(blueOutline, rearLeft);
+            graphics.DrawPolygon(blueOutline, rearRight);
+
+            var frontTop = new[] { new PointF(10.1F, 4.9F), new PointF(15.25F, 7.45F), new PointF(10.1F, 10.05F), new PointF(4.95F, 7.45F) };
+            var frontLeft = new[] { new PointF(4.95F, 7.45F), new PointF(10.1F, 10.05F), new PointF(10.1F, 14.3F), new PointF(4.95F, 11.7F) };
+            var frontRight = new[] { new PointF(10.1F, 10.05F), new PointF(15.25F, 7.45F), new PointF(15.25F, 11.7F), new PointF(10.1F, 14.3F) };
+            graphics.FillPolygon(frontTopBrush, frontTop);
+            graphics.FillPolygon(frontLeftBrush, frontLeft);
+            graphics.FillPolygon(frontRightBrush, frontRight);
+            graphics.DrawPolygon(frontOutline, frontTop);
+            graphics.DrawPolygon(frontOutline, frontLeft);
+            graphics.DrawPolygon(frontOutline, frontRight);
+
+            graphics.DrawLine(link, 5.6F, 7.8F, 9.35F, 9.65F);
+            graphics.FillEllipse(nodeFill, 4.1F, 6.65F, 1.6F, 1.6F);
+            graphics.DrawEllipse(link, 4.1F, 6.65F, 1.6F, 1.6F);
+            graphics.FillEllipse(nodeFill, 9.25F, 9.25F, 1.6F, 1.6F);
+            graphics.DrawEllipse(link, 9.25F, 9.25F, 1.6F, 1.6F);
         }
         return bitmap;
     }
@@ -1290,10 +1858,46 @@ internal sealed class PdmTaskPaneControl : UserControl
     {
         var bitmap = new Bitmap(16, 16);
         using (var graphics = Graphics.FromImage(bitmap))
-        using (var paper = new SolidBrush(Color.White))
-        using (var pen = new Pen(Color.FromArgb(72, 126, 181), 1))
+        using (var paper = new SolidBrush(Color.FromArgb(252, 253, 255)))
+        using (var fold = new SolidBrush(Color.FromArgb(220, 226, 232)))
+        using (var viewFill = new SolidBrush(Color.FromArgb(229, 238, 247)))
+        using (var titleFill = new SolidBrush(Color.FromArgb(243, 245, 247)))
+        using (var pen = new Pen(Color.FromArgb(77, 86, 98), 0.85F))
+        using (var viewPen = new Pen(Color.FromArgb(71, 118, 160), 0.65F))
+        using (var detail = new Pen(Color.FromArgb(124, 135, 146), 0.55F))
         {
-            graphics.FillRectangle(paper, 3, 2, 10, 12);
+            graphics.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+            graphics.PixelOffsetMode = System.Drawing.Drawing2D.PixelOffsetMode.HighQuality;
+            var page = new[] { new PointF(2.6F, 1.3F), new PointF(10.4F, 1.3F), new PointF(13.4F, 4.3F), new PointF(13.4F, 14.7F), new PointF(2.6F, 14.7F) };
+            var pageFold = new[] { new PointF(10.4F, 1.3F), new PointF(10.4F, 4.3F), new PointF(13.4F, 4.3F) };
+            graphics.FillPolygon(paper, page);
+            graphics.FillPolygon(fold, pageFold);
+            graphics.DrawPolygon(pen, page);
+            graphics.DrawPolygon(pen, pageFold);
+
+            graphics.FillRectangle(viewFill, 4.15F, 5.5F, 3.9F, 3.1F);
+            graphics.DrawRectangle(viewPen, 4.15F, 5.5F, 3.9F, 3.1F);
+            graphics.DrawEllipse(pen, 9.1F, 5.55F, 3.1F, 3.1F);
+            graphics.DrawLine(detail, 9.1F, 7.1F, 12.2F, 7.1F);
+            graphics.DrawLine(detail, 10.65F, 5.55F, 10.65F, 8.65F);
+
+            graphics.FillRectangle(titleFill, 4.15F, 10F, 7.75F, 3.05F);
+            graphics.DrawRectangle(detail, 4.15F, 10F, 7.75F, 3.05F);
+            graphics.DrawLine(detail, 4.15F, 11.4F, 11.9F, 11.4F);
+            graphics.DrawLine(detail, 8.9F, 10F, 8.9F, 13.05F);
+            graphics.DrawLine(detail, 10.4F, 10F, 10.4F, 13.05F);
+        }
+        return bitmap;
+    }
+
+    private static Bitmap DrawOtherDocumentIcon()
+    {
+        var bitmap = new Bitmap(16, 16);
+        using (var graphics = Graphics.FromImage(bitmap))
+        using (var fill = new SolidBrush(Color.FromArgb(196, 205, 214)))
+        using (var pen = new Pen(Color.FromArgb(99, 112, 126), 1))
+        {
+            graphics.FillRectangle(fill, 3, 2, 10, 12);
             graphics.DrawRectangle(pen, 3, 2, 10, 12);
             graphics.DrawLine(pen, 5, 6, 11, 6);
             graphics.DrawLine(pen, 5, 9, 11, 9);
@@ -1322,19 +1926,37 @@ internal sealed class PdmTaskPaneControl : UserControl
             return "历史预览（只读）";
         }
 
+        if (node.IsRenamePendingSave)
+        {
+            return "重命名待保存";
+        }
+
         if (node.Status == CadReferenceStatus.Missing)
         {
             return "文件缺失";
         }
 
+        string editState;
         switch (node.WorkState)
         {
-            case CadWorkState.ModifiedUnsaved: return "修改未保存";
-            case CadWorkState.PendingCheckIn: return "待提交";
-            case CadWorkState.Editable: return "可编辑";
-            case CadWorkState.EditingByOther: return string.IsNullOrWhiteSpace(node.CheckedOutBy) ? "他人编辑中" : string.Concat(node.CheckedOutBy, "编辑中");
-            default: return !node.DocumentId.HasValue ? "未入库" : node.Status == CadReferenceStatus.Normal ? "正常" : StatusText(node.Status);
+            case CadWorkState.ModifiedUnsaved: editState = "修改未保存"; break;
+            case CadWorkState.PendingCheckIn: editState = "待提交"; break;
+            case CadWorkState.Editable: editState = "可编辑"; break;
+            case CadWorkState.EditingByOther: editState = node.CheckoutSessionLost ? "编辑权限已失效" : string.IsNullOrWhiteSpace(node.CheckedOutBy) ? "他人编辑中" : string.Concat(node.CheckedOutBy, "编辑中"); break;
+            default: editState = !node.DocumentId.HasValue ? "未入库" : node.Status == CadReferenceStatus.Normal ? "正常" : StatusText(node.Status); break;
         }
+        var lifecycle = LifecycleText(node.LifecycleState);
+        return string.Equals(lifecycle, "工作中", StringComparison.Ordinal) || !node.DocumentId.HasValue
+            ? editState
+            : string.Concat(lifecycle, " · ", editState);
+    }
+
+    private static string LifecycleText(string state)
+    {
+        if (string.Equals(state, "InReview", StringComparison.OrdinalIgnoreCase)) return "审批中";
+        if (string.Equals(state, "Released", StringComparison.OrdinalIgnoreCase)) return "已发布";
+        if (string.Equals(state, "Obsolete", StringComparison.OrdinalIgnoreCase)) return "已作废";
+        return "工作中";
     }
 
     private static Color WorkStateColor(CadTreeNode node)
@@ -1342,6 +1964,11 @@ internal sealed class PdmTaskPaneControl : UserControl
         if (node.IsHistoricalPreview)
         {
             return Color.FromArgb(59, 104, 153);
+        }
+
+        if (node.IsRenamePendingSave)
+        {
+            return Color.FromArgb(188, 68, 35);
         }
 
         if (node.Status == CadReferenceStatus.Missing)
@@ -1359,13 +1986,13 @@ internal sealed class PdmTaskPaneControl : UserControl
         }
     }
 
-    private TreeNode BuildRelatedDrawingsGroup(CadTreeNode modelRoot, string filter)
+    private TreeNode BuildRelatedDrawingsGroup(CadTreeNode modelRoot, string filter, ISet<string> checkedPaths)
     {
         var drawings = new List<CadTreeNode>();
         CollectRelatedDrawings(modelRoot, drawings, new HashSet<string>(StringComparer.OrdinalIgnoreCase));
         var drawingNodes = drawings
             .Where(drawing => MatchesFilter(drawing, filter))
-            .Select(drawing => BuildTreeNode(drawing, filter, modelRoot))
+            .Select(drawing => BuildTreeNode(drawing, filter, modelRoot, checkedPaths))
             .Where(node => node != null)
             .ToArray();
         if (drawingNodes.Length == 0)
@@ -1432,26 +2059,45 @@ internal sealed class PdmTaskPaneControl : UserControl
 
     private void UpdateSelected(CadTreeNode node)
     {
+        var automaticDrawingSource = node?.Kind == CadDocumentKind.Drawing ? activeDrawingSource : node;
+        var relatedDrawing = node?.Kind == CadDocumentKind.Drawing ? node : FindRelatedDrawing(automaticDrawingSource);
+        automaticDrawing.SetSource(automaticDrawingSource, relatedDrawing);
         if (node == null)
         {
             selectedFile.Text = "未选择图档";
             selectedMeta.Text = "配置、版本和编辑状态";
             checkoutButton.Enabled = false;
+            discardCheckoutButton.Enabled = false;
             checkinButton.Enabled = false;
             batchOperationButton.Enabled = false;
-            ApplyCheckoutButtonAppearance(false, false);
-            ApplyCheckinButtonAppearance(false);
+            batchPropertyButton.Enabled = false;
+            ApplyStructureActionButtonAppearances();
+            UpdateTreeHealth();
             return;
         }
 
-        selectedFile.Text = node.FileName;
+        selectedFile.Text = string.Concat(
+            string.IsNullOrWhiteSpace(node.DrawingNumber) ? Path.GetFileNameWithoutExtension(node.FileName) : node.DrawingNumber,
+            " · ",
+            string.IsNullOrWhiteSpace(node.DisplayName) ? node.FileName : node.DisplayName);
         var workStateText = WorkStateText(node);
         var editState = string.IsNullOrWhiteSpace(workStateText) ? string.Empty : string.Concat("　状态：", workStateText);
+        var selectedVersionText = string.IsNullOrWhiteSpace(node.CurrentRevision)
+            ? string.IsNullOrWhiteSpace(node.Revision) ? "未归档" : node.Revision
+            : VersionText(node);
+        var editor = string.IsNullOrWhiteSpace(node.CheckedOutBy)
+            ? "未检出"
+            : string.Concat(node.CheckedOutBy,
+                string.IsNullOrWhiteSpace(node.CheckoutMachine) ? string.Empty : string.Concat(" @ ", node.CheckoutMachine),
+                node.CheckedOutAt.HasValue ? string.Concat(" · ", node.CheckedOutAt.Value.ToLocalTime().ToString("yyyy-MM-dd HH:mm")) : string.Empty);
         selectedMeta.Text = string.Concat(
-            "配置：", string.IsNullOrWhiteSpace(node.Configuration) ? "默认" : node.Configuration,
-            "　版本：", string.IsNullOrWhiteSpace(node.Revision) ? "未归档" : node.Revision,
-            editState);
-        checkoutButton.Text = string.IsNullOrWhiteSpace(node.CheckedOutBy) ? "获取权限" : "正在编辑";
+            "文件：", node.FileName,
+            "\r\n业务状态：", LifecycleText(node.LifecycleState), editState, "　编辑：", editor,
+            "\r\n配置：", string.IsNullOrWhiteSpace(node.Configuration) ? "默认" : node.Configuration,
+            "　版本：", selectedVersionText,
+            "\r\n描述：", string.IsNullOrWhiteSpace(node.Description) ? "-" : node.Description,
+            "　材料：", string.IsNullOrWhiteSpace(node.Material) ? "-" : node.Material,
+            "\r\n路径：", string.IsNullOrWhiteSpace(node.FullPath) ? "-" : node.FullPath);
         var localFileExists = !string.IsNullOrWhiteSpace(node.FullPath) && File.Exists(node.FullPath);
         var canRegister = !node.DocumentId.HasValue
             && localFileExists
@@ -1459,25 +2105,200 @@ internal sealed class PdmTaskPaneControl : UserControl
         var authenticated = !string.IsNullOrWhiteSpace(authenticatedUsername);
         var editingByCurrentUser = authenticated
             && !string.IsNullOrWhiteSpace(node.CheckedOutBy)
+            && string.Equals(node.CheckedOutBy, authenticatedUsername, StringComparison.OrdinalIgnoreCase)
+            && !node.CheckoutSessionLost;
+        var canRecoverCheckout = authenticated
+            && node.CheckoutSessionLost
             && string.Equals(node.CheckedOutBy, authenticatedUsername, StringComparison.OrdinalIgnoreCase);
         var historicalPreview = node.IsHistoricalPreview;
+        var lifecycleLocked = string.Equals(node.LifecycleState, "InReview", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(node.LifecycleState, "Obsolete", StringComparison.OrdinalIgnoreCase);
         var canCheckout = !historicalPreview
+            && !lifecycleLocked
             && authenticated
-            && string.IsNullOrWhiteSpace(node.CheckedOutBy)
+            && (string.IsNullOrWhiteSpace(node.CheckedOutBy) || canRecoverCheckout)
             && (node.DocumentId.HasValue || canRegister);
         var canFirstCheckIn = !historicalPreview && authenticated && canRegister;
-        var canCheckIn = canFirstCheckIn || (!historicalPreview && node.DocumentId.HasValue && editingByCurrentUser && localFileExists);
+        var canCheckIn = CanCheckInNode(node);
+        var checkedNodes = GetCheckedCheckInNodes();
         checkoutButton.Enabled = canCheckout;
-        checkinButton.Enabled = canCheckIn;
-        ApplyCheckoutButtonAppearance(canCheckout, editingByCurrentUser);
-        ApplyCheckinButtonAppearance(canCheckIn);
+        discardCheckoutButton.Enabled = !historicalPreview && node.DocumentId.HasValue && editingByCurrentUser;
+        checkinButton.Enabled = canCheckIn || checkedNodes.Count > 0;
         batchOperationButton.Enabled = authenticated && rootNode != null && !rootNode.IsHistoricalPreview;
+        batchPropertyButton.Enabled = authenticated && rootNode != null && !rootNode.IsHistoricalPreview;
+        ApplyStructureActionButtonAppearances();
         actionToolTip.SetToolTip(
             checkoutButton,
-            historicalPreview ? "历史版本为只读预览，不能获取编辑权限" : canRegister ? "首次获取权限时将自动登记该图档" : node.DocumentId.HasValue ? "获取该图档的独占编辑权限" : "本地文件不存在或文件类型不支持登记");
+            historicalPreview ? "历史版本为只读预览，不能获取编辑权限" : canRecoverCheckout ? "恢复本机已过期的旧编辑会话" : canRegister ? "首次获取权限时将自动登记该图档" : node.DocumentId.HasValue ? "获取该图档的独占编辑权限" : "本地文件不存在或文件类型不支持登记");
+        actionToolTip.SetToolTip(
+            discardCheckoutButton,
+            historicalPreview ? "历史版本为只读预览，不能更改编辑状态" : editingByCurrentUser ? "释放当前图档的编辑权限，不生成新版本" : "当前用户尚未获取该图档的编辑权限");
         actionToolTip.SetToolTip(
             checkinButton,
-            historicalPreview ? "历史版本为只读预览，不能提交存档；请打开当前工作文件" : canFirstCheckIn ? "首次提交存档时选择归属项目，系统将自动登记并准备权限" : !node.DocumentId.HasValue ? "本地文件不存在或文件类型不支持登记" : !editingByCurrentUser ? "只有当前编辑人员可以提交存档" : !localFileExists ? "本地文件不存在，不能提交存档" : "提交当前文件并生成新工作版本");
+            checkedNodes.Count > 0
+                ? string.Concat("提交已勾选的", checkedNodes.Count, "个图档")
+                : historicalPreview ? "历史版本为只读预览，不能提交存档；请打开当前工作文件" : canFirstCheckIn ? "首次提交存档时选择归属项目，系统将自动登记并准备权限" : !node.DocumentId.HasValue ? "本地文件不存在或文件类型不支持登记" : !editingByCurrentUser ? "只有当前编辑人员可以提交存档" : !localFileExists ? "本地文件不存在，不能提交存档" : "提交当前文件并生成新工作版本");
+        UpdateTreeHealth();
+    }
+
+    private bool CanCheckInNode(CadTreeNode node)
+    {
+        if (node == null || node.IsHistoricalPreview || string.Equals(node.LifecycleState, "InReview", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(node.LifecycleState, "Obsolete", StringComparison.OrdinalIgnoreCase) || string.IsNullOrWhiteSpace(authenticatedUsername)
+            || string.IsNullOrWhiteSpace(node.FullPath) || !File.Exists(node.FullPath))
+        {
+            return false;
+        }
+
+        var supported = node.Kind == CadDocumentKind.Assembly
+            || node.Kind == CadDocumentKind.Part
+            || node.Kind == CadDocumentKind.Drawing;
+        if (!supported)
+        {
+            return false;
+        }
+
+        if (!node.DocumentId.HasValue)
+        {
+            return true;
+        }
+
+        return !string.IsNullOrWhiteSpace(node.CheckedOutBy)
+            && string.Equals(node.CheckedOutBy, authenticatedUsername, StringComparison.OrdinalIgnoreCase)
+            && !node.CheckoutSessionLost;
+    }
+
+    private void SynchronizeCheckedDocument(CadTreeNode node, bool isChecked)
+    {
+        if (string.IsNullOrWhiteSpace(node?.FullPath))
+        {
+            return;
+        }
+
+        if (isChecked)
+        {
+            checkedCheckInPaths.Add(node.FullPath);
+        }
+        else
+        {
+            checkedCheckInPaths.Remove(node.FullPath);
+        }
+
+        suppressTreeCheckEvents = true;
+        try
+        {
+            SynchronizeVisibleChecks(structureTree.Nodes, node.FullPath, isChecked);
+        }
+        finally
+        {
+            suppressTreeCheckEvents = false;
+        }
+    }
+
+    private static void SynchronizeVisibleChecks(TreeNodeCollection nodes, string fullPath, bool isChecked)
+    {
+        foreach (TreeNode treeNode in nodes)
+        {
+            if (treeNode.Tag is CadTreeNode model
+                && string.Equals(model.FullPath, fullPath, StringComparison.OrdinalIgnoreCase))
+            {
+                treeNode.Checked = isChecked;
+            }
+
+            SynchronizeVisibleChecks(treeNode.Nodes, fullPath, isChecked);
+        }
+    }
+
+    private IReadOnlyList<CadTreeNode> GetCheckedCheckInNodes()
+    {
+        if (rootNode == null || checkedCheckInPaths.Count == 0)
+        {
+            return Array.Empty<CadTreeNode>();
+        }
+
+        var paths = new HashSet<string>(checkedCheckInPaths, StringComparer.OrdinalIgnoreCase);
+        return EnumerateCadTree(rootNode)
+            .Where(node => !string.IsNullOrWhiteSpace(node.FullPath) && paths.Contains(node.FullPath) && CanCheckInNode(node))
+            .GroupBy(node => node.FullPath, StringComparer.OrdinalIgnoreCase)
+            .Select(group => group.First())
+            .ToArray();
+    }
+
+    private void SelectTreeDocuments(Func<CadTreeNode, bool> predicate)
+    {
+        checkedCheckInPaths.Clear();
+        if (rootNode != null)
+        {
+            foreach (var node in EnumerateCadTree(rootNode).Where(predicate))
+            {
+                if (!string.IsNullOrWhiteSpace(node.FullPath)) checkedCheckInPaths.Add(node.FullPath);
+            }
+        }
+        RebuildTree(searchBox.Text);
+        UpdateSelected(SelectedNode);
+    }
+
+    private void ExpandAllMaterialized()
+    {
+        structureTree.BeginUpdate();
+        try
+        {
+            foreach (TreeNode node in structureTree.Nodes) MaterializeAndExpand(node);
+        }
+        finally
+        {
+            structureTree.EndUpdate();
+        }
+    }
+
+    private void MaterializeAndExpand(TreeNode node)
+    {
+        MaterializeChildren(node, activeTreeBuildPlan);
+        foreach (TreeNode child in node.Nodes.Cast<TreeNode>().Where(child => !(child.Tag is LazyTreePlaceholder)))
+            MaterializeAndExpand(child);
+        node.Expand();
+    }
+
+    private static IEnumerable<CadTreeNode> EnumerateCadTree(CadTreeNode root)
+    {
+        if (root == null)
+        {
+            yield break;
+        }
+
+        yield return root;
+        foreach (var child in root.Children)
+        {
+            foreach (var descendant in EnumerateCadTree(child))
+            {
+                yield return descendant;
+            }
+        }
+    }
+
+    private void UpdateTreeHealth()
+    {
+        if (rootNode == null)
+        {
+            treeHealth.Text = "结构健康：暂无结构";
+            return;
+        }
+        var nodes = EnumerateCadTree(rootNode)
+            .GroupBy(node => string.IsNullOrWhiteSpace(node.FullPath) ? node.InstancePath : node.FullPath, StringComparer.OrdinalIgnoreCase)
+            .Select(group => group.First())
+            .ToArray();
+        var missing = nodes.Count(node => !node.IsRenamePendingSave
+            && (node.Status == CadReferenceStatus.Missing
+                || (!string.IsNullOrWhiteSpace(node.FullPath) && !File.Exists(node.FullPath))));
+        var outdated = nodes.Count(node => !string.IsNullOrWhiteSpace(node.LatestRevision)
+            && !string.IsNullOrWhiteSpace(node.CurrentRevision)
+            && !string.Equals(node.CurrentRevision.TrimEnd('*'), node.LatestRevision, StringComparison.OrdinalIgnoreCase));
+        var otherEditing = nodes.Count(node => node.WorkState == CadWorkState.EditingByOther && !node.CheckoutSessionLost);
+        var pending = nodes.Count(node => node.WorkState == CadWorkState.ModifiedUnsaved || node.WorkState == CadWorkState.PendingCheckIn);
+        treeHealth.Text = string.Concat("结构健康：过期 ", outdated, "　缺失 ", missing, "　他人编辑 ", otherEditing, "　待提交 ", pending);
+        treeHealth.ForeColor = missing > 0 || outdated > 0 || otherEditing > 0 || pending > 0
+            ? Color.FromArgb(174, 94, 0)
+            : Color.FromArgb(21, 126, 77);
     }
 
     private void RaiseSelected(EventHandler<CadTreeNodeEventArgs> handler)
@@ -1487,6 +2308,18 @@ internal sealed class PdmTaskPaneControl : UserControl
         {
             handler?.Invoke(this, new CadTreeNodeEventArgs(node));
         }
+    }
+
+    private void RaiseCheckInRequested()
+    {
+        var checkedNodes = GetCheckedCheckInNodes();
+        if (checkedNodes.Count > 0)
+        {
+            CheckInRequested?.Invoke(this, new CadTreeNodeEventArgs(checkedNodes[0], checkedNodes, true));
+            return;
+        }
+
+        RaiseSelected(CheckInRequested);
     }
 
     private void RaiseVersionsRequested()
@@ -1540,25 +2373,25 @@ internal sealed class PdmTaskPaneControl : UserControl
         button.FlatAppearance.BorderSize = 1;
     }
 
-    private void ApplyCheckoutButtonAppearance(bool canCheckout, bool editingByCurrentUser)
+    private void ApplyStructureActionButtonAppearances()
     {
-        if (editingByCurrentUser)
+        ApplyActionButtonAppearance(checkoutButton, CheckoutAvailableColor);
+        ApplyActionButtonAppearance(discardCheckoutButton, DiscardCheckoutAvailableColor);
+        ApplyActionButtonAppearance(checkinButton, SubmitAvailableColor);
+        ApplyActionButtonAppearance(batchOperationButton, BatchOperationAvailableColor);
+        ApplyActionButtonAppearance(batchPropertyButton, BatchOperationAvailableColor);
+    }
+
+    private static void ApplyActionButtonAppearance(Button button, Color availableColor)
+    {
+        if (button.Enabled)
         {
-            ApplyFilledButtonAppearance(checkoutButton, EditingColor);
-        }
-        else if (canCheckout)
-        {
-            ApplyFilledButtonAppearance(checkoutButton, CheckoutAvailableColor);
+            ApplyFilledButtonAppearance(button, availableColor);
         }
         else
         {
-            ApplyDefaultButtonAppearance(checkoutButton);
+            ApplyDefaultButtonAppearance(button);
         }
-    }
-
-    private void ApplyCheckinButtonAppearance(bool canCheckIn)
-    {
-        ApplyFilledButtonAppearance(checkinButton, canCheckIn ? SubmitAvailableColor : SubmitUnavailableColor, canCheckIn ? Color.White : SystemColors.GrayText);
     }
 
     private static void ApplyFilledButtonAppearance(Button button, Color background, Color foreground)
@@ -1586,14 +2419,25 @@ internal sealed class PdmTaskPaneControl : UserControl
     {
         const int standardGap = 6;
         var availableWidth = Math.Max(0, actions.ClientSize.Width - actions.Padding.Horizontal);
-        var widthBeforeLastGap = Math.Max(0, availableWidth - standardGap * 2);
-        var lastGap = standardGap + widthBeforeLastGap % 3;
+        var widthBeforeLastGap = Math.Max(0, availableWidth - standardGap * 3);
+        var lastGap = standardGap + widthBeforeLastGap % 4;
         actions.ColumnStyles.Clear();
-        actions.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 33.33334F));
+        actions.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 25));
         actions.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, standardGap));
-        actions.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 33.33333F));
+        actions.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 25));
+        actions.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, standardGap));
+        actions.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 25));
         actions.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, lastGap));
-        actions.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 33.33333F));
+        actions.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 25));
+    }
+
+    private static void MatchProjectButtonWidths(TableLayoutPanel actions, ColumnStyle clientButtonColumn, ColumnStyle userButtonColumn)
+    {
+        const int structureToolbarGaps = 18;
+        var availableWidth = Math.Max(0, actions.ClientSize.Width - actions.Padding.Horizontal);
+        var buttonWidth = Math.Max(60, (availableWidth - structureToolbarGaps) / 4);
+        clientButtonColumn.Width = buttonWidth;
+        userButtonColumn.Width = buttonWidth;
     }
 
     private void RunOnUiThread(Action action)
@@ -1659,9 +2503,23 @@ internal sealed class PdmTaskPaneControl : UserControl
 
 internal sealed class CadTreeNodeEventArgs : EventArgs
 {
-    public CadTreeNodeEventArgs(CadTreeNode node) => Node = node;
+    public CadTreeNodeEventArgs(CadTreeNode node)
+        : this(node, node == null ? Array.Empty<CadTreeNode>() : new[] { node }, false)
+    {
+    }
+
+    public CadTreeNodeEventArgs(CadTreeNode node, IReadOnlyList<CadTreeNode> nodes, bool usesCheckedSelection)
+    {
+        Node = node;
+        Nodes = nodes ?? Array.Empty<CadTreeNode>();
+        UsesCheckedSelection = usesCheckedSelection;
+    }
 
     public CadTreeNode Node { get; }
+
+    public IReadOnlyList<CadTreeNode> Nodes { get; }
+
+    public bool UsesCheckedSelection { get; }
 }
 
 internal sealed class DocumentVersionEventArgs : EventArgs

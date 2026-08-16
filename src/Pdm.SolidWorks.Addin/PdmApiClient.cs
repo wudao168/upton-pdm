@@ -40,6 +40,9 @@ internal sealed class PdmApiClient : IDisposable
     public Task<List<DocumentDto>> GetDocumentsAsync(Guid projectId, CancellationToken cancellationToken) =>
         GetJsonAsync<List<DocumentDto>>(string.Concat("api/projects/", projectId, "/documents"), cancellationToken);
 
+    public Task<List<DocumentModelDrawingRelationDto>> GetDocumentRelationsAsync(Guid projectId, CancellationToken cancellationToken) =>
+        GetJsonAsync<List<DocumentModelDrawingRelationDto>>(string.Concat("api/projects/", projectId, "/document-relations"), cancellationToken);
+
     public Task<DocumentReferenceNodeDto> GetReferenceTreeAsync(Guid projectId, CancellationToken cancellationToken) =>
         GetJsonAsync<DocumentReferenceNodeDto>(string.Concat("api/projects/", projectId, "/reference-tree"), cancellationToken);
 
@@ -54,7 +57,22 @@ internal sealed class PdmApiClient : IDisposable
             new { versionId, releasedOnly, forEdit },
             cancellationToken);
 
-    public Task<DocumentDto> RegisterDocumentAsync(Guid projectId, CadTreeNode node, CancellationToken cancellationToken) =>
+    public Task<List<DocumentRegistrationMatchDto>> PreflightDocumentRegistrationAsync(
+        Guid projectId,
+        IReadOnlyList<DocumentRegistrationCandidateDto> candidates,
+        CancellationToken cancellationToken) =>
+        PostJsonAsync<List<DocumentRegistrationMatchDto>>(
+            string.Concat("api/projects/", projectId, "/documents/registration-preflight"),
+            new { candidates },
+            cancellationToken);
+
+    public Task<DocumentDto> RegisterDocumentAsync(
+        Guid projectId,
+        CadTreeNode node,
+        string sourceSha256,
+        bool allowDuplicateContent,
+        string duplicateReason,
+        CancellationToken cancellationToken) =>
         PostJsonAsync<DocumentDto>(
             string.Concat("api/projects/", projectId, "/documents/register"),
             new
@@ -62,21 +80,43 @@ internal sealed class PdmApiClient : IDisposable
                 drawingNumber = Path.GetFileNameWithoutExtension(node.FileName),
                 name = string.IsNullOrWhiteSpace(node.DisplayName) ? Path.GetFileNameWithoutExtension(node.FileName) : node.DisplayName,
                 fileName = node.FileName,
-                kind = (int)node.Kind
+                kind = (int)node.Kind,
+                relatedModelDocumentId = node.RelatedModelDocumentId,
+                sourceSha256,
+                allowDuplicateContent,
+                duplicateReason
             },
             cancellationToken);
 
     public Task<List<DocumentVersionDto>> GetVersionsAsync(Guid documentId, CancellationToken cancellationToken) =>
         GetJsonAsync<List<DocumentVersionDto>>(string.Concat("api/documents/", documentId, "/versions"), cancellationToken);
 
-    public Task<DocumentDto> CheckoutAsync(Guid documentId, CancellationToken cancellationToken) =>
-        PostJsonAsync<DocumentDto>(string.Concat("api/documents/", documentId, "/checkout"), new { }, cancellationToken);
+    public Task<DocumentDto> CheckoutAsync(Guid documentId, Guid sessionId, string machineName, CancellationToken cancellationToken) =>
+        PostJsonAsync<DocumentDto>(string.Concat("api/documents/", documentId, "/checkout"), new { sessionId, machineName }, cancellationToken);
 
-    public Task<DocumentDto> CompleteEditWithoutChangesAsync(Guid documentId, string sha256, CancellationToken cancellationToken) =>
-        PostJsonAsync<DocumentDto>(string.Concat("api/documents/", documentId, "/complete-edit"), new { sha256 }, cancellationToken);
+    public Task<DocumentDto> CompleteEditWithoutChangesAsync(Guid documentId, Guid checkoutSessionId, string sha256, CancellationToken cancellationToken) =>
+        PostJsonAsync<DocumentDto>(string.Concat("api/documents/", documentId, "/complete-edit"), new { sha256, checkoutSessionId }, cancellationToken);
 
-    public Task<DocumentDto> DiscardCheckoutAsync(Guid documentId, CancellationToken cancellationToken) =>
-        PostJsonAsync<DocumentDto>(string.Concat("api/documents/", documentId, "/discard-checkout"), new { }, cancellationToken);
+    public Task<DocumentDto> DiscardCheckoutAsync(Guid documentId, Guid checkoutSessionId, CancellationToken cancellationToken) =>
+        PostJsonAsync<DocumentDto>(string.Concat("api/documents/", documentId, "/discard-checkout"), new { checkoutSessionId }, cancellationToken);
+
+    public Task<List<DocumentWhereUsedDto>> GetWhereUsedAsync(Guid documentId, CancellationToken cancellationToken) =>
+        GetJsonAsync<List<DocumentWhereUsedDto>>(string.Concat("api/documents/", documentId, "/where-used"), cancellationToken);
+
+    public Task<DocumentDto> RequestCheckoutReleaseAsync(Guid documentId, string reason, CancellationToken cancellationToken) =>
+        PostJsonAsync<DocumentDto>(string.Concat("api/documents/", documentId, "/request-release"), new { reason }, cancellationToken);
+
+    public Task<DocumentDto> ObsoleteAsync(Guid documentId, string comment, CancellationToken cancellationToken) =>
+        PostJsonAsync<DocumentDto>(string.Concat("api/documents/", documentId, "/obsolete"), new { comment }, cancellationToken);
+
+    public Task<List<ReleasePackageDto>> GetReleasePackagesAsync(Guid projectId, CancellationToken cancellationToken) =>
+        GetJsonAsync<List<ReleasePackageDto>>(string.Concat("api/projects/", projectId, "/release-packages"), cancellationToken);
+
+    public Task<ReleasePackageDto> WithdrawReleasePackageAsync(Guid releasePackageId, string comment, CancellationToken cancellationToken) =>
+        PostJsonAsync<ReleasePackageDto>(string.Concat("api/release-packages/", releasePackageId, "/withdraw"), new { comment }, cancellationToken);
+
+    public Task<EditSessionHeartbeatDto> HeartbeatEditSessionAsync(Guid sessionId, string machineName, IReadOnlyList<Guid> documentIds, CancellationToken cancellationToken) =>
+        PostJsonAsync<EditSessionHeartbeatDto>(string.Concat("api/edit-sessions/", sessionId, "/heartbeat"), new { machineName, documentIds }, cancellationToken);
 
     public Task<CheckInResultDto> CheckInAsync(
         Guid documentId,
@@ -85,22 +125,29 @@ internal sealed class PdmApiClient : IDisposable
         string comment,
         StoredVersionFile storedFile,
         IReadOnlyDictionary<string, string> modelProperties,
+        Guid checkoutSessionId,
         bool isProjectRoot,
         bool forceVersion,
+        string drawingNumber,
+        string name,
         CancellationToken cancellationToken) =>
         PostJsonAsync<CheckInResultDto>(
             string.Concat("api/documents/", documentId, "/checkin"),
             new
             {
                 projectId,
-                root = ToRequestNode(root),
+                root = ToRequestNode(root, true),
                 comment,
                 storageRelativePath = storedFile.RelativePath,
                 fileLength = storedFile.Length,
                 sha256 = storedFile.Sha256,
                 properties = MergeProperties(storedFile.Properties, modelProperties),
+                checkoutSessionId,
                 isProjectRoot,
-                forceVersion
+                forceVersion,
+                drawingNumber,
+                name,
+                fileName = root.FileName
             },
             cancellationToken);
 
@@ -331,12 +378,32 @@ internal sealed class PdmApiClient : IDisposable
         }
     }
 
-    private static object ToRequestNode(CadTreeNode node)
+    private static object ToRequestNode(CadTreeNode node, bool isRoot)
     {
         var children = new List<object>();
         foreach (var child in node.Children)
         {
-            children.Add(ToRequestNode(child));
+            if (child.Kind == CadDocumentKind.Drawing)
+            {
+                continue;
+            }
+
+            children.Add(ToRequestNode(child, false));
+        }
+
+        var displayedRevisionText = isRoot ? node.Revision : node.CurrentRevision;
+        var revisionText = !isRoot && displayedRevisionText?.EndsWith("*", StringComparison.Ordinal) == true
+            ? displayedRevisionText.TrimEnd('*').Trim()
+            : displayedRevisionText;
+        var revision = ToRevisionRequest(revisionText);
+        if (!isRoot && node.DocumentId.HasValue && revision == null)
+        {
+            throw new InvalidOperationException(string.Concat(
+                "引用文件",
+                string.IsNullOrWhiteSpace(node.FileName) ? node.DisplayName : node.FileName,
+                "的本机版本无法对应PDM受控版本（当前显示：",
+                string.IsNullOrWhiteSpace(displayedRevisionText) ? "待识别" : displayedRevisionText,
+                "）。请先保存并提交或更新该子件，再提交根装配。"));
         }
 
         return new
@@ -350,7 +417,7 @@ internal sealed class PdmApiClient : IDisposable
             configuration = node.Configuration,
             quantity = node.Quantity,
             status = (int)node.Status,
-            revision = ToRevisionRequest(node.Revision),
+            revision,
             checkedOutBy = node.CheckedOutBy,
             children
         };
@@ -431,6 +498,9 @@ internal sealed class ProjectDto
     public string Name { get; set; }
     public Guid? ParentProjectId { get; set; }
     public int? ChildSequence { get; set; }
+    public bool CanReadContent { get; set; }
+    public int? DocumentCount { get; set; }
+    public string BusinessStatus { get; set; }
 
     public override string ToString() => string.Concat(Code, " · ", Name);
 }
@@ -461,8 +531,85 @@ internal sealed class DocumentDto
     public string DrawingNumber { get; set; }
     public string Name { get; set; }
     public string FileName { get; set; }
+    public int Kind { get; set; }
+    public int State { get; set; }
+    public DateTime? UpdatedAt { get; set; }
     public string CheckedOutBy { get; set; }
+    public DateTime? CheckedOutAt { get; set; }
+    public Guid? CheckoutSessionId { get; set; }
+    public string CheckoutMachine { get; set; }
+    public DateTime? CheckoutLastHeartbeatAt { get; set; }
+    public DateTime? CheckoutLeaseExpiresAt { get; set; }
+    public string CheckoutReleaseRequestedBy { get; set; }
+    public DateTime? CheckoutReleaseRequestedAt { get; set; }
     public RevisionDto Revision { get; set; }
+}
+
+internal sealed class DocumentRegistrationCandidateDto
+{
+    public string CandidateKey { get; set; }
+    public string FileName { get; set; }
+    public int Kind { get; set; }
+    public string SourceSha256 { get; set; }
+}
+
+internal sealed class DocumentRegistrationMatchDto
+{
+    public string CandidateKey { get; set; }
+    public int MatchKind { get; set; }
+    public Guid? ExistingDocumentId { get; set; }
+    public Guid? ExistingProjectId { get; set; }
+    public string ExistingProjectCode { get; set; }
+    public string ExistingProjectName { get; set; }
+    public string ExistingDrawingNumber { get; set; }
+    public string ExistingFileName { get; set; }
+    public string ExistingRevision { get; set; }
+}
+
+internal sealed class DocumentModelDrawingRelationDto
+{
+    public Guid ModelDocumentId { get; set; }
+    public Guid DrawingDocumentId { get; set; }
+}
+
+internal sealed class DocumentWhereUsedDto
+{
+    public Guid ParentDocumentId { get; set; }
+    public Guid ProjectId { get; set; }
+    public string ProjectCode { get; set; }
+    public string ProjectName { get; set; }
+    public string ParentDrawingNumber { get; set; }
+    public string ParentName { get; set; }
+    public string ParentFileName { get; set; }
+    public int ParentState { get; set; }
+    public RevisionDto ParentRevision { get; set; }
+    public string InstancePath { get; set; }
+    public string Configuration { get; set; }
+    public int Quantity { get; set; }
+}
+
+internal sealed class ReleasePackageDto
+{
+    public Guid Id { get; set; }
+    public int State { get; set; }
+    public string Number { get; set; }
+}
+
+internal sealed class EditSessionHeartbeatDto
+{
+    public Guid SessionId { get; set; }
+    public DateTime ServerTime { get; set; }
+    public DateTime LeaseExpiresAt { get; set; }
+    public List<Guid> ActiveDocumentIds { get; set; }
+    public List<Guid> LostDocumentIds { get; set; }
+    public CheckoutPolicyDto Settings { get; set; }
+}
+
+internal sealed class CheckoutPolicyDto
+{
+    public int CheckoutHeartbeatSeconds { get; set; } = 180;
+    public int CheckoutReminderHours { get; set; } = 4;
+    public int CheckoutStrongReminderHours { get; set; } = 8;
 }
 
 internal sealed class DocumentVersionDto

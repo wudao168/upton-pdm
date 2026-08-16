@@ -160,9 +160,10 @@ try {
     $resumableUploadPassed = Test-ResumableUpload $headers $project.id
 
     $stage = 'checkout-and-conflict'
-    Invoke-PdmJson 'Post' "/api/documents/$($document.id)/checkout" $null $headers | Out-Null
+    $checkoutSessionId = [Guid]::NewGuid()
+    Invoke-PdmJson 'Post' "/api/documents/$($document.id)/checkout" @{ sessionId = $checkoutSessionId; machineName = 'PHASE1-QA' } $headers | Out-Null
     $conflictObserved = $false
-    try { Invoke-PdmJson 'Post' "/api/documents/$($document.id)/checkout" $null $engineerHeaders | Out-Null } catch { if ($_.Exception.Response.StatusCode.value__ -eq 409) { $conflictObserved = $true } }
+    try { Invoke-PdmJson 'Post' "/api/documents/$($document.id)/checkout" @{ sessionId = [Guid]::NewGuid(); machineName = 'PHASE1-QA-OTHER' } $headers | Out-Null } catch { if ($_.Exception.Response.StatusCode.value__ -eq 409) { $conflictObserved = $true } }
     Assert-Phase1 $conflictObserved '并发获取编辑权限未返回409冲突。'
 
     $stage = 'checkin-w1'
@@ -171,18 +172,19 @@ try {
     $v1Stored = Send-PdmFile $v1File ".versions/$($document.id)/$([Guid]::NewGuid().ToString('N'))/QA-ROOT.SLDASM" $headers $project.id
     $checkin1 = Invoke-PdmJson 'Post' "/api/documents/$($document.id)/checkin" @{
         projectId = $project.id; root = $root; comment = '一期验收W1'; storageRelativePath = $v1Stored.relativePath
-        fileLength = $v1Stored.length; sha256 = $v1Stored.sha256; properties = @{ Material = '45#'; Description = '验收版本一' }
+        fileLength = $v1Stored.length; sha256 = $v1Stored.sha256; checkoutSessionId = $checkoutSessionId; properties = @{ Material = '45#'; Description = '验收版本一' }
     } $headers
     Assert-Phase1 ($checkin1.version.revision.display -eq 'W1') '首次存档未生成W1。'
 
     $stage = 'checkin-w2'
-    Invoke-PdmJson 'Post' "/api/documents/$($document.id)/checkout" $null $headers | Out-Null
+    $checkoutSessionId = [Guid]::NewGuid()
+    Invoke-PdmJson 'Post' "/api/documents/$($document.id)/checkout" @{ sessionId = $checkoutSessionId; machineName = 'PHASE1-QA' } $headers | Out-Null
     $v2File = Join-Path $qaRoot 'QA-ROOT-v2.SLDASM'
     Write-QaFile $v2File 'UPTON-PDM-QA-VERSION-2-CHANGED'
     $v2Stored = Send-PdmFile $v2File ".versions/$($document.id)/$([Guid]::NewGuid().ToString('N'))/QA-ROOT.SLDASM" $headers $project.id
     $checkin2 = Invoke-PdmJson 'Post' "/api/documents/$($document.id)/checkin" @{
         projectId = $project.id; root = $root; comment = '一期验收W2'; storageRelativePath = $v2Stored.relativePath
-        fileLength = $v2Stored.length; sha256 = $v2Stored.sha256; properties = @{ Material = '铝'; Description = '验收版本二' }
+        fileLength = $v2Stored.length; sha256 = $v2Stored.sha256; checkoutSessionId = $checkoutSessionId; properties = @{ Material = '铝'; Description = '验收版本二' }
     } $headers
     Assert-Phase1 ($checkin2.version.revision.display -eq 'W2') '后续存档未生成W2。'
     $stage = 'version-read-compare-restore'

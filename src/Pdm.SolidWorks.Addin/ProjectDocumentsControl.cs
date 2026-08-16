@@ -39,7 +39,8 @@ internal sealed class ProjectBrowseEventArgs : EventArgs
 
 internal sealed class ProjectDocumentsControl : UserControl
 {
-    private readonly ProjectBrowserControl projectSelector = new ProjectBrowserControl();
+    private static readonly Color InputBorderColor = Color.FromArgb(122, 122, 122);
+    private readonly ProjectBrowserControl projectSelector = new ProjectBrowserControl(matchTaskPaneProjectLayout: true);
     private readonly TreeView tree = new TreeView();
     private readonly Label empty = new Label();
     private readonly ContextMenuStrip menu = new ContextMenuStrip();
@@ -48,13 +49,19 @@ internal sealed class ProjectDocumentsControl : UserControl
     public ProjectDocumentsControl()
     {
         Dock = DockStyle.Fill;
-        BackColor = Color.White;
+        BackColor = Color.FromArgb(244, 247, 251);
 
-        var projectPanel = new TableLayoutPanel { Dock = DockStyle.Top, Height = 55, ColumnCount = 1, RowCount = 2, Padding = new Padding(3, 2, 3, 3) };
-        projectPanel.RowStyles.Add(new RowStyle(SizeType.Absolute, 20));
-        projectPanel.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-        projectPanel.Controls.Add(new Label { Text = "权限内项目", Dock = DockStyle.Fill, ForeColor = Color.FromArgb(90, 107, 128), TextAlign = ContentAlignment.MiddleLeft }, 0, 0);
+        var projectPanel = new Panel { Dock = DockStyle.Top, Height = 72, BackColor = BackColor, Padding = new Padding(0, 7, 0, 8) };
+        var projectLabel = new Label
+        {
+            Text = "权限内项目",
+            Dock = DockStyle.Top,
+            Height = 21,
+            ForeColor = Color.FromArgb(90, 107, 128),
+            Padding = new Padding(3, 0, 0, 0)
+        };
         projectSelector.Dock = DockStyle.Fill;
+        projectSelector.Margin = Padding.Empty;
         projectSelector.SelectedProjectChanged += (_, _) =>
         {
             SetTree(null);
@@ -63,23 +70,34 @@ internal sealed class ProjectDocumentsControl : UserControl
                 ProjectSelected?.Invoke(this, new ProjectBrowseEventArgs(projectSelector.SelectedProjectId.Value));
             }
         };
-        projectPanel.Controls.Add(projectSelector, 0, 1);
+        projectPanel.Controls.Add(projectSelector);
+        projectPanel.Controls.Add(projectLabel);
 
-        var actions = new TableLayoutPanel { Dock = DockStyle.Top, Height = 40, ColumnCount = 2, Padding = new Padding(3) };
+        var actions = new TableLayoutPanel
+        {
+            Dock = DockStyle.Top,
+            Height = 36,
+            ColumnCount = 3,
+            RowCount = 1,
+            Margin = Padding.Empty,
+            Padding = new Padding(3)
+        };
         actions.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
+        actions.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 6));
         actions.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
+        actions.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         var readOnly = CreateButton("只读打开最新");
         var edit = CreateButton("获取并编辑");
         readOnly.Click += (_, _) => Raise(ControlledOpenMode.LatestReadOnly);
         edit.Click += (_, _) => Raise(ControlledOpenMode.LatestEdit);
         actions.Controls.Add(readOnly, 0, 0);
-        actions.Controls.Add(edit, 1, 0);
+        actions.Controls.Add(edit, 2, 0);
 
         tree.Dock = DockStyle.Fill;
+        tree.BorderStyle = BorderStyle.FixedSingle;
         tree.HideSelection = false;
         tree.FullRowSelect = true;
         tree.BeforeExpand += (_, args) => Materialize(args.Node);
-        tree.DoubleClick += (_, _) => Raise(ControlledOpenMode.LatestReadOnly);
         tree.MouseDown += (_, args) =>
         {
             if (args.Button == MouseButtons.Right) tree.SelectedNode = tree.GetNodeAt(args.Location);
@@ -92,8 +110,11 @@ internal sealed class ProjectDocumentsControl : UserControl
         empty.TextAlign = ContentAlignment.MiddleCenter;
         empty.ForeColor = Color.FromArgb(111, 128, 149);
 
-        Controls.Add(tree);
-        Controls.Add(empty);
+        var treeHost = new Panel { Dock = DockStyle.Fill, Padding = new Padding(3, 0, 3, 3), BackColor = BackColor };
+        treeHost.Controls.Add(tree);
+        treeHost.Controls.Add(empty);
+
+        Controls.Add(treeHost);
         Controls.Add(actions);
         Controls.Add(projectPanel);
         SetTree(null);
@@ -103,6 +124,11 @@ internal sealed class ProjectDocumentsControl : UserControl
     public event EventHandler<ProjectBrowseEventArgs> ProjectSelected;
 
     public Guid? SelectedProjectId => projectSelector.SelectedProjectId;
+
+    public float BrowseButtonWidth
+    {
+        set => projectSelector.BrowseButtonWidth = value;
+    }
 
     public void SetProjects(IReadOnlyList<ProjectDto> projects)
     {
@@ -152,15 +178,21 @@ internal sealed class ProjectDocumentsControl : UserControl
         }
     }
 
-    private static Button CreateButton(string text) => new Button
+    private static Button CreateButton(string text)
     {
-        Text = text,
-        Dock = DockStyle.Fill,
-        Margin = new Padding(3),
-        FlatStyle = FlatStyle.Flat,
-        BackColor = Color.White,
-        ForeColor = Color.FromArgb(31, 49, 72)
-    };
+        var button = new Button
+        {
+            Text = text,
+            Dock = DockStyle.Fill,
+            Margin = Padding.Empty,
+            FlatStyle = FlatStyle.Flat,
+            BackColor = Color.White,
+            ForeColor = Color.FromArgb(31, 49, 72)
+        };
+        button.FlatAppearance.BorderColor = InputBorderColor;
+        button.FlatAppearance.BorderSize = 1;
+        return button;
+    }
 
     private static TreeNode CreateNode(CadTreeNode model)
     {

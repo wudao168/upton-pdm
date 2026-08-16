@@ -2,7 +2,7 @@
 import { ref, watch } from 'vue'
 import type { BomItem } from '../types'
 
-const props = defineProps<{ mechanical: BomItem[]; electrical: BomItem[]; pending: boolean }>()
+const props = withDefaults(defineProps<{ mechanical: BomItem[]; electrical: BomItem[]; pending: boolean; editable?: boolean }>(), { editable: false })
 const emit = defineEmits<{
   save: [kind: 'Mechanical' | 'Electrical', items: BomItem[]]
   import: [kind: 'Mechanical' | 'Electrical', file: File]
@@ -44,10 +44,10 @@ function importSelected(event: Event) {
     <header class="pdm-manager-heading">
       <div><h2>BOM维护</h2><p>机械BOM来自结构快照；电气BOM可手工维护或导入标准XLSX。</p></div>
       <div class="pdm-manager-actions">
-        <button type="button" class="pdm-secondary-action" @click="selectImport">导入XLSX</button>
+        <button v-if="editable" type="button" class="pdm-secondary-action" @click="selectImport">导入XLSX</button>
         <button type="button" class="pdm-secondary-action" @click="emit('export', kind)">导出XLSX</button>
-        <button type="button" class="pdm-secondary-action" @click="addRow">新增物料</button>
-        <button type="button" class="pdm-primary-action" :disabled="pending" @click="emit('save', kind, rows)">{{ pending ? '保存中…' : '保存BOM' }}</button>
+        <button v-if="editable" type="button" class="pdm-secondary-action" @click="addRow">新增物料</button>
+        <button v-if="editable" type="button" class="pdm-primary-action" :disabled="pending" @click="emit('save', kind, rows)">{{ pending ? '保存中…' : '保存BOM' }}</button>
       </div>
     </header>
     <input ref="fileInput" class="pdm-visually-hidden" type="file" accept=".xlsx" @change="importSelected">
@@ -60,16 +60,16 @@ function importSelected(event: Event) {
         <thead><tr><th>序号</th><th>图号</th><th>名称</th><th>数量</th><th>单位</th><th>材料</th><th>规格</th><th>版本</th><th>完整</th><th>操作</th></tr></thead>
         <tbody>
           <tr v-for="(row, index) in rows" :key="`${row.drawingNumber}-${index}`">
-            <td><input v-model.number="row.sequence" type="number" min="1"></td>
-            <td><input v-model.trim="row.drawingNumber" required></td>
-            <td><input v-model.trim="row.name" required></td>
-            <td><input v-model.number="row.quantity" type="number" min="0.0001" step="0.0001"></td>
-            <td><input v-model.trim="row.unit" required></td>
-            <td><input v-model.trim="row.material"></td>
-            <td><input v-model.trim="row.specification"></td>
-            <td><input v-model.trim="row.revision" required></td>
-            <td><input v-model="row.complete" type="checkbox" aria-label="物料完整"></td>
-            <td><button type="button" class="pdm-table-action is-danger" @click="removeRow(index)">删除</button></td>
+            <td><input v-model.number="row.sequence" type="number" min="1" :disabled="!editable"></td>
+            <td><input v-model.trim="row.drawingNumber" required :disabled="!editable"></td>
+            <td><input v-model.trim="row.name" required :disabled="!editable"></td>
+            <td><input v-model.number="row.quantity" type="number" min="0.0001" step="0.0001" :disabled="!editable"></td>
+            <td><input v-model.trim="row.unit" required :disabled="!editable"></td>
+            <td><input v-model.trim="row.material" :disabled="!editable"></td>
+            <td><input v-model.trim="row.specification" :disabled="!editable"></td>
+            <td><input v-model.trim="row.revision" required :disabled="!editable"></td>
+            <td><input v-model="row.complete" type="checkbox" aria-label="物料完整" :disabled="!editable"></td>
+            <td><button v-if="editable" type="button" class="pdm-table-action is-danger" @click="removeRow(index)">删除</button></td>
           </tr>
           <tr v-if="rows.length === 0"><td colspan="10" class="pdm-empty-info">当前BOM为空，请新增物料或导入标准XLSX。</td></tr>
         </tbody>

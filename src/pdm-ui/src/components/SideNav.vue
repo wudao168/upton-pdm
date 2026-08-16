@@ -1,33 +1,34 @@
 <script setup lang="ts">
-import { FolderKanban, FolderTree, GitPullRequestArrow, History, LayoutDashboard, ListTree, PackageCheck, Settings, Stamp, UsersRound } from '@lucide/vue'
+import { ClipboardCheck, FolderKanban, HardDrive, Settings } from '@lucide/vue'
+import pdmClientIconUrl from '../assets/pdm-client-icon.png'
 
-type NavKey = 'projects' | 'customers' | 'workbench' | 'documents' | 'bom' | 'approvals' | 'release' | 'changes' | 'audit' | 'settings'
+type NavKey = 'projects' | 'tasks' | 'client-settings' | 'admin'
 
-const props = withDefaults(defineProps<{ active: NavKey; approvalCount?: number; isAdministrator?: boolean }>(), {
+const props = withDefaults(defineProps<{ active: NavKey; approvalCount?: number; canManageSystem?: boolean; desktopAvailable?: boolean }>(), {
   approvalCount: 0,
-  isAdministrator: false,
+  canManageSystem: false,
+  desktopAvailable: false,
 })
 const emit = defineEmits<{ navigate: [key: NavKey, label: string] }>()
 
 const items = [
-  { key: 'projects', label: '项目管理', icon: FolderKanban },
-  { key: 'customers', label: '客户维护', icon: UsersRound, administratorOnly: true },
-  { key: 'workbench', label: '工作台', icon: LayoutDashboard },
-  { key: 'documents', label: '项目图档', icon: FolderTree },
-  { key: 'bom', label: 'BOM管理', icon: ListTree },
-  { key: 'approvals', label: '图纸审批', icon: Stamp },
-  { key: 'release', label: '生产发包', icon: PackageCheck },
-  { key: 'changes', label: '变更管理', icon: GitPullRequestArrow },
-  { key: 'audit', label: '审计查询', icon: History },
-] satisfies Array<{ key: NavKey; label: string; icon: typeof LayoutDashboard; administratorOnly?: boolean }>
+  { key: 'projects', label: '项目中心', icon: FolderKanban },
+  { key: 'tasks', label: '我的待办', icon: ClipboardCheck },
+] satisfies Array<{ key: NavKey; label: string; icon: typeof FolderKanban }>
 </script>
 
 <template>
   <aside class="pdm-sidebar" aria-label="主导航">
+    <div class="pdm-sidebar__brand">
+      <img class="pdm-sidebar__brand-mark" :src="pdmClientIconUrl" alt="" aria-hidden="true">
+      <div class="pdm-sidebar__brand-copy">
+        <strong>UPTON</strong>
+        <span>产品数据管理</span>
+      </div>
+    </div>
     <nav class="pdm-sidebar__nav">
       <button
-      v-for="item in items"
-      v-show="!item.administratorOnly || props.isAdministrator"
+        v-for="item in items"
         :key="item.label"
         type="button"
         class="pdm-nav-item"
@@ -35,20 +36,32 @@ const items = [
         :aria-current="props.active === item.key ? 'page' : undefined"
         @click="emit('navigate', item.key, item.label)"
       >
-        <component :is="item.icon" :size="17" aria-hidden="true" />
+        <component :is="item.icon" :size="18" aria-hidden="true" />
         <span>{{ item.label }}</span>
-        <em v-if="item.key === 'approvals' && props.approvalCount">{{ props.approvalCount }}</em>
+        <em v-if="item.key === 'tasks' && props.approvalCount">{{ props.approvalCount }}</em>
       </button>
     </nav>
-    <button
-      v-if="props.isAdministrator"
-      type="button"
-      class="pdm-nav-item pdm-sidebar__settings"
-      :class="{ 'is-active': props.active === 'settings' }"
-      :aria-current="props.active === 'settings' ? 'page' : undefined"
-      @click="emit('navigate', 'settings', '系统设置')"
-    >
-      <Settings :size="17" aria-hidden="true" /><span>系统设置</span>
-    </button>
+    <div class="pdm-sidebar__footer">
+      <button
+        v-if="props.desktopAvailable"
+        type="button"
+        class="pdm-nav-item pdm-sidebar__settings"
+        :class="{ 'is-active': props.active === 'client-settings' }"
+        :aria-current="props.active === 'client-settings' ? 'page' : undefined"
+        @click="emit('navigate', 'client-settings', '客户端设置')"
+      >
+        <HardDrive :size="18" aria-hidden="true" /><span>客户端设置</span>
+      </button>
+      <button
+        v-if="props.canManageSystem"
+        type="button"
+        class="pdm-nav-item pdm-sidebar__settings"
+        :class="{ 'is-active': props.active === 'admin' }"
+        :aria-current="props.active === 'admin' ? 'page' : undefined"
+        @click="emit('navigate', 'admin', '系统管理')"
+      >
+        <Settings :size="18" aria-hidden="true" /><span>系统管理</span>
+      </button>
+    </div>
   </aside>
 </template>

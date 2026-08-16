@@ -19,41 +19,83 @@ internal sealed class ProjectBrowserControl : UserControl
     {
         Text = "浏览...",
         Dock = DockStyle.Fill,
-        FlatStyle = FlatStyle.Flat
+        FlatStyle = FlatStyle.Flat,
+        UseVisualStyleBackColor = false,
+        BackColor = Color.FromArgb(47, 109, 224),
+        ForeColor = Color.White
     };
+    private readonly ColumnStyle browseButtonColumn;
+    private float requestedBrowseButtonWidth = 98;
     private IReadOnlyList<ProjectDto> projects = Array.Empty<ProjectDto>();
     private ProjectDto selection;
 
-    public ProjectBrowserControl()
+    public ProjectBrowserControl(bool matchTaskPaneProjectLayout = false)
     {
         AutoScaleMode = AutoScaleMode.Font;
-        MinimumSize = new Size(120, 27);
-        Height = 27;
+        MinimumSize = new Size(120, 30);
+        Height = 30;
 
-        browse.FlatAppearance.BorderColor = Color.FromArgb(122, 122, 122);
+        browse.FlatAppearance.BorderColor = Color.FromArgb(47, 109, 224);
         browse.FlatAppearance.BorderSize = 1;
         browse.Click += (_, _) => BrowseForProject();
+
+        selectedProject.AutoSize = false;
+        selectedProject.Margin = Padding.Empty;
+        selectedProject.ShortcutsEnabled = false;
+        browse.Margin = Padding.Empty;
+        browse.AutoSize = false;
+        browse.AutoEllipsis = false;
+        browse.TextAlign = ContentAlignment.MiddleCenter;
+        browse.UseCompatibleTextRendering = false;
+
+        if (matchTaskPaneProjectLayout)
+        {
+            selectedProject.BorderStyle = BorderStyle.FixedSingle;
+        }
 
         var layout = new TableLayoutPanel
         {
             Dock = DockStyle.Fill,
-            ColumnCount = 2,
+            ColumnCount = 3,
             RowCount = 1,
             Margin = Padding.Empty,
-            Padding = Padding.Empty
+            Padding = matchTaskPaneProjectLayout ? new Padding(3) : Padding.Empty
         };
         layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        layout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 68));
+        layout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 6));
+
+        browseButtonColumn = new ColumnStyle(SizeType.Absolute, requestedBrowseButtonWidth);
+        layout.ColumnStyles.Add(browseButtonColumn);
         layout.Controls.Add(selectedProject, 0, 0);
-        layout.Controls.Add(browse, 1, 0);
+        layout.Controls.Add(browse, 2, 0);
         Controls.Add(layout);
+        Layout += (_, _) =>
+        {
+            layout.Padding = matchTaskPaneProjectLayout ? new Padding(3) : Padding.Empty;
+            browseButtonColumn.Width = requestedBrowseButtonWidth;
+        };
     }
 
     public event EventHandler SelectedProjectChanged;
 
     public Guid? SelectedProjectId => selection?.Id;
 
-    public string SelectedProjectDisplay => selection?.ToString() ?? string.Empty;
+    public string SelectedProjectDisplay => ProjectSelectionText(selection);
+
+    public string SelectedProjectConfirmationCode => selection == null
+        ? string.Empty
+        : selection.ParentProjectId.HasValue
+            ? selection.Code
+            : string.Concat(selection.Code, "-0");
+
+    public float BrowseButtonWidth
+    {
+        set
+        {
+            requestedBrowseButtonWidth = value;
+            browseButtonColumn.Width = value;
+        }
+    }
 
     public void SetProjects(IReadOnlyList<ProjectDto> value)
     {
@@ -106,6 +148,12 @@ internal sealed class ProjectBrowserControl : UserControl
             ? "尚未选择项目"
             : string.Concat("当前选择项目：", selectedProject.Text);
     }
+
+    private static string ProjectSelectionText(ProjectDto project) => project == null
+        ? string.Empty
+        : project.ParentProjectId.HasValue
+            ? project.ToString()
+            : string.Concat(project.Code, "-0 · 主项目图档");
 }
 
 internal sealed class ProjectBrowserDialog : Form
@@ -113,7 +161,18 @@ internal sealed class ProjectBrowserDialog : Form
     private readonly IReadOnlyList<ProjectDto> projects;
     private readonly TextBox search = new TextBox { Dock = DockStyle.Fill };
     private readonly ListBox mainProjects = new ListBox { Dock = DockStyle.Fill, IntegralHeight = false };
-    private readonly ListBox childProjects = new ListBox { Dock = DockStyle.Fill, IntegralHeight = false };
+    private readonly ListView childProjects = new ListView
+    {
+        Dock = DockStyle.Fill,
+        View = View.Details,
+        FullRowSelect = true,
+        HideSelection = false,
+        MultiSelect = false,
+        HeaderStyle = ColumnHeaderStyle.Nonclickable,
+        GridLines = true,
+        ShowItemToolTips = true,
+        UseCompatibleStateImageBehavior = false
+    };
     private readonly Label childHint = new Label
     {
         Dock = DockStyle.Bottom,
@@ -149,9 +208,13 @@ internal sealed class ProjectBrowserDialog : Form
         search.AccessibleName = "搜索项目号或项目名称";
         search.TextChanged += (_, _) => ApplySearch();
         mainProjects.SelectedIndexChanged += (_, _) => RefreshChildren();
-        mainProjects.DoubleClick += (_, _) => ConfirmMainWithoutChildren();
+        mainProjects.DoubleClick += (_, _) => SelectAndConfirmMainDocuments();
         childProjects.SelectedIndexChanged += (_, _) => UpdateSelectionState();
-        childProjects.DoubleClick += (_, _) => ConfirmChild();
+        childProjects.DoubleClick += (_, _) => ConfirmProjectSelection();
+        childProjects.Resize += (_, _) => ResizeChildColumns();
+        childProjects.Columns.Add("名称");
+        childProjects.Columns.Add("图档状态");
+        childProjects.Columns.Add("业务状态");
 
         var searchPanel = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 1 };
         searchPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 160));
@@ -166,12 +229,14 @@ internal sealed class ProjectBrowserDialog : Form
         searchPanel.Controls.Add(search, 1, 0);
 
         var columns = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 1 };
-        columns.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
-        columns.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
+        columns.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 42));
+        columns.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 58));
         columns.Controls.Add(BuildProjectGroup("1. 主项目", mainProjects, null), 0, 0);
-        columns.Controls.Add(BuildProjectGroup("2. 子项目（可选）", childProjects, childHint), 1, 0);
+        columns.Controls.Add(BuildProjectGroup("2. 图档归属（必选）", childProjects, childHint), 1, 0);
 
         var cancel = new Button { Text = "取消", DialogResult = DialogResult.Cancel, AutoSize = true };
+        ApplyDialogButtonAppearance(confirm, Color.FromArgb(21, 126, 77), true);
+        ApplyDialogButtonAppearance(cancel, Color.FromArgb(230, 126, 34), true);
         var buttons = new FlowLayoutPanel
         {
             Dock = DockStyle.Fill,
@@ -201,7 +266,7 @@ internal sealed class ProjectBrowserDialog : Form
         layout.Controls.Add(searchPanel, 0, 0);
         layout.Controls.Add(new Label
         {
-            Text = "先选择主项目，再选择该主项目下的子项目；如无需子项目，可直接确认主项目。",
+            Text = "先选择主项目，再选择“项目号-0”的主项目图档或具体子项目。",
             Dock = DockStyle.Fill,
             ForeColor = Color.FromArgb(99, 115, 134),
             TextAlign = ContentAlignment.MiddleLeft
@@ -216,8 +281,15 @@ internal sealed class ProjectBrowserDialog : Form
         RestoreInitialSelection();
     }
 
-    public ProjectDto SelectedProject => childProjects.SelectedItem as ProjectDto
-        ?? mainProjects.SelectedItem as ProjectDto;
+    public ProjectDto SelectedProject
+    {
+        get
+        {
+            return childProjects.SelectedItems.Count == 1
+                ? childProjects.SelectedItems[0].Tag as ProjectDto
+                : null;
+        }
+    }
 
     private static Control BuildProjectGroup(string title, Control list, Control footer)
     {
@@ -255,7 +327,7 @@ internal sealed class ProjectBrowserDialog : Form
     private void RefreshChildren()
     {
         var parent = mainProjects.SelectedItem as ProjectDto;
-        var previousChildId = (childProjects.SelectedItem as ProjectDto)?.Id;
+        var previousProjectId = SelectedProject?.Id;
         var query = search.Text.Trim();
         var children = parent == null
             ? Array.Empty<ProjectDto>()
@@ -268,15 +340,23 @@ internal sealed class ProjectBrowserDialog : Form
 
         childProjects.BeginUpdate();
         childProjects.Items.Clear();
-        childProjects.Items.AddRange(children.Cast<object>().ToArray());
+        if (parent != null && (string.IsNullOrWhiteSpace(query) || Matches(parent, query) || MatchesMainDocuments(parent, query)))
+        {
+            childProjects.Items.Add(CreateProjectItem(parent, isMainDocuments: true));
+        }
+        foreach (var child in children)
+        {
+            childProjects.Items.Add(CreateProjectItem(child, isMainDocuments: false));
+        }
         childProjects.EndUpdate();
-        childProjects.Enabled = parent != null && children.Length > 0;
+        childProjects.Enabled = parent != null;
         childHint.Text = parent == null
             ? "请先选择主项目"
-            : children.Length == 0 ? "该主项目下没有可选子项目" : "不选择子项目时，将使用主项目";
+            : children.Length == 0 ? "请选择主项目图档（项目号-0）" : string.Concat("可选主项目图档或 ", children.Length, " 个子项目");
 
-        var restoreId = previousChildId ?? ResolveInitialChildProjectId(parent?.Id);
-        SelectListItem(childProjects, restoreId);
+        var restoreId = previousProjectId ?? ResolveInitialTargetProjectId(parent?.Id);
+        SelectProjectItem(childProjects, restoreId);
+        ResizeChildColumns();
         UpdateSelectionState();
     }
 
@@ -288,9 +368,9 @@ internal sealed class ProjectBrowserDialog : Form
         var mainId = initial?.ParentProjectId ?? initial?.Id;
         SelectListItem(mainProjects, mainId);
         RefreshChildren();
-        if (initial?.ParentProjectId.HasValue == true)
+        if (initial != null)
         {
-            SelectListItem(childProjects, initial.Id);
+            SelectProjectItem(childProjects, initial.Id);
         }
 
         UpdateSelectionState();
@@ -300,26 +380,49 @@ internal sealed class ProjectBrowserDialog : Form
     {
         var selected = SelectedProject;
         confirm.Enabled = selected != null;
-        selection.Text = selected == null ? "尚未选择项目" : string.Concat("将选择：", selected);
+        ApplyDialogButtonAppearance(confirm, Color.FromArgb(21, 126, 77), confirm.Enabled);
+        selection.Text = selected != null
+            ? string.Concat("将选择：", ProjectSelectionText(selected))
+            : mainProjects.SelectedItem == null ? "尚未选择项目" : "请选择图档归属";
     }
 
-    private void ConfirmMainWithoutChildren()
+    private void SelectAndConfirmMainDocuments()
     {
         var main = mainProjects.SelectedItem as ProjectDto;
-        if (main != null && projects.All(project => project.ParentProjectId != main.Id))
+        if (main != null)
+        {
+            SelectProjectItem(childProjects, main.Id);
+            ConfirmProjectSelection();
+        }
+    }
+
+    private void ConfirmProjectSelection()
+    {
+        if (SelectedProject != null)
         {
             DialogResult = DialogResult.OK;
             Close();
         }
     }
 
-    private void ConfirmChild()
+    private static void ApplyDialogButtonAppearance(Button button, Color availableColor, bool enabled)
     {
-        if (childProjects.SelectedItem is ProjectDto)
+        button.FlatStyle = FlatStyle.Flat;
+        if (enabled)
         {
-            DialogResult = DialogResult.OK;
-            Close();
+            button.UseVisualStyleBackColor = false;
+            button.BackColor = availableColor;
+            button.ForeColor = Color.White;
+            button.FlatAppearance.BorderColor = availableColor;
+            button.FlatAppearance.BorderSize = 0;
+            return;
         }
+
+        button.UseVisualStyleBackColor = true;
+        button.BackColor = SystemColors.Control;
+        button.ForeColor = SystemColors.GrayText;
+        button.FlatAppearance.BorderColor = Color.FromArgb(122, 122, 122);
+        button.FlatAppearance.BorderSize = 1;
     }
 
     private Guid? ResolveInitialMainProjectId()
@@ -333,7 +436,7 @@ internal sealed class ProjectBrowserDialog : Form
         return initial?.ParentProjectId ?? initial?.Id;
     }
 
-    private Guid? ResolveInitialChildProjectId(Guid? parentId)
+    private Guid? ResolveInitialTargetProjectId(Guid? parentId)
     {
         if (!initialProjectId.HasValue || !parentId.HasValue)
         {
@@ -341,7 +444,9 @@ internal sealed class ProjectBrowserDialog : Form
         }
 
         var initial = projects.FirstOrDefault(project => project.Id == initialProjectId.Value);
-        return initial?.ParentProjectId == parentId ? initial.Id : (Guid?)null;
+        return initial != null && (initial.Id == parentId || initial.ParentProjectId == parentId)
+            ? initial.Id
+            : (Guid?)null;
     }
 
     private static void SelectListItem(ListBox list, Guid? projectId)
@@ -361,6 +466,77 @@ internal sealed class ProjectBrowserDialog : Form
             }
         }
     }
+
+    private static void SelectProjectItem(ListView list, Guid? projectId)
+    {
+        list.SelectedItems.Clear();
+        if (!projectId.HasValue)
+        {
+            return;
+        }
+
+        foreach (ListViewItem item in list.Items)
+        {
+            if (item.Tag is ProjectDto project && project.Id == projectId.Value)
+            {
+                item.Selected = true;
+                item.Focused = true;
+                item.EnsureVisible();
+                return;
+            }
+        }
+    }
+
+    private static ListViewItem CreateProjectItem(ProjectDto project, bool isMainDocuments)
+    {
+        var name = isMainDocuments
+            ? string.Concat(project.Code, "-0 · 主项目图档")
+            : project.ToString();
+        var documentStatus = !project.CanReadContent
+            ? "无查看权限"
+            : project.DocumentCount.GetValueOrDefault() > 0
+                ? string.Concat("有图档（", project.DocumentCount.Value, "）")
+                : "暂无图档";
+        var businessStatus = project.CanReadContent
+            ? string.IsNullOrWhiteSpace(project.BusinessStatus) ? "正常" : project.BusinessStatus
+            : "—";
+        var item = new ListViewItem(name)
+        {
+            Tag = project,
+            ToolTipText = string.Concat(name, "\r\n图档状态：", documentStatus, "\r\n业务状态：", businessStatus)
+        };
+        item.SubItems.Add(documentStatus);
+        item.SubItems.Add(businessStatus);
+        if (project.CanReadContent && project.DocumentCount.GetValueOrDefault() > 0)
+        {
+            item.BackColor = Color.FromArgb(232, 245, 233);
+            item.ForeColor = Color.FromArgb(22, 101, 52);
+        }
+        return item;
+    }
+
+    private void ResizeChildColumns()
+    {
+        if (childProjects.Columns.Count != 3)
+        {
+            return;
+        }
+
+        const int documentStatusWidth = 96;
+        const int businessStatusWidth = 124;
+        var available = Math.Max(0, childProjects.ClientSize.Width - SystemInformation.VerticalScrollBarWidth - 4);
+        childProjects.Columns[0].Width = Math.Max(150, available - documentStatusWidth - businessStatusWidth);
+        childProjects.Columns[1].Width = documentStatusWidth;
+        childProjects.Columns[2].Width = businessStatusWidth;
+    }
+
+    private static string ProjectSelectionText(ProjectDto project) => project.ParentProjectId.HasValue
+        ? project.ToString()
+        : string.Concat(project.Code, "-0 · 主项目图档");
+
+    private static bool MatchesMainDocuments(ProjectDto project, string query) =>
+        string.Concat(project.Code, "-0").IndexOf(query, StringComparison.OrdinalIgnoreCase) >= 0
+        || "主项目图档".IndexOf(query, StringComparison.OrdinalIgnoreCase) >= 0;
 
     private static bool Matches(ProjectDto project, string query) =>
         string.IsNullOrWhiteSpace(query)

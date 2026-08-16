@@ -5,6 +5,7 @@ using System.Linq;
 using System.Security.Cryptography;
 using System.Threading;
 using System.Threading.Tasks;
+using Upton.Pdm.LocalSettings;
 
 namespace Upton.Pdm.SolidWorks;
 
@@ -66,6 +67,12 @@ internal sealed class ControlledWorkspaceManager
         }
 
         var target = WorkingDirectory(manifest);
+        if (Directory.Exists(target) && ValidateWorkspace(target, manifest.Files))
+        {
+            SetWorkspaceAttributes(target, manifest, true);
+            return ResolveRootPath(target, manifest);
+        }
+
         var parent = Path.GetDirectoryName(target) ?? throw new InvalidDataException("编辑工作区路径无效。");
         Directory.CreateDirectory(parent);
         var staging = Path.Combine(parent, string.Concat(".edit-stage-", Guid.NewGuid().ToString("N")));
@@ -97,9 +104,7 @@ internal sealed class ControlledWorkspaceManager
     private static string WorkspaceRoot(ControlledOpenManifestDto manifest)
     {
         return Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-            "UPTON PDM",
-            "Workspace",
+            WorkspaceSettingsStore.GetWorkspaceRoot(),
             SafeSegment(manifest.ProjectCode),
             manifest.RootDocumentId.ToString("N"));
     }
@@ -156,18 +161,139 @@ internal sealed class ControlledWorkspaceManager
         }
 
         var backup = string.Concat(target, ".backup-", Guid.NewGuid().ToString("N"));
-        Directory.Move(target, backup);
+        var originalAttributes = SnapshotFileAttributes(target);
+        var backupCompleted = false;
         try
         {
-            Directory.Move(source, target);
+            CopyDirectory(target, backup);
+            backupCompleted = true;
+            SynchronizeDirectory(source, target);
             DeleteDirectory(backup);
         }
-        catch
+        catch (Exception updateException)
         {
-            if (Directory.Exists(target)) DeleteDirectory(target);
-            if (Directory.Exists(backup)) Directory.Move(backup, target);
+            if (!backupCompleted)
+            {
+                throw;
+            }
+
+            try
+            {
+                SynchronizeDirectory(backup, target);
+                RestoreFileAttributes(target, originalAttributes);
+            }
+            catch (Exception rollbackException)
+            {
+                throw new AggregateException("工作区更新失败，并且未能完整回滚原工作区。", updateException, rollbackException);
+            }
+
             throw;
         }
+        finally
+        {
+            if (Directory.Exists(backup)) DeleteDirectory(backup);
+        }
+    }
+
+    private static void SynchronizeDirectory(string source, string target)
+    {
+        Directory.CreateDirectory(target);
+        var sourceRoot = Path.GetFullPath(source).TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
+        var targetRoot = Path.GetFullPath(target).TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
+        var expectedFiles = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var expectedDirectories = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { string.Empty };
+
+        foreach (var sourceDirectory in Directory.GetDirectories(source, "*", SearchOption.AllDirectories))
+        {
+            var relativePath = RelativePath(sourceRoot, sourceDirectory);
+            expectedDirectories.Add(relativePath);
+            Directory.CreateDirectory(Path.Combine(targetRoot, relativePath));
+        }
+
+        foreach (var sourceFile in Directory.GetFiles(source, "*", SearchOption.AllDirectories))
+        {
+            var relativePath = RelativePath(sourceRoot, sourceFile);
+            expectedFiles.Add(relativePath);
+            var destination = Path.Combine(targetRoot, relativePath);
+            var destinationDirectory = Path.GetDirectoryName(destination);
+            if (!string.IsNullOrWhiteSpace(destinationDirectory)) Directory.CreateDirectory(destinationDirectory);
+            CopyFileAtomically(sourceFile, destination);
+        }
+
+        foreach (var targetFile in Directory.GetFiles(target, "*", SearchOption.AllDirectories))
+        {
+            if (expectedFiles.Contains(RelativePath(targetRoot, targetFile))) continue;
+            File.SetAttributes(targetFile, FileAttributes.Normal);
+            File.Delete(targetFile);
+        }
+
+        foreach (var targetDirectory in Directory.GetDirectories(target, "*", SearchOption.AllDirectories)
+            .OrderByDescending(path => path.Length))
+        {
+            if (expectedDirectories.Contains(RelativePath(targetRoot, targetDirectory))) continue;
+            Directory.Delete(targetDirectory, true);
+        }
+    }
+
+    private static void CopyFileAtomically(string source, string target)
+    {
+        if (File.Exists(target)
+            && new FileInfo(source).Length == new FileInfo(target).Length
+            && string.Equals(ComputeSha256(source), ComputeSha256(target), StringComparison.OrdinalIgnoreCase))
+        {
+            return;
+        }
+
+        var temporary = string.Concat(target, ".pdm-update-", Guid.NewGuid().ToString("N"));
+        try
+        {
+            using (var input = new FileStream(source, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
+            using (var output = new FileStream(temporary, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+            {
+                input.CopyTo(output);
+            }
+
+            if (File.Exists(target))
+            {
+                File.SetAttributes(target, FileAttributes.Normal);
+                File.Replace(temporary, target, null, true);
+            }
+            else
+            {
+                File.Move(temporary, target);
+            }
+        }
+        finally
+        {
+            if (File.Exists(temporary)) File.Delete(temporary);
+        }
+    }
+
+    private static IReadOnlyDictionary<string, FileAttributes> SnapshotFileAttributes(string directory)
+    {
+        var root = Path.GetFullPath(directory).TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
+        return Directory.GetFiles(directory, "*", SearchOption.AllDirectories)
+            .ToDictionary(path => RelativePath(root, path), File.GetAttributes, StringComparer.OrdinalIgnoreCase);
+    }
+
+    private static void RestoreFileAttributes(string directory, IReadOnlyDictionary<string, FileAttributes> attributes)
+    {
+        foreach (var item in attributes)
+        {
+            var path = Path.Combine(directory, item.Key);
+            if (File.Exists(path)) File.SetAttributes(path, item.Value);
+        }
+    }
+
+    private static string RelativePath(string root, string path)
+    {
+        var fullPath = Path.GetFullPath(path);
+        if (!fullPath.StartsWith(root, StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidDataException("工作区文件路径越界。");
+        }
+
+        return fullPath.Substring(root.Length);
     }
 
     private static void CopyDirectory(string source, string target)
@@ -204,7 +330,7 @@ internal sealed class ControlledWorkspaceManager
 
     private static string ComputeSha256(string path)
     {
-        using (var input = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read))
+        using (var input = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
         using (var hash = SHA256.Create())
         {
             return BitConverter.ToString(hash.ComputeHash(input)).Replace("-", string.Empty);

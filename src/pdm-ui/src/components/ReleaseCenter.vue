@@ -2,11 +2,12 @@
 import { computed, ref } from 'vue'
 import type { ReleasePackageSummary } from '../types'
 
-const props = defineProps<{ releasePackage: ReleasePackageSummary | null; username: string; pending: boolean; progress: number; error: string }>()
+const props = defineProps<{ releasePackage: ReleasePackageSummary | null; username: string; pending: boolean; progress: number; error: string; canManage: boolean; canDecide: boolean }>()
 const emit = defineEmits<{
   create: [number: string, processReviewer: string, approver: string]
   upload: [file: File]
   submit: []
+  withdraw: []
   decide: [taskId: string, decision: 'Approved' | 'Rejected', comment: string]
 }>()
 const showCreate = ref(false)
@@ -29,10 +30,10 @@ function uploadSelected(event: Event) {
   <section class="pdm-panel pdm-manager-panel" aria-label="审批与生产发包">
     <header class="pdm-manager-heading">
       <div><h2>审批与生产发包</h2><p>固定工艺审核、批准两级；批准后自动原子投放生产目录。</p></div>
-      <button v-if="releasePackage?.state === '已发布'" type="button" class="pdm-primary-action" @click="showCreate = !showCreate">新建发布包</button>
+      <button v-if="canManage && releasePackage?.state === '已发布'" type="button" class="pdm-primary-action" @click="showCreate = !showCreate">新建发布包</button>
     </header>
 
-    <form v-if="!releasePackage || showCreate" class="pdm-form-grid" @submit.prevent="emit('create', number, processReviewer, approver)">
+    <form v-if="canManage && (!releasePackage || showCreate)" class="pdm-form-grid" @submit.prevent="emit('create', number, processReviewer, approver)">
       <label>发布包编号<input v-model.trim="number" required></label>
       <label>工艺审核账号<input v-model.trim="processReviewer" required></label>
       <label>批准账号<input v-model.trim="approver" required></label>
@@ -46,6 +47,11 @@ function uploadSelected(event: Event) {
         <div><small>生产目录</small><strong>{{ releasePackage.publishedPath || '审批通过后自动投放' }}</strong></div>
       </div>
 
+      <div v-if="canManage && ['工艺审核', '待批准'].includes(releasePackage.state)" class="pdm-manager-actions">
+        <button type="button" class="pdm-secondary-action is-danger" :disabled="pending" @click="emit('withdraw')">撤回审批</button>
+        <small>撤回后图档恢复为工作中，可修改后重新提交。</small>
+      </div>
+
       <div class="pdm-approval-chain">
         <article v-for="step in releasePackage.steps" :key="step.id" :class="`is-${step.status}`">
           <span>{{ step.status === 'done' ? '✓' : step.status === 'current' ? '●' : '○' }}</span>
@@ -53,7 +59,7 @@ function uploadSelected(event: Event) {
         </article>
       </div>
 
-      <div v-if="canPrepare" class="pdm-release-preparation">
+      <div v-if="canManage && canPrepare" class="pdm-release-preparation">
         <h3>发包资料</h3>
         <p>机械/电气BOM已由系统固化为XLSX；请上传至少一份PDF和一份DWG。</p>
         <div class="pdm-manager-actions">
@@ -64,7 +70,7 @@ function uploadSelected(event: Event) {
         <progress v-if="pending && progress > 0" :value="progress" max="100">{{ progress }}%</progress>
       </div>
 
-      <div v-if="currentTask" class="pdm-decision-box">
+      <div v-if="canDecide && currentTask" class="pdm-decision-box">
         <label>审批意见<textarea v-model.trim="comment" rows="3" maxlength="1000" /></label>
         <div class="pdm-manager-actions">
           <button type="button" class="pdm-secondary-action is-danger" :disabled="pending" @click="emit('decide', currentTask.id, 'Rejected', comment || '驳回')">驳回</button>

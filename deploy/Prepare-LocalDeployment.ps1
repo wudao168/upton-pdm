@@ -213,14 +213,14 @@ Copy-Item -Path (Join-Path $projectRoot 'src\Pdm.SolidWorks.Addin\bin\Release\ne
 
 $desktopDirectory = [Environment]::GetFolderPath('Desktop')
 $shortcutPath = Join-Path $desktopDirectory 'UPTON PDM.lnk'
-if (-not $isUpgrade) {
-    $shell = New-Object -ComObject WScript.Shell
-    $shortcut = $shell.CreateShortcut($shortcutPath)
-    $shortcut.TargetPath = Join-Path $localRoot 'client\Upton.Pdm.Desktop.exe'
-    $shortcut.WorkingDirectory = Join-Path $localRoot 'client'
-    $shortcut.Description = 'UPTON PDM engineering client'
-    $shortcut.Save()
-}
+$clientPath = Join-Path $localRoot 'client\Upton.Pdm.Desktop.exe'
+$shell = New-Object -ComObject WScript.Shell
+$shortcut = $shell.CreateShortcut($shortcutPath)
+$shortcut.TargetPath = $clientPath
+$shortcut.WorkingDirectory = Join-Path $localRoot 'client'
+$shortcut.IconLocation = "$clientPath,0"
+$shortcut.Description = 'UPTON PDM engineering client'
+$shortcut.Save()
 
 $receipt = [ordered]@{
     preparedAt = [DateTimeOffset]::Now.ToString('O')
@@ -230,7 +230,7 @@ $receipt = [ordered]@{
     mysqlHome = $mysqlHome
     localRoot = $localRoot
     apiPath = Join-Path $localRoot 'api\Pdm.Api.dll'
-    clientPath = Join-Path $localRoot 'client\Upton.Pdm.Desktop.exe'
+    clientPath = $clientPath
     addinPath = Join-Path $localRoot 'solidworks-addin\Upton.Pdm.SolidWorks.Addin.dll'
     shortcutPath = $shortcutPath
 }

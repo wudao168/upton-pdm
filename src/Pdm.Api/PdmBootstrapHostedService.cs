@@ -16,6 +16,10 @@ public sealed class PdmBootstrapHostedService(
         await migrationRunner.RunAsync(cancellationToken);
 
         var repository = scope.ServiceProvider.GetRequiredService<IPdmRepository>();
+        foreach (var project in (await repository.ListProjectsAsync(cancellationToken)).Where(item => item.ParentProjectId is null))
+        {
+            await repository.EnsureProjectFolderTreeAsync(project.Id, cancellationToken);
+        }
         if (await repository.CountUsersAsync(cancellationToken) > 0)
         {
             return;

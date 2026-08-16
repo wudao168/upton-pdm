@@ -23,11 +23,18 @@ public sealed partial class MySqlPdmRepository
 
     public async Task<DocumentCheckInResult> CheckInVersionAsync(Guid documentId, string actor, DocumentVersionCommit commit, CancellationToken cancellationToken)
     {
+        var document = await FindDocumentAsync(documentId, cancellationToken) ?? throw new PdmNotFoundException("图档不存在。");
+        if (document.CheckoutSessionId is null) throw new PdmConflictException("当前编辑权限没有有效会话，请重新获取权限。");
+        return await CheckInVersionAsync(documentId, actor, document.CheckoutSessionId.Value, commit, cancellationToken);
+    }
+
+    public async Task<DocumentCheckInResult> CheckInVersionAsync(Guid documentId, string actor, Guid sessionId, DocumentVersionCommit commit, CancellationToken cancellationToken)
+    {
         await using var connection = await OpenAsync(cancellationToken);
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
         var locked = await LockDocumentAsync(connection, transaction, documentId, cancellationToken);
-        if (!string.Equals(locked.CheckedOutBy, actor, StringComparison.OrdinalIgnoreCase))
-            throw new PdmConflictException("只有当前编辑人员可以提交存档。");
+        if (!string.Equals(locked.CheckedOutBy, actor, StringComparison.OrdinalIgnoreCase) || locked.CheckoutSessionId != sessionId)
+            throw new PdmConflictException("编辑会话已经失效，不能提交存档。请另存本地修改或重新获取权限。");
 
         var latestFile = await connection.QuerySingleOrDefaultAsync<LatestVersionFingerprintRow>(new CommandDefinition(
             """
@@ -54,8 +61,15 @@ public sealed partial class MySqlPdmRepository
             }
 
             var unchanged = await connection.ExecuteAsync(new CommandDefinition(
-                "UPDATE document SET checked_out_by=NULL, checked_out_at=NULL, updated_at=@Now, row_version=row_version+1 WHERE id=@DocumentId AND row_version=@RowVersion AND checked_out_by=@Actor",
-                new { DocumentId = documentId, Actor = actor, RowVersion = locked.RowVersion, Now = timeProvider.GetUtcNow().UtcDateTime }, transaction, cancellationToken: cancellationToken));
+                """
+                UPDATE document SET drawing_number=COALESCE(@DrawingNumber,drawing_number),name=COALESCE(@Name,name),file_name=COALESCE(@FileName,file_name),
+                    source_fingerprint_sha256=COALESCE(@SourceFileSha256,source_fingerprint_sha256),
+                    checked_out_by=NULL,checked_out_at=NULL,checkout_session_id=NULL,checkout_machine=NULL,
+                    checkout_last_heartbeat_at=NULL,checkout_lease_expires_at=NULL,checkout_release_requested_by=NULL,
+                    checkout_release_requested_at=NULL,checkout_release_request_reason=NULL,updated_at=@Now,row_version=row_version+1
+                WHERE id=@DocumentId AND row_version=@RowVersion AND checked_out_by=@Actor AND checkout_session_id=@SessionId
+                """,
+                new { DocumentId = documentId, Actor = actor, SessionId = sessionId, RowVersion = locked.RowVersion, Now = timeProvider.GetUtcNow().UtcDateTime, commit.DrawingNumber, commit.Name, commit.FileName, SourceFileSha256 = sourceFileSha256 }, transaction, cancellationToken: cancellationToken));
             if (unchanged != 1) throw new PdmConflictException("图档编辑状态已经变化，请刷新后重试。");
             var unchangedDocument = await FindDocumentAsync(connection, transaction, documentId, cancellationToken) ?? throw new PdmNotFoundException("图档不存在。");
             await transaction.CommitAsync(cancellationToken);
@@ -72,8 +86,16 @@ public sealed partial class MySqlPdmRepository
         }
 
         var affected = await connection.ExecuteAsync(new CommandDefinition(
-            "UPDATE document SET revision_label=@Revision, lifecycle_state='Work', checked_out_by=NULL, checked_out_at=NULL, updated_at=@Now, row_version=row_version+1 WHERE id=@DocumentId AND row_version=@RowVersion AND checked_out_by=@Actor",
-            new { DocumentId = documentId, Revision = nextRevision.Display, Actor = actor, RowVersion = locked.RowVersion, Now = version.CreatedAt.UtcDateTime }, transaction, cancellationToken: cancellationToken));
+            """
+            UPDATE document SET drawing_number=COALESCE(@DrawingNumber,drawing_number),name=COALESCE(@Name,name),file_name=COALESCE(@FileName,file_name),
+                source_fingerprint_sha256=COALESCE(@SourceFileSha256,source_fingerprint_sha256),
+                revision_label=@Revision,lifecycle_state='Work',checked_out_by=NULL,checked_out_at=NULL,
+                checkout_session_id=NULL,checkout_machine=NULL,checkout_last_heartbeat_at=NULL,checkout_lease_expires_at=NULL,
+                checkout_release_requested_by=NULL,checkout_release_requested_at=NULL,checkout_release_request_reason=NULL,
+                updated_at=@Now,row_version=row_version+1
+            WHERE id=@DocumentId AND row_version=@RowVersion AND checked_out_by=@Actor AND checkout_session_id=@SessionId
+            """,
+            new { DocumentId = documentId, Revision = nextRevision.Display, Actor = actor, SessionId = sessionId, RowVersion = locked.RowVersion, Now = version.CreatedAt.UtcDateTime, commit.DrawingNumber, commit.Name, commit.FileName, SourceFileSha256 = sourceFileSha256 }, transaction, cancellationToken: cancellationToken));
         if (affected != 1) throw new PdmConflictException("图档已被其他存档操作更新，本次存档未生效。");
         var document = await FindDocumentAsync(connection, transaction, documentId, cancellationToken) ?? throw new PdmNotFoundException("图档不存在。");
         await transaction.CommitAsync(cancellationToken);
@@ -98,9 +120,10 @@ public sealed partial class MySqlPdmRepository
             ApprovalTaskId = null, ReleasePackageId = null
         };
         await InsertVersionAsync(connection, transaction, version, cancellationToken);
+        source.PropertySnapshot.TryGetValue("SourceFileSha256", out var restoredSourceSha256);
         var affected = await connection.ExecuteAsync(new CommandDefinition(
-            "UPDATE document SET revision_label=@Revision, lifecycle_state='Work', checked_out_by=NULL, checked_out_at=NULL, updated_at=@Now, row_version=row_version+1 WHERE id=@DocumentId AND row_version=@RowVersion",
-            new { DocumentId = documentId, Revision = nextRevision.Display, RowVersion = locked.RowVersion, Now = version.CreatedAt.UtcDateTime }, transaction, cancellationToken: cancellationToken));
+            "UPDATE document SET revision_label=@Revision,lifecycle_state='Work',source_fingerprint_sha256=COALESCE(@SourceFileSha256,source_fingerprint_sha256),checked_out_by=NULL,checked_out_at=NULL,checkout_session_id=NULL,checkout_machine=NULL,checkout_last_heartbeat_at=NULL,checkout_lease_expires_at=NULL,checkout_release_requested_by=NULL,checkout_release_requested_at=NULL,checkout_release_request_reason=NULL,updated_at=@Now,row_version=row_version+1 WHERE id=@DocumentId AND row_version=@RowVersion",
+            new { DocumentId = documentId, Revision = nextRevision.Display, RowVersion = locked.RowVersion, Now = version.CreatedAt.UtcDateTime, SourceFileSha256 = restoredSourceSha256 }, transaction, cancellationToken: cancellationToken));
         if (affected != 1) throw new PdmConflictException("图档已被其他恢复或存档操作更新，本次恢复未生效。");
         var document = await FindDocumentAsync(connection, transaction, documentId, cancellationToken) ?? throw new PdmNotFoundException("图档不存在。");
         await transaction.CommitAsync(cancellationToken);
@@ -131,7 +154,7 @@ public sealed partial class MySqlPdmRepository
         };
         await InsertVersionAsync(connection, transaction, released, cancellationToken);
         var affected = await connection.ExecuteAsync(new CommandDefinition(
-            "UPDATE document SET revision_label=@Revision, lifecycle_state='Released', checked_out_by=NULL, checked_out_at=NULL, updated_at=@Now, row_version=row_version+1 WHERE id=@DocumentId AND row_version=@RowVersion",
+            "UPDATE document SET revision_label=@Revision,lifecycle_state='Released',checked_out_by=NULL,checked_out_at=NULL,checkout_session_id=NULL,checkout_machine=NULL,checkout_last_heartbeat_at=NULL,checkout_lease_expires_at=NULL,checkout_release_requested_by=NULL,checkout_release_requested_at=NULL,checkout_release_request_reason=NULL,updated_at=@Now,row_version=row_version+1 WHERE id=@DocumentId AND row_version=@RowVersion",
             new { DocumentId = documentId, Revision = releasedRevision.Display, RowVersion = locked.RowVersion, Now = released.CreatedAt.UtcDateTime }, transaction, cancellationToken: cancellationToken));
         if (affected != 1) throw new PdmConflictException("图档版本已变化，不能重复发布。");
         await transaction.CommitAsync(cancellationToken);
@@ -158,8 +181,9 @@ public sealed partial class MySqlPdmRepository
         var root = JsonSerializer.Deserialize<DocumentReferenceNode>(rootJson, jsonOptions)
             ?? throw new InvalidDataException("发布包引用树快照损坏。");
 
+        var documentIds = EnumerateDocumentIds(root).Distinct().ToArray();
         var releasedVersions = new List<DocumentVersion>();
-        foreach (var documentId in EnumerateDocumentIds(root).Distinct())
+        foreach (var documentId in documentIds)
         {
             var locked = await LockDocumentAsync(connection, transaction, documentId, cancellationToken);
             var sourceRow = await connection.QuerySingleOrDefaultAsync<DocumentVersionRow>(new CommandDefinition(
@@ -180,11 +204,15 @@ public sealed partial class MySqlPdmRepository
             };
             await InsertVersionAsync(connection, transaction, released, cancellationToken);
             var affected = await connection.ExecuteAsync(new CommandDefinition(
-                "UPDATE document SET revision_label=@Revision,lifecycle_state='Released',checked_out_by=NULL,checked_out_at=NULL,updated_at=@Now,row_version=row_version+1 WHERE id=@DocumentId AND row_version=@RowVersion",
+                "UPDATE document SET revision_label=@Revision,lifecycle_state='Released',checked_out_by=NULL,checked_out_at=NULL,checkout_session_id=NULL,checkout_machine=NULL,checkout_last_heartbeat_at=NULL,checkout_lease_expires_at=NULL,checkout_release_requested_by=NULL,checkout_release_requested_at=NULL,checkout_release_request_reason=NULL,updated_at=@Now,row_version=row_version+1 WHERE id=@DocumentId AND row_version=@RowVersion",
                 new { DocumentId = documentId, Revision = revision.Display, RowVersion = locked.RowVersion, Now = released.CreatedAt.UtcDateTime }, transaction, cancellationToken: cancellationToken));
             if (affected != 1) throw new PdmConflictException("图档版本已变化，发布包正式版本事务未生效。");
             releasedVersions.Add(released);
         }
+
+        await connection.ExecuteAsync(new CommandDefinition(
+            "UPDATE document SET lifecycle_state='Released',updated_at=@Now,row_version=row_version+1 WHERE id IN @DocumentIds AND lifecycle_state='InReview'",
+            new { DocumentIds = documentIds, Now = timeProvider.GetUtcNow().UtcDateTime }, transaction, cancellationToken: cancellationToken));
 
         await transaction.CommitAsync(cancellationToken);
         return releasedVersions;
@@ -249,7 +277,7 @@ public sealed partial class MySqlPdmRepository
     }
 
     private static async Task<LockedDocumentRow> LockDocumentAsync(DbConnection connection, DbTransaction transaction, Guid documentId, CancellationToken cancellationToken) =>
-        await connection.QuerySingleOrDefaultAsync<LockedDocumentRow>(new CommandDefinition("SELECT id,revision_label,checked_out_by,row_version FROM document WHERE id=@DocumentId FOR UPDATE", new { DocumentId = documentId }, transaction, cancellationToken: cancellationToken))
+        await connection.QuerySingleOrDefaultAsync<LockedDocumentRow>(new CommandDefinition("SELECT id,revision_label,checked_out_by,checkout_session_id,row_version FROM document WHERE id=@DocumentId FOR UPDATE", new { DocumentId = documentId }, transaction, cancellationToken: cancellationToken))
         ?? throw new PdmNotFoundException("图档不存在。");
 
     private DocumentVersion MapDocumentVersion(DocumentVersionRow row) => new(
@@ -263,7 +291,7 @@ public sealed partial class MySqlPdmRepository
 
     private const string VersionSelect = "SELECT id,document_id,revision_label,version_status,storage_relative_path,file_length,sha256,comment,property_snapshot_json,reference_snapshot_json,mechanical_bom_snapshot_json,electrical_bom_snapshot_json,source_version_id,source_description,approval_task_id,release_package_id,created_by,created_at FROM document_version";
 
-    private sealed class LockedDocumentRow { public Guid Id { get; init; } public string RevisionLabel { get; init; } = string.Empty; public string? CheckedOutBy { get; init; } public long RowVersion { get; init; } }
+    private sealed class LockedDocumentRow { public Guid Id { get; init; } public string RevisionLabel { get; init; } = string.Empty; public string? CheckedOutBy { get; init; } public Guid? CheckoutSessionId { get; init; } public long RowVersion { get; init; } }
     private sealed class LatestVersionFingerprintRow { public string Sha256 { get; init; } = string.Empty; public string? SourceFileSha256 { get; init; } }
     private sealed class PackagePublishRow { public Guid ProjectId { get; init; } public Guid ReferenceSnapshotId { get; init; } public string State { get; init; } = string.Empty; }
     private sealed class DocumentVersionRow

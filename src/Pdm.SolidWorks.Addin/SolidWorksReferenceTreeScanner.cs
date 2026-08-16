@@ -65,6 +65,7 @@ internal sealed class SolidWorksReferenceTreeScanner
             FileName = Path.GetFileName(componentPath),
             FullPath = componentPath,
             DisplayName = string.IsNullOrWhiteSpace(componentName) ? Path.GetFileNameWithoutExtension(componentPath) : componentName,
+            DrawingNumber = Path.GetFileNameWithoutExtension(componentPath),
             Kind = DocumentKindFromPath(componentPath, isRoot ? (int)swDocumentTypes_e.swDocASSEMBLY : 0),
             Configuration = component.ReferencedConfiguration ?? string.Empty,
             Status = GetStatus(component, componentPath),
@@ -296,6 +297,7 @@ internal sealed class SolidWorksReferenceTreeScanner
             FileName = Path.GetFileName(path),
             FullPath = path,
             DisplayName = Path.GetFileNameWithoutExtension(string.IsNullOrWhiteSpace(path) ? title : path),
+            DrawingNumber = Path.GetFileNameWithoutExtension(string.IsNullOrWhiteSpace(path) ? title : path),
             Kind = DocumentKindFromPath(path, documentType),
             Configuration = configuration,
             Status = string.IsNullOrWhiteSpace(path) || File.Exists(path) ? CadReferenceStatus.Normal : CadReferenceStatus.Missing,
@@ -324,6 +326,7 @@ internal sealed class SolidWorksReferenceTreeScanner
             FileName = Path.GetFileName(drawingPath),
             FullPath = drawingPath,
             DisplayName = string.Concat(Path.GetFileNameWithoutExtension(drawingPath), " 工程图"),
+            DrawingNumber = Path.GetFileNameWithoutExtension(drawingPath),
             Kind = CadDocumentKind.Drawing,
             Configuration = "图纸",
             Status = CadReferenceStatus.Normal
@@ -360,7 +363,26 @@ internal sealed class SolidWorksReferenceTreeScanner
             // A partially resolved component can throw while its state is queried.
         }
 
-        return string.IsNullOrWhiteSpace(path) || File.Exists(path) ? CadReferenceStatus.Normal : CadReferenceStatus.Missing;
+        if (string.IsNullOrWhiteSpace(path) || File.Exists(path))
+        {
+            return CadReferenceStatus.Normal;
+        }
+
+        try
+        {
+            // A document renamed in SolidWorks can exist only in memory until the user saves it.
+            // It is not a broken reference while SolidWorks still has the model resolved.
+            if (component?.GetModelDoc2() is IModelDoc2)
+            {
+                return CadReferenceStatus.Normal;
+            }
+        }
+        catch
+        {
+            // Unresolved components can throw while their model document is queried.
+        }
+
+        return CadReferenceStatus.Missing;
     }
 
     private static bool IsModified(IComponent2 component)

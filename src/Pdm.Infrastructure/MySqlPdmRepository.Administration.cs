@@ -11,7 +11,7 @@ public sealed partial class MySqlPdmRepository
     {
         await using var connection = await OpenAsync(cancellationToken);
         var rows = await connection.QueryAsync<CustomerRow>(new CommandDefinition(
-            $"SELECT id,code,name,is_active IsActive FROM pdm_customer {(includeInactive ? string.Empty : "WHERE is_active=1")} ORDER BY code",
+            $"SELECT id,code,name,is_active IsActive,source_system SourceSystem,last_synced_at LastSyncedAt FROM pdm_customer WHERE source_system='crm' {(includeInactive ? string.Empty : "AND is_active=1")} ORDER BY code",
             cancellationToken: cancellationToken));
         return rows.Select(MapCustomer).ToArray();
     }
@@ -20,7 +20,7 @@ public sealed partial class MySqlPdmRepository
     {
         await using var connection = await OpenAsync(cancellationToken);
         var row = await connection.QuerySingleOrDefaultAsync<CustomerRow>(new CommandDefinition(
-            "SELECT id,code,name,is_active IsActive FROM pdm_customer WHERE id=@CustomerId",
+            "SELECT id,code,name,is_active IsActive,source_system SourceSystem,last_synced_at LastSyncedAt FROM pdm_customer WHERE id=@CustomerId",
             new { CustomerId = customerId }, cancellationToken: cancellationToken));
         return row is null ? null : MapCustomer(row);
     }
@@ -50,7 +50,87 @@ public sealed partial class MySqlPdmRepository
         {
             throw new PdmConflictException("客户编码已经存在。");
         }
-        return new(id, code, name, isActive);
+        return new(id, code, name, isActive, "legacy");
+    }
+
+    public async Task<CrmIntegrationConfiguration> GetCrmIntegrationConfigurationAsync(CancellationToken cancellationToken)
+    {
+        await using var connection = await OpenAsync(cancellationToken);
+        var row = await connection.QuerySingleOrDefaultAsync<CrmIntegrationRow>(new CommandDefinition(
+            "SELECT base_url BaseUrl,username,password_ciphertext PasswordCiphertext,auto_sync_enabled AutoSyncEnabled,auto_sync_interval_minutes AutoSyncIntervalMinutes,last_sync_at LastSyncAt,last_sync_count LastSyncCount,last_auto_sync_attempt_at LastAutoSyncAttemptAt,last_auto_sync_error LastAutoSyncError FROM crm_integration_setting WHERE id=1",
+            cancellationToken: cancellationToken));
+        return row is null
+            ? new(string.Empty, string.Empty, string.Empty, false, 60, null, 0, null, null)
+            : new(row.BaseUrl, row.Username, row.PasswordCiphertext, row.AutoSyncEnabled, row.AutoSyncIntervalMinutes, AsUtc(row.LastSyncAt), row.LastSyncCount, AsUtc(row.LastAutoSyncAttemptAt), row.LastAutoSyncError);
+    }
+
+    public async Task<CrmIntegrationConfiguration> SaveCrmIntegrationConfigurationAsync(CrmIntegrationConfiguration configuration, string actor, CancellationToken cancellationToken)
+    {
+        var now = timeProvider.GetUtcNow().UtcDateTime;
+        await using var connection = await OpenAsync(cancellationToken);
+        await connection.ExecuteAsync(new CommandDefinition(
+            """
+            INSERT INTO crm_integration_setting(id,base_url,username,password_ciphertext,auto_sync_enabled,auto_sync_interval_minutes,last_sync_at,last_sync_count,last_auto_sync_attempt_at,last_auto_sync_error,updated_at,updated_by)
+            VALUES(1,@BaseUrl,@Username,@PasswordCiphertext,@AutoSyncEnabled,@AutoSyncIntervalMinutes,@LastSyncAt,@LastSyncCount,@LastAutoSyncAttemptAt,@LastAutoSyncError,@Now,@Actor)
+            ON DUPLICATE KEY UPDATE base_url=VALUES(base_url),username=VALUES(username),password_ciphertext=VALUES(password_ciphertext),auto_sync_enabled=VALUES(auto_sync_enabled),auto_sync_interval_minutes=VALUES(auto_sync_interval_minutes),updated_at=VALUES(updated_at),updated_by=VALUES(updated_by)
+            """,
+            new
+            {
+                configuration.BaseUrl,
+                configuration.Username,
+                configuration.PasswordCiphertext,
+                configuration.AutoSyncEnabled,
+                configuration.AutoSyncIntervalMinutes,
+                LastSyncAt = configuration.LastSyncAt?.UtcDateTime,
+                configuration.LastSyncCount,
+                LastAutoSyncAttemptAt = configuration.LastAutoSyncAttemptAt?.UtcDateTime,
+                configuration.LastAutoSyncError,
+                Now = now,
+                Actor = actor
+            },
+            cancellationToken: cancellationToken));
+        return await GetCrmIntegrationConfigurationAsync(cancellationToken);
+    }
+
+    public async Task RecordCrmAutomaticSyncAttemptAsync(DateTimeOffset attemptedAt, string? error, CancellationToken cancellationToken)
+    {
+        await using var connection = await OpenAsync(cancellationToken);
+        var affected = await connection.ExecuteAsync(new CommandDefinition(
+            "UPDATE crm_integration_setting SET last_auto_sync_attempt_at=@AttemptedAt,last_auto_sync_error=@Error,updated_at=@AttemptedAt WHERE id=1",
+            new { AttemptedAt = attemptedAt.UtcDateTime, Error = error },
+            cancellationToken: cancellationToken));
+        if (affected != 1) throw new PdmRuleException("CRM连接配置不存在，请重新保存连接配置。");
+    }
+
+    public async Task<IReadOnlyList<PdmCustomer>> ApplyCrmCustomerSyncAsync(IReadOnlyList<CrmCustomerRecord> customers, DateTimeOffset syncedAt, CancellationToken cancellationToken)
+    {
+        await using var connection = await OpenAsync(cancellationToken);
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+        await connection.ExecuteAsync(new CommandDefinition(
+            "UPDATE pdm_customer SET is_active=0,row_version=row_version+1,updated_at=@SyncedAt WHERE source_system='crm' AND is_active=1",
+            new { SyncedAt = syncedAt.UtcDateTime },
+            transaction,
+            cancellationToken: cancellationToken));
+        foreach (var customer in customers)
+        {
+            await connection.ExecuteAsync(new CommandDefinition(
+                """
+                INSERT INTO pdm_customer(id,code,name,is_active,source_system,last_synced_at,row_version,created_at,updated_at)
+                VALUES(@Id,@Code,@Name,1,'crm',@SyncedAt,1,@SyncedAt,@SyncedAt)
+                ON DUPLICATE KEY UPDATE name=VALUES(name),is_active=1,source_system='crm',last_synced_at=VALUES(last_synced_at),row_version=row_version+1,updated_at=VALUES(updated_at)
+                """,
+                new { Id = Guid.NewGuid(), customer.Code, customer.Name, SyncedAt = syncedAt.UtcDateTime },
+                transaction,
+                cancellationToken: cancellationToken));
+        }
+        var affected = await connection.ExecuteAsync(new CommandDefinition(
+            "UPDATE crm_integration_setting SET last_sync_at=@SyncedAt,last_sync_count=@Count,updated_at=@SyncedAt WHERE id=1",
+            new { SyncedAt = syncedAt.UtcDateTime, Count = customers.Count },
+            transaction,
+            cancellationToken: cancellationToken));
+        if (affected != 1) throw new PdmRuleException("CRM连接配置不存在，请重新保存连接配置。");
+        await transaction.CommitAsync(cancellationToken);
+        return await ListCustomersAsync(true, cancellationToken);
     }
 
     public async Task<IReadOnlyList<EquipmentTypeDefinition>> ListEquipmentTypesAsync(bool includeInactive, CancellationToken cancellationToken)
@@ -78,12 +158,21 @@ public sealed partial class MySqlPdmRepository
     {
         await using var connection = await OpenAsync(cancellationToken);
         var rows = await connection.QueryAsync<SystemSettingRow>(new CommandDefinition(
-            "SELECT setting_key SettingKey,setting_value SettingValue FROM pdm_system_setting WHERE setting_key IN ('vault_root','release_root')",
+            "SELECT setting_key SettingKey,setting_value SettingValue FROM pdm_system_setting",
             cancellationToken: cancellationToken));
         var values = rows.ToDictionary(row => row.SettingKey, row => row.SettingValue, StringComparer.OrdinalIgnoreCase);
         if (!values.TryGetValue("vault_root", out var vaultRoot) || !values.TryGetValue("release_root", out var releaseRoot))
             throw new PdmRuleException("系统存储根目录尚未配置。");
-        return new(vaultRoot, releaseRoot);
+        return new(vaultRoot, releaseRoot)
+        {
+            CheckoutHeartbeatSeconds = ReadInt(values, "checkout_heartbeat_seconds", 180),
+            CheckoutLeaseMinutes = ReadInt(values, "checkout_lease_minutes", 15),
+            CheckoutOfflineGraceMinutes = ReadInt(values, "checkout_offline_grace_minutes", 60),
+            CheckoutReminderHours = ReadInt(values, "checkout_reminder_hours", 4),
+            CheckoutStrongReminderHours = ReadInt(values, "checkout_strong_reminder_hours", 8),
+            CheckoutOverdueHours = ReadInt(values, "checkout_overdue_hours", 24),
+            CheckoutForceReleaseHours = ReadInt(values, "checkout_force_release_hours", 48)
+        };
     }
 
     public async Task<PdmSystemSettings> UpdateSystemSettingsAsync(PdmSystemSettings settings, CancellationToken cancellationToken)
@@ -91,7 +180,18 @@ public sealed partial class MySqlPdmRepository
         var now = timeProvider.GetUtcNow().UtcDateTime;
         await using var connection = await OpenAsync(cancellationToken);
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
-        foreach (var item in new[] { new { Key = "vault_root", Value = settings.VaultRoot }, new { Key = "release_root", Value = settings.ReleaseRoot } })
+        foreach (var item in new[]
+        {
+            new { Key = "vault_root", Value = settings.VaultRoot },
+            new { Key = "release_root", Value = settings.ReleaseRoot },
+            new { Key = "checkout_heartbeat_seconds", Value = settings.CheckoutHeartbeatSeconds.ToString() },
+            new { Key = "checkout_lease_minutes", Value = settings.CheckoutLeaseMinutes.ToString() },
+            new { Key = "checkout_offline_grace_minutes", Value = settings.CheckoutOfflineGraceMinutes.ToString() },
+            new { Key = "checkout_reminder_hours", Value = settings.CheckoutReminderHours.ToString() },
+            new { Key = "checkout_strong_reminder_hours", Value = settings.CheckoutStrongReminderHours.ToString() },
+            new { Key = "checkout_overdue_hours", Value = settings.CheckoutOverdueHours.ToString() },
+            new { Key = "checkout_force_release_hours", Value = settings.CheckoutForceReleaseHours.ToString() }
+        })
         {
             await connection.ExecuteAsync(new CommandDefinition(
                 """
@@ -104,6 +204,9 @@ public sealed partial class MySqlPdmRepository
         return settings;
     }
 
+    private static int ReadInt(IReadOnlyDictionary<string, string> values, string key, int defaultValue) =>
+        values.TryGetValue(key, out var value) && int.TryParse(value, out var parsed) ? parsed : defaultValue;
+
     public async Task<IReadOnlyList<UserAccount>> ListUsersAsync(CancellationToken cancellationToken)
     {
         await using var connection = await OpenAsync(cancellationToken);
@@ -113,36 +216,29 @@ public sealed partial class MySqlPdmRepository
         return rows.Select(row => new UserAccount(row.Id, row.Username, row.DisplayName, row.PasswordHash, Enum.Parse<UserRole>(row.Role), row.IsActive)).ToArray();
     }
 
-    public async Task<Project> SetProjectResponsibleUsersAsync(Guid projectId, IReadOnlyList<string> usernames, CancellationToken cancellationToken)
-    {
-        var normalized = usernames.Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
-        var now = timeProvider.GetUtcNow().UtcDateTime;
-        await using var connection = await OpenAsync(cancellationToken);
-        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
-        var projectExists = await connection.ExecuteScalarAsync<int>(new CommandDefinition(
-            "SELECT COUNT(*) FROM project WHERE id=@ProjectId FOR UPDATE", new { ProjectId = projectId }, transaction, cancellationToken: cancellationToken));
-        if (projectExists == 0) throw new PdmNotFoundException("项目不存在。");
-        var activeUsernames = (await connection.QueryAsync<string>(new CommandDefinition(
-            "SELECT username FROM pdm_user WHERE is_active=1 AND username IN @Usernames",
-            new { Usernames = normalized }, transaction, cancellationToken: cancellationToken))).ToArray();
-        if (activeUsernames.Length != normalized.Length) throw new PdmRuleException("负责人列表中包含不存在或已停用的账号。");
-        await connection.ExecuteAsync(new CommandDefinition("DELETE FROM project_responsible WHERE project_id=@ProjectId", new { ProjectId = projectId }, transaction, cancellationToken: cancellationToken));
-        await connection.ExecuteAsync(new CommandDefinition(
-            "INSERT INTO project_responsible(project_id,username,assigned_at) VALUES(@ProjectId,@Username,@Now)",
-            normalized.Select(username => new { ProjectId = projectId, Username = username, Now = now }), transaction, cancellationToken: cancellationToken));
-        await connection.ExecuteAsync(new CommandDefinition(
-            "UPDATE project SET owner=@Owner,row_version=row_version+1,updated_at=@Now WHERE id=@ProjectId",
-            new { ProjectId = projectId, Owner = normalized[0], Now = now }, transaction, cancellationToken: cancellationToken));
-        await transaction.CommitAsync(cancellationToken);
-        return await FindProjectAsync(projectId, cancellationToken) ?? throw new PdmNotFoundException("项目不存在。");
-    }
+    private static PdmCustomer MapCustomer(CustomerRow row) => new(row.Id, row.Code, row.Name, row.IsActive, row.SourceSystem, AsUtc(row.LastSyncedAt));
 
-    private static PdmCustomer MapCustomer(CustomerRow row) => new(row.Id, row.Code, row.Name, row.IsActive);
+    private static DateTimeOffset? AsUtc(DateTime? value) => value is null
+        ? null
+        : new DateTimeOffset(DateTime.SpecifyKind(value.Value, DateTimeKind.Utc));
 
     private sealed class SystemSettingRow
     {
         public string SettingKey { get; init; } = string.Empty;
         public string SettingValue { get; init; } = string.Empty;
+    }
+
+    private sealed class CrmIntegrationRow
+    {
+        public string BaseUrl { get; init; } = string.Empty;
+        public string Username { get; init; } = string.Empty;
+        public string PasswordCiphertext { get; init; } = string.Empty;
+        public bool AutoSyncEnabled { get; init; }
+        public int AutoSyncIntervalMinutes { get; init; } = 60;
+        public DateTime? LastSyncAt { get; init; }
+        public int LastSyncCount { get; init; }
+        public DateTime? LastAutoSyncAttemptAt { get; init; }
+        public string? LastAutoSyncError { get; init; }
     }
 
     private sealed class AdministrationUserRow

@@ -1,40 +1,97 @@
 <script setup lang="ts">
-import { Boxes, FileSearch, Maximize, MoreHorizontal, Pencil, Rotate3D } from '@lucide/vue'
-import { nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { FileSearch, Link2, Maximize, MoreHorizontal, Pencil, Rotate3D } from '@lucide/vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { postDesktopMessage } from '../api'
-import type { BomItem, DocumentNode, PreviewMode, SolidWorksOpenMode } from '../types'
+import type { DocumentNode, PreviewMode, SolidWorksOpenMode } from '../types'
 
-const props = defineProps<{ selected: DocumentNode; bom: BomItem[] }>()
-const mode = defineModel<PreviewMode>('mode', { required: true })
-const emit = defineEmits<{ open: [node: DocumentNode, mode: SolidWorksOpenMode, versionId?: string]; preview: [node: DocumentNode]; more: [] }>()
+const props = withDefaults(defineProps<{ selected: DocumentNode; related: DocumentNode[]; canEdit?: boolean; canManageLifecycle?: boolean; desktopAvailable?: boolean; obscured?: boolean }>(), { canEdit: false, canManageLifecycle: false, desktopAvailable: false, obscured: false })
+const emit = defineEmits<{ open: [node: DocumentNode, mode: SolidWorksOpenMode, versionId?: string]; preview: [node: DocumentNode]; related: [node: DocumentNode]; more: []; whereUsed: []; obsolete: [] }>()
 const previewSlot = ref<HTMLElement>()
-const previewState = ref<'idle' | 'loading' | 'ready' | 'error'>('idle')
+const previewState = ref<'idle' | 'loading' | 'ready' | 'error' | 'unavailable'>(props.desktopAvailable ? 'idle' : 'unavailable')
 const previewError = ref('')
 const solidWorksAvailable = ref(false)
 const solidWorksPending = ref(false)
 const solidWorksMessage = ref('')
 const solidWorksError = ref(false)
 let resizeObserver: ResizeObserver | undefined
+let overlayObserver: MutationObserver | undefined
+let previewSyncFrame = 0
+let previewSuspended = false
 
-const tabs: Array<{ value: PreviewMode; label: string }> = [
-  { value: 'model', label: '3D预览' },
-  { value: 'drawing', label: '2D图纸' },
-  { value: 'bom', label: '机械BOM' },
-]
+const mode = computed<PreviewMode>(() => props.selected.kind === 'Drawing' ? 'drawing' : 'model')
+const previewKindLabel = computed(() => mode.value === 'drawing' ? '2D工程图' : '3D模型')
+const selectedDisplayName = computed(() => {
+  const drawingNumber = props.selected.drawingNumber?.trim()
+  const name = props.selected.name?.trim()
+  if (!drawingNumber) return name || props.selected.fileName
+  if (!name || name === drawingNumber) return drawingNumber
+  return `${drawingNumber} · ${name}`
+})
+const lifecycleLabel = computed(() => {
+  const value = props.selected.lifecycleState
+  if (typeof value === 'number') return ['工作中', '审批中', '已发布', '已作废'][value] ?? String(value)
+  return ({ Work: '工作中', InReview: '审批中', Released: '已发布', Obsolete: '已作废' } as Record<string, string>)[value ?? ''] ?? value ?? '工作中'
+})
 
 function reportPreviewBounds() {
+  if (!props.desktopAvailable) return
   const slot = previewSlot.value
-  if (!slot || (mode.value !== 'model' && mode.value !== 'drawing')) return
+  if (!slot) return
+  if (props.obscured) {
+    suspendPreview()
+    return
+  }
   const bounds = slot.getBoundingClientRect()
-  if (bounds.width < 1 || bounds.height < 1) return
+  if (document.visibilityState === 'hidden' || isPreviewObscured(bounds)) {
+    suspendPreview()
+    return
+  }
+  const left = Math.max(0, bounds.left)
+  const top = Math.max(0, bounds.top)
+  const right = Math.min(window.innerWidth, bounds.right)
+  const bottom = Math.min(window.innerHeight, bounds.bottom)
+  const width = Math.max(0, right - left)
+  const height = Math.max(0, bottom - top)
+  if (width < 80 || height < 80) {
+    suspendPreview()
+    return
+  }
+  previewSuspended = false
   postDesktopMessage('preview-host-bounds', {
-    left: bounds.left,
-    top: bounds.top,
-    width: bounds.width,
-    height: bounds.height,
+    left,
+    top,
+    width,
+    height,
     viewportWidth: window.innerWidth,
     viewportHeight: window.innerHeight,
     visible: true,
+  })
+}
+
+function isPreviewObscured(slotBounds: DOMRect) {
+  return [...document.querySelectorAll<HTMLElement>('.el-overlay, .el-popper, .el-message-box__wrapper')].some(element => {
+    const style = window.getComputedStyle(element)
+    if (style.display === 'none' || style.visibility === 'hidden') return false
+    const bounds = element.getBoundingClientRect()
+    return bounds.width > 0 && bounds.height > 0
+      && bounds.left < slotBounds.right && bounds.right > slotBounds.left
+      && bounds.top < slotBounds.bottom && bounds.bottom > slotBounds.top
+  })
+}
+
+function suspendPreview() {
+  if (previewSuspended) return
+  previewSuspended = true
+  postDesktopMessage('preview-host-suspend')
+}
+
+function schedulePreviewBounds() {
+  if (typeof window === 'undefined') return
+  if (previewSyncFrame) return
+  previewSyncFrame = window.requestAnimationFrame(() => {
+    previewSyncFrame = 0
+    if (typeof window === 'undefined' || typeof document === 'undefined') return
+    reportPreviewBounds()
   })
 }
 
@@ -44,6 +101,11 @@ function hidePreview() {
 
 function startPreview() {
   if (!props.selected.documentId) return
+  if (!props.desktopAvailable) {
+    previewState.value = 'unavailable'
+    previewError.value = ''
+    return
+  }
   previewState.value = 'loading'
   previewError.value = ''
   reportPreviewBounds()
@@ -52,13 +114,15 @@ function startPreview() {
 
 async function restartPreview() {
   hidePreview()
+  previewSuspended = false
   previewState.value = 'idle'
   previewError.value = ''
   await nextTick()
-  if (mode.value === 'model' || mode.value === 'drawing') startPreview()
+  startPreview()
 }
 
 function fitPreview() {
+  if (!props.desktopAvailable) return
   if (previewState.value === 'ready') postDesktopMessage('preview-host-fit')
   else startPreview()
 }
@@ -69,7 +133,7 @@ function onPreviewStatus(event: Event) {
   if (detail.state === 'loading' || detail.state === 'ready' || detail.state === 'error') {
     previewState.value = detail.state
     previewError.value = detail.message ?? ''
-    if (detail.state === 'ready') void nextTick(reportPreviewBounds)
+    if (detail.state === 'ready') void nextTick(schedulePreviewBounds)
   }
 }
 
@@ -93,7 +157,13 @@ function onSolidWorksStatus(event: Event) {
   solidWorksMessage.value = detail.message ?? ''
 }
 
-watch(mode, restartPreview)
+watch(() => props.obscured, obscured => {
+  if (obscured) {
+    suspendPreview()
+    return
+  }
+  void nextTick(schedulePreviewBounds)
+}, { flush: 'post' })
 
 watch(() => props.selected.id, () => {
   solidWorksPending.value = false
@@ -103,24 +173,32 @@ watch(() => props.selected.id, () => {
 })
 
 onMounted(() => {
-  window.addEventListener('resize', reportPreviewBounds)
+  window.addEventListener('resize', schedulePreviewBounds)
+  window.addEventListener('scroll', schedulePreviewBounds, true)
+  document.addEventListener('visibilitychange', schedulePreviewBounds)
   window.addEventListener('pdm-preview-status', onPreviewStatus)
   window.addEventListener('pdm-solidworks-capability', onSolidWorksCapability)
   window.addEventListener('pdm-solidworks-status', onSolidWorksStatus)
   postDesktopMessage('solidworks-capability-request')
   if (typeof ResizeObserver !== 'undefined' && previewSlot.value) {
-    resizeObserver = new ResizeObserver(reportPreviewBounds)
+    resizeObserver = new ResizeObserver(schedulePreviewBounds)
     resizeObserver.observe(previewSlot.value)
   }
-  void nextTick(() => {
-    if (mode.value === 'model' || mode.value === 'drawing') startPreview()
-  })
+  if (window.chrome?.webview && typeof MutationObserver !== 'undefined') {
+    overlayObserver = new MutationObserver(schedulePreviewBounds)
+    overlayObserver.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['class', 'style', 'aria-hidden'] })
+  }
+  void nextTick(startPreview)
 })
 
 onBeforeUnmount(() => {
   hidePreview()
+  if (previewSyncFrame) window.cancelAnimationFrame(previewSyncFrame)
   resizeObserver?.disconnect()
-  window.removeEventListener('resize', reportPreviewBounds)
+  overlayObserver?.disconnect()
+  window.removeEventListener('resize', schedulePreviewBounds)
+  window.removeEventListener('scroll', schedulePreviewBounds, true)
+  document.removeEventListener('visibilitychange', schedulePreviewBounds)
   window.removeEventListener('pdm-preview-status', onPreviewStatus)
   window.removeEventListener('pdm-solidworks-capability', onSolidWorksCapability)
   window.removeEventListener('pdm-solidworks-status', onSolidWorksStatus)
@@ -128,75 +206,72 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <section class="pdm-panel pdm-preview-panel" aria-label="图档预览">
-    <header class="pdm-preview-toolbar">
-      <div class="pdm-view-tabs" role="tablist" aria-label="资料视图">
-        <button
-          v-for="tab in tabs"
-          :key="tab.value"
-          type="button"
-          role="tab"
-          :aria-selected="mode === tab.value"
-          @click="mode = tab.value"
-        >{{ tab.label }}</button>
-      </div>
-      <div class="pdm-preview-actions">
-        <button type="button" aria-label="适合窗口" @click="fitPreview"><Maximize :size="15" /></button>
-        <button type="button" aria-label="更多操作" @click="emit('more')"><MoreHorizontal :size="17" /></button>
-      </div>
-    </header>
+  <section class="pdm-preview-panel" aria-label="图档预览">
+    <section class="pdm-panel pdm-preview-control-panel" aria-label="图档查看与操作">
+      <header class="pdm-preview-toolbar">
+        <div class="pdm-preview-document-switcher">
+          <span class="pdm-preview-kind">{{ previewKindLabel }}</span>
+          <strong class="pdm-preview-document-name" :title="selectedDisplayName">{{ selectedDisplayName }}</strong>
+          <span class="pdm-selected-file" :title="selected.fileName">{{ selected.fileName }}</span>
+          <span class="pdm-selected-version" :aria-label="`工作版本 ${selected.version}`">{{ selected.version }}</span>
+          <span class="pdm-selected-version" :aria-label="`业务状态 ${lifecycleLabel}`">{{ lifecycleLabel }}</span>
+          <span class="pdm-selected-status">{{ selected.checkedOutBy ? `${selected.checkedOutBy}编辑` : '未签出' }}</span>
+          <div v-if="related.length" class="pdm-related-documents" aria-label="关联图档">
+            <span><Link2 :size="13" />关联{{ mode === 'model' ? '图纸' : '模型' }}</span>
+            <button v-for="document in related" :key="document.id" type="button" :title="document.name" @click="emit('related', document)">{{ document.drawingNumber }}</button>
+          </div>
+        </div>
+        <div class="pdm-preview-actions">
+          <button type="button" aria-label="使用位置" title="查看该图档被哪些装配体引用" :disabled="!selected.documentId" @click="emit('whereUsed')"><Link2 :size="15" /><span>引用</span></button>
+          <button v-if="canManageLifecycle && lifecycleLabel !== '已作废'" type="button" aria-label="作废图档" title="受控作废当前图档" :disabled="!selected.documentId" @click="emit('obsolete')"><span>作废</span></button>
+          <button type="button" aria-label="适合窗口" :disabled="!desktopAvailable" :title="desktopAvailable ? '使eDrawings内容适合窗口' : '网页端没有eDrawings宿主'" @click="fitPreview"><Maximize :size="15" /><span>适窗</span></button>
+          <button type="button" aria-label="更多操作" title="查看更多图档操作" @click="emit('more')"><MoreHorizontal :size="17" /><span>更多</span></button>
+        </div>
+        <div class="pdm-solidworks-actions">
+          <button
+            type="button"
+            class="pdm-solidworks-primary"
+            :disabled="!selected.documentId || !solidWorksAvailable || solidWorksPending"
+            :title="solidWorksAvailable ? `从PDM获取${selected.version}并在SolidWorks中只读打开` : '当前电脑未安装SolidWorks或UPTON PDM插件'"
+            @click="openInSolidWorks('LatestReadOnly')"
+          ><Rotate3D :size="15" />只读打开</button>
+          <button
+            v-if="canEdit"
+            type="button"
+            class="pdm-solidworks-edit"
+            :disabled="!selected.documentId || !solidWorksAvailable || solidWorksPending"
+            title="完整下载并校验成功后获取编辑权限"
+            @click="openInSolidWorks('LatestEdit')"
+          ><Pencil :size="14" />获取编辑</button>
+        </div>
+      </header>
+      <p v-if="solidWorksMessage" class="pdm-solidworks-feedback" :class="{ 'is-error': solidWorksError }" role="status">{{ solidWorksMessage }}</p>
+    </section>
 
-    <div class="pdm-selected-bar">
-      <span class="pdm-selected-bar__title"><Boxes :size="16" /><strong>{{ selected.drawingNumber }} {{ selected.name }}</strong></span>
-      <span>{{ selected.fileName }}</span>
-      <span>工作版本 <b>{{ selected.version }}</b></span>
-      <span class="pdm-selected-status">{{ selected.checkedOutBy ? `正在编辑 · ${selected.checkedOutBy}` : '未签出' }}</span>
-      <div class="pdm-solidworks-actions">
-        <button
-          type="button"
-          class="pdm-solidworks-primary"
-          :disabled="!selected.documentId || !solidWorksAvailable || solidWorksPending"
-          :title="solidWorksAvailable ? `从PDM获取${selected.version}并在SolidWorks中只读打开` : '当前电脑未安装SolidWorks或UPTON PDM插件'"
-          @click="openInSolidWorks('LatestReadOnly')"
-        ><Rotate3D :size="15" />SolidWorks打开最新</button>
-        <button
-          type="button"
-          class="pdm-solidworks-edit"
-          :disabled="!selected.documentId || !solidWorksAvailable || solidWorksPending"
-          title="完整下载并校验成功后获取编辑权限"
-          @click="openInSolidWorks('LatestEdit')"
-        ><Pencil :size="14" />获取并编辑</button>
-      </div>
-    </div>
-    <p v-if="solidWorksMessage" class="pdm-solidworks-feedback" :class="{ 'is-error': solidWorksError }" role="status">{{ solidWorksMessage }}</p>
-
-    <div class="pdm-preview-content">
+    <div class="pdm-panel pdm-preview-content">
       <div
-        v-if="mode === 'model' || mode === 'drawing'"
         ref="previewSlot"
         class="pdm-real-preview pdm-embedded-preview-slot"
         :data-preview-state="previewState"
-        aria-label="客户端内嵌eDrawings预览区"
+        :aria-label="desktopAvailable ? '客户端内嵌eDrawings预览区' : '网页端图档预览状态'"
       >
-        <FileSearch :size="52" />
-        <h3>{{ previewState === 'loading' ? '正在加载 eDrawings…' : mode === 'model' ? 'eDrawings 内嵌三维预览' : 'eDrawings 内嵌图纸预览' }}</h3>
-        <p>{{ selected.fileName }} · {{ selected.version }}</p>
-        <small>文件通过PDM权限校验和SHA-256校验后下载到独立只读缓存，不会覆盖工作文件。</small>
-        <p v-if="previewState === 'error'" class="pdm-preview-error" role="alert">{{ previewError || 'eDrawings加载失败，请重试。' }}</p>
-        <button v-if="previewState === 'error'" type="button" class="pdm-primary-action" :disabled="!selected.documentId" @click="startPreview">
-          重新加载内嵌预览
-        </button>
-      </div>
-
-      <div v-else class="pdm-bom-view">
-        <el-table :data="bom" size="small" height="310" stripe>
-          <el-table-column prop="sequence" label="序号" width="60" />
-          <el-table-column prop="drawingNumber" label="图号" min-width="110" />
-          <el-table-column prop="name" label="名称" min-width="110" />
-          <el-table-column prop="quantity" label="数量" width="70" />
-          <el-table-column prop="material" label="材料" min-width="80" />
-          <el-table-column prop="revision" label="版本" width="66" />
-        </el-table>
+        <template v-if="previewState === 'unavailable'">
+          <FileSearch :size="52" />
+          <h3>网页端暂不支持原生SolidWorks图档预览</h3>
+          <p>{{ selected.fileName }} · {{ selected.version }}</p>
+          <small>eDrawings预览依赖Windows客户端中的本地组件；网页端可查看版本信息并下载受控文件。</small>
+          <button type="button" class="pdm-primary-action" :disabled="!selected.documentId" @click="emit('more')">查看并下载版本</button>
+        </template>
+        <template v-else>
+          <FileSearch :size="52" />
+          <h3>{{ previewState === 'loading' ? '正在加载 eDrawings…' : mode === 'model' ? 'eDrawings 内嵌三维预览' : 'eDrawings 内嵌图纸预览' }}</h3>
+          <p>{{ selected.fileName }} · {{ selected.version }}</p>
+          <small>文件通过PDM权限校验和SHA-256校验后下载到独立只读缓存，不会覆盖工作文件。</small>
+          <p v-if="previewState === 'error'" class="pdm-preview-error" role="alert">{{ previewError || 'eDrawings加载失败，请重试。' }}</p>
+          <button v-if="previewState === 'error'" type="button" class="pdm-primary-action" :disabled="!selected.documentId" @click="startPreview">
+            重新加载内嵌预览
+          </button>
+        </template>
       </div>
     </div>
   </section>

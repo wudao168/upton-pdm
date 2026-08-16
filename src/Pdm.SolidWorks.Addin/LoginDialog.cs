@@ -8,7 +8,7 @@ internal sealed class LoginDialog : Form
 {
     private readonly TextBox username = new TextBox();
     private readonly TextBox password = new TextBox { UseSystemPasswordChar = true };
-    private readonly CheckBox rememberCredentials = new CheckBox { Text = "记住用户名和密码", AutoSize = true };
+    private readonly CheckBox rememberCredentials = new CheckBox { Text = "记住用户名和密码", AutoSize = true, Checked = true };
 
     public LoginDialog()
     {

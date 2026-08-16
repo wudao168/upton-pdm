@@ -1,4 +1,5 @@
 using System.Text;
+using Microsoft.AspNetCore.DataProtection;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Diagnostics;
 using Microsoft.AspNetCore.Mvc;
@@ -71,6 +72,15 @@ builder.Services.AddSingleton<IOptions<PdmDatabaseOptions>>(Options.Create(datab
 builder.Services.AddSingleton<IOptions<PdmStorageOptions>>(Options.Create(storageOptions));
 builder.Services.AddSingleton<IOptions<AuthenticationOptions>>(Options.Create(authenticationOptions));
 
+var dataProtection = builder.Services.AddDataProtection().SetApplicationName("Upton.Pdm.CrmIntegration");
+if (!builder.Environment.IsDevelopment())
+{
+    var keyDirectory = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "secrets", "data-protection-keys"));
+    Directory.CreateDirectory(keyDirectory);
+    dataProtection.PersistKeysToFileSystem(new DirectoryInfo(keyDirectory));
+    if (OperatingSystem.IsWindows()) dataProtection.ProtectKeysWithDpapi(protectToLocalMachine: true);
+}
+
 if (string.Equals(databaseOptions.Provider, "MySql", StringComparison.OrdinalIgnoreCase))
 {
     builder.Services.AddScoped<IPdmRepository, MySqlPdmRepository>();
@@ -85,8 +95,12 @@ builder.Services.AddSingleton<IPasswordService, Pbkdf2PasswordService>();
 builder.Services.AddSingleton<ITokenIssuer, JwtTokenIssuer>();
 builder.Services.AddScoped<IFileStorage, LocalFileStorage>();
 builder.Services.AddSingleton<IReleasePackagePublisher, AtomicReleasePackagePublisher>();
+builder.Services.AddSingleton<ICrmCredentialProtector, DataProtectionCrmCredentialProtector>();
+builder.Services.AddHttpClient<ICrmCustomerClient, CrmCustomerClient>(client => client.Timeout = TimeSpan.FromSeconds(20));
 builder.Services.AddScoped<PdmWorkflowService>();
+builder.Services.AddScoped<CrmCustomerIntegrationService>();
 builder.Services.AddHostedService<PdmBootstrapHostedService>();
+builder.Services.AddHostedService<CrmCustomerSyncHostedService>();
 
 builder.Services.AddCors(options => options.AddPolicy("PdmClients", policy => policy
     .WithOrigins("http://127.0.0.1:5173", "http://localhost:5173", "http://127.0.0.1:5175", "http://localhost:5175", "https://appassets.pdm.local")

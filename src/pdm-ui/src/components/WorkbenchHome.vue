@@ -18,12 +18,8 @@ const emit = defineEmits<{ documents: []; bom: [] }>()
 
 <template>
   <section class="pdm-workbench" aria-label="工作台主页面">
-    <header class="pdm-pagebar">
-      <div>
-        <div class="pdm-breadcrumb">工作台 <span>/</span> 项目概览</div>
-        <h1>{{ project.code }} · {{ project.name }}</h1>
-        <p>项目负责人：{{ project.owner }}　{{ project.stage }}　图档库：{{ project.vaultName }}</p>
-      </div>
+    <header class="pdm-project-overview-heading">
+      <div><h2>项目概览</h2><p>汇总图档、BOM、发布状态和项目存储位置。</p></div>
       <div class="pdm-page-actions">
         <button type="button" class="pdm-secondary-action" @click="emit('bom')"><Boxes :size="16" />查看BOM</button>
         <button type="button" class="pdm-primary-action" @click="emit('documents')"><FolderTree :size="16" />进入项目图档</button>

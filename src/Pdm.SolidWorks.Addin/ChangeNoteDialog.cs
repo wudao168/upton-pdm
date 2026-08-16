@@ -43,7 +43,7 @@ internal sealed class ChangeNoteDialog : Form
         }, 0, 0);
         layout.Controls.Add(new Label
         {
-            Text = "请输入本次变更内容（必填），该内容将随工作版本保存，便于后期追溯。",
+            Text = "请输入本次变更内容（选填），该内容将随工作版本保存，便于后期追溯。",
             AutoSize = true,
             Margin = new Padding(0, 0, 0, 8)
         }, 0, 1);
@@ -64,8 +64,7 @@ internal sealed class ChangeNoteDialog : Form
             Height = 30,
             BackColor = Color.FromArgb(21, 126, 77),
             ForeColor = Color.White,
-            FlatStyle = FlatStyle.Flat,
-            Enabled = false
+            FlatStyle = FlatStyle.Flat
         };
         submit.FlatAppearance.BorderSize = 0;
         var cancel = new Button { Text = "取消", DialogResult = DialogResult.Cancel, Width = 82, Height = 30 };
@@ -74,7 +73,6 @@ internal sealed class ChangeNoteDialog : Form
         layout.Controls.Add(buttons, 0, 3);
         Controls.Add(layout);
 
-        changeNote.TextChanged += (_, _) => submit.Enabled = !string.IsNullOrWhiteSpace(changeNote.Text);
         AcceptButton = submit;
         CancelButton = cancel;
         Shown += (_, _) => changeNote.Focus();

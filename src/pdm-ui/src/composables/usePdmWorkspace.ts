@@ -1,9 +1,11 @@
 import { computed, onMounted, ref } from 'vue'
-import { checkHealth, compareDocumentVersions, createProject as createProjectRequest, createSubproject as createSubprojectRequest, createReleasePackage, decideApproval, exportBom, getProjectNumberingOptions, getStorageStatus, getSystemSettings, importBom, listAudit, listCustomers, listDocumentVersions, listEquipmentTypes, listProjects, listUsers, loadProjectWorkspace, login as apiLogin, PdmApiError, postDesktopMessage, readDocumentVersionFile, restoreDocumentVersion, saveBom, saveCustomer as saveCustomerRequest, saveEquipmentType as saveEquipmentTypeRequest, submitReleasePackage, updateOrganizationCounters as updateOrganizationCountersRequest, updateProjectResponsibles as updateProjectResponsiblesRequest, updateSystemSettings as updateSystemSettingsRequest, uploadReleaseFile } from '../api'
+import { checkHealth, compareDocumentVersions, createProject as createProjectRequest, createSubproject as createSubprojectRequest, createReleasePackage, decideApproval, deleteProject as deleteProjectRequest, exportBom, forceReleaseEditLock as forceReleaseEditLockRequest, getCrmIntegrationSettings, getOrganizationDirectory, getProjectNumberingOptions, getRolePermissionDirectory, getStorageStatus, getSystemSettings, importBom, listAudit, listCustomers, listDocumentVersions, listDocumentWhereUsed, listEditLocks, listEquipmentTypes, listFolderTemplate, listMyApprovalTasks, listProjectAudit, listProjects, listProjectVersions, loadProjectWorkspace, login as apiLogin, obsoleteDocument as obsoleteDocumentRequest, PdmApiError, postDesktopMessage, readDocumentVersionFile, requestEditLockRelease as requestEditLockReleaseRequest, restoreDocumentVersion, saveBom, saveEquipmentType as saveEquipmentTypeRequest, saveFolderTemplate as saveFolderTemplateRequest, saveOrganizationUnit as saveOrganizationUnitRequest, saveProjectOrganization as saveProjectOrganizationRequest, submitReleasePackage, syncCrmCustomers as syncCrmCustomersRequest, testCrmIntegration as testCrmIntegrationRequest, updateChildProjectDesigners as updateChildProjectDesignersRequest, updateCrmIntegrationSettings as updateCrmIntegrationSettingsRequest, updateMainProjectStaffing as updateMainProjectStaffingRequest, updateOrganizationCounters as updateOrganizationCountersRequest, updateOrganizationMemberships as updateOrganizationMembershipsRequest, updateOrganizationUnitManagers as updateOrganizationUnitManagersRequest, updateProjectExecutionUnit as updateProjectExecutionUnitRequest, updateProjectFolderPermissions as updateProjectFolderPermissionsRequest, updateRolePermissions as updateRolePermissionsRequest, updateSystemSettings as updateSystemSettingsRequest, uploadReleaseFile, withdrawReleasePackage } from '../api'
 import type { AuthSession } from '../api'
-import type { AuditEntry, BomItem, CreateProjectInput, CreateSubprojectInput, DocumentNode, DocumentVersionComparison, DocumentVersionSummary, EquipmentTypeDefinition, PdmCustomer, PdmSystemSettings, PdmUser, PreviewMode, ProjectNumberingOptions, ProjectSummary, ReleasePackageSummary, SolidWorksOpenMode } from '../types'
+import type { AuditEntry, BomItem, CreateProjectInput, CreateSubprojectInput, CrmConnectionTestResult, CrmCustomerSyncResult, CrmIntegrationSettings, DocumentFilter, DocumentModelDrawingRelation, DocumentNode, DocumentVersionComparison, DocumentVersionSummary, DocumentWhereUsed, EditLockSummary, EquipmentTypeDefinition, FolderPermissionRule, MainProjectStaffingInput, ManagedDocument, MyApprovalTask, OrganizationDirectory, PdmCustomer, PdmSystemSettings, PdmUser, ProjectFolder, ProjectFolderTemplateNode, ProjectNumberingOptions, ProjectSummary, ProjectVersionItem, ReleasePackageSummary, RolePermissionDirectory, SaveOrganizationUnitInput, SaveProjectOrganizationInput, SolidWorksOpenMode, UpdateCrmIntegrationInput } from '../types'
 
 const sessionKey = 'upton-pdm-session'
+const defaultSystemSettings: PdmSystemSettings = { vaultRoot: '', releaseRoot: '', checkoutHeartbeatSeconds: 180, checkoutLeaseMinutes: 15, checkoutOfflineGraceMinutes: 60, checkoutReminderHours: 4, checkoutStrongReminderHours: 8, checkoutOverdueHours: 24, checkoutForceReleaseHours: 48 }
+const defaultCrmIntegrationSettings: CrmIntegrationSettings = { baseUrl: '', username: '', passwordConfigured: false, autoSyncEnabled: false, autoSyncIntervalMinutes: 60, lastSyncAt: null, lastSyncCount: 0, lastAutoSyncAttemptAt: null, lastAutoSyncError: null }
 
 const emptyProject: ProjectSummary = {
   id: '',
@@ -17,6 +19,12 @@ const emptyProject: ProjectSummary = {
   quantity: 1,
   serialNumbers: [],
   responsibleUsers: [],
+  collaborativeProjectManagers: [],
+  designers: [],
+  canAssignExecutionUnit: false,
+  canManageMainStaffing: false,
+  canAssignDesigners: false,
+  canReadContent: false,
 }
 
 const emptyRoot: DocumentNode = {
@@ -41,25 +49,73 @@ function findNode(root: DocumentNode, id: string): DocumentNode | undefined {
   return undefined
 }
 
-function filterNode(node: DocumentNode, query: string): DocumentNode | undefined {
-  const normalized = query.trim().toLocaleLowerCase('zh-CN')
-  if (!normalized) return node
-  const children = node.children.map((child) => filterNode(child, query)).filter((child): child is DocumentNode => Boolean(child))
-  const ownText = `${node.drawingNumber} ${node.name} ${node.fileName}`.toLocaleLowerCase('zh-CN')
-  if (ownText.includes(normalized) || children.length > 0) return { ...node, children }
+function findNodeByDocumentId(root: DocumentNode, documentId: string): DocumentNode | undefined {
+  if (root.documentId === documentId) return root
+  for (const child of root.children) {
+    const match = findNodeByDocumentId(child, documentId)
+    if (match) return match
+  }
   return undefined
 }
 
-function countNodes(root: DocumentNode): { normal: number; warning: number } {
-  const hasWarning = root.status === 'Missing' || root.status === 'Unregistered'
-  let normal = hasWarning ? 0 : 1
-  let warning = hasWarning ? 1 : 0
-  for (const child of root.children) {
-    const counts = countNodes(child)
-    normal += counts.normal
-    warning += counts.warning
+function isIssue(node: DocumentNode) {
+  return node.status === 'Missing'
+    || node.status === 'Unregistered'
+    || (node.versionAlignment !== undefined && node.versionAlignment !== 'Synced')
+}
+
+function matchesQuery(node: DocumentNode, query: string) {
+  const normalized = query.trim().toLocaleLowerCase('zh-CN')
+  if (!normalized) return true
+  const ownText = `${node.drawingNumber} ${node.name} ${node.fileName}`.toLocaleLowerCase('zh-CN')
+  return ownText.includes(normalized)
+}
+
+function filterNode(node: DocumentNode, query: string, filter: Exclude<DocumentFilter, 'drawing'>): DocumentNode | undefined {
+  const children = node.children.map((child) => filterNode(child, query, filter)).filter((child): child is DocumentNode => Boolean(child))
+  const matchesKind = filter === 'all'
+    || (filter === 'model' && node.kind !== 'Drawing')
+    || (filter === 'issue' && isIssue(node))
+  if ((matchesKind && matchesQuery(node, query)) || children.length > 0) return { ...node, children }
+  return undefined
+}
+
+function managedDocumentNode(document: ManagedDocument): DocumentNode {
+  return {
+    id: `document-${document.id}`,
+    documentId: document.id,
+    drawingNumber: document.drawingNumber,
+    name: document.name,
+    fileName: document.fileName,
+    kind: document.kind,
+    configuration: document.kind === 'Drawing' ? '工程图' : '默认',
+    quantity: 1,
+    version: document.revision,
+    checkedOutBy: document.checkedOutBy,
+    lifecycleState: document.state,
+    status: 'Normal',
+    children: [],
   }
-  return { normal, warning }
+}
+
+function firstMatchingNode(root: DocumentNode | undefined, predicate: (node: DocumentNode) => boolean): DocumentNode | undefined {
+  if (!root) return undefined
+  if (predicate(root)) return root
+  for (const child of root.children) {
+    const match = firstMatchingNode(child, predicate)
+    if (match) return match
+  }
+  return undefined
+}
+
+function countUniqueIssues(root: DocumentNode) {
+  const keys = new Set<string>()
+  const visit = (node: DocumentNode) => {
+    if (isIssue(node)) keys.add(node.documentId ?? node.id)
+    node.children.forEach(visit)
+  }
+  visit(root)
+  return keys.size
 }
 
 function messageFrom(error: unknown): string {
@@ -70,22 +126,30 @@ export function usePdmWorkspace() {
   const projects = ref<ProjectSummary[]>([])
   const projectNumberingOptions = ref<ProjectNumberingOptions>({ organizations: [], projectTypes: [], equipmentTypes: [] })
   const customers = ref<PdmCustomer[]>([])
+  const crmIntegrationSettings = ref<CrmIntegrationSettings>({ ...defaultCrmIntegrationSettings })
   const users = ref<PdmUser[]>([])
-  const systemSettings = ref<PdmSystemSettings>({ vaultRoot: '', releaseRoot: '' })
+  const organizationDirectory = ref<OrganizationDirectory>({ organizations: [], units: [], memberships: [], managers: [], users: [] })
+  const rolePermissionDirectory = ref<RolePermissionDirectory>({ permissions: [], roles: [] })
+  const systemSettings = ref<PdmSystemSettings>({ ...defaultSystemSettings })
   const equipmentTypes = ref<EquipmentTypeDefinition[]>([])
   const project = ref<ProjectSummary>(emptyProject)
+  const projectFolders = ref<ProjectFolder[]>([])
+  const managedDocuments = ref<ManagedDocument[]>([])
+  const documentRelations = ref<DocumentModelDrawingRelation[]>([])
+  const folderTemplate = ref<ProjectFolderTemplateNode[]>([])
   const root = ref<DocumentNode>(emptyRoot)
   const mechanicalBom = ref<BomItem[]>([])
   const electricalBom = ref<BomItem[]>([])
   const releasePackage = ref<ReleasePackageSummary | null>(null)
   const selectedId = ref('')
   const searchQuery = ref('')
-  const previewMode = ref<PreviewMode>('model')
+  const documentFilter = ref<DocumentFilter>('all')
   const serviceOnline = ref(false)
   const authenticated = ref(false)
   const currentUser = ref('')
   const currentUsername = ref('')
   const currentRole = ref('')
+  const currentPermissions = ref<string[]>([])
   const loginPending = ref(false)
   const loginError = ref('')
   const loading = ref(false)
@@ -93,6 +157,10 @@ export function usePdmWorkspace() {
   const ready = ref(false)
   const hasDocuments = ref(false)
   const versionDrawerOpen = ref(false)
+  const whereUsedDrawerOpen = ref(false)
+  const whereUsed = ref<DocumentWhereUsed[]>([])
+  const whereUsedLoading = ref(false)
+  const whereUsedError = ref('')
   const versions = ref<DocumentVersionSummary[]>([])
   const leftVersionId = ref('')
   const rightVersionId = ref('')
@@ -104,20 +172,116 @@ export function usePdmWorkspace() {
   const operationError = ref('')
   const uploadProgress = ref(0)
   const auditEntries = ref<AuditEntry[]>([])
+  const myApprovalTasks = ref<MyApprovalTask[]>([])
+  const editLocks = ref<EditLockSummary[]>([])
+  const projectVersions = ref<ProjectVersionItem[]>([])
+  const projectAuditEntries = ref<AuditEntry[]>([])
   const storageStatus = ref<{ vaultAvailable: boolean; releaseAvailable: boolean } | null>(null)
   let accessToken = ''
   let pendingVersionComparison: { documentId: string; leftVersionId?: string; rightVersionId?: string } | null = null
 
-  const selectedNode = computed(() => findNode(root.value, selectedId.value) ?? root.value)
+  const managedDocumentNodes = computed(() => managedDocuments.value.map(managedDocumentNode))
+  const drawingNodes = computed(() => managedDocumentNodes.value.filter(node => node.kind === 'Drawing'))
+  const selectedNode = computed(() => findNode(root.value, selectedId.value)
+    ?? managedDocumentNodes.value.find(node => node.id === selectedId.value)
+    ?? root.value)
   const selectedDocumentId = computed(() => selectedNode.value.documentId)
-  const filteredTree = computed(() => filterNode(root.value, searchQuery.value) ?? root.value)
-  const nodeCounts = computed(() => ready.value && hasDocuments.value ? countNodes(root.value) : { normal: 0, warning: 0 })
-  const normalCount = computed(() => nodeCounts.value.normal)
-  const warningCount = computed(() => nodeCounts.value.warning)
+  const filteredTree = computed<DocumentNode | undefined>(() => documentFilter.value === 'drawing'
+    ? undefined
+    : filterNode(root.value, searchQuery.value, documentFilter.value))
+  const filteredDrawings = computed(() => drawingNodes.value.filter(node => matchesQuery(node, searchQuery.value)))
+  const documentFilterCounts = computed(() => {
+    const unresolvedIssues = countUniqueIssues(root.value)
+    const model = managedDocuments.value.filter(document => document.kind !== 'Drawing').length
+    const drawing = managedDocuments.value.filter(document => document.kind === 'Drawing').length
+    const unregistered = (() => {
+      const keys = new Set<string>()
+      const visit = (node: DocumentNode) => {
+        if (isIssue(node) && !node.documentId) keys.add(node.id)
+        node.children.forEach(visit)
+      }
+      visit(root.value)
+      return keys.size
+    })()
+    return { all: model + drawing + unregistered, model, drawing, issue: unresolvedIssues }
+  })
+  const relatedNodes = computed(() => {
+    const documentId = selectedNode.value.documentId
+    if (!documentId) return []
+    const relatedIds = new Set<string>()
+    for (const relation of documentRelations.value) {
+      if (relation.modelDocumentId === documentId) relatedIds.add(relation.drawingDocumentId)
+      if (relation.drawingDocumentId === documentId) relatedIds.add(relation.modelDocumentId)
+    }
+    return [...relatedIds].map(id => findNodeByDocumentId(root.value, id)
+      ?? managedDocumentNodes.value.find(node => node.documentId === id))
+      .filter((node): node is DocumentNode => Boolean(node))
+  })
+  const warningCount = computed(() => ready.value && hasDocuments.value ? documentFilterCounts.value.issue : 0)
+  const normalCount = computed(() => ready.value && hasDocuments.value
+    ? Math.max(0, documentFilterCounts.value.all - warningCount.value)
+    : 0)
+  const hasPermission = (code: string) => currentPermissions.value.includes(code)
 
   function selectNode(node: DocumentNode) {
     selectedId.value = node.id
     if (node.documentId) postDesktopMessage('document-selected', { documentId: node.documentId, fileName: node.fileName })
+  }
+
+  function setDocumentFilter(filter: DocumentFilter) {
+    documentFilter.value = filter
+    const current = selectedNode.value
+    const compatible = filter === 'all'
+      || (filter === 'model' && current.kind !== 'Drawing')
+      || (filter === 'drawing' && current.kind === 'Drawing')
+      || (filter === 'issue' && isIssue(current))
+    if (compatible) return
+
+    const resolveCandidate = () => {
+      const related = relatedNodes.value.find(node => filter === 'drawing' ? node.kind === 'Drawing' : filter === 'model' ? node.kind !== 'Drawing' : false)
+      return filter === 'drawing'
+        ? (related && matchesQuery(related, searchQuery.value) ? related : filteredDrawings.value[0])
+        : filter === 'issue'
+          ? firstMatchingNode(filteredTree.value, isIssue)
+          : filter === 'model'
+            ? (related && matchesQuery(related, searchQuery.value) ? related : firstMatchingNode(filteredTree.value, node => node.kind !== 'Drawing'))
+            : current
+    }
+    let candidate = resolveCandidate()
+    if (!candidate && searchQuery.value.trim()) {
+      searchQuery.value = ''
+      candidate = resolveCandidate()
+    }
+    if (candidate) selectNode(candidate)
+  }
+
+  function selectRelatedNode(node: DocumentNode) {
+    documentFilter.value = node.kind === 'Drawing' ? 'drawing' : 'model'
+    selectNode(node)
+  }
+
+  function clearProjectWorkspace() {
+    project.value = emptyProject
+    projectFolders.value = []
+    managedDocuments.value = []
+    documentRelations.value = []
+    root.value = emptyRoot
+    hasDocuments.value = false
+    mechanicalBom.value = []
+    electricalBom.value = []
+    releasePackage.value = null
+    selectedId.value = ''
+    searchQuery.value = ''
+    documentFilter.value = 'all'
+    projectVersions.value = []
+    projectAuditEntries.value = []
+  }
+
+  function selectDocument(documentId: string) {
+    const node = findNodeByDocumentId(root.value, documentId)
+      ?? managedDocumentNodes.value.find(candidate => candidate.documentId === documentId)
+    if (node) selectNode(node)
+    return Boolean(node)
   }
 
   async function openVersionDrawer(left?: string, right?: string) {
@@ -281,6 +445,49 @@ export function usePdmWorkspace() {
     }
   }
 
+  async function withdrawPackage(comment: string) {
+    if (!releasePackage.value) throw new Error('当前没有发布包。')
+    operationPending.value = true
+    operationError.value = ''
+    try {
+      await withdrawReleasePackage(releasePackage.value.id, comment, accessToken)
+      await reload()
+    } catch (error) {
+      operationError.value = messageFrom(error)
+      throw error
+    } finally {
+      operationPending.value = false
+    }
+  }
+
+  async function openWhereUsed() {
+    whereUsedDrawerOpen.value = true
+    whereUsedLoading.value = true
+    whereUsedError.value = ''
+    whereUsed.value = []
+    try {
+      const documentId = selectedDocumentId.value
+      if (!documentId) throw new Error('该引用尚未登记到PDM。')
+      whereUsed.value = await listDocumentWhereUsed(documentId, accessToken)
+    } catch (error) {
+      whereUsedError.value = messageFrom(error)
+    } finally {
+      whereUsedLoading.value = false
+    }
+  }
+
+  async function obsoleteSelectedDocument(comment: string) {
+    const documentId = selectedDocumentId.value
+    if (!documentId) throw new Error('该引用尚未登记到PDM。')
+    operationPending.value = true
+    try {
+      await obsoleteDocumentRequest(documentId, comment, accessToken)
+      await reload()
+    } finally {
+      operationPending.value = false
+    }
+  }
+
   async function decideApprovalTask(taskId: string, decision: 'Approved' | 'Rejected', comment: string) {
     operationPending.value = true
     operationError.value = ''
@@ -299,6 +506,66 @@ export function usePdmWorkspace() {
     auditEntries.value = await listAudit(accessToken)
   }
 
+  async function requestMyApprovalTasks() {
+    try {
+      return await listMyApprovalTasks(accessToken)
+    } catch (error) {
+      if (error instanceof PdmApiError && error.status === 404) return []
+      throw error
+    }
+  }
+
+  async function requestEditLocks() {
+    try {
+      return await listEditLocks(accessToken)
+    } catch (error) {
+      if (error instanceof PdmApiError && error.status === 404) return []
+      throw error
+    }
+  }
+
+  async function loadMyApprovalTasks() {
+    [myApprovalTasks.value, editLocks.value] = await Promise.all([requestMyApprovalTasks(), requestEditLocks()])
+  }
+
+  async function requestEditLockRelease(documentId: string, reason: string) {
+    operationPending.value = true
+    try { await requestEditLockReleaseRequest(documentId, reason, accessToken); editLocks.value = await requestEditLocks() }
+    finally { operationPending.value = false }
+  }
+
+  async function forceReleaseEditLock(documentId: string, reason: string) {
+    operationPending.value = true
+    try { await forceReleaseEditLockRequest(documentId, reason, accessToken); editLocks.value = await requestEditLocks() }
+    finally { operationPending.value = false }
+  }
+
+  async function loadProjectVersions() {
+    if (!project.value.id) return
+    try {
+      projectVersions.value = await listProjectVersions(project.value.id, accessToken)
+    } catch (error) {
+      if (error instanceof PdmApiError && error.status === 404) {
+        projectVersions.value = []
+        return
+      }
+      throw error
+    }
+  }
+
+  async function loadProjectAuditEntries() {
+    if (!project.value.id) return
+    try {
+      projectAuditEntries.value = await listProjectAudit(project.value.id, accessToken)
+    } catch (error) {
+      if (error instanceof PdmApiError && error.status === 404) {
+        projectAuditEntries.value = []
+        return
+      }
+      throw error
+    }
+  }
+
   async function loadStorageStatus() {
     storageStatus.value = await getStorageStatus(project.value.id, accessToken)
   }
@@ -310,6 +577,7 @@ export function usePdmWorkspace() {
     currentUser.value = session.displayName || session.username
     currentUsername.value = session.username
     currentRole.value = session.role
+    currentPermissions.value = session.permissions ?? []
     window.sessionStorage.setItem(sessionKey, JSON.stringify(session))
   }
 
@@ -320,19 +588,21 @@ export function usePdmWorkspace() {
     currentUser.value = ''
     currentUsername.value = ''
     currentRole.value = ''
+    currentPermissions.value = []
     ready.value = false
     projects.value = []
     projectNumberingOptions.value = { organizations: [], projectTypes: [], equipmentTypes: [] }
     customers.value = []
+    crmIntegrationSettings.value = { ...defaultCrmIntegrationSettings }
     users.value = []
-    systemSettings.value = { vaultRoot: '', releaseRoot: '' }
+    organizationDirectory.value = { organizations: [], units: [], memberships: [], managers: [], users: [] }
+    rolePermissionDirectory.value = { permissions: [], roles: [] }
+    systemSettings.value = { ...defaultSystemSettings }
     equipmentTypes.value = []
-    project.value = emptyProject
-    root.value = emptyRoot
-    hasDocuments.value = false
-    mechanicalBom.value = []
-    electricalBom.value = []
-    releasePackage.value = null
+    folderTemplate.value = []
+    clearProjectWorkspace()
+    myApprovalTasks.value = []
+    editLocks.value = []
     window.sessionStorage.removeItem(sessionKey)
   }
 
@@ -341,36 +611,33 @@ export function usePdmWorkspace() {
     loading.value = true
     loadError.value = ''
     try {
-      const [loadedProjects, loadedOptions, loadedCustomers] = await Promise.all([
+      const [loadedProjects, loadedOptions, loadedCustomers, loadedTasks, loadedEditLocks, loadedDirectory] = await Promise.all([
         listProjects(accessToken),
         getProjectNumberingOptions(accessToken),
         listCustomers(accessToken),
+        requestMyApprovalTasks(),
+        requestEditLocks(),
+        getOrganizationDirectory(accessToken),
       ])
       projects.value = loadedProjects
       projectNumberingOptions.value = loadedOptions
       customers.value = loadedCustomers
-      if (currentRole.value === 'Administrator') {
-        const [loadedUsers, loadedSettings, loadedEquipmentTypes] = await Promise.all([
-          listUsers(accessToken), getSystemSettings(accessToken), listEquipmentTypes(accessToken),
-        ])
-        users.value = loadedUsers
-        systemSettings.value = loadedSettings
-        equipmentTypes.value = loadedEquipmentTypes
-      } else {
-        users.value = []
-        equipmentTypes.value = []
-      }
+      myApprovalTasks.value = loadedTasks
+      editLocks.value = loadedEditLocks
+      organizationDirectory.value = loadedDirectory
+      users.value = loadedDirectory.users
+      if (hasPermission('settings.storage.manage')) {
+        [systemSettings.value, equipmentTypes.value] = await Promise.all([getSystemSettings(accessToken), listEquipmentTypes(accessToken)])
+      } else equipmentTypes.value = []
+      crmIntegrationSettings.value = hasPermission('settings.customer.manage')
+        ? await getCrmIntegrationSettings(accessToken)
+        : { ...defaultCrmIntegrationSettings }
+      folderTemplate.value = hasPermission('settings.folder.manage') ? await listFolderTemplate(accessToken) : []
+      rolePermissionDirectory.value = hasPermission('system.role.view') ? await getRolePermissionDirectory(accessToken) : { permissions: [], roles: [] }
       const selectedProject = projects.value.find(candidate => candidate.id === projectId)
-        ?? projects.value.find(candidate => candidate.id === project.value.id)
-        ?? projects.value.find(candidate => candidate.stage === '进行中')
-        ?? projects.value[0]
+        ?? (project.value.id ? projects.value.find(candidate => candidate.id === project.value.id) : undefined)
       if (!selectedProject) {
-        project.value = emptyProject
-        root.value = emptyRoot
-        hasDocuments.value = false
-        mechanicalBom.value = []
-        electricalBom.value = []
-        releasePackage.value = null
+        clearProjectWorkspace()
         ready.value = true
         serviceOnline.value = true
         return
@@ -378,6 +645,9 @@ export function usePdmWorkspace() {
 
       const data = await loadProjectWorkspace(selectedProject.id, accessToken)
       project.value = data.project
+      projectFolders.value = data.folders
+      managedDocuments.value = data.documents
+      documentRelations.value = data.documentRelations
       root.value = data.root
       hasDocuments.value = data.hasDocuments
       mechanicalBom.value = data.mechanicalBom
@@ -389,7 +659,7 @@ export function usePdmWorkspace() {
       if (pendingVersionComparison) {
         const request = pendingVersionComparison
         pendingVersionComparison = null
-        selectedId.value = request.documentId
+        selectDocument(request.documentId)
         await openVersionDrawer(request.leftVersionId, request.rightVersionId)
       }
     } catch (error) {
@@ -410,7 +680,7 @@ export function usePdmWorkspace() {
     operationError.value = ''
     try {
       const created = await createProjectRequest(input, accessToken)
-      await reload(created.id)
+      await reload()
       return created
     } catch (error) {
       operationError.value = messageFrom(error)
@@ -425,8 +695,23 @@ export function usePdmWorkspace() {
     operationError.value = ''
     try {
       const created = await createSubprojectRequest(parentProjectId, input, accessToken)
-      await reload(created.id)
+      await reload()
       return created
+    } catch (error) {
+      operationError.value = messageFrom(error)
+      throw error
+    } finally {
+      operationPending.value = false
+    }
+  }
+
+  async function deleteProject(projectId: string) {
+    operationPending.value = true
+    operationError.value = ''
+    try {
+      await deleteProjectRequest(projectId, accessToken)
+      if (project.value.id === projectId) clearProjectWorkspace()
+      await reload()
     } catch (error) {
       operationError.value = messageFrom(error)
       throw error
@@ -449,26 +734,98 @@ export function usePdmWorkspace() {
     }
   }
 
-  async function saveCustomer(customer: Partial<PdmCustomer> & Pick<PdmCustomer, 'code' | 'name' | 'isActive'>) {
+  async function saveCrmIntegrationSettings(input: UpdateCrmIntegrationInput) {
     operationPending.value = true
     try {
-      const saved = await saveCustomerRequest(customer, accessToken)
-      await reload(project.value.id)
-      return saved
+      crmIntegrationSettings.value = await updateCrmIntegrationSettingsRequest(input, accessToken)
+      return crmIntegrationSettings.value
     } finally {
       operationPending.value = false
     }
   }
 
-  async function updateProjectResponsibles(projectId: string, usernames: string[]) {
+  async function testCrmIntegration(): Promise<CrmConnectionTestResult> {
     operationPending.value = true
     try {
-      const saved = await updateProjectResponsiblesRequest(projectId, usernames, accessToken)
-      await reload(project.value.id || projectId)
-      return saved
+      return await testCrmIntegrationRequest(accessToken)
     } finally {
       operationPending.value = false
     }
+  }
+
+  async function syncCrmCustomers(): Promise<CrmCustomerSyncResult> {
+    operationPending.value = true
+    try {
+      const result = await syncCrmCustomersRequest(accessToken)
+      customers.value = result.customers
+      crmIntegrationSettings.value = result.settings
+      return result
+    } finally {
+      operationPending.value = false
+    }
+  }
+
+  async function saveProjectOrganization(input: SaveProjectOrganizationInput) {
+    operationPending.value = true
+    try {
+      const saved = await saveProjectOrganizationRequest(input, accessToken)
+      await reload(project.value.id)
+      return saved
+    } finally { operationPending.value = false }
+  }
+
+  async function saveOrganizationUnit(input: SaveOrganizationUnitInput) {
+    operationPending.value = true
+    try {
+      const saved = await saveOrganizationUnitRequest(input, accessToken)
+      organizationDirectory.value = await getOrganizationDirectory(accessToken)
+      users.value = organizationDirectory.value.users
+      return saved
+    } finally { operationPending.value = false }
+  }
+
+  async function updateOrganizationMemberships(username: string, unitIds: string[], primaryUnitId: string) {
+    operationPending.value = true
+    try {
+      organizationDirectory.value = await updateOrganizationMembershipsRequest(username, unitIds, primaryUnitId, accessToken)
+      users.value = organizationDirectory.value.users
+      return organizationDirectory.value
+    } finally { operationPending.value = false }
+  }
+
+  async function updateOrganizationUnitManagers(unitId: string, primaryManager: string, collaborativeManagers: string[]) {
+    operationPending.value = true
+    try {
+      organizationDirectory.value = await updateOrganizationUnitManagersRequest(unitId, primaryManager, collaborativeManagers, accessToken)
+      return organizationDirectory.value
+    } finally { operationPending.value = false }
+  }
+
+  async function updateProjectExecutionUnit(projectId: string, executionUnitId: string) {
+    operationPending.value = true
+    try {
+      const saved = await updateProjectExecutionUnitRequest(projectId, executionUnitId, accessToken)
+      await reload(project.value.id)
+      return saved
+    } finally { operationPending.value = false }
+  }
+
+  async function updateMainProjectStaffing(projectId: string, input: MainProjectStaffingInput) {
+    operationPending.value = true
+    try {
+      const saved = await updateMainProjectStaffingRequest(projectId, input, accessToken)
+      await reload(project.value.id)
+      return saved
+    } finally { operationPending.value = false }
+  }
+
+  async function updateChildProjectDesigners(projectId: string, designers: string[]) {
+    operationPending.value = true
+    try {
+      const saved = await updateChildProjectDesignersRequest(projectId, designers, accessToken)
+      await reload(project.value.id)
+      return saved
+    } finally { operationPending.value = false }
   }
 
   async function saveSystemSettings(settings: PdmSystemSettings) {
@@ -494,16 +851,50 @@ export function usePdmWorkspace() {
     }
   }
 
+  async function updateProjectFolderPermissions(folderId: string, permissions: FolderPermissionRule[]) {
+    if (!project.value.id) throw new Error('请先进入项目。')
+    operationPending.value = true
+    try {
+      projectFolders.value = await updateProjectFolderPermissionsRequest(project.value.id, folderId, permissions, accessToken)
+      return projectFolders.value
+    } finally { operationPending.value = false }
+  }
+
+  async function saveFolderTemplate(nodes: ProjectFolderTemplateNode[]) {
+    operationPending.value = true
+    try {
+      folderTemplate.value = await saveFolderTemplateRequest(nodes, accessToken)
+      return folderTemplate.value
+    } finally { operationPending.value = false }
+  }
+
+  async function updateRolePermissions(role: string, permissions: string[]) {
+    operationPending.value = true
+    try {
+      rolePermissionDirectory.value = await updateRolePermissionsRequest(role, permissions, accessToken)
+      if (role === currentRole.value) {
+        currentPermissions.value = rolePermissionDirectory.value.roles.find(item => item.role === role)?.permissions ?? []
+        const stored = restoreSession()
+        if (stored) applySession({ ...stored, permissions: currentPermissions.value })
+      }
+      return rolePermissionDirectory.value
+    } finally { operationPending.value = false }
+  }
+
   async function selectProject(projectId: string) {
     await reload(projectId)
   }
 
-  async function login(username: string, password: string, rememberCredentials = false) {
+  function closeProject() {
+    clearProjectWorkspace()
+  }
+
+  async function login(username: string, password: string, rememberUsername = false) {
     loginPending.value = true
     loginError.value = ''
     try {
       const session = await apiLogin(username, password)
-      postDesktopMessage(rememberCredentials ? 'credentials-save' : 'credentials-clear', { username: username.trim(), password })
+      postDesktopMessage(rememberUsername ? 'credentials-save' : 'credentials-clear', { username: username.trim() })
       applySession(session)
       await reload()
     } catch (error) {
@@ -568,23 +959,35 @@ export function usePdmWorkspace() {
     projects,
     projectNumberingOptions,
     customers,
+    crmIntegrationSettings,
     users,
+    organizationDirectory,
+    rolePermissionDirectory,
     systemSettings,
     equipmentTypes,
     project,
+    projectFolders,
+    managedDocuments,
+    documentRelations,
+    folderTemplate,
     root,
     releasePackage,
     mechanicalBom,
     electricalBom,
     selectedNode,
     filteredTree,
+    filteredDrawings,
+    documentFilter,
+    documentFilterCounts,
+    relatedNodes,
     searchQuery,
-    previewMode,
     serviceOnline,
     authenticated,
     currentUser,
     currentUsername,
     currentRole,
+    currentPermissions,
+    hasPermission,
     loginPending,
     loginError,
     loading,
@@ -594,6 +997,10 @@ export function usePdmWorkspace() {
     normalCount,
     warningCount,
     versionDrawerOpen,
+    whereUsedDrawerOpen,
+    whereUsed,
+    whereUsedLoading,
+    whereUsedError,
     versions,
     leftVersionId,
     rightVersionId,
@@ -605,16 +1012,36 @@ export function usePdmWorkspace() {
     operationError,
     uploadProgress,
     auditEntries,
+    myApprovalTasks,
+    editLocks,
+    projectVersions,
+    projectAuditEntries,
     storageStatus,
     createProject,
     createSubproject,
+    deleteProject,
     updateOrganizationCounters,
-    saveCustomer,
-    updateProjectResponsibles,
+    saveCrmIntegrationSettings,
+    testCrmIntegration,
+    syncCrmCustomers,
+    saveProjectOrganization,
+    saveOrganizationUnit,
+    updateOrganizationMemberships,
+    updateOrganizationUnitManagers,
+    updateProjectExecutionUnit,
+    updateMainProjectStaffing,
+    updateChildProjectDesigners,
     saveSystemSettings,
     saveEquipmentType,
+    updateProjectFolderPermissions,
+    saveFolderTemplate,
+    updateRolePermissions,
     selectProject,
+    closeProject,
     selectNode,
+    setDocumentFilter,
+    selectRelatedNode,
+    selectDocument,
     openDocument,
     previewDocument,
     openVersionDrawer,
@@ -628,8 +1055,16 @@ export function usePdmWorkspace() {
     createPackage,
     uploadPackageFile,
     submitPackage,
+    withdrawPackage,
+    openWhereUsed,
+    obsoleteSelectedDocument,
     decideApprovalTask,
     loadAuditEntries,
+    loadMyApprovalTasks,
+    requestEditLockRelease,
+    forceReleaseEditLock,
+    loadProjectVersions,
+    loadProjectAuditEntries,
     loadStorageStatus,
     login,
     logout,

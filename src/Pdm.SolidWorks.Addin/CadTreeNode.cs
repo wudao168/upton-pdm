@@ -38,6 +38,8 @@ internal sealed class CadTreeNode
 
     public Guid? DocumentId { get; set; }
 
+    public Guid? RelatedModelDocumentId { get; set; }
+
     public string InstancePath { get; set; } = string.Empty;
 
     public string ComponentSelectionName { get; set; } = string.Empty;
@@ -47,6 +49,16 @@ internal sealed class CadTreeNode
     public string FullPath { get; set; } = string.Empty;
 
     public string DisplayName { get; set; } = string.Empty;
+
+    public string DrawingNumber { get; set; } = string.Empty;
+
+    public string Description { get; set; } = string.Empty;
+
+    public string Material { get; set; } = string.Empty;
+
+    public string LifecycleState { get; set; } = "Work";
+
+    public DateTime? UpdatedAt { get; set; }
 
     public CadDocumentKind Kind { get; set; }
 
@@ -68,6 +80,16 @@ internal sealed class CadTreeNode
 
     public string CheckedOutBy { get; set; }
 
+    public DateTime? CheckedOutAt { get; set; }
+
+    public Guid? CheckoutSessionId { get; set; }
+
+    public string CheckoutMachine { get; set; } = string.Empty;
+
+    public DateTime? CheckoutLastHeartbeatAt { get; set; }
+
+    public bool CheckoutSessionLost { get; set; }
+
     public CadWorkState WorkState { get; set; }
 
     public string LatestVersionSha256 { get; set; } = string.Empty;
@@ -75,6 +97,8 @@ internal sealed class CadTreeNode
     public string LatestStoredSha256 { get; set; } = string.Empty;
 
     public bool IsModifiedInSolidWorks { get; set; }
+
+    public bool IsRenamePendingSave { get; set; }
 
     public bool IsHistoricalPreview { get; set; }
 
