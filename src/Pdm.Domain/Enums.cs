@@ -144,8 +144,30 @@ public enum BomChangeKind
 
 public enum BomKind
 {
-    Mechanical,
-    Electrical
+    Mechanical = 0,
+    Electrical = 1,
+    Standard = 2,
+    NonStandard = 3,
+    Unclassified = 4
+}
+
+public enum BomVersionState
+{
+    Draft = 0,
+    InReview = 1,
+    Released = 2,
+    Obsolete = 3
+}
+
+public enum CadPropertyWritebackStatus
+{
+    Pending = 0,
+    InProgress = 1,
+    Succeeded = 2,
+    Conflict = 3,
+    Failed = 4,
+    Superseded = 5,
+    PendingSave = 6
 }
 
 public enum ApprovalStage

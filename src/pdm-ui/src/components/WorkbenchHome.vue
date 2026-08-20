@@ -5,10 +5,12 @@ import type { DocumentNode, ProjectSummary, ReleasePackageSummary } from '../typ
 defineProps<{
   project: ProjectSummary
   selected: DocumentNode
+  currentUsername?: string
   hasDocuments: boolean
   documentCount: number
   warningCount: number
-  mechanicalCount: number
+  standardCount: number
+  nonStandardCount: number
   electricalCount: number
   releasePackage: ReleasePackageSummary | null
 }>()
@@ -18,23 +20,15 @@ const emit = defineEmits<{ documents: []; bom: [] }>()
 
 <template>
   <section class="pdm-workbench" aria-label="工作台主页面">
-    <header class="pdm-project-overview-heading">
-      <div><h2>项目概览</h2><p>汇总图档、BOM、发布状态和项目存储位置。</p></div>
-      <div class="pdm-page-actions">
-        <button type="button" class="pdm-secondary-action" @click="emit('bom')"><Boxes :size="16" />查看BOM</button>
-        <button type="button" class="pdm-primary-action" @click="emit('documents')"><FolderTree :size="16" />进入项目图档</button>
-      </div>
-    </header>
-
     <div class="pdm-workbench-grid">
-      <article class="pdm-panel pdm-stat-card">
+      <button type="button" class="pdm-panel pdm-stat-card pdm-stat-card-action" aria-label="进入项目图档" @click="emit('documents')">
         <span class="is-blue"><FolderTree :size="19" /></span>
         <div><small>项目图档</small><strong>{{ documentCount }}</strong><em>{{ warningCount ? `${warningCount} 个异常引用` : '引用结构正常' }}</em></div>
-      </article>
-      <article class="pdm-panel pdm-stat-card">
+      </button>
+      <button type="button" class="pdm-panel pdm-stat-card pdm-stat-card-action" aria-label="进入BOM数据" @click="emit('bom')">
         <span class="is-green"><Boxes :size="19" /></span>
-        <div><small>BOM数据</small><strong>{{ mechanicalCount + electricalCount }}</strong><em>机械 {{ mechanicalCount }} · 电气 {{ electricalCount }}</em></div>
-      </article>
+        <div><small>BOM数据</small><strong>{{ standardCount + nonStandardCount + electricalCount }}</strong><em>标准 {{ standardCount }} · 非标 {{ nonStandardCount }} · 电气 {{ electricalCount }}</em></div>
+      </button>
       <article class="pdm-panel pdm-stat-card">
         <span class="is-orange"><PackageCheck :size="19" /></span>
         <div><small>当前发布包</small><strong class="is-code">{{ releasePackage?.number || '暂无' }}</strong><em>{{ releasePackage?.state || '尚未创建发布包' }}</em></div>
@@ -47,7 +41,7 @@ const emit = defineEmits<{ documents: []; bom: [] }>()
           <div><strong>{{ selected.drawingNumber }} · {{ selected.name }}</strong><small>{{ selected.fileName }}</small></div>
           <dl>
             <div><dt>工作版本</dt><dd>{{ selected.version }}</dd></div>
-            <div><dt>状态</dt><dd>{{ selected.checkedOutBy ? `正在编辑 · ${selected.checkedOutBy}` : '可用' }}</dd></div>
+            <div><dt>状态</dt><dd>{{ !selected.checkedOutBy ? '正常' : selected.checkedOutBy.toLocaleLowerCase('zh-CN') === (currentUsername || '').toLocaleLowerCase('zh-CN') ? '可编辑' : `${selected.checkedOutBy}编辑中` }}</dd></div>
             <div><dt>配置</dt><dd>{{ selected.configuration }}</dd></div>
           </dl>
         </div>

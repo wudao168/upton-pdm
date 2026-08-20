@@ -22,7 +22,8 @@ public sealed class JwtTokenIssuer(IOptions<AuthenticationOptions> options, Time
             new Claim(JwtRegisteredClaimNames.Sub, account.Id.ToString()),
             new Claim(ClaimTypes.Name, account.Username),
             new Claim("display_name", account.DisplayName),
-            new Claim(ClaimTypes.Role, account.Role.ToString())
+            new Claim(ClaimTypes.Role, account.Role.ToString()),
+            new Claim("token_version", account.TokenVersion.ToString(System.Globalization.CultureInfo.InvariantCulture))
         };
         var token = new JwtSecurityToken(
             settings.Issuer,

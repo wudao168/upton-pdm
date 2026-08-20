@@ -1,19 +1,25 @@
+using System.Text.Json;
 using Upton.Pdm.Domain;
 
 namespace Upton.Pdm.Application;
 
 public sealed class CrmCustomerIntegrationService(
     IPdmRepository repository,
-    ICrmCustomerClient crmClient,
-    ICrmCredentialProtector credentialProtector,
+    IMaterialRepository materials,
+    IU9OpenApiClient u9Client,
+    IU9SecretProtector secretProtector,
     TimeProvider timeProvider)
 {
     private static readonly SemaphoreSlim SyncGate = new(1, 1);
+    private const int CustomerPageSize = 1000;
+    private const int MaximumCustomerPages = 100;
 
-    public async Task<CrmIntegrationSettings> GetSettingsAsync(UserRole role, CancellationToken cancellationToken)
+    public async Task<CrmIntegrationSettings> GetSettingsAsync(string actor, UserRole role, CancellationToken cancellationToken)
     {
-        await RequirePermissionAsync(role, cancellationToken);
-        return ToSettings(await repository.GetCrmIntegrationConfigurationAsync(cancellationToken));
+        await RequirePermissionAsync(actor, role, cancellationToken);
+        var schedule = await repository.GetCrmIntegrationConfigurationAsync(cancellationToken);
+        var u9Configuration = await materials.GetIntegrationConfigurationAsync(cancellationToken);
+        return ToSettings(schedule, u9Configuration);
     }
 
     public async Task<CrmIntegrationSettings> UpdateSettingsAsync(
@@ -26,37 +32,25 @@ public sealed class CrmCustomerIntegrationService(
         UserRole role,
         CancellationToken cancellationToken)
     {
-        await RequirePermissionAsync(role, cancellationToken);
-        var normalizedBaseUrl = NormalizeBaseUrl(baseUrl);
-        var normalizedUsername = username?.Trim() ?? string.Empty;
-        if (normalizedUsername.Length is < 1 or > 100)
-            throw new PdmRuleException("CRM集成账号不能为空且不能超过100个字符。");
-
+        await RequirePermissionAsync(actor, role, cancellationToken);
+        var u9Configuration = await RequireU9ConfigurationAsync(cancellationToken);
         var existing = await repository.GetCrmIntegrationConfigurationAsync(cancellationToken);
-        var passwordCiphertext = existing.PasswordCiphertext;
-        if (!string.IsNullOrEmpty(password))
-        {
-            if (password.Length > 500) throw new PdmRuleException("CRM集成密码不能超过500个字符。");
-            passwordCiphertext = credentialProtector.Protect(password);
-        }
-        if (string.IsNullOrWhiteSpace(passwordCiphertext))
-            throw new PdmRuleException("首次配置CRM连接时必须填写集成账号密码。");
         if (autoSyncIntervalMinutes is < 5 or > 10_080)
-            throw new PdmRuleException("CRM自动同步间隔必须在5分钟到7天之间。");
+            throw new PdmRuleException("U9C客户自动同步间隔必须在5分钟到7天之间。");
 
         var saved = await repository.SaveCrmIntegrationConfigurationAsync(
             existing with
             {
-                BaseUrl = normalizedBaseUrl,
-                Username = normalizedUsername,
-                PasswordCiphertext = passwordCiphertext,
+                BaseUrl = u9Configuration.BaseUrl,
+                Username = u9Configuration.UserCode,
+                PasswordCiphertext = string.Empty,
                 AutoSyncEnabled = autoSyncEnabled,
                 AutoSyncIntervalMinutes = autoSyncIntervalMinutes
             },
             actor,
             cancellationToken);
-        await AuditAsync(actor, "crm.integration.update", "CrmIntegration", "crm", $"地址：{saved.BaseUrl}；账号：{saved.Username}；自动同步：{(saved.AutoSyncEnabled ? "启用" : "关闭")}；间隔：{saved.AutoSyncIntervalMinutes}分钟", cancellationToken);
-        return ToSettings(saved);
+        await AuditAsync(actor, "u9.customer-schedule.update", "U9CustomerIntegration", "u9c", $"复用U9C配置：{u9Configuration.BaseUrl}；账号：{u9Configuration.UserCode}；自动同步：{(saved.AutoSyncEnabled ? "启用" : "关闭")}；间隔：{saved.AutoSyncIntervalMinutes}分钟", cancellationToken);
+        return ToSettings(saved, u9Configuration);
     }
 
     public async Task<CrmConnectionTestResult> TestConnectionAsync(
@@ -64,10 +58,10 @@ public sealed class CrmCustomerIntegrationService(
         UserRole role,
         CancellationToken cancellationToken)
     {
-        await RequirePermissionAsync(role, cancellationToken);
+        await RequirePermissionAsync(actor, role, cancellationToken);
         var batch = await LoadCustomersAsync(cancellationToken);
         var testedAt = timeProvider.GetUtcNow();
-        await AuditAsync(actor, "crm.connection.test", "CrmIntegration", "crm", $"连接成功；可读取客户{batch.Customers.Count}个；跳过无效数据{batch.SkippedCount}条", cancellationToken);
+        await AuditAsync(actor, "u9.customer.connection.test", "U9CustomerIntegration", "u9c", $"U9C客户参照连接成功；可读取客户{batch.Customers.Count}个；跳过无效数据{batch.SkippedCount}条", cancellationToken);
         return new(batch.Customers.Count, batch.SkippedCount, testedAt);
     }
 
@@ -76,7 +70,7 @@ public sealed class CrmCustomerIntegrationService(
         UserRole role,
         CancellationToken cancellationToken)
     {
-        await RequirePermissionAsync(role, cancellationToken);
+        await RequirePermissionAsync(actor, role, cancellationToken);
         await SyncGate.WaitAsync(cancellationToken);
         try
         {
@@ -107,7 +101,7 @@ public sealed class CrmCustomerIntegrationService(
 
             try
             {
-                var result = await SyncCustomersUnlockedAsync("system:crm-auto-sync", cancellationToken, configuration);
+                var result = await SyncCustomersUnlockedAsync("system:u9-customer-auto-sync", cancellationToken, configuration);
                 await repository.RecordCrmAutomaticSyncAttemptAsync(now, null, cancellationToken);
                 return result;
             }
@@ -136,65 +130,104 @@ public sealed class CrmCustomerIntegrationService(
         var batch = await LoadCustomersAsync(configuration, cancellationToken);
         var syncedAt = timeProvider.GetUtcNow();
         var savedCustomers = await repository.ApplyCrmCustomerSyncAsync(batch.Customers, syncedAt, cancellationToken);
-        var settings = ToSettings(await repository.GetCrmIntegrationConfigurationAsync(cancellationToken));
-        await AuditAsync(actor, "crm.customer.sync", nameof(PdmCustomer), "crm", $"从CRM同步客户{batch.Customers.Count}个；跳过无效数据{batch.SkippedCount}条", cancellationToken);
+        var u9Configuration = await materials.GetIntegrationConfigurationAsync(cancellationToken);
+        var settings = ToSettings(await repository.GetCrmIntegrationConfigurationAsync(cancellationToken), u9Configuration);
+        await AuditAsync(actor, "u9.customer.sync", nameof(PdmCustomer), "u9c", $"从U9C同步客户{batch.Customers.Count}个；跳过无效数据{batch.SkippedCount}条", cancellationToken);
         return new(batch.Customers.Count, batch.SkippedCount, syncedAt, settings, savedCustomers);
     }
 
     private async Task<CrmCustomerBatch> LoadCustomersAsync(CancellationToken cancellationToken) =>
         await LoadCustomersAsync(null, cancellationToken);
 
-    private async Task<CrmCustomerBatch> LoadCustomersAsync(CrmIntegrationConfiguration? savedConfiguration, CancellationToken cancellationToken)
+    private async Task<CrmCustomerBatch> LoadCustomersAsync(CrmIntegrationConfiguration? _, CancellationToken cancellationToken)
     {
-        var configuration = savedConfiguration ?? await repository.GetCrmIntegrationConfigurationAsync(cancellationToken);
-        if (string.IsNullOrWhiteSpace(configuration.BaseUrl)
-            || string.IsNullOrWhiteSpace(configuration.Username)
-            || string.IsNullOrWhiteSpace(configuration.PasswordCiphertext))
-            throw new PdmRuleException("请先保存完整的CRM连接配置。");
-
-        string password;
+        var configuration = await RequireU9ConfigurationAsync(cancellationToken);
+        string clientSecret;
         try
         {
-            password = credentialProtector.Unprotect(configuration.PasswordCiphertext);
+            clientSecret = secretProtector.Unprotect(configuration.ClientSecretCiphertext);
         }
         catch (Exception exception) when (exception is not PdmRuleException)
         {
-            throw new PdmRuleException("CRM连接密码无法解密，请重新输入并保存密码。");
+            throw new PdmRuleException("U9C应用密钥无法解密，请到料品管理的U9C配置中重新保存。");
         }
-        return await crmClient.ListCustomersAsync(configuration.BaseUrl, configuration.Username, password, cancellationToken);
+        var authentication = await u9Client.AuthenticateAsync(new(
+            configuration.BaseUrl,
+            configuration.EnterpriseCode,
+            configuration.OrganizationCode,
+            configuration.UserCode,
+            configuration.ClientId,
+            clientSecret), cancellationToken);
+
+        var customers = new Dictionary<string, CrmCustomerRecord>(StringComparer.OrdinalIgnoreCase);
+        var skippedCount = 0;
+        for (var pageIndex = 0; pageIndex < MaximumCustomerPages; pageIndex++)
+        {
+            var payload = JsonSerializer.Serialize(new
+            {
+                ReferenceCode = "Customer",
+                ReferenceEntityFullName = "UFIDA.U9.CBO.SCM.Customer.Customer",
+                ReferenceDefaultFilter = string.Empty,
+                Transclude = string.Empty,
+                TargetOrgCode = configuration.OrganizationCode,
+                PageIndex = pageIndex,
+                PageSize = CustomerPageSize,
+                Filter = string.Empty,
+                FilterObjectXML = string.Empty
+            });
+            var page = await u9Client.QueryCustomerReferencesAsync(
+                configuration.BaseUrl,
+                authentication.Token,
+                payload,
+                cancellationToken);
+            if (page.ResponseCode != 0)
+                throw new PdmRuleException($"U9C客户参照查询失败（ResCode={page.ResponseCode}）：{page.ResponseMessage ?? "未返回错误说明"}。");
+
+            skippedCount += Math.Max(0, page.RawCount - page.Customers.Count);
+            var countBeforePage = customers.Count;
+            foreach (var customer in page.Customers)
+            {
+                var code = customer.Code.Trim();
+                var name = customer.Name.Trim();
+                if (!customers.TryAdd(code, new(code, name))) skippedCount++;
+            }
+            if (page.RawCount == 0 || page.RawCount < CustomerPageSize || customers.Count == countBeforePage) break;
+        }
+        if (customers.Count == 0)
+            throw new PdmRuleException("U9C客户参照未返回任何有效的客户编码和名称，本次未更新PDM客户目录。");
+        return new(customers.Values.OrderBy(customer => customer.Code, StringComparer.OrdinalIgnoreCase).ToArray(), skippedCount);
     }
 
-    private async Task RequirePermissionAsync(UserRole role, CancellationToken cancellationToken)
+    private async Task<U9MaterialIntegrationConfiguration> RequireU9ConfigurationAsync(CancellationToken cancellationToken)
     {
-        if (!await repository.HasRolePermissionAsync(role, PermissionCodes.CustomerSettingsManage, cancellationToken))
-            throw new UnauthorizedAccessException("当前用户没有配置CRM客户同步的权限。");
+        var configuration = await materials.GetIntegrationConfigurationAsync(cancellationToken);
+        if (string.IsNullOrWhiteSpace(configuration.BaseUrl)
+            || string.IsNullOrWhiteSpace(configuration.EnterpriseCode)
+            || string.IsNullOrWhiteSpace(configuration.OrganizationCode)
+            || string.IsNullOrWhiteSpace(configuration.UserCode)
+            || string.IsNullOrWhiteSpace(configuration.ClientId)
+            || string.IsNullOrWhiteSpace(configuration.ClientSecretCiphertext))
+            throw new PdmRuleException("请先到料品管理的U9C配置中保存完整的OAuth连接参数。");
+        return configuration;
+    }
+
+    private async Task RequirePermissionAsync(string actor, UserRole role, CancellationToken cancellationToken)
+    {
+        if (!await repository.HasUserPermissionAsync(actor, role, PermissionCodes.CustomerSettingsManage, cancellationToken))
+            throw new UnauthorizedAccessException("当前用户没有配置U9C客户同步的权限。");
     }
 
     private Task AuditAsync(string actor, string action, string entityType, string entityId, string detail, CancellationToken cancellationToken) =>
         repository.AppendAuditAsync(new AuditEntry(Guid.NewGuid(), timeProvider.GetUtcNow(), actor, action, entityType, entityId, detail), cancellationToken);
 
-    private static CrmIntegrationSettings ToSettings(CrmIntegrationConfiguration configuration) => new(
+    private static CrmIntegrationSettings ToSettings(CrmIntegrationConfiguration schedule, U9MaterialIntegrationConfiguration configuration) => new(
         configuration.BaseUrl,
-        configuration.Username,
-        !string.IsNullOrWhiteSpace(configuration.PasswordCiphertext),
-        configuration.AutoSyncEnabled,
-        configuration.AutoSyncIntervalMinutes,
-        configuration.LastSyncAt,
-        configuration.LastSyncCount,
-        configuration.LastAutoSyncAttemptAt,
-        configuration.LastAutoSyncError);
-
-    private static string NormalizeBaseUrl(string value)
-    {
-        var normalized = value?.Trim().TrimEnd('/') ?? string.Empty;
-        if (normalized.Length is < 1 or > 500
-            || !Uri.TryCreate(normalized, UriKind.Absolute, out var uri)
-            || (uri.Scheme != Uri.UriSchemeHttp && uri.Scheme != Uri.UriSchemeHttps)
-            || string.IsNullOrWhiteSpace(uri.Host)
-            || !string.IsNullOrEmpty(uri.UserInfo)
-            || !string.IsNullOrEmpty(uri.Query)
-            || !string.IsNullOrEmpty(uri.Fragment))
-            throw new PdmRuleException("CRM服务地址必须是有效的HTTP或HTTPS地址，例如 http://127.0.0.1:8080。");
-        return normalized;
-    }
+        configuration.UserCode,
+        !string.IsNullOrWhiteSpace(configuration.ClientSecretCiphertext),
+        schedule.AutoSyncEnabled,
+        schedule.AutoSyncIntervalMinutes,
+        schedule.LastSyncAt,
+        schedule.LastSyncCount,
+        schedule.LastAutoSyncAttemptAt,
+        schedule.LastAutoSyncError);
 }

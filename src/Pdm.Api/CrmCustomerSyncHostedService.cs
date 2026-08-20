@@ -20,7 +20,7 @@ public sealed class CrmCustomerSyncHostedService(
                 if (result is not null)
                 {
                     logger.LogInformation(
-                        "CRM automatic customer sync completed: {CustomerCount} customers, {SkippedCount} skipped.",
+                        "U9C automatic customer sync completed: {CustomerCount} customers, {SkippedCount} skipped.",
                         result.CustomerCount,
                         result.SkippedCount);
                 }
@@ -31,7 +31,7 @@ public sealed class CrmCustomerSyncHostedService(
             }
             catch (Exception exception)
             {
-                logger.LogError(exception, "CRM automatic customer sync failed; the configured interval will be observed before retrying.");
+                logger.LogError(exception, "U9C automatic customer sync failed; the configured interval will be observed before retrying.");
             }
         }
         while (await timer.WaitForNextTickAsync(stoppingToken));

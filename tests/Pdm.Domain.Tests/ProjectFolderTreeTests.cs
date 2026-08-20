@@ -87,8 +87,26 @@ public sealed class ProjectFolderTreeTests
         var project = Assert.Single(await repository.ListProjectsForUserAsync("admin", UserRole.Administrator, CancellationToken.None));
 
         Assert.Equal(7, project.DocumentCount);
-        Assert.Contains("已检出", project.BusinessStatus);
+        Assert.Contains("编辑中", project.BusinessStatus);
         Assert.Contains("待审批", project.BusinessStatus);
+        Assert.Equal("王工", project.RootDocumentCheckedOutBy);
+    }
+
+    [Fact]
+    public async Task ProjectListIgnoresCheckoutOnNonRootDocumentForProjectStatus()
+    {
+        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var project = Assert.Single(await repository.ListProjectsForUserAsync("admin", UserRole.Administrator, CancellationToken.None));
+        var snapshot = await repository.GetLatestReferenceSnapshotAsync(project.Id, CancellationToken.None);
+        Assert.NotNull(snapshot);
+        await repository.ForceReleaseCheckoutAsync(snapshot.RootDocumentId, "admin", "test", CancellationToken.None);
+        var child = (await repository.ListDocumentsAsync(project.Id, CancellationToken.None)).First(item => item.Id != snapshot.RootDocumentId);
+        await repository.CheckoutAsync(child.Id, "engineer", CancellationToken.None);
+
+        var refreshed = Assert.Single(await repository.ListProjectsForUserAsync("admin", UserRole.Administrator, CancellationToken.None));
+
+        Assert.DoesNotContain("编辑中", refreshed.BusinessStatus ?? string.Empty);
+        Assert.Null(refreshed.RootDocumentCheckedOutBy);
     }
 
     private static CreateNumberedProjectCommand Command(string name) => new(

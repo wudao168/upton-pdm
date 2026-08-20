@@ -76,7 +76,7 @@ onBeforeUnmount(() => {
     </header>
 
     <section class="pdm-panel pdm-manager-panel">
-      <header class="pdm-manager-heading"><div><h2>本地缓存工作区</h2><p>获取并编辑、只读打开和本地工作副本将保存在此目录。</p></div></header>
+      <header class="pdm-manager-heading"><div><h2>本地缓存工作区</h2><p>打开最新、历史只读预览和本地工作副本将保存在此目录。</p></div></header>
       <label class="pdm-client-workspace-label">
         工作区根目录
         <span class="pdm-client-workspace-row"><input v-model="workspaceRoot" :disabled="pending || !available" aria-label="本地缓存工作区"><button type="button" class="pdm-secondary-action" :disabled="pending || !available" @click="browseWorkspaceRoot">浏览…</button></span>

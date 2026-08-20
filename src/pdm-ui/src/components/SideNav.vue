@@ -1,8 +1,8 @@
 <script setup lang="ts">
-import { ClipboardCheck, FolderKanban, HardDrive, Settings } from '@lucide/vue'
-import pdmClientIconUrl from '../assets/pdm-client-icon.png'
+import { Boxes, ClipboardCheck, FolderKanban, HardDrive, ListTree, Settings } from '@lucide/vue'
+import pdmClientIconUrl from '../../../Pdm.Desktop/Assets/PdmClient.ico'
 
-type NavKey = 'projects' | 'tasks' | 'client-settings' | 'admin'
+type NavKey = 'project-center' | 'projects' | 'materials' | 'tasks' | 'client-settings' | 'admin'
 
 const props = withDefaults(defineProps<{ active: NavKey; approvalCount?: number; canManageSystem?: boolean; desktopAvailable?: boolean }>(), {
   approvalCount: 0,
@@ -12,7 +12,9 @@ const props = withDefaults(defineProps<{ active: NavKey; approvalCount?: number;
 const emit = defineEmits<{ navigate: [key: NavKey, label: string] }>()
 
 const items = [
-  { key: 'projects', label: '项目中心', icon: FolderKanban },
+  { key: 'project-center', label: '项目中心', icon: FolderKanban },
+  { key: 'projects', label: '项目列表', icon: ListTree },
+  { key: 'materials', label: '料品管理', icon: Boxes },
   { key: 'tasks', label: '我的待办', icon: ClipboardCheck },
 ] satisfies Array<{ key: NavKey; label: string; icon: typeof FolderKanban }>
 </script>
@@ -20,7 +22,15 @@ const items = [
 <template>
   <aside class="pdm-sidebar" aria-label="主导航">
     <div class="pdm-sidebar__brand">
-      <img class="pdm-sidebar__brand-mark" :src="pdmClientIconUrl" alt="" aria-hidden="true">
+      <img
+        class="pdm-sidebar__brand-mark"
+        :src="pdmClientIconUrl"
+        alt=""
+        width="38"
+        height="38"
+        draggable="false"
+        aria-hidden="true"
+      >
       <div class="pdm-sidebar__brand-copy">
         <strong>UPTON</strong>
         <span>产品数据管理</span>

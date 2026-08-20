@@ -11,7 +11,7 @@ const props = withDefaults(defineProps<{
   size: 16,
 })
 
-const issue = computed(() => props.status === 'Missing' || props.status === 'Unregistered')
+const issue = computed(() => props.status === 'Missing' || props.status === 'Unregistered' || props.status === 'Unarchived')
 const label = computed(() => ({
   Assembly: '装配体',
   Part: '零件',

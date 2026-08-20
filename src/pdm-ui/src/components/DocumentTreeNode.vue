@@ -47,7 +47,7 @@ function openContext(event: MouseEvent) {
       role="treeitem"
       :aria-expanded="hasChildren ? expanded : undefined"
       class="pdm-tree-row"
-      :class="{ 'is-selected': selectedId === node.id, 'has-warning': node.status === 'Missing' || node.status === 'Unregistered', 'has-version-warning': node.versionAlignment === 'StructureStale' || node.versionAlignment === 'NotSnapshotted', 'has-version-conflict': node.versionAlignment === 'VersionConflict' }"
+      :class="{ 'is-selected': selectedId === node.id, 'has-warning': node.status === 'Missing' || node.status === 'Unregistered' || node.status === 'Unarchived', 'has-version-warning': node.versionAlignment === 'StructureStale' || node.versionAlignment === 'NotSnapshotted', 'has-version-conflict': node.versionAlignment === 'VersionConflict' }"
       :style="{ '--tree-level': level ?? 0 }"
       @click="select"
       @dblclick="hasChildren && (expanded = !expanded)"
@@ -63,11 +63,11 @@ function openContext(event: MouseEvent) {
           <small>{{ node.name }}<template v-if="node.quantity > 1"> ×{{ node.quantity }}</template></small>
         </span>
       </span>
-      <span v-if="node.status !== 'Missing' && node.status !== 'Unregistered'" class="pdm-tree-row__version" :title="versionHint">
+      <span v-if="node.status !== 'Missing' && node.status !== 'Unregistered' && node.status !== 'Unarchived'" class="pdm-tree-row__version" :title="versionHint">
         <em>{{ versionText }}</em>
         <small v-if="versionStateText">{{ versionStateText }}</small>
       </span>
-      <em v-else>{{ node.status === 'Missing' ? '缺失' : '未入库' }}</em>
+      <em v-else>{{ node.status === 'Missing' ? '缺失' : node.status === 'Unarchived' ? '未存档' : '未入库' }}</em>
     </button>
     <ul v-if="expanded && hasChildren" class="pdm-tree-children" role="group">
       <DocumentTreeNode

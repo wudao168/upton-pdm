@@ -36,7 +36,7 @@ try {
   await page.locator('.pdm-app-body').waitFor({ state: 'visible', timeout: 20_000 })
   const navCases = [
     ['工作台', '工作台主页面'],
-    ['项目图档', '项目图档结构'],
+    ['项目图档', '项目设计树'],
     ['BOM管理', 'BOM维护'],
     ['图纸审批', '审批与生产发包'],
     ['生产发包', '审批与生产发包'],
@@ -54,7 +54,7 @@ try {
   }
 
   await page.getByRole('button', { name: '项目图档', exact: true }).click()
-  await page.getByLabel('项目图档结构').waitFor({ state: 'visible', timeout: 10_000 })
+  await page.getByLabel('项目设计树').waitFor({ state: 'visible', timeout: 10_000 })
   const metrics = await page.evaluate(() => {
     const shell = document.querySelector('.pdm-app-shell')
     const tree = document.querySelector('[role="tree"]')

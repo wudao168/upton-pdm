@@ -188,7 +188,7 @@ internal sealed class ProjectBrowserDialog : Form
         TextAlign = ContentAlignment.MiddleLeft,
         ForeColor = Color.FromArgb(54, 76, 102)
     };
-    private readonly Button confirm = new Button { Text = "确认选择", DialogResult = DialogResult.OK, AutoSize = true };
+    private readonly Button confirm = new Button { Text = "确认选择", AutoSize = true };
     private readonly Guid? initialProjectId;
 
     public ProjectBrowserDialog(IReadOnlyList<ProjectDto> projects, Guid? initialProjectId)
@@ -208,9 +208,9 @@ internal sealed class ProjectBrowserDialog : Form
         search.AccessibleName = "搜索项目号或项目名称";
         search.TextChanged += (_, _) => ApplySearch();
         mainProjects.SelectedIndexChanged += (_, _) => RefreshChildren();
-        mainProjects.DoubleClick += (_, _) => SelectAndConfirmMainDocuments();
         childProjects.SelectedIndexChanged += (_, _) => UpdateSelectionState();
         childProjects.DoubleClick += (_, _) => ConfirmProjectSelection();
+        confirm.Click += (_, _) => ConfirmProjectSelection();
         childProjects.Resize += (_, _) => ResizeChildColumns();
         childProjects.Columns.Add("名称");
         childProjects.Columns.Add("图档状态");
@@ -384,16 +384,6 @@ internal sealed class ProjectBrowserDialog : Form
         selection.Text = selected != null
             ? string.Concat("将选择：", ProjectSelectionText(selected))
             : mainProjects.SelectedItem == null ? "尚未选择项目" : "请选择图档归属";
-    }
-
-    private void SelectAndConfirmMainDocuments()
-    {
-        var main = mainProjects.SelectedItem as ProjectDto;
-        if (main != null)
-        {
-            SelectProjectItem(childProjects, main.Id);
-            ConfirmProjectSelection();
-        }
     }
 
     private void ConfirmProjectSelection()

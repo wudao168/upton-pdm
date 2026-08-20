@@ -74,6 +74,10 @@ internal sealed class CadTreeNode
 
     public string LatestRevision { get; set; } = string.Empty;
 
+    public bool StoredVersionStateKnown { get; set; }
+
+    public bool HasStoredVersion { get; set; }
+
     public Guid? OpenedVersionId { get; set; }
 
     public string OpenedRevision { get; set; } = string.Empty;
@@ -101,6 +105,10 @@ internal sealed class CadTreeNode
     public bool IsRenamePendingSave { get; set; }
 
     public bool IsHistoricalPreview { get; set; }
+
+    public bool IsLatestReadOnlyPreview { get; set; }
+
+    public bool IsReadOnlyPreview => IsHistoricalPreview || IsLatestReadOnlyPreview;
 
     public List<CadTreeNode> Children { get; } = new List<CadTreeNode>();
 

@@ -152,7 +152,6 @@ internal sealed class AutomaticDrawingControl : UserControl
         var summary = new Panel { Dock = DockStyle.Top, Height = 62, BackColor = Color.White, Padding = new Padding(8, 7, 8, 5), Margin = new Padding(0, 0, 0, 7) };
         sourceName.Dock = DockStyle.Top;
         sourceName.Height = 23;
-        sourceName.Font = new Font(Font, FontStyle.Bold);
         sourceName.AutoEllipsis = true;
         sourceStatus.Dock = DockStyle.Fill;
         sourceStatus.ForeColor = Color.FromArgb(90, 107, 128);
@@ -163,9 +162,11 @@ internal sealed class AutomaticDrawingControl : UserControl
         var mainActions = BuildActionRow();
         ConfigureButton(acquireEditButton, AcquireColor);
         ConfigureButton(generateButton, PrimaryColor);
+        ConfigureButton(importAnnotationsButton, Color.White);
         ConfigureButton(submitButton, SubmitColor);
         acquireEditButton.Text = "获取工程图权限";
-        generateButton.Text = "生成工程图";
+        generateButton.Text = "生成视图";
+        importAnnotationsButton.Text = "自动标注";
         submitButton.Text = "提交存档";
         acquireEditButton.Click += (_, _) =>
         {
@@ -175,10 +176,12 @@ internal sealed class AutomaticDrawingControl : UserControl
             }
         };
         generateButton.Click += (_, _) => RaiseBusyRequest(GenerateRequested, true, generateButton, "正在生成...");
+        importAnnotationsButton.Click += (_, _) => RaiseBusyRequest(ImportAnnotationsRequested, true, importAnnotationsButton, "正在整理尺寸...");
         submitButton.Click += (_, _) => RaiseRequest(SubmitRequested, false);
         mainActions.Controls.Add(acquireEditButton, 0, 0);
         mainActions.Controls.Add(generateButton, 2, 0);
-        mainActions.Controls.Add(submitButton, 4, 0);
+        mainActions.Controls.Add(importAnnotationsButton, 4, 0);
+        mainActions.Controls.Add(submitButton, 6, 0);
 
         var settingsGroup = new GroupBox
         {
@@ -239,13 +242,6 @@ internal sealed class AutomaticDrawingControl : UserControl
         settings.SetColumnSpan(generateIsometric, 3);
         settingsGroup.Controls.Add(settings);
 
-        var postActions = new TableLayoutPanel { Dock = DockStyle.Top, Height = 38, ColumnCount = 1, RowCount = 1, Margin = new Padding(0, 0, 0, 7) };
-        postActions.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        ConfigureButton(importAnnotationsButton, Color.White);
-        importAnnotationsButton.Text = "按固化规则自动标注";
-        importAnnotationsButton.Click += (_, _) => RaiseBusyRequest(ImportAnnotationsRequested, true, importAnnotationsButton, "正在整理尺寸...");
-        postActions.Controls.Add(importAnnotationsButton, 0, 0);
-
         workflowHint.AutoSize = false;
         workflowHint.Dock = DockStyle.Top;
         workflowHint.Height = 72;
@@ -256,28 +252,18 @@ internal sealed class AutomaticDrawingControl : UserControl
         content.Controls.Add(summary, 0, 0);
         content.Controls.Add(mainActions, 0, 1);
         content.Controls.Add(settingsGroup, 0, 2);
-        content.Controls.Add(postActions, 0, 3);
-        content.Controls.Add(workflowHint, 0, 4);
+        content.Controls.Add(workflowHint, 0, 3);
         Controls.Add(content);
     }
 
-    private static TableLayoutPanel BuildActionRow(int buttonCount = 3)
+    private static TableLayoutPanel BuildActionRow()
     {
-        var columnCount = buttonCount == 2 ? 3 : 5;
-        var row = new TableLayoutPanel { Dock = DockStyle.Top, Height = 38, ColumnCount = columnCount, RowCount = 1, Margin = new Padding(0, 0, 0, 7) };
-        if (buttonCount == 2)
+        var row = new TableLayoutPanel { Dock = DockStyle.Top, Height = 38, ColumnCount = 7, RowCount = 1, Margin = new Padding(0, 0, 0, 7) };
+        for (var index = 0; index < 7; index++)
         {
-            row.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
-            row.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 6));
-            row.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
-        }
-        else
-        {
-            row.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 33.333F));
-            row.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 6));
-            row.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 33.333F));
-            row.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 6));
-            row.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 33.334F));
+            row.ColumnStyles.Add(index % 2 == 0
+                ? new ColumnStyle(SizeType.Percent, 25)
+                : new ColumnStyle(SizeType.Absolute, 6));
         }
         return row;
     }
@@ -311,27 +297,27 @@ internal sealed class AutomaticDrawingControl : UserControl
         var drawingEditable = !drawingControlled || IsEditable(drawing);
         sourceName.Text = supported ? source.FileName : "未选择零件或装配体";
         var defaultStatus = !supported
-            ? "请从结构树选择模型，或使用右键菜单进入。"
+            ? "请从设计树选择模型，或使用右键菜单进入。"
             : drawingExists
                 ? string.Concat(
                     "关联工程图：",
                     Path.GetFileName(drawingPath),
                     drawingControlled && !drawingEditable ? "；请先获取工程图权限" : string.Empty)
-                : source.DocumentId.HasValue ? "关联工程图：尚未生成；请先点击蓝色生成按钮" : "源模型尚未入库；可生成本地草稿，存档前需先入库模型。";
+                : source.DocumentId.HasValue ? "关联工程图：尚未生成；请先点击蓝色生成视图按钮" : "源模型尚未入库；可生成本地草稿，存档前需先入库模型。";
         sourceStatus.Text = string.IsNullOrWhiteSpace(operationResult) ? defaultStatus : operationResult;
         acquireEditButton.Enabled = drawingExists && drawingControlled && !drawingEditable && drawing?.IsHistoricalPreview != true;
-        generateButton.Text = drawingExists ? "更新工程图" : "第1步 生成工程图";
-        importAnnotationsButton.Text = drawingExists ? "第2步 按规则自动标注" : "第2步 生成后自动标注";
-        generateButton.Enabled = sourceExists && !source.IsHistoricalPreview && (!drawingExists || drawingEditable);
+        generateButton.Text = "生成视图";
+        importAnnotationsButton.Text = "自动标注";
+        generateButton.Enabled = sourceExists && !source.IsReadOnlyPreview && (!drawingExists || drawingEditable);
         includeAssemblyBom.Enabled = source?.Kind == CadDocumentKind.Assembly;
         importAnnotationsButton.Enabled = drawingExists && drawingEditable;
         submitButton.Enabled = drawingExists && drawingEditable;
         workflowHint.Text = !supported
-            ? "请先在“结构树”中选择一个零件或装配体。"
+            ? "请先在“设计树”中选择一个零件或装配体。"
             : !sourceExists
                 ? "所选模型的本地文件不存在，不能自动出图。"
                 : !drawingExists
-                    ? "第1步：点击上方蓝色“生成工程图”。生成并检查正视、俯视和右视图后，第2步按固化规则自动标注。"
+                    ? "第1步：点击上方蓝色“生成视图”。生成并检查正视、俯视和右视图后，第2步执行自动标注。"
                     : string.Concat(
                         "第2步：按GB制图标准和生产样本规则导入必要尺寸、消除重复并排列避让。规则 ",
                         AutomaticDrawingRuleProfile.CurrentRuleVersion,
@@ -341,7 +327,7 @@ internal sealed class AutomaticDrawingControl : UserControl
         ApplyEnabledAppearance(importAnnotationsButton, Color.White);
         ApplyEnabledAppearance(submitButton, SubmitColor);
         toolTip.SetToolTip(acquireEditButton, acquireEditButton.Enabled ? "获取或恢复当前工程图的编辑会话" : drawingControlled && drawingEditable ? "当前工程图已可编辑" : "工程图首次入库后可获取编辑权限");
-        toolTip.SetToolTip(generateButton, source?.IsHistoricalPreview == true ? "历史版本不能生成或更新工程图" : sourceExists ? string.Empty : "请选择本地存在的零件或装配体");
+        toolTip.SetToolTip(generateButton, source?.IsReadOnlyPreview == true ? "只读预览不能生成或更新工程图" : sourceExists ? string.Empty : "请选择本地存在的零件或装配体");
         toolTip.SetToolTip(importAnnotationsButton, drawingExists ? "仅导入标记尺寸、公差和孔标注，消除重复后按固化规则排列" : "请先完成第1步：生成工程图");
         toolTip.SetToolTip(submitButton, source?.DocumentId.HasValue == true ? "提交关联工程图草稿" : "源模型入库后才能绑定并提交工程图");
     }

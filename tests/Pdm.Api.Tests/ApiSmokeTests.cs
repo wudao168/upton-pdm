@@ -46,6 +46,111 @@ public sealed class ApiSmokeTests : IClassFixture<PdmApiFactory>
     }
 
     [Fact]
+    public async Task PersonalSettings_UpdateProfileAndChangePasswordLikeCrm()
+    {
+        var repository = factory.Services.GetRequiredService<IPdmRepository>();
+        var passwords = factory.Services.GetRequiredService<IPasswordService>();
+        var username = $"profile-{Guid.NewGuid():N}";
+        await repository.CreateUserAsync(new UserAccount(Guid.NewGuid(), username, "个人设置测试", passwords.Hash("OldPassword1"), UserRole.Engineer, true), CancellationToken.None);
+        var loginResponse = await client.PostAsJsonAsync("/api/auth/login", new { username, password = "OldPassword1" });
+        Assert.Equal(HttpStatusCode.OK, loginResponse.StatusCode);
+        var login = await loginResponse.Content.ReadFromJsonAsync<LoginSessionResponse>();
+        Assert.NotNull(login);
+        Assert.False(string.IsNullOrWhiteSpace(login.ResumeToken));
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", login.AccessToken);
+
+        var profileResponse = await client.PutAsJsonAsync("/api/auth/profile", new
+        {
+            nickname = "设计昵称",
+            gender = "female",
+            landline = "0512-12345678",
+            mobilePhone = "13800000000",
+            email = "designer@example.com"
+        });
+        Assert.Equal(HttpStatusCode.OK, profileResponse.StatusCode);
+        var profile = await profileResponse.Content.ReadFromJsonAsync<UserProfileResponse>();
+        Assert.NotNull(profile);
+        Assert.Equal("设计昵称", profile.Nickname);
+        Assert.Equal("female", profile.Gender);
+        Assert.Equal("designer@example.com", profile.Email);
+
+        var invalidPassword = await client.PutAsJsonAsync("/api/auth/password", new { currentPassword = "wrong", password = "NewPassword2" });
+        Assert.Equal(HttpStatusCode.BadRequest, invalidPassword.StatusCode);
+        var changedPassword = await client.PutAsJsonAsync("/api/auth/password", new { currentPassword = "OldPassword1", password = "NewPassword2" });
+        Assert.Equal(HttpStatusCode.OK, changedPassword.StatusCode);
+        var changedLogin = await changedPassword.Content.ReadFromJsonAsync<LoginSessionResponse>();
+        Assert.NotNull(changedLogin);
+        Assert.True(passwords.Verify("NewPassword2", (await repository.FindUserAsync(username, CancellationToken.None))!.PasswordHash));
+
+        client.DefaultRequestHeaders.Authorization = null;
+        var rejectedResume = await client.PostAsJsonAsync("/api/auth/resume", new { resumeToken = login.ResumeToken });
+        Assert.Equal(HttpStatusCode.Unauthorized, rejectedResume.StatusCode);
+        var resumed = await client.PostAsJsonAsync("/api/auth/resume", new { resumeToken = changedLogin.ResumeToken });
+        Assert.Equal(HttpStatusCode.OK, resumed.StatusCode);
+
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", login.AccessToken);
+        Assert.Equal(HttpStatusCode.Unauthorized, (await client.GetAsync("/api/auth/me")).StatusCode);
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", changedLogin.AccessToken);
+        Assert.Equal(HttpStatusCode.OK, (await client.GetAsync("/api/auth/me")).StatusCode);
+    }
+
+    [Fact]
+    public async Task ForgotPassword_HidesAccountExistenceAndCreatesAdminResetTask()
+    {
+        var repository = factory.Services.GetRequiredService<IPdmRepository>();
+        var passwords = factory.Services.GetRequiredService<IPasswordService>();
+        var username = $"reset-{Guid.NewGuid():N}";
+        await repository.CreateUserAsync(new UserAccount(Guid.NewGuid(), username, "重置测试用户", passwords.Hash("OldPassword1"), UserRole.Engineer, true), CancellationToken.None);
+
+        var loginResponse = await client.PostAsJsonAsync("/api/auth/login", new { username, password = "OldPassword1" });
+        Assert.Equal(HttpStatusCode.OK, loginResponse.StatusCode);
+        var oldLogin = await loginResponse.Content.ReadFromJsonAsync<LoginSessionResponse>();
+        Assert.NotNull(oldLogin);
+
+        client.DefaultRequestHeaders.Authorization = null;
+        var unknown = await client.PostAsJsonAsync("/api/auth/password-reset-request", new { username = $"unknown-{Guid.NewGuid():N}", displayName = "未知用户" });
+        var mismatch = await client.PostAsJsonAsync("/api/auth/password-reset-request", new { username, displayName = "姓名不匹配" });
+        var matched = await client.PostAsJsonAsync("/api/auth/password-reset-request", new { username, displayName = "重置测试用户" });
+        Assert.Equal(HttpStatusCode.OK, unknown.StatusCode);
+        Assert.Equal(HttpStatusCode.OK, mismatch.StatusCode);
+        Assert.Equal(HttpStatusCode.OK, matched.StatusCode);
+
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", CreateToken("admin", "Administrator"));
+        var tasks = await client.GetFromJsonAsync<IReadOnlyList<PasswordResetTaskResponse>>("/api/password-reset-requests");
+        var task = Assert.Single(tasks!, item => item.Username == username);
+        var reset = await client.PutAsJsonAsync($"/api/password-reset-requests/{task.Id}/reset", new { });
+        Assert.Equal(HttpStatusCode.OK, reset.StatusCode);
+        Assert.True(passwords.Verify("11111111", (await repository.FindUserAsync(username, CancellationToken.None))!.PasswordHash));
+        Assert.DoesNotContain((await client.GetFromJsonAsync<IReadOnlyList<PasswordResetTaskResponse>>("/api/password-reset-requests"))!, item => item.Username == username);
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", oldLogin.AccessToken);
+        Assert.Equal(HttpStatusCode.Unauthorized, (await client.GetAsync("/api/auth/me")).StatusCode);
+    }
+
+    [Fact]
+    public async Task UserAdministration_CreatesUpdatesAndResetsUser()
+    {
+        var repository = factory.Services.GetRequiredService<IPdmRepository>();
+        var passwords = factory.Services.GetRequiredService<IPasswordService>();
+        var username = $"managed-{Guid.NewGuid():N}";
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", CreateToken("admin", "Administrator"));
+
+        var created = await client.PostAsJsonAsync("/api/users", new { username, displayName = "受管用户", password = "Initial123", role = nameof(UserRole.Engineer), isActive = true });
+        Assert.Equal(HttpStatusCode.Created, created.StatusCode);
+        Assert.Contains((await client.GetFromJsonAsync<IReadOnlyList<ManagedUserResponse>>("/api/users"))!, user => user.Username == username && user.Role == "Engineer");
+
+        var updated = await client.PutAsJsonAsync($"/api/users/{username}", new { displayName = "计划用户", role = nameof(UserRole.PlanningManager), isActive = true });
+        Assert.Equal(HttpStatusCode.OK, updated.StatusCode);
+        var account = await repository.FindUserAsync(username, CancellationToken.None);
+        Assert.NotNull(account);
+        Assert.Equal("计划用户", account.DisplayName);
+        Assert.Equal(UserRole.PlanningManager, account.Role);
+
+        var reset = await client.PutAsJsonAsync($"/api/users/{username}/reset-password", new { });
+        Assert.Equal(HttpStatusCode.OK, reset.StatusCode);
+        Assert.True(passwords.Verify("11111111", (await repository.FindUserAsync(username, CancellationToken.None))!.PasswordHash));
+    }
+
+    [Fact]
     public async Task EditSessionApi_RequiresMatchingSessionForHeartbeatAndRelease()
     {
         var repository = factory.Services.GetRequiredService<IPdmRepository>();
@@ -106,6 +211,94 @@ public sealed class ApiSmokeTests : IClassFixture<PdmApiFactory>
         Assert.Equal(HttpStatusCode.OK, oldHeartbeat.StatusCode);
         using var heartbeatJson = JsonDocument.Parse(await oldHeartbeat.Content.ReadAsStringAsync());
         Assert.DoesNotContain(document.Id, heartbeatJson.RootElement.GetProperty("activeDocumentIds").EnumerateArray().Select(item => item.GetGuid()));
+    }
+
+    [Fact]
+    public async Task BomResolve_AcceptsStringTargetKindFromWebClient()
+    {
+        var repository = factory.Services.GetRequiredService<IPdmRepository>();
+        var project = await repository.CreateProjectAsync(
+            new CreateProjectCommand($"BOM-{Guid.NewGuid():N}", "BOM分类接口验收", "admin", @"D:\PDM\Bom", @"D:\Release\Bom"),
+            "admin",
+            CancellationToken.None);
+        var item = new BomItem(Guid.NewGuid(), project.Id, BomKind.NonStandard, 1, "BOM-001", "待分类零件", 1, "件", "6061", null, "W1", false)
+        {
+            IsPendingClassification = true
+        };
+        await repository.ReplaceBomAsync(project.Id, BomKind.NonStandard, [item], CancellationToken.None);
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", CreateToken("admin", "Administrator"));
+
+        using var content = new StringContent("""{"action":"classify","targetKind":"Standard"}""", Encoding.UTF8, "application/json");
+        var response = await client.PostAsync($"/api/projects/{project.Id}/boms/items/{item.Id}/resolve", content);
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var standard = await repository.GetBomAsync(project.Id, BomKind.Standard, CancellationToken.None);
+        var resolved = Assert.Single(standard, candidate => candidate.Id == item.Id);
+        Assert.False(resolved.IsPendingClassification);
+        Assert.True(resolved.IsManuallyOverridden);
+        Assert.Equal(BomKind.Standard, resolved.Kind);
+    }
+
+    [Fact]
+    public async Task BomBatchUpdate_ValidatesAllRowsAndUpdatesSelectedPropertiesTogether()
+    {
+        var repository = factory.Services.GetRequiredService<IPdmRepository>();
+        var project = await repository.CreateProjectAsync(
+            new CreateProjectCommand($"BATCH-{Guid.NewGuid():N}", "BOM批量编辑验收", "admin", @"D:\PDM\Batch", @"D:\Release\Batch"),
+            "admin",
+            CancellationToken.None);
+        var first = new BomItem(Guid.NewGuid(), project.Id, BomKind.NonStandard, 1, "BATCH-001", "批量零件一", 1, "件", "6061", null, "W1", false) { IsPendingClassification = true };
+        var second = new BomItem(Guid.NewGuid(), project.Id, BomKind.NonStandard, 2, "BATCH-002", "批量零件二", 1, "件", "6061", null, "W1", false) { IsPendingClassification = true };
+        await repository.ReplaceBomAsync(project.Id, BomKind.NonStandard, [first, second], CancellationToken.None);
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", CreateToken("admin", "Administrator"));
+
+        using var content = new StringContent($$"""{"itemIds":["{{first.Id}}","{{second.Id}}"],"fields":["kind","brand"],"targetKind":"Standard","brand":"UPTON"}""", Encoding.UTF8, "application/json");
+        var response = await client.PatchAsync($"/api/projects/{project.Id}/boms/items/batch", content);
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var standard = await repository.GetBomAsync(project.Id, BomKind.Standard, CancellationToken.None);
+        Assert.Equal(2, standard.Count);
+        Assert.All(standard, item =>
+        {
+            Assert.Equal("UPTON", item.Brand);
+            Assert.False(item.IsPendingClassification);
+            Assert.Equal(BomKind.Standard, item.Kind);
+        });
+
+        using var invalidContent = new StringContent($$"""{"itemIds":["{{first.Id}}","{{Guid.NewGuid()}}"],"fields":["brand"],"brand":"不应保存"}""", Encoding.UTF8, "application/json");
+        var invalid = await client.PatchAsync($"/api/projects/{project.Id}/boms/items/batch", invalidContent);
+        Assert.Equal(HttpStatusCode.NotFound, invalid.StatusCode);
+        var unchanged = await repository.GetBomAsync(project.Id, BomKind.Standard, CancellationToken.None);
+        Assert.All(unchanged, item => Assert.Equal("UPTON", item.Brand));
+    }
+
+    [Fact]
+    public async Task BomBatchDelete_PersistentlyExcludesDrawingRowsAndClassificationRestoresThem()
+    {
+        var repository = factory.Services.GetRequiredService<IPdmRepository>();
+        var project = await repository.CreateProjectAsync(
+            new CreateProjectCommand($"DELETE-{Guid.NewGuid():N}", "BOM批量删除验收", "admin", @"D:\PDM\Delete", @"D:\Release\Delete"),
+            "admin",
+            CancellationToken.None);
+        var source = new BomItem(Guid.NewGuid(), project.Id, BomKind.NonStandard, 1, "DELETE-001", "图纸来源物料", 1, "件", "6061", null, "W1", true)
+        {
+            Source = "Auto",
+            SourceDocumentId = Guid.NewGuid()
+        };
+        await repository.ReplaceBomAsync(project.Id, BomKind.NonStandard, [source], CancellationToken.None);
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", CreateToken("admin", "Administrator"));
+
+        var deleted = await client.PostAsJsonAsync($"/api/projects/{project.Id}/boms/items/batch-delete", new { itemIds = new[] { source.Id }, reason = "接口回收站测试" });
+
+        Assert.Equal(HttpStatusCode.OK, deleted.StatusCode);
+        Assert.True(Assert.Single(await repository.GetBomAsync(project.Id, BomKind.NonStandard, CancellationToken.None)).IsManuallyExcluded);
+
+        var restored = await client.PostAsJsonAsync($"/api/projects/{project.Id}/boms/items/batch-restore", new { itemIds = new[] { source.Id }, mode = "AsManual" });
+
+        Assert.Equal(HttpStatusCode.OK, restored.StatusCode);
+        var restoredItem = Assert.Single(await repository.GetBomAsync(project.Id, BomKind.NonStandard, CancellationToken.None));
+        Assert.False(restoredItem.IsManuallyExcluded);
+        Assert.Null(restoredItem.SourceDocumentId);
     }
 
     [Fact]
@@ -216,18 +409,34 @@ public sealed class ApiSmokeTests : IClassFixture<PdmApiFactory>
     }
 
     [Fact]
-    public async Task Administrator_SynchronizesCrmCustomersAndMaintainsRolePermissionsWhileManualCustomerEndpointIsRemoved()
+    public async Task Administrator_SynchronizesU9CustomersAndMaintainsRolePermissionsWhileManualCustomerEndpointIsRemoved()
     {
         client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", CreateToken("admin", "Administrator"));
 
         var manualCustomerResponse = await client.PostAsJsonAsync("/api/customers", new { code = "C00999", name = "手工客户", isActive = true });
         Assert.Equal(HttpStatusCode.MethodNotAllowed, manualCustomerResponse.StatusCode);
 
+        var saveU9Settings = await client.PutAsJsonAsync("/api/u9-material-integration", new
+        {
+            baseUrl = "http://u9.example.test/U9",
+            enterpriseCode = "01",
+            organizationCode = "7",
+            userCode = "pdm",
+            clientId = "PDM",
+            clientSecret = "test-secret",
+            itemCreatePath = U9MaterialContract.CreatePath,
+            itemQueryPath = U9MaterialContract.QueryPath,
+            itemModifyPath = U9MaterialContract.ModifyPath,
+            itemDeletePath = U9MaterialContract.DeletePath,
+            writeEnabled = false
+        });
+        Assert.True(saveU9Settings.IsSuccessStatusCode, await saveU9Settings.Content.ReadAsStringAsync());
+
         var saveCrmSettings = await client.PutAsJsonAsync("/api/crm-integration", new
         {
-            baseUrl = "http://crm.example.test:8080",
-            username = "pdm-integration",
-            password = "crm-secret",
+            baseUrl = "",
+            username = "",
+            password = (string?)null,
             autoSyncEnabled = true,
             autoSyncIntervalMinutes = 30
         });
@@ -235,14 +444,16 @@ public sealed class ApiSmokeTests : IClassFixture<PdmApiFactory>
         var crmSettings = await saveCrmSettings.Content.ReadFromJsonAsync<CrmIntegrationSettingsResponse>();
         Assert.NotNull(crmSettings);
         Assert.True(crmSettings.PasswordConfigured);
+        Assert.Equal("http://u9.example.test/U9", crmSettings.BaseUrl);
+        Assert.Equal("pdm", crmSettings.Username);
         Assert.True(crmSettings.AutoSyncEnabled);
         Assert.Equal(30, crmSettings.AutoSyncIntervalMinutes);
         using (var settingsJson = JsonDocument.Parse(await saveCrmSettings.Content.ReadAsStringAsync()))
             Assert.False(settingsJson.RootElement.TryGetProperty("password", out _));
         var disableAutomaticSync = await client.PutAsJsonAsync("/api/crm-integration", new
         {
-            baseUrl = "http://crm.example.test:8080",
-            username = "pdm-integration",
+            baseUrl = "",
+            username = "",
             password = (string?)null,
             autoSyncEnabled = false,
             autoSyncIntervalMinutes = 30
@@ -261,10 +472,8 @@ public sealed class ApiSmokeTests : IClassFixture<PdmApiFactory>
         Assert.Equal(3, syncResult!.CustomerCount);
         Assert.Equal(0, syncResult.SkippedCount);
         var customers = await client.GetFromJsonAsync<List<CustomerResponse>>("/api/customers");
-        Assert.Contains(customers!, item => item.Code == "C00999" && item.Name == "CRM接口客户");
-        var crmClient = factory.Services.GetRequiredService<TestCrmCustomerClient>();
-        Assert.Equal("pdm-integration", crmClient.LastUsername);
-        Assert.Equal("crm-secret", crmClient.LastPassword);
+        Assert.Contains(customers!, item => item.Code == "C00999" && item.Name == "U9C接口客户");
+        Assert.NotNull(factory.Services.GetRequiredService<TestU9OpenApiClient>().LastRequest);
 
         var settings = await client.GetFromJsonAsync<SystemSettingsResponse>("/api/system-settings");
         Assert.Equal(@"D:\PDM\Vault", settings!.VaultRoot);
@@ -296,6 +505,37 @@ public sealed class ApiSmokeTests : IClassFixture<PdmApiFactory>
 
         var removedEndpoint = await client.PutAsJsonAsync("/api/projects/11111111-1111-1111-1111-111111111111/responsibles", new { usernames = new[] { "admin" } });
         Assert.False(removedEndpoint.IsSuccessStatusCode);
+    }
+
+    [Fact]
+    public async Task Administrator_CreatesAndDeletesOnlyCustomRoles()
+    {
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", CreateToken("admin", "Administrator"));
+        var roleName = $"自定义角色-{Guid.NewGuid():N}";
+
+        var createdResponse = await client.PostAsJsonAsync("/api/role-permissions", new
+        {
+            name = roleName,
+            description = "复制工程师角色用于验证",
+            sourceRoleCode = nameof(UserRole.Engineer)
+        });
+
+        Assert.Equal(HttpStatusCode.Created, createdResponse.StatusCode);
+        var createdDirectory = await createdResponse.Content.ReadFromJsonAsync<RolePermissionDirectoryResponse>();
+        var created = Assert.Single(createdDirectory!.Roles, role => role.Name == roleName);
+        Assert.False(created.IsSystem);
+        Assert.Equal(nameof(UserRole.Engineer), created.BaseRole);
+        Assert.Contains(PermissionCodes.ProjectView, created.Permissions);
+
+        var deletedResponse = await client.DeleteAsync($"/api/role-permissions/{Uri.EscapeDataString(created.Role)}");
+        Assert.Equal(HttpStatusCode.OK, deletedResponse.StatusCode);
+        var deletedDirectory = await deletedResponse.Content.ReadFromJsonAsync<RolePermissionDirectoryResponse>();
+        Assert.DoesNotContain(deletedDirectory!.Roles, role => role.Role == created.Role);
+
+        var protectedResponse = await client.DeleteAsync("/api/role-permissions/Administrator");
+        Assert.False(protectedResponse.IsSuccessStatusCode);
+        Assert.Contains((await client.GetFromJsonAsync<RolePermissionDirectoryResponse>("/api/role-permissions"))!.Roles,
+            role => role.Role == nameof(UserRole.Administrator) && role.IsSystemAdministrator);
     }
 
     [Fact]
@@ -518,10 +758,14 @@ public sealed class ApiSmokeTests : IClassFixture<PdmApiFactory>
     private sealed record EquipmentTypeResponse(int Code, string Name, bool IsActive);
     private sealed record NumberingOptionsResponse(IReadOnlyList<EquipmentTypeResponse> EquipmentTypes);
     private sealed record OrganizationDirectoryResponse(IReadOnlyList<OrganizationUnitResponse> Units);
+    private sealed record UserProfileResponse(string Username, string DisplayName, string? Nickname, string Gender, string? Landline, string? MobilePhone, string? Email);
+    private sealed record PasswordResetTaskResponse(Guid Id, string Username, string DisplayName, DateTimeOffset RequestedAt);
+    private sealed record ManagedUserResponse(string Username, string DisplayName, string Role, bool IsActive);
+    private sealed record LoginSessionResponse(string AccessToken, DateTimeOffset ExpiresAt, string ResumeToken, string Username, string DisplayName, string Role, IReadOnlyList<string> Permissions);
     private sealed record OrganizationUnitResponse(Guid Id, Guid OrganizationId, Guid? ParentUnitId, string Code, string Name, string Kind, bool IsActive, int SortOrder);
     private sealed record RolePermissionDirectoryResponse(IReadOnlyList<PermissionDefinitionResponse> Permissions, IReadOnlyList<RolePermissionSettingsResponse> Roles);
     private sealed record PermissionDefinitionResponse(string Code, string Name, string Module, string? Description, bool Sensitive);
-    private sealed record RolePermissionSettingsResponse(string Role, string Name, string Description, bool IsSystemAdministrator, IReadOnlyList<string> Permissions);
+    private sealed record RolePermissionSettingsResponse(string Role, string Name, string Description, string BaseRole, bool IsSystem, bool IsSystemAdministrator, IReadOnlyList<string> Permissions, int UserCount);
     private sealed record MyApprovalTaskResponse(Guid Id, Guid ProjectId, string ProjectCode, string ProjectName, Guid ReleasePackageId, string ReleasePackageNumber, ApprovalStage Stage, ReleasePackageState PackageState, DateTimeOffset CreatedAt);
     private sealed record ProjectVersionResponse(Guid Id, Guid DocumentId, string DrawingNumber, string DocumentName, string FileName, RevisionLabel Revision, DocumentVersionStatus Status, string CreatedBy, DateTimeOffset CreatedAt, string ChangeNote);
     private sealed record AuditResponse(Guid Id, DateTimeOffset OccurredAt, string Actor, string Action, string EntityType, Guid EntityId, string Detail);
@@ -536,11 +780,32 @@ public sealed class PdmApiFactory : WebApplicationFactory<Program>
         {
             services.RemoveAll<ICrmCustomerClient>();
             services.RemoveAll<ICrmCredentialProtector>();
+            services.RemoveAll<IU9OpenApiClient>();
+            services.RemoveAll<IU9SecretProtector>();
+            services.RemoveAll<IPersistentSessionTokenService>();
             services.AddSingleton<TestCrmCustomerClient>();
             services.AddSingleton<ICrmCustomerClient>(provider => provider.GetRequiredService<TestCrmCustomerClient>());
             services.AddSingleton<ICrmCredentialProtector, TestCrmCredentialProtector>();
+            services.AddSingleton<TestU9OpenApiClient>();
+            services.AddSingleton<IU9OpenApiClient>(provider => provider.GetRequiredService<TestU9OpenApiClient>());
+            services.AddSingleton<IU9SecretProtector, TestU9SecretProtector>();
+            services.AddSingleton<IPersistentSessionTokenService, TestPersistentSessionTokenService>();
         });
     }
+}
+
+public sealed class TestPersistentSessionTokenService : IPersistentSessionTokenService
+{
+    private readonly Dictionary<string, PersistentSessionTicket> tickets = [];
+
+    public string Issue(UserAccount account)
+    {
+        var token = Guid.NewGuid().ToString("N");
+        tickets[token] = new PersistentSessionTicket(account.Username, account.TokenVersion);
+        return token;
+    }
+
+    public bool TryRead(string token, out PersistentSessionTicket ticket) => tickets.TryGetValue(token, out ticket!);
 }
 
 public sealed class TestCrmCustomerClient : ICrmCustomerClient
@@ -564,5 +829,56 @@ public sealed class TestCrmCredentialProtector : ICrmCredentialProtector
 {
     public string Protect(string password) => "protected:" + password;
 
+    public string Unprotect(string ciphertext) => ciphertext["protected:".Length..];
+}
+
+public sealed class TestU9OpenApiClient : IU9OpenApiClient
+{
+    public U9AuthenticationRequest? LastRequest { get; private set; }
+    public U9ItemQueryResult QueryResult { get; set; } = new(0, null, []);
+    public Queue<U9ItemQueryResult> QueryResults { get; } = new();
+    public U9UomQueryResult UomResult { get; set; } = new(0, null, [new("uom-001", "001")]);
+    public U9BusinessBatchResult BusinessResult { get; set; } = new(0, null, []);
+    public U9CustomerQueryResult CustomerResult { get; set; } = new(0, null, [
+        new("C00465", "中山比亚迪电子有限公司"),
+        new("C00999", "U9C接口客户"),
+        new("C01000", "U9C范围客户")
+    ], 3);
+    public int QueryCallCount { get; private set; }
+    public int PostCallCount { get; private set; }
+    public string LastPostPath { get; private set; } = string.Empty;
+    public string LastPostPayload { get; private set; } = string.Empty;
+
+    public Task<U9AuthenticationResult> AuthenticateAsync(U9AuthenticationRequest request, CancellationToken cancellationToken)
+    {
+        LastRequest = request;
+        return Task.FromResult(new U9AuthenticationResult("test-token"));
+    }
+
+    public Task<U9BusinessBatchResult> PostBatchAsync(string baseUrl, string path, string token, string payloadJson, CancellationToken cancellationToken)
+    {
+        PostCallCount++;
+        LastPostPath = path;
+        LastPostPayload = payloadJson;
+        return Task.FromResult(BusinessResult);
+    }
+
+    public Task<U9ItemQueryResult> QueryItemsAsync(string baseUrl, string path, string token, string payloadJson, CancellationToken cancellationToken)
+    {
+        QueryCallCount++;
+        return Task.FromResult(QueryResults.Count > 0 ? QueryResults.Dequeue() : QueryResult);
+    }
+
+    public Task<U9UomQueryResult> QueryUomsAsync(string baseUrl, string token, string payloadJson, CancellationToken cancellationToken) =>
+        Task.FromResult(UomResult);
+
+    public Task<U9CustomerQueryResult> QueryCustomerReferencesAsync(
+        string baseUrl, string token, string payloadJson, CancellationToken cancellationToken) =>
+        Task.FromResult(CustomerResult);
+}
+
+public sealed class TestU9SecretProtector : IU9SecretProtector
+{
+    public string Protect(string secret) => "protected:" + secret;
     public string Unprotect(string ciphertext) => ciphertext["protected:".Length..];
 }

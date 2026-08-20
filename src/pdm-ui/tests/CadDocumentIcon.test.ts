@@ -11,7 +11,7 @@ describe('CadDocumentIcon', () => {
   })
 
   it('keeps the document type and overlays its warning state', () => {
-    const wrapper = mount(CadDocumentIcon, { props: { kind: 'Part', status: 'Missing' } })
+    const wrapper = mount(CadDocumentIcon, { props: { kind: 'Part', status: 'Unarchived' } })
 
     expect(wrapper.get('svg').attributes('data-cad-kind')).toBe('Part')
     expect(wrapper.find('[data-cad-issue="true"]').exists()).toBe(true)

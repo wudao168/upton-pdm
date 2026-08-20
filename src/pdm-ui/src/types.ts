@@ -1,5 +1,5 @@
 export type DocumentKind = 'Assembly' | 'Part' | 'Drawing'
-export type ReferenceStatus = 'Normal' | 'Suppressed' | 'Hidden' | 'Lightweight' | 'Virtual' | 'Missing' | 'Unregistered'
+export type ReferenceStatus = 'Normal' | 'Suppressed' | 'Hidden' | 'Lightweight' | 'Virtual' | 'Missing' | 'Unregistered' | 'Unarchived'
 export type DocumentFilter = 'all' | 'model' | 'drawing' | 'issue'
 export type VersionAlignmentStatus = 'Synced' | 'StructureStale' | 'VersionConflict' | 'NotSnapshotted'
 export type PreviewMode = 'model' | 'drawing'
@@ -37,6 +37,7 @@ export interface ProjectSummary {
   designers: string[]
   documentCount?: number
   businessStatus?: string
+  rootDocumentCheckedOutBy?: string
   canAssignExecutionUnit: boolean
   canManageMainStaffing: boolean
   canAssignDesigners: boolean
@@ -60,6 +61,17 @@ export interface CreateSubprojectInput {
   quantity: number
 }
 
+export interface UpdateProjectInput {
+  organizationId?: string
+  projectTypeCode?: string
+  equipmentTypeCode?: number
+  customerId?: string
+  name: string
+  projectAlias?: string
+  signedDate: string
+  quantity: number
+}
+
 export interface ProjectOrganization {
   id: string
   name: string
@@ -71,14 +83,14 @@ export interface ProjectOrganization {
   isActive?: boolean
 }
 
-export interface ProjectTypeDefinition { code: string; name: string }
+export interface ProjectTypeDefinition { code: string; name: string; isActive?: boolean }
 export interface EquipmentTypeDefinition { code: number; name: string; isActive?: boolean }
 export interface ProjectNumberingOptions {
   organizations: ProjectOrganization[]
   projectTypes: ProjectTypeDefinition[]
   equipmentTypes: EquipmentTypeDefinition[]
 }
-export interface PdmCustomer { id: string; code: string; name: string; isActive: boolean }
+export interface PdmCustomer { id: string; code: string; name: string; isActive: boolean; sourceSystem?: string; lastSyncedAt?: string | null }
 export interface CrmIntegrationSettings {
   baseUrl: string
   username: string
@@ -100,6 +112,24 @@ export interface CrmCustomerSyncResult {
   customers: PdmCustomer[]
 }
 export interface PdmUser { username: string; displayName: string; role: string; isActive: boolean }
+export interface SavePdmUserInput { username: string; displayName: string; role: string; isActive: boolean; password?: string }
+export interface PdmUserProfile {
+  username: string
+  displayName: string
+  nickname?: string | null
+  gender: 'male' | 'female' | 'unspecified'
+  landline?: string | null
+  mobilePhone?: string | null
+  email?: string | null
+}
+export interface PasswordResetTask { id: string; username: string; displayName: string; requestedAt: string }
+export interface BomPropertyMapping {
+  pdmPropertyKey: string
+  pdmPropertyName: string
+  solidWorksProperty: string
+  source: 'SolidWorks' | 'Assembly' | 'Pdm'
+  mappingEditable: boolean
+}
 export interface PdmSystemSettings {
   vaultRoot: string
   releaseRoot: string
@@ -110,6 +140,23 @@ export interface PdmSystemSettings {
   checkoutStrongReminderHours: number
   checkoutOverdueHours: number
   checkoutForceReleaseHours: number
+  bomDrawingNumberProperty: string
+  bomNameProperty: string
+  bomDescriptionProperty: string
+  bomMaterialProperty: string
+  bomSpecificationProperty: string
+  bomUnitProperty: string
+  bomBrandProperty: string
+  bomSurfaceTreatmentProperty: string
+  bomWeightProperty: string
+  bomPropertyMappings: BomPropertyMapping[]
+  validationRules: BomValidationRules
+}
+export type BomValidationField = 'drawingNumber' | 'name' | 'unit' | 'specification' | 'brand' | 'material' | 'surfaceTreatment' | 'weight' | 'quantity' | 'revision' | 'remark'
+export interface BomValidationRules {
+  standard: BomValidationField[]
+  nonStandard: BomValidationField[]
+  electrical: BomValidationField[]
 }
 export type OrganizationUnitKind = 'BusinessDivision' | 'Department' | 'Team'
 export interface OrganizationUnit {
@@ -144,14 +191,18 @@ export interface RolePermissionSettings {
   role: string
   name: string
   description: string
+  baseRole: string
+  isSystem: boolean
   isSystemAdministrator: boolean
   permissions: string[]
+  userCount: number
 }
 
 export interface RolePermissionDirectory {
   permissions: PermissionDefinition[]
   roles: RolePermissionSettings[]
 }
+export interface CreateRoleInput { name: string; description: string; sourceRoleCode: string }
 export interface SaveProjectOrganizationInput { id?: string; name: string; projectCompanyCode: string; modelCompanyCode: string; isActive: boolean }
 export interface SaveOrganizationUnitInput { id?: string; organizationId: string; parentUnitId?: string; code: string; name: string; kind: OrganizationUnitKind; isActive: boolean; sortOrder: number }
 export interface MainProjectStaffingInput { primaryProjectManager: string; collaborativeProjectManagers: string[]; designLead: string }
@@ -237,6 +288,7 @@ export interface ManagedDocument {
   kind: DocumentKind
   state: string | number
   revision: string
+  storedVersionCount?: number
   checkedOutBy?: string
   checkedOutAt?: string
   checkoutMachine?: string
@@ -271,6 +323,8 @@ export interface EditLockSummary {
 }
 
 export interface BomItem {
+  id?: string
+  kind?: BomKind
   sequence: number
   drawingNumber: string
   name: string
@@ -278,8 +332,99 @@ export interface BomItem {
   unit: string
   material?: string
   specification?: string
+  remark?: string
+  brand?: string
+  surfaceTreatment?: string
+  weight?: string
   revision: string
   complete: boolean
+  sourceDocumentId?: string
+  sourceConfiguration?: string
+  source?: 'Auto' | 'Manual'
+  manuallyOverridden?: boolean
+  pendingRemoval?: boolean
+  pendingClassification?: boolean
+  manualUnmatched?: boolean
+  manuallyRetained?: boolean
+  manuallyExcluded?: boolean
+  reconciliationStatus?: string
+  reconciliationNote?: string
+  reconciliationUpdatedBy?: string
+  reconciliationUpdatedAt?: string
+  deletedAt?: string
+  deletedBy?: string
+  deleteReason?: string
+  propertyWritebackStatus?: 'PendingSave' | 'Pending' | 'InProgress' | 'Succeeded' | 'Conflict' | 'Failed' | 'Superseded'
+}
+
+export type BomKind = 'Standard' | 'NonStandard' | 'Unclassified' | 'Electrical'
+export interface BatchUpdateBomItemsInput {
+  itemIds: string[]
+  fields: string[]
+  targetKind?: BomKind
+  unit?: string
+  drawingNumber?: string
+  name?: string
+  specification?: string
+  remark?: string
+  brand?: string
+  material?: string
+  surfaceTreatment?: string
+  weight?: string
+  quantity?: number
+  revision?: string
+  complete?: boolean
+}
+export interface BomEmptyDeclaration { kind: BomKind; declaredEmpty: boolean; updatedBy?: string; updatedAt?: string }
+export interface BomGenerationResult {
+  standardItems: BomItem[]
+  nonStandardItems: BomItem[]
+  electricalItems: BomItem[]
+  unclassifiedItems: BomItem[]
+  virtualCount: number
+  unclassifiedCount: number
+  pendingRemovalCount: number
+  manualUnmatchedCount: number
+  applied: boolean
+}
+
+export type BomVersionState = 'Draft' | 'InReview' | 'Released' | 'Obsolete'
+export interface BomVersion {
+  id: string
+  projectId: string
+  kind: Exclude<BomKind, 'Unclassified'>
+  versionNumber: number
+  label: string
+  state: BomVersionState
+  baseVersionId?: string
+  changeNumber?: string
+  changeReason?: string
+  effectiveSerialFrom?: string
+  effectiveSerialTo?: string
+  items: BomItem[]
+  createdBy: string
+  createdAt: string
+  updatedBy: string
+  updatedAt: string
+  releasedAt?: string
+  validationRequiredFields?: BomValidationField[]
+}
+
+export interface ManufacturingBomBaseline {
+  id: string
+  projectId: string
+  sequence: number
+  label: string
+  standardBomVersionId: string
+  nonStandardBomVersionId: string
+  electricalBomVersionId: string
+  changeNumber: string
+  changeReason: string
+  effectiveSerialFrom: string
+  effectiveSerialTo?: string
+  releasePackageId: string
+  createdBy: string
+  createdAt: string
 }
 
 export interface ApprovalStep {
@@ -299,6 +444,13 @@ export interface ReleasePackageSummary {
   steps: ApprovalStep[]
   publishedPath?: string
   publishError?: string
+  changeNumber?: string
+  changeReason?: string
+  effectiveSerialFrom?: string
+  effectiveSerialTo?: string
+  standardBomRevision?: string
+  nonStandardBomRevision?: string
+  electricalBomRevision?: string
 }
 
 export interface AuditEntry {
@@ -367,4 +519,227 @@ export interface DocumentVersionComparison {
   propertyChanges: VersionChange[]
   referenceChanges: VersionChange[]
   bomChanges: VersionChange[]
+}
+
+export type MaterialKind = 'Electrical' | 'Standard' | 'NonStandard'
+export type MaterialSupplyMode = 'Purchase' | 'Manufacture' | 'Outsource'
+export type MaterialApprovalStatus = 'Draft' | 'Approved'
+export type MaterialSyncStatus = 'NotQueued' | 'PreviewReady' | 'Pending' | 'Succeeded' | 'Failed' | 'NeedsReview' | 'Superseded'
+export type MaterialDataSource = 'Pdm' | 'U9C'
+export type MaterialMasterOwner = 'Pdm' | 'U9C'
+
+export interface PdmMaterial {
+  id: string
+  materialCode: string
+  name: string
+  kind: MaterialKind
+  supplyMode: MaterialSupplyMode
+  unitCode: string
+  specification?: string | null
+  material?: string | null
+  remark?: string | null
+  brand?: string | null
+  surfaceTreatment?: string | null
+  purchaseLink?: string | null
+  weight?: number | null
+  weightUnit?: string | null
+  sourceBomItemId?: string | null
+  approvalStatus: MaterialApprovalStatus
+  approvedBy?: string | null
+  approvedAt?: string | null
+  u9CategoryCode?: string | null
+  u9ItemId?: string | null
+  u9ItemCode?: string | null
+  syncStatus: MaterialSyncStatus
+  createdBy: string
+  createdAt: string
+  updatedBy: string
+  updatedAt: string
+  rowVersion: number
+  categoryCode?: string | null
+  isArchived: boolean
+  archivedBy?: string | null
+  archivedAt?: string | null
+  u9SyncConfirmed: boolean
+  sourceSystem: MaterialDataSource
+  masterOwner: MaterialMasterOwner
+  lastU9SyncedAt?: string | null
+}
+
+export interface SaveMaterialInput {
+  materialCode: string
+  name: string
+  kind: MaterialKind
+  supplyMode: MaterialSupplyMode
+  unitCode: string
+  specification?: string | null
+  material?: string | null
+  remark?: string | null
+  brand?: string | null
+  surfaceTreatment?: string | null
+  purchaseLink?: string | null
+  weight?: number | null
+  weightUnit?: string | null
+  expectedRowVersion?: number | null
+  categoryCode?: string | null
+}
+
+export interface MaterialCategory {
+  code: string
+  name: string
+  parentCode?: string | null
+  u9CategoryId?: string | null
+  pdmKind?: MaterialKind | null
+  defaultSupplyMode: MaterialSupplyMode
+  allowCreate: boolean
+  isVisible: boolean
+  isActive: boolean
+  numberPrefix: string
+  sequenceLength: number
+  counterScope: string
+  sortOrder: number
+  updatedBy: string
+  updatedAt: string
+  rowVersion: number
+  currentSequence: number
+}
+
+export interface MaterialRemovalResult {
+  material: PdmMaterial
+  deleted: boolean
+  archived: boolean
+}
+
+export interface MaterialRemovalReadiness {
+  materialId: string
+  materialCode: string
+  pdmReferenceCount: number
+  isPdmMaster: boolean
+  localDeletePreconditionsPassed: boolean
+  u9ReferenceCheckAvailable: boolean
+  synchronizedDeleteAvailable: boolean
+  decision: string
+}
+
+export interface MaterialCategoryRule {
+  pdmKind: MaterialKind
+  u9CategoryCode: string
+  u9CategoryName: string
+  defaultSupplyMode: MaterialSupplyMode
+  isEnabled: boolean
+  updatedBy: string
+  updatedAt: string
+}
+
+export interface MaterialSyncTask {
+  id: string
+  materialId: string
+  operation: 'Create' | 'Update'
+  status: MaterialSyncStatus
+  correlationId: string
+  payloadJson: string
+  payloadSha256: string
+  attemptCount: number
+  nextAttemptAt?: string | null
+  lastError?: string | null
+  responsePreview?: string | null
+  u9ItemId?: string | null
+  u9ItemCode?: string | null
+  createdAt: string
+  updatedAt: string
+}
+
+export interface MaterialSyncExecutionResult {
+  material: PdmMaterial
+  task: MaterialSyncTask
+  created: boolean
+  alreadyExisted: boolean
+  updated: boolean
+}
+
+export interface U9MaterialIntegrationSettings {
+  baseUrl: string
+  enterpriseCode: string
+  organizationCode: string
+  userCode: string
+  clientId: string
+  clientSecretConfigured: boolean
+  itemCreatePath: string
+  itemQueryPath: string
+  itemModifyPath: string
+  itemDeletePath: string
+  unitCodeMappings: Record<string, string>
+  writeEnabled: boolean
+  updatedBy?: string | null
+  updatedAt?: string | null
+}
+
+export interface U9ConnectionTestResult {
+  baseUrl: string
+  enterpriseCode: string
+  organizationCode: string
+  userCode: string
+  clientId: string
+  testedAt: string
+}
+
+export interface U9ItemQueryResult {
+  responseCode: number
+  responseMessage?: string | null
+  items: Array<{
+    u9ItemId?: string | null
+    u9ItemCode?: string | null
+    u9ItemName?: string | null
+    u9Specification?: string | null
+    u9CategoryCode?: string | null
+    u9CategoryName?: string | null
+    u9UnitCode?: string | null
+    u9ItemFormAttribute?: number | null
+  }>
+}
+
+export interface U9MaterialSampleItem {
+  u9ItemId: string
+  materialCode: string
+  name: string
+  categoryCode: string
+  categoryName: string
+  kind: MaterialKind
+  supplyMode: MaterialSupplyMode
+  unitCode: string
+  specification?: string | null
+  existsInPdm: boolean
+  canImport: boolean
+  decision: string
+}
+
+export interface U9MaterialSamplePreview {
+  categoryCodes: string[]
+  limitPerCategory: number
+  items: U9MaterialSampleItem[]
+  queriedAt: string
+}
+
+export interface U9MaterialSampleImportResult {
+  preview: U9MaterialSamplePreview
+  createdCount: number
+  refreshedCount: number
+  skippedCount: number
+  materials: PdmMaterial[]
+  importedAt: string
+}
+
+export interface UpdateU9MaterialIntegrationInput {
+  baseUrl: string
+  enterpriseCode: string
+  organizationCode: string
+  userCode: string
+  clientId: string
+  clientSecret?: string | null
+  itemCreatePath: string
+  itemQueryPath: string
+  itemModifyPath: string
+  itemDeletePath: string
+  unitCodeMappings: Record<string, string>
+  writeEnabled: boolean
 }

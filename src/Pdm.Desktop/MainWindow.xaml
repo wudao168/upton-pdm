@@ -9,6 +9,7 @@
         Height="900"
         MinWidth="1100"
         MinHeight="700"
+        WindowState="Maximized"
         WindowStartupLocation="CenterScreen"
         Background="{StaticResource WindowBackground}">
     <Grid x:Name="RootGrid">
@@ -20,16 +21,58 @@
                     Background="#EDF3F8"
                     BorderBrush="#CBD8E5"
                     BorderThickness="1">
-                <wfi:WindowsFormsHost x:Name="EmbeddedPreviewHost" />
+                <Grid>
+                    <wfi:WindowsFormsHost x:Name="EmbeddedPreviewHost" />
+                    <Popup x:Name="PreviewPropertiesPopup"
+                           Placement="Relative"
+                           PlacementTarget="{Binding ElementName=EmbeddedPreviewHost}"
+                           HorizontalOffset="14"
+                           VerticalOffset="14"
+                           AllowsTransparency="True"
+                           IsHitTestVisible="False"
+                           StaysOpen="True">
+                        <Grid x:Name="PreviewPropertiesGrid"
+                              MaxWidth="320"
+                              SnapsToDevicePixels="True"
+                              UseLayoutRounding="True"
+                              TextOptions.TextFormattingMode="Display"
+                              TextOptions.TextHintingMode="Fixed"
+                              TextOptions.TextRenderingMode="Grayscale" />
+                    </Popup>
+                </Grid>
             </Border>
         </Canvas>
 
-        <Border x:Name="LoadingPanel" Panel.ZIndex="100" Background="#F4F6F8">
-            <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center">
-                <TextBlock Text="UPTON PDM" FontSize="26" FontWeight="SemiBold" Foreground="#19242D" HorizontalAlignment="Center" />
-                <TextBlock Text="正在加载设计资料中心…" Margin="0,12,0,0" FontSize="14" Foreground="#6E7D88" HorizontalAlignment="Center" />
-                <ProgressBar Margin="0,20,0,0" Width="220" Height="4" IsIndeterminate="True" Foreground="#D68021" />
-            </StackPanel>
+        <Border x:Name="LoadingPanel" Panel.ZIndex="100" Background="#FFFFFF">
+            <Grid Width="520" Height="16" HorizontalAlignment="Center" VerticalAlignment="Center" ClipToBounds="True">
+                <Border Background="#E9EDF4" CornerRadius="8" />
+                <Border Width="210" Height="16" HorizontalAlignment="Left" CornerRadius="8">
+                    <Border.Background>
+                        <LinearGradientBrush StartPoint="0,0.5" EndPoint="1,0.5">
+                            <GradientStop Color="#5BC9F2" Offset="0" />
+                            <GradientStop Color="#37D4B1" Offset="0.55" />
+                            <GradientStop Color="#2BB673" Offset="1" />
+                        </LinearGradientBrush>
+                    </Border.Background>
+                    <Border.RenderTransform>
+                        <TranslateTransform x:Name="LoadingSweepTransform" X="-210" />
+                    </Border.RenderTransform>
+                </Border>
+                <Grid.Triggers>
+                    <EventTrigger RoutedEvent="FrameworkElement.Loaded">
+                        <BeginStoryboard>
+                            <Storyboard>
+                                <DoubleAnimation Storyboard.TargetName="LoadingSweepTransform"
+                                                 Storyboard.TargetProperty="X"
+                                                 From="-210"
+                                                 To="520"
+                                                 Duration="0:0:1.15"
+                                                 RepeatBehavior="Forever" />
+                            </Storyboard>
+                        </BeginStoryboard>
+                    </EventTrigger>
+                </Grid.Triggers>
+            </Grid>
         </Border>
     </Grid>
 </Window>

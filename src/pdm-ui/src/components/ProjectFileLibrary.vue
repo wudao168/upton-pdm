@@ -90,7 +90,7 @@ async function savePermissions() {
     </aside>
     <section class="pdm-panel pdm-folder-content">
       <header class="pdm-folder-toolbar">
-        <div><div class="pdm-breadcrumb">项目图档 <span>/</span> {{ selectedFolder?.name || '请选择目录' }}</div><h2>{{ selectedFolder?.name || '项目文件库' }}</h2><p v-if="selectedFolder?.purpose === 'ProjectContainer'">该目录只接收“{{ selectedFolder.name }}”对应项目的图档。</p><p v-else>当前目录按独立权限控制查看、上传、编辑和发布。</p></div>
+        <div><div class="pdm-breadcrumb">项目图档 <span>/</span> {{ selectedFolder?.name || '请选择目录' }}</div><h2>{{ selectedFolder?.name || '项目文件库' }}</h2><p v-if="selectedFolder?.purpose === 'ProjectContainer'">该目录只接收“{{ selectedFolder.name }}”对应项目的图档。</p></div>
         <button v-if="administrator && selectedFolder" type="button" class="pdm-secondary-action" @click="openPermissions"><ShieldCheck :size="15" />目录权限</button>
       </header>
       <div class="pdm-file-filters">

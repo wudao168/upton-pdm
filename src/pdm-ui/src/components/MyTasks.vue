@@ -1,14 +1,16 @@
 <script setup lang="ts">
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { ClipboardCheck, ClockAlert, RefreshCw } from '@lucide/vue'
-import type { EditLockSummary, MyApprovalTask } from '../types'
+import { ClipboardCheck, ClockAlert, KeyRound, RefreshCw } from '@lucide/vue'
+import type { EditLockSummary, MyApprovalTask, PasswordResetTask } from '../types'
 
 const props = defineProps<{
   tasks: MyApprovalTask[]
   locks: EditLockSummary[]
+  passwordResetTasks: PasswordResetTask[]
   pending: boolean
   onRequestRelease: (documentId: string, reason: string) => Promise<void>
   onForceRelease: (documentId: string, reason: string) => Promise<void>
+  onResetPassword: (taskId: string) => Promise<void>
 }>()
 defineEmits<{ open: [projectId: string]; refresh: [] }>()
 
@@ -55,6 +57,17 @@ async function forceRelease(lock: EditLockSummary) {
     ElMessage.error(error instanceof Error ? error.message : '强制释放失败')
   }
 }
+
+async function resetPassword(task: PasswordResetTask) {
+  try {
+    await ElMessageBox.confirm(`确认将 ${task.displayName} 的密码重置为 11111111？`, '重置密码', { type: 'warning' })
+    await props.onResetPassword(task.id)
+    ElMessage.success('密码已重置为 11111111')
+  } catch (error) {
+    if (error === 'cancel' || error === 'close') return
+    ElMessage.error(error instanceof Error ? error.message : '密码重置失败')
+  }
+}
 </script>
 
 <template>
@@ -63,6 +76,10 @@ async function forceRelease(lock: EditLockSummary) {
       <div><div class="pdm-breadcrumb">PDM <span>/</span> 我的待办</div><h1>我的待办</h1><p>集中处理审批任务和长时间未提交的编辑权限。</p></div>
       <button type="button" class="pdm-secondary-action" :disabled="pending" @click="$emit('refresh')"><RefreshCw :size="15" />刷新</button>
     </header>
+    <section v-if="passwordResetTasks.length" class="pdm-panel pdm-project-list">
+      <header class="pdm-panel-heading"><div><h2>密码重置申请</h2><small>账号与姓名匹配后生成；处理方式与CRM一致，重置为初始密码11111111。</small></div></header>
+      <div class="pdm-table-scroll"><table class="pdm-project-table"><thead><tr><th>账号</th><th>姓名</th><th>申请时间</th><th>操作</th></tr></thead><tbody><tr v-for="task in passwordResetTasks" :key="task.id"><td><strong>{{ task.username }}</strong></td><td>{{ task.displayName }}</td><td>{{ new Date(task.requestedAt).toLocaleString() }}</td><td><button type="button" class="pdm-text-action" :disabled="pending" @click="resetPassword(task)"><KeyRound :size="14" />重置密码</button></td></tr></tbody></table></div>
+    </section>
     <section class="pdm-panel pdm-project-list">
       <header class="pdm-panel-heading"><div><h2>编辑权限</h2><small>在线会话继续保留权限；离线和超时权限可催办，达到强制释放时限后由授权人员处理。</small></div></header>
       <div v-if="locks.length" class="pdm-table-scroll"><table class="pdm-project-table pdm-lock-table"><thead><tr><th>项目／图档</th><th>编辑人</th><th>已占用</th><th>连接</th><th>状态</th><th>申请情况</th><th>操作</th></tr></thead><tbody><tr v-for="lock in locks" :key="lock.documentId" :class="`is-lock-level-${attentionIndex(lock.attentionLevel)}`"><td><strong>{{ lock.projectCode }} · {{ lock.drawingNumber }}</strong><small>{{ lock.documentName }}</small></td><td>{{ lock.checkedOutBy }}<small>{{ lock.checkoutMachine || '未知电脑' }}</small></td><td>{{ elapsed(lock.checkedOutAt) }}<small>{{ new Date(lock.checkedOutAt).toLocaleString() }}</small></td><td><span class="pdm-status" :class="connectionLabel(lock.connectionState) === '在线' ? 'is-ok' : 'is-alert'">{{ connectionLabel(lock.connectionState) }}</span><small>心跳 {{ new Date(lock.lastHeartbeatAt).toLocaleString() }}</small></td><td><span class="pdm-status" :class="attentionIndex(lock.attentionLevel) >= 3 ? 'is-alert' : attentionIndex(lock.attentionLevel) > 0 ? 'is-remind' : 'is-ok'">{{ attentionLabel(lock.attentionLevel) }}</span></td><td><span v-if="lock.releaseRequestedBy">{{ lock.releaseRequestedBy }} 已申请</span><small v-if="lock.releaseRequestReason">{{ lock.releaseRequestReason }}</small><span v-else>—</span></td><td><span v-if="lock.ownedByCurrentUser" class="pdm-lock-own">请在SolidWorks提交或放弃</span><button v-else-if="lock.canForceRelease" type="button" class="pdm-text-action is-danger" :disabled="pending" @click="forceRelease(lock)">强制释放</button><button v-else-if="lock.canRequestRelease" type="button" class="pdm-text-action" :disabled="pending || !!lock.releaseRequestedBy" @click="requestRelease(lock)">{{ lock.releaseRequestedBy ? '已申请' : '催办／申请释放' }}</button><span v-else>—</span></td></tr></tbody></table></div>

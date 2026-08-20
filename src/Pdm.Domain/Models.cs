@@ -62,6 +62,8 @@ public sealed record Project(
     public int? DocumentCount { get; init; }
 
     public string? BusinessStatus { get; init; }
+
+    public string? RootDocumentCheckedOutBy { get; init; }
 }
 
 public sealed record ProjectOrganization(
@@ -101,6 +103,28 @@ public sealed record PdmSystemSettings(string VaultRoot, string ReleaseRoot)
     public int CheckoutOverdueHours { get; init; } = 24;
 
     public int CheckoutForceReleaseHours { get; init; } = 48;
+
+    public string BomDrawingNumberProperty { get; init; } = "物料编码";
+
+    public string BomNameProperty { get; init; } = "物料名称";
+
+    public string BomDescriptionProperty { get; init; } = "备注信息";
+
+    public string BomMaterialProperty { get; init; } = "材质";
+
+    public string BomSpecificationProperty { get; init; } = "型号";
+
+    public string BomUnitProperty { get; init; } = "单位";
+
+    public string BomBrandProperty { get; init; } = "品牌";
+
+    public string BomSurfaceTreatmentProperty { get; init; } = "表面处理";
+
+    public string BomWeightProperty { get; init; } = "重量";
+
+    public IReadOnlyList<BomPropertyMapping> BomPropertyMappings { get; init; } = Array.Empty<BomPropertyMapping>();
+
+    public BomValidationRules ValidationRules { get; init; } = BomValidationRules.Default;
 }
 
 public sealed record ProjectNumberingOptions(
@@ -122,7 +146,10 @@ public sealed record OrganizationMembership(Guid UnitId, string Username, bool I
 
 public sealed record OrganizationUnitManagers(Guid UnitId, string PrimaryManager, IReadOnlyList<string> CollaborativeManagers);
 
-public sealed record OrganizationDirectoryUser(string Username, string DisplayName, UserRole Role, bool IsActive);
+public sealed record OrganizationDirectoryUser(string Username, string DisplayName, UserRole Role, bool IsActive, string? RoleCode = null)
+{
+    public string EffectiveRoleCode => string.IsNullOrWhiteSpace(RoleCode) ? Role.ToString() : RoleCode;
+}
 
 public sealed record OrganizationDirectory(
     IReadOnlyList<ProjectOrganization> Organizations,
@@ -139,17 +166,22 @@ public sealed record PermissionDefinition(
     bool Sensitive = false);
 
 public sealed record RoleDefinition(
-    UserRole Role,
+    string RoleCode,
     string Name,
     string Description,
+    UserRole BaseRole,
+    bool IsSystem = false,
     bool IsSystemAdministrator = false);
 
 public sealed record RolePermissionSettings(
-    UserRole Role,
+    string Role,
     string Name,
     string Description,
+    UserRole BaseRole,
+    bool IsSystem,
     bool IsSystemAdministrator,
-    IReadOnlyList<string> Permissions);
+    IReadOnlyList<string> Permissions,
+    int UserCount = 0);
 
 public sealed record RolePermissionDirectory(
     IReadOnlyList<PermissionDefinition> Permissions,
@@ -168,6 +200,8 @@ public sealed record PdmDocument(
     DateTimeOffset UpdatedAt)
 {
     public Guid? FolderId { get; init; }
+
+    public int? StoredVersionCount { get; init; }
 
     public DateTimeOffset? CheckedOutAt { get; init; }
 
@@ -284,7 +318,112 @@ public sealed record BomItem(
     string? Material,
     string? Specification,
     string Revision,
-    bool IsComplete);
+    bool IsComplete)
+{
+    public string? Remark { get; init; }
+
+    public string? Brand { get; init; }
+
+    public string? SurfaceTreatment { get; init; }
+
+    public string? Weight { get; init; }
+
+    public Guid? SourceDocumentId { get; init; }
+
+    public string? SourceConfiguration { get; init; }
+
+    public string Source { get; init; } = "Manual";
+
+    public bool IsManuallyOverridden { get; init; }
+
+    public bool IsPendingRemoval { get; init; }
+
+    public bool IsPendingClassification { get; init; }
+
+    public bool IsManualUnmatched { get; init; }
+
+    public bool IsManuallyRetained { get; init; }
+
+    public bool IsManuallyExcluded { get; init; }
+
+    public string? ReconciliationStatus { get; init; }
+
+    public string? ReconciliationNote { get; init; }
+
+    public string? ReconciliationUpdatedBy { get; init; }
+
+    public DateTimeOffset? ReconciliationUpdatedAt { get; init; }
+
+    public DateTimeOffset? DeletedAt { get; init; }
+
+    public string? DeletedBy { get; init; }
+
+    public string? DeleteReason { get; init; }
+
+    public CadPropertyWritebackStatus? PropertyWritebackStatus { get; init; }
+}
+
+public sealed record BomEmptyDeclaration(BomKind Kind, bool DeclaredEmpty, string? UpdatedBy, DateTimeOffset? UpdatedAt);
+
+public sealed record BomVersion(
+    Guid Id,
+    Guid ProjectId,
+    BomKind Kind,
+    int VersionNumber,
+    string Label,
+    BomVersionState State,
+    Guid? BaseVersionId,
+    string? ChangeNumber,
+    string? ChangeReason,
+    string? EffectiveSerialFrom,
+    string? EffectiveSerialTo,
+    IReadOnlyList<BomItem> Items,
+    string CreatedBy,
+    DateTimeOffset CreatedAt,
+    string UpdatedBy,
+    DateTimeOffset UpdatedAt,
+    DateTimeOffset? ReleasedAt)
+{
+    public IReadOnlyList<string> ValidationRequiredFields { get; init; } = [];
+}
+
+public sealed record ManufacturingBomBaseline(
+    Guid Id,
+    Guid ProjectId,
+    int Sequence,
+    string Label,
+    Guid StandardBomVersionId,
+    Guid NonStandardBomVersionId,
+    Guid ElectricalBomVersionId,
+    string ChangeNumber,
+    string ChangeReason,
+    string EffectiveSerialFrom,
+    string? EffectiveSerialTo,
+    Guid ReleasePackageId,
+    string CreatedBy,
+    DateTimeOffset CreatedAt);
+
+public sealed record CadPropertyWriteback(
+    Guid Id,
+    Guid ProjectId,
+    Guid BomItemId,
+    Guid SourceDocumentId,
+    string? SourceConfiguration,
+    Guid ExpectedVersionId,
+    string ExpectedRevision,
+    IReadOnlyDictionary<string, string?> Properties,
+    CadPropertyWritebackStatus Status,
+    string RequestedBy,
+    DateTimeOffset RequestedAt)
+{
+    public DateTimeOffset? StartedAt { get; init; }
+
+    public DateTimeOffset? CompletedAt { get; init; }
+
+    public Guid? ResultVersionId { get; init; }
+
+    public string? LastError { get; init; }
+}
 
 public sealed record ApprovalTask(
     Guid Id,
@@ -309,6 +448,28 @@ public sealed record ReleasePackage(
     DateTimeOffset? PublishedAt,
     string? PublishedPath)
 {
+    public Guid? StandardBomVersionId { get; init; }
+
+    public Guid? NonStandardBomVersionId { get; init; }
+
+    public Guid? ElectricalBomVersionId { get; init; }
+
+    public string? StandardBomRevision { get; init; }
+
+    public string? NonStandardBomRevision { get; init; }
+
+    public IReadOnlyList<BomItem> StandardBomSnapshot { get; init; } = [];
+
+    public IReadOnlyList<BomItem> NonStandardBomSnapshot { get; init; } = [];
+
+    public string? ChangeNumber { get; init; }
+
+    public string? ChangeReason { get; init; }
+
+    public string? EffectiveSerialFrom { get; init; }
+
+    public string? EffectiveSerialTo { get; init; }
+
     public IReadOnlyList<BomItem> MechanicalBomSnapshot { get; init; } = [];
 
     public IReadOnlyList<BomItem> ElectricalBomSnapshot { get; init; } = [];

@@ -32,7 +32,7 @@ public partial class MainWindow : Window
     private const uint MenuByCommand = 0x0000;
     private const uint MenuChecked = 0x0008;
     private const uint MenuUnchecked = 0x0000;
-    private readonly string[] startupArgs = Environment.GetCommandLineArgs();
+    private readonly string[] startupArgs = Environment.GetCommandLineArgs().Skip(1).ToArray();
     private readonly bool startedWithWindows = Environment.GetCommandLineArgs().Any(argument => string.Equals(argument, "--startup", StringComparison.OrdinalIgnoreCase));
     private readonly HttpClient apiClient = new() { BaseAddress = new Uri("http://127.0.0.1:5080"), Timeout = TimeSpan.FromMinutes(5) };
     private readonly SolidWorksOpenBridge solidWorksBridge = new();
@@ -48,6 +48,8 @@ public partial class MainWindow : Window
     private bool trayNoticeShown;
     private WinForms.NotifyIcon? trayIcon;
     private WinForms.ToolStripMenuItem? trayStartupItem;
+    private string[]? pendingExternalRequestArgs;
+    private bool workspaceNavigationReady;
 
     public MainWindow()
     {
@@ -99,17 +101,19 @@ public partial class MainWindow : Window
             uiFolder,
             CoreWebView2HostResourceAccessKind.DenyCors);
         WorkspaceView.CoreWebView2.WebMessageReceived += OnWebMessageReceived;
-        WorkspaceView.NavigationCompleted += (_, args) =>
+        WorkspaceView.NavigationCompleted += async (_, args) =>
         {
             LoadingPanel.Visibility = Visibility.Collapsed;
             if (!args.IsSuccess)
             {
                 WpfMessageBox.Show(this, $"页面加载失败：{args.WebErrorStatus}", "UPTON PDM");
             }
-            else if (startupArgs.Length >= 5 && string.Equals(startupArgs[1], "--compare", StringComparison.OrdinalIgnoreCase))
+            else
             {
-                var script = $"window.dispatchEvent(new CustomEvent('pdm-open-version-compare', {{ detail: {{ documentId: {Serialize(startupArgs[2])}, leftVersionId: {Serialize(startupArgs[3])}, rightVersionId: {Serialize(startupArgs[4])} }} }}));";
-                _ = WorkspaceView.CoreWebView2.ExecuteScriptAsync(script);
+                workspaceNavigationReady = true;
+                var requestArgs = pendingExternalRequestArgs ?? startupArgs;
+                pendingExternalRequestArgs = null;
+                await DispatchLaunchRequestAsync(requestArgs);
             }
             _ = PublishSolidWorksCapabilityAsync();
         };
@@ -118,6 +122,45 @@ public partial class MainWindow : Window
     }
 
     private static string Serialize(object value) => new JavaScriptSerializer().Serialize(value);
+
+    private async Task DispatchLaunchRequestAsync(IReadOnlyList<string> arguments)
+    {
+        if (WorkspaceView.CoreWebView2 == null || arguments == null || arguments.Count == 0) return;
+
+        if (arguments.Count >= 4 && string.Equals(arguments[0], "--compare", StringComparison.OrdinalIgnoreCase))
+        {
+            var compareScript = $"window.dispatchEvent(new CustomEvent('pdm-open-version-compare', {{ detail: {{ documentId: {Serialize(arguments[1])}, leftVersionId: {Serialize(arguments[2])}, rightVersionId: {Serialize(arguments[3])} }} }}));";
+            await WorkspaceView.CoreWebView2.ExecuteScriptAsync(compareScript);
+            return;
+        }
+
+        var projectArgumentIndex = FindArgument(arguments, "--project");
+        if (projectArgumentIndex < 0
+            || projectArgumentIndex + 1 >= arguments.Count
+            || !Guid.TryParse(arguments[projectArgumentIndex + 1], out var projectId))
+        {
+            return;
+        }
+
+        var tab = "documents";
+        var tabArgumentIndex = FindArgument(arguments, "--tab");
+        if (tabArgumentIndex >= 0 && tabArgumentIndex + 1 < arguments.Count)
+        {
+            tab = arguments[tabArgumentIndex + 1];
+        }
+
+        var projectScript = $"window.dispatchEvent(new CustomEvent('pdm-open-project', {{ detail: {{ projectId: {Serialize(projectId.ToString("D"))}, tab: {Serialize(tab)} }} }}));";
+        await WorkspaceView.CoreWebView2.ExecuteScriptAsync(projectScript);
+    }
+
+    private static int FindArgument(IReadOnlyList<string> arguments, string name)
+    {
+        for (var index = 0; index < arguments.Count; index++)
+        {
+            if (string.Equals(arguments[index], name, StringComparison.OrdinalIgnoreCase)) return index;
+        }
+        return -1;
+    }
 
     private void OnWebMessageReceived(object? sender, CoreWebView2WebMessageReceivedEventArgs e)
     {
@@ -164,9 +207,9 @@ public partial class MainWindow : Window
             return;
         }
 
-        if (type == "credentials-save" && TryReadUsername(message, out var username))
+        if (type == "credentials-save" && TryReadCredentials(message, out var username, out var password))
         {
-            TryUpdateRememberedCredentials(() => RememberedCredentialsStore.SaveUsername(username));
+            TryUpdateRememberedCredentials(() => RememberedCredentialsStore.SaveCredentials(username, password));
             return;
         }
 
@@ -198,6 +241,7 @@ public partial class MainWindow : Window
         if (type == "preview-host-suspend")
         {
             PreviewFrame.Visibility = Visibility.Collapsed;
+            PreviewPropertiesPopup.IsOpen = false;
             return;
         }
 
@@ -292,8 +336,8 @@ public partial class MainWindow : Window
             return;
         }
 
-        var remembered = RememberedCredentialsStore.TryLoadUsername(out var username);
-        var detail = new { username, remember = remembered };
+        var remembered = RememberedCredentialsStore.TryLoadCredentials(out var username, out var password);
+        var detail = new { username, password, remember = remembered };
         var script = $"window.dispatchEvent(new CustomEvent('pdm-remembered-credentials', {{ detail: {Serialize(detail)} }}));";
         await WorkspaceView.CoreWebView2.ExecuteScriptAsync(script);
     }
@@ -431,7 +475,7 @@ public partial class MainWindow : Window
     {
         if (WindowState == WindowState.Minimized && !allowClose)
         {
-            HideToNotificationArea(false);
+            ShowInTaskbar = true;
         }
     }
 
@@ -495,11 +539,23 @@ public partial class MainWindow : Window
     {
         ShowInTaskbar = true;
         Show();
-        WindowState = WindowState.Normal;
+        WindowState = WindowState.Maximized;
         Activate();
     }
 
-    internal void RestoreFromExternalRequest() => RestoreFromNotificationArea();
+    internal void RestoreFromExternalRequest(string[] arguments)
+    {
+        RestoreFromNotificationArea();
+        if (arguments == null || arguments.Length == 0) return;
+
+        if (!workspaceNavigationReady || WorkspaceView.CoreWebView2 == null)
+        {
+            pendingExternalRequestArgs = arguments;
+            return;
+        }
+
+        _ = DispatchLaunchRequestAsync(arguments);
+    }
 
     private void ExitApplication()
     {
@@ -533,20 +589,24 @@ public partial class MainWindow : Window
     [DllImport("user32.dll")]
     private static extern uint CheckMenuItem(IntPtr menu, uint item, uint check);
 
-    private static bool TryReadUsername(
+    private static bool TryReadCredentials(
         IReadOnlyDictionary<string, object> message,
-        out string username)
+        out string username,
+        out string password)
     {
         username = string.Empty;
+        password = string.Empty;
         if (!message.TryGetValue("payload", out var payloadValue)
             || payloadValue is not Dictionary<string, object> payload
-            || !payload.TryGetValue("username", out var usernameValue))
+            || !payload.TryGetValue("username", out var usernameValue)
+            || !payload.TryGetValue("password", out var passwordValue))
         {
             return false;
         }
 
         username = usernameValue as string ?? string.Empty;
-        return !string.IsNullOrWhiteSpace(username);
+        password = passwordValue as string ?? string.Empty;
+        return !string.IsNullOrWhiteSpace(username) && !string.IsNullOrEmpty(password);
     }
 
     private void TryUpdateRememberedCredentials(Action update)
@@ -601,6 +661,8 @@ public partial class MainWindow : Window
         var requestGeneration = Interlocked.Increment(ref previewRequestGeneration);
         previewDocumentReady = false;
         PreviewFrame.Visibility = Visibility.Collapsed;
+        PreviewPropertiesPopup.IsOpen = false;
+        UpdatePreviewProperties(payload);
         try
         {
             await PublishPreviewStatusAsync("loading", string.Empty, string.Empty);
@@ -626,7 +688,7 @@ public partial class MainWindow : Window
 
             var versions = new JavaScriptSerializer().Deserialize<VersionResponse[]>(versionsJson) ?? Array.Empty<VersionResponse>();
             var version = versions.OrderByDescending(item => item.CreatedAt).FirstOrDefault()
-                ?? throw new InvalidOperationException("该图档尚无已存档版本，不能只读预览。");
+                ?? throw new InvalidOperationException("该图档已登记，但尚未提交首个存档版本。装配体中可见的可能只是SolidWorks缓存几何，不是可下载的源文件；请从原始工作目录找回文件后完成首次存档。");
             if (string.IsNullOrWhiteSpace(fileName)) fileName = "document.bin";
             var cacheDirectory = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "UPTON", "PDM", "Preview", documentId.ToString("N"), version.Id.ToString("N"));
             Directory.CreateDirectory(cacheDirectory);
@@ -676,6 +738,7 @@ public partial class MainWindow : Window
 
             previewDocumentReady = false;
             PreviewFrame.Visibility = Visibility.Collapsed;
+            PreviewPropertiesPopup.IsOpen = false;
             embeddedPreview?.CloseDocument();
             await PublishPreviewStatusAsync("error", string.Empty, exception.Message);
         }
@@ -716,6 +779,7 @@ public partial class MainWindow : Window
             || WorkspaceView.ActualWidth <= 0 || WorkspaceView.ActualHeight <= 0)
         {
             PreviewFrame.Visibility = Visibility.Collapsed;
+            PreviewPropertiesPopup.IsOpen = false;
             return;
         }
 
@@ -737,6 +801,7 @@ public partial class MainWindow : Window
         if (width < 80 || height < 80)
         {
             PreviewFrame.Visibility = Visibility.Collapsed;
+            PreviewPropertiesPopup.IsOpen = false;
             return;
         }
 
@@ -745,6 +810,7 @@ public partial class MainWindow : Window
         PreviewFrame.Width = width;
         PreviewFrame.Height = height;
         PreviewFrame.Visibility = Visibility.Visible;
+        PreviewPropertiesPopup.IsOpen = PreviewPropertiesGrid.Children.Count > 0;
     }
 
     private void HideEmbeddedPreview(bool closeDocument)
@@ -752,9 +818,65 @@ public partial class MainWindow : Window
         Interlocked.Increment(ref previewRequestGeneration);
         previewDocumentReady = false;
         PreviewFrame.Visibility = Visibility.Collapsed;
+        PreviewPropertiesPopup.IsOpen = false;
         if (closeDocument)
         {
             embeddedPreview?.CloseDocument();
+        }
+    }
+
+    private void UpdatePreviewProperties(IReadOnlyDictionary<string, object> payload)
+    {
+        PreviewPropertiesGrid.Children.Clear();
+        PreviewPropertiesGrid.RowDefinitions.Clear();
+        PreviewPropertiesGrid.ColumnDefinitions.Clear();
+        PreviewPropertiesGrid.ColumnDefinitions.Add(new System.Windows.Controls.ColumnDefinition { Width = new GridLength(64) });
+        PreviewPropertiesGrid.ColumnDefinitions.Add(new System.Windows.Controls.ColumnDefinition { Width = GridLength.Auto });
+
+        var fields = new[]
+        {
+            (Label: "物料/图号", Key: "drawingNumber"),
+            (Label: "名称", Key: "name"),
+            (Label: "规格/型号", Key: "specification"),
+            (Label: "材质", Key: "material"),
+            (Label: "品牌", Key: "brand"),
+            (Label: "表面处理", Key: "surfaceTreatment"),
+            (Label: "版本", Key: "revision"),
+            (Label: "状态", Key: "status"),
+        };
+
+        foreach (var field in fields)
+        {
+            if (!payload.TryGetValue(field.Key, out var raw) || string.IsNullOrWhiteSpace(raw as string)) continue;
+            var row = PreviewPropertiesGrid.RowDefinitions.Count;
+            PreviewPropertiesGrid.RowDefinitions.Add(new System.Windows.Controls.RowDefinition { Height = GridLength.Auto });
+
+            var label = new System.Windows.Controls.TextBlock
+            {
+                Text = field.Label,
+                FontFamily = new System.Windows.Media.FontFamily("Microsoft YaHei UI"),
+                FontSize = 11,
+                FontWeight = FontWeights.SemiBold,
+                Foreground = new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(15, 23, 42)),
+                Margin = new Thickness(0, 0, 6, 4),
+            };
+            var value = new System.Windows.Controls.TextBlock
+            {
+                Text = (string)raw,
+                FontFamily = new System.Windows.Media.FontFamily("Microsoft YaHei UI"),
+                FontSize = 11,
+                FontWeight = FontWeights.SemiBold,
+                Foreground = new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(2, 6, 23)),
+                Margin = new Thickness(0, 0, 0, 4),
+                TextTrimming = TextTrimming.CharacterEllipsis,
+                MaxWidth = 250,
+            };
+            System.Windows.Controls.Grid.SetRow(label, row);
+            System.Windows.Controls.Grid.SetColumn(label, 0);
+            System.Windows.Controls.Grid.SetRow(value, row);
+            System.Windows.Controls.Grid.SetColumn(value, 1);
+            PreviewPropertiesGrid.Children.Add(label);
+            PreviewPropertiesGrid.Children.Add(value);
         }
     }
 

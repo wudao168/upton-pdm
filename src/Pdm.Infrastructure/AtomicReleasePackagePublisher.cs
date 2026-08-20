@@ -14,7 +14,14 @@ public sealed class AtomicReleasePackagePublisher(TimeProvider timeProvider) : I
         var vaultRoot = StorageLocationPolicy.Normalize(project.VaultLocation);
         var stagingDirectory = StorageLocationPolicy.ResolveUnder(vaultRoot, Path.Combine(".release-staging", package.Number));
         Directory.CreateDirectory(stagingDirectory);
-        await File.WriteAllBytesAsync(Path.Combine(stagingDirectory, "mechanical-bom.xlsx"), BomWorkbook.Write(package.MechanicalBomSnapshot), cancellationToken);
+        var standard = package.StandardBomVersionId.HasValue
+            ? package.StandardBomSnapshot.ToArray()
+            : package.MechanicalBomSnapshot.Where(item => item.Kind == BomKind.Standard).ToArray();
+        var nonStandard = package.NonStandardBomVersionId.HasValue
+            ? package.NonStandardBomSnapshot.ToArray()
+            : package.MechanicalBomSnapshot.Where(item => item.Kind is BomKind.NonStandard or BomKind.Mechanical).ToArray();
+        await File.WriteAllBytesAsync(Path.Combine(stagingDirectory, "standard-parts-bom.xlsx"), BomWorkbook.Write(standard), cancellationToken);
+        await File.WriteAllBytesAsync(Path.Combine(stagingDirectory, "nonstandard-parts-bom.xlsx"), BomWorkbook.Write(nonStandard), cancellationToken);
         await File.WriteAllBytesAsync(Path.Combine(stagingDirectory, "electrical-bom.xlsx"), BomWorkbook.Write(package.ElectricalBomSnapshot), cancellationToken);
     }
 
@@ -70,6 +77,15 @@ public sealed class AtomicReleasePackagePublisher(TimeProvider timeProvider) : I
                 package.Number,
                 package.ProjectId,
                 package.ReferenceSnapshotId,
+                package.ChangeNumber,
+                package.ChangeReason,
+                package.EffectiveSerialFrom,
+                package.EffectiveSerialTo,
+                package.StandardBomVersionId,
+                package.NonStandardBomVersionId,
+                package.ElectricalBomVersionId,
+                package.StandardBomRevision,
+                package.NonStandardBomRevision,
                 package.MechanicalBomRevision,
                 package.ElectricalBomRevision,
                 PublishedAt = timeProvider.GetUtcNow(),
@@ -115,7 +131,8 @@ public sealed class AtomicReleasePackagePublisher(TimeProvider timeProvider) : I
             throw new PdmRuleException("生产发布包不能包含SolidWorks源文件。 ");
         RequireFile(sourceFiles, path => string.Equals(Path.GetExtension(path), ".pdf", StringComparison.OrdinalIgnoreCase), "PDF图纸");
         RequireFile(sourceFiles, path => string.Equals(Path.GetExtension(path), ".dwg", StringComparison.OrdinalIgnoreCase), "DWG图纸");
-        RequireFile(sourceFiles, path => string.Equals(Path.GetFileName(path), "mechanical-bom.xlsx", StringComparison.OrdinalIgnoreCase), "机械BOM XLSX");
+        RequireFile(sourceFiles, path => string.Equals(Path.GetFileName(path), "standard-parts-bom.xlsx", StringComparison.OrdinalIgnoreCase), "标准件BOM XLSX");
+        RequireFile(sourceFiles, path => string.Equals(Path.GetFileName(path), "nonstandard-parts-bom.xlsx", StringComparison.OrdinalIgnoreCase), "非标件BOM XLSX");
         RequireFile(sourceFiles, path => string.Equals(Path.GetFileName(path), "electrical-bom.xlsx", StringComparison.OrdinalIgnoreCase), "电气BOM XLSX");
     }
 }

@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
+import { ArrowDown, ArrowUp } from '@lucide/vue'
 import type { FolderPermissionRule, PdmUser, ProjectFolderTemplateNode } from '../types'
 
 const props = defineProps<{ nodes: ProjectFolderTemplateNode[]; users: PdmUser[]; pending: boolean; onSave: (nodes: ProjectFolderTemplateNode[]) => Promise<ProjectFolderTemplateNode[]> }>()
@@ -21,11 +22,35 @@ function addPermission() { permissionRows.value.push({ principalType: 'Role', pr
 function accessValues(rule: FolderPermissionRule) { return accessOptions.filter(item => (rule.access & item.value) === item.value).map(item => item.value) }
 function setAccess(rule: FolderPermissionRule, values: number[]) { rule.access = values.reduce((mask, value) => mask | value, 0) }
 function applyPermissions() { const node = draft.value.find(item => item.folderKey === editingKey.value); if (node) node.permissions = permissionRows.value.map(rule => ({ ...rule })); permissionOpen.value = false }
+function parentLabel(node: ProjectFolderTemplateNode) {
+  if (!node.parentKey) return '项目号'
+  return draft.value.find(item => item.folderKey === node.parentKey)?.name || node.parentKey
+}
+function siblingIndexes(node: ProjectFolderTemplateNode) {
+  return draft.value.map((item, index) => ({ item, index })).filter(entry => entry.item.parentKey === node.parentKey).map(entry => entry.index)
+}
+function canMove(node: ProjectFolderTemplateNode, offset: -1 | 1) {
+  const indexes = siblingIndexes(node)
+  const position = indexes.findIndex(index => draft.value[index].folderKey === node.folderKey)
+  return position >= 0 && position + offset >= 0 && position + offset < indexes.length
+}
+function moveNode(node: ProjectFolderTemplateNode, offset: -1 | 1) {
+  const indexes = siblingIndexes(node)
+  const position = indexes.findIndex(index => draft.value[index].folderKey === node.folderKey)
+  const targetPosition = position + offset
+  if (position < 0 || targetPosition < 0 || targetPosition >= indexes.length) return
+  const currentIndex = indexes[position]
+  const targetIndex = indexes[targetPosition]
+  const target = draft.value[targetIndex]
+  const currentSortOrder = node.sortOrder
+  node.sortOrder = target.sortOrder
+  target.sortOrder = currentSortOrder
+  ;[draft.value[currentIndex], draft.value[targetIndex]] = [target, node]
+}
 </script>
 <template>
   <section class="pdm-project-manager pdm-template-settings">
-    <header class="pdm-pagebar"><div><div class="pdm-breadcrumb">系统管理 <span>/</span> 文件夹模板</div><h1>项目文件夹模板</h1><p>新建项目自动应用；主项目目录固定为“项目号-0”，子项目目录固定为子项目号，机械和电气采用同一规则。</p></div><button type="button" class="pdm-primary-action" :disabled="pending" @click="save">保存模板</button></header>
-    <section class="pdm-panel"><table class="pdm-data-table"><thead><tr><th>上级</th><th>目录名称</th><th>用途</th><th>顺序</th><th>继承上级权限</th><th>默认权限</th></tr></thead><tbody><tr v-for="node in draft" :key="node.folderKey"><td>{{ node.parentKey || '项目号' }}</td><td><el-input v-model="node.name" :disabled="node.purpose === 'ProjectContainer'" /></td><td>{{ purposeLabel[node.purpose] }}</td><td><el-input-number v-model="node.sortOrder" :min="0" :max="999" /></td><td><el-switch v-model="node.inheritPermissions" /></td><td><button type="button" class="pdm-secondary-action" @click="editPermissions(node)">{{ node.permissions.length ? `${node.permissions.length}条权限` : '设置权限' }}</button></td></tr></tbody></table></section>
+    <section class="pdm-panel"><div class="pdm-page-actions pdm-template-toolbar"><button type="button" class="pdm-primary-action" :disabled="pending" @click="save">保存模板</button></div><table class="pdm-data-table"><thead><tr><th>上级</th><th>目录名称</th><th>用途</th><th>排序</th><th>继承上级权限</th><th>默认权限</th></tr></thead><tbody><tr v-for="node in draft" :key="node.folderKey"><td>{{ parentLabel(node) }}</td><td><el-input v-model="node.name" :disabled="node.purpose === 'ProjectContainer'" /></td><td>{{ purposeLabel[node.purpose] }}</td><td><div class="pdm-order-actions"><button type="button" class="pdm-order-button" :aria-label="`上移 ${node.name}`" :title="`上移 ${node.name}`" :disabled="pending || !canMove(node, -1)" @click="moveNode(node, -1)"><ArrowUp :size="15" /></button><button type="button" class="pdm-order-button" :aria-label="`下移 ${node.name}`" :title="`下移 ${node.name}`" :disabled="pending || !canMove(node, 1)" @click="moveNode(node, 1)"><ArrowDown :size="15" /></button></div></td><td><el-switch v-model="node.inheritPermissions" /></td><td><button type="button" class="pdm-secondary-action" @click="editPermissions(node)">{{ node.permissions.length ? `${node.permissions.length}条权限` : '设置权限' }}</button></td></tr></tbody></table></section>
   </section>
   <el-dialog v-model="permissionOpen" title="模板默认权限" width="760px">
     <p class="pdm-dialog-help">模板权限用于未单独设置权限的项目目录；项目内仍可逐个目录覆盖。</p>

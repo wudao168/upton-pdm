@@ -95,9 +95,9 @@ internal static class SeedData
 
     internal static IReadOnlyList<BomItem> Bom() =>
     [
-        new(Guid.NewGuid(), ProjectId, BomKind.Mechanical, 1, "A01-100", "机架组件", 1, "套", null, null, "A", true),
-        new(Guid.NewGuid(), ProjectId, BomKind.Mechanical, 2, "A01-200", "夹具组件", 2, "套", null, null, "W2", true),
-        new(Guid.NewGuid(), ProjectId, BomKind.Mechanical, 3, "A01-301", "定位块", 4, "件", "45#", null, "A", true),
+        new(Guid.NewGuid(), ProjectId, BomKind.Standard, 1, "A01-100", "机架组件", 1, "011", null, "标准组件", "A", true),
+        new(Guid.NewGuid(), ProjectId, BomKind.NonStandard, 1, "A01-200", "夹具组件", 2, "011", "Q235B", null, "W2", true),
+        new(Guid.NewGuid(), ProjectId, BomKind.NonStandard, 2, "A01-301", "定位块", 4, "件", "45#", null, "A", true),
         new(Guid.NewGuid(), ProjectId, BomKind.Electrical, 1, "EL-001", "光电传感器", 4, "件", null, "M18 PNP", "A", true),
         new(Guid.NewGuid(), ProjectId, BomKind.Electrical, 2, "EL-002", "伺服驱动器", 2, "件", null, "750W", "A", false)
     ];

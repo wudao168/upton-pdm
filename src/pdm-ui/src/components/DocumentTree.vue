@@ -25,8 +25,8 @@ const contextTop = ref(0)
 const solidWorksAvailable = ref(false)
 const filters: Array<{ value: DocumentFilter; label: string }> = [
   { value: 'all', label: '全部' },
-  { value: 'model', label: '3D结构' },
-  { value: 'drawing', label: '2D图纸' },
+  { value: 'model', label: '3D' },
+  { value: 'drawing', label: '2D' },
   { value: 'issue', label: '异常' },
 ]
 
@@ -65,10 +65,10 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <section class="pdm-panel pdm-tree-panel" aria-label="项目图档结构">
+  <section class="pdm-panel pdm-tree-panel" aria-label="项目设计树">
     <header class="pdm-panel-heading">
-      <h2>图档结构</h2>
-      <button type="button" class="pdm-plain-button" aria-label="刷新结构树" @click="emit('refresh')"><RefreshCw :size="15" /></button>
+      <h2>设计树</h2>
+      <button type="button" class="pdm-plain-button" aria-label="刷新设计树" @click="emit('refresh')"><RefreshCw :size="15" /></button>
     </header>
     <label class="pdm-tree-search">
       <Search :size="15" aria-hidden="true" />
@@ -117,8 +117,7 @@ onBeforeUnmount(() => {
       @click.stop
     >
       <strong>{{ contextNode.drawingNumber }} · <template v-if="contextNode.snapshotVersion !== undefined">{{ contextNode.snapshotVersion }} / </template>{{ contextNode.version }}</strong>
-      <button type="button" role="menuitem" :disabled="!solidWorksAvailable || !contextNode.documentId" @click="open('LatestReadOnly')">在SolidWorks中打开最新受控版（只读）</button>
-      <button type="button" role="menuitem" :disabled="!solidWorksAvailable || !contextNode.documentId" @click="open('LatestEdit')">获取最新版本并编辑</button>
+      <button type="button" role="menuitem" :disabled="!solidWorksAvailable || !contextNode.documentId" @click="open('LatestReadOnly')">在SolidWorks中打开最新受控版</button>
       <button type="button" role="menuitem" :disabled="!solidWorksAvailable || !contextNode.documentId" @click="open('LatestReleased')">打开最新正式发布版（只读）</button>
       <small v-if="!contextNode.documentId">该引用尚未入库，请先在SolidWorks插件中提交整套存档</small>
       <small v-if="!solidWorksAvailable">当前电脑未安装SolidWorks或UPTON PDM插件</small>

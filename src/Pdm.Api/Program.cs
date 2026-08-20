@@ -84,21 +84,29 @@ if (!builder.Environment.IsDevelopment())
 if (string.Equals(databaseOptions.Provider, "MySql", StringComparison.OrdinalIgnoreCase))
 {
     builder.Services.AddScoped<IPdmRepository, MySqlPdmRepository>();
+    builder.Services.AddScoped<IMaterialRepository, MySqlMaterialRepository>();
 }
 else
 {
     builder.Services.AddSingleton<IPdmRepository, InMemoryPdmRepository>();
+    builder.Services.AddSingleton<IMaterialRepository, InMemoryMaterialRepository>();
 }
 
 builder.Services.AddScoped<MySqlMigrationRunner>();
 builder.Services.AddSingleton<IPasswordService, Pbkdf2PasswordService>();
 builder.Services.AddSingleton<ITokenIssuer, JwtTokenIssuer>();
+builder.Services.AddSingleton<IPersistentSessionTokenService, PersistentSessionTokenService>();
 builder.Services.AddScoped<IFileStorage, LocalFileStorage>();
 builder.Services.AddSingleton<IReleasePackagePublisher, AtomicReleasePackagePublisher>();
 builder.Services.AddSingleton<ICrmCredentialProtector, DataProtectionCrmCredentialProtector>();
+builder.Services.AddSingleton<IU9SecretProtector, DataProtectionU9SecretProtector>();
 builder.Services.AddHttpClient<ICrmCustomerClient, CrmCustomerClient>(client => client.Timeout = TimeSpan.FromSeconds(20));
+builder.Services.AddHttpClient<IU9OpenApiClient, U9OpenApiClient>(client => client.Timeout = TimeSpan.FromSeconds(20))
+    .RemoveAllLoggers();
 builder.Services.AddScoped<PdmWorkflowService>();
 builder.Services.AddScoped<CrmCustomerIntegrationService>();
+builder.Services.AddScoped<MaterialService>();
+builder.Services.AddScoped<U9MaterialIntegrationService>();
 builder.Services.AddHostedService<PdmBootstrapHostedService>();
 builder.Services.AddHostedService<CrmCustomerSyncHostedService>();
 
@@ -122,6 +130,24 @@ builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
             NameClaimType = "http://schemas.xmlsoap.org/ws/2005/05/identity/claims/name",
             RoleClaimType = "http://schemas.microsoft.com/ws/2008/06/identity/claims/role",
             ClockSkew = TimeSpan.FromMinutes(1)
+        };
+        options.Events = new JwtBearerEvents
+        {
+            OnTokenValidated = async context =>
+            {
+                var versionText = context.Principal?.FindFirst("token_version")?.Value;
+                if (versionText is null) return;
+
+                var username = context.Principal?.Identity?.Name;
+                var repository = context.HttpContext.RequestServices.GetRequiredService<IPdmRepository>();
+                var account = string.IsNullOrWhiteSpace(username)
+                    ? null
+                    : await repository.FindUserAsync(username, context.HttpContext.RequestAborted);
+                if (account is null || !account.IsActive || !long.TryParse(versionText, out var version) || version != account.TokenVersion)
+                {
+                    context.Fail("登录状态已失效，请重新登录。");
+                }
+            }
         };
     });
 builder.Services.AddAuthorization();
@@ -151,6 +177,7 @@ app.UseCors("PdmClients");
 app.UseAuthentication();
 app.UseAuthorization();
 app.MapPdmEndpoints();
+app.MapPdmMaterialEndpoints();
 try
 {
     app.Run();

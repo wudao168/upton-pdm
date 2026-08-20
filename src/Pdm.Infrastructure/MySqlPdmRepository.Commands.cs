@@ -259,10 +259,17 @@ public sealed partial class MySqlPdmRepository
             INSERT INTO release_package(
                 id, project_id, package_number, state, reference_snapshot_id, mechanical_bom_revision,
                 electrical_bom_revision, mechanical_bom_snapshot_json, electrical_bom_snapshot_json,
+                standard_bom_version_id, non_standard_bom_version_id, electrical_bom_version_id,
+                standard_bom_revision, non_standard_bom_revision, standard_bom_snapshot_json, non_standard_bom_snapshot_json,
+                change_number, change_reason, effective_serial_from, effective_serial_to,
                 published_at, published_path, publish_error, row_version, created_at)
             VALUES (
                 @Id, @ProjectId, @PackageNumber, @State, @ReferenceSnapshotId, @MechanicalBomRevision,
-                @ElectricalBomRevision, @MechanicalBomSnapshot, @ElectricalBomSnapshot, NULL, NULL, NULL, 1, @CreatedAt)
+                @ElectricalBomRevision, @MechanicalBomSnapshot, @ElectricalBomSnapshot,
+                @StandardBomVersionId, @NonStandardBomVersionId, @ElectricalBomVersionId,
+                @StandardBomRevision, @NonStandardBomRevision, @StandardBomSnapshot, @NonStandardBomSnapshot,
+                @ChangeNumber, @ChangeReason, @EffectiveSerialFrom, @EffectiveSerialTo,
+                NULL, NULL, NULL, 1, @CreatedAt)
             """,
             new
             {
@@ -275,6 +282,17 @@ public sealed partial class MySqlPdmRepository
                 package.ElectricalBomRevision,
                 MechanicalBomSnapshot = JsonSerializer.Serialize(package.MechanicalBomSnapshot, jsonOptions),
                 ElectricalBomSnapshot = JsonSerializer.Serialize(package.ElectricalBomSnapshot, jsonOptions),
+                package.StandardBomVersionId,
+                package.NonStandardBomVersionId,
+                package.ElectricalBomVersionId,
+                package.StandardBomRevision,
+                package.NonStandardBomRevision,
+                StandardBomSnapshot = JsonSerializer.Serialize(package.StandardBomSnapshot, jsonOptions),
+                NonStandardBomSnapshot = JsonSerializer.Serialize(package.NonStandardBomSnapshot, jsonOptions),
+                package.ChangeNumber,
+                package.ChangeReason,
+                package.EffectiveSerialFrom,
+                package.EffectiveSerialTo,
                 CreatedAt = package.CreatedAt.UtcDateTime
             },
             transaction,
@@ -563,8 +581,8 @@ public sealed partial class MySqlPdmRepository
         await using var connection = await OpenAsync(cancellationToken);
         await connection.ExecuteAsync(new CommandDefinition(
             """
-            INSERT INTO pdm_user(id, username, display_name, password_hash, role, is_active, row_version, created_at)
-            VALUES (@Id, @Username, @DisplayName, @PasswordHash, @Role, @IsActive, 1, @CreatedAt)
+            INSERT INTO pdm_user(id, username, display_name, password_hash, role, assigned_role_code, is_active, row_version, created_at)
+            VALUES (@Id, @Username, @DisplayName, @PasswordHash, @Role, @RoleCode, @IsActive, 1, @CreatedAt)
             """,
             new
             {
@@ -573,10 +591,22 @@ public sealed partial class MySqlPdmRepository
                 user.DisplayName,
                 user.PasswordHash,
                 Role = user.Role.ToString(),
+                RoleCode = user.EffectiveRoleCode,
                 user.IsActive,
                 CreatedAt = timeProvider.GetUtcNow().UtcDateTime
             },
             cancellationToken: cancellationToken));
+    }
+
+    public async Task<UserAccount> UpdateUserAsync(string username, string displayName, UserRole role, string roleCode, bool isActive, CancellationToken cancellationToken)
+    {
+        await using var connection = await OpenAsync(cancellationToken);
+        var affected = await connection.ExecuteAsync(new CommandDefinition(
+            "UPDATE pdm_user SET display_name=@DisplayName,role=@Role,assigned_role_code=@RoleCode,is_active=@IsActive,token_version=token_version+1,row_version=row_version+1 WHERE username=@Username",
+            new { Username = username, DisplayName = displayName, Role = role.ToString(), RoleCode = roleCode, IsActive = isActive },
+            cancellationToken: cancellationToken));
+        if (affected != 1) throw new PdmNotFoundException("用户不存在。");
+        return await FindUserAsync(username, cancellationToken) ?? throw new PdmNotFoundException("用户不存在。");
     }
 
     public async Task AppendAuditAsync(AuditEntry entry, CancellationToken cancellationToken)

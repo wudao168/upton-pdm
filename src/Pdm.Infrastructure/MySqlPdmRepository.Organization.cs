@@ -39,7 +39,7 @@ public sealed partial class MySqlPdmRepository
                 group.Key,
                 group.FirstOrDefault(item => item.IsPrimary)?.Username ?? string.Empty,
                 group.Where(item => !item.IsPrimary).Select(item => item.Username).ToArray())).ToArray(),
-            users.Select(user => new OrganizationDirectoryUser(user.Username, user.DisplayName, user.Role, user.IsActive)).ToArray());
+            users.Select(user => new OrganizationDirectoryUser(user.Username, user.DisplayName, user.Role, user.IsActive, user.EffectiveRoleCode)).ToArray());
     }
 
     public async Task<ProjectOrganization> SaveProjectOrganizationAsync(SaveProjectOrganizationCommand command, CancellationToken cancellationToken)
@@ -138,6 +138,194 @@ public sealed partial class MySqlPdmRepository
             managers.Select(item => new { UnitId = unitId, item.Username, item.IsPrimary, Now = now }), transaction, cancellationToken: cancellationToken));
         await transaction.CommitAsync(cancellationToken);
         return await GetOrganizationDirectoryAsync(cancellationToken);
+    }
+
+    public async Task<Project> UpdateProjectDetailsAsync(Guid projectId, UpdateProjectDetailsCommand command, CancellationToken cancellationToken)
+    {
+        var now = timeProvider.GetUtcNow().UtcDateTime;
+        await using var connection = await OpenAsync(cancellationToken);
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+        try
+        {
+            var project = await FindProjectAsync(connection, transaction, projectId, cancellationToken)
+                ?? throw new PdmNotFoundException("项目不存在。");
+            if (project.ParentProjectId is not null)
+            {
+                var childOrganization = await connection.QuerySingleAsync<ProjectOrganizationRow>(new CommandDefinition(
+                    "SELECT id,name,project_company_code,model_company_code,crm_company_name,is_active FROM project_organization WHERE id=@OrganizationId FOR UPDATE",
+                    new { project.OrganizationId }, transaction, cancellationToken: cancellationToken));
+                var serials = await ResizeProjectSerialsAsync(connection, transaction, project, childOrganization, command.Quantity, cancellationToken);
+                await connection.ExecuteAsync(new CommandDefinition(
+                    "UPDATE project SET name=@Name,project_alias=@ProjectAlias,quantity=@Quantity,row_version=row_version+1,updated_at=@Now WHERE id=@ProjectId",
+                    new { ProjectId = projectId, command.Name, command.ProjectAlias, command.Quantity, Now = now }, transaction, cancellationToken: cancellationToken));
+                await ReplaceProjectSerialsAsync(connection, transaction, projectId, serials, cancellationToken);
+                var savedChild = await FindProjectAsync(connection, transaction, projectId, cancellationToken)
+                    ?? throw new PdmNotFoundException("项目不存在。");
+                await transaction.CommitAsync(cancellationToken);
+                return savedChild;
+            }
+
+            var organizationId = command.OrganizationId ?? throw new PdmRuleException("所属公司不能为空。");
+            var equipmentTypeCode = command.EquipmentTypeCode ?? throw new PdmRuleException("设备类型不能为空。");
+            var projectTypeCode = command.ProjectTypeCode ?? throw new PdmRuleException("项目类型不能为空。");
+            var organization = await connection.QuerySingleOrDefaultAsync<ProjectOrganizationRow>(new CommandDefinition(
+                "SELECT id,name,project_company_code,model_company_code,crm_company_name,is_active FROM project_organization WHERE id=@OrganizationId AND is_active=1 FOR UPDATE",
+                new { OrganizationId = organizationId }, transaction, cancellationToken: cancellationToken))
+                ?? throw new PdmRuleException("所选组织不存在或已停用。");
+            var oldOrganization = await connection.QuerySingleAsync<ProjectOrganizationRow>(new CommandDefinition(
+                "SELECT id,name,project_company_code,model_company_code,crm_company_name,is_active FROM project_organization WHERE id=@OrganizationId FOR UPDATE",
+                new { project.OrganizationId }, transaction, cancellationToken: cancellationToken));
+            var customer = command.CustomerId is null
+                ? new CustomerRow
+                {
+                    Code = project.CustomerCode ?? throw new PdmRuleException("项目缺少客户编码。"),
+                    Name = project.CustomerName ?? string.Empty,
+                    IsActive = true
+                }
+                : await connection.QuerySingleOrDefaultAsync<CustomerRow>(new CommandDefinition(
+                    "SELECT id,code,name,is_active IsActive,source_system SourceSystem,last_synced_at LastSyncedAt FROM pdm_customer WHERE id=@CustomerId AND is_active=1 FOR UPDATE",
+                    new { CustomerId = command.CustomerId.Value }, transaction, cancellationToken: cancellationToken))
+                    ?? throw new PdmRuleException("所选客户不存在或已停用。");
+
+            var organizationChanged = organization.Id != oldOrganization.Id;
+            var codeChanged = organizationChanged || !string.Equals(project.ProjectTypeCode, projectTypeCode, StringComparison.OrdinalIgnoreCase);
+            var oldProjectSequence = 0;
+            if (codeChanged && !TryParseProjectSequence(project.Code, project.ProjectTypeCode, oldOrganization.ProjectCompanyCode, out oldProjectSequence))
+                throw new PdmRuleException("项目号不是系统自动编号，不能变更所属公司或项目类型。");
+            var projectSequence = organizationChanged
+                ? await ReserveProjectNumberAsync(connection, transaction, organization.Id, cancellationToken)
+                : oldProjectSequence;
+            if (organizationChanged)
+                await connection.ExecuteAsync(new CommandDefinition(
+                    "INSERT IGNORE INTO released_project_number(organization_id,sequence_value,released_at) VALUES(@OrganizationId,@Sequence,@Now)",
+                    new { OrganizationId = oldOrganization.Id, Sequence = oldProjectSequence, Now = now }, transaction, cancellationToken: cancellationToken));
+
+            var customerChanged = organizationChanged || !string.Equals(project.CustomerCode, customer.Code, StringComparison.OrdinalIgnoreCase);
+            var customerSequence = customerChanged
+                ? await ReserveCustomerProjectNumberAsync(connection, transaction, organization.Id, customer.Code, cancellationToken)
+                : project.CustomerProjectSequence ?? throw new PdmRuleException("项目缺少客户流水号，不能修改编号资料。");
+            if (customerChanged && project.CustomerProjectSequence is not null && !string.IsNullOrWhiteSpace(project.CustomerCode))
+                await connection.ExecuteAsync(new CommandDefinition(
+                    "INSERT IGNORE INTO released_customer_project_number(organization_id,customer_code,sequence_value,released_at) VALUES(@OrganizationId,@CustomerCode,@Sequence,@Now)",
+                    new { OrganizationId = oldOrganization.Id, CustomerCode = project.CustomerCode, Sequence = project.CustomerProjectSequence.Value, Now = now }, transaction, cancellationToken: cancellationToken));
+
+            var treeIds = (await connection.QueryAsync<Guid>(new CommandDefinition(
+                "SELECT id FROM project WHERE id=@ProjectId OR parent_project_id=@ProjectId ORDER BY child_sequence FOR UPDATE",
+                new { ProjectId = project.Id }, transaction, cancellationToken: cancellationToken))).ToArray();
+            var rootCode = codeChanged ? $"{projectTypeCode}{organization.ProjectCompanyCode}{projectSequence:D5}" : project.Code;
+            foreach (var itemId in treeIds)
+            {
+                var item = await FindProjectAsync(connection, transaction, itemId, cancellationToken)
+                    ?? throw new PdmNotFoundException("项目不存在。");
+                var quantity = item.Id == project.Id ? command.Quantity : item.Quantity;
+                IReadOnlyList<string> serials;
+                if (organizationChanged)
+                {
+                    await ReleaseProjectSerialsAsync(connection, transaction, item, oldOrganization, now, cancellationToken);
+                    var values = await ReserveSerialNumbersAsync(connection, transaction, organization.Id, quantity, cancellationToken);
+                    serials = values.Select(value => $"{organization.ProjectCompanyCode}{value:D7}").ToArray();
+                }
+                else
+                {
+                    serials = await ResizeProjectSerialsAsync(connection, transaction, item, organization, quantity, cancellationToken);
+                }
+
+                var code = item.Id == project.Id ? rootCode : $"{rootCode}-{item.ChildSequence}";
+                var suffix = item.Id == project.Id ? 0 : item.ChildSequence!.Value;
+                await connection.ExecuteAsync(new CommandDefinition(
+                    """
+                    UPDATE project SET code=@Code,name=@Name,project_alias=@ProjectAlias,organization_id=@OrganizationId,
+                        project_type_code=@ProjectTypeCode,equipment_type_code=@EquipmentTypeCode,customer_code=@CustomerCode,
+                        customer_name=@CustomerName,customer_project_sequence=@CustomerSequence,device_model=@DeviceModel,
+                        signed_date=@SignedDate,quantity=@Quantity,vault_location=@VaultLocation,release_location=@ReleaseLocation,
+                        row_version=row_version+1,updated_at=@Now WHERE id=@ProjectId
+                    """,
+                    new
+                    {
+                        ProjectId = item.Id,
+                        Code = code,
+                        Name = item.Id == project.Id ? command.Name : item.Name,
+                        ProjectAlias = item.Id == project.Id ? command.ProjectAlias : item.ProjectAlias,
+                        OrganizationId = organization.Id,
+                        ProjectTypeCode = projectTypeCode,
+                        EquipmentTypeCode = equipmentTypeCode,
+                        CustomerCode = customer.Code,
+                        CustomerName = customer.Name,
+                        CustomerSequence = customerSequence,
+                        DeviceModel = $"{organization.ModelCompanyCode}-{equipmentTypeCode}-{customer.Code}-{customerSequence:D3}-{suffix:D2}",
+                        command.SignedDate,
+                        Quantity = quantity,
+                        VaultLocation = ReplaceTerminalDirectory(item.VaultLocation, code),
+                        ReleaseLocation = ReplaceTerminalDirectory(item.ReleaseLocation, code),
+                        Now = now
+                    }, transaction, cancellationToken: cancellationToken));
+                await ReplaceProjectSerialsAsync(connection, transaction, item.Id, serials, cancellationToken);
+            }
+
+            var saved = await FindProjectAsync(connection, transaction, projectId, cancellationToken)
+                ?? throw new PdmNotFoundException("项目不存在。");
+            await transaction.CommitAsync(cancellationToken);
+            return saved;
+        }
+        catch (MySqlException exception) when (exception.Number == 1062)
+        {
+            await transaction.RollbackAsync(cancellationToken);
+            throw new PdmConflictException("重新编号后的项目号、型号或序列号已被占用，请刷新后重试。");
+        }
+        catch
+        {
+            await transaction.RollbackAsync(cancellationToken);
+            throw;
+        }
+    }
+
+    private static async Task<IReadOnlyList<string>> ResizeProjectSerialsAsync(MySqlConnection connection, System.Data.Common.DbTransaction transaction,
+        Project project, ProjectOrganizationRow organization, int quantity, CancellationToken cancellationToken)
+    {
+        if (quantity == project.SerialNumbers.Count) return project.SerialNumbers;
+        if (quantity < project.SerialNumbers.Count)
+        {
+            var removed = project.SerialNumbers.Skip(quantity).ToArray();
+            await ReleaseSerialValuesAsync(connection, transaction, organization.Id, organization.ProjectCompanyCode, removed, DateTime.UtcNow, cancellationToken);
+            return project.SerialNumbers.Take(quantity).ToArray();
+        }
+        var reserved = await ReserveSerialNumbersAsync(connection, transaction, organization.Id, quantity - project.SerialNumbers.Count, cancellationToken);
+        return project.SerialNumbers.Concat(reserved.Select(value => $"{organization.ProjectCompanyCode}{value:D7}")).ToArray();
+    }
+
+    private static Task ReleaseProjectSerialsAsync(MySqlConnection connection, System.Data.Common.DbTransaction transaction, Project project,
+        ProjectOrganizationRow organization, DateTime now, CancellationToken cancellationToken) =>
+        ReleaseSerialValuesAsync(connection, transaction, organization.Id, organization.ProjectCompanyCode, project.SerialNumbers, now, cancellationToken);
+
+    private static async Task ReleaseSerialValuesAsync(MySqlConnection connection, System.Data.Common.DbTransaction transaction, Guid organizationId,
+        string projectCompanyCode, IReadOnlyList<string> serialNumbers, DateTime now, CancellationToken cancellationToken)
+    {
+        var values = serialNumbers
+            .Select(serial => TryParseSerialSequence(serial, projectCompanyCode, out var value) ? value : (int?)null)
+            .Where(value => value is not null)
+            .Select(value => value!.Value)
+            .Distinct()
+            .ToArray();
+        if (values.Length == 0) return;
+        await connection.ExecuteAsync(new CommandDefinition(
+            "INSERT IGNORE INTO released_serial_number(organization_id,sequence_value,released_at) VALUES(@OrganizationId,@Sequence,@Now)",
+            values.Select(value => new { OrganizationId = organizationId, Sequence = value, Now = now }), transaction, cancellationToken: cancellationToken));
+    }
+
+    private static async Task ReplaceProjectSerialsAsync(MySqlConnection connection, System.Data.Common.DbTransaction transaction, Guid projectId,
+        IReadOnlyList<string> serialNumbers, CancellationToken cancellationToken)
+    {
+        await connection.ExecuteAsync(new CommandDefinition("DELETE FROM project_serial_number WHERE project_id=@ProjectId",
+            new { ProjectId = projectId }, transaction, cancellationToken: cancellationToken));
+        await connection.ExecuteAsync(new CommandDefinition(
+            "INSERT INTO project_serial_number(project_id,sequence_no,serial_number) VALUES(@ProjectId,@Sequence,@SerialNumber)",
+            serialNumbers.Select((serial, index) => new { ProjectId = projectId, Sequence = index + 1, SerialNumber = serial }), transaction, cancellationToken: cancellationToken));
+    }
+
+    private static string ReplaceTerminalDirectory(string path, string code)
+    {
+        var parent = Path.GetDirectoryName(path);
+        return string.IsNullOrWhiteSpace(parent) ? path : Path.Combine(parent, code);
     }
 
     public async Task<Project> SetProjectExecutionUnitAsync(Guid projectId, Guid executionUnitId, string actor, CancellationToken cancellationToken)

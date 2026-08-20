@@ -1,10 +1,10 @@
 <script setup lang="ts">
-import { FileSearch, Link2, Maximize, MoreHorizontal, Pencil, Rotate3D } from '@lucide/vue'
+import { FileSearch, Link2, MoreHorizontal, Rotate3D } from '@lucide/vue'
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { postDesktopMessage } from '../api'
-import type { DocumentNode, PreviewMode, SolidWorksOpenMode } from '../types'
+import type { BomItem, DocumentNode, PreviewMode, SolidWorksOpenMode } from '../types'
 
-const props = withDefaults(defineProps<{ selected: DocumentNode; related: DocumentNode[]; canEdit?: boolean; canManageLifecycle?: boolean; desktopAvailable?: boolean; obscured?: boolean }>(), { canEdit: false, canManageLifecycle: false, desktopAvailable: false, obscured: false })
+const props = withDefaults(defineProps<{ selected: DocumentNode; related: DocumentNode[]; bomItem?: BomItem; currentUsername?: string; canManageLifecycle?: boolean; desktopAvailable?: boolean; obscured?: boolean }>(), { currentUsername: '', canManageLifecycle: false, desktopAvailable: false, obscured: false })
 const emit = defineEmits<{ open: [node: DocumentNode, mode: SolidWorksOpenMode, versionId?: string]; preview: [node: DocumentNode]; related: [node: DocumentNode]; more: []; whereUsed: []; obsolete: [] }>()
 const previewSlot = ref<HTMLElement>()
 const previewState = ref<'idle' | 'loading' | 'ready' | 'error' | 'unavailable'>(props.desktopAvailable ? 'idle' : 'unavailable')
@@ -32,6 +32,23 @@ const lifecycleLabel = computed(() => {
   if (typeof value === 'number') return ['工作中', '审批中', '已发布', '已作废'][value] ?? String(value)
   return ({ Work: '工作中', InReview: '审批中', Released: '已发布', Obsolete: '已作废' } as Record<string, string>)[value ?? ''] ?? value ?? '工作中'
 })
+const editStatusLabel = computed(() => {
+  const owner = props.selected.checkedOutBy?.trim()
+  if (!owner) return '正常'
+  return owner.localeCompare(props.currentUsername.trim(), undefined, { sensitivity: 'accent' }) === 0
+    ? '可编辑'
+    : `${owner}编辑中`
+})
+const previewProperties = computed(() => [
+  { label: '物料/图号', value: props.selected.drawingNumber?.trim() },
+  { label: '名称', value: props.selected.name?.trim() },
+  { label: '规格/型号', value: props.bomItem?.specification?.trim() },
+  { label: '材质', value: props.bomItem?.material?.trim() },
+  { label: '品牌', value: props.bomItem?.brand?.trim() },
+  { label: '表面处理', value: props.bomItem?.surfaceTreatment?.trim() },
+  { label: '版本', value: props.selected.version?.trim() },
+  { label: '状态', value: lifecycleLabel.value },
+].filter((item): item is { label: string; value: string } => Boolean(item.value)))
 
 function reportPreviewBounds() {
   if (!props.desktopAvailable) return
@@ -69,7 +86,7 @@ function reportPreviewBounds() {
 }
 
 function isPreviewObscured(slotBounds: DOMRect) {
-  return [...document.querySelectorAll<HTMLElement>('.el-overlay, .el-popper, .el-message-box__wrapper')].some(element => {
+  return [...document.querySelectorAll<HTMLElement>('.el-overlay, .el-popper, .el-message-box__wrapper, .pdm-dialog-backdrop')].some(element => {
     const style = window.getComputedStyle(element)
     if (style.display === 'none' || style.visibility === 'hidden') return false
     const bounds = element.getBoundingClientRect()
@@ -121,12 +138,6 @@ async function restartPreview() {
   startPreview()
 }
 
-function fitPreview() {
-  if (!props.desktopAvailable) return
-  if (previewState.value === 'ready') postDesktopMessage('preview-host-fit')
-  else startPreview()
-}
-
 function onPreviewStatus(event: Event) {
   const detail = (event as CustomEvent<{ state?: string; message?: string }>).detail
   if (!detail?.state) return
@@ -141,7 +152,7 @@ function openInSolidWorks(mode: SolidWorksOpenMode) {
   if (!props.selected.documentId || !solidWorksAvailable.value || solidWorksPending.value) return
   solidWorksPending.value = true
   solidWorksError.value = false
-  solidWorksMessage.value = mode === 'LatestEdit' ? '正在准备最新受控文件并获取权限…' : '正在准备最新受控只读版本…'
+  solidWorksMessage.value = '正在准备最新受控文件，不获取编辑权限…'
   emit('open', props.selected, mode)
 }
 
@@ -215,7 +226,7 @@ onBeforeUnmount(() => {
           <span class="pdm-selected-file" :title="selected.fileName">{{ selected.fileName }}</span>
           <span class="pdm-selected-version" :aria-label="`工作版本 ${selected.version}`">{{ selected.version }}</span>
           <span class="pdm-selected-version" :aria-label="`业务状态 ${lifecycleLabel}`">{{ lifecycleLabel }}</span>
-          <span class="pdm-selected-status">{{ selected.checkedOutBy ? `${selected.checkedOutBy}编辑` : '未签出' }}</span>
+          <span class="pdm-selected-status">{{ editStatusLabel }}</span>
           <div v-if="related.length" class="pdm-related-documents" aria-label="关联图档">
             <span><Link2 :size="13" />关联{{ mode === 'model' ? '图纸' : '模型' }}</span>
             <button v-for="document in related" :key="document.id" type="button" :title="document.name" @click="emit('related', document)">{{ document.drawingNumber }}</button>
@@ -224,7 +235,6 @@ onBeforeUnmount(() => {
         <div class="pdm-preview-actions">
           <button type="button" aria-label="使用位置" title="查看该图档被哪些装配体引用" :disabled="!selected.documentId" @click="emit('whereUsed')"><Link2 :size="15" /><span>引用</span></button>
           <button v-if="canManageLifecycle && lifecycleLabel !== '已作废'" type="button" aria-label="作废图档" title="受控作废当前图档" :disabled="!selected.documentId" @click="emit('obsolete')"><span>作废</span></button>
-          <button type="button" aria-label="适合窗口" :disabled="!desktopAvailable" :title="desktopAvailable ? '使eDrawings内容适合窗口' : '网页端没有eDrawings宿主'" @click="fitPreview"><Maximize :size="15" /><span>适窗</span></button>
           <button type="button" aria-label="更多操作" title="查看更多图档操作" @click="emit('more')"><MoreHorizontal :size="17" /><span>更多</span></button>
         </div>
         <div class="pdm-solidworks-actions">
@@ -232,17 +242,9 @@ onBeforeUnmount(() => {
             type="button"
             class="pdm-solidworks-primary"
             :disabled="!selected.documentId || !solidWorksAvailable || solidWorksPending"
-            :title="solidWorksAvailable ? `从PDM获取${selected.version}并在SolidWorks中只读打开` : '当前电脑未安装SolidWorks或UPTON PDM插件'"
+            :title="solidWorksAvailable ? `从PDM获取${selected.version}并在SolidWorks中打开；需要修改时请在插件设计树中获取权限` : '当前电脑未安装SolidWorks或UPTON PDM插件'"
             @click="openInSolidWorks('LatestReadOnly')"
-          ><Rotate3D :size="15" />只读打开</button>
-          <button
-            v-if="canEdit"
-            type="button"
-            class="pdm-solidworks-edit"
-            :disabled="!selected.documentId || !solidWorksAvailable || solidWorksPending"
-            title="完整下载并校验成功后获取编辑权限"
-            @click="openInSolidWorks('LatestEdit')"
-          ><Pencil :size="14" />获取编辑</button>
+          ><Rotate3D :size="15" />打开最新</button>
         </div>
       </header>
       <p v-if="solidWorksMessage" class="pdm-solidworks-feedback" :class="{ 'is-error': solidWorksError }" role="status">{{ solidWorksMessage }}</p>
@@ -255,6 +257,12 @@ onBeforeUnmount(() => {
         :data-preview-state="previewState"
         :aria-label="desktopAvailable ? '客户端内嵌eDrawings预览区' : '网页端图档预览状态'"
       >
+        <dl class="pdm-preview-properties" aria-label="图档属性">
+          <div v-for="property in previewProperties" :key="property.label">
+            <dt>{{ property.label }}</dt>
+            <dd :title="property.value">{{ property.value }}</dd>
+          </div>
+        </dl>
         <template v-if="previewState === 'unavailable'">
           <FileSearch :size="52" />
           <h3>网页端暂不支持原生SolidWorks图档预览</h3>

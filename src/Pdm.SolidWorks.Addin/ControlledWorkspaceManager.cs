@@ -18,17 +18,20 @@ internal sealed class ControlledWorkspaceManager
         this.apiClient = apiClient ?? throw new ArgumentNullException(nameof(apiClient));
     }
 
-    public async Task<string> PrepareReadOnlyAsync(ControlledOpenManifestDto manifest, CancellationToken cancellationToken)
+    public async Task<string> PrepareReadOnlyAsync(
+        ControlledOpenManifestDto manifest,
+        bool historicalPreview,
+        CancellationToken cancellationToken)
     {
         if (manifest?.Files == null || manifest.Files.Count == 0)
         {
             throw new InvalidDataException("PDM返回的打开清单为空。");
         }
 
-        var target = ReadOnlyDirectory(manifest);
+        var target = ReadOnlyDirectory(manifest, historicalPreview);
         if (Directory.Exists(target) && ValidateWorkspace(target, manifest.Files))
         {
-            SetWorkspaceAttributes(target, manifest, false);
+            SetWorkspaceAttributes(target, manifest, Array.Empty<Guid>());
             return ResolveRootPath(target, manifest);
         }
 
@@ -49,12 +52,53 @@ internal sealed class ControlledWorkspaceManager
             }
 
             ReplaceDirectory(staging, target);
-            SetWorkspaceAttributes(target, manifest, false);
+            SetWorkspaceAttributes(target, manifest, Array.Empty<Guid>());
             return ResolveRootPath(target, manifest);
         }
         finally
         {
             if (Directory.Exists(staging)) Directory.Delete(staging, true);
+        }
+    }
+
+    public async Task<string> PrepareWorkingCopyAsync(
+        ControlledOpenManifestDto manifest,
+        IReadOnlyCollection<Guid> editableDocumentIds,
+        CancellationToken cancellationToken)
+    {
+        var readOnlyRootPath = await PrepareReadOnlyAsync(manifest, false, cancellationToken).ConfigureAwait(false);
+        var source = Path.GetDirectoryName(readOnlyRootPath) ?? throw new InvalidDataException("只读工作区路径无效。");
+        var target = WorkingDirectory(manifest);
+        var editableIds = new HashSet<Guid>(editableDocumentIds ?? Array.Empty<Guid>());
+        if (Directory.Exists(target) && ValidateWorkspace(target, manifest.Files))
+        {
+            SetWorkspaceAttributes(target, manifest, editableIds);
+            return ResolveRootPath(target, manifest);
+        }
+
+        if (Directory.Exists(target) && HasPotentialLocalChanges(target, manifest.Files, editableIds))
+        {
+            throw new InvalidDataException("本地工作区存在可能尚未提交的文件，已停止用最新受控版本覆盖。请先提交存档、放弃编辑或备份本地文件。");
+        }
+
+        var parent = Path.GetDirectoryName(target) ?? throw new InvalidDataException("编辑工作区路径无效。");
+        Directory.CreateDirectory(parent);
+        var staging = Path.Combine(parent, string.Concat(".working-stage-", Guid.NewGuid().ToString("N")));
+        CopyDirectory(source, staging);
+        try
+        {
+            if (!ValidateWorkspace(staging, manifest.Files))
+            {
+                throw new InvalidDataException("最新受控文件复制校验失败，未更新本地工作区。");
+            }
+
+            ReplaceDirectory(staging, target);
+            SetWorkspaceAttributes(target, manifest, editableIds);
+            return ResolveRootPath(target, manifest);
+        }
+        finally
+        {
+            if (Directory.Exists(staging)) DeleteDirectory(staging);
         }
     }
 
@@ -69,7 +113,7 @@ internal sealed class ControlledWorkspaceManager
         var target = WorkingDirectory(manifest);
         if (Directory.Exists(target) && ValidateWorkspace(target, manifest.Files))
         {
-            SetWorkspaceAttributes(target, manifest, true);
+            SetWorkspaceAttributes(target, manifest, new[] { manifest.RootDocumentId });
             return ResolveRootPath(target, manifest);
         }
 
@@ -84,7 +128,7 @@ internal sealed class ControlledWorkspaceManager
                 throw new InvalidDataException("编辑工作区复制校验失败。");
             }
             ReplaceDirectory(staging, target);
-            SetWorkspaceAttributes(target, manifest, true);
+            SetWorkspaceAttributes(target, manifest, new[] { manifest.RootDocumentId });
             return ResolveRootPath(target, manifest);
         }
         finally
@@ -96,10 +140,54 @@ internal sealed class ControlledWorkspaceManager
     public string GetWorkingRootPath(ControlledOpenManifestDto manifest) =>
         Path.Combine(WorkingDirectory(manifest), manifest.RootRelativePath ?? string.Empty);
 
+    public string ApplyWorkingPermissions(
+        ControlledOpenManifestDto manifest,
+        IReadOnlyCollection<Guid> editableDocumentIds,
+        bool preserveLocalChanges = false)
+    {
+        var target = WorkingDirectory(manifest);
+        var valid = preserveLocalChanges
+            ? Directory.Exists(target) && HasAllManifestFiles(target, manifest.Files)
+            : Directory.Exists(target) && ValidateWorkspace(target, manifest.Files);
+        if (!valid)
+        {
+            throw new InvalidDataException("编辑工作区校验失败，未更改文件权限。");
+        }
+
+        SetWorkspaceAttributes(target, manifest, editableDocumentIds);
+        return ResolveRootPath(target, manifest);
+    }
+
+    public bool TryGetExistingWorkingRoot(
+        ControlledOpenManifestDto manifest,
+        out string rootPath,
+        out bool matchesControlledFiles)
+    {
+        rootPath = string.Empty;
+        matchesControlledFiles = false;
+        var target = WorkingDirectory(manifest);
+        if (!Directory.Exists(target) || !HasAllManifestFiles(target, manifest.Files))
+        {
+            return false;
+        }
+
+        rootPath = ResolveRootPath(target, manifest);
+        matchesControlledFiles = ValidateWorkspace(target, manifest.Files);
+        return true;
+    }
+
     public IReadOnlyList<string> GetWorkingFilePaths(ControlledOpenManifestDto manifest) =>
         manifest.Files.Select(file => Path.Combine(WorkingDirectory(manifest), file.RelativePath ?? file.FileName ?? string.Empty)).ToArray();
 
-    public string GetReadOnlyDirectory(ControlledOpenManifestDto manifest) => ReadOnlyDirectory(manifest);
+    public string GetWorkingFilePath(ControlledOpenManifestDto manifest, Guid documentId)
+    {
+        var file = manifest.Files.FirstOrDefault(item => item.DocumentId == documentId)
+            ?? throw new FileNotFoundException("编辑工作区中未找到所选图档。");
+        return Path.Combine(WorkingDirectory(manifest), file.RelativePath ?? file.FileName ?? string.Empty);
+    }
+
+    public string GetReadOnlyDirectory(ControlledOpenManifestDto manifest, bool historicalPreview = false) =>
+        ReadOnlyDirectory(manifest, historicalPreview);
 
     private static string WorkspaceRoot(ControlledOpenManifestDto manifest)
     {
@@ -109,8 +197,11 @@ internal sealed class ControlledWorkspaceManager
             manifest.RootDocumentId.ToString("N"));
     }
 
-    private static string ReadOnlyDirectory(ControlledOpenManifestDto manifest) =>
-        Path.Combine(WorkspaceRoot(manifest), "ReadOnly", manifest.RootVersionId.ToString("N"));
+    private static string ReadOnlyDirectory(ControlledOpenManifestDto manifest, bool historicalPreview) =>
+        Path.Combine(
+            WorkspaceRoot(manifest),
+            historicalPreview ? "ReadOnly" : "Latest",
+            manifest.RootVersionId.ToString("N"));
 
     private static string WorkingDirectory(ControlledOpenManifestDto manifest) =>
         Path.Combine(WorkspaceRoot(manifest), "Working");
@@ -141,13 +232,46 @@ internal sealed class ControlledWorkspaceManager
         return true;
     }
 
-    private static void SetWorkspaceAttributes(string directory, ControlledOpenManifestDto manifest, bool editable)
+    private static bool HasAllManifestFiles(string directory, IEnumerable<ControlledOpenFileDto> files) =>
+        files.All(file => File.Exists(Path.Combine(directory, file.RelativePath ?? file.FileName ?? string.Empty)));
+
+    private static bool HasPotentialLocalChanges(
+        string directory,
+        IReadOnlyCollection<ControlledOpenFileDto> files,
+        IReadOnlyCollection<Guid> editableDocumentIds)
     {
+        if (editableDocumentIds.Count > 0)
+        {
+            return true;
+        }
+
+        var root = Path.GetFullPath(directory).TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
+        var expected = new HashSet<string>(files
+            .Select(file => file.RelativePath ?? file.FileName ?? string.Empty)
+            .Where(path => !string.IsNullOrWhiteSpace(path)), StringComparer.OrdinalIgnoreCase);
+        foreach (var path in Directory.GetFiles(directory, "*", SearchOption.AllDirectories))
+        {
+            if (!expected.Contains(RelativePath(root, path))
+                || (File.GetAttributes(path) & FileAttributes.ReadOnly) == 0)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static void SetWorkspaceAttributes(
+        string directory,
+        ControlledOpenManifestDto manifest,
+        IReadOnlyCollection<Guid> editableDocumentIds)
+    {
+        var editableIds = new HashSet<Guid>(editableDocumentIds ?? Array.Empty<Guid>());
         foreach (var file in manifest.Files)
         {
             var path = Path.Combine(directory, file.RelativePath ?? file.FileName ?? string.Empty);
             var attributes = File.GetAttributes(path) | FileAttributes.ReadOnly;
-            if (editable && file.IsRoot) attributes &= ~FileAttributes.ReadOnly;
+            if (editableIds.Contains(file.DocumentId)) attributes &= ~FileAttributes.ReadOnly;
             File.SetAttributes(path, attributes);
         }
     }

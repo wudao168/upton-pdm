@@ -234,8 +234,8 @@ SELECT UUID_TO_BIN('33333333-3333-3333-3333-333333333333'), UUID_TO_BIN('1111111
 WHERE NOT EXISTS (SELECT 1 FROM reference_snapshot WHERE project_id=UUID_TO_BIN('11111111-1111-1111-1111-111111111111'));
 INSERT INTO bom_item(id, project_id, bom_kind, sequence_no, drawing_number, name, quantity, unit, material, specification, revision_label, is_complete, updated_at)
 VALUES
-(UUID_TO_BIN('55555555-5555-5555-5555-555555555551'), UUID_TO_BIN('11111111-1111-1111-1111-111111111111'), 'Mechanical', 1, 'A01-100', 'Frame Assembly', 1, 'set', 'Q235B', NULL, 'A', 1, UTC_TIMESTAMP(6)),
-(UUID_TO_BIN('55555555-5555-5555-5555-555555555552'), UUID_TO_BIN('11111111-1111-1111-1111-111111111111'), 'Mechanical', 2, 'A01-101', 'Base Plate', 2, 'piece', 'Q235B', '12mm', 'A', 1, UTC_TIMESTAMP(6)),
+(UUID_TO_BIN('55555555-5555-5555-5555-555555555551'), UUID_TO_BIN('11111111-1111-1111-1111-111111111111'), 'Standard', 1, 'A01-100', 'Frame Assembly', 1, 'set', NULL, 'Assembly', 'A', 1, UTC_TIMESTAMP(6)),
+(UUID_TO_BIN('55555555-5555-5555-5555-555555555552'), UUID_TO_BIN('11111111-1111-1111-1111-111111111111'), 'NonStandard', 1, 'A01-101', 'Base Plate', 2, 'piece', 'Q235B', '12mm', 'A', 1, UTC_TIMESTAMP(6)),
 (UUID_TO_BIN('55555555-5555-5555-5555-555555555553'), UUID_TO_BIN('11111111-1111-1111-1111-111111111111'), 'Electrical', 1, 'E01-001', 'Control Cabinet', 1, 'set', NULL, 'Standard', 'A', 1, UTC_TIMESTAMP(6))
 ON DUPLICATE KEY UPDATE name=VALUES(name), quantity=VALUES(quantity), material=VALUES(material), specification=VALUES(specification), revision_label=VALUES(revision_label), is_complete=VALUES(is_complete), updated_at=UTC_TIMESTAMP(6);
 "@

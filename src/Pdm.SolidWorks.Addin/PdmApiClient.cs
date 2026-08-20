@@ -46,6 +46,27 @@ internal sealed class PdmApiClient : IDisposable
     public Task<DocumentReferenceNodeDto> GetReferenceTreeAsync(Guid projectId, CancellationToken cancellationToken) =>
         GetJsonAsync<DocumentReferenceNodeDto>(string.Concat("api/projects/", projectId, "/reference-tree"), cancellationToken);
 
+    public async Task<DocumentReferenceNodeDto> GetReferenceTreeOrNullAsync(Guid projectId, CancellationToken cancellationToken)
+    {
+        using (var response = await httpClient.GetAsync(
+            string.Concat("api/projects/", projectId, "/reference-tree"),
+            cancellationToken).ConfigureAwait(false))
+        {
+            var body = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
+            if (response.StatusCode == System.Net.HttpStatusCode.NotFound)
+            {
+                return null;
+            }
+
+            if (!response.IsSuccessStatusCode)
+            {
+                throw new InvalidOperationException(GetErrorMessage(response.StatusCode.ToString(), body));
+            }
+
+            return serializer.Deserialize<DocumentReferenceNodeDto>(body);
+        }
+    }
+
     public Task<ControlledOpenManifestDto> CreateControlledOpenManifestAsync(
         Guid documentId,
         Guid? versionId,
@@ -111,6 +132,18 @@ internal sealed class PdmApiClient : IDisposable
 
     public Task<List<ReleasePackageDto>> GetReleasePackagesAsync(Guid projectId, CancellationToken cancellationToken) =>
         GetJsonAsync<List<ReleasePackageDto>>(string.Concat("api/projects/", projectId, "/release-packages"), cancellationToken);
+
+    public Task<List<CadPropertyWritebackDto>> GetCadPropertyWritebacksAsync(Guid projectId, CancellationToken cancellationToken) =>
+        GetJsonAsync<List<CadPropertyWritebackDto>>(string.Concat("api/projects/", projectId, "/cad-property-writebacks?activeOnly=true"), cancellationToken);
+
+    public Task<CadPropertyWritebackDto> StartCadPropertyWritebackAsync(Guid id, CancellationToken cancellationToken) =>
+        PostJsonAsync<CadPropertyWritebackDto>(string.Concat("api/cad-property-writebacks/", id, "/start"), new { }, cancellationToken);
+
+    public Task<CadPropertyWritebackDto> CompleteCadPropertyWritebackAsync(Guid id, Guid resultVersionId, CancellationToken cancellationToken) =>
+        PostJsonAsync<CadPropertyWritebackDto>(string.Concat("api/cad-property-writebacks/", id, "/complete"), new { resultVersionId }, cancellationToken);
+
+    public Task<CadPropertyWritebackDto> FailCadPropertyWritebackAsync(Guid id, string error, bool conflict, CancellationToken cancellationToken) =>
+        PostJsonAsync<CadPropertyWritebackDto>(string.Concat("api/cad-property-writebacks/", id, "/fail"), new { error, conflict }, cancellationToken);
 
     public Task<ReleasePackageDto> WithdrawReleasePackageAsync(Guid releasePackageId, string comment, CancellationToken cancellationToken) =>
         PostJsonAsync<ReleasePackageDto>(string.Concat("api/release-packages/", releasePackageId, "/withdraw"), new { comment }, cancellationToken);
@@ -625,7 +658,37 @@ internal sealed class DocumentVersionDto
     public DocumentReferenceNodeDto ReferenceSnapshot { get; set; }
 }
 
-internal sealed class CheckInResultDto { public DocumentDto Document { get; set; } public DocumentVersionDto Version { get; set; } public bool VersionCreated { get; set; } }
+internal sealed class CheckInResultDto
+{
+    public DocumentDto Document { get; set; }
+    public DocumentVersionDto Version { get; set; }
+    public bool VersionCreated { get; set; }
+    public BomGenerationResultDto BomUpdate { get; set; }
+    public string BomUpdateError { get; set; }
+}
+
+internal sealed class BomGenerationResultDto
+{
+    public int UnclassifiedCount { get; set; }
+    public int PendingRemovalCount { get; set; }
+    public int ManualUnmatchedCount { get; set; }
+    public bool Applied { get; set; }
+}
+internal sealed class CadPropertyWritebackDto
+{
+    public Guid Id { get; set; }
+    public Guid ProjectId { get; set; }
+    public Guid BomItemId { get; set; }
+    public Guid SourceDocumentId { get; set; }
+    public string SourceConfiguration { get; set; }
+    public Guid ExpectedVersionId { get; set; }
+    public string ExpectedRevision { get; set; }
+    public Dictionary<string, string> Properties { get; set; }
+    public int Status { get; set; }
+    public string RequestedBy { get; set; }
+    public DateTime RequestedAt { get; set; }
+    public string LastError { get; set; }
+}
 internal sealed class ControlledOpenManifestDto
 {
     public Guid Id { get; set; }
@@ -637,6 +700,7 @@ internal sealed class ControlledOpenManifestDto
     public string RootRelativePath { get; set; }
     public bool ForEdit { get; set; }
     public List<ControlledOpenFileDto> Files { get; set; }
+    public List<string> Warnings { get; set; } = new List<string>();
 }
 internal sealed class ControlledOpenFileDto
 {

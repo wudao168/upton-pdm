@@ -10,7 +10,8 @@ namespace Upton.Pdm.Infrastructure;
 
 public static class BomWorkbook
 {
-    private static readonly string[] Headers = ["序号", "图号", "名称", "数量", "单位", "材料", "规格", "版本", "完整"];
+    private static readonly string[] Headers = ["序号", "物料分类", "单位", "物料编码", "物料名称", "型号", "备注信息", "品牌", "材质", "表面处理", "重量", "数量", "版本", "完整"];
+    private static readonly string[] RequiredHeaders = ["序号", "单位", "物料编码", "物料名称", "数量", "版本", "完整"];
 
     public static byte[] Write(IReadOnlyList<BomItem> items)
     {
@@ -55,7 +56,7 @@ public static class BomWorkbook
             var rowNumber = 2;
             foreach (var item in items.OrderBy(item => item.Sequence))
             {
-                WriteRow(writer, rowNumber++, [item.Sequence, item.DrawingNumber, item.Name, item.Quantity, item.Unit, item.Material, item.Specification, item.Revision, item.IsComplete ? "是" : "否"]);
+                WriteRow(writer, rowNumber++, [item.Sequence, KindLabel(item.Kind), item.Unit, item.DrawingNumber, item.Name, item.Specification, item.Remark, item.Brand, item.Material, item.SurfaceTreatment, item.Weight, item.Quantity, item.Revision, item.IsComplete ? "是" : "否"]);
             }
             writer.WriteEndElement();
             writer.WriteEndElement();
@@ -82,9 +83,10 @@ public static class BomWorkbook
             header => header,
             header => FindHeaderColumn(headerValues, header),
             StringComparer.OrdinalIgnoreCase);
-        if (columns.Any(pair => pair.Value < 0))
+        var missing = RequiredHeaders.Where(header => columns[header] < 0).ToArray();
+        if (missing.Length > 0)
         {
-            throw new PdmRuleException($"BOM Excel必须包含列：{string.Join("、", Headers)}。");
+            throw new PdmRuleException($"BOM Excel必须包含列：{string.Join("、", missing)}。");
         }
 
         var result = new List<BomItemInput>();
@@ -96,14 +98,18 @@ public static class BomWorkbook
             var quantity = ParseDecimal(Value(cells, columns["数量"]), "数量");
             result.Add(new BomItemInput(
                 sequence,
-                Value(cells, columns["图号"]),
-                Value(cells, columns["名称"]),
+                Value(cells, columns["物料编码"]),
+                Value(cells, columns["物料名称"]),
                 quantity,
                 Value(cells, columns["单位"]),
-                EmptyToNull(Value(cells, columns["材料"])),
-                EmptyToNull(Value(cells, columns["规格"])),
+                EmptyToNull(Value(cells, columns["材质"])),
+                EmptyToNull(Value(cells, columns["型号"])),
                 Value(cells, columns["版本"]),
-                ParseComplete(Value(cells, columns["完整"]))));
+                ParseComplete(Value(cells, columns["完整"])),
+                Remark: EmptyToNull(Value(cells, columns["备注信息"])),
+                Brand: EmptyToNull(Value(cells, columns["品牌"])),
+                SurfaceTreatment: EmptyToNull(Value(cells, columns["表面处理"])),
+                Weight: EmptyToNull(Value(cells, columns["重量"]))));
         }
 
         if (result.Count == 0) throw new PdmRuleException("BOM Excel没有有效数据行。");
@@ -171,9 +177,26 @@ public static class BomWorkbook
     }
 
     private static int FindHeaderColumn(IReadOnlyDictionary<int, string> values, string header) =>
-        values.FirstOrDefault(pair => string.Equals(NormalizeHeader(pair.Value), header, StringComparison.OrdinalIgnoreCase), new KeyValuePair<int, string>(-1, string.Empty)).Key;
+        values.FirstOrDefault(pair => string.Equals(NormalizeHeader(pair.Value), NormalizeHeader(header), StringComparison.OrdinalIgnoreCase), new KeyValuePair<int, string>(-1, string.Empty)).Key;
 
-    private static string NormalizeHeader(string value) => value.Trim().Replace("物料编码", "图号", StringComparison.OrdinalIgnoreCase).Replace("物料名称", "名称", StringComparison.OrdinalIgnoreCase).Replace("是否完整", "完整", StringComparison.OrdinalIgnoreCase);
+    private static string NormalizeHeader(string value) => value.Trim() switch
+    {
+        "图号" => "物料编码",
+        "名称" => "物料名称",
+        "规格" => "型号",
+        "描述" => "备注信息",
+        "材料" => "材质",
+        "是否完整" => "完整",
+        var normalized => normalized
+    };
+
+    private static string KindLabel(BomKind kind) => kind switch
+    {
+        BomKind.Standard => "标准件",
+        BomKind.NonStandard => "非标件",
+        BomKind.Electrical => "电气件",
+        _ => kind.ToString()
+    };
     private static string Value(IReadOnlyDictionary<int, string> cells, int column) => cells.TryGetValue(column, out var value) ? value : string.Empty;
     private static string? EmptyToNull(string value) => string.IsNullOrWhiteSpace(value) ? null : value;
     private static int ParseInt(string value, string field) => int.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var result) ? result : throw new PdmRuleException($"BOM{field}“{value}”不是有效整数。");

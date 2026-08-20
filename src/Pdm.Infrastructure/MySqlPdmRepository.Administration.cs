@@ -1,3 +1,4 @@
+using System.Text.Json;
 using Dapper;
 using MySqlConnector;
 using Upton.Pdm.Application;
@@ -11,7 +12,7 @@ public sealed partial class MySqlPdmRepository
     {
         await using var connection = await OpenAsync(cancellationToken);
         var rows = await connection.QueryAsync<CustomerRow>(new CommandDefinition(
-            $"SELECT id,code,name,is_active IsActive,source_system SourceSystem,last_synced_at LastSyncedAt FROM pdm_customer WHERE source_system='crm' {(includeInactive ? string.Empty : "AND is_active=1")} ORDER BY code",
+            $"SELECT id,code,name,is_active IsActive,source_system SourceSystem,last_synced_at LastSyncedAt FROM pdm_customer WHERE source_system='u9c' {(includeInactive ? string.Empty : "AND is_active=1")} ORDER BY code",
             cancellationToken: cancellationToken));
         return rows.Select(MapCustomer).ToArray();
     }
@@ -99,7 +100,7 @@ public sealed partial class MySqlPdmRepository
             "UPDATE crm_integration_setting SET last_auto_sync_attempt_at=@AttemptedAt,last_auto_sync_error=@Error,updated_at=@AttemptedAt WHERE id=1",
             new { AttemptedAt = attemptedAt.UtcDateTime, Error = error },
             cancellationToken: cancellationToken));
-        if (affected != 1) throw new PdmRuleException("CRM连接配置不存在，请重新保存连接配置。");
+        if (affected != 1) throw new PdmRuleException("U9C客户同步计划不存在，请重新保存同步计划。");
     }
 
     public async Task<IReadOnlyList<PdmCustomer>> ApplyCrmCustomerSyncAsync(IReadOnlyList<CrmCustomerRecord> customers, DateTimeOffset syncedAt, CancellationToken cancellationToken)
@@ -107,7 +108,7 @@ public sealed partial class MySqlPdmRepository
         await using var connection = await OpenAsync(cancellationToken);
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
         await connection.ExecuteAsync(new CommandDefinition(
-            "UPDATE pdm_customer SET is_active=0,row_version=row_version+1,updated_at=@SyncedAt WHERE source_system='crm' AND is_active=1",
+            "UPDATE pdm_customer SET is_active=0,row_version=row_version+1,updated_at=@SyncedAt WHERE source_system='u9c' AND is_active=1",
             new { SyncedAt = syncedAt.UtcDateTime },
             transaction,
             cancellationToken: cancellationToken));
@@ -116,8 +117,8 @@ public sealed partial class MySqlPdmRepository
             await connection.ExecuteAsync(new CommandDefinition(
                 """
                 INSERT INTO pdm_customer(id,code,name,is_active,source_system,last_synced_at,row_version,created_at,updated_at)
-                VALUES(@Id,@Code,@Name,1,'crm',@SyncedAt,1,@SyncedAt,@SyncedAt)
-                ON DUPLICATE KEY UPDATE name=VALUES(name),is_active=1,source_system='crm',last_synced_at=VALUES(last_synced_at),row_version=row_version+1,updated_at=VALUES(updated_at)
+                VALUES(@Id,@Code,@Name,1,'u9c',@SyncedAt,1,@SyncedAt,@SyncedAt)
+                ON DUPLICATE KEY UPDATE name=VALUES(name),is_active=1,source_system='u9c',last_synced_at=VALUES(last_synced_at),row_version=row_version+1,updated_at=VALUES(updated_at)
                 """,
                 new { Id = Guid.NewGuid(), customer.Code, customer.Name, SyncedAt = syncedAt.UtcDateTime },
                 transaction,
@@ -128,7 +129,7 @@ public sealed partial class MySqlPdmRepository
             new { SyncedAt = syncedAt.UtcDateTime, Count = customers.Count },
             transaction,
             cancellationToken: cancellationToken));
-        if (affected != 1) throw new PdmRuleException("CRM连接配置不存在，请重新保存连接配置。");
+        if (affected != 1) throw new PdmRuleException("U9C客户同步计划不存在，请重新保存同步计划。");
         await transaction.CommitAsync(cancellationToken);
         return await ListCustomersAsync(true, cancellationToken);
     }
@@ -163,7 +164,7 @@ public sealed partial class MySqlPdmRepository
         var values = rows.ToDictionary(row => row.SettingKey, row => row.SettingValue, StringComparer.OrdinalIgnoreCase);
         if (!values.TryGetValue("vault_root", out var vaultRoot) || !values.TryGetValue("release_root", out var releaseRoot))
             throw new PdmRuleException("系统存储根目录尚未配置。");
-        return new(vaultRoot, releaseRoot)
+        var settings = new PdmSystemSettings(vaultRoot, releaseRoot)
         {
             CheckoutHeartbeatSeconds = ReadInt(values, "checkout_heartbeat_seconds", 180),
             CheckoutLeaseMinutes = ReadInt(values, "checkout_lease_minutes", 15),
@@ -171,8 +172,23 @@ public sealed partial class MySqlPdmRepository
             CheckoutReminderHours = ReadInt(values, "checkout_reminder_hours", 4),
             CheckoutStrongReminderHours = ReadInt(values, "checkout_strong_reminder_hours", 8),
             CheckoutOverdueHours = ReadInt(values, "checkout_overdue_hours", 24),
-            CheckoutForceReleaseHours = ReadInt(values, "checkout_force_release_hours", 48)
+            CheckoutForceReleaseHours = ReadInt(values, "checkout_force_release_hours", 48),
+            BomDrawingNumberProperty = ReadString(values, "bom_drawing_number_property", "物料编码"),
+            BomNameProperty = ReadString(values, "bom_name_property", "物料名称"),
+            BomDescriptionProperty = ReadString(values, "bom_description_property", "备注信息"),
+            BomMaterialProperty = ReadString(values, "bom_material_property", "材质"),
+            BomSpecificationProperty = ReadString(values, "bom_specification_property", "型号"),
+            BomUnitProperty = ReadString(values, "bom_unit_property", "单位"),
+            BomBrandProperty = ReadString(values, "bom_brand_property", "品牌"),
+            BomSurfaceTreatmentProperty = ReadString(values, "bom_surface_treatment_property", "表面处理"),
+            BomWeightProperty = ReadString(values, "bom_weight_property", "重量"),
+            BomPropertyMappings = ReadBomPropertyMappings(values),
+            ValidationRules = new(
+                ReadStringList(values, "bom_standard_required_fields", BomValidationFieldCatalog.StandardDefaults),
+                ReadStringList(values, "bom_nonstandard_required_fields", BomValidationFieldCatalog.NonStandardDefaults),
+                ReadStringList(values, "bom_electrical_required_fields", BomValidationFieldCatalog.ElectricalDefaults))
         };
+        return BomPropertyMappingCatalog.Apply(settings);
     }
 
     public async Task<PdmSystemSettings> UpdateSystemSettingsAsync(PdmSystemSettings settings, CancellationToken cancellationToken)
@@ -190,7 +206,20 @@ public sealed partial class MySqlPdmRepository
             new { Key = "checkout_reminder_hours", Value = settings.CheckoutReminderHours.ToString() },
             new { Key = "checkout_strong_reminder_hours", Value = settings.CheckoutStrongReminderHours.ToString() },
             new { Key = "checkout_overdue_hours", Value = settings.CheckoutOverdueHours.ToString() },
-            new { Key = "checkout_force_release_hours", Value = settings.CheckoutForceReleaseHours.ToString() }
+            new { Key = "checkout_force_release_hours", Value = settings.CheckoutForceReleaseHours.ToString() },
+            new { Key = "bom_drawing_number_property", Value = settings.BomDrawingNumberProperty },
+            new { Key = "bom_name_property", Value = settings.BomNameProperty },
+            new { Key = "bom_description_property", Value = settings.BomDescriptionProperty },
+            new { Key = "bom_material_property", Value = settings.BomMaterialProperty },
+            new { Key = "bom_specification_property", Value = settings.BomSpecificationProperty },
+            new { Key = "bom_unit_property", Value = settings.BomUnitProperty },
+            new { Key = "bom_brand_property", Value = settings.BomBrandProperty },
+            new { Key = "bom_surface_treatment_property", Value = settings.BomSurfaceTreatmentProperty },
+            new { Key = "bom_weight_property", Value = settings.BomWeightProperty },
+            new { Key = "bom_property_mappings", Value = JsonSerializer.Serialize(BomPropertyMappingCatalog.Normalize(settings), jsonOptions) },
+            new { Key = "bom_standard_required_fields", Value = JsonSerializer.Serialize(settings.ValidationRules.Standard, jsonOptions) },
+            new { Key = "bom_nonstandard_required_fields", Value = JsonSerializer.Serialize(settings.ValidationRules.NonStandard, jsonOptions) },
+            new { Key = "bom_electrical_required_fields", Value = JsonSerializer.Serialize(settings.ValidationRules.Electrical, jsonOptions) }
         })
         {
             await connection.ExecuteAsync(new CommandDefinition(
@@ -207,13 +236,45 @@ public sealed partial class MySqlPdmRepository
     private static int ReadInt(IReadOnlyDictionary<string, string> values, string key, int defaultValue) =>
         values.TryGetValue(key, out var value) && int.TryParse(value, out var parsed) ? parsed : defaultValue;
 
+    private static string ReadString(IReadOnlyDictionary<string, string> values, string key, string defaultValue) =>
+        values.TryGetValue(key, out var value) && !string.IsNullOrWhiteSpace(value) ? value : defaultValue;
+
+    private IReadOnlyList<BomPropertyMapping> ReadBomPropertyMappings(IReadOnlyDictionary<string, string> values)
+    {
+        if (!values.TryGetValue("bom_property_mappings", out var json) || string.IsNullOrWhiteSpace(json))
+            return Array.Empty<BomPropertyMapping>();
+        try
+        {
+            var mappings = JsonSerializer.Deserialize<List<BomPropertyMapping>>(json, jsonOptions);
+            return mappings ?? (IReadOnlyList<BomPropertyMapping>)Array.Empty<BomPropertyMapping>();
+        }
+        catch (JsonException)
+        {
+            return Array.Empty<BomPropertyMapping>();
+        }
+    }
+
+    private IReadOnlyList<string> ReadStringList(IReadOnlyDictionary<string, string> values, string key, IReadOnlyList<string> defaultValue)
+    {
+        if (!values.TryGetValue(key, out var value) || string.IsNullOrWhiteSpace(value)) return defaultValue;
+        try
+        {
+            var parsed = JsonSerializer.Deserialize<string[]>(value, jsonOptions);
+            return parsed is { Length: > 0 } ? BomValidationFieldCatalog.Normalize(parsed) : defaultValue;
+        }
+        catch (JsonException)
+        {
+            return defaultValue;
+        }
+    }
+
     public async Task<IReadOnlyList<UserAccount>> ListUsersAsync(CancellationToken cancellationToken)
     {
         await using var connection = await OpenAsync(cancellationToken);
         var rows = await connection.QueryAsync<AdministrationUserRow>(new CommandDefinition(
-            "SELECT id,username,display_name DisplayName,password_hash PasswordHash,role,is_active IsActive FROM pdm_user ORDER BY username",
+            "SELECT id,username,display_name DisplayName,password_hash PasswordHash,role,assigned_role_code RoleCode,is_active IsActive,token_version TokenVersion FROM pdm_user ORDER BY username",
             cancellationToken: cancellationToken));
-        return rows.Select(row => new UserAccount(row.Id, row.Username, row.DisplayName, row.PasswordHash, Enum.Parse<UserRole>(row.Role), row.IsActive)).ToArray();
+        return rows.Select(row => new UserAccount(row.Id, row.Username, row.DisplayName, row.PasswordHash, Enum.Parse<UserRole>(row.Role), row.IsActive, row.TokenVersion, row.RoleCode)).ToArray();
     }
 
     private static PdmCustomer MapCustomer(CustomerRow row) => new(row.Id, row.Code, row.Name, row.IsActive, row.SourceSystem, AsUtc(row.LastSyncedAt));
@@ -248,6 +309,8 @@ public sealed partial class MySqlPdmRepository
         public string DisplayName { get; init; } = string.Empty;
         public string PasswordHash { get; init; } = string.Empty;
         public string Role { get; init; } = string.Empty;
+        public string? RoleCode { get; init; }
         public bool IsActive { get; init; }
+        public long TokenVersion { get; init; }
     }
 }

@@ -37,6 +37,7 @@
   </ItemGroup>
   <ItemGroup>
     <Compile Include="..\Pdm.LocalSettings\WorkspaceSettingsStore.cs" Link="WorkspaceSettingsStore.cs" />
+    <EmbeddedResource Include="..\pdm-ui\src\assets\pdm-client-icon.png" LogicalName="Upton.Pdm.SolidWorks.Assets.PdmClient.png" />
   </ItemGroup>
   <Target Name="ValidateSolidWorksInterop" BeforeTargets="ResolveReferences">
     <Error Condition="!Exists('$(SolidWorksInstallDir)\SolidWorks.Interop.sldworks.dll')" Text="SolidWorks interop assemblies were not found. Set SolidWorksInstallDir." />

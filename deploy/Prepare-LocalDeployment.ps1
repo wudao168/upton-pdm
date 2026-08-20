@@ -88,7 +88,11 @@ if ($isUpgrade) {
     }
 }
 
-if (-not (Test-Path -LiteralPath $secretPath)) {
+if ($isUpgrade -and -not (Test-Path -LiteralPath $secretPath)) {
+    throw 'Existing PDM service is missing its protected deployment secret file.'
+}
+
+if (-not $isUpgrade -and -not (Test-Path -LiteralPath $secretPath)) {
     $secrets = [ordered]@{
         mysqlRootPassword = 'MysqlRoot!' + (New-RandomText 24)
         databasePassword = 'PdmDb!' + (New-RandomText 24)
@@ -101,16 +105,18 @@ if (-not (Test-Path -LiteralPath $secretPath)) {
     Protect-SecretFile $secretPath
 }
 
-$secrets = Get-Content -LiteralPath $secretPath -Raw -Encoding UTF8 | ConvertFrom-Json
-Write-Utf8File $rootClientPath @(
-    '[client]',
-    'user=root',
-    "password=$($secrets.mysqlRootPassword)",
-    'host=127.0.0.1',
-    'port=3308',
-    'protocol=TCP'
-)
-Protect-SecretFile $rootClientPath
+if (-not $isUpgrade) {
+    $secrets = Get-Content -LiteralPath $secretPath -Raw -Encoding UTF8 | ConvertFrom-Json
+    Write-Utf8File $rootClientPath @(
+        '[client]',
+        'user=root',
+        "password=$($secrets.mysqlRootPassword)",
+        'host=127.0.0.1',
+        'port=3308',
+        'protocol=TCP'
+    )
+    Protect-SecretFile $rootClientPath
+}
 
 if (-not (Test-Path -LiteralPath (Join-Path $mysqlHome 'bin\mysqld.exe'))) {
     $needsDownload = -not (Test-Path -LiteralPath $mysqlArchive)
@@ -184,7 +190,13 @@ if (-not (Test-Path -LiteralPath $dotnetPath)) {
 Push-Location $projectRoot
 try {
     pnpm.cmd install --frozen-lockfile
+    if ($LASTEXITCODE -ne 0) {
+        throw 'Frontend dependency restore failed.'
+    }
     pnpm.cmd ui:build
+    if ($LASTEXITCODE -ne 0) {
+        throw 'Frontend production build failed.'
+    }
     & $dotnetPath restore Pdm.slnx --nologo
     if ($LASTEXITCODE -ne 0) {
         throw 'Solution restore failed.'
@@ -208,19 +220,24 @@ finally {
     Pop-Location
 }
 
-Copy-Item -Path (Join-Path $projectRoot 'src\Pdm.Desktop\bin\Release\net48\*') -Destination $clientOutput -Recurse -Force
+$clientBuildOutput = Join-Path $projectRoot 'src\Pdm.Desktop\bin\Release\net48'
+Get-ChildItem -LiteralPath $clientBuildOutput |
+    Where-Object { $_.Name -ne 'Upton.Pdm.Desktop.exe.WebView2' } |
+    Copy-Item -Destination $clientOutput -Recurse -Force
 Copy-Item -Path (Join-Path $projectRoot 'src\Pdm.SolidWorks.Addin\bin\Release\net48\*') -Destination $addinOutput -Recurse -Force
 
 $desktopDirectory = [Environment]::GetFolderPath('Desktop')
 $shortcutPath = Join-Path $desktopDirectory 'UPTON PDM.lnk'
 $clientPath = Join-Path $localRoot 'client\Upton.Pdm.Desktop.exe'
-$shell = New-Object -ComObject WScript.Shell
-$shortcut = $shell.CreateShortcut($shortcutPath)
-$shortcut.TargetPath = $clientPath
-$shortcut.WorkingDirectory = Join-Path $localRoot 'client'
-$shortcut.IconLocation = "$clientPath,0"
-$shortcut.Description = 'UPTON PDM engineering client'
-$shortcut.Save()
+if (-not $isUpgrade) {
+    $shell = New-Object -ComObject WScript.Shell
+    $shortcut = $shell.CreateShortcut($shortcutPath)
+    $shortcut.TargetPath = $clientPath
+    $shortcut.WorkingDirectory = Join-Path $localRoot 'client'
+    $shortcut.IconLocation = "$clientPath,0"
+    $shortcut.Description = 'UPTON PDM engineering client'
+    $shortcut.Save()
+}
 
 $receipt = [ordered]@{
     preparedAt = [DateTimeOffset]::Now.ToString('O')

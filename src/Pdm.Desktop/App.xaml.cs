@@ -19,6 +19,7 @@ public partial class App : System.Windows.Application
         {
             singleInstanceMutex.Dispose();
             singleInstanceMutex = null;
+            DesktopExternalRequestStore.Write(e.Args);
             using (var showEvent = new EventWaitHandle(false, EventResetMode.AutoReset, ShowRequestEventName))
             {
                 showEvent.Set();
@@ -38,7 +39,7 @@ public partial class App : System.Windows.Application
                     {
                         if (MainWindow is MainWindow window)
                         {
-                            window.RestoreFromExternalRequest();
+                            window.RestoreFromExternalRequest(DesktopExternalRequestStore.ReadAndDelete());
                         }
                     }));
                 }
