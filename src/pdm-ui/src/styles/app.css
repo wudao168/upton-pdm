@@ -207,6 +207,14 @@
 .pdm-solidworks-primary { border: 1px solid var(--pdm-blue); background: var(--pdm-blue); color: white; }
 .pdm-solidworks-edit { border: 1px solid var(--pdm-border); background: white; color: var(--pdm-text); }
 .pdm-solidworks-actions button:disabled { opacity: .55; cursor: not-allowed; }
+.pdm-edrawings-toolbar { min-height: 38px; display: flex; flex: 0 0 auto; align-items: center; justify-content: center; gap: 7px; padding: 4px 8px; border-top: 1px solid var(--pdm-border-soft); background: #f2f5f8; }
+.pdm-edrawings-tool-group { display: inline-flex; align-items: center; gap: 2px; }
+.pdm-edrawings-toolbar button { position: relative; width: 30px; height: 28px; display: inline-flex; align-items: center; justify-content: center; padding: 0; border: 1px solid transparent; border-radius: 2px; background: transparent; color: #586b7f; cursor: pointer; }
+.pdm-edrawings-toolbar button:hover:not(:disabled) { border-color: #aebdcb; background: white; color: var(--pdm-blue); }
+.pdm-edrawings-toolbar button.is-active { border-color: #9eb8d0; background: white; color: var(--pdm-blue); box-shadow: inset 0 0 0 1px rgba(59,130,246,.08); }
+.pdm-edrawings-toolbar button:disabled { color: #aeb9c4; cursor: not-allowed; opacity: .65; }
+.pdm-edrawings-toolbar button small { position: absolute; right: 1px; bottom: 0; color: currentColor; font-size: 7px; font-weight: 600; line-height: 1; }
+.pdm-edrawings-toolbar-divider { width: 1px; height: 20px; background: #cbd5df; }
 .pdm-solidworks-feedback { flex: 0 0 auto; margin: 0; padding: 5px 9px; border-top: 1px solid var(--pdm-border-soft); background: #eff7ff; color: var(--pdm-blue); font-size: 10px; }
 .pdm-solidworks-feedback.is-error { background: #fff0ef; color: var(--pdm-danger); }
 .pdm-preview-layout { min-height: 0; height: 100%; display: grid; grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); gap: var(--pdm-container-gap); align-items: stretch; overflow: hidden; }

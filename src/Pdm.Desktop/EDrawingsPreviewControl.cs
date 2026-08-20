@@ -42,6 +42,53 @@ internal sealed class EDrawingsPreviewControl : Forms.UserControl
         }
     }
 
+    internal void ExecuteCommand(string command)
+    {
+        if (disposed || !viewer.IsHandleCreated)
+        {
+            return;
+        }
+
+        try
+        {
+            dynamic control = viewer.ActiveControl;
+            switch (command)
+            {
+                case "select":
+                    control.ViewOperator = 0;
+                    break;
+                case "rotate":
+                    control.ViewOperator = 1;
+                    break;
+                case "zoom":
+                    control.ViewOperator = 2;
+                    break;
+                case "pan":
+                    control.ViewOperator = 4;
+                    break;
+                case "fit":
+                    control.ViewOrientation = 7;
+                    break;
+                case "front":
+                    control.ViewOrientation = 0;
+                    break;
+                case "top":
+                    control.ViewOrientation = 2;
+                    break;
+                case "right":
+                    control.ViewOrientation = 5;
+                    break;
+                case "isometric":
+                    control.ViewOrientation = 6;
+                    break;
+            }
+        }
+        catch
+        {
+            // Some older eDrawings controls do not expose every operator.
+        }
+    }
+
     internal void CloseDocument()
     {
         if (disposed)
@@ -90,9 +137,16 @@ internal sealed class EDrawingsPreviewControl : Forms.UserControl
         internal void OpenDocument(string path)
         {
             dynamic control = ActiveControl;
-            control.FullUI = true;
-            control.ShowToolbar(true);
+            ShowCompleteUi(control);
             control.OpenDoc(path, false, false, true, string.Empty);
+            ShowCompleteUi(control);
+        }
+
+        private static void ShowCompleteUi(dynamic control)
+        {
+            // eDrawings defines FullUI as an integer: -1 is complete UI and 0 is simple UI.
+            control.FullUI = -1;
+            control.ShowToolbar(true);
         }
 
         internal void CloseDocument()

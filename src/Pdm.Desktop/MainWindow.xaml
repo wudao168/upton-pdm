@@ -30,7 +30,7 @@
                            VerticalOffset="14"
                            AllowsTransparency="True"
                            IsHitTestVisible="False"
-                           StaysOpen="True">
+                           StaysOpen="False">
                         <Grid x:Name="PreviewPropertiesGrid"
                               MaxWidth="320"
                               SnapsToDevicePixels="True"

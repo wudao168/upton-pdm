@@ -58,6 +58,8 @@ public partial class MainWindow : Window
         Loaded += OnLoaded;
         SizeChanged += (_, _) => ApplyPreviewBounds();
         StateChanged += OnWindowStateChanged;
+        Activated += OnWindowActivated;
+        Deactivated += OnWindowDeactivated;
         Closing += OnClosing;
         Closed += OnClosed;
         System.Windows.Application.Current.SessionEnding += OnSessionEnding;
@@ -256,6 +258,12 @@ public partial class MainWindow : Window
         if (type == "preview-host-fit")
         {
             embeddedPreview?.FitDocument();
+            return;
+        }
+
+        if (type == "preview-host-command" && TryReadPayloadString(message, "command", out var previewCommand))
+        {
+            embeddedPreview?.ExecuteCommand(previewCommand);
             return;
         }
 
@@ -476,8 +484,16 @@ public partial class MainWindow : Window
         if (WindowState == WindowState.Minimized && !allowClose)
         {
             ShowInTaskbar = true;
+            PreviewPropertiesPopup.IsOpen = false;
+            return;
         }
+
+        ApplyPreviewBounds();
     }
+
+    private void OnWindowActivated(object? sender, EventArgs eventArgs) => ApplyPreviewBounds();
+
+    private void OnWindowDeactivated(object? sender, EventArgs eventArgs) => PreviewPropertiesPopup.IsOpen = false;
 
     private void InitializeTrayIcon()
     {
@@ -526,6 +542,7 @@ public partial class MainWindow : Window
 
     private void HideToNotificationArea(bool showNotice)
     {
+        PreviewPropertiesPopup.IsOpen = false;
         ShowInTaskbar = false;
         Hide();
         if (showNotice && !trayNoticeShown && trayIcon != null)
@@ -774,7 +791,8 @@ public partial class MainWindow : Window
 
     private void ApplyPreviewBounds()
     {
-        if (!previewDocumentReady || previewBounds is not { Visible: true } bounds
+        if (!IsActive || !IsVisible || WindowState == WindowState.Minimized
+            || !previewDocumentReady || previewBounds is not { Visible: true } bounds
             || bounds.Width < 80 || bounds.Height < 80
             || WorkspaceView.ActualWidth <= 0 || WorkspaceView.ActualHeight <= 0)
         {

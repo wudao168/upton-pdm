@@ -825,9 +825,13 @@ describe('PDM client workspace', () => {
     window.dispatchEvent(new CustomEvent('pdm-preview-status', { detail: { state: 'ready', fileName: 'REAL-ASM-001.SLDASM' } }))
     await flushPromises()
     expect(slot.attributes('data-preview-state')).toBe('ready')
-    expect(wrapper.find('[aria-label="eDrawings快捷操作"]').exists()).toBe(false)
-    expect(wrapper.find('button[aria-label="适合窗口"]').exists()).toBe(false)
-    expect(postMessage.mock.calls.filter(([message]) => message.type === 'preview-host-command')).toHaveLength(0)
+    expect(wrapper.find('[aria-label="eDrawings快捷操作"]').exists()).toBe(true)
+    expect(wrapper.find('button[aria-label="适合窗口"]').exists()).toBe(true)
+    await wrapper.get('button[aria-label="平移"]').trigger('click')
+    expect(postMessage).toHaveBeenCalledWith({ type: 'preview-host-command', payload: { command: 'pan' } })
+    expect(wrapper.get('button[aria-label="平移"]').classes()).toContain('is-active')
+    await wrapper.get('button[aria-label="适合窗口"]').trigger('click')
+    expect(postMessage).toHaveBeenCalledWith({ type: 'preview-host-command', payload: { command: 'fit' } })
 
     const previewDocumentCalls = postMessage.mock.calls.filter(([message]) => message.type === 'preview-document').length
     await wrapper.get('button[aria-label="更多操作"]').trigger('click')
@@ -885,9 +889,9 @@ describe('PDM client workspace', () => {
     })
     window.dispatchEvent(new CustomEvent('pdm-preview-status', { detail: { state: 'ready', fileName: 'REAL-ASM-001.SLDDRW' } }))
     await flushPromises()
-    expect(wrapper.find('[aria-label="eDrawings快捷操作"]').exists()).toBe(false)
+    expect(wrapper.find('[aria-label="eDrawings快捷操作"]').exists()).toBe(true)
     expect(wrapper.find('[aria-label="图纸页切换"]').exists()).toBe(false)
-    expect(postMessage.mock.calls.filter(([message]) => message.type === 'preview-host-command')).toHaveLength(0)
+    expect(wrapper.get('button[aria-label="旋转"]').attributes('disabled')).toBeDefined()
 
     await wrapper.get('.pdm-related-documents button').trigger('click')
     await flushPromises()

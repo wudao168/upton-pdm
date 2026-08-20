@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { FileSearch, Link2, MoreHorizontal, Rotate3D } from '@lucide/vue'
+import { Box, FileSearch, Link2, Maximize2, MoreHorizontal, MousePointer2, Move, Rotate3D, RotateCw, ZoomIn } from '@lucide/vue'
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { postDesktopMessage } from '../api'
 import type { BomItem, DocumentNode, PreviewMode, SolidWorksOpenMode } from '../types'
@@ -13,6 +13,7 @@ const solidWorksAvailable = ref(false)
 const solidWorksPending = ref(false)
 const solidWorksMessage = ref('')
 const solidWorksError = ref(false)
+const activePreviewTool = ref<'select' | 'rotate' | 'zoom' | 'pan'>('select')
 let resizeObserver: ResizeObserver | undefined
 let overlayObserver: MutationObserver | undefined
 let previewSyncFrame = 0
@@ -156,6 +157,14 @@ function openInSolidWorks(mode: SolidWorksOpenMode) {
   emit('open', props.selected, mode)
 }
 
+function runPreviewCommand(command: 'select' | 'rotate' | 'zoom' | 'pan' | 'fit' | 'front' | 'top' | 'right' | 'isometric') {
+  if (!props.desktopAvailable || previewState.value !== 'ready') return
+  if (command === 'select' || command === 'rotate' || command === 'zoom' || command === 'pan') {
+    activePreviewTool.value = command
+  }
+  postDesktopMessage('preview-host-command', { command })
+}
+
 function onSolidWorksCapability(event: Event) {
   solidWorksAvailable.value = Boolean((event as CustomEvent<{ available?: boolean }>).detail?.available)
 }
@@ -177,6 +186,7 @@ watch(() => props.obscured, obscured => {
 }, { flush: 'post' })
 
 watch(() => props.selected.id, () => {
+  activePreviewTool.value = 'select'
   solidWorksPending.value = false
   solidWorksMessage.value = ''
   solidWorksError.value = false
@@ -247,6 +257,22 @@ onBeforeUnmount(() => {
           ><Rotate3D :size="15" />打开最新</button>
         </div>
       </header>
+      <div v-if="desktopAvailable" class="pdm-edrawings-toolbar" aria-label="eDrawings快捷操作">
+        <div class="pdm-edrawings-tool-group" aria-label="查看工具">
+          <button type="button" :class="{ 'is-active': activePreviewTool === 'select' }" aria-label="选择" title="选择" :disabled="previewState !== 'ready'" @click="runPreviewCommand('select')"><MousePointer2 :size="17" /></button>
+          <button type="button" :class="{ 'is-active': activePreviewTool === 'pan' }" aria-label="平移" title="平移" :disabled="previewState !== 'ready'" @click="runPreviewCommand('pan')"><Move :size="17" /></button>
+          <button type="button" :class="{ 'is-active': activePreviewTool === 'rotate' }" aria-label="旋转" title="旋转" :disabled="previewState !== 'ready' || mode === 'drawing'" @click="runPreviewCommand('rotate')"><RotateCw :size="17" /></button>
+          <button type="button" :class="{ 'is-active': activePreviewTool === 'zoom' }" aria-label="缩放" title="缩放" :disabled="previewState !== 'ready'" @click="runPreviewCommand('zoom')"><ZoomIn :size="17" /></button>
+          <button type="button" aria-label="适合窗口" title="适合窗口" :disabled="previewState !== 'ready'" @click="runPreviewCommand('fit')"><Maximize2 :size="17" /></button>
+        </div>
+        <span class="pdm-edrawings-toolbar-divider" aria-hidden="true"></span>
+        <div class="pdm-edrawings-tool-group" aria-label="标准视图">
+          <button type="button" aria-label="前视图" title="前视图" :disabled="previewState !== 'ready' || mode === 'drawing'" @click="runPreviewCommand('front')"><Box :size="16" /><small>前</small></button>
+          <button type="button" aria-label="顶视图" title="顶视图" :disabled="previewState !== 'ready' || mode === 'drawing'" @click="runPreviewCommand('top')"><Box :size="16" /><small>上</small></button>
+          <button type="button" aria-label="右视图" title="右视图" :disabled="previewState !== 'ready' || mode === 'drawing'" @click="runPreviewCommand('right')"><Box :size="16" /><small>右</small></button>
+          <button type="button" aria-label="等轴测" title="等轴测" :disabled="previewState !== 'ready' || mode === 'drawing'" @click="runPreviewCommand('isometric')"><Box :size="16" /><small>等</small></button>
+        </div>
+      </div>
       <p v-if="solidWorksMessage" class="pdm-solidworks-feedback" :class="{ 'is-error': solidWorksError }" role="status">{{ solidWorksMessage }}</p>
     </section>
 
