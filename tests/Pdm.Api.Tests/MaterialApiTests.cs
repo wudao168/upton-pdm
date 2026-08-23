@@ -78,6 +78,173 @@ public sealed class MaterialApiTests : IClassFixture<PdmApiFactory>
     }
 
     [Fact]
+    public async Task U9BomQueryApi_UsesSavedOrganizationAndReturnsReadOnlyPreview()
+    {
+        var settingsResponse = await client.PutAsJsonAsync("/api/u9-material-integration", new
+        {
+            baseUrl = "http://u9.example.test/U9",
+            enterpriseCode = "01",
+            organizationCode = "7",
+            userCode = "pdm",
+            clientId = "PDM",
+            clientSecret = "bom-query-secret",
+            itemCreatePath = U9MaterialContract.CreatePath,
+            itemQueryPath = U9MaterialContract.QueryPath,
+            writeEnabled = false
+        });
+        Assert.Equal(HttpStatusCode.OK, settingsResponse.StatusCode);
+        var fake = factory.Services.GetRequiredService<TestU9OpenApiClient>();
+        fake.BomResult = new U9BomQueryResult(0, null,
+        [
+            new("1001", "03010000001", "测试设备", "V1", "7", "昆山工厂", 0, 1, "001", "个",
+                null, null, 2, 0, 1, "ASM-001", "测试BOM", null, false, 0, 0,
+                [new(10, "2001", "01020000057", "阀岛", null, 2m, "001", "个", 1m,
+                    0, true, null, null, null, null, 0, 0, false, false)])
+        ]);
+
+        var response = await client.PostAsJsonAsync("/api/u9-boms/query", new
+        {
+            itemCode = "03010000001",
+            bomVersionCode = "V1",
+            lot = 1,
+            productUomCode = "001"
+        });
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        using var result = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+        Assert.Equal(U9BomContract.QueryPath, result.RootElement.GetProperty("queryPath").GetString());
+        Assert.False(result.RootElement.GetProperty("requestPreview").GetString()!.Contains("token", StringComparison.OrdinalIgnoreCase));
+        var bom = Assert.Single(result.RootElement.GetProperty("result").GetProperty("boms").EnumerateArray());
+        Assert.Equal("03010000001", bom.GetProperty("itemCode").GetString());
+        Assert.Equal("01020000057", Assert.Single(bom.GetProperty("components").EnumerateArray()).GetProperty("itemCode").GetString());
+        using var payload = JsonDocument.Parse(fake.LastBomPayload);
+        var request = Assert.Single(payload.RootElement.EnumerateArray());
+        Assert.Equal("7", request.GetProperty("Org").GetProperty("Code").GetString());
+        Assert.Equal("03010000001", request.GetProperty("ItemMaster").GetProperty("Code").GetString());
+        Assert.Equal("V1", request.GetProperty("BOMVersionCode").GetString());
+    }
+
+    [Fact]
+    public async Task U9BomWriteApi_UsesFixedA1AndOnlyAppendsDuringModify()
+    {
+        var settingsResponse = await client.PutAsJsonAsync("/api/u9-material-integration", new
+        {
+            baseUrl = "http://u9.example.test/U9",
+            enterpriseCode = "01",
+            organizationCode = "7",
+            userCode = "pdm",
+            clientId = "PDM",
+            clientSecret = "bom-write-secret",
+            itemCreatePath = U9MaterialContract.CreatePath,
+            itemQueryPath = U9MaterialContract.QueryPath,
+            writeEnabled = true
+        });
+        Assert.Equal(HttpStatusCode.OK, settingsResponse.StatusCode);
+        var fake = factory.Services.GetRequiredService<TestU9OpenApiClient>();
+        fake.BomResults.Clear();
+        fake.BomResult = new(0, null, []);
+        fake.BusinessResult = new(0, null, [new(true, null, "bom-1", "TEST-BOM")]);
+
+        object Command(int operation, params object[] components) => new
+        {
+            operation,
+            itemCode = "02010003168",
+            bomVersionCode = "A1",
+            productUomCode = "001",
+            lot = 1,
+            explain = "PLM受控接口测试",
+            components
+        };
+
+        object Component(int sequence, string itemCode, decimal usageQty) =>
+            new { sequence, itemCode, usageQty, issueUomCode = "001", parentQty = 1m };
+
+        U9BomReference Existing(string? marker, IReadOnlyList<U9BomComponentReference> components, string? explain = null) => new(
+            "bom-1", "02010003168", "测试母件", "A1", "7", "测试组织", 0, 1, "001", "个",
+            null, null, 0, 0, 0, null, explain ?? "PLM受控接口测试", null, false, 0, 0,
+            components, marker);
+
+        U9BomComponentReference ExistingComponent(int sequence, string itemCode, decimal usageQty) =>
+            new(sequence, $"id-{sequence}", itemCode, "测试子件", null, usageQty, "001", "个", 1m,
+                0, true, null, null, null, null, 0, 0, false, false);
+
+        async Task<JsonDocument> PreviewAsync(object command)
+        {
+            var response = await client.PostAsJsonAsync("/api/u9-boms/write-preview", command);
+            var body = await response.Content.ReadAsStringAsync();
+            Assert.True(response.StatusCode == HttpStatusCode.OK, body);
+            return JsonDocument.Parse(body);
+        }
+
+        async Task<JsonDocument> ExecuteAsync(object command, JsonDocument preview)
+        {
+            var response = await client.PostAsJsonAsync("/api/u9-boms/write-execute", new
+            {
+                command,
+                requestSha256 = preview.RootElement.GetProperty("requestSha256").GetString(),
+                confirmation = preview.RootElement.GetProperty("requiredConfirmation").GetString()
+            });
+            var body = await response.Content.ReadAsStringAsync();
+            Assert.True(response.StatusCode == HttpStatusCode.OK, body);
+            return JsonDocument.Parse(body);
+        }
+
+        var originalComponent = Component(10, "01020000057", 2m);
+        using var createPreview = await PreviewAsync(Command((int)U9BomWriteOperation.Create, originalComponent));
+        Assert.Equal(U9BomContract.CreatePath, createPreview.RootElement.GetProperty("path").GetString());
+        Assert.Equal(1, createPreview.RootElement.GetProperty("addedComponentCount").GetInt32());
+        Assert.Equal(0, createPreview.RootElement.GetProperty("retainedHistoricalComponentCount").GetInt32());
+        using var createPayload = JsonDocument.Parse(createPreview.RootElement.GetProperty("requestPreview").GetString()!);
+        var marker = Assert.Single(createPayload.RootElement.EnumerateArray()).GetProperty("OtherID").GetString()!;
+        var stampedExplain = Assert.Single(createPayload.RootElement.EnumerateArray()).GetProperty("Explain").GetString()!;
+        Assert.StartsWith("pdm-bom-", marker);
+        Assert.Contains($"[PDM:{marker}]", stampedExplain, StringComparison.OrdinalIgnoreCase);
+        fake.BomResults.Enqueue(new(0, null, []));
+        var baseline = Existing(null, [ExistingComponent(10, "01020000057", 2m)], stampedExplain);
+        fake.BomResults.Enqueue(new(0, null, [baseline]));
+        using var createExecution = await ExecuteAsync(Command((int)U9BomWriteOperation.Create, originalComponent), createPreview);
+        Assert.Equal(U9BomContract.CreatePath, fake.LastPostPath);
+        Assert.Single(createExecution.RootElement.GetProperty("verification").GetProperty("boms").EnumerateArray());
+
+        fake.BomResult = new(0, null, [baseline]);
+        var appendedComponent = Component(20, "01020000058", 1m);
+        using var modifyPreview = await PreviewAsync(Command((int)U9BomWriteOperation.Modify, appendedComponent));
+        Assert.Equal(U9BomContract.ModifyPath, modifyPreview.RootElement.GetProperty("path").GetString());
+        Assert.Equal(1, modifyPreview.RootElement.GetProperty("addedComponentCount").GetInt32());
+        Assert.Equal(1, modifyPreview.RootElement.GetProperty("retainedHistoricalComponentCount").GetInt32());
+        using var modifyPayload = JsonDocument.Parse(modifyPreview.RootElement.GetProperty("requestPreview").GetString()!);
+        var modifyRow = Assert.Single(modifyPayload.RootElement.EnumerateArray());
+        var appendedPayload = Assert.Single(modifyRow.GetProperty("BOMComponents").EnumerateArray());
+        Assert.Equal(20, appendedPayload.GetProperty("Sequence").GetInt32());
+        var afterAppend = Existing(null,
+            [ExistingComponent(10, "01020000057", 2m), ExistingComponent(20, "01020000058", 1m)], stampedExplain);
+        fake.BomResults.Enqueue(new(0, null, [baseline]));
+        fake.BomResults.Enqueue(new(0, null, [baseline]));
+        fake.BomResults.Enqueue(new(0, null, [afterAppend]));
+        using var modifyExecution = await ExecuteAsync(Command((int)U9BomWriteOperation.Modify, appendedComponent), modifyPreview);
+        Assert.Equal(U9BomContract.ModifyPath, fake.LastPostPath);
+        Assert.Equal(2, modifyExecution.RootElement.GetProperty("verification").GetProperty("boms")[0].GetProperty("components").GetArrayLength());
+
+        var changedExistingResponse = await client.PostAsJsonAsync("/api/u9-boms/write-preview",
+            Command((int)U9BomWriteOperation.Modify, Component(10, "01020000057", 3m)));
+        Assert.Equal(HttpStatusCode.BadRequest, changedExistingResponse.StatusCode);
+        Assert.Contains("原有项次10不能修改", await changedExistingResponse.Content.ReadAsStringAsync());
+
+        var deleteCommand = new
+        {
+            operation = (int)U9BomWriteOperation.Delete,
+            itemCode = "02010003168",
+            bomVersionCode = "A1",
+            productUomCode = "001",
+            lot = 1,
+            components = Array.Empty<object>()
+        };
+        var deleteResponse = await client.PostAsJsonAsync("/api/u9-boms/write-preview", deleteCommand);
+        Assert.Equal(HttpStatusCode.BadRequest, deleteResponse.StatusCode);
+        Assert.Contains("禁止删除整张BOM", await deleteResponse.Content.ReadAsStringAsync());
+    }
+
+    [Fact]
     public async Task MaterialApi_CreatesApprovesAndListsPreviewTask()
     {
         await ConfigureReadOnlyU9Async();
@@ -96,6 +263,7 @@ public sealed class MaterialApiTests : IClassFixture<PdmApiFactory>
         var materialCode = created.RootElement.GetProperty("materialCode").GetString()!;
         Assert.StartsWith("0101", materialCode);
         Assert.Equal(11, materialCode.Length);
+        Assert.Equal(0, created.RootElement.GetProperty("referenceCount").GetInt32());
 
         var approvedResponse = await client.PostAsync($"/api/materials/{materialId}/approve?expectedRowVersion={rowVersion}", null);
         Assert.Equal(HttpStatusCode.OK, approvedResponse.StatusCode);

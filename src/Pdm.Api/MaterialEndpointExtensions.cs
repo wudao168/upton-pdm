@@ -63,6 +63,46 @@ public static class MaterialEndpointExtensions
             return Results.Ok(MapMaterial(await service.CreateFromBomAsync(new(request.ProjectId, request.BomItemId), actor, role, cancellationToken)));
         });
 
+        api.MapPost("/material-code/resolve", async (ResolveMaterialCodesRequest request, HttpContext context, MaterialService service, PdmWorkflowService workflow, CancellationToken cancellationToken) =>
+        {
+            var (actor, role) = CurrentUser(context.User);
+            var results = await service.ResolveStandardBomMaterialsAsync(new(request.ProjectId, request.BomItemIds), actor, role, cancellationToken);
+            foreach (var result in results.Where(item => item.Status == MaterialCodeResolutionStatus.Matched && item.Material is not null))
+            {
+                await service.LinkBomMaterialAsync(new(request.ProjectId, result.BomItemId, result.Material!.Id), actor, role, cancellationToken);
+                await workflow.ApplyMaterialCodeToBomAsync(request.ProjectId, result.BomItemId, result.Material.MaterialCode, actor, cancellationToken);
+            }
+            return Results.Ok(results.Select(MapResolution));
+        });
+
+        api.MapPost("/material-code/applications", async (ApplyMaterialCodesRequest request, HttpContext context, MaterialService service, PdmWorkflowService workflow, CancellationToken cancellationToken) =>
+        {
+            var (actor, role) = CurrentUser(context.User);
+            var results = await service.ApplyForMaterialCodesAsync(new(request.ProjectId, request.BomItemIds), actor, role, cancellationToken);
+            foreach (var result in results.Where(item => item.Status == MaterialCodeResolutionStatus.Matched && item.Material is not null))
+            {
+                await service.LinkBomMaterialAsync(new(request.ProjectId, result.BomItemId, result.Material!.Id), actor, role, cancellationToken);
+                await workflow.ApplyMaterialCodeToBomAsync(request.ProjectId, result.BomItemId, result.Material.MaterialCode, actor, cancellationToken);
+            }
+            return Results.Ok(results.Select(MapResolution));
+        });
+
+        api.MapGet("/material-code/applications", async (Guid? projectId, string? status, HttpContext context, MaterialService service, CancellationToken cancellationToken) =>
+        {
+            var (actor, role) = CurrentUser(context.User);
+            MaterialCodeApplicationStatus? parsedStatus = string.IsNullOrWhiteSpace(status) ? null : Parse<MaterialCodeApplicationStatus>(status, "申请状态");
+            return Results.Ok((await service.ListCodeApplicationsAsync(projectId, parsedStatus, actor, role, cancellationToken)).Select(MapApplication));
+        });
+
+        api.MapPost("/material-code/applications/{applicationId:guid}/decision", async (Guid applicationId, DecideMaterialCodeApplicationRequest request, HttpContext context, MaterialService service, PdmWorkflowService workflow, CancellationToken cancellationToken) =>
+        {
+            var (actor, role) = CurrentUser(context.User);
+            var result = await service.DecideMaterialCodeApplicationAsync(applicationId, request.ExpectedRowVersion, request.Approved, request.Comment, actor, role, cancellationToken);
+            if (result.Material is not null)
+                await workflow.ApplyMaterialCodeToBomAsync(result.Application.ProjectId, result.Application.BomItemId, result.Material.MaterialCode, actor, cancellationToken);
+            return Results.Ok(new { Application = MapApplication(result.Application), Material = result.Material is null ? null : MapMaterial(result.Material) });
+        });
+
         api.MapPost("/materials/{materialId:guid}/approve", async (Guid materialId, long expectedRowVersion, HttpContext context, MaterialService service, CancellationToken cancellationToken) =>
         {
             var (actor, role) = CurrentUser(context.User);
@@ -97,9 +137,9 @@ public static class MaterialEndpointExtensions
 
         api.MapPut("/material-category-rules/{kind}", async (string kind, SaveMaterialCategoryRuleRequest request, HttpContext context, MaterialService service, CancellationToken cancellationToken) =>
         {
-            var routeKind = Parse<MaterialKind>(kind, "PDM物料分类");
-            var requestKind = Parse<MaterialKind>(request.PdmKind, "PDM物料分类");
-            if (routeKind != requestKind) throw new PdmRuleException("路径中的PDM物料分类与请求内容不一致。");
+            var routeKind = Parse<MaterialKind>(kind, "PLM物料分类");
+            var requestKind = Parse<MaterialKind>(request.PdmKind, "PLM物料分类");
+            if (routeKind != requestKind) throw new PdmRuleException("路径中的PLM物料分类与请求内容不一致。");
             var (actor, role) = CurrentUser(context.User);
             var saved = await service.SaveCategoryRuleAsync(new(
                 requestKind,
@@ -154,7 +194,14 @@ public static class MaterialEndpointExtensions
                 request.WriteEnabled,
                 request.ItemModifyPath,
                 request.ItemDeletePath,
-                request.UnitCodeMappings), actor, role, cancellationToken));
+                request.UnitCodeMappings,
+                request.CustomerQueryPath,
+                request.BomCreatePath,
+                request.BomQueryPath,
+                request.BomModifyPath,
+                request.BomDeletePath,
+                request.BomBatchUnapprovePath,
+                request.BomBipQueryPagePath), actor, role, cancellationToken));
         });
 
         api.MapPost("/u9-material-integration/test", async (HttpContext context, U9MaterialIntegrationService service, CancellationToken cancellationToken) =>
@@ -194,7 +241,7 @@ public static class MaterialEndpointExtensions
     private static SaveMaterialCommand ToCommand(SaveMaterialRequest request) => new(
         request.MaterialCode,
         request.Name,
-        Parse<MaterialKind>(request.Kind, "PDM物料分类"),
+        Parse<MaterialKind>(request.Kind, "PLM物料分类"),
         Parse<MaterialSupplyMode>(request.SupplyMode, "供给方式"),
         request.UnitCode,
         request.Specification,
@@ -213,7 +260,7 @@ public static class MaterialEndpointExtensions
         request.Name,
         request.ParentCode,
         request.U9CategoryId,
-        string.IsNullOrWhiteSpace(request.PdmKind) ? null : Parse<MaterialKind>(request.PdmKind, "PDM业务分类"),
+        string.IsNullOrWhiteSpace(request.PdmKind) ? null : Parse<MaterialKind>(request.PdmKind, "PLM业务分类"),
         Parse<MaterialSupplyMode>(request.DefaultSupplyMode, "默认供给方式"),
         request.AllowCreate,
         request.IsVisible,
@@ -260,7 +307,8 @@ public static class MaterialEndpointExtensions
         material.U9SyncConfirmed,
         SourceSystem = material.SourceSystem.ToString(),
         MasterOwner = material.MasterOwner.ToString(),
-        material.LastU9SyncedAt
+        material.LastU9SyncedAt,
+        material.ReferenceCount
     };
 
     private static object MapCategory(MaterialCategory category) => new
@@ -312,6 +360,35 @@ public static class MaterialEndpointExtensions
         task.U9ItemCode,
         task.CreatedAt,
         task.UpdatedAt
+    };
+
+    private static object MapApplication(MaterialCodeApplication application) => new
+    {
+        application.Id,
+        application.ProjectId,
+        application.BomItemId,
+        Status = application.Status.ToString(),
+        application.RequestedBy,
+        application.RequestedAt,
+        application.DecidedBy,
+        application.DecidedAt,
+        application.DecisionComment,
+        application.MaterialId,
+        application.MaterialCode,
+        application.RowVersion,
+        application.BomItemName,
+        application.Specification,
+        application.Brand,
+        application.Remark
+    };
+
+    private static object MapResolution(MaterialCodeResolution resolution) => new
+    {
+        resolution.BomItemId,
+        Status = resolution.Status.ToString(),
+        Material = resolution.Material is null ? null : MapMaterial(resolution.Material),
+        Candidates = resolution.Candidates.Select(MapMaterial),
+        Application = resolution.Application is null ? null : MapApplication(resolution.Application)
     };
 
     private static T Parse<T>(string value, string field) where T : struct, Enum =>

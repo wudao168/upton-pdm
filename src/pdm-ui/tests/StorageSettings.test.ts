@@ -46,7 +46,7 @@ describe('StorageSettings BOM property mappings', () => {
     expect((wrapper.get('[aria-label="物料分类对应SolidWorks属性"]').element as HTMLInputElement).value).toBe('物料分类')
     expect((wrapper.get('[aria-label="易损件对应SolidWorks属性"]').element as HTMLInputElement).value).toBe('易损件')
     expect(wrapper.text()).toContain('装配结构自动计算')
-    expect(wrapper.text()).toContain('PDM受控版本')
+    expect(wrapper.text()).toContain('PLM受控版本')
 
     await wrapper.get('[aria-label="热处理对应SolidWorks属性"]').setValue('热处理方式')
     await wrapper.get('[aria-label="物料分类对应SolidWorks属性"]').setValue('分类')

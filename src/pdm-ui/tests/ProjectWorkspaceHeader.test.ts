@@ -24,6 +24,8 @@ const rootProject: ProjectSummary = {
   collaborativeProjectManagers: [],
   designers: [],
   documentCount: 3,
+  modelDocumentCount: 2,
+  drawingDocumentCount: 1,
   businessStatus: '已检出',
   rootDocumentCheckedOutBy: 'engineer',
   canAssignExecutionUnit: false,
@@ -45,6 +47,8 @@ const childProject: ProjectSummary = {
   primaryProjectManager: undefined,
   designLead: undefined,
   documentCount: 0,
+  modelDocumentCount: 0,
+  drawingDocumentCount: 0,
   businessStatus: '待审批',
   rootDocumentCheckedOutBy: undefined,
 }
@@ -56,6 +60,8 @@ const drawingChild: ProjectSummary = {
   name: '工装',
   childSequence: 2,
   documentCount: 2,
+  modelDocumentCount: 1,
+  drawingDocumentCount: 1,
   businessStatus: '正常',
   rootDocumentCheckedOutBy: 'other-user',
 }
@@ -82,11 +88,12 @@ describe('ProjectWorkspaceHeader', () => {
     const sidebar = wrapper.get('[aria-label="项目基本信息与全部项目号"]')
     const context = sidebar.get('[aria-label="当前项目"]')
     expect(context.find('select[aria-label="切换项目"]').exists()).toBe(false)
-    expect((context.get('input[aria-label="当前项目显示"]').element as HTMLInputElement).value).toBe('P700002 · XXX设备')
-    expect(context.get('input[aria-label="当前项目显示"]').attributes('readonly')).toBeDefined()
-    expect(context.get('button[aria-label="浏览项目"]').text()).toBe('浏览')
+    expect(context.find('input[aria-label="当前项目显示"]').exists()).toBe(false)
+    expect(context.get('button[aria-label="浏览项目"]').text()).toBe('P700002 · XXX设备')
+    expect(context.get('button[aria-label="浏览项目"]').attributes('aria-haspopup')).toBe('dialog')
+    expect(context.find('.pdm-project-switcher__search-icon').exists()).toBe(true)
     expect(context.find('.pdm-project-context__breadcrumb').exists()).toBe(false)
-    expect(context.text()).toBe('切换项目浏览')
+    expect(context.text()).toBe('P700002 · XXX设备')
     expect(wrapper.find('.pdm-project-context').exists()).toBe(false)
     expect(sidebar.text()).not.toContain('项目基本信息')
     expect(sidebar.get('.pdm-project-sidebar__summary').find('small').text()).toBe('子项目')
@@ -103,9 +110,15 @@ describe('ProjectWorkspaceHeader', () => {
     expect(wrapper.findAll('.pdm-project-family__state i')).toHaveLength(0)
     expect(wrapper.find('.pdm-project-selected-summary').exists()).toBe(false)
     expect(wrapper.findAll('.pdm-project-tabs button')).toHaveLength(7)
+    expect(wrapper.text()).not.toContain('图纸审核')
     expect(sidebar.get('[aria-label="选择项目号 P700002"] .pdm-project-family__state').text()).toBe('可编辑')
     expect(sidebar.get('[aria-label="选择项目号 P700002-1"] .pdm-project-family__state').text()).toBe('正常')
     expect(sidebar.get('[aria-label="选择项目号 P700002-2"] .pdm-project-family__state').text()).toBe('other-user编辑中')
+    expect(sidebar.get('[aria-label="选择项目号 P700002"] .pdm-project-family__document-counts').text()).toBe('21')
+    expect(sidebar.get('[aria-label="选择项目号 P700002"] .pdm-project-family__document-counts').attributes('aria-label')).toBe('3D图档 2，2D图档 1')
+    expect(sidebar.get('[aria-label="选择项目号 P700002-1"] .pdm-project-family__document-counts').text()).toBe('00')
+    expect(sidebar.get('[aria-label="选择项目号 P700002-1"] .is-model').attributes('title')).toBe('3D图档 0')
+    expect(sidebar.get('[aria-label="选择项目号 P700002-1"] .is-drawing').attributes('title')).toBe('2D图档 0')
     expect(sidebar.get('.pdm-project-sidebar__overview').text()).toContain('0图档')
     expect(sidebar.text()).not.toContain('已检出')
   })
@@ -123,7 +136,7 @@ describe('ProjectWorkspaceHeader', () => {
     expect(summary.text()).toContain('70000001')
     expect(summary.text()).toContain('自动化事业部')
     expect(wrapper.get('.pdm-project-sidebar__overview').text()).toContain('3图档')
-    expect(wrapper.get('[aria-label="选择项目号 P700002"] .pdm-project-family__document-tag').text()).toBe('3')
+    expect(wrapper.get('[aria-label="选择项目号 P700002"] .pdm-project-family__document-counts').text()).toBe('21')
   })
 
   it('图档数量跟随当前选中的子项目号', () => {
@@ -145,7 +158,7 @@ describe('ProjectWorkspaceHeader', () => {
     expect(confirm).not.toHaveBeenCalled()
     expect(wrapper.emitted('switch')).toEqual([[drawingChild.id]])
 
-    const fileTab = wrapper.findAll('.pdm-project-tabs button').find(button => button.text() === '文件库')
+    const fileTab = wrapper.findAll('.pdm-project-tabs button').find(button => button.text() === '文件')
     expect(fileTab).toBeDefined()
     await fileTab!.trigger('click')
     expect(wrapper.emitted('tab')).toEqual([['files']])
@@ -159,12 +172,13 @@ describe('ProjectWorkspaceHeader', () => {
 
     await wrapper.get('button[aria-label="浏览项目"]').trigger('click')
     expect(wrapper.get('[role="dialog"]').text()).toContain('浏览项目')
-    expect(wrapper.findAll('[role="option"]')).toHaveLength(0)
-    expect(wrapper.get('[aria-label="项目搜索结果"]').text()).toContain('或选择客户、事业部、人员进行筛选')
+    expect(wrapper.findAll('[role="option"]')).toHaveLength(2)
+    expect(wrapper.findAll('[role="option"]').map(item => item.attributes('aria-label'))).toEqual(['选择浏览项目 P700003', '选择浏览项目 P700002'])
+    expect(wrapper.get('[aria-label="项目搜索结果"]').text()).toContain('客户名称')
+    expect(wrapper.get('[aria-label="项目搜索结果"]').text()).toContain('序列号')
 
     await wrapper.get('input[aria-label="搜索项目"]').setValue('检测')
-    expect(wrapper.findAll('[role="option"]')).toHaveLength(0)
-    await wrapper.get('input[aria-label="搜索项目"]').setValue('检测设备')
+    expect(wrapper.findAll('[role="option"]')).toHaveLength(1)
     expect(wrapper.find('button[aria-label="选择浏览项目 P700002"]').exists()).toBe(false)
     expect(wrapper.get('button[aria-label="选择浏览项目 P700003"]').text()).toContain('检测设备')
 
@@ -178,6 +192,28 @@ describe('ProjectWorkspaceHeader', () => {
     )
     expect(wrapper.emitted('switch')).toEqual([[otherRootProject.id]])
     expect(wrapper.find('[role="dialog"]').exists()).toBe(false)
+  })
+
+  it('浏览项目默认每页20行，并支持切换50、100行', async () => {
+    const projects = Array.from({ length: 52 }, (_, index) => ({
+      ...otherRootProject,
+      id: `root-page-${index}`,
+      code: `P${String(index + 1).padStart(6, '0')}`,
+      name: `分页项目${index + 1}`,
+    }))
+    const wrapper = mount(ProjectWorkspaceHeader, {
+      props: { project: childProject, projects: [rootProject, childProject, ...projects], activeTab: 'overview' },
+    })
+
+    await wrapper.get('button[aria-label="浏览项目"]').trigger('click')
+    expect(wrapper.findAll('[role="option"]')).toHaveLength(20)
+    expect(wrapper.get('[aria-label="项目列表分页"]').text()).toContain('共 53 条')
+    await wrapper.get('select[aria-label="每页行数"]').setValue('50')
+    expect(wrapper.findAll('[role="option"]')).toHaveLength(50)
+    await wrapper.get('button[aria-label="下一页"]').trigger('click')
+    expect(wrapper.findAll('[role="option"]')).toHaveLength(3)
+    await wrapper.get('select[aria-label="每页行数"]').setValue('100')
+    expect(wrapper.findAll('[role="option"]')).toHaveLength(53)
   })
 
   it.each([
@@ -215,7 +251,7 @@ describe('ProjectWorkspaceHeader', () => {
 
     expect(wrapper.emitted('switch')).toBeUndefined()
     expect(wrapper.find('[role="dialog"]').exists()).toBe(true)
-    expect((wrapper.get('input[aria-label="当前项目显示"]').element as HTMLInputElement).value).toBe('P700002 · XXX设备')
+    expect(wrapper.get('button[aria-label="浏览项目"]').text()).toBe('P700002 · XXX设备')
   })
 
   it('图档页左侧只显示项目摘要和全部项目号', () => {

@@ -45,7 +45,7 @@ public static class BomValidationFieldCatalog
         [DrawingNumber, Name, Unit, Specification, Quantity, Revision];
 
     public static IReadOnlyList<string> NonStandardDefaults { get; } =
-        [DrawingNumber, Name, Unit, Material, Quantity, Revision];
+        [Name, Unit, Material, Quantity, Revision];
 
     public static IReadOnlyList<string> ElectricalDefaults { get; } =
         [DrawingNumber, Name, Unit, Quantity, Revision];

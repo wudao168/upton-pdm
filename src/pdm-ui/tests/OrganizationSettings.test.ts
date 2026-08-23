@@ -1,6 +1,6 @@
 import { flushPromises, mount } from '@vue/test-utils'
 import ElementPlus from 'element-plus'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import OrganizationSettings from '../src/components/OrganizationSettings.vue'
 import type { OrganizationDirectory } from '../src/types'
 
@@ -34,6 +34,7 @@ function buttonByText(wrapper: ReturnType<typeof mount>, text: string) {
 
 describe('OrganizationSettings', () => {
   beforeEach(() => localStorage.clear())
+  afterEach(() => { document.body.innerHTML = '' })
 
   it('按当前公司隔离组织树，并将公司维护与组织架构分开', async () => {
     localStorage.setItem('pdm_active_organization', 'org-ks')
@@ -70,5 +71,40 @@ describe('OrganizationSettings', () => {
     await buttonByText(wrapper, '公司管理').trigger('click')
     expect(wrapper.get('[aria-label="公司管理"]').text()).toContain('昆山阿普顿自动化系统有限公司')
     expect(wrapper.get('[aria-label="公司管理"]').text()).toContain('广州阿普顿自动化系统有限公司')
+  })
+
+  it('新建组织显示明确保存按钮且不再要求排序，所有层级均可设置负责人', async () => {
+    const saveUnit = vi.fn().mockResolvedValue({ id: 'new-unit', organizationId: 'org-ks', code: 'KS-NEW', name: '新部门', kind: 'BusinessDivision', isActive: true, sortOrder: 2 })
+    const wrapper = mount(OrganizationSettings, {
+      attachTo: document.body,
+      props: {
+        directory,
+        activeCompanyId: 'org-ks',
+        pending: false,
+        onSaveOrganization: vi.fn(),
+        onSaveUnit: saveUnit,
+        onUpdateMemberships: vi.fn(),
+        onUpdateManagers: vi.fn(),
+      },
+      global: { plugins: [ElementPlus] },
+    })
+    await flushPromises()
+
+    await buttonByText(wrapper, '新建部门').trigger('click')
+    await flushPromises()
+    const dialog = document.body.querySelector('.el-dialog')!
+    expect(dialog.textContent).not.toContain('排序')
+    expect(dialog.textContent).toContain('保存组织')
+    const inputs = Array.from(dialog.querySelectorAll<HTMLInputElement>('input:not([disabled]):not([type="checkbox"])'))
+    inputs[0].value = 'KS-NEW'; inputs[0].dispatchEvent(new Event('input'))
+    inputs[1].value = '新部门'; inputs[1].dispatchEvent(new Event('input'))
+    Array.from(dialog.querySelectorAll<HTMLButtonElement>('button')).find(button => button.textContent?.trim() === '保存组织')!.click()
+    await flushPromises()
+    expect(saveUnit).toHaveBeenCalledWith(expect.objectContaining({ organizationId: 'org-ks', code: 'KS-NEW', name: '新部门' }))
+
+    await wrapper.get('[aria-label="组织架构树"]').findAll('[role="treeitem"]')[1].trigger('click')
+    await flushPromises()
+    expect(wrapper.get('[aria-label="组织详情"]').text()).toContain('设置负责人')
+    expect(wrapper.get('[aria-label="组织详情"]').text()).toContain('主负责人')
   })
 })

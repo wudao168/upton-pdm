@@ -11,7 +11,7 @@ $localRoot = Join-Path $projectRoot '.local'
 $allowedRoot = [IO.Path]::GetFullPath((Join-Path $localRoot 'backup')) + [IO.Path]::DirectorySeparatorChar
 if ([string]::IsNullOrWhiteSpace($BackupPath)) {
     $latest = Get-ChildItem -LiteralPath (Join-Path $localRoot 'backup') -Directory | Where-Object { Test-Path -LiteralPath (Join-Path $_.FullName 'manifest.json') } | Sort-Object LastWriteTime -Descending | Select-Object -First 1
-    if ($null -eq $latest) { throw 'No complete PDM backup was found.' }
+    if ($null -eq $latest) { throw 'No complete PLM backup was found.' }
     $BackupPath = $latest.FullName
 }
 $backupRoot = [IO.Path]::GetFullPath($BackupPath)

@@ -90,7 +90,7 @@ public sealed class PdmAddin : ISwAddin
             WireEvents();
             WireSolidWorksEvents();
 
-            taskPaneView = application.CreateTaskpaneView2(CreateTaskPaneIcon(), "UPTON PDM");
+            taskPaneView = application.CreateTaskpaneView2(CreateTaskPaneIcon(), "UPLM");
             taskPaneView.DisplayWindowFromHandlex64(taskPaneControl.Handle.ToInt64());
             taskPaneControl.SetConnectionState(false, "未登录");
             RefreshTree(false);
@@ -158,8 +158,8 @@ public sealed class PdmAddin : ISwAddin
         using (var addinKey = Registry.LocalMachine.CreateSubKey(string.Concat(@"SOFTWARE\SOLIDWORKS\Addins\", guid)))
         {
             addinKey?.SetValue(null, 0, RegistryValueKind.DWord);
-            addinKey?.SetValue("Title", "UPTON PDM");
-            addinKey?.SetValue("Description", "UPTON PDM SolidWorks图档、版本与设计树插件");
+            addinKey?.SetValue("Title", "UPLM");
+            addinKey?.SetValue("Description", "UPLM SolidWorks图档、版本与设计树插件");
         }
 
         using (var startupKey = Registry.CurrentUser.CreateSubKey(string.Concat(@"SOFTWARE\SOLIDWORKS\AddInsStartup\", guid)))
@@ -827,7 +827,7 @@ public sealed class PdmAddin : ISwAddin
             MessageBox.Show(
                 taskPaneControl,
                 string.Concat("登录成功，但登录信息未能保存：", exception.Message),
-                "UPTON PDM",
+                "UPLM",
                 MessageBoxButtons.OK,
                 MessageBoxIcon.Warning);
         }
@@ -936,7 +936,7 @@ public sealed class PdmAddin : ISwAddin
             try
             {
                 await apiClient.RequestCheckoutReleaseAsync(eventArgs.Node.DocumentId.Value, dialog.Comment, lifetime.Token);
-                MessageBox.Show(taskPaneControl, "释放申请已发送。", "UPTON PDM", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                MessageBox.Show(taskPaneControl, "释放申请已发送。", "UPLM", MessageBoxButtons.OK, MessageBoxIcon.Information);
             }
             catch (Exception exception) { ShowError(exception.Message); }
         }
@@ -955,7 +955,7 @@ public sealed class PdmAddin : ISwAddin
                     ?? throw new InvalidOperationException("当前项目没有审批中的发布包。");
                 await apiClient.WithdrawReleasePackageAsync(active.Id, dialog.Comment, lifetime.Token);
                 RefreshTree(true);
-                MessageBox.Show(taskPaneControl, "审批已撤回，图档已恢复为工作中。", "UPTON PDM", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                MessageBox.Show(taskPaneControl, "审批已撤回，图档已恢复为工作中。", "UPLM", MessageBoxButtons.OK, MessageBoxIcon.Information);
             }
             catch (Exception exception) { ShowError(exception.Message); }
         }
@@ -972,7 +972,7 @@ public sealed class PdmAddin : ISwAddin
                 var document = await apiClient.ObsoleteAsync(eventArgs.Node.DocumentId.Value, dialog.Comment, lifetime.Token);
                 ApplyCheckoutDocument(eventArgs.Node, document);
                 taskPaneControl.SetTree(currentTree);
-                MessageBox.Show(taskPaneControl, "图档已受控作废。", "UPTON PDM", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                MessageBox.Show(taskPaneControl, "图档已受控作废。", "UPLM", MessageBoxButtons.OK, MessageBoxIcon.Information);
             }
             catch (Exception exception) { ShowError(exception.Message); }
         }
@@ -1226,7 +1226,7 @@ public sealed class PdmAddin : ISwAddin
             case swRenameDocumentError_e.swRenameDocumentError_InvalidVirtualComponent:
                 return "该零部件类型不支持直接重命名。";
             case swRenameDocumentError_e.swRenameDocumentError_NotAllowedWithPDM:
-                return "SolidWorks拒绝了本次PDM环境下的重命名操作。";
+                return "SolidWorks拒绝了本次PLM环境下的重命名操作。";
             default:
                 return string.Concat("SolidWorks重命名失败，错误代码：", (int)error, "。");
         }
@@ -1923,7 +1923,7 @@ public sealed class PdmAddin : ISwAddin
         {
             drawing.CreateLayer2(
                 layerName,
-                "PDM自动中心线",
+                "PLM自动中心线",
                 0,
                 (int)swLineStyles_e.swLineCENTER,
                 (int)swLineWeights_e.swLW_THIN,
@@ -3249,7 +3249,7 @@ public sealed class PdmAddin : ISwAddin
         var node = eventArgs.Node;
         if (!apiClient.IsAuthenticated)
         {
-            ShowError("请先登录PDM。");
+            ShowError("请先登录PLM。");
             return;
         }
         if (node == null || !node.DocumentId.HasValue)
@@ -3291,7 +3291,7 @@ public sealed class PdmAddin : ISwAddin
 
             var versions = await apiClient.GetVersionsAsync(node.DocumentId.Value, lifetime.Token);
             var latest = versions.FirstOrDefault()
-                ?? throw new InvalidOperationException("该图档尚无可获取的PDM版本。");
+                ?? throw new InvalidOperationException("该图档尚无可获取的PLM版本。");
             ApplyLatestVersion(node, latest);
 
             if (File.Exists(node.FullPath))
@@ -3301,7 +3301,7 @@ public sealed class PdmAddin : ISwAddin
                 {
                     ApplyUpdatedWorkingVersion(node, latest);
                     taskPaneControl.SetTree(currentTree);
-                    MessageBox.Show(taskPaneControl, "当前工作文件已是最新版本。", "UPTON PDM", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    MessageBox.Show(taskPaneControl, "当前工作文件已是最新版本。", "UPLM", MessageBoxButtons.OK, MessageBoxIcon.Information);
                     return;
                 }
 
@@ -3309,7 +3309,7 @@ public sealed class PdmAddin : ISwAddin
                 {
                     throw new InvalidOperationException(string.Concat(
                         node.FileName,
-                        "的本地内容无法对应任何PDM历史版本，可能存在待提交修改。为避免覆盖，已停止更新。"));
+                        "的本地内容无法对应任何PLM历史版本，可能存在待提交修改。为避免覆盖，已停止更新。"));
                 }
             }
 
@@ -3344,7 +3344,7 @@ public sealed class PdmAddin : ISwAddin
             MessageBox.Show(
                 taskPaneControl,
                 string.Concat("已更新到最新版本：", latest.Revision?.Display ?? "-", "。\r\n原工作文件已保留在本地工作区备份目录。"),
-                "UPTON PDM",
+                "UPLM",
                 MessageBoxButtons.OK,
                 MessageBoxIcon.Information);
         }
@@ -3378,7 +3378,7 @@ public sealed class PdmAddin : ISwAddin
             || node.WorkState == CadWorkState.ModifiedUnsaved
             || node.WorkState == CadWorkState.PendingCheckIn)
         {
-            throw new InvalidOperationException("该图档存在未保存修改或待提交内容，不能用PDM版本覆盖。");
+            throw new InvalidOperationException("该图档存在未保存修改或待提交内容，不能用PLM版本覆盖。");
         }
         if (string.IsNullOrWhiteSpace(node.FullPath)
             || ToSolidWorksDocumentType(node.Kind) == (int)swDocumentTypes_e.swDocNONE)
@@ -3446,7 +3446,7 @@ public sealed class PdmAddin : ISwAddin
     {
         if (!apiClient.IsAuthenticated)
         {
-            ShowError("请先登录PDM，再打开受控图档。");
+            ShowError("请先登录PLM，再打开受控图档。");
             return;
         }
         if (Interlocked.Exchange(ref controlledOpenInProgress, 1) != 0)
@@ -3673,7 +3673,7 @@ public sealed class PdmAddin : ISwAddin
         if (Volatile.Read(ref checkInOperationInProgress) > 0
             || Volatile.Read(ref workspaceOperationInProgress) > 0)
         {
-            ShowError("正在处理PDM工作文件，请稍候再打开其他图档。");
+            ShowError("正在处理PLM工作文件，请稍候再打开其他图档。");
             return;
         }
 
@@ -3749,7 +3749,7 @@ public sealed class PdmAddin : ISwAddin
         var node = requestedNodes.FirstOrDefault() ?? eventArgs.Node;
         if (node == null || !apiClient.IsAuthenticated)
         {
-            ShowError("请先登录PDM。");
+            ShowError("请先登录PLM。");
             return;
         }
 
@@ -3880,7 +3880,7 @@ public sealed class PdmAddin : ISwAddin
     {
         if (!apiClient.IsAuthenticated)
         {
-            ShowError("请先登录PDM。");
+            ShowError("请先登录PLM。");
             return;
         }
         if (currentTree == null || currentTree.IsReadOnlyPreview)
@@ -4035,7 +4035,7 @@ public sealed class PdmAddin : ISwAddin
                     {
                         message = string.Concat(message, "\r\n\r\n", string.Join("\r\n", result.BomWarnings.Distinct().Take(8)));
                     }
-                    MessageBox.Show(taskPaneControl, message, "UPTON PDM", MessageBoxButtons.OK,
+                    MessageBox.Show(taskPaneControl, message, "UPLM", MessageBoxButtons.OK,
                         result.Failures.Count == 0 && result.BomWarnings.Count == 0 ? MessageBoxIcon.Information : MessageBoxIcon.Warning);
                     RememberExplicitProjectPaths(selectedOperationItems, projectId.Value);
                     currentProjectId = projectId.Value;
@@ -4146,8 +4146,8 @@ public sealed class PdmAddin : ISwAddin
             }
             MessageBox.Show(
                 taskPaneControl,
-                string.Concat("PDM属性回写完成。\r\n成功：", completed, "条\r\n失败：", failed, "条\r\n新版本文件：", result.CreatedVersions, "个"),
-                "UPTON PDM",
+                string.Concat("PLM属性回写完成。\r\n成功：", completed, "条\r\n失败：", failed, "条\r\n新版本文件：", result.CreatedVersions, "个"),
+                "UPLM",
                 MessageBoxButtons.OK,
                 failed == 0 ? MessageBoxIcon.Information : MessageBoxIcon.Warning);
         }
@@ -4189,7 +4189,7 @@ public sealed class PdmAddin : ISwAddin
                 openedForBatch = true;
             }
             if (document == null || !PathsEqual(document.GetPathName(), node.FullPath))
-                throw new IOException(string.Concat(node.FileName, "未能安全加载，PDM属性未写入。"));
+                throw new IOException(string.Concat(node.FileName, "未能安全加载，PLM属性未写入。"));
             EnsureDocumentEditable(document, node.FullPath);
             var configuration = request.SourceConfiguration?.Trim() ?? string.Empty;
             var manager = document.Extension.CustomPropertyManager[configuration];
@@ -4200,7 +4200,7 @@ public sealed class PdmAddin : ISwAddin
             var saveWarnings = 0;
             var saved = document.Save3((int)swSaveAsOptions_e.swSaveAsOptions_Silent, ref saveErrors, ref saveWarnings);
             if (!saved || saveErrors != 0)
-                throw new IOException(string.Concat(node.FileName, "保存PDM属性失败，错误码：", saveErrors, "，警告码：", saveWarnings));
+                throw new IOException(string.Concat(node.FileName, "保存PLM属性失败，错误码：", saveErrors, "，警告码：", saveWarnings));
             node.WorkState = CadWorkState.PendingCheckIn;
         }
         finally
@@ -4430,7 +4430,7 @@ public sealed class PdmAddin : ISwAddin
     {
         if (!apiClient.IsAuthenticated)
         {
-            ShowError("请先登录PDM。");
+            ShowError("请先登录PLM。");
             return;
         }
 
@@ -4525,7 +4525,7 @@ public sealed class PdmAddin : ISwAddin
                             "\r\n已获取权限：", result.CheckedOutFiles, "个",
                             "\r\n已更新本地文件：", result.UpdatedFiles, "个",
                             "\r\n本地已是最新或首次登记：", result.CheckedOutFiles - result.UpdatedFiles, "个"),
-                        "UPTON PDM",
+                        "UPLM",
                         MessageBoxButtons.OK,
                         MessageBoxIcon.Information);
                 }
@@ -4699,7 +4699,7 @@ public sealed class PdmAddin : ISwAddin
                 {
                     if (!File.Exists(node.FullPath))
                     {
-                        throw new FileNotFoundException(string.Concat(node.FileName, "尚无PDM存档版本，本地文件也不存在。"));
+                        throw new FileNotFoundException(string.Concat(node.FileName, "尚无PLM存档版本，本地文件也不存在。"));
                     }
 
                     continue;
@@ -4724,14 +4724,14 @@ public sealed class PdmAddin : ISwAddin
 
                     if (node.IsModifiedInSolidWorks)
                     {
-                        throw new InvalidOperationException(string.Concat(node.FileName, "存在未保存修改，并且磁盘文件不是PDM最新版本，不能自动更新。请先另存修改或放弃修改。"));
+                        throw new InvalidOperationException(string.Concat(node.FileName, "存在未保存修改，并且磁盘文件不是PLM最新版本，不能自动更新。请先另存修改或放弃修改。"));
                     }
 
                     if (!versions.Any(version => VersionMatchesLocalFile(version, node.FullPath, localSha256)))
                     {
                         throw new InvalidOperationException(string.Concat(
                             node.FileName,
-                            "的本地内容无法对应任何PDM历史版本，可能包含未存档修改。为避免覆盖，整套获取已停止。"));
+                            "的本地内容无法对应任何PLM历史版本，可能包含未存档修改。为避免覆盖，整套获取已停止。"));
                     }
 
                     needsDownload = true;
@@ -5125,7 +5125,7 @@ public sealed class PdmAddin : ISwAddin
         {
             throw new InvalidOperationException(string.Concat(
                 "检测到不同路径的同名文件：", conflict.Key,
-                "。当前PDM以项目内文件名识别图档，请先处理同名冲突。"));
+                "。当前PLM以项目内文件名识别图档，请先处理同名冲突。"));
         }
     }
 
@@ -5173,7 +5173,7 @@ public sealed class PdmAddin : ISwAddin
             {
                 throw new InvalidOperationException(string.Concat(
                     Path.GetFileName(document.GetPathName()),
-                    "存在未保存修改。请先保存或放弃修改，再获取PDM最新版本。"));
+                    "存在未保存修改。请先保存或放弃修改，再获取PLM最新版本。"));
             }
         }
     }
@@ -5356,7 +5356,7 @@ public sealed class PdmAddin : ISwAddin
         {
             throw new IOException(string.Concat(
                 Path.GetFileName(path),
-                "已获取PDM编辑权限，但SolidWorks仍以只读方式打开。请关闭该图档后重新获取权限。"));
+                "已获取PLM编辑权限，但SolidWorks仍以只读方式打开。请关闭该图档后重新获取权限。"));
         }
     }
 
@@ -5863,7 +5863,7 @@ public sealed class PdmAddin : ISwAddin
     {
         if (node == null || !node.DocumentId.HasValue)
         {
-            throw new InvalidOperationException("图档尚未登记到PDM。");
+            throw new InvalidOperationException("图档尚未登记到PLM。");
         }
 
         if (node.IsReadOnlyPreview || IsReadOnlyPreviewPath(node.FullPath))
@@ -6121,7 +6121,7 @@ public sealed class PdmAddin : ISwAddin
         {
             if (!BringActiveBatchProgressToFront())
             {
-                ShowError("上一项PDM工作文件操作仍在完成（可能正在恢复原图档），请等待状态刷新后再试。");
+                ShowError("上一项PLM工作文件操作仍在完成（可能正在恢复原图档），请等待状态刷新后再试。");
             }
             return;
         }
@@ -6333,7 +6333,7 @@ public sealed class PdmAddin : ISwAddin
                 historicalPartEditContexts.Remove(node.DocumentId.Value);
                 ProtectLoadedDocument(activePath);
                 taskPaneControl.SetTree(currentTree);
-                MessageBox.Show(taskPaneControl, string.Concat("未检测到变更，已结束编辑，版本仍为", node.Revision, "。"), "UPTON PDM", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                MessageBox.Show(taskPaneControl, string.Concat("未检测到变更，已结束编辑，版本仍为", node.Revision, "。"), "UPLM", MessageBoxButtons.OK, MessageBoxIcon.Information);
                 return;
             }
 
@@ -6382,7 +6382,7 @@ public sealed class PdmAddin : ISwAddin
                     ? string.Concat("提交存档成功，工作版本：", node.Revision)
                     : string.Concat("未检测到变更，已结束编辑，版本仍为", node.Revision, "。"),
                     string.IsNullOrWhiteSpace(bomNotice) ? string.Empty : string.Concat("\r\n\r\n", bomNotice)),
-                "UPTON PDM",
+                "UPLM",
                 MessageBoxButtons.OK,
                 HasBomUpdateWarning(result) ? MessageBoxIcon.Warning : MessageBoxIcon.Information);
         }
@@ -6758,7 +6758,7 @@ public sealed class PdmAddin : ISwAddin
     {
         if (!apiClient.IsAuthenticated)
         {
-            ShowError("请先登录PDM。");
+            ShowError("请先登录PLM。");
             return;
         }
 
@@ -6808,7 +6808,7 @@ public sealed class PdmAddin : ISwAddin
 
             var versions = await apiClient.GetVersionsAsync(node.DocumentId.Value, lifetime.Token);
             var latest = versions.FirstOrDefault()
-                ?? throw new InvalidOperationException("该图档尚无可选择的PDM版本。");
+                ?? throw new InvalidOperationException("该图档尚无可选择的PLM版本。");
             var selected = versions.FirstOrDefault(version => version.Id == eventArgs.Version.Id)
                 ?? throw new InvalidOperationException("所选版本已不存在，请刷新版本列表后重试。");
             ApplyLatestVersion(node, latest);
@@ -6823,7 +6823,7 @@ public sealed class PdmAddin : ISwAddin
                 {
                     throw new InvalidOperationException(string.Concat(
                         node.FileName,
-                        "的本地内容无法对应任何PDM历史版本，可能存在待提交修改。为避免覆盖，已停止切换。"));
+                        "的本地内容无法对应任何PLM历史版本，可能存在待提交修改。为避免覆盖，已停止切换。"));
                 }
 
                 if (current.Id == selected.Id)
@@ -6834,7 +6834,7 @@ public sealed class PdmAddin : ISwAddin
                     MessageBox.Show(
                         taskPaneControl,
                         string.Concat("当前工作文件已经是", selected.Revision?.Display ?? "-", "，设计树已更新版本状态。"),
-                        "UPTON PDM",
+                        "UPLM",
                         MessageBoxButtons.OK,
                         MessageBoxIcon.Information);
                     return;
@@ -6895,7 +6895,7 @@ public sealed class PdmAddin : ISwAddin
             MessageBox.Show(
                 taskPaneControl,
                 string.Concat("工作版本已切换为", selectedRevision, "。\r\n设计树版本：", selectedRevision, " / ", latestRevision, "。"),
-                "UPTON PDM",
+                "UPLM",
                 MessageBoxButtons.OK,
                 MessageBoxIcon.Information);
         }
@@ -6921,7 +6921,7 @@ public sealed class PdmAddin : ISwAddin
     {
         if (!apiClient.IsAuthenticated)
         {
-            ShowError("请先登录PDM。");
+            ShowError("请先登录PLM。");
             return;
         }
 
@@ -6985,7 +6985,7 @@ public sealed class PdmAddin : ISwAddin
 
             var versions = await apiClient.GetVersionsAsync(node.DocumentId.Value, lifetime.Token);
             var latest = versions.FirstOrDefault()
-                ?? throw new InvalidOperationException("该零件尚无可选择的PDM版本。");
+                ?? throw new InvalidOperationException("该零件尚无可选择的PLM版本。");
             var selected = versions.FirstOrDefault(version => version.Id == eventArgs.Version.Id)
                 ?? throw new InvalidOperationException("所选版本已不存在，请刷新版本列表后重试。");
             if (selected.Id == latest.Id)
@@ -7004,7 +7004,7 @@ public sealed class PdmAddin : ISwAddin
                 {
                     throw new InvalidOperationException(string.Concat(
                         node.FileName,
-                        "的本地内容无法对应任何PDM历史版本，可能存在待提交修改。为避免覆盖，已停止获取编辑。"));
+                        "的本地内容无法对应任何PLM历史版本，可能存在待提交修改。为避免覆盖，已停止获取编辑。"));
                 }
             }
 
@@ -7135,7 +7135,7 @@ public sealed class PdmAddin : ISwAddin
             ScheduleTreeRefresh();
             if (!string.IsNullOrWhiteSpace(successMessage))
             {
-                MessageBox.Show(taskPaneControl, successMessage, "UPTON PDM", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                MessageBox.Show(taskPaneControl, successMessage, "UPLM", MessageBoxButtons.OK, MessageBoxIcon.Information);
             }
         }
     }
@@ -8504,7 +8504,7 @@ public sealed class PdmAddin : ISwAddin
     {
         if (!apiClient.IsAuthenticated)
         {
-            ShowError("请先登录PDM。 ");
+            ShowError("请先登录PLM。 ");
             return false;
         }
 
@@ -8532,7 +8532,7 @@ public sealed class PdmAddin : ISwAddin
     {
         var directory = Path.Combine(System.Environment.GetFolderPath(System.Environment.SpecialFolder.LocalApplicationData), "UPTON PDM");
         Directory.CreateDirectory(directory);
-        var iconPath = Path.Combine(directory, "pdm-taskpane.bmp");
+        var iconPath = Path.Combine(directory, "plm-taskpane-v2.bmp");
         if (File.Exists(iconPath))
         {
             return iconPath;
@@ -8540,13 +8540,18 @@ public sealed class PdmAddin : ISwAddin
 
         using (var bitmap = new Bitmap(20, 20))
         using (var graphics = Graphics.FromImage(bitmap))
-        using (var background = new SolidBrush(Color.FromArgb(36, 170, 168)))
-        using (var textBrush = new SolidBrush(Color.White))
-        using (var font = new Font("Segoe UI", 11F, FontStyle.Bold, GraphicsUnit.Pixel))
+        using (var stream = typeof(PdmAddin).Assembly.GetManifestResourceStream("Upton.Pdm.SolidWorks.Assets.PdmClient.png"))
         {
-            graphics.FillRectangle(background, 0, 0, 20, 20);
-            graphics.DrawString("P", font, textBrush, new PointF(5, 3));
-            bitmap.Save(iconPath);
+            graphics.Clear(Color.White);
+            if (stream != null)
+            {
+                using (var image = Image.FromStream(stream))
+                {
+                    graphics.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.HighQualityBicubic;
+                    graphics.DrawImage(image, new Rectangle(0, 0, 20, 20));
+                }
+            }
+            bitmap.Save(iconPath, System.Drawing.Imaging.ImageFormat.Bmp);
         }
 
         return iconPath;
@@ -8561,7 +8566,7 @@ public sealed class PdmAddin : ISwAddin
 
         try
         {
-            MessageBox.Show(taskPaneControl, message, "UPTON PDM", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            MessageBox.Show(taskPaneControl, message, "UPLM", MessageBoxButtons.OK, MessageBoxIcon.Warning);
         }
         catch (Exception exception)
         {

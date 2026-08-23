@@ -31,7 +31,14 @@ internal sealed class PdmApiClient : IDisposable
     {
         var response = await PostJsonAsync<LoginResponseDto>("api/auth/login", new { username, password }, cancellationToken).ConfigureAwait(false);
         httpClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", response.AccessToken);
+        SetActiveCompany(response.ActiveCompanyId);
         return response;
+    }
+
+    public void SetActiveCompany(Guid companyId)
+    {
+        httpClient.DefaultRequestHeaders.Remove("X-Company-Id");
+        if (companyId != Guid.Empty) httpClient.DefaultRequestHeaders.Add("X-Company-Id", companyId.ToString());
     }
 
     public Task<List<ProjectDto>> GetProjectsAsync(CancellationToken cancellationToken) =>
@@ -277,7 +284,7 @@ internal sealed class PdmApiClient : IDisposable
             {
                 if (!response.IsSuccessStatusCode)
                 {
-                    throw new InvalidOperationException("PDM最新版本文件读取失败。");
+                    throw new InvalidOperationException("PLM最新版本文件读取失败。");
                 }
 
                 using (var input = await response.Content.ReadAsStreamAsync().ConfigureAwait(false))
@@ -290,7 +297,7 @@ internal sealed class PdmApiClient : IDisposable
             var actualSha256 = ComputeFileSha256(partialPath);
             if (!string.Equals(actualSha256, expectedSha256, StringComparison.OrdinalIgnoreCase))
             {
-                throw new InvalidDataException("PDM最新版本文件校验失败，未更新本地工作文件。");
+                throw new InvalidDataException("PLM最新版本文件校验失败，未更新本地工作文件。");
             }
 
             File.Move(partialPath, path);
@@ -314,7 +321,7 @@ internal sealed class PdmApiClient : IDisposable
         var path = Path.GetFullPath(Path.Combine(root, relativePath ?? string.Empty));
         if (!path.StartsWith(root, StringComparison.OrdinalIgnoreCase))
         {
-            throw new InvalidDataException("PDM打开清单包含无效相对路径。");
+            throw new InvalidDataException("PLM打开清单包含无效相对路径。");
         }
 
         Directory.CreateDirectory(Path.GetDirectoryName(path));
@@ -434,7 +441,7 @@ internal sealed class PdmApiClient : IDisposable
             throw new InvalidOperationException(string.Concat(
                 "引用文件",
                 string.IsNullOrWhiteSpace(node.FileName) ? node.DisplayName : node.FileName,
-                "的本机版本无法对应PDM受控版本（当前显示：",
+                "的本机版本无法对应PLM受控版本（当前显示：",
                 string.IsNullOrWhiteSpace(displayedRevisionText) ? "待识别" : displayedRevisionText,
                 "）。请先保存并提交或更新该子件，再提交根装配。"));
         }
@@ -493,7 +500,7 @@ internal sealed class PdmApiClient : IDisposable
     {
         if (string.IsNullOrWhiteSpace(body))
         {
-            return string.Concat("PDM服务返回", status, "。 ");
+            return string.Concat("PLM服务返回", status, "。 ");
         }
 
         try
@@ -522,6 +529,17 @@ internal sealed class LoginResponseDto
     public string Username { get; set; }
     public string DisplayName { get; set; }
     public string Role { get; set; }
+    public Guid PrimaryCompanyId { get; set; }
+    public Guid ActiveCompanyId { get; set; }
+    public string ActiveCompanyName { get; set; }
+    public bool CrossCompanyView { get; set; }
+    public List<CompanyOptionDto> AccessibleCompanies { get; set; }
+}
+
+internal sealed class CompanyOptionDto
+{
+    public Guid Id { get; set; }
+    public string Name { get; set; }
 }
 
 internal sealed class ProjectDto

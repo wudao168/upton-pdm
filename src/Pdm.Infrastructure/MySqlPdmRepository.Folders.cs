@@ -12,17 +12,17 @@ public sealed partial class MySqlPdmRepository
         await using var connection = await OpenAsync(cancellationToken);
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
         var project = await connection.QuerySingleOrDefaultAsync<FolderProjectRow>(new CommandDefinition(
-            "SELECT id,code,parent_project_id,child_sequence FROM project WHERE id=@ProjectId",
+            "SELECT id,code,parent_project_id,root_project_id,child_sequence FROM project WHERE id=@ProjectId",
             new { ProjectId = projectId }, transaction, cancellationToken: cancellationToken))
             ?? throw new PdmNotFoundException("项目不存在。");
-        var rootId = project.ParentProjectId ?? project.Id;
-        var root = project.ParentProjectId is null
+        var rootId = project.RootProjectId ?? project.Id;
+        var root = project.Id == rootId
             ? project
             : await connection.QuerySingleAsync<FolderProjectRow>(new CommandDefinition(
-                "SELECT id,code,parent_project_id,child_sequence FROM project WHERE id=@ProjectId",
+                "SELECT id,code,parent_project_id,root_project_id,child_sequence FROM project WHERE id=@ProjectId",
                 new { ProjectId = rootId }, transaction, cancellationToken: cancellationToken));
         var projects = (await connection.QueryAsync<FolderProjectRow>(new CommandDefinition(
-            "SELECT id,code,parent_project_id,child_sequence FROM project WHERE id=@RootId OR parent_project_id=@RootId ORDER BY parent_project_id,child_sequence",
+            "SELECT id,code,parent_project_id,root_project_id,child_sequence FROM project WHERE id=@RootId OR root_project_id=@RootId ORDER BY code",
             new { RootId = rootId }, transaction, cancellationToken: cancellationToken))).ToArray();
         var template = (await connection.QueryAsync<FolderTemplateRow>(new CommandDefinition(
             "SELECT folder_key,parent_key,name,purpose,sort_order,is_system,inherit_permissions FROM folder_template_node ORDER BY sort_order,folder_key",
@@ -61,7 +61,7 @@ public sealed partial class MySqlPdmRepository
             """
             UPDATE document d
             INNER JOIN project p ON p.id=d.project_id
-            INNER JOIN project_folder f ON f.root_project_id=COALESCE(p.parent_project_id,p.id)
+            INNER JOIN project_folder f ON f.root_project_id=COALESCE(p.root_project_id,p.id)
                 AND f.target_project_id=d.project_id AND f.template_key='mechanical.project'
             SET d.folder_id=f.id
             WHERE d.folder_id IS NULL
@@ -75,7 +75,7 @@ public sealed partial class MySqlPdmRepository
         await EnsureProjectFolderTreeAsync(projectId, cancellationToken);
         await using var connection = await OpenAsync(cancellationToken);
         var rootId = await connection.ExecuteScalarAsync<Guid>(new CommandDefinition(
-            "SELECT COALESCE(parent_project_id,id) FROM project WHERE id=@ProjectId",
+            "SELECT COALESCE(root_project_id,id) FROM project WHERE id=@ProjectId",
             new { ProjectId = projectId }, cancellationToken: cancellationToken));
         var rows = (await connection.QueryAsync<ProjectFolderRow>(new CommandDefinition(
             "SELECT id,root_project_id,parent_folder_id,target_project_id,folder_key,template_key,name,purpose,sort_order,is_system,inherit_permissions FROM project_folder WHERE root_project_id=@RootId ORDER BY sort_order,name",
@@ -145,7 +145,7 @@ public sealed partial class MySqlPdmRepository
         await using var connection = await OpenAsync(cancellationToken);
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
         var belongs = await connection.ExecuteScalarAsync<int?>(new CommandDefinition(
-            "SELECT 1 FROM project_folder f INNER JOIN project p ON p.id=@ProjectId WHERE f.id=@FolderId AND f.root_project_id=COALESCE(p.parent_project_id,p.id)",
+            "SELECT 1 FROM project_folder f INNER JOIN project p ON p.id=@ProjectId WHERE f.id=@FolderId AND f.root_project_id=COALESCE(p.root_project_id,p.id)",
             new { ProjectId = projectId, FolderId = folderId }, transaction, cancellationToken: cancellationToken));
         if (belongs != 1) throw new PdmNotFoundException("项目目录不存在。");
         await connection.ExecuteAsync(new CommandDefinition("DELETE FROM project_folder_permission WHERE folder_id=@FolderId", new { FolderId = folderId }, transaction, cancellationToken: cancellationToken));
@@ -247,7 +247,7 @@ public sealed partial class MySqlPdmRepository
     private static ProjectFolder MapFolder(ProjectFolderRow row) => new(row.Id, row.RootProjectId, row.ParentFolderId, row.TargetProjectId,
         row.FolderKey, row.TemplateKey, row.Name, row.Purpose, row.SortOrder, row.IsSystem, row.InheritPermissions);
 
-    private sealed class FolderProjectRow { public Guid Id { get; init; } public string Code { get; init; } = string.Empty; public Guid? ParentProjectId { get; init; } public int? ChildSequence { get; init; } }
+    private sealed class FolderProjectRow { public Guid Id { get; init; } public string Code { get; init; } = string.Empty; public Guid? ParentProjectId { get; init; } public Guid? RootProjectId { get; init; } public int? ChildSequence { get; init; } }
     private sealed class FolderTemplateRow { public string FolderKey { get; init; } = string.Empty; public string? ParentKey { get; init; } public string Name { get; init; } = string.Empty; public ProjectFolderPurpose Purpose { get; init; } public int SortOrder { get; init; } public bool IsSystem { get; init; } public bool InheritPermissions { get; init; } }
     private sealed class ProjectFolderRow { public Guid Id { get; init; } public Guid RootProjectId { get; init; } public Guid? ParentFolderId { get; init; } public Guid? TargetProjectId { get; init; } public string FolderKey { get; init; } = string.Empty; public string TemplateKey { get; init; } = string.Empty; public string Name { get; init; } = string.Empty; public ProjectFolderPurpose Purpose { get; init; } public int SortOrder { get; init; } public bool IsSystem { get; init; } public bool InheritPermissions { get; init; } }
     private sealed class FolderPermissionRow { public Guid Id { get; init; } public Guid FolderId { get; init; } public string PrincipalType { get; init; } = string.Empty; public string PrincipalKey { get; init; } = string.Empty; public int AccessMask { get; init; } }

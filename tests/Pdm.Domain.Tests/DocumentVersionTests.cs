@@ -263,7 +263,7 @@ public sealed class DocumentVersionTests
             UserRole.Administrator,
             new Application.StoredFile("unused", 1, new string('A', 64), DateTimeOffset.UtcNow),
             "  ",
-            new Dictionary<string, string?>(),
+            PreviewSourceProperties('1'),
             snapshot,
             false,
             false,
@@ -273,6 +273,7 @@ public sealed class DocumentVersionTests
         Assert.Equal("W1", Assert.IsType<DocumentVersion>(result.Version).Revision.Display);
         Assert.Equal(string.Empty, result.Version.ChangeNote);
         Assert.Single(fileStorage.VerifiedFiles);
+        Assert.Null(Assert.IsType<DocumentVersion>(result.Version).Preview);
     }
 
     [Fact]
@@ -298,7 +299,7 @@ public sealed class DocumentVersionTests
             UserRole.Administrator,
             new Application.StoredFile("unused", 1, new string('A', 64), DateTimeOffset.UtcNow),
             "  ",
-            new Dictionary<string, string?>(),
+            PreviewSourceProperties('2'),
             snapshot,
             false,
             false,
@@ -308,6 +309,67 @@ public sealed class DocumentVersionTests
         Assert.Equal("W2", Assert.IsType<DocumentVersion>(result.Version).Revision.Display);
         Assert.Equal(string.Empty, result.Version.ChangeNote);
         Assert.Single(fileStorage.VerifiedFiles);
+    }
+
+    [Fact]
+    public async Task CheckIn_DoesNotRequireOrStorePreviewArtifact()
+    {
+        var repository = new Infrastructure.InMemoryPdmRepository(TimeProvider.System);
+        var project = Assert.Single(await repository.ListProjectsAsync(CancellationToken.None));
+        var document = await repository.RegisterDocumentAsync(
+            new Application.RegisterDocumentCommand(project.Id, "P-PREVIEW-MISMATCH", "Preview mismatch", "P-PREVIEW-MISMATCH.SLDPRT", DocumentKind.Part),
+            "engineer",
+            CancellationToken.None);
+        document = await repository.CheckoutAsync(document.Id, "engineer", CancellationToken.None);
+        var snapshot = new CadReferenceSnapshot(
+            Guid.NewGuid(), project.Id, document.Id, DateTimeOffset.UtcNow, "engineer", ReferenceRoot(document, "engineer"), new string('F', 64));
+        var storage = new RecordingFileStorage();
+        var workflow = new Application.PdmWorkflowService(repository, storage, new NoOpPublisher(), TimeProvider.System);
+
+        var result = await workflow.CheckInAsync(
+            document.Id,
+            "engineer",
+            UserRole.Administrator,
+            new Application.StoredFile(".versions/model.SLDPRT", 128, new string('A', 64), DateTimeOffset.UtcNow),
+            "preview mismatch",
+            PreviewSourceProperties('1'),
+            snapshot,
+            false,
+            false,
+            CancellationToken.None);
+
+        Assert.Single(storage.VerifiedFiles);
+        Assert.Null(Assert.IsType<DocumentVersion>(result.Version).Preview);
+        Assert.Single(await repository.ListDocumentVersionsAsync(document.Id, CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task CheckIn_DrawingStoresSourceOnly()
+    {
+        var repository = new Infrastructure.InMemoryPdmRepository(TimeProvider.System);
+        var project = Assert.Single(await repository.ListProjectsAsync(CancellationToken.None));
+        var document = await repository.RegisterDocumentAsync(
+            new Application.RegisterDocumentCommand(project.Id, "D-PDF", "Drawing PDF", "D-PDF.SLDDRW", DocumentKind.Drawing),
+            "engineer",
+            CancellationToken.None);
+        document = await repository.CheckoutAsync(document.Id, "engineer", CancellationToken.None);
+        var storage = new RecordingFileStorage();
+        var workflow = new Application.PdmWorkflowService(repository, storage, new NoOpPublisher(), TimeProvider.System);
+
+        var result = await workflow.CheckInAsync(
+            document.Id,
+            "engineer",
+            UserRole.Administrator,
+            new Application.StoredFile(".versions/D-PDF.SLDDRW", 128, new string('A', 64), DateTimeOffset.UtcNow),
+            "drawing preview",
+            PreviewSourceProperties('3'),
+            new CadReferenceSnapshot(Guid.NewGuid(), project.Id, document.Id, DateTimeOffset.UtcNow, "engineer", ReferenceRoot(document, "engineer"), new string('F', 64)),
+            false,
+            false,
+            CancellationToken.None);
+
+        Assert.Null(Assert.IsType<DocumentVersion>(result.Version).Preview);
+        Assert.Single(storage.VerifiedFiles);
     }
 
     [Fact]
@@ -399,7 +461,7 @@ public sealed class DocumentVersionTests
             document.CheckoutSessionId!.Value,
             new Application.StoredFile("unused", 1, new string('D', 64), DateTimeOffset.UtcNow),
             "batch property update",
-            new Dictionary<string, string?>(),
+            PreviewSourceProperties('3'),
             snapshot,
             false,
             true,
@@ -440,6 +502,7 @@ public sealed class DocumentVersionTests
             "更新子件属性",
             new Dictionary<string, string?>
             {
+                ["SourceFileSha256"] = new string('4', 64),
                 ["物料分类"] = "标准件",
                 ["物料编码"] = "AUTO-BOM-001",
                 ["物料名称"] = "自动更新标准组件",
@@ -577,7 +640,7 @@ public sealed class DocumentVersionTests
             UserRole.Administrator,
             new Application.StoredFile("unused", 1, new string('4', 64), DateTimeOffset.UtcNow),
             "subassembly W2",
-            new Dictionary<string, string?>(),
+            PreviewSourceProperties('5'),
             new CadReferenceSnapshot(
                 Guid.NewGuid(),
                 project.Id,
@@ -1096,6 +1159,9 @@ public sealed class DocumentVersionTests
     private static DocumentReferenceNode ReferenceRoot(PdmDocument document, string actor) =>
         new(Guid.NewGuid(), document.Id, document.DrawingNumber, document.FileName, document.Name, document.Kind, "Default", 1, ReferenceNodeStatus.Normal, document.Revision, actor, []);
 
+    private static IReadOnlyDictionary<string, string?> PreviewSourceProperties(char sourceHashCharacter) =>
+        new Dictionary<string, string?> { ["SourceFileSha256"] = new string(sourceHashCharacter, 64) };
+
     private static Application.DocumentVersionCommit Commit(
         Project project,
         PdmDocument document,
@@ -1144,7 +1210,18 @@ public sealed class DocumentVersionTests
     {
         public Task PrepareAsync(ReleasePackage package, Project project, CancellationToken cancellationToken) => Task.CompletedTask;
         public Task ValidateAsync(ReleasePackage package, Project project, CancellationToken cancellationToken) => Task.CompletedTask;
-        public Task<string> PublishAsync(ReleasePackage package, Project project, CancellationToken cancellationToken) => Task.FromResult(string.Empty);
+        public Task<Application.ReleasePublication> PublishAsync(ReleasePackage package, Project project, IReadOnlyList<Application.ReleasePreviewSource> sources, CancellationToken cancellationToken) =>
+            Task.FromResult(new Application.ReleasePublication(string.Empty, PreviewArtifacts(sources)));
+
+        private static IReadOnlyDictionary<Guid, DocumentPreviewArtifact> PreviewArtifacts(IReadOnlyList<Application.ReleasePreviewSource> sources) =>
+            sources.ToDictionary(
+                source => source.DocumentId,
+                source => new DocumentPreviewArtifact(
+                    source.Kind == DocumentKind.Drawing ? DocumentPreviewFormat.Pdf : DocumentPreviewFormat.Step,
+                    $".release-previews/{source.DocumentId:N}.{(source.Kind == DocumentKind.Drawing ? "pdf" : "step")}",
+                    1,
+                    new string('A', 64),
+                    source.SourceSha256));
     }
 
     private sealed class MutableTimeProvider(DateTimeOffset now) : TimeProvider

@@ -16,7 +16,7 @@ if (!string.IsNullOrWhiteSpace(httpUrlOverride))
 {
     builder.Configuration["Kestrel:Endpoints:Http:Url"] = httpUrlOverride;
 }
-builder.Host.UseWindowsService(options => options.ServiceName = "UPTON PDM API");
+builder.Host.UseWindowsService(options => options.ServiceName = "UPLM API");
 builder.Logging.ClearProviders();
 builder.Logging.AddConsole();
 var timeProvider = TimeProvider.System;
@@ -55,6 +55,11 @@ if (string.Equals(databaseOptions.Provider, "MySql", StringComparison.OrdinalIgn
 var storageOptions = new PdmStorageOptions();
 builder.Configuration.GetSection(PdmStorageOptions.SectionName).Bind(storageOptions);
 
+var previewWorkerOptions = new PdmPreviewWorkerOptions();
+builder.Configuration.GetSection(PdmPreviewWorkerOptions.SectionName).Bind(previewWorkerOptions);
+var previewWorkerPathOverride = Environment.GetEnvironmentVariable("PDM_PREVIEW_WORKER_PATH");
+if (!string.IsNullOrWhiteSpace(previewWorkerPathOverride)) previewWorkerOptions.WorkerPath = previewWorkerPathOverride;
+
 var authenticationOptions = new AuthenticationOptions();
 builder.Configuration.GetSection(AuthenticationOptions.SectionName).Bind(authenticationOptions);
 authenticationOptions.SigningKey = Environment.GetEnvironmentVariable("PDM_JWT_SIGNING_KEY") ?? string.Empty;
@@ -70,6 +75,7 @@ if (authenticationOptions.SigningKey.Length < 32)
 
 builder.Services.AddSingleton<IOptions<PdmDatabaseOptions>>(Options.Create(databaseOptions));
 builder.Services.AddSingleton<IOptions<PdmStorageOptions>>(Options.Create(storageOptions));
+builder.Services.AddSingleton<IOptions<PdmPreviewWorkerOptions>>(Options.Create(previewWorkerOptions));
 builder.Services.AddSingleton<IOptions<AuthenticationOptions>>(Options.Create(authenticationOptions));
 
 var dataProtection = builder.Services.AddDataProtection().SetApplicationName("Upton.Pdm.CrmIntegration");
@@ -97,16 +103,22 @@ builder.Services.AddSingleton<IPasswordService, Pbkdf2PasswordService>();
 builder.Services.AddSingleton<ITokenIssuer, JwtTokenIssuer>();
 builder.Services.AddSingleton<IPersistentSessionTokenService, PersistentSessionTokenService>();
 builder.Services.AddScoped<IFileStorage, LocalFileStorage>();
+builder.Services.AddSingleton<IServerPreviewConverter, SolidWorksServerPreviewConverter>();
 builder.Services.AddSingleton<IReleasePackagePublisher, AtomicReleasePackagePublisher>();
 builder.Services.AddSingleton<ICrmCredentialProtector, DataProtectionCrmCredentialProtector>();
 builder.Services.AddSingleton<IU9SecretProtector, DataProtectionU9SecretProtector>();
 builder.Services.AddHttpClient<ICrmCustomerClient, CrmCustomerClient>(client => client.Timeout = TimeSpan.FromSeconds(20));
 builder.Services.AddHttpClient<IU9OpenApiClient, U9OpenApiClient>(client => client.Timeout = TimeSpan.FromSeconds(20))
     .RemoveAllLoggers();
+builder.Services.AddHttpClient<IU9BomQueryClient, U9OpenApiClient>(client => client.Timeout = TimeSpan.FromSeconds(20))
+    .RemoveAllLoggers();
 builder.Services.AddScoped<PdmWorkflowService>();
 builder.Services.AddScoped<CrmCustomerIntegrationService>();
 builder.Services.AddScoped<MaterialService>();
+builder.Services.AddScoped<BomHeaderService>();
 builder.Services.AddScoped<U9MaterialIntegrationService>();
+builder.Services.AddScoped<U9BomQueryService>();
+builder.Services.AddScoped<U9BomWriteService>();
 builder.Services.AddHostedService<PdmBootstrapHostedService>();
 builder.Services.AddHostedService<CrmCustomerSyncHostedService>();
 
@@ -151,6 +163,7 @@ builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
         };
     });
 builder.Services.AddAuthorization();
+builder.Services.AddScoped<CompanySessionService>();
 builder.Services.AddProblemDetails();
 
 var app = builder.Build();
@@ -169,22 +182,25 @@ app.UseExceptionHandler(exceptionHandler => exceptionHandler.Run(async context =
     await context.Response.WriteAsJsonAsync(new ProblemDetails
     {
         Status = status,
-        Title = status == 500 ? "PDM服务发生内部错误" : exception?.Message,
+        Title = status == 500 ? "PLM服务发生内部错误" : exception?.Message,
         Detail = status == 500 && !app.Environment.IsDevelopment() ? null : exception?.Message
     });
 }));
 app.UseCors("PdmClients");
 app.UseAuthentication();
+app.UseMiddleware<CompanyContextMiddleware>();
 app.UseAuthorization();
 app.MapPdmEndpoints();
 app.MapPdmMaterialEndpoints();
+app.MapPdmBomHeaderEndpoints();
+app.MapU9BomEndpoints();
 try
 {
     app.Run();
 }
 catch (IOException exception)
 {
-    app.Logger.LogCritical(exception, "PDM API启动失败，请确认5080端口是否已由UptonPdmApi服务占用。");
+    app.Logger.LogCritical(exception, "PLM API启动失败，请确认5080端口是否已由UptonPdmApi服务占用。");
     Environment.ExitCode = 1;
 }
 

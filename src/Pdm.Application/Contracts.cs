@@ -10,7 +10,9 @@ public sealed record UserAccount(
     UserRole Role,
     bool IsActive,
     long TokenVersion = 0,
-    string? RoleCode = null)
+    string? RoleCode = null,
+    Guid? CompanyId = null,
+    bool CrossCompanyView = false)
 {
     public string EffectiveRoleCode => string.IsNullOrWhiteSpace(RoleCode) ? Role.ToString() : RoleCode;
 }
@@ -20,13 +22,25 @@ public sealed record CreateManagedUserCommand(
     string DisplayName,
     string PasswordHash,
     string RoleCode,
-    bool IsActive);
+    bool IsActive,
+    Guid CompanyId = default,
+    bool CrossCompanyView = false,
+    IReadOnlyList<Guid>? AccessibleCompanyIds = null);
 
 public sealed record UpdateManagedUserCommand(
     string Username,
     string DisplayName,
     string RoleCode,
-    bool IsActive);
+    bool IsActive,
+    Guid CompanyId = default,
+    bool CrossCompanyView = false,
+    IReadOnlyList<Guid>? AccessibleCompanyIds = null);
+
+public sealed record UserCompanyScope(
+    Guid UserId,
+    Guid? PrimaryCompanyId,
+    bool CrossCompanyView,
+    IReadOnlyList<Guid> AccessibleCompanyIds);
 
 public sealed record UserProfile(
     string Username,
@@ -73,6 +87,21 @@ public sealed record DocumentVersionCommit(
     string? DrawingNumber = null,
     string? Name = null,
     string? FileName = null);
+
+public sealed record ReleasePreviewSource(
+    Guid DocumentId,
+    Guid SourceVersionId,
+    string DrawingNumber,
+    string FileName,
+    DocumentKind Kind,
+    string StorageRelativePath,
+    long FileLength,
+    string Sha256,
+    string SourceSha256);
+
+public sealed record ReleasePublication(
+    string PublishedPath,
+    IReadOnlyDictionary<Guid, DocumentPreviewArtifact> Previews);
 
 public sealed record DocumentCheckInResult(
     PdmDocument Document,
@@ -167,7 +196,8 @@ public sealed record CreateNumberedProjectCommand(
     int Quantity,
     string Owner,
     string VaultLocation,
-    string ReleaseLocation);
+    string ReleaseLocation,
+    string BomItemCategoryCode = "0302");
 
 public sealed record CreateSubprojectCommand(
     Guid ParentProjectId,
@@ -175,7 +205,8 @@ public sealed record CreateSubprojectCommand(
     string? ProjectAlias,
     int Quantity,
     string? VaultRoot = null,
-    string? ReleaseRoot = null);
+    string? ReleaseRoot = null,
+    int? EquipmentTypeCode = null);
 
 public sealed record UpdateProjectDetailsCommand(
     Guid? OrganizationId,
@@ -227,7 +258,10 @@ public sealed record BomItemInput(
     string? Weight = null,
     bool IsPendingClassification = false,
     bool IsManualUnmatched = false,
-    bool IsManuallyRetained = false);
+    bool IsManuallyRetained = false,
+    Guid? Id = null,
+    string? SourceInstancePath = null,
+    string? ParentDrawingNumber = null);
 
 public sealed record BomGenerationResult(
     IReadOnlyList<BomItem> StandardItems,
@@ -257,7 +291,8 @@ public sealed record BatchUpdateBomItemsCommand(
     string? Weight = null,
     decimal? Quantity = null,
     string? Revision = null,
-    bool? Complete = null);
+    bool? Complete = null,
+    string? ParentDrawingNumber = null);
 
 public sealed record BatchDeleteBomItemsCommand(IReadOnlyList<Guid> ItemIds, string Reason);
 
@@ -345,6 +380,8 @@ public interface IPdmRepository
     Task<PdmSystemSettings> GetSystemSettingsAsync(CancellationToken cancellationToken);
     Task<PdmSystemSettings> UpdateSystemSettingsAsync(PdmSystemSettings settings, CancellationToken cancellationToken);
     Task<IReadOnlyList<UserAccount>> ListUsersAsync(CancellationToken cancellationToken);
+    Task<UserCompanyScope?> GetUserCompanyScopeAsync(string username, CancellationToken cancellationToken);
+    Task<UserCompanyScope> SetUserCompanyScopeAsync(string username, Guid companyId, bool crossCompanyView, IReadOnlyList<Guid> accessibleCompanyIds, string actor, CancellationToken cancellationToken);
     Task<RolePermissionDirectory> GetRolePermissionDirectoryAsync(CancellationToken cancellationToken);
     Task<IReadOnlySet<string>> GetRolePermissionsAsync(UserRole role, CancellationToken cancellationToken);
     Task<IReadOnlySet<string>> GetUserPermissionsAsync(string username, UserRole fallbackRole, CancellationToken cancellationToken);
@@ -386,12 +423,23 @@ public interface IPdmRepository
     Task<IReadOnlyList<BomItem>> ReplaceBomAsync(Guid projectId, BomKind kind, IReadOnlyList<BomItem> items, CancellationToken cancellationToken);
     Task ApplyBomBatchAsync(Guid projectId, IReadOnlyList<BomItem> standardItems, IReadOnlyList<BomItem> nonStandardItems, IReadOnlyList<BomItem> unclassifiedItems, IReadOnlyList<BomItem> electricalItems, IReadOnlyList<CadPropertyWriteback> writebacks, IReadOnlyList<AuditEntry> auditEntries, CancellationToken cancellationToken);
     Task<BomItem?> FindBomItemAsync(Guid projectId, Guid itemId, CancellationToken cancellationToken);
+    Task<BomItem> UpdateBomMaterialCodeAsync(Guid projectId, Guid itemId, string materialCode, CancellationToken cancellationToken);
     Task<CadPropertyWriteback> EnqueueCadPropertyWritebackAsync(CadPropertyWriteback request, CancellationToken cancellationToken);
     Task<IReadOnlyList<CadPropertyWriteback>> ListCadPropertyWritebacksAsync(Guid projectId, CancellationToken cancellationToken);
     Task<CadPropertyWriteback?> FindCadPropertyWritebackAsync(Guid id, CancellationToken cancellationToken);
     Task<CadPropertyWriteback> UpdateCadPropertyWritebackAsync(Guid id, CadPropertyWritebackStatus status, Guid? resultVersionId, string? error, CancellationToken cancellationToken);
+    Task<IReadOnlyList<DrawingReviewPackage>> ListDrawingReviewPackagesAsync(Guid projectId, CancellationToken cancellationToken);
+    Task<DrawingReviewPackage?> FindDrawingReviewPackageAsync(Guid packageId, CancellationToken cancellationToken);
+    Task<DrawingReviewPackage> CreateDrawingReviewPackageAsync(DrawingReviewPackage package, CancellationToken cancellationToken);
+    Task<DrawingReviewPackage> AddDrawingReviewMarkupAsync(DrawingReviewMarkup markup, CancellationToken cancellationToken);
+    Task<DrawingReviewPackage> ResolveDrawingReviewMarkupAsync(Guid markupId, string actor, DateTimeOffset resolvedAt, CancellationToken cancellationToken);
+    Task<DrawingReviewPackage> DecideDrawingReviewTargetAsync(Guid itemId, DrawingReviewTarget target, DrawingReviewTargetState state, string reviewer, string reviewerName, DateTimeOffset reviewedAt, string? comment, CancellationToken cancellationToken);
+    Task<DrawingReviewPackage> QueueDrawingReviewWritebacksAsync(Guid packageId, IReadOnlyList<DrawingReviewWritebackRequest> requests, CancellationToken cancellationToken);
+    Task<DrawingReviewPackage?> RecordDrawingReviewWritebackResultAsync(Guid writebackId, Guid? resultVersionId, bool succeeded, CancellationToken cancellationToken);
     Task<IReadOnlyList<BomEmptyDeclaration>> GetBomEmptyDeclarationsAsync(Guid projectId, CancellationToken cancellationToken);
     Task<BomEmptyDeclaration> SetBomEmptyDeclarationAsync(Guid projectId, BomKind kind, bool declaredEmpty, string actor, CancellationToken cancellationToken);
+    Task<IReadOnlyList<ProjectBomHeaderBinding>> ListProjectBomHeaderBindingsAsync(Guid projectId, CancellationToken cancellationToken);
+    Task<ProjectBomHeaderBinding> SaveProjectBomHeaderBindingAsync(Guid projectId, ProjectBomHeaderKind kind, Guid materialId, long expectedRowVersion, string actor, CancellationToken cancellationToken);
     Task<IReadOnlyList<BomVersion>> ListBomVersionsAsync(Guid projectId, BomKind? kind, CancellationToken cancellationToken);
     Task<BomVersion?> FindBomVersionAsync(Guid projectId, Guid versionId, CancellationToken cancellationToken);
     Task<BomVersion> SaveBomDraftAsync(Guid projectId, BomKind kind, IReadOnlyList<BomItem> items, string actor, CancellationToken cancellationToken);
@@ -401,6 +449,8 @@ public interface IPdmRepository
     Task<ManufacturingBomBaseline> CreateManufacturingBomBaselineAsync(ManufacturingBomBaseline baseline, CancellationToken cancellationToken);
     Task<IReadOnlyList<ReleasePackage>> ListReleasePackagesAsync(Guid projectId, CancellationToken cancellationToken);
     Task<ReleasePackage?> FindReleasePackageAsync(Guid releasePackageId, CancellationToken cancellationToken);
+    Task<ReleasePackage?> FindReleasePackageByApprovalTaskAsync(Guid taskId, CancellationToken cancellationToken);
+    Task<IReadOnlyList<ReleasePreviewSource>> ListReleasePreviewSourcesAsync(Guid releasePackageId, CancellationToken cancellationToken);
     Task<IReadOnlyList<PdmDocument>> ListCheckedOutDocumentsAsync(CancellationToken cancellationToken);
     Task<PdmDocument> CheckoutAsync(Guid documentId, string actor, CancellationToken cancellationToken);
     Task<PdmDocument> CheckoutAsync(Guid documentId, string actor, Guid sessionId, string machineName, DateTimeOffset leaseExpiresAt, CancellationToken cancellationToken);
@@ -415,12 +465,18 @@ public interface IPdmRepository
     Task<DocumentCheckInResult> CheckInVersionAsync(Guid documentId, string actor, Guid sessionId, DocumentVersionCommit commit, CancellationToken cancellationToken);
     Task<(PdmDocument Document, DocumentVersion Version)> RestoreVersionAsync(Guid documentId, Guid sourceVersionId, string actor, StoredFile restoredFile, string changeNote, CancellationToken cancellationToken);
     Task<DocumentVersion> PublishDocumentVersionAsync(Guid documentId, Guid sourceVersionId, Guid releasePackageId, Guid approvalTaskId, string actor, CancellationToken cancellationToken);
-    Task<IReadOnlyList<DocumentVersion>> PublishReleasePackageVersionsAsync(Guid releasePackageId, Guid approvalTaskId, string actor, CancellationToken cancellationToken);
+    Task<IReadOnlyList<DocumentVersion>> PublishReleasePackageVersionsAsync(
+        Guid releasePackageId,
+        Guid approvalTaskId,
+        string actor,
+        IReadOnlyDictionary<Guid, DocumentPreviewArtifact> previews,
+        CancellationToken cancellationToken);
     Task<ReleasePackage> CreateReleasePackageAsync(ReleasePackage package, CancellationToken cancellationToken);
     Task<ReleasePackage> UpdateReleasePackageBomVersionsAsync(Guid releasePackageId, BomVersion standard, BomVersion nonStandard, BomVersion electrical, CancellationToken cancellationToken);
+    Task<ReleasePackage> ApplyReleasePackageMaterialCodesAsync(Guid releasePackageId, IReadOnlyDictionary<Guid, string> materialCodes, string actor, CancellationToken cancellationToken);
     Task<ReleasePackage> SubmitReleasePackageAsync(Guid releasePackageId, string actor, CancellationToken cancellationToken);
     Task<ReleasePackage> WithdrawReleasePackageAsync(Guid releasePackageId, string actor, CancellationToken cancellationToken);
-    Task<ReleasePackage> DecideApprovalAsync(Guid taskId, string actor, ApprovalDecision decision, string? comment, CancellationToken cancellationToken);
+    Task<ReleasePackage> DecideApprovalAsync(Guid taskId, string actor, ApprovalDecision decision, string? comment, bool emergencySubstitute, string? emergencyReason, CancellationToken cancellationToken);
     Task<PdmDocument> ObsoleteDocumentAsync(Guid documentId, string actor, CancellationToken cancellationToken);
     Task MarkPublishedAsync(Guid releasePackageId, string publishedPath, DateTimeOffset publishedAt, CancellationToken cancellationToken);
     Task<ManufacturingBomBaseline> MarkPublishedWithBomBaselineAsync(ReleasePackage package, string publishedPath, DateTimeOffset publishedAt, string actor, CancellationToken cancellationToken);
@@ -456,7 +512,21 @@ public interface IReleasePackagePublisher
 {
     Task PrepareAsync(ReleasePackage package, Project project, CancellationToken cancellationToken);
     Task ValidateAsync(ReleasePackage package, Project project, CancellationToken cancellationToken);
-    Task<string> PublishAsync(ReleasePackage package, Project project, CancellationToken cancellationToken);
+    Task<ReleasePublication> PublishAsync(
+        ReleasePackage package,
+        Project project,
+        IReadOnlyList<ReleasePreviewSource> previewSources,
+        CancellationToken cancellationToken);
+}
+
+public interface IServerPreviewConverter
+{
+    Task<IReadOnlyDictionary<Guid, DocumentPreviewArtifact>> GenerateAsync(
+        ReleasePackage package,
+        Project project,
+        IReadOnlyList<ReleasePreviewSource> sources,
+        string stagingDirectory,
+        CancellationToken cancellationToken);
 }
 
 public interface IPasswordService

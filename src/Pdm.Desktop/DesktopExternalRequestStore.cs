@@ -15,7 +15,7 @@ internal static class DesktopExternalRequestStore
     public static void Write(string[] arguments)
     {
         var directory = Path.GetDirectoryName(RequestPath)
-            ?? throw new InvalidOperationException("无法确定PDM客户端请求目录。");
+            ?? throw new InvalidOperationException("无法确定PLM客户端请求目录。");
         Directory.CreateDirectory(directory);
         File.WriteAllLines(
             RequestPath,

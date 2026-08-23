@@ -1,6 +1,7 @@
 <script setup lang="ts">
+import { computed, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { ClipboardCheck, ClockAlert, KeyRound, RefreshCw } from '@lucide/vue'
+import { ClipboardCheck, KeyRound, RefreshCw } from '@lucide/vue'
 import type { EditLockSummary, MyApprovalTask, PasswordResetTask } from '../types'
 
 const props = defineProps<{
@@ -12,10 +13,35 @@ const props = defineProps<{
   onForceRelease: (documentId: string, reason: string) => Promise<void>
   onResetPassword: (taskId: string) => Promise<void>
 }>()
-defineEmits<{ open: [projectId: string]; refresh: [] }>()
+defineEmits<{ open: [projectId: string, releasePackageId: string]; refresh: [] }>()
+
+type TaskFilter = 'all' | 'approval' | 'lock' | 'password'
+type TaskCenterRow = {
+  key: string
+  kind: Exclude<TaskFilter, 'all'>
+  status: string
+  statusClass: string
+  title: string
+  content: string
+  createdAt: string
+  approval?: MyApprovalTask
+  lock?: EditLockSummary
+  password?: PasswordResetTask
+}
+
+const taskFilter = ref<TaskFilter>('all')
+const currentPage = ref(1)
+const pageSize = ref(20)
+const pageSizeOptions = [20, 50, 100]
 
 function stageLabel(stage: string | number) {
-  return stage === 'ProcessReview' || stage === 0 ? '工艺审核' : '批准'
+  const key = typeof stage === 'number'
+    ? ({ 1: 'ProcessReview', 2: 'Approval', 10: 'MechanicalEngineer', 20: 'MainDesigner', 30: 'MechanicalSupervisor', 40: 'HardwareEngineer', 50: 'HardwareSupervisor', 60: 'StandardizationSupervisor' } as Record<number, string>)[stage]
+    : stage
+  return ({
+    ProcessReview: '工艺审核', Approval: '批准', MechanicalEngineer: '机械工程师自检', MainDesigner: '主设审核',
+    MechanicalSupervisor: '机械主管批准', HardwareEngineer: '硬件工程师自检', HardwareSupervisor: '硬件主管审核', StandardizationSupervisor: '标准化主管批准',
+  } as Record<string, string>)[key] ?? String(stage)
 }
 
 function attentionIndex(value: EditLockSummary['attentionLevel']) {
@@ -35,6 +61,69 @@ function elapsed(from: string) {
   const hours = Math.max(0, Math.floor((Date.now() - new Date(from).getTime()) / 3_600_000))
   return hours < 24 ? `${hours}小时` : `${Math.floor(hours / 24)}天${hours % 24}小时`
 }
+
+function lockStatusClass(lock: EditLockSummary) {
+  const index = attentionIndex(lock.attentionLevel)
+  return index >= 3 ? 'is-alert' : index > 0 ? 'is-remind' : 'is-ok'
+}
+
+function formatDateTime(value: string) {
+  return new Date(value).toLocaleString()
+}
+
+const rows = computed<TaskCenterRow[]>(() => [
+  ...props.tasks.map(task => ({
+    key: `approval-${task.id}`,
+    kind: 'approval' as const,
+    status: '待审批',
+    statusClass: 'is-remind',
+    title: `${task.projectCode} BOM发布审批`,
+    content: `${task.projectName} · ${task.releasePackageNumber} · ${stageLabel(task.stage)}`,
+    createdAt: task.createdAt,
+    approval: task,
+  })),
+  ...props.locks.map(lock => ({
+    key: `lock-${lock.documentId}`,
+    kind: 'lock' as const,
+    status: attentionLabel(lock.attentionLevel),
+    statusClass: lockStatusClass(lock),
+    title: `${lock.projectCode} · ${lock.drawingNumber}`,
+    content: `${lock.documentName} · ${lock.checkedOutBy}（${lock.checkoutMachine || '未知电脑'}）· ${connectionLabel(lock.connectionState)} · 已占用${elapsed(lock.checkedOutAt)}`,
+    createdAt: lock.checkedOutAt,
+    lock,
+  })),
+  ...props.passwordResetTasks.map(task => ({
+    key: `password-${task.id}`,
+    kind: 'password' as const,
+    status: '待处理',
+    statusClass: 'is-remind',
+    title: `${task.username} 密码重置申请`,
+    content: `${task.displayName}申请将账号密码重置为初始密码`,
+    createdAt: task.requestedAt,
+    password: task,
+  })),
+].sort((left, right) => new Date(right.createdAt).getTime() - new Date(left.createdAt).getTime()))
+
+const filterCounts = computed(() => ({
+  all: rows.value.length,
+  approval: props.tasks.length,
+  lock: props.locks.length,
+  password: props.passwordResetTasks.length,
+}))
+const filteredRows = computed(() => taskFilter.value === 'all' ? rows.value : rows.value.filter(row => row.kind === taskFilter.value))
+const pagedRows = computed(() => filteredRows.value.slice((currentPage.value - 1) * pageSize.value, currentPage.value * pageSize.value))
+const totalPages = computed(() => Math.max(1, Math.ceil(filteredRows.value.length / pageSize.value)))
+
+function setTaskFilter(value: TaskFilter) {
+  taskFilter.value = value
+}
+
+watch(taskFilter, () => {
+  currentPage.value = 1
+})
+watch([pageSize, () => filteredRows.value.length], () => {
+  currentPage.value = Math.min(currentPage.value, totalPages.value)
+})
 
 async function requestRelease(lock: EditLockSummary) {
   try {
@@ -72,23 +161,47 @@ async function resetPassword(task: PasswordResetTask) {
 
 <template>
   <section class="pdm-project-manager pdm-task-center" aria-label="我的待办">
-    <header class="pdm-pagebar">
-      <div><div class="pdm-breadcrumb">PDM <span>/</span> 我的待办</div><h1>我的待办</h1><p>集中处理审批任务和长时间未提交的编辑权限。</p></div>
-      <button type="button" class="pdm-secondary-action" :disabled="pending" @click="$emit('refresh')"><RefreshCw :size="15" />刷新</button>
-    </header>
-    <section v-if="passwordResetTasks.length" class="pdm-panel pdm-project-list">
-      <header class="pdm-panel-heading"><div><h2>密码重置申请</h2><small>账号与姓名匹配后生成；处理方式与CRM一致，重置为初始密码11111111。</small></div></header>
-      <div class="pdm-table-scroll"><table class="pdm-project-table"><thead><tr><th>账号</th><th>姓名</th><th>申请时间</th><th>操作</th></tr></thead><tbody><tr v-for="task in passwordResetTasks" :key="task.id"><td><strong>{{ task.username }}</strong></td><td>{{ task.displayName }}</td><td>{{ new Date(task.requestedAt).toLocaleString() }}</td><td><button type="button" class="pdm-text-action" :disabled="pending" @click="resetPassword(task)"><KeyRound :size="14" />重置密码</button></td></tr></tbody></table></div>
-    </section>
-    <section class="pdm-panel pdm-project-list">
-      <header class="pdm-panel-heading"><div><h2>编辑权限</h2><small>在线会话继续保留权限；离线和超时权限可催办，达到强制释放时限后由授权人员处理。</small></div></header>
-      <div v-if="locks.length" class="pdm-table-scroll"><table class="pdm-project-table pdm-lock-table"><thead><tr><th>项目／图档</th><th>编辑人</th><th>已占用</th><th>连接</th><th>状态</th><th>申请情况</th><th>操作</th></tr></thead><tbody><tr v-for="lock in locks" :key="lock.documentId" :class="`is-lock-level-${attentionIndex(lock.attentionLevel)}`"><td><strong>{{ lock.projectCode }} · {{ lock.drawingNumber }}</strong><small>{{ lock.documentName }}</small></td><td>{{ lock.checkedOutBy }}<small>{{ lock.checkoutMachine || '未知电脑' }}</small></td><td>{{ elapsed(lock.checkedOutAt) }}<small>{{ new Date(lock.checkedOutAt).toLocaleString() }}</small></td><td><span class="pdm-status" :class="connectionLabel(lock.connectionState) === '在线' ? 'is-ok' : 'is-alert'">{{ connectionLabel(lock.connectionState) }}</span><small>心跳 {{ new Date(lock.lastHeartbeatAt).toLocaleString() }}</small></td><td><span class="pdm-status" :class="attentionIndex(lock.attentionLevel) >= 3 ? 'is-alert' : attentionIndex(lock.attentionLevel) > 0 ? 'is-remind' : 'is-ok'">{{ attentionLabel(lock.attentionLevel) }}</span></td><td><span v-if="lock.releaseRequestedBy">{{ lock.releaseRequestedBy }} 已申请</span><small v-if="lock.releaseRequestReason">{{ lock.releaseRequestReason }}</small><span v-else>—</span></td><td><span v-if="lock.ownedByCurrentUser" class="pdm-lock-own">请在SolidWorks提交或放弃</span><button v-else-if="lock.canForceRelease" type="button" class="pdm-text-action is-danger" :disabled="pending" @click="forceRelease(lock)">强制释放</button><button v-else-if="lock.canRequestRelease" type="button" class="pdm-text-action" :disabled="pending || !!lock.releaseRequestedBy" @click="requestRelease(lock)">{{ lock.releaseRequestedBy ? '已申请' : '催办／申请释放' }}</button><span v-else>—</span></td></tr></tbody></table></div>
-      <div v-else class="pdm-project-empty pdm-lock-empty"><ClockAlert :size="34" /><h2>当前没有编辑权限待办</h2><p>本人签出或权限范围内的占用记录会显示在这里。</p></div>
-    </section>
-    <section class="pdm-panel pdm-project-list">
-      <header class="pdm-panel-heading"><div><h2>审批任务</h2><small>处理分配给当前账号的工艺审核和批准任务。</small></div></header>
-      <div v-if="tasks.length" class="pdm-table-scroll"><table class="pdm-project-table"><thead><tr><th>项目号</th><th>项目名称</th><th>发布包</th><th>待办环节</th><th>进入时间</th><th>操作</th></tr></thead><tbody><tr v-for="task in tasks" :key="task.id"><td><strong>{{ task.projectCode }}</strong></td><td>{{ task.projectName }}</td><td>{{ task.releasePackageNumber }}</td><td><span class="pdm-status is-warn">{{ stageLabel(task.stage) }}</span></td><td>{{ new Date(task.createdAt).toLocaleString() }}</td><td><button type="button" class="pdm-text-action" @click="$emit('open', task.projectId)">进入审批与发布</button></td></tr></tbody></table></div>
-      <div v-else class="pdm-project-empty"><ClipboardCheck :size="42" /><h2>当前没有待处理任务</h2><p>新的工艺审核或批准任务分配给你后，会显示在这里。</p></div>
+    <section class="pdm-panel pdm-task-message-panel" aria-label="消息中心">
+      <div class="pdm-task-toolbar">
+        <button type="button" class="pdm-secondary-action" :disabled="pending" @click="$emit('refresh')"><RefreshCw :size="14" />刷新</button>
+        <div class="pdm-task-filters" role="tablist" aria-label="待办类型">
+          <button type="button" role="tab" :aria-selected="taskFilter === 'all'" @click="setTaskFilter('all')">全部待办（{{ filterCounts.all }}）</button>
+          <button type="button" role="tab" :aria-selected="taskFilter === 'approval'" @click="setTaskFilter('approval')">审批任务（{{ filterCounts.approval }}）</button>
+          <button type="button" role="tab" :aria-selected="taskFilter === 'lock'" @click="setTaskFilter('lock')">编辑权限（{{ filterCounts.lock }}）</button>
+          <button type="button" role="tab" :aria-selected="taskFilter === 'password'" @click="setTaskFilter('password')">密码重置（{{ filterCounts.password }}）</button>
+        </div>
+      </div>
+
+      <div v-if="pagedRows.length" class="pdm-table-scroll pdm-task-table-scroll">
+        <table class="pdm-project-table pdm-task-table">
+          <thead><tr><th>状态</th><th>标题</th><th>内容</th><th>创建时间</th><th>操作</th></tr></thead>
+          <tbody>
+            <tr v-for="row in pagedRows" :key="row.key" :class="{ 'is-task-actionable': row.kind === 'approval' }" @click="row.approval && $emit('open', row.approval.projectId, row.approval.releasePackageId)">
+              <td><span class="pdm-status" :class="row.statusClass">{{ row.status }}</span></td>
+              <td><strong>{{ row.title }}</strong></td>
+              <td :title="row.content">{{ row.content }}</td>
+              <td>{{ formatDateTime(row.createdAt) }}</td>
+              <td>
+                <button v-if="row.approval" type="button" class="pdm-text-action" @click.stop="$emit('open', row.approval.projectId, row.approval.releasePackageId)">查看</button>
+                <button v-else-if="row.password" type="button" class="pdm-text-action" :disabled="pending" @click.stop="resetPassword(row.password)"><KeyRound :size="14" />重置密码</button>
+                <span v-else-if="row.lock?.ownedByCurrentUser" class="pdm-lock-own">请在SolidWorks处理</span>
+                <button v-else-if="row.lock?.canForceRelease" type="button" class="pdm-text-action is-danger" :disabled="pending" @click.stop="forceRelease(row.lock)">强制释放</button>
+                <button v-else-if="row.lock?.canRequestRelease" type="button" class="pdm-text-action" :disabled="pending || !!row.lock.releaseRequestedBy" @click.stop="requestRelease(row.lock)">{{ row.lock.releaseRequestedBy ? '已申请' : '催办／申请释放' }}</button>
+                <span v-else>—</span>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <div v-else class="pdm-project-empty pdm-task-empty"><ClipboardCheck :size="42" /><h2>当前没有待办任务</h2><p>新的审批、编辑权限或密码重置任务会显示在这里。</p></div>
+
+      <footer class="pdm-task-pagination">
+        <span>共 {{ filteredRows.length }} 条</span>
+        <label>每页<select v-model.number="pageSize"><option v-for="size in pageSizeOptions" :key="size" :value="size">{{ size }}</option></select>条</label>
+        <button type="button" :disabled="currentPage <= 1" aria-label="上一页" @click="currentPage--">‹</button>
+        <strong>{{ currentPage }} / {{ totalPages }}</strong>
+        <button type="button" :disabled="currentPage >= totalPages" aria-label="下一页" @click="currentPage++">›</button>
+      </footer>
     </section>
   </section>
 </template>

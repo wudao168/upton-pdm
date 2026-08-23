@@ -64,7 +64,7 @@
   </defs>
 
   <rect width="1200" height="720" fill="url(#bg)"/>
-  <text x="64" y="68" fill="#172033" font-family="Microsoft YaHei, Segoe UI, sans-serif" font-size="28" font-weight="700">PDM 图档类型图标 · 参考方案 B</text>
+  <text x="64" y="68" fill="#172033" font-family="Microsoft YaHei, Segoe UI, sans-serif" font-size="28" font-weight="700">PLM 图档类型图标 · 参考方案 B</text>
   <text x="64" y="101" fill="#667085" font-family="Microsoft YaHei, Segoe UI, sans-serif" font-size="15">接近 SolidWorks 经典图标语言：深色轮廓、金色实体、蓝色装配关系、灰白工程图</text>
 
   <g transform="translate(60 140)">

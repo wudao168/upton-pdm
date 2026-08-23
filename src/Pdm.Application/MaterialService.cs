@@ -24,6 +24,121 @@ public sealed class MaterialService(
     public Task<IReadOnlyList<MaterialSyncTask>> ListSyncTasksAsync(CancellationToken cancellationToken) =>
         materials.ListSyncTasksAsync(cancellationToken);
 
+    public async Task<IReadOnlyList<MaterialCodeApplication>> ListCodeApplicationsAsync(Guid? projectId, MaterialCodeApplicationStatus? status, string actor, UserRole role, CancellationToken cancellationToken)
+    {
+        await RequirePermissionAsync(actor, role, PermissionCodes.ProjectView, cancellationToken);
+        return await materials.ListMaterialCodeApplicationsAsync(projectId, status, cancellationToken);
+    }
+
+    public async Task<IReadOnlyList<MaterialCodeResolution>> ResolveStandardBomMaterialsAsync(ResolveMaterialCodesCommand command, string actor, UserRole role, CancellationToken cancellationToken)
+    {
+        if (!await repository.HasProjectContentReadAccessAsync(command.ProjectId, actor, role, cancellationToken))
+            throw new UnauthorizedAccessException("当前用户没有该项目的读取权限。");
+        var results = new List<MaterialCodeResolution>();
+        foreach (var itemId in command.BomItemIds.Distinct())
+        {
+            var item = await repository.FindBomItemAsync(command.ProjectId, itemId, cancellationToken)
+                ?? throw new PdmNotFoundException("BOM物料不存在。");
+            if (item.Kind != BomKind.Standard) throw new PdmRuleException("只有标准件BOM需要申请料号。");
+            var pending = await materials.FindPendingMaterialCodeApplicationByBomItemAsync(item.Id, cancellationToken);
+            if (pending is not null)
+            {
+                results.Add(new(item.Id, MaterialCodeResolutionStatus.ApplicationPending, null, [], pending));
+                continue;
+            }
+            var approvedApplication = (await materials.ListMaterialCodeApplicationsAsync(command.ProjectId, MaterialCodeApplicationStatus.Approved, cancellationToken))
+                .FirstOrDefault(application => application.BomItemId == item.Id);
+            if (approvedApplication is not null)
+            {
+                var approvedMaterial = approvedApplication.MaterialId is Guid materialId ? await materials.FindMaterialAsync(materialId, cancellationToken) : null;
+                results.Add(new(item.Id, MaterialCodeResolutionStatus.ApplicationApproved, approvedMaterial, approvedMaterial is null ? [] : [approvedMaterial], approvedApplication));
+                continue;
+            }
+            if (string.IsNullOrWhiteSpace(item.Specification))
+            {
+                results.Add(new(item.Id, MaterialCodeResolutionStatus.NoMatch, null, [], null));
+                continue;
+            }
+            var modelCandidates = await materials.FindApprovedMaterialsBySpecificationAsync(item.Specification, cancellationToken);
+            var candidates = modelCandidates.Count <= 1 || string.IsNullOrWhiteSpace(item.Brand)
+                ? modelCandidates
+                : modelCandidates.Where(candidate => string.Equals(candidate.Brand?.Trim(), item.Brand.Trim(), StringComparison.OrdinalIgnoreCase)).ToArray();
+            results.Add(candidates.Count switch
+            {
+                0 => new(item.Id, MaterialCodeResolutionStatus.NoMatch, null, [], null),
+                1 => new(item.Id, MaterialCodeResolutionStatus.Matched, candidates[0], candidates, null),
+                _ => new(item.Id, MaterialCodeResolutionStatus.Ambiguous, null, candidates, null)
+            });
+        }
+        return results;
+    }
+
+    public async Task<IReadOnlyList<MaterialCodeResolution>> ApplyForMaterialCodesAsync(ApplyMaterialCodesCommand command, string actor, UserRole role, CancellationToken cancellationToken)
+    {
+        await RequirePermissionAsync(actor, role, PermissionCodes.BomEdit, cancellationToken);
+        var resolutions = await ResolveStandardBomMaterialsAsync(new(command.ProjectId, command.BomItemIds), actor, role, cancellationToken);
+        var results = new List<MaterialCodeResolution>(resolutions.Count);
+        foreach (var resolution in resolutions)
+        {
+            if (resolution.Status != MaterialCodeResolutionStatus.NoMatch)
+            {
+                results.Add(resolution);
+                continue;
+            }
+            var now = timeProvider.GetUtcNow();
+            var application = new MaterialCodeApplication(Guid.NewGuid(), command.ProjectId, resolution.BomItemId,
+                MaterialCodeApplicationStatus.Pending, actor, now, null, null, null, null, null, 1);
+            application = await materials.CreateMaterialCodeApplicationAsync(application, cancellationToken);
+            await AuditAsync(actor, "material-code.application.create", application.Id, $"申请标准件料号：BOM {application.BomItemId}", cancellationToken);
+            results.Add(resolution with { Status = MaterialCodeResolutionStatus.ApplicationPending, Application = application });
+        }
+        return results;
+    }
+
+    public async Task<(MaterialCodeApplication Application, PdmMaterial? Material)> DecideMaterialCodeApplicationAsync(Guid applicationId, long expectedRowVersion, bool approved, string? comment, string actor, UserRole role, CancellationToken cancellationToken)
+    {
+        var approvalSettings = (await repository.GetSystemSettingsAsync(cancellationToken)).MaterialCodeApproval;
+        if (role != UserRole.Administrator && !approvalSettings.ApproverRoleCodes.Contains(role.ToString(), StringComparer.OrdinalIgnoreCase))
+            throw new UnauthorizedAccessException("只有标准化角色可以处理料号申请。");
+        var application = await materials.FindMaterialCodeApplicationAsync(applicationId, cancellationToken)
+            ?? throw new PdmNotFoundException("料号申请不存在。");
+        if (!approved)
+        {
+            var rejected = await materials.DecideMaterialCodeApplicationAsync(application.Id, expectedRowVersion, MaterialCodeApplicationStatus.Rejected,
+                actor, string.IsNullOrWhiteSpace(comment) ? "标准化退回" : comment.Trim(), null, null, timeProvider.GetUtcNow(), cancellationToken);
+            await AuditAsync(actor, "material-code.application.reject", rejected.Id, rejected.DecisionComment ?? "退回", cancellationToken);
+            return (rejected, null);
+        }
+
+        var item = await repository.FindBomItemAsync(application.ProjectId, application.BomItemId, cancellationToken)
+            ?? throw new PdmNotFoundException("申请对应的BOM物料不存在。");
+        if (item.Kind != BomKind.Standard) throw new PdmRuleException("只有标准件使用料号申请审批。");
+        var material = await CreateFromBomCoreAsync(new(application.ProjectId, application.BomItemId), actor, cancellationToken);
+        if (material.ApprovalStatus == MaterialApprovalStatus.Draft)
+            (material, _) = await ApproveCoreAsync(material.Id, material.RowVersion, actor, cancellationToken);
+        var decided = await materials.DecideMaterialCodeApplicationAsync(application.Id, expectedRowVersion, MaterialCodeApplicationStatus.Approved,
+            actor, comment?.Trim(), material.Id, material.MaterialCode, timeProvider.GetUtcNow(), cancellationToken);
+        await AuditAsync(actor, "material-code.application.approve", decided.Id, $"批准标准件料号：{material.MaterialCode}", cancellationToken);
+        return (decided, material);
+    }
+
+    public async Task<IReadOnlyList<PdmMaterial>> EnsureNonStandardMaterialsAsync(Guid projectId, IReadOnlyList<Guid> bomItemIds, string actor, UserRole role, CancellationToken cancellationToken)
+    {
+        await RequirePermissionAsync(actor, role, PermissionCodes.ApprovalDecide, cancellationToken);
+        var result = new List<PdmMaterial>();
+        foreach (var itemId in bomItemIds.Distinct())
+        {
+            var item = await repository.FindBomItemAsync(projectId, itemId, cancellationToken)
+                ?? throw new PdmNotFoundException("非标件BOM物料不存在。");
+            if (item.Kind != BomKind.NonStandard) throw new PdmRuleException("自动生成料号只适用于非标件BOM。");
+            var material = await CreateFromBomCoreAsync(new(projectId, itemId), actor, cancellationToken);
+            if (material.ApprovalStatus == MaterialApprovalStatus.Draft)
+                (material, _) = await ApproveCoreAsync(material.Id, material.RowVersion, actor, cancellationToken);
+            result.Add(material);
+        }
+        return result;
+    }
+
     public async Task<PdmMaterial> CreateAsync(SaveMaterialCommand command, string actor, UserRole role, CancellationToken cancellationToken)
     {
         await RequirePermissionAsync(actor, role, PermissionCodes.BomEdit, cancellationToken);
@@ -55,6 +170,11 @@ public sealed class MaterialService(
     public async Task<PdmMaterial> CreateFromBomAsync(CreateMaterialFromBomCommand command, string actor, UserRole role, CancellationToken cancellationToken)
     {
         await RequirePermissionAsync(actor, role, PermissionCodes.BomEdit, cancellationToken);
+        return await CreateFromBomCoreAsync(command, actor, cancellationToken);
+    }
+
+    private async Task<PdmMaterial> CreateFromBomCoreAsync(CreateMaterialFromBomCommand command, string actor, CancellationToken cancellationToken)
+    {
         var item = await repository.FindBomItemAsync(command.ProjectId, command.BomItemId, cancellationToken)
             ?? throw new PdmNotFoundException("BOM物料不存在。");
         if (item.IsPendingClassification || item.IsManualUnmatched || item.IsPendingRemoval || item.IsManuallyExcluded)
@@ -175,7 +295,7 @@ public sealed class MaterialService(
         if (result.ResponseCode != 0)
             throw new PdmRuleException($"U9C创建前计量单位校验失败（ResCode={result.ResponseCode}）：{result.ResponseMessage ?? "未返回错误说明"}。");
         if (!result.Units.Any(unit => string.Equals(unit.U9UomCode?.Trim(), u9UnitCode, StringComparison.OrdinalIgnoreCase)))
-            throw new PdmRuleException($"PDM计量单位编码 {u9UnitCode} 在U9C中不存在；未创建料品，也未占用流水号。");
+            throw new PdmRuleException($"PLM计量单位编码 {u9UnitCode} 在U9C中不存在；未创建料品，也未占用流水号。");
         return u9UnitCode;
     }
 
@@ -187,6 +307,11 @@ public sealed class MaterialService(
     public async Task<(PdmMaterial Material, MaterialSyncTask Task)> ApproveAsync(Guid materialId, long expectedRowVersion, string actor, UserRole role, CancellationToken cancellationToken)
     {
         await RequirePermissionAsync(actor, role, PermissionCodes.ReleaseManage, cancellationToken);
+        return await ApproveCoreAsync(materialId, expectedRowVersion, actor, cancellationToken);
+    }
+
+    private async Task<(PdmMaterial Material, MaterialSyncTask Task)> ApproveCoreAsync(Guid materialId, long expectedRowVersion, string actor, CancellationToken cancellationToken)
+    {
         var material = await materials.FindMaterialAsync(materialId, cancellationToken) ?? throw new PdmNotFoundException("物料主档不存在。");
         if (material.IsArchived) throw new PdmRuleException("已归档料品不能批准。");
         if (material.ApprovalStatus != MaterialApprovalStatus.Draft) throw new PdmRuleException("物料主档已经批准。");
@@ -271,7 +396,7 @@ public sealed class MaterialService(
         if (existing.RowVersion != expectedRowVersion)
             throw new PdmConflictException("物料主档已被其他用户修改，请刷新后重试。");
         if (existing.SourceSystem != MaterialDataSource.Pdm || existing.MasterOwner != MaterialMasterOwner.Pdm)
-            throw new PdmRuleException("只有PDM来源且PDM主控的料品可以删除；U9C主控料品只能停用或由U9C维护。");
+            throw new PdmRuleException("只有PLM来源且PLM主控的料品可以删除；U9C主控料品只能停用或由U9C维护。");
         if (await materials.HasMaterialReferencesAsync(materialId, cancellationToken))
             throw new PdmRuleException("料品已被BOM引用或来源于BOM，不能删除；可改为停用。");
         if ((await materials.ListSyncTasksAsync(cancellationToken)).Any(task =>
@@ -282,7 +407,7 @@ public sealed class MaterialService(
         var deleted = await materials.DeleteLocalMaterialAsync(materialId, expectedRowVersion, true, cancellationToken);
         await AuditAsync(actor, deletedFromU9 ? "material.delete-synchronized" : "material.delete-local", deleted.Id,
             deletedFromU9
-                ? $"同步删除料品：{deleted.MaterialCode}；U9C删除成功并回查确认不存在后删除PDM主档；删除前已确认无PDM/BOM引用。"
+                ? $"同步删除料品：{deleted.MaterialCode}；U9C删除成功并回查确认不存在后删除PLM主档；删除前已确认无PLM/BOM引用。"
                 : $"安全删除料品：{deleted.MaterialCode}；删除前已确认无BOM引用且U9C实时查询不存在；本地历史同步标记={existing.U9SyncConfirmed}；清理本地同步任务，未调用U9C写接口。", cancellationToken);
         return new MaterialRemovalResult(deleted, true, false);
     }
@@ -306,12 +431,12 @@ public sealed class MaterialService(
             && string.Equals(configuration.ItemQueryPath, U9MaterialContract.QueryPath, StringComparison.OrdinalIgnoreCase)
             && string.Equals(configuration.ItemDeletePath, U9MaterialContract.DeletePath, StringComparison.OrdinalIgnoreCase);
         var decision = !isPdmMaster
-            ? "U9C主控料品不允许从PDM发起物理删除。"
+            ? "U9C主控料品不允许从PLM发起物理删除。"
             : referenceCount > 0
-                ? $"PDM中已有{referenceCount}处BOM引用，不能删除。"
+                ? $"PLM中已有{referenceCount}处BOM引用，不能删除。"
                 : synchronizedDeleteAvailable
-                    ? "PDM未发现引用；若U9C存在，将先由U9C删除接口校验引用并删除，回查确认不存在后才删除PDM主档。"
-                    : "PDM未发现引用；U9C真实写入或删除接口尚未启用，只能删除U9C中不存在的料品。";
+                    ? "PLM未发现引用；若U9C存在，将先由U9C删除接口校验引用并删除，回查确认不存在后才删除PLM主档。"
+                    : "PLM未发现引用；U9C真实写入或删除接口尚未启用，只能删除U9C中不存在的料品。";
         return new MaterialRemovalReadiness(
             material.Id,
             material.MaterialCode,
@@ -367,9 +492,9 @@ public sealed class MaterialService(
 
         await RequirePermissionAsync(actor, role, PermissionCodes.ReleaseManage, cancellationToken);
         if (!configuration.WriteEnabled)
-            throw new PdmRuleException($"U9C已存在料品 {material.MaterialCode}，但U9C真实写入尚未启用；未删除U9C和PDM主档。");
+            throw new PdmRuleException($"U9C已存在料品 {material.MaterialCode}，但U9C真实写入尚未启用；未删除U9C和PLM主档。");
         if (!string.Equals(configuration.ItemDeletePath, U9MaterialContract.DeletePath, StringComparison.OrdinalIgnoreCase))
-            throw new PdmRuleException("U9C料品Delete路径与已冻结的官方合同不一致；未删除U9C和PDM主档。");
+            throw new PdmRuleException("U9C料品Delete路径与已冻结的官方合同不一致；未删除U9C和PLM主档。");
 
         var correlationId = $"pdm-delete-{Guid.NewGuid():N}";
         U9BusinessBatchResult deletion;
@@ -384,14 +509,14 @@ public sealed class MaterialService(
         }
         catch (PdmRuleException exception)
         {
-            throw new PdmRuleException($"U9C删除请求未确认：{exception.Message}；PDM主档保持不变，请先回查U9C后重试。");
+            throw new PdmRuleException($"U9C删除请求未确认：{exception.Message}；PLM主档保持不变，请先回查U9C后重试。");
         }
 
         if (deletion.ResponseCode != 0)
-            throw new PdmRuleException($"U9C拒绝删除料品 {material.MaterialCode}（ResCode={deletion.ResponseCode}）：{deletion.ResponseMessage ?? "未返回错误说明"}；PDM主档保持不变。");
+            throw new PdmRuleException($"U9C拒绝删除料品 {material.MaterialCode}（ResCode={deletion.ResponseCode}）：{deletion.ResponseMessage ?? "未返回错误说明"}；PLM主档保持不变。");
         var failedRow = deletion.Rows.FirstOrDefault(row => !row.IsSuccess);
         if (failedRow is not null)
-            throw new PdmRuleException($"U9C拒绝删除料品 {material.MaterialCode}：{failedRow.ErrorMessage ?? "可能存在业务引用"}；PDM主档保持不变。");
+            throw new PdmRuleException($"U9C拒绝删除料品 {material.MaterialCode}：{failedRow.ErrorMessage ?? "可能存在业务引用"}；PLM主档保持不变。");
 
         var verification = await u9Client.QueryItemsAsync(
             configuration.BaseUrl,
@@ -400,9 +525,9 @@ public sealed class MaterialService(
             U9MaterialPayloadFactory.QueryPayload(material.MaterialCode, $"{correlationId}-verify"),
             cancellationToken);
         if (verification.ResponseCode != 0)
-            throw new PdmRuleException($"U9C删除后回查失败（ResCode={verification.ResponseCode}）：{verification.ResponseMessage ?? "未返回错误说明"}；PDM主档保持不变，请人工确认U9C结果。");
+            throw new PdmRuleException($"U9C删除后回查失败（ResCode={verification.ResponseCode}）：{verification.ResponseMessage ?? "未返回错误说明"}；PLM主档保持不变，请人工确认U9C结果。");
         if (verification.Items.Any(item => string.Equals(item.U9ItemCode?.Trim(), material.MaterialCode, StringComparison.OrdinalIgnoreCase)))
-            throw new PdmRuleException($"U9C返回删除成功，但回查仍存在料品 {material.MaterialCode}；PDM主档保持不变。");
+            throw new PdmRuleException($"U9C返回删除成功，但回查仍存在料品 {material.MaterialCode}；PLM主档保持不变。");
         return true;
     }
 
@@ -418,6 +543,26 @@ public sealed class MaterialService(
             throw new PdmRuleException("BOM只能引用已批准的料品主档。");
         await materials.LinkBomItemAsync(command.BomItemId, material.Id, actor, timeProvider.GetUtcNow(), cancellationToken);
         await AuditAsync(actor, "material.link-bom", material.Id, $"BOM引用料品：{command.BomItemId} → {material.MaterialCode}", cancellationToken);
+        return material;
+    }
+
+    public async Task<PdmMaterial?> SetBomMaterialLinkByCodeAsync(Guid projectId, Guid bomItemId, string? materialCode, string actor, UserRole role, CancellationToken cancellationToken)
+    {
+        await RequirePermissionAsync(actor, role, PermissionCodes.BomEdit, cancellationToken);
+        _ = await repository.FindBomItemAsync(projectId, bomItemId, cancellationToken)
+            ?? throw new PdmNotFoundException("BOM物料不存在。");
+        if (string.IsNullOrWhiteSpace(materialCode))
+        {
+            await materials.UnlinkBomItemAsync(bomItemId, cancellationToken);
+            await AuditAsync(actor, "material.unlink-bom", bomItemId, "型号或品牌已变更，解除原料品引用。", cancellationToken);
+            return null;
+        }
+        var material = await materials.FindMaterialByCodeAsync(materialCode.Trim(), cancellationToken)
+            ?? throw new PdmNotFoundException("自动匹配的料品主档不存在，请重新核对型号。");
+        if (material.IsArchived || material.ApprovalStatus != MaterialApprovalStatus.Approved)
+            throw new PdmRuleException("BOM只能关联已批准且未归档的料品主档。");
+        await materials.LinkBomItemAsync(bomItemId, material.Id, actor, timeProvider.GetUtcNow(), cancellationToken);
+        await AuditAsync(actor, "material.link-bom", material.Id, $"型号自动关联：{bomItemId} → {material.MaterialCode}", cancellationToken);
         return material;
     }
 
@@ -492,7 +637,7 @@ public sealed class MaterialService(
         if (parentCode is not null && await materials.FindCategoryAsync(parentCode, cancellationToken) is null)
             throw new PdmRuleException("上级料品分类不存在。");
         if (command.SequenceLength is < 1 or > 9) throw new PdmRuleException("流水位数必须在1到9之间。");
-        if (command.AllowCreate && command.PdmKind is null) throw new PdmRuleException("开放创建前必须选择PDM业务分类。");
+        if (command.AllowCreate && command.PdmKind is null) throw new PdmRuleException("开放创建前必须选择PLM业务分类。");
         if (command.AllowCreate && (!command.IsVisible || !command.IsActive)) throw new PdmRuleException("只有可见且有效的分类才能开放创建。");
         var prefix = Clean(command.NumberPrefix) ?? code;
         if (prefix.Length > 40) throw new PdmRuleException("编号前缀不能超过40个字符。");
@@ -568,6 +713,13 @@ public sealed class MaterialService(
         var queryPath = NormalizeContractPath(command.ItemQueryPath, U9MaterialContract.QueryPath, "料品查询");
         var modifyPath = NormalizeContractPath(command.ItemModifyPath ?? U9MaterialContract.ModifyPath, U9MaterialContract.ModifyPath, "料品修改");
         var deletePath = NormalizeContractPath(command.ItemDeletePath ?? U9MaterialContract.DeletePath, U9MaterialContract.DeletePath, "料品删除");
+        var customerQueryPath = NormalizeContractPath(command.CustomerQueryPath ?? U9MaterialContract.CustomerReferencePath, U9MaterialContract.CustomerReferencePath, "客户查询");
+        var bomCreatePath = NormalizeContractPath(command.BomCreatePath ?? U9BomContract.CreatePath, U9BomContract.CreatePath, "BOM创建");
+        var bomQueryPath = NormalizeContractPath(command.BomQueryPath ?? U9BomContract.QueryPath, U9BomContract.QueryPath, "BOM查询");
+        var bomModifyPath = NormalizeContractPath(command.BomModifyPath ?? U9BomContract.ModifyPath, U9BomContract.ModifyPath, "BOM修改");
+        var bomDeletePath = NormalizeContractPath(command.BomDeletePath ?? U9BomContract.DeletePath, U9BomContract.DeletePath, "BOM删除");
+        var bomBatchUnapprovePath = NormalizeContractPath(command.BomBatchUnapprovePath ?? U9BomContract.BatchUnApprovePath, U9BomContract.BatchUnApprovePath, "BOM弃审");
+        var bomBipQueryPagePath = NormalizeContractPath(command.BomBipQueryPagePath ?? U9BomContract.BipQueryPagePath, U9BomContract.BipQueryPagePath, "BOM记录定位");
         if (command.WriteEnabled && string.IsNullOrWhiteSpace(ciphertext))
             throw new PdmRuleException("启用U9C真实写入前必须保存应用密钥。");
         var configuration = new U9MaterialIntegrationConfiguration(
@@ -584,7 +736,14 @@ public sealed class MaterialService(
             timeProvider.GetUtcNow(),
             modifyPath,
             deletePath,
-            new Dictionary<string, string>());
+            new Dictionary<string, string>(),
+            customerQueryPath,
+            bomCreatePath,
+            bomQueryPath,
+            bomModifyPath,
+            bomDeletePath,
+            bomBatchUnapprovePath,
+            bomBipQueryPagePath);
         var saved = await materials.SaveIntegrationConfigurationAsync(configuration, cancellationToken);
         await AuditAsync(actor, "u9.material-integration.update", "u9-material", $"更新U9C料品集成配置：{saved.BaseUrl}；应用：{saved.ClientId}；真实写入：{(saved.WriteEnabled ? "开启" : "关闭")}", cancellationToken);
         return ToSettings(saved);
@@ -634,7 +793,7 @@ public sealed class MaterialService(
 
     private static void ValidateForApproval(PdmMaterial material)
     {
-        _ = Required(material.MaterialCode, "PDM物料编码");
+        _ = Required(material.MaterialCode, "PLM物料编码");
         _ = Required(material.Name, "物料名称");
         _ = Required(material.UnitCode, "计量单位");
         if (material.Kind == MaterialKind.Standard && string.IsNullOrWhiteSpace(material.Specification))
@@ -669,7 +828,7 @@ public sealed class MaterialService(
         var category = await materials.FindCategoryAsync(categoryCode.Trim(), cancellationToken)
             ?? throw new PdmRuleException("料品分类不存在或尚未从U9C同步。");
         if (!category.IsActive) throw new PdmRuleException("料品分类已停用。");
-        if (!category.IsVisible) throw new PdmRuleException("料品分类在PDM中已屏蔽。");
+        if (!category.IsVisible) throw new PdmRuleException("料品分类在PLM中已屏蔽。");
         if (!category.AllowCreate) throw new PdmRuleException("料品分类未开放创建。");
         if (category.PdmKind is not null && category.PdmKind != kind)
             throw new PdmRuleException($"料品分类 {category.Code} 仅允许创建{category.PdmKind}类型料品。");
@@ -725,5 +884,12 @@ public sealed class MaterialService(
         configuration.UpdatedAt,
         configuration.ItemModifyPath,
         configuration.ItemDeletePath,
-        configuration.UnitCodeMappings ?? new Dictionary<string, string>());
+        configuration.UnitCodeMappings ?? new Dictionary<string, string>(),
+        configuration.CustomerQueryPath,
+        configuration.BomCreatePath,
+        configuration.BomQueryPath,
+        configuration.BomModifyPath,
+        configuration.BomDeletePath,
+        configuration.BomBatchUnapprovePath,
+        configuration.BomBipQueryPagePath);
 }

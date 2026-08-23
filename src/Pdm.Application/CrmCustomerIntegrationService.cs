@@ -177,6 +177,7 @@ public sealed class CrmCustomerIntegrationService(
             });
             var page = await u9Client.QueryCustomerReferencesAsync(
                 configuration.BaseUrl,
+                configuration.CustomerQueryPath,
                 authentication.Token,
                 payload,
                 cancellationToken);
@@ -194,7 +195,7 @@ public sealed class CrmCustomerIntegrationService(
             if (page.RawCount == 0 || page.RawCount < CustomerPageSize || customers.Count == countBeforePage) break;
         }
         if (customers.Count == 0)
-            throw new PdmRuleException("U9C客户参照未返回任何有效的客户编码和名称，本次未更新PDM客户目录。");
+            throw new PdmRuleException("U9C客户参照未返回任何有效的客户编码和名称，本次未更新PLM客户目录。");
         return new(customers.Values.OrderBy(customer => customer.Code, StringComparer.OrdinalIgnoreCase).ToArray(), skippedCount);
     }
 

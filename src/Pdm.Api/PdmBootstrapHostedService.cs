@@ -30,21 +30,33 @@ public sealed class PdmBootstrapHostedService(
         {
             if (!environment.IsDevelopment())
             {
-                logger.LogWarning("PDM has no users. Set PDM_BOOTSTRAP_ADMIN_PASSWORD before first production start.");
+                logger.LogWarning("PLM has no users. Set PDM_BOOTSTRAP_ADMIN_PASSWORD before first production start.");
             }
 
             return;
         }
 
         var passwordService = scope.ServiceProvider.GetRequiredService<IPasswordService>();
+        var primaryCompanyId = (await repository.GetProjectNumberingOptionsAsync(cancellationToken)).Organizations
+            .Where(item => item.IsActive)
+            .OrderBy(item => item.Name, StringComparer.Ordinal)
+            .Select(item => (Guid?)item.Id)
+            .FirstOrDefault();
+        if (primaryCompanyId is null)
+        {
+            logger.LogWarning("PLM has no active company. Create a company before bootstrapping the platform administrator.");
+            return;
+        }
         await repository.CreateUserAsync(new UserAccount(
             Guid.NewGuid(),
             "admin",
             "系统管理员",
             passwordService.Hash(password),
-            UserRole.Administrator,
-            true), cancellationToken);
-        logger.LogInformation("Created the initial PDM administrator account.");
+            UserRole.PlatformAdministrator,
+            true,
+            RoleCode: "platform_admin",
+            CompanyId: primaryCompanyId), cancellationToken);
+        logger.LogInformation("Created the initial PLM platform administrator account.");
     }
 
     public Task StopAsync(CancellationToken cancellationToken) => Task.CompletedTask;

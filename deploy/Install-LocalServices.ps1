@@ -48,7 +48,7 @@ function Wait-Health([int]$timeoutSeconds) {
         }
         Start-Sleep -Milliseconds 750
     } while ([DateTime]::UtcNow -lt $deadline)
-    throw 'PDM API did not report a healthy MySQL connection within the timeout.'
+    throw 'PLM API did not report a healthy MySQL connection within the timeout.'
 }
 
 function Run-RootSql([string]$sql) {
@@ -81,24 +81,26 @@ $dotnetPath = Join-Path $projectRoot '.dotnet\dotnet.exe'
 $preparedApiUpgrade = Join-Path $localRoot 'api-next'
 $preparedClientUpgrade = Join-Path $localRoot 'staged-client'
 $preparedAddinUpgrade = Join-Path $localRoot 'staged-solidworks-addin'
+$preparedPreviewWorkerUpgrade = Join-Path $localRoot 'staged-preview-worker'
 $hasPreparedApiUpgrade = Test-Path -LiteralPath (Join-Path $preparedApiUpgrade 'Pdm.Api.dll')
 $hasPreparedClientUpgrade = Test-Path -LiteralPath (Join-Path $preparedClientUpgrade 'Upton.Pdm.Desktop.exe')
 $hasPreparedAddinUpgrade = Test-Path -LiteralPath (Join-Path $preparedAddinUpgrade 'Upton.Pdm.SolidWorks.Addin.dll')
-$hasPreparedUpgrade = $hasPreparedApiUpgrade -or $hasPreparedClientUpgrade -or $hasPreparedAddinUpgrade
+$hasPreparedPreviewWorkerUpgrade = Test-Path -LiteralPath (Join-Path $preparedPreviewWorkerUpgrade 'Upton.Pdm.SolidWorks.PreviewWorker.exe')
+$hasPreparedUpgrade = $hasPreparedApiUpgrade -or $hasPreparedClientUpgrade -or $hasPreparedAddinUpgrade -or $hasPreparedPreviewWorkerUpgrade
 
 if (-not (Test-Path -LiteralPath $mysqldPath) -or -not (Test-Path -LiteralPath $mysqlClient) -or -not (Test-Path -LiteralPath $mysqlDump)) {
     throw 'MySQL binaries are missing from the prepared runtime.'
 }
 
-if ($hasPreparedUpgrade -and -not ($hasPreparedApiUpgrade -and $hasPreparedClientUpgrade -and $hasPreparedAddinUpgrade)) {
-    throw 'The PDM upgrade is incomplete. API, Windows client and SolidWorks add-in must be staged together.'
+if ($hasPreparedUpgrade -and -not ($hasPreparedApiUpgrade -and $hasPreparedClientUpgrade -and $hasPreparedAddinUpgrade -and $hasPreparedPreviewWorkerUpgrade)) {
+    throw 'The PLM upgrade is incomplete. API, Windows client, SolidWorks add-in and server preview worker must be staged together.'
 }
 
 if ($hasPreparedUpgrade) {
     $blockingProcesses = Get-Process -Name 'SLDWORKS', 'Upton.Pdm.Desktop' -ErrorAction SilentlyContinue
     if ($blockingProcesses) {
         $names = ($blockingProcesses | Select-Object -ExpandProperty ProcessName -Unique) -join ', '
-        throw "Close the PDM Windows client and SolidWorks before the three-part upgrade. Running: $names"
+        throw "Close the PLM Windows client and SolidWorks before the three-part upgrade. Running: $names"
     }
 }
 
@@ -110,7 +112,8 @@ if ($null -eq $mysqlService) {
     }
 }
 & sc.exe config $mysqlServiceName start= auto | Out-Null
-& sc.exe description $mysqlServiceName 'UPTON PDM isolated MySQL 8.4 instance on 127.0.0.1:3308' | Out-Null
+& sc.exe config $mysqlServiceName DisplayName= 'UPLM MySQL' | Out-Null
+& sc.exe description $mysqlServiceName 'UPLM isolated MySQL 8.4 instance on 127.0.0.1:3308' | Out-Null
 & sc.exe failure $mysqlServiceName reset= 86400 actions= restart/5000/restart/15000/restart/30000 | Out-Null
 Start-Service -Name $mysqlServiceName
 Wait-Port 3308 60
@@ -144,7 +147,7 @@ if ($hasPreparedUpgrade) {
     $backupRoot = Join-Path $localRoot (Join-Path 'backup' ([DateTimeOffset]::Now.ToString('yyyyMMdd-HHmmss')))
     $databaseBackupPath = Join-Path $backupRoot 'pdm.sql'
     New-Item -ItemType Directory -Path $backupRoot -Force | Out-Null
-    foreach ($component in @('api', 'client', 'solidworks-addin')) {
+    foreach ($component in @('api', 'client', 'solidworks-addin', 'preview-worker')) {
         $source = Join-Path $localRoot $component
         if (Test-Path -LiteralPath $source) {
             Copy-Item -LiteralPath $source -Destination (Join-Path $backupRoot $component) -Recurse -Force
@@ -152,7 +155,7 @@ if ($hasPreparedUpgrade) {
     }
     & $mysqlDump "--defaults-extra-file=$rootClientPath" --single-transaction --routines --triggers --hex-blob "--result-file=$databaseBackupPath" pdm
     if ($LASTEXITCODE -ne 0) {
-        throw "PDM database backup failed with exit code $LASTEXITCODE. Upgrade files were not switched."
+        throw "PLM database backup failed with exit code $LASTEXITCODE. Upgrade files were not switched."
     }
     $dataBackupRoot = Join-Path $backupRoot 'data'
     foreach ($dataName in @('vault', 'release')) {
@@ -189,15 +192,19 @@ if ($hasPreparedApiUpgrade) {
     Remove-Item -LiteralPath $preparedClientUpgrade -Recurse -Force
     Copy-Item -Path (Join-Path $preparedAddinUpgrade '*') -Destination (Join-Path $localRoot 'solidworks-addin') -Recurse -Force
     Remove-Item -LiteralPath $preparedAddinUpgrade -Recurse -Force
+    Copy-Item -Path (Join-Path $preparedPreviewWorkerUpgrade '*') -Destination (Join-Path $localRoot 'preview-worker') -Recurse -Force
+    Remove-Item -LiteralPath $preparedPreviewWorkerUpgrade -Recurse -Force
 }
 
 if ($null -eq $apiService) {
-    New-Service -Name $apiServiceName -BinaryPathName $apiBinaryPath -DisplayName 'UPTON PDM API' -Description 'UPTON PDM API on 127.0.0.1:5080' -StartupType Automatic | Out-Null
+    New-Service -Name $apiServiceName -BinaryPathName $apiBinaryPath -DisplayName 'UPLM API' -Description 'UPLM API on 127.0.0.1:5080' -StartupType Automatic | Out-Null
 }
 else {
     & sc.exe config $apiServiceName "binPath= $apiBinaryPath" start= auto | Out-Null
 }
 & sc.exe config $apiServiceName depend= $mysqlServiceName | Out-Null
+& sc.exe config $apiServiceName DisplayName= 'UPLM API' | Out-Null
+& sc.exe description $apiServiceName 'UPLM API on 127.0.0.1:5080' | Out-Null
 & sc.exe failure $apiServiceName reset= 86400 actions= restart/5000/restart/15000/restart/30000 | Out-Null
 
 $apiEnvironment = @(
@@ -205,6 +212,7 @@ $apiEnvironment = @(
     "PDM_DB_PASSWORD=$($secrets.databasePassword)",
     "PDM_JWT_SIGNING_KEY=$($secrets.jwtSigningKey)",
     "PDM_BOOTSTRAP_ADMIN_PASSWORD=$($secrets.bootstrapAdminPassword)",
+    "PDM_PREVIEW_WORKER_PATH=$($receipt.previewWorkerPath)",
     "Pdm__Storage__UploadTempRoot=$(Join-Path $localRoot 'uploads')"
 )
 $apiRegistryPath = "HKLM:\SYSTEM\CurrentControlSet\Services\$apiServiceName"
@@ -248,13 +256,15 @@ Set-ItemProperty -LiteralPath $apiRegistryPath -Name Environment -Value $apiEnvi
 
 $regAsmPath = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\RegAsm.exe'
 $addinPath = $receipt.addinPath
+$previewWorkerPath = $receipt.previewWorkerPath
 $tlbPath = [IO.Path]::ChangeExtension($addinPath, '.tlb')
 $solidWorksInstallDir = 'C:\Program Files\SOLIDWORKS Corp\SOLIDWORKS'
-if (-not (Test-Path -LiteralPath $regAsmPath) -or -not (Test-Path -LiteralPath $addinPath) -or -not (Test-Path -LiteralPath $solidWorksInstallDir)) {
-    throw 'RegAsm, the prepared SolidWorks add-in, or the SolidWorks install directory was not found.'
+if (-not (Test-Path -LiteralPath $regAsmPath) -or -not (Test-Path -LiteralPath $addinPath) -or -not (Test-Path -LiteralPath $previewWorkerPath) -or -not (Test-Path -LiteralPath $solidWorksInstallDir)) {
+    throw 'RegAsm, the prepared SolidWorks add-in, the server preview worker, or the SolidWorks install directory was not found.'
 }
 
 $addinDirectory = Split-Path -Parent $addinPath
+$previewWorkerDirectory = Split-Path -Parent $previewWorkerPath
 $solidWorksInteropFiles = @(
     'SolidWorks.Interop.sldworks.dll',
     'SolidWorks.Interop.swconst.dll',
@@ -267,6 +277,7 @@ foreach ($interopFile in $solidWorksInteropFiles) {
     }
 
     Copy-Item -LiteralPath $sourcePath -Destination (Join-Path $addinDirectory $interopFile) -Force
+    Copy-Item -LiteralPath $sourcePath -Destination (Join-Path $previewWorkerDirectory $interopFile) -Force
 }
 
 & $regAsmPath $addinPath /codebase "/tlb:$tlbPath"
@@ -297,5 +308,5 @@ $status = [ordered]@{
     addinStartupUserSid = $interactiveUserSid
 }
 $status | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $localRoot 'installation-status.json') -Encoding UTF8
-Write-Host 'UPTON PDM local services and SolidWorks add-in are installed.'
+Write-Host 'UPLM local services and SolidWorks add-in are installed.'
 Stop-Transcript | Out-Null

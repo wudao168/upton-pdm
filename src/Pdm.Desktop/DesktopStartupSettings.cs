@@ -9,7 +9,9 @@ internal static class DesktopStartupSettings
     private const string PreferenceKeyPath = @"Software\UPTON\PDM Desktop";
     private const string RunKeyPath = @"Software\Microsoft\Windows\CurrentVersion\Run";
     private const string PreferenceName = "StartWithWindows";
-    private const string RunValueName = "UPTON PDM";
+    private const string RunValueName = "UPLM";
+    private const string PreviousRunValueName = "UPTON PLM";
+    private const string LegacyRunValueName = "UPTON PDM";
 
     public static bool EnsureConfigured()
     {
@@ -41,12 +43,16 @@ internal static class DesktopStartupSettings
         if (enabled)
         {
             var executable = Assembly.GetEntryAssembly()?.Location
-                ?? throw new InvalidOperationException("无法确定PDM客户端程序路径。");
+                ?? throw new InvalidOperationException("无法确定PLM客户端程序路径。");
             runKey?.SetValue(RunValueName, string.Concat('"', executable, '"', " --startup"), RegistryValueKind.String);
+            runKey?.DeleteValue(PreviousRunValueName, false);
+            runKey?.DeleteValue(LegacyRunValueName, false);
         }
         else
         {
             runKey?.DeleteValue(RunValueName, false);
+            runKey?.DeleteValue(PreviousRunValueName, false);
+            runKey?.DeleteValue(LegacyRunValueName, false);
         }
     }
 }

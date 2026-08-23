@@ -257,14 +257,18 @@ public sealed partial class MySqlPdmRepository
         await connection.ExecuteAsync(new CommandDefinition(
             """
             INSERT INTO release_package(
-                id, project_id, package_number, state, reference_snapshot_id, mechanical_bom_revision,
+                id, project_id, package_number, state, release_scope, workflow_code, workflow_version,
+                selected_bom_item_ids_json, creates_manufacturing_baseline, locks_documents,
+                reference_snapshot_id, mechanical_bom_revision,
                 electrical_bom_revision, mechanical_bom_snapshot_json, electrical_bom_snapshot_json,
                 standard_bom_version_id, non_standard_bom_version_id, electrical_bom_version_id,
                 standard_bom_revision, non_standard_bom_revision, standard_bom_snapshot_json, non_standard_bom_snapshot_json,
                 change_number, change_reason, effective_serial_from, effective_serial_to,
                 published_at, published_path, publish_error, row_version, created_at)
             VALUES (
-                @Id, @ProjectId, @PackageNumber, @State, @ReferenceSnapshotId, @MechanicalBomRevision,
+                @Id, @ProjectId, @PackageNumber, @State, @Scope, @WorkflowCode, @WorkflowVersion,
+                @SelectedBomItemIds, @CreatesManufacturingBaseline, @LocksDocuments,
+                @ReferenceSnapshotId, @MechanicalBomRevision,
                 @ElectricalBomRevision, @MechanicalBomSnapshot, @ElectricalBomSnapshot,
                 @StandardBomVersionId, @NonStandardBomVersionId, @ElectricalBomVersionId,
                 @StandardBomRevision, @NonStandardBomRevision, @StandardBomSnapshot, @NonStandardBomSnapshot,
@@ -277,6 +281,12 @@ public sealed partial class MySqlPdmRepository
                 package.ProjectId,
                 PackageNumber = package.Number,
                 State = package.State.ToString(),
+                Scope = package.Scope.ToString(),
+                package.WorkflowCode,
+                package.WorkflowVersion,
+                SelectedBomItemIds = JsonSerializer.Serialize(package.SelectedBomItemIds, jsonOptions),
+                package.CreatesManufacturingBaseline,
+                package.LocksDocuments,
                 package.ReferenceSnapshotId,
                 package.MechanicalBomRevision,
                 package.ElectricalBomRevision,
@@ -302,10 +312,10 @@ public sealed partial class MySqlPdmRepository
         {
             await connection.ExecuteAsync(new CommandDefinition(
                 """
-                INSERT INTO approval_task(id, release_package_id, stage, assignee, decision_by, decision_value, decision_comment, decided_at)
-                VALUES (@Id, @ReleasePackageId, @Stage, @Assignee, NULL, NULL, NULL, NULL)
+                INSERT INTO approval_task(id, release_package_id, stage, step_order, step_name, assignee, decision_by, decision_value, decision_comment, decided_at, is_emergency_substitute, emergency_reason)
+                VALUES (@Id, @ReleasePackageId, @Stage, @StepOrder, @StepName, @Assignee, NULL, NULL, NULL, NULL, 0, NULL)
                 """,
-                new { task.Id, task.ReleasePackageId, Stage = task.Stage.ToString(), task.Assignee },
+                new { task.Id, task.ReleasePackageId, Stage = task.Stage.ToString(), task.StepOrder, task.StepName, task.Assignee },
                 transaction,
                 cancellationToken: cancellationToken));
         }
@@ -320,7 +330,7 @@ public sealed partial class MySqlPdmRepository
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
         var packageState = await connection.QuerySingleOrDefaultAsync<ReleaseSnapshotStateRow>(new CommandDefinition(
             """
-            SELECT package.state,snapshot.root_json
+            SELECT package.state,package.release_scope,package.locks_documents,snapshot.root_json
             FROM release_package package
             INNER JOIN reference_snapshot snapshot ON snapshot.id=package.reference_snapshot_id
             WHERE package.id=@PackageId
@@ -331,8 +341,8 @@ public sealed partial class MySqlPdmRepository
         if (packageState.State is not ("Draft" or "Rejected" or "PublishFailed"))
             throw new PdmConflictException("只有草稿、已驳回或发布失败的发布包可以提交。");
         var documentIds = DeserializeDocumentIds(packageState.RootJson);
-        if (documentIds.Length == 0) throw new PdmConflictException("发布包引用快照中没有可审批图档。");
-        var blocked = await connection.QuerySingleOrDefaultAsync<DocumentApprovalBlockRow>(new CommandDefinition(
+        if (packageState.LocksDocuments && documentIds.Length == 0) throw new PdmConflictException("发布包引用快照中没有可审批图档。");
+        var blocked = packageState.LocksDocuments ? await connection.QuerySingleOrDefaultAsync<DocumentApprovalBlockRow>(new CommandDefinition(
             """
             SELECT drawing_number,checked_out_by,lifecycle_state
             FROM document
@@ -340,7 +350,7 @@ public sealed partial class MySqlPdmRepository
             LIMIT 1
             FOR UPDATE
             """,
-            new { DocumentIds = documentIds }, transaction, cancellationToken: cancellationToken));
+            new { DocumentIds = documentIds }, transaction, cancellationToken: cancellationToken)) : null;
         if (blocked is not null)
         {
             if (blocked.LifecycleState == DocumentLifecycleState.Obsolete.ToString())
@@ -349,14 +359,28 @@ public sealed partial class MySqlPdmRepository
         }
 
         await connection.ExecuteAsync(new CommandDefinition(
-            "UPDATE approval_task SET decision_by=NULL,decision_value=NULL,decision_comment=NULL,decided_at=NULL WHERE release_package_id=@PackageId",
+            "UPDATE approval_task SET decision_by=NULL,decision_value=NULL,decision_comment=NULL,decided_at=NULL,is_emergency_substitute=0,emergency_reason=NULL WHERE release_package_id=@PackageId",
             new { PackageId = releasePackageId }, transaction, cancellationToken: cancellationToken));
-        await connection.ExecuteAsync(new CommandDefinition(
-            "UPDATE release_package SET state='ProcessReview',published_at=NULL,published_path=NULL,publish_error=NULL,row_version=row_version+1 WHERE id=@PackageId",
+        if (!string.Equals(packageState.ReleaseScope, ReleaseScope.LegacyCombined.ToString(), StringComparison.Ordinal))
+        {
+            var selfCheckTaskId = await connection.QuerySingleAsync<Guid>(new CommandDefinition(
+                "SELECT id FROM approval_task WHERE release_package_id=@PackageId ORDER BY step_order LIMIT 1",
+                new { PackageId = releasePackageId }, transaction, cancellationToken: cancellationToken));
+            await connection.ExecuteAsync(new CommandDefinition(
+                "UPDATE approval_task SET decision_by=@Actor,decision_value='Approved',decision_comment='提交人自检',decided_at=@Now WHERE id=@TaskId",
+                new { Actor = actor, Now = timeProvider.GetUtcNow().UtcDateTime, TaskId = selfCheckTaskId }, transaction, cancellationToken: cancellationToken));
+        }
+        var pendingTaskCount = await connection.ExecuteScalarAsync<int>(new CommandDefinition(
+            "SELECT COUNT(*) FROM approval_task WHERE release_package_id=@PackageId AND decision_value IS NULL",
             new { PackageId = releasePackageId }, transaction, cancellationToken: cancellationToken));
+        var submittedState = pendingTaskCount <= 1 ? ReleasePackageState.Approval : ReleasePackageState.ProcessReview;
         await connection.ExecuteAsync(new CommandDefinition(
-            "UPDATE document SET lifecycle_state='InReview',updated_at=@Now,row_version=row_version+1 WHERE id IN @DocumentIds",
-            new { DocumentIds = documentIds, Now = timeProvider.GetUtcNow().UtcDateTime }, transaction, cancellationToken: cancellationToken));
+            "UPDATE release_package SET state=@State,published_at=NULL,published_path=NULL,publish_error=NULL,row_version=row_version+1 WHERE id=@PackageId",
+            new { State = submittedState.ToString(), PackageId = releasePackageId }, transaction, cancellationToken: cancellationToken));
+        if (packageState.LocksDocuments)
+            await connection.ExecuteAsync(new CommandDefinition(
+                "UPDATE document SET lifecycle_state='InReview',updated_at=@Now,row_version=row_version+1 WHERE id IN @DocumentIds",
+                new { DocumentIds = documentIds, Now = timeProvider.GetUtcNow().UtcDateTime }, transaction, cancellationToken: cancellationToken));
         var package = await FindReleasePackageAsync(connection, transaction, releasePackageId, cancellationToken)
             ?? throw new PdmNotFoundException("发布包不存在。");
         await transaction.CommitAsync(cancellationToken);
@@ -369,7 +393,7 @@ public sealed partial class MySqlPdmRepository
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
         var packageState = await connection.QuerySingleOrDefaultAsync<ReleaseSnapshotStateRow>(new CommandDefinition(
             """
-            SELECT package.state,snapshot.root_json
+            SELECT package.state,package.release_scope,package.locks_documents,snapshot.root_json
             FROM release_package package
             INNER JOIN reference_snapshot snapshot ON snapshot.id=package.reference_snapshot_id
             WHERE package.id=@PackageId
@@ -381,12 +405,12 @@ public sealed partial class MySqlPdmRepository
             throw new PdmConflictException("只有审批中的发布包可以撤回。");
         var documentIds = DeserializeDocumentIds(packageState.RootJson);
         await connection.ExecuteAsync(new CommandDefinition(
-            "UPDATE approval_task SET decision_by=NULL,decision_value=NULL,decision_comment=NULL,decided_at=NULL WHERE release_package_id=@PackageId",
+            "UPDATE approval_task SET decision_by=NULL,decision_value=NULL,decision_comment=NULL,decided_at=NULL,is_emergency_substitute=0,emergency_reason=NULL WHERE release_package_id=@PackageId",
             new { PackageId = releasePackageId }, transaction, cancellationToken: cancellationToken));
         await connection.ExecuteAsync(new CommandDefinition(
             "UPDATE release_package SET state='Draft',row_version=row_version+1 WHERE id=@PackageId",
             new { PackageId = releasePackageId }, transaction, cancellationToken: cancellationToken));
-        if (documentIds.Length > 0)
+        if (packageState.LocksDocuments && documentIds.Length > 0)
         {
             await connection.ExecuteAsync(new CommandDefinition(
                 "UPDATE document SET lifecycle_state='Work',updated_at=@Now,row_version=row_version+1 WHERE id IN @DocumentIds AND lifecycle_state='InReview'",
@@ -398,13 +422,13 @@ public sealed partial class MySqlPdmRepository
         return package;
     }
 
-    public async Task<ReleasePackage> DecideApprovalAsync(Guid taskId, string actor, ApprovalDecision decision, string? comment, CancellationToken cancellationToken)
+    public async Task<ReleasePackage> DecideApprovalAsync(Guid taskId, string actor, ApprovalDecision decision, string? comment, bool emergencySubstitute, string? emergencyReason, CancellationToken cancellationToken)
     {
         await using var connection = await OpenAsync(cancellationToken);
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
         var row = await connection.QuerySingleOrDefaultAsync<ApprovalDecisionRow>(new CommandDefinition(
             """
-            SELECT t.id, t.release_package_id, t.stage, t.assignee, t.decision_value, p.state AS package_state
+            SELECT t.id, t.release_package_id, t.stage, t.step_order, t.assignee, t.decision_value, p.state AS package_state, p.locks_documents
             FROM approval_task t
             INNER JOIN release_package p ON p.id = t.release_package_id
             WHERE t.id = @TaskId
@@ -420,14 +444,15 @@ public sealed partial class MySqlPdmRepository
             throw new PdmConflictException("审批任务已经处理。 ");
         }
 
-        if (!string.Equals(row.Assignee, actor, StringComparison.OrdinalIgnoreCase) && !string.Equals(actor, "admin", StringComparison.OrdinalIgnoreCase))
+        if (!emergencySubstitute && !string.Equals(row.Assignee, actor, StringComparison.OrdinalIgnoreCase) && !string.Equals(actor, "admin", StringComparison.OrdinalIgnoreCase))
         {
             throw new PdmRuleException("只能处理分配给自己的审批任务。 ");
         }
 
-        var stage = Enum.Parse<ApprovalStage>(row.Stage);
-        var expectedState = stage == ApprovalStage.ProcessReview ? ReleasePackageState.ProcessReview : ReleasePackageState.Approval;
-        if (!string.Equals(row.PackageState, expectedState.ToString(), StringComparison.Ordinal))
+        var currentTaskId = await connection.QuerySingleOrDefaultAsync<Guid?>(new CommandDefinition(
+            "SELECT id FROM approval_task WHERE release_package_id=@PackageId AND decision_value IS NULL ORDER BY step_order LIMIT 1",
+            new { PackageId = row.ReleasePackageId }, transaction, cancellationToken: cancellationToken));
+        if (currentTaskId != taskId || row.PackageState is not ("ProcessReview" or "Approval"))
         {
             throw new PdmConflictException("当前发布包尚未到达该审批节点。 ");
         }
@@ -436,18 +461,22 @@ public sealed partial class MySqlPdmRepository
         await connection.ExecuteAsync(new CommandDefinition(
             """
             UPDATE approval_task
-            SET decision_by = @Actor, decision_value = @Decision, decision_comment = @Comment, decided_at = @Now
+            SET decision_by = @Actor, decision_value = @Decision, decision_comment = @Comment, decided_at = @Now,
+                is_emergency_substitute = @EmergencySubstitute, emergency_reason = @EmergencyReason
             WHERE id = @TaskId
             """,
-            new { TaskId = taskId, Actor = actor, Decision = decision.ToString(), Comment = comment, Now = now },
+            new { TaskId = taskId, Actor = actor, Decision = decision.ToString(), Comment = comment, Now = now, EmergencySubstitute = emergencySubstitute, EmergencyReason = emergencyReason },
             transaction,
             cancellationToken: cancellationToken));
 
+        var remainingTaskCount = await connection.ExecuteScalarAsync<int>(new CommandDefinition(
+            "SELECT COUNT(*) FROM approval_task WHERE release_package_id=@PackageId AND decision_value IS NULL",
+            new { PackageId = row.ReleasePackageId }, transaction, cancellationToken: cancellationToken));
         var nextState = decision == ApprovalDecision.Rejected
             ? ReleasePackageState.Rejected
-            : stage == ApprovalStage.ProcessReview
-                ? ReleasePackageState.Approval
-                : ReleasePackageState.Publishing;
+            : remainingTaskCount == 0 ? ReleasePackageState.Publishing
+            : remainingTaskCount == 1 ? ReleasePackageState.Approval
+            : ReleasePackageState.ProcessReview;
         await connection.ExecuteAsync(new CommandDefinition(
             "UPDATE release_package SET state = @State, row_version = row_version + 1 WHERE id = @PackageId",
             new { State = nextState.ToString(), PackageId = row.ReleasePackageId },
@@ -456,10 +485,10 @@ public sealed partial class MySqlPdmRepository
 
         if (nextState == ReleasePackageState.Rejected)
         {
-            var rootJson = await connection.QuerySingleAsync<string>(new CommandDefinition(
+            var rootJson = row.LocksDocuments ? await connection.QuerySingleAsync<string>(new CommandDefinition(
                 "SELECT snapshot.root_json FROM release_package package INNER JOIN reference_snapshot snapshot ON snapshot.id=package.reference_snapshot_id WHERE package.id=@PackageId",
-                new { PackageId = row.ReleasePackageId }, transaction, cancellationToken: cancellationToken));
-            var documentIds = DeserializeDocumentIds(rootJson);
+                new { PackageId = row.ReleasePackageId }, transaction, cancellationToken: cancellationToken)) : null;
+            var documentIds = rootJson is null ? [] : DeserializeDocumentIds(rootJson);
             if (documentIds.Length > 0)
             {
                 await connection.ExecuteAsync(new CommandDefinition(
@@ -522,6 +551,7 @@ public sealed partial class MySqlPdmRepository
     public async Task MarkPublishedAsync(Guid releasePackageId, string publishedPath, DateTimeOffset publishedAt, CancellationToken cancellationToken)
     {
         await using var connection = await OpenAsync(cancellationToken);
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
         var affected = await connection.ExecuteAsync(new CommandDefinition(
             """
             UPDATE release_package
@@ -536,11 +566,45 @@ public sealed partial class MySqlPdmRepository
                 PackageId = releasePackageId,
                 ExpectedState = ReleasePackageState.Publishing.ToString()
             },
+            transaction,
             cancellationToken: cancellationToken));
         if (affected != 1)
         {
             throw new PdmConflictException("发布包状态已变化，不能标记为已发布。 ");
         }
+        var package = await FindReleasePackageAsync(connection, transaction, releasePackageId, cancellationToken)
+            ?? throw new PdmNotFoundException("发布包不存在。");
+        var versionIds = new[] { package.StandardBomVersionId, package.NonStandardBomVersionId, package.ElectricalBomVersionId }
+            .Where(id => id.HasValue).Select(id => id!.Value).ToArray();
+        if (versionIds.Length > 0)
+            await connection.ExecuteAsync(new CommandDefinition(
+                "UPDATE bom_version SET state='Released',updated_at=@PublishedAt,released_at=@PublishedAt,row_version=row_version+1 WHERE id IN @VersionIds AND state='InReview'",
+                new { VersionIds = versionIds, PublishedAt = publishedAt.UtcDateTime }, transaction, cancellationToken: cancellationToken));
+        var eventType = package.Scope == ReleaseScope.StandardLongLead ? "LongLeadBomReleased" : "BomStreamReleased";
+        await connection.ExecuteAsync(new CommandDefinition(
+            """
+            INSERT INTO integration_outbox(id,event_type,aggregate_type,aggregate_id,payload_json,occurred_at,retry_count)
+            VALUES(@Id,@EventType,'ReleasePackage',@AggregateId,@PayloadJson,@OccurredAt,0)
+            """,
+            new
+            {
+                Id = Guid.NewGuid(),
+                EventType = eventType,
+                AggregateId = releasePackageId.ToString(),
+                PayloadJson = JsonSerializer.Serialize(new
+                {
+                    ReleasePackageId = releasePackageId,
+                    package.ProjectId,
+                    Scope = package.Scope.ToString(),
+                    package.ChangeNumber,
+                    package.StandardBomRevision,
+                    package.SelectedBomItemIds,
+                    PublishedPath = publishedPath
+                }, jsonOptions),
+                OccurredAt = publishedAt.UtcDateTime
+            }, transaction, cancellationToken: cancellationToken));
+        await EnqueueU9BomReleaseReadyAsync(connection, transaction, package, publishedAt, null, cancellationToken);
+        await transaction.CommitAsync(cancellationToken);
     }
 
     public async Task MarkPublishFailedAsync(Guid releasePackageId, string error, CancellationToken cancellationToken)
@@ -581,8 +645,8 @@ public sealed partial class MySqlPdmRepository
         await using var connection = await OpenAsync(cancellationToken);
         await connection.ExecuteAsync(new CommandDefinition(
             """
-            INSERT INTO pdm_user(id, username, display_name, password_hash, role, assigned_role_code, is_active, row_version, created_at)
-            VALUES (@Id, @Username, @DisplayName, @PasswordHash, @Role, @RoleCode, @IsActive, 1, @CreatedAt)
+            INSERT INTO pdm_user(id,username,display_name,password_hash,role,assigned_role_code,company_id,cross_company_view,is_active,row_version,created_at)
+            VALUES (@Id,@Username,@DisplayName,@PasswordHash,@Role,@RoleCode,@CompanyId,@CrossCompanyView,@IsActive,1,@CreatedAt)
             """,
             new
             {
@@ -592,6 +656,8 @@ public sealed partial class MySqlPdmRepository
                 user.PasswordHash,
                 Role = user.Role.ToString(),
                 RoleCode = user.EffectiveRoleCode,
+                user.CompanyId,
+                user.CrossCompanyView,
                 user.IsActive,
                 CreatedAt = timeProvider.GetUtcNow().UtcDateTime
             },
@@ -635,14 +701,18 @@ public sealed partial class MySqlPdmRepository
         public Guid Id { get; init; }
         public Guid ReleasePackageId { get; init; }
         public string Stage { get; init; } = string.Empty;
+        public int StepOrder { get; init; }
         public string Assignee { get; init; } = string.Empty;
         public string? DecisionValue { get; init; }
         public string PackageState { get; init; } = string.Empty;
+        public bool LocksDocuments { get; init; }
     }
 
     private sealed class ReleaseSnapshotStateRow
     {
         public string State { get; init; } = string.Empty;
+        public string ReleaseScope { get; init; } = Upton.Pdm.Domain.ReleaseScope.LegacyCombined.ToString();
+        public bool LocksDocuments { get; init; }
         public string RootJson { get; init; } = string.Empty;
     }
 

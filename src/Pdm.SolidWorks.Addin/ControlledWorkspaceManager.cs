@@ -25,7 +25,7 @@ internal sealed class ControlledWorkspaceManager
     {
         if (manifest?.Files == null || manifest.Files.Count == 0)
         {
-            throw new InvalidDataException("PDM返回的打开清单为空。");
+            throw new InvalidDataException("PLM返回的打开清单为空。");
         }
 
         var target = ReadOnlyDirectory(manifest, historicalPreview);

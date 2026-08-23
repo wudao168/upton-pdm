@@ -113,8 +113,8 @@ public sealed class U9MaterialIntegrationService(
         foreach (var categoryCode in categoriesToQuery)
         {
             var category = await materials.FindCategoryAsync(categoryCode, cancellationToken)
-                ?? throw new PdmRuleException($"PDM中尚未维护U9C分类 {categoryCode}。");
-            if (category.PdmKind is null) throw new PdmRuleException($"分类 {categoryCode} 尚未配置PDM业务类型。");
+                ?? throw new PdmRuleException($"PLM中尚未维护U9C分类 {categoryCode}。");
+            if (category.PdmKind is null) throw new PdmRuleException($"分类 {categoryCode} 尚未配置PLM业务类型。");
             var filter = $"MainItemCategory.Code = '{categoryCode}'";
             var referencePayload = JsonSerializer.Serialize(new
             {
@@ -130,6 +130,7 @@ public sealed class U9MaterialIntegrationService(
             });
             var references = await client.QueryCustomerReferencesAsync(
                 configuration.BaseUrl,
+                configuration.CustomerQueryPath,
                 authentication.Token,
                 referencePayload,
                 cancellationToken);
@@ -165,9 +166,16 @@ public sealed class U9MaterialIntegrationService(
                     ResolveSupplyMode(item.U9ItemFormAttribute, category.DefaultSupplyMode),
                     U9UnitCatalog.Normalize(item.U9UnitCode),
                     Clean(item.U9Specification),
+                    Clean(item.U9Brand),
+                    Clean(item.U9Material),
+                    Clean(item.U9SurfaceTreatment),
+                    Clean(item.U9Description),
+                    item.U9Weight,
+                    Clean(item.U9WeightUnitCode),
+                    Clean(item.U9PurchaseLink),
                     existing is not null,
                     canImport,
-                    existing is null ? "新建" : canImport ? "刷新U9C来源料品" : "同号料品由PDM主控，跳过"));
+                    existing is null ? "新建" : canImport ? "刷新U9C来源料品" : "同号料品由PLM主控，跳过"));
             }
         }
 
@@ -196,12 +204,13 @@ public sealed class U9MaterialIntegrationService(
             }
             var candidate = new PdmMaterial(
                 Guid.NewGuid(), item.MaterialCode, item.Name, item.Kind, item.SupplyMode, item.UnitCode,
-                item.Specification, null, null, null, null, null, null, null,
+                item.Specification, item.Material, item.Remark, item.Brand, item.SurfaceTreatment,
+                item.Weight, item.WeightUnit, null,
                 MaterialApprovalStatus.Approved, actor, importedAt, item.CategoryCode,
                 item.U9ItemId, item.MaterialCode, MaterialSyncStatus.Succeeded,
                 actor, importedAt, actor, importedAt, 1, item.CategoryCode,
                 U9SyncConfirmed: true, SourceSystem: MaterialDataSource.U9C, MasterOwner: MaterialMasterOwner.U9C,
-                LastU9SyncedAt: importedAt);
+                LastU9SyncedAt: importedAt, PurchaseLink: item.PurchaseLink);
             var saved = await materials.UpsertU9MaterialAsync(candidate, cancellationToken);
             if (saved.MasterOwner != MaterialMasterOwner.U9C)
             {
@@ -276,7 +285,7 @@ public sealed class U9MaterialIntegrationService(
             if (uomQuery.ResponseCode != 0)
                 throw new PdmRuleException($"U9C计量单位查询失败（ResCode={uomQuery.ResponseCode}）：{uomQuery.ResponseMessage ?? "未返回错误说明"}。");
             if (!uomQuery.Units.Any(unit => string.Equals(unit.U9UomCode?.Trim(), u9UnitCode, StringComparison.OrdinalIgnoreCase)))
-                throw new PdmRuleException($"PDM计量单位编码 {u9UnitCode} 在U9C中不存在；未执行料品写入。");
+                throw new PdmRuleException($"PLM计量单位编码 {u9UnitCode} 在U9C中不存在；未执行料品写入。");
 
             var query = await client.QueryItemsAsync(
                 configuration.BaseUrl,
@@ -290,7 +299,7 @@ public sealed class U9MaterialIntegrationService(
             var existingItem = query.Items.FirstOrDefault(item =>
                 string.Equals(item.U9ItemCode, sourceMaterial.MaterialCode, StringComparison.OrdinalIgnoreCase));
             if (task.Operation == MaterialSyncOperation.Create && existingItem is not null)
-                throw new PdmRuleException($"U9C已存在料号 {sourceMaterial.MaterialCode}。系统不会自动绑定同号料品；请校准该分类流水并重新创建PDM料品。");
+                throw new PdmRuleException($"U9C已存在料号 {sourceMaterial.MaterialCode}。系统不会自动绑定同号料品；请校准该分类流水并重新创建PLM料品。");
 
             if (task.Operation == MaterialSyncOperation.Update && existingItem is null)
                 throw new PdmRuleException("U9C不存在同料号，不能执行修改；请先核对创建任务和料号映射。");

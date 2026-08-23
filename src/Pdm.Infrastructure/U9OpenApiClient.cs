@@ -7,7 +7,7 @@ using Upton.Pdm.Domain;
 
 namespace Upton.Pdm.Infrastructure;
 
-public sealed class U9OpenApiClient(HttpClient httpClient) : IU9OpenApiClient
+public sealed class U9OpenApiClient(HttpClient httpClient) : IU9OpenApiClient, IU9BomQueryClient
 {
     public async Task<U9AuthenticationResult> AuthenticateAsync(
         U9AuthenticationRequest request,
@@ -102,7 +102,17 @@ public sealed class U9OpenApiClient(HttpClient httpClient) : IU9OpenApiClient
                 ReadEntityString(row, "MainItemCategory", "Code"),
                 ReadEntityString(row, "MainItemCategory", "Name"),
                 ReadEntityString(row, "InventoryUOM", "Code"),
-                ReadInt(row, "ItemFormAttribute", "m_itemFormAttribute")))
+                ReadInt(row, "ItemFormAttribute", "m_itemFormAttribute"),
+                ReadEntityString(row, "TradeMark", "Name")
+                    ?? ReadEntityString(row, "DescFlexField", U9MaterialContract.BrandPublicSegment),
+                ReadString(row, "Description", "m_description"),
+                ReadScalarOrEntityName(row, "Material", "m_material")
+                    ?? ReadEntityString(row, "DescFlexField", U9MaterialContract.MaterialPrivateSegment),
+                ReadScalarOrEntityName(row, "SurfaceTreatment", "m_surfaceTreatment")
+                    ?? ReadEntityString(row, "DescFlexField", U9MaterialContract.SurfaceTreatmentPrivateSegment),
+                ReadDecimal(row, "Weight", "m_weight"),
+                ReadEntityString(row, "WeightUom", "Code"),
+                ReadEntityString(row, "DescFlexField", U9MaterialContract.PurchaseLinkPublicSegment)))
             .Where(item => !string.IsNullOrWhiteSpace(item.U9ItemId) || !string.IsNullOrWhiteSpace(item.U9ItemCode))
             .ToArray();
         return new U9ItemQueryResult(responseCode, ReadMessage(root), items);
@@ -142,11 +152,12 @@ public sealed class U9OpenApiClient(HttpClient httpClient) : IU9OpenApiClient
 
     public async Task<U9CustomerQueryResult> QueryCustomerReferencesAsync(
         string baseUrl,
+        string path,
         string token,
         string payloadJson,
         CancellationToken cancellationToken)
     {
-        var endpoint = BuildEndpoint(baseUrl, U9MaterialContract.CustomerReferencePath);
+        var endpoint = BuildEndpoint(baseUrl, path);
         using var payload = ParseJson(payloadJson, "U9C客户参照查询请求不是有效JSON。");
         using var request = new HttpRequestMessage(HttpMethod.Post, endpoint)
         {
@@ -173,6 +184,104 @@ public sealed class U9OpenApiClient(HttpClient httpClient) : IU9OpenApiClient
             .ToArray();
         return new U9CustomerQueryResult(responseCode, ReadMessage(root), customers, rows.Count);
     }
+
+    public async Task<U9BomQueryResult> QueryBomsAsync(
+        string baseUrl,
+        string path,
+        string token,
+        string payloadJson,
+        CancellationToken cancellationToken)
+    {
+        var endpoint = BuildEndpoint(baseUrl, path);
+        using var payload = ParseJson(payloadJson, "U9C BOM查询请求不是有效JSON。");
+        using var request = new HttpRequestMessage(HttpMethod.Post, endpoint)
+        {
+            Content = new StringContent(payload.RootElement.GetRawText(), Encoding.UTF8, "application/json")
+        };
+        request.Headers.TryAddWithoutValidation("token", Required(token, "U9C Token"));
+        request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
+
+        using var response = await SendAsync(request, "U9C BOM查询", cancellationToken);
+        var responseJson = await response.Content.ReadAsStringAsync(cancellationToken);
+        if (!response.IsSuccessStatusCode)
+            throw new PdmRuleException($"U9C BOM查询请求失败：HTTP {(int)response.StatusCode}。");
+
+        using var document = ParseJson(responseJson, "U9C BOM查询响应不是有效JSON。");
+        var root = document.RootElement;
+        var responseCode = ReadInt(root, "ResCode") ?? throw new PdmRuleException("U9C BOM查询响应缺少ResCode。");
+        var boms = ReadDataRows(root).Select(ReadBom).ToArray();
+        return new U9BomQueryResult(responseCode, ReadMessage(root), boms);
+    }
+
+    public async Task<U9BomOperationReference?> QueryBomOperationAsync(
+        string baseUrl,
+        string path,
+        string token,
+        string organizationCode,
+        string itemCode,
+        string bomVersionCode,
+        string otherId,
+        CancellationToken cancellationToken)
+    {
+        var endpoint = BuildEndpoint(baseUrl, path);
+        var normalizedToken = Required(token, "U9C Token");
+        var normalizedOrganizationCode = Required(organizationCode, "U9C组织编码");
+        var normalizedItemCode = Required(itemCode, "BOM母件料号");
+        var normalizedVersionCode = Required(bomVersionCode, "BOM版本");
+        const int pageSize = 20;
+        var pageIndex = 1;
+        var pageCount = 1;
+
+        do
+        {
+            var payloadJson = JsonSerializer.Serialize(new Dictionary<string, object?>
+            {
+                ["pageIndex"] = pageIndex,
+                ["pageSize"] = pageSize,
+                ["Orgcode"] = normalizedOrganizationCode,
+                ["Condition"] = $"ItemMaster.Code = '{EscapeConditionValue(normalizedItemCode)}' and BOMVersionCode = '{EscapeConditionValue(normalizedVersionCode)}'"
+            });
+            using var request = new HttpRequestMessage(HttpMethod.Post, endpoint)
+            {
+                Content = new StringContent(payloadJson, Encoding.UTF8, "application/json")
+            };
+            request.Headers.TryAddWithoutValidation("token", normalizedToken);
+            request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
+
+            using var response = await SendAsync(request, "U9C BOM操作信息查询", cancellationToken);
+            var responseJson = await response.Content.ReadAsStringAsync(cancellationToken);
+            if (!response.IsSuccessStatusCode)
+                throw new PdmRuleException($"U9C BOM操作信息查询失败：HTTP {(int)response.StatusCode}。");
+
+            using var document = ParseJson(responseJson, "U9C BOM操作信息查询响应不是有效JSON。");
+            var root = document.RootElement;
+            var responseCode = ReadInt(root, "ResCode") ?? throw new PdmRuleException("U9C BOM操作信息查询响应缺少ResCode。");
+            if (responseCode != 0)
+                throw new PdmRuleException($"U9C BOM操作信息查询失败（ResCode={responseCode}）：{ReadMessage(root) ?? "未返回错误说明"}。");
+            if (TryFindBomOperation(root, otherId, out var operation)) return operation;
+
+            var candidates = new List<BomOperationCandidate>();
+            CollectBomOperationCandidates(root, candidates);
+            var matching = candidates.Distinct().Where(candidate =>
+                    string.Equals(candidate.ItemCode, normalizedItemCode, StringComparison.OrdinalIgnoreCase)
+                    && string.Equals(candidate.BomVersionCode, normalizedVersionCode, StringComparison.OrdinalIgnoreCase))
+                .ToArray();
+            if (matching.Length > 1)
+                throw new PdmRuleException("U9C BOM操作信息查询返回多条相同母件和版本的记录，已停止后续操作。");
+            if (matching.Length == 1)
+                return new U9BomOperationReference(matching[0].Id, matching[0].CurrentSysVersion, otherId);
+            var distinct = candidates.Distinct().ToArray();
+            if (FindLongProperty(root, "RecordCount") == 1 && distinct.Length == 1)
+                return new U9BomOperationReference(distinct[0].Id, distinct[0].CurrentSysVersion, otherId);
+
+            pageCount = checked((int)(FindLongProperty(root, "PageCount") ?? 1));
+            pageIndex++;
+        } while (pageIndex <= pageCount && pageIndex <= 100);
+
+        return null;
+    }
+
+    private static string EscapeConditionValue(string value) => value.Replace("'", "''", StringComparison.Ordinal);
 
     private static Uri BuildEndpoint(string baseUrl, string path)
     {
@@ -245,6 +354,67 @@ public sealed class U9OpenApiClient(HttpClient httpClient) : IU9OpenApiClient
             : value.ValueKind == JsonValueKind.Object ? [value.Clone()] : [];
     }
 
+    private static U9BomReference ReadBom(JsonElement row) => new(
+        ReadEntityString(row, "ItemMaster", "ID"),
+        ReadEntityString(row, "ItemMaster", "Code"),
+        ReadEntityString(row, "ItemMaster", "Name"),
+        ReadString(row, "BOMVersionCode", "m_bOMVersionCode"),
+        ReadEntityString(row, "Org", "Code"),
+        ReadEntityString(row, "Org", "Name"),
+        ReadInt(row, "AlternateType", "m_alternateType"),
+        ReadInt(row, "Lot", "m_lot"),
+        ReadEntityString(row, "ProductUOM", "Code"),
+        ReadEntityString(row, "ProductUOM", "Name"),
+        ReadDateTimeOffset(row, "EffectiveDate", "m_effectiveDate"),
+        ReadDateTimeOffset(row, "DisableDate", "m_disableDate"),
+        ReadInt(row, "Status", "m_status"),
+        ReadInt(row, "BOMSort", "m_bOMSort"),
+        ReadInt(row, "BOMType", "m_bOMType"),
+        ReadString(row, "ProjectMapNum", "m_projectMapNum"),
+        ReadString(row, "Explain", "m_explain"),
+        ReadString(row, "ECOCode", "m_eCOCode"),
+        ReadBool(row, "IsCostRoll", "m_isCostRoll"),
+        ReadInt(row, "ItemSource", "m_itemSource"),
+        ReadInt(row, "SysState", "sysState"),
+        ReadArray(row, "BOMComponents", "m_bOMComponents").Select(ReadBomComponent).ToArray(),
+        ReadString(row, "OtherID", "OtherId", "m_otherID", "m_otherId"));
+
+    private static U9BomComponentReference ReadBomComponent(JsonElement row) => new(
+        ReadInt(row, "Sequence", "m_sequence"),
+        ReadEntityString(row, "ItemMaster", "ID"),
+        ReadEntityString(row, "ItemMaster", "Code"),
+        ReadEntityString(row, "ItemMaster", "Name"),
+        ReadString(row, "ItemVersionCode", "m_itemVersionCode"),
+        ReadDecimal(row, "UsageQty", "m_usageQty"),
+        ReadEntityString(row, "IssueUOM", "Code"),
+        ReadEntityString(row, "IssueUOM", "Name"),
+        ReadDecimal(row, "ParentQty", "m_parentQty"),
+        ReadInt(row, "ComponentType", "m_componentType"),
+        ReadBool(row, "IsEffective", "m_isEffective"),
+        ReadDateTimeOffset(row, "EffectiveDate", "m_effectiveDate"),
+        ReadDateTimeOffset(row, "DisableDate", "m_disableDate"),
+        ReadString(row, "Remark", "m_remark"),
+        ReadString(row, "ProjectMapNum", "m_projectMapNum"),
+        ReadInt(row, "IssueStyle", "m_issueStyle"),
+        ReadInt(row, "SupplyStyle", "m_supplyStyle"),
+        ReadBool(row, "IsPhantomPart", "m_isPhantomPart"),
+        ReadBool(row, "IsDelete", "m_isDelete"));
+
+    private static IReadOnlyList<JsonElement> ReadArray(JsonElement element, params string[] names)
+    {
+        foreach (var name in names)
+        {
+            if (!TryGet(element, name, out var value) || value.ValueKind is JsonValueKind.Null or JsonValueKind.Undefined) continue;
+            using var document = value.ValueKind == JsonValueKind.String
+                ? ParseJson(value.GetString() ?? "[]", $"U9C BOM响应字段{name}不是有效JSON。")
+                : JsonDocument.Parse(value.GetRawText());
+            return document.RootElement.ValueKind == JsonValueKind.Array
+                ? document.RootElement.EnumerateArray().Select(item => item.Clone()).ToArray()
+                : [];
+        }
+        return [];
+    }
+
     private static string? ReadToken(JsonElement root)
     {
         if (!TryGet(root, "Data", out var data)) return null;
@@ -259,6 +429,185 @@ public sealed class U9OpenApiClient(HttpClient httpClient) : IU9OpenApiClient
             if (!TryGet(element, name, out var value)) continue;
             if (value.ValueKind == JsonValueKind.Number && value.TryGetInt32(out var number)) return number;
             if (int.TryParse(value.ToString(), out number)) return number;
+        }
+        return null;
+    }
+
+    private static long? ReadLong(JsonElement element, params string[] names)
+    {
+        foreach (var name in names)
+        {
+            if (!TryGet(element, name, out var value)) continue;
+            if (value.ValueKind == JsonValueKind.Number && value.TryGetInt64(out var number)) return number;
+            if (long.TryParse(value.ToString(), out number)) return number;
+        }
+        return null;
+    }
+
+    private static bool TryFindBomOperation(
+        JsonElement element,
+        string expectedOtherId,
+        out U9BomOperationReference? operation)
+    {
+        if (element.ValueKind == JsonValueKind.Object)
+        {
+            var otherId = ReadString(element, "OtherID", "OtherId", "m_otherID", "m_otherId");
+            if (string.Equals(otherId, expectedOtherId, StringComparison.OrdinalIgnoreCase))
+            {
+                var id = ReadLong(element, "ID", "Id", "BomID", "m_iD", "m_id", "m_bomID");
+                var currentSysVersion = ReadLong(element,
+                    "CurrentSysVersion", "SysVersion", "m_currentSysVersion", "m_sysVersion");
+                if (id is not null && currentSysVersion is not null)
+                {
+                    operation = new U9BomOperationReference(id.Value, currentSysVersion.Value, otherId!);
+                    return true;
+                }
+            }
+
+            foreach (var property in element.EnumerateObject())
+            {
+                if (TryFindBomOperation(property.Value, expectedOtherId, out operation)) return true;
+            }
+        }
+        else if (element.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var item in element.EnumerateArray())
+            {
+                if (TryFindBomOperation(item, expectedOtherId, out operation)) return true;
+            }
+        }
+        else if (element.ValueKind == JsonValueKind.String)
+        {
+            var value = element.GetString()?.Trim();
+            if (!string.IsNullOrWhiteSpace(value) && value[0] is '{' or '[')
+            {
+                try
+                {
+                    using var document = JsonDocument.Parse(value);
+                    if (TryFindBomOperation(document.RootElement, expectedOtherId, out operation)) return true;
+                }
+                catch (JsonException)
+                {
+                    // Ordinary string fields are not query result containers.
+                }
+            }
+        }
+
+        operation = null;
+        return false;
+    }
+
+    private static void CollectBomOperationCandidates(
+        JsonElement element,
+        ICollection<BomOperationCandidate> candidates)
+    {
+        if (element.ValueKind == JsonValueKind.Object)
+        {
+            var id = ReadLong(element, "ID", "Id", "BomID", "m_iD", "m_id", "m_bomID");
+            var bomVersionCode = ReadString(element, "BOMVersionCode", "m_bOMVersionCode");
+            if (id is not null && !string.IsNullOrWhiteSpace(bomVersionCode))
+                candidates.Add(new(
+                    id.Value,
+                    ReadLong(element, "CurrentSysVersion", "SysVersion", "m_currentSysVersion", "m_sysVersion") ?? 0,
+                    ReadEntityString(element, "ItemMaster", "Code")
+                    ?? ReadString(element, "ItemCode", "m_itemCode"),
+                    bomVersionCode));
+            foreach (var property in element.EnumerateObject())
+                CollectBomOperationCandidates(property.Value, candidates);
+        }
+        else if (element.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var item in element.EnumerateArray())
+                CollectBomOperationCandidates(item, candidates);
+        }
+        else if (element.ValueKind == JsonValueKind.String)
+        {
+            var value = element.GetString()?.Trim();
+            if (string.IsNullOrWhiteSpace(value) || value[0] is not ('{' or '[')) return;
+            try
+            {
+                using var document = JsonDocument.Parse(value);
+                CollectBomOperationCandidates(document.RootElement, candidates);
+            }
+            catch (JsonException)
+            {
+                // Ordinary string fields are not query result containers.
+            }
+        }
+    }
+
+    private sealed record BomOperationCandidate(
+        long Id,
+        long CurrentSysVersion,
+        string? ItemCode,
+        string BomVersionCode);
+
+    private static long? FindLongProperty(JsonElement element, string name)
+    {
+        if (element.ValueKind == JsonValueKind.Object)
+        {
+            var direct = ReadLong(element, name);
+            if (direct is not null) return direct;
+            foreach (var property in element.EnumerateObject())
+            {
+                var nested = FindLongProperty(property.Value, name);
+                if (nested is not null) return nested;
+            }
+        }
+        else if (element.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var item in element.EnumerateArray())
+            {
+                var nested = FindLongProperty(item, name);
+                if (nested is not null) return nested;
+            }
+        }
+        else if (element.ValueKind == JsonValueKind.String)
+        {
+            var value = element.GetString()?.Trim();
+            if (string.IsNullOrWhiteSpace(value) || value[0] is not ('{' or '[')) return null;
+            try
+            {
+                using var document = JsonDocument.Parse(value);
+                return FindLongProperty(document.RootElement, name);
+            }
+            catch (JsonException)
+            {
+                return null;
+            }
+        }
+        return null;
+    }
+
+
+    private static decimal? ReadDecimal(JsonElement element, params string[] names)
+    {
+        foreach (var name in names)
+        {
+            if (!TryGet(element, name, out var value)) continue;
+            if (value.ValueKind == JsonValueKind.Number && value.TryGetDecimal(out var number)) return number;
+            if (decimal.TryParse(value.ToString(), System.Globalization.NumberStyles.Number,
+                    System.Globalization.CultureInfo.InvariantCulture, out number)) return number;
+        }
+        return null;
+    }
+
+    private static DateTimeOffset? ReadDateTimeOffset(JsonElement element, params string[] names)
+    {
+        var value = ReadString(element, names);
+        return DateTimeOffset.TryParse(value, System.Globalization.CultureInfo.InvariantCulture,
+            System.Globalization.DateTimeStyles.AssumeLocal, out var parsed) ? parsed : null;
+    }
+
+    private static string? ReadScalarOrEntityName(JsonElement element, params string[] names)
+    {
+        foreach (var name in names)
+        {
+            if (!TryGet(element, name, out var value) || value.ValueKind is JsonValueKind.Null or JsonValueKind.Undefined) continue;
+            if (value.ValueKind == JsonValueKind.Object)
+                return ReadString(value, "Name", "m_name", "Code", "m_code");
+            var result = value.ValueKind == JsonValueKind.String ? value.GetString() : value.ToString();
+            if (!string.IsNullOrWhiteSpace(result)) return result.Trim();
         }
         return null;
     }

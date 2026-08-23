@@ -404,10 +404,10 @@ internal sealed class PdmTaskPaneControl : UserControl
             Location = new Point(10, 10),
             Size = new Size(38, 38)
         };
-        var title = new Label { Text = "UPTON PDM", ForeColor = Color.White, Font = new Font("Microsoft YaHei UI", 10F), Location = new Point(58, 9), AutoSize = true };
+        var title = new Label { Text = "UPLM", ForeColor = Color.White, Font = new Font("Microsoft YaHei UI", 10F), Location = new Point(58, 9), AutoSize = true };
         var subtitle = new Label { Text = "SolidWorks 插件", ForeColor = Color.FromArgb(184, 201, 220), Location = new Point(58, 32), AutoSize = true };
         serviceStatus.Text = "○";
-        serviceStatus.AccessibleName = "PDM连接状态";
+        serviceStatus.AccessibleName = "PLM连接状态";
         serviceStatus.AccessibleDescription = "未连接";
         serviceStatus.ForeColor = Color.FromArgb(255, 184, 86);
         serviceStatus.Font = new Font("Segoe UI Symbol", 11.2F);
@@ -560,7 +560,7 @@ internal sealed class PdmTaskPaneControl : UserControl
         actionToolTip.SetToolTip(checkoutButton, "获取编辑权限");
         actionToolTip.SetToolTip(checkinButton, "提交存档");
         actionToolTip.SetToolTip(batchOperationButton, "整体获取最新文件及权限，或按子件优先顺序提交存档");
-        actionToolTip.SetToolTip(batchPropertyButton, "在同一页面执行批量属性编辑或PDM属性回写");
+        actionToolTip.SetToolTip(batchPropertyButton, "在同一页面执行批量属性编辑或PLM属性回写");
         checkoutButton.Click += (_, _) => RaiseCheckoutToggle();
         checkinButton.Click += (_, _) => RaiseCheckInRequested();
         batchOperationButton.Click += (_, _) => BatchOperationRequested?.Invoke(this, EventArgs.Empty);
@@ -1066,14 +1066,14 @@ internal sealed class PdmTaskPaneControl : UserControl
         var isLatest = !hasPendingLocalChange
             && !string.IsNullOrWhiteSpace(node.LatestRevision)
             && string.Equals(currentRevision, node.LatestRevision, StringComparison.OrdinalIgnoreCase);
-        var updateReason = "从PDM获取最新版本并安全更新本地工作文件";
+        var updateReason = "从PLM获取最新版本并安全更新本地工作文件";
         if (!registered)
         {
             updateReason = "该图档尚未入库";
         }
         else if (!authenticated)
         {
-            updateReason = "请先登录PDM";
+            updateReason = "请先登录PLM";
         }
         else if (readOnlyPreview)
         {
@@ -1127,7 +1127,7 @@ internal sealed class PdmTaskPaneControl : UserControl
         SetContextState(
             contextDrawingVersions,
             relatedDrawing?.DocumentId.HasValue == true && authenticated,
-            relatedDrawing?.DocumentId.HasValue == true ? "请先登录PDM" : "关联工程图尚未入库");
+            relatedDrawing?.DocumentId.HasValue == true ? "请先登录PLM" : "关联工程图尚未入库");
 
         var checkoutReason = PdmActionReason(registered, authenticated);
         if (registered && authenticated && editing)
@@ -1196,7 +1196,7 @@ internal sealed class PdmTaskPaneControl : UserControl
                 ? string.Concat("只有当前编辑人员", node.CheckedOutBy, "可以放弃编辑")
                 : registered && authenticated ? "尚未获取该图档的编辑权限" : PdmActionReason(registered, authenticated));
 
-        SetContextState(contextWhereUsed, registered && authenticated, registered ? "请先登录PDM" : "该图档尚未入库");
+        SetContextState(contextWhereUsed, registered && authenticated, registered ? "请先登录PLM" : "该图档尚未入库");
         SetContextState(contextRequestRelease, registered && authenticated && !readOnlyPreview && editing && !editingByCurrentUser,
             editingByCurrentUser ? "当前编辑权限属于您" : editing ? string.Concat("向", node.CheckedOutBy, "申请释放编辑权限") : "该图档当前未被检出");
         SetContextState(contextOpenFolder, localFileExists, "本地文件不存在");
@@ -1209,8 +1209,8 @@ internal sealed class PdmTaskPaneControl : UserControl
             && string.Equals(rootNode.CheckedOutBy, authenticatedUsername, StringComparison.OrdinalIgnoreCase)
             && !rootNode.CheckoutSessionLost;
         var renameReason = selectedRoot
-            ? "以新名称保存当前主图档；提交存档后更新PDM当前名称"
-            : "在SolidWorks中重命名所选图档；保存并提交存档后更新PDM当前名称";
+            ? "以新名称保存当前主图档；提交存档后更新PLM当前名称"
+            : "在SolidWorks中重命名所选图档；保存并提交存档后更新PLM当前名称";
         if (!renameSupported)
         {
             renameReason = node.Kind == CadDocumentKind.Drawing
@@ -1223,7 +1223,7 @@ internal sealed class PdmTaskPaneControl : UserControl
         }
         else if (!authenticated)
         {
-            renameReason = "请先登录PDM";
+            renameReason = "请先登录PLM";
         }
         else if (readOnlyPreview)
         {
@@ -1253,13 +1253,13 @@ internal sealed class PdmTaskPaneControl : UserControl
         SetContextState(contextZoomSelection, !string.IsNullOrWhiteSpace(node.ComponentSelectionName), "请选择装配体中的零部件实例");
         SetContextState(contextIsolate, !string.IsNullOrWhiteSpace(node.ComponentSelectionName), "请选择装配体中的零部件实例");
         contextExitIsolate.Enabled = canOpenInSolidWorks;
-        SetContextState(contextOpenReleaseCenter, authenticated && selectedProjectId.HasValue, authenticated ? "请先选择当前项目" : "请先登录PDM");
+        SetContextState(contextOpenReleaseCenter, authenticated && selectedProjectId.HasValue, authenticated ? "请先选择当前项目" : "请先登录PLM");
         SetContextState(contextWithdrawApproval, registered && authenticated && !readOnlyPreview && selectedProjectId.HasValue && lifecycleInReview,
             lifecycleInReview ? "撤回当前项目审批并恢复工作状态" : "该图档当前不在审批中");
         SetContextState(contextObsolete, registered && authenticated && !editing && !readOnlyPreview && !lifecycleInReview && !lifecycleObsolete,
             lifecycleObsolete ? "图档已作废" : lifecycleInReview ? "请先撤回审批" : editing ? "请先提交或放弃编辑" : "填写原因后受控作废图档");
 
-        SetContextState(contextVersions, registered && authenticated, registered ? "请先登录PDM" : "该图档尚未入库");
+        SetContextState(contextVersions, registered && authenticated, registered ? "请先登录PLM" : "该图档尚未入库");
 
         if (historicalPreview)
         {
@@ -1279,7 +1279,7 @@ internal sealed class PdmTaskPaneControl : UserControl
         }
         else if (!authenticated)
         {
-            contextHint.Text = "提示：登录后可使用PDM操作";
+            contextHint.Text = "提示：登录后可使用PLM操作";
         }
         else if (!localFileExists)
         {
@@ -1302,7 +1302,7 @@ internal sealed class PdmTaskPaneControl : UserControl
             return "该图档尚未入库";
         }
 
-        return authenticated ? string.Empty : "请先登录PDM";
+        return authenticated ? string.Empty : "请先登录PLM";
     }
 
     private CadTreeNode FindRelatedDrawing(CadTreeNode source)
@@ -1492,7 +1492,7 @@ internal sealed class PdmTaskPaneControl : UserControl
         }
         if (string.IsNullOrWhiteSpace(authenticatedUsername))
         {
-            reason = "请先登录PDM";
+            reason = "请先登录PLM";
             return false;
         }
         if (node.IsReadOnlyPreview)
@@ -2680,13 +2680,13 @@ internal sealed class PdmTaskPaneControl : UserControl
         if (!node.DocumentId.HasValue)
         {
             ClearDisplayedVersions();
-            MessageBox.Show(this, "该图档尚未入库，暂无版本记录", "UPTON PDM", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            MessageBox.Show(this, "该图档尚未入库，暂无版本记录", "UPLM", MessageBoxButtons.OK, MessageBoxIcon.Information);
             return;
         }
         if (string.IsNullOrWhiteSpace(authenticatedUsername))
         {
             ClearDisplayedVersions();
-            MessageBox.Show(this, "请先登录PDM。", "UPTON PDM", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            MessageBox.Show(this, "请先登录PLM。", "UPLM", MessageBoxButtons.OK, MessageBoxIcon.Information);
             return;
         }
         VersionsRequested?.Invoke(this, new CadTreeNodeEventArgs(node));

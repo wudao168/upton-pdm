@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { Bell, LogIn, LogOut } from '@lucide/vue'
+import { Bell, ChevronDown, ChevronLeft, ChevronRight, LogIn, LogOut } from '@lucide/vue'
 import { ElMessage } from 'element-plus'
 import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
 import type { PdmUserProfile } from '../types'
@@ -12,9 +12,12 @@ const props = withDefaults(defineProps<{
   username?: string
   role?: string
   companyName?: string
+  activeCompanyId?: string
+  accessibleCompanies?: Array<{ id: string; name: string; code: string }>
   notificationCount?: number
   theme?: PdmTheme
   profile?: PdmUserProfile | null
+  sidebarCollapsed?: boolean
   onSaveProfile?: (profile: Pick<PdmUserProfile, 'landline' | 'mobilePhone' | 'email' | 'gender' | 'nickname'>) => Promise<PdmUserProfile>
   onChangePassword?: (currentPassword: string, password: string) => Promise<void>
 }>(), {
@@ -22,11 +25,14 @@ const props = withDefaults(defineProps<{
   username: '',
   role: '',
   companyName: '昆山阿普顿自动化系统有限公司',
+  activeCompanyId: '',
+  accessibleCompanies: () => [],
   notificationCount: 0,
   theme: 'a',
+  sidebarCollapsed: false,
 })
 
-const emit = defineEmits<{ login: []; logout: []; notifications: []; theme: [theme: PdmTheme] }>()
+const emit = defineEmits<{ login: []; logout: []; notifications: []; theme: [theme: PdmTheme]; company: [companyId: string]; toggleSidebar: [] }>()
 const headerNow = ref(new Date())
 const personalInfoVisible = ref(false)
 const personalSettingsTab = ref('profile')
@@ -37,6 +43,9 @@ let headerClockTimer: number | undefined
 
 const roleName = computed(() => ({
   Administrator: '系统管理员',
+  platform_admin: '平台管理员',
+  developer: '开发者',
+  BusinessUnitManager: '事业部经理',
   Engineer: '工程师',
   Reviewer: '审核人',
   Approver: '批准人',
@@ -113,7 +122,27 @@ onUnmounted(() => {
 <template>
   <header class="pdm-titlebar" role="banner">
     <div class="pdm-titlebar__left">
-      <span class="pdm-tenant-company" :title="props.companyName">{{ props.companyName }}</span>
+      <button
+        v-if="props.userName"
+        type="button"
+        class="pdm-titlebar__sidebar-toggle"
+        :aria-label="props.sidebarCollapsed ? '展开主导航' : '折叠主导航'"
+        :title="props.sidebarCollapsed ? '展开主导航' : '折叠主导航'"
+        :aria-expanded="!props.sidebarCollapsed"
+        @click="emit('toggleSidebar')"
+      >
+        <ChevronRight v-if="props.sidebarCollapsed" :size="16" aria-hidden="true" />
+        <ChevronLeft v-else :size="16" aria-hidden="true" />
+      </button>
+      <el-dropdown v-if="props.accessibleCompanies.length > 1" trigger="click" @command="emit('company', String($event))">
+        <button type="button" class="pdm-tenant-company pdm-company-switcher" :title="props.companyName" aria-label="切换当前公司">
+          <span>{{ props.companyName }}</span><ChevronDown :size="14" aria-hidden="true" />
+        </button>
+        <template #dropdown><el-dropdown-menu>
+          <el-dropdown-item v-for="company in props.accessibleCompanies" :key="company.id" :command="company.id" :class="{ 'is-active-company': company.id === props.activeCompanyId }">{{ company.name }}</el-dropdown-item>
+        </el-dropdown-menu></template>
+      </el-dropdown>
+      <span v-else class="pdm-tenant-company" :title="props.companyName">{{ props.companyName }}</span>
     </div>
     <div class="pdm-titlebar__actions">
       <template v-if="props.userName">

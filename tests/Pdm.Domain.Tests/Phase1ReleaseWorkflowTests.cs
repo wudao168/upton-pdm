@@ -16,6 +16,7 @@ public sealed class Phase1ReleaseWorkflowTests
         var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(), publisher, TimeProvider.System);
         foreach (var document in await repository.ListCheckedOutDocumentsAsync(default))
             await repository.ForceReleaseCheckoutAsync(document.Id, "admin", "测试准备", default);
+        await PrepareApprovedNonStandardDrawingReviewAsync(repository, workflow);
         var electrical = new[]
         {
             new BomItemInput(1, "EL-001", "光电传感器", 4, "件", null, "M18 PNP", "A", true)
@@ -44,8 +45,16 @@ public sealed class Phase1ReleaseWorkflowTests
         package = await workflow.DecideAsync(approvalTask.Id, "admin", UserRole.Administrator, ApprovalDecision.Approved, "批准发布", default);
         Assert.Equal(ReleasePackageState.Published, package.State);
         Assert.Equal(1, publisher.PublishCalls);
+        Assert.NotEmpty(publisher.PreviewSources);
         Assert.Equal("C:\\PDM\\Release\\package", package.PublishedPath);
         Assert.All(await repository.ListDocumentsAsync(ProjectId, default), document => Assert.Equal(DocumentLifecycleState.Released, document.State));
+        foreach (var source in publisher.PreviewSources)
+        {
+            var released = (await repository.ListDocumentVersionsAsync(source.DocumentId, default))
+                .Single(version => version.Status == DocumentVersionStatus.Released);
+            Assert.Equal(source.SourceSha256, released.Preview?.SourceSha256);
+            Assert.Equal(source.Kind == DocumentKind.Drawing ? DocumentPreviewFormat.Pdf : DocumentPreviewFormat.Step, released.Preview?.Format);
+        }
     }
 
     [Fact]
@@ -76,6 +85,7 @@ public sealed class Phase1ReleaseWorkflowTests
         var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(), new RecordingPublisher(), TimeProvider.System);
         foreach (var document in await repository.ListCheckedOutDocumentsAsync(default))
             await repository.ForceReleaseCheckoutAsync(document.Id, "admin", "测试准备", default);
+        await PrepareApprovedNonStandardDrawingReviewAsync(repository, workflow);
         await workflow.ReplaceBomAsync(ProjectId, BomKind.Electrical,
             [new BomItemInput(1, "EL-002", "接近开关", 2, "件", null, "M12", "A", true)],
             "admin", UserRole.Administrator, default);
@@ -157,13 +167,15 @@ public sealed class Phase1ReleaseWorkflowTests
         var repository = new InMemoryPdmRepository(TimeProvider.System);
         var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(), new RecordingPublisher(), TimeProvider.System);
         var current = await repository.GetSystemSettingsAsync(default);
-        await workflow.UpdateSystemSettingsAsync(current with
+        var savedSettings = await workflow.UpdateSystemSettingsAsync(current with
         {
             ValidationRules = new(
                 [BomValidationFieldCatalog.DrawingNumber, BomValidationFieldCatalog.Name, BomValidationFieldCatalog.Unit, BomValidationFieldCatalog.Brand, BomValidationFieldCatalog.Quantity, BomValidationFieldCatalog.Revision],
                 BomValidationFieldCatalog.NonStandardDefaults,
-                BomValidationFieldCatalog.ElectricalDefaults)
+                BomValidationFieldCatalog.ElectricalDefaults),
+            ReleaseChangeReasonTypes = [" 设计变更 ", "客户需求", "设计变更"]
         }, "admin", UserRole.Administrator, default);
+        Assert.Equal(["设计变更", "客户需求"], savedSettings.ReleaseChangeReasonTypes);
 
         var item = Assert.Single(await workflow.ReplaceBomAsync(ProjectId, BomKind.Standard,
             [new BomItemInput(1, "STD-RULE", "标准件", 1, "件", null, "M10", "W1", true)],
@@ -181,12 +193,12 @@ public sealed class Phase1ReleaseWorkflowTests
     }
 
     [Fact]
-    public async Task BomDuplicateMaterialCode_UsesMaterialCodeTerminology()
+    public async Task BomDuplicateMaterialCode_PreservesSeparateRowsAndStableIds()
     {
         var repository = new InMemoryPdmRepository(TimeProvider.System);
         var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(), new RecordingPublisher(), TimeProvider.System);
 
-        var exception = await Assert.ThrowsAsync<PdmRuleException>(() => workflow.ReplaceBomAsync(
+        var created = await workflow.ReplaceBomAsync(
             ProjectId,
             BomKind.Electrical,
             [
@@ -195,9 +207,25 @@ public sealed class Phase1ReleaseWorkflowTests
             ],
             "admin",
             UserRole.Administrator,
-            default));
+            default);
 
-        Assert.Equal("BOM物料编码DUP-001重复。", exception.Message);
+        Assert.Equal(2, created.Count);
+        Assert.All(created, item => Assert.Equal("DUP-001", item.DrawingNumber.ToUpperInvariant()));
+        Assert.Equal(2, created.Select(item => item.Id).Distinct().Count());
+
+        var savedAgain = await workflow.ReplaceBomAsync(
+            ProjectId,
+            BomKind.Electrical,
+            created.Select(item => new BomItemInput(
+                item.Sequence, item.DrawingNumber, item.Name, item.Quantity, item.Unit, item.Material,
+                item.Specification, item.Revision, item.IsComplete, Id: item.Id,
+                ParentDrawingNumber: item.Sequence == 1 ? "PARENT-A" : "PARENT-B")).ToArray(),
+            "admin",
+            UserRole.Administrator,
+            default);
+
+        Assert.Equal(created.Select(item => item.Id), savedAgain.Select(item => item.Id));
+        Assert.Equal(new[] { "PARENT-A", "PARENT-B" }, savedAgain.Select(item => item.ParentDrawingNumber));
     }
 
     [Fact]
@@ -282,7 +310,7 @@ public sealed class Phase1ReleaseWorkflowTests
     }
 
     [Fact]
-    public async Task BomRecycleBin_RequiresReasonAndRejectsRestoreConflictsAtomically()
+    public async Task BomRecycleBin_RequiresReasonAndAllowsDuplicateMaterialCodeRestore()
     {
         var repository = new InMemoryPdmRepository(TimeProvider.System);
         var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(), new RecordingPublisher(), TimeProvider.System);
@@ -298,12 +326,13 @@ public sealed class Phase1ReleaseWorkflowTests
 
         await Assert.ThrowsAsync<PdmRuleException>(() => workflow.BatchDeleteBomItemsAsync(
             ProjectId, new([active.Id], " "), "admin", UserRole.Administrator, default));
-        await Assert.ThrowsAsync<PdmConflictException>(() => workflow.BatchRestoreBomItemsAsync(
-            ProjectId, new([recycled.Id]), "admin", UserRole.Administrator, default));
+        var restored = await workflow.BatchRestoreBomItemsAsync(
+            ProjectId, new([recycled.Id]), "admin", UserRole.Administrator, default);
 
         var unchanged = await repository.GetBomAsync(ProjectId, BomKind.Electrical, default);
         Assert.False(Assert.Single(unchanged, item => item.Id == active.Id).IsManuallyExcluded);
-        Assert.True(Assert.Single(unchanged, item => item.Id == recycled.Id).IsManuallyExcluded);
+        Assert.False(Assert.Single(restored, item => item.Id == recycled.Id).IsManuallyExcluded);
+        Assert.False(Assert.Single(unchanged, item => item.Id == recycled.Id).IsManuallyExcluded);
     }
 
     [Fact]
@@ -328,6 +357,30 @@ public sealed class Phase1ReleaseWorkflowTests
             "admin", UserRole.Administrator, default));
 
         Assert.Equal("公司下的组织层级不能超过10级。", exception.Message);
+    }
+
+    [Fact]
+    public async Task OrganizationManagers_CanBeAssignedToChildUnitAndBecomeMembers()
+    {
+        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(), new RecordingPublisher(), TimeProvider.System);
+        await repository.CreateUserAsync(
+            new UserAccount(Guid.NewGuid(), "admin", "系统管理员", "unused", UserRole.Administrator, true),
+            default);
+        var organizationId = Guid.Parse("70000000-0000-0000-0000-000000000001");
+        var division = await workflow.SaveOrganizationUnitAsync(
+            new SaveOrganizationUnitCommand(null, organizationId, null, "MANAGER-DIV", "负责人测试事业部", OrganizationUnitKind.BusinessDivision, true, 0),
+            "admin", UserRole.Administrator, default);
+        var department = await workflow.SaveOrganizationUnitAsync(
+            new SaveOrganizationUnitCommand(null, organizationId, division.Id, "MANAGER-DEPT", "负责人测试子部门", OrganizationUnitKind.Department, true, 0),
+            "admin", UserRole.Administrator, default);
+
+        var directory = await workflow.SetOrganizationUnitManagersAsync(
+            department.Id, "admin", [], "admin", UserRole.Administrator, default);
+
+        Assert.Equal("admin", Assert.Single(directory.Managers, item => item.UnitId == department.Id).PrimaryManager);
+        var membership = Assert.Single(directory.Memberships, item => item.UnitId == department.Id && item.Username == "admin");
+        Assert.True(membership.IsPrimary);
     }
 
     [Fact]
@@ -507,6 +560,9 @@ public sealed class Phase1ReleaseWorkflowTests
         Assert.Equal(source.Material, restored.Material);
         Assert.Equal(source.Quantity, restored.Quantity);
         Assert.Equal(source.Revision, restored.Revision);
+        Assert.True(restored.IsManuallyOverridden);
+        Assert.Equal("SourceMatched", restored.ReconciliationStatus);
+        Assert.DoesNotContain("物料分类", restored.ReconciliationNote);
         Assert.Equal(writebacksBeforeRestore.Count, writebacksAfterRestore.Count);
         Assert.Contains("BOM分类与排序保持不变", restored.ReconciliationNote);
     }
@@ -555,6 +611,7 @@ public sealed class Phase1ReleaseWorkflowTests
         var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(), new RecordingPublisher(), TimeProvider.System);
         foreach (var document in await repository.ListCheckedOutDocumentsAsync(default))
             await repository.ForceReleaseCheckoutAsync(document.Id, "admin", "测试准备", default);
+        await PrepareApprovedNonStandardDrawingReviewAsync(repository, workflow);
         await workflow.ReplaceBomAsync(ProjectId, BomKind.Electrical,
             [new BomItemInput(1, "EL-VERSION", "版本测试电气件", 1, "个", null, "M18", "W1", true)],
             "admin", UserRole.Administrator, default);
@@ -564,6 +621,7 @@ public sealed class Phase1ReleaseWorkflowTests
             "admin", "admin", "admin", UserRole.Administrator, default);
         first = await PublishAsync(workflow, first);
         var firstBaseline = Assert.Single(await repository.ListManufacturingBomBaselinesAsync(ProjectId, default));
+        Assert.Equal("BL-PRJ-2026-018-0-001", firstBaseline.Label);
         Assert.Equal(first.StandardBomVersionId, firstBaseline.StandardBomVersionId);
         Assert.Equal(first.NonStandardBomVersionId, firstBaseline.NonStandardBomVersionId);
         Assert.Equal(first.ElectricalBomVersionId, firstBaseline.ElectricalBomVersionId);
@@ -585,6 +643,7 @@ public sealed class Phase1ReleaseWorkflowTests
         Assert.Equal(first.NonStandardBomVersionId, second.NonStandardBomVersionId);
         Assert.Equal(first.ElectricalBomVersionId, second.ElectricalBomVersionId);
         var versionHistory = await repository.ListBomVersionsAsync(ProjectId, null, default);
+        Assert.All(versionHistory, version => Assert.Contains("-PRJ-2026-018-0-", version.Label));
         Assert.Equal("ECN-001", versionHistory.Single(version => version.Id == first.NonStandardBomVersionId).ChangeNumber);
         Assert.Equal("ECN-001", versionHistory.Single(version => version.Id == first.ElectricalBomVersionId).ChangeNumber);
         Assert.Equal(BomValidationFieldCatalog.ElectricalDefaults,
@@ -602,6 +661,7 @@ public sealed class Phase1ReleaseWorkflowTests
         var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(), new RecordingPublisher(), TimeProvider.System);
         foreach (var document in await repository.ListCheckedOutDocumentsAsync(default))
             await repository.ForceReleaseCheckoutAsync(document.Id, "admin", "测试准备", default);
+        await PrepareApprovedNonStandardDrawingReviewAsync(repository, workflow);
         await workflow.ReplaceBomAsync(ProjectId, BomKind.Electrical,
             [new BomItemInput(1, "EL-LOCK", "锁定测试电气件", 1, "个", null, "M18", "W1", true)],
             "admin", UserRole.Administrator, default);
@@ -623,6 +683,226 @@ public sealed class Phase1ReleaseWorkflowTests
         Assert.Equal(2, Assert.Single(changed).Quantity);
     }
 
+    [Fact]
+    public async Task ScopedStandardReview_UsesVersionedMechanicalChainAndLocksOnlyStandardBom()
+    {
+        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        await ConfigureApprovalWorkflowsAsync(repository);
+        var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(), new RecordingPublisher(), TimeProvider.System);
+        var package = await workflow.CreateScopedReleasePackageAsync(
+            ProjectId, null, string.Empty, string.Empty, string.Empty, "SHOULD-NOT-APPLY", "SHOULD-NOT-APPLY",
+            ReleaseScope.StandardFormal, [], "admin", UserRole.Administrator, default);
+
+        Assert.StartsWith("RP-PRJ-2026-018-0-", package.Number);
+        Assert.StartsWith("S-PRJ-2026-018-0-B", package.StandardBomRevision);
+        Assert.Equal(package.Number, package.ChangeNumber);
+        Assert.Equal("未指定", package.EffectiveSerialFrom);
+        Assert.Null(package.EffectiveSerialTo);
+        Assert.Equal(string.Empty, package.ChangeReason);
+        Assert.Equal(ReleaseScope.StandardFormal, package.Scope);
+        Assert.Equal("mechanical-release", package.WorkflowCode);
+        Assert.Equal(3, package.ApprovalTasks.Count);
+        Assert.Equal("admin", package.ApprovalTasks.Single(task => task.Stage == ApprovalStage.MechanicalEngineer).Assignee);
+        Assert.Equal("admin", package.ApprovalTasks.Single(task => task.Stage == ApprovalStage.MainDesigner).Assignee);
+        Assert.Equal("mechanical-supervisor", package.ApprovalTasks.Single(task => task.Stage == ApprovalStage.MechanicalSupervisor).Assignee);
+        Assert.False(package.LocksDocuments);
+        package = await workflow.SubmitReleasePackageAsync(package.Id, "admin", UserRole.Administrator, default);
+        Assert.Equal(ApprovalDecision.Approved, package.ApprovalTasks.Single(task => task.Stage == ApprovalStage.MechanicalEngineer).Decision);
+
+        await workflow.ReplaceBomAsync(ProjectId, BomKind.Electrical,
+            [new BomItemInput(1, "EL-SCOPE", "独立电气件", 1, "个", null, "M18", "W1", true)],
+            "admin", UserRole.Administrator, default);
+        var standard = await repository.GetBomAsync(ProjectId, BomKind.Standard, default);
+        var locked = await Assert.ThrowsAsync<PdmConflictException>(() => workflow.ReplaceBomAsync(
+            ProjectId, BomKind.Standard, standard.Select(item => new BomItemInput(item.Sequence, item.DrawingNumber, item.Name, item.Quantity, item.Unit, item.Material, item.Specification, item.Revision, true)).ToArray(),
+            "admin", UserRole.Administrator, default));
+        Assert.Contains("标准件BOM已锁定", locked.Message);
+
+        var mainDesigner = package.ApprovalTasks.Single(task => task.Stage == ApprovalStage.MainDesigner);
+        package = await workflow.EmergencyDecideAsync(mainDesigner.Id, "admin", UserRole.Administrator, ApprovalDecision.Approved, "长交期采购窗口即将关闭", default);
+        Assert.True(package.ApprovalTasks.Single(task => task.Id == mainDesigner.Id).IsEmergencySubstitute);
+        var supervisor = package.ApprovalTasks.Single(task => task.Stage == ApprovalStage.MechanicalSupervisor);
+        package = await workflow.DecideAsync(supervisor.Id, "admin", UserRole.Administrator, ApprovalDecision.Approved, "机械主管批准", default);
+        Assert.Equal(ReleasePackageState.Published, package.State);
+        Assert.Empty(await repository.ListManufacturingBomBaselinesAsync(ProjectId, default));
+
+        var invalidNextFormal = await Assert.ThrowsAsync<PdmRuleException>(() => workflow.CreateScopedReleasePackageAsync(
+            ProjectId, null, string.Empty, string.Empty, "重复正式发布", "未指定", null,
+            ReleaseScope.StandardFormal, [], "admin", UserRole.Administrator, default));
+        Assert.Contains("后续只能发起增补/变更", invalidNextFormal.Message);
+    }
+
+    [Fact]
+    public async Task ScopedSupplement_GeneratesReadOnlyChangeNumber()
+    {
+        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        await ConfigureApprovalWorkflowsAsync(repository);
+        var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(), new RecordingPublisher(), TimeProvider.System);
+
+        var invalid = await Assert.ThrowsAsync<PdmRuleException>(() => workflow.CreateScopedReleasePackageAsync(
+            ProjectId, null, string.Empty, string.Empty, "未配置原因", "SHOULD-NOT-APPLY", null,
+            ReleaseScope.StandardSupplement, [], "admin", UserRole.Administrator, default));
+        Assert.Contains("不在系统配置中", invalid.Message);
+
+        var package = await workflow.CreateScopedReleasePackageAsync(
+            ProjectId, null, string.Empty, "MANUAL-VALUE-IGNORED", "设计变更；客户需求", "SHOULD-NOT-APPLY", null,
+            ReleaseScope.StandardSupplement, [], "admin", UserRole.Administrator, default);
+
+        Assert.StartsWith("ECN-PRJ-2026-018-0-", package.ChangeNumber);
+        Assert.NotEqual("MANUAL-VALUE-IGNORED", package.ChangeNumber);
+        Assert.Equal("设计变更；客户需求", package.ChangeReason);
+    }
+
+    [Fact]
+    public async Task ElectricalReview_ResolvesDepartmentAndParentManagersWhenDraftIsCreated()
+    {
+        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        await ConfigureApprovalWorkflowsAsync(repository);
+        var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(), new RecordingPublisher(), TimeProvider.System);
+        await workflow.ReplaceBomAsync(ProjectId, BomKind.Electrical,
+            [new BomItemInput(1, "EL-ORG", "组织审批测试电气件", 1, "个", null, "M18", "W1", true)],
+            "admin", UserRole.Administrator, default);
+
+        var package = await workflow.CreateScopedReleasePackageAsync(
+            ProjectId, null, $"RP-ELECTRICAL-{Guid.NewGuid():N}", "ELE-001", "电气正式发布", "未指定", null,
+            ReleaseScope.ElectricalFormal, [], "admin", UserRole.Administrator, default);
+
+        Assert.Equal("admin", package.ApprovalTasks.Single(task => task.Stage == ApprovalStage.HardwareEngineer).Assignee);
+        Assert.Equal("mechanical-supervisor", package.ApprovalTasks.Single(task => task.Stage == ApprovalStage.HardwareSupervisor).Assignee);
+        Assert.Equal("standardization-supervisor", package.ApprovalTasks.Single(task => task.Stage == ApprovalStage.StandardizationSupervisor).Assignee);
+    }
+
+    [Fact]
+    public async Task LongLeadStandardRelease_PublishesSelectedControlledOutputWithoutManufacturingBaseline()
+    {
+        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        await ConfigureApprovalWorkflowsAsync(repository);
+        var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(), new RecordingPublisher(), TimeProvider.System);
+        var selected = (await repository.GetBomAsync(ProjectId, BomKind.Standard, default)).Take(1).Select(item => item.Id).ToArray();
+        var package = await workflow.CreateScopedReleasePackageAsync(
+            ProjectId, null, $"RP-LONGLEAD-{Guid.NewGuid():N}", "LL-001", "长交期件提前采购", "未指定", null,
+            ReleaseScope.StandardLongLead, selected, "admin", UserRole.Administrator, default);
+
+        Assert.Equal(selected, package.SelectedBomItemIds);
+        Assert.Single(package.StandardBomSnapshot);
+        Assert.Null(package.StandardBomVersionId);
+        Assert.False(package.CreatesManufacturingBaseline);
+        package = await workflow.SubmitReleasePackageAsync(package.Id, "admin", UserRole.Administrator, default);
+        foreach (var task in package.ApprovalTasks.Where(task => task.Decision is null).OrderBy(task => task.StepOrder))
+            package = await workflow.DecideAsync(task.Id, "admin", UserRole.Administrator, ApprovalDecision.Approved, "同意", default);
+        Assert.Equal(ReleasePackageState.Published, package.State);
+        Assert.Empty(await repository.ListManufacturingBomBaselinesAsync(ProjectId, default));
+    }
+
+    [Fact]
+    public async Task LongLeadStandardRelease_RejectsOverlappingActiveItemsButAllowsDifferentItems()
+    {
+        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        await ConfigureApprovalWorkflowsAsync(repository);
+        var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(), new RecordingPublisher(), TimeProvider.System);
+        await workflow.ReplaceBomAsync(ProjectId, BomKind.Standard,
+        [
+            new BomItemInput(1, "STD-LL-001", "长交期件A", 1, "个", null, "M1", "W1", true),
+            new BomItemInput(2, "STD-LL-002", "长交期件B", 1, "个", null, "M2", "W1", true)
+        ], "admin", UserRole.Administrator, default);
+        var standard = await repository.GetBomAsync(ProjectId, BomKind.Standard, default);
+        var firstItem = standard[0].Id;
+        var secondItem = standard[1].Id;
+
+        var first = await workflow.CreateScopedReleasePackageAsync(
+            ProjectId, null, $"RP-LONGLEAD-A-{Guid.NewGuid():N}", "LL-A", "第一批长交期件", "未指定", null,
+            ReleaseScope.StandardLongLead, [firstItem], "admin", UserRole.Administrator, default);
+
+        var conflict = await Assert.ThrowsAsync<PdmConflictException>(() => workflow.CreateScopedReleasePackageAsync(
+            ProjectId, null, $"RP-LONGLEAD-B-{Guid.NewGuid():N}", "LL-B", "重复长交期件", "未指定", null,
+            ReleaseScope.StandardLongLead, [firstItem], "admin", UserRole.Administrator, default));
+        Assert.Contains(first.Number, conflict.Message);
+        Assert.Contains("不能同时进入", conflict.Message);
+
+        var disjoint = await workflow.CreateScopedReleasePackageAsync(
+            ProjectId, null, $"RP-LONGLEAD-C-{Guid.NewGuid():N}", "LL-C", "另一批长交期件", "未指定", null,
+            ReleaseScope.StandardLongLead, [secondItem], "admin", UserRole.Administrator, default);
+        Assert.Equal(new[] { secondItem }, disjoint.SelectedBomItemIds);
+    }
+
+    private static async Task ConfigureApprovalWorkflowsAsync(InMemoryPdmRepository repository)
+    {
+        if (await repository.FindUserAsync("admin", default) is null)
+            await repository.CreateUserAsync(new UserAccount(Guid.NewGuid(), "admin", "系统管理员", "unused", UserRole.Administrator, true), default);
+        if (await repository.FindUserAsync("mechanical-supervisor", default) is null)
+            await repository.CreateUserAsync(new UserAccount(Guid.NewGuid(), "mechanical-supervisor", "机械主管", "unused", UserRole.Approver, true), default);
+        if (await repository.FindUserAsync("standardization-supervisor", default) is null)
+            await repository.CreateUserAsync(new UserAccount(Guid.NewGuid(), "standardization-supervisor", "标准化主管", "unused", UserRole.Approver, true), default);
+
+        var organizationId = Guid.Parse("70000000-0000-0000-0000-000000000001");
+        var division = await repository.SaveOrganizationUnitAsync(
+            new SaveOrganizationUnitCommand(null, organizationId, null, "APPROVAL-DIV", "审批测试事业部", OrganizationUnitKind.BusinessDivision, true, 0), default);
+        var department = await repository.SaveOrganizationUnitAsync(
+            new SaveOrganizationUnitCommand(null, organizationId, division.Id, "APPROVAL-DEPT", "审批测试部门", OrganizationUnitKind.Department, true, 0), default);
+        await repository.SetOrganizationMembershipsAsync("admin", [department.Id], department.Id, default);
+        await repository.SetOrganizationUnitManagersAsync(department.Id, "mechanical-supervisor", [], default);
+        await repository.SetOrganizationUnitManagersAsync(division.Id, "standardization-supervisor", [], default);
+        await repository.SetMainProjectStaffingAsync(ProjectId, new SetMainProjectStaffingCommand("admin", [], "admin"), "admin", default);
+    }
+
+    private static async Task PrepareApprovedNonStandardDrawingReviewAsync(InMemoryPdmRepository repository, PdmWorkflowService workflow)
+    {
+        var documents = await repository.ListDocumentsAsync(ProjectId, default);
+        var model = documents.Single(document => document.DrawingNumber == "A01-100" && document.Kind == DocumentKind.Assembly);
+        var drawing = documents.Single(document => document.DrawingNumber == "A01-100" && document.Kind == DocumentKind.Drawing);
+        await CheckInAsync(repository, model.Id, "designer", new Dictionary<string, string?>(), 'A');
+        await CheckInAsync(repository, drawing.Id, "designer", new Dictionary<string, string?>(), 'B');
+        await repository.ReplaceBomAsync(ProjectId, BomKind.NonStandard,
+        [
+            new BomItem(Guid.NewGuid(), ProjectId, BomKind.NonStandard, 1, "A01-100", "机架组件", 1, "件", "Q235B", null, "W1", true)
+            {
+                SourceDocumentId = model.Id,
+                SourceConfiguration = "默认",
+                Source = "Auto"
+            }
+        ], default);
+
+        var review = await workflow.CreateDrawingReviewPackageAsync(ProjectId, "submitter", UserRole.Administrator, default);
+        var item = Assert.Single(review.Items);
+        review = await workflow.DecideDrawingReviewTargetAsync(review.Id, item.Id,
+            new DecideDrawingReviewTargetCommand(DrawingReviewTarget.Model3D, DrawingReviewDecision.Approve, "3D通过"),
+            "model-reviewer", UserRole.Administrator, default);
+        review = await workflow.DecideDrawingReviewTargetAsync(review.Id, item.Id,
+            new DecideDrawingReviewTargetCommand(DrawingReviewTarget.Drawing2D, DrawingReviewDecision.Approve, "2D通过"),
+            "drawing-reviewer", UserRole.Administrator, default);
+
+        foreach (var request in (await repository.ListCadPropertyWritebacksAsync(ProjectId, default)).OrderBy(request => request.SourceDocumentId))
+        {
+            await workflow.StartCadPropertyWritebackAsync(request.Id, "cad-client", UserRole.Administrator, default);
+            var result = await CheckInAsync(repository, request.SourceDocumentId, "cad-client", request.Properties,
+                request.SourceDocumentId == model.Id ? 'C' : 'D');
+            await workflow.CompleteCadPropertyWritebackAsync(request.Id, Assert.IsType<DocumentVersion>(result.Version).Id,
+                "cad-client", UserRole.Administrator, default);
+        }
+
+        Assert.Equal(DrawingReviewPackageState.Approved,
+            (await repository.FindDrawingReviewPackageAsync(review.Id, default))?.State);
+    }
+
+    private static async Task<DocumentCheckInResult> CheckInAsync(
+        InMemoryPdmRepository repository,
+        Guid documentId,
+        string actor,
+        IReadOnlyDictionary<string, string?> properties,
+        char hashCharacter)
+    {
+        var document = await repository.CheckoutAsync(documentId, actor, default);
+        var root = new DocumentReferenceNode(Guid.NewGuid(), document.Id, document.DrawingNumber, document.FileName, document.Name,
+            document.Kind, "默认", 1, ReferenceNodeStatus.Normal, document.Revision, actor, []);
+        return await repository.CheckInVersionAsync(documentId, actor, new DocumentVersionCommit(
+            new StoredFile($"versions/{document.FileName}", 128, new string(hashCharacter, 64), DateTimeOffset.UtcNow),
+            "测试存档",
+            properties,
+            new CadReferenceSnapshot(Guid.NewGuid(), ProjectId, document.Id, DateTimeOffset.UtcNow, actor, root, new string('F', 64)),
+            [],
+            []), default);
+    }
+
     private static async Task<ReleasePackage> PublishAsync(PdmWorkflowService workflow, ReleasePackage package)
     {
         package = await workflow.SubmitReleasePackageAsync(package.Id, "admin", UserRole.Administrator, default);
@@ -637,9 +917,23 @@ public sealed class Phase1ReleaseWorkflowTests
         public int PrepareCalls { get; private set; }
         public int ValidateCalls { get; private set; }
         public int PublishCalls { get; private set; }
+        public IReadOnlyList<ReleasePreviewSource> PreviewSources { get; private set; } = [];
         public Task PrepareAsync(ReleasePackage package, Project project, CancellationToken cancellationToken) { PrepareCalls++; return Task.CompletedTask; }
         public Task ValidateAsync(ReleasePackage package, Project project, CancellationToken cancellationToken) { ValidateCalls++; return Task.CompletedTask; }
-        public Task<string> PublishAsync(ReleasePackage package, Project project, CancellationToken cancellationToken) { PublishCalls++; return Task.FromResult("C:\\PDM\\Release\\package"); }
+        public Task<ReleasePublication> PublishAsync(ReleasePackage package, Project project, IReadOnlyList<ReleasePreviewSource> sources, CancellationToken cancellationToken)
+        {
+            PublishCalls++;
+            PreviewSources = sources.ToArray();
+            var previews = sources.ToDictionary(
+                source => source.DocumentId,
+                source => new DocumentPreviewArtifact(
+                    source.Kind == DocumentKind.Drawing ? DocumentPreviewFormat.Pdf : DocumentPreviewFormat.Step,
+                    $".release-previews/{source.DocumentId:N}.{(source.Kind == DocumentKind.Drawing ? "pdf" : "step")}",
+                    1,
+                    new string('A', 64),
+                    source.SourceSha256));
+            return Task.FromResult(new ReleasePublication("C:\\PDM\\Release\\package", previews));
+        }
     }
 
     private sealed class UnusedFileStorage : IFileStorage

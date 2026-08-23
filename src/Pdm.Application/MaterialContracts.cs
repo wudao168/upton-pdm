@@ -48,6 +48,10 @@ public sealed record CalibrateMaterialCategoryCounterCommand(string LastMaterial
 
 public sealed record LinkBomMaterialCommand(Guid ProjectId, Guid BomItemId, Guid MaterialId);
 
+public sealed record ResolveMaterialCodesCommand(Guid ProjectId, IReadOnlyList<Guid> BomItemIds);
+
+public sealed record ApplyMaterialCodesCommand(Guid ProjectId, IReadOnlyList<Guid> BomItemIds);
+
 public sealed record UpdateU9MaterialIntegrationCommand(
     string BaseUrl,
     string EnterpriseCode,
@@ -60,7 +64,14 @@ public sealed record UpdateU9MaterialIntegrationCommand(
     bool WriteEnabled,
     string? ItemModifyPath = null,
     string? ItemDeletePath = null,
-    IReadOnlyDictionary<string, string>? UnitCodeMappings = null);
+    IReadOnlyDictionary<string, string>? UnitCodeMappings = null,
+    string? CustomerQueryPath = null,
+    string? BomCreatePath = null,
+    string? BomQueryPath = null,
+    string? BomModifyPath = null,
+    string? BomDeletePath = null,
+    string? BomBatchUnapprovePath = null,
+    string? BomBipQueryPagePath = null);
 
 public sealed record U9AuthenticationRequest(
     string BaseUrl,
@@ -91,7 +102,14 @@ public sealed record U9ItemReference(
     string? U9CategoryCode = null,
     string? U9CategoryName = null,
     string? U9UnitCode = null,
-    int? U9ItemFormAttribute = null);
+    int? U9ItemFormAttribute = null,
+    string? U9Brand = null,
+    string? U9Description = null,
+    string? U9Material = null,
+    string? U9SurfaceTreatment = null,
+    decimal? U9Weight = null,
+    string? U9WeightUnitCode = null,
+    string? U9PurchaseLink = null);
 
 public sealed record U9ItemQueryResult(
     int ResponseCode,
@@ -133,6 +151,13 @@ public sealed record U9MaterialSampleItem(
     MaterialSupplyMode SupplyMode,
     string UnitCode,
     string? Specification,
+    string? Brand,
+    string? Material,
+    string? SurfaceTreatment,
+    string? Remark,
+    decimal? Weight,
+    string? WeightUnit,
+    string? PurchaseLink,
     bool ExistsInPdm,
     bool CanImport,
     string Decision);
@@ -167,6 +192,9 @@ public static class U9MaterialContract
     public const string UomQueryPath = "/webapi/UOM/Query";
     public const string CustomerReferencePath = "/webapi/GetCommonReference/Create";
     public const string PurchaseLinkPublicSegment = "PubDescSeg1";
+    public const string BrandPublicSegment = "PubDescSeg3";
+    public const string MaterialPrivateSegment = "PrivateDescSeg2";
+    public const string SurfaceTreatmentPrivateSegment = "PrivateDescSeg3";
 }
 
 public sealed record U9ConnectionTestResult(
@@ -199,6 +227,7 @@ public interface IU9OpenApiClient
         CancellationToken cancellationToken);
     Task<U9CustomerQueryResult> QueryCustomerReferencesAsync(
         string baseUrl,
+        string path,
         string token,
         string payloadJson,
         CancellationToken cancellationToken);
@@ -210,6 +239,13 @@ public interface IMaterialRepository
     Task<PdmMaterial?> FindMaterialAsync(Guid materialId, CancellationToken cancellationToken);
     Task<PdmMaterial?> FindMaterialByCodeAsync(string materialCode, CancellationToken cancellationToken);
     Task<PdmMaterial?> FindMaterialBySourceBomItemAsync(Guid bomItemId, CancellationToken cancellationToken);
+    Task<IReadOnlyList<PdmMaterial>> FindApprovedMaterialsBySpecificationAsync(string specification, CancellationToken cancellationToken);
+    Task<IReadOnlyList<PdmMaterial>> FindApprovedMaterialsByBrandAndSpecificationAsync(string brand, string specification, CancellationToken cancellationToken);
+    Task<IReadOnlyList<MaterialCodeApplication>> ListMaterialCodeApplicationsAsync(Guid? projectId, MaterialCodeApplicationStatus? status, CancellationToken cancellationToken);
+    Task<MaterialCodeApplication?> FindMaterialCodeApplicationAsync(Guid applicationId, CancellationToken cancellationToken);
+    Task<MaterialCodeApplication?> FindPendingMaterialCodeApplicationByBomItemAsync(Guid bomItemId, CancellationToken cancellationToken);
+    Task<MaterialCodeApplication> CreateMaterialCodeApplicationAsync(MaterialCodeApplication application, CancellationToken cancellationToken);
+    Task<MaterialCodeApplication> DecideMaterialCodeApplicationAsync(Guid applicationId, long expectedRowVersion, MaterialCodeApplicationStatus status, string actor, string? comment, Guid? materialId, string? materialCode, DateTimeOffset decidedAt, CancellationToken cancellationToken);
     Task<bool> HasMaterialReferencesAsync(Guid materialId, CancellationToken cancellationToken);
     Task<int> CountMaterialReferencesAsync(Guid materialId, CancellationToken cancellationToken);
     Task<string> ReserveNextMaterialCodeAsync(MaterialCategory category, CancellationToken cancellationToken);
@@ -225,6 +261,7 @@ public interface IMaterialRepository
     Task<PdmMaterial> ArchiveMaterialAsync(Guid materialId, long expectedRowVersion, string actor, DateTimeOffset archivedAt, CancellationToken cancellationToken);
     Task<PdmMaterial> DeleteLocalMaterialAsync(Guid materialId, long expectedRowVersion, bool u9AbsenceConfirmed, CancellationToken cancellationToken);
     Task LinkBomItemAsync(Guid bomItemId, Guid materialId, string actor, DateTimeOffset linkedAt, CancellationToken cancellationToken);
+    Task UnlinkBomItemAsync(Guid bomItemId, CancellationToken cancellationToken);
     Task<IReadOnlyList<MaterialCategory>> ListCategoriesAsync(bool includeHidden, CancellationToken cancellationToken);
     Task<MaterialCategory?> FindCategoryAsync(string categoryCode, CancellationToken cancellationToken);
     Task<MaterialCategory> SaveCategoryAsync(MaterialCategory category, long? expectedRowVersion, CancellationToken cancellationToken);

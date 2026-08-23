@@ -4,7 +4,8 @@ public enum MaterialKind
 {
     Electrical = 0,
     Standard = 1,
-    NonStandard = 2
+    NonStandard = 2,
+    Product = 3
 }
 
 public enum MaterialSupplyMode
@@ -19,6 +20,49 @@ public enum MaterialApprovalStatus
     Draft = 0,
     Approved = 1
 }
+
+public enum MaterialCodeApplicationStatus
+{
+    Pending = 0,
+    Approved = 1,
+    Rejected = 2
+}
+
+public sealed record MaterialCodeApplication(
+    Guid Id,
+    Guid ProjectId,
+    Guid BomItemId,
+    MaterialCodeApplicationStatus Status,
+    string RequestedBy,
+    DateTimeOffset RequestedAt,
+    string? DecidedBy,
+    DateTimeOffset? DecidedAt,
+    string? DecisionComment,
+    Guid? MaterialId,
+    string? MaterialCode,
+    long RowVersion)
+{
+    public string? BomItemName { get; init; }
+    public string? Specification { get; init; }
+    public string? Brand { get; init; }
+    public string? Remark { get; init; }
+}
+
+public enum MaterialCodeResolutionStatus
+{
+    Matched = 0,
+    NoMatch = 1,
+    Ambiguous = 2,
+    ApplicationPending = 3,
+    ApplicationApproved = 4
+}
+
+public sealed record MaterialCodeResolution(
+    Guid BomItemId,
+    MaterialCodeResolutionStatus Status,
+    PdmMaterial? Material,
+    IReadOnlyList<PdmMaterial> Candidates,
+    MaterialCodeApplication? Application);
 
 public enum MaterialSyncStatus
 {
@@ -112,7 +156,8 @@ public sealed record PdmMaterial(
     MaterialDataSource SourceSystem = MaterialDataSource.Pdm,
     MaterialMasterOwner MasterOwner = MaterialMasterOwner.Pdm,
     DateTimeOffset? LastU9SyncedAt = null,
-    string? PurchaseLink = null);
+    string? PurchaseLink = null,
+    int ReferenceCount = 0);
 
 public sealed record MaterialRemovalResult(
     PdmMaterial Material,
@@ -150,7 +195,14 @@ public sealed record U9MaterialIntegrationConfiguration(
     DateTimeOffset? UpdatedAt,
     string ItemModifyPath = "/webapi/ItemMaster/Modify",
     string ItemDeletePath = "/webapi/ItemMaster/Delete",
-    IReadOnlyDictionary<string, string>? UnitCodeMappings = null);
+    IReadOnlyDictionary<string, string>? UnitCodeMappings = null,
+    string CustomerQueryPath = "/webapi/GetCommonReference/Create",
+    string BomCreatePath = "/webapi/BOM/Create",
+    string BomQueryPath = "/webapi/BOM/Query",
+    string BomModifyPath = "/webapi/BOM/Modify",
+    string BomDeletePath = "/webapi/BOM/Delete",
+    string BomBatchUnapprovePath = "/webapi/BOM/BatchUnApprove",
+    string BomBipQueryPagePath = "/webapi/BOM/BIPQueryPage");
 
 public sealed record U9MaterialIntegrationSettings(
     string BaseUrl,
@@ -166,4 +218,11 @@ public sealed record U9MaterialIntegrationSettings(
     DateTimeOffset? UpdatedAt,
     string ItemModifyPath = "/webapi/ItemMaster/Modify",
     string ItemDeletePath = "/webapi/ItemMaster/Delete",
-    IReadOnlyDictionary<string, string>? UnitCodeMappings = null);
+    IReadOnlyDictionary<string, string>? UnitCodeMappings = null,
+    string CustomerQueryPath = "/webapi/GetCommonReference/Create",
+    string BomCreatePath = "/webapi/BOM/Create",
+    string BomQueryPath = "/webapi/BOM/Query",
+    string BomModifyPath = "/webapi/BOM/Modify",
+    string BomDeletePath = "/webapi/BOM/Delete",
+    string BomBatchUnapprovePath = "/webapi/BOM/BatchUnApprove",
+    string BomBipQueryPagePath = "/webapi/BOM/BIPQueryPage");

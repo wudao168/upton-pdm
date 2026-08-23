@@ -25,11 +25,13 @@ if ($isUpgrade) {
     $apiOutput = Join-Path $localRoot 'api-next'
     $clientOutput = Join-Path $localRoot 'staged-client'
     $addinOutput = Join-Path $localRoot 'staged-solidworks-addin'
+    $previewWorkerOutput = Join-Path $localRoot 'staged-preview-worker'
 }
 else {
     $apiOutput = Join-Path $localRoot 'api'
     $clientOutput = Join-Path $localRoot 'client'
     $addinOutput = Join-Path $localRoot 'solidworks-addin'
+    $previewWorkerOutput = Join-Path $localRoot 'preview-worker'
 }
 
 function New-RandomText([int]$byteCount) {
@@ -69,6 +71,7 @@ foreach ($directory in @(
     (Join-Path $localRoot 'api'),
     (Join-Path $localRoot 'client'),
     (Join-Path $localRoot 'solidworks-addin'),
+    (Join-Path $localRoot 'preview-worker'),
     (Join-Path $localRoot 'vault\PRJ-2026-018'),
     (Join-Path $localRoot 'release\PRJ-2026-018'),
     (Join-Path $localRoot 'uploads')
@@ -77,7 +80,7 @@ foreach ($directory in @(
 }
 
 if ($isUpgrade) {
-    foreach ($directory in @($apiOutput, $clientOutput, $addinOutput)) {
+    foreach ($directory in @($apiOutput, $clientOutput, $addinOutput, $previewWorkerOutput)) {
         $resolvedLocal = [IO.Path]::GetFullPath($localRoot).TrimEnd('\') + '\'
         $resolvedTarget = [IO.Path]::GetFullPath($directory)
         if (-not $resolvedTarget.StartsWith($resolvedLocal, [StringComparison]::OrdinalIgnoreCase)) {
@@ -89,7 +92,7 @@ if ($isUpgrade) {
 }
 
 if ($isUpgrade -and -not (Test-Path -LiteralPath $secretPath)) {
-    throw 'Existing PDM service is missing its protected deployment secret file.'
+    throw 'Existing PLM service is missing its protected deployment secret file.'
 }
 
 if (-not $isUpgrade -and -not (Test-Path -LiteralPath $secretPath)) {
@@ -197,7 +200,9 @@ try {
     if ($LASTEXITCODE -ne 0) {
         throw 'Frontend production build failed.'
     }
-    & $dotnetPath restore Pdm.slnx --nologo
+    # Local deployments use the locked dependency graph and may run on an isolated factory network.
+    # NuGet vulnerability auditing is a separate online gate; do not let its network call block deployment.
+    & $dotnetPath restore Pdm.slnx --nologo -p:NuGetAudit=false
     if ($LASTEXITCODE -ne 0) {
         throw 'Solution restore failed.'
     }
@@ -225,18 +230,30 @@ Get-ChildItem -LiteralPath $clientBuildOutput |
     Where-Object { $_.Name -ne 'Upton.Pdm.Desktop.exe.WebView2' } |
     Copy-Item -Destination $clientOutput -Recurse -Force
 Copy-Item -Path (Join-Path $projectRoot 'src\Pdm.SolidWorks.Addin\bin\Release\net48\*') -Destination $addinOutput -Recurse -Force
+Copy-Item -Path (Join-Path $projectRoot 'src\Pdm.SolidWorks.PreviewWorker\bin\Release\net48\*') -Destination $previewWorkerOutput -Recurse -Force
 
 $desktopDirectory = [Environment]::GetFolderPath('Desktop')
-$shortcutPath = Join-Path $desktopDirectory 'UPTON PDM.lnk'
+$shortcutPath = Join-Path $desktopDirectory 'UPLM.lnk'
+$previousShortcutPath = Join-Path $desktopDirectory 'UPTON PLM.lnk'
+$legacyShortcutPath = Join-Path $desktopDirectory 'UPTON PDM.lnk'
 $clientPath = Join-Path $localRoot 'client\Upton.Pdm.Desktop.exe'
+$clientIconPath = Join-Path $localRoot 'client\UPTON-PLM.ico'
+if (-not (Test-Path -LiteralPath $clientIconPath)) {
+    throw "UPLM desktop icon was not found: $clientIconPath"
+}
+$clientIconHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $clientIconPath).Hash.Substring(0, 12)
+$shortcutIconPath = Join-Path $localRoot "client\UPTON-PLM-$clientIconHash.ico"
+Copy-Item -LiteralPath $clientIconPath -Destination $shortcutIconPath -Force
 if (-not $isUpgrade) {
     $shell = New-Object -ComObject WScript.Shell
     $shortcut = $shell.CreateShortcut($shortcutPath)
     $shortcut.TargetPath = $clientPath
     $shortcut.WorkingDirectory = Join-Path $localRoot 'client'
-    $shortcut.IconLocation = "$clientPath,0"
-    $shortcut.Description = 'UPTON PDM engineering client'
+    $shortcut.IconLocation = "$shortcutIconPath,0"
+    $shortcut.Description = 'UPLM engineering client'
     $shortcut.Save()
+    if (Test-Path -LiteralPath $previousShortcutPath) { Remove-Item -LiteralPath $previousShortcutPath -Force }
+    if (Test-Path -LiteralPath $legacyShortcutPath) { Remove-Item -LiteralPath $legacyShortcutPath -Force }
 }
 
 $receipt = [ordered]@{
@@ -248,7 +265,10 @@ $receipt = [ordered]@{
     localRoot = $localRoot
     apiPath = Join-Path $localRoot 'api\Pdm.Api.dll'
     clientPath = $clientPath
+    clientIconPath = $clientIconPath
+    shortcutIconPath = $shortcutIconPath
     addinPath = Join-Path $localRoot 'solidworks-addin\Upton.Pdm.SolidWorks.Addin.dll'
+    previewWorkerPath = Join-Path $localRoot 'preview-worker\Upton.Pdm.SolidWorks.PreviewWorker.exe'
     shortcutPath = $shortcutPath
 }
 $receipt | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $localRoot 'deployment-receipt.json') -Encoding UTF8

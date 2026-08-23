@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { loadProjectDocumentWorkspace, loadProjectWorkspace, saveOrganizationUnit } from '../src/api'
+import { listProjects, loadProjectDocumentWorkspace, loadProjectWorkspace, saveOrganizationUnit } from '../src/api'
 
-describe('PDM API client', () => {
+describe('PLM API client', () => {
   afterEach(() => vi.unstubAllGlobals())
 
   it('serializes a company-level department with the numeric API enum and null parent', async () => {
@@ -30,6 +30,18 @@ describe('PDM API client', () => {
     const [, request] = fetchMock.mock.calls[0] as [string, RequestInit]
     expect(JSON.parse(String(request.body))).toMatchObject({ parentUnitId: null, kind: 0 })
     expect(saved.kind).toBe('BusinessDivision')
+  })
+
+  it('preserves the BOM hierarchy fields returned by the project API', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify([{
+      id: 'project-1', code: 'P700001', name: '设备', owner: 'admin',
+      vaultLocation: 'D:/PDM/P700001', releaseLocation: 'D:/PDM/Release/P700001', isActive: true,
+      rootProjectId: 'project-1', bomItemCategoryCode: '0302',
+    }]), { status: 200, headers: { 'Content-Type': 'application/json' } })))
+
+    const projects = await listProjects('token')
+
+    expect(projects[0]).toMatchObject({ rootProjectId: 'project-1', bomItemCategoryCode: '0302' })
   })
 
   it('does not present a registered document without a stored version as W1', async () => {

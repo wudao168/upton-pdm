@@ -17,6 +17,8 @@ const roles: RolePermissionDirectory = {
   roles: [
     { role: 'Engineer', name: '工程师', description: '设计岗位', baseRole: 'Engineer', isSystem: true, isSystemAdministrator: false, permissions: ['project.view'], userCount: 1 },
     { role: 'Administrator', name: '系统管理员', description: '系统管理', baseRole: 'Administrator', isSystem: true, isSystemAdministrator: true, permissions: ['project.view'], userCount: 1 },
+    { role: 'platform_admin', name: '平台管理员', description: '平台设置', baseRole: 'PlatformAdministrator', isSystem: true, isSystemAdministrator: true, permissions: ['project.view'], userCount: 1 },
+    { role: 'developer', name: '开发者', description: '全部权限', baseRole: 'Administrator', isSystem: true, isSystemAdministrator: true, permissions: ['project.view'], userCount: 1 },
   ],
 }
 
@@ -30,6 +32,7 @@ describe('UserSettings', () => {
       props: {
         directory,
         roleDirectory: roles,
+        activeOrganizationId: 'org-1',
         permissions: ['settings.organization.manage', 'system.role.view', 'system.role.edit'],
         currentUsername: 'admin',
         pending: false,
@@ -48,13 +51,22 @@ describe('UserSettings', () => {
     await flushPromises()
 
     expect(wrapper.find('.pdm-pagebar').exists()).toBe(false)
+    expect(wrapper.get('[aria-label="当前公司主体"]').text()).toContain('昆山阿普顿自动化系统有限公司')
     expect(wrapper.get('[aria-label="用户设置功能"]').text()).toContain('用户角色权限组织关系公司管理')
     expect(wrapper.get('[aria-label="用户列表"]').text()).toContain('工程师')
     expect(wrapper.get('[aria-label="用户列表"]').text()).toContain('设计部')
 
+    await wrapper.findAll('button').find(button => button.text() === '角色权限')!.trigger('click')
+    await flushPromises()
+    expect(wrapper.find('[aria-label="当前公司主体"]').exists()).toBe(false)
+    expect(wrapper.get('[aria-label="角色列表"]').text()).toContain('角色编码说明用户数类型操作')
+    await wrapper.findAll('button').find(button => button.text() === '用户')!.trigger('click')
+
     await wrapper.findAll('button').find(button => button.text() === '新建用户')!.trigger('click')
     await flushPromises()
     const dialog = document.body.querySelector('.el-dialog')!
+    expect(dialog.querySelector('select')?.textContent).not.toContain('平台管理员')
+    expect(dialog.querySelector('select')?.textContent).not.toContain('开发者')
     const inputs = Array.from(dialog.querySelectorAll<HTMLInputElement>('input'))
     inputs[0].value = 'new-user'; inputs[0].dispatchEvent(new Event('input'))
     inputs[1].value = '新用户'; inputs[1].dispatchEvent(new Event('input'))

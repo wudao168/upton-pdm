@@ -23,6 +23,8 @@ const parent: ProjectSummary = {
   organizationId: 'org-1',
   projectTypeCode: 'P',
   equipmentTypeCode: 2,
+  rootProjectId: 'parent-1',
+  bomItemCategoryCode: '0301',
   executionUnitName: '自动化事业部',
   primaryProjectManager: 'project-manager',
   designLead: 'design-lead',
@@ -40,6 +42,8 @@ const child: ProjectSummary = {
   code: 'P700001-1',
   name: '气密设备子项目',
   parentProjectId: parent.id,
+  rootProjectId: parent.id,
+  bomItemCategoryCode: '0302',
   childSequence: 1,
   deviceModel: 'AK-2-C001-001-01',
   serialNumbers: ['70000002'],
@@ -88,16 +92,17 @@ describe('ProjectManager', () => {
     expect(wrapper.find('.pdm-project-filter-panel').exists()).toBe(false)
     expect(wrapper.get('[aria-label="项目筛选"]').element.parentElement).toBe(wrapper.get('[aria-label="项目列表"]').element)
     expect(wrapper.find('.pdm-project-table-panel .pdm-panel-heading').exists()).toBe(false)
-    expect(headers).toEqual(['项目号', '项目名称', '别名', '型号', '序列号', '客户', '事业部', '项目经理', '主设／工程师', '状态', '订单日期', '操作'])
-    expect(cells[1].text()).toBe('气密设备')
-    expect(cells[2].text()).toBe('—')
-    expect(cells[3].text()).toBe('AK-2-C001-001-00')
-    expect(cells[4].text()).toBe('70000001')
-    expect(cells[5].text()).toBe('测试客户')
-    expect(cells[6].text()).toBe('自动化事业部')
-    expect(cells[7].text()).toBe('project-manager、project-manager-2')
-    expect(cells[8].text()).toBe('design-lead')
-    expect(cells[10].text()).toBe('2026-08-13')
+    expect(headers).toEqual(['项目号', 'BOM类型', '项目名称', '别名', '型号', '序列号', '客户', '事业部', '项目经理', '主设／工程师', '状态', '订单日期', '操作'])
+    expect(cells[1].text()).toBe('0301 产线')
+    expect(cells[2].text()).toBe('气密设备')
+    expect(cells[3].text()).toBe('—')
+    expect(cells[4].text()).toBe('AK-2-C001-001-00')
+    expect(cells[5].text()).toBe('70000001')
+    expect(cells[6].text()).toBe('测试客户')
+    expect(cells[7].text()).toBe('自动化事业部')
+    expect(cells[8].text()).toBe('project-manager、project-manager-2')
+    expect(cells[9].text()).toBe('design-lead')
+    expect(cells[11].text()).toBe('2026-08-13')
   })
 
   it('默认按项目号自然倒序排列主项目并保持子项目正序', async () => {
@@ -145,8 +150,30 @@ describe('ProjectManager', () => {
     expect(wrapper.findAll('tr.is-child')).toHaveLength(1)
     expect(wrapper.get('tr.is-child').text()).toContain('气密设备子项目')
     expect(wrapper.get('tr.is-child').text()).toContain('70000002')
-    expect(wrapper.get('tr.is-child').findAll('td')[5].text()).toBe('测试客户')
+    expect(wrapper.get('tr.is-child').findAll('td')[6].text()).toBe('测试客户')
     expect(wrapper.get('tr.is-child .pdm-project-code-cell').classes()).toContain('is-child-code')
+  })
+
+  it('0302设备子项目可继续递归展开0302子项', async () => {
+    const nested: ProjectSummary = {
+      ...child,
+      id: 'child-2',
+      code: 'P700001-1-1',
+      name: '设备模块',
+      parentProjectId: child.id,
+      rootProjectId: parent.id,
+      childSequence: 1,
+      deviceModel: 'AK-2-C001-001-01-01',
+    }
+    const wrapper = mountProjectManager(emptyDirectory, [parent, child, nested])
+
+    await wrapper.get('[aria-label="展开P700001的子项目"]').trigger('click')
+    expect(wrapper.findAll('tr.is-child')).toHaveLength(1)
+    await wrapper.get('[aria-label="展开P700001-1的子项目"]').trigger('click')
+
+    expect(wrapper.findAll('tr.is-child')).toHaveLength(2)
+    expect(wrapper.text()).toContain('P700001-1-1')
+    expect(wrapper.findAll('tr.is-child')[1].findAll('td')[1].text()).toBe('0302 设备')
   })
 
   it('可从操作菜单编辑项目名称、别名和订单日期', async () => {

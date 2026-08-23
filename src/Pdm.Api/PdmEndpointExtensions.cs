@@ -23,7 +23,9 @@ public static class PdmEndpointExtensions
             IPasswordService passwords,
             ITokenIssuer tokenIssuer,
             IPersistentSessionTokenService persistentSessions,
+            CompanySessionService companySessions,
             IOptions<AuthenticationOptions> authenticationOptions,
+            HttpContext context,
             TimeProvider timeProvider,
             CancellationToken cancellationToken) =>
         {
@@ -35,6 +37,7 @@ public static class PdmEndpointExtensions
 
             var lifetime = TimeSpan.FromHours(authenticationOptions.Value.TokenLifetimeHours);
             var expiresAt = timeProvider.GetUtcNow().Add(lifetime);
+            var company = await companySessions.ResolveAsync(account, context.Request.Headers["X-Company-Id"].FirstOrDefault(), cancellationToken);
             return Results.Ok(new LoginResponse(
                 tokenIssuer.Issue(account, lifetime),
                 expiresAt,
@@ -42,7 +45,12 @@ public static class PdmEndpointExtensions
                 account.Username,
                 account.DisplayName,
                 account.EffectiveRoleCode,
-                (await repository.GetUserPermissionsAsync(account.Username, account.Role, cancellationToken)).Order().ToArray()));
+                (await repository.GetUserPermissionsAsync(account.Username, account.Role, cancellationToken)).Order().ToArray(),
+                company.PrimaryCompanyId,
+                company.ActiveCompanyId,
+                company.ActiveCompanyName,
+                company.CrossCompanyView,
+                company.AccessibleCompanies));
         }).AllowAnonymous();
 
         app.MapPost("/api/auth/resume", async (
@@ -50,7 +58,9 @@ public static class PdmEndpointExtensions
             IPdmRepository repository,
             ITokenIssuer tokenIssuer,
             IPersistentSessionTokenService persistentSessions,
+            CompanySessionService companySessions,
             IOptions<AuthenticationOptions> authenticationOptions,
+            HttpContext context,
             TimeProvider timeProvider,
             CancellationToken cancellationToken) =>
         {
@@ -60,6 +70,7 @@ public static class PdmEndpointExtensions
 
             var lifetime = TimeSpan.FromHours(authenticationOptions.Value.TokenLifetimeHours);
             var expiresAt = timeProvider.GetUtcNow().Add(lifetime);
+            var company = await companySessions.ResolveAsync(account, context.Request.Headers["X-Company-Id"].FirstOrDefault(), cancellationToken);
             return Results.Ok(new LoginResponse(
                 tokenIssuer.Issue(account, lifetime),
                 expiresAt,
@@ -67,7 +78,12 @@ public static class PdmEndpointExtensions
                 account.Username,
                 account.DisplayName,
                 account.EffectiveRoleCode,
-                (await repository.GetUserPermissionsAsync(account.Username, account.Role, cancellationToken)).Order().ToArray()));
+                (await repository.GetUserPermissionsAsync(account.Username, account.Role, cancellationToken)).Order().ToArray(),
+                company.PrimaryCompanyId,
+                company.ActiveCompanyId,
+                company.ActiveCompanyName,
+                company.CrossCompanyView,
+                company.AccessibleCompanies));
         }).AllowAnonymous();
 
         app.MapPost("/api/auth/password-reset-request", async (
@@ -118,6 +134,7 @@ public static class PdmEndpointExtensions
             IPasswordService passwords,
             ITokenIssuer tokenIssuer,
             IPersistentSessionTokenService persistentSessions,
+            CompanySessionService companySessions,
             IOptions<AuthenticationOptions> authenticationOptions,
             TimeProvider timeProvider,
             CancellationToken cancellationToken) =>
@@ -131,6 +148,7 @@ public static class PdmEndpointExtensions
             var updatedAccount = await repository.UpdateUserPasswordAsync(actor, passwords.Hash(request.Password), cancellationToken);
             await repository.AppendAuditAsync(new AuditEntry(Guid.NewGuid(), timeProvider.GetUtcNow(), actor, "user.password.change", nameof(UserAccount), account.Id.ToString(), "用户修改登录密码"), cancellationToken);
             var lifetime = TimeSpan.FromHours(authenticationOptions.Value.TokenLifetimeHours);
+            var company = await companySessions.ResolveAsync(updatedAccount, TenantContext.CompanyId?.ToString(), cancellationToken);
             return Results.Ok(new LoginResponse(
                 tokenIssuer.Issue(updatedAccount, lifetime),
                 timeProvider.GetUtcNow().Add(lifetime),
@@ -138,13 +156,18 @@ public static class PdmEndpointExtensions
                 account.Username,
                 account.DisplayName,
                 updatedAccount.EffectiveRoleCode,
-                (await repository.GetUserPermissionsAsync(updatedAccount.Username, updatedAccount.Role, cancellationToken)).Order().ToArray()));
+                (await repository.GetUserPermissionsAsync(updatedAccount.Username, updatedAccount.Role, cancellationToken)).Order().ToArray(),
+                company.PrimaryCompanyId,
+                company.ActiveCompanyId,
+                company.ActiveCompanyName,
+                company.CrossCompanyView,
+                company.AccessibleCompanies));
         });
 
         api.MapGet("/password-reset-requests", async (HttpContext context, IPdmRepository repository, CancellationToken cancellationToken) =>
         {
             var (actor, role) = CurrentUser(context.User);
-            return role != UserRole.Administrator
+            return role is not (UserRole.Administrator or UserRole.PlatformAdministrator)
                 ? Results.Forbid()
                 : Results.Ok(await repository.ListPasswordResetTasksAsync(cancellationToken));
         });
@@ -152,7 +175,7 @@ public static class PdmEndpointExtensions
         api.MapPut("/password-reset-requests/{taskId:guid}/reset", async (Guid taskId, HttpContext context, IPdmRepository repository, IPasswordService passwords, TimeProvider timeProvider, CancellationToken cancellationToken) =>
         {
             var (actor, role) = CurrentUser(context.User);
-            if (role != UserRole.Administrator) return Results.Forbid();
+            if (role is not (UserRole.Administrator or UserRole.PlatformAdministrator)) return Results.Forbid();
             var now = timeProvider.GetUtcNow();
             await repository.CompletePasswordResetTaskAsync(taskId, passwords.Hash("11111111"), actor, now, cancellationToken);
             await repository.AppendAuditAsync(new AuditEntry(Guid.NewGuid(), now, actor, "user.password.reset", nameof(UserAccount), taskId.ToString(), "管理员将用户密码重置为初始密码"), cancellationToken);
@@ -166,7 +189,12 @@ public static class PdmEndpointExtensions
         });
 
         api.MapGet("/project-numbering/options", async (IPdmRepository repository, CancellationToken cancellationToken) =>
-            Results.Ok(await repository.GetProjectNumberingOptionsAsync(cancellationToken)));
+        {
+            var options = await repository.GetProjectNumberingOptionsAsync(cancellationToken);
+            return Results.Ok(TenantContext.CompanyId is not Guid companyId
+                ? options
+                : options with { Organizations = options.Organizations.Where(item => item.Id == companyId).ToArray() });
+        });
 
         api.MapGet("/customers", async (HttpContext context, IPdmRepository repository, CancellationToken cancellationToken) =>
         {
@@ -204,30 +232,40 @@ public static class PdmEndpointExtensions
             var (actor, role) = CurrentUser(context.User);
             if (!await repository.HasUserPermissionAsync(actor, role, PermissionCodes.OrganizationSettingsManage, cancellationToken)
                 && !await repository.HasUserPermissionAsync(actor, role, PermissionCodes.RoleSettingsView, cancellationToken)) return Results.Forbid();
-            var users = await repository.ListUsersAsync(cancellationToken);
-            return Results.Ok(users.Select(user => new { user.Username, user.DisplayName, Role = user.EffectiveRoleCode, user.IsActive }));
+            var companyId = TenantContext.Current?.IsPlatformAdministrator == true ? TenantContext.CompanyId : TenantContext.Current?.PrimaryCompanyId;
+            var users = (await repository.ListUsersAsync(cancellationToken)).Where(user => companyId is null || user.CompanyId == companyId);
+            var mapped = new List<object>();
+            foreach (var user in users)
+            {
+                mapped.Add(MapManagedUser(user, await repository.GetUserCompanyScopeAsync(user.Username, cancellationToken)));
+            }
+            return Results.Ok(mapped);
         });
 
-        api.MapPost("/users", async (CreateManagedUserRequest request, HttpContext context, PdmWorkflowService workflow, IPasswordService passwords, CancellationToken cancellationToken) =>
+        api.MapPost("/users", async (CreateManagedUserRequest request, HttpContext context, PdmWorkflowService workflow, IPdmRepository repository, IPasswordService passwords, CancellationToken cancellationToken) =>
         {
             if (string.IsNullOrWhiteSpace(request.Password) || request.Password.Length < 8) throw new PdmRuleException("初始密码至少需要8位。");
             var (actor, role) = CurrentUser(context.User);
-            var saved = await workflow.CreateManagedUserAsync(new(request.Username, request.DisplayName, passwords.Hash(request.Password), request.Role, request.IsActive), actor, role, cancellationToken);
-            return Results.Created($"/api/users/{Uri.EscapeDataString(saved.Username)}", new { saved.Username, saved.DisplayName, Role = saved.EffectiveRoleCode, saved.IsActive });
+            var saved = await workflow.CreateManagedUserAsync(new(request.Username, request.DisplayName, passwords.Hash(request.Password), request.Role, request.IsActive,
+                request.CompanyId, request.CrossCompanyView, request.AccessibleCompanyIds), actor, role, cancellationToken);
+            var scope = await repository.GetUserCompanyScopeAsync(saved.Username, cancellationToken);
+            return Results.Created($"/api/users/{Uri.EscapeDataString(saved.Username)}", MapManagedUser(saved, scope));
         });
 
-        api.MapPut("/users/{username}", async (string username, UpdateManagedUserRequest request, HttpContext context, PdmWorkflowService workflow, CancellationToken cancellationToken) =>
+        api.MapPut("/users/{username}", async (string username, UpdateManagedUserRequest request, HttpContext context, PdmWorkflowService workflow, IPdmRepository repository, CancellationToken cancellationToken) =>
         {
             var (actor, role) = CurrentUser(context.User);
-            var saved = await workflow.UpdateManagedUserAsync(new(username, request.DisplayName, request.Role, request.IsActive), actor, role, cancellationToken);
-            return Results.Ok(new { saved.Username, saved.DisplayName, Role = saved.EffectiveRoleCode, saved.IsActive });
+            var saved = await workflow.UpdateManagedUserAsync(new(username, request.DisplayName, request.Role, request.IsActive,
+                request.CompanyId, request.CrossCompanyView, request.AccessibleCompanyIds), actor, role, cancellationToken);
+            var scope = await repository.GetUserCompanyScopeAsync(saved.Username, cancellationToken);
+            return Results.Ok(MapManagedUser(saved, scope));
         });
 
         api.MapPut("/users/{username}/reset-password", async (string username, HttpContext context, PdmWorkflowService workflow, IPasswordService passwords, CancellationToken cancellationToken) =>
         {
             var (actor, role) = CurrentUser(context.User);
             var saved = await workflow.ResetManagedUserPasswordAsync(username, passwords.Hash("11111111"), actor, role, cancellationToken);
-            return Results.Ok(new { saved.Username, saved.DisplayName, Role = saved.EffectiveRoleCode, saved.IsActive });
+            return Results.Ok(MapManagedUser(saved));
         });
 
         api.MapGet("/role-permissions", async (HttpContext context, IPdmRepository repository, CancellationToken cancellationToken) =>
@@ -258,14 +296,23 @@ public static class PdmEndpointExtensions
 
         api.MapGet("/organization-directory", async (IPdmRepository repository, CancellationToken cancellationToken) =>
         {
-            var directory = await repository.GetOrganizationDirectoryAsync(cancellationToken);
+            var directory = ScopeOrganizationDirectory(await repository.GetOrganizationDirectoryAsync(cancellationToken));
             return Results.Ok(new
             {
                 directory.Organizations,
                 Units = directory.Units.Select(unit => new { unit.Id, unit.OrganizationId, unit.ParentUnitId, unit.Code, unit.Name, Kind = unit.Kind.ToString(), unit.IsActive, unit.SortOrder }),
                 directory.Memberships,
                 directory.Managers,
-                Users = directory.Users.Select(user => new { user.Username, user.DisplayName, Role = user.EffectiveRoleCode, user.IsActive })
+                Users = directory.Users.Select(user => new
+                {
+                    user.Username,
+                    user.DisplayName,
+                    Role = user.EffectiveRoleCode,
+                    user.IsActive,
+                    user.CompanyId,
+                    user.CrossCompanyView,
+                    AccessibleCompanyIds = user.AccessibleCompanyIds ?? Array.Empty<Guid>()
+                })
             });
         });
 
@@ -338,7 +385,10 @@ public static class PdmEndpointExtensions
                 BomSurfaceTreatmentProperty = request.BomSurfaceTreatmentProperty,
                 BomWeightProperty = request.BomWeightProperty,
                 BomPropertyMappings = request.BomPropertyMappings ?? currentSettings.BomPropertyMappings,
-                ValidationRules = validationRules
+                ValidationRules = validationRules,
+                ApprovalWorkflows = request.ApprovalWorkflows ?? currentSettings.ApprovalWorkflows,
+                MaterialCodeApproval = request.MaterialCodeApproval ?? currentSettings.MaterialCodeApproval,
+                ReleaseChangeReasonTypes = request.ReleaseChangeReasonTypes ?? currentSettings.ReleaseChangeReasonTypes
             };
             return Results.Ok(await workflow.UpdateSystemSettingsAsync(settings, actor, role, cancellationToken));
         });
@@ -384,7 +434,8 @@ public static class PdmEndpointExtensions
                     request.Quantity,
                     actor,
                     string.Empty,
-                    string.Empty),
+                    string.Empty,
+                    request.BomItemCategoryCode),
                 actor,
                 role,
                 cancellationToken);
@@ -395,7 +446,7 @@ public static class PdmEndpointExtensions
         {
             var (actor, role) = CurrentUser(context.User);
             var project = await workflow.CreateSubprojectAsync(
-                new CreateSubprojectCommand(projectId, request.Name, request.ProjectAlias, request.Quantity),
+                new CreateSubprojectCommand(projectId, request.Name, request.ProjectAlias, request.Quantity, EquipmentTypeCode: request.EquipmentTypeCode),
                 actor,
                 role,
                 cancellationToken);
@@ -563,6 +614,25 @@ public static class PdmEndpointExtensions
             return Results.File(stream, "application/octet-stream", download ? document.FileName : null, enableRangeProcessing: true);
         });
 
+        api.MapGet("/documents/{documentId:guid}/versions/{versionId:guid}/preview", async (Guid documentId, Guid versionId, HttpContext context, IPdmRepository repository, IFileStorage storage, PdmWorkflowService workflow, CancellationToken cancellationToken) =>
+        {
+            var (actor, role) = CurrentUser(context.User);
+            var document = await repository.FindDocumentAsync(documentId, cancellationToken);
+            var version = await repository.FindDocumentVersionAsync(documentId, versionId, cancellationToken);
+            if (document is null || version?.Preview is null) return Results.NotFound();
+            var project = await repository.FindProjectAsync(document.ProjectId, cancellationToken);
+            if (project is null) return Results.NotFound();
+            await workflow.AuditVersionReadAsync(documentId, versionId, actor, role, "document.preview.read", cancellationToken);
+            await storage.VerifyStoredFileAsync(
+                project,
+                new StoredFile(version.Preview.StorageRelativePath, version.Preview.FileLength, version.Preview.Sha256, version.CreatedAt),
+                cancellationToken);
+            var path = StorageLocationPolicy.ResolveUnder(project.VaultLocation, version.Preview.StorageRelativePath);
+            var stream = await storage.OpenReadAsync(path, cancellationToken);
+            var contentType = version.Preview.Format == DocumentPreviewFormat.Pdf ? "application/pdf" : "model/step";
+            return Results.File(stream, contentType, enableRangeProcessing: true);
+        });
+
         api.MapPost("/documents/{documentId:guid}/open-manifest", async (Guid documentId, CreateControlledOpenManifestRequest request, HttpContext context, PdmWorkflowService workflow, CancellationToken cancellationToken) =>
         {
             var (actor, role) = CurrentUser(context.User);
@@ -660,14 +730,19 @@ public static class PdmEndpointExtensions
             return Results.Ok(await workflow.ResolveBomItemAsync(projectId, itemId, new ResolveBomItemCommand(request.Action, request.TargetKind), actor, role, cancellationToken));
         });
 
-        api.MapPatch("/projects/{projectId:guid}/boms/items/batch", async (Guid projectId, BatchUpdateBomItemsRequest request, HttpContext context, PdmWorkflowService workflow, CancellationToken cancellationToken) =>
+        api.MapPatch("/projects/{projectId:guid}/boms/items/batch", async (Guid projectId, BatchUpdateBomItemsRequest request, HttpContext context, PdmWorkflowService workflow, MaterialService materials, CancellationToken cancellationToken) =>
         {
             var (actor, role) = CurrentUser(context.User);
             var command = new BatchUpdateBomItemsCommand(
                 request.ItemIds, request.Fields, request.TargetKind, request.Unit, request.DrawingNumber, request.Name,
                 request.Specification, request.Remark, request.Brand, request.Material, request.SurfaceTreatment,
                 request.Weight, request.Quantity, request.Revision, request.Complete);
-            return Results.Ok(await workflow.BatchUpdateBomItemsAsync(projectId, command, actor, role, cancellationToken));
+            var updated = await workflow.BatchUpdateBomItemsAsync(projectId, command, actor, role, cancellationToken);
+            if (request.ItemIds.Count == 1
+                && request.Fields.Contains("drawingNumber", StringComparer.OrdinalIgnoreCase)
+                && (request.Fields.Contains("specification", StringComparer.OrdinalIgnoreCase) || request.Fields.Contains("brand", StringComparer.OrdinalIgnoreCase)))
+                await materials.SetBomMaterialLinkByCodeAsync(projectId, request.ItemIds[0], request.DrawingNumber, actor, role, cancellationToken);
+            return Results.Ok(updated);
         });
 
         api.MapPost("/projects/{projectId:guid}/boms/items/batch-delete", async (Guid projectId, BatchDeleteBomItemsRequest request, HttpContext context, PdmWorkflowService workflow, CancellationToken cancellationToken) =>
@@ -710,6 +785,36 @@ public static class PdmEndpointExtensions
         {
             var (actor, role) = CurrentUser(context.User);
             return Results.Ok(await workflow.FailCadPropertyWritebackAsync(id, request.Error, request.Conflict, actor, role, cancellationToken));
+        });
+
+        api.MapGet("/projects/{projectId:guid}/drawing-reviews", async (Guid projectId, HttpContext context, PdmWorkflowService workflow, CancellationToken cancellationToken) =>
+        {
+            var (actor, role) = CurrentUser(context.User);
+            return Results.Ok(await workflow.ListDrawingReviewPackagesAsync(projectId, actor, role, cancellationToken));
+        });
+
+        api.MapPost("/projects/{projectId:guid}/drawing-reviews", async (Guid projectId, HttpContext context, PdmWorkflowService workflow, CancellationToken cancellationToken) =>
+        {
+            var (actor, role) = CurrentUser(context.User);
+            return Results.Ok(await workflow.CreateDrawingReviewPackageAsync(projectId, actor, role, cancellationToken));
+        });
+
+        api.MapPost("/drawing-reviews/{packageId:guid}/markups", async (Guid packageId, AddDrawingReviewMarkupRequest request, HttpContext context, PdmWorkflowService workflow, CancellationToken cancellationToken) =>
+        {
+            var (actor, role) = CurrentUser(context.User);
+            return Results.Ok(await workflow.AddDrawingReviewMarkupAsync(packageId, new AddDrawingReviewMarkupCommand(request.ItemId, request.Target, request.ViewName, request.NormalizedX, request.NormalizedY, request.Text, request.Severity), actor, role, cancellationToken));
+        });
+
+        api.MapPost("/drawing-reviews/{packageId:guid}/markups/{markupId:guid}/resolve", async (Guid packageId, Guid markupId, HttpContext context, PdmWorkflowService workflow, CancellationToken cancellationToken) =>
+        {
+            var (actor, role) = CurrentUser(context.User);
+            return Results.Ok(await workflow.ResolveDrawingReviewMarkupAsync(packageId, markupId, actor, role, cancellationToken));
+        });
+
+        api.MapPost("/drawing-reviews/{packageId:guid}/items/{itemId:guid}/decision", async (Guid packageId, Guid itemId, DecideDrawingReviewTargetRequest request, HttpContext context, PdmWorkflowService workflow, CancellationToken cancellationToken) =>
+        {
+            var (actor, role) = CurrentUser(context.User);
+            return Results.Ok(await workflow.DecideDrawingReviewTargetAsync(packageId, itemId, new DecideDrawingReviewTargetCommand(request.Target, request.Decision, request.Comment), actor, role, cancellationToken));
         });
 
         api.MapGet("/projects/{projectId:guid}/boms/empty-declarations", async (Guid projectId, HttpContext context, IPdmRepository repository, CancellationToken cancellationToken) =>
@@ -848,23 +953,26 @@ public static class PdmEndpointExtensions
             });
         });
 
-        api.MapPost("/release-packages", async (CreateReleasePackageRequest request, HttpContext context, IPdmRepository repository, PdmWorkflowService workflow, CancellationToken cancellationToken) =>
+        api.MapPost("/release-packages", async (CreateReleasePackageRequest request, HttpContext context, IPdmRepository repository, PdmWorkflowService workflow, BomHeaderService bomHeaders, CancellationToken cancellationToken) =>
         {
             var (actor, role) = CurrentUser(context.User);
             if (!await repository.HasProjectContentReadAccessAsync(request.ProjectId, actor, role, cancellationToken)) return Results.Forbid();
-            return Results.Ok(await workflow.CreateReleasePackageAsync(
-                request.ProjectId,
-                request.ReferenceSnapshotId,
-                request.Number,
-                request.ChangeNumber ?? request.Number,
-                request.ChangeReason ?? "兼容既有发布流程创建的设变",
-                request.EffectiveSerialFrom ?? "未指定",
-                request.EffectiveSerialTo,
-                request.ProcessReviewer,
-                request.Approver,
-                actor,
-                role,
-                cancellationToken));
+            await bomHeaders.EnsureReleaseReadyAsync(request.ProjectId, request.Scope, cancellationToken);
+            return Results.Ok(request.Scope == ReleaseScope.LegacyCombined
+                ? await workflow.CreateReleasePackageAsync(
+                    request.ProjectId, request.ReferenceSnapshotId, request.Number ?? string.Empty,
+                    request.ChangeNumber ?? request.Number ?? string.Empty,
+                    request.ChangeReason ?? "兼容既有发布流程创建的设变",
+                    request.EffectiveSerialFrom ?? "未指定", request.EffectiveSerialTo,
+                    request.ProcessReviewer ?? string.Empty, request.Approver ?? string.Empty,
+                    actor, role, cancellationToken)
+                : await workflow.CreateScopedReleasePackageAsync(
+                    request.ProjectId, request.ReferenceSnapshotId, string.Empty,
+                    string.Empty,
+                    request.ChangeReason ?? string.Empty,
+                    "未指定", null,
+                    request.Scope, request.SelectedBomItemIds,
+                    actor, role, cancellationToken));
         });
 
         api.MapPost("/release-packages/{releasePackageId:guid}/submit", async (Guid releasePackageId, HttpContext context, PdmWorkflowService workflow, CancellationToken cancellationToken) =>
@@ -879,36 +987,52 @@ public static class PdmEndpointExtensions
             return Results.Ok(await workflow.WithdrawReleasePackageAsync(releasePackageId, actor, role, request.Comment, cancellationToken));
         });
 
-        api.MapPost("/approval-tasks/{taskId:guid}/decision", async (Guid taskId, ApprovalRequest request, HttpContext context, PdmWorkflowService workflow, CancellationToken cancellationToken) =>
+        api.MapPost("/approval-tasks/{taskId:guid}/decision", async (Guid taskId, ApprovalRequest request, HttpContext context, PdmWorkflowService workflow, MaterialService materials, CancellationToken cancellationToken) =>
         {
             var (actor, role) = CurrentUser(context.User);
+            if (request.Decision == ApprovalDecision.Approved)
+            {
+                var itemIds = await workflow.GetNonStandardItemsForFinalApprovalAsync(taskId, cancellationToken);
+                if (itemIds.Count > 0)
+                {
+                    var package = await workflow.FindReleasePackageByApprovalTaskAsync(taskId, cancellationToken);
+                    var created = await materials.EnsureNonStandardMaterialsAsync(
+                        package.ProjectId,
+                        itemIds, actor, role, cancellationToken);
+                    foreach (var material in created.Where(item => item.SourceBomItemId.HasValue))
+                        await workflow.ApplyMaterialCodeToBomAsync(
+                            package.ProjectId,
+                            material.SourceBomItemId!.Value, material.MaterialCode, actor, cancellationToken);
+                    await workflow.ApplyReleasePackageMaterialCodesAsync(package.Id, created.Where(item => item.SourceBomItemId.HasValue)
+                        .ToDictionary(item => item.SourceBomItemId!.Value, item => item.MaterialCode), actor, cancellationToken);
+                }
+            }
             return Results.Ok(await workflow.DecideAsync(taskId, actor, role, request.Decision, request.Comment, cancellationToken));
+        });
+
+        api.MapPost("/approval-tasks/{taskId:guid}/emergency-decision", async (Guid taskId, EmergencyApprovalRequest request, HttpContext context, PdmWorkflowService workflow, CancellationToken cancellationToken) =>
+        {
+            var (actor, role) = CurrentUser(context.User);
+            return Results.Ok(await workflow.EmergencyDecideAsync(taskId, actor, role, request.Decision, request.Reason, cancellationToken));
         });
 
         api.MapGet("/approval-tasks/mine", async (HttpContext context, IPdmRepository repository, CancellationToken cancellationToken) =>
         {
             var (actor, role) = CurrentUser(context.User);
             var projects = await repository.ListProjectsForUserAsync(actor, role, cancellationToken);
+            var canEmergencySubstitute = await repository.HasUserPermissionAsync(actor, role, PermissionCodes.ApprovalEmergencySubstitute, cancellationToken);
             var results = new List<MyApprovalTaskResponse>();
             foreach (var project in projects)
             {
                 var packages = await repository.ListReleasePackagesAsync(project.Id, cancellationToken);
                 foreach (var package in packages)
                 {
-                    var expectedStage = package.State switch
-                    {
-                        ReleasePackageState.ProcessReview => ApprovalStage.ProcessReview,
-                        ReleasePackageState.Approval => ApprovalStage.Approval,
-                        _ => (ApprovalStage?)null
-                    };
-                    if (expectedStage is null) continue;
-                    results.AddRange(package.ApprovalTasks
-                        .Where(task => task.Decision is null
-                            && task.Stage == expectedStage
-                            && string.Equals(task.Assignee, actor, StringComparison.OrdinalIgnoreCase))
-                        .Select(task => new MyApprovalTaskResponse(
-                            task.Id, project.Id, project.Code, project.Name, package.Id, package.Number,
-                            task.Stage, package.State, package.CreatedAt)));
+                    if (package.State is not (ReleasePackageState.ProcessReview or ReleasePackageState.Approval)) continue;
+                    var task = package.ApprovalTasks.OrderBy(item => item.StepOrder).FirstOrDefault(item => item.Decision is null);
+                    if (task is null || (!canEmergencySubstitute && !string.Equals(task.Assignee, actor, StringComparison.OrdinalIgnoreCase))) continue;
+                    results.Add(new MyApprovalTaskResponse(
+                        task.Id, project.Id, project.Code, project.Name, package.Id, package.Number,
+                        task.Stage, package.State, package.CreatedAt));
                 }
             }
             return Results.Ok(results.OrderBy(item => item.CreatedAt));
@@ -1010,6 +1134,30 @@ public static class PdmEndpointExtensions
         var roleValue = principal.FindFirstValue(ClaimTypes.Role) ?? throw new UnauthorizedAccessException("角色信息无效。 ");
         return (actor, Enum.Parse<UserRole>(roleValue));
     }
+
+    private static OrganizationDirectory ScopeOrganizationDirectory(OrganizationDirectory directory)
+    {
+        var tenant = TenantContext.Current;
+        if (tenant is null || tenant.IsPlatformAdministrator) return directory;
+        var unitIds = directory.Units.Where(item => item.OrganizationId == tenant.CompanyId).Select(item => item.Id).ToHashSet();
+        return new OrganizationDirectory(
+            directory.Organizations.Where(item => item.Id == tenant.CompanyId).ToArray(),
+            directory.Units.Where(item => unitIds.Contains(item.Id)).ToArray(),
+            directory.Memberships.Where(item => unitIds.Contains(item.UnitId)).ToArray(),
+            directory.Managers.Where(item => unitIds.Contains(item.UnitId)).ToArray(),
+            directory.Users.Where(item => item.CompanyId == tenant.CompanyId).ToArray());
+    }
+
+    private static object MapManagedUser(UserAccount user, UserCompanyScope? scope = null) => new
+    {
+        user.Username,
+        user.DisplayName,
+        Role = user.EffectiveRoleCode,
+        user.IsActive,
+        CompanyId = scope?.PrimaryCompanyId ?? user.CompanyId,
+        CrossCompanyView = scope?.CrossCompanyView ?? user.CrossCompanyView,
+        AccessibleCompanyIds = scope?.AccessibleCompanyIds ?? Array.Empty<Guid>()
+    };
 
     private static object MapRolePermissionDirectory(RolePermissionDirectory directory) => new
     {

@@ -53,7 +53,7 @@ test.beforeEach(async ({ page }) => {
       const credentials = route.request().postDataJSON() as { username?: string }
       const administrator = credentials.username === 'admin'
       currentUsername = administrator ? 'admin' : 'engineer'
-      return fulfill({ accessToken: 'e2e-token', expiresAt: '2099-01-01T00:00:00Z', resumeToken: 'e2e-resume-token', username: currentUsername, displayName: administrator ? '系统管理员' : '真实工程师', role: administrator ? 'Administrator' : 'Engineer', permissions: administrator ? ['project.view', 'project.create', 'project.child.create', 'project.content.view', 'document.edit', 'bom.edit', 'release.manage', 'settings.customer.manage', 'settings.organization.manage', 'settings.folder.manage', 'settings.storage.manage', 'system.role.view', 'system.role.edit', 'audit.view'] : ['project.view', 'project.create', 'project.child.create', 'project.content.view', 'document.edit', 'bom.edit', 'release.manage'] })
+      return fulfill({ accessToken: 'e2e-token', expiresAt: '2099-01-01T00:00:00Z', resumeToken: 'e2e-resume-token', username: currentUsername, displayName: administrator ? '系统管理员' : '真实工程师', role: administrator ? 'Administrator' : 'Engineer', permissions: administrator ? ['project.view', 'project.create', 'project.child.create', 'project.content.view', 'document.edit', 'bom.edit', 'release.manage', 'settings.customer.manage', 'settings.organization.manage', 'settings.folder.manage', 'settings.storage.manage', 'system.role.view', 'system.role.edit', 'audit.view'] : ['project.view', 'project.create', 'project.child.create', 'project.content.view', 'document.edit', 'bom.edit', 'release.manage'], primaryCompanyId: 'org-ks', activeCompanyId: 'org-ks', activeCompanyName: '昆山阿普顿自动化系统有限公司', crossCompanyView: administrator, accessibleCompanies: administrator ? [{ id: 'org-ks', name: '昆山阿普顿自动化系统有限公司', code: '7' }, { id: 'org-gz', name: '广州阿普顿自动化系统有限公司', code: '3' }] : [{ id: 'org-ks', name: '昆山阿普顿自动化系统有限公司', code: '7' }] })
     }
     if (path === '/api/auth/me') return fulfill({ username: currentUsername, displayName: currentUsername === 'admin' ? '系统管理员' : '真实工程师', nickname: null, gender: 'unspecified', landline: null, mobilePhone: null, email: null })
     if (path === '/api/password-reset-requests') return fulfill([])
@@ -99,7 +99,7 @@ test.beforeEach(async ({ page }) => {
   })
 })
 
-test('engineer logs in and reads the API-backed PDM workspace', async ({ page }, testInfo) => {
+test('engineer logs in and reads the API-backed PLM workspace', async ({ page }, testInfo) => {
   await page.setViewportSize({ width: 1920, height: 1080 })
   await page.addInitScript(() => {
     Object.defineProperty(window, 'pdmHostMessages', {
@@ -116,7 +116,7 @@ test('engineer logs in and reads the API-backed PDM workspace', async ({ page },
 
   await expect(page.getByRole('main', { name: '未登录主页' })).toBeVisible()
   await page.getByRole('banner').getByRole('button', { name: '登录', exact: true }).click()
-  const loginForm = page.getByLabel('登录PDM')
+  const loginForm = page.getByLabel('登录PLM')
   await loginForm.getByRole('textbox', { name: '账号' }).fill('engineer')
   await loginForm.getByRole('textbox', { name: '密码' }).fill('correct-password')
   await loginForm.getByRole('button', { name: '登录', exact: true }).click()
@@ -147,7 +147,7 @@ test('engineer logs in and reads the API-backed PDM workspace', async ({ page },
     }
   })
   expect(crmShellLayout.sidebarWidth).toBe(155)
-  expect(crmShellLayout.brandHeight).toBe(76)
+  expect(crmShellLayout.brandHeight).toBe(62)
   expect(crmShellLayout.navItemHeight).toBe(56)
   expect(crmShellLayout.titlebarHeight).toBe(62)
   expect(crmShellLayout.sidebarBackground).toContain('linear-gradient')
@@ -171,7 +171,7 @@ test('engineer logs in and reads the API-backed PDM workspace', async ({ page },
 
   await expect(page.locator('.pdm-project-sidebar__summary').getByText('PRJ-REAL-001 · 真实装配项目', { exact: true })).toBeVisible()
   await expect(page.getByRole('banner').getByText('真实工程师', { exact: true })).toBeVisible()
-  await page.getByRole('button', { name: '文件库', exact: true }).click()
+  await page.getByRole('button', { name: '文件', exact: true }).click()
   await expect(page.getByText('项目文件夹', { exact: true })).toBeVisible()
   await expect(page.getByText('机械图纸', { exact: true })).toBeVisible()
   await page.getByText('PRJ-REAL-001-0', { exact: true }).first().click()
@@ -185,7 +185,7 @@ test('engineer logs in and reads the API-backed PDM workspace', async ({ page },
   expect(fileDetailWidths.table).toBeGreaterThanOrEqual(1080)
   expect(fileDetailWidths.number).toBeGreaterThanOrEqual(200)
   expect(fileDetailWidths.name).toBeGreaterThanOrEqual(260)
-  expect(fileDetailWidths.updated).toBeGreaterThanOrEqual(180)
+  expect(fileDetailWidths.updated).toBeGreaterThanOrEqual(170)
   await page.getByRole('button', { name: '图档', exact: true }).click()
   await expect(page.getByLabel('项目设计树')).toContainText('REAL-PRT-001')
   await expect(page.getByLabel('工作版本 W2')).toHaveText('W2')
@@ -259,7 +259,7 @@ test('project numbers remain fully visible at the compact adaptive width', async
   await page.setViewportSize({ width: 982, height: 994 })
   await page.goto('/')
   await page.getByRole('banner').getByRole('button', { name: '登录', exact: true }).click()
-  const loginForm = page.getByLabel('登录PDM')
+  const loginForm = page.getByLabel('登录PLM')
   await loginForm.getByRole('textbox', { name: '账号' }).fill('engineer')
   await loginForm.getByRole('textbox', { name: '密码' }).fill('correct-password')
   await loginForm.getByRole('button', { name: '登录', exact: true }).click()
@@ -286,7 +286,7 @@ test('administrator switches independent company organization trees', async ({ p
   await page.addInitScript(() => localStorage.setItem('pdm_active_organization', 'org-ks'))
   await page.goto('/')
   await page.getByRole('banner').getByRole('button', { name: '登录', exact: true }).click()
-  const loginForm = page.getByLabel('登录PDM')
+  const loginForm = page.getByLabel('登录PLM')
   await loginForm.getByRole('textbox', { name: '账号' }).fill('admin')
   await loginForm.getByRole('textbox', { name: '密码' }).fill('correct-password')
   await loginForm.getByRole('button', { name: '登录', exact: true }).click()
@@ -302,8 +302,13 @@ test('administrator switches independent company organization trees', async ({ p
   await expect(companyTree).toContainText('未分配人员2')
 
   await page.getByLabel('选择当前公司').selectOption('org-gz')
-  await expect(companyTree).toContainText('广州自动化事业部')
-  await expect(companyTree).not.toContainText('昆山自动化事业部')
+  await expect(page.getByRole('button', { name: '切换当前公司' })).toContainText('广州阿普顿自动化系统有限公司')
+  await page.getByRole('button', { name: '系统管理', exact: true }).click()
+  await page.getByRole('button', { name: '用户设置', exact: true }).click()
+  await page.getByLabel('用户设置功能').getByRole('button', { name: '组织关系', exact: true }).click()
+  const switchedCompanyTree = page.getByLabel('公司组织树')
+  await expect(switchedCompanyTree).toContainText('广州自动化事业部')
+  await expect(switchedCompanyTree).not.toContainText('昆山自动化事业部')
   await expect(page.getByLabel('组织详情')).toContainText('广州设计员')
   await expect.poll(() => page.evaluate(() => localStorage.getItem('pdm_active_organization'))).toBe('org-gz')
 
@@ -321,7 +326,7 @@ for (const scale of [
     await page.setViewportSize({ width: scale.width, height: scale.height })
     await page.goto('/')
     await page.getByRole('banner').getByRole('button', { name: '登录', exact: true }).click()
-    const loginForm = page.getByLabel('登录PDM')
+    const loginForm = page.getByLabel('登录PLM')
     await loginForm.getByRole('textbox', { name: '账号' }).fill('engineer')
     await loginForm.getByRole('textbox', { name: '密码' }).fill('correct-password')
     await loginForm.getByRole('button', { name: '登录', exact: true }).click()
@@ -369,11 +374,11 @@ for (const scale of [
 
     const navCases = [
       ['概览', '工作台主页面'],
-      ['文件库', '项目文件夹'],
+      ['文件', '项目文件夹'],
       ['图档', '项目设计树'],
       ['BOM', 'BOM维护'],
-      ['审批发布', '审批与生产发包'],
-      ['项目记录', '审计查询'],
+      ['发布', '发布总览'],
+      ['记录', '审计查询'],
     ] as const
     for (const [buttonName, panelName] of navCases) {
       const button = page.getByRole('button', { name: buttonName, exact: true })

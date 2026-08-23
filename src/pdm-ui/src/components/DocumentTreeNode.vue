@@ -1,18 +1,20 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
 import { ChevronDown, ChevronRight, Minus } from '@lucide/vue'
-import type { DocumentNode } from '../types'
+import type { DocumentNode, DrawingReviewBadge } from '../types'
 import CadDocumentIcon from './CadDocumentIcon.vue'
 
 const props = defineProps<{
   node: DocumentNode
   level?: number
   selectedId: string
+  reviewStates?: Record<string, DrawingReviewBadge>
 }>()
 
 const emit = defineEmits<{ select: [node: DocumentNode]; context: [node: DocumentNode, event: MouseEvent] }>()
 const expanded = ref((props.level ?? 0) < 2)
 const hasChildren = computed(() => props.node.children.length > 0)
+const reviewState = computed(() => props.node.documentId ? props.reviewStates?.[props.node.documentId] : undefined)
 const versionText = computed(() => props.node.snapshotVersion === undefined
   ? props.node.version
   : `${props.node.snapshotVersion} / ${props.node.version}`)
@@ -65,6 +67,7 @@ function openContext(event: MouseEvent) {
       </span>
       <span v-if="node.status !== 'Missing' && node.status !== 'Unregistered' && node.status !== 'Unarchived'" class="pdm-tree-row__version" :title="versionHint">
         <em>{{ versionText }}</em>
+        <small v-if="reviewState" class="pdm-review-badge" :class="`is-${reviewState.tone}`">{{ reviewState.label }}</small>
         <small v-if="versionStateText">{{ versionStateText }}</small>
       </span>
       <em v-else>{{ node.status === 'Missing' ? '缺失' : node.status === 'Unarchived' ? '未存档' : '未入库' }}</em>
@@ -76,6 +79,7 @@ function openContext(event: MouseEvent) {
         :node="child"
         :level="(level ?? 0) + 1"
         :selected-id="selectedId"
+        :review-states="reviewStates"
         @select="emit('select', $event)"
         @context="(node, event) => emit('context', node, event)"
       />

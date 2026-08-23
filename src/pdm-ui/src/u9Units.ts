@@ -16,7 +16,7 @@ export const u9UnitOptions = [
 
 export function u9UnitLabel(code: string) {
   const unit = u9UnitOptions.find(item => item.code === code)
-  return unit ? `${unit.code} ${unit.name}` : code
+  return unit?.name ?? code
 }
 
 export function u9UnitName(code: string) {

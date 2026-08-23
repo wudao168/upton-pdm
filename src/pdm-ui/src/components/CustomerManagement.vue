@@ -7,6 +7,7 @@ import type { CrmConnectionTestResult, CrmCustomerSyncResult, CrmIntegrationSett
 const props = defineProps<{
   customers: PdmCustomer[]
   integrationSettings: CrmIntegrationSettings
+  customerQueryPath: string
   pending: boolean
   onSaveSettings: (input: UpdateCrmIntegrationInput) => Promise<CrmIntegrationSettings>
   onTestConnection: () => Promise<CrmConnectionTestResult>
@@ -75,24 +76,15 @@ async function syncCustomers() {
 
 <template>
   <section class="pdm-project-manager pdm-crm-customer-page" aria-label="U9C客户同步">
-    <header class="pdm-pagebar">
-      <div><div class="pdm-breadcrumb">系统管理 <span>/</span> U9C接口 <span>/</span> 客户查询</div><h1>客户查询</h1><p>客户编码和客户名称由U9C客户参照接口提供，PDM不再手工新建或修改客户。</p></div>
-      <button type="button" class="pdm-primary-action" :disabled="pending || !integrationSettings.passwordConfigured" @click="syncCustomers"><RefreshCw :size="16" />从U9C同步</button>
-    </header>
-
     <section class="pdm-panel pdm-crm-connection">
       <header class="pdm-manager-heading">
-        <div><h2>U9C客户同步</h2><p>复用“U9C接口 → 基础设置”的OAuth连接，只读调用 <code>GetCommonReference/Create</code> 获取客户编码和名称。</p></div>
+        <div><h2>U9C客户同步</h2><p>复用“U9C接口 → 基础设置”的OAuth连接，只读调用 <code>{{ customerQueryPath }}</code> 获取客户编码和名称；接口路径在“接口设置”中统一维护。</p></div>
         <span :class="integrationSettings.passwordConfigured ? 'pdm-status is-ok' : 'pdm-status is-warn'">{{ integrationSettings.passwordConfigured ? 'OAuth已配置' : 'OAuth未配置' }}</span>
       </header>
-      <div class="pdm-settings-form pdm-crm-settings-form">
-        <label>U9C服务地址<input :value="integrationSettings.baseUrl" name="u9CustomerBaseUrl" readonly><small>连接地址在“U9C接口 → 基础设置”中统一维护。</small></label>
-        <label>U9C用户<input :value="integrationSettings.username" name="u9CustomerUser" readonly><small>OAuth Token仅用于当次查询，不落库保存。</small></label>
-      </div>
       <div class="pdm-crm-schedule" aria-label="U9C定时同步设置">
         <div class="pdm-crm-schedule__switch">
           <label><input v-model="draft.autoSyncEnabled" name="u9CustomerAutoSyncEnabled" type="checkbox"><span>启用定时同步</span></label>
-          <small>由PDM服务端后台执行，关闭客户端或网页后仍会按计划同步。</small>
+          <small>由PLM服务端后台执行，关闭客户端或网页后仍会按计划同步。</small>
         </div>
         <label class="pdm-crm-schedule__interval">同步间隔
           <select v-model.number="draft.autoSyncIntervalMinutes" name="u9CustomerAutoSyncIntervalMinutes" :disabled="!draft.autoSyncEnabled">
@@ -106,11 +98,11 @@ async function syncCustomers() {
       </div>
       <div class="pdm-crm-connection-footer">
         <small>最近同步：{{ lastSyncText }}<template v-if="integrationSettings.lastSyncAt">，{{ integrationSettings.lastSyncCount }}个客户</template></small>
-        <div class="pdm-manager-actions"><button type="button" class="pdm-secondary-action" :disabled="pending || !integrationSettings.passwordConfigured" @click="testConnection"><PlugZap :size="15" />测试连接</button><button type="button" class="pdm-primary-action" :disabled="pending" @click="saveSettings">保存同步计划</button></div>
+        <div class="pdm-manager-actions"><button type="button" class="pdm-secondary-action" :disabled="pending || !integrationSettings.passwordConfigured" @click="testConnection"><PlugZap :size="15" />测试连接</button><button type="button" class="pdm-primary-action" :disabled="pending" @click="saveSettings">保存同步计划</button><button type="button" class="pdm-primary-action" :disabled="pending || !integrationSettings.passwordConfigured" @click="syncCustomers"><RefreshCw :size="16" />从U9C同步</button></div>
       </div>
     </section>
 
-    <section class="pdm-panel pdm-project-list">
+    <section class="pdm-panel pdm-project-list pdm-crm-customer-list">
       <header class="pdm-panel-heading"><div><h2>U9C客户列表</h2><small>仅显示U9C已同步的客户编码和名称；同步不会删除历史项目已使用的客户。</small></div><label class="pdm-inline-search"><Search :size="15" /><input v-model="query" placeholder="搜索客户编码或名称"></label></header>
       <div v-if="filteredCustomers.length" class="pdm-table-scroll"><table class="pdm-project-table"><thead><tr><th>客户编码</th><th>客户名称</th><th>状态</th><th>来源</th></tr></thead><tbody><tr v-for="customer in filteredCustomers" :key="customer.id"><td><strong>{{ customer.code }}</strong></td><td>{{ customer.name }}</td><td><span :class="customer.isActive ? 'pdm-status is-ok' : 'pdm-status is-warn'">{{ customer.isActive ? '当前可见' : '历史保留' }}</span></td><td><span class="pdm-status is-ok">U9C</span></td></tr></tbody></table></div>
       <div v-else class="pdm-project-empty"><RefreshCw :size="38" /><h2>暂无U9C客户数据</h2><p>请先到“U9C接口 → 基础设置”维护连接，再测试客户查询并执行“从U9C同步”。</p></div>

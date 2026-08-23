@@ -13,7 +13,7 @@ interface DesktopSettingsDetail {
 }
 
 const available = ref(false)
-const startWithWindows = ref(false)
+const startWithWindows = ref(true)
 const workspaceRoot = ref('')
 const savedWorkspaceRoot = ref('')
 const defaultWorkspaceRoot = ref('')
@@ -71,10 +71,6 @@ onBeforeUnmount(() => {
 
 <template>
   <section class="pdm-project-manager" aria-label="客户端设置">
-    <header class="pdm-pagebar">
-      <div><div class="pdm-breadcrumb">客户端设置 <span>/</span> 本地工作区</div><h1>客户端设置</h1><p>设置当前Windows用户的PDM本地缓存位置和启动方式。</p></div>
-    </header>
-
     <section class="pdm-panel pdm-manager-panel">
       <header class="pdm-manager-heading"><div><h2>本地缓存工作区</h2><p>打开最新、历史只读预览和本地工作副本将保存在此目录。</p></div></header>
       <label class="pdm-client-workspace-label">
@@ -91,7 +87,7 @@ onBeforeUnmount(() => {
     <section class="pdm-panel pdm-manager-panel">
       <header class="pdm-manager-heading"><div><h2>客户端常驻</h2><p>关闭窗口后，客户端继续在Windows右下角通知区域运行。</p></div></header>
       <div class="pdm-setting-list">
-        <article><div><small>启动方式</small><strong>随电脑启动</strong><small>启动后直接进入通知区域；双击PDM图标恢复窗口，右键图标可退出。</small></div><button type="button" class="pdm-secondary-action" :disabled="!available" @click="toggleStartWithWindows">{{ startWithWindows ? '已开启' : '已关闭' }}</button></article>
+        <article><div><small>启动方式</small><strong>随电脑启动</strong><small>默认开启。启动后直接进入通知区域；双击PLM图标恢复窗口，右键图标可退出。</small></div><button type="button" class="pdm-secondary-action" :disabled="!available" @click="toggleStartWithWindows">{{ startWithWindows ? '已开启' : '已关闭' }}</button></article>
       </div>
     </section>
   </section>

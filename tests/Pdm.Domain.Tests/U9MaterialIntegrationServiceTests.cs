@@ -80,13 +80,18 @@ public sealed class U9MaterialIntegrationServiceTests
         var fixture = await CreateSampleFixtureAsync();
         fixture.Client.CustomerResult = new U9CustomerQueryResult(0, null, [new("01010000001", "光电传感器")], 1);
         fixture.Client.QueryResultsByCode["01010000001"] = new U9ItemQueryResult(0, null,
-            [new("u9-item-1", "01010000001", "光电传感器", "M18 PNP", "0101", "电气外购件", "001", 9)]);
+            [new("u9-item-1", "01010000001", "光电传感器", "M18 PNP", "0101", "电气外购件", "001", 9,
+                "欧姆龙", "测试备注", "PBT", "无", 0.15m, "KG", "https://shop.example.test/item/sensor")]);
 
         var first = await fixture.Service.ImportSampleAsync(["0101"], 10, "admin", UserRole.Administrator, default);
         var second = await fixture.Service.ImportSampleAsync(["0101"], 10, "admin", UserRole.Administrator, default);
 
         Assert.Equal(1, first.CreatedCount);
         Assert.Equal(1, second.RefreshedCount);
+        Assert.Equal("欧姆龙", Assert.Single(first.Preview.Items).Brand);
+        var refreshed = Assert.Single(second.Materials);
+        Assert.Equal(("PBT", "欧姆龙", "无", "测试备注"), (refreshed.Material, refreshed.Brand, refreshed.SurfaceTreatment, refreshed.Remark));
+        Assert.Equal((0.15m, "KG", "https://shop.example.test/item/sensor"), (refreshed.Weight, refreshed.WeightUnit, refreshed.PurchaseLink));
         Assert.Single(await fixture.Materials.ListMaterialsAsync(null, "0101", false, 100, default));
         Assert.Equal(0, fixture.Client.PostCallCount);
         using var referencePayload = System.Text.Json.JsonDocument.Parse(fixture.Client.LastReferencePayload);
@@ -100,7 +105,7 @@ public sealed class U9MaterialIntegrationServiceTests
         var category = (await fixture.Materials.FindCategoryAsync("0101", default))!;
         var now = fixture.TimeProvider.GetUtcNow();
         var local = new PdmMaterial(
-            Guid.NewGuid(), "01010000001", "PDM自建名称", MaterialKind.Electrical, MaterialSupplyMode.Purchase, "001",
+            Guid.NewGuid(), "01010000001", "PLM自建名称", MaterialKind.Electrical, MaterialSupplyMode.Purchase, "001",
             "LOCAL", null, null, null, null, null, null, null, MaterialApprovalStatus.Draft, null, null, "0101", null, null,
             MaterialSyncStatus.NotQueued, "admin", now, "admin", now, 1, "0101");
         await fixture.Materials.CreateMaterialAsync(local, category, default);
@@ -112,7 +117,7 @@ public sealed class U9MaterialIntegrationServiceTests
 
         Assert.Equal(1, result.SkippedCount);
         var saved = await fixture.Materials.FindMaterialByCodeAsync("01010000001", default);
-        Assert.Equal("PDM自建名称", saved?.Name);
+        Assert.Equal("PLM自建名称", saved?.Name);
         Assert.Equal(MaterialMasterOwner.Pdm, saved?.MasterOwner);
     }
 
@@ -137,7 +142,14 @@ public sealed class U9MaterialIntegrationServiceTests
         Assert.Contains("\"MainItemCategory\"", fixture.Client.LastCreatePayload);
         Assert.Contains("\"Code\": \"001\"", fixture.Client.LastUomPayload);
         Assert.Contains("\"Code\": \"001\"", fixture.Client.LastCreatePayload);
-        Assert.Contains("\"PubDescSeg1\": \"https://shop.example.test/item/sensor\"", fixture.Client.LastCreatePayload);
+        using var createPayload = System.Text.Json.JsonDocument.Parse(fixture.Client.LastCreatePayload);
+        var createRow = createPayload.RootElement[0];
+        var createFlexFields = createRow.GetProperty("DescFlexField");
+        Assert.Equal("https://shop.example.test/item/sensor", createFlexFields.GetProperty(U9MaterialContract.PurchaseLinkPublicSegment).GetString());
+        Assert.Equal("SICK", createFlexFields.GetProperty(U9MaterialContract.BrandPublicSegment).GetString());
+        Assert.Equal("PBT", createFlexFields.GetProperty(U9MaterialContract.MaterialPrivateSegment).GetString());
+        Assert.Equal("无", createFlexFields.GetProperty(U9MaterialContract.SurfaceTreatmentPrivateSegment).GetString());
+        Assert.Equal("进口传感器", createRow.GetProperty("Description").GetString());
     }
 
     [Fact]
@@ -165,7 +177,7 @@ public sealed class U9MaterialIntegrationServiceTests
         var exception = await Assert.ThrowsAsync<PdmRuleException>(() => fixture.Service.ExecuteTaskAsync(
             fixture.Task.Id, "admin", UserRole.Administrator, default));
 
-        Assert.Contains("PDM计量单位编码 001 在U9C中不存在", exception.Message);
+        Assert.Contains("PLM计量单位编码 001 在U9C中不存在", exception.Message);
         Assert.Equal(0, fixture.Client.QueryCallCount);
         Assert.Equal(0, fixture.Client.PostCallCount);
     }
@@ -219,9 +231,14 @@ public sealed class U9MaterialIntegrationServiceTests
 
         Assert.True(result.Updated);
         Assert.Equal(U9MaterialContract.ModifyPath, fixture.Client.LastPostPath);
-        Assert.Contains("\"Attributes\"", fixture.Client.LastCreatePayload);
-        Assert.Contains("\"AttributeName\": \"DescFlexField.PubDescSeg1\"", fixture.Client.LastCreatePayload);
-        Assert.Contains("\"AttributeValue\": \"https://shop.example.test/item/sensor-v2\"", fixture.Client.LastCreatePayload);
+        using var modifyPayload = System.Text.Json.JsonDocument.Parse(fixture.Client.LastCreatePayload);
+        var attributes = modifyPayload.RootElement[0].GetProperty("Attributes").EnumerateArray()
+            .ToDictionary(attribute => attribute.GetProperty("AttributeName").GetString()!);
+        Assert.Equal("https://shop.example.test/item/sensor-v2", attributes[$"DescFlexField.{U9MaterialContract.PurchaseLinkPublicSegment}"].GetProperty("AttributeValue").GetString());
+        Assert.Equal("SICK", attributes[$"DescFlexField.{U9MaterialContract.BrandPublicSegment}"].GetProperty("AttributeValue").GetString());
+        Assert.Equal("PBT", attributes[$"DescFlexField.{U9MaterialContract.MaterialPrivateSegment}"].GetProperty("AttributeValue").GetString());
+        Assert.Equal("无", attributes[$"DescFlexField.{U9MaterialContract.SurfaceTreatmentPrivateSegment}"].GetProperty("AttributeValue").GetString());
+        Assert.Equal("进口传感器", attributes["Description"].GetProperty("AttributeValue").GetString());
     }
 
     private static async Task<ExecutionFixture> CreateApprovedTaskAsync(bool writeEnabled)
@@ -237,7 +254,7 @@ public sealed class U9MaterialIntegrationServiceTests
         var materialService = new MaterialService(materials, repository, new TestProtector(), client, timeProvider);
         var material = await materialService.CreateAsync(new(
             $"0101{Guid.NewGuid():N}", "光电传感器", MaterialKind.Electrical, MaterialSupplyMode.Purchase, "001",
-            "M18 PNP", null, null, "SICK", null, null, null, PurchaseLink: "https://shop.example.test/item/sensor"), "admin", UserRole.Administrator, default);
+            "M18 PNP", "PBT", "进口传感器", "SICK", "无", null, null, PurchaseLink: "https://shop.example.test/item/sensor"), "admin", UserRole.Administrator, default);
         var approved = await materialService.ApproveAsync(material.Id, material.RowVersion, "admin", UserRole.Administrator, default);
         client.ResetCalls();
         var service = new U9MaterialIntegrationService(materials, repository, new TestProtector(), client, timeProvider);
@@ -323,7 +340,7 @@ public sealed class U9MaterialIntegrationServiceTests
         }
 
         public Task<U9CustomerQueryResult> QueryCustomerReferencesAsync(
-            string baseUrl, string token, string payloadJson, CancellationToken cancellationToken)
+            string baseUrl, string path, string token, string payloadJson, CancellationToken cancellationToken)
         {
             LastReferencePayload = payloadJson;
             return Task.FromResult(CustomerResult);

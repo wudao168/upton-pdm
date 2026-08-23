@@ -202,4 +202,81 @@ public sealed class MigrationResourceTests
         Assert.Contains("bom_electrical_required_fields", sql, StringComparison.Ordinal);
         Assert.Contains("validation_rule_snapshot_json JSON NULL", sql, StringComparison.Ordinal);
     }
+
+    [Fact]
+    public async Task U9InterfacePathMigration_PersistsCustomerMaterialAndBomContractsTogether()
+    {
+        var assembly = typeof(MySqlMigrationRunner).Assembly;
+        var resourceName = assembly.GetManifestResourceNames()
+            .Single(name => name.EndsWith(".Migrations.053_u9_interface_paths.sql", StringComparison.Ordinal));
+
+        await using var stream = assembly.GetManifestResourceStream(resourceName);
+        Assert.NotNull(stream);
+        using var reader = new StreamReader(stream!);
+        var sql = await reader.ReadToEndAsync();
+
+        Assert.Contains("customer_query_path", sql, StringComparison.Ordinal);
+        Assert.Contains("bom_create_path", sql, StringComparison.Ordinal);
+        Assert.Contains("bom_query_path", sql, StringComparison.Ordinal);
+        Assert.Contains("bom_batch_unapprove_path", sql, StringComparison.Ordinal);
+        Assert.Contains("bom_bip_query_page_path", sql, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task BomOccurrenceMigration_PersistsSourcePathAndParentRelationship()
+    {
+        var assembly = typeof(MySqlMigrationRunner).Assembly;
+        var resourceName = assembly.GetManifestResourceNames()
+            .Single(name => name.EndsWith(".Migrations.055_bom_occurrence_relationship.sql", StringComparison.Ordinal));
+
+        await using var stream = assembly.GetManifestResourceStream(resourceName);
+        Assert.NotNull(stream);
+        using var reader = new StreamReader(stream!);
+        var sql = await reader.ReadToEndAsync();
+
+        Assert.Contains("source_instance_path VARCHAR(1000)", sql, StringComparison.Ordinal);
+        Assert.Contains("parent_drawing_number VARCHAR(160)", sql, StringComparison.Ordinal);
+        Assert.Contains("ix_bom_item_source_occurrence", sql, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task IndependentBomHeaderMigration_PersistsDistinctCodesAndPinsVersions()
+    {
+        var assembly = typeof(MySqlMigrationRunner).Assembly;
+        var resourceName = assembly.GetManifestResourceNames()
+            .Single(name => name.EndsWith(".Migrations.057_independent_project_bom_headers.sql", StringComparison.Ordinal));
+
+        await using var stream = assembly.GetManifestResourceStream(resourceName);
+        Assert.NotNull(stream);
+        using var reader = new StreamReader(stream!);
+        var sql = await reader.ReadToEndAsync();
+
+        Assert.Contains("CREATE TABLE IF NOT EXISTS project_bom_header", sql, StringComparison.Ordinal);
+        Assert.Contains("UNIQUE KEY ux_project_bom_header_material (project_id,material_id)", sql, StringComparison.Ordinal);
+        Assert.Contains("mother_material_id BINARY(16)", sql, StringComparison.Ordinal);
+        Assert.Contains("information_schema.columns", sql, StringComparison.Ordinal);
+        Assert.Contains("information_schema.statistics", sql, StringComparison.Ordinal);
+        Assert.Contains("information_schema.referential_constraints", sql, StringComparison.Ordinal);
+        Assert.Contains("BINARY constraint_schema = BINARY @pdm_schema_name", sql, StringComparison.Ordinal);
+        Assert.Contains("pdm_kind='Product'", sql, StringComparison.Ordinal);
+        Assert.Contains("category_code IN ('0301','0302')", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("WHERE code IN", sql, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task BomHeaderMaterialCategoryMigration_Enables0201ForVirtualProductCodes()
+    {
+        var assembly = typeof(MySqlMigrationRunner).Assembly;
+        var resourceName = assembly.GetManifestResourceNames()
+            .Single(name => name.EndsWith(".Migrations.058_enable_bom_header_material_category.sql", StringComparison.Ordinal));
+
+        await using var stream = assembly.GetManifestResourceStream(resourceName);
+        Assert.NotNull(stream);
+        using var reader = new StreamReader(stream!);
+        var sql = await reader.ReadToEndAsync();
+
+        Assert.Contains("pdm_kind='Product'", sql, StringComparison.Ordinal);
+        Assert.Contains("allow_create=1", sql, StringComparison.Ordinal);
+        Assert.Contains("category_code='0201'", sql, StringComparison.Ordinal);
+    }
 }

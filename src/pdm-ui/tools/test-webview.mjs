@@ -19,7 +19,7 @@ try {
   const pages = browser.contexts().flatMap(context => context.pages())
   const page = pages.find(candidate => candidate.url().includes('/ui/index.html'))
     ?? pages.find(candidate => candidate.url() !== 'about:blank')
-  if (!page) throw new Error(`WebView2 PDM page was not found: ${pages.map(candidate => candidate.url()).join(', ')}`)
+  if (!page) throw new Error(`WebView2 PLM page was not found: ${pages.map(candidate => candidate.url()).join(', ')}`)
 
   page.on('pageerror', error => errors.push(error.message))
   page.on('console', message => {

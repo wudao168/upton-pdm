@@ -9,7 +9,7 @@ $localRoot = Join-Path $projectRoot '.local'
 $receiptPath = Join-Path $localRoot 'deployment-receipt.json'
 $rootClientPath = Join-Path $localRoot 'secrets\mysql-root-client.ini'
 if (-not (Test-Path -LiteralPath $receiptPath) -or -not (Test-Path -LiteralPath $rootClientPath)) {
-    throw 'PDM deployment receipt or protected MySQL client file is missing.'
+    throw 'PLM deployment receipt or protected MySQL client file is missing.'
 }
 
 if ([string]::IsNullOrWhiteSpace($DestinationRoot)) {
@@ -25,14 +25,14 @@ if (Test-Path -LiteralPath $backupRoot) { throw "The backup directory already ex
 $receipt = Get-Content -LiteralPath $receiptPath -Raw -Encoding UTF8 | ConvertFrom-Json
 $mysqlDump = Join-Path $receipt.mysqlHome 'bin\mysqldump.exe'
 if (-not (Test-Path -LiteralPath $mysqlDump)) {
-    throw 'PDM MySQL client binaries are missing.'
+    throw 'PLM MySQL client binaries are missing.'
 }
 
 New-Item -ItemType Directory -Path $backupRoot -Force | Out-Null
 try {
 $databasePath = Join-Path $backupRoot 'pdm.sql'
 & $mysqlDump "--defaults-extra-file=$rootClientPath" --single-transaction --routines --triggers --hex-blob "--result-file=$databasePath" pdm
-if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $databasePath)) { throw 'PDM database backup failed.' }
+if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $databasePath)) { throw 'PLM database backup failed.' }
 $dumpText = [IO.File]::ReadAllText($databasePath, [Text.Encoding]::UTF8)
 $signalTriggerPattern = '(?m)(/\*!\d+ TRIGGER [^\r\n]*SIGNAL SQLSTATE [^\r\n]*); (\*/;;)$'
 $dumpText = [Text.RegularExpressions.Regex]::Replace($dumpText, $signalTriggerPattern, '$1 $2')
@@ -54,9 +54,9 @@ $env:PDM_DB_PASSWORD = $secrets.databasePassword
 $env:PDM_ACCEPTANCE_CONNECTION = 'Server=127.0.0.1;Port=3308;Database=pdm;UserID=pdm_app;GuidFormat=Binary16;SslMode=None;AllowUserVariables=true;ConnectionTimeout=5;DefaultCommandTimeout=30'
 Remove-Item Env:PDM_ACCEPTANCE_SEED -ErrorAction SilentlyContinue
 $verificationJson = (& $dotnet $acceptanceDll | Out-String)
-if ($LASTEXITCODE -ne 0) { throw 'PDM database verification failed.' }
+if ($LASTEXITCODE -ne 0) { throw 'PLM database verification failed.' }
 $verification = $verificationJson | ConvertFrom-Json
-if (-not $verification.expectedMigrationApplied -or $verification.releaseColumns -ne 3) { throw 'PDM database schema verification failed.' }
+if (-not $verification.expectedMigrationApplied -or $verification.releaseColumns -ne 3) { throw 'PLM database schema verification failed.' }
 $databaseCounts = $verification.tableCounts
 
 $files = @()

@@ -475,7 +475,7 @@ internal static class AutomaticDrawingSettingsStore
 {
     private static readonly string SettingsPath = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-        "UPTON PDM",
+        "UPTON PLM",
         "solidworks-auto-drawing.json");
 
     public static AutomaticDrawingOptions Load()
@@ -715,7 +715,7 @@ internal static class AutomaticDrawingRuleStore
 {
     private static readonly string RulesPath = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-        "UPTON PDM",
+        "UPTON PLM",
         "solidworks-auto-drawing-rules.json");
 
     public static AutomaticDrawingRuleProfile Load()
@@ -801,7 +801,7 @@ internal static class AutomaticDrawingLearningStore
 {
     private static readonly string LearningPath = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-        "UPTON PDM",
+        "UPTON PLM",
         "solidworks-auto-drawing-learning.json");
 
     public static void Record(AutomaticDrawingLearningRecord record, int maximumRecords)

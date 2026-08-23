@@ -50,6 +50,12 @@ public sealed record U9MaterialSampleRequest(
 
 public sealed record LinkBomMaterialRequest(Guid ProjectId, Guid BomItemId, Guid MaterialId);
 
+public sealed record ResolveMaterialCodesRequest(Guid ProjectId, IReadOnlyList<Guid> BomItemIds);
+
+public sealed record ApplyMaterialCodesRequest(Guid ProjectId, IReadOnlyList<Guid> BomItemIds);
+
+public sealed record DecideMaterialCodeApplicationRequest(long ExpectedRowVersion, bool Approved, string? Comment);
+
 public sealed record UpdateU9MaterialIntegrationRequest(
     string BaseUrl,
     string EnterpriseCode,
@@ -62,4 +68,11 @@ public sealed record UpdateU9MaterialIntegrationRequest(
     bool WriteEnabled,
     string? ItemModifyPath = null,
     string? ItemDeletePath = null,
-    IReadOnlyDictionary<string, string>? UnitCodeMappings = null);
+    IReadOnlyDictionary<string, string>? UnitCodeMappings = null,
+    string? CustomerQueryPath = null,
+    string? BomCreatePath = null,
+    string? BomQueryPath = null,
+    string? BomModifyPath = null,
+    string? BomDeletePath = null,
+    string? BomBatchUnapprovePath = null,
+    string? BomBipQueryPagePath = null);

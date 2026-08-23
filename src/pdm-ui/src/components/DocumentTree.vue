@@ -2,11 +2,11 @@
 import { onBeforeUnmount, onMounted, ref } from 'vue'
 import { RefreshCw, Search } from '@lucide/vue'
 import { postDesktopMessage } from '../api'
-import type { DocumentFilter, DocumentNode, SolidWorksOpenMode } from '../types'
+import type { DocumentFilter, DocumentNode, DrawingReviewBadge, SolidWorksOpenMode } from '../types'
 import CadDocumentIcon from './CadDocumentIcon.vue'
 import DocumentTreeNode from './DocumentTreeNode.vue'
 
-defineProps<{
+withDefaults(defineProps<{
   root?: DocumentNode
   drawings: DocumentNode[]
   selectedId: string
@@ -14,7 +14,8 @@ defineProps<{
   modelCount: number
   drawingCount: number
   warningCount: number
-}>()
+  reviewStates?: Record<string, DrawingReviewBadge>
+}>(), { reviewStates: () => ({}) })
 
 const query = defineModel<string>('query', { required: true })
 const filter = defineModel<DocumentFilter>('filter', { required: true })
@@ -98,12 +99,12 @@ onBeforeUnmount(() => {
           @contextmenu.prevent="showContext(drawing, $event)"
         >
           <span class="pdm-tree-row__content"><CadDocumentIcon :kind="drawing.kind" :status="drawing.status" :size="17" /><span class="pdm-tree-row__label"><strong>{{ drawing.drawingNumber }}</strong><small>{{ drawing.name }}</small></span></span>
-          <em>{{ drawing.version }}</em>
+          <span class="pdm-tree-row__version"><em>{{ drawing.version }}</em><small v-if="drawing.documentId && reviewStates[drawing.documentId]" class="pdm-review-badge" :class="`is-${reviewStates[drawing.documentId].tone}`">{{ reviewStates[drawing.documentId].label }}</small></span>
         </button>
       </li>
     </ul>
     <ul v-else-if="filter !== 'drawing' && root" class="pdm-tree" role="tree">
-      <DocumentTreeNode :node="root" :selected-id="selectedId" @select="emit('select', $event)" @context="showContext" />
+      <DocumentTreeNode :node="root" :selected-id="selectedId" :review-states="reviewStates" @select="emit('select', $event)" @context="showContext" />
     </ul>
     <div v-else class="pdm-tree-empty" role="status">
       <strong>没有匹配的图档</strong>
@@ -120,7 +121,7 @@ onBeforeUnmount(() => {
       <button type="button" role="menuitem" :disabled="!solidWorksAvailable || !contextNode.documentId" @click="open('LatestReadOnly')">在SolidWorks中打开最新受控版</button>
       <button type="button" role="menuitem" :disabled="!solidWorksAvailable || !contextNode.documentId" @click="open('LatestReleased')">打开最新正式发布版（只读）</button>
       <small v-if="!contextNode.documentId">该引用尚未入库，请先在SolidWorks插件中提交整套存档</small>
-      <small v-if="!solidWorksAvailable">当前电脑未安装SolidWorks或UPTON PDM插件</small>
+      <small v-if="!solidWorksAvailable">当前电脑未安装SolidWorks或UPLM插件</small>
     </div>
     <footer class="pdm-tree-legend">
       <span><i class="is-green" />已发布</span>

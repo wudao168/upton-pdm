@@ -6,6 +6,7 @@
     <Project Path="src/Pdm.Api/Pdm.Api.csproj" />
     <Project Path="src/Pdm.Desktop/Pdm.Desktop.csproj" />
     <Project Path="src/Pdm.SolidWorks.Addin/Pdm.SolidWorks.Addin.csproj" />
+    <Project Path="src/Pdm.SolidWorks.PreviewWorker/Pdm.SolidWorks.PreviewWorker.csproj" />
   </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/Pdm.Domain.Tests/Pdm.Domain.Tests.csproj" />

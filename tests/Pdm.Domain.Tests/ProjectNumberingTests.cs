@@ -1,4 +1,5 @@
 using Upton.Pdm.Application;
+using Upton.Pdm.Domain;
 using Upton.Pdm.Infrastructure;
 
 namespace Upton.Pdm.Domain.Tests;
@@ -43,6 +44,41 @@ public sealed class ProjectNumberingTests
         Assert.Equal("P700001-2", second.Code);
         Assert.Equal("AK-2-C00465-001-02", second.DeviceModel);
         Assert.Equal(["70000004"], second.SerialNumbers);
+    }
+
+    [Fact]
+    public async Task EquipmentProjectCanBeRootOrNestedRecursivelyWithIndependentEquipmentTypes()
+    {
+        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var line = await repository.CreateNumberedProjectAsync(Command("产线", quantity: 1) with { BomItemCategoryCode = "0301" }, CancellationToken.None);
+        var equipment = await repository.CreateSubprojectAsync(new(line.Id, "设备", null, 1, EquipmentTypeCode: 8), CancellationToken.None);
+        var nestedEquipment = await repository.CreateSubprojectAsync(new(equipment.Id, "设备子项", null, 1, EquipmentTypeCode: 9), CancellationToken.None);
+        var equipmentRoot = await repository.CreateNumberedProjectAsync(Command("独立设备", quantity: 1) with { BomItemCategoryCode = "0302" }, CancellationToken.None);
+
+        Assert.Equal("0301", line.BomItemCategoryCode);
+        Assert.Equal("0302", equipment.BomItemCategoryCode);
+        Assert.Equal("0302", nestedEquipment.BomItemCategoryCode);
+        Assert.Equal(line.Id, equipment.RootProjectId);
+        Assert.Equal(line.Id, nestedEquipment.RootProjectId);
+        Assert.Equal("P700001-1", equipment.Code);
+        Assert.Equal("AK-8-C00465-001-01", equipment.DeviceModel);
+        Assert.Equal("P700001-1-1", nestedEquipment.Code);
+        Assert.Equal("AK-9-C00465-001-01-01", nestedEquipment.DeviceModel);
+        Assert.Null(equipmentRoot.ParentProjectId);
+        Assert.Equal(equipmentRoot.Id, equipmentRoot.RootProjectId);
+        Assert.Equal("0302", equipmentRoot.BomItemCategoryCode);
+    }
+
+    [Fact]
+    public async Task BusinessCode_UsesZeroForMainProjectAndKeepsChildSequence()
+    {
+        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var parent = await repository.CreateNumberedProjectAsync(Command("主项目", quantity: 1), CancellationToken.None);
+        await repository.CreateSubprojectAsync(new(parent.Id, "子项目一", null, 1), CancellationToken.None);
+        var child = await repository.CreateSubprojectAsync(new(parent.Id, "子项目二", null, 1), CancellationToken.None);
+
+        Assert.Equal("P700001-0", ProjectNumberPolicy.BusinessCode(parent));
+        Assert.Equal("P700001-2", ProjectNumberPolicy.BusinessCode(child));
     }
 
     [Fact]
@@ -125,7 +161,7 @@ public sealed class ProjectNumberingTests
         Assert.Equal(2, saved.SerialNumbers.Count);
         Assert.All(saved.SerialNumbers, serial => Assert.StartsWith("3", serial));
         Assert.Equal("W300001-1", savedChild?.Code);
-        Assert.Equal("AG-8-C00465-001-01", savedChild?.DeviceModel);
+        Assert.Equal("AG-2-C00465-001-01", savedChild?.DeviceModel);
         Assert.Equal(new DateOnly(2026, 8, 16), savedChild?.SignedDate);
         Assert.All(savedChild!.SerialNumbers, serial => Assert.StartsWith("3", serial));
     }

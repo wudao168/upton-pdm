@@ -87,6 +87,8 @@ public sealed class ProjectFolderTreeTests
         var project = Assert.Single(await repository.ListProjectsForUserAsync("admin", UserRole.Administrator, CancellationToken.None));
 
         Assert.Equal(7, project.DocumentCount);
+        Assert.Equal(6, project.ModelDocumentCount);
+        Assert.Equal(1, project.DrawingDocumentCount);
         Assert.Contains("编辑中", project.BusinessStatus);
         Assert.Contains("待审批", project.BusinessStatus);
         Assert.Equal("王工", project.RootDocumentCheckedOutBy);

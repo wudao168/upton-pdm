@@ -142,7 +142,7 @@ public sealed class CrmCustomerIntegrationTests
             return Task.FromResult(new U9AuthenticationResult("token"));
         }
 
-        public Task<U9CustomerQueryResult> QueryCustomerReferencesAsync(string baseUrl, string token, string payloadJson, CancellationToken cancellationToken)
+        public Task<U9CustomerQueryResult> QueryCustomerReferencesAsync(string baseUrl, string path, string token, string payloadJson, CancellationToken cancellationToken)
         {
             CustomerQueryCallCount++;
             LastCustomerPayload = payloadJson;
@@ -160,7 +160,7 @@ public sealed class CrmCustomerIntegrationTests
     {
         public int CustomerQueryCallCount { get; private set; }
         public Task<U9AuthenticationResult> AuthenticateAsync(U9AuthenticationRequest request, CancellationToken cancellationToken) => Task.FromResult(new U9AuthenticationResult("token"));
-        public Task<U9CustomerQueryResult> QueryCustomerReferencesAsync(string baseUrl, string token, string payloadJson, CancellationToken cancellationToken)
+        public Task<U9CustomerQueryResult> QueryCustomerReferencesAsync(string baseUrl, string path, string token, string payloadJson, CancellationToken cancellationToken)
         {
             CustomerQueryCallCount++;
             throw new HttpRequestException("U9C unavailable");

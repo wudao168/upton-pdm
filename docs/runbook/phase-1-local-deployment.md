@@ -2,9 +2,9 @@
 
 ## 固定隔离边界
 
-PDM 与现有 CRM 完全独立：
+PLM 与现有 CRM 完全独立：
 
-| 资源 | PDM | CRM 保留 |
+| 资源 | PLM | CRM 保留 |
 | --- | --- | --- |
 | MySQL 监听端口 | `3308` | `3306` |
 | API 监听端口 | `5080` | `8080` |
@@ -36,12 +36,13 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\deploy\Get-LocalStatus
 
 - MySQL 服务：`UptonPdmMySQL`，只监听 `127.0.0.1:3308`。
 - API 服务：`UptonPdmApi`，只监听 `127.0.0.1:5080`，并依赖 MySQL 服务。
-- 客户端：`.local\client\Upton.Pdm.Desktop.exe`，同时创建桌面快捷方式 `UPTON PDM.lnk`。
+- 客户端：`.local\client\Upton.Pdm.Desktop.exe`，同时创建桌面快捷方式 `UPLM.lnk`。
 - SolidWorks 插件：`.local\solidworks-addin\Upton.Pdm.SolidWorks.Addin.dll`。
+- 服务器预览转换程序：`.local\preview-worker\Upton.Pdm.SolidWorks.PreviewWorker.exe`。它只由 API 在最终审批通过后调用，工程客户端和设计人员电脑不会执行转换。
 - 首次管理员：用户名 `admin`，随机密码保存在 `.local\secrets\pdm-secrets.json`；该文件受本机用户 ACL 保护，禁止复制到代码仓库。
 - 部署结果：`.local\installation-status.json`；准备清单：`.local\deployment-receipt.json`。
 
-插件注册时会从本机现有 SolidWorks 安装目录复制其 3 个 Interop 依赖到插件私有目录；不会修改 SolidWorks 安装目录。重新打开 SolidWorks 后，在“工具 > 插件”中确认 `UPTON PDM` 已勾选。
+插件注册时会从本机现有 SolidWorks 安装目录复制其 3 个 Interop 依赖到插件私有目录；不会修改 SolidWorks 安装目录。重新打开 SolidWorks 后，在“工具 > 插件”中确认 `UPLM` 已勾选。
 
 ## 构建一期产物
 
@@ -64,7 +65,7 @@ powershell.exe -ExecutionPolicy Bypass -File .\deploy\Build-Phase1.ps1 -Configur
 
 ```powershell
 $env:ASPNETCORE_ENVIRONMENT = 'Production'
-$env:PDM_DB_PASSWORD = '<PDM专用数据库密码>'
+$env:PDM_DB_PASSWORD = '<PLM专用数据库密码>'
 $env:PDM_BOOTSTRAP_ADMIN_PASSWORD = '<首次管理员密码>'
 $env:PDM_JWT_SIGNING_KEY = '<至少32字符的随机密钥>'
 Set-Location 'F:\codex file\pdm\src\Pdm.Api\bin\Release\net10.0'
@@ -88,7 +89,7 @@ Set-Location 'F:\codex file\pdm'
 powershell.exe -ExecutionPolicy Bypass -File .\deploy\Register-SolidWorksAddin.ps1 -Configuration Release
 ```
 
-重新打开 SolidWorks，在“工具 > 插件”确认 `UPTON PDM` 已启用。卸载时使用 `Unregister-SolidWorksAddin.ps1`。
+重新打开 SolidWorks，在“工具 > 插件”确认 `UPLM` 已启用。卸载时使用 `Unregister-SolidWorksAddin.ps1`。
 
 ## 启动 Windows 客户端
 
@@ -111,8 +112,10 @@ powershell.exe -ExecutionPolicy Bypass -File .\deploy\Register-SolidWorksAddin.p
 
 1. Windows 客户端的机械 BOM 读取结构快照；电气 BOM 可手工维护或导入标准 XLSX，并可导出。
 2. 创建发布包后依次提交工艺审核和批准。驳回后修改并重新提交，历史审批记录保留。
-3. 最终批准成功后，系统才把 PDF、DWG、两类 BOM、清单、审批记录和 SHA-256 文件原子投放到项目 `ReleaseLocation`。
+3. 签入阶段只保存 SolidWorks 源文件。最终批准成功后，API 服务器上的预览转换程序才打开批准快照中的源文件，零件/装配生成 STEP、工程图生成 PDF，并把它们与两类 BOM、清单、审批记录和 SHA-256 文件原子投放到项目 `ReleaseLocation`。历史 DWG 文件保留，但新发布不再生成、校验或引用 DWG。
 4. 任一文件准备、哈希、审批或投放失败时，发布包不进入已发布状态，生产目录不会出现半成品。
+
+服务器必须安装与源文件版本兼容且已激活的 SolidWorks，并让 `UptonPdmApi` 服务运行在具备该 SolidWorks 许可和项目库访问权限的专用 Windows 账户下。仅复制 Interop DLL 不能代替 SolidWorks 安装或许可证；转换失败会记录在发布包错误中，不会回退到个人电脑执行。
 
 ## 全量备份与恢复演练
 

@@ -152,7 +152,7 @@ internal sealed class ProjectDocumentsControl : UserControl
         treeSurface.Controls.Add(tree);
 
         empty.Dock = DockStyle.Fill;
-        empty.Text = "选择项目后读取PDM受控图档";
+        empty.Text = "选择项目后读取PLM受控图档";
         empty.TextAlign = ContentAlignment.MiddleCenter;
         empty.ForeColor = Color.FromArgb(111, 128, 149);
 

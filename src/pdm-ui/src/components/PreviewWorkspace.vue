@@ -1,26 +1,66 @@
 <script setup lang="ts">
-import { Box, FileSearch, Link2, Maximize2, MoreHorizontal, MousePointer2, Move, Rotate3D, RotateCw, ZoomIn } from '@lucide/vue'
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { postDesktopMessage } from '../api'
+import { FileSearch, Link2, MoreHorizontal, Rotate3D, ScanSearch } from '@lucide/vue'
+import { computed, defineAsyncComponent, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { listDocumentVersions, postDesktopMessage, readDocumentPreviewFile } from '../api'
 import type { BomItem, DocumentNode, PreviewMode, SolidWorksOpenMode } from '../types'
+import SquareLoader from './SquareLoader.vue'
 
-const props = withDefaults(defineProps<{ selected: DocumentNode; related: DocumentNode[]; bomItem?: BomItem; currentUsername?: string; canManageLifecycle?: boolean; desktopAvailable?: boolean; obscured?: boolean }>(), { currentUsername: '', canManageLifecycle: false, desktopAvailable: false, obscured: false })
-const emit = defineEmits<{ open: [node: DocumentNode, mode: SolidWorksOpenMode, versionId?: string]; preview: [node: DocumentNode]; related: [node: DocumentNode]; more: []; whereUsed: []; obsolete: [] }>()
+const StepPreviewViewer = defineAsyncComponent(() => import('./StepPreviewViewer.vue'))
+
+const props = withDefaults(defineProps<{
+  selected: DocumentNode
+  related: DocumentNode[]
+  bomItem?: BomItem
+  currentUsername?: string
+  canManageLifecycle?: boolean
+  desktopAvailable?: boolean
+  obscured?: boolean
+  reviewPanelOpen?: boolean
+  reviewStatus?: string
+  reviewStatusTone?: 'neutral' | 'pending' | 'warning' | 'success' | 'danger'
+  reviewVersionId?: string
+  reviewRevision?: string
+  accessToken?: string
+}>(), {
+  currentUsername: '',
+  canManageLifecycle: false,
+  desktopAvailable: false,
+  obscured: false,
+  reviewPanelOpen: false,
+  reviewStatus: '未发起',
+  reviewStatusTone: 'neutral',
+  reviewVersionId: '',
+  reviewRevision: '',
+  accessToken: '',
+})
+const emit = defineEmits<{
+  open: [node: DocumentNode, mode: SolidWorksOpenMode, versionId?: string]
+  preview: [node: DocumentNode, versionId?: string, revision?: string]
+  related: [node: DocumentNode]
+  more: []
+  whereUsed: []
+  obsolete: []
+  review: []
+}>()
 const previewSlot = ref<HTMLElement>()
 const previewState = ref<'idle' | 'loading' | 'ready' | 'error' | 'unavailable'>(props.desktopAvailable ? 'idle' : 'unavailable')
 const previewError = ref('')
+const webPreviewFormat = ref<'Step' | 'Pdf'>()
+const webPreviewUrl = ref('')
+const webStepBuffer = ref<ArrayBuffer>()
 const solidWorksAvailable = ref(false)
 const solidWorksPending = ref(false)
 const solidWorksMessage = ref('')
 const solidWorksError = ref(false)
-const activePreviewTool = ref<'select' | 'rotate' | 'zoom' | 'pan'>('select')
 let resizeObserver: ResizeObserver | undefined
 let overlayObserver: MutationObserver | undefined
 let previewSyncFrame = 0
 let previewSuspended = false
+let webPreviewRequest = 0
 
 const mode = computed<PreviewMode>(() => props.selected.kind === 'Drawing' ? 'drawing' : 'model')
 const previewKindLabel = computed(() => mode.value === 'drawing' ? '2D工程图' : '3D模型')
+const displayedRevision = computed(() => props.reviewVersionId && props.reviewRevision ? props.reviewRevision : props.selected.version)
 const selectedDisplayName = computed(() => {
   const drawingNumber = props.selected.drawingNumber?.trim()
   const name = props.selected.name?.trim()
@@ -47,7 +87,7 @@ const previewProperties = computed(() => [
   { label: '材质', value: props.bomItem?.material?.trim() },
   { label: '品牌', value: props.bomItem?.brand?.trim() },
   { label: '表面处理', value: props.bomItem?.surfaceTreatment?.trim() },
-  { label: '版本', value: props.selected.version?.trim() },
+  { label: '版本', value: displayedRevision.value?.trim() },
   { label: '状态', value: lifecycleLabel.value },
 ].filter((item): item is { label: string; value: string } => Boolean(item.value)))
 
@@ -117,17 +157,64 @@ function hidePreview() {
   postDesktopMessage('preview-host-hide')
 }
 
-function startPreview() {
+function clearWebPreview() {
+  webPreviewRequest++
+  if (webPreviewUrl.value) URL.revokeObjectURL(webPreviewUrl.value)
+  webPreviewUrl.value = ''
+  webStepBuffer.value = undefined
+  webPreviewFormat.value = undefined
+}
+
+function normalizedPreviewFormat(value: string | number): 'Step' | 'Pdf' {
+  return value === 'Pdf' || value === 1 ? 'Pdf' : 'Step'
+}
+
+async function startPreview() {
   if (!props.selected.documentId) return
   if (!props.desktopAvailable) {
-    previewState.value = 'unavailable'
+    clearWebPreview()
     previewError.value = ''
+    if (!props.accessToken) {
+      previewState.value = 'unavailable'
+      previewError.value = '登录后可读取受控预览文件。'
+      return
+    }
+    const request = webPreviewRequest
+    previewState.value = 'loading'
+    try {
+      const versions = await listDocumentVersions(props.selected.documentId, props.accessToken)
+      if (request !== webPreviewRequest) return
+      const expectedRevision = props.reviewRevision || props.selected.snapshotVersion || props.selected.version
+      const version = props.reviewVersionId
+        ? versions.find(item => item.id === props.reviewVersionId)
+        : versions.find(item => item.revision.display === expectedRevision) ?? versions[0]
+      if (!version?.preview) {
+        previewState.value = 'unavailable'
+        previewError.value = version ? '该历史版本尚未生成STP/PDF预览。' : '该图档尚无可预览版本。'
+        return
+      }
+      const format = normalizedPreviewFormat(version.preview.format)
+      const blob = await readDocumentPreviewFile(props.selected.documentId, version.id, props.accessToken)
+      if (request !== webPreviewRequest) return
+      webPreviewFormat.value = format
+      if (format === 'Pdf') {
+        webPreviewUrl.value = URL.createObjectURL(new Blob([blob], { type: 'application/pdf' }))
+        previewState.value = 'ready'
+      } else {
+        webStepBuffer.value = await blob.arrayBuffer()
+        if (request === webPreviewRequest) previewState.value = 'loading'
+      }
+    } catch (error) {
+      if (request !== webPreviewRequest) return
+      previewState.value = 'error'
+      previewError.value = error instanceof Error ? error.message : '网页预览加载失败。'
+    }
     return
   }
   previewState.value = 'loading'
   previewError.value = ''
   reportPreviewBounds()
-  emit('preview', props.selected)
+  emit('preview', props.selected, props.reviewVersionId || undefined, props.reviewRevision || undefined)
 }
 
 async function restartPreview() {
@@ -136,7 +223,16 @@ async function restartPreview() {
   previewState.value = 'idle'
   previewError.value = ''
   await nextTick()
-  startPreview()
+  void startPreview()
+}
+
+function onWebStepReady() {
+  previewState.value = 'ready'
+}
+
+function onWebStepError(message: string) {
+  previewState.value = 'error'
+  previewError.value = message
 }
 
 function onPreviewStatus(event: Event) {
@@ -153,16 +249,8 @@ function openInSolidWorks(mode: SolidWorksOpenMode) {
   if (!props.selected.documentId || !solidWorksAvailable.value || solidWorksPending.value) return
   solidWorksPending.value = true
   solidWorksError.value = false
-  solidWorksMessage.value = '正在准备最新受控文件，不获取编辑权限…'
-  emit('open', props.selected, mode)
-}
-
-function runPreviewCommand(command: 'select' | 'rotate' | 'zoom' | 'pan' | 'fit' | 'front' | 'top' | 'right' | 'isometric') {
-  if (!props.desktopAvailable || previewState.value !== 'ready') return
-  if (command === 'select' || command === 'rotate' || command === 'zoom' || command === 'pan') {
-    activePreviewTool.value = command
-  }
-  postDesktopMessage('preview-host-command', { command })
+  solidWorksMessage.value = props.reviewVersionId ? '正在准备审核冻结版本（只读）…' : '正在准备最新受控文件，不获取编辑权限…'
+  emit('open', props.selected, props.reviewVersionId ? 'SpecificReadOnly' : mode, props.reviewVersionId || undefined)
 }
 
 function onSolidWorksCapability(event: Event) {
@@ -185,8 +273,7 @@ watch(() => props.obscured, obscured => {
   void nextTick(schedulePreviewBounds)
 }, { flush: 'post' })
 
-watch(() => props.selected.id, () => {
-  activePreviewTool.value = 'select'
+watch([() => props.selected.id, () => props.reviewVersionId], () => {
   solidWorksPending.value = false
   solidWorksMessage.value = ''
   solidWorksError.value = false
@@ -217,6 +304,7 @@ onBeforeUnmount(() => {
   if (previewSyncFrame) window.cancelAnimationFrame(previewSyncFrame)
   resizeObserver?.disconnect()
   overlayObserver?.disconnect()
+  clearWebPreview()
   window.removeEventListener('resize', schedulePreviewBounds)
   window.removeEventListener('scroll', schedulePreviewBounds, true)
   document.removeEventListener('visibilitychange', schedulePreviewBounds)
@@ -234,7 +322,7 @@ onBeforeUnmount(() => {
           <span class="pdm-preview-kind">{{ previewKindLabel }}</span>
           <strong class="pdm-preview-document-name" :title="selectedDisplayName">{{ selectedDisplayName }}</strong>
           <span class="pdm-selected-file" :title="selected.fileName">{{ selected.fileName }}</span>
-          <span class="pdm-selected-version" :aria-label="`工作版本 ${selected.version}`">{{ selected.version }}</span>
+          <span class="pdm-selected-version" :aria-label="`${reviewVersionId ? '审核冻结版本' : '工作版本'} ${displayedRevision}`">{{ displayedRevision }}</span>
           <span class="pdm-selected-version" :aria-label="`业务状态 ${lifecycleLabel}`">{{ lifecycleLabel }}</span>
           <span class="pdm-selected-status">{{ editStatusLabel }}</span>
           <div v-if="related.length" class="pdm-related-documents" aria-label="关联图档">
@@ -243,6 +331,7 @@ onBeforeUnmount(() => {
           </div>
         </div>
         <div class="pdm-preview-actions">
+          <button type="button" class="pdm-review-toolbar-button" :class="[{ 'is-active': reviewPanelOpen }, `is-${reviewStatusTone}`]" aria-label="图纸审核" :aria-pressed="reviewPanelOpen" :disabled="!selected.documentId" @click="emit('review')"><ScanSearch :size="15" /><span>图纸审核</span><small>{{ reviewStatus }}</small></button>
           <button type="button" aria-label="使用位置" title="查看该图档被哪些装配体引用" :disabled="!selected.documentId" @click="emit('whereUsed')"><Link2 :size="15" /><span>引用</span></button>
           <button v-if="canManageLifecycle && lifecycleLabel !== '已作废'" type="button" aria-label="作废图档" title="受控作废当前图档" :disabled="!selected.documentId" @click="emit('obsolete')"><span>作废</span></button>
           <button type="button" aria-label="更多操作" title="查看更多图档操作" @click="emit('more')"><MoreHorizontal :size="17" /><span>更多</span></button>
@@ -252,27 +341,11 @@ onBeforeUnmount(() => {
             type="button"
             class="pdm-solidworks-primary"
             :disabled="!selected.documentId || !solidWorksAvailable || solidWorksPending"
-            :title="solidWorksAvailable ? `从PDM获取${selected.version}并在SolidWorks中打开；需要修改时请在插件设计树中获取权限` : '当前电脑未安装SolidWorks或UPTON PDM插件'"
+            :title="solidWorksAvailable ? reviewVersionId ? `从PLM获取审核冻结版本${displayedRevision}并只读打开` : `从PLM获取${selected.version}并在SolidWorks中打开；需要修改时请在插件设计树中获取权限` : '当前电脑未安装SolidWorks或UPLM插件'"
             @click="openInSolidWorks('LatestReadOnly')"
-          ><Rotate3D :size="15" />打开最新</button>
+          ><Rotate3D :size="15" />{{ reviewVersionId ? '打开审核版' : '打开最新' }}</button>
         </div>
       </header>
-      <div v-if="desktopAvailable" class="pdm-edrawings-toolbar" aria-label="eDrawings快捷操作">
-        <div class="pdm-edrawings-tool-group" aria-label="查看工具">
-          <button type="button" :class="{ 'is-active': activePreviewTool === 'select' }" aria-label="选择" title="选择" :disabled="previewState !== 'ready'" @click="runPreviewCommand('select')"><MousePointer2 :size="17" /></button>
-          <button type="button" :class="{ 'is-active': activePreviewTool === 'pan' }" aria-label="平移" title="平移" :disabled="previewState !== 'ready'" @click="runPreviewCommand('pan')"><Move :size="17" /></button>
-          <button type="button" :class="{ 'is-active': activePreviewTool === 'rotate' }" aria-label="旋转" title="旋转" :disabled="previewState !== 'ready' || mode === 'drawing'" @click="runPreviewCommand('rotate')"><RotateCw :size="17" /></button>
-          <button type="button" :class="{ 'is-active': activePreviewTool === 'zoom' }" aria-label="缩放" title="缩放" :disabled="previewState !== 'ready'" @click="runPreviewCommand('zoom')"><ZoomIn :size="17" /></button>
-          <button type="button" aria-label="适合窗口" title="适合窗口" :disabled="previewState !== 'ready'" @click="runPreviewCommand('fit')"><Maximize2 :size="17" /></button>
-        </div>
-        <span class="pdm-edrawings-toolbar-divider" aria-hidden="true"></span>
-        <div class="pdm-edrawings-tool-group" aria-label="标准视图">
-          <button type="button" aria-label="前视图" title="前视图" :disabled="previewState !== 'ready' || mode === 'drawing'" @click="runPreviewCommand('front')"><Box :size="16" /><small>前</small></button>
-          <button type="button" aria-label="顶视图" title="顶视图" :disabled="previewState !== 'ready' || mode === 'drawing'" @click="runPreviewCommand('top')"><Box :size="16" /><small>上</small></button>
-          <button type="button" aria-label="右视图" title="右视图" :disabled="previewState !== 'ready' || mode === 'drawing'" @click="runPreviewCommand('right')"><Box :size="16" /><small>右</small></button>
-          <button type="button" aria-label="等轴测" title="等轴测" :disabled="previewState !== 'ready' || mode === 'drawing'" @click="runPreviewCommand('isometric')"><Box :size="16" /><small>等</small></button>
-        </div>
-      </div>
       <p v-if="solidWorksMessage" class="pdm-solidworks-feedback" :class="{ 'is-error': solidWorksError }" role="status">{{ solidWorksMessage }}</p>
     </section>
 
@@ -280,6 +353,7 @@ onBeforeUnmount(() => {
       <div
         ref="previewSlot"
         class="pdm-real-preview pdm-embedded-preview-slot"
+        :class="{ 'has-web-preview': !desktopAvailable && previewState === 'ready' }"
         :data-preview-state="previewState"
         :aria-label="desktopAvailable ? '客户端内嵌eDrawings预览区' : '网页端图档预览状态'"
       >
@@ -289,21 +363,34 @@ onBeforeUnmount(() => {
             <dd :title="property.value">{{ property.value }}</dd>
           </div>
         </dl>
+        <iframe
+          v-if="!desktopAvailable && previewState === 'ready' && webPreviewFormat === 'Pdf' && webPreviewUrl"
+          class="pdm-web-preview-frame"
+          :src="webPreviewUrl"
+          title="PDF工程图预览"
+        />
+        <StepPreviewViewer
+          v-else-if="!desktopAvailable && webPreviewFormat === 'Step' && webStepBuffer"
+          :buffer="webStepBuffer"
+          @ready="onWebStepReady"
+          @error="onWebStepError"
+        />
         <template v-if="previewState === 'unavailable'">
           <FileSearch :size="52" />
-          <h3>网页端暂不支持原生SolidWorks图档预览</h3>
-          <p>{{ selected.fileName }} · {{ selected.version }}</p>
-          <small>eDrawings预览依赖Windows客户端中的本地组件；网页端可查看版本信息并下载受控文件。</small>
+          <h3>{{ previewError || '该版本尚无网页预览文件' }}</h3>
+          <p>{{ selected.fileName }} · {{ displayedRevision }}</p>
+          <small>工作版本签入时不生成预览；最终审批通过后由服务器生成并绑定正式版本：三维使用STP/STEP，工程图使用PDF。历史DWG不会自动删除，但不再作为预览或发布必需文件。</small>
           <button type="button" class="pdm-primary-action" :disabled="!selected.documentId" @click="emit('more')">查看并下载版本</button>
         </template>
-        <template v-else>
-          <FileSearch :size="52" />
-          <h3>{{ previewState === 'loading' ? '正在加载 eDrawings…' : mode === 'model' ? 'eDrawings 内嵌三维预览' : 'eDrawings 内嵌图纸预览' }}</h3>
-          <p>{{ selected.fileName }} · {{ selected.version }}</p>
-          <small>文件通过PDM权限校验和SHA-256校验后下载到独立只读缓存，不会覆盖工作文件。</small>
+        <template v-else-if="previewState !== 'ready'">
+          <SquareLoader v-if="previewState === 'loading'" :label="desktopAvailable ? '正在加载 eDrawings' : '正在加载网页预览'" />
+          <FileSearch v-else :size="52" />
+          <h3>{{ previewState === 'loading' ? desktopAvailable ? '正在加载 eDrawings…' : '正在加载网页预览…' : desktopAvailable ? mode === 'model' ? 'eDrawings 内嵌三维预览' : 'eDrawings 内嵌图纸预览' : mode === 'model' ? 'STP/STEP三维预览' : 'PDF工程图预览' }}</h3>
+          <p>{{ selected.fileName }} · {{ displayedRevision }}</p>
+          <small>文件通过PLM权限校验和SHA-256校验后下载到独立只读缓存，不会覆盖工作文件。</small>
           <p v-if="previewState === 'error'" class="pdm-preview-error" role="alert">{{ previewError || 'eDrawings加载失败，请重试。' }}</p>
           <button v-if="previewState === 'error'" type="button" class="pdm-primary-action" :disabled="!selected.documentId" @click="startPreview">
-            重新加载内嵌预览
+            重新加载预览
           </button>
         </template>
       </div>

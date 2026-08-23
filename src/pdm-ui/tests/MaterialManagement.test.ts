@@ -34,7 +34,7 @@ describe('MaterialManagement', () => {
       unitCode: '001', specification: 'M18', material: 'PBT', brand: '欧姆龙', surfaceTreatment: '无', purchaseLink: 'https://shop.example.test/item/EL-001', weight: 0.15, weightUnit: 'kg', remark: '测试备注',
       categoryCode: '0101', u9CategoryCode: '0101', approvalStatus: 'Draft', syncStatus: 'NotQueued', createdBy: 'admin',
       createdAt: '2026-08-17T00:00:00Z', updatedBy: 'admin', updatedAt: '2026-08-17T00:00:00Z', rowVersion: 1,
-      isArchived: false, u9SyncConfirmed: false,
+      isArchived: false, u9SyncConfirmed: false, referenceCount: 3,
     }])
     api.listMaterialCategories.mockResolvedValue([
       { code: '01', name: '原材料', parentCode: null, pdmKind: null, defaultSupplyMode: 'Purchase', allowCreate: false, isVisible: true, isActive: true, numberPrefix: '01', sequenceLength: 7, counterScope: '01', sortOrder: 1, updatedBy: 'system', updatedAt: '2026-08-17T00:00:00Z', rowVersion: 1 },
@@ -57,7 +57,7 @@ describe('MaterialManagement', () => {
     api.getMaterialRemovalReadiness.mockImplementation((materialId: string) => Promise.resolve({
       materialId, materialCode: materialId === 'material-2' ? 'ME-002' : 'EL-001', pdmReferenceCount: 0,
       isPdmMaster: true, localDeletePreconditionsPassed: true, u9ReferenceCheckAvailable: false,
-      synchronizedDeleteAvailable: false, decision: 'PDM未发现引用；U9C引用查询合同尚未验证，同步删除保持关闭。',
+      synchronizedDeleteAvailable: false, decision: 'PLM未发现引用；U9C引用查询合同尚未验证，同步删除保持关闭。',
     }))
   })
 
@@ -78,16 +78,31 @@ describe('MaterialManagement', () => {
     expect(toolbar.get('input[placeholder="搜索编码、名称、规格、品牌或分类"]')).toBeTruthy()
     expect(wrapper.text()).toContain('EL-001')
     expect(wrapper.text()).toContain('光电传感器')
-    expect(wrapper.find('.material-table').text()).not.toContain('PDM业务类型')
+    expect(wrapper.find('.material-table').text()).not.toContain('PLM业务类型')
     expect(wrapper.find('.material-table').text()).not.toContain('供给方式')
     expect(wrapper.text()).toContain('计量单位')
+    expect(wrapper.find('.material-table').text()).toContain('个')
+    expect(wrapper.find('.material-table').text()).not.toContain('001 个')
     expect(wrapper.text()).toContain('品牌')
     expect(wrapper.text()).toContain('欧姆龙')
     expect(wrapper.text()).toContain('表面处理')
     expect(wrapper.text()).toContain('0.15 kg')
     expect(wrapper.text()).toContain('测试备注')
-    expect(wrapper.text()).toContain('料品采购链接')
+    expect(wrapper.find('.material-table').text()).toContain('物料编码')
+    expect(wrapper.find('.material-table').text()).not.toContain('PLM物料编码')
+    expect(wrapper.find('.material-table').text()).toContain('链接')
+    expect(wrapper.find('.material-table').text()).not.toContain('料品采购链接')
     expect(wrapper.get('a[href="https://shop.example.test/item/EL-001"]').text()).toBe('打开')
+    expect(wrapper.find('.material-table').text()).toContain('创建人')
+    expect(wrapper.find('.material-table').text()).toContain('创建时间')
+    expect(wrapper.find('.material-table').text()).toContain('引用次数')
+    expect(wrapper.find('.material-table').text()).toContain('admin')
+    expect(wrapper.find('.material-table').text()).toContain('3')
+    const headers = wrapper.findAll('.material-table .el-table__header-wrapper th .cell').map(header => header.text().trim())
+    expect(headers.indexOf('引用次数')).toBe(headers.indexOf('U9C对应分类') + 1)
+    expect(headers.indexOf('品牌')).toBe(headers.indexOf('材质') - 1)
+    expect(headers.indexOf('计量单位')).toBe(headers.indexOf('来源/主控') - 1)
+    expect(headers.indexOf('来源/主控')).toBe(headers.indexOf('状态') - 1)
 
     const ruleTab = wrapper.findAll('[role="tab"]').find(tab => tab.text().includes('分类维护'))
     await ruleTab!.trigger('click')
@@ -179,6 +194,13 @@ describe('MaterialManagement', () => {
     expect(layout.element.children).toHaveLength(2)
     expect(nav.attributes('aria-label')).toBe('料品分类')
     expect(wrapper.get('.material-master-content').attributes('aria-label')).toBe('料品列表')
+    expect(layout.classes()).toContain('is-category-collapsed')
+    expect(wrapper.find('.material-category-all').exists()).toBe(false)
+    expect(wrapper.find('.material-category-nav .el-tree').exists()).toBe(false)
+    const expand = wrapper.get('button[aria-label="展开料品分类"]')
+    expect(expand.attributes('aria-expanded')).toBe('false')
+    await expand.trigger('click')
+    expect(layout.classes()).not.toContain('is-category-collapsed')
     expect(nav.text()).toContain('全部料品')
     expect(nav.text()).toContain('01 原材料')
     expect(nav.text()).toContain('0101 电气外购件')
@@ -215,7 +237,7 @@ describe('MaterialManagement', () => {
     await createButton!.trigger('click')
     await flushPromises()
 
-    const codeItem = wrapper.findAll('.el-form-item').find(item => item.text().includes('PDM物料编码'))!
+    const codeItem = wrapper.findAll('.el-form-item').find(item => item.text().includes('PLM物料编码'))!
     const codeInput = codeItem.get('input')
     expect(codeInput.attributes('disabled')).toBeDefined()
     expect(codeInput.attributes('placeholder')).toBe('选择开放分类后自动生成')
@@ -226,7 +248,7 @@ describe('MaterialManagement', () => {
     expect(codeItem.text()).toContain('创建后不可修改')
     expect(codeItem.text()).toContain('逐号只读查询U9C')
     expect(wrapper.text()).toContain('001 个')
-    expect(wrapper.text()).toContain('PDM直接保存并使用U9C计量单位编码')
+    expect(wrapper.text()).toContain('PLM直接保存并使用U9C计量单位编码')
     expect(wrapper.text()).toContain('料品采购链接')
   })
 
@@ -297,7 +319,7 @@ describe('MaterialManagement', () => {
     await flushPromises()
 
     expect(confirmSpy).toHaveBeenCalledWith(
-      expect.stringContaining('仅PDM主控'),
+      expect.stringContaining('仅PLM主控'),
       '安全删除料品',
       expect.objectContaining({ confirmButtonText: '确认删除' }),
     )
@@ -357,7 +379,7 @@ describe('MaterialManagement', () => {
     await flushPromises()
 
     expect(confirmSpy).toHaveBeenCalledWith(
-      expect.stringContaining('本操作只停用PDM料品，不会停用或物理删除U9C料品'),
+      expect.stringContaining('本操作只停用PLM料品，不会停用或物理删除U9C料品'),
       '停用料品',
       expect.objectContaining({ confirmButtonText: '确认停用' }),
     )
@@ -391,7 +413,7 @@ describe('MaterialManagement', () => {
     api.getMaterialRemovalReadiness.mockResolvedValueOnce({
       materialId: 'material-1', materialCode: 'EL-001', pdmReferenceCount: 0, isPdmMaster: true,
       localDeletePreconditionsPassed: true, u9ReferenceCheckAvailable: false, synchronizedDeleteAvailable: true,
-      decision: 'PDM未发现引用；若U9C存在，将先由U9C删除接口校验引用并删除，回查确认不存在后才删除PDM主档。',
+      decision: 'PLM未发现引用；若U9C存在，将先由U9C删除接口校验引用并删除，回查确认不存在后才删除PLM主档。',
     })
     const wrapper = mount(MaterialManagement, {
       props: { token: 'token', canEdit: true, canApprove: true, canManageIntegration: false },
@@ -456,7 +478,7 @@ describe('MaterialManagement', () => {
     api.getMaterialRemovalReadiness.mockResolvedValueOnce({
       materialId: 'material-u9', materialCode: 'U9-001', pdmReferenceCount: 2, isPdmMaster: false,
       localDeletePreconditionsPassed: false, u9ReferenceCheckAvailable: false, synchronizedDeleteAvailable: false,
-      decision: 'U9C主控料品不允许从PDM发起物理删除。',
+      decision: 'U9C主控料品不允许从PLM发起物理删除。',
     })
     const wrapper = mount(MaterialManagement, {
       props: { token: 'token', canEdit: true, canApprove: true, canManageIntegration: false },
@@ -473,11 +495,11 @@ describe('MaterialManagement', () => {
     expect(wrapper.text()).toContain('一致·U9主控')
   })
 
-  it('查询U9C时同时显示PDM引用数量', async () => {
+  it('查询U9C时同时显示PLM引用数量', async () => {
     api.getMaterialRemovalReadiness.mockResolvedValueOnce({
       materialId: 'material-1', materialCode: 'EL-001', pdmReferenceCount: 2, isPdmMaster: true,
       localDeletePreconditionsPassed: false, u9ReferenceCheckAvailable: false, synchronizedDeleteAvailable: false,
-      decision: 'PDM中已有2处BOM引用，不能删除。',
+      decision: 'PLM中已有2处BOM引用，不能删除。',
     })
     const wrapper = mount(MaterialManagement, {
       props: { token: 'token', canEdit: true, canApprove: true, canManageIntegration: false },
@@ -494,7 +516,7 @@ describe('MaterialManagement', () => {
     await wrapper.findAll('button').find(button => button.text() === '查询U9C')!.trigger('click')
     await flushPromises()
 
-    expect(wrapper.text()).toContain('一致·PDM引用2')
+    expect(wrapper.text()).toContain('一致·PLM引用2')
   })
 
   it('删除预检接口不可用时保留U9查询结果并关闭删除判定', async () => {

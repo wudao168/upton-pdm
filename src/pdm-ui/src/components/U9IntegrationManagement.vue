@@ -12,6 +12,8 @@ import type {
   UpdateCrmIntegrationInput,
 } from '../types'
 import CustomerManagement from './CustomerManagement.vue'
+import SquareLoader from './SquareLoader.vue'
+import U9BomQuery from './U9BomQuery.vue'
 
 const props = defineProps<{
   token: string
@@ -25,12 +27,12 @@ const props = defineProps<{
   onSyncCustomers: () => Promise<CrmCustomerSyncResult>
 }>()
 
-type U9Tab = 'base' | 'customers' | 'material-sync' | 'materials'
+type U9Tab = 'base' | 'interfaces' | 'customers' | 'material-sync' | 'bom-query'
 
 const activeTab = ref<U9Tab>('base')
 const loading = ref(false)
 const savingBase = ref(false)
-const savingMaterial = ref(false)
+const savingInterfaces = ref(false)
 const testingConnection = ref(false)
 const previewingSample = ref(false)
 const importingSample = ref(false)
@@ -44,7 +46,11 @@ const sampleCategoryOptions = [
 ]
 const integration = reactive<U9MaterialIntegrationSettings & { clientSecret: string }>({
   baseUrl: '', enterpriseCode: '', organizationCode: '', userCode: '', clientId: '', clientSecretConfigured: false,
-  clientSecret: '', itemCreatePath: '', itemQueryPath: '', itemModifyPath: '', itemDeletePath: '', unitCodeMappings: {}, writeEnabled: false,
+  clientSecret: '', itemCreatePath: '/webapi/ItemMaster/Create', itemQueryPath: '/webapi/ItemMaster/Query',
+  itemModifyPath: '/webapi/ItemMaster/Modify', itemDeletePath: '/webapi/ItemMaster/Delete',
+  customerQueryPath: '/webapi/GetCommonReference/Create', bomCreatePath: '/webapi/BOM/Create', bomQueryPath: '/webapi/BOM/Query',
+  bomModifyPath: '/webapi/BOM/Modify', bomDeletePath: '/webapi/BOM/Delete', bomBatchUnapprovePath: '/webapi/BOM/BatchUnApprove',
+  bomBipQueryPagePath: '/webapi/BOM/BIPQueryPage', unitCodeMappings: {}, writeEnabled: false,
 })
 
 const customerConnectionSettings = computed<CrmIntegrationSettings>(() => ({
@@ -87,6 +93,13 @@ function buildUpdateInput(clientSecret: string | null) {
     itemQueryPath: integration.itemQueryPath.trim(),
     itemModifyPath: integration.itemModifyPath.trim(),
     itemDeletePath: integration.itemDeletePath.trim(),
+    customerQueryPath: integration.customerQueryPath.trim(),
+    bomCreatePath: integration.bomCreatePath.trim(),
+    bomQueryPath: integration.bomQueryPath.trim(),
+    bomModifyPath: integration.bomModifyPath.trim(),
+    bomDeletePath: integration.bomDeletePath.trim(),
+    bomBatchUnapprovePath: integration.bomBatchUnapprovePath.trim(),
+    bomBipQueryPagePath: integration.bomBipQueryPagePath.trim(),
     unitCodeMappings: {},
     writeEnabled: integration.writeEnabled,
   }
@@ -125,7 +138,7 @@ async function testConnection() {
   }
 }
 
-async function saveMaterialSettings() {
+async function saveInterfaceSettings() {
   if (integration.writeEnabled) {
     try {
       await ElMessageBox.confirm(
@@ -138,15 +151,15 @@ async function saveMaterialSettings() {
       throw error
     }
   }
-  savingMaterial.value = true
+  savingInterfaces.value = true
   try {
     const saved = await updateU9MaterialIntegration(buildUpdateInput(null), props.token)
     applyIntegrationSettings(saved)
-    ElMessage.success(`U9C料品接口设置已保存，真实写入已${saved.writeEnabled ? '开启' : '关闭'}`)
+    ElMessage.success(`U9C接口设置已保存，真实写入已${saved.writeEnabled ? '开启' : '关闭'}`)
   } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : 'U9C料品接口设置保存失败')
+    ElMessage.error(error instanceof Error ? error.message : 'U9C接口设置保存失败')
   } finally {
-    savingMaterial.value = false
+    savingInterfaces.value = false
   }
 }
 
@@ -174,8 +187,8 @@ async function importMaterialSample() {
   }
   try {
     await ElMessageBox.confirm(
-      `将重新只读核对U9C，并向PDM导入所选分类每类最多 ${sampleLimitPerCategory.value} 条；不会向U9C写入。`,
-      '确认导入PDM',
+      `将重新只读核对U9C，并向PLM导入所选分类每类最多 ${sampleLimitPerCategory.value} 条；不会向U9C写入。`,
+      '确认导入PLM',
       { type: 'warning', confirmButtonText: '确认导入', cancelButtonText: '取消' },
     )
   } catch (error) {
@@ -198,7 +211,8 @@ onMounted(loadIntegration)
 </script>
 
 <template>
-  <section class="pdm-project-manager u9-integration-page" aria-label="U9C接口管理" v-loading="loading">
+  <section class="pdm-project-manager u9-integration-page pdm-loading-host" aria-label="U9C接口管理">
+    <SquareLoader v-if="loading" overlay label="正在加载U9C接口设置" />
     <el-tabs v-model="activeTab" class="u9-interface-tabs">
       <el-tab-pane label="基础设置" name="base">
         <section class="pdm-panel u9-settings-card" aria-label="U9C基础设置">
@@ -226,10 +240,51 @@ onMounted(loadIntegration)
         </section>
       </el-tab-pane>
 
+      <el-tab-pane v-if="canManageBase" label="接口设置" name="interfaces">
+        <section class="pdm-panel u9-settings-card" aria-label="U9C接口设置">
+          <header class="u9-card-heading">
+            <div><h2>接口设置</h2><p>客户、料品、BOM及后续新增的U9C接口统一在此维护；OAuth参数来自“基础设置”。</p></div>
+          </header>
+          <el-alert title="接口路径按当前U9C OpenAPI合同校验。BOM删除已核准版本时，还会使用弃审和记录定位接口。" type="info" :closable="false" show-icon />
+          <el-form label-position="top" class="u9-settings-form">
+            <section class="u9-interface-group" aria-label="客户接口">
+              <h3>客户接口</h3>
+              <div class="u9-form-grid">
+                <el-form-item label="客户查询接口路径"><el-input v-model="integration.customerQueryPath" name="u9CustomerQueryPath" /></el-form-item>
+              </div>
+            </section>
+            <section class="u9-interface-group" aria-label="料品接口">
+              <h3>料品接口</h3>
+              <div class="u9-form-grid">
+                <el-form-item label="料品创建接口路径"><el-input v-model="integration.itemCreatePath" name="u9ItemCreatePath" /></el-form-item>
+                <el-form-item label="料品查询接口路径"><el-input v-model="integration.itemQueryPath" name="u9ItemQueryPath" /></el-form-item>
+                <el-form-item label="料品修改接口路径"><el-input v-model="integration.itemModifyPath" name="u9ItemModifyPath" /></el-form-item>
+                <el-form-item label="料品删除接口路径"><el-input v-model="integration.itemDeletePath" name="u9ItemDeletePath" /></el-form-item>
+              </div>
+            </section>
+            <section class="u9-interface-group" aria-label="BOM接口">
+              <h3>BOM接口</h3>
+              <div class="u9-form-grid">
+                <el-form-item label="BOM创建接口路径"><el-input v-model="integration.bomCreatePath" name="u9BomCreatePath" /></el-form-item>
+                <el-form-item label="BOM查询接口路径"><el-input v-model="integration.bomQueryPath" name="u9BomQueryPath" /></el-form-item>
+                <el-form-item label="BOM修改接口路径"><el-input v-model="integration.bomModifyPath" name="u9BomModifyPath" /></el-form-item>
+                <el-form-item label="BOM删除接口路径"><el-input v-model="integration.bomDeletePath" name="u9BomDeletePath" /></el-form-item>
+                <el-form-item label="BOM弃审接口路径"><el-input v-model="integration.bomBatchUnapprovePath" name="u9BomBatchUnapprovePath" /></el-form-item>
+                <el-form-item label="BOM记录定位接口路径"><el-input v-model="integration.bomBipQueryPagePath" name="u9BomBipQueryPagePath" /></el-form-item>
+              </div>
+            </section>
+            <el-checkbox v-model="integration.writeEnabled">启用人工确认后的真实写入</el-checkbox>
+            <p class="u9-write-note">开启后仍不会自动写入；料品和BOM写入均须先生成预览并由获授权人员确认。</p>
+            <div class="u9-actions"><el-button type="primary" :loading="savingInterfaces" @click="saveInterfaceSettings">保存接口设置</el-button></div>
+          </el-form>
+        </section>
+      </el-tab-pane>
+
       <el-tab-pane v-if="canManageCustomers" label="客户查询" name="customers">
         <CustomerManagement
           :customers="customers"
           :integration-settings="customerConnectionSettings"
+          :customer-query-path="integration.customerQueryPath"
           :pending="pending"
           :on-save-settings="onSaveCustomerSettings"
           :on-test-connection="onTestCustomerConnection"
@@ -239,7 +294,7 @@ onMounted(loadIntegration)
 
       <el-tab-pane v-if="canManageBase" label="料品同步" name="material-sync">
         <section class="pdm-panel u9-settings-card" aria-label="U9C料品样本同步">
-          <header class="u9-card-heading"><div><h2>料品样本同步</h2><p>从U9C只读获取料品，在PDM端形成可搜索、可引用、可受控变更的主档。</p></div><span class="pdm-status is-warn">非全量</span></header>
+          <header class="u9-card-heading"><div><h2>料品样本同步</h2><p>从U9C只读获取料品，在PLM端形成可搜索、可引用、可受控变更的主档。</p></div><span class="pdm-status is-warn">非全量</span></header>
           <el-alert title="本功能硬限制为 0101、0102、0204，每类最多10条。预览和导入只调用U9C查询接口，不会创建、修改或删除U9C料品。" type="warning" :closable="false" show-icon />
           <div class="sample-sync-controls">
             <el-checkbox-group v-model="sampleCategoryCodes" aria-label="样本同步分类">
@@ -248,40 +303,28 @@ onMounted(loadIntegration)
             <el-form-item label="每类上限"><el-input-number v-model="sampleLimitPerCategory" :min="1" :max="10" :step="1" /></el-form-item>
             <div class="u9-actions">
               <el-button :loading="previewingSample" @click="previewMaterialSample">只读预览</el-button>
-              <el-button type="primary" :loading="importingSample" :disabled="!samplePreview" @click="importMaterialSample">确认导入PDM</el-button>
+              <el-button type="primary" :loading="importingSample" :disabled="!samplePreview" @click="importMaterialSample">确认导入PLM</el-button>
             </div>
           </div>
           <el-table v-if="samplePreview" :data="samplePreview.items" row-key="materialCode" class="sample-sync-table" empty-text="所选分类未返回可核对料品">
             <el-table-column prop="materialCode" label="U9C料号" min-width="130" />
             <el-table-column prop="name" label="名称" min-width="150" show-overflow-tooltip />
             <el-table-column prop="categoryCode" label="分类" width="80" />
-            <el-table-column prop="unitCode" label="PDM单位" width="90" />
+            <el-table-column prop="unitCode" label="PLM单位" width="90" />
             <el-table-column prop="specification" label="规格" min-width="170" show-overflow-tooltip />
+            <el-table-column prop="brand" label="品牌" min-width="100" show-overflow-tooltip />
             <el-table-column label="处理" width="170"><template #default="{ row }"><el-tag :type="row.canImport ? row.existsInPdm ? 'warning' : 'success' : 'info'">{{ row.decision }}</el-tag></template></el-table-column>
           </el-table>
         </section>
       </el-tab-pane>
 
-      <el-tab-pane v-if="canManageBase" label="料品接口" name="materials">
-        <section class="pdm-panel u9-settings-card" aria-label="U9C料品接口设置">
-          <header class="u9-card-heading"><div><h2>料品接口</h2><p>维护料品接口合同和真实写入开关；PDM直接使用U9C计量单位编码，不再维护单位映射。OAuth参数来自“基础设置”。</p></div></header>
-          <el-form label-position="top" class="u9-settings-form">
-            <div class="u9-form-grid">
-              <el-form-item label="料品创建接口路径"><el-input v-model="integration.itemCreatePath" name="u9ItemCreatePath" /></el-form-item>
-              <el-form-item label="料品查询接口路径"><el-input v-model="integration.itemQueryPath" name="u9ItemQueryPath" /></el-form-item>
-              <el-form-item label="料品修改接口路径"><el-input v-model="integration.itemModifyPath" name="u9ItemModifyPath" /></el-form-item>
-              <el-form-item label="料品删除接口路径"><el-input v-model="integration.itemDeletePath" name="u9ItemDeletePath" /></el-form-item>
-            </div>
-            <el-checkbox v-model="integration.writeEnabled">启用人工确认后的真实写入</el-checkbox>
-            <p class="u9-write-note">开启后仍不会自动写入；每个任务必须人工确认，系统先按料号查询，再仅创建不存在的料品。</p>
-            <div class="u9-actions"><el-button type="primary" :loading="savingMaterial" @click="saveMaterialSettings">保存料品接口</el-button></div>
-          </el-form>
-        </section>
+      <el-tab-pane v-if="canManageBase" label="BOM维护" name="bom-query">
+        <U9BomQuery :token="token" :organization-code="integration.organizationCode" :write-enabled="integration.writeEnabled" />
       </el-tab-pane>
     </el-tabs>
   </section>
 </template>
 
 <style scoped>
-.u9-integration-page{min-width:0}.u9-interface-tabs{margin-top:4px}.u9-settings-card{padding:24px}.u9-card-heading{display:flex;align-items:flex-start;justify-content:space-between;gap:18px;margin-bottom:20px}.u9-card-heading h2{margin:0 0 6px;font-size:20px}.u9-card-heading p{margin:0;color:#64748b;line-height:1.6}.u9-settings-form{margin-top:18px}.u9-form-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:0 18px}.u9-actions{display:flex;gap:10px;margin-top:4px}.sample-sync-controls{display:grid;grid-template-columns:minmax(320px,1fr) 150px auto;align-items:end;gap:18px;margin:20px 0}.sample-sync-controls :deep(.el-form-item){margin-bottom:0}.sample-sync-table{width:100%}.u9-write-note{margin:6px 0 18px;color:#9a3412;font-size:13px}@media(max-width:900px){.u9-form-grid{grid-template-columns:1fr}.sample-sync-controls{grid-template-columns:1fr}.u9-settings-card{padding:18px}}
+.u9-integration-page{min-width:0;min-height:0}.u9-interface-tabs{min-height:0;flex:1 1 auto;display:flex;flex-direction:column;overflow:hidden;margin-top:4px}.u9-interface-tabs :deep(.el-tabs__content){min-height:0;flex:1 1 auto;overflow:hidden}.u9-interface-tabs :deep(.el-tab-pane){min-height:0;height:100%;overflow:auto}.u9-settings-card{padding:24px}.u9-card-heading{display:flex;align-items:flex-start;justify-content:space-between;gap:18px;margin-bottom:20px}.u9-card-heading h2{margin:0 0 6px;font-size:20px}.u9-card-heading p{margin:0;color:#64748b;line-height:1.6}.u9-settings-form{margin-top:18px}.u9-form-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:0 18px}.u9-interface-group{margin:0 0 16px;padding:16px 18px 4px;border:1px solid #e2e8f0;border-radius:8px;background:#f8fafc}.u9-interface-group h3{margin:0 0 14px;font-size:15px;color:#1e293b}.u9-actions{display:flex;gap:10px;margin-top:4px}.sample-sync-controls{display:grid;grid-template-columns:minmax(320px,1fr) 150px auto;align-items:end;gap:18px;margin:20px 0}.sample-sync-controls :deep(.el-form-item){margin-bottom:0}.sample-sync-table{width:100%}.u9-write-note{margin:6px 0 18px;color:#9a3412;font-size:13px}@media(max-width:900px){.u9-form-grid{grid-template-columns:1fr}.sample-sync-controls{grid-template-columns:1fr}.u9-settings-card{padding:18px}}
 </style>

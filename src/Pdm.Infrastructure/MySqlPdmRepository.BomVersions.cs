@@ -29,20 +29,25 @@ public sealed partial class MySqlPdmRepository
     public async Task<BomVersion> SaveBomDraftAsync(Guid projectId, BomKind kind, IReadOnlyList<BomItem> items, string actor, CancellationToken cancellationToken)
     {
         EnsureVersionedBomKind(kind);
+        var project = await FindProjectAsync(projectId, cancellationToken)
+            ?? throw new PdmNotFoundException("项目不存在。");
         await using var connection = await OpenAsync(cancellationToken);
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
         var now = timeProvider.GetUtcNow();
         var existing = await connection.QuerySingleOrDefaultAsync<BomVersionRow>(new CommandDefinition(
             $"{BomVersionSelect} WHERE project_id=@ProjectId AND bom_kind=@Kind AND state='Draft' ORDER BY version_number DESC LIMIT 1 FOR UPDATE",
             new { ProjectId = projectId, Kind = kind.ToString() }, transaction, cancellationToken: cancellationToken));
+        var motherMaterialId = await connection.QuerySingleOrDefaultAsync<Guid?>(new CommandDefinition(
+            "SELECT material_id FROM project_bom_header WHERE project_id=@ProjectId AND bom_kind=@Kind",
+            new { ProjectId = projectId, Kind = HeaderKind(kind).ToString() }, transaction, cancellationToken: cancellationToken));
         var snapshot = JsonSerializer.Serialize(items.OrderBy(item => item.Sequence), jsonOptions);
         Guid versionId;
         if (existing is not null)
         {
             versionId = existing.Id;
             await connection.ExecuteAsync(new CommandDefinition(
-                "UPDATE bom_version SET snapshot_json=@Snapshot,updated_by=@Actor,updated_at=@Now,row_version=row_version+1 WHERE id=@Id",
-                new { Id = versionId, Snapshot = snapshot, Actor = actor, Now = now.UtcDateTime }, transaction, cancellationToken: cancellationToken));
+                "UPDATE bom_version SET mother_material_id=@MotherMaterialId,snapshot_json=@Snapshot,updated_by=@Actor,updated_at=@Now,row_version=row_version+1 WHERE id=@Id",
+                new { Id = versionId, MotherMaterialId = motherMaterialId, Snapshot = snapshot, Actor = actor, Now = now.UtcDateTime }, transaction, cancellationToken: cancellationToken));
         }
         else
         {
@@ -53,10 +58,10 @@ public sealed partial class MySqlPdmRepository
             versionId = Guid.NewGuid();
             await connection.ExecuteAsync(new CommandDefinition(
                 """
-                INSERT INTO bom_version(id,project_id,bom_kind,version_number,version_label,state,base_version_id,change_number,change_reason,effective_serial_from,effective_serial_to,snapshot_json,created_by,created_at,updated_by,updated_at,released_at,row_version)
-                VALUES(@Id,@ProjectId,@Kind,@VersionNumber,@Label,'Draft',@BaseVersionId,NULL,NULL,NULL,NULL,@Snapshot,@Actor,@Now,@Actor,@Now,NULL,1)
+                INSERT INTO bom_version(id,project_id,bom_kind,mother_material_id,version_number,version_label,state,base_version_id,change_number,change_reason,effective_serial_from,effective_serial_to,snapshot_json,created_by,created_at,updated_by,updated_at,released_at,row_version)
+                VALUES(@Id,@ProjectId,@Kind,@MotherMaterialId,@VersionNumber,@Label,'Draft',@BaseVersionId,NULL,NULL,NULL,NULL,@Snapshot,@Actor,@Now,@Actor,@Now,NULL,1)
                 """,
-                new { Id = versionId, ProjectId = projectId, Kind = kind.ToString(), VersionNumber = versionNumber, Label = BomVersionLabel(kind, versionNumber), BaseVersionId = latest?.Id, Snapshot = snapshot, Actor = actor, Now = now.UtcDateTime },
+                new { Id = versionId, ProjectId = projectId, Kind = kind.ToString(), MotherMaterialId = motherMaterialId, VersionNumber = versionNumber, Label = BomVersionLabel(ProjectNumberPolicy.BusinessCode(project), kind, versionNumber), BaseVersionId = latest?.Id, Snapshot = snapshot, Actor = actor, Now = now.UtcDateTime },
                 transaction, cancellationToken: cancellationToken));
         }
         await transaction.CommitAsync(cancellationToken);
@@ -142,9 +147,33 @@ public sealed partial class MySqlPdmRepository
             ?? throw new PdmNotFoundException("发布包不存在。");
     }
 
+    public async Task<ReleasePackage> ApplyReleasePackageMaterialCodesAsync(Guid releasePackageId, IReadOnlyDictionary<Guid, string> materialCodes, string actor, CancellationToken cancellationToken)
+    {
+        if (materialCodes.Count == 0) return await FindReleasePackageAsync(releasePackageId, cancellationToken) ?? throw new PdmNotFoundException("发布包不存在。");
+        var package = await FindReleasePackageAsync(releasePackageId, cancellationToken) ?? throw new PdmNotFoundException("发布包不存在。");
+        if (package.State is not (ReleasePackageState.ProcessReview or ReleasePackageState.Approval)) throw new PdmConflictException("只有审批中的发布包可以在终审时回填非标件料号。");
+        BomItem Apply(BomItem item) => materialCodes.TryGetValue(item.Id, out var code) ? item with { DrawingNumber = code } : item;
+        var nonStandard = package.NonStandardBomSnapshot.Select(Apply).ToArray();
+        var mechanical = package.MechanicalBomSnapshot.Select(Apply).ToArray();
+        await using var connection = await OpenAsync(cancellationToken);
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+        var affected = await connection.ExecuteAsync(new CommandDefinition(
+            "UPDATE release_package SET non_standard_bom_snapshot_json=@NonStandard,mechanical_bom_snapshot_json=@Mechanical,row_version=row_version+1 WHERE id=@Id AND state IN ('ProcessReview','Approval')",
+            new { Id = releasePackageId, NonStandard = JsonSerializer.Serialize(nonStandard, jsonOptions), Mechanical = JsonSerializer.Serialize(mechanical, jsonOptions) }, transaction, cancellationToken: cancellationToken));
+        if (affected != 1) throw new PdmConflictException("发布包状态已变化，无法回填非标件料号。");
+        if (package.NonStandardBomVersionId is Guid versionId)
+            await connection.ExecuteAsync(new CommandDefinition(
+                "UPDATE bom_version SET snapshot_json=@Snapshot,updated_by=@Actor,updated_at=UTC_TIMESTAMP(6),row_version=row_version+1 WHERE id=@VersionId AND state='InReview'",
+                new { VersionId = versionId, Snapshot = JsonSerializer.Serialize(nonStandard, jsonOptions), Actor = actor }, transaction, cancellationToken: cancellationToken));
+        await transaction.CommitAsync(cancellationToken);
+        return await FindReleasePackageAsync(releasePackageId, cancellationToken) ?? throw new PdmNotFoundException("发布包不存在。");
+    }
+
     public async Task<ManufacturingBomBaseline> MarkPublishedWithBomBaselineAsync(ReleasePackage package, string publishedPath, DateTimeOffset publishedAt, string actor, CancellationToken cancellationToken)
     {
         var versionIds = RequiredPackageBomVersionIds(package);
+        var project = await FindProjectAsync(package.ProjectId, cancellationToken)
+            ?? throw new PdmNotFoundException("项目不存在。");
         await using var connection = await OpenAsync(cancellationToken);
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
         var currentState = await connection.QuerySingleOrDefaultAsync<string>(new CommandDefinition(
@@ -158,7 +187,7 @@ public sealed partial class MySqlPdmRepository
             new { package.ProjectId }, transaction, cancellationToken: cancellationToken));
         var sequence = (latestSequence ?? 0) + 1;
         var baseline = new ManufacturingBomBaseline(
-            Guid.NewGuid(), package.ProjectId, sequence, $"BL-{sequence:D3}", versionIds[0], versionIds[1], versionIds[2],
+            Guid.NewGuid(), package.ProjectId, sequence, $"BL-{ProjectNumberPolicy.BusinessCode(project)}-{sequence:D3}", versionIds[0], versionIds[1], versionIds[2],
             package.ChangeNumber ?? package.Number, package.ChangeReason ?? "兼容既有发布流程创建的设变",
             package.EffectiveSerialFrom ?? "未指定", package.EffectiveSerialTo, package.Id, actor, publishedAt);
         await connection.ExecuteAsync(new CommandDefinition(
@@ -168,6 +197,29 @@ public sealed partial class MySqlPdmRepository
             "UPDATE release_package SET state='Published',published_at=@PublishedAt,published_path=@PublishedPath,publish_error=NULL,row_version=row_version+1 WHERE id=@PackageId AND state='Publishing'",
             new { PackageId = package.Id, PublishedAt = publishedAt.UtcDateTime, PublishedPath = publishedPath }, transaction, cancellationToken: cancellationToken));
         if (affected != 1) throw new PdmConflictException("发布包状态已变化，不能标记为已发布。");
+        await connection.ExecuteAsync(new CommandDefinition(
+            """
+            INSERT INTO integration_outbox(id,event_type,aggregate_type,aggregate_id,payload_json,occurred_at,retry_count)
+            VALUES(@Id,'ManufacturingBomBaselineReleased','ManufacturingBomBaseline',@AggregateId,@PayloadJson,@OccurredAt,0)
+            """,
+            new
+            {
+                Id = Guid.NewGuid(),
+                AggregateId = baseline.Id.ToString(),
+                PayloadJson = JsonSerializer.Serialize(new
+                {
+                    BaselineId = baseline.Id,
+                    baseline.ProjectId,
+                    baseline.Label,
+                    ReleasePackageId = package.Id,
+                    Scope = package.Scope.ToString(),
+                    baseline.StandardBomVersionId,
+                    baseline.NonStandardBomVersionId,
+                    baseline.ElectricalBomVersionId
+                }, jsonOptions),
+                OccurredAt = publishedAt.UtcDateTime
+            }, transaction, cancellationToken: cancellationToken));
+        await EnqueueU9BomReleaseReadyAsync(connection, transaction, package, publishedAt, baseline.Id, cancellationToken);
         await transaction.CommitAsync(cancellationToken);
         return baseline;
     }
@@ -181,7 +233,8 @@ public sealed partial class MySqlPdmRepository
     {
         ValidationRequiredFields = string.IsNullOrWhiteSpace(row.ValidationRuleSnapshotJson)
             ? []
-            : JsonSerializer.Deserialize<List<string>>(row.ValidationRuleSnapshotJson, jsonOptions) ?? []
+            : JsonSerializer.Deserialize<List<string>>(row.ValidationRuleSnapshotJson, jsonOptions) ?? [],
+        MotherMaterialId = row.MotherMaterialId
     };
 
     private static ManufacturingBomBaseline MapManufacturingBomBaseline(ManufacturingBomBaselineRow row) => new(
@@ -195,8 +248,16 @@ public sealed partial class MySqlPdmRepository
             throw new PdmRuleException("只有标准件、非标件和电气BOM支持独立版本控制。");
     }
 
-    private static string BomVersionLabel(BomKind kind, int versionNumber) =>
-        $"{(kind == BomKind.Standard ? "S" : kind == BomKind.NonStandard ? "N" : "E")}-B{versionNumber:D2}";
+    private static ProjectBomHeaderKind HeaderKind(BomKind kind) => kind switch
+    {
+        BomKind.Standard => ProjectBomHeaderKind.Standard,
+        BomKind.NonStandard => ProjectBomHeaderKind.NonStandard,
+        BomKind.Electrical => ProjectBomHeaderKind.Electrical,
+        _ => throw new PdmRuleException("当前BOM类型没有独立母件料号。")
+    };
+
+    private static string BomVersionLabel(string projectNumber, BomKind kind, int versionNumber) =>
+        $"{(kind == BomKind.Standard ? "S" : kind == BomKind.NonStandard ? "N" : "E")}-{projectNumber}-B{versionNumber:D2}";
 
     private static Guid[] RequiredPackageBomVersionIds(ReleasePackage package)
     {
@@ -205,13 +266,14 @@ public sealed partial class MySqlPdmRepository
         return [package.StandardBomVersionId.Value, package.NonStandardBomVersionId.Value, package.ElectricalBomVersionId.Value];
     }
 
-    private const string BomVersionSelect = "SELECT id,project_id,bom_kind,version_number,version_label,state,base_version_id,change_number,change_reason,effective_serial_from,effective_serial_to,snapshot_json,validation_rule_snapshot_json,created_by,created_at,updated_by,updated_at,released_at FROM bom_version";
+    private const string BomVersionSelect = "SELECT id,project_id,bom_kind,mother_material_id,version_number,version_label,state,base_version_id,change_number,change_reason,effective_serial_from,effective_serial_to,snapshot_json,validation_rule_snapshot_json,created_by,created_at,updated_by,updated_at,released_at FROM bom_version";
 
     private sealed class BomVersionRow
     {
         public Guid Id { get; init; }
         public Guid ProjectId { get; init; }
         public string BomKind { get; init; } = string.Empty;
+        public Guid? MotherMaterialId { get; init; }
         public int VersionNumber { get; init; }
         public string VersionLabel { get; init; } = string.Empty;
         public string State { get; init; } = string.Empty;

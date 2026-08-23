@@ -1,5 +1,12 @@
 namespace Upton.Pdm.Domain;
 
+public sealed record DocumentPreviewArtifact(
+    DocumentPreviewFormat Format,
+    string StorageRelativePath,
+    long FileLength,
+    string Sha256,
+    string SourceSha256);
+
 public sealed record DocumentVersion(
     Guid Id,
     Guid DocumentId,
@@ -18,7 +25,8 @@ public sealed record DocumentVersion(
     Guid? SourceVersionId,
     string? SourceDescription,
     Guid? ApprovalTaskId,
-    Guid? ReleasePackageId);
+    Guid? ReleasePackageId,
+    DocumentPreviewArtifact? Preview = null);
 
 public sealed record PropertySnapshotChange(
     SnapshotChangeKind Kind,

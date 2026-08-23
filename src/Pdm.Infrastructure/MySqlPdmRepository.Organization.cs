@@ -31,6 +31,10 @@ public sealed partial class MySqlPdmRepository
             "SELECT unit_id,username,is_primary FROM organization_unit_manager ORDER BY unit_id,is_primary DESC,username",
             cancellationToken: cancellationToken));
         var users = await ListUsersAsync(cancellationToken);
+        var companyAccess = (await connection.QueryAsync<UserCompanyAccessRow>(new CommandDefinition(
+            "SELECT user_account.username,access_grant.accessible_company_id CompanyId FROM user_company_access access_grant INNER JOIN pdm_user user_account ON user_account.id=access_grant.user_id ORDER BY user_account.username,access_grant.accessible_company_id",
+            cancellationToken: cancellationToken))).GroupBy(item => item.Username, StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(group => group.Key, group => (IReadOnlyList<Guid>)group.Select(item => item.CompanyId).ToArray(), StringComparer.OrdinalIgnoreCase);
         return new OrganizationDirectory(
             organizationRows.Select(MapOrganization).ToArray(),
             unitRows.Select(MapOrganizationUnit).ToArray(),
@@ -39,7 +43,8 @@ public sealed partial class MySqlPdmRepository
                 group.Key,
                 group.FirstOrDefault(item => item.IsPrimary)?.Username ?? string.Empty,
                 group.Where(item => !item.IsPrimary).Select(item => item.Username).ToArray())).ToArray(),
-            users.Select(user => new OrganizationDirectoryUser(user.Username, user.DisplayName, user.Role, user.IsActive, user.EffectiveRoleCode)).ToArray());
+            users.Select(user => new OrganizationDirectoryUser(user.Username, user.DisplayName, user.Role, user.IsActive, user.EffectiveRoleCode, user.CompanyId, user.CrossCompanyView,
+                companyAccess.GetValueOrDefault(user.Username, Array.Empty<Guid>()))).ToArray());
     }
 
     public async Task<ProjectOrganization> SaveProjectOrganizationAsync(SaveProjectOrganizationCommand command, CancellationToken cancellationToken)
@@ -125,11 +130,39 @@ public sealed partial class MySqlPdmRepository
         return await GetOrganizationDirectoryAsync(cancellationToken);
     }
 
+    private sealed class UserCompanyAccessRow
+    {
+        public string Username { get; init; } = string.Empty;
+        public Guid CompanyId { get; init; }
+    }
+
     public async Task<OrganizationDirectory> SetOrganizationUnitManagersAsync(Guid unitId, string primaryManager, IReadOnlyList<string> collaborativeManagers, CancellationToken cancellationToken)
     {
         var now = timeProvider.GetUtcNow().UtcDateTime;
         await using var connection = await OpenAsync(cancellationToken);
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+        var organizationId = await connection.ExecuteScalarAsync<Guid?>(new CommandDefinition(
+            "SELECT organization_id FROM organization_unit WHERE id=@UnitId AND is_active=1 FOR UPDATE",
+            new { UnitId = unitId }, transaction, cancellationToken: cancellationToken))
+            ?? throw new PdmNotFoundException("组织不存在或已停用。");
+        var managerUsernames = new[] { primaryManager }.Concat(collaborativeManagers).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+        foreach (var username in managerUsernames)
+        {
+            var membershipOrganizationIds = (await connection.QueryAsync<Guid>(new CommandDefinition(
+                "SELECT unit.organization_id FROM organization_membership membership INNER JOIN organization_unit unit ON unit.id=membership.unit_id WHERE membership.username=@Username FOR UPDATE",
+                new { Username = username }, transaction, cancellationToken: cancellationToken))).ToArray();
+            if (membershipOrganizationIds.Any(item => item != organizationId))
+                throw new PdmConflictException("部门负责人已经属于其他公司，不能跨公司任职。");
+            var isCurrentMember = await connection.ExecuteScalarAsync<int>(new CommandDefinition(
+                "SELECT COUNT(*) FROM organization_membership WHERE unit_id=@UnitId AND username=@Username",
+                new { UnitId = unitId, Username = username }, transaction, cancellationToken: cancellationToken)) > 0;
+            if (!isCurrentMember)
+            {
+                await connection.ExecuteAsync(new CommandDefinition(
+                    "INSERT INTO organization_membership(unit_id,username,is_primary,assigned_at) VALUES(@UnitId,@Username,@IsPrimary,@Now)",
+                    new { UnitId = unitId, Username = username, IsPrimary = membershipOrganizationIds.Length == 0, Now = now }, transaction, cancellationToken: cancellationToken));
+            }
+        }
         await connection.ExecuteAsync(new CommandDefinition("DELETE FROM organization_unit_manager WHERE unit_id=@UnitId", new { UnitId = unitId }, transaction, cancellationToken: cancellationToken));
         var managers = new[] { new { Username = primaryManager, IsPrimary = true } }
             .Concat(collaborativeManagers.Select(username => new { Username = username, IsPrimary = false }));
@@ -210,7 +243,7 @@ public sealed partial class MySqlPdmRepository
                     new { OrganizationId = oldOrganization.Id, CustomerCode = project.CustomerCode, Sequence = project.CustomerProjectSequence.Value, Now = now }, transaction, cancellationToken: cancellationToken));
 
             var treeIds = (await connection.QueryAsync<Guid>(new CommandDefinition(
-                "SELECT id FROM project WHERE id=@ProjectId OR parent_project_id=@ProjectId ORDER BY child_sequence FOR UPDATE",
+                "SELECT id FROM project WHERE id=@ProjectId OR root_project_id=@ProjectId ORDER BY code FOR UPDATE",
                 new { ProjectId = project.Id }, transaction, cancellationToken: cancellationToken))).ToArray();
             var rootCode = codeChanged ? $"{projectTypeCode}{organization.ProjectCompanyCode}{projectSequence:D5}" : project.Code;
             foreach (var itemId in treeIds)
@@ -230,8 +263,8 @@ public sealed partial class MySqlPdmRepository
                     serials = await ResizeProjectSerialsAsync(connection, transaction, item, organization, quantity, cancellationToken);
                 }
 
-                var code = item.Id == project.Id ? rootCode : $"{rootCode}-{item.ChildSequence}";
-                var suffix = item.Id == project.Id ? 0 : item.ChildSequence!.Value;
+                var code = item.Id == project.Id ? rootCode : $"{rootCode}{item.Code[project.Code.Length..]}";
+                var itemEquipmentTypeCode = item.Id == project.Id ? equipmentTypeCode : item.EquipmentTypeCode ?? equipmentTypeCode;
                 await connection.ExecuteAsync(new CommandDefinition(
                     """
                     UPDATE project SET code=@Code,name=@Name,project_alias=@ProjectAlias,organization_id=@OrganizationId,
@@ -248,11 +281,11 @@ public sealed partial class MySqlPdmRepository
                         ProjectAlias = item.Id == project.Id ? command.ProjectAlias : item.ProjectAlias,
                         OrganizationId = organization.Id,
                         ProjectTypeCode = projectTypeCode,
-                        EquipmentTypeCode = equipmentTypeCode,
+                        EquipmentTypeCode = itemEquipmentTypeCode,
                         CustomerCode = customer.Code,
                         CustomerName = customer.Name,
                         CustomerSequence = customerSequence,
-                        DeviceModel = $"{organization.ModelCompanyCode}-{equipmentTypeCode}-{customer.Code}-{customerSequence:D3}-{suffix:D2}",
+                        DeviceModel = $"{organization.ModelCompanyCode}-{itemEquipmentTypeCode}-{customer.Code}-{customerSequence:D3}-{BuildModelSuffixFromCode(code)}",
                         command.SignedDate,
                         Quantity = quantity,
                         VaultLocation = ReplaceTerminalDirectory(item.VaultLocation, code),
@@ -338,7 +371,7 @@ public sealed partial class MySqlPdmRepository
             new { ProjectId = projectId, ExecutionUnitId = executionUnitId, Now = now }, transaction, cancellationToken: cancellationToken));
         if (affected == 0) throw new PdmNotFoundException("主项目不存在。");
         await connection.ExecuteAsync(new CommandDefinition(
-            "DELETE assignment FROM project_assignment assignment INNER JOIN project item ON item.id=assignment.project_id WHERE item.id=@ProjectId OR item.parent_project_id=@ProjectId",
+            "DELETE assignment FROM project_assignment assignment INNER JOIN project item ON item.id=assignment.project_id WHERE item.id=@ProjectId OR item.root_project_id=@ProjectId",
             new { ProjectId = projectId }, transaction, cancellationToken: cancellationToken));
         await transaction.CommitAsync(cancellationToken);
         return await FindProjectAsync(projectId, cancellationToken) ?? throw new PdmNotFoundException("主项目不存在。");

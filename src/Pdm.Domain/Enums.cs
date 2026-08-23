@@ -18,12 +18,14 @@ public enum EditLockAttentionLevel
 
 public enum UserRole
 {
-    Engineer,
-    PlanningManager,
-    ProcessReviewer,
-    Approver,
-    ProductionViewer,
-    Administrator
+    Engineer = 0,
+    PlanningManager = 1,
+    ProcessReviewer = 2,
+    Approver = 3,
+    ProductionViewer = 4,
+    Administrator = 5,
+    BusinessUnitManager = 6,
+    PlatformAdministrator = 7
 }
 
 public enum OrganizationUnitKind
@@ -49,6 +51,12 @@ public enum DocumentKind
     Pdf,
     Dwg,
     Other
+}
+
+public enum DocumentPreviewFormat
+{
+    Step,
+    Pdf
 }
 
 public enum DocumentRegistrationMatchKind
@@ -159,6 +167,14 @@ public enum BomVersionState
     Obsolete = 3
 }
 
+public enum ProjectBomHeaderKind
+{
+    Master = 0,
+    Standard = 1,
+    NonStandard = 2,
+    Electrical = 3
+}
+
 public enum CadPropertyWritebackStatus
 {
     Pending = 0,
@@ -173,7 +189,33 @@ public enum CadPropertyWritebackStatus
 public enum ApprovalStage
 {
     ProcessReview = 1,
-    Approval = 2
+    Approval = 2,
+    MechanicalEngineer = 10,
+    MainDesigner = 20,
+    MechanicalSupervisor = 30,
+    HardwareEngineer = 40,
+    HardwareSupervisor = 50,
+    StandardizationSupervisor = 60
+}
+
+public enum ApprovalAssigneeSource
+{
+    Submitter,
+    ProjectDesignLead,
+    FixedUser,
+    PrimaryUnitManager,
+    ParentUnitManager
+}
+
+public enum ReleaseScope
+{
+    LegacyCombined,
+    StandardLongLead,
+    StandardFormal,
+    StandardSupplement,
+    ElectricalFormal,
+    ElectricalSupplement,
+    NonStandardWithDrawing
 }
 
 public enum ApprovalDecision

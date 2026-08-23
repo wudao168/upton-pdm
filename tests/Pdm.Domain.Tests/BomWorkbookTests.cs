@@ -18,7 +18,8 @@ public sealed class BomWorkbookTests
                 Remark = "常开型",
                 Brand = "SICK",
                 SurfaceTreatment = "本色",
-                Weight = "0.25 kg"
+                Weight = "0.25 kg",
+                ParentDrawingNumber = "ASM-001"
             },
             new BomItem(Guid.NewGuid(), projectId, BomKind.Electrical, 2, "EL-002", "伺服驱动器", 2.5m, "件", "铝", "750W", "W2", false)
         };
@@ -35,6 +36,7 @@ public sealed class BomWorkbookTests
         Assert.Equal("不锈钢", imported[0].Material);
         Assert.Equal("本色", imported[0].SurfaceTreatment);
         Assert.Equal("0.25 kg", imported[0].Weight);
+        Assert.Equal("ASM-001", imported[0].ParentDrawingNumber);
         Assert.Equal("750W", imported[1].Specification);
         Assert.False(imported[1].IsComplete);
     }

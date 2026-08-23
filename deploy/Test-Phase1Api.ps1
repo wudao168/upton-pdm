@@ -1,11 +1,15 @@
 ﻿[CmdletBinding()]
 param(
     [string]$Database = 'pdm_phase1_qa',
-    [int]$ApiPort = 5180
+    [int]$ApiPort = 5180,
+    [Parameter(Mandatory)]
+    [string]$QaAssemblyPath
 )
 
 $ErrorActionPreference = 'Stop'
 if ($Database -notmatch '^[A-Za-z0-9_]+_qa$') { throw '验收数据库名必须以_qa结尾。' }
+$QaAssemblyPath = (Resolve-Path -LiteralPath $QaAssemblyPath -ErrorAction Stop).Path
+if ([IO.Path]::GetExtension($QaAssemblyPath) -ine '.sldasm') { throw '服务器发布验收必须提供有效的SLDASM测试装配体。' }
 
 $projectRoot = Split-Path -Parent $PSScriptRoot
 $secretPath = Join-Path $projectRoot '.local\secrets\pdm-secrets.json'
@@ -49,10 +53,6 @@ function Invoke-PdmJson([string]$method, [string]$path, $body, $headers) {
         $parameters.Body = $body | ConvertTo-Json -Depth 100 -Compress
     }
     return Invoke-RestMethod @parameters
-}
-
-function Write-QaFile([string]$path, [string]$content) {
-    [IO.File]::WriteAllBytes($path, [Text.Encoding]::UTF8.GetBytes($content))
 }
 
 function Get-Sha256([string]$path) {
@@ -168,7 +168,7 @@ try {
 
     $stage = 'checkin-w1'
     $v1File = Join-Path $qaRoot 'QA-ROOT-v1.SLDASM'
-    Write-QaFile $v1File 'UPTON-PDM-QA-VERSION-1'
+    Copy-Item -LiteralPath $QaAssemblyPath -Destination $v1File -Force
     $v1Stored = Send-PdmFile $v1File ".versions/$($document.id)/$([Guid]::NewGuid().ToString('N'))/QA-ROOT.SLDASM" $headers $project.id
     $checkin1 = Invoke-PdmJson 'Post' "/api/documents/$($document.id)/checkin" @{
         projectId = $project.id; root = $root; comment = '一期验收W1'; storageRelativePath = $v1Stored.relativePath
@@ -180,7 +180,10 @@ try {
     $checkoutSessionId = [Guid]::NewGuid()
     Invoke-PdmJson 'Post' "/api/documents/$($document.id)/checkout" @{ sessionId = $checkoutSessionId; machineName = 'PHASE1-QA' } $headers | Out-Null
     $v2File = Join-Path $qaRoot 'QA-ROOT-v2.SLDASM'
-    Write-QaFile $v2File 'UPTON-PDM-QA-VERSION-2-CHANGED'
+    Copy-Item -LiteralPath $QaAssemblyPath -Destination $v2File -Force
+    $versionMarker = [Text.Encoding]::UTF8.GetBytes('UPTON-PLM-QA-VERSION-2')
+    $versionStream = [IO.File]::Open($v2File, [IO.FileMode]::Append, [IO.FileAccess]::Write, [IO.FileShare]::None)
+    try { $versionStream.Write($versionMarker, 0, $versionMarker.Length) } finally { $versionStream.Dispose() }
     $v2Stored = Send-PdmFile $v2File ".versions/$($document.id)/$([Guid]::NewGuid().ToString('N'))/QA-ROOT.SLDASM" $headers $project.id
     $checkin2 = Invoke-PdmJson 'Post' "/api/documents/$($document.id)/checkin" @{
         projectId = $project.id; root = $root; comment = '一期验收W2'; storageRelativePath = $v2Stored.relativePath
@@ -206,10 +209,6 @@ try {
     $packageNumber = 'RP-QA-' + [DateTimeOffset]::Now.ToString('yyyyMMddHHmmssfff')
     $package = Invoke-PdmJson 'Post' '/api/release-packages' @{ projectId = $project.id; referenceSnapshotId = $null; number = $packageNumber; processReviewer = 'qa_admin'; approver = 'qa_admin' } $headers
     Assert-Phase1 ($package.state -eq 0) '发布包创建后不是草稿状态。'
-    $pdf = Join-Path $qaRoot 'QA-DRAWING.pdf'; Write-QaFile $pdf "%PDF-1.4`nUPTON PDM QA`n%%EOF"
-    $dwg = Join-Path $qaRoot 'QA-DRAWING.dwg'; Write-QaFile $dwg 'AC1027-UPTON-PDM-QA'
-    Send-PdmFile $pdf ".release-staging/$packageNumber/drawings/QA-DRAWING.pdf" $headers $project.id | Out-Null
-    Send-PdmFile $dwg ".release-staging/$packageNumber/drawings/QA-DRAWING.dwg" $headers $project.id | Out-Null
     $stage = 'release-package-submit-approve'
     $package = Invoke-PdmJson 'Post' "/api/release-packages/$($package.id)/submit" $null $headers
     Assert-Phase1 ($package.state -eq 1) '发布包提交后未进入工艺审核。'
@@ -220,8 +219,11 @@ try {
     $package = Invoke-PdmJson 'Post' "/api/approval-tasks/$($approvalTask.id)/decision" @{ decision = 0; comment = '批准验收发布' } $headers
     Assert-Phase1 ($package.state -eq 5) '最终批准后未自动发布。'
     Assert-Phase1 (Test-Path -LiteralPath $package.publishedPath) '发布包未投放生产目录。'
-    $requiredFiles = @('manifest.json', 'approval.json', 'checksums.sha256', 'mechanical-bom.xlsx', 'electrical-bom.xlsx', 'drawings\QA-DRAWING.pdf', 'drawings\QA-DRAWING.dwg')
+    $requiredFiles = @('manifest.json', 'approval.json', 'checksums.sha256', 'mechanical-bom.xlsx', 'electrical-bom.xlsx')
     foreach ($relative in $requiredFiles) { Assert-Phase1 (Test-Path -LiteralPath (Join-Path $package.publishedPath $relative)) "发布包缺少$relative。" }
+    $publishedFiles = @(Get-ChildItem -LiteralPath $package.publishedPath -File -Recurse)
+    Assert-Phase1 (($publishedFiles | Where-Object { $_.Extension -ieq '.step' }).Count -ge 1) '发布阶段未由服务器生成STEP。'
+    Assert-Phase1 (($publishedFiles | Where-Object { $_.Extension -in @('.dwg', '.sldasm', '.sldprt', '.slddrw') }).Count -eq 0) '发布包不能包含DWG或SolidWorks源文件。'
 
     $stage = 'formal-version-and-audit'
     $versionsAfterApproval = @(Invoke-PdmJson 'Get' "/api/documents/$($document.id)/versions" $null $headers)
@@ -231,8 +233,6 @@ try {
     $stage = 'reject-and-resubmit'
     $retryNumber = 'RP-QA-RETRY-' + [DateTimeOffset]::Now.ToString('yyyyMMddHHmmssfff')
     $retryPackage = Invoke-PdmJson 'Post' '/api/release-packages' @{ projectId = $project.id; referenceSnapshotId = $null; number = $retryNumber; processReviewer = 'qa_admin'; approver = 'qa_admin' } $headers
-    Send-PdmFile $pdf ".release-staging/$retryNumber/drawings/QA-DRAWING.pdf" $headers $project.id | Out-Null
-    Send-PdmFile $dwg ".release-staging/$retryNumber/drawings/QA-DRAWING.dwg" $headers $project.id | Out-Null
     $retryPackage = Invoke-PdmJson 'Post' "/api/release-packages/$($retryPackage.id)/submit" $null $headers
     $retryProcessTask = @($retryPackage.approvalTasks) | Where-Object { $_.stage -eq 1 } | Select-Object -First 1
     $retryPackage = Invoke-PdmJson 'Post' "/api/approval-tasks/$($retryProcessTask.id)/decision" @{ decision = 1; comment = '验收驳回' } $headers

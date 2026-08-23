@@ -28,5 +28,5 @@ if ($LASTEXITCODE -ne 0) {
     throw "SolidWorks add-in registration failed. RegAsm exit code: $LASTEXITCODE"
 }
 
-Write-Host "UPTON PDM SolidWorks add-in registered: $assemblyPath"
-Write-Host 'Restart SolidWorks and verify UPTON PDM under Tools > Add-ins.'
+Write-Host "UPLM SolidWorks add-in registered: $assemblyPath"
+Write-Host 'Restart SolidWorks and verify UPLM under Tools > Add-ins.'

@@ -9,6 +9,9 @@ const api = vi.hoisted(() => ({
   testU9MaterialIntegration: vi.fn(),
   previewU9MaterialSample: vi.fn(),
   importU9MaterialSample: vi.fn(),
+  queryU9Bom: vi.fn(),
+  previewU9BomWrite: vi.fn(),
+  executeU9BomWrite: vi.fn(),
 }))
 
 vi.mock('../src/api', () => api)
@@ -16,7 +19,10 @@ vi.mock('../src/api', () => api)
 const settings = {
   baseUrl: 'http://u9.example.test/U9', enterpriseCode: '01', organizationCode: '7', userCode: 'pdm', clientId: 'PDM',
   clientSecretConfigured: true, itemCreatePath: '/webapi/ItemMaster/Create', itemQueryPath: '/webapi/ItemMaster/Query',
-  itemModifyPath: '/webapi/ItemMaster/Modify', itemDeletePath: '/webapi/ItemMaster/Delete', unitCodeMappings: {}, writeEnabled: false,
+  itemModifyPath: '/webapi/ItemMaster/Modify', itemDeletePath: '/webapi/ItemMaster/Delete',
+  customerQueryPath: '/webapi/GetCommonReference/Create', bomCreatePath: '/webapi/BOM/Create', bomQueryPath: '/webapi/BOM/Query',
+  bomModifyPath: '/webapi/BOM/Modify', bomDeletePath: '/webapi/BOM/Delete', bomBatchUnapprovePath: '/webapi/BOM/BatchUnApprove',
+  bomBipQueryPagePath: '/webapi/BOM/BIPQueryPage', unitCodeMappings: {}, writeEnabled: false,
 }
 
 const customerSettings = {
@@ -44,31 +50,53 @@ describe('U9IntegrationManagement', () => {
     api.updateU9MaterialIntegration.mockImplementation(async input => ({ ...input, clientSecretConfigured: true }))
     api.testU9MaterialIntegration.mockResolvedValue({ ...settings, testedAt: '2026-08-20T00:00:00Z' })
     api.previewU9MaterialSample.mockResolvedValue({ categoryCodes: ['0101', '0102', '0204'], limitPerCategory: 10, queriedAt: '2026-08-20T00:00:00Z', items: [] })
+    api.queryU9Bom.mockResolvedValue({
+      queryPath: '/webapi/BOM/Query', requestPreview: '[{"Org":{"Code":"7"},"ItemMaster":{"Code":"03010000001"}}]', queriedAt: '2026-08-21T00:00:00Z',
+      result: { responseCode: 0, boms: [{ itemCode: '03010000001', itemName: '测试设备', bomVersionCode: 'V1', organizationCode: '7', productUomCode: '001', lot: 1, status: 2, bomType: 1, bomSort: 0, projectMapNum: 'ASM-001', explain: '测试BOM', components: [{ sequence: 10, itemCode: '01020000057', itemName: '阀岛', usageQty: 2, issueUomCode: '001', parentQty: 1 }] }] },
+    })
+    api.previewU9BomWrite.mockResolvedValue({ operation: 0, path: '/webapi/BOM/Create', requestPreview: '[{"ItemMaster":{"Code":"02010003168"}}]', requestSha256: 'ABC123', baselineSha256: 'EMPTY', requiredConfirmation: '创建 02010003168/A1', addedComponentCount: 1, retainedHistoricalComponentCount: 0, generatedAt: '2026-08-21T00:00:00Z' })
+    api.executeU9BomWrite.mockResolvedValue({ preview: {}, writeResult: { responseCode: 0, rows: [{ isSuccess: true }] }, verification: { responseCode: 0, boms: [] }, executedAt: '2026-08-21T00:01:00Z' })
   })
 
-  it('以基础设置为首个选项卡，并把客户和料品接口分开', async () => {
+  it('把接口设置放在基础设置右侧，并统一展示客户料品和BOM接口', async () => {
     const wrapper = mountPage()
     await flushPromises()
 
     expect(wrapper.find('.u9-integration-page > .pdm-pagebar').exists()).toBe(false)
     const tabs = wrapper.findAll('[role="tab"]')
-    expect(tabs.map(tab => tab.text())).toEqual(expect.arrayContaining(['基础设置', '客户查询', '料品同步', '料品接口']))
+    expect(tabs.map(tab => tab.text())).toEqual(['基础设置', '接口设置', '客户查询', '料品同步', 'BOM维护'])
     expect(tabs.find(tab => tab.text().includes('基础设置'))?.attributes('aria-selected')).toBe('true')
     expect(wrapper.get('input[name="u9BaseUrl"]').element).toHaveProperty('value', settings.baseUrl)
 
     await tabs.find(tab => tab.text().includes('客户查询'))!.trigger('click')
     await flushPromises()
-    expect(wrapper.get('[aria-label="U9C客户同步"]').text()).toContain('测试客户')
-    expect(wrapper.get('[aria-label="U9C客户同步"]').text()).toContain('GetCommonReference/Create')
+    const customerPage = wrapper.get('[aria-label="U9C客户同步"]')
+    expect(customerPage.text()).toContain('测试客户')
+    expect(customerPage.text()).toContain('GetCommonReference/Create')
+    expect(customerPage.text()).not.toContain('U9C服务地址')
+    expect(customerPage.text()).not.toContain('U9C用户')
+    expect(customerPage.find('input[name="u9CustomerBaseUrl"]').exists()).toBe(false)
+    expect(customerPage.find('input[name="u9CustomerUser"]').exists()).toBe(false)
+    expect(customerPage.find('.pdm-pagebar').exists()).toBe(false)
+    expect(customerPage.find('.pdm-crm-customer-list').exists()).toBe(true)
+    expect(customerPage.get('.pdm-manager-actions').findAll('button').map(button => button.text().trim())).toEqual(['测试连接', '保存同步计划', '从U9C同步'])
 
-    await wrapper.findAll('[role="tab"]').find(tab => tab.text().includes('料品接口'))!.trigger('click')
+    await wrapper.findAll('[role="tab"]').find(tab => tab.text().includes('接口设置'))!.trigger('click')
     await flushPromises()
-    expect(wrapper.get('[aria-label="U9C料品接口设置"]').text()).toContain('PDM直接使用U9C计量单位编码')
-    expect(wrapper.get('[aria-label="U9C料品接口设置"]').text()).not.toContain('新增映射')
-    expect(wrapper.get('[aria-label="U9C料品接口设置"]').text()).toContain('启用人工确认后的真实写入')
+    const interfacePage = wrapper.get('[aria-label="U9C接口设置"]')
+    expect(interfacePage.text()).toContain('客户接口')
+    expect(interfacePage.text()).toContain('料品接口')
+    expect(interfacePage.text()).toContain('BOM接口')
+    expect(interfacePage.get('input[name="u9CustomerQueryPath"]').element).toHaveProperty('value', settings.customerQueryPath)
+    expect(interfacePage.get('input[name="u9BomCreatePath"]').element).toHaveProperty('value', settings.bomCreatePath)
+    expect(interfacePage.text()).toContain('启用人工确认后的真实写入')
   })
 
   it('料品同步固定为三类且每类最多10条，只执行预览请求', async () => {
+    api.previewU9MaterialSample.mockResolvedValueOnce({
+      categoryCodes: ['0101', '0102', '0204'], limitPerCategory: 10, queriedAt: '2026-08-20T00:00:00Z',
+      items: [{ u9ItemId: 'u9-1', materialCode: '01010000001', name: '光电传感器', categoryCode: '0101', categoryName: '电气外购件', kind: 'Electrical', supplyMode: 'Purchase', unitCode: '001', specification: 'M18', brand: '欧姆龙', existsInPdm: false, canImport: true, decision: '新建' }],
+    })
     const wrapper = mountPage()
     await flushPromises()
     await wrapper.findAll('[role="tab"]').find(tab => tab.text().includes('料品同步'))!.trigger('click')
@@ -82,6 +110,8 @@ describe('U9IntegrationManagement', () => {
 
     expect(api.previewU9MaterialSample).toHaveBeenCalledWith(['0101', '0102', '0204'], 10, 'token')
     expect(api.importU9MaterialSample).not.toHaveBeenCalled()
+    expect(panel.text()).toContain('品牌')
+    expect(panel.text()).toContain('欧姆龙')
   })
 
   it('保存基础设置时保留料品接口参数', async () => {
@@ -95,24 +125,71 @@ describe('U9IntegrationManagement', () => {
     expect(api.updateU9MaterialIntegration).toHaveBeenCalledWith(expect.objectContaining({
       organizationCode: '8',
       itemCreatePath: settings.itemCreatePath,
+      bomCreatePath: settings.bomCreatePath,
       unitCodeMappings: {},
     }), 'token')
   })
 
-  it('保存料品接口时保留基础设置并清空旧单位映射', async () => {
+  it('保存统一接口设置时同时提交客户料品和BOM路径', async () => {
     const wrapper = mountPage()
     await flushPromises()
-    await wrapper.findAll('[role="tab"]').find(tab => tab.text().includes('料品接口'))!.trigger('click')
+    await wrapper.findAll('[role="tab"]').find(tab => tab.text().includes('接口设置'))!.trigger('click')
     await flushPromises()
 
-    await wrapper.findAll('button').find(button => button.text().includes('保存料品接口'))!.trigger('click')
+    await wrapper.findAll('button').find(button => button.text().includes('保存接口设置'))!.trigger('click')
     await flushPromises()
 
     expect(api.updateU9MaterialIntegration).toHaveBeenCalledWith(expect.objectContaining({
       baseUrl: settings.baseUrl,
       clientId: settings.clientId,
       clientSecret: null,
+      customerQueryPath: settings.customerQueryPath,
+      bomCreatePath: settings.bomCreatePath,
+      bomBipQueryPagePath: settings.bomBipQueryPagePath,
       unitCodeMappings: {},
     }), 'token')
+  })
+
+  it('BOM维护可查询U9C并展示请求预览和子项', async () => {
+    const wrapper = mountPage()
+    await flushPromises()
+    await wrapper.findAll('[role="tab"]').find(tab => tab.text().includes('BOM维护'))!.trigger('click')
+    await flushPromises()
+
+    const panel = wrapper.get('[aria-label="U9C BOM查询与维护"]')
+    expect(panel.text()).toContain('当前只能查询')
+    expect(panel.get('input[name="u9BomOrganizationCode"]').element).toHaveProperty('value', '7')
+    await panel.get('input[name="u9BomItemCode"]').setValue('03010000001')
+    await panel.get('input[name="u9BomVersionCode"]').setValue('V1')
+    await panel.get('form').trigger('submit')
+    await flushPromises()
+
+    expect(api.queryU9Bom).toHaveBeenCalledWith(expect.objectContaining({ itemCode: '03010000001', bomVersionCode: 'V1' }), 'token')
+    expect(panel.text()).toContain('/webapi/BOM/Query')
+    expect(panel.text()).toContain('测试设备')
+    expect(panel.text()).toContain('子项数')
+  })
+
+  it('BOM真实写入必须先预览并输入完全一致的确认文字', async () => {
+    api.getU9MaterialIntegration.mockResolvedValueOnce({ ...settings, writeEnabled: true })
+    const wrapper = mountPage()
+    await flushPromises()
+    await wrapper.findAll('[role="tab"]').find(tab => tab.text().includes('BOM维护'))!.trigger('click')
+    await flushPromises()
+
+    const panel = wrapper.get('[aria-label="U9C BOM查询与维护"]')
+    await panel.findAll('button').find(button => button.text().includes('新建BOM'))!.trigger('click')
+    await flushPromises()
+    await wrapper.get('input[name="u9BomWriteItemCode"]').setValue('02010003168')
+    expect(wrapper.get('input[name="u9BomWriteVersionCode"]').element).toHaveProperty('value', 'A1')
+    expect(wrapper.get('input[name="u9BomWriteVersionCode"]').attributes('disabled')).toBeDefined()
+    await wrapper.findAll('button').find(button => button.text().includes('生成请求预览'))!.trigger('click')
+    await flushPromises()
+
+    expect(api.previewU9BomWrite).toHaveBeenCalledWith(expect.objectContaining({ operation: 0, itemCode: '02010003168', bomVersionCode: 'A1' }), 'token')
+    expect(document.body.textContent).toContain('/webapi/BOM/Create')
+    const executeButton = Array.from(document.body.querySelectorAll('button')).find(button => button.textContent?.includes('确认执行并自动回查'))!
+    expect(executeButton.disabled).toBe(true)
+    expect(api.executeU9BomWrite).not.toHaveBeenCalled()
   })
 })

@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { computed, onMounted, reactive, ref, watch } from 'vue'
+import SquareLoader from './SquareLoader.vue'
 import {
   archiveMaterial,
   approveMaterial,
@@ -11,15 +12,18 @@ import {
   executeMaterialSyncTask,
   getMaterialRemovalReadiness,
   listMaterialCategories,
+  listMaterialCodeApplications,
   listMaterials,
   listMaterialSyncTasks,
   queryU9Material,
   retryMaterialSyncTask,
+  decideMaterialCodeApplication,
   saveMaterialCategory,
   updateMaterial,
 } from '../api'
 import type {
   MaterialCategory,
+  MaterialCodeApplication,
   MaterialKind,
   MaterialRemovalReadiness,
   MaterialSupplyMode,
@@ -29,14 +33,16 @@ import type {
 } from '../types'
 import { u9UnitLabel, u9UnitOptions } from '../u9Units'
 
-const props = defineProps<{
+const props = withDefaults(defineProps<{
   token: string
   canEdit: boolean
   canApprove: boolean
+  canDecideMaterialCode?: boolean
   canManageIntegration: boolean
-}>()
+}>(), { canDecideMaterialCode: false })
 
 const activeTab = ref('materials')
+const categoryNavCollapsed = ref(true)
 const loading = ref(false)
 const saving = ref(false)
 const syncingTaskId = ref<string | null>(null)
@@ -52,6 +58,8 @@ const u9ValidationResults = reactive<Record<string, U9ValidationResult>>({})
 const materials = ref<PdmMaterial[]>([])
 const categories = ref<MaterialCategory[]>([])
 const tasks = ref<MaterialSyncTask[]>([])
+const codeApplications = ref<MaterialCodeApplication[]>([])
+const decidingApplicationId = ref<string | null>(null)
 const query = ref('')
 const brandFilter = ref('')
 const showArchived = ref(false)
@@ -146,7 +154,7 @@ const materialCategoryScopeCodes = computed<Set<string> | null>(() => {
 })
 const creatableCategories = computed(() => categories.value.filter(category => category.allowCreate && category.isVisible && category.isActive && category.pdmKind))
 
-const kindLabels: Record<MaterialKind, string> = { Electrical: '电气外购件', Standard: '机械外购件', NonStandard: '非标机加件' }
+const kindLabels: Record<MaterialKind, string> = { Electrical: '电气外购件', Standard: '机械外购件', NonStandard: '非标机加件', Product: '产品/组件' }
 const supplyLabels: Record<MaterialSupplyMode, string> = { Purchase: '采购', Manufacture: '自制', Outsource: '委外' }
 const syncLabels: Record<string, string> = {
   NotQueued: '未排队', PreviewReady: '请求预览', Pending: '待同步', Succeeded: '已同步', Failed: '失败', NeedsReview: '待复核', Superseded: '已废止',
@@ -157,6 +165,10 @@ const categoryLabel = (item: PdmMaterial) => {
   return `${code} ${categories.value.find(category => category.code === code)?.name ?? kindLabels[item.kind]}`
 }
 const weightLabel = (item: PdmMaterial) => item.weight == null ? '—' : `${item.weight}${item.weightUnit ? ` ${item.weightUnit}` : ''}`
+const dateTimeLabel = (value: string) => {
+  const date = new Date(value)
+  return Number.isNaN(date.getTime()) ? '—' : date.toLocaleString('zh-CN', { hour12: false })
+}
 const materialCodePlaceholder = computed(() => {
   const category = categories.value.find(item => item.code === form.categoryCode)
   if (editingId.value) return ''
@@ -263,6 +275,34 @@ async function load() {
     ElMessage.error(error instanceof Error ? error.message : '料品数据加载失败')
   } finally {
     loading.value = false
+  }
+}
+
+async function loadCodeApplications() {
+  if (!props.canDecideMaterialCode) return
+  try { codeApplications.value = await listMaterialCodeApplications(props.token) }
+  catch (error) { ElMessage.error(error instanceof Error ? error.message : '料号审批加载失败') }
+}
+
+watch(activeTab, value => { if (value === 'code-approvals') void loadCodeApplications() })
+
+async function decideCodeApplication(application: MaterialCodeApplication, approved: boolean) {
+  let comment = ''
+  if (!approved) {
+    try {
+      const result = await ElMessageBox.prompt('请填写退回原因。', '退回料号申请', { inputType: 'textarea', confirmButtonText: '退回', cancelButtonText: '取消' })
+      comment = result.value
+    } catch { return }
+  }
+  decidingApplicationId.value = application.id
+  try {
+    await decideMaterialCodeApplication(application.id, application.rowVersion, approved, comment, props.token)
+    ElMessage.success(approved ? '料号申请已批准，料号已返回BOM并进入SolidWorks静默写回队列' : '料号申请已退回')
+    await load()
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '料号申请处理失败')
+  } finally {
+    decidingApplicationId.value = null
   }
 }
 
@@ -429,7 +469,7 @@ async function archiveSelected() {
   if (!item) return
   try {
     await ElMessageBox.confirm(
-      `停用后将禁止新BOM引用 ${item.materialCode}，历史BOM不受影响；本操作只停用PDM料品，不会停用或物理删除U9C料品。`,
+      `停用后将禁止新BOM引用 ${item.materialCode}，历史BOM不受影响；本操作只停用PLM料品，不会停用或物理删除U9C料品。`,
       '停用料品',
       { type: 'warning', confirmButtonText: '确认停用', cancelButtonText: '取消' },
     )
@@ -449,7 +489,7 @@ async function deleteSelected() {
   if (targets.length === 0) return
   try {
     await ElMessageBox.confirm(
-      `将检查选中的 ${targets.length} 个料品。仅PDM主控且未被BOM引用的料品可删除；若U9C存在，将先请求U9C删除，U9C因业务引用拒绝时PDM保持不变，只有U9C删除成功并回查不存在后才删除PDM主档。`,
+      `将检查选中的 ${targets.length} 个料品。仅PLM主控且未被BOM引用的料品可删除；若U9C存在，将先请求U9C删除，U9C因业务引用拒绝时PLM保持不变，只有U9C删除成功并回查不存在后才删除PLM主档。`,
       '安全删除料品',
       { type: 'warning', confirmButtonText: '确认删除', cancelButtonText: '取消' },
     )
@@ -478,8 +518,8 @@ async function deleteSelected() {
 
 function removalStatus(readiness: MaterialRemovalReadiness, u9Exists: boolean) {
   if (!readiness.isPdmMaster) return { label: 'U9主控', message: readiness.decision }
-  if (readiness.pdmReferenceCount > 0) return { label: `PDM引用${readiness.pdmReferenceCount}`, message: readiness.decision }
-  if (!u9Exists) return { label: '可安全删除', message: 'PDM未发现引用，且U9C实时查询未找到该料品。' }
+  if (readiness.pdmReferenceCount > 0) return { label: `PLM引用${readiness.pdmReferenceCount}`, message: readiness.decision }
+  if (!u9Exists) return { label: '可安全删除', message: 'PLM未发现引用，且U9C实时查询未找到该料品。' }
   if (readiness.synchronizedDeleteAvailable) return { label: '可同步删除', message: readiness.decision }
   return { label: '同步删除未启用', message: readiness.decision }
 }
@@ -500,8 +540,8 @@ async function queryU9(item: PdmMaterial, notify = true): Promise<U9ValidationSt
     const removal = readiness
       ? removalStatus(readiness, codeMatches.length > 0)
       : item.sourceSystem === 'U9C' || item.masterOwner === 'U9C'
-        ? { label: 'U9主控', message: 'U9C主控料品不允许从PDM发起物理删除。' }
-        : { label: '删除校验不可用', message: '未取得PDM引用状态，删除判定保持关闭。' }
+        ? { label: 'U9主控', message: 'U9C主控料品不允许从PLM发起物理删除。' }
+        : { label: '删除校验不可用', message: '未取得PLM引用状态，删除判定保持关闭。' }
     if (codeMatches.length === 0) {
       const message = `U9C未找到编码 ${item.materialCode} 的料品；删除检查：${removal.message}`
       u9ValidationResults[item.id] = { status: 'NotFound', message, removalLabel: removal.label }
@@ -519,7 +559,7 @@ async function queryU9(item: PdmMaterial, notify = true): Promise<U9ValidationSt
     }
 
     const u9Specifications = [...new Set(codeMatches.map(value => value.u9Specification?.trim() || '空'))]
-    const message = `编码 ${item.materialCode} 的规格冲突：PDM为“${item.specification?.trim() || '空'}”，U9C为“${u9Specifications.join('、')}”；删除检查：${removal.message}`
+    const message = `编码 ${item.materialCode} 的规格冲突：PLM为“${item.specification?.trim() || '空'}”，U9C为“${u9Specifications.join('、')}”；删除检查：${removal.message}`
     u9ValidationResults[item.id] = {
       status: 'SpecificationMismatch',
       message,
@@ -578,14 +618,15 @@ onMounted(load)
 </script>
 
 <template>
-  <section class="material-page pdm-panel" v-loading="loading">
+  <section class="material-page pdm-panel pdm-loading-host">
+    <SquareLoader v-if="loading" overlay label="正在加载料品数据" />
     <el-tabs v-model="activeTab" class="material-tabs">
       <el-tab-pane label="料品主档" name="materials">
-        <div class="material-master-layout">
+        <div class="material-master-layout" :class="{ 'is-category-collapsed': categoryNavCollapsed }">
           <aside class="material-category-nav" aria-label="料品分类">
-            <div class="material-category-nav__title">料品分类</div>
-            <button type="button" class="material-category-all" :class="{ 'is-active': !selectedMaterialCategoryCode }" @click="selectMaterialCategory()">全部料品</button>
-            <el-tree :data="materialCategoryTree" node-key="code" default-expand-all highlight-current :current-node-key="selectedMaterialCategoryCode || undefined" :expand-on-click-node="false" @node-click="selectMaterialCategory($event.code)">
+            <div class="material-category-nav__title"><span v-if="!categoryNavCollapsed">料品分类</span><button type="button" class="material-category-nav__toggle" :aria-label="categoryNavCollapsed ? '展开料品分类' : '收起料品分类'" :aria-expanded="!categoryNavCollapsed" @click="categoryNavCollapsed = !categoryNavCollapsed">{{ categoryNavCollapsed ? '›' : '‹' }}</button></div>
+            <button v-if="!categoryNavCollapsed" type="button" class="material-category-all" :class="{ 'is-active': !selectedMaterialCategoryCode }" @click="selectMaterialCategory()">全部料品</button>
+            <el-tree v-if="!categoryNavCollapsed" :data="materialCategoryTree" node-key="code" default-expand-all highlight-current :current-node-key="selectedMaterialCategoryCode || undefined" :expand-on-click-node="false" @node-click="selectMaterialCategory($event.code)">
               <template #default="{ data }"><span class="material-category-node">{{ data.code }} {{ data.name }}</span></template>
             </el-tree>
           </aside>
@@ -595,20 +636,23 @@ onMounted(load)
               <div class="material-toolbar__filters"><el-checkbox v-model="showArchived" @change="load">显示已停用</el-checkbox><el-select v-model="brandFilter" class="material-brand-filter" clearable filterable placeholder="筛选品牌"><el-option v-for="brand in brandOptions" :key="brand" :label="brand" :value="brand" /></el-select><el-input v-model="query" clearable placeholder="搜索编码、名称、规格、品牌或分类" /></div>
             </div>
             <div class="material-table-shell">
-              <el-table class="material-table" :data="pagedMaterials" height="100%" stripe row-key="id" table-layout="fixed" :fit="true" empty-text="尚未创建PDM料品" @selection-change="selectedMaterials = $event">
+              <el-table class="material-table" :data="pagedMaterials" height="100%" stripe row-key="id" table-layout="fixed" :fit="true" empty-text="尚未创建PLM料品" @selection-change="selectedMaterials = $event">
           <el-table-column type="selection" width="38" />
-          <el-table-column prop="materialCode" label="PDM物料编码" min-width="100" show-overflow-tooltip />
+          <el-table-column prop="materialCode" label="物料编码" min-width="100" show-overflow-tooltip />
           <el-table-column prop="name" label="名称" min-width="112" show-overflow-tooltip />
-          <el-table-column label="来源/主控" min-width="76"><template #default="{ row }">{{ row.sourceSystem === 'U9C' ? 'U9C/U9C' : 'PDM/PDM' }}</template></el-table-column>
           <el-table-column label="U9C对应分类" min-width="96" show-overflow-tooltip><template #default="{ row }">{{ categoryLabel(row) }}</template></el-table-column>
-          <el-table-column label="计量单位" min-width="76"><template #default="{ row }">{{ u9UnitLabel(row.unitCode) }}</template></el-table-column>
+          <el-table-column label="引用次数" min-width="62"><template #default="{ row }">{{ row.referenceCount ?? 0 }}</template></el-table-column>
           <el-table-column label="规格" min-width="220" show-overflow-tooltip><template #default="{ row }">{{ row.specification || '—' }}</template></el-table-column>
-          <el-table-column label="材质" min-width="52" show-overflow-tooltip><template #default="{ row }">{{ row.material || '—' }}</template></el-table-column>
           <el-table-column label="品牌" min-width="56" show-overflow-tooltip><template #default="{ row }">{{ row.brand || '—' }}</template></el-table-column>
+          <el-table-column label="材质" min-width="52" show-overflow-tooltip><template #default="{ row }">{{ row.material || '—' }}</template></el-table-column>
           <el-table-column label="表面处理" min-width="64" show-overflow-tooltip><template #default="{ row }">{{ row.surfaceTreatment || '—' }}</template></el-table-column>
           <el-table-column label="重量" min-width="54" show-overflow-tooltip><template #default="{ row }">{{ weightLabel(row) }}</template></el-table-column>
           <el-table-column label="备注" min-width="64" show-overflow-tooltip><template #default="{ row }">{{ row.remark || '—' }}</template></el-table-column>
-          <el-table-column label="料品采购链接" min-width="80"><template #default="{ row }"><el-link v-if="row.purchaseLink" :href="row.purchaseLink" target="_blank" rel="noopener noreferrer" type="primary" underline="never">打开</el-link><span v-else>—</span></template></el-table-column>
+          <el-table-column label="链接" min-width="80"><template #default="{ row }"><el-link v-if="row.purchaseLink" :href="row.purchaseLink" target="_blank" rel="noopener noreferrer" type="primary" underline="never">打开</el-link><span v-else>—</span></template></el-table-column>
+          <el-table-column prop="createdBy" label="创建人" min-width="70" show-overflow-tooltip />
+          <el-table-column label="创建时间" min-width="130" show-overflow-tooltip><template #default="{ row }">{{ dateTimeLabel(row.createdAt) }}</template></el-table-column>
+          <el-table-column label="计量单位" min-width="76"><template #default="{ row }">{{ u9UnitLabel(row.unitCode) }}</template></el-table-column>
+          <el-table-column label="来源/主控" min-width="76"><template #default="{ row }">{{ row.sourceSystem === 'U9C' ? 'U9C/U9C' : 'PLM/PLM' }}</template></el-table-column>
           <el-table-column label="状态" min-width="56"><template #default="{ row }"><el-tag :type="row.isArchived ? 'info' : row.approvalStatus === 'Approved' ? 'success' : 'info'">{{ row.isArchived ? '已停用' : row.approvalStatus === 'Approved' ? '已批准' : '草稿' }}</el-tag></template></el-table-column>
           <el-table-column label="同步" min-width="52"><template #default="{ row }">{{ row.syncStatus === 'Succeeded' && !row.u9SyncConfirmed ? '待校正' : syncLabels[row.syncStatus] }}</template></el-table-column>
           <el-table-column label="U9/删除校验" min-width="112"><template #default="{ row }"><el-tooltip v-if="u9ValidationResults[row.id]" :content="u9ValidationResults[row.id].message" placement="top"><div class="u9-validation" :aria-label="u9ValidationResults[row.id].message"><el-tag :type="u9ValidationResults[row.id].status === 'Matched' ? 'success' : u9ValidationResults[row.id].status === 'SpecificationMismatch' ? 'danger' : 'warning'">{{ validationLabel(u9ValidationResults[row.id]) }}</el-tag></div></el-tooltip><span v-else class="u9-unchecked">未校验</span></template></el-table-column>
@@ -630,6 +674,21 @@ onMounted(load)
         </el-table>
       </el-tab-pane>
 
+      <el-tab-pane v-if="canDecideMaterialCode" label="料号审批" name="code-approvals">
+        <div class="material-code-approval-note">流程：申请工程师提交 → 任意标准化角色处理。任一人完成后申请立即关闭，批准后料号自动返回BOM。</div>
+        <el-table :data="codeApplications" row-key="id" stripe empty-text="尚无料号申请">
+          <el-table-column prop="bomItemName" label="物料名称" min-width="140"><template #default="{ row }">{{ row.bomItemName || '—' }}</template></el-table-column>
+          <el-table-column prop="specification" label="型号" min-width="180"><template #default="{ row }">{{ row.specification || '—' }}</template></el-table-column>
+          <el-table-column prop="brand" label="品牌" min-width="100"><template #default="{ row }">{{ row.brand || '—' }}</template></el-table-column>
+          <el-table-column prop="remark" label="备注" min-width="140"><template #default="{ row }">{{ row.remark || '—' }}</template></el-table-column>
+          <el-table-column prop="requestedBy" label="申请工程师" min-width="100" />
+          <el-table-column label="申请时间" min-width="150"><template #default="{ row }">{{ dateTimeLabel(row.requestedAt) }}</template></el-table-column>
+          <el-table-column label="状态" width="90"><template #default="{ row }"><el-tag :type="row.status === 'Approved' ? 'success' : row.status === 'Rejected' ? 'danger' : 'warning'">{{ row.status === 'Approved' ? '已批准' : row.status === 'Rejected' ? '已退回' : '待审批' }}</el-tag></template></el-table-column>
+          <el-table-column prop="materialCode" label="返回料号" min-width="110"><template #default="{ row }">{{ row.materialCode || '—' }}</template></el-table-column>
+          <el-table-column label="操作" width="150"><template #default="{ row }"><template v-if="row.status === 'Pending' && canDecideMaterialCode"><el-button link type="primary" :loading="decidingApplicationId === row.id" @click="decideCodeApplication(row, true)">批准</el-button><el-button link type="danger" :disabled="decidingApplicationId === row.id" @click="decideCodeApplication(row, false)">退回</el-button></template><span v-else>{{ row.decidedBy || '—' }}</span></template></el-table-column>
+        </el-table>
+      </el-tab-pane>
+
       <el-tab-pane label="分类维护" name="rules">
         <div class="category-layout">
           <aside class="category-tree-panel">
@@ -646,7 +705,7 @@ onMounted(load)
                 <el-form-item label="分类名称" required><el-input v-model="categoryDraft.name" :disabled="!canManageIntegration" /></el-form-item>
                 <el-form-item label="上级分类"><el-select v-model="categoryDraft.parentCode" clearable filterable :disabled="!canManageIntegration"><el-option v-for="item in categories.filter(item => item.code !== categoryDraft.code)" :key="item.code" :label="`${item.code} ${item.name}`" :value="item.code" /></el-select></el-form-item>
                 <el-form-item label="U9C分类ID"><el-input v-model="categoryDraft.u9CategoryId" :disabled="!canManageIntegration" placeholder="同步后保存稳定ID" /></el-form-item>
-                <el-form-item label="PDM业务分类"><el-select v-model="categoryDraft.pdmKind" clearable :disabled="!canManageIntegration"><el-option label="电气件" value="Electrical" /><el-option label="机械外购件" value="Standard" /><el-option label="非标机加件" value="NonStandard" /></el-select></el-form-item>
+                <el-form-item label="PLM业务分类"><el-select v-model="categoryDraft.pdmKind" clearable :disabled="!canManageIntegration"><el-option label="电气件" value="Electrical" /><el-option label="机械外购件" value="Standard" /><el-option label="非标机加件" value="NonStandard" /><el-option label="产品/组件" value="Product" /></el-select></el-form-item>
                 <el-form-item label="默认供给方式"><el-select v-model="categoryDraft.defaultSupplyMode" :disabled="!canManageIntegration"><el-option label="采购" value="Purchase" /><el-option label="自制" value="Manufacture" /><el-option label="委外" value="Outsource" /></el-select></el-form-item>
                 <el-form-item label="编号前缀"><el-input v-model="categoryDraft.numberPrefix" :disabled="!canManageIntegration" :placeholder="categoryDraft.code" /></el-form-item>
                 <el-form-item label="流水位数"><el-input-number v-model="categoryDraft.sequenceLength" :min="1" :max="9" :disabled="!canManageIntegration" /></el-form-item>
@@ -654,7 +713,7 @@ onMounted(load)
                 <el-form-item label="排序号"><el-input-number v-model="categoryDraft.sortOrder" :disabled="!canManageIntegration" /></el-form-item>
                 <el-form-item label="U9C末位料号"><el-input v-model="lastU9MaterialCode" :disabled="!canManageIntegration || categoryCreating" :placeholder="`${categoryDraft.numberPrefix || categoryDraft.code}${'0'.repeat(categoryDraft.sequenceLength)}`"><template #append><el-button @click="calibrateCounter">校准流水</el-button></template></el-input><p class="field-help">只允许向前校准；系统不会通过U9C精确查询接口猜测最大流水。</p></el-form-item>
               </div>
-              <div class="category-switches"><el-switch v-model="categoryDraft.allowCreate" :disabled="!canManageIntegration" active-text="开放创建" inactive-text="屏蔽创建" /><el-switch v-model="categoryDraft.isVisible" :disabled="!canManageIntegration" active-text="PDM可见" /><el-switch v-model="categoryDraft.isActive" :disabled="!canManageIntegration" active-text="U9C有效" /></div>
+              <div class="category-switches"><el-switch v-model="categoryDraft.allowCreate" :disabled="!canManageIntegration" active-text="开放创建" inactive-text="屏蔽创建" /><el-switch v-model="categoryDraft.isVisible" :disabled="!canManageIntegration" active-text="PLM可见" /><el-switch v-model="categoryDraft.isActive" :disabled="!canManageIntegration" active-text="U9C有效" /></div>
               <p class="field-help">开放创建只影响新增料品；屏蔽分类中的现有料品仍可查询并供历史BOM引用。当前流水：{{ categoryDraft.currentSequence }}；下一个编号：{{ categoryDraft.numberPrefix || categoryDraft.code }}{{ (categoryDraft.currentSequence + 1).toString().padStart(categoryDraft.sequenceLength, '0') }}</p>
               <el-button v-if="canManageIntegration" type="primary" @click="saveCategory">保存分类</el-button>
             </el-form>
@@ -666,7 +725,7 @@ onMounted(load)
 
     <el-dialog v-model="editorOpen" class="material-editor-dialog" :title="editingId ? '编辑或变更料品' : '新增料品草稿'" width="720px">
       <el-form label-position="top">
-        <div class="form-grid"><el-form-item label="PDM物料编码"><el-input v-model="form.materialCode" disabled :placeholder="materialCodePlaceholder" /><p class="field-help">保存时从分类当前流水起逐号只读查询U9C，跳过编码占用及规格冲突后预留可用编号；创建后不可修改。</p></el-form-item><el-form-item label="物料名称" required><el-input v-model="form.name" /></el-form-item><el-form-item label="U9C对应分类" required><el-select v-model="form.categoryCode" filterable placeholder="请选择U9C对应分类" @change="applyCategoryDefaults"><el-option v-for="category in creatableCategories" :key="category.code" :label="`${category.code} ${category.name}`" :value="category.code" /></el-select><p class="field-help">这里只显示已开放创建的有效分类，新增时必须主动选择。</p></el-form-item><el-form-item label="PDM业务类型"><el-select v-model="form.kind" disabled><el-option label="电气件" value="Electrical" /><el-option label="机械外购件" value="Standard" /><el-option label="非标机加件" value="NonStandard" /></el-select></el-form-item><el-form-item label="供给方式" required><el-select v-model="form.supplyMode"><el-option label="采购" value="Purchase" /><el-option label="自制" value="Manufacture" /><el-option label="委外" value="Outsource" /></el-select></el-form-item><el-form-item label="计量单位" required><el-select v-model="form.unitCode" filterable placeholder="请选择U9C计量单位"><el-option v-for="unit in u9UnitOptions" :key="unit.code" :label="`${unit.code} ${unit.name}`" :value="unit.code" /></el-select><p class="field-help">PDM直接保存并使用U9C计量单位编码，不再进行单位映射；创建料品前会主动校验U9C单位档案。</p></el-form-item><el-form-item label="规格"><el-input v-model="form.specification" /></el-form-item><el-form-item label="材质"><el-input v-model="form.material" /></el-form-item><el-form-item label="品牌"><el-input v-model="form.brand" /></el-form-item><el-form-item label="表面处理"><el-input v-model="form.surfaceTreatment" /></el-form-item><el-form-item label="料品采购链接"><el-input v-model="form.purchaseLink" type="url" placeholder="https://..." /></el-form-item><el-form-item label="重量"><el-input-number v-model="form.weight" :min="0" :precision="6" /><el-input v-model="form.weightUnit" class="weight-unit" /></el-form-item></div>
+<div class="form-grid"><el-form-item label="PLM物料编码"><el-input v-model="form.materialCode" disabled :placeholder="materialCodePlaceholder" /><p class="field-help">保存时从分类当前流水起逐号只读查询U9C，跳过编码占用及规格冲突后预留可用编号；创建后不可修改。</p></el-form-item><el-form-item label="物料名称" required><el-input v-model="form.name" /></el-form-item><el-form-item label="U9C对应分类" required><el-select v-model="form.categoryCode" filterable placeholder="请选择U9C对应分类" @change="applyCategoryDefaults"><el-option v-for="category in creatableCategories" :key="category.code" :label="`${category.code} ${category.name}`" :value="category.code" /></el-select><p class="field-help">这里只显示已开放创建的有效分类，新增时必须主动选择。</p></el-form-item><el-form-item label="PLM业务类型"><el-select v-model="form.kind" disabled><el-option label="电气件" value="Electrical" /><el-option label="机械外购件" value="Standard" /><el-option label="非标机加件" value="NonStandard" /><el-option label="产品/组件" value="Product" /></el-select></el-form-item><el-form-item label="供给方式" required><el-select v-model="form.supplyMode"><el-option label="采购" value="Purchase" /><el-option label="自制" value="Manufacture" /><el-option label="委外" value="Outsource" /></el-select></el-form-item><el-form-item label="计量单位" required><el-select v-model="form.unitCode" filterable placeholder="请选择U9C计量单位"><el-option v-for="unit in u9UnitOptions" :key="unit.code" :label="`${unit.code} ${unit.name}`" :value="unit.code" /></el-select><p class="field-help">PLM直接保存并使用U9C计量单位编码，不再进行单位映射；创建料品前会主动校验U9C单位档案。</p></el-form-item><el-form-item label="规格"><el-input v-model="form.specification" /></el-form-item><el-form-item label="材质"><el-input v-model="form.material" /></el-form-item><el-form-item label="品牌"><el-input v-model="form.brand" /></el-form-item><el-form-item label="表面处理"><el-input v-model="form.surfaceTreatment" /></el-form-item><el-form-item label="料品采购链接"><el-input v-model="form.purchaseLink" type="url" placeholder="https://..." /></el-form-item><el-form-item label="重量"><el-input-number v-model="form.weight" :min="0" :precision="6" /><el-input v-model="form.weightUnit" class="weight-unit" /></el-form-item></div>
         <el-form-item label="备注"><el-input v-model="form.remark" type="textarea" :rows="3" /></el-form-item>
       </el-form>
       <template #footer><el-button @click="editorOpen = false">取消</el-button><el-button type="primary" :loading="saving" @click="saveMaterial">{{ editingId ? '保存修改' : '保存草稿' }}</el-button></template>
@@ -695,9 +754,10 @@ onMounted(load)
 </template>
 
 <style scoped>
-.material-master-layout{display:grid;grid-template-columns:190px minmax(0,1fr);gap:var(--pdm-container-gap);min-width:0;background:var(--shell-content-bg)}.material-category-nav,.material-master-content{min-width:0;padding:10px;border:1px solid #e2e8f0;border-radius:8px;background:#fff}.material-category-nav{overflow:auto;font-size:11px}.material-category-nav__title{margin:0 4px 8px;color:#334155;font-weight:600}.material-category-all{width:100%;height:28px;margin-bottom:4px;padding:0 8px;border:0;border-radius:5px;background:transparent;color:#475569;font:inherit;text-align:left;cursor:pointer}.material-category-all:hover,.material-category-all.is-active{background:#eaf3ff;color:#409eff}.material-category-nav :deep(.el-tree){background:#fff;color:#475569;font-size:11px}.material-category-nav :deep(.el-tree-node__content){height:28px;border-radius:5px}.material-category-node{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.material-master-content{overflow:hidden}
+.material-master-layout{display:grid;grid-template-columns:190px minmax(0,1fr);gap:var(--pdm-container-gap);min-width:0;background:var(--shell-content-bg)}.material-master-layout.is-category-collapsed{grid-template-columns:34px minmax(0,1fr)}.material-category-nav,.material-master-content{min-width:0;padding:10px;border:1px solid #e2e8f0;border-radius:8px;background:#fff}.material-category-nav{overflow:auto;font-size:11px}.material-category-nav__title{display:flex;align-items:center;justify-content:space-between;gap:4px;margin:0 4px 8px;color:#334155;font-weight:600;white-space:nowrap}.material-category-nav__toggle{width:22px;height:22px;display:inline-flex;flex:0 0 22px;align-items:center;justify-content:center;padding:0;border:1px solid #d4dfed;border-radius:5px;background:#f8fbff;color:#409eff;font-size:16px;line-height:1;cursor:pointer}.material-category-nav__toggle:hover,.material-category-nav__toggle:focus-visible{border-color:#409eff;background:#eaf3ff;outline:none}.material-master-layout.is-category-collapsed .material-category-nav{padding:5px}.material-master-layout.is-category-collapsed .material-category-nav__title{justify-content:center;margin:0}.material-category-all{width:100%;height:28px;margin-bottom:4px;padding:0 8px;border:0;border-radius:5px;background:transparent;color:#475569;font:inherit;text-align:left;cursor:pointer}.material-category-all:hover,.material-category-all.is-active{background:#eaf3ff;color:#409eff}.material-category-nav :deep(.el-tree){background:#fff;color:#475569;font-size:11px}.material-category-nav :deep(.el-tree-node__content){height:28px;border-radius:5px}.material-category-node{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.material-master-content{overflow:hidden}
 .material-page{min-width:0;min-height:calc(100vh - 112px);overflow:hidden;padding:5px 28px 28px}.material-tabs{min-width:0;max-width:100%}.material-tabs :deep(.el-tabs__content),.material-tabs :deep(.el-tab-pane){min-width:0;max-width:100%;overflow:hidden}.material-toolbar{display:flex;min-width:0;align-items:center;justify-content:flex-start;flex-wrap:nowrap;gap:5px;margin-bottom:14px;font-size:11px}.material-toolbar__actions,.material-toolbar__filters{display:flex;min-width:0;align-items:center;flex-wrap:nowrap;gap:5px}.material-toolbar__actions{flex:0 1 auto}.material-toolbar__filters{flex:1 1 260px}.material-toolbar :deep(.el-button),.material-toolbar :deep(.el-checkbox__label),.material-toolbar :deep(.el-input__inner),.material-toolbar :deep(.el-select__placeholder),.material-toolbar :deep(.el-select__selected-item){font-size:11px}.material-toolbar__actions :deep(.el-button){width:clamp(60px,5vw,80px);height:30px;flex:1 1 60px;margin-left:0;padding:0}.material-toolbar__filters :deep(.el-checkbox){flex:0 0 auto}.material-brand-filter{width:110px;min-width:80px;flex:0 1 110px}.material-toolbar .el-input{width:auto;min-width:80px;flex:1 1 180px}.material-table{width:100%;min-width:0;max-width:100%;box-sizing:border-box}.material-table :deep(.el-table__inner-wrapper),.material-table :deep(.el-scrollbar),.material-table :deep(.el-scrollbar__wrap){max-width:100%}.material-table :deep(.el-scrollbar__wrap){overflow-x:auto}.material-table :deep(.el-table__cell){font-size:11px;text-align:center}.material-table :deep(.cell){overflow:hidden;padding:0 6px;text-overflow:ellipsis;white-space:nowrap}.material-table :deep(.el-button),.material-table :deep(.el-tag){font-size:11px}.u9-validation{display:flex;align-items:center;justify-content:center;white-space:nowrap}.u9-unchecked{color:#64748b;font-size:11px}.batch-editor-note{margin:0 0 14px;color:#64748b;font-size:11px}.batch-editor-form :deep(.el-checkbox){margin-right:0}.category-layout{display:grid;grid-template-columns:minmax(280px,35%) 1fr;gap:18px;min-height:520px}.category-tree-panel,.category-editor{padding:18px;border:1px solid #e2e8f0;border-radius:14px;background:#f8fafc}.category-actions{display:flex;gap:8px;margin-bottom:14px}.category-node{display:flex;align-items:center;justify-content:space-between;gap:12px;width:100%;padding-right:8px}.category-empty{display:grid;min-height:420px;place-items:center;color:#94a3b8}.category-switches{display:flex;flex-wrap:wrap;gap:24px;margin:2px 0 14px}.form-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));column-gap:18px}.field-help{width:100%;margin:6px 0 0;color:#64748b;font-size:11px;line-height:1.5}.weight-unit{width:76px;margin-left:8px}.preview-meta{display:grid;gap:6px;margin-bottom:12px;color:#64748b;font-size:12px;word-break:break-all}.payload-preview{max-height:480px;overflow:auto;padding:18px;border-radius:10px;background:#0f172a;color:#dbeafe;font:12px/1.6 Consolas,monospace;white-space:pre-wrap;word-break:break-all}.material-tabs :deep(.el-tabs__content),.material-tabs :deep(.el-tabs__content *){font-size:11px}:global(.material-editor-dialog),:global(.material-editor-dialog *){font-size:11px}:global(.material-editor-dialog .el-dialog__title){font-size:11px!important}@media(max-width:1000px){.material-page{padding:5px 18px 18px}.material-toolbar__actions :deep(.el-button){width:52px;min-width:52px;flex-basis:52px}.material-brand-filter{width:70px;min-width:70px;flex-basis:70px}.material-toolbar .el-input{min-width:70px;flex-basis:70px}.category-layout{grid-template-columns:1fr}.form-grid{grid-template-columns:1fr}}
-.material-page{height:100%;min-height:0;display:flex;flex-direction:column}.material-tabs{min-height:0;flex:1 1 auto;display:flex;flex-direction:column}.material-tabs :deep(.el-tabs__content){min-height:0;flex:1 1 auto}.material-tabs :deep(.el-tab-pane){height:100%;min-height:0}.material-master-layout{height:100%;min-height:0}.material-master-content{display:flex;flex-direction:column}.material-toolbar{flex:0 0 auto;margin-bottom:5px}.material-table-shell{min-height:0;flex:1 1 auto}.material-table{height:100%}.material-pagination{flex:0 0 auto;justify-content:flex-end;margin-top:5px}.material-pagination :deep(.el-pagination__total),.material-pagination :deep(.el-select__selected-item),.material-pagination :deep(button),.material-pagination :deep(.number){font-size:11px}
+.material-page{height:100%;min-height:0;display:flex;flex-direction:column}.material-tabs{min-height:0;flex:1 1 auto;display:flex;flex-direction:column}.material-tabs :deep(.el-tabs__header .el-tabs__item){font-size:13px;font-weight:600}.material-tabs :deep(.el-tabs__content){min-height:0;flex:1 1 auto}.material-tabs :deep(.el-tab-pane){height:100%;min-height:0}.material-master-layout{height:100%;min-height:0}.material-master-content{display:flex;flex-direction:column}.material-toolbar{flex:0 0 auto;margin-bottom:5px}.material-table-shell{min-height:0;flex:1 1 auto}.material-table{height:100%}.material-pagination{flex:0 0 auto;justify-content:flex-end;margin-top:5px}.material-pagination :deep(.el-pagination__total),.material-pagination :deep(.el-select__selected-item),.material-pagination :deep(button),.material-pagination :deep(.number){font-size:11px}
 .material-table :deep(.el-table__body tr.el-table__row){height:30px}.material-table :deep(.el-table__body td.el-table__cell){height:30px;padding:0}.material-table :deep(.el-table__body .el-tag){height:20px;padding-top:0;padding-bottom:0;line-height:18px}
-@media(max-width:1000px){.material-master-layout{grid-template-columns:1fr}.material-category-nav{max-height:220px}}
+.material-code-approval-note{margin-bottom:8px;padding:8px 10px;border:1px solid #dbeafe;border-radius:6px;background:#eff6ff;color:#475569;font-size:11px}
+@media(max-width:1000px){.material-master-layout{grid-template-columns:1fr}.material-master-layout.is-category-collapsed{grid-template-columns:34px minmax(0,1fr)}.material-category-nav{max-height:220px}}
 </style>

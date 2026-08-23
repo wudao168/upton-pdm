@@ -16,7 +16,11 @@ internal static class SeedData
         "王工",
         @"D:\PDM\Vault\PRJ-2026-018",
         @"D:\PDM\Release\PRJ-2026-018",
-        true);
+        true)
+    {
+        RootProjectId = ProjectId,
+        BomItemCategoryCode = "0302"
+    };
 
     internal static IReadOnlyList<PdmDocument> Documents(DateTimeOffset now) =>
     [

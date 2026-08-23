@@ -186,7 +186,10 @@ public sealed partial class MySqlPdmRepository
             ValidationRules = new(
                 ReadStringList(values, "bom_standard_required_fields", BomValidationFieldCatalog.StandardDefaults),
                 ReadStringList(values, "bom_nonstandard_required_fields", BomValidationFieldCatalog.NonStandardDefaults),
-                ReadStringList(values, "bom_electrical_required_fields", BomValidationFieldCatalog.ElectricalDefaults))
+                ReadStringList(values, "bom_electrical_required_fields", BomValidationFieldCatalog.ElectricalDefaults)),
+            ApprovalWorkflows = ReadApprovalWorkflows(values),
+            MaterialCodeApproval = ReadMaterialCodeApproval(values),
+            ReleaseChangeReasonTypes = ReadStringList(values, "release_change_reason_types", PdmSystemSettings.DefaultReleaseChangeReasonTypes)
         };
         return BomPropertyMappingCatalog.Apply(settings);
     }
@@ -219,7 +222,10 @@ public sealed partial class MySqlPdmRepository
             new { Key = "bom_property_mappings", Value = JsonSerializer.Serialize(BomPropertyMappingCatalog.Normalize(settings), jsonOptions) },
             new { Key = "bom_standard_required_fields", Value = JsonSerializer.Serialize(settings.ValidationRules.Standard, jsonOptions) },
             new { Key = "bom_nonstandard_required_fields", Value = JsonSerializer.Serialize(settings.ValidationRules.NonStandard, jsonOptions) },
-            new { Key = "bom_electrical_required_fields", Value = JsonSerializer.Serialize(settings.ValidationRules.Electrical, jsonOptions) }
+            new { Key = "bom_electrical_required_fields", Value = JsonSerializer.Serialize(settings.ValidationRules.Electrical, jsonOptions) },
+            new { Key = "release_approval_workflows", Value = JsonSerializer.Serialize(settings.ApprovalWorkflows, jsonOptions) },
+            new { Key = "material_code_approval", Value = JsonSerializer.Serialize(settings.MaterialCodeApproval, jsonOptions) },
+            new { Key = "release_change_reason_types", Value = JsonSerializer.Serialize(settings.ReleaseChangeReasonTypes, jsonOptions) }
         })
         {
             await connection.ExecuteAsync(new CommandDefinition(
@@ -268,13 +274,82 @@ public sealed partial class MySqlPdmRepository
         }
     }
 
+    private ReleaseApprovalSettings ReadApprovalWorkflows(IReadOnlyDictionary<string, string> values)
+    {
+        if (!values.TryGetValue("release_approval_workflows", out var value) || string.IsNullOrWhiteSpace(value))
+            return ReleaseApprovalSettings.Default;
+        try
+        {
+            return ReleaseApprovalSettings.UseOrganizationHierarchy(
+                JsonSerializer.Deserialize<ReleaseApprovalSettings>(value, jsonOptions));
+        }
+        catch (JsonException)
+        {
+            return ReleaseApprovalSettings.Default;
+        }
+    }
+
+    private MaterialCodeApprovalSettings ReadMaterialCodeApproval(IReadOnlyDictionary<string, string> values)
+    {
+        if (!values.TryGetValue("material_code_approval", out var value) || string.IsNullOrWhiteSpace(value)) return MaterialCodeApprovalSettings.Default;
+        try { return JsonSerializer.Deserialize<MaterialCodeApprovalSettings>(value, jsonOptions) ?? MaterialCodeApprovalSettings.Default; }
+        catch (JsonException) { return MaterialCodeApprovalSettings.Default; }
+    }
+
     public async Task<IReadOnlyList<UserAccount>> ListUsersAsync(CancellationToken cancellationToken)
     {
         await using var connection = await OpenAsync(cancellationToken);
         var rows = await connection.QueryAsync<AdministrationUserRow>(new CommandDefinition(
-            "SELECT id,username,display_name DisplayName,password_hash PasswordHash,role,assigned_role_code RoleCode,is_active IsActive,token_version TokenVersion FROM pdm_user ORDER BY username",
+            "SELECT id,username,display_name DisplayName,password_hash PasswordHash,role,assigned_role_code RoleCode,company_id CompanyId,cross_company_view CrossCompanyView,is_active IsActive,token_version TokenVersion FROM pdm_user ORDER BY username",
             cancellationToken: cancellationToken));
-        return rows.Select(row => new UserAccount(row.Id, row.Username, row.DisplayName, row.PasswordHash, Enum.Parse<UserRole>(row.Role), row.IsActive, row.TokenVersion, row.RoleCode)).ToArray();
+        return rows.Select(row => new UserAccount(row.Id, row.Username, row.DisplayName, row.PasswordHash, Enum.Parse<UserRole>(row.Role), row.IsActive, row.TokenVersion, row.RoleCode, row.CompanyId, row.CrossCompanyView)).ToArray();
+    }
+
+    public async Task<UserCompanyScope?> GetUserCompanyScopeAsync(string username, CancellationToken cancellationToken)
+    {
+        await using var connection = await OpenAsync(cancellationToken);
+        var user = await connection.QuerySingleOrDefaultAsync<UserCompanyRow>(new CommandDefinition(
+            "SELECT id,company_id CompanyId,cross_company_view CrossCompanyView FROM pdm_user WHERE username=@Username LIMIT 1",
+            new { Username = username }, cancellationToken: cancellationToken));
+        if (user is null) return null;
+        var companyIds = (await connection.QueryAsync<Guid>(new CommandDefinition(
+            "SELECT accessible_company_id FROM user_company_access WHERE user_id=@UserId ORDER BY accessible_company_id",
+            new { UserId = user.Id }, cancellationToken: cancellationToken))).ToArray();
+        return new UserCompanyScope(user.Id, user.CompanyId, user.CrossCompanyView, companyIds);
+    }
+
+    public async Task<UserCompanyScope> SetUserCompanyScopeAsync(string username, Guid companyId, bool crossCompanyView, IReadOnlyList<Guid> accessibleCompanyIds, string actor, CancellationToken cancellationToken)
+    {
+        var normalizedCompanyIds = accessibleCompanyIds.Where(id => id != companyId).Distinct().ToArray();
+        await using var connection = await OpenAsync(cancellationToken);
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+        var userId = await connection.ExecuteScalarAsync<Guid?>(new CommandDefinition(
+            "SELECT id FROM pdm_user WHERE username=@Username FOR UPDATE", new { Username = username }, transaction, cancellationToken: cancellationToken))
+            ?? throw new PdmNotFoundException("用户不存在。");
+        var validCompanyCount = await connection.ExecuteScalarAsync<int>(new CommandDefinition(
+            "SELECT COUNT(*) FROM project_organization WHERE is_active=1 AND id IN @CompanyIds",
+            new { CompanyIds = new[] { companyId }.Concat(normalizedCompanyIds).Distinct().ToArray() }, transaction, cancellationToken: cancellationToken));
+        if (validCompanyCount != normalizedCompanyIds.Length + 1) throw new PdmRuleException("所属公司或跨公司授权目标不存在或已停用。");
+        var actorId = await connection.ExecuteScalarAsync<Guid?>(new CommandDefinition(
+            "SELECT id FROM pdm_user WHERE username=@Actor LIMIT 1", new { Actor = actor }, transaction, cancellationToken: cancellationToken));
+        await connection.ExecuteAsync(new CommandDefinition(
+            "UPDATE pdm_user SET company_id=@CompanyId,cross_company_view=@CrossCompanyView,token_version=token_version+1,row_version=row_version+1 WHERE id=@UserId",
+            new { UserId = userId, CompanyId = companyId, CrossCompanyView = crossCompanyView && normalizedCompanyIds.Length > 0 }, transaction, cancellationToken: cancellationToken));
+        await connection.ExecuteAsync(new CommandDefinition("DELETE FROM user_company_access WHERE user_id=@UserId", new { UserId = userId }, transaction, cancellationToken: cancellationToken));
+        if (crossCompanyView && normalizedCompanyIds.Length > 0)
+        {
+            await connection.ExecuteAsync(new CommandDefinition(
+                "INSERT INTO user_company_access(id,user_id,accessible_company_id,created_by,created_at) VALUES(@Id,@UserId,@CompanyId,@CreatedBy,@Now)",
+                normalizedCompanyIds.Select(id => new { Id = Guid.NewGuid(), UserId = userId, CompanyId = id, CreatedBy = actorId, Now = timeProvider.GetUtcNow().UtcDateTime }), transaction, cancellationToken: cancellationToken));
+        }
+        await connection.ExecuteAsync(new CommandDefinition(
+            "DELETE membership FROM organization_membership membership INNER JOIN organization_unit unit ON unit.id=membership.unit_id WHERE membership.username=@Username AND unit.organization_id<>@CompanyId",
+            new { Username = username, CompanyId = companyId }, transaction, cancellationToken: cancellationToken));
+        await connection.ExecuteAsync(new CommandDefinition(
+            "DELETE manager FROM organization_unit_manager manager INNER JOIN organization_unit unit ON unit.id=manager.unit_id WHERE manager.username=@Username AND unit.organization_id<>@CompanyId",
+            new { Username = username, CompanyId = companyId }, transaction, cancellationToken: cancellationToken));
+        await transaction.CommitAsync(cancellationToken);
+        return await GetUserCompanyScopeAsync(username, cancellationToken) ?? throw new PdmNotFoundException("用户不存在。");
     }
 
     private static PdmCustomer MapCustomer(CustomerRow row) => new(row.Id, row.Code, row.Name, row.IsActive, row.SourceSystem, AsUtc(row.LastSyncedAt));
@@ -310,7 +385,16 @@ public sealed partial class MySqlPdmRepository
         public string PasswordHash { get; init; } = string.Empty;
         public string Role { get; init; } = string.Empty;
         public string? RoleCode { get; init; }
+        public Guid? CompanyId { get; init; }
+        public bool CrossCompanyView { get; init; }
         public bool IsActive { get; init; }
         public long TokenVersion { get; init; }
+    }
+
+    private sealed class UserCompanyRow
+    {
+        public Guid Id { get; init; }
+        public Guid? CompanyId { get; init; }
+        public bool CrossCompanyView { get; init; }
     }
 }

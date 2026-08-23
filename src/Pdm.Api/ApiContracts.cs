@@ -8,7 +8,21 @@ public sealed record LoginRequest(string Username, string Password);
 
 public sealed record ResumeSessionRequest(string ResumeToken);
 
-public sealed record LoginResponse(string AccessToken, DateTimeOffset ExpiresAt, string ResumeToken, string Username, string DisplayName, string Role, IReadOnlyList<string> Permissions);
+public sealed record CompanyOption(Guid Id, string Name, string Code);
+
+public sealed record LoginResponse(
+    string AccessToken,
+    DateTimeOffset ExpiresAt,
+    string ResumeToken,
+    string Username,
+    string DisplayName,
+    string Role,
+    IReadOnlyList<string> Permissions,
+    Guid PrimaryCompanyId,
+    Guid ActiveCompanyId,
+    string ActiveCompanyName,
+    bool CrossCompanyView,
+    IReadOnlyList<CompanyOption> AccessibleCompanies);
 
 public sealed record PasswordResetRequest(string Username, string DisplayName);
 
@@ -16,9 +30,23 @@ public sealed record ChangePasswordRequest(string CurrentPassword, string Passwo
 
 public sealed record UpdateProfileRequest(string? Landline, string? MobilePhone, string? Email, string? Gender, string? Nickname);
 
-public sealed record CreateManagedUserRequest(string Username, string DisplayName, string Password, string Role, bool IsActive = true);
+public sealed record CreateManagedUserRequest(
+    string Username,
+    string DisplayName,
+    string Password,
+    string Role,
+    bool IsActive = true,
+    Guid CompanyId = default,
+    bool CrossCompanyView = false,
+    IReadOnlyList<Guid>? AccessibleCompanyIds = null);
 
-public sealed record UpdateManagedUserRequest(string DisplayName, string Role, bool IsActive = true);
+public sealed record UpdateManagedUserRequest(
+    string DisplayName,
+    string Role,
+    bool IsActive = true,
+    Guid CompanyId = default,
+    bool CrossCompanyView = false,
+    IReadOnlyList<Guid>? AccessibleCompanyIds = null);
 
 public sealed record CreateProjectRequest(
     Guid OrganizationId,
@@ -28,9 +56,10 @@ public sealed record CreateProjectRequest(
     string Name,
     string? ProjectAlias,
     DateOnly SignedDate,
-    int Quantity);
+    int Quantity,
+    string BomItemCategoryCode = "0302");
 
-public sealed record CreateSubprojectRequest(string Name, string? ProjectAlias, int Quantity);
+public sealed record CreateSubprojectRequest(string Name, string? ProjectAlias, int Quantity, int? EquipmentTypeCode = null);
 
 public sealed record UpdateProjectDetailsRequest(
     Guid? OrganizationId,
@@ -73,9 +102,26 @@ public sealed record UpdateSystemSettingsRequest(
     string BomSurfaceTreatmentProperty = "表面处理",
     string BomWeightProperty = "重量",
     IReadOnlyList<BomPropertyMapping>? BomPropertyMappings = null,
-    BomValidationRules? ValidationRules = null);
+    BomValidationRules? ValidationRules = null,
+    ReleaseApprovalSettings? ApprovalWorkflows = null,
+    MaterialCodeApprovalSettings? MaterialCodeApproval = null,
+    IReadOnlyList<string>? ReleaseChangeReasonTypes = null);
 
 public sealed record SetBomEmptyDeclarationRequest(bool DeclaredEmpty);
+
+public sealed record AddDrawingReviewMarkupRequest(
+    Guid ItemId,
+    [property: JsonConverter(typeof(JsonStringEnumConverter))] DrawingReviewTarget Target,
+    string? ViewName,
+    decimal? NormalizedX,
+    decimal? NormalizedY,
+    string Text,
+    [property: JsonConverter(typeof(JsonStringEnumConverter))] DrawingReviewMarkupSeverity Severity);
+
+public sealed record DecideDrawingReviewTargetRequest(
+    [property: JsonConverter(typeof(JsonStringEnumConverter))] DrawingReviewTarget Target,
+    [property: JsonConverter(typeof(JsonStringEnumConverter))] DrawingReviewDecision Decision,
+    string? Comment);
 
 public sealed record UpdateRolePermissionsRequest(IReadOnlyList<string> Permissions);
 
@@ -170,14 +216,20 @@ public sealed record CreateControlledOpenManifestRequest(Guid? VersionId, bool R
 
 public sealed record CreateReleasePackageRequest(
     Guid ProjectId,
-    Guid? ReferenceSnapshotId,
-    string Number,
-    string ProcessReviewer,
-    string Approver,
+    Guid? ReferenceSnapshotId = null,
+    string? Number = null,
+    string? ProcessReviewer = null,
+    string? Approver = null,
     string? ChangeNumber = null,
     string? ChangeReason = null,
     string? EffectiveSerialFrom = null,
-    string? EffectiveSerialTo = null);
+    string? EffectiveSerialTo = null,
+    [property: JsonConverter(typeof(JsonStringEnumConverter))] ReleaseScope Scope = ReleaseScope.LegacyCombined,
+    IReadOnlyList<Guid>? SelectedBomItemIds = null);
+
+public sealed record EmergencyApprovalRequest(
+    [property: JsonConverter(typeof(JsonStringEnumConverter))] ApprovalDecision Decision,
+    string Reason);
 
 public sealed record ReplaceBomRequest(IReadOnlyList<BomItemInput> Items);
 

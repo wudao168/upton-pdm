@@ -15,7 +15,7 @@ public static class StorageLocationPolicy
         var root = Path.GetPathRoot(fullPath);
         if (string.IsNullOrWhiteSpace(root) || string.Equals(root, fullPath, StringComparison.OrdinalIgnoreCase))
         {
-            throw new PdmRuleException("不能把磁盘根目录作为PDM存储位置。 ");
+            throw new PdmRuleException("不能把磁盘根目录作为PLM存储位置。 ");
         }
 
         return fullPath.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);

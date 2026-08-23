@@ -58,7 +58,7 @@ public sealed class MySqlMigrationRunner(IOptions<PdmDatabaseOptions> options, I
                     transaction,
                     cancellationToken: cancellationToken));
                 await transaction.CommitAsync(cancellationToken);
-                logger.LogInformation("Applied PDM database migration {MigrationVersion}", version);
+                logger.LogInformation("Applied PLM database migration {MigrationVersion}", version);
             }
             catch
             {

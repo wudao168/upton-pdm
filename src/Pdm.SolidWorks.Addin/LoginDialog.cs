@@ -12,7 +12,7 @@ internal sealed class LoginDialog : Form
 
     public LoginDialog()
     {
-        Text = "登录 UPTON PDM";
+        Text = "登录 UPLM";
         StartPosition = FormStartPosition.CenterParent;
         FormBorderStyle = FormBorderStyle.FixedDialog;
         MaximizeBox = false;

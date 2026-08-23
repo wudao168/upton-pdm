@@ -1,0 +1,32 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net48</TargetFramework>
+    <RootNamespace>Upton.Pdm.SolidWorks.PreviewWorker</RootNamespace>
+    <AssemblyName>Upton.Pdm.SolidWorks.PreviewWorker</AssemblyName>
+    <OutputType>Exe</OutputType>
+    <PlatformTarget>x64</PlatformTarget>
+    <Prefer32Bit>false</Prefer32Bit>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <SolidWorksInstallDir Condition="'$(SolidWorksInstallDir)' == ''">C:\Program Files\SOLIDWORKS Corp\SOLIDWORKS</SolidWorksInstallDir>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NETFramework.ReferenceAssemblies.net48" Version="1.0.3" PrivateAssets="all" />
+  </ItemGroup>
+  <ItemGroup>
+    <Reference Include="SolidWorks.Interop.sldworks">
+      <HintPath>$(SolidWorksInstallDir)\SolidWorks.Interop.sldworks.dll</HintPath>
+      <Private>false</Private>
+      <EmbedInteropTypes>false</EmbedInteropTypes>
+    </Reference>
+    <Reference Include="SolidWorks.Interop.swconst">
+      <HintPath>$(SolidWorksInstallDir)\SolidWorks.Interop.swconst.dll</HintPath>
+      <Private>false</Private>
+      <EmbedInteropTypes>false</EmbedInteropTypes>
+    </Reference>
+    <Reference Include="System.Web.Extensions" />
+  </ItemGroup>
+  <Target Name="ValidateSolidWorksInterop" BeforeTargets="ResolveReferences">
+    <Error Condition="!Exists('$(SolidWorksInstallDir)\SolidWorks.Interop.sldworks.dll')" Text="SolidWorks interop assemblies were not found. Set SolidWorksInstallDir." />
+  </Target>
+</Project>

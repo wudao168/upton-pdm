@@ -1,4 +1,4 @@
-import type { ApprovalStep, AuditEntry, BatchUpdateBomItemsInput, BomEmptyDeclaration, BomGenerationResult, BomItem, BomKind, BomValidationRules, BomVersion, BomVersionState, CreateProjectInput, CreateRoleInput, CreateSubprojectInput, CrmConnectionTestResult, CrmCustomerSyncResult, CrmIntegrationSettings, DocumentKind, DocumentModelDrawingRelation, DocumentNode, DocumentVersionComparison, DocumentVersionSummary, DocumentWhereUsed, EditLockSummary, EquipmentTypeDefinition, FolderPermissionRule, MainProjectStaffingInput, ManagedDocument, ManufacturingBomBaseline, MaterialCategory, MaterialCategoryRule, MaterialKind, MaterialRemovalReadiness, MaterialRemovalResult, MaterialSyncExecutionResult, MaterialSyncTask, MyApprovalTask, OrganizationDirectory, OrganizationUnit, PasswordResetTask, PdmCustomer, PdmMaterial, PdmSystemSettings, PdmUser, PdmUserProfile, ProjectFolder, ProjectFolderTemplateNode, ProjectNumberingOptions, ProjectOrganization, ProjectSummary, ProjectVersionItem, ReferenceStatus, ReleasePackageSummary, RolePermissionDirectory, SaveMaterialInput, SaveOrganizationUnitInput, SavePdmUserInput, SaveProjectOrganizationInput, U9ConnectionTestResult, U9ItemQueryResult, U9MaterialIntegrationSettings, U9MaterialSampleImportResult, U9MaterialSamplePreview, UpdateCrmIntegrationInput, UpdateProjectInput, UpdateU9MaterialIntegrationInput } from './types'
+import type { AddDrawingReviewMarkupInput, ApprovalStep, AuditEntry, BatchUpdateBomItemsInput, BomEmptyDeclaration, BomGenerationResult, BomHeaderKind, BomItem, BomKind, BomValidationRules, BomVersion, BomVersionState, CreateProjectInput, CreateReleasePackageInput, CreateRoleInput, CreateSubprojectInput, CrmConnectionTestResult, CrmCustomerSyncResult, CrmIntegrationSettings, DocumentKind, DocumentModelDrawingRelation, DocumentNode, DocumentVersionComparison, DocumentVersionSummary, DocumentWhereUsed, DrawingReviewDecision, DrawingReviewPackage, DrawingReviewTarget, EditLockSummary, EquipmentTypeDefinition, FolderPermissionRule, MainProjectStaffingInput, ManagedDocument, ManufacturingBomBaseline, MaterialCategory, MaterialCategoryRule, MaterialCodeApplication, MaterialCodeApplicationStatus, MaterialCodeResolution, MaterialKind, MaterialRemovalReadiness, MaterialRemovalResult, MaterialSyncExecutionResult, MaterialSyncTask, MyApprovalTask, OrganizationDirectory, OrganizationUnit, PasswordResetTask, PdmCustomer, PdmMaterial, PdmSystemSettings, PdmUser, PdmUserProfile, ProjectBomHeader, ProjectFolder, ProjectFolderTemplateNode, ProjectNumberingOptions, ProjectOrganization, ProjectSummary, ProjectVersionItem, ReferenceStatus, ReleasePackageSummary, ReleaseScope, RolePermissionDirectory, SaveMaterialInput, SaveOrganizationUnitInput, SavePdmUserInput, SaveProjectOrganizationInput, U9BomQueryExecution, U9BomQueryInput, U9BomWriteExecution, U9BomWriteInput, U9BomWritePreview, U9ConnectionTestResult, U9ItemQueryResult, U9MaterialIntegrationSettings, U9MaterialSampleImportResult, U9MaterialSamplePreview, UpdateCrmIntegrationInput, UpdateProjectInput, UpdateU9MaterialIntegrationInput } from './types'
 
 const apiBase = (import.meta.env.VITE_PDM_API_BASE ?? 'http://127.0.0.1:5080').replace(/\/$/, '')
 
@@ -16,6 +16,11 @@ export interface AuthSession {
   displayName: string
   role: string
   permissions: string[]
+  primaryCompanyId: string
+  activeCompanyId: string
+  activeCompanyName: string
+  crossCompanyView: boolean
+  accessibleCompanies: Array<{ id: string; name: string; code: string }>
 }
 
 export interface ProjectWorkspaceData {
@@ -33,6 +38,9 @@ export interface ProjectWorkspaceData {
   bomEmptyDeclarations: BomEmptyDeclaration[]
   bomVersions: BomVersion[]
   bomBaselines: ManufacturingBomBaseline[]
+  drawingReviews: DrawingReviewPackage[]
+  materialCodeApplications: MaterialCodeApplication[]
+  releasePackages: ReleasePackageSummary[]
   releasePackage: ReleasePackageSummary | null
 }
 
@@ -63,7 +71,9 @@ interface ApiProject {
   signedDate?: string | null
   quantity?: number
   parentProjectId?: string | null
+  rootProjectId?: string | null
   childSequence?: number | null
+  bomItemCategoryCode?: '0301' | '0302' | null
   serialNumbers?: string[]
   responsibleUsers?: string[]
   executionUnitId?: string | null
@@ -73,6 +83,8 @@ interface ApiProject {
   designLead?: string | null
   designers?: string[]
   documentCount?: number | null
+  modelDocumentCount?: number | null
+  drawingDocumentCount?: number | null
   businessStatus?: string | null
   rootDocumentCheckedOutBy?: string | null
   canAssignExecutionUnit?: boolean
@@ -168,6 +180,10 @@ interface ApiApprovalTask {
   decision?: number | string | null
   decidedAt?: string | null
   comment?: string | null
+  stepOrder?: number
+  stepName?: string | null
+  isEmergencySubstitute?: boolean
+  emergencyReason?: string | null
 }
 
 interface ApiReleasePackage {
@@ -185,6 +201,19 @@ interface ApiReleasePackage {
   standardBomRevision?: string | null
   nonStandardBomRevision?: string | null
   electricalBomRevision?: string | null
+  scope?: string | number
+  workflowCode?: string | null
+  workflowVersion?: number
+  selectedBomItemIds?: string[]
+  createsManufacturingBaseline?: boolean
+  locksDocuments?: boolean
+  standardBomVersionId?: string | null
+  nonStandardBomVersionId?: string | null
+  electricalBomVersionId?: string | null
+  standardBomSnapshot?: ApiBomItem[]
+  nonStandardBomSnapshot?: ApiBomItem[]
+  electricalBomSnapshot?: ApiBomItem[]
+  createdAt?: string | null
 }
 
 interface ApiBomVersion extends Omit<BomVersion, 'kind' | 'state' | 'items'> {
@@ -193,11 +222,19 @@ interface ApiBomVersion extends Omit<BomVersion, 'kind' | 'state' | 'items'> {
   items: ApiBomItem[]
 }
 
+interface ApiDrawingReviewPackage extends Omit<DrawingReviewPackage, 'state' | 'items' | 'markups'> {
+  state: string | number
+  items: Array<Omit<DrawingReviewPackage['items'][number], 'modelState' | 'drawingState'> & { modelState: string | number; drawingState: string | number }>
+  markups: Array<Omit<DrawingReviewPackage['markups'][number], 'target' | 'severity' | 'state'> & { target: string | number; severity: string | number; state: string | number }>
+}
+
 async function requestJson<T>(path: string, init: RequestInit = {}, token?: string): Promise<T> {
   const headers = new Headers(init.headers)
   headers.set('Accept', 'application/json')
   if (init.body && !(init.body instanceof FormData)) headers.set('Content-Type', 'application/json')
   if (token) headers.set('Authorization', `Bearer ${token}`)
+  const activeCompanyId = window.localStorage.getItem('pdm_active_organization')
+  if (activeCompanyId && (token || path === '/api/auth/resume')) headers.set('X-Company-Id', activeCompanyId)
 
   const response = await fetch(`${apiBase}${path}`, { ...init, headers, cache: 'no-store' })
   if (!response.ok) {
@@ -205,7 +242,7 @@ async function requestJson<T>(path: string, init: RequestInit = {}, token?: stri
       window.dispatchEvent(new CustomEvent('pdm-session-expired'))
       throw new PdmApiError('登录已过期，请重新登录。', response.status)
     }
-    let message = `PDM API请求失败（${response.status}）`
+    let message = `PLM API请求失败（${response.status}）`
     try {
       const problem = await response.json() as { title?: string; detail?: string; message?: string; errors?: Record<string, string[]> }
       const validation = problem.errors ? Object.values(problem.errors).flat().join('；') : ''
@@ -219,13 +256,36 @@ async function requestJson<T>(path: string, init: RequestInit = {}, token?: stri
   return response.json() as Promise<T>
 }
 
-export function listMaterials(token: string, query = '', includeArchived = false, limit = 100): Promise<PdmMaterial[]> {
+function authenticatedHeaders(token: string): Headers {
+  const headers = new Headers({ Authorization: `Bearer ${token}` })
+  const activeCompanyId = window.localStorage.getItem('pdm_active_organization')
+  if (activeCompanyId) headers.set('X-Company-Id', activeCompanyId)
+  return headers
+}
+
+export function listMaterials(token: string, query = '', includeArchived = false, limit = 100, categoryCode = ''): Promise<PdmMaterial[]> {
   const parameters = new URLSearchParams()
   if (query.trim()) parameters.set('query', query.trim())
   if (includeArchived) parameters.set('includeArchived', 'true')
   if (limit !== 100) parameters.set('limit', String(limit))
+  if (categoryCode.trim()) parameters.set('categoryCode', categoryCode.trim())
   const suffix = parameters.size ? `?${parameters}` : ''
   return requestJson<PdmMaterial[]>(`/api/materials${suffix}`, {}, token)
+}
+
+export function listProjectBomHeaders(projectId: string, token: string): Promise<ProjectBomHeader[]> {
+  return requestJson<ProjectBomHeader[]>(`/api/projects/${projectId}/bom-headers`, {}, token)
+}
+
+export function bindProjectBomHeaderMaterial(projectId: string, kind: BomHeaderKind, materialId: string, expectedRowVersion: number, token: string): Promise<ProjectBomHeader> {
+  return requestJson<ProjectBomHeader>(`/api/projects/${projectId}/bom-headers/${kind}/material`, {
+    method: 'PUT',
+    body: JSON.stringify({ materialId, expectedRowVersion }),
+  }, token)
+}
+
+export function generateProjectBomHeaderHierarchy(projectId: string, token: string): Promise<{ rootProjectId: string; expectedCount: number; generatedCount: number; existingCount: number; headers: ProjectBomHeader[] }> {
+  return requestJson(`/api/projects/${projectId}/bom-headers/generate-hierarchy`, { method: 'POST' }, token)
 }
 
 export function createMaterial(input: SaveMaterialInput, token: string): Promise<PdmMaterial> {
@@ -254,6 +314,28 @@ export function archiveMaterial(materialId: string, expectedRowVersion: number, 
 
 export function linkBomMaterial(projectId: string, bomItemId: string, materialId: string, token: string): Promise<PdmMaterial> {
   return requestJson<PdmMaterial>('/api/materials/link-bom', { method: 'POST', body: JSON.stringify({ projectId, bomItemId, materialId }) }, token)
+}
+
+export function resolveBomMaterialCodes(projectId: string, bomItemIds: string[], token: string): Promise<MaterialCodeResolution[]> {
+  return requestJson('/api/material-code/resolve', { method: 'POST', body: JSON.stringify({ projectId, bomItemIds }) }, token)
+}
+
+export function applyForBomMaterialCodes(projectId: string, bomItemIds: string[], token: string): Promise<MaterialCodeResolution[]> {
+  return requestJson('/api/material-code/applications', { method: 'POST', body: JSON.stringify({ projectId, bomItemIds }) }, token)
+}
+
+export async function listMaterialCodeApplications(token: string, projectId?: string, status?: MaterialCodeApplicationStatus): Promise<MaterialCodeApplication[]> {
+  const parameters = new URLSearchParams()
+  if (projectId) parameters.set('projectId', projectId)
+  if (status) parameters.set('status', status)
+  return requestJson<MaterialCodeApplication[]>(`/api/material-code/applications${parameters.size ? `?${parameters}` : ''}`, {}, token).catch(error => {
+    if (error instanceof PdmApiError && error.status === 404) return []
+    throw error
+  })
+}
+
+export function decideMaterialCodeApplication(applicationId: string, expectedRowVersion: number, approved: boolean, comment: string, token: string): Promise<{ application: MaterialCodeApplication; material?: PdmMaterial | null }> {
+  return requestJson(`/api/material-code/applications/${applicationId}/decision`, { method: 'POST', body: JSON.stringify({ expectedRowVersion, approved, comment }) }, token)
 }
 
 export function approveMaterial(materialId: string, expectedRowVersion: number, token: string): Promise<{ material: PdmMaterial; task: MaterialSyncTask }> {
@@ -312,6 +394,24 @@ export function queryU9Material(materialCode: string, token: string): Promise<U9
   return requestJson<U9ItemQueryResult>(`/api/u9-material-query/${encodeURIComponent(materialCode)}`, {}, token)
 }
 
+export function queryU9Bom(input: U9BomQueryInput, token: string): Promise<U9BomQueryExecution> {
+  return requestJson<U9BomQueryExecution>('/api/u9-boms/query', {
+    method: 'POST', body: JSON.stringify(input),
+  }, token)
+}
+
+export function previewU9BomWrite(input: U9BomWriteInput, token: string): Promise<U9BomWritePreview> {
+  return requestJson<U9BomWritePreview>('/api/u9-boms/write-preview', {
+    method: 'POST', body: JSON.stringify(input),
+  }, token)
+}
+
+export function executeU9BomWrite(input: U9BomWriteInput, requestSha256: string, confirmation: string, token: string): Promise<U9BomWriteExecution> {
+  return requestJson<U9BomWriteExecution>('/api/u9-boms/write-execute', {
+    method: 'POST', body: JSON.stringify({ command: input, requestSha256, confirmation }),
+  }, token)
+}
+
 export function previewU9MaterialSample(categoryCodes: string[], limitPerCategory: number, token: string): Promise<U9MaterialSamplePreview> {
   return requestJson<U9MaterialSamplePreview>('/api/u9-material-sample/preview', {
     method: 'POST', body: JSON.stringify({ categoryCodes, limitPerCategory }),
@@ -328,6 +428,15 @@ export function listDocumentVersions(documentId: string, token: string): Promise
   return requestJson<DocumentVersionSummary[]>(`/api/documents/${documentId}/versions`, {}, token)
 }
 
+export async function readDocumentPreviewFile(documentId: string, versionId: string, token: string): Promise<Blob> {
+  const response = await fetch(`${apiBase}/api/documents/${documentId}/versions/${versionId}/preview`, {
+    headers: authenticatedHeaders(token),
+    cache: 'no-store',
+  })
+  if (!response.ok) throw new PdmApiError(response.status === 404 ? '该版本尚未生成网页预览文件。' : `预览文件读取失败（${response.status}）`, response.status)
+  return response.blob()
+}
+
 export function compareDocumentVersions(documentId: string, left: string, right: string, token: string): Promise<DocumentVersionComparison> {
   return requestJson<DocumentVersionComparison>(`/api/documents/${documentId}/versions/compare?left=${encodeURIComponent(left)}&right=${encodeURIComponent(right)}`, {}, token)
 }
@@ -337,7 +446,7 @@ export function restoreDocumentVersion(documentId: string, versionId: string, ch
 }
 
 export async function readDocumentVersionFile(documentId: string, versionId: string, token: string, download: boolean): Promise<Blob> {
-  const response = await fetch(`${apiBase}/api/documents/${documentId}/versions/${versionId}/file?download=${download}`, { headers: { Authorization: `Bearer ${token}` }, cache: 'no-store' })
+  const response = await fetch(`${apiBase}/api/documents/${documentId}/versions/${versionId}/file?download=${download}`, { headers: authenticatedHeaders(token), cache: 'no-store' })
   if (!response.ok) throw new PdmApiError(`历史版本文件读取失败（${response.status}）`, response.status)
   return response.blob()
 }
@@ -422,17 +531,15 @@ export function listUsers(token: string): Promise<PdmUser[]> {
   return requestJson('/api/users', {}, token)
 }
 
-const userRoleValues: Record<string, number> = { Engineer: 0, PlanningManager: 1, ProcessReviewer: 2, Approver: 3, ProductionViewer: 4, Administrator: 5 }
-
 export function createUser(input: SavePdmUserInput, token: string): Promise<PdmUser> {
   return requestJson('/api/users', {
-    method: 'POST', body: JSON.stringify({ ...input, role: userRoleValues[input.role] ?? 0 }),
+    method: 'POST', body: JSON.stringify(input),
   }, token)
 }
 
 export function updateUser(input: SavePdmUserInput, token: string): Promise<PdmUser> {
   return requestJson(`/api/users/${encodeURIComponent(input.username)}`, {
-    method: 'PUT', body: JSON.stringify({ displayName: input.displayName, role: userRoleValues[input.role] ?? 0, isActive: input.isActive }),
+    method: 'PUT', body: JSON.stringify({ displayName: input.displayName, role: input.role, isActive: input.isActive, companyId: input.companyId, crossCompanyView: input.crossCompanyView, accessibleCompanyIds: input.accessibleCompanyIds }),
   }, token)
 }
 
@@ -567,6 +674,11 @@ export async function saveBom(projectId: string, kind: BomKind, items: BomItem[]
   return saved.map(mapBomItem)
 }
 
+export async function listBom(projectId: string, kind: BomKind, token: string): Promise<BomItem[]> {
+  const items = await requestJson<ApiBomItem[]>(`/api/projects/${projectId}/boms/${kind}`, {}, token)
+  return items.map(mapBomItem)
+}
+
 export async function importBom(projectId: string, kind: BomKind, file: File, token: string): Promise<BomItem[]> {
   const form = new FormData()
   form.append('file', file, file.name)
@@ -575,7 +687,7 @@ export async function importBom(projectId: string, kind: BomKind, file: File, to
 }
 
 export async function exportBom(projectId: string, kind: BomKind, token: string): Promise<Blob> {
-  const response = await fetch(`${apiBase}/api/projects/${projectId}/boms/${kind}/export`, { headers: { Authorization: `Bearer ${token}` }, cache: 'no-store' })
+  const response = await fetch(`${apiBase}/api/projects/${projectId}/boms/${kind}/export`, { headers: authenticatedHeaders(token), cache: 'no-store' })
   if (!response.ok) throw new PdmApiError(`BOM导出失败（${response.status}）`, response.status)
   return response.blob()
 }
@@ -628,8 +740,36 @@ export function setBomEmptyDeclaration(projectId: string, kind: BomKind, declare
   return requestJson(`/api/projects/${projectId}/boms/${kind}/empty-declaration`, { method: 'PUT', body: JSON.stringify({ declaredEmpty }) }, token)
 }
 
-export function createReleasePackage(projectId: string, number: string, changeNumber: string, changeReason: string, effectiveSerialFrom: string, effectiveSerialTo: string | undefined, processReviewer: string, approver: string, token: string): Promise<ApiReleasePackage> {
-  return requestJson('/api/release-packages', { method: 'POST', body: JSON.stringify({ projectId, referenceSnapshotId: null, number, changeNumber, changeReason, effectiveSerialFrom, effectiveSerialTo, processReviewer, approver }) }, token)
+export async function listDrawingReviews(projectId: string, token: string): Promise<DrawingReviewPackage[]> {
+  const packages = await requestJson<ApiDrawingReviewPackage[]>(`/api/projects/${projectId}/drawing-reviews`, {}, token).catch(error => {
+    if (error instanceof PdmApiError && error.status === 404) return []
+    throw error
+  })
+  return packages.map(mapDrawingReviewPackage)
+}
+
+export async function createDrawingReview(projectId: string, token: string): Promise<DrawingReviewPackage> {
+  return mapDrawingReviewPackage(await requestJson<ApiDrawingReviewPackage>(`/api/projects/${projectId}/drawing-reviews`, { method: 'POST' }, token))
+}
+
+export async function addDrawingReviewMarkup(packageId: string, input: AddDrawingReviewMarkupInput, token: string): Promise<DrawingReviewPackage> {
+  return mapDrawingReviewPackage(await requestJson<ApiDrawingReviewPackage>(`/api/drawing-reviews/${packageId}/markups`, {
+    method: 'POST', body: JSON.stringify(input),
+  }, token))
+}
+
+export async function resolveDrawingReviewMarkup(packageId: string, markupId: string, token: string): Promise<DrawingReviewPackage> {
+  return mapDrawingReviewPackage(await requestJson<ApiDrawingReviewPackage>(`/api/drawing-reviews/${packageId}/markups/${markupId}/resolve`, { method: 'POST' }, token))
+}
+
+export async function decideDrawingReviewTarget(packageId: string, itemId: string, target: DrawingReviewTarget, decision: DrawingReviewDecision, comment: string, token: string): Promise<DrawingReviewPackage> {
+  return mapDrawingReviewPackage(await requestJson<ApiDrawingReviewPackage>(`/api/drawing-reviews/${packageId}/items/${itemId}/decision`, {
+    method: 'POST', body: JSON.stringify({ target, decision, comment }),
+  }, token))
+}
+
+export function createReleasePackage(projectId: string, input: CreateReleasePackageInput, token: string): Promise<ApiReleasePackage> {
+  return requestJson('/api/release-packages', { method: 'POST', body: JSON.stringify({ projectId, referenceSnapshotId: null, ...input }) }, token)
 }
 
 export async function listBomVersions(projectId: string, token: string): Promise<BomVersion[]> {
@@ -667,16 +807,20 @@ export function decideApproval(taskId: string, decision: 'Approved' | 'Rejected'
   return requestJson(`/api/approval-tasks/${taskId}/decision`, { method: 'POST', body: JSON.stringify({ decision: decision === 'Approved' ? 0 : 1, comment }) }, token)
 }
 
+export function emergencyDecideApproval(taskId: string, decision: 'Approved' | 'Rejected', reason: string, token: string): Promise<ApiReleasePackage> {
+  return requestJson(`/api/approval-tasks/${taskId}/emergency-decision`, { method: 'POST', body: JSON.stringify({ decision, reason }) }, token)
+}
+
 export async function uploadReleaseFile(projectId: string, packageNumber: string, file: File, token: string, onProgress?: (percent: number) => void): Promise<void> {
   const extension = file.name.split('.').pop()?.toLocaleLowerCase()
-  if (extension !== 'pdf' && extension !== 'dwg') throw new PdmApiError('生产发包只允许上传PDF或DWG。', 400)
+  if (extension !== 'pdf') throw new PdmApiError('生产发包只允许上传PDF。', 400)
   const digest = await crypto.subtle.digest('SHA-256', await file.arrayBuffer())
   const sha256 = [...new Uint8Array(digest)].map(value => value.toString(16).padStart(2, '0')).join('').toUpperCase()
   const session = await requestJson<{ id: string; chunkSize: number }>(`/api/uploads/sessions`, { method: 'POST', body: JSON.stringify({ projectId, fileName: file.name, totalLength: file.size, sha256 }) }, token)
   const chunks = Math.ceil(file.size / session.chunkSize)
   for (let index = 0; index < chunks; index++) {
     const body = file.slice(index * session.chunkSize, Math.min(file.size, (index + 1) * session.chunkSize))
-    const response = await fetch(`${apiBase}/api/uploads/sessions/${session.id}/chunks/${index}`, { method: 'PUT', headers: { Authorization: `Bearer ${token}` }, body })
+    const response = await fetch(`${apiBase}/api/uploads/sessions/${session.id}/chunks/${index}`, { method: 'PUT', headers: authenticatedHeaders(token), body })
     if (!response.ok) throw new PdmApiError(`发布文件分块${index + 1}上传失败（${response.status}）`, response.status)
     onProgress?.(Math.round(((index + 1) / chunks) * 100))
   }
@@ -761,10 +905,10 @@ export async function loadProjectWorkspace(projectId: string, token: string): Pr
   const project = await requestJson<ApiProject>(`/api/projects/${projectId}`, {}, token)
   const mappedProject = mapProject(project)
   if (!mappedProject.canReadContent) {
-    return { project: mappedProject, root: emptyProjectRoot(project), hasDocuments: false, documents: [], documentRelations: [], folders: [], standardBom: [], nonStandardBom: [], unclassifiedBom: [], electricalBom: [], bomSourceData: [], bomEmptyDeclarations: [], bomVersions: [], bomBaselines: [], releasePackage: null }
+    return { project: mappedProject, root: emptyProjectRoot(project), hasDocuments: false, documents: [], documentRelations: [], folders: [], standardBom: [], nonStandardBom: [], unclassifiedBom: [], electricalBom: [], bomSourceData: [], bomEmptyDeclarations: [], bomVersions: [], bomBaselines: [], drawingReviews: [], materialCodeApplications: [], releasePackages: [], releasePackage: null }
   }
 
-  const [documentWorkspace, folders, standard, nonStandard, unclassified, electrical, sourceData, bomEmptyDeclarations, bomVersions, bomBaselines, releasePackages] = await Promise.all([
+  const [documentWorkspace, folders, standard, nonStandard, unclassified, electrical, sourceData, bomEmptyDeclarations, bomVersions, bomBaselines, drawingReviews, materialCodeApplications, releasePackages] = await Promise.all([
     loadProjectDocumentWorkspace(project.id, token),
     listProjectFolders(project.id, token),
     requestJson<ApiBomItem[]>(`/api/projects/${project.id}/boms/Standard`, {}, token),
@@ -775,6 +919,8 @@ export async function loadProjectWorkspace(projectId: string, token: string): Pr
     requestJson<BomEmptyDeclaration[]>(`/api/projects/${project.id}/boms/empty-declarations`, {}, token),
     listBomVersions(project.id, token),
     listBomBaselines(project.id, token),
+    listDrawingReviews(project.id, token),
+    listMaterialCodeApplications(token, project.id),
     requestJson<ApiReleasePackage[]>(`/api/projects/${project.id}/release-packages`, {}, token),
   ])
 
@@ -790,6 +936,9 @@ export async function loadProjectWorkspace(projectId: string, token: string): Pr
     bomEmptyDeclarations,
     bomVersions,
     bomBaselines,
+    drawingReviews,
+    materialCodeApplications,
+    releasePackages: releasePackages.map(mapReleasePackage),
     releasePackage: releasePackages.length > 0 ? mapReleasePackage(releasePackages[0]) : null,
   }
 }
@@ -879,7 +1028,9 @@ function mapProject(project: ApiProject): ProjectSummary {
     signedDate: project.signedDate ?? undefined,
     quantity: project.quantity ?? 1,
     parentProjectId: project.parentProjectId ?? undefined,
+    rootProjectId: project.rootProjectId ?? undefined,
     childSequence: project.childSequence ?? undefined,
+    bomItemCategoryCode: project.bomItemCategoryCode ?? undefined,
     serialNumbers: project.serialNumbers ?? [],
     responsibleUsers: project.responsibleUsers ?? (project.owner ? [project.owner] : []),
     executionUnitId: project.executionUnitId ?? undefined,
@@ -889,6 +1040,8 @@ function mapProject(project: ApiProject): ProjectSummary {
     designLead: project.designLead ?? undefined,
     designers: project.designers ?? [],
     documentCount: project.documentCount ?? undefined,
+    modelDocumentCount: project.modelDocumentCount ?? undefined,
+    drawingDocumentCount: project.drawingDocumentCount ?? undefined,
     businessStatus: project.businessStatus ?? undefined,
     rootDocumentCheckedOutBy: project.rootDocumentCheckedOutBy ?? undefined,
     canAssignExecutionUnit: project.canAssignExecutionUnit ?? false,
@@ -1094,12 +1247,43 @@ function mapBomItem(item: ApiBomItem): BomItem {
   }
 }
 
+function drawingReviewEnum<T extends string>(value: string | number, values: readonly T[]): T {
+  return typeof value === 'number' ? values[value] : value as T
+}
+
+function mapDrawingReviewPackage(review: ApiDrawingReviewPackage): DrawingReviewPackage {
+  const packageStates = ['InReview', 'ChangesRequested', 'WritingProperties', 'Approved', 'Stale'] as const
+  const targetStates = ['Pending', 'ChangesRequested', 'Approved', 'Marked'] as const
+  const targets = ['Model3D', 'Drawing2D'] as const
+  const severities = ['Note', 'Blocking'] as const
+  const markupStates = ['Open', 'Resolved'] as const
+  return {
+    ...review,
+    state: drawingReviewEnum(review.state, packageStates),
+    items: review.items.map(item => ({
+      ...item,
+      modelState: drawingReviewEnum(item.modelState, targetStates),
+      drawingState: drawingReviewEnum(item.drawingState, targetStates),
+      effectiveModelVersionId: item.effectiveModelVersionId || item.modelResultVersionId || item.modelVersionId,
+      effectiveDrawingVersionId: item.effectiveDrawingVersionId || item.drawingResultVersionId || item.drawingVersionId,
+    })),
+    markups: review.markups.map(markup => ({
+      ...markup,
+      target: drawingReviewEnum(markup.target, targets),
+      severity: drawingReviewEnum(markup.severity, severities),
+      state: drawingReviewEnum(markup.state, markupStates),
+    })),
+  }
+}
+
 function mapReleasePackage(releasePackage: ApiReleasePackage): ReleasePackageSummary {
   const state = releaseState(releasePackage.state)
-  const steps: ApprovalStep[] = (releasePackage.approvalTasks ?? []).map((task) => {
-    const stage = approvalStage(task.stage)
+  const approvalTasks = [...(releasePackage.approvalTasks ?? [])].sort((left, right) => (left.stepOrder ?? 0) - (right.stepOrder ?? 0))
+  const currentTaskId = approvalTasks.find(task => !(task.decidedAt || task.decisionBy || task.decision !== null && task.decision !== undefined))?.id
+  const steps: ApprovalStep[] = approvalTasks.map((task) => {
+    const stage = task.stepName || approvalStage(task.stage)
     const done = Boolean(task.decidedAt || task.decisionBy || task.decision !== null && task.decision !== undefined)
-    const current = !done && ((state === '工艺审核' && stage === '工艺审核') || (state === '待批准' && stage === '批准'))
+    const current = !done && currentTaskId === task.id && ['审批中', '工艺审核', '待批准'].includes(state)
     return {
       id: task.id,
       stage,
@@ -1108,6 +1292,9 @@ function mapReleasePackage(releasePackage: ApiReleasePackage): ReleasePackageSum
       detail: task.decidedAt ? formatDate(task.decidedAt) : done ? '已处理' : '待处理',
       decision: task.decision ?? undefined,
       comment: task.comment ?? undefined,
+      stepOrder: task.stepOrder,
+      emergencySubstitute: task.isEmergencySubstitute ?? false,
+      emergencyReason: task.emergencyReason ?? undefined,
     }
   })
 
@@ -1126,7 +1313,26 @@ function mapReleasePackage(releasePackage: ApiReleasePackage): ReleasePackageSum
     effectiveSerialFrom: releasePackage.effectiveSerialFrom ?? undefined, effectiveSerialTo: releasePackage.effectiveSerialTo ?? undefined,
     standardBomRevision: releasePackage.standardBomRevision ?? undefined, nonStandardBomRevision: releasePackage.nonStandardBomRevision ?? undefined,
     electricalBomRevision: releasePackage.electricalBomRevision ?? undefined,
+    scope: mapReleaseScope(releasePackage.scope),
+    workflowCode: releasePackage.workflowCode ?? undefined,
+    workflowVersion: releasePackage.workflowVersion ?? 0,
+    selectedBomItemIds: releasePackage.selectedBomItemIds ?? [],
+    createsManufacturingBaseline: releasePackage.createsManufacturingBaseline ?? true,
+    locksDocuments: releasePackage.locksDocuments ?? true,
+    standardBomVersionId: releasePackage.standardBomVersionId ?? undefined,
+    nonStandardBomVersionId: releasePackage.nonStandardBomVersionId ?? undefined,
+    electricalBomVersionId: releasePackage.electricalBomVersionId ?? undefined,
+    standardBomSnapshot: (releasePackage.standardBomSnapshot ?? []).map(mapBomItem),
+    nonStandardBomSnapshot: (releasePackage.nonStandardBomSnapshot ?? []).map(mapBomItem),
+    electricalBomSnapshot: (releasePackage.electricalBomSnapshot ?? []).map(mapBomItem),
+    createdAt: releasePackage.createdAt ?? undefined,
+    publishedAt: releasePackage.publishedAt ?? undefined,
   }
+}
+
+function mapReleaseScope(value?: string | number): ReleaseScope {
+  if (typeof value === 'string') return value as ReleaseScope
+  return ['LegacyCombined', 'StandardLongLead', 'StandardFormal', 'StandardSupplement', 'ElectricalFormal', 'ElectricalSupplement', 'NonStandardWithDrawing'][value ?? 0] as ReleaseScope
 }
 
 function mapBomVersionState(value: string | number): BomVersionState {
@@ -1191,13 +1397,14 @@ function mapReferenceStatus(value: number | string): ReferenceStatus {
 }
 
 function approvalStage(value: number | string): string {
-  return value === 1 || value === 'ProcessReview' ? '工艺审核' : '批准'
+  const key = typeof value === 'number' ? ({ 1: 'ProcessReview', 2: 'Approval', 10: 'MechanicalEngineer', 20: 'MainDesigner', 30: 'MechanicalSupervisor', 40: 'HardwareEngineer', 50: 'HardwareSupervisor', 60: 'StandardizationSupervisor' } as Record<number, string>)[value] : value
+  return ({ ProcessReview: '工艺审核', Approval: '批准', MechanicalEngineer: '机械工程师自检', MainDesigner: '主设审核', MechanicalSupervisor: '机械主管批准', HardwareEngineer: '硬件工程师自检', HardwareSupervisor: '硬件主管审核', StandardizationSupervisor: '标准化主管批准' } as Record<string, string>)[key] ?? String(value)
 }
 
 function releaseState(value: number | string): string {
   const name = typeof value === 'number'
     ? ['草稿', '工艺审核', '待批准', '已驳回', '发布中', '已发布', '发布失败'][value]
-    : ({ Draft: '草稿', ProcessReview: '工艺审核', Approval: '待批准', Rejected: '已驳回', Publishing: '发布中', Published: '已发布', PublishFailed: '发布失败' } as Record<string, string>)[value]
+    : ({ Draft: '草稿', ProcessReview: '审批中', Approval: '待批准', Rejected: '已驳回', Publishing: '发布中', Published: '已发布', PublishFailed: '发布失败' } as Record<string, string>)[value]
   return name ?? String(value)
 }
 

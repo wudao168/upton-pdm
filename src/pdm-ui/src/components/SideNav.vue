@@ -1,13 +1,13 @@
 <script setup lang="ts">
-import { Boxes, ClipboardCheck, FolderKanban, HardDrive, ListTree, Settings } from '@lucide/vue'
-import pdmClientIconUrl from '../../../Pdm.Desktop/Assets/PdmClient.ico'
+import { Boxes, ClipboardCheck, FolderKanban, ListTree, Settings } from '@lucide/vue'
+import PlmCubeIcon from './PlmCubeIcon.vue'
 
-type NavKey = 'project-center' | 'projects' | 'materials' | 'tasks' | 'client-settings' | 'admin'
+type NavKey = 'project-center' | 'projects' | 'materials' | 'tasks' | 'admin'
 
-const props = withDefaults(defineProps<{ active: NavKey; approvalCount?: number; canManageSystem?: boolean; desktopAvailable?: boolean }>(), {
+const props = withDefaults(defineProps<{ active: NavKey; approvalCount?: number; canManageSystem?: boolean; collapsed?: boolean }>(), {
   approvalCount: 0,
   canManageSystem: false,
-  desktopAvailable: false,
+  collapsed: false,
 })
 const emit = defineEmits<{ navigate: [key: NavKey, label: string] }>()
 
@@ -20,20 +20,12 @@ const items = [
 </script>
 
 <template>
-  <aside class="pdm-sidebar" aria-label="主导航">
+  <aside class="pdm-sidebar" :class="{ 'is-collapsed': props.collapsed }" aria-label="主导航">
     <div class="pdm-sidebar__brand">
-      <img
-        class="pdm-sidebar__brand-mark"
-        :src="pdmClientIconUrl"
-        alt=""
-        width="38"
-        height="38"
-        draggable="false"
-        aria-hidden="true"
-      >
+      <PlmCubeIcon class="pdm-sidebar__brand-mark" />
       <div class="pdm-sidebar__brand-copy">
-        <strong>UPTON</strong>
-        <span>产品数据管理</span>
+        <span>产品生命</span>
+        <span>周期管理</span>
       </div>
     </div>
     <nav class="pdm-sidebar__nav">
@@ -44,6 +36,8 @@ const items = [
         class="pdm-nav-item"
         :class="{ 'is-active': props.active === item.key }"
         :aria-current="props.active === item.key ? 'page' : undefined"
+        :aria-label="props.collapsed ? item.label : undefined"
+        :title="props.collapsed ? item.label : undefined"
         @click="emit('navigate', item.key, item.label)"
       >
         <component :is="item.icon" :size="18" aria-hidden="true" />
@@ -53,21 +47,13 @@ const items = [
     </nav>
     <div class="pdm-sidebar__footer">
       <button
-        v-if="props.desktopAvailable"
-        type="button"
-        class="pdm-nav-item pdm-sidebar__settings"
-        :class="{ 'is-active': props.active === 'client-settings' }"
-        :aria-current="props.active === 'client-settings' ? 'page' : undefined"
-        @click="emit('navigate', 'client-settings', '客户端设置')"
-      >
-        <HardDrive :size="18" aria-hidden="true" /><span>客户端设置</span>
-      </button>
-      <button
         v-if="props.canManageSystem"
         type="button"
         class="pdm-nav-item pdm-sidebar__settings"
         :class="{ 'is-active': props.active === 'admin' }"
         :aria-current="props.active === 'admin' ? 'page' : undefined"
+        :aria-label="props.collapsed ? '系统管理' : undefined"
+        :title="props.collapsed ? '系统管理' : undefined"
         @click="emit('navigate', 'admin', '系统管理')"
       >
         <Settings :size="18" aria-hidden="true" /><span>系统管理</span>

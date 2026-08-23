@@ -22,7 +22,7 @@ internal sealed class SolidWorksOpenBridge
     {
         if (!IsAvailable)
         {
-            throw new InvalidOperationException("当前电脑未安装SolidWorks或UPTON PDM插件，不能使用SolidWorks打开。");
+            throw new InvalidOperationException("当前电脑未安装SolidWorks或UPLM插件，不能使用SolidWorks打开。");
         }
 
         var request = new { projectId, documentId, versionId, mode };
@@ -34,7 +34,7 @@ internal sealed class SolidWorksOpenBridge
 
         if (Process.GetProcessesByName("SLDWORKS").Length > 0)
         {
-            throw new InvalidOperationException("SolidWorks正在运行，但UPTON PDM插件尚未响应。请确认插件已启用并重新打开SolidWorks。");
+            throw new InvalidOperationException("SolidWorks正在运行，但UPLM插件尚未响应。请确认插件已启用并重新打开SolidWorks。");
         }
 
         QueueForStartup(json);

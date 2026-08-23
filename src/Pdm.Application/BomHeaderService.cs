@@ -1,0 +1,194 @@
+using System.Text.Json.Serialization;
+using Upton.Pdm.Domain;
+
+namespace Upton.Pdm.Application;
+
+public sealed record ProjectBomHeader(
+    Guid ProjectId,
+    [property: JsonConverter(typeof(JsonStringEnumConverter))] ProjectBomHeaderKind Kind,
+    [property: JsonConverter(typeof(JsonStringEnumConverter))] ProjectBomHeaderKind? ParentKind,
+    Guid? MaterialId,
+    string? MaterialCode,
+    string? MaterialName,
+    string? CategoryCode,
+    [property: JsonConverter(typeof(JsonStringEnumConverter))] MaterialApprovalStatus? ApprovalStatus,
+    long RowVersion);
+
+public sealed record BomHeaderGenerationResult(
+    Guid RootProjectId,
+    int ExpectedCount,
+    int GeneratedCount,
+    int ExistingCount,
+    IReadOnlyList<ProjectBomHeader> Headers);
+
+public sealed class BomHeaderService(
+    IPdmRepository repository,
+    IMaterialRepository materials,
+    MaterialService materialService,
+    TimeProvider timeProvider)
+{
+    private const string ChildBomCategoryCode = "0201";
+    private static readonly ProjectBomHeaderKind[] AllKinds =
+        [ProjectBomHeaderKind.Master, ProjectBomHeaderKind.Standard, ProjectBomHeaderKind.NonStandard, ProjectBomHeaderKind.Electrical];
+
+    public async Task<IReadOnlyList<ProjectBomHeader>> ListAsync(Guid projectId, string actor, UserRole role, CancellationToken cancellationToken)
+    {
+        if (!await repository.HasProjectReadAccessAsync(projectId, actor, role, cancellationToken))
+            throw new UnauthorizedAccessException("当前用户没有项目查看权限。");
+        var bindings = (await repository.ListProjectBomHeaderBindingsAsync(projectId, cancellationToken)).ToDictionary(item => item.Kind);
+        var result = new List<ProjectBomHeader>(AllKinds.Length);
+        foreach (var kind in AllKinds)
+        {
+            bindings.TryGetValue(kind, out var binding);
+            var material = binding is null ? null : await materials.FindMaterialAsync(binding.MaterialId, cancellationToken);
+            result.Add(new ProjectBomHeader(
+                projectId, kind, kind == ProjectBomHeaderKind.Master ? null : ProjectBomHeaderKind.Master,
+                material?.Id, OfficialMaterialCode(material), material?.Name, material?.CategoryCode,
+                material?.ApprovalStatus, binding?.RowVersion ?? 0));
+        }
+        return result;
+    }
+
+    public async Task<ProjectBomHeader> BindMaterialAsync(Guid projectId, ProjectBomHeaderKind kind, Guid materialId, long expectedRowVersion, string actor, UserRole role, CancellationToken cancellationToken)
+    {
+        if (!await repository.HasUserPermissionAsync(actor, role, PermissionCodes.BomEdit, cancellationToken))
+            throw new UnauthorizedAccessException("当前角色未配置BOM编辑权限。");
+        var project = await repository.FindProjectAsync(projectId, cancellationToken) ?? throw new PdmNotFoundException("项目不存在。");
+        if (!await repository.HasProjectReadAccessAsync(projectId, actor, role, cancellationToken))
+            throw new UnauthorizedAccessException("当前用户没有项目查看权限。");
+        var material = await materials.FindMaterialAsync(materialId, cancellationToken) ?? throw new PdmNotFoundException("料品主档不存在。");
+        ValidateMaterial(project, kind, material);
+
+        var saved = await repository.SaveProjectBomHeaderBindingAsync(projectId, kind, materialId, expectedRowVersion, actor, cancellationToken);
+        await repository.AppendAuditAsync(new AuditEntry(
+            Guid.NewGuid(), timeProvider.GetUtcNow(), actor, "bom.header.bind", nameof(ProjectBomHeaderBinding),
+            $"{projectId}:{kind}", $"{kind}绑定独立料号{material.MaterialCode}"), cancellationToken);
+        return new ProjectBomHeader(projectId, kind, saved.ParentKind, material.Id, OfficialMaterialCode(material), material.Name,
+            material.CategoryCode, material.ApprovalStatus, saved.RowVersion);
+    }
+
+    public async Task<BomHeaderGenerationResult> GenerateHierarchyMaterialsAsync(Guid projectId, string actor, UserRole role, CancellationToken cancellationToken)
+    {
+        if (!await repository.HasUserPermissionAsync(actor, role, PermissionCodes.BomEdit, cancellationToken))
+            throw new UnauthorizedAccessException("当前角色未配置BOM编辑权限。");
+        var selectedProject = await repository.FindProjectAsync(projectId, cancellationToken) ?? throw new PdmNotFoundException("项目不存在。");
+        if (!await repository.HasProjectReadAccessAsync(projectId, actor, role, cancellationToken))
+            throw new UnauthorizedAccessException("当前用户没有项目查看权限。");
+
+        var rootProjectId = selectedProject.RootProjectId ?? selectedProject.Id;
+        var projects = (await repository.ListProjectsForUserAsync(actor, role, cancellationToken))
+            .Where(project => (project.RootProjectId ?? project.Id) == rootProjectId)
+            .OrderBy(project => project.ParentProjectId is null ? 0 : 1)
+            .ThenBy(project => project.ChildSequence ?? 0)
+            .ThenBy(project => project.Code, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+        if (projects.Length == 0) throw new PdmNotFoundException("当前项目层级不存在或无权访问。");
+
+        var generatedCount = 0;
+        var existingCount = 0;
+        foreach (var project in projects)
+        {
+            var existingBindings = (await repository.ListProjectBomHeaderBindingsAsync(project.Id, cancellationToken))
+                .ToDictionary(binding => binding.Kind);
+            foreach (var kind in AllKinds)
+            {
+                existingBindings.TryGetValue(kind, out var binding);
+                var boundMaterial = binding is null
+                    ? null
+                    : await materials.FindMaterialAsync(binding.MaterialId, cancellationToken);
+                if (boundMaterial is not null)
+                {
+                    existingCount++;
+                    continue;
+                }
+                await GenerateMaterialAsync(project, kind, binding?.RowVersion ?? 0, actor, role, cancellationToken);
+                generatedCount++;
+            }
+        }
+
+        var headers = new List<ProjectBomHeader>(projects.Length * AllKinds.Length);
+        foreach (var project in projects)
+            headers.AddRange(await ListAsync(project.Id, actor, role, cancellationToken));
+        return new BomHeaderGenerationResult(rootProjectId, projects.Length * AllKinds.Length, generatedCount, existingCount, headers);
+    }
+
+    private async Task<ProjectBomHeader> GenerateMaterialAsync(Project project, ProjectBomHeaderKind kind, long expectedRowVersion, string actor, UserRole role, CancellationToken cancellationToken)
+    {
+        var categoryCode = RequiredCategoryCode(project, kind);
+        var material = await materialService.CreateAsync(new SaveMaterialCommand(
+            null,
+            $"{project.Code} {KindLabel(kind)}",
+            MaterialKind.Product,
+            MaterialSupplyMode.Manufacture,
+            "001",
+            null,
+            null,
+            $"{project.Name} · {KindLabel(kind)}",
+            null,
+            null,
+            null,
+            null,
+            CategoryCode: categoryCode), actor, role, cancellationToken);
+        var saved = await repository.SaveProjectBomHeaderBindingAsync(project.Id, kind, material.Id, expectedRowVersion, actor, cancellationToken);
+        await repository.AppendAuditAsync(new AuditEntry(
+            Guid.NewGuid(), timeProvider.GetUtcNow(), actor, "bom.header.generate", nameof(ProjectBomHeaderBinding),
+            $"{project.Id}:{kind}", $"为{KindLabel(kind)}提交料号申请，料号分类{categoryCode}"), cancellationToken);
+        return new ProjectBomHeader(project.Id, kind, saved.ParentKind, material.Id, OfficialMaterialCode(material), material.Name,
+            material.CategoryCode, material.ApprovalStatus, saved.RowVersion);
+    }
+
+    public async Task EnsureReleaseReadyAsync(Guid projectId, ReleaseScope scope, CancellationToken cancellationToken)
+    {
+        var project = await repository.FindProjectAsync(projectId, cancellationToken) ?? throw new PdmNotFoundException("项目不存在。");
+        var bindings = (await repository.ListProjectBomHeaderBindingsAsync(projectId, cancellationToken)).ToDictionary(item => item.Kind);
+        var requiredKinds = scope == ReleaseScope.LegacyCombined
+            ? AllKinds
+            : new[] { ProjectBomHeaderKind.Master, HeaderKind(scope) };
+        foreach (var kind in requiredKinds.Distinct())
+        {
+            if (!bindings.TryGetValue(kind, out var binding))
+                throw new PdmRuleException($"请先为{KindLabel(kind)}生成独立料号，再发起发布。");
+            var material = await materials.FindMaterialAsync(binding.MaterialId, cancellationToken)
+                ?? throw new PdmRuleException($"{KindLabel(kind)}生成的料品主档不存在，请重新生成。");
+            ValidateMaterial(project, kind, material);
+            if (!material.U9SyncConfirmed || string.IsNullOrWhiteSpace(material.U9ItemCode))
+                throw new PdmRuleException($"{KindLabel(kind)}料号仍在申请中；请先完成U9C同步并取得U9C正式料号。");
+        }
+    }
+
+    private static string? OfficialMaterialCode(PdmMaterial? material) =>
+        material is { U9SyncConfirmed: true } && !string.IsNullOrWhiteSpace(material.U9ItemCode)
+            ? material.U9ItemCode.Trim()
+            : null;
+
+    private static void ValidateMaterial(Project project, ProjectBomHeaderKind kind, PdmMaterial material)
+    {
+        if (material.IsArchived) throw new PdmRuleException("已停用料品不能作为BOM料号。");
+        if (material.ApprovalStatus != MaterialApprovalStatus.Approved) throw new PdmRuleException("只有已批准料品才能作为BOM料号。");
+        if (material.Kind != MaterialKind.Product) throw new PdmRuleException("BOM料号必须使用产品/组件类料品。");
+        var requiredCategoryCode = RequiredCategoryCode(project, kind);
+        if (!string.Equals(material.CategoryCode, requiredCategoryCode, StringComparison.OrdinalIgnoreCase))
+            throw new PdmRuleException($"{KindLabel(kind)}料号分类必须为{requiredCategoryCode}。");
+    }
+
+    private static string RequiredCategoryCode(Project project, ProjectBomHeaderKind kind) => kind == ProjectBomHeaderKind.Master
+        ? project.BomItemCategoryCode ?? throw new PdmRuleException("项目尚未配置主BOM料号分类。")
+        : ChildBomCategoryCode;
+
+    private static ProjectBomHeaderKind HeaderKind(ReleaseScope scope) => scope switch
+    {
+        ReleaseScope.StandardLongLead or ReleaseScope.StandardFormal or ReleaseScope.StandardSupplement => ProjectBomHeaderKind.Standard,
+        ReleaseScope.ElectricalFormal or ReleaseScope.ElectricalSupplement => ProjectBomHeaderKind.Electrical,
+        ReleaseScope.NonStandardWithDrawing => ProjectBomHeaderKind.NonStandard,
+        _ => throw new PdmRuleException("当前发布范围没有独立BOM料号。")
+    };
+
+    private static string KindLabel(ProjectBomHeaderKind kind) => kind switch
+    {
+        ProjectBomHeaderKind.Master => "项目主BOM",
+        ProjectBomHeaderKind.Standard => "标准件BOM",
+        ProjectBomHeaderKind.NonStandard => "非标件BOM",
+        ProjectBomHeaderKind.Electrical => "电气BOM",
+        _ => kind.ToString()
+    };
+}

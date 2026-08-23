@@ -617,9 +617,9 @@ public sealed class ApiSmokeTests : IClassFixture<PdmApiFactory>
         foreach (var user in new[]
         {
             new UserAccount(Guid.NewGuid(), "plan-user", "计划管理", "unused", UserRole.PlanningManager, true),
-            new UserAccount(Guid.NewGuid(), "division-manager", "事业部负责人", "unused", UserRole.Engineer, true),
+            new UserAccount(Guid.NewGuid(), "division-manager", "事业部负责人", "unused", UserRole.Engineer, true, RoleCode: UserRole.BusinessUnitManager.ToString()),
             new UserAccount(Guid.NewGuid(), "project-manager", "项目经理", "unused", UserRole.Engineer, true),
-            new UserAccount(Guid.NewGuid(), "design-lead", "设计负责人", "unused", UserRole.Engineer, true),
+            new UserAccount(Guid.NewGuid(), "design-lead", "设计负责人", "unused", UserRole.Engineer, true, RoleCode: "ProjectManager"),
             new UserAccount(Guid.NewGuid(), "designer-own", "本事业部设计", "unused", UserRole.Engineer, true),
             new UserAccount(Guid.NewGuid(), "designer-other", "跨事业部设计", "unused", UserRole.Engineer, true)
         })
@@ -704,10 +704,14 @@ public sealed class ApiSmokeTests : IClassFixture<PdmApiFactory>
         var visibleMain = Assert.Single(visible, item => item.Id == project.Id);
         Assert.False(visibleMain.CanReadContent);
         Assert.Null(visibleMain.DocumentCount);
+        Assert.Null(visibleMain.ModelDocumentCount);
+        Assert.Null(visibleMain.DrawingDocumentCount);
         Assert.Null(visibleMain.BusinessStatus);
         var visibleChild = Assert.Single(visible, item => item.Id == child.Id);
         Assert.True(visibleChild.CanReadContent);
         Assert.Equal(0, visibleChild.DocumentCount);
+        Assert.Equal(0, visibleChild.ModelDocumentCount);
+        Assert.Equal(0, visibleChild.DrawingDocumentCount);
         Assert.Equal("正常", visibleChild.BusinessStatus);
 
         client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", CreateToken("design-lead", "Engineer"));
@@ -749,7 +753,7 @@ public sealed class ApiSmokeTests : IClassFixture<PdmApiFactory>
     private sealed record HealthResponse(string Status, string Service, string Database, int ApiPort, int MySqlPort);
     private sealed record ProjectResponse(Guid Id, string Code, string Name, string Owner, string VaultLocation, string ReleaseLocation, bool IsActive,
         string? DeviceModel, IReadOnlyList<string> SerialNumbers, IReadOnlyList<string> ResponsibleUsers, bool CanReadContent = false,
-        int? DocumentCount = null, string? BusinessStatus = null, bool CanAssignExecutionUnit = false, bool CanManageMainStaffing = false);
+        int? DocumentCount = null, int? ModelDocumentCount = null, int? DrawingDocumentCount = null, string? BusinessStatus = null, bool CanAssignExecutionUnit = false, bool CanManageMainStaffing = false);
     private sealed record CustomerResponse(Guid Id, string Code, string Name, bool IsActive);
     private sealed record CrmIntegrationSettingsResponse(string BaseUrl, string Username, bool PasswordConfigured, bool AutoSyncEnabled, int AutoSyncIntervalMinutes, DateTimeOffset? LastSyncAt, int LastSyncCount, DateTimeOffset? LastAutoSyncAttemptAt, string? LastAutoSyncError);
     private sealed record CrmConnectionTestResponse(int CustomerCount, int SkippedCount, DateTimeOffset TestedAt);
@@ -781,6 +785,7 @@ public sealed class PdmApiFactory : WebApplicationFactory<Program>
             services.RemoveAll<ICrmCustomerClient>();
             services.RemoveAll<ICrmCredentialProtector>();
             services.RemoveAll<IU9OpenApiClient>();
+            services.RemoveAll<IU9BomQueryClient>();
             services.RemoveAll<IU9SecretProtector>();
             services.RemoveAll<IPersistentSessionTokenService>();
             services.AddSingleton<TestCrmCustomerClient>();
@@ -788,6 +793,7 @@ public sealed class PdmApiFactory : WebApplicationFactory<Program>
             services.AddSingleton<ICrmCredentialProtector, TestCrmCredentialProtector>();
             services.AddSingleton<TestU9OpenApiClient>();
             services.AddSingleton<IU9OpenApiClient>(provider => provider.GetRequiredService<TestU9OpenApiClient>());
+            services.AddSingleton<IU9BomQueryClient>(provider => provider.GetRequiredService<TestU9OpenApiClient>());
             services.AddSingleton<IU9SecretProtector, TestU9SecretProtector>();
             services.AddSingleton<IPersistentSessionTokenService, TestPersistentSessionTokenService>();
         });
@@ -832,7 +838,7 @@ public sealed class TestCrmCredentialProtector : ICrmCredentialProtector
     public string Unprotect(string ciphertext) => ciphertext["protected:".Length..];
 }
 
-public sealed class TestU9OpenApiClient : IU9OpenApiClient
+public sealed class TestU9OpenApiClient : IU9OpenApiClient, IU9BomQueryClient
 {
     public U9AuthenticationRequest? LastRequest { get; private set; }
     public U9ItemQueryResult QueryResult { get; set; } = new(0, null, []);
@@ -844,6 +850,10 @@ public sealed class TestU9OpenApiClient : IU9OpenApiClient
         new("C00999", "U9C接口客户"),
         new("C01000", "U9C范围客户")
     ], 3);
+    public U9BomQueryResult BomResult { get; set; } = new(0, null, []);
+    public Queue<U9BomQueryResult> BomResults { get; } = new();
+    public U9BomOperationReference? BomOperationResult { get; set; }
+    public string LastBomPayload { get; private set; } = string.Empty;
     public int QueryCallCount { get; private set; }
     public int PostCallCount { get; private set; }
     public string LastPostPath { get; private set; } = string.Empty;
@@ -873,8 +883,25 @@ public sealed class TestU9OpenApiClient : IU9OpenApiClient
         Task.FromResult(UomResult);
 
     public Task<U9CustomerQueryResult> QueryCustomerReferencesAsync(
-        string baseUrl, string token, string payloadJson, CancellationToken cancellationToken) =>
+        string baseUrl, string path, string token, string payloadJson, CancellationToken cancellationToken) =>
         Task.FromResult(CustomerResult);
+
+    public Task<U9BomQueryResult> QueryBomsAsync(
+        string baseUrl, string path, string token, string payloadJson, CancellationToken cancellationToken)
+    {
+        LastBomPayload = payloadJson;
+        return Task.FromResult(BomResults.Count > 0 ? BomResults.Dequeue() : BomResult);
+    }
+
+    public Task<U9BomOperationReference?> QueryBomOperationAsync(
+        string baseUrl,
+        string path,
+        string token,
+        string organizationCode,
+        string itemCode,
+        string bomVersionCode,
+        string otherId,
+        CancellationToken cancellationToken) => Task.FromResult(BomOperationResult);
 }
 
 public sealed class TestU9SecretProtector : IU9SecretProtector

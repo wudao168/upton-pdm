@@ -14,6 +14,8 @@ using System.Threading.Tasks;
 using System.Web.Script.Serialization;
 using System.Windows;
 using System.Windows.Interop;
+using System.Windows.Media;
+using System.Windows.Media.Animation;
 using Microsoft.Web.WebView2.Core;
 using Upton.Pdm.LocalSettings;
 using WinForms = System.Windows.Forms;
@@ -25,19 +27,17 @@ public partial class MainWindow : Window
 {
     private const string UiHost = "appassets.pdm.local";
     private const int WindowMessageSystemCommand = 0x0112;
-    private const int MenuStartWithWindows = 0x1FF0;
     private const int MenuExit = 0x1FE0;
     private const uint MenuString = 0x0000;
     private const uint MenuSeparator = 0x0800;
-    private const uint MenuByCommand = 0x0000;
-    private const uint MenuChecked = 0x0008;
-    private const uint MenuUnchecked = 0x0000;
     private readonly string[] startupArgs = Environment.GetCommandLineArgs().Skip(1).ToArray();
     private readonly bool startedWithWindows = Environment.GetCommandLineArgs().Any(argument => string.Equals(argument, "--startup", StringComparison.OrdinalIgnoreCase));
     private readonly HttpClient apiClient = new() { BaseAddress = new Uri("http://127.0.0.1:5080"), Timeout = TimeSpan.FromMinutes(5) };
     private readonly SolidWorksOpenBridge solidWorksBridge = new();
     private string accessToken = string.Empty;
+    private string activeCompanyId = string.Empty;
     private EDrawingsPreviewControl? embeddedPreview;
+    private IReadOnlyList<KeyValuePair<string, string>> previewProperties = Array.Empty<KeyValuePair<string, string>>();
     private PreviewHostBounds? previewBounds;
     private bool previewDocumentReady;
     private int previewRequestGeneration;
@@ -45,31 +45,86 @@ public partial class MainWindow : Window
     private IntPtr systemMenu;
     private bool startWithWindows;
     private bool allowClose;
-    private bool trayNoticeShown;
     private WinForms.NotifyIcon? trayIcon;
-    private WinForms.ToolStripMenuItem? trayStartupItem;
     private string[]? pendingExternalRequestArgs;
     private bool workspaceNavigationReady;
 
     public MainWindow()
     {
         InitializeComponent();
+        LoadingPanel.Loaded += (_, _) => InitializeLoadingAnimation();
         SourceInitialized += OnSourceInitialized;
         Loaded += OnLoaded;
         SizeChanged += (_, _) => ApplyPreviewBounds();
         StateChanged += OnWindowStateChanged;
         Activated += OnWindowActivated;
-        Deactivated += OnWindowDeactivated;
         Closing += OnClosing;
         Closed += OnClosed;
         System.Windows.Application.Current.SessionEnding += OnSessionEnding;
+    }
+
+    private void InitializeLoadingAnimation()
+    {
+        var squares = new[]
+        {
+            LoadingSquare1,
+            LoadingSquare2,
+            LoadingSquare3,
+            LoadingSquare4,
+            LoadingSquare5,
+            LoadingSquare6,
+            LoadingSquare7
+        };
+
+        for (var index = 0; index < squares.Length; index++)
+        {
+            var delay = -(index + 1) * 10d / squares.Length;
+            squares[index].BeginAnimation(
+                System.Windows.Controls.Canvas.LeftProperty,
+                CreateSquareAnimation(new[] { 0d, 0, 32, 32, 64, 64, 64, 64, 32, 32, 32, 32, 0, 0, 0, 0, 0 }, delay));
+            squares[index].BeginAnimation(
+                System.Windows.Controls.Canvas.TopProperty,
+                CreateSquareAnimation(new[] { 0d, 0, 0, 0, 0, 0, 32, 32, 32, 32, 64, 64, 64, 64, 32, 32, 0 }, delay));
+        }
+    }
+
+    private static DoubleAnimationUsingKeyFrames CreateSquareAnimation(IReadOnlyList<double> values, double delay)
+    {
+        var progress = new[]
+        {
+            0d, .105, .125, .23, .25, .355, .375, .48, .5,
+            .605, .625, .73, .75, .855, .875, .98, 1
+        };
+        var animation = new DoubleAnimationUsingKeyFrames
+        {
+            BeginTime = TimeSpan.FromSeconds(delay),
+            Duration = TimeSpan.FromSeconds(10),
+            RepeatBehavior = RepeatBehavior.Forever
+        };
+        for (var index = 0; index < progress.Length; index++)
+        {
+            var value = values[index] + 2;
+            var keyTime = KeyTime.FromPercent(progress[index]);
+            if (index == 0)
+            {
+                animation.KeyFrames.Add(new DiscreteDoubleKeyFrame(value, keyTime));
+            }
+            else
+            {
+                animation.KeyFrames.Add(new EasingDoubleKeyFrame(
+                    value,
+                    keyTime,
+                    new SineEase { EasingMode = EasingMode.EaseInOut }));
+            }
+        }
+        return animation;
     }
 
     private async void OnLoaded(object sender, RoutedEventArgs e)
     {
         if (startedWithWindows)
         {
-            HideToNotificationArea(false);
+            HideToNotificationArea();
         }
 
         try
@@ -81,8 +136,8 @@ public partial class MainWindow : Window
             LoadingPanel.Visibility = Visibility.Collapsed;
             WpfMessageBox.Show(
                 this,
-                $"PDM 客户端启动失败。\n\n{exception.Message}",
-                "UPTON PDM",
+                $"PLM 客户端启动失败。\n\n{exception.Message}",
+                "UPLM",
                 MessageBoxButton.OK,
                 MessageBoxImage.Error);
         }
@@ -108,7 +163,7 @@ public partial class MainWindow : Window
             LoadingPanel.Visibility = Visibility.Collapsed;
             if (!args.IsSuccess)
             {
-                WpfMessageBox.Show(this, $"页面加载失败：{args.WebErrorStatus}", "UPTON PDM");
+                WpfMessageBox.Show(this, $"页面加载失败：{args.WebErrorStatus}", "UPLM");
             }
             else
             {
@@ -224,12 +279,14 @@ public partial class MainWindow : Window
         if (type == "session-ready" && TryReadPayloadString(message, "accessToken", out var token))
         {
             accessToken = token;
+            activeCompanyId = TryReadPayloadString(message, "activeCompanyId", out var companyId) ? companyId : string.Empty;
             return;
         }
 
         if (type == "session-clear")
         {
             accessToken = string.Empty;
+            activeCompanyId = string.Empty;
             HideEmbeddedPreview(true);
             return;
         }
@@ -243,7 +300,6 @@ public partial class MainWindow : Window
         if (type == "preview-host-suspend")
         {
             PreviewFrame.Visibility = Visibility.Collapsed;
-            PreviewPropertiesPopup.IsOpen = false;
             return;
         }
 
@@ -374,7 +430,6 @@ public partial class MainWindow : Window
         {
             DesktopStartupSettings.SetEnabled(enabled);
             startWithWindows = enabled;
-            UpdateSystemMenuCheck();
             _ = PublishDesktopSettingsAsync(message: "客户端启动设置已保存。");
         }
         catch (Exception exception) when (exception is UnauthorizedAccessException || exception is IOException)
@@ -387,7 +442,7 @@ public partial class MainWindow : Window
     {
         using (var dialog = new WinForms.FolderBrowserDialog
         {
-            Description = "选择UPTON PDM本地缓存工作区",
+            Description = "选择UPLM本地缓存工作区",
             SelectedPath = WorkspaceSettingsStore.GetWorkspaceRoot(),
             ShowNewFolderButton = true
         })
@@ -425,14 +480,12 @@ public partial class MainWindow : Window
         if (systemMenu != IntPtr.Zero)
         {
             AppendMenu(systemMenu, MenuSeparator, UIntPtr.Zero, string.Empty);
-            AppendMenu(systemMenu, MenuString, new UIntPtr(MenuStartWithWindows), "随电脑启动");
-            AppendMenu(systemMenu, MenuString, new UIntPtr(MenuExit), "退出 UPTON PDM");
+            AppendMenu(systemMenu, MenuString, new UIntPtr(MenuExit), "退出 UPLM");
         }
 
         try
         {
             startWithWindows = DesktopStartupSettings.EnsureConfigured();
-            UpdateSystemMenuCheck();
         }
         catch (Exception exception) when (exception is UnauthorizedAccessException || exception is IOException)
         {
@@ -445,12 +498,7 @@ public partial class MainWindow : Window
     {
         if (message != WindowMessageSystemCommand) return IntPtr.Zero;
         var command = wParam.ToInt32();
-        if (command == MenuStartWithWindows)
-        {
-            UpdateStartWithWindows(!startWithWindows);
-            handled = true;
-        }
-        else if (command == MenuExit)
+        if (command == MenuExit)
         {
             allowClose = true;
             Close();
@@ -460,23 +508,11 @@ public partial class MainWindow : Window
         return IntPtr.Zero;
     }
 
-    private void UpdateSystemMenuCheck()
-    {
-        if (systemMenu != IntPtr.Zero)
-        {
-            CheckMenuItem(systemMenu, MenuStartWithWindows, MenuByCommand | (startWithWindows ? MenuChecked : MenuUnchecked));
-        }
-        if (trayStartupItem != null)
-        {
-            trayStartupItem.Checked = startWithWindows;
-        }
-    }
-
     private void OnClosing(object? sender, CancelEventArgs eventArgs)
     {
         if (allowClose) return;
         eventArgs.Cancel = true;
-        HideToNotificationArea(true);
+        HideToNotificationArea();
     }
 
     private void OnWindowStateChanged(object? sender, EventArgs eventArgs)
@@ -484,7 +520,6 @@ public partial class MainWindow : Window
         if (WindowState == WindowState.Minimized && !allowClose)
         {
             ShowInTaskbar = true;
-            PreviewPropertiesPopup.IsOpen = false;
             return;
         }
 
@@ -493,28 +528,23 @@ public partial class MainWindow : Window
 
     private void OnWindowActivated(object? sender, EventArgs eventArgs) => ApplyPreviewBounds();
 
-    private void OnWindowDeactivated(object? sender, EventArgs eventArgs) => PreviewPropertiesPopup.IsOpen = false;
-
     private void InitializeTrayIcon()
     {
         var icon = LoadClientIcon();
 
         var menu = new WinForms.ContextMenuStrip();
-        var openItem = new WinForms.ToolStripMenuItem("打开 UPTON PDM");
-        trayStartupItem = new WinForms.ToolStripMenuItem("随电脑启动") { Checked = startWithWindows };
-        var exitItem = new WinForms.ToolStripMenuItem("退出 UPTON PDM");
+        var openItem = new WinForms.ToolStripMenuItem("打开 UPLM");
+        var exitItem = new WinForms.ToolStripMenuItem("退出 UPLM");
         openItem.Click += (_, _) => RestoreFromNotificationArea();
-        trayStartupItem.Click += (_, _) => UpdateStartWithWindows(!startWithWindows);
         exitItem.Click += (_, _) => ExitApplication();
         menu.Items.Add(openItem);
-        menu.Items.Add(trayStartupItem);
         menu.Items.Add(new WinForms.ToolStripSeparator());
         menu.Items.Add(exitItem);
 
         trayIcon = new WinForms.NotifyIcon
         {
             Icon = icon,
-            Text = "UPTON PDM",
+            Text = "UPLM",
             Visible = true,
             ContextMenuStrip = menu
         };
@@ -540,16 +570,10 @@ public partial class MainWindow : Window
             ?? (System.Drawing.Icon)System.Drawing.SystemIcons.Application.Clone();
     }
 
-    private void HideToNotificationArea(bool showNotice)
+    private void HideToNotificationArea()
     {
-        PreviewPropertiesPopup.IsOpen = false;
         ShowInTaskbar = false;
         Hide();
-        if (showNotice && !trayNoticeShown && trayIcon != null)
-        {
-            trayNoticeShown = true;
-            trayIcon.ShowBalloonTip(2500, "UPTON PDM", "客户端正在通知区域运行。双击图标可重新打开。", WinForms.ToolTipIcon.Info);
-        }
     }
 
     private void RestoreFromNotificationArea()
@@ -603,9 +627,6 @@ public partial class MainWindow : Window
     [DllImport("user32.dll", CharSet = CharSet.Unicode)]
     private static extern bool AppendMenu(IntPtr menu, uint flags, UIntPtr item, string text);
 
-    [DllImport("user32.dll")]
-    private static extern uint CheckMenuItem(IntPtr menu, uint item, uint check);
-
     private static bool TryReadCredentials(
         IReadOnlyDictionary<string, object> message,
         out string username,
@@ -640,7 +661,7 @@ public partial class MainWindow : Window
             WpfMessageBox.Show(
                 this,
                 $"账号保存失败。\n\n{exception.Message}",
-                "UPTON PDM",
+                "UPLM",
                 MessageBoxButton.OK,
                 MessageBoxImage.Warning);
         }
@@ -650,14 +671,14 @@ public partial class MainWindow : Window
     {
         if (!payload.TryGetValue("localPath", out var pathValue))
         {
-            WpfMessageBox.Show(this, "文档尚未下载到本地工作区。", "UPTON PDM", MessageBoxButton.OK, MessageBoxImage.Information);
+            WpfMessageBox.Show(this, "文档尚未下载到本地工作区。", "UPLM", MessageBoxButton.OK, MessageBoxImage.Information);
             return;
         }
 
         var path = pathValue as string;
         if (string.IsNullOrWhiteSpace(path) || !File.Exists(path))
         {
-            WpfMessageBox.Show(this, "本地文档不存在，请先获取权限或下载。", "UPTON PDM", MessageBoxButton.OK, MessageBoxImage.Warning);
+            WpfMessageBox.Show(this, "本地文档不存在，请先获取权限或下载。", "UPLM", MessageBoxButton.OK, MessageBoxImage.Warning);
             return;
         }
 
@@ -678,7 +699,6 @@ public partial class MainWindow : Window
         var requestGeneration = Interlocked.Increment(ref previewRequestGeneration);
         previewDocumentReady = false;
         PreviewFrame.Visibility = Visibility.Collapsed;
-        PreviewPropertiesPopup.IsOpen = false;
         UpdatePreviewProperties(payload);
         try
         {
@@ -704,8 +724,17 @@ public partial class MainWindow : Window
             }
 
             var versions = new JavaScriptSerializer().Deserialize<VersionResponse[]>(versionsJson) ?? Array.Empty<VersionResponse>();
-            var version = versions.OrderByDescending(item => item.CreatedAt).FirstOrDefault()
-                ?? throw new InvalidOperationException("该图档已登记，但尚未提交首个存档版本。装配体中可见的可能只是SolidWorks缓存几何，不是可下载的源文件；请从原始工作目录找回文件后完成首次存档。");
+            Guid? requestedVersionId = null;
+            if (payload.TryGetValue("versionId", out var versionIdValue)
+                && Guid.TryParse(versionIdValue as string, out var parsedVersionId))
+            {
+                requestedVersionId = parsedVersionId;
+            }
+            var version = requestedVersionId.HasValue
+                ? versions.SingleOrDefault(item => item.Id == requestedVersionId.Value)
+                    ?? throw new InvalidOperationException("图纸审核绑定的版本不存在，不能继续审核。")
+                : versions.OrderByDescending(item => item.CreatedAt).FirstOrDefault()
+                    ?? throw new InvalidOperationException("该图档已登记，但尚未提交首个存档版本。装配体中可见的可能只是SolidWorks缓存几何，不是可下载的源文件；请从原始工作目录找回文件后完成首次存档。");
             if (string.IsNullOrWhiteSpace(fileName)) fileName = "document.bin";
             var cacheDirectory = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "UPTON", "PDM", "Preview", documentId.ToString("N"), version.Id.ToString("N"));
             Directory.CreateDirectory(cacheDirectory);
@@ -755,7 +784,6 @@ public partial class MainWindow : Window
 
             previewDocumentReady = false;
             PreviewFrame.Visibility = Visibility.Collapsed;
-            PreviewPropertiesPopup.IsOpen = false;
             embeddedPreview?.CloseDocument();
             await PublishPreviewStatusAsync("error", string.Empty, exception.Message);
         }
@@ -769,6 +797,9 @@ public partial class MainWindow : Window
         }
 
         embeddedPreview = new EDrawingsPreviewControl();
+        embeddedPreview.UserMessageRequested += message => Dispatcher.BeginInvoke(new Action(() =>
+            WpfMessageBox.Show(this, message, "UPLM", MessageBoxButton.OK, MessageBoxImage.Information)));
+        embeddedPreview.UpdateProperties(previewProperties);
         EmbeddedPreviewHost.Child = embeddedPreview;
     }
 
@@ -797,7 +828,6 @@ public partial class MainWindow : Window
             || WorkspaceView.ActualWidth <= 0 || WorkspaceView.ActualHeight <= 0)
         {
             PreviewFrame.Visibility = Visibility.Collapsed;
-            PreviewPropertiesPopup.IsOpen = false;
             return;
         }
 
@@ -819,7 +849,6 @@ public partial class MainWindow : Window
         if (width < 80 || height < 80)
         {
             PreviewFrame.Visibility = Visibility.Collapsed;
-            PreviewPropertiesPopup.IsOpen = false;
             return;
         }
 
@@ -828,7 +857,7 @@ public partial class MainWindow : Window
         PreviewFrame.Width = width;
         PreviewFrame.Height = height;
         PreviewFrame.Visibility = Visibility.Visible;
-        PreviewPropertiesPopup.IsOpen = PreviewPropertiesGrid.Children.Count > 0;
+        embeddedPreview?.RefreshPreview();
     }
 
     private void HideEmbeddedPreview(bool closeDocument)
@@ -836,7 +865,6 @@ public partial class MainWindow : Window
         Interlocked.Increment(ref previewRequestGeneration);
         previewDocumentReady = false;
         PreviewFrame.Visibility = Visibility.Collapsed;
-        PreviewPropertiesPopup.IsOpen = false;
         if (closeDocument)
         {
             embeddedPreview?.CloseDocument();
@@ -845,12 +873,6 @@ public partial class MainWindow : Window
 
     private void UpdatePreviewProperties(IReadOnlyDictionary<string, object> payload)
     {
-        PreviewPropertiesGrid.Children.Clear();
-        PreviewPropertiesGrid.RowDefinitions.Clear();
-        PreviewPropertiesGrid.ColumnDefinitions.Clear();
-        PreviewPropertiesGrid.ColumnDefinitions.Add(new System.Windows.Controls.ColumnDefinition { Width = new GridLength(64) });
-        PreviewPropertiesGrid.ColumnDefinitions.Add(new System.Windows.Controls.ColumnDefinition { Width = GridLength.Auto });
-
         var fields = new[]
         {
             (Label: "物料/图号", Key: "drawingNumber"),
@@ -863,39 +885,21 @@ public partial class MainWindow : Window
             (Label: "状态", Key: "status"),
         };
 
+        var values = new List<KeyValuePair<string, string>>();
         foreach (var field in fields)
         {
-            if (!payload.TryGetValue(field.Key, out var raw) || string.IsNullOrWhiteSpace(raw as string)) continue;
-            var row = PreviewPropertiesGrid.RowDefinitions.Count;
-            PreviewPropertiesGrid.RowDefinitions.Add(new System.Windows.Controls.RowDefinition { Height = GridLength.Auto });
+            if (!payload.TryGetValue(field.Key, out var raw)
+                || raw is not string value
+                || string.IsNullOrWhiteSpace(value))
+            {
+                continue;
+            }
 
-            var label = new System.Windows.Controls.TextBlock
-            {
-                Text = field.Label,
-                FontFamily = new System.Windows.Media.FontFamily("Microsoft YaHei UI"),
-                FontSize = 11,
-                FontWeight = FontWeights.SemiBold,
-                Foreground = new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(15, 23, 42)),
-                Margin = new Thickness(0, 0, 6, 4),
-            };
-            var value = new System.Windows.Controls.TextBlock
-            {
-                Text = (string)raw,
-                FontFamily = new System.Windows.Media.FontFamily("Microsoft YaHei UI"),
-                FontSize = 11,
-                FontWeight = FontWeights.SemiBold,
-                Foreground = new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(2, 6, 23)),
-                Margin = new Thickness(0, 0, 0, 4),
-                TextTrimming = TextTrimming.CharacterEllipsis,
-                MaxWidth = 250,
-            };
-            System.Windows.Controls.Grid.SetRow(label, row);
-            System.Windows.Controls.Grid.SetColumn(label, 0);
-            System.Windows.Controls.Grid.SetRow(value, row);
-            System.Windows.Controls.Grid.SetColumn(value, 1);
-            PreviewPropertiesGrid.Children.Add(label);
-            PreviewPropertiesGrid.Children.Add(value);
+            values.Add(new KeyValuePair<string, string>(field.Label, value));
         }
+
+        previewProperties = values;
+        embeddedPreview?.UpdateProperties(previewProperties);
     }
 
     private async Task PublishPreviewStatusAsync(string state, string fileName, string message)
@@ -919,7 +923,7 @@ public partial class MainWindow : Window
 
     private void DisposeClientResources()
     {
-        HideEmbeddedPreview(true);
+        HideEmbeddedPreview(false);
         EmbeddedPreviewHost.Child = null;
         embeddedPreview?.Dispose();
         embeddedPreview = null;
@@ -953,6 +957,7 @@ public partial class MainWindow : Window
     {
         var request = new HttpRequestMessage(method, path);
         request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", accessToken);
+        if (!string.IsNullOrWhiteSpace(activeCompanyId)) request.Headers.Add("X-Company-Id", activeCompanyId);
         return request;
     }
 

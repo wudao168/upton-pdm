@@ -28,6 +28,10 @@ public sealed class LocalFileStorage(IOptions<PdmStorageOptions> options, IPdmRe
         {
             throw new PdmRuleException("文件名不能包含路径。 ");
         }
+        if (string.Equals(Path.GetExtension(safeName), ".dwg", StringComparison.OrdinalIgnoreCase))
+        {
+            throw new PdmRuleException("系统不再接收DWG文件；三维预览请使用STP/STEP，二维工程图请使用PDF。");
+        }
 
         _ = await repository.FindProjectAsync(projectId, cancellationToken)
             ?? throw new PdmNotFoundException("项目不存在。 ");

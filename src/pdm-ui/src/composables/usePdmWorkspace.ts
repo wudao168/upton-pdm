@@ -1,9 +1,12 @@
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { ElMessageBox } from 'element-plus'
 import { batchDeleteBomItems as batchDeleteBomItemsRequest, batchRestoreBomItems as batchRestoreBomItemsRequest, restoreBomItemsFromSource as restoreBomItemsFromSourceRequest } from '../api'
 import { getBomSourceData } from '../api'
-import { batchUpdateBomItems as batchUpdateBomItemsRequest, changeMyPassword as changeMyPasswordRequest, checkHealth, compareDocumentVersions, createProject as createProjectRequest, createRole as createRoleRequest, createSubproject as createSubprojectRequest, createReleasePackage, createUser as createUserRequest, decideApproval, deleteProject as deleteProjectRequest, deleteRole as deleteRoleRequest, exportBom, forceReleaseEditLock as forceReleaseEditLockRequest, generateMechanicalBom, getBomValidationRules, getCrmIntegrationSettings, getMyProfile, getOrganizationDirectory, getProjectNumberingOptions, getRolePermissionDirectory, getStorageStatus, getSystemSettings, importBom, listAudit, listBomBaselines, listBomVersions, listCustomers, listDocumentVersions, listDocumentWhereUsed, listEditLocks, listEquipmentTypes, listFolderTemplate, listMyApprovalTasks, listPasswordResetTasks, listProjectAudit, listProjects, listProjectVersions, loadProjectDocumentWorkspace, loadProjectWorkspace, login as apiLogin, obsoleteDocument as obsoleteDocumentRequest, PdmApiError, postDesktopMessage, readDocumentVersionFile, requestEditLockRelease as requestEditLockReleaseRequest, resetRequestedPassword as resetRequestedPasswordRequest, resetUserPassword as resetUserPasswordRequest, resolveBomItem as resolveBomItemRequest, restoreDocumentVersion, resumeSession as apiResumeSession, saveBom, saveEquipmentType as saveEquipmentTypeRequest, saveFolderTemplate as saveFolderTemplateRequest, saveOrganizationUnit as saveOrganizationUnitRequest, saveProjectOrganization as saveProjectOrganizationRequest, setBomEmptyDeclaration as setBomEmptyDeclarationRequest, submitReleasePackage, syncCrmCustomers as syncCrmCustomersRequest, testCrmIntegration as testCrmIntegrationRequest, updateChildProjectDesigners as updateChildProjectDesignersRequest, updateCrmIntegrationSettings as updateCrmIntegrationSettingsRequest, updateMainProjectStaffing as updateMainProjectStaffingRequest, updateMyProfile as updateMyProfileRequest, updateOrganizationCounters as updateOrganizationCountersRequest, updateOrganizationMemberships as updateOrganizationMembershipsRequest, updateOrganizationUnitManagers as updateOrganizationUnitManagersRequest, updateProject as updateProjectRequest, updateProjectExecutionUnit as updateProjectExecutionUnitRequest, updateProjectFolderPermissions as updateProjectFolderPermissionsRequest, updateRolePermissions as updateRolePermissionsRequest, updateSystemSettings as updateSystemSettingsRequest, updateUser as updateUserRequest, uploadReleaseFile, withdrawReleasePackage } from '../api'
+import { addDrawingReviewMarkup as addDrawingReviewMarkupRequest, createDrawingReview as createDrawingReviewRequest, decideDrawingReviewTarget as decideDrawingReviewTargetRequest, listDrawingReviews, resolveDrawingReviewMarkup as resolveDrawingReviewMarkupRequest } from '../api'
+import { batchUpdateBomItems as batchUpdateBomItemsRequest, changeMyPassword as changeMyPasswordRequest, checkHealth, compareDocumentVersions, createProject as createProjectRequest, createRole as createRoleRequest, createSubproject as createSubprojectRequest, createReleasePackage, createUser as createUserRequest, decideApproval, deleteProject as deleteProjectRequest, deleteRole as deleteRoleRequest, emergencyDecideApproval, exportBom, forceReleaseEditLock as forceReleaseEditLockRequest, generateMechanicalBom, getBomValidationRules, getCrmIntegrationSettings, getMyProfile, getOrganizationDirectory, getProjectNumberingOptions, getRolePermissionDirectory, getStorageStatus, getSystemSettings, importBom, listAudit, listBomBaselines, listBomVersions, listCustomers, listDocumentVersions, listDocumentWhereUsed, listEditLocks, listEquipmentTypes, listFolderTemplate, listMyApprovalTasks, listPasswordResetTasks, listProjectAudit, listProjects, listProjectVersions, loadProjectDocumentWorkspace, loadProjectWorkspace, login as apiLogin, obsoleteDocument as obsoleteDocumentRequest, PdmApiError, postDesktopMessage, readDocumentVersionFile, requestEditLockRelease as requestEditLockReleaseRequest, resetRequestedPassword as resetRequestedPasswordRequest, resetUserPassword as resetUserPasswordRequest, resolveBomItem as resolveBomItemRequest, restoreDocumentVersion, resumeSession as apiResumeSession, saveBom, saveEquipmentType as saveEquipmentTypeRequest, saveFolderTemplate as saveFolderTemplateRequest, saveOrganizationUnit as saveOrganizationUnitRequest, saveProjectOrganization as saveProjectOrganizationRequest, setBomEmptyDeclaration as setBomEmptyDeclarationRequest, submitReleasePackage, syncCrmCustomers as syncCrmCustomersRequest, testCrmIntegration as testCrmIntegrationRequest, updateChildProjectDesigners as updateChildProjectDesignersRequest, updateCrmIntegrationSettings as updateCrmIntegrationSettingsRequest, updateMainProjectStaffing as updateMainProjectStaffingRequest, updateMyProfile as updateMyProfileRequest, updateOrganizationCounters as updateOrganizationCountersRequest, updateOrganizationMemberships as updateOrganizationMembershipsRequest, updateOrganizationUnitManagers as updateOrganizationUnitManagersRequest, updateProject as updateProjectRequest, updateProjectExecutionUnit as updateProjectExecutionUnitRequest, updateProjectFolderPermissions as updateProjectFolderPermissionsRequest, updateRolePermissions as updateRolePermissionsRequest, updateSystemSettings as updateSystemSettingsRequest, updateUser as updateUserRequest, uploadReleaseFile, withdrawReleasePackage } from '../api'
 import type { AuthSession } from '../api'
-import type { AuditEntry, BatchUpdateBomItemsInput, BomEmptyDeclaration, BomGenerationResult, BomItem, BomKind, BomVersion, CreateProjectInput, CreateRoleInput, CreateSubprojectInput, CrmConnectionTestResult, CrmCustomerSyncResult, CrmIntegrationSettings, DocumentFilter, DocumentModelDrawingRelation, DocumentNode, DocumentVersionComparison, DocumentVersionSummary, DocumentWhereUsed, EditLockSummary, EquipmentTypeDefinition, FolderPermissionRule, MainProjectStaffingInput, ManagedDocument, ManufacturingBomBaseline, MyApprovalTask, OrganizationDirectory, PasswordResetTask, PdmCustomer, PdmSystemSettings, PdmUser, PdmUserProfile, ProjectFolder, ProjectFolderTemplateNode, ProjectNumberingOptions, ProjectSummary, ProjectVersionItem, ReleasePackageSummary, RolePermissionDirectory, SaveOrganizationUnitInput, SavePdmUserInput, SaveProjectOrganizationInput, SolidWorksOpenMode, UpdateCrmIntegrationInput, UpdateProjectInput } from '../types'
+import type { AuditEntry, BatchUpdateBomItemsInput, BomEmptyDeclaration, BomGenerationResult, BomItem, BomKind, BomVersion, CreateProjectInput, CreateReleasePackageInput, CreateRoleInput, CreateSubprojectInput, CrmConnectionTestResult, CrmCustomerSyncResult, CrmIntegrationSettings, DocumentFilter, DocumentModelDrawingRelation, DocumentNode, DocumentVersionComparison, DocumentVersionSummary, DocumentWhereUsed, EditLockSummary, EquipmentTypeDefinition, FolderPermissionRule, MainProjectStaffingInput, ManagedDocument, ManufacturingBomBaseline, MaterialCodeApplication, MyApprovalTask, OrganizationDirectory, PasswordResetTask, PdmCustomer, PdmSystemSettings, PdmUser, PdmUserProfile, ProjectFolder, ProjectFolderTemplateNode, ProjectNumberingOptions, ProjectSummary, ProjectVersionItem, ReleasePackageSummary, RolePermissionDirectory, SaveOrganizationUnitInput, SavePdmUserInput, SaveProjectOrganizationInput, SolidWorksOpenMode, UpdateCrmIntegrationInput, UpdateProjectInput } from '../types'
+import type { AddDrawingReviewMarkupInput, DrawingReviewDecision, DrawingReviewPackage, DrawingReviewTarget } from '../types'
 
 const sessionKey = 'upton-pdm-session'
 const fallbackBomPropertyMappings: PdmSystemSettings['bomPropertyMappings'] = [
@@ -40,7 +43,7 @@ function bomPropertyMappingsFromLegacy(settings: PdmSystemSettings) {
     solidWorksProperty: mapping.mappingEditable ? values[mapping.pdmPropertyKey] ?? mapping.solidWorksProperty : mapping.solidWorksProperty,
   }))
 }
-const defaultSystemSettings: PdmSystemSettings = { vaultRoot: '', releaseRoot: '', checkoutHeartbeatSeconds: 180, checkoutLeaseMinutes: 15, checkoutOfflineGraceMinutes: 60, checkoutReminderHours: 4, checkoutStrongReminderHours: 8, checkoutOverdueHours: 24, checkoutForceReleaseHours: 48, bomDrawingNumberProperty: '物料编码', bomNameProperty: '物料名称', bomDescriptionProperty: '备注信息', bomMaterialProperty: '材质', bomSpecificationProperty: '型号', bomUnitProperty: '单位', bomBrandProperty: '品牌', bomSurfaceTreatmentProperty: '表面处理', bomWeightProperty: '重量', bomPropertyMappings: fallbackBomPropertyMappings.map(mapping => ({ ...mapping })), validationRules: { standard: ['drawingNumber', 'name', 'unit', 'specification', 'quantity', 'revision'], nonStandard: ['drawingNumber', 'name', 'unit', 'material', 'quantity', 'revision'], electrical: ['drawingNumber', 'name', 'unit', 'quantity', 'revision'], } }
+const defaultSystemSettings: PdmSystemSettings = { vaultRoot: '', releaseRoot: '', checkoutHeartbeatSeconds: 180, checkoutLeaseMinutes: 15, checkoutOfflineGraceMinutes: 60, checkoutReminderHours: 4, checkoutStrongReminderHours: 8, checkoutOverdueHours: 24, checkoutForceReleaseHours: 48, bomDrawingNumberProperty: '物料编码', bomNameProperty: '物料名称', bomDescriptionProperty: '备注信息', bomMaterialProperty: '材质', bomSpecificationProperty: '型号', bomUnitProperty: '单位', bomBrandProperty: '品牌', bomSurfaceTreatmentProperty: '表面处理', bomWeightProperty: '重量', bomPropertyMappings: fallbackBomPropertyMappings.map(mapping => ({ ...mapping })), validationRules: { standard: ['drawingNumber', 'name', 'unit', 'specification', 'quantity', 'revision'], nonStandard: ['drawingNumber', 'name', 'unit', 'material', 'quantity', 'revision'], electrical: ['drawingNumber', 'name', 'unit', 'quantity', 'revision'], }, approvalWorkflows: { mechanical: { code: 'mechanical-release', name: '机械发布审批', version: 1, steps: [{ stage: 'MechanicalEngineer', name: '机械工程师自检', assigneeSource: 'Submitter' }, { stage: 'MainDesigner', name: '主设审核', assigneeSource: 'ProjectDesignLead' }, { stage: 'MechanicalSupervisor', name: '机械主管批准', assigneeSource: 'PrimaryUnitManager' }] }, electrical: { code: 'electrical-release', name: '电气发布审批', version: 1, steps: [{ stage: 'HardwareEngineer', name: '硬件工程师自检', assigneeSource: 'Submitter' }, { stage: 'HardwareSupervisor', name: '硬件主管审核', assigneeSource: 'PrimaryUnitManager' }, { stage: 'StandardizationSupervisor', name: '标准化主管批准', assigneeSource: 'ParentUnitManager' }] }, emergencySubstituteRoleCode: 'BusinessUnitManager' }, releaseChangeReasonTypes: ['设计变更', '客户需求', '物料替代', '质量整改', '生产反馈', '其他'] }
 const defaultCrmIntegrationSettings: CrmIntegrationSettings = { baseUrl: '', username: '', passwordConfigured: false, autoSyncEnabled: false, autoSyncIntervalMinutes: 60, lastSyncAt: null, lastSyncCount: 0, lastAutoSyncAttemptAt: null, lastAutoSyncError: null }
 
 export function formatBomGenerationConfirmation(preview: BomGenerationResult): string {
@@ -55,6 +58,26 @@ export function formatBomGenerationConfirmation(preview: BomGenerationResult): s
     '',
     '待处理项不会静默删除，并会阻止发布。是否应用本次更新？',
   ].join('\n')
+}
+
+export async function confirmBomGeneration(preview: BomGenerationResult): Promise<boolean> {
+  try {
+    await ElMessageBox.confirm(
+      formatBomGenerationConfirmation(preview),
+      '确认重新对账',
+      {
+        confirmButtonText: '确认更新',
+        cancelButtonText: '取消',
+        type: 'warning',
+        closeOnClickModal: false,
+        customClass: 'pdm-bom-generation-confirm',
+      },
+    )
+    return true
+  } catch (error) {
+    if (error === 'cancel' || error === 'close') return false
+    throw error
+  }
 }
 
 const emptyProject: ProjectSummary = {
@@ -170,7 +193,7 @@ function countUniqueIssues(root: DocumentNode) {
 }
 
 function messageFrom(error: unknown): string {
-  return error instanceof Error ? error.message : 'PDM数据加载失败。'
+  return error instanceof Error ? error.message : 'PLM数据加载失败。'
 }
 
 export function usePdmWorkspace() {
@@ -198,7 +221,10 @@ export function usePdmWorkspace() {
   const bomEmptyDeclarations = ref<BomEmptyDeclaration[]>([])
   const bomVersions = ref<BomVersion[]>([])
   const bomBaselines = ref<ManufacturingBomBaseline[]>([])
-  const releasePackage = ref<ReleasePackageSummary | null>(null)
+  const drawingReviews = ref<DrawingReviewPackage[]>([])
+  const materialCodeApplications = ref<MaterialCodeApplication[]>([])
+  const releasePackages = ref<ReleasePackageSummary[]>([])
+  const releasePackage = computed(() => releasePackages.value[0] ?? null)
   const selectedId = ref('')
   const searchQuery = ref('')
   const documentFilter = ref<DocumentFilter>('all')
@@ -208,6 +234,11 @@ export function usePdmWorkspace() {
   const currentUsername = ref('')
   const currentRole = ref('')
   const currentPermissions = ref<string[]>([])
+  const primaryCompanyId = ref('')
+  const activeCompanyId = ref('')
+  const activeCompanyName = ref('')
+  const crossCompanyView = ref(false)
+  const accessibleCompanies = ref<AuthSession['accessibleCompanies']>([])
   const currentProfile = ref<PdmUserProfile | null>(null)
   const loginPending = ref(false)
   const loginError = ref('')
@@ -298,7 +329,7 @@ export function usePdmWorkspace() {
   const normalCount = computed(() => ready.value && hasDocuments.value
     ? Math.max(0, documentFilterCounts.value.all - warningCount.value)
     : 0)
-  const hasPermission = (code: string) => currentPermissions.value.includes(code)
+  const hasPermission = (code: string) => currentRole.value === 'Administrator' || currentPermissions.value.includes(code)
 
   function selectNode(node: DocumentNode) {
     selectedId.value = node.id
@@ -352,7 +383,9 @@ export function usePdmWorkspace() {
     bomEmptyDeclarations.value = []
     bomVersions.value = []
     bomBaselines.value = []
-    releasePackage.value = null
+    drawingReviews.value = []
+    materialCodeApplications.value = []
+    releasePackages.value = []
     selectedId.value = ''
     searchQuery.value = ''
     documentFilter.value = 'all'
@@ -375,7 +408,7 @@ export function usePdmWorkspace() {
     const documentId = selectedDocumentId.value
     if (!documentId) {
       versions.value = []
-      versionError.value = '该引用尚未登记到PDM，暂无版本记录。'
+      versionError.value = '该引用尚未登记到PLM，暂无版本记录。'
       versionLoading.value = false
       return
     }
@@ -409,7 +442,7 @@ export function usePdmWorkspace() {
 
   async function openVersionFile(versionId: string, download: boolean) {
     const documentId = selectedDocumentId.value
-    if (!documentId) throw new Error('该引用尚未登记到PDM。')
+    if (!documentId) throw new Error('该引用尚未登记到PLM。')
     const blob = await readDocumentVersionFile(documentId, versionId, accessToken, download)
     const url = URL.createObjectURL(blob)
     if (download) {
@@ -425,7 +458,7 @@ export function usePdmWorkspace() {
 
   async function restoreVersion(versionId: string, changeNote: string) {
     const documentId = selectedDocumentId.value
-    if (!documentId) throw new Error('该引用尚未登记到PDM。')
+    if (!documentId) throw new Error('该引用尚未登记到PLM。')
     await restoreDocumentVersion(documentId, versionId, changeNote, accessToken)
     await Promise.all([reload(), openVersionDrawer(undefined, undefined)])
   }
@@ -435,7 +468,7 @@ export function usePdmWorkspace() {
     postDesktopMessage('open-document', { projectId: project.value.id, documentId: node.documentId, fileName: node.fileName, mode, versionId })
   }
 
-  function previewDocument(node = selectedNode.value) {
+  function previewDocument(node = selectedNode.value, versionId?: string, revision?: string) {
     if (!node.documentId) return
     const bomItem = bomItemForNode(node)
     const lifecycleState = typeof node.lifecycleState === 'number'
@@ -443,15 +476,16 @@ export function usePdmWorkspace() {
       : ({ Work: '工作中', InReview: '审批中', Released: '已发布', Obsolete: '已作废' } as Record<string, string>)[node.lifecycleState ?? ''] ?? node.lifecycleState ?? '工作中'
     postDesktopMessage('preview-document', {
       documentId: node.documentId,
+      versionId,
       fileName: node.fileName,
-      revision: node.version,
+      revision: revision ?? node.version,
       drawingNumber: node.drawingNumber,
       name: node.name,
       specification: bomItem?.specification ?? '',
       material: bomItem?.material ?? '',
       brand: bomItem?.brand ?? '',
       surfaceTreatment: bomItem?.surfaceTreatment ?? '',
-      status: lifecycleState,
+      status: versionId ? '图纸审核冻结版本' : lifecycleState,
     })
   }
 
@@ -504,12 +538,12 @@ export function usePdmWorkspace() {
     window.setTimeout(() => URL.revokeObjectURL(url), 10_000)
   }
 
-  async function generateBomFromDrawings(): Promise<BomGenerationResult> {
+  async function generateBomFromDrawings(): Promise<BomGenerationResult | null> {
     operationPending.value = true
     try {
       const preview = await generateMechanicalBom(project.value.id, false, accessToken)
-      const confirmed = window.confirm(formatBomGenerationConfirmation(preview))
-      if (!confirmed) return preview
+      const confirmed = await confirmBomGeneration(preview)
+      if (!confirmed) return null
       const result = await generateMechanicalBom(project.value.id, true, accessToken)
       standardBom.value = result.standardItems
       nonStandardBom.value = result.nonStandardItems
@@ -609,29 +643,67 @@ export function usePdmWorkspace() {
     bomBaselines.value = loadedBaselines
   }
 
-  async function createPackage(
-    number: string,
-    changeNumber: string,
-    changeReason: string,
-    effectiveSerialFrom: string,
-    effectiveSerialTo: string,
-    processReviewer: string,
-    approver: string,
-  ) {
+  function replaceDrawingReview(updated: DrawingReviewPackage) {
+    const index = drawingReviews.value.findIndex(item => item.id === updated.id)
+    drawingReviews.value = index < 0
+      ? [updated, ...drawingReviews.value]
+      : drawingReviews.value.map(item => item.id === updated.id ? updated : item)
+  }
+
+  async function refreshDrawingReviews() {
+    if (!project.value.id) return
+    drawingReviews.value = await listDrawingReviews(project.value.id, accessToken)
+  }
+
+  async function createDrawingReview() {
     operationPending.value = true
     operationError.value = ''
     try {
-      await createReleasePackage(
-        project.value.id,
-        number,
-        changeNumber,
-        changeReason,
-        effectiveSerialFrom,
-        effectiveSerialTo,
-        processReviewer,
-        approver,
-        accessToken,
-      )
+      replaceDrawingReview(await createDrawingReviewRequest(project.value.id, accessToken))
+    } catch (error) {
+      operationError.value = messageFrom(error)
+      throw error
+    } finally { operationPending.value = false }
+  }
+
+  async function addDrawingReviewMarkup(packageId: string, input: AddDrawingReviewMarkupInput) {
+    operationPending.value = true
+    operationError.value = ''
+    try {
+      replaceDrawingReview(await addDrawingReviewMarkupRequest(packageId, input, accessToken))
+    } catch (error) {
+      operationError.value = messageFrom(error)
+      throw error
+    } finally { operationPending.value = false }
+  }
+
+  async function resolveDrawingReviewMarkup(packageId: string, markupId: string) {
+    operationPending.value = true
+    operationError.value = ''
+    try {
+      replaceDrawingReview(await resolveDrawingReviewMarkupRequest(packageId, markupId, accessToken))
+    } catch (error) {
+      operationError.value = messageFrom(error)
+      throw error
+    } finally { operationPending.value = false }
+  }
+
+  async function decideDrawingReviewTarget(packageId: string, itemId: string, target: DrawingReviewTarget, decision: DrawingReviewDecision, comment: string) {
+    operationPending.value = true
+    operationError.value = ''
+    try {
+      replaceDrawingReview(await decideDrawingReviewTargetRequest(packageId, itemId, target, decision, comment, accessToken))
+    } catch (error) {
+      operationError.value = messageFrom(error)
+      throw error
+    } finally { operationPending.value = false }
+  }
+
+  async function createPackage(input: CreateReleasePackageInput) {
+    operationPending.value = true
+    operationError.value = ''
+    try {
+      await createReleasePackage(project.value.id, input, accessToken)
       await reload()
     } catch (error) {
       operationError.value = messageFrom(error)
@@ -641,13 +713,26 @@ export function usePdmWorkspace() {
     }
   }
 
-  async function uploadPackageFile(file: File) {
-    if (!releasePackage.value) throw new Error('请先创建发布包。')
+  async function emergencyDecideApprovalTask(taskId: string, decision: 'Approved' | 'Rejected', reason: string) {
+    operationPending.value = true
+    operationError.value = ''
+    try {
+      await emergencyDecideApproval(taskId, decision, reason, accessToken)
+      await reload()
+    } catch (error) {
+      operationError.value = messageFrom(error)
+      throw error
+    } finally { operationPending.value = false }
+  }
+
+  async function uploadPackageFile(releasePackageId: string, file: File) {
+    const targetPackage = releasePackages.value.find(item => item.id === releasePackageId)
+    if (!targetPackage) throw new Error('发布包不存在，请刷新后重试。')
     operationPending.value = true
     operationError.value = ''
     uploadProgress.value = 0
     try {
-      await uploadReleaseFile(project.value.id, releasePackage.value.number, file, accessToken, value => { uploadProgress.value = value })
+      await uploadReleaseFile(project.value.id, targetPackage.number, file, accessToken, value => { uploadProgress.value = value })
     } catch (error) {
       operationError.value = messageFrom(error)
       throw error
@@ -656,12 +741,11 @@ export function usePdmWorkspace() {
     }
   }
 
-  async function submitPackage() {
-    if (!releasePackage.value) throw new Error('当前没有发布包。')
+  async function submitPackage(releasePackageId: string) {
     operationPending.value = true
     operationError.value = ''
     try {
-      await submitReleasePackage(releasePackage.value.id, accessToken)
+      await submitReleasePackage(releasePackageId, accessToken)
       await reload()
     } catch (error) {
       operationError.value = messageFrom(error)
@@ -671,12 +755,11 @@ export function usePdmWorkspace() {
     }
   }
 
-  async function withdrawPackage(comment: string) {
-    if (!releasePackage.value) throw new Error('当前没有发布包。')
+  async function withdrawPackage(releasePackageId: string, comment: string) {
     operationPending.value = true
     operationError.value = ''
     try {
-      await withdrawReleasePackage(releasePackage.value.id, comment, accessToken)
+      await withdrawReleasePackage(releasePackageId, comment, accessToken)
       await reload()
     } catch (error) {
       operationError.value = messageFrom(error)
@@ -693,7 +776,7 @@ export function usePdmWorkspace() {
     whereUsed.value = []
     try {
       const documentId = selectedDocumentId.value
-      if (!documentId) throw new Error('该引用尚未登记到PDM。')
+      if (!documentId) throw new Error('该引用尚未登记到PLM。')
       whereUsed.value = await listDocumentWhereUsed(documentId, accessToken)
     } catch (error) {
       whereUsedError.value = messageFrom(error)
@@ -704,7 +787,7 @@ export function usePdmWorkspace() {
 
   async function obsoleteSelectedDocument(comment: string) {
     const documentId = selectedDocumentId.value
-    if (!documentId) throw new Error('该引用尚未登记到PDM。')
+    if (!documentId) throw new Error('该引用尚未登记到PLM。')
     operationPending.value = true
     try {
       await obsoleteDocumentRequest(documentId, comment, accessToken)
@@ -755,7 +838,7 @@ export function usePdmWorkspace() {
   }
 
   async function requestPasswordResetTasks() {
-    return currentRole.value === 'Administrator' ? listPasswordResetTasks(accessToken) : []
+    return ['Administrator', 'platform_admin', 'developer'].includes(currentRole.value) ? listPasswordResetTasks(accessToken) : []
   }
 
   async function resetRequestedPassword(taskId: string) {
@@ -811,12 +894,18 @@ export function usePdmWorkspace() {
   function applySession(session: AuthSession) {
     persistentSession = session
     accessToken = session.accessToken
-    postDesktopMessage('session-ready', { accessToken: session.accessToken })
+    postDesktopMessage('session-ready', { accessToken: session.accessToken, activeCompanyId: session.activeCompanyId })
     authenticated.value = true
     currentUser.value = session.displayName || session.username
     currentUsername.value = session.username
     currentRole.value = session.role
     currentPermissions.value = session.permissions ?? []
+    primaryCompanyId.value = session.primaryCompanyId ?? ''
+    activeCompanyId.value = session.activeCompanyId ?? session.primaryCompanyId ?? ''
+    activeCompanyName.value = session.activeCompanyName ?? ''
+    crossCompanyView.value = session.crossCompanyView ?? false
+    accessibleCompanies.value = session.accessibleCompanies ?? []
+    if (activeCompanyId.value) window.localStorage.setItem('pdm_active_organization', activeCompanyId.value)
     if (currentProfile.value?.username !== session.username) {
       currentProfile.value = { username: session.username, displayName: session.displayName || session.username, gender: 'unspecified' }
     }
@@ -833,6 +922,11 @@ export function usePdmWorkspace() {
     currentUsername.value = ''
     currentRole.value = ''
     currentPermissions.value = []
+    primaryCompanyId.value = ''
+    activeCompanyId.value = ''
+    activeCompanyName.value = ''
+    crossCompanyView.value = false
+    accessibleCompanies.value = []
     currentProfile.value = null
     ready.value = false
     projects.value = []
@@ -886,6 +980,21 @@ export function usePdmWorkspace() {
       }
     })()
     return sessionRenewal
+  }
+
+  function switchCompany(companyId: string) {
+    const company = accessibleCompanies.value.find(item => item.id === companyId)
+    if (!company || companyId === activeCompanyId.value) return
+    activeCompanyId.value = companyId
+    activeCompanyName.value = company.name
+    if (persistentSession) {
+      persistentSession = { ...persistentSession, activeCompanyId: companyId, activeCompanyName: company.name }
+      window.localStorage.setItem(sessionKey, JSON.stringify(persistentSession))
+      window.sessionStorage.removeItem(sessionKey)
+    }
+    window.localStorage.setItem('pdm_active_organization', companyId)
+    postDesktopMessage('session-ready', { accessToken, activeCompanyId: companyId })
+    window.location.reload()
   }
 
   async function reload(projectId?: string) {
@@ -958,7 +1067,9 @@ export function usePdmWorkspace() {
       bomEmptyDeclarations.value = data.bomEmptyDeclarations
       bomVersions.value = data.bomVersions
       bomBaselines.value = data.bomBaselines
-      releasePackage.value = data.releasePackage
+      drawingReviews.value = data.drawingReviews
+      materialCodeApplications.value = data.materialCodeApplications
+      releasePackages.value = data.releasePackages ?? (data.releasePackage ? [data.releasePackage] : [])
       const selectedStillExists = previousSelectedId
         && (findNode(data.root, previousSelectedId)
           || data.documents.some(document => `document-${document.id}` === previousSelectedId))
@@ -1418,6 +1529,7 @@ export function usePdmWorkspace() {
     documentRelations,
     folderTemplate,
     root,
+    releasePackages,
     releasePackage,
     standardBom,
     nonStandardBom,
@@ -1428,6 +1540,8 @@ export function usePdmWorkspace() {
     bomEmptyDeclarations,
     bomVersions,
     bomBaselines,
+    drawingReviews,
+    materialCodeApplications,
     selectedNode,
     selectedBomItem,
     filteredTree,
@@ -1442,8 +1556,14 @@ export function usePdmWorkspace() {
     currentUsername,
     currentRole,
     currentPermissions,
+    primaryCompanyId,
+    activeCompanyId,
+    activeCompanyName,
+    crossCompanyView,
+    accessibleCompanies,
     currentProfile,
     hasPermission,
+    switchCompany,
     loginPending,
     loginError,
     loading,
@@ -1521,6 +1641,11 @@ export function usePdmWorkspace() {
     batchRestoreBomItems,
     restoreBomItemsFromSource,
     setBomCategoryEmpty,
+    refreshDrawingReviews,
+    createDrawingReview,
+    addDrawingReviewMarkup,
+    resolveDrawingReviewMarkup,
+    decideDrawingReviewTarget,
     createPackage,
     uploadPackageFile,
     submitPackage,
@@ -1528,6 +1653,7 @@ export function usePdmWorkspace() {
     openWhereUsed,
     obsoleteSelectedDocument,
     decideApprovalTask,
+    emergencyDecideApprovalTask,
     loadAuditEntries,
     loadMyApprovalTasks,
     requestEditLockRelease,

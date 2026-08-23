@@ -1,3 +1,5 @@
+using System.Text.Json.Serialization;
+
 namespace Upton.Pdm.Domain;
 
 public sealed record Project(
@@ -33,7 +35,11 @@ public sealed record Project(
 
     public Guid? ParentProjectId { get; init; }
 
+    public Guid? RootProjectId { get; init; }
+
     public int? ChildSequence { get; init; }
+
+    public string? BomItemCategoryCode { get; init; }
 
     public IReadOnlyList<string> SerialNumbers { get; init; } = [];
 
@@ -60,6 +66,10 @@ public sealed record Project(
     public bool CanReadContent { get; init; }
 
     public int? DocumentCount { get; init; }
+
+    public int? ModelDocumentCount { get; init; }
+
+    public int? DrawingDocumentCount { get; init; }
 
     public string? BusinessStatus { get; init; }
 
@@ -90,6 +100,9 @@ public sealed record PdmCustomer(
 
 public sealed record PdmSystemSettings(string VaultRoot, string ReleaseRoot)
 {
+    public static IReadOnlyList<string> DefaultReleaseChangeReasonTypes { get; } =
+        ["设计变更", "客户需求", "物料替代", "质量整改", "生产反馈", "其他"];
+
     public int CheckoutHeartbeatSeconds { get; init; } = 180;
 
     public int CheckoutLeaseMinutes { get; init; } = 15;
@@ -125,6 +138,89 @@ public sealed record PdmSystemSettings(string VaultRoot, string ReleaseRoot)
     public IReadOnlyList<BomPropertyMapping> BomPropertyMappings { get; init; } = Array.Empty<BomPropertyMapping>();
 
     public BomValidationRules ValidationRules { get; init; } = BomValidationRules.Default;
+
+    public ReleaseApprovalSettings ApprovalWorkflows { get; init; } = ReleaseApprovalSettings.Default;
+
+    public MaterialCodeApprovalSettings MaterialCodeApproval { get; init; } = MaterialCodeApprovalSettings.Default;
+
+    public IReadOnlyList<string> ReleaseChangeReasonTypes { get; init; } = DefaultReleaseChangeReasonTypes;
+}
+
+public sealed record MaterialCodeApprovalSettings(int Version, IReadOnlyList<string> ApproverRoleCodes)
+{
+    public static MaterialCodeApprovalSettings Default { get; } = new(1, [UserRole.ProcessReviewer.ToString(), UserRole.Approver.ToString()]);
+}
+
+public sealed record ApprovalWorkflowStepTemplate(
+    [property: JsonConverter(typeof(JsonStringEnumConverter))] ApprovalStage Stage,
+    string Name,
+    [property: JsonConverter(typeof(JsonStringEnumConverter))] ApprovalAssigneeSource AssigneeSource,
+    string? FixedAssignee = null);
+
+public sealed record ApprovalWorkflowTemplate(
+    string Code,
+    string Name,
+    int Version,
+    IReadOnlyList<ApprovalWorkflowStepTemplate> Steps);
+
+public sealed record ReleaseApprovalSettings(
+    ApprovalWorkflowTemplate Mechanical,
+    ApprovalWorkflowTemplate Electrical,
+    string EmergencySubstituteRoleCode)
+{
+    public static ReleaseApprovalSettings Default { get; } = new(
+        new ApprovalWorkflowTemplate(
+            "mechanical-release",
+            "机械发布审批",
+            1,
+            [
+                new(ApprovalStage.MechanicalEngineer, "机械工程师自检", ApprovalAssigneeSource.Submitter),
+                new(ApprovalStage.MainDesigner, "主设审核", ApprovalAssigneeSource.ProjectDesignLead),
+                new(ApprovalStage.MechanicalSupervisor, "机械主管批准", ApprovalAssigneeSource.PrimaryUnitManager)
+            ]),
+        new ApprovalWorkflowTemplate(
+            "electrical-release",
+            "电气发布审批",
+            1,
+            [
+                new(ApprovalStage.HardwareEngineer, "硬件工程师自检", ApprovalAssigneeSource.Submitter),
+                new(ApprovalStage.HardwareSupervisor, "硬件主管审核", ApprovalAssigneeSource.PrimaryUnitManager),
+                new(ApprovalStage.StandardizationSupervisor, "标准化主管批准", ApprovalAssigneeSource.ParentUnitManager)
+            ]),
+        UserRole.BusinessUnitManager.ToString());
+
+    public static ReleaseApprovalSettings UseOrganizationHierarchy(ReleaseApprovalSettings? settings)
+    {
+        settings ??= Default;
+
+        static ApprovalWorkflowTemplate Upgrade(
+            ApprovalWorkflowTemplate template,
+            IReadOnlyDictionary<ApprovalStage, ApprovalAssigneeSource> sources)
+        {
+            var changed = false;
+            var steps = template.Steps.Select(step =>
+            {
+                if (!sources.TryGetValue(step.Stage, out var source) || step.AssigneeSource == source)
+                    return step;
+                changed = true;
+                return step with { AssigneeSource = source, FixedAssignee = null };
+            }).ToArray();
+            return changed ? template with { Version = template.Version + 1, Steps = steps } : template;
+        }
+
+        return settings with
+        {
+            Mechanical = Upgrade(settings.Mechanical, new Dictionary<ApprovalStage, ApprovalAssigneeSource>
+            {
+                [ApprovalStage.MechanicalSupervisor] = ApprovalAssigneeSource.PrimaryUnitManager
+            }),
+            Electrical = Upgrade(settings.Electrical, new Dictionary<ApprovalStage, ApprovalAssigneeSource>
+            {
+                [ApprovalStage.HardwareSupervisor] = ApprovalAssigneeSource.PrimaryUnitManager,
+                [ApprovalStage.StandardizationSupervisor] = ApprovalAssigneeSource.ParentUnitManager
+            })
+        };
+    }
 }
 
 public sealed record ProjectNumberingOptions(
@@ -146,7 +242,15 @@ public sealed record OrganizationMembership(Guid UnitId, string Username, bool I
 
 public sealed record OrganizationUnitManagers(Guid UnitId, string PrimaryManager, IReadOnlyList<string> CollaborativeManagers);
 
-public sealed record OrganizationDirectoryUser(string Username, string DisplayName, UserRole Role, bool IsActive, string? RoleCode = null)
+public sealed record OrganizationDirectoryUser(
+    string Username,
+    string DisplayName,
+    UserRole Role,
+    bool IsActive,
+    string? RoleCode = null,
+    Guid? CompanyId = null,
+    bool CrossCompanyView = false,
+    IReadOnlyList<Guid>? AccessibleCompanyIds = null)
 {
     public string EffectiveRoleCode => string.IsNullOrWhiteSpace(RoleCode) ? Role.ToString() : RoleCode;
 }
@@ -332,6 +436,10 @@ public sealed record BomItem(
 
     public string? SourceConfiguration { get; init; }
 
+    public string? SourceInstancePath { get; init; }
+
+    public string? ParentDrawingNumber { get; init; }
+
     public string Source { get; init; } = "Manual";
 
     public bool IsManuallyOverridden { get; init; }
@@ -365,6 +473,15 @@ public sealed record BomItem(
 
 public sealed record BomEmptyDeclaration(BomKind Kind, bool DeclaredEmpty, string? UpdatedBy, DateTimeOffset? UpdatedAt);
 
+public sealed record ProjectBomHeaderBinding(
+    Guid ProjectId,
+    ProjectBomHeaderKind Kind,
+    ProjectBomHeaderKind? ParentKind,
+    Guid MaterialId,
+    string UpdatedBy,
+    DateTimeOffset UpdatedAt,
+    long RowVersion);
+
 public sealed record BomVersion(
     Guid Id,
     Guid ProjectId,
@@ -385,6 +502,8 @@ public sealed record BomVersion(
     DateTimeOffset? ReleasedAt)
 {
     public IReadOnlyList<string> ValidationRequiredFields { get; init; } = [];
+
+    public Guid? MotherMaterialId { get; init; }
 }
 
 public sealed record ManufacturingBomBaseline(
@@ -433,7 +552,16 @@ public sealed record ApprovalTask(
     string? DecisionBy,
     ApprovalDecision? Decision,
     string? Comment,
-    DateTimeOffset? DecidedAt);
+    DateTimeOffset? DecidedAt)
+{
+    public int StepOrder { get; init; }
+
+    public string? StepName { get; init; }
+
+    public bool IsEmergencySubstitute { get; init; }
+
+    public string? EmergencyReason { get; init; }
+}
 
 public sealed record ReleasePackage(
     Guid Id,
@@ -475,6 +603,18 @@ public sealed record ReleasePackage(
     public IReadOnlyList<BomItem> ElectricalBomSnapshot { get; init; } = [];
 
     public string? PublishError { get; init; }
+
+    public ReleaseScope Scope { get; init; } = ReleaseScope.LegacyCombined;
+
+    public string? WorkflowCode { get; init; }
+
+    public int WorkflowVersion { get; init; }
+
+    public IReadOnlyList<Guid> SelectedBomItemIds { get; init; } = [];
+
+    public bool CreatesManufacturingBaseline { get; init; } = true;
+
+    public bool LocksDocuments { get; init; } = true;
 }
 
 public sealed record AuditEntry(

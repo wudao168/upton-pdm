@@ -23,4 +23,4 @@ if ($LASTEXITCODE -ne 0) {
     throw "SolidWorks add-in unregister failed. RegAsm exit code: $LASTEXITCODE"
 }
 
-Write-Host 'UPTON PDM SolidWorks add-in unregistered.'
+Write-Host 'UPLM SolidWorks add-in unregistered.'

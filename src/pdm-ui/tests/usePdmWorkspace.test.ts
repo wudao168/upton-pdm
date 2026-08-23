@@ -1,5 +1,6 @@
-import { describe, expect, it } from 'vitest'
-import { formatBomGenerationConfirmation } from '../src/composables/usePdmWorkspace'
+import { ElMessageBox } from 'element-plus'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import { confirmBomGeneration, formatBomGenerationConfirmation } from '../src/composables/usePdmWorkspace'
 import type { BomGenerationResult, BomItem } from '../src/types'
 
 describe('formatBomGenerationConfirmation', () => {
@@ -28,5 +29,44 @@ describe('formatBomGenerationConfirmation', () => {
       '',
       '待处理项不会静默删除，并会阻止发布。是否应用本次更新？',
     ])
+  })
+})
+
+describe('confirmBomGeneration', () => {
+  const preview: BomGenerationResult = {
+    standardItems: [],
+    nonStandardItems: [],
+    electricalItems: [],
+    unclassifiedItems: [],
+    virtualCount: 0,
+    unclassifiedCount: 0,
+    pendingRemovalCount: 0,
+    manualUnmatchedCount: 0,
+    applied: false,
+  }
+
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  it('uses the in-app confirmation dialog before applying the update', async () => {
+    const confirm = vi.spyOn(ElMessageBox, 'confirm').mockResolvedValue('confirm' as never)
+
+    await expect(confirmBomGeneration(preview)).resolves.toBe(true)
+    expect(confirm).toHaveBeenCalledWith(
+      formatBomGenerationConfirmation(preview),
+      '确认重新对账',
+      expect.objectContaining({
+        confirmButtonText: '确认更新',
+        cancelButtonText: '取消',
+        closeOnClickModal: false,
+      }),
+    )
+  })
+
+  it.each(['cancel', 'close'])('treats %s as an explicit cancellation', async action => {
+    vi.spyOn(ElMessageBox, 'confirm').mockRejectedValue(action)
+
+    await expect(confirmBomGeneration(preview)).resolves.toBe(false)
   })
 })

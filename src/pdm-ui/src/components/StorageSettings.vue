@@ -100,7 +100,7 @@ function mappingOptions(mapping: BomPropertyMapping) {
 
 function mappingSource(mapping: BomPropertyMapping) {
   if (mapping.source === 'Assembly') return '装配结构自动计算'
-  if (mapping.source === 'Pdm') return 'PDM受控版本'
+  if (mapping.source === 'Pdm') return 'PLM受控版本'
   return mapping.mappingEditable ? 'SolidWorks自定义属性' : 'SolidWorks固定属性'
 }
 
@@ -177,7 +177,7 @@ async function saveCounters(row: { id: string; project: number; serial: number }
       <el-tab-pane label="存档位置" name="storage">
         <section class="pdm-panel pdm-manager-panel">
           <header class="pdm-manager-heading"><div><h2>项目文件夹规则</h2><p>创建项目时不再填写路径，系统自动使用“根目录\项目号”。</p></div></header>
-          <div class="pdm-settings-form"><label>图档存档根目录<input v-model="storageDraft.vaultRoot" placeholder="例如 D:\PDM\Vault"><small>示例：{{ storageDraft.vaultRoot || '未设置' }}\P700001</small></label><label>生产发包根目录<input v-model="storageDraft.releaseRoot" placeholder="例如 D:\PDM\Release"><small>示例：{{ storageDraft.releaseRoot || '未设置' }}\P700001</small></label></div>
+          <div class="pdm-settings-form"><label>图档存档根目录<input v-model="storageDraft.vaultRoot" placeholder="例如 D:\PLM\Vault"><small>示例：{{ storageDraft.vaultRoot || '未设置' }}\P700001</small></label><label>生产发包根目录<input v-model="storageDraft.releaseRoot" placeholder="例如 D:\PLM\Release"><small>示例：{{ storageDraft.releaseRoot || '未设置' }}\P700001</small></label></div>
           <div class="pdm-settings-actions"><button type="button" class="pdm-primary-action" :disabled="pending" @click="saveStorage">保存存储设置</button></div>
         </section>
       </el-tab-pane>
@@ -204,10 +204,10 @@ async function saveCounters(row: { id: string; project: number; serial: number }
       </el-tab-pane>
       <el-tab-pane label="BOM属性映射" name="bom-properties">
         <section class="pdm-panel pdm-manager-panel">
-          <header class="pdm-manager-heading"><div><h2>SolidWorks属性对应关系</h2><p>列表由服务端的PDM属性目录自动生成；新增PDM属性后会自动出现新行，再由管理员选择对应的SolidWorks属性。配置属性优先于全局属性。</p></div></header>
+          <header class="pdm-manager-heading"><div><h2>SolidWorks属性对应关系</h2><p>列表由服务端的PLM属性目录自动生成；新增PLM属性后会自动出现新行，再由管理员选择对应的SolidWorks属性。配置属性优先于全局属性。</p></div></header>
           <div class="pdm-table-scroll pdm-property-mapping-table">
             <table class="pdm-project-table" aria-label="SolidWorks属性映射列表">
-              <thead><tr><th>PDM属性</th><th>数据来源</th><th>SolidWorks对应属性</th><th>规则</th></tr></thead>
+              <thead><tr><th>PLM属性</th><th>数据来源</th><th>SolidWorks对应属性</th><th>规则</th></tr></thead>
               <tbody>
                 <tr v-for="mapping in storageDraft.bomPropertyMappings" :key="mapping.pdmPropertyKey">
                   <td><strong>{{ mapping.pdmPropertyName }}</strong><small>{{ mapping.pdmPropertyKey }}</small></td>

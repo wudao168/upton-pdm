@@ -15,7 +15,7 @@ public sealed class MySqlMaterialRepository : IMaterialRepository
     public MySqlMaterialRepository(IOptions<PdmDatabaseOptions> options)
     {
         connectionString = options.Value.ConnectionString;
-        if (string.IsNullOrWhiteSpace(connectionString)) throw new InvalidOperationException("PDM MySQL连接字符串未配置。 ");
+        if (string.IsNullOrWhiteSpace(connectionString)) throw new InvalidOperationException("PLM MySQL连接字符串未配置。 ");
         DefaultTypeMap.MatchNamesWithUnderscores = true;
     }
 
@@ -56,6 +56,69 @@ public sealed class MySqlMaterialRepository : IMaterialRepository
             MaterialSelect + " WHERE source_bom_item_id=@BomItemId ORDER BY created_at LIMIT 1",
             new { BomItemId = bomItemId }, cancellationToken: cancellationToken));
         return row is null ? null : MapMaterial(row);
+    }
+
+    public async Task<IReadOnlyList<PdmMaterial>> FindApprovedMaterialsBySpecificationAsync(string specification, CancellationToken cancellationToken)
+    {
+        await using var connection = await OpenAsync(cancellationToken);
+        var rows = await connection.QueryAsync<MaterialRow>(new CommandDefinition(
+            MaterialSelect + " WHERE approval_status='Approved' AND is_archived=0 AND UPPER(TRIM(specification))=UPPER(@Specification) ORDER BY material_code",
+            new { Specification = specification.Trim() }, cancellationToken: cancellationToken));
+        return rows.Select(MapMaterial).ToArray();
+    }
+
+    public async Task<IReadOnlyList<PdmMaterial>> FindApprovedMaterialsByBrandAndSpecificationAsync(string brand, string specification, CancellationToken cancellationToken)
+    {
+        await using var connection = await OpenAsync(cancellationToken);
+        var rows = await connection.QueryAsync<MaterialRow>(new CommandDefinition(
+            MaterialSelect + " WHERE approval_status='Approved' AND is_archived=0 AND UPPER(TRIM(brand))=UPPER(@Brand) AND UPPER(TRIM(specification))=UPPER(@Specification) ORDER BY material_code",
+            new { Brand = brand.Trim(), Specification = specification.Trim() }, cancellationToken: cancellationToken));
+        return rows.Select(MapMaterial).ToArray();
+    }
+
+    public async Task<IReadOnlyList<MaterialCodeApplication>> ListMaterialCodeApplicationsAsync(Guid? projectId, MaterialCodeApplicationStatus? status, CancellationToken cancellationToken)
+    {
+        await using var connection = await OpenAsync(cancellationToken);
+        var rows = await connection.QueryAsync<MaterialCodeApplicationRow>(new CommandDefinition(
+            MaterialCodeApplicationSelect + " WHERE (@ProjectId IS NULL OR project_id=@ProjectId) AND (@Status IS NULL OR status=@Status) ORDER BY requested_at DESC",
+            new { ProjectId = projectId, Status = status?.ToString() }, cancellationToken: cancellationToken));
+        return rows.Select(MapMaterialCodeApplication).ToArray();
+    }
+
+    public async Task<MaterialCodeApplication?> FindMaterialCodeApplicationAsync(Guid applicationId, CancellationToken cancellationToken)
+    {
+        await using var connection = await OpenAsync(cancellationToken);
+        var row = await connection.QuerySingleOrDefaultAsync<MaterialCodeApplicationRow>(new CommandDefinition(
+            MaterialCodeApplicationSelect + " WHERE id=@ApplicationId", new { ApplicationId = applicationId }, cancellationToken: cancellationToken));
+        return row is null ? null : MapMaterialCodeApplication(row);
+    }
+
+    public async Task<MaterialCodeApplication?> FindPendingMaterialCodeApplicationByBomItemAsync(Guid bomItemId, CancellationToken cancellationToken)
+    {
+        await using var connection = await OpenAsync(cancellationToken);
+        var row = await connection.QueryFirstOrDefaultAsync<MaterialCodeApplicationRow>(new CommandDefinition(
+            MaterialCodeApplicationSelect + " WHERE bom_item_id=@BomItemId AND status='Pending' ORDER BY requested_at DESC LIMIT 1",
+            new { BomItemId = bomItemId }, cancellationToken: cancellationToken));
+        return row is null ? null : MapMaterialCodeApplication(row);
+    }
+
+    public async Task<MaterialCodeApplication> CreateMaterialCodeApplicationAsync(MaterialCodeApplication application, CancellationToken cancellationToken)
+    {
+        await using var connection = await OpenAsync(cancellationToken);
+        await connection.ExecuteAsync(new CommandDefinition(
+            "INSERT INTO material_code_application(id,project_id,bom_item_id,status,requested_by,requested_at,row_version) VALUES(@Id,@ProjectId,@BomItemId,@Status,@RequestedBy,@RequestedAt,@RowVersion)",
+            new { application.Id, application.ProjectId, application.BomItemId, Status = application.Status.ToString(), application.RequestedBy, RequestedAt = application.RequestedAt.UtcDateTime, application.RowVersion }, cancellationToken: cancellationToken));
+        return application;
+    }
+
+    public async Task<MaterialCodeApplication> DecideMaterialCodeApplicationAsync(Guid applicationId, long expectedRowVersion, MaterialCodeApplicationStatus status, string actor, string? comment, Guid? materialId, string? materialCode, DateTimeOffset decidedAt, CancellationToken cancellationToken)
+    {
+        await using var connection = await OpenAsync(cancellationToken);
+        var affected = await connection.ExecuteAsync(new CommandDefinition(
+            "UPDATE material_code_application SET status=@Status,decided_by=@Actor,decided_at=@DecidedAt,decision_comment=@Comment,material_id=@MaterialId,material_code=@MaterialCode,row_version=row_version+1 WHERE id=@ApplicationId AND status='Pending' AND row_version=@ExpectedRowVersion",
+            new { ApplicationId = applicationId, ExpectedRowVersion = expectedRowVersion, Status = status.ToString(), Actor = actor, DecidedAt = decidedAt.UtcDateTime, Comment = comment, MaterialId = materialId, MaterialCode = materialCode }, cancellationToken: cancellationToken));
+        if (affected != 1) throw new PdmConflictException("料号申请已由其他标准化人员处理，请刷新后重试。");
+        return await FindMaterialCodeApplicationAsync(applicationId, cancellationToken) ?? throw new PdmNotFoundException("料号申请不存在。");
     }
 
     public async Task<bool> HasMaterialReferencesAsync(Guid materialId, CancellationToken cancellationToken)
@@ -136,7 +199,7 @@ public sealed class MySqlMaterialRepository : IMaterialRepository
         }
         catch (MySqlException exception) when (exception.Number == 1062)
         {
-            throw new PdmConflictException("预留的PDM物料编码已被占用，请重试。");
+            throw new PdmConflictException("预留的PLM物料编码已被占用，请重试。");
         }
     }
 
@@ -162,6 +225,13 @@ public sealed class MySqlMaterialRepository : IMaterialRepository
                 supply_mode=IF(master_owner='U9C',VALUES(supply_mode),supply_mode),
                 unit_code=IF(master_owner='U9C',VALUES(unit_code),unit_code),
                 specification=IF(master_owner='U9C',VALUES(specification),specification),
+                material=IF(master_owner='U9C',VALUES(material),material),
+                remark=IF(master_owner='U9C',VALUES(remark),remark),
+                brand=IF(master_owner='U9C',VALUES(brand),brand),
+                surface_treatment=IF(master_owner='U9C',VALUES(surface_treatment),surface_treatment),
+                purchase_link=IF(master_owner='U9C',VALUES(purchase_link),purchase_link),
+                weight=IF(master_owner='U9C',VALUES(weight),weight),
+                weight_unit=IF(master_owner='U9C',VALUES(weight_unit),weight_unit),
                 u9_category_code=IF(master_owner='U9C',VALUES(u9_category_code),u9_category_code),
                 u9_item_id=IF(master_owner='U9C',VALUES(u9_item_id),u9_item_id),
                 u9_item_code=IF(master_owner='U9C',VALUES(u9_item_code),u9_item_code),
@@ -175,7 +245,7 @@ public sealed class MySqlMaterialRepository : IMaterialRepository
                 category_code=IF(master_owner='U9C',VALUES(category_code),category_code)
             """, MaterialParameters(material), cancellationToken: cancellationToken));
         return await FindMaterialByCodeAsync(material.MaterialCode, cancellationToken)
-            ?? throw new PdmRuleException("U9C料品导入后未能回读PDM主档。");
+            ?? throw new PdmRuleException("U9C料品导入后未能回读PLM主档。");
     }
 
     public async Task<PdmMaterial> UpdateMaterialAsync(PdmMaterial material, long expectedRowVersion, CancellationToken cancellationToken)
@@ -215,7 +285,7 @@ public sealed class MySqlMaterialRepository : IMaterialRepository
         }
         catch (MySqlException exception) when (exception.Number == 1062)
         {
-            throw new PdmConflictException("PDM物料编码已存在。");
+            throw new PdmConflictException("PLM物料编码已存在。");
         }
     }
 
@@ -320,7 +390,7 @@ public sealed class MySqlMaterialRepository : IMaterialRepository
             if (existing.RowVersion != expectedRowVersion)
                 throw new PdmConflictException("物料主档已被其他用户修改，请刷新后重试。");
             if (existing.SourceSystem != MaterialDataSource.Pdm || existing.MasterOwner != MaterialMasterOwner.Pdm)
-                throw new PdmRuleException("只有PDM来源且PDM主控的料品可以删除。");
+                throw new PdmRuleException("只有PLM来源且PLM主控的料品可以删除。");
             var referenced = await connection.QuerySingleAsync<int>(new CommandDefinition(
                 """
                 SELECT CASE WHEN EXISTS(SELECT 1 FROM bom_material_link WHERE material_id=@MaterialId)
@@ -362,6 +432,14 @@ public sealed class MySqlMaterialRepository : IMaterialRepository
             VALUES(@BomItemId,@MaterialId,@Actor,@LinkedAt)
             ON DUPLICATE KEY UPDATE material_id=VALUES(material_id),linked_by=VALUES(linked_by),linked_at=VALUES(linked_at)
             """, new { BomItemId = bomItemId, MaterialId = materialId, Actor = actor, LinkedAt = linkedAt.UtcDateTime }, cancellationToken: cancellationToken));
+    }
+
+    public async Task UnlinkBomItemAsync(Guid bomItemId, CancellationToken cancellationToken)
+    {
+        await using var connection = await OpenAsync(cancellationToken);
+        await connection.ExecuteAsync(new CommandDefinition(
+            "DELETE FROM bom_material_link WHERE bom_item_id=@BomItemId",
+            new { BomItemId = bomItemId }, cancellationToken: cancellationToken));
     }
 
     public async Task<IReadOnlyList<MaterialCategory>> ListCategoriesAsync(bool includeHidden, CancellationToken cancellationToken)
@@ -500,7 +578,7 @@ public sealed class MySqlMaterialRepository : IMaterialRepository
         }
         catch (MySqlException exception) when (exception.Number == 1062)
         {
-            throw new PdmConflictException("U9C料品分类编码已映射到其他PDM分类。");
+            throw new PdmConflictException("U9C料品分类编码已映射到其他PLM分类。");
         }
     }
 
@@ -774,6 +852,8 @@ public sealed class MySqlMaterialRepository : IMaterialRepository
             """
             SELECT base_url,enterprise_code,organization_code,user_code,client_id,client_secret_ciphertext,
                    item_create_path,item_query_path,item_modify_path,item_delete_path,unit_code_mapping_json,
+                   customer_query_path,bom_create_path,bom_query_path,bom_modify_path,bom_delete_path,
+                   bom_batch_unapprove_path,bom_bip_query_page_path,
                    write_enabled,updated_by,updated_at
             FROM u9_material_integration_setting WHERE id=1
             """, cancellationToken: cancellationToken));
@@ -789,6 +869,9 @@ public sealed class MySqlMaterialRepository : IMaterialRepository
             SET base_url=@BaseUrl,enterprise_code=@EnterpriseCode,organization_code=@OrganizationCode,user_code=@UserCode,
                 client_id=@ClientId,client_secret_ciphertext=@ClientSecretCiphertext,item_create_path=@ItemCreatePath,
                 item_query_path=@ItemQueryPath,item_modify_path=@ItemModifyPath,item_delete_path=@ItemDeletePath,
+                customer_query_path=@CustomerQueryPath,bom_create_path=@BomCreatePath,bom_query_path=@BomQueryPath,
+                bom_modify_path=@BomModifyPath,bom_delete_path=@BomDeletePath,
+                bom_batch_unapprove_path=@BomBatchUnapprovePath,bom_bip_query_page_path=@BomBipQueryPagePath,
                 unit_code_mapping_json=@UnitCodeMappingJson,write_enabled=@WriteEnabled,updated_by=@UpdatedBy,updated_at=@UpdatedAt
             WHERE id=1
             """, new
@@ -803,6 +886,13 @@ public sealed class MySqlMaterialRepository : IMaterialRepository
                 configuration.ItemQueryPath,
                 configuration.ItemModifyPath,
                 configuration.ItemDeletePath,
+                configuration.CustomerQueryPath,
+                configuration.BomCreatePath,
+                configuration.BomQueryPath,
+                configuration.BomModifyPath,
+                configuration.BomDeletePath,
+                configuration.BomBatchUnapprovePath,
+                configuration.BomBipQueryPagePath,
                 UnitCodeMappingJson = JsonSerializer.Serialize(configuration.UnitCodeMappings ?? new Dictionary<string, string>(), jsonOptions),
                 configuration.WriteEnabled,
                 configuration.UpdatedBy,
@@ -931,7 +1021,7 @@ public sealed class MySqlMaterialRepository : IMaterialRepository
         row.U9CategoryCode, row.U9ItemId, row.U9ItemCode, Enum.Parse<MaterialSyncStatus>(row.SyncStatus), row.CreatedBy, Utc(row.CreatedAt)!.Value,
         row.UpdatedBy, Utc(row.UpdatedAt)!.Value, row.RowVersion, row.CategoryCode, row.IsArchived, row.ArchivedBy, Utc(row.ArchivedAt),
         row.U9SyncConfirmed, Enum.Parse<MaterialDataSource>(row.SourceSystem), Enum.Parse<MaterialMasterOwner>(row.MasterOwner), Utc(row.LastU9SyncedAt),
-        row.PurchaseLink);
+        row.PurchaseLink, row.ReferenceCount);
 
     private static MaterialCategory MapCategory(CategoryRow row) => new(
         row.CategoryCode,
@@ -961,10 +1051,16 @@ public sealed class MySqlMaterialRepository : IMaterialRepository
         row.PayloadJson, row.PayloadSha256, row.AttemptCount, Utc(row.NextAttemptAt), row.LastError, row.ResponsePreview, row.U9ItemId, row.U9ItemCode,
         Utc(row.CreatedAt)!.Value, Utc(row.UpdatedAt)!.Value);
 
+    private static MaterialCodeApplication MapMaterialCodeApplication(MaterialCodeApplicationRow row) => new(
+        row.Id, row.ProjectId, row.BomItemId, Enum.Parse<MaterialCodeApplicationStatus>(row.Status), row.RequestedBy,
+        Utc(row.RequestedAt)!.Value, row.DecidedBy, Utc(row.DecidedAt), row.DecisionComment, row.MaterialId, row.MaterialCode, row.RowVersion)
+        { BomItemName = row.BomItemName, Specification = row.Specification, Brand = row.Brand, Remark = row.Remark };
+
     private static U9MaterialIntegrationConfiguration MapConfiguration(IntegrationRow row) => new(
         row.BaseUrl, row.EnterpriseCode, row.OrganizationCode, row.UserCode, row.ClientId, row.ClientSecretCiphertext,
         row.ItemCreatePath, row.ItemQueryPath, row.WriteEnabled, row.UpdatedBy, Utc(row.UpdatedAt), row.ItemModifyPath, row.ItemDeletePath,
-        DeserializeUnitCodeMappings(row.UnitCodeMappingJson));
+        DeserializeUnitCodeMappings(row.UnitCodeMappingJson), row.CustomerQueryPath, row.BomCreatePath, row.BomQueryPath,
+        row.BomModifyPath, row.BomDeletePath, row.BomBatchUnapprovePath, row.BomBipQueryPagePath);
 
     private static IReadOnlyDictionary<string, string> DeserializeUnitCodeMappings(string? json)
     {
@@ -985,7 +1081,9 @@ public sealed class MySqlMaterialRepository : IMaterialRepository
     private const string MaterialSelect = """
         SELECT id,material_code,name,material_kind,supply_mode,unit_code,specification,material,remark,brand,surface_treatment,purchase_link,
                weight,weight_unit,source_bom_item_id,approval_status,approved_by,approved_at,u9_category_code,u9_item_id,u9_item_code,u9_sync_confirmed,
-               source_system,master_owner,last_u9_synced_at,sync_status,created_by,created_at,updated_by,updated_at,row_version,category_code,is_archived,archived_by,archived_at
+               source_system,master_owner,last_u9_synced_at,sync_status,created_by,created_at,updated_by,updated_at,row_version,category_code,is_archived,archived_by,archived_at,
+               (SELECT COUNT(*) FROM bom_material_link AS material_link WHERE material_link.material_id=material_master.id)
+                   + CASE WHEN source_bom_item_id IS NULL THEN 0 ELSE 1 END AS reference_count
         FROM material_master
         """;
 
@@ -1003,6 +1101,15 @@ public sealed class MySqlMaterialRepository : IMaterialRepository
         FROM u9_material_sync_task
         """;
 
+    private const string MaterialCodeApplicationSelect = """
+        SELECT id,project_id,bom_item_id,status,requested_by,requested_at,decided_by,decided_at,decision_comment,material_id,material_code,row_version,
+               (SELECT name FROM bom_item WHERE bom_item.id=material_code_application.bom_item_id) bom_item_name,
+               (SELECT specification FROM bom_item WHERE bom_item.id=material_code_application.bom_item_id) specification,
+               (SELECT brand FROM bom_item WHERE bom_item.id=material_code_application.bom_item_id) brand,
+               (SELECT remark FROM bom_item WHERE bom_item.id=material_code_application.bom_item_id) remark
+        FROM material_code_application
+        """;
+
     private sealed class MaterialRow
     {
         public Guid Id { get; init; }
@@ -1017,6 +1124,7 @@ public sealed class MySqlMaterialRepository : IMaterialRepository
         public string? Brand { get; init; }
         public string? SurfaceTreatment { get; init; }
         public string? PurchaseLink { get; init; }
+        public int ReferenceCount { get; init; }
         public decimal? Weight { get; init; }
         public string? WeightUnit { get; init; }
         public Guid? SourceBomItemId { get; init; }
@@ -1105,10 +1213,37 @@ public sealed class MySqlMaterialRepository : IMaterialRepository
         public string ItemQueryPath { get; init; } = string.Empty;
         public string ItemModifyPath { get; init; } = string.Empty;
         public string ItemDeletePath { get; init; } = string.Empty;
+        public string CustomerQueryPath { get; init; } = U9MaterialContract.CustomerReferencePath;
+        public string BomCreatePath { get; init; } = U9BomContract.CreatePath;
+        public string BomQueryPath { get; init; } = U9BomContract.QueryPath;
+        public string BomModifyPath { get; init; } = U9BomContract.ModifyPath;
+        public string BomDeletePath { get; init; } = U9BomContract.DeletePath;
+        public string BomBatchUnapprovePath { get; init; } = U9BomContract.BatchUnApprovePath;
+        public string BomBipQueryPagePath { get; init; } = U9BomContract.BipQueryPagePath;
         public string UnitCodeMappingJson { get; init; } = "{}";
         public bool WriteEnabled { get; init; }
         public string? UpdatedBy { get; init; }
         public DateTime? UpdatedAt { get; init; }
+    }
+
+    private sealed class MaterialCodeApplicationRow
+    {
+        public Guid Id { get; init; }
+        public Guid ProjectId { get; init; }
+        public Guid BomItemId { get; init; }
+        public string Status { get; init; } = string.Empty;
+        public string RequestedBy { get; init; } = string.Empty;
+        public DateTime RequestedAt { get; init; }
+        public string? DecidedBy { get; init; }
+        public DateTime? DecidedAt { get; init; }
+        public string? DecisionComment { get; init; }
+        public Guid? MaterialId { get; init; }
+        public string? MaterialCode { get; init; }
+        public long RowVersion { get; init; }
+        public string? BomItemName { get; init; }
+        public string? Specification { get; init; }
+        public string? Brand { get; init; }
+        public string? Remark { get; init; }
     }
 
     private static long MaximumSequence(int sequenceLength) =>

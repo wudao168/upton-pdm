@@ -281,7 +281,7 @@ internal sealed class BatchPropertyEditDialog : Form
     private readonly ComboBox fillProperty = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList };
     private readonly TextBox fillValue = new TextBox();
     private readonly TextBox changeNote = new TextBox { Text = "批量更新SolidWorks属性" };
-    private readonly TextBox writebackChangeNote = new TextBox { Text = "PDM属性回写" };
+    private readonly TextBox writebackChangeNote = new TextBox { Text = "PLM属性回写" };
     private readonly Label summary = new Label { AutoSize = true, ForeColor = Color.FromArgb(90, 107, 128) };
     private readonly Button execute = new Button { Text = "执行批量编辑", DialogResult = DialogResult.OK, AutoSize = true };
 
@@ -346,7 +346,7 @@ internal sealed class BatchPropertyEditDialog : Form
         };
         var note = new Label
         {
-            Text = "在本页面选择“批量编辑”或“属性回写”。两种操作都会先校验版本和编辑权限，再生成新的PDM工作版本。",
+            Text = "在本页面选择“批量编辑”或“属性回写”。两种操作都会先校验版本和编辑权限，再生成新的PLM工作版本。",
             ForeColor = Color.FromArgb(73, 88, 108),
             AutoSize = true,
             MaximumSize = new Size(1120, 0),
@@ -391,7 +391,7 @@ internal sealed class BatchPropertyEditDialog : Form
 
         var explanation = new Label
         {
-            Text = "编辑并回写SolidWorks属性卡。项目号、项目名称由归属项目自动填写且不可修改；已有配置特定属性继续写原配置，其他属性写全局。图号和名称同步到PDM，不修改文件名和装配引用。可从Excel复制后在表格中按Ctrl+V粘贴。",
+            Text = "编辑并回写SolidWorks属性卡。项目号、项目名称由归属项目自动填写且不可修改；已有配置特定属性继续写原配置，其他属性写全局。图号和名称同步到PLM，不修改文件名和装配引用。可从Excel复制后在表格中按Ctrl+V粘贴。",
             ForeColor = Color.FromArgb(73, 88, 108),
             AutoSize = true,
             MaximumSize = new Size(1100, 0),
@@ -690,7 +690,7 @@ internal sealed class BatchPropertyEditDialog : Form
             || item.Name.Trim().Length > 300);
         if (invalidIdentity != null)
         {
-            CancelValidation(string.Concat(invalidIdentity.FileName, "的图号或名称为空，或长度超过PDM限制。"));
+            CancelValidation(string.Concat(invalidIdentity.FileName, "的图号或名称为空，或长度超过PLM限制。"));
             return;
         }
 
@@ -727,6 +727,6 @@ internal sealed class BatchPropertyEditDialog : Form
     private void CancelValidation(string message)
     {
         DialogResult = DialogResult.None;
-        MessageBox.Show(this, message, "UPTON PDM", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        MessageBox.Show(this, message, "UPLM", MessageBoxButtons.OK, MessageBoxIcon.Warning);
     }
 }

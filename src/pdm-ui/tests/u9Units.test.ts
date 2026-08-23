@@ -18,8 +18,8 @@ describe('U9C计量单位目录', () => {
       { code: '012', name: '箱' },
       { code: '013', name: '包' },
     ])
-    expect(u9UnitLabel('001')).toBe('001 个')
-    expect(u9UnitLabel('013')).toBe('013 包')
+    expect(u9UnitLabel('001')).toBe('个')
+    expect(u9UnitLabel('013')).toBe('包')
     expect(u9UnitName('001')).toBe('个')
     expect(u9UnitName('013')).toBe('包')
   })

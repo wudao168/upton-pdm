@@ -27,7 +27,7 @@ public static class U9MaterialPayloadFactory
             ["Code1"] = material.MaterialCode,
             ["Name"] = material.Name,
             ["SPECS"] = material.Specification,
-            ["Description"] = BuildDescription(material),
+            ["Description"] = Clean(material.Remark),
             ["MainItemCategory"] = Archive(rule.U9CategoryCode),
             ["Org"] = Archive(organizationCode),
             ["ItemFormAttribute"] = material.SupplyMode switch
@@ -35,7 +35,7 @@ public static class U9MaterialPayloadFactory
                 MaterialSupplyMode.Purchase => 9,
                 MaterialSupplyMode.Manufacture => 10,
                 MaterialSupplyMode.Outsource => 4,
-                _ => throw new PdmRuleException("PDM供给方式无法映射到U9C料品形态属性。")
+                _ => throw new PdmRuleException("PLM供给方式无法映射到U9C料品形态属性。")
             },
             ["ConverRatioRule"] = 0,
             ["InventoryUOM"] = unit,
@@ -50,12 +50,7 @@ public static class U9MaterialPayloadFactory
             ["WeightUom"] = material.Weight is null || string.IsNullOrWhiteSpace(material.WeightUnit)
                 ? null
                 : Archive(material.WeightUnit),
-            ["DescFlexField"] = string.IsNullOrWhiteSpace(material.PurchaseLink)
-                ? null
-                : new Dictionary<string, object?>
-                {
-                    [U9MaterialContract.PurchaseLinkPublicSegment] = material.PurchaseLink
-                },
+            ["DescFlexField"] = BuildDescFlexField(material),
             ["IsDualUOM"] = false,
             ["IsMultyUOM"] = false,
             ["IsDualQuantity"] = false,
@@ -127,10 +122,13 @@ public static class U9MaterialPayloadFactory
         {
             Attribute("Name", material.Name),
             Attribute("SPECS", material.Specification ?? string.Empty),
-            Attribute("Description", BuildDescription(material) ?? string.Empty),
+            Attribute("Description", Clean(material.Remark) ?? string.Empty),
             EntityAttribute("MainItemCategory", material.CategoryCode ?? material.U9CategoryCode ?? string.Empty),
             EntityAttribute("InventoryUOM", u9UnitCode ?? material.UnitCode),
-            Attribute($"DescFlexField.{U9MaterialContract.PurchaseLinkPublicSegment}", material.PurchaseLink ?? string.Empty)
+            Attribute($"DescFlexField.{U9MaterialContract.PurchaseLinkPublicSegment}", Clean(material.PurchaseLink) ?? string.Empty),
+            Attribute($"DescFlexField.{U9MaterialContract.BrandPublicSegment}", Clean(material.Brand) ?? string.Empty),
+            Attribute($"DescFlexField.{U9MaterialContract.MaterialPrivateSegment}", Clean(material.Material) ?? string.Empty),
+            Attribute($"DescFlexField.{U9MaterialContract.SurfaceTreatmentPrivateSegment}", Clean(material.SurfaceTreatment) ?? string.Empty)
         };
         if (material.Weight is not null) attributes.Add(Attribute("Weight", material.Weight.Value.ToString(System.Globalization.CultureInfo.InvariantCulture)));
         return JsonSerializer.Serialize(new[]
@@ -160,16 +158,20 @@ public static class U9MaterialPayloadFactory
         ["EntityValue"] = Archive(code)
     };
 
-    private static string? BuildDescription(PdmMaterial material)
+    private static Dictionary<string, object?>? BuildDescFlexField(PdmMaterial material)
     {
-        var parts = new[]
+        var fields = new Dictionary<string, object?>
         {
-            material.Material is null ? null : $"材质：{material.Material}",
-            material.Brand is null ? null : $"品牌：{material.Brand}",
-            material.SurfaceTreatment is null ? null : $"表面处理：{material.SurfaceTreatment}",
-            material.Remark
+            [U9MaterialContract.PurchaseLinkPublicSegment] = Clean(material.PurchaseLink),
+            [U9MaterialContract.BrandPublicSegment] = Clean(material.Brand),
+            [U9MaterialContract.MaterialPrivateSegment] = Clean(material.Material),
+            [U9MaterialContract.SurfaceTreatmentPrivateSegment] = Clean(material.SurfaceTreatment)
         };
-        var description = string.Join("；", parts.Where(value => !string.IsNullOrWhiteSpace(value)));
-        return string.IsNullOrWhiteSpace(description) ? null : description;
+        var nonNullFields = fields
+            .Where(pair => pair.Value is not null)
+            .ToDictionary(pair => pair.Key, pair => pair.Value);
+        return nonNullFields.Count == 0 ? null : nonNullFields;
     }
+
+    private static string? Clean(string? value) => string.IsNullOrWhiteSpace(value) ? null : value.Trim();
 }

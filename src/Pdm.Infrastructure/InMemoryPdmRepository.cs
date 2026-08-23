@@ -4,7 +4,7 @@ using Upton.Pdm.Domain;
 
 namespace Upton.Pdm.Infrastructure;
 
-public sealed class InMemoryPdmRepository : IPdmRepository
+public sealed partial class InMemoryPdmRepository : IPdmRepository
 {
     private readonly object gate = new();
     private readonly ConcurrentDictionary<Guid, Project> projects = new();
@@ -22,6 +22,7 @@ public sealed class InMemoryPdmRepository : IPdmRepository
     private readonly ConcurrentDictionary<Guid, ProjectOrganization> organizations = new();
     private readonly ConcurrentDictionary<Guid, OrganizationUnit> organizationUnits = new();
     private readonly ConcurrentDictionary<string, (IReadOnlyList<Guid> UnitIds, Guid PrimaryUnitId)> organizationMemberships = new(StringComparer.OrdinalIgnoreCase);
+    private readonly ConcurrentDictionary<Guid, HashSet<Guid>> userCompanyAccess = new();
     private readonly ConcurrentDictionary<Guid, OrganizationUnitManagers> organizationManagers = new();
     private readonly ConcurrentDictionary<int, EquipmentTypeDefinition> equipmentTypes = new();
     private readonly ConcurrentDictionary<Guid, ReleasePackage> packages = new();
@@ -37,6 +38,7 @@ public sealed class InMemoryPdmRepository : IPdmRepository
     private readonly Dictionary<(Guid OrganizationId, string CustomerCode), SortedSet<int>> releasedCustomerNumbers = new();
     private readonly List<BomItem> bomItems;
     private readonly Dictionary<(Guid ProjectId, BomKind Kind), BomEmptyDeclaration> bomEmptyDeclarations = new();
+    private readonly Dictionary<(Guid ProjectId, ProjectBomHeaderKind Kind), ProjectBomHeaderBinding> projectBomHeaders = new();
     private readonly ConcurrentDictionary<Guid, BomVersion> bomVersions = new();
     private readonly ConcurrentDictionary<Guid, ManufacturingBomBaseline> manufacturingBomBaselines = new();
     private readonly Dictionary<Guid, CadPropertyWriteback> cadPropertyWritebacks = new();
@@ -51,7 +53,7 @@ public sealed class InMemoryPdmRepository : IPdmRepository
         foreach (var definition in RolePermissionCatalog.Roles)
         {
             roleDefinitions[definition.RoleCode] = definition;
-            rolePermissions[definition.RoleCode] = RolePermissionCatalog.Defaults[definition.BaseRole];
+            rolePermissions[definition.RoleCode] = RolePermissionCatalog.InitialPermissions(definition.RoleCode, definition.BaseRole);
         }
         foreach (var organization in SeedOrganizations()) organizations[organization.Id] = organization;
         var project = SeedData.Project();
@@ -86,10 +88,11 @@ public sealed class InMemoryPdmRepository : IPdmRepository
     }
 
     public Task<IReadOnlyList<Project>> ListProjectsAsync(CancellationToken cancellationToken) =>
-        Task.FromResult<IReadOnlyList<Project>>(projects.Values.OrderBy(project => project.Code).ToArray());
+        Task.FromResult<IReadOnlyList<Project>>(projects.Values.Where(IsInActiveCompany).OrderBy(project => project.Code).ToArray());
 
     public Task<IReadOnlyList<Project>> ListProjectsForUserAsync(string actor, UserRole role, CancellationToken cancellationToken) =>
         Task.FromResult<IReadOnlyList<Project>>(!HasUserPermission(actor, role, PermissionCodes.ProjectView) ? [] : projects.Values
+            .Where(IsInActiveCompany)
             .Where(project => CanViewProject(project, actor, role))
             .Select(project => ApplyCapabilities(project, actor, role))
             .OrderBy(project => project.Code)
@@ -98,18 +101,58 @@ public sealed class InMemoryPdmRepository : IPdmRepository
     public Task<Project?> FindProjectAsync(Guid projectId, CancellationToken cancellationToken)
     {
         projects.TryGetValue(projectId, out var project);
+        if (project is not null && !IsInActiveCompany(project)) project = null;
         return Task.FromResult(project);
     }
 
     public Task<bool> HasProjectReadAccessAsync(Guid projectId, string actor, UserRole role, CancellationToken cancellationToken) =>
-        Task.FromResult(HasUserPermission(actor, role, PermissionCodes.ProjectView) && projects.TryGetValue(projectId, out var project) && CanViewProject(project, actor, role));
+        Task.FromResult(HasUserPermission(actor, role, PermissionCodes.ProjectView) && projects.TryGetValue(projectId, out var project) && IsInActiveCompany(project) && CanViewProject(project, actor, role));
 
     public Task<bool> HasProjectContentReadAccessAsync(Guid projectId, string actor, UserRole role, CancellationToken cancellationToken) =>
-        Task.FromResult(role == UserRole.Administrator || (HasUserPermission(actor, role, PermissionCodes.ProjectContentView)
-            && projects.TryGetValue(projectId, out var project) && HasProjectContentAssignment(project, actor)));
+        Task.FromResult(projects.TryGetValue(projectId, out var project) && IsInActiveCompany(project)
+            && (role == UserRole.Administrator || (HasUserPermission(actor, role, PermissionCodes.ProjectContentView) && HasProjectContentAssignment(project, actor))));
+
+    private static bool IsInActiveCompany(Project project) => TenantContext.CompanyId is not Guid companyId || project.OrganizationId is null || project.OrganizationId == companyId;
 
     public Task<bool> HasChildProjectsAsync(Guid projectId, CancellationToken cancellationToken) =>
         Task.FromResult(projects.Values.Any(project => project.ParentProjectId == projectId));
+
+    public Task<IReadOnlyList<ProjectBomHeaderBinding>> ListProjectBomHeaderBindingsAsync(Guid projectId, CancellationToken cancellationToken)
+    {
+        lock (gate)
+        {
+            return Task.FromResult<IReadOnlyList<ProjectBomHeaderBinding>>(projectBomHeaders.Values
+                .Where(item => item.ProjectId == projectId)
+                .OrderBy(item => item.Kind)
+                .ToArray());
+        }
+    }
+
+    public Task<ProjectBomHeaderBinding> SaveProjectBomHeaderBindingAsync(Guid projectId, ProjectBomHeaderKind kind, Guid materialId, long expectedRowVersion, string actor, CancellationToken cancellationToken)
+    {
+        lock (gate)
+        {
+            if (!projects.ContainsKey(projectId)) throw new PdmNotFoundException("项目不存在。");
+            if (projectBomHeaders.Values.Any(item => item.ProjectId == projectId && item.Kind != kind && item.MaterialId == materialId))
+                throw new PdmConflictException("同一项目的主BOM及三类子BOM必须分别使用不同料号。");
+
+            var key = (projectId, kind);
+            if (projectBomHeaders.TryGetValue(key, out var existing))
+            {
+                if (existing.RowVersion != expectedRowVersion) throw new PdmConflictException("BOM料号绑定已变化，请刷新后重试。");
+            }
+            else if (expectedRowVersion != 0)
+            {
+                throw new PdmConflictException("BOM料号绑定已变化，请刷新后重试。");
+            }
+
+            var saved = new ProjectBomHeaderBinding(
+                projectId, kind, kind == ProjectBomHeaderKind.Master ? null : ProjectBomHeaderKind.Master,
+                materialId, actor, timeProvider.GetUtcNow(), (existing?.RowVersion ?? 0) + 1);
+            projectBomHeaders[key] = saved;
+            return Task.FromResult(saved);
+        }
+    }
 
     public Task DeleteProjectAsync(Guid projectId, CancellationToken cancellationToken)
     {
@@ -245,11 +288,17 @@ public sealed class InMemoryPdmRepository : IPdmRepository
     }
 
     public Task<PdmSystemSettings> GetSystemSettingsAsync(CancellationToken cancellationToken) =>
-        Task.FromResult(BomPropertyMappingCatalog.Apply(systemSettings));
+        Task.FromResult(BomPropertyMappingCatalog.Apply(systemSettings with
+        {
+            ApprovalWorkflows = ReleaseApprovalSettings.UseOrganizationHierarchy(systemSettings.ApprovalWorkflows)
+        }));
 
     public Task<PdmSystemSettings> UpdateSystemSettingsAsync(PdmSystemSettings settings, CancellationToken cancellationToken)
     {
-        systemSettings = BomPropertyMappingCatalog.Apply(settings);
+        systemSettings = BomPropertyMappingCatalog.Apply(settings with
+        {
+            ApprovalWorkflows = ReleaseApprovalSettings.UseOrganizationHierarchy(settings.ApprovalWorkflows)
+        });
         return Task.FromResult(systemSettings);
     }
 
@@ -311,7 +360,32 @@ public sealed class InMemoryPdmRepository : IPdmRepository
             organizationUnits.Values.OrderBy(item => item.SortOrder).ThenBy(item => item.Name).ToArray(),
             organizationMemberships.SelectMany(item => item.Value.UnitIds.Select(unitId => new OrganizationMembership(unitId, item.Key, unitId == item.Value.PrimaryUnitId))).ToArray(),
             organizationManagers.Values.ToArray(),
-            users.Values.OrderBy(item => item.Username).Select(item => new OrganizationDirectoryUser(item.Username, item.DisplayName, item.Role, item.IsActive, item.EffectiveRoleCode)).ToArray()));
+            users.Values.OrderBy(item => item.Username).Select(item => new OrganizationDirectoryUser(item.Username, item.DisplayName, item.Role, item.IsActive, item.EffectiveRoleCode, item.CompanyId, item.CrossCompanyView,
+                userCompanyAccess.TryGetValue(item.Id, out var access) ? access.ToArray() : Array.Empty<Guid>())).ToArray()));
+
+    public Task<UserCompanyScope?> GetUserCompanyScopeAsync(string username, CancellationToken cancellationToken)
+    {
+        var user = users.Values.FirstOrDefault(item => string.Equals(item.Username, username, StringComparison.OrdinalIgnoreCase));
+        if (user is null) return Task.FromResult<UserCompanyScope?>(null);
+        var access = userCompanyAccess.TryGetValue(user.Id, out var companyIds) ? companyIds.ToArray() : Array.Empty<Guid>();
+        return Task.FromResult<UserCompanyScope?>(new UserCompanyScope(user.Id, user.CompanyId, user.CrossCompanyView, access));
+    }
+
+    public Task<UserCompanyScope> SetUserCompanyScopeAsync(string username, Guid companyId, bool crossCompanyView, IReadOnlyList<Guid> accessibleCompanyIds, string actor, CancellationToken cancellationToken)
+    {
+        var user = users.Values.FirstOrDefault(item => string.Equals(item.Username, username, StringComparison.OrdinalIgnoreCase))
+            ?? throw new PdmNotFoundException("用户不存在。");
+        if (!organizations.TryGetValue(companyId, out var company) || !company.IsActive) throw new PdmRuleException("所属公司不存在或已停用。");
+        var normalized = accessibleCompanyIds.Where(id => id != companyId).Distinct().ToArray();
+        if (normalized.Any(id => !organizations.TryGetValue(id, out var target) || !target.IsActive)) throw new PdmRuleException("跨公司授权目标不存在或已停用。");
+        var updated = user with { CompanyId = companyId, CrossCompanyView = crossCompanyView && normalized.Length > 0, TokenVersion = user.TokenVersion + 1 };
+        users[user.Id] = updated;
+        userCompanyAccess[user.Id] = normalized.ToHashSet();
+        if (organizationMemberships.TryGetValue(username, out var membership)
+            && membership.UnitIds.Any(id => organizationUnits.TryGetValue(id, out var unit) && unit.OrganizationId != companyId))
+            organizationMemberships.TryRemove(username, out _);
+        return Task.FromResult(new UserCompanyScope(user.Id, companyId, updated.CrossCompanyView, normalized));
+    }
 
     public Task<ProjectOrganization> SaveProjectOrganizationAsync(SaveProjectOrganizationCommand command, CancellationToken cancellationToken)
     {
@@ -351,6 +425,20 @@ public sealed class InMemoryPdmRepository : IPdmRepository
 
     public async Task<OrganizationDirectory> SetOrganizationUnitManagersAsync(Guid unitId, string primaryManager, IReadOnlyList<string> collaborativeManagers, CancellationToken cancellationToken)
     {
+        var unit = organizationUnits.GetValueOrDefault(unitId) ?? throw new PdmNotFoundException("组织不存在。");
+        foreach (var username in new[] { primaryManager }.Concat(collaborativeManagers).Distinct(StringComparer.OrdinalIgnoreCase))
+        {
+            if (organizationMemberships.TryGetValue(username, out var current))
+            {
+                if (current.UnitIds.Any(memberUnitId => organizationUnits.GetValueOrDefault(memberUnitId)?.OrganizationId != unit.OrganizationId))
+                    throw new PdmConflictException("部门负责人已经属于其他公司，不能跨公司任职。");
+                if (!current.UnitIds.Contains(unitId)) organizationMemberships[username] = (current.UnitIds.Append(unitId).ToArray(), current.PrimaryUnitId);
+            }
+            else
+            {
+                organizationMemberships[username] = ([unitId], unitId);
+            }
+        }
         organizationManagers[unitId] = new OrganizationUnitManagers(unitId, primaryManager, collaborativeManagers.ToArray());
         return await GetOrganizationDirectoryAsync(cancellationToken);
     }
@@ -399,7 +487,7 @@ public sealed class InMemoryPdmRepository : IPdmRepository
             if (customerChanged) ReleaseNumber(releasedCustomerNumbers, oldCustomerKey, project.CustomerProjectSequence!.Value);
 
             var rootCode = codeChanged ? $"{projectTypeCode}{organization.ProjectCompanyCode}{projectSequence:D5}" : project.Code;
-            var tree = projects.Values.Where(item => item.Id == project.Id || item.ParentProjectId == project.Id).ToArray();
+            var tree = projects.Values.Where(item => item.Id == project.Id || item.RootProjectId == project.Id).ToArray();
             foreach (var item in tree)
             {
                 IReadOnlyList<string> serials;
@@ -413,8 +501,8 @@ public sealed class InMemoryPdmRepository : IPdmRepository
                     serials = ResizeSerialNumbers(item, organization, item.Id == project.Id ? command.Quantity : item.Quantity);
                 }
 
-                var code = item.Id == project.Id ? rootCode : $"{rootCode}-{item.ChildSequence}";
-                var modelSuffix = item.Id == project.Id ? 0 : item.ChildSequence!.Value;
+                var code = item.Id == project.Id ? rootCode : $"{rootCode}{item.Code[project.Code.Length..]}";
+                var itemEquipmentTypeCode = item.Id == project.Id ? equipmentTypeCode : item.EquipmentTypeCode ?? equipmentTypeCode;
                 var updated = item with
                 {
                     Code = code,
@@ -423,11 +511,11 @@ public sealed class InMemoryPdmRepository : IPdmRepository
                     OrganizationId = organization.Id,
                     OrganizationName = organization.Name,
                     ProjectTypeCode = projectTypeCode,
-                    EquipmentTypeCode = equipmentTypeCode,
+                    EquipmentTypeCode = itemEquipmentTypeCode,
                     CustomerCode = customer.Code,
                     CustomerName = customer.Name,
                     CustomerProjectSequence = customerSequence,
-                    DeviceModel = $"{organization.ModelCompanyCode}-{equipmentTypeCode}-{customer.Code}-{customerSequence:D3}-{modelSuffix:D2}",
+                    DeviceModel = $"{organization.ModelCompanyCode}-{itemEquipmentTypeCode}-{customer.Code}-{customerSequence:D3}-{BuildModelSuffixFromCode(code)}",
                     SignedDate = command.SignedDate,
                     Quantity = item.Id == project.Id ? command.Quantity : item.Quantity,
                     SerialNumbers = serials,
@@ -452,7 +540,7 @@ public sealed class InMemoryPdmRepository : IPdmRepository
                 CollaborativeProjectManagers = [], DesignLead = null, Designers = []
             };
             projects[projectId] = project;
-            foreach (var child in projects.Values.Where(item => item.ParentProjectId == projectId).ToArray())
+            foreach (var child in projects.Values.Where(item => item.RootProjectId == projectId && item.Id != projectId).ToArray())
                 projects[child.Id] = child with { ExecutionUnitId = unit.Id, ExecutionUnitName = unit.Name, PrimaryProjectManager = null, CollaborativeProjectManagers = [], DesignLead = null, Designers = [] };
             return Task.FromResult(project);
         }
@@ -465,7 +553,7 @@ public sealed class InMemoryPdmRepository : IPdmRepository
             if (!projects.TryGetValue(projectId, out var project) || project.ParentProjectId is not null) throw new PdmNotFoundException("主项目不存在。");
             project = project with { PrimaryProjectManager = command.PrimaryProjectManager, CollaborativeProjectManagers = command.CollaborativeProjectManagers.ToArray(), DesignLead = command.DesignLead };
             projects[projectId] = project;
-            foreach (var child in projects.Values.Where(item => item.ParentProjectId == projectId).ToArray())
+            foreach (var child in projects.Values.Where(item => item.RootProjectId == projectId && item.Id != projectId).ToArray())
                 projects[child.Id] = child with { PrimaryProjectManager = command.PrimaryProjectManager, CollaborativeProjectManagers = command.CollaborativeProjectManagers.ToArray(), DesignLead = command.DesignLead };
             return Task.FromResult(project);
         }
@@ -494,10 +582,16 @@ public sealed class InMemoryPdmRepository : IPdmRepository
             var serials = ReserveSerials(organization, command.Quantity);
             var code = $"{command.ProjectTypeCode}{organization.ProjectCompanyCode}{projectSequence:D5}";
             var model = $"{organization.ModelCompanyCode}-{command.EquipmentTypeCode}-{customer.Code}-{customerSequence:D3}-00";
-            var project = BuildNumberedProject(Guid.NewGuid(), code, command.Name, command.ProjectAlias, organization, command.ProjectTypeCode,
+            var projectId = Guid.NewGuid();
+            var project = BuildNumberedProject(projectId, code, command.Name, command.ProjectAlias, organization, command.ProjectTypeCode,
                 command.EquipmentTypeCode, customer.Code, customer.Name, customerSequence, model, command.SignedDate,
                 command.Quantity, null, null, command.Owner, Path.Combine(command.VaultLocation, code), Path.Combine(command.ReleaseLocation, code), serials);
-            project = project with { ResponsibleUsers = [command.Owner] };
+            project = project with
+            {
+                RootProjectId = projectId,
+                BomItemCategoryCode = command.BomItemCategoryCode,
+                ResponsibleUsers = [command.Owner]
+            };
             projects[project.Id] = project;
             projectResponsibles[project.Id] = project.ResponsibleUsers;
             EnsureProjectFolderTree(project.Id);
@@ -509,8 +603,7 @@ public sealed class InMemoryPdmRepository : IPdmRepository
     {
         lock (gate)
         {
-            if (!projects.TryGetValue(command.ParentProjectId, out var parent)) throw new PdmNotFoundException("主项目不存在。");
-            if (parent.ParentProjectId is not null) throw new PdmRuleException("只能在主项目下创建子项目。");
+            if (!projects.TryGetValue(command.ParentProjectId, out var parent)) throw new PdmNotFoundException("上级项目不存在。");
             if (parent.OrganizationId is null || parent.EquipmentTypeCode is null || parent.CustomerProjectSequence is null
                 || parent.SignedDate is null || string.IsNullOrWhiteSpace(parent.ProjectTypeCode)
                 || string.IsNullOrWhiteSpace(parent.CustomerCode) || string.IsNullOrWhiteSpace(parent.CustomerName))
@@ -521,13 +614,16 @@ public sealed class InMemoryPdmRepository : IPdmRepository
             if (childSequence == 0) throw new PdmRuleException("该主项目的两位子项目号已用尽。");
             var serials = ReserveSerials(organization, command.Quantity);
             var code = $"{parent.Code}-{childSequence}";
-            var model = $"{organization.ModelCompanyCode}-{parent.EquipmentTypeCode.Value}-{parent.CustomerCode}-{parent.CustomerProjectSequence.Value:D3}-{childSequence:D2}";
+            var equipmentTypeCode = command.EquipmentTypeCode ?? parent.EquipmentTypeCode.Value;
+            var model = $"{organization.ModelCompanyCode}-{equipmentTypeCode}-{parent.CustomerCode}-{parent.CustomerProjectSequence.Value:D3}-{BuildChildModelSuffix(parent.Code, childSequence)}";
             var project = BuildNumberedProject(Guid.NewGuid(), code, command.Name, command.ProjectAlias, organization, parent.ProjectTypeCode,
-                parent.EquipmentTypeCode.Value, parent.CustomerCode, parent.CustomerName, parent.CustomerProjectSequence.Value, model,
+                equipmentTypeCode, parent.CustomerCode, parent.CustomerName, parent.CustomerProjectSequence.Value, model,
                 parent.SignedDate.Value, command.Quantity, parent.Id, childSequence, parent.Owner,
                 Path.Combine(command.VaultRoot ?? systemSettings.VaultRoot, code), Path.Combine(command.ReleaseRoot ?? systemSettings.ReleaseRoot, code), serials);
             project = project with
             {
+                RootProjectId = parent.RootProjectId ?? parent.Id,
+                BomItemCategoryCode = "0302",
                 ResponsibleUsers = parent.ResponsibleUsers,
                 ExecutionUnitId = parent.ExecutionUnitId,
                 ExecutionUnitName = parent.ExecutionUnitName,
@@ -554,7 +650,7 @@ public sealed class InMemoryPdmRepository : IPdmRepository
         {
             EnsureProjectFolderTree(projectId);
             var project = projects.GetValueOrDefault(projectId) ?? throw new PdmNotFoundException("项目不存在。");
-            var rootId = project.ParentProjectId ?? project.Id;
+            var rootId = project.RootProjectId ?? project.Id;
             var folders = projectFolders.Values.Where(item => item.RootProjectId == rootId).OrderBy(item => item.SortOrder).ThenBy(item => item.Name).ToArray();
             var result = folders.Select(folder => folder with
             {
@@ -599,7 +695,7 @@ public sealed class InMemoryPdmRepository : IPdmRepository
         {
             EnsureProjectFolderTree(projectId);
             var project = projects.GetValueOrDefault(projectId) ?? throw new PdmNotFoundException("项目不存在。");
-            var rootId = project.ParentProjectId ?? project.Id;
+            var rootId = project.RootProjectId ?? project.Id;
             if (!projectFolders.TryGetValue(folderId, out var folder) || folder.RootProjectId != rootId) throw new PdmNotFoundException("项目目录不存在。");
             projectFolders[folderId] = folder with { Permissions = NormalizeFolderPermissions(permissions) };
             return ListProjectFoldersAsync(projectId, actor, role, cancellationToken);
@@ -678,6 +774,22 @@ public sealed class InMemoryPdmRepository : IPdmRepository
             SerialNumbers = serialNumbers
         };
 
+    private static string BuildChildModelSuffix(string parentCode, int childSequence)
+    {
+        var parentSegments = parentCode.Split('-', StringSplitOptions.RemoveEmptyEntries)
+            .Skip(1)
+            .Select(segment => int.TryParse(segment, out var value) ? value.ToString("D2") : segment);
+        return string.Join('-', parentSegments.Append(childSequence.ToString("D2")));
+    }
+
+    private static string BuildModelSuffixFromCode(string code)
+    {
+        var segments = code.Split('-', StringSplitOptions.RemoveEmptyEntries).Skip(1).ToArray();
+        return segments.Length == 0
+            ? "00"
+            : string.Join('-', segments.Select(segment => int.TryParse(segment, out var value) ? value.ToString("D2") : segment));
+    }
+
     private IReadOnlyList<string> ResizeSerialNumbers(Project project, ProjectOrganization organization, int quantity)
     {
         if (quantity == project.SerialNumbers.Count) return project.SerialNumbers;
@@ -753,8 +865,8 @@ public sealed class InMemoryPdmRepository : IPdmRepository
     public Task<IReadOnlyList<PdmDocument>> ListProjectTreeDocumentsAsync(Guid projectId, CancellationToken cancellationToken)
     {
         var project = projects.GetValueOrDefault(projectId) ?? throw new PdmNotFoundException("项目不存在。");
-        var rootId = project.ParentProjectId ?? project.Id;
-        var projectIds = projects.Values.Where(item => item.Id == rootId || item.ParentProjectId == rootId).Select(item => item.Id).ToHashSet();
+        var rootId = project.RootProjectId ?? project.Id;
+        var projectIds = projects.Values.Where(item => item.Id == rootId || item.RootProjectId == rootId).Select(item => item.Id).ToHashSet();
         return Task.FromResult<IReadOnlyList<PdmDocument>>(documents.Values
             .Where(item => projectIds.Contains(item.ProjectId))
             .Select(WithStoredVersionCount)
@@ -769,8 +881,8 @@ public sealed class InMemoryPdmRepository : IPdmRepository
     public Task<IReadOnlyList<DocumentModelDrawingRelation>> ListDocumentRelationsAsync(Guid projectId, CancellationToken cancellationToken)
     {
         var project = projects.GetValueOrDefault(projectId) ?? throw new PdmNotFoundException("项目不存在。");
-        var rootId = project.ParentProjectId ?? project.Id;
-        var projectIds = projects.Values.Where(item => item.Id == rootId || item.ParentProjectId == rootId).Select(item => item.Id).ToHashSet();
+        var rootId = project.RootProjectId ?? project.Id;
+        var projectIds = projects.Values.Where(item => item.Id == rootId || item.RootProjectId == rootId).Select(item => item.Id).ToHashSet();
         var documentIds = documents.Values.Where(item => projectIds.Contains(item.ProjectId)).Select(item => item.Id).ToHashSet();
         return Task.FromResult<IReadOnlyList<DocumentModelDrawingRelation>>(documentRelations.Values
             .Where(item => documentIds.Contains(item.ModelDocumentId) && documentIds.Contains(item.DrawingDocumentId))
@@ -993,12 +1105,32 @@ public sealed class InMemoryPdmRepository : IPdmRepository
         }
     }
 
+    public Task<BomItem> UpdateBomMaterialCodeAsync(Guid projectId, Guid itemId, string materialCode, CancellationToken cancellationToken)
+    {
+        lock (gate)
+        {
+            var index = bomItems.FindIndex(item => item.ProjectId == projectId && item.Id == itemId);
+            if (index < 0) throw new PdmNotFoundException("BOM物料不存在。");
+            var current = bomItems[index];
+            var saved = current with
+            {
+                DrawingNumber = materialCode.Trim(),
+                PropertyWritebackStatus = current.SourceDocumentId.HasValue && current.Kind != BomKind.Electrical
+                    ? CadPropertyWritebackStatus.Pending
+                    : current.PropertyWritebackStatus
+            };
+            bomItems[index] = saved;
+            return Task.FromResult(saved);
+        }
+    }
+
     public Task<CadPropertyWriteback> EnqueueCadPropertyWritebackAsync(CadPropertyWriteback request, CancellationToken cancellationToken)
     {
         lock (gate)
         {
             foreach (var existing in cadPropertyWritebacks.Values
-                         .Where(item => item.BomItemId == request.BomItemId && item.Status is CadPropertyWritebackStatus.Pending or CadPropertyWritebackStatus.InProgress)
+                         .Where(item => item.BomItemId == request.BomItemId && item.SourceDocumentId == request.SourceDocumentId
+                             && item.Status is CadPropertyWritebackStatus.Pending or CadPropertyWritebackStatus.InProgress)
                          .ToArray())
             {
                 cadPropertyWritebacks[existing.Id] = existing with { Status = CadPropertyWritebackStatus.Superseded, CompletedAt = timeProvider.GetUtcNow() };
@@ -1046,7 +1178,16 @@ public sealed class InMemoryPdmRepository : IPdmRepository
             };
             cadPropertyWritebacks[id] = updated;
             var index = bomItems.FindIndex(item => item.Id == request.BomItemId);
-            if (index >= 0) bomItems[index] = bomItems[index] with { PropertyWritebackStatus = status };
+            if (index >= 0)
+            {
+                var related = cadPropertyWritebacks.Values.Where(item => item.BomItemId == request.BomItemId).ToArray();
+                var aggregate = related.Any(item => item.Status is CadPropertyWritebackStatus.Pending or CadPropertyWritebackStatus.InProgress)
+                    ? CadPropertyWritebackStatus.Pending
+                    : related.Any(item => item.Status is CadPropertyWritebackStatus.Conflict or CadPropertyWritebackStatus.Failed)
+                        ? CadPropertyWritebackStatus.Failed
+                        : status;
+                bomItems[index] = bomItems[index] with { PropertyWritebackStatus = aggregate };
+            }
             return Task.FromResult(updated);
         }
     }
@@ -1087,10 +1228,14 @@ public sealed class InMemoryPdmRepository : IPdmRepository
         lock (gate)
         {
             var now = timeProvider.GetUtcNow();
+            var headerKind = kind == BomKind.Standard ? ProjectBomHeaderKind.Standard
+                : kind == BomKind.NonStandard ? ProjectBomHeaderKind.NonStandard
+                : ProjectBomHeaderKind.Electrical;
+            projectBomHeaders.TryGetValue((projectId, headerKind), out var header);
             var draft = bomVersions.Values.FirstOrDefault(version => version.ProjectId == projectId && version.Kind == kind && version.State == BomVersionState.Draft);
             if (draft is not null)
             {
-                draft = draft with { Items = items.OrderBy(item => item.Sequence).ToArray(), UpdatedBy = actor, UpdatedAt = now };
+                draft = draft with { Items = items.OrderBy(item => item.Sequence).ToArray(), UpdatedBy = actor, UpdatedAt = now, MotherMaterialId = header?.MaterialId };
                 bomVersions[draft.Id] = draft;
                 return Task.FromResult(draft);
             }
@@ -1098,8 +1243,12 @@ public sealed class InMemoryPdmRepository : IPdmRepository
             var latest = bomVersions.Values.Where(version => version.ProjectId == projectId && version.Kind == kind).OrderByDescending(version => version.VersionNumber).FirstOrDefault();
             var number = (latest?.VersionNumber ?? 0) + 1;
             var prefix = kind == BomKind.Standard ? "S" : kind == BomKind.NonStandard ? "N" : "E";
-            draft = new BomVersion(Guid.NewGuid(), projectId, kind, number, $"{prefix}-B{number:D2}", BomVersionState.Draft,
-                latest?.Id, null, null, null, null, items.OrderBy(item => item.Sequence).ToArray(), actor, now, actor, now, null);
+            if (!projects.TryGetValue(projectId, out var project)) throw new PdmNotFoundException("项目不存在。");
+            draft = new BomVersion(Guid.NewGuid(), projectId, kind, number, $"{prefix}-{ProjectNumberPolicy.BusinessCode(project)}-B{number:D2}", BomVersionState.Draft,
+                latest?.Id, null, null, null, null, items.OrderBy(item => item.Sequence).ToArray(), actor, now, actor, now, null)
+            {
+                MotherMaterialId = header?.MaterialId
+            };
             bomVersions[draft.Id] = draft;
             return Task.FromResult(draft);
         }
@@ -1383,7 +1532,7 @@ public sealed class InMemoryPdmRepository : IPdmRepository
             if (!documents.TryGetValue(documentId, out var document)) throw new PdmNotFoundException("图档不存在。");
             if (!versions.TryGetValue(sourceVersionId, out var source) || source.DocumentId != documentId) throw new PdmNotFoundException("历史版本不存在。");
             var revision = document.Revision.NextWork();
-            var restored = source with { Id = Guid.NewGuid(), Revision = revision, Status = DocumentVersionStatus.Work, StorageRelativePath = restoredFile.RelativePath, FileLength = restoredFile.Length, Sha256 = restoredFile.Sha256, CreatedBy = actor, CreatedAt = DateTimeOffset.UtcNow, ChangeNote = changeNote, SourceVersionId = source.Id, SourceDescription = $"由{source.Revision.Display}恢复生成{revision.Display}", ApprovalTaskId = null, ReleasePackageId = null };
+            var restored = source with { Id = Guid.NewGuid(), Revision = revision, Status = DocumentVersionStatus.Work, StorageRelativePath = restoredFile.RelativePath, FileLength = restoredFile.Length, Sha256 = restoredFile.Sha256, CreatedBy = actor, CreatedAt = DateTimeOffset.UtcNow, ChangeNote = changeNote, SourceVersionId = source.Id, SourceDescription = $"由{source.Revision.Display}恢复生成{revision.Display}", ApprovalTaskId = null, ReleasePackageId = null, Preview = null };
             versions[restored.Id] = restored;
             var updated = ClearEditLock(document with { Revision = revision, State = DocumentLifecycleState.Work }, restored.CreatedAt);
             documents[documentId] = updated;
@@ -1412,13 +1561,50 @@ public sealed class InMemoryPdmRepository : IPdmRepository
         }
     }
 
-    public Task<IReadOnlyList<DocumentVersion>> PublishReleasePackageVersionsAsync(Guid releasePackageId, Guid approvalTaskId, string actor, CancellationToken cancellationToken)
+    public Task<IReadOnlyList<ReleasePreviewSource>> ListReleasePreviewSourcesAsync(Guid releasePackageId, CancellationToken cancellationToken)
+    {
+        lock (gate)
+        {
+            if (!packages.TryGetValue(releasePackageId, out var package) || package.State != ReleasePackageState.Publishing)
+                throw new PdmConflictException("发布包尚未进入服务器转换状态。");
+            var sources = new List<ReleasePreviewSource>();
+            foreach (var documentId in EnumerateDocumentIds(referenceTree).Distinct())
+            {
+                if (!documents.TryGetValue(documentId, out var document)
+                    || document.Kind is not (DocumentKind.Assembly or DocumentKind.Part or DocumentKind.Drawing)) continue;
+                var source = versions.Values
+                    .Where(version => version.DocumentId == documentId)
+                    .OrderByDescending(version => version.CreatedAt)
+                    .FirstOrDefault();
+                if (source is null) continue;
+                source.PropertySnapshot.TryGetValue("SourceFileSha256", out var sourceSha256);
+                sources.Add(new ReleasePreviewSource(
+                    document.Id,
+                    source.Id,
+                    document.DrawingNumber,
+                    document.FileName,
+                    document.Kind,
+                    source.StorageRelativePath,
+                    source.FileLength,
+                    source.Sha256,
+                    string.IsNullOrWhiteSpace(sourceSha256) ? source.Sha256 : sourceSha256));
+            }
+            return Task.FromResult<IReadOnlyList<ReleasePreviewSource>>(sources);
+        }
+    }
+
+    public Task<IReadOnlyList<DocumentVersion>> PublishReleasePackageVersionsAsync(
+        Guid releasePackageId,
+        Guid approvalTaskId,
+        string actor,
+        IReadOnlyDictionary<Guid, DocumentPreviewArtifact> previews,
+        CancellationToken cancellationToken)
     {
         lock (gate)
         {
             if (!packages.TryGetValue(releasePackageId, out var package) || package.State != ReleasePackageState.Publishing)
                 throw new PdmConflictException("发布包尚未进入发布状态。");
-            if (!package.ApprovalTasks.Any(task => task.Id == approvalTaskId && task.Stage == ApprovalStage.Approval && task.Decision == ApprovalDecision.Approved))
+            if (!package.ApprovalTasks.Any(task => task.Id == approvalTaskId && task.Decision == ApprovalDecision.Approved))
                 throw new PdmConflictException("最终批准记录无效。");
             var released = new List<DocumentVersion>();
             foreach (var documentId in EnumerateDocumentIds(referenceTree).Distinct())
@@ -1426,8 +1612,12 @@ public sealed class InMemoryPdmRepository : IPdmRepository
                 if (!documents.TryGetValue(documentId, out var document)) continue;
                 var source = versions.Values.Where(version => version.DocumentId == documentId).OrderByDescending(version => version.CreatedAt).FirstOrDefault();
                 if (source is null || source.Status != DocumentVersionStatus.Work || !string.Equals(source.Revision.Display, document.Revision.Display, StringComparison.OrdinalIgnoreCase)) continue;
+                DocumentPreviewArtifact? preview = null;
+                if (document.Kind is DocumentKind.Assembly or DocumentKind.Part or DocumentKind.Drawing
+                    && !previews.TryGetValue(documentId, out preview))
+                    throw new PdmConflictException($"图档{document.DrawingNumber}缺少服务器生成的发布预览文件。");
                 var revision = source.Revision.Release();
-                var version = source with { Id = Guid.NewGuid(), Revision = revision, Status = DocumentVersionStatus.Released, CreatedBy = actor, CreatedAt = DateTimeOffset.UtcNow, ChangeNote = $"审批发布{revision.Display}", SourceVersionId = source.Id, SourceDescription = $"由{source.Revision.Display}审批发布", ApprovalTaskId = approvalTaskId, ReleasePackageId = releasePackageId };
+                var version = source with { Id = Guid.NewGuid(), Revision = revision, Status = DocumentVersionStatus.Released, CreatedBy = actor, CreatedAt = DateTimeOffset.UtcNow, ChangeNote = $"审批发布{revision.Display}", SourceVersionId = source.Id, SourceDescription = $"由{source.Revision.Display}审批发布", ApprovalTaskId = approvalTaskId, ReleasePackageId = releasePackageId, Preview = preview };
                 versions[version.Id] = version;
                 documents[documentId] = ClearEditLock(document with { Revision = revision, State = DocumentLifecycleState.Released }, version.CreatedAt);
                 released.Add(version);
@@ -1484,6 +1674,21 @@ public sealed class InMemoryPdmRepository : IPdmRepository
         }
     }
 
+    public Task<ReleasePackage> ApplyReleasePackageMaterialCodesAsync(Guid releasePackageId, IReadOnlyDictionary<Guid, string> materialCodes, string actor, CancellationToken cancellationToken)
+    {
+        lock (gate)
+        {
+            if (!packages.TryGetValue(releasePackageId, out var package)) throw new PdmNotFoundException("发布包不存在。");
+            if (package.State is not (ReleasePackageState.ProcessReview or ReleasePackageState.Approval)) throw new PdmConflictException("只有审批中的发布包可以在终审时回填非标件料号。");
+            BomItem Apply(BomItem item) => materialCodes.TryGetValue(item.Id, out var code) ? item with { DrawingNumber = code } : item;
+            var updated = package with { NonStandardBomSnapshot = package.NonStandardBomSnapshot.Select(Apply).ToArray(), MechanicalBomSnapshot = package.MechanicalBomSnapshot.Select(Apply).ToArray() };
+            packages[releasePackageId] = updated;
+            if (package.NonStandardBomVersionId is Guid versionId && bomVersions.TryGetValue(versionId, out var version))
+                bomVersions[versionId] = version with { Items = updated.NonStandardBomSnapshot, UpdatedBy = actor, UpdatedAt = timeProvider.GetUtcNow() };
+            return Task.FromResult(updated);
+        }
+    }
+
     public Task<ReleasePackage> SubmitReleasePackageAsync(Guid releasePackageId, string actor, CancellationToken cancellationToken)
     {
         lock (gate)
@@ -1491,17 +1696,28 @@ public sealed class InMemoryPdmRepository : IPdmRepository
             if (!packages.TryGetValue(releasePackageId, out var package)) throw new PdmNotFoundException("发布包不存在。");
             if (package.State is not (ReleasePackageState.Draft or ReleasePackageState.Rejected or ReleasePackageState.PublishFailed))
                 throw new PdmConflictException("只有草稿、已驳回或发布失败的发布包可以提交。");
-            var documentIds = EnumerateDocumentIds(referenceTree).Distinct().ToArray();
-            var editing = documentIds.Select(id => documents.GetValueOrDefault(id)).FirstOrDefault(document => document?.CheckedOutBy is not null);
-            if (editing is not null) throw new PdmConflictException($"图档{editing.DrawingNumber}正在由{editing.CheckedOutBy}编辑，不能提交审批。");
             var now = timeProvider.GetUtcNow();
-            foreach (var documentId in documentIds)
+            if (package.LocksDocuments)
             {
-                if (documents.TryGetValue(documentId, out var document) && document.State != DocumentLifecycleState.Obsolete)
-                    documents[documentId] = document with { State = DocumentLifecycleState.InReview, UpdatedAt = now };
+                var documentIds = EnumerateDocumentIds(referenceTree).Distinct().ToArray();
+                var editing = documentIds.Select(id => documents.GetValueOrDefault(id)).FirstOrDefault(document => document?.CheckedOutBy is not null);
+                if (editing is not null) throw new PdmConflictException($"图档{editing.DrawingNumber}正在由{editing.CheckedOutBy}编辑，不能提交审批。");
+                foreach (var documentId in documentIds)
+                {
+                    if (documents.TryGetValue(documentId, out var document) && document.State != DocumentLifecycleState.Obsolete)
+                        documents[documentId] = document with { State = DocumentLifecycleState.InReview, UpdatedAt = now };
+                }
             }
-            var tasks = package.ApprovalTasks.Select(task => task with { DecisionBy = null, Decision = null, Comment = null, DecidedAt = null }).ToArray();
-            var submitted = package with { State = ReleasePackageState.ProcessReview, ApprovalTasks = tasks, PublishedAt = null, PublishedPath = null, PublishError = null };
+            var resetTasks = package.ApprovalTasks.OrderBy(task => task.StepOrder).Select(task => task with
+            {
+                DecisionBy = null, Decision = null, Comment = null, DecidedAt = null,
+                IsEmergencySubstitute = false, EmergencyReason = null
+            }).ToArray();
+            if (package.Scope != ReleaseScope.LegacyCombined && resetTasks.Length > 0)
+                resetTasks[0] = resetTasks[0] with { DecisionBy = actor, Decision = ApprovalDecision.Approved, Comment = "提交人自检", DecidedAt = now };
+            var pendingCount = resetTasks.Count(task => task.Decision is null);
+            var state = pendingCount <= 1 ? ReleasePackageState.Approval : ReleasePackageState.ProcessReview;
+            var submitted = package with { State = state, ApprovalTasks = resetTasks, PublishedAt = null, PublishedPath = null, PublishError = null };
             packages[package.Id] = submitted;
             return Task.FromResult(submitted);
         }
@@ -1515,19 +1731,26 @@ public sealed class InMemoryPdmRepository : IPdmRepository
             if (package.State is not (ReleasePackageState.ProcessReview or ReleasePackageState.Approval))
                 throw new PdmConflictException("只有审批中的发布包可以撤回。");
             var now = timeProvider.GetUtcNow();
-            foreach (var documentId in EnumerateDocumentIds(referenceTree).Distinct())
+            if (package.LocksDocuments)
             {
-                if (documents.TryGetValue(documentId, out var document) && document.State == DocumentLifecycleState.InReview)
-                    documents[documentId] = document with { State = DocumentLifecycleState.Work, UpdatedAt = now };
+                foreach (var documentId in EnumerateDocumentIds(referenceTree).Distinct())
+                {
+                    if (documents.TryGetValue(documentId, out var document) && document.State == DocumentLifecycleState.InReview)
+                        documents[documentId] = document with { State = DocumentLifecycleState.Work, UpdatedAt = now };
+                }
             }
-            var tasks = package.ApprovalTasks.Select(task => task with { DecisionBy = null, Decision = null, Comment = null, DecidedAt = null }).ToArray();
+            var tasks = package.ApprovalTasks.Select(task => task with
+            {
+                DecisionBy = null, Decision = null, Comment = null, DecidedAt = null,
+                IsEmergencySubstitute = false, EmergencyReason = null
+            }).ToArray();
             var withdrawn = package with { State = ReleasePackageState.Draft, ApprovalTasks = tasks };
             packages[releasePackageId] = withdrawn;
             return Task.FromResult(withdrawn);
         }
     }
 
-    public Task<ReleasePackage> DecideApprovalAsync(Guid taskId, string actor, ApprovalDecision decision, string? comment, CancellationToken cancellationToken)
+    public Task<ReleasePackage> DecideApprovalAsync(Guid taskId, string actor, ApprovalDecision decision, string? comment, bool emergencySubstitute, string? emergencyReason, CancellationToken cancellationToken)
     {
         lock (gate)
         {
@@ -1539,13 +1762,13 @@ public sealed class InMemoryPdmRepository : IPdmRepository
                 throw new PdmConflictException("审批任务已经处理。 ");
             }
 
-            if (!string.Equals(task.Assignee, actor, StringComparison.OrdinalIgnoreCase) && !string.Equals(actor, "admin", StringComparison.OrdinalIgnoreCase))
+            if (!emergencySubstitute && !string.Equals(task.Assignee, actor, StringComparison.OrdinalIgnoreCase) && !string.Equals(actor, "admin", StringComparison.OrdinalIgnoreCase))
             {
                 throw new PdmRuleException("只能处理分配给自己的审批任务。 ");
             }
 
-            var expectedState = task.Stage == ApprovalStage.ProcessReview ? ReleasePackageState.ProcessReview : ReleasePackageState.Approval;
-            if (package.State != expectedState)
+            var currentTask = package.ApprovalTasks.OrderBy(item => item.StepOrder).FirstOrDefault(item => item.Decision is null);
+            if (currentTask?.Id != taskId || package.State is not (ReleasePackageState.ProcessReview or ReleasePackageState.Approval))
             {
                 throw new PdmConflictException("当前发布包尚未到达该审批节点。 ");
             }
@@ -1555,23 +1778,29 @@ public sealed class InMemoryPdmRepository : IPdmRepository
                 Decision = decision,
                 DecisionBy = actor,
                 Comment = comment,
-                DecidedAt = DateTimeOffset.UtcNow
+                DecidedAt = timeProvider.GetUtcNow(),
+                IsEmergencySubstitute = emergencySubstitute,
+                EmergencyReason = emergencyReason
             };
             var updatedTasks = package.ApprovalTasks.Select(item => item.Id == taskId ? updatedTask : item).ToArray();
+            var remaining = updatedTasks.Count(item => item.Decision is null);
             var nextState = decision == ApprovalDecision.Rejected
                 ? ReleasePackageState.Rejected
-                : task.Stage == ApprovalStage.ProcessReview
-                    ? ReleasePackageState.Approval
-                    : ReleasePackageState.Publishing;
+                : remaining == 0 ? ReleasePackageState.Publishing
+                : remaining == 1 ? ReleasePackageState.Approval
+                : ReleasePackageState.ProcessReview;
             var updated = package with { ApprovalTasks = updatedTasks, State = nextState };
             packages[package.Id] = updated;
             if (nextState == ReleasePackageState.Rejected)
             {
                 var now = timeProvider.GetUtcNow();
-                foreach (var documentId in EnumerateDocumentIds(referenceTree).Distinct())
+                if (package.LocksDocuments)
                 {
-                    if (documents.TryGetValue(documentId, out var document) && document.State == DocumentLifecycleState.InReview)
-                        documents[documentId] = document with { State = DocumentLifecycleState.Work, UpdatedAt = now };
+                    foreach (var documentId in EnumerateDocumentIds(referenceTree).Distinct())
+                    {
+                        if (documents.TryGetValue(documentId, out var document) && document.State == DocumentLifecycleState.InReview)
+                            documents[documentId] = document with { State = DocumentLifecycleState.Work, UpdatedAt = now };
+                    }
                 }
             }
             return Task.FromResult(updated);
@@ -1607,6 +1836,9 @@ public sealed class InMemoryPdmRepository : IPdmRepository
                 PublishedPath = publishedPath,
                 PublishedAt = publishedAt
             };
+            foreach (var versionId in new[] { package.StandardBomVersionId, package.NonStandardBomVersionId, package.ElectricalBomVersionId }.Where(id => id.HasValue).Select(id => id!.Value))
+                if (bomVersions.TryGetValue(versionId, out var version) && version.State == BomVersionState.InReview)
+                    bomVersions[versionId] = version with { State = BomVersionState.Released, UpdatedAt = publishedAt, ReleasedAt = publishedAt };
             return Task.CompletedTask;
         }
     }
@@ -1624,7 +1856,8 @@ public sealed class InMemoryPdmRepository : IPdmRepository
                 if (bomVersions.TryGetValue(id, out var version) && version.State == BomVersionState.InReview)
                     bomVersions[id] = version with { State = BomVersionState.Released, UpdatedBy = actor, UpdatedAt = publishedAt, ReleasedAt = publishedAt };
             var sequence = manufacturingBomBaselines.Values.Where(item => item.ProjectId == current.ProjectId).Select(item => item.Sequence).DefaultIfEmpty().Max() + 1;
-            var baseline = new ManufacturingBomBaseline(Guid.NewGuid(), current.ProjectId, sequence, $"BL-{sequence:D3}", versionIds[0], versionIds[1], versionIds[2],
+            if (!projects.TryGetValue(current.ProjectId, out var project)) throw new PdmNotFoundException("项目不存在。");
+            var baseline = new ManufacturingBomBaseline(Guid.NewGuid(), current.ProjectId, sequence, $"BL-{ProjectNumberPolicy.BusinessCode(project)}-{sequence:D3}", versionIds[0], versionIds[1], versionIds[2],
                 current.ChangeNumber ?? current.Number, current.ChangeReason ?? "兼容既有发布流程创建的设变", current.EffectiveSerialFrom ?? "未指定", current.EffectiveSerialTo,
                 current.Id, actor, publishedAt);
             manufacturingBomBaselines[baseline.Id] = baseline;
@@ -1704,6 +1937,20 @@ public sealed class InMemoryPdmRepository : IPdmRepository
 
     public Task CreateUserAsync(UserAccount user, CancellationToken cancellationToken)
     {
+        if (user.CompanyId is null)
+        {
+            Guid? defaultCompanyId = null;
+            foreach (var project in projects.Values)
+            {
+                if (project.OrganizationId is Guid organizationId && organizations.TryGetValue(organizationId, out var organization) && organization.IsActive)
+                {
+                    defaultCompanyId = organizationId;
+                    break;
+                }
+            }
+            if (!defaultCompanyId.HasValue || defaultCompanyId == Guid.Empty) defaultCompanyId = SeedOrganizations().First(item => item.IsActive).Id;
+            user = user with { CompanyId = defaultCompanyId == Guid.Empty ? null : defaultCompanyId };
+        }
         if (users.Values.Any(item => string.Equals(item.Username, user.Username, StringComparison.OrdinalIgnoreCase)) || !users.TryAdd(user.Id, user))
         {
             throw new PdmConflictException("用户名已经存在。 ");
@@ -1755,10 +2002,9 @@ public sealed class InMemoryPdmRepository : IPdmRepository
     private void EnsureProjectFolderTree(Guid projectId)
     {
         var project = projects.GetValueOrDefault(projectId) ?? throw new PdmNotFoundException("项目不存在。");
-        var root = project.ParentProjectId is null
-            ? project
-            : projects.GetValueOrDefault(project.ParentProjectId.Value) ?? throw new PdmNotFoundException("主项目不存在。");
-        var targets = projects.Values.Where(item => item.Id == root.Id || item.ParentProjectId == root.Id).OrderBy(item => item.ChildSequence).ToArray();
+        var rootId = project.RootProjectId ?? project.Id;
+        var root = projects.GetValueOrDefault(rootId) ?? throw new PdmNotFoundException("主项目不存在。");
+        var targets = projects.Values.Where(item => item.Id == root.Id || item.RootProjectId == root.Id).OrderBy(item => item.Code).ToArray();
         var actualIds = new Dictionary<string, Guid>(StringComparer.OrdinalIgnoreCase);
         var rootFolder = UpsertFolder(root.Id, null, root.Id, "root", "root", root.Code, ProjectFolderPurpose.Root, 0, true, true);
         actualIds["root"] = rootFolder.Id;
@@ -1874,7 +2120,7 @@ public sealed class InMemoryPdmRepository : IPdmRepository
     private bool CanViewProject(Project project, string actor, UserRole role)
     {
         if (role == UserRole.Administrator) return true;
-        var root = project.ParentProjectId is null ? project : projects.GetValueOrDefault(project.ParentProjectId.Value);
+        var root = projects.GetValueOrDefault(project.RootProjectId ?? project.Id);
         if (root is null) return false;
         if (string.Equals(root.PrimaryProjectManager, actor, StringComparison.OrdinalIgnoreCase)
             || root.CollaborativeProjectManagers.Contains(actor, StringComparer.OrdinalIgnoreCase)
@@ -1890,10 +2136,12 @@ public sealed class InMemoryPdmRepository : IPdmRepository
     private Project ApplyCapabilities(Project project, string actor, UserRole role)
     {
         var documentCount = documents.Values.Count(item => item.ProjectId == project.Id);
+        var modelDocumentCount = documents.Values.Count(item => item.ProjectId == project.Id && item.Kind is DocumentKind.Assembly or DocumentKind.Part);
+        var drawingDocumentCount = documents.Values.Count(item => item.ProjectId == project.Id && item.Kind == DocumentKind.Drawing);
         var businessStatus = BuildBusinessStatus(project.Id);
         var rootDocumentCheckedOutBy = RootDocumentCheckedOutBy(project.Id);
         if (role == UserRole.Administrator)
-            return project with { CanAssignExecutionUnit = project.ParentProjectId is null, CanManageMainStaffing = project.ParentProjectId is null && project.ExecutionUnitId is not null, CanAssignDesigners = project.ParentProjectId is not null, CanReadContent = true, DocumentCount = documentCount, BusinessStatus = businessStatus, RootDocumentCheckedOutBy = rootDocumentCheckedOutBy };
+            return project with { CanAssignExecutionUnit = project.ParentProjectId is null, CanManageMainStaffing = project.ParentProjectId is null && project.ExecutionUnitId is not null, CanAssignDesigners = project.ParentProjectId is not null, CanReadContent = true, DocumentCount = documentCount, ModelDocumentCount = modelDocumentCount, DrawingDocumentCount = drawingDocumentCount, BusinessStatus = businessStatus, RootDocumentCheckedOutBy = rootDocumentCheckedOutBy };
         var canManage = project.ParentProjectId is null && project.ExecutionUnitId is not null
             && organizationManagers.TryGetValue(project.ExecutionUnitId.Value, out var managers)
             && (string.Equals(managers.PrimaryManager, actor, StringComparison.OrdinalIgnoreCase) || managers.CollaborativeManagers.Contains(actor, StringComparer.OrdinalIgnoreCase));
@@ -1905,6 +2153,8 @@ public sealed class InMemoryPdmRepository : IPdmRepository
             CanAssignDesigners = HasUserPermission(actor, role, PermissionCodes.ProjectDesignerAssign) && project.ParentProjectId is not null && string.Equals(project.DesignLead, actor, StringComparison.OrdinalIgnoreCase),
             CanReadContent = canReadContent,
             DocumentCount = canReadContent ? documentCount : null,
+            ModelDocumentCount = canReadContent ? modelDocumentCount : null,
+            DrawingDocumentCount = canReadContent ? drawingDocumentCount : null,
             BusinessStatus = canReadContent ? businessStatus : null,
             RootDocumentCheckedOutBy = canReadContent ? rootDocumentCheckedOutBy : null
         };
@@ -1930,7 +2180,7 @@ public sealed class InMemoryPdmRepository : IPdmRepository
 
     private bool HasProjectContentAssignment(Project project, string actor)
     {
-        var root = project.ParentProjectId is null ? project : projects.GetValueOrDefault(project.ParentProjectId.Value);
+        var root = projects.GetValueOrDefault(project.RootProjectId ?? project.Id);
         return (root is not null && string.Equals(root.DesignLead, actor, StringComparison.OrdinalIgnoreCase))
             || project.Designers.Contains(actor, StringComparer.OrdinalIgnoreCase)
             || packages.Values.Any(package => package.ProjectId == project.Id

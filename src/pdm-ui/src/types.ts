@@ -26,7 +26,9 @@ export interface ProjectSummary {
   signedDate?: string
   quantity: number
   parentProjectId?: string
+  rootProjectId?: string
   childSequence?: number
+  bomItemCategoryCode?: '0301' | '0302'
   serialNumbers: string[]
   responsibleUsers: string[]
   executionUnitId?: string
@@ -36,6 +38,8 @@ export interface ProjectSummary {
   designLead?: string
   designers: string[]
   documentCount?: number
+  modelDocumentCount?: number
+  drawingDocumentCount?: number
   businessStatus?: string
   rootDocumentCheckedOutBy?: string
   canAssignExecutionUnit: boolean
@@ -53,12 +57,14 @@ export interface CreateProjectInput {
   projectAlias?: string
   signedDate: string
   quantity: number
+  bomItemCategoryCode: '0301' | '0302'
 }
 
 export interface CreateSubprojectInput {
   name: string
   projectAlias?: string
   quantity: number
+  equipmentTypeCode?: number
 }
 
 export interface UpdateProjectInput {
@@ -111,8 +117,25 @@ export interface CrmCustomerSyncResult {
   settings: CrmIntegrationSettings
   customers: PdmCustomer[]
 }
-export interface PdmUser { username: string; displayName: string; role: string; isActive: boolean }
-export interface SavePdmUserInput { username: string; displayName: string; role: string; isActive: boolean; password?: string }
+export interface PdmUser {
+  username: string
+  displayName: string
+  role: string
+  isActive: boolean
+  companyId?: string | null
+  crossCompanyView?: boolean
+  accessibleCompanyIds?: string[]
+}
+export interface SavePdmUserInput {
+  username: string
+  displayName: string
+  role: string
+  isActive: boolean
+  companyId: string
+  crossCompanyView: boolean
+  accessibleCompanyIds: string[]
+  password?: string
+}
 export interface PdmUserProfile {
   username: string
   displayName: string
@@ -151,7 +174,16 @@ export interface PdmSystemSettings {
   bomWeightProperty: string
   bomPropertyMappings: BomPropertyMapping[]
   validationRules: BomValidationRules
+  approvalWorkflows?: ReleaseApprovalSettings
+  materialCodeApproval?: MaterialCodeApprovalSettings
+  releaseChangeReasonTypes?: string[]
 }
+export interface MaterialCodeApprovalSettings { version: number; approverRoleCodes: string[] }
+export type ApprovalStage = 'ProcessReview' | 'Approval' | 'MechanicalEngineer' | 'MainDesigner' | 'MechanicalSupervisor' | 'HardwareEngineer' | 'HardwareSupervisor' | 'StandardizationSupervisor'
+export type ApprovalAssigneeSource = 'Submitter' | 'ProjectDesignLead' | 'FixedUser' | 'PrimaryUnitManager' | 'ParentUnitManager'
+export interface ApprovalWorkflowStepTemplate { stage: ApprovalStage; name: string; assigneeSource: ApprovalAssigneeSource; fixedAssignee?: string | null }
+export interface ApprovalWorkflowTemplate { code: string; name: string; version: number; steps: ApprovalWorkflowStepTemplate[] }
+export interface ReleaseApprovalSettings { mechanical: ApprovalWorkflowTemplate; electrical: ApprovalWorkflowTemplate; emergencySubstituteRoleCode: string }
 export type BomValidationField = 'drawingNumber' | 'name' | 'unit' | 'specification' | 'brand' | 'material' | 'surfaceTreatment' | 'weight' | 'quantity' | 'revision' | 'remark'
 export interface BomValidationRules {
   standard: BomValidationField[]
@@ -209,7 +241,7 @@ export interface MainProjectStaffingInput { primaryProjectManager: string; colla
 export interface DocumentNode {
   /** Unique assembly occurrence. Tree selection and rendering must use this value. */
   id: string
-  /** PDM document identity. Different occurrences of one part intentionally share this value. */
+  /** PLM document identity. Different occurrences of one part intentionally share this value. */
   documentId?: string
   drawingNumber: string
   name: string
@@ -340,6 +372,8 @@ export interface BomItem {
   complete: boolean
   sourceDocumentId?: string
   sourceConfiguration?: string
+  sourceInstancePath?: string
+  parentDrawingNumber?: string
   source?: 'Auto' | 'Manual'
   manuallyOverridden?: boolean
   pendingRemoval?: boolean
@@ -373,6 +407,7 @@ export interface BatchUpdateBomItemsInput {
   weight?: string
   quantity?: number
   revision?: string
+  parentDrawingNumber?: string
   complete?: boolean
 }
 export interface BomEmptyDeclaration { kind: BomKind; declaredEmpty: boolean; updatedBy?: string; updatedAt?: string }
@@ -435,6 +470,17 @@ export interface ApprovalStep {
   detail: string
   decision?: string | number
   comment?: string
+  stepOrder?: number
+  emergencySubstitute?: boolean
+  emergencyReason?: string
+}
+
+export type ReleaseScope = 'LegacyCombined' | 'StandardLongLead' | 'StandardFormal' | 'StandardSupplement' | 'ElectricalFormal' | 'ElectricalSupplement' | 'NonStandardWithDrawing'
+
+export interface CreateReleasePackageInput {
+  changeReason: string
+  scope: Exclude<ReleaseScope, 'LegacyCombined'>
+  selectedBomItemIds: string[]
 }
 
 export interface ReleasePackageSummary {
@@ -451,6 +497,108 @@ export interface ReleasePackageSummary {
   standardBomRevision?: string
   nonStandardBomRevision?: string
   electricalBomRevision?: string
+  standardBomVersionId?: string
+  nonStandardBomVersionId?: string
+  electricalBomVersionId?: string
+  standardBomSnapshot: BomItem[]
+  nonStandardBomSnapshot: BomItem[]
+  electricalBomSnapshot: BomItem[]
+  createdAt?: string
+  publishedAt?: string
+  scope: ReleaseScope
+  workflowCode?: string
+  workflowVersion: number
+  selectedBomItemIds: string[]
+  createsManufacturingBaseline: boolean
+  locksDocuments: boolean
+}
+
+export type DrawingReviewPackageState = 'InReview' | 'ChangesRequested' | 'WritingProperties' | 'Approved' | 'Stale'
+export type DrawingReviewTarget = 'Model3D' | 'Drawing2D'
+export type DrawingReviewTargetState = 'Pending' | 'ChangesRequested' | 'Approved' | 'Marked'
+export type DrawingReviewDecision = 'Approve' | 'RequestChanges'
+export type DrawingReviewMarkupSeverity = 'Note' | 'Blocking'
+export type DrawingReviewMarkupState = 'Open' | 'Resolved'
+
+export type DrawingReviewBadgeTone = 'neutral' | 'pending' | 'warning' | 'success' | 'danger'
+
+export interface DrawingReviewBadge {
+  label: string
+  tone: DrawingReviewBadgeTone
+}
+
+export interface DrawingReviewMarkup {
+  id: string
+  packageId: string
+  itemId: string
+  target: DrawingReviewTarget
+  viewName?: string | null
+  normalizedX?: number | null
+  normalizedY?: number | null
+  text: string
+  severity: DrawingReviewMarkupSeverity
+  state: DrawingReviewMarkupState
+  createdBy: string
+  createdAt: string
+  resolvedBy?: string | null
+  resolvedAt?: string | null
+}
+
+export interface DrawingReviewItem {
+  id: string
+  packageId: string
+  bomItemId: string
+  drawingNumber: string
+  name: string
+  configuration?: string | null
+  modelDocumentId: string
+  modelVersionId: string
+  modelRevision: string
+  modelSha256: string
+  modelCreatedBy: string
+  drawingDocumentId: string
+  drawingVersionId: string
+  drawingRevision: string
+  drawingSha256: string
+  drawingCreatedBy: string
+  modelState: DrawingReviewTargetState
+  modelReviewer?: string | null
+  modelReviewerName?: string | null
+  modelReviewedAt?: string | null
+  modelComment?: string | null
+  drawingState: DrawingReviewTargetState
+  drawingReviewer?: string | null
+  drawingReviewerName?: string | null
+  drawingReviewedAt?: string | null
+  drawingComment?: string | null
+  modelWritebackId?: string | null
+  drawingWritebackId?: string | null
+  modelResultVersionId?: string | null
+  drawingResultVersionId?: string | null
+  effectiveModelVersionId: string
+  effectiveDrawingVersionId: string
+}
+
+export interface DrawingReviewPackage {
+  id: string
+  projectId: string
+  number: string
+  state: DrawingReviewPackageState
+  createdBy: string
+  createdAt: string
+  approvedAt?: string | null
+  items: DrawingReviewItem[]
+  markups: DrawingReviewMarkup[]
+}
+
+export interface AddDrawingReviewMarkupInput {
+  itemId: string
+  target: DrawingReviewTarget
+  viewName?: string
+  normalizedX?: number
+  normalizedY?: number
+  text: string
+  severity: DrawingReviewMarkupSeverity
 }
 
 export interface AuditEntry {
@@ -500,6 +648,13 @@ export interface DocumentVersionSummary {
   changeNote: string
   sourceDescription?: string
   releasePackageId?: string
+  preview?: {
+    format: 'Step' | 'Pdf' | 0 | 1
+    storageRelativePath: string
+    fileLength: number
+    sha256: string
+    sourceSha256: string
+  } | null
 }
 
 export interface VersionChange {
@@ -521,7 +676,7 @@ export interface DocumentVersionComparison {
   bomChanges: VersionChange[]
 }
 
-export type MaterialKind = 'Electrical' | 'Standard' | 'NonStandard'
+export type MaterialKind = 'Electrical' | 'Standard' | 'NonStandard' | 'Product'
 export type MaterialSupplyMode = 'Purchase' | 'Manufacture' | 'Outsource'
 export type MaterialApprovalStatus = 'Draft' | 'Approved'
 export type MaterialSyncStatus = 'NotQueued' | 'PreviewReady' | 'Pending' | 'Succeeded' | 'Failed' | 'NeedsReview' | 'Superseded'
@@ -564,6 +719,49 @@ export interface PdmMaterial {
   sourceSystem: MaterialDataSource
   masterOwner: MaterialMasterOwner
   lastU9SyncedAt?: string | null
+  referenceCount: number
+}
+
+export type BomHeaderKind = 'Master' | 'Standard' | 'NonStandard' | 'Electrical'
+
+export interface ProjectBomHeader {
+  projectId: string
+  kind: BomHeaderKind
+  parentKind?: BomHeaderKind | null
+  materialId?: string | null
+  materialCode?: string | null
+  materialName?: string | null
+  categoryCode?: string | null
+  approvalStatus?: MaterialApprovalStatus | null
+  rowVersion: number
+}
+
+export type MaterialCodeApplicationStatus = 'Pending' | 'Approved' | 'Rejected'
+export interface MaterialCodeApplication {
+  id: string
+  projectId: string
+  bomItemId: string
+  status: MaterialCodeApplicationStatus
+  requestedBy: string
+  requestedAt: string
+  decidedBy?: string | null
+  decidedAt?: string | null
+  decisionComment?: string | null
+  materialId?: string | null
+  materialCode?: string | null
+  rowVersion: number
+  bomItemName?: string | null
+  specification?: string | null
+  brand?: string | null
+  remark?: string | null
+}
+export type MaterialCodeResolutionStatus = 'Matched' | 'NoMatch' | 'Ambiguous' | 'ApplicationPending' | 'ApplicationApproved'
+export interface MaterialCodeResolution {
+  bomItemId: string
+  status: MaterialCodeResolutionStatus
+  material?: PdmMaterial | null
+  candidates: PdmMaterial[]
+  application?: MaterialCodeApplication | null
 }
 
 export interface SaveMaterialInput {
@@ -668,6 +866,13 @@ export interface U9MaterialIntegrationSettings {
   itemQueryPath: string
   itemModifyPath: string
   itemDeletePath: string
+  customerQueryPath: string
+  bomCreatePath: string
+  bomQueryPath: string
+  bomModifyPath: string
+  bomDeletePath: string
+  bomBatchUnapprovePath: string
+  bomBipQueryPagePath: string
   unitCodeMappings: Record<string, string>
   writeEnabled: boolean
   updatedBy?: string | null
@@ -695,7 +900,134 @@ export interface U9ItemQueryResult {
     u9CategoryName?: string | null
     u9UnitCode?: string | null
     u9ItemFormAttribute?: number | null
+    u9Brand?: string | null
+    u9Description?: string | null
+    u9Material?: string | null
+    u9SurfaceTreatment?: string | null
+    u9Weight?: number | null
+    u9WeightUnitCode?: string | null
+    u9PurchaseLink?: string | null
   }>
+}
+
+export interface U9BomComponentReference {
+  sequence?: number | null
+  itemId?: string | null
+  itemCode?: string | null
+  itemName?: string | null
+  itemVersionCode?: string | null
+  usageQty?: number | null
+  issueUomCode?: string | null
+  issueUomName?: string | null
+  parentQty?: number | null
+  componentType?: number | null
+  isEffective?: boolean | null
+  effectiveDate?: string | null
+  disableDate?: string | null
+  remark?: string | null
+  projectMapNum?: string | null
+  issueStyle?: number | null
+  supplyStyle?: number | null
+  isPhantomPart?: boolean | null
+  isDelete?: boolean | null
+}
+
+export interface U9BomReference {
+  itemId?: string | null
+  itemCode?: string | null
+  itemName?: string | null
+  bomVersionCode?: string | null
+  organizationCode?: string | null
+  organizationName?: string | null
+  alternateType?: number | null
+  lot?: number | null
+  productUomCode?: string | null
+  productUomName?: string | null
+  effectiveDate?: string | null
+  disableDate?: string | null
+  status?: number | null
+  bomSort?: number | null
+  bomType?: number | null
+  projectMapNum?: string | null
+  explain?: string | null
+  ecoCode?: string | null
+  isCostRoll?: boolean | null
+  itemSource?: number | null
+  sysState?: number | null
+  components: U9BomComponentReference[]
+  otherId?: string | null
+}
+
+export interface U9BomQueryInput {
+  itemCode: string
+  bomVersionCode?: string | null
+  lot?: number | null
+  productUomCode?: string | null
+}
+
+export interface U9BomQueryExecution {
+  queryPath: string
+  requestPreview: string
+  queriedAt: string
+  result: {
+    responseCode: number
+    responseMessage?: string | null
+    boms: U9BomReference[]
+  }
+}
+
+export type U9BomWriteOperation = 0 | 1 | 2
+
+export interface U9BomComponentInput {
+  sequence: number
+  itemCode: string
+  usageQty: number
+  issueUomCode: string
+  parentQty: number
+  itemVersionCode?: string | null
+  isEffective?: boolean
+  effectiveDate?: string | null
+  disableDate?: string | null
+  remark?: string | null
+  componentType?: number
+  issueStyle?: number
+  supplyStyle?: number
+  isPhantomPart?: boolean
+  isDelete?: boolean
+}
+
+export interface U9BomWriteInput {
+  operation: U9BomWriteOperation
+  itemCode: string
+  bomVersionCode: string
+  productUomCode: string
+  lot: number
+  components: U9BomComponentInput[]
+  effectiveDate?: string | null
+  disableDate?: string | null
+  bomSort?: number
+  bomType?: number
+  projectMapNum?: string | null
+  explain?: string | null
+}
+
+export interface U9BomWritePreview {
+  operation: U9BomWriteOperation
+  path: string
+  requestPreview: string
+  requestSha256: string
+  baselineSha256: string
+  requiredConfirmation: string
+  addedComponentCount: number
+  retainedHistoricalComponentCount: number
+  generatedAt: string
+}
+
+export interface U9BomWriteExecution {
+  preview: U9BomWritePreview
+  writeResult: { responseCode: number; responseMessage?: string | null; rows: Array<{ isSuccess: boolean; errorMessage?: string | null }> }
+  verification: { responseCode: number; responseMessage?: string | null; boms: U9BomReference[] }
+  executedAt: string
 }
 
 export interface U9MaterialSampleItem {
@@ -708,6 +1040,13 @@ export interface U9MaterialSampleItem {
   supplyMode: MaterialSupplyMode
   unitCode: string
   specification?: string | null
+  brand?: string | null
+  material?: string | null
+  surfaceTreatment?: string | null
+  remark?: string | null
+  weight?: number | null
+  weightUnit?: string | null
+  purchaseLink?: string | null
   existsInPdm: boolean
   canImport: boolean
   decision: string
@@ -740,6 +1079,13 @@ export interface UpdateU9MaterialIntegrationInput {
   itemQueryPath: string
   itemModifyPath: string
   itemDeletePath: string
+  customerQueryPath: string
+  bomCreatePath: string
+  bomQueryPath: string
+  bomModifyPath: string
+  bomDeletePath: string
+  bomBatchUnapprovePath: string
+  bomBipQueryPagePath: string
   unitCodeMappings: Record<string, string>
   writeEnabled: boolean
 }

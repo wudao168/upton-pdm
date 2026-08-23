@@ -10,6 +10,7 @@ public sealed class InMemoryMaterialRepository : IMaterialRepository
     private readonly ConcurrentDictionary<Guid, PdmMaterial> materials = new();
     private readonly ConcurrentDictionary<Guid, MaterialSyncTask> tasks = new();
     private readonly ConcurrentDictionary<Guid, Guid> bomLinks = new();
+    private readonly ConcurrentDictionary<Guid, MaterialCodeApplication> applications = new();
     private readonly ConcurrentDictionary<MaterialKind, MaterialCategoryRule> rules = new();
     private readonly ConcurrentDictionary<string, MaterialCategory> categories = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, long> materialCodeCounters = new(StringComparer.OrdinalIgnoreCase);
@@ -29,7 +30,11 @@ public sealed class InMemoryMaterialRepository : IMaterialRepository
         categories["0102"] = Category("0102", "机械外购件", "01", MaterialKind.Standard, true, now, 12);
         categories["0104"] = Category("0104", "生产辅料", "01", null, false, now, 14);
         categories["02"] = Category("02", "半成品", null, null, false, now, 20);
+        categories["0201"] = Category("0201", "夹具", "02", MaterialKind.Product, true, now, 21);
         categories["0204"] = Category("0204", "非标机加件", "02", MaterialKind.NonStandard, true, now, 24);
+        categories["03"] = Category("03", "产成品", null, null, false, now, 30);
+        categories["0301"] = Category("0301", "产线", "03", MaterialKind.Product, true, now, 31);
+        categories["0302"] = Category("0302", "设备", "03", MaterialKind.Product, true, now, 32);
     }
 
     public Task<IReadOnlyList<PdmMaterial>> ListMaterialsAsync(string? query, string? categoryCode, bool includeArchived, int limit, CancellationToken cancellationToken)
@@ -42,6 +47,10 @@ public sealed class InMemoryMaterialRepository : IMaterialRepository
                 .Any(value => value?.Contains(normalized, StringComparison.OrdinalIgnoreCase) == true))
             .OrderBy(item => item.MaterialCode, StringComparer.OrdinalIgnoreCase)
             .Take(Math.Clamp(limit, 1, 500))
+            .Select(item => item with
+            {
+                ReferenceCount = (item.SourceBomItemId is null ? 0 : 1) + bomLinks.Values.Count(value => value == item.Id)
+            })
             .ToArray();
         return Task.FromResult<IReadOnlyList<PdmMaterial>>(result);
     }
@@ -54,6 +63,56 @@ public sealed class InMemoryMaterialRepository : IMaterialRepository
 
     public Task<PdmMaterial?> FindMaterialBySourceBomItemAsync(Guid bomItemId, CancellationToken cancellationToken) =>
         Task.FromResult(materials.Values.FirstOrDefault(item => item.SourceBomItemId == bomItemId));
+
+    public Task<IReadOnlyList<PdmMaterial>> FindApprovedMaterialsBySpecificationAsync(string specification, CancellationToken cancellationToken) =>
+        Task.FromResult<IReadOnlyList<PdmMaterial>>(materials.Values
+            .Where(item => item.ApprovalStatus == MaterialApprovalStatus.Approved && !item.IsArchived)
+            .Where(item => string.Equals(item.Specification?.Trim(), specification.Trim(), StringComparison.OrdinalIgnoreCase))
+            .OrderBy(item => item.MaterialCode, StringComparer.OrdinalIgnoreCase).ToArray());
+
+    public Task<IReadOnlyList<PdmMaterial>> FindApprovedMaterialsByBrandAndSpecificationAsync(string brand, string specification, CancellationToken cancellationToken) =>
+        Task.FromResult<IReadOnlyList<PdmMaterial>>(materials.Values
+            .Where(item => item.ApprovalStatus == MaterialApprovalStatus.Approved && !item.IsArchived)
+            .Where(item => string.Equals(item.Brand?.Trim(), brand.Trim(), StringComparison.OrdinalIgnoreCase)
+                && string.Equals(item.Specification?.Trim(), specification.Trim(), StringComparison.OrdinalIgnoreCase))
+            .OrderBy(item => item.MaterialCode, StringComparer.OrdinalIgnoreCase).ToArray());
+
+    public Task<IReadOnlyList<MaterialCodeApplication>> ListMaterialCodeApplicationsAsync(Guid? projectId, MaterialCodeApplicationStatus? status, CancellationToken cancellationToken) =>
+        Task.FromResult<IReadOnlyList<MaterialCodeApplication>>(applications.Values
+            .Where(item => projectId is null || item.ProjectId == projectId)
+            .Where(item => status is null || item.Status == status)
+            .OrderByDescending(item => item.RequestedAt).ToArray());
+
+    public Task<MaterialCodeApplication?> FindMaterialCodeApplicationAsync(Guid applicationId, CancellationToken cancellationToken) =>
+        Task.FromResult(applications.GetValueOrDefault(applicationId));
+
+    public Task<MaterialCodeApplication?> FindPendingMaterialCodeApplicationByBomItemAsync(Guid bomItemId, CancellationToken cancellationToken) =>
+        Task.FromResult(applications.Values.Where(item => item.BomItemId == bomItemId && item.Status == MaterialCodeApplicationStatus.Pending)
+            .OrderByDescending(item => item.RequestedAt).FirstOrDefault());
+
+    public Task<MaterialCodeApplication> CreateMaterialCodeApplicationAsync(MaterialCodeApplication application, CancellationToken cancellationToken)
+    {
+        lock (gate)
+        {
+            if (applications.Values.Any(item => item.BomItemId == application.BomItemId && item.Status == MaterialCodeApplicationStatus.Pending))
+                throw new PdmConflictException("该BOM物料已有待审批的料号申请。");
+            applications[application.Id] = application;
+            return Task.FromResult(application);
+        }
+    }
+
+    public Task<MaterialCodeApplication> DecideMaterialCodeApplicationAsync(Guid applicationId, long expectedRowVersion, MaterialCodeApplicationStatus status, string actor, string? comment, Guid? materialId, string? materialCode, DateTimeOffset decidedAt, CancellationToken cancellationToken)
+    {
+        lock (gate)
+        {
+            if (!applications.TryGetValue(applicationId, out var current)) throw new PdmNotFoundException("料号申请不存在。");
+            if (current.Status != MaterialCodeApplicationStatus.Pending || current.RowVersion != expectedRowVersion)
+                throw new PdmConflictException("料号申请已由其他标准化人员处理，请刷新后重试。");
+            var saved = current with { Status = status, DecidedBy = actor, DecidedAt = decidedAt, DecisionComment = comment, MaterialId = materialId, MaterialCode = materialCode, RowVersion = current.RowVersion + 1 };
+            applications[applicationId] = saved;
+            return Task.FromResult(saved);
+        }
+    }
 
     public Task<bool> HasMaterialReferencesAsync(Guid materialId, CancellationToken cancellationToken) =>
         Task.FromResult(materials.TryGetValue(materialId, out var material)
@@ -84,7 +143,7 @@ public sealed class InMemoryMaterialRepository : IMaterialRepository
         {
             if (string.IsNullOrWhiteSpace(material.MaterialCode)) throw new PdmRuleException("物料编码尚未预留。");
             if (materials.Values.Any(item => item.MaterialCode.Equals(material.MaterialCode, StringComparison.OrdinalIgnoreCase)))
-                throw new PdmConflictException("预留的PDM物料编码已被占用，请重试。");
+                throw new PdmConflictException("预留的PLM物料编码已被占用，请重试。");
             var saved = material with { CategoryCode = category.Code };
             materials[saved.Id] = saved;
             return Task.FromResult(saved);
@@ -134,6 +193,12 @@ public sealed class InMemoryMaterialRepository : IMaterialRepository
     public Task LinkBomItemAsync(Guid bomItemId, Guid materialId, string actor, DateTimeOffset linkedAt, CancellationToken cancellationToken)
     {
         bomLinks[bomItemId] = materialId;
+        return Task.CompletedTask;
+    }
+
+    public Task UnlinkBomItemAsync(Guid bomItemId, CancellationToken cancellationToken)
+    {
+        bomLinks.TryRemove(bomItemId, out _);
         return Task.CompletedTask;
     }
 
@@ -190,7 +255,7 @@ public sealed class InMemoryMaterialRepository : IMaterialRepository
         lock (gate)
         {
             if (rules.Values.Any(item => item.PdmKind != rule.PdmKind && item.U9CategoryCode.Equals(rule.U9CategoryCode, StringComparison.OrdinalIgnoreCase)))
-                throw new PdmConflictException("U9C料品分类编码已映射到其他PDM分类。");
+                throw new PdmConflictException("U9C料品分类编码已映射到其他PLM分类。");
             rules[rule.PdmKind] = rule;
             if (categories.TryGetValue(rule.U9CategoryCode, out var category))
             {
@@ -284,7 +349,7 @@ public sealed class InMemoryMaterialRepository : IMaterialRepository
             if (!materials.TryGetValue(materialId, out var existing)) throw new PdmNotFoundException("物料主档不存在。");
             if (existing.RowVersion != expectedRowVersion) throw new PdmConflictException("物料主档已被其他用户修改，请刷新后重试。");
             if (existing.SourceSystem != MaterialDataSource.Pdm || existing.MasterOwner != MaterialMasterOwner.Pdm)
-                throw new PdmRuleException("只有PDM来源且PDM主控的料品可以删除。");
+                throw new PdmRuleException("只有PLM来源且PLM主控的料品可以删除。");
             if (existing.SourceBomItemId is not null || bomLinks.Values.Any(value => value == materialId))
                 throw new PdmRuleException("料品已被BOM引用或来源于BOM，不能删除；可改为停用。");
             if (tasks.Values.Any(task => task.MaterialId == materialId && task.Status == MaterialSyncStatus.Pending))
@@ -464,7 +529,7 @@ public sealed class InMemoryMaterialRepository : IMaterialRepository
     }
 
     private static MaterialCategory Category(string code, string name, string? parentCode, MaterialKind? kind, bool allowCreate, DateTimeOffset now, int sortOrder) =>
-        new(code, name, parentCode, null, kind, kind == MaterialKind.NonStandard ? MaterialSupplyMode.Manufacture : MaterialSupplyMode.Purchase,
+        new(code, name, parentCode, null, kind, kind is MaterialKind.NonStandard or MaterialKind.Product ? MaterialSupplyMode.Manufacture : MaterialSupplyMode.Purchase,
             allowCreate, true, true, code, 7, code, sortOrder, "system", now, 1);
 
     private static long MaximumSequence(int sequenceLength) =>

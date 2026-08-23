@@ -117,7 +117,7 @@ public sealed partial class MySqlPdmRepository
             StorageRelativePath = restoredFile.RelativePath, FileLength = restoredFile.Length, Sha256 = restoredFile.Sha256,
             CreatedBy = actor, CreatedAt = timeProvider.GetUtcNow(), ChangeNote = changeNote,
             SourceVersionId = source.Id, SourceDescription = $"由{source.Revision.Display}恢复生成{nextRevision.Display}",
-            ApprovalTaskId = null, ReleasePackageId = null
+            ApprovalTaskId = null, ReleasePackageId = null, Preview = null
         };
         await InsertVersionAsync(connection, transaction, version, cancellationToken);
         source.PropertySnapshot.TryGetValue("SourceFileSha256", out var restoredSourceSha256);
@@ -142,7 +142,7 @@ public sealed partial class MySqlPdmRepository
         var packageState = await connection.QuerySingleOrDefaultAsync<string>(new CommandDefinition("SELECT state FROM release_package WHERE id=@ReleasePackageId FOR UPDATE", new { ReleasePackageId = releasePackageId }, transaction, cancellationToken: cancellationToken));
         if (packageState is null) throw new PdmNotFoundException("发布包不存在。");
         if (packageState is not ("Publishing" or "Published")) throw new PdmConflictException("发布包尚未审批通过，不能生成正式版本。");
-        var taskMatches = await connection.ExecuteScalarAsync<int>(new CommandDefinition("SELECT COUNT(*) FROM approval_task WHERE id=@ApprovalTaskId AND release_package_id=@ReleasePackageId AND stage='Approval' AND decision_value='Approved'", new { ApprovalTaskId = approvalTaskId, ReleasePackageId = releasePackageId }, transaction, cancellationToken: cancellationToken));
+        var taskMatches = await connection.ExecuteScalarAsync<int>(new CommandDefinition("SELECT COUNT(*) FROM approval_task WHERE id=@ApprovalTaskId AND release_package_id=@ReleasePackageId AND decision_value='Approved'", new { ApprovalTaskId = approvalTaskId, ReleasePackageId = releasePackageId }, transaction, cancellationToken: cancellationToken));
         if (taskMatches != 1) throw new PdmConflictException("最终批准记录与发布包不匹配或尚未批准。");
         var releasedRevision = source.Revision.Release();
         var released = source with
@@ -161,7 +161,58 @@ public sealed partial class MySqlPdmRepository
         return released;
     }
 
-    public async Task<IReadOnlyList<DocumentVersion>> PublishReleasePackageVersionsAsync(Guid releasePackageId, Guid approvalTaskId, string actor, CancellationToken cancellationToken)
+    public async Task<IReadOnlyList<ReleasePreviewSource>> ListReleasePreviewSourcesAsync(Guid releasePackageId, CancellationToken cancellationToken)
+    {
+        await using var connection = await OpenAsync(cancellationToken);
+        var package = await connection.QuerySingleOrDefaultAsync<PackagePublishRow>(new CommandDefinition(
+            "SELECT project_id,reference_snapshot_id,state FROM release_package WHERE id=@PackageId",
+            new { PackageId = releasePackageId }, cancellationToken: cancellationToken))
+            ?? throw new PdmNotFoundException("发布包不存在。");
+        if (package.State != ReleasePackageState.Publishing.ToString())
+            throw new PdmConflictException("发布包尚未进入服务器转换状态。");
+        var rootJson = await connection.QuerySingleOrDefaultAsync<string>(new CommandDefinition(
+            "SELECT root_json FROM reference_snapshot WHERE id=@SnapshotId AND project_id=@ProjectId",
+            new { SnapshotId = package.ReferenceSnapshotId, package.ProjectId }, cancellationToken: cancellationToken))
+            ?? throw new PdmConflictException("发布包引用树快照不存在。");
+        var root = JsonSerializer.Deserialize<DocumentReferenceNode>(rootJson, jsonOptions)
+            ?? throw new InvalidDataException("发布包引用树快照损坏。");
+        var sources = new List<ReleasePreviewSource>();
+        foreach (var documentId in EnumerateDocumentIds(root).Distinct())
+        {
+            var row = await connection.QuerySingleOrDefaultAsync<ReleasePreviewSourceRow>(new CommandDefinition(
+                """
+                SELECT d.id document_id,d.drawing_number,d.file_name,d.kind,
+                       v.id source_version_id,v.storage_relative_path,v.file_length,v.sha256,v.property_snapshot_json
+                FROM document d
+                INNER JOIN document_version v ON v.document_id=d.id
+                WHERE d.id=@DocumentId AND d.kind IN ('Assembly','Part','Drawing')
+                ORDER BY v.created_at DESC
+                LIMIT 1
+                """,
+                new { DocumentId = documentId }, cancellationToken: cancellationToken));
+            if (row is null) continue;
+            var properties = JsonSerializer.Deserialize<Dictionary<string, string?>>(row.PropertySnapshotJson, jsonOptions) ?? [];
+            properties.TryGetValue("SourceFileSha256", out var sourceSha256);
+            sources.Add(new ReleasePreviewSource(
+                row.DocumentId,
+                row.SourceVersionId,
+                row.DrawingNumber,
+                row.FileName,
+                Enum.Parse<DocumentKind>(row.Kind),
+                row.StorageRelativePath,
+                row.FileLength,
+                row.Sha256,
+                string.IsNullOrWhiteSpace(sourceSha256) ? row.Sha256 : sourceSha256));
+        }
+        return sources;
+    }
+
+    public async Task<IReadOnlyList<DocumentVersion>> PublishReleasePackageVersionsAsync(
+        Guid releasePackageId,
+        Guid approvalTaskId,
+        string actor,
+        IReadOnlyDictionary<Guid, DocumentPreviewArtifact> previews,
+        CancellationToken cancellationToken)
     {
         await using var connection = await OpenAsync(cancellationToken);
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
@@ -171,7 +222,7 @@ public sealed partial class MySqlPdmRepository
             ?? throw new PdmNotFoundException("发布包不存在。");
         if (package.State != ReleasePackageState.Publishing.ToString()) throw new PdmConflictException("发布包尚未进入发布状态。");
         var taskMatches = await connection.ExecuteScalarAsync<int>(new CommandDefinition(
-            "SELECT COUNT(*) FROM approval_task WHERE id=@ApprovalTaskId AND release_package_id=@PackageId AND stage='Approval' AND decision_value='Approved'",
+            "SELECT COUNT(*) FROM approval_task WHERE id=@ApprovalTaskId AND release_package_id=@PackageId AND decision_value='Approved'",
             new { ApprovalTaskId = approvalTaskId, PackageId = releasePackageId }, transaction, cancellationToken: cancellationToken));
         if (taskMatches != 1) throw new PdmConflictException("最终批准记录与发布包不匹配或尚未批准。");
         var rootJson = await connection.QuerySingleOrDefaultAsync<string>(new CommandDefinition(
@@ -194,13 +245,17 @@ public sealed partial class MySqlPdmRepository
             if (source.Status == DocumentVersionStatus.Released) continue;
             if (!string.Equals(source.Revision.Display, locked.RevisionLabel, StringComparison.OrdinalIgnoreCase))
                 throw new PdmConflictException($"图档{documentId}最新工作版本已变化，发布包不能继续发布。");
+            DocumentPreviewArtifact? preview = null;
+            if (Enum.Parse<DocumentKind>(locked.Kind) is DocumentKind.Assembly or DocumentKind.Part or DocumentKind.Drawing
+                && !previews.TryGetValue(documentId, out preview))
+                throw new PdmConflictException($"图档{documentId}缺少服务器生成的发布预览文件。");
             var revision = source.Revision.Release();
             var released = source with
             {
                 Id = Guid.NewGuid(), Revision = revision, Status = DocumentVersionStatus.Released,
                 CreatedBy = actor, CreatedAt = timeProvider.GetUtcNow(), ChangeNote = $"审批发布{revision.Display}",
                 SourceVersionId = source.Id, SourceDescription = $"由{source.Revision.Display}审批发布",
-                ApprovalTaskId = approvalTaskId, ReleasePackageId = releasePackageId
+                ApprovalTaskId = approvalTaskId, ReleasePackageId = releasePackageId, Preview = preview
             };
             await InsertVersionAsync(connection, transaction, released, cancellationToken);
             var affected = await connection.ExecuteAsync(new CommandDefinition(
@@ -263,12 +318,15 @@ public sealed partial class MySqlPdmRepository
     private async Task InsertVersionAsync(DbConnection connection, DbTransaction transaction, DocumentVersion version, CancellationToken cancellationToken) =>
         await connection.ExecuteAsync(new CommandDefinition(
             """
-            INSERT INTO document_version(id,document_id,revision_label,version_status,storage_relative_path,file_length,sha256,comment,property_snapshot_json,reference_snapshot_json,mechanical_bom_snapshot_json,electrical_bom_snapshot_json,source_version_id,source_description,approval_task_id,release_package_id,created_by,created_at)
-            VALUES(@Id,@DocumentId,@Revision,@Status,@Path,@Length,@Sha256,@Comment,@Properties,@Reference,@Mechanical,@Electrical,@SourceVersionId,@SourceDescription,@ApprovalTaskId,@ReleasePackageId,@CreatedBy,@CreatedAt)
+            INSERT INTO document_version(id,document_id,revision_label,version_status,storage_relative_path,file_length,sha256,comment,property_snapshot_json,reference_snapshot_json,mechanical_bom_snapshot_json,electrical_bom_snapshot_json,source_version_id,source_description,approval_task_id,release_package_id,preview_format,preview_storage_relative_path,preview_file_length,preview_sha256,preview_source_sha256,created_by,created_at)
+            VALUES(@Id,@DocumentId,@Revision,@Status,@Path,@Length,@Sha256,@Comment,@Properties,@Reference,@Mechanical,@Electrical,@SourceVersionId,@SourceDescription,@ApprovalTaskId,@ReleasePackageId,@PreviewFormat,@PreviewPath,@PreviewLength,@PreviewSha256,@PreviewSourceSha256,@CreatedBy,@CreatedAt)
             """,
             new { version.Id, version.DocumentId, Revision = version.Revision.Display, Status = version.Status.ToString(), Path = version.StorageRelativePath, Length = version.FileLength, version.Sha256, Comment = version.ChangeNote,
                 Properties = JsonSerializer.Serialize(version.PropertySnapshot, jsonOptions), Reference = JsonSerializer.Serialize(version.ReferenceSnapshot, jsonOptions), Mechanical = JsonSerializer.Serialize(version.MechanicalBomSnapshot, jsonOptions), Electrical = JsonSerializer.Serialize(version.ElectricalBomSnapshot, jsonOptions),
-                version.SourceVersionId, version.SourceDescription, version.ApprovalTaskId, version.ReleasePackageId, version.CreatedBy, CreatedAt = version.CreatedAt.UtcDateTime }, transaction, cancellationToken: cancellationToken));
+                version.SourceVersionId, version.SourceDescription, version.ApprovalTaskId, version.ReleasePackageId,
+                PreviewFormat = version.Preview?.Format.ToString(), PreviewPath = version.Preview?.StorageRelativePath,
+                PreviewLength = version.Preview?.FileLength, PreviewSha256 = version.Preview?.Sha256, PreviewSourceSha256 = version.Preview?.SourceSha256,
+                version.CreatedBy, CreatedAt = version.CreatedAt.UtcDateTime }, transaction, cancellationToken: cancellationToken));
 
     private async Task<DocumentVersion?> FindDocumentVersionAsync(DbConnection connection, DbTransaction? transaction, Guid documentId, Guid versionId, CancellationToken cancellationToken)
     {
@@ -277,7 +335,7 @@ public sealed partial class MySqlPdmRepository
     }
 
     private static async Task<LockedDocumentRow> LockDocumentAsync(DbConnection connection, DbTransaction transaction, Guid documentId, CancellationToken cancellationToken) =>
-        await connection.QuerySingleOrDefaultAsync<LockedDocumentRow>(new CommandDefinition("SELECT id,revision_label,checked_out_by,checkout_session_id,row_version FROM document WHERE id=@DocumentId FOR UPDATE", new { DocumentId = documentId }, transaction, cancellationToken: cancellationToken))
+        await connection.QuerySingleOrDefaultAsync<LockedDocumentRow>(new CommandDefinition("SELECT id,kind,revision_label,checked_out_by,checkout_session_id,row_version FROM document WHERE id=@DocumentId FOR UPDATE", new { DocumentId = documentId }, transaction, cancellationToken: cancellationToken))
         ?? throw new PdmNotFoundException("图档不存在。");
 
     private DocumentVersion MapDocumentVersion(DocumentVersionRow row) => new(
@@ -287,19 +345,40 @@ public sealed partial class MySqlPdmRepository
         JsonSerializer.Deserialize<DocumentReferenceNode>(row.ReferenceSnapshotJson, jsonOptions) ?? throw new InvalidDataException("版本引用树快照损坏。"),
         JsonSerializer.Deserialize<List<BomItem>>(row.MechanicalBomSnapshotJson, jsonOptions) ?? [],
         JsonSerializer.Deserialize<List<BomItem>>(row.ElectricalBomSnapshotJson, jsonOptions) ?? [],
-        row.SourceVersionId, row.SourceDescription, row.ApprovalTaskId, row.ReleasePackageId);
+        row.SourceVersionId, row.SourceDescription, row.ApprovalTaskId, row.ReleasePackageId,
+        string.IsNullOrWhiteSpace(row.PreviewFormat)
+            ? null
+            : new DocumentPreviewArtifact(
+                Enum.Parse<DocumentPreviewFormat>(row.PreviewFormat),
+                row.PreviewStorageRelativePath ?? throw new InvalidDataException("版本预览路径缺失。"),
+                row.PreviewFileLength ?? throw new InvalidDataException("版本预览大小缺失。"),
+                row.PreviewSha256 ?? throw new InvalidDataException("版本预览SHA-256缺失。"),
+                row.PreviewSourceSha256 ?? throw new InvalidDataException("版本预览源SHA-256缺失。")));
 
-    private const string VersionSelect = "SELECT id,document_id,revision_label,version_status,storage_relative_path,file_length,sha256,comment,property_snapshot_json,reference_snapshot_json,mechanical_bom_snapshot_json,electrical_bom_snapshot_json,source_version_id,source_description,approval_task_id,release_package_id,created_by,created_at FROM document_version";
+    private const string VersionSelect = "SELECT id,document_id,revision_label,version_status,storage_relative_path,file_length,sha256,comment,property_snapshot_json,reference_snapshot_json,mechanical_bom_snapshot_json,electrical_bom_snapshot_json,source_version_id,source_description,approval_task_id,release_package_id,preview_format,preview_storage_relative_path,preview_file_length,preview_sha256,preview_source_sha256,created_by,created_at FROM document_version";
 
-    private sealed class LockedDocumentRow { public Guid Id { get; init; } public string RevisionLabel { get; init; } = string.Empty; public string? CheckedOutBy { get; init; } public Guid? CheckoutSessionId { get; init; } public long RowVersion { get; init; } }
+    private sealed class LockedDocumentRow { public Guid Id { get; init; } public string Kind { get; init; } = string.Empty; public string RevisionLabel { get; init; } = string.Empty; public string? CheckedOutBy { get; init; } public Guid? CheckoutSessionId { get; init; } public long RowVersion { get; init; } }
     private sealed class LatestVersionFingerprintRow { public string Sha256 { get; init; } = string.Empty; public string? SourceFileSha256 { get; init; } }
     private sealed class PackagePublishRow { public Guid ProjectId { get; init; } public Guid ReferenceSnapshotId { get; init; } public string State { get; init; } = string.Empty; }
+    private sealed class ReleasePreviewSourceRow
+    {
+        public Guid DocumentId { get; init; }
+        public Guid SourceVersionId { get; init; }
+        public string DrawingNumber { get; init; } = string.Empty;
+        public string FileName { get; init; } = string.Empty;
+        public string Kind { get; init; } = string.Empty;
+        public string StorageRelativePath { get; init; } = string.Empty;
+        public long FileLength { get; init; }
+        public string Sha256 { get; init; } = string.Empty;
+        public string PropertySnapshotJson { get; init; } = "{}";
+    }
     private sealed class DocumentVersionRow
     {
         public Guid Id { get; init; } public Guid DocumentId { get; init; } public string RevisionLabel { get; init; } = string.Empty; public string VersionStatus { get; init; } = string.Empty;
         public string StorageRelativePath { get; init; } = string.Empty; public long FileLength { get; init; } public string Sha256 { get; init; } = string.Empty; public string? Comment { get; init; }
         public string PropertySnapshotJson { get; init; } = "{}"; public string ReferenceSnapshotJson { get; init; } = "{}"; public string MechanicalBomSnapshotJson { get; init; } = "[]"; public string ElectricalBomSnapshotJson { get; init; } = "[]";
         public Guid? SourceVersionId { get; init; } public string? SourceDescription { get; init; } public Guid? ApprovalTaskId { get; init; } public Guid? ReleasePackageId { get; init; }
+        public string? PreviewFormat { get; init; } public string? PreviewStorageRelativePath { get; init; } public long? PreviewFileLength { get; init; } public string? PreviewSha256 { get; init; } public string? PreviewSourceSha256 { get; init; }
         public string CreatedBy { get; init; } = string.Empty; public DateTime CreatedAt { get; init; }
     }
 }

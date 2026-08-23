@@ -1,7 +1,7 @@
 <script setup lang="ts">
-import { Boxes, ClipboardList, FileClock, FolderOpen, FolderTree, LayoutDashboard, PackageCheck } from '@lucide/vue'
+import { Boxes, ClipboardList, FileClock, FolderOpen, FolderTree, LayoutDashboard, PackageCheck, Search } from '@lucide/vue'
 import { ElMessageBox } from 'element-plus'
-import { computed, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 import type { ProjectSummary } from '../types'
 
 export type ProjectTab = 'overview' | 'files' | 'documents' | 'bom' | 'versions' | 'release' | 'records'
@@ -11,12 +11,12 @@ const emit = defineEmits<{ back: []; switch: [projectId: string]; tab: [tab: Pro
 
 const tabs = [
   { key: 'overview', label: '概览', icon: LayoutDashboard },
-  { key: 'files', label: '文件库', icon: FolderOpen },
+  { key: 'files', label: '文件', icon: FolderOpen },
   { key: 'documents', label: '图档', icon: FolderTree },
   { key: 'bom', label: 'BOM', icon: Boxes },
+  { key: 'release', label: '发布', icon: PackageCheck },
   { key: 'versions', label: '版本', icon: FileClock },
-  { key: 'release', label: '审批发布', icon: PackageCheck },
-  { key: 'records', label: '项目记录', icon: ClipboardList },
+  { key: 'records', label: '记录', icon: ClipboardList },
 ] satisfies Array<{ key: ProjectTab; label: string; icon: typeof LayoutDashboard }>
 
 const rootProject = computed(() => {
@@ -42,34 +42,30 @@ const projectSearchQuery = ref('')
 const projectCustomerFilter = ref('')
 const projectExecutionUnitFilter = ref('')
 const projectPersonFilter = ref('')
-const minimumProjectSearchLength = 4
+const projectPage = ref(1)
+const projectPageSize = ref(20)
 const normalizedProjectSearchQuery = computed(() => projectSearchQuery.value.trim().toLocaleLowerCase())
-const projectTextSearchReady = computed(() => [...normalizedProjectSearchQuery.value].length >= minimumProjectSearchLength)
-const projectFiltersActive = computed(() => Boolean(projectCustomerFilter.value || projectExecutionUnitFilter.value || projectPersonFilter.value))
-const projectSearchReady = computed(() => projectTextSearchReady.value || (!normalizedProjectSearchQuery.value && projectFiltersActive.value))
 const projectCustomerOptions = computed(() => [...new Set(rootProjects.value.map(item => item.customerName).filter((item): item is string => Boolean(item)))].sort((left, right) => left.localeCompare(right, 'zh-CN')))
 const projectExecutionUnitOptions = computed(() => [...new Set(rootProjects.value.map(item => item.executionUnitName).filter((item): item is string => Boolean(item)))].sort((left, right) => left.localeCompare(right, 'zh-CN')))
 const projectPersonOptions = computed(() => [...new Set(rootProjects.value.flatMap(item => [item.primaryProjectManager, ...item.collaborativeProjectManagers, item.designLead, ...item.designers]).filter((item): item is string => Boolean(item)))].sort((left, right) => left.localeCompare(right, 'zh-CN')))
 const filteredRootProjects = computed(() => {
   const query = normalizedProjectSearchQuery.value
-  if (!projectSearchReady.value) return []
   return rootProjects.value.filter(item => {
-    if (query && ![item.code, item.name, item.projectAlias, item.deviceModel].some(value => value?.toLocaleLowerCase().includes(query))) return false
+    if (query && ![item.code, item.name, item.projectAlias, item.customerName, item.deviceModel, ...item.serialNumbers].some(value => value?.toLocaleLowerCase().includes(query))) return false
     if (projectCustomerFilter.value && item.customerName !== projectCustomerFilter.value) return false
     if (projectExecutionUnitFilter.value && item.executionUnitName !== projectExecutionUnitFilter.value) return false
     if (projectPersonFilter.value && ![item.primaryProjectManager, ...item.collaborativeProjectManagers, item.designLead, ...item.designers].includes(projectPersonFilter.value)) return false
     return true
-  })
+  }).sort((left, right) => right.code.localeCompare(left.code, 'zh-CN', { numeric: true, sensitivity: 'base' }))
+})
+const projectPageCount = computed(() => Math.max(1, Math.ceil(filteredRootProjects.value.length / projectPageSize.value)))
+const pagedRootProjects = computed(() => {
+  const start = (projectPage.value - 1) * projectPageSize.value
+  return filteredRootProjects.value.slice(start, start + projectPageSize.value)
 })
 
-function projectBrowserDescription(project: ProjectSummary) {
-  return [
-    project.customerName && `客户：${project.customerName}`,
-    project.executionUnitName && `事业部：${project.executionUnitName}`,
-    project.primaryProjectManager && `项目经理：${project.primaryProjectManager}`,
-    project.designLead && `主设：${project.designLead}`,
-  ].filter(Boolean).join(' · ') || '暂无客户及人员信息'
-}
+watch([projectSearchQuery, projectCustomerFilter, projectExecutionUnitFilter, projectPersonFilter, projectPageSize], () => { projectPage.value = 1 })
+watch(projectPageCount, pageCount => { if (projectPage.value > pageCount) projectPage.value = pageCount })
 
 async function confirmProjectSwitch(projectId: string) {
   if (switchConfirmationPending.value || projectId === rootProject.value.id) return false
@@ -100,6 +96,8 @@ function closeProjectBrowser() {
   projectCustomerFilter.value = ''
   projectExecutionUnitFilter.value = ''
   projectPersonFilter.value = ''
+  projectPage.value = 1
+  projectPageSize.value = 20
 }
 
 async function selectBrowsedProject(projectId: string) {
@@ -121,15 +119,25 @@ function documentStatus(project: ProjectSummary, activeProject = false) {
     ? '可编辑'
     : `${owner}编辑中`
 }
+
+function modelDocumentCount(project: ProjectSummary) {
+  return project.modelDocumentCount ?? Math.max((project.documentCount ?? 0) - (project.drawingDocumentCount ?? 0), 0)
+}
+
+function drawingDocumentCount(project: ProjectSummary) {
+  return project.drawingDocumentCount ?? 0
+}
 </script>
 
 <template>
   <div class="pdm-project-layout">
     <aside class="pdm-project-sidebar-stack" aria-label="项目基本信息与全部项目号">
       <section class="pdm-project-sidebar__context" aria-label="当前项目">
-        <div class="pdm-project-switcher"><span class="pdm-visually-hidden">切换项目</span>
-          <input :value="`${rootProject.code} · ${rootProject.name}`" type="text" readonly aria-label="当前项目显示" :title="`${rootProject.code} · ${rootProject.name}`">
-          <button type="button" class="pdm-secondary-action" aria-label="浏览项目" :disabled="switchConfirmationPending" @click="projectBrowserOpen = true">浏览</button>
+        <div class="pdm-project-switcher">
+          <button type="button" class="pdm-project-switcher__display" aria-label="浏览项目" aria-haspopup="dialog" :aria-expanded="projectBrowserOpen" :disabled="switchConfirmationPending" :title="`${rootProject.code} · ${rootProject.name}`" @click="projectBrowserOpen = true">
+            <span>{{ rootProject.code }} · {{ rootProject.name }}</span>
+            <span class="pdm-project-switcher__search-icon" aria-hidden="true"><Search :size="12" /></span>
+          </button>
         </div>
       </section>
 
@@ -169,7 +177,10 @@ function documentStatus(project: ProjectSummary, activeProject = false) {
             <span class="pdm-project-family__identity"><strong>{{ item.code }}</strong><small :title="item.name">{{ item.name }}</small></span>
             <span class="pdm-project-family__meta">
               <span class="pdm-project-family__state">{{ documentStatus(item, item.id === project.id) }}</span>
-              <span v-if="(item.documentCount ?? 0) > 0" class="pdm-project-family__document-tag" :title="`该项目号包含 ${item.documentCount} 个图档`">{{ item.documentCount }}</span>
+              <span class="pdm-project-family__document-counts" :aria-label="`3D图档 ${modelDocumentCount(item)}，2D图档 ${drawingDocumentCount(item)}`">
+                <span class="is-model" :title="`3D图档 ${modelDocumentCount(item)}`">{{ modelDocumentCount(item) }}</span>
+                <span class="is-drawing" :title="`2D图档 ${drawingDocumentCount(item)}`">{{ drawingDocumentCount(item) }}</span>
+              </span>
             </span>
           </button>
         </div>
@@ -193,8 +204,8 @@ function documentStatus(project: ProjectSummary, activeProject = false) {
           <button type="button" class="pdm-icon-button" aria-label="关闭项目浏览" :disabled="switchConfirmationPending" @click="closeProjectBrowser">×</button>
         </header>
         <div class="pdm-project-browser-search">
-          <input v-model="projectSearchQuery" type="search" aria-label="搜索项目" placeholder="输入至少4个字符，搜索项目号、名称或型号" autofocus>
-          <span>{{ projectSearchReady ? `找到 ${filteredRootProjects.length} 个项目` : '输入4个字符或选择筛选条件' }}</span>
+          <input v-model="projectSearchQuery" type="search" aria-label="搜索项目" placeholder="搜索项目号、名称、客户、型号或序列号" autofocus>
+          <span>找到 {{ filteredRootProjects.length }} 个项目</span>
         </div>
         <div class="pdm-project-browser-filters" aria-label="项目筛选">
           <select v-model="projectCustomerFilter" aria-label="客户筛选"><option value="">全部客户</option><option v-for="customer in projectCustomerOptions" :key="customer" :value="customer">{{ customer }}</option></select>
@@ -202,8 +213,9 @@ function documentStatus(project: ProjectSummary, activeProject = false) {
           <select v-model="projectPersonFilter" aria-label="人员筛选"><option value="">全部人员</option><option v-for="person in projectPersonOptions" :key="person" :value="person">{{ person }}</option></select>
         </div>
         <div class="pdm-project-browser-list" role="listbox" aria-label="项目搜索结果">
+          <div class="pdm-project-browser-table-head" aria-hidden="true"><span>项目号</span><span>名称</span><span>客户名称</span><span>型号</span><span>序列号</span><span>操作</span></div>
           <button
-            v-for="item in filteredRootProjects"
+            v-for="item in pagedRootProjects"
             :key="item.id"
             type="button"
             role="option"
@@ -212,12 +224,21 @@ function documentStatus(project: ProjectSummary, activeProject = false) {
             :disabled="switchConfirmationPending || item.id === rootProject.id"
             @click="selectBrowsedProject(item.id)"
           >
-            <span class="pdm-project-browser-identity"><strong>{{ item.code }}</strong><span :title="item.name">{{ item.name }}</span></span>
-            <span class="pdm-project-browser-description" :title="projectBrowserDescription(item)">{{ projectBrowserDescription(item) }}</span>
+            <strong :title="item.code">{{ item.code }}</strong>
+            <span :title="item.name">{{ item.name }}</span>
+            <span :title="item.customerName">{{ item.customerName || '—' }}</span>
+            <span :title="item.deviceModel">{{ item.deviceModel || '—' }}</span>
+            <span :title="item.serialNumbers.join('、')">{{ item.serialNumbers.join('、') || '—' }}</span>
             <em>{{ item.id === rootProject.id ? '当前项目' : '选择' }}</em>
           </button>
-          <p v-if="!projectSearchReady" class="pdm-empty-info">请输入至少 4 个字符搜索项目，或选择客户、事业部、人员进行筛选。</p>
-          <p v-else-if="filteredRootProjects.length === 0" class="pdm-empty-info">没有符合搜索条件的项目。</p>
+          <p v-if="filteredRootProjects.length === 0" class="pdm-empty-info">没有符合搜索条件的项目。</p>
+        </div>
+        <div class="pdm-project-browser-pagination" aria-label="项目列表分页">
+          <span>共 {{ filteredRootProjects.length }} 条</span>
+          <label>每页<select v-model.number="projectPageSize" aria-label="每页行数"><option :value="20">20</option><option :value="50">50</option><option :value="100">100</option></select>行</label>
+          <button type="button" class="pdm-secondary-action" aria-label="上一页" :disabled="projectPage <= 1" @click="projectPage--">上一页</button>
+          <span>第 {{ projectPage }} / {{ projectPageCount }} 页</span>
+          <button type="button" class="pdm-secondary-action" aria-label="下一页" :disabled="projectPage >= projectPageCount" @click="projectPage++">下一页</button>
         </div>
         <footer><button type="button" class="pdm-secondary-action" :disabled="switchConfirmationPending" @click="closeProjectBrowser">取消</button></footer>
       </section>

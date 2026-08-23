@@ -19,7 +19,7 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
         connectionString = options.Value.ConnectionString;
         if (string.IsNullOrWhiteSpace(connectionString))
         {
-            throw new InvalidOperationException("PDM MySQL连接字符串未配置。 ");
+            throw new InvalidOperationException("PLM MySQL连接字符串未配置。 ");
         }
 
         this.timeProvider = timeProvider;
@@ -33,14 +33,17 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
             """
             SELECT p.id,p.code,p.name,p.project_alias,p.organization_id,o.name organization_name,p.project_type_code,
                    p.equipment_type_code,p.customer_code,p.customer_name,p.customer_project_sequence,p.device_model,
-                   p.signed_date,p.quantity,p.parent_project_id,p.child_sequence,p.owner,p.vault_location,p.release_location,p.is_active,
-                   COALESCE(p.execution_unit_id,parent.execution_unit_id) execution_unit_id,execution_unit.name execution_unit_name
+                   p.signed_date,p.quantity,p.parent_project_id,p.root_project_id,p.child_sequence,p.bom_item_category_code,
+                   p.owner,p.vault_location,p.release_location,p.is_active,
+                   COALESCE(p.execution_unit_id,root.execution_unit_id) execution_unit_id,execution_unit.name execution_unit_name
              FROM project p
              LEFT JOIN project_organization o ON o.id=p.organization_id
-             LEFT JOIN project parent ON parent.id=p.parent_project_id
-             LEFT JOIN organization_unit execution_unit ON execution_unit.id=COALESCE(p.execution_unit_id,parent.execution_unit_id)
-            ORDER BY COALESCE(parent.code,p.code), CASE WHEN p.parent_project_id IS NULL THEN 0 ELSE 1 END, p.child_sequence
+             LEFT JOIN project root ON root.id=COALESCE(p.root_project_id,p.id)
+             LEFT JOIN organization_unit execution_unit ON execution_unit.id=COALESCE(p.execution_unit_id,root.execution_unit_id)
+            WHERE @ActiveCompanyId IS NULL OR p.organization_id=@ActiveCompanyId
+            ORDER BY root.code,p.code
             """,
+            new { ActiveCompanyId = TenantContext.CompanyId },
             cancellationToken: cancellationToken));
         return await MapProjectsAsync(connection, null, rows, cancellationToken);
     }
@@ -59,15 +62,16 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
             """
             SELECT p.id,p.code,p.name,p.project_alias,p.organization_id,o.name organization_name,p.project_type_code,
                    p.equipment_type_code,p.customer_code,p.customer_name,p.customer_project_sequence,p.device_model,
-                   p.signed_date,p.quantity,p.parent_project_id,p.child_sequence,p.owner,p.vault_location,p.release_location,p.is_active,
-                   COALESCE(p.execution_unit_id,parent.execution_unit_id) execution_unit_id,execution_unit.name execution_unit_name
+                   p.signed_date,p.quantity,p.parent_project_id,p.root_project_id,p.child_sequence,p.bom_item_category_code,
+                   p.owner,p.vault_location,p.release_location,p.is_active,
+                   COALESCE(p.execution_unit_id,root.execution_unit_id) execution_unit_id,execution_unit.name execution_unit_name
              FROM project p
              LEFT JOIN project_organization o ON o.id=p.organization_id
-             LEFT JOIN project parent ON parent.id=p.parent_project_id
-             LEFT JOIN organization_unit execution_unit ON execution_unit.id=COALESCE(p.execution_unit_id,parent.execution_unit_id)
-             WHERE EXISTS (
+             LEFT JOIN project root ON root.id=COALESCE(p.root_project_id,p.id)
+             LEFT JOIN organization_unit execution_unit ON execution_unit.id=COALESCE(p.execution_unit_id,root.execution_unit_id)
+             WHERE (@ActiveCompanyId IS NULL OR p.organization_id=@ActiveCompanyId) AND (EXISTS (
                  SELECT 1 FROM project_assignment assignment
-                 WHERE assignment.project_id=COALESCE(p.parent_project_id,p.id) AND assignment.username=@Actor
+                 WHERE assignment.project_id=COALESCE(p.root_project_id,p.id) AND assignment.username=@Actor
                    AND assignment.assignment_type IN ('PrimaryProjectManager','CollaborativeProjectManager','DesignLead'))
                 OR EXISTS (
                  SELECT 1 FROM project_assignment assignment
@@ -78,7 +82,7 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
                  WHERE child.parent_project_id=p.id AND assignment.username=@Actor AND assignment.assignment_type='Designer'))
                 OR EXISTS (
                  SELECT 1 FROM organization_unit_manager manager
-                 WHERE manager.unit_id=COALESCE(p.execution_unit_id,parent.execution_unit_id) AND manager.username=@Actor)
+                 WHERE manager.unit_id=COALESCE(p.execution_unit_id,root.execution_unit_id) AND manager.username=@Actor)
                 OR EXISTS (
                  SELECT 1 FROM release_package package
                  INNER JOIN approval_task task ON task.release_package_id=package.id
@@ -86,10 +90,10 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
                 OR (@CanAssignExecutionUnit=1 AND EXISTS (
                  SELECT 1 FROM organization_membership membership
                  INNER JOIN organization_unit member_unit ON member_unit.id=membership.unit_id
-                 WHERE membership.username=@Actor AND member_unit.organization_id=p.organization_id))
-            ORDER BY COALESCE(parent.code,p.code), CASE WHEN p.parent_project_id IS NULL THEN 0 ELSE 1 END, p.child_sequence
+                 WHERE membership.username=@Actor AND member_unit.organization_id=p.organization_id)))
+            ORDER BY root.code,p.code
             """,
-            new { Actor = actor, CanAssignExecutionUnit = await HasUserPermissionAsync(actor, role, PermissionCodes.ProjectExecutionAssign, cancellationToken) },
+            new { Actor = actor, ActiveCompanyId = TenantContext.CompanyId, CanAssignExecutionUnit = await HasUserPermissionAsync(actor, role, PermissionCodes.ProjectExecutionAssign, cancellationToken) },
             cancellationToken: cancellationToken));
         var projects = await MapProjectsAsync(connection, null, rows, cancellationToken);
         return await ApplyCapabilitiesAsync(connection, projects, actor, role, cancellationToken);
@@ -98,18 +102,20 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
     public async Task<Project?> FindProjectAsync(Guid projectId, CancellationToken cancellationToken)
     {
         await using var connection = await OpenAsync(cancellationToken);
-        return await FindProjectAsync(connection, null, projectId, cancellationToken);
+        var project = await FindProjectAsync(connection, null, projectId, cancellationToken);
+        return project is not null && TenantContext.CompanyId is Guid companyId && project.OrganizationId != companyId ? null : project;
     }
 
     public async Task<bool> HasProjectReadAccessAsync(Guid projectId, string actor, UserRole role, CancellationToken cancellationToken)
     {
         if (!await HasUserPermissionAsync(actor, role, PermissionCodes.ProjectView, cancellationToken)) return false;
+        if (!await IsProjectInActiveCompanyAsync(projectId, cancellationToken)) return false;
         if (role == UserRole.Administrator) return true;
         await using var connection = await OpenAsync(cancellationToken);
         var value = await connection.ExecuteScalarAsync<int?>(new CommandDefinition(
             """
              SELECT CASE WHEN EXISTS (SELECT 1 FROM project_assignment assignment
-                    WHERE assignment.project_id=COALESCE(p.parent_project_id,p.id) AND assignment.username=@Actor
+                    WHERE assignment.project_id=COALESCE(p.root_project_id,p.id) AND assignment.username=@Actor
                       AND assignment.assignment_type IN ('PrimaryProjectManager','CollaborativeProjectManager','DesignLead'))
                 OR EXISTS (SELECT 1 FROM project_assignment assignment
                     WHERE assignment.project_id=p.id AND assignment.username=@Actor AND assignment.assignment_type='Designer')
@@ -117,7 +123,7 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
                     SELECT 1 FROM project child INNER JOIN project_assignment assignment ON assignment.project_id=child.id
                     WHERE child.parent_project_id=p.id AND assignment.username=@Actor AND assignment.assignment_type='Designer'))
                 OR EXISTS (SELECT 1 FROM organization_unit_manager manager
-                    WHERE manager.unit_id=COALESCE(p.execution_unit_id,parent.execution_unit_id) AND manager.username=@Actor)
+                    WHERE manager.unit_id=COALESCE(p.execution_unit_id,root.execution_unit_id) AND manager.username=@Actor)
                 OR EXISTS (SELECT 1 FROM release_package package
                     INNER JOIN approval_task task ON task.release_package_id=package.id
                     WHERE package.project_id=p.id AND task.assignee=@Actor)
@@ -125,7 +131,7 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
                     SELECT 1 FROM organization_membership membership INNER JOIN organization_unit member_unit ON member_unit.id=membership.unit_id
                     WHERE membership.username=@Actor AND member_unit.organization_id=p.organization_id)) THEN 1 ELSE 0 END
              FROM project p
-             LEFT JOIN project parent ON parent.id=p.parent_project_id
+             LEFT JOIN project root ON root.id=COALESCE(p.root_project_id,p.id)
              WHERE p.id=@ProjectId
             """,
             new { ProjectId = projectId, Actor = actor, CanAssignExecutionUnit = await HasUserPermissionAsync(actor, role, PermissionCodes.ProjectExecutionAssign, cancellationToken) },
@@ -136,6 +142,7 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
     public async Task<bool> HasProjectContentReadAccessAsync(Guid projectId, string actor, UserRole role, CancellationToken cancellationToken)
     {
         if (!await HasUserPermissionAsync(actor, role, PermissionCodes.ProjectContentView, cancellationToken)) return false;
+        if (!await IsProjectInActiveCompanyAsync(projectId, cancellationToken)) return false;
         if (role == UserRole.Administrator) return true;
         await using var connection = await OpenAsync(cancellationToken);
         var value = await connection.ExecuteScalarAsync<int?>(new CommandDefinition(
@@ -143,7 +150,7 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
             SELECT CASE WHEN EXISTS (SELECT 1 FROM project_assignment assignment
                     WHERE assignment.project_id=p.id AND assignment.username=@Actor AND assignment.assignment_type='Designer')
                 OR EXISTS (SELECT 1 FROM project_assignment assignment
-                    WHERE assignment.project_id=COALESCE(p.parent_project_id,p.id) AND assignment.username=@Actor AND assignment.assignment_type='DesignLead')
+                    WHERE assignment.project_id=COALESCE(p.root_project_id,p.id) AND assignment.username=@Actor AND assignment.assignment_type='DesignLead')
                 OR EXISTS (SELECT 1 FROM release_package package
                     INNER JOIN approval_task task ON task.release_package_id=package.id
                     WHERE package.project_id=p.id AND task.assignee=@Actor)
@@ -151,6 +158,15 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
             FROM project p WHERE p.id=@ProjectId
             """, new { ProjectId = projectId, Actor = actor }, cancellationToken: cancellationToken));
         return value == 1;
+    }
+
+    private async Task<bool> IsProjectInActiveCompanyAsync(Guid projectId, CancellationToken cancellationToken)
+    {
+        if (TenantContext.CompanyId is not Guid companyId) return true;
+        await using var connection = await OpenAsync(cancellationToken);
+        return await connection.ExecuteScalarAsync<int>(new CommandDefinition(
+            "SELECT EXISTS(SELECT 1 FROM project WHERE id=@ProjectId AND organization_id=@CompanyId)",
+            new { ProjectId = projectId, CompanyId = companyId }, cancellationToken: cancellationToken)) == 1;
     }
 
     public async Task<bool> HasChildProjectsAsync(Guid projectId, CancellationToken cancellationToken)
@@ -362,12 +378,13 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
             var serialSequences = await ReserveSerialNumbersAsync(connection, transaction, command.OrganizationId, command.Quantity, cancellationToken);
             var code = $"{command.ProjectTypeCode}{organization.ProjectCompanyCode}{projectSequence:D5}";
             var deviceModel = $"{organization.ModelCompanyCode}-{command.EquipmentTypeCode}-{customer.Code}-{customerSequence:D3}-00";
+            var projectId = Guid.NewGuid();
             var project = BuildNumberedProject(
-                Guid.NewGuid(), code, command.Name, command.ProjectAlias, command.OrganizationId, organization.Name,
+                projectId, code, command.Name, command.ProjectAlias, command.OrganizationId, organization.Name,
                 command.ProjectTypeCode, command.EquipmentTypeCode, customer.Code, customer.Name,
                 customerSequence, deviceModel, command.SignedDate, command.Quantity, null, null, command.Owner,
                 Path.Combine(command.VaultLocation, code), Path.Combine(command.ReleaseLocation, code), organization.ProjectCompanyCode, serialSequences)
-                with { ResponsibleUsers = [command.Owner] };
+                with { RootProjectId = projectId, BomItemCategoryCode = command.BomItemCategoryCode, ResponsibleUsers = [command.Owner] };
             await InsertNumberedProjectAsync(connection, transaction, project, now, cancellationToken);
             await transaction.CommitAsync(cancellationToken);
             return project;
@@ -390,13 +407,13 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
                 """
                 SELECT p.id,p.code,p.name,p.project_alias,p.organization_id,o.name organization_name,p.project_type_code,
                        p.equipment_type_code,p.customer_code,p.customer_name,p.customer_project_sequence,p.device_model,
-                       p.signed_date,p.quantity,p.parent_project_id,p.child_sequence,p.owner,p.vault_location,p.release_location,p.is_active
+                       p.signed_date,p.quantity,p.parent_project_id,p.root_project_id,p.child_sequence,p.bom_item_category_code,
+                       p.owner,p.vault_location,p.release_location,p.is_active
                 FROM project p LEFT JOIN project_organization o ON o.id=p.organization_id
                 WHERE p.id=@ParentProjectId FOR UPDATE
                 """,
                 new { command.ParentProjectId }, transaction, cancellationToken: cancellationToken))
                 ?? throw new PdmNotFoundException("主项目不存在。");
-            if (parent.ParentProjectId is not null) throw new PdmRuleException("只能在主项目下创建子项目。");
             if (parent.OrganizationId is null || parent.EquipmentTypeCode is null || parent.CustomerProjectSequence is null
                 || string.IsNullOrWhiteSpace(parent.ProjectTypeCode) || string.IsNullOrWhiteSpace(parent.CustomerCode)
                 || string.IsNullOrWhiteSpace(parent.CustomerName) || parent.SignedDate is null)
@@ -412,18 +429,24 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
                 new { OrganizationId = parent.OrganizationId.Value }, transaction, cancellationToken: cancellationToken));
             var serialSequences = await ReserveSerialNumbersAsync(connection, transaction, parent.OrganizationId.Value, command.Quantity, cancellationToken);
             var code = $"{parent.Code}-{childSequence}";
-            var deviceModel = $"{organization.ModelCompanyCode}-{parent.EquipmentTypeCode.Value}-{parent.CustomerCode}-{parent.CustomerProjectSequence.Value:D3}-{childSequence:D2}";
+            var equipmentTypeCode = command.EquipmentTypeCode ?? parent.EquipmentTypeCode.Value;
+            var deviceModel = $"{organization.ModelCompanyCode}-{equipmentTypeCode}-{parent.CustomerCode}-{parent.CustomerProjectSequence.Value:D3}-{BuildChildModelSuffix(parent.Code, childSequence)}";
             var responsibleUsers = (await connection.QueryAsync<string>(new CommandDefinition(
                 "SELECT username FROM project_responsible WHERE project_id=@ProjectId ORDER BY username",
                 new { ProjectId = parent.Id }, transaction, cancellationToken: cancellationToken))).ToArray();
             if (responsibleUsers.Length == 0) responsibleUsers = [parent.Owner];
             var project = BuildNumberedProject(
                 Guid.NewGuid(), code, command.Name, command.ProjectAlias, parent.OrganizationId.Value, organization.Name,
-                parent.ProjectTypeCode, parent.EquipmentTypeCode.Value, parent.CustomerCode, parent.CustomerName,
+                parent.ProjectTypeCode, equipmentTypeCode, parent.CustomerCode, parent.CustomerName,
                 parent.CustomerProjectSequence.Value, deviceModel, DateOnly.FromDateTime(parent.SignedDate.Value), command.Quantity,
                 parent.Id, childSequence, parent.Owner, Path.Combine(command.VaultRoot ?? Path.GetDirectoryName(parent.VaultLocation)!, code),
                 Path.Combine(command.ReleaseRoot ?? Path.GetDirectoryName(parent.ReleaseLocation)!, code), organization.ProjectCompanyCode, serialSequences)
-                with { ResponsibleUsers = responsibleUsers };
+                with
+                {
+                    RootProjectId = parent.RootProjectId ?? parent.Id,
+                    BomItemCategoryCode = "0302",
+                    ResponsibleUsers = responsibleUsers
+                };
             await InsertNumberedProjectAsync(connection, transaction, project, now, cancellationToken);
             await transaction.CommitAsync(cancellationToken);
             return project;
@@ -800,7 +823,7 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
         var rows = await connection.QueryAsync<BomRow>(new CommandDefinition(
             """
             SELECT id, project_id, bom_kind, sequence_no, drawing_number, name, quantity, unit, material, specification, remark, brand, surface_treatment, weight, revision_label, is_complete,
-                   source_document_id, source_configuration, item_source, is_manually_overridden, is_pending_removal,
+                   source_document_id, source_configuration, source_instance_path, parent_drawing_number, item_source, is_manually_overridden, is_pending_removal,
                    is_pending_classification, is_manual_unmatched, is_manually_retained, is_manually_excluded,
                    reconciliation_status, reconciliation_note, reconciliation_updated_by, reconciliation_updated_at,
                    deleted_at, deleted_by, delete_reason,
@@ -827,8 +850,8 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
         foreach (var item in items)
         {
             await connection.ExecuteAsync(new CommandDefinition(
-                "INSERT INTO bom_item(id,project_id,bom_kind,sequence_no,drawing_number,name,quantity,unit,material,specification,remark,brand,surface_treatment,weight,revision_label,is_complete,source_document_id,source_configuration,item_source,is_manually_overridden,is_pending_removal,is_pending_classification,is_manual_unmatched,is_manually_retained,is_manually_excluded,reconciliation_status,reconciliation_note,reconciliation_updated_by,reconciliation_updated_at,deleted_at,deleted_by,delete_reason,property_writeback_status,row_version,updated_at) VALUES(@Id,@ProjectId,@Kind,@Sequence,@DrawingNumber,@Name,@Quantity,@Unit,@Material,@Specification,@Remark,@Brand,@SurfaceTreatment,@Weight,@Revision,@IsComplete,@SourceDocumentId,@SourceConfiguration,@Source,@IsManuallyOverridden,@IsPendingRemoval,@IsPendingClassification,@IsManualUnmatched,@IsManuallyRetained,@IsManuallyExcluded,@ReconciliationStatus,@ReconciliationNote,@ReconciliationUpdatedBy,@ReconciliationUpdatedAt,@DeletedAt,@DeletedBy,@DeleteReason,@PropertyWritebackStatus,1,@Now)",
-                new { item.Id, ProjectId = projectId, Kind = kind.ToString(), item.Sequence, item.DrawingNumber, item.Name, item.Quantity, item.Unit, item.Material, item.Specification, item.Remark, item.Brand, item.SurfaceTreatment, item.Weight, Revision = item.Revision, item.IsComplete, item.SourceDocumentId, item.SourceConfiguration, item.Source, item.IsManuallyOverridden, item.IsPendingRemoval, item.IsPendingClassification, item.IsManualUnmatched, item.IsManuallyRetained, item.IsManuallyExcluded, item.ReconciliationStatus, item.ReconciliationNote, item.ReconciliationUpdatedBy, ReconciliationUpdatedAt = item.ReconciliationUpdatedAt?.UtcDateTime, DeletedAt = item.DeletedAt?.UtcDateTime, item.DeletedBy, item.DeleteReason, PropertyWritebackStatus = item.PropertyWritebackStatus?.ToString(), Now = now },
+                "INSERT INTO bom_item(id,project_id,bom_kind,sequence_no,drawing_number,name,quantity,unit,material,specification,remark,brand,surface_treatment,weight,revision_label,is_complete,source_document_id,source_configuration,source_instance_path,parent_drawing_number,item_source,is_manually_overridden,is_pending_removal,is_pending_classification,is_manual_unmatched,is_manually_retained,is_manually_excluded,reconciliation_status,reconciliation_note,reconciliation_updated_by,reconciliation_updated_at,deleted_at,deleted_by,delete_reason,property_writeback_status,row_version,updated_at) VALUES(@Id,@ProjectId,@Kind,@Sequence,@DrawingNumber,@Name,@Quantity,@Unit,@Material,@Specification,@Remark,@Brand,@SurfaceTreatment,@Weight,@Revision,@IsComplete,@SourceDocumentId,@SourceConfiguration,@SourceInstancePath,@ParentDrawingNumber,@Source,@IsManuallyOverridden,@IsPendingRemoval,@IsPendingClassification,@IsManualUnmatched,@IsManuallyRetained,@IsManuallyExcluded,@ReconciliationStatus,@ReconciliationNote,@ReconciliationUpdatedBy,@ReconciliationUpdatedAt,@DeletedAt,@DeletedBy,@DeleteReason,@PropertyWritebackStatus,1,@Now)",
+                new { item.Id, ProjectId = projectId, Kind = kind.ToString(), item.Sequence, item.DrawingNumber, item.Name, item.Quantity, item.Unit, item.Material, item.Specification, item.Remark, item.Brand, item.SurfaceTreatment, item.Weight, Revision = item.Revision, item.IsComplete, item.SourceDocumentId, item.SourceConfiguration, item.SourceInstancePath, item.ParentDrawingNumber, item.Source, item.IsManuallyOverridden, item.IsPendingRemoval, item.IsPendingClassification, item.IsManualUnmatched, item.IsManuallyRetained, item.IsManuallyExcluded, item.ReconciliationStatus, item.ReconciliationNote, item.ReconciliationUpdatedBy, ReconciliationUpdatedAt = item.ReconciliationUpdatedAt?.UtcDateTime, DeletedAt = item.DeletedAt?.UtcDateTime, item.DeletedBy, item.DeleteReason, PropertyWritebackStatus = item.PropertyWritebackStatus?.ToString(), Now = now },
                 transaction, cancellationToken: cancellationToken));
         }
         await transaction.CommitAsync(cancellationToken);
@@ -851,8 +874,8 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
         foreach (var item in standardItems.Concat(nonStandardItems).Concat(unclassifiedItems).Concat(electricalItems))
         {
             await connection.ExecuteAsync(new CommandDefinition(
-                "INSERT INTO bom_item(id,project_id,bom_kind,sequence_no,drawing_number,name,quantity,unit,material,specification,remark,brand,surface_treatment,weight,revision_label,is_complete,source_document_id,source_configuration,item_source,is_manually_overridden,is_pending_removal,is_pending_classification,is_manual_unmatched,is_manually_retained,is_manually_excluded,reconciliation_status,reconciliation_note,reconciliation_updated_by,reconciliation_updated_at,deleted_at,deleted_by,delete_reason,property_writeback_status,row_version,updated_at) VALUES(@Id,@ProjectId,@Kind,@Sequence,@DrawingNumber,@Name,@Quantity,@Unit,@Material,@Specification,@Remark,@Brand,@SurfaceTreatment,@Weight,@Revision,@IsComplete,@SourceDocumentId,@SourceConfiguration,@Source,@IsManuallyOverridden,@IsPendingRemoval,@IsPendingClassification,@IsManualUnmatched,@IsManuallyRetained,@IsManuallyExcluded,@ReconciliationStatus,@ReconciliationNote,@ReconciliationUpdatedBy,@ReconciliationUpdatedAt,@DeletedAt,@DeletedBy,@DeleteReason,@PropertyWritebackStatus,1,@Now)",
-                new { item.Id, ProjectId = projectId, Kind = item.Kind.ToString(), item.Sequence, item.DrawingNumber, item.Name, item.Quantity, item.Unit, item.Material, item.Specification, item.Remark, item.Brand, item.SurfaceTreatment, item.Weight, Revision = item.Revision, item.IsComplete, item.SourceDocumentId, item.SourceConfiguration, item.Source, item.IsManuallyOverridden, item.IsPendingRemoval, item.IsPendingClassification, item.IsManualUnmatched, item.IsManuallyRetained, item.IsManuallyExcluded, item.ReconciliationStatus, item.ReconciliationNote, item.ReconciliationUpdatedBy, ReconciliationUpdatedAt = item.ReconciliationUpdatedAt?.UtcDateTime, DeletedAt = item.DeletedAt?.UtcDateTime, item.DeletedBy, item.DeleteReason, PropertyWritebackStatus = item.PropertyWritebackStatus?.ToString(), Now = now },
+                "INSERT INTO bom_item(id,project_id,bom_kind,sequence_no,drawing_number,name,quantity,unit,material,specification,remark,brand,surface_treatment,weight,revision_label,is_complete,source_document_id,source_configuration,source_instance_path,parent_drawing_number,item_source,is_manually_overridden,is_pending_removal,is_pending_classification,is_manual_unmatched,is_manually_retained,is_manually_excluded,reconciliation_status,reconciliation_note,reconciliation_updated_by,reconciliation_updated_at,deleted_at,deleted_by,delete_reason,property_writeback_status,row_version,updated_at) VALUES(@Id,@ProjectId,@Kind,@Sequence,@DrawingNumber,@Name,@Quantity,@Unit,@Material,@Specification,@Remark,@Brand,@SurfaceTreatment,@Weight,@Revision,@IsComplete,@SourceDocumentId,@SourceConfiguration,@SourceInstancePath,@ParentDrawingNumber,@Source,@IsManuallyOverridden,@IsPendingRemoval,@IsPendingClassification,@IsManualUnmatched,@IsManuallyRetained,@IsManuallyExcluded,@ReconciliationStatus,@ReconciliationNote,@ReconciliationUpdatedBy,@ReconciliationUpdatedAt,@DeletedAt,@DeletedBy,@DeleteReason,@PropertyWritebackStatus,1,@Now)",
+                new { item.Id, ProjectId = projectId, Kind = item.Kind.ToString(), item.Sequence, item.DrawingNumber, item.Name, item.Quantity, item.Unit, item.Material, item.Specification, item.Remark, item.Brand, item.SurfaceTreatment, item.Weight, Revision = item.Revision, item.IsComplete, item.SourceDocumentId, item.SourceConfiguration, item.SourceInstancePath, item.ParentDrawingNumber, item.Source, item.IsManuallyOverridden, item.IsPendingRemoval, item.IsPendingClassification, item.IsManualUnmatched, item.IsManuallyRetained, item.IsManuallyExcluded, item.ReconciliationStatus, item.ReconciliationNote, item.ReconciliationUpdatedBy, ReconciliationUpdatedAt = item.ReconciliationUpdatedAt?.UtcDateTime, DeletedAt = item.DeletedAt?.UtcDateTime, item.DeletedBy, item.DeleteReason, PropertyWritebackStatus = item.PropertyWritebackStatus?.ToString(), Now = now },
                 transaction, cancellationToken: cancellationToken));
         }
 
@@ -881,9 +904,19 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
     {
         await using var connection = await OpenAsync(cancellationToken);
         var row = await connection.QuerySingleOrDefaultAsync<BomRow>(new CommandDefinition(
-            "SELECT id,project_id,bom_kind,sequence_no,drawing_number,name,quantity,unit,material,specification,remark,brand,surface_treatment,weight,revision_label,is_complete,source_document_id,source_configuration,item_source,is_manually_overridden,is_pending_removal,is_pending_classification,is_manual_unmatched,is_manually_retained,is_manually_excluded,reconciliation_status,reconciliation_note,reconciliation_updated_by,reconciliation_updated_at,deleted_at,deleted_by,delete_reason,property_writeback_status FROM bom_item WHERE project_id=@ProjectId AND id=@ItemId",
+            "SELECT id,project_id,bom_kind,sequence_no,drawing_number,name,quantity,unit,material,specification,remark,brand,surface_treatment,weight,revision_label,is_complete,source_document_id,source_configuration,source_instance_path,parent_drawing_number,item_source,is_manually_overridden,is_pending_removal,is_pending_classification,is_manual_unmatched,is_manually_retained,is_manually_excluded,reconciliation_status,reconciliation_note,reconciliation_updated_by,reconciliation_updated_at,deleted_at,deleted_by,delete_reason,property_writeback_status FROM bom_item WHERE project_id=@ProjectId AND id=@ItemId",
             new { ProjectId = projectId, ItemId = itemId }, cancellationToken: cancellationToken));
         return row is null ? null : MapBomItem(row);
+    }
+
+    public async Task<BomItem> UpdateBomMaterialCodeAsync(Guid projectId, Guid itemId, string materialCode, CancellationToken cancellationToken)
+    {
+        await using var connection = await OpenAsync(cancellationToken);
+        var affected = await connection.ExecuteAsync(new CommandDefinition(
+            "UPDATE bom_item SET drawing_number=@MaterialCode,property_writeback_status=CASE WHEN source_document_id IS NULL OR bom_kind='Electrical' THEN property_writeback_status ELSE 'Pending' END,row_version=row_version+1,updated_at=UTC_TIMESTAMP(6) WHERE project_id=@ProjectId AND id=@ItemId",
+            new { ProjectId = projectId, ItemId = itemId, MaterialCode = materialCode.Trim() }, cancellationToken: cancellationToken));
+        if (affected != 1) throw new PdmNotFoundException("BOM物料不存在。");
+        return await FindBomItemAsync(projectId, itemId, cancellationToken) ?? throw new PdmNotFoundException("BOM物料不存在。");
     }
 
     public async Task<CadPropertyWriteback> EnqueueCadPropertyWritebackAsync(CadPropertyWriteback request, CancellationToken cancellationToken)
@@ -892,8 +925,8 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
         var now = timeProvider.GetUtcNow().UtcDateTime;
         await connection.ExecuteAsync(new CommandDefinition(
-            "UPDATE cad_property_writeback SET status='Superseded',completed_at=@Now WHERE bom_item_id=@BomItemId AND status IN ('Pending','InProgress')",
-            new { request.BomItemId, Now = now }, transaction, cancellationToken: cancellationToken));
+            "UPDATE cad_property_writeback SET status='Superseded',completed_at=@Now WHERE bom_item_id=@BomItemId AND source_document_id=@SourceDocumentId AND status IN ('Pending','InProgress')",
+            new { request.BomItemId, request.SourceDocumentId, Now = now }, transaction, cancellationToken: cancellationToken));
         await connection.ExecuteAsync(new CommandDefinition(
             "INSERT INTO cad_property_writeback(id,project_id,bom_item_id,source_document_id,source_configuration,expected_version_id,expected_revision,property_payload,status,requested_by,requested_at) VALUES(@Id,@ProjectId,@BomItemId,@SourceDocumentId,@SourceConfiguration,@ExpectedVersionId,@ExpectedRevision,@PropertyPayload,@Status,@RequestedBy,@RequestedAt)",
             new { request.Id, request.ProjectId, request.BomItemId, request.SourceDocumentId, request.SourceConfiguration, request.ExpectedVersionId, request.ExpectedRevision, PropertyPayload = JsonSerializer.Serialize(request.Properties, jsonOptions), Status = request.Status.ToString(), request.RequestedBy, RequestedAt = request.RequestedAt.UtcDateTime }, transaction, cancellationToken: cancellationToken));
@@ -932,7 +965,15 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
             new { Id = id, Status = status.ToString(), ResultVersionId = resultVersionId, Error = error, Now = now }, transaction, cancellationToken: cancellationToken));
         if (affected != 1) throw new PdmNotFoundException("属性写回任务不存在。");
         await connection.ExecuteAsync(new CommandDefinition(
-            "UPDATE bom_item b INNER JOIN cad_property_writeback w ON w.bom_item_id=b.id SET b.property_writeback_status=@Status,b.updated_at=@Now WHERE w.id=@Id",
+            """
+            UPDATE bom_item b
+            INNER JOIN cad_property_writeback current_task ON current_task.bom_item_id=b.id AND current_task.id=@Id
+            SET b.property_writeback_status=CASE
+                WHEN EXISTS(SELECT 1 FROM cad_property_writeback pending WHERE pending.bom_item_id=b.id AND pending.status IN ('Pending','InProgress')) THEN 'Pending'
+                WHEN EXISTS(SELECT 1 FROM cad_property_writeback failed WHERE failed.bom_item_id=b.id AND failed.status IN ('Conflict','Failed')) THEN 'Failed'
+                ELSE @Status END,
+                b.updated_at=@Now
+            """,
             new { Id = id, Status = status.ToString(), Now = now }, transaction, cancellationToken: cancellationToken));
         await transaction.CommitAsync(cancellationToken);
         return await FindCadPropertyWritebackAsync(id, cancellationToken) ?? throw new PdmNotFoundException("属性写回任务不存在。");
@@ -966,7 +1007,8 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
         await using var connection = await OpenAsync(cancellationToken);
         var rows = await connection.QueryAsync<ReleasePackageRow>(new CommandDefinition(
             """
-            SELECT id, project_id, package_number, state, reference_snapshot_id, mechanical_bom_revision, electrical_bom_revision, mechanical_bom_snapshot_json, electrical_bom_snapshot_json,
+            SELECT id, project_id, package_number, state, release_scope, workflow_code, workflow_version, selected_bom_item_ids_json, creates_manufacturing_baseline, locks_documents,
+                   reference_snapshot_id, mechanical_bom_revision, electrical_bom_revision, mechanical_bom_snapshot_json, electrical_bom_snapshot_json,
                    standard_bom_version_id, non_standard_bom_version_id, electrical_bom_version_id, standard_bom_revision, non_standard_bom_revision,
                    standard_bom_snapshot_json, non_standard_bom_snapshot_json, change_number, change_reason, effective_serial_from, effective_serial_to,
                    published_at, published_path, publish_error, created_at
@@ -995,10 +1037,10 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
     {
         await using var connection = await OpenAsync(cancellationToken);
         var row = await connection.QuerySingleOrDefaultAsync<UserRow>(new CommandDefinition(
-            "SELECT id, username, display_name, password_hash, role, assigned_role_code RoleCode, is_active, token_version FROM pdm_user WHERE username = @Username LIMIT 1",
+            "SELECT id,username,display_name,password_hash,role,assigned_role_code RoleCode,company_id CompanyId,cross_company_view CrossCompanyView,is_active,token_version FROM pdm_user WHERE username=@Username LIMIT 1",
             new { Username = username },
             cancellationToken: cancellationToken));
-        return row is null ? null : new UserAccount(row.Id, row.Username, row.DisplayName, row.PasswordHash, Enum.Parse<UserRole>(row.Role), row.IsActive, row.TokenVersion, row.RoleCode);
+        return row is null ? null : new UserAccount(row.Id, row.Username, row.DisplayName, row.PasswordHash, Enum.Parse<UserRole>(row.Role), row.IsActive, row.TokenVersion, row.RoleCode, row.CompanyId, row.CrossCompanyView);
     }
 
     public async Task<UserProfile?> FindUserProfileAsync(string username, CancellationToken cancellationToken)
@@ -1159,11 +1201,12 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
             """
             SELECT p.id,p.code,p.name,p.project_alias,p.organization_id,o.name organization_name,p.project_type_code,
                    p.equipment_type_code,p.customer_code,p.customer_name,p.customer_project_sequence,p.device_model,
-                   p.signed_date,p.quantity,p.parent_project_id,p.child_sequence,p.owner,p.vault_location,p.release_location,p.is_active,
-                   COALESCE(p.execution_unit_id,parent.execution_unit_id) execution_unit_id,execution_unit.name execution_unit_name
+                   p.signed_date,p.quantity,p.parent_project_id,p.root_project_id,p.child_sequence,p.bom_item_category_code,
+                   p.owner,p.vault_location,p.release_location,p.is_active,
+                   COALESCE(p.execution_unit_id,root.execution_unit_id) execution_unit_id,execution_unit.name execution_unit_name
             FROM project p LEFT JOIN project_organization o ON o.id=p.organization_id
-            LEFT JOIN project parent ON parent.id=p.parent_project_id
-            LEFT JOIN organization_unit execution_unit ON execution_unit.id=COALESCE(p.execution_unit_id,parent.execution_unit_id)
+            LEFT JOIN project root ON root.id=COALESCE(p.root_project_id,p.id)
+            LEFT JOIN organization_unit execution_unit ON execution_unit.id=COALESCE(p.execution_unit_id,root.execution_unit_id)
             WHERE p.id=@ProjectId
             """,
             new { ProjectId = projectId },
@@ -1180,7 +1223,7 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
         if (responsibles.Length == 0 && !string.IsNullOrWhiteSpace(row.Owner)) responsibles = [row.Owner];
         var assignments = (await connection.QueryAsync<ProjectAssignmentRow>(new CommandDefinition(
             "SELECT project_id,username,assignment_type FROM project_assignment WHERE project_id IN @ProjectIds ORDER BY username",
-            new { ProjectIds = row.ParentProjectId is null ? new[] { row.Id } : new[] { row.ParentProjectId.Value, row.Id } }, transaction, cancellationToken: cancellationToken))).ToArray();
+            new { ProjectIds = new[] { row.RootProjectId ?? row.Id, row.Id }.Distinct().ToArray() }, transaction, cancellationToken: cancellationToken))).ToArray();
         return MapProject(row, serials.ToArray(), responsibles, assignments);
     }
 
@@ -1204,7 +1247,8 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
     {
         var row = await connection.QuerySingleOrDefaultAsync<ReleasePackageRow>(new CommandDefinition(
             """
-            SELECT id, project_id, package_number, state, reference_snapshot_id, mechanical_bom_revision, electrical_bom_revision, mechanical_bom_snapshot_json, electrical_bom_snapshot_json,
+            SELECT id, project_id, package_number, state, release_scope, workflow_code, workflow_version, selected_bom_item_ids_json, creates_manufacturing_baseline, locks_documents,
+                   reference_snapshot_id, mechanical_bom_revision, electrical_bom_revision, mechanical_bom_snapshot_json, electrical_bom_snapshot_json,
                    standard_bom_version_id, non_standard_bom_version_id, electrical_bom_version_id, standard_bom_revision, non_standard_bom_revision,
                    standard_bom_snapshot_json, non_standard_bom_snapshot_json, change_number, change_reason, effective_serial_from, effective_serial_to,
                    published_at, published_path, publish_error, created_at
@@ -1232,16 +1276,20 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
             SignedDate = row.SignedDate is null ? null : DateOnly.FromDateTime(row.SignedDate.Value),
             Quantity = row.Quantity,
             ParentProjectId = row.ParentProjectId,
+            RootProjectId = row.RootProjectId ?? row.Id,
             ChildSequence = row.ChildSequence,
+            BomItemCategoryCode = row.BomItemCategoryCode,
             SerialNumbers = serialNumbers ?? [],
             ResponsibleUsers = responsibleUsers ?? (string.IsNullOrWhiteSpace(row.Owner) ? [] : [row.Owner]),
             ExecutionUnitId = row.ExecutionUnitId,
             ExecutionUnitName = row.ExecutionUnitName,
-            PrimaryProjectManager = FindSingleAssignment(assignments, row.ParentProjectId ?? row.Id, ProjectAssignmentType.PrimaryProjectManager),
-            CollaborativeProjectManagers = FindAssignments(assignments, row.ParentProjectId ?? row.Id, ProjectAssignmentType.CollaborativeProjectManager),
-            DesignLead = FindSingleAssignment(assignments, row.ParentProjectId ?? row.Id, ProjectAssignmentType.DesignLead),
+            PrimaryProjectManager = FindSingleAssignment(assignments, row.RootProjectId ?? row.Id, ProjectAssignmentType.PrimaryProjectManager),
+            CollaborativeProjectManagers = FindAssignments(assignments, row.RootProjectId ?? row.Id, ProjectAssignmentType.CollaborativeProjectManager),
+            DesignLead = FindSingleAssignment(assignments, row.RootProjectId ?? row.Id, ProjectAssignmentType.DesignLead),
             Designers = FindAssignments(assignments, row.Id, ProjectAssignmentType.Designer),
             DocumentCount = activity?.DocumentCount,
+            ModelDocumentCount = activity?.ModelDocumentCount,
+            DrawingDocumentCount = activity?.DrawingDocumentCount,
             BusinessStatus = activity is null ? null : BuildBusinessStatus(activity),
             RootDocumentCheckedOutBy = activity?.RootDocumentCheckedOutBy
         };
@@ -1258,7 +1306,7 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
             "SELECT project_id,username FROM project_responsible WHERE project_id IN @ProjectIds ORDER BY project_id,username",
             new { ProjectIds = rowArray.Select(row => row.Id).ToArray() }, transaction, cancellationToken: cancellationToken));
         var responsibles = responsibleRows.GroupBy(row => row.ProjectId).ToDictionary(group => group.Key, group => (IReadOnlyList<string>)group.Select(row => row.Username).ToArray());
-        var rootIds = rowArray.Select(row => row.ParentProjectId ?? row.Id).Concat(rowArray.Select(row => row.Id)).Distinct().ToArray();
+        var rootIds = rowArray.Select(row => row.RootProjectId ?? row.Id).Concat(rowArray.Select(row => row.Id)).Distinct().ToArray();
         var assignments = (await connection.QueryAsync<ProjectAssignmentRow>(new CommandDefinition(
             "SELECT project_id,username,assignment_type FROM project_assignment WHERE project_id IN @ProjectIds ORDER BY username",
             new { ProjectIds = rootIds }, transaction, cancellationToken: cancellationToken))).ToArray();
@@ -1266,6 +1314,8 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
             """
             SELECT p.id project_id,
                    COUNT(DISTINCT d.id) document_count,
+                   COUNT(DISTINCT CASE WHEN d.kind IN ('Assembly','Part') THEN d.id END) model_document_count,
+                   COUNT(DISTINCT CASE WHEN d.kind='Drawing' THEN d.id END) drawing_document_count,
                    MAX(current_root_document.checked_out_by) root_document_checked_out_by,
                    MAX(CASE WHEN package.state='Draft' THEN 1 ELSE 0 END) has_draft,
                    MAX(CASE WHEN package.state IN ('ProcessReview','Approval') THEN 1 ELSE 0 END) has_pending_approval,
@@ -1341,6 +1391,8 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
                 CanAssignDesigners = permissions.Contains(PermissionCodes.ProjectDesignerAssign) && project.ParentProjectId is not null && string.Equals(project.DesignLead, actor, StringComparison.OrdinalIgnoreCase),
                 CanReadContent = canReadContent,
                 DocumentCount = canReadContent ? project.DocumentCount : null,
+                ModelDocumentCount = canReadContent ? project.ModelDocumentCount : null,
+                DrawingDocumentCount = canReadContent ? project.DrawingDocumentCount : null,
                 BusinessStatus = canReadContent ? project.BusinessStatus : null
             };
         }).ToArray();
@@ -1370,15 +1422,34 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
             SerialNumbers = serialSequences.Select(value => $"{projectCompanyCode}{value:D7}").ToArray()
         };
 
+    private static string BuildChildModelSuffix(string parentCode, int childSequence)
+    {
+        var parentSegments = parentCode.Split('-', StringSplitOptions.RemoveEmptyEntries)
+            .Skip(1)
+            .Select(segment => int.TryParse(segment, out var value) ? value.ToString("D2") : segment);
+        return string.Join('-', parentSegments.Append(childSequence.ToString("D2")));
+    }
+
+    private static string BuildModelSuffixFromCode(string code)
+    {
+        var segments = code.Split('-', StringSplitOptions.RemoveEmptyEntries)
+            .Skip(1)
+            .Select(segment => int.TryParse(segment, out var value) ? value.ToString("D2") : segment)
+            .ToArray();
+        return segments.Length == 0 ? "00" : string.Join('-', segments);
+    }
+
     private static async Task InsertNumberedProjectAsync(MySqlConnection connection, DbTransaction transaction, Project project, DateTime now, CancellationToken cancellationToken)
     {
         await connection.ExecuteAsync(new CommandDefinition(
             """
             INSERT INTO project(id,code,name,project_alias,organization_id,project_type_code,equipment_type_code,customer_code,customer_name,
-                customer_project_sequence,device_model,signed_date,quantity,parent_project_id,child_sequence,owner,vault_location,release_location,
+                customer_project_sequence,device_model,signed_date,quantity,parent_project_id,root_project_id,child_sequence,bom_item_category_code,
+                owner,vault_location,release_location,
                 is_active,row_version,created_at,updated_at)
             VALUES(@Id,@Code,@Name,@ProjectAlias,@OrganizationId,@ProjectTypeCode,@EquipmentTypeCode,@CustomerCode,@CustomerName,
-                @CustomerProjectSequence,@DeviceModel,@SignedDate,@Quantity,@ParentProjectId,@ChildSequence,@Owner,@VaultLocation,@ReleaseLocation,
+                @CustomerProjectSequence,@DeviceModel,@SignedDate,@Quantity,@ParentProjectId,@RootProjectId,@ChildSequence,@BomItemCategoryCode,
+                @Owner,@VaultLocation,@ReleaseLocation,
                 1,1,@Now,@Now)
             """,
             new
@@ -1386,7 +1457,8 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
                 project.Id, project.Code, project.Name, project.ProjectAlias, project.OrganizationId, project.ProjectTypeCode,
                 project.EquipmentTypeCode, project.CustomerCode, project.CustomerName, project.CustomerProjectSequence,
                 project.DeviceModel, SignedDate = project.SignedDate!.Value.ToDateTime(TimeOnly.MinValue), project.Quantity,
-                project.ParentProjectId, project.ChildSequence, project.Owner, project.VaultLocation, project.ReleaseLocation, Now = now
+                project.ParentProjectId, project.RootProjectId, project.ChildSequence, project.BomItemCategoryCode,
+                project.Owner, project.VaultLocation, project.ReleaseLocation, Now = now
             }, transaction, cancellationToken: cancellationToken));
         await connection.ExecuteAsync(new CommandDefinition(
             "INSERT INTO project_serial_number(project_id,sequence_no,serial_number) VALUES(@ProjectId,@Sequence,@SerialNumber)",
@@ -1503,6 +1575,8 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
             Weight = row.Weight,
             SourceDocumentId = row.SourceDocumentId,
             SourceConfiguration = row.SourceConfiguration,
+            SourceInstancePath = row.SourceInstancePath,
+            ParentDrawingNumber = row.ParentDrawingNumber,
             Source = row.ItemSource,
             IsManuallyOverridden = row.IsManuallyOverridden,
             IsPendingRemoval = row.IsPendingRemoval,
@@ -1535,8 +1609,8 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
     {
         var taskRows = await connection.QueryAsync<ApprovalTaskRow>(new CommandDefinition(
             """
-            SELECT id, release_package_id, stage, assignee, decision_by, decision_value, decision_comment, decided_at
-            FROM approval_task WHERE release_package_id = @PackageId ORDER BY stage
+            SELECT id, release_package_id, stage, step_order, step_name, assignee, decision_by, decision_value, decision_comment, decided_at, is_emergency_substitute, emergency_reason
+            FROM approval_task WHERE release_package_id = @PackageId ORDER BY step_order
             """,
             new { PackageId = row.Id },
             transaction,
@@ -1549,7 +1623,13 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
             task.DecisionBy,
             task.DecisionValue is null ? null : Enum.Parse<ApprovalDecision>(task.DecisionValue),
             task.DecisionComment,
-            task.DecidedAt is null ? null : new DateTimeOffset(DateTime.SpecifyKind(task.DecidedAt.Value, DateTimeKind.Utc)))).ToArray();
+            task.DecidedAt is null ? null : new DateTimeOffset(DateTime.SpecifyKind(task.DecidedAt.Value, DateTimeKind.Utc)))
+        {
+            StepOrder = task.StepOrder,
+            StepName = task.StepName,
+            IsEmergencySubstitute = task.IsEmergencySubstitute,
+            EmergencyReason = task.EmergencyReason
+        }).ToArray();
         return new ReleasePackage(
             row.Id,
             row.ProjectId,
@@ -1576,7 +1656,13 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
             EffectiveSerialTo = row.EffectiveSerialTo,
             MechanicalBomSnapshot = JsonSerializer.Deserialize<List<BomItem>>(row.MechanicalBomSnapshotJson, new JsonSerializerOptions(JsonSerializerDefaults.Web)) ?? [],
             ElectricalBomSnapshot = JsonSerializer.Deserialize<List<BomItem>>(row.ElectricalBomSnapshotJson, new JsonSerializerOptions(JsonSerializerDefaults.Web)) ?? [],
-            PublishError = row.PublishError
+            PublishError = row.PublishError,
+            Scope = Enum.Parse<ReleaseScope>(row.ReleaseScope),
+            WorkflowCode = row.WorkflowCode,
+            WorkflowVersion = row.WorkflowVersion,
+            SelectedBomItemIds = JsonSerializer.Deserialize<List<Guid>>(row.SelectedBomItemIdsJson, new JsonSerializerOptions(JsonSerializerDefaults.Web)) ?? [],
+            CreatesManufacturingBaseline = row.CreatesManufacturingBaseline,
+            LocksDocuments = row.LocksDocuments
         };
     }
 
@@ -1597,7 +1683,9 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
         public DateTime? SignedDate { get; init; }
         public int Quantity { get; init; } = 1;
         public Guid? ParentProjectId { get; init; }
+        public Guid? RootProjectId { get; init; }
         public int? ChildSequence { get; init; }
+        public string? BomItemCategoryCode { get; init; }
         public string Owner { get; init; } = string.Empty;
         public string VaultLocation { get; init; } = string.Empty;
         public string ReleaseLocation { get; init; } = string.Empty;
@@ -1610,6 +1698,8 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
     {
         public Guid ProjectId { get; init; }
         public int DocumentCount { get; init; }
+        public int ModelDocumentCount { get; init; }
+        public int DrawingDocumentCount { get; init; }
         public string? RootDocumentCheckedOutBy { get; init; }
         public bool HasDraft { get; init; }
         public bool HasPendingApproval { get; init; }
@@ -1738,6 +1828,8 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
         public bool IsComplete { get; init; }
         public Guid? SourceDocumentId { get; init; }
         public string? SourceConfiguration { get; init; }
+        public string? SourceInstancePath { get; init; }
+        public string? ParentDrawingNumber { get; init; }
         public string ItemSource { get; init; } = "Manual";
         public bool IsManuallyOverridden { get; init; }
         public bool IsPendingRemoval { get; init; }
@@ -1788,6 +1880,12 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
         public Guid ProjectId { get; init; }
         public string PackageNumber { get; init; } = string.Empty;
         public string State { get; init; } = string.Empty;
+        public string ReleaseScope { get; init; } = Upton.Pdm.Domain.ReleaseScope.LegacyCombined.ToString();
+        public string? WorkflowCode { get; init; }
+        public int WorkflowVersion { get; init; }
+        public string SelectedBomItemIdsJson { get; init; } = "[]";
+        public bool CreatesManufacturingBaseline { get; init; }
+        public bool LocksDocuments { get; init; }
         public Guid ReferenceSnapshotId { get; init; }
         public string MechanicalBomRevision { get; init; } = string.Empty;
         public string ElectricalBomRevision { get; init; } = string.Empty;
@@ -1826,11 +1924,15 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
         public Guid Id { get; init; }
         public Guid ReleasePackageId { get; init; }
         public string Stage { get; init; } = string.Empty;
+        public int StepOrder { get; init; }
+        public string? StepName { get; init; }
         public string Assignee { get; init; } = string.Empty;
         public string? DecisionBy { get; init; }
         public string? DecisionValue { get; init; }
         public string? DecisionComment { get; init; }
         public DateTime? DecidedAt { get; init; }
+        public bool IsEmergencySubstitute { get; init; }
+        public string? EmergencyReason { get; init; }
     }
 
     private sealed class UserRow
@@ -1841,6 +1943,8 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
         public string PasswordHash { get; init; } = string.Empty;
         public string Role { get; init; } = string.Empty;
         public string? RoleCode { get; init; }
+        public Guid? CompanyId { get; init; }
+        public bool CrossCompanyView { get; init; }
         public bool IsActive { get; init; }
         public long TokenVersion { get; init; }
     }

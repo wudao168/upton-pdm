@@ -63,7 +63,7 @@ async function submitPasswordReset() {
 <template>
   <main class="pdm-login-shell" :class="{ 'is-compact': props.compact }">
     <section class="pdm-login-layout">
-      <aside v-if="!props.compact" class="pdm-login-visual" aria-label="PDM图档管理系统登录插画">
+      <aside v-if="!props.compact" class="pdm-login-visual" aria-label="PLM产品生命周期管理系统登录插画">
         <div class="pdm-login-brand">
           <img class="pdm-login-brand__logo" :src="companyLogo" alt="UPTON 阿普顿">
         </div>
@@ -77,12 +77,12 @@ async function submitPasswordReset() {
       </aside>
 
       <section class="pdm-login-content">
-        <form class="pdm-login-form" aria-label="登录PDM" autocomplete="off" @submit.prevent="submit">
+        <form class="pdm-login-form" aria-label="登录PLM" autocomplete="off" @submit.prevent="submit">
           <div v-if="!props.compact" class="pdm-login-mobile-brand" aria-hidden="true">
             <img class="pdm-login-brand__logo" :src="companyLogo" alt="">
           </div>
           <header class="pdm-login-heading">
-            <h1>PDM图档管理系统</h1>
+            <h1>PLM产品生命周期管理系统</h1>
             <p>请输入账号与密码</p>
           </header>
 
@@ -133,7 +133,7 @@ async function submitPasswordReset() {
           </div>
 
           <p v-if="error" class="pdm-login-error" role="alert">{{ error }}</p>
-          <p v-else-if="!online" class="pdm-login-warning">PDM服务当前未连接，登录可能失败。</p>
+          <p v-else-if="!online" class="pdm-login-warning">PLM服务当前未连接，登录可能失败。</p>
 
           <button type="submit" class="pdm-login-submit" :disabled="pending || !username.trim() || !password">
             <span class="pdm-login-submit__label">{{ pending ? '登录中...' : '登录' }}</span>

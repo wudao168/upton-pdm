@@ -15,8 +15,12 @@ public static class PermissionCodes
     public const string DocumentLockRequestRelease = "document.lock.request-release";
     public const string DocumentLockForceRelease = "document.lock.force-release";
     public const string BomEdit = "bom.edit";
+    public const string DrawingReviewSubmit = "drawing-review.submit";
+    public const string DrawingReviewAnnotate = "drawing-review.annotate";
+    public const string DrawingReviewDecide = "drawing-review.decide";
     public const string ReleaseManage = "release.manage";
     public const string ApprovalDecide = "approval.decide";
+    public const string ApprovalEmergencySubstitute = "approval.emergency-substitute";
     public const string CustomerSettingsManage = "settings.customer.manage";
     public const string OrganizationSettingsManage = "settings.organization.manage";
     public const string FolderSettingsManage = "settings.folder.manage";
@@ -43,8 +47,12 @@ public static class RolePermissionCatalog
         new(PermissionCodes.DocumentLockRequestRelease, "催办并申请释放编辑权限", "项目内容"),
         new(PermissionCodes.DocumentLockForceRelease, "强制释放超时编辑权限", "项目内容", "仅限本人负责项目，系统管理员不受项目岗位限制。", Sensitive: true),
         new(PermissionCodes.BomEdit, "维护BOM和料品", "项目内容"),
+        new(PermissionCodes.DrawingReviewSubmit, "发起图纸审核", "图纸审核", "按当前非标件BOM冻结3D和2D图档版本。", Sensitive: true),
+        new(PermissionCodes.DrawingReviewAnnotate, "添加和处理图纸批注", "图纸审核"),
+        new(PermissionCodes.DrawingReviewDecide, "审核3D和2D图纸", "图纸审核", "设计者不能审核自己生成的图档版本。", Sensitive: true),
         new(PermissionCodes.ReleaseManage, "创建并提交发布包", "审批发布", Sensitive: true),
         new(PermissionCodes.ApprovalDecide, "处理发布审批", "审批发布", Sensitive: true),
+        new(PermissionCodes.ApprovalEmergencySubstitute, "紧急代批当前节点", "审批发布", "仅在紧急情况下替代当前审批人，必须填写原因，后续节点仍正常流转。", Sensitive: true),
         new(PermissionCodes.CustomerSettingsManage, "配置U9C客户同步", "系统设置", "复用U9C OAuth配置并定期同步客户编码和名称。", Sensitive: true),
         new(PermissionCodes.OrganizationSettingsManage, "维护公司与组织结构", "系统设置", Sensitive: true),
         new(PermissionCodes.FolderSettingsManage, "维护文件夹模板与目录权限", "系统设置", Sensitive: true),
@@ -69,34 +77,102 @@ public static class RolePermissionCatalog
                 PermissionCodes.DocumentLockRequestRelease,
                 PermissionCodes.DocumentLockForceRelease,
                 PermissionCodes.BomEdit,
+                PermissionCodes.DrawingReviewSubmit,
+                PermissionCodes.DrawingReviewAnnotate,
                 PermissionCodes.ReleaseManage),
             [UserRole.PlanningManager] = Set(PermissionCodes.ProjectView, PermissionCodes.ProjectExecutionAssign),
-            [UserRole.ProcessReviewer] = Set(PermissionCodes.ProjectView, PermissionCodes.ProjectContentView, PermissionCodes.ApprovalDecide),
-            [UserRole.Approver] = Set(PermissionCodes.ProjectView, PermissionCodes.ProjectContentView, PermissionCodes.ApprovalDecide),
+            [UserRole.ProcessReviewer] = Set(PermissionCodes.ProjectView, PermissionCodes.ProjectContentView, PermissionCodes.DrawingReviewAnnotate, PermissionCodes.DrawingReviewDecide, PermissionCodes.ApprovalDecide),
+            [UserRole.Approver] = Set(PermissionCodes.ProjectView, PermissionCodes.ProjectContentView, PermissionCodes.DrawingReviewAnnotate, PermissionCodes.DrawingReviewDecide, PermissionCodes.ApprovalDecide),
             [UserRole.ProductionViewer] = Set(PermissionCodes.ProjectView, PermissionCodes.ProjectContentView),
-            [UserRole.Administrator] = Set(Permissions.Select(permission => permission.Code).ToArray())
+            [UserRole.BusinessUnitManager] = Set(PermissionCodes.ProjectView, PermissionCodes.ProjectContentView, PermissionCodes.DrawingReviewAnnotate, PermissionCodes.DrawingReviewDecide, PermissionCodes.ApprovalDecide, PermissionCodes.ApprovalEmergencySubstitute),
+            [UserRole.Administrator] = Set(Permissions.Select(permission => permission.Code).ToArray()),
+            [UserRole.PlatformAdministrator] = Set(
+                PermissionCodes.CustomerSettingsManage,
+                PermissionCodes.OrganizationSettingsManage,
+                PermissionCodes.FolderSettingsManage,
+                PermissionCodes.StorageSettingsManage,
+                PermissionCodes.RoleSettingsView,
+                PermissionCodes.RoleSettingsEdit,
+                PermissionCodes.AuditView)
         };
 
     public static IReadOnlyList<RoleDefinition> Roles { get; } =
     [
-        new(UserRole.Engineer.ToString(), "工程师", "承担设计、图档、BOM及发布准备工作。", UserRole.Engineer, true),
+        new(UserRole.Engineer.ToString(), "机械工程师", "负责机械图档、BOM及发布资料准备。", UserRole.Engineer, true),
+        new("ElectricalEngineer", "电气工程师", "负责电气图档、BOM及发布资料准备。", UserRole.Engineer, true),
+        new("CommissioningEngineer", "调试工程师", "负责调试图档、问题记录及相关BOM维护。", UserRole.Engineer, true),
+        new("HardwareEngineer", "硬件工程师", "负责硬件图档、BOM及发布资料准备。", UserRole.Engineer, true),
+        new("MechanicalManager", "机械经理", "负责机械专业复核、发布准备及受控编辑协调。", UserRole.Approver, true),
+        new("TechnicalAssistant", "技术助理", "协助维护技术图档、BOM和项目资料。", UserRole.Engineer, true),
+        new(UserRole.BusinessUnitManager.ToString(), "事业部经理", "负责事业部项目分工、审批及紧急代批。", UserRole.Approver, true),
+        new(UserRole.ProcessReviewer.ToString(), "标准化工程师", "负责标准化检查并处理分配的审批任务。", UserRole.ProcessReviewer, true),
+        new("ProjectManager", "项目经理", "负责项目建立、人员分工及发布组织。", UserRole.Engineer, true),
+        new("SupplyChain", "供应链", "查看负责范围内的项目、BOM和生产资料。", UserRole.ProductionViewer, true),
+        new("ProcurementSpecialist", "采购专员", "查看负责范围内的项目、BOM和采购资料。", UserRole.ProductionViewer, true),
+        new("ProcurementManager", "采购经理", "查看采购资料并处理分配的审批任务。", UserRole.Approver, true),
+        new("ProductionManager", "生产经理", "查看生产资料并处理分配的审批任务。", UserRole.Approver, true),
+        new("ProductionAssistant", "生产助理", "协助查看和组织负责范围内的生产资料。", UserRole.ProductionViewer, true),
+        new("MachiningSupervisor", "机加主管", "查看负责范围内的机加图档和生产资料。", UserRole.ProductionViewer, true),
+        new("MachiningOperator", "机加人员", "查看分配给本人的机加图档和生产资料。", UserRole.ProductionViewer, true),
+        new("AssemblySupervisor", "装配主管", "查看负责范围内的装配图档和生产资料。", UserRole.ProductionViewer, true),
+        new("AssemblyFitter", "装配钳工", "查看分配给本人的装配图档和生产资料。", UserRole.ProductionViewer, true),
+        new("ElectricalSupervisor", "电工主管", "查看负责范围内的电气装配图档和生产资料。", UserRole.ProductionViewer, true),
+        new("AssemblyElectrician", "装配电工", "查看分配给本人的电气装配图档和生产资料。", UserRole.ProductionViewer, true),
         new(UserRole.PlanningManager.ToString(), "计划管理", "按所属公司分配项目执行事业部。", UserRole.PlanningManager, true),
-        new(UserRole.ProcessReviewer.ToString(), "工艺审核", "处理分配给本人的工艺审核任务。", UserRole.ProcessReviewer, true),
-        new(UserRole.Approver.ToString(), "批准人", "处理分配给本人的批准任务。", UserRole.Approver, true),
-        new(UserRole.ProductionViewer.ToString(), "生产查看", "按后续项目岗位或目录授权查看生产资料。", UserRole.ProductionViewer, true),
-        new(UserRole.Administrator.ToString(), "系统管理员", "固定拥有全部权限，防止系统管理锁死。", UserRole.Administrator, true, true)
+        new(UserRole.ProductionViewer.ToString(), "生产物料员", "查看负责范围内的BOM和生产物料资料。", UserRole.ProductionViewer, true),
+        new(UserRole.Approver.ToString(), "标准化主管", "负责标准化审批和批准结论。", UserRole.Approver, true),
+        new(UserRole.Administrator.ToString(), "系统管理员", "管理所属公司并在公司范围内拥有完整业务权限。", UserRole.Administrator, true, true),
+        new("platform_admin", "平台管理员", "跨公司维护平台设置；不自动获得项目、图档和BOM业务权限。", UserRole.PlatformAdministrator, true, true),
+        new("developer", "开发者", "跨公司访问全部业务数据并拥有全部系统权限。", UserRole.Administrator, true, true)
     ];
+
+    private static IReadOnlyDictionary<string, IReadOnlySet<string>> InitialRoleDefaults { get; } =
+        new Dictionary<string, IReadOnlySet<string>>(StringComparer.OrdinalIgnoreCase)
+        {
+            [UserRole.Engineer.ToString()] = Set(PermissionCodes.ProjectView, PermissionCodes.ProjectContentView, PermissionCodes.DocumentEdit, PermissionCodes.DocumentLockRequestRelease, PermissionCodes.BomEdit, PermissionCodes.ReleaseManage),
+            ["ElectricalEngineer"] = Set(PermissionCodes.ProjectView, PermissionCodes.ProjectContentView, PermissionCodes.DocumentEdit, PermissionCodes.DocumentLockRequestRelease, PermissionCodes.BomEdit, PermissionCodes.ReleaseManage),
+            ["CommissioningEngineer"] = Set(PermissionCodes.ProjectView, PermissionCodes.ProjectContentView, PermissionCodes.DocumentEdit, PermissionCodes.DocumentLockRequestRelease, PermissionCodes.BomEdit),
+            ["HardwareEngineer"] = Set(PermissionCodes.ProjectView, PermissionCodes.ProjectContentView, PermissionCodes.DocumentEdit, PermissionCodes.DocumentLockRequestRelease, PermissionCodes.BomEdit, PermissionCodes.ReleaseManage),
+            ["MechanicalManager"] = Set(PermissionCodes.ProjectView, PermissionCodes.ProjectContentView, PermissionCodes.DocumentEdit, PermissionCodes.DocumentLockRequestRelease, PermissionCodes.DocumentLockForceRelease, PermissionCodes.BomEdit, PermissionCodes.ReleaseManage, PermissionCodes.ApprovalDecide),
+            ["TechnicalAssistant"] = Set(PermissionCodes.ProjectView, PermissionCodes.ProjectContentView, PermissionCodes.DocumentEdit, PermissionCodes.DocumentLockRequestRelease, PermissionCodes.BomEdit),
+            [UserRole.BusinessUnitManager.ToString()] = Set(PermissionCodes.ProjectView, PermissionCodes.ProjectStaffingManage, PermissionCodes.ProjectContentView, PermissionCodes.ApprovalDecide, PermissionCodes.ApprovalEmergencySubstitute),
+            [UserRole.ProcessReviewer.ToString()] = Defaults[UserRole.ProcessReviewer],
+            ["ProjectManager"] = Set(PermissionCodes.ProjectView, PermissionCodes.ProjectCreate, PermissionCodes.ProjectEdit, PermissionCodes.ProjectChildCreate, PermissionCodes.ProjectStaffingManage, PermissionCodes.ProjectDesignerAssign, PermissionCodes.ProjectContentView, PermissionCodes.ReleaseManage),
+            ["SupplyChain"] = Defaults[UserRole.ProductionViewer],
+            ["ProcurementSpecialist"] = Defaults[UserRole.ProductionViewer],
+            ["ProcurementManager"] = Defaults[UserRole.Approver],
+            ["ProductionManager"] = Defaults[UserRole.Approver],
+            ["ProductionAssistant"] = Defaults[UserRole.ProductionViewer],
+            ["MachiningSupervisor"] = Defaults[UserRole.ProductionViewer],
+            ["MachiningOperator"] = Defaults[UserRole.ProductionViewer],
+            ["AssemblySupervisor"] = Defaults[UserRole.ProductionViewer],
+            ["AssemblyFitter"] = Defaults[UserRole.ProductionViewer],
+            ["ElectricalSupervisor"] = Defaults[UserRole.ProductionViewer],
+            ["AssemblyElectrician"] = Defaults[UserRole.ProductionViewer],
+            [UserRole.PlanningManager.ToString()] = Defaults[UserRole.PlanningManager],
+            [UserRole.ProductionViewer.ToString()] = Defaults[UserRole.ProductionViewer],
+            [UserRole.Approver.ToString()] = Defaults[UserRole.Approver],
+            [UserRole.Administrator.ToString()] = Defaults[UserRole.Administrator],
+            ["platform_admin"] = Defaults[UserRole.PlatformAdministrator],
+            ["developer"] = Defaults[UserRole.Administrator]
+        };
+
+    public static IReadOnlySet<string> InitialPermissions(string roleCode, UserRole baseRole) =>
+        InitialRoleDefaults.GetValueOrDefault(roleCode, Defaults[baseRole]);
 
     public static bool IsKnown(string code) => Permissions.Any(permission => string.Equals(permission.Code, code, StringComparison.Ordinal));
 
     public static IReadOnlySet<string> Normalize(UserRole role, IEnumerable<string> codes)
     {
         if (role == UserRole.Administrator) return Defaults[UserRole.Administrator];
+        if (role == UserRole.PlatformAdministrator) return Defaults[UserRole.PlatformAdministrator];
         var normalized = codes.Where(IsKnown).ToHashSet(StringComparer.Ordinal);
         if (normalized.Any(code => code.StartsWith("project.", StringComparison.Ordinal)
-                || code is PermissionCodes.DocumentEdit or PermissionCodes.DocumentLockRequestRelease or PermissionCodes.DocumentLockForceRelease or PermissionCodes.BomEdit or PermissionCodes.ReleaseManage or PermissionCodes.ApprovalDecide))
+                || code is PermissionCodes.DocumentEdit or PermissionCodes.DocumentLockRequestRelease or PermissionCodes.DocumentLockForceRelease or PermissionCodes.BomEdit
+                    or PermissionCodes.DrawingReviewSubmit or PermissionCodes.DrawingReviewAnnotate or PermissionCodes.DrawingReviewDecide or PermissionCodes.ReleaseManage or PermissionCodes.ApprovalDecide))
             normalized.Add(PermissionCodes.ProjectView);
-        if (normalized.Any(code => code is PermissionCodes.DocumentEdit or PermissionCodes.DocumentLockRequestRelease or PermissionCodes.DocumentLockForceRelease or PermissionCodes.BomEdit or PermissionCodes.ReleaseManage or PermissionCodes.ApprovalDecide))
+        if (normalized.Any(code => code is PermissionCodes.DocumentEdit or PermissionCodes.DocumentLockRequestRelease or PermissionCodes.DocumentLockForceRelease or PermissionCodes.BomEdit
+                or PermissionCodes.DrawingReviewSubmit or PermissionCodes.DrawingReviewAnnotate or PermissionCodes.DrawingReviewDecide or PermissionCodes.ReleaseManage or PermissionCodes.ApprovalDecide))
             normalized.Add(PermissionCodes.ProjectContentView);
         if (normalized.Contains(PermissionCodes.RoleSettingsEdit)) normalized.Add(PermissionCodes.RoleSettingsView);
         return normalized;

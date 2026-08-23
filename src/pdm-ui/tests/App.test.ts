@@ -11,8 +11,8 @@ function json(value: unknown, status = 200) {
   return new Response(JSON.stringify(value), { status, headers: { 'Content-Type': 'application/json' } })
 }
 
-function installApiMock() {
-  const projects: Array<Record<string, unknown>> = [{ id: projectId, code: 'PRJ-REAL-001', name: '真实装配项目', owner: 'engineer', responsibleUsers: ['engineer'], vaultLocation: 'D:\\PDM\\PRJ-REAL-001', releaseLocation: 'D:\\Release\\PRJ-REAL-001', isActive: true, quantity: 1, serialNumbers: [] }]
+function installApiMock(projectsBeforeDefault: Array<Record<string, unknown>> = []) {
+  const projects: Array<Record<string, unknown>> = [...projectsBeforeDefault, { id: projectId, code: 'PRJ-REAL-001', name: '真实装配项目', owner: 'engineer', responsibleUsers: ['engineer'], vaultLocation: 'D:\\PDM\\PRJ-REAL-001', releaseLocation: 'D:\\Release\\PRJ-REAL-001', isActive: true, quantity: 1, serialNumbers: [] }]
   const customers = [{ id: 'customer-1', code: 'C00465', name: '中山比亚迪电子有限公司', isActive: true }]
   let crmSettings = { baseUrl: 'http://10.7.7.188/U9', username: 'pdm', passwordConfigured: true, autoSyncEnabled: false, autoSyncIntervalMinutes: 60, lastSyncAt: null as string | null, lastSyncCount: 0, lastAutoSyncAttemptAt: null as string | null, lastAutoSyncError: null as string | null }
   let u9Settings = { baseUrl: 'http://10.7.7.188/U9', enterpriseCode: '01', organizationCode: '7', userCode: 'pdm', clientId: 'PDM', clientSecretConfigured: true, itemCreatePath: '/webapi/ItemMaster/Create', itemQueryPath: '/webapi/ItemMaster/Query', itemModifyPath: '/webapi/ItemMaster/Modify', itemDeletePath: '/webapi/ItemMaster/Delete', unitCodeMappings: {}, writeEnabled: false }
@@ -51,6 +51,7 @@ function installApiMock() {
     if (url.endsWith('/api/auth/me')) return json({ username: 'admin', displayName: '系统管理员', nickname: null, gender: 'unspecified', landline: null, mobilePhone: null, email: null })
     if (url.endsWith('/api/password-reset-requests')) return json([])
     if (url.endsWith('/api/materials')) return materialRequestsUnauthorized ? json({ title: 'Unauthorized' }, 401) : json([])
+    if (url.includes('/api/material-code/applications')) return json([])
     if (url.endsWith('/api/material-category-rules')) return json([])
     if (url.endsWith('/api/material-sync-tasks')) return json([])
     if (url.endsWith('/api/role-permissions')) return json(roleDirectory)
@@ -129,7 +130,7 @@ function installApiMock() {
     ])
     if (url.endsWith(`/api/projects/${projectId}/audit?take=200`)) return json([{ id: 'audit-1', occurredAt: '2026-08-11T02:00:00Z', actor: 'engineer', action: 'document.checkin', entityType: 'DocumentVersion', entityId: 'version-w2', detail: 'W2' }])
     if (url.endsWith(`/api/projects/${projectId}/folders`)) return json([])
-    if (url.endsWith(`/api/projects/${projectId}`)) return json(projects[0])
+    if (url.endsWith(`/api/projects/${projectId}`)) return json(projects.find(item => item.id === projectId) ?? projects[0])
     if (url.endsWith('/document-relations')) return json([
       { modelDocumentId: 'doc-root', drawingDocumentId: 'doc-drawing' },
       { modelDocumentId: 'doc-root', drawingDocumentId: 'doc-drawing-missing' },
@@ -189,7 +190,7 @@ async function login(wrapper: ReturnType<typeof mount>, openProject = true) {
   await openLogin(wrapper)
   await wrapper.get('input[name="username"]').setValue('engineer')
   await wrapper.get('input[name="password"]').setValue('correct-password')
-  await wrapper.get('form[aria-label="登录PDM"]').trigger('submit')
+  await wrapper.get('form[aria-label="登录PLM"]').trigger('submit')
   await flushPromises()
   if (openProject) {
     await projectTabByText(wrapper, '图档').trigger('click')
@@ -201,7 +202,7 @@ async function login(wrapper: ReturnType<typeof mount>, openProject = true) {
 }
 
 async function openLogin(wrapper: ReturnType<typeof mount>) {
-  if (wrapper.find('form[aria-label="登录PDM"]').exists()) return
+  if (wrapper.find('form[aria-label="登录PLM"]').exists()) return
   await buttonByText(wrapper, '登录').trigger('click')
   await flushPromises()
 }
@@ -233,7 +234,7 @@ function projectTabByText(wrapper: ReturnType<typeof mount>, label: string) {
   return button
 }
 
-describe('PDM client workspace', () => {
+describe('PLM client workspace', () => {
   beforeEach(() => {
     materialRequestsUnauthorized = false
     resumeRequestsUnauthorized = false
@@ -241,6 +242,38 @@ describe('PDM client workspace', () => {
     window.localStorage.clear()
     Object.defineProperty(window, 'chrome', { configurable: true, value: undefined })
     installApiMock()
+  })
+
+  it('restores and toggles the collapsed main navigation', async () => {
+    window.localStorage.setItem('upton-pdm-sidebar-collapsed', 'true')
+    const wrapper = mount(App, { attachTo: document.body, global: { plugins: [ElementPlus] } })
+    await login(wrapper, false)
+
+    expect(wrapper.get('.pdm-app-body').classes()).toContain('is-sidebar-collapsed')
+    expect(wrapper.get('.pdm-titlebar__sidebar-toggle').attributes('aria-label')).toBe('展开主导航')
+
+    await wrapper.get('.pdm-titlebar__sidebar-toggle').trigger('click')
+    expect(wrapper.get('.pdm-app-body').classes()).not.toContain('is-sidebar-collapsed')
+    expect(window.localStorage.getItem('upton-pdm-sidebar-collapsed')).toBe('false')
+
+    wrapper.unmount()
+  })
+
+  it('keeps new workflow actions visible to the fixed administrator before a stale session permission list is renewed', async () => {
+    const wrapper = mount(App, { attachTo: document.body, global: { plugins: [ElementPlus] } })
+    await openLogin(wrapper)
+    await wrapper.get('input[name="username"]').setValue('admin')
+    await wrapper.get('input[name="password"]').setValue('correct-password')
+    await wrapper.get('form[aria-label="登录PLM"]').trigger('submit')
+    await flushPromises()
+
+    await projectTabByText(wrapper, '图档').trigger('click')
+    await flushPromises()
+    await wrapper.get('button[aria-label="图纸审核"]').trigger('click')
+
+    expect(wrapper.find('[aria-label="图纸审核面板"]').exists()).toBe(true)
+    expect(buttonByText(wrapper, '发起本项目图纸审核').exists()).toBe(true)
+    wrapper.unmount()
   })
 
   it('places password help on the left and remembered credentials on the right', async () => {
@@ -263,7 +296,7 @@ describe('PDM client workspace', () => {
     await openLogin(wrapper)
     await wrapper.get('input[name="username"]').setValue('engineer')
     await wrapper.get('input[name="password"]').setValue('correct-password')
-    await wrapper.get('form[aria-label="登录PDM"]').trigger('submit')
+    await wrapper.get('form[aria-label="登录PLM"]').trigger('submit')
     await flushPromises()
 
     expect(wrapper.find('.pdm-project-workspace').exists()).toBe(true)
@@ -305,6 +338,35 @@ describe('PDM client workspace', () => {
     restored.unmount()
   })
 
+  it('opens the most recently used project overview after Windows client login', async () => {
+    const fallbackProject = { id: 'project-fallback', code: 'PRJ-FALLBACK-001', name: '回退项目', owner: 'engineer', responsibleUsers: ['engineer'], vaultLocation: 'D:\\PDM\\PRJ-FALLBACK-001', releaseLocation: 'D:\\Release\\PRJ-FALLBACK-001', isActive: true, quantity: 1, serialNumbers: [] }
+    installApiMock([fallbackProject])
+    window.localStorage.setItem('upton-pdm-project-center', JSON.stringify({ projectId, tab: 'bom' }))
+    window.localStorage.setItem('upton-pdm-active-navigation', 'admin')
+    Object.defineProperty(window, 'chrome', {
+      configurable: true,
+      value: { webview: { postMessage: vi.fn(), addEventListener: vi.fn() } },
+    })
+
+    const wrapper = mount(App, { attachTo: document.body, global: { plugins: [ElementPlus] } })
+    try {
+      await openLogin(wrapper)
+      await wrapper.get('input[name="username"]').setValue('engineer')
+      await wrapper.get('input[name="password"]').setValue('correct-password')
+      await wrapper.get('form[aria-label="登录PLM"]').trigger('submit')
+      await flushPromises()
+
+      expect(wrapper.find('.pdm-project-workspace').exists()).toBe(true)
+      expect(wrapper.text()).toContain('PRJ-REAL-001')
+      expect(wrapper.text()).not.toContain('PRJ-FALLBACK-001')
+      expect(wrapper.get('.pdm-project-tabs button.is-active').text()).toBe('概览')
+      expect(wrapper.get('.pdm-sidebar__nav .pdm-nav-item.is-active').text()).toContain('项目中心')
+      expect(JSON.parse(window.localStorage.getItem('upton-pdm-project-center') ?? '{}')).toEqual({ projectId, tab: 'overview' })
+    } finally {
+      wrapper.unmount()
+    }
+  })
+
   it('restores encrypted Windows client credentials without logging in automatically', async () => {
     const postMessage = vi.fn()
     Object.defineProperty(window, 'chrome', {
@@ -329,7 +391,7 @@ describe('PDM client workspace', () => {
     expect(vi.mocked(fetch).mock.calls.filter(([input]) => String(input).endsWith('/api/auth/login'))).toHaveLength(0)
     expect(vi.mocked(fetch).mock.calls.filter(([input]) => String(input).endsWith('/api/projects'))).toHaveLength(0)
 
-    await wrapper.get('form[aria-label="登录PDM"]').trigger('submit')
+    await wrapper.get('form[aria-label="登录PLM"]').trigger('submit')
     await flushPromises()
 
     expect(postMessage).toHaveBeenCalledWith({
@@ -367,7 +429,7 @@ describe('PDM client workspace', () => {
     expect((wrapper.get('input[name="password"]').element as HTMLInputElement).value).toBe('expired-password')
     expect(vi.mocked(fetch).mock.calls.filter(([input]) => String(input).endsWith('/api/auth/login'))).toHaveLength(0)
 
-    await wrapper.get('form[aria-label="登录PDM"]').trigger('submit')
+    await wrapper.get('form[aria-label="登录PLM"]').trigger('submit')
     await flushPromises()
 
     expect(wrapper.text()).toContain('用户名或密码错误。')
@@ -406,7 +468,7 @@ describe('PDM client workspace', () => {
     wrapper.unmount()
   })
 
-  it('allows every Windows client user to configure the local workspace', async () => {
+  it('moves Windows client startup and workspace settings under system management', async () => {
     const postMessage = vi.fn()
     Object.defineProperty(window, 'chrome', {
       configurable: true,
@@ -415,7 +477,9 @@ describe('PDM client workspace', () => {
     const wrapper = mount(App, { attachTo: document.body, global: { plugins: [ElementPlus] } })
     await login(wrapper, false)
 
-    await buttonByText(wrapper, '客户端设置').trigger('click')
+    expect(wrapper.findAll('.pdm-sidebar__footer button').map(button => button.text())).toEqual(['系统管理'])
+    await buttonByText(wrapper, '系统管理').trigger('click')
+    expect(buttonByText(wrapper, '客户端设置')).toBeDefined()
     expect(postMessage).toHaveBeenCalledWith({ type: 'desktop-settings-request', payload: undefined })
 
     window.dispatchEvent(new CustomEvent('pdm-desktop-settings', {
@@ -428,6 +492,8 @@ describe('PDM client workspace', () => {
     }))
     await flushPromises()
     expect((wrapper.get('input[aria-label="本地缓存工作区"]').element as HTMLInputElement).value).toContain('UPTON PDM\\Workspace')
+    await buttonByText(wrapper, '已开启').trigger('click')
+    expect(postMessage).toHaveBeenCalledWith({ type: 'desktop-settings-save', payload: { startWithWindows: false } })
 
     window.dispatchEvent(new CustomEvent('pdm-workspace-folder-selected', { detail: { workspaceRoot: 'D:\\PDM-Cache' } }))
     await flushPromises()
@@ -452,7 +518,7 @@ describe('PDM client workspace', () => {
     expect(wrapper.text()).toContain('PRJ-REAL-001 · 真实装配项目')
     expect(wrapper.get('button[aria-label="进入项目图档"]').text()).toContain('项目图档')
     expect(wrapper.get('button[aria-label="进入BOM数据"]').text()).toContain('BOM数据')
-    await projectTabByText(wrapper, '文件库').trigger('click')
+    await projectTabByText(wrapper, '文件').trigger('click')
     await flushPromises()
     expect(wrapper.text()).toContain('项目文件夹')
     expect(wrapper.get('.pdm-project-workspace').classes()).not.toContain('is-document-view')
@@ -473,7 +539,7 @@ describe('PDM client workspace', () => {
     expect(wrapper.find('[aria-label="BOM维护"] h2').exists()).toBe(false)
     expect(wrapper.text()).toContain('标准件BOM（1）')
 
-    await projectTabByText(wrapper, '审批发布').trigger('click')
+    await projectTabByText(wrapper, '发布').trigger('click')
     await flushPromises()
     expect(wrapper.text()).toContain('RP-REAL-001')
     expect(wrapper.text()).not.toContain('PRJ-2026-018')
@@ -528,23 +594,23 @@ describe('PDM client workspace', () => {
     await wrapper.get('input[name="projectAlias"]').setValue('测试别名')
     await wrapper.get('input[name="signedDate"]').setValue('2026-08-13')
     await wrapper.get('input[name="quantity"]').setValue('2')
-    await wrapper.get('form[aria-label="创建PDM项目"]').trigger('submit')
+    await wrapper.get('form[aria-label="创建PLM项目"]').trigger('submit')
     await flushPromises()
 
     const fetchMock = vi.mocked(fetch)
-    expect(fetchMock).toHaveBeenCalledWith(expect.stringMatching(/\/api\/projects$/), expect.objectContaining({
-      method: 'POST',
-      body: JSON.stringify({
-        organizationId: '70000000-0000-0000-0000-000000000001',
-        projectTypeCode: 'P',
-        equipmentTypeCode: 2,
-        customerId: 'customer-1',
-        name: '新建装配项目',
-        projectAlias: '测试别名',
-        signedDate: '2026-08-13',
-        quantity: 2,
-      }),
-    }))
+    const createRequest = fetchMock.mock.calls.find(([input, init]) => String(input).endsWith('/api/projects') && init?.method === 'POST')
+    expect(createRequest).toBeDefined()
+    expect(JSON.parse(String(createRequest?.[1]?.body))).toEqual({
+      organizationId: '70000000-0000-0000-0000-000000000001',
+      projectTypeCode: 'P',
+      equipmentTypeCode: 2,
+      customerId: 'customer-1',
+      name: '新建装配项目',
+      projectAlias: '测试别名',
+      signedDate: '2026-08-13',
+      quantity: 2,
+      bomItemCategoryCode: '0301',
+    })
     expect(wrapper.text()).toContain('P700001')
     expect(wrapper.text()).toContain('AK-2-C00465-001-00')
     expect(wrapper.text()).toContain('中山比亚迪电子有限公司')
@@ -554,7 +620,7 @@ describe('PDM client workspace', () => {
     await runProjectAction(wrapper, 'create-child', 'P700001')
     await wrapper.get('input[name="childProjectName"]').setValue('子项目一')
     await wrapper.get('input[name="childQuantity"]').setValue('2')
-    await wrapper.get('form[aria-label="创建PDM子项目"]').trigger('submit')
+    await wrapper.get('form[aria-label="创建PLM子项目"]').trigger('submit')
     await flushPromises()
     expect(wrapper.text()).toContain('P700001-1')
     expect(wrapper.text()).toContain('AK-2-C00465-001-01')
@@ -562,14 +628,14 @@ describe('PDM client workspace', () => {
 
     await runProjectAction(wrapper, 'open', 'P700001')
     await flushPromises()
-    await projectTabByText(wrapper, '文件库').trigger('click')
+    await projectTabByText(wrapper, '文件').trigger('click')
     const confirmSwitch = vi.spyOn(ElMessageBox, 'confirm').mockResolvedValue('confirm' as never)
     await wrapper.get('[aria-label="选择项目号 P700001-1"]').trigger('click')
     await flushPromises()
     expect(confirmSwitch).not.toHaveBeenCalled()
     confirmSwitch.mockRestore()
     expect(wrapper.get('main.pdm-main').classes()).toContain('is-project-workspace')
-    expect(wrapper.get('.pdm-project-tabs button.is-active').text()).toBe('文件库')
+    expect(wrapper.get('.pdm-project-tabs button.is-active').text()).toBe('文件')
     expect(wrapper.get('.pdm-project-sidebar__summary').text()).toContain('AK-2-C00465-001-01')
     expect(wrapper.get('.pdm-project-sidebar__summary').text()).toContain('70000003、70000004')
     expect(wrapper.find('.pdm-project-selected-summary').exists()).toBe(false)
@@ -580,7 +646,7 @@ describe('PDM client workspace', () => {
     await openLogin(wrapper)
     await wrapper.get('input[name="username"]').setValue('admin')
     await wrapper.get('input[name="password"]').setValue('correct-password')
-    await wrapper.get('form[aria-label="登录PDM"]').trigger('submit')
+    await wrapper.get('form[aria-label="登录PLM"]').trigger('submit')
     await flushPromises()
 
     await buttonByText(wrapper, '项目列表').trigger('click')
@@ -604,8 +670,8 @@ describe('PDM client workspace', () => {
     expect(crmPanel.text()).toContain('C00465')
     expect(crmPanel.text()).not.toContain('新增客户')
     expect(crmPanel.findAll('button').some(button => button.text().trim() === '编辑')).toBe(false)
-    expect(crmPanel.get('input[name="u9CustomerBaseUrl"]').attributes('readonly')).toBeDefined()
-    expect(crmPanel.get('input[name="u9CustomerUser"]').element).toHaveProperty('value', 'pdm')
+    expect(crmPanel.find('input[name="u9CustomerBaseUrl"]').exists()).toBe(false)
+    expect(crmPanel.find('input[name="u9CustomerUser"]').exists()).toBe(false)
     await crmPanel.get('input[name="u9CustomerAutoSyncEnabled"]').setValue(true)
     await crmPanel.get('select[name="u9CustomerAutoSyncIntervalMinutes"]').setValue('30')
     await buttonByText(wrapper, '保存同步计划').trigger('click')
@@ -631,11 +697,16 @@ describe('PDM client workspace', () => {
     expect(wrapper.find('.pdm-pagebar').exists()).toBe(false)
     await buttonByText(wrapper, '角色权限').trigger('click')
     expect(wrapper.get('[aria-label="角色权限设置"]').text()).toContain('工程师')
+    const engineerRoleRow = wrapper.findAll('.el-table__row').find(row => row.text().includes('Engineer'))
+    expect(engineerRoleRow).toBeDefined()
+    await engineerRoleRow!.findAll('button').find(button => button.text().trim() === '基础权限')!.trigger('click')
     expect(wrapper.text()).toContain('分配子项目设计人员')
+    await buttonByText(wrapper, '取消').trigger('click')
+    await engineerRoleRow!.findAll('button').find(button => button.text().trim() === '单据权限')!.trigger('click')
     const documentPermission = wrapper.findAll('.pdm-permission-card').find(item => item.text().includes('document.edit'))
     expect(documentPermission).toBeDefined()
     await documentPermission!.get('input[type="checkbox"]').setValue(false)
-    await buttonByText(wrapper, '保存权限').trigger('click')
+    await buttonByText(wrapper, '保存并立即生效').trigger('click')
     await flushPromises()
     expect(vi.mocked(fetch)).toHaveBeenCalledWith(expect.stringMatching(/\/api\/role-permissions\/Engineer$/), expect.objectContaining({ method: 'PUT' }))
 
@@ -665,12 +736,12 @@ describe('PDM client workspace', () => {
     await openLogin(wrapper)
     await wrapper.get('input[name="username"]').setValue('engineer')
     await wrapper.get('input[name="password"]').setValue('wrong-password')
-    await wrapper.get('form[aria-label="登录PDM"]').trigger('submit')
+    await wrapper.get('form[aria-label="登录PLM"]').trigger('submit')
     await flushPromises()
     expect(wrapper.text()).toContain('用户名或密码错误')
 
     await wrapper.get('input[name="password"]').setValue('correct-password')
-    await wrapper.get('form[aria-label="登录PDM"]').trigger('submit')
+    await wrapper.get('form[aria-label="登录PLM"]').trigger('submit')
     await flushPromises()
     await projectTabByText(wrapper, '图档').trigger('click')
     await flushPromises()
@@ -723,13 +794,17 @@ describe('PDM client workspace', () => {
     expect(wrapper.find('[aria-label="项目设计树"]').exists()).toBe(true)
 
     await projectTabByText(wrapper, 'BOM').trigger('click')
-    expect(wrapper.get('button[role="tab"][aria-selected="true"]').text()).toContain('源数据')
+    expect(wrapper.get('button[role="tab"][aria-selected="true"]').text()).toContain('多级总览')
+    expect(wrapper.get('[aria-label="BOM多级总览"]').text()).toContain('本级BOM料号')
+    expect(wrapper.get('[aria-label="BOM多级总览"]').text()).toContain('上级BOM料号')
+    await wrapper.findAll('button[role="tab"]').find(button => button.text().includes('源数据'))!.trigger('click')
     expect(wrapper.text()).toContain('归入标准件BOM')
     expect(wrapper.text()).toContain('归入非标件BOM')
     expect(wrapper.text()).not.toContain('归入电气BOM')
 
     await projectTabByText(wrapper, '图档').trigger('click')
-    expect(wrapper.text()).toContain('网页端暂不支持原生SolidWorks图档预览')
+    await flushPromises()
+    expect(wrapper.text()).toContain('该历史版本尚未生成STP/PDF预览')
     expect(wrapper.find('[aria-label="图档查看与操作"]').exists()).toBe(true)
     const projectSidebar = wrapper.get('[aria-label="项目基本信息与全部项目号"]')
     expect(projectSidebar.find('[aria-label="BOM完整性"]').exists()).toBe(false)
@@ -739,11 +814,11 @@ describe('PDM client workspace', () => {
     expect(wrapper.find('button[aria-label="适合窗口"]').exists()).toBe(false)
     await buttonByText(wrapper, '消息').trigger('click')
     await flushPromises()
-    expect(wrapper.get('[aria-label="我的待办"]').text()).toContain('我的待办')
+    expect(wrapper.get('[aria-label="我的待办"]').text()).toContain('全部待办')
     await buttonByText(wrapper, '项目列表').trigger('click')
     await runProjectAction(wrapper, 'open')
     await flushPromises()
-    await projectTabByText(wrapper, '审批发布').trigger('click')
+    await projectTabByText(wrapper, '发布').trigger('click')
     await flushPromises()
     expect(document.body.textContent).toContain('RP-REAL-001')
     expect(document.body.textContent).not.toContain('审批与生产发包')
@@ -801,6 +876,8 @@ describe('PDM client workspace', () => {
     await login(wrapper)
 
     const slot = wrapper.get('[aria-label="客户端内嵌eDrawings预览区"]')
+    expect(slot.get('[aria-label="正在加载 eDrawings"]')).toBeTruthy()
+    expect(slot.findAll('.pdm-square-loader__square')).toHaveLength(8)
     vi.spyOn(slot.element, 'getBoundingClientRect').mockReturnValue({
       x: 260, y: 180, left: 260, top: 180, right: 960, bottom: 700,
       width: 700, height: 520, toJSON: () => ({}),
@@ -825,13 +902,7 @@ describe('PDM client workspace', () => {
     window.dispatchEvent(new CustomEvent('pdm-preview-status', { detail: { state: 'ready', fileName: 'REAL-ASM-001.SLDASM' } }))
     await flushPromises()
     expect(slot.attributes('data-preview-state')).toBe('ready')
-    expect(wrapper.find('[aria-label="eDrawings快捷操作"]').exists()).toBe(true)
-    expect(wrapper.find('button[aria-label="适合窗口"]').exists()).toBe(true)
-    await wrapper.get('button[aria-label="平移"]').trigger('click')
-    expect(postMessage).toHaveBeenCalledWith({ type: 'preview-host-command', payload: { command: 'pan' } })
-    expect(wrapper.get('button[aria-label="平移"]').classes()).toContain('is-active')
-    await wrapper.get('button[aria-label="适合窗口"]').trigger('click')
-    expect(postMessage).toHaveBeenCalledWith({ type: 'preview-host-command', payload: { command: 'fit' } })
+    expect(wrapper.find('[aria-label="eDrawings快捷操作"]').exists()).toBe(false)
 
     const previewDocumentCalls = postMessage.mock.calls.filter(([message]) => message.type === 'preview-document').length
     await wrapper.get('button[aria-label="更多操作"]').trigger('click')
@@ -889,40 +960,41 @@ describe('PDM client workspace', () => {
     })
     window.dispatchEvent(new CustomEvent('pdm-preview-status', { detail: { state: 'ready', fileName: 'REAL-ASM-001.SLDDRW' } }))
     await flushPromises()
-    expect(wrapper.find('[aria-label="eDrawings快捷操作"]').exists()).toBe(true)
+    expect(wrapper.find('[aria-label="eDrawings快捷操作"]').exists()).toBe(false)
     expect(wrapper.find('[aria-label="图纸页切换"]').exists()).toBe(false)
-    expect(wrapper.get('button[aria-label="旋转"]').attributes('disabled')).toBeDefined()
 
     await wrapper.get('.pdm-related-documents button').trigger('click')
     await flushPromises()
     expect(postMessage.mock.calls.filter(([message]) => message.type === 'preview-document')).toHaveLength(3)
   })
 
-  it('shows an actionable fallback instead of endless eDrawings loading in a web browser', async () => {
+  it('shows an actionable fallback when a historical version has no STP/PDF preview', async () => {
     const wrapper = mount(App, { attachTo: document.body, global: { plugins: [ElementPlus] } })
     await login(wrapper)
 
     const preview = wrapper.get('[aria-label="网页端图档预览状态"]')
     expect(preview.attributes('data-preview-state')).toBe('unavailable')
-    expect(preview.text()).toContain('网页端暂不支持原生SolidWorks图档预览')
+    expect(preview.text()).toContain('该历史版本尚未生成STP/PDF预览')
     expect(preview.text()).not.toContain('正在加载 eDrawings')
     expect(preview.get('[aria-label="图档属性"]').text()).toContain('物料/图号REAL-ASM-001')
     expect(preview.get('[aria-label="图档属性"]').text()).toContain('名称真实总装配')
-
-    const partRow = wrapper.get('[aria-label="项目设计树"]').findAll('.pdm-tree-row').find(row => row.text().includes('真实底板-1'))
-    expect(partRow).toBeTruthy()
-    await partRow!.trigger('click')
-    await flushPromises()
-    expect(wrapper.get('[aria-label="图档属性"]').text()).toContain('规格/型号10mm')
-    expect(wrapper.get('[aria-label="图档属性"]').text()).toContain('材质Q235B')
 
     await buttonByText(wrapper, '查看并下载版本').trigger('click')
     await flushPromises()
     expect(document.body.textContent).toContain('图档历史版本对比')
     expect(document.body.textContent).toContain('下载左侧')
+
+    const partRow = wrapper.get('[aria-label="项目设计树"]').findAll('.pdm-tree-row').find(row => row.text().includes('真实底板-1'))
+    expect(partRow).toBeTruthy()
+    await partRow!.trigger('click')
+    await flushPromises()
+    await new Promise(resolve => window.setTimeout(resolve, 20))
+    await flushPromises()
+    expect(wrapper.get('[aria-label="图档属性"]').text()).toContain('规格/型号10mm')
+    expect(wrapper.get('[aria-label="图档属性"]').text()).toContain('材质Q235B')
   })
 
-  it('opens only PDM-controlled document identities in SolidWorks from the entity button and tree menu', async () => {
+  it('opens only PLM-controlled document identities in SolidWorks from the entity button and tree menu', async () => {
     const postMessage = vi.fn()
     Object.defineProperty(window, 'chrome', {
       configurable: true,
@@ -1005,10 +1077,10 @@ describe('PDM client workspace', () => {
     await openLogin(wrapper)
     await wrapper.get('input[name="username"]').setValue('engineer')
     await wrapper.get('input[name="password"]').setValue('correct-password')
-    await wrapper.get('form[aria-label="登录PDM"]').trigger('submit')
+    await wrapper.get('form[aria-label="登录PLM"]').trigger('submit')
     await flushPromises()
 
-    expect((wrapper.get('input[aria-label="当前项目显示"]').element as HTMLInputElement).value).toContain('PRJ-REAL-001')
+    expect(wrapper.get('button[aria-label="浏览项目"]').text()).toContain('PRJ-REAL-001')
     expect(wrapper.get('.pdm-project-tabs .is-active').text()).toContain('图档')
     expect(wrapper.find('[aria-label="项目设计树"]').exists()).toBe(true)
   })
