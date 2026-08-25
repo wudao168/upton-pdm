@@ -25,16 +25,24 @@ public sealed partial class MySqlPdmRepository
     {
         var document = await FindDocumentAsync(documentId, cancellationToken) ?? throw new PdmNotFoundException("图档不存在。");
         if (document.CheckoutSessionId is null) throw new PdmConflictException("当前编辑权限没有有效会话，请重新获取权限。");
-        return await CheckInVersionAsync(documentId, actor, document.CheckoutSessionId.Value, commit, cancellationToken);
+        return await CheckInVersionAsync(documentId, actor, document.CheckoutSessionId.Value, commit, null, cancellationToken);
     }
 
     public async Task<DocumentCheckInResult> CheckInVersionAsync(Guid documentId, string actor, Guid sessionId, DocumentVersionCommit commit, CancellationToken cancellationToken)
+        => await CheckInVersionAsync(documentId, actor, sessionId, commit, null, cancellationToken);
+
+    public async Task<DocumentCheckInResult> CheckInVersionAsync(Guid documentId, string actor, Guid sessionId, DocumentVersionCommit commit, Guid? drawingReviewWritebackId, CancellationToken cancellationToken)
     {
         await using var connection = await OpenAsync(cancellationToken);
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
         var locked = await LockDocumentAsync(connection, transaction, documentId, cancellationToken);
         if (!string.Equals(locked.CheckedOutBy, actor, StringComparison.OrdinalIgnoreCase) || locked.CheckoutSessionId != sessionId)
             throw new PdmConflictException("编辑会话已经失效，不能提交存档。请另存本地修改或重新获取权限。");
+        var drawingReviewLocked = await IsDocumentUnderActiveDrawingReviewAsync(connection, transaction, documentId, cancellationToken);
+        var controlledWriteback = drawingReviewWritebackId.HasValue
+            && await IsActiveDrawingReviewWritebackAsync(connection, transaction, documentId, drawingReviewWritebackId.Value, cancellationToken);
+        if (drawingReviewLocked && !controlledWriteback)
+            throw new PdmConflictException("图档正在进行图纸审核，不能提交存档。");
 
         var latestFile = await connection.QuerySingleOrDefaultAsync<LatestVersionFingerprintRow>(new CommandDefinition(
             """

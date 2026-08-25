@@ -1,11 +1,13 @@
 <script setup lang="ts">
-import { Boxes, ClipboardCheck, FolderKanban, ListTree, Settings } from '@lucide/vue'
+import { Blocks, Boxes, ClipboardCheck, FolderKanban, ListTree, Settings } from '@lucide/vue'
+import uptonLogo from '../assets/upton-logo-white.png'
 import PlmCubeIcon from './PlmCubeIcon.vue'
 
-type NavKey = 'project-center' | 'projects' | 'materials' | 'tasks' | 'admin'
+type NavKey = 'project-center' | 'projects' | 'materials' | 'program-templates' | 'tasks' | 'admin'
 
-const props = withDefaults(defineProps<{ active: NavKey; approvalCount?: number; canManageSystem?: boolean; collapsed?: boolean }>(), {
+const props = withDefaults(defineProps<{ active: NavKey; approvalCount?: number; materialCount?: number; canManageSystem?: boolean; collapsed?: boolean }>(), {
   approvalCount: 0,
+  materialCount: 0,
   canManageSystem: false,
   collapsed: false,
 })
@@ -15,6 +17,7 @@ const items = [
   { key: 'project-center', label: '项目中心', icon: FolderKanban },
   { key: 'projects', label: '项目列表', icon: ListTree },
   { key: 'materials', label: '料品管理', icon: Boxes },
+  { key: 'program-templates', label: '程序模板', icon: Blocks },
   { key: 'tasks', label: '我的待办', icon: ClipboardCheck },
 ] satisfies Array<{ key: NavKey; label: string; icon: typeof FolderKanban }>
 </script>
@@ -24,8 +27,7 @@ const items = [
     <div class="pdm-sidebar__brand">
       <PlmCubeIcon class="pdm-sidebar__brand-mark" />
       <div class="pdm-sidebar__brand-copy">
-        <span>产品生命</span>
-        <span>周期管理</span>
+        <img class="pdm-sidebar__brand-logo" :src="uptonLogo" alt="UPTON">
       </div>
     </div>
     <nav class="pdm-sidebar__nav">
@@ -42,7 +44,8 @@ const items = [
       >
         <component :is="item.icon" :size="18" aria-hidden="true" />
         <span>{{ item.label }}</span>
-        <em v-if="item.key === 'tasks' && props.approvalCount">{{ props.approvalCount }}</em>
+        <em v-if="item.key === 'materials' && props.materialCount">{{ props.materialCount }}</em>
+        <em v-else-if="item.key === 'tasks' && props.approvalCount">{{ props.approvalCount }}</em>
       </button>
     </nav>
     <div class="pdm-sidebar__footer">

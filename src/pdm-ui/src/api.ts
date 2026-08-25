@@ -1,4 +1,4 @@
-import type { AddDrawingReviewMarkupInput, ApprovalStep, AuditEntry, BatchUpdateBomItemsInput, BomEmptyDeclaration, BomGenerationResult, BomHeaderKind, BomItem, BomKind, BomValidationRules, BomVersion, BomVersionState, CreateProjectInput, CreateReleasePackageInput, CreateRoleInput, CreateSubprojectInput, CrmConnectionTestResult, CrmCustomerSyncResult, CrmIntegrationSettings, DocumentKind, DocumentModelDrawingRelation, DocumentNode, DocumentVersionComparison, DocumentVersionSummary, DocumentWhereUsed, DrawingReviewDecision, DrawingReviewPackage, DrawingReviewTarget, EditLockSummary, EquipmentTypeDefinition, FolderPermissionRule, MainProjectStaffingInput, ManagedDocument, ManufacturingBomBaseline, MaterialCategory, MaterialCategoryRule, MaterialCodeApplication, MaterialCodeApplicationStatus, MaterialCodeResolution, MaterialKind, MaterialRemovalReadiness, MaterialRemovalResult, MaterialSyncExecutionResult, MaterialSyncTask, MyApprovalTask, OrganizationDirectory, OrganizationUnit, PasswordResetTask, PdmCustomer, PdmMaterial, PdmSystemSettings, PdmUser, PdmUserProfile, ProjectBomHeader, ProjectFolder, ProjectFolderTemplateNode, ProjectNumberingOptions, ProjectOrganization, ProjectSummary, ProjectVersionItem, ReferenceStatus, ReleasePackageSummary, ReleaseScope, RolePermissionDirectory, SaveMaterialInput, SaveOrganizationUnitInput, SavePdmUserInput, SaveProjectOrganizationInput, U9BomQueryExecution, U9BomQueryInput, U9BomWriteExecution, U9BomWriteInput, U9BomWritePreview, U9ConnectionTestResult, U9ItemQueryResult, U9MaterialIntegrationSettings, U9MaterialSampleImportResult, U9MaterialSamplePreview, UpdateCrmIntegrationInput, UpdateProjectInput, UpdateU9MaterialIntegrationInput } from './types'
+import type { AddDrawingReviewMarkupInput, ApprovalStep, ApprovalU9AutomationResult, AuditEntry, BatchUpdateBomItemsInput, BomEmptyDeclaration, BomGenerationResult, BomHeaderKind, BomItem, BomKind, BomValidationRules, BomVersion, BomVersionState, CreateProjectInput, CreateReleasePackageInput, CreateRoleInput, CreateSubprojectInput, CrmConnectionTestResult, CrmCustomerSyncResult, CrmIntegrationSettings, DocumentKind, DocumentModelDrawingRelation, DocumentNode, DocumentVersionComparison, DocumentVersionSummary, DocumentWhereUsed, DrawingReviewCandidate, DrawingReviewDecision, DrawingReviewPackage, DrawingReviewTarget, EditLockSummary, EquipmentTypeDefinition, FolderPermissionRule, MainProjectStaffingInput, ManagedDocument, ManufacturingBomBaseline, MaterialAttachment, MaterialAttachmentKind, MaterialCategory, MaterialCategoryRule, MaterialCodeApplication, MaterialCodeApplicationStatus, MaterialCodeDecisionResult, MaterialCodeResolution, MaterialKind, MaterialRemovalReadiness, MaterialRemovalResult, MaterialSyncExecutionResult, MaterialSyncTask, MyApprovalTask, OrganizationDirectory, OrganizationUnit, PasswordResetTask, PdmCustomer, PdmMaterial, PdmSystemSettings, PdmUser, PdmUserProfile, ProgramTemplate, ProgramTemplateApprovalDecision, ProgramTemplateAttachmentKind, ProgramTemplateDraftInput, ProgramTemplateRevision, ProgramTemplateTask, ProgramTemplateVersionBump, ProjectBomHeader, ProjectBomU9SyncExecution, ProjectBomU9SyncPreview, ProjectFolder, ProjectFolderTemplateNode, ProjectNumberingOptions, ProjectOrganization, ProjectSummary, ProjectVersionItem, ReferenceStatus, ReleasePackageSummary, ReleaseScope, RolePermissionDirectory, SaveMaterialInput, SaveOrganizationUnitInput, SavePdmUserInput, SaveProjectOrganizationInput, U9BomQueryExecution, U9BomQueryInput, U9BomWriteExecution, U9BomWriteInput, U9BomWritePreview, U9ConnectionTestResult, U9ItemQueryResult, U9MaterialIntegrationSettings, U9MaterialSampleImportResult, U9MaterialSamplePreview, UpdateCrmIntegrationInput, UpdateProjectInput, UpdateU9MaterialIntegrationInput } from './types'
 
 const apiBase = (import.meta.env.VITE_PDM_API_BASE ?? 'http://127.0.0.1:5080').replace(/\/$/, '')
 
@@ -21,6 +21,99 @@ export interface AuthSession {
   activeCompanyName: string
   crossCompanyView: boolean
   accessibleCompanies: Array<{ id: string; name: string; code: string }>
+}
+
+export function listProgramTemplates(token: string, mine = false): Promise<ProgramTemplate[]> {
+  return requestJson<ProgramTemplate[]>(`/api/program-templates${mine ? '?mine=true' : ''}`, {}, token)
+}
+
+export function getProgramTemplate(templateId: string, token: string): Promise<ProgramTemplate> {
+  return requestJson<ProgramTemplate>(`/api/program-templates/${templateId}`, {}, token)
+}
+
+export function createProgramTemplate(input: ProgramTemplateDraftInput, token: string): Promise<ProgramTemplate> {
+  return requestJson<ProgramTemplate>('/api/program-templates', { method: 'POST', body: JSON.stringify(input) }, token)
+}
+
+export function updateProgramTemplateDraft(revisionId: string, input: ProgramTemplateDraftInput, expectedRowVersion: number, token: string): Promise<ProgramTemplateRevision> {
+  const { assetType: _, ...draft } = input
+  return requestJson<ProgramTemplateRevision>(`/api/program-templates/revisions/${revisionId}`, {
+    method: 'PUT', body: JSON.stringify({ ...draft, expectedRowVersion }),
+  }, token)
+}
+
+export function createProgramTemplateRevision(templateId: string, bump: ProgramTemplateVersionBump, token: string): Promise<ProgramTemplateRevision> {
+  return requestJson<ProgramTemplateRevision>(`/api/program-templates/${templateId}/revisions`, {
+    method: 'POST', body: JSON.stringify({ bump }),
+  }, token)
+}
+
+export async function uploadProgramTemplateFile(
+  revisionId: string,
+  kind: ProgramTemplateAttachmentKind,
+  file: File,
+  expectedRowVersion: number,
+  token: string,
+  onProgress?: (percent: number) => void,
+): Promise<ProgramTemplateRevision> {
+  onProgress?.(0)
+  const digest = await crypto.subtle.digest('SHA-256', await file.arrayBuffer())
+  const sha256 = [...new Uint8Array(digest)].map(value => value.toString(16).padStart(2, '0')).join('').toUpperCase()
+  const session = await requestJson<{ id: string; chunkSize: number }>(`/api/program-templates/revisions/${revisionId}/uploads`, {
+    method: 'POST', body: JSON.stringify({ kind, fileName: file.name, totalLength: file.size, sha256 }),
+  }, token)
+  const chunks = Math.ceil(file.size / session.chunkSize)
+  for (let index = 0; index < chunks; index++) {
+    const body = file.slice(index * session.chunkSize, Math.min(file.size, (index + 1) * session.chunkSize))
+    const response = await fetch(`${apiBase}/api/program-templates/uploads/${session.id}/chunks/${index}`, {
+      method: 'PUT', headers: authenticatedHeaders(token), body,
+    })
+    if (!response.ok) throw new PdmApiError(`程序模板分块${index + 1}上传失败（${response.status}）`, response.status)
+    onProgress?.(Math.round(((index + 1) / chunks) * 100))
+  }
+  return requestJson<ProgramTemplateRevision>(`/api/program-templates/uploads/${session.id}/complete`, {
+    method: 'POST', body: JSON.stringify({ expectedRowVersion }),
+  }, token)
+}
+
+export function submitProgramTemplateRevision(revisionId: string, expectedRowVersion: number, token: string): Promise<ProgramTemplateRevision> {
+  return requestJson<ProgramTemplateRevision>(`/api/program-templates/revisions/${revisionId}/submit`, {
+    method: 'POST', body: JSON.stringify({ expectedRowVersion }),
+  }, token)
+}
+
+export function listProgramTemplateTasks(token: string): Promise<ProgramTemplateTask[]> {
+  return requestJson<ProgramTemplateTask[]>('/api/program-templates/tasks/mine', {}, token)
+}
+
+export function decideProgramTemplateTask(
+  taskId: string,
+  decision: ProgramTemplateApprovalDecision,
+  comment: string,
+  checklistItems: string[],
+  expectedRowVersion: number,
+  token: string,
+): Promise<{ revision: ProgramTemplateRevision }> {
+  return requestJson(`/api/program-templates/tasks/${taskId}/decision`, {
+    method: 'POST', body: JSON.stringify({ decision, comment, checklistItems, expectedRowVersion }),
+  }, token)
+}
+
+export async function downloadProgramTemplate(templateId: string, fileName: string, token: string): Promise<void> {
+  const response = await fetch(`${apiBase}/api/program-templates/${templateId}/download`, { headers: authenticatedHeaders(token) })
+  if (!response.ok) throw new PdmApiError(`程序模板下载失败（${response.status}）`, response.status)
+  const url = URL.createObjectURL(await response.blob())
+  const anchor = document.createElement('a')
+  anchor.href = url
+  anchor.download = fileName
+  anchor.click()
+  URL.revokeObjectURL(url)
+}
+
+export function setProgramTemplateArchived(templateId: string, archived: boolean, reason: string, token: string): Promise<ProgramTemplate> {
+  return requestJson<ProgramTemplate>(`/api/program-templates/${templateId}/archive`, {
+    method: 'POST', body: JSON.stringify({ archived, reason }),
+  }, token)
 }
 
 export interface ProjectWorkspaceData {
@@ -228,6 +321,11 @@ interface ApiDrawingReviewPackage extends Omit<DrawingReviewPackage, 'state' | '
   markups: Array<Omit<DrawingReviewPackage['markups'][number], 'target' | 'severity' | 'state'> & { target: string | number; severity: string | number; state: string | number }>
 }
 
+interface ApiDrawingReviewCandidate extends Omit<DrawingReviewCandidate, 'state' | 'bomKinds'> {
+  state: string | number
+  bomKinds: Array<string | number>
+}
+
 async function requestJson<T>(path: string, init: RequestInit = {}, token?: string): Promise<T> {
   const headers = new Headers(init.headers)
   headers.set('Accept', 'application/json')
@@ -312,6 +410,42 @@ export function archiveMaterial(materialId: string, expectedRowVersion: number, 
   return requestJson<PdmMaterial>(`/api/materials/${materialId}/archive?expectedRowVersion=${expectedRowVersion}`, { method: 'POST' }, token)
 }
 
+export function listMaterialAttachments(materialId: string, token: string, kind?: MaterialAttachmentKind): Promise<MaterialAttachment[]> {
+  const query = kind ? `?kind=${encodeURIComponent(kind)}` : ''
+  return requestJson<MaterialAttachment[]>(`/api/materials/${materialId}/attachments${query}`, {}, token).catch(error => {
+    if (error instanceof PdmApiError && error.status === 404) return []
+    throw error
+  })
+}
+
+export async function uploadMaterialAttachment(materialId: string, kind: MaterialAttachmentKind, file: File, token: string, onProgress?: (percent: number) => void): Promise<MaterialAttachment> {
+  onProgress?.(0)
+  const digest = await crypto.subtle.digest('SHA-256', await file.arrayBuffer())
+  const sha256 = [...new Uint8Array(digest)].map(value => value.toString(16).padStart(2, '0')).join('').toUpperCase()
+  const session = await requestJson<{ id: string; chunkSize: number }>(`/api/materials/${materialId}/attachments/uploads`, {
+    method: 'POST', body: JSON.stringify({ kind, fileName: file.name, totalLength: file.size, sha256 }),
+  }, token)
+  const chunks = Math.ceil(file.size / session.chunkSize)
+  for (let index = 0; index < chunks; index++) {
+    const body = file.slice(index * session.chunkSize, Math.min(file.size, (index + 1) * session.chunkSize))
+    const response = await fetch(`${apiBase}/api/material-attachment-uploads/${session.id}/chunks/${index}`, { method: 'PUT', headers: authenticatedHeaders(token), body })
+    if (!response.ok) throw new PdmApiError(`附件分块${index + 1}上传失败（${response.status}）`, response.status)
+    onProgress?.(Math.round(((index + 1) / chunks) * 100))
+  }
+  return requestJson<MaterialAttachment>(`/api/material-attachment-uploads/${session.id}/complete`, { method: 'POST' }, token)
+}
+
+export async function downloadMaterialAttachment(materialId: string, attachment: MaterialAttachment, token: string): Promise<void> {
+  const response = await fetch(`${apiBase}/api/materials/${materialId}/attachments/${attachment.id}/file`, { headers: authenticatedHeaders(token) })
+  if (!response.ok) throw new PdmApiError(`附件下载失败（${response.status}）`, response.status)
+  const url = URL.createObjectURL(await response.blob())
+  const anchor = document.createElement('a')
+  anchor.href = url
+  anchor.download = attachment.originalFileName
+  anchor.click()
+  URL.revokeObjectURL(url)
+}
+
 export function linkBomMaterial(projectId: string, bomItemId: string, materialId: string, token: string): Promise<PdmMaterial> {
   return requestJson<PdmMaterial>('/api/materials/link-bom', { method: 'POST', body: JSON.stringify({ projectId, bomItemId, materialId }) }, token)
 }
@@ -334,7 +468,7 @@ export async function listMaterialCodeApplications(token: string, projectId?: st
   })
 }
 
-export function decideMaterialCodeApplication(applicationId: string, expectedRowVersion: number, approved: boolean, comment: string, token: string): Promise<{ application: MaterialCodeApplication; material?: PdmMaterial | null }> {
+export function decideMaterialCodeApplication(applicationId: string, expectedRowVersion: number, approved: boolean, comment: string, token: string): Promise<MaterialCodeDecisionResult> {
   return requestJson(`/api/material-code/applications/${applicationId}/decision`, { method: 'POST', body: JSON.stringify({ expectedRowVersion, approved, comment }) }, token)
 }
 
@@ -410,6 +544,20 @@ export function executeU9BomWrite(input: U9BomWriteInput, requestSha256: string,
   return requestJson<U9BomWriteExecution>('/api/u9-boms/write-execute', {
     method: 'POST', body: JSON.stringify({ command: input, requestSha256, confirmation }),
   }, token)
+}
+
+export function previewProjectBomU9Sync(projectId: string, kind: BomHeaderKind, token: string): Promise<ProjectBomU9SyncPreview> {
+  return requestJson<ProjectBomU9SyncPreview>(`/api/projects/${projectId}/bom-headers/${kind}/u9-preview`, { method: 'POST' }, token)
+}
+
+export function executeProjectBomU9Sync(projectId: string, kind: BomHeaderKind, requestSha256: string, confirmation: string, token: string): Promise<ProjectBomU9SyncExecution> {
+  return requestJson<ProjectBomU9SyncExecution>(`/api/projects/${projectId}/bom-headers/${kind}/u9-execute`, {
+    method: 'POST', body: JSON.stringify({ requestSha256, confirmation }),
+  }, token)
+}
+
+export function continueProjectBomU9Automation(projectId: string, token: string): Promise<ApprovalU9AutomationResult> {
+  return requestJson<ApprovalU9AutomationResult>(`/api/material-code/projects/${projectId}/u9-continue`, { method: 'POST' }, token)
 }
 
 export function previewU9MaterialSample(categoryCodes: string[], limitPerCategory: number, token: string): Promise<U9MaterialSamplePreview> {
@@ -748,8 +896,27 @@ export async function listDrawingReviews(projectId: string, token: string): Prom
   return packages.map(mapDrawingReviewPackage)
 }
 
-export async function createDrawingReview(projectId: string, token: string): Promise<DrawingReviewPackage> {
-  return mapDrawingReviewPackage(await requestJson<ApiDrawingReviewPackage>(`/api/projects/${projectId}/drawing-reviews`, { method: 'POST' }, token))
+export async function listDrawingReviewCandidates(projectId: string, token: string): Promise<DrawingReviewCandidate[]> {
+  const states = ['Ready', 'InReview', 'ApprovedCurrent', 'Unavailable'] as const
+  const bomKinds = ['Unclassified', 'Electrical', 'Standard', 'NonStandard', 'Unclassified'] as const
+  const candidates = await requestJson<ApiDrawingReviewCandidate[]>(`/api/projects/${projectId}/drawing-review-candidates`, {}, token)
+  return candidates.map(candidate => ({
+    ...candidate,
+    state: drawingReviewEnum(candidate.state, states),
+    bomKinds: candidate.bomKinds.map(kind => drawingReviewEnum(kind, bomKinds)),
+  }))
+}
+
+export async function createDrawingReview(projectId: string, modelDocumentIds: string[], token: string): Promise<DrawingReviewPackage> {
+  return mapDrawingReviewPackage(await requestJson<ApiDrawingReviewPackage>(`/api/projects/${projectId}/drawing-reviews`, {
+    method: 'POST', body: JSON.stringify({ modelDocumentIds }),
+  }, token))
+}
+
+export async function withdrawDrawingReview(packageId: string, reason: string, token: string): Promise<DrawingReviewPackage> {
+  return mapDrawingReviewPackage(await requestJson<ApiDrawingReviewPackage>(`/api/drawing-reviews/${packageId}/withdraw`, {
+    method: 'POST', body: JSON.stringify({ reason }),
+  }, token))
 }
 
 export async function addDrawingReviewMarkup(packageId: string, input: AddDrawingReviewMarkupInput, token: string): Promise<DrawingReviewPackage> {
@@ -1252,8 +1419,8 @@ function drawingReviewEnum<T extends string>(value: string | number, values: rea
 }
 
 function mapDrawingReviewPackage(review: ApiDrawingReviewPackage): DrawingReviewPackage {
-  const packageStates = ['InReview', 'ChangesRequested', 'WritingProperties', 'Approved', 'Stale'] as const
-  const targetStates = ['Pending', 'ChangesRequested', 'Approved', 'Marked'] as const
+  const packageStates = ['InReview', 'ChangesRequested', 'WritingProperties', 'Approved', 'Stale', 'Withdrawn'] as const
+  const targetStates = ['Pending', 'ChangesRequested', 'Approved', 'Marked', 'NotRequired'] as const
   const targets = ['Model3D', 'Drawing2D'] as const
   const severities = ['Note', 'Blocking'] as const
   const markupStates = ['Open', 'Resolved'] as const

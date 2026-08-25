@@ -295,6 +295,8 @@ internal sealed class AutomaticDrawingControl : UserControl
         var drawingExists = !string.IsNullOrWhiteSpace(drawingPath) && File.Exists(drawingPath);
         var drawingControlled = drawing?.DocumentId.HasValue == true;
         var drawingEditable = !drawingControlled || IsEditable(drawing);
+        var sourceReviewLocked = source?.DrawingReviewLocked == true;
+        var drawingReviewLocked = drawing?.DrawingReviewLocked == true;
         sourceName.Text = supported ? source.FileName : "未选择零件或装配体";
         var defaultStatus = !supported
             ? "请从设计树选择模型，或使用右键菜单进入。"
@@ -304,14 +306,18 @@ internal sealed class AutomaticDrawingControl : UserControl
                     Path.GetFileName(drawingPath),
                     drawingControlled && !drawingEditable ? "；请先获取工程图权限" : string.Empty)
                 : source.DocumentId.HasValue ? "关联工程图：尚未生成；请先点击蓝色生成视图按钮" : "源模型尚未入库；可生成本地草稿，存档前需先入库模型。";
-        sourceStatus.Text = string.IsNullOrWhiteSpace(operationResult) ? defaultStatus : operationResult;
-        acquireEditButton.Enabled = drawingExists && drawingControlled && !drawingEditable && drawing?.IsHistoricalPreview != true;
+        sourceStatus.Text = sourceReviewLocked || drawingReviewLocked
+            ? "图纸审核中，只允许只读查看，不能生成、修改或提交工程图。"
+            : string.IsNullOrWhiteSpace(operationResult) ? defaultStatus : operationResult;
+        acquireEditButton.Enabled = drawingExists && drawingControlled && !drawingEditable
+            && drawing?.IsHistoricalPreview != true && !drawingReviewLocked;
         generateButton.Text = "生成视图";
         importAnnotationsButton.Text = "自动标注";
-        generateButton.Enabled = sourceExists && !source.IsReadOnlyPreview && (!drawingExists || drawingEditable);
+        generateButton.Enabled = sourceExists && !source.IsReadOnlyPreview && !sourceReviewLocked
+            && !drawingReviewLocked && (!drawingExists || drawingEditable);
         includeAssemblyBom.Enabled = source?.Kind == CadDocumentKind.Assembly;
-        importAnnotationsButton.Enabled = drawingExists && drawingEditable;
-        submitButton.Enabled = drawingExists && drawingEditable;
+        importAnnotationsButton.Enabled = drawingExists && drawingEditable && !drawingReviewLocked;
+        submitButton.Enabled = drawingExists && drawingEditable && !drawingReviewLocked;
         workflowHint.Text = !supported
             ? "请先在“设计树”中选择一个零件或装配体。"
             : !sourceExists
@@ -326,7 +332,7 @@ internal sealed class AutomaticDrawingControl : UserControl
         ApplyEnabledAppearance(acquireEditButton, AcquireColor);
         ApplyEnabledAppearance(importAnnotationsButton, Color.White);
         ApplyEnabledAppearance(submitButton, SubmitColor);
-        toolTip.SetToolTip(acquireEditButton, acquireEditButton.Enabled ? "获取或恢复当前工程图的编辑会话" : drawingControlled && drawingEditable ? "当前工程图已可编辑" : "工程图首次入库后可获取编辑权限");
+        toolTip.SetToolTip(acquireEditButton, drawingReviewLocked ? "图纸审核中，不能获取工程图编辑权限" : acquireEditButton.Enabled ? "获取或恢复当前工程图的编辑会话" : drawingControlled && drawingEditable ? "当前工程图已可编辑" : "工程图首次入库后可获取编辑权限");
         toolTip.SetToolTip(generateButton, source?.IsReadOnlyPreview == true ? "只读预览不能生成或更新工程图" : sourceExists ? string.Empty : "请选择本地存在的零件或装配体");
         toolTip.SetToolTip(importAnnotationsButton, drawingExists ? "仅导入标记尺寸、公差和孔标注，消除重复后按固化规则排列" : "请先完成第1步：生成工程图");
         toolTip.SetToolTip(submitButton, source?.DocumentId.HasValue == true ? "提交关联工程图草稿" : "源模型入库后才能绑定并提交工程图");

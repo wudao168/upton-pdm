@@ -14,7 +14,7 @@ const mappings: PdmSystemSettings['bomPropertyMappings'] = [
 ]
 
 const settings: PdmSystemSettings = {
-  vaultRoot: 'D:\\PDM\\Vault', releaseRoot: 'D:\\PDM\\Release',
+  vaultRoot: 'D:\\PDM\\Vault', releaseRoot: 'D:\\PDM\\Release', materialAttachmentRoot: 'D:\\PDM\\MaterialAttachments',
   checkoutHeartbeatSeconds: 180, checkoutLeaseMinutes: 15, checkoutOfflineGraceMinutes: 60,
   checkoutReminderHours: 4, checkoutStrongReminderHours: 8, checkoutOverdueHours: 24, checkoutForceReleaseHours: 48,
   bomDrawingNumberProperty: '物料编码', bomNameProperty: '物料名称', bomDescriptionProperty: '备注信息',
@@ -24,6 +24,26 @@ const settings: PdmSystemSettings = {
 }
 
 describe('StorageSettings BOM property mappings', () => {
+  it('saves an independently configurable material attachment root', async () => {
+    const onSaveSettings = vi.fn().mockImplementation(async input => input)
+    const wrapper = mount(StorageSettings, {
+      props: {
+        settings, equipmentTypes: [], numberingOptions: { organizations: [], projectTypes: [], equipmentTypes: [] }, pending: false,
+        onSaveSettings, onSaveEquipmentType: vi.fn(), onUpdateCounters: vi.fn(),
+      },
+      global: { plugins: [ElementPlus] },
+    })
+
+    const attachmentRootLabel = wrapper.findAll('.pdm-settings-form label').find(label => label.text().includes('料品资料存档根目录'))!
+    expect((attachmentRootLabel.get('input').element as HTMLInputElement).value).toBe('D:\\PDM\\MaterialAttachments')
+    await attachmentRootLabel.get('input').setValue('  E:\\PLM\\MaterialArchive  ')
+    await wrapper.findAll('button').find(button => button.text() === '保存存储设置')!.trigger('click')
+    await flushPromises()
+
+    expect(onSaveSettings).toHaveBeenCalledWith(expect.objectContaining({ materialAttachmentRoot: 'E:\\PLM\\MaterialArchive' }))
+    wrapper.unmount()
+  })
+
   it('renders the server mapping directory and saves a manually selected SolidWorks property', async () => {
     const onSaveSettings = vi.fn().mockImplementation(async input => input)
     const wrapper = mount(StorageSettings, {

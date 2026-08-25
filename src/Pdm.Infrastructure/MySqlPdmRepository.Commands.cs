@@ -24,14 +24,26 @@ public sealed partial class MySqlPdmRepository
     public Task<PdmDocument> CheckoutAsync(Guid documentId, string actor, CancellationToken cancellationToken)
     {
         var now = timeProvider.GetUtcNow();
-        return CheckoutAsync(documentId, actor, Guid.NewGuid(), "legacy-client", now.AddMinutes(15), cancellationToken);
+        return CheckoutAsync(documentId, actor, Guid.NewGuid(), "legacy-client", now.AddMinutes(15), null, cancellationToken);
     }
 
     public async Task<PdmDocument> CheckoutAsync(Guid documentId, string actor, Guid sessionId, string machineName, DateTimeOffset leaseExpiresAt, CancellationToken cancellationToken)
+        => await CheckoutAsync(documentId, actor, sessionId, machineName, leaseExpiresAt, null, cancellationToken);
+
+    public async Task<PdmDocument> CheckoutAsync(Guid documentId, string actor, Guid sessionId, string machineName, DateTimeOffset leaseExpiresAt, Guid? drawingReviewWritebackId, CancellationToken cancellationToken)
     {
         if (sessionId == Guid.Empty) throw new PdmRuleException("编辑会话编号不能为空。");
         await using var connection = await OpenAsync(cancellationToken);
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+        var lockedDocumentId = await connection.QuerySingleOrDefaultAsync<Guid?>(new CommandDefinition(
+            "SELECT id FROM document WHERE id=@DocumentId FOR UPDATE",
+            new { DocumentId = documentId }, transaction, cancellationToken: cancellationToken));
+        if (!lockedDocumentId.HasValue) throw new PdmNotFoundException("图档不存在。 ");
+        var drawingReviewLocked = await IsDocumentUnderActiveDrawingReviewAsync(connection, transaction, documentId, cancellationToken);
+        var controlledWriteback = drawingReviewWritebackId.HasValue
+            && await IsActiveDrawingReviewWritebackAsync(connection, transaction, documentId, drawingReviewWritebackId.Value, cancellationToken);
+        if (drawingReviewLocked && !controlledWriteback)
+            throw new PdmConflictException("图档正在进行图纸审核，不能获取编辑权限。");
         var now = timeProvider.GetUtcNow().UtcDateTime;
         var affected = await connection.ExecuteAsync(new CommandDefinition(
             """

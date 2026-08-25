@@ -2,11 +2,11 @@ import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { ElMessageBox } from 'element-plus'
 import { batchDeleteBomItems as batchDeleteBomItemsRequest, batchRestoreBomItems as batchRestoreBomItemsRequest, restoreBomItemsFromSource as restoreBomItemsFromSourceRequest } from '../api'
 import { getBomSourceData } from '../api'
-import { addDrawingReviewMarkup as addDrawingReviewMarkupRequest, createDrawingReview as createDrawingReviewRequest, decideDrawingReviewTarget as decideDrawingReviewTargetRequest, listDrawingReviews, resolveDrawingReviewMarkup as resolveDrawingReviewMarkupRequest } from '../api'
-import { batchUpdateBomItems as batchUpdateBomItemsRequest, changeMyPassword as changeMyPasswordRequest, checkHealth, compareDocumentVersions, createProject as createProjectRequest, createRole as createRoleRequest, createSubproject as createSubprojectRequest, createReleasePackage, createUser as createUserRequest, decideApproval, deleteProject as deleteProjectRequest, deleteRole as deleteRoleRequest, emergencyDecideApproval, exportBom, forceReleaseEditLock as forceReleaseEditLockRequest, generateMechanicalBom, getBomValidationRules, getCrmIntegrationSettings, getMyProfile, getOrganizationDirectory, getProjectNumberingOptions, getRolePermissionDirectory, getStorageStatus, getSystemSettings, importBom, listAudit, listBomBaselines, listBomVersions, listCustomers, listDocumentVersions, listDocumentWhereUsed, listEditLocks, listEquipmentTypes, listFolderTemplate, listMyApprovalTasks, listPasswordResetTasks, listProjectAudit, listProjects, listProjectVersions, loadProjectDocumentWorkspace, loadProjectWorkspace, login as apiLogin, obsoleteDocument as obsoleteDocumentRequest, PdmApiError, postDesktopMessage, readDocumentVersionFile, requestEditLockRelease as requestEditLockReleaseRequest, resetRequestedPassword as resetRequestedPasswordRequest, resetUserPassword as resetUserPasswordRequest, resolveBomItem as resolveBomItemRequest, restoreDocumentVersion, resumeSession as apiResumeSession, saveBom, saveEquipmentType as saveEquipmentTypeRequest, saveFolderTemplate as saveFolderTemplateRequest, saveOrganizationUnit as saveOrganizationUnitRequest, saveProjectOrganization as saveProjectOrganizationRequest, setBomEmptyDeclaration as setBomEmptyDeclarationRequest, submitReleasePackage, syncCrmCustomers as syncCrmCustomersRequest, testCrmIntegration as testCrmIntegrationRequest, updateChildProjectDesigners as updateChildProjectDesignersRequest, updateCrmIntegrationSettings as updateCrmIntegrationSettingsRequest, updateMainProjectStaffing as updateMainProjectStaffingRequest, updateMyProfile as updateMyProfileRequest, updateOrganizationCounters as updateOrganizationCountersRequest, updateOrganizationMemberships as updateOrganizationMembershipsRequest, updateOrganizationUnitManagers as updateOrganizationUnitManagersRequest, updateProject as updateProjectRequest, updateProjectExecutionUnit as updateProjectExecutionUnitRequest, updateProjectFolderPermissions as updateProjectFolderPermissionsRequest, updateRolePermissions as updateRolePermissionsRequest, updateSystemSettings as updateSystemSettingsRequest, updateUser as updateUserRequest, uploadReleaseFile, withdrawReleasePackage } from '../api'
+import { addDrawingReviewMarkup as addDrawingReviewMarkupRequest, createDrawingReview as createDrawingReviewRequest, decideDrawingReviewTarget as decideDrawingReviewTargetRequest, listDrawingReviewCandidates, listDrawingReviews, resolveDrawingReviewMarkup as resolveDrawingReviewMarkupRequest, withdrawDrawingReview as withdrawDrawingReviewRequest } from '../api'
+import { batchUpdateBomItems as batchUpdateBomItemsRequest, changeMyPassword as changeMyPasswordRequest, checkHealth, compareDocumentVersions, createProject as createProjectRequest, createRole as createRoleRequest, createSubproject as createSubprojectRequest, createReleasePackage, createUser as createUserRequest, decideApproval, deleteProject as deleteProjectRequest, deleteRole as deleteRoleRequest, emergencyDecideApproval, exportBom, forceReleaseEditLock as forceReleaseEditLockRequest, generateMechanicalBom, getBomValidationRules, getCrmIntegrationSettings, getMyProfile, getOrganizationDirectory, getProjectNumberingOptions, getRolePermissionDirectory, getStorageStatus, getSystemSettings, importBom, listAudit, listBomBaselines, listBomVersions, listCustomers, listDocumentVersions, listDocumentWhereUsed, listEditLocks, listEquipmentTypes, listFolderTemplate, listMaterialCodeApplications, listMaterialSyncTasks, listMyApprovalTasks, listPasswordResetTasks, listProgramTemplateTasks, listProjectAudit, listProjects, listProjectVersions, loadProjectDocumentWorkspace, loadProjectWorkspace, login as apiLogin, obsoleteDocument as obsoleteDocumentRequest, PdmApiError, postDesktopMessage, readDocumentVersionFile, requestEditLockRelease as requestEditLockReleaseRequest, resetRequestedPassword as resetRequestedPasswordRequest, resetUserPassword as resetUserPasswordRequest, resolveBomItem as resolveBomItemRequest, restoreDocumentVersion, resumeSession as apiResumeSession, saveBom, saveEquipmentType as saveEquipmentTypeRequest, saveFolderTemplate as saveFolderTemplateRequest, saveOrganizationUnit as saveOrganizationUnitRequest, saveProjectOrganization as saveProjectOrganizationRequest, setBomEmptyDeclaration as setBomEmptyDeclarationRequest, submitReleasePackage, syncCrmCustomers as syncCrmCustomersRequest, testCrmIntegration as testCrmIntegrationRequest, updateChildProjectDesigners as updateChildProjectDesignersRequest, updateCrmIntegrationSettings as updateCrmIntegrationSettingsRequest, updateMainProjectStaffing as updateMainProjectStaffingRequest, updateMyProfile as updateMyProfileRequest, updateOrganizationCounters as updateOrganizationCountersRequest, updateOrganizationMemberships as updateOrganizationMembershipsRequest, updateOrganizationUnitManagers as updateOrganizationUnitManagersRequest, updateProject as updateProjectRequest, updateProjectExecutionUnit as updateProjectExecutionUnitRequest, updateProjectFolderPermissions as updateProjectFolderPermissionsRequest, updateRolePermissions as updateRolePermissionsRequest, updateSystemSettings as updateSystemSettingsRequest, updateUser as updateUserRequest, uploadReleaseFile, withdrawReleasePackage } from '../api'
 import type { AuthSession } from '../api'
-import type { AuditEntry, BatchUpdateBomItemsInput, BomEmptyDeclaration, BomGenerationResult, BomItem, BomKind, BomVersion, CreateProjectInput, CreateReleasePackageInput, CreateRoleInput, CreateSubprojectInput, CrmConnectionTestResult, CrmCustomerSyncResult, CrmIntegrationSettings, DocumentFilter, DocumentModelDrawingRelation, DocumentNode, DocumentVersionComparison, DocumentVersionSummary, DocumentWhereUsed, EditLockSummary, EquipmentTypeDefinition, FolderPermissionRule, MainProjectStaffingInput, ManagedDocument, ManufacturingBomBaseline, MaterialCodeApplication, MyApprovalTask, OrganizationDirectory, PasswordResetTask, PdmCustomer, PdmSystemSettings, PdmUser, PdmUserProfile, ProjectFolder, ProjectFolderTemplateNode, ProjectNumberingOptions, ProjectSummary, ProjectVersionItem, ReleasePackageSummary, RolePermissionDirectory, SaveOrganizationUnitInput, SavePdmUserInput, SaveProjectOrganizationInput, SolidWorksOpenMode, UpdateCrmIntegrationInput, UpdateProjectInput } from '../types'
-import type { AddDrawingReviewMarkupInput, DrawingReviewDecision, DrawingReviewPackage, DrawingReviewTarget } from '../types'
+import type { AuditEntry, BatchUpdateBomItemsInput, BomEmptyDeclaration, BomGenerationResult, BomItem, BomKind, BomVersion, CreateProjectInput, CreateReleasePackageInput, CreateRoleInput, CreateSubprojectInput, CrmConnectionTestResult, CrmCustomerSyncResult, CrmIntegrationSettings, DocumentFilter, DocumentModelDrawingRelation, DocumentNode, DocumentVersionComparison, DocumentVersionSummary, DocumentWhereUsed, EditLockSummary, EquipmentTypeDefinition, FolderPermissionRule, MainProjectStaffingInput, ManagedDocument, ManufacturingBomBaseline, MaterialCodeApplication, MaterialSyncTask, MyApprovalTask, OrganizationDirectory, PasswordResetTask, PdmCustomer, PdmSystemSettings, PdmUser, PdmUserProfile, ProgramTemplateTask, ProjectFolder, ProjectFolderTemplateNode, ProjectNumberingOptions, ProjectSummary, ProjectVersionItem, ReleasePackageSummary, RolePermissionDirectory, SaveOrganizationUnitInput, SavePdmUserInput, SaveProjectOrganizationInput, SolidWorksOpenMode, UpdateCrmIntegrationInput, UpdateProjectInput } from '../types'
+import type { AddDrawingReviewMarkupInput, DrawingReviewCandidate, DrawingReviewDecision, DrawingReviewPackage, DrawingReviewTarget } from '../types'
 
 const sessionKey = 'upton-pdm-session'
 const fallbackBomPropertyMappings: PdmSystemSettings['bomPropertyMappings'] = [
@@ -43,7 +43,7 @@ function bomPropertyMappingsFromLegacy(settings: PdmSystemSettings) {
     solidWorksProperty: mapping.mappingEditable ? values[mapping.pdmPropertyKey] ?? mapping.solidWorksProperty : mapping.solidWorksProperty,
   }))
 }
-const defaultSystemSettings: PdmSystemSettings = { vaultRoot: '', releaseRoot: '', checkoutHeartbeatSeconds: 180, checkoutLeaseMinutes: 15, checkoutOfflineGraceMinutes: 60, checkoutReminderHours: 4, checkoutStrongReminderHours: 8, checkoutOverdueHours: 24, checkoutForceReleaseHours: 48, bomDrawingNumberProperty: '物料编码', bomNameProperty: '物料名称', bomDescriptionProperty: '备注信息', bomMaterialProperty: '材质', bomSpecificationProperty: '型号', bomUnitProperty: '单位', bomBrandProperty: '品牌', bomSurfaceTreatmentProperty: '表面处理', bomWeightProperty: '重量', bomPropertyMappings: fallbackBomPropertyMappings.map(mapping => ({ ...mapping })), validationRules: { standard: ['drawingNumber', 'name', 'unit', 'specification', 'quantity', 'revision'], nonStandard: ['drawingNumber', 'name', 'unit', 'material', 'quantity', 'revision'], electrical: ['drawingNumber', 'name', 'unit', 'quantity', 'revision'], }, approvalWorkflows: { mechanical: { code: 'mechanical-release', name: '机械发布审批', version: 1, steps: [{ stage: 'MechanicalEngineer', name: '机械工程师自检', assigneeSource: 'Submitter' }, { stage: 'MainDesigner', name: '主设审核', assigneeSource: 'ProjectDesignLead' }, { stage: 'MechanicalSupervisor', name: '机械主管批准', assigneeSource: 'PrimaryUnitManager' }] }, electrical: { code: 'electrical-release', name: '电气发布审批', version: 1, steps: [{ stage: 'HardwareEngineer', name: '硬件工程师自检', assigneeSource: 'Submitter' }, { stage: 'HardwareSupervisor', name: '硬件主管审核', assigneeSource: 'PrimaryUnitManager' }, { stage: 'StandardizationSupervisor', name: '标准化主管批准', assigneeSource: 'ParentUnitManager' }] }, emergencySubstituteRoleCode: 'BusinessUnitManager' }, releaseChangeReasonTypes: ['设计变更', '客户需求', '物料替代', '质量整改', '生产反馈', '其他'] }
+const defaultSystemSettings: PdmSystemSettings = { vaultRoot: '', releaseRoot: '', materialAttachmentRoot: '', checkoutHeartbeatSeconds: 180, checkoutLeaseMinutes: 15, checkoutOfflineGraceMinutes: 60, checkoutReminderHours: 4, checkoutStrongReminderHours: 8, checkoutOverdueHours: 24, checkoutForceReleaseHours: 48, bomDrawingNumberProperty: '物料编码', bomNameProperty: '物料名称', bomDescriptionProperty: '备注信息', bomMaterialProperty: '材质', bomSpecificationProperty: '型号', bomUnitProperty: '单位', bomBrandProperty: '品牌', bomSurfaceTreatmentProperty: '表面处理', bomWeightProperty: '重量', bomPropertyMappings: fallbackBomPropertyMappings.map(mapping => ({ ...mapping })), validationRules: { standard: ['drawingNumber', 'name', 'unit', 'specification', 'quantity', 'revision'], nonStandard: ['drawingNumber', 'name', 'unit', 'material', 'quantity', 'revision'], electrical: ['drawingNumber', 'name', 'unit', 'quantity', 'revision'], }, approvalWorkflows: { mechanical: { code: 'mechanical-release', name: '机械发布审批', version: 1, steps: [{ stage: 'MechanicalEngineer', name: '机械工程师自检', assigneeSource: 'Submitter' }, { stage: 'MainDesigner', name: '主设审核', assigneeSource: 'ProjectDesignLead' }, { stage: 'MechanicalSupervisor', name: '机械主管批准', assigneeSource: 'PrimaryUnitManager' }] }, electrical: { code: 'electrical-release', name: '电气发布审批', version: 1, steps: [{ stage: 'HardwareEngineer', name: '硬件工程师自检', assigneeSource: 'Submitter' }, { stage: 'HardwareSupervisor', name: '硬件主管审核', assigneeSource: 'PrimaryUnitManager' }, { stage: 'StandardizationSupervisor', name: '标准化主管批准', assigneeSource: 'ParentUnitManager' }] }, emergencySubstituteRoleCode: 'BusinessUnitManager' }, releaseChangeReasonTypes: ['设计变更', '客户需求', '物料替代', '质量整改', '生产反馈', '其他'] }
 const defaultCrmIntegrationSettings: CrmIntegrationSettings = { baseUrl: '', username: '', passwordConfigured: false, autoSyncEnabled: false, autoSyncIntervalMinutes: 60, lastSyncAt: null, lastSyncCount: 0, lastAutoSyncAttemptAt: null, lastAutoSyncError: null }
 
 export function formatBomGenerationConfirmation(preview: BomGenerationResult): string {
@@ -196,6 +196,13 @@ function messageFrom(error: unknown): string {
   return error instanceof Error ? error.message : 'PLM数据加载失败。'
 }
 
+function withLoadContext<T>(label: string, request: Promise<T>): Promise<T> {
+  return request.catch(error => {
+    const message = `${label}：${messageFrom(error)}`
+    throw error instanceof PdmApiError ? new PdmApiError(message, error.status) : new Error(message)
+  })
+}
+
 export function usePdmWorkspace() {
   const projects = ref<ProjectSummary[]>([])
   const projectNumberingOptions = ref<ProjectNumberingOptions>({ organizations: [], projectTypes: [], equipmentTypes: [] })
@@ -222,6 +229,7 @@ export function usePdmWorkspace() {
   const bomVersions = ref<BomVersion[]>([])
   const bomBaselines = ref<ManufacturingBomBaseline[]>([])
   const drawingReviews = ref<DrawingReviewPackage[]>([])
+  const drawingReviewCandidates = ref<DrawingReviewCandidate[]>([])
   const materialCodeApplications = ref<MaterialCodeApplication[]>([])
   const releasePackages = ref<ReleasePackageSummary[]>([])
   const releasePackage = computed(() => releasePackages.value[0] ?? null)
@@ -263,6 +271,9 @@ export function usePdmWorkspace() {
   const uploadProgress = ref(0)
   const auditEntries = ref<AuditEntry[]>([])
   const myApprovalTasks = ref<MyApprovalTask[]>([])
+  const materialCodeApprovalTasks = ref<MaterialCodeApplication[]>([])
+  const materialSyncTasks = ref<MaterialSyncTask[]>([])
+  const programTemplateTasks = ref<ProgramTemplateTask[]>([])
   const editLocks = ref<EditLockSummary[]>([])
   const passwordResetTasks = ref<PasswordResetTask[]>([])
   const projectVersions = ref<ProjectVersionItem[]>([])
@@ -567,6 +578,17 @@ export function usePdmWorkspace() {
     }
   }
 
+  async function retainBomItems(itemIds: string[]) {
+    operationPending.value = true
+    try {
+      for (const itemId of [...new Set(itemIds)])
+        await resolveBomItemRequest(project.value.id, itemId, 'retain', undefined, accessToken)
+      await reload()
+    } finally {
+      operationPending.value = false
+    }
+  }
+
   async function batchUpdateBomItems(input: BatchUpdateBomItemsInput) {
     operationPending.value = true
     operationError.value = ''
@@ -652,14 +674,32 @@ export function usePdmWorkspace() {
 
   async function refreshDrawingReviews() {
     if (!project.value.id) return
-    drawingReviews.value = await listDrawingReviews(project.value.id, accessToken)
+    const [reviews, candidates] = await Promise.all([
+      listDrawingReviews(project.value.id, accessToken),
+      listDrawingReviewCandidates(project.value.id, accessToken),
+    ])
+    drawingReviews.value = reviews
+    drawingReviewCandidates.value = candidates
   }
 
-  async function createDrawingReview() {
+  async function createDrawingReview(modelDocumentIds: string[]) {
     operationPending.value = true
     operationError.value = ''
     try {
-      replaceDrawingReview(await createDrawingReviewRequest(project.value.id, accessToken))
+      replaceDrawingReview(await createDrawingReviewRequest(project.value.id, modelDocumentIds, accessToken))
+      drawingReviewCandidates.value = await listDrawingReviewCandidates(project.value.id, accessToken)
+    } catch (error) {
+      operationError.value = messageFrom(error)
+      throw error
+    } finally { operationPending.value = false }
+  }
+
+  async function withdrawDrawingReview(packageId: string, reason: string) {
+    operationPending.value = true
+    operationError.value = ''
+    try {
+      replaceDrawingReview(await withdrawDrawingReviewRequest(packageId, reason, accessToken))
+      drawingReviewCandidates.value = await listDrawingReviewCandidates(project.value.id, accessToken)
     } catch (error) {
       operationError.value = messageFrom(error)
       throw error
@@ -834,7 +874,24 @@ export function usePdmWorkspace() {
   }
 
   async function loadMyApprovalTasks() {
-    [myApprovalTasks.value, editLocks.value, passwordResetTasks.value] = await Promise.all([requestMyApprovalTasks(), requestEditLocks(), requestPasswordResetTasks()])
+    [myApprovalTasks.value, materialCodeApprovalTasks.value, materialSyncTasks.value, programTemplateTasks.value, editLocks.value, passwordResetTasks.value] = await Promise.all([
+      requestMyApprovalTasks(), requestMaterialCodeApprovalTasks(), listMaterialSyncTasks(accessToken), requestProgramTemplateTasks(), requestEditLocks(), requestPasswordResetTasks(),
+    ])
+  }
+
+  async function requestProgramTemplateTasks() {
+    try {
+      return await listProgramTemplateTasks(accessToken)
+    } catch (error) {
+      if (error instanceof PdmApiError && error.status === 404) return []
+      throw error
+    }
+  }
+
+  async function requestMaterialCodeApprovalTasks() {
+    return hasPermission('approval.decide')
+      ? listMaterialCodeApplications(accessToken, undefined, 'Pending')
+      : []
   }
 
   async function requestPasswordResetTasks() {
@@ -941,6 +998,9 @@ export function usePdmWorkspace() {
     folderTemplate.value = []
     clearProjectWorkspace()
     myApprovalTasks.value = []
+    materialCodeApprovalTasks.value = []
+    materialSyncTasks.value = []
+    programTemplateTasks.value = []
     editLocks.value = []
     passwordResetTasks.value = []
     persistentSession = null
@@ -1002,24 +1062,30 @@ export function usePdmWorkspace() {
     loading.value = true
     loadError.value = ''
     try {
-      const [loadedProjects, loadedOptions, loadedCustomers, loadedTasks, loadedEditLocks, loadedDirectory, loadedProfile, loadedPasswordResetTasks, loadedValidationRules] = await Promise.all([
-        listProjects(accessToken),
-        getProjectNumberingOptions(accessToken),
-        listCustomers(accessToken),
-        requestMyApprovalTasks(),
-        requestEditLocks(),
-        getOrganizationDirectory(accessToken),
-        getMyProfile(accessToken),
-        requestPasswordResetTasks(),
-        getBomValidationRules(accessToken).catch(error => {
+      const [loadedProjects, loadedOptions, loadedCustomers, loadedTasks, loadedMaterialCodeTasks, loadedMaterialSyncTasks, loadedProgramTemplateTasks, loadedEditLocks, loadedDirectory, loadedProfile, loadedPasswordResetTasks, loadedValidationRules] = await Promise.all([
+        withLoadContext('项目列表', listProjects(accessToken)),
+        withLoadContext('项目编号选项', getProjectNumberingOptions(accessToken)),
+        withLoadContext('客户列表', listCustomers(accessToken)),
+        withLoadContext('审批待办', requestMyApprovalTasks()),
+        withLoadContext('料号审批待办', requestMaterialCodeApprovalTasks()),
+        withLoadContext('料品同步任务', listMaterialSyncTasks(accessToken)),
+        withLoadContext('程序模板待办', requestProgramTemplateTasks()),
+        withLoadContext('编辑锁', requestEditLocks()),
+        withLoadContext('组织目录', getOrganizationDirectory(accessToken)),
+        withLoadContext('个人资料', getMyProfile(accessToken)),
+        withLoadContext('密码重置待办', requestPasswordResetTasks()),
+        withLoadContext('BOM校验规则', getBomValidationRules(accessToken).catch(error => {
           if (error instanceof PdmApiError && error.status !== 404) throw error
           return defaultSystemSettings.validationRules
-        }),
+        })),
       ])
       projects.value = loadedProjects
       projectNumberingOptions.value = loadedOptions
       customers.value = loadedCustomers
       myApprovalTasks.value = loadedTasks
+      materialCodeApprovalTasks.value = loadedMaterialCodeTasks
+      materialSyncTasks.value = loadedMaterialSyncTasks
+      programTemplateTasks.value = loadedProgramTemplateTasks
       editLocks.value = loadedEditLocks
       organizationDirectory.value = loadedDirectory
       users.value = loadedDirectory.users
@@ -1541,6 +1607,7 @@ export function usePdmWorkspace() {
     bomVersions,
     bomBaselines,
     drawingReviews,
+    drawingReviewCandidates,
     materialCodeApplications,
     selectedNode,
     selectedBomItem,
@@ -1589,6 +1656,9 @@ export function usePdmWorkspace() {
     uploadProgress,
     auditEntries,
     myApprovalTasks,
+    materialCodeApprovalTasks,
+    materialSyncTasks,
+    programTemplateTasks,
     editLocks,
     passwordResetTasks,
     projectVersions,
@@ -1636,6 +1706,7 @@ export function usePdmWorkspace() {
     exportBomFile,
     generateBomFromDrawings,
     resolveBomItem,
+    retainBomItems,
     batchUpdateBomItems,
     batchDeleteBomItems,
     batchRestoreBomItems,
@@ -1643,6 +1714,7 @@ export function usePdmWorkspace() {
     setBomCategoryEmpty,
     refreshDrawingReviews,
     createDrawingReview,
+    withdrawDrawingReview,
     addDrawingReviewMarkup,
     resolveDrawingReviewMarkup,
     decideDrawingReviewTarget,

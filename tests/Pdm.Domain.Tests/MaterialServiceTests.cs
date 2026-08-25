@@ -126,6 +126,52 @@ public sealed class MaterialServiceTests
     }
 
     [Fact]
+    public async Task Create_PersistsSelectionMetadataAndRecommendation()
+    {
+        var service = CreateService(out var materials);
+
+        var created = await service.CreateAsync(new(
+            null, "推荐气缸", MaterialKind.Standard, MaterialSupplyMode.Purchase, "001",
+            "CDQ2B32-100", null, null, "SMC", null, null, null,
+            CategoryCode: "0102",
+            PurchaseLink: "https://supplier.example.test/item/1",
+            SelectionAdvice: "适合短行程夹紧工位",
+            ReferencePrice: 368.50m,
+            Model3DLink: "https://files.example.test/models/1",
+            DocumentLink: "https://files.example.test/documents/1",
+            IsRecommended: true), "admin", UserRole.Administrator, default);
+
+        var saved = await materials.FindMaterialAsync(created.Id, default);
+        Assert.NotNull(saved);
+        Assert.Equal("适合短行程夹紧工位", saved.SelectionAdvice);
+        Assert.Equal(368.50m, saved.ReferencePrice);
+        Assert.Equal("https://files.example.test/models/1", saved.Model3DLink);
+        Assert.Equal("https://files.example.test/documents/1", saved.DocumentLink);
+        Assert.True(saved.IsRecommended);
+    }
+
+    [Fact]
+    public async Task MaterialAttachment_IsCountedAsReferenceSoMaterialCannotBePhysicallyDeleted()
+    {
+        var service = CreateService(out var materials);
+        var material = await service.CreateAsync(new(
+            null, "带资料传感器", MaterialKind.Electrical, MaterialSupplyMode.Purchase, "001",
+            "M18", null, null, null, null, null, null, CategoryCode: "0101"),
+            "admin", UserRole.Administrator, default);
+        var attachment = new MaterialAttachment(
+            Guid.NewGuid(), material.Id, MaterialAttachmentKind.Document, "manual.pdf", @"D:\PDM\MaterialAttachments",
+            Path.Combine(material.MaterialCode, "Documents", "202608", "manual.pdf"), 128, new string('A', 64),
+            "admin", DateTimeOffset.UtcNow);
+
+        await materials.CreateMaterialAttachmentAsync(attachment, default);
+
+        Assert.True(await materials.HasMaterialReferencesAsync(material.Id, default));
+        Assert.Equal(1, await materials.CountMaterialReferencesAsync(material.Id, default));
+        var listed = await materials.ListMaterialsAsync(null, null, false, 10, default);
+        Assert.Equal(1, Assert.Single(listed).DocumentAttachmentCount);
+    }
+
+    [Fact]
     public async Task Create_SkipsU9OccupiedCodesAndChecksSpecificationBeforeSaving()
     {
         var service = CreateService(out _, out var u9Client);
@@ -677,8 +723,41 @@ public sealed class MaterialServiceTests
         Assert.Equal(MaterialCodeApplicationStatus.Approved, decision.Application.Status);
         Assert.False(string.IsNullOrWhiteSpace(decision.Material?.MaterialCode));
         var updated = await workflow.ApplyMaterialCodeToBomAsync(
-            ProjectId, application.BomItemId, decision.Material!.MaterialCode, "standardizer", default);
+            ProjectId, application.BomItemId!.Value, decision.Material!.MaterialCode, "standardizer", default);
         Assert.Equal(decision.Material.MaterialCode, updated.DrawingNumber);
+    }
+
+    [Fact]
+    public async Task BomHeaderMaterialCodeApproval_ApprovesDraftAndCreatesTraceableU9Preview()
+    {
+        var service = CreateService(out var materials);
+        var material = await service.CreateAsync(new(
+            null, "气密设备标准件BOM", MaterialKind.Standard, MaterialSupplyMode.Purchase, "001",
+            "VIRTUAL-BOM", null, null, null, null, null, null, CategoryCode: "0102"),
+            "engineer", UserRole.Administrator, default);
+        var requestedAt = DateTimeOffset.UtcNow;
+        var application = await materials.CreateMaterialCodeApplicationAsync(new(
+            Guid.NewGuid(), ProjectId, null, MaterialCodeApplicationStatus.Pending, "engineer", requestedAt,
+            null, null, null, material.Id, null, 1, ProjectBomHeaderKind.Standard)
+        {
+            ApplicationName = material.Name,
+            ProjectCode = "P700001",
+            ProjectName = "气密设备",
+            CategoryCode = material.CategoryCode,
+            RequestedMaterialCode = material.MaterialCode
+        }, default);
+
+        var decision = await service.DecideMaterialCodeApplicationAsync(
+            application.Id, application.RowVersion, true, "同意", "standardizer", UserRole.ProcessReviewer, default);
+
+        Assert.Equal(MaterialCodeApplicationStatus.Approved, decision.Application.Status);
+        Assert.Equal(ProjectBomHeaderKind.Standard, decision.Application.BomHeaderKind);
+        Assert.Equal(MaterialApprovalStatus.Approved, decision.Material?.ApprovalStatus);
+        var task = Assert.Single(await materials.ListSyncTasksAsync(default));
+        Assert.Equal(MaterialSyncStatus.PreviewReady, task.Status);
+        Assert.Equal("P700001", task.ProjectCode);
+        Assert.Equal("engineer", task.RequestedBy);
+        Assert.Equal(ProjectBomHeaderKind.Standard, task.BomHeaderKind);
     }
 
     [Fact]

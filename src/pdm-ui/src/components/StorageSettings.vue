@@ -14,7 +14,7 @@ const props = defineProps<{
 }>()
 
 const activeTab = ref('storage')
-const storageDraft = reactive<PdmSystemSettings>({ vaultRoot: '', releaseRoot: '', checkoutHeartbeatSeconds: 180, checkoutLeaseMinutes: 15, checkoutOfflineGraceMinutes: 60, checkoutReminderHours: 4, checkoutStrongReminderHours: 8, checkoutOverdueHours: 24, checkoutForceReleaseHours: 48, bomDrawingNumberProperty: '物料编码', bomNameProperty: '物料名称', bomDescriptionProperty: '备注信息', bomMaterialProperty: '材质', bomSpecificationProperty: '型号', bomUnitProperty: '单位', bomBrandProperty: '品牌', bomSurfaceTreatmentProperty: '表面处理', bomWeightProperty: '重量', bomPropertyMappings: [], validationRules: { standard: [], nonStandard: [], electrical: [] } })
+const storageDraft = reactive<PdmSystemSettings>({ vaultRoot: '', releaseRoot: '', materialAttachmentRoot: '', checkoutHeartbeatSeconds: 180, checkoutLeaseMinutes: 15, checkoutOfflineGraceMinutes: 60, checkoutReminderHours: 4, checkoutStrongReminderHours: 8, checkoutOverdueHours: 24, checkoutForceReleaseHours: 48, bomDrawingNumberProperty: '物料编码', bomNameProperty: '物料名称', bomDescriptionProperty: '备注信息', bomMaterialProperty: '材质', bomSpecificationProperty: '型号', bomUnitProperty: '单位', bomBrandProperty: '品牌', bomSurfaceTreatmentProperty: '表面处理', bomWeightProperty: '重量', bomPropertyMappings: [], validationRules: { standard: [], nonStandard: [], electrical: [] } })
 const equipmentDialogOpen = ref(false)
 const equipmentDraft = reactive<EquipmentTypeDefinition>({ code: 0, name: '', isActive: true })
 const counterDrafts = ref<Array<{ id: string; name: string; project: number; serial: number }>>([])
@@ -56,12 +56,12 @@ watch(() => props.numberingOptions.organizations, organizations => {
 }, { immediate: true, deep: true })
 
 async function saveStorage() {
-  if (!storageDraft.vaultRoot.trim() || !storageDraft.releaseRoot.trim()) {
-    ElMessage.warning('请填写图档存档根目录和生产发包根目录')
+  if (!storageDraft.vaultRoot.trim() || !storageDraft.releaseRoot.trim() || !storageDraft.materialAttachmentRoot.trim()) {
+    ElMessage.warning('请填写图档、生产发包和料品资料存档根目录')
     return
   }
   try {
-    await props.onSaveSettings({ ...storageDraft, vaultRoot: storageDraft.vaultRoot.trim(), releaseRoot: storageDraft.releaseRoot.trim() })
+    await props.onSaveSettings({ ...storageDraft, vaultRoot: storageDraft.vaultRoot.trim(), releaseRoot: storageDraft.releaseRoot.trim(), materialAttachmentRoot: storageDraft.materialAttachmentRoot.trim() })
     ElMessage.success('存储设置已保存，新项目将自动创建项目号目录')
   } catch (error) {
     ElMessage.error(error instanceof Error ? error.message : '存储设置保存失败')
@@ -177,7 +177,7 @@ async function saveCounters(row: { id: string; project: number; serial: number }
       <el-tab-pane label="存档位置" name="storage">
         <section class="pdm-panel pdm-manager-panel">
           <header class="pdm-manager-heading"><div><h2>项目文件夹规则</h2><p>创建项目时不再填写路径，系统自动使用“根目录\项目号”。</p></div></header>
-          <div class="pdm-settings-form"><label>图档存档根目录<input v-model="storageDraft.vaultRoot" placeholder="例如 D:\PLM\Vault"><small>示例：{{ storageDraft.vaultRoot || '未设置' }}\P700001</small></label><label>生产发包根目录<input v-model="storageDraft.releaseRoot" placeholder="例如 D:\PLM\Release"><small>示例：{{ storageDraft.releaseRoot || '未设置' }}\P700001</small></label></div>
+          <div class="pdm-settings-form"><label>图档存档根目录<input v-model="storageDraft.vaultRoot" placeholder="例如 D:\PLM\Vault"><small>示例：{{ storageDraft.vaultRoot || '未设置' }}\P700001</small></label><label>生产发包根目录<input v-model="storageDraft.releaseRoot" placeholder="例如 D:\PLM\Release"><small>示例：{{ storageDraft.releaseRoot || '未设置' }}\P700001</small></label><label>料品资料存档根目录<input v-model="storageDraft.materialAttachmentRoot" placeholder="例如 D:\PLM\MaterialAttachments"><small>目录变更只影响新上传附件，历史附件仍从原位置下载。</small></label></div>
           <div class="pdm-settings-actions"><button type="button" class="pdm-primary-action" :disabled="pending" @click="saveStorage">保存存储设置</button></div>
         </section>
       </el-tab-pane>

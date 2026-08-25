@@ -403,6 +403,9 @@ public sealed class Phase1ReleaseWorkflowTests
 
         var applied = await workflow.GenerateMechanicalBomAsync(ProjectId, true, "admin", UserRole.Administrator, default);
         Assert.True(applied.Applied);
+        Assert.Equal(1, repository.BomBatchApplyCount);
+        var appliedItems = applied.StandardItems.Concat(applied.NonStandardItems).Concat(applied.UnclassifiedItems).Concat(applied.ElectricalItems).ToArray();
+        Assert.Equal(appliedItems.Length, appliedItems.Select(item => item.Id).Distinct().Count());
         Assert.Contains(await repository.GetBomAsync(ProjectId, BomKind.Unclassified, default), item => item.IsPendingClassification);
         Assert.DoesNotContain(await repository.GetBomAsync(ProjectId, BomKind.NonStandard, default), item => item.IsPendingClassification);
     }
@@ -875,7 +878,7 @@ public sealed class Phase1ReleaseWorkflowTests
         {
             await workflow.StartCadPropertyWritebackAsync(request.Id, "cad-client", UserRole.Administrator, default);
             var result = await CheckInAsync(repository, request.SourceDocumentId, "cad-client", request.Properties,
-                request.SourceDocumentId == model.Id ? 'C' : 'D');
+                request.SourceDocumentId == model.Id ? 'C' : 'D', request.Id);
             await workflow.CompleteCadPropertyWritebackAsync(request.Id, Assert.IsType<DocumentVersion>(result.Version).Id,
                 "cad-client", UserRole.Administrator, default);
         }
@@ -889,18 +892,21 @@ public sealed class Phase1ReleaseWorkflowTests
         Guid documentId,
         string actor,
         IReadOnlyDictionary<string, string?> properties,
-        char hashCharacter)
+        char hashCharacter,
+        Guid? drawingReviewWritebackId = null)
     {
-        var document = await repository.CheckoutAsync(documentId, actor, default);
+        var sessionId = Guid.NewGuid();
+        var document = await repository.CheckoutAsync(documentId, actor, sessionId, "TEST-WS",
+            DateTimeOffset.UtcNow.AddMinutes(15), drawingReviewWritebackId, default);
         var root = new DocumentReferenceNode(Guid.NewGuid(), document.Id, document.DrawingNumber, document.FileName, document.Name,
             document.Kind, "默认", 1, ReferenceNodeStatus.Normal, document.Revision, actor, []);
-        return await repository.CheckInVersionAsync(documentId, actor, new DocumentVersionCommit(
+        return await repository.CheckInVersionAsync(documentId, actor, sessionId, new DocumentVersionCommit(
             new StoredFile($"versions/{document.FileName}", 128, new string(hashCharacter, 64), DateTimeOffset.UtcNow),
             "测试存档",
             properties,
             new CadReferenceSnapshot(Guid.NewGuid(), ProjectId, document.Id, DateTimeOffset.UtcNow, actor, root, new string('F', 64)),
             [],
-            []), default);
+            []), drawingReviewWritebackId, default);
     }
 
     private static async Task<ReleasePackage> PublishAsync(PdmWorkflowService workflow, ReleasePackage package)

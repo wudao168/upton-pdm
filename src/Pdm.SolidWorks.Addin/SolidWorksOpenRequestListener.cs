@@ -123,6 +123,7 @@ internal sealed class SolidWorksOpenRequestListener : IDisposable
         && (string.Equals(request.Mode, "LatestReadOnly", StringComparison.Ordinal)
             || string.Equals(request.Mode, "LatestReleased", StringComparison.Ordinal)
             || string.Equals(request.Mode, "LatestEdit", StringComparison.Ordinal)
+            || string.Equals(request.Mode, "PropertyWriteback", StringComparison.Ordinal)
             || string.Equals(request.Mode, "SpecificReadOnly", StringComparison.Ordinal) && request.VersionId.HasValue);
 
     internal static string PipeName()

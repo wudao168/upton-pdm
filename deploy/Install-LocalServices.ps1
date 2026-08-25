@@ -213,7 +213,8 @@ $apiEnvironment = @(
     "PDM_JWT_SIGNING_KEY=$($secrets.jwtSigningKey)",
     "PDM_BOOTSTRAP_ADMIN_PASSWORD=$($secrets.bootstrapAdminPassword)",
     "PDM_PREVIEW_WORKER_PATH=$($receipt.previewWorkerPath)",
-    "Pdm__Storage__UploadTempRoot=$(Join-Path $localRoot 'uploads')"
+    "Pdm__Storage__UploadTempRoot=$(Join-Path $localRoot 'uploads')",
+    "Pdm__Storage__ProgramTemplateRoot=$(Join-Path $localRoot 'program-templates')"
 )
 $apiRegistryPath = "HKLM:\SYSTEM\CurrentControlSet\Services\$apiServiceName"
 New-ItemProperty -LiteralPath $apiRegistryPath -Name Environment -PropertyType MultiString -Value $apiEnvironment -Force | Out-Null

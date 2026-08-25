@@ -2,20 +2,22 @@
 import { computed, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { ClipboardCheck, KeyRound, RefreshCw } from '@lucide/vue'
-import type { EditLockSummary, MyApprovalTask, PasswordResetTask } from '../types'
+import type { EditLockSummary, MaterialCodeApplication, MyApprovalTask, PasswordResetTask, ProgramTemplateTask } from '../types'
 
-const props = defineProps<{
+const props = withDefaults(defineProps<{
   tasks: MyApprovalTask[]
+  materialCodeTasks: MaterialCodeApplication[]
+  programTemplateTasks?: ProgramTemplateTask[]
   locks: EditLockSummary[]
   passwordResetTasks: PasswordResetTask[]
   pending: boolean
   onRequestRelease: (documentId: string, reason: string) => Promise<void>
   onForceRelease: (documentId: string, reason: string) => Promise<void>
   onResetPassword: (taskId: string) => Promise<void>
-}>()
-defineEmits<{ open: [projectId: string, releasePackageId: string]; refresh: [] }>()
+}>(), { programTemplateTasks: () => [] })
+defineEmits<{ open: [projectId: string, releasePackageId: string]; openMaterialApprovals: []; openProgramTemplate: [templateId: string]; refresh: [] }>()
 
-type TaskFilter = 'all' | 'approval' | 'lock' | 'password'
+type TaskFilter = 'all' | 'approval' | 'material' | 'program' | 'lock' | 'password'
 type TaskCenterRow = {
   key: string
   kind: Exclude<TaskFilter, 'all'>
@@ -25,14 +27,84 @@ type TaskCenterRow = {
   content: string
   createdAt: string
   approval?: MyApprovalTask
-  lock?: EditLockSummary
+  material?: MaterialCodeApplication
+  program?: ProgramTemplateTask
+  locks?: EditLockSummary[]
   password?: PasswordResetTask
 }
+
+const bomHeaderLabels = {
+  Master: '项目主BOM', Standard: '标准件BOM', NonStandard: '非标件BOM', Electrical: '电气BOM',
+} as const
+const bomHeaderOrder = ['Master', 'Standard', 'NonStandard', 'Electrical'] as const
+
+const lockGroups = computed(() => {
+  const groups = new Map<string, EditLockSummary[]>()
+  for (const lock of props.locks) {
+    const locks = groups.get(lock.projectId) ?? []
+    locks.push(lock)
+    groups.set(lock.projectId, locks)
+  }
+  return [...groups.values()]
+})
+
+const materialTaskRows = computed<TaskCenterRow[]>(() => {
+  const bomHeaderGroups = new Map<string, MaterialCodeApplication[]>()
+  const individualTasks: MaterialCodeApplication[] = []
+  for (const task of props.materialCodeTasks) {
+    if (task.applicationType !== 'BomHeader') {
+      individualTasks.push(task)
+      continue
+    }
+    const tasks = bomHeaderGroups.get(task.projectId) ?? []
+    tasks.push(task)
+    bomHeaderGroups.set(task.projectId, tasks)
+  }
+
+  const groupedRows = [...bomHeaderGroups.values()].map(tasks => {
+    const first = tasks[0]
+    const latest = tasks.reduce((result, task) => new Date(task.requestedAt).getTime() > new Date(result.requestedAt).getTime() ? task : result)
+    const kinds = [...new Set(tasks.map(task => task.bomHeaderKind).filter((kind): kind is NonNullable<MaterialCodeApplication['bomHeaderKind']> => !!kind))]
+      .sort((left, right) => bomHeaderOrder.indexOf(left) - bomHeaderOrder.indexOf(right))
+      .map(kind => bomHeaderLabels[kind])
+    const applicants = [...new Set(tasks.map(task => task.requestedBy))]
+    return {
+      key: `material-bom-project-${first.projectId}`,
+      kind: 'material' as const,
+      status: '待审批',
+      statusClass: 'is-remind',
+      title: `${first.projectCode || '项目'} BOM料号审批${tasks.length > 1 ? `（${tasks.length}项）` : ''}`,
+      content: `${first.projectName || first.projectId} · ${kinds.join('、') || 'BOM物料'}${tasks.length > 1 ? ` · 共${tasks.length}项` : ''} · 申请人 ${applicants.join('、')}`,
+      createdAt: latest.requestedAt,
+      material: first,
+    }
+  })
+  const individualRows = individualTasks.map(task => ({
+    key: `material-${task.id}`,
+    kind: 'material' as const,
+    status: '待审批',
+    statusClass: 'is-remind',
+    title: `${task.projectCode || '项目'} 标准件料号审批`,
+    content: `${task.projectName || task.projectId} · ${task.applicationName || task.bomItemName || 'BOM物料'} · 申请人 ${task.requestedBy}`,
+    createdAt: task.requestedAt,
+    material: task,
+  }))
+  return [...groupedRows, ...individualRows]
+})
 
 const taskFilter = ref<TaskFilter>('all')
 const currentPage = ref(1)
 const pageSize = ref(20)
 const pageSizeOptions = [20, 50, 100]
+const commonForceReleaseReasons = ['编辑人长期离线未处理', '项目交接需继续设计', '误获取或未正确释放', '人员离职或岗位调整', '客户端异常导致占用']
+const forceReleaseDialogOpen = ref(false)
+const forceReleaseDialogTargets = ref<EditLockSummary[]>([])
+const forceReleaseReason = ref('')
+const forceReleaseSubmitting = ref(false)
+const forceReleaseDialogSummary = computed(() => {
+  const targets = forceReleaseDialogTargets.value
+  return targets.length ? `将统一释放 ${targets[0].projectCode} 项目下 ${targets.length} 个超时编辑权限，相关旧会话将立即失效，只能另存文件，不能提交。` : ''
+})
 
 function stageLabel(stage: string | number) {
   const key = typeof stage === 'number'
@@ -82,16 +154,35 @@ const rows = computed<TaskCenterRow[]>(() => [
     createdAt: task.createdAt,
     approval: task,
   })),
-  ...props.locks.map(lock => ({
-    key: `lock-${lock.documentId}`,
-    kind: 'lock' as const,
-    status: attentionLabel(lock.attentionLevel),
-    statusClass: lockStatusClass(lock),
-    title: `${lock.projectCode} · ${lock.drawingNumber}`,
-    content: `${lock.documentName} · ${lock.checkedOutBy}（${lock.checkoutMachine || '未知电脑'}）· ${connectionLabel(lock.connectionState)} · 已占用${elapsed(lock.checkedOutAt)}`,
-    createdAt: lock.checkedOutAt,
-    lock,
+  ...materialTaskRows.value,
+  ...props.programTemplateTasks.map(task => ({
+    key: `program-${task.id}`,
+    kind: 'program' as const,
+    status: task.stage === 'Review' ? '待审核' : '待批准',
+    statusClass: 'is-remind',
+    title: `${task.templateCode} 程序模板${task.stage === 'Review' ? '审核' : '批准'}`,
+    content: `${task.templateName} · ${task.version} · ${task.stage === 'Review' ? '电气组织审核' : '集团标准化批准'}`,
+    createdAt: task.createdAt,
+    program: task,
   })),
+  ...lockGroups.value.map(locks => {
+    const first = locks[0]
+    const oldest = locks.reduce((result, lock) => new Date(lock.checkedOutAt).getTime() < new Date(result.checkedOutAt).getTime() ? lock : result)
+    const mostUrgent = locks.reduce((result, lock) => attentionIndex(lock.attentionLevel) > attentionIndex(result.attentionLevel) ? lock : result)
+    const editorCount = new Set(locks.map(lock => lock.checkedOutBy)).size
+    return {
+      key: `lock-project-${first.projectId}`,
+      kind: 'lock' as const,
+      status: attentionLabel(mostUrgent.attentionLevel),
+      statusClass: lockStatusClass(mostUrgent),
+      title: `${first.projectCode} · ${first.projectName}`,
+      content: locks.length === 1
+        ? `${first.drawingNumber} · ${first.documentName} · ${first.checkedOutBy}（${first.checkoutMachine || '未知电脑'}）· ${connectionLabel(first.connectionState)} · 已占用${elapsed(first.checkedOutAt)}`
+        : `${locks.length} 个图档 · ${editorCount} 位编辑人 · 最长占用${elapsed(oldest.checkedOutAt)}`,
+      createdAt: oldest.checkedOutAt,
+      locks,
+    }
+  }),
   ...props.passwordResetTasks.map(task => ({
     key: `password-${task.id}`,
     kind: 'password' as const,
@@ -107,7 +198,9 @@ const rows = computed<TaskCenterRow[]>(() => [
 const filterCounts = computed(() => ({
   all: rows.value.length,
   approval: props.tasks.length,
-  lock: props.locks.length,
+  material: materialTaskRows.value.length,
+  program: props.programTemplateTasks.length,
+  lock: lockGroups.value.length,
   password: props.passwordResetTasks.length,
 }))
 const filteredRows = computed(() => taskFilter.value === 'all' ? rows.value : rows.value.filter(row => row.kind === taskFilter.value))
@@ -125,25 +218,72 @@ watch([pageSize, () => filteredRows.value.length], () => {
   currentPage.value = Math.min(currentPage.value, totalPages.value)
 })
 
-async function requestRelease(lock: EditLockSummary) {
+function forceReleaseTargets(locks: EditLockSummary[] = []) {
+  return locks.filter(lock => lock.canForceRelease && !lock.ownedByCurrentUser)
+}
+
+function requestReleaseTargets(locks: EditLockSummary[] = []) {
+  return locks.filter(lock => lock.canRequestRelease && !lock.ownedByCurrentUser && !lock.releaseRequestedBy)
+}
+
+function forceReleaseLabel(locks: EditLockSummary[] = []) {
+  const count = forceReleaseTargets(locks).length
+  return count > 1 ? `统一强制释放（${count}）` : '强制释放'
+}
+
+function requestReleaseLabel(locks: EditLockSummary[] = []) {
+  const count = requestReleaseTargets(locks).length
+  return count > 1 ? `统一催办／申请（${count}）` : '催办／申请释放'
+}
+
+function openForceRelease(locks: EditLockSummary[]) {
+  const targets = forceReleaseTargets(locks)
+  if (!targets.length) return
+  forceReleaseDialogTargets.value = targets
+  forceReleaseReason.value = ''
+  forceReleaseDialogOpen.value = true
+}
+
+async function requestRelease(locks: EditLockSummary[]) {
+  const targets = requestReleaseTargets(locks)
+  if (!targets.length) return
+  let completed = 0
   try {
-    const { value } = await ElMessageBox.prompt('请说明需要该图档的原因，系统会记录申请并提醒当前编辑人。', '申请释放编辑权限', { inputValue: '需要继续该图档设计，请及时提交存档或结束编辑。', inputValidator: value => value.trim().length > 0 || '请填写申请原因', confirmButtonText: '提交申请', cancelButtonText: '取消' })
-    await props.onRequestRelease(lock.documentId, value)
-    ElMessage.success('释放申请已记录')
+    const { value } = await ElMessageBox.prompt(`将向 ${targets[0].projectCode} 项目下 ${targets.length} 个图档的当前编辑人统一发送释放申请。`, '批量申请释放编辑权限', { inputValue: '需要继续该项目设计，请及时提交存档或结束编辑。', inputValidator: value => value.trim().length > 0 || '请填写申请原因', confirmButtonText: '提交申请', cancelButtonText: '取消' })
+    for (const lock of targets) {
+      await props.onRequestRelease(lock.documentId, value)
+      completed++
+    }
+    ElMessage.success(`已统一提交 ${completed} 个释放申请`)
   } catch (error) {
     if (error === 'cancel' || error === 'close') return
-    ElMessage.error(error instanceof Error ? error.message : '申请释放失败')
+    const message = error instanceof Error ? error.message : '申请释放失败'
+    ElMessage.error(completed ? `已提交 ${completed} 个，其余未完成：${message}` : message)
   }
 }
 
-async function forceRelease(lock: EditLockSummary) {
+async function confirmForceRelease() {
+  const targets = forceReleaseDialogTargets.value
+  const reason = forceReleaseReason.value.trim()
+  if (!targets.length) return
+  if (!reason) {
+    ElMessage.warning('请选择常用原因或填写强制释放原因')
+    return
+  }
+  let completed = 0
+  forceReleaseSubmitting.value = true
   try {
-    const { value } = await ElMessageBox.prompt(`将使${lock.checkedOutBy}的旧会话立即失效，旧会话只能另存文件，不能提交。`, '强制释放超时权限', { inputPlaceholder: '请填写强制释放原因', inputValidator: value => value.trim().length > 0 || '请填写强制释放原因', confirmButtonText: '确认强制释放', cancelButtonText: '取消', type: 'warning' })
-    await props.onForceRelease(lock.documentId, value)
-    ElMessage.success('超时编辑权限已释放')
+    for (const lock of targets) {
+      await props.onForceRelease(lock.documentId, reason)
+      completed++
+    }
+    forceReleaseDialogOpen.value = false
+    ElMessage.success(`已统一释放 ${completed} 个超时编辑权限`)
   } catch (error) {
-    if (error === 'cancel' || error === 'close') return
-    ElMessage.error(error instanceof Error ? error.message : '强制释放失败')
+    const message = error instanceof Error ? error.message : '强制释放失败'
+    ElMessage.error(completed ? `已释放 ${completed} 个，其余未完成：${message}` : message)
+  } finally {
+    forceReleaseSubmitting.value = false
   }
 }
 
@@ -167,6 +307,8 @@ async function resetPassword(task: PasswordResetTask) {
         <div class="pdm-task-filters" role="tablist" aria-label="待办类型">
           <button type="button" role="tab" :aria-selected="taskFilter === 'all'" @click="setTaskFilter('all')">全部待办（{{ filterCounts.all }}）</button>
           <button type="button" role="tab" :aria-selected="taskFilter === 'approval'" @click="setTaskFilter('approval')">审批任务（{{ filterCounts.approval }}）</button>
+          <button type="button" role="tab" :aria-selected="taskFilter === 'material'" @click="setTaskFilter('material')">料号审批（{{ filterCounts.material }}）</button>
+          <button v-if="programTemplateTasks.length" type="button" role="tab" :aria-selected="taskFilter === 'program'" @click="setTaskFilter('program')">程序模板（{{ filterCounts.program }}）</button>
           <button type="button" role="tab" :aria-selected="taskFilter === 'lock'" @click="setTaskFilter('lock')">编辑权限（{{ filterCounts.lock }}）</button>
           <button type="button" role="tab" :aria-selected="taskFilter === 'password'" @click="setTaskFilter('password')">密码重置（{{ filterCounts.password }}）</button>
         </div>
@@ -176,24 +318,27 @@ async function resetPassword(task: PasswordResetTask) {
         <table class="pdm-project-table pdm-task-table">
           <thead><tr><th>状态</th><th>标题</th><th>内容</th><th>创建时间</th><th>操作</th></tr></thead>
           <tbody>
-            <tr v-for="row in pagedRows" :key="row.key" :class="{ 'is-task-actionable': row.kind === 'approval' }" @click="row.approval && $emit('open', row.approval.projectId, row.approval.releasePackageId)">
+            <tr v-for="row in pagedRows" :key="row.key" :class="{ 'is-task-actionable': row.kind === 'approval' || row.kind === 'material' || row.kind === 'program' }" @click="row.approval ? $emit('open', row.approval.projectId, row.approval.releasePackageId) : row.material ? $emit('openMaterialApprovals') : row.program ? $emit('openProgramTemplate', row.program.templateId) : undefined">
               <td><span class="pdm-status" :class="row.statusClass">{{ row.status }}</span></td>
               <td><strong>{{ row.title }}</strong></td>
               <td :title="row.content">{{ row.content }}</td>
               <td>{{ formatDateTime(row.createdAt) }}</td>
               <td>
                 <button v-if="row.approval" type="button" class="pdm-text-action" @click.stop="$emit('open', row.approval.projectId, row.approval.releasePackageId)">查看</button>
+                <button v-else-if="row.material" type="button" class="pdm-text-action" @click.stop="$emit('openMaterialApprovals')">查看申请</button>
+                <button v-else-if="row.program" type="button" class="pdm-text-action" @click.stop="$emit('openProgramTemplate', row.program.templateId)">查看模板</button>
                 <button v-else-if="row.password" type="button" class="pdm-text-action" :disabled="pending" @click.stop="resetPassword(row.password)"><KeyRound :size="14" />重置密码</button>
-                <span v-else-if="row.lock?.ownedByCurrentUser" class="pdm-lock-own">请在SolidWorks处理</span>
-                <button v-else-if="row.lock?.canForceRelease" type="button" class="pdm-text-action is-danger" :disabled="pending" @click.stop="forceRelease(row.lock)">强制释放</button>
-                <button v-else-if="row.lock?.canRequestRelease" type="button" class="pdm-text-action" :disabled="pending || !!row.lock.releaseRequestedBy" @click.stop="requestRelease(row.lock)">{{ row.lock.releaseRequestedBy ? '已申请' : '催办／申请释放' }}</button>
+                <button v-else-if="forceReleaseTargets(row.locks).length" type="button" class="pdm-text-action is-danger" :disabled="pending" @click.stop="openForceRelease(row.locks!)">{{ forceReleaseLabel(row.locks) }}</button>
+                <button v-else-if="requestReleaseTargets(row.locks).length" type="button" class="pdm-text-action" :disabled="pending" @click.stop="requestRelease(row.locks!)">{{ requestReleaseLabel(row.locks) }}</button>
+                <span v-else-if="row.locks?.some(lock => lock.releaseRequestedBy)">已申请</span>
+                <span v-else-if="row.locks?.some(lock => lock.ownedByCurrentUser)" class="pdm-lock-own">请在SolidWorks处理</span>
                 <span v-else>—</span>
               </td>
             </tr>
           </tbody>
         </table>
       </div>
-      <div v-else class="pdm-project-empty pdm-task-empty"><ClipboardCheck :size="42" /><h2>当前没有待办任务</h2><p>新的审批、编辑权限或密码重置任务会显示在这里。</p></div>
+      <div v-else class="pdm-project-empty pdm-task-empty"><ClipboardCheck :size="42" /><h2>当前没有待办任务</h2><p>新的发布审批、料号审批、程序模板审核、编辑权限或密码重置任务会显示在这里。</p></div>
 
       <footer class="pdm-task-pagination">
         <span>共 {{ filteredRows.length }} 条</span>
@@ -203,5 +348,24 @@ async function resetPassword(task: PasswordResetTask) {
         <button type="button" :disabled="currentPage >= totalPages" aria-label="下一页" @click="currentPage++">›</button>
       </footer>
     </section>
+
+    <el-dialog v-if="forceReleaseDialogOpen" v-model="forceReleaseDialogOpen" class="pdm-force-release-dialog" modal-class="pdm-force-release-overlay" title="批量强制释放超时权限" width="520px" :close-on-click-modal="false" append-to-body>
+      <div class="pdm-force-release-form">
+        <p>{{ forceReleaseDialogSummary }}</p>
+        <fieldset>
+          <legend>常用释放原因</legend>
+          <div class="pdm-force-release-reasons" role="group" aria-label="常用释放原因">
+            <button v-for="reason in commonForceReleaseReasons" :key="reason" type="button" :aria-pressed="forceReleaseReason === reason" @click="forceReleaseReason = reason">{{ reason }}</button>
+          </div>
+        </fieldset>
+        <label>释放原因<textarea v-model="forceReleaseReason" rows="3" maxlength="500" placeholder="请选择常用原因或填写具体原因" aria-label="强制释放原因" /></label>
+      </div>
+      <template #footer>
+        <div class="pdm-force-release-dialog-actions">
+          <button type="button" class="pdm-secondary-action" :disabled="forceReleaseSubmitting" @click="forceReleaseDialogOpen = false">取消</button>
+          <button type="button" class="pdm-primary-action" :disabled="pending || forceReleaseSubmitting" @click="confirmForceRelease">{{ forceReleaseSubmitting ? '释放中…' : '确认释放' }}</button>
+        </div>
+      </template>
+    </el-dialog>
   </section>
 </template>

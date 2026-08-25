@@ -14,6 +14,35 @@ public sealed partial class InMemoryPdmRepository
             .OrderByDescending(package => package.CreatedAt)
             .ToArray());
 
+    public Task<IReadOnlySet<Guid>> ListActiveDrawingReviewDocumentIdsAsync(Guid projectId, CancellationToken cancellationToken)
+    {
+        lock (gate)
+        {
+            return Task.FromResult<IReadOnlySet<Guid>>(drawingReviewPackages.Values
+                .Where(package => package.ProjectId == projectId && IsActiveDrawingReview(package))
+                .SelectMany(package => package.Items.SelectMany(item => item.DrawingDocumentId.HasValue
+                    ? new[] { item.ModelDocumentId, item.DrawingDocumentId.Value }
+                    : new[] { item.ModelDocumentId }))
+                .ToHashSet());
+        }
+    }
+
+    public Task<bool> IsDocumentUnderActiveDrawingReviewAsync(Guid documentId, CancellationToken cancellationToken)
+    {
+        lock (gate)
+        {
+            return Task.FromResult(IsDocumentUnderActiveDrawingReview(documentId));
+        }
+    }
+
+    public Task<bool> IsActiveDrawingReviewWritebackAsync(Guid documentId, Guid writebackId, CancellationToken cancellationToken)
+    {
+        lock (gate)
+        {
+            return Task.FromResult(IsActiveDrawingReviewWriteback(documentId, writebackId));
+        }
+    }
+
     public Task<DrawingReviewPackage?> FindDrawingReviewPackageAsync(Guid packageId, CancellationToken cancellationToken)
     {
         drawingReviewPackages.TryGetValue(packageId, out var package);
@@ -22,10 +51,60 @@ public sealed partial class InMemoryPdmRepository
 
     public Task<DrawingReviewPackage> CreateDrawingReviewPackageAsync(DrawingReviewPackage package, CancellationToken cancellationToken)
     {
-        if (!drawingReviewPackages.TryAdd(package.Id, package))
-            throw new PdmConflictException("图纸审核单已经存在。");
-        return Task.FromResult(package);
+        lock (gate)
+        {
+            var documentIds = package.Items
+                .SelectMany(item => item.DrawingDocumentId.HasValue
+                    ? new[] { item.ModelDocumentId, item.DrawingDocumentId.Value }
+                    : new[] { item.ModelDocumentId })
+                .Distinct()
+                .ToArray();
+            if (documentIds.Any(documentId => !documents.TryGetValue(documentId, out var document) || !string.IsNullOrWhiteSpace(document.CheckedOutBy)))
+                throw new PdmConflictException("待审核图档仍处于签出编辑状态，请先提交存档或放弃编辑。");
+            if (documentIds.Any(IsDocumentUnderActiveDrawingReview))
+                throw new PdmConflictException("待审核图档已经处于图纸审核中，请刷新后重试。");
+            if (!drawingReviewPackages.TryAdd(package.Id, package))
+                throw new PdmConflictException("图纸审核单已经存在。");
+            return Task.FromResult(package);
+        }
     }
+
+    public Task<DrawingReviewPackage> WithdrawDrawingReviewPackageAsync(Guid packageId, string actor, DateTimeOffset withdrawnAt, string reason, CancellationToken cancellationToken)
+    {
+        lock (gate)
+        {
+            if (!drawingReviewPackages.TryGetValue(packageId, out var package))
+                throw new PdmNotFoundException("图纸审核单不存在。");
+            if (package.State != DrawingReviewPackageState.InReview)
+                throw new PdmConflictException("只有审核中的图纸审核单可以撤销。");
+            package = package with
+            {
+                State = DrawingReviewPackageState.Withdrawn,
+                WithdrawnBy = actor,
+                WithdrawnAt = withdrawnAt,
+                WithdrawalReason = reason
+            };
+            drawingReviewPackages[package.Id] = package;
+            return Task.FromResult(package);
+        }
+    }
+
+    private static bool IsActiveDrawingReview(DrawingReviewPackage package) =>
+        package.State is DrawingReviewPackageState.InReview or DrawingReviewPackageState.WritingProperties;
+
+    private bool IsDocumentUnderActiveDrawingReview(Guid documentId) => drawingReviewPackages.Values.Any(package =>
+        IsActiveDrawingReview(package)
+        && package.Items.Any(item => item.ModelDocumentId == documentId || item.DrawingDocumentId == documentId));
+
+    private bool IsActiveDrawingReviewWriteback(Guid documentId, Guid writebackId) =>
+        cadPropertyWritebacks.TryGetValue(writebackId, out var writeback)
+        && writeback.SourceDocumentId == documentId
+        && writeback.Status == CadPropertyWritebackStatus.InProgress
+        && drawingReviewPackages.Values.Any(package =>
+            package.State == DrawingReviewPackageState.WritingProperties
+            && package.Items.Any(item =>
+                item.ModelDocumentId == documentId && item.ModelWritebackId == writebackId
+                || item.DrawingDocumentId == documentId && item.DrawingWritebackId == writebackId));
 
     public Task<DrawingReviewPackage> AddDrawingReviewMarkupAsync(DrawingReviewMarkup markup, CancellationToken cancellationToken)
     {
@@ -102,7 +181,8 @@ public sealed partial class InMemoryPdmRepository
             foreach (var request in requests)
             {
                 cadPropertyWritebacks[request.Model.Id] = request.Model;
-                cadPropertyWritebacks[request.Drawing.Id] = request.Drawing;
+                if (request.Drawing is not null)
+                    cadPropertyWritebacks[request.Drawing.Id] = request.Drawing;
             }
             package = package with
             {
@@ -110,7 +190,9 @@ public sealed partial class InMemoryPdmRepository
                 Items = package.Items.Select(item =>
                 {
                     var request = byItem[item.Id];
-                    return item with { ModelWritebackId = request.Model.Id, DrawingWritebackId = request.Drawing.Id };
+                    if (item.RequiresDrawingReview != (request.Drawing is not null))
+                        throw new PdmRuleException("图纸审核属性写回与审核目标不一致。");
+                    return item with { ModelWritebackId = request.Model.Id, DrawingWritebackId = request.Drawing?.Id };
                 }).ToArray()
             };
             drawingReviewPackages[package.Id] = package;
@@ -132,7 +214,8 @@ public sealed partial class InMemoryPdmRepository
                     return succeeded ? item with { DrawingState = DrawingReviewTargetState.Marked, DrawingResultVersionId = resultVersionId } : item;
                 return item;
             }).ToArray();
-            var approved = succeeded && items.All(item => item.ModelState == DrawingReviewTargetState.Marked && item.DrawingState == DrawingReviewTargetState.Marked);
+            var approved = succeeded && items.All(item => item.ModelState == DrawingReviewTargetState.Marked
+                && item.DrawingState is DrawingReviewTargetState.Marked or DrawingReviewTargetState.NotRequired);
             package = package with
             {
                 Items = items,

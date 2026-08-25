@@ -5,10 +5,8 @@ import BomHierarchyOverview from '../src/components/BomHierarchyOverview.vue'
 import type { BomItem, ProjectSummary } from '../src/types'
 
 const api = vi.hoisted(() => ({
-  listBom: vi.fn(),
-  listBomVersions: vi.fn(),
-  listProjectBomHeaders: vi.fn(),
-  generateProjectBomHeaderHierarchy: vi.fn(),
+  listBom: vi.fn(), listBomVersions: vi.fn(), listProjectBomHeaders: vi.fn(),
+  generateProjectBomHeaderHierarchy: vi.fn(), previewProjectBomU9Sync: vi.fn(), executeProjectBomU9Sync: vi.fn(),
 }))
 
 vi.mock('../src/api', () => api)
@@ -17,8 +15,7 @@ function project(input: Partial<ProjectSummary> & Pick<ProjectSummary, 'id' | 'c
   return {
     owner: 'admin', stage: '设计', vaultName: 'vault', vaultLocation: '', releaseLocation: '', quantity: 1,
     serialNumbers: [], responsibleUsers: [], collaborativeProjectManagers: [], designers: [],
-    canAssignExecutionUnit: true, canManageMainStaffing: true, canAssignDesigners: true, canReadContent: true,
-    ...input,
+    canAssignExecutionUnit: true, canManageMainStaffing: true, canAssignDesigners: true, canReadContent: true, ...input,
   }
 }
 
@@ -28,15 +25,12 @@ function item(drawingNumber: string, name: string): BomItem {
 
 describe('BomHierarchyOverview', () => {
   beforeEach(() => {
-    api.listBom.mockReset()
-    api.listBomVersions.mockReset()
-    api.listProjectBomHeaders.mockReset()
-    api.generateProjectBomHeaderHierarchy.mockReset()
+    Object.values(api).forEach(mock => mock.mockReset())
+    api.previewProjectBomU9Sync.mockImplementation(async (projectId: string, kind: string) => ({
+      projectId, kind, itemCode: 'U9-CODE', componentCount: 0, state: 'UpToDate', writePreview: null,
+    }))
   })
-
-  afterEach(() => {
-    vi.restoreAllMocks()
-  })
+  afterEach(() => vi.restoreAllMocks())
 
   it('shows one status row per hierarchy BOM without rendering material details', async () => {
     const root = project({ id: 'root', code: 'P-0301', name: '装配产线', rootProjectId: 'root', bomItemCategoryCode: '0301' })
@@ -68,6 +62,8 @@ describe('BomHierarchyOverview', () => {
     const rootMaster = wrapper.findAll('tbody tr').find(row => row.text().includes('P-0301') && row.text().includes('三类汇总'))
     expect(rootMaster?.text()).toContain('ROOT-M')
     expect(rootMaster?.text()).toContain('项目主BOM')
+    expect(rootMaster?.findAll('td')[4].text()).toBe('2')
+    expect(rootMaster?.findAll('td')[7].text()).toBe('正常')
     const rootStandard = wrapper.findAll('tbody tr').find(row => row.text().includes('标准件BOM') && row.text().includes('S-V02'))
     expect(rootStandard?.text()).toContain('0201')
     expect(rootStandard?.text()).toContain('1')
@@ -83,7 +79,6 @@ describe('BomHierarchyOverview', () => {
     expect(wrapper.text()).not.toContain('正式版物料')
     expect(wrapper.text()).not.toContain('工作区物料')
     expect(wrapper.text()).not.toContain('归属主BOM')
-
     expect(wrapper.find('.bom-overview__header').exists()).toBe(false)
     expect(wrapper.find('input[type="search"]').exists()).toBe(false)
     expect(wrapper.find('button').exists()).toBe(false)
@@ -94,18 +89,12 @@ describe('BomHierarchyOverview', () => {
     api.listBom.mockResolvedValue([])
     api.listBomVersions.mockResolvedValue([])
     api.listProjectBomHeaders.mockResolvedValue([
-      { projectId: 'root', kind: 'Master', rowVersion: 0 },
-      { projectId: 'root', kind: 'Standard', parentKind: 'Master', rowVersion: 0 },
-      { projectId: 'root', kind: 'NonStandard', parentKind: 'Master', rowVersion: 0 },
-      { projectId: 'root', kind: 'Electrical', parentKind: 'Master', rowVersion: 0 },
+      { projectId: 'root', kind: 'Master', rowVersion: 0 }, { projectId: 'root', kind: 'Standard', parentKind: 'Master', rowVersion: 0 },
+      { projectId: 'root', kind: 'NonStandard', parentKind: 'Master', rowVersion: 0 }, { projectId: 'root', kind: 'Electrical', parentKind: 'Master', rowVersion: 0 },
     ])
     api.generateProjectBomHeaderHierarchy.mockResolvedValue({ rootProjectId: 'root', expectedCount: 4, generatedCount: 4, existingCount: 0, headers: [] })
     vi.spyOn(ElMessageBox, 'confirm').mockResolvedValue(undefined as never)
-
-    const wrapper = mount(BomHierarchyOverview, {
-      props: { project: root, projects: [root], token: 'token', editable: true },
-      global: { plugins: [ElementPlus] },
-    })
+    const wrapper = mount(BomHierarchyOverview, { props: { project: root, projects: [root], token: 'token', editable: true }, global: { plugins: [ElementPlus] } })
     await flushPromises()
 
     expect(wrapper.text()).toContain('待申请 4 个BOM料号')
@@ -113,12 +102,61 @@ describe('BomHierarchyOverview', () => {
     expect(wrapper.findAll('tbody tr')[1].text()).toContain('0201')
     await wrapper.get('.bom-overview__generation button').trigger('click')
     await flushPromises()
-
-    expect(ElMessageBox.confirm).toHaveBeenCalledWith(
-      expect.stringContaining('缺失的 4 个BOM容器'),
-      '确认申请BOM料号',
-      expect.objectContaining({ confirmButtonText: '确认申请' }),
-    )
+    expect(ElMessageBox.confirm).toHaveBeenCalledWith(expect.stringContaining('缺失的 4 个BOM容器'), '确认申请BOM料号', expect.objectContaining({ confirmButtonText: '确认申请' }))
     expect(api.generateProjectBomHeaderHierarchy).toHaveBeenCalledWith('root', 'token')
   })
+
+  it('shows an unfinished automatic empty-BOM creation without requiring a second manual operation', async () => {
+    const root = project({ id: 'root', code: 'P700001', name: '气密设备', rootProjectId: 'root', bomItemCategoryCode: '0302' })
+    api.listBom.mockImplementation(async (_projectId: string, kind: string) => kind === 'Standard' ? [item('01020000057', '阀岛')] : [])
+    api.listBomVersions.mockResolvedValue([])
+    api.listProjectBomHeaders.mockResolvedValue([
+      { projectId: 'root', kind: 'Master', materialId: 'material-master', materialCode: '03020000009', rowVersion: 1, applicationStatus: 'Approved' },
+      { projectId: 'root', kind: 'Standard', parentKind: 'Master', materialId: 'material-standard', materialCode: '02010000101', rowVersion: 1, applicationStatus: 'Approved' },
+      { projectId: 'root', kind: 'NonStandard', parentKind: 'Master', materialId: 'material-nonstandard', materialCode: '02010000116', rowVersion: 1, applicationStatus: 'Approved' },
+      { projectId: 'root', kind: 'Electrical', parentKind: 'Master', materialId: 'material-electrical', materialCode: '02010000117', rowVersion: 1, applicationStatus: 'Approved' },
+    ])
+    api.previewProjectBomU9Sync.mockResolvedValue({ projectId: 'root', kind: 'Master', itemCode: '03020000009', componentCount: 0, state: 'CreateRequired', writePreview: {
+      operation: 0, path: '/webapi/BOM/Create', requestPreview: '[]', requestSha256: 'sha-1', baselineSha256: 'base-1',
+      requiredConfirmation: '创建 03020000009/A1', addedComponentCount: 0, retainedHistoricalComponentCount: 0, generatedAt: '2026-08-24T12:00:00Z',
+    } })
+    api.executeProjectBomU9Sync.mockResolvedValue({})
+    vi.spyOn(ElMessageBox, 'confirm')
+    const wrapper = mount(BomHierarchyOverview, { props: { project: root, projects: [root], token: 'token', editable: true }, global: { plugins: [ElementPlus] } })
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('U9C料品')
+    expect(wrapper.text()).toContain('U9C BOM')
+    expect(wrapper.text()).toContain('已回写')
+    expect(wrapper.text()).toContain('待首个正式子件')
+    expect(api.previewProjectBomU9Sync).toHaveBeenCalledWith('root', 'Master', 'token')
+    await wrapper.find('button.bom-overview__sync').trigger('click')
+    await flushPromises()
+    expect(api.executeProjectBomU9Sync).not.toHaveBeenCalled()
+    expect(ElMessageBox.confirm).not.toHaveBeenCalled()
+    expect(wrapper.text()).toContain('待首个正式子件')
+  })
+
+  it('shows the automatic empty-BOM result without requiring a second operation', async () => {
+    const root = project({ id: 'root', code: 'P700001', name: '气密设备', rootProjectId: 'root', bomItemCategoryCode: '0302' })
+    api.listBom.mockResolvedValue([])
+    api.listBomVersions.mockResolvedValue([])
+    api.listProjectBomHeaders.mockResolvedValue([
+      { projectId: 'root', kind: 'Master', materialId: 'material-master', materialCode: '03020000009', rowVersion: 1, applicationStatus: 'Approved' },
+    ])
+    api.previewProjectBomU9Sync.mockResolvedValue({
+      projectId: 'root', kind: 'Master', itemCode: '03020000009', componentCount: 0,
+      state: 'AwaitingApproval', writePreview: null,
+    })
+    const wrapper = mount(BomHierarchyOverview, {
+      props: { project: root, projects: [root], token: 'token', editable: true },
+      global: { plugins: [ElementPlus] },
+    })
+    await flushPromises()
+
+    expect(api.previewProjectBomU9Sync).toHaveBeenCalledWith('root', 'Master', 'token')
+    expect(api.executeProjectBomU9Sync).not.toHaveBeenCalled()
+    expect(wrapper.text()).toContain('待BOM审核')
+  })
+
 })

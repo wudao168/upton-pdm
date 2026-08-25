@@ -72,6 +72,7 @@ foreach ($directory in @(
     (Join-Path $localRoot 'client'),
     (Join-Path $localRoot 'solidworks-addin'),
     (Join-Path $localRoot 'preview-worker'),
+    (Join-Path $localRoot 'program-templates'),
     (Join-Path $localRoot 'vault\PRJ-2026-018'),
     (Join-Path $localRoot 'release\PRJ-2026-018'),
     (Join-Path $localRoot 'uploads')

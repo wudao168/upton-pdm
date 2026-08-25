@@ -21,24 +21,33 @@ public sealed class U9BomWriteService(
         CancellationToken cancellationToken)
     {
         await DemandPermissionAsync(actor, role, cancellationToken);
+        return await PreviewCoreAsync(command, cancellationToken);
+    }
+
+    internal async Task<U9BomWritePreview> PreviewUpsertAsync(
+        U9BomWriteCommand command,
+        CancellationToken cancellationToken)
+    {
+        var normalized = Normalize(command with { Operation = U9BomWriteOperation.Create });
+        var context = await LoadContextAsync(cancellationToken);
+        var current = await QueryAsync(context, normalized.ItemCode, normalized.BomVersionCode, cancellationToken);
+        var operation = FindMatching(current, normalized) is null
+            ? U9BomWriteOperation.Create
+            : U9BomWriteOperation.Modify;
+        normalized = normalized with { Operation = operation };
+        ValidateCurrent(normalized, current);
+        return BuildPreview(context, normalized, current);
+    }
+
+    private async Task<U9BomWritePreview> PreviewCoreAsync(
+        U9BomWriteCommand command,
+        CancellationToken cancellationToken)
+    {
         var normalized = Normalize(command);
         var context = await LoadContextAsync(cancellationToken);
         var current = await QueryAsync(context, normalized.ItemCode, normalized.BomVersionCode, cancellationToken);
         ValidateCurrent(normalized, current);
-
-        var payload = BuildPayload(context.OrganizationCode, normalized, current);
-        var baseline = Fingerprint(current);
-        var (addedCount, retainedCount) = ComponentDelta(normalized, current);
-        return new(
-            normalized.Operation,
-            PathFor(context, normalized.Operation),
-            payload,
-            Hash($"{normalized.Operation}\n{baseline}\n{payload}"),
-            baseline,
-            ConfirmationFor(normalized),
-            addedCount,
-            retainedCount,
-            timeProvider.GetUtcNow());
+        return BuildPreview(context, normalized, current);
     }
 
     public async Task<U9BomWriteExecution> ExecuteAsync(
@@ -49,7 +58,33 @@ public sealed class U9BomWriteService(
         UserRole role,
         CancellationToken cancellationToken)
     {
-        var preview = await PreviewAsync(command, actor, role, cancellationToken);
+        await DemandPermissionAsync(actor, role, cancellationToken);
+        return await ExecuteCoreAsync(command, requestSha256, confirmation, actor, cancellationToken);
+    }
+
+    internal Task<U9BomWriteExecution> ExecuteAuthorizedAsync(
+        U9BomWriteCommand command,
+        string requestSha256,
+        string confirmation,
+        string actor,
+        CancellationToken cancellationToken) =>
+        ExecuteCoreAsync(command, requestSha256, confirmation, actor, cancellationToken);
+
+    internal Task<U9BomWriteExecution> ExecuteApprovalAutomationAsync(
+        U9BomWriteCommand command,
+        U9BomWritePreview preview,
+        string actor,
+        CancellationToken cancellationToken) =>
+        ExecuteCoreAsync(command, preview.RequestSha256, preview.RequiredConfirmation, actor, cancellationToken);
+
+    private async Task<U9BomWriteExecution> ExecuteCoreAsync(
+        U9BomWriteCommand command,
+        string requestSha256,
+        string confirmation,
+        string actor,
+        CancellationToken cancellationToken)
+    {
+        var preview = await PreviewCoreAsync(command, cancellationToken);
         if (!string.Equals(preview.RequestSha256, Required(requestSha256, "请求SHA-256"), StringComparison.OrdinalIgnoreCase))
             throw new PdmRuleException("BOM请求已变化，请重新生成预览后再确认。");
         if (!string.Equals(preview.RequiredConfirmation, confirmation?.Trim(), StringComparison.Ordinal))
@@ -76,6 +111,26 @@ public sealed class U9BomWriteService(
             nameof(U9BomReference), $"{normalized.ItemCode}/{normalized.BomVersionCode}",
             $"已执行U9C BOM{OperationName(normalized.Operation)}；A1固定版本；新增{preview.AddedComponentCount}项；U9C历史保留{preview.RetainedHistoricalComponentCount}项；接口{preview.Path}；请求SHA-256 {preview.RequestSha256}；自动回查通过。"), cancellationToken);
         return new(preview, write, verification, executedAt);
+    }
+
+    private U9BomWritePreview BuildPreview(
+        WriteContext context,
+        U9BomWriteCommand normalized,
+        U9BomQueryResult current)
+    {
+        var payload = BuildPayload(context.OrganizationCode, normalized, current);
+        var baseline = Fingerprint(current);
+        var (addedCount, retainedCount) = ComponentDelta(normalized, current);
+        return new(
+            normalized.Operation,
+            PathFor(context, normalized.Operation),
+            payload,
+            Hash($"{normalized.Operation}\n{baseline}\n{payload}"),
+            baseline,
+            ConfirmationFor(normalized),
+            addedCount,
+            retainedCount,
+            timeProvider.GetUtcNow());
     }
 
     private async Task DemandPermissionAsync(string actor, UserRole role, CancellationToken cancellationToken)
@@ -140,7 +195,8 @@ public sealed class U9BomWriteService(
             throw new PdmRuleException("U9C BOM版本固定为A1，不允许创建或修改其他版本。");
         var productUomCode = Required(command.ProductUomCode, "产品计量单位");
         if (command.Lot <= 0) throw new PdmRuleException("生产批量必须大于0。");
-        if (command.Components.Count == 0)
+        if (command.Components.Count == 0
+            && !(command.Operation == U9BomWriteOperation.Create && command.AllowEmptyCreate))
             throw new PdmRuleException("创建或修改BOM时至少需要一条子件。");
 
         var components = command.Components.Select(component =>

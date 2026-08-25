@@ -21,6 +21,11 @@ public static class PermissionCodes
     public const string ReleaseManage = "release.manage";
     public const string ApprovalDecide = "approval.decide";
     public const string ApprovalEmergencySubstitute = "approval.emergency-substitute";
+    public const string ProgramTemplateView = "program-template.view";
+    public const string ProgramTemplateSubmit = "program-template.submit";
+    public const string ProgramTemplateReview = "program-template.review";
+    public const string ProgramTemplateApprove = "program-template.approve";
+    public const string ProgramTemplateManage = "program-template.manage";
     public const string CustomerSettingsManage = "settings.customer.manage";
     public const string OrganizationSettingsManage = "settings.organization.manage";
     public const string FolderSettingsManage = "settings.folder.manage";
@@ -53,6 +58,11 @@ public static class RolePermissionCatalog
         new(PermissionCodes.ReleaseManage, "创建并提交发布包", "审批发布", Sensitive: true),
         new(PermissionCodes.ApprovalDecide, "处理发布审批", "审批发布", Sensitive: true),
         new(PermissionCodes.ApprovalEmergencySubstitute, "紧急代批当前节点", "审批发布", "仅在紧急情况下替代当前审批人，必须填写原因，后续节点仍正常流转。", Sensitive: true),
+        new(PermissionCodes.ProgramTemplateView, "查看和下载程序模板", "程序模板", "查看集团已发布的PLC、HMI程序模板。"),
+        new(PermissionCodes.ProgramTemplateSubmit, "上传和提交程序模板", "程序模板", "维护本人创建的草稿并提交审核。", Sensitive: true),
+        new(PermissionCodes.ProgramTemplateReview, "审核程序模板", "程序模板", "仅能处理分配给本人的电气组织审核任务。", Sensitive: true),
+        new(PermissionCodes.ProgramTemplateApprove, "批准程序模板", "程序模板", "处理集团标准化主管池中的最终批准任务。", Sensitive: true),
+        new(PermissionCodes.ProgramTemplateManage, "管理程序模板", "程序模板", "停用、恢复和维护集团程序模板。", Sensitive: true),
         new(PermissionCodes.CustomerSettingsManage, "配置U9C客户同步", "系统设置", "复用U9C OAuth配置并定期同步客户编码和名称。", Sensitive: true),
         new(PermissionCodes.OrganizationSettingsManage, "维护公司与组织结构", "系统设置", Sensitive: true),
         new(PermissionCodes.FolderSettingsManage, "维护文件夹模板与目录权限", "系统设置", Sensitive: true),
@@ -79,12 +89,13 @@ public static class RolePermissionCatalog
                 PermissionCodes.BomEdit,
                 PermissionCodes.DrawingReviewSubmit,
                 PermissionCodes.DrawingReviewAnnotate,
-                PermissionCodes.ReleaseManage),
-            [UserRole.PlanningManager] = Set(PermissionCodes.ProjectView, PermissionCodes.ProjectExecutionAssign),
-            [UserRole.ProcessReviewer] = Set(PermissionCodes.ProjectView, PermissionCodes.ProjectContentView, PermissionCodes.DrawingReviewAnnotate, PermissionCodes.DrawingReviewDecide, PermissionCodes.ApprovalDecide),
-            [UserRole.Approver] = Set(PermissionCodes.ProjectView, PermissionCodes.ProjectContentView, PermissionCodes.DrawingReviewAnnotate, PermissionCodes.DrawingReviewDecide, PermissionCodes.ApprovalDecide),
-            [UserRole.ProductionViewer] = Set(PermissionCodes.ProjectView, PermissionCodes.ProjectContentView),
-            [UserRole.BusinessUnitManager] = Set(PermissionCodes.ProjectView, PermissionCodes.ProjectContentView, PermissionCodes.DrawingReviewAnnotate, PermissionCodes.DrawingReviewDecide, PermissionCodes.ApprovalDecide, PermissionCodes.ApprovalEmergencySubstitute),
+                PermissionCodes.ReleaseManage,
+                PermissionCodes.ProgramTemplateView),
+            [UserRole.PlanningManager] = Set(PermissionCodes.ProjectView, PermissionCodes.ProjectExecutionAssign, PermissionCodes.ProgramTemplateView),
+            [UserRole.ProcessReviewer] = Set(PermissionCodes.ProjectView, PermissionCodes.ProjectContentView, PermissionCodes.DrawingReviewAnnotate, PermissionCodes.DrawingReviewDecide, PermissionCodes.ApprovalDecide, PermissionCodes.ProgramTemplateView),
+            [UserRole.Approver] = Set(PermissionCodes.ProjectView, PermissionCodes.ProjectContentView, PermissionCodes.DrawingReviewAnnotate, PermissionCodes.DrawingReviewDecide, PermissionCodes.ApprovalDecide, PermissionCodes.ProgramTemplateView, PermissionCodes.ProgramTemplateApprove),
+            [UserRole.ProductionViewer] = Set(PermissionCodes.ProjectView, PermissionCodes.ProjectContentView, PermissionCodes.ProgramTemplateView),
+            [UserRole.BusinessUnitManager] = Set(PermissionCodes.ProjectView, PermissionCodes.ProjectContentView, PermissionCodes.DrawingReviewAnnotate, PermissionCodes.DrawingReviewDecide, PermissionCodes.ApprovalDecide, PermissionCodes.ApprovalEmergencySubstitute, PermissionCodes.ProgramTemplateView, PermissionCodes.ProgramTemplateReview),
             [UserRole.Administrator] = Set(Permissions.Select(permission => permission.Code).ToArray()),
             [UserRole.PlatformAdministrator] = Set(
                 PermissionCodes.CustomerSettingsManage,
@@ -129,15 +140,15 @@ public static class RolePermissionCatalog
     private static IReadOnlyDictionary<string, IReadOnlySet<string>> InitialRoleDefaults { get; } =
         new Dictionary<string, IReadOnlySet<string>>(StringComparer.OrdinalIgnoreCase)
         {
-            [UserRole.Engineer.ToString()] = Set(PermissionCodes.ProjectView, PermissionCodes.ProjectContentView, PermissionCodes.DocumentEdit, PermissionCodes.DocumentLockRequestRelease, PermissionCodes.BomEdit, PermissionCodes.ReleaseManage),
-            ["ElectricalEngineer"] = Set(PermissionCodes.ProjectView, PermissionCodes.ProjectContentView, PermissionCodes.DocumentEdit, PermissionCodes.DocumentLockRequestRelease, PermissionCodes.BomEdit, PermissionCodes.ReleaseManage),
-            ["CommissioningEngineer"] = Set(PermissionCodes.ProjectView, PermissionCodes.ProjectContentView, PermissionCodes.DocumentEdit, PermissionCodes.DocumentLockRequestRelease, PermissionCodes.BomEdit),
-            ["HardwareEngineer"] = Set(PermissionCodes.ProjectView, PermissionCodes.ProjectContentView, PermissionCodes.DocumentEdit, PermissionCodes.DocumentLockRequestRelease, PermissionCodes.BomEdit, PermissionCodes.ReleaseManage),
-            ["MechanicalManager"] = Set(PermissionCodes.ProjectView, PermissionCodes.ProjectContentView, PermissionCodes.DocumentEdit, PermissionCodes.DocumentLockRequestRelease, PermissionCodes.DocumentLockForceRelease, PermissionCodes.BomEdit, PermissionCodes.ReleaseManage, PermissionCodes.ApprovalDecide),
-            ["TechnicalAssistant"] = Set(PermissionCodes.ProjectView, PermissionCodes.ProjectContentView, PermissionCodes.DocumentEdit, PermissionCodes.DocumentLockRequestRelease, PermissionCodes.BomEdit),
-            [UserRole.BusinessUnitManager.ToString()] = Set(PermissionCodes.ProjectView, PermissionCodes.ProjectStaffingManage, PermissionCodes.ProjectContentView, PermissionCodes.ApprovalDecide, PermissionCodes.ApprovalEmergencySubstitute),
+            [UserRole.Engineer.ToString()] = Set(PermissionCodes.ProjectView, PermissionCodes.ProjectContentView, PermissionCodes.DocumentEdit, PermissionCodes.DocumentLockRequestRelease, PermissionCodes.BomEdit, PermissionCodes.ReleaseManage, PermissionCodes.ProgramTemplateView),
+            ["ElectricalEngineer"] = Set(PermissionCodes.ProjectView, PermissionCodes.ProjectContentView, PermissionCodes.DocumentEdit, PermissionCodes.DocumentLockRequestRelease, PermissionCodes.BomEdit, PermissionCodes.ReleaseManage, PermissionCodes.ProgramTemplateView, PermissionCodes.ProgramTemplateSubmit),
+            ["CommissioningEngineer"] = Set(PermissionCodes.ProjectView, PermissionCodes.ProjectContentView, PermissionCodes.DocumentEdit, PermissionCodes.DocumentLockRequestRelease, PermissionCodes.BomEdit, PermissionCodes.ProgramTemplateView, PermissionCodes.ProgramTemplateSubmit),
+            ["HardwareEngineer"] = Set(PermissionCodes.ProjectView, PermissionCodes.ProjectContentView, PermissionCodes.DocumentEdit, PermissionCodes.DocumentLockRequestRelease, PermissionCodes.BomEdit, PermissionCodes.ReleaseManage, PermissionCodes.ProgramTemplateView, PermissionCodes.ProgramTemplateSubmit),
+            ["MechanicalManager"] = Set(PermissionCodes.ProjectView, PermissionCodes.ProjectContentView, PermissionCodes.DocumentEdit, PermissionCodes.DocumentLockRequestRelease, PermissionCodes.DocumentLockForceRelease, PermissionCodes.BomEdit, PermissionCodes.ReleaseManage, PermissionCodes.ApprovalDecide, PermissionCodes.ProgramTemplateView),
+            ["TechnicalAssistant"] = Set(PermissionCodes.ProjectView, PermissionCodes.ProjectContentView, PermissionCodes.DocumentEdit, PermissionCodes.DocumentLockRequestRelease, PermissionCodes.BomEdit, PermissionCodes.ProgramTemplateView),
+            [UserRole.BusinessUnitManager.ToString()] = Set(PermissionCodes.ProjectView, PermissionCodes.ProjectStaffingManage, PermissionCodes.ProjectContentView, PermissionCodes.ApprovalDecide, PermissionCodes.ApprovalEmergencySubstitute, PermissionCodes.ProgramTemplateView, PermissionCodes.ProgramTemplateReview),
             [UserRole.ProcessReviewer.ToString()] = Defaults[UserRole.ProcessReviewer],
-            ["ProjectManager"] = Set(PermissionCodes.ProjectView, PermissionCodes.ProjectCreate, PermissionCodes.ProjectEdit, PermissionCodes.ProjectChildCreate, PermissionCodes.ProjectStaffingManage, PermissionCodes.ProjectDesignerAssign, PermissionCodes.ProjectContentView, PermissionCodes.ReleaseManage),
+            ["ProjectManager"] = Set(PermissionCodes.ProjectView, PermissionCodes.ProjectCreate, PermissionCodes.ProjectEdit, PermissionCodes.ProjectChildCreate, PermissionCodes.ProjectStaffingManage, PermissionCodes.ProjectDesignerAssign, PermissionCodes.ProjectContentView, PermissionCodes.ReleaseManage, PermissionCodes.ProgramTemplateView),
             ["SupplyChain"] = Defaults[UserRole.ProductionViewer],
             ["ProcurementSpecialist"] = Defaults[UserRole.ProductionViewer],
             ["ProcurementManager"] = Defaults[UserRole.Approver],
@@ -174,6 +185,8 @@ public static class RolePermissionCatalog
         if (normalized.Any(code => code is PermissionCodes.DocumentEdit or PermissionCodes.DocumentLockRequestRelease or PermissionCodes.DocumentLockForceRelease or PermissionCodes.BomEdit
                 or PermissionCodes.DrawingReviewSubmit or PermissionCodes.DrawingReviewAnnotate or PermissionCodes.DrawingReviewDecide or PermissionCodes.ReleaseManage or PermissionCodes.ApprovalDecide))
             normalized.Add(PermissionCodes.ProjectContentView);
+        if (normalized.Any(code => code is PermissionCodes.ProgramTemplateSubmit or PermissionCodes.ProgramTemplateReview or PermissionCodes.ProgramTemplateApprove or PermissionCodes.ProgramTemplateManage))
+            normalized.Add(PermissionCodes.ProgramTemplateView);
         if (normalized.Contains(PermissionCodes.RoleSettingsEdit)) normalized.Add(PermissionCodes.RoleSettingsView);
         return normalized;
     }

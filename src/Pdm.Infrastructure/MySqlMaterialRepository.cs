@@ -58,6 +58,54 @@ public sealed class MySqlMaterialRepository : IMaterialRepository
         return row is null ? null : MapMaterial(row);
     }
 
+    public async Task<IReadOnlyList<MaterialAttachment>> ListMaterialAttachmentsAsync(Guid materialId, MaterialAttachmentKind? kind, CancellationToken cancellationToken)
+    {
+        await using var connection = await OpenAsync(cancellationToken);
+        var rows = await connection.QueryAsync<MaterialAttachmentRow>(new CommandDefinition(
+            MaterialAttachmentSelect + " WHERE material_id=@MaterialId AND (@Kind IS NULL OR attachment_kind=@Kind) ORDER BY uploaded_at DESC",
+            new { MaterialId = materialId, Kind = kind?.ToString() }, cancellationToken: cancellationToken));
+        return rows.Select(MapMaterialAttachment).ToArray();
+    }
+
+    public async Task<MaterialAttachment?> FindMaterialAttachmentAsync(Guid attachmentId, CancellationToken cancellationToken)
+    {
+        await using var connection = await OpenAsync(cancellationToken);
+        var row = await connection.QuerySingleOrDefaultAsync<MaterialAttachmentRow>(new CommandDefinition(
+            MaterialAttachmentSelect + " WHERE id=@AttachmentId", new { AttachmentId = attachmentId }, cancellationToken: cancellationToken));
+        return row is null ? null : MapMaterialAttachment(row);
+    }
+
+    public async Task<MaterialAttachment> CreateMaterialAttachmentAsync(MaterialAttachment attachment, CancellationToken cancellationToken)
+    {
+        await using var connection = await OpenAsync(cancellationToken);
+        try
+        {
+            await connection.ExecuteAsync(new CommandDefinition(
+                """
+                INSERT INTO material_attachment(
+                    id,material_id,attachment_kind,original_file_name,storage_root,storage_relative_path,file_length,sha256,uploaded_by,uploaded_at)
+                VALUES(@Id,@MaterialId,@Kind,@OriginalFileName,@StorageRoot,@StorageRelativePath,@FileLength,@Sha256,@UploadedBy,@UploadedAt)
+                """, new
+                {
+                    attachment.Id,
+                    attachment.MaterialId,
+                    Kind = attachment.Kind.ToString(),
+                    attachment.OriginalFileName,
+                    attachment.StorageRoot,
+                    attachment.StorageRelativePath,
+                    attachment.FileLength,
+                    attachment.Sha256,
+                    attachment.UploadedBy,
+                    UploadedAt = attachment.UploadedAt.UtcDateTime
+                }, cancellationToken: cancellationToken));
+            return attachment;
+        }
+        catch (MySqlException exception) when (exception.Number == 1062)
+        {
+            throw new PdmConflictException("料品附件已经存在。");
+        }
+    }
+
     public async Task<IReadOnlyList<PdmMaterial>> FindApprovedMaterialsBySpecificationAsync(string specification, CancellationToken cancellationToken)
     {
         await using var connection = await OpenAsync(cancellationToken);
@@ -106,8 +154,20 @@ public sealed class MySqlMaterialRepository : IMaterialRepository
     {
         await using var connection = await OpenAsync(cancellationToken);
         await connection.ExecuteAsync(new CommandDefinition(
-            "INSERT INTO material_code_application(id,project_id,bom_item_id,status,requested_by,requested_at,row_version) VALUES(@Id,@ProjectId,@BomItemId,@Status,@RequestedBy,@RequestedAt,@RowVersion)",
-            new { application.Id, application.ProjectId, application.BomItemId, Status = application.Status.ToString(), application.RequestedBy, RequestedAt = application.RequestedAt.UtcDateTime, application.RowVersion }, cancellationToken: cancellationToken));
+            "INSERT INTO material_code_application(id,project_id,bom_item_id,bom_header_kind,status,requested_by,requested_at,material_id,material_code,row_version) VALUES(@Id,@ProjectId,@BomItemId,@BomHeaderKind,@Status,@RequestedBy,@RequestedAt,@MaterialId,@MaterialCode,@RowVersion)",
+            new
+            {
+                application.Id,
+                application.ProjectId,
+                application.BomItemId,
+                BomHeaderKind = application.BomHeaderKind?.ToString(),
+                Status = application.Status.ToString(),
+                application.RequestedBy,
+                RequestedAt = application.RequestedAt.UtcDateTime,
+                application.MaterialId,
+                application.MaterialCode,
+                application.RowVersion
+            }, cancellationToken: cancellationToken));
         return application;
     }
 
@@ -128,6 +188,7 @@ public sealed class MySqlMaterialRepository : IMaterialRepository
             """
             SELECT CASE WHEN EXISTS(SELECT 1 FROM bom_material_link WHERE material_id=@MaterialId)
                           OR EXISTS(SELECT 1 FROM material_master WHERE id=@MaterialId AND source_bom_item_id IS NOT NULL)
+                          OR EXISTS(SELECT 1 FROM material_attachment WHERE material_id=@MaterialId)
                         THEN 1 ELSE 0 END
             """,
             new { MaterialId = materialId }, cancellationToken: cancellationToken));
@@ -141,6 +202,7 @@ public sealed class MySqlMaterialRepository : IMaterialRepository
             """
             SELECT (SELECT COUNT(*) FROM bom_material_link WHERE material_id=@MaterialId)
                  + (SELECT CASE WHEN source_bom_item_id IS NULL THEN 0 ELSE 1 END FROM material_master WHERE id=@MaterialId)
+                 + (SELECT COUNT(*) FROM material_attachment WHERE material_id=@MaterialId)
             """,
             new { MaterialId = materialId }, cancellationToken: cancellationToken));
     }
@@ -187,11 +249,11 @@ public sealed class MySqlMaterialRepository : IMaterialRepository
             await connection.ExecuteAsync(new CommandDefinition(
                 """
                 INSERT INTO material_master(
-                    id,material_code,name,material_kind,supply_mode,unit_code,specification,material,remark,brand,surface_treatment,purchase_link,
+                    id,material_code,name,material_kind,supply_mode,unit_code,specification,material,remark,brand,surface_treatment,purchase_link,selection_advice,reference_price,model_3d_link,document_link,is_recommended,
                     weight,weight_unit,source_bom_item_id,approval_status,approved_by,approved_at,u9_category_code,u9_item_id,u9_item_code,u9_sync_confirmed,
                     source_system,master_owner,last_u9_synced_at,sync_status,created_by,created_at,updated_by,updated_at,row_version,category_code,is_archived,archived_by,archived_at)
                 VALUES(
-                    @Id,@MaterialCode,@Name,@MaterialKind,@SupplyMode,@UnitCode,@Specification,@Material,@Remark,@Brand,@SurfaceTreatment,@PurchaseLink,
+                    @Id,@MaterialCode,@Name,@MaterialKind,@SupplyMode,@UnitCode,@Specification,@Material,@Remark,@Brand,@SurfaceTreatment,@PurchaseLink,@SelectionAdvice,@ReferencePrice,@Model3DLink,@DocumentLink,@IsRecommended,
                     @Weight,@WeightUnit,@SourceBomItemId,@ApprovalStatus,@ApprovedBy,@ApprovedAt,@U9CategoryCode,@U9ItemId,@U9ItemCode,@U9SyncConfirmed,
                     @SourceSystem,@MasterOwner,@LastU9SyncedAt,@SyncStatus,@CreatedBy,@CreatedAt,@UpdatedBy,@UpdatedAt,@RowVersion,@CategoryCode,@IsArchived,@ArchivedBy,@ArchivedAt)
                 """, MaterialParameters(saved), cancellationToken: cancellationToken));
@@ -212,11 +274,11 @@ public sealed class MySqlMaterialRepository : IMaterialRepository
         await connection.ExecuteAsync(new CommandDefinition(
             """
             INSERT INTO material_master(
-                id,material_code,name,material_kind,supply_mode,unit_code,specification,material,remark,brand,surface_treatment,purchase_link,
+                id,material_code,name,material_kind,supply_mode,unit_code,specification,material,remark,brand,surface_treatment,purchase_link,selection_advice,reference_price,model_3d_link,document_link,is_recommended,
                 weight,weight_unit,source_bom_item_id,approval_status,approved_by,approved_at,u9_category_code,u9_item_id,u9_item_code,u9_sync_confirmed,
                 source_system,master_owner,last_u9_synced_at,sync_status,created_by,created_at,updated_by,updated_at,row_version,category_code,is_archived,archived_by,archived_at)
             VALUES(
-                @Id,@MaterialCode,@Name,@MaterialKind,@SupplyMode,@UnitCode,@Specification,@Material,@Remark,@Brand,@SurfaceTreatment,@PurchaseLink,
+                @Id,@MaterialCode,@Name,@MaterialKind,@SupplyMode,@UnitCode,@Specification,@Material,@Remark,@Brand,@SurfaceTreatment,@PurchaseLink,@SelectionAdvice,@ReferencePrice,@Model3DLink,@DocumentLink,@IsRecommended,
                 @Weight,@WeightUnit,@SourceBomItemId,@ApprovalStatus,@ApprovedBy,@ApprovedAt,@U9CategoryCode,@U9ItemId,@U9ItemCode,@U9SyncConfirmed,
                 @SourceSystem,@MasterOwner,@LastU9SyncedAt,@SyncStatus,@CreatedBy,@CreatedAt,@UpdatedBy,@UpdatedAt,@RowVersion,@CategoryCode,@IsArchived,@ArchivedBy,@ArchivedAt)
             ON DUPLICATE KEY UPDATE
@@ -258,6 +320,7 @@ public sealed class MySqlMaterialRepository : IMaterialRepository
                 UPDATE material_master AS current_material
                 SET name=@Name,material_kind=@MaterialKind,supply_mode=@SupplyMode,unit_code=@UnitCode,
                     specification=@Specification,material=@Material,remark=@Remark,brand=@Brand,surface_treatment=@SurfaceTreatment,purchase_link=@PurchaseLink,
+                    selection_advice=@SelectionAdvice,reference_price=@ReferencePrice,model_3d_link=@Model3DLink,document_link=@DocumentLink,is_recommended=@IsRecommended,
                     weight=@Weight,weight_unit=@WeightUnit,category_code=@CategoryCode,updated_by=@UpdatedBy,updated_at=@UpdatedAt,row_version=row_version+1
                 WHERE id=@Id AND row_version=@ExpectedRowVersion AND approval_status='Draft' AND is_archived=0
                 """, new
@@ -273,6 +336,11 @@ public sealed class MySqlMaterialRepository : IMaterialRepository
                     material.Brand,
                     material.SurfaceTreatment,
                     material.PurchaseLink,
+                    material.SelectionAdvice,
+                    material.ReferencePrice,
+                    material.Model3DLink,
+                    material.DocumentLink,
+                    material.IsRecommended,
                     material.Weight,
                     material.WeightUnit,
                     material.CategoryCode,
@@ -305,6 +373,7 @@ public sealed class MySqlMaterialRepository : IMaterialRepository
                 UPDATE material_master
                 SET name=@Name,material_kind=@MaterialKind,supply_mode=@SupplyMode,unit_code=@UnitCode,
                     specification=@Specification,material=@Material,remark=@Remark,brand=@Brand,surface_treatment=@SurfaceTreatment,purchase_link=@PurchaseLink,
+                    selection_advice=@SelectionAdvice,reference_price=@ReferencePrice,model_3d_link=@Model3DLink,document_link=@DocumentLink,is_recommended=@IsRecommended,
                     weight=@Weight,weight_unit=@WeightUnit,category_code=@CategoryCode,u9_category_code=@CategoryCode,
                     sync_status='PreviewReady',updated_by=@UpdatedBy,updated_at=@UpdatedAt,row_version=row_version+1
                 WHERE id=@Id AND row_version=@ExpectedRowVersion AND approval_status='Approved'
@@ -326,6 +395,11 @@ public sealed class MySqlMaterialRepository : IMaterialRepository
                     material.Brand,
                     material.SurfaceTreatment,
                     material.PurchaseLink,
+                    material.SelectionAdvice,
+                    material.ReferencePrice,
+                    material.Model3DLink,
+                    material.DocumentLink,
+                    material.IsRecommended,
                     material.Weight,
                     material.WeightUnit,
                     material.CategoryCode,
@@ -951,6 +1025,11 @@ public sealed class MySqlMaterialRepository : IMaterialRepository
         material.Brand,
         material.SurfaceTreatment,
         material.PurchaseLink,
+        material.SelectionAdvice,
+        material.ReferencePrice,
+        material.Model3DLink,
+        material.DocumentLink,
+        material.IsRecommended,
         material.Weight,
         material.WeightUnit,
         material.SourceBomItemId,
@@ -1021,7 +1100,15 @@ public sealed class MySqlMaterialRepository : IMaterialRepository
         row.U9CategoryCode, row.U9ItemId, row.U9ItemCode, Enum.Parse<MaterialSyncStatus>(row.SyncStatus), row.CreatedBy, Utc(row.CreatedAt)!.Value,
         row.UpdatedBy, Utc(row.UpdatedAt)!.Value, row.RowVersion, row.CategoryCode, row.IsArchived, row.ArchivedBy, Utc(row.ArchivedAt),
         row.U9SyncConfirmed, Enum.Parse<MaterialDataSource>(row.SourceSystem), Enum.Parse<MaterialMasterOwner>(row.MasterOwner), Utc(row.LastU9SyncedAt),
-        row.PurchaseLink, row.ReferenceCount);
+        row.PurchaseLink, row.ReferenceCount, row.SelectionAdvice, row.ReferencePrice, row.Model3DLink, row.DocumentLink, row.IsRecommended)
+        {
+            Model3DAttachmentCount = row.Model3DAttachmentCount,
+            DocumentAttachmentCount = row.DocumentAttachmentCount
+        };
+
+    private static MaterialAttachment MapMaterialAttachment(MaterialAttachmentRow row) => new(
+        row.Id, row.MaterialId, Enum.Parse<MaterialAttachmentKind>(row.AttachmentKind), row.OriginalFileName,
+        row.StorageRoot, row.StorageRelativePath, row.FileLength, row.Sha256, row.UploadedBy, Utc(row.UploadedAt)!.Value);
 
     private static MaterialCategory MapCategory(CategoryRow row) => new(
         row.CategoryCode,
@@ -1049,12 +1136,34 @@ public sealed class MySqlMaterialRepository : IMaterialRepository
     private static MaterialSyncTask MapTask(SyncTaskRow row) => new(
         row.Id, row.MaterialId, Enum.Parse<MaterialSyncOperation>(row.Operation), Enum.Parse<MaterialSyncStatus>(row.Status), row.CorrelationId,
         row.PayloadJson, row.PayloadSha256, row.AttemptCount, Utc(row.NextAttemptAt), row.LastError, row.ResponsePreview, row.U9ItemId, row.U9ItemCode,
-        Utc(row.CreatedAt)!.Value, Utc(row.UpdatedAt)!.Value);
+        Utc(row.CreatedAt)!.Value, Utc(row.UpdatedAt)!.Value)
+        {
+            MaterialCode = row.MaterialCode,
+            MaterialName = row.MaterialName,
+            CategoryCode = row.CategoryCode,
+            ProjectId = row.ProjectId,
+            ProjectCode = row.ProjectCode,
+            ProjectName = row.ProjectName,
+            BomHeaderKind = string.IsNullOrWhiteSpace(row.BomHeaderKind) ? null : Enum.Parse<ProjectBomHeaderKind>(row.BomHeaderKind),
+            RequestedBy = row.RequestedBy,
+            RequestedAt = Utc(row.RequestedAt)
+        };
 
     private static MaterialCodeApplication MapMaterialCodeApplication(MaterialCodeApplicationRow row) => new(
         row.Id, row.ProjectId, row.BomItemId, Enum.Parse<MaterialCodeApplicationStatus>(row.Status), row.RequestedBy,
-        Utc(row.RequestedAt)!.Value, row.DecidedBy, Utc(row.DecidedAt), row.DecisionComment, row.MaterialId, row.MaterialCode, row.RowVersion)
-        { BomItemName = row.BomItemName, Specification = row.Specification, Brand = row.Brand, Remark = row.Remark };
+        Utc(row.RequestedAt)!.Value, row.DecidedBy, Utc(row.DecidedAt), row.DecisionComment, row.MaterialId, row.MaterialCode, row.RowVersion,
+        string.IsNullOrWhiteSpace(row.BomHeaderKind) ? null : Enum.Parse<ProjectBomHeaderKind>(row.BomHeaderKind))
+        {
+            BomItemName = row.BomItemName,
+            ApplicationName = row.ApplicationName,
+            ProjectCode = row.ProjectCode,
+            ProjectName = row.ProjectName,
+            CategoryCode = row.CategoryCode,
+            RequestedMaterialCode = row.RequestedMaterialCode,
+            Specification = row.Specification,
+            Brand = row.Brand,
+            Remark = row.Remark
+        };
 
     private static U9MaterialIntegrationConfiguration MapConfiguration(IntegrationRow row) => new(
         row.BaseUrl, row.EnterpriseCode, row.OrganizationCode, row.UserCode, row.ClientId, row.ClientSecretCiphertext,
@@ -1079,12 +1188,19 @@ public sealed class MySqlMaterialRepository : IMaterialRepository
     private static DateTimeOffset? Utc(DateTime? value) => value is null ? null : new DateTimeOffset(DateTime.SpecifyKind(value.Value, DateTimeKind.Utc));
 
     private const string MaterialSelect = """
-        SELECT id,material_code,name,material_kind,supply_mode,unit_code,specification,material,remark,brand,surface_treatment,purchase_link,
+        SELECT id,material_code,name,material_kind,supply_mode,unit_code,specification,material,remark,brand,surface_treatment,purchase_link,selection_advice,reference_price,model_3d_link,document_link,is_recommended,
                weight,weight_unit,source_bom_item_id,approval_status,approved_by,approved_at,u9_category_code,u9_item_id,u9_item_code,u9_sync_confirmed,
                source_system,master_owner,last_u9_synced_at,sync_status,created_by,created_at,updated_by,updated_at,row_version,category_code,is_archived,archived_by,archived_at,
-               (SELECT COUNT(*) FROM bom_material_link AS material_link WHERE material_link.material_id=material_master.id)
-                   + CASE WHEN source_bom_item_id IS NULL THEN 0 ELSE 1 END AS reference_count
+                (SELECT COUNT(*) FROM bom_material_link AS material_link WHERE material_link.material_id=material_master.id)
+                    + CASE WHEN source_bom_item_id IS NULL THEN 0 ELSE 1 END AS reference_count,
+                (SELECT COUNT(*) FROM material_attachment AS attachment WHERE attachment.material_id=material_master.id AND attachment.attachment_kind='Model3D') AS model3d_attachment_count,
+                (SELECT COUNT(*) FROM material_attachment AS attachment WHERE attachment.material_id=material_master.id AND attachment.attachment_kind='Document') AS document_attachment_count
         FROM material_master
+        """;
+
+    private const string MaterialAttachmentSelect = """
+        SELECT id,material_id,attachment_kind,original_file_name,storage_root,storage_relative_path,file_length,sha256,uploaded_by,uploaded_at
+        FROM material_attachment
         """;
 
     private const string CategorySelect = """
@@ -1097,13 +1213,32 @@ public sealed class MySqlMaterialRepository : IMaterialRepository
 
     private const string SyncTaskSelect = """
         SELECT id,material_id,operation,status,correlation_id,payload_json,payload_sha256,attempt_count,next_attempt_at,last_error,
-               response_preview,u9_item_id,u9_item_code,created_at,updated_at
+               response_preview,u9_item_id,u9_item_code,created_at,updated_at,
+               (SELECT material_code FROM material_master WHERE material_master.id=u9_material_sync_task.material_id) material_code,
+               (SELECT name FROM material_master WHERE material_master.id=u9_material_sync_task.material_id) material_name,
+               (SELECT category_code FROM material_master WHERE material_master.id=u9_material_sync_task.material_id) category_code,
+               (SELECT project_id FROM material_code_application WHERE material_code_application.material_id=u9_material_sync_task.material_id ORDER BY requested_at DESC LIMIT 1) project_id,
+               (SELECT project.code FROM project WHERE project.id=(SELECT project_id FROM material_code_application WHERE material_code_application.material_id=u9_material_sync_task.material_id ORDER BY requested_at DESC LIMIT 1)) project_code,
+               (SELECT project.name FROM project WHERE project.id=(SELECT project_id FROM material_code_application WHERE material_code_application.material_id=u9_material_sync_task.material_id ORDER BY requested_at DESC LIMIT 1)) project_name,
+               (SELECT bom_header_kind FROM material_code_application WHERE material_code_application.material_id=u9_material_sync_task.material_id ORDER BY requested_at DESC LIMIT 1) bom_header_kind,
+               COALESCE(
+                   (SELECT requested_by FROM material_code_application WHERE material_code_application.material_id=u9_material_sync_task.material_id ORDER BY requested_at DESC LIMIT 1),
+                   (SELECT created_by FROM material_master WHERE material_master.id=u9_material_sync_task.material_id)) requested_by,
+               COALESCE(
+                   (SELECT requested_at FROM material_code_application WHERE material_code_application.material_id=u9_material_sync_task.material_id ORDER BY requested_at DESC LIMIT 1),
+                   (SELECT created_at FROM material_master WHERE material_master.id=u9_material_sync_task.material_id)) requested_at
         FROM u9_material_sync_task
         """;
 
     private const string MaterialCodeApplicationSelect = """
-        SELECT id,project_id,bom_item_id,status,requested_by,requested_at,decided_by,decided_at,decision_comment,material_id,material_code,row_version,
+        SELECT id,project_id,bom_item_id,bom_header_kind,status,requested_by,requested_at,decided_by,decided_at,decision_comment,material_id,material_code,row_version,
+               (SELECT code FROM project WHERE project.id=material_code_application.project_id) project_code,
+               (SELECT name FROM project WHERE project.id=material_code_application.project_id) project_name,
                (SELECT name FROM bom_item WHERE bom_item.id=material_code_application.bom_item_id) bom_item_name,
+               COALESCE((SELECT name FROM bom_item WHERE bom_item.id=material_code_application.bom_item_id),
+                        (SELECT name FROM material_master WHERE material_master.id=material_code_application.material_id)) application_name,
+               (SELECT category_code FROM material_master WHERE material_master.id=material_code_application.material_id) category_code,
+               (SELECT material_code FROM material_master WHERE material_master.id=material_code_application.material_id) requested_material_code,
                (SELECT specification FROM bom_item WHERE bom_item.id=material_code_application.bom_item_id) specification,
                (SELECT brand FROM bom_item WHERE bom_item.id=material_code_application.bom_item_id) brand,
                (SELECT remark FROM bom_item WHERE bom_item.id=material_code_application.bom_item_id) remark
@@ -1124,7 +1259,14 @@ public sealed class MySqlMaterialRepository : IMaterialRepository
         public string? Brand { get; init; }
         public string? SurfaceTreatment { get; init; }
         public string? PurchaseLink { get; init; }
+        public string? SelectionAdvice { get; init; }
+        public decimal? ReferencePrice { get; init; }
+        public string? Model3DLink { get; init; }
+        public string? DocumentLink { get; init; }
+        public bool IsRecommended { get; init; }
         public int ReferenceCount { get; init; }
+        public int Model3DAttachmentCount { get; init; }
+        public int DocumentAttachmentCount { get; init; }
         public decimal? Weight { get; init; }
         public string? WeightUnit { get; init; }
         public Guid? SourceBomItemId { get; init; }
@@ -1148,6 +1290,20 @@ public sealed class MySqlMaterialRepository : IMaterialRepository
         public bool IsArchived { get; init; }
         public string? ArchivedBy { get; init; }
         public DateTime? ArchivedAt { get; init; }
+    }
+
+    private sealed class MaterialAttachmentRow
+    {
+        public Guid Id { get; init; }
+        public Guid MaterialId { get; init; }
+        public string AttachmentKind { get; init; } = string.Empty;
+        public string OriginalFileName { get; init; } = string.Empty;
+        public string StorageRoot { get; init; } = string.Empty;
+        public string StorageRelativePath { get; init; } = string.Empty;
+        public long FileLength { get; init; }
+        public string Sha256 { get; init; } = string.Empty;
+        public string UploadedBy { get; init; } = string.Empty;
+        public DateTime UploadedAt { get; init; }
     }
 
     private sealed class CategoryRow
@@ -1199,6 +1355,15 @@ public sealed class MySqlMaterialRepository : IMaterialRepository
         public string? U9ItemCode { get; init; }
         public DateTime CreatedAt { get; init; }
         public DateTime UpdatedAt { get; init; }
+        public string? MaterialCode { get; init; }
+        public string? MaterialName { get; init; }
+        public string? CategoryCode { get; init; }
+        public Guid? ProjectId { get; init; }
+        public string? ProjectCode { get; init; }
+        public string? ProjectName { get; init; }
+        public string? BomHeaderKind { get; init; }
+        public string? RequestedBy { get; init; }
+        public DateTime? RequestedAt { get; init; }
     }
 
     private sealed class IntegrationRow
@@ -1230,7 +1395,8 @@ public sealed class MySqlMaterialRepository : IMaterialRepository
     {
         public Guid Id { get; init; }
         public Guid ProjectId { get; init; }
-        public Guid BomItemId { get; init; }
+        public Guid? BomItemId { get; init; }
+        public string? BomHeaderKind { get; init; }
         public string Status { get; init; } = string.Empty;
         public string RequestedBy { get; init; } = string.Empty;
         public DateTime RequestedAt { get; init; }
@@ -1241,6 +1407,11 @@ public sealed class MySqlMaterialRepository : IMaterialRepository
         public string? MaterialCode { get; init; }
         public long RowVersion { get; init; }
         public string? BomItemName { get; init; }
+        public string? ApplicationName { get; init; }
+        public string? ProjectCode { get; init; }
+        public string? ProjectName { get; init; }
+        public string? CategoryCode { get; init; }
+        public string? RequestedMaterialCode { get; init; }
         public string? Specification { get; init; }
         public string? Brand { get; init; }
         public string? Remark { get; init; }

@@ -9,6 +9,7 @@ public sealed class InMemoryMaterialRepository : IMaterialRepository
     private readonly object gate = new();
     private readonly ConcurrentDictionary<Guid, PdmMaterial> materials = new();
     private readonly ConcurrentDictionary<Guid, MaterialSyncTask> tasks = new();
+    private readonly ConcurrentDictionary<Guid, MaterialAttachment> attachments = new();
     private readonly ConcurrentDictionary<Guid, Guid> bomLinks = new();
     private readonly ConcurrentDictionary<Guid, MaterialCodeApplication> applications = new();
     private readonly ConcurrentDictionary<MaterialKind, MaterialCategoryRule> rules = new();
@@ -49,7 +50,9 @@ public sealed class InMemoryMaterialRepository : IMaterialRepository
             .Take(Math.Clamp(limit, 1, 500))
             .Select(item => item with
             {
-                ReferenceCount = (item.SourceBomItemId is null ? 0 : 1) + bomLinks.Values.Count(value => value == item.Id)
+                ReferenceCount = (item.SourceBomItemId is null ? 0 : 1) + bomLinks.Values.Count(value => value == item.Id),
+                Model3DAttachmentCount = attachments.Values.Count(value => value.MaterialId == item.Id && value.Kind == MaterialAttachmentKind.Model3D),
+                DocumentAttachmentCount = attachments.Values.Count(value => value.MaterialId == item.Id && value.Kind == MaterialAttachmentKind.Document)
             })
             .ToArray();
         return Task.FromResult<IReadOnlyList<PdmMaterial>>(result);
@@ -63,6 +66,22 @@ public sealed class InMemoryMaterialRepository : IMaterialRepository
 
     public Task<PdmMaterial?> FindMaterialBySourceBomItemAsync(Guid bomItemId, CancellationToken cancellationToken) =>
         Task.FromResult(materials.Values.FirstOrDefault(item => item.SourceBomItemId == bomItemId));
+
+    public Task<IReadOnlyList<MaterialAttachment>> ListMaterialAttachmentsAsync(Guid materialId, MaterialAttachmentKind? kind, CancellationToken cancellationToken) =>
+        Task.FromResult<IReadOnlyList<MaterialAttachment>>(attachments.Values
+            .Where(item => item.MaterialId == materialId && (kind is null || item.Kind == kind))
+            .OrderByDescending(item => item.UploadedAt)
+            .ToArray());
+
+    public Task<MaterialAttachment?> FindMaterialAttachmentAsync(Guid attachmentId, CancellationToken cancellationToken) =>
+        Task.FromResult(attachments.GetValueOrDefault(attachmentId));
+
+    public Task<MaterialAttachment> CreateMaterialAttachmentAsync(MaterialAttachment attachment, CancellationToken cancellationToken)
+    {
+        if (!materials.ContainsKey(attachment.MaterialId)) throw new PdmNotFoundException("料品主档不存在。");
+        if (!attachments.TryAdd(attachment.Id, attachment)) throw new PdmConflictException("料品附件已经存在。");
+        return Task.FromResult(attachment);
+    }
 
     public Task<IReadOnlyList<PdmMaterial>> FindApprovedMaterialsBySpecificationAsync(string specification, CancellationToken cancellationToken) =>
         Task.FromResult<IReadOnlyList<PdmMaterial>>(materials.Values
@@ -94,7 +113,9 @@ public sealed class InMemoryMaterialRepository : IMaterialRepository
     {
         lock (gate)
         {
-            if (applications.Values.Any(item => item.BomItemId == application.BomItemId && item.Status == MaterialCodeApplicationStatus.Pending))
+            if (applications.Values.Any(item => item.Status == MaterialCodeApplicationStatus.Pending
+                && ((application.BomItemId is not null && item.BomItemId == application.BomItemId)
+                    || (application.BomHeaderKind is not null && item.ProjectId == application.ProjectId && item.BomHeaderKind == application.BomHeaderKind))))
                 throw new PdmConflictException("该BOM物料已有待审批的料号申请。");
             applications[application.Id] = application;
             return Task.FromResult(application);
@@ -116,12 +137,12 @@ public sealed class InMemoryMaterialRepository : IMaterialRepository
 
     public Task<bool> HasMaterialReferencesAsync(Guid materialId, CancellationToken cancellationToken) =>
         Task.FromResult(materials.TryGetValue(materialId, out var material)
-            && (material.SourceBomItemId is not null || bomLinks.Values.Any(value => value == materialId)));
+            && (material.SourceBomItemId is not null || bomLinks.Values.Any(value => value == materialId) || attachments.Values.Any(value => value.MaterialId == materialId)));
 
     public Task<int> CountMaterialReferencesAsync(Guid materialId, CancellationToken cancellationToken)
     {
         var sourceReference = materials.TryGetValue(materialId, out var material) && material.SourceBomItemId is not null ? 1 : 0;
-        return Task.FromResult(sourceReference + bomLinks.Values.Count(value => value == materialId));
+        return Task.FromResult(sourceReference + bomLinks.Values.Count(value => value == materialId) + attachments.Values.Count(value => value.MaterialId == materialId));
     }
 
     public Task<string> ReserveNextMaterialCodeAsync(MaterialCategory category, CancellationToken cancellationToken)
@@ -387,10 +408,31 @@ public sealed class InMemoryMaterialRepository : IMaterialRepository
     }
 
     public Task<IReadOnlyList<MaterialSyncTask>> ListSyncTasksAsync(CancellationToken cancellationToken) =>
-        Task.FromResult<IReadOnlyList<MaterialSyncTask>>(tasks.Values.OrderByDescending(task => task.CreatedAt).ToArray());
+        Task.FromResult<IReadOnlyList<MaterialSyncTask>>(tasks.Values.OrderByDescending(task => task.CreatedAt).Select(EnrichTask).ToArray());
 
     public Task<MaterialSyncTask?> FindSyncTaskAsync(Guid taskId, CancellationToken cancellationToken) =>
-        Task.FromResult(tasks.GetValueOrDefault(taskId));
+        Task.FromResult(tasks.TryGetValue(taskId, out var task) ? EnrichTask(task) : null);
+
+    private MaterialSyncTask EnrichTask(MaterialSyncTask task)
+    {
+        var material = materials.GetValueOrDefault(task.MaterialId);
+        var application = applications.Values
+            .Where(item => item.MaterialId == task.MaterialId)
+            .OrderByDescending(item => item.RequestedAt)
+            .FirstOrDefault();
+        return task with
+        {
+            MaterialCode = material?.MaterialCode,
+            MaterialName = material?.Name,
+            CategoryCode = material?.CategoryCode,
+            ProjectId = application?.ProjectId,
+            ProjectCode = application?.ProjectCode,
+            ProjectName = application?.ProjectName,
+            BomHeaderKind = application?.BomHeaderKind,
+            RequestedBy = application?.RequestedBy ?? material?.CreatedBy,
+            RequestedAt = application?.RequestedAt ?? material?.CreatedAt
+        };
+    }
 
     public Task<MaterialSyncTask> RetrySyncTaskAsync(
         Guid taskId,

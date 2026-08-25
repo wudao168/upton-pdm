@@ -166,6 +166,7 @@ public sealed partial class MySqlPdmRepository
             throw new PdmRuleException("系统存储根目录尚未配置。");
         var settings = new PdmSystemSettings(vaultRoot, releaseRoot)
         {
+            MaterialAttachmentRoot = ReadString(values, "material_attachment_root", Path.Combine(Path.GetDirectoryName(vaultRoot) ?? vaultRoot, "MaterialAttachments")),
             CheckoutHeartbeatSeconds = ReadInt(values, "checkout_heartbeat_seconds", 180),
             CheckoutLeaseMinutes = ReadInt(values, "checkout_lease_minutes", 15),
             CheckoutOfflineGraceMinutes = ReadInt(values, "checkout_offline_grace_minutes", 60),
@@ -203,6 +204,7 @@ public sealed partial class MySqlPdmRepository
         {
             new { Key = "vault_root", Value = settings.VaultRoot },
             new { Key = "release_root", Value = settings.ReleaseRoot },
+            new { Key = "material_attachment_root", Value = settings.MaterialAttachmentRoot },
             new { Key = "checkout_heartbeat_seconds", Value = settings.CheckoutHeartbeatSeconds.ToString() },
             new { Key = "checkout_lease_minutes", Value = settings.CheckoutLeaseMinutes.ToString() },
             new { Key = "checkout_offline_grace_minutes", Value = settings.CheckoutOfflineGraceMinutes.ToString() },

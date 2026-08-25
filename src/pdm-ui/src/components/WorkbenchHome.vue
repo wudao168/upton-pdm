@@ -60,6 +60,7 @@ const drawingReviewSummary = computed(() => {
     WritingProperties: '写入标记',
     Approved: '已完成',
     Stale: '版本冲突',
+    Withdrawn: '已撤销',
   }
   const reviewed = review.items.reduce((count, item) => count
     + (['Approved', 'Marked'].includes(item.modelState) ? 1 : 0)
@@ -97,7 +98,7 @@ function bomApprovalStatus(scopes: ReleaseScope[]) {
 
 function materialApplicationStatus(itemIds: string[]) {
   const ids = new Set(itemIds)
-  const applications = props.materialApplications.filter(item => ids.has(item.bomItemId))
+  const applications = props.materialApplications.filter(item => item.bomItemId && ids.has(item.bomItemId))
   if (!applications.length) return '暂无'
   const pending = applications.filter(item => item.status === 'Pending').length
   const approved = applications.filter(item => item.status === 'Approved').length

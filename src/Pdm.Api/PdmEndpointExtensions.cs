@@ -368,6 +368,7 @@ public static class PdmEndpointExtensions
             var validationRules = request.ValidationRules ?? currentSettings.ValidationRules;
             var settings = new PdmSystemSettings(request.VaultRoot, request.ReleaseRoot)
             {
+                MaterialAttachmentRoot = request.MaterialAttachmentRoot ?? currentSettings.MaterialAttachmentRoot,
                 CheckoutHeartbeatSeconds = request.CheckoutHeartbeatSeconds,
                 CheckoutLeaseMinutes = request.CheckoutLeaseMinutes,
                 CheckoutOfflineGraceMinutes = request.CheckoutOfflineGraceMinutes,
@@ -508,7 +509,10 @@ public static class PdmEndpointExtensions
             var folders = await repository.ListProjectFoldersAsync(projectId, actor, role, cancellationToken);
             var visibleFolderIds = folders.Where(folder => (folder.EffectiveAccess & FolderAccess.View) != 0).Select(folder => folder.Id).ToHashSet();
             var documents = await repository.ListDocumentsAsync(projectId, cancellationToken);
-            return Results.Ok(documents.Where(document => document.FolderId is Guid folderId && visibleFolderIds.Contains(folderId)));
+            var drawingReviewLockedIds = await repository.ListActiveDrawingReviewDocumentIdsAsync(projectId, cancellationToken);
+            return Results.Ok(documents
+                .Where(document => document.FolderId is Guid folderId && visibleFolderIds.Contains(folderId))
+                .Select(document => document with { DrawingReviewLocked = drawingReviewLockedIds.Contains(document.Id) }));
         });
 
         api.MapGet("/projects/{projectId:guid}/folders", async (Guid projectId, HttpContext context, IPdmRepository repository, CancellationToken cancellationToken) =>
@@ -793,10 +797,22 @@ public static class PdmEndpointExtensions
             return Results.Ok(await workflow.ListDrawingReviewPackagesAsync(projectId, actor, role, cancellationToken));
         });
 
-        api.MapPost("/projects/{projectId:guid}/drawing-reviews", async (Guid projectId, HttpContext context, PdmWorkflowService workflow, CancellationToken cancellationToken) =>
+        api.MapGet("/projects/{projectId:guid}/drawing-review-candidates", async (Guid projectId, HttpContext context, PdmWorkflowService workflow, CancellationToken cancellationToken) =>
         {
             var (actor, role) = CurrentUser(context.User);
-            return Results.Ok(await workflow.CreateDrawingReviewPackageAsync(projectId, actor, role, cancellationToken));
+            return Results.Ok(await workflow.ListDrawingReviewCandidatesAsync(projectId, actor, role, cancellationToken));
+        });
+
+        api.MapPost("/projects/{projectId:guid}/drawing-reviews", async (Guid projectId, CreateDrawingReviewRequest? request, HttpContext context, PdmWorkflowService workflow, CancellationToken cancellationToken) =>
+        {
+            var (actor, role) = CurrentUser(context.User);
+            return Results.Ok(await workflow.CreateDrawingReviewPackageAsync(projectId, request?.ModelDocumentIds, actor, role, cancellationToken));
+        });
+
+        api.MapPost("/drawing-reviews/{packageId:guid}/withdraw", async (Guid packageId, WithdrawDrawingReviewRequest request, HttpContext context, PdmWorkflowService workflow, CancellationToken cancellationToken) =>
+        {
+            var (actor, role) = CurrentUser(context.User);
+            return Results.Ok(await workflow.WithdrawDrawingReviewPackageAsync(packageId, request.Reason, actor, role, cancellationToken));
         });
 
         api.MapPost("/drawing-reviews/{packageId:guid}/markups", async (Guid packageId, AddDrawingReviewMarkupRequest request, HttpContext context, PdmWorkflowService workflow, CancellationToken cancellationToken) =>
@@ -876,7 +892,7 @@ public static class PdmEndpointExtensions
         api.MapPost("/documents/{documentId:guid}/checkout", async (Guid documentId, CheckoutRequest request, HttpContext context, PdmWorkflowService workflow, CancellationToken cancellationToken) =>
         {
             var (actor, role) = CurrentUser(context.User);
-            return Results.Ok(await workflow.CheckoutAsync(documentId, actor, role, request.SessionId, request.MachineName, cancellationToken));
+            return Results.Ok(await workflow.CheckoutAsync(documentId, actor, role, request.SessionId, request.MachineName, cancellationToken, request.DrawingReviewWritebackId));
         });
 
         api.MapPost("/documents/{documentId:guid}/complete-edit", async (Guid documentId, CompleteEditRequest request, HttpContext context, PdmWorkflowService workflow, CancellationToken cancellationToken) =>
@@ -942,7 +958,8 @@ public static class PdmEndpointExtensions
                 cancellationToken,
                 request.DrawingNumber,
                 request.Name,
-                request.FileName);
+                request.FileName,
+                request.DrawingReviewWritebackId);
             return Results.Ok(new
             {
                 document = result.Document,

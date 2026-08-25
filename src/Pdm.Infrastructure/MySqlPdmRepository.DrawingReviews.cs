@@ -1,3 +1,4 @@
+using System.Data.Common;
 using Dapper;
 using Upton.Pdm.Application;
 using Upton.Pdm.Domain;
@@ -19,6 +20,37 @@ public sealed partial class MySqlPdmRepository
         return packages;
     }
 
+    public async Task<IReadOnlySet<Guid>> ListActiveDrawingReviewDocumentIdsAsync(Guid projectId, CancellationToken cancellationToken)
+    {
+        await using var connection = await OpenAsync(cancellationToken);
+        var ids = await connection.QueryAsync<Guid>(new CommandDefinition(
+            """
+            SELECT item.model_document_id
+            FROM drawing_review_item item
+            JOIN drawing_review_package package ON package.id=item.package_id
+            WHERE package.project_id=@ProjectId AND package.state IN ('InReview','WritingProperties')
+            UNION
+            SELECT item.drawing_document_id
+            FROM drawing_review_item item
+            JOIN drawing_review_package package ON package.id=item.package_id
+            WHERE package.project_id=@ProjectId AND package.state IN ('InReview','WritingProperties') AND item.drawing_document_id IS NOT NULL
+            """,
+            new { ProjectId = projectId }, cancellationToken: cancellationToken));
+        return ids.ToHashSet();
+    }
+
+    public async Task<bool> IsDocumentUnderActiveDrawingReviewAsync(Guid documentId, CancellationToken cancellationToken)
+    {
+        await using var connection = await OpenAsync(cancellationToken);
+        return await IsDocumentUnderActiveDrawingReviewAsync(connection, null, documentId, cancellationToken);
+    }
+
+    public async Task<bool> IsActiveDrawingReviewWritebackAsync(Guid documentId, Guid writebackId, CancellationToken cancellationToken)
+    {
+        await using var connection = await OpenAsync(cancellationToken);
+        return await IsActiveDrawingReviewWritebackAsync(connection, null, documentId, writebackId, cancellationToken);
+    }
+
     public async Task<DrawingReviewPackage?> FindDrawingReviewPackageAsync(Guid packageId, CancellationToken cancellationToken)
     {
         await using var connection = await OpenAsync(cancellationToken);
@@ -29,6 +61,31 @@ public sealed partial class MySqlPdmRepository
     {
         await using var connection = await OpenAsync(cancellationToken);
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+        var documentIds = package.Items
+            .SelectMany(item => item.DrawingDocumentId.HasValue
+                ? new[] { item.ModelDocumentId, item.DrawingDocumentId.Value }
+                : new[] { item.ModelDocumentId })
+            .Distinct()
+            .OrderBy(id => id)
+            .ToArray();
+        var lockedDocuments = (await connection.QueryAsync<DrawingReviewDocumentLockRow>(new CommandDefinition(
+            "SELECT id,checked_out_by FROM document WHERE id IN @DocumentIds ORDER BY id FOR UPDATE",
+            new { DocumentIds = documentIds }, transaction, cancellationToken: cancellationToken))).ToArray();
+        if (lockedDocuments.Length != documentIds.Length)
+            throw new PdmNotFoundException("待审核图档不存在，请刷新后重试。");
+        if (lockedDocuments.Any(document => !string.IsNullOrWhiteSpace(document.CheckedOutBy)))
+            throw new PdmConflictException("待审核图档仍处于签出编辑状态，请先提交存档或放弃编辑。");
+        var activeReviewCount = await connection.ExecuteScalarAsync<int>(new CommandDefinition(
+            """
+            SELECT COUNT(*)
+            FROM drawing_review_item item
+            JOIN drawing_review_package package ON package.id=item.package_id
+            WHERE package.state IN ('InReview','WritingProperties')
+              AND (item.model_document_id IN @DocumentIds OR item.drawing_document_id IN @DocumentIds)
+            """,
+            new { DocumentIds = documentIds }, transaction, cancellationToken: cancellationToken));
+        if (activeReviewCount > 0)
+            throw new PdmConflictException("待审核图档已经处于图纸审核中，请刷新后重试。");
         await connection.ExecuteAsync(new CommandDefinition(
             "INSERT INTO drawing_review_package(id,project_id,review_number,state,created_by,created_at,approved_at) VALUES(@Id,@ProjectId,@Number,@State,@CreatedBy,@CreatedAt,@ApprovedAt)",
             new { package.Id, package.ProjectId, package.Number, State = package.State.ToString(), package.CreatedBy, CreatedAt = package.CreatedAt.UtcDateTime, ApprovedAt = package.ApprovedAt?.UtcDateTime },
@@ -72,6 +129,66 @@ public sealed partial class MySqlPdmRepository
         }
         await transaction.CommitAsync(cancellationToken);
         return package;
+    }
+
+    public async Task<DrawingReviewPackage> WithdrawDrawingReviewPackageAsync(Guid packageId, string actor, DateTimeOffset withdrawnAt, string reason, CancellationToken cancellationToken)
+    {
+        await using var connection = await OpenAsync(cancellationToken);
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+        var state = await connection.QuerySingleOrDefaultAsync<string>(new CommandDefinition(
+            "SELECT state FROM drawing_review_package WHERE id=@PackageId FOR UPDATE",
+            new { PackageId = packageId }, transaction, cancellationToken: cancellationToken));
+        if (state is null) throw new PdmNotFoundException("图纸审核单不存在。");
+        if (state != DrawingReviewPackageState.InReview.ToString())
+            throw new PdmConflictException("只有审核中的图纸审核单可以撤销。");
+        await connection.ExecuteAsync(new CommandDefinition(
+            "UPDATE drawing_review_package SET state='Withdrawn',withdrawn_by=@Actor,withdrawn_at=@WithdrawnAt,withdrawal_reason=@Reason WHERE id=@PackageId",
+            new { PackageId = packageId, Actor = actor, WithdrawnAt = withdrawnAt.UtcDateTime, Reason = reason },
+            transaction, cancellationToken: cancellationToken));
+        await transaction.CommitAsync(cancellationToken);
+        return await FindDrawingReviewPackageAsync(packageId, cancellationToken)
+            ?? throw new PdmNotFoundException("图纸审核单不存在。");
+    }
+
+    private static async Task<bool> IsDocumentUnderActiveDrawingReviewAsync(
+        DbConnection connection,
+        DbTransaction? transaction,
+        Guid documentId,
+        CancellationToken cancellationToken)
+    {
+        var count = await connection.ExecuteScalarAsync<int>(new CommandDefinition(
+            """
+            SELECT COUNT(*)
+            FROM drawing_review_item item
+            JOIN drawing_review_package package ON package.id=item.package_id
+            WHERE package.state IN ('InReview','WritingProperties')
+              AND (item.model_document_id=@DocumentId OR item.drawing_document_id=@DocumentId)
+            """,
+            new { DocumentId = documentId }, transaction, cancellationToken: cancellationToken));
+        return count > 0;
+    }
+
+    private static async Task<bool> IsActiveDrawingReviewWritebackAsync(
+        DbConnection connection,
+        DbTransaction? transaction,
+        Guid documentId,
+        Guid writebackId,
+        CancellationToken cancellationToken)
+    {
+        var count = await connection.ExecuteScalarAsync<int>(new CommandDefinition(
+            """
+            SELECT COUNT(*)
+            FROM drawing_review_item item
+            JOIN drawing_review_package package ON package.id=item.package_id
+            JOIN cad_property_writeback writeback ON writeback.id=@WritebackId
+            WHERE package.state='WritingProperties'
+              AND writeback.source_document_id=@DocumentId
+              AND writeback.status='InProgress'
+              AND ((item.model_document_id=@DocumentId AND item.model_writeback_id=@WritebackId)
+                   OR (item.drawing_document_id=@DocumentId AND item.drawing_writeback_id=@WritebackId))
+            """,
+            new { DocumentId = documentId, WritebackId = writebackId }, transaction, cancellationToken: cancellationToken));
+        return count > 0;
     }
 
     public async Task<DrawingReviewPackage> AddDrawingReviewMarkupAsync(DrawingReviewMarkup markup, CancellationToken cancellationToken)
@@ -174,10 +291,17 @@ public sealed partial class MySqlPdmRepository
         foreach (var request in requests)
         {
             await InsertDrawingReviewWritebackAsync(connection, transaction, request.Model, cancellationToken);
-            await InsertDrawingReviewWritebackAsync(connection, transaction, request.Drawing, cancellationToken);
+            if (request.Drawing is not null)
+                await InsertDrawingReviewWritebackAsync(connection, transaction, request.Drawing, cancellationToken);
             var affected = await connection.ExecuteAsync(new CommandDefinition(
-                "UPDATE drawing_review_item SET model_writeback_id=@ModelWritebackId,drawing_writeback_id=@DrawingWritebackId WHERE id=@ItemId AND package_id=@PackageId AND model_state='Approved' AND drawing_state='Approved' AND model_writeback_id IS NULL AND drawing_writeback_id IS NULL",
-                new { request.ItemId, PackageId = packageId, ModelWritebackId = request.Model.Id, DrawingWritebackId = request.Drawing.Id }, transaction, cancellationToken: cancellationToken));
+                """
+                UPDATE drawing_review_item
+                SET model_writeback_id=@ModelWritebackId,drawing_writeback_id=@DrawingWritebackId
+                WHERE id=@ItemId AND package_id=@PackageId AND model_state='Approved' AND model_writeback_id IS NULL
+                  AND ((drawing_state='Approved' AND @DrawingWritebackId IS NOT NULL AND drawing_writeback_id IS NULL)
+                    OR (drawing_state='NotRequired' AND @DrawingWritebackId IS NULL))
+                """,
+                new { request.ItemId, PackageId = packageId, ModelWritebackId = request.Model.Id, DrawingWritebackId = request.Drawing?.Id }, transaction, cancellationToken: cancellationToken));
             if (affected != 1) throw new PdmConflictException("图纸审核结果已变化，不能生成属性写回任务。");
         }
         await connection.ExecuteAsync(new CommandDefinition(
@@ -217,7 +341,7 @@ public sealed partial class MySqlPdmRepository
             await connection.ExecuteAsync(new CommandDefinition(sql,
                 new { link.ItemId, ResultVersionId = resultVersionId.Value }, transaction, cancellationToken: cancellationToken));
             var remaining = await connection.ExecuteScalarAsync<int>(new CommandDefinition(
-                "SELECT COUNT(*) FROM drawing_review_item WHERE package_id=@PackageId AND (model_state<>'Marked' OR drawing_state<>'Marked')",
+                "SELECT COUNT(*) FROM drawing_review_item WHERE package_id=@PackageId AND (model_state<>'Marked' OR drawing_state NOT IN ('Marked','NotRequired'))",
                 new { link.PackageId }, transaction, cancellationToken: cancellationToken));
             await connection.ExecuteAsync(new CommandDefinition(
                 remaining == 0
@@ -261,7 +385,7 @@ public sealed partial class MySqlPdmRepository
     private async Task<DrawingReviewPackage?> LoadDrawingReviewPackageAsync(System.Data.Common.DbConnection connection, System.Data.Common.DbTransaction? transaction, Guid packageId, CancellationToken cancellationToken)
     {
         var package = await connection.QuerySingleOrDefaultAsync<DrawingReviewPackageRow>(new CommandDefinition(
-            "SELECT id,project_id,review_number,state,created_by,created_at,approved_at FROM drawing_review_package WHERE id=@PackageId",
+            "SELECT id,project_id,review_number,state,created_by,created_at,approved_at,withdrawn_by,withdrawn_at,withdrawal_reason FROM drawing_review_package WHERE id=@PackageId",
             new { PackageId = packageId }, transaction, cancellationToken: cancellationToken));
         if (package is null) return null;
         var items = await connection.QueryAsync<DrawingReviewItemRow>(new CommandDefinition(
@@ -290,6 +414,9 @@ public sealed partial class MySqlPdmRepository
             CreatedBy = package.CreatedBy,
             CreatedAt = AsUtc(package.CreatedAt),
             ApprovedAt = AsNullableUtc(package.ApprovedAt),
+            WithdrawnBy = package.WithdrawnBy,
+            WithdrawnAt = AsNullableUtc(package.WithdrawnAt),
+            WithdrawalReason = package.WithdrawalReason,
             Items = items.Select(MapDrawingReviewItem).ToArray(),
             Markups = markups.Select(MapDrawingReviewMarkup).ToArray()
         };
@@ -356,6 +483,9 @@ public sealed partial class MySqlPdmRepository
         public string CreatedBy { get; init; } = string.Empty;
         public DateTime CreatedAt { get; init; }
         public DateTime? ApprovedAt { get; init; }
+        public string? WithdrawnBy { get; init; }
+        public DateTime? WithdrawnAt { get; init; }
+        public string? WithdrawalReason { get; init; }
     }
 
     private sealed class DrawingReviewItemRow
@@ -371,11 +501,11 @@ public sealed partial class MySqlPdmRepository
         public string ModelRevision { get; init; } = string.Empty;
         public string ModelSha256 { get; init; } = string.Empty;
         public string ModelCreatedBy { get; init; } = string.Empty;
-        public Guid DrawingDocumentId { get; init; }
-        public Guid DrawingVersionId { get; init; }
-        public string DrawingRevision { get; init; } = string.Empty;
-        public string DrawingSha256 { get; init; } = string.Empty;
-        public string DrawingCreatedBy { get; init; } = string.Empty;
+        public Guid? DrawingDocumentId { get; init; }
+        public Guid? DrawingVersionId { get; init; }
+        public string? DrawingRevision { get; init; }
+        public string? DrawingSha256 { get; init; }
+        public string? DrawingCreatedBy { get; init; }
         public string ModelState { get; init; } = string.Empty;
         public string? ModelReviewer { get; init; }
         public string? ModelReviewerName { get; init; }
@@ -426,6 +556,12 @@ public sealed partial class MySqlPdmRepository
         public Guid ItemId { get; init; }
         public Guid PackageId { get; init; }
         public string Target { get; init; } = string.Empty;
+    }
+
+    private sealed class DrawingReviewDocumentLockRow
+    {
+        public Guid Id { get; init; }
+        public string? CheckedOutBy { get; init; }
     }
 
     private sealed class ReleasePackageLinkRow

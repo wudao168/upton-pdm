@@ -289,7 +289,8 @@ internal sealed class BatchPropertyEditDialog : Form
         IReadOnlyList<BatchPropertyEditItem> items,
         IReadOnlyList<DocumentDto> projectDocuments,
         IReadOnlyList<PropertyWritebackPreviewItem> writebackItems,
-        int unavailableWritebackCount)
+        int unavailableWritebackCount,
+        PropertyOperationMode initialOperation = PropertyOperationMode.BatchEdit)
     {
         this.items = items ?? Array.Empty<BatchPropertyEditItem>();
         this.projectDocuments = projectDocuments ?? Array.Empty<DocumentDto>();
@@ -308,6 +309,8 @@ internal sealed class BatchPropertyEditDialog : Form
         BuildGrid();
         BuildWritebackGrid();
         Controls.Add(BuildLayout());
+        operationTabs.SelectedIndex = initialOperation == PropertyOperationMode.PropertyWriteback ? 1 : 0;
+        UpdateOperationState();
         AcceptButton = execute;
         UpdateSummary();
     }

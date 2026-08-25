@@ -85,6 +85,7 @@ public sealed record SaveEquipmentTypeRequest(string Name, bool IsActive = true)
 public sealed record UpdateSystemSettingsRequest(
     string VaultRoot,
     string ReleaseRoot,
+    string? MaterialAttachmentRoot = null,
     int CheckoutHeartbeatSeconds = 180,
     int CheckoutLeaseMinutes = 15,
     int CheckoutOfflineGraceMinutes = 60,
@@ -108,6 +109,10 @@ public sealed record UpdateSystemSettingsRequest(
     IReadOnlyList<string>? ReleaseChangeReasonTypes = null);
 
 public sealed record SetBomEmptyDeclarationRequest(bool DeclaredEmpty);
+
+public sealed record CreateDrawingReviewRequest(IReadOnlyList<Guid>? ModelDocumentIds = null);
+
+public sealed record WithdrawDrawingReviewRequest(string Reason);
 
 public sealed record AddDrawingReviewMarkupRequest(
     Guid ItemId,
@@ -181,7 +186,7 @@ public sealed record SaveFolderTemplateRequest(IReadOnlyList<SaveFolderTemplateN
 
 public sealed record SaveProjectFolderPermissionsRequest(IReadOnlyList<SaveFolderPermissionRequest> Permissions);
 
-public sealed record CheckoutRequest(Guid SessionId, string MachineName);
+public sealed record CheckoutRequest(Guid SessionId, string MachineName, Guid? DrawingReviewWritebackId = null);
 
 public sealed record EditSessionHeartbeatRequest(string MachineName, IReadOnlyList<Guid> DocumentIds);
 
@@ -202,7 +207,8 @@ public sealed record CheckInRequest(
     bool ForceVersion = false,
     string? DrawingNumber = null,
     string? Name = null,
-    string? FileName = null);
+    string? FileName = null,
+    Guid? DrawingReviewWritebackId = null);
 
 public sealed record CompleteEditRequest(string Sha256, Guid CheckoutSessionId);
 

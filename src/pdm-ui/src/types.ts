@@ -3,7 +3,7 @@ export type ReferenceStatus = 'Normal' | 'Suppressed' | 'Hidden' | 'Lightweight'
 export type DocumentFilter = 'all' | 'model' | 'drawing' | 'issue'
 export type VersionAlignmentStatus = 'Synced' | 'StructureStale' | 'VersionConflict' | 'NotSnapshotted'
 export type PreviewMode = 'model' | 'drawing'
-export type SolidWorksOpenMode = 'LatestReadOnly' | 'LatestReleased' | 'LatestEdit' | 'SpecificReadOnly'
+export type SolidWorksOpenMode = 'LatestReadOnly' | 'LatestReleased' | 'LatestEdit' | 'SpecificReadOnly' | 'PropertyWriteback'
 
 export interface ProjectSummary {
   id: string
@@ -156,6 +156,7 @@ export interface BomPropertyMapping {
 export interface PdmSystemSettings {
   vaultRoot: string
   releaseRoot: string
+  materialAttachmentRoot: string
   checkoutHeartbeatSeconds: number
   checkoutLeaseMinutes: number
   checkoutOfflineGraceMinutes: number
@@ -513,9 +514,10 @@ export interface ReleasePackageSummary {
   locksDocuments: boolean
 }
 
-export type DrawingReviewPackageState = 'InReview' | 'ChangesRequested' | 'WritingProperties' | 'Approved' | 'Stale'
+export type DrawingReviewPackageState = 'InReview' | 'ChangesRequested' | 'WritingProperties' | 'Approved' | 'Stale' | 'Withdrawn'
+export type DrawingReviewCandidateState = 'Ready' | 'InReview' | 'ApprovedCurrent' | 'Unavailable'
 export type DrawingReviewTarget = 'Model3D' | 'Drawing2D'
-export type DrawingReviewTargetState = 'Pending' | 'ChangesRequested' | 'Approved' | 'Marked'
+export type DrawingReviewTargetState = 'Pending' | 'ChangesRequested' | 'Approved' | 'Marked' | 'NotRequired'
 export type DrawingReviewDecision = 'Approve' | 'RequestChanges'
 export type DrawingReviewMarkupSeverity = 'Note' | 'Blocking'
 export type DrawingReviewMarkupState = 'Open' | 'Resolved'
@@ -556,11 +558,11 @@ export interface DrawingReviewItem {
   modelRevision: string
   modelSha256: string
   modelCreatedBy: string
-  drawingDocumentId: string
-  drawingVersionId: string
-  drawingRevision: string
-  drawingSha256: string
-  drawingCreatedBy: string
+  drawingDocumentId?: string | null
+  drawingVersionId?: string | null
+  drawingRevision?: string | null
+  drawingSha256?: string | null
+  drawingCreatedBy?: string | null
   modelState: DrawingReviewTargetState
   modelReviewer?: string | null
   modelReviewerName?: string | null
@@ -576,7 +578,7 @@ export interface DrawingReviewItem {
   modelResultVersionId?: string | null
   drawingResultVersionId?: string | null
   effectiveModelVersionId: string
-  effectiveDrawingVersionId: string
+  effectiveDrawingVersionId?: string | null
 }
 
 export interface DrawingReviewPackage {
@@ -587,8 +589,27 @@ export interface DrawingReviewPackage {
   createdBy: string
   createdAt: string
   approvedAt?: string | null
+  withdrawnBy?: string | null
+  withdrawnAt?: string | null
+  withdrawalReason?: string | null
   items: DrawingReviewItem[]
   markups: DrawingReviewMarkup[]
+}
+
+export interface DrawingReviewCandidate {
+  candidateId: string
+  bomItemId?: string | null
+  modelDocumentId?: string | null
+  drawingDocumentId?: string | null
+  drawingNumber: string
+  name: string
+  configuration?: string | null
+  bomKinds: BomKind[]
+  modelRevision: string
+  drawingRevision?: string | null
+  state: DrawingReviewCandidateState
+  reason?: string | null
+  selectable: boolean
 }
 
 export interface AddDrawingReviewMarkupInput {
@@ -682,6 +703,18 @@ export type MaterialApprovalStatus = 'Draft' | 'Approved'
 export type MaterialSyncStatus = 'NotQueued' | 'PreviewReady' | 'Pending' | 'Succeeded' | 'Failed' | 'NeedsReview' | 'Superseded'
 export type MaterialDataSource = 'Pdm' | 'U9C'
 export type MaterialMasterOwner = 'Pdm' | 'U9C'
+export type MaterialAttachmentKind = 'Model3D' | 'Document'
+
+export interface MaterialAttachment {
+  id: string
+  materialId: string
+  kind: MaterialAttachmentKind
+  originalFileName: string
+  fileLength: number
+  sha256: string
+  uploadedBy: string
+  uploadedAt: string
+}
 
 export interface PdmMaterial {
   id: string
@@ -696,6 +729,11 @@ export interface PdmMaterial {
   brand?: string | null
   surfaceTreatment?: string | null
   purchaseLink?: string | null
+  selectionAdvice?: string | null
+  referencePrice?: number | null
+  model3DLink?: string | null
+  documentLink?: string | null
+  isRecommended?: boolean
   weight?: number | null
   weightUnit?: string | null
   sourceBomItemId?: string | null
@@ -720,6 +758,8 @@ export interface PdmMaterial {
   masterOwner: MaterialMasterOwner
   lastU9SyncedAt?: string | null
   referenceCount: number
+  model3DAttachmentCount: number
+  documentAttachmentCount: number
 }
 
 export type BomHeaderKind = 'Master' | 'Standard' | 'NonStandard' | 'Electrical'
@@ -734,13 +774,19 @@ export interface ProjectBomHeader {
   categoryCode?: string | null
   approvalStatus?: MaterialApprovalStatus | null
   rowVersion: number
+  applicationStatus?: MaterialCodeApplicationStatus | null
+  applicationId?: string | null
+  requestedBy?: string | null
+  requestedAt?: string | null
 }
 
 export type MaterialCodeApplicationStatus = 'Pending' | 'Approved' | 'Rejected'
 export interface MaterialCodeApplication {
   id: string
   projectId: string
-  bomItemId: string
+  bomItemId?: string | null
+  bomHeaderKind?: BomHeaderKind | null
+  applicationType: 'StandardBomItem' | 'BomHeader'
   status: MaterialCodeApplicationStatus
   requestedBy: string
   requestedAt: string
@@ -751,6 +797,11 @@ export interface MaterialCodeApplication {
   materialCode?: string | null
   rowVersion: number
   bomItemName?: string | null
+  applicationName?: string | null
+  projectCode?: string | null
+  projectName?: string | null
+  categoryCode?: string | null
+  requestedMaterialCode?: string | null
   specification?: string | null
   brand?: string | null
   remark?: string | null
@@ -762,6 +813,30 @@ export interface MaterialCodeResolution {
   material?: PdmMaterial | null
   candidates: PdmMaterial[]
   application?: MaterialCodeApplication | null
+}
+
+export type ApprovalU9AutomationStage = 'NotRequested' | 'ItemSyncFailed' | 'WaitingForDependencies' | 'BomSyncFailed' | 'Completed'
+export type ProjectBomU9AutomaticState = 'WaitingForDependencies' | 'AwaitingApproval' | 'Empty' | 'UpToDate' | 'Created' | 'Modified'
+export interface ApprovalU9BomOutcome {
+  projectId: string
+  projectCode: string
+  kind: BomHeaderKind
+  state?: ProjectBomU9AutomaticState | null
+  message: string
+  failed: boolean
+}
+export interface ApprovalU9AutomationResult {
+  stage: ApprovalU9AutomationStage
+  message: string
+  itemSync?: MaterialSyncExecutionResult | null
+  boms: ApprovalU9BomOutcome[]
+}
+
+export interface MaterialCodeDecisionResult {
+  application: MaterialCodeApplication
+  material?: PdmMaterial | null
+  task?: MaterialSyncTask | null
+  automation?: ApprovalU9AutomationResult | null
 }
 
 export interface SaveMaterialInput {
@@ -776,6 +851,11 @@ export interface SaveMaterialInput {
   brand?: string | null
   surfaceTreatment?: string | null
   purchaseLink?: string | null
+  selectionAdvice?: string | null
+  referencePrice?: number | null
+  model3DLink?: string | null
+  documentLink?: string | null
+  isRecommended?: boolean
   weight?: number | null
   weightUnit?: string | null
   expectedRowVersion?: number | null
@@ -843,6 +923,15 @@ export interface MaterialSyncTask {
   responsePreview?: string | null
   u9ItemId?: string | null
   u9ItemCode?: string | null
+  materialCode?: string | null
+  materialName?: string | null
+  categoryCode?: string | null
+  projectId?: string | null
+  projectCode?: string | null
+  projectName?: string | null
+  bomHeaderKind?: BomHeaderKind | null
+  requestedBy?: string | null
+  requestedAt?: string | null
   createdAt: string
   updatedAt: string
 }
@@ -1030,6 +1119,22 @@ export interface U9BomWriteExecution {
   executedAt: string
 }
 
+export type ProjectBomU9SyncState = 'Empty' | 'CreateRequired' | 'AwaitingApproval' | 'ModifyRequired' | 'UpToDate'
+
+export interface ProjectBomU9SyncPreview {
+  projectId: string
+  kind: BomHeaderKind
+  itemCode: string
+  componentCount: number
+  state: ProjectBomU9SyncState
+  writePreview?: U9BomWritePreview | null
+}
+
+export interface ProjectBomU9SyncExecution {
+  preview: ProjectBomU9SyncPreview
+  execution: U9BomWriteExecution
+}
+
 export interface U9MaterialSampleItem {
   u9ItemId: string
   materialCode: string
@@ -1088,4 +1193,102 @@ export interface UpdateU9MaterialIntegrationInput {
   bomBipQueryPagePath: string
   unitCodeMappings: Record<string, string>
   writeEnabled: boolean
+}
+
+export type ProgramTemplateAssetType = 'PlcFunctionBlock' | 'PlcProgram' | 'HmiTemplate'
+export type ProgramTemplateRevisionState = 'Draft' | 'PendingReview' | 'PendingApproval' | 'Rejected' | 'Published' | 'Superseded' | 'Archived'
+export type ProgramTemplateParameterDirection = 'Input' | 'Output' | 'InOut'
+export type ProgramTemplateAttachmentKind = 'Package' | 'TestEvidence'
+export type ProgramTemplateApprovalStage = 'Review' | 'Approval'
+export type ProgramTemplateApprovalDecision = 'Approved' | 'Rejected'
+export type ProgramTemplateVersionBump = 'Major' | 'Minor' | 'Patch'
+
+export interface ProgramTemplateParameter {
+  id: string
+  direction: ProgramTemplateParameterDirection
+  sortOrder: number
+  name: string
+  dataType: string
+  defaultValue?: string | null
+  unit?: string | null
+  description?: string | null
+}
+
+export interface ProgramTemplateRevision {
+  id: string
+  version: string
+  attemptNumber: number
+  state: ProgramTemplateRevisionState
+  name: string
+  category: string
+  description: string
+  vendor: string
+  platform: string
+  softwareVersion: string
+  applicableSeries: string
+  tags: string[]
+  changeNote: string
+  packageFileName?: string | null
+  packageFileLength?: number | null
+  packageSha256?: string | null
+  evidenceFileName?: string | null
+  evidenceFileLength?: number | null
+  evidenceSha256?: string | null
+  createdBy: string
+  createdAt: string
+  submittedAt?: string | null
+  publishedAt?: string | null
+  rowVersion: number
+  parameters: ProgramTemplateParameter[]
+}
+
+export interface ProgramTemplate {
+  id: string
+  code: string
+  assetType: ProgramTemplateAssetType
+  originCompanyId?: string | null
+  originCompanyName?: string | null
+  currentPublishedRevisionId?: string | null
+  isArchived: boolean
+  createdBy: string
+  createdAt: string
+  revisions: ProgramTemplateRevision[]
+}
+
+export interface ProgramTemplateTask {
+  id: string
+  templateId: string
+  templateCode: string
+  revisionId: string
+  templateName: string
+  version: string
+  stage: ProgramTemplateApprovalStage
+  state: ProgramTemplateRevisionState
+  requiredChecklist: string[]
+  createdAt: string
+  rowVersion: number
+}
+
+export interface ProgramTemplateParameterInput {
+  direction: ProgramTemplateParameterDirection
+  sortOrder: number
+  name: string
+  dataType: string
+  defaultValue?: string | null
+  unit?: string | null
+  description?: string | null
+}
+
+export interface ProgramTemplateDraftInput {
+  assetType: ProgramTemplateAssetType
+  name: string
+  category: string
+  description: string
+  vendor: string
+  platform: string
+  softwareVersion: string
+  applicableSeries: string
+  tags: string[]
+  changeNote: string
+  parameters: ProgramTemplateParameterInput[]
 }

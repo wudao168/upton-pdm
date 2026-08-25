@@ -12,7 +12,11 @@ public sealed record ProjectBomHeader(
     string? MaterialName,
     string? CategoryCode,
     [property: JsonConverter(typeof(JsonStringEnumConverter))] MaterialApprovalStatus? ApprovalStatus,
-    long RowVersion);
+    long RowVersion,
+    [property: JsonConverter(typeof(JsonStringEnumConverter))] MaterialCodeApplicationStatus? ApplicationStatus = null,
+    Guid? ApplicationId = null,
+    string? RequestedBy = null,
+    DateTimeOffset? RequestedAt = null);
 
 public sealed record BomHeaderGenerationResult(
     Guid RootProjectId,
@@ -35,16 +39,25 @@ public sealed class BomHeaderService(
     {
         if (!await repository.HasProjectReadAccessAsync(projectId, actor, role, cancellationToken))
             throw new UnauthorizedAccessException("当前用户没有项目查看权限。");
+        var project = await repository.FindProjectAsync(projectId, cancellationToken) ?? throw new PdmNotFoundException("项目不存在。");
         var bindings = (await repository.ListProjectBomHeaderBindingsAsync(projectId, cancellationToken)).ToDictionary(item => item.Kind);
+        var applications = (await materials.ListMaterialCodeApplicationsAsync(projectId, null, cancellationToken)).ToList();
         var result = new List<ProjectBomHeader>(AllKinds.Length);
         foreach (var kind in AllKinds)
         {
             bindings.TryGetValue(kind, out var binding);
             var material = binding is null ? null : await materials.FindMaterialAsync(binding.MaterialId, cancellationToken);
+            var application = LatestHeaderApplication(applications, kind);
+            if (material?.ApprovalStatus == MaterialApprovalStatus.Draft && application is null)
+            {
+                application = await CreateHeaderApplicationAsync(project, kind, material, actor, cancellationToken);
+                applications.Add(application);
+            }
             result.Add(new ProjectBomHeader(
                 projectId, kind, kind == ProjectBomHeaderKind.Master ? null : ProjectBomHeaderKind.Master,
                 material?.Id, OfficialMaterialCode(material), material?.Name, material?.CategoryCode,
-                material?.ApprovalStatus, binding?.RowVersion ?? 0));
+                material?.ApprovalStatus, binding?.RowVersion ?? 0, application?.Status, application?.Id,
+                application?.RequestedBy, application?.RequestedAt));
         }
         return result;
     }
@@ -90,6 +103,7 @@ public sealed class BomHeaderService(
         {
             var existingBindings = (await repository.ListProjectBomHeaderBindingsAsync(project.Id, cancellationToken))
                 .ToDictionary(binding => binding.Kind);
+            var applications = (await materials.ListMaterialCodeApplicationsAsync(project.Id, null, cancellationToken)).ToList();
             foreach (var kind in AllKinds)
             {
                 existingBindings.TryGetValue(kind, out var binding);
@@ -98,7 +112,15 @@ public sealed class BomHeaderService(
                     : await materials.FindMaterialAsync(binding.MaterialId, cancellationToken);
                 if (boundMaterial is not null)
                 {
-                    existingCount++;
+                    var latest = LatestHeaderApplication(applications, kind);
+                    if (boundMaterial.ApprovalStatus == MaterialApprovalStatus.Draft
+                        && (latest is null || latest.Status == MaterialCodeApplicationStatus.Rejected))
+                    {
+                        var application = await CreateHeaderApplicationAsync(project, kind, boundMaterial, actor, cancellationToken);
+                        applications.Add(application);
+                        generatedCount++;
+                    }
+                    else existingCount++;
                     continue;
                 }
                 await GenerateMaterialAsync(project, kind, binding?.RowVersion ?? 0, actor, role, cancellationToken);
@@ -130,12 +152,46 @@ public sealed class BomHeaderService(
             null,
             CategoryCode: categoryCode), actor, role, cancellationToken);
         var saved = await repository.SaveProjectBomHeaderBindingAsync(project.Id, kind, material.Id, expectedRowVersion, actor, cancellationToken);
+        var application = await CreateHeaderApplicationAsync(project, kind, material, actor, cancellationToken);
         await repository.AppendAuditAsync(new AuditEntry(
             Guid.NewGuid(), timeProvider.GetUtcNow(), actor, "bom.header.generate", nameof(ProjectBomHeaderBinding),
             $"{project.Id}:{kind}", $"为{KindLabel(kind)}提交料号申请，料号分类{categoryCode}"), cancellationToken);
         return new ProjectBomHeader(project.Id, kind, saved.ParentKind, material.Id, OfficialMaterialCode(material), material.Name,
-            material.CategoryCode, material.ApprovalStatus, saved.RowVersion);
+            material.CategoryCode, material.ApprovalStatus, saved.RowVersion, application.Status, application.Id,
+            application.RequestedBy, application.RequestedAt);
     }
+
+    private async Task<MaterialCodeApplication> CreateHeaderApplicationAsync(
+        Project project,
+        ProjectBomHeaderKind kind,
+        PdmMaterial material,
+        string actor,
+        CancellationToken cancellationToken)
+    {
+        var now = timeProvider.GetUtcNow();
+        var application = new MaterialCodeApplication(
+            Guid.NewGuid(), project.Id, null, MaterialCodeApplicationStatus.Pending, actor, now,
+            null, null, null, material.Id, null, 1, kind)
+        {
+            ApplicationName = material.Name,
+            ProjectCode = project.Code,
+            ProjectName = project.Name,
+            CategoryCode = material.CategoryCode,
+            RequestedMaterialCode = material.MaterialCode
+        };
+        var saved = await materials.CreateMaterialCodeApplicationAsync(application, cancellationToken);
+        await repository.AppendAuditAsync(new AuditEntry(
+            Guid.NewGuid(), now, actor, "bom.header.application.create", nameof(MaterialCodeApplication),
+            saved.Id.ToString(), $"提交{KindLabel(kind)}料号审批：{project.Code} · {material.Name}"), cancellationToken);
+        return saved;
+    }
+
+    private static MaterialCodeApplication? LatestHeaderApplication(
+        IEnumerable<MaterialCodeApplication> applications,
+        ProjectBomHeaderKind kind) => applications
+        .Where(application => application.BomHeaderKind == kind)
+        .OrderByDescending(application => application.RequestedAt)
+        .FirstOrDefault();
 
     public async Task EnsureReleaseReadyAsync(Guid projectId, ReleaseScope scope, CancellationToken cancellationToken)
     {

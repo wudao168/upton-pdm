@@ -31,7 +31,7 @@ public enum MaterialCodeApplicationStatus
 public sealed record MaterialCodeApplication(
     Guid Id,
     Guid ProjectId,
-    Guid BomItemId,
+    Guid? BomItemId,
     MaterialCodeApplicationStatus Status,
     string RequestedBy,
     DateTimeOffset RequestedAt,
@@ -40,9 +40,15 @@ public sealed record MaterialCodeApplication(
     string? DecisionComment,
     Guid? MaterialId,
     string? MaterialCode,
-    long RowVersion)
+    long RowVersion,
+    ProjectBomHeaderKind? BomHeaderKind = null)
 {
     public string? BomItemName { get; init; }
+    public string? ApplicationName { get; init; }
+    public string? ProjectCode { get; init; }
+    public string? ProjectName { get; init; }
+    public string? CategoryCode { get; init; }
+    public string? RequestedMaterialCode { get; init; }
     public string? Specification { get; init; }
     public string? Brand { get; init; }
     public string? Remark { get; init; }
@@ -92,6 +98,24 @@ public enum MaterialMasterOwner
     Pdm = 0,
     U9C = 1
 }
+
+public enum MaterialAttachmentKind
+{
+    Model3D = 0,
+    Document = 1
+}
+
+public sealed record MaterialAttachment(
+    Guid Id,
+    Guid MaterialId,
+    MaterialAttachmentKind Kind,
+    string OriginalFileName,
+    string StorageRoot,
+    string StorageRelativePath,
+    long FileLength,
+    string Sha256,
+    string UploadedBy,
+    DateTimeOffset UploadedAt);
 
 public sealed record MaterialCategory(
     string Code,
@@ -157,7 +181,17 @@ public sealed record PdmMaterial(
     MaterialMasterOwner MasterOwner = MaterialMasterOwner.Pdm,
     DateTimeOffset? LastU9SyncedAt = null,
     string? PurchaseLink = null,
-    int ReferenceCount = 0);
+    int ReferenceCount = 0,
+    string? SelectionAdvice = null,
+    decimal? ReferencePrice = null,
+    string? Model3DLink = null,
+    string? DocumentLink = null,
+    bool IsRecommended = false)
+{
+    public int Model3DAttachmentCount { get; init; }
+
+    public int DocumentAttachmentCount { get; init; }
+}
 
 public sealed record MaterialRemovalResult(
     PdmMaterial Material,
@@ -179,7 +213,18 @@ public sealed record MaterialSyncTask(
     string? U9ItemId,
     string? U9ItemCode,
     DateTimeOffset CreatedAt,
-    DateTimeOffset UpdatedAt);
+    DateTimeOffset UpdatedAt)
+{
+    public string? MaterialCode { get; init; }
+    public string? MaterialName { get; init; }
+    public string? CategoryCode { get; init; }
+    public Guid? ProjectId { get; init; }
+    public string? ProjectCode { get; init; }
+    public string? ProjectName { get; init; }
+    public ProjectBomHeaderKind? BomHeaderKind { get; init; }
+    public string? RequestedBy { get; init; }
+    public DateTimeOffset? RequestedAt { get; init; }
+}
 
 public sealed record U9MaterialIntegrationConfiguration(
     string BaseUrl,

@@ -41,6 +41,29 @@ describe('BomManager', () => {
     expect(wrapper.get('.pdm-empty-info').text()).toContain('系统自动按无此类物料处理')
   })
 
+  it('shows the distinct source material total without changing source rows or categorized BOM counts', () => {
+    const wrapper = mount(BomManager, {
+      props: {
+        sourceData: [
+          { id: 'source-1', sequence: 1, drawingNumber: 'STD-001', name: '重复零件', quantity: 1, unit: '个', revision: 'W1', complete: true, source: 'Auto', sourceDocumentId: 'document-1', sourceConfiguration: 'Default', sourceInstancePath: 'root/1' },
+          { id: 'source-2', sequence: 2, drawingNumber: 'STD-001', name: '重复零件', quantity: 1, unit: '个', revision: 'W1', complete: true, source: 'Auto', sourceDocumentId: 'document-1', sourceConfiguration: 'Alternate', sourceInstancePath: 'root/2' },
+          { id: 'source-3', sequence: 3, drawingNumber: 'STD-002', name: '另一零件', quantity: 1, unit: '个', revision: 'W1', complete: true, source: 'Auto', sourceDocumentId: 'document-1', sourceConfiguration: 'Default', sourceInstancePath: 'root/3' },
+        ],
+        standard: [
+          { id: 'standard-1', sequence: 1, drawingNumber: 'STD-001', name: '标准件一', quantity: 1, unit: '个', revision: 'W1', complete: true },
+          { id: 'standard-2', sequence: 2, drawingNumber: 'STD-002', name: '标准件二', quantity: 1, unit: '个', revision: 'W1', complete: true },
+        ],
+        nonStandard: [{ id: 'non-standard-1', sequence: 1, drawingNumber: 'NST-001', name: '非标件', quantity: 1, unit: '个', revision: 'W1', complete: true }],
+        electrical: [{ id: 'electrical-1', sequence: 1, drawingNumber: 'ELE-001', name: '电气件', quantity: 1, unit: '个', revision: 'W1', complete: true }],
+        declarations: [], pending: false,
+      },
+    })
+
+    const tabs = wrapper.findAll('button[role="tab"]')
+    expect(tabs.map(tab => tab.text())).toEqual(['源数据（2）', '标准件BOM（2）', '非标件BOM（1）', '电气BOM（1）'])
+    expect(wrapper.findAll('.pdm-bom-table tbody tr')).toHaveLength(3)
+  })
+
   it('keeps release actions out of source data and shows per-BOM release state', async () => {
     const releasePackage: ReleasePackageSummary = {
       id: 'release-standard-1', number: 'RP-S-001', state: '审批中', steps: [], scope: 'StandardFormal',
@@ -101,7 +124,7 @@ describe('BomManager', () => {
     await wrapper.findAll('button[role="tab"]')[1].trigger('click')
 
     expect(wrapper.findAll('thead th').map(header => header.text())).toEqual([
-      '', '', '序号', '物料分类', '单位', '物料编码', '物料名称', '关联料号', '型号', '备注信息', '品牌', '材质', '表面处理', '重量', '数量', '版本', '对账状态/说明', '资料状态',
+      '', '', '序号', '物料分类', '单位', '物料编码', '物料名称', '关联料号', '型号', '备注信息', '品牌', '材质', '表面处理', '重量', '数量(BOM/源)', '图纸核对', '版本', '对账状态/说明', '资料状态',
     ])
   })
 
@@ -120,10 +143,16 @@ describe('BomManager', () => {
     expect(nameValue.text()).toBe('这是一个超过八个字的物料名称')
   })
 
-  it('shows current and aggregated quantities while editing only the current row', async () => {
+  it('shows BOM and source quantities while retaining the same-code total in the tooltip', async () => {
     const wrapper = mount(BomManager, {
       props: {
         standard: [
+          { id: 'bom-1', sequence: 1, drawingNumber: 'STD-001', name: '配套物料', quantity: 1, unit: '001', revision: 'W1', complete: true },
+          { id: 'bom-2', sequence: 2, drawingNumber: 'STD-001', name: '配套物料', quantity: 1, unit: '001', revision: 'W1', complete: true },
+          { id: 'bom-3', sequence: 3, drawingNumber: 'STD-001', name: '配套物料', quantity: 1, unit: '001', revision: 'W1', complete: true },
+          { id: 'bom-4', sequence: 4, drawingNumber: 'STD-002', name: '唯一物料', quantity: 1, unit: '001', revision: 'W1', complete: true },
+        ],
+        sourceData: [
           { id: 'bom-1', sequence: 1, drawingNumber: 'STD-001', name: '配套物料', quantity: 1, unit: '001', revision: 'W1', complete: true },
           { id: 'bom-2', sequence: 2, drawingNumber: 'STD-001', name: '配套物料', quantity: 1, unit: '001', revision: 'W1', complete: true },
           { id: 'bom-3', sequence: 3, drawingNumber: 'STD-001', name: '配套物料', quantity: 1, unit: '001', revision: 'W1', complete: true },
@@ -136,10 +165,31 @@ describe('BomManager', () => {
     await wrapper.findAll('button[role="tab"]')[1].trigger('click')
 
     const quantityButtons = wrapper.findAll('button[aria-label="编辑数量"]')
-    expect(quantityButtons.map(button => button.text())).toEqual(['1 / 3', '1 / 3', '1 / 3', '1 / 1'])
+    expect(quantityButtons.map(button => button.text())).toEqual(['1 / 1', '1 / 1', '1 / 1', '1 / 1'])
+    expect(quantityButtons[0].attributes('title')).toContain('同料号合计 3')
 
     await quantityButtons[0].trigger('click')
     expect((wrapper.get('input[aria-label="内联编辑数量"]').element as HTMLInputElement).value).toBe('1')
+  })
+
+  it('shows strict 3D and unique 2D checks for non-standard BOM rows', async () => {
+    const linked = { id: 'bom-linked', kind: 'NonStandard' as const, sequence: 1, drawingNumber: 'N-001', name: '非标零件', quantity: 2, unit: '件', revision: 'W1', complete: true, source: 'Auto' as const, sourceDocumentId: 'model-1' }
+    const manual = { id: 'bom-manual', kind: 'NonStandard' as const, sequence: 2, drawingNumber: 'N-002', name: '人工非标件', quantity: 1, unit: '件', revision: 'W1', complete: true, source: 'Manual' as const }
+    const wrapper = mount(BomManager, {
+      props: {
+        sourceData: [linked], standard: [], nonStandard: [linked, manual], electrical: [], declarations: [], pending: false, editable: true,
+        documents: [
+          { id: 'model-1', projectId: 'project-1', drawingNumber: 'N-001', name: '非标零件', fileName: 'N-001.SLDPRT', kind: 'Part', state: 'Working', revision: 'W1' },
+          { id: 'drawing-1', projectId: 'project-1', drawingNumber: 'N-001', name: '非标工程图', fileName: 'N-001.SLDDRW', kind: 'Drawing', state: 'Working', revision: 'W2' },
+        ],
+        documentRelations: [{ modelDocumentId: 'model-1', drawingDocumentId: 'drawing-1' }],
+      },
+    })
+
+    await wrapper.findAll('button[role="tab"]')[2].trigger('click')
+
+    expect(wrapper.findAll('.pdm-bom-audit strong').map(item => item.text())).toEqual(['3D+2D已对应', '缺少来源3D'])
+    expect(wrapper.findAll('.pdm-bom-quantity-audit').map(item => item.text())).toEqual(['2 / 2', '1 / —'])
   })
 
   it('confirms and emits one batch-delete operation for selected categorized rows', async () => {
@@ -313,6 +363,70 @@ describe('BomManager', () => {
     expect(wrapper.get('.pdm-bom-reconciliation').attributes('title')).toBe('图档源数据分类由非标件变更为标准件，已自动迁移。')
   })
 
+  it('confirms manual unmatched rows directly from the reconciliation cell', async () => {
+    const confirm = vi.spyOn(ElMessageBox, 'confirm').mockResolvedValue('confirm' as never)
+    const prompt = vi.spyOn(ElMessageBox, 'prompt').mockResolvedValue({ value: '确认删除无来源人工项' } as never)
+    const wrapper = mount(BomManager, {
+      props: {
+        standard: [{
+          id: 'manual-unmatched', kind: 'Standard', sequence: 1, drawingNumber: 'S-MANUAL', name: '人工待确认项', quantity: 1, unit: '件', revision: 'W1', complete: true,
+          source: 'Manual', manualUnmatched: true, reconciliationStatus: 'ManualUnmatched', reconciliationNote: 'BOM中存在，但最新图档源数据中无对应项，等待确认删除或人工保留。',
+        }],
+        nonStandard: [], electrical: [], declarations: [], pending: false, editable: true,
+      },
+    })
+
+    await wrapper.findAll('button[role="tab"]')[1].trigger('click')
+    const actions = wrapper.get('.pdm-bom-reconciliation-actions')
+    expect(actions.findAll('button').map(button => button.text())).toEqual(['保留', '删除'])
+    expect(actions.attributes('title')).toBeUndefined()
+
+    await actions.get('button[aria-label="确认保留人工BOM项 S-MANUAL"]').trigger('click')
+    expect(confirm).toHaveBeenCalledOnce()
+    expect(wrapper.emitted('resolve')).toEqual([['manual-unmatched', 'retain']])
+
+    await actions.get('button[aria-label="确认删除人工BOM项 S-MANUAL"]').trigger('click')
+    expect(prompt).toHaveBeenCalledOnce()
+    expect(wrapper.emitted('batchDelete')).toEqual([[['manual-unmatched'], '确认删除无来源人工项']])
+  })
+
+  it('batch confirms retainable rows while rejecting a mixed ordinary selection', async () => {
+    const confirm = vi.spyOn(ElMessageBox, 'confirm').mockResolvedValue('confirm' as never)
+    const wrapper = mount(BomManager, {
+      props: {
+        standard: [
+          { id: 'manual-1', kind: 'Standard', sequence: 1, drawingNumber: 'S-001', name: '人工待确认一', quantity: 1, unit: '件', revision: 'W1', complete: true, source: 'Manual', manualUnmatched: true },
+          { id: 'manual-2', kind: 'Standard', sequence: 2, drawingNumber: 'S-002', name: '人工待确认二', quantity: 1, unit: '件', revision: 'W1', complete: true, source: 'Manual', manualUnmatched: true },
+          { id: 'ordinary', kind: 'Standard', sequence: 3, drawingNumber: 'S-003', name: '普通物料', quantity: 1, unit: '件', revision: 'W1', complete: true, source: 'Auto' },
+        ],
+        nonStandard: [], electrical: [], declarations: [], pending: false, editable: true,
+      },
+    })
+
+    await wrapper.findAll('button[role="tab"]')[1].trigger('click')
+    const checkboxes = wrapper.findAll('input[aria-label="选择物料"]')
+    await checkboxes[0].setValue(true)
+    await checkboxes[2].setValue(true)
+    let retainButton = wrapper.findAll('.pdm-bom-selection-toolbar button').find(button => button.text() === '批量确认保留')!
+    expect((retainButton.element as HTMLButtonElement).disabled).toBe(true)
+    expect(retainButton.attributes('title')).toBe('仅支持同时保留人工待确认或待确认删除的物料')
+
+    await checkboxes[2].setValue(false)
+    await checkboxes[1].setValue(true)
+    retainButton = wrapper.findAll('.pdm-bom-selection-toolbar button').find(button => button.text() === '批量确认保留')!
+    expect((retainButton.element as HTMLButtonElement).disabled).toBe(false)
+    await retainButton.trigger('click')
+    await flushPromises()
+
+    expect(confirm).toHaveBeenCalledWith(
+      '确认保留所选 2 条待处理BOM项吗？确认后这些物料不再显示为待处理。',
+      '批量确认保留',
+      expect.objectContaining({ confirmButtonText: '批量确认保留' }),
+    )
+    expect(wrapper.emitted('batchRetain')).toEqual([[['manual-1', 'manual-2']]])
+    expect(wrapper.find('.pdm-bom-selection-summary').exists()).toBe(false)
+  })
+
   it('treats a restored classification-only difference as reconciled', async () => {
     const wrapper = mount(BomManager, {
       props: {
@@ -382,6 +496,7 @@ describe('BomManager', () => {
     expect(rows[0].get('.pdm-bom-source').classes()).toContain('is-warning')
     expect(rows[0].get('.pdm-bom-source').text()).toBe('分类不一致')
     expect(rows[0].findAll('td').filter(cell => cell.classes().some(name => name.endsWith('-cell'))).map(cell => cell.classes())).toEqual([
+      ['pdm-bom-drawing-audit-cell'],
       ['pdm-bom-reconciliation-cell'],
       ['pdm-bom-data-status-cell', 'is-complete'],
     ])
@@ -1095,7 +1210,7 @@ describe('BomManager', () => {
     expect((wrapper.get('select[aria-label="选择BOM版本"]').element as HTMLSelectElement).value).toBe('standard-released')
     await wrapper.get('select[aria-label="选择BOM版本"]').setValue('current')
     expect(wrapper.get('.pdm-bom-data-status').text()).toBe('已完善')
-    expect(wrapper.text()).toContain('默认显示PLM最新正式发布版')
+    expect(wrapper.text()).not.toContain('默认显示PLM最新正式发布版')
   })
 
   it('shows independent BOM history as read-only and displays the three-version manufacturing baseline', async () => {

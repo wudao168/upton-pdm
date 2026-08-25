@@ -105,6 +105,8 @@ public sealed record PdmSystemSettings(string VaultRoot, string ReleaseRoot)
 
     public int CheckoutHeartbeatSeconds { get; init; } = 180;
 
+    public string MaterialAttachmentRoot { get; init; } = string.Empty;
+
     public int CheckoutLeaseMinutes { get; init; } = 15;
 
     public int CheckoutOfflineGraceMinutes { get; init; } = 60;
@@ -322,6 +324,8 @@ public sealed record PdmDocument(
     public DateTimeOffset? CheckoutReleaseRequestedAt { get; init; }
 
     public string? CheckoutReleaseRequestReason { get; init; }
+
+    public bool DrawingReviewLocked { get; init; }
 }
 
 public sealed record DocumentModelDrawingRelation(

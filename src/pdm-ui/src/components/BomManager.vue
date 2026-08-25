@@ -2,7 +2,7 @@
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { applyForBomMaterialCodes, linkBomMaterial, listMaterials, resolveBomMaterialCodes } from '../api'
-import type { BatchUpdateBomItemsInput, BomEmptyDeclaration, BomItem, BomKind, BomValidationField, BomValidationRules, BomVersion, CreateReleasePackageInput, ManufacturingBomBaseline, MaterialCodeResolution, PdmMaterial, ProjectSummary, ReleasePackageSummary, ReleaseScope } from '../types'
+import type { BatchUpdateBomItemsInput, BomEmptyDeclaration, BomItem, BomKind, BomValidationField, BomValidationRules, BomVersion, CreateReleasePackageInput, DocumentModelDrawingRelation, ManagedDocument, ManufacturingBomBaseline, MaterialCodeResolution, PdmMaterial, ProjectSummary, ReleasePackageSummary, ReleaseScope } from '../types'
 import { u9UnitName, u9UnitOptions } from '../u9Units'
 import BomHierarchyOverview from './BomHierarchyOverview.vue'
 import ReleaseCenter from './ReleaseCenter.vue'
@@ -19,6 +19,8 @@ const props = withDefaults(defineProps<{
   nonStandard: BomItem[]
   unclassified?: BomItem[]
   electrical: BomItem[]
+  documents?: ManagedDocument[]
+  documentRelations?: DocumentModelDrawingRelation[]
   validationRules?: BomValidationRules
   releaseChangeReasonTypes?: string[]
   declarations: BomEmptyDeclaration[]
@@ -42,6 +44,8 @@ const props = withDefaults(defineProps<{
   editable: false,
   sourceData: () => [],
   unclassified: () => [],
+  documents: () => [],
+  documentRelations: () => [],
   versions: () => [],
   baselines: () => [],
   token: '',
@@ -68,6 +72,7 @@ const emit = defineEmits<{
   export: [kind: BomKind]
   generate: []
   resolve: [itemId: string, action: 'classify' | 'retain' | 'remove', targetKind?: BomKind]
+  batchRetain: [itemIds: string[]]
   batchUpdate: [input: BatchUpdateBomItemsInput]
   batchDelete: [itemIds: string[], reason: string]
   batchRestore: [itemIds: string[], mode: 'Original' | 'AsManual']
@@ -132,6 +137,11 @@ function createBatchDraft() {
 const batchDraft = ref(createBatchDraft())
 
 const sourceDataRows = computed(() => props.sourceData)
+const sourceDataTotalCount = computed(() => new Set(sourceDataRows.value.map((row, index) => {
+  const materialKey = quantityAggregationKey(row)
+  if (materialKey) return `material:${materialKey}`
+  return row.id ? `id:${row.id.toLocaleLowerCase()}` : `row:${index}`
+})).size)
 const standardRows = computed(() => props.standard.filter(item => !item.manuallyExcluded && !item.pendingClassification))
 const nonStandardRows = computed(() => props.nonStandard.filter(item => !item.manuallyExcluded && !item.pendingClassification))
 const electricalRows = computed(() => props.electrical.filter(item => !item.manuallyExcluded))
@@ -231,7 +241,9 @@ const recycleBinRows = computed(() => [...props.standard, ...props.nonStandard, 
 const recycleBinAllSelected = computed(() => recycleBinRows.value.length > 0 && recycleBinRows.value.every(item => item.id && recycleBinSelectedIds.value.includes(item.id)))
 const allRowsSelected = computed(() => selectableIds.value.length > 0 && selectableIds.value.every(id => selectedIds.value.includes(id)))
 const batchFieldCount = computed(() => Object.entries(batchDraft.value).filter(([key, value]) => key.endsWith('Enabled') && value).length)
-const canRetainSelected = computed(() => selectedRows.value.length === 1 && (selectedRows.value[0].pendingRemoval || selectedRows.value[0].manualUnmatched))
+const retainableSelectedRows = computed(() => selectedRows.value.filter(row => row.id && (row.pendingRemoval || row.manualUnmatched)))
+const hasRetainableSelection = computed(() => retainableSelectedRows.value.length > 0)
+const canRetainSelected = computed(() => selectedRows.value.length > 0 && retainableSelectedRows.value.length === selectedRows.value.length)
 const canConfirmDeleteSelected = computed(() => selectedRows.value.length > 0 && selectedRows.value.every(row => row.pendingRemoval || row.manualUnmatched))
 const canRestoreSourceSelected = computed(() => selectedRows.value.length > 0
   && (kind.value === 'Standard' || kind.value === 'NonStandard')
@@ -547,9 +559,50 @@ function formatQuantity(value: number) {
 }
 
 function quantityDisplay(row: BomItem) {
+  const source = sourceRowFor(row)
+  return `${formatQuantity(Number(row.quantity))} / ${source ? formatQuantity(Number(source.quantity)) : '—'}`
+}
+
+function quantityTitle(row: BomItem) {
+  const source = sourceRowFor(row)
   const key = quantityAggregationKey(row)
   const total = key ? quantityTotals.value.get(key) ?? Number(row.quantity) : Number(row.quantity)
-  return `${formatQuantity(Number(row.quantity))} / ${formatQuantity(total)}`
+  return `BOM数量 ${formatQuantity(Number(row.quantity))}；源数量 ${source ? formatQuantity(Number(source.quantity)) : '无'}；同料号合计 ${formatQuantity(total)}`
+}
+
+function sourceRowFor(row: BomItem) {
+  if (row.id) {
+    const byId = sourceDataRows.value.find(source => source.id === row.id)
+    if (byId) return byId
+  }
+  if (!row.sourceDocumentId) return undefined
+  return sourceDataRows.value.find(source => {
+    if (source.sourceDocumentId !== row.sourceDocumentId) return false
+    if (source.sourceInstancePath && row.sourceInstancePath)
+      return source.sourceInstancePath.localeCompare(row.sourceInstancePath, undefined, { sensitivity: 'accent' }) === 0
+    return (source.sourceConfiguration ?? '').localeCompare(row.sourceConfiguration ?? '', undefined, { sensitivity: 'accent' }) === 0
+  })
+}
+
+function quantityAuditClass(row: BomItem) {
+  const source = sourceRowFor(row)
+  if (!source) return 'is-blocking'
+  return Number(source.quantity) === Number(row.quantity) ? 'is-matched' : 'is-blocking'
+}
+
+function drawingAudit(row: BomItem) {
+  if (rowKind(row) !== 'NonStandard') return undefined
+  if (!row.sourceDocumentId) return { label: '缺少来源3D', detail: '必须补齐3D及唯一2D工程图', blocking: true }
+  const drawingIds = [...new Set(props.documentRelations
+    .filter(relation => relation.modelDocumentId === row.sourceDocumentId)
+    .map(relation => relation.drawingDocumentId))]
+  const drawings = drawingIds.flatMap(id => {
+    const document = props.documents.find(candidate => candidate.id === id && candidate.kind === 'Drawing')
+    return document ? [document] : []
+  })
+  if (drawings.length === 0) return { label: '缺少2D工程图', detail: '非标BOM禁止仅有3D', blocking: true }
+  if (drawings.length > 1) return { label: `关联${drawings.length}张2D`, detail: '必须保持唯一对应', blocking: true }
+  return { label: '3D+2D已对应', detail: `${drawings[0]!.drawingNumber} · ${drawings[0]!.revision}`, blocking: false }
 }
 
 function saveCurrentBom() {
@@ -885,11 +938,41 @@ function restoreRecycleBin() {
   recycleBinSelectedIds.value = []
 }
 
-function retainSelected() {
-  const row = selectedRows.value[0]
-  if (!row?.id || (!row.pendingRemoval && !row.manualUnmatched)) return
-  emit('resolve', row.id, 'retain')
-  selectedIds.value = []
+async function retainSelected() {
+  if (!canRetainSelected.value || props.pending) return
+  const itemIds = retainableSelectedRows.value.map(row => row.id!)
+  const count = itemIds.length
+  try {
+    await ElMessageBox.confirm(
+      `确认保留所选 ${count} 条待处理BOM项吗？确认后这些物料不再显示为待处理。`,
+      count > 1 ? '批量确认保留' : '确认保留',
+      { confirmButtonText: count > 1 ? '批量确认保留' : '确认保留', cancelButtonText: '取消', type: 'warning' },
+    )
+    if (count === 1) emit('resolve', itemIds[0], 'retain')
+    else emit('batchRetain', itemIds)
+    selectedIds.value = []
+  } catch {
+    // 用户取消时保留当前选择，不修改BOM。
+  }
+}
+
+async function confirmManualRetain(row: BomItem) {
+  if (!row.id || !row.manualUnmatched || !canEditCurrentView.value || props.pending) return
+  try {
+    await ElMessageBox.confirm(
+      `确认将“${row.drawingNumber || row.name}”作为人工BOM项保留吗？确认后该项不再显示为待处理。`,
+      '确认保留人工BOM项',
+      { confirmButtonText: '确认保留', cancelButtonText: '取消', type: 'warning' },
+    )
+    emit('resolve', row.id, 'retain')
+  } catch {
+    // 用户取消时不修改BOM。
+  }
+}
+
+async function confirmManualDelete(row: BomItem) {
+  if (!row.id || !row.manualUnmatched || !canEditCurrentView.value || props.pending) return
+  await deleteItems([row.id])
 }
 
 function classifySelected(targetKind: Exclude<BomKind, 'Unclassified'>) {
@@ -1108,7 +1191,7 @@ function submitBatchUpdate() {
     <div class="pdm-bom-detail-toolbar">
       <div class="pdm-segmented" role="tablist">
         <button v-if="project && projects.length" type="button" role="tab" class="pdm-bom-overview-tab" :aria-selected="kind === 'Overview'" @click="kind = 'Overview'">多级总览</button>
-        <button type="button" role="tab" class="pdm-source-data-tab" :aria-selected="kind === 'Source'" @click="kind = 'Source'">源数据（{{ sourceDataRows.length }}）</button>
+        <button type="button" role="tab" class="pdm-source-data-tab" :aria-selected="kind === 'Source'" @click="kind = 'Source'">源数据（{{ sourceDataTotalCount }}）</button>
         <button type="button" role="tab" :aria-selected="kind === 'Standard'" @click="kind = 'Standard'">标准件BOM（{{ standardRows.length }}）</button>
         <button type="button" role="tab" :aria-selected="kind === 'NonStandard'" @click="kind = 'NonStandard'">非标件BOM（{{ nonStandardRows.length }}）</button>
         <button type="button" role="tab" :aria-selected="kind === 'Electrical'" @click="kind = 'Electrical'">电气BOM（{{ electricalRows.length }}）</button>
@@ -1176,7 +1259,7 @@ function submitBatchUpdate() {
           <button type="button" class="pdm-secondary-action" :disabled="pending || selectedIds.length === 0 || hasSelectedDraftRows" :title="hasSelectedDraftRows ? '新增行请直接编辑表格字段' : ''" @click="openBatchEditor">{{ selectedIds.length > 1 ? '批量编辑' : '编辑' }}</button>
           <button v-if="!isSourceView" type="button" class="pdm-primary-action" :disabled="pending || selectedIds.length > 1 || !token || !projectId" @click="openMaterialReference">按编码引用料品</button>
           <button v-if="kind === 'Standard'" type="button" class="pdm-secondary-action" :disabled="pending || selectedStandardItemsWithoutCode.length === 0" @click="applyForMaterialCodes(selectedStandardItemsWithoutCode.map(item => item.id!))">{{ selectedStandardItemsWithoutCode.length > 1 ? '批量申请料号' : '申请料号' }}</button>
-          <button v-if="canRetainSelected" type="button" class="pdm-secondary-action" :disabled="pending" @click="retainSelected">保留此项</button>
+          <button v-if="hasRetainableSelection" type="button" class="pdm-secondary-action" :disabled="pending || !canRetainSelected" :title="!canRetainSelected ? '仅支持同时保留人工待确认或待确认删除的物料' : ''" @click="retainSelected">{{ selectedIds.length > 1 ? '批量确认保留' : '确认保留' }}</button>
           <button v-if="!isSourceView || canConfirmDeleteSelected" type="button" class="pdm-secondary-action is-danger" :disabled="pending || selectedIds.length === 0 || hasSelectedDraftRows" @click="deleteItems(selectedPersistedIds)">{{ canConfirmDeleteSelected ? (selectedIds.length > 1 ? '批量确认删除' : '确认删除') : (selectedIds.length > 1 ? '批量删除' : '删除') }}</button>
           <button v-if="kind === 'Standard' || kind === 'NonStandard'" type="button" class="pdm-secondary-action" :disabled="pending || !canRestoreSourceSelected" :title="selectedIds.length > 0 && !canRestoreSourceSelected ? '仅支持恢复有图档来源的标准件或非标件' : '恢复最新图档源属性，保留分类与排序'" @click="restoreSelectedFromSource">恢复源数据</button>
         </template>
@@ -1199,7 +1282,6 @@ function submitBatchUpdate() {
           </select>
         </label>
         <span v-if="selectedVersion" class="pdm-bom-version-state" :class="`is-${selectedVersion.state.toLocaleLowerCase()}`">{{ versionStateLabel(selectedVersion.state) }} · 只读</span>
-        <span class="pdm-bom-version-hint">默认显示PLM最新正式发布版；U9C固定A1的历史保留项仅在同步差异中显示。</span>
         <button type="button" class="pdm-secondary-action" :disabled="!comparisonBaseVersion" @click="comparisonOpen = !comparisonOpen">{{ comparisonOpen ? '收起差异' : '与上一发布版对比' }}</button>
       </div>
     </div>
@@ -1208,10 +1290,10 @@ function submitBatchUpdate() {
         <colgroup>
           <col class="is-select"><col class="is-row-actions"><col class="is-sequence"><col class="is-kind"><col class="is-unit"><col class="is-code">
           <col class="is-name"><col class="is-parent-code"><col class="is-model"><col class="is-remark"><col class="is-brand">
-          <col class="is-material"><col class="is-surface"><col class="is-weight"><col class="is-quantity">
+          <col class="is-material"><col class="is-surface"><col class="is-weight"><col class="is-quantity"><col class="is-drawing-audit">
           <col class="is-revision"><col class="is-source"><col class="is-data-status">
         </colgroup>
-        <thead><tr><th><input type="checkbox" :aria-label="isSourceView ? '选择全部源数据物料' : '选择当前分类全部物料'" :checked="allRowsSelected" :disabled="!canSelectCurrentView || selectableIds.length === 0" @change="toggleAllRows"></th><th aria-label="行排序与插入操作"></th><th>序号</th><th>物料分类</th><th>单位</th><th>物料编码</th><th>物料名称</th><th>关联料号</th><th>型号</th><th>备注信息</th><th>品牌</th><th>材质</th><th>表面处理</th><th>重量</th><th>数量</th><th>版本</th><th>对账状态/说明</th><th>资料状态</th></tr></thead>
+        <thead><tr><th><input type="checkbox" :aria-label="isSourceView ? '选择全部源数据物料' : '选择当前分类全部物料'" :checked="allRowsSelected" :disabled="!canSelectCurrentView || selectableIds.length === 0" @change="toggleAllRows"></th><th aria-label="行排序与插入操作"></th><th>序号</th><th>物料分类</th><th>单位</th><th>物料编码</th><th>物料名称</th><th>关联料号</th><th>型号</th><th>备注信息</th><th>品牌</th><th>材质</th><th>表面处理</th><th>重量</th><th>数量(BOM/源)</th><th>图纸核对</th><th>版本</th><th>对账状态/说明</th><th>资料状态</th></tr></thead>
         <tbody>
           <tr v-for="{ row, index } in filteredRows" :key="row.id || row._clientKey" :data-row-index="index" :class="{ 'is-pending-removal': row.pendingRemoval, 'is-bom-unresolved': rowNeedsClassification(row) || row.manualUnmatched, 'is-row-dragging': draggedRowIndex === index, 'is-drag-over-before': dragOverRowIndex === index && dragOverPosition === 'before', 'is-drag-over-after': dragOverRowIndex === index && dragOverPosition === 'after' }">
             <td><input type="checkbox" aria-label="选择物料" :checked="selectedIds.includes(rowSelectionKey(row) ?? '')" :disabled="!canSelectCurrentView || !rowSelectionKey(row)" @change="toggleRow(rowSelectionKey(row), $event)"></td>
@@ -1286,11 +1368,15 @@ function submitBatchUpdate() {
               <input v-if="!row.id && canEditCurrentView && !isSourceView" v-model.trim="row.weight" aria-label="重量">
               <span v-else class="pdm-bom-cell-value">{{ displayValue(row.weight) }}</span>
             </td>
-            <td>
+            <td class="pdm-bom-quantity-audit" :class="quantityAuditClass(row)">
               <input v-if="isInlineEditing(row, 'quantity')" v-model.number="inlineValue" type="number" min="0.0001" step="0.0001" class="pdm-bom-inline-editor pdm-bom-quantity-editor" aria-label="内联编辑数量" autofocus @blur="commitInlineEdit(row)" @keydown.enter.prevent="commitInlineEdit(row)" @keydown.esc.prevent="cancelInlineEdit">
-              <button v-else-if="row.id && canEditCurrentView" type="button" class="pdm-bom-cell-edit" :title="quantityDisplay(row)" aria-label="编辑数量" @click="beginInlineEdit(row, 'quantity')">{{ quantityDisplay(row) }}</button>
+              <button v-else-if="row.id && canEditCurrentView" type="button" class="pdm-bom-cell-edit" :title="quantityTitle(row)" aria-label="编辑数量" @click="beginInlineEdit(row, 'quantity')">{{ quantityDisplay(row) }}</button>
               <input v-else-if="canEditCurrentView && !isSourceView" v-model.number="row.quantity" type="number" min="0.0001" step="0.0001" class="pdm-bom-quantity-editor" aria-label="数量">
-              <span v-else class="pdm-bom-cell-value">{{ quantityDisplay(row) }}</span>
+              <span v-else class="pdm-bom-cell-value" :title="quantityTitle(row)">{{ quantityDisplay(row) }}</span>
+            </td>
+            <td class="pdm-bom-drawing-audit-cell">
+              <div v-if="drawingAudit(row)" class="pdm-bom-audit" :class="drawingAudit(row)!.blocking ? 'is-blocking' : 'is-matched'" :title="drawingAudit(row)!.detail"><strong>{{ drawingAudit(row)!.label }}</strong><small>{{ drawingAudit(row)!.detail }}</small></div>
+              <span v-else class="pdm-bom-cell-value">—</span>
             </td>
             <td>
               <input v-if="!row.id && canEditCurrentView && !isSourceView" v-model.trim="row.revision" required aria-label="版本">
@@ -1299,13 +1385,17 @@ function submitBatchUpdate() {
             <td class="pdm-bom-reconciliation-cell">
               <div class="pdm-bom-reconciliation" :title="reconciliationDescription(row)">
                 <span class="pdm-bom-source" :class="{ 'is-success': hasReconciliationSuccess(row), 'is-warning': hasReconciliationWarning(row) }">{{ reconciliationLabel(row) }}</span>
-                <small>{{ reconciliationDescription(row) }}</small>
+                <div v-if="row.manualUnmatched && canEditCurrentView" class="pdm-bom-reconciliation-actions">
+                  <button type="button" class="is-retain" :disabled="pending" :aria-label="`确认保留人工BOM项 ${row.drawingNumber || row.name}`" @click="confirmManualRetain(row)">保留</button>
+                  <button type="button" class="is-delete" :disabled="pending" :aria-label="`确认删除人工BOM项 ${row.drawingNumber || row.name}`" @click="confirmManualDelete(row)">删除</button>
+                </div>
+                <small v-else>{{ reconciliationDescription(row) }}</small>
               </div>
               <small v-if="row.propertyWritebackStatus" class="pdm-bom-writeback-status">{{ writebackLabel(row.propertyWritebackStatus) }}</small>
             </td>
             <td class="pdm-bom-data-status-cell" :class="missingRequiredFields(row).length ? 'is-incomplete' : 'is-complete'"><span class="pdm-bom-data-status" :class="missingRequiredFields(row).length ? 'is-incomplete' : 'is-complete'" :title="missingRequiredFields(row).length ? `待完善：${missingRequiredFields(row).join('、')}` : '必填资料已齐全'">{{ dataStatusLabel(row) }}</span></td>
           </tr>
-          <tr v-if="filteredRows.length === 0"><td colspan="18" class="pdm-empty-info">{{ rows.length ? '没有符合当前筛选条件的物料。' : isSourceView ? '当前没有图档源数据。' : '当前BOM为空，系统自动按无此类物料处理；可新增物料或导入标准XLSX。' }}</td></tr>
+          <tr v-if="filteredRows.length === 0"><td colspan="19" class="pdm-empty-info">{{ rows.length ? '没有符合当前筛选条件的物料。' : isSourceView ? '当前没有图档源数据。' : '当前BOM为空，系统自动按无此类物料处理；可新增物料或导入标准XLSX。' }}</td></tr>
         </tbody>
       </table>
     </div>
@@ -1419,6 +1509,7 @@ function submitBatchUpdate() {
 
 <style scoped>
 .pdm-bom-manager-panel{font-size:12px}.pdm-bom-manager-panel :deep(button),.pdm-bom-manager-panel :deep(input),.pdm-bom-manager-panel :deep(select),.pdm-bom-manager-panel :deep(textarea),.pdm-bom-manager-panel :deep(table),.pdm-bom-manager-panel :deep(label),.pdm-bom-manager-panel :deep(small),.pdm-bom-manager-panel :deep(strong){font-size:12px}
+.pdm-bom-manager-panel :deep(.pdm-bom-reconciliation),.pdm-bom-manager-panel :deep(.pdm-bom-reconciliation small){font-size:11px}
 .pdm-bom-release-strip{display:flex;align-items:center;gap:22px;padding:8px 11px;border:1px solid #bfdbfe;border-radius:7px;background:#eff6ff;font-size:12px;white-space:nowrap}.pdm-bom-release-strip>div{display:flex;align-items:center;gap:6px;white-space:nowrap}.pdm-bom-release-strip small,.pdm-bom-release-strip strong{font-size:12px;line-height:1.2;white-space:nowrap}.pdm-bom-release-strip small{color:var(--pdm-muted)}.pdm-bom-release-strip strong.is-active{color:#b45309}.pdm-bom-release-strip-actions{display:flex!important;grid-auto-flow:column;gap:6px;margin-left:auto}.pdm-bom-release-strip-actions button{box-sizing:border-box;width:70px;min-width:70px;height:28px;min-height:28px;padding:4px 10px;font-size:12px;line-height:18px;white-space:nowrap}.pdm-bom-release-workspace{display:grid;grid-template-columns:210px minmax(0,1fr);gap:12px;min-height:100%}.pdm-bom-release-history{border:1px solid var(--pdm-border);border-radius:7px;overflow:auto;background:#fff}.pdm-bom-release-history header{display:flex;align-items:center;justify-content:space-between;padding:10px;border-bottom:1px solid var(--pdm-border)}.pdm-bom-release-history>button{display:flex;width:100%;justify-content:space-between;gap:8px;padding:10px;border:0;border-bottom:1px solid var(--pdm-border);background:#fff;text-align:left;color:var(--pdm-text)}.pdm-bom-release-history>button:hover,.pdm-bom-release-history>button.is-active{background:#eff6ff}.pdm-bom-release-history>button span{display:grid;gap:3px;min-width:0}.pdm-bom-release-history>button small{overflow:hidden;text-overflow:ellipsis;color:var(--pdm-muted)}.pdm-bom-release-history>button em{font-style:normal;color:#2563eb;white-space:nowrap}.pdm-bom-release-history>p{padding:12px;color:var(--pdm-muted)}.pdm-bom-release-workspace .release-center{min-width:0;margin:0}@media(max-width:900px){.pdm-bom-release-strip{align-items:flex-start;flex-wrap:wrap}.pdm-bom-release-strip-actions{margin-left:0}.pdm-bom-release-workspace{grid-template-columns:1fr}.pdm-bom-release-history{max-height:180px}}
 .pdm-bom-release-strip{box-sizing:border-box;height:38px;min-height:38px;padding-block:4px;background:#fff}
 @media(max-width:900px){.pdm-bom-release-strip{height:auto}}

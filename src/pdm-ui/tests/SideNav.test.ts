@@ -19,6 +19,14 @@ describe('SideNav', () => {
     expect(wrapper.text()).not.toContain('料品与U9C')
   })
 
+  it('shows the combined material task count on material management', () => {
+    const wrapper = mount(SideNav, { props: { active: 'projects', materialCount: 3 } })
+    const materialItem = wrapper.findAll('.pdm-sidebar__nav .pdm-nav-item')[2]!
+
+    expect(materialItem.text()).toContain('料品管理')
+    expect(materialItem.get('em').text()).toBe('3')
+  })
+
   it('uses the six-face animated PLM cube for the web and desktop shell brand', () => {
     const wrapper = mount(SideNav, {
       props: {
@@ -30,16 +38,17 @@ describe('SideNav', () => {
     expect(brandMark.element.tagName).toBe('SPAN')
     expect(brandMark.attributes('aria-hidden')).toBe('true')
     expect(brandMark.findAll('.plm-cube-icon__face').map(face => face.text())).toEqual(['P', 'L', 'M', '阿', '普', '顿'])
-    expect(brandMark.findAll('.plm-cube-icon__tile')).toHaveLength(54)
+    expect(brandMark.findAll('.plm-cube-icon__tile')).toHaveLength(24)
     expect(brandMark.findAll('.plm-cube-icon__label.is-latin').map(label => label.text())).toEqual(['P', 'L', 'M'])
   })
 
-  it('uses the two-line product lifecycle subtitle beside the cube', () => {
+  it('uses the UPTON wordmark beside the cube', () => {
     const wrapper = mount(SideNav, { props: { active: 'projects' } })
 
-    expect(wrapper.find('.pdm-sidebar__brand-logo').exists()).toBe(false)
-    expect(wrapper.get('.pdm-sidebar__brand-copy').text()).toBe('产品生命周期管理')
-    expect(wrapper.findAll('.pdm-sidebar__brand-copy span').map(line => line.text())).toEqual(['产品生命', '周期管理'])
+    const logo = wrapper.get('.pdm-sidebar__brand-logo')
+    expect(logo.attributes('src')).toContain('upton-logo-white.png')
+    expect(logo.attributes('alt')).toBe('UPTON')
+    expect(wrapper.get('.pdm-sidebar__brand-copy').text()).toBe('')
   })
 
   it('exposes navigation labels in collapsed mode', () => {

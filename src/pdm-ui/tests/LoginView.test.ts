@@ -30,6 +30,26 @@ describe('LoginView', () => {
     wrapper.unmount()
   })
 
+  it('renders only the local account login controls', () => {
+    const wrapper = mount(LoginView, {
+      props: { pending: false, error: '', online: true, compact: true },
+      global: {
+        stubs: {
+          ElButton: true,
+          ElDialog: true,
+          ElForm: true,
+          ElFormItem: true,
+          ElInput: true,
+        },
+      },
+    })
+
+    expect(wrapper.findAll('.pdm-login-input-frame')).toHaveLength(2)
+    expect(wrapper.get('button[type="submit"]').text()).toBe('登录')
+    expect(wrapper.text()).not.toMatch(/注册|Google|Apple/i)
+    wrapper.unmount()
+  })
+
   it('moves the character bodies and pupils with the pointer', async () => {
     const wrapper = mount(PdmLoginCharacters)
     expect(wrapper.findAll('.pupil-dot')).toHaveLength(4)

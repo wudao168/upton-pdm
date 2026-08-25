@@ -100,7 +100,8 @@ public sealed record U9BomWriteCommand(
     int BomSort = 0,
     int BomType = 0,
     string? ProjectMapNum = null,
-    string? Explain = null);
+    string? Explain = null,
+    bool AllowEmptyCreate = false);
 
 public sealed record U9BomWritePreview(
     U9BomWriteOperation Operation,

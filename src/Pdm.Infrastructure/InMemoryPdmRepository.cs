@@ -44,8 +44,13 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
     private readonly Dictionary<Guid, CadPropertyWriteback> cadPropertyWritebacks = new();
     private DocumentReferenceNode referenceTree;
     private Guid referenceRootDocumentId = SeedData.RootDocumentId;
-    private PdmSystemSettings systemSettings = new(@"D:\PDM\Vault", @"D:\PDM\Release");
+    private PdmSystemSettings systemSettings = new(@"D:\PDM\Vault", @"D:\PDM\Release")
+    {
+        MaterialAttachmentRoot = @"D:\PDM\MaterialAttachments"
+    };
     private CrmIntegrationConfiguration crmIntegrationConfiguration = new(string.Empty, string.Empty, string.Empty, false, 60, null, 0, null, null);
+
+    public int BomBatchApplyCount { get; private set; }
 
     public InMemoryPdmRepository(TimeProvider timeProvider)
     {
@@ -1079,6 +1084,7 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
     {
         lock (gate)
         {
+            BomBatchApplyCount++;
             bomItems.RemoveAll(item => item.ProjectId == projectId && item.Kind is BomKind.Standard or BomKind.NonStandard or BomKind.Unclassified or BomKind.Electrical);
             bomItems.AddRange(standardItems);
             bomItems.AddRange(nonStandardItems);
@@ -1309,16 +1315,24 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
     public Task<PdmDocument> CheckoutAsync(Guid documentId, string actor, CancellationToken cancellationToken)
     {
         var now = timeProvider.GetUtcNow();
-        return CheckoutAsync(documentId, actor, Guid.NewGuid(), "legacy-client", now.AddMinutes(15), cancellationToken);
+        return CheckoutAsync(documentId, actor, Guid.NewGuid(), "legacy-client", now.AddMinutes(15), null, cancellationToken);
     }
 
     public Task<PdmDocument> CheckoutAsync(Guid documentId, string actor, Guid sessionId, string machineName, DateTimeOffset leaseExpiresAt, CancellationToken cancellationToken)
+        => CheckoutAsync(documentId, actor, sessionId, machineName, leaseExpiresAt, null, cancellationToken);
+
+    public Task<PdmDocument> CheckoutAsync(Guid documentId, string actor, Guid sessionId, string machineName, DateTimeOffset leaseExpiresAt, Guid? drawingReviewWritebackId, CancellationToken cancellationToken)
     {
         lock (gate)
         {
             if (!documents.TryGetValue(documentId, out var document))
             {
                 throw new PdmNotFoundException("图档不存在。 ");
+            }
+            if (IsDocumentUnderActiveDrawingReview(documentId)
+                && (!drawingReviewWritebackId.HasValue || !IsActiveDrawingReviewWriteback(documentId, drawingReviewWritebackId.Value)))
+            {
+                throw new PdmConflictException("图档正在进行图纸审核，不能获取编辑权限。");
             }
 
             var now = timeProvider.GetUtcNow();
@@ -1457,15 +1471,23 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
 
     public Task<DocumentCheckInResult> CheckInVersionAsync(Guid documentId, string actor, DocumentVersionCommit commit, CancellationToken cancellationToken)
     {
-        return CheckInVersionAsync(documentId, actor, CurrentSession(documentId), commit, cancellationToken);
+        return CheckInVersionAsync(documentId, actor, CurrentSession(documentId), commit, null, cancellationToken);
     }
 
     public Task<DocumentCheckInResult> CheckInVersionAsync(Guid documentId, string actor, Guid sessionId, DocumentVersionCommit commit, CancellationToken cancellationToken)
+        => CheckInVersionAsync(documentId, actor, sessionId, commit, null, cancellationToken);
+
+    public Task<DocumentCheckInResult> CheckInVersionAsync(Guid documentId, string actor, Guid sessionId, DocumentVersionCommit commit, Guid? drawingReviewWritebackId, CancellationToken cancellationToken)
     {
         lock (gate)
         {
             if (!documents.TryGetValue(documentId, out var document)) throw new PdmNotFoundException("图档不存在。");
             EnsureSessionOwner(document, actor, sessionId, "提交存档");
+            if (IsDocumentUnderActiveDrawingReview(documentId)
+                && (!drawingReviewWritebackId.HasValue || !IsActiveDrawingReviewWriteback(documentId, drawingReviewWritebackId.Value)))
+            {
+                throw new PdmConflictException("图档正在进行图纸审核，不能提交存档。");
+            }
             var renamedDocument = document with
             {
                 DrawingNumber = commit.DrawingNumber ?? document.DrawingNumber,

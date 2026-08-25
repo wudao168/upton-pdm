@@ -6,6 +6,7 @@ import App from '../src/App.vue'
 const projectId = '11111111-1111-1111-1111-111111111111'
 let materialRequestsUnauthorized = false
 let resumeRequestsUnauthorized = false
+let drawingReviewsResponse: Array<Record<string, unknown>> = []
 
 function json(value: unknown, status = 200) {
   return new Response(JSON.stringify(value), { status, headers: { 'Content-Type': 'application/json' } })
@@ -130,6 +131,10 @@ function installApiMock(projectsBeforeDefault: Array<Record<string, unknown>> = 
     ])
     if (url.endsWith(`/api/projects/${projectId}/audit?take=200`)) return json([{ id: 'audit-1', occurredAt: '2026-08-11T02:00:00Z', actor: 'engineer', action: 'document.checkin', entityType: 'DocumentVersion', entityId: 'version-w2', detail: 'W2' }])
     if (url.endsWith(`/api/projects/${projectId}/folders`)) return json([])
+    if (url.endsWith(`/api/projects/${projectId}/drawing-reviews`) && (!init?.method || init.method === 'GET')) return json(drawingReviewsResponse)
+    if (url.endsWith(`/api/projects/${projectId}/drawing-review-candidates`)) return json([
+      { modelDocumentId: 'doc-root', drawingDocumentId: 'doc-drawing', drawingNumber: 'REAL-ASM-001', name: '真实总装配', configuration: '默认', bomKinds: ['NonStandard'], modelRevision: 'W2', drawingRevision: 'W2', state: 'Ready', selectable: true },
+    ])
     if (url.endsWith(`/api/projects/${projectId}`)) return json(projects.find(item => item.id === projectId) ?? projects[0])
     if (url.endsWith('/document-relations')) return json([
       { modelDocumentId: 'doc-root', drawingDocumentId: 'doc-drawing' },
@@ -238,6 +243,7 @@ describe('PLM client workspace', () => {
   beforeEach(() => {
     materialRequestsUnauthorized = false
     resumeRequestsUnauthorized = false
+    drawingReviewsResponse = []
     window.sessionStorage.clear()
     window.localStorage.clear()
     Object.defineProperty(window, 'chrome', { configurable: true, value: undefined })
@@ -272,7 +278,85 @@ describe('PLM client workspace', () => {
     await wrapper.get('button[aria-label="图纸审核"]').trigger('click')
 
     expect(wrapper.find('[aria-label="图纸审核面板"]').exists()).toBe(true)
-    expect(buttonByText(wrapper, '发起本项目图纸审核').exists()).toBe(true)
+    expect(buttonByText(wrapper, '选择范围并发起审核').exists()).toBe(true)
+    wrapper.unmount()
+  })
+
+  it('does not reload the preview when the drawing review panel is opened', async () => {
+    const postMessage = vi.fn()
+    Object.defineProperty(window, 'chrome', {
+      configurable: true,
+      value: { webview: { postMessage, addEventListener: vi.fn() } },
+    })
+    drawingReviewsResponse = [{
+      id: 'review-1', projectId, number: 'DR-20260823-0001', state: 'InReview', createdBy: 'submitter', createdAt: '2026-08-23T00:00:00Z', markups: [],
+      items: [{
+        id: 'review-item-1', packageId: 'review-1', bomItemId: 'bom-1', drawingNumber: 'REAL-ASM-001', name: '真实总装配',
+        modelDocumentId: 'doc-root', modelVersionId: 'version-w2', modelRevision: 'W2', modelSha256: 'A'.repeat(64), modelCreatedBy: 'designer',
+        drawingDocumentId: 'doc-drawing', drawingVersionId: 'drawing-version-w2', drawingRevision: 'W2', drawingSha256: 'B'.repeat(64), drawingCreatedBy: 'drawing-designer',
+        modelState: 'Pending', drawingState: 'Pending', effectiveModelVersionId: 'version-w2', effectiveDrawingVersionId: 'drawing-version-w2',
+      }],
+    }]
+    const wrapper = mount(App, { attachTo: document.body, global: { plugins: [ElementPlus] } })
+    await login(wrapper)
+    const previewCallsBeforeOpen = postMessage.mock.calls.filter(([message]) => message.type === 'preview-document').length
+
+    await wrapper.get('button[aria-label="图纸审核"]').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.find('[aria-label="图纸审核面板"]').exists()).toBe(false)
+    expect(postMessage).toHaveBeenCalledWith(expect.objectContaining({
+      type: 'review-overlay-state',
+      payload: expect.objectContaining({ visible: true, selectedDocumentId: 'doc-root' }),
+    }))
+    expect(postMessage.mock.calls.filter(([message]) => message.type === 'preview-document')).toHaveLength(previewCallsBeforeOpen)
+    wrapper.unmount()
+  })
+
+  it('separates read-only review opening from the property writeback workflow', async () => {
+    const postMessage = vi.fn()
+    Object.defineProperty(window, 'chrome', {
+      configurable: true,
+      value: { webview: { postMessage, addEventListener: vi.fn() } },
+    })
+    drawingReviewsResponse = [{
+      id: 'review-writeback', projectId, number: 'DR-20260824-0001', state: 'WritingProperties', createdBy: 'submitter', createdAt: '2026-08-24T00:00:00Z', markups: [],
+      items: [{
+        id: 'review-item-writeback', packageId: 'review-writeback', bomItemId: 'bom-1', drawingNumber: 'REAL-ASM-001', name: '真实总装配',
+        modelDocumentId: 'doc-root', modelVersionId: 'version-w2', modelRevision: 'W2', modelSha256: 'A'.repeat(64), modelCreatedBy: 'designer',
+        drawingDocumentId: 'doc-drawing', drawingVersionId: 'drawing-version-w2', drawingRevision: 'W2', drawingSha256: 'B'.repeat(64), drawingCreatedBy: 'drawing-designer',
+        modelState: 'Approved', drawingState: 'Approved', effectiveModelVersionId: 'version-w2', effectiveDrawingVersionId: 'drawing-version-w2',
+      }],
+    }]
+    const wrapper = mount(App, { attachTo: document.body, global: { plugins: [ElementPlus] } })
+    await login(wrapper)
+    window.dispatchEvent(new CustomEvent('pdm-solidworks-capability', { detail: { available: true } }))
+    await flushPromises()
+
+    await buttonByText(wrapper, '打开审核版（只读）').trigger('click')
+    expect(postMessage).toHaveBeenCalledWith({
+      type: 'open-document',
+      payload: expect.objectContaining({
+        projectId,
+        documentId: 'doc-root',
+        mode: 'SpecificReadOnly',
+        versionId: 'version-w2',
+      }),
+    })
+
+    window.dispatchEvent(new CustomEvent('pdm-solidworks-status', { detail: { state: 'ready', message: '请求已发送' } }))
+    await flushPromises()
+    await buttonByText(wrapper, '回写审核标记').trigger('click')
+    expect(postMessage).toHaveBeenCalledWith({
+      type: 'open-document',
+      payload: expect.objectContaining({
+        projectId,
+        documentId: 'doc-root',
+        mode: 'PropertyWriteback',
+        versionId: undefined,
+      }),
+    })
+
     wrapper.unmount()
   })
 
@@ -291,7 +375,7 @@ describe('PLM client workspace', () => {
     wrapper.unmount()
   })
 
-  it('uses the last project page as the project center home and keeps the project list separate', async () => {
+  it('uses the project center overview as the default home and keeps the project list separate', async () => {
     const wrapper = mount(App, { attachTo: document.body, global: { plugins: [ElementPlus] } })
     await openLogin(wrapper)
     await wrapper.get('input[name="username"]').setValue('engineer')
@@ -310,7 +394,7 @@ describe('PLM client workspace', () => {
     const restoredProjectPage = mount(App, { attachTo: document.body, global: { plugins: [ElementPlus] } })
     await flushPromises()
     expect(restoredProjectPage.find('.pdm-project-workspace').exists()).toBe(true)
-    expect(restoredProjectPage.get('.pdm-project-tabs button.is-active').text()).toBe('BOM')
+    expect(restoredProjectPage.get('.pdm-project-tabs button.is-active').text()).toBe('概览')
 
     await buttonByText(restoredProjectPage, '项目列表').trigger('click')
     expect(restoredProjectPage.get('[aria-label="项目中心"]').text()).toContain('PRJ-REAL-001')
@@ -318,19 +402,16 @@ describe('PLM client workspace', () => {
     expect(window.localStorage.getItem('upton-pdm-active-navigation')).toBe('projects')
 
     restoredProjectPage.unmount()
-    const restoredList = mount(App, { attachTo: document.body, global: { plugins: [ElementPlus] } })
+    const restoredHome = mount(App, { attachTo: document.body, global: { plugins: [ElementPlus] } })
     await flushPromises()
-    expect(restoredList.get('[aria-label="项目中心"]').text()).toContain('PRJ-REAL-001')
-    expect(restoredList.get('.pdm-sidebar__nav .pdm-nav-item.is-active').text()).toContain('项目列表')
-
-    await buttonByText(restoredList, '项目中心').trigger('click')
-    await flushPromises()
-    expect(restoredList.find('.pdm-project-workspace').exists()).toBe(true)
-    expect(restoredList.get('.pdm-project-tabs button.is-active').text()).toBe('概览')
+    expect(restoredHome.text()).toContain('PRJ-REAL-001')
+    expect(restoredHome.get('.pdm-sidebar__nav .pdm-nav-item.is-active').text()).toContain('项目中心')
+    expect(restoredHome.find('.pdm-project-workspace').exists()).toBe(true)
+    expect(restoredHome.get('.pdm-project-tabs button.is-active').text()).toBe('概览')
     expect(JSON.parse(window.localStorage.getItem('upton-pdm-project-center') ?? '{}')).toEqual({ projectId, tab: 'overview' })
     expect(window.localStorage.getItem('upton-pdm-active-navigation')).toBe('project-center')
 
-    restoredList.unmount()
+    restoredHome.unmount()
     const restored = mount(App, { attachTo: document.body, global: { plugins: [ElementPlus] } })
     await flushPromises()
     expect(restored.find('.pdm-project-workspace').exists()).toBe(true)
@@ -375,6 +456,7 @@ describe('PLM client workspace', () => {
     })
     const wrapper = mount(App, { attachTo: document.body, global: { plugins: [ElementPlus] } })
     expect(wrapper.find('[aria-label="未登录主页"]').exists()).toBe(true)
+    expect(wrapper.find('form[aria-label="登录PLM"]').exists()).toBe(true)
     expect(vi.mocked(fetch).mock.calls.filter(([input]) => String(input).endsWith('/api/auth/login'))).toHaveLength(0)
 
     await openLogin(wrapper)
@@ -398,7 +480,7 @@ describe('PLM client workspace', () => {
       type: 'credentials-save',
       payload: { username: 'engineer', password: 'correct-password' },
     })
-    expect(wrapper.find('.pdm-login-button').exists()).toBe(false)
+    expect(wrapper.find('form[aria-label="登录PLM"]').exists()).toBe(false)
     expect(window.localStorage.getItem('upton-pdm-project-center')).toContain(projectId)
     expect([...Array(window.localStorage.length)].map((_, index) => window.localStorage.key(index)).join(' ')).not.toContain('credential')
     expect([...Array(window.localStorage.length)].map((_, index) => window.localStorage.getItem(window.localStorage.key(index) ?? '')).join(' ')).not.toContain('correct-password')
@@ -406,8 +488,7 @@ describe('PLM client workspace', () => {
 
     await buttonByText(wrapper, '退出').trigger('click')
     await flushPromises()
-    expect(wrapper.find('.pdm-login-button').exists()).toBe(true)
-    expect(wrapper.get('.el-modal-dialog').attributes('style')).toContain('display: none')
+    expect(wrapper.find('form[aria-label="登录PLM"]').exists()).toBe(true)
     wrapper.unmount()
   })
 
@@ -446,7 +527,7 @@ describe('PLM client workspace', () => {
     await buttonByText(wrapper, '料品管理').trigger('click')
     await flushPromises()
 
-    expect(wrapper.find('.pdm-login-button').exists()).toBe(false)
+    expect(wrapper.find('form[aria-label="登录PLM"]').exists()).toBe(false)
     expect(window.localStorage.getItem('upton-pdm-session')).toContain('renewed-token')
     expect(vi.mocked(fetch).mock.calls.filter(([input]) => String(input).endsWith('/api/auth/resume'))).toHaveLength(1)
     expect(window.sessionStorage.getItem('upton-pdm-session')).toBeNull()
@@ -462,7 +543,7 @@ describe('PLM client workspace', () => {
     await buttonByText(wrapper, '料品管理').trigger('click')
     await flushPromises()
 
-    expect(wrapper.find('.pdm-login-button').exists()).toBe(true)
+    expect(wrapper.find('form[aria-label="登录PLM"]').exists()).toBe(true)
     expect(wrapper.text()).toContain('登录已失效，请重新登录。')
     expect(window.localStorage.getItem('upton-pdm-session')).toBeNull()
     wrapper.unmount()
@@ -506,7 +587,8 @@ describe('PLM client workspace', () => {
   it('logs in and renders project, tree, BOM and release data returned by the API', async () => {
     const wrapper = mount(App, { attachTo: document.body, global: { plugins: [ElementPlus] } })
     expect(wrapper.find('[aria-label="未登录主页"]').exists()).toBe(true)
-    expect(wrapper.find('.pdm-login-button').exists()).toBe(true)
+    expect(wrapper.find('form[aria-label="登录PLM"]').exists()).toBe(true)
+    expect(wrapper.find('.el-overlay-dialog').exists()).toBe(false)
 
     await login(wrapper, false)
 
@@ -877,7 +959,8 @@ describe('PLM client workspace', () => {
 
     const slot = wrapper.get('[aria-label="客户端内嵌eDrawings预览区"]')
     expect(slot.get('[aria-label="正在加载 eDrawings"]')).toBeTruthy()
-    expect(slot.findAll('.pdm-square-loader__square')).toHaveLength(8)
+    expect(slot.get('.plm-cube-icon').classes()).toContain('is-axial')
+    expect(slot.findAll('.plm-cube-icon__face')).toHaveLength(6)
     vi.spyOn(slot.element, 'getBoundingClientRect').mockReturnValue({
       x: 260, y: 180, left: 260, top: 180, right: 960, bottom: 700,
       width: 700, height: 520, toJSON: () => ({}),
@@ -946,6 +1029,36 @@ describe('PLM client workspace', () => {
     await new Promise(resolve => window.setTimeout(resolve, 20))
     expect(postMessage.mock.calls.filter(([message]) => message.type === 'preview-host-bounds').length).toBeGreaterThan(boundsCallsBeforeProjectBrowser)
 
+    const previewDocumentCallsBeforeReview = postMessage.mock.calls.filter(([message]) => message.type === 'preview-document').length
+    await wrapper.get('button[aria-label="图纸审核"]').trigger('click')
+    await flushPromises()
+    expect(wrapper.find('[aria-label="图纸审核面板"]').exists()).toBe(false)
+    window.dispatchEvent(new Event('resize'))
+    await new Promise<void>(resolve => window.requestAnimationFrame(() => resolve()))
+    await flushPromises()
+    expect(postMessage).toHaveBeenCalledWith(expect.objectContaining({
+      type: 'preview-host-bounds',
+      payload: expect.objectContaining({ left: 260, width: 700, visible: true }),
+    }))
+    expect(postMessage).toHaveBeenCalledWith(expect.objectContaining({
+      type: 'review-overlay-bounds',
+      payload: expect.objectContaining({ left: 600, width: 360, height: 520, visible: true }),
+    }))
+    expect(postMessage).toHaveBeenCalledWith(expect.objectContaining({
+      type: 'review-overlay-state',
+      payload: expect.objectContaining({ visible: true, selectedDocumentId: 'doc-root' }),
+    }))
+    expect(postMessage.mock.calls.filter(([message]) => message.type === 'preview-document')).toHaveLength(previewDocumentCallsBeforeReview)
+
+    const reviewMessageListener = vi.mocked(window.chrome!.webview!.addEventListener).mock.calls.find(([type]) => type === 'message')?.[1]
+    expect(reviewMessageListener).toBeTruthy()
+    reviewMessageListener!(new MessageEvent('message', { data: { type: 'review-overlay-action', payload: { action: 'close' } } }))
+    await flushPromises()
+    expect(postMessage).toHaveBeenCalledWith(expect.objectContaining({
+      type: 'review-overlay-state',
+      payload: expect.objectContaining({ visible: false }),
+    }))
+
     const drawingFilter = wrapper.findAll('button[role="tab"]').find(button => button.text().includes('2D'))
     expect(drawingFilter).toBeTruthy()
     await drawingFilter!.trigger('click')
@@ -966,6 +1079,12 @@ describe('PLM client workspace', () => {
     await wrapper.get('.pdm-related-documents button').trigger('click')
     await flushPromises()
     expect(postMessage.mock.calls.filter(([message]) => message.type === 'preview-document')).toHaveLength(3)
+
+    const hideCallsBeforeTabChange = postMessage.mock.calls.filter(([message]) => message.type === 'preview-host-hide').length
+    const bomTab = wrapper.findAll('.pdm-project-tabs button').find(button => button.text().includes('BOM'))
+    expect(bomTab).toBeTruthy()
+    await bomTab!.trigger('click')
+    expect(postMessage.mock.calls.filter(([message]) => message.type === 'preview-host-hide').length).toBeGreaterThan(hideCallsBeforeTabChange)
   })
 
   it('shows an actionable fallback when a historical version has no STP/PDF preview', async () => {

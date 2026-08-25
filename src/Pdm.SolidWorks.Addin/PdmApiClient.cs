@@ -119,8 +119,8 @@ internal sealed class PdmApiClient : IDisposable
     public Task<List<DocumentVersionDto>> GetVersionsAsync(Guid documentId, CancellationToken cancellationToken) =>
         GetJsonAsync<List<DocumentVersionDto>>(string.Concat("api/documents/", documentId, "/versions"), cancellationToken);
 
-    public Task<DocumentDto> CheckoutAsync(Guid documentId, Guid sessionId, string machineName, CancellationToken cancellationToken) =>
-        PostJsonAsync<DocumentDto>(string.Concat("api/documents/", documentId, "/checkout"), new { sessionId, machineName }, cancellationToken);
+    public Task<DocumentDto> CheckoutAsync(Guid documentId, Guid sessionId, string machineName, CancellationToken cancellationToken, Guid? drawingReviewWritebackId = null) =>
+        PostJsonAsync<DocumentDto>(string.Concat("api/documents/", documentId, "/checkout"), new { sessionId, machineName, drawingReviewWritebackId }, cancellationToken);
 
     public Task<DocumentDto> CompleteEditWithoutChangesAsync(Guid documentId, Guid checkoutSessionId, string sha256, CancellationToken cancellationToken) =>
         PostJsonAsync<DocumentDto>(string.Concat("api/documents/", documentId, "/complete-edit"), new { sha256, checkoutSessionId }, cancellationToken);
@@ -170,7 +170,8 @@ internal sealed class PdmApiClient : IDisposable
         bool forceVersion,
         string drawingNumber,
         string name,
-        CancellationToken cancellationToken) =>
+        CancellationToken cancellationToken,
+        Guid? drawingReviewWritebackId = null) =>
         PostJsonAsync<CheckInResultDto>(
             string.Concat("api/documents/", documentId, "/checkin"),
             new
@@ -187,7 +188,8 @@ internal sealed class PdmApiClient : IDisposable
                 forceVersion,
                 drawingNumber,
                 name,
-                fileName = root.FileName
+                fileName = root.FileName,
+                drawingReviewWritebackId
             },
             cancellationToken);
 
@@ -588,6 +590,7 @@ internal sealed class DocumentDto
     public string CheckedOutBy { get; set; }
     public DateTime? CheckedOutAt { get; set; }
     public Guid? CheckoutSessionId { get; set; }
+    public bool DrawingReviewLocked { get; set; }
     public string CheckoutMachine { get; set; }
     public DateTime? CheckoutLastHeartbeatAt { get; set; }
     public DateTime? CheckoutLeaseExpiresAt { get; set; }

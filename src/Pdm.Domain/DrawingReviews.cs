@@ -6,7 +6,16 @@ public enum DrawingReviewPackageState
     ChangesRequested,
     WritingProperties,
     Approved,
-    Stale
+    Stale,
+    Withdrawn
+}
+
+public enum DrawingReviewCandidateState
+{
+    Ready,
+    InReview,
+    ApprovedCurrent,
+    Unavailable
 }
 
 public enum DrawingReviewTarget
@@ -20,7 +29,8 @@ public enum DrawingReviewTargetState
     Pending,
     ChangesRequested,
     Approved,
-    Marked
+    Marked,
+    NotRequired
 }
 
 public enum DrawingReviewDecision
@@ -57,9 +67,44 @@ public sealed record DrawingReviewPackage
 
     public DateTimeOffset? ApprovedAt { get; init; }
 
+    public string? WithdrawnBy { get; init; }
+
+    public DateTimeOffset? WithdrawnAt { get; init; }
+
+    public string? WithdrawalReason { get; init; }
+
     public IReadOnlyList<DrawingReviewItem> Items { get; init; } = [];
 
     public IReadOnlyList<DrawingReviewMarkup> Markups { get; init; } = [];
+}
+
+public sealed record DrawingReviewCandidate
+{
+    public required Guid CandidateId { get; init; }
+
+    public Guid? BomItemId { get; init; }
+
+    public Guid? ModelDocumentId { get; init; }
+
+    public Guid? DrawingDocumentId { get; init; }
+
+    public required string DrawingNumber { get; init; }
+
+    public required string Name { get; init; }
+
+    public string? Configuration { get; init; }
+
+    public IReadOnlyList<BomKind> BomKinds { get; init; } = [];
+
+    public required string ModelRevision { get; init; }
+
+    public string? DrawingRevision { get; init; }
+
+    public required DrawingReviewCandidateState State { get; init; }
+
+    public string? Reason { get; init; }
+
+    public bool Selectable => State is DrawingReviewCandidateState.Ready or DrawingReviewCandidateState.ApprovedCurrent;
 }
 
 public sealed record DrawingReviewItem
@@ -86,15 +131,15 @@ public sealed record DrawingReviewItem
 
     public required string ModelCreatedBy { get; init; }
 
-    public required Guid DrawingDocumentId { get; init; }
+    public required Guid? DrawingDocumentId { get; init; }
 
-    public required Guid DrawingVersionId { get; init; }
+    public required Guid? DrawingVersionId { get; init; }
 
-    public required string DrawingRevision { get; init; }
+    public required string? DrawingRevision { get; init; }
 
-    public required string DrawingSha256 { get; init; }
+    public required string? DrawingSha256 { get; init; }
 
-    public required string DrawingCreatedBy { get; init; }
+    public required string? DrawingCreatedBy { get; init; }
 
     public DrawingReviewTargetState ModelState { get; init; } = DrawingReviewTargetState.Pending;
 
@@ -126,7 +171,9 @@ public sealed record DrawingReviewItem
 
     public Guid EffectiveModelVersionId => ModelResultVersionId ?? ModelVersionId;
 
-    public Guid EffectiveDrawingVersionId => DrawingResultVersionId ?? DrawingVersionId;
+    public Guid? EffectiveDrawingVersionId => DrawingResultVersionId ?? DrawingVersionId;
+
+    public bool RequiresDrawingReview => DrawingDocumentId.HasValue;
 }
 
 public sealed record DrawingReviewMarkup
@@ -163,4 +210,4 @@ public sealed record DrawingReviewMarkup
 public sealed record DrawingReviewWritebackRequest(
     Guid ItemId,
     CadPropertyWriteback Model,
-    CadPropertyWriteback Drawing);
+    CadPropertyWriteback? Drawing);

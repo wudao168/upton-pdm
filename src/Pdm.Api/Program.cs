@@ -91,11 +91,13 @@ if (string.Equals(databaseOptions.Provider, "MySql", StringComparison.OrdinalIgn
 {
     builder.Services.AddScoped<IPdmRepository, MySqlPdmRepository>();
     builder.Services.AddScoped<IMaterialRepository, MySqlMaterialRepository>();
+    builder.Services.AddScoped<IProgramTemplateRepository, MySqlProgramTemplateRepository>();
 }
 else
 {
     builder.Services.AddSingleton<IPdmRepository, InMemoryPdmRepository>();
     builder.Services.AddSingleton<IMaterialRepository, InMemoryMaterialRepository>();
+    builder.Services.AddSingleton<IProgramTemplateRepository, InMemoryProgramTemplateRepository>();
 }
 
 builder.Services.AddScoped<MySqlMigrationRunner>();
@@ -103,6 +105,8 @@ builder.Services.AddSingleton<IPasswordService, Pbkdf2PasswordService>();
 builder.Services.AddSingleton<ITokenIssuer, JwtTokenIssuer>();
 builder.Services.AddSingleton<IPersistentSessionTokenService, PersistentSessionTokenService>();
 builder.Services.AddScoped<IFileStorage, LocalFileStorage>();
+builder.Services.AddScoped<IMaterialAttachmentStorage, LocalMaterialAttachmentStorage>();
+builder.Services.AddScoped<IProgramTemplateStorage, LocalProgramTemplateStorage>();
 builder.Services.AddSingleton<IServerPreviewConverter, SolidWorksServerPreviewConverter>();
 builder.Services.AddSingleton<IReleasePackagePublisher, AtomicReleasePackagePublisher>();
 builder.Services.AddSingleton<ICrmCredentialProtector, DataProtectionCrmCredentialProtector>();
@@ -115,10 +119,14 @@ builder.Services.AddHttpClient<IU9BomQueryClient, U9OpenApiClient>(client => cli
 builder.Services.AddScoped<PdmWorkflowService>();
 builder.Services.AddScoped<CrmCustomerIntegrationService>();
 builder.Services.AddScoped<MaterialService>();
+builder.Services.AddScoped<MaterialAttachmentService>();
+builder.Services.AddScoped<ProgramTemplateService>();
 builder.Services.AddScoped<BomHeaderService>();
 builder.Services.AddScoped<U9MaterialIntegrationService>();
 builder.Services.AddScoped<U9BomQueryService>();
 builder.Services.AddScoped<U9BomWriteService>();
+builder.Services.AddScoped<ProjectBomU9SyncService>();
+builder.Services.AddScoped<ApprovalU9AutomationService>();
 builder.Services.AddHostedService<PdmBootstrapHostedService>();
 builder.Services.AddHostedService<CrmCustomerSyncHostedService>();
 
@@ -193,6 +201,7 @@ app.UseAuthorization();
 app.MapPdmEndpoints();
 app.MapPdmMaterialEndpoints();
 app.MapPdmBomHeaderEndpoints();
+app.MapProgramTemplateEndpoints();
 app.MapU9BomEndpoints();
 try
 {

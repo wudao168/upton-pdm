@@ -156,6 +156,7 @@ public sealed class U9MaterialIntegrationService(
 
                 var existing = await materials.FindMaterialByCodeAsync(reference.Code, cancellationToken);
                 var canImport = existing is null || existing.MasterOwner == MaterialMasterOwner.U9C;
+                var weight = item.U9Weight is > 0 ? item.U9Weight : null;
                 items.Add(new U9MaterialSampleItem(
                     item.U9ItemId ?? string.Empty,
                     reference.Code.Trim(),
@@ -170,8 +171,8 @@ public sealed class U9MaterialIntegrationService(
                     Clean(item.U9Material),
                     Clean(item.U9SurfaceTreatment),
                     Clean(item.U9Description),
-                    item.U9Weight,
-                    Clean(item.U9WeightUnitCode),
+                    weight,
+                    weight is null ? null : Clean(item.U9WeightUnitCode),
                     Clean(item.U9PurchaseLink),
                     existing is not null,
                     canImport,
@@ -236,6 +237,21 @@ public sealed class U9MaterialIntegrationService(
     {
         if (!await repository.HasUserPermissionAsync(actor, role, PermissionCodes.ReleaseManage, cancellationToken))
             throw new UnauthorizedAccessException("当前角色无权执行U9C料品同步。");
+
+        return await ExecuteApprovedTaskCoreAsync(taskId, actor, cancellationToken);
+    }
+
+    internal Task<MaterialSyncExecutionResult> ExecuteApprovedTaskAsync(
+        Guid taskId,
+        string actor,
+        CancellationToken cancellationToken) =>
+        ExecuteApprovedTaskCoreAsync(taskId, actor, cancellationToken);
+
+    private async Task<MaterialSyncExecutionResult> ExecuteApprovedTaskCoreAsync(
+        Guid taskId,
+        string actor,
+        CancellationToken cancellationToken)
+    {
 
         var configuration = await materials.GetIntegrationConfigurationAsync(cancellationToken);
         if (!configuration.WriteEnabled)

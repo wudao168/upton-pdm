@@ -20,6 +20,7 @@ const props = withDefaults(defineProps<{
   reviewStatusTone?: 'neutral' | 'pending' | 'warning' | 'success' | 'danger'
   reviewVersionId?: string
   reviewRevision?: string
+  canWritebackReviewProperties?: boolean
   accessToken?: string
 }>(), {
   currentUsername: '',
@@ -31,6 +32,7 @@ const props = withDefaults(defineProps<{
   reviewStatusTone: 'neutral',
   reviewVersionId: '',
   reviewRevision: '',
+  canWritebackReviewProperties: false,
   accessToken: '',
 })
 const emit = defineEmits<{
@@ -124,6 +126,16 @@ function reportPreviewBounds() {
     viewportHeight: window.innerHeight,
     visible: true,
   })
+  const reviewWidth = Math.min(width, Math.min(440, Math.max(360, width * 0.34)))
+  postDesktopMessage('review-overlay-bounds', {
+    left: right - reviewWidth,
+    top,
+    width: reviewWidth,
+    height,
+    viewportWidth: window.innerWidth,
+    viewportHeight: window.innerHeight,
+    visible: props.reviewPanelOpen,
+  })
 }
 
 function isPreviewObscured(slotBounds: DOMRect) {
@@ -141,6 +153,7 @@ function suspendPreview() {
   if (previewSuspended) return
   previewSuspended = true
   postDesktopMessage('preview-host-suspend')
+  postDesktopMessage('review-overlay-suspend')
 }
 
 function schedulePreviewBounds() {
@@ -155,6 +168,7 @@ function schedulePreviewBounds() {
 
 function hidePreview() {
   postDesktopMessage('preview-host-hide')
+  postDesktopMessage('review-overlay-hide')
 }
 
 function clearWebPreview() {
@@ -245,12 +259,16 @@ function onPreviewStatus(event: Event) {
   }
 }
 
-function openInSolidWorks(mode: SolidWorksOpenMode) {
+function openInSolidWorks(mode: SolidWorksOpenMode, versionId?: string) {
   if (!props.selected.documentId || !solidWorksAvailable.value || solidWorksPending.value) return
   solidWorksPending.value = true
   solidWorksError.value = false
-  solidWorksMessage.value = props.reviewVersionId ? '正在准备审核冻结版本（只读）…' : '正在准备最新受控文件，不获取编辑权限…'
-  emit('open', props.selected, props.reviewVersionId ? 'SpecificReadOnly' : mode, props.reviewVersionId || undefined)
+  solidWorksMessage.value = mode === 'PropertyWriteback'
+    ? '正在打开当前工作版并定位到属性回写…'
+    : versionId
+      ? '正在准备审核冻结版本（只读）…'
+      : '正在准备最新受控文件，不获取编辑权限…'
+  emit('open', props.selected, mode, versionId)
 }
 
 function onSolidWorksCapability(event: Event) {
@@ -270,6 +288,10 @@ watch(() => props.obscured, obscured => {
     suspendPreview()
     return
   }
+  void nextTick(schedulePreviewBounds)
+}, { flush: 'post' })
+
+watch(() => props.reviewPanelOpen, () => {
   void nextTick(schedulePreviewBounds)
 }, { flush: 'post' })
 
@@ -339,11 +361,19 @@ onBeforeUnmount(() => {
         <div class="pdm-solidworks-actions">
           <button
             type="button"
-            class="pdm-solidworks-primary"
+            :class="reviewVersionId && canWritebackReviewProperties ? 'pdm-solidworks-edit' : 'pdm-solidworks-primary'"
             :disabled="!selected.documentId || !solidWorksAvailable || solidWorksPending"
             :title="solidWorksAvailable ? reviewVersionId ? `从PLM获取审核冻结版本${displayedRevision}并只读打开` : `从PLM获取${selected.version}并在SolidWorks中打开；需要修改时请在插件设计树中获取权限` : '当前电脑未安装SolidWorks或UPLM插件'"
-            @click="openInSolidWorks('LatestReadOnly')"
-          ><Rotate3D :size="15" />{{ reviewVersionId ? '打开审核版' : '打开最新' }}</button>
+            @click="openInSolidWorks(reviewVersionId ? 'SpecificReadOnly' : 'LatestReadOnly', reviewVersionId || undefined)"
+          ><Rotate3D :size="15" />{{ reviewVersionId ? '打开审核版（只读）' : '打开最新' }}</button>
+          <button
+            v-if="canWritebackReviewProperties"
+            type="button"
+            class="pdm-solidworks-primary"
+            :disabled="!selected.documentId || !solidWorksAvailable || solidWorksPending"
+            :title="solidWorksAvailable ? '打开当前工作版，并在SolidWorks插件中直接进入属性回写' : '当前电脑未安装SolidWorks或UPLM插件'"
+            @click="openInSolidWorks('PropertyWriteback')"
+          ><Rotate3D :size="15" />回写审核标记</button>
         </div>
       </header>
       <p v-if="solidWorksMessage" class="pdm-solidworks-feedback" :class="{ 'is-error': solidWorksError }" role="status">{{ solidWorksMessage }}</p>
@@ -394,6 +424,7 @@ onBeforeUnmount(() => {
           </button>
         </template>
       </div>
+      <slot />
     </div>
   </section>
 </template>

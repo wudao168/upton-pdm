@@ -95,7 +95,7 @@ public sealed class MaterialService(
         return results;
     }
 
-    public async Task<(MaterialCodeApplication Application, PdmMaterial? Material)> DecideMaterialCodeApplicationAsync(Guid applicationId, long expectedRowVersion, bool approved, string? comment, string actor, UserRole role, CancellationToken cancellationToken)
+    public async Task<(MaterialCodeApplication Application, PdmMaterial? Material, MaterialSyncTask? Task)> DecideMaterialCodeApplicationAsync(Guid applicationId, long expectedRowVersion, bool approved, string? comment, string actor, UserRole role, CancellationToken cancellationToken)
     {
         var approvalSettings = (await repository.GetSystemSettingsAsync(cancellationToken)).MaterialCodeApproval;
         if (role != UserRole.Administrator && !approvalSettings.ApproverRoleCodes.Contains(role.ToString(), StringComparer.OrdinalIgnoreCase))
@@ -107,19 +107,45 @@ public sealed class MaterialService(
             var rejected = await materials.DecideMaterialCodeApplicationAsync(application.Id, expectedRowVersion, MaterialCodeApplicationStatus.Rejected,
                 actor, string.IsNullOrWhiteSpace(comment) ? "标准化退回" : comment.Trim(), null, null, timeProvider.GetUtcNow(), cancellationToken);
             await AuditAsync(actor, "material-code.application.reject", rejected.Id, rejected.DecisionComment ?? "退回", cancellationToken);
-            return (rejected, null);
+            return (rejected, null, null);
         }
 
-        var item = await repository.FindBomItemAsync(application.ProjectId, application.BomItemId, cancellationToken)
+        if (application.BomHeaderKind is not null)
+        {
+            if (application.MaterialId is not Guid headerMaterialId)
+                throw new PdmRuleException("BOM料号申请未关联料品草稿，无法批准。");
+            var headerMaterial = await materials.FindMaterialAsync(headerMaterialId, cancellationToken)
+                ?? throw new PdmNotFoundException("BOM料号申请对应的料品草稿不存在。");
+            MaterialSyncTask? syncTask = null;
+            if (headerMaterial.ApprovalStatus == MaterialApprovalStatus.Draft)
+                (headerMaterial, syncTask) = await ApproveCoreAsync(headerMaterial.Id, headerMaterial.RowVersion, actor, cancellationToken);
+            else if (!headerMaterial.U9SyncConfirmed)
+                syncTask = (await materials.ListSyncTasksAsync(cancellationToken))
+                    .FirstOrDefault(task => task.MaterialId == headerMaterial.Id && task.Status == MaterialSyncStatus.PreviewReady);
+            var approvedHeader = await materials.DecideMaterialCodeApplicationAsync(
+                application.Id, expectedRowVersion, MaterialCodeApplicationStatus.Approved,
+                actor, comment?.Trim(), headerMaterial.Id, headerMaterial.MaterialCode, timeProvider.GetUtcNow(), cancellationToken);
+            await AuditAsync(actor, "bom.header.application.approve", approvedHeader.Id,
+                $"批准{application.BomHeaderKind}料号申请：{headerMaterial.MaterialCode}", cancellationToken);
+            return (approvedHeader, headerMaterial, syncTask);
+        }
+
+        if (application.BomItemId is not Guid bomItemId)
+            throw new PdmRuleException("标准件料号申请未关联BOM物料。");
+        var item = await repository.FindBomItemAsync(application.ProjectId, bomItemId, cancellationToken)
             ?? throw new PdmNotFoundException("申请对应的BOM物料不存在。");
         if (item.Kind != BomKind.Standard) throw new PdmRuleException("只有标准件使用料号申请审批。");
-        var material = await CreateFromBomCoreAsync(new(application.ProjectId, application.BomItemId), actor, cancellationToken);
+        var material = await CreateFromBomCoreAsync(new(application.ProjectId, bomItemId), actor, cancellationToken);
+        MaterialSyncTask? materialSyncTask = null;
         if (material.ApprovalStatus == MaterialApprovalStatus.Draft)
-            (material, _) = await ApproveCoreAsync(material.Id, material.RowVersion, actor, cancellationToken);
+            (material, materialSyncTask) = await ApproveCoreAsync(material.Id, material.RowVersion, actor, cancellationToken);
+        else if (!material.U9SyncConfirmed)
+            materialSyncTask = (await materials.ListSyncTasksAsync(cancellationToken))
+                .FirstOrDefault(task => task.MaterialId == material.Id && task.Status == MaterialSyncStatus.PreviewReady);
         var decided = await materials.DecideMaterialCodeApplicationAsync(application.Id, expectedRowVersion, MaterialCodeApplicationStatus.Approved,
             actor, comment?.Trim(), material.Id, material.MaterialCode, timeProvider.GetUtcNow(), cancellationToken);
         await AuditAsync(actor, "material-code.application.approve", decided.Id, $"批准标准件料号：{material.MaterialCode}", cancellationToken);
-        return (decided, material);
+        return (decided, material, materialSyncTask);
     }
 
     public async Task<IReadOnlyList<PdmMaterial>> EnsureNonStandardMaterialsAsync(Guid projectId, IReadOnlyList<Guid> bomItemIds, string actor, UserRole role, CancellationToken cancellationToken)
@@ -754,8 +780,11 @@ public sealed class MaterialService(
         var code = existing?.MaterialCode ?? string.Empty;
         var name = Required(command.Name, "物料名称");
         var unit = U9UnitCatalog.Normalize(command.UnitCode);
+        var selectionAdvice = Clean(command.SelectionAdvice);
         if (name.Length > 300) throw new PdmRuleException("物料名称不能超过300个字符。");
         if (command.Weight is <= 0) throw new PdmRuleException("重量必须大于0。");
+        if (selectionAdvice?.Length > 1000) throw new PdmRuleException("选型建议不能超过1000个字符。");
+        if (command.ReferencePrice is < 0) throw new PdmRuleException("参考价格不能小于0。");
         return new PdmMaterial(
             id,
             code,
@@ -788,7 +817,12 @@ public sealed class MaterialService(
             existing?.ArchivedBy,
             existing?.ArchivedAt,
             existing?.U9SyncConfirmed ?? false,
-            PurchaseLink: NormalizePurchaseLink(command.PurchaseLink));
+            PurchaseLink: NormalizeHttpLink(command.PurchaseLink, "料品采购链接"),
+            SelectionAdvice: selectionAdvice,
+            ReferencePrice: command.ReferencePrice,
+            Model3DLink: NormalizeHttpLink(command.Model3DLink, "3D链接"),
+            DocumentLink: NormalizeHttpLink(command.DocumentLink, "资料链接"),
+            IsRecommended: command.IsRecommended);
     }
 
     private static void ValidateForApproval(PdmMaterial material)
@@ -844,13 +878,13 @@ public sealed class MaterialService(
 
     private static string? Clean(string? value) => string.IsNullOrWhiteSpace(value) ? null : value.Trim();
 
-    private static string? NormalizePurchaseLink(string? value)
+    private static string? NormalizeHttpLink(string? value, string field)
     {
         var normalized = Clean(value);
         if (normalized is null) return null;
-        if (normalized.Length > 2048) throw new PdmRuleException("料品采购链接不能超过2048个字符。");
+        if (normalized.Length > 2048) throw new PdmRuleException($"{field}不能超过2048个字符。");
         if (!Uri.TryCreate(normalized, UriKind.Absolute, out var uri) || uri.Scheme is not ("http" or "https"))
-            throw new PdmRuleException("料品采购链接必须是有效的HTTP或HTTPS地址。");
+            throw new PdmRuleException($"{field}必须是有效的HTTP或HTTPS地址。");
         return normalized;
     }
 

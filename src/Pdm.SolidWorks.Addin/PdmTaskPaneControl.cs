@@ -1041,6 +1041,7 @@ internal sealed class PdmTaskPaneControl : UserControl
                 || string.Equals(node.CheckoutMachine, Environment.MachineName, StringComparison.OrdinalIgnoreCase));
         var lifecycleInReview = string.Equals(node.LifecycleState, "InReview", StringComparison.OrdinalIgnoreCase);
         var lifecycleObsolete = string.Equals(node.LifecycleState, "Obsolete", StringComparison.OrdinalIgnoreCase);
+        var drawingReviewLocked = node.DrawingReviewLocked;
         var drawingSource = node.Kind == CadDocumentKind.Part || node.Kind == CadDocumentKind.Assembly;
         var drawingPath = AutomaticDrawingControl.GetDrawingPath(node);
         var drawingExists = drawingSource && !string.IsNullOrWhiteSpace(drawingPath) && File.Exists(drawingPath);
@@ -1142,6 +1143,10 @@ internal sealed class PdmTaskPaneControl : UserControl
         {
             checkoutReason = "历史版本为只读预览，不能获取编辑权限";
         }
+        else if (drawingReviewLocked)
+        {
+            checkoutReason = "图纸审核中，只允许只读打开，不能获取编辑权限";
+        }
         else if (latestReadOnlyPreview)
         {
             checkoutReason = "切换到Working工作区并获取编辑权限";
@@ -1153,11 +1158,12 @@ internal sealed class PdmTaskPaneControl : UserControl
         SetContextState(
             contextCheckout,
             !historicalPreview
+                && !drawingReviewLocked
                 && authenticated
                 && (latestReadOnlyPreview ? registered && (!editing || canReclaimLatestPreview) : (!editing || canRecoverCheckout) && (registered || canRegister)),
             checkoutReason);
 
-        var canFirstCheckIn = !readOnlyPreview && authenticated && canRegister;
+        var canFirstCheckIn = !readOnlyPreview && !drawingReviewLocked && authenticated && canRegister;
         var checkInReason = PdmActionReason(registered, authenticated);
         if (node.CheckoutSessionLost)
         {
@@ -1166,6 +1172,10 @@ internal sealed class PdmTaskPaneControl : UserControl
         else if (readOnlyPreview)
         {
             checkInReason = "只读预览不能提交存档；请先切换到编辑工作区";
+        }
+        else if (drawingReviewLocked)
+        {
+            checkInReason = "图纸审核中，不能提交存档";
         }
         else if (canFirstCheckIn)
         {
@@ -1185,7 +1195,7 @@ internal sealed class PdmTaskPaneControl : UserControl
         }
         SetContextState(
             contextCheckIn,
-            canFirstCheckIn || (!readOnlyPreview && registered && authenticated && editingByCurrentUser && localFileExists),
+            canFirstCheckIn || (!readOnlyPreview && !drawingReviewLocked && registered && authenticated && editingByCurrentUser && localFileExists),
             checkInReason);
         SetContextState(
             contextDiscardCheckout,
@@ -1543,10 +1553,11 @@ internal sealed class PdmTaskPaneControl : UserControl
             reason = "当前仅支持零件基于历史版本获取编辑";
             return false;
         }
-        if (string.Equals(SelectedNode.LifecycleState, "InReview", StringComparison.OrdinalIgnoreCase)
+        if (SelectedNode.DrawingReviewLocked
+            || string.Equals(SelectedNode.LifecycleState, "InReview", StringComparison.OrdinalIgnoreCase)
             || string.Equals(SelectedNode.LifecycleState, "Obsolete", StringComparison.OrdinalIgnoreCase))
         {
-            reason = "审批中或已作废的零件不能获取编辑权限";
+            reason = SelectedNode.DrawingReviewLocked ? "图纸审核中的零件不能获取编辑权限" : "审批中或已作废的零件不能获取编辑权限";
             return false;
         }
         if (versionList.Items.Count == 0
@@ -2340,7 +2351,8 @@ internal sealed class PdmTaskPaneControl : UserControl
             && string.Equals(node.CheckedOutBy, authenticatedUsername, StringComparison.OrdinalIgnoreCase)
             && (string.IsNullOrWhiteSpace(node.CheckoutMachine)
                 || string.Equals(node.CheckoutMachine, Environment.MachineName, StringComparison.OrdinalIgnoreCase));
-        var lifecycleLocked = string.Equals(node.LifecycleState, "InReview", StringComparison.OrdinalIgnoreCase)
+        var lifecycleLocked = node.DrawingReviewLocked
+            || string.Equals(node.LifecycleState, "InReview", StringComparison.OrdinalIgnoreCase)
             || string.Equals(node.LifecycleState, "Obsolete", StringComparison.OrdinalIgnoreCase);
         var canCheckout = !historicalPreview
             && !lifecycleLocked
@@ -2368,6 +2380,8 @@ internal sealed class PdmTaskPaneControl : UserControl
             checkoutButton,
             checkedActionNodes.Count > 0
                 ? string.Concat(checkoutButton.Text, "已勾选的", checkedActionNodes.Count, "个图档")
+                : node.DrawingReviewLocked
+                ? "图纸审核中，只允许只读打开，不能获取编辑权限"
                 : editingByCurrentUser
                 ? "释放当前图档的编辑权限，不生成新版本"
                 : historicalPreview ? "历史版本为只读预览，不能获取编辑权限" : latestReadOnlyPreview ? "切换到Working工作区并获取编辑权限" : canRecoverCheckout ? "恢复本机已过期的旧编辑会话" : canRegister ? "首次获取权限时将自动登记该图档" : node.DocumentId.HasValue ? "获取该图档的独占编辑权限" : "本地文件不存在或文件类型不支持登记");
@@ -2375,13 +2389,13 @@ internal sealed class PdmTaskPaneControl : UserControl
             checkinButton,
             checkedNodes.Length > 0
                 ? string.Concat("提交已勾选的", checkedNodes.Length, "个图档")
-                : readOnlyPreview ? "只读预览不能提交存档；请先切换到编辑工作区" : canFirstCheckIn ? "首次提交存档时选择归属项目，系统将自动登记并准备权限" : !node.DocumentId.HasValue ? "本地文件不存在或文件类型不支持登记" : !editingByCurrentUser ? "只有当前编辑人员可以提交存档" : !localFileExists ? "本地文件不存在，不能提交存档" : "提交当前文件并生成新工作版本");
+                : node.DrawingReviewLocked ? "图纸审核中，不能提交存档" : readOnlyPreview ? "只读预览不能提交存档；请先切换到编辑工作区" : canFirstCheckIn ? "首次提交存档时选择归属项目，系统将自动登记并准备权限" : !node.DocumentId.HasValue ? "本地文件不存在或文件类型不支持登记" : !editingByCurrentUser ? "只有当前编辑人员可以提交存档" : !localFileExists ? "本地文件不存在，不能提交存档" : "提交当前文件并生成新工作版本");
         UpdateTreeHealth();
     }
 
     private bool CanSelectForBatchAction(CadTreeNode node)
     {
-        if (node == null || node.IsReadOnlyPreview || string.IsNullOrWhiteSpace(authenticatedUsername)
+        if (node == null || node.IsReadOnlyPreview || node.DrawingReviewLocked || string.IsNullOrWhiteSpace(authenticatedUsername)
             || string.IsNullOrWhiteSpace(node.FullPath) || !File.Exists(node.FullPath))
         {
             return false;
@@ -2400,7 +2414,7 @@ internal sealed class PdmTaskPaneControl : UserControl
 
     private bool CanCheckInNode(CadTreeNode node)
     {
-        if (node == null || node.IsReadOnlyPreview || string.Equals(node.LifecycleState, "InReview", StringComparison.OrdinalIgnoreCase)
+        if (node == null || node.IsReadOnlyPreview || node.DrawingReviewLocked || string.Equals(node.LifecycleState, "InReview", StringComparison.OrdinalIgnoreCase)
             || string.Equals(node.LifecycleState, "Obsolete", StringComparison.OrdinalIgnoreCase) || string.IsNullOrWhiteSpace(authenticatedUsername)
             || string.IsNullOrWhiteSpace(node.FullPath) || !File.Exists(node.FullPath))
         {

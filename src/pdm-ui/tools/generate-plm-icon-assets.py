@@ -7,12 +7,12 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 CANVAS_SIZE = 1024
 FACE_GRID = (7, 25, 54, 92)
 TILE = {
-    "red": "#FF3D00",
-    "orange": "#FF9800",
-    "yellow": "#FFDF33",
-    "green": "#49B653",
-    "blue": "#2495E8",
-    "white": "#F8FAFC",
+    "coral": "#D56673",
+    "peach": "#DA884F",
+    "yellow": "#C8BC3F",
+    "mint": "#4CAA62",
+    "sky": "#3198C8",
+    "lavender": "#8066C4",
 }
 
 
@@ -29,19 +29,19 @@ def face_point(points: list[tuple[int, int]], horizontal: float, vertical: float
 
 def draw_face(image: Image.Image, points: list[tuple[int, int]], colors: list[str]) -> None:
     draw = ImageDraw.Draw(image, "RGBA")
-    for row in range(3):
-        for column in range(3):
-            left = column / 3
-            right = (column + 1) / 3
-            top = row / 3
-            bottom = (row + 1) / 3
+    for row in range(2):
+        for column in range(2):
+            left = column / 2
+            right = (column + 1) / 2
+            top = row / 2
+            bottom = (row + 1) / 2
             cell = [
                 face_point(points, left, top),
                 face_point(points, right, top),
                 face_point(points, right, bottom),
                 face_point(points, left, bottom),
             ]
-            draw.polygon(cell, fill=colors[row * 3 + column], outline=FACE_GRID, width=5)
+            draw.polygon(cell, fill=colors[row * 2 + column], outline=FACE_GRID, width=5)
     draw.line(points + [points[0]], fill=FACE_GRID, width=5, joint="curve")
 
 
@@ -59,7 +59,7 @@ def affine_letter(label: str, points: list[tuple[int, int]], color: str) -> Imag
         label,
         font=font,
         fill=color,
-        stroke_width=16,
+        stroke_width=12,
         stroke_fill=(7, 25, 54, 220),
     )
 
@@ -91,9 +91,9 @@ def build_icon() -> Image.Image:
     left = [(78, 292), (512, 542), (512, 1014), (78, 764)]
     right = [(512, 542), (946, 292), (946, 764), (512, 1014)]
     faces = [
-        (top, [TILE["red"], TILE["green"], TILE["blue"], TILE["green"], TILE["white"], TILE["yellow"], TILE["blue"], TILE["yellow"], TILE["red"]], "P", "#FFFFFF"),
-        (left, [TILE["orange"], TILE["green"], TILE["blue"], TILE["blue"], TILE["white"], TILE["red"], TILE["yellow"], TILE["orange"], TILE["green"]], "L", "#FFFFFF"),
-        (right, [TILE["yellow"], TILE["red"], TILE["blue"], TILE["red"], TILE["white"], TILE["green"], TILE["blue"], TILE["green"], TILE["yellow"]], "M", "#FFFFFF"),
+        (top, [TILE["yellow"], TILE["sky"], TILE["lavender"], TILE["coral"]], "P", "#FFFFFF"),
+        (left, [TILE["peach"], TILE["mint"], TILE["sky"], TILE["yellow"]], "L", "#FFFFFF"),
+        (right, [TILE["lavender"], TILE["peach"], TILE["coral"], TILE["mint"]], "M", "#FFFFFF"),
     ]
     for points, colors, label, text_color in faces:
         draw_face(image, points, colors)

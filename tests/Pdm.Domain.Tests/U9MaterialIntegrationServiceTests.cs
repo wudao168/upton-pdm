@@ -99,6 +99,25 @@ public sealed class U9MaterialIntegrationServiceTests
     }
 
     [Fact]
+    public async Task ImportSample_TreatsZeroWeightAndItsUnitAsMissing()
+    {
+        var fixture = await CreateSampleFixtureAsync();
+        fixture.Client.CustomerResult = new U9CustomerQueryResult(0, null, [new("01010000002", "PLC_CPU")], 1);
+        fixture.Client.QueryResultsByCode["01010000002"] = new U9ItemQueryResult(0, null,
+            [new("u9-item-2", "01010000002", "PLC_CPU", "6ES7516-3AN01-0AB0", "0101", "电气外购件", "001", 9,
+                "SIEMENS", null, null, null, 0m, "001")]);
+
+        var result = await fixture.Service.ImportSampleAsync(["0101"], 10, "admin", UserRole.Administrator, default);
+
+        var preview = Assert.Single(result.Preview.Items);
+        Assert.Null(preview.Weight);
+        Assert.Null(preview.WeightUnit);
+        var material = Assert.Single(result.Materials);
+        Assert.Null(material.Weight);
+        Assert.Null(material.WeightUnit);
+    }
+
+    [Fact]
     public async Task ImportSample_DoesNotOverwriteSameCodeOwnedByPdm()
     {
         var fixture = await CreateSampleFixtureAsync();

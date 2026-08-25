@@ -39,7 +39,7 @@ $dumpText = [Text.RegularExpressions.Regex]::Replace($dumpText, $signalTriggerPa
 [IO.File]::WriteAllText($databasePath, $dumpText, (New-Object Text.UTF8Encoding($false)))
 
 $dataRoot = Join-Path $backupRoot 'data'
-foreach ($name in @('vault', 'release')) {
+foreach ($name in @('vault', 'release', 'program-templates')) {
     $source = Join-Path $localRoot $name
     if (Test-Path -LiteralPath $source) {
         Copy-Item -LiteralPath $source -Destination (Join-Path $dataRoot $name) -Recurse -Force

@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.ComponentModel;
 using System.Diagnostics;
+using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Net.Http;
@@ -16,6 +17,13 @@ using System.Windows;
 using System.Windows.Interop;
 using System.Windows.Media;
 using System.Windows.Media.Animation;
+using System.Windows.Media.Media3D;
+using MediaBrush = System.Windows.Media.Brush;
+using MediaColor = System.Windows.Media.Color;
+using MediaFontFamily = System.Windows.Media.FontFamily;
+using WpfBrushes = System.Windows.Media.Brushes;
+using WpfFlowDirection = System.Windows.FlowDirection;
+using WpfPoint = System.Windows.Point;
 using Microsoft.Web.WebView2.Core;
 using Upton.Pdm.LocalSettings;
 using WinForms = System.Windows.Forms;
@@ -25,7 +33,7 @@ namespace Upton.Pdm.Desktop;
 
 public partial class MainWindow : Window
 {
-    private const string UiHost = "appassets.pdm.local";
+    internal const string UiHostName = "appassets.pdm.local";
     private const int WindowMessageSystemCommand = 0x0112;
     private const int MenuExit = 0x1FE0;
     private const uint MenuString = 0x0000;
@@ -39,12 +47,17 @@ public partial class MainWindow : Window
     private EDrawingsPreviewControl? embeddedPreview;
     private IReadOnlyList<KeyValuePair<string, string>> previewProperties = Array.Empty<KeyValuePair<string, string>>();
     private PreviewHostBounds? previewBounds;
+    private PreviewHostBounds? reviewOverlayBounds;
+    private ReviewOverlayWindow? reviewOverlay;
+    private bool reviewOverlayVisible;
+    private bool reviewOverlaySuspended;
     private bool previewDocumentReady;
     private int previewRequestGeneration;
     private HwndSource? windowSource;
     private IntPtr systemMenu;
     private bool startWithWindows;
     private bool allowClose;
+    private bool interactiveSurfacesSuspended;
     private WinForms.NotifyIcon? trayIcon;
     private string[]? pendingExternalRequestArgs;
     private bool workspaceNavigationReady;
@@ -55,9 +68,11 @@ public partial class MainWindow : Window
         LoadingPanel.Loaded += (_, _) => InitializeLoadingAnimation();
         SourceInitialized += OnSourceInitialized;
         Loaded += OnLoaded;
-        SizeChanged += (_, _) => ApplyPreviewBounds();
+        SizeChanged += (_, _) => ApplyPreviewSurfaces();
+        LocationChanged += (_, _) => ApplyPreviewSurfaces();
         StateChanged += OnWindowStateChanged;
         Activated += OnWindowActivated;
+        Deactivated += (_, _) => Dispatcher.BeginInvoke(new Action(ApplyPreviewSurfaces));
         Closing += OnClosing;
         Closed += OnClosed;
         System.Windows.Application.Current.SessionEnding += OnSessionEnding;
@@ -65,59 +80,97 @@ public partial class MainWindow : Window
 
     private void InitializeLoadingAnimation()
     {
-        var squares = new[]
-        {
-            LoadingSquare1,
-            LoadingSquare2,
-            LoadingSquare3,
-            LoadingSquare4,
-            LoadingSquare5,
-            LoadingSquare6,
-            LoadingSquare7
-        };
+        var red = MediaColor.FromRgb(0xFF, 0x3D, 0x00);
+        var orange = MediaColor.FromRgb(0xFF, 0x98, 0x00);
+        var yellow = MediaColor.FromRgb(0xFF, 0xDF, 0x33);
+        var green = MediaColor.FromRgb(0x49, 0xB6, 0x53);
+        var blue = MediaColor.FromRgb(0x24, 0x95, 0xE8);
+        var white = MediaColor.FromRgb(0xF8, 0xFA, 0xFC);
+        var cube = new Model3DGroup();
+        cube.Children.Add(CreateLoadingCubeFace(
+            new[] { new Point3D(-.5, .5, .5), new Point3D(.5, .5, .5), new Point3D(.5, -.5, .5), new Point3D(-.5, -.5, .5) },
+            "L", true, new[] { orange, green, blue, blue, white, red, yellow, orange, green }));
+        cube.Children.Add(CreateLoadingCubeFace(
+            new[] { new Point3D(.5, .5, -.5), new Point3D(-.5, .5, -.5), new Point3D(-.5, -.5, -.5), new Point3D(.5, -.5, -.5) },
+            "阿", false, new[] { blue, yellow, red, white, green, orange, red, blue, yellow }));
+        cube.Children.Add(CreateLoadingCubeFace(
+            new[] { new Point3D(.5, .5, .5), new Point3D(.5, .5, -.5), new Point3D(.5, -.5, -.5), new Point3D(.5, -.5, .5) },
+            "M", true, new[] { yellow, red, blue, red, white, green, blue, green, yellow }));
+        cube.Children.Add(CreateLoadingCubeFace(
+            new[] { new Point3D(-.5, .5, -.5), new Point3D(-.5, .5, .5), new Point3D(-.5, -.5, .5), new Point3D(-.5, -.5, -.5) },
+            "顿", false, new[] { orange, blue, white, green, red, yellow, blue, white, green }));
+        cube.Children.Add(CreateLoadingCubeFace(
+            new[] { new Point3D(-.5, .5, -.5), new Point3D(.5, .5, -.5), new Point3D(.5, .5, .5), new Point3D(-.5, .5, .5) },
+            "P", true, new[] { red, green, blue, green, white, yellow, blue, yellow, red }));
+        cube.Children.Add(CreateLoadingCubeFace(
+            new[] { new Point3D(-.5, -.5, .5), new Point3D(.5, -.5, .5), new Point3D(.5, -.5, -.5), new Point3D(-.5, -.5, -.5) },
+            "普", false, new[] { white, green, orange, red, blue, yellow, green, orange, red }));
+        LoadingCubeVisual.Content = cube;
 
-        for (var index = 0; index < squares.Length; index++)
-        {
-            var delay = -(index + 1) * 10d / squares.Length;
-            squares[index].BeginAnimation(
-                System.Windows.Controls.Canvas.LeftProperty,
-                CreateSquareAnimation(new[] { 0d, 0, 32, 32, 64, 64, 64, 64, 32, 32, 32, 32, 0, 0, 0, 0, 0 }, delay));
-            squares[index].BeginAnimation(
-                System.Windows.Controls.Canvas.TopProperty,
-                CreateSquareAnimation(new[] { 0d, 0, 0, 0, 0, 0, 32, 32, 32, 32, 64, 64, 64, 64, 32, 32, 0 }, delay));
-        }
+        var alignCornerY = new AxisAngleRotation3D(new Vector3D(0, 1, 0), -45);
+        var alignCornerX = new AxisAngleRotation3D(new Vector3D(1, 0, 0), -54.736);
+        var axialRotation = new AxisAngleRotation3D(new Vector3D(0, 1, 0), 0);
+        var transforms = new Transform3DGroup();
+        transforms.Children.Add(new RotateTransform3D(alignCornerY));
+        transforms.Children.Add(new RotateTransform3D(alignCornerX));
+        transforms.Children.Add(new RotateTransform3D(axialRotation));
+        LoadingCubeVisual.Transform = transforms;
+        BeginContinuousRotation(axialRotation, 0, 360, 1.5);
     }
 
-    private static DoubleAnimationUsingKeyFrames CreateSquareAnimation(IReadOnlyList<double> values, double delay)
+    private static GeometryModel3D CreateLoadingCubeFace(Point3D[] positions, string label, bool latin, MediaColor[] colors)
     {
-        var progress = new[]
+        var mesh = new MeshGeometry3D
         {
-            0d, .105, .125, .23, .25, .355, .375, .48, .5,
-            .605, .625, .73, .75, .855, .875, .98, 1
-        };
-        var animation = new DoubleAnimationUsingKeyFrames
-        {
-            BeginTime = TimeSpan.FromSeconds(delay),
-            Duration = TimeSpan.FromSeconds(10),
-            RepeatBehavior = RepeatBehavior.Forever
-        };
-        for (var index = 0; index < progress.Length; index++)
-        {
-            var value = values[index] + 2;
-            var keyTime = KeyTime.FromPercent(progress[index]);
-            if (index == 0)
+            Positions = new Point3DCollection(positions),
+            TextureCoordinates = new PointCollection
             {
-                animation.KeyFrames.Add(new DiscreteDoubleKeyFrame(value, keyTime));
-            }
-            else
+                new WpfPoint(0, 0), new WpfPoint(1, 0), new WpfPoint(1, 1), new WpfPoint(0, 1)
+            },
+            TriangleIndices = new Int32Collection { 0, 1, 2, 0, 2, 3 }
+        };
+        var material = new EmissiveMaterial(CreateLoadingFaceBrush(label, latin, colors));
+        return new GeometryModel3D(mesh, material) { BackMaterial = material };
+    }
+
+    private static MediaBrush CreateLoadingFaceBrush(string label, bool latin, IReadOnlyList<MediaColor> colors)
+    {
+        const double faceSize = 90;
+        const double tileSize = faceSize / 3;
+        var visual = new DrawingVisual();
+        using (var context = visual.RenderOpen())
+        {
+            context.DrawRectangle(new SolidColorBrush(MediaColor.FromRgb(0x07, 0x19, 0x36)), null, new Rect(0, 0, faceSize, faceSize));
+            for (var index = 0; index < colors.Count; index++)
             {
-                animation.KeyFrames.Add(new EasingDoubleKeyFrame(
-                    value,
-                    keyTime,
-                    new SineEase { EasingMode = EasingMode.EaseInOut }));
+                var left = index % 3 * tileSize + .6;
+                var top = index / 3 * tileSize + .6;
+                context.DrawRectangle(new SolidColorBrush(colors[index]), null, new Rect(left, top, tileSize - 1.2, tileSize - 1.2));
             }
+
+            var typeface = new Typeface(new MediaFontFamily("Microsoft YaHei UI"), FontStyles.Normal, FontWeights.ExtraBold, FontStretches.Normal);
+            var fontSize = latin ? 58 : 48;
+            var shadow = new FormattedText(label, CultureInfo.GetCultureInfo("zh-CN"), WpfFlowDirection.LeftToRight,
+                typeface, fontSize, new SolidColorBrush(MediaColor.FromArgb(230, 0x05, 0x17, 0x36)), 1);
+            var foreground = new FormattedText(label, CultureInfo.GetCultureInfo("zh-CN"), WpfFlowDirection.LeftToRight,
+                typeface, fontSize, WpfBrushes.White, 1);
+            var origin = new WpfPoint((faceSize - foreground.Width) / 2, (faceSize - foreground.Height) / 2);
+            foreach (var offset in new[] { new Vector(-1.4, 0), new Vector(1.4, 0), new Vector(0, -1.4), new Vector(0, 1.4) })
+            {
+                context.DrawText(shadow, origin + offset);
+            }
+            context.DrawText(foreground, origin);
         }
-        return animation;
+
+        return new VisualBrush(visual) { Stretch = Stretch.Fill };
+    }
+
+    private static void BeginContinuousRotation(AxisAngleRotation3D rotation, double from, double to, double seconds)
+    {
+        rotation.BeginAnimation(AxisAngleRotation3D.AngleProperty, new DoubleAnimation(from, to, TimeSpan.FromSeconds(seconds))
+        {
+            RepeatBehavior = RepeatBehavior.Forever
+        });
     }
 
     private async void OnLoaded(object sender, RoutedEventArgs e)
@@ -154,7 +207,7 @@ public partial class MainWindow : Window
 
         await WorkspaceView.EnsureCoreWebView2Async();
         WorkspaceView.CoreWebView2.SetVirtualHostNameToFolderMapping(
-            UiHost,
+            UiHostName,
             uiFolder,
             CoreWebView2HostResourceAccessKind.DenyCors);
         WorkspaceView.CoreWebView2.WebMessageReceived += OnWebMessageReceived;
@@ -175,7 +228,10 @@ public partial class MainWindow : Window
             _ = PublishSolidWorksCapabilityAsync();
         };
         var uiVersion = File.GetLastWriteTimeUtc(indexFile).Ticks;
-        WorkspaceView.Source = new Uri($"https://{UiHost}/index.html?v={uiVersion}");
+        reviewOverlay = new ReviewOverlayWindow(this, WorkspaceView.CoreWebView2.Environment, uiFolder, uiVersion);
+        reviewOverlay.MessageReceived += OnReviewOverlayMessageReceived;
+        reviewOverlay.ActivityChanged += ApplyPreviewSurfaces;
+        WorkspaceView.Source = new Uri($"https://{UiHostName}/index.html?v={uiVersion}");
     }
 
     private static string Serialize(object value) => new JavaScriptSerializer().Serialize(value);
@@ -288,18 +344,57 @@ public partial class MainWindow : Window
             accessToken = string.Empty;
             activeCompanyId = string.Empty;
             HideEmbeddedPreview(true);
+            HideReviewOverlay();
             return;
         }
 
-        if (type == "document-selected" || type == "preview-host-hide")
+        if (type == "document-selected")
         {
             HideEmbeddedPreview(true);
+            return;
+        }
+
+        if (type == "preview-host-hide")
+        {
+            HideEmbeddedPreview(true);
+            HideReviewOverlay();
             return;
         }
 
         if (type == "preview-host-suspend")
         {
             PreviewFrame.Visibility = Visibility.Collapsed;
+            reviewOverlaySuspended = true;
+            HideReviewOverlay();
+            return;
+        }
+
+        if (type == "review-overlay-hide")
+        {
+            HideReviewOverlay();
+            return;
+        }
+
+        if (type == "review-overlay-suspend")
+        {
+            reviewOverlaySuspended = true;
+            HideReviewOverlay();
+            return;
+        }
+
+        if (type == "review-overlay-state"
+            && message.TryGetValue("payload", out var reviewStatePayloadValue)
+            && reviewStatePayloadValue is Dictionary<string, object> reviewStatePayload)
+        {
+            UpdateReviewOverlayState(e.WebMessageAsJson, reviewStatePayload);
+            return;
+        }
+
+        if (type == "review-overlay-bounds"
+            && message.TryGetValue("payload", out var reviewBoundsPayloadValue)
+            && reviewBoundsPayloadValue is Dictionary<string, object> reviewBoundsPayload)
+        {
+            UpdateReviewOverlayBounds(reviewBoundsPayload);
             return;
         }
 
@@ -519,14 +614,15 @@ public partial class MainWindow : Window
     {
         if (WindowState == WindowState.Minimized && !allowClose)
         {
+            SuspendInteractiveSurfaces();
             ShowInTaskbar = true;
             return;
         }
 
-        ApplyPreviewBounds();
+        ResumeInteractiveSurfaces();
     }
 
-    private void OnWindowActivated(object? sender, EventArgs eventArgs) => ApplyPreviewBounds();
+    private void OnWindowActivated(object? sender, EventArgs eventArgs) => ApplyPreviewSurfaces();
 
     private void InitializeTrayIcon()
     {
@@ -572,6 +668,7 @@ public partial class MainWindow : Window
 
     private void HideToNotificationArea()
     {
+        SuspendInteractiveSurfaces();
         ShowInTaskbar = false;
         Hide();
     }
@@ -581,7 +678,34 @@ public partial class MainWindow : Window
         ShowInTaskbar = true;
         Show();
         WindowState = WindowState.Maximized;
+        ResumeInteractiveSurfaces();
         Activate();
+    }
+
+    private void SuspendInteractiveSurfaces()
+    {
+        if (interactiveSurfacesSuspended) return;
+        interactiveSurfacesSuspended = true;
+        HideReviewOverlay();
+        PreviewFrame.Visibility = Visibility.Collapsed;
+        PreviewOverlay.IsHitTestVisible = false;
+        WorkspaceView.IsHitTestVisible = false;
+        WorkspaceView.Visibility = Visibility.Collapsed;
+        RootGrid.IsHitTestVisible = false;
+    }
+
+    private void ResumeInteractiveSurfaces()
+    {
+        if (interactiveSurfacesSuspended)
+        {
+            RootGrid.IsHitTestVisible = true;
+            WorkspaceView.Visibility = Visibility.Visible;
+            WorkspaceView.IsHitTestVisible = true;
+            PreviewOverlay.IsHitTestVisible = true;
+            interactiveSurfacesSuspended = false;
+        }
+
+        Dispatcher.BeginInvoke(new Action(ApplyPreviewSurfaces));
     }
 
     internal void RestoreFromExternalRequest(string[] arguments)
@@ -817,12 +941,64 @@ public partial class MainWindow : Window
         TryReadNumber(payload, "viewportHeight", out var viewportHeight);
         var visible = !payload.TryGetValue("visible", out var visibleValue) || Convert.ToBoolean(visibleValue);
         previewBounds = new PreviewHostBounds(left, top, width, height, viewportWidth, viewportHeight, visible);
+        reviewOverlaySuspended = false;
+        ApplyPreviewSurfaces();
+    }
+
+    private void UpdateReviewOverlayBounds(IReadOnlyDictionary<string, object> payload)
+    {
+        if (!TryReadNumber(payload, "left", out var left)
+            || !TryReadNumber(payload, "top", out var top)
+            || !TryReadNumber(payload, "width", out var width)
+            || !TryReadNumber(payload, "height", out var height))
+        {
+            return;
+        }
+
+        TryReadNumber(payload, "viewportWidth", out var viewportWidth);
+        TryReadNumber(payload, "viewportHeight", out var viewportHeight);
+        var visible = !payload.TryGetValue("visible", out var visibleValue) || Convert.ToBoolean(visibleValue);
+        reviewOverlayBounds = new PreviewHostBounds(left, top, width, height, viewportWidth, viewportHeight, visible);
+        reviewOverlaySuspended = false;
+        ApplyReviewOverlayBounds();
+    }
+
+    private void UpdateReviewOverlayState(string stateJson, IReadOnlyDictionary<string, object> payload)
+    {
+        reviewOverlayVisible = payload.TryGetValue("visible", out var visibleValue) && Convert.ToBoolean(visibleValue);
+        _ = reviewOverlay?.PublishStateAsync(stateJson);
+        ApplyReviewOverlayBounds();
+    }
+
+    private void OnReviewOverlayMessageReceived(string messageJson)
+    {
+        var serializer = new JavaScriptSerializer();
+        var message = serializer.Deserialize<Dictionary<string, object>>(messageJson);
+        if (message == null || !message.TryGetValue("type", out var typeValue)) return;
+        var type = typeValue as string;
+        if (type == "preview-host-command" && TryReadPayloadString(message, "command", out var previewCommand))
+        {
+            embeddedPreview?.ExecuteCommand(previewCommand);
+            return;
+        }
+
+        if (type == "review-overlay-action")
+        {
+            WorkspaceView.CoreWebView2?.PostWebMessageAsJson(messageJson);
+        }
+    }
+
+    private bool IsPreviewSurfaceActive => IsActive || reviewOverlay?.IsActive == true;
+
+    private void ApplyPreviewSurfaces()
+    {
         ApplyPreviewBounds();
+        ApplyReviewOverlayBounds();
     }
 
     private void ApplyPreviewBounds()
     {
-        if (!IsActive || !IsVisible || WindowState == WindowState.Minimized
+        if (!IsPreviewSurfaceActive || !IsVisible || WindowState == WindowState.Minimized
             || !previewDocumentReady || previewBounds is not { Visible: true } bounds
             || bounds.Width < 80 || bounds.Height < 80
             || WorkspaceView.ActualWidth <= 0 || WorkspaceView.ActualHeight <= 0)
@@ -859,6 +1035,51 @@ public partial class MainWindow : Window
         PreviewFrame.Visibility = Visibility.Visible;
         embeddedPreview?.RefreshPreview();
     }
+
+    private void ApplyReviewOverlayBounds()
+    {
+        if (reviewOverlay == null
+            || !IsPreviewSurfaceActive || !IsVisible || WindowState == WindowState.Minimized
+            || reviewOverlaySuspended || !reviewOverlayVisible
+            || reviewOverlayBounds is not { Visible: true } bounds
+            || bounds.Width < 80 || bounds.Height < 80
+            || WorkspaceView.ActualWidth <= 0 || WorkspaceView.ActualHeight <= 0)
+        {
+            HideReviewOverlay();
+            return;
+        }
+
+        var scaleX = bounds.ViewportWidth > 0 ? WorkspaceView.ActualWidth / bounds.ViewportWidth : 1d;
+        var scaleY = bounds.ViewportHeight > 0 ? WorkspaceView.ActualHeight / bounds.ViewportHeight : 1d;
+        var origin = WorkspaceView.TranslatePoint(new System.Windows.Point(0, 0), RootGrid);
+        var viewportLeft = Math.Max(0, origin.X);
+        var viewportTop = Math.Max(0, origin.Y);
+        var viewportRight = Math.Min(RootGrid.ActualWidth, origin.X + WorkspaceView.ActualWidth);
+        var viewportBottom = Math.Min(RootGrid.ActualHeight, origin.Y + WorkspaceView.ActualHeight);
+        var requestedLeft = origin.X + bounds.Left * scaleX;
+        var requestedTop = origin.Y + bounds.Top * scaleY;
+        var left = Math.Max(viewportLeft, requestedLeft);
+        var top = Math.Max(viewportTop, requestedTop);
+        var right = Math.Min(viewportRight, requestedLeft + bounds.Width * scaleX);
+        var bottom = Math.Min(viewportBottom, requestedTop + bounds.Height * scaleY);
+        var width = Math.Max(0, right - left);
+        var height = Math.Max(0, bottom - top);
+        if (width < 80 || height < 80)
+        {
+            HideReviewOverlay();
+            return;
+        }
+
+        var screenPoint = RootGrid.PointToScreen(new System.Windows.Point(left, top));
+        var presentationSource = PresentationSource.FromVisual(this);
+        if (presentationSource?.CompositionTarget != null)
+        {
+            screenPoint = presentationSource.CompositionTarget.TransformFromDevice.Transform(screenPoint);
+        }
+        reviewOverlay.ShowAt(screenPoint.X, screenPoint.Y, width, height);
+    }
+
+    private void HideReviewOverlay() => reviewOverlay?.HideOverlay();
 
     private void HideEmbeddedPreview(bool closeDocument)
     {
@@ -923,6 +1144,13 @@ public partial class MainWindow : Window
 
     private void DisposeClientResources()
     {
+        if (reviewOverlay != null)
+        {
+            reviewOverlay.MessageReceived -= OnReviewOverlayMessageReceived;
+            reviewOverlay.ActivityChanged -= ApplyPreviewSurfaces;
+            reviewOverlay.Shutdown();
+            reviewOverlay = null;
+        }
         HideEmbeddedPreview(false);
         EmbeddedPreviewHost.Child = null;
         embeddedPreview?.Dispose();

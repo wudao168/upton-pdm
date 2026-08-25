@@ -15,9 +15,20 @@ public sealed record SaveMaterialRequest(
     string? WeightUnit,
     long? ExpectedRowVersion = null,
     string? CategoryCode = null,
-    string? PurchaseLink = null);
+    string? PurchaseLink = null,
+    string? SelectionAdvice = null,
+    decimal? ReferencePrice = null,
+    string? Model3DLink = null,
+    string? DocumentLink = null,
+    bool IsRecommended = false);
 
 public sealed record CreateMaterialFromBomRequest(Guid ProjectId, Guid BomItemId);
+
+public sealed record StartMaterialAttachmentUploadRequest(
+    string Kind,
+    string FileName,
+    long TotalLength,
+    string Sha256);
 
 public sealed record SaveMaterialCategoryRuleRequest(
     string PdmKind,

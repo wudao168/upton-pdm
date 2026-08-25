@@ -13,6 +13,38 @@ public static class MaterialEndpointExtensions
         api.MapGet("/materials", async (string? query, string? categoryCode, bool? includeArchived, int? limit, MaterialService service, CancellationToken cancellationToken) =>
             Results.Ok((await service.ListMaterialsAsync(query, categoryCode, includeArchived ?? false, limit ?? 100, cancellationToken)).Select(MapMaterial)));
 
+        api.MapGet("/materials/{materialId:guid}/attachments", async (Guid materialId, string? kind, MaterialAttachmentService service, CancellationToken cancellationToken) =>
+        {
+            MaterialAttachmentKind? parsedKind = string.IsNullOrWhiteSpace(kind) ? null : Parse<MaterialAttachmentKind>(kind, "附件类型");
+            return Results.Ok((await service.ListAsync(materialId, parsedKind, cancellationToken)).Select(MapAttachment));
+        });
+
+        api.MapPost("/materials/{materialId:guid}/attachments/uploads", async (Guid materialId, StartMaterialAttachmentUploadRequest request, HttpContext context, MaterialAttachmentService service, CancellationToken cancellationToken) =>
+        {
+            var (actor, role) = CurrentUser(context.User);
+            var session = await service.StartUploadAsync(materialId, Parse<MaterialAttachmentKind>(request.Kind, "附件类型"), request.FileName, request.TotalLength, request.Sha256, actor, role, cancellationToken);
+            return Results.Ok(MapAttachmentUploadSession(session));
+        });
+
+        api.MapPut("/material-attachment-uploads/{sessionId:guid}/chunks/{chunkIndex:int}", async (Guid sessionId, int chunkIndex, HttpRequest request, HttpContext context, MaterialAttachmentService service, CancellationToken cancellationToken) =>
+        {
+            var (actor, role) = CurrentUser(context.User);
+            return Results.Ok(MapAttachmentUploadSession(await service.WriteChunkAsync(sessionId, chunkIndex, request.Body, actor, role, cancellationToken)));
+        });
+
+        api.MapPost("/material-attachment-uploads/{sessionId:guid}/complete", async (Guid sessionId, HttpContext context, MaterialAttachmentService service, CancellationToken cancellationToken) =>
+        {
+            var (actor, role) = CurrentUser(context.User);
+            return Results.Ok(MapAttachment(await service.CompleteUploadAsync(sessionId, actor, role, cancellationToken)));
+        });
+
+        api.MapGet("/materials/{materialId:guid}/attachments/{attachmentId:guid}/file", async (Guid materialId, Guid attachmentId, HttpContext context, MaterialAttachmentService service, CancellationToken cancellationToken) =>
+        {
+            var (actor, _) = CurrentUser(context.User);
+            var download = await service.OpenDownloadAsync(materialId, attachmentId, actor, cancellationToken);
+            return Results.File(download.Content, "application/octet-stream", download.Attachment.OriginalFileName, enableRangeProcessing: true);
+        });
+
         api.MapPost("/materials", async (SaveMaterialRequest request, HttpContext context, MaterialService service, CancellationToken cancellationToken) =>
         {
             var (actor, role) = CurrentUser(context.User);
@@ -94,13 +126,30 @@ public static class MaterialEndpointExtensions
             return Results.Ok((await service.ListCodeApplicationsAsync(projectId, parsedStatus, actor, role, cancellationToken)).Select(MapApplication));
         });
 
-        api.MapPost("/material-code/applications/{applicationId:guid}/decision", async (Guid applicationId, DecideMaterialCodeApplicationRequest request, HttpContext context, MaterialService service, PdmWorkflowService workflow, CancellationToken cancellationToken) =>
+        api.MapPost("/material-code/applications/{applicationId:guid}/decision", async (Guid applicationId, DecideMaterialCodeApplicationRequest request, HttpContext context, MaterialService service, PdmWorkflowService workflow, ApprovalU9AutomationService automation, CancellationToken cancellationToken) =>
         {
             var (actor, role) = CurrentUser(context.User);
             var result = await service.DecideMaterialCodeApplicationAsync(applicationId, request.ExpectedRowVersion, request.Approved, request.Comment, actor, role, cancellationToken);
-            if (result.Material is not null)
-                await workflow.ApplyMaterialCodeToBomAsync(result.Application.ProjectId, result.Application.BomItemId, result.Material.MaterialCode, actor, cancellationToken);
-            return Results.Ok(new { Application = MapApplication(result.Application), Material = result.Material is null ? null : MapMaterial(result.Material) });
+            if (result.Material is not null && result.Application.BomItemId is Guid bomItemId)
+                await workflow.ApplyMaterialCodeToBomAsync(result.Application.ProjectId, bomItemId, result.Material.MaterialCode, actor, cancellationToken);
+            var automationResult = request.Approved
+                ? await automation.RunAfterApprovalAsync(result.Application, result.Material, result.Task, actor, cancellationToken)
+                : null;
+            return Results.Ok(new
+            {
+                Application = MapApplication(result.Application),
+                Material = result.Material is null ? null : MapMaterial(automationResult?.ItemSync?.Material ?? result.Material),
+                Task = result.Task is null ? null : MapTask(automationResult?.ItemSync?.Task ?? result.Task),
+                Automation = automationResult
+            });
+        });
+
+        api.MapPost("/material-code/projects/{projectId:guid}/u9-continue", async (Guid projectId, HttpContext context, IPdmRepository repository, ApprovalU9AutomationService automation, CancellationToken cancellationToken) =>
+        {
+            var (actor, role) = CurrentUser(context.User);
+            if (!await repository.HasUserPermissionAsync(actor, role, PermissionCodes.ApprovalDecide, cancellationToken))
+                return Results.Forbid();
+            return Results.Ok(await automation.ContinueAfterMaterialSyncAsync(projectId, actor, cancellationToken));
         });
 
         api.MapPost("/materials/{materialId:guid}/approve", async (Guid materialId, long expectedRowVersion, HttpContext context, MaterialService service, CancellationToken cancellationToken) =>
@@ -159,17 +208,35 @@ public static class MaterialEndpointExtensions
             return Results.Ok(MapTask(await service.RetrySyncTaskAsync(taskId, actor, role, cancellationToken)));
         });
 
-        api.MapPost("/material-sync-tasks/{taskId:guid}/execute", async (Guid taskId, HttpContext context, U9MaterialIntegrationService service, CancellationToken cancellationToken) =>
+        api.MapPost("/material-sync-tasks/{taskId:guid}/execute", async (Guid taskId, HttpContext context, U9MaterialIntegrationService service, ApprovalU9AutomationService automation, CancellationToken cancellationToken) =>
         {
             var (actor, role) = CurrentUser(context.User);
             var result = await service.ExecuteTaskAsync(taskId, actor, role, cancellationToken);
+            ApprovalU9AutomationResult? automationResult = null;
+            if (result.Task.ProjectId is Guid projectId)
+            {
+                try
+                {
+                    automationResult = await automation.ContinueAfterMaterialSyncAsync(projectId, actor, cancellationToken);
+                }
+                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                {
+                    throw;
+                }
+                catch (Exception exception)
+                {
+                    automationResult = new(ApprovalU9AutomationStage.BomSyncFailed,
+                        $"U9C料品已同步，但BOM自动续跑失败：{exception.Message}", null, []);
+                }
+            }
             return Results.Ok(new
             {
                 Material = MapMaterial(result.Material),
                 Task = MapTask(result.Task),
                 result.Created,
                 result.AlreadyExisted,
-                result.Updated
+                result.Updated,
+                Automation = automationResult
             });
         });
 
@@ -253,7 +320,12 @@ public static class MaterialEndpointExtensions
         request.WeightUnit,
         request.ExpectedRowVersion,
         request.CategoryCode,
-        request.PurchaseLink);
+        request.PurchaseLink,
+        request.SelectionAdvice,
+        request.ReferencePrice,
+        request.Model3DLink,
+        request.DocumentLink,
+        request.IsRecommended);
 
     private static SaveMaterialCategoryCommand ToCommand(SaveMaterialCategoryRequest request) => new(
         request.Code,
@@ -287,6 +359,11 @@ public static class MaterialEndpointExtensions
         material.Weight,
         material.WeightUnit,
         material.PurchaseLink,
+        material.SelectionAdvice,
+        material.ReferencePrice,
+        material.Model3DLink,
+        material.DocumentLink,
+        material.IsRecommended,
         material.SourceBomItemId,
         ApprovalStatus = material.ApprovalStatus.ToString(),
         material.ApprovedBy,
@@ -308,7 +385,33 @@ public static class MaterialEndpointExtensions
         SourceSystem = material.SourceSystem.ToString(),
         MasterOwner = material.MasterOwner.ToString(),
         material.LastU9SyncedAt,
-        material.ReferenceCount
+        material.ReferenceCount,
+        material.Model3DAttachmentCount,
+        material.DocumentAttachmentCount
+    };
+
+    private static object MapAttachment(MaterialAttachment attachment) => new
+    {
+        attachment.Id,
+        attachment.MaterialId,
+        Kind = attachment.Kind.ToString(),
+        attachment.OriginalFileName,
+        attachment.FileLength,
+        attachment.Sha256,
+        attachment.UploadedBy,
+        attachment.UploadedAt
+    };
+
+    private static object MapAttachmentUploadSession(MaterialAttachmentUploadSession session) => new
+    {
+        session.Id,
+        session.MaterialId,
+        Kind = session.Kind.ToString(),
+        session.FileName,
+        session.TotalLength,
+        session.ChunkSize,
+        session.ReceivedLength,
+        session.ExpiresAt
     };
 
     private static object MapCategory(MaterialCategory category) => new
@@ -358,6 +461,15 @@ public static class MaterialEndpointExtensions
         task.ResponsePreview,
         task.U9ItemId,
         task.U9ItemCode,
+        task.MaterialCode,
+        task.MaterialName,
+        task.CategoryCode,
+        task.ProjectId,
+        task.ProjectCode,
+        task.ProjectName,
+        BomHeaderKind = task.BomHeaderKind?.ToString(),
+        task.RequestedBy,
+        task.RequestedAt,
         task.CreatedAt,
         task.UpdatedAt
     };
@@ -367,6 +479,8 @@ public static class MaterialEndpointExtensions
         application.Id,
         application.ProjectId,
         application.BomItemId,
+        BomHeaderKind = application.BomHeaderKind?.ToString(),
+        ApplicationType = application.BomHeaderKind is null ? "StandardBomItem" : "BomHeader",
         Status = application.Status.ToString(),
         application.RequestedBy,
         application.RequestedAt,
@@ -377,6 +491,11 @@ public static class MaterialEndpointExtensions
         application.MaterialCode,
         application.RowVersion,
         application.BomItemName,
+        application.ApplicationName,
+        application.ProjectCode,
+        application.ProjectName,
+        application.CategoryCode,
+        application.RequestedMaterialCode,
         application.Specification,
         application.Brand,
         application.Remark

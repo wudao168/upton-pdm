@@ -11,6 +11,7 @@ internal enum ControlledOpenMode
     LatestReleased,
     LatestEdit,
     SpecificReadOnly,
+    PropertyWriteback,
     Versions
 }
 

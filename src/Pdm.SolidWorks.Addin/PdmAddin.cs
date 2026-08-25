@@ -53,6 +53,9 @@ public sealed class PdmAddin : ISwAddin
     private int controlledOpenInProgress;
     private int refreshSuppressionDepth;
     private int pendingTreeRefresh;
+    private int pendingPropertyWritebackDialog;
+    private int openPropertyWritebackTab;
+    private Guid? pendingPropertyWritebackProjectId;
     private int checkoutHeartbeatInProgress;
     private int staleCheckoutResolutionInProgress;
     private int automaticDrawingOperationInProgress;
@@ -133,6 +136,9 @@ public sealed class PdmAddin : ISwAddin
             controlledWorkspace = null;
             controlledOpenListener = null;
             pendingControlledOpenRequest = null;
+            pendingPropertyWritebackProjectId = null;
+            Interlocked.Exchange(ref pendingPropertyWritebackDialog, 0);
+            Interlocked.Exchange(ref openPropertyWritebackTab, 0);
             scanner = null;
             lifetime = null;
             application = null;
@@ -639,6 +645,7 @@ public sealed class PdmAddin : ISwAddin
             LogOperation(string.Concat(source, " start"));
             BindAssemblyEvents();
             RefreshTree(false);
+            TryOpenPendingPropertyWritebackDialog();
             LogOperation(string.Concat(source, " end"));
         }
         catch (Exception exception)
@@ -649,6 +656,28 @@ public sealed class PdmAddin : ISwAddin
         {
             Interlocked.Exchange(ref treeRefreshInProgress, 0);
         }
+    }
+
+    private void TryOpenPendingPropertyWritebackDialog()
+    {
+        if (Volatile.Read(ref pendingPropertyWritebackDialog) == 0
+            || currentTree == null
+            || currentTree.IsReadOnlyPreview)
+        {
+            return;
+        }
+
+        var projectId = currentProjectId ?? GetExplicitProjectId(currentTree.FullPath);
+        if (!projectId.HasValue || projectId != pendingPropertyWritebackProjectId)
+        {
+            return;
+        }
+
+        Interlocked.Exchange(ref pendingPropertyWritebackDialog, 0);
+        pendingPropertyWritebackProjectId = null;
+        Interlocked.Exchange(ref openPropertyWritebackTab, 1);
+        taskPaneControl.ShowStructureTab();
+        OnBatchPropertyEditRequested(this, new CadTreeNodeEventArgs(currentTree));
     }
 
     private void TryStartCheckoutHeartbeat()
@@ -3203,6 +3232,7 @@ public sealed class PdmAddin : ISwAddin
         target.Description = source.Description;
         target.Material = source.Material;
         target.LifecycleState = source.LifecycleState;
+        target.DrawingReviewLocked = source.DrawingReviewLocked;
         target.UpdatedAt = source.UpdatedAt;
         target.Revision = source.Revision;
         target.CurrentRevision = source.CurrentRevision;
@@ -3468,11 +3498,13 @@ public sealed class PdmAddin : ISwAddin
         string rootPath = null;
         string openWarning = null;
         Guid? missingReferenceRecoveryProjectId = null;
+        Guid? preparedProjectId = null;
         try
         {
             Interlocked.Exchange(ref workspaceOperationInProgress, 1);
             var requestsLatestEdit = mode == ControlledOpenMode.LatestEdit;
-            var opensLatestWorkingCopy = requestsLatestEdit || mode == ControlledOpenMode.LatestReadOnly;
+            var opensPropertyWriteback = mode == ControlledOpenMode.PropertyWriteback;
+            var opensLatestWorkingCopy = requestsLatestEdit || mode == ControlledOpenMode.LatestReadOnly || opensPropertyWriteback;
             var releasedOnly = mode == ControlledOpenMode.LatestReleased;
             var specificVersionId = mode == ControlledOpenMode.SpecificReadOnly ? versionId : null;
             var manifest = await apiClient.CreateControlledOpenManifestAsync(
@@ -3481,6 +3513,7 @@ public sealed class PdmAddin : ISwAddin
                 releasedOnly,
                 requestsLatestEdit,
                 lifetime.Token);
+            preparedProjectId = manifest.ProjectId;
             if (requestedProjectId != Guid.Empty && manifest.ProjectId != requestedProjectId)
             {
                 throw new InvalidOperationException("客户端所选项目与图档所属项目不一致，已停止打开。请刷新项目图档后重试。");
@@ -3624,7 +3657,12 @@ public sealed class PdmAddin : ISwAddin
 
         if (!string.IsNullOrWhiteSpace(rootPath))
         {
-            QueueOpenDocument(rootPath, DocumentKindFromPath(rootPath), string.Empty);
+            QueueOpenDocument(
+                rootPath,
+                DocumentKindFromPath(rootPath),
+                string.Empty,
+                mode == ControlledOpenMode.PropertyWriteback,
+                preparedProjectId);
             if (!string.IsNullOrWhiteSpace(openWarning))
             {
                 taskPaneControl.SetCheckoutReminder(openWarning, true);
@@ -3661,7 +3699,12 @@ public sealed class PdmAddin : ISwAddin
         }
     }
 
-    private void QueueOpenDocument(string fullPath, CadDocumentKind kind, string configuration)
+    private void QueueOpenDocument(
+        string fullPath,
+        CadDocumentKind kind,
+        string configuration,
+        bool openPropertyWriteback = false,
+        Guid? propertyWritebackProjectId = null)
     {
         var documentType = ToSolidWorksDocumentType(kind);
         if (documentType == (int)swDocumentTypes_e.swDocNONE)
@@ -3685,7 +3728,12 @@ public sealed class PdmAddin : ISwAddin
         try
         {
             LogOperation(string.Concat("Open queued path=", fullPath));
-            taskPaneControl.BeginInvoke((Action)(() => OpenDocumentOnSolidWorksThread(fullPath, documentType, configuration ?? string.Empty)));
+            taskPaneControl.BeginInvoke((Action)(() => OpenDocumentOnSolidWorksThread(
+                fullPath,
+                documentType,
+                configuration ?? string.Empty,
+                openPropertyWriteback,
+                propertyWritebackProjectId)));
         }
         catch (Exception exception)
         {
@@ -3695,7 +3743,12 @@ public sealed class PdmAddin : ISwAddin
         }
     }
 
-    private void OpenDocumentOnSolidWorksThread(string fullPath, int documentType, string configuration)
+    private void OpenDocumentOnSolidWorksThread(
+        string fullPath,
+        int documentType,
+        string configuration,
+        bool openPropertyWriteback = false,
+        Guid? propertyWritebackProjectId = null)
     {
         Interlocked.Increment(ref refreshSuppressionDepth);
         try
@@ -3705,7 +3758,12 @@ public sealed class PdmAddin : ISwAddin
                 return;
             }
 
-            OpenOrActivateDocumentOnSolidWorksThread(fullPath, documentType, configuration);
+            var openedDocument = OpenOrActivateDocumentOnSolidWorksThread(fullPath, documentType, configuration);
+            if (openedDocument != null && openPropertyWriteback && propertyWritebackProjectId.HasValue)
+            {
+                pendingPropertyWritebackProjectId = propertyWritebackProjectId;
+                Interlocked.Exchange(ref pendingPropertyWritebackDialog, 1);
+            }
         }
         catch (Exception exception)
         {
@@ -3878,6 +3936,9 @@ public sealed class PdmAddin : ISwAddin
 
     private async void OnBatchPropertyEditRequested(object sender, CadTreeNodeEventArgs eventArgs)
     {
+        var initialOperation = Interlocked.Exchange(ref openPropertyWritebackTab, 0) != 0
+            ? PropertyOperationMode.PropertyWriteback
+            : PropertyOperationMode.BatchEdit;
         if (!apiClient.IsAuthenticated)
         {
             ShowError("请先登录PLM。");
@@ -3949,7 +4010,8 @@ public sealed class PdmAddin : ISwAddin
                 editItems,
                 projectDocuments,
                 writebackPreviews,
-                queuedWritebacks.Length - availableWritebacks.Length))
+                queuedWritebacks.Length - availableWritebacks.Length,
+                initialOperation))
             {
                 if (dialog.ShowDialog(taskPaneControl) != DialogResult.OK)
                 {
@@ -4113,7 +4175,10 @@ public sealed class PdmAddin : ISwAddin
                 .GroupBy(item => item.Node.DocumentId.Value)
                 .Select(group => group.First())
                 .ToArray();
-            await AcquireLatestAndCheckoutAsync(operationItems, projectId);
+            var drawingReviewWritebackIds = started
+                .GroupBy(item => item.SourceDocumentId)
+                .ToDictionary(group => group.Key, group => group.First().Id);
+            await AcquireLatestAndCheckoutAsync(operationItems, projectId, null, drawingReviewWritebackIds);
             foreach (var group in started.GroupBy(item => item.SourceDocumentId))
             {
                 var node = nodesByDocument[group.Key];
@@ -4123,7 +4188,7 @@ public sealed class PdmAddin : ISwAddin
                 }
             }
 
-            var result = await CheckInBatchAsync(operationItems, projectId, changeNote, null, lifetime.Token);
+            var result = await CheckInBatchAsync(operationItems, projectId, changeNote, null, lifetime.Token, null, drawingReviewWritebackIds);
             var completed = 0;
             var failed = 0;
             foreach (var request in started)
@@ -4656,7 +4721,8 @@ public sealed class PdmAddin : ISwAddin
     private async Task<WorkspaceAcquireResult> AcquireLatestAndCheckoutAsync(
         IReadOnlyList<BatchOperationItem> selectedItems,
         Guid projectId,
-        IReadOnlyDictionary<string, RegistrationDecision> registrationDecisions = null)
+        IReadOnlyDictionary<string, RegistrationDecision> registrationDecisions = null,
+        IReadOnlyDictionary<Guid, Guid> drawingReviewWritebackIds = null)
     {
         var items = DistinctBatchItems(selectedItems);
         ValidateBatchFileNames(items);
@@ -4672,7 +4738,8 @@ public sealed class PdmAddin : ISwAddin
             foreach (var item in items)
             {
                 var node = item.Node;
-                ValidateAcquireNode(node);
+                ValidateAcquireNode(node, node.DocumentId.HasValue
+                    && drawingReviewWritebackIds?.ContainsKey(node.DocumentId.Value) == true);
                 if (!node.DocumentId.HasValue)
                 {
                     continue;
@@ -4796,7 +4863,18 @@ public sealed class PdmAddin : ISwAddin
                         continue;
                     }
 
-                    var document = await apiClient.CheckoutAsync(node.DocumentId.Value, checkoutSessionId, checkoutMachineName, lifetime.Token);
+                    Guid? drawingReviewWritebackId = null;
+                    if (drawingReviewWritebackIds != null
+                        && drawingReviewWritebackIds.TryGetValue(node.DocumentId.Value, out var writebackId))
+                    {
+                        drawingReviewWritebackId = writebackId;
+                    }
+                    var document = await apiClient.CheckoutAsync(
+                        node.DocumentId.Value,
+                        checkoutSessionId,
+                        checkoutMachineName,
+                        lifetime.Token,
+                        drawingReviewWritebackId);
                     ApplyCheckoutDocument(node, document);
                     node.WorkState = CadWorkState.Editable;
                     historicalPartEditContexts.Remove(node.DocumentId.Value);
@@ -5129,11 +5207,15 @@ public sealed class PdmAddin : ISwAddin
         }
     }
 
-    private static void ValidateAcquireNode(CadTreeNode node)
+    private static void ValidateAcquireNode(CadTreeNode node, bool allowDrawingReviewWriteback = false)
     {
         if (node.IsReadOnlyPreview)
         {
             throw new InvalidOperationException("只读预览不能原地获取编辑权限，请先切换到编辑工作区。");
+        }
+        if (node.DrawingReviewLocked && !allowDrawingReviewWriteback)
+        {
+            throw new InvalidOperationException("图档正在进行图纸审核，只允许只读打开，不能获取编辑权限。");
         }
 
         if (ToSolidWorksDocumentType(node.Kind) == (int)swDocumentTypes_e.swDocNONE)
@@ -5729,7 +5811,8 @@ public sealed class PdmAddin : ISwAddin
         string changeNote,
         Action<int, int, string, string> reportProgress,
         CancellationToken cancellationToken,
-        IReadOnlyDictionary<string, BatchDocumentIdentity> identities = null)
+        IReadOnlyDictionary<string, BatchDocumentIdentity> identities = null,
+        IReadOnlyDictionary<Guid, Guid> drawingReviewWritebackIds = null)
     {
         var items = DistinctBatchItems(selectedItems);
         ValidateBatchFileNames(items);
@@ -5773,6 +5856,12 @@ public sealed class PdmAddin : ISwAddin
                     ValidateBatchCheckInNode(node);
                     BatchDocumentIdentity identity = null;
                     identities?.TryGetValue(node.FullPath, out identity);
+                    Guid? drawingReviewWritebackId = null;
+                    if (node.DocumentId.HasValue && drawingReviewWritebackIds != null
+                        && drawingReviewWritebackIds.TryGetValue(node.DocumentId.Value, out var writebackId))
+                    {
+                        drawingReviewWritebackId = writebackId;
+                    }
                     var fileResult = await CheckInBatchNodeAsync(
                         node,
                         projectId,
@@ -5783,7 +5872,8 @@ public sealed class PdmAddin : ISwAddin
                                 ? node.DocumentId.Value == projectRootDocumentId.Value
                                 : item.Depth == 0),
                         cancellationToken,
-                        identity);
+                        identity,
+                        drawingReviewWritebackId);
                     if (fileResult.VersionCreated)
                     {
                         result.CreatedVersions++;
@@ -5900,7 +5990,8 @@ public sealed class PdmAddin : ISwAddin
         string changeNote,
         bool isProjectRoot,
         CancellationToken cancellationToken,
-        BatchDocumentIdentity identity = null)
+        BatchDocumentIdentity identity = null,
+        Guid? drawingReviewWritebackId = null)
     {
         var uploadCopyPath = string.Empty;
         IModelDoc2 document = null;
@@ -5989,7 +6080,8 @@ public sealed class PdmAddin : ISwAddin
                 referenceChanged || identity != null,
                 identity?.DrawingNumber,
                 identity?.Name,
-                cancellationToken);
+                cancellationToken,
+                drawingReviewWritebackId);
             ApplyCheckoutDocument(node, checkIn.Document);
             node.Revision = checkIn.Version?.Revision?.Display ?? checkIn.Document.Revision?.Display ?? node.Revision;
             node.CurrentRevision = node.Revision;
@@ -6945,10 +7037,11 @@ public sealed class PdmAddin : ISwAddin
             ShowError("只读预览目录不能基于历史版本编辑，请先切换到当前工作区。");
             return;
         }
-        if (string.Equals(node.LifecycleState, "InReview", StringComparison.OrdinalIgnoreCase)
+        if (node.DrawingReviewLocked
+            || string.Equals(node.LifecycleState, "InReview", StringComparison.OrdinalIgnoreCase)
             || string.Equals(node.LifecycleState, "Obsolete", StringComparison.OrdinalIgnoreCase))
         {
-            ShowError("审批中或已作废的零件不能获取编辑权限。");
+            ShowError(node.DrawingReviewLocked ? "图纸审核中的零件不能获取编辑权限。" : "审批中或已作废的零件不能获取编辑权限。");
             return;
         }
 
@@ -7455,6 +7548,7 @@ public sealed class PdmAddin : ISwAddin
             CheckoutMachine = document?.CheckoutMachine ?? string.Empty,
             CheckoutLastHeartbeatAt = document?.CheckoutLastHeartbeatAt,
             LifecycleState = LifecycleStateName(document?.State ?? 0),
+            DrawingReviewLocked = document?.DrawingReviewLocked == true,
             UpdatedAt = document?.UpdatedAt
         };
         var seenInstancePaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -7529,6 +7623,7 @@ public sealed class PdmAddin : ISwAddin
                 CheckoutMachine = drawing.CheckoutMachine ?? string.Empty,
                 CheckoutLastHeartbeatAt = drawing.CheckoutLastHeartbeatAt,
                 LifecycleState = LifecycleStateName(drawing.State),
+                DrawingReviewLocked = drawing.DrawingReviewLocked,
                 UpdatedAt = drawing.UpdatedAt
             });
             existingDrawingIds.Add(drawing.Id);
@@ -7568,6 +7663,7 @@ public sealed class PdmAddin : ISwAddin
         node.DrawingNumber = document.DrawingNumber ?? node.DrawingNumber;
         node.DisplayName = document.Name ?? node.DisplayName;
         node.LifecycleState = LifecycleStateName(document.State);
+        node.DrawingReviewLocked = document.DrawingReviewLocked;
         node.UpdatedAt = document.UpdatedAt;
         var checkedOutByCurrentUser = !string.IsNullOrWhiteSpace(authenticatedUsername)
             && !string.IsNullOrWhiteSpace(document.CheckedOutBy)
@@ -8532,7 +8628,7 @@ public sealed class PdmAddin : ISwAddin
     {
         var directory = Path.Combine(System.Environment.GetFolderPath(System.Environment.SpecialFolder.LocalApplicationData), "UPTON PDM");
         Directory.CreateDirectory(directory);
-        var iconPath = Path.Combine(directory, "plm-taskpane-v2.bmp");
+        var iconPath = Path.Combine(directory, "plm-taskpane-v3.bmp");
         if (File.Exists(iconPath))
         {
             return iconPath;

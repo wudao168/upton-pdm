@@ -94,6 +94,8 @@ internal sealed class CadTreeNode
 
     public bool CheckoutSessionLost { get; set; }
 
+    public bool DrawingReviewLocked { get; set; }
+
     public CadWorkState WorkState { get; set; }
 
     public string LatestVersionSha256 { get; set; } = string.Empty;

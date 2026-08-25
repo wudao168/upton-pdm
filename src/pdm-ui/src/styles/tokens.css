@@ -6,6 +6,9 @@
   --pdm-bg: #f4f7fb;
   --pdm-surface: #ffffff;
   --pdm-surface-muted: #f8fafc;
+  --pdm-detail-row: #ffffff;
+  --pdm-detail-row-alt: #f0f2f5;
+  --pdm-detail-row-height: 30px;
   --pdm-sidebar: #3a475c;
   --pdm-sidebar-active: #203347;
   --pdm-sidebar-text: rgba(255, 255, 255, .95);

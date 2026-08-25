@@ -17,7 +17,12 @@ public sealed record SaveMaterialCommand(
     string? WeightUnit,
     long? ExpectedRowVersion = null,
     string? CategoryCode = null,
-    string? PurchaseLink = null);
+    string? PurchaseLink = null,
+    string? SelectionAdvice = null,
+    decimal? ReferencePrice = null,
+    string? Model3DLink = null,
+    string? DocumentLink = null,
+    bool IsRecommended = false);
 
 public sealed record CreateMaterialFromBomCommand(Guid ProjectId, Guid BomItemId);
 
@@ -239,6 +244,9 @@ public interface IMaterialRepository
     Task<PdmMaterial?> FindMaterialAsync(Guid materialId, CancellationToken cancellationToken);
     Task<PdmMaterial?> FindMaterialByCodeAsync(string materialCode, CancellationToken cancellationToken);
     Task<PdmMaterial?> FindMaterialBySourceBomItemAsync(Guid bomItemId, CancellationToken cancellationToken);
+    Task<IReadOnlyList<MaterialAttachment>> ListMaterialAttachmentsAsync(Guid materialId, MaterialAttachmentKind? kind, CancellationToken cancellationToken);
+    Task<MaterialAttachment?> FindMaterialAttachmentAsync(Guid attachmentId, CancellationToken cancellationToken);
+    Task<MaterialAttachment> CreateMaterialAttachmentAsync(MaterialAttachment attachment, CancellationToken cancellationToken);
     Task<IReadOnlyList<PdmMaterial>> FindApprovedMaterialsBySpecificationAsync(string specification, CancellationToken cancellationToken);
     Task<IReadOnlyList<PdmMaterial>> FindApprovedMaterialsByBrandAndSpecificationAsync(string brand, string specification, CancellationToken cancellationToken);
     Task<IReadOnlyList<MaterialCodeApplication>> ListMaterialCodeApplicationsAsync(Guid? projectId, MaterialCodeApplicationStatus? status, CancellationToken cancellationToken);
@@ -301,6 +309,51 @@ public interface IMaterialRepository
         CancellationToken cancellationToken);
     Task<U9MaterialIntegrationConfiguration> GetIntegrationConfigurationAsync(CancellationToken cancellationToken);
     Task<U9MaterialIntegrationConfiguration> SaveIntegrationConfigurationAsync(U9MaterialIntegrationConfiguration configuration, CancellationToken cancellationToken);
+}
+
+public sealed record MaterialAttachmentUploadSession(
+    Guid Id,
+    Guid MaterialId,
+    string MaterialCode,
+    MaterialAttachmentKind Kind,
+    string FileName,
+    long TotalLength,
+    int ChunkSize,
+    string ExpectedSha256,
+    long ReceivedLength,
+    string StorageRoot,
+    string Owner,
+    DateTimeOffset ExpiresAt);
+
+public sealed record StoredMaterialAttachment(
+    Guid MaterialId,
+    MaterialAttachmentKind Kind,
+    string OriginalFileName,
+    string StorageRoot,
+    string RelativePath,
+    long Length,
+    string Sha256,
+    DateTimeOffset StoredAt);
+
+public sealed record MaterialAttachmentDownload(MaterialAttachment Attachment, Stream Content);
+
+public interface IMaterialAttachmentStorage
+{
+    Task<MaterialAttachmentUploadSession> StartUploadAsync(
+        Guid materialId,
+        string materialCode,
+        MaterialAttachmentKind kind,
+        string fileName,
+        long totalLength,
+        string expectedSha256,
+        string storageRoot,
+        string owner,
+        CancellationToken cancellationToken);
+    Task<MaterialAttachmentUploadSession> WriteChunkAsync(Guid sessionId, int chunkIndex, Stream content, string actor, CancellationToken cancellationToken);
+    Task<StoredMaterialAttachment> CompleteUploadAsync(Guid sessionId, string actor, CancellationToken cancellationToken);
+    Task VerifyAsync(MaterialAttachment attachment, CancellationToken cancellationToken);
+    Task<Stream> OpenReadAsync(MaterialAttachment attachment, CancellationToken cancellationToken);
+    Task DiscardAsync(StoredMaterialAttachment file, CancellationToken cancellationToken);
 }
 
 public interface IU9SecretProtector

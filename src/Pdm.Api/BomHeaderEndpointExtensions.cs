@@ -25,6 +25,20 @@ public static class BomHeaderEndpointExtensions
             var (actor, role) = CurrentUser(context.User);
             return Results.Ok(await service.GenerateHierarchyMaterialsAsync(projectId, actor, role, cancellationToken));
         });
+        api.MapPost("/{kind}/u9-preview", async (Guid projectId, string kind, HttpContext context, ProjectBomU9SyncService service, CancellationToken cancellationToken) =>
+        {
+            if (!Enum.TryParse<ProjectBomHeaderKind>(kind, true, out var parsed)) return Results.BadRequest(new { message = "BOM层级类型无效。" });
+            var (actor, role) = CurrentUser(context.User);
+            return Results.Ok(await service.PreviewAsync(projectId, parsed, actor, role, cancellationToken));
+        });
+        api.MapPost("/{kind}/u9-execute", async (Guid projectId, string kind, ProjectBomU9ExecuteRequest request, HttpContext context, ProjectBomU9SyncService service, CancellationToken cancellationToken) =>
+        {
+            if (!Enum.TryParse<ProjectBomHeaderKind>(kind, true, out var parsed)) return Results.BadRequest(new { message = "BOM层级类型无效。" });
+            var (actor, role) = CurrentUser(context.User);
+            return Results.Ok(await service.ExecuteAsync(
+                projectId, parsed, request.RequestSha256, request.Confirmation,
+                actor, role, cancellationToken));
+        });
     }
 
     private static (string Actor, UserRole Role) CurrentUser(ClaimsPrincipal principal)
@@ -36,4 +50,5 @@ public static class BomHeaderEndpointExtensions
     }
 
     private sealed record BindBomHeaderMaterialRequest(Guid MaterialId, long ExpectedRowVersion);
+    private sealed record ProjectBomU9ExecuteRequest(string RequestSha256, string Confirmation);
 }

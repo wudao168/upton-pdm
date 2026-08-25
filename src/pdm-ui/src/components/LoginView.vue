@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ArrowRight, Eye, EyeOff } from '@lucide/vue'
+import { Eye, EyeOff, LockKeyhole, UserRound } from '@lucide/vue'
 import { ElMessage } from 'element-plus'
 import { onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import { postDesktopMessage, requestPasswordReset } from '../api'
@@ -88,24 +88,30 @@ async function submitPasswordReset() {
 
           <label class="pdm-login-field" for="pdm-login-username">
             <span>账号</span>
-            <input
-              id="pdm-login-username"
-              v-model="username"
-              name="username"
-              autocomplete="username"
-              placeholder="请输入账号"
-              autofocus
-              @focus="isTypingUsername = true"
-              @blur="isTypingUsername = false"
-            >
+            <span class="pdm-login-input-frame">
+              <UserRound class="pdm-login-input-icon" :size="19" aria-hidden="true" />
+              <input
+                id="pdm-login-username"
+                v-model="username"
+                class="pdm-login-input"
+                name="username"
+                autocomplete="username"
+                placeholder="请输入账号"
+                autofocus
+                @focus="isTypingUsername = true"
+                @blur="isTypingUsername = false"
+              >
+            </span>
           </label>
 
           <label class="pdm-login-field" for="pdm-login-password">
             <span>密码</span>
-            <span class="pdm-login-password">
+            <span class="pdm-login-input-frame pdm-login-password">
+              <LockKeyhole class="pdm-login-input-icon" :size="19" aria-hidden="true" />
               <input
                 id="pdm-login-password"
                 v-model="password"
+                class="pdm-login-input"
                 name="password"
                 :type="showPassword ? 'text' : 'password'"
                 autocomplete="current-password"
@@ -136,11 +142,7 @@ async function submitPasswordReset() {
           <p v-else-if="!online" class="pdm-login-warning">PLM服务当前未连接，登录可能失败。</p>
 
           <button type="submit" class="pdm-login-submit" :disabled="pending || !username.trim() || !password">
-            <span class="pdm-login-submit__label">{{ pending ? '登录中...' : '登录' }}</span>
-            <span class="pdm-login-submit__hover" aria-hidden="true">
-              <span>{{ pending ? '登录中...' : '登录' }}</span>
-              <ArrowRight :size="16" />
-            </span>
+            {{ pending ? '登录中...' : '登录' }}
           </button>
 
           <small v-if="desktopCredentialStorageAvailable">账号和密码仅加密保存在当前Windows用户下。</small>

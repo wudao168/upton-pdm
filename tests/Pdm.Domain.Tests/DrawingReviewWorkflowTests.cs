@@ -37,6 +37,144 @@ public sealed class DrawingReviewWorkflowTests
     }
 
     [Fact]
+    public async Task DeveloperCanReviewOwnModel()
+    {
+        var (_, workflow, _, _) = await PrepareReviewAsync();
+        var package = await workflow.CreateDrawingReviewPackageAsync(ProjectId, "submitter", UserRole.Administrator, default);
+        var item = Assert.Single(package.Items);
+        TenantContext.Set(new CurrentTenant(
+            Guid.NewGuid(),
+            Guid.NewGuid(),
+            Guid.NewGuid(),
+            "designer",
+            "developer",
+            true,
+            new HashSet<string>(StringComparer.Ordinal) { PermissionCodes.DrawingReviewDecide }));
+
+        try
+        {
+            package = await workflow.DecideDrawingReviewTargetAsync(
+                package.Id,
+                item.Id,
+                new DecideDrawingReviewTargetCommand(DrawingReviewTarget.Model3D, DrawingReviewDecision.Approve, "开发者自审验证"),
+                "designer",
+                UserRole.Administrator,
+                default);
+        }
+        finally
+        {
+            TenantContext.Clear();
+        }
+
+        Assert.Equal(DrawingReviewTargetState.Approved, Assert.Single(package.Items).ModelState);
+    }
+
+    [Fact]
+    public async Task ActiveDrawingReviewBlocksOrdinaryCheckoutForModelAndDrawing()
+    {
+        var (_, workflow, model, drawing) = await PrepareReviewAsync();
+        await workflow.CreateDrawingReviewPackageAsync(ProjectId, "submitter", UserRole.Administrator, default);
+
+        var modelBlocked = await Assert.ThrowsAsync<PdmConflictException>(() => workflow.CheckoutAsync(
+            model.Id, "designer", UserRole.Administrator, Guid.NewGuid(), "TEST-WS", default));
+        var drawingBlocked = await Assert.ThrowsAsync<PdmConflictException>(() => workflow.CheckoutAsync(
+            drawing.Id, "designer", UserRole.Administrator, Guid.NewGuid(), "TEST-WS", default));
+
+        Assert.Contains("图纸审核", modelBlocked.Message);
+        Assert.Contains("不能获取编辑权限", modelBlocked.Message);
+        Assert.Contains("图纸审核", drawingBlocked.Message);
+    }
+
+    [Fact]
+    public async Task WithdrawnDrawingReviewKeepsHistoryAndReleasesDocumentLocks()
+    {
+        var (_, workflow, model, drawing) = await PrepareReviewAsync();
+        var package = await workflow.CreateDrawingReviewPackageAsync(ProjectId, "submitter", UserRole.Administrator, default);
+
+        var withdrawn = await workflow.WithdrawDrawingReviewPackageAsync(package.Id, "审核范围选择有误", "submitter", UserRole.Administrator, default);
+
+        Assert.Equal(DrawingReviewPackageState.Withdrawn, withdrawn.State);
+        Assert.Equal("submitter", withdrawn.WithdrawnBy);
+        Assert.Equal("审核范围选择有误", withdrawn.WithdrawalReason);
+        Assert.NotNull(withdrawn.WithdrawnAt);
+        await workflow.CheckoutAsync(model.Id, "designer", UserRole.Administrator, Guid.NewGuid(), "TEST-WS", default);
+        await workflow.CheckoutAsync(drawing.Id, "designer", UserRole.Administrator, Guid.NewGuid(), "TEST-WS", default);
+    }
+
+    [Fact]
+    public async Task DrawingReviewCanBeCreatedForSelectedCandidateOnly()
+    {
+        var (repository, workflow, model, _) = await PrepareReviewAsync();
+        var standardModel = await repository.RegisterDocumentAsync(
+            new RegisterDocumentCommand(ProjectId, "STD-SELECT", "待选择标准件", "STD-SELECT.SLDPRT", DocumentKind.Part),
+            "designer",
+            default);
+        var standardDrawing = await repository.RegisterDocumentAsync(
+            new RegisterDocumentCommand(ProjectId, "STD-SELECT", "待选择标准件工程图", "STD-SELECT.SLDDRW", DocumentKind.Drawing, RelatedModelDocumentId: standardModel.Id),
+            "designer",
+            default);
+        await CheckInAsync(repository, standardModel.Id, "designer", new Dictionary<string, string?>(), 'C');
+        await CheckInAsync(repository, standardDrawing.Id, "designer", new Dictionary<string, string?>(), 'D');
+        await repository.ReplaceBomAsync(ProjectId, BomKind.Standard,
+        [
+            new BomItem(Guid.NewGuid(), ProjectId, BomKind.Standard, 1, "STD-SELECT", "待选择标准件", 1, "件", null, "STD-SELECT", "W1", true)
+            {
+                SourceDocumentId = standardModel.Id,
+                SourceConfiguration = "默认",
+                Source = "Auto"
+            }
+        ], default);
+
+        var candidates = await workflow.ListDrawingReviewCandidatesAsync(ProjectId, "submitter", UserRole.Administrator, default);
+        Assert.Contains(candidates, candidate => candidate.ModelDocumentId == model.Id && candidate.State == DrawingReviewCandidateState.Ready);
+        Assert.Contains(candidates, candidate => candidate.ModelDocumentId == standardModel.Id && candidate.BomKinds.Contains(BomKind.Standard));
+
+        var package = await workflow.CreateDrawingReviewPackageAsync(ProjectId, [standardModel.Id], "submitter", UserRole.Administrator, default);
+        var item = Assert.Single(package.Items);
+        Assert.Equal(standardModel.Id, item.ModelDocumentId);
+        Assert.Equal(standardDrawing.Id, item.DrawingDocumentId);
+    }
+
+    [Fact]
+    public async Task PropertyWritingRejectsOrdinaryCheckInWithoutControlledWriteback()
+    {
+        var (repository, workflow, model, drawing) = await PrepareReviewAsync();
+        var review = await workflow.CreateDrawingReviewPackageAsync(ProjectId, "submitter", UserRole.Administrator, default);
+        var item = Assert.Single(review.Items);
+        review = await workflow.DecideDrawingReviewTargetAsync(review.Id, item.Id,
+            new DecideDrawingReviewTargetCommand(DrawingReviewTarget.Model3D, DrawingReviewDecision.Approve, "3D通过"),
+            "model-reviewer", UserRole.Administrator, default);
+        review = await workflow.DecideDrawingReviewTargetAsync(review.Id, item.Id,
+            new DecideDrawingReviewTargetCommand(DrawingReviewTarget.Drawing2D, DrawingReviewDecision.Approve, "2D通过"),
+            "drawing-reviewer", UserRole.Administrator, default);
+        Assert.Equal(DrawingReviewPackageState.WritingProperties, review.State);
+
+        var lockedIds = await repository.ListActiveDrawingReviewDocumentIdsAsync(ProjectId, default);
+        Assert.Contains(model.Id, lockedIds);
+        Assert.Contains(drawing.Id, lockedIds);
+
+        var writeback = (await repository.ListCadPropertyWritebacksAsync(ProjectId, default))
+            .Single(request => request.SourceDocumentId == model.Id);
+        await workflow.StartCadPropertyWritebackAsync(writeback.Id, "cad-client", UserRole.Administrator, default);
+        var sessionId = Guid.NewGuid();
+        var checkedOut = await repository.CheckoutAsync(model.Id, "cad-client", sessionId, "TEST-WS",
+            DateTimeOffset.UtcNow.AddMinutes(15), writeback.Id, default);
+        var root = new DocumentReferenceNode(Guid.NewGuid(), checkedOut.Id, checkedOut.DrawingNumber, checkedOut.FileName,
+            checkedOut.Name, checkedOut.Kind, "默认", 1, ReferenceNodeStatus.Normal, checkedOut.Revision, "cad-client", []);
+        var commit = new DocumentVersionCommit(
+            new StoredFile($"versions/{checkedOut.FileName}", 128, new string('E', 64), DateTimeOffset.UtcNow),
+            "非法普通存档",
+            writeback.Properties,
+            new CadReferenceSnapshot(Guid.NewGuid(), ProjectId, checkedOut.Id, DateTimeOffset.UtcNow, "cad-client", root, new string('F', 64)),
+            [],
+            []);
+
+        var blocked = await Assert.ThrowsAsync<PdmConflictException>(() =>
+            repository.CheckInVersionAsync(model.Id, "cad-client", sessionId, commit, default));
+        Assert.Contains("不能提交存档", blocked.Message);
+    }
+
+    [Fact]
     public async Task FormalNonStandardReleaseWaitsForBothReviewsAndPropertyWritebacks()
     {
         var (repository, workflow, model, drawing) = await PrepareReviewAsync();
@@ -62,7 +200,8 @@ public sealed class DrawingReviewWorkflowTests
         foreach (var request in writebacks.OrderBy(request => request.SourceDocumentId))
         {
             await workflow.StartCadPropertyWritebackAsync(request.Id, "cad-client", UserRole.Administrator, default);
-            var result = await CheckInAsync(repository, request.SourceDocumentId, "cad-client", request.Properties, request.SourceDocumentId == model.Id ? 'C' : 'D');
+            var result = await CheckInAsync(repository, request.SourceDocumentId, "cad-client", request.Properties,
+                request.SourceDocumentId == model.Id ? 'C' : 'D', drawingReviewWritebackId: request.Id);
             await workflow.CompleteCadPropertyWritebackAsync(request.Id, Assert.IsType<DocumentVersion>(result.Version).Id, "cad-client", UserRole.Administrator, default);
         }
 
@@ -80,6 +219,264 @@ public sealed class DrawingReviewWorkflowTests
         Assert.Equal(ReleasePackageState.ProcessReview, submitted.State);
     }
 
+    [Fact]
+    public async Task FormalReleaseRejectsNonStandardRowWithoutSourceDocuments()
+    {
+        var (repository, workflow, _, _) = await PrepareReviewAsync();
+        var items = (await repository.GetBomAsync(ProjectId, BomKind.NonStandard, default)).ToList();
+        items.Add(new BomItem(Guid.NewGuid(), ProjectId, BomKind.NonStandard, 2, "02040000005", "夹紧胶2", 1, "件", "PU(90°)", null, "W1", true)
+        {
+            Source = "Manual",
+            IsManuallyRetained = true
+        });
+        await repository.ReplaceBomAsync(ProjectId, BomKind.NonStandard, items, default);
+        var release = await CreateLegacyReleasePackageAsync(repository);
+
+        var blocked = await Assert.ThrowsAsync<PdmRuleException>(() =>
+            workflow.SubmitReleasePackageAsync(release.Id, "admin", UserRole.Administrator, default));
+
+        Assert.Contains("没有3D/2D图档关系", blocked.Message);
+        Assert.Contains("02040000005", blocked.Message);
+    }
+
+    [Fact]
+    public async Task FormalReleaseRejectsMultipleDrawingsForOneNonStandardModel()
+    {
+        var (repository, workflow, model, drawing) = await PrepareReviewAsync();
+        var alternateDrawing = await repository.RegisterDocumentAsync(
+            new RegisterDocumentCommand(ProjectId, "A01-100-ALT", "机架备用工程图", "A01-100-ALT.SLDDRW", DocumentKind.Drawing,
+                RelatedModelDocumentId: model.Id),
+            "designer",
+            default);
+        await CheckInAsync(repository, alternateDrawing.Id, "designer", new Dictionary<string, string?>(), 'C');
+        var modelVersion = (await repository.ListDocumentVersionsAsync(model.Id, default)).First();
+        var drawingVersion = (await repository.ListDocumentVersionsAsync(drawing.Id, default)).First();
+        var packageId = Guid.NewGuid();
+        await repository.CreateDrawingReviewPackageAsync(new DrawingReviewPackage
+        {
+            Id = packageId,
+            ProjectId = ProjectId,
+            Number = "DR-MULTIPLE-DRAWINGS",
+            State = DrawingReviewPackageState.Approved,
+            CreatedBy = "reviewer",
+            CreatedAt = DateTimeOffset.UtcNow,
+            ApprovedAt = DateTimeOffset.UtcNow,
+            Items =
+            [
+                new DrawingReviewItem
+                {
+                    Id = Guid.NewGuid(), PackageId = packageId, BomItemId = Guid.NewGuid(), DrawingNumber = "A01-100", Name = "机架组件",
+                    ModelDocumentId = model.Id, ModelVersionId = modelVersion.Id, ModelRevision = modelVersion.Revision.Display,
+                    ModelSha256 = modelVersion.Sha256, ModelCreatedBy = modelVersion.CreatedBy, ModelState = DrawingReviewTargetState.Marked,
+                    DrawingDocumentId = drawing.Id, DrawingVersionId = drawingVersion.Id, DrawingRevision = drawingVersion.Revision.Display,
+                    DrawingSha256 = drawingVersion.Sha256, DrawingCreatedBy = drawingVersion.CreatedBy, DrawingState = DrawingReviewTargetState.Marked
+                }
+            ]
+        }, default);
+        var release = await CreateLegacyReleasePackageAsync(repository);
+
+        var blocked = await Assert.ThrowsAsync<PdmRuleException>(() =>
+            workflow.SubmitReleasePackageAsync(release.Id, "admin", UserRole.Administrator, default));
+
+        Assert.Contains("关联2张2D工程图", blocked.Message);
+    }
+
+    [Fact]
+    public async Task FormalReleaseRejectsNonStandardQuantityMismatch()
+    {
+        var (repository, workflow, _, _) = await PrepareReviewAsync();
+        var items = (await repository.GetBomAsync(ProjectId, BomKind.NonStandard, default))
+            .Select(item => item with { Quantity = 2 })
+            .ToArray();
+        await repository.ReplaceBomAsync(ProjectId, BomKind.NonStandard, items, default);
+        var release = await CreateLegacyReleasePackageAsync(repository);
+
+        var blocked = await Assert.ThrowsAsync<PdmRuleException>(() =>
+            workflow.SubmitReleasePackageAsync(release.Id, "admin", UserRole.Administrator, default));
+
+        Assert.Contains("BOM数量与最新设计树数量不一致", blocked.Message);
+        Assert.Contains("A01-100（BOM 2 / 源 1）", blocked.Message);
+    }
+
+    [Fact]
+    public async Task ActiveReviewOnlyExcludesItsOwnDocumentsFromTheNextPackage()
+    {
+        var (repository, workflow, model, drawing) = await PrepareReviewAsync();
+        var unrelatedModel = await repository.RegisterDocumentAsync(
+            new RegisterDocumentCommand(ProjectId, "OTHER-001", "其他审核模型", "OTHER-001.SLDPRT", DocumentKind.Part),
+            "other-designer",
+            default);
+        var unrelatedDrawing = await repository.RegisterDocumentAsync(
+            new RegisterDocumentCommand(ProjectId, "OTHER-001", "其他审核工程图", "OTHER-001.SLDDRW", DocumentKind.Drawing,
+                RelatedModelDocumentId: unrelatedModel.Id),
+            "other-designer",
+            default);
+        await CheckInAsync(repository, unrelatedModel.Id, "other-designer", new Dictionary<string, string?>(), 'E');
+        await CheckInAsync(repository, unrelatedDrawing.Id, "other-designer", new Dictionary<string, string?>(), 'F');
+        var unrelatedPackageId = Guid.NewGuid();
+        await repository.CreateDrawingReviewPackageAsync(new DrawingReviewPackage
+        {
+            Id = unrelatedPackageId,
+            ProjectId = ProjectId,
+            Number = "DR-UNRELATED",
+            State = DrawingReviewPackageState.InReview,
+            CreatedBy = "another-submitter",
+            CreatedAt = DateTimeOffset.UtcNow,
+            Items = [CreateReviewItem(unrelatedPackageId, unrelatedModel.Id, unrelatedDrawing.Id)]
+        }, default);
+
+        var package = await workflow.CreateDrawingReviewPackageAsync(ProjectId, "submitter", UserRole.Administrator, default);
+        var item = Assert.Single(package.Items);
+        Assert.Equal(model.Id, item.ModelDocumentId);
+        Assert.Equal(drawing.Id, item.DrawingDocumentId);
+
+        var duplicate = await Assert.ThrowsAsync<PdmConflictException>(() =>
+            workflow.CreateDrawingReviewPackageAsync(ProjectId, "submitter", UserRole.Administrator, default));
+        Assert.Contains("均已在审核中", duplicate.Message);
+    }
+
+    [Fact]
+    public async Task ManualBomRowsWithoutSourceDocumentsAreVisibleAsBlockersWithoutHidingLinkedDrawings()
+    {
+        var (repository, workflow, model, drawing) = await PrepareReviewAsync();
+        var bomItems = (await repository.GetBomAsync(ProjectId, BomKind.NonStandard, default)).ToList();
+        bomItems.Add(new BomItem(Guid.NewGuid(), ProjectId, BomKind.NonStandard, 2, "02040000005", "夹紧胶2", 1, "件", "PU(90°)", null, "W1", true)
+        {
+            Source = "Manual"
+        });
+        bomItems.Add(new BomItem(Guid.NewGuid(), ProjectId, BomKind.NonStandard, 3, "02040000010", "抓手定位圆柱销", 1, "件", "SUS304", null, "W1", true)
+        {
+            Source = "Manual"
+        });
+        await repository.ReplaceBomAsync(ProjectId, BomKind.NonStandard, bomItems, default);
+
+        var package = await workflow.CreateDrawingReviewPackageAsync(ProjectId, "submitter", UserRole.Administrator, default);
+
+        var item = Assert.Single(package.Items);
+        Assert.Equal(model.Id, item.ModelDocumentId);
+        Assert.Equal(drawing.Id, item.DrawingDocumentId);
+        var blockers = (await workflow.ListDrawingReviewCandidatesAsync(ProjectId, "submitter", UserRole.Administrator, default))
+            .Where(candidate => candidate.ModelDocumentId is null)
+            .ToArray();
+        Assert.Equal(2, blockers.Length);
+        Assert.All(blockers, blocker =>
+        {
+            Assert.Equal(DrawingReviewCandidateState.Unavailable, blocker.State);
+            Assert.Equal(blocker.CandidateId, blocker.BomItemId);
+            Assert.Contains("没有来源3D模型", blocker.Reason);
+        });
+    }
+
+    [Fact]
+    public async Task NonStandardAssemblyWithoutDrawingIsUnavailableForReview()
+    {
+        var (repository, workflow, _, _) = await PrepareReviewAsync();
+        var assembly = await repository.RegisterDocumentAsync(
+            new RegisterDocumentCommand(ProjectId, "A01-200", "非标装配体", "A01-200.SLDASM", DocumentKind.Assembly),
+            "designer",
+            default);
+        await CheckInAsync(repository, assembly.Id, "designer", new Dictionary<string, string?>(), 'E', true);
+        await repository.ReplaceBomAsync(ProjectId, BomKind.NonStandard,
+        [
+            new BomItem(Guid.NewGuid(), ProjectId, BomKind.NonStandard, 1, "A01-200", "非标装配体", 1, "件", "Q235B", null, "W1", true)
+            {
+                SourceDocumentId = assembly.Id,
+                SourceConfiguration = "默认",
+                Source = "Auto"
+            }
+        ], default);
+
+        var candidate = Assert.Single(await workflow.ListDrawingReviewCandidatesAsync(ProjectId, "submitter", UserRole.Administrator, default));
+        Assert.Equal(assembly.Id, candidate.ModelDocumentId);
+        Assert.Equal(DrawingReviewCandidateState.Unavailable, candidate.State);
+        Assert.Contains("缺少关联2D工程图", candidate.Reason);
+
+        var blocked = await Assert.ThrowsAsync<PdmRuleException>(() => workflow.CreateDrawingReviewPackageAsync(
+            ProjectId, [assembly.Id], "submitter", UserRole.Administrator, default));
+        Assert.Contains("不能进入图纸审核", blocked.Message);
+    }
+
+    [Fact]
+    public async Task DrawingReviewIncludesLinkedStandardBomDocuments()
+    {
+        var (repository, workflow, model, drawing) = await PrepareReviewAsync();
+        var standardModel = await repository.RegisterDocumentAsync(
+            new RegisterDocumentCommand(ProjectId, "STD-200", "标准件模型", "STD-200.SLDPRT", DocumentKind.Part),
+            "designer",
+            default);
+        var standardDrawing = await repository.RegisterDocumentAsync(
+            new RegisterDocumentCommand(ProjectId, "STD-200", "标准件工程图", "STD-200.SLDDRW", DocumentKind.Drawing, RelatedModelDocumentId: standardModel.Id),
+            "designer",
+            default);
+        await CheckInAsync(repository, standardModel.Id, "designer", new Dictionary<string, string?>(), 'C');
+        await CheckInAsync(repository, standardDrawing.Id, "designer", new Dictionary<string, string?>(), 'D');
+        await repository.ReplaceBomAsync(ProjectId, BomKind.Standard,
+        [
+            new BomItem(Guid.NewGuid(), ProjectId, BomKind.Standard, 1, "STD-200", "标准件模型", 1, "件", null, "STD-200", "W1", true)
+            {
+                SourceDocumentId = standardModel.Id,
+                SourceConfiguration = "默认",
+                Source = "Auto"
+            }
+        ], default);
+
+        var package = await workflow.CreateDrawingReviewPackageAsync(ProjectId, "submitter", UserRole.Administrator, default);
+
+        Assert.Equal(2, package.Items.Count);
+        Assert.Contains(package.Items, item => item.ModelDocumentId == model.Id && item.DrawingDocumentId == drawing.Id);
+        Assert.Contains(package.Items, item => item.ModelDocumentId == standardModel.Id && item.DrawingDocumentId == standardDrawing.Id);
+    }
+
+    [Fact]
+    public async Task DrawingReviewIncludesAssemblyFromDesignTreeWithoutBomRow()
+    {
+        var (repository, workflow, model, drawing) = await PrepareReviewAsync();
+        await repository.ReplaceBomAsync(ProjectId, BomKind.NonStandard, [], default);
+
+        var package = await workflow.CreateDrawingReviewPackageAsync(ProjectId, "submitter", UserRole.Administrator, default);
+
+        var item = Assert.Single(package.Items);
+        Assert.Equal(model.Id, item.ModelDocumentId);
+        Assert.Equal(drawing.Id, item.DrawingDocumentId);
+        Assert.Equal(model.Id, item.BomItemId);
+    }
+
+    [Fact]
+    public async Task DrawingReviewAllowsAssemblyWithoutDrawing()
+    {
+        var (repository, workflow, _, _) = await PrepareReviewAsync();
+        var assembly = await repository.RegisterDocumentAsync(
+            new RegisterDocumentCommand(ProjectId, "A01-200", "无工程图装配体", "A01-200.SLDASM", DocumentKind.Assembly),
+            "designer",
+            default);
+        await CheckInAsync(repository, assembly.Id, "designer", new Dictionary<string, string?>(), 'E', true);
+        await repository.ReplaceBomAsync(ProjectId, BomKind.NonStandard, [], default);
+
+        var package = await workflow.CreateDrawingReviewPackageAsync(ProjectId, "submitter", UserRole.Administrator, default);
+
+        var item = Assert.Single(package.Items);
+        Assert.Equal(assembly.Id, item.ModelDocumentId);
+        Assert.False(item.RequiresDrawingReview);
+        Assert.Null(item.DrawingDocumentId);
+        Assert.Equal(DrawingReviewTargetState.NotRequired, item.DrawingState);
+
+        package = await workflow.DecideDrawingReviewTargetAsync(
+            package.Id, item.Id, new DecideDrawingReviewTargetCommand(DrawingReviewTarget.Model3D, DrawingReviewDecision.Approve, "3D通过"),
+            "reviewer", UserRole.Administrator, default);
+        Assert.Equal(DrawingReviewPackageState.WritingProperties, package.State);
+
+        var writeback = Assert.Single(await repository.ListCadPropertyWritebacksAsync(ProjectId, default));
+        Assert.Equal(assembly.Id, writeback.SourceDocumentId);
+        await workflow.StartCadPropertyWritebackAsync(writeback.Id, "cad-client", UserRole.Administrator, default);
+        var result = await CheckInAsync(repository, assembly.Id, "cad-client", writeback.Properties, 'F', drawingReviewWritebackId: writeback.Id);
+        await workflow.CompleteCadPropertyWritebackAsync(writeback.Id, Assert.IsType<DocumentVersion>(result.Version).Id, "cad-client", UserRole.Administrator, default);
+
+        package = await repository.FindDrawingReviewPackageAsync(package.Id, default) ?? throw new InvalidOperationException();
+        Assert.Equal(DrawingReviewPackageState.Approved, package.State);
+        Assert.Equal(DrawingReviewTargetState.Marked, Assert.Single(package.Items).ModelState);
+        Assert.Equal(DrawingReviewTargetState.NotRequired, Assert.Single(package.Items).DrawingState);
+    }
+
     private static async Task<(InMemoryPdmRepository Repository, PdmWorkflowService Workflow, PdmDocument Model, PdmDocument Drawing)> PrepareReviewAsync()
     {
         var repository = new InMemoryPdmRepository(TimeProvider.System);
@@ -88,8 +485,16 @@ public sealed class DrawingReviewWorkflowTests
         var documents = await repository.ListDocumentsAsync(ProjectId, default);
         var model = documents.Single(document => document.DrawingNumber == "A01-100" && document.Kind == DocumentKind.Assembly);
         var drawing = documents.Single(document => document.DrawingNumber == "A01-100" && document.Kind == DocumentKind.Drawing);
-        await CheckInAsync(repository, model.Id, "designer", new Dictionary<string, string?>(), 'A');
+        await CheckInAsync(repository, model.Id, "designer", new Dictionary<string, string?>(), 'A', true);
         await CheckInAsync(repository, drawing.Id, "designer", new Dictionary<string, string?>(), 'B');
+        var referenceRoot = await repository.RegisterDocumentAsync(
+            new RegisterDocumentCommand(ProjectId, "REVIEW-ROOT", "审核测试根节点", "REVIEW-ROOT.SLDPRT", DocumentKind.Part),
+            "designer",
+            default);
+        var modelNode = new DocumentReferenceNode(
+            Guid.NewGuid(), model.Id, model.DrawingNumber, model.FileName, model.Name, model.Kind, "默认", 1,
+            ReferenceNodeStatus.Normal, model.Revision, "designer", []);
+        await CheckInAsync(repository, referenceRoot.Id, "designer", new Dictionary<string, string?>(), 'C', true, children: [modelNode]);
         await repository.ReplaceBomAsync(ProjectId, BomKind.Standard, [], default);
         await repository.ReplaceBomAsync(ProjectId, BomKind.Electrical, [], default);
         await repository.ReplaceBomAsync(ProjectId, BomKind.Unclassified, [], default);
@@ -105,18 +510,54 @@ public sealed class DrawingReviewWorkflowTests
         return (repository, new PdmWorkflowService(repository, new UnusedFileStorage(), new RecordingPublisher(), TimeProvider.System), model, drawing);
     }
 
-    private static async Task<DocumentCheckInResult> CheckInAsync(InMemoryPdmRepository repository, Guid documentId, string actor, IReadOnlyDictionary<string, string?> properties, char hashCharacter)
+    private static async Task<DocumentCheckInResult> CheckInAsync(
+        InMemoryPdmRepository repository,
+        Guid documentId,
+        string actor,
+        IReadOnlyDictionary<string, string?> properties,
+        char hashCharacter,
+        bool isProjectRoot = false,
+        Guid? drawingReviewWritebackId = null,
+        IReadOnlyList<DocumentReferenceNode>? children = null)
     {
-        var document = await repository.CheckoutAsync(documentId, actor, default);
-        var root = new DocumentReferenceNode(Guid.NewGuid(), document.Id, document.DrawingNumber, document.FileName, document.Name, document.Kind, "默认", 1, ReferenceNodeStatus.Normal, document.Revision, actor, []);
-        return await repository.CheckInVersionAsync(documentId, actor, new DocumentVersionCommit(
+        var sessionId = Guid.NewGuid();
+        var document = await repository.CheckoutAsync(
+            documentId,
+            actor,
+            sessionId,
+            "TEST-WS",
+            DateTimeOffset.UtcNow.AddMinutes(15),
+            drawingReviewWritebackId,
+            default);
+        var root = new DocumentReferenceNode(Guid.NewGuid(), document.Id, document.DrawingNumber, document.FileName, document.Name, document.Kind, "默认", 1, ReferenceNodeStatus.Normal, document.Revision, actor, children ?? []);
+        return await repository.CheckInVersionAsync(documentId, actor, sessionId, new DocumentVersionCommit(
             new StoredFile($"versions/{document.FileName}", 128, new string(hashCharacter, 64), DateTimeOffset.UtcNow),
             "测试存档",
             properties,
             new CadReferenceSnapshot(Guid.NewGuid(), ProjectId, document.Id, DateTimeOffset.UtcNow, actor, root, new string('F', 64)),
             [],
-            []), default);
+            [],
+            IsProjectRoot: isProjectRoot), drawingReviewWritebackId, default);
     }
+
+    private static DrawingReviewItem CreateReviewItem(Guid packageId, Guid modelDocumentId, Guid drawingDocumentId) => new()
+    {
+        Id = Guid.NewGuid(),
+        PackageId = packageId,
+        BomItemId = Guid.NewGuid(),
+        DrawingNumber = "OTHER-001",
+        Name = "其他审核中图档",
+        ModelDocumentId = modelDocumentId,
+        ModelVersionId = Guid.NewGuid(),
+        ModelRevision = "W1",
+        ModelSha256 = new string('A', 64),
+        ModelCreatedBy = "designer-a",
+        DrawingDocumentId = drawingDocumentId,
+        DrawingVersionId = Guid.NewGuid(),
+        DrawingRevision = "W1",
+        DrawingSha256 = new string('B', 64),
+        DrawingCreatedBy = "designer-b"
+    };
 
     private static async Task<ReleasePackage> CreateLegacyReleasePackageAsync(InMemoryPdmRepository repository)
     {

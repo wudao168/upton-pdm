@@ -10,6 +10,7 @@ $clientSource = [IO.Path]::GetFullPath((Join-Path $localRoot 'staged-client'))
 $clientTarget = [IO.Path]::GetFullPath((Join-Path $localRoot 'client'))
 $previewSource = [IO.Path]::GetFullPath((Join-Path $localRoot 'staged-preview-worker'))
 $previewTarget = [IO.Path]::GetFullPath((Join-Path $localRoot 'preview-worker'))
+$programTemplateRoot = [IO.Path]::GetFullPath((Join-Path $localRoot 'program-templates'))
 $resultPath = Join-Path $localRoot 'deploy-webapi-only-result.json'
 $errorPath = Join-Path $localRoot 'deploy-webapi-only-error.txt'
 $serviceName = 'UptonPdmApi'
@@ -24,11 +25,12 @@ if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administra
     throw 'Run this script from an elevated Administrator PowerShell session.'
 }
 
-foreach ($path in @($apiSource, $apiTarget, $clientSource, $clientTarget, $previewSource, $previewTarget)) {
+foreach ($path in @($apiSource, $apiTarget, $clientSource, $clientTarget, $previewSource, $previewTarget, $programTemplateRoot)) {
     if (-not $path.StartsWith($localRoot + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) {
         throw "Deployment path escaped .local: $path"
     }
 }
+New-Item -ItemType Directory -Path $programTemplateRoot -Force | Out-Null
 foreach ($source in @($apiSource, $clientSource, $previewSource)) {
     if (-not (Test-Path -LiteralPath $source)) { throw "Deployment staging directory does not exist: $source" }
 }
@@ -54,6 +56,12 @@ try {
     Copy-Item -Path (Join-Path $apiSource '*') -Destination $apiTarget -Recurse -Force
     Copy-Item -Path (Join-Path $clientSource '*') -Destination $clientTarget -Recurse -Force
     Copy-Item -Path (Join-Path $previewSource '*') -Destination $previewTarget -Recurse -Force
+
+    $apiRegistryPath = "HKLM:\SYSTEM\CurrentControlSet\Services\$serviceName"
+    $serviceEnvironment = @((Get-ItemProperty -LiteralPath $apiRegistryPath -Name Environment -ErrorAction SilentlyContinue).Environment)
+    $serviceEnvironment = @($serviceEnvironment | Where-Object { $_ -notlike 'Pdm__Storage__ProgramTemplateRoot=*' })
+    $serviceEnvironment += "Pdm__Storage__ProgramTemplateRoot=$programTemplateRoot"
+    New-ItemProperty -LiteralPath $apiRegistryPath -Name Environment -PropertyType MultiString -Value $serviceEnvironment -Force | Out-Null
 
     $stagedHash = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $apiSource 'Pdm.Api.dll')).Hash
     $activeHash = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $apiTarget 'Pdm.Api.dll')).Hash
