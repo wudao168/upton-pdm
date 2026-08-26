@@ -102,7 +102,8 @@ public enum MaterialMasterOwner
 public enum MaterialAttachmentKind
 {
     Model3D = 0,
-    Document = 1
+    Document = 1,
+    CoverImage = 2
 }
 
 public sealed record MaterialAttachment(
@@ -186,12 +187,42 @@ public sealed record PdmMaterial(
     decimal? ReferencePrice = null,
     string? Model3DLink = null,
     string? DocumentLink = null,
-    bool IsRecommended = false)
+    bool IsRecommended = false,
+    Guid? CoverImageAttachmentId = null)
 {
     public int Model3DAttachmentCount { get; init; }
 
     public int DocumentAttachmentCount { get; init; }
 }
+
+public sealed record StandardLibraryCategory(
+    Guid Id,
+    string Name,
+    Guid? ParentId,
+    int SortOrder,
+    bool IsActive,
+    string CreatedBy,
+    DateTimeOffset CreatedAt,
+    string UpdatedBy,
+    DateTimeOffset UpdatedAt,
+    long RowVersion);
+
+public sealed record StandardLibraryMembership(
+    Guid CategoryId,
+    Guid MaterialId,
+    string AddedBy,
+    DateTimeOffset AddedAt);
+
+public sealed record StandardLibraryMaterial(
+    PdmMaterial Material,
+    IReadOnlyList<StandardLibraryCategory> Categories,
+    MaterialAttachment? CoverImage);
+
+public sealed record StandardLibraryMaterialPage(
+    IReadOnlyList<StandardLibraryMaterial> Items,
+    int Total,
+    int Page,
+    int PageSize);
 
 public sealed record MaterialRemovalResult(
     PdmMaterial Material,

@@ -1,14 +1,15 @@
 <script setup lang="ts">
-import { Blocks, Boxes, ClipboardCheck, FolderKanban, ListTree, Settings } from '@lucide/vue'
+import { Blocks, Boxes, ClipboardCheck, FolderKanban, Library, ListTree, Network, Settings } from '@lucide/vue'
 import uptonLogo from '../assets/upton-logo-white.png'
 import PlmCubeIcon from './PlmCubeIcon.vue'
 
-type NavKey = 'project-center' | 'projects' | 'materials' | 'program-templates' | 'tasks' | 'admin'
+type NavKey = 'project-center' | 'projects' | 'materials' | 'standard-library' | 'standard-structure' | 'program-templates' | 'tasks' | 'admin'
 
-const props = withDefaults(defineProps<{ active: NavKey; approvalCount?: number; materialCount?: number; canManageSystem?: boolean; collapsed?: boolean }>(), {
+const props = withDefaults(defineProps<{ active: NavKey; approvalCount?: number; materialCount?: number; canManageSystem?: boolean; canViewStandardLibrary?: boolean; collapsed?: boolean }>(), {
   approvalCount: 0,
   materialCount: 0,
   canManageSystem: false,
+  canViewStandardLibrary: false,
   collapsed: false,
 })
 const emit = defineEmits<{ navigate: [key: NavKey, label: string] }>()
@@ -16,6 +17,8 @@ const emit = defineEmits<{ navigate: [key: NavKey, label: string] }>()
 const items = [
   { key: 'project-center', label: '项目中心', icon: FolderKanban },
   { key: 'projects', label: '项目列表', icon: ListTree },
+  { key: 'standard-library', label: '标准物料', icon: Library },
+  { key: 'standard-structure', label: '标准结构', icon: Network },
   { key: 'materials', label: '料品管理', icon: Boxes },
   { key: 'program-templates', label: '程序模板', icon: Blocks },
   { key: 'tasks', label: '我的待办', icon: ClipboardCheck },
@@ -32,7 +35,7 @@ const items = [
     </div>
     <nav class="pdm-sidebar__nav">
       <button
-        v-for="item in items"
+        v-for="item in items.filter(entry => !['standard-library', 'standard-structure'].includes(entry.key) || props.canViewStandardLibrary)"
         :key="item.label"
         type="button"
         class="pdm-nav-item"

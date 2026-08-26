@@ -26,7 +26,7 @@ public sealed class CompanyContextMiddleware(RequestDelegate next)
             var company = await companySessions.ResolveAsync(account, context.Request.Headers["X-Company-Id"].FirstOrDefault(), context.RequestAborted);
             var permissions = await repository.GetUserPermissionsAsync(account.Username, account.Role, context.RequestAborted);
             TenantContext.Set(new CurrentTenant(account.Id, company.ActiveCompanyId, company.PrimaryCompanyId, account.Username,
-                account.EffectiveRoleCode, company.CrossCompanyView, permissions));
+                account.EffectiveRoleCode, company.CrossCompanyView, permissions, account.EffectiveRoleCodes));
             await next(context);
         }
         catch (UnauthorizedAccessException exception)

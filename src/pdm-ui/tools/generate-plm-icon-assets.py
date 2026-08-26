@@ -7,12 +7,12 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 CANVAS_SIZE = 1024
 FACE_GRID = (7, 25, 54, 92)
 TILE = {
-    "coral": "#D56673",
-    "peach": "#DA884F",
-    "yellow": "#C8BC3F",
-    "mint": "#4CAA62",
-    "sky": "#3198C8",
-    "lavender": "#8066C4",
+    "coral": "#E43C2F",
+    "peach": "#FFA31A",
+    "yellow": "#FFD600",
+    "mint": "#239443",
+    "sky": "#2E7CEE",
+    "lavender": "#9582FF",
 }
 
 

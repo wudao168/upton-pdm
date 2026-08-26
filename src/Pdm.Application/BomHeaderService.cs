@@ -34,6 +34,7 @@ public sealed class BomHeaderService(
     private const string ChildBomCategoryCode = "0201";
     private static readonly ProjectBomHeaderKind[] AllKinds =
         [ProjectBomHeaderKind.Master, ProjectBomHeaderKind.Standard, ProjectBomHeaderKind.NonStandard, ProjectBomHeaderKind.Electrical];
+    private static readonly ProjectBomHeaderKind[] MasterOnly = [ProjectBomHeaderKind.Master];
 
     public async Task<IReadOnlyList<ProjectBomHeader>> ListAsync(Guid projectId, string actor, UserRole role, CancellationToken cancellationToken)
     {
@@ -55,7 +56,7 @@ public sealed class BomHeaderService(
             }
             result.Add(new ProjectBomHeader(
                 projectId, kind, kind == ProjectBomHeaderKind.Master ? null : ProjectBomHeaderKind.Master,
-                material?.Id, OfficialMaterialCode(material), material?.Name, material?.CategoryCode,
+                material?.Id, VisibleMaterialCode(material, application), material?.Name, material?.CategoryCode,
                 material?.ApprovalStatus, binding?.RowVersion ?? 0, application?.Status, application?.Id,
                 application?.RequestedBy, application?.RequestedAt));
         }
@@ -99,12 +100,14 @@ public sealed class BomHeaderService(
 
         var generatedCount = 0;
         var existingCount = 0;
+        var rootHasChildren = projects.Any(project => project.ParentProjectId == rootProjectId);
         foreach (var project in projects)
         {
             var existingBindings = (await repository.ListProjectBomHeaderBindingsAsync(project.Id, cancellationToken))
                 .ToDictionary(binding => binding.Kind);
             var applications = (await materials.ListMaterialCodeApplicationsAsync(project.Id, null, cancellationToken)).ToList();
-            foreach (var kind in AllKinds)
+            var eligibleKinds = project.Id == rootProjectId && rootHasChildren ? MasterOnly : AllKinds;
+            foreach (var kind in eligibleKinds)
             {
                 existingBindings.TryGetValue(kind, out var binding);
                 var boundMaterial = binding is null
@@ -131,13 +134,14 @@ public sealed class BomHeaderService(
         var headers = new List<ProjectBomHeader>(projects.Length * AllKinds.Length);
         foreach (var project in projects)
             headers.AddRange(await ListAsync(project.Id, actor, role, cancellationToken));
-        return new BomHeaderGenerationResult(rootProjectId, projects.Length * AllKinds.Length, generatedCount, existingCount, headers);
+        var expectedCount = rootHasChildren ? 1 + (projects.Length - 1) * AllKinds.Length : AllKinds.Length;
+        return new BomHeaderGenerationResult(rootProjectId, expectedCount, generatedCount, existingCount, headers);
     }
 
     private async Task<ProjectBomHeader> GenerateMaterialAsync(Project project, ProjectBomHeaderKind kind, long expectedRowVersion, string actor, UserRole role, CancellationToken cancellationToken)
     {
         var categoryCode = RequiredCategoryCode(project, kind);
-        var material = await materialService.CreateAsync(new SaveMaterialCommand(
+        var material = await materialService.CreateApplicationDraftAsync(new SaveMaterialCommand(
             null,
             $"{project.Code} {KindLabel(kind)}",
             MaterialKind.Product,
@@ -177,7 +181,7 @@ public sealed class BomHeaderService(
             ProjectCode = project.Code,
             ProjectName = project.Name,
             CategoryCode = material.CategoryCode,
-            RequestedMaterialCode = material.MaterialCode
+            RequestedMaterialCode = null
         };
         var saved = await materials.CreateMaterialCodeApplicationAsync(application, cancellationToken);
         await repository.AppendAuditAsync(new AuditEntry(
@@ -215,6 +219,11 @@ public sealed class BomHeaderService(
     private static string? OfficialMaterialCode(PdmMaterial? material) =>
         material is { U9SyncConfirmed: true } && !string.IsNullOrWhiteSpace(material.U9ItemCode)
             ? material.U9ItemCode.Trim()
+            : null;
+
+    private static string? VisibleMaterialCode(PdmMaterial? material, MaterialCodeApplication? application) =>
+        application is null || application.Status == MaterialCodeApplicationStatus.Approved
+            ? OfficialMaterialCode(material)
             : null;
 
     private static void ValidateMaterial(Project project, ProjectBomHeaderKind kind, PdmMaterial material)

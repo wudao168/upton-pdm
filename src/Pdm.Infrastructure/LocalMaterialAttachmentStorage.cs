@@ -19,6 +19,11 @@ public sealed class LocalMaterialAttachmentStorage(IOptions<PdmStorageOptions> o
         ".jpg", ".jpeg", ".png", ".zip", ".rar", ".7z"
     };
 
+    private static readonly IReadOnlySet<string> CoverImageExtensions = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+    {
+        ".jpg", ".jpeg", ".png", ".webp"
+    };
+
     private readonly PdmStorageOptions settings = options.Value;
     private readonly JsonSerializerOptions jsonOptions = new(JsonSerializerDefaults.Web);
 
@@ -34,6 +39,8 @@ public sealed class LocalMaterialAttachmentStorage(IOptions<PdmStorageOptions> o
         CancellationToken cancellationToken)
     {
         if (totalLength <= 0) throw new PdmRuleException("上传附件不能为空。");
+        if (kind == MaterialAttachmentKind.CoverImage && totalLength > 10 * 1024 * 1024)
+            throw new PdmRuleException("封面图片不能超过10MB。");
         if (string.IsNullOrWhiteSpace(expectedSha256) || expectedSha256.Length != 64 || expectedSha256.Any(character => !Uri.IsHexDigit(character)))
             throw new PdmRuleException("必须提供64位SHA-256。");
 
@@ -87,7 +94,12 @@ public sealed class LocalMaterialAttachmentStorage(IOptions<PdmStorageOptions> o
         if (session.ReceivedLength != session.TotalLength)
             throw new PdmConflictException($"上传尚未完成：{session.ReceivedLength}/{session.TotalLength}字节。");
 
-        var folder = session.Kind == MaterialAttachmentKind.Model3D ? "3D" : "Documents";
+        var folder = session.Kind switch
+        {
+            MaterialAttachmentKind.Model3D => "3D",
+            MaterialAttachmentKind.CoverImage => "Covers",
+            _ => "Documents"
+        };
         var storedAt = timeProvider.GetUtcNow();
         var relativePath = Path.Combine(session.MaterialCode, folder, storedAt.ToString("yyyyMM"), $"{session.Id:N}_{session.FileName}");
         var targetPath = StorageLocationPolicy.ResolveUnder(session.StorageRoot, relativePath);
@@ -120,6 +132,18 @@ public sealed class LocalMaterialAttachmentStorage(IOptions<PdmStorageOptions> o
         {
             File.Delete(assembledPath);
             throw new PdmConflictException("附件SHA-256校验失败。");
+        }
+        if (session.Kind == MaterialAttachmentKind.CoverImage)
+        {
+            try
+            {
+                await ValidateCoverFileTypeAsync(assembledPath, Path.GetExtension(session.FileName), cancellationToken);
+            }
+            catch
+            {
+                File.Delete(assembledPath);
+                throw;
+            }
         }
         if (File.Exists(targetPath)) throw new PdmConflictException("附件目标文件已经存在，不能覆盖受控文件。");
 
@@ -193,11 +217,38 @@ public sealed class LocalMaterialAttachmentStorage(IOptions<PdmStorageOptions> o
     private static void ValidateExtension(MaterialAttachmentKind kind, string fileName)
     {
         var extension = Path.GetExtension(fileName);
-        var allowed = kind == MaterialAttachmentKind.Model3D ? Model3DExtensions : DocumentExtensions;
+        var allowed = kind switch
+        {
+            MaterialAttachmentKind.Model3D => Model3DExtensions,
+            MaterialAttachmentKind.CoverImage => CoverImageExtensions,
+            _ => DocumentExtensions
+        };
         if (!allowed.Contains(extension))
-            throw new PdmRuleException(kind == MaterialAttachmentKind.Model3D
-                ? "3D附件仅支持SLDPRT、SLDASM、STEP、STP、IGS、IGES、X_T、X_B和SAT格式。"
-                : "资料附件仅支持常用文档、图片和ZIP/RAR/7Z压缩包格式。");
+            throw new PdmRuleException(kind switch
+            {
+                MaterialAttachmentKind.Model3D => "3D附件仅支持SLDPRT、SLDASM、STEP、STP、IGS、IGES、X_T、X_B和SAT格式。",
+                MaterialAttachmentKind.CoverImage => "封面图片仅支持JPG、PNG和WebP格式。",
+                _ => "资料附件仅支持常用文档、图片和ZIP/RAR/7Z压缩包格式。"
+            });
+    }
+
+    private static async Task ValidateCoverFileTypeAsync(string path, string extension, CancellationToken cancellationToken)
+    {
+        var header = new byte[12];
+        await using var input = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, 4096, FileOptions.Asynchronous | FileOptions.SequentialScan);
+        var read = await input.ReadAsync(header, cancellationToken);
+        var isJpeg = read >= 3 && header[0] == 0xFF && header[1] == 0xD8 && header[2] == 0xFF;
+        var isPng = read >= 8 && header.AsSpan(0, 8).SequenceEqual(new byte[] { 0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A });
+        var isWebP = read >= 12 && header.AsSpan(0, 4).SequenceEqual("RIFF"u8) && header.AsSpan(8, 4).SequenceEqual("WEBP"u8);
+        var matches = extension.ToLowerInvariant() switch
+        {
+            ".jpg" or ".jpeg" => isJpeg,
+            ".png" => isPng,
+            ".webp" => isWebP,
+            _ => false
+        };
+        if (!matches)
+            throw new PdmRuleException("封面图片内容与文件扩展名不一致。");
     }
 
     private static string RequiredPathSegment(string value)

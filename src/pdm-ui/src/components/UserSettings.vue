@@ -34,7 +34,7 @@ const editingUsername = ref('')
 const selectedUser = ref<PdmUser | null>(null)
 const membershipUnits = ref<string[]>([])
 const primaryUnitId = ref('')
-const userForm = reactive<SavePdmUserInput>({ username: '', displayName: '', role: 'Engineer', isActive: true, companyId: '', crossCompanyView: false, accessibleCompanyIds: [], password: '11111111' })
+const userForm = reactive<SavePdmUserInput>({ username: '', displayName: '', role: 'Engineer', roles: ['Engineer'], isActive: true, companyId: '', crossCompanyView: false, accessibleCompanyIds: [], password: '11111111' })
 
 const canManageOrganization = computed(() => props.permissions.includes('settings.organization.manage'))
 const canViewRoles = computed(() => props.permissions.includes('system.role.view'))
@@ -44,7 +44,7 @@ const activeCompany = computed(() => props.directory.organizations.find(item => 
 const activeCompanyUnits = computed(() => props.directory.units.filter(unit => unit.organizationId === props.activeOrganizationId))
 const activeCompanyUnitIds = computed(() => new Set(activeCompanyUnits.value.map(unit => unit.id)))
 const platformManagedRoles = new Set(['platform_admin', 'developer'])
-const scopedUsers = computed(() => props.directory.users.filter(user => userCompanyId(user) === props.activeOrganizationId && (props.platformAdministrator || !platformManagedRoles.has(user.role))))
+const scopedUsers = computed(() => props.directory.users.filter(user => userCompanyId(user) === props.activeOrganizationId && (props.platformAdministrator || !(user.roles ?? [user.role]).some(role => platformManagedRoles.has(role)))))
 const activeCompanies = computed(() => props.directory.organizations.filter(item => item.isActive !== false))
 const assignableRoles = computed(() => props.platformAdministrator ? props.roleDirectory.roles : props.roleDirectory.roles.filter(item => !platformManagedRoles.has(item.role)))
 const accessibleCompanyOptions = computed(() => activeCompanies.value.filter(item => item.id !== userForm.companyId))
@@ -57,7 +57,7 @@ const availableSections = computed<Section[]>(() => [
 const filteredUsers = computed(() => {
   const normalized = query.value.trim().toLocaleLowerCase('zh-CN')
   if (!normalized) return scopedUsers.value
-  return scopedUsers.value.filter(user => `${user.username} ${user.displayName} ${roleName(user.role)} ${primaryUnitName(user.username)}`.toLocaleLowerCase('zh-CN').includes(normalized))
+  return scopedUsers.value.filter(user => `${user.username} ${user.displayName} ${roleNames(user)} ${primaryUnitName(user.username)}`.toLocaleLowerCase('zh-CN').includes(normalized))
 })
 const activeUnits = computed(() => activeCompanyUnits.value.filter(unit => unit.isActive))
 
@@ -67,6 +67,7 @@ watch(() => userForm.companyId, companyId => {
 })
 
 function roleName(role: string) { return props.roleDirectory.roles.find(item => item.role === role)?.name ?? role }
+function roleNames(user: PdmUser) { return (user.roles ?? [user.role]).map(roleName).join('、') }
 function unitById(id?: string) { return props.directory.units.find(item => item.id === id) }
 function companyName(id?: string) { return props.directory.organizations.find(item => item.id === id)?.name ?? '—' }
 function unitPath(id: string) {
@@ -84,20 +85,21 @@ function otherUnitNames(username: string) { return memberships(username).filter(
 function openUser(user?: PdmUser) {
   editingUsername.value = user?.username ?? ''
   Object.assign(userForm, user
-    ? { username: user.username, displayName: user.displayName, role: user.role, isActive: user.isActive, companyId: user.companyId ?? props.activeOrganizationId, crossCompanyView: Boolean(user.crossCompanyView), accessibleCompanyIds: [...(user.accessibleCompanyIds ?? [])], password: '' }
-    : { username: '', displayName: '', role: 'Engineer', isActive: true, companyId: props.activeOrganizationId, crossCompanyView: false, accessibleCompanyIds: [], password: '11111111' })
+    ? { username: user.username, displayName: user.displayName, role: user.role, roles: [...(user.roles ?? [user.role])], isActive: user.isActive, companyId: user.companyId ?? props.activeOrganizationId, crossCompanyView: Boolean(user.crossCompanyView), accessibleCompanyIds: [...(user.accessibleCompanyIds ?? [])], password: '' }
+    : { username: '', displayName: '', role: 'Engineer', roles: ['Engineer'], isActive: true, companyId: props.activeOrganizationId, crossCompanyView: false, accessibleCompanyIds: [], password: '11111111' })
   userDialog.value = true
 }
 
 async function saveUser() {
   if (!userForm.username.trim() || !userForm.displayName.trim()) return ElMessage.warning('请填写账号和姓名')
+  if (!userForm.roles.length) return ElMessage.warning('请至少选择一个系统角色')
   if (!userForm.companyId) return ElMessage.warning('请选择主公司')
   if (!editingUsername.value && (!userForm.password || userForm.password.length < 8)) return ElMessage.warning('初始密码至少需要8位')
   try {
     const accessibleCompanyIds = props.platformAdministrator && userForm.crossCompanyView
       ? [...new Set(userForm.accessibleCompanyIds.filter(id => id !== userForm.companyId))]
       : []
-    await props.onSaveUser({ ...userForm, crossCompanyView: accessibleCompanyIds.length > 0, accessibleCompanyIds }, !editingUsername.value)
+    await props.onSaveUser({ ...userForm, role: userForm.roles[0], crossCompanyView: accessibleCompanyIds.length > 0, accessibleCompanyIds }, !editingUsername.value)
     userDialog.value = false
     ElMessage.success(editingUsername.value ? '用户资料已保存' : '用户已创建')
   } catch (error) { ElMessage.error(error instanceof Error ? error.message : '用户保存失败') }
@@ -159,7 +161,7 @@ async function resetPassword(user: PdmUser) {
       <div class="user-table-scroll">
         <table class="pdm-project-table">
           <thead><tr><th>账号</th><th>姓名</th><th>角色</th><th>公司</th><th>主部门</th><th>兼任部门</th><th>状态</th><th>操作</th></tr></thead>
-          <tbody><tr v-for="user in filteredUsers" :key="user.username"><td><strong>{{ user.username }}</strong></td><td>{{ user.displayName }}</td><td>{{ roleName(user.role) }}</td><td :title="companyName(user.companyId ?? undefined)">{{ companyName(user.companyId ?? undefined) }}</td><td :title="primaryUnitName(user.username)">{{ primaryUnitName(user.username) }}</td><td :title="otherUnitNames(user.username)">{{ otherUnitNames(user.username) }}</td><td><span class="pdm-status" :class="user.isActive ? 'is-ok' : 'is-warn'">{{ user.isActive ? '启用' : '停用' }}</span></td><td><div class="user-row-actions"><button v-if="canManageUsers" type="button" class="pdm-text-action" @click="openUser(user)">编辑</button><button v-if="canManageOrganization" type="button" class="pdm-text-action" :disabled="!user.isActive || !activeUnits.length" @click="openMembership(user)">组织关系</button><button v-if="canManageUsers && user.username.toLocaleLowerCase('zh-CN') !== currentUsername.toLocaleLowerCase('zh-CN')" type="button" class="pdm-text-action" @click="resetPassword(user)">重置密码</button></div></td></tr></tbody>
+          <tbody><tr v-for="user in filteredUsers" :key="user.username"><td><strong>{{ user.username }}</strong></td><td>{{ user.displayName }}</td><td :title="roleNames(user)">{{ roleNames(user) }}</td><td :title="companyName(user.companyId ?? undefined)">{{ companyName(user.companyId ?? undefined) }}</td><td :title="primaryUnitName(user.username)">{{ primaryUnitName(user.username) }}</td><td :title="otherUnitNames(user.username)">{{ otherUnitNames(user.username) }}</td><td><span class="pdm-status" :class="user.isActive ? 'is-ok' : 'is-warn'">{{ user.isActive ? '启用' : '停用' }}</span></td><td><div class="user-row-actions"><button v-if="canManageUsers" type="button" class="pdm-text-action" @click="openUser(user)">编辑</button><button v-if="canManageOrganization" type="button" class="pdm-text-action" :disabled="!user.isActive || !activeUnits.length" @click="openMembership(user)">组织关系</button><button v-if="canManageUsers && user.username.toLocaleLowerCase('zh-CN') !== currentUsername.toLocaleLowerCase('zh-CN')" type="button" class="pdm-text-action" @click="resetPassword(user)">重置密码</button></div></td></tr></tbody>
         </table>
       </div>
       <p v-if="!filteredUsers.length" class="pdm-empty-info">没有符合条件的用户。</p>
@@ -174,7 +176,7 @@ async function resetPassword(user: PdmUser) {
       <div class="user-form">
         <label>账号<input v-model="userForm.username" :disabled="Boolean(editingUsername)" maxlength="100" autocomplete="off"></label>
         <label>姓名<input v-model="userForm.displayName" maxlength="100"></label>
-        <label>系统角色<select v-model="userForm.role"><option v-for="role in assignableRoles" :key="role.role" :value="role.role">{{ role.name }}</option></select></label>
+        <label>系统角色<el-select v-model="userForm.roles" multiple filterable collapse-tags :max-collapse-tags="3" style="width:100%"><el-option v-for="role in assignableRoles" :key="role.role" :label="role.name" :value="role.role" /></el-select><small>可多选；第一个角色作为兼容主角色，实际权限按所有角色合并。</small></label>
         <label>主公司<select v-model="userForm.companyId" :disabled="!platformAdministrator"><option v-for="company in activeCompanies" :key="company.id" :value="company.id">{{ company.name }}</option></select></label>
         <template v-if="platformAdministrator">
           <label class="user-checkbox"><input v-model="userForm.crossCompanyView" type="checkbox"> 允许跨公司访问</label>

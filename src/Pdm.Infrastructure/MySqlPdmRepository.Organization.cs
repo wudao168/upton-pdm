@@ -22,7 +22,7 @@ public sealed partial class MySqlPdmRepository
             ORDER BY organization.is_active DESC,organization.project_company_code
             """, cancellationToken: cancellationToken));
         var unitRows = await connection.QueryAsync<OrganizationUnitRow>(new CommandDefinition(
-            "SELECT id,organization_id,parent_unit_id,code,name,kind,is_active,sort_order FROM organization_unit ORDER BY organization_id,sort_order,name",
+            "SELECT id,organization_id,parent_unit_id,code,name,kind,is_active,sort_order,can_manufacture CanManufacture FROM organization_unit ORDER BY organization_id,sort_order,name",
             cancellationToken: cancellationToken));
         var membershipRows = await connection.QueryAsync<OrganizationMembershipRow>(new CommandDefinition(
             "SELECT unit_id,username,is_primary FROM organization_membership ORDER BY username,is_primary DESC",
@@ -44,7 +44,7 @@ public sealed partial class MySqlPdmRepository
                 group.FirstOrDefault(item => item.IsPrimary)?.Username ?? string.Empty,
                 group.Where(item => !item.IsPrimary).Select(item => item.Username).ToArray())).ToArray(),
             users.Select(user => new OrganizationDirectoryUser(user.Username, user.DisplayName, user.Role, user.IsActive, user.EffectiveRoleCode, user.CompanyId, user.CrossCompanyView,
-                companyAccess.GetValueOrDefault(user.Username, Array.Empty<Guid>()))).ToArray());
+                companyAccess.GetValueOrDefault(user.Username, Array.Empty<Guid>()), user.EffectiveRoleCodes)).ToArray());
     }
 
     public async Task<ProjectOrganization> SaveProjectOrganizationAsync(SaveProjectOrganizationCommand command, CancellationToken cancellationToken)
@@ -94,19 +94,19 @@ public sealed partial class MySqlPdmRepository
             {
                 await connection.ExecuteAsync(new CommandDefinition(
                     """
-                    INSERT INTO organization_unit(id,organization_id,parent_unit_id,code,name,kind,is_active,sort_order,created_at,updated_at)
-                    VALUES(@Id,@OrganizationId,@ParentUnitId,@Code,@Name,@Kind,@IsActive,@SortOrder,@Now,@Now)
+                    INSERT INTO organization_unit(id,organization_id,parent_unit_id,code,name,kind,is_active,sort_order,can_manufacture,created_at,updated_at)
+                    VALUES(@Id,@OrganizationId,@ParentUnitId,@Code,@Name,@Kind,@IsActive,@SortOrder,@CanManufacture,@Now,@Now)
                     """,
-                    new { Id = id, command.OrganizationId, command.ParentUnitId, command.Code, command.Name, Kind = command.Kind.ToString(), command.IsActive, command.SortOrder, Now = now }, cancellationToken: cancellationToken));
+                    new { Id = id, command.OrganizationId, command.ParentUnitId, command.Code, command.Name, Kind = command.Kind.ToString(), command.IsActive, command.SortOrder, command.CanManufacture, Now = now }, cancellationToken: cancellationToken));
             }
             else
             {
                 var affected = await connection.ExecuteAsync(new CommandDefinition(
                     """
                     UPDATE organization_unit SET organization_id=@OrganizationId,parent_unit_id=@ParentUnitId,code=@Code,name=@Name,
-                        kind=@Kind,is_active=@IsActive,sort_order=@SortOrder,updated_at=@Now WHERE id=@Id
+                        kind=@Kind,is_active=@IsActive,sort_order=@SortOrder,can_manufacture=@CanManufacture,updated_at=@Now WHERE id=@Id
                     """,
-                    new { Id = id, command.OrganizationId, command.ParentUnitId, command.Code, command.Name, Kind = command.Kind.ToString(), command.IsActive, command.SortOrder, Now = now }, cancellationToken: cancellationToken));
+                    new { Id = id, command.OrganizationId, command.ParentUnitId, command.Code, command.Name, Kind = command.Kind.ToString(), command.IsActive, command.SortOrder, command.CanManufacture, Now = now }, cancellationToken: cancellationToken));
                 if (affected == 0) throw new PdmNotFoundException("组织单元不存在。");
             }
         }
@@ -114,7 +114,7 @@ public sealed partial class MySqlPdmRepository
         {
             throw new PdmConflictException("同一公司内的组织编码已经存在。");
         }
-        return new OrganizationUnit(id, command.OrganizationId, command.ParentUnitId, command.Code, command.Name, command.Kind, command.IsActive, command.SortOrder);
+        return new OrganizationUnit(id, command.OrganizationId, command.ParentUnitId, command.Code, command.Name, command.Kind, command.IsActive, command.SortOrder, command.CanManufacture);
     }
 
     public async Task<OrganizationDirectory> SetOrganizationMembershipsAsync(string username, IReadOnlyList<Guid> unitIds, Guid primaryUnitId, CancellationToken cancellationToken)
@@ -145,7 +145,10 @@ public sealed partial class MySqlPdmRepository
             "SELECT organization_id FROM organization_unit WHERE id=@UnitId AND is_active=1 FOR UPDATE",
             new { UnitId = unitId }, transaction, cancellationToken: cancellationToken))
             ?? throw new PdmNotFoundException("组织不存在或已停用。");
-        var managerUsernames = new[] { primaryManager }.Concat(collaborativeManagers).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+        var managerUsernames = new[] { primaryManager }.Concat(collaborativeManagers)
+            .Where(username => !string.IsNullOrWhiteSpace(username))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
         foreach (var username in managerUsernames)
         {
             var membershipOrganizationIds = (await connection.QueryAsync<Guid>(new CommandDefinition(
@@ -164,11 +167,17 @@ public sealed partial class MySqlPdmRepository
             }
         }
         await connection.ExecuteAsync(new CommandDefinition("DELETE FROM organization_unit_manager WHERE unit_id=@UnitId", new { UnitId = unitId }, transaction, cancellationToken: cancellationToken));
-        var managers = new[] { new { Username = primaryManager, IsPrimary = true } }
-            .Concat(collaborativeManagers.Select(username => new { Username = username, IsPrimary = false }));
-        await connection.ExecuteAsync(new CommandDefinition(
-            "INSERT INTO organization_unit_manager(unit_id,username,is_primary,assigned_at) VALUES(@UnitId,@Username,@IsPrimary,@Now)",
-            managers.Select(item => new { UnitId = unitId, item.Username, item.IsPrimary, Now = now }), transaction, cancellationToken: cancellationToken));
+        var managers = (string.IsNullOrWhiteSpace(primaryManager)
+                ? Array.Empty<(string Username, bool IsPrimary)>()
+                : new[] { (Username: primaryManager, IsPrimary: true) })
+            .Concat(collaborativeManagers.Select(username => (Username: username, IsPrimary: false)))
+            .ToArray();
+        if (managers.Length > 0)
+        {
+            await connection.ExecuteAsync(new CommandDefinition(
+                "INSERT INTO organization_unit_manager(unit_id,username,is_primary,assigned_at) VALUES(@UnitId,@Username,@IsPrimary,@Now)",
+                managers.Select(item => new { UnitId = unitId, item.Username, item.IsPrimary, Now = now }), transaction, cancellationToken: cancellationToken));
+        }
         await transaction.CommitAsync(cancellationToken);
         return await GetOrganizationDirectoryAsync(cancellationToken);
     }
@@ -390,9 +399,10 @@ public sealed partial class MySqlPdmRepository
             new { ProjectId = projectId }, transaction, cancellationToken: cancellationToken));
         var assignments = new[]
         {
-            new { Username = command.PrimaryProjectManager, Type = ProjectAssignmentType.PrimaryProjectManager.ToString() },
-            new { Username = command.DesignLead, Type = ProjectAssignmentType.DesignLead.ToString() }
-        }.Concat(command.CollaborativeProjectManagers.Select(username => new { Username = username, Type = ProjectAssignmentType.CollaborativeProjectManager.ToString() }));
+            new { Username = command.PrimaryProjectManager, Type = ProjectAssignmentType.PrimaryProjectManager.ToString() }
+        }
+            .Concat(command.CollaborativeProjectManagers.Select(username => new { Username = username, Type = ProjectAssignmentType.CollaborativeProjectManager.ToString() }))
+            .Concat(command.DesignLeads.Select(username => new { Username = username, Type = ProjectAssignmentType.DesignLead.ToString() }));
         await connection.ExecuteAsync(new CommandDefinition(
             "INSERT INTO project_assignment(project_id,username,assignment_type,assigned_by,assigned_at) VALUES(@ProjectId,@Username,@Type,@Actor,@Now)",
             assignments.Select(item => new { ProjectId = projectId, item.Username, item.Type, Actor = actor, Now = now }), transaction, cancellationToken: cancellationToken));
@@ -417,12 +427,29 @@ public sealed partial class MySqlPdmRepository
         return await FindProjectAsync(projectId, cancellationToken) ?? throw new PdmNotFoundException("子项目不存在。");
     }
 
+    public async Task<Project> SetChildProjectManagerAsync(Guid projectId, string projectManager, string actor, CancellationToken cancellationToken)
+    {
+        var now = timeProvider.GetUtcNow().UtcDateTime;
+        await using var connection = await OpenAsync(cancellationToken);
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+        var exists = await connection.ExecuteScalarAsync<int>(new CommandDefinition(
+            "SELECT COUNT(*) FROM project WHERE id=@ProjectId AND parent_project_id IS NOT NULL FOR UPDATE", new { ProjectId = projectId }, transaction, cancellationToken: cancellationToken));
+        if (exists == 0) throw new PdmNotFoundException("子项目不存在。");
+        await connection.ExecuteAsync(new CommandDefinition(
+            "DELETE FROM project_assignment WHERE project_id=@ProjectId AND assignment_type='PrimaryProjectManager'", new { ProjectId = projectId }, transaction, cancellationToken: cancellationToken));
+        await connection.ExecuteAsync(new CommandDefinition(
+            "INSERT INTO project_assignment(project_id,username,assignment_type,assigned_by,assigned_at) VALUES(@ProjectId,@Username,'PrimaryProjectManager',@Actor,@Now)",
+            new { ProjectId = projectId, Username = projectManager, Actor = actor, Now = now }, transaction, cancellationToken: cancellationToken));
+        await transaction.CommitAsync(cancellationToken);
+        return await FindProjectAsync(projectId, cancellationToken) ?? throw new PdmNotFoundException("子项目不存在。");
+    }
+
     private static ProjectOrganization MapOrganization(ProjectOrganizationRow row) => new(
         row.Id, row.Name, row.ProjectCompanyCode, row.ModelCompanyCode, row.CrmCompanyName, row.IsActive,
         checked((int)row.CurrentProjectSequence), checked((int)row.CurrentSerialSequence));
 
     private static OrganizationUnit MapOrganizationUnit(OrganizationUnitRow row) => new(
-        row.Id, row.OrganizationId, row.ParentUnitId, row.Code, row.Name, Enum.Parse<OrganizationUnitKind>(row.Kind), row.IsActive, row.SortOrder);
+        row.Id, row.OrganizationId, row.ParentUnitId, row.Code, row.Name, Enum.Parse<OrganizationUnitKind>(row.Kind), row.IsActive, row.SortOrder, row.CanManufacture);
 
     private sealed class OrganizationUnitRow
     {
@@ -434,6 +461,7 @@ public sealed partial class MySqlPdmRepository
         public string Kind { get; init; } = string.Empty;
         public bool IsActive { get; init; }
         public int SortOrder { get; init; }
+        public bool CanManufacture { get; init; }
     }
 
     private sealed class OrganizationMembershipRow

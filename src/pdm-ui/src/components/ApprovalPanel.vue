@@ -1,8 +1,10 @@
 <script setup lang="ts">
 import { Check } from '@lucide/vue'
 import type { ReleasePackageSummary } from '../types'
+import { useUserDisplayName } from '../userDisplay'
 
 defineProps<{ releasePackage: ReleasePackageSummary | null }>()
+const displayUserName = useUserDisplayName()
 </script>
 
 <template>
@@ -12,7 +14,7 @@ defineProps<{ releasePackage: ReleasePackageSummary | null }>()
       <template v-for="(step, index) in releasePackage.steps" :key="step.stage">
         <div class="pdm-approval-step" :class="`is-${step.status}`">
           <span class="pdm-approval-step__number"><Check v-if="step.status === 'done'" :size="14" /><template v-else>{{ index + 1 }}</template></span>
-          <p><strong>{{ step.stage }}</strong><small>{{ step.assignee }} · {{ step.detail }}</small></p>
+          <p><strong>{{ step.stage }}</strong><small>{{ displayUserName(step.assignee) }} · {{ step.detail }}</small></p>
         </div>
         <i v-if="index < releasePackage.steps.length - 1" class="pdm-approval-line" :class="{ 'is-done': step.status === 'done' }" />
       </template>

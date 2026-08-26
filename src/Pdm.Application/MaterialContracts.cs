@@ -256,10 +256,11 @@ public interface IMaterialRepository
     Task<MaterialCodeApplication> DecideMaterialCodeApplicationAsync(Guid applicationId, long expectedRowVersion, MaterialCodeApplicationStatus status, string actor, string? comment, Guid? materialId, string? materialCode, DateTimeOffset decidedAt, CancellationToken cancellationToken);
     Task<bool> HasMaterialReferencesAsync(Guid materialId, CancellationToken cancellationToken);
     Task<int> CountMaterialReferencesAsync(Guid materialId, CancellationToken cancellationToken);
-    Task<string> ReserveNextMaterialCodeAsync(MaterialCategory category, CancellationToken cancellationToken);
+    Task<string> ReserveNextMaterialCodeAsync(MaterialCategory category, long minimumCurrentSequence, CancellationToken cancellationToken);
     Task<PdmMaterial> CreateMaterialAsync(PdmMaterial material, MaterialCategory category, CancellationToken cancellationToken);
     Task<PdmMaterial> UpsertU9MaterialAsync(PdmMaterial material, CancellationToken cancellationToken);
     Task<PdmMaterial> UpdateMaterialAsync(PdmMaterial material, long expectedRowVersion, CancellationToken cancellationToken);
+    Task<PdmMaterial> UpdatePlmMetadataAsync(PdmMaterial material, long expectedRowVersion, CancellationToken cancellationToken);
     Task<(PdmMaterial Material, MaterialSyncTask Task)> UpdateAndEnqueueAsync(
         PdmMaterial material,
         long expectedRowVersion,
@@ -278,7 +279,7 @@ public interface IMaterialRepository
     Task<MaterialCategoryRule?> FindCategoryRuleAsync(MaterialKind kind, CancellationToken cancellationToken);
     Task<MaterialCategoryRule> SaveCategoryRuleAsync(MaterialCategoryRule rule, CancellationToken cancellationToken);
     Task<(PdmMaterial Material, MaterialSyncTask Task)> ApproveAndEnqueueAsync(
-        Guid materialId,
+        PdmMaterial material,
         long expectedRowVersion,
         string u9CategoryCode,
         MaterialSyncTask task,

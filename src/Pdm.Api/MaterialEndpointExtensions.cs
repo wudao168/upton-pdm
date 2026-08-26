@@ -45,6 +45,12 @@ public static class MaterialEndpointExtensions
             return Results.File(download.Content, "application/octet-stream", download.Attachment.OriginalFileName, enableRangeProcessing: true);
         });
 
+        api.MapPut("/materials/{materialId:guid}/cover", async (Guid materialId, SetMaterialCoverRequest request, HttpContext context, MaterialAttachmentService service, CancellationToken cancellationToken) =>
+        {
+            var (actor, role) = CurrentUser(context.User);
+            return Results.Ok(MapMaterial(await service.SetCoverAsync(materialId, request.AttachmentId, request.ExpectedRowVersion, actor, role, cancellationToken)));
+        });
+
         api.MapPost("/materials", async (SaveMaterialRequest request, HttpContext context, MaterialService service, CancellationToken cancellationToken) =>
         {
             var (actor, role) = CurrentUser(context.User);
@@ -61,7 +67,7 @@ public static class MaterialEndpointExtensions
         {
             var (actor, role) = CurrentUser(context.User);
             var changed = await service.ChangeApprovedAsync(materialId, ToCommand(request), actor, role, cancellationToken);
-            return Results.Ok(new { Material = MapMaterial(changed.Material), Task = MapTask(changed.Task) });
+            return Results.Ok(new { Material = MapMaterial(changed.Material), Task = changed.Task is null ? null : MapTask(changed.Task) });
         });
 
         api.MapDelete("/materials/{materialId:guid}", async (Guid materialId, long expectedRowVersion, HttpContext context, MaterialService service, CancellationToken cancellationToken) =>
@@ -343,7 +349,7 @@ public static class MaterialEndpointExtensions
         request.SortOrder,
         request.ExpectedRowVersion);
 
-    private static object MapMaterial(PdmMaterial material) => new
+    internal static object MapMaterial(PdmMaterial material) => new
     {
         material.Id,
         material.MaterialCode,
@@ -387,10 +393,11 @@ public static class MaterialEndpointExtensions
         material.LastU9SyncedAt,
         material.ReferenceCount,
         material.Model3DAttachmentCount,
-        material.DocumentAttachmentCount
+        material.DocumentAttachmentCount,
+        material.CoverImageAttachmentId
     };
 
-    private static object MapAttachment(MaterialAttachment attachment) => new
+    internal static object MapAttachment(MaterialAttachment attachment) => new
     {
         attachment.Id,
         attachment.MaterialId,

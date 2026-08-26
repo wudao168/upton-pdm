@@ -22,8 +22,9 @@ describe('PLM API client', () => {
       parentUnitId: undefined,
       code: 'DESIGN',
       name: '设计部',
-      kind: 'BusinessDivision',
-      isActive: true,
+    kind: 'BusinessDivision',
+    canManufacture: true,
+    isActive: true,
       sortOrder: 0,
     }, 'token')
 

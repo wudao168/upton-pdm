@@ -59,11 +59,29 @@ public sealed class ProjectFolderTreeTests
     }
 
     [Fact]
+    public async Task FolderPermissionsMatchTheUsersActualRoleCode()
+    {
+        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        await repository.CreateUserAsync(new(Guid.NewGuid(), "electrical", "电气工程师", "unused", UserRole.Engineer, true, RoleCode: "ElectricalEngineer"), CancellationToken.None);
+        var main = await repository.CreateNumberedProjectAsync(Command("实际角色目录权限"), CancellationToken.None);
+        var template = await repository.ListFolderTemplateAsync(CancellationToken.None);
+        await repository.SaveFolderTemplateAsync(template.Select(node => new SaveFolderTemplateNodeCommand(
+            node.FolderKey, node.Name, node.SortOrder, node.InheritPermissions,
+            node.FolderKey == "electrical"
+                ? [new SaveFolderPermissionCommand(FolderPrincipalType.Role, "ElectricalEngineer", FolderAccess.Publish)]
+                : [])).ToArray(), CancellationToken.None);
+
+        var folders = await repository.ListProjectFoldersAsync(main.Id, "electrical", UserRole.Engineer, CancellationToken.None);
+
+        Assert.Equal(FolderAccess.Publish, folders.Single(item => item.TemplateKey == "electrical").EffectiveAccess);
+    }
+
+    [Fact]
     public async Task ProjectFolderPermissionsGateDocumentReadAndEditAccess()
     {
         var repository = new InMemoryPdmRepository(TimeProvider.System);
         var main = await repository.CreateNumberedProjectAsync(Command("目录权限项目"), CancellationToken.None);
-        await repository.SetMainProjectStaffingAsync(main.Id, new("project-manager", [], "engineer"), "admin", CancellationToken.None);
+        await repository.SetMainProjectStaffingAsync(main.Id, new("project-manager", [], ["engineer"]), "admin", CancellationToken.None);
         var folders = await repository.ListProjectFoldersAsync(main.Id, "admin", UserRole.Administrator, CancellationToken.None);
         var mechanical = folders.Single(item => item.TemplateKey == "mechanical.project" && item.TargetProjectId == main.Id);
         var document = await repository.RegisterDocumentAsync(

@@ -60,9 +60,9 @@ public sealed class BomHeaderServiceTests
     }
 
     [Fact]
-    public async Task GenerateHierarchy_CreatesPendingApplicationsWithoutExposingPredictedCodesAndIsIdempotent()
+    public async Task GenerateHierarchy_WithChild_CreatesOnlyRootMasterAndChildHeaders()
     {
-        var service = CreateService(out var materials, out var repository);
+        var service = CreateService(out var materials, out var repository, out var u9Client);
         var root = await repository.CreateNumberedProjectAsync(new(
             Guid.Parse("70000000-0000-0000-0000-000000000001"),
             "P",
@@ -79,29 +79,64 @@ public sealed class BomHeaderServiceTests
 
         var first = await service.GenerateHierarchyMaterialsAsync(root.Id, "admin", UserRole.Administrator, default);
 
-        Assert.Equal(8, first.ExpectedCount);
-        Assert.Equal(8, first.GeneratedCount);
+        Assert.Equal(5, first.ExpectedCount);
+        Assert.Equal(5, first.GeneratedCount);
         Assert.Equal(0, first.ExistingCount);
+        Assert.Equal(0, u9Client.AuthenticationCount);
+        Assert.Equal(0, u9Client.ItemQueryCount);
+        Assert.Equal(0, u9Client.UomQueryCount);
+        Assert.Equal(0, u9Client.ReferenceQueryCount);
         Assert.Equal(8, first.Headers.Count);
         Assert.Equal(2, first.Headers.Count(header => header.Kind == ProjectBomHeaderKind.Master));
         Assert.All(first.Headers.Where(header => header.Kind == ProjectBomHeaderKind.Master), header => Assert.Equal("0302", header.CategoryCode));
-        Assert.All(first.Headers.Where(header => header.Kind != ProjectBomHeaderKind.Master), header => Assert.Equal("0201", header.CategoryCode));
-        Assert.All(first.Headers, header => Assert.Null(header.MaterialCode));
-        Assert.All(first.Headers, header => Assert.Equal(MaterialApprovalStatus.Draft, header.ApprovalStatus));
-        Assert.All(first.Headers, header => Assert.Equal(MaterialCodeApplicationStatus.Pending, header.ApplicationStatus));
-        Assert.All(first.Headers, header => Assert.Equal("admin", header.RequestedBy));
+        Assert.All(first.Headers.Where(header => header.Kind != ProjectBomHeaderKind.Master && header.MaterialId is not null), header => Assert.Equal("0201", header.CategoryCode));
+        var rootHeaders = first.Headers.Where(header => header.ProjectId == root.Id).ToArray();
+        Assert.NotNull(rootHeaders.Single(header => header.Kind == ProjectBomHeaderKind.Master).MaterialId);
+        Assert.All(rootHeaders.Where(header => header.Kind != ProjectBomHeaderKind.Master), header => Assert.Null(header.MaterialId));
+        Assert.All(first.Headers.Where(header => header.MaterialId is not null), header => Assert.Null(header.MaterialCode));
+        Assert.All(first.Headers.Where(header => header.MaterialId is not null), header => Assert.Equal(MaterialApprovalStatus.Draft, header.ApprovalStatus));
+        Assert.All(first.Headers.Where(header => header.MaterialId is not null), header => Assert.Equal(MaterialCodeApplicationStatus.Pending, header.ApplicationStatus));
+        Assert.All(first.Headers.Where(header => header.MaterialId is not null), header => Assert.Equal("admin", header.RequestedBy));
         var applications = await materials.ListMaterialCodeApplicationsAsync(null, MaterialCodeApplicationStatus.Pending, default);
-        Assert.Equal(8, applications.Count);
+        Assert.Equal(5, applications.Count);
         Assert.All(applications, application => Assert.NotNull(application.BomHeaderKind));
         Assert.All(applications, application => Assert.Null(application.BomItemId));
+        Assert.All(applications, application => Assert.Null(application.RequestedMaterialCode));
+        Assert.DoesNotContain(applications, application => application.ProjectId == root.Id
+            && application.BomHeaderKind != ProjectBomHeaderKind.Master);
         var pendingMaterials = await materials.ListMaterialsAsync(null, null, false, 100, default);
-        Assert.Equal(8, pendingMaterials.Count);
-        Assert.Equal(8, pendingMaterials.Select(material => material.MaterialCode).Distinct().Count());
+        Assert.Equal(5, pendingMaterials.Count);
+        Assert.All(pendingMaterials, material => Assert.StartsWith("PDM-PENDING-", material.MaterialCode));
+        Assert.Equal(5, pendingMaterials.Select(material => material.MaterialCode).Distinct().Count());
 
         var second = await service.GenerateHierarchyMaterialsAsync(root.Id, "admin", UserRole.Administrator, default);
         Assert.Equal(0, second.GeneratedCount);
-        Assert.Equal(8, second.ExistingCount);
+        Assert.Equal(5, second.ExistingCount);
         Assert.Equal(first.Headers.Select(header => header.MaterialId), second.Headers.Select(header => header.MaterialId));
+    }
+
+    [Fact]
+    public async Task GenerateHierarchy_AfterChildAdded_AppliesOnlyForNewChildHeaders()
+    {
+        var service = CreateService(out var materials, out var repository);
+        var root = await repository.CreateNumberedProjectAsync(new(
+            Guid.Parse("70000000-0000-0000-0000-000000000001"),
+            "P", 2, Guid.Parse("c0046500-0000-0000-0000-000000000001"), "增量主项目", null,
+            new DateOnly(2026, 8, 22), 1, "admin", @"D:\PDM\Vault", @"D:\PDM\Release"), default);
+
+        var initial = await service.GenerateHierarchyMaterialsAsync(root.Id, "admin", UserRole.Administrator, default);
+        Assert.Equal(4, initial.GeneratedCount);
+        var child = await repository.CreateSubprojectAsync(new(root.Id, "后增子项目", null, 1), default);
+
+        var incremental = await service.GenerateHierarchyMaterialsAsync(root.Id, "admin", UserRole.Administrator, default);
+
+        Assert.Equal(5, incremental.ExpectedCount);
+        Assert.Equal(4, incremental.GeneratedCount);
+        Assert.Equal(1, incremental.ExistingCount);
+        var applications = await materials.ListMaterialCodeApplicationsAsync(null, MaterialCodeApplicationStatus.Pending, default);
+        Assert.Equal(8, applications.Count);
+        Assert.Equal(4, applications.Count(application => application.ProjectId == child.Id));
+        Assert.Equal(4, applications.Count(application => application.ProjectId == root.Id));
     }
 
     [Fact]
@@ -153,6 +188,12 @@ public sealed class BomHeaderServiceTests
     }
 
     private static BomHeaderService CreateService(out InMemoryMaterialRepository materials, out InMemoryPdmRepository repository)
+        => CreateService(out materials, out repository, out _);
+
+    private static BomHeaderService CreateService(
+        out InMemoryMaterialRepository materials,
+        out InMemoryPdmRepository repository,
+        out AvailableCodeClient u9Client)
     {
         var time = TimeProvider.System;
         repository = new InMemoryPdmRepository(time);
@@ -161,7 +202,8 @@ public sealed class BomHeaderServiceTests
             "http://u9.example.test/U9", "01", "7", "pdm", "PDM", "protected:test-secret",
             U9MaterialContract.CreatePath, U9MaterialContract.QueryPath, false, "admin", time.GetUtcNow(),
             UnitCodeMappings: new Dictionary<string, string>()), default).GetAwaiter().GetResult();
-        var materialService = new MaterialService(materials, repository, new TestProtector(), new AvailableCodeClient(), time);
+        u9Client = new AvailableCodeClient();
+        var materialService = new MaterialService(materials, repository, new TestProtector(), u9Client, time);
         return new BomHeaderService(repository, materials, materialService, time);
     }
 
@@ -176,6 +218,27 @@ public sealed class BomHeaderServiceTests
 
         Assert.NotNull(pendingHeader.MaterialId);
         Assert.Null(pendingHeader.MaterialCode);
+    }
+
+    [Fact]
+    public async Task List_HidesConfirmedU9CodeWhileLatestHeaderApplicationIsPending()
+    {
+        var service = CreateService(out var materials, out var repository);
+        var material = await AddMaterial(materials, MaterialKind.Product, MaterialApprovalStatus.Approved,
+            "0302", "PDM-0302-13", "03020000013", true);
+        await repository.SaveProjectBomHeaderBindingAsync(
+            ProjectId, ProjectBomHeaderKind.Master, material.Id, 0, "admin", default);
+        var application = await materials.CreateMaterialCodeApplicationAsync(new(
+            Guid.NewGuid(), ProjectId, null, MaterialCodeApplicationStatus.Pending, "developer", DateTimeOffset.UtcNow,
+            null, null, null, material.Id, null, 1, ProjectBomHeaderKind.Master), default);
+
+        var header = (await service.ListAsync(ProjectId, "admin", UserRole.Administrator, default))
+            .Single(item => item.Kind == ProjectBomHeaderKind.Master);
+
+        Assert.Equal(application.Id, header.ApplicationId);
+        Assert.Equal(MaterialCodeApplicationStatus.Pending, header.ApplicationStatus);
+        Assert.Equal(material.Id, header.MaterialId);
+        Assert.Null(header.MaterialCode);
     }
 
     [Fact]
@@ -278,6 +341,73 @@ public sealed class BomHeaderServiceTests
     }
 
     [Fact]
+    public async Task ProjectBomU9Sync_RootWithChildrenUsesChildRootsAndAppendsOnlyNewChild()
+    {
+        var time = TimeProvider.System;
+        var repository = new InMemoryPdmRepository(time);
+        var materials = new InMemoryMaterialRepository(time);
+        var root = await repository.CreateNumberedProjectAsync(new(
+            Guid.Parse("70000000-0000-0000-0000-000000000001"),
+            "P", 2, Guid.Parse("c0046500-0000-0000-0000-000000000001"), "U9层级主项目", null,
+            new DateOnly(2026, 8, 22), 1, "admin", @"D:\PDM\Vault", @"D:\PDM\Release"), default);
+        await materials.SaveIntegrationConfigurationAsync(new(
+            "http://u9.example.test/U9", "01", "7", "pdm", "PDM", "protected:test-secret",
+            U9MaterialContract.CreatePath, U9MaterialContract.QueryPath, true, "admin", time.GetUtcNow()), default);
+        var rootMaster = await AddMaterial(materials, MaterialKind.Product, MaterialApprovalStatus.Approved,
+            "0302", "03020000009", "03020000009", true);
+        var rootStandard = await AddMaterial(materials, MaterialKind.Product, MaterialApprovalStatus.Approved,
+            "0201", "02010000100", "02010000100", true);
+        await repository.SaveProjectBomHeaderBindingAsync(root.Id, ProjectBomHeaderKind.Master, rootMaster.Id, 0, "admin", default);
+        await repository.SaveProjectBomHeaderBindingAsync(root.Id, ProjectBomHeaderKind.Standard, rootStandard.Id, 0, "admin", default);
+        await ReleaseCategoryAsync(repository, root.Id, BomKind.Standard, "ROOT-ITEM", time);
+
+        var firstChild = await repository.CreateSubprojectAsync(new(root.Id, "泵组单元", null, 1), default);
+        var firstChildMaster = await AddMaterial(materials, MaterialKind.Product, MaterialApprovalStatus.Approved,
+            "0302", "03020000010", "03020000010", true);
+        var firstChildStandard = await AddMaterial(materials, MaterialKind.Product, MaterialApprovalStatus.Approved,
+            "0201", "02010000101", "02010000101", true);
+        await repository.SaveProjectBomHeaderBindingAsync(firstChild.Id, ProjectBomHeaderKind.Master, firstChildMaster.Id, 0, "admin", default);
+        await repository.SaveProjectBomHeaderBindingAsync(firstChild.Id, ProjectBomHeaderKind.Standard, firstChildStandard.Id, 0, "admin", default);
+        await ReleaseCategoryAsync(repository, firstChild.Id, BomKind.Standard, "CHILD-1-ITEM", time);
+
+        var client = new ApprovalAutomationClient();
+        var service = new ProjectBomU9SyncService(repository, materials,
+            new U9BomWriteService(materials, repository, client, client, new TestProtector(), time), time);
+
+        var childPreview = await service.PreviewAsync(firstChild.Id, ProjectBomHeaderKind.Master, "admin", UserRole.Administrator, default);
+        Assert.Equal(1, childPreview.ComponentCount);
+        using (var childPayload = JsonDocument.Parse(childPreview.WritePreview!.RequestPreview))
+            Assert.Equal("02010000101", childPayload.RootElement[0].GetProperty("BOMComponents")[0].GetProperty("ItemMaster").GetProperty("Code").GetString());
+
+        var initial = await service.PreviewAsync(root.Id, ProjectBomHeaderKind.Master, "admin", UserRole.Administrator, default);
+        Assert.Equal(ProjectBomU9SyncState.CreateRequired, initial.State);
+        Assert.Equal(1, initial.ComponentCount);
+        using (var initialPayload = JsonDocument.Parse(initial.WritePreview!.RequestPreview))
+        {
+            var componentCodes = initialPayload.RootElement[0].GetProperty("BOMComponents").EnumerateArray()
+                .Select(component => component.GetProperty("ItemMaster").GetProperty("Code").GetString())
+                .ToArray();
+            Assert.Equal("03020000010", Assert.Single(componentCodes));
+            Assert.DoesNotContain("02010000100", componentCodes);
+        }
+        await service.ExecuteAsync(root.Id, ProjectBomHeaderKind.Master,
+            initial.WritePreview.RequestSha256, initial.WritePreview.RequiredConfirmation,
+            "admin", UserRole.Administrator, default);
+
+        var secondChild = await repository.CreateSubprojectAsync(new(root.Id, "回收单元", null, 1), default);
+        var secondChildMaster = await AddMaterial(materials, MaterialKind.Product, MaterialApprovalStatus.Approved,
+            "0302", "03020000011", "03020000011", true);
+        await repository.SaveProjectBomHeaderBindingAsync(secondChild.Id, ProjectBomHeaderKind.Master, secondChildMaster.Id, 0, "admin", default);
+        await ReleaseCategoryAsync(repository, secondChild.Id, BomKind.Standard, "CHILD-2-ITEM", time);
+
+        var incremental = await service.PreviewAsync(root.Id, ProjectBomHeaderKind.Master, "admin", UserRole.Administrator, default);
+
+        Assert.Equal(ProjectBomU9SyncState.ModifyRequired, incremental.State);
+        Assert.Equal(2, incremental.ComponentCount);
+        Assert.Equal(1, incremental.WritePreview!.AddedComponentCount);
+    }
+
+    [Fact]
     public async Task ApprovalAutomation_WaitsForFirstReleasedComponentThenCreatesA1Bom()
     {
         var time = TimeProvider.System;
@@ -372,6 +502,21 @@ public sealed class BomHeaderServiceTests
         Assert.Equal(0, client.BomWriteCount);
     }
 
+    private static async Task ReleaseCategoryAsync(
+        InMemoryPdmRepository repository,
+        Guid projectId,
+        BomKind kind,
+        string drawingNumber,
+        TimeProvider time)
+    {
+        var item = new BomItem(
+            Guid.NewGuid(), projectId, kind, 1, drawingNumber, drawingNumber, 1, "001",
+            null, null, "A1", true);
+        await repository.ReplaceBomAsync(projectId, kind, [item], default);
+        var version = await repository.SaveBomDraftAsync(projectId, kind, [item], "reviewer", default);
+        await repository.SetBomVersionStateAsync([version.Id], BomVersionState.Released, "reviewer", time.GetUtcNow(), default);
+    }
+
     private static async Task<PdmMaterial> AddMaterial(InMemoryMaterialRepository repository, MaterialKind kind, MaterialApprovalStatus approval, string categoryCode, string code, string? u9ItemCode = null, bool u9SyncConfirmed = false)
     {
         var category = await repository.FindCategoryAsync(categoryCode, default) ?? throw new InvalidOperationException();
@@ -392,20 +537,37 @@ public sealed class BomHeaderServiceTests
 
     private sealed class AvailableCodeClient : IU9OpenApiClient
     {
-        public Task<U9AuthenticationResult> AuthenticateAsync(U9AuthenticationRequest request, CancellationToken cancellationToken) =>
-            Task.FromResult(new U9AuthenticationResult("token"));
+        public int AuthenticationCount { get; private set; }
+        public int ItemQueryCount { get; private set; }
+        public int UomQueryCount { get; private set; }
+        public int ReferenceQueryCount { get; private set; }
 
-        public Task<U9ItemQueryResult> QueryItemsAsync(string baseUrl, string path, string token, string payloadJson, CancellationToken cancellationToken) =>
-            Task.FromResult(new U9ItemQueryResult(0, null, []));
+        public Task<U9AuthenticationResult> AuthenticateAsync(U9AuthenticationRequest request, CancellationToken cancellationToken)
+        {
+            AuthenticationCount++;
+            return Task.FromResult(new U9AuthenticationResult("token"));
+        }
 
-        public Task<U9UomQueryResult> QueryUomsAsync(string baseUrl, string token, string payloadJson, CancellationToken cancellationToken) =>
-            Task.FromResult(new U9UomQueryResult(0, null, [new U9UomReference("uom-001", "001")]));
+        public Task<U9ItemQueryResult> QueryItemsAsync(string baseUrl, string path, string token, string payloadJson, CancellationToken cancellationToken)
+        {
+            ItemQueryCount++;
+            return Task.FromResult(new U9ItemQueryResult(0, null, []));
+        }
+
+        public Task<U9UomQueryResult> QueryUomsAsync(string baseUrl, string token, string payloadJson, CancellationToken cancellationToken)
+        {
+            UomQueryCount++;
+            return Task.FromResult(new U9UomQueryResult(0, null, [new U9UomReference("uom-001", "001")]));
+        }
 
         public Task<U9BusinessBatchResult> PostBatchAsync(string baseUrl, string path, string token, string payloadJson, CancellationToken cancellationToken) =>
             throw new NotSupportedException();
 
-        public Task<U9CustomerQueryResult> QueryCustomerReferencesAsync(string baseUrl, string path, string token, string payloadJson, CancellationToken cancellationToken) =>
-            throw new NotSupportedException();
+        public Task<U9CustomerQueryResult> QueryCustomerReferencesAsync(string baseUrl, string path, string token, string payloadJson, CancellationToken cancellationToken)
+        {
+            ReferenceQueryCount++;
+            return Task.FromResult(new U9CustomerQueryResult(0, null, [], 0));
+        }
     }
 
     private sealed class BomWriteState
@@ -457,6 +619,7 @@ public sealed class BomHeaderServiceTests
     private sealed class ApprovalAutomationClient : IU9OpenApiClient, IU9BomQueryClient
     {
         private U9BomReference? bom;
+        private U9ItemReference? createdItem;
 
         public int ItemWriteCount { get; private set; }
         public int BomWriteCount { get; private set; }
@@ -467,7 +630,7 @@ public sealed class BomHeaderServiceTests
             Task.FromResult(new U9AuthenticationResult("token"));
 
         public Task<U9ItemQueryResult> QueryItemsAsync(string baseUrl, string path, string token, string payloadJson, CancellationToken cancellationToken) =>
-            Task.FromResult(new U9ItemQueryResult(0, null, []));
+            Task.FromResult(new U9ItemQueryResult(0, null, createdItem is null ? [] : [createdItem]));
 
         public Task<U9UomQueryResult> QueryUomsAsync(string baseUrl, string token, string payloadJson, CancellationToken cancellationToken) =>
             Task.FromResult(new U9UomQueryResult(0, null, [new U9UomReference("uom-001", "001")]));
@@ -480,6 +643,17 @@ public sealed class BomHeaderServiceTests
             {
                 ItemWriteCount++;
                 var itemCode = row.GetProperty("Code").GetString();
+                createdItem = new U9ItemReference(
+                    "item-1",
+                    itemCode,
+                    row.GetProperty("Name").GetString(),
+                    row.TryGetProperty("SPECS", out var specification) ? specification.GetString() : null,
+                    row.GetProperty("MainItemCategory").GetProperty("Code").GetString(),
+                    null,
+                    row.GetProperty("InventoryUOM").GetProperty("Code").GetString(),
+                    null,
+                    null,
+                    row.TryGetProperty("Description", out var description) ? description.GetString() : null);
                 return Task.FromResult(new U9BusinessBatchResult(0, null, [new(true, null, "item-1", itemCode)]));
             }
 
@@ -525,6 +699,8 @@ public sealed class BomHeaderServiceTests
             Task.FromResult<U9BomOperationReference?>(null);
 
         public Task<U9CustomerQueryResult> QueryCustomerReferencesAsync(string baseUrl, string path, string token, string payloadJson, CancellationToken cancellationToken) =>
-            throw new NotSupportedException();
+            Task.FromResult(new U9CustomerQueryResult(0, null, createdItem is null
+                ? []
+                : [new U9CustomerReference(createdItem.U9ItemCode!, createdItem.U9ItemName ?? createdItem.U9ItemCode!)], createdItem is null ? 0 : 1));
     }
 }

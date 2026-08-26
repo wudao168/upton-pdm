@@ -4,6 +4,9 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { computed, ref, watch } from 'vue'
 import { postDesktopMessage } from '../api'
 import type { AddDrawingReviewMarkupInput, BomKind, DrawingReviewCandidate, DrawingReviewDecision, DrawingReviewPackage, DrawingReviewTarget } from '../types'
+import { useUserDisplayName } from '../userDisplay'
+
+const displayUserName = useUserDisplayName()
 
 const props = withDefaults(defineProps<{
   packageId: string
@@ -273,7 +276,7 @@ function targetStateLabel(state: DrawingReviewPackage['items'][number]['modelSta
     <template v-else>
       <section class="drawing-review-package-summary">
         <div><strong>{{ activePackage.number }}</strong><span :class="`is-${activePackage.state.toLowerCase()}`">{{ packageStateLabel(activePackage.state) }}</span></div>
-        <p>{{ activePackage.items.length }}组图档 · {{ markedTargetCount }}/{{ totalTargetCount }}项完成 · 发起人 {{ activePackage.createdBy }}</p>
+        <p>{{ activePackage.items.length }}组图档 · {{ markedTargetCount }}/{{ totalTargetCount }}项完成 · 发起人 {{ displayUserName(activePackage.createdBy) }}</p>
         <p v-if="activePackage.state === 'Withdrawn'" class="drawing-review-withdrawn">{{ activePackage.withdrawnBy }} 撤销：{{ activePackage.withdrawalReason }}</p>
         <div class="drawing-review-package-actions"><button v-if="canWithdrawActive" type="button" class="is-danger" :disabled="pending" @click="withdrawActiveReview"><X :size="14" />撤销审核</button><button v-if="canSubmit" type="button" :disabled="pending" @click="openScopeSelection"><Send :size="14" />发起其他图档</button></div>
       </section>
@@ -319,7 +322,7 @@ function targetStateLabel(state: DrawingReviewPackage['items'][number]['modelSta
             <article v-for="markup in activeMarkups" :key="markup.id" :class="[`is-${markup.severity.toLowerCase()}`, { 'is-resolved': markup.state === 'Resolved' }]">
               <header><strong>{{ markup.severity === 'Blocking' ? '必须整改' : '优化建议' }}</strong><span>{{ markup.viewName || (target === 'Model3D' ? '当前3D视图' : '当前图纸') }}</span></header>
               <p>{{ markup.text }}</p>
-              <footer><span>{{ markup.createdBy }}</span><button v-if="canAnnotate && markup.state === 'Open'" type="button" @click="emit('resolveMarkup', activePackage.id, markup.id)">标记已处理</button><span v-else>已处理</span></footer>
+              <footer><span>{{ displayUserName(markup.createdBy) }}</span><button v-if="canAnnotate && markup.state === 'Open'" type="button" @click="emit('resolveMarkup', activePackage.id, markup.id)">标记已处理</button><span v-else>已处理</span></footer>
             </article>
             <p v-if="!activeMarkups.length" class="drawing-review-no-markup">当前图档暂无批注</p>
           </div>

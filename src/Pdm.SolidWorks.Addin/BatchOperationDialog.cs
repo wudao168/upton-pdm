@@ -56,7 +56,7 @@ internal sealed class BatchOperationDialog : Form
     private const int FileTreeLeftPadding = 4;
     private const int FileTreeIndentWidth = 16;
     private const int FileExpanderSize = 9;
-    private readonly ProjectBrowserControl projectSelector = new ProjectBrowserControl { Dock = DockStyle.Fill };
+    private readonly ProjectBrowserControl projectSelector = new ProjectBrowserControl(requireSubmissionAccess: true) { Dock = DockStyle.Fill };
     private readonly RadioButton acquire = new RadioButton { Text = "获取最新并获取权限", AutoSize = true, Checked = true };
     private readonly RadioButton checkIn = new RadioButton { Text = "提交最新整套存档", AutoSize = true };
     private readonly TreeView files = new TreeView();

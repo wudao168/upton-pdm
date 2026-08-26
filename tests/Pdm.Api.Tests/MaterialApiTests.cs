@@ -466,7 +466,10 @@ public sealed class MaterialApiTests : IClassFixture<PdmApiFactory>
         var taskId = approved.RootElement.GetProperty("task").GetProperty("id").GetGuid();
 
         var fake = factory.Services.GetRequiredService<TestU9OpenApiClient>();
-        fake.QueryResult = new U9ItemQueryResult(0, null, []);
+        fake.QueryResults.Clear();
+        fake.QueryResults.Enqueue(new U9ItemQueryResult(0, null, []));
+        fake.QueryResults.Enqueue(new U9ItemQueryResult(0, null,
+            [new("u9-1001", materialCode, "API同步测试电气件", "M12", "0101", null, "001")]));
         fake.BusinessResult = new U9BusinessBatchResult(0, null, [new(true, null, "u9-1001", materialCode)]);
         var executeResponse = await client.PostAsync($"/api/material-sync-tasks/{taskId}/execute", null);
 
@@ -475,7 +478,7 @@ public sealed class MaterialApiTests : IClassFixture<PdmApiFactory>
         Assert.True(result.RootElement.GetProperty("created").GetBoolean());
         Assert.Equal("Succeeded", result.RootElement.GetProperty("task").GetProperty("status").GetString());
         Assert.Equal("u9-1001", result.RootElement.GetProperty("material").GetProperty("u9ItemId").GetString());
-        Assert.True(fake.QueryCallCount >= 1);
+        Assert.True(fake.QueryCallCount >= 2);
         Assert.True(fake.PostCallCount >= 1);
     }
 

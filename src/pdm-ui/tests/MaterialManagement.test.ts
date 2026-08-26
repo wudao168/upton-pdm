@@ -322,9 +322,10 @@ describe('MaterialManagement', () => {
       { id: 'standard', applicationType: 'BomHeader' as const, bomItemId: null, bomHeaderKind: 'Standard' as const, categoryCode: '0201', applicationName: 'P700002 标准件BOM', rowVersion: 2 },
       { id: 'non-standard', applicationType: 'BomHeader' as const, bomItemId: null, bomHeaderKind: 'NonStandard' as const, categoryCode: '0201', applicationName: 'P700002 非标件BOM', rowVersion: 3 },
       { id: 'electrical', applicationType: 'BomHeader' as const, bomItemId: null, bomHeaderKind: 'Electrical' as const, categoryCode: '0201', applicationName: 'P700002 电气BOM', rowVersion: 4 },
-    ].map(application => ({
+    ].map((application, index) => ({
       ...application,
       projectId: 'project-2', projectCode: 'P700002', projectName: 'XXX设备', status: 'Pending' as const,
+      requestedMaterialCode: index === 0 ? '03020000013' : `02010000${250 + index - 1}`,
       requestedBy: 'developer', requestedAt: '2026-08-25T10:19:10Z', createdAt: '2026-08-25T10:19:10Z', updatedAt: '2026-08-25T10:19:10Z',
     }))
     api.listMaterialCodeApplications.mockResolvedValue(applications)
@@ -344,6 +345,8 @@ describe('MaterialManagement', () => {
     expect(rows[0].text()).toContain('BOM料号（4项）')
     expect(rows[0].text()).toContain('项目主BOM、标准件BOM、非标件BOM、电气BOM')
     expect(rows[0].text()).toContain('P700002 4 个BOM料号')
+    expect(rows[0].text()).not.toContain('03020000013')
+    expect(rows[0].text()).not.toContain('02010000250')
 
     await rows[0].findAll('button').find(button => button.text() === '批准')!.trigger('click')
     await flushPromises()
@@ -394,6 +397,32 @@ describe('MaterialManagement', () => {
     expect(api.decideMaterialCodeApplication).toHaveBeenNthCalledWith(1, 'application-1', 3, true, '', 'token')
     expect(api.decideMaterialCodeApplication).toHaveBeenNthCalledWith(2, 'application-2', 5, true, '', 'token')
     confirm.mockRestore()
+  })
+
+  it('等待U9C返回正式料号时持续显示当前处理进度', async () => {
+    const application = {
+      id: 'application-1', applicationType: 'BomHeader' as const, bomItemId: null, bomHeaderKind: 'Master' as const,
+      projectId: 'project-1', projectCode: 'P700003', projectName: '氮检设备', categoryCode: '0302',
+      applicationName: 'P700003 项目主BOM', status: 'Pending' as const, requestedBy: 'developer',
+      requestedAt: '2026-08-23T14:47:51Z', createdAt: '2026-08-23T14:47:51Z', updatedAt: '2026-08-23T14:47:51Z', rowVersion: 3,
+    }
+    api.listMaterialCodeApplications.mockResolvedValue([application])
+    let finishDecision!: (value: unknown) => void
+    api.decideMaterialCodeApplication.mockImplementation(() => new Promise(resolve => { finishDecision = resolve }))
+    const wrapper = mount(MaterialManagement, {
+      props: { token: 'token', canEdit: true, canApprove: true, canDecideMaterialCode: true, canManageIntegration: false, requestedTab: 'code-approvals' },
+      global: { plugins: [ElementPlus] },
+    })
+    await flushPromises()
+
+    const table = wrapper.findAllComponents({ name: 'ElTable' }).find(component => component.classes().includes('material-code-approval-table'))!
+    await table.findAll('.el-table__body-wrapper tbody tr')[0].findAll('button').find(button => button.text() === '批准')!.trigger('click')
+    await flushPromises()
+
+    expect(wrapper.get('.material-code-approval-progress').text()).toContain('读取U9C最新序号、申请正式料号并回查')
+    finishDecision({ application: { ...application, status: 'Approved' } })
+    await flushPromises()
+    expect(wrapper.find('.material-code-approval-progress').exists()).toBe(false)
   })
 
   it('批量退回只填写一次统一原因并逐项提交', async () => {
@@ -461,12 +490,12 @@ describe('MaterialManagement', () => {
     expect(wrapper.get('.material-editor-dialog').text()).not.toContain('供给方式')
     expect(wrapper.getComponent({ name: 'ElDialog' }).props('width')).toBe('688px')
     expect(wrapper.text()).toContain('料品采购链接')
-    expect(wrapper.get('.material-editor-grid').findAll('.el-form-item')).toHaveLength(17)
+    expect(wrapper.get('.material-editor-grid').findAll('.el-form-item')).toHaveLength(18)
     expect(wrapper.text()).toContain('选型建议')
     expect(wrapper.text()).toContain('参考价格')
     expect(wrapper.text()).toContain('3D')
     expect(wrapper.text()).toContain('资料')
-    expect(wrapper.findAll('button').filter(button => button.text() === '保存后上传')).toHaveLength(2)
+    expect(wrapper.findAll('button').filter(button => button.text() === '保存后上传')).toHaveLength(3)
     const editorItems = wrapper.get('.material-editor-grid').findAll('.el-form-item')
     const remarkItem = editorItems.find(item => item.text().includes('备注'))!
     const selectionAdviceItem = editorItems.find(item => item.text().includes('选型建议'))!

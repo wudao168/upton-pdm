@@ -3,6 +3,7 @@ import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { ArrowDown, ArrowUp, Blocks, Download, Plus, RefreshCw, Trash2, Upload } from '@lucide/vue'
 import FunctionBlockDiagram from './FunctionBlockDiagram.vue'
+import { useUserDisplayName } from '../userDisplay'
 import {
   createProgramTemplate,
   createProgramTemplateRevision,
@@ -26,6 +27,8 @@ import type {
   ProgramTemplateTask,
   ProgramTemplateVersionBump,
 } from '../types'
+
+const displayUserName = useUserDisplayName()
 
 const props = withDefaults(defineProps<{
   token: string
@@ -407,7 +410,7 @@ onMounted(async () => {
 
         <section v-if="activeRevision.parameters.length" class="program-template-section is-diagram"><h3>功能块图形化表示</h3><div class="program-template-diagram-scroll"><FunctionBlockDiagram :code="selected.code" :name="activeRevision.name" :version="activeRevision.version" :parameters="activeRevision.parameters" /></div></section>
 
-        <section class="program-template-section is-properties"><h3>属性与受控文件</h3><dl class="program-template-properties"><div><dt>厂商</dt><dd>{{ activeRevision.vendor }}</dd></div><div><dt>平台</dt><dd>{{ activeRevision.platform }}</dd></div><div><dt>软件版本</dt><dd>{{ activeRevision.softwareVersion }}</dd></div><div><dt>适用系列</dt><dd>{{ activeRevision.applicableSeries || '—' }}</dd></div><div><dt>来源公司</dt><dd>{{ selected.originCompanyName || '集团共享' }}</dd></div><div><dt>上传人</dt><dd>{{ activeRevision.createdBy }}</dd></div><div><dt>ZIP程序包</dt><dd>{{ activeRevision.packageFileName || '未上传' }} · {{ fileSize(activeRevision.packageFileLength) }}</dd></div><div><dt>离线测试证据</dt><dd>{{ activeRevision.evidenceFileName || '未上传' }}</dd></div><div class="is-wide"><dt>程序包 SHA-256</dt><dd><code>{{ activeRevision.packageSha256 || '—' }}</code></dd></div><div class="is-wide"><dt>版本说明</dt><dd>{{ activeRevision.changeNote }}</dd></div></dl></section>
+        <section class="program-template-section is-properties"><h3>属性与受控文件</h3><dl class="program-template-properties"><div><dt>厂商</dt><dd>{{ activeRevision.vendor }}</dd></div><div><dt>平台</dt><dd>{{ activeRevision.platform }}</dd></div><div><dt>软件版本</dt><dd>{{ activeRevision.softwareVersion }}</dd></div><div><dt>适用系列</dt><dd>{{ activeRevision.applicableSeries || '—' }}</dd></div><div><dt>来源公司</dt><dd>{{ selected.originCompanyName || '集团共享' }}</dd></div><div><dt>上传人</dt><dd>{{ displayUserName(activeRevision.createdBy) }}</dd></div><div><dt>ZIP程序包</dt><dd>{{ activeRevision.packageFileName || '未上传' }} · {{ fileSize(activeRevision.packageFileLength) }}</dd></div><div><dt>离线测试证据</dt><dd>{{ activeRevision.evidenceFileName || '未上传' }}</dd></div><div class="is-wide"><dt>程序包 SHA-256</dt><dd><code>{{ activeRevision.packageSha256 || '—' }}</code></dd></div><div class="is-wide"><dt>版本说明</dt><dd>{{ activeRevision.changeNote }}</dd></div></dl></section>
 
         <section v-if="activeTask" class="program-template-section program-template-decision is-decision"><h3>{{ activeTask.stage === 'Review' ? '电气组织审核' : '集团标准化批准' }}</h3><el-checkbox-group v-if="activeTask.requiredChecklist.length" v-model="checkedItems"><el-checkbox v-for="item in activeTask.requiredChecklist" :key="item" :label="item">{{ item }}</el-checkbox></el-checkbox-group><el-input v-model="decisionComment" type="textarea" :rows="3" placeholder="审批意见（退回时必填）" /></section>
 

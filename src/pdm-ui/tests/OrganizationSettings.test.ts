@@ -12,17 +12,20 @@ const directory: OrganizationDirectory = {
   units: [
     { id: 'ks-division', organizationId: 'org-ks', code: 'KS-AUTO', name: '昆山自动化事业部', kind: 'BusinessDivision', isActive: true, sortOrder: 1 },
     { id: 'ks-department', organizationId: 'org-ks', parentUnitId: 'ks-division', code: 'KS-DESIGN', name: '昆山设计部', kind: 'Department', isActive: true, sortOrder: 1 },
+    { id: 'ks-other', organizationId: 'org-ks', code: 'KS-OTHER', name: '昆山其他部门', kind: 'BusinessDivision', isActive: true, sortOrder: 2 },
     { id: 'gz-division', organizationId: 'org-gz', code: 'GZ-AUTO', name: '广州自动化事业部', kind: 'BusinessDivision', isActive: true, sortOrder: 1 },
   ],
   memberships: [
     { unitId: 'ks-department', username: 'ks-user', isPrimary: true },
+    { unitId: 'ks-other', username: 'existing-user', isPrimary: true },
     { unitId: 'gz-division', username: 'gz-user', isPrimary: true },
   ],
   managers: [{ unitId: 'ks-division', primaryManager: 'ks-user', collaborativeManagers: [] }],
   users: [
-    { username: 'ks-user', displayName: '昆山设计员', role: 'Engineer', isActive: true },
-    { username: 'gz-user', displayName: '广州设计员', role: 'Engineer', isActive: true },
-    { username: 'new-user', displayName: '待分配人员', role: 'Engineer', isActive: true },
+    { username: 'ks-user', displayName: '昆山设计员', role: 'Engineer', isActive: true, companyId: 'org-ks' },
+    { username: 'gz-user', displayName: '广州设计员', role: 'Engineer', isActive: true, companyId: 'org-gz' },
+    { username: 'new-user', displayName: '待分配人员', role: 'Engineer', isActive: true, companyId: 'org-ks' },
+    { username: 'existing-user', displayName: '已分配人员', role: 'Engineer', isActive: true, companyId: 'org-ks' },
   ],
 }
 
@@ -106,5 +109,93 @@ describe('OrganizationSettings', () => {
     await flushPromises()
     expect(wrapper.get('[aria-label="组织详情"]').text()).toContain('设置负责人')
     expect(wrapper.get('[aria-label="组织详情"]').text()).toContain('主负责人')
+  })
+
+  it('公司直属部门可标记为制造部门并承接项目', async () => {
+    const saveUnit = vi.fn().mockImplementation(input => Promise.resolve({ id: 'ks-division', ...input }))
+    const wrapper = mount(OrganizationSettings, {
+      attachTo: document.body,
+      props: {
+        directory,
+        activeCompanyId: 'org-ks',
+        pending: false,
+        onSaveOrganization: vi.fn(),
+        onSaveUnit: saveUnit,
+        onUpdateMemberships: vi.fn(),
+        onUpdateManagers: vi.fn(),
+      },
+      global: { plugins: [ElementPlus] },
+    })
+    await flushPromises()
+
+    await buttonByText(wrapper, '编辑').trigger('click')
+    await flushPromises()
+    const dialog = document.body.querySelector('.el-dialog')!
+    const manufacturingLabel = Array.from(dialog.querySelectorAll('label')).find(label => label.textContent?.includes('制造部门'))
+    expect(manufacturingLabel?.textContent).toContain('可承接项目')
+    const manufacturingCheckbox = manufacturingLabel!.querySelector<HTMLInputElement>('input[type="checkbox"]')!
+    manufacturingCheckbox.checked = true
+    manufacturingCheckbox.dispatchEvent(new Event('change'))
+    Array.from(dialog.querySelectorAll<HTMLButtonElement>('button')).find(button => button.textContent?.trim() === '保存组织')!.click()
+    await flushPromises()
+
+    expect(saveUnit).toHaveBeenCalledWith(expect.objectContaining({ id: 'ks-division', canManufacture: true }))
+  })
+
+  it('可向当前组织添加人员并保留原归属', async () => {
+    const updateMemberships = vi.fn().mockResolvedValue(directory)
+    const wrapper = mount(OrganizationSettings, {
+      attachTo: document.body,
+      props: {
+        directory,
+        activeCompanyId: 'org-ks',
+        pending: false,
+        onSaveOrganization: vi.fn(),
+        onSaveUnit: vi.fn(),
+        onUpdateMemberships: updateMemberships,
+        onUpdateManagers: vi.fn(),
+      },
+      global: { plugins: [ElementPlus] },
+    })
+    await flushPromises()
+
+    await buttonByText(wrapper, '添加人员').trigger('click')
+    await flushPromises()
+    const select = wrapper.findComponent({ name: 'ElSelect' })
+    expect(select.props('filterable')).toBe(true)
+    expect(select.findAllComponents({ name: 'ElOption' }).map(option => option.props('label'))).toContain('已分配人员')
+    select.vm.$emit('update:modelValue', 'existing-user')
+    await flushPromises()
+    Array.from(document.body.querySelectorAll<HTMLButtonElement>('button')).find(button => button.textContent?.trim() === '添加到本组织')!.click()
+    await flushPromises()
+
+    expect(updateMemberships).toHaveBeenCalledWith('existing-user', ['ks-other', 'ks-division'], 'ks-other')
+  })
+
+  it('清空主负责人后可删除部门负责人', async () => {
+    const updateManagers = vi.fn().mockResolvedValue(directory)
+    const wrapper = mount(OrganizationSettings, {
+      attachTo: document.body,
+      props: {
+        directory,
+        activeCompanyId: 'org-ks',
+        pending: false,
+        onSaveOrganization: vi.fn(),
+        onSaveUnit: vi.fn(),
+        onUpdateMemberships: vi.fn(),
+        onUpdateManagers: updateManagers,
+      },
+      global: { plugins: [ElementPlus] },
+    })
+    await flushPromises()
+
+    await buttonByText(wrapper, '设置负责人').trigger('click')
+    await flushPromises()
+    Array.from(document.body.querySelectorAll<HTMLButtonElement>('button')).find(button => button.textContent?.trim() === '清空负责人')!.click()
+    await flushPromises()
+    Array.from(document.body.querySelectorAll<HTMLButtonElement>('button')).find(button => button.textContent?.trim() === '保存负责人')!.click()
+    await flushPromises()
+
+    expect(updateManagers).toHaveBeenCalledWith('ks-division', '', [])
   })
 })

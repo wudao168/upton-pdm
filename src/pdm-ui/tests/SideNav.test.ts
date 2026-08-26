@@ -19,6 +19,15 @@ describe('SideNav', () => {
     expect(wrapper.text()).not.toContain('料品与U9C')
   })
 
+  it('places the permission-gated standard structure directly below standard materials', async () => {
+    const wrapper = mount(SideNav, { props: { active: 'materials', canViewStandardLibrary: true } })
+    const labels = wrapper.findAll('.pdm-sidebar__nav .pdm-nav-item').map(item => item.text().trim())
+
+    expect(labels.slice(2, 5)).toEqual(['标准物料', '标准结构', '料品管理'])
+    await wrapper.findAll('.pdm-sidebar__nav .pdm-nav-item')[3]!.trigger('click')
+    expect(wrapper.emitted('navigate')?.[0]).toEqual(['standard-structure', '标准结构'])
+  })
+
   it('shows the combined material task count on material management', () => {
     const wrapper = mount(SideNav, { props: { active: 'projects', materialCount: 3 } })
     const materialItem = wrapper.findAll('.pdm-sidebar__nav .pdm-nav-item')[2]!

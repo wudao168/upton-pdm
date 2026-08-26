@@ -29,7 +29,7 @@ public sealed class MySqlMaterialRepository : IMaterialRepository
             " WHERE (@IncludeArchived=1 OR is_archived=0)" +
             " AND (@CategoryCode IS NULL OR category_code=@CategoryCode)" +
             " AND (@Query IS NULL OR material_code LIKE @Query OR name LIKE @Query OR specification LIKE @Query OR material LIKE @Query OR brand LIKE @Query OR purchase_link LIKE @Query)" +
-            " ORDER BY material_code LIMIT @Limit",
+            " ORDER BY is_recommended DESC,reference_count DESC,material_code LIMIT @Limit",
             new { Query = normalizedQuery, CategoryCode = normalizedCategory, IncludeArchived = includeArchived, Limit = Math.Clamp(limit, 1, 500) },
             cancellationToken: cancellationToken));
         return rows.Select(MapMaterial).ToArray();
@@ -207,7 +207,7 @@ public sealed class MySqlMaterialRepository : IMaterialRepository
             new { MaterialId = materialId }, cancellationToken: cancellationToken));
     }
 
-    public async Task<string> ReserveNextMaterialCodeAsync(MaterialCategory category, CancellationToken cancellationToken)
+    public async Task<string> ReserveNextMaterialCodeAsync(MaterialCategory category, long minimumCurrentSequence, CancellationToken cancellationToken)
     {
         await using var connection = await OpenAsync(cancellationToken);
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
@@ -225,9 +225,10 @@ public sealed class MySqlMaterialRepository : IMaterialRepository
                 FROM material_master
                 ON DUPLICATE KEY UPDATE u9_category_code=u9_category_code
             """, new { category.CounterScope, category.NumberPrefix, category.SequenceLength }, transaction, cancellationToken: cancellationToken));
-        var currentValue = await connection.QuerySingleAsync<long>(new CommandDefinition(
+        var storedValue = await connection.QuerySingleAsync<long>(new CommandDefinition(
             "SELECT current_value FROM material_code_counter WHERE u9_category_code=@CounterScope FOR UPDATE",
             new { category.CounterScope }, transaction, cancellationToken: cancellationToken));
+        var currentValue = Math.Max(storedValue, minimumCurrentSequence);
         var maximum = MaximumSequence(category.SequenceLength);
         if (currentValue >= maximum) throw new PdmRuleException($"分类 {category.Code} 的物料编码流水已用尽。");
 
@@ -355,6 +356,33 @@ public sealed class MySqlMaterialRepository : IMaterialRepository
         {
             throw new PdmConflictException("PLM物料编码已存在。");
         }
+    }
+
+    public async Task<PdmMaterial> UpdatePlmMetadataAsync(PdmMaterial material, long expectedRowVersion, CancellationToken cancellationToken)
+    {
+        await using var connection = await OpenAsync(cancellationToken);
+        var affected = await connection.ExecuteAsync(new CommandDefinition(
+            """
+            UPDATE material_master
+            SET selection_advice=@SelectionAdvice,reference_price=@ReferencePrice,model_3d_link=@Model3DLink,
+                document_link=@DocumentLink,is_recommended=@IsRecommended,cover_image_attachment_id=@CoverImageAttachmentId,
+                updated_by=@UpdatedBy,updated_at=@UpdatedAt,row_version=row_version+1
+            WHERE id=@Id AND row_version=@ExpectedRowVersion AND is_archived=0
+            """, new
+            {
+                material.Id,
+                material.SelectionAdvice,
+                material.ReferencePrice,
+                material.Model3DLink,
+                material.DocumentLink,
+                material.IsRecommended,
+                material.CoverImageAttachmentId,
+                material.UpdatedBy,
+                UpdatedAt = material.UpdatedAt.UtcDateTime,
+                ExpectedRowVersion = expectedRowVersion
+            }, cancellationToken: cancellationToken));
+        if (affected != 1) throw new PdmConflictException("料品已停用或被其他用户修改，请刷新后重试。");
+        return (await FindMaterialAsync(connection, null, material.Id, cancellationToken))!;
     }
 
     public async Task<(PdmMaterial Material, MaterialSyncTask Task)> UpdateAndEnqueueAsync(
@@ -657,7 +685,7 @@ public sealed class MySqlMaterialRepository : IMaterialRepository
     }
 
     public async Task<(PdmMaterial Material, MaterialSyncTask Task)> ApproveAndEnqueueAsync(
-        Guid materialId, long expectedRowVersion, string u9CategoryCode, MaterialSyncTask task, AuditEntry audit, CancellationToken cancellationToken)
+        PdmMaterial material, long expectedRowVersion, string u9CategoryCode, MaterialSyncTask task, AuditEntry audit, CancellationToken cancellationToken)
     {
         await using var connection = await OpenAsync(cancellationToken);
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
@@ -666,12 +694,13 @@ public sealed class MySqlMaterialRepository : IMaterialRepository
             var affected = await connection.ExecuteAsync(new CommandDefinition(
                 """
                 UPDATE material_master
-                SET approval_status='Approved',approved_by=@Actor,approved_at=@OccurredAt,u9_category_code=@U9CategoryCode,
+                SET material_code=@MaterialCode,approval_status='Approved',approved_by=@Actor,approved_at=@OccurredAt,u9_category_code=@U9CategoryCode,
                     sync_status='PreviewReady',updated_by=@Actor,updated_at=@OccurredAt,row_version=row_version+1
                 WHERE id=@MaterialId AND row_version=@ExpectedRowVersion AND approval_status='Draft'
                 """, new
                 {
-                    MaterialId = materialId,
+                    MaterialId = material.Id,
+                    material.MaterialCode,
                     ExpectedRowVersion = expectedRowVersion,
                     U9CategoryCode = u9CategoryCode,
                     Actor = audit.Actor,
@@ -700,14 +729,14 @@ public sealed class MySqlMaterialRepository : IMaterialRepository
                     audit.EntityId,
                     DetailJson = JsonSerializer.Serialize(new { detail = audit.Detail }, jsonOptions)
                 }, transaction, cancellationToken: cancellationToken));
-            var material = (await FindMaterialAsync(connection, transaction, materialId, cancellationToken))!;
+            var saved = (await FindMaterialAsync(connection, transaction, material.Id, cancellationToken))!;
             await transaction.CommitAsync(cancellationToken);
-            return (material, task);
+            return (saved, task);
         }
         catch (MySqlException exception) when (exception.Number == 1062)
         {
             await transaction.RollbackAsync(cancellationToken);
-            throw new PdmConflictException("相同内容的U9C同步任务已经存在。");
+            throw new PdmConflictException("PLM物料编码或相同内容的U9C同步任务已经存在。");
         }
         catch
         {
@@ -1100,7 +1129,7 @@ public sealed class MySqlMaterialRepository : IMaterialRepository
         row.U9CategoryCode, row.U9ItemId, row.U9ItemCode, Enum.Parse<MaterialSyncStatus>(row.SyncStatus), row.CreatedBy, Utc(row.CreatedAt)!.Value,
         row.UpdatedBy, Utc(row.UpdatedAt)!.Value, row.RowVersion, row.CategoryCode, row.IsArchived, row.ArchivedBy, Utc(row.ArchivedAt),
         row.U9SyncConfirmed, Enum.Parse<MaterialDataSource>(row.SourceSystem), Enum.Parse<MaterialMasterOwner>(row.MasterOwner), Utc(row.LastU9SyncedAt),
-        row.PurchaseLink, row.ReferenceCount, row.SelectionAdvice, row.ReferencePrice, row.Model3DLink, row.DocumentLink, row.IsRecommended)
+        row.PurchaseLink, row.ReferenceCount, row.SelectionAdvice, row.ReferencePrice, row.Model3DLink, row.DocumentLink, row.IsRecommended, row.CoverImageAttachmentId)
         {
             Model3DAttachmentCount = row.Model3DAttachmentCount,
             DocumentAttachmentCount = row.DocumentAttachmentCount
@@ -1188,7 +1217,7 @@ public sealed class MySqlMaterialRepository : IMaterialRepository
     private static DateTimeOffset? Utc(DateTime? value) => value is null ? null : new DateTimeOffset(DateTime.SpecifyKind(value.Value, DateTimeKind.Utc));
 
     private const string MaterialSelect = """
-        SELECT id,material_code,name,material_kind,supply_mode,unit_code,specification,material,remark,brand,surface_treatment,purchase_link,selection_advice,reference_price,model_3d_link,document_link,is_recommended,
+        SELECT id,material_code,name,material_kind,supply_mode,unit_code,specification,material,remark,brand,surface_treatment,purchase_link,selection_advice,reference_price,model_3d_link,document_link,is_recommended,cover_image_attachment_id,
                weight,weight_unit,source_bom_item_id,approval_status,approved_by,approved_at,u9_category_code,u9_item_id,u9_item_code,u9_sync_confirmed,
                source_system,master_owner,last_u9_synced_at,sync_status,created_by,created_at,updated_by,updated_at,row_version,category_code,is_archived,archived_by,archived_at,
                 (SELECT COUNT(*) FROM bom_material_link AS material_link WHERE material_link.material_id=material_master.id)
@@ -1264,6 +1293,7 @@ public sealed class MySqlMaterialRepository : IMaterialRepository
         public string? Model3DLink { get; init; }
         public string? DocumentLink { get; init; }
         public bool IsRecommended { get; init; }
+        public Guid? CoverImageAttachmentId { get; init; }
         public int ReferenceCount { get; init; }
         public int Model3DAttachmentCount { get; init; }
         public int DocumentAttachmentCount { get; init; }

@@ -22,7 +22,8 @@ public sealed record LoginResponse(
     Guid ActiveCompanyId,
     string ActiveCompanyName,
     bool CrossCompanyView,
-    IReadOnlyList<CompanyOption> AccessibleCompanies);
+    IReadOnlyList<CompanyOption> AccessibleCompanies,
+    IReadOnlyList<string>? Roles = null);
 
 public sealed record PasswordResetRequest(string Username, string DisplayName);
 
@@ -38,7 +39,8 @@ public sealed record CreateManagedUserRequest(
     bool IsActive = true,
     Guid CompanyId = default,
     bool CrossCompanyView = false,
-    IReadOnlyList<Guid>? AccessibleCompanyIds = null);
+    IReadOnlyList<Guid>? AccessibleCompanyIds = null,
+    IReadOnlyList<string>? Roles = null);
 
 public sealed record UpdateManagedUserRequest(
     string DisplayName,
@@ -46,7 +48,8 @@ public sealed record UpdateManagedUserRequest(
     bool IsActive = true,
     Guid CompanyId = default,
     bool CrossCompanyView = false,
-    IReadOnlyList<Guid>? AccessibleCompanyIds = null);
+    IReadOnlyList<Guid>? AccessibleCompanyIds = null,
+    IReadOnlyList<string>? Roles = null);
 
 public sealed record CreateProjectRequest(
     Guid OrganizationId,
@@ -141,7 +144,8 @@ public sealed record SaveOrganizationUnitRequest(
     string Name,
     OrganizationUnitKind Kind,
     bool IsActive = true,
-    int SortOrder = 0);
+    int SortOrder = 0,
+    bool CanManufacture = false);
 
 public sealed record UpdateOrganizationMembershipsRequest(IReadOnlyList<Guid> UnitIds, Guid PrimaryUnitId);
 
@@ -149,9 +153,15 @@ public sealed record UpdateOrganizationUnitManagersRequest(string PrimaryManager
 
 public sealed record UpdateProjectExecutionUnitRequest(Guid ExecutionUnitId);
 
-public sealed record UpdateMainProjectStaffingRequest(string PrimaryProjectManager, IReadOnlyList<string> CollaborativeProjectManagers, string DesignLead);
+public sealed record UpdateMainProjectStaffingRequest(
+    string PrimaryProjectManager,
+    IReadOnlyList<string> CollaborativeProjectManagers,
+    string? DesignLead = null,
+    IReadOnlyList<string>? DesignLeads = null);
 
 public sealed record UpdateChildProjectDesignersRequest(IReadOnlyList<string> Designers);
+
+public sealed record UpdateChildProjectManagerRequest(string ProjectManager);
 
 public sealed record RegisterDocumentRequest(
     string DrawingNumber,

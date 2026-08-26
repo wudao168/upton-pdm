@@ -29,8 +29,9 @@ public sealed class ProgramTemplateService(
             && !string.Equals(template.CreatedBy, actor, StringComparison.OrdinalIgnoreCase)
             && !await HasPermissionAsync(actor, role, PermissionCodes.ProgramTemplateManage, cancellationToken))
         {
-            var roleCode = TenantContext.Current?.RoleCode ?? role.ToString();
-            var visibleTaskRevisionIds = (await templates.ListTasksAsync(actor, roleCode, cancellationToken)).Select(item => item.RevisionId).ToHashSet();
+            var visibleTaskRevisionIds = new HashSet<Guid>();
+            foreach (var roleCode in CurrentRoleCodes(role))
+                foreach (var task in await templates.ListTasksAsync(actor, roleCode, cancellationToken)) visibleTaskRevisionIds.Add(task.RevisionId);
             if (!template.Revisions.Any(item => visibleTaskRevisionIds.Contains(item.Id)))
                 throw new UnauthorizedAccessException("无权查看尚未发布的程序模板。");
         }
@@ -210,7 +211,7 @@ public sealed class ProgramTemplateService(
         var eligibleApprovers = new List<UserAccount>();
         foreach (var user in await pdmRepository.ListUsersAsync(cancellationToken))
         {
-            if (!user.IsActive || !string.Equals(user.EffectiveRoleCode, UserRole.Approver.ToString(), StringComparison.OrdinalIgnoreCase)) continue;
+            if (!user.IsActive || !user.HasRole(UserRole.Approver.ToString())) continue;
             if (string.Equals(user.Username, actor, StringComparison.OrdinalIgnoreCase) || string.Equals(user.Username, reviewer, StringComparison.OrdinalIgnoreCase)) continue;
             if (await HasPermissionAsync(user.Username, user.Role, PermissionCodes.ProgramTemplateApprove, cancellationToken)) eligibleApprovers.Add(user);
         }
@@ -228,8 +229,10 @@ public sealed class ProgramTemplateService(
 
     public async Task<IReadOnlyList<ProgramTemplateApprovalTask>> ListMyTasksAsync(string actor, UserRole role, CancellationToken cancellationToken)
     {
-        var roleCode = TenantContext.Current?.RoleCode ?? role.ToString();
-        return await templates.ListTasksAsync(actor, roleCode, cancellationToken);
+        var tasks = new Dictionary<Guid, ProgramTemplateApprovalTask>();
+        foreach (var roleCode in CurrentRoleCodes(role))
+            foreach (var task in await templates.ListTasksAsync(actor, roleCode, cancellationToken)) tasks[task.Id] = task;
+        return tasks.Values.OrderBy(task => task.CreatedAt).ToArray();
     }
 
     public async Task<ProgramTemplateDecisionResult> DecideAsync(
@@ -262,8 +265,7 @@ public sealed class ProgramTemplateService(
         else
         {
             await RequirePermissionAsync(actor, role, PermissionCodes.ProgramTemplateApprove, cancellationToken);
-            var roleCode = TenantContext.Current?.RoleCode ?? role.ToString();
-            if (!string.Equals(task.AssigneeRoleCode, roleCode, StringComparison.OrdinalIgnoreCase)) throw new UnauthorizedAccessException("当前角色不在集团标准化主管批准池中。");
+            if (!CurrentRoleCodes(role).Contains(task.AssigneeRoleCode ?? string.Empty, StringComparer.OrdinalIgnoreCase)) throw new UnauthorizedAccessException("当前角色不在集团标准化主管批准池中。");
             var review = (await templates.ListRevisionTasksAsync(revision.Id, cancellationToken)).FirstOrDefault(item => item.Stage == ProgramTemplateApprovalStage.Review);
             if (review?.Decision != ProgramTemplateApprovalDecision.Approved) throw new PdmConflictException("程序模板尚未通过电气组织审核。");
             if (string.Equals(review.DecisionBy, actor, StringComparison.OrdinalIgnoreCase)) throw new UnauthorizedAccessException("审核人不能同时执行最终批准。");
@@ -275,6 +277,9 @@ public sealed class ProgramTemplateService(
         await AuditAsync(actor, "program-template.decision", nameof(ProgramTemplateApprovalTask), task.Id, $"{task.Stage} {command.Decision} {result.Revision.VersionLabel}", cancellationToken);
         return result;
     }
+
+    private static IReadOnlyList<string> CurrentRoleCodes(UserRole fallbackRole) =>
+        TenantContext.Current?.EffectiveRoleCodes ?? [fallbackRole.ToString()];
 
     public async Task<ProgramTemplateDownload> OpenPublishedDownloadAsync(Guid templateId, string actor, UserRole role, CancellationToken cancellationToken)
     {

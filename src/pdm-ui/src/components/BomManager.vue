@@ -1208,8 +1208,8 @@ function submitBatchUpdate() {
         </div>
       </div>
     </div>
-    <BomHierarchyOverview v-if="isOverviewView && project" :project="project" :projects="projects" :token="token" :editable="editable" />
-    <template v-else>
+    <BomHierarchyOverview v-if="project" v-show="isOverviewView" :project="project" :projects="projects" :token="token" :editable="editable" />
+    <template v-if="!isOverviewView">
     <section v-if="!isSourceView" class="pdm-bom-release-strip" aria-label="当前BOM审批发布">
       <div>
         <small>当前工作版</small>

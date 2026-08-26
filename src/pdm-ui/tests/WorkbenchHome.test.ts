@@ -1,4 +1,5 @@
 import { mount } from '@vue/test-utils'
+import ElementPlus from 'element-plus'
 import { describe, expect, it } from 'vitest'
 import WorkbenchHome from '../src/components/WorkbenchHome.vue'
 import type { DocumentNode, ProjectSummary } from '../src/types'
@@ -22,8 +23,8 @@ const project = {
   serialNumbers: [],
   responsibleUsers: [],
   canAssignExecutionUnit: false,
-  canManageMainStaffing: false,
-  canAssignDesigners: false,
+  canManageMainStaffing: true,
+  canAssignDesigners: true,
   canReadContent: true,
 } satisfies ProjectSummary
 
@@ -44,7 +45,7 @@ const childProject = {
   designers: ['engineer'],
   canAssignExecutionUnit: false,
   canManageMainStaffing: false,
-  canAssignDesigners: false,
+  canAssignDesigners: true,
   canReadContent: true,
 } satisfies ProjectSummary
 
@@ -103,10 +104,25 @@ describe('WorkbenchHome', () => {
           state: '审批中',
           steps: [{ id: 'step-1', stage: '主设审核', assignee: 'lead', status: 'current', detail: '待处理' }],
         } as never,
+        organizationDirectory: {
+          organizations: [],
+          units: [],
+          memberships: [],
+          managers: [],
+          users: [],
+        },
+        pending: false,
+        onUpdateMainStaffing: async () => project,
+        onUpdateDesigners: async () => childProject,
       },
+      global: { plugins: [ElementPlus] },
     })
 
     expect(wrapper.find('.pdm-project-overview-heading').exists()).toBe(false)
+    expect(wrapper.text()).not.toContain('当前工作图档')
+    expect(wrapper.text()).not.toContain('项目尚未关联图纸')
+    expect(wrapper.find('.pdm-current-document').exists()).toBe(false)
+    expect(wrapper.find('.pdm-project-link-guide').exists()).toBe(false)
     expect(wrapper.find('.pdm-page-actions').exists()).toBe(false)
     expect(wrapper.get('button[aria-label="进入项目图档"]').text()).toContain('图纸审核：审核中 · 双审 2/4')
     expect(wrapper.get('button[aria-label="进入BOM数据"]').text()).toContain('BOM审批：审批中 · 主设审核')
@@ -123,6 +139,15 @@ describe('WorkbenchHome', () => {
     expect(wrapper.get('[aria-label="项目阶段负责人"]').text()).toContain('工程师丁')
     expect(wrapper.get('[aria-label="客户联络人"]').text()).toContain('宁波均普智能制造有限公司')
     expect(wrapper.get('[aria-label="客户联络人"]').text()).toContain('待维护')
+    expect(wrapper.get('[aria-label="人员组织结构"] button').text()).toBe('配置主项目分工')
+
+    await wrapper.setProps({ projects: [{ ...project, collaborativeProjectManagers: [] }, childProject] })
+    const collaborativeManager = wrapper.findAll('.pdm-project-staffing-row').find(row => row.text().includes('协同项目经理'))
+    expect(collaborativeManager?.text()).toContain('无')
+
+    await wrapper.setProps({ project: { ...childProject, canAssignDesigners: false } })
+    expect(wrapper.get('[aria-label="项目阶段负责人"]').text()).toContain('本子项目工程师')
+    expect(wrapper.get('[aria-label="人员组织结构"]').text()).toContain('配置本子项目工程师')
 
     await wrapper.get('button[aria-label="进入项目图档"]').trigger('click')
     await wrapper.get('button[aria-label="进入BOM数据"]').trigger('click')

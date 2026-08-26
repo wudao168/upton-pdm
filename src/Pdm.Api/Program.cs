@@ -90,13 +90,17 @@ if (!builder.Environment.IsDevelopment())
 if (string.Equals(databaseOptions.Provider, "MySql", StringComparison.OrdinalIgnoreCase))
 {
     builder.Services.AddScoped<IPdmRepository, MySqlPdmRepository>();
+    builder.Services.AddScoped<IProjectFileRepository, MySqlProjectFileRepository>();
     builder.Services.AddScoped<IMaterialRepository, MySqlMaterialRepository>();
+    builder.Services.AddScoped<IStandardLibraryRepository, MySqlStandardLibraryRepository>();
     builder.Services.AddScoped<IProgramTemplateRepository, MySqlProgramTemplateRepository>();
 }
 else
 {
     builder.Services.AddSingleton<IPdmRepository, InMemoryPdmRepository>();
+    builder.Services.AddSingleton<IProjectFileRepository, InMemoryProjectFileRepository>();
     builder.Services.AddSingleton<IMaterialRepository, InMemoryMaterialRepository>();
+    builder.Services.AddSingleton<IStandardLibraryRepository, InMemoryStandardLibraryRepository>();
     builder.Services.AddSingleton<IProgramTemplateRepository, InMemoryProgramTemplateRepository>();
 }
 
@@ -107,6 +111,7 @@ builder.Services.AddSingleton<IPersistentSessionTokenService, PersistentSessionT
 builder.Services.AddScoped<IFileStorage, LocalFileStorage>();
 builder.Services.AddScoped<IMaterialAttachmentStorage, LocalMaterialAttachmentStorage>();
 builder.Services.AddScoped<IProgramTemplateStorage, LocalProgramTemplateStorage>();
+builder.Services.AddScoped<IProjectFileStorage, LocalProjectFileStorage>();
 builder.Services.AddSingleton<IServerPreviewConverter, SolidWorksServerPreviewConverter>();
 builder.Services.AddSingleton<IReleasePackagePublisher, AtomicReleasePackagePublisher>();
 builder.Services.AddSingleton<ICrmCredentialProtector, DataProtectionCrmCredentialProtector>();
@@ -120,7 +125,9 @@ builder.Services.AddScoped<PdmWorkflowService>();
 builder.Services.AddScoped<CrmCustomerIntegrationService>();
 builder.Services.AddScoped<MaterialService>();
 builder.Services.AddScoped<MaterialAttachmentService>();
+builder.Services.AddScoped<StandardLibraryService>();
 builder.Services.AddScoped<ProgramTemplateService>();
+builder.Services.AddScoped<ProjectFileService>();
 builder.Services.AddScoped<BomHeaderService>();
 builder.Services.AddScoped<U9MaterialIntegrationService>();
 builder.Services.AddScoped<U9BomQueryService>();
@@ -129,6 +136,7 @@ builder.Services.AddScoped<ProjectBomU9SyncService>();
 builder.Services.AddScoped<ApprovalU9AutomationService>();
 builder.Services.AddHostedService<PdmBootstrapHostedService>();
 builder.Services.AddHostedService<CrmCustomerSyncHostedService>();
+builder.Services.AddHostedService<ProjectFileRecycleCleanupService>();
 
 builder.Services.AddCors(options => options.AddPolicy("PdmClients", policy => policy
     .WithOrigins("http://127.0.0.1:5173", "http://localhost:5173", "http://127.0.0.1:5175", "http://localhost:5175", "https://appassets.pdm.local")
@@ -200,8 +208,10 @@ app.UseMiddleware<CompanyContextMiddleware>();
 app.UseAuthorization();
 app.MapPdmEndpoints();
 app.MapPdmMaterialEndpoints();
+app.MapStandardLibraryEndpoints();
 app.MapPdmBomHeaderEndpoints();
 app.MapProgramTemplateEndpoints();
+app.MapProjectFileEndpoints();
 app.MapU9BomEndpoints();
 try
 {

@@ -3,6 +3,9 @@ import { computed, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { ClipboardCheck, KeyRound, RefreshCw } from '@lucide/vue'
 import type { EditLockSummary, MaterialCodeApplication, MyApprovalTask, PasswordResetTask, ProgramTemplateTask } from '../types'
+import { useUserDisplayName } from '../userDisplay'
+
+const displayUserName = useUserDisplayName()
 
 const props = withDefaults(defineProps<{
   tasks: MyApprovalTask[]
@@ -74,7 +77,7 @@ const materialTaskRows = computed<TaskCenterRow[]>(() => {
       status: '待审批',
       statusClass: 'is-remind',
       title: `${first.projectCode || '项目'} BOM料号审批${tasks.length > 1 ? `（${tasks.length}项）` : ''}`,
-      content: `${first.projectName || first.projectId} · ${kinds.join('、') || 'BOM物料'}${tasks.length > 1 ? ` · 共${tasks.length}项` : ''} · 申请人 ${applicants.join('、')}`,
+      content: `${first.projectName || first.projectId} · ${kinds.join('、') || 'BOM物料'}${tasks.length > 1 ? ` · 共${tasks.length}项` : ''} · 申请人 ${applicants.map(item => displayUserName(item)).join('、')}`,
       createdAt: latest.requestedAt,
       material: first,
     }
@@ -85,7 +88,7 @@ const materialTaskRows = computed<TaskCenterRow[]>(() => {
     status: '待审批',
     statusClass: 'is-remind',
     title: `${task.projectCode || '项目'} 标准件料号审批`,
-    content: `${task.projectName || task.projectId} · ${task.applicationName || task.bomItemName || 'BOM物料'} · 申请人 ${task.requestedBy}`,
+    content: `${task.projectName || task.projectId} · ${task.applicationName || task.bomItemName || 'BOM物料'} · 申请人 ${displayUserName(task.requestedBy)}`,
     createdAt: task.requestedAt,
     material: task,
   }))
@@ -177,7 +180,7 @@ const rows = computed<TaskCenterRow[]>(() => [
       statusClass: lockStatusClass(mostUrgent),
       title: `${first.projectCode} · ${first.projectName}`,
       content: locks.length === 1
-        ? `${first.drawingNumber} · ${first.documentName} · ${first.checkedOutBy}（${first.checkoutMachine || '未知电脑'}）· ${connectionLabel(first.connectionState)} · 已占用${elapsed(first.checkedOutAt)}`
+        ? `${first.drawingNumber} · ${first.documentName} · ${displayUserName(first.checkedOutBy)}（${first.checkoutMachine || '未知电脑'}）· ${connectionLabel(first.connectionState)} · 已占用${elapsed(first.checkedOutAt)}`
         : `${locks.length} 个图档 · ${editorCount} 位编辑人 · 最长占用${elapsed(oldest.checkedOutAt)}`,
       createdAt: oldest.checkedOutAt,
       locks,
@@ -188,7 +191,7 @@ const rows = computed<TaskCenterRow[]>(() => [
     kind: 'password' as const,
     status: '待处理',
     statusClass: 'is-remind',
-    title: `${task.username} 密码重置申请`,
+    title: `${displayUserName(task.username)} 密码重置申请`,
     content: `${task.displayName}申请将账号密码重置为初始密码`,
     createdAt: task.requestedAt,
     password: task,

@@ -111,6 +111,10 @@ public sealed class ProjectBomU9SyncService(
         string actor,
         CancellationToken cancellationToken)
     {
+        if (kind != ProjectBomHeaderKind.Master && await HasDirectChildrenAsync(projectId, cancellationToken))
+            return new(projectId, kind, ProjectBomU9AutomaticState.UpToDate, null,
+                "主项目已有子项目，本级三类BOM不纳入U9C层级同步。");
+
         var syncLock = AutomationLocks.GetOrAdd((projectId, kind), _ => new SemaphoreSlim(1, 1));
         await syncLock.WaitAsync(cancellationToken);
         try
@@ -162,6 +166,8 @@ public sealed class ProjectBomU9SyncService(
     {
         var project = await repository.FindProjectAsync(projectId, cancellationToken)
             ?? throw new PdmNotFoundException("项目不存在。");
+        if (kind != ProjectBomHeaderKind.Master && await HasDirectChildrenAsync(projectId, cancellationToken))
+            throw new PdmRuleException("主项目已有子项目，本级三类BOM不纳入U9C层级同步。");
         var bindings = (await repository.ListProjectBomHeaderBindingsAsync(projectId, cancellationToken))
             .ToDictionary(binding => binding.Kind);
         if (!bindings.TryGetValue(kind, out var binding))
@@ -201,29 +207,38 @@ public sealed class ProjectBomU9SyncService(
     {
         var result = new List<U9BomComponentCommand>();
         var approved = false;
-        foreach (var kind in new[] { ProjectBomHeaderKind.Standard, ProjectBomHeaderKind.NonStandard, ProjectBomHeaderKind.Electrical })
-        {
-            var released = await LatestReleasedAsync(project.Id, kind, cancellationToken);
-            if (released is null) continue;
-            approved = true;
-            if (!EffectiveItems(released.Items).Any()) continue;
-            if (!bindings.TryGetValue(kind, out var binding))
-                throw new PdmRuleException($"{KindLabel(kind)}已有物料，但尚未申请独立BOM料号。");
-            var material = await RequireOfficialMaterialAsync(binding.MaterialId, KindLabel(kind), cancellationToken);
-            result.Add(Component((result.Count + 1) * 10, material, 1, $"{project.Code} · {KindLabel(kind)}"));
-        }
-
         var projects = await repository.ListProjectsAsync(cancellationToken);
-        foreach (var child in projects.Where(item => item.ParentProjectId == project.Id).OrderBy(item => item.ChildSequence ?? 0).ThenBy(item => item.Code))
+        var children = projects.Where(item => item.ParentProjectId == project.Id)
+            .OrderBy(item => item.ChildSequence ?? 0)
+            .ThenBy(item => item.Code)
+            .ToArray();
+        if (children.Length == 0)
         {
-            var childReleased = await HasReleasedCategoryBomAsync(child.Id, cancellationToken);
-            if (!childReleased) continue;
-            approved = true;
-            var childMaster = (await repository.ListProjectBomHeaderBindingsAsync(child.Id, cancellationToken))
-                .SingleOrDefault(item => item.Kind == ProjectBomHeaderKind.Master)
-                ?? throw new PdmRuleException($"子项目 {child.Code} 尚未申请项目主BOM料号。");
-            var material = await RequireOfficialMaterialAsync(childMaster.MaterialId, $"子项目 {child.Code} 主BOM", cancellationToken);
-            result.Add(Component((result.Count + 1) * 10, material, Math.Max(child.Quantity, 1), $"子项目 {child.Code} · {child.Name}"));
+            foreach (var kind in new[] { ProjectBomHeaderKind.Standard, ProjectBomHeaderKind.NonStandard, ProjectBomHeaderKind.Electrical })
+            {
+                var released = await LatestReleasedAsync(project.Id, kind, cancellationToken);
+                if (released is null) continue;
+                approved = true;
+                if (!EffectiveItems(released.Items).Any()) continue;
+                if (!bindings.TryGetValue(kind, out var binding))
+                    throw new PdmRuleException($"{KindLabel(kind)}已有物料，但尚未申请独立BOM料号。");
+                var material = await RequireOfficialMaterialAsync(binding.MaterialId, KindLabel(kind), cancellationToken);
+                result.Add(Component((result.Count + 1) * 10, material, 1, $"{project.Code} · {KindLabel(kind)}"));
+            }
+        }
+        else
+        {
+            foreach (var child in children)
+            {
+                var childReleased = await HasReleasedCategoryBomAsync(child.Id, cancellationToken);
+                if (!childReleased) continue;
+                approved = true;
+                var childMaster = (await repository.ListProjectBomHeaderBindingsAsync(child.Id, cancellationToken))
+                    .SingleOrDefault(item => item.Kind == ProjectBomHeaderKind.Master)
+                    ?? throw new PdmRuleException($"子项目 {child.Code} 尚未申请项目主BOM料号。");
+                var material = await RequireOfficialMaterialAsync(childMaster.MaterialId, $"子项目 {child.Code} 主BOM", cancellationToken);
+                result.Add(Component((result.Count + 1) * 10, material, Math.Max(child.Quantity, 1), $"子项目 {child.Code} · {child.Name}"));
+            }
         }
         return new(approved, result);
     }
@@ -273,6 +288,9 @@ public sealed class ProjectBomU9SyncService(
         (await repository.ListBomVersionsAsync(projectId, null, cancellationToken))
             .Any(version => version.State == BomVersionState.Released
                 && version.Kind is BomKind.Standard or BomKind.NonStandard or BomKind.Electrical);
+
+    private async Task<bool> HasDirectChildrenAsync(Guid projectId, CancellationToken cancellationToken) =>
+        (await repository.ListProjectsAsync(cancellationToken)).Any(project => project.ParentProjectId == projectId);
 
     private async Task<PdmMaterial> RequireOfficialMaterialAsync(Guid materialId, string label, CancellationToken cancellationToken)
     {

@@ -14,6 +14,7 @@ internal sealed class SolidWorksReferenceTreeScanner
         StringComparison.Ordinal);
 
     private readonly ISldWorks application;
+    private string activeDocumentDirectory = string.Empty;
 
     public SolidWorksReferenceTreeScanner(ISldWorks application)
     {
@@ -29,6 +30,7 @@ internal sealed class SolidWorksReferenceTreeScanner
         }
 
         var path = model.GetPathName() ?? string.Empty;
+        activeDocumentDirectory = Path.GetDirectoryName(path) ?? string.Empty;
         Log(string.Concat("ScanActiveDocument type=", model.GetType(), " title=", model.GetTitle(), " path=", path));
         if (model.GetType() != (int)swDocumentTypes_e.swDocASSEMBLY)
         {
@@ -55,8 +57,8 @@ internal sealed class SolidWorksReferenceTreeScanner
         bool isRoot,
         ITreeControlItem featureTreeItem)
     {
-        var componentName = component.Name2 ?? Path.GetFileNameWithoutExtension(component.GetPathName());
-        var componentPath = component.GetPathName() ?? string.Empty;
+        var componentPath = ResolveComponentPath(component);
+        var componentName = component.Name2 ?? Path.GetFileNameWithoutExtension(componentPath);
         var currentPath = string.IsNullOrWhiteSpace(instancePath) ? componentName : instancePath;
         var node = new CadTreeNode
         {
@@ -93,6 +95,45 @@ internal sealed class SolidWorksReferenceTreeScanner
 
         AddSameNameDrawing(node);
         return node;
+    }
+
+    private string ResolveComponentPath(IComponent2 component)
+    {
+        var referencedPath = component.GetPathName() ?? string.Empty;
+        if (!string.IsNullOrWhiteSpace(referencedPath) && File.Exists(referencedPath))
+        {
+            return referencedPath;
+        }
+
+        try
+        {
+            var loadedPath = (component.GetModelDoc2() as IModelDoc2)?.GetPathName() ?? string.Empty;
+            if (!string.IsNullOrWhiteSpace(loadedPath))
+            {
+                return loadedPath;
+            }
+        }
+        catch
+        {
+            // An unresolved component can throw while SolidWorks is resolving its model document.
+        }
+
+        var referencedDirectory = Path.GetDirectoryName(referencedPath) ?? string.Empty;
+        if (!string.IsNullOrWhiteSpace(activeDocumentDirectory)
+            && !string.IsNullOrWhiteSpace(referencedDirectory)
+            && string.Equals(
+                Path.GetFileName(referencedDirectory),
+                Path.GetFileName(activeDocumentDirectory),
+                StringComparison.OrdinalIgnoreCase))
+        {
+            var localSiblingPath = Path.Combine(activeDocumentDirectory, Path.GetFileName(referencedPath));
+            if (File.Exists(localSiblingPath))
+            {
+                return localSiblingPath;
+            }
+        }
+
+        return referencedPath;
     }
 
     private ITreeControlItem GetFeatureTreeRoot(IModelDoc2 model)

@@ -6,12 +6,12 @@ withDefaults(defineProps<{
 })
 
 const tile = {
-  coral: 'linear-gradient(135deg, #ec949d 0%, #c94f60 100%)',
-  peach: 'linear-gradient(135deg, #efad7d 0%, #cc713c 100%)',
-  yellow: 'linear-gradient(135deg, #e8df6a 0%, #b9ad2e 100%)',
-  mint: 'linear-gradient(135deg, #8ed69a 0%, #389b52 100%)',
-  sky: 'linear-gradient(135deg, #76c5e8 0%, #1e85b8 100%)',
-  lavender: 'linear-gradient(135deg, #b49de3 0%, #6f54b6 100%)',
+  coral: '#E43C2F',
+  peach: '#FFA31A',
+  yellow: '#FFD600',
+  mint: '#239443',
+  sky: '#2E7CEE',
+  lavender: '#9582FF',
 }
 
 const faces = [
@@ -66,7 +66,7 @@ const faces = [
   animation: plm-cube-spatial-spin 6.8s infinite linear;
 }
 .plm-cube-icon.is-axial .plm-cube-icon__cube {
-  animation: plm-cube-axial-spin 1.5s infinite linear;
+  animation: plm-cube-axial-spin 3s infinite linear reverse;
 }
 .plm-cube-icon__face {
   position: absolute;

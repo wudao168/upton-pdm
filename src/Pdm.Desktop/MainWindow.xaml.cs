@@ -82,7 +82,7 @@ public partial class MainWindow : Window
     {
         var red = MediaColor.FromRgb(0xFF, 0x3D, 0x00);
         var orange = MediaColor.FromRgb(0xFF, 0x98, 0x00);
-        var yellow = MediaColor.FromRgb(0xFF, 0xDF, 0x33);
+        var yellow = MediaColor.FromRgb(0xFF, 0xD6, 0x00);
         var green = MediaColor.FromRgb(0x49, 0xB6, 0x53);
         var blue = MediaColor.FromRgb(0x24, 0x95, 0xE8);
         var white = MediaColor.FromRgb(0xF8, 0xFA, 0xFC);

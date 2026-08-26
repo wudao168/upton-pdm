@@ -1,5 +1,7 @@
 namespace Upton.Pdm.Api;
 
+public sealed record SetMaterialCoverRequest(Guid? AttachmentId, long ExpectedRowVersion);
+
 public sealed record SaveMaterialRequest(
     string? MaterialCode,
     string Name,

@@ -1,6 +1,9 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
 import type { BomItem, CreateReleasePackageInput, ReleasePackageSummary, ReleaseScope } from '../types'
+import { useUserDisplayName } from '../userDisplay'
+
+const displayUserName = useUserDisplayName()
 
 const props = withDefaults(defineProps<{
   releasePackage: ReleasePackageSummary | null
@@ -206,7 +209,7 @@ function uploadSelected(event: Event) {
           <span>{{ step.status === 'done' ? '✓' : step.status === 'current' ? '●' : '○' }}</span>
           <div>
             <strong>{{ step.stage }}</strong>
-            <small>{{ step.assignee }} · {{ step.detail }}</small>
+            <small>{{ displayUserName(step.assignee) }} · {{ step.detail }}</small>
             <em v-if="step.emergencySubstitute">紧急代批：{{ step.emergencyReason }}</em>
             <em v-else-if="step.comment">{{ step.comment }}</em>
           </div>

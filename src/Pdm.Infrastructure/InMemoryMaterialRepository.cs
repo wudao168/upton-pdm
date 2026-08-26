@@ -46,7 +46,9 @@ public sealed class InMemoryMaterialRepository : IMaterialRepository
             .Where(item => string.IsNullOrWhiteSpace(categoryCode) || string.Equals(item.CategoryCode, categoryCode.Trim(), StringComparison.OrdinalIgnoreCase))
             .Where(item => string.IsNullOrWhiteSpace(normalized) || new[] { item.MaterialCode, item.Name, item.Specification, item.Material, item.Brand }
                 .Any(value => value?.Contains(normalized, StringComparison.OrdinalIgnoreCase) == true))
-            .OrderBy(item => item.MaterialCode, StringComparer.OrdinalIgnoreCase)
+            .OrderByDescending(item => item.IsRecommended)
+            .ThenByDescending(item => (item.SourceBomItemId is null ? 0 : 1) + bomLinks.Values.Count(value => value == item.Id))
+            .ThenBy(item => item.MaterialCode, StringComparer.OrdinalIgnoreCase)
             .Take(Math.Clamp(limit, 1, 500))
             .Select(item => item with
             {
@@ -59,7 +61,7 @@ public sealed class InMemoryMaterialRepository : IMaterialRepository
     }
 
     public Task<PdmMaterial?> FindMaterialAsync(Guid materialId, CancellationToken cancellationToken) =>
-        Task.FromResult(materials.GetValueOrDefault(materialId));
+        Task.FromResult(materials.TryGetValue(materialId, out var material) ? WithCounts(material) : null);
 
     public Task<PdmMaterial?> FindMaterialByCodeAsync(string materialCode, CancellationToken cancellationToken) =>
         Task.FromResult(materials.Values.FirstOrDefault(item => item.MaterialCode.Equals(materialCode, StringComparison.OrdinalIgnoreCase)));
@@ -145,11 +147,11 @@ public sealed class InMemoryMaterialRepository : IMaterialRepository
         return Task.FromResult(sourceReference + bomLinks.Values.Count(value => value == materialId) + attachments.Values.Count(value => value.MaterialId == materialId));
     }
 
-    public Task<string> ReserveNextMaterialCodeAsync(MaterialCategory category, CancellationToken cancellationToken)
+    public Task<string> ReserveNextMaterialCodeAsync(MaterialCategory category, long minimumCurrentSequence, CancellationToken cancellationToken)
     {
         lock (gate)
         {
-            var currentValue = materialCodeCounters.GetValueOrDefault(category.CounterScope);
+            var currentValue = Math.Max(materialCodeCounters.GetValueOrDefault(category.CounterScope), minimumCurrentSequence);
             var maximum = MaximumSequence(category.SequenceLength);
             if (currentValue >= maximum) throw new PdmRuleException($"分类 {category.Code} 的物料编码流水已用尽。");
             var nextValue = currentValue + 1;
@@ -206,6 +208,29 @@ public sealed class InMemoryMaterialRepository : IMaterialRepository
             if (!materials.TryGetValue(material.Id, out var existing)) throw new PdmNotFoundException("物料主档不存在。");
             if (existing.RowVersion != expectedRowVersion) throw new PdmConflictException("物料主档已被其他用户修改，请刷新后重试。");
             var saved = material with { MaterialCode = existing.MaterialCode, RowVersion = expectedRowVersion + 1 };
+            materials[material.Id] = saved;
+            return Task.FromResult(saved);
+        }
+    }
+
+    public Task<PdmMaterial> UpdatePlmMetadataAsync(PdmMaterial material, long expectedRowVersion, CancellationToken cancellationToken)
+    {
+        lock (gate)
+        {
+            if (!materials.TryGetValue(material.Id, out var existing)) throw new PdmNotFoundException("物料主档不存在。");
+            if (existing.RowVersion != expectedRowVersion) throw new PdmConflictException("物料主档已被其他用户修改，请刷新后重试。");
+            var saved = existing with
+            {
+                SelectionAdvice = material.SelectionAdvice,
+                ReferencePrice = material.ReferencePrice,
+                Model3DLink = material.Model3DLink,
+                DocumentLink = material.DocumentLink,
+                IsRecommended = material.IsRecommended,
+                CoverImageAttachmentId = material.CoverImageAttachmentId,
+                UpdatedBy = material.UpdatedBy,
+                UpdatedAt = material.UpdatedAt,
+                RowVersion = expectedRowVersion + 1
+            };
             materials[material.Id] = saved;
             return Task.FromResult(saved);
         }
@@ -381,13 +406,16 @@ public sealed class InMemoryMaterialRepository : IMaterialRepository
         }
     }
 
-    public Task<(PdmMaterial Material, MaterialSyncTask Task)> ApproveAndEnqueueAsync(Guid materialId, long expectedRowVersion, string u9CategoryCode, MaterialSyncTask task, AuditEntry audit, CancellationToken cancellationToken)
+    public Task<(PdmMaterial Material, MaterialSyncTask Task)> ApproveAndEnqueueAsync(PdmMaterial material, long expectedRowVersion, string u9CategoryCode, MaterialSyncTask task, AuditEntry audit, CancellationToken cancellationToken)
     {
         lock (gate)
         {
-            if (!materials.TryGetValue(materialId, out var material)) throw new PdmNotFoundException("物料主档不存在。");
-            if (material.RowVersion != expectedRowVersion) throw new PdmConflictException("物料主档已被其他用户修改，请刷新后重试。");
-            if (material.ApprovalStatus != MaterialApprovalStatus.Draft) throw new PdmRuleException("物料主档已经批准。");
+            if (!materials.TryGetValue(material.Id, out var current)) throw new PdmNotFoundException("物料主档不存在。");
+            if (current.RowVersion != expectedRowVersion) throw new PdmConflictException("物料主档已被其他用户修改，请刷新后重试。");
+            if (current.ApprovalStatus != MaterialApprovalStatus.Draft) throw new PdmRuleException("物料主档已经批准。");
+            if (materials.Values.Any(existing => existing.Id != material.Id
+                && existing.MaterialCode.Equals(material.MaterialCode, StringComparison.OrdinalIgnoreCase)))
+                throw new PdmConflictException("PLM物料编码已存在。");
             if (tasks.Values.Any(existing => existing.MaterialId == task.MaterialId && existing.Operation == task.Operation && existing.PayloadSha256 == task.PayloadSha256))
                 throw new PdmConflictException("相同内容的U9C同步任务已经存在。");
             var approved = material with
@@ -399,9 +427,9 @@ public sealed class InMemoryMaterialRepository : IMaterialRepository
                 SyncStatus = MaterialSyncStatus.PreviewReady,
                 UpdatedBy = audit.Actor,
                 UpdatedAt = audit.OccurredAt,
-                RowVersion = material.RowVersion + 1
+                RowVersion = current.RowVersion + 1
             };
-            materials[materialId] = approved;
+            materials[material.Id] = approved;
             tasks[task.Id] = task;
             return Task.FromResult((approved, task));
         }
@@ -569,6 +597,13 @@ public sealed class InMemoryMaterialRepository : IMaterialRepository
         configuration = value;
         return Task.FromResult(configuration);
     }
+
+    private PdmMaterial WithCounts(PdmMaterial material) => material with
+    {
+        ReferenceCount = (material.SourceBomItemId is null ? 0 : 1) + bomLinks.Values.Count(value => value == material.Id),
+        Model3DAttachmentCount = attachments.Values.Count(value => value.MaterialId == material.Id && value.Kind == MaterialAttachmentKind.Model3D),
+        DocumentAttachmentCount = attachments.Values.Count(value => value.MaterialId == material.Id && value.Kind == MaterialAttachmentKind.Document)
+    };
 
     private static MaterialCategory Category(string code, string name, string? parentCode, MaterialKind? kind, bool allowCreate, DateTimeOffset now, int sortOrder) =>
         new(code, name, parentCode, null, kind, kind is MaterialKind.NonStandard or MaterialKind.Product ? MaterialSupplyMode.Manufacture : MaterialSupplyMode.Purchase,

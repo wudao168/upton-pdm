@@ -21,8 +21,7 @@ public sealed class CompanySessionService(IPdmRepository repository)
             .ToArray();
         var primary = organizations.SingleOrDefault(item => item.Id == primaryCompanyId)
             ?? throw new UnauthorizedAccessException("所属公司已停用。");
-        var platformAdministrator = string.Equals(account.EffectiveRoleCode, "platform_admin", StringComparison.OrdinalIgnoreCase)
-            || string.Equals(account.EffectiveRoleCode, "developer", StringComparison.OrdinalIgnoreCase);
+        var platformAdministrator = account.HasRole("platform_admin") || account.HasRole("developer");
         var accessibleIds = new HashSet<Guid> { primaryCompanyId };
         if (platformAdministrator)
         {

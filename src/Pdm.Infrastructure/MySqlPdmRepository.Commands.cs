@@ -655,6 +655,7 @@ public sealed partial class MySqlPdmRepository
     public async Task CreateUserAsync(UserAccount user, CancellationToken cancellationToken)
     {
         await using var connection = await OpenAsync(cancellationToken);
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
         await connection.ExecuteAsync(new CommandDefinition(
             """
             INSERT INTO pdm_user(id,username,display_name,password_hash,role,assigned_role_code,company_id,cross_company_view,is_active,row_version,created_at)
@@ -673,17 +674,39 @@ public sealed partial class MySqlPdmRepository
                 user.IsActive,
                 CreatedAt = timeProvider.GetUtcNow().UtcDateTime
             },
+            transaction,
             cancellationToken: cancellationToken));
+        await connection.ExecuteAsync(new CommandDefinition(
+            "INSERT INTO pdm_user_role(user_id,role_code,is_primary,created_at) VALUES(@UserId,@RoleCode,@IsPrimary,@CreatedAt)",
+            user.EffectiveRoleCodes.Select((roleCode, index) => new
+            {
+                UserId = user.Id,
+                RoleCode = roleCode,
+                IsPrimary = index == 0,
+                CreatedAt = timeProvider.GetUtcNow().UtcDateTime
+            }), transaction, cancellationToken: cancellationToken));
+        await transaction.CommitAsync(cancellationToken);
     }
 
-    public async Task<UserAccount> UpdateUserAsync(string username, string displayName, UserRole role, string roleCode, bool isActive, CancellationToken cancellationToken)
+    public async Task<UserAccount> UpdateUserAsync(string username, string displayName, UserRole role, string roleCode, IReadOnlyList<string> roleCodes, bool isActive, CancellationToken cancellationToken)
     {
         await using var connection = await OpenAsync(cancellationToken);
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
         var affected = await connection.ExecuteAsync(new CommandDefinition(
             "UPDATE pdm_user SET display_name=@DisplayName,role=@Role,assigned_role_code=@RoleCode,is_active=@IsActive,token_version=token_version+1,row_version=row_version+1 WHERE username=@Username",
             new { Username = username, DisplayName = displayName, Role = role.ToString(), RoleCode = roleCode, IsActive = isActive },
+            transaction,
             cancellationToken: cancellationToken));
         if (affected != 1) throw new PdmNotFoundException("用户不存在。");
+        var userId = await connection.ExecuteScalarAsync<Guid>(new CommandDefinition(
+            "SELECT id FROM pdm_user WHERE username=@Username", new { Username = username }, transaction, cancellationToken: cancellationToken));
+        await connection.ExecuteAsync(new CommandDefinition("DELETE FROM pdm_user_role WHERE user_id=@UserId", new { UserId = userId }, transaction, cancellationToken: cancellationToken));
+        var normalizedRoles = roleCodes.Prepend(roleCode).Where(code => !string.IsNullOrWhiteSpace(code)).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+        await connection.ExecuteAsync(new CommandDefinition(
+            "INSERT INTO pdm_user_role(user_id,role_code,is_primary,created_at) VALUES(@UserId,@RoleCode,@IsPrimary,@CreatedAt)",
+            normalizedRoles.Select((code, index) => new { UserId = userId, RoleCode = code, IsPrimary = index == 0, CreatedAt = timeProvider.GetUtcNow().UtcDateTime }),
+            transaction, cancellationToken: cancellationToken));
+        await transaction.CommitAsync(cancellationToken);
         return await FindUserAsync(username, cancellationToken) ?? throw new PdmNotFoundException("用户不存在。");
     }
 

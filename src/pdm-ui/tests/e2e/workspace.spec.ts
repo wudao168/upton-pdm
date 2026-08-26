@@ -177,7 +177,7 @@ test('engineer logs in and reads the API-backed PLM workspace', async ({ page },
   await expect(page.getByText('项目文件夹', { exact: true })).toBeVisible()
   await expect(page.getByText('机械图纸', { exact: true })).toBeVisible()
   await page.getByText('PRJ-REAL-001-0', { exact: true }).first().click()
-  const fileDetails = page.getByRole('table', { name: '文件明细' })
+  const fileDetails = page.getByRole('table', { name: '受控图档' })
   await expect(fileDetails).toBeVisible()
   await expect(fileDetails.getByRole('columnheader')).toHaveCount(7)
   const fileDetailWidths = await fileDetails.evaluate(table => {

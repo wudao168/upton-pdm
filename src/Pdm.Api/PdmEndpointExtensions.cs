@@ -50,7 +50,8 @@ public static class PdmEndpointExtensions
                 company.ActiveCompanyId,
                 company.ActiveCompanyName,
                 company.CrossCompanyView,
-                company.AccessibleCompanies));
+                company.AccessibleCompanies,
+                account.EffectiveRoleCodes));
         }).AllowAnonymous();
 
         app.MapPost("/api/auth/resume", async (
@@ -83,7 +84,8 @@ public static class PdmEndpointExtensions
                 company.ActiveCompanyId,
                 company.ActiveCompanyName,
                 company.CrossCompanyView,
-                company.AccessibleCompanies));
+                company.AccessibleCompanies,
+                account.EffectiveRoleCodes));
         }).AllowAnonymous();
 
         app.MapPost("/api/auth/password-reset-request", async (
@@ -161,7 +163,8 @@ public static class PdmEndpointExtensions
                 company.ActiveCompanyId,
                 company.ActiveCompanyName,
                 company.CrossCompanyView,
-                company.AccessibleCompanies));
+                company.AccessibleCompanies,
+                updatedAccount.EffectiveRoleCodes));
         });
 
         api.MapGet("/password-reset-requests", async (HttpContext context, IPdmRepository repository, CancellationToken cancellationToken) =>
@@ -247,7 +250,7 @@ public static class PdmEndpointExtensions
             if (string.IsNullOrWhiteSpace(request.Password) || request.Password.Length < 8) throw new PdmRuleException("初始密码至少需要8位。");
             var (actor, role) = CurrentUser(context.User);
             var saved = await workflow.CreateManagedUserAsync(new(request.Username, request.DisplayName, passwords.Hash(request.Password), request.Role, request.IsActive,
-                request.CompanyId, request.CrossCompanyView, request.AccessibleCompanyIds), actor, role, cancellationToken);
+                request.CompanyId, request.CrossCompanyView, request.AccessibleCompanyIds, request.Roles), actor, role, cancellationToken);
             var scope = await repository.GetUserCompanyScopeAsync(saved.Username, cancellationToken);
             return Results.Created($"/api/users/{Uri.EscapeDataString(saved.Username)}", MapManagedUser(saved, scope));
         });
@@ -256,7 +259,7 @@ public static class PdmEndpointExtensions
         {
             var (actor, role) = CurrentUser(context.User);
             var saved = await workflow.UpdateManagedUserAsync(new(username, request.DisplayName, request.Role, request.IsActive,
-                request.CompanyId, request.CrossCompanyView, request.AccessibleCompanyIds), actor, role, cancellationToken);
+                request.CompanyId, request.CrossCompanyView, request.AccessibleCompanyIds, request.Roles), actor, role, cancellationToken);
             var scope = await repository.GetUserCompanyScopeAsync(saved.Username, cancellationToken);
             return Results.Ok(MapManagedUser(saved, scope));
         });
@@ -308,6 +311,7 @@ public static class PdmEndpointExtensions
                     user.Username,
                     user.DisplayName,
                     Role = user.EffectiveRoleCode,
+                    Roles = user.EffectiveRoleCodes,
                     user.IsActive,
                     user.CompanyId,
                     user.CrossCompanyView,
@@ -332,14 +336,14 @@ public static class PdmEndpointExtensions
         api.MapPost("/organization-units", async (SaveOrganizationUnitRequest request, HttpContext context, PdmWorkflowService workflow, CancellationToken cancellationToken) =>
         {
             var (actor, role) = CurrentUser(context.User);
-            var saved = await workflow.SaveOrganizationUnitAsync(new(null, request.OrganizationId, request.ParentUnitId, request.Code, request.Name, request.Kind, request.IsActive, request.SortOrder), actor, role, cancellationToken);
+            var saved = await workflow.SaveOrganizationUnitAsync(new(null, request.OrganizationId, request.ParentUnitId, request.Code, request.Name, request.Kind, request.IsActive, request.SortOrder, request.CanManufacture), actor, role, cancellationToken);
             return Results.Created($"/api/organization-units/{saved.Id}", saved);
         });
 
         api.MapPut("/organization-units/{unitId:guid}", async (Guid unitId, SaveOrganizationUnitRequest request, HttpContext context, PdmWorkflowService workflow, CancellationToken cancellationToken) =>
         {
             var (actor, role) = CurrentUser(context.User);
-            return Results.Ok(await workflow.SaveOrganizationUnitAsync(new(unitId, request.OrganizationId, request.ParentUnitId, request.Code, request.Name, request.Kind, request.IsActive, request.SortOrder), actor, role, cancellationToken));
+            return Results.Ok(await workflow.SaveOrganizationUnitAsync(new(unitId, request.OrganizationId, request.ParentUnitId, request.Code, request.Name, request.Kind, request.IsActive, request.SortOrder, request.CanManufacture), actor, role, cancellationToken));
         });
 
         api.MapPut("/organization-users/{username}/memberships", async (string username, UpdateOrganizationMembershipsRequest request, HttpContext context, PdmWorkflowService workflow, CancellationToken cancellationToken) =>
@@ -479,7 +483,7 @@ public static class PdmEndpointExtensions
         api.MapGet("/projects/{projectId:guid}", async (Guid projectId, HttpContext context, IPdmRepository repository, CancellationToken cancellationToken) =>
         {
             var (actor, role) = CurrentUser(context.User);
-            if (!await repository.HasProjectReadAccessAsync(projectId, actor, role, cancellationToken)) return Results.Forbid();
+            if (!await repository.HasUserPermissionAsync(actor, role, PermissionCodes.ProjectView, cancellationToken)) return Results.Forbid();
             var project = await repository.FindProjectAsync(projectId, cancellationToken);
             return project is null ? Results.NotFound() : Results.Ok(project with { CanReadContent = await repository.HasProjectContentReadAccessAsync(projectId, actor, role, cancellationToken) });
         });
@@ -493,13 +497,22 @@ public static class PdmEndpointExtensions
         api.MapPut("/projects/{projectId:guid}/staffing", async (Guid projectId, UpdateMainProjectStaffingRequest request, HttpContext context, PdmWorkflowService workflow, CancellationToken cancellationToken) =>
         {
             var (actor, role) = CurrentUser(context.User);
-            return Results.Ok(await workflow.SetMainProjectStaffingAsync(projectId, new(request.PrimaryProjectManager, request.CollaborativeProjectManagers, request.DesignLead), actor, role, cancellationToken));
+            var designLeads = request.DesignLeads is { Count: > 0 }
+                ? request.DesignLeads
+                : string.IsNullOrWhiteSpace(request.DesignLead) ? [] : [request.DesignLead];
+            return Results.Ok(await workflow.SetMainProjectStaffingAsync(projectId, new(request.PrimaryProjectManager, request.CollaborativeProjectManagers, designLeads), actor, role, cancellationToken));
         });
 
         api.MapPut("/projects/{projectId:guid}/designers", async (Guid projectId, UpdateChildProjectDesignersRequest request, HttpContext context, PdmWorkflowService workflow, CancellationToken cancellationToken) =>
         {
             var (actor, role) = CurrentUser(context.User);
             return Results.Ok(await workflow.SetChildProjectDesignersAsync(projectId, request.Designers, actor, role, cancellationToken));
+        });
+
+        api.MapPut("/projects/{projectId:guid}/manager", async (Guid projectId, UpdateChildProjectManagerRequest request, HttpContext context, PdmWorkflowService workflow, CancellationToken cancellationToken) =>
+        {
+            var (actor, role) = CurrentUser(context.User);
+            return Results.Ok(await workflow.SetChildProjectManagerAsync(projectId, request.ProjectManager, actor, role, cancellationToken));
         });
 
         api.MapGet("/projects/{projectId:guid}/documents", async (Guid projectId, HttpContext context, IPdmRepository repository, CancellationToken cancellationToken) =>
@@ -1082,12 +1095,11 @@ public static class PdmEndpointExtensions
                 : Results.Ok(await repository.ListProjectAuditAsync(projectId, take ?? 100, cancellationToken));
         });
 
-        api.MapPost("/uploads/sessions", async (StartUploadRequest request, HttpContext context, IPdmRepository repository, IFileStorage storage, CancellationToken cancellationToken) =>
+        api.MapPost("/uploads/sessions", async (StartUploadRequest request, HttpContext context, PdmWorkflowService workflow, IFileStorage storage, CancellationToken cancellationToken) =>
         {
             var (actor, role) = CurrentUser(context.User);
-            return !await repository.HasProjectContentReadAccessAsync(request.ProjectId, actor, role, cancellationToken)
-                ? Results.Forbid()
-                : Results.Ok(await storage.StartUploadAsync(request.ProjectId, request.FileName, request.TotalLength, request.Sha256, cancellationToken));
+            await workflow.RequireProjectSubmissionAccessAsync(request.ProjectId, actor, role, "上传存档文件", cancellationToken);
+            return Results.Ok(await storage.StartUploadAsync(request.ProjectId, request.FileName, request.TotalLength, request.Sha256, cancellationToken));
         });
 
         api.MapGet("/uploads/sessions/{sessionId:guid}", async (Guid sessionId, IFileStorage storage, CancellationToken cancellationToken) =>
@@ -1170,6 +1182,7 @@ public static class PdmEndpointExtensions
         user.Username,
         user.DisplayName,
         Role = user.EffectiveRoleCode,
+        Roles = user.EffectiveRoleCodes,
         user.IsActive,
         CompanyId = scope?.PrimaryCompanyId ?? user.CompanyId,
         CrossCompanyView = scope?.CrossCompanyView ?? user.CrossCompanyView,

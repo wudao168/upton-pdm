@@ -1,7 +1,8 @@
 <script setup lang="ts">
-import { Boxes, ContactRound, FileCheck2, FolderTree, PackageCheck, UsersRound } from '@lucide/vue'
-import { computed } from 'vue'
-import type { DocumentNode, DrawingReviewPackage, DrawingReviewTarget, MaterialCodeApplication, PdmUser, ProjectSummary, ReleasePackageSummary, ReleaseScope } from '../types'
+import { Boxes, ContactRound, FolderTree, PackageCheck, UsersRound } from '@lucide/vue'
+import { ElMessage } from 'element-plus'
+import { computed, reactive, ref } from 'vue'
+import type { DocumentNode, DrawingReviewPackage, DrawingReviewTarget, MainProjectStaffingInput, MaterialCodeApplication, OrganizationDirectory, PdmUser, ProjectSummary, ReleasePackageSummary, ReleaseScope } from '../types'
 
 const props = defineProps<{
   project: ProjectSummary
@@ -24,16 +25,119 @@ const props = defineProps<{
   materialApplications: MaterialCodeApplication[]
   releasePackages: ReleasePackageSummary[]
   releasePackage: ReleasePackageSummary | null
+  organizationDirectory: OrganizationDirectory
+  pending: boolean
+  onUpdateMainStaffing: (projectId: string, input: MainProjectStaffingInput) => Promise<ProjectSummary>
+  onUpdateDesigners: (projectId: string, designers: string[]) => Promise<ProjectSummary>
 }>()
 
 const emit = defineEmits<{ documents: []; bom: [] }>()
 
+const activeProject = computed(() => props.projects.find(item => item.id === props.project.id) ?? props.project)
 const rootProject = computed(() => {
-  if (!props.project.parentProjectId) return props.project
-  return props.projects.find(item => item.id === props.project.parentProjectId) ?? props.project
+  if (!activeProject.value.parentProjectId) return activeProject.value
+  return props.projects.find(item => item.id === activeProject.value.parentProjectId) ?? activeProject.value
 })
 
 const familyProjects = computed(() => props.projects.filter(item => item.id === rootProject.value.id || item.parentProjectId === rootProject.value.id))
+const staffingDialogOpen = ref(false)
+const designerDialogOpen = ref(false)
+const staffingForm = reactive<MainProjectStaffingInput>({ primaryProjectManager: '', collaborativeProjectManagers: [], designLeads: [] })
+const designerDraft = ref<string[]>([])
+
+function projectDesignLeads(project: ProjectSummary) {
+  return project.designLeads?.length ? project.designLeads : project.designLead ? [project.designLead] : []
+}
+
+function isUnitWithin(unitId: string, divisionId: string) {
+  let current = props.organizationDirectory.units.find(unit => unit.id === unitId)
+  while (current) {
+    if (current.id === divisionId) return true
+    current = current.parentUnitId ? props.organizationDirectory.units.find(unit => unit.id === current!.parentUnitId) : undefined
+  }
+  return false
+}
+
+function divisionOfUser(username: string) {
+  const memberships = props.organizationDirectory.memberships.filter(item => item.username === username).sort((left, right) => Number(right.isPrimary) - Number(left.isPrimary))
+  for (const membership of memberships) {
+    let current = props.organizationDirectory.units.find(unit => unit.id === membership.unitId)
+    while (current) {
+      if (current.kind === 'BusinessDivision') return current
+      current = current.parentUnitId ? props.organizationDirectory.units.find(unit => unit.id === current!.parentUnitId) : undefined
+    }
+  }
+}
+
+function usersInExecutionUnit(role: string) {
+  const executionUnitId = rootProject.value.executionUnitId
+  if (!executionUnitId) return []
+  const usernames = new Set(props.organizationDirectory.memberships.filter(item => isUnitWithin(item.unitId, executionUnitId)).map(item => item.username))
+  return props.organizationDirectory.users
+    .filter(user => user.isActive && usernames.has(user.username) && [user.role, ...(user.roles ?? [])].includes(role))
+    .sort((left, right) => left.displayName.localeCompare(right.displayName, 'zh-CN'))
+}
+
+const projectManagerCandidates = computed(() => usersInExecutionUnit('ProjectManager'))
+const designLeadCandidates = computed(() => usersInExecutionUnit('Engineer'))
+const designerCandidates = computed(() => {
+  const organizationId = props.project.organizationId ?? rootProject.value.organizationId
+  if (!organizationId) return []
+  const ownDivisionId = divisionOfUser(props.currentUsername ?? '')?.id
+  const companyUnitIds = new Set(props.organizationDirectory.units.filter(unit => unit.organizationId === organizationId && unit.isActive).map(unit => unit.id))
+  const usernames = new Set(props.organizationDirectory.memberships.filter(item => companyUnitIds.has(item.unitId)).map(item => item.username))
+  const technicalRoles = new Set(['Engineer', 'ElectricalEngineer', 'CommissioningEngineer', 'HardwareEngineer', 'MechanicalManager', 'TechnicalAssistant', 'ProcessReviewer', 'Approver'])
+  const isTechnicalUser = (user: PdmUser) => {
+    const roles = [user.role, ...(user.roles ?? [])]
+    if (!roles.some(role => technicalRoles.has(role))) return false
+    return props.organizationDirectory.memberships.filter(item => item.username === user.username).some(item => {
+      const unit = props.organizationDirectory.units.find(candidate => candidate.id === item.unitId)
+      const name = unit?.name ?? ''
+      return /机械|电气|硬件|标准化|技术|设计|研发/.test(name) || unit?.kind === 'BusinessDivision' && !/采购|供应链|生产|装配|机加|财务|行政|人事部|销售|计划|质量|仓储|物流/.test(name)
+    })
+  }
+  return props.organizationDirectory.users
+    .filter(user => user.isActive && usernames.has(user.username) && isTechnicalUser(user))
+    .map(user => {
+      const division = divisionOfUser(user.username)
+      return { ...user, divisionName: division?.name ?? '未归属事业部', ownDivision: division?.id === ownDivisionId }
+    })
+    .sort((left, right) => Number(right.ownDivision) - Number(left.ownDivision) || left.divisionName.localeCompare(right.divisionName, 'zh-CN') || left.displayName.localeCompare(right.displayName, 'zh-CN'))
+})
+const hasCrossDivisionSelection = computed(() => designerCandidates.value.some(user => designerDraft.value.includes(user.username) && !user.ownDivision))
+
+function openStaffingDialog() {
+  staffingForm.primaryProjectManager = rootProject.value.primaryProjectManager ?? ''
+  staffingForm.collaborativeProjectManagers = [...rootProject.value.collaborativeProjectManagers]
+  staffingForm.designLeads = [...projectDesignLeads(rootProject.value)]
+  staffingDialogOpen.value = true
+}
+
+function openDesignerDialog() {
+  designerDraft.value = [...activeProject.value.designers]
+  designerDialogOpen.value = true
+}
+
+async function saveMainStaffing() {
+  if (!staffingForm.primaryProjectManager || !staffingForm.designLeads.length) return ElMessage.warning('请选择一名项目经理和至少一名主设')
+  try {
+    await props.onUpdateMainStaffing(rootProject.value.id, {
+      primaryProjectManager: staffingForm.primaryProjectManager,
+      collaborativeProjectManagers: [...staffingForm.collaborativeProjectManagers],
+      designLeads: [...staffingForm.designLeads],
+    })
+    staffingDialogOpen.value = false
+    ElMessage.success('主项目分工已保存')
+  } catch (error) { ElMessage.error(error instanceof Error ? error.message : '主项目分工保存失败') }
+}
+
+async function saveDesigners() {
+  try {
+    await props.onUpdateDesigners(activeProject.value.id, [...designerDraft.value])
+    designerDialogOpen.value = false
+    ElMessage.success(designerDraft.value.length ? '子项目工程师已保存' : '子项目工程师已清空')
+  } catch (error) { ElMessage.error(error instanceof Error ? error.message : '子项目工程师保存失败') }
+}
 
 function assignedPeople(usernames: Array<string | undefined>) {
   const uniqueUsernames = [...new Set(usernames.map(item => item?.trim()).filter((item): item is string => Boolean(item)))]
@@ -44,10 +148,10 @@ function assignedPeople(usernames: Array<string | undefined>) {
 }
 
 const staffingRows = computed(() => [
-  { key: 'manager', stage: '项目管理', role: '项目经理', people: assignedPeople([rootProject.value.primaryProjectManager]) },
+  { key: 'manager', stage: '项目管理', role: activeProject.value.parentProjectId ? '子项目负责人' : '项目经理', people: assignedPeople([activeProject.value.primaryProjectManager ?? rootProject.value.primaryProjectManager]) },
   { key: 'collaborative-managers', stage: '项目管理', role: '协同项目经理', people: assignedPeople(rootProject.value.collaborativeProjectManagers) },
-  { key: 'design-lead', stage: '设计阶段', role: '主设', people: assignedPeople([rootProject.value.designLead]) },
-  { key: 'engineers', stage: '设计执行', role: '工程师', people: assignedPeople(familyProjects.value.flatMap(item => item.designers)) },
+  { key: 'design-lead', stage: '设计阶段', role: '主设', people: assignedPeople(projectDesignLeads(rootProject.value)) },
+  { key: 'engineers', stage: '设计执行', role: activeProject.value.parentProjectId ? '本子项目工程师' : '工程师', people: assignedPeople(activeProject.value.parentProjectId ? activeProject.value.designers : familyProjects.value.flatMap(item => item.designers)) },
   { key: 'downstream', stage: '后续阶段', role: '各部门负责人', people: [] },
 ])
 
@@ -149,25 +253,15 @@ const materialApplicationSummary = computed(() => {
       </article>
 
       <div class="pdm-workbench-primary">
-        <article class="pdm-panel pdm-workbench-detail">
-          <header class="pdm-panel-heading"><h2>当前工作图档</h2><button type="button" class="pdm-text-action" @click="emit('documents')">查看结构</button></header>
-          <div v-if="hasDocuments" class="pdm-current-document">
-            <span><FileCheck2 :size="22" /></span>
-            <div><strong>{{ selected.drawingNumber }} · {{ selected.name }}</strong><small>{{ selected.fileName }}</small></div>
-            <dl>
-              <div><dt>工作版本</dt><dd>{{ selected.version }}</dd></div>
-              <div><dt>状态</dt><dd>{{ !selected.checkedOutBy ? '正常' : selected.checkedOutBy.toLocaleLowerCase('zh-CN') === (currentUsername || '').toLocaleLowerCase('zh-CN') ? '可编辑' : `${selected.checkedOutBy}编辑中` }}</dd></div>
-              <div><dt>配置</dt><dd>{{ selected.configuration }}</dd></div>
-            </dl>
-          </div>
-          <div v-else class="pdm-project-link-guide">
-            <FolderTree :size="34" />
-            <div><strong>项目尚未关联图纸</strong><p>请在SolidWorks端刷新项目列表，选择“{{ project.code }} · {{ project.name }}”，再提交图纸存档。</p></div>
-          </div>
-        </article>
-
         <article class="pdm-panel pdm-workbench-detail pdm-project-people" aria-label="人员组织结构">
-          <header class="pdm-panel-heading"><h2>人员组织结构</h2><small>按项目阶段展示当前负责人</small></header>
+          <header class="pdm-panel-heading">
+            <h2>人员组织结构</h2>
+            <small>按项目阶段展示当前负责人</small>
+            <span class="pdm-project-people__actions">
+              <button v-if="rootProject.canManageMainStaffing" type="button" class="pdm-text-action" @click="openStaffingDialog">配置主项目分工</button>
+              <button v-if="activeProject.parentProjectId && activeProject.canAssignDesigners" type="button" class="pdm-text-action" @click="openDesignerDialog">配置本子项目工程师</button>
+            </span>
+          </header>
           <div class="pdm-project-people__layout">
             <section class="pdm-project-people__section" aria-label="项目阶段负责人">
               <header><span><UsersRound :size="17" /></span><div><strong>项目阶段负责人</strong><small>{{ rootProject.executionUnitName || '执行事业部待分配' }}</small></div></header>
@@ -175,9 +269,9 @@ const materialApplicationSummary = computed(() => {
                 <div v-for="row in staffingRows" :key="row.key" class="pdm-project-staffing-row">
                   <span><small>{{ row.stage }}</small><strong>{{ row.role }}</strong></span>
                   <div v-if="row.people.length" class="pdm-project-person-list">
-                    <span v-for="person in row.people" :key="person.username" :title="person.username">{{ person.name }}</span>
+                    <span v-for="person in row.people" :key="person.username" :title="person.name">{{ person.name }}</span>
                   </div>
-                  <em v-else>待配置</em>
+                  <em v-else>无</em>
                 </div>
               </div>
             </section>
@@ -201,5 +295,21 @@ const materialApplicationSummary = computed(() => {
         </dl>
       </article>
     </div>
+
+    <el-dialog v-model="staffingDialogOpen" :title="`配置主项目分工 · ${rootProject.code}`" width="500px" append-to-body>
+      <div class="pdm-project-staffing-form">
+        <label class="pdm-dialog-field">项目经理（限1名）<el-select v-model="staffingForm.primaryProjectManager" class="pdm-project-person-select" filterable placeholder="输入姓名筛选" style="width:100%"><el-option v-for="user in projectManagerCandidates" :key="user.username" :label="user.displayName" :value="user.username" /></el-select></label>
+        <label class="pdm-dialog-field">协同项目经理（可多选）<el-select v-model="staffingForm.collaborativeProjectManagers" class="pdm-project-person-select" multiple filterable placeholder="输入姓名筛选" style="width:100%"><el-option v-for="user in projectManagerCandidates.filter(item => item.username !== staffingForm.primaryProjectManager)" :key="user.username" :label="user.displayName" :value="user.username" /></el-select></label>
+        <label class="pdm-dialog-field">主设（可多选）<el-select v-model="staffingForm.designLeads" class="pdm-project-person-select" multiple filterable placeholder="输入姓名筛选" style="width:100%"><el-option v-for="user in designLeadCandidates" :key="user.username" :label="user.displayName" :value="user.username" /></el-select></label>
+      </div>
+      <template #footer><el-button @click="staffingDialogOpen=false">取消</el-button><el-button type="primary" :loading="pending" @click="saveMainStaffing">保存分工</el-button></template>
+    </el-dialog>
+
+    <el-dialog v-model="designerDialogOpen" :title="`配置子项目工程师 · ${project.code}`" width="500px" append-to-body>
+      <label class="pdm-dialog-field">工程师（可多选）<el-select v-model="designerDraft" class="pdm-project-person-select" multiple filterable placeholder="输入姓名筛选" style="width:100%"><el-option-group label="本事业部（优先）"><el-option v-for="user in designerCandidates.filter(item => item.ownDivision)" :key="user.username" :label="user.displayName" :value="user.username" /></el-option-group><el-option-group label="其他事业部"><el-option v-for="user in designerCandidates.filter(item => !item.ownDivision)" :key="user.username" :label="`${user.displayName} · ${user.divisionName}`" :value="user.username" /></el-option-group></el-select></label>
+      <p v-if="hasCrossDivisionSelection" class="pdm-dialog-note is-warning">已选择其他事业部人员，请确认跨事业部协作安排。</p>
+      <p class="pdm-dialog-note">工程师可保持为空；由具备“分配子项目工程师”权限且与项目有关联的人员配置。</p>
+      <template #footer><el-button @click="designerDialogOpen=false">取消</el-button><el-button type="primary" :loading="pending" @click="saveDesigners">保存工程师</el-button></template>
+    </el-dialog>
   </section>
 </template>

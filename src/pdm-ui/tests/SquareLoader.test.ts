@@ -13,6 +13,14 @@ describe('SquareLoader', () => {
     expect(wrapper.get('.plm-cube-icon').classes()).toContain('is-axial')
     expect(wrapper.findAll('.plm-cube-icon__face')).toHaveLength(6)
     expect(wrapper.findAll('.plm-cube-icon__tile')).toHaveLength(24)
+    expect(new Set(wrapper.findAll('.plm-cube-icon__tile').map(tile => (tile.element as HTMLElement).style.background))).toEqual(new Set([
+      'rgb(228, 60, 47)',
+      'rgb(255, 163, 26)',
+      'rgb(255, 214, 0)',
+      'rgb(35, 148, 67)',
+      'rgb(46, 124, 238)',
+      'rgb(149, 130, 255)',
+    ]))
     wrapper.findAll('.plm-cube-icon__face').forEach((face) => {
       const tileStyles = face.findAll('.plm-cube-icon__tile').map(tile => tile.attributes('style'))
       expect(new Set(tileStyles).size).toBe(4)

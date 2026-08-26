@@ -3822,6 +3822,10 @@ public sealed class PdmAddin : ISwAddin
             ShowError("请先选择当前项目。");
             return;
         }
+        if (!EnsureProjectArchiveAccess(currentProjectId.Value, "获取编辑权限"))
+        {
+            return;
+        }
 
         IReadOnlyDictionary<string, RegistrationDecision> registrationDecisions = null;
         var acquireItems = requestedNodes.Select(candidate => new BatchOperationItem(candidate, 0)).ToArray();
@@ -3931,7 +3935,7 @@ public sealed class PdmAddin : ISwAddin
 
     private void OnBatchOperationRequested(object sender, EventArgs eventArgs)
     {
-        OpenBatchOperationDialog(null, BatchOperationKind.AcquireLatestAndCheckout);
+        OpenBatchOperationDialog(null, BatchOperationKind.CheckIn);
     }
 
     private async void OnBatchPropertyEditRequested(object sender, CadTreeNodeEventArgs eventArgs)
@@ -4536,6 +4540,18 @@ public sealed class PdmAddin : ISwAddin
                 return;
             }
 
+            if (dialog.Operation == BatchOperationKind.CheckIn
+                && IsSolidWorksTemporaryVirtualComponentPath(currentTree.FullPath))
+            {
+                LogOperation(string.Concat(
+                    "Batch check-in blocked temporary virtual component root path=",
+                    currentTree.FullPath));
+                ShowError(
+                    "当前活动装配体是SolidWorks临时虚拟组件，不能作为项目根执行整体存档。\r\n"
+                    + "请切换到实际顶层主装配，刷新设计树后再执行整体提交。");
+                return;
+            }
+
             var selectedProjectId = dialog.SelectedProjectId.Value;
             var selectedProjectDisplay = dialog.SelectedProjectDisplay;
             IReadOnlyDictionary<string, RegistrationDecision> registrationDecisions;
@@ -4847,6 +4863,13 @@ public sealed class PdmAddin : ISwAddin
                 foreach (var item in items)
                 {
                     var node = item.Node;
+                    if (!node.DocumentId.HasValue)
+                    {
+                        throw new InvalidOperationException(string.Concat(
+                            node.FileName,
+                            "登记后未取得PLM图档标识，整套获取已停止。请刷新设计树后重试。"));
+                    }
+
                     var wasAlreadyCheckedOut = IsCheckedOutByCurrentUser(node);
                     if (wasAlreadyCheckedOut)
                     {
@@ -4969,6 +4992,26 @@ public sealed class PdmAddin : ISwAddin
         }
     }
 
+    private bool EnsureProjectArchiveAccess(Guid projectId, string action)
+    {
+        var project = availableProjects.FirstOrDefault(item => item.Id == projectId);
+        if (project == null)
+        {
+            ShowError("当前归属项目已不可用，请刷新项目列表后重试。");
+            return false;
+        }
+        if (project.CanSubmitArchive)
+        {
+            return true;
+        }
+
+        var target = project.ParentProjectId.HasValue
+            ? string.Concat("子项目“", project.Code, "”")
+            : "主项目图档";
+        ShowError(string.Concat("当前账号对", target, "无存档权限，不能", action, "。只能浏览本人未负责的项目。"));
+        return false;
+    }
+
     private async Task<IReadOnlyDictionary<string, Guid>> ResolveInheritedDrawingProjectsAsync(
         IReadOnlyList<BatchOperationItem> items,
         Guid? projectId)
@@ -5042,7 +5085,7 @@ public sealed class PdmAddin : ISwAddin
             CandidateKey = node.NodeId.ToString("N"),
             FileName = node.FileName,
             Kind = (int)node.Kind,
-            SourceSha256 = ComputeFileHash(node.FullPath)
+            SourceSha256 = ComputeRegistrationFileHash(node)
         }).ToArray(), lifetime.Token);
         var matches = await apiClient.PreflightDocumentRegistrationAsync(projectId, candidates, lifetime.Token);
         var nodesByKey = nodes.ToDictionary(node => node.NodeId.ToString("N"), StringComparer.OrdinalIgnoreCase);
@@ -5160,7 +5203,43 @@ public sealed class PdmAddin : ISwAddin
             && !string.IsNullOrWhiteSpace(node?.FullPath)
             && decisions.TryGetValue(node.FullPath, out var decision))
             return decision;
-        return new RegistrationDecision(ComputeFileHash(node.FullPath), false, null);
+        return new RegistrationDecision(ComputeRegistrationFileHash(node), false, null);
+    }
+
+    private static string ComputeRegistrationFileHash(CadTreeNode node)
+    {
+        if (node == null || string.IsNullOrWhiteSpace(node.FullPath) || !File.Exists(node.FullPath))
+        {
+            throw new InvalidOperationException(string.Concat(
+                "引用文件",
+                node?.FileName ?? "未知图档",
+                "的本地路径不存在：",
+                node?.FullPath ?? "未提供路径",
+                "。请在SolidWorks中将引用更新到实际工作文件并保存装配体，然后刷新设计树后重试。"));
+        }
+
+        try
+        {
+            return ComputeFileHash(node.FullPath);
+        }
+        catch (DirectoryNotFoundException)
+        {
+            throw new InvalidOperationException(string.Concat(
+                "引用文件",
+                node.FileName,
+                "的本地路径已失效：",
+                node.FullPath,
+                "。请在SolidWorks中更新引用并保存装配体，然后刷新设计树后重试。"));
+        }
+        catch (FileNotFoundException)
+        {
+            throw new InvalidOperationException(string.Concat(
+                "引用文件",
+                node.FileName,
+                "在首次存档检查期间已不可用：",
+                node.FullPath,
+                "。请确认文件位置后刷新设计树并重试。"));
+        }
     }
 
     private void RememberExplicitProjectPaths(IEnumerable<BatchOperationItem> items, Guid projectId)
@@ -6138,6 +6217,11 @@ public sealed class PdmAddin : ISwAddin
             return;
         }
 
+        if (currentProjectId.HasValue && !EnsureProjectArchiveAccess(currentProjectId.Value, "提交存档"))
+        {
+            return;
+        }
+
         var pendingRenames = currentTree == null
             ? Array.Empty<CadTreeNode>()
             : EnumerateCadNodes(currentTree)
@@ -6703,6 +6787,36 @@ public sealed class PdmAddin : ISwAddin
         catch
         {
             return string.Equals(left, right, StringComparison.OrdinalIgnoreCase);
+        }
+    }
+
+    private static bool IsSolidWorksTemporaryVirtualComponentPath(string path)
+    {
+        if (string.IsNullOrWhiteSpace(path))
+        {
+            return false;
+        }
+
+        try
+        {
+            var tempRoot = Path.GetFullPath(Path.GetTempPath())
+                .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
+                + Path.DirectorySeparatorChar;
+            var fullPath = Path.GetFullPath(path);
+            if (!fullPath.StartsWith(tempRoot, StringComparison.OrdinalIgnoreCase))
+            {
+                return false;
+            }
+
+            var relativeSegments = fullPath.Substring(tempRoot.Length)
+                .Split(new[] { Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar }, StringSplitOptions.RemoveEmptyEntries);
+            return relativeSegments.Length >= 3
+                && relativeSegments[0].StartsWith("swx", StringComparison.OrdinalIgnoreCase)
+                && relativeSegments.Any(segment => string.Equals(segment, "VC~~", StringComparison.OrdinalIgnoreCase));
+        }
+        catch
+        {
+            return false;
         }
     }
 
@@ -7684,12 +7798,13 @@ public sealed class PdmAddin : ISwAddin
     private void ApplyRegisteredDocumentToMatchingInstances(CadTreeNode source, DocumentDto document)
     {
         if (source == null || document == null) return;
-        var matchingNodes = currentTree == null
-            ? new[] { source }
-            : EnumerateCadNodes(currentTree)
-                .Where(candidate => PathsEqual(candidate.FullPath, source.FullPath))
-                .ToArray();
-        if (matchingNodes.Length == 0) matchingNodes = new[] { source };
+        var matchingNodes = (currentTree == null
+                ? Array.Empty<CadTreeNode>()
+                : EnumerateCadNodes(currentTree)
+                    .Where(candidate => PathsEqual(candidate.FullPath, source.FullPath)))
+            .Concat(new[] { source })
+            .Distinct()
+            .ToArray();
 
         foreach (var node in matchingNodes)
         {
@@ -8628,7 +8743,21 @@ public sealed class PdmAddin : ISwAddin
     {
         var directory = Path.Combine(System.Environment.GetFolderPath(System.Environment.SpecialFolder.LocalApplicationData), "UPTON PDM");
         Directory.CreateDirectory(directory);
-        var iconPath = Path.Combine(directory, "plm-taskpane-v3.bmp");
+        byte[] iconBytes;
+        using (var stream = typeof(PdmAddin).Assembly.GetManifestResourceStream("Upton.Pdm.SolidWorks.Assets.PdmClient.png"))
+        using (var buffer = new MemoryStream())
+        {
+            stream?.CopyTo(buffer);
+            iconBytes = buffer.ToArray();
+        }
+
+        string iconVersion;
+        using (var hash = SHA256.Create())
+        {
+            iconVersion = BitConverter.ToString(hash.ComputeHash(iconBytes)).Replace("-", string.Empty).Substring(0, 12);
+        }
+
+        var iconPath = Path.Combine(directory, string.Concat("plm-taskpane-", iconVersion, ".bmp"));
         if (File.Exists(iconPath))
         {
             return iconPath;
@@ -8636,11 +8765,11 @@ public sealed class PdmAddin : ISwAddin
 
         using (var bitmap = new Bitmap(20, 20))
         using (var graphics = Graphics.FromImage(bitmap))
-        using (var stream = typeof(PdmAddin).Assembly.GetManifestResourceStream("Upton.Pdm.SolidWorks.Assets.PdmClient.png"))
         {
             graphics.Clear(Color.White);
-            if (stream != null)
+            if (iconBytes.Length > 0)
             {
+                using (var stream = new MemoryStream(iconBytes))
                 using (var image = Image.FromStream(stream))
                 {
                     graphics.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.HighQualityBicubic;

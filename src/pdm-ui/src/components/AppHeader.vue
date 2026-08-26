@@ -41,16 +41,35 @@ const profileForm = reactive({ nickname: '', gender: 'unspecified' as PdmUserPro
 const passwordForm = reactive({ currentPassword: '', password: '', confirmPassword: '' })
 let headerClockTimer: number | undefined
 
-const roleName = computed(() => ({
+const roleNames: Record<string, string> = {
+  Engineer: '机械工程师',
+  ElectricalEngineer: '电气工程师',
+  CommissioningEngineer: '调试工程师',
+  HardwareEngineer: '硬件工程师',
+  MechanicalManager: '机械经理',
+  TechnicalAssistant: '技术助理',
+  BusinessUnitManager: '事业部经理',
+  ProcessReviewer: '标准化工程师',
+  ProjectManager: '项目经理',
+  SupplyChain: '供应链',
+  ProcurementSpecialist: '采购专员',
+  ProcurementManager: '采购经理',
+  ProductionManager: '生产经理',
+  ProductionAssistant: '生产助理',
+  MachiningSupervisor: '机加主管',
+  MachiningOperator: '机加人员',
+  AssemblySupervisor: '装配主管',
+  AssemblyFitter: '装配钳工',
+  ElectricalSupervisor: '电工主管',
+  AssemblyElectrician: '装配电工',
+  PlanningManager: '计划管理',
+  ProductionViewer: '生产物料员',
+  Approver: '标准化主管',
   Administrator: '系统管理员',
   platform_admin: '平台管理员',
   developer: '开发者',
-  BusinessUnitManager: '事业部经理',
-  Engineer: '工程师',
-  Reviewer: '审核人',
-  Approver: '批准人',
-  Production: '生产人员',
-}[props.role] || props.role || '未分配角色'))
+}
+const roleName = computed(() => roleNames[props.role] || (props.role ? '自定义角色' : '未分配角色'))
 
 const headerDateTime = computed(() => {
   const value = headerNow.value

@@ -89,6 +89,11 @@ public sealed partial class MySqlPdmRepository
         var templatePermissionRows = (await connection.QueryAsync<TemplatePermissionRow>(new CommandDefinition(
             "SELECT id,folder_key,principal_type,principal_key,access_mask FROM folder_template_permission",
             cancellationToken: cancellationToken))).ToArray();
+        var roleCodes = string.Equals(TenantContext.Current?.Username, actor, StringComparison.OrdinalIgnoreCase)
+            ? TenantContext.Current!.EffectiveRoleCodes
+            : (await connection.QueryAsync<string>(new CommandDefinition(
+                "SELECT assignment.role_code FROM pdm_user user_account INNER JOIN pdm_user_role assignment ON assignment.user_id=user_account.id WHERE user_account.username=@Actor ORDER BY assignment.is_primary DESC,assignment.created_at,assignment.role_code",
+                new { Actor = actor }, cancellationToken: cancellationToken))).DefaultIfEmpty(role.ToString()).ToArray();
         var byId = rows.ToDictionary(item => item.Id);
         var result = new List<ProjectFolder>(rows.Length);
         foreach (var row in rows)
@@ -96,7 +101,7 @@ public sealed partial class MySqlPdmRepository
             var explicitRules = permissionRows.Where(item => item.FolderId == row.Id).Select(MapRule).ToArray();
             var canSeeTarget = row.TargetProjectId is null || await HasProjectReadAccessAsync(row.TargetProjectId.Value, actor, role, cancellationToken);
             var access = canSeeTarget
-                ? ResolveAccess(row, byId, permissionRows, templatePermissionRows, actor, role)
+                ? ResolveAccess(row, byId, permissionRows, templatePermissionRows, actor, roleCodes, role)
                 : FolderAccess.None;
             result.Add(MapFolder(row) with { EffectiveAccess = access, Permissions = explicitRules });
         }
@@ -154,6 +159,69 @@ public sealed partial class MySqlPdmRepository
         return await ListProjectFoldersAsync(projectId, actor, role, cancellationToken);
     }
 
+    public async Task<ProjectFolder> CreateProjectFolderAsync(Guid projectId, Guid parentFolderId, string name, CancellationToken cancellationToken)
+    {
+        await using var connection = await OpenAsync(cancellationToken);
+        var parent = await connection.QuerySingleOrDefaultAsync<ProjectFolderRow>(new CommandDefinition(
+            "SELECT f.id,f.root_project_id,f.parent_folder_id,f.target_project_id,f.folder_key,f.template_key,f.name,f.purpose,f.sort_order,f.is_system,f.inherit_permissions FROM project_folder f INNER JOIN project p ON p.id=@ProjectId WHERE f.id=@ParentFolderId AND f.root_project_id=COALESCE(p.root_project_id,p.id) AND f.purpose='Standard'",
+            new { ProjectId = projectId, ParentFolderId = parentFolderId }, cancellationToken: cancellationToken)) ?? throw new PdmNotFoundException("目标业务目录不存在。");
+        var duplicate = await connection.ExecuteScalarAsync<int>(new CommandDefinition("SELECT EXISTS(SELECT 1 FROM project_folder WHERE parent_folder_id=@ParentFolderId AND LOWER(name)=LOWER(@Name))", new { ParentFolderId = parentFolderId, Name = name }, cancellationToken: cancellationToken));
+        if (duplicate == 1) throw new PdmConflictException("该目录下已存在同名文件夹。");
+        var id = Guid.NewGuid();
+        var sortOrder = await connection.ExecuteScalarAsync<int>(new CommandDefinition("SELECT COALESCE(MAX(sort_order),0)+10 FROM project_folder WHERE parent_folder_id=@ParentFolderId", new { ParentFolderId = parentFolderId }, cancellationToken: cancellationToken));
+        await connection.ExecuteAsync(new CommandDefinition(
+            "INSERT INTO project_folder(id,root_project_id,parent_folder_id,target_project_id,folder_key,template_key,name,purpose,sort_order,is_system,inherit_permissions,created_at,updated_at) VALUES(@Id,@RootProjectId,@ParentFolderId,NULL,@FolderKey,'custom',@Name,'Standard',@SortOrder,0,1,@Now,@Now)",
+            new { Id = id, parent.RootProjectId, ParentFolderId = parentFolderId, FolderKey = $"custom:{id:N}", Name = name, SortOrder = sortOrder, Now = timeProvider.GetUtcNow().UtcDateTime }, cancellationToken: cancellationToken));
+        return new(id, parent.RootProjectId, parentFolderId, null, $"custom:{id:N}", "custom", name, ProjectFolderPurpose.Standard, sortOrder, false, true);
+    }
+
+    public async Task<ProjectFolder> RenameProjectFolderAsync(Guid projectId, Guid folderId, string name, CancellationToken cancellationToken)
+    {
+        await using var connection = await OpenAsync(cancellationToken);
+        try
+        {
+            var affected = await connection.ExecuteAsync(new CommandDefinition(
+                "UPDATE project_folder f INNER JOIN project p ON p.id=@ProjectId SET f.name=@Name,f.updated_at=@Now WHERE f.id=@FolderId AND f.root_project_id=COALESCE(p.root_project_id,p.id) AND f.is_system=0 AND f.purpose='Standard'",
+                new { ProjectId = projectId, FolderId = folderId, Name = name, Now = timeProvider.GetUtcNow().UtcDateTime }, cancellationToken: cancellationToken));
+            if (affected == 0) throw new PdmNotFoundException("自定义文件夹不存在。");
+        }
+        catch (MySqlConnector.MySqlException exception) when (exception.Number == 1062) { throw new PdmConflictException("该目录下已存在同名文件夹。"); }
+        return await FindProjectFolderAsync(connection, folderId, cancellationToken);
+    }
+
+    public async Task<ProjectFolder> MoveProjectFolderAsync(Guid projectId, Guid folderId, Guid parentFolderId, CancellationToken cancellationToken)
+    {
+        await using var connection = await OpenAsync(cancellationToken);
+        var rows = (await connection.QueryAsync<ProjectFolderRow>(new CommandDefinition(
+            "SELECT f.id,f.root_project_id,f.parent_folder_id,f.target_project_id,f.folder_key,f.template_key,f.name,f.purpose,f.sort_order,f.is_system,f.inherit_permissions FROM project_folder f INNER JOIN project p ON p.id=@ProjectId WHERE f.root_project_id=COALESCE(p.root_project_id,p.id)",
+            new { ProjectId = projectId }, cancellationToken: cancellationToken))).ToArray();
+        var folder = rows.SingleOrDefault(item => item.Id == folderId && !item.IsSystem && item.Purpose == ProjectFolderPurpose.Standard) ?? throw new PdmNotFoundException("自定义文件夹不存在。");
+        var parent = rows.SingleOrDefault(item => item.Id == parentFolderId && item.Purpose == ProjectFolderPurpose.Standard) ?? throw new PdmNotFoundException("目标业务目录不存在。");
+        for (var current = parent; current is not null; current = current.ParentFolderId is Guid id ? rows.SingleOrDefault(item => item.Id == id) : null)
+            if (current.Id == folder.Id) throw new PdmRuleException("文件夹不能移动到自身或其子目录。");
+        try
+        {
+            await connection.ExecuteAsync(new CommandDefinition("UPDATE project_folder SET parent_folder_id=@ParentFolderId,updated_at=@Now WHERE id=@FolderId", new { FolderId = folderId, ParentFolderId = parentFolderId, Now = timeProvider.GetUtcNow().UtcDateTime }, cancellationToken: cancellationToken));
+        }
+        catch (MySqlConnector.MySqlException exception) when (exception.Number == 1062) { throw new PdmConflictException("目标目录下已存在同名文件夹。"); }
+        return await FindProjectFolderAsync(connection, folderId, cancellationToken);
+    }
+
+    public async Task DeleteProjectFolderAsync(Guid projectId, Guid folderId, CancellationToken cancellationToken)
+    {
+        await using var connection = await OpenAsync(cancellationToken);
+        var affected = await connection.ExecuteAsync(new CommandDefinition(
+            "DELETE f FROM project_folder f INNER JOIN project p ON p.id=@ProjectId WHERE f.id=@FolderId AND f.root_project_id=COALESCE(p.root_project_id,p.id) AND f.is_system=0 AND f.purpose='Standard' AND NOT EXISTS(SELECT 1 FROM project_folder child WHERE child.parent_folder_id=f.id)",
+            new { ProjectId = projectId, FolderId = folderId }, cancellationToken: cancellationToken));
+        if (affected == 0) throw new PdmConflictException("只能删除空的自定义文件夹。");
+    }
+
+    private static async Task<ProjectFolder> FindProjectFolderAsync(DbConnection connection, Guid folderId, CancellationToken cancellationToken)
+    {
+        var row = await connection.QuerySingleOrDefaultAsync<ProjectFolderRow>(new CommandDefinition("SELECT id,root_project_id,parent_folder_id,target_project_id,folder_key,template_key,name,purpose,sort_order,is_system,inherit_permissions FROM project_folder WHERE id=@FolderId", new { FolderId = folderId }, cancellationToken: cancellationToken)) ?? throw new PdmNotFoundException("项目文件夹不存在。");
+        return MapFolder(row);
+    }
+
     private static async Task<Guid> UpsertFolderAsync(DbConnection connection, DbTransaction transaction, Guid rootProjectId, Guid? parentFolderId,
         Guid? targetProjectId, string folderKey, string templateKey, string name, ProjectFolderPurpose purpose, int sortOrder,
         bool isSystem, bool inheritPermissions, DateTime now, CancellationToken cancellationToken)
@@ -187,15 +255,15 @@ public sealed partial class MySqlPdmRepository
 
     private static FolderAccess ResolveAccess(ProjectFolderRow row, IReadOnlyDictionary<Guid, ProjectFolderRow> byId,
         IReadOnlyList<FolderPermissionRow> explicitRules, IReadOnlyList<TemplatePermissionRow> templateRules,
-        string actor, UserRole role)
+        string actor, IReadOnlyList<string> roleCodes, UserRole role)
     {
-        if (role == UserRole.Administrator) return FolderAccess.All;
+        if (role is UserRole.Administrator or UserRole.PlatformAdministrator) return FolderAccess.All;
         ProjectFolderRow? current = row;
         while (current is not null)
         {
-            var matches = explicitRules.Where(item => item.FolderId == current.Id && Matches(item.PrincipalType, item.PrincipalKey, actor, role)).ToArray();
+            var matches = explicitRules.Where(item => item.FolderId == current.Id && Matches(item.PrincipalType, item.PrincipalKey, actor, roleCodes)).ToArray();
             if (matches.Length == 0)
-                matches = templateRules.Where(item => item.FolderKey == current.TemplateKey && Matches(item.PrincipalType, item.PrincipalKey, actor, role))
+                matches = templateRules.Where(item => item.FolderKey == current.TemplateKey && Matches(item.PrincipalType, item.PrincipalKey, actor, roleCodes))
                     .Select(item => new FolderPermissionRow { Id = item.Id, FolderId = current.Id, PrincipalType = item.PrincipalType, PrincipalKey = item.PrincipalKey, AccessMask = item.AccessMask }).ToArray();
             if (matches.Length > 0) return matches.Aggregate(FolderAccess.None, (value, item) => value | (FolderAccess)item.AccessMask);
             if (!current.InheritPermissions || current.ParentFolderId is null) break;
@@ -207,9 +275,9 @@ public sealed partial class MySqlPdmRepository
             : FolderAccess.View | FolderAccess.Download;
     }
 
-    private static bool Matches(string type, string key, string actor, UserRole role) =>
+    private static bool Matches(string type, string key, string actor, IReadOnlyList<string> roleCodes) =>
         (type == FolderPrincipalType.User.ToString() && string.Equals(key, actor, StringComparison.OrdinalIgnoreCase))
-        || (type == FolderPrincipalType.Role.ToString() && string.Equals(key, role.ToString(), StringComparison.OrdinalIgnoreCase));
+        || (type == FolderPrincipalType.Role.ToString() && roleCodes.Contains(key, StringComparer.OrdinalIgnoreCase));
 
     private static async Task InsertTemplatePermissionsAsync(DbConnection connection, DbTransaction transaction, string folderKey, IEnumerable<SaveFolderPermissionCommand> permissions, CancellationToken cancellationToken)
     {

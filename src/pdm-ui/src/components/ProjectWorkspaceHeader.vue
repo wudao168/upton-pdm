@@ -3,11 +3,17 @@ import { Boxes, ClipboardList, FileClock, FolderOpen, FolderTree, LayoutDashboar
 import { ElMessageBox } from 'element-plus'
 import { computed, ref, watch } from 'vue'
 import type { ProjectSummary } from '../types'
+import { useUserDisplayName } from '../userDisplay'
 
 export type ProjectTab = 'overview' | 'files' | 'documents' | 'bom' | 'versions' | 'release' | 'records'
 
 const props = defineProps<{ project: ProjectSummary; projects: ProjectSummary[]; activeTab: ProjectTab; activeProjectDocumentStatus?: string; currentUsername?: string }>()
 const emit = defineEmits<{ back: []; switch: [projectId: string]; tab: [tab: ProjectTab] }>()
+const displayUserName = useUserDisplayName()
+
+function projectDesignLeads(project: ProjectSummary) {
+  return project.designLeads?.length ? project.designLeads : project.designLead ? [project.designLead] : []
+}
 
 const tabs = [
   { key: 'overview', label: '概览', icon: LayoutDashboard },
@@ -47,14 +53,14 @@ const projectPageSize = ref(20)
 const normalizedProjectSearchQuery = computed(() => projectSearchQuery.value.trim().toLocaleLowerCase())
 const projectCustomerOptions = computed(() => [...new Set(rootProjects.value.map(item => item.customerName).filter((item): item is string => Boolean(item)))].sort((left, right) => left.localeCompare(right, 'zh-CN')))
 const projectExecutionUnitOptions = computed(() => [...new Set(rootProjects.value.map(item => item.executionUnitName).filter((item): item is string => Boolean(item)))].sort((left, right) => left.localeCompare(right, 'zh-CN')))
-const projectPersonOptions = computed(() => [...new Set(rootProjects.value.flatMap(item => [item.primaryProjectManager, ...item.collaborativeProjectManagers, item.designLead, ...item.designers]).filter((item): item is string => Boolean(item)))].sort((left, right) => left.localeCompare(right, 'zh-CN')))
+const projectPersonOptions = computed(() => [...new Set(rootProjects.value.flatMap(item => [item.primaryProjectManager, ...item.collaborativeProjectManagers, ...projectDesignLeads(item), ...item.designers]).filter((item): item is string => Boolean(item)))].sort((left, right) => displayUserName(left).localeCompare(displayUserName(right), 'zh-CN')))
 const filteredRootProjects = computed(() => {
   const query = normalizedProjectSearchQuery.value
   return rootProjects.value.filter(item => {
     if (query && ![item.code, item.name, item.projectAlias, item.customerName, item.deviceModel, ...item.serialNumbers].some(value => value?.toLocaleLowerCase().includes(query))) return false
     if (projectCustomerFilter.value && item.customerName !== projectCustomerFilter.value) return false
     if (projectExecutionUnitFilter.value && item.executionUnitName !== projectExecutionUnitFilter.value) return false
-    if (projectPersonFilter.value && ![item.primaryProjectManager, ...item.collaborativeProjectManagers, item.designLead, ...item.designers].includes(projectPersonFilter.value)) return false
+    if (projectPersonFilter.value && ![item.primaryProjectManager, ...item.collaborativeProjectManagers, ...projectDesignLeads(item), ...item.designers].includes(projectPersonFilter.value)) return false
     return true
   }).sort((left, right) => right.code.localeCompare(left.code, 'zh-CN', { numeric: true, sensitivity: 'base' }))
 })
@@ -151,8 +157,8 @@ function drawingDocumentCount(project: ProjectSummary) {
           <div><dt>型号</dt><dd :title="sidebarProject.deviceModel">{{ sidebarProject.deviceModel || '—' }}</dd></div>
           <div><dt>序列号</dt><dd :title="sidebarProject.serialNumbers.join('、')">{{ sidebarProject.serialNumbers.join('、') || '—' }}</dd></div>
           <div><dt>事业部</dt><dd :title="rootProject.executionUnitName">{{ rootProject.executionUnitName || '待分配' }}</dd></div>
-          <div><dt>项目经理</dt><dd :title="rootProject.primaryProjectManager">{{ rootProject.primaryProjectManager || '待分配' }}</dd></div>
-          <div><dt>主设</dt><dd :title="rootProject.designLead">{{ rootProject.designLead || '待分配' }}</dd></div>
+          <div><dt>项目经理</dt><dd :title="displayUserName(rootProject.primaryProjectManager, '待分配')">{{ displayUserName(rootProject.primaryProjectManager, '待分配') }}</dd></div>
+          <div><dt>主设</dt><dd :title="projectDesignLeads(rootProject).map(item => displayUserName(item)).join('、') || '待分配'">{{ projectDesignLeads(rootProject).map(item => displayUserName(item)).join('、') || '待分配' }}</dd></div>
         </dl>
       </section>
 
@@ -210,7 +216,7 @@ function drawingDocumentCount(project: ProjectSummary) {
         <div class="pdm-project-browser-filters" aria-label="项目筛选">
           <select v-model="projectCustomerFilter" aria-label="客户筛选"><option value="">全部客户</option><option v-for="customer in projectCustomerOptions" :key="customer" :value="customer">{{ customer }}</option></select>
           <select v-model="projectExecutionUnitFilter" aria-label="事业部筛选"><option value="">全部事业部</option><option v-for="unit in projectExecutionUnitOptions" :key="unit" :value="unit">{{ unit }}</option></select>
-          <select v-model="projectPersonFilter" aria-label="人员筛选"><option value="">全部人员</option><option v-for="person in projectPersonOptions" :key="person" :value="person">{{ person }}</option></select>
+          <select v-model="projectPersonFilter" aria-label="人员筛选"><option value="">全部人员</option><option v-for="person in projectPersonOptions" :key="person" :value="person">{{ displayUserName(person) }}</option></select>
         </div>
         <div class="pdm-project-browser-list" role="listbox" aria-label="项目搜索结果">
           <div class="pdm-project-browser-table-head" aria-hidden="true"><span>项目号</span><span>名称</span><span>客户名称</span><span>型号</span><span>序列号</span><span>操作</span></div>

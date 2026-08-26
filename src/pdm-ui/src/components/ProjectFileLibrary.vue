@@ -1,147 +1,253 @@
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
-import { ElMessage } from 'element-plus'
-import { File, Folder, FolderCog, Search, ShieldCheck } from '@lucide/vue'
-import type { FolderPermissionRule, ManagedDocument, PdmUser, ProjectFolder } from '../types'
+import { computed, onBeforeUnmount, ref, watch } from 'vue'
+import { ElMessage, ElMessageBox } from 'element-plus'
+import { Download, Eye, File, Folder, FolderCog, FolderPlus, History, Pencil, RotateCcw, Search, ShieldCheck, Trash2, Upload, X } from '@lucide/vue'
+import type { FolderPermissionRule, ManagedDocument, PdmUser, ProjectFile, ProjectFileVersion, ProjectFolder, RolePermissionSettings } from '../types'
+import { createProjectFolder, deleteProjectFile, deleteProjectFolder, downloadProjectFile, listProjectFiles, listProjectFileVersions, moveProjectFile, moveProjectFolder, renameProjectFile, renameProjectFolder, restoreProjectFile, uploadProjectFile } from '../api'
+import { resolveUserDisplayName } from '../userDisplay'
 
 const props = defineProps<{
-  folders: ProjectFolder[]
-  documents: ManagedDocument[]
-  users: PdmUser[]
-  administrator: boolean
-  pending: boolean
+  projectId: string; token: string; folders: ProjectFolder[]; documents: ManagedDocument[]; users: PdmUser[]; roles: RolePermissionSettings[]
+  administrator: boolean; pending: boolean
   onUpdatePermissions: (folderId: string, permissions: FolderPermissionRule[]) => Promise<ProjectFolder[]>
+  onReload: () => Promise<unknown>
 }>()
-
+const displayUserName = (username?: string | null, emptyText = '—') => resolveUserDisplayName(props.users, username, emptyText)
 interface FolderTreeNode extends ProjectFolder { children: FolderTreeNode[] }
+interface MoveFolderTreeNode extends FolderTreeNode { disabled: boolean; children: MoveFolderTreeNode[] }
+
 const selectedFolderId = ref('')
 const kindFilter = ref<'all' | 'model' | 'drawing'>('all')
-const documentQuery = ref('')
+const query = ref('')
+const includeDeleted = ref(false)
+const projectFiles = ref<ProjectFile[]>([])
+const loadingFiles = ref(false)
+const uploadProgress = ref(0)
+const uploadingName = ref('')
+const uploadInput = ref<HTMLInputElement>()
+let uploadController: AbortController | null = null
 const permissionOpen = ref(false)
 const permissionRows = ref<FolderPermissionRule[]>([])
-const roles = ['Engineer', 'PlanningManager', 'ProcessReviewer', 'Approver', 'ProductionViewer', 'Administrator']
+const versionOpen = ref(false)
+const versionFile = ref<ProjectFile | null>(null)
+const versions = ref<ProjectFileVersion[]>([])
+const moveTargetOpen = ref(false)
+const moveTargetTitle = ref('')
+const moveTargetId = ref('')
+const moveExcludedIds = ref<string[]>([])
+let resolveMoveTarget: ((folderId: string) => void) | null = null
+let rejectMoveTarget: ((reason: 'cancel') => void) | null = null
 const accessOptions = [
   { value: 1, label: '查看' }, { value: 2, label: '下载' }, { value: 4, label: '上传' },
   { value: 8, label: '编辑' }, { value: 16, label: '删除' }, { value: 32, label: '管理权限' }, { value: 64, label: '发布' },
 ]
 
-const visibleFolders = computed(() => props.folders.filter(folder => (folder.effectiveAccess & 1) === 1))
+const visibleFolders = computed(() => props.folders.filter(folder => hasAccess(folder, 1)))
 const treeData = computed<FolderTreeNode[]>(() => {
   const map = new Map(visibleFolders.value.map(folder => [folder.id, { ...folder, children: [] as FolderTreeNode[] }]))
   const roots: FolderTreeNode[] = []
   for (const folder of map.values()) {
     const parent = folder.parentFolderId ? map.get(folder.parentFolderId) : undefined
-    if (parent) parent.children.push(folder)
-    else roots.push(folder)
+    if (parent) parent.children.push(folder); else roots.push(folder)
   }
   const sort = (items: FolderTreeNode[]) => items.sort((a, b) => a.sortOrder - b.sortOrder || a.name.localeCompare(b.name, 'zh-CN')).forEach(item => sort(item.children))
   sort(roots)
   return roots
 })
 const selectedFolder = computed(() => visibleFolders.value.find(folder => folder.id === selectedFolderId.value))
+const businessFolder = computed(() => selectedFolder.value?.purpose === 'Standard')
 const folderDocuments = computed(() => props.documents.filter(document => document.folderId === selectedFolderId.value))
 const modelDocumentCount = computed(() => folderDocuments.value.filter(document => document.kind !== 'Drawing').length)
 const drawingDocumentCount = computed(() => folderDocuments.value.filter(document => document.kind === 'Drawing').length)
 const displayedDocuments = computed(() => {
-  const query = documentQuery.value.trim().toLocaleLowerCase('zh-CN')
+  const keyword = query.value.trim().toLocaleLowerCase('zh-CN')
   return folderDocuments.value.filter(document => {
-    const matchesKind = kindFilter.value === 'all'
-      || (kindFilter.value === 'model' && document.kind !== 'Drawing')
-      || (kindFilter.value === 'drawing' && document.kind === 'Drawing')
-    const text = `${document.drawingNumber} ${document.name} ${document.fileName}`.toLocaleLowerCase('zh-CN')
-    return matchesKind && (!query || text.includes(query))
+    const matchesKind = kindFilter.value === 'all' || (kindFilter.value === 'model' && document.kind !== 'Drawing') || (kindFilter.value === 'drawing' && document.kind === 'Drawing')
+    return matchesKind && (!keyword || `${document.drawingNumber} ${document.name} ${document.fileName}`.toLocaleLowerCase('zh-CN').includes(keyword))
   })
+})
+const displayedFiles = computed(() => {
+  const keyword = query.value.trim().toLocaleLowerCase('zh-CN')
+  return projectFiles.value.filter(file => !keyword || `${file.fileName} ${file.currentVersion?.uploadedBy ?? ''}`.toLocaleLowerCase('zh-CN').includes(keyword))
+})
+const standardTargets = computed(() => visibleFolders.value.filter(folder => folder.purpose === 'Standard' && hasAccess(folder, 8)))
+const moveTargetTreeData = computed<MoveFolderTreeNode[]>(() => {
+  const excluded = new Set(moveExcludedIds.value)
+  const clone = (items: FolderTreeNode[]): MoveFolderTreeNode[] => items.map(item => ({
+    ...item,
+    disabled: item.purpose !== 'Standard' || !hasAccess(item, 8) || excluded.has(item.id),
+    children: clone(item.children),
+  }))
+  return clone(treeData.value)
 })
 
 watch(() => props.folders, () => {
   if (!visibleFolders.value.some(folder => folder.id === selectedFolderId.value)) selectedFolderId.value = treeData.value[0]?.id ?? ''
 }, { immediate: true, deep: true })
+watch([selectedFolderId, includeDeleted], loadFiles, { immediate: true })
+onBeforeUnmount(() => { uploadController?.abort(); rejectMoveTarget?.('cancel') })
 
-function selectFolder(folder: ProjectFolder) { selectedFolderId.value = folder.id }
+function hasAccess(folder: ProjectFolder | undefined, mask: number) { return Boolean(folder && (folder.effectiveAccess & mask) === mask) }
+function selectFolder(folder: ProjectFolder) { selectedFolderId.value = folder.id; query.value = '' }
 function folderCount(folderId: string) { return props.documents.filter(document => document.folderId === folderId).length }
 function kindLabel(kind: ManagedDocument['kind']) { return ({ Assembly: '装配体', Part: '零件', Drawing: '工程图' })[kind] }
 function stateLabel(state: string | number) { return state === 'Released' || state === 2 ? '已发布' : state === 'InReview' || state === 1 ? '审批中' : '工作版' }
+function formatSize(bytes = 0) { if (bytes < 1024) return `${bytes} B`; if (bytes < 1024 ** 2) return `${(bytes / 1024).toFixed(1)} KB`; if (bytes < 1024 ** 3) return `${(bytes / 1024 ** 2).toFixed(1)} MB`; return `${(bytes / 1024 ** 3).toFixed(2)} GB` }
+function canPreview(file: ProjectFile) { return /\.(pdf|png|jpe?g|gif|webp|txt|csv|md)$/i.test(file.fileName) }
 
-function openPermissions() {
-  if (!selectedFolder.value) return
-  permissionRows.value = selectedFolder.value.permissions.map(item => ({ ...item }))
-  permissionOpen.value = true
+async function loadFiles() {
+  if (!props.projectId || !selectedFolderId.value || !businessFolder.value) { projectFiles.value = []; return }
+  loadingFiles.value = true
+  try { projectFiles.value = await listProjectFiles(props.projectId, selectedFolderId.value, includeDeleted.value, props.token) }
+  catch (error) { ElMessage.error(error instanceof Error ? error.message : '项目文件加载失败') }
+  finally { loadingFiles.value = false }
 }
-function addPermission() { permissionRows.value.push({ principalType: 'Role', principalKey: 'Engineer', access: 3 }) }
+
+function chooseFiles() { uploadInput.value?.click() }
+async function handleFiles(event: Event) {
+  const input = event.target as HTMLInputElement
+  const selected = [...(input.files ?? [])]
+  input.value = ''
+  for (const file of selected) {
+    if (projectFiles.value.some(item => !item.deletedAt && item.fileName.localeCompare(file.name, undefined, { sensitivity: 'accent' }) === 0)) {
+      try { await ElMessageBox.confirm(`“${file.name}”已存在，继续上传将创建不可变的新版本。`, '确认创建新版本', { confirmButtonText: '创建新版本', cancelButtonText: '跳过' }) }
+      catch { continue }
+    }
+    uploadController = new AbortController(); uploadingName.value = file.name; uploadProgress.value = 0
+    try {
+      await uploadProjectFile(props.projectId, selectedFolderId.value, file, props.token, '', value => { uploadProgress.value = value }, uploadController.signal)
+      ElMessage.success(`${file.name} 已上传`); await loadFiles()
+    } catch (error) { if ((error as Error).name !== 'AbortError') ElMessage.error(error instanceof Error ? error.message : '文件上传失败') }
+    finally { uploadController = null; uploadingName.value = ''; uploadProgress.value = 0 }
+  }
+}
+function cancelUpload() { uploadController?.abort(); ElMessage.info('正在取消上传') }
+
+async function newFolder() {
+  if (!selectedFolder.value) return
+  try { const { value } = await ElMessageBox.prompt('请输入新文件夹名称', '新建文件夹', { inputPattern: /\S+/, inputErrorMessage: '文件夹名称不能为空' }); await createProjectFolder(props.projectId, selectedFolder.value.id, value, props.token); await props.onReload(); ElMessage.success('文件夹已创建') }
+  catch (error) { if (error !== 'cancel' && error !== 'close') ElMessage.error(error instanceof Error ? error.message : '新建文件夹失败') }
+}
+async function renameFolderEntry() {
+  const folder = selectedFolder.value; if (!folder) return
+  try { const { value } = await ElMessageBox.prompt('请输入新名称', '重命名文件夹', { inputValue: folder.name }); await renameProjectFolder(props.projectId, folder.id, value, props.token); await props.onReload(); ElMessage.success('文件夹已重命名') }
+  catch (error) { if (error !== 'cancel' && error !== 'close') ElMessage.error(error instanceof Error ? error.message : '重命名失败') }
+}
+async function selectTarget(title: string, excludedIds: string[]) {
+  const excluded = new Set(excludedIds)
+  const options = standardTargets.value.filter(item => !excluded.has(item.id))
+  if (!options.length) throw new Error('没有可用的目标目录')
+  rejectMoveTarget?.('cancel')
+  moveTargetTitle.value = title
+  moveTargetId.value = ''
+  moveExcludedIds.value = excludedIds
+  moveTargetOpen.value = true
+  return await new Promise<string>((resolve, reject) => { resolveMoveTarget = resolve; rejectMoveTarget = reject })
+}
+function selectMoveTarget(folder: MoveFolderTreeNode) { if (!folder.disabled) moveTargetId.value = folder.id }
+function confirmMoveTarget() {
+  if (!moveTargetId.value || !resolveMoveTarget) return
+  const resolve = resolveMoveTarget
+  resolveMoveTarget = null; rejectMoveTarget = null
+  moveTargetOpen.value = false
+  resolve(moveTargetId.value)
+}
+function cancelMoveTarget() {
+  const reject = rejectMoveTarget
+  resolveMoveTarget = null; rejectMoveTarget = null
+  reject?.('cancel')
+}
+function folderMoveExcludedIds(folderId: string) {
+  const excluded = new Set([folderId])
+  let changed = true
+  while (changed) {
+    changed = false
+    for (const folder of props.folders) {
+      if (folder.parentFolderId && excluded.has(folder.parentFolderId) && !excluded.has(folder.id)) { excluded.add(folder.id); changed = true }
+    }
+  }
+  return [...excluded]
+}
+async function moveFolderEntry() {
+  const folder = selectedFolder.value; if (!folder) return
+  try { await moveProjectFolder(props.projectId, folder.id, await selectTarget('移动文件夹', folderMoveExcludedIds(folder.id)), props.token); await props.onReload(); ElMessage.success('文件夹已移动') }
+  catch (error) { if (error !== 'cancel' && error !== 'close') ElMessage.error(error instanceof Error ? error.message : '移动失败') }
+}
+async function removeFolder() {
+  const folder = selectedFolder.value; if (!folder) return
+  try { await ElMessageBox.confirm(`仅空文件夹可以删除。确认删除“${folder.name}”？`, '删除文件夹', { type: 'warning' }); await deleteProjectFolder(props.projectId, folder.id, props.token); selectedFolderId.value = ''; await props.onReload(); ElMessage.success('空文件夹已删除') }
+  catch (error) { if (error !== 'cancel' && error !== 'close') ElMessage.error(error instanceof Error ? error.message : '删除失败') }
+}
+async function renameFileEntry(file: ProjectFile) {
+  try { const { value } = await ElMessageBox.prompt('请输入新文件名（含扩展名）', '重命名文件', { inputValue: file.fileName }); await renameProjectFile(props.projectId, file.id, value, props.token); await loadFiles(); ElMessage.success('文件已重命名') }
+  catch (error) { if (error !== 'cancel' && error !== 'close') ElMessage.error(error instanceof Error ? error.message : '重命名失败') }
+}
+async function moveFileEntry(file: ProjectFile) {
+  try { await moveProjectFile(props.projectId, file.id, await selectTarget('移动文件', [file.folderId]), props.token); await loadFiles(); ElMessage.success('文件已移动') }
+  catch (error) { if (error !== 'cancel' && error !== 'close') ElMessage.error(error instanceof Error ? error.message : '移动失败') }
+}
+async function removeFile(file: ProjectFile) {
+  try { await ElMessageBox.confirm(`确认将“${file.fileName}”移入回收站？历史版本会保留。`, '删除文件', { type: 'warning' }); await deleteProjectFile(props.projectId, file.id, props.token); await loadFiles(); ElMessage.success('文件已移入回收站') }
+  catch (error) { if (error !== 'cancel' && error !== 'close') ElMessage.error(error instanceof Error ? error.message : '删除失败') }
+}
+async function restoreFile(file: ProjectFile) { try { await restoreProjectFile(props.projectId, file.id, props.token); await loadFiles(); ElMessage.success('文件已恢复') } catch (error) { ElMessage.error(error instanceof Error ? error.message : '恢复失败') } }
+async function download(file: ProjectFile, versionId?: string, preview = false) { try { await downloadProjectFile(props.projectId, file, props.token, versionId, preview) } catch (error) { ElMessage.error(error instanceof Error ? error.message : '文件读取失败') } }
+async function openVersions(file: ProjectFile) { try { versionFile.value = file; versions.value = await listProjectFileVersions(props.projectId, file.id, props.token); versionOpen.value = true } catch (error) { ElMessage.error(error instanceof Error ? error.message : '版本历史加载失败') } }
+
+function openPermissions() { if (!selectedFolder.value) return; permissionRows.value = selectedFolder.value.permissions.map(item => ({ ...item })); permissionOpen.value = true }
+function addPermission() { permissionRows.value.push({ principalType: 'Role', principalKey: props.roles[0]?.role ?? '', access: 3 }) }
 function accessValues(rule: FolderPermissionRule) { return accessOptions.filter(item => (rule.access & item.value) === item.value).map(item => item.value) }
 function setAccess(rule: FolderPermissionRule, values: number[]) { rule.access = values.reduce((mask, value) => mask | value, 0) }
-async function savePermissions() {
-  if (!selectedFolder.value) return
-  try {
-    await props.onUpdatePermissions(selectedFolder.value.id, permissionRows.value)
-    permissionOpen.value = false
-    ElMessage.success('目录权限已保存')
-  } catch (error) { ElMessage.error(error instanceof Error ? error.message : '目录权限保存失败') }
-}
+async function savePermissions() { if (!selectedFolder.value) return; try { await props.onUpdatePermissions(selectedFolder.value.id, permissionRows.value); permissionOpen.value = false; ElMessage.success('目录权限已保存') } catch (error) { ElMessage.error(error instanceof Error ? error.message : '目录权限保存失败') } }
 </script>
 
 <template>
   <section class="pdm-file-library">
     <aside class="pdm-panel pdm-folder-pane">
-      <header class="pdm-panel-heading"><div><h2>项目文件夹</h2><p>机械、电气均按主项目与子项目独立归档</p></div></header>
+      <header class="pdm-panel-heading"><div><h2>项目文件夹</h2><p>业务资料与受控图档分区管理</p></div></header>
       <el-tree :data="treeData" node-key="id" :default-expanded-keys="visibleFolders.filter(item => ['Root', 'MechanicalRoot', 'ElectricalRoot'].includes(item.purpose)).map(item => item.id)" highlight-current @node-click="selectFolder">
         <template #default="{ data }"><span class="pdm-folder-node"><Folder :size="15" /><span>{{ data.name }}</span><small v-if="folderCount(data.id)">{{ folderCount(data.id) }}</small></span></template>
       </el-tree>
     </aside>
     <section class="pdm-panel pdm-folder-content">
       <header class="pdm-folder-toolbar">
-        <div><div class="pdm-breadcrumb">项目图档 <span>/</span> {{ selectedFolder?.name || '请选择目录' }}</div><h2>{{ selectedFolder?.name || '项目文件库' }}</h2><p v-if="selectedFolder?.purpose === 'ProjectContainer'">该目录只接收“{{ selectedFolder.name }}”对应项目的图档。</p></div>
-        <button v-if="administrator && selectedFolder" type="button" class="pdm-secondary-action" @click="openPermissions"><ShieldCheck :size="15" />目录权限</button>
-      </header>
-      <div class="pdm-file-filters">
-        <div class="pdm-document-filters" role="tablist" aria-label="项目图档类型筛选">
-          <button type="button" role="tab" :aria-selected="kindFilter === 'all'" @click="kindFilter = 'all'">全部<small>{{ folderDocuments.length }}</small></button>
-          <button type="button" role="tab" :aria-selected="kindFilter === 'model'" @click="kindFilter = 'model'">3D结构<small>{{ modelDocumentCount }}</small></button>
-          <button type="button" role="tab" :aria-selected="kindFilter === 'drawing'" @click="kindFilter = 'drawing'">2D图纸<small>{{ drawingDocumentCount }}</small></button>
+        <div><div class="pdm-breadcrumb">项目文件 <span>/</span> {{ selectedFolder?.name || '请选择目录' }}</div><h2>{{ selectedFolder?.name || '项目文件库' }}</h2><p v-if="!businessFolder && selectedFolder">该目录由图档或发布流程受控，网页不维护普通文件。</p></div>
+        <div class="pdm-file-actions" v-if="selectedFolder">
+          <button v-if="businessFolder && hasAccess(selectedFolder, 4)" type="button" class="pdm-primary-action" :disabled="Boolean(uploadingName)" @click="chooseFiles"><Upload :size="15" />上传文件</button>
+          <button v-if="businessFolder && hasAccess(selectedFolder, 8)" type="button" class="pdm-secondary-action" @click="newFolder"><FolderPlus :size="15" />新建文件夹</button>
+          <el-dropdown v-if="businessFolder && !selectedFolder.isSystem && hasAccess(selectedFolder, 8)"><button type="button" class="pdm-secondary-action">文件夹操作</button><template #dropdown><el-dropdown-menu><el-dropdown-item @click="renameFolderEntry">重命名</el-dropdown-item><el-dropdown-item @click="moveFolderEntry">移动</el-dropdown-item><el-dropdown-item v-if="hasAccess(selectedFolder, 16)" divided @click="removeFolder">删除空文件夹</el-dropdown-item></el-dropdown-menu></template></el-dropdown>
+          <button v-if="administrator" type="button" class="pdm-secondary-action" @click="openPermissions"><ShieldCheck :size="15" />目录权限</button>
+          <input ref="uploadInput" type="file" multiple hidden @change="handleFiles">
         </div>
-        <label class="pdm-inline-search"><Search :size="15" /><input v-model="documentQuery" type="search" placeholder="搜索图号、名称或文件名"></label>
+      </header>
+      <div v-if="uploadingName" class="pdm-upload-strip"><span>正在上传 {{ uploadingName }}</span><el-progress :percentage="uploadProgress" /><button type="button" class="pdm-icon-action" aria-label="取消上传" @click="cancelUpload"><X :size="15" /></button></div>
+      <div class="pdm-file-filters">
+        <div v-if="!businessFolder" class="pdm-document-filters" role="tablist" aria-label="项目图档类型筛选"><button type="button" role="tab" :aria-selected="kindFilter === 'all'" @click="kindFilter = 'all'">全部<small>{{ folderDocuments.length }}</small></button><button type="button" role="tab" :aria-selected="kindFilter === 'model'" @click="kindFilter = 'model'">3D结构<small>{{ modelDocumentCount }}</small></button><button type="button" role="tab" :aria-selected="kindFilter === 'drawing'" @click="kindFilter = 'drawing'">2D图纸<small>{{ drawingDocumentCount }}</small></button></div>
+        <el-checkbox v-else-if="hasAccess(selectedFolder, 16)" v-model="includeDeleted">显示回收站</el-checkbox>
+        <label class="pdm-inline-search"><Search :size="15" /><input v-model="query" type="search" :placeholder="businessFolder ? '搜索文件名或上传人' : '搜索图号、名称或文件名'"></label>
       </div>
-      <div v-if="displayedDocuments.length" class="pdm-file-table-wrap">
-        <table class="pdm-file-detail-table" aria-label="文件明细">
-          <colgroup>
-            <col class="pdm-file-column-number">
-            <col class="pdm-file-column-name">
-            <col class="pdm-file-column-kind">
-            <col class="pdm-file-column-revision">
-            <col class="pdm-file-column-state">
-            <col class="pdm-file-column-editor">
-            <col class="pdm-file-column-updated">
-          </colgroup>
-          <thead><tr><th>图号</th><th>名称</th><th>类型</th><th>版本</th><th>状态</th><th>编辑人</th><th>更新时间</th></tr></thead>
-          <tbody>
-            <tr v-for="document in displayedDocuments" :key="document.id">
-              <td><span class="pdm-file-name" :title="document.drawingNumber"><File :size="15" />{{ document.drawingNumber }}</span></td>
-              <td :title="document.name">{{ document.name }}</td>
-              <td>{{ kindLabel(document.kind) }}</td>
-              <td>{{ document.revision }}</td>
-              <td>{{ stateLabel(document.state) }}</td>
-              <td :title="document.checkedOutBy || '—'">{{ document.checkedOutBy || '—' }}</td>
-              <td>{{ document.updatedAt ? new Date(document.updatedAt).toLocaleString() : '—' }}</td>
-            </tr>
-          </tbody>
-        </table>
+      <div v-if="businessFolder && displayedFiles.length" v-loading="loadingFiles" class="pdm-file-table-wrap">
+        <table class="pdm-file-detail-table" aria-label="项目资料文件"><thead><tr><th>文件名</th><th>版本</th><th>大小</th><th>上传人</th><th>更新时间</th><th>操作</th></tr></thead><tbody><tr v-for="item in displayedFiles" :key="item.id" :class="{ 'is-deleted': item.deletedAt }">
+          <td><span class="pdm-file-name" :title="item.fileName"><File :size="15" />{{ item.fileName }}</span><small v-if="item.deletedAt" class="pdm-deleted-badge">回收站</small></td><td>V{{ item.currentVersion?.versionNumber ?? 0 }}</td><td>{{ formatSize(item.currentVersion?.fileLength) }}</td><td>{{ displayUserName(item.currentVersion?.uploadedBy) }}</td><td>{{ new Date(item.updatedAt).toLocaleString() }}</td>
+          <td><div class="pdm-row-actions"><button v-if="!item.deletedAt && canPreview(item) && hasAccess(selectedFolder, 2)" type="button" title="预览" @click="download(item, undefined, true)"><Eye :size="14" /></button><button v-if="!item.deletedAt && hasAccess(selectedFolder, 2)" type="button" title="下载" @click="download(item)"><Download :size="14" /></button><button v-if="!item.deletedAt && hasAccess(selectedFolder, 1)" type="button" title="版本历史" @click="openVersions(item)"><History :size="14" /></button><button v-if="!item.deletedAt && hasAccess(selectedFolder, 8)" type="button" title="重命名" @click="renameFileEntry(item)"><Pencil :size="14" /></button><button v-if="!item.deletedAt && hasAccess(selectedFolder, 8)" type="button" title="移动" @click="moveFileEntry(item)"><Folder :size="14" /></button><button v-if="!item.deletedAt && hasAccess(selectedFolder, 16)" type="button" title="删除" @click="removeFile(item)"><Trash2 :size="14" /></button><button v-if="item.deletedAt && hasAccess(selectedFolder, 16)" type="button" title="恢复" @click="restoreFile(item)"><RotateCcw :size="14" /></button></div></td>
+        </tr></tbody></table>
       </div>
-      <div v-else class="pdm-folder-empty"><FolderCog :size="34" /><strong>{{ folderDocuments.length ? '没有匹配的图档' : '此目录暂无文件' }}</strong><span v-if="folderDocuments.length">请调整3D/2D筛选或搜索关键字。</span><span v-else-if="selectedFolder?.purpose === 'ProjectContainer'">SolidWorks首次存档时将自动归入机械图纸的对应项目目录；电气图档可显式选择电气目录。</span><span v-else>该目录可用于项目资料上传，实际上传操作将在后续文件操作入口中提供。</span></div>
+      <div v-else-if="!businessFolder && displayedDocuments.length" class="pdm-file-table-wrap"><table class="pdm-file-detail-table" aria-label="受控图档"><colgroup><col class="pdm-file-column-number"><col class="pdm-file-column-name"><col class="pdm-file-column-kind"><col class="pdm-file-column-revision"><col class="pdm-file-column-state"><col class="pdm-file-column-editor"><col class="pdm-file-column-updated"></colgroup><thead><tr><th>图号</th><th>名称</th><th>类型</th><th>版本</th><th>状态</th><th>编辑人</th><th>更新时间</th></tr></thead><tbody><tr v-for="document in displayedDocuments" :key="document.id"><td><span class="pdm-file-name"><File :size="15" />{{ document.drawingNumber }}</span></td><td>{{ document.name }}</td><td>{{ kindLabel(document.kind) }}</td><td>{{ document.revision }}</td><td>{{ stateLabel(document.state) }}</td><td>{{ displayUserName(document.checkedOutBy) }}</td><td>{{ document.updatedAt ? new Date(document.updatedAt).toLocaleString() : '—' }}</td></tr></tbody></table></div>
+      <div v-else class="pdm-folder-empty" v-loading="loadingFiles"><FolderCog :size="34" /><strong>{{ query ? '没有匹配的文件' : includeDeleted ? '此目录及回收站暂无文件' : '此目录暂无文件' }}</strong><span v-if="businessFolder && hasAccess(selectedFolder, 4)">可上传项目资料，或在此目录下新建子文件夹。</span><span v-else-if="businessFolder">当前账号可查看该目录，但没有上传权限。</span><span v-else>受控图档由SolidWorks存档，发布文件由审批发布流程生成。</span></div>
     </section>
   </section>
-
-  <el-dialog v-model="permissionOpen" title="目录独立权限" width="760px">
-    <p class="pdm-dialog-help">未配置时继承上级或模板权限；当前目录的显式权限会优先应用。</p>
-    <div class="pdm-permission-list">
-      <div v-for="(rule, index) in permissionRows" :key="rule.id || index" class="pdm-permission-row">
-        <el-select v-model="rule.principalType" style="width:100px"><el-option label="角色" value="Role" /><el-option label="用户" value="User" /></el-select>
-        <el-select v-if="rule.principalType === 'Role'" v-model="rule.principalKey" style="width:165px"><el-option v-for="role in roles" :key="role" :label="role" :value="role" /></el-select>
-        <el-select v-else v-model="rule.principalKey" filterable style="width:165px"><el-option v-for="user in users" :key="user.username" :label="`${user.displayName} (${user.username})`" :value="user.username" /></el-select>
-        <el-checkbox-group :model-value="accessValues(rule)" @update:model-value="setAccess(rule, $event as number[])"><el-checkbox v-for="item in accessOptions" :key="item.value" :value="item.value">{{ item.label }}</el-checkbox></el-checkbox-group>
-        <button type="button" class="pdm-text-danger" @click="permissionRows.splice(index, 1)">移除</button>
-      </div>
-    </div>
-    <button type="button" class="pdm-secondary-action" @click="addPermission">添加权限主体</button>
-    <template #footer><button type="button" class="pdm-secondary-action" @click="permissionOpen=false">取消</button><button type="button" class="pdm-primary-action" :disabled="pending" @click="savePermissions">保存权限</button></template>
+  <el-dialog v-model="moveTargetOpen" :title="moveTargetTitle" width="520px" class="pdm-move-folder-dialog" modal-class="pdm-move-folder-overlay" @closed="cancelMoveTarget">
+    <p class="pdm-dialog-help">请选择目标文件夹。灰色目录不可作为移动目标。</p>
+    <el-tree class="pdm-move-folder-tree" :data="moveTargetTreeData" node-key="id" :current-node-key="moveTargetId" default-expand-all highlight-current @current-change="selectMoveTarget">
+      <template #default="{ data }"><span class="pdm-folder-node" :class="{ 'is-move-disabled': data.disabled }"><Folder :size="15" /><span>{{ data.name }}</span></span></template>
+    </el-tree>
+    <template #footer><button type="button" class="pdm-secondary-action" @click="moveTargetOpen=false">取消</button><button type="button" class="pdm-primary-action" :disabled="!moveTargetId" @click="confirmMoveTarget">确定</button></template>
   </el-dialog>
+  <el-dialog v-model="versionOpen" :title="`版本历史 · ${versionFile?.fileName ?? ''}`" width="720px"><el-table :data="versions"><el-table-column prop="versionNumber" label="版本" width="80"><template #default="scope">V{{ scope.row.versionNumber }}</template></el-table-column><el-table-column prop="fileName" label="原始文件名" /><el-table-column label="大小" width="100"><template #default="scope">{{ formatSize(scope.row.fileLength) }}</template></el-table-column><el-table-column label="上传人" width="100"><template #default="scope">{{ displayUserName(scope.row.uploadedBy) }}</template></el-table-column><el-table-column label="上传时间" width="170"><template #default="scope">{{ new Date(scope.row.uploadedAt).toLocaleString() }}</template></el-table-column><el-table-column label="操作" width="70"><template #default="scope"><button class="pdm-icon-action" type="button" title="下载该版本" @click="versionFile && download(versionFile, scope.row.id)"><Download :size="14" /></button></template></el-table-column></el-table></el-dialog>
+  <el-dialog v-model="permissionOpen" title="目录独立权限" width="760px"><p class="pdm-dialog-help">未配置时继承上级或模板权限；后端对每个文件操作再次校验当前有效权限。</p><div class="pdm-permission-list"><div v-for="(rule, index) in permissionRows" :key="rule.id || index" class="pdm-permission-row"><el-select v-model="rule.principalType" style="width:100px"><el-option label="角色" value="Role" /><el-option label="用户" value="User" /></el-select><el-select v-if="rule.principalType === 'Role'" v-model="rule.principalKey" filterable style="width:165px"><el-option v-for="role in roles" :key="role.role" :label="role.name" :value="role.role" /></el-select><el-select v-else v-model="rule.principalKey" filterable style="width:165px"><el-option v-for="user in users" :key="user.username" :label="user.displayName" :value="user.username" /></el-select><el-checkbox-group :model-value="accessValues(rule)" @update:model-value="setAccess(rule, $event as number[])"><el-checkbox v-for="item in accessOptions" :key="item.value" :value="item.value">{{ item.label }}</el-checkbox></el-checkbox-group><button type="button" class="pdm-text-danger" @click="permissionRows.splice(index, 1)">移除</button></div></div><button type="button" class="pdm-secondary-action" @click="addPermission">添加权限主体</button><template #footer><button type="button" class="pdm-secondary-action" @click="permissionOpen=false">取消</button><button type="button" class="pdm-primary-action" :disabled="pending" @click="savePermissions">保存权限</button></template></el-dialog>
 </template>
+
+<style scoped>
+.pdm-file-actions,.pdm-row-actions,.pdm-upload-strip{display:flex;align-items:center;gap:8px}.pdm-file-actions{flex-wrap:wrap;justify-content:flex-end}.pdm-upload-strip{padding:8px 14px;background:#f0fdfa;border-bottom:1px solid #ccfbf1}.pdm-upload-strip>span{max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.pdm-upload-strip :deep(.el-progress){flex:1}.pdm-row-actions button,.pdm-icon-action{display:inline-flex;align-items:center;justify-content:center;border:0;background:transparent;color:#0f766e;cursor:pointer;padding:4px;border-radius:4px}.pdm-row-actions button:hover,.pdm-icon-action:hover{background:#ccfbf1}.is-deleted{opacity:.65}.pdm-deleted-badge{margin-left:8px;color:#b45309}.pdm-file-detail-table th:last-child{width:180px}
+:global(.pdm-move-folder-overlay .el-overlay-dialog){align-items:center;justify-content:center;padding:12px}:global(.pdm-move-folder-overlay .el-overlay-dialog>.pdm-move-folder-dialog){width:min(520px,calc(100vw - 24px))!important;height:min(720px,calc(100dvh - 24px));max-height:calc(100dvh - 24px);margin:auto;border-radius:8px;box-shadow:0 16px 42px rgba(15,23,42,.22)}:global(.pdm-move-folder-overlay .el-overlay-dialog>.pdm-move-folder-dialog .el-dialog__body){display:flex;min-height:0;flex-direction:column;overflow:hidden}.pdm-move-folder-tree{box-sizing:border-box;min-height:0;flex:1 1 auto;padding:8px;border:1px solid var(--pdm-border);border-radius:6px;overflow:auto}.pdm-move-folder-tree :deep(.el-tree-node__content){height:28px}.pdm-folder-node.is-move-disabled{color:#94a3b8}
+</style>

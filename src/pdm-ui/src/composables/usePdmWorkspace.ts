@@ -3,7 +3,7 @@ import { ElMessageBox } from 'element-plus'
 import { batchDeleteBomItems as batchDeleteBomItemsRequest, batchRestoreBomItems as batchRestoreBomItemsRequest, restoreBomItemsFromSource as restoreBomItemsFromSourceRequest } from '../api'
 import { getBomSourceData } from '../api'
 import { addDrawingReviewMarkup as addDrawingReviewMarkupRequest, createDrawingReview as createDrawingReviewRequest, decideDrawingReviewTarget as decideDrawingReviewTargetRequest, listDrawingReviewCandidates, listDrawingReviews, resolveDrawingReviewMarkup as resolveDrawingReviewMarkupRequest, withdrawDrawingReview as withdrawDrawingReviewRequest } from '../api'
-import { batchUpdateBomItems as batchUpdateBomItemsRequest, changeMyPassword as changeMyPasswordRequest, checkHealth, compareDocumentVersions, createProject as createProjectRequest, createRole as createRoleRequest, createSubproject as createSubprojectRequest, createReleasePackage, createUser as createUserRequest, decideApproval, deleteProject as deleteProjectRequest, deleteRole as deleteRoleRequest, emergencyDecideApproval, exportBom, forceReleaseEditLock as forceReleaseEditLockRequest, generateMechanicalBom, getBomValidationRules, getCrmIntegrationSettings, getMyProfile, getOrganizationDirectory, getProjectNumberingOptions, getRolePermissionDirectory, getStorageStatus, getSystemSettings, importBom, listAudit, listBomBaselines, listBomVersions, listCustomers, listDocumentVersions, listDocumentWhereUsed, listEditLocks, listEquipmentTypes, listFolderTemplate, listMaterialCodeApplications, listMaterialSyncTasks, listMyApprovalTasks, listPasswordResetTasks, listProgramTemplateTasks, listProjectAudit, listProjects, listProjectVersions, loadProjectDocumentWorkspace, loadProjectWorkspace, login as apiLogin, obsoleteDocument as obsoleteDocumentRequest, PdmApiError, postDesktopMessage, readDocumentVersionFile, requestEditLockRelease as requestEditLockReleaseRequest, resetRequestedPassword as resetRequestedPasswordRequest, resetUserPassword as resetUserPasswordRequest, resolveBomItem as resolveBomItemRequest, restoreDocumentVersion, resumeSession as apiResumeSession, saveBom, saveEquipmentType as saveEquipmentTypeRequest, saveFolderTemplate as saveFolderTemplateRequest, saveOrganizationUnit as saveOrganizationUnitRequest, saveProjectOrganization as saveProjectOrganizationRequest, setBomEmptyDeclaration as setBomEmptyDeclarationRequest, submitReleasePackage, syncCrmCustomers as syncCrmCustomersRequest, testCrmIntegration as testCrmIntegrationRequest, updateChildProjectDesigners as updateChildProjectDesignersRequest, updateCrmIntegrationSettings as updateCrmIntegrationSettingsRequest, updateMainProjectStaffing as updateMainProjectStaffingRequest, updateMyProfile as updateMyProfileRequest, updateOrganizationCounters as updateOrganizationCountersRequest, updateOrganizationMemberships as updateOrganizationMembershipsRequest, updateOrganizationUnitManagers as updateOrganizationUnitManagersRequest, updateProject as updateProjectRequest, updateProjectExecutionUnit as updateProjectExecutionUnitRequest, updateProjectFolderPermissions as updateProjectFolderPermissionsRequest, updateRolePermissions as updateRolePermissionsRequest, updateSystemSettings as updateSystemSettingsRequest, updateUser as updateUserRequest, uploadReleaseFile, withdrawReleasePackage } from '../api'
+import { batchUpdateBomItems as batchUpdateBomItemsRequest, changeMyPassword as changeMyPasswordRequest, checkHealth, compareDocumentVersions, createProject as createProjectRequest, createRole as createRoleRequest, createSubproject as createSubprojectRequest, createReleasePackage, createUser as createUserRequest, decideApproval, deleteProject as deleteProjectRequest, deleteRole as deleteRoleRequest, emergencyDecideApproval, exportBom, forceReleaseEditLock as forceReleaseEditLockRequest, generateMechanicalBom, getBomValidationRules, getCrmIntegrationSettings, getMyProfile, getOrganizationDirectory, getProjectNumberingOptions, getRolePermissionDirectory, getStorageStatus, getSystemSettings, importBom, listAudit, listBomBaselines, listBomVersions, listCustomers, listDocumentVersions, listDocumentWhereUsed, listEditLocks, listEquipmentTypes, listFolderTemplate, listMaterialCodeApplications, listMaterialSyncTasks, listMyApprovalTasks, listPasswordResetTasks, listProgramTemplateTasks, listProjectAudit, listProjects, listProjectVersions, loadProjectDocumentWorkspace, loadProjectWorkspace, login as apiLogin, obsoleteDocument as obsoleteDocumentRequest, PdmApiError, postDesktopMessage, readDocumentVersionFile, requestEditLockRelease as requestEditLockReleaseRequest, resetRequestedPassword as resetRequestedPasswordRequest, resetUserPassword as resetUserPasswordRequest, resolveBomItem as resolveBomItemRequest, restoreDocumentVersion, resumeSession as apiResumeSession, saveBom, saveEquipmentType as saveEquipmentTypeRequest, saveFolderTemplate as saveFolderTemplateRequest, saveOrganizationUnit as saveOrganizationUnitRequest, saveProjectOrganization as saveProjectOrganizationRequest, setBomEmptyDeclaration as setBomEmptyDeclarationRequest, submitReleasePackage, syncCrmCustomers as syncCrmCustomersRequest, testCrmIntegration as testCrmIntegrationRequest, updateChildProjectDesigners as updateChildProjectDesignersRequest, updateChildProjectManager as updateChildProjectManagerRequest, updateCrmIntegrationSettings as updateCrmIntegrationSettingsRequest, updateMainProjectStaffing as updateMainProjectStaffingRequest, updateMyProfile as updateMyProfileRequest, updateOrganizationCounters as updateOrganizationCountersRequest, updateOrganizationMemberships as updateOrganizationMembershipsRequest, updateOrganizationUnitManagers as updateOrganizationUnitManagersRequest, updateProject as updateProjectRequest, updateProjectExecutionUnit as updateProjectExecutionUnitRequest, updateProjectFolderPermissions as updateProjectFolderPermissionsRequest, updateRolePermissions as updateRolePermissionsRequest, updateSystemSettings as updateSystemSettingsRequest, updateUser as updateUserRequest, uploadReleaseFile, withdrawReleasePackage } from '../api'
 import type { AuthSession } from '../api'
 import type { AuditEntry, BatchUpdateBomItemsInput, BomEmptyDeclaration, BomGenerationResult, BomItem, BomKind, BomVersion, CreateProjectInput, CreateReleasePackageInput, CreateRoleInput, CreateSubprojectInput, CrmConnectionTestResult, CrmCustomerSyncResult, CrmIntegrationSettings, DocumentFilter, DocumentModelDrawingRelation, DocumentNode, DocumentVersionComparison, DocumentVersionSummary, DocumentWhereUsed, EditLockSummary, EquipmentTypeDefinition, FolderPermissionRule, MainProjectStaffingInput, ManagedDocument, ManufacturingBomBaseline, MaterialCodeApplication, MaterialSyncTask, MyApprovalTask, OrganizationDirectory, PasswordResetTask, PdmCustomer, PdmSystemSettings, PdmUser, PdmUserProfile, ProgramTemplateTask, ProjectFolder, ProjectFolderTemplateNode, ProjectNumberingOptions, ProjectSummary, ProjectVersionItem, ReleasePackageSummary, RolePermissionDirectory, SaveOrganizationUnitInput, SavePdmUserInput, SaveProjectOrganizationInput, SolidWorksOpenMode, UpdateCrmIntegrationInput, UpdateProjectInput } from '../types'
 import type { AddDrawingReviewMarkupInput, DrawingReviewCandidate, DrawingReviewDecision, DrawingReviewPackage, DrawingReviewTarget } from '../types'
@@ -241,6 +241,7 @@ export function usePdmWorkspace() {
   const currentUser = ref('')
   const currentUsername = ref('')
   const currentRole = ref('')
+  const currentRoles = ref<string[]>([])
   const currentPermissions = ref<string[]>([])
   const primaryCompanyId = ref('')
   const activeCompanyId = ref('')
@@ -340,7 +341,8 @@ export function usePdmWorkspace() {
   const normalCount = computed(() => ready.value && hasDocuments.value
     ? Math.max(0, documentFilterCounts.value.all - warningCount.value)
     : 0)
-  const hasPermission = (code: string) => currentRole.value === 'Administrator' || currentPermissions.value.includes(code)
+  const hasRole = (role: string) => currentRoles.value.includes(role)
+  const hasPermission = (code: string) => hasRole('Administrator') || currentPermissions.value.includes(code)
 
   function selectNode(node: DocumentNode) {
     selectedId.value = node.id
@@ -895,7 +897,7 @@ export function usePdmWorkspace() {
   }
 
   async function requestPasswordResetTasks() {
-    return ['Administrator', 'platform_admin', 'developer'].includes(currentRole.value) ? listPasswordResetTasks(accessToken) : []
+    return ['Administrator', 'platform_admin', 'developer'].some(hasRole) ? listPasswordResetTasks(accessToken) : []
   }
 
   async function resetRequestedPassword(taskId: string) {
@@ -956,6 +958,7 @@ export function usePdmWorkspace() {
     currentUser.value = session.displayName || session.username
     currentUsername.value = session.username
     currentRole.value = session.role
+    currentRoles.value = session.roles?.length ? [...new Set(session.roles)] : [session.role]
     currentPermissions.value = session.permissions ?? []
     primaryCompanyId.value = session.primaryCompanyId ?? ''
     activeCompanyId.value = session.activeCompanyId ?? session.primaryCompanyId ?? ''
@@ -978,6 +981,7 @@ export function usePdmWorkspace() {
     currentUser.value = ''
     currentUsername.value = ''
     currentRole.value = ''
+    currentRoles.value = []
     currentPermissions.value = []
     primaryCompanyId.value = ''
     activeCompanyId.value = ''
@@ -1386,6 +1390,15 @@ export function usePdmWorkspace() {
     } finally { operationPending.value = false }
   }
 
+  async function updateChildProjectManager(projectId: string, projectManager: string) {
+    operationPending.value = true
+    try {
+      const saved = await updateChildProjectManagerRequest(projectId, projectManager, accessToken)
+      await reload(project.value.id)
+      return saved
+    } finally { operationPending.value = false }
+  }
+
   async function saveSystemSettings(settings: PdmSystemSettings) {
     operationPending.value = true
     try {
@@ -1436,8 +1449,10 @@ export function usePdmWorkspace() {
     operationPending.value = true
     try {
       rolePermissionDirectory.value = await updateRolePermissionsRequest(role, permissions, accessToken)
-      if (role === currentRole.value) {
-        currentPermissions.value = rolePermissionDirectory.value.roles.find(item => item.role === role)?.permissions ?? []
+      if (hasRole(role)) {
+        currentPermissions.value = [...new Set(rolePermissionDirectory.value.roles
+          .filter(item => hasRole(item.role))
+          .flatMap(item => item.permissions))]
         const stored = restoreSession()
         if (stored) applySession({ ...stored, permissions: currentPermissions.value })
       }
@@ -1561,11 +1576,16 @@ export function usePdmWorkspace() {
     const session = restoreSession()
     if (session) {
       persistentSession = session
-      if (new Date(session.expiresAt).getTime() > Date.now()) {
+      const accessTokenIsValid = new Date(session.expiresAt).getTime() > Date.now()
+      if (session.resumeToken) {
+        const renewed = await renewPersistentSession()
+        if (!renewed && persistentSession && accessTokenIsValid) {
+          applySession(session)
+          await reload()
+        }
+      } else if (accessTokenIsValid) {
         applySession(session)
         await reload()
-      } else {
-        await renewPersistentSession()
       }
     }
   })
@@ -1622,6 +1642,7 @@ export function usePdmWorkspace() {
     currentUser,
     currentUsername,
     currentRole,
+    currentRoles,
     currentPermissions,
     primaryCompanyId,
     activeCompanyId,
@@ -1629,6 +1650,7 @@ export function usePdmWorkspace() {
     crossCompanyView,
     accessibleCompanies,
     currentProfile,
+    hasRole,
     hasPermission,
     switchCompany,
     loginPending,
@@ -1681,6 +1703,7 @@ export function usePdmWorkspace() {
     updateProjectExecutionUnit,
     updateMainProjectStaffing,
     updateChildProjectDesigners,
+    updateChildProjectManager,
     saveSystemSettings,
     saveEquipmentType,
     updateProjectFolderPermissions,

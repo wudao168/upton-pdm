@@ -12,9 +12,17 @@ public sealed record UserAccount(
     long TokenVersion = 0,
     string? RoleCode = null,
     Guid? CompanyId = null,
-    bool CrossCompanyView = false)
+    bool CrossCompanyView = false,
+    IReadOnlyList<string>? RoleCodes = null)
 {
     public string EffectiveRoleCode => string.IsNullOrWhiteSpace(RoleCode) ? Role.ToString() : RoleCode;
+    public IReadOnlyList<string> EffectiveRoleCodes => (RoleCodes ?? [])
+        .Prepend(EffectiveRoleCode)
+        .Where(code => !string.IsNullOrWhiteSpace(code))
+        .Distinct(StringComparer.OrdinalIgnoreCase)
+        .ToArray();
+
+    public bool HasRole(string roleCode) => EffectiveRoleCodes.Contains(roleCode, StringComparer.OrdinalIgnoreCase);
 }
 
 public sealed record CreateManagedUserCommand(
@@ -25,7 +33,8 @@ public sealed record CreateManagedUserCommand(
     bool IsActive,
     Guid CompanyId = default,
     bool CrossCompanyView = false,
-    IReadOnlyList<Guid>? AccessibleCompanyIds = null);
+    IReadOnlyList<Guid>? AccessibleCompanyIds = null,
+    IReadOnlyList<string>? RoleCodes = null);
 
 public sealed record UpdateManagedUserCommand(
     string Username,
@@ -34,7 +43,8 @@ public sealed record UpdateManagedUserCommand(
     bool IsActive,
     Guid CompanyId = default,
     bool CrossCompanyView = false,
-    IReadOnlyList<Guid>? AccessibleCompanyIds = null);
+    IReadOnlyList<Guid>? AccessibleCompanyIds = null,
+    IReadOnlyList<string>? RoleCodes = null);
 
 public sealed record UserCompanyScope(
     Guid UserId,
@@ -233,12 +243,13 @@ public sealed record SaveOrganizationUnitCommand(
     string Name,
     OrganizationUnitKind Kind,
     bool IsActive,
-    int SortOrder);
+    int SortOrder,
+    bool CanManufacture = false);
 
 public sealed record SetMainProjectStaffingCommand(
     string PrimaryProjectManager,
     IReadOnlyList<string> CollaborativeProjectManagers,
-    string DesignLead);
+    IReadOnlyList<string> DesignLeads);
 
 public sealed record BomItemInput(
     int Sequence,
@@ -398,6 +409,7 @@ public interface IPdmRepository
     Task<Project> UpdateProjectDetailsAsync(Guid projectId, UpdateProjectDetailsCommand command, CancellationToken cancellationToken);
     Task<Project> SetProjectExecutionUnitAsync(Guid projectId, Guid executionUnitId, string actor, CancellationToken cancellationToken);
     Task<Project> SetMainProjectStaffingAsync(Guid projectId, SetMainProjectStaffingCommand command, string actor, CancellationToken cancellationToken);
+    Task<Project> SetChildProjectManagerAsync(Guid projectId, string projectManager, string actor, CancellationToken cancellationToken);
     Task<Project> SetChildProjectDesignersAsync(Guid projectId, IReadOnlyList<string> designers, string actor, CancellationToken cancellationToken);
     Task<Project> CreateNumberedProjectAsync(CreateNumberedProjectCommand command, CancellationToken cancellationToken);
     Task<Project> CreateSubprojectAsync(CreateSubprojectCommand command, CancellationToken cancellationToken);
@@ -406,6 +418,10 @@ public interface IPdmRepository
     Task<IReadOnlyList<ProjectFolderTemplateNode>> ListFolderTemplateAsync(CancellationToken cancellationToken);
     Task<IReadOnlyList<ProjectFolderTemplateNode>> SaveFolderTemplateAsync(IReadOnlyList<SaveFolderTemplateNodeCommand> nodes, CancellationToken cancellationToken);
     Task<IReadOnlyList<ProjectFolder>> SetProjectFolderPermissionsAsync(Guid projectId, Guid folderId, IReadOnlyList<SaveFolderPermissionCommand> permissions, string actor, UserRole role, CancellationToken cancellationToken);
+    Task<ProjectFolder> CreateProjectFolderAsync(Guid projectId, Guid parentFolderId, string name, CancellationToken cancellationToken);
+    Task<ProjectFolder> RenameProjectFolderAsync(Guid projectId, Guid folderId, string name, CancellationToken cancellationToken);
+    Task<ProjectFolder> MoveProjectFolderAsync(Guid projectId, Guid folderId, Guid parentFolderId, CancellationToken cancellationToken);
+    Task DeleteProjectFolderAsync(Guid projectId, Guid folderId, CancellationToken cancellationToken);
     Task<IReadOnlyList<PdmDocument>> ListDocumentsAsync(Guid projectId, CancellationToken cancellationToken);
     Task<IReadOnlyList<PdmDocument>> ListProjectTreeDocumentsAsync(Guid projectId, CancellationToken cancellationToken);
     Task<IReadOnlyList<DocumentModelDrawingRelation>> ListDocumentRelationsAsync(Guid projectId, CancellationToken cancellationToken);
@@ -496,7 +512,7 @@ public interface IPdmRepository
     Task CompletePasswordResetTaskAsync(Guid taskId, string passwordHash, string actor, DateTimeOffset completedAt, CancellationToken cancellationToken);
     Task<int> CountUsersAsync(CancellationToken cancellationToken);
     Task CreateUserAsync(UserAccount user, CancellationToken cancellationToken);
-    Task<UserAccount> UpdateUserAsync(string username, string displayName, UserRole role, string roleCode, bool isActive, CancellationToken cancellationToken);
+    Task<UserAccount> UpdateUserAsync(string username, string displayName, UserRole role, string roleCode, IReadOnlyList<string> roleCodes, bool isActive, CancellationToken cancellationToken);
     Task AppendAuditAsync(AuditEntry entry, CancellationToken cancellationToken);
     Task<IReadOnlyList<AuditEntry>> ListAuditAsync(string actor, UserRole role, int take, CancellationToken cancellationToken);
     Task<IReadOnlyList<AuditEntry>> ListProjectAuditAsync(Guid projectId, int take, CancellationToken cancellationToken);

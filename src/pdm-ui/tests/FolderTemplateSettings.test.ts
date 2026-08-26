@@ -4,6 +4,11 @@ import { describe, expect, it, vi } from 'vitest'
 import FolderTemplateSettings from '../src/components/FolderTemplateSettings.vue'
 import type { ProjectFolderTemplateNode } from '../src/types'
 
+const roles = [
+  { role: 'Engineer', name: '机械工程师', description: '', baseRole: 'Engineer', isSystem: true, isSystemAdministrator: false, permissions: [], userCount: 1 },
+  { role: 'ElectricalEngineer', name: '电气工程师', description: '', baseRole: 'Engineer', isSystem: true, isSystemAdministrator: false, permissions: [], userCount: 1 },
+]
+
 const nodes: ProjectFolderTemplateNode[] = [
   { folderKey: 'mechanical', name: '机械图纸', purpose: 'MechanicalRoot', sortOrder: 10, isSystem: true, inheritPermissions: true, permissions: [] },
   { folderKey: 'electrical', name: '电气图纸', purpose: 'ElectricalRoot', sortOrder: 20, isSystem: true, inheritPermissions: true, permissions: [] },
@@ -13,7 +18,7 @@ const nodes: ProjectFolderTemplateNode[] = [
 
 function mountSettings(onSave = vi.fn().mockResolvedValue(nodes)) {
   return mount(FolderTemplateSettings, {
-    props: { nodes, users: [], pending: false, onSave },
+    props: { nodes, users: [], roles, pending: false, onSave },
     global: { plugins: [ElementPlus] },
   })
 }
@@ -46,5 +51,20 @@ describe('FolderTemplateSettings', () => {
       expect.objectContaining({ folderKey: 'electrical', sortOrder: 10 }),
       expect.objectContaining({ folderKey: 'mechanical', sortOrder: 20 }),
     ]))
+  })
+
+  it('权限角色来自实际角色目录并显示中文名称', async () => {
+    const wrapper = mountSettings()
+    await wrapper.findAll('tbody tr')[0].find('button.pdm-secondary-action').trigger('click')
+    await wrapper.get('.el-dialog button.pdm-secondary-action').trigger('click')
+
+    const roleSelect = wrapper.findAllComponents({ name: 'ElSelect' })[1]
+    const options = wrapper.findAllComponents({ name: 'ElOption' }).filter(option => ['Engineer', 'ElectricalEngineer'].includes(String(option.props('value'))))
+
+    expect(options.map(option => [option.props('label'), option.props('value')])).toEqual([
+      ['机械工程师', 'Engineer'],
+      ['电气工程师', 'ElectricalEngineer'],
+    ])
+    expect(roleSelect.props('modelValue')).toBe('Engineer')
   })
 })

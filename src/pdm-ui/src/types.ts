@@ -36,6 +36,7 @@ export interface ProjectSummary {
   primaryProjectManager?: string
   collaborativeProjectManagers: string[]
   designLead?: string
+  designLeads?: string[]
   designers: string[]
   documentCount?: number
   modelDocumentCount?: number
@@ -121,6 +122,7 @@ export interface PdmUser {
   username: string
   displayName: string
   role: string
+  roles?: string[]
   isActive: boolean
   companyId?: string | null
   crossCompanyView?: boolean
@@ -130,6 +132,7 @@ export interface SavePdmUserInput {
   username: string
   displayName: string
   role: string
+  roles: string[]
   isActive: boolean
   companyId: string
   crossCompanyView: boolean
@@ -199,6 +202,7 @@ export interface OrganizationUnit {
   code: string
   name: string
   kind: OrganizationUnitKind
+  canManufacture?: boolean
   isActive: boolean
   sortOrder: number
 }
@@ -237,8 +241,8 @@ export interface RolePermissionDirectory {
 }
 export interface CreateRoleInput { name: string; description: string; sourceRoleCode: string }
 export interface SaveProjectOrganizationInput { id?: string; name: string; projectCompanyCode: string; modelCompanyCode: string; isActive: boolean }
-export interface SaveOrganizationUnitInput { id?: string; organizationId: string; parentUnitId?: string; code: string; name: string; kind: OrganizationUnitKind; isActive: boolean; sortOrder: number }
-export interface MainProjectStaffingInput { primaryProjectManager: string; collaborativeProjectManagers: string[]; designLead: string }
+export interface SaveOrganizationUnitInput { id?: string; organizationId: string; parentUnitId?: string; code: string; name: string; kind: OrganizationUnitKind; canManufacture: boolean; isActive: boolean; sortOrder: number }
+export interface MainProjectStaffingInput { primaryProjectManager: string; collaborativeProjectManagers: string[]; designLeads: string[] }
 export interface DocumentNode {
   /** Unique assembly occurrence. Tree selection and rendering must use this value. */
   id: string
@@ -330,6 +334,32 @@ export interface ManagedDocument {
   checkoutReleaseRequestedBy?: string
   checkoutReleaseRequestedAt?: string
   updatedAt?: string
+}
+
+export interface ProjectFileVersion {
+  id: string
+  projectFileId: string
+  versionNumber: number
+  fileName: string
+  fileLength: number
+  sha256: string
+  uploadedBy: string
+  uploadedAt: string
+  comment?: string
+}
+
+export interface ProjectFile {
+  id: string
+  rootProjectId: string
+  folderId: string
+  fileName: string
+  createdBy: string
+  createdAt: string
+  updatedBy: string
+  updatedAt: string
+  deletedAt?: string
+  deletedBy?: string
+  currentVersion?: ProjectFileVersion
 }
 
 export interface EditLockSummary {
@@ -703,7 +733,7 @@ export type MaterialApprovalStatus = 'Draft' | 'Approved'
 export type MaterialSyncStatus = 'NotQueued' | 'PreviewReady' | 'Pending' | 'Succeeded' | 'Failed' | 'NeedsReview' | 'Superseded'
 export type MaterialDataSource = 'Pdm' | 'U9C'
 export type MaterialMasterOwner = 'Pdm' | 'U9C'
-export type MaterialAttachmentKind = 'Model3D' | 'Document'
+export type MaterialAttachmentKind = 'Model3D' | 'Document' | 'CoverImage'
 
 export interface MaterialAttachment {
   id: string
@@ -760,6 +790,33 @@ export interface PdmMaterial {
   referenceCount: number
   model3DAttachmentCount: number
   documentAttachmentCount: number
+  coverImageAttachmentId?: string | null
+}
+
+export interface StandardLibraryCategory {
+  id: string
+  name: string
+  parentId?: string | null
+  sortOrder: number
+  isActive: boolean
+  createdBy: string
+  createdAt: string
+  updatedBy: string
+  updatedAt: string
+  rowVersion: number
+}
+
+export interface StandardLibraryMaterial {
+  material: PdmMaterial
+  categories: StandardLibraryCategory[]
+  coverImage?: MaterialAttachment | null
+}
+
+export interface StandardLibraryMaterialPage {
+  items: StandardLibraryMaterial[]
+  total: number
+  page: number
+  pageSize: number
 }
 
 export type BomHeaderKind = 'Master' | 'Standard' | 'NonStandard' | 'Electrical'

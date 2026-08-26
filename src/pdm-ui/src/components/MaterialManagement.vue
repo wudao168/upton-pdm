@@ -2,6 +2,7 @@
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { computed, onMounted, reactive, ref, watch } from 'vue'
 import SquareLoader from './SquareLoader.vue'
+import MaterialEditorDialog from './MaterialEditorDialog.vue'
 import {
   archiveMaterial,
   approveMaterial,
@@ -18,10 +19,12 @@ import {
   listMaterialCodeApplications,
   listMaterials,
   listMaterialSyncTasks,
+  materialAttachmentObjectUrl,
   queryU9Material,
   retryMaterialSyncTask,
   decideMaterialCodeApplication,
   saveMaterialCategory,
+  setMaterialCover,
   updateMaterial,
   uploadMaterialAttachment,
 } from '../api'
@@ -38,6 +41,9 @@ import type {
   SaveMaterialInput,
 } from '../types'
 import { u9UnitLabel, u9UnitOptions } from '../u9Units'
+import { useUserDisplayName } from '../userDisplay'
+
+const displayUserName = useUserDisplayName()
 
 const props = withDefaults(defineProps<{
   token: string
@@ -73,6 +79,7 @@ const codeApplications = ref<MaterialCodeApplication[]>([])
 const decidingApplicationId = ref<string | null>(null)
 const selectedCodeApplications = ref<MaterialCodeApprovalRow[]>([])
 const batchDecidingApplications = ref(false)
+const approvalProgressText = ref('')
 const query = ref('')
 const brandFilter = ref('')
 const showArchived = ref(false)
@@ -81,10 +88,9 @@ const currentPage = ref(1)
 const editorOpen = ref(false)
 const editingId = ref<string | null>(null)
 const editorAttachments = ref<MaterialAttachment[]>([])
-const model3DInput = ref<HTMLInputElement | null>(null)
-const documentInput = ref<HTMLInputElement | null>(null)
 const uploadingAttachmentKind = ref<MaterialAttachmentKind | null>(null)
 const attachmentUploadProgress = ref(0)
+const coverUrl = ref('')
 const attachmentViewerOpen = ref(false)
 const attachmentViewerLoading = ref(false)
 const attachmentViewerMaterial = ref<PdmMaterial | null>(null)
@@ -132,8 +138,6 @@ const emptyForm = (): SaveMaterialInput => ({
   selectionAdvice: '', referencePrice: null, model3DLink: '', documentLink: '', isRecommended: false,
 })
 const form = reactive<SaveMaterialInput>(emptyForm())
-const model3DAccept = '.sldprt,.sldasm,.step,.stp,.igs,.iges,.x_t,.x_b,.sat'
-const documentAccept = '.pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.txt,.csv,.jpg,.jpeg,.png,.zip,.rar,.7z'
 
 const filteredMaterials = computed(() => {
   const normalized = query.value.trim().toLowerCase()
@@ -232,6 +236,9 @@ const applicationTypeLabel = (application: MaterialCodeApprovalRow) => applicati
 const applicationTargetLabel = (application: MaterialCodeApprovalRow) => application.groupedApplications
   ? application.groupedApplications.map(item => item.bomHeaderKind ? bomHeaderLabels[item.bomHeaderKind] : 'BOM').join('、')
   : application.bomHeaderKind ? bomHeaderLabels[application.bomHeaderKind] : '标准件BOM物料'
+const applicationMaterialCodeLabel = (application: MaterialCodeApprovalRow) => application.groupedApplications
+  ? '—'
+  : application.materialCode || application.requestedMaterialCode || '—'
 const categoryLabel = (item: PdmMaterial) => {
   const code = item.categoryCode ?? item.u9CategoryCode
   if (!code) return '—'
@@ -254,10 +261,10 @@ const materialCodePlaceholder = computed(() => {
 })
 const selectedMaterial = computed(() => selectedMaterials.value.length === 1 ? selectedMaterials.value[0] : null)
 const canEditSelected = computed(() => Boolean(selectedMaterial.value
-  && !selectedMaterial.value.isArchived
-  && selectedMaterial.value.syncStatus !== 'Pending'))
+  && !selectedMaterial.value.isArchived))
 const canBatchEditSelected = computed(() => selectedMaterials.value.length > 1
-  && selectedMaterials.value.every(item => !item.isArchived && item.syncStatus !== 'Pending'))
+  && selectedMaterials.value.every(item => !item.isArchived && !['Pending', 'NeedsReview'].includes(item.syncStatus)))
+const editorU9FieldsLocked = computed(() => Boolean(editingId.value && ['Pending', 'NeedsReview'].includes(materials.value.find(item => item.id === editingId.value)?.syncStatus ?? '')))
 const canApproveSelected = computed(() => Boolean(selectedMaterial.value
   && !selectedMaterial.value.isArchived
   && selectedMaterial.value.approvalStatus === 'Draft'))
@@ -281,6 +288,7 @@ function openCreate() {
   editingId.value = null
   editorAttachments.value = []
   Object.assign(form, emptyForm())
+  replaceCoverUrl('')
   editorOpen.value = true
 }
 
@@ -314,10 +322,6 @@ function openEdit(item: PdmMaterial) {
   void loadEditorAttachments(item.id)
 }
 
-function editorAttachmentItems(kind: MaterialAttachmentKind) {
-  return editorAttachments.value.filter(item => item.kind === kind)
-}
-
 function attachmentCount(item: PdmMaterial, kind: MaterialAttachmentKind) {
   return kind === 'Model3D' ? item.model3DAttachmentCount ?? 0 : item.documentAttachmentCount ?? 0
 }
@@ -325,18 +329,18 @@ function attachmentCount(item: PdmMaterial, kind: MaterialAttachmentKind) {
 async function loadEditorAttachments(materialId: string) {
   try {
     editorAttachments.value = await listMaterialAttachments(materialId, props.token)
+    const material = materials.value.find(item => item.id === materialId)
+    const coverId = material?.coverImageAttachmentId
+    replaceCoverUrl(coverId ? await materialAttachmentObjectUrl(materialId, coverId, props.token) : '')
   } catch (error) {
     editorAttachments.value = []
     ElMessage.error(error instanceof Error ? error.message : '附件列表加载失败')
   }
 }
 
-function triggerAttachmentPicker(kind: MaterialAttachmentKind) {
-  if (!editingId.value) {
-    ElMessage.warning('请先保存料品草稿，再上传附件')
-    return
-  }
-  ;(kind === 'Model3D' ? model3DInput.value : documentInput.value)?.click()
+function replaceCoverUrl(next: string) {
+  if (coverUrl.value.startsWith('blob:')) URL.revokeObjectURL(coverUrl.value)
+  coverUrl.value = next
 }
 
 async function handleAttachmentFiles(kind: MaterialAttachmentKind, event: Event) {
@@ -357,6 +361,15 @@ async function handleAttachmentFiles(kind: MaterialAttachmentKind, event: Event)
           attachmentUploadProgress.value = Math.round(((index + percent / 100) / files.length) * 100)
         })
         editorAttachments.value.unshift(attachment)
+        if (kind === 'CoverImage') {
+          const current = materials.value.find(item => item.id === materialId)
+          if (!current) throw new Error('料品主档已刷新，请重新打开编辑器')
+          const saved = await setMaterialCover(materialId, attachment.id, current.rowVersion, props.token)
+          const materialIndex = materials.value.findIndex(item => item.id === materialId)
+          if (materialIndex >= 0) materials.value[materialIndex] = saved
+          form.expectedRowVersion = saved.rowVersion
+          replaceCoverUrl(await materialAttachmentObjectUrl(materialId, attachment.id, props.token))
+        }
         uploaded++
       } catch (error) {
         failures.push(`${file.name}：${error instanceof Error ? error.message : '上传失败'}`)
@@ -365,13 +378,29 @@ async function handleAttachmentFiles(kind: MaterialAttachmentKind, event: Event)
     const material = materials.value.find(item => item.id === materialId)
     if (material && uploaded > 0) {
       if (kind === 'Model3D') material.model3DAttachmentCount = (material.model3DAttachmentCount ?? 0) + uploaded
-      else material.documentAttachmentCount = (material.documentAttachmentCount ?? 0) + uploaded
+      if (kind === 'Document') material.documentAttachmentCount = (material.documentAttachmentCount ?? 0) + uploaded
     }
-    if (uploaded > 0) ElMessage.success(`已上传 ${uploaded} 个${kind === 'Model3D' ? '3D' : '资料'}附件`)
+    if (uploaded > 0) ElMessage.success(kind === 'CoverImage' ? '封面图片已存档并设为当前封面' : `已上传 ${uploaded} 个${kind === 'Model3D' ? '3D' : '资料'}附件`)
     if (failures.length > 0) ElMessage.error(failures.join('；'))
   } finally {
     uploadingAttachmentKind.value = null
     attachmentUploadProgress.value = 0
+  }
+}
+
+async function clearCover() {
+  if (!editingId.value) return
+  try {
+    const current = materials.value.find(item => item.id === editingId.value)
+    if (!current) return
+    const saved = await setMaterialCover(current.id, null, current.rowVersion, props.token)
+    const index = materials.value.findIndex(item => item.id === current.id)
+    if (index >= 0) materials.value[index] = saved
+    form.expectedRowVersion = saved.rowVersion
+    replaceCoverUrl('')
+    ElMessage.success('当前封面已清除，历史图片仍保留')
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '封面清除失败')
   }
 }
 
@@ -492,8 +521,11 @@ async function decideCodeApplication(application: MaterialCodeApprovalRow, appro
   const failures: string[] = []
   const automationWarnings: string[] = []
   try {
-    for (const target of targets) {
+    for (const [index, target] of targets.entries()) {
       try {
+        approvalProgressText.value = approved
+          ? `正在处理第 ${index + 1}/${targets.length} 项：读取U9C最新序号、申请正式料号并回查，请勿重复操作。`
+          : `正在退回第 ${index + 1}/${targets.length} 项料号申请。`
         const result = await decideMaterialCodeApplication(target.id, target.rowVersion, approved, comment, props.token)
         succeeded++
         if (approved && (result.automation?.stage === 'ItemSyncFailed' || result.automation?.stage === 'BomSyncFailed'))
@@ -521,6 +553,7 @@ async function decideCodeApplication(application: MaterialCodeApprovalRow, appro
     if (automationWarnings.length) ElMessage.warning(`有 ${automationWarnings.length} 项已批准但自动同步需处理：${automationWarnings.join('；')}`)
   } finally {
     decidingApplicationId.value = null
+    approvalProgressText.value = ''
   }
 }
 
@@ -563,8 +596,11 @@ async function decideSelectedCodeApplications(approved: boolean) {
   const failures: string[] = []
   const automationWarnings: string[] = []
   try {
-    for (const application of targets) {
+    for (const [index, application] of targets.entries()) {
       try {
+        approvalProgressText.value = approved
+          ? `正在批量处理第 ${index + 1}/${targets.length} 项：读取U9C最新序号、申请正式料号并回查，请勿重复操作。`
+          : `正在批量退回第 ${index + 1}/${targets.length} 项料号申请。`
         const result = await decideMaterialCodeApplication(application.id, application.rowVersion, approved, comment, props.token)
         succeeded++
         if (approved && (result.automation?.stage === 'ItemSyncFailed' || result.automation?.stage === 'BomSyncFailed'))
@@ -596,6 +632,7 @@ async function decideSelectedCodeApplications(approved: boolean) {
     if (automationWarnings.length) ElMessage.warning(`有 ${automationWarnings.length} 项已批准但自动同步需处理：${automationWarnings.join('；')}`)
   } finally {
     batchDecidingApplications.value = false
+    approvalProgressText.value = ''
   }
 }
 
@@ -643,7 +680,7 @@ async function saveBatchEdit() {
         const saved = changeResult?.material ?? await updateMaterial(item.id, input, props.token)
         const index = materials.value.findIndex(value => value.id === saved.id)
         if (index >= 0) materials.value[index] = saved
-        if (changeResult) tasks.value.unshift(changeResult.task)
+        if (changeResult?.task) tasks.value.unshift(changeResult.task)
         savedCount++
       } catch (error) {
         failures.push(`${item.materialCode}：${error instanceof Error ? error.message : '修改失败'}`)
@@ -672,11 +709,11 @@ async function saveMaterial() {
     const saved = changeResult?.material ?? (editingId.value
       ? await updateMaterial(editingId.value, { ...form }, props.token)
       : await createMaterial({ ...form }, props.token))
-    if (changeResult) tasks.value.unshift(changeResult.task)
+    if (changeResult?.task) tasks.value.unshift(changeResult.task)
     const index = materials.value.findIndex(item => item.id === saved.id)
     if (index >= 0) materials.value[index] = saved
     else materials.value.push(saved)
-    materials.value.sort((left, right) => left.materialCode.localeCompare(right.materialCode))
+    materials.value.sort((left, right) => Number(Boolean(right.isRecommended)) - Number(Boolean(left.isRecommended)) || right.referenceCount - left.referenceCount || left.materialCode.localeCompare(right.materialCode))
     if (wasCreating) {
       editingId.value = saved.id
       Object.assign(form, materialInput(saved))
@@ -684,11 +721,11 @@ async function saveMaterial() {
     } else {
       editorOpen.value = false
     }
-    ElMessage.success(changeResult
+    ElMessage.success(changeResult?.task
       ? existing?.u9SyncConfirmed
         ? '料品已更新，并生成U9C修改预览'
         : '料品已更新，旧请求已废止并生成新的U9C创建预览'
-      : wasCreating ? '料品草稿已创建，可以继续上传3D和资料' : '料品已更新')
+      : wasCreating ? '料品草稿已创建，可以继续上传3D和资料' : changeResult ? 'PLM专属字段已更新，不生成U9C任务' : '料品已更新')
   } catch (error) {
     ElMessage.error(error instanceof Error ? error.message : '料品保存失败')
   } finally {
@@ -995,7 +1032,7 @@ onMounted(() => {
               <el-table class="material-table" :data="pagedMaterials" height="100%" stripe row-key="id" table-layout="fixed" :fit="true" empty-text="尚未创建PLM料品" @selection-change="selectedMaterials = $event">
           <el-table-column type="selection" width="38" />
           <el-table-column prop="materialCode" label="物料编码" min-width="100" show-overflow-tooltip />
-          <el-table-column prop="name" label="名称" min-width="112" show-overflow-tooltip />
+          <el-table-column prop="name" label="名称" min-width="112" show-overflow-tooltip><template #default="{ row }"><el-tag v-if="row.isRecommended" size="small" type="warning">推荐</el-tag> {{ row.name }}</template></el-table-column>
           <el-table-column label="引用" min-width="48"><template #default="{ row }">{{ row.referenceCount ?? 0 }}</template></el-table-column>
           <el-table-column label="规格" min-width="220" show-overflow-tooltip><template #default="{ row }">{{ row.specification || '—' }}</template></el-table-column>
           <el-table-column label="品牌" min-width="56" show-overflow-tooltip><template #default="{ row }">{{ row.brand || '—' }}</template></el-table-column>
@@ -1007,7 +1044,7 @@ onMounted(() => {
           <el-table-column label="参考价格" min-width="72" show-overflow-tooltip><template #default="{ row }">{{ referencePriceLabel(row) }}</template></el-table-column>
           <el-table-column label="3D" min-width="48"><template #default="{ row }"><el-button link type="primary" :disabled="attachmentCount(row, 'Model3D') === 0" @click.stop="openAttachmentViewer(row, 'Model3D')">{{ attachmentCount(row, 'Model3D') || '—' }}</el-button></template></el-table-column>
           <el-table-column label="资料" min-width="48"><template #default="{ row }"><el-button link type="primary" :disabled="attachmentCount(row, 'Document') === 0" @click.stop="openAttachmentViewer(row, 'Document')">{{ attachmentCount(row, 'Document') || '—' }}</el-button></template></el-table-column>
-          <el-table-column prop="createdBy" label="创建人" min-width="70" show-overflow-tooltip />
+          <el-table-column label="创建人" min-width="70" show-overflow-tooltip><template #default="{ row }">{{ displayUserName(row.createdBy) }}</template></el-table-column>
           <el-table-column label="创建时间" min-width="130" show-overflow-tooltip><template #default="{ row }">{{ dateTimeLabel(row.createdAt) }}</template></el-table-column>
           <el-table-column label="计量单位" min-width="76"><template #default="{ row }">{{ u9UnitLabel(row.unitCode) }}</template></el-table-column>
           <el-table-column label="来源/主控" min-width="76"><template #default="{ row }">{{ row.sourceSystem === 'U9C' ? 'U9C/U9C' : 'PLM/PLM' }}</template></el-table-column>
@@ -1033,7 +1070,7 @@ onMounted(() => {
           <el-table-column label="来源" min-width="190" show-overflow-tooltip><template #default="{ row }">{{ row.projectCode ? `${row.projectCode} · ${row.projectName || '未命名项目'}` : '料品主档' }}</template></el-table-column>
           <el-table-column label="审批对象" min-width="150" show-overflow-tooltip><template #default="{ row }">{{ row.bomHeaderKind ? bomHeaderLabels[row.bomHeaderKind] : row.materialName || '普通料品' }}</template></el-table-column>
           <el-table-column prop="materialCode" label="PLM料号" min-width="120"><template #default="{ row }">{{ row.materialCode || '—' }}</template></el-table-column>
-          <el-table-column prop="requestedBy" label="申请人" min-width="90"><template #default="{ row }">{{ row.requestedBy || '—' }}</template></el-table-column>
+          <el-table-column label="申请人" min-width="90"><template #default="{ row }">{{ displayUserName(row.requestedBy) }}</template></el-table-column>
           <el-table-column label="申请时间" min-width="145"><template #default="{ row }">{{ row.requestedAt ? dateTimeLabel(row.requestedAt) : '—' }}</template></el-table-column>
           <el-table-column label="状态" width="110"><template #default="{ row }"><el-tag :type="row.status === 'Succeeded' ? 'success' : row.status === 'Failed' ? 'danger' : 'warning'">{{ syncLabels[row.status] }}</el-tag></template></el-table-column>
           <el-table-column prop="attemptCount" label="重试次数" width="90" />
@@ -1045,7 +1082,8 @@ onMounted(() => {
 
       <el-tab-pane name="code-approvals">
         <template #label><span class="material-tab-label">料号审批<em v-if="codeApprovalNoticeCount">{{ codeApprovalNoticeCount }}</em></span></template>
-        <div class="material-code-approval-note">BOM料号和标准件料号都在这里审批；BOM料号批准后，系统自动同步U9C料品、创建不含子件的A1 BOM并回查，标准化无需返回项目页二次操作。正式子件只在BOM审核发布后自动同步；已批准和已退回记录长期保留在本页。</div>
+        <div class="material-code-approval-note">BOM料号和标准件料号都在这里审批；BOM料号批准后，系统先自动同步U9C料品。U9C不接受零子件BOM，待BOM审核产生首个正式子件后自动创建A1并回查，标准化无需返回项目页二次操作；后续正式子件也只在BOM审核发布后自动同步。已批准和已退回记录长期保留在本页。</div>
+        <div v-if="approvalProgressText" class="material-code-approval-progress" role="status" aria-live="polite">{{ approvalProgressText }}</div>
         <div v-if="canDecideMaterialCode" class="material-code-approval-toolbar">
           <div class="material-code-approval-toolbar__actions">
             <el-button type="primary" :disabled="selectedCodeApplications.length === 0 || decidingApplicationId !== null" :loading="batchDecidingApplications" @click="decideSelectedCodeApplications(true)">批量批准</el-button>
@@ -1064,10 +1102,10 @@ onMounted(() => {
             <el-table-column prop="specification" label="型号" width="78" show-overflow-tooltip><template #default="{ row }">{{ row.specification || '—' }}</template></el-table-column>
             <el-table-column prop="brand" label="品牌" width="62" show-overflow-tooltip><template #default="{ row }">{{ row.brand || '—' }}</template></el-table-column>
             <el-table-column prop="remark" label="备注" width="72" show-overflow-tooltip><template #default="{ row }">{{ row.remark || '—' }}</template></el-table-column>
-            <el-table-column prop="requestedBy" label="申请人" width="70" show-overflow-tooltip />
+            <el-table-column label="申请人" width="70" show-overflow-tooltip><template #default="{ row }">{{ displayUserName(row.requestedBy) }}</template></el-table-column>
             <el-table-column label="申请时间" width="116" show-overflow-tooltip><template #default="{ row }">{{ dateTimeLabel(row.requestedAt) }}</template></el-table-column>
             <el-table-column label="状态" width="72"><template #default="{ row }"><el-tag :type="row.status === 'Approved' ? 'success' : row.status === 'Rejected' ? 'danger' : 'warning'">{{ row.status === 'Approved' ? '已批准' : row.status === 'Rejected' ? '已退回' : '待审批' }}</el-tag></template></el-table-column>
-            <el-table-column prop="materialCode" label="审批料号" width="98" show-overflow-tooltip><template #default="{ row }">{{ row.materialCode || row.requestedMaterialCode || '—' }}</template></el-table-column>
+            <el-table-column prop="materialCode" label="审批料号" width="98" show-overflow-tooltip><template #default="{ row }">{{ applicationMaterialCodeLabel(row) }}</template></el-table-column>
             <el-table-column label="操作" width="92"><template #default="{ row }"><template v-if="row.status === 'Pending' && canDecideMaterialCode"><el-button link type="primary" :loading="decidingApplicationId === row.id" :disabled="batchDecidingApplications" @click="decideCodeApplication(row, true)">批准</el-button><el-button link type="danger" :disabled="decidingApplicationId === row.id || batchDecidingApplications" @click="decideCodeApplication(row, false)">退回</el-button></template><span v-else>{{ row.decidedBy || '—' }}</span></template></el-table-column>
           </el-table>
         </div>
@@ -1107,48 +1145,24 @@ onMounted(() => {
 
     </el-tabs>
 
-    <el-dialog v-model="editorOpen" class="material-editor-dialog" :title="editingId ? '编辑或变更料品' : '新增料品草稿'" width="688px">
-      <el-form label-position="top">
-        <div class="form-grid material-editor-grid">
-          <el-form-item label="PLM物料编码"><el-input v-model="form.materialCode" disabled :placeholder="materialCodePlaceholder" /><p class="field-help">保存时从分类当前流水起逐号只读查询U9C，跳过编码占用及规格冲突后预留可用编号；创建后不可修改。</p></el-form-item>
-          <el-form-item label="物料名称" required><el-input v-model="form.name" /></el-form-item>
-          <el-form-item label="U9C对应分类" required><el-select v-model="form.categoryCode" filterable placeholder="请选择U9C对应分类" @change="applyCategoryDefaults"><el-option v-for="category in creatableCategories" :key="category.code" :label="`${category.code} ${category.name}`" :value="category.code" /></el-select></el-form-item>
-          <el-form-item label="PLM业务类型"><el-select v-model="form.kind" disabled><el-option label="电气件" value="Electrical" /><el-option label="机械外购件" value="Standard" /><el-option label="非标机加件" value="NonStandard" /><el-option label="产品/组件" value="Product" /></el-select></el-form-item>
-          <el-form-item label="计量单位" required><el-select v-model="form.unitCode" filterable placeholder="请选择U9C计量单位"><el-option v-for="unit in u9UnitOptions" :key="unit.code" :label="`${unit.code} ${unit.name}`" :value="unit.code" /></el-select></el-form-item>
-          <el-form-item label="规格"><el-input v-model="form.specification" /></el-form-item>
-          <el-form-item label="材质"><el-input v-model="form.material" /></el-form-item>
-          <el-form-item label="品牌"><el-input v-model="form.brand" /></el-form-item>
-          <el-form-item label="表面处理"><el-input v-model="form.surfaceTreatment" /></el-form-item>
-          <el-form-item label="重量"><div class="material-weight-input"><el-input-number v-model="form.weight" :min="0" :precision="6" /></div></el-form-item>
-          <el-form-item label="参考价格"><el-input-number v-model="form.referencePrice" :min="0" :precision="2" :step="10" controls-position="right" /></el-form-item>
-          <el-form-item label="推荐属性"><el-button class="material-recommend-button" :type="form.isRecommended ? 'warning' : ''" :aria-pressed="form.isRecommended" @click="form.isRecommended = !form.isRecommended">{{ form.isRecommended ? '已推荐' : '推荐' }}</el-button></el-form-item>
-          <el-form-item label="料品采购链接"><el-input v-model="form.purchaseLink" type="url" placeholder="https://..." /></el-form-item>
-          <el-form-item label="3D">
-            <div class="material-attachment-field">
-              <input ref="model3DInput" class="material-attachment-input" type="file" multiple :accept="model3DAccept" @change="handleAttachmentFiles('Model3D', $event)" />
-              <el-button :disabled="!editingId || uploadingAttachmentKind !== null" :loading="uploadingAttachmentKind === 'Model3D'" @click="triggerAttachmentPicker('Model3D')">{{ editingId ? '上传附件' : '保存后上传' }}</el-button>
-              <span v-if="uploadingAttachmentKind === 'Model3D'" class="material-upload-progress">{{ attachmentUploadProgress }}%</span>
-              <div v-if="editorAttachmentItems('Model3D').length" class="material-attachment-list">
-                <el-button v-for="attachment in editorAttachmentItems('Model3D')" :key="attachment.id" link type="primary" :title="attachment.originalFileName" @click="downloadAttachment(attachment)">{{ attachment.originalFileName }}</el-button>
-              </div>
-            </div>
-          </el-form-item>
-          <el-form-item label="资料">
-            <div class="material-attachment-field">
-              <input ref="documentInput" class="material-attachment-input" type="file" multiple :accept="documentAccept" @change="handleAttachmentFiles('Document', $event)" />
-              <el-button :disabled="!editingId || uploadingAttachmentKind !== null" :loading="uploadingAttachmentKind === 'Document'" @click="triggerAttachmentPicker('Document')">{{ editingId ? '上传附件' : '保存后上传' }}</el-button>
-              <span v-if="uploadingAttachmentKind === 'Document'" class="material-upload-progress">{{ attachmentUploadProgress }}%</span>
-              <div v-if="editorAttachmentItems('Document').length" class="material-attachment-list">
-                <el-button v-for="attachment in editorAttachmentItems('Document')" :key="attachment.id" link type="primary" :title="attachment.originalFileName" @click="downloadAttachment(attachment)">{{ attachment.originalFileName }}</el-button>
-              </div>
-            </div>
-          </el-form-item>
-          <el-form-item class="material-editor-grid__wide" label="备注"><el-input v-model="form.remark" /></el-form-item>
-          <el-form-item label="选型建议"><el-input v-model="form.selectionAdvice" maxlength="1000" show-word-limit /></el-form-item>
-        </div>
-      </el-form>
-      <template #footer><el-button @click="editorOpen = false">取消</el-button><el-button type="primary" :loading="saving" @click="saveMaterial">{{ editingId ? '保存修改' : '保存草稿' }}</el-button></template>
-    </el-dialog>
+    <MaterialEditorDialog
+      v-model="editorOpen"
+      :editing-id="editingId"
+      :form="form"
+      :categories="creatableCategories"
+      :material-code-placeholder="materialCodePlaceholder"
+      :attachments="editorAttachments"
+      :saving="saving"
+      :uploading-kind="uploadingAttachmentKind"
+      :upload-progress="attachmentUploadProgress"
+      :cover-url="coverUrl"
+      :u9-fields-locked="editorU9FieldsLocked"
+      @category-change="applyCategoryDefaults"
+      @attachment-files="handleAttachmentFiles"
+      @download-attachment="downloadAttachment"
+      @clear-cover="clearCover"
+      @save="saveMaterial"
+    />
 
     <el-dialog v-model="attachmentViewerOpen" :title="attachmentViewerTitle" width="620px">
       <el-table v-loading="attachmentViewerLoading" :data="attachmentViewerItems" empty-text="暂无附件" max-height="420">
@@ -1189,6 +1203,7 @@ onMounted(() => {
 .material-tab-label{display:inline-flex;align-items:center;gap:5px}.material-tab-label em{min-width:18px;height:18px;padding:0 5px;border-radius:9px;background:#0b72e7;color:#fff;font-size:10px;font-style:normal;font-weight:600;line-height:18px;text-align:center}
 .material-table :deep(.el-table__body tr.el-table__row){height:30px}.material-table :deep(.el-table__body td.el-table__cell){height:30px;padding:0}.material-table :deep(.el-table__body .el-tag){height:20px;padding-top:0;padding-bottom:0;line-height:18px}
 .material-code-approval-note,.material-sync-note{margin-bottom:8px;padding:8px 10px;border:1px solid #dbeafe;border-radius:6px;background:#eff6ff;color:#475569;font-size:11px}
+.material-code-approval-progress{margin-bottom:8px;padding:8px 10px;border:1px solid #bfdbfe;border-radius:6px;background:#eff6ff;color:#1d4ed8;font-size:11px}
 .material-sync-toolbar{display:flex;align-items:center;gap:8px;margin-bottom:8px}.material-sync-toolbar :deep(.el-button){min-width:110px;height:28px;margin-left:0;font-size:11px}.material-sync-toolbar>span{color:#64748b;font-size:11px}
 .material-code-approval-toolbar{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:8px}.material-code-approval-toolbar__actions{display:flex;align-items:center;gap:6px}.material-code-approval-toolbar :deep(.el-button){min-width:76px;height:28px;margin-left:0;font-size:11px}.material-code-approval-toolbar>span{color:#64748b;font-size:11px}
 .material-code-approval-table-shell{width:100%;min-width:0;max-width:100%;overflow:hidden}.material-code-approval-table{width:100%;min-width:0;max-width:100%}.material-code-approval-table :deep(.el-table__inner-wrapper),.material-code-approval-table :deep(.el-scrollbar),.material-code-approval-table :deep(.el-scrollbar__wrap){max-width:100%}.material-code-approval-table :deep(.el-table__cell){padding-left:0;padding-right:0;text-align:center}.material-code-approval-table :deep(.cell){overflow:hidden;padding:0 4px;text-overflow:ellipsis;white-space:nowrap}.material-code-approval-table :deep(.el-button){margin-left:0;padding:2px 3px;font-size:11px}.material-code-approval-table :deep(.el-tag){max-width:100%;padding:0 5px;font-size:11px}

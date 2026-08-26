@@ -1,4 +1,4 @@
-import type { AddDrawingReviewMarkupInput, ApprovalStep, ApprovalU9AutomationResult, AuditEntry, BatchUpdateBomItemsInput, BomEmptyDeclaration, BomGenerationResult, BomHeaderKind, BomItem, BomKind, BomValidationRules, BomVersion, BomVersionState, CreateProjectInput, CreateReleasePackageInput, CreateRoleInput, CreateSubprojectInput, CrmConnectionTestResult, CrmCustomerSyncResult, CrmIntegrationSettings, DocumentKind, DocumentModelDrawingRelation, DocumentNode, DocumentVersionComparison, DocumentVersionSummary, DocumentWhereUsed, DrawingReviewCandidate, DrawingReviewDecision, DrawingReviewPackage, DrawingReviewTarget, EditLockSummary, EquipmentTypeDefinition, FolderPermissionRule, MainProjectStaffingInput, ManagedDocument, ManufacturingBomBaseline, MaterialAttachment, MaterialAttachmentKind, MaterialCategory, MaterialCategoryRule, MaterialCodeApplication, MaterialCodeApplicationStatus, MaterialCodeDecisionResult, MaterialCodeResolution, MaterialKind, MaterialRemovalReadiness, MaterialRemovalResult, MaterialSyncExecutionResult, MaterialSyncTask, MyApprovalTask, OrganizationDirectory, OrganizationUnit, PasswordResetTask, PdmCustomer, PdmMaterial, PdmSystemSettings, PdmUser, PdmUserProfile, ProgramTemplate, ProgramTemplateApprovalDecision, ProgramTemplateAttachmentKind, ProgramTemplateDraftInput, ProgramTemplateRevision, ProgramTemplateTask, ProgramTemplateVersionBump, ProjectBomHeader, ProjectBomU9SyncExecution, ProjectBomU9SyncPreview, ProjectFolder, ProjectFolderTemplateNode, ProjectNumberingOptions, ProjectOrganization, ProjectSummary, ProjectVersionItem, ReferenceStatus, ReleasePackageSummary, ReleaseScope, RolePermissionDirectory, SaveMaterialInput, SaveOrganizationUnitInput, SavePdmUserInput, SaveProjectOrganizationInput, U9BomQueryExecution, U9BomQueryInput, U9BomWriteExecution, U9BomWriteInput, U9BomWritePreview, U9ConnectionTestResult, U9ItemQueryResult, U9MaterialIntegrationSettings, U9MaterialSampleImportResult, U9MaterialSamplePreview, UpdateCrmIntegrationInput, UpdateProjectInput, UpdateU9MaterialIntegrationInput } from './types'
+import type { AddDrawingReviewMarkupInput, ApprovalStep, ApprovalU9AutomationResult, AuditEntry, BatchUpdateBomItemsInput, BomEmptyDeclaration, BomGenerationResult, BomHeaderKind, BomItem, BomKind, BomValidationRules, BomVersion, BomVersionState, CreateProjectInput, CreateReleasePackageInput, CreateRoleInput, CreateSubprojectInput, CrmConnectionTestResult, CrmCustomerSyncResult, CrmIntegrationSettings, DocumentKind, DocumentModelDrawingRelation, DocumentNode, DocumentVersionComparison, DocumentVersionSummary, DocumentWhereUsed, DrawingReviewCandidate, DrawingReviewDecision, DrawingReviewPackage, DrawingReviewTarget, EditLockSummary, EquipmentTypeDefinition, FolderPermissionRule, MainProjectStaffingInput, ManagedDocument, ManufacturingBomBaseline, MaterialAttachment, MaterialAttachmentKind, MaterialCategory, MaterialCategoryRule, MaterialCodeApplication, MaterialCodeApplicationStatus, MaterialCodeDecisionResult, MaterialCodeResolution, MaterialKind, MaterialRemovalReadiness, MaterialRemovalResult, MaterialSyncExecutionResult, MaterialSyncTask, MyApprovalTask, OrganizationDirectory, OrganizationUnit, PasswordResetTask, PdmCustomer, PdmMaterial, PdmSystemSettings, PdmUser, PdmUserProfile, ProgramTemplate, ProgramTemplateApprovalDecision, ProgramTemplateAttachmentKind, ProgramTemplateDraftInput, ProgramTemplateRevision, ProgramTemplateTask, ProgramTemplateVersionBump, ProjectBomHeader, ProjectBomU9SyncExecution, ProjectBomU9SyncPreview, ProjectFile, ProjectFileVersion, ProjectFolder, ProjectFolderTemplateNode, ProjectNumberingOptions, ProjectOrganization, ProjectSummary, ProjectVersionItem, ReferenceStatus, ReleasePackageSummary, ReleaseScope, RolePermissionDirectory, SaveMaterialInput, SaveOrganizationUnitInput, SavePdmUserInput, SaveProjectOrganizationInput, StandardLibraryCategory, StandardLibraryMaterialPage, U9BomQueryExecution, U9BomQueryInput, U9BomWriteExecution, U9BomWriteInput, U9BomWritePreview, U9ConnectionTestResult, U9ItemQueryResult, U9MaterialIntegrationSettings, U9MaterialSampleImportResult, U9MaterialSamplePreview, UpdateCrmIntegrationInput, UpdateProjectInput, UpdateU9MaterialIntegrationInput } from './types'
 
 const apiBase = (import.meta.env.VITE_PDM_API_BASE ?? 'http://127.0.0.1:5080').replace(/\/$/, '')
 
@@ -15,6 +15,7 @@ export interface AuthSession {
   username: string
   displayName: string
   role: string
+  roles?: string[]
   permissions: string[]
   primaryCompanyId: string
   activeCompanyId: string
@@ -174,6 +175,7 @@ interface ApiProject {
   primaryProjectManager?: string | null
   collaborativeProjectManagers?: string[]
   designLead?: string | null
+  designLeads?: string[]
   designers?: string[]
   documentCount?: number | null
   modelDocumentCount?: number | null
@@ -351,6 +353,7 @@ async function requestJson<T>(path: string, init: RequestInit = {}, token?: stri
     throw new PdmApiError(message, response.status)
   }
 
+  if (response.status === 204) return undefined as T
   return response.json() as Promise<T>
 }
 
@@ -394,7 +397,7 @@ export function updateMaterial(materialId: string, input: SaveMaterialInput, tok
   return requestJson<PdmMaterial>(`/api/materials/${materialId}`, { method: 'PUT', body: JSON.stringify(input) }, token)
 }
 
-export function changeApprovedMaterial(materialId: string, input: SaveMaterialInput, token: string): Promise<{ material: PdmMaterial; task: MaterialSyncTask }> {
+export function changeApprovedMaterial(materialId: string, input: SaveMaterialInput, token: string): Promise<{ material: PdmMaterial; task?: MaterialSyncTask | null }> {
   return requestJson(`/api/materials/${materialId}/change`, { method: 'POST', body: JSON.stringify(input) }, token)
 }
 
@@ -444,6 +447,73 @@ export async function downloadMaterialAttachment(materialId: string, attachment:
   anchor.download = attachment.originalFileName
   anchor.click()
   URL.revokeObjectURL(url)
+}
+
+export async function materialAttachmentObjectUrl(materialId: string, attachmentId: string, token: string, thumbnailMaxSize?: number): Promise<string> {
+  const response = await fetch(`${apiBase}/api/materials/${materialId}/attachments/${attachmentId}/file`, { headers: authenticatedHeaders(token) })
+  if (!response.ok) throw new PdmApiError(`图片加载失败（${response.status}）`, response.status)
+  let imageBlob = await response.blob()
+  if (thumbnailMaxSize && typeof createImageBitmap === 'function') {
+    try {
+      const bitmap = await createImageBitmap(imageBlob)
+      const scale = Math.min(1, thumbnailMaxSize / Math.max(bitmap.width, bitmap.height))
+      const canvas = document.createElement('canvas')
+      canvas.width = Math.max(1, Math.round(bitmap.width * scale))
+      canvas.height = Math.max(1, Math.round(bitmap.height * scale))
+      canvas.getContext('2d')?.drawImage(bitmap, 0, 0, canvas.width, canvas.height)
+      const thumbnail = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, 'image/webp', 0.82))
+      bitmap.close()
+      if (thumbnail) imageBlob = thumbnail
+    } catch {
+      // Older browsers can still display the original authenticated image.
+    }
+  }
+  return URL.createObjectURL(imageBlob)
+}
+
+export function setMaterialCover(materialId: string, attachmentId: string | null, expectedRowVersion: number, token: string): Promise<PdmMaterial> {
+  return requestJson<PdmMaterial>(`/api/materials/${materialId}/cover`, {
+    method: 'PUT', body: JSON.stringify({ attachmentId, expectedRowVersion }),
+  }, token)
+}
+
+export function listStandardLibraryCategories(token: string, includeInactive = false): Promise<StandardLibraryCategory[]> {
+  return requestJson<StandardLibraryCategory[]>(`/api/standard-library/categories${includeInactive ? '?includeInactive=true' : ''}`, {}, token)
+}
+
+export function saveStandardLibraryCategory(input: { name: string; parentId?: string | null; sortOrder: number; isActive: boolean; expectedRowVersion?: number | null }, token: string, categoryId?: string): Promise<StandardLibraryCategory> {
+  return requestJson<StandardLibraryCategory>(categoryId ? `/api/standard-library/categories/${categoryId}` : '/api/standard-library/categories', {
+    method: categoryId ? 'PUT' : 'POST', body: JSON.stringify(input),
+  }, token)
+}
+
+export function deleteStandardLibraryCategory(categoryId: string, expectedRowVersion: number, token: string): Promise<void> {
+  return requestJson<void>(`/api/standard-library/categories/${categoryId}?expectedRowVersion=${expectedRowVersion}`, { method: 'DELETE' }, token)
+}
+
+export function listStandardLibraryMaterials(token: string, input: { categoryId?: string; query?: string; brand?: string; recommendedOnly?: boolean; page?: number; pageSize?: number }): Promise<StandardLibraryMaterialPage> {
+  const parameters = new URLSearchParams()
+  if (input.categoryId) parameters.set('categoryId', input.categoryId)
+  if (input.query?.trim()) parameters.set('query', input.query.trim())
+  if (input.brand?.trim()) parameters.set('brand', input.brand.trim())
+  if (input.recommendedOnly) parameters.set('recommendedOnly', 'true')
+  if (input.page) parameters.set('page', String(input.page))
+  if (input.pageSize) parameters.set('pageSize', String(input.pageSize))
+  return requestJson<StandardLibraryMaterialPage>(`/api/standard-library/materials?${parameters}`, {}, token)
+}
+
+export function addStandardLibraryMaterials(categoryIds: string[], materialIds: string[], token: string): Promise<void> {
+  return requestJson<void>('/api/standard-library/memberships', { method: 'POST', body: JSON.stringify({ categoryIds, materialIds }) }, token)
+}
+
+export function removeStandardLibraryMaterial(categoryId: string, materialId: string, token: string): Promise<void> {
+  return requestJson<void>(`/api/standard-library/categories/${categoryId}/materials/${materialId}`, { method: 'DELETE' }, token)
+}
+
+export function setStandardLibraryRecommendation(materialId: string, isRecommended: boolean, expectedRowVersion: number, token: string): Promise<PdmMaterial> {
+  return requestJson<PdmMaterial>(`/api/standard-library/materials/${materialId}/recommended`, {
+    method: 'PUT', body: JSON.stringify({ isRecommended, expectedRowVersion }),
+  }, token)
 }
 
 export function linkBomMaterial(projectId: string, bomItemId: string, materialId: string, token: string): Promise<PdmMaterial> {
@@ -687,7 +757,7 @@ export function createUser(input: SavePdmUserInput, token: string): Promise<PdmU
 
 export function updateUser(input: SavePdmUserInput, token: string): Promise<PdmUser> {
   return requestJson(`/api/users/${encodeURIComponent(input.username)}`, {
-    method: 'PUT', body: JSON.stringify({ displayName: input.displayName, role: input.role, isActive: input.isActive, companyId: input.companyId, crossCompanyView: input.crossCompanyView, accessibleCompanyIds: input.accessibleCompanyIds }),
+    method: 'PUT', body: JSON.stringify({ displayName: input.displayName, role: input.role, roles: input.roles, isActive: input.isActive, companyId: input.companyId, crossCompanyView: input.crossCompanyView, accessibleCompanyIds: input.accessibleCompanyIds }),
   }, token)
 }
 
@@ -762,6 +832,10 @@ export async function updateMainProjectStaffing(projectId: string, input: MainPr
 
 export async function updateChildProjectDesigners(projectId: string, designers: string[], token: string): Promise<ProjectSummary> {
   return mapProject(await requestJson<ApiProject>(`/api/projects/${projectId}/designers`, { method: 'PUT', body: JSON.stringify({ designers }) }, token))
+}
+
+export async function updateChildProjectManager(projectId: string, projectManager: string, token: string): Promise<ProjectSummary> {
+  return mapProject(await requestJson<ApiProject>(`/api/projects/${projectId}/manager`, { method: 'PUT', body: JSON.stringify({ projectManager }) }, token))
 }
 
 export function getSystemSettings(token: string): Promise<PdmSystemSettings> {
@@ -1039,6 +1113,73 @@ export async function updateProjectFolderPermissions(projectId: string, folderId
   return result.map(mapProjectFolder)
 }
 
+export function listProjectFiles(projectId: string, folderId: string, includeDeleted: boolean, token: string): Promise<ProjectFile[]> {
+  return requestJson(`/api/projects/${projectId}/files?folderId=${encodeURIComponent(folderId)}&includeDeleted=${includeDeleted}`, {}, token)
+}
+
+export async function uploadProjectFile(projectId: string, folderId: string, file: File, token: string, comment = '', onProgress?: (percent: number) => void, signal?: AbortSignal): Promise<ProjectFile> {
+  onProgress?.(0)
+  const digest = await crypto.subtle.digest('SHA-256', await file.arrayBuffer())
+  const sha256 = [...new Uint8Array(digest)].map(value => value.toString(16).padStart(2, '0')).join('').toUpperCase()
+  const session = await requestJson<{ id: string; chunkSize: number }>(`/api/projects/${projectId}/folders/${folderId}/file-uploads`, {
+    method: 'POST', body: JSON.stringify({ fileName: file.name, totalLength: file.size, sha256 }), signal,
+  }, token)
+  try {
+    const chunks = Math.ceil(file.size / session.chunkSize)
+    for (let index = 0; index < chunks; index++) {
+      const response = await fetch(`${apiBase}/api/project-file-uploads/${session.id}/chunks/${index}`, {
+        method: 'PUT', headers: authenticatedHeaders(token), body: file.slice(index * session.chunkSize, Math.min(file.size, (index + 1) * session.chunkSize)), signal,
+      })
+      if (!response.ok) throw new PdmApiError(`文件分块${index + 1}上传失败（${response.status}）`, response.status)
+      onProgress?.(Math.round(((index + 1) / chunks) * 95))
+    }
+    const saved = await requestJson<ProjectFile>(`/api/project-file-uploads/${session.id}/complete`, { method: 'POST', body: JSON.stringify({ comment }), signal }, token)
+    onProgress?.(100)
+    return saved
+  } catch (error) {
+    await requestJson<void>(`/api/project-file-uploads/${session.id}`, { method: 'DELETE' }, token).catch(() => undefined)
+    throw error
+  }
+}
+
+export function createProjectFolder(projectId: string, parentFolderId: string, name: string, token: string): Promise<ProjectFolder> {
+  return requestJson(`/api/projects/${projectId}/folders/${parentFolderId}/children`, { method: 'POST', body: JSON.stringify({ name }) }, token)
+}
+export function renameProjectFolder(projectId: string, folderId: string, name: string, token: string): Promise<ProjectFolder> {
+  return requestJson(`/api/projects/${projectId}/folders/${folderId}`, { method: 'PATCH', body: JSON.stringify({ name }) }, token)
+}
+export function moveProjectFolder(projectId: string, folderId: string, targetFolderId: string, token: string): Promise<ProjectFolder> {
+  return requestJson(`/api/projects/${projectId}/folders/${folderId}/move`, { method: 'POST', body: JSON.stringify({ folderId: targetFolderId }) }, token)
+}
+export function deleteProjectFolder(projectId: string, folderId: string, token: string): Promise<void> {
+  return requestJson(`/api/projects/${projectId}/folders/${folderId}`, { method: 'DELETE' }, token)
+}
+export function renameProjectFile(projectId: string, fileId: string, name: string, token: string): Promise<ProjectFile> {
+  return requestJson(`/api/projects/${projectId}/files/${fileId}`, { method: 'PATCH', body: JSON.stringify({ name }) }, token)
+}
+export function moveProjectFile(projectId: string, fileId: string, folderId: string, token: string): Promise<ProjectFile> {
+  return requestJson(`/api/projects/${projectId}/files/${fileId}/move`, { method: 'POST', body: JSON.stringify({ folderId }) }, token)
+}
+export function deleteProjectFile(projectId: string, fileId: string, token: string): Promise<ProjectFile> {
+  return requestJson(`/api/projects/${projectId}/files/${fileId}`, { method: 'DELETE' }, token)
+}
+export function restoreProjectFile(projectId: string, fileId: string, token: string): Promise<ProjectFile> {
+  return requestJson(`/api/projects/${projectId}/files/${fileId}/restore`, { method: 'POST' }, token)
+}
+export function listProjectFileVersions(projectId: string, fileId: string, token: string): Promise<ProjectFileVersion[]> {
+  return requestJson(`/api/projects/${projectId}/files/${fileId}/versions`, {}, token)
+}
+export async function downloadProjectFile(projectId: string, file: ProjectFile, token: string, versionId?: string, preview = false): Promise<void> {
+  const query = new URLSearchParams({ download: preview ? 'false' : 'true' })
+  if (versionId) query.set('versionId', versionId)
+  const response = await fetch(`${apiBase}/api/projects/${projectId}/files/${file.id}/content?${query}`, { headers: authenticatedHeaders(token) })
+  if (!response.ok) throw new PdmApiError(`项目文件读取失败（${response.status}）`, response.status)
+  const url = URL.createObjectURL(await response.blob())
+  if (preview) window.open(url, '_blank', 'noopener,noreferrer')
+  else { const link = document.createElement('a'); link.href = url; link.download = file.fileName; link.click() }
+  window.setTimeout(() => URL.revokeObjectURL(url), 60_000)
+}
+
 export async function listFolderTemplate(token: string): Promise<ProjectFolderTemplateNode[]> {
   const nodes = await requestJson<Array<Omit<ProjectFolderTemplateNode, 'purpose' | 'permissions'> & { purpose: string | number; permissions?: Array<Omit<FolderPermissionRule, 'principalType'> & { principalType: string | number }> }>>('/api/folder-template', {}, token)
   return nodes.map(mapFolderTemplateNode)
@@ -1205,6 +1346,7 @@ function mapProject(project: ApiProject): ProjectSummary {
     primaryProjectManager: project.primaryProjectManager ?? undefined,
     collaborativeProjectManagers: project.collaborativeProjectManagers ?? [],
     designLead: project.designLead ?? undefined,
+    designLeads: project.designLeads?.length ? project.designLeads : project.designLead ? [project.designLead] : [],
     designers: project.designers ?? [],
     documentCount: project.documentCount ?? undefined,
     modelDocumentCount: project.modelDocumentCount ?? undefined,

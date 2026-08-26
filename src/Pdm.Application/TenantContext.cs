@@ -7,12 +7,19 @@ public sealed record CurrentTenant(
     string Username,
     string RoleCode,
     bool CrossCompanyView,
-    IReadOnlySet<string> Permissions)
+    IReadOnlySet<string> Permissions,
+    IReadOnlyList<string>? RoleCodes = null)
 {
+    public IReadOnlyList<string> EffectiveRoleCodes => (RoleCodes ?? [])
+        .Prepend(RoleCode)
+        .Where(code => !string.IsNullOrWhiteSpace(code))
+        .Distinct(StringComparer.OrdinalIgnoreCase)
+        .ToArray();
+
     public bool HasPermission(string permission) => Permissions.Contains(permission);
+    public bool HasRole(string roleCode) => EffectiveRoleCodes.Contains(roleCode, StringComparer.OrdinalIgnoreCase);
     public bool IsPlatformAdministrator =>
-        string.Equals(RoleCode, "platform_admin", StringComparison.OrdinalIgnoreCase)
-        || string.Equals(RoleCode, "developer", StringComparison.OrdinalIgnoreCase);
+        HasRole("platform_admin") || HasRole("developer");
 }
 
 public static class TenantContext

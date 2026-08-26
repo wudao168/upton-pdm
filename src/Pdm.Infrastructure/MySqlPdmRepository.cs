@@ -51,52 +51,15 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
     public async Task<IReadOnlyList<Project>> ListProjectsForUserAsync(string actor, UserRole role, CancellationToken cancellationToken)
     {
         if (!await HasUserPermissionAsync(actor, role, PermissionCodes.ProjectView, cancellationToken)) return [];
-        if (role == UserRole.Administrator)
+        var projects = await ListProjectsAsync(cancellationToken);
+        if (role is UserRole.Administrator or UserRole.PlatformAdministrator || TenantContext.Current?.IsPlatformAdministrator == true)
         {
-            var administratorProjects = await ListProjectsAsync(cancellationToken);
-            return administratorProjects.Select(ApplyAdministratorCapabilities).ToArray();
+            return projects.Select(ApplyAdministratorCapabilities).ToArray();
         }
 
         await using var connection = await OpenAsync(cancellationToken);
-        var rows = await connection.QueryAsync<ProjectRow>(new CommandDefinition(
-            """
-            SELECT p.id,p.code,p.name,p.project_alias,p.organization_id,o.name organization_name,p.project_type_code,
-                   p.equipment_type_code,p.customer_code,p.customer_name,p.customer_project_sequence,p.device_model,
-                   p.signed_date,p.quantity,p.parent_project_id,p.root_project_id,p.child_sequence,p.bom_item_category_code,
-                   p.owner,p.vault_location,p.release_location,p.is_active,
-                   COALESCE(p.execution_unit_id,root.execution_unit_id) execution_unit_id,execution_unit.name execution_unit_name
-             FROM project p
-             LEFT JOIN project_organization o ON o.id=p.organization_id
-             LEFT JOIN project root ON root.id=COALESCE(p.root_project_id,p.id)
-             LEFT JOIN organization_unit execution_unit ON execution_unit.id=COALESCE(p.execution_unit_id,root.execution_unit_id)
-             WHERE (@ActiveCompanyId IS NULL OR p.organization_id=@ActiveCompanyId) AND (EXISTS (
-                 SELECT 1 FROM project_assignment assignment
-                 WHERE assignment.project_id=COALESCE(p.root_project_id,p.id) AND assignment.username=@Actor
-                   AND assignment.assignment_type IN ('PrimaryProjectManager','CollaborativeProjectManager','DesignLead'))
-                OR EXISTS (
-                 SELECT 1 FROM project_assignment assignment
-                 WHERE assignment.project_id=p.id AND assignment.username=@Actor AND assignment.assignment_type='Designer')
-                OR (p.parent_project_id IS NULL AND EXISTS (
-                 SELECT 1 FROM project child
-                 INNER JOIN project_assignment assignment ON assignment.project_id=child.id
-                 WHERE child.parent_project_id=p.id AND assignment.username=@Actor AND assignment.assignment_type='Designer'))
-                OR EXISTS (
-                 SELECT 1 FROM organization_unit_manager manager
-                 WHERE manager.unit_id=COALESCE(p.execution_unit_id,root.execution_unit_id) AND manager.username=@Actor)
-                OR EXISTS (
-                 SELECT 1 FROM release_package package
-                 INNER JOIN approval_task task ON task.release_package_id=package.id
-                 WHERE package.project_id=p.id AND task.assignee=@Actor)
-                OR (@CanAssignExecutionUnit=1 AND EXISTS (
-                 SELECT 1 FROM organization_membership membership
-                 INNER JOIN organization_unit member_unit ON member_unit.id=membership.unit_id
-                 WHERE membership.username=@Actor AND member_unit.organization_id=p.organization_id)))
-            ORDER BY root.code,p.code
-            """,
-            new { Actor = actor, ActiveCompanyId = TenantContext.CompanyId, CanAssignExecutionUnit = await HasUserPermissionAsync(actor, role, PermissionCodes.ProjectExecutionAssign, cancellationToken) },
-            cancellationToken: cancellationToken));
-        var projects = await MapProjectsAsync(connection, null, rows, cancellationToken);
-        return await ApplyCapabilitiesAsync(connection, projects, actor, role, cancellationToken);
+        var permissions = await GetUserPermissionsAsync(actor, role, cancellationToken);
+        return await ApplyCapabilitiesAsync(connection, projects, actor, permissions, cancellationToken);
     }
 
     public async Task<Project?> FindProjectAsync(Guid projectId, CancellationToken cancellationToken)
@@ -108,56 +71,14 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
 
     public async Task<bool> HasProjectReadAccessAsync(Guid projectId, string actor, UserRole role, CancellationToken cancellationToken)
     {
-        if (!await HasUserPermissionAsync(actor, role, PermissionCodes.ProjectView, cancellationToken)) return false;
-        if (!await IsProjectInActiveCompanyAsync(projectId, cancellationToken)) return false;
-        if (role == UserRole.Administrator) return true;
-        await using var connection = await OpenAsync(cancellationToken);
-        var value = await connection.ExecuteScalarAsync<int?>(new CommandDefinition(
-            """
-             SELECT CASE WHEN EXISTS (SELECT 1 FROM project_assignment assignment
-                    WHERE assignment.project_id=COALESCE(p.root_project_id,p.id) AND assignment.username=@Actor
-                      AND assignment.assignment_type IN ('PrimaryProjectManager','CollaborativeProjectManager','DesignLead'))
-                OR EXISTS (SELECT 1 FROM project_assignment assignment
-                    WHERE assignment.project_id=p.id AND assignment.username=@Actor AND assignment.assignment_type='Designer')
-                OR (p.parent_project_id IS NULL AND EXISTS (
-                    SELECT 1 FROM project child INNER JOIN project_assignment assignment ON assignment.project_id=child.id
-                    WHERE child.parent_project_id=p.id AND assignment.username=@Actor AND assignment.assignment_type='Designer'))
-                OR EXISTS (SELECT 1 FROM organization_unit_manager manager
-                    WHERE manager.unit_id=COALESCE(p.execution_unit_id,root.execution_unit_id) AND manager.username=@Actor)
-                OR EXISTS (SELECT 1 FROM release_package package
-                    INNER JOIN approval_task task ON task.release_package_id=package.id
-                    WHERE package.project_id=p.id AND task.assignee=@Actor)
-                OR (@CanAssignExecutionUnit=1 AND EXISTS (
-                    SELECT 1 FROM organization_membership membership INNER JOIN organization_unit member_unit ON member_unit.id=membership.unit_id
-                    WHERE membership.username=@Actor AND member_unit.organization_id=p.organization_id)) THEN 1 ELSE 0 END
-             FROM project p
-             LEFT JOIN project root ON root.id=COALESCE(p.root_project_id,p.id)
-             WHERE p.id=@ProjectId
-            """,
-            new { ProjectId = projectId, Actor = actor, CanAssignExecutionUnit = await HasUserPermissionAsync(actor, role, PermissionCodes.ProjectExecutionAssign, cancellationToken) },
-            cancellationToken: cancellationToken));
-        return value == 1;
+        return await HasUserPermissionAsync(actor, role, PermissionCodes.ProjectView, cancellationToken)
+            && await IsProjectInActiveCompanyAsync(projectId, cancellationToken);
     }
 
     public async Task<bool> HasProjectContentReadAccessAsync(Guid projectId, string actor, UserRole role, CancellationToken cancellationToken)
     {
-        if (!await HasUserPermissionAsync(actor, role, PermissionCodes.ProjectContentView, cancellationToken)) return false;
-        if (!await IsProjectInActiveCompanyAsync(projectId, cancellationToken)) return false;
-        if (role == UserRole.Administrator) return true;
-        await using var connection = await OpenAsync(cancellationToken);
-        var value = await connection.ExecuteScalarAsync<int?>(new CommandDefinition(
-            """
-            SELECT CASE WHEN EXISTS (SELECT 1 FROM project_assignment assignment
-                    WHERE assignment.project_id=p.id AND assignment.username=@Actor AND assignment.assignment_type='Designer')
-                OR EXISTS (SELECT 1 FROM project_assignment assignment
-                    WHERE assignment.project_id=COALESCE(p.root_project_id,p.id) AND assignment.username=@Actor AND assignment.assignment_type='DesignLead')
-                OR EXISTS (SELECT 1 FROM release_package package
-                    INNER JOIN approval_task task ON task.release_package_id=package.id
-                    WHERE package.project_id=p.id AND task.assignee=@Actor)
-                THEN 1 ELSE 0 END
-            FROM project p WHERE p.id=@ProjectId
-            """, new { ProjectId = projectId, Actor = actor }, cancellationToken: cancellationToken));
-        return value == 1;
+        return await HasUserPermissionAsync(actor, role, PermissionCodes.ProjectContentView, cancellationToken)
+            && await IsProjectInActiveCompanyAsync(projectId, cancellationToken);
     }
 
     private async Task<bool> IsProjectInActiveCompanyAsync(Guid projectId, CancellationToken cancellationToken)
@@ -766,53 +687,13 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
         Guid projectId,
         CancellationToken cancellationToken)
     {
-        var current = await connection.QuerySingleOrDefaultAsync<ReferenceSnapshotRow>(new CommandDefinition(
+        return await connection.QuerySingleOrDefaultAsync<ReferenceSnapshotRow>(new CommandDefinition(
             """
             SELECT rs.id, rs.project_id, rs.root_document_id, rs.captured_at, rs.captured_by, rs.sha256, rs.root_json
             FROM project_reference_root current_root
             INNER JOIN reference_snapshot rs ON rs.id = current_root.reference_snapshot_id
             WHERE current_root.project_id = @ProjectId
             """,
-            new { ProjectId = projectId },
-            cancellationToken: cancellationToken));
-        if (current is not null)
-        {
-            return current;
-        }
-
-        var recoveredRoot = await connection.QuerySingleOrDefaultAsync<ReferenceSnapshotRow>(new CommandDefinition(
-            """
-            SELECT candidate.id, candidate.project_id, candidate.root_document_id, candidate.captured_at,
-                   candidate.captured_by, candidate.sha256, candidate.root_json
-            FROM reference_snapshot candidate
-            INNER JOIN document root_document
-                ON root_document.id = candidate.root_document_id
-               AND root_document.project_id = candidate.project_id
-            WHERE candidate.project_id = @ProjectId
-              AND root_document.kind = 'Assembly'
-              AND NOT EXISTS (
-                  SELECT 1
-                  FROM reference_snapshot container
-                  WHERE container.project_id = candidate.project_id
-                    AND container.root_document_id <> candidate.root_document_id
-                    AND JSON_SEARCH(
-                        JSON_EXTRACT(container.root_json, '$.children'),
-                        'one',
-                        root_document.file_name
-                    ) IS NOT NULL
-              )
-            ORDER BY candidate.captured_at DESC, candidate.id DESC
-            LIMIT 1
-            """,
-            new { ProjectId = projectId },
-            cancellationToken: cancellationToken));
-        if (recoveredRoot is not null)
-        {
-            return recoveredRoot;
-        }
-
-        return await connection.QuerySingleOrDefaultAsync<ReferenceSnapshotRow>(new CommandDefinition(
-            "SELECT id, project_id, root_document_id, captured_at, captured_by, sha256, root_json FROM reference_snapshot WHERE project_id=@ProjectId ORDER BY captured_at DESC, id DESC LIMIT 1",
             new { ProjectId = projectId },
             cancellationToken: cancellationToken));
     }
@@ -1051,7 +932,11 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
             "SELECT id,username,display_name,password_hash,role,assigned_role_code RoleCode,company_id CompanyId,cross_company_view CrossCompanyView,is_active,token_version FROM pdm_user WHERE username=@Username LIMIT 1",
             new { Username = username },
             cancellationToken: cancellationToken));
-        return row is null ? null : new UserAccount(row.Id, row.Username, row.DisplayName, row.PasswordHash, Enum.Parse<UserRole>(row.Role), row.IsActive, row.TokenVersion, row.RoleCode, row.CompanyId, row.CrossCompanyView);
+        if (row is null) return null;
+        var roleCodes = (await connection.QueryAsync<string>(new CommandDefinition(
+            "SELECT role_code FROM pdm_user_role WHERE user_id=@UserId ORDER BY is_primary DESC,created_at,role_code",
+            new { UserId = row.Id }, cancellationToken: cancellationToken))).ToArray();
+        return new UserAccount(row.Id, row.Username, row.DisplayName, row.PasswordHash, Enum.Parse<UserRole>(row.Role), row.IsActive, row.TokenVersion, row.RoleCode, row.CompanyId, row.CrossCompanyView, roleCodes);
     }
 
     public async Task<UserProfile?> FindUserProfileAsync(string username, CancellationToken cancellationToken)
@@ -1294,9 +1179,13 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
             ResponsibleUsers = responsibleUsers ?? (string.IsNullOrWhiteSpace(row.Owner) ? [] : [row.Owner]),
             ExecutionUnitId = row.ExecutionUnitId,
             ExecutionUnitName = row.ExecutionUnitName,
-            PrimaryProjectManager = FindSingleAssignment(assignments, row.RootProjectId ?? row.Id, ProjectAssignmentType.PrimaryProjectManager),
+            PrimaryProjectManager = row.ParentProjectId is null
+                ? FindSingleAssignment(assignments, row.Id, ProjectAssignmentType.PrimaryProjectManager)
+                : FindSingleAssignment(assignments, row.Id, ProjectAssignmentType.PrimaryProjectManager)
+                    ?? FindSingleAssignment(assignments, row.RootProjectId ?? row.Id, ProjectAssignmentType.PrimaryProjectManager),
             CollaborativeProjectManagers = FindAssignments(assignments, row.RootProjectId ?? row.Id, ProjectAssignmentType.CollaborativeProjectManager),
             DesignLead = FindSingleAssignment(assignments, row.RootProjectId ?? row.Id, ProjectAssignmentType.DesignLead),
+            DesignLeads = FindAssignments(assignments, row.RootProjectId ?? row.Id, ProjectAssignmentType.DesignLead),
             Designers = FindAssignments(assignments, row.Id, ProjectAssignmentType.Designer),
             DocumentCount = activity?.DocumentCount,
             ModelDocumentCount = activity?.ModelDocumentCount,
@@ -1371,36 +1260,33 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
         CanAssignExecutionUnit = project.ParentProjectId is null,
         CanManageMainStaffing = project.ParentProjectId is null && project.ExecutionUnitId is not null,
         CanAssignDesigners = project.ParentProjectId is not null,
-        CanReadContent = true
+        CanReadContent = true,
+        CanSubmitArchive = true
     };
 
-    private static async Task<IReadOnlyList<Project>> ApplyCapabilitiesAsync(DbConnection connection, IReadOnlyList<Project> projects, string actor, UserRole role, CancellationToken cancellationToken)
+    private static async Task<IReadOnlyList<Project>> ApplyCapabilitiesAsync(DbConnection connection, IReadOnlyList<Project> projects, string actor, IReadOnlySet<string> permissions, CancellationToken cancellationToken)
     {
-        var permissions = role == UserRole.Administrator
-            ? RolePermissionCatalog.Defaults[role]
-            : (await connection.QueryAsync<string>(new CommandDefinition(
-                "SELECT permission_code FROM role_permission WHERE role_code=@RoleCode",
-                new { RoleCode = role.ToString() }, cancellationToken: cancellationToken))).ToHashSet(StringComparer.Ordinal);
         var managedUnitIds = (await connection.QueryAsync<Guid>(new CommandDefinition(
             "SELECT unit_id FROM organization_unit_manager WHERE username=@Actor", new { Actor = actor }, cancellationToken: cancellationToken))).ToHashSet();
-        var organizationIds = (await connection.QueryAsync<Guid>(new CommandDefinition(
-            "SELECT DISTINCT unit.organization_id FROM organization_membership membership INNER JOIN organization_unit unit ON unit.id=membership.unit_id WHERE membership.username=@Actor",
-            new { Actor = actor }, cancellationToken: cancellationToken))).ToHashSet();
-        var approvalProjectIds = (await connection.QueryAsync<Guid>(new CommandDefinition(
-            "SELECT DISTINCT package.project_id FROM release_package package INNER JOIN approval_task task ON task.release_package_id=package.id WHERE task.assignee=@Actor",
-            new { Actor = actor }, cancellationToken: cancellationToken))).ToHashSet();
+        var primaryCompanyId = await connection.ExecuteScalarAsync<Guid?>(new CommandDefinition(
+            "SELECT company_id FROM pdm_user WHERE username=@Actor LIMIT 1", new { Actor = actor }, cancellationToken: cancellationToken));
         return projects.Select(project =>
         {
-            var canReadContent = permissions.Contains(PermissionCodes.ProjectContentView)
-                && (string.Equals(project.DesignLead, actor, StringComparison.OrdinalIgnoreCase)
-                    || project.Designers.Contains(actor, StringComparer.OrdinalIgnoreCase)
-                    || approvalProjectIds.Contains(project.Id));
+            var canReadContent = permissions.Contains(PermissionCodes.ProjectContentView);
+            var belongsToProjectStaffing = string.Equals(project.PrimaryProjectManager, actor, StringComparison.OrdinalIgnoreCase)
+                || project.CollaborativeProjectManagers.Contains(actor, StringComparer.OrdinalIgnoreCase)
+                || project.DesignLeads.Contains(actor, StringComparer.OrdinalIgnoreCase)
+                || string.Equals(project.DesignLead, actor, StringComparison.OrdinalIgnoreCase);
+            var managesExecutionUnit = project.ExecutionUnitId is Guid executionUnitId && managedUnitIds.Contains(executionUnitId);
             return project with
             {
-                CanAssignExecutionUnit = permissions.Contains(PermissionCodes.ProjectExecutionAssign) && project.ParentProjectId is null && project.OrganizationId is not null && organizationIds.Contains(project.OrganizationId.Value),
+                CanAssignExecutionUnit = permissions.Contains(PermissionCodes.ProjectExecutionAssign) && project.ParentProjectId is null && project.OrganizationId == primaryCompanyId,
                 CanManageMainStaffing = permissions.Contains(PermissionCodes.ProjectStaffingManage) && project.ParentProjectId is null && project.ExecutionUnitId is not null && managedUnitIds.Contains(project.ExecutionUnitId.Value),
-                CanAssignDesigners = permissions.Contains(PermissionCodes.ProjectDesignerAssign) && project.ParentProjectId is not null && string.Equals(project.DesignLead, actor, StringComparison.OrdinalIgnoreCase),
+                CanAssignDesigners = permissions.Contains(PermissionCodes.ProjectDesignerAssign) && project.ParentProjectId is not null && (managesExecutionUnit || belongsToProjectStaffing),
                 CanReadContent = canReadContent,
+                CanSubmitArchive = canReadContent
+                    && permissions.Contains(PermissionCodes.DocumentEdit)
+                    && ProjectSubmissionPolicy.CanSubmitArchive(project, actor, false),
                 DocumentCount = canReadContent ? project.DocumentCount : null,
                 ModelDocumentCount = canReadContent ? project.ModelDocumentCount : null,
                 DrawingDocumentCount = canReadContent ? project.DrawingDocumentCount : null,

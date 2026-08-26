@@ -55,6 +55,8 @@ public sealed record Project(
 
     public string? DesignLead { get; init; }
 
+    public IReadOnlyList<string> DesignLeads { get; init; } = [];
+
     public IReadOnlyList<string> Designers { get; init; } = [];
 
     public bool CanAssignExecutionUnit { get; init; }
@@ -64,6 +66,8 @@ public sealed record Project(
     public bool CanAssignDesigners { get; init; }
 
     public bool CanReadContent { get; init; }
+
+    public bool CanSubmitArchive { get; init; }
 
     public int? DocumentCount { get; init; }
 
@@ -238,7 +242,8 @@ public sealed record OrganizationUnit(
     string Name,
     OrganizationUnitKind Kind,
     bool IsActive,
-    int SortOrder);
+    int SortOrder,
+    bool CanManufacture = false);
 
 public sealed record OrganizationMembership(Guid UnitId, string Username, bool IsPrimary);
 
@@ -252,9 +257,15 @@ public sealed record OrganizationDirectoryUser(
     string? RoleCode = null,
     Guid? CompanyId = null,
     bool CrossCompanyView = false,
-    IReadOnlyList<Guid>? AccessibleCompanyIds = null)
+    IReadOnlyList<Guid>? AccessibleCompanyIds = null,
+    IReadOnlyList<string>? RoleCodes = null)
 {
     public string EffectiveRoleCode => string.IsNullOrWhiteSpace(RoleCode) ? Role.ToString() : RoleCode;
+    public IReadOnlyList<string> EffectiveRoleCodes => (RoleCodes ?? [])
+        .Prepend(EffectiveRoleCode)
+        .Where(code => !string.IsNullOrWhiteSpace(code))
+        .Distinct(StringComparer.OrdinalIgnoreCase)
+        .ToArray();
 }
 
 public sealed record OrganizationDirectory(

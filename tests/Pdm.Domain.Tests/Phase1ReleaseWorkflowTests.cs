@@ -360,6 +360,31 @@ public sealed class Phase1ReleaseWorkflowTests
     }
 
     [Fact]
+    public async Task ProjectExecutionUnit_RequiresManufacturingDepartment()
+    {
+        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(), new RecordingPublisher(), TimeProvider.System);
+        var organizationId = Guid.Parse("70000000-0000-0000-0000-000000000001");
+        var ordinaryDepartment = await workflow.SaveOrganizationUnitAsync(
+            new SaveOrganizationUnitCommand(null, organizationId, null, "ORDINARY", "普通部门", OrganizationUnitKind.BusinessDivision, true, 0, false),
+            "admin", UserRole.Administrator, default);
+
+        var assignmentException = await Assert.ThrowsAsync<PdmRuleException>(() => workflow.SetProjectExecutionUnitAsync(
+            ProjectId, ordinaryDepartment.Id, "admin", UserRole.Administrator, default));
+        Assert.Equal("承接部门不存在、未启用或未设为制造部门。", assignmentException.Message);
+
+        var manufacturingDepartment = await workflow.SaveOrganizationUnitAsync(
+            new SaveOrganizationUnitCommand(null, organizationId, null, "MANUFACTURING", "T2事业部", OrganizationUnitKind.BusinessDivision, true, 0, true),
+            "admin", UserRole.Administrator, default);
+        Assert.True(manufacturingDepartment.CanManufacture);
+
+        var nestedException = await Assert.ThrowsAsync<PdmRuleException>(() => workflow.SaveOrganizationUnitAsync(
+            new SaveOrganizationUnitCommand(null, organizationId, manufacturingDepartment.Id, "NESTED", "下级制造部门", OrganizationUnitKind.Department, true, 0, true),
+            "admin", UserRole.Administrator, default));
+        Assert.Equal("只有公司直属部门可以设为制造部门。", nestedException.Message);
+    }
+
+    [Fact]
     public async Task OrganizationManagers_CanBeAssignedToChildUnitAndBecomeMembers()
     {
         var repository = new InMemoryPdmRepository(TimeProvider.System);
@@ -845,7 +870,7 @@ public sealed class Phase1ReleaseWorkflowTests
         await repository.SetOrganizationMembershipsAsync("admin", [department.Id], department.Id, default);
         await repository.SetOrganizationUnitManagersAsync(department.Id, "mechanical-supervisor", [], default);
         await repository.SetOrganizationUnitManagersAsync(division.Id, "standardization-supervisor", [], default);
-        await repository.SetMainProjectStaffingAsync(ProjectId, new SetMainProjectStaffingCommand("admin", [], "admin"), "admin", default);
+        await repository.SetMainProjectStaffingAsync(ProjectId, new SetMainProjectStaffingCommand("admin", [], ["admin"]), "admin", default);
     }
 
     private static async Task PrepareApprovedNonStandardDrawingReviewAsync(InMemoryPdmRepository repository, PdmWorkflowService workflow)

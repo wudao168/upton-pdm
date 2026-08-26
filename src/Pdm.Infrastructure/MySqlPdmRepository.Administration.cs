@@ -304,7 +304,12 @@ public sealed partial class MySqlPdmRepository
         var rows = await connection.QueryAsync<AdministrationUserRow>(new CommandDefinition(
             "SELECT id,username,display_name DisplayName,password_hash PasswordHash,role,assigned_role_code RoleCode,company_id CompanyId,cross_company_view CrossCompanyView,is_active IsActive,token_version TokenVersion FROM pdm_user ORDER BY username",
             cancellationToken: cancellationToken));
-        return rows.Select(row => new UserAccount(row.Id, row.Username, row.DisplayName, row.PasswordHash, Enum.Parse<UserRole>(row.Role), row.IsActive, row.TokenVersion, row.RoleCode, row.CompanyId, row.CrossCompanyView)).ToArray();
+        var roleCodes = (await connection.QueryAsync<UserRoleAssignmentRow>(new CommandDefinition(
+            "SELECT user_id UserId,role_code RoleCode,is_primary IsPrimary FROM pdm_user_role ORDER BY user_id,is_primary DESC,created_at,role_code",
+            cancellationToken: cancellationToken))).GroupBy(item => item.UserId)
+            .ToDictionary(group => group.Key, group => (IReadOnlyList<string>)group.Select(item => item.RoleCode).ToArray());
+        return rows.Select(row => new UserAccount(row.Id, row.Username, row.DisplayName, row.PasswordHash, Enum.Parse<UserRole>(row.Role), row.IsActive, row.TokenVersion, row.RoleCode, row.CompanyId, row.CrossCompanyView,
+            roleCodes.GetValueOrDefault(row.Id, Array.Empty<string>()))).ToArray();
     }
 
     public async Task<UserCompanyScope?> GetUserCompanyScopeAsync(string username, CancellationToken cancellationToken)

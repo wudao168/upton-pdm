@@ -28,9 +28,11 @@ internal sealed class ProjectBrowserControl : UserControl
     private float requestedBrowseButtonWidth = 98;
     private IReadOnlyList<ProjectDto> projects = Array.Empty<ProjectDto>();
     private ProjectDto selection;
+    private readonly bool requireSubmissionAccess;
 
-    public ProjectBrowserControl(bool matchTaskPaneProjectLayout = false)
+    public ProjectBrowserControl(bool matchTaskPaneProjectLayout = false, bool requireSubmissionAccess = false)
     {
+        this.requireSubmissionAccess = requireSubmissionAccess;
         AutoScaleMode = AutoScaleMode.Font;
         MinimumSize = new Size(120, 30);
         Height = 30;
@@ -100,9 +102,13 @@ internal sealed class ProjectBrowserControl : UserControl
     public void SetProjects(IReadOnlyList<ProjectDto> value)
     {
         projects = value ?? Array.Empty<ProjectDto>();
-        if (selection != null && projects.All(project => project.Id != selection.Id))
+        if (selection != null)
         {
-            selection = null;
+            selection = projects.FirstOrDefault(project => project.Id == selection.Id);
+            if (requireSubmissionAccess && selection?.CanSubmitArchive != true)
+            {
+                selection = null;
+            }
         }
 
         UpdateDisplay();
@@ -113,6 +119,10 @@ internal sealed class ProjectBrowserControl : UserControl
         selection = projectId.HasValue
             ? projects.FirstOrDefault(project => project.Id == projectId.Value)
             : null;
+        if (requireSubmissionAccess && selection?.CanSubmitArchive != true)
+        {
+            selection = null;
+        }
         UpdateDisplay();
     }
 
@@ -124,7 +134,7 @@ internal sealed class ProjectBrowserControl : UserControl
             return;
         }
 
-        using (var dialog = new ProjectBrowserDialog(projects, SelectedProjectId))
+        using (var dialog = new ProjectBrowserDialog(projects, SelectedProjectId, requireSubmissionAccess))
         {
             if (dialog.ShowDialog(FindForm()) != DialogResult.OK || dialog.SelectedProject == null)
             {
@@ -190,11 +200,13 @@ internal sealed class ProjectBrowserDialog : Form
     };
     private readonly Button confirm = new Button { Text = "确认选择", AutoSize = true };
     private readonly Guid? initialProjectId;
+    private readonly bool requireSubmissionAccess;
 
-    public ProjectBrowserDialog(IReadOnlyList<ProjectDto> projects, Guid? initialProjectId)
+    public ProjectBrowserDialog(IReadOnlyList<ProjectDto> projects, Guid? initialProjectId, bool requireSubmissionAccess = false)
     {
         this.projects = projects ?? Array.Empty<ProjectDto>();
         this.initialProjectId = initialProjectId;
+        this.requireSubmissionAccess = requireSubmissionAccess;
 
         Text = "浏览选择项目";
         StartPosition = FormStartPosition.CenterParent;
@@ -215,6 +227,7 @@ internal sealed class ProjectBrowserDialog : Form
         childProjects.Columns.Add("名称");
         childProjects.Columns.Add("图档状态");
         childProjects.Columns.Add("业务状态");
+        childProjects.Columns.Add("存档权限");
 
         var searchPanel = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 1 };
         searchPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 160));
@@ -379,16 +392,19 @@ internal sealed class ProjectBrowserDialog : Form
     private void UpdateSelectionState()
     {
         var selected = SelectedProject;
-        confirm.Enabled = selected != null;
+        var canConfirm = selected != null && (!requireSubmissionAccess || selected.CanSubmitArchive);
+        confirm.Enabled = canConfirm;
         ApplyDialogButtonAppearance(confirm, Color.FromArgb(21, 126, 77), confirm.Enabled);
-        selection.Text = selected != null
+        selection.Text = selected != null && requireSubmissionAccess && !selected.CanSubmitArchive
+            ? "无存档权限：只能浏览，不能获取编辑权限或提交存档"
+            : selected != null
             ? string.Concat("将选择：", ProjectSelectionText(selected))
             : mainProjects.SelectedItem == null ? "尚未选择项目" : "请选择图档归属";
     }
 
     private void ConfirmProjectSelection()
     {
-        if (SelectedProject != null)
+        if (SelectedProject is { } selected && (!requireSubmissionAccess || selected.CanSubmitArchive))
         {
             DialogResult = DialogResult.OK;
             Close();
@@ -490,14 +506,21 @@ internal sealed class ProjectBrowserDialog : Form
         var businessStatus = project.CanReadContent
             ? string.IsNullOrWhiteSpace(project.BusinessStatus) ? "正常" : project.BusinessStatus
             : "—";
+        var submissionStatus = project.CanSubmitArchive ? "可提交" : "无存档权限";
         var item = new ListViewItem(name)
         {
             Tag = project,
-            ToolTipText = string.Concat(name, "\r\n图档状态：", documentStatus, "\r\n业务状态：", businessStatus)
+            ToolTipText = string.Concat(name, "\r\n图档状态：", documentStatus, "\r\n业务状态：", businessStatus, "\r\n存档权限：", submissionStatus)
         };
         item.SubItems.Add(documentStatus);
         item.SubItems.Add(businessStatus);
-        if (project.CanReadContent && project.DocumentCount.GetValueOrDefault() > 0)
+        item.SubItems.Add(submissionStatus);
+        if (!project.CanSubmitArchive)
+        {
+            item.BackColor = Color.FromArgb(242, 242, 242);
+            item.ForeColor = SystemColors.GrayText;
+        }
+        else if (project.CanReadContent && project.DocumentCount.GetValueOrDefault() > 0)
         {
             item.BackColor = Color.FromArgb(232, 245, 233);
             item.ForeColor = Color.FromArgb(22, 101, 52);
@@ -507,17 +530,19 @@ internal sealed class ProjectBrowserDialog : Form
 
     private void ResizeChildColumns()
     {
-        if (childProjects.Columns.Count != 3)
+        if (childProjects.Columns.Count != 4)
         {
             return;
         }
 
         const int documentStatusWidth = 96;
-        const int businessStatusWidth = 124;
+        const int businessStatusWidth = 96;
+        const int submissionStatusWidth = 104;
         var available = Math.Max(0, childProjects.ClientSize.Width - SystemInformation.VerticalScrollBarWidth - 4);
-        childProjects.Columns[0].Width = Math.Max(150, available - documentStatusWidth - businessStatusWidth);
+        childProjects.Columns[0].Width = Math.Max(150, available - documentStatusWidth - businessStatusWidth - submissionStatusWidth);
         childProjects.Columns[1].Width = documentStatusWidth;
         childProjects.Columns[2].Width = businessStatusWidth;
+        childProjects.Columns[3].Width = submissionStatusWidth;
     }
 
     private static string ProjectSelectionText(ProjectDto project) => project.ParentProjectId.HasValue

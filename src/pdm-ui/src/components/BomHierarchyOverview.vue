@@ -3,6 +3,9 @@ import { computed, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { executeProjectBomU9Sync, generateProjectBomHeaderHierarchy, listBom, listBomVersions, listProjectBomHeaders, previewProjectBomU9Sync } from '../api'
 import type { BomHeaderKind, BomItem, BomKind, BomVersion, ProjectBomHeader, ProjectSummary } from '../types'
+import { useUserDisplayName } from '../userDisplay'
+
+const displayUserName = useUserDisplayName()
 
 type VisibleBomKind = Exclude<BomKind, 'Unclassified'>
 type ProjectDetail = {
@@ -36,6 +39,15 @@ const rootProjectId = computed(() => props.project.rootProjectId || props.projec
 const hierarchyProjects = computed(() => props.projects
   .filter(project => (project.rootProjectId || project.id) === rootProjectId.value)
   .sort((left, right) => (left.childSequence ?? 0) - (right.childSequence ?? 0) || left.code.localeCompare(right.code)))
+const hierarchySignature = computed(() => JSON.stringify(hierarchyProjects.value.map(project => ({
+  id: project.id,
+  code: project.code,
+  name: project.name,
+  parentProjectId: project.parentProjectId,
+  rootProjectId: project.rootProjectId,
+  childSequence: project.childSequence,
+  bomItemCategoryCode: project.bomItemCategoryCode,
+}))))
 const projectById = computed(() => new Map(hierarchyProjects.value.map(project => [project.id, project])))
 const childrenByParent = computed(() => {
   const result = new Map<string, ProjectSummary[]>()
@@ -57,6 +69,7 @@ const orderedProjects = computed(() => {
   for (const root of rootProjects.value) visit(root, 0)
   return result
 })
+const rootHasChildren = computed(() => hierarchyProjects.value.some(project => project.parentProjectId === rootProjectId.value))
 
 function includedRows(items: BomItem[]) {
   return items.filter(item => !item.manuallyExcluded && !item.pendingClassification)
@@ -135,10 +148,15 @@ const overviewRows = computed(() => orderedProjects.value.flatMap(({ project, de
     parentHeader: undefined,
   }, ...categoryRows]
 }))
-const missingHeaderCount = computed(() => overviewRows.value.filter(row => !row.header?.materialId || row.header.applicationStatus === 'Rejected').length)
-const pendingHeaderCount = computed(() => overviewRows.value.filter(row => row.header?.materialId && !row.header.materialCode).length)
+function isHeaderEligible(row: (typeof overviewRows.value)[number]) {
+  return !rootHasChildren.value || row.project.id !== rootProjectId.value || row.headerKind === 'Master'
+}
+const eligibleHeaderRows = computed(() => overviewRows.value.filter(isHeaderEligible))
+const missingHeaderCount = computed(() => eligibleHeaderRows.value.filter(row => !row.header?.materialId || row.header.applicationStatus === 'Rejected').length)
+const pendingHeaderCount = computed(() => eligibleHeaderRows.value.filter(row => row.header?.materialId && !row.header.materialCode).length)
 
 function u9BomStateText(row: (typeof overviewRows.value)[number]) {
+  if (!isHeaderEligible(row)) return '不纳入'
   if (!row.header?.materialCode) return '待料品回写'
   const state = u9BomStates.value[row.key]
   if (state === 'checking') return '检查中…'
@@ -161,24 +179,21 @@ function viewStateFromPreview(preview: Awaited<ReturnType<typeof previewProjectB
 }
 
 async function refreshU9BomStates() {
-  const rows = overviewRows.value.filter(row => row.header?.materialCode)
+  const rows = eligibleHeaderRows.value.filter(row => row.header?.materialCode)
   if (!rows.length) return
-  u9BomStates.value = {
-    ...u9BomStates.value,
-    ...Object.fromEntries(rows.map(row => [row.key, 'checking' as const])),
-  }
-  await Promise.all(rows.map(async row => {
+  const updates = await Promise.all(rows.map(async row => {
     try {
       const preview = await previewProjectBomU9Sync(row.project.id, row.headerKind, props.token)
-      u9BomStates.value = { ...u9BomStates.value, [row.key]: viewStateFromPreview(preview) }
+      return [row.key, viewStateFromPreview(preview)] as const
     } catch {
-      u9BomStates.value = { ...u9BomStates.value, [row.key]: 'failed' }
+      return [row.key, 'failed'] as const
     }
   }))
+  u9BomStates.value = { ...u9BomStates.value, ...Object.fromEntries(updates) }
 }
 
 async function syncU9Bom(row: (typeof overviewRows.value)[number]) {
-  if (!props.editable || !row.header?.materialCode || syncingRowKey.value) return
+  if (!props.editable || !isHeaderEligible(row) || !row.header?.materialCode || syncingRowKey.value) return
   syncingRowKey.value = row.key
   try {
     const preview = await previewProjectBomU9Sync(row.project.id, row.headerKind, props.token)
@@ -231,7 +246,8 @@ async function syncU9Bom(row: (typeof overviewRows.value)[number]) {
   }
 }
 
-function headerCodeText(header?: ProjectBomHeader) {
+function headerCodeText(header?: ProjectBomHeader, eligible = true) {
+  if (!eligible && !header?.materialId) return '不申请'
   if (!header?.materialId) return '待申请'
   if (header.materialCode) return header.materialCode
   if (header.applicationStatus === 'Rejected') return '已退回'
@@ -242,7 +258,7 @@ function headerCodeText(header?: ProjectBomHeader) {
 function headerCodeTitle(header?: ProjectBomHeader) {
   if (!header?.materialId) return '尚未提交BOM料号申请'
   if (header.materialCode) return `U9C正式料号：${header.materialCode}`
-  const applicant = header.requestedBy ? `申请人：${header.requestedBy}` : '申请人待补充'
+  const applicant = header.requestedBy ? `申请人：${displayUserName(header.requestedBy)}` : '申请人待补充'
   const requestedAt = header.requestedAt ? `，申请时间：${formatDate(header.requestedAt)}` : ''
   return `${applicant}${requestedAt}；审批并同步成功后显示U9C返回的正式料号`
 }
@@ -307,10 +323,10 @@ function formatDate(value?: string) {
   return Number.isNaN(date.getTime()) ? value : date.toLocaleString('zh-CN', { hour12: false })
 }
 
-watch([() => props.project.id, () => props.projects], () => {
+watch([rootProjectId, hierarchySignature, () => props.token], () => {
   detailCache.value = {}
   void loadOverview(true)
-}, { immediate: true, deep: true })
+}, { immediate: true })
 </script>
 
 <template>
@@ -332,17 +348,17 @@ watch([() => props.project.id, () => props.projects], () => {
               <span class="bom-overview__project" :style="{ paddingLeft: `${row.depth * 18}px` }"><i v-if="!row.isMaster">↳</i><strong v-if="row.isMaster">{{ row.project.code }}</strong><span>{{ row.isMaster ? `${row.project.name} · 项目主BOM` : row.label }}</span></span>
             </td>
             <td>{{ headerCategoryLabel(row.project, row.headerKind) }}</td>
-            <td><span :class="row.header?.materialCode ? '' : 'is-warning'" :title="headerCodeTitle(row.header)">{{ headerCodeText(row.header) }}</span></td>
+            <td><span :class="row.header?.materialCode ? '' : isHeaderEligible(row) ? 'is-warning' : 'is-muted'" :title="isHeaderEligible(row) ? headerCodeTitle(row.header) : '主项目已有子项目，本级三类BOM不申请料号'">{{ headerCodeText(row.header, isHeaderEligible(row)) }}</span></td>
             <td><span :class="row.parentHeader?.materialCode ? '' : row.parentHeader?.materialId ? 'is-warning' : 'is-muted'">{{ row.parentHeader ? headerCodeText(row.parentHeader) : '—' }}</span></td>
             <td>{{ row.itemCount }}</td>
             <td>{{ row.version }}</td>
             <td><span :class="row.releaseStatus === '已发布' ? 'is-success' : row.releaseStatus.includes('未发布') ? 'is-warning' : 'is-muted'">{{ row.releaseStatus }}</span></td>
             <td><span :class="row.unresolvedCount ? 'is-warning' : 'is-success'">{{ row.unresolvedCount ? `${row.unresolvedCount} 项` : '正常' }}</span></td>
             <td :title="formatDate(row.releasedAt)">{{ formatDate(row.releasedAt) }}</td>
-            <td :title="headerCodeTitle(row.header)"><span :class="row.header?.applicationStatus === 'Rejected' ? 'is-warning' : row.header?.applicationStatus === 'Approved' ? 'is-success' : row.header?.applicationId ? 'is-warning' : 'is-muted'">{{ row.header?.applicationStatus === 'Approved' ? '已批准' : row.header?.applicationStatus === 'Rejected' ? '已退回' : row.header?.applicationId ? `待审批 · ${row.header.requestedBy || '未知申请人'}` : '未提交' }}</span></td>
-            <td><span :class="row.header?.materialCode ? 'is-success' : row.header?.materialId ? 'is-warning' : 'is-muted'">{{ row.header?.materialCode ? '已回写' : row.header?.materialId ? '申请中' : '未申请' }}</span></td>
+            <td :title="isHeaderEligible(row) ? headerCodeTitle(row.header) : '主项目已有子项目，本级三类BOM不申请料号'"><span :class="row.header?.applicationStatus === 'Rejected' ? 'is-warning' : row.header?.applicationStatus === 'Approved' ? 'is-success' : row.header?.applicationId ? 'is-warning' : 'is-muted'">{{ !isHeaderEligible(row) && !row.header?.materialId ? '不申请' : row.header?.applicationStatus === 'Approved' ? '已批准' : row.header?.applicationStatus === 'Rejected' ? '已退回' : row.header?.applicationId ? `待审批 · ${displayUserName(row.header.requestedBy, '未知申请人')}` : '未提交' }}</span></td>
+            <td><span :class="row.header?.materialCode ? 'is-success' : row.header?.materialId ? 'is-warning' : 'is-muted'">{{ !isHeaderEligible(row) && !row.header?.materialId ? '不申请' : row.header?.materialCode ? '已回写' : row.header?.materialId ? '申请中' : '未申请' }}</span></td>
             <td>
-              <button v-if="editable && row.header?.materialCode" type="button" class="bom-overview__sync" :disabled="!!syncingRowKey" @click="syncU9Bom(row)">{{ syncingRowKey === row.key ? '检查中…' : u9BomStateText(row) }}</button>
+              <button v-if="editable && isHeaderEligible(row) && row.header?.materialCode" type="button" class="bom-overview__sync" :disabled="!!syncingRowKey" @click="syncU9Bom(row)">{{ syncingRowKey === row.key ? '检查中…' : u9BomStateText(row) }}</button>
               <span v-else :class="row.header?.materialCode ? 'is-muted' : 'is-warning'">{{ u9BomStateText(row) }}</span>
             </td>
           </tr>

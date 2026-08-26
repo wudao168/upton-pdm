@@ -1,6 +1,9 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import type { BomVersion, ManufacturingBomBaseline, ReleasePackageSummary, ReleaseScope } from '../types'
+import { useUserDisplayName } from '../userDisplay'
+
+const displayUserName = useUserDisplayName()
 
 const props = defineProps<{
   releasePackages: ReleasePackageSummary[]
@@ -62,7 +65,7 @@ function baselineChangeNumber(baseline: ManufacturingBomBaseline) {
     </div>
     <section class="pdm-panel pdm-release-baseline-list">
       <header><h3>制造BOM基线</h3><small>仅当三条正式流都有有效版本时生成；长交期输出不改变基线。</small></header>
-      <table class="pdm-edit-table"><thead><tr><th>基线</th><th>变更单号</th><th>生成人</th><th>生成时间</th></tr></thead><tbody><tr v-for="baseline in baselines" :key="baseline.id"><td>{{ baseline.label }}</td><td>{{ baselineChangeNumber(baseline) }}</td><td>{{ baseline.createdBy }}</td><td>{{ new Date(baseline.createdAt).toLocaleString() }}</td></tr><tr v-if="!baselines.length"><td colspan="4" class="pdm-empty-info">暂无制造BOM基线。</td></tr></tbody></table>
+      <table class="pdm-edit-table"><thead><tr><th>基线</th><th>变更单号</th><th>生成人</th><th>生成时间</th></tr></thead><tbody><tr v-for="baseline in baselines" :key="baseline.id"><td>{{ baseline.label }}</td><td>{{ baselineChangeNumber(baseline) }}</td><td>{{ displayUserName(baseline.createdBy) }}</td><td>{{ new Date(baseline.createdAt).toLocaleString() }}</td></tr><tr v-if="!baselines.length"><td colspan="4" class="pdm-empty-info">暂无制造BOM基线。</td></tr></tbody></table>
     </section>
   </section>
 </template>

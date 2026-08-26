@@ -10,6 +10,43 @@ afterEach(() => {
 })
 
 describe('CRM-aligned personal settings', () => {
+  it.each([
+    ['Engineer', '机械工程师'],
+    ['ElectricalEngineer', '电气工程师'],
+    ['CommissioningEngineer', '调试工程师'],
+    ['HardwareEngineer', '硬件工程师'],
+    ['MechanicalManager', '机械经理'],
+    ['TechnicalAssistant', '技术助理'],
+    ['BusinessUnitManager', '事业部经理'],
+    ['ProcessReviewer', '标准化工程师'],
+    ['ProjectManager', '项目经理'],
+    ['SupplyChain', '供应链'],
+    ['ProcurementSpecialist', '采购专员'],
+    ['ProcurementManager', '采购经理'],
+    ['ProductionManager', '生产经理'],
+    ['ProductionAssistant', '生产助理'],
+    ['MachiningSupervisor', '机加主管'],
+    ['MachiningOperator', '机加人员'],
+    ['AssemblySupervisor', '装配主管'],
+    ['AssemblyFitter', '装配钳工'],
+    ['ElectricalSupervisor', '电工主管'],
+    ['AssemblyElectrician', '装配电工'],
+    ['PlanningManager', '计划管理'],
+    ['ProductionViewer', '生产物料员'],
+    ['Approver', '标准化主管'],
+    ['Administrator', '系统管理员'],
+    ['platform_admin', '平台管理员'],
+    ['developer', '开发者'],
+  ])('shows role %s as the Chinese name %s', (role, expectedName) => {
+    const wrapper = mount(AppHeader, {
+      props: { online: true, userName: '测试用户', role },
+      global: { plugins: [ElementPlus] },
+    })
+
+    expect(wrapper.get('.pdm-user-role').text()).toBe(expectedName)
+    wrapper.unmount()
+  })
+
   it('shows the same profile and password functions when clicking the user name', async () => {
     const wrapper = mount(AppHeader, {
       attachTo: document.body,

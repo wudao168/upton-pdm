@@ -100,6 +100,42 @@ public sealed class MaterialAttachmentStorageTests
         }
     }
 
+    [Fact]
+    public async Task CoverUpload_ValidatesLimitAndRealFileSignature()
+    {
+        var testRoot = NewTestRoot();
+        var attachmentRoot = Path.Combine(testRoot, "material-attachments");
+        var pngHeader = new byte[] { 0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0, 0, 0, 0 };
+        var storage = CreateStorage(Path.Combine(testRoot, "upload"), pngHeader.Length);
+
+        try
+        {
+            await Assert.ThrowsAsync<PdmRuleException>(() => storage.StartUploadAsync(
+                Guid.NewGuid(), "01010000001", MaterialAttachmentKind.CoverImage, "cover.png",
+                10 * 1024 * 1024 + 1, new string('A', 64), attachmentRoot, "engineer", default));
+
+            var session = await storage.StartUploadAsync(
+                Guid.NewGuid(), "01010000001", MaterialAttachmentKind.CoverImage, "cover.png",
+                pngHeader.Length, Convert.ToHexString(SHA256.HashData(pngHeader)), attachmentRoot, "engineer", default);
+            await using var chunk = new MemoryStream(pngHeader, writable: false);
+            await storage.WriteChunkAsync(session.Id, 0, chunk, "engineer", default);
+            var stored = await storage.CompleteUploadAsync(session.Id, "engineer", default);
+            Assert.Contains($"{Path.DirectorySeparatorChar}Covers{Path.DirectorySeparatorChar}", stored.RelativePath);
+
+            var fakeJpeg = "not-a-jpeg"u8.ToArray();
+            var invalid = await storage.StartUploadAsync(
+                Guid.NewGuid(), "01010000001", MaterialAttachmentKind.CoverImage, "fake.jpg",
+                fakeJpeg.Length, Convert.ToHexString(SHA256.HashData(fakeJpeg)), attachmentRoot, "engineer", default);
+            await using var invalidChunk = new MemoryStream(fakeJpeg, writable: false);
+            await storage.WriteChunkAsync(invalid.Id, 0, invalidChunk, "engineer", default);
+            await Assert.ThrowsAsync<PdmRuleException>(() => storage.CompleteUploadAsync(invalid.Id, "engineer", default));
+        }
+        finally
+        {
+            DeleteTestRoot(testRoot);
+        }
+    }
+
     private static LocalMaterialAttachmentStorage CreateStorage(string uploadRoot, int chunkSize) =>
         new(Options.Create(new PdmStorageOptions { UploadTempRoot = uploadRoot, ChunkSizeBytes = chunkSize }), TimeProvider.System);
 

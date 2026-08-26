@@ -172,21 +172,21 @@ public sealed class MaterialServiceTests
     }
 
     [Fact]
-    public async Task Create_SkipsU9OccupiedCodesAndChecksSpecificationBeforeSaving()
+    public async Task Create_UsesLatestU9SequenceAndDoesNotFillEarlierGap()
     {
         var service = CreateService(out _, out var u9Client);
         u9Client.ItemsByCode["01020000001"] = new("u9-1", "01020000001", "气缸旧规格", "CDQ2B32");
-        u9Client.ItemsByCode["01020000002"] = new("u9-2", "01020000002", "气缸另一规格", "CDQ2B32-100");
+        u9Client.ItemsByCode["01020000003"] = new("u9-3", "01020000003", "气缸另一规格", "CDQ2B32-100");
 
         var material = await service.CreateAsync(new(
             null, "气缸", MaterialKind.Standard, MaterialSupplyMode.Purchase, "001",
             "CDQ2B32", null, null, null, null, null, null, CategoryCode: "0102"),
             "admin", UserRole.Administrator, default);
 
-        Assert.Equal("01020000003", material.MaterialCode);
-        Assert.Equal(
-            ["01020000001", "01020000002", "01020000003"],
-            u9Client.QueriedCodes.ToArray());
+        Assert.Equal("01020000004", material.MaterialCode);
+        Assert.Equal(["01020000004"], u9Client.QueriedCodes.ToArray());
+        using var referencePayload = JsonDocument.Parse(Assert.Single(u9Client.ReferencePayloads));
+        Assert.Equal("MainItemCategory.Code = '0102'", referencePayload.RootElement.GetProperty("ReferenceDefaultFilter").GetString());
     }
 
     [Fact]
@@ -561,11 +561,40 @@ public sealed class MaterialServiceTests
             material.Weight, material.WeightUnit, completed.Material.RowVersion, "0101"),
             "admin", UserRole.Administrator, default);
 
-        Assert.Equal(MaterialSyncOperation.Update, changed.Task.Operation);
+        var changeTask = Assert.IsType<MaterialSyncTask>(changed.Task);
+        Assert.Equal(MaterialSyncOperation.Update, changeTask.Operation);
         Assert.Equal(MaterialSyncStatus.PreviewReady, changed.Material.SyncStatus);
-        Assert.Contains("\"Attributes\"", changed.Task.PayloadJson);
-        Assert.Contains("\"AttributeName\": \"Name\"", changed.Task.PayloadJson);
+        Assert.Contains("\"Attributes\"", changeTask.PayloadJson);
+        Assert.Contains("\"AttributeName\": \"Name\"", changeTask.PayloadJson);
         Assert.Equal("同步料品改名", changed.Material.Name);
+    }
+
+    [Fact]
+    public async Task ApprovedMaterialPlmOnlyChange_DoesNotCreateU9Task()
+    {
+        var service = CreateService(out var materials);
+        var material = await service.CreateAsync(new(
+            null, "传感器", MaterialKind.Electrical, MaterialSupplyMode.Purchase, "001",
+            "M18", null, "原备注", "SICK", null, null, null, CategoryCode: "0101"),
+            "admin", UserRole.Administrator, default);
+        var approved = await service.ApproveAsync(material.Id, material.RowVersion, "admin", UserRole.Administrator, default);
+        await materials.BeginSyncTaskAsync(approved.Task.Id, DateTimeOffset.UtcNow, default);
+        var completed = await materials.CompleteSyncTaskAsync(
+            approved.Task.Id, "u9-1", material.MaterialCode, "{}",
+            new AuditEntry(Guid.NewGuid(), DateTimeOffset.UtcNow, "admin", "test", nameof(PdmMaterial), material.Id.ToString(), "test"), default);
+
+        var changed = await service.ChangeApprovedAsync(material.Id, new(
+            material.MaterialCode, completed.Material.Name, completed.Material.Kind, completed.Material.SupplyMode, completed.Material.UnitCode,
+            completed.Material.Specification, completed.Material.Material, completed.Material.Remark, completed.Material.Brand, completed.Material.SurfaceTreatment,
+            completed.Material.Weight, completed.Material.WeightUnit, completed.Material.RowVersion, "0101",
+            completed.Material.PurchaseLink, "优先选用库存型号", 125.50m, IsRecommended: true),
+            "admin", UserRole.Administrator, default);
+
+        Assert.Null(changed.Task);
+        Assert.Equal("优先选用库存型号", changed.Material.SelectionAdvice);
+        Assert.Equal(125.50m, changed.Material.ReferencePrice);
+        Assert.True(changed.Material.IsRecommended);
+        Assert.Single(await materials.ListSyncTasksAsync(default));
     }
 
     [Fact]
@@ -588,10 +617,11 @@ public sealed class MaterialServiceTests
         var obsolete = Assert.Single(tasks, task => task.Id == approved.Task.Id);
         Assert.Equal(MaterialSyncStatus.Superseded, obsolete.Status);
         Assert.Equal("料品已编辑，旧请求已废止。", obsolete.LastError);
-        Assert.Equal(MaterialSyncOperation.Create, changed.Task.Operation);
-        Assert.Equal(MaterialSyncStatus.PreviewReady, changed.Task.Status);
+        var changeTask = Assert.IsType<MaterialSyncTask>(changed.Task);
+        Assert.Equal(MaterialSyncOperation.Create, changeTask.Operation);
+        Assert.Equal(MaterialSyncStatus.PreviewReady, changeTask.Status);
         Assert.Equal("待同步气缸改名", changed.Material.Name);
-        Assert.Contains("CDQ2B32-100", changed.Task.PayloadJson);
+        Assert.Contains("CDQ2B32-100", changeTask.PayloadJson);
         var exception = await Assert.ThrowsAsync<PdmRuleException>(() =>
             materials.BeginSyncTaskAsync(approved.Task.Id, DateTimeOffset.UtcNow, default));
         Assert.Contains("已废止", exception.Message);
@@ -730,11 +760,14 @@ public sealed class MaterialServiceTests
     [Fact]
     public async Task BomHeaderMaterialCodeApproval_ApprovesDraftAndCreatesTraceableU9Preview()
     {
-        var service = CreateService(out var materials);
+        var service = CreateService(out var materials, out var u9Client);
+        u9Client.ItemsByCode["01020000001"] = new("u9-1", "01020000001", "历史标准件BOM");
+        u9Client.ItemsByCode["01020000003"] = new("u9-3", "01020000003", "最新标准件BOM");
         var material = await service.CreateAsync(new(
             null, "气密设备标准件BOM", MaterialKind.Standard, MaterialSupplyMode.Purchase, "001",
             "VIRTUAL-BOM", null, null, null, null, null, null, CategoryCode: "0102"),
             "engineer", UserRole.Administrator, default);
+        Assert.Equal("01020000004", material.MaterialCode);
         var requestedAt = DateTimeOffset.UtcNow;
         var application = await materials.CreateMaterialCodeApplicationAsync(new(
             Guid.NewGuid(), ProjectId, null, MaterialCodeApplicationStatus.Pending, "engineer", requestedAt,
@@ -753,11 +786,41 @@ public sealed class MaterialServiceTests
         Assert.Equal(MaterialCodeApplicationStatus.Approved, decision.Application.Status);
         Assert.Equal(ProjectBomHeaderKind.Standard, decision.Application.BomHeaderKind);
         Assert.Equal(MaterialApprovalStatus.Approved, decision.Material?.ApprovalStatus);
+        Assert.Equal("01020000005", decision.Material?.MaterialCode);
+        Assert.Equal(decision.Material?.MaterialCode, decision.Application.MaterialCode);
         var task = Assert.Single(await materials.ListSyncTasksAsync(default));
         Assert.Equal(MaterialSyncStatus.PreviewReady, task.Status);
         Assert.Equal("P700001", task.ProjectCode);
         Assert.Equal("engineer", task.RequestedBy);
         Assert.Equal(ProjectBomHeaderKind.Standard, task.BomHeaderKind);
+    }
+
+    [Fact]
+    public async Task BomHeaderMaterialCodeReapproval_ReusesConfirmedU9MaterialWithoutNewSyncTask()
+    {
+        var service = CreateService(out var materials);
+        var material = await service.CreateAsync(new(
+            null, "已回写项目主BOM", MaterialKind.Product, MaterialSupplyMode.Manufacture, "001",
+            null, null, "安全重置复批", null, null, null, null, CategoryCode: "0302"),
+            "developer", UserRole.Administrator, default);
+        var approved = await service.ApproveAsync(
+            material.Id, material.RowVersion, "standardizer", UserRole.Administrator, default);
+        await materials.BeginSyncTaskAsync(approved.Task.Id, DateTimeOffset.UtcNow, default);
+        var completed = await materials.CompleteSyncTaskAsync(
+            approved.Task.Id, "u9-03020000013", "03020000013", "{}",
+            new AuditEntry(Guid.NewGuid(), DateTimeOffset.UtcNow, "standardizer", "test", nameof(PdmMaterial), material.Id.ToString(), "test"), default);
+        var application = await materials.CreateMaterialCodeApplicationAsync(new(
+            Guid.NewGuid(), ProjectId, null, MaterialCodeApplicationStatus.Pending, "developer", DateTimeOffset.UtcNow,
+            null, null, null, completed.Material.Id, null, 1, ProjectBomHeaderKind.Master), default);
+
+        var decision = await service.DecideMaterialCodeApplicationAsync(
+            application.Id, application.RowVersion, true, "重新批准", "standardizer", UserRole.ProcessReviewer, default);
+
+        Assert.Equal(MaterialCodeApplicationStatus.Approved, decision.Application.Status);
+        Assert.Null(decision.Task);
+        Assert.True(decision.Material?.U9SyncConfirmed);
+        Assert.Equal("03020000013", decision.Material?.U9ItemCode);
+        Assert.Single(await materials.ListSyncTasksAsync(default));
     }
 
     [Fact]
@@ -897,6 +960,7 @@ public sealed class MaterialServiceTests
             ["001"] = 0
         };
         public ConcurrentQueue<string> QueriedCodes { get; } = new();
+        public ConcurrentQueue<string> ReferencePayloads { get; } = new();
         public U9BusinessBatchResult DeleteResult { get; set; } = new(0, null, [new(true, null, null, null)]);
         public bool DeleteRemovesItem { get; set; } = true;
         public string LastPostPath { get; private set; } = string.Empty;
@@ -940,7 +1004,14 @@ public sealed class MaterialServiceTests
         }
 
         public Task<U9CustomerQueryResult> QueryCustomerReferencesAsync(
-            string baseUrl, string path, string token, string payloadJson, CancellationToken cancellationToken) =>
-            throw new NotSupportedException();
+            string baseUrl, string path, string token, string payloadJson, CancellationToken cancellationToken)
+        {
+            ReferencePayloads.Enqueue(payloadJson);
+            var references = ItemsByCode.Values
+                .Select(item => new U9CustomerReference(item.U9ItemCode!, item.U9ItemName ?? item.U9ItemCode!))
+                .OrderBy(item => item.Code, StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+            return Task.FromResult(new U9CustomerQueryResult(0, null, references, references.Length));
+        }
     }
 }

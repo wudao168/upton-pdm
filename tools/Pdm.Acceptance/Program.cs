@@ -28,8 +28,11 @@ if (string.Equals(Environment.GetEnvironmentVariable("PDM_ACCEPTANCE_SEED"), "1"
 }
 var migrations = (await connection.QueryAsync<string>("SELECT version FROM pdm_schema_migration ORDER BY version")).ToArray();
 var releaseColumns = await connection.ExecuteScalarAsync<int>("SELECT COUNT(*) FROM information_schema.columns WHERE table_schema=DATABASE() AND table_name='release_package' AND column_name IN ('mechanical_bom_snapshot_json','electrical_bom_snapshot_json','publish_error')");
+var projectFileTables = await connection.ExecuteScalarAsync<int>("SELECT COUNT(*) FROM information_schema.tables WHERE table_schema=DATABASE() AND table_name IN ('project_file','project_file_version')");
+var projectFileTriggers = await connection.ExecuteScalarAsync<int>("SELECT COUNT(*) FROM information_schema.triggers WHERE trigger_schema=DATABASE() AND trigger_name IN ('trg_project_file_version_no_update','trg_project_file_version_no_delete')");
 var tableCountRows = await connection.QueryAsync<DatabaseTableCount>("SELECT 'project' AS TableName,COUNT(*) AS RowCount FROM project UNION ALL SELECT 'document',COUNT(*) FROM document UNION ALL SELECT 'document_version',COUNT(*) FROM document_version UNION ALL SELECT 'reference_snapshot',COUNT(*) FROM reference_snapshot UNION ALL SELECT 'bom_item',COUNT(*) FROM bom_item UNION ALL SELECT 'release_package',COUNT(*) FROM release_package UNION ALL SELECT 'audit_entry',COUNT(*) FROM audit_entry");
 var tableCounts = tableCountRows.ToDictionary(row => row.TableName, row => row.RowCount, StringComparer.Ordinal);
+var projectCompanies = (await connection.QueryAsync("SELECT code,organization_id FROM project ORDER BY code")).ToArray();
 var projectReferenceRoots = (await connection.QueryAsync<ProjectReferenceRootRow>("""
     SELECT p.code AS ProjectCode,
            d.file_name AS RootFileName,
@@ -63,8 +66,13 @@ Console.WriteLine(JsonSerializer.Serialize(new
     database = builder.Database,
     migrations,
     expectedMigrationApplied = migrations.Contains("004_phase1_bom_release_workflow", StringComparer.Ordinal),
+    projectFileMigrationApplied = migrations.Contains("075_project_files", StringComparer.Ordinal),
+    projectFileRetentionMigrationApplied = migrations.Contains("076_project_file_retention", StringComparer.Ordinal),
     releaseColumns,
+    projectFileTables,
+    projectFileTriggers,
     tableCounts,
+    projectCompanies,
     projectReferenceRoots,
     referenceSnapshotCandidates,
     qaAdminExists = qaPasswordHash is not null,
@@ -88,9 +96,10 @@ static async Task SeedAsync(MySqlConnection connection)
     var node = new DocumentReferenceNode(Guid.Parse("dddddddd-dddd-dddd-dddd-dddddddddddd"), documentId, "QA-ROOT", "QA-ROOT.SLDASM", "一期自动验收装配", DocumentKind.Assembly, "Default", 1, ReferenceNodeStatus.Normal, RevisionLabel.InitialWork(), null, []);
     var rootJson = JsonSerializer.Serialize(node, new JsonSerializerOptions(JsonSerializerDefaults.Web));
     var passwordHash = new Pbkdf2PasswordService().Hash(password);
+    var companyId = await connection.QuerySingleAsync<Guid>("SELECT id FROM project_organization WHERE is_active=1 ORDER BY name LIMIT 1");
 
-    await connection.ExecuteAsync("INSERT INTO pdm_user(id,username,display_name,password_hash,role,is_active,row_version,created_at) VALUES(@Id,'qa_admin','一期验收管理员',@PasswordHash,'Administrator',1,1,@Now) ON DUPLICATE KEY UPDATE password_hash=@PasswordHash,is_active=1", new { Id = Guid.Parse("eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee"), PasswordHash = passwordHash, Now = now });
-    await connection.ExecuteAsync("INSERT INTO pdm_user(id,username,display_name,password_hash,role,is_active,row_version,created_at) VALUES(@Id,'qa_engineer','一期验收工程师',@PasswordHash,'Engineer',1,1,@Now) ON DUPLICATE KEY UPDATE password_hash=@PasswordHash,is_active=1", new { Id = Guid.Parse("ffffffff-eeee-eeee-eeee-eeeeeeeeeeee"), PasswordHash = passwordHash, Now = now });
+    await connection.ExecuteAsync("INSERT INTO pdm_user(id,username,display_name,password_hash,role,company_id,is_active,row_version,created_at) VALUES(@Id,'qa_admin','一期验收管理员',@PasswordHash,'Administrator',@CompanyId,1,1,@Now) ON DUPLICATE KEY UPDATE password_hash=@PasswordHash,company_id=@CompanyId,is_active=1", new { Id = Guid.Parse("eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee"), PasswordHash = passwordHash, CompanyId = companyId, Now = now });
+    await connection.ExecuteAsync("INSERT INTO pdm_user(id,username,display_name,password_hash,role,company_id,is_active,row_version,created_at) VALUES(@Id,'qa_engineer','一期验收工程师',@PasswordHash,'Engineer',@CompanyId,1,1,@Now) ON DUPLICATE KEY UPDATE password_hash=@PasswordHash,company_id=@CompanyId,is_active=1", new { Id = Guid.Parse("ffffffff-eeee-eeee-eeee-eeeeeeeeeeee"), PasswordHash = passwordHash, CompanyId = companyId, Now = now });
     await connection.ExecuteAsync("INSERT INTO project(id,code,name,owner,vault_location,release_location,is_active,row_version,created_at,updated_at) VALUES(@Id,'QA-PHASE1','一期自动验收项目','qa_admin',@Vault,@Release,1,1,@Now,@Now) ON DUPLICATE KEY UPDATE vault_location=@Vault,release_location=@Release,is_active=1,updated_at=@Now", new { Id = projectId, Vault = vault, Release = release, Now = now });
     await connection.ExecuteAsync("INSERT INTO document(id,project_id,drawing_number,name,file_name,kind,lifecycle_state,revision_label,checked_out_by,checked_out_at,row_version,created_at,updated_at) VALUES(@Id,@ProjectId,'QA-ROOT','一期自动验收装配','QA-ROOT.SLDASM','Assembly','Work','W1',NULL,NULL,1,@Now,@Now) ON DUPLICATE KEY UPDATE updated_at=@Now", new { Id = documentId, ProjectId = projectId, Now = now });
     await connection.ExecuteAsync("INSERT INTO reference_snapshot(id,project_id,root_document_id,captured_at,captured_by,sha256,root_json) VALUES(@Id,@ProjectId,@DocumentId,@Now,'qa_admin',REPEAT('0',64),@RootJson) ON DUPLICATE KEY UPDATE captured_at=@Now,root_json=@RootJson", new { Id = snapshotId, ProjectId = projectId, DocumentId = documentId, Now = now, RootJson = rootJson });

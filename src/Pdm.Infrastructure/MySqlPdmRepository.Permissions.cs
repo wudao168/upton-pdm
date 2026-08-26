@@ -14,7 +14,7 @@ public sealed partial class MySqlPdmRepository
         var permissions = (await connection.QueryAsync<RolePermissionRow>(new CommandDefinition(
             "SELECT role_code RoleCode,permission_code PermissionCode FROM role_permission ORDER BY role_code,permission_code", cancellationToken: cancellationToken))).ToArray();
         var userCounts = (await connection.QueryAsync<RoleUserCountRow>(new CommandDefinition(
-            "SELECT COALESCE(NULLIF(assigned_role_code,''),role) RoleCode,COUNT(*) UserCount FROM pdm_user GROUP BY COALESCE(NULLIF(assigned_role_code,''),role)", cancellationToken: cancellationToken)))
+            "SELECT role_code RoleCode,COUNT(DISTINCT user_id) UserCount FROM pdm_user_role GROUP BY role_code", cancellationToken: cancellationToken)))
             .ToDictionary(item => item.RoleCode, item => checked((int)item.UserCount), StringComparer.OrdinalIgnoreCase);
         return BuildRolePermissionDirectory(definitions, permissions, userCounts);
     }
@@ -30,6 +30,19 @@ public sealed partial class MySqlPdmRepository
     {
         if (fallbackRole == UserRole.Administrator) return RolePermissionCatalog.Defaults[fallbackRole];
         await using var connection = await OpenAsync(cancellationToken);
+        var assignmentCount = await connection.ExecuteScalarAsync<int>(new CommandDefinition(
+            "SELECT COUNT(*) FROM pdm_user_role assignment INNER JOIN pdm_user user_account ON user_account.id=assignment.user_id WHERE user_account.username=@Username",
+            new { Username = username }, cancellationToken: cancellationToken));
+        var permissions = (await connection.QueryAsync<string>(new CommandDefinition(
+            """
+            SELECT DISTINCT permission.permission_code
+            FROM pdm_user user_account
+            INNER JOIN pdm_user_role assignment ON assignment.user_id=user_account.id
+            INNER JOIN role_permission permission ON permission.role_code=assignment.role_code
+            WHERE user_account.username=@Username
+            """, new { Username = username }, cancellationToken: cancellationToken)))
+            .Where(RolePermissionCatalog.IsKnown).ToHashSet(StringComparer.Ordinal);
+        if (assignmentCount > 0) return permissions;
         var roleCode = await connection.QuerySingleOrDefaultAsync<string>(new CommandDefinition(
             "SELECT COALESCE(NULLIF(assigned_role_code,''),role) FROM pdm_user WHERE username=@Username LIMIT 1", new { Username = username }, cancellationToken: cancellationToken));
         return await ReadPermissionsAsync(connection, string.IsNullOrWhiteSpace(roleCode) ? fallbackRole.ToString() : roleCode, cancellationToken);
@@ -91,7 +104,7 @@ public sealed partial class MySqlPdmRepository
         await using var connection = await OpenAsync(cancellationToken);
         var definition = await FindRoleDefinitionAsync(connection, roleCode, cancellationToken) ?? throw new PdmNotFoundException("角色不存在。");
         if (definition.IsSystem) throw new PdmRuleException("系统角色不能删除。");
-        var userCount = await connection.ExecuteScalarAsync<int>(new CommandDefinition("SELECT COUNT(*) FROM pdm_user WHERE assigned_role_code=@RoleCode", new { definition.RoleCode }, cancellationToken: cancellationToken));
+        var userCount = await connection.ExecuteScalarAsync<int>(new CommandDefinition("SELECT COUNT(DISTINCT user_id) FROM pdm_user_role WHERE role_code=@RoleCode", new { definition.RoleCode }, cancellationToken: cancellationToken));
         if (userCount > 0) throw new PdmConflictException($"该角色仍分配给 {userCount} 个用户，请先调整用户角色。");
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
         try
@@ -134,4 +147,5 @@ public sealed partial class MySqlPdmRepository
     private sealed class RoleDefinitionDataRow { public string RoleCode { get; init; } = string.Empty; public string Name { get; init; } = string.Empty; public string Description { get; init; } = string.Empty; public string BaseRole { get; init; } = string.Empty; public bool IsSystem { get; init; } }
     private sealed record RolePermissionRow(string RoleCode, string PermissionCode);
     private sealed record RoleUserCountRow(string RoleCode, long UserCount);
+    private sealed record UserRoleAssignmentRow(Guid UserId, string RoleCode, bool IsPrimary);
 }

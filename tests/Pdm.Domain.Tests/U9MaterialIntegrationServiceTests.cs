@@ -144,7 +144,8 @@ public sealed class U9MaterialIntegrationServiceTests
     public async Task ExecuteTask_QueriesByCodeThenCreatesAndCompletesTask()
     {
         var fixture = await CreateApprovedTaskAsync(writeEnabled: true);
-        fixture.Client.QueryResult = new U9ItemQueryResult(0, null, []);
+        fixture.Client.QueryResultSequence.Enqueue(new U9ItemQueryResult(0, null, []));
+        fixture.Client.QueryResultSequence.Enqueue(MatchingQuery(fixture.Material, "1001"));
         fixture.Client.BatchResult = new U9BusinessBatchResult(0, null,
             [new U9BusinessRowResult(true, null, "1001", fixture.Material.MaterialCode)]);
 
@@ -156,7 +157,7 @@ public sealed class U9MaterialIntegrationServiceTests
         Assert.Equal(MaterialSyncStatus.Succeeded, result.Task.Status);
         Assert.Equal("1001", result.Material.U9ItemId);
         Assert.True(result.Material.U9SyncConfirmed);
-        Assert.Equal(1, fixture.Client.QueryCallCount);
+        Assert.Equal(2, fixture.Client.QueryCallCount);
         Assert.Equal(1, fixture.Client.PostCallCount);
         Assert.Contains("\"MainItemCategory\"", fixture.Client.LastCreatePayload);
         Assert.Contains("\"Code\": \"001\"", fixture.Client.LastUomPayload);
@@ -230,6 +231,105 @@ public sealed class U9MaterialIntegrationServiceTests
     }
 
     [Fact]
+    public async Task ExecuteTask_WhenPostWriteFieldsDoNotMatch_MarksNeedsReviewWithoutRewriting()
+    {
+        var fixture = await CreateApprovedTaskAsync(writeEnabled: true);
+        fixture.Client.QueryResultSequence.Enqueue(new U9ItemQueryResult(0, null, []));
+        fixture.Client.QueryResult = new U9ItemQueryResult(0, null,
+            [new("u9-1001", fixture.Material.MaterialCode, "错误名称", fixture.Material.Specification, "0101", null, "001")]);
+        fixture.Client.BatchResult = new U9BusinessBatchResult(0, null,
+            [new U9BusinessRowResult(true, null, "u9-1001", fixture.Material.MaterialCode)]);
+
+        var exception = await Assert.ThrowsAsync<PdmRuleException>(() => fixture.Service.ExecuteTaskAsync(
+            fixture.Task.Id, "admin", UserRole.Administrator, default));
+
+        var saved = await fixture.Materials.FindSyncTaskAsync(fixture.Task.Id, default);
+        Assert.Equal(MaterialSyncStatus.NeedsReview, saved?.Status);
+        Assert.Contains("名称", exception.Message);
+        Assert.Equal(1, fixture.Client.PostCallCount);
+        Assert.Equal(4, fixture.Client.QueryCallCount);
+    }
+
+    [Fact]
+    public async Task ExecuteTask_WhenPlmWeightIsMissingAndU9ReturnsZero_ConfirmsSynchronization()
+    {
+        var fixture = await CreateApprovedTaskAsync(writeEnabled: true);
+        fixture.Client.QueryResultSequence.Enqueue(new U9ItemQueryResult(0, null, []));
+        var matching = MatchingQuery(fixture.Material, "u9-1001");
+        fixture.Client.QueryResult = matching with
+        {
+            Items = [matching.Items.Single() with { U9Weight = 0m }]
+        };
+        fixture.Client.BatchResult = new U9BusinessBatchResult(0, null,
+            [new U9BusinessRowResult(true, null, "u9-1001", fixture.Material.MaterialCode)]);
+
+        var result = await fixture.Service.ExecuteTaskAsync(
+            fixture.Task.Id, "admin", UserRole.Administrator, default);
+
+        Assert.True(result.Created);
+        Assert.Equal(MaterialSyncStatus.Succeeded, result.Task.Status);
+        Assert.True(result.Material.U9SyncConfirmed);
+        Assert.Equal("u9-1001", result.Material.U9ItemId);
+        Assert.Equal(fixture.Material.MaterialCode, result.Material.U9ItemCode);
+        Assert.Equal(1, fixture.Client.PostCallCount);
+    }
+
+    [Fact]
+    public async Task ExecuteTask_WhenNeedsReviewCreateFindsMatchingItem_ReconcilesWithoutWriting()
+    {
+        var fixture = await CreateApprovedTaskAsync(writeEnabled: true);
+        await fixture.Materials.BeginSyncTaskAsync(fixture.Task.Id, fixture.TimeProvider.GetUtcNow(), default);
+        await fixture.Materials.FailSyncTaskAsync(
+            fixture.Task.Id,
+            MaterialSyncStatus.NeedsReview,
+            "写后回查未确认",
+            null,
+            new AuditEntry(Guid.NewGuid(), fixture.TimeProvider.GetUtcNow(), "admin", "test", nameof(PdmMaterial), fixture.Material.Id.ToString(), "test"),
+            default);
+        var matching = MatchingQuery(fixture.Material, "u9-1001");
+        fixture.Client.QueryResult = matching with
+        {
+            Items = [matching.Items.Single() with { U9Weight = 0m }]
+        };
+
+        var result = await fixture.Service.ExecuteTaskAsync(
+            fixture.Task.Id, "admin", UserRole.Administrator, default);
+
+        Assert.True(result.AlreadyExisted);
+        Assert.False(result.Created);
+        Assert.Equal(MaterialSyncStatus.Succeeded, result.Task.Status);
+        Assert.True(result.Material.U9SyncConfirmed);
+        Assert.Equal("u9-1001", result.Material.U9ItemId);
+        Assert.Equal(fixture.Material.MaterialCode, result.Material.U9ItemCode);
+        Assert.Equal(1, fixture.Client.QueryCallCount);
+        Assert.Equal(0, fixture.Client.PostCallCount);
+    }
+
+    [Fact]
+    public async Task ExecuteTask_WhenNeedsReviewCreateDoesNotFindItem_StopsWithoutWriting()
+    {
+        var fixture = await CreateApprovedTaskAsync(writeEnabled: true);
+        await fixture.Materials.BeginSyncTaskAsync(fixture.Task.Id, fixture.TimeProvider.GetUtcNow(), default);
+        await fixture.Materials.FailSyncTaskAsync(
+            fixture.Task.Id,
+            MaterialSyncStatus.NeedsReview,
+            "写后回查未确认",
+            null,
+            new AuditEntry(Guid.NewGuid(), fixture.TimeProvider.GetUtcNow(), "admin", "test", nameof(PdmMaterial), fixture.Material.Id.ToString(), "test"),
+            default);
+        fixture.Client.QueryResult = new U9ItemQueryResult(0, null, []);
+
+        var exception = await Assert.ThrowsAsync<PdmRuleException>(() => fixture.Service.ExecuteTaskAsync(
+            fixture.Task.Id, "admin", UserRole.Administrator, default));
+
+        var saved = await fixture.Materials.FindSyncTaskAsync(fixture.Task.Id, default);
+        Assert.Equal(MaterialSyncStatus.NeedsReview, saved?.Status);
+        Assert.Contains("避免重复创建", exception.Message);
+        Assert.Equal(1, fixture.Client.QueryCallCount);
+        Assert.Equal(0, fixture.Client.PostCallCount);
+    }
+
+    [Fact]
     public async Task ExecuteTask_ModifyRequiresExistingU9ItemAndUsesOfficialModifyPath()
     {
         var fixture = await CreateApprovedTaskAsync(writeEnabled: true);
@@ -243,10 +343,11 @@ public sealed class U9MaterialIntegrationServiceTests
             fixture.Material.Specification, fixture.Material.Material, fixture.Material.Remark, fixture.Material.Brand, fixture.Material.SurfaceTreatment,
             fixture.Material.Weight, fixture.Material.WeightUnit, synced.Material.RowVersion, "0101", "https://shop.example.test/item/sensor-v2"),
             "admin", UserRole.Administrator, default);
-        fixture.Client.QueryResult = new U9ItemQueryResult(0, null, [new("u9-1001", fixture.Material.MaterialCode)]);
+        fixture.Client.QueryResultSequence.Enqueue(new U9ItemQueryResult(0, null, [new("u9-1001", fixture.Material.MaterialCode)]));
+        fixture.Client.QueryResultSequence.Enqueue(MatchingQuery(synced.Material with { Name = "改名后的传感器", PurchaseLink = "https://shop.example.test/item/sensor-v2" }, "u9-1001"));
         fixture.Client.BatchResult = new U9BusinessBatchResult(0, null, []);
 
-        var result = await fixture.Service.ExecuteTaskAsync(change.Task.Id, "admin", UserRole.Administrator, default);
+        var result = await fixture.Service.ExecuteTaskAsync(Assert.IsType<MaterialSyncTask>(change.Task).Id, "admin", UserRole.Administrator, default);
 
         Assert.True(result.Updated);
         Assert.Equal(U9MaterialContract.ModifyPath, fixture.Client.LastPostPath);
@@ -280,6 +381,24 @@ public sealed class U9MaterialIntegrationServiceTests
         return new ExecutionFixture(service, repository, materials, client, timeProvider, approved.Material, approved.Task);
     }
 
+    private static U9ItemQueryResult MatchingQuery(PdmMaterial material, string u9ItemId) => new(0, null,
+    [new U9ItemReference(
+        u9ItemId,
+        material.MaterialCode,
+        material.Name,
+        material.Specification,
+        material.CategoryCode ?? material.U9CategoryCode,
+        null,
+        material.UnitCode,
+        null,
+        material.Brand,
+        material.Remark,
+        material.Material,
+        material.SurfaceTreatment,
+        material.Weight,
+        material.WeightUnit,
+        material.PurchaseLink)]);
+
     private static async Task<ExecutionFixture> CreateSampleFixtureAsync()
     {
         var timeProvider = TimeProvider.System;
@@ -311,6 +430,7 @@ public sealed class U9MaterialIntegrationServiceTests
         public U9BusinessBatchResult BatchResult { get; set; } = new(0, null, []);
         public U9CustomerQueryResult CustomerResult { get; set; } = new(0, null, [], 0);
         public Dictionary<string, U9ItemQueryResult> QueryResultsByCode { get; } = new(StringComparer.OrdinalIgnoreCase);
+        public Queue<U9ItemQueryResult> QueryResultSequence { get; } = new();
         public int QueryCallCount { get; private set; }
         public int PostCallCount { get; private set; }
         public bool ThrowOnPost { get; set; }
@@ -343,6 +463,7 @@ public sealed class U9MaterialIntegrationServiceTests
         public Task<U9ItemQueryResult> QueryItemsAsync(string baseUrl, string path, string token, string payloadJson, CancellationToken cancellationToken)
         {
             QueryCallCount++;
+            if (QueryResultSequence.Count > 0) return Task.FromResult(QueryResultSequence.Dequeue());
             using var document = System.Text.Json.JsonDocument.Parse(payloadJson);
             if (document.RootElement.ValueKind == System.Text.Json.JsonValueKind.Array
                 && document.RootElement.GetArrayLength() > 0

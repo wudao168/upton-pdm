@@ -2,14 +2,13 @@
 import { ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { ArrowDown, ArrowUp } from '@lucide/vue'
-import type { FolderPermissionRule, PdmUser, ProjectFolderTemplateNode } from '../types'
+import type { FolderPermissionRule, PdmUser, ProjectFolderTemplateNode, RolePermissionSettings } from '../types'
 
-const props = defineProps<{ nodes: ProjectFolderTemplateNode[]; users: PdmUser[]; pending: boolean; onSave: (nodes: ProjectFolderTemplateNode[]) => Promise<ProjectFolderTemplateNode[]> }>()
+const props = defineProps<{ nodes: ProjectFolderTemplateNode[]; users: PdmUser[]; roles: RolePermissionSettings[]; pending: boolean; onSave: (nodes: ProjectFolderTemplateNode[]) => Promise<ProjectFolderTemplateNode[]> }>()
 const draft = ref<ProjectFolderTemplateNode[]>([])
 const permissionOpen = ref(false)
 const editingKey = ref('')
 const permissionRows = ref<FolderPermissionRule[]>([])
-const roles = ['Engineer', 'PlanningManager', 'ProcessReviewer', 'Approver', 'ProductionViewer', 'Administrator']
 const accessOptions = [
   { value: 1, label: '查看' }, { value: 2, label: '下载' }, { value: 4, label: '上传' }, { value: 8, label: '编辑' },
   { value: 16, label: '删除' }, { value: 32, label: '管理权限' }, { value: 64, label: '发布' },
@@ -18,7 +17,7 @@ watch(() => props.nodes, value => { draft.value = value.map(item => ({ ...item, 
 const purposeLabel: Record<string, string> = { MechanicalRoot: '机械根目录', ElectricalRoot: '电气根目录', ProjectContainer: '项目目录', Release: '发布目录', Standard: '资料目录' }
 async function save() { try { await props.onSave(draft.value); ElMessage.success('文件夹模板已保存') } catch (error) { ElMessage.error(error instanceof Error ? error.message : '模板保存失败') } }
 function editPermissions(node: ProjectFolderTemplateNode) { editingKey.value = node.folderKey; permissionRows.value = node.permissions.map(rule => ({ ...rule })); permissionOpen.value = true }
-function addPermission() { permissionRows.value.push({ principalType: 'Role', principalKey: 'Engineer', access: 3 }) }
+function addPermission() { permissionRows.value.push({ principalType: 'Role', principalKey: props.roles[0]?.role ?? '', access: 3 }) }
 function accessValues(rule: FolderPermissionRule) { return accessOptions.filter(item => (rule.access & item.value) === item.value).map(item => item.value) }
 function setAccess(rule: FolderPermissionRule, values: number[]) { rule.access = values.reduce((mask, value) => mask | value, 0) }
 function applyPermissions() { const node = draft.value.find(item => item.folderKey === editingKey.value); if (node) node.permissions = permissionRows.value.map(rule => ({ ...rule })); permissionOpen.value = false }
@@ -54,7 +53,7 @@ function moveNode(node: ProjectFolderTemplateNode, offset: -1 | 1) {
   </section>
   <el-dialog v-model="permissionOpen" title="模板默认权限" width="760px">
     <p class="pdm-dialog-help">模板权限用于未单独设置权限的项目目录；项目内仍可逐个目录覆盖。</p>
-    <div class="pdm-permission-list"><div v-for="(rule,index) in permissionRows" :key="rule.id || index" class="pdm-permission-row"><el-select v-model="rule.principalType" style="width:100px"><el-option label="角色" value="Role" /><el-option label="用户" value="User" /></el-select><el-select v-if="rule.principalType === 'Role'" v-model="rule.principalKey" style="width:165px"><el-option v-for="role in roles" :key="role" :label="role" :value="role" /></el-select><el-select v-else v-model="rule.principalKey" filterable style="width:165px"><el-option v-for="user in users" :key="user.username" :label="`${user.displayName} (${user.username})`" :value="user.username" /></el-select><el-checkbox-group :model-value="accessValues(rule)" @update:model-value="setAccess(rule, $event as number[])"><el-checkbox v-for="item in accessOptions" :key="item.value" :value="item.value">{{ item.label }}</el-checkbox></el-checkbox-group><button type="button" class="pdm-text-danger" @click="permissionRows.splice(index,1)">移除</button></div></div>
+    <div class="pdm-permission-list"><div v-for="(rule,index) in permissionRows" :key="rule.id || index" class="pdm-permission-row"><el-select v-model="rule.principalType" style="width:100px"><el-option label="角色" value="Role" /><el-option label="用户" value="User" /></el-select><el-select v-if="rule.principalType === 'Role'" v-model="rule.principalKey" filterable style="width:165px"><el-option v-for="role in roles" :key="role.role" :label="role.name" :value="role.role" /></el-select><el-select v-else v-model="rule.principalKey" filterable style="width:165px"><el-option v-for="user in users" :key="user.username" :label="user.displayName" :value="user.username" /></el-select><el-checkbox-group :model-value="accessValues(rule)" @update:model-value="setAccess(rule, $event as number[])"><el-checkbox v-for="item in accessOptions" :key="item.value" :value="item.value">{{ item.label }}</el-checkbox></el-checkbox-group><button type="button" class="pdm-text-danger" @click="permissionRows.splice(index,1)">移除</button></div></div>
     <button type="button" class="pdm-secondary-action" @click="addPermission">添加权限主体</button>
     <template #footer><button type="button" class="pdm-secondary-action" @click="permissionOpen=false">取消</button><button type="button" class="pdm-primary-action" @click="applyPermissions">应用到模板草稿</button></template>
   </el-dialog>

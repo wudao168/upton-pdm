@@ -552,6 +552,7 @@ internal sealed class ProjectDto
     public Guid? ParentProjectId { get; set; }
     public int? ChildSequence { get; set; }
     public bool CanReadContent { get; set; }
+    public bool CanSubmitArchive { get; set; }
     public int? DocumentCount { get; set; }
     public string BusinessStatus { get; set; }
 

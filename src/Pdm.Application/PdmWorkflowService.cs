@@ -311,8 +311,9 @@ public sealed class PdmWorkflowService(
         var username = NormalizeUsername(command.Username);
         var displayName = NormalizeDisplayName(command.DisplayName);
         if (await repository.FindUserAsync(username, cancellationToken) is not null) throw new PdmConflictException("用户名已经存在。");
-        var targetRole = await FindRoleAsync(command.RoleCode, cancellationToken);
-        if (IsPlatformManagedRole(targetRole.Role) && TenantContext.Current?.IsPlatformAdministrator != true)
+        var targetRoles = await FindRolesAsync(command.RoleCodes ?? [command.RoleCode], cancellationToken);
+        var targetRole = targetRoles[0];
+        if (targetRoles.Any(role => IsPlatformManagedRole(role.Role)) && TenantContext.Current?.IsPlatformAdministrator != true)
             throw new UnauthorizedAccessException("只有平台级账号可以创建平台管理员或开发者。");
         var directory = await repository.GetOrganizationDirectoryAsync(cancellationToken);
         var companyId = ResolveManagedCompany(command.CompanyId, directory);
@@ -320,10 +321,11 @@ public sealed class PdmWorkflowService(
         if ((command.CrossCompanyView || accessibleCompanyIds.Length > 0) && TenantContext.Current?.IsPlatformAdministrator != true)
             throw new UnauthorizedAccessException("只有平台管理员可以配置跨公司权限。");
         var crossCompanyView = command.CrossCompanyView && accessibleCompanyIds.Length > 0;
-        var user = new UserAccount(Guid.NewGuid(), username, displayName, command.PasswordHash, targetRole.BaseRole, command.IsActive, RoleCode: targetRole.Role, CompanyId: companyId, CrossCompanyView: crossCompanyView);
+        var roleCodes = targetRoles.Select(role => role.Role).ToArray();
+        var user = new UserAccount(Guid.NewGuid(), username, displayName, command.PasswordHash, targetRole.BaseRole, command.IsActive, RoleCode: targetRole.Role, CompanyId: companyId, CrossCompanyView: crossCompanyView, RoleCodes: roleCodes);
         await repository.CreateUserAsync(user, cancellationToken);
         await repository.SetUserCompanyScopeAsync(username, companyId, crossCompanyView, accessibleCompanyIds, actor, cancellationToken);
-        await AuditAsync(actor, "user.create", nameof(UserAccount), username, $"{displayName} · {targetRole.Name} · {(command.IsActive ? "启用" : "停用")}", cancellationToken);
+        await AuditAsync(actor, "user.create", nameof(UserAccount), username, $"{displayName} · {string.Join('、', targetRoles.Select(role => role.Name))} · {(command.IsActive ? "启用" : "停用")}", cancellationToken);
         return await repository.FindUserAsync(username, cancellationToken) ?? user;
     }
 
@@ -334,10 +336,12 @@ public sealed class PdmWorkflowService(
         var username = NormalizeUsername(command.Username);
         var displayName = NormalizeDisplayName(command.DisplayName);
         var current = await repository.FindUserAsync(username, cancellationToken) ?? throw new PdmNotFoundException("用户不存在。");
-        var targetRole = await FindRoleAsync(command.RoleCode, cancellationToken);
-        if (IsPlatformManagedRole(targetRole.Role) && TenantContext.Current?.IsPlatformAdministrator != true)
+        var targetRoles = await FindRolesAsync(command.RoleCodes ?? [command.RoleCode], cancellationToken);
+        var targetRole = targetRoles[0];
+        var roleCodes = targetRoles.Select(role => role.Role).ToArray();
+        if (targetRoles.Any(role => IsPlatformManagedRole(role.Role)) && TenantContext.Current?.IsPlatformAdministrator != true)
             throw new UnauthorizedAccessException("只有平台级账号可以分配平台管理员或开发者角色。");
-        if (string.Equals(actor, username, StringComparison.OrdinalIgnoreCase) && (!command.IsActive || !string.Equals(targetRole.Role, current.EffectiveRoleCode, StringComparison.OrdinalIgnoreCase)))
+        if (string.Equals(actor, username, StringComparison.OrdinalIgnoreCase) && (!command.IsActive || !RoleSetsEqual(roleCodes, current.EffectiveRoleCodes)))
             throw new PdmRuleException("不能停用当前登录账号或修改其系统角色。");
         if (current.Role == UserRole.Administrator && current.IsActive && (targetRole.BaseRole != UserRole.Administrator || !command.IsActive))
         {
@@ -350,10 +354,10 @@ public sealed class PdmWorkflowService(
         if ((command.CrossCompanyView || accessibleCompanyIds.Length > 0) && TenantContext.Current?.IsPlatformAdministrator != true)
             throw new UnauthorizedAccessException("只有平台管理员可以配置跨公司权限。");
         var crossCompanyView = command.CrossCompanyView && accessibleCompanyIds.Length > 0;
-        var saved = await repository.UpdateUserAsync(username, displayName, targetRole.BaseRole, targetRole.Role, command.IsActive, cancellationToken);
+        var saved = await repository.UpdateUserAsync(username, displayName, targetRole.BaseRole, targetRole.Role, roleCodes, command.IsActive, cancellationToken);
         await repository.SetUserCompanyScopeAsync(username, companyId, crossCompanyView, accessibleCompanyIds, actor, cancellationToken);
         saved = await repository.FindUserAsync(username, cancellationToken) ?? saved;
-        await AuditAsync(actor, "user.update", nameof(UserAccount), username, $"{displayName} · {targetRole.Name} · {(command.IsActive ? "启用" : "停用")}", cancellationToken);
+        await AuditAsync(actor, "user.update", nameof(UserAccount), username, $"{displayName} · {string.Join('、', targetRoles.Select(role => role.Name))} · {(command.IsActive ? "启用" : "停用")}", cancellationToken);
         return saved;
     }
 
@@ -396,6 +400,8 @@ public sealed class PdmWorkflowService(
         if (code.Length is < 1 or > 40 || code.Any(character => !char.IsLetterOrDigit(character) && character is not ('-' or '_')))
             throw new PdmRuleException("组织编码只能包含字母、数字、短横线和下划线，且不能超过40位。");
         if (name.Length is < 1 or > 160) throw new PdmRuleException("组织名称不能为空且不能超过160个字符。");
+        if (command.CanManufacture && command.Kind != OrganizationUnitKind.BusinessDivision)
+            throw new PdmRuleException("只有公司直属部门可以设为制造部门。");
         if (command.ParentUnitId is not null)
         {
             var parent = directory.Units.SingleOrDefault(item => item.Id == command.ParentUnitId);
@@ -444,8 +450,15 @@ public sealed class PdmWorkflowService(
         var unit = directory.Units.SingleOrDefault(item => item.Id == unitId && item.IsActive)
             ?? throw new PdmRuleException("只能为启用的组织配置负责人。");
         if (TenantContext.Current?.IsPlatformAdministrator != true) RequirePrimaryCompany(unit.OrganizationId);
+        if (string.IsNullOrWhiteSpace(primaryManager))
+        {
+            if (collaborators.Length > 0) throw new PdmRuleException("清除主负责人时不能保留协同负责人。");
+            var cleared = await repository.SetOrganizationUnitManagersAsync(unitId, string.Empty, Array.Empty<string>(), cancellationToken);
+            await AuditAsync(actor, "organization.managers.clear", nameof(OrganizationUnitManagers), unitId.ToString(), "已清除部门负责人", cancellationToken);
+            return cleared;
+        }
         var candidates = new[] { primaryManager }.Concat(collaborators).ToArray();
-        if (string.IsNullOrWhiteSpace(primaryManager) || candidates.Any(username => !IsActiveUserAvailableToOrganization(directory, username, unit.OrganizationId)))
+        if (candidates.Any(username => !IsActiveUserAvailableToOrganization(directory, username, unit.OrganizationId)))
             throw new PdmRuleException("部门负责人必须是主公司为当前公司的启用账号。");
         var saved = await repository.SetOrganizationUnitManagersAsync(unitId, primaryManager, collaborators, cancellationToken);
         await AuditAsync(actor, "organization.managers.update", nameof(OrganizationUnitManagers), unitId.ToString(), $"主负责人：{primaryManager}；协同：{string.Join('、', collaborators)}", cancellationToken);
@@ -458,13 +471,14 @@ public sealed class PdmWorkflowService(
         var project = await repository.FindProjectAsync(projectId, cancellationToken) ?? throw new PdmNotFoundException("项目不存在。");
         if (project.ParentProjectId is not null) throw new PdmRuleException("执行事业部只能在主项目上配置。");
         var directory = await repository.GetOrganizationDirectoryAsync(cancellationToken);
-        var unit = directory.Units.SingleOrDefault(item => item.Id == executionUnitId && item.IsActive && item.Kind == OrganizationUnitKind.BusinessDivision)
-            ?? throw new PdmRuleException("执行事业部不存在或已停用。");
+        var unit = directory.Units.SingleOrDefault(item => item.Id == executionUnitId && item.IsActive
+            && item.Kind == OrganizationUnitKind.BusinessDivision && item.CanManufacture)
+            ?? throw new PdmRuleException("承接部门不存在、未启用或未设为制造部门。");
         if (project.OrganizationId != unit.OrganizationId) throw new PdmRuleException("执行事业部必须属于项目公司。");
         if (role != UserRole.Administrator)
         {
-            if (!directory.Memberships.Any(item => string.Equals(item.Username, actor, StringComparison.OrdinalIgnoreCase)
-                    && directory.Units.Any(memberUnit => memberUnit.Id == item.UnitId && memberUnit.OrganizationId == unit.OrganizationId)))
+            if (!directory.Users.Any(user => string.Equals(user.Username, actor, StringComparison.OrdinalIgnoreCase)
+                    && user.CompanyId == unit.OrganizationId))
                 throw new UnauthorizedAccessException("计划管理只能分配本人所属公司的项目。");
         }
         var saved = await repository.SetProjectExecutionUnitAsync(projectId, executionUnitId, actor, cancellationToken);
@@ -553,14 +567,14 @@ public sealed class PdmWorkflowService(
                 && (string.Equals(item.PrimaryManager, actor, StringComparison.OrdinalIgnoreCase) || item.CollaborativeManagers.Contains(actor, StringComparer.OrdinalIgnoreCase))))
             throw new UnauthorizedAccessException("只有执行事业部负责人可以配置项目经理和设计负责人。");
         var primary = command.PrimaryProjectManager?.Trim() ?? string.Empty;
-        var designLead = command.DesignLead?.Trim() ?? string.Empty;
+        var designLeads = NormalizeUsers(command.DesignLeads);
         var collaborators = NormalizeUsers(command.CollaborativeProjectManagers).Where(username => !string.Equals(username, primary, StringComparison.OrdinalIgnoreCase)).ToArray();
-        var candidates = new[] { primary, designLead }.Concat(collaborators).ToArray();
-        if (string.IsNullOrWhiteSpace(primary) || string.IsNullOrWhiteSpace(designLead)
+        var candidates = new[] { primary }.Concat(designLeads).Concat(collaborators).ToArray();
+        if (string.IsNullOrWhiteSpace(primary) || designLeads.Length == 0
             || candidates.Any(username => !IsActiveMemberOfDivision(directory, username, project.ExecutionUnitId.Value)))
-            throw new PdmRuleException("项目经理、协同项目经理和设计负责人必须是执行事业部内的启用账号。");
-        var saved = await repository.SetMainProjectStaffingAsync(projectId, new(primary, collaborators, designLead), actor, cancellationToken);
-        await AuditAsync(actor, "project.staffing.update", nameof(Project), project.Id.ToString(), $"项目经理：{primary}；设计负责人：{designLead}；协同：{string.Join('、', collaborators)}", cancellationToken);
+            throw new PdmRuleException("项目经理、协同项目经理和主设必须是执行事业部内的启用账号。");
+        var saved = await repository.SetMainProjectStaffingAsync(projectId, new(primary, collaborators, designLeads), actor, cancellationToken);
+        await AuditAsync(actor, "project.staffing.update", nameof(Project), project.Id.ToString(), $"项目经理：{primary}；主设：{string.Join('、', designLeads)}；协同：{string.Join('、', collaborators)}", cancellationToken);
         return saved;
     }
 
@@ -570,15 +584,44 @@ public sealed class PdmWorkflowService(
         var child = await repository.FindProjectAsync(projectId, cancellationToken) ?? throw new PdmNotFoundException("子项目不存在。");
         if (child.ParentProjectId is null) throw new PdmRuleException("设计人员只能配置到子项目。");
         var root = await repository.FindProjectAsync(child.RootProjectId ?? child.ParentProjectId.Value, cancellationToken) ?? throw new PdmNotFoundException("主项目不存在。");
-        if (role != UserRole.Administrator && !string.Equals(root.DesignLead, actor, StringComparison.OrdinalIgnoreCase))
-            throw new UnauthorizedAccessException("只有主项目设计负责人可以分配子项目设计人员。");
-        var normalized = NormalizeUsers(designers);
-        if (normalized.Length == 0) throw new PdmRuleException("请至少选择一名子项目设计人员。");
         var directory = await repository.GetOrganizationDirectoryAsync(cancellationToken);
-        if (root.OrganizationId is null || normalized.Any(username => !IsActiveMemberOfOrganization(directory, username, root.OrganizationId.Value)))
-            throw new PdmRuleException("设计人员必须是项目公司组织内的启用账号；当前阶段不允许跨公司分配。");
+        var managesExecutionUnit = root.ExecutionUnitId is Guid executionUnitId && directory.Managers.Any(item => item.UnitId == executionUnitId
+            && (string.Equals(item.PrimaryManager, actor, StringComparison.OrdinalIgnoreCase) || item.CollaborativeManagers.Contains(actor, StringComparer.OrdinalIgnoreCase)));
+        var belongsToProjectStaffing = string.Equals(root.PrimaryProjectManager, actor, StringComparison.OrdinalIgnoreCase)
+            || root.CollaborativeProjectManagers.Contains(actor, StringComparer.OrdinalIgnoreCase)
+            || root.DesignLeads.Contains(actor, StringComparer.OrdinalIgnoreCase)
+            || string.Equals(root.DesignLead, actor, StringComparison.OrdinalIgnoreCase);
+        if (role != UserRole.Administrator && !managesExecutionUnit && !belongsToProjectStaffing)
+            throw new UnauthorizedAccessException("只有执行事业部负责人、项目经理或主设可以分配子项目工程师。");
+        var normalized = NormalizeUsers(designers);
+        if (root.OrganizationId is null || normalized.Any(username => !IsActiveTechnicalMemberOfOrganization(directory, username, root.OrganizationId.Value)))
+            throw new PdmRuleException("工程师必须是项目公司内启用的机械、电气、硬件、标准化等技术岗位人员。");
         var saved = await repository.SetChildProjectDesignersAsync(projectId, normalized, actor, cancellationToken);
-        await AuditAsync(actor, "project.designers.update", nameof(Project), child.Id.ToString(), $"{child.Code} · {string.Join('、', normalized)}", cancellationToken);
+        await AuditAsync(actor, "project.designers.update", nameof(Project), child.Id.ToString(), $"{child.Code} · {(normalized.Length == 0 ? "清空" : string.Join('、', normalized))}", cancellationToken);
+        return saved;
+    }
+
+    public async Task<Project> SetChildProjectManagerAsync(Guid projectId, string projectManager, string actor, UserRole role, CancellationToken cancellationToken)
+    {
+        await RequirePermissionAsync(actor, role, PermissionCodes.ProjectDesignerAssign, cancellationToken);
+        var child = await repository.FindProjectAsync(projectId, cancellationToken) ?? throw new PdmNotFoundException("子项目不存在。");
+        if (child.ParentProjectId is null) throw new PdmRuleException("负责人只能配置到子项目。");
+        var root = await repository.FindProjectAsync(child.RootProjectId ?? child.ParentProjectId.Value, cancellationToken) ?? throw new PdmNotFoundException("主项目不存在。");
+        var directory = await repository.GetOrganizationDirectoryAsync(cancellationToken);
+        var managesExecutionUnit = root.ExecutionUnitId is Guid executionUnitId && directory.Managers.Any(item => item.UnitId == executionUnitId
+            && (string.Equals(item.PrimaryManager, actor, StringComparison.OrdinalIgnoreCase) || item.CollaborativeManagers.Contains(actor, StringComparer.OrdinalIgnoreCase)));
+        var belongsToProjectStaffing = string.Equals(root.PrimaryProjectManager, actor, StringComparison.OrdinalIgnoreCase)
+            || root.CollaborativeProjectManagers.Contains(actor, StringComparer.OrdinalIgnoreCase)
+            || root.DesignLeads.Contains(actor, StringComparer.OrdinalIgnoreCase)
+            || string.Equals(root.DesignLead, actor, StringComparison.OrdinalIgnoreCase);
+        if (role != UserRole.Administrator && !managesExecutionUnit && !belongsToProjectStaffing)
+            throw new UnauthorizedAccessException("只有执行事业部负责人、项目经理或主设可以配置子项目负责人。");
+        var normalized = projectManager?.Trim() ?? string.Empty;
+        var candidates = new[] { root.PrimaryProjectManager }.Concat(root.CollaborativeProjectManagers).Where(item => !string.IsNullOrWhiteSpace(item));
+        if (string.IsNullOrWhiteSpace(normalized) || !candidates.Contains(normalized, StringComparer.OrdinalIgnoreCase))
+            throw new PdmRuleException("子项目负责人只能选择主项目经理或协同项目经理。");
+        var saved = await repository.SetChildProjectManagerAsync(projectId, normalized, actor, cancellationToken);
+        await AuditAsync(actor, "project.manager.update", nameof(Project), child.Id.ToString(), $"{child.Code} · {normalized}", cancellationToken);
         return saved;
     }
 
@@ -640,6 +683,7 @@ public sealed class PdmWorkflowService(
         await RequirePermissionAsync(actor, role, PermissionCodes.DocumentEdit, cancellationToken);
         if (!await repository.HasProjectContentReadAccessAsync(projectId, actor, role, cancellationToken))
             throw new UnauthorizedAccessException("当前用户没有目标项目的图档权限。");
+        await RequireProjectSubmissionAccessAsync(projectId, actor, role, "登记并提交图档", cancellationToken);
         if (candidates is null || candidates.Count == 0) return Array.Empty<DocumentRegistrationMatch>();
         if (candidates.Count > 2000) throw new PdmRuleException("单次最多检查2000个待入库图档。");
 
@@ -720,6 +764,7 @@ public sealed class PdmWorkflowService(
     public async Task<PdmDocument> RegisterDocumentAsync(RegisterDocumentCommand command, string actor, UserRole role, CancellationToken cancellationToken)
     {
         await RequirePermissionAsync(actor, role, PermissionCodes.DocumentEdit, cancellationToken);
+        await RequireProjectSubmissionAccessAsync(command.ProjectId, actor, role, "登记并提交图档", cancellationToken);
         if (string.IsNullOrWhiteSpace(command.DrawingNumber)
             || string.IsNullOrWhiteSpace(command.Name)
             || string.IsNullOrWhiteSpace(command.FileName))
@@ -794,6 +839,7 @@ public sealed class PdmWorkflowService(
         if (string.IsNullOrWhiteSpace(machineName)) throw new PdmRuleException("客户端电脑名称不能为空。");
         var document = await repository.FindDocumentAsync(documentId, cancellationToken)
             ?? throw new PdmNotFoundException("图档不存在。 ");
+        await RequireProjectSubmissionAccessAsync(document.ProjectId, actor, role, "获取编辑权限", cancellationToken);
 
         if (document.State == DocumentLifecycleState.InReview)
         {
@@ -883,6 +929,7 @@ public sealed class PdmWorkflowService(
         await RequireDocumentAccessAsync(documentId, actor, role, FolderAccess.View | FolderAccess.Edit, cancellationToken);
         var document = await repository.FindDocumentAsync(documentId, cancellationToken)
             ?? throw new PdmNotFoundException("图档不存在。 ");
+        await RequireProjectSubmissionAccessAsync(document.ProjectId, actor, role, "提交存档", cancellationToken);
 
         if (snapshot.ProjectId != document.ProjectId || snapshot.RootDocumentId != documentId)
         {
@@ -2676,7 +2723,7 @@ public sealed class PdmWorkflowService(
         if (targetState != DrawingReviewTargetState.Pending)
             throw new PdmConflictException("该3D或2D图档已经完成审核，请刷新后重试。");
         var createdBy = command.Target == DrawingReviewTarget.Model3D ? item.ModelCreatedBy : item.DrawingCreatedBy;
-        var developerSelfReviewAllowed = string.Equals(TenantContext.Current?.RoleCode, "developer", StringComparison.OrdinalIgnoreCase);
+        var developerSelfReviewAllowed = TenantContext.Current?.HasRole("developer") == true;
         if (!developerSelfReviewAllowed && string.Equals(createdBy, actor, StringComparison.OrdinalIgnoreCase))
             throw new PdmRuleException("设计者不能审核自己生成的图档版本，请由其他审核人处理。");
         var comment = string.IsNullOrWhiteSpace(command.Comment) ? null : command.Comment.Trim();
@@ -3460,6 +3507,7 @@ public sealed class PdmWorkflowService(
         role == UserRole.Administrator
         || string.Equals(project.PrimaryProjectManager, actor, StringComparison.OrdinalIgnoreCase)
         || project.CollaborativeProjectManagers.Contains(actor, StringComparer.OrdinalIgnoreCase)
+        || project.DesignLeads.Contains(actor, StringComparer.OrdinalIgnoreCase)
         || string.Equals(project.DesignLead, actor, StringComparison.OrdinalIgnoreCase);
 
     private static string RequiredReason(string reason)
@@ -3514,6 +3562,21 @@ public sealed class PdmWorkflowService(
             ?? throw new PdmRuleException("所选系统角色不存在。");
     }
 
+    private async Task<IReadOnlyList<RolePermissionSettings>> FindRolesAsync(IReadOnlyList<string> roleCodes, CancellationToken cancellationToken)
+    {
+        var normalized = roleCodes.Select(code => code?.Trim() ?? string.Empty)
+            .Where(code => !string.IsNullOrWhiteSpace(code))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+        if (normalized.Length == 0) throw new PdmRuleException("请至少选择一个系统角色。");
+        var roles = (await repository.GetRolePermissionDirectoryAsync(cancellationToken)).Roles;
+        return normalized.Select(code => roles.SingleOrDefault(role => string.Equals(role.Role, code, StringComparison.OrdinalIgnoreCase))
+            ?? throw new PdmRuleException($"所选系统角色不存在：{code}。")).ToArray();
+    }
+
+    private static bool RoleSetsEqual(IEnumerable<string> left, IEnumerable<string> right) =>
+        left.ToHashSet(StringComparer.OrdinalIgnoreCase).SetEquals(right);
+
     private static Guid ResolveManagedCompany(Guid requestedCompanyId, OrganizationDirectory directory)
     {
         var tenant = TenantContext.Current;
@@ -3566,6 +3629,40 @@ public sealed class PdmWorkflowService(
         if (!await repository.HasDocumentAccessAsync(documentId, actor, role, requiredAccess, cancellationToken))
             throw new UnauthorizedAccessException("当前用户没有该项目目录下图档的对应操作权限。");
     }
+
+    public async Task<bool> CanSubmitArchiveAsync(Guid projectId, string actor, UserRole role, CancellationToken cancellationToken)
+    {
+        if (!await repository.HasUserPermissionAsync(actor, role, PermissionCodes.DocumentEdit, cancellationToken)
+            || !await repository.HasProjectContentReadAccessAsync(projectId, actor, role, cancellationToken))
+            return false;
+
+        var project = await repository.FindProjectAsync(projectId, cancellationToken);
+        return project is not null
+            && ProjectSubmissionPolicy.CanSubmitArchive(project, actor, IsSubmissionAdministrator(role));
+    }
+
+    public async Task<Project> RequireProjectSubmissionAccessAsync(
+        Guid projectId,
+        string actor,
+        UserRole role,
+        string action,
+        CancellationToken cancellationToken)
+    {
+        var project = await repository.FindProjectAsync(projectId, cancellationToken)
+            ?? throw new PdmNotFoundException("项目不存在。");
+        if (!await CanSubmitArchiveAsync(projectId, actor, role, cancellationToken))
+        {
+            var target = project.ParentProjectId is null ? "主项目图档" : string.Concat("子项目“", project.Code, "”");
+            throw new UnauthorizedAccessException(string.Concat(
+                "当前账号未被分配为", target, "的项目经理、主设或工程师，不能", action, "。"));
+        }
+
+        return project;
+    }
+
+    private static bool IsSubmissionAdministrator(UserRole role) =>
+        role is UserRole.Administrator or UserRole.PlatformAdministrator
+        || TenantContext.Current?.IsPlatformAdministrator == true;
 
     private Task AuditAsync(string actor, string action, string entityType, string entityId, string detail, CancellationToken cancellationToken) =>
         repository.AppendAuditAsync(new AuditEntry(Guid.NewGuid(), timeProvider.GetUtcNow(), actor, action, entityType, entityId, detail), cancellationToken);
@@ -3906,6 +4003,24 @@ public sealed class PdmWorkflowService(
         directory.Users.Any(user => user.IsActive && string.Equals(user.Username, username, StringComparison.OrdinalIgnoreCase))
         && directory.Memberships.Any(membership => string.Equals(membership.Username, username, StringComparison.OrdinalIgnoreCase)
             && directory.Units.Any(unit => unit.Id == membership.UnitId && unit.IsActive && unit.OrganizationId == organizationId));
+
+    private static bool IsActiveTechnicalMemberOfOrganization(OrganizationDirectory directory, string username, Guid organizationId)
+    {
+        if (!IsActiveMemberOfOrganization(directory, username, organizationId)) return false;
+        var user = directory.Users.First(item => string.Equals(item.Username, username, StringComparison.OrdinalIgnoreCase));
+        if (!user.EffectiveRoleCodes.Any(roleCode => roleCode is "Engineer" or "ElectricalEngineer" or "CommissioningEngineer" or "HardwareEngineer"
+                or "MechanicalManager" or "TechnicalAssistant" or "ProcessReviewer" or "Approver")) return false;
+        return directory.Memberships.Where(item => string.Equals(item.Username, username, StringComparison.OrdinalIgnoreCase))
+            .Select(item => directory.Units.FirstOrDefault(unit => unit.Id == item.UnitId))
+            .Any(unit => unit is not null && (IsTechnicalUnitName(unit.Name)
+                || unit.Kind == OrganizationUnitKind.BusinessDivision && !IsNonTechnicalUnitName(unit.Name)));
+    }
+
+    private static bool IsTechnicalUnitName(string name) =>
+        new[] { "机械", "电气", "硬件", "标准化", "技术", "设计", "研发" }.Any(keyword => name.Contains(keyword, StringComparison.OrdinalIgnoreCase));
+
+    private static bool IsNonTechnicalUnitName(string name) =>
+        new[] { "采购", "供应链", "生产", "装配", "机加", "财务", "行政", "人事部", "销售", "计划", "质量", "仓储", "物流" }.Any(keyword => name.Contains(keyword, StringComparison.OrdinalIgnoreCase));
 
     private static bool IsActiveUserAvailableToOrganization(OrganizationDirectory directory, string username, Guid organizationId)
     {

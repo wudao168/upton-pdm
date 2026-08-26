@@ -25,7 +25,7 @@ public sealed class MaterialAttachmentService(
         UserRole role,
         CancellationToken cancellationToken)
     {
-        await RequirePermissionAsync(actor, role, PermissionCodes.BomEdit, cancellationToken);
+        await RequireAttachmentWritePermissionAsync(actor, role, kind, cancellationToken);
         var material = await materials.FindMaterialAsync(materialId, cancellationToken)
             ?? throw new PdmNotFoundException("料品主档不存在。");
         if (material.IsArchived) throw new PdmRuleException("已停用料品不能上传附件。");
@@ -45,7 +45,7 @@ public sealed class MaterialAttachmentService(
         UserRole role,
         CancellationToken cancellationToken)
     {
-        await RequirePermissionAsync(actor, role, PermissionCodes.BomEdit, cancellationToken);
+        await RequireAnyAttachmentWritePermissionAsync(actor, role, cancellationToken);
         return await storage.WriteChunkAsync(sessionId, chunkIndex, content, actor, cancellationToken);
     }
 
@@ -55,7 +55,7 @@ public sealed class MaterialAttachmentService(
         UserRole role,
         CancellationToken cancellationToken)
     {
-        await RequirePermissionAsync(actor, role, PermissionCodes.BomEdit, cancellationToken);
+        await RequireAnyAttachmentWritePermissionAsync(actor, role, cancellationToken);
         var stored = await storage.CompleteUploadAsync(sessionId, actor, cancellationToken);
         var material = await materials.FindMaterialAsync(stored.MaterialId, cancellationToken);
         if (material is null || material.IsArchived)
@@ -99,9 +99,51 @@ public sealed class MaterialAttachmentService(
         return new(attachment, content);
     }
 
+    public async Task<PdmMaterial> SetCoverAsync(
+        Guid materialId,
+        Guid? attachmentId,
+        long expectedRowVersion,
+        string actor,
+        UserRole role,
+        CancellationToken cancellationToken)
+    {
+        await RequireAnyAttachmentWritePermissionAsync(actor, role, cancellationToken);
+        var material = await materials.FindMaterialAsync(materialId, cancellationToken)
+            ?? throw new PdmNotFoundException("料品主档不存在。");
+        if (material.IsArchived) throw new PdmRuleException("已停用料品不能维护封面。");
+        if (attachmentId is not null)
+        {
+            var attachment = await materials.FindMaterialAttachmentAsync(attachmentId.Value, cancellationToken);
+            if (attachment is null || attachment.MaterialId != materialId || attachment.Kind != MaterialAttachmentKind.CoverImage)
+                throw new PdmRuleException("只能将该料品的封面图片附件设为当前封面。");
+        }
+        var saved = await materials.UpdatePlmMetadataAsync(material with
+        {
+            CoverImageAttachmentId = attachmentId,
+            UpdatedBy = actor,
+            UpdatedAt = timeProvider.GetUtcNow()
+        }, expectedRowVersion, cancellationToken);
+        await repository.AppendAuditAsync(new AuditEntry(
+            Guid.NewGuid(), timeProvider.GetUtcNow(), actor, attachmentId is null ? "material.cover.clear" : "material.cover.set",
+            nameof(PdmMaterial), materialId.ToString(), attachmentId is null ? "清除当前封面指针；历史图片保留。" : $"切换当前封面：{attachmentId}"), cancellationToken);
+        return saved;
+    }
+
     private async Task RequirePermissionAsync(string actor, UserRole role, string permissionCode, CancellationToken cancellationToken)
     {
         if (!await repository.HasUserPermissionAsync(actor, role, permissionCode, cancellationToken))
             throw new UnauthorizedAccessException("当前角色无权执行此操作。");
+    }
+
+    private Task RequireAttachmentWritePermissionAsync(string actor, UserRole role, MaterialAttachmentKind kind, CancellationToken cancellationToken) =>
+        kind == MaterialAttachmentKind.CoverImage
+            ? RequireAnyAttachmentWritePermissionAsync(actor, role, cancellationToken)
+            : RequirePermissionAsync(actor, role, PermissionCodes.BomEdit, cancellationToken);
+
+    private async Task RequireAnyAttachmentWritePermissionAsync(string actor, UserRole role, CancellationToken cancellationToken)
+    {
+        if (!await repository.HasUserPermissionAsync(actor, role, PermissionCodes.BomEdit, cancellationToken)
+            && !await repository.HasUserPermissionAsync(actor, role, PermissionCodes.StandardLibraryManage, cancellationToken))
+            throw new UnauthorizedAccessException("当前角色无权维护料品附件。");
     }
 }

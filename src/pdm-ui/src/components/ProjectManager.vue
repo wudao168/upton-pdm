@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { ChevronDown, ChevronRight, FolderKanban, FolderPlus, Pencil, Search } from '@lucide/vue'
+import { ChevronDown, ChevronRight, FolderKanban, FolderPlus, Search } from '@lucide/vue'
 import { computed, reactive, ref, watch } from 'vue'
 import type { CreateProjectInput, CreateSubprojectInput, MainProjectStaffingInput, OrganizationDirectory, PdmCustomer, PdmUser, ProjectNumberingOptions, ProjectSummary, UpdateProjectInput } from '../types'
 
@@ -24,6 +24,7 @@ const props = defineProps<{
   onUpdateExecutionUnit: (projectId: string, executionUnitId: string) => Promise<ProjectSummary>
   onUpdateMainStaffing: (projectId: string, input: MainProjectStaffingInput) => Promise<ProjectSummary>
   onUpdateDesigners: (projectId: string, designers: string[]) => Promise<ProjectSummary>
+  onUpdateChildManager: (projectId: string, projectManager: string) => Promise<ProjectSummary>
 }>()
 
 const emit = defineEmits<{ open: [projectId: string] }>()
@@ -38,11 +39,13 @@ const executionProject = ref<ProjectSummary | null>(null)
 const executionUnitId = ref('')
 const staffingDialogOpen = ref(false)
 const staffingProject = ref<ProjectSummary | null>(null)
-const staffingFocus = ref<'managers' | 'design'>('managers')
-const staffingForm = reactive<MainProjectStaffingInput>({ primaryProjectManager: '', collaborativeProjectManagers: [], designLead: '' })
+const staffingForm = reactive<MainProjectStaffingInput>({ primaryProjectManager: '', collaborativeProjectManagers: [], designLeads: [] })
 const designerDialogOpen = ref(false)
 const designerProject = ref<ProjectSummary | null>(null)
 const designerDraft = ref<string[]>([])
+const childManagerDialogOpen = ref(false)
+const childManagerProject = ref<ProjectSummary | null>(null)
+const childManagerDraft = ref('')
 const expanded = ref(new Set<string>())
 const projectQuery = ref('')
 const hierarchyFilter = ref<'all' | 'parent' | 'child'>('all')
@@ -55,19 +58,32 @@ const form = reactive<CreateProjectInput>({
   organizationId: '', projectTypeCode: '', equipmentTypeCode: 0, customerId: '', name: '', projectAlias: '', signedDate: '', quantity: 1, bomItemCategoryCode: '0301',
 })
 const editForm = reactive<UpdateProjectInput>({ organizationId: '', projectTypeCode: '', equipmentTypeCode: 0, customerId: '', name: '', projectAlias: '', signedDate: '', quantity: 1 })
-const childForm = reactive<CreateSubprojectInput>({ name: '', projectAlias: '', quantity: 1, equipmentTypeCode: 0 })
+const childForm = reactive<CreateSubprojectInput>({ name: '', projectAlias: '', quantity: 1 })
 
 function compareProjectCodeDescending(left: ProjectSummary, right: ProjectSummary) {
   return right.code.localeCompare(left.code, 'zh-CN', { numeric: true, sensitivity: 'base' })
 }
 
+function userDisplayName(username?: string | null, emptyText = '—') {
+  const normalized = username?.trim()
+  if (!normalized) return emptyText
+  return props.organizationDirectory.users.find(user => user.username.localeCompare(normalized, undefined, { sensitivity: 'accent' }) === 0)?.displayName || normalized
+}
+
+function projectDesignLeads(project: ProjectSummary) {
+  return project.designLeads?.length ? project.designLeads : project.designLead ? [project.designLead] : []
+}
+
 const rootProjects = computed(() => props.projects.filter(item => !item.parentProjectId).sort(compareProjectCodeDescending))
 const activeCustomers = computed(() => props.customers.filter(item => item.isActive))
-const responsibleOptions = computed(() => [...new Set(props.projects.flatMap(item => [item.primaryProjectManager, item.designLead, ...item.collaborativeProjectManagers, ...item.designers]).filter((item): item is string => Boolean(item)))].sort())
+const responsibleOptions = computed(() => [...new Set(props.projects.flatMap(item => [item.primaryProjectManager, ...projectDesignLeads(item), ...item.collaborativeProjectManagers, ...item.designers]).filter((item): item is string => Boolean(item)))].sort((left, right) => userDisplayName(left).localeCompare(userDisplayName(right), 'zh-CN')))
 const executionUnitOptions = computed(() => [...new Set(props.projects.map(item => item.executionUnitName).filter((item): item is string => Boolean(item)))].sort((left, right) => left.localeCompare(right, 'zh-CN')))
-const projectManagerOptions = computed(() => [...new Set(props.projects.flatMap(item => [item.primaryProjectManager, ...item.collaborativeProjectManagers]).filter((item): item is string => Boolean(item)))].sort())
-const designOwnerOptions = computed(() => [...new Set(props.projects.flatMap(item => [item.designLead, ...item.designers]).filter((item): item is string => Boolean(item)))].sort())
-const businessDivisions = computed(() => props.organizationDirectory.units.filter(unit => unit.kind === 'BusinessDivision' && unit.isActive))
+const projectManagerOptions = computed(() => [...new Set(props.projects.flatMap(item => [item.primaryProjectManager, ...item.collaborativeProjectManagers]).filter((item): item is string => Boolean(item)))].sort((left, right) => userDisplayName(left).localeCompare(userDisplayName(right), 'zh-CN')))
+const designOwnerOptions = computed(() => [...new Set(props.projects.flatMap(item => [...projectDesignLeads(item), ...item.designers]).filter((item): item is string => Boolean(item)))].sort((left, right) => userDisplayName(left).localeCompare(userDisplayName(right), 'zh-CN')))
+const executionUnitCandidates = computed(() => props.organizationDirectory.units
+  .filter(unit => unit.kind === 'BusinessDivision' && unit.isActive)
+  .sort((left, right) => Number(!left.name.includes('事业部')) - Number(!right.name.includes('事业部'))
+    || left.name.localeCompare(right.name, 'zh-CN', { numeric: true, sensitivity: 'base' })))
 const stageOptions = computed(() => [...new Set(props.projects.map(item => item.stage).filter(Boolean))].sort())
 const selectedCustomer = computed(() => props.customers.find(item => item.id === form.customerId))
 const selectedEditCustomer = computed(() => props.customers.find(item => item.id === editForm.customerId))
@@ -84,10 +100,10 @@ const childrenByParent = computed(() => {
 const normalizedProjectQuery = computed(() => projectQuery.value.trim().toLocaleLowerCase())
 function matchesProject(project: ProjectSummary) {
   if (stageFilter.value && project.stage !== stageFilter.value) return false
-  if (responsibleFilter.value && ![project.primaryProjectManager, project.designLead, ...project.collaborativeProjectManagers, ...project.designers].includes(responsibleFilter.value)) return false
+  if (responsibleFilter.value && ![project.primaryProjectManager, ...projectDesignLeads(project), ...project.collaborativeProjectManagers, ...project.designers].includes(responsibleFilter.value)) return false
   if (executionUnitFilter.value && project.executionUnitName !== executionUnitFilter.value) return false
   if (projectManagerFilter.value && ![project.primaryProjectManager, ...project.collaborativeProjectManagers].includes(projectManagerFilter.value)) return false
-  if (designOwnerFilter.value && ![project.designLead, ...project.designers].includes(designOwnerFilter.value)) return false
+  if (designOwnerFilter.value && ![...projectDesignLeads(project), ...project.designers].includes(designOwnerFilter.value)) return false
   const query = normalizedProjectQuery.value
   if (!query) return true
   return [
@@ -101,7 +117,7 @@ function matchesProject(project: ProjectSummary) {
     ...project.serialNumbers,
     project.executionUnitName,
     project.primaryProjectManager,
-    project.designLead,
+    ...projectDesignLeads(project),
     ...project.collaborativeProjectManagers,
     ...project.designers,
   ].some(value => String(value ?? '').toLocaleLowerCase().includes(query))
@@ -124,6 +140,17 @@ const visibleRootProjects = computed(() => rootProjects.value.filter(parent => {
   if (hierarchyFilter.value === 'child') return hasMatchingChild
   return matchesProject(parent) || hasMatchingChild
 }))
+const expandableProjectIds = computed(() => {
+  const result: string[] = []
+  const append = (project: ProjectSummary) => {
+    const children = filteredChildrenByParent.value.get(project.id) ?? []
+    if (children.length === 0) return
+    result.push(project.id)
+    children.forEach(append)
+  }
+  visibleRootProjects.value.forEach(append)
+  return result
+})
 const hasActiveProjectFilter = computed(() => Boolean(
   normalizedProjectQuery.value || stageFilter.value || responsibleFilter.value || executionUnitFilter.value || projectManagerFilter.value || designOwnerFilter.value,
 ))
@@ -187,7 +214,7 @@ function openEditDialog(project: ProjectSummary) {
 
 function openExecutionDialog(project: ProjectSummary) {
   executionProject.value = project
-  executionUnitId.value = project.executionUnitId ?? businessDivisions.value.find(unit => unit.organizationId === project.organizationId)?.id ?? ''
+  executionUnitId.value = project.executionUnitId ?? executionUnitCandidates.value.find(unit => unit.organizationId === project.organizationId && unit.canManufacture === true)?.id ?? ''
   executionDialogOpen.value = true
 }
 
@@ -216,12 +243,15 @@ function usersInDivision(divisionId: string) {
   return props.organizationDirectory.users.filter(user => user.isActive && usernames.has(user.username))
 }
 
-function openStaffingDialog(project: ProjectSummary, focus: 'managers' | 'design' = 'managers') {
+function usersInDivisionByRole(divisionId: string, role: string) {
+  return usersInDivision(divisionId).filter(user => [user.role, ...(user.roles ?? [])].includes(role))
+}
+
+function openStaffingDialog(project: ProjectSummary) {
   staffingProject.value = project
-  staffingFocus.value = focus
   staffingForm.primaryProjectManager = project.primaryProjectManager ?? ''
   staffingForm.collaborativeProjectManagers = [...project.collaborativeProjectManagers]
-  staffingForm.designLead = project.designLead ?? ''
+  staffingForm.designLeads = [...projectDesignLeads(project)]
   staffingDialogOpen.value = true
 }
 
@@ -231,12 +261,37 @@ function openDesignerDialog(project: ProjectSummary) {
   designerDialogOpen.value = true
 }
 
+function rootOfProject(project: ProjectSummary) {
+  return project.parentProjectId ? props.projects.find(item => item.id === (project.rootProjectId ?? project.parentProjectId)) : project
+}
+
+const childManagerCandidates = computed(() => {
+  const root = childManagerProject.value ? rootOfProject(childManagerProject.value) : undefined
+  return root ? [root.primaryProjectManager, ...root.collaborativeProjectManagers].filter((item): item is string => Boolean(item)) : []
+})
+
+function openChildManagerDialog(project: ProjectSummary) {
+  childManagerProject.value = project
+  childManagerDraft.value = project.primaryProjectManager ?? rootOfProject(project)?.primaryProjectManager ?? ''
+  childManagerDialogOpen.value = true
+}
+
 const designerCandidates = computed(() => {
   const project = designerProject.value
   if (!project?.organizationId) return []
   const ownDivisionId = divisionOfUser(props.currentUsername)?.id
   const usernames = new Set(props.organizationDirectory.memberships.filter(item => props.organizationDirectory.units.some(unit => unit.id === item.unitId && unit.organizationId === project.organizationId && unit.isActive)).map(item => item.username))
-  return props.organizationDirectory.users.filter(user => user.isActive && usernames.has(user.username)).map(user => {
+  const technicalRoles = new Set(['Engineer', 'ElectricalEngineer', 'CommissioningEngineer', 'HardwareEngineer', 'MechanicalManager', 'TechnicalAssistant', 'ProcessReviewer', 'Approver'])
+  const isTechnicalUser = (user: PdmUser) => {
+    const roles = [user.role, ...(user.roles ?? [])]
+    if (!roles.some(role => technicalRoles.has(role))) return false
+    return props.organizationDirectory.memberships.filter(item => item.username === user.username).some(item => {
+      const unit = props.organizationDirectory.units.find(candidate => candidate.id === item.unitId)
+      const name = unit?.name ?? ''
+      return /机械|电气|硬件|标准化|技术|设计|研发/.test(name) || unit?.kind === 'BusinessDivision' && !/采购|供应链|生产|装配|机加|财务|行政|人事部|销售|计划|质量|仓储|物流/.test(name)
+    })
+  }
+  return props.organizationDirectory.users.filter(user => user.isActive && usernames.has(user.username) && isTechnicalUser(user)).map(user => {
     const division = divisionOfUser(user.username)
     return { ...user, divisionName: division?.name ?? '未归属事业部', ownDivision: division?.id === ownDivisionId }
   }).sort((left, right) => Number(right.ownDivision) - Number(left.ownDivision) || left.divisionName.localeCompare(right.divisionName, 'zh-CN') || left.displayName.localeCompare(right.displayName, 'zh-CN'))
@@ -246,6 +301,7 @@ const hasCrossDivisionSelection = computed(() => designerCandidates.value.some(u
 
 async function saveExecutionUnit() {
   if (!executionProject.value || !executionUnitId.value) return ElMessage.warning('请选择执行事业部')
+  if (executionUnitCandidates.value.find(unit => unit.id === executionUnitId.value)?.canManufacture !== true) return ElMessage.warning('所选部门未设置为制造部门，不能承接项目')
   try {
     await props.onUpdateExecutionUnit(executionProject.value.id, executionUnitId.value)
     executionDialogOpen.value = false
@@ -254,7 +310,7 @@ async function saveExecutionUnit() {
 }
 
 async function saveMainStaffing() {
-  if (!staffingProject.value || !staffingForm.primaryProjectManager || !staffingForm.designLead) return ElMessage.warning('请选择一名项目经理和一名主设')
+  if (!staffingProject.value || !staffingForm.primaryProjectManager || !staffingForm.designLeads.length) return ElMessage.warning('请选择一名项目经理和至少一名主设')
   try {
     await props.onUpdateMainStaffing(staffingProject.value.id, { ...staffingForm, collaborativeProjectManagers: [...staffingForm.collaborativeProjectManagers] })
     staffingDialogOpen.value = false
@@ -263,7 +319,7 @@ async function saveMainStaffing() {
 }
 
 async function saveDesigners() {
-  if (!designerProject.value || !designerDraft.value.length) return ElMessage.warning('请至少选择一名设计人员')
+  if (!designerProject.value) return
   try {
     await props.onUpdateDesigners(designerProject.value.id, designerDraft.value)
     designerDialogOpen.value = false
@@ -271,12 +327,20 @@ async function saveDesigners() {
   } catch (error) { ElMessage.error(error instanceof Error ? error.message : '设计人员保存失败') }
 }
 
+async function saveChildManager() {
+  if (!childManagerProject.value || !childManagerDraft.value) return ElMessage.warning('请选择子项目负责人')
+  try {
+    await props.onUpdateChildManager(childManagerProject.value.id, childManagerDraft.value)
+    childManagerDialogOpen.value = false
+    ElMessage.success('子项目负责人已保存')
+  } catch (error) { ElMessage.error(error instanceof Error ? error.message : '子项目负责人保存失败') }
+}
+
 function openChildDialog(parent: ProjectSummary) {
   childParent.value = parent
   childForm.name = ''
   childForm.projectAlias = ''
   childForm.quantity = 1
-  childForm.equipmentTypeCode = parent.equipmentTypeCode ?? props.numberingOptions.equipmentTypes[0]?.code ?? 0
   childDialogOpen.value = true
 }
 
@@ -284,6 +348,16 @@ function toggle(projectId: string) {
   const next = new Set(expanded.value)
   if (next.has(projectId)) next.delete(projectId)
   else next.add(projectId)
+  expanded.value = next
+}
+
+const allProjectDetailsExpanded = computed(() => expandableProjectIds.value.length > 0
+  && expandableProjectIds.value.every(projectId => expanded.value.has(projectId)))
+
+function toggleAllProjectDetails() {
+  const next = new Set(expanded.value)
+  if (allProjectDetailsExpanded.value) expandableProjectIds.value.forEach(projectId => next.delete(projectId))
+  else expandableProjectIds.value.forEach(projectId => next.add(projectId))
   expanded.value = next
 }
 
@@ -351,13 +425,13 @@ async function saveProjectDetails() {
 }
 
 async function submitSubproject() {
-  if (!childParent.value || !childForm.name.trim() || childForm.quantity < 1 || childForm.equipmentTypeCode === undefined) {
-    ElMessage.warning('请填写设备子项目名称、设备类型和数量')
+  if (!childParent.value || !childForm.name.trim() || childForm.quantity < 1) {
+    ElMessage.warning('请填写设备子项目名称和数量')
     return
   }
   try {
     const parentId = childParent.value.id
-    await props.onCreateSubproject(parentId, { name: childForm.name.trim(), projectAlias: childForm.projectAlias?.trim(), quantity: childForm.quantity, equipmentTypeCode: childForm.equipmentTypeCode })
+    await props.onCreateSubproject(parentId, { name: childForm.name.trim(), projectAlias: childForm.projectAlias?.trim(), quantity: childForm.quantity })
     expanded.value = new Set([...expanded.value, parentId])
     childDialogOpen.value = false
     ElMessage.success('子项目号、设备型号和序列号已自动生成')
@@ -383,12 +457,13 @@ async function deleteProject(project: ProjectSummary) {
 
 function projectManagerText(project: ProjectSummary) {
   const managers = [project.primaryProjectManager, ...project.collaborativeProjectManagers].filter((item): item is string => Boolean(item))
-  return managers.length ? [...new Set(managers)].join('、') : '待分配'
+  return managers.length ? [...new Set(managers)].map(item => userDisplayName(item)).join('、') : '待分配'
 }
 
 function designOwnerText(project: ProjectSummary) {
-  if (project.parentProjectId && project.designers.length) return project.designers.join('、')
-  return project.designLead || '待分配'
+  if (project.parentProjectId) return project.designers.length ? project.designers.map(item => userDisplayName(item)).join('、') : '待分配'
+  const designLeads = projectDesignLeads(project)
+  return designLeads.length ? designLeads.map(item => userDisplayName(item)).join('、') : '待分配'
 }
 
 function canAssignExecutionUnit(project: ProjectSummary) {
@@ -414,40 +489,40 @@ function handleProjectAction(project: ProjectSummary, action: ProjectAction) {
       <section class="pdm-panel pdm-project-table-panel" aria-label="项目列表">
         <div class="pdm-project-list-toolbar" aria-label="项目筛选">
           <button v-if="canCreate" type="button" class="pdm-primary-action pdm-project-create-action" @click="openCreateDialog"><FolderPlus :size="16" />创建主项目</button>
+          <button type="button" class="pdm-secondary-action pdm-project-collapse-action" :aria-label="`${allProjectDetailsExpanded ? '折叠' : '展开'}全部项目明细`" :disabled="expandableProjectIds.length === 0 || hasActiveProjectFilter || hierarchyFilter !== 'all'" :title="hasActiveProjectFilter || hierarchyFilter !== 'all' ? '清除筛选后可统一展开或折叠项目明细' : ''" @click="toggleAllProjectDetails"><ChevronDown v-if="allProjectDetailsExpanded" :size="15" /><ChevronRight v-else :size="15" />{{ allProjectDetailsExpanded ? '折叠明细' : '展开明细' }}</button>
           <div class="pdm-project-filters">
             <label class="pdm-inline-search"><Search :size="15" /><input v-model="projectQuery" type="search" aria-label="搜索项目" placeholder="搜索项目号、名称、客户或项目人员"></label>
             <select v-model="stageFilter" aria-label="项目状态筛选"><option value="">全部状态</option><option v-for="stage in stageOptions" :key="stage" :value="stage">{{ stage }}</option></select>
-            <select v-model="responsibleFilter" aria-label="项目人员筛选"><option value="">全部项目人员</option><option v-for="username in responsibleOptions" :key="username" :value="username">{{ username }}</option></select>
+            <select v-model="responsibleFilter" aria-label="项目人员筛选"><option value="">全部项目人员</option><option v-for="username in responsibleOptions" :key="username" :value="username">{{ userDisplayName(username) }}</option></select>
             <select v-model="executionUnitFilter" aria-label="事业部筛选"><option value="">全部事业部</option><option v-for="unit in executionUnitOptions" :key="unit" :value="unit">{{ unit }}</option></select>
-            <select v-model="projectManagerFilter" aria-label="项目经理筛选"><option value="">全部项目经理</option><option v-for="username in projectManagerOptions" :key="username" :value="username">{{ username }}</option></select>
-            <select v-model="designOwnerFilter" aria-label="主设工程师筛选"><option value="">全部主设／工程师</option><option v-for="username in designOwnerOptions" :key="username" :value="username">{{ username }}</option></select>
+            <select v-model="projectManagerFilter" aria-label="项目经理筛选"><option value="">全部项目经理</option><option v-for="username in projectManagerOptions" :key="username" :value="username">{{ userDisplayName(username) }}</option></select>
+            <select v-model="designOwnerFilter" aria-label="主设工程师筛选"><option value="">全部主设／工程师</option><option v-for="username in designOwnerOptions" :key="username" :value="username">{{ userDisplayName(username) }}</option></select>
             <select v-model="hierarchyFilter" aria-label="项目层级筛选"><option value="all">全部项目</option><option value="parent">仅主项目</option><option value="child">仅子项目</option></select>
           </div>
         </div>
         <div v-if="visibleRootProjects.length" class="pdm-table-scroll pdm-project-number-scroll">
         <table class="pdm-project-table pdm-project-number-table">
-          <thead><tr><th>项目号</th><th>BOM类型</th><th>项目名称</th><th>别名</th><th>型号</th><th>序列号</th><th>客户</th><th>事业部</th><th>项目经理</th><th>主设／工程师</th><th>状态</th><th>订单日期</th><th>操作</th></tr></thead>
+          <thead><tr><th>项目号</th><th>项目名称</th><th>别名</th><th>型号</th><th>序列号</th><th>客户</th><th>事业部</th><th>项目经理</th><th>主设／工程师</th><th>状态</th><th>订单日期</th><th>操作</th></tr></thead>
           <tbody>
             <tr v-for="row in visibleProjectRows" :key="row.project.id" :class="{ 'is-child': row.depth > 0 }">
-              <td><div class="pdm-project-code-cell" :class="{ 'is-child-code': row.depth > 0 }" :style="{ paddingLeft: `${row.depth * 18}px` }"><button v-if="filteredChildrenByParent.has(row.project.id) && hierarchyFilter !== 'parent'" type="button" class="pdm-tree-toggle" :aria-label="`${isEffectivelyExpanded(row.project.id) ? '折叠' : '展开'}${row.project.code}的子项目`" @click="toggle(row.project.id)"><ChevronDown v-if="isEffectivelyExpanded(row.project.id)" :size="15" /><ChevronRight v-else :size="15" /></button><span v-else class="pdm-project-code-spacer"></span><button type="button" class="pdm-project-code-link" :aria-label="`进入项目 ${row.project.code}`" @click="emit('open', row.project.id)">{{ row.project.code }}</button><span class="pdm-project-code-spacer"></span></div></td>
-              <td><span class="pdm-status" :class="row.project.bomItemCategoryCode ? 'is-ok' : 'is-warn'">{{ row.project.bomItemCategoryCode === '0301' ? '0301 产线' : row.project.bomItemCategoryCode === '0302' ? '0302 设备' : '待确认' }}</span></td>
+              <td><div class="pdm-project-code-cell" :class="{ 'is-child-code': row.depth > 0 }" :style="{ paddingLeft: `${row.depth * 18}px` }"><button v-if="filteredChildrenByParent.has(row.project.id) && hierarchyFilter !== 'parent'" type="button" class="pdm-tree-toggle" :aria-label="`${isEffectivelyExpanded(row.project.id) ? '折叠' : '展开'}${row.project.code}的子项目`" @click="toggle(row.project.id)"><ChevronDown v-if="isEffectivelyExpanded(row.project.id)" :size="15" /><ChevronRight v-else :size="15" /></button><span v-else class="pdm-project-code-spacer"></span><button type="button" class="pdm-project-code-link" :aria-label="`进入项目 ${row.project.code}`" @click="emit('open', row.project.id)">{{ row.project.code }}</button><button v-if="row.depth === 0 && canCreateSubproject && row.project.deviceModel" type="button" class="pdm-project-add-child" :aria-label="`为${row.project.code}创建子项目`" title="创建子项目" @click.stop="openChildDialog(row.project)"><FolderPlus :size="14" /></button><span v-else class="pdm-project-code-spacer"></span></div></td>
               <td>{{ row.project.name }}</td>
               <td>{{ row.project.projectAlias || '—' }}</td>
               <td>{{ row.project.deviceModel || '旧项目未编号' }}</td>
               <td class="pdm-project-serials"><span v-for="serial in row.project.serialNumbers" :key="serial" class="pdm-serial-line">{{ serial }}</span><span v-if="row.project.serialNumbers.length === 0">—</span></td>
               <td>{{ row.project.customerName || '—' }}</td>
-              <td><button v-if="row.depth === 0 && canAssignExecutionUnit(row.project)" type="button" class="pdm-project-assignment-button" :aria-label="`分配事业部 ${row.project.code}`" title="点击分配执行事业部" @click="openExecutionDialog(row.project)"><span>{{ row.project.executionUnitName || '待分配' }}</span><Pencil :size="12" aria-hidden="true" /></button><div v-else class="pdm-project-cell-text" :title="row.project.executionUnitName || '待分配'">{{ row.project.executionUnitName || '待分配' }}</div></td>
-              <td><button v-if="row.depth === 0 && canManageMainStaffing(row.project)" type="button" class="pdm-project-assignment-button" :aria-label="`配置项目经理（含协同） ${row.project.code}`" title="点击配置项目经理和协同项目经理" @click="openStaffingDialog(row.project, 'managers')"><span>{{ projectManagerText(row.project) }}</span><Pencil :size="12" aria-hidden="true" /></button><div v-else class="pdm-project-cell-text" :title="projectManagerText(row.project)">{{ projectManagerText(row.project) }}</div></td>
-              <td><button v-if="row.depth === 0 && canManageMainStaffing(row.project)" type="button" class="pdm-project-assignment-button" :aria-label="`配置主设 ${row.project.code}`" title="点击配置主设" @click="openStaffingDialog(row.project, 'design')"><span>{{ designOwnerText(row.project) }}</span><Pencil :size="12" aria-hidden="true" /></button><div v-else class="pdm-project-cell-text" :title="designOwnerText(row.project)">{{ designOwnerText(row.project) }}</div></td>
+              <td><button v-if="row.depth === 0 && canAssignExecutionUnit(row.project)" type="button" class="pdm-project-assignment-button" :aria-label="`分配事业部 ${row.project.code}`" title="点击分配执行事业部" @click="openExecutionDialog(row.project)"><span>{{ row.project.executionUnitName || '待分配' }}</span></button><div v-else class="pdm-project-cell-text" :title="row.project.executionUnitName || '待分配'">{{ row.project.executionUnitName || '待分配' }}</div></td>
+              <td><button v-if="row.depth === 0 && canManageMainStaffing(row.project)" type="button" class="pdm-project-assignment-button" :aria-label="`配置项目经理（含协同） ${row.project.code}`" title="点击配置项目经理和协同项目经理" @click="openStaffingDialog(row.project)"><span>{{ projectManagerText(row.project) }}</span></button><button v-else-if="row.depth > 0 && row.project.canAssignDesigners" type="button" class="pdm-project-assignment-button" :aria-label="`配置子项目负责人 ${row.project.code}`" title="点击从主项目经理或协同项目经理中选择" @click="openChildManagerDialog(row.project)"><span>{{ projectManagerText(row.project) }}</span></button><div v-else class="pdm-project-cell-text" :title="projectManagerText(row.project)">{{ projectManagerText(row.project) }}</div></td>
+              <td><button v-if="row.depth === 0 && canManageMainStaffing(row.project)" type="button" class="pdm-project-assignment-button" :aria-label="`配置主设 ${row.project.code}`" title="点击配置主设" @click="openStaffingDialog(row.project)"><span>{{ designOwnerText(row.project) }}</span></button><button v-else-if="row.depth > 0 && row.project.canAssignDesigners" type="button" class="pdm-project-assignment-button" :aria-label="`分配工程师 ${row.project.code}`" title="点击分配子项目工程师" @click="openDesignerDialog(row.project)"><span>{{ designOwnerText(row.project) }}</span></button><div v-else class="pdm-project-cell-text" :title="designOwnerText(row.project)">{{ designOwnerText(row.project) }}</div></td>
               <td><span class="pdm-status" :class="row.project.stage === '进行中' ? 'is-ok' : 'is-warn'">{{ row.project.stage }}</span></td>
               <td class="pdm-project-order-date">{{ row.project.signedDate || '—' }}</td>
-              <td><el-dropdown :aria-label="`操作项目${row.project.code}`" trigger="click" placement="bottom-end" popper-class="pdm-project-action-menu" @command="handleProjectAction(row.project, $event)"><button type="button" class="pdm-project-action-trigger" :aria-label="`操作项目${row.project.code}`">操作<ChevronDown :size="13" /></button><template #dropdown><el-dropdown-menu><el-dropdown-item v-if="canEdit" command="edit">编辑项目</el-dropdown-item><el-dropdown-item v-if="row.depth === 0 && canManageMainStaffing(row.project)" command="configure-staffing">配置分工</el-dropdown-item><el-dropdown-item v-if="canCreateSubproject && row.project.deviceModel" command="create-child">创建设备子项目</el-dropdown-item><el-dropdown-item v-if="row.depth > 0 && row.project.canAssignDesigners" command="assign-designers">分配工程师</el-dropdown-item><el-dropdown-item v-if="canDelete" command="delete" divided>删除项目</el-dropdown-item></el-dropdown-menu></template></el-dropdown></td>
+              <td><el-dropdown :aria-label="`操作项目${row.project.code}`" trigger="click" placement="bottom-end" popper-class="pdm-project-action-menu" @command="handleProjectAction(row.project, $event)"><button type="button" class="pdm-project-action-trigger" :aria-label="`操作项目${row.project.code}`">操作<ChevronDown :size="13" /></button><template #dropdown><el-dropdown-menu><el-dropdown-item v-if="canEdit" command="edit">编辑项目</el-dropdown-item><el-dropdown-item v-if="row.depth === 0 && canManageMainStaffing(row.project)" command="configure-staffing">配置分工</el-dropdown-item><el-dropdown-item v-if="row.depth === 0 && canCreateSubproject && row.project.deviceModel" command="create-child">创建设备子项目</el-dropdown-item><el-dropdown-item v-if="row.depth > 0 && row.project.canAssignDesigners" command="assign-designers">分配工程师</el-dropdown-item><el-dropdown-item v-if="canDelete" command="delete" divided>删除项目</el-dropdown-item></el-dropdown-menu></template></el-dropdown></td>
             </tr>
           </tbody>
         </table>
       </div>
         <div v-else-if="projects.length" class="pdm-project-empty"><Search :size="42" /><h2>未找到匹配项目</h2><p>请调整搜索内容或筛选条件。</p><button type="button" class="pdm-secondary-action" @click="projectQuery=''; stageFilter=''; responsibleFilter=''; hierarchyFilter='all'">清除筛选</button></div>
-        <div v-else class="pdm-project-empty"><FolderKanban :size="42" /><h2>当前账号还没有分配到项目</h2><p v-if="canCreate">项目创建后由系统管理员或计划管理分配事业部，再由系统管理员或事业部负责人配置项目岗位。</p><p v-else>请联系系统管理员、计划管理或事业部负责人完成项目岗位分配。</p></div>
+        <div v-else class="pdm-project-empty"><FolderKanban :size="42" /><h2>当前公司还没有项目</h2><p v-if="canCreate">创建主项目后，可继续分配事业部和配置项目岗位。</p><p v-else>请联系有创建权限的人员新建项目。</p></div>
       </section>
     </section>
 
@@ -464,7 +539,7 @@ function handleProjectAction(project: ProjectSummary, action: ProjectAction) {
         <label>项目别名<input v-model="editForm.projectAlias" name="editProjectAlias" maxlength="200" placeholder="可选"></label>
         <label>订单日期<input v-model="editForm.signedDate" name="editSignedDate" type="date" :disabled="Boolean(editProject?.parentProjectId)"></label>
         <label>数量<input v-model.number="editForm.quantity" name="editQuantity" type="number" min="1" max="10000"></label>
-        <p class="is-wide" v-if="editProject?.parentProjectId">设备子项目的公司、项目类型、客户和订单日期继承根项目；设备类型在创建时独立选择，修改数量时系统会自动追加或释放序列号。</p>
+        <p class="is-wide" v-if="editProject?.parentProjectId">设备子项目的编号资料继承上级项目；修改数量时系统会自动追加或释放序列号。</p>
         <p class="is-wide" v-else>保存前会预览项目号、型号和数量变化。所属公司或项目类型变化会联动子项目编号；已有受控图档时禁止变更项目号。</p>
       </form>
       <template #footer><button type="button" class="pdm-secondary-action" :disabled="pending" @click="editDialogOpen=false">取消</button><button type="button" class="pdm-primary-action" :disabled="pending" @click="saveProjectDetails">{{ pending ? '正在保存…' : '保存' }}</button></template>
@@ -476,7 +551,7 @@ function handleProjectAction(project: ProjectSummary, action: ProjectAction) {
         <label>项目类型<select v-model="form.projectTypeCode" name="projectTypeCode"><option v-for="item in numberingOptions.projectTypes" :key="item.code" :value="item.code">{{ item.code }} · {{ item.name }}</option></select></label>
         <label>BOM根节点类型<select v-model="form.bomItemCategoryCode" name="bomItemCategoryCode"><option value="0301">0301 · 产线</option><option value="0302">0302 · 设备（可独立作为根节点）</option></select></label>
         <label>设备类型<select v-model.number="form.equipmentTypeCode" name="equipmentTypeCode"><option v-for="item in numberingOptions.equipmentTypes" :key="item.code" :value="item.code">{{ item.code }} · {{ item.name }}</option></select></label>
-        <label class="is-wide">客户<select v-model="form.customerId" name="customerId"><option value="" disabled>请选择客户</option><option v-for="item in activeCustomers" :key="item.id" :value="item.id">{{ item.name }}（{{ item.code }}）</option></select><small v-if="selectedCustomer">客户编码由U9C客户数据自动带出：{{ selectedCustomer.code }}</small><small v-else-if="activeCustomers.length === 0">尚未同步U9C客户，请先到“系统管理 → U9C接口 → 客户查询”执行同步。</small></label>
+        <label class="is-wide">客户<el-select v-model="form.customerId" class="pdm-project-customer-select" name="customerId" filterable placeholder="输入客户名称或编码筛选" no-match-text="未找到匹配客户" style="width:100%"><el-option v-for="item in activeCustomers" :key="item.id" :label="`${item.name}（${item.code}）`" :value="item.id" /></el-select><small v-if="selectedCustomer">客户编码由U9C客户数据自动带出：{{ selectedCustomer.code }}</small><small v-else-if="activeCustomers.length === 0">尚未同步U9C客户，请先到“系统管理 → U9C接口 → 客户查询”执行同步。</small></label>
         <label>项目名称<input v-model="form.name" name="projectName" maxlength="200" placeholder="人工录入"></label>
         <label>项目别名<input v-model="form.projectAlias" name="projectAlias" maxlength="200" placeholder="人工录入，可选"></label>
         <label>签订日期<input v-model="form.signedDate" name="signedDate" type="date"></label>
@@ -487,30 +562,39 @@ function handleProjectAction(project: ProjectSummary, action: ProjectAction) {
     </el-dialog>
 
     <el-dialog v-model="executionDialogOpen" :title="`分配执行事业部 · ${executionProject?.code ?? ''}`" width="560px" :close-on-click-modal="false">
-      <label class="pdm-dialog-field">执行事业部<el-select v-model="executionUnitId" filterable style="width:100%"><el-option v-for="unit in businessDivisions.filter(item => item.organizationId === executionProject?.organizationId)" :key="unit.id" :label="unit.name" :value="unit.id" /></el-select></label>
+      <label class="pdm-dialog-field">执行事业部<el-select v-model="executionUnitId" filterable style="width:100%"><el-option v-for="unit in executionUnitCandidates.filter(item => item.organizationId === executionProject?.organizationId)" :key="unit.id" :label="unit.name" :value="unit.id" :disabled="unit.canManufacture !== true" /></el-select></label>
       <p class="pdm-counter-note">由系统管理员或拥有“分配执行事业部”权限的计划人员操作。更换事业部会清空项目经理、主设和子项目工程师。</p>
       <template #footer><button type="button" class="pdm-secondary-action" :disabled="pending" @click="executionDialogOpen=false">取消</button><button type="button" class="pdm-primary-action" :disabled="pending" @click="saveExecutionUnit">确认分配</button></template>
     </el-dialog>
 
     <el-dialog v-model="staffingDialogOpen" :title="`配置主项目分工 · ${staffingProject?.code ?? ''}`" width="620px" :close-on-click-modal="false">
-      <div class="pdm-project-form"><label class="is-wide" :class="{ 'is-staffing-target': staffingFocus === 'managers' }">项目经理（限1名）<el-select v-model="staffingForm.primaryProjectManager" filterable style="width:100%"><el-option v-for="user in usersInDivision(staffingProject?.executionUnitId ?? '')" :key="user.username" :label="`${user.displayName}（${user.username}）`" :value="user.username" /></el-select></label><label class="is-wide" :class="{ 'is-staffing-target': staffingFocus === 'managers' }">协同项目经理（可多选）<el-select v-model="staffingForm.collaborativeProjectManagers" multiple filterable style="width:100%"><el-option v-for="user in usersInDivision(staffingProject?.executionUnitId ?? '').filter(item => item.username !== staffingForm.primaryProjectManager)" :key="user.username" :label="`${user.displayName}（${user.username}）`" :value="user.username" /></el-select></label><label class="is-wide" :class="{ 'is-staffing-target': staffingFocus === 'design' }">主设（限1名）<el-select v-model="staffingForm.designLead" filterable style="width:100%"><el-option v-for="user in usersInDivision(staffingProject?.executionUnitId ?? '')" :key="user.username" :label="`${user.displayName}（${user.username}）`" :value="user.username" /></el-select></label></div>
+      <div class="pdm-project-staffing-form">
+        <label class="pdm-dialog-field">项目经理（限1名）<el-select v-model="staffingForm.primaryProjectManager" class="pdm-project-person-select" filterable placeholder="输入姓名筛选" style="width:100%"><el-option v-for="user in usersInDivisionByRole(staffingProject?.executionUnitId ?? '', 'ProjectManager')" :key="user.username" :label="user.displayName" :value="user.username" /></el-select></label>
+        <label class="pdm-dialog-field">协同项目经理（可多选）<el-select v-model="staffingForm.collaborativeProjectManagers" class="pdm-project-person-select" multiple filterable placeholder="输入姓名筛选" style="width:100%"><el-option v-for="user in usersInDivisionByRole(staffingProject?.executionUnitId ?? '', 'ProjectManager').filter(item => item.username !== staffingForm.primaryProjectManager)" :key="user.username" :label="user.displayName" :value="user.username" /></el-select></label>
+        <label class="pdm-dialog-field">主设（可多选）<el-select v-model="staffingForm.designLeads" class="pdm-project-person-select" multiple filterable placeholder="输入姓名筛选" style="width:100%"><el-option v-for="user in usersInDivisionByRole(staffingProject?.executionUnitId ?? '', 'Engineer')" :key="user.username" :label="user.displayName" :value="user.username" /></el-select></label>
+      </div>
       <p class="pdm-counter-note">由系统管理员或事业部负责人配置。项目经理查看项目状态；主设查看设计内容并分配子项目。</p>
       <template #footer><button type="button" class="pdm-secondary-action" :disabled="pending" @click="staffingDialogOpen=false">取消</button><button type="button" class="pdm-primary-action" :disabled="pending" @click="saveMainStaffing">保存分工</button></template>
     </el-dialog>
 
     <el-dialog v-model="designerDialogOpen" :title="`分配子项目工程师 · ${designerProject?.code ?? ''}`" width="640px" :close-on-click-modal="false">
-      <label class="pdm-dialog-field">工程师<el-select v-model="designerDraft" multiple filterable style="width:100%"><el-option-group label="本事业部（优先）"><el-option v-for="user in designerCandidates.filter(item => item.ownDivision)" :key="user.username" :label="`${user.displayName}（${user.username}）`" :value="user.username" /></el-option-group><el-option-group label="其他事业部"><el-option v-for="user in designerCandidates.filter(item => !item.ownDivision)" :key="user.username" :label="`${user.displayName}（${user.username}） · ${user.divisionName}`" :value="user.username" /></el-option-group></el-select></label>
+      <label class="pdm-dialog-field">工程师（可多选）<el-select v-model="designerDraft" multiple filterable placeholder="输入姓名筛选" style="width:100%"><el-option-group label="本事业部（优先）"><el-option v-for="user in designerCandidates.filter(item => item.ownDivision)" :key="user.username" :label="user.displayName" :value="user.username" /></el-option-group><el-option-group label="其他事业部"><el-option v-for="user in designerCandidates.filter(item => !item.ownDivision)" :key="user.username" :label="`${user.displayName} · ${user.divisionName}`" :value="user.username" /></el-option-group></el-select></label>
       <p v-if="hasCrossDivisionSelection" class="pdm-counter-note is-warning">已选择其他事业部人员：其权限只覆盖当前子项目及主项目摘要，不会获得兄弟子项目权限，也不会改变执行事业部。</p><p v-else class="pdm-counter-note">默认优先显示主设所在事业部人员；允许选择同一公司其他事业部人员。</p>
       <template #footer><button type="button" class="pdm-secondary-action" :disabled="pending" @click="designerDialogOpen=false">取消</button><button type="button" class="pdm-primary-action" :disabled="pending" @click="saveDesigners">保存工程师</button></template>
+    </el-dialog>
+
+    <el-dialog v-model="childManagerDialogOpen" :title="`配置子项目负责人 · ${childManagerProject?.code ?? ''}`" width="500px" :close-on-click-modal="false">
+      <label class="pdm-dialog-field">项目负责人（限1名）<el-select v-model="childManagerDraft" filterable placeholder="输入姓名筛选" style="width:100%"><el-option v-for="username in childManagerCandidates" :key="username" :label="userDisplayName(username)" :value="username" /></el-select></label>
+      <p class="pdm-counter-note">默认由主项目经理负责；也可选择主项目已配置的协同项目经理。</p>
+      <template #footer><button type="button" class="pdm-secondary-action" :disabled="pending" @click="childManagerDialogOpen=false">取消</button><button type="button" class="pdm-primary-action" :disabled="pending" @click="saveChildManager">保存负责人</button></template>
     </el-dialog>
 
     <el-dialog v-model="childDialogOpen" :title="`创建0302设备子项目 · ${childParent?.code ?? ''}`" width="560px" :close-on-click-modal="false">
       <form class="pdm-project-form" aria-label="创建PLM子项目" @submit.prevent="submitSubproject">
         <label>子项目名称<input v-model="childForm.name" name="childProjectName" maxlength="200" placeholder="人工录入"></label>
         <label>子项目别名<input v-model="childForm.projectAlias" name="childProjectAlias" maxlength="200" placeholder="人工录入，可选"></label>
-        <label>设备类型<select v-model.number="childForm.equipmentTypeCode" name="childEquipmentTypeCode"><option v-for="item in numberingOptions.equipmentTypes" :key="item.code" :value="item.code">{{ item.code }} · {{ item.name }}</option></select></label>
         <label>数量<input v-model.number="childForm.quantity" name="childQuantity" type="number" min="1" max="10000"></label>
-        <p class="is-wide">每台设备建立为独立0302子项目；0302下仍可继续创建0302子项目。编号按上级逐层追加-1、-2…，U9C BOM版本固定A1。</p>
+        <p class="is-wide">每台设备建立为独立0302子项目；型号规则沿用上级项目，编号按上级追加-1、-2…，U9C BOM版本固定A1。</p>
       </form>
       <template #footer><button type="button" class="pdm-secondary-action" :disabled="pending" @click="childDialogOpen=false">取消</button><button type="button" class="pdm-primary-action" :disabled="pending" @click="submitSubproject">{{ pending ? '正在创建…' : '创建子项目' }}</button></template>
     </el-dialog>

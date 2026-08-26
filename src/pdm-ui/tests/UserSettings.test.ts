@@ -16,6 +16,7 @@ const roles: RolePermissionDirectory = {
   permissions: [{ code: 'project.view', name: '查看项目', module: '项目管理', sensitive: false }],
   roles: [
     { role: 'Engineer', name: '工程师', description: '设计岗位', baseRole: 'Engineer', isSystem: true, isSystemAdministrator: false, permissions: ['project.view'], userCount: 1 },
+    { role: 'PlanningManager', name: '计划管理', description: '项目计划', baseRole: 'PlanningManager', isSystem: true, isSystemAdministrator: false, permissions: ['project.view'], userCount: 1 },
     { role: 'Administrator', name: '系统管理员', description: '系统管理', baseRole: 'Administrator', isSystem: true, isSystemAdministrator: true, permissions: ['project.view'], userCount: 1 },
     { role: 'platform_admin', name: '平台管理员', description: '平台设置', baseRole: 'PlatformAdministrator', isSystem: true, isSystemAdministrator: true, permissions: ['project.view'], userCount: 1 },
     { role: 'developer', name: '开发者', description: '全部权限', baseRole: 'Administrator', isSystem: true, isSystemAdministrator: true, permissions: ['project.view'], userCount: 1 },
@@ -65,8 +66,10 @@ describe('UserSettings', () => {
     await wrapper.findAll('button').find(button => button.text() === '新建用户')!.trigger('click')
     await flushPromises()
     const dialog = document.body.querySelector('.el-dialog')!
-    expect(dialog.querySelector('select')?.textContent).not.toContain('平台管理员')
-    expect(dialog.querySelector('select')?.textContent).not.toContain('开发者')
+    const roleSelect = wrapper.findAllComponents({ name: 'ElSelect' })[0]
+    expect(roleSelect.props('multiple')).toBe(true)
+    expect(roleSelect.props('modelValue')).toEqual(['Engineer'])
+    await roleSelect.vm.$emit('update:modelValue', ['Engineer', 'PlanningManager'])
     const inputs = Array.from(dialog.querySelectorAll<HTMLInputElement>('input'))
     inputs[0].value = 'new-user'; inputs[0].dispatchEvent(new Event('input'))
     inputs[1].value = '新用户'; inputs[1].dispatchEvent(new Event('input'))
@@ -74,6 +77,6 @@ describe('UserSettings', () => {
     save.click()
     await flushPromises()
 
-    expect(saveUser).toHaveBeenCalledWith(expect.objectContaining({ username: 'new-user', displayName: '新用户', password: '11111111' }), true)
+    expect(saveUser).toHaveBeenCalledWith(expect.objectContaining({ username: 'new-user', displayName: '新用户', role: 'Engineer', roles: ['Engineer', 'PlanningManager'], password: '11111111' }), true)
   })
 })

@@ -3,6 +3,7 @@ import { FileSearch, Link2, MoreHorizontal, Rotate3D, ScanSearch } from '@lucide
 import { computed, defineAsyncComponent, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { listDocumentVersions, postDesktopMessage, readDocumentPreviewFile } from '../api'
 import type { BomItem, DocumentNode, PreviewMode, SolidWorksOpenMode } from '../types'
+import { useUserDisplayName } from '../userDisplay'
 import SquareLoader from './SquareLoader.vue'
 
 const StepPreviewViewer = defineAsyncComponent(() => import('./StepPreviewViewer.vue'))
@@ -44,6 +45,7 @@ const emit = defineEmits<{
   obsolete: []
   review: []
 }>()
+const displayUserName = useUserDisplayName()
 const previewSlot = ref<HTMLElement>()
 const previewState = ref<'idle' | 'loading' | 'ready' | 'error' | 'unavailable'>(props.desktopAvailable ? 'idle' : 'unavailable')
 const previewError = ref('')
@@ -80,7 +82,7 @@ const editStatusLabel = computed(() => {
   if (!owner) return '正常'
   return owner.localeCompare(props.currentUsername.trim(), undefined, { sensitivity: 'accent' }) === 0
     ? '可编辑'
-    : `${owner}编辑中`
+    : `${displayUserName(owner)}编辑中`
 })
 const previewProperties = computed(() => [
   { label: '物料/图号', value: props.selected.drawingNumber?.trim() },

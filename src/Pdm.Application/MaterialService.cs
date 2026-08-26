@@ -1,6 +1,7 @@
 using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.Json;
 using Upton.Pdm.Domain;
 
 namespace Upton.Pdm.Application;
@@ -12,6 +13,10 @@ public sealed class MaterialService(
     IU9OpenApiClient u9Client,
     TimeProvider timeProvider)
 {
+    private const string PendingApplicationCodePrefix = "PDM-PENDING-";
+    private const int U9MaterialReferencePageSize = 1000;
+    private const int MaximumU9MaterialReferencePages = 100;
+
     public Task<IReadOnlyList<PdmMaterial>> ListMaterialsAsync(string? query, string? categoryCode, bool includeArchived, int limit, CancellationToken cancellationToken) =>
         materials.ListMaterialsAsync(query, categoryCode, includeArchived, limit, cancellationToken);
 
@@ -118,7 +123,8 @@ public sealed class MaterialService(
                 ?? throw new PdmNotFoundException("BOM料号申请对应的料品草稿不存在。");
             MaterialSyncTask? syncTask = null;
             if (headerMaterial.ApprovalStatus == MaterialApprovalStatus.Draft)
-                (headerMaterial, syncTask) = await ApproveCoreAsync(headerMaterial.Id, headerMaterial.RowVersion, actor, cancellationToken);
+                (headerMaterial, syncTask) = await ApproveCoreAsync(
+                    headerMaterial.Id, headerMaterial.RowVersion, actor, cancellationToken, reserveCodeAtApproval: true);
             else if (!headerMaterial.U9SyncConfirmed)
                 syncTask = (await materials.ListSyncTasksAsync(cancellationToken))
                     .FirstOrDefault(task => task.MaterialId == headerMaterial.Id && task.Status == MaterialSyncStatus.PreviewReady);
@@ -171,11 +177,25 @@ public sealed class MaterialService(
         var category = await RequireCreatableCategoryAsync(command.CategoryCode, command.Kind, cancellationToken);
         var now = timeProvider.GetUtcNow();
         var normalized = Normalize(Guid.NewGuid(), command, null, actor, now, category.Code);
-        var reservation = await ReserveAvailableMaterialCodeAsync(category, normalized.UnitCode, normalized.Specification, cancellationToken);
+        var reservation = await ReserveAvailableMaterialCodeAsync(category, normalized.UnitCode, cancellationToken);
         var material = normalized with { MaterialCode = reservation.Code };
         var saved = await materials.CreateMaterialAsync(material, category, cancellationToken);
         await AuditAsync(actor, "material.create", saved.Id,
-            $"创建物料主档：{saved.MaterialCode} · {saved.Name}；创建前只读校验U9C编码和规格，跳过同规格占用{reservation.SameSpecificationCount}个、规格冲突占用{reservation.DifferentSpecificationCount}个。", cancellationToken);
+            $"创建物料主档：{saved.MaterialCode} · {saved.Name}；按U9C当前最新料号 {reservation.LatestU9MaterialCode ?? "无"} 向后生成。", cancellationToken);
+        return saved;
+    }
+
+    public async Task<PdmMaterial> CreateApplicationDraftAsync(SaveMaterialCommand command, string actor, UserRole role, CancellationToken cancellationToken)
+    {
+        await RequirePermissionAsync(actor, role, PermissionCodes.BomEdit, cancellationToken);
+        var category = await RequireCreatableCategoryAsync(command.CategoryCode, command.Kind, cancellationToken);
+        var now = timeProvider.GetUtcNow();
+        var materialId = Guid.NewGuid();
+        var normalized = Normalize(materialId, command, null, actor, now, category.Code);
+        var material = normalized with { MaterialCode = $"{PendingApplicationCodePrefix}{materialId:N}" };
+        var saved = await materials.CreateMaterialAsync(material, category, cancellationToken);
+        await AuditAsync(actor, "material.application-draft.create", saved.Id,
+            $"创建待审批料品草稿：{saved.Name}；审批前未查询或预留U9C正式料号。", cancellationToken);
         return saved;
     }
 
@@ -240,7 +260,7 @@ public sealed class MaterialService(
             weight,
             weight is null ? null : "kg",
             CategoryCode: category.Code), null, actor, now, category.Code) with { SourceBomItemId = item.Id };
-        var reservation = await ReserveAvailableMaterialCodeAsync(category, normalized.UnitCode, normalized.Specification, cancellationToken);
+        var reservation = await ReserveAvailableMaterialCodeAsync(category, normalized.UnitCode, cancellationToken);
         var material = normalized with { MaterialCode = reservation.Code };
         var saved = await materials.CreateMaterialAsync(material, category, cancellationToken);
         await materials.LinkBomItemAsync(item.Id, saved.Id, actor, now, cancellationToken);
@@ -251,7 +271,6 @@ public sealed class MaterialService(
     private async Task<MaterialCodeReservation> ReserveAvailableMaterialCodeAsync(
         MaterialCategory category,
         string unitCode,
-        string? specification,
         CancellationToken cancellationToken)
     {
         var configuration = await materials.GetIntegrationConfigurationAsync(cancellationToken);
@@ -275,11 +294,13 @@ public sealed class MaterialService(
             $"pdm-create-uom-check-{Guid.NewGuid():N}",
             cancellationToken);
 
-        var sameSpecificationCount = 0;
-        var differentSpecificationCount = 0;
+        var latestU9Sequence = await QueryLatestU9SequenceAsync(configuration, authentication.Token, category, cancellationToken);
+        var latestU9MaterialCode = latestU9Sequence == 0
+            ? null
+            : $"{category.NumberPrefix}{latestU9Sequence.ToString($"D{category.SequenceLength}")}";
         while (true)
         {
-            var candidate = await materials.ReserveNextMaterialCodeAsync(category, cancellationToken);
+            var candidate = await materials.ReserveNextMaterialCodeAsync(category, latestU9Sequence, cancellationToken);
             var result = await u9Client.QueryItemsAsync(
                 configuration.BaseUrl,
                 configuration.ItemQueryPath,
@@ -292,18 +313,73 @@ public sealed class MaterialService(
             var codeMatches = result.Items.Where(item =>
                 string.Equals(item.U9ItemCode?.Trim(), candidate, StringComparison.OrdinalIgnoreCase)).ToArray();
             if (codeMatches.Length == 0)
-                return new MaterialCodeReservation(candidate, sameSpecificationCount, differentSpecificationCount);
+                return new MaterialCodeReservation(candidate, latestU9MaterialCode);
 
-            if (codeMatches.Any(item => SameSpecification(item.U9Specification, specification))) sameSpecificationCount++;
-            else differentSpecificationCount++;
+            latestU9Sequence = Math.Max(latestU9Sequence, ParseMaterialSequence(candidate, category));
+            latestU9MaterialCode = candidate;
         }
     }
 
-    private static bool SameSpecification(string? left, string? right) =>
-        string.Equals(NormalizeSpecification(left), NormalizeSpecification(right), StringComparison.OrdinalIgnoreCase);
+    private async Task<long> QueryLatestU9SequenceAsync(
+        U9MaterialIntegrationConfiguration configuration,
+        string token,
+        MaterialCategory category,
+        CancellationToken cancellationToken)
+    {
+        var latestSequence = 0L;
+        var seenCodes = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        for (var pageIndex = 0; pageIndex < MaximumU9MaterialReferencePages; pageIndex++)
+        {
+            var payload = JsonSerializer.Serialize(new
+            {
+                ReferenceCode = "ItemMaster",
+                ReferenceEntityFullName = "UFIDA.U9.CBO.SCM.Item.ItemMaster",
+                ReferenceDefaultFilter = $"MainItemCategory.Code = '{category.Code}'",
+                Transclude = string.Empty,
+                TargetOrgCode = configuration.OrganizationCode,
+                PageIndex = pageIndex,
+                PageSize = U9MaterialReferencePageSize,
+                Filter = string.Empty,
+                FilterObjectXML = string.Empty
+            });
+            var page = await u9Client.QueryCustomerReferencesAsync(
+                configuration.BaseUrl,
+                configuration.CustomerQueryPath,
+                token,
+                payload,
+                cancellationToken);
+            if (page.ResponseCode != 0)
+                throw new PdmRuleException($"U9C最新料号查询失败（ResCode={page.ResponseCode}）：{page.ResponseMessage ?? "未返回错误说明"}。");
 
-    private static string NormalizeSpecification(string? value) =>
-        string.Join(' ', (value ?? string.Empty).Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));
+            var countBeforePage = seenCodes.Count;
+            foreach (var item in page.Customers)
+            {
+                var code = item.Code.Trim();
+                if (!seenCodes.Add(code)) continue;
+                if (TryParseMaterialSequence(code, category, out var sequence)) latestSequence = Math.Max(latestSequence, sequence);
+            }
+
+            if (page.RawCount == 0 || page.RawCount < U9MaterialReferencePageSize) return latestSequence;
+            if (seenCodes.Count == countBeforePage)
+                throw new PdmRuleException("U9C最新料号分页查询未向后推进，无法可靠确定当前最新序号。");
+        }
+
+        throw new PdmRuleException($"U9C分类 {category.Code} 的料号超过可安全读取的分页范围，无法可靠确定当前最新序号。");
+    }
+
+    private static long ParseMaterialSequence(string materialCode, MaterialCategory category) =>
+        TryParseMaterialSequence(materialCode, category, out var sequence)
+            ? sequence
+            : throw new PdmRuleException($"料号 {materialCode} 不符合分类 {category.Code} 的编码规则。");
+
+    private static bool TryParseMaterialSequence(string materialCode, MaterialCategory category, out long sequence)
+    {
+        sequence = 0;
+        if (!materialCode.StartsWith(category.NumberPrefix, StringComparison.OrdinalIgnoreCase)
+            || materialCode.Length != category.NumberPrefix.Length + category.SequenceLength) return false;
+        var suffix = materialCode[category.NumberPrefix.Length..];
+        return suffix.All(char.IsDigit) && long.TryParse(suffix, out sequence);
+    }
 
     private async Task<string> RequireAvailableU9UnitCodeAsync(
         U9MaterialIntegrationConfiguration configuration,
@@ -327,8 +403,7 @@ public sealed class MaterialService(
 
     private sealed record MaterialCodeReservation(
         string Code,
-        int SameSpecificationCount,
-        int DifferentSpecificationCount);
+        string? LatestU9MaterialCode);
 
     public async Task<(PdmMaterial Material, MaterialSyncTask Task)> ApproveAsync(Guid materialId, long expectedRowVersion, string actor, UserRole role, CancellationToken cancellationToken)
     {
@@ -336,22 +411,33 @@ public sealed class MaterialService(
         return await ApproveCoreAsync(materialId, expectedRowVersion, actor, cancellationToken);
     }
 
-    private async Task<(PdmMaterial Material, MaterialSyncTask Task)> ApproveCoreAsync(Guid materialId, long expectedRowVersion, string actor, CancellationToken cancellationToken)
+    private async Task<(PdmMaterial Material, MaterialSyncTask Task)> ApproveCoreAsync(
+        Guid materialId,
+        long expectedRowVersion,
+        string actor,
+        CancellationToken cancellationToken,
+        bool reserveCodeAtApproval = false)
     {
         var material = await materials.FindMaterialAsync(materialId, cancellationToken) ?? throw new PdmNotFoundException("物料主档不存在。");
         if (material.IsArchived) throw new PdmRuleException("已归档料品不能批准。");
         if (material.ApprovalStatus != MaterialApprovalStatus.Draft) throw new PdmRuleException("物料主档已经批准。");
-        ValidateForApproval(material);
         var category = await RequireCreatableCategoryAsync(material.CategoryCode, material.Kind, cancellationToken);
+        var materialForApproval = material;
+        if (reserveCodeAtApproval)
+        {
+            var reservation = await ReserveAvailableMaterialCodeAsync(category, material.UnitCode, cancellationToken);
+            materialForApproval = material with { MaterialCode = reservation.Code };
+        }
+        ValidateForApproval(materialForApproval);
         var rule = new MaterialCategoryRule(material.Kind, category.Code, category.Name, category.DefaultSupplyMode, category.AllowCreate, category.UpdatedBy, category.UpdatedAt);
-        ValidateSupplyMode(material, rule);
+        ValidateSupplyMode(materialForApproval, rule);
 
         var now = timeProvider.GetUtcNow();
         var taskId = Guid.NewGuid();
         var correlationId = $"pdm-material-{material.Id:N}-v{expectedRowVersion}";
         var configuration = await materials.GetIntegrationConfigurationAsync(cancellationToken);
         var u9UnitCode = U9MaterialPayloadFactory.ResolveUnitCode(material.UnitCode);
-        var payloadJson = U9MaterialPayloadFactory.CreatePayload(material, rule, configuration.OrganizationCode, correlationId, u9UnitCode);
+        var payloadJson = U9MaterialPayloadFactory.CreatePayload(materialForApproval, rule, configuration.OrganizationCode, correlationId, u9UnitCode);
         var hash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(payloadJson)));
         var task = new MaterialSyncTask(
             taskId,
@@ -369,11 +455,11 @@ public sealed class MaterialService(
             null,
             now,
             now);
-        var audit = new AuditEntry(Guid.NewGuid(), now, actor, "material.approve", nameof(PdmMaterial), material.Id.ToString(), $"批准物料并生成U9C请求预览：{material.MaterialCode} · {rule.U9CategoryCode}");
-        return await materials.ApproveAndEnqueueAsync(material.Id, expectedRowVersion, rule.U9CategoryCode, task, audit, cancellationToken);
+        var audit = new AuditEntry(Guid.NewGuid(), now, actor, "material.approve", nameof(PdmMaterial), material.Id.ToString(), $"批准物料并生成U9C请求预览：{materialForApproval.MaterialCode} · {rule.U9CategoryCode}");
+        return await materials.ApproveAndEnqueueAsync(materialForApproval, expectedRowVersion, rule.U9CategoryCode, task, audit, cancellationToken);
     }
 
-    public async Task<(PdmMaterial Material, MaterialSyncTask Task)> ChangeApprovedAsync(
+    public async Task<(PdmMaterial Material, MaterialSyncTask? Task)> ChangeApprovedAsync(
         Guid materialId,
         SaveMaterialCommand command,
         string actor,
@@ -385,11 +471,28 @@ public sealed class MaterialService(
         if (existing.IsArchived) throw new PdmRuleException("已归档料品不能变更。");
         if (existing.ApprovalStatus != MaterialApprovalStatus.Approved)
             throw new PdmRuleException("只有已批准料品才能通过变更流程修改。");
-        if (existing.SyncStatus == MaterialSyncStatus.Pending)
-            throw new PdmRuleException("U9C同步请求正在执行，结果确认前不能修改料品。");
         if (command.ExpectedRowVersion is null) throw new PdmRuleException("变更料品必须提供数据版本。");
-        var category = await RequireCreatableCategoryAsync(command.CategoryCode ?? existing.CategoryCode, command.Kind, cancellationToken);
-        var updated = Normalize(materialId, command, existing, actor, timeProvider.GetUtcNow(), category.Code);
+        var categoryCode = command.CategoryCode ?? existing.CategoryCode ?? existing.U9CategoryCode;
+        if (string.IsNullOrWhiteSpace(categoryCode)) categoryCode = (await RequireEnabledCategoryRuleAsync(command.Kind, cancellationToken)).U9CategoryCode;
+        var currentCategory = await materials.FindCategoryAsync(categoryCode, cancellationToken)
+            ?? throw new PdmRuleException("料品分类不存在或尚未从U9C同步。");
+        var updated = Normalize(materialId, command, existing, actor, timeProvider.GetUtcNow(), currentCategory.Code);
+
+        var u9FieldsChanged = HasU9MasterChanges(existing, updated);
+        if (!u9FieldsChanged)
+        {
+            var saved = await materials.UpdatePlmMetadataAsync(updated, command.ExpectedRowVersion.Value, cancellationToken);
+            await AuditAsync(actor, "material.plm-metadata.update", materialId,
+                $"更新PLM专属字段，不生成U9C任务：{existing.MaterialCode}", cancellationToken);
+            return (saved, null);
+        }
+        if (existing.SyncStatus is MaterialSyncStatus.Pending or MaterialSyncStatus.NeedsReview)
+            throw new PdmRuleException(existing.SyncStatus == MaterialSyncStatus.Pending
+                ? "U9C同步请求正在执行，结果确认前不能再次修改U9字段。"
+                : "上次U9C写入仍待人工复核，处理完成前不能再次修改U9字段。");
+
+        var category = await RequireCreatableCategoryAsync(currentCategory.Code, command.Kind, cancellationToken);
+        updated = Normalize(materialId, command, existing, actor, timeProvider.GetUtcNow(), category.Code);
         ValidateForApproval(updated);
         var rule = new MaterialCategoryRule(updated.Kind, category.Code, category.Name, category.DefaultSupplyMode, category.AllowCreate, category.UpdatedBy, category.UpdatedAt);
         ValidateSupplyMode(updated, rule);
@@ -413,6 +516,29 @@ public sealed class MaterialService(
                 : $"变更未同步料品，废止旧请求并生成新的U9C创建预览：{existing.MaterialCode}");
         return await materials.UpdateAndEnqueueAsync(updated, command.ExpectedRowVersion.Value, task, audit, cancellationToken);
     }
+
+    private static bool HasU9MasterChanges(PdmMaterial existing, PdmMaterial updated) =>
+        !SameText(existing.Name, updated.Name)
+        || !SameCode(existing.CategoryCode ?? existing.U9CategoryCode, updated.CategoryCode ?? updated.U9CategoryCode)
+        || !SameCode(existing.UnitCode, updated.UnitCode)
+        || !SameText(existing.Specification, updated.Specification)
+        || !SameText(existing.Remark, updated.Remark)
+        || !SameText(existing.Brand, updated.Brand)
+        || !SameText(existing.Material, updated.Material)
+        || !SameText(existing.SurfaceTreatment, updated.SurfaceTreatment)
+        || !SameText(existing.PurchaseLink, updated.PurchaseLink)
+        || NormalizeWeight(existing.Weight) != NormalizeWeight(updated.Weight);
+
+    private static bool SameText(string? left, string? right) =>
+        string.Equals(NormalizeComparisonText(left), NormalizeComparisonText(right), StringComparison.Ordinal);
+
+    private static bool SameCode(string? left, string? right) =>
+        string.Equals(NormalizeComparisonText(left), NormalizeComparisonText(right), StringComparison.OrdinalIgnoreCase);
+
+    private static string? NormalizeComparisonText(string? value) =>
+        string.IsNullOrWhiteSpace(value) ? null : value.Trim();
+
+    private static decimal? NormalizeWeight(decimal? value) => value is null ? null : decimal.Round(value.Value, 6, MidpointRounding.AwayFromZero);
 
     public async Task<MaterialRemovalResult> RemoveAsync(Guid materialId, long expectedRowVersion, string actor, UserRole role, CancellationToken cancellationToken)
     {
@@ -822,7 +948,8 @@ public sealed class MaterialService(
             ReferencePrice: command.ReferencePrice,
             Model3DLink: NormalizeHttpLink(command.Model3DLink, "3D链接"),
             DocumentLink: NormalizeHttpLink(command.DocumentLink, "资料链接"),
-            IsRecommended: command.IsRecommended);
+            IsRecommended: command.IsRecommended,
+            CoverImageAttachmentId: existing?.CoverImageAttachmentId);
     }
 
     private static void ValidateForApproval(PdmMaterial material)
