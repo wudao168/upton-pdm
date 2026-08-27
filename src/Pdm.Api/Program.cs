@@ -54,6 +54,14 @@ if (string.Equals(databaseOptions.Provider, "MySql", StringComparison.OrdinalIgn
 
 var storageOptions = new PdmStorageOptions();
 builder.Configuration.GetSection(PdmStorageOptions.SectionName).Bind(storageOptions);
+if (!Path.IsPathFullyQualified(storageOptions.UploadTempRoot))
+{
+    storageOptions.UploadTempRoot = Path.GetFullPath(Path.Combine(builder.Environment.ContentRootPath, storageOptions.UploadTempRoot));
+}
+if (!Path.IsPathFullyQualified(storageOptions.ProgramTemplateRoot))
+{
+    storageOptions.ProgramTemplateRoot = Path.GetFullPath(Path.Combine(builder.Environment.ContentRootPath, storageOptions.ProgramTemplateRoot));
+}
 
 var previewWorkerOptions = new PdmPreviewWorkerOptions();
 builder.Configuration.GetSection(PdmPreviewWorkerOptions.SectionName).Bind(previewWorkerOptions);
@@ -191,7 +199,7 @@ app.UseExceptionHandler(exceptionHandler => exceptionHandler.Run(async context =
         PdmNotFoundException => StatusCodes.Status404NotFound,
         PdmConflictException => StatusCodes.Status409Conflict,
         PdmRuleException => StatusCodes.Status400BadRequest,
-        UnauthorizedAccessException => StatusCodes.Status401Unauthorized,
+        UnauthorizedAccessException => StatusCodes.Status403Forbidden,
         _ => StatusCodes.Status500InternalServerError
     };
     context.Response.StatusCode = status;

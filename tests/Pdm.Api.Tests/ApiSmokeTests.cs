@@ -4,8 +4,10 @@ using System.Net.Http.Json;
 using System.Text.Json;
 using System.IdentityModel.Tokens.Jwt;
 using System.Security.Claims;
+using System.Security.Cryptography;
 using System.Text;
 using Microsoft.AspNetCore.Hosting;
+using Microsoft.AspNetCore.DataProtection;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.IdentityModel.Tokens;
 using Microsoft.Extensions.DependencyInjection;
@@ -858,6 +860,179 @@ public sealed class ApiSmokeTests : IClassFixture<PdmApiFactory>
         }
     }
 
+    [Fact]
+    public async Task ProjectFiles_CompleteBusinessFileLifecycleAndRejectReadOnlyRoleUploads()
+    {
+        var repository = factory.Services.GetRequiredService<IPdmRepository>();
+        var originalSettings = await repository.GetSystemSettingsAsync(CancellationToken.None);
+        var testRoot = Path.GetFullPath(Path.Combine(".data", "api-tests", Guid.NewGuid().ToString("N")));
+        var project = await repository.CreateProjectAsync(
+            new CreateProjectCommand($"FILE-{Guid.NewGuid():N}", "项目文件全流程验收", "admin", testRoot, Path.Combine(testRoot, "release")),
+            "admin",
+            CancellationToken.None);
+        await repository.EnsureProjectFolderTreeAsync(project.Id, CancellationToken.None);
+        await repository.UpdateSystemSettingsAsync(originalSettings with { VaultRoot = testRoot }, CancellationToken.None);
+        Assert.True(Path.IsPathFullyQualified(testRoot), testRoot);
+        Assert.Equal(testRoot, (await repository.GetSystemSettingsAsync(CancellationToken.None)).VaultRoot);
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", CreateToken("admin", "Administrator"));
+
+        try
+        {
+            var folders = await repository.ListProjectFoldersAsync(project.Id, "admin", UserRole.Administrator, CancellationToken.None);
+            var projectFiles = Assert.Single(folders, item => item.FolderKey == "project-files");
+            var presales = Assert.Single(folders, item => item.FolderKey == "presales");
+
+            var createdResponse = await client.PostAsJsonAsync($"/api/projects/{project.Id}/folders/{projectFiles.Id}/children", new { name = "验收资料临时区" });
+            Assert.Equal(HttpStatusCode.OK, createdResponse.StatusCode);
+            using var createdJson = JsonDocument.Parse(await createdResponse.Content.ReadAsStringAsync());
+            var customFolderId = createdJson.RootElement.GetProperty("id").GetGuid();
+
+            var renamedFolder = await client.PatchAsJsonAsync($"/api/projects/{project.Id}/folders/{customFolderId}", new { name = "验收资料归档区" });
+            Assert.Equal(HttpStatusCode.OK, renamedFolder.StatusCode);
+            var movedFolder = await client.PostAsJsonAsync($"/api/projects/{project.Id}/folders/{customFolderId}/move", new { folderId = presales.Id });
+            Assert.Equal(HttpStatusCode.OK, movedFolder.StatusCode);
+
+            client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", CreateToken($"readonly-{Guid.NewGuid():N}", "PlanningManager"));
+            var deniedUpload = await client.PostAsJsonAsync($"/api/projects/{project.Id}/folders/{customFolderId}/file-uploads", new
+            {
+                fileName = "只读角色禁止上传.txt",
+                totalLength = 1,
+                sha256 = new string('0', 64)
+            });
+            Assert.True(deniedUpload.StatusCode == HttpStatusCode.Forbidden,
+                $"Expected 403 but received {(int)deniedUpload.StatusCode}: {await deniedUpload.Content.ReadAsStringAsync()}");
+
+            client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", CreateToken("admin", "Administrator"));
+            var firstContent = Encoding.UTF8.GetBytes("PLM项目文件全流程模拟数据-v1");
+            var firstHash = Convert.ToHexString(SHA256.HashData(firstContent));
+            var start = await client.PostAsJsonAsync($"/api/projects/{project.Id}/folders/{customFolderId}/file-uploads", new
+            {
+                fileName = "验收项目资料.txt",
+                totalLength = firstContent.Length,
+                sha256 = firstHash
+            });
+            Assert.True(start.StatusCode == HttpStatusCode.OK,
+                $"Expected upload session but received {(int)start.StatusCode}: {await start.Content.ReadAsStringAsync()}");
+            using var startJson = JsonDocument.Parse(await start.Content.ReadAsStringAsync());
+            var sessionId = startJson.RootElement.GetProperty("id").GetGuid();
+
+            using var chunk = new ByteArrayContent(firstContent);
+            chunk.Headers.ContentType = new MediaTypeHeaderValue("application/octet-stream");
+            var chunkResponse = await client.PutAsync($"/api/project-file-uploads/{sessionId}/chunks/0", chunk);
+            Assert.Equal(HttpStatusCode.OK, chunkResponse.StatusCode);
+
+            var complete = await client.PostAsJsonAsync($"/api/project-file-uploads/{sessionId}/complete", new { comment = "首次受控上传" });
+            Assert.Equal(HttpStatusCode.OK, complete.StatusCode);
+            using var completeJson = JsonDocument.Parse(await complete.Content.ReadAsStringAsync());
+            var fileId = completeJson.RootElement.GetProperty("id").GetGuid();
+            Assert.Equal(1, completeJson.RootElement.GetProperty("currentVersion").GetProperty("versionNumber").GetInt32());
+
+            var versions = await client.GetFromJsonAsync<JsonElement[]>($"/api/projects/{project.Id}/files/{fileId}/versions");
+            Assert.Single(versions!);
+            var download = await client.GetAsync($"/api/projects/{project.Id}/files/{fileId}/content?download=false");
+            Assert.Equal(HttpStatusCode.OK, download.StatusCode);
+            Assert.Equal(firstContent, await download.Content.ReadAsByteArrayAsync());
+
+            var rename = await client.PatchAsJsonAsync($"/api/projects/{project.Id}/files/{fileId}", new { name = "验收项目资料-已归档.txt" });
+            Assert.Equal(HttpStatusCode.OK, rename.StatusCode);
+            var invalidRename = await client.PatchAsJsonAsync($"/api/projects/{project.Id}/files/{fileId}", new { name = "验收项目资料-非法改扩展名.pdf" });
+            Assert.Equal(HttpStatusCode.BadRequest, invalidRename.StatusCode);
+            var move = await client.PostAsJsonAsync($"/api/projects/{project.Id}/files/{fileId}/move", new { folderId = projectFiles.Id });
+            Assert.Equal(HttpStatusCode.OK, move.StatusCode);
+
+            var deleted = await client.DeleteAsync($"/api/projects/{project.Id}/files/{fileId}");
+            Assert.Equal(HttpStatusCode.OK, deleted.StatusCode);
+            Assert.Equal(HttpStatusCode.Conflict, (await client.GetAsync($"/api/projects/{project.Id}/files/{fileId}/content")).StatusCode);
+            var restored = await client.PostAsync($"/api/projects/{project.Id}/files/{fileId}/restore", null);
+            Assert.Equal(HttpStatusCode.OK, restored.StatusCode);
+            Assert.Equal(firstContent, await (await client.GetAsync($"/api/projects/{project.Id}/files/{fileId}/content?download=false")).Content.ReadAsByteArrayAsync());
+
+            var audit = await repository.ListAuditAsync("admin", UserRole.Administrator, 200, CancellationToken.None);
+            Assert.Contains(audit, item => item.Action == "project.file.upload" && item.EntityId == fileId.ToString());
+            Assert.Contains(audit, item => item.Action == "project.file.restore" && item.EntityId == fileId.ToString());
+        }
+        finally
+        {
+            await repository.UpdateSystemSettingsAsync(originalSettings, CancellationToken.None);
+            if (Directory.Exists(testRoot))
+            {
+                foreach (var file in Directory.EnumerateFiles(testRoot, "*", SearchOption.AllDirectories)) File.SetAttributes(file, FileAttributes.Normal);
+                Directory.Delete(testRoot, true);
+            }
+        }
+    }
+
+    [Fact]
+    public async Task StandardLibrary_ApiCoversCategoryMembershipRecommendationAndRoleDenial()
+    {
+        var repository = factory.Services.GetRequiredService<IPdmRepository>();
+        var materials = factory.Services.GetRequiredService<IMaterialRepository>();
+        var materialCategory = (await materials.FindCategoryAsync("0101", CancellationToken.None))!;
+        var code = $"QA{Guid.NewGuid():N}"[..14];
+        var now = DateTimeOffset.UtcNow;
+        var material = await materials.CreateMaterialAsync(new PdmMaterial(
+            Guid.NewGuid(), code, "标准库接口验收传感器", MaterialKind.Electrical, MaterialSupplyMode.Purchase,
+            "001", "M18", null, null, "SICK", null, null, null, null,
+            MaterialApprovalStatus.Approved, "admin", now, "0101", $"u9-{code}", code,
+            MaterialSyncStatus.Succeeded, "admin", now, "admin", now, 1, "0101", U9SyncConfirmed: true),
+            materialCategory,
+            CancellationToken.None);
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", CreateToken("admin", "Administrator"));
+
+        var create = await client.PostAsJsonAsync("/api/standard-library/categories", new
+        {
+            name = $"接口验收分类-{Guid.NewGuid():N}",
+            parentId = (Guid?)null,
+            sortOrder = 9000,
+            isActive = true,
+            expectedRowVersion = (long?)null
+        });
+        Assert.Equal(HttpStatusCode.OK, create.StatusCode);
+        using var categoryJson = JsonDocument.Parse(await create.Content.ReadAsStringAsync());
+        var categoryId = categoryJson.RootElement.GetProperty("id").GetGuid();
+        var categoryRowVersion = categoryJson.RootElement.GetProperty("rowVersion").GetInt64();
+
+        var membership = await client.PostAsJsonAsync("/api/standard-library/memberships", new
+        {
+            categoryIds = new[] { categoryId },
+            materialIds = new[] { material.Id }
+        });
+        Assert.Equal(HttpStatusCode.NoContent, membership.StatusCode);
+
+        var page = await client.GetFromJsonAsync<JsonElement>($"/api/standard-library/materials?categoryId={categoryId}&query={Uri.EscapeDataString(material.Name)}");
+        Assert.Equal(1, page.GetProperty("total").GetInt32());
+        Assert.Equal(material.Id, page.GetProperty("items")[0].GetProperty("material").GetProperty("id").GetGuid());
+
+        var recommended = await client.PutAsJsonAsync($"/api/standard-library/materials/{material.Id}/recommended", new
+        {
+            isRecommended = true,
+            expectedRowVersion = material.RowVersion
+        });
+        Assert.Equal(HttpStatusCode.OK, recommended.StatusCode);
+        var recommendedPage = await client.GetFromJsonAsync<JsonElement>($"/api/standard-library/materials?categoryId={categoryId}&recommendedOnly=true");
+        Assert.Equal(1, recommendedPage.GetProperty("total").GetInt32());
+
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", CreateToken($"library-reader-{Guid.NewGuid():N}", "Engineer"));
+        Assert.Equal(HttpStatusCode.OK, (await client.GetAsync("/api/standard-library/categories")).StatusCode);
+        var denied = await client.PostAsJsonAsync("/api/standard-library/categories", new
+        {
+            name = "工程师禁止维护分类",
+            parentId = (Guid?)null,
+            sortOrder = 1,
+            isActive = true,
+            expectedRowVersion = (long?)null
+        });
+        Assert.True(denied.StatusCode == HttpStatusCode.Forbidden,
+            $"Expected 403 but received {(int)denied.StatusCode}: {await denied.Content.ReadAsStringAsync()}");
+
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", CreateToken("admin", "Administrator"));
+        Assert.Equal(HttpStatusCode.NoContent, (await client.DeleteAsync($"/api/standard-library/categories/{categoryId}/materials/{material.Id}")).StatusCode);
+        Assert.Equal(HttpStatusCode.NoContent, (await client.DeleteAsync($"/api/standard-library/categories/{categoryId}?expectedRowVersion={categoryRowVersion}")).StatusCode);
+        var audit = await repository.ListAuditAsync("admin", UserRole.Administrator, 200, CancellationToken.None);
+        Assert.Contains(audit, item => item.Action == "standard-library.membership.add");
+        Assert.Contains(audit, item => item.Action == "standard-library.category.delete" && item.EntityId == categoryId.ToString());
+    }
+
     private static string CreateToken(string username, string role)
     {
         var credentials = new SigningCredentials(
@@ -904,6 +1079,7 @@ public sealed class PdmApiFactory : WebApplicationFactory<Program>
         builder.UseEnvironment("Development");
         builder.ConfigureServices(services =>
         {
+            services.AddDataProtection().UseEphemeralDataProtectionProvider();
             services.RemoveAll<ICrmCustomerClient>();
             services.RemoveAll<ICrmCredentialProtector>();
             services.RemoveAll<IU9OpenApiClient>();

@@ -217,7 +217,7 @@ internal sealed class BatchOperationDialog : Form
                 var path = item.Node.FullPath;
                 var shouldCheck = selectedPaths != null
                     ? selectedPaths.Contains(path)
-                    : startWithCheckIn ? CanPrepareForCheckIn(item.Node, this.username) : CanAcquire(item.Node);
+                    : startWithCheckIn ? ShouldSelectForCheckIn(item.Node, this.username) : CanAcquire(item.Node);
                 if (shouldCheck)
                 {
                     checkedPaths.Add(path);
@@ -458,11 +458,13 @@ internal sealed class BatchOperationDialog : Form
     {
         changeNote.Enabled = checkIn.Checked;
         selectChanged.Enabled = checkIn.Checked;
-        selectionSummary.Text = string.Empty;
+        selectionSummary.Text = checkIn.Checked
+            ? "未在编辑的图档不会默认勾选；已保存修改请点“勾选变更项”，或先整体获取权限"
+            : string.Empty;
         checkedPaths.Clear();
         foreach (var item in operationItems)
         {
-            if (checkIn.Checked ? CanPrepareForCheckIn(item.Node, username) : CanAcquire(item.Node))
+            if (checkIn.Checked ? ShouldSelectForCheckIn(item.Node, username) : CanAcquire(item.Node))
             {
                 checkedPaths.Add(item.Node.FullPath);
             }
@@ -479,7 +481,14 @@ internal sealed class BatchOperationDialog : Form
 
         if (SelectedItems.Count == 0)
         {
-            MessageBox.Show(this, "请至少选择一个图档。", "整套装配操作", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            MessageBox.Show(
+                this,
+                checkIn.Checked
+                    ? "当前没有选择可提交图档。若已经修改，请先在SolidWorks中保存文件，再点击“勾选变更项”；若尚未获取编辑权限，请先选择“获取最新并获取权限”，完成编辑并保存后再提交。"
+                    : "请至少选择一个图档。",
+                "整套装配操作",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Information);
             eventArgs.Cancel = true;
             return;
         }
@@ -698,7 +707,7 @@ internal sealed class BatchOperationDialog : Form
     }
 
     private bool CanSelectNode(CadTreeNode node) => checkIn.Checked
-        ? CanPrepareForCheckIn(node, username)
+        ? CanSelectForCheckIn(node, username)
         : CanAcquire(node);
 
     private void UpdateAllTreeNodes()
@@ -1013,10 +1022,14 @@ internal sealed class BatchOperationDialog : Form
         && !string.IsNullOrWhiteSpace(node.FullPath)
         && IsSupported(node.Kind);
 
-    private static bool CanPrepareForCheckIn(CadTreeNode node, string username) =>
+    private static bool CanSelectForCheckIn(CadTreeNode node, string username) =>
         CanAcquire(node)
+        && File.Exists(node.FullPath)
         && (string.IsNullOrWhiteSpace(node.CheckedOutBy)
-            || string.Equals(node.CheckedOutBy, username, StringComparison.OrdinalIgnoreCase))
+            || string.Equals(node.CheckedOutBy, username, StringComparison.OrdinalIgnoreCase));
+
+    private static bool ShouldSelectForCheckIn(CadTreeNode node, string username) =>
+        CanSelectForCheckIn(node, username)
         && (!node.DocumentId.HasValue
             || string.Equals(node.CheckedOutBy, username, StringComparison.OrdinalIgnoreCase)
             || node.IsModifiedInSolidWorks
@@ -1042,8 +1055,10 @@ internal sealed class BatchOperationDialog : Form
         if (node.IsHistoricalPreview) return "历史预览（只读）";
         if (!node.DocumentId.HasValue) return "未入库（提交时登记）";
         if (string.IsNullOrWhiteSpace(node.CheckedOutBy)) return node.IsModifiedInSolidWorks
-            ? "将获取权限后提交"
-            : "未在编辑（提交时分析）";
+            ? "已修改（提交时获取权限）"
+            : node.Status == CadReferenceStatus.Lightweight
+                ? "轻量化·未在编辑（可勾选分析）"
+                : "未在编辑（可勾选分析）";
         if (node.CheckoutSessionLost && string.Equals(node.CheckedOutBy, username, StringComparison.OrdinalIgnoreCase))
         {
             return "编辑权限失效（提交时恢复）";

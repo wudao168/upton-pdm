@@ -1299,9 +1299,13 @@ internal sealed class PdmTaskPaneControl : UserControl
         {
             contextHint.Text = string.Concat("提示：", WorkStateText(node), "；编辑人员：", node.CheckedOutBy);
         }
+        else if (node.Status == CadReferenceStatus.Lightweight)
+        {
+            contextHint.Text = "提示：轻量化不阻止存档；请先获取编辑权限，完成修改并保存后提交";
+        }
         else
         {
-            contextHint.Text = "提示：请选择需要执行的操作";
+            contextHint.Text = "提示：请先获取编辑权限，完成修改并保存后再提交存档";
         }
     }
 
@@ -2362,6 +2366,12 @@ internal sealed class PdmTaskPaneControl : UserControl
                 : (string.IsNullOrWhiteSpace(node.CheckedOutBy) || canRecoverCheckout) && (node.DocumentId.HasValue || canRegister));
         var canFirstCheckIn = !readOnlyPreview && authenticated && canRegister;
         var canCheckIn = CanCheckInNode(node);
+        var canExplainCheckIn = !readOnlyPreview
+            && !lifecycleLocked
+            && authenticated
+            && node.DocumentId.HasValue
+            && localFileExists
+            && (node.Kind == CadDocumentKind.Assembly || node.Kind == CadDocumentKind.Part || node.Kind == CadDocumentKind.Drawing);
         var checkedActionNodes = GetCheckedActionNodes();
         var checkedNodes = checkedActionNodes.Where(CanCheckInNode).ToArray();
         var discardCheckedNodes = checkedActionNodes.Count > 0 && checkedActionNodes.All(IsEditingByCurrentUser);
@@ -2372,7 +2382,7 @@ internal sealed class PdmTaskPaneControl : UserControl
         checkoutButton.Enabled = checkedActionNodes.Count > 0
             || canCheckout
             || (!readOnlyPreview && node.DocumentId.HasValue && editingByCurrentUser);
-        checkinButton.Enabled = !readOnlyPreview && (canCheckIn || checkedNodes.Length > 0);
+        checkinButton.Enabled = !readOnlyPreview && (canCheckIn || checkedNodes.Length > 0 || canExplainCheckIn);
         batchOperationButton.Enabled = authenticated && rootNode != null && !rootNode.IsReadOnlyPreview;
         batchPropertyButton.Enabled = authenticated && rootNode != null && !rootNode.IsReadOnlyPreview;
         ApplyStructureActionButtonAppearances();
@@ -2389,7 +2399,7 @@ internal sealed class PdmTaskPaneControl : UserControl
             checkinButton,
             checkedNodes.Length > 0
                 ? string.Concat("提交已勾选的", checkedNodes.Length, "个图档")
-                : node.DrawingReviewLocked ? "图纸审核中，不能提交存档" : readOnlyPreview ? "只读预览不能提交存档；请先切换到编辑工作区" : canFirstCheckIn ? "首次提交存档时选择归属项目，系统将自动登记并准备权限" : !node.DocumentId.HasValue ? "本地文件不存在或文件类型不支持登记" : !editingByCurrentUser ? "只有当前编辑人员可以提交存档" : !localFileExists ? "本地文件不存在，不能提交存档" : "提交当前文件并生成新工作版本");
+                : node.DrawingReviewLocked ? "图纸审核中，不能提交存档" : readOnlyPreview ? "只读预览不能提交存档；请先切换到编辑工作区" : canFirstCheckIn ? "首次提交存档时选择归属项目，系统将自动登记并准备权限" : !node.DocumentId.HasValue ? "本地文件不存在或文件类型不支持登记" : !editingByCurrentUser ? string.IsNullOrWhiteSpace(node.CheckedOutBy) ? "尚未获取编辑权限；点击后查看正确操作" : string.Concat("当前编辑人员：", node.CheckedOutBy) : !localFileExists ? "本地文件不存在，不能提交存档" : "提交当前文件并生成新工作版本");
         UpdateTreeHealth();
     }
 

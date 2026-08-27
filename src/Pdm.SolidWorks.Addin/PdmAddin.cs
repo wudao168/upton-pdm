@@ -8609,7 +8609,9 @@ public sealed class PdmAddin : ISwAddin
         }
 
         ShowError(string.IsNullOrWhiteSpace(node?.CheckedOutBy)
-            ? string.Concat("当前图档尚未获取编辑权限，不能", operation, "。")
+            ? string.Concat(
+                "当前图档尚未获取编辑权限，不能", operation,
+                "。请先点击“获取”取得编辑权限，完成编辑并保存后再提交；整套装配请使用“整体”中的“获取最新并获取权限”。")
             : string.Concat("当前图档正在由", node.CheckedOutBy, "编辑，不能", operation, "。"));
         return false;
     }
