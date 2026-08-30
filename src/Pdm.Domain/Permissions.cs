@@ -15,6 +15,8 @@ public static class PermissionCodes
     public const string DocumentLockRequestRelease = "document.lock.request-release";
     public const string DocumentLockForceRelease = "document.lock.force-release";
     public const string BomEdit = "bom.edit";
+    public const string MaterialView = "material.view";
+    public const string MaterialManage = "material.manage";
     public const string DrawingReviewSubmit = "drawing-review.submit";
     public const string DrawingReviewAnnotate = "drawing-review.annotate";
     public const string DrawingReviewDecide = "drawing-review.decide";
@@ -53,7 +55,9 @@ public static class RolePermissionCatalog
         new(PermissionCodes.DocumentEdit, "登记、签出和存档图档", "项目内容", Sensitive: true),
         new(PermissionCodes.DocumentLockRequestRelease, "催办并申请释放编辑权限", "项目内容"),
         new(PermissionCodes.DocumentLockForceRelease, "强制释放超时编辑权限", "项目内容", "仅限本人负责项目，系统管理员不受项目岗位限制。", Sensitive: true),
-        new(PermissionCodes.BomEdit, "维护BOM和料品", "项目内容"),
+        new(PermissionCodes.BomEdit, "维护项目BOM", "项目内容"),
+        new(PermissionCodes.MaterialView, "查看料品管理", "料品管理", "查看料品主档、审批状态和U9C同步结果。"),
+        new(PermissionCodes.MaterialManage, "维护料品主档", "料品管理", "新增、修改、批准、停用或删除料品，并执行U9C料品同步。", Sensitive: true),
         new(PermissionCodes.DrawingReviewSubmit, "发起图纸审核", "图纸审核", "按当前非标件BOM冻结3D和2D图档版本。", Sensitive: true),
         new(PermissionCodes.DrawingReviewAnnotate, "添加和处理图纸批注", "图纸审核"),
         new(PermissionCodes.DrawingReviewDecide, "审核3D和2D图纸", "图纸审核", "设计者不能审核自己生成的图档版本。", Sensitive: true),
@@ -97,8 +101,8 @@ public static class RolePermissionCatalog
                 PermissionCodes.ProgramTemplateView,
                 PermissionCodes.StandardLibraryView),
             [UserRole.PlanningManager] = Set(PermissionCodes.ProjectView, PermissionCodes.ProjectExecutionAssign, PermissionCodes.ProjectContentView, PermissionCodes.ProgramTemplateView),
-            [UserRole.ProcessReviewer] = Set(PermissionCodes.ProjectView, PermissionCodes.ProjectContentView, PermissionCodes.DrawingReviewAnnotate, PermissionCodes.DrawingReviewDecide, PermissionCodes.ApprovalDecide, PermissionCodes.ProgramTemplateView, PermissionCodes.StandardLibraryView),
-            [UserRole.Approver] = Set(PermissionCodes.ProjectView, PermissionCodes.ProjectContentView, PermissionCodes.DrawingReviewAnnotate, PermissionCodes.DrawingReviewDecide, PermissionCodes.ApprovalDecide, PermissionCodes.ProgramTemplateView, PermissionCodes.ProgramTemplateApprove, PermissionCodes.StandardLibraryView),
+            [UserRole.ProcessReviewer] = Set(PermissionCodes.ProjectView, PermissionCodes.ProjectContentView, PermissionCodes.DrawingReviewAnnotate, PermissionCodes.DrawingReviewDecide, PermissionCodes.ApprovalDecide, PermissionCodes.ProgramTemplateView, PermissionCodes.StandardLibraryView, PermissionCodes.MaterialView, PermissionCodes.MaterialManage),
+            [UserRole.Approver] = Set(PermissionCodes.ProjectView, PermissionCodes.ProjectContentView, PermissionCodes.DrawingReviewAnnotate, PermissionCodes.DrawingReviewDecide, PermissionCodes.ApprovalDecide, PermissionCodes.ProgramTemplateView, PermissionCodes.ProgramTemplateApprove, PermissionCodes.StandardLibraryView, PermissionCodes.MaterialView, PermissionCodes.MaterialManage),
             [UserRole.ProductionViewer] = Set(PermissionCodes.ProjectView, PermissionCodes.ProjectContentView, PermissionCodes.ProgramTemplateView),
             [UserRole.BusinessUnitManager] = Set(PermissionCodes.ProjectView, PermissionCodes.ProjectContentView, PermissionCodes.DrawingReviewAnnotate, PermissionCodes.DrawingReviewDecide, PermissionCodes.ApprovalDecide, PermissionCodes.ApprovalEmergencySubstitute, PermissionCodes.ProgramTemplateView, PermissionCodes.ProgramTemplateReview),
             [UserRole.Administrator] = Set(Permissions.Select(permission => permission.Code).ToArray()),
@@ -156,8 +160,8 @@ public static class RolePermissionCatalog
             ["ProjectManager"] = Set(PermissionCodes.ProjectView, PermissionCodes.ProjectCreate, PermissionCodes.ProjectEdit, PermissionCodes.ProjectChildCreate, PermissionCodes.ProjectStaffingManage, PermissionCodes.ProjectDesignerAssign, PermissionCodes.ProjectContentView, PermissionCodes.ReleaseManage, PermissionCodes.ProgramTemplateView),
             ["SupplyChain"] = Defaults[UserRole.ProductionViewer],
             ["ProcurementSpecialist"] = Defaults[UserRole.ProductionViewer],
-            ["ProcurementManager"] = Defaults[UserRole.Approver],
-            ["ProductionManager"] = Defaults[UserRole.Approver],
+            ["ProcurementManager"] = Set(PermissionCodes.ProjectView, PermissionCodes.ProjectContentView, PermissionCodes.DrawingReviewAnnotate, PermissionCodes.DrawingReviewDecide, PermissionCodes.ApprovalDecide, PermissionCodes.ProgramTemplateView, PermissionCodes.ProgramTemplateApprove, PermissionCodes.StandardLibraryView),
+            ["ProductionManager"] = Set(PermissionCodes.ProjectView, PermissionCodes.ProjectContentView, PermissionCodes.DrawingReviewAnnotate, PermissionCodes.DrawingReviewDecide, PermissionCodes.ApprovalDecide, PermissionCodes.ProgramTemplateView, PermissionCodes.ProgramTemplateApprove, PermissionCodes.StandardLibraryView),
             ["ProductionAssistant"] = Defaults[UserRole.ProductionViewer],
             ["MachiningSupervisor"] = Defaults[UserRole.ProductionViewer],
             ["MachiningOperator"] = Defaults[UserRole.ProductionViewer],
@@ -193,6 +197,7 @@ public static class RolePermissionCatalog
         if (normalized.Any(code => code is PermissionCodes.ProgramTemplateSubmit or PermissionCodes.ProgramTemplateReview or PermissionCodes.ProgramTemplateApprove or PermissionCodes.ProgramTemplateManage))
             normalized.Add(PermissionCodes.ProgramTemplateView);
         if (normalized.Contains(PermissionCodes.StandardLibraryManage)) normalized.Add(PermissionCodes.StandardLibraryView);
+        if (normalized.Contains(PermissionCodes.MaterialManage)) normalized.Add(PermissionCodes.MaterialView);
         if (normalized.Contains(PermissionCodes.RoleSettingsEdit)) normalized.Add(PermissionCodes.RoleSettingsView);
         return normalized;
     }

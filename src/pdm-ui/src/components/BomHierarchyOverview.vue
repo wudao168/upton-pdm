@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { executeProjectBomU9Sync, generateProjectBomHeaderHierarchy, listBom, listBomVersions, listProjectBomHeaders, previewProjectBomU9Sync } from '../api'
+import { executeProjectBomU9Sync, listBom, listBomVersions, listProjectBomHeaders, previewProjectBomU9Sync } from '../api'
 import type { BomHeaderKind, BomItem, BomKind, BomVersion, ProjectBomHeader, ProjectSummary } from '../types'
 import { useUserDisplayName } from '../userDisplay'
 
@@ -30,7 +30,6 @@ const categoryLabels: Record<VisibleBomKind, string> = {
 const detailCache = ref<Record<string, ProjectDetail>>({})
 const loading = ref(false)
 const error = ref('')
-const hierarchyGenerating = ref(false)
 const syncingRowKey = ref('')
 type U9BomViewState = 'checking' | 'synced' | 'empty' | 'approval-pending' | 'waiting-components' | 'create-pending' | 'modify-pending' | 'failed'
 const u9BomStates = ref<Record<string, U9BomViewState>>({})
@@ -274,32 +273,6 @@ async function fetchProjectDetail(projectId: string): Promise<ProjectDetail> {
   return { current: { Standard: standard, NonStandard: nonStandard, Electrical: electrical }, versions, headers }
 }
 
-async function generateHierarchy() {
-  if (!props.editable || missingHeaderCount.value === 0) return
-  try {
-    await ElMessageBox.confirm(
-      `将为当前层级缺失的 ${missingHeaderCount.value} 个BOM容器提交料号申请。审批并同步成功后，以U9C返回的正式料号为准。`,
-      '确认申请BOM料号',
-      { confirmButtonText: '确认申请', cancelButtonText: '取消', type: 'warning' },
-    )
-  } catch {
-    return
-  }
-  hierarchyGenerating.value = true
-  try {
-    const result = await generateProjectBomHeaderHierarchy(rootProjectId.value, props.token)
-    detailCache.value = {}
-    await loadOverview(true)
-    ElMessage.success(`已提交 ${result.generatedCount} 个BOM料号申请`)
-  } catch (reason) {
-    detailCache.value = {}
-    await loadOverview(true)
-    ElMessage.error(reason instanceof Error ? reason.message : 'BOM料号申请失败')
-  } finally {
-    hierarchyGenerating.value = false
-  }
-}
-
 async function loadOverview(force = false) {
   if (!props.token) return
   const projectsToLoad = hierarchyProjects.value.filter(project => force || !detailCache.value[project.id])
@@ -333,8 +306,7 @@ watch([rootProjectId, hierarchySignature, () => props.token], () => {
   <section class="bom-overview" aria-label="BOM多级总览">
     <div v-if="error" class="bom-overview__error" role="alert">{{ error }}</div>
     <div v-if="editable" class="bom-overview__generation">
-      <span>{{ missingHeaderCount ? `待申请 ${missingHeaderCount} 个BOM料号` : pendingHeaderCount ? `${pendingHeaderCount} 个BOM料号申请中` : '全部BOM料号已由U9C回写' }}</span>
-      <el-button v-if="missingHeaderCount" type="primary" :loading="hierarchyGenerating" @click="generateHierarchy">申请BOM料号</el-button>
+      <span>{{ missingHeaderCount ? `待BOM批准后自动申请 ${missingHeaderCount} 个BOM料号` : pendingHeaderCount ? `${pendingHeaderCount} 个BOM料号申请中` : '全部BOM料号已由U9C回写' }}</span>
     </div>
 
     <div class="bom-overview__table-wrap">
@@ -371,5 +343,5 @@ watch([rootProjectId, hierarchySignature, () => props.token], () => {
 </template>
 
 <style scoped>
-.bom-overview{display:flex;min-height:560px;min-width:0;flex-direction:column;padding:0;border:1px solid var(--pdm-border);border-radius:7px;background:#fff}.bom-overview__error{margin:10px;padding:8px 10px;border-radius:5px;background:#fef2f2;color:#b91c1c}.bom-overview__generation{display:flex;min-height:38px;align-items:center;justify-content:flex-end;gap:10px;padding:5px 8px;border-bottom:1px solid var(--pdm-border);color:#64748b}.bom-overview__table-wrap{min-height:0;flex:1;overflow:auto;border-radius:6px}.bom-overview__table-wrap table{width:100%;table-layout:fixed;border-collapse:collapse;white-space:nowrap}.bom-overview__table-wrap th,.bom-overview__table-wrap td{overflow:hidden;padding:8px;border-bottom:1px solid var(--pdm-border);text-align:left;text-overflow:ellipsis}.bom-overview__table-wrap th{position:sticky;top:0;z-index:1;background:#f3f6fa}.bom-overview__table-wrap th:nth-child(1){width:205px}.bom-overview__table-wrap th:nth-child(2){width:85px}.bom-overview__table-wrap th:nth-child(3),.bom-overview__table-wrap th:nth-child(4){width:112px}.bom-overview__table-wrap th:nth-child(5){width:58px}.bom-overview__table-wrap th:nth-child(6){width:80px}.bom-overview__table-wrap th:nth-child(7){width:82px}.bom-overview__table-wrap th:nth-child(8){width:68px}.bom-overview__table-wrap th:nth-child(9){width:118px}.bom-overview__table-wrap th:nth-child(10){width:145px}.bom-overview__table-wrap th:nth-child(11){width:72px}.bom-overview__table-wrap th:nth-child(12){width:92px}.bom-overview__table-wrap tr.is-master-row td{background:#f8fafc;font-weight:600}.bom-overview__project{display:flex;min-width:0;align-items:center;gap:6px}.bom-overview__project i{color:var(--pdm-muted);font-style:normal}.bom-overview__project strong{flex:0 0 auto}.bom-overview__project span{overflow:hidden;color:var(--pdm-muted);text-overflow:ellipsis}.bom-overview__sync{border:0;background:transparent;color:#2563eb;cursor:pointer;font:inherit}.bom-overview__sync:disabled{cursor:wait;opacity:.6}.is-warning{color:#b45309}.is-success{color:#15803d}.is-muted{color:#64748b}.bom-overview__empty{padding:24px;text-align:center;color:var(--pdm-muted)}
+.bom-overview{display:flex;min-height:560px;min-width:0;flex-direction:column;padding:0;border:1px solid var(--pdm-border);border-radius:7px;background:#fff}.bom-overview__error{margin:10px;padding:8px 10px;border-radius:5px;background:#fef2f2;color:#b91c1c}.bom-overview__generation{display:flex;min-height:38px;align-items:center;justify-content:flex-end;gap:10px;padding:5px 8px;border-bottom:1px solid var(--pdm-border);color:#64748b}.bom-overview__table-wrap{min-height:0;flex:1;overflow:auto;border-radius:6px}.bom-overview__table-wrap table{width:100%;table-layout:fixed;border-collapse:collapse;white-space:nowrap}.bom-overview__table-wrap th,.bom-overview__table-wrap td{overflow:hidden;padding:8px;border-bottom:1px solid var(--pdm-border);text-align:left;text-overflow:ellipsis}.bom-overview__table-wrap th{position:sticky;top:0;z-index:1;background:#f3f6fa}.bom-overview__table-wrap th:nth-child(1){width:205px}.bom-overview__table-wrap th:nth-child(2){width:85px}.bom-overview__table-wrap th:nth-child(3),.bom-overview__table-wrap th:nth-child(4){width:112px}.bom-overview__table-wrap th:nth-child(5){width:58px}.bom-overview__table-wrap th:nth-child(6){width:80px}.bom-overview__table-wrap th:nth-child(7){width:82px}.bom-overview__table-wrap th:nth-child(8){width:68px}.bom-overview__table-wrap th:nth-child(9){width:118px}.bom-overview__table-wrap th:nth-child(10){width:145px}.bom-overview__table-wrap th:nth-child(11){width:72px}.bom-overview__table-wrap th:nth-child(12){width:92px}.bom-overview__table-wrap tr.is-master-row td{background:#f8fafc;font-weight:600}.bom-overview__project{display:flex;min-width:0;align-items:center;gap:6px}.bom-overview__project i{color:var(--pdm-muted);font-style:normal}.bom-overview__project strong{flex:0 0 auto}.bom-overview__project span{overflow:hidden;color:var(--pdm-muted);text-overflow:ellipsis}.bom-overview__sync{border:0;background:transparent;color:var(--pdm-blue);cursor:pointer;font:inherit}.bom-overview__sync:disabled{cursor:wait;opacity:.6}.is-warning{color:#b45309}.is-success{color:#15803d}.is-muted{color:#64748b}.bom-overview__empty{padding:24px;text-align:center;color:var(--pdm-muted)}
 </style>

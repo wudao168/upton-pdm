@@ -156,7 +156,8 @@ public enum BomKind
     Electrical = 1,
     Standard = 2,
     NonStandard = 3,
-    Unclassified = 4
+    Unclassified = 4,
+    Virtual = 5
 }
 
 public enum BomVersionState

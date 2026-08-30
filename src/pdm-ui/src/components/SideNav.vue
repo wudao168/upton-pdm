@@ -5,11 +5,12 @@ import PlmCubeIcon from './PlmCubeIcon.vue'
 
 type NavKey = 'project-center' | 'projects' | 'materials' | 'standard-library' | 'standard-structure' | 'program-templates' | 'tasks' | 'admin'
 
-const props = withDefaults(defineProps<{ active: NavKey; approvalCount?: number; materialCount?: number; canManageSystem?: boolean; canViewStandardLibrary?: boolean; collapsed?: boolean }>(), {
+const props = withDefaults(defineProps<{ active: NavKey; approvalCount?: number; materialCount?: number; canManageSystem?: boolean; canViewStandardLibrary?: boolean; canViewMaterials?: boolean; collapsed?: boolean }>(), {
   approvalCount: 0,
   materialCount: 0,
   canManageSystem: false,
   canViewStandardLibrary: false,
+  canViewMaterials: false,
   collapsed: false,
 })
 const emit = defineEmits<{ navigate: [key: NavKey, label: string] }>()
@@ -35,7 +36,7 @@ const items = [
     </div>
     <nav class="pdm-sidebar__nav">
       <button
-        v-for="item in items.filter(entry => !['standard-library', 'standard-structure'].includes(entry.key) || props.canViewStandardLibrary)"
+        v-for="item in items.filter(entry => (!['standard-library', 'standard-structure'].includes(entry.key) || props.canViewStandardLibrary) && (entry.key !== 'materials' || props.canViewMaterials))"
         :key="item.label"
         type="button"
         class="pdm-nav-item"

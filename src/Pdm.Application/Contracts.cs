@@ -279,6 +279,7 @@ public sealed record BomGenerationResult(
     IReadOnlyList<BomItem> NonStandardItems,
     IReadOnlyList<BomItem> ElectricalItems,
     IReadOnlyList<BomItem> UnclassifiedItems,
+    IReadOnlyList<BomItem> VirtualItems,
     int VirtualCount,
     int UnclassifiedCount,
     int PendingRemovalCount,
@@ -310,6 +311,28 @@ public sealed record BatchDeleteBomItemsCommand(IReadOnlyList<Guid> ItemIds, str
 public sealed record BatchRestoreBomItemsCommand(IReadOnlyList<Guid> ItemIds, string Mode = "Original");
 
 public sealed record RestoreBomItemsFromSourceCommand(IReadOnlyList<Guid> ItemIds);
+
+public sealed record ReclassifyBomItemsFromSourceCommand(
+    IReadOnlyList<Guid> ItemIds,
+    BomKind TargetKind);
+
+public sealed record BomSourceReclassificationItemPreview(
+    Guid ItemId,
+    BomKind CurrentKind,
+    BomKind TargetKind,
+    string CurrentDrawingNumber,
+    string SourceDrawingNumber,
+    string ResultDrawingNumber,
+    string CurrentName,
+    string SourceName,
+    IReadOnlyList<string> ChangedFields,
+    bool OfficialMaterialCodeProtected);
+
+public sealed record BomSourceReclassificationPreview(
+    BomKind TargetKind,
+    int ItemCount,
+    int ChangedItemCount,
+    IReadOnlyList<BomSourceReclassificationItemPreview> Items);
 
 public sealed record CompleteCadPropertyWritebackCommand(Guid ResultVersionId);
 
@@ -437,7 +460,7 @@ public interface IPdmRepository
     Task<CadReferenceSnapshot?> GetLatestReferenceSnapshotAsync(Guid projectId, CancellationToken cancellationToken);
     Task<IReadOnlyList<BomItem>> GetBomAsync(Guid projectId, BomKind kind, CancellationToken cancellationToken);
     Task<IReadOnlyList<BomItem>> ReplaceBomAsync(Guid projectId, BomKind kind, IReadOnlyList<BomItem> items, CancellationToken cancellationToken);
-    Task ApplyBomBatchAsync(Guid projectId, IReadOnlyList<BomItem> standardItems, IReadOnlyList<BomItem> nonStandardItems, IReadOnlyList<BomItem> unclassifiedItems, IReadOnlyList<BomItem> electricalItems, IReadOnlyList<CadPropertyWriteback> writebacks, IReadOnlyList<AuditEntry> auditEntries, CancellationToken cancellationToken);
+    Task ApplyBomBatchAsync(Guid projectId, IReadOnlyList<BomItem> standardItems, IReadOnlyList<BomItem> nonStandardItems, IReadOnlyList<BomItem> unclassifiedItems, IReadOnlyList<BomItem> electricalItems, IReadOnlyList<BomItem> virtualItems, IReadOnlyList<CadPropertyWriteback> writebacks, IReadOnlyList<AuditEntry> auditEntries, CancellationToken cancellationToken);
     Task<BomItem?> FindBomItemAsync(Guid projectId, Guid itemId, CancellationToken cancellationToken);
     Task<BomItem> UpdateBomMaterialCodeAsync(Guid projectId, Guid itemId, string materialCode, CancellationToken cancellationToken);
     Task<CadPropertyWriteback> EnqueueCadPropertyWritebackAsync(CadPropertyWriteback request, CancellationToken cancellationToken);

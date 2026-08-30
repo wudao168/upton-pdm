@@ -831,7 +831,8 @@ public sealed class ApiSmokeTests : IClassFixture<PdmApiFactory>
 
         client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", CreateToken("design-lead", "Engineer"));
         var directory = await client.GetFromJsonAsync<OrganizationDirectoryResponse>("/api/organization-directory");
-        Assert.Contains(directory!.Units, item => item.Id == division.Id);
+        var visibleDivision = Assert.Single(directory!.Units, item => item.Id == division.Id);
+        Assert.True(visibleDivision.CanManufacture);
         var clearDesignersResponse = await client.PutAsJsonAsync($"/api/projects/{child.Id}/designers", new { designers = Array.Empty<string>() });
         Assert.Equal(HttpStatusCode.OK, clearDesignersResponse.StatusCode);
         Assert.Empty((await clearDesignersResponse.Content.ReadFromJsonAsync<Project>())!.Designers);

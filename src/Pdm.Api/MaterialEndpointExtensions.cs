@@ -10,13 +10,17 @@ public static class MaterialEndpointExtensions
     {
         var api = app.MapGroup("/api").RequireAuthorization();
 
-        api.MapGet("/materials", async (string? query, string? categoryCode, bool? includeArchived, int? limit, MaterialService service, CancellationToken cancellationToken) =>
-            Results.Ok((await service.ListMaterialsAsync(query, categoryCode, includeArchived ?? false, limit ?? 100, cancellationToken)).Select(MapMaterial)));
-
-        api.MapGet("/materials/{materialId:guid}/attachments", async (Guid materialId, string? kind, MaterialAttachmentService service, CancellationToken cancellationToken) =>
+        api.MapGet("/materials", async (string? query, string? categoryCode, bool? includeArchived, int? limit, HttpContext context, MaterialService service, CancellationToken cancellationToken) =>
         {
+            var (actor, role) = CurrentUser(context.User);
+            return Results.Ok((await service.ListMaterialsAsync(query, categoryCode, includeArchived ?? false, limit ?? 100, actor, role, cancellationToken)).Select(MapMaterial));
+        });
+
+        api.MapGet("/materials/{materialId:guid}/attachments", async (Guid materialId, string? kind, HttpContext context, MaterialAttachmentService service, CancellationToken cancellationToken) =>
+        {
+            var (actor, role) = CurrentUser(context.User);
             MaterialAttachmentKind? parsedKind = string.IsNullOrWhiteSpace(kind) ? null : Parse<MaterialAttachmentKind>(kind, "附件类型");
-            return Results.Ok((await service.ListAsync(materialId, parsedKind, cancellationToken)).Select(MapAttachment));
+            return Results.Ok((await service.ListAsync(materialId, parsedKind, actor, role, cancellationToken)).Select(MapAttachment));
         });
 
         api.MapPost("/materials/{materialId:guid}/attachments/uploads", async (Guid materialId, StartMaterialAttachmentUploadRequest request, HttpContext context, MaterialAttachmentService service, CancellationToken cancellationToken) =>
@@ -40,8 +44,8 @@ public static class MaterialEndpointExtensions
 
         api.MapGet("/materials/{materialId:guid}/attachments/{attachmentId:guid}/file", async (Guid materialId, Guid attachmentId, HttpContext context, MaterialAttachmentService service, CancellationToken cancellationToken) =>
         {
-            var (actor, _) = CurrentUser(context.User);
-            var download = await service.OpenDownloadAsync(materialId, attachmentId, actor, cancellationToken);
+            var (actor, role) = CurrentUser(context.User);
+            var download = await service.OpenDownloadAsync(materialId, attachmentId, actor, role, cancellationToken);
             return Results.File(download.Content, "application/octet-stream", download.Attachment.OriginalFileName, enableRangeProcessing: true);
         });
 
@@ -165,11 +169,17 @@ public static class MaterialEndpointExtensions
             return Results.Ok(new { Material = MapMaterial(approved.Material), Task = MapTask(approved.Task) });
         });
 
-        api.MapGet("/material-category-rules", async (MaterialService service, CancellationToken cancellationToken) =>
-            Results.Ok((await service.ListCategoryRulesAsync(cancellationToken)).Select(MapRule)));
+        api.MapGet("/material-category-rules", async (HttpContext context, MaterialService service, CancellationToken cancellationToken) =>
+        {
+            var (actor, role) = CurrentUser(context.User);
+            return Results.Ok((await service.ListCategoryRulesAsync(actor, role, cancellationToken)).Select(MapRule));
+        });
 
-        api.MapGet("/material-categories", async (bool? includeHidden, MaterialService service, CancellationToken cancellationToken) =>
-            Results.Ok((await service.ListCategoriesAsync(includeHidden ?? false, cancellationToken)).Select(MapCategory)));
+        api.MapGet("/material-categories", async (bool? includeHidden, HttpContext context, MaterialService service, CancellationToken cancellationToken) =>
+        {
+            var (actor, role) = CurrentUser(context.User);
+            return Results.Ok((await service.ListCategoriesAsync(includeHidden ?? false, actor, role, cancellationToken)).Select(MapCategory));
+        });
 
         api.MapPost("/material-categories", async (SaveMaterialCategoryRequest request, HttpContext context, MaterialService service, CancellationToken cancellationToken) =>
         {
@@ -205,8 +215,11 @@ public static class MaterialEndpointExtensions
             return Results.Ok(MapRule(saved));
         });
 
-        api.MapGet("/material-sync-tasks", async (MaterialService service, CancellationToken cancellationToken) =>
-            Results.Ok((await service.ListSyncTasksAsync(cancellationToken)).Select(MapTask)));
+        api.MapGet("/material-sync-tasks", async (HttpContext context, MaterialService service, CancellationToken cancellationToken) =>
+        {
+            var (actor, role) = CurrentUser(context.User);
+            return Results.Ok((await service.ListSyncTasksAsync(actor, role, cancellationToken)).Select(MapTask));
+        });
 
         api.MapPost("/material-sync-tasks/{taskId:guid}/retry", async (Guid taskId, HttpContext context, MaterialService service, CancellationToken cancellationToken) =>
         {

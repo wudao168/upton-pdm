@@ -84,7 +84,6 @@ internal sealed class BatchOperationDialog : Form
         ForeColor = Color.FromArgb(90, 107, 128),
         Anchor = AnchorStyles.Left
     };
-    private readonly TextBox projectConfirmation = new TextBox { Dock = DockStyle.Fill };
     private readonly CheckBox projectConfirmed = new CheckBox
     {
         Text = "已确认归属项目",
@@ -182,7 +181,6 @@ internal sealed class BatchOperationDialog : Form
 
         projectSelector.SelectedProjectChanged += (_, _) =>
         {
-            projectConfirmation.Clear();
             projectConfirmed.Checked = false;
             RefreshProjectConfirmationState();
         };
@@ -306,42 +304,14 @@ internal sealed class BatchOperationDialog : Form
             Dock = DockStyle.Fill,
             AutoSize = false,
             Height = projectInputHeight,
-            ColumnCount = 2,
+            ColumnCount = 1,
             RowCount = 1,
             Margin = Padding.Empty
         };
         projectConfirmationPanel.RowStyles.Add(new RowStyle(SizeType.Absolute, projectInputHeight));
-        projectConfirmationPanel.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
         projectConfirmationPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        projectConfirmationPanel.Controls.Add(new Label
-        {
-            Text = "新增存档确认",
-            AutoSize = true,
-            Anchor = AnchorStyles.Left,
-            Margin = new Padding(0, 0, 8, 0)
-        }, 0, 0);
-        var confirmationPanel = new TableLayoutPanel
-        {
-            Dock = DockStyle.Fill,
-            AutoSize = false,
-            Height = projectInputHeight,
-            ColumnCount = 3,
-            RowCount = 1,
-            Margin = Padding.Empty
-        };
-        confirmationPanel.RowStyles.Add(new RowStyle(SizeType.Absolute, projectInputHeight));
-        confirmationPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        confirmationPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 6));
-        confirmationPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, projectActionWidth));
-        projectConfirmation.AutoSize = false;
-        projectConfirmation.MinimumSize = new Size(0, projectInputHeight);
-        projectConfirmation.MaximumSize = new Size(0, projectInputHeight);
-        projectConfirmation.Height = projectInputHeight;
-        projectConfirmation.Margin = Padding.Empty;
-        confirmationPanel.Controls.Add(projectConfirmation, 0, 0);
         projectConfirmed.Margin = Padding.Empty;
-        confirmationPanel.Controls.Add(projectConfirmed, 2, 0);
-        projectConfirmationPanel.Controls.Add(confirmationPanel, 1, 0);
+        projectConfirmationPanel.Controls.Add(projectConfirmed, 0, 0);
 
         projectPanel.Controls.Add(projectSelectionPanel, 0, 0);
         projectPanel.Controls.Add(new Panel
@@ -510,19 +480,6 @@ internal sealed class BatchOperationDialog : Form
                 SelectedProjectId,
                 inheritedDrawingProjects)))
         {
-            var expectedCode = projectSelector.SelectedProjectConfirmationCode;
-            if (!string.Equals(projectConfirmation.Text.Trim(), expectedCode, StringComparison.OrdinalIgnoreCase))
-            {
-                MessageBox.Show(
-                    this,
-                    string.Concat("本次包含新增图档。请再次输入项目号“", expectedCode, "”确认归属。"),
-                    "新增图档归属确认",
-                    MessageBoxButtons.OK,
-                    MessageBoxIcon.Warning);
-                eventArgs.Cancel = true;
-                projectConfirmation.Focus();
-                return;
-            }
             if (!projectConfirmed.Checked)
             {
                 MessageBox.Show(this, "请勾选“已确认归属项目”后再执行。", "新增图档归属确认", MessageBoxButtons.OK, MessageBoxIcon.Warning);
@@ -733,11 +690,9 @@ internal sealed class BatchOperationDialog : Form
             item,
             SelectedProjectId,
             inheritedDrawingProjects));
-        projectConfirmation.Enabled = required;
         projectConfirmed.Enabled = required;
         if (!required)
         {
-            projectConfirmation.Clear();
             projectConfirmed.Checked = false;
         }
     }
@@ -776,7 +731,10 @@ internal sealed class BatchOperationDialog : Form
         var model = occurrence?.Model;
         if (model != null)
         {
-            node.Text = string.IsNullOrWhiteSpace(model.DisplayName) ? model.FileName : model.DisplayName;
+            node.Text = string.Concat(
+                Path.GetFileNameWithoutExtension(model.FileName),
+                " · ",
+                model.DisplayName);
         }
 
         if (occurrence?.Item != null

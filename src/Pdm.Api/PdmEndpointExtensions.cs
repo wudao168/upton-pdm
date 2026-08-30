@@ -303,7 +303,7 @@ public static class PdmEndpointExtensions
             return Results.Ok(new
             {
                 directory.Organizations,
-                Units = directory.Units.Select(unit => new { unit.Id, unit.OrganizationId, unit.ParentUnitId, unit.Code, unit.Name, Kind = unit.Kind.ToString(), unit.IsActive, unit.SortOrder }),
+                Units = directory.Units.Select(unit => new { unit.Id, unit.OrganizationId, unit.ParentUnitId, unit.Code, unit.Name, Kind = unit.Kind.ToString(), unit.CanManufacture, unit.IsActive, unit.SortOrder }),
                 directory.Memberships,
                 directory.Managers,
                 Users = directory.Users.Select(user => new
@@ -780,6 +780,18 @@ public static class PdmEndpointExtensions
             return Results.Ok(await workflow.RestoreBomItemsFromSourceAsync(projectId, new RestoreBomItemsFromSourceCommand(request.ItemIds), actor, role, cancellationToken));
         });
 
+        api.MapPost("/projects/{projectId:guid}/boms/items/reclassify-source/preview", async (Guid projectId, ReclassifyBomItemsFromSourceRequest request, HttpContext context, PdmWorkflowService workflow, CancellationToken cancellationToken) =>
+        {
+            var (actor, role) = CurrentUser(context.User);
+            return Results.Ok(await workflow.PreviewBomSourceReclassificationAsync(projectId, new ReclassifyBomItemsFromSourceCommand(request.ItemIds, request.TargetKind), actor, role, cancellationToken));
+        });
+
+        api.MapPost("/projects/{projectId:guid}/boms/items/reclassify-source", async (Guid projectId, ReclassifyBomItemsFromSourceRequest request, HttpContext context, PdmWorkflowService workflow, CancellationToken cancellationToken) =>
+        {
+            var (actor, role) = CurrentUser(context.User);
+            return Results.Ok(await workflow.ReclassifyBomItemsFromSourceAsync(projectId, new ReclassifyBomItemsFromSourceCommand(request.ItemIds, request.TargetKind), actor, role, cancellationToken));
+        });
+
         api.MapGet("/projects/{projectId:guid}/cad-property-writebacks", async (Guid projectId, bool? activeOnly, HttpContext context, PdmWorkflowService workflow, CancellationToken cancellationToken) =>
         {
             var (actor, role) = CurrentUser(context.User);
@@ -983,11 +995,10 @@ public static class PdmEndpointExtensions
             });
         });
 
-        api.MapPost("/release-packages", async (CreateReleasePackageRequest request, HttpContext context, IPdmRepository repository, PdmWorkflowService workflow, BomHeaderService bomHeaders, CancellationToken cancellationToken) =>
+        api.MapPost("/release-packages", async (CreateReleasePackageRequest request, HttpContext context, IPdmRepository repository, PdmWorkflowService workflow, CancellationToken cancellationToken) =>
         {
             var (actor, role) = CurrentUser(context.User);
             if (!await repository.HasProjectContentReadAccessAsync(request.ProjectId, actor, role, cancellationToken)) return Results.Forbid();
-            await bomHeaders.EnsureReleaseReadyAsync(request.ProjectId, request.Scope, cancellationToken);
             return Results.Ok(request.Scope == ReleaseScope.LegacyCombined
                 ? await workflow.CreateReleasePackageAsync(
                     request.ProjectId, request.ReferenceSnapshotId, request.Number ?? string.Empty,

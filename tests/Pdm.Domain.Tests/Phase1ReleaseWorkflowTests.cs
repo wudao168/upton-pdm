@@ -310,7 +310,7 @@ public sealed class Phase1ReleaseWorkflowTests
     }
 
     [Fact]
-    public async Task BomRecycleBin_RequiresReasonAndAllowsDuplicateMaterialCodeRestore()
+    public async Task BomRecycleBin_AllowsEmptyReasonAndDuplicateMaterialCodeRestore()
     {
         var repository = new InMemoryPdmRepository(TimeProvider.System);
         var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(), new RecordingPublisher(), TimeProvider.System);
@@ -324,13 +324,16 @@ public sealed class Phase1ReleaseWorkflowTests
         };
         await repository.ReplaceBomAsync(ProjectId, BomKind.Electrical, [active, recycled], default);
 
-        await Assert.ThrowsAsync<PdmRuleException>(() => workflow.BatchDeleteBomItemsAsync(
-            ProjectId, new([active.Id], " "), "admin", UserRole.Administrator, default));
+        var afterDelete = await workflow.BatchDeleteBomItemsAsync(
+            ProjectId, new([active.Id], " "), "admin", UserRole.Administrator, default);
+        var deleted = Assert.Single(afterDelete, item => item.Id == active.Id);
+        Assert.True(deleted.IsManuallyExcluded);
+        Assert.Equal("未填写删除原因", deleted.DeleteReason);
         var restored = await workflow.BatchRestoreBomItemsAsync(
             ProjectId, new([recycled.Id]), "admin", UserRole.Administrator, default);
 
         var unchanged = await repository.GetBomAsync(ProjectId, BomKind.Electrical, default);
-        Assert.False(Assert.Single(unchanged, item => item.Id == active.Id).IsManuallyExcluded);
+        Assert.True(Assert.Single(unchanged, item => item.Id == active.Id).IsManuallyExcluded);
         Assert.False(Assert.Single(restored, item => item.Id == recycled.Id).IsManuallyExcluded);
         Assert.False(Assert.Single(unchanged, item => item.Id == recycled.Id).IsManuallyExcluded);
     }
@@ -436,6 +439,35 @@ public sealed class Phase1ReleaseWorkflowTests
     }
 
     [Fact]
+    public async Task MechanicalBomSource_UsesPartNamePropertyInsteadOfStoredInstancePath()
+    {
+        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(), new RecordingPublisher(), TimeProvider.System);
+        var sourceDocument = await repository.FindDocumentAsync(
+            Guid.Parse("22222222-2222-2222-2222-222222222223"), default) ?? throw new InvalidOperationException();
+        var snapshot = await repository.GetLatestReferenceSnapshotAsync(ProjectId, default) ?? throw new InvalidOperationException();
+        await repository.CheckoutAsync(sourceDocument.Id, "admin", default);
+        await repository.CheckInVersionAsync(sourceDocument.Id, "admin", new DocumentVersionCommit(
+            new StoredFile("versions/part-name.sldasm", 10, new string('A', 64), DateTimeOffset.UtcNow),
+            "零件名称映射测试",
+            new Dictionary<string, string?>
+            {
+                ["全局/物料分类"] = "标准件",
+                ["全局/零件名称"] = "真空箱泵组安装架"
+            },
+            snapshot,
+            [],
+            [],
+            ForceVersion: true,
+            Name: "R70000050.02-1/CQ-WS-ISO63-PT2-20250520113101861-1"), default);
+
+        var generated = await workflow.GenerateMechanicalBomAsync(ProjectId, false, "admin", UserRole.Administrator, default);
+        var sourceItem = Assert.Single(generated.StandardItems, item => item.SourceDocumentId == sourceDocument.Id);
+
+        Assert.Equal("真空箱泵组安装架", sourceItem.Name);
+    }
+
+    [Fact]
     public async Task MechanicalBomReconcile_PreservesManuallyClassifiedDrawingItems()
     {
         var repository = new InMemoryPdmRepository(TimeProvider.System);
@@ -455,6 +487,29 @@ public sealed class Phase1ReleaseWorkflowTests
         Assert.Equal("ManualOverrideMismatch", classified.ReconciliationStatus);
         Assert.Contains("物料分类", classified.ReconciliationNote);
         Assert.Equal(generated.UnclassifiedCount - 1, reconciled.UnclassifiedCount);
+    }
+
+    [Fact]
+    public async Task MechanicalBom_VirtualClassificationRemainsOnlyInSourceData()
+    {
+        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(), new RecordingPublisher(), TimeProvider.System);
+        var generated = await workflow.GenerateMechanicalBomAsync(ProjectId, true, "admin", UserRole.Administrator, default);
+        var pending = generated.UnclassifiedItems.First(item => item.IsPendingClassification && item.SourceDocumentId.HasValue);
+
+        var updated = Assert.Single(await workflow.BatchUpdateBomItemsAsync(
+            ProjectId,
+            new BatchUpdateBomItemsCommand([pending.Id], ["kind"], BomKind.Virtual),
+            "admin", UserRole.Administrator, default));
+        var sourceData = await workflow.GetBomSourceDataAsync(ProjectId, "admin", UserRole.Administrator, default);
+
+        Assert.Equal(BomKind.Virtual, updated.Kind);
+        Assert.Contains(await repository.GetBomAsync(ProjectId, BomKind.Virtual, default), item => item.Id == pending.Id);
+        Assert.DoesNotContain(await repository.GetBomAsync(ProjectId, BomKind.Standard, default), item => item.Id == pending.Id);
+        Assert.DoesNotContain(await repository.GetBomAsync(ProjectId, BomKind.NonStandard, default), item => item.Id == pending.Id);
+        Assert.DoesNotContain(await repository.GetBomAsync(ProjectId, BomKind.Unclassified, default), item => item.Id == pending.Id);
+        Assert.DoesNotContain(await repository.GetBomAsync(ProjectId, BomKind.Electrical, default), item => item.Id == pending.Id);
+        Assert.Contains(sourceData, item => item.Id == pending.Id && item.Kind == BomKind.Virtual);
     }
 
     [Fact]
@@ -613,6 +668,37 @@ public sealed class Phase1ReleaseWorkflowTests
     }
 
     [Fact]
+    public async Task ReclassifyBomItemsFromSource_PreviewsThenAtomicallyMovesAndRestoresSourceFields()
+    {
+        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(), new RecordingPublisher(), TimeProvider.System);
+        var generated = await workflow.GenerateMechanicalBomAsync(ProjectId, true, "admin", UserRole.Administrator, default);
+        var pending = generated.UnclassifiedItems.First(item => item.IsPendingClassification && item.SourceDocumentId.HasValue);
+        var source = Assert.Single(await workflow.GetBomSourceDataAsync(ProjectId, "admin", UserRole.Administrator, default),
+            item => item.SourceDocumentId == pending.SourceDocumentId && item.SourceConfiguration == pending.SourceConfiguration);
+        await workflow.BatchUpdateBomItemsAsync(
+            ProjectId,
+            new BatchUpdateBomItemsCommand([pending.Id], ["name"], Name: source.Name + "-错误维护值"),
+            "admin", UserRole.Administrator, default);
+
+        var command = new ReclassifyBomItemsFromSourceCommand([pending.Id], BomKind.Standard);
+        var preview = await workflow.PreviewBomSourceReclassificationAsync(ProjectId, command, "admin", UserRole.Administrator, default);
+        var previewItem = Assert.Single(preview.Items);
+        Assert.Equal(BomKind.Unclassified, previewItem.CurrentKind);
+        Assert.Equal(BomKind.Standard, previewItem.TargetKind);
+        Assert.Contains("物料名称", previewItem.ChangedFields);
+
+        var updated = Assert.Single(await workflow.ReclassifyBomItemsFromSourceAsync(
+            ProjectId, command, "admin", UserRole.Administrator, default));
+        Assert.Equal(BomKind.Standard, updated.Kind);
+        Assert.Equal(source.Name, updated.Name);
+        Assert.Equal(source.DrawingNumber, updated.DrawingNumber);
+        Assert.Equal(CadPropertyWritebackStatus.PendingSave, updated.PropertyWritebackStatus);
+        Assert.DoesNotContain((await repository.GetBomAsync(ProjectId, BomKind.Unclassified, default)), item => item.Id == pending.Id);
+        Assert.Contains((await repository.GetBomAsync(ProjectId, BomKind.Standard, default)), item => item.Id == pending.Id);
+    }
+
+    [Fact]
     public async Task CadPropertyWritebackQueue_SupersedesPendingRequestAndTracksCompletion()
     {
         var repository = new InMemoryPdmRepository(TimeProvider.System);
@@ -758,6 +844,39 @@ public sealed class Phase1ReleaseWorkflowTests
             ProjectId, null, string.Empty, string.Empty, "重复正式发布", "未指定", null,
             ReleaseScope.StandardFormal, [], "admin", UserRole.Administrator, default));
         Assert.Contains("后续只能发起增补/变更", invalidNextFormal.Message);
+    }
+
+    [Fact]
+    public async Task ApprovedCategoryBom_AutomaticallyCreatesCategoryAndMasterCodeApplications()
+    {
+        var time = TimeProvider.System;
+        var repository = new InMemoryPdmRepository(time);
+        var materials = new InMemoryMaterialRepository(time);
+        await ConfigureApprovalWorkflowsAsync(repository);
+        var materialService = new MaterialService(materials, repository, new TestU9SecretProtector(), new NoU9OpenApiClient(), time);
+        var headerService = new BomHeaderService(repository, materials, materialService, time);
+        var workflow = new PdmWorkflowService(
+            repository, new UnusedFileStorage(), new RecordingPublisher(), time, null, headerService);
+        var package = await workflow.CreateScopedReleasePackageAsync(
+            ProjectId, null, string.Empty, string.Empty, string.Empty, "未指定", null,
+            ReleaseScope.StandardFormal, [], "admin", UserRole.Administrator, default);
+
+        package = await workflow.SubmitReleasePackageAsync(package.Id, "admin", UserRole.Administrator, default);
+        foreach (var task in package.ApprovalTasks.Where(task => task.Decision is null).OrderBy(task => task.StepOrder))
+            package = await workflow.DecideAsync(task.Id, "admin", UserRole.Administrator, ApprovalDecision.Approved, "同意", default);
+
+        Assert.Equal(ReleasePackageState.Published, package.State);
+        var applications = await materials.ListMaterialCodeApplicationsAsync(
+            ProjectId, MaterialCodeApplicationStatus.Pending, default);
+        Assert.Equal(2, applications.Count);
+        Assert.Equal(
+            [ProjectBomHeaderKind.Master, ProjectBomHeaderKind.Standard],
+            applications.Select(application => application.BomHeaderKind).OrderBy(kind => kind).ToArray());
+
+        var headers = await headerService.ListAsync(ProjectId, "admin", UserRole.Administrator, default);
+        Assert.Equal(MaterialApprovalStatus.Draft, headers.Single(header => header.Kind == ProjectBomHeaderKind.Master).ApprovalStatus);
+        Assert.Equal(MaterialApprovalStatus.Draft, headers.Single(header => header.Kind == ProjectBomHeaderKind.Standard).ApprovalStatus);
+        Assert.Null(headers.Single(header => header.Kind == ProjectBomHeaderKind.Electrical).MaterialId);
     }
 
     [Fact]
@@ -977,5 +1096,25 @@ public sealed class Phase1ReleaseWorkflowTests
         public Task<UploadSession> StartUploadAsync(Guid projectId, string fileName, long totalLength, string expectedSha256, CancellationToken cancellationToken) => throw new NotSupportedException();
         public Task VerifyStoredFileAsync(Project project, StoredFile file, CancellationToken cancellationToken) => throw new NotSupportedException();
         public Task<UploadSession> WriteChunkAsync(Guid sessionId, int chunkIndex, Stream content, CancellationToken cancellationToken) => throw new NotSupportedException();
+    }
+
+    private sealed class TestU9SecretProtector : IU9SecretProtector
+    {
+        public string Protect(string secret) => $"protected:{secret}";
+        public string Unprotect(string ciphertext) => ciphertext[10..];
+    }
+
+    private sealed class NoU9OpenApiClient : IU9OpenApiClient
+    {
+        public Task<U9AuthenticationResult> AuthenticateAsync(U9AuthenticationRequest request, CancellationToken cancellationToken) =>
+            throw new InvalidOperationException("自动创建BOM料号申请时不应访问U9C。");
+        public Task<U9ItemQueryResult> QueryItemsAsync(string baseUrl, string path, string token, string payloadJson, CancellationToken cancellationToken) =>
+            throw new InvalidOperationException("自动创建BOM料号申请时不应查询U9C料号。");
+        public Task<U9UomQueryResult> QueryUomsAsync(string baseUrl, string token, string payloadJson, CancellationToken cancellationToken) =>
+            throw new InvalidOperationException("自动创建BOM料号申请时不应查询U9C单位。");
+        public Task<U9BusinessBatchResult> PostBatchAsync(string baseUrl, string path, string token, string payloadJson, CancellationToken cancellationToken) =>
+            throw new InvalidOperationException("自动创建BOM料号申请时不应写入U9C。");
+        public Task<U9CustomerQueryResult> QueryCustomerReferencesAsync(string baseUrl, string path, string token, string payloadJson, CancellationToken cancellationToken) =>
+            throw new InvalidOperationException("自动创建BOM料号申请时不应查询U9C参考资料。");
     }
 }

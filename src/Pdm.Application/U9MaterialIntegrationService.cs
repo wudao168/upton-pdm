@@ -59,7 +59,7 @@ public sealed class U9MaterialIntegrationService(
         UserRole role,
         CancellationToken cancellationToken)
     {
-        if (!await repository.HasUserPermissionAsync(actor, role, PermissionCodes.BomEdit, cancellationToken))
+        if (!await repository.HasUserPermissionAsync(actor, role, PermissionCodes.MaterialView, cancellationToken))
             throw new UnauthorizedAccessException("当前角色无权查询U9C料品。");
         var code = materialCode.Trim();
         if (string.IsNullOrWhiteSpace(code)) throw new PdmRuleException("物料编码不能为空。");
@@ -235,7 +235,7 @@ public sealed class U9MaterialIntegrationService(
         UserRole role,
         CancellationToken cancellationToken)
     {
-        if (!await repository.HasUserPermissionAsync(actor, role, PermissionCodes.ReleaseManage, cancellationToken))
+        if (!await repository.HasUserPermissionAsync(actor, role, PermissionCodes.MaterialManage, cancellationToken))
             throw new UnauthorizedAccessException("当前角色无权执行U9C料品同步。");
 
         return await ExecuteApprovedTaskCoreAsync(taskId, actor, cancellationToken);

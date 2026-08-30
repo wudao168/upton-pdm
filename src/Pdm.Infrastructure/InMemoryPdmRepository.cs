@@ -1146,16 +1146,17 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
         }
     }
 
-    public Task ApplyBomBatchAsync(Guid projectId, IReadOnlyList<BomItem> standardItems, IReadOnlyList<BomItem> nonStandardItems, IReadOnlyList<BomItem> unclassifiedItems, IReadOnlyList<BomItem> electricalItems, IReadOnlyList<CadPropertyWriteback> writebacks, IReadOnlyList<AuditEntry> auditEntries, CancellationToken cancellationToken)
+    public Task ApplyBomBatchAsync(Guid projectId, IReadOnlyList<BomItem> standardItems, IReadOnlyList<BomItem> nonStandardItems, IReadOnlyList<BomItem> unclassifiedItems, IReadOnlyList<BomItem> electricalItems, IReadOnlyList<BomItem> virtualItems, IReadOnlyList<CadPropertyWriteback> writebacks, IReadOnlyList<AuditEntry> auditEntries, CancellationToken cancellationToken)
     {
         lock (gate)
         {
             BomBatchApplyCount++;
-            bomItems.RemoveAll(item => item.ProjectId == projectId && item.Kind is BomKind.Standard or BomKind.NonStandard or BomKind.Unclassified or BomKind.Electrical);
+            bomItems.RemoveAll(item => item.ProjectId == projectId && item.Kind is BomKind.Standard or BomKind.NonStandard or BomKind.Unclassified or BomKind.Electrical or BomKind.Virtual);
             bomItems.AddRange(standardItems);
             bomItems.AddRange(nonStandardItems);
             bomItems.AddRange(unclassifiedItems);
             bomItems.AddRange(electricalItems);
+            bomItems.AddRange(virtualItems);
             foreach (var request in writebacks)
             {
                 foreach (var existing in cadPropertyWritebacks.Values

@@ -18,9 +18,17 @@ public sealed class RolePermissionCatalogTests
         var mechanical = RolePermissionCatalog.InitialPermissions(UserRole.Engineer.ToString(), UserRole.Engineer);
         Assert.Contains(PermissionCodes.DocumentEdit, mechanical);
         Assert.Contains(PermissionCodes.BomEdit, mechanical);
+        Assert.DoesNotContain(PermissionCodes.MaterialView, mechanical);
+        Assert.DoesNotContain(PermissionCodes.MaterialManage, mechanical);
+
+        var standardizationEngineer = RolePermissionCatalog.InitialPermissions(UserRole.ProcessReviewer.ToString(), UserRole.ProcessReviewer);
+        Assert.Contains(PermissionCodes.MaterialView, standardizationEngineer);
+        Assert.Contains(PermissionCodes.MaterialManage, standardizationEngineer);
 
         var standardizationSupervisor = RolePermissionCatalog.InitialPermissions(UserRole.Approver.ToString(), UserRole.Approver);
         Assert.Contains(PermissionCodes.ApprovalDecide, standardizationSupervisor);
+        Assert.Contains(PermissionCodes.MaterialView, standardizationSupervisor);
+        Assert.Contains(PermissionCodes.MaterialManage, standardizationSupervisor);
         Assert.DoesNotContain(PermissionCodes.DocumentEdit, standardizationSupervisor);
         Assert.DoesNotContain(PermissionCodes.BomEdit, standardizationSupervisor);
 
@@ -29,6 +37,10 @@ public sealed class RolePermissionCatalogTests
         Assert.DoesNotContain(PermissionCodes.DocumentEdit, productionMaterialHandler);
         Assert.DoesNotContain(PermissionCodes.BomEdit, productionMaterialHandler);
 
+        var procurementManager = RolePermissionCatalog.InitialPermissions("ProcurementManager", UserRole.Approver);
+        Assert.DoesNotContain(PermissionCodes.MaterialView, procurementManager);
+        Assert.DoesNotContain(PermissionCodes.MaterialManage, procurementManager);
+
         var platformAdministrator = RolePermissionCatalog.InitialPermissions("platform_admin", UserRole.PlatformAdministrator);
         Assert.Contains(PermissionCodes.OrganizationSettingsManage, platformAdministrator);
         Assert.DoesNotContain(PermissionCodes.ProjectView, platformAdministrator);
@@ -36,5 +48,14 @@ public sealed class RolePermissionCatalogTests
         var developer = RolePermissionCatalog.InitialPermissions("developer", UserRole.Administrator);
         Assert.Equal(RolePermissionCatalog.Permissions.Count, developer.Count);
         Assert.All(RolePermissionCatalog.Permissions, permission => Assert.Contains(permission.Code, developer));
+    }
+
+    [Fact]
+    public void Normalize_MaterialManageImpliesMaterialView()
+    {
+        var normalized = RolePermissionCatalog.Normalize(UserRole.Engineer, [PermissionCodes.MaterialManage]);
+
+        Assert.Contains(PermissionCodes.MaterialManage, normalized);
+        Assert.Contains(PermissionCodes.MaterialView, normalized);
     }
 }

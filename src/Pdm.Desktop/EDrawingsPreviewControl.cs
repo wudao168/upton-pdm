@@ -33,8 +33,27 @@ internal sealed class EDrawingsPreviewControl : Forms.UserControl
     private bool documentOpen;
     private bool documentTransitioning;
     private bool disposed;
+    private PreviewButtonTheme buttonTheme = PreviewButtonTheme.Resolve("a");
 
     internal event Action<string>? UserMessageRequested;
+
+    internal void ApplyTheme(string theme)
+    {
+        buttonTheme = PreviewButtonTheme.Resolve(theme);
+        foreach (Forms.ToolStripItem item in toolbar.Items)
+        {
+            if (item is not Forms.ToolStripButton button || button.Tag is not string command)
+            {
+                continue;
+            }
+
+            var previousImage = button.Image;
+            button.Image = CreateCommandIcon(command, buttonTheme.IconColor);
+            previousImage?.Dispose();
+        }
+        toolbar.Renderer = new TransparentToolStripRenderer(buttonTheme);
+        toolbar.Invalidate();
+    }
 
     internal EDrawingsPreviewControl()
     {
@@ -318,12 +337,12 @@ internal sealed class EDrawingsPreviewControl : Forms.UserControl
             };
             var value = new Forms.Label
             {
-                AutoEllipsis = true,
-                AutoSize = false,
+                AutoEllipsis = false,
+                AutoSize = true,
                 Font = new Font("Microsoft YaHei UI", 9F, FontStyle.Bold),
                 ForeColor = PrimaryText,
                 Margin = new Forms.Padding(0, 0, 0, 5),
-                MaximumSize = new Size(245, 22),
+                MaximumSize = new Size(420, 0),
                 MinimumSize = new Size(70, 20),
                 Text = item.Value,
                 TextAlign = ContentAlignment.MiddleLeft,
@@ -396,7 +415,7 @@ internal sealed class EDrawingsPreviewControl : Forms.UserControl
         toolbar.GripStyle = Forms.ToolStripGripStyle.Hidden;
         toolbar.ImageScalingSize = new Size(26, 26);
         toolbar.Padding = Forms.Padding.Empty;
-        toolbar.Renderer = new TransparentToolStripRenderer();
+        toolbar.Renderer = new TransparentToolStripRenderer(buttonTheme);
         toolbar.ShowItemToolTips = true;
         toolbar.TabStop = false;
     }
@@ -408,9 +427,9 @@ internal sealed class EDrawingsPreviewControl : Forms.UserControl
         propertiesPanel.BackColor = PreviewBackground;
         propertiesPanel.ColumnCount = 2;
         propertiesPanel.ColumnStyles.Add(new Forms.ColumnStyle(Forms.SizeType.AutoSize));
-        propertiesPanel.ColumnStyles.Add(new Forms.ColumnStyle(Forms.SizeType.Absolute, 245F));
+        propertiesPanel.ColumnStyles.Add(new Forms.ColumnStyle(Forms.SizeType.AutoSize));
         propertiesPanel.Margin = Forms.Padding.Empty;
-        propertiesPanel.MaximumSize = new Size(355, 0);
+        propertiesPanel.MaximumSize = new Size(520, 0);
         propertiesPanel.Padding = new Forms.Padding(2, 2, 2, 0);
         propertiesPanel.Visible = false;
     }
@@ -443,7 +462,7 @@ internal sealed class EDrawingsPreviewControl : Forms.UserControl
         });
     }
 
-    private static Forms.ToolStripButton CreateButton(string command, string toolTip)
+    private Forms.ToolStripButton CreateButton(string command, string toolTip)
     {
         return new Forms.ToolStripButton
         {
@@ -451,7 +470,7 @@ internal sealed class EDrawingsPreviewControl : Forms.UserControl
             AutoSize = false,
             DisplayStyle = Forms.ToolStripItemDisplayStyle.Image,
             Height = 40,
-            Image = CreateCommandIcon(command),
+            Image = CreateCommandIcon(command, buttonTheme.IconColor),
             ImageScaling = Forms.ToolStripItemImageScaling.None,
             Margin = new Forms.Padding(3, 0, 3, 0),
             Tag = command,
@@ -460,14 +479,13 @@ internal sealed class EDrawingsPreviewControl : Forms.UserControl
         };
     }
 
-    private static Bitmap CreateCommandIcon(string command)
+    private static Bitmap CreateCommandIcon(string command, Color color)
     {
         var bitmap = new Bitmap(26, 26);
         using var graphics = Graphics.FromImage(bitmap);
         graphics.SmoothingMode = SmoothingMode.AntiAlias;
         graphics.PixelOffsetMode = PixelOffsetMode.HighQuality;
 
-        var color = Color.FromArgb(71, 85, 105);
         using var pen = new Pen(color, 1.8F)
         {
             EndCap = LineCap.Round,
@@ -625,6 +643,17 @@ internal sealed class EDrawingsPreviewControl : Forms.UserControl
 
         toolbar.PerformLayout();
         toolbar.Location = new Point(Math.Max(8, (ClientSize.Width - toolbar.Width) / 2), 10);
+        var propertiesWidth = Math.Max(220, Math.Min(520, ClientSize.Width - 28));
+        var valueWidth = Math.Max(120, propertiesWidth - 100);
+        propertiesPanel.MaximumSize = new Size(propertiesWidth, 0);
+        for (var row = 0; row < propertiesPanel.RowCount; row++)
+        {
+            if (propertiesPanel.GetControlFromPosition(1, row) is Forms.Label value)
+            {
+                value.MaximumSize = new Size(valueWidth, 0);
+            }
+        }
+        propertiesPanel.PerformLayout();
         propertiesPanel.Location = new Point(14, 14);
         toolbar.BringToFront();
         propertiesPanel.BringToFront();
@@ -709,6 +738,13 @@ internal sealed class EDrawingsPreviewControl : Forms.UserControl
 
     private sealed class TransparentToolStripRenderer : Forms.ToolStripProfessionalRenderer
     {
+        private readonly PreviewButtonTheme theme;
+
+        internal TransparentToolStripRenderer(PreviewButtonTheme theme)
+        {
+            this.theme = theme;
+        }
+
         protected override void OnRenderToolStripBackground(Forms.ToolStripRenderEventArgs eventArgs)
         {
             // Keep the preview visible behind the toolbar; only individual hot/checked icons are highlighted.
@@ -728,13 +764,13 @@ internal sealed class EDrawingsPreviewControl : Forms.UserControl
             var bounds = new Rectangle(1, 1, Math.Max(1, eventArgs.Item.Width - 3), Math.Max(1, eventArgs.Item.Height - 3));
             using var path = CreateRoundedRectangle(bounds, 5);
             var backColor = button.Checked || button.Pressed
-                ? Color.FromArgb(219, 234, 254)
+                ? theme.ActiveBackground
                 : button.Selected
-                    ? Color.FromArgb(248, 250, 252)
+                    ? theme.HoverBackground
                     : Color.White;
             var borderColor = button.Checked || button.Pressed
-                ? Color.FromArgb(147, 197, 253)
-                : Color.FromArgb(226, 232, 240);
+                ? theme.ActiveBorder
+                : theme.Border;
             using var shadowBrush = new SolidBrush(Color.FromArgb(35, 15, 23, 42));
             using var backBrush = new SolidBrush(backColor);
             using var borderPen = new Pen(borderColor);
@@ -762,6 +798,51 @@ internal sealed class EDrawingsPreviewControl : Forms.UserControl
             path.AddArc(bounds.Left, bounds.Bottom - diameter, diameter, diameter, 90, 90);
             path.CloseFigure();
             return path;
+        }
+    }
+
+    private sealed class PreviewButtonTheme
+    {
+        private PreviewButtonTheme(Color hoverBackground, Color activeBackground, Color border, Color activeBorder)
+        {
+            HoverBackground = hoverBackground;
+            ActiveBackground = activeBackground;
+            Border = border;
+            ActiveBorder = activeBorder;
+            IconColor = activeBorder;
+        }
+
+        internal Color HoverBackground { get; }
+        internal Color ActiveBackground { get; }
+        internal Color Border { get; }
+        internal Color ActiveBorder { get; }
+        internal Color IconColor { get; }
+
+        internal static PreviewButtonTheme Resolve(string theme)
+        {
+            if (string.Equals(theme, "c", StringComparison.OrdinalIgnoreCase))
+            {
+                return new PreviewButtonTheme(
+                    Color.FromArgb(233, 248, 246),
+                    Color.FromArgb(208, 239, 236),
+                    Color.FromArgb(157, 219, 213),
+                    Color.FromArgb(19, 157, 147));
+            }
+
+            if (string.Equals(theme, "o", StringComparison.OrdinalIgnoreCase))
+            {
+                return new PreviewButtonTheme(
+                    Color.FromArgb(255, 243, 231),
+                    Color.FromArgb(255, 227, 196),
+                    Color.FromArgb(246, 199, 143),
+                    Color.FromArgb(230, 120, 23));
+            }
+
+            return new PreviewButtonTheme(
+                Color.FromArgb(237, 245, 255),
+                Color.FromArgb(217, 236, 255),
+                Color.FromArgb(156, 199, 255),
+                Color.FromArgb(64, 158, 255));
         }
     }
 

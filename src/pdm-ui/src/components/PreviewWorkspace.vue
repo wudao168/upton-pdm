@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { FileSearch, Link2, MoreHorizontal, Rotate3D, ScanSearch } from '@lucide/vue'
+import { Cloud, FileSearch, Link2, MoreHorizontal, PencilLine, Rotate3D, RotateCcw, ScanSearch, Square } from '@lucide/vue'
+import { ElMessage } from 'element-plus'
 import { computed, defineAsyncComponent, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { listDocumentVersions, postDesktopMessage, readDocumentPreviewFile } from '../api'
 import type { BomItem, DocumentNode, PreviewMode, SolidWorksOpenMode } from '../types'
@@ -66,11 +67,12 @@ const mode = computed<PreviewMode>(() => props.selected.kind === 'Drawing' ? 'dr
 const previewKindLabel = computed(() => mode.value === 'drawing' ? '2D工程图' : '3D模型')
 const displayedRevision = computed(() => props.reviewVersionId && props.reviewRevision ? props.reviewRevision : props.selected.version)
 const selectedDisplayName = computed(() => {
-  const drawingNumber = props.selected.drawingNumber?.trim()
+  const name = meaningfulSelectedName.value
+  return name || props.selected.drawingNumber?.trim() || props.selected.fileName
+})
+const meaningfulSelectedName = computed(() => {
   const name = props.selected.name?.trim()
-  if (!drawingNumber) return name || props.selected.fileName
-  if (!name || name === drawingNumber) return drawingNumber
-  return `${drawingNumber} · ${name}`
+  return name && name !== props.selected.drawingNumber?.trim() ? name : ''
 })
 const lifecycleLabel = computed(() => {
   const value = props.selected.lifecycleState
@@ -86,7 +88,7 @@ const editStatusLabel = computed(() => {
 })
 const previewProperties = computed(() => [
   { label: '物料/图号', value: props.selected.drawingNumber?.trim() },
-  { label: '名称', value: props.selected.name?.trim() },
+  { label: '名称', value: meaningfulSelectedName.value },
   { label: '规格/型号', value: props.bomItem?.specification?.trim() },
   { label: '材质', value: props.bomItem?.material?.trim() },
   { label: '品牌', value: props.bomItem?.brand?.trim() },
@@ -94,6 +96,15 @@ const previewProperties = computed(() => [
   { label: '版本', value: displayedRevision.value?.trim() },
   { label: '状态', value: lifecycleLabel.value },
 ].filter((item): item is { label: string; value: string } => Boolean(item.value)))
+
+function activateMarkup(command: string) {
+  if (!props.selected.documentId) return
+  if (!props.desktopAvailable) {
+    ElMessage.info('图形批注工具仅在Windows客户端的eDrawings预览中可用。')
+    return
+  }
+  postDesktopMessage('preview-host-command', { command })
+}
 
 function reportPreviewBounds() {
   if (!props.desktopAvailable) return
@@ -345,7 +356,6 @@ onBeforeUnmount(() => {
         <div class="pdm-preview-document-switcher">
           <span class="pdm-preview-kind">{{ previewKindLabel }}</span>
           <strong class="pdm-preview-document-name" :title="selectedDisplayName">{{ selectedDisplayName }}</strong>
-          <span class="pdm-selected-file" :title="selected.fileName">{{ selected.fileName }}</span>
           <span class="pdm-selected-version" :aria-label="`${reviewVersionId ? '审核冻结版本' : '工作版本'} ${displayedRevision}`">{{ displayedRevision }}</span>
           <span class="pdm-selected-version" :aria-label="`业务状态 ${lifecycleLabel}`">{{ lifecycleLabel }}</span>
           <span class="pdm-selected-status">{{ editStatusLabel }}</span>
@@ -355,6 +365,13 @@ onBeforeUnmount(() => {
           </div>
         </div>
         <div class="pdm-preview-actions">
+          <div class="pdm-markup-toolbar" aria-label="图形批注工具">
+            <span>批注</span>
+            <button type="button" aria-label="引线批注" title="带引线文字" :disabled="!selected.documentId" @click="activateMarkup('markup-text-leader')"><PencilLine :size="14" /></button>
+            <button type="button" aria-label="云线批注" title="修订云线" :disabled="!selected.documentId" @click="activateMarkup('markup-cloud')"><Cloud :size="14" /></button>
+            <button type="button" aria-label="框选批注" title="矩形框" :disabled="!selected.documentId" @click="activateMarkup('markup-rectangle')"><Square :size="14" /></button>
+            <button type="button" aria-label="手绘批注" title="自由曲线" :disabled="!selected.documentId" @click="activateMarkup('markup-spline')"><RotateCcw :size="14" /></button>
+          </div>
           <button type="button" class="pdm-review-toolbar-button" :class="[{ 'is-active': reviewPanelOpen }, `is-${reviewStatusTone}`]" aria-label="图纸审核" :aria-pressed="reviewPanelOpen" :disabled="!selected.documentId" @click="emit('review')"><ScanSearch :size="15" /><span>图纸审核</span><small>{{ reviewStatus }}</small></button>
           <button type="button" aria-label="使用位置" title="查看该图档被哪些装配体引用" :disabled="!selected.documentId" @click="emit('whereUsed')"><Link2 :size="15" /><span>引用</span></button>
           <button v-if="canManageLifecycle && lifecycleLabel !== '已作废'" type="button" aria-label="作废图档" title="受控作废当前图档" :disabled="!selected.documentId" @click="emit('obsolete')"><span>作废</span></button>

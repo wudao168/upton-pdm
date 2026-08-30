@@ -59,6 +59,7 @@ internal sealed class SolidWorksReferenceTreeScanner
     {
         var componentPath = ResolveComponentPath(component);
         var componentName = component.Name2 ?? Path.GetFileNameWithoutExtension(componentPath);
+        var documentName = Path.GetFileNameWithoutExtension(componentPath);
         var currentPath = string.IsNullOrWhiteSpace(instancePath) ? componentName : instancePath;
         var node = new CadTreeNode
         {
@@ -66,7 +67,7 @@ internal sealed class SolidWorksReferenceTreeScanner
             ComponentSelectionName = component.Name2 ?? string.Empty,
             FileName = Path.GetFileName(componentPath),
             FullPath = componentPath,
-            DisplayName = string.IsNullOrWhiteSpace(componentName) ? Path.GetFileNameWithoutExtension(componentPath) : componentName,
+            DisplayName = documentName,
             DrawingNumber = Path.GetFileNameWithoutExtension(componentPath),
             Kind = DocumentKindFromPath(componentPath, isRoot ? (int)swDocumentTypes_e.swDocASSEMBLY : 0),
             Configuration = component.ReferencedConfiguration ?? string.Empty,

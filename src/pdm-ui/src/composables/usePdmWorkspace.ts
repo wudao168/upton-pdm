@@ -54,7 +54,7 @@ export function formatBomGenerationConfirmation(preview: BomGenerationResult): s
     `• 待分类：${preview.unclassifiedCount} 条`,
     `• 待移除：${preview.pendingRemovalCount} 条`,
     `• 人工待确认：${preview.manualUnmatchedCount} 条`,
-    `• 虚拟件排除：${preview.virtualCount} 条`,
+    `• 虚拟件（仅源数据）：${preview.virtualCount} 条`,
     '',
     '待处理项不会静默删除，并会阻止发布。是否应用本次更新？',
   ].join('\n')
@@ -237,6 +237,7 @@ export function usePdmWorkspace() {
   const searchQuery = ref('')
   const documentFilter = ref<DocumentFilter>('all')
   const serviceOnline = ref(false)
+  const authInitialized = ref(false)
   const authenticated = ref(false)
   const currentUser = ref('')
   const currentUsername = ref('')
@@ -877,7 +878,7 @@ export function usePdmWorkspace() {
 
   async function loadMyApprovalTasks() {
     [myApprovalTasks.value, materialCodeApprovalTasks.value, materialSyncTasks.value, programTemplateTasks.value, editLocks.value, passwordResetTasks.value] = await Promise.all([
-      requestMyApprovalTasks(), requestMaterialCodeApprovalTasks(), listMaterialSyncTasks(accessToken), requestProgramTemplateTasks(), requestEditLocks(), requestPasswordResetTasks(),
+      requestMyApprovalTasks(), requestMaterialCodeApprovalTasks(), requestMaterialSyncTasks(), requestProgramTemplateTasks(), requestEditLocks(), requestPasswordResetTasks(),
     ])
   }
 
@@ -894,6 +895,10 @@ export function usePdmWorkspace() {
     return hasPermission('approval.decide')
       ? listMaterialCodeApplications(accessToken, undefined, 'Pending')
       : []
+  }
+
+  async function requestMaterialSyncTasks() {
+    return hasPermission('material.view') ? listMaterialSyncTasks(accessToken) : []
   }
 
   async function requestPasswordResetTasks() {
@@ -1072,7 +1077,7 @@ export function usePdmWorkspace() {
         withLoadContext('客户列表', listCustomers(accessToken)),
         withLoadContext('审批待办', requestMyApprovalTasks()),
         withLoadContext('料号审批待办', requestMaterialCodeApprovalTasks()),
-        withLoadContext('料品同步任务', listMaterialSyncTasks(accessToken)),
+        withLoadContext('料品同步任务', requestMaterialSyncTasks()),
         withLoadContext('程序模板待办', requestProgramTemplateTasks()),
         withLoadContext('编辑锁', requestEditLocks()),
         withLoadContext('组织目录', getOrganizationDirectory(accessToken)),
@@ -1573,20 +1578,24 @@ export function usePdmWorkspace() {
       if (message.type === 'service-status') serviceOnline.value = Boolean(message.payload?.online)
     })
 
-    const session = restoreSession()
-    if (session) {
-      persistentSession = session
-      const accessTokenIsValid = new Date(session.expiresAt).getTime() > Date.now()
-      if (session.resumeToken) {
-        const renewed = await renewPersistentSession()
-        if (!renewed && persistentSession && accessTokenIsValid) {
+    try {
+      const session = restoreSession()
+      if (session) {
+        persistentSession = session
+        const accessTokenIsValid = new Date(session.expiresAt).getTime() > Date.now()
+        if (session.resumeToken) {
+          const renewed = await renewPersistentSession()
+          if (!renewed && persistentSession && accessTokenIsValid) {
+            applySession(session)
+            await reload()
+          }
+        } else if (accessTokenIsValid) {
           applySession(session)
           await reload()
         }
-      } else if (accessTokenIsValid) {
-        applySession(session)
-        await reload()
       }
+    } finally {
+      authInitialized.value = true
     }
   })
 
@@ -1638,6 +1647,7 @@ export function usePdmWorkspace() {
     relatedNodes,
     searchQuery,
     serviceOnline,
+    authInitialized,
     authenticated,
     currentUser,
     currentUsername,

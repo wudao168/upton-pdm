@@ -2,7 +2,9 @@ using System;
 using System.Collections.Generic;
 using System.ComponentModel;
 using System.Drawing;
+using System.IO;
 using System.Linq;
+using System.Threading.Tasks;
 using System.Windows.Forms;
 
 namespace Upton.Pdm.SolidWorks;
@@ -33,6 +35,8 @@ internal sealed class BatchPropertyEditItem
 
     private readonly Dictionary<string, string> originalValues;
     private readonly Dictionary<string, string> propertyScopes;
+    private IReadOnlyList<NativePropertyCardField> propertyCardFields = Array.Empty<NativePropertyCardField>();
+    private IReadOnlyList<NativePropertyCardField> activePropertyCardFields = Array.Empty<NativePropertyCardField>();
 
     public BatchPropertyEditItem(
         BatchOperationItem operationItem,
@@ -89,6 +93,11 @@ internal sealed class BatchPropertyEditItem
 
     public string Kind => KindText(OperationItem.Node.Kind);
 
+    public string PropertyCard { get; set; }
+
+    [Browsable(false)]
+    public string PropertyCardPath { get; private set; } = string.Empty;
+
     public string ConfigurationDisplay => string.IsNullOrWhiteSpace(ConfigurationName) ? "默认" : ConfigurationName;
 
     public string ScopeDisplay
@@ -102,9 +111,9 @@ internal sealed class BatchPropertyEditItem
         }
     }
 
-    public string ProjectNumber { get; }
+    public string ProjectNumber { get; private set; }
 
-    public string ProjectName { get; }
+    public string ProjectName { get; private set; }
 
     public string DrawingNumber { get; set; }
 
@@ -152,7 +161,8 @@ internal sealed class BatchPropertyEditItem
     public string OriginalName => OriginalValue("名称");
 
     [Browsable(false)]
-    public bool HasChanges => PropertyValues().Any(pair => !Same(pair.Value, OriginalValue(pair.Key)));
+    public bool HasChanges => propertyCardFields.Count > 0
+        || PropertyValues().Any(pair => !Same(pair.Value, OriginalValue(pair.Key)));
 
     internal IEnumerable<KeyValuePair<string, string>> ChangedProperties() =>
         PropertyValues().Where(pair => !Same(pair.Value, OriginalValue(pair.Key)));
@@ -160,6 +170,46 @@ internal sealed class BatchPropertyEditItem
     internal string OriginalValue(string propertyName) => Value(originalValues, propertyName);
 
     internal string PropertyScope(string propertyName) => Value(propertyScopes, propertyName);
+
+    internal IReadOnlyList<NativePropertyCardField> PropertyCardFields => propertyCardFields;
+
+    internal IReadOnlyList<NativePropertyCardField> EffectivePropertyCardFields =>
+        propertyCardFields.Count > 0 ? propertyCardFields : activePropertyCardFields;
+
+    internal void AcceptChanges()
+    {
+        foreach (var property in PropertyValues())
+        {
+            originalValues[property.Key] = property.Value ?? string.Empty;
+        }
+        if (propertyCardFields.Count > 0)
+        {
+            activePropertyCardFields = propertyCardFields;
+            propertyCardFields = Array.Empty<NativePropertyCardField>();
+        }
+    }
+
+    internal NativePropertyCardField PropertyCardField(string editorPropertyName) =>
+        propertyCardFields.FirstOrDefault(field =>
+            string.Equals(field.EditorPropertyName, editorPropertyName, StringComparison.OrdinalIgnoreCase));
+
+    internal void ApplyPropertyCard(NativePropertyCardTemplate template)
+    {
+        if (template == null || !template.IsAvailable)
+        {
+            throw new InvalidOperationException("未选择有效的SolidWorks原生属性卡。");
+        }
+
+        PropertyCard = template.DisplayName;
+        PropertyCardPath = template.FilePath;
+        propertyCardFields = template.Fields;
+        foreach (var field in propertyCardFields.Where(field => !string.IsNullOrWhiteSpace(field.EditorPropertyName)))
+        {
+            propertyScopes[field.EditorPropertyName] = field.ConfigurationSpecific
+                ? string.Concat("配置:", ConfigurationDisplay)
+                : "全局";
+        }
+    }
 
     internal void SetPropertyValue(string propertyName, string value)
     {
@@ -184,6 +234,23 @@ internal sealed class BatchPropertyEditItem
             case "制图": Drafter = normalized; break;
             case "校对": Checker = normalized; break;
             case "批准": Approver = normalized; break;
+        }
+    }
+
+    internal void ApplyPlmValues(
+        string projectNumber,
+        string projectName,
+        IReadOnlyDictionary<string, string> values,
+        IReadOnlyDictionary<string, string> scopes)
+    {
+        ProjectNumber = projectNumber?.Trim() ?? string.Empty;
+        ProjectName = projectName?.Trim() ?? string.Empty;
+        propertyScopes["项目号"] = Value(scopes, "项目号");
+        propertyScopes["项目名称"] = Value(scopes, "项目名称");
+        foreach (var propertyName in EditablePropertyNames)
+        {
+            SetPropertyValue(propertyName, Value(values, propertyName));
+            propertyScopes[propertyName] = Value(scopes, propertyName);
         }
     }
 
@@ -229,6 +296,17 @@ internal sealed class BatchPropertyEditItem
             default: return "其他";
         }
     }
+
+    internal static string DefaultPropertyCardText(CadDocumentKind kind)
+    {
+        switch (kind)
+        {
+            case CadDocumentKind.Assembly: return "装配体卡（.asmprp）";
+            case CadDocumentKind.Part: return "零件卡（.prtprp）";
+            case CadDocumentKind.Drawing: return "工程图卡（.drwprp）";
+            default: return "未匹配";
+        }
+    }
 }
 
 internal sealed class BatchDocumentIdentity
@@ -247,13 +325,15 @@ internal sealed class BatchDocumentIdentity
 internal enum PropertyOperationMode
 {
     BatchEdit,
+    PropertyCardAssignment,
     PropertyWriteback
 }
 
 internal sealed class PropertyWritebackPreviewItem
 {
-    public PropertyWritebackPreviewItem(string fileName, string revision, string properties, string requestedBy, string requestedAt)
+    public PropertyWritebackPreviewItem(Guid id, string fileName, string revision, string properties, string requestedBy, string requestedAt)
     {
+        Id = id;
         FileName = fileName ?? string.Empty;
         Revision = revision ?? string.Empty;
         Properties = properties ?? string.Empty;
@@ -261,6 +341,9 @@ internal sealed class PropertyWritebackPreviewItem
         RequestedAt = requestedAt ?? string.Empty;
     }
 
+    [Browsable(false)]
+    public Guid Id { get; }
+    public bool Selected { get; set; } = true;
     public string FileName { get; }
     public string Revision { get; }
     public string Properties { get; }
@@ -270,61 +353,120 @@ internal sealed class PropertyWritebackPreviewItem
 
 internal sealed class BatchPropertyEditDialog : Form
 {
+    private const int StandardControlWidth = 150;
+    private const int StandardControlHeight = 30;
+    private const int StandardControlGap = 6;
     private readonly IReadOnlyList<BatchPropertyEditItem> items;
-    private readonly IReadOnlyList<DocumentDto> projectDocuments;
     private readonly IReadOnlyList<PropertyWritebackPreviewItem> writebackItems;
     private readonly int unavailableWritebackCount;
+    private readonly PropertyOperationMode initialOperation;
+    private readonly IReadOnlyDictionary<CadDocumentKind, IReadOnlyList<string>> propertyCardTemplates;
+    private readonly Func<IReadOnlyList<BatchPropertyEditItem>, Task<int>> synchronizePlmProperties;
+    private readonly Func<IReadOnlyList<BatchPropertyEditItem>, bool, Action<string, int, int>, string> executeLocalOperation;
+    private readonly Dictionary<CadDocumentKind, ComboBox> propertyCardSelectors = new Dictionary<CadDocumentKind, ComboBox>();
     private readonly BindingList<BatchPropertyEditItem> rows;
+    private readonly BindingList<PropertyWritebackPreviewItem> writebackRows;
     private readonly DataGridView grid = new DataGridView();
+    private readonly DataGridView propertyCardGrid = new DataGridView();
     private readonly DataGridView writebackGrid = new DataGridView();
     private readonly TabControl operationTabs = new TabControl();
+    private readonly TabControl propertyTabs = new TabControl();
+    private readonly TabPage propertyPage = new TabPage("属性") { BackColor = Color.White };
+    private readonly TabPage batchEditPage = new TabPage("批量编辑") { BackColor = Color.White };
+    private readonly TabPage propertyCardPage = new TabPage("属性卡设置") { BackColor = Color.White };
+    private readonly TabPage writebackPage = new TabPage("属性回写") { BackColor = Color.White };
+    private readonly ComboBox documentTypeFilter = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList };
+    private readonly TextBox itemFilterText = new TextBox();
+    private readonly CheckBox includeRelatedModels = new CheckBox
+    {
+        Text = "包含关联模型",
+        AutoSize = false,
+        TextAlign = ContentAlignment.MiddleLeft,
+        Enabled = false
+    };
     private readonly ComboBox fillProperty = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList };
     private readonly TextBox fillValue = new TextBox();
-    private readonly TextBox changeNote = new TextBox { Text = "批量更新SolidWorks属性" };
+    private readonly ComboBox fillOptionValue = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList };
+    private readonly Panel fillValueHost = new Panel();
     private readonly TextBox writebackChangeNote = new TextBox { Text = "PLM属性回写" };
-    private readonly Label summary = new Label { AutoSize = true, ForeColor = Color.FromArgb(90, 107, 128) };
-    private readonly Button execute = new Button { Text = "执行批量编辑", DialogResult = DialogResult.OK, AutoSize = true };
+    private readonly Label summary = new Label { AutoSize = false, ForeColor = Color.FromArgb(90, 107, 128) };
+    private readonly Label selectionSummary = new Label { AutoSize = false, ForeColor = Color.FromArgb(73, 88, 108), TextAlign = ContentAlignment.MiddleLeft };
+    private readonly Label propertyCardSummary = new Label { AutoSize = false, ForeColor = Color.FromArgb(90, 107, 128) };
+    private readonly Label writebackSummary = new Label { AutoSize = true, ForeColor = Color.FromArgb(90, 107, 128) };
+    private readonly Label propertyCardStatus = new Label { Text = "请选择图档和对应属性卡", AutoSize = false, AutoEllipsis = true, ForeColor = Color.FromArgb(210, 110, 0), TextAlign = ContentAlignment.MiddleLeft };
+    private readonly Label plmSyncStatus = new Label { Text = "PLM属性尚未同步", AutoSize = true, AutoEllipsis = false, ForeColor = Color.FromArgb(210, 110, 0), TextAlign = ContentAlignment.MiddleLeft };
+    private readonly Button execute = new Button { Text = "执行批量编辑", AutoSize = false, Size = new Size(StandardControlWidth, StandardControlHeight) };
+    private readonly Button close = new Button { Text = "关闭", DialogResult = DialogResult.Cancel, AutoSize = false, Size = new Size(StandardControlWidth, StandardControlHeight) };
+    private readonly Panel executionPanel = new Panel();
+    private readonly Label executionStatus = new Label();
+    private readonly PdmQuantityProgressBar executionProgress = new PdmQuantityProgressBar();
+    private RowStyle executionRowStyle;
+    private bool propertyCardsConfirmed;
+    private bool operationRunning;
 
     public BatchPropertyEditDialog(
         IReadOnlyList<BatchPropertyEditItem> items,
-        IReadOnlyList<DocumentDto> projectDocuments,
         IReadOnlyList<PropertyWritebackPreviewItem> writebackItems,
         int unavailableWritebackCount,
-        PropertyOperationMode initialOperation = PropertyOperationMode.BatchEdit)
+        PropertyOperationMode initialOperation = PropertyOperationMode.BatchEdit,
+        IReadOnlyDictionary<CadDocumentKind, IReadOnlyList<string>> propertyCardTemplates = null,
+        Func<IReadOnlyList<BatchPropertyEditItem>, Task<int>> synchronizePlmProperties = null,
+        Func<IReadOnlyList<BatchPropertyEditItem>, bool, Action<string, int, int>, string> executeLocalOperation = null)
     {
         this.items = items ?? Array.Empty<BatchPropertyEditItem>();
-        this.projectDocuments = projectDocuments ?? Array.Empty<DocumentDto>();
         this.writebackItems = writebackItems ?? Array.Empty<PropertyWritebackPreviewItem>();
         this.unavailableWritebackCount = Math.Max(0, unavailableWritebackCount);
+        this.initialOperation = initialOperation;
+        this.propertyCardTemplates = propertyCardTemplates
+            ?? new Dictionary<CadDocumentKind, IReadOnlyList<string>>();
+        this.synchronizePlmProperties = synchronizePlmProperties;
+        this.executeLocalOperation = executeLocalOperation;
+        if (synchronizePlmProperties == null)
+        {
+            plmSyncStatus.Text = "未关联项目，可直接编辑本地属性";
+            plmSyncStatus.ForeColor = Color.FromArgb(73, 88, 108);
+        }
         rows = new BindingList<BatchPropertyEditItem>(this.items.ToList());
-
-        Text = "属性";
+        writebackRows = new BindingList<PropertyWritebackPreviewItem>(this.writebackItems.ToList());
+        Text = initialOperation == PropertyOperationMode.PropertyWriteback
+            ? "属性回写确认"
+            : "属性";
         StartPosition = FormStartPosition.CenterParent;
-        MinimumSize = new Size(900, 520);
-        Size = new Size(1240, 680);
+        MinimumSize = new Size(1100, 650);
+        var workingArea = Screen.PrimaryScreen.WorkingArea;
+        Size = new Size(
+            Math.Max(MinimumSize.Width, Math.Min(1600, workingArea.Width - 60)),
+            Math.Max(MinimumSize.Height, Math.Min(900, workingArea.Height - 60)));
         FormBorderStyle = FormBorderStyle.Sizable;
         MaximizeBox = true;
         MinimizeBox = false;
 
         BuildGrid();
+        BuildPropertyCardGrid();
         BuildWritebackGrid();
         Controls.Add(BuildLayout());
-        operationTabs.SelectedIndex = initialOperation == PropertyOperationMode.PropertyWriteback ? 1 : 0;
+        StyleButtons(this);
+        propertyTabs.SelectedTab = initialOperation == PropertyOperationMode.PropertyCardAssignment
+            ? propertyCardPage
+            : batchEditPage;
         UpdateOperationState();
         AcceptButton = execute;
         UpdateSummary();
     }
 
     public IReadOnlyList<BatchPropertyEditItem> ChangedItems =>
-        items.Where(item => item.Selected && item.HasChanges).ToArray();
+        rows.Where(item => item.Selected && item.HasChanges).ToArray();
 
-    public PropertyOperationMode SelectedOperation => operationTabs.SelectedIndex == 1
+    public IReadOnlyList<Guid> SelectedWritebackIds =>
+        writebackItems.Where(item => item.Selected).Select(item => item.Id).ToArray();
+
+    public PropertyOperationMode SelectedOperation => initialOperation == PropertyOperationMode.PropertyWriteback
         ? PropertyOperationMode.PropertyWriteback
-        : PropertyOperationMode.BatchEdit;
+        : ReferenceEquals(propertyTabs.SelectedTab, propertyCardPage)
+            ? PropertyOperationMode.PropertyCardAssignment
+            : PropertyOperationMode.BatchEdit;
 
-    public string ChangeNote => SelectedOperation == PropertyOperationMode.PropertyWriteback
-        ? writebackChangeNote.Text?.Trim() ?? string.Empty
-        : changeNote.Text?.Trim() ?? string.Empty;
+    public string ChangeNote => writebackChangeNote.Text?.Trim() ?? string.Empty;
 
     private Control BuildLayout()
     {
@@ -333,49 +475,104 @@ internal sealed class BatchPropertyEditDialog : Form
             Dock = DockStyle.Fill,
             Padding = new Padding(14),
             ColumnCount = 1,
-            RowCount = 4
+            RowCount = 5
         };
         layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        executionRowStyle = new RowStyle(SizeType.Absolute, 0);
+        layout.RowStyles.Add(executionRowStyle);
         layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
 
         var title = new Label
         {
-            Text = "属性",
+            Text = initialOperation == PropertyOperationMode.PropertyWriteback
+                ? "属性回写确认"
+                : "属性",
             Font = new Font(Font.FontFamily, 13F, FontStyle.Bold),
             AutoSize = true,
             Margin = new Padding(0, 0, 0, 6)
         };
         var note = new Label
         {
-            Text = "在本页面选择“批量编辑”或“属性回写”。两种操作都会先校验版本和编辑权限，再生成新的PLM工作版本。",
+            Text = initialOperation == PropertyOperationMode.PropertyWriteback
+                ? "请确认需要回写的图档。可回写任务默认勾选；确认后系统自动校验、获取权限、写入属性并提交新工作版本。"
+                : "在属性窗口内切换“批量编辑”或“属性卡设置”；两项操作分别确认、分别执行。",
             ForeColor = Color.FromArgb(73, 88, 108),
             AutoSize = true,
             MaximumSize = new Size(1120, 0),
             Margin = new Padding(0, 0, 0, 10)
         };
 
-        operationTabs.Dock = DockStyle.Fill;
-        operationTabs.TabPages.Add(new TabPage("批量编辑") { BackColor = Color.White });
-        operationTabs.TabPages.Add(new TabPage("属性回写") { BackColor = Color.White });
-        operationTabs.TabPages[0].Controls.Add(BuildBatchEditPage());
-        operationTabs.TabPages[1].Controls.Add(BuildWritebackPage());
-        operationTabs.SelectedIndexChanged += (_, _) => UpdateOperationState();
-        operationTabs.Selected += (_, _) => UpdateOperationState();
+        Control mainContent;
+        if (initialOperation == PropertyOperationMode.PropertyWriteback)
+        {
+            mainContent = BuildWritebackPage();
+        }
+        else
+        {
+            mainContent = BuildPropertyPage();
+        }
+        propertyTabs.SelectedIndexChanged += (_, _) =>
+        {
+            RefreshFillPropertyOptions();
+            UpdateOperationState();
+        };
+        propertyTabs.Selected += (_, _) => UpdateOperationState();
 
         var buttons = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.RightToLeft, AutoSize = true };
-        var cancel = new Button { Text = "取消", DialogResult = DialogResult.Cancel, AutoSize = true };
-        buttons.Controls.Add(cancel);
+        buttons.Controls.Add(close);
         buttons.Controls.Add(execute);
         execute.Click += ValidateBeforeExecute;
 
+        executionPanel.Dock = DockStyle.Fill;
+        executionPanel.Padding = new Padding(0, 3, 0, 3);
+        executionPanel.BackColor = Color.FromArgb(232, 243, 255);
+        executionPanel.Visible = false;
+        var executionLayout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 2, Margin = Padding.Empty, Padding = Padding.Empty };
+        executionLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 58));
+        executionLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        executionStatus.Dock = DockStyle.Fill;
+        executionStatus.AutoEllipsis = false;
+        executionStatus.UseCompatibleTextRendering = true;
+        executionStatus.ForeColor = Color.FromArgb(31, 89, 147);
+        executionStatus.TextAlign = ContentAlignment.MiddleLeft;
+        executionProgress.Dock = DockStyle.Fill;
+        executionProgress.Margin = Padding.Empty;
+        executionLayout.Controls.Add(executionStatus, 0, 0);
+        executionLayout.Controls.Add(executionProgress, 0, 1);
+        executionPanel.Controls.Add(executionLayout);
+
         layout.Controls.Add(title, 0, 0);
         layout.Controls.Add(note, 0, 1);
-        layout.Controls.Add(operationTabs, 0, 2);
-        layout.Controls.Add(buttons, 0, 3);
+        layout.Controls.Add(mainContent, 0, 2);
+        layout.Controls.Add(executionPanel, 0, 3);
+        layout.Controls.Add(buttons, 0, 4);
         UpdateOperationState();
         return layout;
+    }
+
+    private Control BuildPropertyPage()
+    {
+        var page = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            Padding = new Padding(8),
+            ColumnCount = 1,
+            RowCount = 2
+        };
+        page.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        page.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+
+        propertyTabs.Dock = DockStyle.Fill;
+        batchEditPage.Controls.Add(BuildBatchEditPage());
+        propertyCardPage.Controls.Add(BuildPropertyCardPage());
+        propertyTabs.TabPages.Add(batchEditPage);
+        propertyTabs.TabPages.Add(propertyCardPage);
+
+        page.Controls.Add(BuildItemFilters(), 0, 0);
+        page.Controls.Add(propertyTabs, 0, 1);
+        return page;
     }
 
     private Control BuildBatchEditPage()
@@ -394,45 +591,107 @@ internal sealed class BatchPropertyEditDialog : Form
 
         var explanation = new Label
         {
-            Text = "编辑并回写SolidWorks属性卡。项目号、项目名称由归属项目自动填写且不可修改；已有配置特定属性继续写原配置，其他属性写全局。图号和名称同步到PLM，不修改文件名和装配引用。可从Excel复制后在表格中按Ctrl+V粘贴。",
+            Text = "可直接编辑本地SolidWorks属性；若已关联项目，请先点击“从PLM同步”，确认列表内容后再执行批量写入。写入时只使用当前列表快照，不再访问PLM。\r\n可从Excel复制后，在表格中按Ctrl+V粘贴。",
             ForeColor = Color.FromArgb(73, 88, 108),
-            AutoSize = true,
-            MaximumSize = new Size(1100, 0),
-            Margin = new Padding(0, 0, 0, 8)
-        };
-        var toolbar = new FlowLayoutPanel
-        {
+            AutoSize = false,
+            AutoEllipsis = false,
+            UseCompatibleTextRendering = true,
             Dock = DockStyle.Fill,
-            AutoSize = true,
-            WrapContents = false,
+            Height = 48,
+            MinimumSize = new Size(0, 48),
+            TextAlign = ContentAlignment.MiddleLeft,
             Margin = new Padding(0, 0, 0, 8)
         };
-        var selectAll = new Button { Text = "全选", AutoSize = true };
-        var clear = new Button { Text = "清空选择", AutoSize = true };
-        selectAll.Click += (_, _) => SetAllSelected(true);
-        clear.Click += (_, _) => SetAllSelected(false);
-        fillProperty.Items.AddRange(BatchPropertyEditItem.EditablePropertyNames.Cast<object>().ToArray());
-        fillProperty.SelectedIndex = 2;
-        fillProperty.Width = 90;
-        fillValue.Width = 220;
-        var fill = new Button { Text = "填入勾选行", AutoSize = true };
+        var toolbar = CreateAlignedRow(100F, 150F, 150F, 150F, 150F, 150F);
+        ConfigureRowInput(fillProperty);
+        ConfigureRowInput(fillValue);
+        ConfigureRowInput(fillOptionValue);
+        fillValueHost.Dock = DockStyle.Fill;
+        fillValueHost.Margin = Padding.Empty;
+        fillValueHost.Controls.Add(fillValue);
+        fillValueHost.Controls.Add(fillOptionValue);
+        fillProperty.SelectedIndexChanged += (_, _) => RefreshFillValueEditor();
+        RefreshFillPropertyOptions();
+        var fill = new Button { Text = "填入勾选行", AutoSize = false, Size = new Size(StandardControlWidth, StandardControlHeight), Margin = Padding.Empty };
         fill.Click += (_, _) => FillSelectedRows();
-        toolbar.Controls.Add(selectAll);
-        toolbar.Controls.Add(clear);
-        toolbar.Controls.Add(new Label { Text = "    整列填充：", AutoSize = true, Margin = new Padding(8, 7, 0, 0) });
-        toolbar.Controls.Add(fillProperty);
-        toolbar.Controls.Add(fillValue);
-        toolbar.Controls.Add(fill);
-        toolbar.Controls.Add(summary);
+        var copyNameToModel = new Button
+        {
+            Text = "名称同步为型号",
+            AutoSize = false,
+            Size = new Size(StandardControlWidth, StandardControlHeight),
+            Margin = Padding.Empty
+        };
+        copyNameToModel.Click += (_, _) => CopyNameToModelForSelectedRows();
+        var sync = new Button
+        {
+            Text = "从PLM同步",
+            AutoSize = false,
+            Size = new Size(StandardControlWidth, StandardControlHeight),
+            Margin = Padding.Empty,
+            Enabled = synchronizePlmProperties != null
+        };
+        sync.Click += async (_, _) => await SynchronizePlmPropertiesAsync(sync);
+        var fillLabel = CreateRowLabel("整列填充");
+        toolbar.Controls.Add(fillLabel, 0, 0);
+        toolbar.Controls.Add(fillProperty, 1, 0);
+        toolbar.Controls.Add(fillValueHost, 2, 0);
+        toolbar.Controls.Add(fill, 3, 0);
+        toolbar.Controls.Add(copyNameToModel, 4, 0);
+        summary.Dock = DockStyle.Fill;
+        summary.TextAlign = ContentAlignment.MiddleLeft;
+        toolbar.Controls.Add(sync, 5, 0);
+        plmSyncStatus.Dock = DockStyle.Fill;
+        toolbar.Controls.Add(plmSyncStatus, 6, 0);
 
         page.Controls.Add(explanation, 0, 0);
         page.Controls.Add(toolbar, 0, 1);
         page.Controls.Add(grid, 0, 2);
-        page.Controls.Add(BuildChangeNoteRow(changeNote), 0, 3);
         return page;
     }
 
-    private Control BuildWritebackPage()
+    private async Task SynchronizePlmPropertiesAsync(Button syncButton)
+    {
+        if (synchronizePlmProperties == null)
+        {
+            return;
+        }
+
+        syncButton.Enabled = false;
+        execute.Enabled = false;
+        UseWaitCursor = true;
+        plmSyncStatus.Text = "正在从PLM同步…";
+        plmSyncStatus.ForeColor = Color.FromArgb(73, 88, 108);
+        try
+        {
+            grid.EndEdit();
+            var selectedItems = rows.Where(item => item.Selected).ToArray();
+            if (selectedItems.Length == 0)
+            {
+                throw new InvalidOperationException("请先勾选需要从PLM同步属性的图档。");
+            }
+            var synchronizedCount = await synchronizePlmProperties(selectedItems);
+            RefreshGridComboBoxValues();
+            grid.Refresh();
+            propertyCardGrid.Refresh();
+            ApplyItemFilter();
+            plmSyncStatus.Text = string.Concat("已从PLM同步 ", synchronizedCount, " 个图档；请确认后批量写入");
+            plmSyncStatus.ForeColor = Color.FromArgb(31, 132, 92);
+        }
+        catch (Exception exception)
+        {
+            plmSyncStatus.Text = "PLM同步失败";
+            plmSyncStatus.ForeColor = Color.FromArgb(190, 55, 55);
+            MessageBox.Show(this, exception.Message, "UPLM", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        }
+        finally
+        {
+            UseWaitCursor = false;
+            syncButton.Enabled = true;
+            UpdateOperationState();
+        }
+    }
+
+    private Control BuildPropertyCardPage()
     {
         var page = new TableLayoutPanel
         {
@@ -442,6 +701,395 @@ internal sealed class BatchPropertyEditDialog : Form
             RowCount = 3
         };
         page.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        page.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        page.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        var toolbar = CreateAlignedRow(280F);
+        propertyCardStatus.Dock = DockStyle.Fill;
+        toolbar.Controls.Add(propertyCardStatus, 0, 0);
+        propertyCardSummary.Dock = DockStyle.Fill;
+        propertyCardSummary.TextAlign = ContentAlignment.MiddleLeft;
+        toolbar.Controls.Add(propertyCardSummary, 1, 0);
+
+        page.Controls.Add(BuildPropertyCardSelectors(), 0, 0);
+        page.Controls.Add(toolbar, 0, 1);
+        page.Controls.Add(propertyCardGrid, 0, 2);
+        return page;
+    }
+
+    private Control BuildItemFilters()
+    {
+        var panel = CreateAlignedRow(110F, 150F, 160F, 150F, 150F, 150F, 150F, 150F);
+        documentTypeFilter.Items.AddRange(new object[] { "全部类型", "装配体", "零件", "工程图" });
+        documentTypeFilter.SelectedIndex = 0;
+        ConfigureRowInput(documentTypeFilter);
+        ConfigureRowInput(itemFilterText);
+        includeRelatedModels.Dock = DockStyle.Fill;
+        includeRelatedModels.Margin = new Padding(0, 0, StandardControlGap, 0);
+        includeRelatedModels.CheckedChanged += (_, _) =>
+        {
+            ApplyItemFilter();
+            if (includeRelatedModels.Checked)
+            {
+                SelectModelsForCheckedDrawings();
+            }
+        };
+        documentTypeFilter.SelectedIndexChanged += (_, _) =>
+        {
+            includeRelatedModels.Enabled = string.Equals(
+                documentTypeFilter.SelectedItem as string,
+                "工程图",
+                StringComparison.Ordinal);
+        };
+        var search = new Button { Text = "搜索", AutoSize = false, Size = new Size(StandardControlWidth, StandardControlHeight), Margin = Padding.Empty };
+        var selectAll = new Button { Text = "全选全部", AutoSize = false, Size = new Size(StandardControlWidth, StandardControlHeight), Margin = Padding.Empty };
+        var clear = new Button { Text = "清空全部", AutoSize = false, Size = new Size(StandardControlWidth, StandardControlHeight), Margin = Padding.Empty };
+        search.Click += (_, _) => ApplyItemFilter();
+        selectAll.Click += (_, _) => SetFilteredSelected(true);
+        clear.Click += (_, _) => SetFilteredSelected(false);
+        panel.Controls.Add(CreateRowLabel("零部件筛选"), 0, 0);
+        panel.Controls.Add(documentTypeFilter, 1, 0);
+        var queryLabel = CreateRowLabel("名称/图号/材料等");
+        panel.Controls.Add(queryLabel, 2, 0);
+        panel.Controls.Add(itemFilterText, 3, 0);
+        panel.Controls.Add(search, 4, 0);
+        panel.Controls.Add(selectAll, 5, 0);
+        panel.Controls.Add(clear, 6, 0);
+        panel.Controls.Add(includeRelatedModels, 7, 0);
+        selectionSummary.Dock = DockStyle.Fill;
+        panel.Controls.Add(selectionSummary, 8, 0);
+        return panel;
+    }
+
+    private Control BuildPropertyCardSelectors()
+    {
+        var panel = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            AutoSize = true,
+            ColumnCount = 8,
+            RowCount = 1,
+            Margin = new Padding(0, 0, 0, 8)
+        };
+        for (var index = 0; index < 3; index++)
+        {
+            panel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 100F));
+            panel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, StandardControlWidth + StandardControlGap));
+        }
+        panel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, StandardControlWidth + StandardControlGap));
+        panel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        panel.RowStyles.Add(new RowStyle(SizeType.Absolute, StandardControlHeight));
+
+        AddPropertyCardSelector(panel, CadDocumentKind.Assembly, "装配体卡", 0);
+        AddPropertyCardSelector(panel, CadDocumentKind.Part, "零件卡", 2);
+        AddPropertyCardSelector(panel, CadDocumentKind.Drawing, "工程图卡", 4);
+        var confirm = new Button { Text = "确认属性卡", AutoSize = false, Size = new Size(StandardControlWidth, StandardControlHeight), Margin = Padding.Empty };
+        confirm.Click += (_, _) => ConfirmPropertyCards();
+        panel.Controls.Add(confirm, 6, 0);
+        return panel;
+    }
+
+    private void AddPropertyCardSelector(TableLayoutPanel panel, CadDocumentKind kind, string caption, int column)
+    {
+        var templates = propertyCardTemplates.TryGetValue(kind, out var configured)
+            ? configured
+                .Where(value => !string.IsNullOrWhiteSpace(value))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .Select(NativePropertyCardTemplate.Load)
+                .Where(template => template.IsAvailable)
+                .ToArray()
+            : Array.Empty<NativePropertyCardTemplate>();
+        var combo = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList };
+        ConfigureRowInput(combo);
+        combo.Items.AddRange((templates.Length > 0
+            ? templates
+            : new[] { NativePropertyCardTemplate.Missing() }).Cast<object>().ToArray());
+        combo.SelectedIndexChanged += (_, _) => InvalidatePropertyCardConfirmation();
+        panel.Controls.Add(CreateRowLabel(caption), column, 0);
+        panel.Controls.Add(combo, column + 1, 0);
+        propertyCardSelectors[kind] = combo;
+        combo.SelectedIndex = 0;
+    }
+
+    private void ApplyPropertyCard(CadDocumentKind kind, NativePropertyCardTemplate propertyCard)
+    {
+        foreach (var item in rows.Where(candidate => candidate.Selected && candidate.OperationItem.Node.Kind == kind))
+        {
+            item.ApplyPropertyCard(propertyCard);
+        }
+        grid.Refresh();
+        propertyCardGrid.Refresh();
+    }
+
+    private void ConfirmPropertyCards()
+    {
+        var selectedKinds = new HashSet<CadDocumentKind>(rows
+            .Where(item => item.Selected)
+            .Select(item => item.OperationItem.Node.Kind));
+        if (selectedKinds.Count == 0)
+        {
+            CancelValidation("请先勾选至少一个需要设置属性卡的图档。");
+            return;
+        }
+        var missing = propertyCardSelectors
+            .Where(pair => selectedKinds.Contains(pair.Key))
+            .Where(pair => !(pair.Value.SelectedItem is NativePropertyCardTemplate template) || !template.IsAvailable)
+            .Select(pair => BatchPropertyEditItem.DefaultPropertyCardText(pair.Key))
+            .ToArray();
+        if (missing.Length > 0)
+        {
+            CancelValidation(string.Concat("请先选择：", string.Join("、", missing)));
+            return;
+        }
+
+        foreach (var selector in propertyCardSelectors)
+        {
+            if (selectedKinds.Contains(selector.Key))
+            {
+                ApplyPropertyCard(selector.Key, (NativePropertyCardTemplate)selector.Value.SelectedItem);
+            }
+        }
+        propertyCardsConfirmed = true;
+        propertyCardStatus.Text = "属性卡已确认，可执行批量设置";
+        propertyCardStatus.ForeColor = Color.FromArgb(31, 132, 92);
+        RefreshFillPropertyOptions();
+        UpdateOperationState();
+    }
+
+    private void InvalidatePropertyCardConfirmation()
+    {
+        if (!propertyCardsConfirmed)
+        {
+            return;
+        }
+
+        propertyCardsConfirmed = false;
+        propertyCardStatus.Text = "属性卡选择已变化，请重新确认";
+        propertyCardStatus.ForeColor = Color.FromArgb(210, 110, 0);
+        UpdateOperationState();
+    }
+
+    private static TableLayoutPanel CreateAlignedRow(params float[] widths)
+    {
+        var row = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            AutoSize = false,
+            Height = StandardControlHeight,
+            ColumnCount = (widths?.Length ?? 0) + 1,
+            RowCount = 1,
+            Margin = new Padding(0, 0, 0, 8)
+        };
+        foreach (var width in widths ?? Array.Empty<float>())
+        {
+            row.ColumnStyles.Add(new ColumnStyle(
+                SizeType.Absolute,
+                Math.Abs(width - StandardControlWidth) < 0.1F
+                    ? width + StandardControlGap
+                    : width));
+        }
+        row.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        row.RowStyles.Add(new RowStyle(SizeType.Absolute, StandardControlHeight));
+        return row;
+    }
+
+    private static Label CreateRowLabel(string text)
+    {
+        return new Label
+        {
+            Text = text,
+            AutoSize = false,
+            Dock = DockStyle.Fill,
+            TextAlign = ContentAlignment.MiddleRight,
+            Margin = new Padding(0, 0, 3, 0)
+        };
+    }
+
+    private static void ConfigureRowInput(Control control)
+    {
+        control.Dock = DockStyle.Fill;
+        control.Size = new Size(StandardControlWidth, StandardControlHeight);
+        control.MinimumSize = new Size(StandardControlWidth, StandardControlHeight);
+        control.MaximumSize = new Size(StandardControlWidth, StandardControlHeight);
+        control.Margin = new Padding(0, 0, StandardControlGap, 0);
+        if (control is TextBox textBox)
+        {
+            textBox.AutoSize = false;
+        }
+        else if (control is ComboBox comboBox)
+        {
+            comboBox.DrawMode = DrawMode.OwnerDrawFixed;
+            comboBox.ItemHeight = 24;
+            comboBox.DrawItem += DrawComboBoxItem;
+        }
+    }
+
+    private static void StyleButtons(Control root)
+    {
+        foreach (Control child in root.Controls)
+        {
+            if (child is Button button)
+            {
+                button.FlatStyle = FlatStyle.Flat;
+                button.FlatAppearance.BorderSize = 0;
+                button.UseVisualStyleBackColor = false;
+                button.Margin = new Padding(0, 0, StandardControlGap, 0);
+                button.EnabledChanged += (_, _) => ApplyButtonVisualState(button);
+                ApplyButtonVisualState(button);
+            }
+            StyleButtons(child);
+        }
+    }
+
+    private static void ApplyButtonVisualState(Button button)
+    {
+        button.BackColor = button.Enabled
+            ? Color.FromArgb(36, 112, 226)
+            : Color.FromArgb(224, 229, 236);
+        button.ForeColor = button.Enabled
+            ? Color.White
+            : Color.FromArgb(128, 139, 153);
+    }
+
+    private static void DrawComboBoxItem(object sender, DrawItemEventArgs eventArgs)
+    {
+        eventArgs.DrawBackground();
+        if (sender is ComboBox comboBox && eventArgs.Index >= 0)
+        {
+            var text = comboBox.Items[eventArgs.Index]?.ToString() ?? string.Empty;
+            using (var brush = new SolidBrush(eventArgs.ForeColor))
+            {
+                var y = eventArgs.Bounds.Top + Math.Max(0, (eventArgs.Bounds.Height - comboBox.Font.Height) / 2);
+                eventArgs.Graphics.DrawString(text, comboBox.Font, brush, eventArgs.Bounds.Left + 3, y);
+            }
+        }
+        eventArgs.DrawFocusRectangle();
+    }
+
+    private void ApplyItemFilter()
+    {
+        var kind = documentTypeFilter.SelectedItem as string ?? "全部类型";
+        var query = itemFilterText.Text?.Trim() ?? string.Empty;
+        var filtered = items.Where(item => MatchesItemFilter(item, kind, query)).ToArray();
+        if (includeRelatedModels.Checked && string.Equals(kind, "工程图", StringComparison.Ordinal))
+        {
+            filtered = filtered
+                .Concat(filtered
+                    .Where(item => item.OperationItem.Node.Kind == CadDocumentKind.Drawing)
+                    .SelectMany(RelatedModelItems))
+                .Distinct()
+                .ToArray();
+        }
+        rows.RaiseListChangedEvents = false;
+        rows.Clear();
+        foreach (var item in filtered)
+        {
+            rows.Add(item);
+        }
+        rows.RaiseListChangedEvents = true;
+        rows.ResetBindings();
+        InvalidatePropertyCardConfirmation();
+        UpdateSummary();
+    }
+
+    private IEnumerable<BatchPropertyEditItem> RelatedModelItems(BatchPropertyEditItem drawingItem)
+    {
+        if (drawingItem?.OperationItem?.Node?.Kind != CadDocumentKind.Drawing)
+        {
+            return Array.Empty<BatchPropertyEditItem>();
+        }
+
+        var drawing = drawingItem.OperationItem.Node;
+        var drawingStem = Path.GetFileNameWithoutExtension(drawing.FileName ?? string.Empty);
+        return items.Where(candidate =>
+            candidate.OperationItem.Node.Kind == CadDocumentKind.Assembly
+            || candidate.OperationItem.Node.Kind == CadDocumentKind.Part)
+            .Where(candidate =>
+                drawing.RelatedModelDocumentId.HasValue
+                    && candidate.OperationItem.Node.DocumentId == drawing.RelatedModelDocumentId
+                || !string.IsNullOrWhiteSpace(drawingStem)
+                    && string.Equals(
+                        Path.GetFileNameWithoutExtension(candidate.FileName),
+                        drawingStem,
+                        StringComparison.OrdinalIgnoreCase));
+    }
+
+    private void SelectModelsForCheckedDrawings()
+    {
+        foreach (var drawing in rows.Where(item =>
+            item.Selected && item.OperationItem.Node.Kind == CadDocumentKind.Drawing))
+        {
+            foreach (var model in RelatedModelItems(drawing))
+            {
+                model.Selected = true;
+            }
+        }
+        grid.Refresh();
+        propertyCardGrid.Refresh();
+        UpdateSummary();
+    }
+
+    private void SelectRelatedModelForRow(DataGridView source, int rowIndex)
+    {
+        if (!includeRelatedModels.Checked
+            || rowIndex < 0
+            || rowIndex >= source.Rows.Count
+            || !(source.Rows[rowIndex].DataBoundItem is BatchPropertyEditItem drawing)
+            || !drawing.Selected
+            || drawing.OperationItem.Node.Kind != CadDocumentKind.Drawing)
+        {
+            return;
+        }
+
+        foreach (var model in RelatedModelItems(drawing))
+        {
+            model.Selected = true;
+        }
+        grid.Refresh();
+        propertyCardGrid.Refresh();
+    }
+
+    private static bool MatchesItemFilter(BatchPropertyEditItem item, string kind, string query)
+    {
+        if (!string.Equals(kind, "全部类型", StringComparison.Ordinal)
+            && !string.Equals(item.Kind, kind, StringComparison.Ordinal))
+        {
+            return false;
+        }
+        if (string.IsNullOrWhiteSpace(query))
+        {
+            return true;
+        }
+
+        return new[]
+        {
+            item.FileName,
+            item.DrawingNumber,
+            item.Name,
+            item.Material,
+            item.Specification,
+            item.Classification,
+            item.MaterialCode,
+            item.PartName,
+            item.Model,
+            item.Brand,
+            item.Remark,
+            item.ProjectNumber,
+            item.ProjectName
+        }.Any(value => !string.IsNullOrWhiteSpace(value)
+            && value.IndexOf(query, StringComparison.CurrentCultureIgnoreCase) >= 0);
+    }
+
+    private Control BuildWritebackPage()
+    {
+        var page = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            Padding = new Padding(8),
+            ColumnCount = 1,
+            RowCount = 4
+        };
+        page.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        page.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         page.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         page.RowStyles.Add(new RowStyle(SizeType.AutoSize));
 
@@ -450,7 +1098,7 @@ internal sealed class BatchPropertyEditDialog : Form
             ? "当前结构没有可执行的待回写属性。"
             : string.Concat(
                 "待回写任务：", writebackItems.Count, "条，涉及图档：", documentCount, "个。执行时将重新校验版本、获取编辑权限并提交新工作版本。",
-                unavailableWritebackCount > 0 ? string.Concat(" 另有", unavailableWritebackCount, "条任务不在当前结构中，本次保留待处理。") : string.Empty);
+                unavailableWritebackCount > 0 ? string.Concat(" 另有", unavailableWritebackCount, "条任务当前不可回写，本次保留待处理。") : string.Empty);
         var explanation = new Label
         {
             Text = summaryText,
@@ -460,19 +1108,32 @@ internal sealed class BatchPropertyEditDialog : Form
             Margin = new Padding(0, 0, 0, 8)
         };
 
+        var toolbar = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, WrapContents = false, Margin = new Padding(0, 0, 0, 8) };
+        var selectAll = new Button { Text = "全选可回写", AutoSize = false, Size = new Size(StandardControlWidth, StandardControlHeight) };
+        var clear = new Button { Text = "清空选择", AutoSize = false, Size = new Size(StandardControlWidth, StandardControlHeight) };
+        selectAll.Click += (_, _) => SetAllWritebacksSelected(true);
+        clear.Click += (_, _) => SetAllWritebacksSelected(false);
+        toolbar.Controls.Add(selectAll);
+        toolbar.Controls.Add(clear);
+        toolbar.Controls.Add(writebackSummary);
+
         page.Controls.Add(explanation, 0, 0);
-        page.Controls.Add(writebackGrid, 0, 1);
-        page.Controls.Add(BuildChangeNoteRow(writebackChangeNote), 0, 2);
+        page.Controls.Add(toolbar, 0, 1);
+        page.Controls.Add(writebackGrid, 0, 2);
+        page.Controls.Add(BuildChangeNoteRow(writebackChangeNote), 0, 3);
+        UpdateWritebackSummary();
         return page;
     }
 
     private static Control BuildChangeNoteRow(TextBox input)
     {
         var row = new TableLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, ColumnCount = 2, Margin = new Padding(0, 10, 0, 8) };
-        row.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        row.ColumnCount = 3;
+        row.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 100));
+        row.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, StandardControlWidth));
         row.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         row.Controls.Add(new Label { Text = "存档说明：", AutoSize = true, Anchor = AnchorStyles.Left, Margin = new Padding(0, 6, 6, 0) }, 0, 0);
-        input.Dock = DockStyle.Fill;
+        ConfigureRowInput(input);
         row.Controls.Add(input, 1, 0);
         return row;
     }
@@ -498,8 +1159,18 @@ internal sealed class BatchPropertyEditDialog : Form
                 grid.CommitEdit(DataGridViewDataErrorContexts.Commit);
             }
         };
-        grid.CellValueChanged += (_, _) => UpdateSummary();
+        grid.CellValueChanged += (_, eventArgs) =>
+        {
+            if (eventArgs.RowIndex >= 0 && eventArgs.ColumnIndex == 0)
+            {
+                SelectRelatedModelForRow(grid, eventArgs.RowIndex);
+                InvalidatePropertyCardConfirmation();
+                propertyCardGrid.Refresh();
+            }
+            UpdateSummary();
+        };
         grid.KeyDown += OnGridKeyDown;
+        grid.DataError += OnGridDataError;
 
         grid.Columns.Add(CheckColumn("选择", nameof(BatchPropertyEditItem.Selected), 48));
         grid.Columns.Add(TextColumn("文件", nameof(BatchPropertyEditItem.FileName), 170, true));
@@ -536,6 +1207,48 @@ internal sealed class BatchPropertyEditDialog : Form
         grid.Columns.Add(TextColumn("批准", nameof(BatchPropertyEditItem.Approver), 90));
     }
 
+    private void BuildPropertyCardGrid()
+    {
+        propertyCardGrid.Dock = DockStyle.Fill;
+        propertyCardGrid.AutoGenerateColumns = false;
+        propertyCardGrid.AllowUserToAddRows = false;
+        propertyCardGrid.AllowUserToDeleteRows = false;
+        propertyCardGrid.AllowUserToOrderColumns = true;
+        propertyCardGrid.RowHeadersVisible = false;
+        propertyCardGrid.SelectionMode = DataGridViewSelectionMode.FullRowSelect;
+        propertyCardGrid.MultiSelect = true;
+        propertyCardGrid.BackgroundColor = Color.White;
+        propertyCardGrid.BorderStyle = BorderStyle.FixedSingle;
+        propertyCardGrid.DataSource = rows;
+        propertyCardGrid.CurrentCellDirtyStateChanged += (_, _) =>
+        {
+            if (propertyCardGrid.IsCurrentCellDirty)
+            {
+                propertyCardGrid.CommitEdit(DataGridViewDataErrorContexts.Commit);
+            }
+        };
+        propertyCardGrid.CellValueChanged += (_, eventArgs) =>
+        {
+            if (eventArgs.RowIndex >= 0 && eventArgs.ColumnIndex == 0)
+            {
+                SelectRelatedModelForRow(propertyCardGrid, eventArgs.RowIndex);
+                InvalidatePropertyCardConfirmation();
+                grid.Refresh();
+            }
+            UpdateSummary();
+        };
+
+        propertyCardGrid.Columns.Add(CheckColumn("选择", nameof(BatchPropertyEditItem.Selected), 48));
+        propertyCardGrid.Columns.Add(TextColumn("文件", nameof(BatchPropertyEditItem.FileName), 170, true));
+        propertyCardGrid.Columns.Add(TextColumn("类型", nameof(BatchPropertyEditItem.Kind), 62, true));
+        propertyCardGrid.Columns.Add(TextColumn("待设置原生属性卡", nameof(BatchPropertyEditItem.PropertyCard), 220, true));
+        propertyCardGrid.Columns.Add(TextColumn("配置", nameof(BatchPropertyEditItem.ConfigurationDisplay), 110, true));
+        propertyCardGrid.Columns.Add(TextColumn("项目号", nameof(BatchPropertyEditItem.ProjectNumber), 130, true));
+        propertyCardGrid.Columns.Add(TextColumn("项目名称", nameof(BatchPropertyEditItem.ProjectName), 180, true));
+        propertyCardGrid.Columns.Add(TextColumn("图号", nameof(BatchPropertyEditItem.DrawingNumber), 160, true));
+        propertyCardGrid.Columns.Add(TextColumn("名称", nameof(BatchPropertyEditItem.Name), 200, true));
+    }
+
     private void BuildWritebackGrid()
     {
         writebackGrid.Dock = DockStyle.Fill;
@@ -543,25 +1256,42 @@ internal sealed class BatchPropertyEditDialog : Form
         writebackGrid.AllowUserToAddRows = false;
         writebackGrid.AllowUserToDeleteRows = false;
         writebackGrid.AllowUserToOrderColumns = true;
-        writebackGrid.ReadOnly = true;
+        writebackGrid.ReadOnly = false;
         writebackGrid.RowHeadersVisible = false;
         writebackGrid.SelectionMode = DataGridViewSelectionMode.FullRowSelect;
         writebackGrid.MultiSelect = true;
         writebackGrid.BackgroundColor = Color.White;
         writebackGrid.BorderStyle = BorderStyle.FixedSingle;
-        writebackGrid.DataSource = new BindingList<PropertyWritebackPreviewItem>(writebackItems.ToList());
+        writebackGrid.EditMode = DataGridViewEditMode.EditOnEnter;
+        writebackGrid.DataSource = writebackRows;
+        writebackGrid.Columns.Add(CheckColumn("确认", nameof(PropertyWritebackPreviewItem.Selected), 52));
         writebackGrid.Columns.Add(TextColumn("图档", nameof(PropertyWritebackPreviewItem.FileName), 190, true));
         writebackGrid.Columns.Add(TextColumn("基准版本", nameof(PropertyWritebackPreviewItem.Revision), 90, true));
         writebackGrid.Columns.Add(TextColumn("待回写属性", nameof(PropertyWritebackPreviewItem.Properties), 420, true));
         writebackGrid.Columns.Add(TextColumn("申请人", nameof(PropertyWritebackPreviewItem.RequestedBy), 100, true));
         writebackGrid.Columns.Add(TextColumn("申请时间", nameof(PropertyWritebackPreviewItem.RequestedAt), 145, true));
+        writebackGrid.CurrentCellDirtyStateChanged += (_, _) =>
+        {
+            if (writebackGrid.IsCurrentCellDirty)
+            {
+                writebackGrid.CommitEdit(DataGridViewDataErrorContexts.Commit);
+            }
+        };
+        writebackGrid.CellValueChanged += (_, eventArgs) =>
+        {
+            if (eventArgs.RowIndex >= 0 && eventArgs.ColumnIndex == 0)
+            {
+                UpdateWritebackSummary();
+            }
+        };
     }
 
     private void UpdateOperationState()
     {
         var writeback = SelectedOperation == PropertyOperationMode.PropertyWriteback;
-        execute.Text = writeback ? "执行属性回写" : "执行批量编辑";
-        execute.Enabled = !writeback || writebackItems.Count > 0;
+        var propertyCard = SelectedOperation == PropertyOperationMode.PropertyCardAssignment;
+        execute.Text = writeback ? "执行属性回写" : propertyCard ? "执行属性卡设置" : "批量写入";
+        execute.Enabled = !operationRunning && (writeback ? SelectedWritebackIds.Count > 0 : !propertyCard || propertyCardsConfirmed);
     }
 
     private static DataGridViewCheckBoxColumn CheckColumn(string header, string property, int width) =>
@@ -592,27 +1322,142 @@ internal sealed class BatchPropertyEditDialog : Form
         return column;
     }
 
-    private void SetAllSelected(bool selected)
+    private void SetFilteredSelected(bool selected)
     {
-        foreach (var item in items)
+        foreach (var item in rows)
         {
             item.Selected = selected;
         }
         grid.Refresh();
+        propertyCardGrid.Refresh();
+        InvalidatePropertyCardConfirmation();
         UpdateSummary();
+    }
+
+    private void SetAllWritebacksSelected(bool selected)
+    {
+        foreach (var item in writebackItems)
+        {
+            item.Selected = selected;
+        }
+        writebackGrid.Refresh();
+        UpdateWritebackSummary();
+    }
+
+    private void UpdateWritebackSummary()
+    {
+        writebackSummary.Text = string.Concat(
+            "    已选 ", SelectedWritebackIds.Count,
+            " / 可回写 ", writebackItems.Count,
+            unavailableWritebackCount > 0 ? string.Concat("；另有 ", unavailableWritebackCount, " 条当前不可回写") : string.Empty);
+        if (SelectedOperation == PropertyOperationMode.PropertyWriteback)
+        {
+            execute.Enabled = SelectedWritebackIds.Count > 0;
+        }
     }
 
     private void FillSelectedRows()
     {
         grid.EndEdit();
         var property = fillProperty.SelectedItem as string;
-        var value = fillValue.Text ?? string.Empty;
-        foreach (var item in items.Where(candidate => candidate.Selected))
+        if (string.IsNullOrWhiteSpace(property))
+        {
+            CancelValidation("当前筛选图档没有共同的属性卡字段，无法整列填充。");
+            return;
+        }
+        var value = fillOptionValue.Visible
+            ? fillOptionValue.SelectedItem?.ToString() ?? string.Empty
+            : fillValue.Text ?? string.Empty;
+        foreach (var item in rows.Where(candidate => candidate.Selected))
         {
             item.SetPropertyValue(property, value);
         }
         grid.Refresh();
         UpdateSummary();
+    }
+
+    private void CopyNameToModelForSelectedRows()
+    {
+        grid.EndEdit();
+        var selectedItems = rows.Where(candidate => candidate.Selected).ToArray();
+        if (selectedItems.Length == 0)
+        {
+            CancelValidation("请先勾选需要同步型号的图档。");
+            return;
+        }
+
+        if (selectedItems.Any(item => !item.EffectivePropertyCardFields.Any(field =>
+                string.Equals(field.EditorPropertyName, "型号", StringComparison.OrdinalIgnoreCase))))
+        {
+            CancelValidation("已勾选图档的属性卡必须都包含“型号”字段。");
+            return;
+        }
+
+        foreach (var item in selectedItems)
+        {
+            item.SetPropertyValue("型号", item.Name);
+        }
+        grid.Refresh();
+        UpdateSummary();
+    }
+
+    private void RefreshFillValueEditor()
+    {
+        var property = fillProperty.SelectedItem as string;
+        var optionColumn = grid.Columns.Cast<DataGridViewColumn>()
+            .OfType<DataGridViewComboBoxColumn>()
+            .FirstOrDefault(column => string.Equals(column.HeaderText, property, StringComparison.Ordinal));
+        fillOptionValue.Visible = optionColumn != null;
+        fillValue.Visible = optionColumn == null;
+        if (optionColumn == null)
+        {
+            return;
+        }
+
+        var current = fillOptionValue.SelectedItem?.ToString() ?? string.Empty;
+        fillOptionValue.Items.Clear();
+        fillOptionValue.Items.AddRange(optionColumn.Items.Cast<object>().ToArray());
+        var selectedIndex = fillOptionValue.FindStringExact(current);
+        fillOptionValue.SelectedIndex = selectedIndex >= 0 ? selectedIndex : (fillOptionValue.Items.Count > 0 ? 0 : -1);
+    }
+
+    private void RefreshFillPropertyOptions()
+    {
+        var current = fillProperty.SelectedItem as string;
+        var selectedRows = rows.Where(item => item.Selected).ToArray();
+        var fieldSets = selectedRows
+            .Select(item => new HashSet<string>(
+                item.EffectivePropertyCardFields
+                    .Select(field => field.EditorPropertyName)
+                    .Where(name => !string.IsNullOrWhiteSpace(name)),
+                StringComparer.OrdinalIgnoreCase))
+            .ToArray();
+        var available = selectedRows.Length > 0 && fieldSets.All(set => set.Count > 0)
+            ? BatchPropertyEditItem.EditablePropertyNames
+                .Where(name => fieldSets.All(set => set.Contains(name)))
+                .ToArray()
+            : Array.Empty<string>();
+
+        if (fillProperty.Items.Cast<object>()
+            .Select(item => item?.ToString() ?? string.Empty)
+            .SequenceEqual(available, StringComparer.OrdinalIgnoreCase))
+        {
+            return;
+        }
+
+        fillProperty.BeginUpdate();
+        try
+        {
+            fillProperty.Items.Clear();
+            fillProperty.Items.AddRange(available.Cast<object>().ToArray());
+            var selectedIndex = string.IsNullOrWhiteSpace(current) ? -1 : fillProperty.FindStringExact(current);
+            fillProperty.SelectedIndex = selectedIndex >= 0 ? selectedIndex : (fillProperty.Items.Count > 0 ? 0 : -1);
+        }
+        finally
+        {
+            fillProperty.EndUpdate();
+        }
+        RefreshFillValueEditor();
     }
 
     private void OnGridKeyDown(object sender, KeyEventArgs eventArgs)
@@ -651,21 +1496,75 @@ internal sealed class BatchPropertyEditDialog : Form
 
     private void UpdateSummary()
     {
-        if (grid.IsCurrentCellDirty)
+        selectionSummary.Text = string.Concat("已选 ", rows.Count(item => item.Selected), " / ", rows.Count);
+        if (grid.IsCurrentCellDirty || propertyCardGrid.IsCurrentCellDirty)
         {
             return;
         }
 
-        summary.Text = string.Concat("    已选 ", items.Count(item => item.Selected), "，有变更 ", items.Count(item => item.Selected && item.HasChanges));
+        var text = string.Concat(
+            "    显示 ", rows.Count, "/", items.Count,
+            "，当前筛选已选 ", rows.Count(item => item.Selected),
+            "，当前筛选有变更 ", rows.Count(item => item.Selected && item.HasChanges));
+        summary.Text = text;
+        propertyCardSummary.Text = text;
+        RefreshFillPropertyOptions();
+    }
+
+    private void RefreshGridComboBoxValues()
+    {
+        AddComboBoxValues(nameof(BatchPropertyEditItem.Classification), items.Select(item => item.Classification));
+        AddComboBoxValues(nameof(BatchPropertyEditItem.WearPart), items.Select(item => item.WearPart));
+        RefreshFillValueEditor();
+    }
+
+    private void AddComboBoxValues(string propertyName, IEnumerable<string> values)
+    {
+        var column = grid.Columns.Cast<DataGridViewColumn>()
+            .OfType<DataGridViewComboBoxColumn>()
+            .FirstOrDefault(candidate => string.Equals(candidate.DataPropertyName, propertyName, StringComparison.Ordinal));
+        if (column == null)
+        {
+            return;
+        }
+
+        foreach (var value in (values ?? Array.Empty<string>())
+            .Select(candidate => candidate?.Trim() ?? string.Empty)
+            .Distinct(StringComparer.OrdinalIgnoreCase))
+        {
+            if (!column.Items.Cast<object>().Any(item => string.Equals(item?.ToString() ?? string.Empty, value, StringComparison.OrdinalIgnoreCase)))
+            {
+                column.Items.Add(value);
+            }
+        }
+    }
+
+    private void OnGridDataError(object sender, DataGridViewDataErrorEventArgs eventArgs)
+    {
+        if (eventArgs.RowIndex >= 0
+            && eventArgs.ColumnIndex >= 0
+            && grid.Columns[eventArgs.ColumnIndex] is DataGridViewComboBoxColumn comboColumn)
+        {
+            var value = grid.Rows[eventArgs.RowIndex].Cells[eventArgs.ColumnIndex].Value?.ToString()?.Trim() ?? string.Empty;
+            if (!comboColumn.Items.Cast<object>().Any(item => string.Equals(item?.ToString() ?? string.Empty, value, StringComparison.OrdinalIgnoreCase)))
+            {
+                comboColumn.Items.Add(value);
+            }
+            eventArgs.ThrowException = false;
+            eventArgs.Cancel = false;
+        }
     }
 
     private void ValidateBeforeExecute(object sender, EventArgs eventArgs)
     {
         if (SelectedOperation == PropertyOperationMode.PropertyWriteback)
         {
-            if (writebackItems.Count == 0)
+            writebackGrid.EndEdit();
+            if (SelectedWritebackIds.Count == 0)
             {
-                CancelValidation("当前结构没有可执行的待回写属性。");
+                CancelValidation(writebackItems.Count == 0
+                    ? "当前结构没有可执行的待回写属性。"
+                    : "请至少勾选一个需要回写的图档。");
                 return;
             }
             if (string.IsNullOrWhiteSpace(ChangeNote))
@@ -678,6 +1577,35 @@ internal sealed class BatchPropertyEditDialog : Form
             return;
         }
 
+        if (SelectedOperation == PropertyOperationMode.PropertyCardAssignment)
+        {
+            propertyCardGrid.EndEdit();
+            if (!propertyCardsConfirmed)
+            {
+                CancelValidation("请先选择并确认需要批量设置的属性卡。");
+                return;
+            }
+            if (ChangedItems.Count == 0)
+            {
+                CancelValidation("请至少勾选一个需要设置属性卡的图档。");
+                return;
+            }
+            var cleanupConfirmation = MessageBox.Show(
+                this,
+                "设置属性卡时，将删除当前属性卡未定义的已知旧卡字段：分类、属性、文档名称、物料编码、NT、BOMINFO、TNR、表面处理、重量、标签编号、SUPPLIER、种类、单位、版本。\r\n\r\n当前属性卡仍定义的同名字段会保留。是否继续？",
+                "确认清理旧属性卡字段",
+                MessageBoxButtons.YesNo,
+                MessageBoxIcon.Warning,
+                MessageBoxDefaultButton.Button2);
+            if (cleanupConfirmation != DialogResult.Yes)
+            {
+                DialogResult = DialogResult.None;
+                return;
+            }
+            RunLocalOperation(true);
+            return;
+        }
+
         grid.EndEdit();
         var changed = ChangedItems;
         if (changed.Count == 0)
@@ -686,45 +1614,58 @@ internal sealed class BatchPropertyEditDialog : Form
             return;
         }
 
-        var invalidIdentity = changed.FirstOrDefault(item =>
-            string.IsNullOrWhiteSpace(item.DrawingNumber)
-            || string.IsNullOrWhiteSpace(item.Name)
-            || item.DrawingNumber.Trim().Length > 160
-            || item.Name.Trim().Length > 300);
-        if (invalidIdentity != null)
+        RunLocalOperation(false);
+    }
+
+    private void RunLocalOperation(bool settingPropertyCards)
+    {
+        if (executeLocalOperation == null)
         {
-            CancelValidation(string.Concat(invalidIdentity.FileName, "的图号或名称为空，或长度超过PLM限制。"));
+            CancelValidation("本地属性操作尚未初始化，请关闭窗口后重试。");
             return;
         }
 
-        if (string.IsNullOrWhiteSpace(ChangeNote))
+        var changed = ChangedItems;
+        operationRunning = true;
+        propertyTabs.Enabled = false;
+        close.Enabled = false;
+        UseWaitCursor = true;
+        executionPanel.Visible = true;
+        try
         {
-            CancelValidation("请填写存档说明。");
-            return;
+            UpdateExecutionProgress(settingPropertyCards ? "准备设置属性卡" : "准备写入属性", 0, changed.Count);
+            var result = executeLocalOperation(changed, settingPropertyCards, UpdateExecutionProgress);
+            executionStatus.Text = result;
+            executionProgress.SetProgress(changed.Count, changed.Count);
         }
-
-        var changedIds = new HashSet<Guid>(changed
-            .Where(item => item.OperationItem.Node.DocumentId.HasValue)
-            .Select(item => item.OperationItem.Node.DocumentId.Value));
-        var finalNumbers = projectDocuments
-            .Where(document => !changedIds.Contains(document.Id))
-            .Select(document => new { document.Id, Number = document.DrawingNumber?.Trim() ?? string.Empty, File = document.FileName })
-            .Concat(changed.Select(item => new
-            {
-                Id = item.OperationItem.Node.DocumentId ?? Guid.NewGuid(),
-                Number = item.DrawingNumber.Trim(),
-                File = item.FileName
-            }))
-            .Where(item => !string.IsNullOrWhiteSpace(item.Number))
-            .GroupBy(item => item.Number, StringComparer.OrdinalIgnoreCase)
-            .FirstOrDefault(group => group.Count() > 1 && group.Any(item => changed.Any(changedItem => string.Equals(changedItem.FileName, item.File, StringComparison.OrdinalIgnoreCase))));
-        if (finalNumbers != null)
+        catch (Exception exception)
         {
-            CancelValidation(string.Concat("图号 ", finalNumbers.Key, " 与项目内其他图档重复，请先调整。"));
-            return;
+            executionStatus.Text = string.Concat("操作失败：", exception.Message);
+            executionStatus.ForeColor = Color.FromArgb(190, 55, 55);
         }
+        finally
+        {
+            operationRunning = false;
+            propertyTabs.Enabled = true;
+            close.Enabled = true;
+            UseWaitCursor = false;
+            propertyCardsConfirmed = false;
+            UpdateSummary();
+            UpdateOperationState();
+        }
+    }
 
-        DialogResult = DialogResult.OK;
+    private void UpdateExecutionProgress(string message, int completed, int total)
+    {
+        executionRowStyle.Height = 96;
+        executionPanel.Visible = true;
+        executionStatus.ForeColor = Color.FromArgb(31, 89, 147);
+        executionStatus.Text = string.Concat("处理中：", Environment.NewLine, message?.Trim() ?? string.Empty);
+        executionProgress.SetProgress(completed, total);
+        executionPanel.PerformLayout();
+        executionPanel.Invalidate(true);
+        executionPanel.Update();
+        Application.DoEvents();
     }
 
     private void CancelValidation(string message)

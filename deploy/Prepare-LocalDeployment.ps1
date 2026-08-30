@@ -1,6 +1,8 @@
 [CmdletBinding()]
 param(
-    [string]$MySqlVersion = '8.4.11'
+    [string]$MySqlVersion = '8.4.11',
+    [string]$LanBaseUrl = 'http://192.168.2.8:5173',
+    [string]$ReleaseVersion = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -233,6 +235,44 @@ Get-ChildItem -LiteralPath $clientBuildOutput |
 Copy-Item -Path (Join-Path $projectRoot 'src\Pdm.SolidWorks.Addin\bin\Release\net48\*') -Destination $addinOutput -Recurse -Force
 Copy-Item -Path (Join-Path $projectRoot 'src\Pdm.SolidWorks.PreviewWorker\bin\Release\net48\*') -Destination $previewWorkerOutput -Recurse -Force
 
+if ([string]::IsNullOrWhiteSpace($ReleaseVersion)) {
+    $ReleaseVersion = [DateTimeOffset]::Now.ToString('yyyy.MM.dd.HHmm')
+}
+$lanBase = $LanBaseUrl.TrimEnd('/')
+$bootstrapUrl = "$lanBase/client-bootstrap.json"
+$locator = [ordered]@{ BootstrapUrl = $bootstrapUrl }
+foreach ($output in @($clientOutput, $addinOutput)) {
+    Write-Utf8File (Join-Path $output 'uplm-bootstrap.json') @(($locator | ConvertTo-Json))
+    Write-Utf8File (Join-Path $output '.uplm-version') @($ReleaseVersion)
+}
+
+$webRoot = Join-Path $apiOutput 'wwwroot'
+$updatesRoot = Join-Path $webRoot 'updates'
+New-Item -ItemType Directory -Path $updatesRoot -Force | Out-Null
+Copy-Item -Path (Join-Path $projectRoot 'src\pdm-ui\dist\*') -Destination $webRoot -Recurse -Force
+$desktopArchive = Join-Path $updatesRoot "uplm-desktop-$ReleaseVersion.zip"
+$addinArchive = Join-Path $updatesRoot "uplm-solidworks-addin-$ReleaseVersion.zip"
+Compress-Archive -Path (Join-Path $clientOutput '*') -DestinationPath $desktopArchive -CompressionLevel Optimal -Force
+Compress-Archive -Path (Join-Path $addinOutput '*') -DestinationPath $addinArchive -CompressionLevel Optimal -Force
+$bootstrap = [ordered]@{
+    SchemaVersion = 1
+    ConfigurationVersion = $ReleaseVersion
+    ApiBaseUrl = "$lanBase/"
+    UiBaseUrl = "$lanBase/"
+    PollSeconds = 30
+    Desktop = [ordered]@{
+        Version = $ReleaseVersion
+        PackageUrl = "/updates/$([IO.Path]::GetFileName($desktopArchive))"
+        Sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $desktopArchive).Hash
+    }
+    SolidWorksAddin = [ordered]@{
+        Version = $ReleaseVersion
+        PackageUrl = "/updates/$([IO.Path]::GetFileName($addinArchive))"
+        Sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $addinArchive).Hash
+    }
+}
+Write-Utf8File (Join-Path $webRoot 'client-bootstrap.json') @(($bootstrap | ConvertTo-Json -Depth 5))
+
 $desktopDirectory = [Environment]::GetFolderPath('Desktop')
 $shortcutPath = Join-Path $desktopDirectory 'UPLM.lnk'
 $previousShortcutPath = Join-Path $desktopDirectory 'UPTON PLM.lnk'
@@ -270,6 +310,11 @@ $receipt = [ordered]@{
     shortcutIconPath = $shortcutIconPath
     addinPath = Join-Path $localRoot 'solidworks-addin\Upton.Pdm.SolidWorks.Addin.dll'
     previewWorkerPath = Join-Path $localRoot 'preview-worker\Upton.Pdm.SolidWorks.PreviewWorker.exe'
+    lanBaseUrl = $lanBase
+    releaseVersion = $ReleaseVersion
+    bootstrapPath = Join-Path $webRoot 'client-bootstrap.json'
+    desktopPackageSha256 = $bootstrap.Desktop.Sha256
+    solidWorksAddinPackageSha256 = $bootstrap.SolidWorksAddin.Sha256
     shortcutPath = $shortcutPath
 }
 $receipt | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $localRoot 'deployment-receipt.json') -Encoding UTF8

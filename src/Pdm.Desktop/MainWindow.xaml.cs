@@ -25,6 +25,7 @@ using WpfBrushes = System.Windows.Media.Brushes;
 using WpfFlowDirection = System.Windows.FlowDirection;
 using WpfPoint = System.Windows.Point;
 using Microsoft.Web.WebView2.Core;
+using Upton.Pdm.ClientShared;
 using Upton.Pdm.LocalSettings;
 using WinForms = System.Windows.Forms;
 using WpfMessageBox = System.Windows.MessageBox;
@@ -40,10 +41,12 @@ public partial class MainWindow : Window
     private const uint MenuSeparator = 0x0800;
     private readonly string[] startupArgs = Environment.GetCommandLineArgs().Skip(1).ToArray();
     private readonly bool startedWithWindows = Environment.GetCommandLineArgs().Any(argument => string.Equals(argument, "--startup", StringComparison.OrdinalIgnoreCase));
-    private readonly HttpClient apiClient = new() { BaseAddress = new Uri("http://127.0.0.1:5080"), Timeout = TimeSpan.FromMinutes(5) };
+    private readonly HttpClient apiClient = new() { Timeout = TimeSpan.FromMinutes(5) };
+    private readonly CancellationTokenSource bootstrapLifetime = new();
     private readonly SolidWorksOpenBridge solidWorksBridge = new();
     private string accessToken = string.Empty;
     private string activeCompanyId = string.Empty;
+    private string currentTheme = "a";
     private EDrawingsPreviewControl? embeddedPreview;
     private IReadOnlyList<KeyValuePair<string, string>> previewProperties = Array.Empty<KeyValuePair<string, string>>();
     private PreviewHostBounds? previewBounds;
@@ -61,6 +64,9 @@ public partial class MainWindow : Window
     private WinForms.NotifyIcon? trayIcon;
     private string[]? pendingExternalRequestArgs;
     private bool workspaceNavigationReady;
+    private ClientBootstrapConfiguration bootstrapConfiguration = new();
+    private bool usingServerUi;
+    private bool attemptedLocalUiFallback;
 
     public MainWindow()
     {
@@ -182,7 +188,10 @@ public partial class MainWindow : Window
 
         try
         {
+            bootstrapConfiguration = await ClientBootstrapLoader.LoadAsync(bootstrapLifetime.Token);
+            apiClient.BaseAddress = new Uri(bootstrapConfiguration.ApiBaseUrl, UriKind.Absolute);
             await InitializeWorkspaceAsync();
+            _ = MonitorBootstrapAsync();
         }
         catch (Exception exception)
         {
@@ -213,13 +222,23 @@ public partial class MainWindow : Window
         WorkspaceView.CoreWebView2.WebMessageReceived += OnWebMessageReceived;
         WorkspaceView.NavigationCompleted += async (_, args) =>
         {
-            LoadingPanel.Visibility = Visibility.Collapsed;
             if (!args.IsSuccess)
             {
+                if (usingServerUi && !attemptedLocalUiFallback)
+                {
+                    attemptedLocalUiFallback = true;
+                    usingServerUi = false;
+                    var fallbackVersion = File.GetLastWriteTimeUtc(indexFile).Ticks;
+                    WorkspaceView.Source = new Uri($"https://{UiHostName}/index.html?v={fallbackVersion}");
+                    return;
+                }
+
+                LoadingPanel.Visibility = Visibility.Collapsed;
                 WpfMessageBox.Show(this, $"页面加载失败：{args.WebErrorStatus}", "UPLM");
             }
             else
             {
+                LoadingPanel.Visibility = Visibility.Collapsed;
                 workspaceNavigationReady = true;
                 var requestArgs = pendingExternalRequestArgs ?? startupArgs;
                 pendingExternalRequestArgs = null;
@@ -231,7 +250,57 @@ public partial class MainWindow : Window
         reviewOverlay = new ReviewOverlayWindow(this, WorkspaceView.CoreWebView2.Environment, uiFolder, uiVersion);
         reviewOverlay.MessageReceived += OnReviewOverlayMessageReceived;
         reviewOverlay.ActivityChanged += ApplyPreviewSurfaces;
-        WorkspaceView.Source = new Uri($"https://{UiHostName}/index.html?v={uiVersion}");
+        usingServerUi = Uri.TryCreate(bootstrapConfiguration.UiBaseUrl, UriKind.Absolute, out var serverUiUrl)
+            && (serverUiUrl.Scheme == Uri.UriSchemeHttp || serverUiUrl.Scheme == Uri.UriSchemeHttps);
+        WorkspaceView.Source = usingServerUi
+            ? new Uri(serverUiUrl!, $"?configuration={Uri.EscapeDataString(bootstrapConfiguration.ConfigurationVersion)}")
+            : new Uri($"https://{UiHostName}/index.html?v={uiVersion}");
+    }
+
+    private async Task MonitorBootstrapAsync()
+    {
+        var observedConfigurationVersion = bootstrapConfiguration.ConfigurationVersion;
+        var observedUiBaseUrl = bootstrapConfiguration.UiBaseUrl;
+        while (!bootstrapLifetime.IsCancellationRequested)
+        {
+            try
+            {
+                await Task.Delay(TimeSpan.FromSeconds(bootstrapConfiguration.PollSeconds), bootstrapLifetime.Token);
+                var latest = await ClientBootstrapLoader.LoadAsync(bootstrapLifetime.Token);
+                await ClientPackageUpdater.StageAsync(
+                    "desktop",
+                    latest.Desktop,
+                    AppDomain.CurrentDomain.BaseDirectory,
+                    bootstrapLifetime.Token);
+
+                if (!string.Equals(observedConfigurationVersion, latest.ConfigurationVersion, StringComparison.Ordinal)
+                    || !string.Equals(observedUiBaseUrl, latest.UiBaseUrl, StringComparison.OrdinalIgnoreCase))
+                {
+                    observedConfigurationVersion = latest.ConfigurationVersion;
+                    observedUiBaseUrl = latest.UiBaseUrl;
+                    bootstrapConfiguration = latest;
+                    await Dispatcher.BeginInvoke(new Action(() =>
+                    {
+                        if (WorkspaceView.CoreWebView2 == null || !Uri.TryCreate(latest.UiBaseUrl, UriKind.Absolute, out var uiUrl)) return;
+                        usingServerUi = true;
+                        attemptedLocalUiFallback = false;
+                        WorkspaceView.Source = new Uri(uiUrl, $"?configuration={Uri.EscapeDataString(latest.ConfigurationVersion)}");
+                    }));
+                }
+                else
+                {
+                    bootstrapConfiguration = latest;
+                }
+            }
+            catch (OperationCanceledException)
+            {
+                return;
+            }
+            catch
+            {
+                // Keep the current cached configuration and retry on the next interval.
+            }
+        }
     }
 
     private static string Serialize(object value) => new JavaScriptSerializer().Serialize(value);
@@ -294,6 +363,13 @@ public partial class MainWindow : Window
         if (type == "desktop-settings-request")
         {
             _ = PublishDesktopSettingsAsync();
+            return;
+        }
+
+        if (type == "theme-change" && TryReadPayloadString(message, "theme", out var requestedTheme))
+        {
+            currentTheme = requestedTheme == "c" || requestedTheme == "o" ? requestedTheme : "a";
+            embeddedPreview?.ApplyTheme(currentTheme);
             return;
         }
 
@@ -921,6 +997,7 @@ public partial class MainWindow : Window
         }
 
         embeddedPreview = new EDrawingsPreviewControl();
+        embeddedPreview.ApplyTheme(currentTheme);
         embeddedPreview.UserMessageRequested += message => Dispatcher.BeginInvoke(new Action(() =>
             WpfMessageBox.Show(this, message, "UPLM", MessageBoxButton.OK, MessageBoxImage.Information)));
         embeddedPreview.UpdateProperties(previewProperties);
@@ -1109,14 +1186,12 @@ public partial class MainWindow : Window
         var values = new List<KeyValuePair<string, string>>();
         foreach (var field in fields)
         {
-            if (!payload.TryGetValue(field.Key, out var raw)
-                || raw is not string value
-                || string.IsNullOrWhiteSpace(value))
-            {
-                continue;
-            }
-
-            values.Add(new KeyValuePair<string, string>(field.Label, value));
+            var value = payload.TryGetValue(field.Key, out var raw) && raw is string text
+                ? text.Trim()
+                : string.Empty;
+            values.Add(new KeyValuePair<string, string>(
+                field.Label,
+                string.IsNullOrWhiteSpace(value) ? "—" : value));
         }
 
         previewProperties = values;
@@ -1144,6 +1219,7 @@ public partial class MainWindow : Window
 
     private void DisposeClientResources()
     {
+        bootstrapLifetime.Cancel();
         if (reviewOverlay != null)
         {
             reviewOverlay.MessageReceived -= OnReviewOverlayMessageReceived;
@@ -1156,6 +1232,7 @@ public partial class MainWindow : Window
         embeddedPreview?.Dispose();
         embeddedPreview = null;
         apiClient.Dispose();
+        bootstrapLifetime.Dispose();
     }
 
     private static bool TryReadNumber(IReadOnlyDictionary<string, object> payload, string name, out double value)

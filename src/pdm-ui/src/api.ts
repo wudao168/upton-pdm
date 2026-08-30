@@ -1,6 +1,10 @@
-import type { AddDrawingReviewMarkupInput, ApprovalStep, ApprovalU9AutomationResult, AuditEntry, BatchUpdateBomItemsInput, BomEmptyDeclaration, BomGenerationResult, BomHeaderKind, BomItem, BomKind, BomValidationRules, BomVersion, BomVersionState, CreateProjectInput, CreateReleasePackageInput, CreateRoleInput, CreateSubprojectInput, CrmConnectionTestResult, CrmCustomerSyncResult, CrmIntegrationSettings, DocumentKind, DocumentModelDrawingRelation, DocumentNode, DocumentVersionComparison, DocumentVersionSummary, DocumentWhereUsed, DrawingReviewCandidate, DrawingReviewDecision, DrawingReviewPackage, DrawingReviewTarget, EditLockSummary, EquipmentTypeDefinition, FolderPermissionRule, MainProjectStaffingInput, ManagedDocument, ManufacturingBomBaseline, MaterialAttachment, MaterialAttachmentKind, MaterialCategory, MaterialCategoryRule, MaterialCodeApplication, MaterialCodeApplicationStatus, MaterialCodeDecisionResult, MaterialCodeResolution, MaterialKind, MaterialRemovalReadiness, MaterialRemovalResult, MaterialSyncExecutionResult, MaterialSyncTask, MyApprovalTask, OrganizationDirectory, OrganizationUnit, PasswordResetTask, PdmCustomer, PdmMaterial, PdmSystemSettings, PdmUser, PdmUserProfile, ProgramTemplate, ProgramTemplateApprovalDecision, ProgramTemplateAttachmentKind, ProgramTemplateDraftInput, ProgramTemplateRevision, ProgramTemplateTask, ProgramTemplateVersionBump, ProjectBomHeader, ProjectBomU9SyncExecution, ProjectBomU9SyncPreview, ProjectFile, ProjectFileVersion, ProjectFolder, ProjectFolderTemplateNode, ProjectNumberingOptions, ProjectOrganization, ProjectSummary, ProjectVersionItem, ReferenceStatus, ReleasePackageSummary, ReleaseScope, RolePermissionDirectory, SaveMaterialInput, SaveOrganizationUnitInput, SavePdmUserInput, SaveProjectOrganizationInput, StandardLibraryCategory, StandardLibraryMaterialPage, U9BomQueryExecution, U9BomQueryInput, U9BomWriteExecution, U9BomWriteInput, U9BomWritePreview, U9ConnectionTestResult, U9ItemQueryResult, U9MaterialIntegrationSettings, U9MaterialSampleImportResult, U9MaterialSamplePreview, UpdateCrmIntegrationInput, UpdateProjectInput, UpdateU9MaterialIntegrationInput } from './types'
+import type { AddDrawingReviewMarkupInput, ApprovalStep, ApprovalU9AutomationResult, AuditEntry, BatchUpdateBomItemsInput, BomClassification, BomEmptyDeclaration, BomGenerationResult, BomHeaderKind, BomItem, BomKind, BomValidationRules, BomVersion, BomVersionState, CreateProjectInput, CreateReleasePackageInput, CreateRoleInput, CreateSubprojectInput, CrmConnectionTestResult, CrmCustomerSyncResult, CrmIntegrationSettings, DocumentKind, DocumentModelDrawingRelation, DocumentNode, DocumentVersionComparison, DocumentVersionSummary, DocumentWhereUsed, DrawingReviewCandidate, DrawingReviewDecision, DrawingReviewPackage, DrawingReviewTarget, EditLockSummary, EquipmentTypeDefinition, FolderPermissionRule, MainProjectStaffingInput, ManagedDocument, ManufacturingBomBaseline, MaterialAttachment, MaterialAttachmentKind, MaterialCategory, MaterialCategoryRule, MaterialCodeApplication, MaterialCodeApplicationStatus, MaterialCodeDecisionResult, MaterialCodeResolution, MaterialKind, MaterialRemovalReadiness, MaterialRemovalResult, MaterialSyncExecutionResult, MaterialSyncTask, MyApprovalTask, OrganizationDirectory, OrganizationUnit, PasswordResetTask, PdmCustomer, PdmMaterial, PdmSystemSettings, PdmUser, PdmUserProfile, ProgramTemplate, ProgramTemplateApprovalDecision, ProgramTemplateAttachmentKind, ProgramTemplateDraftInput, ProgramTemplateRevision, ProgramTemplateTask, ProgramTemplateVersionBump, ProjectBomHeader, ProjectBomU9SyncExecution, ProjectBomU9SyncPreview, ProjectFile, ProjectFileVersion, ProjectFolder, ProjectFolderTemplateNode, ProjectNumberingOptions, ProjectOrganization, ProjectSummary, ProjectVersionItem, ReferenceStatus, ReleasePackageSummary, ReleaseScope, RolePermissionDirectory, SaveMaterialInput, SaveOrganizationUnitInput, SavePdmUserInput, SaveProjectOrganizationInput, StandardLibraryCategory, StandardLibraryMaterialPage, U9BomQueryExecution, U9BomQueryInput, U9BomWriteExecution, U9BomWriteInput, U9BomWritePreview, U9ConnectionTestResult, U9ItemQueryResult, U9MaterialIntegrationSettings, U9MaterialSampleImportResult, U9MaterialSamplePreview, UpdateCrmIntegrationInput, UpdateProjectInput, UpdateU9MaterialIntegrationInput } from './types'
 
-const apiBase = (import.meta.env.VITE_PDM_API_BASE ?? 'http://127.0.0.1:5080').replace(/\/$/, '')
+import type { BomSourceReclassificationPreview } from './types'
+
+const localDesktopOrigin = window.location.hostname === 'appassets.pdm.local'
+const needsLocalApiFallback = localDesktopOrigin || import.meta.env.MODE === 'test'
+const apiBase = (import.meta.env.VITE_PDM_API_BASE ?? (needsLocalApiFallback ? 'http://127.0.0.1:5080' : '')).replace(/\/$/, '')
 
 export class PdmApiError extends Error {
   constructor(message: string, public readonly status: number) {
@@ -915,8 +919,8 @@ export async function exportBom(projectId: string, kind: BomKind, token: string)
 }
 
 export async function generateMechanicalBom(projectId: string, apply: boolean, token: string): Promise<BomGenerationResult> {
-  const result = await requestJson<{ standardItems: ApiBomItem[]; nonStandardItems: ApiBomItem[]; electricalItems: ApiBomItem[]; unclassifiedItems: ApiBomItem[]; virtualCount: number; unclassifiedCount: number; pendingRemovalCount: number; manualUnmatchedCount: number; applied: boolean }>(`/api/projects/${projectId}/boms/generate?apply=${apply}`, { method: 'POST' }, token)
-  return { ...result, standardItems: result.standardItems.map(mapBomItem), nonStandardItems: result.nonStandardItems.map(mapBomItem), electricalItems: result.electricalItems.map(mapBomItem), unclassifiedItems: result.unclassifiedItems.map(mapBomItem) }
+  const result = await requestJson<{ standardItems: ApiBomItem[]; nonStandardItems: ApiBomItem[]; electricalItems: ApiBomItem[]; unclassifiedItems: ApiBomItem[]; virtualItems: ApiBomItem[]; virtualCount: number; unclassifiedCount: number; pendingRemovalCount: number; manualUnmatchedCount: number; applied: boolean }>(`/api/projects/${projectId}/boms/generate?apply=${apply}`, { method: 'POST' }, token)
+  return { ...result, standardItems: result.standardItems.map(mapBomItem), nonStandardItems: result.nonStandardItems.map(mapBomItem), electricalItems: result.electricalItems.map(mapBomItem), unclassifiedItems: result.unclassifiedItems.map(mapBomItem), virtualItems: result.virtualItems.map(mapBomItem) }
 }
 
 export async function getBomSourceData(projectId: string, token: string): Promise<BomItem[]> {
@@ -954,6 +958,19 @@ export async function batchRestoreBomItems(projectId: string, itemIds: string[],
 export async function restoreBomItemsFromSource(projectId: string, itemIds: string[], token: string): Promise<BomItem[]> {
   const saved = await requestJson<ApiBomItem[]>(`/api/projects/${projectId}/boms/items/restore-source`, {
     method: 'POST', body: JSON.stringify({ itemIds }),
+  }, token)
+  return saved.map(mapBomItem)
+}
+
+export function previewBomSourceReclassification(projectId: string, itemIds: string[], targetKind: 'Standard' | 'NonStandard', token: string): Promise<BomSourceReclassificationPreview> {
+  return requestJson(`/api/projects/${projectId}/boms/items/reclassify-source/preview`, {
+    method: 'POST', body: JSON.stringify({ itemIds, targetKind }),
+  }, token)
+}
+
+export async function reclassifyBomItemsFromSource(projectId: string, itemIds: string[], targetKind: 'Standard' | 'NonStandard', token: string): Promise<BomItem[]> {
+  const saved = await requestJson<ApiBomItem[]>(`/api/projects/${projectId}/boms/items/reclassify-source`, {
+    method: 'POST', body: JSON.stringify({ itemIds, targetKind }),
   }, token)
   return saved.map(mapBomItem)
 }
@@ -1393,7 +1410,7 @@ function mapReferenceNode(
     id: node.nodeId || node.instancePath,
     documentId: documentId ?? undefined,
     drawingNumber: document?.drawingNumber ?? node.fileName.replace(/\.[^.]+$/, ''),
-    name: node.displayName || document?.name || node.fileName.replace(/\.[^.]+$/, ''),
+    name: document?.name || meaningfulReferenceName(node.displayName, node.fileName),
     fileName: node.fileName,
     kind: mapDocumentKind(node.kind),
     configuration: node.configuration || '默认',
@@ -1408,6 +1425,12 @@ function mapReferenceNode(
     status: documentId ? hasStoredVersion ? mapReferenceStatus(node.status) : 'Unarchived' : 'Unregistered',
     children,
   }
+}
+
+function meaningfulReferenceName(displayName: string, fileName: string) {
+  const fallback = fileName.replace(/\.[^.]+$/, '')
+  const name = displayName?.trim()
+  return !name || name.includes('/') || name.includes('\\') ? fallback : name
 }
 
 function uniqueDocumentsByFileName(documents: Iterable<ApiDocument>): Map<string, ApiDocument> {
@@ -1522,7 +1545,7 @@ function reconcileCurrentReferenceTree(
 function mapBomItem(item: ApiBomItem): BomItem {
   return {
     id: item.id,
-    kind: typeof item.kind === 'string' ? item.kind as BomKind : undefined,
+    kind: typeof item.kind === 'string' ? item.kind as BomClassification : undefined,
     sequence: item.sequence,
     drawingNumber: item.drawingNumber,
     name: item.name,

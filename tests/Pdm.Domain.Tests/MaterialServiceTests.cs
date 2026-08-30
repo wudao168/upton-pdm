@@ -11,6 +11,26 @@ public sealed class MaterialServiceTests
     private static readonly Guid ProjectId = Guid.Parse("11111111-1111-1111-1111-111111111111");
 
     [Fact]
+    public async Task MaterialMasterMaintenance_IsLimitedToMaterialManagersWhileBomLookupStillWorks()
+    {
+        var service = CreateService(out _);
+        var command = new SaveMaterialCommand(
+            $"STD-{Guid.NewGuid():N}", "标准化维护料品", MaterialKind.Standard, MaterialSupplyMode.Purchase, "001",
+            "MODEL-001", null, null, "UPTON", null, null, null);
+
+        await Assert.ThrowsAsync<UnauthorizedAccessException>(() =>
+            service.CreateAsync(command, "engineer", UserRole.Engineer, default));
+
+        var created = await service.CreateAsync(command, "standardizer", UserRole.ProcessReviewer, default);
+        Assert.Equal("标准化维护料品", created.Name);
+
+        var bomLookup = await service.ListMaterialsAsync(created.MaterialCode, null, false, 100, "engineer", UserRole.Engineer, default);
+        Assert.Contains(bomLookup, material => material.Id == created.Id);
+        await Assert.ThrowsAsync<UnauthorizedAccessException>(() =>
+            service.ListSyncTasksAsync("engineer", UserRole.Engineer, default));
+    }
+
+    [Fact]
     public async Task Approval_UsesConfigured0101RuleAndCreatesDeterministicPreviewTask()
     {
         var service = CreateService(out var materials);
@@ -755,6 +775,29 @@ public sealed class MaterialServiceTests
         var updated = await workflow.ApplyMaterialCodeToBomAsync(
             ProjectId, application.BomItemId!.Value, decision.Material!.MaterialCode, "standardizer", default);
         Assert.Equal(decision.Material.MaterialCode, updated.DrawingNumber);
+    }
+
+    [Fact]
+    public async Task StandardBomMaterialCode_ReusesOnePendingApplicationForSameModelAndBrand()
+    {
+        var service = CreateService(out var materials, out var repository, out _);
+        var workflow = new PdmWorkflowService(repository, null!, null!, TimeProvider.System);
+        var bom = await workflow.ReplaceBomAsync(ProjectId, BomKind.Standard,
+        [
+            new BomItemInput(1, string.Empty, "磁性开关", 1, "001", null, "D-A93L", "W1", true, Brand: "SMC"),
+            new BomItemInput(2, string.Empty, "磁性开关", 1, "001", null, "D-A93L", "W1", true, Brand: "SMC")
+        ], "admin", UserRole.Administrator, default);
+
+        var applied = await service.ApplyForMaterialCodesAsync(
+            new(ProjectId, bom.Select(item => item.Id).ToArray()), "admin", UserRole.Administrator, default);
+
+        Assert.All(applied, resolution => Assert.Equal(MaterialCodeResolutionStatus.ApplicationPending, resolution.Status));
+        Assert.Single(applied.Select(resolution => resolution.Application?.Id).Distinct());
+        Assert.Single(await materials.ListMaterialCodeApplicationsAsync(ProjectId, MaterialCodeApplicationStatus.Pending, default));
+
+        var resolved = await service.ResolveStandardBomMaterialsAsync(
+            new(ProjectId, [bom[1].Id]), "admin", UserRole.Administrator, default);
+        Assert.Equal(applied[0].Application?.Id, Assert.Single(resolved).Application?.Id);
     }
 
     [Fact]

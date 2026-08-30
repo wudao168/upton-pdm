@@ -45,7 +45,7 @@ const referenceChildren = Array.from({ length: 40 }, (_, index) => ({
 
 test.beforeEach(async ({ page }) => {
   let currentUsername = 'engineer'
-  await page.route('http://127.0.0.1:5080/**', async (route) => {
+  await page.route(/^http:\/\/127\.0\.0\.1:(?:5080|5173)\/(?:api(?:\/.*)?|health)(?:\?.*)?$/, async (route) => {
     const path = new URL(route.request().url()).pathname
     const fulfill = (body: unknown, status = 200) => route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(body) })
     if (path === '/health') return fulfill({ status: 'ok' })
@@ -245,7 +245,7 @@ test('engineer logs in and reads the API-backed PLM workspace', async ({ page },
   await page.getByRole('button', { name: 'BOM', exact: true }).click()
   await page.getByRole('tab', { name: '标准件BOM' }).click()
   await expect(page.locator('.pdm-edit-table tbody tr').first().getByRole('button', { name: '编辑物料编码' })).toHaveText('REAL-STD-001')
-  await page.getByLabel('选择物料').check()
+  await page.locator('.pdm-edit-table tbody tr').first().getByLabel('选择物料').check()
   await expect(page.getByText(/已选择 1 项/)).toBeVisible()
   await page.getByRole('button', { name: '编辑', exact: true }).click()
   const batchDialog = page.getByRole('dialog', { name: '批量编辑BOM属性' })

@@ -116,6 +116,40 @@ public sealed class BomHeaderServiceTests
     }
 
     [Fact]
+    public async Task BomApproval_AutomaticallyCreatesMasterAndApprovedCategoryApplicationsIdempotently()
+    {
+        var service = CreateService(out var materials, out _, out var u9Client);
+
+        var standard = await service.EnsureApplicationsAfterBomApprovalAsync(
+            ProjectId, ProjectBomHeaderKind.Standard, "reviewer", default);
+
+        Assert.Equal(2, standard.ExpectedCount);
+        Assert.Equal(2, standard.GeneratedCount);
+        Assert.Equal(0, standard.ExistingCount);
+        var firstApplications = await materials.ListMaterialCodeApplicationsAsync(
+            ProjectId, MaterialCodeApplicationStatus.Pending, default);
+        Assert.Equal(
+            [ProjectBomHeaderKind.Master, ProjectBomHeaderKind.Standard],
+            firstApplications.Select(application => application.BomHeaderKind).OrderBy(kind => kind).ToArray());
+        Assert.All(firstApplications, application => Assert.Null(application.RequestedMaterialCode));
+
+        var repeated = await service.EnsureApplicationsAfterBomApprovalAsync(
+            ProjectId, ProjectBomHeaderKind.Standard, "reviewer", default);
+        Assert.Equal(0, repeated.GeneratedCount);
+        Assert.Equal(2, repeated.ExistingCount);
+
+        var electrical = await service.EnsureApplicationsAfterBomApprovalAsync(
+            ProjectId, ProjectBomHeaderKind.Electrical, "reviewer", default);
+        Assert.Equal(1, electrical.GeneratedCount);
+        Assert.Equal(1, electrical.ExistingCount);
+        var allApplications = await materials.ListMaterialCodeApplicationsAsync(
+            ProjectId, MaterialCodeApplicationStatus.Pending, default);
+        Assert.Equal(3, allApplications.Count);
+        Assert.Equal(0, u9Client.AuthenticationCount);
+        Assert.Equal(0, u9Client.ItemQueryCount);
+    }
+
+    [Fact]
     public async Task GenerateHierarchy_AfterChildAdded_AppliesOnlyForNewChildHeaders()
     {
         var service = CreateService(out var materials, out var repository);

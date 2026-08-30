@@ -25,6 +25,9 @@ if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administra
     throw 'Run this script from an elevated Administrator PowerShell session.'
 }
 
+Remove-Item -LiteralPath $resultPath -Force -ErrorAction SilentlyContinue
+Remove-Item -LiteralPath $errorPath -Force -ErrorAction SilentlyContinue
+
 foreach ($path in @($apiSource, $apiTarget, $clientSource, $clientTarget, $previewSource, $previewTarget, $programTemplateRoot)) {
     if (-not $path.StartsWith($localRoot + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) {
         throw "Deployment path escaped .local: $path"
@@ -49,9 +52,16 @@ foreach ($component in @(
 
 $serviceStopped = $false
 try {
+    $serviceProcessId = [int](Get-CimInstance Win32_Service -Filter "Name='$serviceName'").ProcessId
     Stop-Service -Name $serviceName -Force
     (Get-Service -Name $serviceName).WaitForStatus('Stopped', [TimeSpan]::FromSeconds(30))
     $serviceStopped = $true
+    if ($serviceProcessId -gt 0) {
+        $serviceProcess = Get-Process -Id $serviceProcessId -ErrorAction SilentlyContinue
+        if ($null -ne $serviceProcess -and -not $serviceProcess.WaitForExit(30000)) {
+            throw "API service process did not exit within 30 seconds: $serviceProcessId"
+        }
+    }
 
     Copy-Item -Path (Join-Path $apiSource '*') -Destination $apiTarget -Recurse -Force
     Copy-Item -Path (Join-Path $clientSource '*') -Destination $clientTarget -Recurse -Force

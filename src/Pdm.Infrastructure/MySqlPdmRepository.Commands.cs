@@ -18,7 +18,7 @@ public sealed partial class MySqlPdmRepository
                    checkout_release_request_reason,updated_at
             FROM document WHERE checked_out_by IS NOT NULL ORDER BY checked_out_at
             """, cancellationToken: cancellationToken));
-        return rows.Select(MapDocument).ToArray();
+        return rows.Select(row => MapDocument(row)).ToArray();
     }
 
     public Task<PdmDocument> CheckoutAsync(Guid documentId, string actor, CancellationToken cancellationToken)

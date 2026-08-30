@@ -176,6 +176,11 @@ function selectTheme(value: PdmTheme) {
   window.localStorage.setItem('pdm_theme', value)
 }
 
+watch(theme, value => {
+  document.documentElement.dataset.pdmTheme = value
+  if (desktopAvailable) postDesktopMessage('theme-change', { theme: value })
+}, { immediate: true })
+
 function toggleSidebar() {
   sidebarCollapsed.value = !sidebarCollapsed.value
   window.localStorage.setItem(sidebarCollapsedMemoryKey, String(sidebarCollapsed.value))
@@ -388,6 +393,7 @@ onMounted(() => {
 onBeforeUnmount(() => {
   window.removeEventListener('pdm-open-project', handleProjectNavigation)
   window.chrome?.webview?.removeEventListener?.('message', handleReviewOverlayAction)
+  if (document.documentElement.dataset.pdmTheme === theme.value) delete document.documentElement.dataset.pdmTheme
 })
 
 async function login(username: string, password: string, rememberCredentials: boolean) {
@@ -569,8 +575,12 @@ async function openWhereUsedParent(projectId: string, parentDocumentId: string) 
 
 <template>
   <div class="pdm-app-shell" :class="`theme-${theme}`">
+    <div v-if="!workspace.authInitialized.value" class="pdm-session-restoring" role="status" aria-label="正在恢复登录状态">
+      <span class="pdm-session-restoring__spinner" aria-hidden="true" />
+      <span>正在恢复登录状态…</span>
+    </div>
     <LoginView
-      v-if="!workspace.authenticated.value"
+      v-else-if="!workspace.authenticated.value"
       compact
       class="pdm-login-page"
       aria-label="未登录主页"
@@ -586,6 +596,7 @@ async function openWhereUsedParent(projectId: string, parentDocumentId: string) 
         :material-count="materialNoticeCount"
         :can-manage-system="canManageSystem"
         :can-view-standard-library="workspace.hasPermission('standard-library.view')"
+        :can-view-materials="workspace.hasPermission('material.view')"
         :collapsed="sidebarCollapsed"
         @navigate="handleNavigation"
       />
@@ -661,8 +672,8 @@ async function openWhereUsedParent(projectId: string, parentDocumentId: string) 
         <MaterialManagement
           v-else-if="activeView === 'materials'"
           :token="workspace.getAccessToken()"
-          :can-edit="workspace.hasPermission('bom.edit')"
-          :can-approve="workspace.hasPermission('release.manage')"
+          :can-edit="workspace.hasPermission('material.manage')"
+          :can-approve="workspace.hasPermission('material.manage')"
           :can-decide-material-code="workspace.hasPermission('approval.decide')"
           :can-manage-integration="workspace.hasPermission('settings.storage.manage')"
           :requested-tab="materialRequestedTab"
@@ -672,7 +683,7 @@ async function openWhereUsedParent(projectId: string, parentDocumentId: string) 
           v-else-if="activeView === 'standard-library'"
           :token="workspace.getAccessToken()"
           :can-manage="workspace.hasPermission('standard-library.manage')"
-          :can-edit="workspace.hasPermission('bom.edit')"
+          :can-edit="workspace.hasPermission('material.manage')"
         />
         <section v-else-if="activeView === 'standard-structure'" class="pdm-panel pdm-workspace-state pdm-standard-structure-state" aria-label="标准结构">
           <PlmCubeIcon

@@ -312,6 +312,136 @@ public sealed class DocumentVersionTests
     }
 
     [Fact]
+    public async Task WorkflowCheckIn_AfterFirstArchive_PreservesPlmPropertiesAndRefreshesFileMetadata()
+    {
+        var repository = new Infrastructure.InMemoryPdmRepository(TimeProvider.System);
+        var project = Assert.Single(await repository.ListProjectsAsync(CancellationToken.None));
+        var document = await repository.RegisterDocumentAsync(
+            new Application.RegisterDocumentCommand(project.Id, "P-PLM-MASTER", "PLM master", "P-PLM-MASTER.SLDPRT", DocumentKind.Part),
+            "engineer",
+            CancellationToken.None);
+        var workflow = new Application.PdmWorkflowService(repository, new RecordingFileStorage(), new NoOpPublisher(), TimeProvider.System);
+
+        document = await repository.CheckoutAsync(document.Id, "engineer", CancellationToken.None);
+        var first = await workflow.CheckInAsync(
+            document.Id,
+            "engineer",
+            UserRole.Administrator,
+            new Application.StoredFile("unused", 1, new string('A', 64), DateTimeOffset.UtcNow),
+            "first archive",
+            new Dictionary<string, string?>
+            {
+                ["全局/材质"] = "Q235",
+                ["SourceFileSha256"] = new string('1', 64)
+            },
+            new CadReferenceSnapshot(Guid.NewGuid(), project.Id, document.Id, DateTimeOffset.UtcNow, "engineer", ReferenceRoot(document, "engineer"), new string('B', 64)),
+            false,
+            false,
+            CancellationToken.None);
+        Assert.Equal("Q235", Assert.IsType<DocumentVersion>(first.Version).PropertySnapshot["全局/材质"]);
+
+        document = await repository.CheckoutAsync(first.Document.Id, "engineer", CancellationToken.None);
+        var second = await workflow.CheckInAsync(
+            document.Id,
+            "engineer",
+            UserRole.Administrator,
+            new Application.StoredFile("unused", 1, new string('C', 64), DateTimeOffset.UtcNow),
+            "normal update",
+            new Dictionary<string, string?>
+            {
+                ["全局/材质"] = "304",
+                ["SourceFileSha256"] = new string('2', 64)
+            },
+            new CadReferenceSnapshot(Guid.NewGuid(), project.Id, document.Id, DateTimeOffset.UtcNow, "engineer", ReferenceRoot(document, "engineer"), new string('D', 64)),
+            false,
+            false,
+            CancellationToken.None,
+            drawingNumber: "LOCAL-NUMBER",
+            name: "Local name");
+
+        var version = Assert.IsType<DocumentVersion>(second.Version);
+        Assert.Equal("Q235", version.PropertySnapshot["全局/材质"]);
+        Assert.Equal(new string('2', 64), version.PropertySnapshot["SourceFileSha256"]);
+        Assert.Equal("P-PLM-MASTER", second.Document.DrawingNumber);
+        Assert.Equal("PLM master", second.Document.Name);
+    }
+
+    [Fact]
+    public async Task WorkflowCheckIn_FormalWriteback_MergesPlmPropertiesIntoNewVersion()
+    {
+        var repository = new Infrastructure.InMemoryPdmRepository(TimeProvider.System);
+        var project = Assert.Single(await repository.ListProjectsAsync(CancellationToken.None));
+        var document = await repository.RegisterDocumentAsync(
+            new Application.RegisterDocumentCommand(project.Id, "P-WRITEBACK", "Writeback part", "P-WRITEBACK.SLDPRT", DocumentKind.Part),
+            "admin",
+            CancellationToken.None);
+        var workflow = new Application.PdmWorkflowService(repository, new RecordingFileStorage(), new NoOpPublisher(), TimeProvider.System);
+
+        document = await repository.CheckoutAsync(document.Id, "admin", CancellationToken.None);
+        var first = await workflow.CheckInAsync(
+            document.Id,
+            "admin",
+            UserRole.Administrator,
+            new Application.StoredFile("unused", 1, new string('A', 64), DateTimeOffset.UtcNow),
+            "first archive",
+            new Dictionary<string, string?>
+            {
+                ["配置:Default/材质"] = "Q235",
+                ["SourceFileSha256"] = new string('1', 64)
+            },
+            new CadReferenceSnapshot(Guid.NewGuid(), project.Id, document.Id, DateTimeOffset.UtcNow, "admin", ReferenceRoot(document, "admin"), new string('B', 64)),
+            false,
+            false,
+            CancellationToken.None);
+        var firstVersion = Assert.IsType<DocumentVersion>(first.Version);
+        var writeback = new CadPropertyWriteback(
+            Guid.NewGuid(),
+            project.Id,
+            Guid.NewGuid(),
+            document.Id,
+            "Default",
+            firstVersion.Id,
+            firstVersion.Revision.Display,
+            new Dictionary<string, string?> { ["材质"] = "304" },
+            CadPropertyWritebackStatus.Pending,
+            "admin",
+            DateTimeOffset.UtcNow);
+        await repository.EnqueueCadPropertyWritebackAsync(writeback, CancellationToken.None);
+        await workflow.StartCadPropertyWritebackAsync(writeback.Id, "admin", UserRole.Administrator, CancellationToken.None);
+
+        var sessionId = Guid.NewGuid();
+        document = await repository.CheckoutAsync(
+            document.Id,
+            "admin",
+            sessionId,
+            "TEST-WS",
+            DateTimeOffset.UtcNow.AddMinutes(15),
+            writeback.Id,
+            CancellationToken.None);
+        var result = await workflow.CheckInAsync(
+            document.Id,
+            "admin",
+            UserRole.Administrator,
+            sessionId,
+            new Application.StoredFile("unused", 1, new string('C', 64), DateTimeOffset.UtcNow),
+            "PLM writeback",
+            new Dictionary<string, string?>
+            {
+                ["配置:Default/材质"] = "LOCAL",
+                ["SourceFileSha256"] = new string('2', 64)
+            },
+            new CadReferenceSnapshot(Guid.NewGuid(), project.Id, document.Id, DateTimeOffset.UtcNow, "admin", ReferenceRoot(document, "admin"), new string('D', 64)),
+            false,
+            false,
+            CancellationToken.None,
+            drawingReviewWritebackId: writeback.Id);
+
+        var version = Assert.IsType<DocumentVersion>(result.Version);
+        Assert.Equal("304", version.PropertySnapshot["配置:Default/材质"]);
+        Assert.Equal(new string('2', 64), version.PropertySnapshot["SourceFileSha256"]);
+    }
+
+    [Fact]
     public async Task CheckIn_DoesNotRequireOrStorePreviewArtifact()
     {
         var repository = new Infrastructure.InMemoryPdmRepository(TimeProvider.System);
@@ -434,7 +564,7 @@ public sealed class DocumentVersionTests
     }
 
     [Fact]
-    public async Task WorkflowCheckIn_WithBatchPropertyIdentity_WritesIdentityAudit()
+    public async Task WorkflowCheckIn_AfterFirstArchive_IgnoresLocalIdentityChanges()
     {
         var repository = new Infrastructure.InMemoryPdmRepository(TimeProvider.System);
         var project = Assert.Single(await repository.ListProjectsAsync(CancellationToken.None));
@@ -469,13 +599,14 @@ public sealed class DocumentVersionTests
             "P-AUDIT-NEW",
             "Updated audit name");
 
-        Assert.Equal("P-AUDIT-NEW", result.Document.DrawingNumber);
+        Assert.Equal("P-AUDIT-OLD", result.Document.DrawingNumber);
+        Assert.Equal("P-AUDIT-OLD", result.Document.Name);
         var audits = await repository.ListAuditAsync("engineer", UserRole.Administrator, 100, CancellationToken.None);
-        Assert.Contains(audits, entry => entry.Action == "document.identity.update" && entry.Detail.Contains("P-AUDIT-NEW", StringComparison.Ordinal));
+        Assert.DoesNotContain(audits, entry => entry.Action == "document.identity.update");
     }
 
     [Fact]
-    public async Task ChildDocumentCheckIn_AutomaticallyReconcilesProjectBomAndReportsMismatches()
+    public async Task ChildDocumentCheckIn_DefersBomReconciliationUntilProjectRootCheckIn()
     {
         var repository = new Infrastructure.InMemoryPdmRepository(TimeProvider.System);
         var project = Assert.Single(await repository.ListProjectsAsync(CancellationToken.None));
@@ -516,9 +647,36 @@ public sealed class DocumentVersionTests
 
         Assert.True(result.VersionCreated);
         Assert.Null(result.BomUpdateError);
-        Assert.NotNull(result.BomUpdate);
-        Assert.True(result.BomUpdate.Applied);
-        Assert.True(result.BomUpdate.UnclassifiedCount + result.BomUpdate.PendingRemovalCount + result.BomUpdate.ManualUnmatchedCount > 0);
+        Assert.Null(result.BomUpdate);
+
+        var rootId = Assert.IsType<Guid>(projectRoot.DocumentId);
+        var rootDocument = Assert.Single(
+            await repository.ListDocumentsAsync(project.Id, CancellationToken.None),
+            document => document.Id == rootId);
+        if (!string.IsNullOrWhiteSpace(rootDocument.CheckedOutBy))
+            await repository.ForceReleaseCheckoutAsync(rootId, "admin", "测试根BOM统一刷新", CancellationToken.None);
+        const string rootActor = "admin";
+        var rootSessionId = Guid.NewGuid();
+        await repository.CheckoutAsync(rootId, rootActor, rootSessionId, "test-machine", DateTimeOffset.UtcNow.AddHours(1), CancellationToken.None);
+        var rootResult = await workflow.CheckInAsync(
+            rootId,
+            rootActor,
+            UserRole.Administrator,
+            rootSessionId,
+            new Application.StoredFile("unused-root", 1, new string('D', 64), DateTimeOffset.UtcNow),
+            "根装配体统一刷新BOM",
+            PreviewSourceProperties('5'),
+            new CadReferenceSnapshot(
+                Guid.NewGuid(), project.Id, rootId, DateTimeOffset.UtcNow, rootActor, NormalizeReferenceStatus(projectRoot), new string('E', 64)),
+            true,
+            true,
+            CancellationToken.None);
+
+        Assert.True(rootResult.VersionCreated);
+        Assert.Null(rootResult.BomUpdateError);
+        Assert.NotNull(rootResult.BomUpdate);
+        Assert.True(rootResult.BomUpdate.Applied);
+        Assert.True(rootResult.BomUpdate.UnclassifiedCount + rootResult.BomUpdate.PendingRemovalCount + rootResult.BomUpdate.ManualUnmatchedCount > 0);
         var refreshed = Assert.Single(
             await repository.GetBomAsync(project.Id, BomKind.Standard, CancellationToken.None),
             item => item.SourceDocumentId == childId);
@@ -760,6 +918,61 @@ public sealed class DocumentVersionTests
         Assert.Contains(manifest.Files, file => file.IsRoot && file.Revision == "W1" && file.Sha256 == new string('3', 64));
         Assert.Contains(manifest.Files, file => file.DocumentId == part.Id && file.Revision == "W1" && file.Sha256 == new string('1', 64));
         Assert.Equal(2, storage.VerifiedFiles.Count);
+    }
+
+    [Fact]
+    public async Task ControlledOpenManifest_CurrentLatestNormalizesConflictingInstanceVersionsButHistoricalStaysStrict()
+    {
+        var repository = new Infrastructure.InMemoryPdmRepository(TimeProvider.System);
+        var project = Assert.Single(await repository.ListProjectsAsync(CancellationToken.None));
+        var part = await RegisterAndCheckInAsync(repository, project, "P-CONFLICT", new string('1', 64));
+        part = await repository.CheckoutAsync(part.Id, "engineer", CancellationToken.None);
+        part = (await repository.CheckInVersionAsync(
+            part.Id,
+            "engineer",
+            Commit(project, part, ReferenceRoot(part, "engineer"), new string('2', 64), "part W2"),
+            CancellationToken.None)).Document;
+
+        var assembly = await repository.RegisterDocumentAsync(
+            new Application.RegisterDocumentCommand(project.Id, "A-CONFLICT", "Conflict Assembly", "A-CONFLICT.SLDASM", DocumentKind.Assembly),
+            "engineer",
+            CancellationToken.None);
+        assembly = await repository.CheckoutAsync(assembly.Id, "engineer", CancellationToken.None);
+        var firstInstance = ReferenceRoot(part, "engineer") with
+        {
+            NodeId = Guid.NewGuid(),
+            InstancePath = "A-CONFLICT/P-CONFLICT-1",
+            Revision = RevisionLabel.Parse("W1")
+        };
+        var secondInstance = firstInstance with
+        {
+            NodeId = Guid.NewGuid(),
+            InstancePath = "A-CONFLICT/P-CONFLICT-2",
+            Revision = RevisionLabel.Parse("W2")
+        };
+        var root = new DocumentReferenceNode(
+            Guid.NewGuid(), assembly.Id, "A-CONFLICT", assembly.FileName, assembly.Name, DocumentKind.Assembly,
+            "Default", 1, ReferenceNodeStatus.Normal, assembly.Revision, "engineer", [firstInstance, secondInstance]);
+        assembly = (await repository.CheckInVersionAsync(
+            assembly.Id,
+            "engineer",
+            Commit(project, assembly, root, new string('3', 64), "assembly W1", isProjectRoot: true),
+            CancellationToken.None)).Document;
+
+        var workflow = new Application.PdmWorkflowService(repository, new RecordingFileStorage(), new NoOpPublisher(), TimeProvider.System);
+        var currentManifest = await workflow.CreateControlledOpenManifestAsync(
+            assembly.Id, null, false, false, "engineer", UserRole.Administrator, CancellationToken.None);
+
+        Assert.Equal(2, currentManifest.Files.Count);
+        Assert.Contains(currentManifest.Files, file => file.DocumentId == part.Id && file.Revision == "W2" && file.Sha256 == new string('2', 64));
+        Assert.Contains(currentManifest.Warnings, warning =>
+            warning.Contains("P-CONFLICT.SLDPRT", StringComparison.Ordinal)
+            && warning.Contains("最新受控版本W2", StringComparison.Ordinal));
+
+        var assemblyVersion = Assert.Single(await repository.ListDocumentVersionsAsync(assembly.Id, CancellationToken.None));
+        var exception = await Assert.ThrowsAsync<Application.PdmRuleException>(() => workflow.CreateControlledOpenManifestAsync(
+            assembly.Id, assemblyVersion.Id, false, false, "engineer", UserRole.Administrator, CancellationToken.None));
+        Assert.Contains("快照中引用了不同版本", exception.Message, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -1158,6 +1371,13 @@ public sealed class DocumentVersionTests
 
     private static DocumentReferenceNode ReferenceRoot(PdmDocument document, string actor) =>
         new(Guid.NewGuid(), document.Id, document.DrawingNumber, document.FileName, document.Name, document.Kind, "Default", 1, ReferenceNodeStatus.Normal, document.Revision, actor, []);
+
+    private static DocumentReferenceNode NormalizeReferenceStatus(DocumentReferenceNode node) =>
+        node with
+        {
+            Status = ReferenceNodeStatus.Normal,
+            Children = node.Children.Select(NormalizeReferenceStatus).ToArray()
+        };
 
     private static IReadOnlyDictionary<string, string?> PreviewSourceProperties(char sourceHashCharacter) =>
         new Dictionary<string, string?> { ["SourceFileSha256"] = new string(sourceHashCharacter, 64) };

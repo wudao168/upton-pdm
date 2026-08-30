@@ -60,9 +60,11 @@ function setPermission(code: string, checked: boolean) {
   if (checked && (code.startsWith('project.') || ['document.edit', 'bom.edit', 'release.manage', 'approval.decide'].includes(code))) next.add('project.view')
   if (checked && ['document.edit', 'bom.edit', 'release.manage', 'approval.decide'].includes(code)) next.add('project.content.view')
   if (checked && code === 'system.role.edit') next.add('system.role.view')
+  if (checked && code === 'material.manage') next.add('material.view')
   if (!checked && code === 'project.view') [...next].filter(item => item.startsWith('project.') || ['document.edit', 'bom.edit', 'release.manage', 'approval.decide'].includes(item)).forEach(item => next.delete(item))
   if (!checked && code === 'project.content.view') ['document.edit', 'bom.edit', 'release.manage', 'approval.decide'].forEach(item => next.delete(item))
   if (!checked && code === 'system.role.view') next.delete('system.role.edit')
+  if (!checked && code === 'material.view') next.delete('material.manage')
   draft.value = [...next]
 }
 

@@ -388,6 +388,7 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
                    d.checked_out_by,d.checked_out_at,d.checkout_session_id,d.checkout_machine,d.checkout_last_heartbeat_at,
                    d.checkout_lease_expires_at,d.checkout_release_requested_by,d.checkout_release_requested_at,
                    d.checkout_release_request_reason,d.updated_at,
+                   (SELECT v.property_snapshot_json FROM document_version v WHERE v.document_id=d.id ORDER BY v.created_at DESC LIMIT 1) latest_property_snapshot_json,
                    (SELECT COUNT(*) FROM document_version v WHERE v.document_id=d.id) stored_version_count
             FROM document d
             WHERE d.project_id = @ProjectId
@@ -395,7 +396,8 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
             """,
             new { ProjectId = projectId },
             cancellationToken: cancellationToken));
-        return rows.Select(MapDocument).ToArray();
+        var nameProperty = await GetBomNamePropertyAsync(connection, cancellationToken);
+        return rows.Select(row => MapDocument(row, ResolveDocumentDisplayName(row, nameProperty))).ToArray();
     }
 
     public async Task<IReadOnlyList<PdmDocument>> ListProjectTreeDocumentsAsync(Guid projectId, CancellationToken cancellationToken)
@@ -407,6 +409,7 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
                    d.checked_out_by,d.checked_out_at,d.checkout_session_id,d.checkout_machine,d.checkout_last_heartbeat_at,
                    d.checkout_lease_expires_at,d.checkout_release_requested_by,d.checkout_release_requested_at,
                    d.checkout_release_request_reason,d.updated_at,
+                   (SELECT v.property_snapshot_json FROM document_version v WHERE v.document_id=d.id ORDER BY v.created_at DESC LIMIT 1) latest_property_snapshot_json,
                    (SELECT COUNT(*) FROM document_version v WHERE v.document_id=d.id) stored_version_count
             FROM document d
             INNER JOIN project requested ON requested.id=@ProjectId
@@ -416,7 +419,8 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
             ORDER BY owner_project.parent_project_id,owner_project.child_sequence,d.drawing_number,d.kind
             """,
             new { ProjectId = projectId }, cancellationToken: cancellationToken));
-        return rows.Select(MapDocument).ToArray();
+        var nameProperty = await GetBomNamePropertyAsync(connection, cancellationToken);
+        return rows.Select(row => MapDocument(row, ResolveDocumentDisplayName(row, nameProperty))).ToArray();
     }
 
     public async Task<IReadOnlyList<DocumentContentFingerprint>> ListDocumentContentFingerprintsAsync(
@@ -485,7 +489,7 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
             FROM document
             """,
             cancellationToken: cancellationToken));
-        var documentsById = documentRows.Select(MapDocument).ToDictionary(document => document.Id);
+        var documentsById = documentRows.Select(row => MapDocument(row)).ToDictionary(document => document.Id);
         var result = new List<DocumentWhereUsed>();
         foreach (var row in snapshotRows)
         {
@@ -739,7 +743,7 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
         return items.OrderBy(item => item.Sequence).ToArray();
     }
 
-    public async Task ApplyBomBatchAsync(Guid projectId, IReadOnlyList<BomItem> standardItems, IReadOnlyList<BomItem> nonStandardItems, IReadOnlyList<BomItem> unclassifiedItems, IReadOnlyList<BomItem> electricalItems, IReadOnlyList<CadPropertyWriteback> writebacks, IReadOnlyList<AuditEntry> auditEntries, CancellationToken cancellationToken)
+    public async Task ApplyBomBatchAsync(Guid projectId, IReadOnlyList<BomItem> standardItems, IReadOnlyList<BomItem> nonStandardItems, IReadOnlyList<BomItem> unclassifiedItems, IReadOnlyList<BomItem> electricalItems, IReadOnlyList<BomItem> virtualItems, IReadOnlyList<CadPropertyWriteback> writebacks, IReadOnlyList<AuditEntry> auditEntries, CancellationToken cancellationToken)
     {
         await using var connection = await OpenAsync(cancellationToken);
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
@@ -749,11 +753,11 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
         if (exists != 1) throw new PdmNotFoundException("项目不存在或已停用。");
 
         var now = timeProvider.GetUtcNow().UtcDateTime;
-        var allItems = standardItems.Concat(nonStandardItems).Concat(unclassifiedItems).Concat(electricalItems).ToArray();
+        var allItems = standardItems.Concat(nonStandardItems).Concat(unclassifiedItems).Concat(electricalItems).Concat(virtualItems).ToArray();
         if (allItems.Select(item => item.Id).Distinct().Count() != allItems.Length)
             throw new PdmConflictException("同一BOM对账批次中存在重复物料标识，已取消更新。");
         await connection.ExecuteAsync(new CommandDefinition(
-            "UPDATE bom_item SET sequence_no=-sequence_no WHERE project_id=@ProjectId AND bom_kind IN ('Standard','NonStandard','Unclassified','Electrical')",
+            "UPDATE bom_item SET sequence_no=-sequence_no WHERE project_id=@ProjectId AND bom_kind IN ('Standard','NonStandard','Unclassified','Electrical','Virtual')",
             new { ProjectId = projectId }, transaction, cancellationToken: cancellationToken));
         foreach (var item in allItems)
         {
@@ -765,8 +769,8 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
 
         var retainedIds = allItems.Select(item => item.Id).ToArray();
         var deleteSql = retainedIds.Length == 0
-            ? "DELETE FROM bom_item WHERE project_id=@ProjectId AND bom_kind IN ('Standard','NonStandard','Unclassified','Electrical')"
-            : "DELETE FROM bom_item WHERE project_id=@ProjectId AND bom_kind IN ('Standard','NonStandard','Unclassified','Electrical') AND id NOT IN @RetainedIds";
+            ? "DELETE FROM bom_item WHERE project_id=@ProjectId AND bom_kind IN ('Standard','NonStandard','Unclassified','Electrical','Virtual')"
+            : "DELETE FROM bom_item WHERE project_id=@ProjectId AND bom_kind IN ('Standard','NonStandard','Unclassified','Electrical','Virtual') AND id NOT IN @RetainedIds";
         await connection.ExecuteAsync(new CommandDefinition(
             deleteSql,
             new { ProjectId = projectId, RetainedIds = retainedIds }, transaction, cancellationToken: cancellationToken));
@@ -1444,8 +1448,8 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
         return number.Length == 7 && int.TryParse(number, out sequence);
     }
 
-    private static PdmDocument MapDocument(DocumentRow row) =>
-        new(row.Id, row.ProjectId, row.DrawingNumber, row.Name, row.FileName, Enum.Parse<DocumentKind>(row.Kind), Enum.Parse<DocumentLifecycleState>(row.LifecycleState), RevisionLabel.Parse(row.RevisionLabel), row.CheckedOutBy, AsUtc(row.UpdatedAt))
+    private static PdmDocument MapDocument(DocumentRow row, string? displayName = null) =>
+        new(row.Id, row.ProjectId, row.DrawingNumber, displayName ?? row.Name, row.FileName, Enum.Parse<DocumentKind>(row.Kind), Enum.Parse<DocumentLifecycleState>(row.LifecycleState), RevisionLabel.Parse(row.RevisionLabel), row.CheckedOutBy, AsUtc(row.UpdatedAt))
         {
             FolderId = row.FolderId,
             StoredVersionCount = row.StoredVersionCount,
@@ -1458,6 +1462,32 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
             CheckoutReleaseRequestedAt = AsNullableUtc(row.CheckoutReleaseRequestedAt),
             CheckoutReleaseRequestReason = row.CheckoutReleaseRequestReason
         };
+
+    private static async Task<string> GetBomNamePropertyAsync(DbConnection connection, CancellationToken cancellationToken) =>
+        await connection.QuerySingleOrDefaultAsync<string>(new CommandDefinition(
+            "SELECT setting_value FROM pdm_system_setting WHERE setting_key='bom_name_property'",
+            cancellationToken: cancellationToken)) ?? "物料名称";
+
+    private string ResolveDocumentDisplayName(DocumentRow row, string configuredNameProperty)
+    {
+        return DocumentDisplayNameResolver.Resolve(row.Name, row.DrawingNumber, ParseLatestProperties(row), configuredNameProperty);
+    }
+
+    private static IReadOnlyDictionary<string, string?> ParseLatestProperties(DocumentRow row)
+    {
+        if (string.IsNullOrWhiteSpace(row.LatestPropertySnapshotJson))
+            return new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
+        try
+        {
+            return JsonSerializer.Deserialize<Dictionary<string, string?>>(row.LatestPropertySnapshotJson)
+                ?? new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
+        }
+        catch (JsonException)
+        {
+            // A damaged legacy snapshot must not prevent the document list from loading.
+            return new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
+        }
+    }
 
     private static DateTimeOffset AsUtc(DateTime value) => DateTime.SpecifyKind(value, DateTimeKind.Utc);
 
@@ -1677,6 +1707,7 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
         public int? StoredVersionCount { get; init; }
         public string DrawingNumber { get; init; } = string.Empty;
         public string Name { get; init; } = string.Empty;
+        public string? LatestPropertySnapshotJson { get; init; }
         public string FileName { get; init; } = string.Empty;
         public string Kind { get; init; } = string.Empty;
         public string LifecycleState { get; init; } = string.Empty;

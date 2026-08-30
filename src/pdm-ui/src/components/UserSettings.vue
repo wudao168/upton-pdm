@@ -201,7 +201,7 @@ async function resetPassword(user: PdmUser) {
 .pdm-user-settings { min-height: 0; }
 .user-settings-tabs { display: flex; gap: 28px; margin-bottom: 12px; padding: 0 16px; border: 1px solid var(--pdm-border); border-radius: 7px; background: var(--pdm-surface); }
 .user-settings-tabs button { min-width: 74px; min-height: 42px; border: 0; border-bottom: 2px solid transparent; border-radius: 0; background: transparent; color: var(--pdm-text); cursor: pointer; }
-.user-settings-tabs button:hover { color: var(--pdm-blue); }.user-settings-tabs button:focus-visible { outline: 2px solid rgba(59, 130, 246, .28); outline-offset: -3px; }
+.user-settings-tabs button:hover { color: var(--pdm-blue); }.user-settings-tabs button:focus-visible { outline: 2px solid var(--pdm-theme-accent-focus); outline-offset: -3px; }
 .user-settings-tabs button.is-active { border-bottom-color: var(--pdm-blue); background: transparent; color: var(--pdm-blue); font-weight: 500; }
 .user-company-context { display: grid; grid-template-columns: minmax(210px, auto) minmax(260px, 390px) minmax(180px, 1fr); align-items: center; gap: 18px; margin-bottom: 12px; padding: 12px 16px; }.user-company-context > div { display: grid; gap: 3px; }.user-company-context small { color: var(--pdm-muted); }.user-company-context select { min-height: 36px; border: 1px solid var(--pdm-border); border-radius: 6px; padding: 0 10px; background: var(--pdm-surface); color: var(--pdm-text); }.user-company-context > span { overflow: hidden; color: var(--pdm-muted); text-align: right; text-overflow: ellipsis; white-space: nowrap; }
 .user-directory { min-height: 0; display: flex; flex: 1 1 auto; flex-direction: column; padding: 16px; overflow: hidden; }

@@ -14,7 +14,11 @@ namespace Upton.Pdm.SolidWorks;
 internal sealed class PdmApiClient : IDisposable
 {
     private readonly HttpClient httpClient;
+    private readonly HttpClient controlledOpenHttpClient;
     private readonly JavaScriptSerializer serializer = new JavaScriptSerializer { MaxJsonLength = int.MaxValue };
+    private int authenticationExpiredRaised;
+
+    public event EventHandler AuthenticationExpired;
 
     public PdmApiClient(string baseAddress)
     {
@@ -23,6 +27,11 @@ internal sealed class PdmApiClient : IDisposable
             BaseAddress = new Uri(baseAddress.TrimEnd('/') + "/", UriKind.Absolute),
             Timeout = TimeSpan.FromSeconds(30)
         };
+        controlledOpenHttpClient = new HttpClient
+        {
+            BaseAddress = httpClient.BaseAddress,
+            Timeout = TimeSpan.FromMinutes(15)
+        };
     }
 
     public bool IsAuthenticated => httpClient.DefaultRequestHeaders.Authorization != null;
@@ -30,7 +39,9 @@ internal sealed class PdmApiClient : IDisposable
     public async Task<LoginResponseDto> LoginAsync(string username, string password, CancellationToken cancellationToken)
     {
         var response = await PostJsonAsync<LoginResponseDto>("api/auth/login", new { username, password }, cancellationToken).ConfigureAwait(false);
+        Interlocked.Exchange(ref authenticationExpiredRaised, 0);
         httpClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", response.AccessToken);
+        controlledOpenHttpClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", response.AccessToken);
         SetActiveCompany(response.ActiveCompanyId);
         return response;
     }
@@ -38,7 +49,9 @@ internal sealed class PdmApiClient : IDisposable
     public void SetActiveCompany(Guid companyId)
     {
         httpClient.DefaultRequestHeaders.Remove("X-Company-Id");
+        controlledOpenHttpClient.DefaultRequestHeaders.Remove("X-Company-Id");
         if (companyId != Guid.Empty) httpClient.DefaultRequestHeaders.Add("X-Company-Id", companyId.ToString());
+        if (companyId != Guid.Empty) controlledOpenHttpClient.DefaultRequestHeaders.Add("X-Company-Id", companyId.ToString());
     }
 
     public Task<List<ProjectDto>> GetProjectsAsync(CancellationToken cancellationToken) =>
@@ -67,6 +80,7 @@ internal sealed class PdmApiClient : IDisposable
 
             if (!response.IsSuccessStatusCode)
             {
+                ThrowAuthenticationExpiredIfNeeded(response);
                 throw new InvalidOperationException(GetErrorMessage(response.StatusCode.ToString(), body));
             }
 
@@ -74,16 +88,26 @@ internal sealed class PdmApiClient : IDisposable
         }
     }
 
-    public Task<ControlledOpenManifestDto> CreateControlledOpenManifestAsync(
+    public async Task<ControlledOpenManifestDto> CreateControlledOpenManifestAsync(
         Guid documentId,
         Guid? versionId,
         bool releasedOnly,
         bool forEdit,
-        CancellationToken cancellationToken) =>
-        PostJsonAsync<ControlledOpenManifestDto>(
-            string.Concat("api/documents/", documentId, "/open-manifest"),
-            new { versionId, releasedOnly, forEdit },
-            cancellationToken);
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            return await PostJsonAsync<ControlledOpenManifestDto>(
+                controlledOpenHttpClient,
+                string.Concat("api/documents/", documentId, "/open-manifest"),
+                new { versionId, releasedOnly, forEdit },
+                cancellationToken).ConfigureAwait(false);
+        }
+        catch (TaskCanceledException exception) when (!cancellationToken.IsCancellationRequested)
+        {
+            throw new TimeoutException("准备受控图档超时。大型装配需要逐项校验受控文件，请确认PLM服务和文件库可访问后重试。", exception);
+        }
+    }
 
     public Task<List<DocumentRegistrationMatchDto>> PreflightDocumentRegistrationAsync(
         Guid projectId,
@@ -203,7 +227,13 @@ internal sealed class PdmApiClient : IDisposable
         return result;
     }
 
-    public async Task<StoredVersionFile> UploadVersionFileAsync(Guid projectId, string filePath, Guid documentId, string originalFilePath, CancellationToken cancellationToken)
+    public async Task<StoredVersionFile> UploadVersionFileAsync(
+        Guid projectId,
+        string filePath,
+        Guid documentId,
+        string originalFilePath,
+        CancellationToken cancellationToken,
+        Action<long, long> reportProgress = null)
     {
         var file = new FileInfo(filePath);
         var originalFile = new FileInfo(originalFilePath);
@@ -214,14 +244,21 @@ internal sealed class PdmApiClient : IDisposable
         {
             var buffer = new byte[session.ChunkSize];
             var chunkIndex = 0;
+            long uploaded = 0;
             int read;
             while ((read = await input.ReadAsync(buffer, 0, buffer.Length, cancellationToken).ConfigureAwait(false)) > 0)
             {
                 using (var content = new ByteArrayContent(buffer, 0, read))
                 using (var response = await httpClient.PutAsync(string.Concat("api/uploads/sessions/", session.Id, "/chunks/", chunkIndex), content, cancellationToken).ConfigureAwait(false))
                 {
-                    if (!response.IsSuccessStatusCode) throw new InvalidOperationException(string.Concat("版本文件第", chunkIndex + 1, "块上传失败。"));
+                    if (!response.IsSuccessStatusCode)
+                    {
+                        ThrowAuthenticationExpiredIfNeeded(response);
+                        throw new InvalidOperationException(string.Concat("版本文件第", chunkIndex + 1, "块上传失败。"));
+                    }
                 }
+                uploaded += read;
+                reportProgress?.Invoke(uploaded, file.Length);
                 chunkIndex++;
             }
         }
@@ -253,7 +290,11 @@ internal sealed class PdmApiClient : IDisposable
         if (File.Exists(partialPath)) File.Delete(partialPath);
         using (var response = await httpClient.GetAsync(string.Concat("api/documents/", documentId, "/versions/", versionId, "/file?download=false"), cancellationToken).ConfigureAwait(false))
         {
-            if (!response.IsSuccessStatusCode) throw new InvalidOperationException("历史版本文件读取失败。");
+            if (!response.IsSuccessStatusCode)
+            {
+                ThrowAuthenticationExpiredIfNeeded(response);
+                throw new InvalidOperationException("历史版本文件读取失败。");
+            }
             using (var input = await response.Content.ReadAsStreamAsync().ConfigureAwait(false))
             using (var output = new FileStream(partialPath, FileMode.CreateNew, FileAccess.Write, FileShare.None)) await input.CopyToAsync(output).ConfigureAwait(false);
         }
@@ -286,6 +327,7 @@ internal sealed class PdmApiClient : IDisposable
             {
                 if (!response.IsSuccessStatusCode)
                 {
+                    ThrowAuthenticationExpiredIfNeeded(response);
                     throw new InvalidOperationException("PLM最新版本文件读取失败。");
                 }
 
@@ -338,6 +380,7 @@ internal sealed class PdmApiClient : IDisposable
             {
                 if (!response.IsSuccessStatusCode)
                 {
+                    ThrowAuthenticationExpiredIfNeeded(response);
                     throw new InvalidOperationException(string.Concat(file.FileName, "的受控版本读取失败。"));
                 }
 
@@ -388,7 +431,11 @@ internal sealed class PdmApiClient : IDisposable
         return string.Concat(name, "__PDM_", revisionToken, "_", versionId.ToString("N").Substring(0, 8), extension);
     }
 
-    public void Dispose() => httpClient.Dispose();
+    public void Dispose()
+    {
+        controlledOpenHttpClient.Dispose();
+        httpClient.Dispose();
+    }
 
     private async Task<T> GetJsonAsync<T>(string path, CancellationToken cancellationToken)
     {
@@ -397,6 +444,7 @@ internal sealed class PdmApiClient : IDisposable
             var body = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
             if (!response.IsSuccessStatusCode)
             {
+                ThrowAuthenticationExpiredIfNeeded(response);
                 throw new InvalidOperationException(GetErrorMessage(response.StatusCode.ToString(), body));
             }
 
@@ -405,14 +453,21 @@ internal sealed class PdmApiClient : IDisposable
     }
 
     private async Task<T> PostJsonAsync<T>(string path, object payload, CancellationToken cancellationToken)
+        => await PostJsonAsync<T>(httpClient, path, payload, cancellationToken).ConfigureAwait(false);
+
+    private async Task<T> PostJsonAsync<T>(HttpClient client, string path, object payload, CancellationToken cancellationToken)
     {
         var json = serializer.Serialize(payload);
         using (var content = new StringContent(json, Encoding.UTF8, "application/json"))
-        using (var response = await httpClient.PostAsync(path, content, cancellationToken).ConfigureAwait(false))
+        using (var response = await client.PostAsync(path, content, cancellationToken).ConfigureAwait(false))
         {
             var body = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
             if (!response.IsSuccessStatusCode)
             {
+                if (!string.Equals(path, "api/auth/login", StringComparison.OrdinalIgnoreCase))
+                {
+                    ThrowAuthenticationExpiredIfNeeded(response);
+                }
                 throw new InvalidOperationException(GetErrorMessage(response.StatusCode.ToString(), body));
             }
 
@@ -463,6 +518,23 @@ internal sealed class PdmApiClient : IDisposable
             checkedOutBy = node.CheckedOutBy,
             children
         };
+    }
+
+    private void ThrowAuthenticationExpiredIfNeeded(HttpResponseMessage response)
+    {
+        if (response == null || response.StatusCode != System.Net.HttpStatusCode.Unauthorized)
+        {
+            return;
+        }
+
+        httpClient.DefaultRequestHeaders.Authorization = null;
+        controlledOpenHttpClient.DefaultRequestHeaders.Authorization = null;
+        if (Interlocked.Exchange(ref authenticationExpiredRaised, 1) == 0)
+        {
+            AuthenticationExpired?.Invoke(this, EventArgs.Empty);
+        }
+
+        throw new InvalidOperationException("PLM登录已过期，请重新登录。");
     }
 
     private static object ToRevisionRequest(string revision)
@@ -592,6 +664,7 @@ internal sealed class DocumentDto
     public DateTime? CheckedOutAt { get; set; }
     public Guid? CheckoutSessionId { get; set; }
     public bool DrawingReviewLocked { get; set; }
+    public int? StoredVersionCount { get; set; }
     public string CheckoutMachine { get; set; }
     public DateTime? CheckoutLastHeartbeatAt { get; set; }
     public DateTime? CheckoutLeaseExpiresAt { get; set; }

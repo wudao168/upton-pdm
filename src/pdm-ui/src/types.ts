@@ -202,7 +202,7 @@ export interface OrganizationUnit {
   code: string
   name: string
   kind: OrganizationUnitKind
-  canManufacture?: boolean
+  canManufacture: boolean
   isActive: boolean
   sortOrder: number
 }
@@ -387,7 +387,7 @@ export interface EditLockSummary {
 
 export interface BomItem {
   id?: string
-  kind?: BomKind
+  kind?: BomClassification
   sequence: number
   drawingNumber: string
   name: string
@@ -423,10 +423,11 @@ export interface BomItem {
 }
 
 export type BomKind = 'Standard' | 'NonStandard' | 'Unclassified' | 'Electrical'
+export type BomClassification = BomKind | 'Virtual'
 export interface BatchUpdateBomItemsInput {
   itemIds: string[]
   fields: string[]
-  targetKind?: BomKind
+  targetKind?: BomClassification
   unit?: string
   drawingNumber?: string
   name?: string
@@ -441,12 +442,34 @@ export interface BatchUpdateBomItemsInput {
   parentDrawingNumber?: string
   complete?: boolean
 }
+
+export interface BomSourceReclassificationItemPreview {
+  itemId: string
+  currentKind: BomClassification
+  targetKind: 'Standard' | 'NonStandard'
+  currentDrawingNumber: string
+  sourceDrawingNumber: string
+  resultDrawingNumber: string
+  currentName: string
+  sourceName: string
+  changedFields: string[]
+  officialMaterialCodeProtected: boolean
+}
+
+export interface BomSourceReclassificationPreview {
+  targetKind: 'Standard' | 'NonStandard'
+  itemCount: number
+  changedItemCount: number
+  items: BomSourceReclassificationItemPreview[]
+}
+
 export interface BomEmptyDeclaration { kind: BomKind; declaredEmpty: boolean; updatedBy?: string; updatedAt?: string }
 export interface BomGenerationResult {
   standardItems: BomItem[]
   nonStandardItems: BomItem[]
   electricalItems: BomItem[]
   unclassifiedItems: BomItem[]
+  virtualItems: BomItem[]
   virtualCount: number
   unclassifiedCount: number
   pendingRemovalCount: number

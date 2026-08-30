@@ -191,6 +191,7 @@ builder.Services.AddScoped<CompanySessionService>();
 builder.Services.AddProblemDetails();
 
 var app = builder.Build();
+var deployedWebRoot = Path.Combine(AppContext.BaseDirectory, "wwwroot");
 app.UseExceptionHandler(exceptionHandler => exceptionHandler.Run(async context =>
 {
     var exception = context.Features.Get<IExceptionHandlerFeature>()?.Error;
@@ -210,6 +211,12 @@ app.UseExceptionHandler(exceptionHandler => exceptionHandler.Run(async context =
         Detail = status == 500 && !app.Environment.IsDevelopment() ? null : exception?.Message
     });
 }));
+if (Directory.Exists(deployedWebRoot))
+{
+    var deployedFiles = new Microsoft.Extensions.FileProviders.PhysicalFileProvider(deployedWebRoot);
+    app.UseDefaultFiles(new DefaultFilesOptions { FileProvider = deployedFiles });
+    app.UseStaticFiles(new StaticFileOptions { FileProvider = deployedFiles });
+}
 app.UseCors("PdmClients");
 app.UseAuthentication();
 app.UseMiddleware<CompanyContextMiddleware>();
@@ -221,6 +228,33 @@ app.MapPdmBomHeaderEndpoints();
 app.MapProgramTemplateEndpoints();
 app.MapProjectFileEndpoints();
 app.MapU9BomEndpoints();
+if (Directory.Exists(deployedWebRoot))
+{
+    app.MapGet("/{**path}", async context =>
+    {
+        if (context.Request.Path.StartsWithSegments("/api") || context.Request.Path.StartsWithSegments("/health"))
+        {
+            context.Response.StatusCode = StatusCodes.Status404NotFound;
+            return;
+        }
+
+        var relativePath = (context.Request.Path.Value ?? string.Empty).TrimStart('/').Replace('/', Path.DirectorySeparatorChar);
+        var requestedFile = Path.GetFullPath(Path.Combine(deployedWebRoot, relativePath));
+        var deployedRootPrefix = Path.GetFullPath(deployedWebRoot).TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
+        if (requestedFile.StartsWith(deployedRootPrefix, StringComparison.OrdinalIgnoreCase) && File.Exists(requestedFile))
+        {
+            var contentTypes = new Microsoft.AspNetCore.StaticFiles.FileExtensionContentTypeProvider();
+            context.Response.ContentType = contentTypes.TryGetContentType(requestedFile, out var contentType)
+                ? contentType
+                : "application/octet-stream";
+            await context.Response.SendFileAsync(requestedFile);
+            return;
+        }
+
+        context.Response.ContentType = "text/html; charset=utf-8";
+        await context.Response.SendFileAsync(Path.Combine(deployedWebRoot, "index.html"));
+    });
+}
 try
 {
     app.Run();

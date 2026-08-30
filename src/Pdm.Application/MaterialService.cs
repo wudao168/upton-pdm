@@ -20,14 +20,38 @@ public sealed class MaterialService(
     public Task<IReadOnlyList<PdmMaterial>> ListMaterialsAsync(string? query, string? categoryCode, bool includeArchived, int limit, CancellationToken cancellationToken) =>
         materials.ListMaterialsAsync(query, categoryCode, includeArchived, limit, cancellationToken);
 
+    public async Task<IReadOnlyList<PdmMaterial>> ListMaterialsAsync(string? query, string? categoryCode, bool includeArchived, int limit, string actor, UserRole role, CancellationToken cancellationToken)
+    {
+        await RequireAnyPermissionAsync(actor, role, [PermissionCodes.MaterialView, PermissionCodes.BomEdit, PermissionCodes.StandardLibraryView], cancellationToken);
+        return await materials.ListMaterialsAsync(query, categoryCode, includeArchived, limit, cancellationToken);
+    }
+
     public Task<IReadOnlyList<MaterialCategory>> ListCategoriesAsync(bool includeHidden, CancellationToken cancellationToken) =>
         materials.ListCategoriesAsync(includeHidden, cancellationToken);
+
+    public async Task<IReadOnlyList<MaterialCategory>> ListCategoriesAsync(bool includeHidden, string actor, UserRole role, CancellationToken cancellationToken)
+    {
+        await RequireAnyPermissionAsync(actor, role, [PermissionCodes.MaterialView, PermissionCodes.BomEdit, PermissionCodes.StandardLibraryView], cancellationToken);
+        return await materials.ListCategoriesAsync(includeHidden, cancellationToken);
+    }
 
     public Task<IReadOnlyList<MaterialCategoryRule>> ListCategoryRulesAsync(CancellationToken cancellationToken) =>
         materials.ListCategoryRulesAsync(cancellationToken);
 
+    public async Task<IReadOnlyList<MaterialCategoryRule>> ListCategoryRulesAsync(string actor, UserRole role, CancellationToken cancellationToken)
+    {
+        await RequireAnyPermissionAsync(actor, role, [PermissionCodes.MaterialView, PermissionCodes.BomEdit, PermissionCodes.StandardLibraryView], cancellationToken);
+        return await materials.ListCategoryRulesAsync(cancellationToken);
+    }
+
     public Task<IReadOnlyList<MaterialSyncTask>> ListSyncTasksAsync(CancellationToken cancellationToken) =>
         materials.ListSyncTasksAsync(cancellationToken);
+
+    public async Task<IReadOnlyList<MaterialSyncTask>> ListSyncTasksAsync(string actor, UserRole role, CancellationToken cancellationToken)
+    {
+        await RequirePermissionAsync(actor, role, PermissionCodes.MaterialView, cancellationToken);
+        return await materials.ListSyncTasksAsync(cancellationToken);
+    }
 
     public async Task<IReadOnlyList<MaterialCodeApplication>> ListCodeApplicationsAsync(Guid? projectId, MaterialCodeApplicationStatus? status, string actor, UserRole role, CancellationToken cancellationToken)
     {
@@ -39,6 +63,14 @@ public sealed class MaterialService(
     {
         if (!await repository.HasProjectContentReadAccessAsync(command.ProjectId, actor, role, cancellationToken))
             throw new UnauthorizedAccessException("当前用户没有该项目的读取权限。");
+        var pendingBySignature = new Dictionary<string, MaterialCodeApplication>(StringComparer.OrdinalIgnoreCase);
+        foreach (var application in await materials.ListMaterialCodeApplicationsAsync(command.ProjectId, MaterialCodeApplicationStatus.Pending, cancellationToken))
+        {
+            if (application.BomItemId is not Guid pendingItemId) continue;
+            var pendingItem = await repository.FindBomItemAsync(command.ProjectId, pendingItemId, cancellationToken);
+            var signature = pendingItem is null ? null : MaterialRequestSignature(pendingItem);
+            if (signature is not null) pendingBySignature.TryAdd(signature, application);
+        }
         var results = new List<MaterialCodeResolution>();
         foreach (var itemId in command.BomItemIds.Distinct())
         {
@@ -68,6 +100,11 @@ public sealed class MaterialService(
             var candidates = modelCandidates.Count <= 1 || string.IsNullOrWhiteSpace(item.Brand)
                 ? modelCandidates
                 : modelCandidates.Where(candidate => string.Equals(candidate.Brand?.Trim(), item.Brand.Trim(), StringComparison.OrdinalIgnoreCase)).ToArray();
+            if (candidates.Count == 0 && MaterialRequestSignature(item) is string signature && pendingBySignature.TryGetValue(signature, out var matchingPending))
+            {
+                results.Add(new(item.Id, MaterialCodeResolutionStatus.ApplicationPending, null, [], matchingPending));
+                continue;
+            }
             results.Add(candidates.Count switch
             {
                 0 => new(item.Id, MaterialCodeResolutionStatus.NoMatch, null, [], null),
@@ -83,6 +120,7 @@ public sealed class MaterialService(
         await RequirePermissionAsync(actor, role, PermissionCodes.BomEdit, cancellationToken);
         var resolutions = await ResolveStandardBomMaterialsAsync(new(command.ProjectId, command.BomItemIds), actor, role, cancellationToken);
         var results = new List<MaterialCodeResolution>(resolutions.Count);
+        var createdBySignature = new Dictionary<string, MaterialCodeApplication>(StringComparer.OrdinalIgnoreCase);
         foreach (var resolution in resolutions)
         {
             if (resolution.Status != MaterialCodeResolutionStatus.NoMatch)
@@ -90,14 +128,35 @@ public sealed class MaterialService(
                 results.Add(resolution);
                 continue;
             }
+            var item = await repository.FindBomItemAsync(command.ProjectId, resolution.BomItemId, cancellationToken)
+                ?? throw new PdmNotFoundException("BOM物料不存在。");
+            var signature = MaterialRequestSignature(item);
+            if (signature is not null && createdBySignature.TryGetValue(signature, out var existingApplication))
+            {
+                results.Add(resolution with { Status = MaterialCodeResolutionStatus.ApplicationPending, Application = existingApplication });
+                continue;
+            }
             var now = timeProvider.GetUtcNow();
             var application = new MaterialCodeApplication(Guid.NewGuid(), command.ProjectId, resolution.BomItemId,
-                MaterialCodeApplicationStatus.Pending, actor, now, null, null, null, null, null, 1);
+                MaterialCodeApplicationStatus.Pending, actor, now, null, null, null, null, null, 1)
+            {
+                BomItemName = item.Name,
+                Specification = item.Specification,
+                Brand = item.Brand,
+                Remark = item.Remark
+            };
             application = await materials.CreateMaterialCodeApplicationAsync(application, cancellationToken);
+            if (signature is not null) createdBySignature[signature] = application;
             await AuditAsync(actor, "material-code.application.create", application.Id, $"申请标准件料号：BOM {application.BomItemId}", cancellationToken);
             results.Add(resolution with { Status = MaterialCodeResolutionStatus.ApplicationPending, Application = application });
         }
         return results;
+    }
+
+    private static string? MaterialRequestSignature(BomItem item)
+    {
+        if (string.IsNullOrWhiteSpace(item.Specification)) return null;
+        return $"{item.Specification.Trim()}|{item.Brand?.Trim() ?? string.Empty}";
     }
 
     public async Task<(MaterialCodeApplication Application, PdmMaterial? Material, MaterialSyncTask? Task)> DecideMaterialCodeApplicationAsync(Guid applicationId, long expectedRowVersion, bool approved, string? comment, string actor, UserRole role, CancellationToken cancellationToken)
@@ -173,7 +232,7 @@ public sealed class MaterialService(
 
     public async Task<PdmMaterial> CreateAsync(SaveMaterialCommand command, string actor, UserRole role, CancellationToken cancellationToken)
     {
-        await RequirePermissionAsync(actor, role, PermissionCodes.BomEdit, cancellationToken);
+        await RequirePermissionAsync(actor, role, PermissionCodes.MaterialManage, cancellationToken);
         var category = await RequireCreatableCategoryAsync(command.CategoryCode, command.Kind, cancellationToken);
         var now = timeProvider.GetUtcNow();
         var normalized = Normalize(Guid.NewGuid(), command, null, actor, now, category.Code);
@@ -188,6 +247,20 @@ public sealed class MaterialService(
     public async Task<PdmMaterial> CreateApplicationDraftAsync(SaveMaterialCommand command, string actor, UserRole role, CancellationToken cancellationToken)
     {
         await RequirePermissionAsync(actor, role, PermissionCodes.BomEdit, cancellationToken);
+        return await CreateApplicationDraftCoreAsync(command, actor, cancellationToken);
+    }
+
+    internal Task<PdmMaterial> CreateApplicationDraftAfterBomApprovalAsync(
+        SaveMaterialCommand command,
+        string actor,
+        CancellationToken cancellationToken) =>
+        CreateApplicationDraftCoreAsync(command, actor, cancellationToken);
+
+    private async Task<PdmMaterial> CreateApplicationDraftCoreAsync(
+        SaveMaterialCommand command,
+        string actor,
+        CancellationToken cancellationToken)
+    {
         var category = await RequireCreatableCategoryAsync(command.CategoryCode, command.Kind, cancellationToken);
         var now = timeProvider.GetUtcNow();
         var materialId = Guid.NewGuid();
@@ -201,7 +274,7 @@ public sealed class MaterialService(
 
     public async Task<PdmMaterial> UpdateAsync(Guid materialId, SaveMaterialCommand command, string actor, UserRole role, CancellationToken cancellationToken)
     {
-        await RequirePermissionAsync(actor, role, PermissionCodes.BomEdit, cancellationToken);
+        await RequirePermissionAsync(actor, role, PermissionCodes.MaterialManage, cancellationToken);
         var existing = await materials.FindMaterialAsync(materialId, cancellationToken) ?? throw new PdmNotFoundException("物料主档不存在。");
         if (existing.IsArchived) throw new PdmRuleException("已归档料品不能修改。");
         if (existing.ApprovalStatus != MaterialApprovalStatus.Draft) throw new PdmRuleException("已批准物料不可直接修改，请通过后续变更流程处理。");
@@ -407,7 +480,7 @@ public sealed class MaterialService(
 
     public async Task<(PdmMaterial Material, MaterialSyncTask Task)> ApproveAsync(Guid materialId, long expectedRowVersion, string actor, UserRole role, CancellationToken cancellationToken)
     {
-        await RequirePermissionAsync(actor, role, PermissionCodes.ReleaseManage, cancellationToken);
+        await RequirePermissionAsync(actor, role, PermissionCodes.MaterialManage, cancellationToken);
         return await ApproveCoreAsync(materialId, expectedRowVersion, actor, cancellationToken);
     }
 
@@ -466,7 +539,7 @@ public sealed class MaterialService(
         UserRole role,
         CancellationToken cancellationToken)
     {
-        await RequirePermissionAsync(actor, role, PermissionCodes.BomEdit, cancellationToken);
+        await RequirePermissionAsync(actor, role, PermissionCodes.MaterialManage, cancellationToken);
         var existing = await materials.FindMaterialAsync(materialId, cancellationToken) ?? throw new PdmNotFoundException("物料主档不存在。");
         if (existing.IsArchived) throw new PdmRuleException("已归档料品不能变更。");
         if (existing.ApprovalStatus != MaterialApprovalStatus.Approved)
@@ -542,7 +615,7 @@ public sealed class MaterialService(
 
     public async Task<MaterialRemovalResult> RemoveAsync(Guid materialId, long expectedRowVersion, string actor, UserRole role, CancellationToken cancellationToken)
     {
-        await RequirePermissionAsync(actor, role, PermissionCodes.BomEdit, cancellationToken);
+        await RequirePermissionAsync(actor, role, PermissionCodes.MaterialManage, cancellationToken);
         var existing = await materials.FindMaterialAsync(materialId, cancellationToken)
             ?? throw new PdmNotFoundException("物料主档不存在。");
         if (existing.RowVersion != expectedRowVersion)
@@ -570,7 +643,7 @@ public sealed class MaterialService(
         UserRole role,
         CancellationToken cancellationToken)
     {
-        await RequirePermissionAsync(actor, role, PermissionCodes.BomEdit, cancellationToken);
+        await RequirePermissionAsync(actor, role, PermissionCodes.MaterialManage, cancellationToken);
         var material = await materials.FindMaterialAsync(materialId, cancellationToken)
             ?? throw new PdmNotFoundException("物料主档不存在。");
         var referenceCount = await materials.CountMaterialReferencesAsync(materialId, cancellationToken);
@@ -602,7 +675,7 @@ public sealed class MaterialService(
 
     public async Task<PdmMaterial> ArchiveAsync(Guid materialId, long expectedRowVersion, string actor, UserRole role, CancellationToken cancellationToken)
     {
-        await RequirePermissionAsync(actor, role, PermissionCodes.BomEdit, cancellationToken);
+        await RequirePermissionAsync(actor, role, PermissionCodes.MaterialManage, cancellationToken);
         var existing = await materials.FindMaterialAsync(materialId, cancellationToken)
             ?? throw new PdmNotFoundException("物料主档不存在。");
         if (existing.IsArchived) throw new PdmRuleException("料品已经归档。");
@@ -642,7 +715,7 @@ public sealed class MaterialService(
             string.Equals(item.U9ItemCode?.Trim(), material.MaterialCode, StringComparison.OrdinalIgnoreCase));
         if (existingItem is null) return false;
 
-        await RequirePermissionAsync(actor, role, PermissionCodes.ReleaseManage, cancellationToken);
+        await RequirePermissionAsync(actor, role, PermissionCodes.MaterialManage, cancellationToken);
         if (!configuration.WriteEnabled)
             throw new PdmRuleException($"U9C已存在料品 {material.MaterialCode}，但U9C真实写入尚未启用；未删除U9C和PLM主档。");
         if (!string.Equals(configuration.ItemDeletePath, U9MaterialContract.DeletePath, StringComparison.OrdinalIgnoreCase))
@@ -720,7 +793,7 @@ public sealed class MaterialService(
 
     public async Task<MaterialSyncTask> RetrySyncTaskAsync(Guid taskId, string actor, UserRole role, CancellationToken cancellationToken)
     {
-        await RequirePermissionAsync(actor, role, PermissionCodes.ReleaseManage, cancellationToken);
+        await RequirePermissionAsync(actor, role, PermissionCodes.MaterialManage, cancellationToken);
         var existingTask = await materials.FindSyncTaskAsync(taskId, cancellationToken)
             ?? throw new PdmNotFoundException("U9C同步任务不存在。");
         var material = await materials.FindMaterialAsync(existingTask.MaterialId, cancellationToken)
@@ -1026,6 +1099,13 @@ public sealed class MaterialService(
     private async Task RequirePermissionAsync(string actor, UserRole role, string permissionCode, CancellationToken cancellationToken)
     {
         if (!await repository.HasUserPermissionAsync(actor, role, permissionCode, cancellationToken)) throw new UnauthorizedAccessException("当前角色无权执行此操作。");
+    }
+
+    private async Task RequireAnyPermissionAsync(string actor, UserRole role, IReadOnlyList<string> permissionCodes, CancellationToken cancellationToken)
+    {
+        foreach (var permissionCode in permissionCodes)
+            if (await repository.HasUserPermissionAsync(actor, role, permissionCode, cancellationToken)) return;
+        throw new UnauthorizedAccessException("当前角色无权查看料品资料。");
     }
 
     private Task AuditAsync(string actor, string action, object entityId, string detail, CancellationToken cancellationToken) =>

@@ -12,15 +12,21 @@ describe('SideNav', () => {
     expect(wrapper.emitted('navigate')?.[0]).toEqual(['projects', '项目列表'])
   })
 
-  it('uses the concise material management label', () => {
+  it('hides material management without material view permission', () => {
     const wrapper = mount(SideNav, { props: { active: 'projects' } })
+
+    expect(wrapper.text()).not.toContain('料品管理')
+  })
+
+  it('uses the concise material management label when permitted', () => {
+    const wrapper = mount(SideNav, { props: { active: 'projects', canViewMaterials: true } })
 
     expect(wrapper.text()).toContain('料品管理')
     expect(wrapper.text()).not.toContain('料品与U9C')
   })
 
   it('places the permission-gated standard structure directly below standard materials', async () => {
-    const wrapper = mount(SideNav, { props: { active: 'materials', canViewStandardLibrary: true } })
+    const wrapper = mount(SideNav, { props: { active: 'materials', canViewStandardLibrary: true, canViewMaterials: true } })
     const labels = wrapper.findAll('.pdm-sidebar__nav .pdm-nav-item').map(item => item.text().trim())
 
     expect(labels.slice(2, 5)).toEqual(['标准物料', '标准结构', '料品管理'])
@@ -29,7 +35,7 @@ describe('SideNav', () => {
   })
 
   it('shows the combined material task count on material management', () => {
-    const wrapper = mount(SideNav, { props: { active: 'projects', materialCount: 3 } })
+    const wrapper = mount(SideNav, { props: { active: 'projects', materialCount: 3, canViewMaterials: true } })
     const materialItem = wrapper.findAll('.pdm-sidebar__nav .pdm-nav-item')[2]!
 
     expect(materialItem.text()).toContain('料品管理')
@@ -61,7 +67,7 @@ describe('SideNav', () => {
   })
 
   it('exposes navigation labels in collapsed mode', () => {
-    const wrapper = mount(SideNav, { props: { active: 'materials', collapsed: true, canManageSystem: true } })
+    const wrapper = mount(SideNav, { props: { active: 'materials', collapsed: true, canManageSystem: true, canViewMaterials: true } })
 
     expect(wrapper.get('.pdm-sidebar').classes()).toContain('is-collapsed')
     expect(wrapper.get('.pdm-nav-item[aria-label="料品管理"]').attributes('title')).toBe('料品管理')

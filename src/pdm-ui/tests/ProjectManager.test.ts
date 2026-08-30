@@ -329,7 +329,7 @@ describe('ProjectManager', () => {
   it('分工候选按项目角色过滤且只显示姓名，并能写入表单值', async () => {
     const directory: OrganizationDirectory = {
       ...emptyDirectory,
-      units: [{ id: 'division-1', organizationId: 'org-1', code: 'DIV-1', name: '自动化事业部', kind: 'BusinessDivision', isActive: true, sortOrder: 1 }],
+      units: [{ id: 'division-1', organizationId: 'org-1', code: 'DIV-1', name: '自动化事业部', kind: 'BusinessDivision', canManufacture: true, isActive: true, sortOrder: 1 }],
       memberships: [
         { unitId: 'division-1', username: 'liupengbo', isPrimary: true },
         { unitId: 'division-1', username: 'lvhaozhe', isPrimary: true },
@@ -467,9 +467,9 @@ describe('ProjectManager', () => {
     const directory: OrganizationDirectory = {
       organizations: [{ id: 'org-1', name: '昆山公司', projectCompanyCode: '7', modelCompanyCode: 'AK', crmCompanyName: '昆山公司', currentProjectSequence: 1, currentSerialSequence: 1 }],
       units: [
-        { id: 'division-own', organizationId: 'org-1', code: 'A', name: '自动化事业部', kind: 'BusinessDivision', isActive: true, sortOrder: 1 },
-        { id: 'division-other', organizationId: 'org-1', code: 'B', name: '机器人事业部', kind: 'BusinessDivision', isActive: true, sortOrder: 2 },
-        { id: 'procurement', organizationId: 'org-1', code: 'P', name: '采购部', kind: 'Department', isActive: true, sortOrder: 3 },
+        { id: 'division-own', organizationId: 'org-1', code: 'A', name: '自动化事业部', kind: 'BusinessDivision', canManufacture: true, isActive: true, sortOrder: 1 },
+        { id: 'division-other', organizationId: 'org-1', code: 'B', name: '机器人事业部', kind: 'BusinessDivision', canManufacture: true, isActive: true, sortOrder: 2 },
+        { id: 'procurement', organizationId: 'org-1', code: 'P', name: '采购部', kind: 'Department', canManufacture: false, isActive: true, sortOrder: 3 },
       ],
       memberships: [
         { unitId: 'division-own', username: 'design-lead', isPrimary: true },

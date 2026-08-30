@@ -276,6 +276,10 @@ public sealed record BatchRestoreBomItemsRequest(IReadOnlyList<Guid> ItemIds, st
 
 public sealed record RestoreBomItemsFromSourceRequest(IReadOnlyList<Guid> ItemIds);
 
+public sealed record ReclassifyBomItemsFromSourceRequest(
+    IReadOnlyList<Guid> ItemIds,
+    [property: JsonConverter(typeof(JsonStringEnumConverter))] BomKind TargetKind);
+
 public sealed record CompleteCadPropertyWritebackRequest(Guid ResultVersionId);
 
 public sealed record FailCadPropertyWritebackRequest(string Error, bool Conflict = false);

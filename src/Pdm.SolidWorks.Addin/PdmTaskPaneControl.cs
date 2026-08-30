@@ -26,11 +26,11 @@ internal sealed class PdmTaskPaneControl : UserControl
     private static readonly Color DisabledActionBackgroundColor = Color.FromArgb(224, 228, 233);
     private static readonly Color DisabledActionTextColor = Color.FromArgb(145, 151, 159);
 
-    private readonly Label serviceStatus = new Label();
+    private readonly PdmRippleStatusIndicator serviceStatus = new PdmRippleStatusIndicator();
     private readonly Image headerLogoImage;
     private readonly TextBox currentProject = new TextBox();
     private readonly TextBox searchBox = new TextBox();
-    private readonly Label treeHealth = new Label();
+    private readonly LinkLabel treeHealth = new LinkLabel();
     private readonly TreeView structureTree = new TreeView();
     private readonly Panel structureTreeSurface = new Panel();
     private readonly Label selectedFile = new Label();
@@ -41,7 +41,12 @@ internal sealed class PdmTaskPaneControl : UserControl
     private readonly Button checkoutButton = new Button();
     private readonly Button checkinButton = new Button();
     private readonly Button batchOperationButton = new Button();
-    private readonly Button batchPropertyButton = new Button();
+    private readonly Button propertyEditButton = new Button();
+    private readonly Button propertyCardButton = new Button();
+    private readonly Button updateAllLatestButton = new Button();
+    private readonly Panel workspaceOperationPanel = new Panel();
+    private readonly Label workspaceOperationStatus = new Label();
+    private readonly PdmQuantityProgressBar workspaceOperationProgress = new PdmQuantityProgressBar();
     private readonly TabControl tabs = new TabControl();
     private readonly ProjectDocumentsControl projectDocuments = new ProjectDocumentsControl();
     private readonly AutomaticDrawingControl automaticDrawing = new AutomaticDrawingControl();
@@ -104,10 +109,14 @@ internal sealed class PdmTaskPaneControl : UserControl
     private bool suppressNodeSelectedNotification;
     private bool suppressTreeCheckEvents;
     private bool allowStructureCollapse;
+    private StructureHealthFilter activeHealthFilter;
+    private bool selectFirstHealthMatchAfterBuild;
     private readonly HashSet<string> checkedCheckInPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
     private IReadOnlyList<ProjectDto> availableProjects = Array.Empty<ProjectDto>();
     private Guid? selectedProjectId;
     private bool projectContextAvailable;
+    private bool workspaceOperationActive;
+    private bool refreshingWorkspaceOperationUi;
 
     public PdmTaskPaneControl()
     {
@@ -159,6 +168,8 @@ internal sealed class PdmTaskPaneControl : UserControl
     public event EventHandler<CadTreeNodeEventArgs> DiscardCheckoutRequested;
     public event EventHandler BatchOperationRequested;
     public event EventHandler<CadTreeNodeEventArgs> BatchPropertyEditRequested;
+    public event EventHandler<CadTreeNodeEventArgs> BatchPropertyCardRequested;
+    public event EventHandler UpdateAllLatestRequested;
     public event EventHandler<AutomaticDrawingRequestEventArgs> AutomaticDrawingGenerateRequested;
     public event EventHandler<AutomaticDrawingRequestEventArgs> AutomaticDrawingOpenRequested;
     public event EventHandler<AutomaticDrawingRequestEventArgs> AutomaticDrawingImportAnnotationsRequested;
@@ -218,6 +229,48 @@ internal sealed class PdmTaskPaneControl : UserControl
     public void SetAutomaticDrawingOperationResult(string message) =>
         RunOnUiThread(() => automaticDrawing.SetOperationResult(message));
 
+    public void SetWorkspaceOperationState(bool active, string message)
+    {
+        RunOnUiThread(() =>
+        {
+            workspaceOperationActive = active;
+            workspaceOperationStatus.Text = active
+                ? string.Concat("处理中：", string.IsNullOrWhiteSpace(message) ? "PLM工作文件操作" : message.Trim())
+                : string.Empty;
+            actionToolTip.SetToolTip(workspaceOperationStatus, workspaceOperationStatus.Text);
+            workspaceOperationProgress.SetProgress(0, 0);
+            serviceStatus.Active = active;
+            workspaceOperationPanel.Visible = active;
+            structureMenu.Enabled = !active;
+            versionMenu.Enabled = !active;
+            UseWaitCursor = active;
+            UpdateSelected(SelectedNode);
+            if (active)
+            {
+                RefreshWorkspaceOperationUi();
+            }
+        });
+    }
+
+    public void SetWorkspaceOperationProgress(string message, int completed, int total)
+    {
+        RunOnUiThread(() =>
+        {
+            if (!workspaceOperationActive)
+            {
+                return;
+            }
+
+            workspaceOperationStatus.Text = string.Concat(
+                "处理中：",
+                Environment.NewLine,
+                string.IsNullOrWhiteSpace(message) ? "PLM工作文件操作" : message.Trim());
+            actionToolTip.SetToolTip(workspaceOperationStatus, workspaceOperationStatus.Text);
+            workspaceOperationProgress.SetProgress(completed, total);
+            RefreshWorkspaceOperationUi();
+        });
+    }
+
     public void ShowVersions(Guid documentId, string fileName, IReadOnlyList<DocumentVersionDto> versions)
     {
         RunOnUiThread(() =>
@@ -253,9 +306,8 @@ internal sealed class PdmTaskPaneControl : UserControl
     {
         RunOnUiThread(() =>
         {
-            serviceStatus.Text = online ? "●" : "○";
+            serviceStatus.Online = online;
             serviceStatus.AccessibleDescription = text;
-            serviceStatus.ForeColor = online ? Color.FromArgb(72, 210, 186) : Color.FromArgb(255, 184, 86);
         });
     }
 
@@ -342,6 +394,8 @@ internal sealed class PdmTaskPaneControl : UserControl
         rootNode = root;
         RunOnUiThread(() =>
         {
+            activeHealthFilter = StructureHealthFilter.None;
+            selectFirstHealthMatchAfterBuild = false;
             checkedCheckInPaths.Clear();
             RebuildTree(searchBox.Text);
         });
@@ -352,9 +406,12 @@ internal sealed class PdmTaskPaneControl : UserControl
         rootNode = null;
         RunOnUiThread(() =>
         {
+            activeHealthFilter = StructureHealthFilter.None;
+            selectFirstHealthMatchAfterBuild = false;
             Interlocked.Increment(ref treeBuildGeneration);
             CancelActiveTreeBuild();
             structureTree.Nodes.Clear();
+            UpdateTreeHealth();
             UpdateSelected(null);
         });
     }
@@ -406,15 +463,13 @@ internal sealed class PdmTaskPaneControl : UserControl
         };
         var title = new Label { Text = "UPLM", ForeColor = Color.White, Font = new Font("Microsoft YaHei UI", 10F), Location = new Point(58, 9), AutoSize = true };
         var subtitle = new Label { Text = "SolidWorks 插件", ForeColor = Color.FromArgb(184, 201, 220), Location = new Point(58, 32), AutoSize = true };
-        serviceStatus.Text = "○";
         serviceStatus.AccessibleName = "PLM连接状态";
         serviceStatus.AccessibleDescription = "未连接";
-        serviceStatus.ForeColor = Color.FromArgb(255, 184, 86);
-        serviceStatus.Font = new Font("Segoe UI Symbol", 11.2F);
-        serviceStatus.TextAlign = ContentAlignment.MiddleCenter;
-        serviceStatus.Size = new Size(48, 22);
+        serviceStatus.Online = false;
+        serviceStatus.Active = false;
+        serviceStatus.Size = new Size(48, 40);
         serviceStatus.Anchor = AnchorStyles.Top | AnchorStyles.Right;
-        serviceStatus.Location = new Point(header.ClientSize.Width - header.Padding.Right - serviceStatus.Width, 18);
+        serviceStatus.Location = new Point(header.ClientSize.Width - header.Padding.Right - serviceStatus.Width, 11);
         header.Controls.Add(logo);
         header.Controls.Add(title);
         header.Controls.Add(subtitle);
@@ -549,31 +604,65 @@ internal sealed class PdmTaskPaneControl : UserControl
     private TabPage BuildStructureTab()
     {
         var tab = new TabPage("设计树") { BackColor = Color.FromArgb(244, 247, 251), Padding = new Padding(8) };
-        var actions = new TableLayoutPanel { Dock = DockStyle.Top, Height = 38, ColumnCount = 6, RowCount = 1, Margin = Padding.Empty, Padding = new Padding(3) };
+        var actions = new TableLayoutPanel { Dock = DockStyle.Top, Height = 38, ColumnCount = 5, RowCount = 1, Margin = Padding.Empty, Padding = new Padding(3) };
         ConfigureStructureActionColumns(actions);
         actions.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
 
         ConfigureCompactActionButton(checkoutButton, "获取", CheckoutAvailableColor);
         ConfigureCompactActionButton(checkinButton, "存档", SubmitAvailableColor);
         ConfigureCompactActionButton(batchOperationButton, "整体", BatchOperationAvailableColor);
-        ConfigureCompactActionButton(batchPropertyButton, "属性", SecondaryActionAvailableColor);
+        ConfigureCompactActionButton(propertyEditButton, "属性", SecondaryActionAvailableColor);
+        ConfigureCompactActionButton(updateAllLatestButton, "更新", SecondaryActionAvailableColor);
         actionToolTip.SetToolTip(checkoutButton, "获取编辑权限");
         actionToolTip.SetToolTip(checkinButton, "提交存档");
         actionToolTip.SetToolTip(batchOperationButton, "整体获取最新文件及权限，或按子件优先顺序提交存档");
-        actionToolTip.SetToolTip(batchPropertyButton, "在同一页面执行批量属性编辑或PLM属性回写");
+        actionToolTip.SetToolTip(propertyEditButton, "批量编辑图档属性，或在属性窗口内设置SolidWorks原生属性卡");
+        actionToolTip.SetToolTip(updateAllLatestButton, "将结构中版本落后的受控图档批量更新到最新版本；本地有修改或正在编辑的图档自动跳过");
         checkoutButton.Click += (_, _) => RaiseCheckoutToggle();
         checkinButton.Click += (_, _) => RaiseCheckInRequested();
         batchOperationButton.Click += (_, _) => BatchOperationRequested?.Invoke(this, EventArgs.Empty);
-        batchPropertyButton.Click += (_, _) => RaiseBatchPropertyRequested();
+        propertyEditButton.Click += (_, _) => RaiseBatchPropertyRequested();
+        updateAllLatestButton.Click += (_, _) => UpdateAllLatestRequested?.Invoke(this, EventArgs.Empty);
         checkoutButton.Enabled = false;
         checkinButton.Enabled = false;
         batchOperationButton.Enabled = false;
-        batchPropertyButton.Enabled = false;
+        propertyEditButton.Enabled = false;
+        propertyCardButton.Enabled = false;
+        updateAllLatestButton.Enabled = false;
         ApplyStructureActionButtonAppearances();
         actions.Controls.Add(checkoutButton, 0, 0);
         actions.Controls.Add(checkinButton, 1, 0);
         actions.Controls.Add(batchOperationButton, 2, 0);
-        actions.Controls.Add(batchPropertyButton, 3, 0);
+        actions.Controls.Add(propertyEditButton, 3, 0);
+        actions.Controls.Add(updateAllLatestButton, 4, 0);
+
+        workspaceOperationPanel.Dock = DockStyle.Top;
+        workspaceOperationPanel.Height = 100;
+        workspaceOperationPanel.Padding = new Padding(3, 4, 3, 4);
+        workspaceOperationPanel.BackColor = Color.FromArgb(232, 243, 255);
+        workspaceOperationPanel.Visible = false;
+        var workspaceOperationLayout = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            ColumnCount = 1,
+            RowCount = 2,
+            Margin = Padding.Empty,
+            Padding = Padding.Empty
+        };
+        workspaceOperationLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        workspaceOperationLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 56));
+        workspaceOperationLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        workspaceOperationStatus.Dock = DockStyle.Fill;
+        workspaceOperationStatus.Margin = Padding.Empty;
+        workspaceOperationStatus.AutoEllipsis = false;
+        workspaceOperationStatus.UseCompatibleTextRendering = true;
+        workspaceOperationStatus.ForeColor = Color.FromArgb(31, 89, 147);
+        workspaceOperationStatus.TextAlign = ContentAlignment.MiddleLeft;
+        workspaceOperationProgress.Dock = DockStyle.Fill;
+        workspaceOperationProgress.Margin = new Padding(0, 3, 0, 0);
+        workspaceOperationLayout.Controls.Add(workspaceOperationStatus, 0, 0);
+        workspaceOperationLayout.Controls.Add(workspaceOperationProgress, 0, 1);
+        workspaceOperationPanel.Controls.Add(workspaceOperationLayout);
 
         var searchToolbar = new TableLayoutPanel { Dock = DockStyle.Top, Height = 40, ColumnCount = 1, RowCount = 1, Margin = Padding.Empty };
         searchToolbar.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
@@ -591,6 +680,16 @@ internal sealed class PdmTaskPaneControl : UserControl
         treeHealth.BackColor = Color.FromArgb(247, 249, 252);
         treeHealth.AutoEllipsis = true;
         treeHealth.Text = "结构健康：等待读取";
+        treeHealth.LinkBehavior = LinkBehavior.HoverUnderline;
+        treeHealth.LinkColor = Color.FromArgb(174, 94, 0);
+        treeHealth.ActiveLinkColor = Color.FromArgb(112, 65, 160);
+        treeHealth.LinkClicked += (_, eventArgs) =>
+        {
+            if (eventArgs.Link.LinkData is StructureHealthFilter filter)
+            {
+                ToggleHealthFilter(filter);
+            }
+        };
 
         structureTree.Dock = DockStyle.Fill;
         structureTree.BorderStyle = BorderStyle.None;
@@ -707,6 +806,7 @@ internal sealed class PdmTaskPaneControl : UserControl
         tab.Controls.Add(detail);
         tab.Controls.Add(treeHealth);
         tab.Controls.Add(searchToolbar);
+        tab.Controls.Add(workspaceOperationPanel);
         tab.Controls.Add(actions);
         return tab;
     }
@@ -1613,12 +1713,13 @@ internal sealed class PdmTaskPaneControl : UserControl
         var expandedInstancePaths = CaptureExpandedInstancePaths(structureTree.Nodes);
         var checkedPaths = new HashSet<string>(checkedCheckInPaths, StringComparer.OrdinalIgnoreCase);
         var normalizedFilter = filter?.Trim();
+        var healthFilter = activeHealthFilter;
         var generation = Interlocked.Increment(ref treeBuildGeneration);
         CancelActiveTreeBuild();
         Task.Run(() =>
         {
-            var root = BuildTreeNode(modelRoot, normalizedFilter, checkedPaths);
-            return PrepareTreeBuildPlan(root, !string.IsNullOrWhiteSpace(normalizedFilter));
+            var root = BuildTreeNode(modelRoot, normalizedFilter, checkedPaths, healthFilter);
+            return PrepareTreeBuildPlan(root, !string.IsNullOrWhiteSpace(normalizedFilter) || healthFilter != StructureHealthFilter.None);
         }).ContinueWith(task => RunOnUiThread(() =>
         {
             if (task.IsFaulted || task.IsCanceled || generation != treeBuildGeneration || !ReferenceEquals(modelRoot, rootNode))
@@ -1831,7 +1932,23 @@ internal sealed class PdmTaskPaneControl : UserControl
             pendingComponentSelectionName = string.Empty;
         }
 
-        if (!pendingSelectionApplied && !string.IsNullOrWhiteSpace(selectedInstancePath))
+        var quickHealthSelectionApplied = false;
+        if (!pendingSelectionApplied && activeHealthFilter != StructureHealthFilter.None && selectFirstHealthMatchAfterBuild)
+        {
+            var healthNode = FindTreeNode(
+                structureTree.Nodes,
+                node => node.Tag is CadTreeNode model && MatchesHealthFilter(model, activeHealthFilter));
+            if (healthNode != null)
+            {
+                EnsureTreeNodeAttached(healthNode, plan);
+                SelectTreeNodeWithoutNotification(healthNode);
+                healthNode.EnsureVisible();
+                quickHealthSelectionApplied = true;
+            }
+            selectFirstHealthMatchAfterBuild = false;
+        }
+
+        if (!pendingSelectionApplied && !quickHealthSelectionApplied && !string.IsNullOrWhiteSpace(selectedInstancePath))
         {
             var selected = FindTreeNode(
                 structureTree.Nodes,
@@ -1979,13 +2096,13 @@ internal sealed class PdmTaskPaneControl : UserControl
         public TreeNode Child { get; }
     }
 
-    private TreeNode BuildTreeNode(CadTreeNode model, string filter, ISet<string> checkedPaths)
+    private TreeNode BuildTreeNode(CadTreeNode model, string filter, ISet<string> checkedPaths, StructureHealthFilter healthFilter)
     {
         var childNodes = model.Children
-            .Select(child => BuildTreeNode(child, filter, checkedPaths))
+            .Select(child => BuildTreeNode(child, filter, checkedPaths, healthFilter))
             .Where(node => node != null)
             .ToArray();
-        var selfMatches = MatchesFilter(model, filter);
+        var selfMatches = MatchesFilter(model, filter) && MatchesHealthFilter(model, healthFilter);
         if (!selfMatches && childNodes.Length == 0)
         {
             return null;
@@ -2243,9 +2360,7 @@ internal sealed class PdmTaskPaneControl : UserControl
             case CadWorkState.EditingByOther: editState = node.CheckoutSessionLost ? "编辑权限已失效" : string.IsNullOrWhiteSpace(node.CheckedOutBy) ? "他人编辑中" : string.Concat(node.CheckedOutBy, "编辑中"); break;
             default: editState = !node.DocumentId.HasValue
                 ? "未入库"
-                : node.Status != CadReferenceStatus.Normal
-                    ? StatusText(node.Status)
-                    : IsVersionOutdated(node) ? "版本落后" : "正常";
+                : IsVersionOutdated(node) ? "版本落后" : "未获取权限";
                 break;
         }
         var lifecycle = LifecycleText(node.LifecycleState);
@@ -2306,8 +2421,13 @@ internal sealed class PdmTaskPaneControl : UserControl
             checkoutButton.Text = "获取";
             checkoutButton.Enabled = false;
             checkinButton.Enabled = false;
-            batchOperationButton.Enabled = false;
-            batchPropertyButton.Enabled = false;
+            batchOperationButton.Enabled = string.IsNullOrWhiteSpace(authenticatedUsername) == false
+                && rootNode is object
+                && rootNode.IsReadOnlyPreview == false
+                && workspaceOperationActive == false;
+            propertyEditButton.Enabled = batchOperationButton.Enabled;
+            propertyCardButton.Enabled = propertyEditButton.Enabled;
+            updateAllLatestButton.Enabled = batchOperationButton.Enabled;
             ApplyStructureActionButtonAppearances();
             UpdateTreeHealth();
             return;
@@ -2384,7 +2504,18 @@ internal sealed class PdmTaskPaneControl : UserControl
             || (!readOnlyPreview && node.DocumentId.HasValue && editingByCurrentUser);
         checkinButton.Enabled = !readOnlyPreview && (canCheckIn || checkedNodes.Length > 0 || canExplainCheckIn);
         batchOperationButton.Enabled = authenticated && rootNode != null && !rootNode.IsReadOnlyPreview;
-        batchPropertyButton.Enabled = authenticated && rootNode != null && !rootNode.IsReadOnlyPreview;
+        propertyEditButton.Enabled = authenticated && rootNode != null && !rootNode.IsReadOnlyPreview;
+        propertyCardButton.Enabled = authenticated && rootNode != null && !rootNode.IsReadOnlyPreview;
+        updateAllLatestButton.Enabled = authenticated && rootNode != null && !rootNode.IsReadOnlyPreview;
+        if (workspaceOperationActive)
+        {
+            checkoutButton.Enabled = false;
+            checkinButton.Enabled = false;
+            batchOperationButton.Enabled = false;
+            propertyEditButton.Enabled = false;
+            propertyCardButton.Enabled = false;
+            updateAllLatestButton.Enabled = false;
+        }
         ApplyStructureActionButtonAppearances();
         actionToolTip.SetToolTip(
             checkoutButton,
@@ -2400,6 +2531,16 @@ internal sealed class PdmTaskPaneControl : UserControl
             checkedNodes.Length > 0
                 ? string.Concat("提交已勾选的", checkedNodes.Length, "个图档")
                 : node.DrawingReviewLocked ? "图纸审核中，不能提交存档" : readOnlyPreview ? "只读预览不能提交存档；请先切换到编辑工作区" : canFirstCheckIn ? "首次提交存档时选择归属项目，系统将自动登记并准备权限" : !node.DocumentId.HasValue ? "本地文件不存在或文件类型不支持登记" : !editingByCurrentUser ? string.IsNullOrWhiteSpace(node.CheckedOutBy) ? "尚未获取编辑权限；点击后查看正确操作" : string.Concat("当前编辑人员：", node.CheckedOutBy) : !localFileExists ? "本地文件不存在，不能提交存档" : "提交当前文件并生成新工作版本");
+        if (workspaceOperationActive)
+        {
+            var operationText = string.Concat(workspaceOperationStatus.Text, "，完成后按钮会自动恢复");
+            actionToolTip.SetToolTip(checkoutButton, operationText);
+            actionToolTip.SetToolTip(checkinButton, operationText);
+            actionToolTip.SetToolTip(batchOperationButton, operationText);
+            actionToolTip.SetToolTip(propertyEditButton, operationText);
+            actionToolTip.SetToolTip(propertyCardButton, operationText);
+            actionToolTip.SetToolTip(updateAllLatestButton, operationText);
+        }
         UpdateTreeHealth();
     }
 
@@ -2601,6 +2742,8 @@ internal sealed class PdmTaskPaneControl : UserControl
     {
         if (rootNode == null)
         {
+            treeHealth.Links.Clear();
+            treeHealth.Cursor = Cursors.Default;
             treeHealth.Text = "结构健康：暂无结构";
             return;
         }
@@ -2608,23 +2751,122 @@ internal sealed class PdmTaskPaneControl : UserControl
             .GroupBy(node => string.IsNullOrWhiteSpace(node.FullPath) ? node.InstancePath : node.FullPath, StringComparer.OrdinalIgnoreCase)
             .Select(group => group.First())
             .ToArray();
-        var missing = nodes.Count(node => !node.IsRenamePendingSave
-            && (node.Status == CadReferenceStatus.Missing
-                || (!string.IsNullOrWhiteSpace(node.FullPath) && !File.Exists(node.FullPath))));
+        var missing = nodes.Count(IsMissingReference);
         var outdated = nodes.Count(IsVersionOutdated);
-        var otherEditing = nodes.Count(node => node.WorkState == CadWorkState.EditingByOther && !node.CheckoutSessionLost);
-        var pending = nodes.Count(node => node.WorkState == CadWorkState.ModifiedUnsaved || node.WorkState == CadWorkState.PendingCheckIn);
-        treeHealth.Text = string.Concat("结构健康：版本落后 ", outdated, "　缺失 ", missing, "　他人编辑 ", otherEditing, "　待提交 ", pending);
-        treeHealth.ForeColor = missing > 0 || outdated > 0 || otherEditing > 0 || pending > 0
+        var otherEditing = nodes.Count(IsEditingByOther);
+        var pending = nodes.Count(IsPendingSubmission);
+        var activeCount = HealthFilterCount(activeHealthFilter, outdated, missing, otherEditing, pending);
+        if (activeHealthFilter != StructureHealthFilter.None && activeCount == 0)
+        {
+            activeHealthFilter = StructureHealthFilter.None;
+            selectFirstHealthMatchAfterBuild = false;
+        }
+
+        var items = new[]
+        {
+            new { Filter = StructureHealthFilter.Outdated, Text = string.Concat("版本落后 ", outdated), Count = outdated },
+            new { Filter = StructureHealthFilter.Missing, Text = string.Concat("缺失 ", missing), Count = missing },
+            new { Filter = StructureHealthFilter.OtherEditing, Text = string.Concat("他人编辑 ", otherEditing), Count = otherEditing },
+            new { Filter = StructureHealthFilter.Pending, Text = string.Concat("待提交 ", pending), Count = pending }
+        };
+        treeHealth.Text = string.Concat(
+            "结构健康：",
+            string.Join("　", items.Select(item => item.Text)),
+            activeHealthFilter == StructureHealthFilter.None ? string.Empty : string.Concat("（仅显示", HealthFilterName(activeHealthFilter), "）"));
+        treeHealth.Links.Clear();
+        foreach (var item in items.Where(item => item.Count > 0))
+        {
+            var start = treeHealth.Text.IndexOf(item.Text, StringComparison.Ordinal);
+            treeHealth.Links.Add(start, item.Text.Length, item.Filter);
+        }
+        var hasHealthIssue = outdated > 0 || missing > 0 || otherEditing > 0 || pending > 0;
+        treeHealth.Cursor = hasHealthIssue ? Cursors.Hand : Cursors.Default;
+        treeHealth.AccessibleDescription = hasHealthIssue
+            ? activeHealthFilter == StructureHealthFilter.None
+                ? "点击异常类别，仅显示对应项目并定位第一项"
+                : "点击当前类别恢复全部，或点击其他类别切换筛选"
+            : "当前没有结构异常";
+        actionToolTip.SetToolTip(treeHealth, treeHealth.AccessibleDescription);
+        treeHealth.ForeColor = hasHealthIssue
             ? Color.FromArgb(174, 94, 0)
             : Color.FromArgb(21, 126, 77);
     }
+
+    private void ToggleHealthFilter(StructureHealthFilter filter)
+    {
+        if (rootNode == null || filter == StructureHealthFilter.None
+            || !EnumerateCadTree(rootNode).Any(node => MatchesHealthFilter(node, filter)))
+        {
+            return;
+        }
+
+        activeHealthFilter = activeHealthFilter == filter ? StructureHealthFilter.None : filter;
+        selectFirstHealthMatchAfterBuild = activeHealthFilter != StructureHealthFilter.None;
+        RebuildTree(searchBox.Text);
+    }
+
+    private static bool MatchesHealthFilter(CadTreeNode node, StructureHealthFilter filter)
+    {
+        switch (filter)
+        {
+            case StructureHealthFilter.Outdated: return IsVersionOutdated(node);
+            case StructureHealthFilter.Missing: return IsMissingReference(node);
+            case StructureHealthFilter.OtherEditing: return IsEditingByOther(node);
+            case StructureHealthFilter.Pending: return IsPendingSubmission(node);
+            default: return true;
+        }
+    }
+
+    private static int HealthFilterCount(StructureHealthFilter filter, int outdated, int missing, int otherEditing, int pending)
+    {
+        switch (filter)
+        {
+            case StructureHealthFilter.Outdated: return outdated;
+            case StructureHealthFilter.Missing: return missing;
+            case StructureHealthFilter.OtherEditing: return otherEditing;
+            case StructureHealthFilter.Pending: return pending;
+            default: return 0;
+        }
+    }
+
+    private static string HealthFilterName(StructureHealthFilter filter)
+    {
+        switch (filter)
+        {
+            case StructureHealthFilter.Outdated: return "版本落后";
+            case StructureHealthFilter.Missing: return "缺失";
+            case StructureHealthFilter.OtherEditing: return "他人编辑";
+            case StructureHealthFilter.Pending: return "待提交";
+            default: return string.Empty;
+        }
+    }
+
+    private static bool IsMissingReference(CadTreeNode node) =>
+        node != null
+        && !node.IsRenamePendingSave
+        && (node.Status == CadReferenceStatus.Missing
+            || (!string.IsNullOrWhiteSpace(node.FullPath) && !File.Exists(node.FullPath)));
+
+    private static bool IsEditingByOther(CadTreeNode node) =>
+        node != null && node.WorkState == CadWorkState.EditingByOther && !node.CheckoutSessionLost;
+
+    private static bool IsPendingSubmission(CadTreeNode node) =>
+        node != null && (node.WorkState == CadWorkState.ModifiedUnsaved || node.WorkState == CadWorkState.PendingCheckIn);
 
     private static bool IsVersionOutdated(CadTreeNode node) =>
         node != null
         && !string.IsNullOrWhiteSpace(node.LatestRevision)
         && !string.IsNullOrWhiteSpace(node.CurrentRevision)
         && !string.Equals(node.CurrentRevision.TrimEnd('*'), node.LatestRevision, StringComparison.OrdinalIgnoreCase);
+
+    private enum StructureHealthFilter
+    {
+        None,
+        Outdated,
+        Missing,
+        OtherEditing,
+        Pending
+    }
 
     private void RaiseCheckoutToggle()
     {
@@ -2686,10 +2928,26 @@ internal sealed class PdmTaskPaneControl : UserControl
             return;
         }
 
+        if (rootNode != null)
+        {
+            var allNodes = EnumerateCadTree(rootNode).ToArray();
+            BatchPropertyEditRequested?.Invoke(this, new CadTreeNodeEventArgs(rootNode, allNodes, true));
+        }
+    }
+
+    private void RaiseBatchPropertyCardRequested()
+    {
+        var checkedNodes = GetCheckedActionNodes();
+        if (checkedNodes.Count > 0)
+        {
+            BatchPropertyCardRequested?.Invoke(this, new CadTreeNodeEventArgs(checkedNodes[0], checkedNodes, true));
+            return;
+        }
+
         var node = SelectedNode;
         if (node != null)
         {
-            BatchPropertyEditRequested?.Invoke(this, new CadTreeNodeEventArgs(node));
+            BatchPropertyCardRequested?.Invoke(this, new CadTreeNodeEventArgs(node));
         }
     }
 
@@ -2770,7 +3028,9 @@ internal sealed class PdmTaskPaneControl : UserControl
             string.Equals(checkoutButton.Text, "放弃", StringComparison.Ordinal) ? DiscardCheckoutAvailableColor : CheckoutAvailableColor);
         ApplyActionButtonAppearance(checkinButton, SubmitAvailableColor);
         ApplyActionButtonAppearance(batchOperationButton, BatchOperationAvailableColor);
-        ApplyActionButtonAppearance(batchPropertyButton, SecondaryActionAvailableColor);
+        ApplyActionButtonAppearance(propertyEditButton, SecondaryActionAvailableColor);
+        ApplyActionButtonAppearance(propertyCardButton, SecondaryActionAvailableColor);
+        ApplyActionButtonAppearance(updateAllLatestButton, SecondaryActionAvailableColor);
     }
 
     private static void ApplyActionButtonAppearance(Button button, Color availableColor)
@@ -2787,9 +3047,9 @@ internal sealed class PdmTaskPaneControl : UserControl
     private static void ConfigureStructureActionColumns(TableLayoutPanel actions)
     {
         actions.ColumnStyles.Clear();
-        for (var column = 0; column < 6; column++)
+        for (var column = 0; column < 5; column++)
         {
-            actions.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100F / 6F));
+            actions.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 20F));
         }
     }
 
@@ -2827,6 +3087,31 @@ internal sealed class PdmTaskPaneControl : UserControl
         catch (InvalidOperationException)
         {
             // SolidWorks is closing and has already destroyed the task pane handle.
+        }
+    }
+
+    private void RefreshWorkspaceOperationUi()
+    {
+        if (refreshingWorkspaceOperationUi || IsDisposed || !IsHandleCreated)
+        {
+            return;
+        }
+
+        try
+        {
+            refreshingWorkspaceOperationUi = true;
+            workspaceOperationPanel.PerformLayout();
+            workspaceOperationPanel.Invalidate(true);
+            workspaceOperationProgress.Invalidate();
+            serviceStatus.Invalidate();
+            System.Windows.Forms.Application.DoEvents();
+            workspaceOperationPanel.Update();
+            workspaceOperationProgress.Update();
+            serviceStatus.Update();
+        }
+        finally
+        {
+            refreshingWorkspaceOperationUi = false;
         }
     }
 

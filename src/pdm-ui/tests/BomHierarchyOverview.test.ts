@@ -6,7 +6,7 @@ import type { BomItem, ProjectSummary } from '../src/types'
 
 const api = vi.hoisted(() => ({
   listBom: vi.fn(), listBomVersions: vi.fn(), listProjectBomHeaders: vi.fn(),
-  generateProjectBomHeaderHierarchy: vi.fn(), previewProjectBomU9Sync: vi.fn(), executeProjectBomU9Sync: vi.fn(),
+  previewProjectBomU9Sync: vi.fn(), executeProjectBomU9Sync: vi.fn(),
 }))
 
 vi.mock('../src/api', () => api)
@@ -106,7 +106,7 @@ describe('BomHierarchyOverview', () => {
     expect(wrapper.findAll('tbody tr')).toHaveLength(4)
   })
 
-  it('confirms once and submits every missing BOM code application in the hierarchy', async () => {
+  it('shows automatic application status without a manual BOM code application entry', async () => {
     const root = project({ id: 'root', code: 'P-0302', name: '气密设备', rootProjectId: 'root', bomItemCategoryCode: '0302' })
     api.listBom.mockResolvedValue([])
     api.listBomVersions.mockResolvedValue([])
@@ -114,18 +114,13 @@ describe('BomHierarchyOverview', () => {
       { projectId: 'root', kind: 'Master', rowVersion: 0 }, { projectId: 'root', kind: 'Standard', parentKind: 'Master', rowVersion: 0 },
       { projectId: 'root', kind: 'NonStandard', parentKind: 'Master', rowVersion: 0 }, { projectId: 'root', kind: 'Electrical', parentKind: 'Master', rowVersion: 0 },
     ])
-    api.generateProjectBomHeaderHierarchy.mockResolvedValue({ rootProjectId: 'root', expectedCount: 4, generatedCount: 4, existingCount: 0, headers: [] })
-    vi.spyOn(ElMessageBox, 'confirm').mockResolvedValue(undefined as never)
     const wrapper = mount(BomHierarchyOverview, { props: { project: root, projects: [root], token: 'token', editable: true }, global: { plugins: [ElementPlus] } })
     await flushPromises()
 
-    expect(wrapper.text()).toContain('待申请 4 个BOM料号')
+    expect(wrapper.text()).toContain('待BOM批准后自动申请 4 个BOM料号')
     expect(wrapper.findAll('tbody tr')[0].text()).toContain('设备 0302')
     expect(wrapper.findAll('tbody tr')[1].text()).toContain('0201')
-    await wrapper.get('.bom-overview__generation button').trigger('click')
-    await flushPromises()
-    expect(ElMessageBox.confirm).toHaveBeenCalledWith(expect.stringContaining('缺失的 4 个BOM容器'), '确认申请BOM料号', expect.objectContaining({ confirmButtonText: '确认申请' }))
-    expect(api.generateProjectBomHeaderHierarchy).toHaveBeenCalledWith('root', 'token')
+    expect(wrapper.find('.bom-overview__generation button').exists()).toBe(false)
   })
 
   it('excludes the main project category BOMs when child projects exist', async () => {
@@ -139,22 +134,17 @@ describe('BomHierarchyOverview', () => {
       { projectId, kind: 'NonStandard', parentKind: 'Master', rowVersion: 0 },
       { projectId, kind: 'Electrical', parentKind: 'Master', rowVersion: 0 },
     ])
-    api.generateProjectBomHeaderHierarchy.mockResolvedValue({ rootProjectId: 'root', expectedCount: 5, generatedCount: 5, existingCount: 0, headers: [] })
-    vi.spyOn(ElMessageBox, 'confirm').mockResolvedValue(undefined as never)
     const wrapper = mount(BomHierarchyOverview, {
       props: { project: root, projects: [root, child], token: 'token', editable: true },
       global: { plugins: [ElementPlus] },
     })
     await flushPromises()
 
-    expect(wrapper.text()).toContain('待申请 5 个BOM料号')
+    expect(wrapper.text()).toContain('待BOM批准后自动申请 5 个BOM料号')
     const rootRows = wrapper.findAll('tbody tr').slice(0, 4)
     expect(rootRows[0].text()).toContain('待申请')
     expect(rootRows.slice(1).every(row => row.text().includes('不申请'))).toBe(true)
-
-    await wrapper.get('.bom-overview__generation button').trigger('click')
-    await flushPromises()
-    expect(ElMessageBox.confirm).toHaveBeenCalledWith(expect.stringContaining('缺失的 5 个BOM容器'), '确认申请BOM料号', expect.objectContaining({ confirmButtonText: '确认申请' }))
+    expect(wrapper.find('.bom-overview__generation button').exists()).toBe(false)
   })
 
   it('shows an unfinished automatic empty-BOM creation without requiring a second manual operation', async () => {

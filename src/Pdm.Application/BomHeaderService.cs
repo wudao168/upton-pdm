@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Text.Json.Serialization;
 using Upton.Pdm.Domain;
 
@@ -35,6 +36,7 @@ public sealed class BomHeaderService(
     private static readonly ProjectBomHeaderKind[] AllKinds =
         [ProjectBomHeaderKind.Master, ProjectBomHeaderKind.Standard, ProjectBomHeaderKind.NonStandard, ProjectBomHeaderKind.Electrical];
     private static readonly ProjectBomHeaderKind[] MasterOnly = [ProjectBomHeaderKind.Master];
+    private static readonly ConcurrentDictionary<Guid, SemaphoreSlim> AutomaticApplicationLocks = new();
 
     public async Task<IReadOnlyList<ProjectBomHeader>> ListAsync(Guid projectId, string actor, UserRole role, CancellationToken cancellationToken)
     {
@@ -138,6 +140,62 @@ public sealed class BomHeaderService(
         return new BomHeaderGenerationResult(rootProjectId, expectedCount, generatedCount, existingCount, headers);
     }
 
+    public async Task<BomHeaderGenerationResult> EnsureApplicationsAfterBomApprovalAsync(
+        Guid projectId,
+        ProjectBomHeaderKind approvedKind,
+        string actor,
+        CancellationToken cancellationToken)
+    {
+        if (approvedKind == ProjectBomHeaderKind.Master)
+            throw new PdmRuleException("主BOM批准不能作为三类BOM自动申请触发条件。");
+
+        var gate = AutomaticApplicationLocks.GetOrAdd(projectId, static _ => new SemaphoreSlim(1, 1));
+        await gate.WaitAsync(cancellationToken);
+        try
+        {
+            var project = await repository.FindProjectAsync(projectId, cancellationToken)
+                ?? throw new PdmNotFoundException("项目不存在。");
+            var bindings = (await repository.ListProjectBomHeaderBindingsAsync(projectId, cancellationToken))
+                .ToDictionary(binding => binding.Kind);
+            var applications = (await materials.ListMaterialCodeApplicationsAsync(projectId, null, cancellationToken)).ToList();
+            var generatedCount = 0;
+            var existingCount = 0;
+
+            foreach (var kind in new[] { ProjectBomHeaderKind.Master, approvedKind }.Distinct())
+            {
+                bindings.TryGetValue(kind, out var binding);
+                var boundMaterial = binding is null
+                    ? null
+                    : await materials.FindMaterialAsync(binding.MaterialId, cancellationToken);
+                if (boundMaterial is not null)
+                {
+                    var latest = LatestHeaderApplication(applications, kind);
+                    if (boundMaterial.ApprovalStatus == MaterialApprovalStatus.Draft
+                        && (latest is null || latest.Status == MaterialCodeApplicationStatus.Rejected))
+                    {
+                        var application = await CreateHeaderApplicationAsync(project, kind, boundMaterial, actor, cancellationToken);
+                        applications.Add(application);
+                        generatedCount++;
+                    }
+                    else
+                    {
+                        existingCount++;
+                    }
+                    continue;
+                }
+
+                await GenerateMaterialAfterBomApprovalAsync(project, kind, binding?.RowVersion ?? 0, actor, cancellationToken);
+                generatedCount++;
+            }
+
+            return new BomHeaderGenerationResult(project.Id, 2, generatedCount, existingCount, []);
+        }
+        finally
+        {
+            gate.Release();
+        }
+    }
+
     private async Task<ProjectBomHeader> GenerateMaterialAsync(Project project, ProjectBomHeaderKind kind, long expectedRowVersion, string actor, UserRole role, CancellationToken cancellationToken)
     {
         var categoryCode = RequiredCategoryCode(project, kind);
@@ -160,6 +218,38 @@ public sealed class BomHeaderService(
         await repository.AppendAuditAsync(new AuditEntry(
             Guid.NewGuid(), timeProvider.GetUtcNow(), actor, "bom.header.generate", nameof(ProjectBomHeaderBinding),
             $"{project.Id}:{kind}", $"为{KindLabel(kind)}提交料号申请，料号分类{categoryCode}"), cancellationToken);
+        return new ProjectBomHeader(project.Id, kind, saved.ParentKind, material.Id, OfficialMaterialCode(material), material.Name,
+            material.CategoryCode, material.ApprovalStatus, saved.RowVersion, application.Status, application.Id,
+            application.RequestedBy, application.RequestedAt);
+    }
+
+    private async Task<ProjectBomHeader> GenerateMaterialAfterBomApprovalAsync(
+        Project project,
+        ProjectBomHeaderKind kind,
+        long expectedRowVersion,
+        string actor,
+        CancellationToken cancellationToken)
+    {
+        var categoryCode = RequiredCategoryCode(project, kind);
+        var material = await materialService.CreateApplicationDraftAfterBomApprovalAsync(new SaveMaterialCommand(
+            null,
+            $"{project.Code} {KindLabel(kind)}",
+            MaterialKind.Product,
+            MaterialSupplyMode.Manufacture,
+            "001",
+            null,
+            null,
+            $"{project.Name} · {KindLabel(kind)}",
+            null,
+            null,
+            null,
+            null,
+            CategoryCode: categoryCode), actor, cancellationToken);
+        var saved = await repository.SaveProjectBomHeaderBindingAsync(project.Id, kind, material.Id, expectedRowVersion, actor, cancellationToken);
+        var application = await CreateHeaderApplicationAsync(project, kind, material, actor, cancellationToken);
+        await repository.AppendAuditAsync(new AuditEntry(
+            Guid.NewGuid(), timeProvider.GetUtcNow(), actor, "bom.header.application.auto-create", nameof(ProjectBomHeaderBinding),
+            $"{project.Id}:{kind}", $"{KindLabel(kind)}批准后自动提交{KindLabel(kind)}料号申请，料号分类{categoryCode}"), cancellationToken);
         return new ProjectBomHeader(project.Id, kind, saved.ParentKind, material.Id, OfficialMaterialCode(material), material.Name,
             material.CategoryCode, material.ApprovalStatus, saved.RowVersion, application.Status, application.Id,
             application.RequestedBy, application.RequestedAt);

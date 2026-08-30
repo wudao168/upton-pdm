@@ -8,7 +8,6 @@ internal sealed class BatchProgressDialog : Form
 {
     private readonly Label status = new Label();
     private readonly Label currentFile = new Label();
-    private readonly ProgressBar progress = new ProgressBar();
     private readonly TextBox details = new TextBox();
     private readonly Button close = new Button();
     private readonly Timer autoCloseTimer = new Timer { Interval = 1000 };
@@ -37,13 +36,8 @@ internal sealed class BatchProgressDialog : Form
         currentFile.Location = new Point(18, 47);
         currentFile.Size = new Size(524, 22);
 
-        progress.Location = new Point(18, 75);
-        progress.Size = new Size(524, 20);
-        progress.Minimum = 0;
-        progress.Maximum = Math.Max(1, totalFiles);
-
-        details.Location = new Point(18, 106);
-        details.Size = new Size(524, 55);
+        details.Location = new Point(18, 75);
+        details.Size = new Size(524, 86);
         details.Multiline = true;
         details.ReadOnly = true;
         details.BorderStyle = BorderStyle.None;
@@ -66,7 +60,6 @@ internal sealed class BatchProgressDialog : Form
 
         Controls.Add(status);
         Controls.Add(currentFile);
-        Controls.Add(progress);
         Controls.Add(details);
         Controls.Add(close);
     }
@@ -92,8 +85,6 @@ internal sealed class BatchProgressDialog : Form
             return;
         }
 
-        progress.Maximum = Math.Max(1, total);
-        progress.Value = Math.Max(progress.Minimum, Math.Min(progress.Maximum, completed));
         status.Text = string.Concat("正在处理 ", Math.Min(completed + 1, total), " / ", total);
         currentFile.Text = fileName ?? string.Empty;
         details.Text = message ?? string.Empty;
@@ -108,7 +99,6 @@ internal sealed class BatchProgressDialog : Form
             return;
         }
 
-        progress.Value = progress.Maximum;
         status.Text = hasFailures ? "整套提交完成，部分文件处理失败。" : "整套提交完成。";
         currentFile.Text = string.Empty;
         details.Text = message ?? string.Empty;

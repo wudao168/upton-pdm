@@ -12,7 +12,7 @@ const props = defineProps<{
 }>()
 
 const emit = defineEmits<{ select: [node: DocumentNode]; context: [node: DocumentNode, event: MouseEvent] }>()
-const expanded = ref((props.level ?? 0) < 2)
+const expanded = ref((props.level ?? 0) === 0)
 const hasChildren = computed(() => props.node.children.length > 0)
 const reviewState = computed(() => props.node.documentId ? props.reviewStates?.[props.node.documentId] : undefined)
 const versionText = computed(() => props.node.snapshotVersion === undefined
@@ -62,7 +62,9 @@ function openContext(event: MouseEvent) {
         <CadDocumentIcon :kind="node.kind" :status="node.status" :size="17" />
         <span class="pdm-tree-row__label">
           <strong>{{ node.drawingNumber }}</strong>
-          <small>{{ node.name }}<template v-if="node.quantity > 1"> ×{{ node.quantity }}</template></small>
+          <small v-if="node.name !== node.drawingNumber || node.quantity > 1">
+            <template v-if="node.name !== node.drawingNumber">{{ node.name }}</template><template v-if="node.quantity > 1"> ×{{ node.quantity }}</template>
+          </small>
         </span>
       </span>
       <span v-if="node.status !== 'Missing' && node.status !== 'Unregistered' && node.status !== 'Unarchived'" class="pdm-tree-row__version" :title="versionHint">

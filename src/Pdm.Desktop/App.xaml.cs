@@ -1,6 +1,8 @@
 using System;
+using System.Diagnostics;
 using System.Threading;
 using System.Windows;
+using Upton.Pdm.ClientShared;
 
 namespace Upton.Pdm.Desktop;
 
@@ -14,6 +16,13 @@ public partial class App : System.Windows.Application
 
     protected override void OnStartup(StartupEventArgs e)
     {
+        var executablePath = Process.GetCurrentProcess().MainModule?.FileName ?? string.Empty;
+        if (ClientPackageUpdater.TryLaunchPendingUpdate("desktop", Process.GetCurrentProcess().Id, executablePath))
+        {
+            Shutdown();
+            return;
+        }
+
         singleInstanceMutex = new Mutex(true, InstanceMutexName, out var createdNew);
         if (!createdNew)
         {

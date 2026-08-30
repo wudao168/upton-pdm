@@ -6,7 +6,7 @@ import type { OrganizationDirectory, RolePermissionDirectory } from '../src/type
 
 const directory: OrganizationDirectory = {
   organizations: [{ id: 'org-1', name: '昆山阿普顿自动化系统有限公司', projectCompanyCode: '7', modelCompanyCode: 'AK', crmCompanyName: '', isActive: true, currentProjectSequence: 1, currentSerialSequence: 1 }],
-  units: [{ id: 'unit-1', organizationId: 'org-1', code: 'DESIGN', name: '设计部', kind: 'BusinessDivision', isActive: true, sortOrder: 1 }],
+  units: [{ id: 'unit-1', organizationId: 'org-1', code: 'DESIGN', name: '设计部', kind: 'BusinessDivision', canManufacture: true, isActive: true, sortOrder: 1 }],
   memberships: [{ unitId: 'unit-1', username: 'engineer', isPrimary: true }],
   managers: [],
   users: [{ username: 'engineer', displayName: '设计工程师', role: 'Engineer', isActive: true }],
