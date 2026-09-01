@@ -49,6 +49,20 @@ public sealed class MaterialApiTests : IClassFixture<PdmApiFactory>
     }
 
     [Fact]
+    public async Task U9MaterialFullSyncStatusApi_ReturnsDynamicCreatableCategoriesAndSchedule()
+    {
+        var response = await client.GetAsync("/api/u9-material-full-sync/status");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        using var result = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+        Assert.Equal("02:00", result.RootElement.GetProperty("scheduleTime").GetString());
+        Assert.Equal(30, result.RootElement.GetProperty("checkIntervalMinutes").GetInt32());
+        var categories = result.RootElement.GetProperty("categories").EnumerateArray().ToArray();
+        Assert.Contains(categories, category => category.GetProperty("code").GetString() == "0102");
+        Assert.DoesNotContain(categories, category => category.GetProperty("code").GetString() == "01");
+    }
+
+    [Fact]
     public async Task U9MaterialQueryApi_ReturnsSpecificationForCodeAndSpecificationValidation()
     {
         var settingsResponse = await client.PutAsJsonAsync("/api/u9-material-integration", new

@@ -2,7 +2,7 @@
 import { onBeforeUnmount, onMounted, ref } from 'vue'
 import { RefreshCw, Search } from '@lucide/vue'
 import { postDesktopMessage } from '../api'
-import type { DocumentFilter, DocumentNode, DrawingReviewBadge, SolidWorksOpenMode } from '../types'
+import type { DocumentFilter, DocumentNode, DrawingReviewBadge, SolidWorksOpenMode, WorkspaceLocalFileState } from '../types'
 import CadDocumentIcon from './CadDocumentIcon.vue'
 import DocumentTreeNode from './DocumentTreeNode.vue'
 
@@ -14,12 +14,15 @@ withDefaults(defineProps<{
   modelCount: number
   drawingCount: number
   warningCount: number
+  canEdit?: boolean
   reviewStates?: Record<string, DrawingReviewBadge>
-}>(), { reviewStates: () => ({}) })
+  localStates?: Record<string, WorkspaceLocalFileState>
+  refreshing?: boolean
+}>(), { canEdit: false, reviewStates: () => ({}), localStates: () => ({}), refreshing: false })
 
 const query = defineModel<string>('query', { required: true })
 const filter = defineModel<DocumentFilter>('filter', { required: true })
-const emit = defineEmits<{ select: [node: DocumentNode]; refresh: []; open: [node: DocumentNode, mode: SolidWorksOpenMode] }>()
+const emit = defineEmits<{ select: [node: DocumentNode]; refresh: []; open: [node: DocumentNode, mode: SolidWorksOpenMode]; openFolder: [node: DocumentNode] }>()
 const contextNode = ref<DocumentNode>()
 const contextLeft = ref(0)
 const contextTop = ref(0)
@@ -67,9 +70,27 @@ onBeforeUnmount(() => {
 
 <template>
   <section class="pdm-panel pdm-tree-panel" aria-label="项目设计树">
-    <header class="pdm-panel-heading">
-      <h2>设计树</h2>
-      <button type="button" class="pdm-plain-button" aria-label="刷新设计树" @click="emit('refresh')"><RefreshCw :size="15" /></button>
+    <header class="pdm-panel-heading pdm-tree-heading">
+      <h2>导航窗格</h2>
+      <div class="pdm-tree-refresh">
+        <button
+          type="button"
+          class="pdm-plain-button"
+          :aria-label="refreshing ? '正在刷新设计树' : '刷新设计树'"
+          :aria-busy="refreshing"
+          :disabled="refreshing"
+          @click="emit('refresh')"
+        >
+          <RefreshCw :size="15" />
+        </button>
+      </div>
+      <div
+        v-if="refreshing"
+        class="pdm-tree-refresh-progress"
+        role="progressbar"
+        aria-label="正在刷新设计树"
+        aria-valuetext="刷新中"
+      />
     </header>
     <label class="pdm-tree-search">
       <Search :size="15" aria-hidden="true" />
@@ -89,6 +110,7 @@ onBeforeUnmount(() => {
         <small>{{ item.value === 'all' ? allCount : item.value === 'model' ? modelCount : item.value === 'drawing' ? drawingCount : warningCount }}</small>
       </button>
     </div>
+    <div class="pdm-tree-columns" aria-hidden="true"><span>名称</span><span>本地状态 / PLM版本</span></div>
     <ul v-if="filter === 'drawing' && drawings.length" class="pdm-tree pdm-drawing-list" aria-label="2D工程图列表">
       <li v-for="drawing in drawings" :key="drawing.id">
         <button
@@ -99,12 +121,12 @@ onBeforeUnmount(() => {
           @contextmenu.prevent="showContext(drawing, $event)"
         >
           <span class="pdm-tree-row__content"><CadDocumentIcon :kind="drawing.kind" :status="drawing.status" :size="17" /><span class="pdm-tree-row__label"><strong>{{ drawing.drawingNumber }}</strong><small>{{ drawing.name }}</small></span></span>
-          <span class="pdm-tree-row__version"><em>{{ drawing.version }}</em><small v-if="drawing.documentId && reviewStates[drawing.documentId]" class="pdm-review-badge" :class="`is-${reviewStates[drawing.documentId].tone}`">{{ reviewStates[drawing.documentId].label }}</small></span>
+          <span class="pdm-tree-row__version"><em>{{ drawing.version }}</em><small v-if="drawing.documentId && localStates[drawing.documentId]" class="pdm-local-state" :class="`is-${localStates[drawing.documentId].localState}`" :title="localStates[drawing.documentId].message">{{ localStates[drawing.documentId].localStateLabel }}</small><small v-if="drawing.documentId && reviewStates[drawing.documentId]" class="pdm-review-badge" :class="`is-${reviewStates[drawing.documentId].tone}`">{{ reviewStates[drawing.documentId].label }}</small></span>
         </button>
       </li>
     </ul>
     <ul v-else-if="filter !== 'drawing' && root" class="pdm-tree" role="tree">
-      <DocumentTreeNode :node="root" :selected-id="selectedId" :review-states="reviewStates" @select="emit('select', $event)" @context="showContext" />
+      <DocumentTreeNode :node="root" :selected-id="selectedId" :review-states="reviewStates" :local-states="localStates" @select="emit('select', $event)" @context="showContext" />
     </ul>
     <div v-else class="pdm-tree-empty" role="status">
       <strong>没有匹配的图档</strong>
@@ -119,14 +141,16 @@ onBeforeUnmount(() => {
     >
       <strong>{{ contextNode.drawingNumber }} · <template v-if="contextNode.snapshotVersion !== undefined">{{ contextNode.snapshotVersion }} / </template>{{ contextNode.version }}</strong>
       <button type="button" role="menuitem" :disabled="!solidWorksAvailable || !contextNode.documentId" @click="open('LatestReadOnly')">在SolidWorks中打开最新受控版</button>
+      <button type="button" role="menuitem" :disabled="!canEdit || !solidWorksAvailable || !contextNode.documentId" @click="open('LatestEdit')">获取编辑权限并打开</button>
       <button type="button" role="menuitem" :disabled="!solidWorksAvailable || !contextNode.documentId" @click="open('LatestReleased')">打开最新正式发布版（只读）</button>
+      <button type="button" role="menuitem" @click="emit('openFolder', contextNode); closeContext()">打开所在文件夹</button>
       <small v-if="!contextNode.documentId">该引用尚未入库，请先在SolidWorks插件中提交整套存档</small>
       <small v-if="!solidWorksAvailable">当前电脑未安装SolidWorks或UPLM插件</small>
     </div>
     <footer class="pdm-tree-legend">
-      <span><i class="is-green" />已发布</span>
-      <span><i class="is-blue" />工作版</span>
-      <span><i class="is-orange" />异常</span>
+      <span><i class="is-green" />只读缓存</span>
+      <span><i class="is-blue" />可编辑</span>
+      <span><i class="is-orange" />需处理</span>
     </footer>
   </section>
 </template>

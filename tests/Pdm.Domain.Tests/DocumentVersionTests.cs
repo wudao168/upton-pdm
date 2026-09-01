@@ -5,6 +5,50 @@ namespace Upton.Pdm.Domain.Tests;
 public sealed class DocumentVersionTests
 {
     [Fact]
+    public async Task IncrementalAdmission_AndIndependentProjectCopies_PreserveIdentityOnRetry()
+    {
+        var repository = new Infrastructure.InMemoryPdmRepository(TimeProvider.System);
+        var originalProject = Assert.Single(await repository.ListProjectsAsync(CancellationToken.None));
+        var copyProject = await repository.CreateProjectAsync(
+            new Application.CreateProjectCommand("COPY-ADMISSION", "独立副本", "admin", @"D:\TestVault\Copy", @"D:\TestRelease\Copy"),
+            "admin", CancellationToken.None);
+        var workflow = new Application.PdmWorkflowService(repository, new RecordingFileStorage(), new NoOpPublisher(), TimeProvider.System);
+        var originalIds = new List<Guid>();
+        var copiedIds = new List<Guid>();
+        // First ten admitted documents, then ten new documents in that same project.
+        for (var i = 0; i < 20; i++)
+        {
+            var command = new Application.RegisterDocumentCommand(originalProject.Id, $"PART-{i}", $"零件{i}", $"PART-{i}.SLDPRT",
+                DocumentKind.Part, SourceSha256: (i + 1).ToString("X64"));
+            var original = await workflow.RegisterDocumentAsync(command, "admin", UserRole.Administrator, CancellationToken.None);
+            originalIds.Add(original.Id);
+            Assert.Equal(original.Id, (await workflow.RegisterDocumentAsync(command, "admin", UserRole.Administrator, CancellationToken.None)).Id);
+
+            var match = Assert.Single(await workflow.PreflightDocumentRegistrationAsync(copyProject.Id,
+                [new("copy", command.FileName, command.Kind, command.SourceSha256!)], "admin", UserRole.Administrator, CancellationToken.None));
+            Assert.Equal(DocumentRegistrationMatchKind.New, match.MatchKind);
+            var copyCommand = command with { ProjectId = copyProject.Id };
+            var copy = await workflow.RegisterDocumentAsync(copyCommand, "admin", UserRole.Administrator, CancellationToken.None);
+            copiedIds.Add(copy.Id);
+            Assert.NotEqual(original.Id, copy.Id);
+            Assert.Equal(RevisionLabel.InitialWork(), copy.Revision);
+            Assert.Equal(copy.Id, (await workflow.RegisterDocumentAsync(copyCommand, "admin", UserRole.Administrator, CancellationToken.None)).Id);
+            Assert.Empty(await repository.ListDocumentVersionsAsync(copy.Id, CancellationToken.None));
+        }
+        var originals = await repository.ListDocumentsAsync(originalProject.Id, CancellationToken.None);
+        var copies = await repository.ListDocumentsAsync(copyProject.Id, CancellationToken.None);
+        Assert.All(originalIds, id => Assert.Single(originals, doc => doc.Id == id));
+        Assert.Equal(20, copies.Count);
+        Assert.Equal(40, originalIds.Concat(copiedIds).Distinct().Count());
+        Assert.All(originals.Where(doc => originalIds.Contains(doc.Id)), doc =>
+        {
+            Assert.Equal(originalProject.Id, doc.ProjectId);
+            Assert.Equal(RevisionLabel.InitialWork(), doc.Revision);
+            Assert.Equal(0, doc.StoredVersionCount);
+        });
+    }
+
+    [Fact]
     public async Task RegisterDocument_IsIdempotentWithinProjectByFileName()
     {
         var repository = new Infrastructure.InMemoryPdmRepository(TimeProvider.System);
@@ -36,7 +80,7 @@ public sealed class DocumentVersionTests
             [
                 new("same", existing.FileName, DocumentKind.Part, sourceSha256),
                 new("conflict", existing.FileName, DocumentKind.Part, new string('B', 64)),
-                new("duplicate", "DUP-ALIAS.SLDPRT", DocumentKind.Part, sourceSha256),
+                new("same-content-new-name", "DUP-ALIAS.SLDPRT", DocumentKind.Part, sourceSha256),
                 new("new", "DUP-NEW.SLDPRT", DocumentKind.Part, new string('C', 64))
             ],
             "admin",
@@ -45,12 +89,12 @@ public sealed class DocumentVersionTests
 
         Assert.Equal(DocumentRegistrationMatchKind.SameNameSameContent, Assert.Single(matches, item => item.CandidateKey == "same").MatchKind);
         Assert.Equal(DocumentRegistrationMatchKind.SameNameDifferentContent, Assert.Single(matches, item => item.CandidateKey == "conflict").MatchKind);
-        Assert.Equal(DocumentRegistrationMatchKind.SameContentDifferentName, Assert.Single(matches, item => item.CandidateKey == "duplicate").MatchKind);
+        Assert.Equal(DocumentRegistrationMatchKind.New, Assert.Single(matches, item => item.CandidateKey == "same-content-new-name").MatchKind);
         Assert.Equal(DocumentRegistrationMatchKind.New, Assert.Single(matches, item => item.CandidateKey == "new").MatchKind);
     }
 
     [Fact]
-    public async Task RegisterDocument_UsesContentFingerprintToPreventUnsafeReuse()
+    public async Task RegisterDocument_UsesContentFingerprintForSameNameSafetyButAllowsDifferentFileNames()
     {
         var repository = new Infrastructure.InMemoryPdmRepository(TimeProvider.System);
         var project = Assert.Single(await repository.ListProjectsAsync(CancellationToken.None));
@@ -67,19 +111,11 @@ public sealed class DocumentVersionTests
             "admin",
             UserRole.Administrator,
             CancellationToken.None));
-        await Assert.ThrowsAsync<Application.PdmConflictException>(() => workflow.RegisterDocumentAsync(
-            command with { DrawingNumber = "SAFE-ALIAS", FileName = "SAFE-ALIAS.SLDPRT" },
-            "admin",
-            UserRole.Administrator,
-            CancellationToken.None));
-
         var independent = await workflow.RegisterDocumentAsync(
             command with
             {
                 DrawingNumber = "SAFE-ALIAS",
-                FileName = "SAFE-ALIAS.SLDPRT",
-                AllowDuplicateContent = true,
-                DuplicateReason = "客户要求使用独立图号"
+                FileName = "SAFE-ALIAS.SLDPRT"
             },
             "admin",
             UserRole.Administrator,
@@ -875,7 +911,7 @@ public sealed class DocumentVersionTests
     }
 
     [Fact]
-    public async Task ControlledOpenManifest_UsesExactReferencedVersionsAndVerifiesEveryFile()
+    public async Task ControlledOpenManifest_UsesExactReferencedVersionsAndValidatesEveryFileMetadata()
     {
         var repository = new Infrastructure.InMemoryPdmRepository(TimeProvider.System);
         var project = Assert.Single(await repository.ListProjectsAsync(CancellationToken.None));
@@ -917,7 +953,8 @@ public sealed class DocumentVersionTests
         Assert.Equal(2, manifest.Files.Count);
         Assert.Contains(manifest.Files, file => file.IsRoot && file.Revision == "W1" && file.Sha256 == new string('3', 64));
         Assert.Contains(manifest.Files, file => file.DocumentId == part.Id && file.Revision == "W1" && file.Sha256 == new string('1', 64));
-        Assert.Equal(2, storage.VerifiedFiles.Count);
+        Assert.Equal(2, storage.MetadataValidatedFiles.Count);
+        Assert.Empty(storage.VerifiedFiles);
     }
 
     [Fact]
@@ -1060,7 +1097,7 @@ public sealed class DocumentVersionTests
 
         Assert.Equal(2, currentManifest.Files.Count);
         Assert.Contains(currentManifest.Files, file => file.DocumentId == drawing.Id && file.Revision == "W1" && file.Sha256 == new string('8', 64));
-        Assert.Equal(2, storage.VerifiedFiles.Count);
+        Assert.Equal(2, storage.MetadataValidatedFiles.Count);
 
         var partVersion = Assert.Single(await repository.ListDocumentVersionsAsync(part.Id, CancellationToken.None));
         var historicalManifest = await workflow.CreateControlledOpenManifestAsync(
@@ -1113,7 +1150,7 @@ public sealed class DocumentVersionTests
 
         Assert.Equal(2, manifest.Files.Count);
         Assert.Contains(manifest.Files, file => file.DocumentId == drawing.Id && file.Revision == "W1");
-        Assert.Equal(2, storage.VerifiedFiles.Count);
+        Assert.Equal(2, storage.MetadataValidatedFiles.Count);
     }
 
     [Fact]
@@ -1161,7 +1198,7 @@ public sealed class DocumentVersionTests
         var currentFile = Assert.Single(currentManifest.Files);
         Assert.True(currentFile.IsRoot);
         Assert.Equal(assembly.Id, currentFile.DocumentId);
-        Assert.Single(storage.VerifiedFiles);
+        Assert.Single(storage.MetadataValidatedFiles);
         Assert.Contains(currentManifest.Warnings, warning => warning.Contains("顶玻璃.SLDDRW", StringComparison.Ordinal));
 
         var assemblyVersion = Assert.Single(await repository.ListDocumentVersionsAsync(assembly.Id, CancellationToken.None));
@@ -1412,6 +1449,12 @@ public sealed class DocumentVersionTests
     private sealed class RecordingFileStorage : Application.IFileStorage
     {
         public List<Application.StoredFile> VerifiedFiles { get; } = [];
+        public List<Application.StoredFile> MetadataValidatedFiles { get; } = [];
+        public Task ValidateStoredFileMetadataAsync(Project project, Application.StoredFile file, CancellationToken cancellationToken)
+        {
+            MetadataValidatedFiles.Add(file);
+            return Task.CompletedTask;
+        }
         public Task VerifyStoredFileAsync(Project project, Application.StoredFile file, CancellationToken cancellationToken)
         {
             VerifiedFiles.Add(file);

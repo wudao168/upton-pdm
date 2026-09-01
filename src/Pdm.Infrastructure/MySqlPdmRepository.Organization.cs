@@ -416,15 +416,15 @@ public sealed partial class MySqlPdmRepository
         await using var connection = await OpenAsync(cancellationToken);
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
         var exists = await connection.ExecuteScalarAsync<int>(new CommandDefinition(
-            "SELECT COUNT(*) FROM project WHERE id=@ProjectId AND parent_project_id IS NOT NULL FOR UPDATE", new { ProjectId = projectId }, transaction, cancellationToken: cancellationToken));
-        if (exists == 0) throw new PdmNotFoundException("子项目不存在。");
+            "SELECT COUNT(*) FROM project WHERE id=@ProjectId FOR UPDATE", new { ProjectId = projectId }, transaction, cancellationToken: cancellationToken));
+        if (exists == 0) throw new PdmNotFoundException("项目不存在。");
         await connection.ExecuteAsync(new CommandDefinition(
             "DELETE FROM project_assignment WHERE project_id=@ProjectId AND assignment_type='Designer'", new { ProjectId = projectId }, transaction, cancellationToken: cancellationToken));
         await connection.ExecuteAsync(new CommandDefinition(
             "INSERT INTO project_assignment(project_id,username,assignment_type,assigned_by,assigned_at) VALUES(@ProjectId,@Username,'Designer',@Actor,@Now)",
             designers.Select(username => new { ProjectId = projectId, Username = username, Actor = actor, Now = now }), transaction, cancellationToken: cancellationToken));
         await transaction.CommitAsync(cancellationToken);
-        return await FindProjectAsync(projectId, cancellationToken) ?? throw new PdmNotFoundException("子项目不存在。");
+        return await FindProjectAsync(projectId, cancellationToken) ?? throw new PdmNotFoundException("项目不存在。");
     }
 
     public async Task<Project> SetChildProjectManagerAsync(Guid projectId, string projectManager, string actor, CancellationToken cancellationToken)

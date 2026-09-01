@@ -176,7 +176,7 @@ public sealed partial class MySqlPdmRepository
             CheckoutForceReleaseHours = ReadInt(values, "checkout_force_release_hours", 48),
             BomDrawingNumberProperty = ReadString(values, "bom_drawing_number_property", "物料编码"),
             BomNameProperty = ReadString(values, "bom_name_property", "物料名称"),
-            BomDescriptionProperty = ReadString(values, "bom_description_property", "备注信息"),
+            BomDescriptionProperty = ReadString(values, "bom_description_property", "备注"),
             BomMaterialProperty = ReadString(values, "bom_material_property", "材质"),
             BomSpecificationProperty = ReadString(values, "bom_specification_property", "型号"),
             BomUnitProperty = ReadString(values, "bom_unit_property", "单位"),

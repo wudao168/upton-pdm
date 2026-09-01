@@ -15,6 +15,16 @@ public sealed partial class MySqlPdmRepository
         return rows.Select(MapDocumentVersion).ToArray();
     }
 
+    public async Task<IReadOnlyList<DocumentVersion>> ListProjectDocumentVersionsAsync(Guid projectId, CancellationToken cancellationToken)
+    {
+        await using var connection = await OpenAsync(cancellationToken);
+        var rows = await connection.QueryAsync<DocumentVersionRow>(new CommandDefinition(
+            VersionSelect + " WHERE document_id IN (SELECT id FROM document WHERE project_id=@ProjectId)",
+            new { ProjectId = projectId },
+            cancellationToken: cancellationToken));
+        return rows.Select(MapDocumentVersion).ToArray();
+    }
+
     public async Task<DocumentVersion?> FindDocumentVersionAsync(Guid documentId, Guid versionId, CancellationToken cancellationToken)
     {
         await using var connection = await OpenAsync(cancellationToken);

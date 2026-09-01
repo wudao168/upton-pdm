@@ -57,8 +57,19 @@ internal sealed class PdmApiClient : IDisposable
     public Task<List<ProjectDto>> GetProjectsAsync(CancellationToken cancellationToken) =>
         GetJsonAsync<List<ProjectDto>>("api/projects", cancellationToken);
 
+    public Task<OrganizationDirectoryDto> GetOrganizationDirectoryAsync(CancellationToken cancellationToken) =>
+        GetJsonAsync<OrganizationDirectoryDto>("api/organization-directory", cancellationToken);
+
     public Task<List<DocumentDto>> GetDocumentsAsync(Guid projectId, CancellationToken cancellationToken) =>
         GetJsonAsync<List<DocumentDto>>(string.Concat("api/projects/", projectId, "/documents"), cancellationToken);
+
+    public Task<List<BomPropertyMappingDto>> GetBomPropertyMappingsAsync(CancellationToken cancellationToken) =>
+        GetJsonAsync<List<BomPropertyMappingDto>>("api/bom-property-mappings", cancellationToken);
+
+    public Task<List<BomItemDto>> GetBomAsync(Guid projectId, string kind, CancellationToken cancellationToken) =>
+        GetJsonAsync<List<BomItemDto>>(
+            string.Concat("api/projects/", projectId, "/boms/", Uri.EscapeDataString(kind ?? string.Empty)),
+            cancellationToken);
 
     public Task<List<DocumentModelDrawingRelationDto>> GetDocumentRelationsAsync(Guid projectId, CancellationToken cancellationToken) =>
         GetJsonAsync<List<DocumentModelDrawingRelationDto>>(string.Concat("api/projects/", projectId, "/document-relations"), cancellationToken);
@@ -475,6 +486,11 @@ internal sealed class PdmApiClient : IDisposable
         }
     }
 
+    internal static bool HasResolvedReferenceVersion(CadTreeNode node) =>
+        ToRevisionRequest(node.CurrentRevision?.TrimEnd('*').Trim()) != null;
+
+    internal static void ValidateCheckInReferences(CadTreeNode node) => ToRequestNode(node, true);
+
     private static object ToRequestNode(CadTreeNode node, bool isRoot)
     {
         var children = new List<object>();
@@ -627,8 +643,23 @@ internal sealed class ProjectDto
     public bool CanSubmitArchive { get; set; }
     public int? DocumentCount { get; set; }
     public string BusinessStatus { get; set; }
+    public string ExecutionUnitName { get; set; }
+    public string DesignLead { get; set; }
+    public List<string> DesignLeads { get; set; }
+    public List<string> Designers { get; set; }
 
     public override string ToString() => string.Concat(Code, " · ", Name);
+}
+
+internal sealed class OrganizationDirectoryDto
+{
+    public List<OrganizationDirectoryUserDto> Users { get; set; }
+}
+
+internal sealed class OrganizationDirectoryUserDto
+{
+    public string Username { get; set; }
+    public string DisplayName { get; set; }
 }
 
 internal sealed class RevisionDto
@@ -654,6 +685,7 @@ internal sealed class DocumentReferenceNodeDto
 internal sealed class DocumentDto
 {
     public Guid Id { get; set; }
+    public Guid ProjectId { get; set; }
     public string DrawingNumber { get; set; }
     public string Name { get; set; }
     public string FileName { get; set; }
@@ -751,6 +783,37 @@ internal sealed class DocumentVersionDto
     public string Sha256 { get; set; }
     public Dictionary<string, string> PropertySnapshot { get; set; }
     public DocumentReferenceNodeDto ReferenceSnapshot { get; set; }
+}
+
+internal sealed class BomPropertyMappingDto
+{
+    public string PdmPropertyKey { get; set; }
+    public string PdmPropertyName { get; set; }
+    public string SolidWorksProperty { get; set; }
+    public string Source { get; set; }
+    public bool MappingEditable { get; set; }
+}
+
+internal sealed class BomItemDto
+{
+    public Guid Id { get; set; }
+    public Guid ProjectId { get; set; }
+    public int Kind { get; set; }
+    public int Sequence { get; set; }
+    public string DrawingNumber { get; set; }
+    public string Name { get; set; }
+    public decimal Quantity { get; set; }
+    public string Unit { get; set; }
+    public string Material { get; set; }
+    public string Specification { get; set; }
+    public string Revision { get; set; }
+    public string Remark { get; set; }
+    public string Brand { get; set; }
+    public string SurfaceTreatment { get; set; }
+    public string Weight { get; set; }
+    public Guid? SourceDocumentId { get; set; }
+    public string SourceConfiguration { get; set; }
+    public bool IsManuallyExcluded { get; set; }
 }
 
 internal sealed class CheckInResultDto

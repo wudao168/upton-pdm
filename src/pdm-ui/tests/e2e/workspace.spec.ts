@@ -191,7 +191,21 @@ test('engineer logs in and reads the API-backed PLM workspace', async ({ page },
   expect(fileDetailWidths.name).toBeGreaterThanOrEqual(260)
   expect(fileDetailWidths.updated).toBeGreaterThanOrEqual(170)
   await page.getByRole('button', { name: '图档', exact: true }).click()
+  await page.evaluate(({ projectId }) => window.dispatchEvent(new CustomEvent('pdm-workspace-local-state', { detail: {
+    projectId,
+    projectCode: 'PRJ-REAL-001',
+    projectDirectory: 'E:\\Workspace\\View\\PRJ-REAL-001',
+    projectDirectoryExists: true,
+    items: [
+      { documentId: 'doc-root', fileName: 'REAL-ASM-001.SLDASM', fullPath: 'E:\\Workspace\\View\\PRJ-REAL-001\\REAL-ASM-001.SLDASM', localState: 'Editable', localStateLabel: '可编辑', localRevision: 'W2', latestRevision: 'W2', message: '已由你检出，可以继续编辑。', isReadOnly: false },
+      { documentId: 'doc-part', fileName: 'REAL-PRT-001.SLDPRT', fullPath: 'E:\\Workspace\\View\\PRJ-REAL-001\\REAL-PRT-001.SLDPRT', localState: 'NeedsUpdate', localStateLabel: '需要更新', localRevision: 'W1', latestRevision: 'A', message: '本地版本需要更新。', isReadOnly: true },
+    ],
+  } })), { projectId })
   await expect(page.getByLabel('项目设计树')).toContainText('REAL-PRT-001')
+  await expect(page.getByLabel('工作区位置')).toContainText('可编辑')
+  await expect(page.getByLabel('项目设计树')).toContainText('需要更新')
+  await page.getByRole('button', { name: '打开文件夹', exact: true }).click()
+  await expect.poll(() => page.evaluate(() => (window as unknown as { pdmHostMessages: Array<{ type?: string }> }).pdmHostMessages.some(message => message.type === 'workspace-open-folder'))).toBe(true)
   await expect(page.getByLabel('工作版本 W2')).toHaveText('W2')
   await expect(page.getByLabel('业务状态 工作中')).toHaveText('工作中')
   await expect(page.getByLabel('图档预览').getByText('可编辑', { exact: true })).toBeVisible()

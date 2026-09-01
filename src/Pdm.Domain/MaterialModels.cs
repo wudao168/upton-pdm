@@ -28,6 +28,17 @@ public enum MaterialCodeApplicationStatus
     Rejected = 2
 }
 
+public enum MaterialCodeWorkflowState
+{
+    PendingApproval = 0,
+    PendingMaterialSync = 1,
+    MaterialSyncFailed = 2,
+    PendingBomSync = 3,
+    BomSyncFailed = 4,
+    Completed = 5,
+    Rejected = 6
+}
+
 public sealed record MaterialCodeApplication(
     Guid Id,
     Guid ProjectId,
@@ -52,6 +63,11 @@ public sealed record MaterialCodeApplication(
     public string? Specification { get; init; }
     public string? Brand { get; init; }
     public string? Remark { get; init; }
+    public MaterialCodeWorkflowState WorkflowState { get; init; } = MaterialCodeWorkflowState.PendingApproval;
+    public Guid? SyncTaskId { get; init; }
+    public MaterialSyncStatus? SyncStatus { get; init; }
+    public string? SyncError { get; init; }
+    public string? WorkflowMessage { get; init; }
 }
 
 public enum MaterialCodeResolutionStatus
@@ -60,7 +76,10 @@ public enum MaterialCodeResolutionStatus
     NoMatch = 1,
     Ambiguous = 2,
     ApplicationPending = 3,
-    ApplicationApproved = 4
+    ApplicationApproved = 4,
+    Verified = 5,
+    ValidationFailed = 6,
+    CodeNotFound = 7
 }
 
 public sealed record MaterialCodeResolution(
@@ -68,7 +87,10 @@ public sealed record MaterialCodeResolution(
     MaterialCodeResolutionStatus Status,
     PdmMaterial? Material,
     IReadOnlyList<PdmMaterial> Candidates,
-    MaterialCodeApplication? Application);
+    MaterialCodeApplication? Application)
+{
+    public IReadOnlyList<string> Issues { get; init; } = [];
+}
 
 public enum MaterialSyncStatus
 {
@@ -85,6 +107,65 @@ public enum MaterialSyncOperation
 {
     Create = 0,
     Update = 1
+}
+
+public enum MaterialSyncBatchStatus
+{
+    Queued = 0,
+    Running = 1,
+    Succeeded = 2,
+    PartiallySucceeded = 3,
+    Failed = 4
+}
+
+public enum MaterialSyncBatchItemStatus
+{
+    Queued = 0,
+    Running = 1,
+    Succeeded = 2,
+    Waiting = 3,
+    Failed = 4
+}
+
+public sealed record MaterialSyncBatchItem(
+    Guid Id,
+    Guid BatchId,
+    Guid TaskId,
+    int Ordinal,
+    MaterialSyncBatchItemStatus Status,
+    string? Message,
+    DateTimeOffset? StartedAt,
+    DateTimeOffset? CompletedAt,
+    DateTimeOffset? LeaseExpiresAt);
+
+public sealed record MaterialSyncBatch(
+    Guid Id,
+    MaterialSyncBatchStatus Status,
+    string RequestedBy,
+    UserRole RequestedRole,
+    int TotalCount,
+    int CompletedCount,
+    int SucceededCount,
+    int WaitingCount,
+    int FailedCount,
+    Guid? CurrentTaskId,
+    string? CurrentMaterialCode,
+    string? LastError,
+    DateTimeOffset CreatedAt,
+    DateTimeOffset? StartedAt,
+    DateTimeOffset? CompletedAt,
+    IReadOnlyList<MaterialSyncBatchItem> Items);
+
+public sealed record MaterialSyncBatchClaim(
+    MaterialSyncBatch Batch,
+    MaterialSyncBatchItem Item);
+
+public enum U9MaterialFullSyncStatus
+{
+    Running = 0,
+    Succeeded = 1,
+    PartiallySucceeded = 2,
+    Failed = 3
 }
 
 public enum MaterialDataSource
@@ -256,6 +337,34 @@ public sealed record MaterialSyncTask(
     public string? RequestedBy { get; init; }
     public DateTimeOffset? RequestedAt { get; init; }
 }
+
+public sealed record U9MaterialFullSyncCategoryResult(
+    string CategoryCode,
+    string CategoryName,
+    int DiscoveredCount,
+    int CreatedCount,
+    int RefreshedCount,
+    int SkippedCount,
+    long MaximumSequence,
+    bool Succeeded,
+    string? Error);
+
+public sealed record U9MaterialFullSyncRun(
+    Guid Id,
+    string TriggerKind,
+    U9MaterialFullSyncStatus Status,
+    IReadOnlyList<string> CategoryCodes,
+    IReadOnlyList<U9MaterialFullSyncCategoryResult> CategoryResults,
+    int CategoryCount,
+    int CompletedCategoryCount,
+    int DiscoveredCount,
+    int CreatedCount,
+    int RefreshedCount,
+    int SkippedCount,
+    int FailedCategoryCount,
+    string? LastError,
+    DateTimeOffset StartedAt,
+    DateTimeOffset? CompletedAt);
 
 public sealed record U9MaterialIntegrationConfiguration(
     string BaseUrl,

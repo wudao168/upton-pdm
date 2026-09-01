@@ -40,6 +40,7 @@
   <ItemGroup>
     <Compile Include="..\Pdm.LocalSettings\WorkspaceSettingsStore.cs" Link="WorkspaceSettingsStore.cs" />
     <Compile Include="..\Pdm.Client.Shared\ClientBootstrap.cs" Link="ClientBootstrap.cs" />
+    <Compile Include="..\Pdm.Domain\CadPropertyCardSnapshot.cs" Link="CadPropertyCardSnapshot.cs" />
     <EmbeddedResource Include="..\pdm-ui\src\assets\pdm-client-icon.png" LogicalName="Upton.Pdm.SolidWorks.Assets.PdmClient.png" />
   </ItemGroup>
   <Target Name="ValidateSolidWorksInterop" BeforeTargets="ResolveReferences">

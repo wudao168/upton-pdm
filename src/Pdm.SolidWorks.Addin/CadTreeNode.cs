@@ -38,6 +38,12 @@ internal sealed class CadTreeNode
 
     public Guid? DocumentId { get; set; }
 
+    public Guid? ProvenanceDocumentId { get; set; }
+
+    public Guid? ProvenanceProjectId { get; set; }
+
+    public bool IsExternalProvenance { get; set; }
+
     public Guid? RelatedModelDocumentId { get; set; }
 
     public string InstancePath { get; set; } = string.Empty;

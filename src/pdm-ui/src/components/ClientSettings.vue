@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { onBeforeUnmount, onMounted, ref } from 'vue'
 import { postDesktopMessage } from '../api'
 
@@ -12,12 +12,33 @@ interface DesktopSettingsDetail {
   message?: string
 }
 
+interface WorkspaceMaintenanceDetail {
+  available?: boolean
+  workingFiles?: number
+  workingBytes?: number
+  snapshotFiles?: number
+  snapshotBytes?: number
+  recoveryFiles?: number
+  recoveryBytes?: number
+  error?: string
+  message?: string
+}
+
 const available = ref(false)
 const startWithWindows = ref(true)
 const workspaceRoot = ref('')
 const savedWorkspaceRoot = ref('')
 const defaultWorkspaceRoot = ref('')
 const pending = ref(false)
+const maintenancePending = ref(false)
+const usage = ref<WorkspaceMaintenanceDetail>({})
+
+function formatBytes(bytes = 0) {
+  if (bytes < 1024) return `${bytes} B`
+  if (bytes < 1024 ** 2) return `${(bytes / 1024).toFixed(1)} KB`
+  if (bytes < 1024 ** 3) return `${(bytes / 1024 ** 2).toFixed(1)} MB`
+  return `${(bytes / 1024 ** 3).toFixed(1)} GB`
+}
 
 function receiveDesktopSettings(event: Event) {
   const detail = (event as CustomEvent<DesktopSettingsDetail>).detail ?? {}
@@ -36,13 +57,21 @@ function receiveSelectedFolder(event: Event) {
   if (detail?.workspaceRoot) workspaceRoot.value = detail.workspaceRoot
 }
 
+function receiveWorkspaceMaintenance(event: Event) {
+  const detail = (event as CustomEvent<WorkspaceMaintenanceDetail>).detail ?? {}
+  usage.value = detail
+  maintenancePending.value = false
+  if (detail.error) ElMessage.error(detail.error)
+  else if (detail.message) ElMessage.success(detail.message)
+}
+
 function browseWorkspaceRoot() {
   postDesktopMessage('workspace-folder-browse')
 }
 
 function saveWorkspaceRoot() {
   if (!workspaceRoot.value.trim()) {
-    ElMessage.warning('请选择本地缓存工作区')
+    ElMessage.warning('请选择PLM受控工作区')
     return
   }
   pending.value = true
@@ -57,30 +86,59 @@ function toggleStartWithWindows() {
   postDesktopMessage('desktop-settings-save', { startWithWindows: !startWithWindows.value })
 }
 
+function refreshWorkspaceUsage() {
+  maintenancePending.value = true
+  postDesktopMessage('workspace-maintenance-request')
+}
+
+async function clearReusableCache() {
+  try {
+    await ElMessageBox.confirm('仅删除未被占用、可从PLM重新获取的只读快照和下载暂存。项目工作文件与恢复副本不会删除。', '清理只读缓存', {
+      confirmButtonText: '确认清理',
+      cancelButtonText: '取消',
+      type: 'warning',
+    })
+  } catch { return }
+  maintenancePending.value = true
+  postDesktopMessage('workspace-cache-clean')
+}
+
 onMounted(() => {
   window.addEventListener('pdm-desktop-settings', receiveDesktopSettings)
   window.addEventListener('pdm-workspace-folder-selected', receiveSelectedFolder)
+  window.addEventListener('pdm-workspace-maintenance', receiveWorkspaceMaintenance)
   postDesktopMessage('desktop-settings-request')
+  postDesktopMessage('workspace-maintenance-request')
 })
 
 onBeforeUnmount(() => {
   window.removeEventListener('pdm-desktop-settings', receiveDesktopSettings)
   window.removeEventListener('pdm-workspace-folder-selected', receiveSelectedFolder)
+  window.removeEventListener('pdm-workspace-maintenance', receiveWorkspaceMaintenance)
 })
 </script>
 
 <template>
   <section class="pdm-project-manager" aria-label="客户端设置">
     <section class="pdm-panel pdm-manager-panel">
-      <header class="pdm-manager-heading"><div><h2>本地缓存工作区</h2><p>打开最新、历史只读预览和本地工作副本将保存在此目录。</p></div></header>
+      <header class="pdm-manager-heading"><div><h2>PLM受控工作区</h2><p>客户端和SolidWorks插件共用此位置；日常打开、编辑和刷新都在工作区页面完成。</p></div></header>
       <label class="pdm-client-workspace-label">
-        工作区根目录
-        <span class="pdm-client-workspace-row"><input v-model="workspaceRoot" :disabled="pending || !available" aria-label="本地缓存工作区"><button type="button" class="pdm-secondary-action" :disabled="pending || !available" @click="browseWorkspaceRoot">浏览…</button></span>
-        <small>修改后仅影响后续获取；不会移动或删除旧缓存，也不会改变当前已打开图档的路径。</small>
+        存储位置（通常无需修改）
+        <span class="pdm-client-workspace-row"><input v-model="workspaceRoot" :disabled="pending || !available" aria-label="PLM受控工作区"><button type="button" class="pdm-secondary-action" :disabled="pending || !available" @click="browseWorkspaceRoot">选择位置…</button></span>
+        <small>该目录由PLM管理，请勿在资源管理器中改名、移动或删除内部文件。修改只影响后续获取，不会移动或删除旧工作区。</small>
       </label>
       <div class="pdm-settings-actions pdm-client-settings-actions">
         <button type="button" class="pdm-secondary-action" :disabled="pending || !available || workspaceRoot === defaultWorkspaceRoot" @click="restoreDefaultWorkspaceRoot">恢复默认</button>
         <button type="button" class="pdm-primary-action" :disabled="pending || !available || !workspaceRoot.trim() || workspaceRoot === savedWorkspaceRoot" @click="saveWorkspaceRoot">{{ pending ? '正在保存…' : '保存工作区' }}</button>
+      </div>
+      <div class="pdm-workspace-usage" aria-label="工作区用量">
+        <article><small>项目工作文件</small><strong>{{ usage.workingFiles ?? 0 }} 个 · {{ formatBytes(usage.workingBytes) }}</strong><span>不自动清理</span></article>
+        <article><small>可重建只读缓存</small><strong>{{ usage.snapshotFiles ?? 0 }} 个 · {{ formatBytes(usage.snapshotBytes) }}</strong><span>可安全清理</span></article>
+        <article :class="{ 'has-recovery': (usage.recoveryFiles ?? 0) > 0 }"><small>异常恢复副本</small><strong>{{ usage.recoveryFiles ?? 0 }} 个 · {{ formatBytes(usage.recoveryBytes) }}</strong><span>{{ (usage.recoveryFiles ?? 0) > 0 ? '需管理员核对' : '无待处理' }}</span></article>
+      </div>
+      <div class="pdm-settings-actions pdm-client-settings-actions">
+        <button type="button" class="pdm-secondary-action" :disabled="maintenancePending || !available" @click="refreshWorkspaceUsage">刷新用量</button>
+        <button type="button" class="pdm-secondary-action" :disabled="maintenancePending || !available || (usage.snapshotFiles ?? 0) === 0" @click="clearReusableCache">清理只读缓存</button>
       </div>
     </section>
 

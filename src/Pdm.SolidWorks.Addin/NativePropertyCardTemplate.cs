@@ -80,8 +80,11 @@ internal sealed class NativePropertyCardTemplate
         }
 
         candidate = label?.Trim() ?? string.Empty;
-        return BatchPropertyEditItem.EditablePropertyNames.FirstOrDefault(name =>
-            string.Equals(name, candidate, StringComparison.OrdinalIgnoreCase)) ?? string.Empty;
+        var knownLabel = BatchPropertyEditItem.EditablePropertyNames.FirstOrDefault(name =>
+            string.Equals(name, candidate, StringComparison.OrdinalIgnoreCase));
+        return !string.IsNullOrWhiteSpace(knownLabel)
+            ? knownLabel
+            : BatchPropertyEditItem.NormalizePropertyName(propertyName);
     }
 }
 

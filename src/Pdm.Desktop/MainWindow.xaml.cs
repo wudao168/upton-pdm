@@ -1,4 +1,5 @@
 using System;
+using System.Collections;
 using System.Collections.Generic;
 using System.ComponentModel;
 using System.Diagnostics;
@@ -27,6 +28,7 @@ using WpfPoint = System.Windows.Point;
 using Microsoft.Web.WebView2.Core;
 using Upton.Pdm.ClientShared;
 using Upton.Pdm.LocalSettings;
+using Upton.Pdm.SolidWorks;
 using WinForms = System.Windows.Forms;
 using WpfMessageBox = System.Windows.MessageBox;
 
@@ -67,6 +69,11 @@ public partial class MainWindow : Window
     private ClientBootstrapConfiguration bootstrapConfiguration = new();
     private bool usingServerUi;
     private bool attemptedLocalUiFallback;
+    private WorkspaceStateRequestContext? workspaceStateRequest;
+    private WorkspaceLocalStateSnapshot? workspaceStateSnapshot;
+    private FileSystemWatcher? workspaceWatcher;
+    private System.Threading.Timer? workspaceRefreshTimer;
+    private int workspaceStateGeneration;
 
     public MainWindow()
     {
@@ -78,7 +85,9 @@ public partial class MainWindow : Window
         LocationChanged += (_, _) => ApplyPreviewSurfaces();
         StateChanged += OnWindowStateChanged;
         Activated += OnWindowActivated;
-        Deactivated += (_, _) => Dispatcher.BeginInvoke(new Action(ApplyPreviewSurfaces));
+        // eDrawings opens native markup editors that temporarily deactivate this WPF window.
+        // Keep the embedded ActiveX preview mounted while those editors are active.
+        Deactivated += (_, _) => Dispatcher.BeginInvoke(new Action(ApplyReviewOverlayBounds));
         Closing += OnClosing;
         Closed += OnClosed;
         System.Windows.Application.Current.SessionEnding += OnSessionEnding;
@@ -366,6 +375,39 @@ public partial class MainWindow : Window
             return;
         }
 
+        if (type == "workspace-maintenance-request")
+        {
+            _ = PublishWorkspaceMaintenanceAsync();
+            return;
+        }
+
+        if (type == "workspace-cache-clean")
+        {
+            ClearReusableWorkspaceCache();
+            return;
+        }
+
+        if (type == "workspace-local-state-request"
+            && message.TryGetValue("payload", out var workspacePayloadValue)
+            && workspacePayloadValue is Dictionary<string, object> workspacePayload)
+        {
+            if (TryReadWorkspaceStateRequest(workspacePayload, out var request))
+            {
+                workspaceStateRequest = request;
+                ConfigureWorkspaceWatcher(request);
+                _ = PublishWorkspaceLocalStateAsync(request);
+            }
+            return;
+        }
+
+        if (type == "workspace-open-folder"
+            && message.TryGetValue("payload", out var folderPayloadValue)
+            && folderPayloadValue is Dictionary<string, object> folderPayload)
+        {
+            OpenWorkspaceFolder(folderPayload);
+            return;
+        }
+
         if (type == "theme-change" && TryReadPayloadString(message, "theme", out var requestedTheme))
         {
             currentTheme = requestedTheme == "c" || requestedTheme == "o" ? requestedTheme : "a";
@@ -564,6 +606,151 @@ public partial class MainWindow : Window
         catch (InvalidOperationException) { }
     }
 
+    private async Task PublishWorkspaceLocalStateAsync(WorkspaceStateRequestContext request)
+    {
+        if (WorkspaceView.CoreWebView2 == null) return;
+        var generation = Interlocked.Increment(ref workspaceStateGeneration);
+        try
+        {
+            var snapshot = await Task.Run(() => WorkspaceLocalStateReader.Read(
+                WorkspaceSettingsStore.GetWorkspaceRoot(),
+                request.ProjectId,
+                request.ProjectCode,
+                request.CurrentUsername,
+                request.Documents));
+            if (generation != workspaceStateGeneration) return;
+            workspaceStateSnapshot = snapshot;
+            var detail = new
+            {
+                projectId = snapshot.ProjectId,
+                projectCode = snapshot.ProjectCode,
+                projectDirectory = snapshot.ProjectDirectory,
+                projectDirectoryExists = snapshot.ProjectDirectoryExists,
+                items = snapshot.Items.Select(item => new
+                {
+                    documentId = item.DocumentId,
+                    fileName = item.FileName,
+                    fullPath = item.FullPath,
+                    localState = item.LocalState,
+                    localStateLabel = item.LocalStateLabel,
+                    localRevision = item.LocalRevision,
+                    latestRevision = item.LatestRevision,
+                    message = item.Message,
+                    isReadOnly = item.IsReadOnly,
+                    lastWriteTimeUtc = item.LastWriteTimeUtc
+                })
+            };
+            var script = $"window.dispatchEvent(new CustomEvent('pdm-workspace-local-state', {{ detail: {Serialize(detail)} }}));";
+            await WorkspaceView.CoreWebView2.ExecuteScriptAsync(script);
+        }
+        catch (Exception exception) when (exception is IOException
+            || exception is UnauthorizedAccessException
+            || exception is ArgumentException
+            || exception is NotSupportedException)
+        {
+            if (generation != workspaceStateGeneration) return;
+            var detail = new { projectId = request.ProjectId, projectCode = request.ProjectCode, error = exception.Message, items = Array.Empty<object>() };
+            var script = $"window.dispatchEvent(new CustomEvent('pdm-workspace-local-state', {{ detail: {Serialize(detail)} }}));";
+            try { await WorkspaceView.CoreWebView2.ExecuteScriptAsync(script); }
+            catch (InvalidOperationException) { }
+        }
+    }
+
+    private void ConfigureWorkspaceWatcher(WorkspaceStateRequestContext request)
+    {
+        workspaceWatcher?.Dispose();
+        workspaceWatcher = null;
+        var directory = WorkspaceLocalStateReader.ProjectDirectory(WorkspaceSettingsStore.GetWorkspaceRoot(), request.ProjectCode);
+        if (!Directory.Exists(directory)) return;
+        workspaceWatcher = new FileSystemWatcher(directory)
+        {
+            IncludeSubdirectories = true,
+            NotifyFilter = NotifyFilters.FileName | NotifyFilters.DirectoryName | NotifyFilters.LastWrite | NotifyFilters.Size
+        };
+        workspaceWatcher.Changed += OnWorkspaceFileChanged;
+        workspaceWatcher.Created += OnWorkspaceFileChanged;
+        workspaceWatcher.Deleted += OnWorkspaceFileChanged;
+        workspaceWatcher.Renamed += OnWorkspaceFileChanged;
+        workspaceWatcher.EnableRaisingEvents = true;
+    }
+
+    private void OnWorkspaceFileChanged(object sender, FileSystemEventArgs eventArgs)
+    {
+        workspaceRefreshTimer ??= new System.Threading.Timer(_ => Dispatcher.BeginInvoke(new Action(() =>
+        {
+            if (workspaceStateRequest != null) _ = PublishWorkspaceLocalStateAsync(workspaceStateRequest);
+        })), null, Timeout.Infinite, Timeout.Infinite);
+        workspaceRefreshTimer.Change(450, Timeout.Infinite);
+    }
+
+    private void OpenWorkspaceFolder(IReadOnlyDictionary<string, object> payload)
+    {
+        try
+        {
+            if (!payload.TryGetValue("projectId", out var projectIdValue)
+                || !Guid.TryParse(projectIdValue as string, out var projectId)
+                || workspaceStateSnapshot == null
+                || workspaceStateSnapshot.ProjectId != projectId)
+            {
+                throw new InvalidOperationException("请先刷新当前项目工作区。" );
+            }
+            var documentId = payload.TryGetValue("documentId", out var documentIdValue)
+                && Guid.TryParse(documentIdValue as string, out var parsedDocumentId)
+                    ? parsedDocumentId
+                    : Guid.Empty;
+            var file = workspaceStateSnapshot.Items.FirstOrDefault(item => item.DocumentId == documentId && File.Exists(item.FullPath));
+            var directory = workspaceStateSnapshot.ProjectDirectory;
+            if (!Directory.Exists(directory)) Directory.CreateDirectory(directory);
+            var arguments = file == null ? string.Concat("\"", directory, "\"") : string.Concat("/select,\"", file.FullPath, "\"");
+            Process.Start(new ProcessStartInfo("explorer.exe", arguments) { UseShellExecute = true });
+        }
+        catch (Exception exception) when (exception is IOException
+            || exception is UnauthorizedAccessException
+            || exception is ArgumentException
+            || exception is InvalidOperationException
+            || exception is NotSupportedException)
+        {
+            WpfMessageBox.Show(this, exception.Message, "UPLM工作区", MessageBoxButton.OK, MessageBoxImage.Warning);
+        }
+    }
+
+    private static bool TryReadWorkspaceStateRequest(
+        IReadOnlyDictionary<string, object> payload,
+        out WorkspaceStateRequestContext request)
+    {
+        request = null!;
+        if (!payload.TryGetValue("projectId", out var projectIdValue)
+            || !Guid.TryParse(projectIdValue as string, out var projectId)
+            || !payload.TryGetValue("projectCode", out var projectCodeValue)
+            || string.IsNullOrWhiteSpace(projectCodeValue as string))
+        {
+            return false;
+        }
+        var documents = new List<WorkspaceDocumentStateRequest>();
+        if (payload.TryGetValue("documents", out var documentsValue) && documentsValue is IEnumerable items)
+        {
+            foreach (var item in items)
+            {
+                if (!(item is Dictionary<string, object> values)
+                    || !values.TryGetValue("documentId", out var documentIdValue)
+                    || !Guid.TryParse(documentIdValue as string, out var documentId)) continue;
+                documents.Add(new WorkspaceDocumentStateRequest
+                {
+                    DocumentId = documentId,
+                    FileName = values.TryGetValue("fileName", out var fileName) ? fileName as string ?? string.Empty : string.Empty,
+                    LatestRevision = values.TryGetValue("latestRevision", out var latestRevision) ? latestRevision as string ?? string.Empty : string.Empty,
+                    CheckedOutBy = values.TryGetValue("checkedOutBy", out var checkedOutBy) ? checkedOutBy as string ?? string.Empty : string.Empty
+                });
+            }
+        }
+        request = new WorkspaceStateRequestContext(
+            projectId,
+            projectCodeValue as string ?? string.Empty,
+            payload.TryGetValue("currentUsername", out var usernameValue) ? usernameValue as string ?? string.Empty : string.Empty,
+            documents);
+        return true;
+    }
+
     private async Task PublishRememberedCredentialsAsync()
     {
         if (WorkspaceView.CoreWebView2 is null)
@@ -593,6 +780,41 @@ public partial class MainWindow : Window
         var script = $"window.dispatchEvent(new CustomEvent('pdm-desktop-settings', {{ detail: {Serialize(detail)} }}));";
         try { await WorkspaceView.CoreWebView2.ExecuteScriptAsync(script); }
         catch (InvalidOperationException) { }
+    }
+
+    private async Task PublishWorkspaceMaintenanceAsync(string error = "", string message = "")
+    {
+        if (WorkspaceView.CoreWebView2 == null) return;
+        var usage = WorkspaceMaintenance.ReadUsage(WorkspaceSettingsStore.GetWorkspaceRoot());
+        var detail = new
+        {
+            available = true,
+            usage.WorkspaceRoot,
+            usage.WorkingFiles,
+            usage.WorkingBytes,
+            usage.SnapshotFiles,
+            usage.SnapshotBytes,
+            usage.RecoveryFiles,
+            usage.RecoveryBytes,
+            error,
+            message
+        };
+        var script = $"window.dispatchEvent(new CustomEvent('pdm-workspace-maintenance', {{ detail: {Serialize(detail)} }}));";
+        try { await WorkspaceView.CoreWebView2.ExecuteScriptAsync(script); }
+        catch (InvalidOperationException) { }
+    }
+
+    private void ClearReusableWorkspaceCache()
+    {
+        try
+        {
+            WorkspaceMaintenance.ClearReusableCache(WorkspaceSettingsStore.GetWorkspaceRoot());
+            _ = PublishWorkspaceMaintenanceAsync(message: "未占用的只读缓存已清理；项目工作文件和恢复副本未改动。");
+        }
+        catch (Exception exception) when (exception is UnauthorizedAccessException || exception is IOException || exception is ArgumentException || exception is NotSupportedException)
+        {
+            _ = PublishWorkspaceMaintenanceAsync(error: exception.Message);
+        }
     }
 
     private void UpdateStartWithWindows(bool enabled)
@@ -635,6 +857,7 @@ public partial class MainWindow : Window
         {
             var saved = WorkspaceSettingsStore.SaveWorkspaceRoot(workspaceRoot);
             _ = PublishDesktopSettingsAsync(message: string.Concat("本地工作区已设置为：", saved));
+            _ = PublishWorkspaceMaintenanceAsync();
         }
         catch (Exception exception) when (exception is UnauthorizedAccessException || exception is IOException || exception is ArgumentException || exception is NotSupportedException)
         {
@@ -809,6 +1032,10 @@ public partial class MainWindow : Window
     private void OnClosed(object? sender, EventArgs eventArgs)
     {
         System.Windows.Application.Current.SessionEnding -= OnSessionEnding;
+        workspaceWatcher?.Dispose();
+        workspaceWatcher = null;
+        workspaceRefreshTimer?.Dispose();
+        workspaceRefreshTimer = null;
         windowSource?.RemoveHook(WindowMessageHook);
         if (trayIcon != null)
         {
@@ -1075,7 +1302,7 @@ public partial class MainWindow : Window
 
     private void ApplyPreviewBounds()
     {
-        if (!IsPreviewSurfaceActive || !IsVisible || WindowState == WindowState.Minimized
+        if (!IsVisible || WindowState == WindowState.Minimized
             || !previewDocumentReady || previewBounds is not { Visible: true } bounds
             || bounds.Width < 80 || bounds.Height < 80
             || WorkspaceView.ActualWidth <= 0 || WorkspaceView.ActualHeight <= 0)
@@ -1302,6 +1529,26 @@ public partial class MainWindow : Window
     {
         public string? Title { get; set; }
         public string? Detail { get; set; }
+    }
+
+    private sealed class WorkspaceStateRequestContext
+    {
+        public WorkspaceStateRequestContext(
+            Guid projectId,
+            string projectCode,
+            string currentUsername,
+            IReadOnlyCollection<WorkspaceDocumentStateRequest> documents)
+        {
+            ProjectId = projectId;
+            ProjectCode = projectCode;
+            CurrentUsername = currentUsername;
+            Documents = documents;
+        }
+
+        public Guid ProjectId { get; }
+        public string ProjectCode { get; }
+        public string CurrentUsername { get; }
+        public IReadOnlyCollection<WorkspaceDocumentStateRequest> Documents { get; }
     }
 
     private sealed class PreviewHostBounds

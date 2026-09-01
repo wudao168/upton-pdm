@@ -4,6 +4,7 @@ using System.ComponentModel;
 using System.Drawing;
 using System.IO;
 using System.Linq;
+using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Forms;
 
@@ -35,6 +36,8 @@ internal sealed class BatchPropertyEditItem
 
     private readonly Dictionary<string, string> originalValues;
     private readonly Dictionary<string, string> propertyScopes;
+    private readonly Dictionary<string, string> additionalValues;
+    private readonly List<string> sourcePropertyNames;
     private IReadOnlyList<NativePropertyCardField> propertyCardFields = Array.Empty<NativePropertyCardField>();
     private IReadOnlyList<NativePropertyCardField> activePropertyCardFields = Array.Empty<NativePropertyCardField>();
 
@@ -45,6 +48,7 @@ internal sealed class BatchPropertyEditItem
         string configurationName,
         IReadOnlyDictionary<string, string> values,
         IReadOnlyDictionary<string, string> scopes,
+        IReadOnlyList<string> propertyNames,
         string originalProjectNumber,
         string originalProjectName)
     {
@@ -52,6 +56,12 @@ internal sealed class BatchPropertyEditItem
         ConfigurationName = configurationName?.Trim() ?? string.Empty;
         originalValues = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         propertyScopes = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        additionalValues = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        sourcePropertyNames = (propertyNames ?? Array.Empty<string>())
+            .Select(NormalizePropertyName)
+            .Where(name => !string.IsNullOrWhiteSpace(name) && !IsIdentityProperty(name))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
         foreach (var propertyName in EditablePropertyNames)
         {
             originalValues[propertyName] = Value(values, propertyName);
@@ -82,6 +92,18 @@ internal sealed class BatchPropertyEditItem
         Drafter = Value(values, "制图");
         Checker = Value(values, "校对");
         Approver = Value(values, "批准");
+        foreach (var propertyName in (values ?? new Dictionary<string, string>())
+            .Keys
+            .Select(NormalizePropertyName)
+            .Where(name => !string.IsNullOrWhiteSpace(name)
+                && !IsIdentityProperty(name)
+                && !EditablePropertyNames.Contains(name, StringComparer.OrdinalIgnoreCase))
+            .Distinct(StringComparer.OrdinalIgnoreCase))
+        {
+            additionalValues[propertyName] = Value(values, propertyName);
+            originalValues[propertyName] = Value(values, propertyName);
+            propertyScopes[propertyName] = Value(scopes, propertyName);
+        }
     }
 
     [Browsable(false)]
@@ -162,10 +184,62 @@ internal sealed class BatchPropertyEditItem
 
     [Browsable(false)]
     public bool HasChanges => propertyCardFields.Count > 0
-        || PropertyValues().Any(pair => !Same(pair.Value, OriginalValue(pair.Key)));
+        || ChangedProperties().Any();
 
     internal IEnumerable<KeyValuePair<string, string>> ChangedProperties() =>
-        PropertyValues().Where(pair => !Same(pair.Value, OriginalValue(pair.Key)));
+        PropertyValues().Where(pair => IsPropertyApplicable(pair.Key))
+            .Where(pair => !Same(pair.Value, OriginalValue(pair.Key)));
+
+    internal IReadOnlyList<string> VisiblePropertyNames => VisiblePropertyCardNames
+        .Where(name => !IsIdentityProperty(name))
+        .ToArray();
+
+    internal IReadOnlyList<string> VisiblePropertyCardNames => EffectivePropertyCardFields
+        .Select(cardField => cardField.EditorPropertyName)
+        .Select(NormalizePropertyName)
+        .Where(name => !string.IsNullOrWhiteSpace(name))
+        .Distinct(StringComparer.OrdinalIgnoreCase)
+        .ToArray();
+
+    internal IEnumerable<string> SearchValues => PropertyValues().Select(pair => pair.Value);
+
+    internal string PropertyValue(string propertyName)
+    {
+        var normalized = NormalizePropertyName(propertyName);
+        switch (normalized)
+        {
+            case "项目号": return ProjectNumber;
+            case "项目名称": return ProjectName;
+            case "图号": return DrawingNumber;
+            case "名称": return Name;
+            case "材料": return Material;
+            case "规格": return Specification;
+            case "分类": return Classification;
+            case "易损件": return WearPart;
+            case "物料编码": return MaterialCode;
+            case "零件名称": return PartName;
+            case "型号": return Model;
+            case "品牌": return Brand;
+            case "备注": return Remark;
+            case "数量": return Quantity;
+            case "热处理": return HeatTreatment;
+            case "表面处理": return SurfaceTreatment;
+            case "设计": return Designer;
+            case "制图": return Drafter;
+            case "校对": return Checker;
+            case "批准": return Approver;
+            default: return Value(additionalValues, normalized);
+        }
+    }
+
+    internal bool IsPropertyApplicable(string propertyName)
+    {
+        var normalized = NormalizePropertyName(propertyName);
+        return EffectivePropertyCardFields.Any(field => string.Equals(
+                NormalizePropertyName(field.EditorPropertyName),
+                normalized,
+                StringComparison.OrdinalIgnoreCase));
+    }
 
     internal string OriginalValue(string propertyName) => Value(originalValues, propertyName);
 
@@ -190,7 +264,7 @@ internal sealed class BatchPropertyEditItem
     }
 
     internal NativePropertyCardField PropertyCardField(string editorPropertyName) =>
-        propertyCardFields.FirstOrDefault(field =>
+        EffectivePropertyCardFields.FirstOrDefault(field =>
             string.Equals(field.EditorPropertyName, editorPropertyName, StringComparison.OrdinalIgnoreCase));
 
     internal void ApplyPropertyCard(NativePropertyCardTemplate template)
@@ -205,14 +279,47 @@ internal sealed class BatchPropertyEditItem
         propertyCardFields = template.Fields;
         foreach (var field in propertyCardFields.Where(field => !string.IsNullOrWhiteSpace(field.EditorPropertyName)))
         {
-            propertyScopes[field.EditorPropertyName] = field.ConfigurationSpecific
+            var propertyName = NormalizePropertyName(field.EditorPropertyName);
+            propertyScopes[propertyName] = field.ConfigurationSpecific
                 ? string.Concat("配置:", ConfigurationDisplay)
                 : "全局";
+            if (!EditablePropertyNames.Contains(propertyName, StringComparer.OrdinalIgnoreCase)
+                && !additionalValues.ContainsKey(propertyName))
+            {
+                additionalValues[propertyName] = string.Empty;
+                originalValues[propertyName] = string.Empty;
+            }
+        }
+    }
+
+    internal void SetActivePropertyCard(NativePropertyCardTemplate template)
+    {
+        if (template == null || !template.IsAvailable)
+        {
+            return;
+        }
+
+        PropertyCard = template.DisplayName;
+        PropertyCardPath = template.FilePath;
+        activePropertyCardFields = template.Fields;
+        foreach (var field in activePropertyCardFields.Where(field => !string.IsNullOrWhiteSpace(field.EditorPropertyName)))
+        {
+            var propertyName = NormalizePropertyName(field.EditorPropertyName);
+            propertyScopes[propertyName] = field.ConfigurationSpecific
+                ? string.Concat("配置:", ConfigurationDisplay)
+                : "全局";
+            if (!EditablePropertyNames.Contains(propertyName, StringComparer.OrdinalIgnoreCase)
+                && !additionalValues.ContainsKey(propertyName))
+            {
+                additionalValues[propertyName] = string.Empty;
+                originalValues[propertyName] = string.Empty;
+            }
         }
     }
 
     internal void SetPropertyValue(string propertyName, string value)
     {
+        propertyName = NormalizePropertyName(propertyName);
         var normalized = value ?? string.Empty;
         switch (propertyName)
         {
@@ -234,6 +341,16 @@ internal sealed class BatchPropertyEditItem
             case "制图": Drafter = normalized; break;
             case "校对": Checker = normalized; break;
             case "批准": Approver = normalized; break;
+            default:
+                if (!string.IsNullOrWhiteSpace(propertyName))
+                {
+                    additionalValues[propertyName] = normalized;
+                    if (!originalValues.ContainsKey(propertyName))
+                    {
+                        originalValues[propertyName] = string.Empty;
+                    }
+                }
+                break;
         }
     }
 
@@ -241,16 +358,71 @@ internal sealed class BatchPropertyEditItem
         string projectNumber,
         string projectName,
         IReadOnlyDictionary<string, string> values,
-        IReadOnlyDictionary<string, string> scopes)
+        IReadOnlyDictionary<string, string> scopes,
+        IReadOnlyList<string> propertyNames)
     {
-        ProjectNumber = projectNumber?.Trim() ?? string.Empty;
-        ProjectName = projectName?.Trim() ?? string.Empty;
-        propertyScopes["项目号"] = Value(scopes, "项目号");
-        propertyScopes["项目名称"] = Value(scopes, "项目名称");
-        foreach (var propertyName in EditablePropertyNames)
+        sourcePropertyNames.Clear();
+        var plmPropertyNames = new HashSet<string>((propertyNames ?? Array.Empty<string>())
+            .Select(NormalizePropertyName)
+            .Where(name => !string.IsNullOrWhiteSpace(name)),
+            StringComparer.OrdinalIgnoreCase);
+        var activeCardPropertyNames = EffectivePropertyCardFields
+            .Select(field => NormalizePropertyName(field.EditorPropertyName))
+            .Where(name => !string.IsNullOrWhiteSpace(name))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+        if (activeCardPropertyNames.Contains("项目号", StringComparer.OrdinalIgnoreCase)
+            && plmPropertyNames.Contains("项目号"))
+        {
+            ProjectNumber = projectNumber?.Trim() ?? string.Empty;
+            propertyScopes["项目号"] = Value(scopes, "项目号");
+        }
+        if (activeCardPropertyNames.Contains("项目名称", StringComparer.OrdinalIgnoreCase)
+            && plmPropertyNames.Contains("项目名称"))
+        {
+            ProjectName = projectName?.Trim() ?? string.Empty;
+            propertyScopes["项目名称"] = Value(scopes, "项目名称");
+        }
+        foreach (var propertyName in activeCardPropertyNames
+            .Where(name => !IsIdentityProperty(name) && plmPropertyNames.Contains(name)))
         {
             SetPropertyValue(propertyName, Value(values, propertyName));
             propertyScopes[propertyName] = Value(scopes, propertyName);
+        }
+    }
+
+    internal void ApplyLocalPropertyCardValues(
+        IReadOnlyDictionary<string, string> values,
+        IReadOnlyDictionary<string, string> scopes,
+        IReadOnlyList<string> propertyNames)
+    {
+        sourcePropertyNames.Clear();
+        sourcePropertyNames.AddRange((propertyNames ?? Array.Empty<string>())
+            .Select(NormalizePropertyName)
+            .Where(name => !string.IsNullOrWhiteSpace(name) && !IsIdentityProperty(name))
+            .Distinct(StringComparer.OrdinalIgnoreCase));
+
+        foreach (var propertyName in EffectivePropertyCardFields
+            .Select(field => NormalizePropertyName(field.EditorPropertyName))
+            .Where(name => !string.IsNullOrWhiteSpace(name))
+            .Distinct(StringComparer.OrdinalIgnoreCase))
+        {
+            var value = Value(values, propertyName);
+            if (string.Equals(propertyName, "项目号", StringComparison.OrdinalIgnoreCase))
+            {
+                ProjectNumber = value;
+            }
+            else if (string.Equals(propertyName, "项目名称", StringComparison.OrdinalIgnoreCase))
+            {
+                ProjectName = value;
+            }
+            else
+            {
+                SetPropertyValue(propertyName, value);
+            }
+
+            propertyScopes[propertyName] = Value(scopes, propertyName);
+            originalValues[propertyName] = value;
         }
     }
 
@@ -276,7 +448,23 @@ internal sealed class BatchPropertyEditItem
         yield return new KeyValuePair<string, string>("制图", Drafter);
         yield return new KeyValuePair<string, string>("校对", Checker);
         yield return new KeyValuePair<string, string>("批准", Approver);
+        foreach (var property in additionalValues)
+        {
+            yield return property;
+        }
     }
+
+    internal static string NormalizePropertyName(string propertyName)
+    {
+        var normalized = propertyName?.Trim() ?? string.Empty;
+        if (string.Equals(normalized, "材质", StringComparison.OrdinalIgnoreCase)) return "材料";
+        if (string.Equals(normalized, "物料分类", StringComparison.OrdinalIgnoreCase)) return "分类";
+        return normalized;
+    }
+
+    private static bool IsIdentityProperty(string propertyName) =>
+        string.Equals(propertyName, "项目号", StringComparison.OrdinalIgnoreCase)
+        || string.Equals(propertyName, "项目名称", StringComparison.OrdinalIgnoreCase);
 
     private static string Value(IReadOnlyDictionary<string, string> source, string propertyName)
     {
@@ -361,6 +549,7 @@ internal sealed class BatchPropertyEditDialog : Form
     private readonly int unavailableWritebackCount;
     private readonly PropertyOperationMode initialOperation;
     private readonly IReadOnlyDictionary<CadDocumentKind, IReadOnlyList<string>> propertyCardTemplates;
+    private readonly Func<IReadOnlyList<BatchPropertyEditItem>, Action<string, int, int>, int> readCurrentPropertyCardValues;
     private readonly Func<IReadOnlyList<BatchPropertyEditItem>, Task<int>> synchronizePlmProperties;
     private readonly Func<IReadOnlyList<BatchPropertyEditItem>, bool, Action<string, int, int>, string> executeLocalOperation;
     private readonly Dictionary<CadDocumentKind, ComboBox> propertyCardSelectors = new Dictionary<CadDocumentKind, ComboBox>();
@@ -376,7 +565,15 @@ internal sealed class BatchPropertyEditDialog : Form
     private readonly TabPage propertyCardPage = new TabPage("属性卡设置") { BackColor = Color.White };
     private readonly TabPage writebackPage = new TabPage("属性回写") { BackColor = Color.White };
     private readonly ComboBox documentTypeFilter = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList };
+    private readonly ComboBox propertyColumnFilter = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList };
     private readonly TextBox itemFilterText = new TextBox();
+    private readonly CheckBox emptyPropertyFilter = new CheckBox
+    {
+        Text = "仅空值",
+        AutoSize = false,
+        TextAlign = ContentAlignment.MiddleLeft,
+        Enabled = false
+    };
     private readonly CheckBox includeRelatedModels = new CheckBox
     {
         Text = "包含关联模型",
@@ -397,12 +594,16 @@ internal sealed class BatchPropertyEditDialog : Form
     private readonly Label plmSyncStatus = new Label { Text = "PLM属性尚未同步", AutoSize = true, AutoEllipsis = false, ForeColor = Color.FromArgb(210, 110, 0), TextAlign = ContentAlignment.MiddleLeft };
     private readonly Button execute = new Button { Text = "执行批量编辑", AutoSize = false, Size = new Size(StandardControlWidth, StandardControlHeight) };
     private readonly Button close = new Button { Text = "关闭", DialogResult = DialogResult.Cancel, AutoSize = false, Size = new Size(StandardControlWidth, StandardControlHeight) };
+    private readonly Button pause = new Button { Text = "暂停", AutoSize = false, Size = new Size(StandardControlWidth, StandardControlHeight), Visible = false };
+    private readonly Button stop = new Button { Text = "停止", AutoSize = false, Size = new Size(StandardControlWidth, StandardControlHeight), Visible = false };
     private readonly Panel executionPanel = new Panel();
     private readonly Label executionStatus = new Label();
     private readonly PdmQuantityProgressBar executionProgress = new PdmQuantityProgressBar();
     private RowStyle executionRowStyle;
     private bool propertyCardsConfirmed;
     private bool operationRunning;
+    private bool operationPaused;
+    private bool operationStopRequested;
 
     public BatchPropertyEditDialog(
         IReadOnlyList<BatchPropertyEditItem> items,
@@ -410,6 +611,7 @@ internal sealed class BatchPropertyEditDialog : Form
         int unavailableWritebackCount,
         PropertyOperationMode initialOperation = PropertyOperationMode.BatchEdit,
         IReadOnlyDictionary<CadDocumentKind, IReadOnlyList<string>> propertyCardTemplates = null,
+        Func<IReadOnlyList<BatchPropertyEditItem>, Action<string, int, int>, int> readCurrentPropertyCardValues = null,
         Func<IReadOnlyList<BatchPropertyEditItem>, Task<int>> synchronizePlmProperties = null,
         Func<IReadOnlyList<BatchPropertyEditItem>, bool, Action<string, int, int>, string> executeLocalOperation = null)
     {
@@ -419,6 +621,7 @@ internal sealed class BatchPropertyEditDialog : Form
         this.initialOperation = initialOperation;
         this.propertyCardTemplates = propertyCardTemplates
             ?? new Dictionary<CadDocumentKind, IReadOnlyList<string>>();
+        this.readCurrentPropertyCardValues = readCurrentPropertyCardValues;
         this.synchronizePlmProperties = synchronizePlmProperties;
         this.executeLocalOperation = executeLocalOperation;
         if (synchronizePlmProperties == null)
@@ -432,11 +635,11 @@ internal sealed class BatchPropertyEditDialog : Form
             ? "属性回写确认"
             : "属性";
         StartPosition = FormStartPosition.CenterParent;
-        MinimumSize = new Size(1100, 650);
+        MinimumSize = new Size(1100, 560);
         var workingArea = Screen.PrimaryScreen.WorkingArea;
         Size = new Size(
             Math.Max(MinimumSize.Width, Math.Min(1600, workingArea.Width - 60)),
-            Math.Max(MinimumSize.Height, Math.Min(900, workingArea.Height - 60)));
+            Math.Max(MinimumSize.Height, (int)Math.Round(workingArea.Height * 0.75)));
         FormBorderStyle = FormBorderStyle.Sizable;
         MaximizeBox = true;
         MinimizeBox = false;
@@ -450,7 +653,6 @@ internal sealed class BatchPropertyEditDialog : Form
             ? propertyCardPage
             : batchEditPage;
         UpdateOperationState();
-        AcceptButton = execute;
         UpdateSummary();
     }
 
@@ -523,14 +725,18 @@ internal sealed class BatchPropertyEditDialog : Form
         var buttons = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.RightToLeft, AutoSize = true };
         buttons.Controls.Add(close);
         buttons.Controls.Add(execute);
+        buttons.Controls.Add(stop);
+        buttons.Controls.Add(pause);
         execute.Click += ValidateBeforeExecute;
+        pause.Click += (_, _) => ToggleOperationPause();
+        stop.Click += (_, _) => RequestOperationStop();
 
         executionPanel.Dock = DockStyle.Fill;
         executionPanel.Padding = new Padding(0, 3, 0, 3);
         executionPanel.BackColor = Color.FromArgb(232, 243, 255);
         executionPanel.Visible = false;
         var executionLayout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 2, Margin = Padding.Empty, Padding = Padding.Empty };
-        executionLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 58));
+        executionLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 30));
         executionLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         executionStatus.Dock = DockStyle.Fill;
         executionStatus.AutoEllipsis = false;
@@ -602,7 +808,7 @@ internal sealed class BatchPropertyEditDialog : Form
             TextAlign = ContentAlignment.MiddleLeft,
             Margin = new Padding(0, 0, 0, 8)
         };
-        var toolbar = CreateAlignedRow(100F, 150F, 150F, 150F, 150F, 150F);
+        var toolbar = CreateAlignedRow(100F, 150F, 150F, 150F, 150F, 150F, 150F);
         ConfigureRowInput(fillProperty);
         ConfigureRowInput(fillValue);
         ConfigureRowInput(fillOptionValue);
@@ -614,14 +820,15 @@ internal sealed class BatchPropertyEditDialog : Form
         RefreshFillPropertyOptions();
         var fill = new Button { Text = "填入勾选行", AutoSize = false, Size = new Size(StandardControlWidth, StandardControlHeight), Margin = Padding.Empty };
         fill.Click += (_, _) => FillSelectedRows();
-        var copyNameToModel = new Button
+        var autoFillNameOrModel = new Button
         {
-            Text = "名称同步为型号",
+            Text = "自动填充名称型号",
             AutoSize = false,
             Size = new Size(StandardControlWidth, StandardControlHeight),
             Margin = Padding.Empty
         };
-        copyNameToModel.Click += (_, _) => CopyNameToModelForSelectedRows();
+        autoFillNameOrModel.Click += (_, _) => AutoFillNameOrModelForSelectedRows();
+        var readCurrent = CreateReadCurrentPropertyCardButton();
         var sync = new Button
         {
             Text = "从PLM同步",
@@ -636,12 +843,13 @@ internal sealed class BatchPropertyEditDialog : Form
         toolbar.Controls.Add(fillProperty, 1, 0);
         toolbar.Controls.Add(fillValueHost, 2, 0);
         toolbar.Controls.Add(fill, 3, 0);
-        toolbar.Controls.Add(copyNameToModel, 4, 0);
+        toolbar.Controls.Add(autoFillNameOrModel, 4, 0);
+        toolbar.Controls.Add(readCurrent, 5, 0);
         summary.Dock = DockStyle.Fill;
         summary.TextAlign = ContentAlignment.MiddleLeft;
-        toolbar.Controls.Add(sync, 5, 0);
+        toolbar.Controls.Add(sync, 6, 0);
         plmSyncStatus.Dock = DockStyle.Fill;
-        toolbar.Controls.Add(plmSyncStatus, 6, 0);
+        toolbar.Controls.Add(plmSyncStatus, 7, 0);
 
         page.Controls.Add(explanation, 0, 0);
         page.Controls.Add(toolbar, 0, 1);
@@ -703,12 +911,13 @@ internal sealed class BatchPropertyEditDialog : Form
         page.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         page.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         page.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-        var toolbar = CreateAlignedRow(280F);
+        var toolbar = CreateAlignedRow(150F, 280F);
+        toolbar.Controls.Add(CreateReadCurrentPropertyCardButton(), 0, 0);
         propertyCardStatus.Dock = DockStyle.Fill;
-        toolbar.Controls.Add(propertyCardStatus, 0, 0);
+        toolbar.Controls.Add(propertyCardStatus, 1, 0);
         propertyCardSummary.Dock = DockStyle.Fill;
         propertyCardSummary.TextAlign = ContentAlignment.MiddleLeft;
-        toolbar.Controls.Add(propertyCardSummary, 1, 0);
+        toolbar.Controls.Add(propertyCardSummary, 2, 0);
 
         page.Controls.Add(BuildPropertyCardSelectors(), 0, 0);
         page.Controls.Add(toolbar, 0, 1);
@@ -716,13 +925,107 @@ internal sealed class BatchPropertyEditDialog : Form
         return page;
     }
 
+    private Button CreateReadCurrentPropertyCardButton()
+    {
+        var button = new Button
+        {
+            Text = "读取当前属性卡",
+            AutoSize = false,
+            Size = new Size(StandardControlWidth, StandardControlHeight),
+            Margin = Padding.Empty,
+            Enabled = readCurrentPropertyCardValues != null
+        };
+        button.Click += (_, _) => ReadCurrentPropertyCardValues(button);
+        return button;
+    }
+
+    private void ReadCurrentPropertyCardValues(Button button)
+    {
+        if (readCurrentPropertyCardValues == null)
+        {
+            return;
+        }
+
+        grid.EndEdit();
+        propertyCardGrid.EndEdit();
+        var selectedItems = rows.Where(item => item.Selected).ToArray();
+        if (selectedItems.Length == 0)
+        {
+            CancelValidation("请先勾选需要读取当前属性卡的图档。");
+            return;
+        }
+
+        operationRunning = true;
+        operationPaused = false;
+        operationStopRequested = false;
+        propertyTabs.Enabled = false;
+        close.Enabled = false;
+        execute.Enabled = false;
+        button.Enabled = false;
+        UseWaitCursor = true;
+        executionPanel.Visible = true;
+        pause.Text = "暂停";
+        pause.Visible = true;
+        pause.Enabled = true;
+        stop.Visible = true;
+        stop.Enabled = true;
+        try
+        {
+            UpdateExecutionProgress("准备读取当前属性卡", 0, selectedItems.Length);
+            var readCount = readCurrentPropertyCardValues(selectedItems, UpdateExecutionProgress);
+            rows.ResetBindings();
+            RefreshGridComboBoxValues();
+            RefreshDynamicPropertyColumns();
+            grid.Refresh();
+            propertyCardGrid.Refresh();
+            UpdateSummary();
+            executionStatus.Text = string.Concat(
+                "当前属性卡读取完成：",
+                readCount,
+                " / ",
+                selectedItems.Length,
+                " 个图档；明细已刷新。");
+            executionStatus.ForeColor = readCount == selectedItems.Length
+                ? Color.FromArgb(31, 132, 92)
+                : Color.FromArgb(210, 110, 0);
+            executionProgress.SetProgress(selectedItems.Length, selectedItems.Length);
+        }
+        catch (OperationCanceledException)
+        {
+            executionStatus.Text = "读取已停止；已完成的图档已刷新，尚未处理的图档保持原值。";
+            executionStatus.ForeColor = Color.FromArgb(210, 110, 0);
+        }
+        catch (Exception exception)
+        {
+            executionStatus.Text = string.Concat("读取当前属性卡失败：", exception.Message);
+            executionStatus.ForeColor = Color.FromArgb(190, 55, 55);
+            MessageBox.Show(this, exception.Message, "UPLM", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        }
+        finally
+        {
+            operationRunning = false;
+            operationPaused = false;
+            operationStopRequested = false;
+            propertyTabs.Enabled = true;
+            close.Enabled = true;
+            pause.Visible = false;
+            stop.Visible = false;
+            UseWaitCursor = false;
+            button.Enabled = true;
+            UpdateOperationState();
+        }
+    }
+
     private Control BuildItemFilters()
     {
-        var panel = CreateAlignedRow(110F, 150F, 160F, 150F, 150F, 150F, 150F, 150F);
+        var panel = CreateAlignedRow(110F, 150F, 150F, 150F, 150F, 150F, 150F, 150F, 100F, 150F);
         documentTypeFilter.Items.AddRange(new object[] { "全部类型", "装配体", "零件", "工程图" });
         documentTypeFilter.SelectedIndex = 0;
         ConfigureRowInput(documentTypeFilter);
+        ConfigureRowInput(propertyColumnFilter);
         ConfigureRowInput(itemFilterText);
+        emptyPropertyFilter.Dock = DockStyle.Fill;
+        emptyPropertyFilter.Margin = new Padding(0, 0, StandardControlGap, 0);
         includeRelatedModels.Dock = DockStyle.Fill;
         includeRelatedModels.Margin = new Padding(0, 0, StandardControlGap, 0);
         includeRelatedModels.CheckedChanged += (_, _) =>
@@ -740,23 +1043,37 @@ internal sealed class BatchPropertyEditDialog : Form
                 "工程图",
                 StringComparison.Ordinal);
         };
+        propertyColumnFilter.SelectedIndexChanged += (_, _) =>
+        {
+            emptyPropertyFilter.Enabled = !string.Equals(
+                propertyColumnFilter.SelectedItem as string,
+                "全部属性",
+                StringComparison.Ordinal);
+            if (!emptyPropertyFilter.Enabled)
+            {
+                emptyPropertyFilter.Checked = false;
+            }
+        };
         var search = new Button { Text = "搜索", AutoSize = false, Size = new Size(StandardControlWidth, StandardControlHeight), Margin = Padding.Empty };
         var selectAll = new Button { Text = "全选全部", AutoSize = false, Size = new Size(StandardControlWidth, StandardControlHeight), Margin = Padding.Empty };
         var clear = new Button { Text = "清空全部", AutoSize = false, Size = new Size(StandardControlWidth, StandardControlHeight), Margin = Padding.Empty };
+        var invert = new Button { Text = "反选", AutoSize = false, Size = new Size(StandardControlWidth, StandardControlHeight), Margin = Padding.Empty };
         search.Click += (_, _) => ApplyItemFilter();
         selectAll.Click += (_, _) => SetFilteredSelected(true);
         clear.Click += (_, _) => SetFilteredSelected(false);
+        invert.Click += (_, _) => InvertFilteredSelection();
         panel.Controls.Add(CreateRowLabel("零部件筛选"), 0, 0);
         panel.Controls.Add(documentTypeFilter, 1, 0);
-        var queryLabel = CreateRowLabel("名称/图号/材料等");
-        panel.Controls.Add(queryLabel, 2, 0);
+        panel.Controls.Add(propertyColumnFilter, 2, 0);
         panel.Controls.Add(itemFilterText, 3, 0);
         panel.Controls.Add(search, 4, 0);
         panel.Controls.Add(selectAll, 5, 0);
         panel.Controls.Add(clear, 6, 0);
-        panel.Controls.Add(includeRelatedModels, 7, 0);
+        panel.Controls.Add(invert, 7, 0);
+        panel.Controls.Add(emptyPropertyFilter, 8, 0);
+        panel.Controls.Add(includeRelatedModels, 9, 0);
         selectionSummary.Dock = DockStyle.Fill;
-        panel.Controls.Add(selectionSummary, 8, 0);
+        panel.Controls.Add(selectionSummary, 10, 0);
         return panel;
     }
 
@@ -849,6 +1166,7 @@ internal sealed class BatchPropertyEditDialog : Form
             }
         }
         propertyCardsConfirmed = true;
+        RefreshDynamicPropertyColumns();
         propertyCardStatus.Text = "属性卡已确认，可执行批量设置";
         propertyCardStatus.ForeColor = Color.FromArgb(31, 132, 92);
         RefreshFillPropertyOptions();
@@ -968,8 +1286,11 @@ internal sealed class BatchPropertyEditDialog : Form
     private void ApplyItemFilter()
     {
         var kind = documentTypeFilter.SelectedItem as string ?? "全部类型";
+        var propertyName = propertyColumnFilter.SelectedItem as string ?? "全部属性";
         var query = itemFilterText.Text?.Trim() ?? string.Empty;
-        var filtered = items.Where(item => MatchesItemFilter(item, kind, query)).ToArray();
+        var filtered = items
+            .Where(item => MatchesItemFilter(item, kind, propertyName, query, emptyPropertyFilter.Checked))
+            .ToArray();
         if (includeRelatedModels.Checked && string.Equals(kind, "工程图", StringComparison.Ordinal))
         {
             filtered = filtered
@@ -987,6 +1308,7 @@ internal sealed class BatchPropertyEditDialog : Form
         }
         rows.RaiseListChangedEvents = true;
         rows.ResetBindings();
+        RefreshDynamicPropertyColumns();
         InvalidatePropertyCardConfirmation();
         UpdateSummary();
     }
@@ -1048,34 +1370,42 @@ internal sealed class BatchPropertyEditDialog : Form
         propertyCardGrid.Refresh();
     }
 
-    private static bool MatchesItemFilter(BatchPropertyEditItem item, string kind, string query)
+    private static bool MatchesItemFilter(
+        BatchPropertyEditItem item,
+        string kind,
+        string propertyName,
+        string query,
+        bool emptyOnly)
     {
         if (!string.Equals(kind, "全部类型", StringComparison.Ordinal)
             && !string.Equals(item.Kind, kind, StringComparison.Ordinal))
         {
             return false;
         }
+        if (!string.Equals(propertyName, "全部属性", StringComparison.Ordinal))
+        {
+            if (!item.IsPropertyApplicable(propertyName))
+            {
+                return false;
+            }
+
+            var propertyValue = item.PropertyValue(propertyName);
+            if (emptyOnly)
+            {
+                return string.IsNullOrWhiteSpace(propertyValue);
+            }
+
+            return string.IsNullOrWhiteSpace(query)
+                || propertyValue.IndexOf(query, StringComparison.CurrentCultureIgnoreCase) >= 0;
+        }
         if (string.IsNullOrWhiteSpace(query))
         {
             return true;
         }
 
-        return new[]
-        {
-            item.FileName,
-            item.DrawingNumber,
-            item.Name,
-            item.Material,
-            item.Specification,
-            item.Classification,
-            item.MaterialCode,
-            item.PartName,
-            item.Model,
-            item.Brand,
-            item.Remark,
-            item.ProjectNumber,
-            item.ProjectName
-        }.Any(value => !string.IsNullOrWhiteSpace(value)
+        return new[] { item.FileName, item.ProjectNumber, item.ProjectName }
+            .Concat(item.SearchValues)
+            .Any(value => !string.IsNullOrWhiteSpace(value)
             && value.IndexOf(query, StringComparison.CurrentCultureIgnoreCase) >= 0);
     }
 
@@ -1161,14 +1491,27 @@ internal sealed class BatchPropertyEditDialog : Form
         };
         grid.CellValueChanged += (_, eventArgs) =>
         {
-            if (eventArgs.RowIndex >= 0 && eventArgs.ColumnIndex == 0)
+            if (eventArgs.RowIndex < 0 || eventArgs.ColumnIndex < 0)
+            {
+                return;
+            }
+            if (eventArgs.ColumnIndex == 0)
             {
                 SelectRelatedModelForRow(grid, eventArgs.RowIndex);
                 InvalidatePropertyCardConfirmation();
                 propertyCardGrid.Refresh();
             }
+            else if (grid.Columns[eventArgs.ColumnIndex].Tag is string propertyName
+                && grid.Rows[eventArgs.RowIndex].DataBoundItem is BatchPropertyEditItem item
+                && item.IsPropertyApplicable(propertyName))
+            {
+                item.SetPropertyValue(
+                    propertyName,
+                    grid.Rows[eventArgs.RowIndex].Cells[eventArgs.ColumnIndex].Value?.ToString() ?? string.Empty);
+            }
             UpdateSummary();
         };
+        grid.CellFormatting += OnGridCellFormatting;
         grid.KeyDown += OnGridKeyDown;
         grid.DataError += OnGridDataError;
 
@@ -1179,32 +1522,133 @@ internal sealed class BatchPropertyEditDialog : Form
         grid.Columns.Add(TextColumn("属性范围", nameof(BatchPropertyEditItem.ScopeDisplay), 82, true));
         grid.Columns.Add(TextColumn("项目号", nameof(BatchPropertyEditItem.ProjectNumber), 115, true));
         grid.Columns.Add(TextColumn("项目名称", nameof(BatchPropertyEditItem.ProjectName), 150, true));
-        grid.Columns.Add(TextColumn("图号", nameof(BatchPropertyEditItem.DrawingNumber), 135));
-        grid.Columns.Add(TextColumn("名称", nameof(BatchPropertyEditItem.Name), 160));
-        grid.Columns.Add(TextColumn("材料", nameof(BatchPropertyEditItem.Material), 110));
-        grid.Columns.Add(TextColumn("规格", nameof(BatchPropertyEditItem.Specification), 120));
-        grid.Columns.Add(ComboColumn(
-            "分类",
-            nameof(BatchPropertyEditItem.Classification),
-            85,
-            new[] { string.Empty, "标准件", "非标件", "虚拟件" }.Concat(items.Select(item => item.Classification))));
-        grid.Columns.Add(ComboColumn(
-            "易损件",
-            nameof(BatchPropertyEditItem.WearPart),
-            75,
-            new[] { string.Empty, "否", "是" }.Concat(items.Select(item => item.WearPart))));
-        grid.Columns.Add(TextColumn("物料编码", nameof(BatchPropertyEditItem.MaterialCode), 125));
-        grid.Columns.Add(TextColumn("零件名称", nameof(BatchPropertyEditItem.PartName), 150));
-        grid.Columns.Add(TextColumn("型号", nameof(BatchPropertyEditItem.Model), 120));
-        grid.Columns.Add(TextColumn("品牌", nameof(BatchPropertyEditItem.Brand), 100));
-        grid.Columns.Add(TextColumn("备注", nameof(BatchPropertyEditItem.Remark), 180));
-        grid.Columns.Add(TextColumn("数量", nameof(BatchPropertyEditItem.Quantity), 70));
-        grid.Columns.Add(TextColumn("热处理", nameof(BatchPropertyEditItem.HeatTreatment), 110));
-        grid.Columns.Add(TextColumn("表面处理", nameof(BatchPropertyEditItem.SurfaceTreatment), 110));
-        grid.Columns.Add(TextColumn("设计", nameof(BatchPropertyEditItem.Designer), 90));
-        grid.Columns.Add(TextColumn("制图", nameof(BatchPropertyEditItem.Drafter), 90));
-        grid.Columns.Add(TextColumn("校对", nameof(BatchPropertyEditItem.Checker), 90));
-        grid.Columns.Add(TextColumn("批准", nameof(BatchPropertyEditItem.Approver), 90));
+        RefreshDynamicPropertyColumns();
+    }
+
+    private void RefreshDynamicPropertyColumns()
+    {
+        var propertyColumns = grid.Columns.Cast<DataGridViewColumn>()
+            .Where(column => column.Tag is string)
+            .ToArray();
+        foreach (var column in propertyColumns)
+        {
+            grid.Columns.Remove(column);
+        }
+
+        var propertyNames = rows
+            .SelectMany(item => item.VisiblePropertyNames)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+        foreach (var propertyName in propertyNames)
+        {
+            grid.Columns.Add(DynamicPropertyColumn(propertyName));
+        }
+        RefreshPropertyColumnFilterOptions();
+        RefreshPropertyCardValueColumns();
+        grid.Invalidate();
+    }
+
+    private void RefreshPropertyColumnFilterOptions()
+    {
+        var current = propertyColumnFilter.SelectedItem as string ?? "全部属性";
+        var options = items
+            .SelectMany(item => item.VisiblePropertyNames)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .OrderBy(name => name, StringComparer.CurrentCulture)
+            .ToArray();
+        propertyColumnFilter.BeginUpdate();
+        try
+        {
+            propertyColumnFilter.Items.Clear();
+            propertyColumnFilter.Items.Add("全部属性");
+            propertyColumnFilter.Items.AddRange(options.Cast<object>().ToArray());
+            var selectedIndex = propertyColumnFilter.FindStringExact(current);
+            propertyColumnFilter.SelectedIndex = selectedIndex >= 0 ? selectedIndex : 0;
+        }
+        finally
+        {
+            propertyColumnFilter.EndUpdate();
+        }
+    }
+
+    private void RefreshPropertyCardValueColumns()
+    {
+        var currentColumns = propertyCardGrid.Columns.Cast<DataGridViewColumn>()
+            .Where(column => column.Tag is string)
+            .ToArray();
+        foreach (var column in currentColumns)
+        {
+            propertyCardGrid.Columns.Remove(column);
+        }
+
+        foreach (var propertyName in rows
+            .SelectMany(item => item.VisiblePropertyCardNames)
+            .Distinct(StringComparer.OrdinalIgnoreCase))
+        {
+            propertyCardGrid.Columns.Add(new DataGridViewTextBoxColumn
+            {
+                HeaderText = propertyName,
+                Width = 130,
+                ReadOnly = true,
+                SortMode = DataGridViewColumnSortMode.NotSortable,
+                Tag = propertyName
+            });
+        }
+        propertyCardGrid.Invalidate();
+    }
+
+    private DataGridViewColumn DynamicPropertyColumn(string propertyName)
+    {
+        DataGridViewColumn column;
+        if (string.Equals(propertyName, "分类", StringComparison.OrdinalIgnoreCase))
+        {
+            column = ComboColumn(
+                propertyName,
+                string.Empty,
+                95,
+                AllowedClassificationValues);
+        }
+        else if (string.Equals(propertyName, "易损件", StringComparison.OrdinalIgnoreCase))
+        {
+            column = ComboColumn(
+                propertyName,
+                string.Empty,
+                85,
+                new[] { string.Empty, "否", "是" }
+                    .Concat(items.Select(item => item.PropertyValue(propertyName))));
+        }
+        else
+        {
+            var width = Math.Max(90, Math.Min(180, 70 + propertyName.Length * 10));
+            column = TextColumn(propertyName, string.Empty, width);
+        }
+        column.Tag = propertyName;
+        return column;
+    }
+
+    private void OnGridCellFormatting(object sender, DataGridViewCellFormattingEventArgs eventArgs)
+    {
+        if (eventArgs.RowIndex < 0
+            || eventArgs.ColumnIndex < 0
+            || !(grid.Columns[eventArgs.ColumnIndex].Tag is string propertyName)
+            || !(grid.Rows[eventArgs.RowIndex].DataBoundItem is BatchPropertyEditItem item))
+        {
+            return;
+        }
+
+        var applicable = item.IsPropertyApplicable(propertyName);
+        var cell = grid.Rows[eventArgs.RowIndex].Cells[eventArgs.ColumnIndex];
+        cell.ReadOnly = !applicable;
+        cell.Style.BackColor = applicable ? Color.White : Color.FromArgb(242, 245, 248);
+        cell.Style.ForeColor = applicable ? grid.DefaultCellStyle.ForeColor : Color.FromArgb(145, 154, 166);
+        var value = applicable ? item.PropertyValue(propertyName) : string.Empty;
+        if (string.Equals(propertyName, "分类", StringComparison.OrdinalIgnoreCase)
+            && !IsAllowedClassification(value))
+        {
+            value = string.Empty;
+        }
+        eventArgs.Value = value;
+        eventArgs.FormattingApplied = true;
     }
 
     private void BuildPropertyCardGrid()
@@ -1237,16 +1681,30 @@ internal sealed class BatchPropertyEditDialog : Form
             }
             UpdateSummary();
         };
+        propertyCardGrid.CellFormatting += OnPropertyCardGridCellFormatting;
 
         propertyCardGrid.Columns.Add(CheckColumn("选择", nameof(BatchPropertyEditItem.Selected), 48));
         propertyCardGrid.Columns.Add(TextColumn("文件", nameof(BatchPropertyEditItem.FileName), 170, true));
         propertyCardGrid.Columns.Add(TextColumn("类型", nameof(BatchPropertyEditItem.Kind), 62, true));
         propertyCardGrid.Columns.Add(TextColumn("待设置原生属性卡", nameof(BatchPropertyEditItem.PropertyCard), 220, true));
         propertyCardGrid.Columns.Add(TextColumn("配置", nameof(BatchPropertyEditItem.ConfigurationDisplay), 110, true));
-        propertyCardGrid.Columns.Add(TextColumn("项目号", nameof(BatchPropertyEditItem.ProjectNumber), 130, true));
-        propertyCardGrid.Columns.Add(TextColumn("项目名称", nameof(BatchPropertyEditItem.ProjectName), 180, true));
-        propertyCardGrid.Columns.Add(TextColumn("图号", nameof(BatchPropertyEditItem.DrawingNumber), 160, true));
-        propertyCardGrid.Columns.Add(TextColumn("名称", nameof(BatchPropertyEditItem.Name), 200, true));
+        RefreshPropertyCardValueColumns();
+    }
+
+    private void OnPropertyCardGridCellFormatting(object sender, DataGridViewCellFormattingEventArgs eventArgs)
+    {
+        if (eventArgs.RowIndex < 0
+            || eventArgs.ColumnIndex < 0
+            || !(propertyCardGrid.Columns[eventArgs.ColumnIndex].Tag is string propertyName)
+            || !(propertyCardGrid.Rows[eventArgs.RowIndex].DataBoundItem is BatchPropertyEditItem item))
+        {
+            return;
+        }
+
+        eventArgs.Value = item.IsPropertyApplicable(propertyName)
+            ? item.PropertyValue(propertyName)
+            : string.Empty;
+        eventArgs.FormattingApplied = true;
     }
 
     private void BuildWritebackGrid()
@@ -1334,6 +1792,18 @@ internal sealed class BatchPropertyEditDialog : Form
         UpdateSummary();
     }
 
+    private void InvertFilteredSelection()
+    {
+        foreach (var item in rows)
+        {
+            item.Selected = !item.Selected;
+        }
+        grid.Refresh();
+        propertyCardGrid.Refresh();
+        InvalidatePropertyCardConfirmation();
+        UpdateSummary();
+    }
+
     private void SetAllWritebacksSelected(bool selected)
     {
         foreach (var item in writebackItems)
@@ -1376,29 +1846,52 @@ internal sealed class BatchPropertyEditDialog : Form
         UpdateSummary();
     }
 
-    private void CopyNameToModelForSelectedRows()
+    private void AutoFillNameOrModelForSelectedRows()
     {
         grid.EndEdit();
         var selectedItems = rows.Where(candidate => candidate.Selected).ToArray();
         if (selectedItems.Length == 0)
         {
-            CancelValidation("请先勾选需要同步型号的图档。");
+            CancelValidation("请先勾选需要自动填充名称或型号的图档。");
             return;
         }
 
-        if (selectedItems.Any(item => !item.EffectivePropertyCardFields.Any(field =>
-                string.Equals(field.EditorPropertyName, "型号", StringComparison.OrdinalIgnoreCase))))
-        {
-            CancelValidation("已勾选图档的属性卡必须都包含“型号”字段。");
-            return;
-        }
-
+        var changedCount = 0;
         foreach (var item in selectedItems)
         {
-            item.SetPropertyValue("型号", item.Name);
+            var drawingName = item.Name?.Trim() ?? string.Empty;
+            if (string.IsNullOrWhiteSpace(drawingName))
+            {
+                continue;
+            }
+
+            var targetProperty = ContainsChinese(drawingName) ? "物料名称" : "型号";
+            if (!item.IsPropertyApplicable(targetProperty)
+                || !string.IsNullOrWhiteSpace(item.PropertyValue(targetProperty)))
+            {
+                continue;
+            }
+
+            item.SetPropertyValue(targetProperty, drawingName);
+            changedCount++;
         }
+
+        if (changedCount == 0)
+        {
+            CancelValidation("所选图档没有可自动填充的空白“物料名称”或“型号”字段，现有内容未改变。");
+            return;
+        }
+
         grid.Refresh();
         UpdateSummary();
+    }
+
+    private static bool ContainsChinese(string value)
+    {
+        return (value ?? string.Empty).Any(character =>
+            character >= '\u3400' && character <= '\u4DBF'
+            || character >= '\u4E00' && character <= '\u9FFF'
+            || character >= '\uF900' && character <= '\uFAFF');
     }
 
     private void RefreshFillValueEditor()
@@ -1427,14 +1920,13 @@ internal sealed class BatchPropertyEditDialog : Form
         var selectedRows = rows.Where(item => item.Selected).ToArray();
         var fieldSets = selectedRows
             .Select(item => new HashSet<string>(
-                item.EffectivePropertyCardFields
-                    .Select(field => field.EditorPropertyName)
-                    .Where(name => !string.IsNullOrWhiteSpace(name)),
+                item.VisiblePropertyNames,
                 StringComparer.OrdinalIgnoreCase))
             .ToArray();
         var available = selectedRows.Length > 0 && fieldSets.All(set => set.Count > 0)
-            ? BatchPropertyEditItem.EditablePropertyNames
-                .Where(name => fieldSets.All(set => set.Contains(name)))
+            ? grid.Columns.Cast<DataGridViewColumn>()
+                .Select(column => column.Tag as string)
+                .Where(name => !string.IsNullOrWhiteSpace(name) && fieldSets.All(set => set.Contains(name)))
                 .ToArray()
             : Array.Empty<string>();
 
@@ -1468,6 +1960,24 @@ internal sealed class BatchPropertyEditDialog : Form
         }
 
         var lines = Clipboard.GetText().Replace("\r\n", "\n").TrimEnd('\n').Split('\n');
+        var isSingleValue = lines.Length == 1 && lines[0].IndexOf('\t') < 0;
+        if (isSingleValue && grid.SelectedCells.Count > 1)
+        {
+            foreach (var cell in grid.SelectedCells.Cast<DataGridViewCell>()
+                .OrderBy(cell => cell.RowIndex)
+                .ThenBy(cell => cell.ColumnIndex))
+            {
+                TrySetPastedCellValue(cell, lines[0]);
+            }
+
+            grid.EndEdit();
+            grid.Refresh();
+            UpdateSummary();
+            eventArgs.Handled = true;
+            eventArgs.SuppressKeyPress = true;
+            return;
+        }
+
         var editableColumns = grid.Columns.Cast<DataGridViewColumn>()
             .Where(column => !column.ReadOnly && !(column is DataGridViewCheckBoxColumn))
             .OrderBy(column => column.DisplayIndex)
@@ -1483,7 +1993,9 @@ internal sealed class BatchPropertyEditDialog : Form
             var values = lines[rowOffset].Split('\t');
             for (var columnOffset = 0; columnOffset < values.Length && startColumn + columnOffset < editableColumns.Length; columnOffset++)
             {
-                grid.Rows[grid.CurrentCell.RowIndex + rowOffset].Cells[editableColumns[startColumn + columnOffset].Index].Value = values[columnOffset];
+                TrySetPastedCellValue(
+                    grid.Rows[grid.CurrentCell.RowIndex + rowOffset].Cells[editableColumns[startColumn + columnOffset].Index],
+                    values[columnOffset]);
             }
         }
 
@@ -1492,6 +2004,38 @@ internal sealed class BatchPropertyEditDialog : Form
         UpdateSummary();
         eventArgs.Handled = true;
         eventArgs.SuppressKeyPress = true;
+    }
+
+    private bool TrySetPastedCellValue(DataGridViewCell cell, string value)
+    {
+        if (cell == null
+            || cell.RowIndex < 0
+            || cell.ColumnIndex < 0
+            || grid.Columns[cell.ColumnIndex].ReadOnly
+            || grid.Columns[cell.ColumnIndex] is DataGridViewCheckBoxColumn
+            || !(grid.Columns[cell.ColumnIndex].Tag is string propertyName)
+            || !(grid.Rows[cell.RowIndex].DataBoundItem is BatchPropertyEditItem item)
+            || !item.IsPropertyApplicable(propertyName))
+        {
+            return false;
+        }
+
+        var normalized = value ?? string.Empty;
+        if (cell is DataGridViewComboBoxCell comboBoxCell)
+        {
+            var matchingValue = comboBoxCell.Items.Cast<object>()
+                .Select(candidate => candidate?.ToString() ?? string.Empty)
+                .FirstOrDefault(candidate => string.Equals(candidate, normalized, StringComparison.OrdinalIgnoreCase));
+            if (matchingValue == null)
+            {
+                return false;
+            }
+            normalized = matchingValue;
+        }
+
+        item.SetPropertyValue(propertyName, normalized);
+        cell.Value = normalized;
+        return true;
     }
 
     private void UpdateSummary()
@@ -1513,8 +2057,8 @@ internal sealed class BatchPropertyEditDialog : Form
 
     private void RefreshGridComboBoxValues()
     {
-        AddComboBoxValues(nameof(BatchPropertyEditItem.Classification), items.Select(item => item.Classification));
-        AddComboBoxValues(nameof(BatchPropertyEditItem.WearPart), items.Select(item => item.WearPart));
+        RefreshDynamicPropertyColumns();
+        AddComboBoxValues("易损件", items.Select(item => item.PropertyValue("易损件")));
         RefreshFillValueEditor();
     }
 
@@ -1522,7 +2066,7 @@ internal sealed class BatchPropertyEditDialog : Form
     {
         var column = grid.Columns.Cast<DataGridViewColumn>()
             .OfType<DataGridViewComboBoxColumn>()
-            .FirstOrDefault(candidate => string.Equals(candidate.DataPropertyName, propertyName, StringComparison.Ordinal));
+            .FirstOrDefault(candidate => string.Equals(candidate.Tag as string, propertyName, StringComparison.Ordinal));
         if (column == null)
         {
             return;
@@ -1546,7 +2090,9 @@ internal sealed class BatchPropertyEditDialog : Form
             && grid.Columns[eventArgs.ColumnIndex] is DataGridViewComboBoxColumn comboColumn)
         {
             var value = grid.Rows[eventArgs.RowIndex].Cells[eventArgs.ColumnIndex].Value?.ToString()?.Trim() ?? string.Empty;
-            if (!comboColumn.Items.Cast<object>().Any(item => string.Equals(item?.ToString() ?? string.Empty, value, StringComparison.OrdinalIgnoreCase)))
+            var propertyName = comboColumn.Tag as string ?? string.Empty;
+            if (!string.Equals(propertyName, "分类", StringComparison.OrdinalIgnoreCase)
+                && !comboColumn.Items.Cast<object>().Any(item => string.Equals(item?.ToString() ?? string.Empty, value, StringComparison.OrdinalIgnoreCase)))
             {
                 comboColumn.Items.Add(value);
             }
@@ -1554,6 +2100,12 @@ internal sealed class BatchPropertyEditDialog : Form
             eventArgs.Cancel = false;
         }
     }
+
+    private static readonly string[] AllowedClassificationValues =
+        { string.Empty, "标准件", "非标件", "虚拟件" };
+
+    private static bool IsAllowedClassification(string value) =>
+        AllowedClassificationValues.Contains(value?.Trim() ?? string.Empty, StringComparer.OrdinalIgnoreCase);
 
     private void ValidateBeforeExecute(object sender, EventArgs eventArgs)
     {
@@ -1592,7 +2144,7 @@ internal sealed class BatchPropertyEditDialog : Form
             }
             var cleanupConfirmation = MessageBox.Show(
                 this,
-                "设置属性卡时，将删除当前属性卡未定义的已知旧卡字段：分类、属性、文档名称、物料编码、NT、BOMINFO、TNR、表面处理、重量、标签编号、SUPPLIER、种类、单位、版本。\r\n\r\n当前属性卡仍定义的同名字段会保留。是否继续？",
+                "设置属性卡时，将删除当前属性卡未定义的已知旧卡字段：图号、名称、材料、规格、零件名称、分类、属性、文档名称、物料编码、NT、BOMINFO、TNR、表面处理、重量、标签编号、SUPPLIER、种类、单位、版本。\r\n\r\n当前属性卡仍定义的同名字段会保留。是否继续？",
                 "确认清理旧属性卡字段",
                 MessageBoxButtons.YesNo,
                 MessageBoxIcon.Warning,
@@ -1627,8 +2179,16 @@ internal sealed class BatchPropertyEditDialog : Form
 
         var changed = ChangedItems;
         operationRunning = true;
+        operationPaused = false;
+        operationStopRequested = false;
         propertyTabs.Enabled = false;
         close.Enabled = false;
+        execute.Enabled = false;
+        pause.Text = "暂停";
+        pause.Visible = true;
+        pause.Enabled = true;
+        stop.Visible = true;
+        stop.Enabled = true;
         UseWaitCursor = true;
         executionPanel.Visible = true;
         try
@@ -1638,6 +2198,11 @@ internal sealed class BatchPropertyEditDialog : Form
             executionStatus.Text = result;
             executionProgress.SetProgress(changed.Count, changed.Count);
         }
+        catch (OperationCanceledException)
+        {
+            executionStatus.Text = "操作已停止；已完成的图档保留，尚未处理的图档未执行。";
+            executionStatus.ForeColor = Color.FromArgb(210, 110, 0);
+        }
         catch (Exception exception)
         {
             executionStatus.Text = string.Concat("操作失败：", exception.Message);
@@ -1646,8 +2211,12 @@ internal sealed class BatchPropertyEditDialog : Form
         finally
         {
             operationRunning = false;
+            operationPaused = false;
+            operationStopRequested = false;
             propertyTabs.Enabled = true;
             close.Enabled = true;
+            pause.Visible = false;
+            stop.Visible = false;
             UseWaitCursor = false;
             propertyCardsConfirmed = false;
             UpdateSummary();
@@ -1657,15 +2226,76 @@ internal sealed class BatchPropertyEditDialog : Form
 
     private void UpdateExecutionProgress(string message, int completed, int total)
     {
-        executionRowStyle.Height = 96;
+        executionRowStyle.Height = 66;
         executionPanel.Visible = true;
         executionStatus.ForeColor = Color.FromArgb(31, 89, 147);
-        executionStatus.Text = string.Concat("处理中：", Environment.NewLine, message?.Trim() ?? string.Empty);
+        var status = (message ?? string.Empty)
+            .Replace("\r\n", " · ")
+            .Replace("\n", " · ")
+            .Replace("\r", " · ")
+            .Trim();
+        executionStatus.Text = string.Concat("处理中：", status);
         executionProgress.SetProgress(completed, total);
         executionPanel.PerformLayout();
         executionPanel.Invalidate(true);
         executionPanel.Update();
         Application.DoEvents();
+        WaitForOperationControl();
+    }
+
+    private void ToggleOperationPause()
+    {
+        if (!operationRunning || operationStopRequested)
+        {
+            return;
+        }
+
+        operationPaused = !operationPaused;
+        pause.Text = operationPaused ? "继续" : "暂停";
+        executionStatus.Text = operationPaused
+            ? string.Concat("已暂停：", executionStatus.Text.Replace("处理中：", string.Empty))
+            : executionStatus.Text.Replace("已暂停：", "处理中：");
+        executionStatus.ForeColor = operationPaused
+            ? Color.FromArgb(210, 110, 0)
+            : Color.FromArgb(31, 89, 147);
+    }
+
+    private void RequestOperationStop()
+    {
+        if (!operationRunning)
+        {
+            return;
+        }
+
+        operationStopRequested = true;
+        operationPaused = false;
+        pause.Text = "暂停";
+        pause.Enabled = false;
+        stop.Enabled = false;
+        executionStatus.Text = "正在停止：当前图档完成后不再处理后续图档。";
+        executionStatus.ForeColor = Color.FromArgb(210, 110, 0);
+    }
+
+    private void WaitForOperationControl()
+    {
+        while (operationPaused && !operationStopRequested)
+        {
+            Application.DoEvents();
+            Thread.Sleep(50);
+        }
+        if (operationStopRequested)
+        {
+            throw new OperationCanceledException("用户停止了批量属性操作。");
+        }
+    }
+
+    protected override bool ProcessCmdKey(ref Message message, Keys keyData)
+    {
+        if ((keyData & Keys.KeyCode) == Keys.Enter && execute.ContainsFocus)
+        {
+            return true;
+        }
+        return base.ProcessCmdKey(ref message, keyData);
     }
 
     private void CancelValidation(string message)

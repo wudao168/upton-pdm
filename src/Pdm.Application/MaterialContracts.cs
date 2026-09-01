@@ -243,6 +243,7 @@ public interface IMaterialRepository
     Task<IReadOnlyList<PdmMaterial>> ListMaterialsAsync(string? query, string? categoryCode, bool includeArchived, int limit, CancellationToken cancellationToken);
     Task<PdmMaterial?> FindMaterialAsync(Guid materialId, CancellationToken cancellationToken);
     Task<PdmMaterial?> FindMaterialByCodeAsync(string materialCode, CancellationToken cancellationToken);
+    Task<IReadOnlyList<PdmMaterial>> FindMaterialsByCodesAsync(IReadOnlyList<string> materialCodes, CancellationToken cancellationToken);
     Task<PdmMaterial?> FindMaterialBySourceBomItemAsync(Guid bomItemId, CancellationToken cancellationToken);
     Task<IReadOnlyList<MaterialAttachment>> ListMaterialAttachmentsAsync(Guid materialId, MaterialAttachmentKind? kind, CancellationToken cancellationToken);
     Task<MaterialAttachment?> FindMaterialAttachmentAsync(Guid attachmentId, CancellationToken cancellationToken);
@@ -254,6 +255,7 @@ public interface IMaterialRepository
     Task<MaterialCodeApplication?> FindPendingMaterialCodeApplicationByBomItemAsync(Guid bomItemId, CancellationToken cancellationToken);
     Task<MaterialCodeApplication> CreateMaterialCodeApplicationAsync(MaterialCodeApplication application, CancellationToken cancellationToken);
     Task<MaterialCodeApplication> DecideMaterialCodeApplicationAsync(Guid applicationId, long expectedRowVersion, MaterialCodeApplicationStatus status, string actor, string? comment, Guid? materialId, string? materialCode, DateTimeOffset decidedAt, CancellationToken cancellationToken);
+    Task RecordMaterialCodeApplicationWorkflowAsync(Guid applicationId, MaterialCodeWorkflowState state, string actor, DateTimeOffset occurredAt, string detail, CancellationToken cancellationToken);
     Task<bool> HasMaterialReferencesAsync(Guid materialId, CancellationToken cancellationToken);
     Task<int> CountMaterialReferencesAsync(Guid materialId, CancellationToken cancellationToken);
     Task<string> ReserveNextMaterialCodeAsync(MaterialCategory category, long minimumCurrentSequence, CancellationToken cancellationToken);
@@ -293,6 +295,26 @@ public interface IMaterialRepository
         string payloadSha256,
         DateTimeOffset retriedAt,
         CancellationToken cancellationToken);
+    Task<MaterialSyncTask> ScheduleSyncTaskAsync(Guid taskId, DateTimeOffset dueAt, CancellationToken cancellationToken);
+    Task<MaterialSyncBatch> CreateSyncBatchAsync(MaterialSyncBatch batch, CancellationToken cancellationToken);
+    Task<MaterialSyncBatch?> FindSyncBatchAsync(Guid batchId, CancellationToken cancellationToken);
+    Task<IReadOnlyList<MaterialSyncBatch>> ListRecentSyncBatchesAsync(string actor, int limit, CancellationToken cancellationToken);
+    Task<MaterialSyncBatchClaim?> ClaimNextSyncBatchItemAsync(DateTimeOffset now, DateTimeOffset leaseExpiresAt, CancellationToken cancellationToken);
+    Task<MaterialSyncBatch> CompleteSyncBatchItemAsync(
+        Guid batchId,
+        Guid itemId,
+        MaterialSyncBatchItemStatus status,
+        string? message,
+        DateTimeOffset completedAt,
+        CancellationToken cancellationToken);
+    Task<(PdmMaterial Material, MaterialSyncTask Task)> ReassignMaterialCodeAndEnqueueAsync(
+        PdmMaterial material,
+        long expectedRowVersion,
+        string previousMaterialCode,
+        MaterialSyncTask previousTask,
+        MaterialSyncTask replacementTask,
+        AuditEntry audit,
+        CancellationToken cancellationToken);
     Task<MaterialSyncTask> BeginSyncTaskAsync(Guid taskId, DateTimeOffset startedAt, CancellationToken cancellationToken);
     Task<(PdmMaterial Material, MaterialSyncTask Task)> CompleteSyncTaskAsync(
         Guid taskId,
@@ -308,6 +330,8 @@ public interface IMaterialRepository
         string? responsePreview,
         AuditEntry audit,
         CancellationToken cancellationToken);
+    Task<U9MaterialFullSyncRun?> GetLatestU9MaterialFullSyncRunAsync(CancellationToken cancellationToken);
+    Task<U9MaterialFullSyncRun> SaveU9MaterialFullSyncRunAsync(U9MaterialFullSyncRun run, CancellationToken cancellationToken);
     Task<U9MaterialIntegrationConfiguration> GetIntegrationConfigurationAsync(CancellationToken cancellationToken);
     Task<U9MaterialIntegrationConfiguration> SaveIntegrationConfigurationAsync(U9MaterialIntegrationConfiguration configuration, CancellationToken cancellationToken);
 }

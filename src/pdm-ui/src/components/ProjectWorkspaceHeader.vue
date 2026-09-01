@@ -7,7 +7,7 @@ import { useUserDisplayName } from '../userDisplay'
 
 export type ProjectTab = 'overview' | 'files' | 'documents' | 'bom' | 'versions' | 'release' | 'records'
 
-const props = defineProps<{ project: ProjectSummary; projects: ProjectSummary[]; activeTab: ProjectTab; activeProjectDocumentStatus?: string; currentUsername?: string }>()
+const props = defineProps<{ project: ProjectSummary; projects: ProjectSummary[]; activeTab: ProjectTab; activeProjectDocumentStatus?: string; activeDocumentCounts?: { all: number; model: number; drawing: number }; currentUsername?: string; switchingProjectId?: string }>()
 const emit = defineEmits<{ back: []; switch: [projectId: string]; tab: [tab: ProjectTab] }>()
 const displayUserName = useUserDisplayName()
 
@@ -38,7 +38,10 @@ const familyProjects = computed(() => {
   return [root, ...children.filter(item => item.id !== root.id)]
 })
 const childCount = computed(() => familyProjects.value.filter(item => item.parentProjectId === rootProject.value.id).length)
-const currentProjectDocumentCount = computed(() => familyProjects.value.find(item => item.id === props.project.id)?.documentCount ?? props.project.documentCount ?? 0)
+const currentProjectDocumentCount = computed(() => props.activeDocumentCounts?.all
+  ?? familyProjects.value.find(item => item.id === props.project.id)?.documentCount
+  ?? props.project.documentCount
+  ?? 0)
 const sidebarProject = computed(() => props.project)
 const childProjectSelected = computed(() => !!sidebarProject.value.parentProjectId)
 const visibleTabs = computed(() => tabs.filter(tab => props.project.canReadContent || tab.key === 'overview' || tab.key === 'records'))
@@ -127,10 +130,12 @@ function documentStatus(project: ProjectSummary, activeProject = false) {
 }
 
 function modelDocumentCount(project: ProjectSummary) {
+  if (project.id === props.project.id && props.activeDocumentCounts) return props.activeDocumentCounts.model
   return project.modelDocumentCount ?? Math.max((project.documentCount ?? 0) - (project.drawingDocumentCount ?? 0), 0)
 }
 
 function drawingDocumentCount(project: ProjectSummary) {
+  if (project.id === props.project.id && props.activeDocumentCounts) return props.activeDocumentCounts.drawing
   return project.drawingDocumentCount ?? 0
 }
 </script>
@@ -140,7 +145,7 @@ function drawingDocumentCount(project: ProjectSummary) {
     <aside class="pdm-project-sidebar-stack" aria-label="项目基本信息与全部项目号">
       <section class="pdm-project-sidebar__context" aria-label="当前项目">
         <div class="pdm-project-switcher">
-          <button type="button" class="pdm-project-switcher__display" aria-label="浏览项目" aria-haspopup="dialog" :aria-expanded="projectBrowserOpen" :disabled="switchConfirmationPending" :title="`${rootProject.code} · ${rootProject.name}`" @click="projectBrowserOpen = true">
+          <button type="button" class="pdm-project-switcher__display" aria-label="浏览项目" aria-haspopup="dialog" :aria-expanded="projectBrowserOpen" :disabled="switchConfirmationPending || Boolean(switchingProjectId)" :title="`${rootProject.code} · ${rootProject.name}`" @click="projectBrowserOpen = true">
             <span>{{ rootProject.code }} · {{ rootProject.name }}</span>
             <span class="pdm-project-switcher__search-icon" aria-hidden="true"><Search :size="12" /></span>
           </button>
@@ -177,12 +182,13 @@ function drawingDocumentCount(project: ProjectSummary) {
             :class="{ 'is-active': item.id === project.id }"
             :aria-current="item.id === project.id ? 'page' : undefined"
             :aria-label="`选择项目号 ${item.code}`"
-            :disabled="switchConfirmationPending"
+            :aria-busy="item.id === switchingProjectId"
+            :disabled="switchConfirmationPending || Boolean(switchingProjectId)"
             @click="item.id !== project.id && emit('switch', item.id)"
           >
             <span class="pdm-project-family__identity"><strong>{{ item.code }}</strong><small :title="item.name">{{ item.name }}</small></span>
             <span class="pdm-project-family__meta">
-              <span class="pdm-project-family__state">{{ documentStatus(item, item.id === project.id) }}</span>
+              <span class="pdm-project-family__state">{{ item.id === switchingProjectId ? '切换中…' : documentStatus(item, item.id === project.id) }}</span>
               <span class="pdm-project-family__document-counts" :aria-label="`3D图档 ${modelDocumentCount(item)}，2D图档 ${drawingDocumentCount(item)}`">
                 <span class="is-model" :title="`3D图档 ${modelDocumentCount(item)}`">{{ modelDocumentCount(item) }}</span>
                 <span class="is-drawing" :title="`2D图档 ${drawingDocumentCount(item)}`">{{ drawingDocumentCount(item) }}</span>

@@ -583,23 +583,28 @@ public sealed class PdmWorkflowService(
     public async Task<Project> SetChildProjectDesignersAsync(Guid projectId, IReadOnlyList<string> designers, string actor, UserRole role, CancellationToken cancellationToken)
     {
         await RequirePermissionAsync(actor, role, PermissionCodes.ProjectDesignerAssign, cancellationToken);
-        var child = await repository.FindProjectAsync(projectId, cancellationToken) ?? throw new PdmNotFoundException("子项目不存在。");
-        if (child.ParentProjectId is null) throw new PdmRuleException("设计人员只能配置到子项目。");
-        var root = await repository.FindProjectAsync(child.RootProjectId ?? child.ParentProjectId.Value, cancellationToken) ?? throw new PdmNotFoundException("主项目不存在。");
+        var project = await repository.FindProjectAsync(projectId, cancellationToken) ?? throw new PdmNotFoundException("项目不存在。");
+        var root = project.ParentProjectId is null
+            ? project
+            : await repository.FindProjectAsync(project.RootProjectId ?? project.ParentProjectId.Value, cancellationToken) ?? throw new PdmNotFoundException("主项目不存在。");
+        if (root.ExecutionUnitId is null) throw new PdmRuleException("请先为主项目分配执行事业部。");
         var directory = await repository.GetOrganizationDirectoryAsync(cancellationToken);
-        var managesExecutionUnit = root.ExecutionUnitId is Guid executionUnitId && directory.Managers.Any(item => item.UnitId == executionUnitId
+        var managesExecutionUnit = directory.Managers.Any(item => item.UnitId == root.ExecutionUnitId
             && (string.Equals(item.PrimaryManager, actor, StringComparison.OrdinalIgnoreCase) || item.CollaborativeManagers.Contains(actor, StringComparer.OrdinalIgnoreCase)));
-        var belongsToProjectStaffing = string.Equals(root.PrimaryProjectManager, actor, StringComparison.OrdinalIgnoreCase)
-            || root.CollaborativeProjectManagers.Contains(actor, StringComparer.OrdinalIgnoreCase)
-            || root.DesignLeads.Contains(actor, StringComparer.OrdinalIgnoreCase)
-            || string.Equals(root.DesignLead, actor, StringComparison.OrdinalIgnoreCase);
-        if (role != UserRole.Administrator && !managesExecutionUnit && !belongsToProjectStaffing)
-            throw new UnauthorizedAccessException("只有执行事业部负责人、项目经理或主设可以分配子项目工程师。");
+        var user = directory.Users.FirstOrDefault(item => string.Equals(item.Username, actor, StringComparison.OrdinalIgnoreCase));
+        var isMechanicalSupervisor = user is not null
+            && user.EffectiveRoleCodes.Contains("MechanicalManager", StringComparer.OrdinalIgnoreCase)
+            && IsActiveMemberOfDivision(directory, actor, root.ExecutionUnitId.Value);
+        var isCurrentProjectManager = string.Equals(project.PrimaryProjectManager, actor, StringComparison.OrdinalIgnoreCase);
+        var isMainDesigner = project.DesignLeads.Contains(actor, StringComparer.OrdinalIgnoreCase)
+            || string.Equals(project.DesignLead, actor, StringComparison.OrdinalIgnoreCase);
+        if (role != UserRole.Administrator && !managesExecutionUnit && !isMechanicalSupervisor && !isCurrentProjectManager && !isMainDesigner)
+            throw new UnauthorizedAccessException("只有执行事业部负责人、机械主管、当前项目经理或主设可以分配执行工程师。");
         var normalized = NormalizeUsers(designers);
         if (root.OrganizationId is null || normalized.Any(username => !IsActiveTechnicalMemberOfOrganization(directory, username, root.OrganizationId.Value)))
             throw new PdmRuleException("工程师必须是项目公司内启用的机械、电气、硬件、标准化等技术岗位人员。");
         var saved = await repository.SetChildProjectDesignersAsync(projectId, normalized, actor, cancellationToken);
-        await AuditAsync(actor, "project.designers.update", nameof(Project), child.Id.ToString(), $"{child.Code} · {(normalized.Length == 0 ? "清空" : string.Join('、', normalized))}", cancellationToken);
+        await AuditAsync(actor, "project.designers.update", nameof(Project), project.Id.ToString(), $"{project.Code} · {(normalized.Length == 0 ? "清空" : string.Join('、', normalized))}", cancellationToken);
         return saved;
     }
 
@@ -700,27 +705,18 @@ public sealed class PdmWorkflowService(
         if (normalized.Select(candidate => candidate.CandidateKey).Distinct(StringComparer.OrdinalIgnoreCase).Count() != normalized.Length)
             throw new PdmRuleException("待入库图档标识不能重复。");
 
-        var projects = await repository.ListProjectsForUserAsync(actor, role, cancellationToken);
-        var visibleProjects = projects.ToDictionary(project => project.Id);
-        if (!visibleProjects.ContainsKey(projectId))
-            throw new UnauthorizedAccessException("当前用户无权查看目标项目。");
-        var allFingerprints = await repository.ListDocumentContentFingerprintsAsync(visibleProjects.Keys.ToArray(), cancellationToken);
+        var targetProject = await repository.FindProjectAsync(projectId, cancellationToken)
+            ?? throw new PdmNotFoundException("目标项目不存在。");
+        var targetProjects = new Dictionary<Guid, Project> { [targetProject.Id] = targetProject };
+        var targetFingerprints = await repository.ListDocumentContentFingerprintsAsync([projectId], cancellationToken);
         var candidateFileNames = normalized.Select(candidate => candidate.FileName).ToHashSet(StringComparer.OrdinalIgnoreCase);
-        var candidateFingerprints = normalized.Select(candidate => candidate.SourceSha256).ToHashSet(StringComparer.OrdinalIgnoreCase);
-        var relevantFingerprints = allFingerprints.Where(fingerprint =>
-            (fingerprint.Document.ProjectId == projectId && candidateFileNames.Contains(fingerprint.Document.FileName))
-            || candidateFingerprints.Contains(fingerprint.SourceSha256)).ToArray();
-        var visibleFingerprints = new List<DocumentContentFingerprint>(relevantFingerprints.Length);
-        foreach (var fingerprint in relevantFingerprints)
-        {
-            if (await repository.HasDocumentReadAccessAsync(fingerprint.Document.Id, actor, role, cancellationToken))
-                visibleFingerprints.Add(fingerprint);
-        }
-        var fingerprints = visibleFingerprints;
+        var relevantFingerprints = targetFingerprints
+            .Where(fingerprint => candidateFileNames.Contains(fingerprint.Document.FileName))
+            .ToArray();
         var results = new List<DocumentRegistrationMatch>(normalized.Length);
         foreach (var candidate in normalized)
         {
-            var sameName = fingerprints.FirstOrDefault(item =>
+            var sameName = relevantFingerprints.FirstOrDefault(item =>
                 item.Document.ProjectId == projectId
                 && string.Equals(item.Document.FileName, candidate.FileName, StringComparison.OrdinalIgnoreCase));
             if (sameName is not null)
@@ -731,33 +727,11 @@ public sealed class PdmWorkflowService(
                         ? DocumentRegistrationMatchKind.SameNameSameContent
                         : DocumentRegistrationMatchKind.SameNameDifferentContent,
                     sameName,
-                    visibleProjects));
+                    targetProjects));
                 continue;
             }
 
-            var sameContent = fingerprints.FirstOrDefault(item =>
-                item.Document.ProjectId == projectId
-                && string.Equals(item.SourceSha256, candidate.SourceSha256, StringComparison.OrdinalIgnoreCase));
-            if (sameContent is not null)
-            {
-                results.Add(ToRegistrationMatch(
-                    candidate.CandidateKey,
-                    DocumentRegistrationMatchKind.SameContentDifferentName,
-                    sameContent,
-                    visibleProjects));
-                continue;
-            }
-
-            var otherProjectContent = fingerprints.FirstOrDefault(item =>
-                item.Document.ProjectId != projectId
-                && string.Equals(item.SourceSha256, candidate.SourceSha256, StringComparison.OrdinalIgnoreCase));
-            results.Add(otherProjectContent is null
-                ? new DocumentRegistrationMatch(candidate.CandidateKey, DocumentRegistrationMatchKind.New, null, null, null, null, null, null, null)
-                : ToRegistrationMatch(
-                    candidate.CandidateKey,
-                    DocumentRegistrationMatchKind.SameContentOtherProject,
-                    otherProjectContent,
-                    visibleProjects));
+            results.Add(new DocumentRegistrationMatch(candidate.CandidateKey, DocumentRegistrationMatchKind.New, null, null, null, null, null, null, null));
         }
 
         return results;
@@ -1268,7 +1242,28 @@ public sealed class PdmWorkflowService(
         UserRole role,
         CancellationToken cancellationToken)
     {
-        await RequireDocumentAccessAsync(documentId, actor, role, forEdit ? FolderAccess.View | FolderAccess.Edit : FolderAccess.View, cancellationToken);
+        var rootDocument = await repository.FindDocumentAsync(documentId, cancellationToken)
+            ?? throw new PdmNotFoundException("图档不存在。");
+        var project = await repository.FindProjectAsync(rootDocument.ProjectId, cancellationToken)
+            ?? throw new PdmNotFoundException("项目不存在。");
+        if (!await repository.HasProjectContentReadAccessAsync(project.Id, actor, role, cancellationToken))
+        {
+            throw new UnauthorizedAccessException("当前用户没有该项目目录下图档的对应操作权限。");
+        }
+        var projectFolders = await repository.ListProjectFoldersAsync(project.Id, actor, role, cancellationToken);
+        var currentProjectDocuments = await repository.ListDocumentsAsync(project.Id, cancellationToken);
+        var currentProjectDocumentsById = currentProjectDocuments.ToDictionary(document => document.Id);
+        void RequireProjectDocumentAccess(PdmDocument document, FolderAccess requiredAccess)
+        {
+            var folder = document.FolderId is null
+                ? projectFolders.FirstOrDefault(item => item.TargetProjectId == document.ProjectId && item.TemplateKey == "mechanical.project")
+                : projectFolders.FirstOrDefault(item => item.Id == document.FolderId.Value);
+            if (folder is null || (folder.EffectiveAccess & requiredAccess) != requiredAccess)
+            {
+                throw new UnauthorizedAccessException("当前用户没有该项目目录下图档的对应操作权限。");
+            }
+        }
+        RequireProjectDocumentAccess(rootDocument, forEdit ? FolderAccess.View | FolderAccess.Edit : FolderAccess.View);
         if (forEdit)
         {
             await RequirePermissionAsync(actor, role, PermissionCodes.DocumentEdit, cancellationToken);
@@ -1278,11 +1273,13 @@ public sealed class PdmWorkflowService(
             }
         }
 
-        var rootDocument = await repository.FindDocumentAsync(documentId, cancellationToken)
-            ?? throw new PdmNotFoundException("图档不存在。");
-        var project = await repository.FindProjectAsync(rootDocument.ProjectId, cancellationToken)
-            ?? throw new PdmNotFoundException("项目不存在。");
-        var rootVersions = await repository.ListDocumentVersionsAsync(documentId, cancellationToken);
+        var projectVersions = await repository.ListProjectDocumentVersionsAsync(project.Id, cancellationToken);
+        var versionsByDocument = projectVersions
+            .GroupBy(version => version.DocumentId)
+            .ToDictionary(
+                group => group.Key,
+                group => (IReadOnlyList<DocumentVersion>)group.OrderByDescending(version => version.CreatedAt).ToArray());
+        var rootVersions = versionsByDocument.GetValueOrDefault(documentId) ?? Array.Empty<DocumentVersion>();
         var rootVersion = versionId.HasValue
             ? rootVersions.SingleOrDefault(item => item.Id == versionId.Value)
             : releasedOnly
@@ -1307,9 +1304,17 @@ public sealed class PdmWorkflowService(
         var normalizedConflictDocumentIds = new HashSet<Guid>();
         var fileNames = new Dictionary<string, Guid>(StringComparer.OrdinalIgnoreCase);
         var allowCurrentVersionFallback = !versionId.HasValue && !releasedOnly;
-        var currentProjectDocuments = allowCurrentVersionFallback
-            ? await repository.ListDocumentsAsync(project.Id, cancellationToken)
-            : Array.Empty<PdmDocument>();
+        var authorizedDocumentIds = new HashSet<Guid> { documentId };
+        async Task<IReadOnlyList<DocumentVersion>> ListOpenVersionsAsync(Guid targetDocumentId)
+        {
+            if (versionsByDocument.TryGetValue(targetDocumentId, out var cachedVersions))
+            {
+                return cachedVersions;
+            }
+            var loadedVersions = await repository.ListDocumentVersionsAsync(targetDocumentId, cancellationToken);
+            versionsByDocument[targetDocumentId] = loadedVersions;
+            return loadedVersions;
+        }
         var nodes = FlattenOpenNodes(rootVersion.ReferenceSnapshot).ToArray();
         for (var index = 0; index < nodes.Length; index++)
         {
@@ -1318,8 +1323,6 @@ public sealed class PdmWorkflowService(
             var optionalCurrentDrawing = allowCurrentVersionFallback
                 && !isRoot
                 && node.Kind == DocumentKind.Drawing;
-            if (!isRoot && node.DocumentId is Guid authorizedReferenceId)
-                await RequireDocumentAccessAsync(authorizedReferenceId, actor, role, FolderAccess.View, cancellationToken);
             if (node.Status == ReferenceNodeStatus.Missing)
             {
                 if (optionalCurrentDrawing)
@@ -1366,6 +1369,18 @@ public sealed class PdmWorkflowService(
                 referencedDocumentId = matches[0].Id;
             }
 
+            if (!isRoot && authorizedDocumentIds.Add(referencedDocumentId))
+            {
+                if (currentProjectDocumentsById.TryGetValue(referencedDocumentId, out var referencedDocument))
+                {
+                    RequireProjectDocumentAccess(referencedDocument, FolderAccess.View);
+                }
+                else
+                {
+                    await RequireDocumentAccessAsync(referencedDocumentId, actor, role, FolderAccess.View, cancellationToken);
+                }
+            }
+
             DocumentVersion? version;
             if (isRoot)
             {
@@ -1377,7 +1392,7 @@ public sealed class PdmWorkflowService(
             }
             else
             {
-                var versions = await repository.ListDocumentVersionsAsync(referencedDocumentId, cancellationToken);
+                var versions = await ListOpenVersionsAsync(referencedDocumentId);
                 if (node.Revision is null)
                 {
                     if (versionId.HasValue || releasedOnly)
@@ -1432,12 +1447,12 @@ public sealed class PdmWorkflowService(
 
                     var currentDocument = currentProjectDocuments.FirstOrDefault(document => document.Id == referencedDocumentId)
                         ?? throw new PdmNotFoundException($"引用文件{node.FileName}已不在当前项目中。");
-                    var currentVersions = await repository.ListDocumentVersionsAsync(referencedDocumentId, cancellationToken);
+                    var currentVersions = await ListOpenVersionsAsync(referencedDocumentId);
                     var currentVersion = currentVersions.FirstOrDefault(item =>
                             item.Revision.Display.Equals(currentDocument.Revision.Display, StringComparison.OrdinalIgnoreCase))
                         ?? currentVersions.FirstOrDefault()
                         ?? throw new PdmNotFoundException($"引用文件{node.FileName}尚无可用的最新受控版本。");
-                    await fileStorage.VerifyStoredFileAsync(
+                    await fileStorage.ValidateStoredFileMetadataAsync(
                         project,
                         new StoredFile(currentVersion.StorageRelativePath, currentVersion.FileLength, currentVersion.Sha256, currentVersion.CreatedAt),
                         cancellationToken);
@@ -1466,7 +1481,7 @@ public sealed class PdmWorkflowService(
                 throw new PdmRuleException($"项目中存在同名文件{fileName}，不能放入同一受控工作区。");
             }
 
-            await fileStorage.VerifyStoredFileAsync(
+            await fileStorage.ValidateStoredFileMetadataAsync(
                 project,
                 new StoredFile(version.StorageRelativePath, version.FileLength, version.Sha256, version.CreatedAt),
                 cancellationToken);
@@ -1487,19 +1502,21 @@ public sealed class PdmWorkflowService(
 
         if (allowCurrentVersionFallback)
         {
-            var currentDocumentsById = currentProjectDocuments.ToDictionary(document => document.Id);
             var drawingRelations = await repository.ListDocumentRelationsAsync(project.Id, cancellationToken);
             foreach (var relation in drawingRelations)
             {
                 if (!filesByDocument.ContainsKey(relation.ModelDocumentId)
                     || filesByDocument.ContainsKey(relation.DrawingDocumentId)
-                    || !currentDocumentsById.TryGetValue(relation.DrawingDocumentId, out var drawingDocument))
+                    || !currentProjectDocumentsById.TryGetValue(relation.DrawingDocumentId, out var drawingDocument))
                 {
                     continue;
                 }
 
-                await RequireDocumentAccessAsync(drawingDocument.Id, actor, role, FolderAccess.View, cancellationToken);
-                var drawingVersions = await repository.ListDocumentVersionsAsync(drawingDocument.Id, cancellationToken);
+                if (authorizedDocumentIds.Add(drawingDocument.Id))
+                {
+                    RequireProjectDocumentAccess(drawingDocument, FolderAccess.View);
+                }
+                var drawingVersions = await ListOpenVersionsAsync(drawingDocument.Id);
                 var drawingVersion = drawingVersions.FirstOrDefault(item =>
                         item.Revision.Display.Equals(drawingDocument.Revision.Display, StringComparison.OrdinalIgnoreCase))
                     ?? drawingVersions.FirstOrDefault();
@@ -1519,7 +1536,7 @@ public sealed class PdmWorkflowService(
                     throw new PdmRuleException($"项目中存在同名文件{drawingFileName}，不能放入同一受控工作区。");
                 }
 
-                await fileStorage.VerifyStoredFileAsync(
+                await fileStorage.ValidateStoredFileMetadataAsync(
                     project,
                     new StoredFile(drawingVersion.StorageRelativePath, drawingVersion.FileLength, drawingVersion.Sha256, drawingVersion.CreatedAt),
                     cancellationToken);
@@ -1650,6 +1667,7 @@ public sealed class PdmWorkflowService(
         var electrical = await repository.GetBomAsync(projectId, BomKind.Electrical, cancellationToken);
         var validationRules = (await repository.GetSystemSettingsAsync(cancellationToken)).ValidationRules;
         var legacyMode = legacyMechanical.Count > 0 && standard.Count == 0 && nonStandard.Count == 0;
+        if (!legacyMode) await EnsureStandardMaterialMasterReadyAsync(standard, cancellationToken);
         if (unclassified.Any(item => !item.IsManuallyExcluded))
             throw new PdmRuleException("源数据中仍有待分类或待确认物料，请处理完成后再创建发布包。");
         if ((!legacyMode && !BomReady(BomKind.Standard, standard, validationRules))
@@ -1749,6 +1767,7 @@ public sealed class PdmWorkflowService(
             targetItems = standard.Where(item => selectedIds.Contains(item.Id)).ToArray();
             if (targetItems.Length != selectedIds.Count) throw new PdmRuleException("长交期发布选择中包含已删除或不属于标准件BOM的物料。");
         }
+        if (targetKind == BomKind.Standard) await EnsureStandardMaterialMasterReadyAsync(targetItems, cancellationToken);
         await EnsureReleaseScopeAvailableAsync(projectId, scope, targetItems.Select(item => item.Id).ToArray(), cancellationToken);
         if (!BomReady(targetKind, targetItems, settings.ValidationRules))
             throw new PdmRuleException($"{BomKindLabel(targetKind)}BOM仍有资料不完整的物料，不能创建发布包。{MissingBomSummary(targetKind, targetItems, settings.ValidationRules)}");
@@ -1876,9 +1895,12 @@ public sealed class PdmWorkflowService(
         }
         var items = inputs.OrderBy(item => item.Sequence).Select(input =>
         {
+            var isExistingSource = existing.Any(item => item.SourceDocumentId.HasValue
+                && (input.Id == item.Id || SameBomSource(input.SourceDocumentId, input.SourceConfiguration, input.SourceInstancePath, item)));
             if (input.Sequence <= 0 || input.Quantity <= 0
                 || (kind == BomKind.Electrical && string.IsNullOrWhiteSpace(input.DrawingNumber))
-                || string.IsNullOrWhiteSpace(input.Name) || string.IsNullOrWhiteSpace(input.Unit)
+                || (string.IsNullOrWhiteSpace(input.Name) && (kind == BomKind.Electrical || !isExistingSource))
+                || string.IsNullOrWhiteSpace(input.Unit)
                 || string.IsNullOrWhiteSpace(input.Revision))
             {
                 throw new PdmRuleException(kind == BomKind.Electrical
@@ -1894,7 +1916,7 @@ public sealed class PdmWorkflowService(
             var material = NullIfWhiteSpace(input.Material);
             var specification = NullIfWhiteSpace(input.Specification);
             var candidate = new BomItem(
-                previous?.Id ?? Guid.NewGuid(), projectId, kind, input.Sequence, input.DrawingNumber.Trim(), input.Name.Trim(), input.Quantity,
+                previous?.Id ?? Guid.NewGuid(), projectId, kind, input.Sequence, input.DrawingNumber.Trim(), input.Name?.Trim() ?? string.Empty, input.Quantity,
                 U9UnitCatalog.NormalizeBomUnit(input.Unit), material, specification, input.Revision.Trim(),
                 false)
             {
@@ -3052,6 +3074,7 @@ public sealed class PdmWorkflowService(
             var nonStandard = (await repository.GetBomAsync(package.ProjectId, BomKind.NonStandard, cancellationToken)).Where(item => !item.IsManuallyExcluded).ToArray();
             var electrical = (await repository.GetBomAsync(package.ProjectId, BomKind.Electrical, cancellationToken)).Where(item => !item.IsManuallyExcluded).ToArray();
             var unclassified = await repository.GetBomAsync(package.ProjectId, BomKind.Unclassified, cancellationToken);
+            await EnsureStandardMaterialMasterReadyAsync(standard, cancellationToken);
             if (unclassified.Any(item => !item.IsManuallyExcluded)
                 || !BomReady(BomKind.Standard, standard, validationRules)
                 || !BomReady(BomKind.NonStandard, nonStandard, validationRules)
@@ -3074,6 +3097,7 @@ public sealed class PdmWorkflowService(
         }
         else if (package.Scope == ReleaseScope.StandardLongLead)
         {
+            await EnsureStandardMaterialMasterReadyAsync(package.StandardBomSnapshot, cancellationToken);
             if (!BomReady(BomKind.Standard, package.StandardBomSnapshot, validationRules))
                 throw new PdmRuleException("长交期标准件清单中仍有资料不完整的物料，不能提交审批。");
         }
@@ -3081,6 +3105,7 @@ public sealed class PdmWorkflowService(
         {
             var targetKind = ReleaseScopeBomKind(package.Scope);
             var targetItems = (await repository.GetBomAsync(package.ProjectId, targetKind, cancellationToken)).Where(item => !item.IsManuallyExcluded).ToArray();
+            if (targetKind == BomKind.Standard) await EnsureStandardMaterialMasterReadyAsync(targetItems, cancellationToken);
             if (!BomReady(targetKind, targetItems, validationRules))
                 throw new PdmRuleException($"{BomKindLabel(targetKind)}BOM仍有资料不完整的物料，不能提交审批。");
             if (targetKind != BomKind.Electrical && (await repository.GetBomAsync(package.ProjectId, BomKind.Unclassified, cancellationToken)).Any(item => !item.IsManuallyExcluded))
@@ -3360,7 +3385,7 @@ public sealed class PdmWorkflowService(
             var source = await SourceAsync(node.DocumentId);
             var properties = source?.Version?.PropertySnapshot;
             var currentDrawingNumber = source.HasValue
-                ? PropertyValue(properties, node.Configuration, settings.BomDrawingNumberProperty) ?? source.Value.Document.DrawingNumber
+                ? PropertyValue(properties, node.Configuration, settings.BomDrawingNumberProperty) ?? string.Empty
                 : parentDrawingNumber;
             var classificationProperty = BomPropertyMappingCatalog.SolidWorksProperty(settings, "kind", "物料分类");
             var classification = PropertyValue(properties, node.Configuration, classificationProperty);
@@ -3384,12 +3409,9 @@ public sealed class PdmWorkflowService(
                 var resolvedKind = preserveManualOverrides && hasManualClassification
                     ? previous!.Kind
                     : kind ?? BomKind.Unclassified;
-                var drawingNumber = currentDrawingNumber ?? document.DrawingNumber;
+                var drawingNumber = currentDrawingNumber ?? string.Empty;
                 var name = PropertyValue(properties, node.Configuration, settings.BomNameProperty)
-                    ?? PropertyValue(properties, node.Configuration, "零件名称")
-                    ?? PropertyValue(properties, node.Configuration, "NT")
-                    ?? PropertyValue(properties, node.Configuration, "名称")
-                    ?? DocumentDisplayNameResolver.Resolve(document.Name, drawingNumber, null, settings.BomNameProperty);
+                    ?? string.Empty;
                 var remark = PropertyValue(properties, node.Configuration, settings.BomDescriptionProperty);
                 var brand = PropertyValue(properties, node.Configuration, settings.BomBrandProperty);
                 var material = PropertyValue(properties, node.Configuration, settings.BomMaterialProperty);
@@ -3629,18 +3651,7 @@ public sealed class PdmWorkflowService(
         : $"legacy:{item.SourceDocumentId:N}:{(item.SourceConfiguration ?? string.Empty).Trim()}";
 
     private static string? PropertyValue(IReadOnlyDictionary<string, string?>? properties, string configuration, string propertyName)
-    {
-        if (properties is null || string.IsNullOrWhiteSpace(propertyName)) return null;
-        var names = new[]
-        {
-            $"配置:{configuration}/{propertyName.Trim()}",
-            $"全局/{propertyName.Trim()}",
-            propertyName.Trim()
-        };
-        foreach (var name in names)
-            if (properties.TryGetValue(name, out var value) && !string.IsNullOrWhiteSpace(value)) return value.Trim();
-        return null;
-    }
+        => CadPropertyCardSnapshot.Read(properties, configuration, propertyName);
 
     private static bool HasRequiredBomValues(BomItem item, BomKind kind, BomValidationRules validationRules) =>
         kind is BomKind.Standard or BomKind.NonStandard or BomKind.Electrical
@@ -3749,6 +3760,32 @@ public sealed class PdmWorkflowService(
         if (included.Any(item => item.IsPendingRemoval || item.IsPendingClassification || item.IsManualUnmatched)) return false;
         if (active.Any(item => item.PropertyWritebackStatus is CadPropertyWritebackStatus.PendingSave or CadPropertyWritebackStatus.Pending or CadPropertyWritebackStatus.InProgress or CadPropertyWritebackStatus.Conflict or CadPropertyWritebackStatus.Failed)) return false;
         return active.Length == 0 || active.All(item => HasRequiredBomValues(item, kind, validationRules));
+    }
+
+    private async Task EnsureStandardMaterialMasterReadyAsync(IReadOnlyList<BomItem> items, CancellationToken cancellationToken)
+    {
+        if (materialRepository is null) return;
+        var targets = items.Where(item => item.Kind == BomKind.Standard
+                && item.SourceDocumentId.HasValue
+                && !item.IsManuallyExcluded
+                && !item.IsPendingRemoval)
+            .ToArray();
+        if (targets.Length == 0) return;
+        var byCode = (await materialRepository.FindMaterialsByCodesAsync(
+                targets.Select(item => item.DrawingNumber).ToArray(), cancellationToken))
+            .ToDictionary(material => material.MaterialCode, StringComparer.OrdinalIgnoreCase);
+        var invalid = targets.Select(item =>
+            {
+                byCode.TryGetValue(item.DrawingNumber.Trim(), out var material);
+                return (Item: item, Issues: MaterialService.StandardBomMaterialMasterIssues(item, material));
+            })
+            .Where(result => result.Issues.Count > 0)
+            .ToArray();
+        if (invalid.Length == 0) return;
+        var detail = string.Join("；", invalid.Take(12).Select(result =>
+            $"{(string.IsNullOrWhiteSpace(result.Item.DrawingNumber) ? result.Item.Name : result.Item.DrawingNumber)}（{string.Join('、', result.Issues)}）"));
+        if (invalid.Length > 12) detail += $"等{invalid.Length}项";
+        throw new PdmRuleException($"图纸上传的标准件料号尚未通过料品主档型号、品牌校验，需人工维护：{detail}。");
     }
 
     private static string? MissingBomSummary(BomKind kind, IReadOnlyList<BomItem> items, BomValidationRules validationRules)

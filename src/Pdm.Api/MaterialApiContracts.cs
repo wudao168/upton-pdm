@@ -61,6 +61,8 @@ public sealed record U9MaterialSampleRequest(
     IReadOnlyList<string>? CategoryCodes,
     int LimitPerCategory = 10);
 
+public sealed record CreateMaterialSyncBatchRequest(IReadOnlyList<Guid> TaskIds);
+
 public sealed record LinkBomMaterialRequest(Guid ProjectId, Guid BomItemId, Guid MaterialId);
 
 public sealed record ResolveMaterialCodesRequest(Guid ProjectId, IReadOnlyList<Guid> BomItemIds);

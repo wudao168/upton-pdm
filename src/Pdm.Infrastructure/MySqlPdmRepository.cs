@@ -565,10 +565,10 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
                 SELECT id,file_name,source_fingerprint_sha256
                 FROM document
                 WHERE project_id=@ProjectId
-                  AND (file_name=@FileName OR source_fingerprint_sha256=@SourceSha256)
+                  AND file_name=@FileName
                 FOR UPDATE
                 """,
-                new { command.ProjectId, command.FileName, command.SourceSha256 },
+                new { command.ProjectId, command.FileName },
                 transaction,
                 cancellationToken: cancellationToken))).ToArray();
             var sameName = matches.FirstOrDefault(item => string.Equals(item.FileName, command.FileName, StringComparison.OrdinalIgnoreCase));
@@ -576,14 +576,6 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
                 && !string.Equals(sameName.SourceFingerprintSha256, command.SourceSha256, StringComparison.OrdinalIgnoreCase))
             {
                 throw new PdmConflictException($"项目中已存在同名但内容不同的图档{command.FileName}，不能覆盖或自动升版。");
-            }
-
-            var sameContent = matches.FirstOrDefault(item =>
-                !string.Equals(item.FileName, command.FileName, StringComparison.OrdinalIgnoreCase)
-                && string.Equals(item.SourceFingerprintSha256, command.SourceSha256, StringComparison.OrdinalIgnoreCase));
-            if (sameContent is not null && !command.AllowDuplicateContent)
-            {
-                throw new PdmConflictException($"项目中已有内容完全相同的图档{sameContent.FileName}。请选择引用已有图档，或确认独立登记并填写原因。");
             }
         }
 
@@ -1263,7 +1255,7 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
     {
         CanAssignExecutionUnit = project.ParentProjectId is null,
         CanManageMainStaffing = project.ParentProjectId is null && project.ExecutionUnitId is not null,
-        CanAssignDesigners = project.ParentProjectId is not null,
+        CanAssignDesigners = project.ExecutionUnitId is not null,
         CanReadContent = true,
         CanSubmitArchive = true
     };
@@ -1274,19 +1266,41 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
             "SELECT unit_id FROM organization_unit_manager WHERE username=@Actor", new { Actor = actor }, cancellationToken: cancellationToken))).ToHashSet();
         var primaryCompanyId = await connection.ExecuteScalarAsync<Guid?>(new CommandDefinition(
             "SELECT company_id FROM pdm_user WHERE username=@Actor LIMIT 1", new { Actor = actor }, cancellationToken: cancellationToken));
+        var actorRoleCodes = string.Equals(TenantContext.Current?.Username, actor, StringComparison.OrdinalIgnoreCase)
+            ? TenantContext.Current!.EffectiveRoleCodes
+            : (await connection.QueryAsync<string>(new CommandDefinition(
+                "SELECT assignment.role_code FROM pdm_user user_account INNER JOIN pdm_user_role assignment ON assignment.user_id=user_account.id WHERE user_account.username=@Actor ORDER BY assignment.is_primary DESC,assignment.created_at,assignment.role_code",
+                new { Actor = actor }, cancellationToken: cancellationToken))).ToArray();
+        var actorMembershipUnitIds = (await connection.QueryAsync<Guid>(new CommandDefinition(
+            "SELECT unit_id FROM organization_membership WHERE username=@Actor", new { Actor = actor }, cancellationToken: cancellationToken))).ToArray();
+        var organizationUnits = (await connection.QueryAsync<OrganizationUnitRow>(new CommandDefinition(
+            "SELECT id,organization_id,parent_unit_id,code,name,kind,is_active,sort_order,can_manufacture CanManufacture FROM organization_unit WHERE is_active=1",
+            cancellationToken: cancellationToken))).Select(MapOrganizationUnit).ToArray();
+        bool IsActorWithin(Guid divisionId) => actorMembershipUnitIds.Any(unitId =>
+        {
+            var current = organizationUnits.FirstOrDefault(unit => unit.Id == unitId);
+            while (current is not null)
+            {
+                if (current.Id == divisionId) return true;
+                current = current.ParentUnitId is Guid parentId ? organizationUnits.FirstOrDefault(unit => unit.Id == parentId) : null;
+            }
+            return false;
+        });
         return projects.Select(project =>
         {
             var canReadContent = permissions.Contains(PermissionCodes.ProjectContentView);
             var belongsToProjectStaffing = string.Equals(project.PrimaryProjectManager, actor, StringComparison.OrdinalIgnoreCase)
-                || project.CollaborativeProjectManagers.Contains(actor, StringComparer.OrdinalIgnoreCase)
                 || project.DesignLeads.Contains(actor, StringComparer.OrdinalIgnoreCase)
                 || string.Equals(project.DesignLead, actor, StringComparison.OrdinalIgnoreCase);
             var managesExecutionUnit = project.ExecutionUnitId is Guid executionUnitId && managedUnitIds.Contains(executionUnitId);
+            var isMechanicalSupervisor = project.ExecutionUnitId is Guid supervisorUnitId
+                && actorRoleCodes.Contains("MechanicalManager", StringComparer.OrdinalIgnoreCase)
+                && IsActorWithin(supervisorUnitId);
             return project with
             {
                 CanAssignExecutionUnit = permissions.Contains(PermissionCodes.ProjectExecutionAssign) && project.ParentProjectId is null && project.OrganizationId == primaryCompanyId,
                 CanManageMainStaffing = permissions.Contains(PermissionCodes.ProjectStaffingManage) && project.ParentProjectId is null && project.ExecutionUnitId is not null && managedUnitIds.Contains(project.ExecutionUnitId.Value),
-                CanAssignDesigners = permissions.Contains(PermissionCodes.ProjectDesignerAssign) && project.ParentProjectId is not null && (managesExecutionUnit || belongsToProjectStaffing),
+                CanAssignDesigners = permissions.Contains(PermissionCodes.ProjectDesignerAssign) && project.ExecutionUnitId is not null && (managesExecutionUnit || isMechanicalSupervisor || belongsToProjectStaffing),
                 CanReadContent = canReadContent,
                 CanSubmitArchive = canReadContent
                     && permissions.Contains(PermissionCodes.DocumentEdit)

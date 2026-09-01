@@ -138,12 +138,17 @@ builder.Services.AddScoped<ProgramTemplateService>();
 builder.Services.AddScoped<ProjectFileService>();
 builder.Services.AddScoped<BomHeaderService>();
 builder.Services.AddScoped<U9MaterialIntegrationService>();
+builder.Services.AddScoped<U9MaterialFullSyncService>();
 builder.Services.AddScoped<U9BomQueryService>();
 builder.Services.AddScoped<U9BomWriteService>();
 builder.Services.AddScoped<ProjectBomU9SyncService>();
 builder.Services.AddScoped<ApprovalU9AutomationService>();
+builder.Services.AddScoped<MaterialCodeSynchronizationService>();
+builder.Services.AddScoped<MaterialSyncBatchService>();
 builder.Services.AddHostedService<PdmBootstrapHostedService>();
 builder.Services.AddHostedService<CrmCustomerSyncHostedService>();
+builder.Services.AddHostedService<MaterialU9SyncHostedService>();
+builder.Services.AddHostedService<MaterialU9SyncBatchHostedService>();
 builder.Services.AddHostedService<ProjectFileRecycleCleanupService>();
 
 builder.Services.AddCors(options => options.AddPolicy("PdmClients", policy => policy

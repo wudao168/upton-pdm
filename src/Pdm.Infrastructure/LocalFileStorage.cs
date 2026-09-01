@@ -174,7 +174,27 @@ public sealed class LocalFileStorage(IOptions<PdmStorageOptions> options, IPdmRe
         }
     }
 
+    public Task ValidateStoredFileMetadataAsync(Project project, StoredFile file, CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        _ = ValidateStoredFileMetadata(project, file);
+        return Task.CompletedTask;
+    }
+
     public async Task VerifyStoredFileAsync(Project project, StoredFile file, CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        var path = ValidateStoredFileMetadata(project, file);
+
+        await using var input = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, 256 * 1024, FileOptions.Asynchronous | FileOptions.SequentialScan);
+        var actual = Convert.ToHexString(await SHA256.HashDataAsync(input, cancellationToken));
+        if (!string.Equals(actual, file.Sha256, StringComparison.OrdinalIgnoreCase))
+        {
+            throw new PdmConflictException("待存档文件SHA-256校验失败。");
+        }
+    }
+
+    private static string ValidateStoredFileMetadata(Project project, StoredFile file)
     {
         var relativeSegments = file.RelativePath.Split(new[] { Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar }, StringSplitOptions.RemoveEmptyEntries);
         if (relativeSegments.Length == 0 || !string.Equals(relativeSegments[0], ".versions", StringComparison.OrdinalIgnoreCase))
@@ -198,13 +218,7 @@ public sealed class LocalFileStorage(IOptions<PdmStorageOptions> options, IPdmRe
         {
             throw new PdmConflictException("历史版本文件不是只读文件，不能写入版本记录。");
         }
-
-        await using var input = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, 256 * 1024, FileOptions.Asynchronous | FileOptions.SequentialScan);
-        var actual = Convert.ToHexString(await SHA256.HashDataAsync(input, cancellationToken));
-        if (!string.Equals(actual, file.Sha256, StringComparison.OrdinalIgnoreCase))
-        {
-            throw new PdmConflictException("待存档文件SHA-256校验失败。");
-        }
+        return path;
     }
 
     public async Task<StoredFile> CopyVersionAsync(Project project, StoredFile source, string relativeTargetPath, CancellationToken cancellationToken)

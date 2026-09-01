@@ -5,6 +5,22 @@ namespace Pdm.Domain.Tests;
 public sealed class MigrationResourceTests
 {
     [Fact]
+    public async Task ExecutionEngineerRoleMigration_GrantsCentralPermissionToDesignAndMechanicalRoles()
+    {
+        var assembly = typeof(MySqlMigrationRunner).Assembly;
+        var resourceName = assembly.GetManifestResourceNames()
+            .Single(name => name.EndsWith(".Migrations.078_execution_engineer_assignment_roles.sql", StringComparison.Ordinal));
+
+        await using var stream = assembly.GetManifestResourceStream(resourceName);
+        Assert.NotNull(stream);
+        using var reader = new StreamReader(stream!);
+        var sql = await reader.ReadToEndAsync();
+
+        Assert.Contains("project.designer.assign", sql, StringComparison.Ordinal);
+        Assert.Contains("'Engineer','MechanicalManager'", sql, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task AuthenticationSchemaRepairMigration_IsEmbeddedAndRepairsTokenVersion()
     {
         var assembly = typeof(MySqlMigrationRunner).Assembly;
@@ -278,5 +294,39 @@ public sealed class MigrationResourceTests
         Assert.Contains("pdm_kind='Product'", sql, StringComparison.Ordinal);
         Assert.Contains("allow_create=1", sql, StringComparison.Ordinal);
         Assert.Contains("category_code='0201'", sql, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task U9MaterialFullSyncMigration_PersistsProgressAndCategoryResults()
+    {
+        var assembly = typeof(MySqlMigrationRunner).Assembly;
+        var resourceName = assembly.GetManifestResourceNames()
+            .Single(name => name.EndsWith(".Migrations.080_u9_material_full_sync_runs.sql", StringComparison.Ordinal));
+
+        await using var stream = assembly.GetManifestResourceStream(resourceName);
+        Assert.NotNull(stream);
+        using var reader = new StreamReader(stream!);
+        var sql = await reader.ReadToEndAsync();
+
+        Assert.Contains("CREATE TABLE u9_material_full_sync_run", sql, StringComparison.Ordinal);
+        Assert.Contains("category_results_json", sql, StringComparison.Ordinal);
+        Assert.Contains("completed_category_count", sql, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task U9MaterialSyncBatchMigration_PersistsOrderedDurableQueue()
+    {
+        var assembly = typeof(MySqlMigrationRunner).Assembly;
+        var resourceName = assembly.GetManifestResourceNames()
+            .Single(name => name.EndsWith(".Migrations.081_u9_material_sync_batches.sql", StringComparison.Ordinal));
+
+        await using var stream = assembly.GetManifestResourceStream(resourceName);
+        Assert.NotNull(stream);
+        using var reader = new StreamReader(stream!);
+        var sql = await reader.ReadToEndAsync();
+
+        Assert.Contains("CREATE TABLE u9_material_sync_batch", sql, StringComparison.Ordinal);
+        Assert.Contains("ordinal_no INT NOT NULL", sql, StringComparison.Ordinal);
+        Assert.Contains("lease_expires_at", sql, StringComparison.Ordinal);
     }
 }

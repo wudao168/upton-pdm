@@ -92,6 +92,16 @@ public static class U9MaterialPayloadFactory
             }
         }, JsonOptions);
 
+    public static string QueryPayload(IReadOnlyList<string> materialCodes, string correlationId) =>
+        JsonSerializer.Serialize(materialCodes
+            .Where(code => !string.IsNullOrWhiteSpace(code))
+            .Select((code, index) => new Dictionary<string, object?>
+            {
+                ["ItemMaster"] = Archive(code.Trim()),
+                ["OtherID"] = $"{correlationId}-{index + 1}"
+            })
+            .ToArray(), JsonOptions);
+
     public static string DeletePayload(PdmMaterial material, U9ItemReference item, string correlationId)
     {
         var data = new Dictionary<string, object?>

@@ -39,7 +39,6 @@ const rootProject = computed(() => {
   return props.projects.find(item => item.id === activeProject.value.parentProjectId) ?? activeProject.value
 })
 
-const familyProjects = computed(() => props.projects.filter(item => item.id === rootProject.value.id || item.parentProjectId === rootProject.value.id))
 const staffingDialogOpen = ref(false)
 const designerDialogOpen = ref(false)
 const staffingForm = reactive<MainProjectStaffingInput>({ primaryProjectManager: '', collaborativeProjectManagers: [], designLeads: [] })
@@ -135,8 +134,8 @@ async function saveDesigners() {
   try {
     await props.onUpdateDesigners(activeProject.value.id, [...designerDraft.value])
     designerDialogOpen.value = false
-    ElMessage.success(designerDraft.value.length ? '子项目工程师已保存' : '子项目工程师已清空')
-  } catch (error) { ElMessage.error(error instanceof Error ? error.message : '子项目工程师保存失败') }
+    ElMessage.success(designerDraft.value.length ? '执行工程师已保存' : '执行工程师已清空')
+  } catch (error) { ElMessage.error(error instanceof Error ? error.message : '执行工程师保存失败') }
 }
 
 function assignedPeople(usernames: Array<string | undefined>) {
@@ -151,7 +150,7 @@ const staffingRows = computed(() => [
   { key: 'manager', stage: '项目管理', role: activeProject.value.parentProjectId ? '子项目负责人' : '项目经理', people: assignedPeople([activeProject.value.primaryProjectManager ?? rootProject.value.primaryProjectManager]) },
   { key: 'collaborative-managers', stage: '项目管理', role: '协同项目经理', people: assignedPeople(rootProject.value.collaborativeProjectManagers) },
   { key: 'design-lead', stage: '设计阶段', role: '主设', people: assignedPeople(projectDesignLeads(rootProject.value)) },
-  { key: 'engineers', stage: '设计执行', role: activeProject.value.parentProjectId ? '本子项目工程师' : '工程师', people: assignedPeople(activeProject.value.parentProjectId ? activeProject.value.designers : familyProjects.value.flatMap(item => item.designers)) },
+  { key: 'engineers', stage: '设计执行', role: '执行工程师', people: assignedPeople(activeProject.value.designers) },
   { key: 'downstream', stage: '后续阶段', role: '各部门负责人', people: [] },
 ])
 
@@ -259,7 +258,7 @@ const materialApplicationSummary = computed(() => {
             <small>按项目阶段展示当前负责人</small>
             <span class="pdm-project-people__actions">
               <button v-if="rootProject.canManageMainStaffing" type="button" class="pdm-text-action" @click="openStaffingDialog">配置主项目分工</button>
-              <button v-if="activeProject.parentProjectId && activeProject.canAssignDesigners" type="button" class="pdm-text-action" @click="openDesignerDialog">配置本子项目工程师</button>
+              <button v-if="activeProject.canAssignDesigners" type="button" class="pdm-text-action" @click="openDesignerDialog">配置当前项目执行工程师</button>
             </span>
           </header>
           <div class="pdm-project-people__layout">
@@ -305,10 +304,10 @@ const materialApplicationSummary = computed(() => {
       <template #footer><el-button @click="staffingDialogOpen=false">取消</el-button><el-button type="primary" :loading="pending" @click="saveMainStaffing">保存分工</el-button></template>
     </el-dialog>
 
-    <el-dialog v-model="designerDialogOpen" :title="`配置子项目工程师 · ${project.code}`" width="500px" append-to-body>
+    <el-dialog v-model="designerDialogOpen" :title="`配置执行工程师 · ${project.code}`" width="500px" append-to-body>
       <label class="pdm-dialog-field">工程师（可多选）<el-select v-model="designerDraft" class="pdm-project-person-select" multiple filterable placeholder="输入姓名筛选" style="width:100%"><el-option-group label="本事业部（优先）"><el-option v-for="user in designerCandidates.filter(item => item.ownDivision)" :key="user.username" :label="user.displayName" :value="user.username" /></el-option-group><el-option-group label="其他事业部"><el-option v-for="user in designerCandidates.filter(item => !item.ownDivision)" :key="user.username" :label="`${user.displayName} · ${user.divisionName}`" :value="user.username" /></el-option-group></el-select></label>
       <p v-if="hasCrossDivisionSelection" class="pdm-dialog-note is-warning">已选择其他事业部人员，请确认跨事业部协作安排。</p>
-      <p class="pdm-dialog-note">工程师可保持为空；由具备“分配子项目工程师”权限且与项目有关联的人员配置。</p>
+      <p class="pdm-dialog-note">工程师可保持为空；由具备“分配执行工程师”权限的事业部负责人、机械主管、当前项目经理或主设配置。</p>
       <template #footer><el-button @click="designerDialogOpen=false">取消</el-button><el-button type="primary" :loading="pending" @click="saveDesigners">保存工程师</el-button></template>
     </el-dialog>
   </section>

@@ -1,8 +1,22 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { listProjects, loadProjectDocumentWorkspace, loadProjectWorkspace, saveOrganizationUnit } from '../src/api'
+import { getBomSourceData, listProjects, loadProjectDocumentWorkspace, loadProjectWorkspace, saveOrganizationUnit } from '../src/api'
 
 describe('PLM API client', () => {
   afterEach(() => vi.unstubAllGlobals())
+
+  it.each([
+    [1, 'Electrical'], [2, 'Standard'], [3, 'NonStandard'], [4, 'Unclassified'], [5, 'Virtual'],
+    ['Electrical', 'Electrical'], ['Standard', 'Standard'], ['NonStandard', 'NonStandard'], ['Unclassified', 'Unclassified'], ['Virtual', 'Virtual'],
+    [undefined, undefined], [0, undefined],
+  ])('preserves BOM source classification %s as %s', async (kind, expected) => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify([{
+      id: 'source-1', kind, sequence: 1, drawingNumber: 'PART', name: '零件', quantity: 1,
+      unit: '个', revision: 'W1', source: 'Auto', isComplete: false, isPendingClassification: false,
+    }]), { status: 200, headers: { 'Content-Type': 'application/json' } })))
+
+    const items = await getBomSourceData('project-1', 'token')
+    expect(items[0]).toMatchObject({ kind: expected, pendingClassification: false, source: 'Auto' })
+  })
 
   it('serializes a company-level department with the numeric API enum and null parent', async () => {
     const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({

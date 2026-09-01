@@ -455,6 +455,7 @@ public interface IPdmRepository
     Task<bool> HasDocumentReadAccessAsync(Guid documentId, string actor, UserRole role, CancellationToken cancellationToken);
     Task<bool> HasDocumentAccessAsync(Guid documentId, string actor, UserRole role, FolderAccess requiredAccess, CancellationToken cancellationToken);
     Task<IReadOnlyList<DocumentVersion>> ListDocumentVersionsAsync(Guid documentId, CancellationToken cancellationToken);
+    Task<IReadOnlyList<DocumentVersion>> ListProjectDocumentVersionsAsync(Guid projectId, CancellationToken cancellationToken);
     Task<DocumentVersion?> FindDocumentVersionAsync(Guid documentId, Guid versionId, CancellationToken cancellationToken);
     Task<DocumentReferenceNode?> GetReferenceTreeAsync(Guid projectId, CancellationToken cancellationToken);
     Task<CadReferenceSnapshot?> GetLatestReferenceSnapshotAsync(Guid projectId, CancellationToken cancellationToken);
@@ -549,6 +550,8 @@ public interface IFileStorage
     Task<StoredFile> CompleteUploadAsync(Guid sessionId, string relativeTargetPath, CancellationToken cancellationToken);
     Task<Stream> OpenReadAsync(string absolutePath, CancellationToken cancellationToken);
     Task<bool> IsAvailableAsync(string location, CancellationToken cancellationToken);
+    Task ValidateStoredFileMetadataAsync(Project project, StoredFile file, CancellationToken cancellationToken) =>
+        VerifyStoredFileAsync(project, file, cancellationToken);
     Task VerifyStoredFileAsync(Project project, StoredFile file, CancellationToken cancellationToken);
     Task<StoredFile> CopyVersionAsync(Project project, StoredFile source, string relativeTargetPath, CancellationToken cancellationToken);
 }
@@ -585,7 +588,13 @@ public interface ITokenIssuer
     string Issue(UserAccount account, TimeSpan lifetime);
 }
 
-public sealed class PdmRuleException(string message) : InvalidOperationException(message);
+public class PdmRuleException(string message) : InvalidOperationException(message);
+
+public sealed class U9MaterialCodeConflictException(string materialCode)
+    : PdmRuleException($"U9C已存在料号 {materialCode}，需要按最新分类流水重新分配。")
+{
+    public string MaterialCode { get; } = materialCode;
+}
 
 public sealed class PdmNotFoundException(string message) : KeyNotFoundException(message);
 

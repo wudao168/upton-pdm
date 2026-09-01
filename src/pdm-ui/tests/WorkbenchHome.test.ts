@@ -16,7 +16,7 @@ const project = {
   primaryProjectManager: 'manager',
   collaborativeProjectManagers: ['coordinator'],
   designLead: 'lead',
-  designers: [],
+  designers: ['engineer'],
   vaultLocation: 'D:\\PDM\\Vault\\P700001',
   releaseLocation: 'D:\\PDM\\Release\\P700001',
   quantity: 1,
@@ -139,15 +139,16 @@ describe('WorkbenchHome', () => {
     expect(wrapper.get('[aria-label="项目阶段负责人"]').text()).toContain('工程师丁')
     expect(wrapper.get('[aria-label="客户联络人"]').text()).toContain('宁波均普智能制造有限公司')
     expect(wrapper.get('[aria-label="客户联络人"]').text()).toContain('待维护')
-    expect(wrapper.get('[aria-label="人员组织结构"] button').text()).toBe('配置主项目分工')
+    expect(wrapper.get('[aria-label="人员组织结构"]').text()).toContain('配置主项目分工')
+    expect(wrapper.get('[aria-label="人员组织结构"]').text()).toContain('配置当前项目执行工程师')
 
     await wrapper.setProps({ projects: [{ ...project, collaborativeProjectManagers: [] }, childProject] })
     const collaborativeManager = wrapper.findAll('.pdm-project-staffing-row').find(row => row.text().includes('协同项目经理'))
     expect(collaborativeManager?.text()).toContain('无')
 
     await wrapper.setProps({ project: { ...childProject, canAssignDesigners: false } })
-    expect(wrapper.get('[aria-label="项目阶段负责人"]').text()).toContain('本子项目工程师')
-    expect(wrapper.get('[aria-label="人员组织结构"]').text()).toContain('配置本子项目工程师')
+    expect(wrapper.get('[aria-label="项目阶段负责人"]').text()).toContain('执行工程师')
+    expect(wrapper.get('[aria-label="人员组织结构"]').text()).toContain('配置当前项目执行工程师')
 
     await wrapper.get('button[aria-label="进入项目图档"]').trigger('click')
     await wrapper.get('button[aria-label="进入BOM数据"]').trigger('click')

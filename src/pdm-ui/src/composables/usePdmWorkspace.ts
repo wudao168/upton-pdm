@@ -10,6 +10,8 @@ import type { AddDrawingReviewMarkupInput, DrawingReviewCandidate, DrawingReview
 
 const sessionKey = 'upton-pdm-session'
 const fallbackBomPropertyMappings: PdmSystemSettings['bomPropertyMappings'] = [
+  { pdmPropertyKey: 'projectNumber', pdmPropertyName: '项目号', solidWorksProperty: '项目号', source: 'Pdm', mappingEditable: true },
+  { pdmPropertyKey: 'projectName', pdmPropertyName: '项目名称', solidWorksProperty: '项目名称', source: 'Pdm', mappingEditable: true },
   { pdmPropertyKey: 'kind', pdmPropertyName: '物料分类', solidWorksProperty: '物料分类', source: 'SolidWorks', mappingEditable: true },
   { pdmPropertyKey: 'wearPart', pdmPropertyName: '易损件', solidWorksProperty: '易损件', source: 'SolidWorks', mappingEditable: true },
   { pdmPropertyKey: 'unit', pdmPropertyName: '单位', solidWorksProperty: '单位', source: 'SolidWorks', mappingEditable: true },
@@ -192,6 +194,21 @@ function countUniqueIssues(root: DocumentNode) {
   return keys.size
 }
 
+export function countUniqueDocumentKinds(root: DocumentNode, additionalNodes: DocumentNode[] = []) {
+  const documents = new Map<string, DocumentNode['kind']>()
+  const visit = (node: DocumentNode) => {
+    const fallbackName = node.fileName.trim().toLocaleLowerCase('zh-CN')
+    const key = node.documentId || (fallbackName ? `file:${fallbackName}` : '')
+    if (key && !documents.has(key)) documents.set(key, node.kind)
+    node.children.forEach(visit)
+  }
+  visit(root)
+  additionalNodes.forEach(visit)
+  const drawing = [...documents.values()].filter(kind => kind === 'Drawing').length
+  const model = documents.size - drawing
+  return { all: documents.size, model, drawing }
+}
+
 function messageFrom(error: unknown): string {
   return error instanceof Error ? error.message : 'PLM数据加载失败。'
 }
@@ -289,6 +306,7 @@ export function usePdmWorkspace() {
   let persistentSession: AuthSession | null = null
   let sessionRenewal: Promise<boolean> | null = null
   let projectDocumentRefreshPending = false
+  let reloadRequestSequence = 0
 
   const managedDocumentNodes = computed(() => managedDocuments.value.map(managedDocumentNode))
   const currentProjectManagedDocuments = computed(() => managedDocuments.value.filter(document => document.projectId === project.value.id))
@@ -313,18 +331,7 @@ export function usePdmWorkspace() {
   const filteredDrawings = computed(() => drawingNodes.value.filter(node => matchesQuery(node, searchQuery.value)))
   const documentFilterCounts = computed(() => {
     const unresolvedIssues = countUniqueIssues(root.value)
-    const model = currentProjectManagedDocuments.value.filter(document => document.kind !== 'Drawing').length
-    const drawing = currentProjectManagedDocuments.value.filter(document => document.kind === 'Drawing').length
-    const unregistered = (() => {
-      const keys = new Set<string>()
-      const visit = (node: DocumentNode) => {
-        if (isIssue(node) && !node.documentId) keys.add(node.id)
-        node.children.forEach(visit)
-      }
-      visit(root.value)
-      return keys.size
-    })()
-    return { all: model + drawing + unregistered, model, drawing, issue: unresolvedIssues }
+    return { ...countUniqueDocumentKinds(root.value, drawingNodes.value), issue: unresolvedIssues }
   })
   const relatedNodes = computed(() => {
     const documentId = selectedNode.value.documentId
@@ -980,6 +987,8 @@ export function usePdmWorkspace() {
   }
 
   function clearSession() {
+    reloadRequestSequence += 1
+    loading.value = false
     accessToken = ''
     postDesktopMessage('session-clear')
     authenticated.value = false
@@ -1068,6 +1077,7 @@ export function usePdmWorkspace() {
 
   async function reload(projectId?: string) {
     if (!accessToken) return
+    const requestSequence = ++reloadRequestSequence
     loading.value = true
     loadError.value = ''
     try {
@@ -1088,6 +1098,7 @@ export function usePdmWorkspace() {
           return defaultSystemSettings.validationRules
         })),
       ])
+      if (requestSequence !== reloadRequestSequence) return
       projects.value = loadedProjects
       projectNumberingOptions.value = loadedOptions
       customers.value = loadedCustomers
@@ -1103,6 +1114,7 @@ export function usePdmWorkspace() {
       systemSettings.value = { ...systemSettings.value, validationRules: loadedValidationRules }
       if (hasPermission('settings.storage.manage')) {
         const [loadedSettings, loadedEquipmentTypes] = await Promise.all([getSystemSettings(accessToken), listEquipmentTypes(accessToken)])
+        if (requestSequence !== reloadRequestSequence) return
         const mergedSettings = { ...systemSettings.value, ...loadedSettings }
         systemSettings.value = {
           ...systemSettings.value,
@@ -1112,11 +1124,17 @@ export function usePdmWorkspace() {
         }
         equipmentTypes.value = loadedEquipmentTypes
       } else equipmentTypes.value = []
-      crmIntegrationSettings.value = hasPermission('settings.customer.manage')
+      const loadedCrmIntegrationSettings = hasPermission('settings.customer.manage')
         ? await getCrmIntegrationSettings(accessToken)
         : { ...defaultCrmIntegrationSettings }
-      folderTemplate.value = hasPermission('settings.folder.manage') ? await listFolderTemplate(accessToken) : []
-      rolePermissionDirectory.value = hasPermission('system.role.view') ? await getRolePermissionDirectory(accessToken) : { permissions: [], roles: [] }
+      if (requestSequence !== reloadRequestSequence) return
+      crmIntegrationSettings.value = loadedCrmIntegrationSettings
+      const loadedFolderTemplate = hasPermission('settings.folder.manage') ? await listFolderTemplate(accessToken) : []
+      if (requestSequence !== reloadRequestSequence) return
+      folderTemplate.value = loadedFolderTemplate
+      const loadedRolePermissionDirectory = hasPermission('system.role.view') ? await getRolePermissionDirectory(accessToken) : { permissions: [], roles: [] }
+      if (requestSequence !== reloadRequestSequence) return
+      rolePermissionDirectory.value = loadedRolePermissionDirectory
       const selectedProject = projects.value.find(candidate => candidate.id === projectId)
         ?? (project.value.id ? projects.value.find(candidate => candidate.id === project.value.id) : undefined)
       if (!selectedProject) {
@@ -1128,6 +1146,7 @@ export function usePdmWorkspace() {
 
       const previousSelectedId = selectedProject.id === project.value.id ? selectedId.value : ''
       const data = await loadProjectWorkspace(selectedProject.id, accessToken)
+      if (requestSequence !== reloadRequestSequence) return
       project.value = data.project
       projectFolders.value = data.folders
       managedDocuments.value = data.documents
@@ -1158,6 +1177,7 @@ export function usePdmWorkspace() {
         await openVersionDrawer(request.leftVersionId, request.rightVersionId)
       }
     } catch (error) {
+      if (requestSequence !== reloadRequestSequence) return
       ready.value = false
       if (error instanceof PdmApiError && error.status === 401) {
         clearSession()
@@ -1166,7 +1186,7 @@ export function usePdmWorkspace() {
         loadError.value = messageFrom(error)
       }
     } finally {
-      loading.value = false
+      if (requestSequence === reloadRequestSequence) loading.value = false
     }
   }
 

@@ -483,7 +483,7 @@ describe('PLM client workspace', () => {
     expect(restoredHome.get('.pdm-sidebar__nav .pdm-nav-item.is-active').text()).toContain('项目中心')
     expect(restoredHome.find('.pdm-project-workspace').exists()).toBe(true)
     expect(restoredHome.get('.pdm-project-tabs button.is-active').text()).toBe('概览')
-    expect(JSON.parse(window.localStorage.getItem('upton-pdm-project-center') ?? '{}')).toEqual({ projectId, tab: 'overview' })
+    expect(JSON.parse(window.localStorage.getItem('upton-pdm-project-center') ?? '{}')).toMatchObject({ projectId, tab: 'overview', username: 'engineer' })
     expect(window.localStorage.getItem('upton-pdm-active-navigation')).toBe('project-center')
 
     restoredHome.unmount()
@@ -494,10 +494,53 @@ describe('PLM client workspace', () => {
     restored.unmount()
   })
 
+  it('keeps the selected child project when an older focus refresh finishes later', async () => {
+    const child = {
+      id: 'project-child',
+      code: 'PRJ-REAL-001-1',
+      name: '泵组单元',
+      parentProjectId: projectId,
+      childSequence: 1,
+      owner: 'engineer',
+      responsibleUsers: ['engineer'],
+      vaultLocation: 'D:\\PDM\\PRJ-REAL-001-1',
+      releaseLocation: 'D:\\Release\\PRJ-REAL-001-1',
+      isActive: true,
+      quantity: 1,
+      serialNumbers: [],
+    }
+    installApiMock([child])
+    const wrapper = mount(App, { attachTo: document.body, global: { plugins: [ElementPlus] } })
+    await login(wrapper)
+
+    const originalFetch = vi.mocked(fetch)
+    let releaseStaleRequest!: () => void
+    const staleRequestGate = new Promise<void>(resolve => { releaseStaleRequest = resolve })
+    let blockNextMainTreeRequest = true
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (blockNextMainTreeRequest && String(input).endsWith(`/api/projects/${projectId}/reference-tree`)) {
+        blockNextMainTreeRequest = false
+        await staleRequestGate
+      }
+      return originalFetch(input, init)
+    }))
+
+    window.dispatchEvent(new Event('focus'))
+    await new Promise(resolve => window.setTimeout(resolve, 0))
+    await wrapper.get('[aria-label="选择项目号 PRJ-REAL-001-1"]').trigger('click')
+    await flushPromises()
+    expect(wrapper.get('.pdm-project-sidebar__summary').text()).toContain('PRJ-REAL-001-1 · 泵组单元')
+
+    releaseStaleRequest()
+    await flushPromises()
+    expect(wrapper.get('.pdm-project-sidebar__summary').text()).toContain('PRJ-REAL-001-1 · 泵组单元')
+    wrapper.unmount()
+  })
+
   it('opens the most recently used project overview after Windows client login', async () => {
     const fallbackProject = { id: 'project-fallback', code: 'PRJ-FALLBACK-001', name: '回退项目', owner: 'engineer', responsibleUsers: ['engineer'], vaultLocation: 'D:\\PDM\\PRJ-FALLBACK-001', releaseLocation: 'D:\\Release\\PRJ-FALLBACK-001', isActive: true, quantity: 1, serialNumbers: [] }
     installApiMock([fallbackProject])
-    window.localStorage.setItem('upton-pdm-project-center', JSON.stringify({ projectId, tab: 'bom' }))
+    window.localStorage.setItem('upton-pdm-project-center', JSON.stringify({ projectId, tab: 'bom', username: 'engineer', companyId: '' }))
     window.localStorage.setItem('upton-pdm-active-navigation', 'admin')
     Object.defineProperty(window, 'chrome', {
       configurable: true,
@@ -517,7 +560,7 @@ describe('PLM client workspace', () => {
       expect(wrapper.text()).not.toContain('PRJ-FALLBACK-001')
       expect(wrapper.get('.pdm-project-tabs button.is-active').text()).toBe('概览')
       expect(wrapper.get('.pdm-sidebar__nav .pdm-nav-item.is-active').text()).toContain('项目中心')
-      expect(JSON.parse(window.localStorage.getItem('upton-pdm-project-center') ?? '{}')).toEqual({ projectId, tab: 'overview' })
+      expect(JSON.parse(window.localStorage.getItem('upton-pdm-project-center') ?? '{}')).toMatchObject({ projectId, tab: 'overview', username: 'engineer' })
     } finally {
       wrapper.unmount()
     }
@@ -638,6 +681,7 @@ describe('PLM client workspace', () => {
     await buttonByText(wrapper, '系统管理').trigger('click')
     expect(buttonByText(wrapper, '客户端设置')).toBeDefined()
     expect(postMessage).toHaveBeenCalledWith({ type: 'desktop-settings-request', payload: undefined })
+    expect(postMessage).toHaveBeenCalledWith({ type: 'workspace-maintenance-request', payload: undefined })
 
     window.dispatchEvent(new CustomEvent('pdm-desktop-settings', {
       detail: {
@@ -648,13 +692,25 @@ describe('PLM client workspace', () => {
       },
     }))
     await flushPromises()
-    expect((wrapper.get('input[aria-label="本地缓存工作区"]').element as HTMLInputElement).value).toContain('UPTON PDM\\Workspace')
+    expect((wrapper.get('input[aria-label="PLM受控工作区"]').element as HTMLInputElement).value).toContain('UPTON PDM\\Workspace')
+    window.dispatchEvent(new CustomEvent('pdm-workspace-maintenance', {
+      detail: { available: true, workingFiles: 41, workingBytes: 2_048, snapshotFiles: 82, snapshotBytes: 3_145_728, recoveryFiles: 0, recoveryBytes: 0 },
+    }))
+    await flushPromises()
+    expect(wrapper.get('[aria-label="工作区用量"]').text()).toContain('项目工作文件41 个 · 2.0 KB不自动清理')
+    expect(wrapper.get('[aria-label="工作区用量"]').text()).toContain('可重建只读缓存82 个 · 3.0 MB可安全清理')
+    const confirmClean = vi.spyOn(ElMessageBox, 'confirm').mockResolvedValue('confirm' as never)
+    await buttonByText(wrapper, '清理只读缓存').trigger('click')
+    await flushPromises()
+    expect(confirmClean).toHaveBeenCalled()
+    expect(postMessage).toHaveBeenCalledWith({ type: 'workspace-cache-clean', payload: undefined })
+    confirmClean.mockRestore()
     await buttonByText(wrapper, '已开启').trigger('click')
     expect(postMessage).toHaveBeenCalledWith({ type: 'desktop-settings-save', payload: { startWithWindows: false } })
 
     window.dispatchEvent(new CustomEvent('pdm-workspace-folder-selected', { detail: { workspaceRoot: 'D:\\PDM-Cache' } }))
     await flushPromises()
-    expect((wrapper.get('input[aria-label="本地缓存工作区"]').element as HTMLInputElement).value).toBe('D:\\PDM-Cache')
+    expect((wrapper.get('input[aria-label="PLM受控工作区"]').element as HTMLInputElement).value).toBe('D:\\PDM-Cache')
 
     await buttonByText(wrapper, '保存工作区').trigger('click')
     expect(postMessage).toHaveBeenCalledWith({ type: 'desktop-settings-save', payload: { workspaceRoot: 'D:\\PDM-Cache' } })
@@ -966,6 +1022,9 @@ describe('PLM client workspace', () => {
     await projectTabByText(wrapper, '图档').trigger('click')
     await flushPromises()
     expect(wrapper.get('[aria-label="BOM维护"]').isVisible()).toBe(false)
+    expect(wrapper.get('[aria-label="网页端图档预览状态"]').attributes('data-preview-state')).toBe('idle')
+    await buttonByText(wrapper, '加载预览').trigger('click')
+    await flushPromises()
     expect(wrapper.text()).toContain('该历史版本尚未生成STP/PDF预览')
     expect(wrapper.find('[aria-label="图档查看与操作"]').exists()).toBe(true)
     const projectSidebar = wrapper.get('[aria-label="项目基本信息与全部项目号"]')
@@ -1031,7 +1090,7 @@ describe('PLM client workspace', () => {
     expect(tree.get('.pdm-tree-row.is-selected').text()).toContain('REAL-PRT-001')
   })
 
-  it('automatically previews the selected document in the embedded eDrawings host without opening a separate web window', async () => {
+  it('loads the first preview on demand and then keeps automatic preview within the drawings tab', async () => {
     const postMessage = vi.fn()
     Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'visible' })
     Object.defineProperty(window, 'chrome', {
@@ -1042,6 +1101,10 @@ describe('PLM client workspace', () => {
     await login(wrapper)
 
     const slot = wrapper.get('[aria-label="客户端内嵌eDrawings预览区"]')
+    expect(slot.attributes('data-preview-state')).toBe('idle')
+    expect(postMessage.mock.calls.filter(([message]) => message.type === 'preview-document')).toHaveLength(0)
+    await buttonByText(wrapper, '加载预览').trigger('click')
+    await flushPromises()
     expect(slot.get('[aria-label="正在加载 eDrawings"]')).toBeTruthy()
     expect(slot.get('.plm-cube-icon').classes()).toContain('is-axial')
     expect(slot.findAll('.plm-cube-icon__face')).toHaveLength(6)
@@ -1176,6 +1239,12 @@ describe('PLM client workspace', () => {
     expect(bomTab).toBeTruthy()
     await bomTab!.trigger('click')
     expect(postMessage.mock.calls.filter(([message]) => message.type === 'preview-host-hide').length).toBeGreaterThan(hideCallsBeforeTabChange)
+
+    const previewCallsBeforeReturn = postMessage.mock.calls.filter(([message]) => message.type === 'preview-document').length
+    await projectTabByText(wrapper, '图档').trigger('click')
+    await flushPromises()
+    expect(wrapper.get('[aria-label="客户端内嵌eDrawings预览区"]').attributes('data-preview-state')).toBe('idle')
+    expect(postMessage.mock.calls.filter(([message]) => message.type === 'preview-document')).toHaveLength(previewCallsBeforeReturn)
   })
 
   it('shows an actionable fallback when a historical version has no STP/PDF preview', async () => {
@@ -1184,6 +1253,9 @@ describe('PLM client workspace', () => {
     await expandAllDocumentTree(wrapper)
 
     const preview = wrapper.get('[aria-label="网页端图档预览状态"]')
+    expect(preview.attributes('data-preview-state')).toBe('idle')
+    await buttonByText(wrapper, '加载预览').trigger('click')
+    await flushPromises()
     expect(preview.attributes('data-preview-state')).toBe('unavailable')
     expect(preview.text()).toContain('该历史版本尚未生成STP/PDF预览')
     expect(preview.text()).not.toContain('正在加载 eDrawings')

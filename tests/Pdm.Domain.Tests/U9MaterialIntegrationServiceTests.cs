@@ -173,16 +173,16 @@ public sealed class U9MaterialIntegrationServiceTests
     }
 
     [Fact]
-    public async Task ExecuteTask_WhenCodeAlreadyExists_BlocksAutomaticBinding()
+    public async Task ExecuteTask_WhenCodeAlreadyExists_ReturnsRecoverableConflict()
     {
         var fixture = await CreateApprovedTaskAsync(writeEnabled: true);
         fixture.Client.QueryResult = new U9ItemQueryResult(0, null,
             [new U9ItemReference("existing-1001", fixture.Material.MaterialCode)]);
 
-        var exception = await Assert.ThrowsAsync<PdmRuleException>(() => fixture.Service.ExecuteTaskAsync(
+        var exception = await Assert.ThrowsAsync<U9MaterialCodeConflictException>(() => fixture.Service.ExecuteTaskAsync(
             fixture.Task.Id, "admin", UserRole.Administrator, default));
 
-        Assert.Contains("不会自动绑定", exception.Message);
+        Assert.Equal(fixture.Material.MaterialCode, exception.MaterialCode);
         Assert.Equal(0, fixture.Client.PostCallCount);
         var material = await fixture.Materials.FindMaterialAsync(fixture.Material.Id, default);
         Assert.False(material?.U9SyncConfirmed);

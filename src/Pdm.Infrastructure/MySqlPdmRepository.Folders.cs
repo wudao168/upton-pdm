@@ -1,5 +1,7 @@
+using System.Data;
 using System.Data.Common;
 using Dapper;
+using MySqlConnector;
 using Upton.Pdm.Application;
 using Upton.Pdm.Domain;
 
@@ -9,18 +11,34 @@ public sealed partial class MySqlPdmRepository
 {
     public async Task EnsureProjectFolderTreeAsync(Guid projectId, CancellationToken cancellationToken)
     {
+        for (var attempt = 0; ; attempt++)
+        {
+            try
+            {
+                await EnsureProjectFolderTreeOnceAsync(projectId, cancellationToken);
+                return;
+            }
+            catch (MySqlException exception) when (attempt < 2 && exception.Number is 1205 or 1213)
+            {
+                // The failed transaction is disposed/rolled back before retrying the whole directory operation.
+                await Task.Delay(TimeSpan.FromMilliseconds(100 * (attempt + 1)), cancellationToken);
+            }
+        }
+    }
+
+    private async Task EnsureProjectFolderTreeOnceAsync(Guid projectId, CancellationToken cancellationToken)
+    {
         await using var connection = await OpenAsync(cancellationToken);
-        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+        await using var transaction = await connection.BeginTransactionAsync(IsolationLevel.ReadCommitted, cancellationToken);
         var project = await connection.QuerySingleOrDefaultAsync<FolderProjectRow>(new CommandDefinition(
             "SELECT id,code,parent_project_id,root_project_id,child_sequence FROM project WHERE id=@ProjectId",
             new { ProjectId = projectId }, transaction, cancellationToken: cancellationToken))
             ?? throw new PdmNotFoundException("项目不存在。");
         var rootId = project.RootProjectId ?? project.Id;
-        var root = project.Id == rootId
-            ? project
-            : await connection.QuerySingleAsync<FolderProjectRow>(new CommandDefinition(
-                "SELECT id,code,parent_project_id,root_project_id,child_sequence FROM project WHERE id=@ProjectId",
-                new { ProjectId = rootId }, transaction, cancellationToken: cancellationToken));
+        // Serialize initialization within one project tree without locking unrelated project folders.
+        var root = await connection.QuerySingleAsync<FolderProjectRow>(new CommandDefinition(
+            "SELECT id,code,parent_project_id,root_project_id,child_sequence FROM project WHERE id=@ProjectId FOR UPDATE",
+            new { ProjectId = rootId }, transaction, cancellationToken: cancellationToken));
         var projects = (await connection.QueryAsync<FolderProjectRow>(new CommandDefinition(
             "SELECT id,code,parent_project_id,root_project_id,child_sequence FROM project WHERE id=@RootId OR root_project_id=@RootId ORDER BY code",
             new { RootId = rootId }, transaction, cancellationToken: cancellationToken))).ToArray();
@@ -28,16 +46,20 @@ public sealed partial class MySqlPdmRepository
             "SELECT folder_key,parent_key,name,purpose,sort_order,is_system,inherit_permissions FROM folder_template_node ORDER BY sort_order,folder_key",
             transaction: transaction, cancellationToken: cancellationToken))).ToArray();
         var now = timeProvider.GetUtcNow().UtcDateTime;
+        var existingFolders = (await connection.QueryAsync<ProjectFolderRow>(new CommandDefinition(
+            "SELECT id,root_project_id,parent_folder_id,target_project_id,folder_key,template_key,name,purpose,sort_order,is_system,inherit_permissions FROM project_folder WHERE root_project_id=@RootId",
+            new { RootId = rootId }, transaction, cancellationToken: cancellationToken)))
+            .ToDictionary(item => item.FolderKey, StringComparer.OrdinalIgnoreCase);
 
         var actualIds = new Dictionary<string, Guid>(StringComparer.OrdinalIgnoreCase);
-        var rootFolderId = await UpsertFolderAsync(connection, transaction, rootId, null, root.Id, "root", "root", root.Code,
+        var rootFolderId = await UpsertFolderAsync(connection, transaction, existingFolders, rootId, null, root.Id, "root", "root", root.Code,
             ProjectFolderPurpose.Root, 0, true, true, now, cancellationToken);
         actualIds["root"] = rootFolderId;
 
         foreach (var node in template.Where(item => item.Purpose != ProjectFolderPurpose.ProjectContainer))
         {
             var parentId = string.IsNullOrWhiteSpace(node.ParentKey) ? rootFolderId : actualIds[node.ParentKey];
-            actualIds[node.FolderKey] = await UpsertFolderAsync(connection, transaction, rootId, parentId, null,
+            actualIds[node.FolderKey] = await UpsertFolderAsync(connection, transaction, existingFolders, rootId, parentId, null,
                 node.FolderKey, node.FolderKey, node.Name, node.Purpose, node.SortOrder, node.IsSystem,
                 node.InheritPermissions, now, cancellationToken);
         }
@@ -51,7 +73,7 @@ public sealed partial class MySqlPdmRepository
                 var isRoot = target.Id == root.Id;
                 var folderName = isRoot ? $"{root.Code}-0" : target.Code;
                 var folderKey = $"{templateKey}:{target.Id:N}";
-                await UpsertFolderAsync(connection, transaction, rootId, parentId, target.Id, folderKey, templateKey,
+                await UpsertFolderAsync(connection, transaction, existingFolders, rootId, parentId, target.Id, folderKey, templateKey,
                     folderName, ProjectFolderPurpose.ProjectContainer, 10 + (target.ChildSequence ?? 0), true,
                     node.InheritPermissions, now, cancellationToken);
             }
@@ -64,9 +86,9 @@ public sealed partial class MySqlPdmRepository
             INNER JOIN project_folder f ON f.root_project_id=COALESCE(p.root_project_id,p.id)
                 AND f.target_project_id=d.project_id AND f.template_key='mechanical.project'
             SET d.folder_id=f.id
-            WHERE d.folder_id IS NULL
+            WHERE d.folder_id IS NULL AND f.root_project_id=@RootId
             """,
-            transaction: transaction, cancellationToken: cancellationToken));
+            new { RootId = rootId }, transaction, cancellationToken: cancellationToken));
         await transaction.CommitAsync(cancellationToken);
     }
 
@@ -222,23 +244,32 @@ public sealed partial class MySqlPdmRepository
         return MapFolder(row);
     }
 
-    private static async Task<Guid> UpsertFolderAsync(DbConnection connection, DbTransaction transaction, Guid rootProjectId, Guid? parentFolderId,
+    private static async Task<Guid> UpsertFolderAsync(DbConnection connection, DbTransaction transaction,
+        IReadOnlyDictionary<string, ProjectFolderRow> existingFolders, Guid rootProjectId, Guid? parentFolderId,
         Guid? targetProjectId, string folderKey, string templateKey, string name, ProjectFolderPurpose purpose, int sortOrder,
         bool isSystem, bool inheritPermissions, DateTime now, CancellationToken cancellationToken)
     {
-        var id = Guid.NewGuid();
+        existingFolders.TryGetValue(folderKey, out var existing);
+        if (existing is not null && existing.ParentFolderId == parentFolderId && existing.TargetProjectId == targetProjectId
+            && existing.TemplateKey == templateKey && existing.Name == name && existing.Purpose == purpose
+            && existing.SortOrder == sortOrder && existing.IsSystem == isSystem && existing.InheritPermissions == inheritPermissions)
+            return existing.Id;
+
+        var id = existing?.Id ?? Guid.NewGuid();
         await connection.ExecuteAsync(new CommandDefinition(
-            """
+            existing is null ? """
             INSERT INTO project_folder(id,root_project_id,parent_folder_id,target_project_id,folder_key,template_key,name,purpose,sort_order,is_system,inherit_permissions,created_at,updated_at)
             VALUES(@Id,@RootProjectId,@ParentFolderId,@TargetProjectId,@FolderKey,@TemplateKey,@Name,@Purpose,@SortOrder,@IsSystem,@InheritPermissions,@Now,@Now)
-            ON DUPLICATE KEY UPDATE parent_folder_id=VALUES(parent_folder_id),target_project_id=VALUES(target_project_id),template_key=VALUES(template_key),name=VALUES(name),purpose=VALUES(purpose),sort_order=VALUES(sort_order),is_system=VALUES(is_system),inherit_permissions=VALUES(inherit_permissions),updated_at=VALUES(updated_at)
+            """ : """
+            UPDATE project_folder SET parent_folder_id=@ParentFolderId,target_project_id=@TargetProjectId,
+                template_key=@TemplateKey,name=@Name,purpose=@Purpose,sort_order=@SortOrder,
+                is_system=@IsSystem,inherit_permissions=@InheritPermissions,updated_at=@Now
+            WHERE id=@Id
             """,
             new { Id = id, RootProjectId = rootProjectId, ParentFolderId = parentFolderId, TargetProjectId = targetProjectId, FolderKey = folderKey,
                 TemplateKey = templateKey, Name = name, Purpose = purpose.ToString(), SortOrder = sortOrder, IsSystem = isSystem,
                 InheritPermissions = inheritPermissions, Now = now }, transaction, cancellationToken: cancellationToken));
-        return await connection.ExecuteScalarAsync<Guid>(new CommandDefinition(
-            "SELECT id FROM project_folder WHERE root_project_id=@RootProjectId AND folder_key=@FolderKey",
-            new { RootProjectId = rootProjectId, FolderKey = folderKey }, transaction, cancellationToken: cancellationToken));
+        return id;
     }
 
     private static async Task<Guid> ResolveDocumentFolderAsync(DbConnection connection, DbTransaction transaction, Guid projectId, Guid? requestedFolderId, CancellationToken cancellationToken)

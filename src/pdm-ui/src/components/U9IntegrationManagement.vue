@@ -1,14 +1,14 @@
 <script setup lang="ts">
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { computed, onMounted, reactive, ref } from 'vue'
-import { getU9MaterialIntegration, importU9MaterialSample, previewU9MaterialSample, testU9MaterialIntegration, updateU9MaterialIntegration } from '../api'
+import { getU9MaterialFullSyncStatus, getU9MaterialIntegration, testU9MaterialIntegration, updateU9MaterialIntegration } from '../api'
 import type {
   CrmConnectionTestResult,
   CrmCustomerSyncResult,
   CrmIntegrationSettings,
   PdmCustomer,
+  U9MaterialFullSyncStatusResponse,
   U9MaterialIntegrationSettings,
-  U9MaterialSamplePreview,
   UpdateCrmIntegrationInput,
 } from '../types'
 import CustomerManagement from './CustomerManagement.vue'
@@ -34,16 +34,8 @@ const loading = ref(false)
 const savingBase = ref(false)
 const savingInterfaces = ref(false)
 const testingConnection = ref(false)
-const previewingSample = ref(false)
-const importingSample = ref(false)
-const sampleCategoryCodes = ref(['0101', '0102', '0204'])
-const sampleLimitPerCategory = ref(10)
-const samplePreview = ref<U9MaterialSamplePreview | null>(null)
-const sampleCategoryOptions = [
-  { code: '0101', name: '电气外购件' },
-  { code: '0102', name: '机械外购件' },
-  { code: '0204', name: '非标机加件' },
-]
+const fullSyncLoading = ref(false)
+const fullSyncStatus = ref<U9MaterialFullSyncStatusResponse | null>(null)
 const integration = reactive<U9MaterialIntegrationSettings & { clientSecret: string }>({
   baseUrl: '', enterpriseCode: '', organizationCode: '', userCode: '', clientId: '', clientSecretConfigured: false,
   clientSecret: '', itemCreatePath: '/webapi/ItemMaster/Create', itemQueryPath: '/webapi/ItemMaster/Query',
@@ -78,6 +70,18 @@ async function loadIntegration() {
     ElMessage.error(error instanceof Error ? error.message : 'U9C基础设置加载失败')
   } finally {
     loading.value = false
+  }
+}
+
+async function loadFullSyncStatus() {
+  if (!props.canManageBase) return
+  fullSyncLoading.value = true
+  try {
+    fullSyncStatus.value = await getU9MaterialFullSyncStatus(props.token)
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : 'U9C料品自动同步状态加载失败')
+  } finally {
+    fullSyncLoading.value = false
   }
 }
 
@@ -163,51 +167,34 @@ async function saveInterfaceSettings() {
   }
 }
 
-async function previewMaterialSample() {
-  if (!sampleCategoryCodes.value.length) {
-    ElMessage.warning('请至少选择一个分类')
-    return
+const fullSyncStatusText = computed(() => {
+  switch (fullSyncStatus.value?.latestRun?.status) {
+    case 'Running': return '同步中'
+    case 'Succeeded': return '已完成'
+    case 'PartiallySucceeded': return '部分完成'
+    case 'Failed': return '失败'
+    default: return '尚未运行'
   }
-  previewingSample.value = true
-  try {
-    samplePreview.value = await previewU9MaterialSample(sampleCategoryCodes.value, sampleLimitPerCategory.value, props.token)
-    ElMessage.success(`只读预览完成，共核对 ${samplePreview.value.items.length} 个U9C料品`)
-  } catch (error) {
-    samplePreview.value = null
-    ElMessage.error(error instanceof Error ? error.message : 'U9C料品样本预览失败')
-  } finally {
-    previewingSample.value = false
+})
+
+const fullSyncTagType = computed(() => {
+  switch (fullSyncStatus.value?.latestRun?.status) {
+    case 'Running': return 'primary'
+    case 'Succeeded': return 'success'
+    case 'PartiallySucceeded': return 'warning'
+    case 'Failed': return 'danger'
+    default: return 'info'
   }
+})
+
+function formatSyncTime(value?: string | null) {
+  return value ? new Date(value).toLocaleString('zh-CN', { hour12: false }) : '—'
 }
 
-async function importMaterialSample() {
-  if (!samplePreview.value?.items.some(item => item.canImport)) {
-    ElMessage.warning('当前预览没有可导入料品')
-    return
-  }
-  try {
-    await ElMessageBox.confirm(
-      `将重新只读核对U9C，并向PLM导入所选分类每类最多 ${sampleLimitPerCategory.value} 条；不会向U9C写入。`,
-      '确认导入PLM',
-      { type: 'warning', confirmButtonText: '确认导入', cancelButtonText: '取消' },
-    )
-  } catch (error) {
-    if (error === 'cancel' || error === 'close') return
-    throw error
-  }
-  importingSample.value = true
-  try {
-    const result = await importU9MaterialSample(sampleCategoryCodes.value, sampleLimitPerCategory.value, props.token)
-    samplePreview.value = result.preview
-    ElMessage.success(`导入完成：新建 ${result.createdCount}，刷新 ${result.refreshedCount}，跳过 ${result.skippedCount}`)
-  } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : 'U9C料品样本导入失败')
-  } finally {
-    importingSample.value = false
-  }
-}
-
-onMounted(loadIntegration)
+onMounted(() => {
+  void loadIntegration()
+  void loadFullSyncStatus()
+})
 </script>
 
 <template>
@@ -293,27 +280,37 @@ onMounted(loadIntegration)
       </el-tab-pane>
 
       <el-tab-pane v-if="canManageBase" label="料品同步" name="material-sync">
-        <section class="pdm-panel u9-settings-card" aria-label="U9C料品样本同步">
-          <header class="u9-card-heading"><div><h2>料品样本同步</h2><p>从U9C只读获取料品，在PLM端形成可搜索、可引用、可受控变更的主档。</p></div><span class="pdm-status is-warn">非全量</span></header>
-          <el-alert title="本功能硬限制为 0101、0102、0204，每类最多10条。预览和导入只调用U9C查询接口，不会创建、修改或删除U9C料品。" type="warning" :closable="false" show-icon />
-          <div class="sample-sync-controls">
-            <el-checkbox-group v-model="sampleCategoryCodes" aria-label="样本同步分类">
-              <el-checkbox v-for="category in sampleCategoryOptions" :key="category.code" :value="category.code">{{ category.code }} {{ category.name }}</el-checkbox>
-            </el-checkbox-group>
-            <el-form-item label="每类上限"><el-input-number v-model="sampleLimitPerCategory" :min="1" :max="10" :step="1" /></el-form-item>
-            <div class="u9-actions">
-              <el-button :loading="previewingSample" @click="previewMaterialSample">只读预览</el-button>
-              <el-button type="primary" :loading="importingSample" :disabled="!samplePreview" @click="importMaterialSample">确认导入PLM</el-button>
-            </div>
+        <section class="pdm-panel u9-settings-card pdm-loading-host" aria-label="U9C料品自动全量同步">
+          <SquareLoader v-if="fullSyncLoading" overlay label="正在加载自动同步状态" />
+          <header class="u9-card-heading">
+            <div><h2>U9C料品自动全量同步</h2><p>每天自动只读同步U9C料品，并把同类最大流水作为PLM后续取号基线。</p></div>
+            <div class="u9-actions"><el-tag :type="fullSyncTagType">{{ fullSyncStatusText }}</el-tag><el-button :loading="fullSyncLoading" @click="loadFullSyncStatus">刷新状态</el-button></div>
+          </header>
+          <el-alert title="同步范围动态取自“分类维护”中允许创建、启用且可见的分类；只读取U9C，不会在U9C创建、修改或删除料品，也不会覆盖PLM自有主档。" type="info" :closable="false" show-icon />
+          <dl class="full-sync-summary">
+            <div><dt>执行计划</dt><dd>每日 {{ fullSyncStatus?.scheduleTime ?? '02:00' }}，每 {{ fullSyncStatus?.checkIntervalMinutes ?? 30 }} 分钟检查</dd></div>
+            <div><dt>最近开始</dt><dd>{{ formatSyncTime(fullSyncStatus?.latestRun?.startedAt) }}</dd></div>
+            <div><dt>最近完成</dt><dd>{{ formatSyncTime(fullSyncStatus?.latestRun?.completedAt) }}</dd></div>
+            <div><dt>分类进度</dt><dd>{{ fullSyncStatus?.latestRun?.completedCategoryCount ?? 0 }} / {{ fullSyncStatus?.latestRun?.categoryCount ?? fullSyncStatus?.categories.length ?? 0 }}</dd></div>
+            <div><dt>发现料品</dt><dd>{{ fullSyncStatus?.latestRun?.discoveredCount ?? 0 }}</dd></div>
+            <div><dt>PLM处理</dt><dd>新建 {{ fullSyncStatus?.latestRun?.createdCount ?? 0 }} · 刷新 {{ fullSyncStatus?.latestRun?.refreshedCount ?? 0 }} · 跳过 {{ fullSyncStatus?.latestRun?.skippedCount ?? 0 }}</dd></div>
+          </dl>
+          <div class="full-sync-categories" aria-label="自动同步分类">
+            <strong>当前同步范围</strong>
+            <el-tag v-for="category in fullSyncStatus?.categories ?? []" :key="category.code" effect="plain">{{ category.code }} {{ category.name }}</el-tag>
+            <span v-if="!fullSyncStatus?.categories.length" class="pdm-muted">暂无允许创建的分类</span>
           </div>
-          <el-table v-if="samplePreview" :data="samplePreview.items" row-key="materialCode" class="sample-sync-table" empty-text="所选分类未返回可核对料品">
-            <el-table-column prop="materialCode" label="U9C料号" min-width="130" />
-            <el-table-column prop="name" label="名称" min-width="150" show-overflow-tooltip />
-            <el-table-column prop="categoryCode" label="分类" width="80" />
-            <el-table-column prop="unitCode" label="PLM单位" width="90" />
-            <el-table-column prop="specification" label="规格" min-width="170" show-overflow-tooltip />
-            <el-table-column prop="brand" label="品牌" min-width="100" show-overflow-tooltip />
-            <el-table-column label="处理" width="170"><template #default="{ row }"><el-tag :type="row.canImport ? row.existsInPdm ? 'warning' : 'success' : 'info'">{{ row.decision }}</el-tag></template></el-table-column>
+          <el-alert v-if="fullSyncStatus?.latestRun?.lastError" :title="fullSyncStatus.latestRun.lastError" type="error" :closable="false" show-icon />
+          <el-table :data="fullSyncStatus?.latestRun?.categoryResults ?? []" row-key="categoryCode" class="full-sync-table" empty-text="尚无分类同步结果">
+            <el-table-column prop="categoryCode" label="分类" width="90" />
+            <el-table-column prop="categoryName" label="分类名称" min-width="150" />
+            <el-table-column prop="maximumSequence" label="最大流水" width="110" />
+            <el-table-column prop="discoveredCount" label="发现" width="80" />
+            <el-table-column prop="createdCount" label="新建" width="80" />
+            <el-table-column prop="refreshedCount" label="刷新" width="80" />
+            <el-table-column prop="skippedCount" label="跳过" width="80" />
+            <el-table-column label="状态" width="100"><template #default="{ row }"><el-tag :type="row.succeeded ? 'success' : 'danger'">{{ row.succeeded ? '完成' : '失败' }}</el-tag></template></el-table-column>
+            <el-table-column prop="error" label="说明" min-width="220" show-overflow-tooltip />
           </el-table>
         </section>
       </el-tab-pane>
@@ -326,5 +323,5 @@ onMounted(loadIntegration)
 </template>
 
 <style scoped>
-.u9-integration-page{min-width:0;min-height:0}.u9-interface-tabs{min-height:0;flex:1 1 auto;display:flex;flex-direction:column;overflow:hidden;margin-top:4px}.u9-interface-tabs :deep(.el-tabs__content){min-height:0;flex:1 1 auto;overflow:hidden}.u9-interface-tabs :deep(.el-tab-pane){min-height:0;height:100%;overflow:auto}.u9-settings-card{padding:24px}.u9-card-heading{display:flex;align-items:flex-start;justify-content:space-between;gap:18px;margin-bottom:20px}.u9-card-heading h2{margin:0 0 6px;font-size:20px}.u9-card-heading p{margin:0;color:#64748b;line-height:1.6}.u9-settings-form{margin-top:18px}.u9-form-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:0 18px}.u9-interface-group{margin:0 0 16px;padding:16px 18px 4px;border:1px solid #e2e8f0;border-radius:8px;background:#f8fafc}.u9-interface-group h3{margin:0 0 14px;font-size:15px;color:#1e293b}.u9-actions{display:flex;gap:10px;margin-top:4px}.sample-sync-controls{display:grid;grid-template-columns:minmax(320px,1fr) 150px auto;align-items:end;gap:18px;margin:20px 0}.sample-sync-controls :deep(.el-form-item){margin-bottom:0}.sample-sync-table{width:100%}.u9-write-note{margin:6px 0 18px;color:#9a3412;font-size:13px}@media(max-width:900px){.u9-form-grid{grid-template-columns:1fr}.sample-sync-controls{grid-template-columns:1fr}.u9-settings-card{padding:18px}}
+.u9-integration-page{min-width:0;min-height:0}.u9-interface-tabs{min-height:0;flex:1 1 auto;display:flex;flex-direction:column;overflow:hidden;margin-top:4px}.u9-interface-tabs :deep(.el-tabs__content){min-height:0;flex:1 1 auto;overflow:hidden}.u9-interface-tabs :deep(.el-tab-pane){min-height:0;height:100%;overflow:auto}.u9-settings-card{padding:24px}.u9-card-heading{display:flex;align-items:flex-start;justify-content:space-between;gap:18px;margin-bottom:20px}.u9-card-heading h2{margin:0 0 6px;font-size:20px}.u9-card-heading p{margin:0;color:#64748b;line-height:1.6}.u9-settings-form{margin-top:18px}.u9-form-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:0 18px}.u9-interface-group{margin:0 0 16px;padding:16px 18px 4px;border:1px solid #e2e8f0;border-radius:8px;background:#f8fafc}.u9-interface-group h3{margin:0 0 14px;font-size:15px;color:#1e293b}.u9-actions{display:flex;align-items:center;gap:10px;margin-top:4px}.full-sync-summary{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;margin:20px 0}.full-sync-summary div{padding:14px 16px;border:1px solid #e2e8f0;border-radius:8px;background:#f8fafc}.full-sync-summary dt{margin-bottom:6px;color:#64748b;font-size:12px}.full-sync-summary dd{margin:0;color:#0f172a;font-weight:600}.full-sync-categories{display:flex;align-items:center;flex-wrap:wrap;gap:8px;margin:0 0 16px}.full-sync-categories strong{margin-right:4px}.full-sync-table{width:100%}.u9-write-note{margin:6px 0 18px;color:#9a3412;font-size:13px}@media(max-width:900px){.u9-form-grid,.full-sync-summary{grid-template-columns:1fr}.u9-settings-card{padding:18px}}
 </style>

@@ -24,6 +24,12 @@ public sealed class BomPropertyMappingCatalogTests
         Assert.Equal("图号", normalized.BomDrawingNumberProperty);
         Assert.Equal("分类", BomPropertyMappingCatalog.SolidWorksProperty(normalized, "kind", "物料分类"));
         Assert.Contains(normalized.BomPropertyMappings, item =>
+            item.PdmPropertyKey == "projectNumber"
+            && item.PdmPropertyName == "项目号"
+            && item.SolidWorksProperty == "项目号"
+            && item.Source == BomPropertyMappingCatalog.PdmSource
+            && item.MappingEditable);
+        Assert.Contains(normalized.BomPropertyMappings, item =>
             item.PdmPropertyKey == "wearPart"
             && item.PdmPropertyName == "易损件"
             && item.SolidWorksProperty == "易损件标识"

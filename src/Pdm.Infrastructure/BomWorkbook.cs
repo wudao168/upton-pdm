@@ -10,7 +10,7 @@ namespace Upton.Pdm.Infrastructure;
 
 public static class BomWorkbook
 {
-    private static readonly string[] Headers = ["序号", "物料分类", "单位", "物料编码", "物料名称", "关联料号", "型号", "备注信息", "品牌", "材质", "表面处理", "重量", "数量", "版本", "完整"];
+    private static readonly string[] Headers = ["序号", "物料分类", "单位", "物料编码", "物料名称", "上级物料编码", "型号", "备注信息", "品牌", "材质", "表面处理", "重量", "数量", "版本", "完整"];
     private static readonly string[] RequiredHeaders = ["序号", "单位", "物料编码", "物料名称", "数量", "版本", "完整"];
 
     public static byte[] Write(IReadOnlyList<BomItem> items)
@@ -110,7 +110,7 @@ public static class BomWorkbook
                 Brand: EmptyToNull(Value(cells, columns["品牌"])),
                 SurfaceTreatment: EmptyToNull(Value(cells, columns["表面处理"])),
                 Weight: EmptyToNull(Value(cells, columns["重量"])),
-                ParentDrawingNumber: EmptyToNull(Value(cells, columns["关联料号"]))));
+                ParentDrawingNumber: EmptyToNull(Value(cells, columns["上级物料编码"]))));
         }
 
         if (result.Count == 0) throw new PdmRuleException("BOM Excel没有有效数据行。");
@@ -185,7 +185,7 @@ public static class BomWorkbook
         "图号" => "物料编码",
         "名称" => "物料名称",
         "规格" => "型号",
-        "父项料号" => "关联料号",
+        "父项料号" or "关联料号" => "上级物料编码",
         "描述" => "备注信息",
         "材料" => "材质",
         "是否完整" => "完整",

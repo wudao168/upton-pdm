@@ -571,7 +571,7 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
     {
         lock (gate)
         {
-            if (!projects.TryGetValue(projectId, out var project) || project.ParentProjectId is null) throw new PdmNotFoundException("子项目不存在。");
+            if (!projects.TryGetValue(projectId, out var project)) throw new PdmNotFoundException("项目不存在。");
             project = project with { Designers = designers.ToArray() };
             projects[projectId] = project;
             return Task.FromResult(project);
@@ -1052,18 +1052,6 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
                 return Task.FromResult(existing);
             }
 
-            if (!string.IsNullOrWhiteSpace(command.SourceSha256))
-            {
-                var duplicateContent = documents.Values.FirstOrDefault(document =>
-                    document.ProjectId == command.ProjectId
-                    && !string.Equals(document.FileName, command.FileName, StringComparison.OrdinalIgnoreCase)
-                    && string.Equals(CurrentSourceFingerprint(document.Id), command.SourceSha256, StringComparison.OrdinalIgnoreCase));
-                if (duplicateContent is not null && !command.AllowDuplicateContent)
-                {
-                    throw new PdmConflictException($"项目中已有内容完全相同的图档{duplicateContent.FileName}。请选择引用已有图档，或确认独立登记并填写原因。");
-                }
-            }
-
             var document = new PdmDocument(
                 Guid.NewGuid(),
                 command.ProjectId,
@@ -1118,6 +1106,22 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
 
     public Task<IReadOnlyList<DocumentVersion>> ListDocumentVersionsAsync(Guid documentId, CancellationToken cancellationToken) =>
         Task.FromResult<IReadOnlyList<DocumentVersion>>(versions.Values.Where(version => version.DocumentId == documentId).OrderByDescending(version => version.CreatedAt).ToArray());
+
+    public Task<IReadOnlyList<DocumentVersion>> ListProjectDocumentVersionsAsync(Guid projectId, CancellationToken cancellationToken)
+    {
+        lock (gate)
+        {
+            var projectDocumentIds = documents.Values
+                .Where(document => document.ProjectId == projectId)
+                .Select(document => document.Id)
+                .ToHashSet();
+            return Task.FromResult<IReadOnlyList<DocumentVersion>>(versions.Values
+                .Where(version => projectDocumentIds.Contains(version.DocumentId))
+                .OrderBy(version => version.DocumentId)
+                .ThenByDescending(version => version.CreatedAt)
+                .ToArray());
+        }
+    }
 
     public Task<DocumentVersion?> FindDocumentVersionAsync(Guid documentId, Guid versionId, CancellationToken cancellationToken)
     {
@@ -2216,21 +2220,25 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
         var businessStatus = BuildBusinessStatus(project.Id);
         var rootDocumentCheckedOutBy = RootDocumentCheckedOutBy(project.Id);
         if (role is UserRole.Administrator or UserRole.PlatformAdministrator || TenantContext.Current?.IsPlatformAdministrator == true)
-            return project with { CanAssignExecutionUnit = project.ParentProjectId is null, CanManageMainStaffing = project.ParentProjectId is null && project.ExecutionUnitId is not null, CanAssignDesigners = project.ParentProjectId is not null, CanReadContent = true, CanSubmitArchive = true, DocumentCount = documentCount, ModelDocumentCount = modelDocumentCount, DrawingDocumentCount = drawingDocumentCount, BusinessStatus = businessStatus, RootDocumentCheckedOutBy = rootDocumentCheckedOutBy };
+            return project with { CanAssignExecutionUnit = project.ParentProjectId is null, CanManageMainStaffing = project.ParentProjectId is null && project.ExecutionUnitId is not null, CanAssignDesigners = project.ExecutionUnitId is not null, CanReadContent = true, CanSubmitArchive = true, DocumentCount = documentCount, ModelDocumentCount = modelDocumentCount, DrawingDocumentCount = drawingDocumentCount, BusinessStatus = businessStatus, RootDocumentCheckedOutBy = rootDocumentCheckedOutBy };
         var managesExecutionUnit = project.ExecutionUnitId is Guid executionUnitId
             && organizationManagers.TryGetValue(executionUnitId, out var managers)
             && (string.Equals(managers.PrimaryManager, actor, StringComparison.OrdinalIgnoreCase) || managers.CollaborativeManagers.Contains(actor, StringComparer.OrdinalIgnoreCase));
         var canManage = project.ParentProjectId is null && managesExecutionUnit;
         var belongsToProjectStaffing = string.Equals(project.PrimaryProjectManager, actor, StringComparison.OrdinalIgnoreCase)
-            || project.CollaborativeProjectManagers.Contains(actor, StringComparer.OrdinalIgnoreCase)
             || project.DesignLeads.Contains(actor, StringComparer.OrdinalIgnoreCase)
             || string.Equals(project.DesignLead, actor, StringComparison.OrdinalIgnoreCase);
+        var actorAccount = users.Values.FirstOrDefault(item => string.Equals(item.Username, actor, StringComparison.OrdinalIgnoreCase));
+        var isMechanicalSupervisor = project.ExecutionUnitId is Guid supervisorUnitId
+            && actorAccount?.EffectiveRoleCodes.Contains("MechanicalManager", StringComparer.OrdinalIgnoreCase) == true
+            && organizationMemberships.TryGetValue(actor, out var supervisorMembership)
+            && supervisorMembership.UnitIds.Any(unitId => IsUnitWithin(unitId, supervisorUnitId));
         var canReadContent = HasUserPermission(actor, role, PermissionCodes.ProjectContentView);
         return project with
         {
             CanAssignExecutionUnit = HasUserPermission(actor, role, PermissionCodes.ProjectExecutionAssign) && project.ParentProjectId is null && project.OrganizationId == UserPrimaryCompanyId(actor),
             CanManageMainStaffing = HasUserPermission(actor, role, PermissionCodes.ProjectStaffingManage) && canManage,
-            CanAssignDesigners = HasUserPermission(actor, role, PermissionCodes.ProjectDesignerAssign) && project.ParentProjectId is not null && (managesExecutionUnit || belongsToProjectStaffing),
+            CanAssignDesigners = HasUserPermission(actor, role, PermissionCodes.ProjectDesignerAssign) && project.ExecutionUnitId is not null && (managesExecutionUnit || isMechanicalSupervisor || belongsToProjectStaffing),
             CanReadContent = canReadContent,
             CanSubmitArchive = canReadContent
                 && HasUserPermission(actor, role, PermissionCodes.DocumentEdit)
@@ -2313,6 +2321,17 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
 
     private Guid? UserPrimaryCompanyId(string username) => users.Values
         .FirstOrDefault(user => string.Equals(user.Username, username, StringComparison.OrdinalIgnoreCase))?.CompanyId;
+
+    private bool IsUnitWithin(Guid unitId, Guid ancestorId)
+    {
+        var current = organizationUnits.GetValueOrDefault(unitId);
+        while (current is not null && current.IsActive)
+        {
+            if (current.Id == ancestorId) return true;
+            current = current.ParentUnitId is Guid parentId ? organizationUnits.GetValueOrDefault(parentId) : null;
+        }
+        return false;
+    }
 
     private RolePermissionDirectory BuildRolePermissionDirectory() => new(
         RolePermissionCatalog.Permissions,

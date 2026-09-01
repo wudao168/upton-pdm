@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
 import { ChevronDown, ChevronRight, Minus } from '@lucide/vue'
-import type { DocumentNode, DrawingReviewBadge } from '../types'
+import type { DocumentNode, DrawingReviewBadge, WorkspaceLocalFileState } from '../types'
 import CadDocumentIcon from './CadDocumentIcon.vue'
 
 const props = defineProps<{
@@ -9,12 +9,14 @@ const props = defineProps<{
   level?: number
   selectedId: string
   reviewStates?: Record<string, DrawingReviewBadge>
+  localStates?: Record<string, WorkspaceLocalFileState>
 }>()
 
 const emit = defineEmits<{ select: [node: DocumentNode]; context: [node: DocumentNode, event: MouseEvent] }>()
 const expanded = ref((props.level ?? 0) === 0)
 const hasChildren = computed(() => props.node.children.length > 0)
 const reviewState = computed(() => props.node.documentId ? props.reviewStates?.[props.node.documentId] : undefined)
+const localState = computed(() => props.node.documentId ? props.localStates?.[props.node.documentId] : undefined)
 const versionText = computed(() => props.node.snapshotVersion === undefined
   ? props.node.version
   : `${props.node.snapshotVersion} / ${props.node.version}`)
@@ -69,6 +71,7 @@ function openContext(event: MouseEvent) {
       </span>
       <span v-if="node.status !== 'Missing' && node.status !== 'Unregistered' && node.status !== 'Unarchived'" class="pdm-tree-row__version" :title="versionHint">
         <em>{{ versionText }}</em>
+        <small v-if="localState" class="pdm-local-state" :class="`is-${localState.localState}`" :title="localState.message">{{ localState.localStateLabel }}</small>
         <small v-if="reviewState" class="pdm-review-badge" :class="`is-${reviewState.tone}`">{{ reviewState.label }}</small>
         <small v-if="versionStateText">{{ versionStateText }}</small>
       </span>
@@ -82,6 +85,7 @@ function openContext(event: MouseEvent) {
         :level="(level ?? 0) + 1"
         :selected-id="selectedId"
         :review-states="reviewStates"
+        :local-states="localStates"
         @select="emit('select', $event)"
         @context="(node, event) => emit('context', node, event)"
       />

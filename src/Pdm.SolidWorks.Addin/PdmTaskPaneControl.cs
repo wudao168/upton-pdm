@@ -133,6 +133,7 @@ internal sealed class PdmTaskPaneControl : UserControl
         ConfigureCheckoutReminder();
         BuildTabs();
         Controls.Add(tabs);
+        Controls.Add(workspaceOperationPanel);
         Controls.Add(checkoutReminder);
         Controls.Add(projectPanel);
         Controls.Add(header);
@@ -235,12 +236,12 @@ internal sealed class PdmTaskPaneControl : UserControl
         {
             workspaceOperationActive = active;
             workspaceOperationStatus.Text = active
-                ? string.Concat("处理中：", string.IsNullOrWhiteSpace(message) ? "PLM工作文件操作" : message.Trim())
-                : string.Empty;
+                ? string.Concat("运行状态：处理中", Environment.NewLine, string.IsNullOrWhiteSpace(message) ? "PLM工作文件操作" : message.Trim())
+                : string.Concat("运行状态：空闲", Environment.NewLine, "当前无进行中的操作");
             actionToolTip.SetToolTip(workspaceOperationStatus, workspaceOperationStatus.Text);
             workspaceOperationProgress.SetProgress(0, 0);
             serviceStatus.Active = active;
-            workspaceOperationPanel.Visible = active;
+            actionToolTip.SetToolTip(serviceStatus, active ? "PLM正在处理工作文件" : serviceStatus.AccessibleDescription);
             structureMenu.Enabled = !active;
             versionMenu.Enabled = !active;
             UseWaitCursor = active;
@@ -262,7 +263,7 @@ internal sealed class PdmTaskPaneControl : UserControl
             }
 
             workspaceOperationStatus.Text = string.Concat(
-                "处理中：",
+                "运行状态：处理中",
                 Environment.NewLine,
                 string.IsNullOrWhiteSpace(message) ? "PLM工作文件操作" : message.Trim());
             actionToolTip.SetToolTip(workspaceOperationStatus, workspaceOperationStatus.Text);
@@ -307,7 +308,8 @@ internal sealed class PdmTaskPaneControl : UserControl
         RunOnUiThread(() =>
         {
             serviceStatus.Online = online;
-            serviceStatus.AccessibleDescription = text;
+            serviceStatus.AccessibleDescription = string.IsNullOrWhiteSpace(text) ? (online ? "PLM已连接" : "PLM未连接") : text;
+            if (!workspaceOperationActive) actionToolTip.SetToolTip(serviceStatus, serviceStatus.AccessibleDescription);
         });
     }
 
@@ -342,6 +344,7 @@ internal sealed class PdmTaskPaneControl : UserControl
                 ? loginButton.Text
                 : string.Concat(loginButton.Text, "（", username, "）");
             actionToolTip.SetToolTip(loginButton, loginButton.AccessibleDescription);
+            projectDocuments.SetAuthenticatedUser(authenticatedUsername);
             if (rootNode == null)
             {
                 UpdateSelected(SelectedNode);
@@ -467,6 +470,8 @@ internal sealed class PdmTaskPaneControl : UserControl
         serviceStatus.AccessibleDescription = "未连接";
         serviceStatus.Online = false;
         serviceStatus.Active = false;
+        serviceStatus.Cursor = Cursors.Help;
+        actionToolTip.SetToolTip(serviceStatus, "PLM未连接");
         serviceStatus.Size = new Size(48, 40);
         serviceStatus.Anchor = AnchorStyles.Top | AnchorStyles.Right;
         serviceStatus.Location = new Point(header.ClientSize.Width - header.Padding.Right - serviceStatus.Width, 11);
@@ -572,7 +577,7 @@ internal sealed class PdmTaskPaneControl : UserControl
         tabs.Padding = new Point(10, 6);
         structureTab = BuildStructureTab();
         tabs.TabPages.Add(structureTab);
-        var projectTab = new TabPage("项目图档") { BackColor = Color.FromArgb(244, 247, 251), Padding = new Padding(8) };
+        var projectTab = new TabPage("工作区") { BackColor = Color.FromArgb(244, 247, 251), Padding = new Padding(8) };
         projectDocuments.OpenRequested += (_, args) =>
         {
             ControlledOpenRequested?.Invoke(this, args);
@@ -636,11 +641,11 @@ internal sealed class PdmTaskPaneControl : UserControl
         actions.Controls.Add(propertyEditButton, 3, 0);
         actions.Controls.Add(updateAllLatestButton, 4, 0);
 
-        workspaceOperationPanel.Dock = DockStyle.Top;
-        workspaceOperationPanel.Height = 100;
-        workspaceOperationPanel.Padding = new Padding(3, 4, 3, 4);
+        workspaceOperationPanel.Dock = DockStyle.Bottom;
+        workspaceOperationPanel.Height = 72;
+        workspaceOperationPanel.Padding = new Padding(3, 3, 3, 3);
         workspaceOperationPanel.BackColor = Color.FromArgb(232, 243, 255);
-        workspaceOperationPanel.Visible = false;
+        workspaceOperationPanel.Visible = true;
         var workspaceOperationLayout = new TableLayoutPanel
         {
             Dock = DockStyle.Fill,
@@ -650,8 +655,9 @@ internal sealed class PdmTaskPaneControl : UserControl
             Padding = Padding.Empty
         };
         workspaceOperationLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        workspaceOperationLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 56));
+        workspaceOperationLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 40));
         workspaceOperationLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        workspaceOperationStatus.Text = string.Concat("运行状态：空闲", Environment.NewLine, "当前无进行中的操作");
         workspaceOperationStatus.Dock = DockStyle.Fill;
         workspaceOperationStatus.Margin = Padding.Empty;
         workspaceOperationStatus.AutoEllipsis = false;
@@ -806,7 +812,6 @@ internal sealed class PdmTaskPaneControl : UserControl
         tab.Controls.Add(detail);
         tab.Controls.Add(treeHealth);
         tab.Controls.Add(searchToolbar);
-        tab.Controls.Add(workspaceOperationPanel);
         tab.Controls.Add(actions);
         return tab;
     }
@@ -844,7 +849,10 @@ internal sealed class PdmTaskPaneControl : UserControl
 
     private void DrawStructureHeader(object sender, PaintEventArgs eventArgs)
     {
-        GetStructureColumns(structureTreeSurface.ClientSize.Width, out var nameDividerX, out var versionDividerX);
+        var contentWidth = structureTree.ClientSize.Width > 0
+            ? structureTree.ClientSize.Width
+            : structureTreeSurface.ClientSize.Width;
+        GetStructureColumns(contentWidth, out var nameDividerX, out var versionDividerX);
         using (var background = new SolidBrush(Color.FromArgb(242, 244, 247)))
         using (var border = new Pen(Color.FromArgb(205, 210, 217)))
         {
@@ -858,7 +866,7 @@ internal sealed class PdmTaskPaneControl : UserControl
         TextRenderer.DrawText(eventArgs.Graphics, "选", Font, new Rectangle(0, 0, StructureSelectionColumnWidth, 22), Color.FromArgb(70, 82, 96), TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
         TextRenderer.DrawText(eventArgs.Graphics, "名称", Font, new Rectangle(StructureSelectionColumnWidth + 5, 0, Math.Max(0, nameDividerX - StructureSelectionColumnWidth - 9), 22), Color.FromArgb(70, 82, 96), TextFormatFlags.Left | TextFormatFlags.VerticalCenter);
         TextRenderer.DrawText(eventArgs.Graphics, "版本", Font, new Rectangle(nameDividerX + 5, 0, Math.Max(0, versionDividerX - nameDividerX - 9), 22), Color.FromArgb(70, 82, 96), TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
-        TextRenderer.DrawText(eventArgs.Graphics, "状态", Font, new Rectangle(versionDividerX + 5, 0, Math.Max(0, structureTreeSurface.ClientSize.Width - versionDividerX - 9), 22), Color.FromArgb(70, 82, 96), TextFormatFlags.Left | TextFormatFlags.VerticalCenter);
+        TextRenderer.DrawText(eventArgs.Graphics, "状态", Font, new Rectangle(versionDividerX + 5, 0, Math.Max(0, contentWidth - versionDividerX - 9), 22), Color.FromArgb(70, 82, 96), TextFormatFlags.Left | TextFormatFlags.VerticalCenter);
     }
 
     private void DrawStructureNode(object sender, DrawTreeNodeEventArgs eventArgs)
@@ -1385,7 +1393,9 @@ internal sealed class PdmTaskPaneControl : UserControl
         }
         else if (!registered)
         {
-            contextHint.Text = "提示：可通过获取权限或提交存档选择归属项目";
+            contextHint.Text = node.IsExternalProvenance
+                ? "提示：当前是工作区外的PLM来源副本，不会自动关联项目；纳入或恢复后请从PLM打开受控工作区副本"
+                : "提示：可通过获取权限或提交存档选择归属项目";
         }
         else if (!authenticated)
         {
@@ -1406,6 +1416,10 @@ internal sealed class PdmTaskPaneControl : UserControl
         else
         {
             contextHint.Text = "提示：请先获取编辑权限，完成修改并保存后再提交存档";
+        }
+        if (node.IsExternalProvenance && registered)
+        {
+            contextHint.Text = string.Concat(contextHint.Text, "；当前仍是工作区外文件，完成本次操作后请从PLM打开工作区副本");
         }
     }
 
@@ -2343,6 +2357,11 @@ internal sealed class PdmTaskPaneControl : UserControl
             return "文件缺失";
         }
 
+        if (node.IsExternalProvenance && !node.DocumentId.HasValue)
+        {
+            return "外部副本（未受控）";
+        }
+
         if (node.StoredVersionStateKnown && !node.HasStoredVersion)
         {
             return "未存档";
@@ -2364,9 +2383,10 @@ internal sealed class PdmTaskPaneControl : UserControl
                 break;
         }
         var lifecycle = LifecycleText(node.LifecycleState);
-        return string.Equals(lifecycle, "工作中", StringComparison.Ordinal) || !node.DocumentId.HasValue
+        var result = string.Equals(lifecycle, "工作中", StringComparison.Ordinal) || !node.DocumentId.HasValue
             ? editState
             : string.Concat(lifecycle, " · ", editState);
+        return node.IsExternalProvenance ? string.Concat("外部路径 · ", result) : result;
     }
 
     private static string LifecycleText(string state)
@@ -2447,6 +2467,11 @@ internal sealed class PdmTaskPaneControl : UserControl
             : string.Concat(node.CheckedOutBy,
                 string.IsNullOrWhiteSpace(node.CheckoutMachine) ? string.Empty : string.Concat(" @ ", node.CheckoutMachine),
                 node.CheckedOutAt.HasValue ? string.Concat(" · ", node.CheckedOutAt.Value.ToLocalTime().ToString("yyyy-MM-dd HH:mm")) : string.Empty);
+        var provenance = node.IsExternalProvenance
+            ? string.Concat("\r\n来源：工作区外的PLM来源副本", ProvenanceProjectText(node))
+            : PdmDocumentIdentityStore.IsControlledWorkspacePath(node.FullPath)
+                ? string.Concat("\r\n来源：工作区", node.DocumentId.HasValue ? "受控文件" : "本地文件（未入库）")
+                : "\r\n来源：普通本地文件（未受控）";
         selectedMeta.Text = string.Concat(
             "文件：", node.FileName,
             "\r\n业务状态：", LifecycleText(node.LifecycleState), editState, "　编辑：", editor,
@@ -2454,6 +2479,7 @@ internal sealed class PdmTaskPaneControl : UserControl
             "　版本：", selectedVersionText,
             "\r\n描述：", string.IsNullOrWhiteSpace(node.Description) ? "-" : node.Description,
             "　材料：", string.IsNullOrWhiteSpace(node.Material) ? "-" : node.Material,
+            provenance,
             "\r\n路径：", string.IsNullOrWhiteSpace(node.FullPath) ? "-" : node.FullPath);
         var localFileExists = !string.IsNullOrWhiteSpace(node.FullPath) && File.Exists(node.FullPath);
         var canRegister = !node.DocumentId.HasValue
@@ -2542,6 +2568,13 @@ internal sealed class PdmTaskPaneControl : UserControl
             actionToolTip.SetToolTip(updateAllLatestButton, operationText);
         }
         UpdateTreeHealth();
+    }
+
+    private string ProvenanceProjectText(CadTreeNode node)
+    {
+        if (!node.ProvenanceProjectId.HasValue) return string.Empty;
+        var project = availableProjects.FirstOrDefault(item => item.Id == node.ProvenanceProjectId.Value);
+        return project == null ? "" : string.Concat("（", project.Code, " · ", project.Name, "）");
     }
 
     private bool CanSelectForBatchAction(CadTreeNode node)

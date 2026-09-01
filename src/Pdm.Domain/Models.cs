@@ -127,7 +127,7 @@ public sealed record PdmSystemSettings(string VaultRoot, string ReleaseRoot)
 
     public string BomNameProperty { get; init; } = "物料名称";
 
-    public string BomDescriptionProperty { get; init; } = "备注信息";
+    public string BomDescriptionProperty { get; init; } = "备注";
 
     public string BomMaterialProperty { get; init; } = "材质";
 

@@ -8,20 +8,21 @@ import {
   approveMaterial,
   calibrateMaterialCategoryCounter,
   changeApprovedMaterial,
-  continueProjectBomU9Automation,
+  createMaterialSyncBatch,
   createMaterial,
   deleteMaterial,
   downloadMaterialAttachment,
   executeMaterialSyncTask,
+  getMaterialSyncBatch,
   getMaterialRemovalReadiness,
   listMaterialCategories,
   listMaterialAttachments,
   listMaterialCodeApplications,
   listMaterials,
   listMaterialSyncTasks,
+  listMaterialSyncBatches,
   materialAttachmentObjectUrl,
   queryU9Material,
-  retryMaterialSyncTask,
   decideMaterialCodeApplication,
   saveMaterialCategory,
   setMaterialCover,
@@ -35,6 +36,7 @@ import type {
   MaterialCodeApplication,
   MaterialKind,
   MaterialRemovalReadiness,
+  MaterialSyncBatch,
   MaterialSupplyMode,
   MaterialSyncTask,
   PdmMaterial,
@@ -76,10 +78,25 @@ const selectedSyncTasks = ref<MaterialSyncTask[]>([])
 const batchSyncingTasks = ref(false)
 type MaterialCodeApprovalRow = MaterialCodeApplication & { groupedApplications?: MaterialCodeApplication[] }
 const codeApplications = ref<MaterialCodeApplication[]>([])
+const codeApprovalView = ref<'pending' | 'history'>('pending')
+const approvalHistoryPage = ref(1)
+const approvalHistoryPageSize = ref(20)
+const syncHistoryPage = ref(1)
+const syncHistoryPageSize = ref(20)
 const decidingApplicationId = ref<string | null>(null)
 const selectedCodeApplications = ref<MaterialCodeApprovalRow[]>([])
 const batchDecidingApplications = ref(false)
 const approvalProgressText = ref('')
+const syncProgressText = ref('')
+type WorkflowResultLevel = 'success' | 'warning' | 'error'
+interface WorkflowResult {
+  level: WorkflowResultLevel
+  title: string
+  summary: string
+  details: string[]
+}
+const approvalResult = ref<WorkflowResult | null>(null)
+const syncResult = ref<WorkflowResult | null>(null)
 const query = ref('')
 const brandFilter = ref('')
 const showArchived = ref(false)
@@ -121,13 +138,47 @@ const categoryDraft = reactive<MaterialCategory>({
   currentSequence: 0,
 })
 const lastU9MaterialCode = ref('')
-const syncTaskNoticeCount = computed(() => tasks.value.filter(task => !['Succeeded', 'Superseded'].includes(task.status)).length)
+const applicationWorkflowCompleted = (application: MaterialCodeApplication) => application.status === 'Rejected'
+  || application.status === 'Approved' && application.workflowState === 'Completed'
+const approvedApplicationsAwaitingSync = computed(() => codeApplications.value
+  .filter(application => application.status === 'Approved' && !applicationWorkflowCompleted(application)))
+const applicationsForSyncTask = (task: MaterialSyncTask) => approvedApplicationsAwaitingSync.value
+  .filter(application => application.materialId === task.materialId)
+const currentSynchronizationTasks = computed(() => {
+  const seenMaterials = new Set<string>()
+  return tasks.value.filter(task => {
+    if (task.status === 'Superseded' || seenMaterials.has(task.materialId)) return false
+    seenMaterials.add(task.materialId)
+    return task.status !== 'Succeeded' || applicationsForSyncTask(task).length > 0
+  }).sort((left, right) => {
+    const leftCode = left.materialCode?.trim() ?? ''
+    const rightCode = right.materialCode?.trim() ?? ''
+    if (!leftCode || !rightCode) return leftCode ? -1 : rightCode ? 1 : 0
+    return leftCode.localeCompare(rightCode, undefined, { numeric: true })
+  })
+})
+const syncTaskNoticeCount = computed(() => currentSynchronizationTasks.value.length)
 const codeApprovalNoticeCount = computed(() => props.canDecideMaterialCode
   ? codeApplications.value.filter(application => application.status === 'Pending' && application.applicationType !== 'BomHeader').length
     + new Set(codeApplications.value
       .filter(application => application.status === 'Pending' && application.applicationType === 'BomHeader')
       .map(application => application.projectId)).size
   : 0)
+const pendingCodeApplicationCount = computed(() => codeApplications.value.filter(application => application.status === 'Pending').length)
+const currentWorkCount = computed(() => pendingCodeApplicationCount.value + currentSynchronizationTasks.value.length)
+const historyCodeApplicationRows = computed(() => codeApplications.value.filter(application => applicationWorkflowCompleted(application)))
+const synchronizationHistoryTasks = computed(() => tasks.value
+  .filter(task => task.status === 'Succeeded' && applicationsForSyncTask(task).length === 0)
+  .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt)))
+const historyWorkCount = computed(() => historyCodeApplicationRows.value.length + synchronizationHistoryTasks.value.length)
+const pagedApprovalHistoryRows = computed(() => historyCodeApplicationRows.value.slice(
+  (approvalHistoryPage.value - 1) * approvalHistoryPageSize.value,
+  approvalHistoryPage.value * approvalHistoryPageSize.value,
+))
+const pagedSynchronizationHistoryTasks = computed(() => synchronizationHistoryTasks.value.slice(
+  (syncHistoryPage.value - 1) * syncHistoryPageSize.value,
+  syncHistoryPage.value * syncHistoryPageSize.value,
+))
 watch([syncTaskNoticeCount, codeApprovalNoticeCount], ([syncTasks, codeApprovals]) => {
   emit('noticeCountsChange', { syncTasks, codeApprovals })
 }, { immediate: true })
@@ -200,9 +251,12 @@ const supplyLabels: Record<MaterialSupplyMode, string> = { Purchase: '采购', M
 const syncLabels: Record<string, string> = {
   NotQueued: '未排队', PreviewReady: '请求预览', Pending: '待同步', Succeeded: '已同步', Failed: '失败', NeedsReview: '待复核', Superseded: '已废止',
 }
+const workflowLabels: Record<string, string> = {
+  PendingMaterialSync: '待同步料品', MaterialSyncFailed: '料品同步失败', PendingBomSync: '待同步A1 BOM', BomSyncFailed: 'A1 BOM同步失败',
+}
 const bomHeaderLabels: Record<string, string> = { Master: '项目主BOM', Standard: '标准件BOM', NonStandard: '非标件BOM', Electrical: '电气BOM' }
 const bomHeaderOrder: Record<string, number> = { Master: 0, Standard: 1, NonStandard: 2, Electrical: 3 }
-const codeApplicationRows = computed<MaterialCodeApprovalRow[]>(() => {
+const pendingCodeApplicationRows = computed<MaterialCodeApprovalRow[]>(() => {
   const pendingGroups = new Map<string, MaterialCodeApplication[]>()
   for (const application of codeApplications.value) {
     if (application.status !== 'Pending' || application.applicationType !== 'BomHeader') continue
@@ -213,7 +267,8 @@ const codeApplicationRows = computed<MaterialCodeApprovalRow[]>(() => {
 
   const emittedProjects = new Set<string>()
   return codeApplications.value.flatMap(application => {
-    if (application.status !== 'Pending' || application.applicationType !== 'BomHeader') return [application]
+    if (application.status !== 'Pending') return []
+    if (application.applicationType !== 'BomHeader') return [application]
     if (emittedProjects.has(application.projectId)) return []
     emittedProjects.add(application.projectId)
     const groupedApplications = [...(pendingGroups.get(application.projectId) ?? [application])]
@@ -501,6 +556,32 @@ async function loadCodeApplications() {
 }
 
 watch(activeTab, value => { if (value === 'code-approvals' && codeApplications.value.length === 0) void loadCodeApplications() })
+watch(codeApprovalView, () => {
+  selectedCodeApplications.value = []
+  selectedSyncTasks.value = []
+})
+
+function showSyncResult(level: WorkflowResultLevel, title: string, summary: string, details: string[] = []) {
+  syncResult.value = { level, title, summary, details }
+}
+
+function showApprovalResult(
+  approved: boolean,
+  total: number,
+  succeeded: number,
+  failures: string[],
+  automationWarnings: string[],
+) {
+  const action = approved ? '批准' : '退回'
+  const summary = `共 ${total} 项，已${action} ${succeeded} 项，失败 ${failures.length} 项${automationWarnings.length ? `，后续待处理 ${automationWarnings.length} 项` : ''}。`
+  const level: WorkflowResultLevel = failures.length > 0
+    ? succeeded > 0 ? 'warning' : 'error'
+    : automationWarnings.length > 0 ? 'warning' : 'success'
+  approvalResult.value = { level, title: failures.length || automationWarnings.length ? `审批${succeeded ? '部分完成' : '失败'}` : '审批完成', summary, details: [
+    ...automationWarnings.map(message => `待处理：${message}`),
+    ...failures.map(message => `失败：${message}`),
+  ] }
+}
 
 async function decideCodeApplication(application: MaterialCodeApprovalRow, approved: boolean) {
   const targets = applicationsForApprovalRow(application)
@@ -517,40 +598,24 @@ async function decideCodeApplication(application: MaterialCodeApprovalRow, appro
   }
   decidingApplicationId.value = application.id
   let succeeded = 0
-  const failedIds = new Set<string>()
   const failures: string[] = []
   const automationWarnings: string[] = []
   try {
     for (const [index, target] of targets.entries()) {
       try {
         approvalProgressText.value = approved
-          ? `正在处理第 ${index + 1}/${targets.length} 项：读取U9C最新序号、申请正式料号并回查，请勿重复操作。`
+          ? `正在处理第 ${index + 1}/${targets.length} 项：按PLM基线分配料号，批准后请在本页选择对应记录完成U9C同步。`
           : `正在退回第 ${index + 1}/${targets.length} 项料号申请。`
         const result = await decideMaterialCodeApplication(target.id, target.rowVersion, approved, comment, props.token)
         succeeded++
         if (approved && (result.automation?.stage === 'ItemSyncFailed' || result.automation?.stage === 'BomSyncFailed'))
           automationWarnings.push(`${bomHeaderLabels[target.bomHeaderKind ?? ''] || target.applicationName || target.id}：${result.automation.message}`)
       } catch (error) {
-        failedIds.add(target.id)
         failures.push(`${bomHeaderLabels[target.bomHeaderKind ?? ''] || target.applicationName || target.id}：${error instanceof Error ? error.message : '处理失败'}`)
       }
     }
-    if (approved && application.groupedApplications && failedIds.size === 0) {
-      try {
-        const finalized = await continueProjectBomU9Automation(application.projectId, props.token)
-        if (finalized.stage !== 'Completed') automationWarnings.push(`自动收尾：${finalized.message}`)
-      } catch (error) {
-        automationWarnings.push(`自动收尾：${error instanceof Error ? error.message : '执行失败'}`)
-      }
-    }
-    if (succeeded) {
-      ElMessage.success(targets.length > 1
-        ? `已${approved ? '批准' : '退回'}该项目 ${succeeded} 项BOM料号申请`
-        : approved ? '料号申请已批准，U9C自动串联已启动' : '料号申请已退回')
-      await load()
-    }
-    if (failures.length) ElMessage.error(`有 ${failures.length} 项未处理：${failures.join('；')}`)
-    if (automationWarnings.length) ElMessage.warning(`有 ${automationWarnings.length} 项已批准但自动同步需处理：${automationWarnings.join('；')}`)
+    if (succeeded) await load()
+    showApprovalResult(approved, targets.length, succeeded, failures, automationWarnings)
   } finally {
     decidingApplicationId.value = null
     approvalProgressText.value = ''
@@ -573,7 +638,7 @@ async function decideSelectedCodeApplications(approved: boolean) {
   try {
     if (approved) {
       await ElMessageBox.confirm(
-        `确认批量批准已选择的 ${targets.length} 项料号申请？批准后系统将依次同步U9C料品、创建或追加A1 BOM并自动回查。`,
+        `确认批量批准已选择的 ${targets.length} 项料号申请？批准后系统分配PLM料号，对应记录将留在本页等待勾选同步到U9C。`,
         '批量批准料号申请',
         { type: 'warning', confirmButtonText: '批量批准', cancelButtonText: '取消' },
       )
@@ -592,44 +657,25 @@ async function decideSelectedCodeApplications(approved: boolean) {
 
   batchDecidingApplications.value = true
   let succeeded = 0
-  const failedIds = new Set<string>()
   const failures: string[] = []
   const automationWarnings: string[] = []
   try {
     for (const [index, application] of targets.entries()) {
       try {
         approvalProgressText.value = approved
-          ? `正在批量处理第 ${index + 1}/${targets.length} 项：读取U9C最新序号、申请正式料号并回查，请勿重复操作。`
+          ? `正在批量处理第 ${index + 1}/${targets.length} 项：按PLM基线分配料号，随后在本页执行第二步U9C同步。`
           : `正在批量退回第 ${index + 1}/${targets.length} 项料号申请。`
         const result = await decideMaterialCodeApplication(application.id, application.rowVersion, approved, comment, props.token)
         succeeded++
         if (approved && (result.automation?.stage === 'ItemSyncFailed' || result.automation?.stage === 'BomSyncFailed'))
           automationWarnings.push(`${application.projectCode || application.applicationName || application.id}：${result.automation.message}`)
       } catch (error) {
-        failedIds.add(application.id)
         failures.push(`${application.projectCode || application.applicationName || application.id}：${error instanceof Error ? error.message : '处理失败'}`)
       }
     }
 
-    if (approved) {
-      const groupedRows = selectedCodeApplications.value.filter(row => row.groupedApplications)
-      for (const row of groupedRows) {
-        if (applicationsForApprovalRow(row).some(application => failedIds.has(application.id))) continue
-        try {
-          const finalized = await continueProjectBomU9Automation(row.projectId, props.token)
-          if (finalized.stage !== 'Completed') automationWarnings.push(`${row.projectCode || row.projectName || row.projectId}自动收尾：${finalized.message}`)
-        } catch (error) {
-          automationWarnings.push(`${row.projectCode || row.projectName || row.projectId}自动收尾：${error instanceof Error ? error.message : '执行失败'}`)
-        }
-      }
-    }
-
-    if (succeeded) {
-      ElMessage.success(`已批量${approved ? '批准' : '退回'} ${succeeded} 项料号申请`)
-      await load()
-    }
-    if (failures.length) ElMessage.error(`有 ${failures.length} 项未处理：${failures.join('；')}`)
-    if (automationWarnings.length) ElMessage.warning(`有 ${automationWarnings.length} 项已批准但自动同步需处理：${automationWarnings.join('；')}`)
+    if (succeeded) await load()
+    showApprovalResult(approved, targets.length, succeeded, failures, automationWarnings)
   } finally {
     batchDecidingApplications.value = false
     approvalProgressText.value = ''
@@ -917,84 +963,129 @@ async function queryU9(item: PdmMaterial, notify = true): Promise<U9ValidationSt
   }
 }
 
-async function retryTask(task: MaterialSyncTask) {
-  try {
-    const saved = await retryMaterialSyncTask(task.id, props.token)
-    tasks.value[tasks.value.findIndex(item => item.id === saved.id)] = saved
-    ElMessage.success('同步任务已重新生成请求预览')
-  } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : '同步任务重试失败')
-  }
+function syncTaskWorkflowState(task: MaterialSyncTask) {
+  const states = applicationsForSyncTask(task).map(application => application.workflowState)
+  return states.find(state => state === 'MaterialSyncFailed' || state === 'BomSyncFailed')
+    ?? states.find(state => state === 'PendingBomSync')
+    ?? states.find(state => state === 'PendingMaterialSync')
+}
+
+function syncTaskStatusLabel(task: MaterialSyncTask) {
+  const state = syncTaskWorkflowState(task)
+  return state ? workflowLabels[state] : syncLabels[task.status]
+}
+
+function syncTaskTagType(task: MaterialSyncTask) {
+  const state = syncTaskWorkflowState(task)
+  if (state === 'MaterialSyncFailed' || state === 'BomSyncFailed' || task.status === 'Failed') return 'danger'
+  if (state === 'PendingMaterialSync' || state === 'PendingBomSync' || task.status === 'PreviewReady') return 'warning'
+  return task.status === 'Succeeded' ? 'success' : 'info'
+}
+
+function syncTaskError(task: MaterialSyncTask) {
+  return applicationsForSyncTask(task).find(application => application.syncError)?.syncError
+    ?? applicationsForSyncTask(task).find(application => application.workflowMessage)?.workflowMessage
+    ?? task.lastError
+    ?? '—'
 }
 
 async function executeTask(task: MaterialSyncTask) {
   try {
-    const operationText = task.operation === 'Update' ? '修改' : '创建'
     await ElMessageBox.confirm(
-      `系统将先按料号查询 U9C，再${operationText} ${materials.value.find(item => item.id === task.materialId)?.materialCode ?? '该料品'}。是否继续？`,
+      `确认将 ${task.materialCode || task.materialName || '该料品'} 同步到U9C？若料号已被占用，系统会自动换号并重试；BOM申请还会继续创建或追加A1 BOM。`,
       '同步到 U9C',
-      { type: 'warning', confirmButtonText: '查询并同步', cancelButtonText: '取消' },
+      { type: 'warning', confirmButtonText: '确认同步', cancelButtonText: '取消' },
     )
     syncingTaskId.value = task.id
+    syncProgressText.value = `正在同步 ${task.materialCode || task.materialName || '该料品'} 到U9C。`
     const result = await executeMaterialSyncTask(task.id, props.token)
-    const taskIndex = tasks.value.findIndex(item => item.id === result.task.id)
-    if (taskIndex >= 0) tasks.value[taskIndex] = result.task
-    const materialIndex = materials.value.findIndex(item => item.id === result.material.id)
-    if (materialIndex >= 0) materials.value[materialIndex] = result.material
-    selectedSyncTasks.value = selectedSyncTasks.value.filter(item => item.id !== result.task.id)
-    ElMessage.success(result.updated ? 'U9C料品修改并回查成功' : result.alreadyExisted ? 'U9C已存在同料号，已完成幂等关联' : 'U9C料品创建并关联成功')
+    await load()
+    showSyncResult(
+      result.completed ? 'success' : 'warning',
+      result.completed ? '同步完成' : '同步部分完成',
+      result.message || (result.completed ? '料号审批与U9C同步流程已完成。' : 'U9C料品已同步，A1 BOM仍待后续条件满足。'),
+    )
   } catch (error) {
     if (error === 'cancel' || error === 'close') return
-    ElMessage.error(error instanceof Error ? error.message : 'U9C料品同步失败')
+    showSyncResult('error', '同步失败', error instanceof Error ? error.message : 'U9C料品同步失败')
     await load()
   } finally {
     syncingTaskId.value = null
+    syncProgressText.value = ''
   }
 }
 
 function canSelectSyncTask(task: MaterialSyncTask) {
-  return props.canApprove
+  return (props.canApprove || props.canDecideMaterialCode)
     && !batchSyncingTasks.value
     && syncingTaskId.value === null
-    && !['Succeeded', 'Pending', 'Superseded'].includes(task.status)
+    && currentSynchronizationTasks.value.some(item => item.id === task.id)
+    && !['Pending', 'Superseded'].includes(task.status)
 }
 
 async function executeSelectedTasks() {
   const selectedIds = new Set(selectedSyncTasks.value.map(task => task.id))
-  const targets = tasks.value.filter(task => selectedIds.has(task.id) && !['Succeeded', 'Pending', 'Superseded'].includes(task.status))
-  if (!props.canApprove || targets.length === 0 || batchSyncingTasks.value || syncingTaskId.value !== null) return
+  const targets = currentSynchronizationTasks.value.filter(task => selectedIds.has(task.id) && canSelectSyncTask(task))
+  if (!(props.canApprove || props.canDecideMaterialCode) || targets.length === 0 || batchSyncingTasks.value || syncingTaskId.value !== null) return
 
   try {
     await ElMessageBox.confirm(
-      `确认批量同步已选择的 ${targets.length} 个任务到 U9C？系统会逐条执行幂等查询和创建或修改，单条失败不会中断其余任务。`,
+      `确认批量同步已选择的 ${targets.length} 个任务到U9C？系统会逐条处理，重复料号自动换号；单条失败不会中断其余任务。`,
       '批量同步到 U9C',
       { type: 'warning', confirmButtonText: '确认批量同步', cancelButtonText: '取消' },
     )
   } catch { return }
 
   batchSyncingTasks.value = true
-  let succeeded = 0
-  const failures: string[] = []
   try {
-    for (const task of targets) {
-      try {
-        const result = await executeMaterialSyncTask(task.id, props.token)
-        const taskIndex = tasks.value.findIndex(item => item.id === result.task.id)
-        if (taskIndex >= 0) tasks.value[taskIndex] = result.task
-        const materialIndex = materials.value.findIndex(item => item.id === result.material.id)
-        if (materialIndex >= 0) materials.value[materialIndex] = result.material
-        succeeded++
-      } catch (error) {
-        failures.push(`${task.materialCode || task.materialName || task.id}：${error instanceof Error ? error.message : '同步失败'}`)
-      }
-    }
-
-    if (succeeded) ElMessage.success(`已批量同步 ${succeeded} 个任务`)
-    if (failures.length) ElMessage.error(`有 ${failures.length} 个任务同步失败：${failures.join('；')}`)
-    await load()
+    const batch = await createMaterialSyncBatch(targets.map(task => task.id), props.token)
+    await monitorMaterialSyncBatch(batch)
+  } catch (error) {
+    showSyncResult('error', '同步批次提交失败', error instanceof Error ? error.message : 'U9C批量同步任务提交失败')
   } finally {
     batchSyncingTasks.value = false
     selectedSyncTasks.value = []
+    syncProgressText.value = ''
+  }
+}
+
+async function monitorMaterialSyncBatch(initial: MaterialSyncBatch) {
+  let batch = initial
+  while (batch.status === 'Queued' || batch.status === 'Running') {
+    syncProgressText.value = batch.status === 'Queued'
+      ? `批次已提交，等待后台执行（${batch.completedCount}/${batch.totalCount}）。`
+      : `正在按料号升序同步第 ${Math.min(batch.completedCount + 1, batch.totalCount)}/${batch.totalCount} 项：${batch.currentMaterialCode || '正在读取任务'}。`
+    await new Promise(resolve => window.setTimeout(resolve, 1000))
+    batch = await getMaterialSyncBatch(batch.id, props.token)
+  }
+
+  await load()
+  const itemDetails = batch.items
+    .filter(item => item.status === 'Waiting' || item.status === 'Failed')
+    .map(item => `${item.status === 'Waiting' ? '待处理' : '失败'}：${item.message || item.taskId}`)
+  const level: WorkflowResultLevel = batch.status === 'Succeeded' ? 'success'
+    : batch.status === 'Failed' ? 'error' : 'warning'
+  showSyncResult(
+    level,
+    batch.status === 'Succeeded' ? '同步完成' : batch.status === 'Failed' ? '同步失败' : '同步部分完成',
+    `共 ${batch.totalCount} 项，完成 ${batch.succeededCount} 项，等待A1 BOM ${batch.waitingCount} 项，失败 ${batch.failedCount} 项。`,
+    itemDetails,
+  )
+}
+
+async function resumeMaterialSyncBatch() {
+  if (batchSyncingTasks.value) return
+  try {
+    const active = (await listMaterialSyncBatches(props.token))
+      .find(batch => batch.status === 'Queued' || batch.status === 'Running')
+    if (!active) return
+    batchSyncingTasks.value = true
+    await monitorMaterialSyncBatch(active)
+  } catch (error) {
+    showSyncResult('error', '同步状态读取失败', error instanceof Error ? error.message : 'U9C批量同步状态读取失败')
+  } finally {
+    batchSyncingTasks.value = false
+    syncProgressText.value = ''
   }
 }
 
@@ -1003,10 +1094,12 @@ function showPreview(task: MaterialSyncTask) {
   previewOpen.value = true
 }
 
-watch(() => props.requestedTab, value => { if (value) activeTab.value = value })
+const normalizeRequestedTab = (value: string) => value === 'tasks' ? 'code-approvals' : value
+watch(() => props.requestedTab, value => { if (value) activeTab.value = normalizeRequestedTab(value) })
 onMounted(() => {
-  activeTab.value = props.requestedTab
+  activeTab.value = normalizeRequestedTab(props.requestedTab)
   void load()
+  void resumeMaterialSyncBatch()
 })
 </script>
 
@@ -1058,57 +1151,113 @@ onMounted(() => {
         </div>
       </el-tab-pane>
 
-      <el-tab-pane name="tasks">
-        <template #label><span class="material-tab-label">同步任务<em v-if="syncTaskNoticeCount">{{ syncTaskNoticeCount }}</em></span></template>
-        <div class="material-sync-note">这里是审批后自动同步的审计与修复页面；正常流程无需再次操作，失败任务可在此重试。</div>
-        <div v-if="canApprove" class="material-sync-toolbar">
-          <el-button type="danger" :disabled="selectedSyncTasks.length === 0 || batchSyncingTasks || syncingTaskId !== null" :loading="batchSyncingTasks" @click="executeSelectedTasks">批量同步到U9C</el-button>
-          <span>已选择 {{ selectedSyncTasks.length }} 个可执行任务</span>
-        </div>
-        <el-table class="material-sync-table" :data="tasks" row-key="id" empty-text="尚无同步任务" @selection-change="selectedSyncTasks = $event">
-          <el-table-column v-if="canApprove" type="selection" width="38" :selectable="canSelectSyncTask" />
-          <el-table-column label="来源" min-width="190" show-overflow-tooltip><template #default="{ row }">{{ row.projectCode ? `${row.projectCode} · ${row.projectName || '未命名项目'}` : '料品主档' }}</template></el-table-column>
-          <el-table-column label="审批对象" min-width="150" show-overflow-tooltip><template #default="{ row }">{{ row.bomHeaderKind ? bomHeaderLabels[row.bomHeaderKind] : row.materialName || '普通料品' }}</template></el-table-column>
-          <el-table-column prop="materialCode" label="PLM料号" min-width="120"><template #default="{ row }">{{ row.materialCode || '—' }}</template></el-table-column>
-          <el-table-column label="申请人" min-width="90"><template #default="{ row }">{{ displayUserName(row.requestedBy) }}</template></el-table-column>
-          <el-table-column label="申请时间" min-width="145"><template #default="{ row }">{{ row.requestedAt ? dateTimeLabel(row.requestedAt) : '—' }}</template></el-table-column>
-          <el-table-column label="状态" width="110"><template #default="{ row }"><el-tag :type="row.status === 'Succeeded' ? 'success' : row.status === 'Failed' ? 'danger' : 'warning'">{{ syncLabels[row.status] }}</el-tag></template></el-table-column>
-          <el-table-column prop="attemptCount" label="重试次数" width="90" />
-          <el-table-column prop="payloadSha256" label="请求SHA-256" min-width="220" show-overflow-tooltip />
-          <el-table-column prop="lastError" label="错误" min-width="180" show-overflow-tooltip />
-          <el-table-column label="操作" width="240"><template #default="{ row }"><el-button link type="primary" @click="showPreview(row)">查看请求</el-button><el-button v-if="canApprove && !['Succeeded', 'Pending', 'Superseded'].includes(row.status)" link :disabled="batchSyncingTasks" @click="retryTask(row)">重试</el-button><el-button v-if="canApprove && !['Succeeded', 'Pending', 'Superseded'].includes(row.status)" link type="danger" :disabled="batchSyncingTasks" :loading="syncingTaskId === row.id" @click="executeTask(row)">同步到U9C</el-button></template></el-table-column>
-        </el-table>
-      </el-tab-pane>
-
       <el-tab-pane name="code-approvals">
-        <template #label><span class="material-tab-label">料号审批<em v-if="codeApprovalNoticeCount">{{ codeApprovalNoticeCount }}</em></span></template>
-        <div class="material-code-approval-note">BOM料号和标准件料号都在这里审批；BOM料号批准后，系统先自动同步U9C料品。U9C不接受零子件BOM，待BOM审核产生首个正式子件后自动创建A1并回查，标准化无需返回项目页二次操作；后续正式子件也只在BOM审核发布后自动同步。已批准和已退回记录长期保留在本页。</div>
-        <div v-if="approvalProgressText" class="material-code-approval-progress" role="status" aria-live="polite">{{ approvalProgressText }}</div>
-        <div v-if="canDecideMaterialCode" class="material-code-approval-toolbar">
-          <div class="material-code-approval-toolbar__actions">
-            <el-button type="primary" :disabled="selectedCodeApplications.length === 0 || decidingApplicationId !== null" :loading="batchDecidingApplications" @click="decideSelectedCodeApplications(true)">批量批准</el-button>
-            <el-button type="danger" plain :disabled="selectedCodeApplications.length === 0 || batchDecidingApplications || decidingApplicationId !== null" @click="decideSelectedCodeApplications(false)">批量退回</el-button>
-          </div>
-          <span>已选择 {{ selectedCodeApplications.length }} 项待审批申请</span>
-        </div>
-        <div class="material-code-approval-table-shell">
-          <el-table class="material-code-approval-table" :data="codeApplicationRows" row-key="id" stripe table-layout="fixed" :fit="true" empty-text="尚无料号申请" @selection-change="selectedCodeApplications = $event">
-            <el-table-column v-if="canDecideMaterialCode" type="selection" width="38" :selectable="canSelectCodeApplication" />
-            <el-table-column label="申请类型" width="64"><template #default="{ row }">{{ applicationTypeLabel(row) }}</template></el-table-column>
-            <el-table-column label="来源项目" width="116" show-overflow-tooltip><template #default="{ row }">{{ row.projectCode ? `${row.projectCode} · ${row.projectName || '未命名项目'}` : row.projectId }}</template></el-table-column>
-            <el-table-column label="BOM层级" width="82" show-overflow-tooltip><template #default="{ row }">{{ applicationTargetLabel(row) }}</template></el-table-column>
-            <el-table-column prop="categoryCode" label="料号分类" width="64"><template #default="{ row }">{{ row.categoryCode || '—' }}</template></el-table-column>
-            <el-table-column prop="applicationName" label="申请对象" width="110" show-overflow-tooltip><template #default="{ row }">{{ row.applicationName || row.bomItemName || '—' }}</template></el-table-column>
-            <el-table-column prop="specification" label="型号" width="78" show-overflow-tooltip><template #default="{ row }">{{ row.specification || '—' }}</template></el-table-column>
-            <el-table-column prop="brand" label="品牌" width="62" show-overflow-tooltip><template #default="{ row }">{{ row.brand || '—' }}</template></el-table-column>
-            <el-table-column prop="remark" label="备注" width="72" show-overflow-tooltip><template #default="{ row }">{{ row.remark || '—' }}</template></el-table-column>
-            <el-table-column label="申请人" width="70" show-overflow-tooltip><template #default="{ row }">{{ displayUserName(row.requestedBy) }}</template></el-table-column>
-            <el-table-column label="申请时间" width="116" show-overflow-tooltip><template #default="{ row }">{{ dateTimeLabel(row.requestedAt) }}</template></el-table-column>
-            <el-table-column label="状态" width="72"><template #default="{ row }"><el-tag :type="row.status === 'Approved' ? 'success' : row.status === 'Rejected' ? 'danger' : 'warning'">{{ row.status === 'Approved' ? '已批准' : row.status === 'Rejected' ? '已退回' : '待审批' }}</el-tag></template></el-table-column>
-            <el-table-column prop="materialCode" label="审批料号" width="98" show-overflow-tooltip><template #default="{ row }">{{ applicationMaterialCodeLabel(row) }}</template></el-table-column>
-            <el-table-column label="操作" width="92"><template #default="{ row }"><template v-if="row.status === 'Pending' && canDecideMaterialCode"><el-button link type="primary" :loading="decidingApplicationId === row.id" :disabled="batchDecidingApplications" @click="decideCodeApplication(row, true)">批准</el-button><el-button link type="danger" :disabled="decidingApplicationId === row.id || batchDecidingApplications" @click="decideCodeApplication(row, false)">退回</el-button></template><span v-else>{{ row.decidedBy || '—' }}</span></template></el-table-column>
-          </el-table>
-        </div>
+        <template #label><span class="material-tab-label">料号审批<em v-if="currentWorkCount">{{ currentWorkCount }}</em></span></template>
+        <div class="material-code-approval-note">本页按两步完成料号流程：第一步批准并按PLM分类基线分配料号；第二步勾选对应记录同步到U9C。重复料号会自动换号并重试；U9C料品及适用的A1 BOM全部完成后才进入审批历史。</div>
+        <el-tabs v-model="codeApprovalView" class="material-code-approval-subtabs">
+          <el-tab-pane name="pending">
+            <template #label><span class="material-code-approval-subtab-label">当前处理 <em>{{ currentWorkCount }}</em></span></template>
+            <div class="material-code-workflow-columns">
+              <section class="material-code-workflow-stage" aria-label="第一步料号审批">
+                <div class="material-code-workflow-stage__title"><strong>第一步：料号审批</strong><span>批准后分配PLM料号，并转入右侧等待同步。</span></div>
+                <section class="material-step-feedback material-approval-feedback" :class="approvalResult ? `is-${approvalResult.level}` : 'is-empty'" aria-label="料号审批状态与结果">
+                  <div class="material-step-feedback__status" role="status" aria-live="polite"><strong>运行状态</strong><span :class="{ 'is-running': approvalProgressText }">{{ approvalProgressText || '空闲' }}</span></div>
+                  <div class="material-step-feedback__result" role="status" aria-live="polite">
+                    <header><strong>处理结果</strong><span>{{ approvalResult ? approvalResult.title : '暂无结果' }}</span></header>
+                    <p>{{ approvalResult ? approvalResult.summary : '完成料号批准或退回后，结果将在此固定显示。' }}</p>
+                    <ul v-if="approvalResult?.details.length"><li v-for="detail in approvalResult.details" :key="detail">{{ detail }}</li></ul>
+                  </div>
+                </section>
+                <div v-if="canDecideMaterialCode" class="material-code-approval-toolbar">
+                  <div class="material-code-approval-toolbar__actions">
+                    <el-button type="primary" :disabled="selectedCodeApplications.length === 0 || decidingApplicationId !== null" :loading="batchDecidingApplications" @click="decideSelectedCodeApplications(true)">批量批准</el-button>
+                    <el-button type="danger" plain :disabled="selectedCodeApplications.length === 0 || batchDecidingApplications || decidingApplicationId !== null" @click="decideSelectedCodeApplications(false)">批量退回</el-button>
+                  </div>
+                  <span>已选择 {{ selectedCodeApplications.length }} 项待审批申请</span>
+                </div>
+                <div class="material-code-approval-table-shell">
+                  <el-table class="material-code-approval-table material-code-approval-table--pending" :data="pendingCodeApplicationRows" row-key="id" stripe table-layout="fixed" :fit="true" empty-text="当前没有待审批申请" @selection-change="selectedCodeApplications = $event">
+                    <el-table-column v-if="canDecideMaterialCode" type="selection" width="38" :selectable="canSelectCodeApplication" />
+                    <el-table-column label="申请类型" width="64"><template #default="{ row }">{{ applicationTypeLabel(row) }}</template></el-table-column>
+                    <el-table-column label="来源项目" width="116" show-overflow-tooltip><template #default="{ row }">{{ row.projectCode ? `${row.projectCode} · ${row.projectName || '未命名项目'}` : row.projectId }}</template></el-table-column>
+                    <el-table-column label="BOM层级" width="82" show-overflow-tooltip><template #default="{ row }">{{ applicationTargetLabel(row) }}</template></el-table-column>
+                    <el-table-column prop="categoryCode" label="料号分类" width="64"><template #default="{ row }">{{ row.categoryCode || '—' }}</template></el-table-column>
+                    <el-table-column prop="applicationName" label="申请对象" width="110" show-overflow-tooltip><template #default="{ row }">{{ row.applicationName || row.bomItemName || '—' }}</template></el-table-column>
+                    <el-table-column prop="specification" label="型号" width="78" show-overflow-tooltip><template #default="{ row }">{{ row.specification || '—' }}</template></el-table-column>
+                    <el-table-column prop="brand" label="品牌" width="62" show-overflow-tooltip><template #default="{ row }">{{ row.brand || '—' }}</template></el-table-column>
+                    <el-table-column prop="remark" label="备注" width="72" show-overflow-tooltip><template #default="{ row }">{{ row.remark || '—' }}</template></el-table-column>
+                    <el-table-column label="申请人" width="70" show-overflow-tooltip><template #default="{ row }">{{ displayUserName(row.requestedBy) }}</template></el-table-column>
+                    <el-table-column label="申请时间" width="116" show-overflow-tooltip><template #default="{ row }">{{ dateTimeLabel(row.requestedAt) }}</template></el-table-column>
+                    <el-table-column label="状态" width="72"><template #default><el-tag type="warning">待审批</el-tag></template></el-table-column>
+                    <el-table-column prop="materialCode" label="审批料号" width="98" show-overflow-tooltip><template #default="{ row }">{{ applicationMaterialCodeLabel(row) }}</template></el-table-column>
+                    <el-table-column label="操作" width="92"><template #default="{ row }"><el-button v-if="canDecideMaterialCode" link type="primary" :loading="decidingApplicationId === row.id" :disabled="batchDecidingApplications" @click="decideCodeApplication(row, true)">批准</el-button><el-button v-if="canDecideMaterialCode" link type="danger" :disabled="decidingApplicationId === row.id || batchDecidingApplications" @click="decideCodeApplication(row, false)">退回</el-button><span v-if="!canDecideMaterialCode">—</span></template></el-table-column>
+                  </el-table>
+                </div>
+              </section>
+              <section class="material-code-workflow-stage material-code-sync-stage" aria-label="第二步同步到U9C">
+                <div class="material-code-workflow-stage__title"><strong>第二步：同步到U9C</strong><span>失败记录保留在此，可选择后再次同步。</span></div>
+                <section class="material-step-feedback material-sync-feedback" :class="syncResult ? `is-${syncResult.level}` : 'is-empty'" aria-label="U9C同步状态与结果">
+                  <div class="material-step-feedback__status" role="status" aria-live="polite"><strong>运行状态</strong><span :class="{ 'is-running': syncProgressText }">{{ syncProgressText || '空闲' }}</span></div>
+                  <div class="material-step-feedback__result" role="status" aria-live="polite">
+                    <header><strong>处理结果</strong><span>{{ syncResult ? syncResult.title : '暂无结果' }}</span></header>
+                    <p>{{ syncResult ? syncResult.summary : '完成U9C同步后，结果将在此固定显示。' }}</p>
+                    <ul v-if="syncResult?.details.length"><li v-for="detail in syncResult.details" :key="detail">{{ detail }}</li></ul>
+                  </div>
+                </section>
+                <div v-if="canApprove || canDecideMaterialCode" class="material-sync-toolbar">
+                  <el-button type="primary" :disabled="selectedSyncTasks.length === 0 || batchSyncingTasks || syncingTaskId !== null" :loading="batchSyncingTasks" @click="executeSelectedTasks">批量同步到U9C</el-button>
+                  <span>已选择 {{ selectedSyncTasks.length }} 个可执行任务</span>
+                </div>
+                <el-table class="material-sync-table" :data="currentSynchronizationTasks" row-key="id" stripe table-layout="fixed" :fit="true" empty-text="当前没有待同步记录" @selection-change="selectedSyncTasks = $event">
+                  <el-table-column v-if="canApprove || canDecideMaterialCode" type="selection" width="38" :selectable="canSelectSyncTask" />
+                  <el-table-column label="来源" width="150" show-overflow-tooltip><template #default="{ row }">{{ row.projectCode ? `${row.projectCode} · ${row.projectName || '未命名项目'}` : '料品主档' }}</template></el-table-column>
+                  <el-table-column label="审批对象" width="130" show-overflow-tooltip><template #default="{ row }">{{ row.bomHeaderKind ? bomHeaderLabels[row.bomHeaderKind] : row.materialName || '普通料品' }}</template></el-table-column>
+                  <el-table-column prop="materialCode" label="PLM料号" width="110"><template #default="{ row }">{{ row.materialCode || '—' }}</template></el-table-column>
+                  <el-table-column label="申请人" width="74"><template #default="{ row }">{{ displayUserName(row.requestedBy) }}</template></el-table-column>
+                  <el-table-column label="申请时间" width="124"><template #default="{ row }">{{ row.requestedAt ? dateTimeLabel(row.requestedAt) : '—' }}</template></el-table-column>
+                  <el-table-column label="流程状态" width="112"><template #default="{ row }"><el-tag :type="syncTaskTagType(row)">{{ syncTaskStatusLabel(row) }}</el-tag></template></el-table-column>
+                  <el-table-column label="说明" min-width="210" show-overflow-tooltip><template #default="{ row }">{{ syncTaskError(row) }}</template></el-table-column>
+                  <el-table-column label="操作" width="132"><template #default="{ row }"><el-button link type="primary" @click="showPreview(row)">查看请求</el-button><el-button v-if="canSelectSyncTask(row)" link type="primary" :disabled="batchSyncingTasks" :loading="syncingTaskId === row.id" @click="executeTask(row)">同步</el-button></template></el-table-column>
+                </el-table>
+              </section>
+            </div>
+          </el-tab-pane>
+          <el-tab-pane name="history">
+            <template #label><span class="material-code-approval-subtab-label">审批/同步历史 <em>{{ historyWorkCount }}</em></span></template>
+            <div class="material-code-workflow-columns material-code-history-columns">
+              <section class="material-code-workflow-stage" aria-label="第一步料号审批历史">
+                <div class="material-code-workflow-stage__title"><strong>第一步：审批历史</strong><span>已批准或已退回记录，只读。</span></div>
+                <div class="material-code-approval-table-shell">
+                  <el-table class="material-code-approval-table material-code-approval-table--history" :data="pagedApprovalHistoryRows" row-key="id" stripe table-layout="fixed" :fit="true" empty-text="尚无审批历史">
+                    <el-table-column label="申请类型" width="64"><template #default="{ row }">{{ applicationTypeLabel(row) }}</template></el-table-column>
+                    <el-table-column label="来源项目" width="116" show-overflow-tooltip><template #default="{ row }">{{ row.projectCode ? `${row.projectCode} · ${row.projectName || '未命名项目'}` : row.projectId }}</template></el-table-column>
+                    <el-table-column label="BOM层级" width="82" show-overflow-tooltip><template #default="{ row }">{{ applicationTargetLabel(row) }}</template></el-table-column>
+                    <el-table-column prop="categoryCode" label="料号分类" width="64"><template #default="{ row }">{{ row.categoryCode || '—' }}</template></el-table-column>
+                    <el-table-column prop="applicationName" label="申请对象" width="110" show-overflow-tooltip><template #default="{ row }">{{ row.applicationName || row.bomItemName || '—' }}</template></el-table-column>
+                    <el-table-column label="申请人" width="70" show-overflow-tooltip><template #default="{ row }">{{ displayUserName(row.requestedBy) }}</template></el-table-column>
+                    <el-table-column label="申请时间" width="116" show-overflow-tooltip><template #default="{ row }">{{ dateTimeLabel(row.requestedAt) }}</template></el-table-column>
+                    <el-table-column label="状态" width="72"><template #default="{ row }"><el-tag :type="row.status === 'Approved' ? 'success' : 'danger'">{{ row.status === 'Approved' ? '已批准' : '已退回' }}</el-tag></template></el-table-column>
+                    <el-table-column prop="materialCode" label="审批料号" width="98" show-overflow-tooltip><template #default="{ row }">{{ applicationMaterialCodeLabel(row) }}</template></el-table-column>
+                    <el-table-column label="审批人" width="92" show-overflow-tooltip><template #default="{ row }">{{ displayUserName(row.decidedBy) }}</template></el-table-column>
+                  </el-table>
+                </div>
+                <el-pagination v-model:current-page="approvalHistoryPage" v-model:page-size="approvalHistoryPageSize" class="material-history-pagination material-approval-history-pagination" :page-sizes="[10, 20, 50]" :total="historyCodeApplicationRows.length" layout="total, sizes, prev, pager, next" size="small" />
+              </section>
+              <section class="material-code-workflow-stage" aria-label="第二步U9C同步历史">
+                <div class="material-code-workflow-stage__title"><strong>第二步：同步历史</strong><span>仅显示已完成U9C同步的记录，只读。</span></div>
+                <el-table class="material-sync-table material-sync-table--history" :data="pagedSynchronizationHistoryTasks" row-key="id" stripe table-layout="fixed" :fit="true" empty-text="尚无同步历史">
+                  <el-table-column label="来源" width="150" show-overflow-tooltip><template #default="{ row }">{{ row.projectCode ? `${row.projectCode} · ${row.projectName || '未命名项目'}` : '料品主档' }}</template></el-table-column>
+                  <el-table-column label="同步对象" width="130" show-overflow-tooltip><template #default="{ row }">{{ row.bomHeaderKind ? bomHeaderLabels[row.bomHeaderKind] : row.materialName || '普通料品' }}</template></el-table-column>
+                  <el-table-column prop="materialCode" label="PLM料号" width="110"><template #default="{ row }">{{ row.materialCode || '—' }}</template></el-table-column>
+                  <el-table-column label="申请人" width="74"><template #default="{ row }">{{ displayUserName(row.requestedBy) }}</template></el-table-column>
+                  <el-table-column label="完成时间" width="124"><template #default="{ row }">{{ dateTimeLabel(row.updatedAt) }}</template></el-table-column>
+                  <el-table-column label="同步结果" width="90"><template #default><el-tag type="success">已同步</el-tag></template></el-table-column>
+                </el-table>
+                <el-pagination v-model:current-page="syncHistoryPage" v-model:page-size="syncHistoryPageSize" class="material-history-pagination material-sync-history-pagination" :page-sizes="[10, 20, 50]" :total="synchronizationHistoryTasks.length" layout="total, sizes, prev, pager, next" size="small" />
+              </section>
+            </div>
+          </el-tab-pane>
+        </el-tabs>
       </el-tab-pane>
 
       <el-tab-pane label="分类维护" name="rules">
@@ -1202,13 +1351,18 @@ onMounted(() => {
 .material-page{height:100%;min-height:0;display:flex;flex-direction:column}.material-tabs{min-height:0;flex:1 1 auto;display:flex;flex-direction:column}.material-tabs :deep(.el-tabs__header .el-tabs__item){font-size:13px;font-weight:600}.material-tabs :deep(.el-tabs__content){min-height:0;flex:1 1 auto}.material-tabs :deep(.el-tab-pane){height:100%;min-height:0}.material-master-layout{height:100%;min-height:0}.material-master-content{display:flex;flex-direction:column}.material-toolbar{flex:0 0 auto;margin-bottom:5px}.material-table-shell{min-height:0;flex:1 1 auto}.material-table{height:100%}.material-pagination{flex:0 0 auto;justify-content:flex-end;margin-top:5px}.material-pagination :deep(.el-pagination__total),.material-pagination :deep(.el-select__selected-item),.material-pagination :deep(button),.material-pagination :deep(.number){font-size:11px}
 .material-tab-label{display:inline-flex;align-items:center;gap:5px}.material-tab-label em{min-width:18px;height:18px;padding:0 5px;border-radius:9px;background:var(--pdm-blue);color:#fff;font-size:10px;font-style:normal;font-weight:600;line-height:18px;text-align:center}
 .material-table :deep(.el-table__body tr.el-table__row){height:30px}.material-table :deep(.el-table__body td.el-table__cell){height:30px;padding:0}.material-table :deep(.el-table__body .el-tag){height:20px;padding-top:0;padding-bottom:0;line-height:18px}
-.material-code-approval-note,.material-sync-note{margin-bottom:8px;padding:8px 10px;border:1px solid #dbeafe;border-radius:6px;background:#eff6ff;color:#475569;font-size:11px}
-.material-code-approval-progress{margin-bottom:8px;padding:8px 10px;border:1px solid #bfdbfe;border-radius:6px;background:#eff6ff;color:#1d4ed8;font-size:11px}
+.material-code-approval-note{margin-bottom:8px;padding:8px 10px;border:1px solid #dbeafe;border-radius:6px;background:#eff6ff;color:#475569;font-size:11px}
+.material-code-approval-subtabs{min-height:0}.material-code-approval-subtabs :deep(.el-tabs__header){margin:0 0 8px}.material-code-approval-subtabs :deep(.el-tabs__item){height:30px;font-size:11px;font-weight:600}.material-code-approval-subtab-label{display:inline-flex;align-items:center;gap:5px}.material-code-approval-subtab-label em{min-width:18px;height:18px;padding:0 5px;border-radius:9px;background:#e0f2fe;color:#0369a1;font-size:10px;font-style:normal;line-height:18px;text-align:center}
+.material-step-feedback{position:sticky;top:0;z-index:4;min-height:82px;max-height:132px;margin-bottom:8px;overflow:auto;padding:7px 9px;border:1px solid #cbd5e1;border-radius:6px;background:#f8fafc;color:#475569;font-size:11px}.material-step-feedback__status,.material-step-feedback__result header{display:flex;align-items:flex-start;gap:8px}.material-step-feedback__status{padding-bottom:5px;border-bottom:1px solid #e2e8f0}.material-step-feedback__status>strong,.material-step-feedback__result header>strong{flex:0 0 auto;color:#0f172a;font-size:11px}.material-step-feedback__status>span,.material-step-feedback__result header>span{min-width:0;font-weight:600;line-height:1.5}.material-step-feedback__status>span.is-running{color:#1d4ed8}.material-step-feedback__result{padding-top:5px}.material-step-feedback__result p{margin:3px 0 0;line-height:1.5}.material-step-feedback__result ul{margin:4px 0 0;padding-left:18px;line-height:1.5}.material-step-feedback.is-success{border-color:#bbf7d0;background:#f0fdf4}.material-step-feedback.is-success .material-step-feedback__result header>span{color:#15803d}.material-step-feedback.is-warning{border-color:#fde68a;background:#fffbeb}.material-step-feedback.is-warning .material-step-feedback__result header>span{color:#b45309}.material-step-feedback.is-error{border-color:#fecaca;background:#fef2f2}.material-step-feedback.is-error .material-step-feedback__result header>span{color:#dc2626}.material-step-feedback.is-empty .material-step-feedback__result header>span,.material-step-feedback.is-empty .material-step-feedback__result p{color:#64748b}
+.material-code-workflow-columns{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:10px;min-width:0}.material-code-workflow-stage{min-width:0;overflow:hidden;padding:10px;border:1px solid #dbe4ef;border-radius:8px;background:#fff}.material-code-workflow-stage__title{display:flex;align-items:center;gap:8px;margin-bottom:8px;color:#334155}.material-code-workflow-stage__title strong{color:#0f766e;font-size:12px;white-space:nowrap}.material-code-workflow-stage__title span{overflow:hidden;color:#64748b;text-overflow:ellipsis;white-space:nowrap}
 .material-sync-toolbar{display:flex;align-items:center;gap:8px;margin-bottom:8px}.material-sync-toolbar :deep(.el-button){min-width:110px;height:28px;margin-left:0;font-size:11px}.material-sync-toolbar>span{color:#64748b;font-size:11px}
+.material-sync-table{width:100%;min-width:0;max-width:100%}.material-sync-table :deep(.el-table__cell){padding-left:0;padding-right:0;text-align:center}.material-sync-table :deep(.cell){overflow:hidden;padding:0 4px;text-overflow:ellipsis;white-space:nowrap}.material-sync-table :deep(.el-button){margin-left:0;padding:2px 3px;font-size:11px}
 .material-code-approval-toolbar{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:8px}.material-code-approval-toolbar__actions{display:flex;align-items:center;gap:6px}.material-code-approval-toolbar :deep(.el-button){min-width:76px;height:28px;margin-left:0;font-size:11px}.material-code-approval-toolbar>span{color:#64748b;font-size:11px}
 .material-code-approval-table-shell{width:100%;min-width:0;max-width:100%;overflow:hidden}.material-code-approval-table{width:100%;min-width:0;max-width:100%}.material-code-approval-table :deep(.el-table__inner-wrapper),.material-code-approval-table :deep(.el-scrollbar),.material-code-approval-table :deep(.el-scrollbar__wrap){max-width:100%}.material-code-approval-table :deep(.el-table__cell){padding-left:0;padding-right:0;text-align:center}.material-code-approval-table :deep(.cell){overflow:hidden;padding:0 4px;text-overflow:ellipsis;white-space:nowrap}.material-code-approval-table :deep(.el-button){margin-left:0;padding:2px 3px;font-size:11px}.material-code-approval-table :deep(.el-tag){max-width:100%;padding:0 5px;font-size:11px}
+.material-history-pagination{justify-content:flex-end;margin-top:8px}.material-history-pagination :deep(.el-pagination__total),.material-history-pagination :deep(.el-select__selected-item),.material-history-pagination :deep(button),.material-history-pagination :deep(.number){font-size:11px}
 .material-editor-grid{grid-template-columns:repeat(3,minmax(0,200px));gap:0 12px}.material-editor-grid :deep(.el-form-item){margin-bottom:10px}.material-editor-grid__wide{grid-column:span 2}.material-weight-input{display:flex;min-width:0}.material-weight-input :deep(.el-input-number){min-width:0;flex:1}.material-recommend-button{width:100%}.material-attachment-field{display:flex;min-width:0;width:100%;align-items:center;flex-wrap:wrap;gap:4px}.material-attachment-input{display:none}.material-attachment-field>.el-button{width:100%;margin-left:0}.material-upload-progress{color:#64748b;font-size:10px}.material-attachment-list{display:flex;max-height:44px;min-width:0;width:100%;overflow:auto;align-items:flex-start;flex-direction:column}.material-attachment-list :deep(.el-button){display:block;max-width:100%;height:20px;margin-left:0;overflow:hidden;padding:0;text-overflow:ellipsis;white-space:nowrap}
 @media(max-width:1000px){.material-master-layout{grid-template-columns:1fr}.material-master-layout.is-category-collapsed{grid-template-columns:34px minmax(0,1fr)}.material-category-nav{max-height:220px}}
+@media(max-width:1100px){.material-code-workflow-columns{grid-template-columns:1fr}}
 @media(max-width:1000px){.material-editor-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
 @media(max-width:760px){.material-editor-grid{grid-template-columns:1fr}.material-editor-grid__wide{grid-column:auto}}
 </style>

@@ -9,12 +9,15 @@ public sealed class InMemoryMaterialRepository : IMaterialRepository
     private readonly object gate = new();
     private readonly ConcurrentDictionary<Guid, PdmMaterial> materials = new();
     private readonly ConcurrentDictionary<Guid, MaterialSyncTask> tasks = new();
+    private readonly ConcurrentDictionary<Guid, MaterialSyncBatch> syncBatches = new();
     private readonly ConcurrentDictionary<Guid, MaterialAttachment> attachments = new();
     private readonly ConcurrentDictionary<Guid, Guid> bomLinks = new();
     private readonly ConcurrentDictionary<Guid, MaterialCodeApplication> applications = new();
+    private readonly ConcurrentDictionary<Guid, (MaterialCodeWorkflowState State, string Message)> applicationWorkflows = new();
     private readonly ConcurrentDictionary<MaterialKind, MaterialCategoryRule> rules = new();
     private readonly ConcurrentDictionary<string, MaterialCategory> categories = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, long> materialCodeCounters = new(StringComparer.OrdinalIgnoreCase);
+    private U9MaterialFullSyncRun? latestFullSyncRun;
     private U9MaterialIntegrationConfiguration configuration = new(
         "http://10.7.7.188/U9", "01", "7", "pdm", "PDM", string.Empty,
         U9MaterialContract.CreatePath, U9MaterialContract.QueryPath, false, "system", DateTimeOffset.UnixEpoch,
@@ -66,6 +69,12 @@ public sealed class InMemoryMaterialRepository : IMaterialRepository
     public Task<PdmMaterial?> FindMaterialByCodeAsync(string materialCode, CancellationToken cancellationToken) =>
         Task.FromResult(materials.Values.FirstOrDefault(item => item.MaterialCode.Equals(materialCode, StringComparison.OrdinalIgnoreCase)));
 
+    public Task<IReadOnlyList<PdmMaterial>> FindMaterialsByCodesAsync(IReadOnlyList<string> materialCodes, CancellationToken cancellationToken)
+    {
+        var requested = materialCodes.Where(code => !string.IsNullOrWhiteSpace(code)).Select(code => code.Trim()).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        return Task.FromResult<IReadOnlyList<PdmMaterial>>(materials.Values.Where(item => requested.Contains(item.MaterialCode)).ToArray());
+    }
+
     public Task<PdmMaterial?> FindMaterialBySourceBomItemAsync(Guid bomItemId, CancellationToken cancellationToken) =>
         Task.FromResult(materials.Values.FirstOrDefault(item => item.SourceBomItemId == bomItemId));
 
@@ -102,10 +111,11 @@ public sealed class InMemoryMaterialRepository : IMaterialRepository
         Task.FromResult<IReadOnlyList<MaterialCodeApplication>>(applications.Values
             .Where(item => projectId is null || item.ProjectId == projectId)
             .Where(item => status is null || item.Status == status)
-            .OrderByDescending(item => item.RequestedAt).ToArray());
+            .OrderByDescending(item => item.RequestedAt)
+            .Select(EnrichApplication).ToArray());
 
     public Task<MaterialCodeApplication?> FindMaterialCodeApplicationAsync(Guid applicationId, CancellationToken cancellationToken) =>
-        Task.FromResult(applications.GetValueOrDefault(applicationId));
+        Task.FromResult(applications.TryGetValue(applicationId, out var application) ? EnrichApplication(application) : null);
 
     public Task<MaterialCodeApplication?> FindPendingMaterialCodeApplicationByBomItemAsync(Guid bomItemId, CancellationToken cancellationToken) =>
         Task.FromResult(applications.Values.Where(item => item.BomItemId == bomItemId && item.Status == MaterialCodeApplicationStatus.Pending)
@@ -135,6 +145,50 @@ public sealed class InMemoryMaterialRepository : IMaterialRepository
             applications[applicationId] = saved;
             return Task.FromResult(saved);
         }
+    }
+
+    public Task RecordMaterialCodeApplicationWorkflowAsync(
+        Guid applicationId,
+        MaterialCodeWorkflowState state,
+        string actor,
+        DateTimeOffset occurredAt,
+        string detail,
+        CancellationToken cancellationToken)
+    {
+        if (!applications.ContainsKey(applicationId)) throw new PdmNotFoundException("料号申请不存在。");
+        applicationWorkflows[applicationId] = (state, detail);
+        return Task.CompletedTask;
+    }
+
+    private MaterialCodeApplication EnrichApplication(MaterialCodeApplication application)
+    {
+        var material = application.MaterialId is Guid materialId ? materials.GetValueOrDefault(materialId) : null;
+        var task = application.MaterialId is Guid linkedMaterialId
+            ? tasks.Values.Where(item => item.MaterialId == linkedMaterialId && item.Status != MaterialSyncStatus.Superseded)
+                .OrderByDescending(item => item.CreatedAt).FirstOrDefault()
+            : null;
+        var recorded = applicationWorkflows.GetValueOrDefault(application.Id);
+        var state = application.Status switch
+        {
+            MaterialCodeApplicationStatus.Pending => MaterialCodeWorkflowState.PendingApproval,
+            MaterialCodeApplicationStatus.Rejected => MaterialCodeWorkflowState.Rejected,
+            _ when recorded.State == MaterialCodeWorkflowState.Completed => MaterialCodeWorkflowState.Completed,
+            _ when material?.U9SyncConfirmed != true => task?.Status is MaterialSyncStatus.Failed or MaterialSyncStatus.NeedsReview
+                ? MaterialCodeWorkflowState.MaterialSyncFailed
+                : MaterialCodeWorkflowState.PendingMaterialSync,
+            _ when application.BomHeaderKind is null => MaterialCodeWorkflowState.Completed,
+            _ when recorded.State == MaterialCodeWorkflowState.BomSyncFailed => MaterialCodeWorkflowState.BomSyncFailed,
+            _ => MaterialCodeWorkflowState.PendingBomSync
+        };
+        return application with
+        {
+            MaterialCode = material?.MaterialCode ?? application.MaterialCode,
+            WorkflowState = state,
+            SyncTaskId = task?.Id,
+            SyncStatus = task?.Status,
+            SyncError = task?.LastError,
+            WorkflowMessage = string.IsNullOrWhiteSpace(recorded.Message) ? task?.LastError : recorded.Message
+        };
     }
 
     public Task<bool> HasMaterialReferencesAsync(Guid materialId, CancellationToken cancellationToken) =>
@@ -491,6 +545,182 @@ public sealed class InMemoryMaterialRepository : IMaterialRepository
         }
     }
 
+    public Task<MaterialSyncTask> ScheduleSyncTaskAsync(Guid taskId, DateTimeOffset dueAt, CancellationToken cancellationToken)
+    {
+        lock (gate)
+        {
+            if (!tasks.TryGetValue(taskId, out var task)) throw new PdmNotFoundException("U9C同步任务不存在。");
+            if (task.Status != MaterialSyncStatus.PreviewReady)
+                throw new PdmRuleException("只有待执行的U9C同步任务才能进入后台队列。");
+            var scheduled = task with { NextAttemptAt = dueAt, UpdatedAt = dueAt };
+            tasks[taskId] = scheduled;
+            return Task.FromResult(EnrichTask(scheduled));
+        }
+    }
+
+    public Task<MaterialSyncBatch> CreateSyncBatchAsync(MaterialSyncBatch batch, CancellationToken cancellationToken)
+    {
+        lock (gate)
+        {
+            var taskIds = batch.Items.Select(item => item.TaskId).ToHashSet();
+            if (taskIds.Count != batch.Items.Count || taskIds.Any(taskId => !tasks.ContainsKey(taskId)))
+                throw new PdmRuleException("部分U9C同步任务不存在，请刷新后重试。");
+            if (taskIds.Select(taskId => tasks[taskId]).Any(task =>
+                    task.Status is not (MaterialSyncStatus.PreviewReady or MaterialSyncStatus.Failed or MaterialSyncStatus.NeedsReview)))
+                throw new PdmRuleException("选中的任务状态已经变化，请刷新后重新选择待执行项。");
+            var duplicate = syncBatches.Values
+                .Where(value => value.Status is MaterialSyncBatchStatus.Queued or MaterialSyncBatchStatus.Running)
+                .SelectMany(value => value.Items)
+                .Any(item => taskIds.Contains(item.TaskId)
+                    && item.Status is MaterialSyncBatchItemStatus.Queued or MaterialSyncBatchItemStatus.Running);
+            if (duplicate) throw new PdmConflictException("选中的任务已存在于运行中的批次，请刷新后查看进度。");
+            if (!syncBatches.TryAdd(batch.Id, batch)) throw new PdmConflictException("U9C批量同步批次已经存在。");
+            return Task.FromResult(batch);
+        }
+    }
+
+    public Task<MaterialSyncBatch?> FindSyncBatchAsync(Guid batchId, CancellationToken cancellationToken) =>
+        Task.FromResult(syncBatches.TryGetValue(batchId, out var batch) ? batch : null);
+
+    public Task<IReadOnlyList<MaterialSyncBatch>> ListRecentSyncBatchesAsync(string actor, int limit, CancellationToken cancellationToken) =>
+        Task.FromResult<IReadOnlyList<MaterialSyncBatch>>(syncBatches.Values
+            .Where(batch => string.Equals(batch.RequestedBy, actor, StringComparison.OrdinalIgnoreCase))
+            .OrderByDescending(batch => batch.CreatedAt)
+            .Take(Math.Clamp(limit, 1, 50))
+            .ToArray());
+
+    public Task<MaterialSyncBatchClaim?> ClaimNextSyncBatchItemAsync(
+        DateTimeOffset now,
+        DateTimeOffset leaseExpiresAt,
+        CancellationToken cancellationToken)
+    {
+        lock (gate)
+        {
+            var candidate = syncBatches.Values
+                .Where(batch => batch.Status is MaterialSyncBatchStatus.Queued or MaterialSyncBatchStatus.Running)
+                .OrderBy(batch => batch.CreatedAt)
+                .SelectMany(batch => batch.Items
+                    .Where(item => item.Status == MaterialSyncBatchItemStatus.Queued
+                        || item.Status == MaterialSyncBatchItemStatus.Running && item.LeaseExpiresAt <= now)
+                    .OrderBy(item => item.Ordinal)
+                    .Select(item => (Batch: batch, Item: item)))
+                .FirstOrDefault();
+            if (candidate.Batch is null) return Task.FromResult<MaterialSyncBatchClaim?>(null);
+
+            var claimedItem = candidate.Item with
+            {
+                Status = MaterialSyncBatchItemStatus.Running,
+                Message = null,
+                StartedAt = candidate.Item.StartedAt ?? now,
+                CompletedAt = null,
+                LeaseExpiresAt = leaseExpiresAt
+            };
+            var items = candidate.Batch.Items.Select(item => item.Id == claimedItem.Id ? claimedItem : item).ToArray();
+            var materialCode = tasks.TryGetValue(claimedItem.TaskId, out var task) ? task.MaterialCode : null;
+            var updatedBatch = candidate.Batch with
+            {
+                Status = MaterialSyncBatchStatus.Running,
+                StartedAt = candidate.Batch.StartedAt ?? now,
+                CurrentTaskId = claimedItem.TaskId,
+                CurrentMaterialCode = materialCode,
+                LastError = null,
+                Items = items
+            };
+            syncBatches[updatedBatch.Id] = updatedBatch;
+            return Task.FromResult<MaterialSyncBatchClaim?>(new(updatedBatch, claimedItem));
+        }
+    }
+
+    public Task<MaterialSyncBatch> CompleteSyncBatchItemAsync(
+        Guid batchId,
+        Guid itemId,
+        MaterialSyncBatchItemStatus status,
+        string? message,
+        DateTimeOffset completedAt,
+        CancellationToken cancellationToken)
+    {
+        if (status is not (MaterialSyncBatchItemStatus.Succeeded or MaterialSyncBatchItemStatus.Waiting or MaterialSyncBatchItemStatus.Failed))
+            throw new ArgumentOutOfRangeException(nameof(status));
+        lock (gate)
+        {
+            if (!syncBatches.TryGetValue(batchId, out var batch)) throw new PdmNotFoundException("U9C批量同步任务不存在。");
+            var current = batch.Items.FirstOrDefault(item => item.Id == itemId)
+                ?? throw new PdmNotFoundException("U9C批量同步明细不存在。");
+            if (current.Status != MaterialSyncBatchItemStatus.Running)
+                throw new PdmConflictException("U9C批量同步明细状态已变化。");
+            var completedItem = current with
+            {
+                Status = status,
+                Message = message,
+                CompletedAt = completedAt,
+                LeaseExpiresAt = null
+            };
+            var items = batch.Items.Select(item => item.Id == itemId ? completedItem : item).ToArray();
+            var completedCount = items.Count(item => item.Status is MaterialSyncBatchItemStatus.Succeeded or MaterialSyncBatchItemStatus.Waiting or MaterialSyncBatchItemStatus.Failed);
+            var succeededCount = items.Count(item => item.Status == MaterialSyncBatchItemStatus.Succeeded);
+            var waitingCount = items.Count(item => item.Status == MaterialSyncBatchItemStatus.Waiting);
+            var failedCount = items.Count(item => item.Status == MaterialSyncBatchItemStatus.Failed);
+            var isComplete = completedCount == items.Length;
+            var batchStatus = !isComplete ? MaterialSyncBatchStatus.Running
+                : failedCount == items.Length ? MaterialSyncBatchStatus.Failed
+                : failedCount > 0 || waitingCount > 0 ? MaterialSyncBatchStatus.PartiallySucceeded
+                : MaterialSyncBatchStatus.Succeeded;
+            var updated = batch with
+            {
+                Status = batchStatus,
+                CompletedCount = completedCount,
+                SucceededCount = succeededCount,
+                WaitingCount = waitingCount,
+                FailedCount = failedCount,
+                CurrentTaskId = null,
+                CurrentMaterialCode = null,
+                LastError = status == MaterialSyncBatchItemStatus.Failed ? message : batch.LastError,
+                CompletedAt = isComplete ? completedAt : null,
+                Items = items
+            };
+            syncBatches[batchId] = updated;
+            return Task.FromResult(updated);
+        }
+    }
+
+    public Task<(PdmMaterial Material, MaterialSyncTask Task)> ReassignMaterialCodeAndEnqueueAsync(
+        PdmMaterial material,
+        long expectedRowVersion,
+        string previousMaterialCode,
+        MaterialSyncTask previousTask,
+        MaterialSyncTask replacementTask,
+        AuditEntry audit,
+        CancellationToken cancellationToken)
+    {
+        lock (gate)
+        {
+            if (!materials.TryGetValue(material.Id, out var current)) throw new PdmNotFoundException("料品主档不存在。");
+            if (current.RowVersion != expectedRowVersion
+                || !string.Equals(current.MaterialCode, previousMaterialCode, StringComparison.OrdinalIgnoreCase)
+                || current.U9SyncConfirmed)
+                throw new PdmConflictException("料品状态或料号已经变化，不能自动换号。");
+            if (materials.Values.Any(item => item.Id != material.Id
+                    && string.Equals(item.MaterialCode, material.MaterialCode, StringComparison.OrdinalIgnoreCase)))
+                throw new PdmConflictException("重新分配的PLM料号已经被占用，请重试。");
+            if (!tasks.TryGetValue(previousTask.Id, out var storedTask)
+                || storedTask.Status is not (MaterialSyncStatus.Failed or MaterialSyncStatus.NeedsReview))
+                throw new PdmConflictException("原U9C同步任务状态已经变化，不能自动换号。");
+
+            materials[material.Id] = material;
+            tasks[previousTask.Id] = storedTask with
+            {
+                Status = MaterialSyncStatus.Superseded,
+                NextAttemptAt = null,
+                LastError = $"U9C已占用料号 {previousMaterialCode}，已自动换号。",
+                UpdatedAt = audit.OccurredAt
+            };
+            tasks[replacementTask.Id] = replacementTask;
+            foreach (var application in applications.Values.Where(item => item.MaterialId == material.Id).ToArray())
+                applications[application.Id] = application with { MaterialCode = material.MaterialCode, RowVersion = application.RowVersion + 1 };
+            return Task.FromResult((material, EnrichTask(replacementTask)));
+        }
+    }
+
     public Task<MaterialSyncTask> BeginSyncTaskAsync(Guid taskId, DateTimeOffset startedAt, CancellationToken cancellationToken)
     {
         lock (gate)
@@ -591,6 +821,20 @@ public sealed class InMemoryMaterialRepository : IMaterialRepository
     }
 
     public Task<U9MaterialIntegrationConfiguration> GetIntegrationConfigurationAsync(CancellationToken cancellationToken) => Task.FromResult(configuration);
+
+    public Task<U9MaterialFullSyncRun?> GetLatestU9MaterialFullSyncRunAsync(CancellationToken cancellationToken)
+    {
+        lock (gate) return Task.FromResult(latestFullSyncRun);
+    }
+
+    public Task<U9MaterialFullSyncRun> SaveU9MaterialFullSyncRunAsync(U9MaterialFullSyncRun run, CancellationToken cancellationToken)
+    {
+        lock (gate)
+        {
+            latestFullSyncRun = run;
+            return Task.FromResult(run);
+        }
+    }
 
     public Task<U9MaterialIntegrationConfiguration> SaveIntegrationConfigurationAsync(U9MaterialIntegrationConfiguration value, CancellationToken cancellationToken)
     {

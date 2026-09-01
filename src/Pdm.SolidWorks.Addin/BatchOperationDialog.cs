@@ -57,15 +57,17 @@ internal sealed class BatchOperationDialog : Form
     private const int FileTreeIndentWidth = 16;
     private const int FileExpanderSize = 9;
     private readonly ProjectBrowserControl projectSelector = new ProjectBrowserControl(requireSubmissionAccess: true) { Dock = DockStyle.Fill };
-    private readonly RadioButton acquire = new RadioButton { Text = "获取最新并获取权限", AutoSize = true, Checked = true };
-    private readonly RadioButton checkIn = new RadioButton { Text = "提交最新整套存档", AutoSize = true };
+    private readonly RadioButton acquire = new RadioButton { Text = "获取最新权限", AutoSize = true, Checked = true };
+    private readonly RadioButton checkIn = new RadioButton { Text = "提交最新存档", AutoSize = true };
     private readonly TreeView files = new TreeView();
     private readonly Panel filesHeader = new Panel();
     private readonly ImageList selectionImages = BuildSelectionImages();
     private readonly ImageList structureImages = PdmTaskPaneControl.BuildStructureImages();
     private readonly IReadOnlyList<BatchOperationItem> operationItems;
+    private readonly IReadOnlyList<ProjectDto> projects;
     private readonly Dictionary<string, BatchOperationItem> itemsByPath;
     private readonly IReadOnlyDictionary<string, Guid> inheritedDrawingProjects;
+    private readonly IReadOnlyDictionary<string, string> userDisplayNames;
     private readonly HashSet<string> checkedPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
     private readonly string username;
     private readonly TextBox changeNote = new TextBox
@@ -84,13 +86,6 @@ internal sealed class BatchOperationDialog : Form
         ForeColor = Color.FromArgb(90, 107, 128),
         Anchor = AnchorStyles.Left
     };
-    private readonly CheckBox projectConfirmed = new CheckBox
-    {
-        Text = "已确认归属项目",
-        AutoSize = true,
-        Anchor = AnchorStyles.Left
-    };
-
     public BatchOperationDialog(
         CadTreeNode root,
         IReadOnlyList<BatchOperationItem> items,
@@ -99,12 +94,16 @@ internal sealed class BatchOperationDialog : Form
         string username,
         BatchOperationKind initialOperation = BatchOperationKind.AcquireLatestAndCheckout,
         IReadOnlyCollection<string> initiallySelectedPaths = null,
-        IReadOnlyDictionary<string, Guid> inheritedDrawingProjects = null)
+        IReadOnlyDictionary<string, Guid> inheritedDrawingProjects = null,
+        IReadOnlyDictionary<string, string> userDisplayNames = null)
     {
         this.username = username ?? string.Empty;
         operationItems = items ?? Array.Empty<BatchOperationItem>();
+        this.projects = projects ?? Array.Empty<ProjectDto>();
         this.inheritedDrawingProjects = inheritedDrawingProjects
             ?? new Dictionary<string, Guid>(StringComparer.OrdinalIgnoreCase);
+        this.userDisplayNames = userDisplayNames
+            ?? new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         itemsByPath = operationItems
             .Where(item => !string.IsNullOrWhiteSpace(item?.Node?.FullPath))
             .GroupBy(item => item.Node.FullPath, StringComparer.OrdinalIgnoreCase)
@@ -179,14 +178,9 @@ internal sealed class BatchOperationDialog : Form
             }
         };
 
-        projectSelector.SelectedProjectChanged += (_, _) =>
-        {
-            projectConfirmed.Checked = false;
-            RefreshProjectConfirmationState();
-        };
         projectSelector.SetProjects(projects);
         projectSelector.SelectProject(initialProjectId);
-        const int projectActionWidth = 130;
+        const int projectActionWidth = 75;
         const int projectInputHeight = 30;
         projectSelector.BrowseButtonWidth = projectActionWidth;
         projectSelector.MinimumSize = new Size(120, projectInputHeight);
@@ -235,157 +229,100 @@ internal sealed class BatchOperationDialog : Form
             Dock = DockStyle.Fill,
             AutoSize = false,
             Height = 30,
-            ColumnCount = 6,
-            RowCount = 2,
-            Margin = Padding.Empty
-        };
-        operationPanel.RowStyles.Add(new RowStyle(SizeType.Absolute, 30));
-        operationPanel.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
-        operationPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 18));
-        operationPanel.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
-        operationPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 24));
-        operationPanel.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
-        operationPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        acquire.Anchor = AnchorStyles.Left;
-        acquire.Margin = new Padding(0, 5, 0, 0);
-        checkIn.Anchor = AnchorStyles.Left;
-        checkIn.Margin = new Padding(0, 5, 0, 0);
-        changeNote.Margin = new Padding(8, 4, 0, 0);
-        operationPanel.Controls.Add(acquire, 0, 0);
-        operationPanel.Controls.Add(checkIn, 2, 0);
-        operationPanel.Controls.Add(new Label
-        {
-            Text = "统一变更说明",
-            AutoSize = false,
-            Dock = DockStyle.Fill,
-            TextAlign = ContentAlignment.MiddleLeft,
-            Margin = Padding.Empty,
-            Padding = new Padding(0, 3, 0, 0)
-        }, 4, 0);
-        operationPanel.Controls.Add(changeNote, 5, 0);
-
-        var projectPanel = new TableLayoutPanel
-        {
-            Dock = DockStyle.Fill,
-            AutoSize = false,
-            Height = projectInputHeight,
-            ColumnCount = 3,
+            ColumnCount = 9,
             RowCount = 1,
             Margin = new Padding(0, 0, 0, 6)
         };
-        projectPanel.RowStyles.Add(new RowStyle(SizeType.Absolute, projectInputHeight));
-        projectPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
-        projectPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 24));
-        projectPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
-
-        var projectSelectionPanel = new TableLayoutPanel
+        operationPanel.RowStyles.Add(new RowStyle(SizeType.Absolute, 30));
+        operationPanel.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        operationPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 430));
+        operationPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 12));
+        operationPanel.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        operationPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 12));
+        operationPanel.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        operationPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 12));
+        operationPanel.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        operationPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        acquire.Anchor = AnchorStyles.Left;
+        acquire.Margin = Padding.Empty;
+        checkIn.Anchor = AnchorStyles.Left;
+        checkIn.Margin = Padding.Empty;
+        changeNote.Margin = Padding.Empty;
+        operationPanel.Controls.Add(new Label
         {
-            Dock = DockStyle.Fill,
-            AutoSize = false,
-            Height = projectInputHeight,
-            ColumnCount = 2,
-            RowCount = 1,
-            Margin = Padding.Empty
-        };
-        projectSelectionPanel.RowStyles.Add(new RowStyle(SizeType.Absolute, projectInputHeight));
-        projectSelectionPanel.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
-        projectSelectionPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        projectSelectionPanel.Controls.Add(new Label
-        {
-            Text = "选择归属项目",
+            Text = "归属项目",
             AutoSize = true,
             Anchor = AnchorStyles.Left,
             Margin = new Padding(0, 0, 8, 0)
         }, 0, 0);
-        projectSelectionPanel.Controls.Add(projectSelector, 1, 0);
-
-        var projectConfirmationPanel = new TableLayoutPanel
+        operationPanel.Controls.Add(projectSelector, 1, 0);
+        operationPanel.Controls.Add(acquire, 3, 0);
+        operationPanel.Controls.Add(checkIn, 5, 0);
+        operationPanel.Controls.Add(new Label
         {
-            Dock = DockStyle.Fill,
-            AutoSize = false,
-            Height = projectInputHeight,
-            ColumnCount = 1,
-            RowCount = 1,
-            Margin = Padding.Empty
-        };
-        projectConfirmationPanel.RowStyles.Add(new RowStyle(SizeType.Absolute, projectInputHeight));
-        projectConfirmationPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        projectConfirmed.Margin = Padding.Empty;
-        projectConfirmationPanel.Controls.Add(projectConfirmed, 0, 0);
-
-        projectPanel.Controls.Add(projectSelectionPanel, 0, 0);
-        projectPanel.Controls.Add(new Panel
-        {
-            Dock = DockStyle.Fill,
-            BackColor = Color.FromArgb(205, 211, 219),
-            Margin = new Padding(11, 2, 11, 2)
-        }, 1, 0);
-        projectPanel.Controls.Add(projectConfirmationPanel, 2, 0);
+            Text = "变更说明",
+            AutoSize = true,
+            Anchor = AnchorStyles.Left,
+            Margin = new Padding(0, 0, 8, 0)
+        }, 7, 0);
+        operationPanel.Controls.Add(changeNote, 8, 0);
 
         var standardButtonSize = new Size(75, 30);
         var selectionButtons = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, WrapContents = false, Margin = Padding.Empty };
         var selectAll = new Button { Text = "全选", AutoSize = false, Size = standardButtonSize };
         var clear = new Button { Text = "清除", AutoSize = false, Size = standardButtonSize };
+        var cancel = new Button { Text = "取消", DialogResult = DialogResult.Cancel, AutoSize = false, Size = standardButtonSize };
         selectChanged.AutoSize = false;
         selectChanged.Size = standardButtonSize;
         selectChanged.Enabled = startWithCheckIn;
+        execute.AutoSize = false;
+        execute.Size = standardButtonSize;
+        selectAll.Margin = new Padding(0, 0, 6, 0);
+        clear.Margin = new Padding(0, 0, 6, 0);
+        selectChanged.Margin = new Padding(0, 0, 6, 0);
+        cancel.Margin = new Padding(0, 0, 6, 0);
+        execute.Margin = Padding.Empty;
         selectAll.Click += (_, _) => SetAllChecked(true);
         clear.Click += (_, _) => SetAllChecked(false);
         selectChanged.Click += async (_, _) => await SelectChangedItemsAsync(username);
+        ApplyCommandButtonAppearance(execute, Color.FromArgb(21, 126, 77));
+        ApplyCommandButtonAppearance(cancel, Color.FromArgb(230, 126, 34));
         selectionButtons.Controls.Add(selectAll);
         selectionButtons.Controls.Add(clear);
         selectionButtons.Controls.Add(selectChanged);
-
-        var commandButtons = new FlowLayoutPanel
-        {
-            Dock = DockStyle.Fill,
-            FlowDirection = FlowDirection.RightToLeft,
-            WrapContents = false,
-            AutoSize = true,
-            Margin = Padding.Empty
-        };
-        execute.AutoSize = false;
-        execute.Size = standardButtonSize;
-        var cancel = new Button { Text = "取消", DialogResult = DialogResult.Cancel, AutoSize = false, Size = standardButtonSize };
-        ApplyCommandButtonAppearance(execute, Color.FromArgb(21, 126, 77));
-        ApplyCommandButtonAppearance(cancel, Color.FromArgb(230, 126, 34));
-        commandButtons.Controls.Add(cancel);
-        commandButtons.Controls.Add(execute);
+        selectionButtons.Controls.Add(cancel);
+        selectionButtons.Controls.Add(execute);
 
         var selectionBar = new TableLayoutPanel
         {
             Dock = DockStyle.Fill,
             AutoSize = true,
-            ColumnCount = 3,
+            ColumnCount = 2,
             RowCount = 1,
             Margin = Padding.Empty
         };
         selectionBar.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
         selectionBar.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        selectionBar.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
         selectionSummary.Dock = DockStyle.Fill;
         selectionSummary.TextAlign = ContentAlignment.MiddleLeft;
         selectionSummary.Margin = new Padding(8, 0, 8, 0);
         selectionBar.Controls.Add(selectionButtons, 0, 0);
         selectionBar.Controls.Add(selectionSummary, 1, 0);
-        selectionBar.Controls.Add(commandButtons, 2, 0);
 
         var layout = new TableLayoutPanel
         {
             Dock = DockStyle.Fill,
             Padding = new Padding(12),
             ColumnCount = 1,
-            RowCount = 5
+            RowCount = 4
         };
         layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        layout.Controls.Add(projectPanel, 0, 0);
-        layout.Controls.Add(operationPanel, 0, 1);
-        layout.Controls.Add(selectionBar, 0, 2);
+        layout.Controls.Add(operationPanel, 0, 0);
+        layout.Controls.Add(selectionBar, 0, 1);
         filesHeader.Dock = DockStyle.Top;
         filesHeader.Height = 25;
         filesHeader.BackColor = Color.FromArgb(242, 244, 247);
@@ -393,14 +330,14 @@ internal sealed class BatchOperationDialog : Form
         var fileDetails = new Panel { Dock = DockStyle.Fill, Margin = Padding.Empty };
         fileDetails.Controls.Add(files);
         fileDetails.Controls.Add(filesHeader);
-        layout.Controls.Add(fileDetails, 0, 3);
+        layout.Controls.Add(fileDetails, 0, 2);
         layout.Controls.Add(new Label
         {
             Text = "注意：勾选图档只会归入上方确认的项目；重复实例按同一个文件处理一次。提交时自动登记新增图档并准备权限，顺序为子件优先、总装最后。",
             AutoSize = true,
             ForeColor = Color.FromArgb(99, 115, 134),
             Margin = new Padding(0, 6, 0, 0)
-        }, 0, 4);
+        }, 0, 3);
         Controls.Add(layout);
 
         acquire.CheckedChanged += (_, _) => RefreshOperationState(username);
@@ -475,18 +412,12 @@ internal sealed class BatchOperationDialog : Form
             return;
         }
 
-        if (SelectedItems.Any(item => RequiresNewDocumentProjectConfirmation(
-                item,
-                SelectedProjectId,
-                inheritedDrawingProjects)))
+        var confirmationPaths = GetNewDocumentConfirmationPaths();
+        if (confirmationPaths.Count > 0
+            && !ConfirmSelectedProject(confirmationPaths.Count))
         {
-            if (!projectConfirmed.Checked)
-            {
-                MessageBox.Show(this, "请勾选“已确认归属项目”后再执行。", "新增图档归属确认", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                eventArgs.Cancel = true;
-                projectConfirmed.Focus();
-                return;
-            }
+            eventArgs.Cancel = true;
+            return;
         }
 
     }
@@ -681,19 +612,29 @@ internal sealed class BatchOperationDialog : Form
         {
             files.EndUpdate();
         }
-        RefreshProjectConfirmationState();
     }
 
-    private void RefreshProjectConfirmationState()
+    private HashSet<string> GetNewDocumentConfirmationPaths() => new HashSet<string>(
+        SelectedItems
+            .Where(item => RequiresNewDocumentProjectConfirmation(item, SelectedProjectId, inheritedDrawingProjects))
+            .Select(item => item.Node.FullPath)
+            .Where(path => !string.IsNullOrWhiteSpace(path)),
+        StringComparer.OrdinalIgnoreCase);
+
+    private bool ConfirmSelectedProject(int documentCount)
     {
-        var required = SelectedItems.Any(item => RequiresNewDocumentProjectConfirmation(
-            item,
-            SelectedProjectId,
-            inheritedDrawingProjects));
-        projectConfirmed.Enabled = required;
-        if (!required)
+        if (projectSelector.SelectedProject == null)
         {
-            projectConfirmed.Checked = false;
+            return false;
+        }
+
+        var selectedProject = projectSelector.SelectedProject;
+        var parentProject = selectedProject.ParentProjectId.HasValue
+            ? projects.FirstOrDefault(project => project.Id == selectedProject.ParentProjectId.Value)
+            : null;
+        using (var dialog = new ProjectAdmissionConfirmationDialog(selectedProject, parentProject, documentCount, userDisplayNames))
+        {
+            return dialog.ShowDialog(this) == DialogResult.OK;
         }
     }
 

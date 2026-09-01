@@ -15,6 +15,7 @@ const props = withDefaults(defineProps<{
   bomItem?: BomItem
   currentUsername?: string
   canManageLifecycle?: boolean
+  canEditDocuments?: boolean
   desktopAvailable?: boolean
   obscured?: boolean
   reviewPanelOpen?: boolean
@@ -24,9 +25,11 @@ const props = withDefaults(defineProps<{
   reviewRevision?: string
   canWritebackReviewProperties?: boolean
   accessToken?: string
+  projectId?: string
 }>(), {
   currentUsername: '',
   canManageLifecycle: false,
+  canEditDocuments: false,
   desktopAvailable: false,
   obscured: false,
   reviewPanelOpen: false,
@@ -36,6 +39,7 @@ const props = withDefaults(defineProps<{
   reviewRevision: '',
   canWritebackReviewProperties: false,
   accessToken: '',
+  projectId: '',
 })
 const emit = defineEmits<{
   open: [node: DocumentNode, mode: SolidWorksOpenMode, versionId?: string]
@@ -48,11 +52,12 @@ const emit = defineEmits<{
 }>()
 const displayUserName = useUserDisplayName()
 const previewSlot = ref<HTMLElement>()
-const previewState = ref<'idle' | 'loading' | 'ready' | 'error' | 'unavailable'>(props.desktopAvailable ? 'idle' : 'unavailable')
+const previewState = ref<'idle' | 'loading' | 'ready' | 'error' | 'unavailable'>('idle')
 const previewError = ref('')
 const webPreviewFormat = ref<'Step' | 'Pdf'>()
 const webPreviewUrl = ref('')
 const webStepBuffer = ref<ArrayBuffer>()
+const previewSessionActivated = ref(false)
 const solidWorksAvailable = ref(false)
 const solidWorksPending = ref(false)
 const solidWorksMessage = ref('')
@@ -198,6 +203,7 @@ function normalizedPreviewFormat(value: string | number): 'Step' | 'Pdf' {
 
 async function startPreview() {
   if (!props.selected.documentId) return
+  previewSessionActivated.value = true
   if (!props.desktopAvailable) {
     clearWebPreview()
     previewError.value = ''
@@ -312,7 +318,22 @@ watch([() => props.selected.id, () => props.reviewVersionId], () => {
   solidWorksPending.value = false
   solidWorksMessage.value = ''
   solidWorksError.value = false
-  void restartPreview()
+  if (previewSessionActivated.value) void restartPreview()
+  else {
+    hidePreview()
+    clearWebPreview()
+    previewState.value = 'idle'
+    previewError.value = ''
+  }
+})
+
+watch(() => props.projectId, (projectId, previousProjectId) => {
+  if (!previousProjectId || projectId === previousProjectId) return
+  previewSessionActivated.value = false
+  hidePreview()
+  clearWebPreview()
+  previewState.value = 'idle'
+  previewError.value = ''
 })
 
 onMounted(() => {
@@ -331,7 +352,6 @@ onMounted(() => {
     overlayObserver = new MutationObserver(schedulePreviewBounds)
     overlayObserver.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['class', 'style', 'aria-hidden'] })
   }
-  void nextTick(startPreview)
 })
 
 onBeforeUnmount(() => {
@@ -386,6 +406,14 @@ onBeforeUnmount(() => {
             @click="openInSolidWorks(reviewVersionId ? 'SpecificReadOnly' : 'LatestReadOnly', reviewVersionId || undefined)"
           ><Rotate3D :size="15" />{{ reviewVersionId ? '打开审核版（只读）' : '打开最新' }}</button>
           <button
+            v-if="!reviewVersionId && canEditDocuments"
+            type="button"
+            class="pdm-solidworks-edit"
+            :disabled="!selected.documentId || !solidWorksAvailable || solidWorksPending"
+            :title="solidWorksAvailable ? '由客户端获取PLM最新受控文件和编辑权限，并交给SolidWorks打开' : '当前电脑未安装SolidWorks或UPLM插件'"
+            @click="openInSolidWorks('LatestEdit')"
+          ><Rotate3D :size="15" />编辑打开</button>
+          <button
             v-if="canWritebackReviewProperties"
             type="button"
             class="pdm-solidworks-primary"
@@ -434,12 +462,12 @@ onBeforeUnmount(() => {
         <template v-else-if="previewState !== 'ready'">
           <SquareLoader v-if="previewState === 'loading'" :label="desktopAvailable ? '正在加载 eDrawings' : '正在加载网页预览'" />
           <FileSearch v-else :size="52" />
-          <h3>{{ previewState === 'loading' ? desktopAvailable ? '正在加载 eDrawings…' : '正在加载网页预览…' : desktopAvailable ? mode === 'model' ? 'eDrawings 内嵌三维预览' : 'eDrawings 内嵌图纸预览' : mode === 'model' ? 'STP/STEP三维预览' : 'PDF工程图预览' }}</h3>
+          <h3>{{ previewState === 'loading' ? desktopAvailable ? '正在加载 eDrawings…' : '正在加载网页预览…' : previewState === 'idle' ? '预览尚未加载' : desktopAvailable ? mode === 'model' ? 'eDrawings 内嵌三维预览' : 'eDrawings 内嵌图纸预览' : mode === 'model' ? 'STP/STEP三维预览' : 'PDF工程图预览' }}</h3>
           <p>{{ selected.fileName }} · {{ displayedRevision }}</p>
-          <small>文件通过PLM权限校验和SHA-256校验后下载到独立只读缓存，不会覆盖工作文件。</small>
+          <small>{{ previewState === 'idle' ? '首次进入图档或切换项目时不自动加载；手动加载后，本次停留在图档页期间会随所选图档自动更新。' : '文件通过PLM权限校验和SHA-256校验后下载到独立只读缓存，不会覆盖工作文件。' }}</small>
           <p v-if="previewState === 'error'" class="pdm-preview-error" role="alert">{{ previewError || 'eDrawings加载失败，请重试。' }}</p>
-          <button v-if="previewState === 'error'" type="button" class="pdm-primary-action" :disabled="!selected.documentId" @click="startPreview">
-            重新加载预览
+          <button v-if="previewState === 'idle' || previewState === 'error'" type="button" class="pdm-primary-action" :disabled="!selected.documentId" @click="startPreview">
+            {{ previewState === 'error' ? '重新加载预览' : '加载预览' }}
           </button>
         </template>
       </div>

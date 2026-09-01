@@ -109,7 +109,7 @@ public static class MaterialEndpointExtensions
         {
             var (actor, role) = CurrentUser(context.User);
             var results = await service.ResolveStandardBomMaterialsAsync(new(request.ProjectId, request.BomItemIds), actor, role, cancellationToken);
-            foreach (var result in results.Where(item => item.Status == MaterialCodeResolutionStatus.Matched && item.Material is not null))
+            foreach (var result in results.Where(item => item.Status == MaterialCodeResolutionStatus.Matched && item.Material?.U9SyncConfirmed == true))
             {
                 await service.LinkBomMaterialAsync(new(request.ProjectId, result.BomItemId, result.Material!.Id), actor, role, cancellationToken);
                 await workflow.ApplyMaterialCodeToBomAsync(request.ProjectId, result.BomItemId, result.Material.MaterialCode, actor, cancellationToken);
@@ -121,7 +121,7 @@ public static class MaterialEndpointExtensions
         {
             var (actor, role) = CurrentUser(context.User);
             var results = await service.ApplyForMaterialCodesAsync(new(request.ProjectId, request.BomItemIds), actor, role, cancellationToken);
-            foreach (var result in results.Where(item => item.Status == MaterialCodeResolutionStatus.Matched && item.Material is not null))
+            foreach (var result in results.Where(item => item.Status == MaterialCodeResolutionStatus.Matched && item.Material?.U9SyncConfirmed == true))
             {
                 await service.LinkBomMaterialAsync(new(request.ProjectId, result.BomItemId, result.Material!.Id), actor, role, cancellationToken);
                 await workflow.ApplyMaterialCodeToBomAsync(request.ProjectId, result.BomItemId, result.Material.MaterialCode, actor, cancellationToken);
@@ -136,20 +136,22 @@ public static class MaterialEndpointExtensions
             return Results.Ok((await service.ListCodeApplicationsAsync(projectId, parsedStatus, actor, role, cancellationToken)).Select(MapApplication));
         });
 
-        api.MapPost("/material-code/applications/{applicationId:guid}/decision", async (Guid applicationId, DecideMaterialCodeApplicationRequest request, HttpContext context, MaterialService service, PdmWorkflowService workflow, ApprovalU9AutomationService automation, CancellationToken cancellationToken) =>
+        api.MapPost("/material-code/applications/{applicationId:guid}/decision", async (Guid applicationId, DecideMaterialCodeApplicationRequest request, HttpContext context, MaterialService service, CancellationToken cancellationToken) =>
         {
             var (actor, role) = CurrentUser(context.User);
             var result = await service.DecideMaterialCodeApplicationAsync(applicationId, request.ExpectedRowVersion, request.Approved, request.Comment, actor, role, cancellationToken);
-            if (result.Material is not null && result.Application.BomItemId is Guid bomItemId)
-                await workflow.ApplyMaterialCodeToBomAsync(result.Application.ProjectId, bomItemId, result.Material.MaterialCode, actor, cancellationToken);
             var automationResult = request.Approved
-                ? await automation.RunAfterApprovalAsync(result.Application, result.Material, result.Task, actor, cancellationToken)
+                ? new ApprovalU9AutomationResult(
+                    ApprovalU9AutomationStage.NotRequested,
+                    "PLM料号已批准；请在当前页面勾选对应记录并执行批量同步到U9C。",
+                    null,
+                    [])
                 : null;
             return Results.Ok(new
             {
                 Application = MapApplication(result.Application),
-                Material = result.Material is null ? null : MapMaterial(automationResult?.ItemSync?.Material ?? result.Material),
-                Task = result.Task is null ? null : MapTask(automationResult?.ItemSync?.Task ?? result.Task),
+                Material = result.Material is null ? null : MapMaterial(result.Material),
+                Task = result.Task is null ? null : MapTask(result.Task),
                 Automation = automationResult
             });
         });
@@ -227,42 +229,89 @@ public static class MaterialEndpointExtensions
             return Results.Ok(MapTask(await service.RetrySyncTaskAsync(taskId, actor, role, cancellationToken)));
         });
 
-        api.MapPost("/material-sync-tasks/{taskId:guid}/execute", async (Guid taskId, HttpContext context, U9MaterialIntegrationService service, ApprovalU9AutomationService automation, CancellationToken cancellationToken) =>
+        api.MapPost("/material-sync-tasks/{taskId:guid}/execute", async (Guid taskId, HttpContext context, MaterialCodeSynchronizationService service, CancellationToken cancellationToken) =>
         {
             var (actor, role) = CurrentUser(context.User);
-            var result = await service.ExecuteTaskAsync(taskId, actor, role, cancellationToken);
-            ApprovalU9AutomationResult? automationResult = null;
-            if (result.Task.ProjectId is Guid projectId)
-            {
-                try
-                {
-                    automationResult = await automation.ContinueAfterMaterialSyncAsync(projectId, actor, cancellationToken);
-                }
-                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-                {
-                    throw;
-                }
-                catch (Exception exception)
-                {
-                    automationResult = new(ApprovalU9AutomationStage.BomSyncFailed,
-                        $"U9C料品已同步，但BOM自动续跑失败：{exception.Message}", null, []);
-                }
-            }
+            var result = await service.SynchronizeTaskAsync(taskId, actor, role, cancellationToken);
             return Results.Ok(new
             {
                 Material = MapMaterial(result.Material),
                 Task = MapTask(result.Task),
-                result.Created,
-                result.AlreadyExisted,
-                result.Updated,
-                Automation = automationResult
+                Created = result.ItemSync?.Created ?? false,
+                AlreadyExisted = result.ItemSync?.AlreadyExisted ?? result.Material.U9SyncConfirmed,
+                Updated = result.ItemSync?.Updated ?? false,
+                Automation = result.Automation,
+                Applications = result.Applications.Select(MapApplication),
+                result.Completed,
+                result.Message
             });
+        });
+
+        api.MapPost("/material-sync-batches", async (CreateMaterialSyncBatchRequest request, HttpContext context, MaterialSyncBatchService service, CancellationToken cancellationToken) =>
+        {
+            var (actor, role) = CurrentUser(context.User);
+            return Results.Ok(MapSyncBatch(await service.CreateAsync(request.TaskIds, actor, role, cancellationToken)));
+        });
+
+        api.MapGet("/material-sync-batches", async (HttpContext context, MaterialSyncBatchService service, CancellationToken cancellationToken) =>
+        {
+            var (actor, role) = CurrentUser(context.User);
+            return Results.Ok((await service.ListRecentAsync(actor, role, cancellationToken)).Select(MapSyncBatch));
+        });
+
+        api.MapGet("/material-sync-batches/{batchId:guid}", async (Guid batchId, HttpContext context, MaterialSyncBatchService service, CancellationToken cancellationToken) =>
+        {
+            var (actor, role) = CurrentUser(context.User);
+            return Results.Ok(MapSyncBatch(await service.GetAsync(batchId, actor, role, cancellationToken)));
         });
 
         api.MapGet("/u9-material-integration", async (HttpContext context, MaterialService service, CancellationToken cancellationToken) =>
         {
             var (actor, role) = CurrentUser(context.User);
             return Results.Ok(await service.GetIntegrationSettingsAsync(actor, role, cancellationToken));
+        });
+
+        api.MapGet("/u9-material-full-sync/status", async (
+            HttpContext context,
+            IMaterialRepository materials,
+            IPdmRepository repository,
+            U9MaterialFullSyncService service,
+            CancellationToken cancellationToken) =>
+        {
+            var (actor, role) = CurrentUser(context.User);
+            if (!await repository.HasUserPermissionAsync(actor, role, PermissionCodes.StorageSettingsManage, cancellationToken))
+                throw new UnauthorizedAccessException("当前角色无权查看U9C料品自动同步状态。");
+            var categories = (await materials.ListCategoriesAsync(true, cancellationToken))
+                .Where(category => category.AllowCreate && category.IsVisible && category.IsActive && category.PdmKind is not null)
+                .OrderBy(category => category.SortOrder)
+                .ThenBy(category => category.Code, StringComparer.OrdinalIgnoreCase)
+                .Select(category => new { category.Code, category.Name })
+                .ToArray();
+            var latestRun = await service.GetLatestRunAsync(cancellationToken);
+            return Results.Ok(new
+            {
+                ScheduleTime = "02:00",
+                CheckIntervalMinutes = 30,
+                Categories = categories,
+                LatestRun = latestRun is null ? null : new
+                {
+                    latestRun.Id,
+                    latestRun.TriggerKind,
+                    Status = latestRun.Status.ToString(),
+                    latestRun.CategoryCodes,
+                    latestRun.CategoryResults,
+                    latestRun.CategoryCount,
+                    latestRun.CompletedCategoryCount,
+                    latestRun.DiscoveredCount,
+                    latestRun.CreatedCount,
+                    latestRun.RefreshedCount,
+                    latestRun.SkippedCount,
+                    latestRun.FailedCategoryCount,
+                    latestRun.LastError,
+                    latestRun.StartedAt,
+                    latestRun.CompletedAt
+                }
+            });
         });
 
         api.MapPut("/u9-material-integration", async (UpdateU9MaterialIntegrationRequest request, HttpContext context, MaterialService service, CancellationToken cancellationToken) =>
@@ -494,6 +543,36 @@ public static class MaterialEndpointExtensions
         task.UpdatedAt
     };
 
+    private static object MapSyncBatch(MaterialSyncBatch batch) => new
+    {
+        batch.Id,
+        Status = batch.Status.ToString(),
+        batch.RequestedBy,
+        RequestedRole = batch.RequestedRole.ToString(),
+        batch.TotalCount,
+        batch.CompletedCount,
+        batch.SucceededCount,
+        batch.WaitingCount,
+        batch.FailedCount,
+        batch.CurrentTaskId,
+        batch.CurrentMaterialCode,
+        batch.LastError,
+        batch.CreatedAt,
+        batch.StartedAt,
+        batch.CompletedAt,
+        Items = batch.Items.Select(item => new
+        {
+            item.Id,
+            item.BatchId,
+            item.TaskId,
+            item.Ordinal,
+            Status = item.Status.ToString(),
+            item.Message,
+            item.StartedAt,
+            item.CompletedAt
+        })
+    };
+
     private static object MapApplication(MaterialCodeApplication application) => new
     {
         application.Id,
@@ -518,7 +597,12 @@ public static class MaterialEndpointExtensions
         application.RequestedMaterialCode,
         application.Specification,
         application.Brand,
-        application.Remark
+        application.Remark,
+        WorkflowState = application.WorkflowState.ToString(),
+        application.SyncTaskId,
+        SyncStatus = application.SyncStatus?.ToString(),
+        application.SyncError,
+        application.WorkflowMessage
     };
 
     private static object MapResolution(MaterialCodeResolution resolution) => new
@@ -527,7 +611,8 @@ public static class MaterialEndpointExtensions
         Status = resolution.Status.ToString(),
         Material = resolution.Material is null ? null : MapMaterial(resolution.Material),
         Candidates = resolution.Candidates.Select(MapMaterial),
-        Application = resolution.Application is null ? null : MapApplication(resolution.Application)
+        Application = resolution.Application is null ? null : MapApplication(resolution.Application),
+        resolution.Issues
     };
 
     private static T Parse<T>(string value, string field) where T : struct, Enum =>

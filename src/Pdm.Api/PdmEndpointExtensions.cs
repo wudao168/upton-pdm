@@ -401,6 +401,9 @@ public static class PdmEndpointExtensions
         api.MapGet("/bom-validation-rules", async (IPdmRepository repository, CancellationToken cancellationToken) =>
             Results.Ok((await repository.GetSystemSettingsAsync(cancellationToken)).ValidationRules));
 
+        api.MapGet("/bom-property-mappings", async (IPdmRepository repository, CancellationToken cancellationToken) =>
+            Results.Ok((await repository.GetSystemSettingsAsync(cancellationToken)).BomPropertyMappings));
+
         api.MapGet("/system-settings/equipment-types", async (HttpContext context, IPdmRepository repository, CancellationToken cancellationToken) =>
         {
             var (actor, role) = CurrentUser(context.User);

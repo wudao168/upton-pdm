@@ -1,4 +1,5 @@
-import type { AddDrawingReviewMarkupInput, ApprovalStep, ApprovalU9AutomationResult, AuditEntry, BatchUpdateBomItemsInput, BomClassification, BomEmptyDeclaration, BomGenerationResult, BomHeaderKind, BomItem, BomKind, BomValidationRules, BomVersion, BomVersionState, CreateProjectInput, CreateReleasePackageInput, CreateRoleInput, CreateSubprojectInput, CrmConnectionTestResult, CrmCustomerSyncResult, CrmIntegrationSettings, DocumentKind, DocumentModelDrawingRelation, DocumentNode, DocumentVersionComparison, DocumentVersionSummary, DocumentWhereUsed, DrawingReviewCandidate, DrawingReviewDecision, DrawingReviewPackage, DrawingReviewTarget, EditLockSummary, EquipmentTypeDefinition, FolderPermissionRule, MainProjectStaffingInput, ManagedDocument, ManufacturingBomBaseline, MaterialAttachment, MaterialAttachmentKind, MaterialCategory, MaterialCategoryRule, MaterialCodeApplication, MaterialCodeApplicationStatus, MaterialCodeDecisionResult, MaterialCodeResolution, MaterialKind, MaterialRemovalReadiness, MaterialRemovalResult, MaterialSyncExecutionResult, MaterialSyncTask, MyApprovalTask, OrganizationDirectory, OrganizationUnit, PasswordResetTask, PdmCustomer, PdmMaterial, PdmSystemSettings, PdmUser, PdmUserProfile, ProgramTemplate, ProgramTemplateApprovalDecision, ProgramTemplateAttachmentKind, ProgramTemplateDraftInput, ProgramTemplateRevision, ProgramTemplateTask, ProgramTemplateVersionBump, ProjectBomHeader, ProjectBomU9SyncExecution, ProjectBomU9SyncPreview, ProjectFile, ProjectFileVersion, ProjectFolder, ProjectFolderTemplateNode, ProjectNumberingOptions, ProjectOrganization, ProjectSummary, ProjectVersionItem, ReferenceStatus, ReleasePackageSummary, ReleaseScope, RolePermissionDirectory, SaveMaterialInput, SaveOrganizationUnitInput, SavePdmUserInput, SaveProjectOrganizationInput, StandardLibraryCategory, StandardLibraryMaterialPage, U9BomQueryExecution, U9BomQueryInput, U9BomWriteExecution, U9BomWriteInput, U9BomWritePreview, U9ConnectionTestResult, U9ItemQueryResult, U9MaterialIntegrationSettings, U9MaterialSampleImportResult, U9MaterialSamplePreview, UpdateCrmIntegrationInput, UpdateProjectInput, UpdateU9MaterialIntegrationInput } from './types'
+import type { AddDrawingReviewMarkupInput, ApprovalStep, ApprovalU9AutomationResult, AuditEntry, BatchUpdateBomItemsInput, BomClassification, BomEmptyDeclaration, BomGenerationResult, BomHeaderKind, BomItem, BomKind, BomValidationRules, BomVersion, BomVersionState, CreateProjectInput, CreateReleasePackageInput, CreateRoleInput, CreateSubprojectInput, CrmConnectionTestResult, CrmCustomerSyncResult, CrmIntegrationSettings, DocumentKind, DocumentModelDrawingRelation, DocumentNode, DocumentVersionComparison, DocumentVersionSummary, DocumentWhereUsed, DrawingReviewCandidate, DrawingReviewDecision, DrawingReviewPackage, DrawingReviewTarget, EditLockSummary, EquipmentTypeDefinition, FolderPermissionRule, MainProjectStaffingInput, ManagedDocument, ManufacturingBomBaseline, MaterialAttachment, MaterialAttachmentKind, MaterialCategory, MaterialCategoryRule, MaterialCodeApplication, MaterialCodeApplicationStatus, MaterialCodeDecisionResult, MaterialCodeResolution, MaterialKind, MaterialRemovalReadiness, MaterialRemovalResult, MaterialSyncExecutionResult, MaterialSyncTask, MyApprovalTask, OrganizationDirectory, OrganizationUnit, PasswordResetTask, PdmCustomer, PdmMaterial, PdmSystemSettings, PdmUser, PdmUserProfile, ProgramTemplate, ProgramTemplateApprovalDecision, ProgramTemplateAttachmentKind, ProgramTemplateDraftInput, ProgramTemplateRevision, ProgramTemplateTask, ProgramTemplateVersionBump, ProjectBomHeader, ProjectBomU9SyncExecution, ProjectBomU9SyncPreview, ProjectFile, ProjectFileVersion, ProjectFolder, ProjectFolderTemplateNode, ProjectNumberingOptions, ProjectOrganization, ProjectSummary, ProjectVersionItem, ReferenceStatus, ReleasePackageSummary, ReleaseScope, RolePermissionDirectory, SaveMaterialInput, SaveOrganizationUnitInput, SavePdmUserInput, SaveProjectOrganizationInput, StandardLibraryCategory, StandardLibraryMaterialPage, U9BomQueryExecution, U9BomQueryInput, U9BomWriteExecution, U9BomWriteInput, U9BomWritePreview, U9ConnectionTestResult, U9ItemQueryResult, U9MaterialFullSyncStatusResponse, U9MaterialIntegrationSettings, U9MaterialSampleImportResult, U9MaterialSamplePreview, UpdateCrmIntegrationInput, UpdateProjectInput, UpdateU9MaterialIntegrationInput } from './types'
+import type { MaterialSyncBatch } from './types'
 
 import type { BomSourceReclassificationPreview } from './types'
 
@@ -586,8 +587,24 @@ export function executeMaterialSyncTask(taskId: string, token: string): Promise<
   return requestJson<MaterialSyncExecutionResult>(`/api/material-sync-tasks/${taskId}/execute`, { method: 'POST' }, token)
 }
 
+export function createMaterialSyncBatch(taskIds: string[], token: string): Promise<MaterialSyncBatch> {
+  return requestJson<MaterialSyncBatch>('/api/material-sync-batches', { method: 'POST', body: JSON.stringify({ taskIds }) }, token)
+}
+
+export function getMaterialSyncBatch(batchId: string, token: string): Promise<MaterialSyncBatch> {
+  return requestJson<MaterialSyncBatch>(`/api/material-sync-batches/${batchId}`, {}, token)
+}
+
+export function listMaterialSyncBatches(token: string): Promise<MaterialSyncBatch[]> {
+  return requestJson<MaterialSyncBatch[]>('/api/material-sync-batches', {}, token)
+}
+
 export function getU9MaterialIntegration(token: string): Promise<U9MaterialIntegrationSettings> {
   return requestJson<U9MaterialIntegrationSettings>('/api/u9-material-integration', {}, token)
+}
+
+export function getU9MaterialFullSyncStatus(token: string): Promise<U9MaterialFullSyncStatusResponse> {
+  return requestJson<U9MaterialFullSyncStatusResponse>('/api/u9-material-full-sync/status', {}, token)
 }
 
 export function updateU9MaterialIntegration(input: UpdateU9MaterialIntegrationInput, token: string): Promise<U9MaterialIntegrationSettings> {
@@ -1545,7 +1562,9 @@ function reconcileCurrentReferenceTree(
 function mapBomItem(item: ApiBomItem): BomItem {
   return {
     id: item.id,
-    kind: typeof item.kind === 'string' ? item.kind as BomClassification : undefined,
+    kind: typeof item.kind === 'number'
+      ? ([undefined, 'Electrical', 'Standard', 'NonStandard', 'Unclassified', 'Virtual'] as const)[item.kind]
+      : item.kind as BomClassification | undefined,
     sequence: item.sequence,
     drawingNumber: item.drawingNumber,
     name: item.name,

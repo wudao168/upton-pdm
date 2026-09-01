@@ -16,7 +16,8 @@ public static class ProjectSubmissionPolicy
         if (project.ParentProjectId is null)
         {
             return project.DesignLeads.Contains(username, StringComparer.OrdinalIgnoreCase)
-                || string.Equals(project.DesignLead, username, StringComparison.OrdinalIgnoreCase);
+                || string.Equals(project.DesignLead, username, StringComparison.OrdinalIgnoreCase)
+                || project.Designers.Contains(username, StringComparer.OrdinalIgnoreCase);
         }
 
         return project.Designers.Contains(username, StringComparer.OrdinalIgnoreCase);

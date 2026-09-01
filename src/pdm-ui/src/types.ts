@@ -265,6 +265,28 @@ export interface DocumentNode {
   children: DocumentNode[]
 }
 
+export type WorkspaceLocalStateCode = 'NotDownloaded' | 'ReadOnlyCache' | 'Editable' | 'Modified' | 'NeedsUpdate' | 'IntegrityMismatch' | 'PermissionMismatch' | 'UnexpectedWritable' | 'IdentityConflict'
+export interface WorkspaceLocalFileState {
+  documentId: string
+  fileName: string
+  fullPath: string
+  localState: WorkspaceLocalStateCode
+  localStateLabel: string
+  localRevision: string
+  latestRevision: string
+  message: string
+  isReadOnly: boolean
+  lastWriteTimeUtc?: string
+}
+export interface WorkspaceLocalStateSnapshot {
+  projectId: string
+  projectCode: string
+  projectDirectory?: string
+  projectDirectoryExists?: boolean
+  error?: string
+  items: WorkspaceLocalFileState[]
+}
+
 export interface DocumentWhereUsed {
   documentId: string
   parentDocumentId: string
@@ -861,6 +883,7 @@ export interface ProjectBomHeader {
 }
 
 export type MaterialCodeApplicationStatus = 'Pending' | 'Approved' | 'Rejected'
+export type MaterialCodeWorkflowState = 'PendingApproval' | 'PendingMaterialSync' | 'MaterialSyncFailed' | 'PendingBomSync' | 'BomSyncFailed' | 'Completed' | 'Rejected'
 export interface MaterialCodeApplication {
   id: string
   projectId: string
@@ -885,14 +908,20 @@ export interface MaterialCodeApplication {
   specification?: string | null
   brand?: string | null
   remark?: string | null
+  workflowState: MaterialCodeWorkflowState
+  syncTaskId?: string | null
+  syncStatus?: MaterialSyncStatus | null
+  syncError?: string | null
+  workflowMessage?: string | null
 }
-export type MaterialCodeResolutionStatus = 'Matched' | 'NoMatch' | 'Ambiguous' | 'ApplicationPending' | 'ApplicationApproved'
+export type MaterialCodeResolutionStatus = 'Matched' | 'NoMatch' | 'Ambiguous' | 'ApplicationPending' | 'ApplicationApproved' | 'Verified' | 'ValidationFailed' | 'CodeNotFound'
 export interface MaterialCodeResolution {
   bomItemId: string
   status: MaterialCodeResolutionStatus
   material?: PdmMaterial | null
   candidates: PdmMaterial[]
   application?: MaterialCodeApplication | null
+  issues: string[]
 }
 
 export type ApprovalU9AutomationStage = 'NotRequested' | 'ItemSyncFailed' | 'WaitingForDependencies' | 'BomSyncFailed' | 'Completed'
@@ -1022,6 +1051,43 @@ export interface MaterialSyncExecutionResult {
   created: boolean
   alreadyExisted: boolean
   updated: boolean
+  automation?: ApprovalU9AutomationResult | null
+  applications?: MaterialCodeApplication[]
+  completed?: boolean
+  message?: string
+}
+
+export type MaterialSyncBatchStatus = 'Queued' | 'Running' | 'Succeeded' | 'PartiallySucceeded' | 'Failed'
+export type MaterialSyncBatchItemStatus = 'Queued' | 'Running' | 'Succeeded' | 'Waiting' | 'Failed'
+
+export interface MaterialSyncBatchItem {
+  id: string
+  batchId: string
+  taskId: string
+  ordinal: number
+  status: MaterialSyncBatchItemStatus
+  message?: string | null
+  startedAt?: string | null
+  completedAt?: string | null
+}
+
+export interface MaterialSyncBatch {
+  id: string
+  status: MaterialSyncBatchStatus
+  requestedBy: string
+  requestedRole: string
+  totalCount: number
+  completedCount: number
+  succeededCount: number
+  waitingCount: number
+  failedCount: number
+  currentTaskId?: string | null
+  currentMaterialCode?: string | null
+  lastError?: string | null
+  createdAt: string
+  startedAt?: string | null
+  completedAt?: string | null
+  items: MaterialSyncBatchItem[]
 }
 
 export interface U9MaterialIntegrationSettings {
@@ -1251,6 +1317,48 @@ export interface U9MaterialSampleImportResult {
   skippedCount: number
   materials: PdmMaterial[]
   importedAt: string
+}
+
+export interface U9MaterialFullSyncCategory {
+  code: string
+  name: string
+}
+
+export interface U9MaterialFullSyncCategoryResult {
+  categoryCode: string
+  categoryName: string
+  discoveredCount: number
+  createdCount: number
+  refreshedCount: number
+  skippedCount: number
+  maximumSequence: number
+  succeeded: boolean
+  error?: string | null
+}
+
+export interface U9MaterialFullSyncRun {
+  id: string
+  triggerKind: string
+  status: 'Running' | 'Succeeded' | 'PartiallySucceeded' | 'Failed'
+  categoryCodes: string[]
+  categoryResults: U9MaterialFullSyncCategoryResult[]
+  categoryCount: number
+  completedCategoryCount: number
+  discoveredCount: number
+  createdCount: number
+  refreshedCount: number
+  skippedCount: number
+  failedCategoryCount: number
+  lastError?: string | null
+  startedAt: string
+  completedAt?: string | null
+}
+
+export interface U9MaterialFullSyncStatusResponse {
+  scheduleTime: string
+  checkIntervalMinutes: number
+  categories: U9MaterialFullSyncCategory[]
+  latestRun?: U9MaterialFullSyncRun | null
 }
 
 export interface UpdateU9MaterialIntegrationInput {

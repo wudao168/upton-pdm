@@ -123,6 +123,21 @@ describe('ProjectWorkspaceHeader', () => {
     expect(sidebar.text()).not.toContain('已检出')
   })
 
+  it('当前项目使用设计树唯一图档数覆盖项目登记汇总数', () => {
+    const wrapper = mount(ProjectWorkspaceHeader, {
+      props: {
+        project: childProject,
+        projects: [rootProject, childProject, drawingChild],
+        activeTab: 'documents',
+        activeDocumentCounts: { all: 41, model: 41, drawing: 0 },
+      },
+    })
+
+    expect(wrapper.get('.pdm-project-sidebar__overview').text()).toContain('41图档')
+    expect(wrapper.get('[aria-label="选择项目号 P700002-1"] .pdm-project-family__document-counts').text()).toBe('410')
+    expect(wrapper.get('[aria-label="选择项目号 P700002"] .pdm-project-family__document-counts').text()).toBe('21')
+  })
+
   it('默认选中主项目时左侧显示主项目管理信息', () => {
     const wrapper = mount(ProjectWorkspaceHeader, {
       props: { project: rootProject, projects: [rootProject, childProject, drawingChild], activeTab: 'overview', currentUsername: 'engineer' },
@@ -162,6 +177,26 @@ describe('ProjectWorkspaceHeader', () => {
     expect(fileTab).toBeDefined()
     await fileTab!.trigger('click')
     expect(wrapper.emitted('tab')).toEqual([['files']])
+  })
+
+  it('切换项目时显示进度并阻止重复点击', async () => {
+    const wrapper = mount(ProjectWorkspaceHeader, {
+      props: {
+        project: rootProject,
+        projects: [rootProject, childProject, drawingChild],
+        activeTab: 'documents',
+        switchingProjectId: childProject.id,
+      },
+    })
+
+    const target = wrapper.get('[aria-label="选择项目号 P700002-1"]')
+    expect(target.attributes('aria-busy')).toBe('true')
+    expect(target.attributes()).toHaveProperty('disabled')
+    expect(target.get('.pdm-project-family__state').text()).toBe('切换中…')
+    expect(wrapper.get('button[aria-label="浏览项目"]').attributes()).toHaveProperty('disabled')
+
+    await target.trigger('click')
+    expect(wrapper.emitted('switch')).toBeUndefined()
   })
 
   it('浏览项目时支持搜索并在二次确认后切换', async () => {

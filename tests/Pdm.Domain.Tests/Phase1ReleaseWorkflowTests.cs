@@ -439,7 +439,7 @@ public sealed class Phase1ReleaseWorkflowTests
     }
 
     [Fact]
-    public async Task MechanicalBomSource_UsesPartNamePropertyInsteadOfStoredInstancePath()
+    public async Task MechanicalBomSource_PreservesEmptyCardFieldsWithoutLegacyNamesOrConfigurationFallback()
     {
         var repository = new InMemoryPdmRepository(TimeProvider.System);
         var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(), new RecordingPublisher(), TimeProvider.System);
@@ -452,7 +452,19 @@ public sealed class Phase1ReleaseWorkflowTests
             "零件名称映射测试",
             new Dictionary<string, string?>
             {
+                [CadPropertyCardSnapshot.SchemaKey] = "1",
+                [CadPropertyCardSnapshot.ScopePrefix + "物料分类"] = "Global",
+                [CadPropertyCardSnapshot.ScopePrefix + "物料编码"] = "Global",
+                [CadPropertyCardSnapshot.ScopePrefix + "物料名称"] = "Global",
+                [CadPropertyCardSnapshot.ScopePrefix + "材质"] = "Global",
+                [CadPropertyCardSnapshot.ScopePrefix + "备注"] = "Global",
                 ["全局/物料分类"] = "标准件",
+                ["全局/物料编码"] = "",
+                ["全局/物料名称"] = "",
+                ["全局/材质"] = "",
+                ["配置:Default/材质"] = "旧材料",
+                ["全局/备注"] = "卡内备注",
+                ["全局/数量"] = "0",
                 ["全局/零件名称"] = "真空箱泵组安装架"
             },
             snapshot,
@@ -464,7 +476,12 @@ public sealed class Phase1ReleaseWorkflowTests
         var generated = await workflow.GenerateMechanicalBomAsync(ProjectId, false, "admin", UserRole.Administrator, default);
         var sourceItem = Assert.Single(generated.StandardItems, item => item.SourceDocumentId == sourceDocument.Id);
 
-        Assert.Equal("真空箱泵组安装架", sourceItem.Name);
+        Assert.Equal("", sourceItem.Name);
+        Assert.Equal("", sourceItem.DrawingNumber);
+        Assert.Null(sourceItem.Material);
+        Assert.Equal("卡内备注", sourceItem.Remark);
+        Assert.True(sourceItem.Quantity > 0);
+        Assert.False(sourceItem.IsComplete);
     }
 
     [Fact]

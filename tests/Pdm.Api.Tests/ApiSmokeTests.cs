@@ -48,6 +48,22 @@ public sealed class ApiSmokeTests : IClassFixture<PdmApiFactory>
     }
 
     [Fact]
+    public async Task BomPropertyMappings_AreReadableByAuthenticatedPluginUsers()
+    {
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue(
+            "Bearer",
+            CreateToken("engineer", "Engineer"));
+
+        var response = await client.GetAsync("/api/bom-property-mappings");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var mappings = await response.Content.ReadFromJsonAsync<List<BomPropertyMappingResponse>>();
+        Assert.Contains(mappings!, item =>
+            item.PdmPropertyKey == "projectNumber"
+            && item.SolidWorksProperty == "项目号");
+    }
+
+    [Fact]
     public async Task PersonalSettings_UpdateProfileAndChangePasswordLikeCrm()
     {
         var repository = factory.Services.GetRequiredService<IPdmRepository>();
@@ -686,6 +702,7 @@ public sealed class ApiSmokeTests : IClassFixture<PdmApiFactory>
             new UserAccount(Guid.NewGuid(), "project-manager-2", "协同项目经理", "unused", UserRole.Engineer, true, RoleCode: "ProjectManager"),
             new UserAccount(Guid.NewGuid(), "design-lead", "设计负责人", "unused", UserRole.Engineer, true),
             new UserAccount(Guid.NewGuid(), "design-lead-2", "协同主设", "unused", UserRole.Engineer, true),
+            new UserAccount(Guid.NewGuid(), "mechanical-supervisor", "机械主管", "unused", UserRole.Approver, true, RoleCode: "MechanicalManager"),
             new UserAccount(Guid.NewGuid(), "designer-own", "本事业部设计", "unused", UserRole.Engineer, true),
             new UserAccount(Guid.NewGuid(), "designer-other", "跨事业部设计", "unused", UserRole.Engineer, true),
             new UserAccount(Guid.NewGuid(), "production-user", "生产人员", "unused", UserRole.ProductionViewer, true),
@@ -703,7 +720,7 @@ public sealed class ApiSmokeTests : IClassFixture<PdmApiFactory>
         var division = await CreateUnitAsync("DIV-A-" + Guid.NewGuid().ToString("N")[..6], "自动化事业部");
         var otherDivision = await CreateUnitAsync("DIV-B-" + Guid.NewGuid().ToString("N")[..6], "机器人事业部");
         var procurement = await CreateUnitAsync("PROC-" + Guid.NewGuid().ToString("N")[..6], "采购部", OrganizationUnitKind.Department, false, division.Id);
-        foreach (var username in new[] { "division-manager", "project-manager", "project-manager-2", "design-lead", "design-lead-2", "designer-own", "production-user" })
+        foreach (var username in new[] { "division-manager", "project-manager", "project-manager-2", "design-lead", "design-lead-2", "mechanical-supervisor", "designer-own", "production-user" })
             await PutMembershipAsync(username, division.Id);
         await PutMembershipAsync("designer-other", otherDivision.Id);
         await PutMembershipAsync("legacy-procurement", procurement.Id);
@@ -768,13 +785,19 @@ public sealed class ApiSmokeTests : IClassFixture<PdmApiFactory>
         Assert.Equal(new[] { "design-lead", "design-lead-2" }, staffingProject!.DesignLeads);
 
         var divisionManagerProjects = await client.GetFromJsonAsync<List<ProjectResponse>>("/api/projects");
+        Assert.True(Assert.Single(divisionManagerProjects!, item => item.Id == project.Id).CanAssignDesigners);
         Assert.True(Assert.Single(divisionManagerProjects!, item => item.Id == child.Id).CanAssignDesigners);
+        var divisionManagerMainDesignersResponse = await client.PutAsJsonAsync($"/api/projects/{project.Id}/designers", new { designers = new[] { "designer-own" } });
+        Assert.Equal(HttpStatusCode.OK, divisionManagerMainDesignersResponse.StatusCode);
         var divisionManagerDesignersResponse = await client.PutAsJsonAsync($"/api/projects/{child.Id}/designers", new { designers = new[] { "designer-own" } });
         Assert.Equal(HttpStatusCode.OK, divisionManagerDesignersResponse.StatusCode);
 
         client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", CreateToken("project-manager", "Engineer"));
         var projectManagerProjects = await client.GetFromJsonAsync<List<ProjectResponse>>("/api/projects");
+        Assert.True(Assert.Single(projectManagerProjects!, item => item.Id == project.Id).CanAssignDesigners);
         Assert.True(Assert.Single(projectManagerProjects!, item => item.Id == child.Id).CanAssignDesigners);
+        var projectManagerMainDesignersResponse = await client.PutAsJsonAsync($"/api/projects/{project.Id}/designers", new { designers = new[] { "designer-own" } });
+        Assert.Equal(HttpStatusCode.OK, projectManagerMainDesignersResponse.StatusCode);
         var projectManagerDesignersResponse = await client.PutAsJsonAsync($"/api/projects/{child.Id}/designers", new { designers = new[] { "designer-own" } });
         Assert.Equal(HttpStatusCode.OK, projectManagerDesignersResponse.StatusCode);
         var nonTechnicalDesignerResponse = await client.PutAsJsonAsync($"/api/projects/{child.Id}/designers", new { designers = new[] { "production-user" } });
@@ -789,9 +812,24 @@ public sealed class ApiSmokeTests : IClassFixture<PdmApiFactory>
 
         client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", CreateToken("design-lead", "Engineer"));
         var designLeadProjects = await client.GetFromJsonAsync<List<ProjectResponse>>("/api/projects");
+        Assert.True(Assert.Single(designLeadProjects!, item => item.Id == project.Id).CanAssignDesigners);
         Assert.True(Assert.Single(designLeadProjects!, item => item.Id == child.Id).CanAssignDesigners);
+        var designLeadMainDesignersResponse = await client.PutAsJsonAsync($"/api/projects/{project.Id}/designers", new { designers = new[] { "designer-own" } });
+        Assert.Equal(HttpStatusCode.OK, designLeadMainDesignersResponse.StatusCode);
         var designersResponse = await client.PutAsJsonAsync($"/api/projects/{child.Id}/designers", new { designers = new[] { "designer-own", "designer-other" } });
         Assert.Equal(HttpStatusCode.OK, designersResponse.StatusCode);
+
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", CreateToken("mechanical-supervisor", "Approver"));
+        var mechanicalSupervisorProjects = await client.GetFromJsonAsync<List<ProjectResponse>>("/api/projects");
+        Assert.True(Assert.Single(mechanicalSupervisorProjects!, item => item.Id == project.Id).CanAssignDesigners);
+        var mechanicalSupervisorResponse = await client.PutAsJsonAsync($"/api/projects/{project.Id}/designers", new { designers = new[] { "designer-own" } });
+        Assert.Equal(HttpStatusCode.OK, mechanicalSupervisorResponse.StatusCode);
+
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", CreateToken("designer-own", "Engineer"));
+        var unrelatedEngineerProjects = await client.GetFromJsonAsync<List<ProjectResponse>>("/api/projects");
+        Assert.False(Assert.Single(unrelatedEngineerProjects!, item => item.Id == project.Id).CanAssignDesigners);
+        var unrelatedEngineerResponse = await client.PutAsJsonAsync($"/api/projects/{project.Id}/designers", new { designers = new[] { "designer-own" } });
+        Assert.Equal(HttpStatusCode.Forbidden, unrelatedEngineerResponse.StatusCode);
 
         client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", CreateToken("design-lead-2", "Engineer"));
         var secondDesignLeadResponse = await client.PutAsJsonAsync($"/api/projects/{child.Id}/designers", new { designers = new[] { "designer-own", "designer-other" } });
@@ -1059,6 +1097,7 @@ public sealed class ApiSmokeTests : IClassFixture<PdmApiFactory>
     private sealed record SystemSettingsResponse(string VaultRoot, string ReleaseRoot);
     private sealed record EquipmentTypeResponse(int Code, string Name, bool IsActive);
     private sealed record NumberingOptionsResponse(IReadOnlyList<EquipmentTypeResponse> EquipmentTypes);
+    private sealed record BomPropertyMappingResponse(string PdmPropertyKey, string SolidWorksProperty);
     private sealed record OrganizationDirectoryResponse(IReadOnlyList<OrganizationUnitResponse> Units);
     private sealed record UserProfileResponse(string Username, string DisplayName, string? Nickname, string Gender, string? Landline, string? MobilePhone, string? Email);
     private sealed record PasswordResetTaskResponse(Guid Id, string Username, string DisplayName, DateTimeOffset RequestedAt);

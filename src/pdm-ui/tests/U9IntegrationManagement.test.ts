@@ -5,6 +5,7 @@ import U9IntegrationManagement from '../src/components/U9IntegrationManagement.v
 
 const api = vi.hoisted(() => ({
   getU9MaterialIntegration: vi.fn(),
+  getU9MaterialFullSyncStatus: vi.fn(),
   updateU9MaterialIntegration: vi.fn(),
   testU9MaterialIntegration: vi.fn(),
   previewU9MaterialSample: vi.fn(),
@@ -47,6 +48,17 @@ describe('U9IntegrationManagement', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     api.getU9MaterialIntegration.mockResolvedValue({ ...settings })
+    api.getU9MaterialFullSyncStatus.mockResolvedValue({
+      scheduleTime: '02:00', checkIntervalMinutes: 30,
+      categories: [{ code: '0101', name: '电气外购件' }, { code: '0302', name: '设备' }],
+      latestRun: {
+        id: 'run-1', triggerKind: 'Scheduled', status: 'Succeeded', categoryCodes: ['0101', '0302'],
+        categoryCount: 2, completedCategoryCount: 2, discoveredCount: 120, createdCount: 10,
+        refreshedCount: 108, skippedCount: 2, failedCategoryCount: 0,
+        startedAt: '2026-09-01T18:00:00Z', completedAt: '2026-09-01T18:10:00Z',
+        categoryResults: [{ categoryCode: '0302', categoryName: '设备', discoveredCount: 20, createdCount: 2, refreshedCount: 18, skippedCount: 0, maximumSequence: 5424, succeeded: true }],
+      },
+    })
     api.updateU9MaterialIntegration.mockImplementation(async input => ({ ...input, clientSecretConfigured: true }))
     api.testU9MaterialIntegration.mockResolvedValue({ ...settings, testedAt: '2026-08-20T00:00:00Z' })
     api.previewU9MaterialSample.mockResolvedValue({ categoryCodes: ['0101', '0102', '0204'], limitPerCategory: 10, queriedAt: '2026-08-20T00:00:00Z', items: [] })
@@ -92,26 +104,22 @@ describe('U9IntegrationManagement', () => {
     expect(interfacePage.text()).toContain('启用人工确认后的真实写入')
   })
 
-  it('料品同步固定为三类且每类最多10条，只执行预览请求', async () => {
-    api.previewU9MaterialSample.mockResolvedValueOnce({
-      categoryCodes: ['0101', '0102', '0204'], limitPerCategory: 10, queriedAt: '2026-08-20T00:00:00Z',
-      items: [{ u9ItemId: 'u9-1', materialCode: '01010000001', name: '光电传感器', categoryCode: '0101', categoryName: '电气外购件', kind: 'Electrical', supplyMode: 'Purchase', unitCode: '001', specification: 'M18', brand: '欧姆龙', existsInPdm: false, canImport: true, decision: '新建' }],
-    })
+  it('料品同步显示动态分类的定时全量同步状态，不再提供样本导入', async () => {
     const wrapper = mountPage()
     await flushPromises()
     await wrapper.findAll('[role="tab"]').find(tab => tab.text().includes('料品同步'))!.trigger('click')
     await flushPromises()
 
-    const panel = wrapper.get('[aria-label="U9C料品样本同步"]')
-    expect(panel.text()).toContain('非全量')
-    expect(panel.text()).toContain('每类最多10条')
-    await panel.findAll('button').find(button => button.text().includes('只读预览'))!.trigger('click')
-    await flushPromises()
-
-    expect(api.previewU9MaterialSample).toHaveBeenCalledWith(['0101', '0102', '0204'], 10, 'token')
+    const panel = wrapper.get('[aria-label="U9C料品自动全量同步"]')
+    expect(panel.text()).toContain('每日 02:00，每 30 分钟检查')
+    expect(panel.text()).toContain('0302 设备')
+    expect(panel.text()).toContain('发现料品120')
+    expect(panel.text()).toContain('最大流水')
+    expect(panel.text()).not.toContain('每类最多10条')
+    expect(panel.text()).not.toContain('只读预览')
+    expect(api.getU9MaterialFullSyncStatus).toHaveBeenCalledWith('token')
+    expect(api.previewU9MaterialSample).not.toHaveBeenCalled()
     expect(api.importU9MaterialSample).not.toHaveBeenCalled()
-    expect(panel.text()).toContain('品牌')
-    expect(panel.text()).toContain('欧姆龙')
   })
 
   it('保存基础设置时保留料品接口参数', async () => {

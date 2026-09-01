@@ -35,7 +35,7 @@ describe('MyTasks', () => {
         materialCodeTasks: [{
           id: 'material-1', projectId: 'project-1', projectCode: 'P700001', projectName: '气密设备',
           bomItemId: null, bomHeaderKind: 'Standard', applicationType: 'BomHeader', status: 'Pending',
-          requestedBy: 'engineer', requestedAt: '2026-08-21T09:00:00Z', rowVersion: 1,
+          workflowState: 'PendingApproval', requestedBy: 'engineer', requestedAt: '2026-08-21T09:00:00Z', rowVersion: 1,
         }],
         passwordResetTasks: [{ id: 'password-1', username: 'zhangsan', displayName: '张三', requestedAt: '2026-08-19T08:00:00Z' }],
         pending: false, onRequestRelease: vi.fn(), onForceRelease: vi.fn(), onResetPassword: vi.fn(),
@@ -60,7 +60,7 @@ describe('MyTasks', () => {
     const baseTask = {
       projectId: 'project-2', projectCode: 'P700002', projectName: 'XXX设备',
       bomItemId: null, applicationType: 'BomHeader' as const, status: 'Pending' as const,
-      requestedBy: 'developer', rowVersion: 1,
+      workflowState: 'PendingApproval' as const, requestedBy: 'developer', rowVersion: 1,
     }
     const wrapper = mount(MyTasks, {
       props: {

@@ -43,7 +43,7 @@ function chooseAttachment(kind: MaterialAttachmentKind) {
     <el-alert v-if="u9FieldsLocked" type="warning" :closable="false" title="U9C任务结果尚未确认，名称、分类、单位、规格等U9字段暂不可修改；推荐、选型建议、参考价格、封面和附件仍可维护。" />
     <el-form label-position="top">
       <div class="material-editor-grid">
-        <el-form-item label="PLM物料编码"><el-input v-model="form.materialCode" disabled :placeholder="materialCodePlaceholder" /><p class="field-help">保存时从分类当前流水起逐号只读查询U9C，跳过编码占用及规格冲突后预留可用编号；创建后不可修改。</p></el-form-item>
+        <el-form-item label="PLM物料编码"><el-input v-model="form.materialCode" disabled :placeholder="materialCodePlaceholder" /><p class="field-help">保存时从PLM分类当前基线向后预留编号；U9C在后台同步，极少数重复号会自动校准并换号。</p></el-form-item>
         <el-form-item label="物料名称" required><el-input v-model="form.name" :disabled="u9FieldsLocked" /></el-form-item>
         <el-form-item label="U9C对应分类" required><el-select v-model="form.categoryCode" :disabled="u9FieldsLocked" filterable placeholder="请选择U9C对应分类" @change="emit('categoryChange', String($event))"><el-option v-for="category in categories" :key="category.code" :label="`${category.code} ${category.name}`" :value="category.code" /></el-select></el-form-item>
         <el-form-item label="PLM业务类型"><el-select v-model="form.kind" disabled><el-option label="电气件" value="Electrical" /><el-option label="机械外购件" value="Standard" /><el-option label="非标机加件" value="NonStandard" /><el-option label="产品/组件" value="Product" /></el-select></el-form-item>

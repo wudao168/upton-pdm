@@ -3,6 +3,15 @@ using Upton.Pdm.Domain;
 
 namespace Upton.Pdm.Application;
 
+internal sealed class U9MaterialExecutionSession(
+    U9MaterialIntegrationConfiguration configuration,
+    string token)
+{
+    public U9MaterialIntegrationConfiguration Configuration { get; } = configuration;
+    public string Token { get; } = token;
+    public HashSet<string> ValidatedUnitCodes { get; } = new(StringComparer.OrdinalIgnoreCase);
+}
+
 public sealed class U9MaterialIntegrationService(
     IMaterialRepository materials,
     IPdmRepository repository,
@@ -238,21 +247,21 @@ public sealed class U9MaterialIntegrationService(
         if (!await repository.HasUserPermissionAsync(actor, role, PermissionCodes.MaterialManage, cancellationToken))
             throw new UnauthorizedAccessException("当前角色无权执行U9C料品同步。");
 
-        return await ExecuteApprovedTaskCoreAsync(taskId, actor, cancellationToken);
+        var session = await CreateExecutionSessionAsync(cancellationToken);
+        return await ExecuteApprovedTaskCoreAsync(taskId, actor, session, cancellationToken);
     }
 
-    internal Task<MaterialSyncExecutionResult> ExecuteApprovedTaskAsync(
-        Guid taskId,
-        string actor,
-        CancellationToken cancellationToken) =>
-        ExecuteApprovedTaskCoreAsync(taskId, actor, cancellationToken);
-
-    private async Task<MaterialSyncExecutionResult> ExecuteApprovedTaskCoreAsync(
+    public async Task<MaterialSyncExecutionResult> ExecuteApprovedTaskAsync(
         Guid taskId,
         string actor,
         CancellationToken cancellationToken)
     {
+        var session = await CreateExecutionSessionAsync(cancellationToken);
+        return await ExecuteApprovedTaskCoreAsync(taskId, actor, session, cancellationToken);
+    }
 
+    internal async Task<U9MaterialExecutionSession> CreateExecutionSessionAsync(CancellationToken cancellationToken)
+    {
         var configuration = await materials.GetIntegrationConfigurationAsync(cancellationToken);
         if (!configuration.WriteEnabled)
             throw new PdmRuleException("U9C料品真实写入尚未启用。请由管理员核对请求预览后显式开启。");
@@ -262,6 +271,23 @@ public sealed class U9MaterialIntegrationService(
             throw new PdmRuleException("U9C料品Create/Modify/Query路径与已冻结的官方合同不一致。");
         if (string.IsNullOrWhiteSpace(configuration.ClientSecretCiphertext))
             throw new PdmRuleException("U9C应用密钥尚未配置。");
+        var authentication = await client.AuthenticateAsync(new U9AuthenticationRequest(
+            configuration.BaseUrl,
+            configuration.EnterpriseCode,
+            configuration.OrganizationCode,
+            configuration.UserCode,
+            configuration.ClientId,
+            secretProtector.Unprotect(configuration.ClientSecretCiphertext)), cancellationToken);
+        return new U9MaterialExecutionSession(configuration, authentication.Token);
+    }
+
+    internal async Task<MaterialSyncExecutionResult> ExecuteApprovedTaskCoreAsync(
+        Guid taskId,
+        string actor,
+        U9MaterialExecutionSession session,
+        CancellationToken cancellationToken)
+    {
+        var configuration = session.Configuration;
 
         var existingTask = await materials.FindSyncTaskAsync(taskId, cancellationToken)
             ?? throw new PdmNotFoundException("U9C同步任务不存在。");
@@ -286,28 +312,24 @@ public sealed class U9MaterialIntegrationService(
         var postWriteVerificationStarted = false;
         try
         {
-            var authentication = await client.AuthenticateAsync(new U9AuthenticationRequest(
-                configuration.BaseUrl,
-                configuration.EnterpriseCode,
-                configuration.OrganizationCode,
-                configuration.UserCode,
-                configuration.ClientId,
-                secretProtector.Unprotect(configuration.ClientSecretCiphertext)), cancellationToken);
-
-            var uomQuery = await client.QueryUomsAsync(
-                configuration.BaseUrl,
-                authentication.Token,
-                U9MaterialPayloadFactory.UomQueryPayload(u9UnitCode, task.CorrelationId),
-                cancellationToken);
-            if (uomQuery.ResponseCode != 0)
-                throw new PdmRuleException($"U9C计量单位查询失败（ResCode={uomQuery.ResponseCode}）：{uomQuery.ResponseMessage ?? "未返回错误说明"}。");
-            if (!uomQuery.Units.Any(unit => string.Equals(unit.U9UomCode?.Trim(), u9UnitCode, StringComparison.OrdinalIgnoreCase)))
-                throw new PdmRuleException($"PLM计量单位编码 {u9UnitCode} 在U9C中不存在；未执行料品写入。");
+            if (!session.ValidatedUnitCodes.Contains(u9UnitCode))
+            {
+                var uomQuery = await client.QueryUomsAsync(
+                    configuration.BaseUrl,
+                    session.Token,
+                    U9MaterialPayloadFactory.UomQueryPayload(u9UnitCode, task.CorrelationId),
+                    cancellationToken);
+                if (uomQuery.ResponseCode != 0)
+                    throw new PdmRuleException($"U9C计量单位查询失败（ResCode={uomQuery.ResponseCode}）：{uomQuery.ResponseMessage ?? "未返回错误说明"}。");
+                if (!uomQuery.Units.Any(unit => string.Equals(unit.U9UomCode?.Trim(), u9UnitCode, StringComparison.OrdinalIgnoreCase)))
+                    throw new PdmRuleException($"PLM计量单位编码 {u9UnitCode} 在U9C中不存在；未执行料品写入。");
+                session.ValidatedUnitCodes.Add(u9UnitCode);
+            }
 
             var query = await client.QueryItemsAsync(
                 configuration.BaseUrl,
                 configuration.ItemQueryPath,
-                authentication.Token,
+                session.Token,
                 U9MaterialPayloadFactory.QueryPayload(sourceMaterial.MaterialCode, task.CorrelationId),
                 cancellationToken);
             if (query.ResponseCode != 0)
@@ -323,7 +345,7 @@ public sealed class U9MaterialIntegrationService(
             if (task.Operation == MaterialSyncOperation.Create && existingItem is not null)
             {
                 if (existingTask.Status != MaterialSyncStatus.NeedsReview)
-                    throw new PdmRuleException($"U9C已存在料号 {sourceMaterial.MaterialCode}。系统不会自动绑定同号料品；请校准该分类流水并重新创建PLM料品。");
+                    throw new U9MaterialCodeConflictException(sourceMaterial.MaterialCode);
 
                 var differences = CompareMappedFields(sourceMaterial, existingItem);
                 if (differences.Count > 0)
@@ -348,7 +370,7 @@ public sealed class U9MaterialIntegrationService(
             var write = await client.PostBatchAsync(
                 configuration.BaseUrl,
                 task.Operation == MaterialSyncOperation.Create ? configuration.ItemCreatePath : configuration.ItemModifyPath,
-                authentication.Token,
+                session.Token,
                 task.PayloadJson,
                 cancellationToken);
             writeResponseReceived = true;
@@ -361,7 +383,7 @@ public sealed class U9MaterialIntegrationService(
             postWriteVerificationStarted = true;
             var verifiedItem = await VerifyWrittenMaterialAsync(
                 configuration,
-                authentication.Token,
+                session.Token,
                 task,
                 sourceMaterial,
                 cancellationToken);

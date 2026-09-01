@@ -4,6 +4,28 @@ namespace Upton.Pdm.Tests;
 
 public sealed class ProjectSubmissionPolicyTests
 {
+    [Theory]
+    [InlineData("engineer", true)]
+    [InlineData(" ENGINEER ", true)]
+    [InlineData("other", false)]
+    [InlineData("owner", false)]
+    [InlineData("", false)]
+    public void MainProject_RequiresExplicitEngineerAssignment(string actor, bool expected)
+    {
+        var root = Project(null, "P700005") with
+        {
+            PrimaryProjectManager = "manager",
+            DesignLeads = ["lead"],
+            Designers = ["engineer"]
+        };
+
+        Assert.Equal(expected, ProjectSubmissionPolicy.CanSubmitArchive(root, actor, false));
+        Assert.False(ProjectSubmissionPolicy.CanSubmitArchive(
+            root with { Designers = [] }, "engineer", false));
+        Assert.False(ProjectSubmissionPolicy.CanSubmitArchive(
+            Project(root.Id, "P700005-1"), "engineer", false));
+    }
+
     [Fact]
     public void AssignedEngineer_CanSubmitOnlyToAssignedChildProject()
     {
@@ -23,10 +45,12 @@ public sealed class ProjectSubmissionPolicyTests
         var root = Project(null, "P700001") with
         {
             PrimaryProjectManager = "manager",
+            CollaborativeProjectManagers = ["collaborator"],
             DesignLeads = ["lead"]
         };
 
         Assert.True(ProjectSubmissionPolicy.CanSubmitArchive(root, "manager", false));
+        Assert.True(ProjectSubmissionPolicy.CanSubmitArchive(root, "collaborator", false));
         Assert.True(ProjectSubmissionPolicy.CanSubmitArchive(root, "lead", false));
         Assert.True(ProjectSubmissionPolicy.CanSubmitArchive(root, "administrator", true));
     }

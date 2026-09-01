@@ -494,7 +494,7 @@ describe('ProjectManager', () => {
     await wrapper.vm.$nextTick()
     const text = wrapper.text()
     expect(text.indexOf('本事业部（优先）')).toBeLessThan(text.indexOf('其他事业部'))
-    expect(text).toContain('默认优先显示主设所在事业部人员')
+    expect(text).toContain('默认优先显示当前用户所在事业部人员')
     expect(wrapper.findAllComponents({ name: 'ElOption' }).map(item => item.props('label'))).not.toContain('项目经理甲')
     expect(wrapper.findAllComponents({ name: 'ElOption' }).map(item => item.props('label'))).not.toContain('采购人员甲 · 未归属事业部')
   })
@@ -508,7 +508,17 @@ describe('ProjectManager', () => {
     expect(wrapper.findAllComponents({ name: 'ElOption' }).map(item => item.props('value'))).toEqual(expect.arrayContaining(['project-manager', 'project-manager-2']))
 
     await wrapper.get('[aria-label="分配工程师 P700001-1"]').trigger('click')
-    expect(wrapper.text()).toContain('分配子项目工程师 · P700001-1')
+    expect(wrapper.text()).toContain('分配执行工程师 · P700001-1')
+  })
+
+  it('主项目可从操作菜单分配执行工程师', async () => {
+    const wrapper = mountProjectManager(emptyDirectory, [{ ...parent, canAssignDesigners: true }])
+    const menu = wrapper.findComponent({ name: 'ElDropdown' })
+    menu.vm.$emit('command', 'assign-designers')
+    await wrapper.vm.$nextTick()
+
+    expect(wrapper.text()).toContain('分配执行工程师 · P700001')
+    expect(wrapper.findComponent({ name: 'ElSelect' }).props('multiple')).toBe(true)
   })
 
   it('操作菜单移除进入与事业部分配，并仅向有权限账号开放项目删除', async () => {

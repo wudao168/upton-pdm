@@ -91,15 +91,16 @@ internal sealed class BatchProgressDialog : Form
         Invalidate(true);
     }
 
-    public void Complete(string message, bool hasFailures)
+    public void Complete(string message, bool hasFailures, bool hasBomWarnings = false)
     {
         if (InvokeRequired)
         {
-            BeginInvoke((Action)(() => Complete(message, hasFailures)));
+            BeginInvoke((Action)(() => Complete(message, hasFailures, hasBomWarnings)));
             return;
         }
 
-        status.Text = hasFailures ? "整套提交完成，部分文件处理失败。" : "整套提交完成。";
+        status.Text = hasFailures ? "整套提交未完成，部分文件处理失败。"
+            : hasBomWarnings ? "整套存档完成，BOM有待处理提醒。" : "整套提交完成。";
         currentFile.Text = string.Empty;
         details.Text = message ?? string.Empty;
         canClose = true;
@@ -107,7 +108,7 @@ internal sealed class BatchProgressDialog : Form
         close.Enabled = true;
         close.Focus();
         Invalidate(true);
-        if (!hasFailures)
+        if (!hasFailures && !hasBomWarnings)
         {
             autoCloseTimer.Start();
         }

@@ -7,6 +7,34 @@ namespace Upton.Pdm.Domain.Tests;
 
 public sealed class BomWorkbookTests
 {
+    [Theory]
+    [InlineData("关联料号")]
+    [InlineData("父项料号")]
+    [InlineData("上级物料编码")]
+    public void Read_AcceptsOldAndNewParentMaterialHeaders(string header)
+    {
+        using var stream = new MemoryStream();
+        stream.Write(BomWorkbook.Write(new[]
+        {
+            new BomItem(Guid.NewGuid(), Guid.NewGuid(), BomKind.Standard, 1, "PART", "零件", 1, "个", null, null, "W1", true)
+            {
+                ParentDrawingNumber = "ASSEMBLY"
+            }
+        }));
+        stream.Position = 0;
+        using (var archive = new ZipArchive(stream, ZipArchiveMode.Update, true))
+        {
+            var entry = archive.GetEntry("xl/worksheets/sheet1.xml")!;
+            string xml;
+            using (var reader = new StreamReader(entry.Open())) xml = reader.ReadToEnd();
+            entry.Delete();
+            using var writer = new StreamWriter(archive.CreateEntry("xl/worksheets/sheet1.xml").Open(), new UTF8Encoding(false));
+            writer.Write(xml.Replace("上级物料编码", header));
+        }
+        stream.Position = 0;
+        Assert.Equal("ASSEMBLY", Assert.Single(BomWorkbook.Read(stream)).ParentDrawingNumber);
+    }
+
     [Fact]
     public void WriteAndRead_RoundTripsStandardBomColumns()
     {

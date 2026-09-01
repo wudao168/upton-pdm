@@ -22,6 +22,8 @@ public static class BomPropertyMappingCatalog
 
     private static readonly IReadOnlyList<Definition> Definitions =
     [
+        new("projectNumber", "项目号", PdmSource, true, _ => "项目号"),
+        new("projectName", "项目名称", PdmSource, true, _ => "项目名称"),
         new("kind", "物料分类", SolidWorksSource, true, _ => "物料分类"),
         new("wearPart", "易损件", SolidWorksSource, true, _ => "易损件"),
         new("unit", "单位", SolidWorksSource, true, settings => settings.BomUnitProperty),

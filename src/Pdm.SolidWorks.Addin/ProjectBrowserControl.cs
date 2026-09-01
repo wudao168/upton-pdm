@@ -82,6 +82,8 @@ internal sealed class ProjectBrowserControl : UserControl
 
     public Guid? SelectedProjectId => selection?.Id;
 
+    public ProjectDto SelectedProject => selection;
+
     public string SelectedProjectDisplay => ProjectSelectionText(selection);
 
     public string SelectedProjectConfirmationCode => selection == null
@@ -96,6 +98,15 @@ internal sealed class ProjectBrowserControl : UserControl
         {
             requestedBrowseButtonWidth = value;
             browseButtonColumn.Width = value;
+        }
+    }
+
+    public string BrowseButtonText
+    {
+        set
+        {
+            browse.Text = string.IsNullOrWhiteSpace(value) ? "选择项目" : value.Trim();
+            browse.AccessibleName = browse.Text;
         }
     }
 

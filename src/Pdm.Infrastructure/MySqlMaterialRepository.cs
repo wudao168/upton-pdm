@@ -49,6 +49,16 @@ public sealed class MySqlMaterialRepository : IMaterialRepository
         return row is null ? null : MapMaterial(row);
     }
 
+    public async Task<IReadOnlyList<PdmMaterial>> FindMaterialsByCodesAsync(IReadOnlyList<string> materialCodes, CancellationToken cancellationToken)
+    {
+        var requested = materialCodes.Where(code => !string.IsNullOrWhiteSpace(code)).Select(code => code.Trim()).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+        if (requested.Length == 0) return [];
+        await using var connection = await OpenAsync(cancellationToken);
+        var rows = await connection.QueryAsync<MaterialRow>(new CommandDefinition(
+            MaterialSelect + " WHERE material_code IN @MaterialCodes", new { MaterialCodes = requested }, cancellationToken: cancellationToken));
+        return rows.Select(MapMaterial).ToArray();
+    }
+
     public async Task<PdmMaterial?> FindMaterialBySourceBomItemAsync(Guid bomItemId, CancellationToken cancellationToken)
     {
         await using var connection = await OpenAsync(cancellationToken);
@@ -130,7 +140,8 @@ public sealed class MySqlMaterialRepository : IMaterialRepository
         var rows = await connection.QueryAsync<MaterialCodeApplicationRow>(new CommandDefinition(
             MaterialCodeApplicationSelect + " WHERE (@ProjectId IS NULL OR project_id=@ProjectId) AND (@Status IS NULL OR status=@Status) ORDER BY requested_at DESC",
             new { ProjectId = projectId, Status = status?.ToString() }, cancellationToken: cancellationToken));
-        return rows.Select(MapMaterialCodeApplication).ToArray();
+        var workflow = await LoadApplicationWorkflowAsync(connection, cancellationToken);
+        return rows.Select(row => MapMaterialCodeApplication(row, workflow.States, workflow.CompletedBomCodes)).ToArray();
     }
 
     public async Task<MaterialCodeApplication?> FindMaterialCodeApplicationAsync(Guid applicationId, CancellationToken cancellationToken)
@@ -138,7 +149,9 @@ public sealed class MySqlMaterialRepository : IMaterialRepository
         await using var connection = await OpenAsync(cancellationToken);
         var row = await connection.QuerySingleOrDefaultAsync<MaterialCodeApplicationRow>(new CommandDefinition(
             MaterialCodeApplicationSelect + " WHERE id=@ApplicationId", new { ApplicationId = applicationId }, cancellationToken: cancellationToken));
-        return row is null ? null : MapMaterialCodeApplication(row);
+        if (row is null) return null;
+        var workflow = await LoadApplicationWorkflowAsync(connection, cancellationToken);
+        return MapMaterialCodeApplication(row, workflow.States, workflow.CompletedBomCodes);
     }
 
     public async Task<MaterialCodeApplication?> FindPendingMaterialCodeApplicationByBomItemAsync(Guid bomItemId, CancellationToken cancellationToken)
@@ -147,7 +160,7 @@ public sealed class MySqlMaterialRepository : IMaterialRepository
         var row = await connection.QueryFirstOrDefaultAsync<MaterialCodeApplicationRow>(new CommandDefinition(
             MaterialCodeApplicationSelect + " WHERE bom_item_id=@BomItemId AND status='Pending' ORDER BY requested_at DESC LIMIT 1",
             new { BomItemId = bomItemId }, cancellationToken: cancellationToken));
-        return row is null ? null : MapMaterialCodeApplication(row);
+        return row is null ? null : MapMaterialCodeApplication(row, new Dictionary<Guid, ApplicationWorkflowAudit>(), new HashSet<string>(StringComparer.OrdinalIgnoreCase));
     }
 
     public async Task<MaterialCodeApplication> CreateMaterialCodeApplicationAsync(MaterialCodeApplication application, CancellationToken cancellationToken)
@@ -179,6 +192,36 @@ public sealed class MySqlMaterialRepository : IMaterialRepository
             new { ApplicationId = applicationId, ExpectedRowVersion = expectedRowVersion, Status = status.ToString(), Actor = actor, DecidedAt = decidedAt.UtcDateTime, Comment = comment, MaterialId = materialId, MaterialCode = materialCode }, cancellationToken: cancellationToken));
         if (affected != 1) throw new PdmConflictException("料号申请已由其他标准化人员处理，请刷新后重试。");
         return await FindMaterialCodeApplicationAsync(applicationId, cancellationToken) ?? throw new PdmNotFoundException("料号申请不存在。");
+    }
+
+    public async Task RecordMaterialCodeApplicationWorkflowAsync(
+        Guid applicationId,
+        MaterialCodeWorkflowState state,
+        string actor,
+        DateTimeOffset occurredAt,
+        string detail,
+        CancellationToken cancellationToken)
+    {
+        await using var connection = await OpenAsync(cancellationToken);
+        var exists = await connection.QuerySingleAsync<int>(new CommandDefinition(
+            "SELECT COUNT(*) FROM material_code_application WHERE id=@ApplicationId",
+            new { ApplicationId = applicationId }, cancellationToken: cancellationToken));
+        if (exists != 1) throw new PdmNotFoundException("料号申请不存在。");
+        await connection.ExecuteAsync(new CommandDefinition(
+            """
+            INSERT INTO audit_entry(id,occurred_at,actor,action_name,entity_type,entity_id,detail_json)
+            VALUES(@Id,@OccurredAt,@Actor,@ActionName,@EntityType,@EntityId,@DetailJson)
+            """,
+            new
+            {
+                Id = Guid.NewGuid(),
+                OccurredAt = occurredAt.UtcDateTime,
+                Actor = actor,
+                ActionName = $"material-code.application.workflow.{state.ToString().ToLowerInvariant()}",
+                EntityType = nameof(MaterialCodeApplication),
+                EntityId = applicationId.ToString(),
+                DetailJson = JsonSerializer.Serialize(new { detail }, jsonOptions)
+            }, cancellationToken: cancellationToken));
     }
 
     public async Task<bool> HasMaterialReferencesAsync(Guid materialId, CancellationToken cancellationToken)
@@ -785,6 +828,304 @@ public sealed class MySqlMaterialRepository : IMaterialRepository
         return (await FindSyncTaskAsync(taskId, cancellationToken))!;
     }
 
+    public async Task<MaterialSyncTask> ScheduleSyncTaskAsync(Guid taskId, DateTimeOffset dueAt, CancellationToken cancellationToken)
+    {
+        await using var connection = await OpenAsync(cancellationToken);
+        var affected = await connection.ExecuteAsync(new CommandDefinition(
+            "UPDATE u9_material_sync_task SET next_attempt_at=@DueAt,updated_at=@DueAt WHERE id=@TaskId AND status='PreviewReady'",
+            new { TaskId = taskId, DueAt = dueAt.UtcDateTime }, cancellationToken: cancellationToken));
+        if (affected != 1)
+        {
+            var existing = await FindSyncTaskAsync(taskId, cancellationToken);
+            if (existing is null) throw new PdmNotFoundException("U9C同步任务不存在。");
+            throw new PdmRuleException("只有待执行的U9C同步任务才能进入后台队列。");
+        }
+        return (await FindSyncTaskAsync(taskId, cancellationToken))!;
+    }
+
+    public async Task<MaterialSyncBatch> CreateSyncBatchAsync(MaterialSyncBatch batch, CancellationToken cancellationToken)
+    {
+        await using var connection = await OpenAsync(cancellationToken);
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+        try
+        {
+            var taskIds = batch.Items.Select(item => item.TaskId).ToArray();
+            var tasks = (await connection.QueryAsync<(Guid Id, string Status)>(new CommandDefinition(
+                "SELECT id,status FROM u9_material_sync_task WHERE id IN @TaskIds FOR UPDATE",
+                new { TaskIds = taskIds }, transaction, cancellationToken: cancellationToken))).ToArray();
+            if (tasks.Length != taskIds.Length)
+                throw new PdmRuleException("部分U9C同步任务不存在，请刷新后重试。");
+            if (tasks.Any(task => task.Status is not ("PreviewReady" or "Failed" or "NeedsReview")))
+                throw new PdmRuleException("选中的任务状态已经变化，请刷新后重新选择待执行项。");
+            var duplicate = await connection.QuerySingleAsync<int>(new CommandDefinition(
+                """
+                SELECT COUNT(*)
+                FROM u9_material_sync_batch_item item
+                INNER JOIN u9_material_sync_batch batch ON batch.id=item.batch_id
+                WHERE item.task_id IN @TaskIds AND item.status IN ('Queued','Running')
+                  AND batch.status IN ('Queued','Running')
+                """, new { TaskIds = taskIds }, transaction, cancellationToken: cancellationToken));
+            if (duplicate > 0) throw new PdmConflictException("选中的任务已存在于运行中的批次，请刷新后查看进度。");
+
+            await connection.ExecuteAsync(new CommandDefinition(
+                """
+                INSERT INTO u9_material_sync_batch(
+                    id,status,requested_by,requested_role,total_count,completed_count,succeeded_count,waiting_count,failed_count,
+                    current_task_id,current_material_code,last_error,created_at,started_at,completed_at)
+                VALUES(@Id,@Status,@RequestedBy,@RequestedRole,@TotalCount,@CompletedCount,@SucceededCount,@WaitingCount,@FailedCount,
+                    @CurrentTaskId,@CurrentMaterialCode,@LastError,@CreatedAt,@StartedAt,@CompletedAt)
+                """, BatchParameters(batch), transaction, cancellationToken: cancellationToken));
+            foreach (var item in batch.Items)
+            {
+                await connection.ExecuteAsync(new CommandDefinition(
+                    """
+                    INSERT INTO u9_material_sync_batch_item(
+                        id,batch_id,task_id,ordinal_no,status,message,started_at,completed_at,lease_expires_at)
+                    VALUES(@Id,@BatchId,@TaskId,@Ordinal,@Status,@Message,@StartedAt,@CompletedAt,@LeaseExpiresAt)
+                    """, BatchItemParameters(item), transaction, cancellationToken: cancellationToken));
+            }
+            await transaction.CommitAsync(cancellationToken);
+        }
+        catch
+        {
+            if (transaction.Connection is not null) await transaction.RollbackAsync(cancellationToken);
+            throw;
+        }
+        return (await FindSyncBatchAsync(batch.Id, cancellationToken))!;
+    }
+
+    public async Task<MaterialSyncBatch?> FindSyncBatchAsync(Guid batchId, CancellationToken cancellationToken)
+    {
+        await using var connection = await OpenAsync(cancellationToken);
+        var row = await connection.QuerySingleOrDefaultAsync<SyncBatchRow>(new CommandDefinition(
+            "SELECT * FROM u9_material_sync_batch WHERE id=@BatchId",
+            new { BatchId = batchId }, cancellationToken: cancellationToken));
+        if (row is null) return null;
+        var items = await connection.QueryAsync<SyncBatchItemRow>(new CommandDefinition(
+            "SELECT * FROM u9_material_sync_batch_item WHERE batch_id=@BatchId ORDER BY ordinal_no",
+            new { BatchId = batchId }, cancellationToken: cancellationToken));
+        return MapBatch(row, items);
+    }
+
+    public async Task<IReadOnlyList<MaterialSyncBatch>> ListRecentSyncBatchesAsync(string actor, int limit, CancellationToken cancellationToken)
+    {
+        await using var connection = await OpenAsync(cancellationToken);
+        var rows = (await connection.QueryAsync<SyncBatchRow>(new CommandDefinition(
+            "SELECT * FROM u9_material_sync_batch WHERE requested_by=@Actor ORDER BY created_at DESC LIMIT @Limit",
+            new { Actor = actor, Limit = Math.Clamp(limit, 1, 50) }, cancellationToken: cancellationToken))).ToArray();
+        var results = new List<MaterialSyncBatch>(rows.Length);
+        foreach (var row in rows)
+        {
+            var items = await connection.QueryAsync<SyncBatchItemRow>(new CommandDefinition(
+                "SELECT * FROM u9_material_sync_batch_item WHERE batch_id=@BatchId ORDER BY ordinal_no",
+                new { BatchId = row.Id }, cancellationToken: cancellationToken));
+            results.Add(MapBatch(row, items));
+        }
+        return results;
+    }
+
+    public async Task<MaterialSyncBatchClaim?> ClaimNextSyncBatchItemAsync(
+        DateTimeOffset now,
+        DateTimeOffset leaseExpiresAt,
+        CancellationToken cancellationToken)
+    {
+        await using var connection = await OpenAsync(cancellationToken);
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+        try
+        {
+            var item = await connection.QueryFirstOrDefaultAsync<SyncBatchItemRow>(new CommandDefinition(
+                """
+                SELECT item.*
+                FROM u9_material_sync_batch_item item
+                INNER JOIN u9_material_sync_batch batch ON batch.id=item.batch_id
+                WHERE batch.status IN ('Queued','Running')
+                  AND (item.status='Queued' OR (item.status='Running' AND item.lease_expires_at<=@Now))
+                ORDER BY batch.created_at,item.ordinal_no
+                LIMIT 1 FOR UPDATE
+                """, new { Now = now.UtcDateTime }, transaction, cancellationToken: cancellationToken));
+            if (item is null)
+            {
+                await transaction.CommitAsync(cancellationToken);
+                return null;
+            }
+
+            await connection.ExecuteAsync(new CommandDefinition(
+                """
+                UPDATE u9_material_sync_batch_item
+                SET status='Running',started_at=COALESCE(started_at,@Now),completed_at=NULL,message=NULL,lease_expires_at=@LeaseExpiresAt
+                WHERE id=@ItemId
+                """, new { ItemId = item.Id, Now = now.UtcDateTime, LeaseExpiresAt = leaseExpiresAt.UtcDateTime }, transaction, cancellationToken: cancellationToken));
+            await connection.ExecuteAsync(new CommandDefinition(
+                """
+                UPDATE u9_material_sync_batch batch
+                INNER JOIN u9_material_sync_task task ON task.id=@TaskId
+                INNER JOIN material_master material ON material.id=task.material_id
+                SET batch.status='Running',batch.started_at=COALESCE(batch.started_at,@Now),
+                    batch.current_task_id=@TaskId,batch.current_material_code=material.material_code,batch.last_error=NULL
+                WHERE batch.id=@BatchId
+                """, new { item.BatchId, item.TaskId, Now = now.UtcDateTime }, transaction, cancellationToken: cancellationToken));
+            var batchRow = await connection.QuerySingleAsync<SyncBatchRow>(new CommandDefinition(
+                "SELECT * FROM u9_material_sync_batch WHERE id=@BatchId",
+                new { item.BatchId }, transaction, cancellationToken: cancellationToken));
+            var claimedItem = await connection.QuerySingleAsync<SyncBatchItemRow>(new CommandDefinition(
+                "SELECT * FROM u9_material_sync_batch_item WHERE id=@ItemId",
+                new { ItemId = item.Id }, transaction, cancellationToken: cancellationToken));
+            var allItems = await connection.QueryAsync<SyncBatchItemRow>(new CommandDefinition(
+                "SELECT * FROM u9_material_sync_batch_item WHERE batch_id=@BatchId ORDER BY ordinal_no",
+                new { item.BatchId }, transaction, cancellationToken: cancellationToken));
+            await transaction.CommitAsync(cancellationToken);
+            return new MaterialSyncBatchClaim(MapBatch(batchRow, allItems), MapBatchItem(claimedItem));
+        }
+        catch
+        {
+            if (transaction.Connection is not null) await transaction.RollbackAsync(cancellationToken);
+            throw;
+        }
+    }
+
+    public async Task<MaterialSyncBatch> CompleteSyncBatchItemAsync(
+        Guid batchId,
+        Guid itemId,
+        MaterialSyncBatchItemStatus status,
+        string? message,
+        DateTimeOffset completedAt,
+        CancellationToken cancellationToken)
+    {
+        if (status is not (MaterialSyncBatchItemStatus.Succeeded or MaterialSyncBatchItemStatus.Waiting or MaterialSyncBatchItemStatus.Failed))
+            throw new ArgumentOutOfRangeException(nameof(status));
+        await using var connection = await OpenAsync(cancellationToken);
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+        try
+        {
+            var affected = await connection.ExecuteAsync(new CommandDefinition(
+                """
+                UPDATE u9_material_sync_batch_item
+                SET status=@Status,message=@Message,completed_at=@CompletedAt,lease_expires_at=NULL
+                WHERE id=@ItemId AND batch_id=@BatchId AND status='Running'
+                """, new { ItemId = itemId, BatchId = batchId, Status = status.ToString(), Message = Truncate(message, 2000), CompletedAt = completedAt.UtcDateTime }, transaction, cancellationToken: cancellationToken));
+            if (affected != 1) throw new PdmConflictException("U9C批量同步明细状态已变化。");
+
+            var counts = await connection.QuerySingleAsync<SyncBatchCountsRow>(new CommandDefinition(
+                """
+                SELECT COUNT(*) total_count,
+                    SUM(status IN ('Succeeded','Waiting','Failed')) completed_count,
+                    SUM(status='Succeeded') succeeded_count,
+                    SUM(status='Waiting') waiting_count,
+                    SUM(status='Failed') failed_count
+                FROM u9_material_sync_batch_item WHERE batch_id=@BatchId
+                """, new { BatchId = batchId }, transaction, cancellationToken: cancellationToken));
+            var isComplete = counts.CompletedCount == counts.TotalCount;
+            var batchStatus = !isComplete ? MaterialSyncBatchStatus.Running
+                : counts.FailedCount == counts.TotalCount ? MaterialSyncBatchStatus.Failed
+                : counts.FailedCount > 0 || counts.WaitingCount > 0 ? MaterialSyncBatchStatus.PartiallySucceeded
+                : MaterialSyncBatchStatus.Succeeded;
+            await connection.ExecuteAsync(new CommandDefinition(
+                """
+                UPDATE u9_material_sync_batch
+                SET status=@Status,completed_count=@CompletedCount,succeeded_count=@SucceededCount,
+                    waiting_count=@WaitingCount,failed_count=@FailedCount,current_task_id=NULL,current_material_code=NULL,
+                    last_error=@LastError,completed_at=@CompletedAt
+                WHERE id=@BatchId
+                """, new
+                {
+                    BatchId = batchId,
+                    Status = batchStatus.ToString(),
+                    counts.CompletedCount,
+                    counts.SucceededCount,
+                    counts.WaitingCount,
+                    counts.FailedCount,
+                    LastError = status == MaterialSyncBatchItemStatus.Failed ? Truncate(message, 2000) : null,
+                    CompletedAt = isComplete ? completedAt.UtcDateTime : (DateTime?)null
+                }, transaction, cancellationToken: cancellationToken));
+            await transaction.CommitAsync(cancellationToken);
+        }
+        catch
+        {
+            if (transaction.Connection is not null) await transaction.RollbackAsync(cancellationToken);
+            throw;
+        }
+        return (await FindSyncBatchAsync(batchId, cancellationToken))!;
+    }
+
+    public async Task<(PdmMaterial Material, MaterialSyncTask Task)> ReassignMaterialCodeAndEnqueueAsync(
+        PdmMaterial material,
+        long expectedRowVersion,
+        string previousMaterialCode,
+        MaterialSyncTask previousTask,
+        MaterialSyncTask replacementTask,
+        AuditEntry audit,
+        CancellationToken cancellationToken)
+    {
+        await using var connection = await OpenAsync(cancellationToken);
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+        try
+        {
+            var materialAffected = await connection.ExecuteAsync(new CommandDefinition(
+                """
+                UPDATE material_master
+                SET material_code=@MaterialCode,sync_status='PreviewReady',updated_by=@Actor,updated_at=@OccurredAt,row_version=row_version+1
+                WHERE id=@MaterialId AND row_version=@ExpectedRowVersion AND material_code=@PreviousMaterialCode
+                  AND approval_status='Approved' AND u9_sync_confirmed=0 AND is_archived=0
+                """, new
+                {
+                    MaterialId = material.Id,
+                    material.MaterialCode,
+                    ExpectedRowVersion = expectedRowVersion,
+                    PreviousMaterialCode = previousMaterialCode,
+                    audit.Actor,
+                    OccurredAt = audit.OccurredAt.UtcDateTime
+                }, transaction, cancellationToken: cancellationToken));
+            if (materialAffected != 1)
+                throw new PdmConflictException("料品状态或料号已经变化，不能自动换号。");
+
+            var taskAffected = await connection.ExecuteAsync(new CommandDefinition(
+                """
+                UPDATE u9_material_sync_task
+                SET status='Superseded',next_attempt_at=NULL,last_error=@LastError,updated_at=@OccurredAt
+                WHERE id=@TaskId AND material_id=@MaterialId AND status IN ('Failed','NeedsReview')
+                """, new
+                {
+                    TaskId = previousTask.Id,
+                    MaterialId = material.Id,
+                    LastError = $"U9C已占用料号 {previousMaterialCode}，已自动换号。",
+                    OccurredAt = audit.OccurredAt.UtcDateTime
+                }, transaction, cancellationToken: cancellationToken));
+            if (taskAffected != 1)
+                throw new PdmConflictException("原U9C同步任务状态已经变化，不能自动换号。");
+
+            await connection.ExecuteAsync(new CommandDefinition(
+                """
+                UPDATE material_code_application
+                SET material_code=@MaterialCode,row_version=row_version+1
+                WHERE material_id=@MaterialId AND status='Approved'
+                """, new { MaterialId = material.Id, material.MaterialCode }, transaction, cancellationToken: cancellationToken));
+            await connection.ExecuteAsync(new CommandDefinition(
+                """
+                INSERT INTO u9_material_sync_task(
+                    id,material_id,operation,status,correlation_id,payload_json,payload_sha256,attempt_count,next_attempt_at,last_error,
+                    response_preview,u9_item_id,u9_item_code,created_at,updated_at)
+                VALUES(@Id,@MaterialId,@Operation,@Status,@CorrelationId,@PayloadJson,@PayloadSha256,@AttemptCount,@NextAttemptAt,@LastError,
+                    @ResponsePreview,@U9ItemId,@U9ItemCode,@CreatedAt,@UpdatedAt)
+                """, TaskParameters(replacementTask), transaction, cancellationToken: cancellationToken));
+            await InsertAuditAsync(connection, transaction, audit, cancellationToken);
+            var saved = (await FindMaterialAsync(connection, transaction, material.Id, cancellationToken))!;
+            var row = await connection.QuerySingleAsync<SyncTaskRow>(new CommandDefinition(
+                SyncTaskSelect + " WHERE id=@TaskId", new { TaskId = replacementTask.Id }, transaction, cancellationToken: cancellationToken));
+            await transaction.CommitAsync(cancellationToken);
+            return (saved, MapTask(row));
+        }
+        catch (MySqlException exception) when (exception.Number == 1062)
+        {
+            await transaction.RollbackAsync(cancellationToken);
+            throw new PdmConflictException("重新分配的PLM料号已经被占用，请重试。");
+        }
+        catch
+        {
+            if (transaction.Connection is not null) await transaction.RollbackAsync(cancellationToken);
+            throw;
+        }
+    }
+
     public async Task<MaterialSyncTask> BeginSyncTaskAsync(Guid taskId, DateTimeOffset startedAt, CancellationToken cancellationToken)
     {
         await using var connection = await OpenAsync(cancellationToken);
@@ -946,6 +1287,56 @@ public sealed class MySqlMaterialRepository : IMaterialRepository
             await transaction.RollbackAsync(cancellationToken);
             throw;
         }
+    }
+
+    public async Task<U9MaterialFullSyncRun?> GetLatestU9MaterialFullSyncRunAsync(CancellationToken cancellationToken)
+    {
+        await using var connection = await OpenAsync(cancellationToken);
+        var row = await connection.QueryFirstOrDefaultAsync<FullSyncRunRow>(new CommandDefinition(
+            "SELECT * FROM u9_material_full_sync_run ORDER BY started_at DESC LIMIT 1",
+            cancellationToken: cancellationToken));
+        return row is null ? null : MapFullSyncRun(row);
+    }
+
+    public async Task<U9MaterialFullSyncRun> SaveU9MaterialFullSyncRunAsync(U9MaterialFullSyncRun run, CancellationToken cancellationToken)
+    {
+        await using var connection = await OpenAsync(cancellationToken);
+        await connection.ExecuteAsync(new CommandDefinition(
+            """
+            INSERT INTO u9_material_full_sync_run(
+                id,trigger_kind,status,category_codes_json,category_results_json,category_count,
+                completed_category_count,discovered_count,created_count,refreshed_count,skipped_count,
+                failed_category_count,last_error,started_at,completed_at)
+            VALUES(
+                @Id,@TriggerKind,@Status,@CategoryCodesJson,@CategoryResultsJson,@CategoryCount,
+                @CompletedCategoryCount,@DiscoveredCount,@CreatedCount,@RefreshedCount,@SkippedCount,
+                @FailedCategoryCount,@LastError,@StartedAt,@CompletedAt)
+            ON DUPLICATE KEY UPDATE
+                status=VALUES(status),category_codes_json=VALUES(category_codes_json),
+                category_results_json=VALUES(category_results_json),category_count=VALUES(category_count),
+                completed_category_count=VALUES(completed_category_count),discovered_count=VALUES(discovered_count),
+                created_count=VALUES(created_count),refreshed_count=VALUES(refreshed_count),
+                skipped_count=VALUES(skipped_count),failed_category_count=VALUES(failed_category_count),
+                last_error=VALUES(last_error),completed_at=VALUES(completed_at)
+            """, new
+            {
+                Id = run.Id.ToString("D"),
+                run.TriggerKind,
+                Status = run.Status.ToString(),
+                CategoryCodesJson = JsonSerializer.Serialize(run.CategoryCodes, jsonOptions),
+                CategoryResultsJson = JsonSerializer.Serialize(run.CategoryResults, jsonOptions),
+                run.CategoryCount,
+                run.CompletedCategoryCount,
+                run.DiscoveredCount,
+                run.CreatedCount,
+                run.RefreshedCount,
+                run.SkippedCount,
+                run.FailedCategoryCount,
+                run.LastError,
+                StartedAt = run.StartedAt.UtcDateTime,
+                CompletedAt = run.CompletedAt?.UtcDateTime
+            }, cancellationToken: cancellationToken));
+        return run;
     }
 
     public async Task<U9MaterialIntegrationConfiguration> GetIntegrationConfigurationAsync(CancellationToken cancellationToken)
@@ -1122,6 +1513,41 @@ public sealed class MySqlMaterialRepository : IMaterialRepository
         UpdatedAt = task.UpdatedAt.UtcDateTime
     };
 
+    private static object BatchParameters(MaterialSyncBatch batch) => new
+    {
+        batch.Id,
+        Status = batch.Status.ToString(),
+        batch.RequestedBy,
+        RequestedRole = batch.RequestedRole.ToString(),
+        batch.TotalCount,
+        batch.CompletedCount,
+        batch.SucceededCount,
+        batch.WaitingCount,
+        batch.FailedCount,
+        batch.CurrentTaskId,
+        batch.CurrentMaterialCode,
+        batch.LastError,
+        CreatedAt = batch.CreatedAt.UtcDateTime,
+        StartedAt = batch.StartedAt?.UtcDateTime,
+        CompletedAt = batch.CompletedAt?.UtcDateTime
+    };
+
+    private static object BatchItemParameters(MaterialSyncBatchItem item) => new
+    {
+        item.Id,
+        item.BatchId,
+        item.TaskId,
+        item.Ordinal,
+        Status = item.Status.ToString(),
+        item.Message,
+        StartedAt = item.StartedAt?.UtcDateTime,
+        CompletedAt = item.CompletedAt?.UtcDateTime,
+        LeaseExpiresAt = item.LeaseExpiresAt?.UtcDateTime
+    };
+
+    private static string? Truncate(string? value, int maximumLength) =>
+        string.IsNullOrEmpty(value) || value.Length <= maximumLength ? value : value[..maximumLength];
+
     private static PdmMaterial MapMaterial(MaterialRow row) => new(
         row.Id, row.MaterialCode, row.Name, Enum.Parse<MaterialKind>(row.MaterialKind), Enum.Parse<MaterialSupplyMode>(row.SupplyMode),
         row.UnitCode, row.Specification, row.Material, row.Remark, row.Brand, row.SurfaceTreatment, row.Weight, row.WeightUnit,
@@ -1178,7 +1604,59 @@ public sealed class MySqlMaterialRepository : IMaterialRepository
             RequestedAt = Utc(row.RequestedAt)
         };
 
-    private static MaterialCodeApplication MapMaterialCodeApplication(MaterialCodeApplicationRow row) => new(
+    private static MaterialSyncBatch MapBatch(SyncBatchRow row, IEnumerable<SyncBatchItemRow> items) => new(
+        row.Id,
+        Enum.Parse<MaterialSyncBatchStatus>(row.Status),
+        row.RequestedBy,
+        Enum.Parse<UserRole>(row.RequestedRole),
+        row.TotalCount,
+        row.CompletedCount,
+        row.SucceededCount,
+        row.WaitingCount,
+        row.FailedCount,
+        row.CurrentTaskId,
+        row.CurrentMaterialCode,
+        row.LastError,
+        Utc(row.CreatedAt)!.Value,
+        Utc(row.StartedAt),
+        Utc(row.CompletedAt),
+        items.Select(MapBatchItem).ToArray());
+
+    private static MaterialSyncBatchItem MapBatchItem(SyncBatchItemRow row) => new(
+        row.Id,
+        row.BatchId,
+        row.TaskId,
+        row.OrdinalNo,
+        Enum.Parse<MaterialSyncBatchItemStatus>(row.Status),
+        row.Message,
+        Utc(row.StartedAt),
+        Utc(row.CompletedAt),
+        Utc(row.LeaseExpiresAt));
+
+    private static MaterialCodeApplication MapMaterialCodeApplication(
+        MaterialCodeApplicationRow row,
+        IReadOnlyDictionary<Guid, ApplicationWorkflowAudit> workflowStates,
+        IReadOnlySet<string> completedBomCodes)
+    {
+        workflowStates.TryGetValue(row.Id, out var workflow);
+        var workflowState = Enum.TryParse<MaterialCodeWorkflowState>(workflow?.State, true, out var recordedState)
+            ? recordedState
+            : MaterialCodeWorkflowState.PendingApproval;
+        MaterialSyncStatus? taskStatus = string.IsNullOrWhiteSpace(row.SyncStatus) ? null : Enum.Parse<MaterialSyncStatus>(row.SyncStatus);
+        var state = Enum.Parse<MaterialCodeApplicationStatus>(row.Status) switch
+        {
+            MaterialCodeApplicationStatus.Pending => MaterialCodeWorkflowState.PendingApproval,
+            MaterialCodeApplicationStatus.Rejected => MaterialCodeWorkflowState.Rejected,
+            _ when workflowState == MaterialCodeWorkflowState.Completed => MaterialCodeWorkflowState.Completed,
+            _ when !row.U9SyncConfirmed => taskStatus is MaterialSyncStatus.Failed or MaterialSyncStatus.NeedsReview
+                ? MaterialCodeWorkflowState.MaterialSyncFailed
+                : MaterialCodeWorkflowState.PendingMaterialSync,
+            _ when string.IsNullOrWhiteSpace(row.BomHeaderKind) => MaterialCodeWorkflowState.Completed,
+            _ when workflowState is MaterialCodeWorkflowState.PendingBomSync or MaterialCodeWorkflowState.BomSyncFailed => workflowState,
+            _ when completedBomCodes.Contains($"{row.MaterialCode ?? row.RequestedMaterialCode}/A1") => MaterialCodeWorkflowState.Completed,
+            _ => MaterialCodeWorkflowState.PendingBomSync
+        };
+        return new(
         row.Id, row.ProjectId, row.BomItemId, Enum.Parse<MaterialCodeApplicationStatus>(row.Status), row.RequestedBy,
         Utc(row.RequestedAt)!.Value, row.DecidedBy, Utc(row.DecidedAt), row.DecisionComment, row.MaterialId, row.MaterialCode, row.RowVersion,
         string.IsNullOrWhiteSpace(row.BomHeaderKind) ? null : Enum.Parse<ProjectBomHeaderKind>(row.BomHeaderKind))
@@ -1191,14 +1669,62 @@ public sealed class MySqlMaterialRepository : IMaterialRepository
             RequestedMaterialCode = row.RequestedMaterialCode,
             Specification = row.Specification,
             Brand = row.Brand,
-            Remark = row.Remark
+            Remark = row.Remark,
+            WorkflowState = state,
+            SyncTaskId = row.SyncTaskId,
+            SyncStatus = taskStatus,
+            SyncError = row.SyncError,
+            WorkflowMessage = workflow?.Detail ?? row.SyncError
         };
+    }
+
+    private static async Task<ApplicationWorkflowContext> LoadApplicationWorkflowAsync(
+        MySqlConnection connection,
+        CancellationToken cancellationToken)
+    {
+        var auditRows = await connection.QueryAsync<ApplicationWorkflowAuditRow>(new CommandDefinition(
+            """
+            SELECT entity_id,action_name,
+                   JSON_UNQUOTE(JSON_EXTRACT(detail_json,'$.detail')) detail,
+                   occurred_at
+            FROM audit_entry
+            WHERE action_name LIKE 'material-code.application.workflow.%'
+            ORDER BY occurred_at DESC
+            """, cancellationToken: cancellationToken));
+        var states = new Dictionary<Guid, ApplicationWorkflowAudit>();
+        foreach (var row in auditRows)
+        {
+            if (!Guid.TryParse(row.EntityId, out var applicationId) || states.ContainsKey(applicationId)) continue;
+            states[applicationId] = new(row.ActionName[(row.ActionName.LastIndexOf('.') + 1)..], row.Detail);
+        }
+        var completedBomCodes = (await connection.QueryAsync<string>(new CommandDefinition(
+            "SELECT entity_id FROM audit_entry WHERE action_name IN ('u9.bom.create','u9.bom.modify')",
+            cancellationToken: cancellationToken))).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        return new(states, completedBomCodes);
+    }
 
     private static U9MaterialIntegrationConfiguration MapConfiguration(IntegrationRow row) => new(
         row.BaseUrl, row.EnterpriseCode, row.OrganizationCode, row.UserCode, row.ClientId, row.ClientSecretCiphertext,
         row.ItemCreatePath, row.ItemQueryPath, row.WriteEnabled, row.UpdatedBy, Utc(row.UpdatedAt), row.ItemModifyPath, row.ItemDeletePath,
         DeserializeUnitCodeMappings(row.UnitCodeMappingJson), row.CustomerQueryPath, row.BomCreatePath, row.BomQueryPath,
         row.BomModifyPath, row.BomDeletePath, row.BomBatchUnapprovePath, row.BomBipQueryPagePath);
+
+    private U9MaterialFullSyncRun MapFullSyncRun(FullSyncRunRow row) => new(
+        Guid.Parse(row.Id),
+        row.TriggerKind,
+        Enum.Parse<U9MaterialFullSyncStatus>(row.Status),
+        JsonSerializer.Deserialize<string[]>(row.CategoryCodesJson, jsonOptions) ?? [],
+        JsonSerializer.Deserialize<U9MaterialFullSyncCategoryResult[]>(row.CategoryResultsJson, jsonOptions) ?? [],
+        row.CategoryCount,
+        row.CompletedCategoryCount,
+        row.DiscoveredCount,
+        row.CreatedCount,
+        row.RefreshedCount,
+        row.SkippedCount,
+        row.FailedCategoryCount,
+        row.LastError,
+        Utc(row.StartedAt)!.Value,
+        Utc(row.CompletedAt));
 
     private static IReadOnlyDictionary<string, string> DeserializeUnitCodeMappings(string? json)
     {
@@ -1267,7 +1793,11 @@ public sealed class MySqlMaterialRepository : IMaterialRepository
                COALESCE((SELECT name FROM bom_item WHERE bom_item.id=material_code_application.bom_item_id),
                         (SELECT name FROM material_master WHERE material_master.id=material_code_application.material_id)) application_name,
                (SELECT category_code FROM material_master WHERE material_master.id=material_code_application.material_id) category_code,
-               (SELECT material_code FROM material_master WHERE material_master.id=material_code_application.material_id) requested_material_code,
+                (SELECT material_code FROM material_master WHERE material_master.id=material_code_application.material_id) requested_material_code,
+               COALESCE((SELECT u9_sync_confirmed FROM material_master WHERE material_master.id=material_code_application.material_id),0) u9_sync_confirmed,
+               (SELECT id FROM u9_material_sync_task WHERE u9_material_sync_task.material_id=material_code_application.material_id AND status<>'Superseded' ORDER BY created_at DESC LIMIT 1) sync_task_id,
+               (SELECT status FROM u9_material_sync_task WHERE u9_material_sync_task.material_id=material_code_application.material_id AND status<>'Superseded' ORDER BY created_at DESC LIMIT 1) sync_status,
+               (SELECT last_error FROM u9_material_sync_task WHERE u9_material_sync_task.material_id=material_code_application.material_id AND status<>'Superseded' ORDER BY created_at DESC LIMIT 1) sync_error,
                (SELECT specification FROM bom_item WHERE bom_item.id=material_code_application.bom_item_id) specification,
                (SELECT brand FROM bom_item WHERE bom_item.id=material_code_application.bom_item_id) brand,
                (SELECT remark FROM bom_item WHERE bom_item.id=material_code_application.bom_item_id) remark
@@ -1396,6 +1926,47 @@ public sealed class MySqlMaterialRepository : IMaterialRepository
         public DateTime? RequestedAt { get; init; }
     }
 
+    private sealed class SyncBatchRow
+    {
+        public Guid Id { get; init; }
+        public string Status { get; init; } = string.Empty;
+        public string RequestedBy { get; init; } = string.Empty;
+        public string RequestedRole { get; init; } = string.Empty;
+        public int TotalCount { get; init; }
+        public int CompletedCount { get; init; }
+        public int SucceededCount { get; init; }
+        public int WaitingCount { get; init; }
+        public int FailedCount { get; init; }
+        public Guid? CurrentTaskId { get; init; }
+        public string? CurrentMaterialCode { get; init; }
+        public string? LastError { get; init; }
+        public DateTime CreatedAt { get; init; }
+        public DateTime? StartedAt { get; init; }
+        public DateTime? CompletedAt { get; init; }
+    }
+
+    private sealed class SyncBatchItemRow
+    {
+        public Guid Id { get; init; }
+        public Guid BatchId { get; init; }
+        public Guid TaskId { get; init; }
+        public int OrdinalNo { get; init; }
+        public string Status { get; init; } = string.Empty;
+        public string? Message { get; init; }
+        public DateTime? StartedAt { get; init; }
+        public DateTime? CompletedAt { get; init; }
+        public DateTime? LeaseExpiresAt { get; init; }
+    }
+
+    private sealed class SyncBatchCountsRow
+    {
+        public int TotalCount { get; init; }
+        public int CompletedCount { get; init; }
+        public int SucceededCount { get; init; }
+        public int WaitingCount { get; init; }
+        public int FailedCount { get; init; }
+    }
+
     private sealed class IntegrationRow
     {
         public string BaseUrl { get; init; } = string.Empty;
@@ -1421,6 +1992,25 @@ public sealed class MySqlMaterialRepository : IMaterialRepository
         public DateTime? UpdatedAt { get; init; }
     }
 
+    private sealed class FullSyncRunRow
+    {
+        public string Id { get; init; } = string.Empty;
+        public string TriggerKind { get; init; } = string.Empty;
+        public string Status { get; init; } = string.Empty;
+        public string CategoryCodesJson { get; init; } = "[]";
+        public string CategoryResultsJson { get; init; } = "[]";
+        public int CategoryCount { get; init; }
+        public int CompletedCategoryCount { get; init; }
+        public int DiscoveredCount { get; init; }
+        public int CreatedCount { get; init; }
+        public int RefreshedCount { get; init; }
+        public int SkippedCount { get; init; }
+        public int FailedCategoryCount { get; init; }
+        public string? LastError { get; init; }
+        public DateTime StartedAt { get; init; }
+        public DateTime? CompletedAt { get; init; }
+    }
+
     private sealed class MaterialCodeApplicationRow
     {
         public Guid Id { get; init; }
@@ -1442,10 +2032,28 @@ public sealed class MySqlMaterialRepository : IMaterialRepository
         public string? ProjectName { get; init; }
         public string? CategoryCode { get; init; }
         public string? RequestedMaterialCode { get; init; }
+        public bool U9SyncConfirmed { get; init; }
+        public Guid? SyncTaskId { get; init; }
+        public string? SyncStatus { get; init; }
+        public string? SyncError { get; init; }
         public string? Specification { get; init; }
         public string? Brand { get; init; }
         public string? Remark { get; init; }
     }
+
+    private sealed class ApplicationWorkflowAuditRow
+    {
+        public string EntityId { get; init; } = string.Empty;
+        public string ActionName { get; init; } = string.Empty;
+        public string? Detail { get; init; }
+        public DateTime OccurredAt { get; init; }
+    }
+
+    private sealed record ApplicationWorkflowAudit(string State, string? Detail);
+
+    private sealed record ApplicationWorkflowContext(
+        IReadOnlyDictionary<Guid, ApplicationWorkflowAudit> States,
+        IReadOnlySet<string> CompletedBomCodes);
 
     private static long MaximumSequence(int sequenceLength) =>
         checked((long)Math.Pow(10, sequenceLength) - 1);
