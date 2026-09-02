@@ -181,6 +181,80 @@ public sealed class U9OpenApiClientTests
     }
 
     [Fact]
+    public async Task QueryCustomerReferences_RepairsControlCharactersAndLegacyBackslashesInSerializedData()
+    {
+        const string nested = "{\"Data\":[{\"Code\":\"01020000001\",\"Name\":\"阀\\组件\n测试\"}]}";
+        var handler = new RecordingHandler(JsonSerializer.Serialize(new { ResCode = 0, Data = nested }));
+        var client = new U9OpenApiClient(new HttpClient(handler));
+
+        var result = await client.QueryCustomerReferencesAsync(
+            "http://u9.example.test/U9",
+            U9MaterialContract.CustomerReferencePath,
+            "token-123",
+            "{\"ReferenceCode\":\"ItemMaster\",\"PageIndex\":0,\"PageSize\":1000}",
+            default);
+
+        var item = Assert.Single(result.Customers);
+        Assert.Equal("01020000001", item.Code);
+        Assert.Equal("阀\\组件\n测试", item.Name);
+    }
+
+    [Fact]
+    public async Task QueryCustomerReferences_UnescapesEntireNestedPayloadReturnedByU9()
+    {
+        const string overEscaped = "{\\\"Data\\\":[{\\\"Code\\\":\\\"02010000001\\\",\\\"Name\\\":\\\"夹具\\\"}]}";
+        var handler = new RecordingHandler(JsonSerializer.Serialize(new { ResCode = 0, Data = overEscaped }));
+        var client = new U9OpenApiClient(new HttpClient(handler));
+
+        var result = await client.QueryCustomerReferencesAsync(
+            "http://u9.example.test/U9", U9MaterialContract.CustomerReferencePath, "token-123",
+            "{\"ReferenceCode\":\"ItemMaster\"}", default);
+
+        var item = Assert.Single(result.Customers);
+        Assert.Equal(("02010000001", "夹具"), (item.Code, item.Name));
+    }
+
+    [Fact]
+    public async Task QueryItems_UsesSameNestedPayloadCompatibilityAsReferenceQuery()
+    {
+        const string overEscaped = "[{\\\"m_iD\\\":1001,\\\"m_code\\\":\\\"01020000001\\\",\\\"m_name\\\":\\\"阀\\\",\\\"m_mainItemCategory\\\":{\\\"m_code\\\":\\\"0102\\\"},\\\"m_inventoryUOM\\\":{\\\"m_code\\\":\\\"L007\\\"}}]";
+        var handler = new RecordingHandler(JsonSerializer.Serialize(new { ResCode = 0, Data = overEscaped }));
+        var client = new U9OpenApiClient(new HttpClient(handler));
+
+        var result = await client.QueryItemsAsync(
+            "http://u9.example.test/U9", U9MaterialContract.QueryPath, "token-123", "[{}]", default);
+
+        var item = Assert.Single(result.Items);
+        Assert.Equal(("01020000001", "L007"), (item.U9ItemCode, item.U9UnitCode));
+    }
+
+    [Fact]
+    public async Task QueryCustomerReferences_TreatsEmptySerializedDataAsNoRows()
+    {
+        var handler = new RecordingHandler(JsonSerializer.Serialize(new { ResCode = 0, Data = "" }));
+        var client = new U9OpenApiClient(new HttpClient(handler));
+
+        var result = await client.QueryCustomerReferencesAsync(
+            "http://u9.example.test/U9", U9MaterialContract.CustomerReferencePath, "token-123",
+            "{\"ReferenceCode\":\"ItemMaster\"}", default);
+
+        Assert.Empty(result.Customers);
+        Assert.Equal(0, result.RawCount);
+    }
+
+    [Fact]
+    public async Task QueryItems_TreatsEmptySerializedDataAsNoRows()
+    {
+        var handler = new RecordingHandler(JsonSerializer.Serialize(new { ResCode = 0, Data = " " }));
+        var client = new U9OpenApiClient(new HttpClient(handler));
+
+        var result = await client.QueryItemsAsync(
+            "http://u9.example.test/U9", U9MaterialContract.QueryPath, "token-123", "[{}]", default);
+
+        Assert.Empty(result.Items);
+    }
+
+    [Fact]
     public async Task QueryBoms_ParsesOfficialPrefixedMasterAndComponentFields()
     {
         var response = JsonSerializer.Serialize(new

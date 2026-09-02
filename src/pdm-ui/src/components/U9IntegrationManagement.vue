@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { computed, onMounted, reactive, ref } from 'vue'
-import { getU9MaterialFullSyncStatus, getU9MaterialIntegration, testU9MaterialIntegration, updateU9MaterialIntegration } from '../api'
+import { getU9MaterialFullSyncStatus, getU9MaterialIntegration, startU9MaterialFullSync, testU9MaterialIntegration, updateU9MaterialIntegration } from '../api'
 import type {
   CrmConnectionTestResult,
   CrmCustomerSyncResult,
@@ -35,6 +35,7 @@ const savingBase = ref(false)
 const savingInterfaces = ref(false)
 const testingConnection = ref(false)
 const fullSyncLoading = ref(false)
+const fullSyncStarting = ref(false)
 const fullSyncStatus = ref<U9MaterialFullSyncStatusResponse | null>(null)
 const integration = reactive<U9MaterialIntegrationSettings & { clientSecret: string }>({
   baseUrl: '', enterpriseCode: '', organizationCode: '', userCode: '', clientId: '', clientSecretConfigured: false,
@@ -82,6 +83,27 @@ async function loadFullSyncStatus() {
     ElMessage.error(error instanceof Error ? error.message : 'U9C料品自动同步状态加载失败')
   } finally {
     fullSyncLoading.value = false
+  }
+}
+
+async function runFullSyncNow() {
+  if (!props.canManageBase || fullSyncStarting.value) return
+  try {
+    await ElMessageBox.confirm(
+      '立即从U9C只读获取当前分类范围内的全部料品并写入PLM料品主档？该操作不会修改U9C。',
+      '确认全量同步',
+      { confirmButtonText: '开始同步', cancelButtonText: '取消' },
+    )
+  } catch { return }
+  fullSyncStarting.value = true
+  try {
+    const result = await startU9MaterialFullSync(props.token)
+    ElMessage.success(result.message)
+    await loadFullSyncStatus()
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : 'U9C料品全量同步启动失败')
+  } finally {
+    fullSyncStarting.value = false
   }
 }
 
@@ -187,6 +209,11 @@ const fullSyncTagType = computed(() => {
   }
 })
 
+const fullSyncInactivatedCount = computed(() =>
+  (fullSyncStatus.value?.latestRun?.categoryResults ?? []).reduce((total, item) => total + (item.inactivatedCount ?? 0), 0))
+const fullSyncConflictCount = computed(() =>
+  (fullSyncStatus.value?.latestRun?.categoryResults ?? []).reduce((total, item) => total + (item.conflictCount ?? 0), 0))
+
 function formatSyncTime(value?: string | null) {
   return value ? new Date(value).toLocaleString('zh-CN', { hour12: false }) : '—'
 }
@@ -283,17 +310,17 @@ onMounted(() => {
         <section class="pdm-panel u9-settings-card pdm-loading-host" aria-label="U9C料品自动全量同步">
           <SquareLoader v-if="fullSyncLoading" overlay label="正在加载自动同步状态" />
           <header class="u9-card-heading">
-            <div><h2>U9C料品自动全量同步</h2><p>每天自动只读同步U9C料品，并把同类最大流水作为PLM后续取号基线。</p></div>
-            <div class="u9-actions"><el-tag :type="fullSyncTagType">{{ fullSyncStatusText }}</el-tag><el-button :loading="fullSyncLoading" @click="loadFullSyncStatus">刷新状态</el-button></div>
+            <div><h2>U9C料品自动全量同步</h2><p>每天只读获取完整料品资料写入PLM料品主档，供快速查询和BOM引用；PLM取号独立使用本地全局基线。</p></div>
+            <div class="u9-actions"><el-tag :type="fullSyncTagType">{{ fullSyncStatusText }}</el-tag><el-button type="primary" :loading="fullSyncStarting" @click="runFullSyncNow">立即全量同步</el-button><el-button :loading="fullSyncLoading" @click="loadFullSyncStatus">刷新状态</el-button></div>
           </header>
-          <el-alert title="同步范围动态取自“分类维护”中允许创建、启用且可见的分类；只读取U9C，不会在U9C创建、修改或删除料品，也不会覆盖PLM自有主档。" type="info" :closable="false" show-icon />
+          <el-alert title="同步范围动态取自“分类维护”中允许创建、启用且可见的分类；U9C不再返回的料品会在PLM标记停用并禁止新BOM引用，历史BOM保留；同编码PLM自有主档不覆盖并计入冲突。" type="info" :closable="false" show-icon />
           <dl class="full-sync-summary">
             <div><dt>执行计划</dt><dd>每日 {{ fullSyncStatus?.scheduleTime ?? '02:00' }}，每 {{ fullSyncStatus?.checkIntervalMinutes ?? 30 }} 分钟检查</dd></div>
             <div><dt>最近开始</dt><dd>{{ formatSyncTime(fullSyncStatus?.latestRun?.startedAt) }}</dd></div>
             <div><dt>最近完成</dt><dd>{{ formatSyncTime(fullSyncStatus?.latestRun?.completedAt) }}</dd></div>
             <div><dt>分类进度</dt><dd>{{ fullSyncStatus?.latestRun?.completedCategoryCount ?? 0 }} / {{ fullSyncStatus?.latestRun?.categoryCount ?? fullSyncStatus?.categories.length ?? 0 }}</dd></div>
             <div><dt>发现料品</dt><dd>{{ fullSyncStatus?.latestRun?.discoveredCount ?? 0 }}</dd></div>
-            <div><dt>PLM处理</dt><dd>新建 {{ fullSyncStatus?.latestRun?.createdCount ?? 0 }} · 刷新 {{ fullSyncStatus?.latestRun?.refreshedCount ?? 0 }} · 跳过 {{ fullSyncStatus?.latestRun?.skippedCount ?? 0 }}</dd></div>
+            <div><dt>PLM处理</dt><dd>新建 {{ fullSyncStatus?.latestRun?.createdCount ?? 0 }} · 刷新 {{ fullSyncStatus?.latestRun?.refreshedCount ?? 0 }} · 停用 {{ fullSyncInactivatedCount }} · 冲突 {{ fullSyncConflictCount }} · 跳过 {{ fullSyncStatus?.latestRun?.skippedCount ?? 0 }}</dd></div>
           </dl>
           <div class="full-sync-categories" aria-label="自动同步分类">
             <strong>当前同步范围</strong>
@@ -308,6 +335,8 @@ onMounted(() => {
             <el-table-column prop="discoveredCount" label="发现" width="80" />
             <el-table-column prop="createdCount" label="新建" width="80" />
             <el-table-column prop="refreshedCount" label="刷新" width="80" />
+            <el-table-column prop="inactivatedCount" label="停用" width="80" />
+            <el-table-column prop="conflictCount" label="冲突" width="80" />
             <el-table-column prop="skippedCount" label="跳过" width="80" />
             <el-table-column label="状态" width="100"><template #default="{ row }"><el-tag :type="row.succeeded ? 'success' : 'danger'">{{ row.succeeded ? '完成' : '失败' }}</el-tag></template></el-table-column>
             <el-table-column prop="error" label="说明" min-width="220" show-overflow-tooltip />
@@ -323,5 +352,5 @@ onMounted(() => {
 </template>
 
 <style scoped>
-.u9-integration-page{min-width:0;min-height:0}.u9-interface-tabs{min-height:0;flex:1 1 auto;display:flex;flex-direction:column;overflow:hidden;margin-top:4px}.u9-interface-tabs :deep(.el-tabs__content){min-height:0;flex:1 1 auto;overflow:hidden}.u9-interface-tabs :deep(.el-tab-pane){min-height:0;height:100%;overflow:auto}.u9-settings-card{padding:24px}.u9-card-heading{display:flex;align-items:flex-start;justify-content:space-between;gap:18px;margin-bottom:20px}.u9-card-heading h2{margin:0 0 6px;font-size:20px}.u9-card-heading p{margin:0;color:#64748b;line-height:1.6}.u9-settings-form{margin-top:18px}.u9-form-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:0 18px}.u9-interface-group{margin:0 0 16px;padding:16px 18px 4px;border:1px solid #e2e8f0;border-radius:8px;background:#f8fafc}.u9-interface-group h3{margin:0 0 14px;font-size:15px;color:#1e293b}.u9-actions{display:flex;align-items:center;gap:10px;margin-top:4px}.full-sync-summary{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;margin:20px 0}.full-sync-summary div{padding:14px 16px;border:1px solid #e2e8f0;border-radius:8px;background:#f8fafc}.full-sync-summary dt{margin-bottom:6px;color:#64748b;font-size:12px}.full-sync-summary dd{margin:0;color:#0f172a;font-weight:600}.full-sync-categories{display:flex;align-items:center;flex-wrap:wrap;gap:8px;margin:0 0 16px}.full-sync-categories strong{margin-right:4px}.full-sync-table{width:100%}.u9-write-note{margin:6px 0 18px;color:#9a3412;font-size:13px}@media(max-width:900px){.u9-form-grid,.full-sync-summary{grid-template-columns:1fr}.u9-settings-card{padding:18px}}
+.u9-integration-page{min-width:0;min-height:0}.u9-interface-tabs{min-height:0;flex:1 1 auto;display:flex;flex-direction:column;overflow:hidden;margin-top:4px}.u9-interface-tabs :deep(.el-tabs__content){min-height:0;flex:1 1 auto;overflow:hidden}.u9-interface-tabs :deep(.el-tab-pane){min-height:0;height:100%;overflow:auto}.u9-settings-card{padding:24px}.u9-card-heading{display:flex;align-items:flex-start;justify-content:space-between;gap:18px;margin-bottom:20px}.u9-card-heading h2{margin:0 0 6px;font-size:20px}.u9-card-heading p{margin:0;color:#64748b;line-height:1.6}.u9-settings-form{margin-top:18px}.u9-form-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:0 18px}.u9-interface-group{margin:0 0 16px;padding:16px 18px 4px;border:1px solid #e2e8f0;border-radius:8px;background:#f8fafc}.u9-interface-group h3{margin:0 0 14px;font-size:15px;color:#1e293b}.u9-actions{display:flex;align-items:center;gap:10px;margin-top:4px}.full-sync-summary{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:12px;margin:20px 0}.full-sync-summary div{padding:14px 16px;border:1px solid #e2e8f0;border-radius:8px;background:#f8fafc}.full-sync-summary dt{margin-bottom:6px;color:#64748b;font-size:12px}.full-sync-summary dd{margin:0;color:#0f172a;font-weight:600}.full-sync-categories{display:flex;align-items:center;flex-wrap:wrap;gap:8px;margin:0 0 16px}.full-sync-categories strong{margin-right:4px}.full-sync-table{width:100%}.u9-write-note{margin:6px 0 18px;color:#9a3412;font-size:13px}@media(max-width:900px){.u9-form-grid,.full-sync-summary{grid-template-columns:1fr}.u9-settings-card{padding:18px}}
 </style>

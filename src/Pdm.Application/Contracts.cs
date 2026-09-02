@@ -25,6 +25,8 @@ public sealed record UserAccount(
     public bool HasRole(string roleCode) => EffectiveRoleCodes.Contains(roleCode, StringComparer.OrdinalIgnoreCase);
 }
 
+public sealed record ApprovalTransferCandidate(string Username, string DisplayName);
+
 public sealed record CreateManagedUserCommand(
     string Username,
     string DisplayName,
@@ -272,7 +274,8 @@ public sealed record BomItemInput(
     bool IsManuallyRetained = false,
     Guid? Id = null,
     string? SourceInstancePath = null,
-    string? ParentDrawingNumber = null);
+    string? ParentDrawingNumber = null,
+    string? HeatTreatment = null);
 
 public sealed record BomGenerationResult(
     IReadOnlyList<BomItem> StandardItems,
@@ -304,7 +307,8 @@ public sealed record BatchUpdateBomItemsCommand(
     decimal? Quantity = null,
     string? Revision = null,
     bool? Complete = null,
-    string? ParentDrawingNumber = null);
+    string? ParentDrawingNumber = null,
+    string? HeatTreatment = null);
 
 public sealed record BatchDeleteBomItemsCommand(IReadOnlyList<Guid> ItemIds, string Reason);
 
@@ -464,6 +468,7 @@ public interface IPdmRepository
     Task ApplyBomBatchAsync(Guid projectId, IReadOnlyList<BomItem> standardItems, IReadOnlyList<BomItem> nonStandardItems, IReadOnlyList<BomItem> unclassifiedItems, IReadOnlyList<BomItem> electricalItems, IReadOnlyList<BomItem> virtualItems, IReadOnlyList<CadPropertyWriteback> writebacks, IReadOnlyList<AuditEntry> auditEntries, CancellationToken cancellationToken);
     Task<BomItem?> FindBomItemAsync(Guid projectId, Guid itemId, CancellationToken cancellationToken);
     Task<BomItem> UpdateBomMaterialCodeAsync(Guid projectId, Guid itemId, string materialCode, CancellationToken cancellationToken);
+    Task<BomItem> UpdateBomReconciliationAsync(Guid projectId, Guid itemId, string? status, string? note, string? updatedBy, DateTimeOffset? updatedAt, CancellationToken cancellationToken);
     Task<CadPropertyWriteback> EnqueueCadPropertyWritebackAsync(CadPropertyWriteback request, CancellationToken cancellationToken);
     Task<IReadOnlyList<CadPropertyWriteback>> ListCadPropertyWritebacksAsync(Guid projectId, CancellationToken cancellationToken);
     Task<CadPropertyWriteback?> FindCadPropertyWritebackAsync(Guid id, CancellationToken cancellationToken);
@@ -523,6 +528,7 @@ public interface IPdmRepository
     Task<ReleasePackage> SubmitReleasePackageAsync(Guid releasePackageId, string actor, CancellationToken cancellationToken);
     Task<ReleasePackage> WithdrawReleasePackageAsync(Guid releasePackageId, string actor, CancellationToken cancellationToken);
     Task<ReleasePackage> DecideApprovalAsync(Guid taskId, string actor, ApprovalDecision decision, string? comment, bool emergencySubstitute, string? emergencyReason, CancellationToken cancellationToken);
+    Task<ReleasePackage> TransferApprovalAsync(Guid taskId, string expectedAssignee, string targetUsername, CancellationToken cancellationToken);
     Task<PdmDocument> ObsoleteDocumentAsync(Guid documentId, string actor, CancellationToken cancellationToken);
     Task MarkPublishedAsync(Guid releasePackageId, string publishedPath, DateTimeOffset publishedAt, CancellationToken cancellationToken);
     Task<ManufacturingBomBaseline> MarkPublishedWithBomBaselineAsync(ReleasePackage package, string publishedPath, DateTimeOffset publishedAt, string actor, CancellationToken cancellationToken);

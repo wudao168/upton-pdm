@@ -326,8 +326,10 @@ public sealed class U9OpenApiClient(HttpClient httpClient) : IU9OpenApiClient, I
     {
         if (!TryGet(root, "Data", out var data) || data.ValueKind is JsonValueKind.Null or JsonValueKind.Undefined)
             return [];
+        if (data.ValueKind == JsonValueKind.String && string.IsNullOrWhiteSpace(data.GetString()))
+            return [];
         using var serialized = data.ValueKind == JsonValueKind.String
-            ? ParseJson(data.GetString() ?? "[]", "U9C业务响应Data不是有效JSON。")
+            ? ParseNestedJson(data.GetString() ?? "[]", "U9C业务响应Data不是有效JSON。")
             : JsonDocument.Parse(data.GetRawText());
         var value = serialized.RootElement;
         return value.ValueKind == JsonValueKind.Array
@@ -339,14 +341,18 @@ public sealed class U9OpenApiClient(HttpClient httpClient) : IU9OpenApiClient, I
     {
         if (!TryGet(root, "Data", out var outerData) || outerData.ValueKind is JsonValueKind.Null or JsonValueKind.Undefined)
             return [];
+        if (outerData.ValueKind == JsonValueKind.String && string.IsNullOrWhiteSpace(outerData.GetString()))
+            return [];
         using var outerDocument = outerData.ValueKind == JsonValueKind.String
-            ? ParseJson(outerData.GetString() ?? "{}", "U9C客户参照响应Data不是有效JSON。")
+            ? ParseNestedJson(outerData.GetString() ?? "{}", "U9C客户参照响应Data不是有效JSON。")
             : JsonDocument.Parse(outerData.GetRawText());
         var outer = outerDocument.RootElement;
         if (!TryGet(outer, "Data", out var rows) || rows.ValueKind is JsonValueKind.Null or JsonValueKind.Undefined)
             return [];
+        if (rows.ValueKind == JsonValueKind.String && string.IsNullOrWhiteSpace(rows.GetString()))
+            return [];
         using var rowsDocument = rows.ValueKind == JsonValueKind.String
-            ? ParseJson(rows.GetString() ?? "[]", "U9C客户参照响应Data.Data不是有效JSON。")
+            ? ParseNestedJson(rows.GetString() ?? "[]", "U9C客户参照响应Data.Data不是有效JSON。")
             : JsonDocument.Parse(rows.GetRawText());
         var value = rowsDocument.RootElement;
         return value.ValueKind == JsonValueKind.Array
@@ -673,6 +679,130 @@ public sealed class U9OpenApiClient(HttpClient httpClient) : IU9OpenApiClient, I
         {
             throw new PdmRuleException(error);
         }
+    }
+
+    private static JsonDocument ParseNestedJson(string value, string error)
+    {
+        var normalized = value.Trim().TrimStart('\uFEFF');
+        for (var depth = 0; depth < 3; depth++)
+        {
+            JsonDocument document;
+            try
+            {
+                document = JsonDocument.Parse(normalized, new JsonDocumentOptions
+                {
+                    AllowTrailingCommas = true,
+                    CommentHandling = JsonCommentHandling.Skip
+                });
+            }
+            catch (JsonException)
+            {
+                try
+                {
+                    document = JsonDocument.Parse(RepairNestedJsonString(normalized), new JsonDocumentOptions
+                    {
+                        AllowTrailingCommas = true,
+                        CommentHandling = JsonCommentHandling.Skip
+                    });
+                }
+                catch (JsonException exception)
+                {
+                    if (TryUnescapeOverEscapedJson(normalized, out var unescaped))
+                    {
+                        normalized = unescaped;
+                        continue;
+                    }
+                    throw new PdmRuleException($"{error.TrimEnd('。')}：{exception.Message}");
+                }
+            }
+
+            if (document.RootElement.ValueKind != JsonValueKind.String)
+                return document;
+            var inner = document.RootElement.GetString()?.Trim();
+            if (string.IsNullOrWhiteSpace(inner) || inner[0] is not ('{' or '[' or '"'))
+                return document;
+            document.Dispose();
+            normalized = inner;
+        }
+        throw new PdmRuleException(error);
+    }
+
+    private static bool TryUnescapeOverEscapedJson(string value, out string unescaped)
+    {
+        unescaped = string.Empty;
+        var trimmed = value.Trim();
+        if (trimmed.Length < 3 || trimmed[0] is not ('{' or '[') || !trimmed.Contains("\\\"", StringComparison.Ordinal))
+            return false;
+        try
+        {
+            using var document = JsonDocument.Parse($"\"{trimmed}\"");
+            unescaped = document.RootElement.GetString() ?? string.Empty;
+            return unescaped.Length > 0 && !string.Equals(unescaped, trimmed, StringComparison.Ordinal);
+        }
+        catch (JsonException)
+        {
+            return false;
+        }
+    }
+
+    private static string RepairNestedJsonString(string value)
+    {
+        var builder = new StringBuilder(value.Length + 16);
+        var insideString = false;
+        for (var index = 0; index < value.Length; index++)
+        {
+            var character = value[index];
+            if (!insideString)
+            {
+                builder.Append(character);
+                if (character == '"') insideString = true;
+                continue;
+            }
+
+            if (character == '"')
+            {
+                builder.Append(character);
+                insideString = false;
+                continue;
+            }
+            if (character == '\\')
+            {
+                if (index + 1 < value.Length && IsValidJsonEscape(value, index + 1))
+                {
+                    builder.Append(character).Append(value[++index]);
+                    if (value[index] == 'u')
+                    {
+                        for (var digit = 0; digit < 4 && index + 1 < value.Length; digit++)
+                            builder.Append(value[++index]);
+                    }
+                }
+                else
+                {
+                    builder.Append("\\\\");
+                }
+                continue;
+            }
+
+            builder.Append(character switch
+            {
+                '\b' => "\\b",
+                '\f' => "\\f",
+                '\n' => "\\n",
+                '\r' => "\\r",
+                '\t' => "\\t",
+                < ' ' => $"\\u{(int)character:x4}",
+                _ => character.ToString()
+            });
+        }
+        return builder.ToString();
+    }
+
+    private static bool IsValidJsonEscape(string value, int escapeIndex)
+    {
+        var escape = value[escapeIndex];
+        if (escape is '"' or '\\' or '/' or 'b' or 'f' or 'n' or 'r' or 't') return true;
+        if (escape != 'u' || escapeIndex + 4 >= value.Length) return false;
+        return value.AsSpan(escapeIndex + 1, 4).ToString().All(Uri.IsHexDigit);
     }
 
     private static string Required(string? value, string field)

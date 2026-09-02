@@ -1,5 +1,6 @@
-import type { AddDrawingReviewMarkupInput, ApprovalStep, ApprovalU9AutomationResult, AuditEntry, BatchUpdateBomItemsInput, BomClassification, BomEmptyDeclaration, BomGenerationResult, BomHeaderKind, BomItem, BomKind, BomValidationRules, BomVersion, BomVersionState, CreateProjectInput, CreateReleasePackageInput, CreateRoleInput, CreateSubprojectInput, CrmConnectionTestResult, CrmCustomerSyncResult, CrmIntegrationSettings, DocumentKind, DocumentModelDrawingRelation, DocumentNode, DocumentVersionComparison, DocumentVersionSummary, DocumentWhereUsed, DrawingReviewCandidate, DrawingReviewDecision, DrawingReviewPackage, DrawingReviewTarget, EditLockSummary, EquipmentTypeDefinition, FolderPermissionRule, MainProjectStaffingInput, ManagedDocument, ManufacturingBomBaseline, MaterialAttachment, MaterialAttachmentKind, MaterialCategory, MaterialCategoryRule, MaterialCodeApplication, MaterialCodeApplicationStatus, MaterialCodeDecisionResult, MaterialCodeResolution, MaterialKind, MaterialRemovalReadiness, MaterialRemovalResult, MaterialSyncExecutionResult, MaterialSyncTask, MyApprovalTask, OrganizationDirectory, OrganizationUnit, PasswordResetTask, PdmCustomer, PdmMaterial, PdmSystemSettings, PdmUser, PdmUserProfile, ProgramTemplate, ProgramTemplateApprovalDecision, ProgramTemplateAttachmentKind, ProgramTemplateDraftInput, ProgramTemplateRevision, ProgramTemplateTask, ProgramTemplateVersionBump, ProjectBomHeader, ProjectBomU9SyncExecution, ProjectBomU9SyncPreview, ProjectFile, ProjectFileVersion, ProjectFolder, ProjectFolderTemplateNode, ProjectNumberingOptions, ProjectOrganization, ProjectSummary, ProjectVersionItem, ReferenceStatus, ReleasePackageSummary, ReleaseScope, RolePermissionDirectory, SaveMaterialInput, SaveOrganizationUnitInput, SavePdmUserInput, SaveProjectOrganizationInput, StandardLibraryCategory, StandardLibraryMaterialPage, U9BomQueryExecution, U9BomQueryInput, U9BomWriteExecution, U9BomWriteInput, U9BomWritePreview, U9ConnectionTestResult, U9ItemQueryResult, U9MaterialFullSyncStatusResponse, U9MaterialIntegrationSettings, U9MaterialSampleImportResult, U9MaterialSamplePreview, UpdateCrmIntegrationInput, UpdateProjectInput, UpdateU9MaterialIntegrationInput } from './types'
+import type { AddDrawingReviewMarkupInput, ApprovalStep, ApprovalU9AutomationResult, AuditEntry, BatchUpdateBomItemsInput, BomClassification, BomEmptyDeclaration, BomGenerationResult, BomHeaderKind, BomItem, BomKind, BomValidationRules, BomVersion, BomVersionState, CreateProjectInput, CreateReleasePackageInput, CreateRoleInput, CreateSubprojectInput, CrmConnectionTestResult, CrmCustomerSyncResult, CrmIntegrationSettings, DocumentKind, DocumentModelDrawingRelation, DocumentNode, DocumentVersionComparison, DocumentVersionSummary, DocumentWhereUsed, DrawingReviewCandidate, DrawingReviewDecision, DrawingReviewPackage, DrawingReviewTarget, EditLockSummary, EquipmentTypeDefinition, FolderPermissionRule, MainProjectStaffingInput, ManagedDocument, ManufacturingBomBaseline, MaterialAttachment, MaterialAttachmentKind, MaterialCategory, MaterialCategoryRule, MaterialCodeApplication, MaterialCodeApplicationStatus, MaterialCodeDecisionResult, MaterialCodeResolution, MaterialDuplicateRule, MaterialKind, MaterialNumberingSettings, MaterialPage, MaterialRemovalReadiness, MaterialRemovalResult, MaterialSyncExecutionResult, MaterialSyncTask, MyApprovalTask, OrganizationDirectory, OrganizationUnit, PasswordResetTask, PdmCustomer, PdmMaterial, PdmSystemSettings, PdmUser, PdmUserProfile, ProgramTemplate, ProgramTemplateApprovalDecision, ProgramTemplateAttachmentKind, ProgramTemplateDraftInput, ProgramTemplateRevision, ProgramTemplateTask, ProgramTemplateVersionBump, ProjectBomHeader, ProjectBomU9SyncExecution, ProjectBomU9SyncPreview, ProjectFile, ProjectFileVersion, ProjectFolder, ProjectFolderTemplateNode, ProjectNumberingOptions, ProjectOrganization, ProjectSummary, ProjectVersionItem, ReferenceStatus, ReleasePackageSummary, ReleaseScope, RolePermissionDirectory, SaveMaterialInput, SaveOrganizationUnitInput, SavePdmUserInput, SaveProjectOrganizationInput, StandardLibraryCategory, StandardLibraryMaterialPage, U9BomQueryExecution, U9BomQueryInput, U9BomWriteExecution, U9BomWriteInput, U9BomWritePreview, U9ConnectionTestResult, U9ItemQueryResult, U9MaterialFullSyncStatusResponse, U9MaterialIntegrationSettings, U9MaterialSampleImportResult, U9MaterialSamplePreview, UpdateCrmIntegrationInput, UpdateProjectInput, UpdateU9MaterialIntegrationInput } from './types'
 import type { MaterialSyncBatch } from './types'
+import type { ApprovalTransferCandidate } from './types'
 
 import type { BomSourceReclassificationPreview } from './types'
 
@@ -250,6 +251,7 @@ interface ApiBomItem {
   remark?: string | null
   brand?: string | null
   surfaceTreatment?: string | null
+  heatTreatment?: string | null
   weight?: string | null
   revision: string
   isComplete: boolean
@@ -377,6 +379,26 @@ export function listMaterials(token: string, query = '', includeArchived = false
   if (categoryCode.trim()) parameters.set('categoryCode', categoryCode.trim())
   const suffix = parameters.size ? `?${parameters}` : ''
   return requestJson<PdmMaterial[]>(`/api/materials${suffix}`, {}, token)
+}
+
+export function listMaterialPage(token: string, input: { query?: string; categoryCode?: string; brand?: string; includeArchived?: boolean; page?: number; pageSize?: number }): Promise<MaterialPage> {
+  const parameters = new URLSearchParams()
+  if (input.query?.trim()) parameters.set('query', input.query.trim())
+  if (input.categoryCode?.trim()) parameters.set('categoryCode', input.categoryCode.trim())
+  if (input.brand?.trim()) parameters.set('brand', input.brand.trim())
+  if (input.includeArchived) parameters.set('includeArchived', 'true')
+  if (input.page && input.page !== 1) parameters.set('page', String(input.page))
+  if (input.pageSize && input.pageSize !== 50) parameters.set('pageSize', String(input.pageSize))
+  const suffix = parameters.size ? `?${parameters}` : ''
+  return requestJson<MaterialPage>(`/api/materials/page${suffix}`, {}, token)
+}
+
+export function getMaterialDuplicateRules(token: string): Promise<MaterialDuplicateRule[]> {
+  return requestJson<MaterialDuplicateRule[]>('/api/material-duplicate-rules', {}, token)
+}
+
+export function updateMaterialDuplicateRules(rules: MaterialDuplicateRule[], token: string): Promise<MaterialDuplicateRule[]> {
+  return requestJson<MaterialDuplicateRule[]>('/api/material-duplicate-rules', { method: 'PUT', body: JSON.stringify({ rules }) }, token)
 }
 
 export function listProjectBomHeaders(projectId: string, token: string): Promise<ProjectBomHeader[]> {
@@ -563,6 +585,16 @@ export function listMaterialCategories(token: string, includeHidden = false): Pr
   return requestJson<MaterialCategory[]>(`/api/material-categories?includeHidden=${includeHidden}`, {}, token)
 }
 
+export function getMaterialNumberingSettings(token: string): Promise<MaterialNumberingSettings> {
+  return requestJson<MaterialNumberingSettings>('/api/material-numbering-settings', {}, token)
+}
+
+export function updateMaterialNumberingSettings(startSequence: number, token: string): Promise<MaterialNumberingSettings> {
+  return requestJson<MaterialNumberingSettings>('/api/material-numbering-settings', {
+    method: 'PUT', body: JSON.stringify({ startSequence }),
+  }, token)
+}
+
 export function saveMaterialCategory(category: MaterialCategory, token: string, creating = false): Promise<MaterialCategory> {
   const method = creating ? 'POST' : 'PUT'
   const path = creating ? '/api/material-categories' : `/api/material-categories/${encodeURIComponent(category.code)}`
@@ -605,6 +637,10 @@ export function getU9MaterialIntegration(token: string): Promise<U9MaterialInteg
 
 export function getU9MaterialFullSyncStatus(token: string): Promise<U9MaterialFullSyncStatusResponse> {
   return requestJson<U9MaterialFullSyncStatusResponse>('/api/u9-material-full-sync/status', {}, token)
+}
+
+export function startU9MaterialFullSync(token: string): Promise<{ message: string }> {
+  return requestJson<{ message: string }>('/api/u9-material-full-sync/run', { method: 'POST' }, token)
 }
 
 export function updateU9MaterialIntegration(input: UpdateU9MaterialIntegrationInput, token: string): Promise<U9MaterialIntegrationSettings> {
@@ -1080,6 +1116,14 @@ export function obsoleteDocument(documentId: string, comment: string, token: str
 
 export function decideApproval(taskId: string, decision: 'Approved' | 'Rejected', comment: string, token: string): Promise<ApiReleasePackage> {
   return requestJson(`/api/approval-tasks/${taskId}/decision`, { method: 'POST', body: JSON.stringify({ decision: decision === 'Approved' ? 0 : 1, comment }) }, token)
+}
+
+export function listApprovalTransferCandidates(taskId: string, token: string): Promise<ApprovalTransferCandidate[]> {
+  return requestJson(`/api/approval-tasks/${taskId}/transfer-candidates`, {}, token)
+}
+
+export function transferApproval(taskId: string, targetUsername: string, comment: string, token: string): Promise<ApiReleasePackage> {
+  return requestJson(`/api/approval-tasks/${taskId}/transfer`, { method: 'POST', body: JSON.stringify({ targetUsername, comment }) }, token)
 }
 
 export function emergencyDecideApproval(taskId: string, decision: 'Approved' | 'Rejected', reason: string, token: string): Promise<ApiReleasePackage> {
@@ -1575,6 +1619,7 @@ function mapBomItem(item: ApiBomItem): BomItem {
     remark: item.remark ?? undefined,
     brand: item.brand ?? undefined,
     surfaceTreatment: item.surfaceTreatment ?? undefined,
+    heatTreatment: item.heatTreatment ?? undefined,
     weight: item.weight ?? undefined,
     revision: item.revision,
     complete: item.isComplete,

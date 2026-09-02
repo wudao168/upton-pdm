@@ -16,6 +16,19 @@ public static class MaterialEndpointExtensions
             return Results.Ok((await service.ListMaterialsAsync(query, categoryCode, includeArchived ?? false, limit ?? 100, actor, role, cancellationToken)).Select(MapMaterial));
         });
 
+        api.MapGet("/materials/page", async (string? query, string? categoryCode, string? brand, bool? includeArchived, int? page, int? pageSize, HttpContext context, MaterialService service, CancellationToken cancellationToken) =>
+        {
+            var (actor, role) = CurrentUser(context.User);
+            var result = await service.ListMaterialPageAsync(query, categoryCode, brand, includeArchived ?? false, page ?? 1, pageSize ?? 50, actor, role, cancellationToken);
+            return Results.Ok(new
+            {
+                Items = result.Items.Select(MapMaterial),
+                result.Total,
+                result.Page,
+                result.PageSize
+            });
+        });
+
         api.MapGet("/materials/{materialId:guid}/attachments", async (Guid materialId, string? kind, HttpContext context, MaterialAttachmentService service, CancellationToken cancellationToken) =>
         {
             var (actor, role) = CurrentUser(context.User);
@@ -183,6 +196,32 @@ public static class MaterialEndpointExtensions
             return Results.Ok((await service.ListCategoriesAsync(includeHidden ?? false, actor, role, cancellationToken)).Select(MapCategory));
         });
 
+        api.MapGet("/material-numbering-settings", async (HttpContext context, MaterialService service, CancellationToken cancellationToken) =>
+        {
+            var (actor, role) = CurrentUser(context.User);
+            return Results.Ok(await service.GetNumberingSettingsAsync(actor, role, cancellationToken));
+        });
+
+        api.MapPut("/material-numbering-settings", async (UpdateMaterialNumberingSettingsRequest request, HttpContext context, MaterialService service, CancellationToken cancellationToken) =>
+        {
+            var (actor, role) = CurrentUser(context.User);
+            return Results.Ok(await service.UpdateNumberingSettingsAsync(request.StartSequence, actor, role, cancellationToken));
+        });
+
+        api.MapGet("/material-duplicate-rules", async (HttpContext context, MaterialService service, CancellationToken cancellationToken) =>
+        {
+            var (actor, role) = CurrentUser(context.User);
+            return Results.Ok(await service.GetDuplicateRulesAsync(actor, role, cancellationToken));
+        });
+
+        api.MapPut("/material-duplicate-rules", async (UpdateMaterialDuplicateRulesRequest request, HttpContext context, MaterialService service, CancellationToken cancellationToken) =>
+        {
+            var (actor, role) = CurrentUser(context.User);
+            return Results.Ok(await service.UpdateDuplicateRulesAsync(
+                request.Rules.Select(rule => new MaterialDuplicateRule(rule.CategoryCode, rule.Fields)).ToArray(),
+                actor, role, cancellationToken));
+        });
+
         api.MapPost("/material-categories", async (SaveMaterialCategoryRequest request, HttpContext context, MaterialService service, CancellationToken cancellationToken) =>
         {
             var (actor, role) = CurrentUser(context.User);
@@ -312,6 +351,20 @@ public static class MaterialEndpointExtensions
                     latestRun.CompletedAt
                 }
             });
+        });
+
+        api.MapPost("/u9-material-full-sync/run", async (
+            HttpContext context,
+            IPdmRepository repository,
+            U9MaterialFullSyncCoordinator coordinator,
+            CancellationToken cancellationToken) =>
+        {
+            var (actor, role) = CurrentUser(context.User);
+            if (!await repository.HasUserPermissionAsync(actor, role, PermissionCodes.StorageSettingsManage, cancellationToken))
+                throw new UnauthorizedAccessException("当前角色无权执行U9C料品全量同步。");
+            if (!coordinator.TryStart(actor, "Manual"))
+                return Results.Conflict(new { Message = "已有U9C料品全量同步正在运行，请刷新状态查看进度。" });
+            return Results.Accepted("/api/u9-material-full-sync/status", new { Message = "U9C料品全量同步已在后台启动。" });
         });
 
         api.MapPut("/u9-material-integration", async (UpdateU9MaterialIntegrationRequest request, HttpContext context, MaterialService service, CancellationToken cancellationToken) =>

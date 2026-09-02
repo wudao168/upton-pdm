@@ -6,7 +6,6 @@ import MaterialEditorDialog from './MaterialEditorDialog.vue'
 import {
   archiveMaterial,
   approveMaterial,
-  calibrateMaterialCategoryCounter,
   changeApprovedMaterial,
   createMaterialSyncBatch,
   createMaterial,
@@ -15,10 +14,12 @@ import {
   executeMaterialSyncTask,
   getMaterialSyncBatch,
   getMaterialRemovalReadiness,
+  getMaterialNumberingSettings,
+  getMaterialDuplicateRules,
   listMaterialCategories,
   listMaterialAttachments,
   listMaterialCodeApplications,
-  listMaterials,
+  listMaterialPage,
   listMaterialSyncTasks,
   listMaterialSyncBatches,
   materialAttachmentObjectUrl,
@@ -27,6 +28,8 @@ import {
   saveMaterialCategory,
   setMaterialCover,
   updateMaterial,
+  updateMaterialDuplicateRules,
+  updateMaterialNumberingSettings,
   uploadMaterialAttachment,
 } from '../api'
 import type {
@@ -35,6 +38,8 @@ import type {
   MaterialCategory,
   MaterialCodeApplication,
   MaterialKind,
+  MaterialDuplicateField,
+  MaterialDuplicateRule,
   MaterialRemovalReadiness,
   MaterialSyncBatch,
   MaterialSupplyMode,
@@ -72,13 +77,20 @@ interface U9ValidationResult {
 }
 const u9ValidationResults = reactive<Record<string, U9ValidationResult>>({})
 const materials = ref<PdmMaterial[]>([])
+const materialTotal = ref(0)
+const materialPageLoading = ref(false)
 const categories = ref<MaterialCategory[]>([])
 const tasks = ref<MaterialSyncTask[]>([])
+type SyncTaskSelectionTable = { clearSelection: () => void }
+const syncTaskSelectionTable = ref<SyncTaskSelectionTable | null>(null)
 const selectedSyncTasks = ref<MaterialSyncTask[]>([])
 const batchSyncingTasks = ref(false)
 type MaterialCodeApprovalRow = MaterialCodeApplication & { groupedApplications?: MaterialCodeApplication[] }
 const codeApplications = ref<MaterialCodeApplication[]>([])
 const codeApprovalView = ref<'pending' | 'history'>('pending')
+const workflowPageSize = 50
+const pendingApprovalPage = ref(1)
+const pendingSyncPage = ref(1)
 const approvalHistoryPage = ref(1)
 const approvalHistoryPageSize = ref(20)
 const syncHistoryPage = ref(1)
@@ -131,13 +143,21 @@ const previewOpen = ref(false)
 const selectedMaterialCategoryCode = ref('')
 const selectedCategoryCode = ref<string | null>(null)
 const categoryCreating = ref(false)
+const numberingStartSequence = ref(1000000)
+const savingNumberingSettings = ref(false)
+const duplicateRules = ref<MaterialDuplicateRule[]>([])
+const savingDuplicateRules = ref(false)
+const duplicateFieldOptions: Array<{ value: MaterialDuplicateField; label: string }> = [
+  { value: 'Name', label: '名称' },
+  { value: 'Specification', label: '型号' },
+  { value: 'Brand', label: '品牌' },
+]
 const categoryDraft = reactive<MaterialCategory>({
   code: '', name: '', parentCode: null, u9CategoryId: null, pdmKind: null, defaultSupplyMode: 'Purchase',
   allowCreate: false, isVisible: true, isActive: true, numberPrefix: '', sequenceLength: 7, counterScope: '',
   sortOrder: 0, updatedBy: '', updatedAt: '', rowVersion: 0,
   currentSequence: 0,
 })
-const lastU9MaterialCode = ref('')
 const applicationWorkflowCompleted = (application: MaterialCodeApplication) => application.status === 'Rejected'
   || application.status === 'Approved' && application.workflowState === 'Completed'
 const approvedApplicationsAwaitingSync = computed(() => codeApplications.value
@@ -156,6 +176,15 @@ const currentSynchronizationTasks = computed(() => {
     if (!leftCode || !rightCode) return leftCode ? -1 : rightCode ? 1 : 0
     return leftCode.localeCompare(rightCode, undefined, { numeric: true })
   })
+})
+const pagedCurrentSynchronizationTasks = computed(() => currentSynchronizationTasks.value.slice(
+  (pendingSyncPage.value - 1) * workflowPageSize,
+  pendingSyncPage.value * workflowPageSize,
+))
+const executableSyncStatuses = new Set<MaterialSyncTask['status']>(['PreviewReady', 'Failed', 'NeedsReview'])
+const selectedExecutableSyncTasks = computed(() => {
+  const selectedIds = new Set(selectedSyncTasks.value.map(task => task.id))
+  return currentSynchronizationTasks.value.filter(task => selectedIds.has(task.id) && executableSyncStatuses.has(task.status))
 })
 const syncTaskNoticeCount = computed(() => currentSynchronizationTasks.value.length)
 const codeApprovalNoticeCount = computed(() => props.canDecideMaterialCode
@@ -190,21 +219,7 @@ const emptyForm = (): SaveMaterialInput => ({
 })
 const form = reactive<SaveMaterialInput>(emptyForm())
 
-const filteredMaterials = computed(() => {
-  const normalized = query.value.trim().toLowerCase()
-  return materials.value.filter(item => {
-    if (materialCategoryScopeCodes.value && !materialCategoryScopeCodes.value.has(item.categoryCode ?? item.u9CategoryCode ?? '')) return false
-    if (brandFilter.value && item.brand !== brandFilter.value) return false
-    if (!normalized) return true
-    const categoryName = categories.value.find(category => category.code === (item.categoryCode ?? item.u9CategoryCode))?.name
-    return [item.materialCode, item.name, item.specification, item.material, item.categoryCode, item.u9CategoryCode, categoryName,
-      item.brand, item.surfaceTreatment, item.purchaseLink, item.selectionAdvice,
-      item.remark, item.unitCode, kindLabels[item.kind], supplyLabels[item.supplyMode]]
-      .some(value => value?.toLowerCase().includes(normalized))
-  })
-})
-const pagedMaterials = computed(() => filteredMaterials.value.slice((currentPage.value - 1) * pageSize.value, currentPage.value * pageSize.value))
-watch([query, brandFilter, selectedMaterialCategoryCode, showArchived], () => { currentPage.value = 1 })
+const pagedMaterials = computed(() => materials.value)
 
 const brandOptions = computed(() => [...new Set(materials.value.map(item => item.brand?.trim()).filter((brand): brand is string => Boolean(brand)))].sort((left, right) => left.localeCompare(right, 'zh-CN')))
 
@@ -228,21 +243,6 @@ const materialCategoryTree = computed<CategoryTreeNode[]>(() => {
     .map(item => ({ ...item, children: prune(item.children ?? []) }))
     .filter(item => item.allowCreate || (item.children?.length ?? 0) > 0)
   return prune(buildCategoryTree(categories.value.filter(category => category.isVisible && category.isActive)))
-})
-const materialCategoryScopeCodes = computed<Set<string> | null>(() => {
-  if (!selectedMaterialCategoryCode.value) return null
-  const codes = new Set([selectedMaterialCategoryCode.value])
-  let changed = true
-  while (changed) {
-    changed = false
-    for (const category of categories.value) {
-      if (category.isVisible && category.isActive && category.parentCode && codes.has(category.parentCode) && !codes.has(category.code)) {
-        codes.add(category.code)
-        changed = true
-      }
-    }
-  }
-  return codes
 })
 const creatableCategories = computed(() => categories.value.filter(category => category.allowCreate && category.isVisible && category.isActive && category.pdmKind))
 
@@ -283,6 +283,16 @@ const pendingCodeApplicationRows = computed<MaterialCodeApprovalRow[]>(() => {
       groupedApplications,
     }]
   })
+})
+const pagedPendingCodeApplicationRows = computed(() => pendingCodeApplicationRows.value.slice(
+  (pendingApprovalPage.value - 1) * workflowPageSize,
+  pendingApprovalPage.value * workflowPageSize,
+))
+watch(() => pendingCodeApplicationRows.value.length, total => {
+  pendingApprovalPage.value = Math.min(pendingApprovalPage.value, Math.max(1, Math.ceil(total / workflowPageSize)))
+})
+watch(() => currentSynchronizationTasks.value.length, total => {
+  pendingSyncPage.value = Math.min(pendingSyncPage.value, Math.max(1, Math.ceil(total / workflowPageSize)))
 })
 const applicationsForApprovalRow = (application: MaterialCodeApprovalRow) => application.groupedApplications ?? [application]
 const applicationTypeLabel = (application: MaterialCodeApprovalRow) => application.groupedApplications
@@ -530,22 +540,63 @@ function openBatchEdit() {
 async function load() {
   loading.value = true
   try {
-    const [loadedMaterials, loadedCategories, loadedTasks, loadedCodeApplications] = await Promise.all([
-      listMaterials(props.token, '', showArchived.value), listMaterialCategories(props.token, props.canManageIntegration), listMaterialSyncTasks(props.token), listMaterialCodeApplications(props.token),
+    const [materialPage, loadedCategories, loadedTasks, loadedCodeApplications, numberingSettings, loadedDuplicateRules] = await Promise.all([
+      listMaterialPage(props.token, { query: query.value, categoryCode: selectedMaterialCategoryCode.value, brand: brandFilter.value, includeArchived: showArchived.value, page: currentPage.value, pageSize: pageSize.value }),
+      listMaterialCategories(props.token, props.canManageIntegration), listMaterialSyncTasks(props.token), listMaterialCodeApplications(props.token),
+      props.canManageIntegration ? getMaterialNumberingSettings(props.token) : Promise.resolve(null),
+      props.canManageIntegration ? getMaterialDuplicateRules(props.token) : Promise.resolve([]),
     ])
-    materials.value = loadedMaterials
+    materials.value = materialPage.items
+    materialTotal.value = materialPage.total
     selectedMaterials.value = []
     categories.value = loadedCategories
     tasks.value = loadedTasks
     selectedSyncTasks.value = []
     codeApplications.value = loadedCodeApplications
     selectedCodeApplications.value = []
+    if (numberingSettings) numberingStartSequence.value = numberingSettings.startSequence
+    duplicateRules.value = loadedDuplicateRules
   } catch (error) {
     ElMessage.error(error instanceof Error ? error.message : '料品数据加载失败')
   } finally {
     loading.value = false
   }
 }
+
+async function loadMaterialPage() {
+  materialPageLoading.value = true
+  try {
+    const result = await listMaterialPage(props.token, {
+      query: query.value,
+      categoryCode: selectedMaterialCategoryCode.value,
+      brand: brandFilter.value,
+      includeArchived: showArchived.value,
+      page: currentPage.value,
+      pageSize: pageSize.value,
+    })
+    materials.value = result.items
+    materialTotal.value = result.total
+    selectedMaterials.value = []
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '料品主档查询失败')
+  } finally {
+    materialPageLoading.value = false
+  }
+}
+
+function resetAndLoadMaterialPage() {
+  if (currentPage.value !== 1) currentPage.value = 1
+  else void loadMaterialPage()
+}
+
+let materialQueryTimer: ReturnType<typeof setTimeout> | undefined
+watch(query, () => {
+  if (materialQueryTimer) clearTimeout(materialQueryTimer)
+  materialQueryTimer = setTimeout(resetAndLoadMaterialPage, 250)
+})
+watch([brandFilter, selectedMaterialCategoryCode, showArchived], resetAndLoadMaterialPage)
+watch(currentPage, () => { void loadMaterialPage() })
+watch(pageSize, resetAndLoadMaterialPage)
 
 async function loadCodeApplications() {
   try {
@@ -560,6 +611,17 @@ watch(codeApprovalView, () => {
   selectedCodeApplications.value = []
   selectedSyncTasks.value = []
 })
+
+function changePendingApprovalPage(page: number) {
+  pendingApprovalPage.value = page
+  selectedCodeApplications.value = []
+}
+
+function changePendingSyncPage(page: number) {
+  pendingSyncPage.value = page
+  selectedSyncTasks.value = []
+  syncTaskSelectionTable.value?.clearSelection()
+}
 
 function showSyncResult(level: WorkflowResultLevel, title: string, summary: string, details: string[] = []) {
   syncResult.value = { level, title, summary, details }
@@ -800,9 +862,6 @@ function selectCategory(category: MaterialCategory) {
   selectedCategoryCode.value = category.code
   categoryCreating.value = false
   Object.assign(categoryDraft, category)
-  lastU9MaterialCode.value = category.currentSequence > 0
-    ? `${category.numberPrefix}${category.currentSequence.toString().padStart(category.sequenceLength, '0')}`
-    : ''
 }
 
 function startCategory(parentCode: string | null = null) {
@@ -814,7 +873,6 @@ function startCategory(parentCode: string | null = null) {
     updatedBy: '', updatedAt: '', rowVersion: 0,
     currentSequence: 0,
   })
-  lastU9MaterialCode.value = ''
 }
 
 async function saveCategory() {
@@ -825,6 +883,7 @@ async function saveCategory() {
     }
     if (!categoryDraft.numberPrefix.trim()) categoryDraft.numberPrefix = categoryDraft.code.trim()
     if (!categoryDraft.counterScope.trim()) categoryDraft.counterScope = categoryDraft.code.trim()
+    if (categoryDraft.allowCreate) categoryDraft.sequenceLength = 7
     const saved = await saveMaterialCategory({ ...categoryDraft }, props.token, categoryCreating.value)
     const index = categories.value.findIndex(item => item.code === saved.code)
     if (index >= 0) categories.value[index] = saved
@@ -836,19 +895,29 @@ async function saveCategory() {
   }
 }
 
-async function calibrateCounter() {
-  if (categoryCreating.value || !categoryDraft.code || !lastU9MaterialCode.value.trim()) {
-    ElMessage.warning('请先保存分类并填写U9C末位料号')
-    return
-  }
+async function saveNumberingSettings() {
+  savingNumberingSettings.value = true
   try {
-    const saved = await calibrateMaterialCategoryCounter(categoryDraft.code, lastU9MaterialCode.value.trim(), props.token)
-    const index = categories.value.findIndex(item => item.code === saved.code)
-    if (index >= 0) categories.value[index] = saved
-    selectCategory(saved)
-    ElMessage.success(`流水已校准，下一个料号为 ${saved.numberPrefix}${(saved.currentSequence + 1).toString().padStart(saved.sequenceLength, '0')}`)
+    const saved = await updateMaterialNumberingSettings(numberingStartSequence.value, props.token)
+    numberingStartSequence.value = saved.startSequence
+    ElMessage.success(`PLM全局起始流水已保存为 ${saved.startSequence}`)
   } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : '分类流水校准失败')
+    ElMessage.error(error instanceof Error ? error.message : 'PLM起始流水保存失败')
+  } finally {
+    savingNumberingSettings.value = false
+  }
+}
+
+async function saveDuplicateRules() {
+  savingDuplicateRules.value = true
+  try {
+    if (duplicateRules.value.some(rule => rule.fields.length === 0)) throw new Error('每个料品分类至少选择一个查重字段')
+    duplicateRules.value = await updateMaterialDuplicateRules(duplicateRules.value, props.token)
+    ElMessage.success('各分类料品查重规则已保存')
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '料品查重规则保存失败')
+  } finally {
+    savingDuplicateRules.value = false
   }
 }
 
@@ -989,12 +1058,30 @@ function syncTaskError(task: MaterialSyncTask) {
     ?? '—'
 }
 
+function isMaterialCodeConflictTask(task: MaterialSyncTask) {
+  return task.operation === 'Create'
+    && ['Failed', 'NeedsReview'].includes(task.status)
+    && syncTaskError(task).includes('U9C已存在料号')
+}
+
+function syncTaskActionLabel(task: MaterialSyncTask) {
+  return isMaterialCodeConflictTask(task) ? '重新分配并同步' : '同步'
+}
+
+const batchSyncActionLabel = computed(() => selectedExecutableSyncTasks.value.some(isMaterialCodeConflictTask)
+  ? '批量重新分配并同步'
+  : '批量同步到U9C')
+
 async function executeTask(task: MaterialSyncTask) {
+  const reassigning = isMaterialCodeConflictTask(task)
+  const targetLabel = task.materialCode || task.materialName || '该料品'
   try {
     await ElMessageBox.confirm(
-      `确认将 ${task.materialCode || task.materialName || '该料品'} 同步到U9C？若料号已被占用，系统会自动换号并重试；BOM申请还会继续创建或追加A1 BOM。`,
-      '同步到 U9C',
-      { type: 'warning', confirmButtonText: '确认同步', cancelButtonText: '取消' },
+      reassigning
+        ? `确认按最新分类流水为 ${targetLabel} 重新分配料号，并同步到U9C？BOM申请还会继续创建或追加A1 BOM。`
+        : `确认将 ${targetLabel} 同步到U9C？若料号已被占用，系统会自动换号并重试；BOM申请还会继续创建或追加A1 BOM。`,
+      reassigning ? '重新分配并同步' : '同步到 U9C',
+      { type: 'warning', confirmButtonText: reassigning ? '确认重新分配并同步' : '确认同步', cancelButtonText: '取消' },
     )
     syncingTaskId.value = task.id
     syncProgressText.value = `正在同步 ${task.materialCode || task.materialName || '该料品'} 到U9C。`
@@ -1015,7 +1102,7 @@ async function executeTask(task: MaterialSyncTask) {
   }
 }
 
-function canSelectSyncTask(task: MaterialSyncTask) {
+function canExecuteSyncTask(task: MaterialSyncTask) {
   return (props.canApprove || props.canDecideMaterialCode)
     && !batchSyncingTasks.value
     && syncingTaskId.value === null
@@ -1023,16 +1110,22 @@ function canSelectSyncTask(task: MaterialSyncTask) {
     && !['Pending', 'Superseded'].includes(task.status)
 }
 
+function canSelectSyncTask(task: MaterialSyncTask) {
+  return canExecuteSyncTask(task) && executableSyncStatuses.has(task.status)
+}
+
 async function executeSelectedTasks() {
-  const selectedIds = new Set(selectedSyncTasks.value.map(task => task.id))
-  const targets = currentSynchronizationTasks.value.filter(task => selectedIds.has(task.id) && canSelectSyncTask(task))
+  const targets = selectedExecutableSyncTasks.value
   if (!(props.canApprove || props.canDecideMaterialCode) || targets.length === 0 || batchSyncingTasks.value || syncingTaskId.value !== null) return
+  const reassigning = targets.some(isMaterialCodeConflictTask)
 
   try {
     await ElMessageBox.confirm(
-      `确认批量同步已选择的 ${targets.length} 个任务到U9C？系统会逐条处理，重复料号自动换号；单条失败不会中断其余任务。`,
-      '批量同步到 U9C',
-      { type: 'warning', confirmButtonText: '确认批量同步', cancelButtonText: '取消' },
+      reassigning
+        ? `确认批量处理已选择的 ${targets.length} 个任务？重复料号失败项将先按最新分类流水重新分配，再同步到U9C；其他任务正常同步，单条失败不会中断其余任务。`
+        : `确认批量同步已选择的 ${targets.length} 个任务到U9C？系统会逐条处理，重复料号自动换号；单条失败不会中断其余任务。`,
+      reassigning ? '批量重新分配并同步' : '批量同步到 U9C',
+      { type: 'warning', confirmButtonText: reassigning ? '确认批量重新分配并同步' : '确认批量同步', cancelButtonText: '取消' },
     )
   } catch { return }
 
@@ -1045,6 +1138,7 @@ async function executeSelectedTasks() {
   } finally {
     batchSyncingTasks.value = false
     selectedSyncTasks.value = []
+    syncTaskSelectionTable.value?.clearSelection()
     syncProgressText.value = ''
   }
 }
@@ -1119,9 +1213,10 @@ onMounted(() => {
           <section class="material-master-content" aria-label="料品列表">
             <div class="material-toolbar">
               <div class="material-toolbar__actions"><el-button @click="load">刷新</el-button><el-button v-if="canEdit" type="primary" @click="openCreate">新增料品</el-button><el-button v-if="canEdit" :disabled="selectedMaterials.length > 1 ? !canBatchEditSelected : !canEditSelected" @click="selectedMaterials.length > 1 ? openBatchEdit() : openSelectedEdit()">{{ selectedMaterials.length > 1 ? '批量编辑' : '编辑' }}</el-button><el-button v-if="canApprove" :disabled="!canApproveSelected" @click="approveSelected">批准</el-button><el-button :disabled="selectedMaterials.length === 0" :loading="queryingU9" @click="querySelected">查询U9C</el-button><el-button v-if="canEdit" :disabled="!canArchiveSelected" @click="archiveSelected">停用</el-button><el-button v-if="canEdit" type="danger" :disabled="!canDeleteSelected" @click="deleteSelected">删除</el-button></div>
-              <div class="material-toolbar__filters"><el-checkbox v-model="showArchived" @change="load">显示已停用</el-checkbox><el-select v-model="brandFilter" class="material-brand-filter" clearable filterable placeholder="筛选品牌"><el-option v-for="brand in brandOptions" :key="brand" :label="brand" :value="brand" /></el-select><el-input v-model="query" clearable placeholder="搜索编码、名称、规格、品牌或分类" /></div>
+              <div class="material-toolbar__filters"><el-checkbox v-model="showArchived">显示已停用</el-checkbox><el-select v-model="brandFilter" class="material-brand-filter" clearable filterable placeholder="筛选品牌"><el-option v-for="brand in brandOptions" :key="brand" :label="brand" :value="brand" /></el-select><el-input v-model="query" clearable placeholder="搜索编码、名称、规格、品牌或分类" /></div>
             </div>
-            <div class="material-table-shell">
+            <div class="material-table-shell pdm-loading-host">
+              <SquareLoader v-if="materialPageLoading" overlay label="正在查询料品主档" />
               <el-table class="material-table" :data="pagedMaterials" height="100%" stripe row-key="id" table-layout="fixed" :fit="true" empty-text="尚未创建PLM料品" @selection-change="selectedMaterials = $event">
           <el-table-column type="selection" width="38" />
           <el-table-column prop="materialCode" label="物料编码" min-width="100" show-overflow-tooltip />
@@ -1146,15 +1241,16 @@ onMounted(() => {
           <el-table-column label="U9/删除校验" min-width="112"><template #default="{ row }"><el-tooltip v-if="u9ValidationResults[row.id]" :content="u9ValidationResults[row.id].message" placement="top"><div class="u9-validation" :aria-label="u9ValidationResults[row.id].message"><el-tag :type="u9ValidationResults[row.id].status === 'Matched' ? 'success' : u9ValidationResults[row.id].status === 'SpecificationMismatch' ? 'danger' : 'warning'">{{ validationLabel(u9ValidationResults[row.id]) }}</el-tag></div></el-tooltip><span v-else class="u9-unchecked">未校验</span></template></el-table-column>
               </el-table>
             </div>
-            <el-pagination v-model:current-page="currentPage" v-model:page-size="pageSize" class="material-pagination" :page-sizes="[50, 100, 200]" :total="filteredMaterials.length" layout="total, sizes, prev, pager, next" @size-change="currentPage = 1" />
+            <el-pagination v-model:current-page="currentPage" v-model:page-size="pageSize" class="material-pagination" :page-sizes="[50, 100, 200]" :total="materialTotal" layout="total, sizes, prev, pager, next" />
           </section>
         </div>
       </el-tab-pane>
 
       <el-tab-pane name="code-approvals">
         <template #label><span class="material-tab-label">料号审批<em v-if="currentWorkCount">{{ currentWorkCount }}</em></span></template>
-        <div class="material-code-approval-note">本页按两步完成料号流程：第一步批准并按PLM分类基线分配料号；第二步勾选对应记录同步到U9C。重复料号会自动换号并重试；U9C料品及适用的A1 BOM全部完成后才进入审批历史。</div>
-        <el-tabs v-model="codeApprovalView" class="material-code-approval-subtabs">
+        <div class="material-code-approval-workflow">
+          <div class="material-code-approval-note">本页按两步完成料号流程：第一步批准并按PLM分类基线分配料号；第二步勾选对应记录同步到U9C。重复料号时系统会刷新同类U9C最新流水并在后台连续换号重试；U9C料品及适用的A1 BOM全部完成后才进入审批历史。</div>
+          <el-tabs v-model="codeApprovalView" class="material-code-approval-subtabs">
           <el-tab-pane name="pending">
             <template #label><span class="material-code-approval-subtab-label">当前处理 <em>{{ currentWorkCount }}</em></span></template>
             <div class="material-code-workflow-columns">
@@ -1176,7 +1272,7 @@ onMounted(() => {
                   <span>已选择 {{ selectedCodeApplications.length }} 项待审批申请</span>
                 </div>
                 <div class="material-code-approval-table-shell">
-                  <el-table class="material-code-approval-table material-code-approval-table--pending" :data="pendingCodeApplicationRows" row-key="id" stripe table-layout="fixed" :fit="true" empty-text="当前没有待审批申请" @selection-change="selectedCodeApplications = $event">
+                  <el-table class="material-code-approval-table material-code-approval-table--pending" :data="pagedPendingCodeApplicationRows" row-key="id" stripe table-layout="fixed" :fit="true" empty-text="当前没有待审批申请" @selection-change="selectedCodeApplications = $event">
                     <el-table-column v-if="canDecideMaterialCode" type="selection" width="38" :selectable="canSelectCodeApplication" />
                     <el-table-column label="申请类型" width="64"><template #default="{ row }">{{ applicationTypeLabel(row) }}</template></el-table-column>
                     <el-table-column label="来源项目" width="116" show-overflow-tooltip><template #default="{ row }">{{ row.projectCode ? `${row.projectCode} · ${row.projectName || '未命名项目'}` : row.projectId }}</template></el-table-column>
@@ -1193,6 +1289,7 @@ onMounted(() => {
                     <el-table-column label="操作" width="92"><template #default="{ row }"><el-button v-if="canDecideMaterialCode" link type="primary" :loading="decidingApplicationId === row.id" :disabled="batchDecidingApplications" @click="decideCodeApplication(row, true)">批准</el-button><el-button v-if="canDecideMaterialCode" link type="danger" :disabled="decidingApplicationId === row.id || batchDecidingApplications" @click="decideCodeApplication(row, false)">退回</el-button><span v-if="!canDecideMaterialCode">—</span></template></el-table-column>
                   </el-table>
                 </div>
+                <el-pagination v-model:current-page="pendingApprovalPage" class="material-workflow-pagination material-pending-approval-pagination" :page-size="workflowPageSize" :total="pendingCodeApplicationRows.length" layout="total, prev, pager, next" size="small" @current-change="changePendingApprovalPage" />
               </section>
               <section class="material-code-workflow-stage material-code-sync-stage" aria-label="第二步同步到U9C">
                 <div class="material-code-workflow-stage__title"><strong>第二步：同步到U9C</strong><span>失败记录保留在此，可选择后再次同步。</span></div>
@@ -1205,10 +1302,10 @@ onMounted(() => {
                   </div>
                 </section>
                 <div v-if="canApprove || canDecideMaterialCode" class="material-sync-toolbar">
-                  <el-button type="primary" :disabled="selectedSyncTasks.length === 0 || batchSyncingTasks || syncingTaskId !== null" :loading="batchSyncingTasks" @click="executeSelectedTasks">批量同步到U9C</el-button>
-                  <span>已选择 {{ selectedSyncTasks.length }} 个可执行任务</span>
+                  <el-button type="primary" :disabled="selectedExecutableSyncTasks.length === 0 || batchSyncingTasks || syncingTaskId !== null" :loading="batchSyncingTasks" @click="executeSelectedTasks">{{ batchSyncActionLabel }}</el-button>
+                  <span>已选择 {{ selectedExecutableSyncTasks.length }} 个可执行任务</span>
                 </div>
-                <el-table class="material-sync-table" :data="currentSynchronizationTasks" row-key="id" stripe table-layout="fixed" :fit="true" empty-text="当前没有待同步记录" @selection-change="selectedSyncTasks = $event">
+                <el-table ref="syncTaskSelectionTable" class="material-sync-table material-code-sync-table--pending" :data="pagedCurrentSynchronizationTasks" row-key="id" stripe table-layout="fixed" :fit="true" empty-text="当前没有待同步记录" @selection-change="selectedSyncTasks = $event">
                   <el-table-column v-if="canApprove || canDecideMaterialCode" type="selection" width="38" :selectable="canSelectSyncTask" />
                   <el-table-column label="来源" width="150" show-overflow-tooltip><template #default="{ row }">{{ row.projectCode ? `${row.projectCode} · ${row.projectName || '未命名项目'}` : '料品主档' }}</template></el-table-column>
                   <el-table-column label="审批对象" width="130" show-overflow-tooltip><template #default="{ row }">{{ row.bomHeaderKind ? bomHeaderLabels[row.bomHeaderKind] : row.materialName || '普通料品' }}</template></el-table-column>
@@ -1217,8 +1314,9 @@ onMounted(() => {
                   <el-table-column label="申请时间" width="124"><template #default="{ row }">{{ row.requestedAt ? dateTimeLabel(row.requestedAt) : '—' }}</template></el-table-column>
                   <el-table-column label="流程状态" width="112"><template #default="{ row }"><el-tag :type="syncTaskTagType(row)">{{ syncTaskStatusLabel(row) }}</el-tag></template></el-table-column>
                   <el-table-column label="说明" min-width="210" show-overflow-tooltip><template #default="{ row }">{{ syncTaskError(row) }}</template></el-table-column>
-                  <el-table-column label="操作" width="132"><template #default="{ row }"><el-button link type="primary" @click="showPreview(row)">查看请求</el-button><el-button v-if="canSelectSyncTask(row)" link type="primary" :disabled="batchSyncingTasks" :loading="syncingTaskId === row.id" @click="executeTask(row)">同步</el-button></template></el-table-column>
+                  <el-table-column label="操作" width="172"><template #default="{ row }"><el-button link type="primary" @click="showPreview(row)">查看请求</el-button><el-button v-if="canExecuteSyncTask(row)" link type="primary" :disabled="batchSyncingTasks" :loading="syncingTaskId === row.id" @click="executeTask(row)">{{ syncTaskActionLabel(row) }}</el-button></template></el-table-column>
                 </el-table>
+                <el-pagination v-model:current-page="pendingSyncPage" class="material-workflow-pagination material-pending-sync-pagination" :page-size="workflowPageSize" :total="currentSynchronizationTasks.length" layout="total, prev, pager, next" size="small" @current-change="changePendingSyncPage" />
               </section>
             </div>
           </el-tab-pane>
@@ -1257,7 +1355,28 @@ onMounted(() => {
               </section>
             </div>
           </el-tab-pane>
-        </el-tabs>
+          </el-tabs>
+        </div>
+      </el-tab-pane>
+
+      <el-tab-pane v-if="canManageIntegration" label="取号设置" name="numbering-settings">
+        <section class="material-numbering-settings" aria-label="PLM料号基线设置">
+          <div>
+            <strong>PLM全局料号基线</strong>
+            <p>所有开放创建分类统一使用7位流水；新料号只按PLM主档与本地计数器向后生成，不在审批或同步时扫描U9C。</p>
+          </div>
+          <el-input-number v-model="numberingStartSequence" :min="1000000" :max="9999999" :step="1" :precision="0" />
+          <el-button type="primary" :loading="savingNumberingSettings" @click="saveNumberingSettings">保存基线设置</el-button>
+        </section>
+        <section class="material-duplicate-settings" aria-label="料品查重规则设置">
+          <header><div><strong>分类查重规则</strong><p>申请或创建料号前只查询PLM料品主档；每类至少选择一个字段，所选字段全部相同时复用现有料品。</p></div><el-button type="primary" :loading="savingDuplicateRules" @click="saveDuplicateRules">保存查重规则</el-button></header>
+          <div class="material-duplicate-rule-list">
+            <div v-for="rule in duplicateRules" :key="rule.categoryCode" class="material-duplicate-rule-row">
+              <span>{{ rule.categoryCode }} {{ categories.find(category => category.code === rule.categoryCode)?.name || '' }}</span>
+              <el-checkbox-group v-model="rule.fields"><el-checkbox v-for="field in duplicateFieldOptions" :key="field.value" :value="field.value">{{ field.label }}</el-checkbox></el-checkbox-group>
+            </div>
+          </div>
+        </section>
       </el-tab-pane>
 
       <el-tab-pane label="分类维护" name="rules">
@@ -1279,13 +1398,12 @@ onMounted(() => {
                 <el-form-item label="PLM业务分类"><el-select v-model="categoryDraft.pdmKind" clearable :disabled="!canManageIntegration"><el-option label="电气件" value="Electrical" /><el-option label="机械外购件" value="Standard" /><el-option label="非标机加件" value="NonStandard" /><el-option label="产品/组件" value="Product" /></el-select></el-form-item>
                 <el-form-item label="默认供给方式"><el-select v-model="categoryDraft.defaultSupplyMode" :disabled="!canManageIntegration"><el-option label="采购" value="Purchase" /><el-option label="自制" value="Manufacture" /><el-option label="委外" value="Outsource" /></el-select></el-form-item>
                 <el-form-item label="编号前缀"><el-input v-model="categoryDraft.numberPrefix" :disabled="!canManageIntegration" :placeholder="categoryDraft.code" /></el-form-item>
-                <el-form-item label="流水位数"><el-input-number v-model="categoryDraft.sequenceLength" :min="1" :max="9" :disabled="!canManageIntegration" /></el-form-item>
+                <el-form-item label="流水位数"><el-input-number v-model="categoryDraft.sequenceLength" :min="1" :max="9" :disabled="!canManageIntegration || categoryDraft.allowCreate" /><p class="field-help">开放创建的分类固定为7位。</p></el-form-item>
                 <el-form-item label="流水范围"><el-input v-model="categoryDraft.counterScope" :disabled="!canManageIntegration" :placeholder="categoryDraft.code" /></el-form-item>
                 <el-form-item label="排序号"><el-input-number v-model="categoryDraft.sortOrder" :disabled="!canManageIntegration" /></el-form-item>
-                <el-form-item label="U9C末位料号"><el-input v-model="lastU9MaterialCode" :disabled="!canManageIntegration || categoryCreating" :placeholder="`${categoryDraft.numberPrefix || categoryDraft.code}${'0'.repeat(categoryDraft.sequenceLength)}`"><template #append><el-button @click="calibrateCounter">校准流水</el-button></template></el-input><p class="field-help">只允许向前校准；系统不会通过U9C精确查询接口猜测最大流水。</p></el-form-item>
               </div>
               <div class="category-switches"><el-switch v-model="categoryDraft.allowCreate" :disabled="!canManageIntegration" active-text="开放创建" inactive-text="屏蔽创建" /><el-switch v-model="categoryDraft.isVisible" :disabled="!canManageIntegration" active-text="PLM可见" /><el-switch v-model="categoryDraft.isActive" :disabled="!canManageIntegration" active-text="U9C有效" /></div>
-              <p class="field-help">开放创建只影响新增料品；屏蔽分类中的现有料品仍可查询并供历史BOM引用。当前流水：{{ categoryDraft.currentSequence }}；下一个编号：{{ categoryDraft.numberPrefix || categoryDraft.code }}{{ (categoryDraft.currentSequence + 1).toString().padStart(categoryDraft.sequenceLength, '0') }}</p>
+              <p class="field-help">开放创建只影响新增料品；屏蔽分类中的现有料品仍可查询并供历史BOM引用。当前流水：{{ categoryDraft.currentSequence }}；下一个编号：{{ categoryDraft.numberPrefix || categoryDraft.code }}{{ Math.max(categoryDraft.currentSequence + 1, numberingStartSequence).toString().padStart(categoryDraft.sequenceLength, '0') }}</p>
               <el-button v-if="canManageIntegration" type="primary" @click="saveCategory">保存分类</el-button>
             </el-form>
           </section>
@@ -1347,19 +1465,21 @@ onMounted(() => {
 
 <style scoped>
 .material-master-layout{display:grid;grid-template-columns:190px minmax(0,1fr);gap:var(--pdm-container-gap);min-width:0;background:var(--shell-content-bg)}.material-master-layout.is-category-collapsed{grid-template-columns:34px minmax(0,1fr)}.material-category-nav,.material-master-content{min-width:0;padding:10px;border:1px solid #e2e8f0;border-radius:8px;background:#fff}.material-category-nav{overflow:auto;font-size:11px}.material-category-nav__title{display:flex;align-items:center;justify-content:space-between;gap:4px;margin:0 4px 8px;color:#334155;font-weight:600;white-space:nowrap}.material-category-nav__toggle{width:22px;height:22px;display:inline-flex;flex:0 0 22px;align-items:center;justify-content:center;padding:0;border:1px solid var(--shell-accent-border);border-radius:5px;background:var(--pdm-blue-soft);color:var(--pdm-blue);font-size:16px;line-height:1;cursor:pointer}.material-category-nav__toggle:hover,.material-category-nav__toggle:focus-visible{border-color:var(--pdm-blue);background:var(--pdm-blue-soft);outline:none}.material-master-layout.is-category-collapsed .material-category-nav{padding:5px}.material-master-layout.is-category-collapsed .material-category-nav__title{justify-content:center;margin:0}.material-category-all{width:100%;height:28px;margin-bottom:4px;padding:0 8px;border:0;border-radius:5px;background:transparent;color:#475569;font:inherit;text-align:left;cursor:pointer}.material-category-all:hover,.material-category-all.is-active{background:var(--pdm-blue-soft);color:var(--pdm-blue)}.material-category-nav :deep(.el-tree){background:#fff;color:#475569;font-size:11px}.material-category-nav :deep(.el-tree-node__content){height:28px;border-radius:5px}.material-category-node{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.material-master-content{overflow:hidden}
-.material-page{min-width:0;min-height:calc(100vh - 112px);overflow:hidden;padding:5px 28px 28px}.material-tabs{min-width:0;max-width:100%}.material-tabs :deep(.el-tabs__content),.material-tabs :deep(.el-tab-pane){min-width:0;max-width:100%;overflow:hidden}.material-toolbar{display:flex;min-width:0;align-items:center;justify-content:flex-start;flex-wrap:nowrap;gap:5px;margin-bottom:14px;font-size:11px}.material-toolbar__actions,.material-toolbar__filters{display:flex;min-width:0;align-items:center;flex-wrap:nowrap;gap:5px}.material-toolbar__actions{flex:0 1 auto}.material-toolbar__filters{flex:1 1 260px}.material-toolbar :deep(.el-button),.material-toolbar :deep(.el-checkbox__label),.material-toolbar :deep(.el-input__inner),.material-toolbar :deep(.el-select__placeholder),.material-toolbar :deep(.el-select__selected-item){font-size:11px}.material-toolbar__actions :deep(.el-button){width:clamp(60px,5vw,80px);height:30px;flex:1 1 60px;margin-left:0;padding:0}.material-toolbar__filters :deep(.el-checkbox){flex:0 0 auto}.material-brand-filter{width:110px;min-width:80px;flex:0 1 110px}.material-toolbar .el-input{width:auto;min-width:80px;flex:1 1 180px}.material-table{width:100%;min-width:0;max-width:100%;box-sizing:border-box}.material-table :deep(.el-table__inner-wrapper),.material-table :deep(.el-scrollbar),.material-table :deep(.el-scrollbar__wrap){max-width:100%}.material-table :deep(.el-scrollbar__wrap){overflow-x:auto}.material-table :deep(.el-table__cell){font-size:11px;text-align:center}.material-table :deep(.cell){overflow:hidden;padding:0 6px;text-overflow:ellipsis;white-space:nowrap}.material-table :deep(.el-button),.material-table :deep(.el-tag){font-size:11px}.u9-validation{display:flex;align-items:center;justify-content:center;white-space:nowrap}.u9-unchecked{color:#64748b;font-size:11px}.batch-editor-note{margin:0 0 14px;color:#64748b;font-size:11px}.batch-editor-form :deep(.el-checkbox){margin-right:0}.category-layout{display:grid;grid-template-columns:minmax(280px,35%) 1fr;gap:18px;min-height:520px}.category-tree-panel,.category-editor{padding:18px;border:1px solid #e2e8f0;border-radius:14px;background:#f8fafc}.category-actions{display:flex;gap:8px;margin-bottom:14px}.category-node{display:flex;align-items:center;justify-content:space-between;gap:12px;width:100%;padding-right:8px}.category-empty{display:grid;min-height:420px;place-items:center;color:#94a3b8}.category-switches{display:flex;flex-wrap:wrap;gap:24px;margin:2px 0 14px}.form-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));column-gap:18px}.field-help{width:100%;margin:6px 0 0;color:#64748b;font-size:11px;line-height:1.5}.weight-unit{width:76px;margin-left:8px}.preview-meta{display:grid;gap:6px;margin-bottom:12px;color:#64748b;font-size:12px;word-break:break-all}.payload-preview{max-height:480px;overflow:auto;padding:18px;border-radius:10px;background:#0f172a;color:#dbeafe;font:12px/1.6 Consolas,monospace;white-space:pre-wrap;word-break:break-all}.material-tabs :deep(.el-tabs__content),.material-tabs :deep(.el-tabs__content *){font-size:11px}:global(.material-editor-dialog),:global(.material-editor-dialog *){font-size:11px}:global(.material-editor-dialog .el-dialog__title){font-size:11px!important}@media(max-width:1000px){.material-page{padding:5px 18px 18px}.material-toolbar__actions :deep(.el-button){width:52px;min-width:52px;flex-basis:52px}.material-brand-filter{width:70px;min-width:70px;flex-basis:70px}.material-toolbar .el-input{min-width:70px;flex-basis:70px}.category-layout{grid-template-columns:1fr}.form-grid{grid-template-columns:1fr}}
+.material-page{min-width:0;min-height:calc(100vh - 112px);overflow:hidden;padding:5px 28px 28px}.material-tabs{min-width:0;max-width:100%}.material-tabs :deep(.el-tabs__content),.material-tabs :deep(.el-tab-pane){min-width:0;max-width:100%;overflow:hidden}.material-toolbar{display:flex;min-width:0;align-items:center;justify-content:flex-start;flex-wrap:nowrap;gap:5px;margin-bottom:14px;font-size:11px}.material-toolbar__actions,.material-toolbar__filters{display:flex;min-width:0;align-items:center;flex-wrap:nowrap;gap:5px}.material-toolbar__actions{flex:0 1 auto}.material-toolbar__filters{flex:1 1 260px}.material-toolbar :deep(.el-button),.material-toolbar :deep(.el-checkbox__label),.material-toolbar :deep(.el-input__inner),.material-toolbar :deep(.el-select__placeholder),.material-toolbar :deep(.el-select__selected-item){font-size:11px}.material-toolbar__actions :deep(.el-button){width:clamp(60px,5vw,80px);height:30px;flex:1 1 60px;margin-left:0;padding:0}.material-toolbar__filters :deep(.el-checkbox){flex:0 0 auto}.material-brand-filter{width:110px;min-width:80px;flex:0 1 110px}.material-toolbar .el-input{width:auto;min-width:80px;flex:1 1 180px}.material-table{width:100%;min-width:0;max-width:100%;box-sizing:border-box}.material-table :deep(.el-table__inner-wrapper),.material-table :deep(.el-scrollbar),.material-table :deep(.el-scrollbar__wrap){max-width:100%}.material-table :deep(.el-scrollbar__wrap){overflow-x:auto}.material-table :deep(.el-table__cell){font-size:11px;text-align:center}.material-table :deep(.cell){overflow:hidden;padding:0 6px;text-overflow:ellipsis;white-space:nowrap}.material-table :deep(.el-button),.material-table :deep(.el-tag){font-size:11px}.u9-validation{display:flex;align-items:center;justify-content:center;white-space:nowrap}.u9-unchecked{color:#64748b;font-size:11px}.batch-editor-note{margin:0 0 14px;color:#64748b;font-size:11px}.batch-editor-form :deep(.el-checkbox){margin-right:0}.material-numbering-settings{display:flex;align-items:center;gap:12px;margin-bottom:12px;padding:12px 16px;border:1px solid #bfdbfe;border-radius:10px;background:#eff6ff}.material-numbering-settings>div{min-width:0;flex:1}.material-numbering-settings strong{color:#0f172a;font-size:12px}.material-numbering-settings p{margin:3px 0 0;color:#475569;line-height:1.5}.material-numbering-settings :deep(.el-input-number){width:150px}.category-layout{display:grid;grid-template-columns:minmax(280px,35%) 1fr;gap:18px;min-height:520px}.category-tree-panel,.category-editor{padding:18px;border:1px solid #e2e8f0;border-radius:14px;background:#f8fafc}.category-actions{display:flex;gap:8px;margin-bottom:14px}.category-node{display:flex;align-items:center;justify-content:space-between;gap:12px;width:100%;padding-right:8px}.category-empty{display:grid;min-height:420px;place-items:center;color:#94a3b8}.category-switches{display:flex;flex-wrap:wrap;gap:24px;margin:2px 0 14px}.form-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));column-gap:18px}.field-help{width:100%;margin:6px 0 0;color:#64748b;font-size:11px;line-height:1.5}.weight-unit{width:76px;margin-left:8px}.preview-meta{display:grid;gap:6px;margin-bottom:12px;color:#64748b;font-size:12px;word-break:break-all}.payload-preview{max-height:480px;overflow:auto;padding:18px;border-radius:10px;background:#0f172a;color:#dbeafe;font:12px/1.6 Consolas,monospace;white-space:pre-wrap;word-break:break-all}.material-tabs :deep(.el-tabs__content),.material-tabs :deep(.el-tabs__content *){font-size:11px}:global(.material-editor-dialog),:global(.material-editor-dialog *){font-size:11px}:global(.material-editor-dialog .el-dialog__title){font-size:11px!important}@media(max-width:1000px){.material-page{padding:5px 18px 18px}.material-toolbar__actions :deep(.el-button){width:52px;min-width:52px;flex-basis:52px}.material-brand-filter{width:70px;min-width:70px;flex-basis:70px}.material-toolbar .el-input{min-width:70px;flex-basis:70px}.material-numbering-settings{align-items:stretch;flex-direction:column}.category-layout{grid-template-columns:1fr}.form-grid{grid-template-columns:1fr}}
+.material-duplicate-settings{padding:14px 16px;border:1px solid #e2e8f0;border-radius:10px;background:#fff}.material-duplicate-settings>header{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;margin-bottom:10px}.material-duplicate-settings>header p{margin:3px 0 0;color:#64748b;line-height:1.5}.material-duplicate-rule-list{display:grid;gap:6px}.material-duplicate-rule-row{display:grid;grid-template-columns:minmax(180px,240px) 1fr;align-items:center;gap:12px;padding:8px 10px;border-radius:6px;background:#f8fafc}.material-duplicate-rule-row>span{font-weight:600}.material-duplicate-rule-row :deep(.el-checkbox){margin-right:18px}@media(max-width:800px){.material-duplicate-rule-row{grid-template-columns:1fr}}
 .material-page{height:100%;min-height:0;display:flex;flex-direction:column}.material-tabs{min-height:0;flex:1 1 auto;display:flex;flex-direction:column}.material-tabs :deep(.el-tabs__header .el-tabs__item){font-size:13px;font-weight:600}.material-tabs :deep(.el-tabs__content){min-height:0;flex:1 1 auto}.material-tabs :deep(.el-tab-pane){height:100%;min-height:0}.material-master-layout{height:100%;min-height:0}.material-master-content{display:flex;flex-direction:column}.material-toolbar{flex:0 0 auto;margin-bottom:5px}.material-table-shell{min-height:0;flex:1 1 auto}.material-table{height:100%}.material-pagination{flex:0 0 auto;justify-content:flex-end;margin-top:5px}.material-pagination :deep(.el-pagination__total),.material-pagination :deep(.el-select__selected-item),.material-pagination :deep(button),.material-pagination :deep(.number){font-size:11px}
 .material-tab-label{display:inline-flex;align-items:center;gap:5px}.material-tab-label em{min-width:18px;height:18px;padding:0 5px;border-radius:9px;background:var(--pdm-blue);color:#fff;font-size:10px;font-style:normal;font-weight:600;line-height:18px;text-align:center}
 .material-table :deep(.el-table__body tr.el-table__row){height:30px}.material-table :deep(.el-table__body td.el-table__cell){height:30px;padding:0}.material-table :deep(.el-table__body .el-tag){height:20px;padding-top:0;padding-bottom:0;line-height:18px}
 .material-code-approval-note{margin-bottom:8px;padding:8px 10px;border:1px solid #dbeafe;border-radius:6px;background:#eff6ff;color:#475569;font-size:11px}
-.material-code-approval-subtabs{min-height:0}.material-code-approval-subtabs :deep(.el-tabs__header){margin:0 0 8px}.material-code-approval-subtabs :deep(.el-tabs__item){height:30px;font-size:11px;font-weight:600}.material-code-approval-subtab-label{display:inline-flex;align-items:center;gap:5px}.material-code-approval-subtab-label em{min-width:18px;height:18px;padding:0 5px;border-radius:9px;background:#e0f2fe;color:#0369a1;font-size:10px;font-style:normal;line-height:18px;text-align:center}
+.material-code-approval-workflow{height:100%;min-height:0;overflow:auto;padding-right:2px}.material-code-approval-subtabs{min-height:0}.material-code-approval-subtabs :deep(.el-tabs__content),.material-code-approval-subtabs :deep(.el-tab-pane){height:auto;min-height:0;overflow:visible}.material-code-approval-subtabs :deep(.el-tabs__header){margin:0 0 8px}.material-code-approval-subtabs :deep(.el-tabs__item){height:30px;font-size:11px;font-weight:600}.material-code-approval-subtab-label{display:inline-flex;align-items:center;gap:5px}.material-code-approval-subtab-label em{min-width:18px;height:18px;padding:0 5px;border-radius:9px;background:#e0f2fe;color:#0369a1;font-size:10px;font-style:normal;line-height:18px;text-align:center}
 .material-step-feedback{position:sticky;top:0;z-index:4;min-height:82px;max-height:132px;margin-bottom:8px;overflow:auto;padding:7px 9px;border:1px solid #cbd5e1;border-radius:6px;background:#f8fafc;color:#475569;font-size:11px}.material-step-feedback__status,.material-step-feedback__result header{display:flex;align-items:flex-start;gap:8px}.material-step-feedback__status{padding-bottom:5px;border-bottom:1px solid #e2e8f0}.material-step-feedback__status>strong,.material-step-feedback__result header>strong{flex:0 0 auto;color:#0f172a;font-size:11px}.material-step-feedback__status>span,.material-step-feedback__result header>span{min-width:0;font-weight:600;line-height:1.5}.material-step-feedback__status>span.is-running{color:#1d4ed8}.material-step-feedback__result{padding-top:5px}.material-step-feedback__result p{margin:3px 0 0;line-height:1.5}.material-step-feedback__result ul{margin:4px 0 0;padding-left:18px;line-height:1.5}.material-step-feedback.is-success{border-color:#bbf7d0;background:#f0fdf4}.material-step-feedback.is-success .material-step-feedback__result header>span{color:#15803d}.material-step-feedback.is-warning{border-color:#fde68a;background:#fffbeb}.material-step-feedback.is-warning .material-step-feedback__result header>span{color:#b45309}.material-step-feedback.is-error{border-color:#fecaca;background:#fef2f2}.material-step-feedback.is-error .material-step-feedback__result header>span{color:#dc2626}.material-step-feedback.is-empty .material-step-feedback__result header>span,.material-step-feedback.is-empty .material-step-feedback__result p{color:#64748b}
-.material-code-workflow-columns{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:10px;min-width:0}.material-code-workflow-stage{min-width:0;overflow:hidden;padding:10px;border:1px solid #dbe4ef;border-radius:8px;background:#fff}.material-code-workflow-stage__title{display:flex;align-items:center;gap:8px;margin-bottom:8px;color:#334155}.material-code-workflow-stage__title strong{color:#0f766e;font-size:12px;white-space:nowrap}.material-code-workflow-stage__title span{overflow:hidden;color:#64748b;text-overflow:ellipsis;white-space:nowrap}
+.material-code-workflow-columns{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);align-items:start;gap:10px;min-width:0}.material-code-workflow-stage{min-width:0;overflow:hidden;padding:10px;border:1px solid #dbe4ef;border-radius:8px;background:#fff}.material-code-workflow-stage__title{display:flex;align-items:center;gap:8px;margin-bottom:8px;color:#334155}.material-code-workflow-stage__title strong{color:#0f766e;font-size:12px;white-space:nowrap}.material-code-workflow-stage__title span{overflow:hidden;color:#64748b;text-overflow:ellipsis;white-space:nowrap}
 .material-sync-toolbar{display:flex;align-items:center;gap:8px;margin-bottom:8px}.material-sync-toolbar :deep(.el-button){min-width:110px;height:28px;margin-left:0;font-size:11px}.material-sync-toolbar>span{color:#64748b;font-size:11px}
 .material-sync-table{width:100%;min-width:0;max-width:100%}.material-sync-table :deep(.el-table__cell){padding-left:0;padding-right:0;text-align:center}.material-sync-table :deep(.cell){overflow:hidden;padding:0 4px;text-overflow:ellipsis;white-space:nowrap}.material-sync-table :deep(.el-button){margin-left:0;padding:2px 3px;font-size:11px}
 .material-code-approval-toolbar{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:8px}.material-code-approval-toolbar__actions{display:flex;align-items:center;gap:6px}.material-code-approval-toolbar :deep(.el-button){min-width:76px;height:28px;margin-left:0;font-size:11px}.material-code-approval-toolbar>span{color:#64748b;font-size:11px}
 .material-code-approval-table-shell{width:100%;min-width:0;max-width:100%;overflow:hidden}.material-code-approval-table{width:100%;min-width:0;max-width:100%}.material-code-approval-table :deep(.el-table__inner-wrapper),.material-code-approval-table :deep(.el-scrollbar),.material-code-approval-table :deep(.el-scrollbar__wrap){max-width:100%}.material-code-approval-table :deep(.el-table__cell){padding-left:0;padding-right:0;text-align:center}.material-code-approval-table :deep(.cell){overflow:hidden;padding:0 4px;text-overflow:ellipsis;white-space:nowrap}.material-code-approval-table :deep(.el-button){margin-left:0;padding:2px 3px;font-size:11px}.material-code-approval-table :deep(.el-tag){max-width:100%;padding:0 5px;font-size:11px}
 .material-history-pagination{justify-content:flex-end;margin-top:8px}.material-history-pagination :deep(.el-pagination__total),.material-history-pagination :deep(.el-select__selected-item),.material-history-pagination :deep(button),.material-history-pagination :deep(.number){font-size:11px}
+.material-workflow-pagination{justify-content:flex-end;margin-top:8px}.material-workflow-pagination :deep(.el-pagination__total),.material-workflow-pagination :deep(button),.material-workflow-pagination :deep(.number){font-size:11px}
 .material-editor-grid{grid-template-columns:repeat(3,minmax(0,200px));gap:0 12px}.material-editor-grid :deep(.el-form-item){margin-bottom:10px}.material-editor-grid__wide{grid-column:span 2}.material-weight-input{display:flex;min-width:0}.material-weight-input :deep(.el-input-number){min-width:0;flex:1}.material-recommend-button{width:100%}.material-attachment-field{display:flex;min-width:0;width:100%;align-items:center;flex-wrap:wrap;gap:4px}.material-attachment-input{display:none}.material-attachment-field>.el-button{width:100%;margin-left:0}.material-upload-progress{color:#64748b;font-size:10px}.material-attachment-list{display:flex;max-height:44px;min-width:0;width:100%;overflow:auto;align-items:flex-start;flex-direction:column}.material-attachment-list :deep(.el-button){display:block;max-width:100%;height:20px;margin-left:0;overflow:hidden;padding:0;text-overflow:ellipsis;white-space:nowrap}
 @media(max-width:1000px){.material-master-layout{grid-template-columns:1fr}.material-master-layout.is-category-collapsed{grid-template-columns:34px minmax(0,1fr)}.material-category-nav{max-height:220px}}
 @media(max-width:1100px){.material-code-workflow-columns{grid-template-columns:1fr}}

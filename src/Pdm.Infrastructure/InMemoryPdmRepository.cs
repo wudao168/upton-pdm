@@ -1201,6 +1201,31 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
         }
     }
 
+    public Task<BomItem> UpdateBomReconciliationAsync(
+        Guid projectId,
+        Guid itemId,
+        string? status,
+        string? note,
+        string? updatedBy,
+        DateTimeOffset? updatedAt,
+        CancellationToken cancellationToken)
+    {
+        lock (gate)
+        {
+            var index = bomItems.FindIndex(item => item.ProjectId == projectId && item.Id == itemId);
+            if (index < 0) throw new PdmNotFoundException("BOM物料不存在。");
+            var saved = bomItems[index] with
+            {
+                ReconciliationStatus = status,
+                ReconciliationNote = note,
+                ReconciliationUpdatedBy = updatedBy,
+                ReconciliationUpdatedAt = updatedAt
+            };
+            bomItems[index] = saved;
+            return Task.FromResult(saved);
+        }
+    }
+
     public Task<CadPropertyWriteback> EnqueueCadPropertyWritebackAsync(CadPropertyWriteback request, CancellationToken cancellationToken)
     {
         lock (gate)
@@ -1896,6 +1921,31 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
                     }
                 }
             }
+            return Task.FromResult(updated);
+        }
+    }
+
+    public Task<ReleasePackage> TransferApprovalAsync(Guid taskId, string expectedAssignee, string targetUsername, CancellationToken cancellationToken)
+    {
+        lock (gate)
+        {
+            var package = packages.Values.FirstOrDefault(candidate => candidate.ApprovalTasks.Any(task => task.Id == taskId))
+                ?? throw new PdmNotFoundException("审批任务不存在。 ");
+            var task = package.ApprovalTasks.Single(item => item.Id == taskId);
+            var currentTask = package.ApprovalTasks.OrderBy(item => item.StepOrder).FirstOrDefault(item => item.Decision is null);
+            if (task.Decision is not null || currentTask?.Id != taskId || package.State is not (ReleasePackageState.ProcessReview or ReleasePackageState.Approval))
+                throw new PdmConflictException("当前发布包尚未到达该审批节点。 ");
+            if (!string.Equals(task.Assignee, expectedAssignee, StringComparison.OrdinalIgnoreCase)
+                && !string.Equals(expectedAssignee, "admin", StringComparison.OrdinalIgnoreCase))
+                throw new PdmConflictException("审批任务已转交给其他用户，请刷新后重试。 ");
+
+            var updated = package with
+            {
+                ApprovalTasks = package.ApprovalTasks.Select(item => item.Id == taskId
+                    ? item with { Assignee = targetUsername }
+                    : item).ToArray()
+            };
+            packages[package.Id] = updated;
             return Task.FromResult(updated);
         }
     }

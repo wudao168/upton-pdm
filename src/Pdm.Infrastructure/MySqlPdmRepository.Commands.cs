@@ -533,6 +533,38 @@ public sealed partial class MySqlPdmRepository
         return package;
     }
 
+    public async Task<ReleasePackage> TransferApprovalAsync(Guid taskId, string expectedAssignee, string targetUsername, CancellationToken cancellationToken)
+    {
+        await using var connection = await OpenAsync(cancellationToken);
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+        var row = await connection.QuerySingleOrDefaultAsync<ApprovalDecisionRow>(new CommandDefinition(
+            """
+            SELECT t.id, t.release_package_id, t.stage, t.step_order, t.assignee, t.decision_value, p.state AS package_state, p.locks_documents
+            FROM approval_task t
+            INNER JOIN release_package p ON p.id = t.release_package_id
+            WHERE t.id = @TaskId
+            FOR UPDATE
+            """,
+            new { TaskId = taskId }, transaction, cancellationToken: cancellationToken))
+            ?? throw new PdmNotFoundException("审批任务不存在。 ");
+        var currentTaskId = await connection.QuerySingleOrDefaultAsync<Guid?>(new CommandDefinition(
+            "SELECT id FROM approval_task WHERE release_package_id=@PackageId AND decision_value IS NULL ORDER BY step_order LIMIT 1",
+            new { PackageId = row.ReleasePackageId }, transaction, cancellationToken: cancellationToken));
+        if (row.DecisionValue is not null || currentTaskId != taskId || row.PackageState is not ("ProcessReview" or "Approval"))
+            throw new PdmConflictException("当前发布包尚未到达该审批节点。 ");
+        if (!string.Equals(row.Assignee, expectedAssignee, StringComparison.OrdinalIgnoreCase)
+            && !string.Equals(expectedAssignee, "admin", StringComparison.OrdinalIgnoreCase))
+            throw new PdmConflictException("审批任务已转交给其他用户，请刷新后重试。 ");
+
+        await connection.ExecuteAsync(new CommandDefinition(
+            "UPDATE approval_task SET assignee=@TargetUsername WHERE id=@TaskId",
+            new { TaskId = taskId, TargetUsername = targetUsername }, transaction, cancellationToken: cancellationToken));
+        var package = await FindReleasePackageAsync(connection, transaction, row.ReleasePackageId, cancellationToken)
+            ?? throw new PdmNotFoundException("发布包不存在。 ");
+        await transaction.CommitAsync(cancellationToken);
+        return package;
+    }
+
     public async Task<PdmDocument> ObsoleteDocumentAsync(Guid documentId, string actor, CancellationToken cancellationToken)
     {
         await using var connection = await OpenAsync(cancellationToken);

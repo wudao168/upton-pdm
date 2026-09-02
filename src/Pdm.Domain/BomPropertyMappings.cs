@@ -34,6 +34,7 @@ public static class BomPropertyMappingCatalog
         new("brand", "品牌", SolidWorksSource, true, settings => settings.BomBrandProperty),
         new("material", "材质", SolidWorksSource, true, settings => settings.BomMaterialProperty),
         new("surfaceTreatment", "表面处理", SolidWorksSource, true, settings => settings.BomSurfaceTreatmentProperty),
+        new("heatTreatment", "热处理", SolidWorksSource, true, _ => "热处理"),
         new("weight", "重量", SolidWorksSource, true, settings => settings.BomWeightProperty),
         new("quantity", "数量", AssemblySource, false, _ => string.Empty),
         new("revision", "版本", PdmSource, false, _ => string.Empty)

@@ -445,6 +445,8 @@ public sealed record BomItem(
 
     public string? SurfaceTreatment { get; init; }
 
+    public string? HeatTreatment { get; init; }
+
     public string? Weight { get; init; }
 
     public Guid? SourceDocumentId { get; init; }

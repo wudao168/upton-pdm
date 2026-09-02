@@ -157,14 +157,15 @@
 .pdm-panel-heading h2 { margin: 0; font-size: 13px; font-weight: 500; }
 .pdm-tree-panel { min-width: 0; min-height: 0; height: 100%; display: flex; flex-direction: column; overflow: hidden; padding: 11px; }
 .pdm-plain-button { color: var(--pdm-muted); }
-.pdm-tree-heading { position: relative; }
-.pdm-tree-refresh { display: inline-flex; align-items: center; color: var(--pdm-muted); }
-.pdm-tree-refresh .pdm-plain-button:disabled { cursor: wait; opacity: .75; }
-.pdm-tree-refresh-progress { position: absolute; right: 0; bottom: 0; left: 0; height: 2px; overflow: hidden; border-radius: 999px; background: var(--pdm-theme-accent-soft-strong); }
-.pdm-tree-refresh-progress::after { width: 34%; height: 100%; display: block; border-radius: inherit; background: var(--pdm-primary); content: ''; animation: pdm-tree-refresh-progress 1s ease-in-out infinite; }
-@keyframes pdm-tree-refresh-progress { from { transform: translateX(-110%); } to { transform: translateX(325%); } }
-@media (prefers-reduced-motion: reduce) { .pdm-tree-refresh-progress::after { animation-duration: 2s; } }
-.pdm-tree-search { display: flex; align-items: center; gap: 6px; margin: 8px 0; padding: 0 8px; border: 1px solid var(--pdm-border); border-radius: 6px; background: var(--pdm-surface-muted); color: var(--pdm-muted); }
+.pdm-tree-search-row { display: grid; grid-template-columns: minmax(0, 1fr) 31px; align-items: center; gap: 6px; margin: 0 0 8px; }
+.pdm-tree-refresh { display: inline-flex; align-items: center; color: var(--pdm-primary); }
+.pdm-tree-refresh-button { width: 31px; height: 31px; display: inline-flex; align-items: center; justify-content: center; border: 1px solid var(--pdm-theme-accent-border); border-radius: 7px; background: var(--pdm-theme-accent-soft); color: var(--pdm-primary); cursor: pointer; transition: border-color .15s ease, background .15s ease, color .15s ease; }
+.pdm-tree-refresh-button:hover:not(:disabled) { border-color: var(--pdm-primary); background: var(--pdm-theme-accent-soft-strong); }
+.pdm-tree-refresh-button:disabled { cursor: wait; opacity: .78; }
+.pdm-tree-refresh-icon.is-spinning { animation: pdm-tree-refresh-spin .8s linear infinite; }
+@keyframes pdm-tree-refresh-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .pdm-tree-refresh-icon.is-spinning { animation-duration: 1.6s; } }
+.pdm-tree-search { display: flex; align-items: center; gap: 6px; margin: 0; padding: 0 8px; border: 1px solid var(--pdm-border); border-radius: 6px; background: var(--pdm-surface-muted); color: var(--pdm-muted); }
 .pdm-tree-search input { width: 100%; min-width: 0; height: 31px; padding: 0; border: 0; outline: 0; background: transparent; color: var(--pdm-text); font-size: 11px; }
 .pdm-document-filters { display: flex; align-items: stretch; gap: 3px; }
 .pdm-document-filters button { min-width: 0; display: inline-flex; flex: 1 1 0; align-items: center; justify-content: center; gap: 3px; padding: 5px 4px; border: 1px solid transparent; border-radius: 5px; background: transparent; color: var(--pdm-muted); font-size: 10px; white-space: nowrap; cursor: pointer; }

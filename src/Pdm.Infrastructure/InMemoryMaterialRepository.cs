@@ -17,6 +17,8 @@ public sealed class InMemoryMaterialRepository : IMaterialRepository
     private readonly ConcurrentDictionary<MaterialKind, MaterialCategoryRule> rules = new();
     private readonly ConcurrentDictionary<string, MaterialCategory> categories = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, long> materialCodeCounters = new(StringComparer.OrdinalIgnoreCase);
+    private long materialCodeStartSequence = 1_000_000;
+    private IReadOnlyList<MaterialDuplicateRule> materialDuplicateRules = [];
     private U9MaterialFullSyncRun? latestFullSyncRun;
     private U9MaterialIntegrationConfiguration configuration = new(
         "http://10.7.7.188/U9", "01", "7", "pdm", "PDM", string.Empty,
@@ -61,6 +63,43 @@ public sealed class InMemoryMaterialRepository : IMaterialRepository
             })
             .ToArray();
         return Task.FromResult<IReadOnlyList<PdmMaterial>>(result);
+    }
+
+    public Task<MaterialPage> ListMaterialPageAsync(
+        string? query,
+        string? categoryCode,
+        string? brand,
+        bool includeArchived,
+        int page,
+        int pageSize,
+        CancellationToken cancellationToken)
+    {
+        var normalizedQuery = query?.Trim();
+        var normalizedCategory = categoryCode?.Trim();
+        var normalizedBrand = brand?.Trim();
+        var filtered = materials.Values
+            .Where(item => includeArchived || !item.IsArchived)
+            .Where(item => string.IsNullOrWhiteSpace(normalizedCategory)
+                || (item.CategoryCode?.StartsWith(normalizedCategory, StringComparison.OrdinalIgnoreCase) ?? false))
+            .Where(item => string.IsNullOrWhiteSpace(normalizedBrand)
+                || string.Equals(item.Brand, normalizedBrand, StringComparison.OrdinalIgnoreCase))
+            .Where(item => string.IsNullOrWhiteSpace(normalizedQuery) || new[]
+            {
+                item.MaterialCode, item.Name, item.Specification, item.Material, item.Brand,
+                item.CategoryCode, item.U9CategoryCode, item.SurfaceTreatment, item.PurchaseLink, item.Remark
+            }.Any(value => value?.Contains(normalizedQuery, StringComparison.OrdinalIgnoreCase) == true))
+            .OrderByDescending(item => item.IsRecommended)
+            .ThenByDescending(item => (item.SourceBomItemId is null ? 0 : 1) + bomLinks.Values.Count(value => value == item.Id))
+            .ThenBy(item => item.MaterialCode, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+        var normalizedPageSize = Math.Clamp(pageSize, 1, 200);
+        var normalizedPage = Math.Max(page, 1);
+        var items = filtered
+            .Skip((normalizedPage - 1) * normalizedPageSize)
+            .Take(normalizedPageSize)
+            .Select(WithCounts)
+            .ToArray();
+        return Task.FromResult(new MaterialPage(items, filtered.Length, normalizedPage, normalizedPageSize));
     }
 
     public Task<PdmMaterial?> FindMaterialAsync(Guid materialId, CancellationToken cancellationToken) =>
@@ -214,6 +253,34 @@ public sealed class InMemoryMaterialRepository : IMaterialRepository
         }
     }
 
+    public Task<long> GetMaterialCodeStartSequenceAsync(CancellationToken cancellationToken)
+    {
+        lock (gate) return Task.FromResult(materialCodeStartSequence);
+    }
+
+    public Task<long> SaveMaterialCodeStartSequenceAsync(long startSequence, DateTimeOffset updatedAt, CancellationToken cancellationToken)
+    {
+        lock (gate)
+        {
+            materialCodeStartSequence = startSequence;
+            return Task.FromResult(materialCodeStartSequence);
+        }
+    }
+
+    public Task<IReadOnlyList<MaterialDuplicateRule>> GetMaterialDuplicateRulesAsync(CancellationToken cancellationToken)
+    {
+        lock (gate) return Task.FromResult(materialDuplicateRules);
+    }
+
+    public Task<IReadOnlyList<MaterialDuplicateRule>> SaveMaterialDuplicateRulesAsync(IReadOnlyList<MaterialDuplicateRule> rules, DateTimeOffset updatedAt, CancellationToken cancellationToken)
+    {
+        lock (gate)
+        {
+            materialDuplicateRules = rules.Select(rule => rule with { Fields = rule.Fields.ToArray() }).ToArray();
+            return Task.FromResult(materialDuplicateRules);
+        }
+    }
+
     public Task<PdmMaterial> CreateMaterialAsync(PdmMaterial material, MaterialCategory category, CancellationToken cancellationToken)
     {
         lock (gate)
@@ -246,13 +313,65 @@ public sealed class InMemoryMaterialRepository : IMaterialRepository
                 CreatedBy = existing.CreatedBy,
                 CreatedAt = existing.CreatedAt,
                 RowVersion = existing.RowVersion + 1,
-                IsArchived = existing.IsArchived,
-                ArchivedBy = existing.ArchivedBy,
-                ArchivedAt = existing.ArchivedAt
+                IsArchived = false,
+                ArchivedBy = null,
+                ArchivedAt = null
             };
             materials[existing.Id] = refreshed;
             return Task.FromResult(refreshed);
         }
+    }
+
+    public Task<int> ArchiveMissingU9MaterialsAsync(
+        string categoryCode,
+        DateTimeOffset synchronizedSince,
+        string actor,
+        DateTimeOffset archivedAt,
+        CancellationToken cancellationToken)
+    {
+        lock (gate)
+        {
+            var affected = 0;
+            foreach (var material in materials.Values.Where(item =>
+                         item.MasterOwner == MaterialMasterOwner.U9C
+                         && string.Equals(item.CategoryCode, categoryCode, StringComparison.OrdinalIgnoreCase)
+                         && !item.IsArchived
+                         && (item.LastU9SyncedAt is null || item.LastU9SyncedAt < synchronizedSince)).ToArray())
+            {
+                materials[material.Id] = material with
+                {
+                    IsArchived = true,
+                    ArchivedBy = actor,
+                    ArchivedAt = archivedAt,
+                    UpdatedBy = actor,
+                    UpdatedAt = archivedAt,
+                    RowVersion = material.RowVersion + 1
+                };
+                affected++;
+            }
+            return Task.FromResult(affected);
+        }
+    }
+
+    public Task MarkU9MaterialsObservedAsync(
+        string categoryCode,
+        IReadOnlyCollection<string> materialCodes,
+        DateTimeOffset observedAt,
+        CancellationToken cancellationToken)
+    {
+        if (materialCodes.Count == 0) return Task.CompletedTask;
+        var observedCodes = materialCodes.ToHashSet(StringComparer.OrdinalIgnoreCase);
+        lock (gate)
+        {
+            foreach (var material in materials.Values.Where(item =>
+                         item.MasterOwner == MaterialMasterOwner.U9C
+                         && string.Equals(item.CategoryCode, categoryCode, StringComparison.OrdinalIgnoreCase)
+                         && observedCodes.Contains(item.MaterialCode)).ToArray())
+            {
+                materials[material.Id] = material with { LastU9SyncedAt = observedAt };
+            }
+        }
+        return Task.CompletedTask;
     }
 
     public Task<PdmMaterial> UpdateMaterialAsync(PdmMaterial material, long expectedRowVersion, CancellationToken cancellationToken)
@@ -703,7 +822,7 @@ public sealed class InMemoryMaterialRepository : IMaterialRepository
                     && string.Equals(item.MaterialCode, material.MaterialCode, StringComparison.OrdinalIgnoreCase)))
                 throw new PdmConflictException("重新分配的PLM料号已经被占用，请重试。");
             if (!tasks.TryGetValue(previousTask.Id, out var storedTask)
-                || storedTask.Status is not (MaterialSyncStatus.Failed or MaterialSyncStatus.NeedsReview))
+                || storedTask.Status is not (MaterialSyncStatus.PreviewReady or MaterialSyncStatus.Failed or MaterialSyncStatus.NeedsReview))
                 throw new PdmConflictException("原U9C同步任务状态已经变化，不能自动换号。");
 
             materials[material.Id] = material;

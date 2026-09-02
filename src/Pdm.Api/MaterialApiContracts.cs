@@ -57,6 +57,12 @@ public sealed record SaveMaterialCategoryRequest(
 
 public sealed record CalibrateMaterialCategoryCounterRequest(string LastMaterialCode);
 
+public sealed record UpdateMaterialNumberingSettingsRequest(long StartSequence);
+
+public sealed record MaterialDuplicateRuleRequest(string CategoryCode, IReadOnlyList<string> Fields);
+
+public sealed record UpdateMaterialDuplicateRulesRequest(IReadOnlyList<MaterialDuplicateRuleRequest> Rules);
+
 public sealed record U9MaterialSampleRequest(
     IReadOnlyList<string>? CategoryCodes,
     int LimitPerCategory = 10);

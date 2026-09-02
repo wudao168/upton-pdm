@@ -35,6 +35,47 @@ public sealed class MySqlMaterialRepository : IMaterialRepository
         return rows.Select(MapMaterial).ToArray();
     }
 
+    public async Task<MaterialPage> ListMaterialPageAsync(
+        string? query,
+        string? categoryCode,
+        string? brand,
+        bool includeArchived,
+        int page,
+        int pageSize,
+        CancellationToken cancellationToken)
+    {
+        await using var connection = await OpenAsync(cancellationToken);
+        var normalizedQuery = string.IsNullOrWhiteSpace(query) ? null : $"%{query.Trim()}%";
+        var normalizedCategory = string.IsNullOrWhiteSpace(categoryCode) ? null : $"{categoryCode.Trim()}%";
+        var normalizedBrand = string.IsNullOrWhiteSpace(brand) ? null : brand.Trim();
+        var normalizedPageSize = Math.Clamp(pageSize, 1, 200);
+        var normalizedPage = Math.Max(page, 1);
+        const string filters =
+            " WHERE (@IncludeArchived=1 OR is_archived=0)" +
+            " AND (@CategoryCode IS NULL OR category_code LIKE @CategoryCode)" +
+            " AND (@Brand IS NULL OR brand=@Brand)" +
+            " AND (@Query IS NULL OR material_code LIKE @Query OR name LIKE @Query OR specification LIKE @Query OR material LIKE @Query OR brand LIKE @Query OR category_code LIKE @Query OR u9_category_code LIKE @Query OR surface_treatment LIKE @Query OR purchase_link LIKE @Query OR remark LIKE @Query)";
+        var parameters = new
+        {
+            Query = normalizedQuery,
+            CategoryCode = normalizedCategory,
+            Brand = normalizedBrand,
+            IncludeArchived = includeArchived,
+            Offset = (normalizedPage - 1) * normalizedPageSize,
+            PageSize = normalizedPageSize
+        };
+        var total = await connection.ExecuteScalarAsync<int>(new CommandDefinition(
+            "SELECT COUNT(*) FROM material_master" + filters,
+            parameters,
+            cancellationToken: cancellationToken));
+        var rows = await connection.QueryAsync<MaterialRow>(new CommandDefinition(
+            MaterialSelect + filters +
+            " ORDER BY is_recommended DESC,reference_count DESC,material_code LIMIT @PageSize OFFSET @Offset",
+            parameters,
+            cancellationToken: cancellationToken));
+        return new(rows.Select(MapMaterial).ToArray(), total, normalizedPage, normalizedPageSize);
+    }
+
     public async Task<PdmMaterial?> FindMaterialAsync(Guid materialId, CancellationToken cancellationToken)
     {
         await using var connection = await OpenAsync(cancellationToken);
@@ -283,6 +324,60 @@ public sealed class MySqlMaterialRepository : IMaterialRepository
         return $"{category.NumberPrefix}{nextValue.ToString($"D{category.SequenceLength}")}";
     }
 
+    public async Task<long> GetMaterialCodeStartSequenceAsync(CancellationToken cancellationToken)
+    {
+        await using var connection = await OpenAsync(cancellationToken);
+        var value = await connection.QuerySingleOrDefaultAsync<string>(new CommandDefinition(
+            "SELECT setting_value FROM pdm_system_setting WHERE setting_key='material_code_start_sequence'",
+            cancellationToken: cancellationToken));
+        return long.TryParse(value, out var parsed) ? parsed : 1_000_000;
+    }
+
+    public async Task<long> SaveMaterialCodeStartSequenceAsync(long startSequence, DateTimeOffset updatedAt, CancellationToken cancellationToken)
+    {
+        await using var connection = await OpenAsync(cancellationToken);
+        await connection.ExecuteAsync(new CommandDefinition(
+            """
+            INSERT INTO pdm_system_setting(setting_key,setting_value,updated_at)
+            VALUES('material_code_start_sequence',@Value,@UpdatedAt)
+            ON DUPLICATE KEY UPDATE setting_value=VALUES(setting_value),updated_at=VALUES(updated_at)
+            """,
+            new { Value = startSequence.ToString(System.Globalization.CultureInfo.InvariantCulture), UpdatedAt = updatedAt.UtcDateTime },
+            cancellationToken: cancellationToken));
+        return startSequence;
+    }
+
+    public async Task<IReadOnlyList<MaterialDuplicateRule>> GetMaterialDuplicateRulesAsync(CancellationToken cancellationToken)
+    {
+        await using var connection = await OpenAsync(cancellationToken);
+        var value = await connection.QuerySingleOrDefaultAsync<string>(new CommandDefinition(
+            "SELECT setting_value FROM pdm_system_setting WHERE setting_key='material_duplicate_rules'",
+            cancellationToken: cancellationToken));
+        if (string.IsNullOrWhiteSpace(value)) return [];
+        try
+        {
+            return JsonSerializer.Deserialize<MaterialDuplicateRule[]>(value, jsonOptions) ?? [];
+        }
+        catch (JsonException)
+        {
+            return [];
+        }
+    }
+
+    public async Task<IReadOnlyList<MaterialDuplicateRule>> SaveMaterialDuplicateRulesAsync(IReadOnlyList<MaterialDuplicateRule> rules, DateTimeOffset updatedAt, CancellationToken cancellationToken)
+    {
+        await using var connection = await OpenAsync(cancellationToken);
+        await connection.ExecuteAsync(new CommandDefinition(
+            """
+            INSERT INTO pdm_system_setting(setting_key,setting_value,updated_at)
+            VALUES('material_duplicate_rules',@Value,@UpdatedAt)
+            ON DUPLICATE KEY UPDATE setting_value=VALUES(setting_value),updated_at=VALUES(updated_at)
+            """,
+            new { Value = JsonSerializer.Serialize(rules, jsonOptions), UpdatedAt = updatedAt.UtcDateTime },
+            cancellationToken: cancellationToken));
+        return rules;
+    }
+
     public async Task<PdmMaterial> CreateMaterialAsync(PdmMaterial material, MaterialCategory category, CancellationToken cancellationToken)
     {
         if (string.IsNullOrWhiteSpace(material.MaterialCode)) throw new PdmRuleException("物料编码尚未预留。");
@@ -348,10 +443,71 @@ public sealed class MySqlMaterialRepository : IMaterialRepository
                 updated_by=IF(master_owner='U9C',VALUES(updated_by),updated_by),
                 updated_at=IF(master_owner='U9C',VALUES(updated_at),updated_at),
                 row_version=IF(master_owner='U9C',row_version+1,row_version),
-                category_code=IF(master_owner='U9C',VALUES(category_code),category_code)
+                category_code=IF(master_owner='U9C',VALUES(category_code),category_code),
+                is_archived=IF(master_owner='U9C',0,is_archived),
+                archived_by=IF(master_owner='U9C',NULL,archived_by),
+                archived_at=IF(master_owner='U9C',NULL,archived_at)
             """, MaterialParameters(material), cancellationToken: cancellationToken));
         return await FindMaterialByCodeAsync(material.MaterialCode, cancellationToken)
             ?? throw new PdmRuleException("U9C料品导入后未能回读PLM主档。");
+    }
+
+    public async Task<int> ArchiveMissingU9MaterialsAsync(
+        string categoryCode,
+        DateTimeOffset synchronizedSince,
+        string actor,
+        DateTimeOffset archivedAt,
+        CancellationToken cancellationToken)
+    {
+        await using var connection = await OpenAsync(cancellationToken);
+        return await connection.ExecuteAsync(new CommandDefinition(
+            """
+            UPDATE material_master
+            SET is_archived=1,archived_by=@Actor,archived_at=@ArchivedAt,
+                updated_by=@Actor,updated_at=@ArchivedAt,row_version=row_version+1
+            WHERE master_owner='U9C' AND category_code=@CategoryCode AND is_archived=0
+              AND (last_u9_synced_at IS NULL OR last_u9_synced_at<@SynchronizedSince)
+            """,
+            new
+            {
+                CategoryCode = categoryCode,
+                Actor = actor,
+                ArchivedAt = archivedAt.UtcDateTime,
+                SynchronizedSince = synchronizedSince.UtcDateTime
+            },
+            cancellationToken: cancellationToken));
+    }
+
+    public async Task MarkU9MaterialsObservedAsync(
+        string categoryCode,
+        IReadOnlyCollection<string> materialCodes,
+        DateTimeOffset observedAt,
+        CancellationToken cancellationToken)
+    {
+        var normalizedCodes = materialCodes
+            .Where(code => !string.IsNullOrWhiteSpace(code))
+            .Select(code => code.Trim())
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+        if (normalizedCodes.Length == 0) return;
+
+        await using var connection = await OpenAsync(cancellationToken);
+        foreach (var codeBatch in normalizedCodes.Chunk(500))
+        {
+            await connection.ExecuteAsync(new CommandDefinition(
+                """
+                UPDATE material_master
+                SET last_u9_synced_at=@ObservedAt
+                WHERE master_owner='U9C' AND category_code=@CategoryCode AND material_code IN @MaterialCodes
+                """,
+                new
+                {
+                    CategoryCode = categoryCode,
+                    MaterialCodes = codeBatch,
+                    ObservedAt = observedAt.UtcDateTime
+                },
+                cancellationToken: cancellationToken));
+        }
     }
 
     public async Task<PdmMaterial> UpdateMaterialAsync(PdmMaterial material, long expectedRowVersion, CancellationToken cancellationToken)
@@ -1082,7 +1238,7 @@ public sealed class MySqlMaterialRepository : IMaterialRepository
                 """
                 UPDATE u9_material_sync_task
                 SET status='Superseded',next_attempt_at=NULL,last_error=@LastError,updated_at=@OccurredAt
-                WHERE id=@TaskId AND material_id=@MaterialId AND status IN ('Failed','NeedsReview')
+                WHERE id=@TaskId AND material_id=@MaterialId AND status IN ('PreviewReady','Failed','NeedsReview')
                 """, new
                 {
                     TaskId = previousTask.Id,

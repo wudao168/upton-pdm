@@ -20,13 +20,14 @@ function mountTree(refreshing: boolean) {
 }
 
 describe('DocumentTree', () => {
-  it('shows refresh progress and blocks duplicate refresh clicks', async () => {
+  it('rotates the refresh icon and blocks duplicate refresh clicks', async () => {
     const wrapper = mountTree(true)
     const button = wrapper.get('button[aria-label="正在刷新设计树"]')
 
     expect(button.attributes('aria-busy')).toBe('true')
     expect(button.attributes()).toHaveProperty('disabled')
-    expect(wrapper.get('[role="progressbar"][aria-label="正在刷新设计树"]').attributes('aria-valuetext')).toBe('刷新中')
+    expect(button.get('.pdm-tree-refresh-icon').classes()).toContain('is-spinning')
+    expect(wrapper.find('[role="progressbar"]').exists()).toBe(false)
 
     await button.trigger('click')
     expect(wrapper.emitted('refresh')).toBeUndefined()
@@ -34,8 +35,11 @@ describe('DocumentTree', () => {
 
   it('emits one refresh request when idle', async () => {
     const wrapper = mountTree(false)
+    expect(wrapper.text()).not.toContain('导航窗格')
     expect(wrapper.find('[role="progressbar"]').exists()).toBe(false)
-    await wrapper.get('button[aria-label="刷新设计树"]').trigger('click')
+    const button = wrapper.get('.pdm-tree-search-row button[aria-label="刷新设计树"]')
+    expect(button.get('.pdm-tree-refresh-icon').classes()).not.toContain('is-spinning')
+    await button.trigger('click')
     expect(wrapper.emitted('refresh')).toHaveLength(1)
   })
 

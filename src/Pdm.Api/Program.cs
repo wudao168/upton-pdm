@@ -139,6 +139,7 @@ builder.Services.AddScoped<ProjectFileService>();
 builder.Services.AddScoped<BomHeaderService>();
 builder.Services.AddScoped<U9MaterialIntegrationService>();
 builder.Services.AddScoped<U9MaterialFullSyncService>();
+builder.Services.AddSingleton<U9MaterialFullSyncCoordinator>();
 builder.Services.AddScoped<U9BomQueryService>();
 builder.Services.AddScoped<U9BomWriteService>();
 builder.Services.AddScoped<ProjectBomU9SyncService>();

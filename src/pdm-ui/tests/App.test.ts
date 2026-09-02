@@ -51,6 +51,9 @@ function installApiMock(projectsBeforeDefault: Array<Record<string, unknown>> = 
       : json({ accessToken: 'renewed-token', expiresAt: '2099-01-01T00:00:00Z', resumeToken: 'renewed-resume-token', username: 'engineer', displayName: '真实工程师', role: 'Engineer', permissions: engineerPermissions })
     if (url.endsWith('/api/auth/me')) return json({ username: 'admin', displayName: '系统管理员', nickname: null, gender: 'unspecified', landline: null, mobilePhone: null, email: null })
     if (url.endsWith('/api/password-reset-requests')) return json([])
+    if (url.includes('/api/materials/page')) return materialRequestsUnauthorized
+      ? json({ title: 'Unauthorized' }, 401)
+      : json({ items: [], total: 0, page: 1, pageSize: 50 })
     if (url.endsWith('/api/materials')) return materialRequestsUnauthorized ? json({ title: 'Unauthorized' }, 401) : json([])
     if (url.includes('/api/material-code/applications')) return json([])
     if (url.endsWith('/api/material-category-rules')) return json([])
@@ -1259,7 +1262,7 @@ describe('PLM client workspace', () => {
     expect(preview.attributes('data-preview-state')).toBe('unavailable')
     expect(preview.text()).toContain('该历史版本尚未生成STP/PDF预览')
     expect(preview.text()).not.toContain('正在加载 eDrawings')
-    expect(preview.get('[aria-label="图档属性"]').text()).toContain('物料/图号REAL-ASM-001')
+    expect(preview.get('[aria-label="图档属性"]').text()).toContain('料号REAL-ASM-001')
     expect(preview.get('[aria-label="图档属性"]').text()).toContain('名称真实总装配')
 
     await buttonByText(wrapper, '查看并下载版本').trigger('click')
@@ -1273,8 +1276,10 @@ describe('PLM client workspace', () => {
     await flushPromises()
     await new Promise(resolve => window.setTimeout(resolve, 20))
     await flushPromises()
-    expect(wrapper.get('[aria-label="图档属性"]').text()).toContain('规格/型号10mm')
-    expect(wrapper.get('[aria-label="图档属性"]').text()).toContain('材质Q235B')
+    const properties = wrapper.get('[aria-label="图档属性"]')
+    expect(properties.text()).toContain('型号10mm')
+    expect(properties.text()).toContain('材质Q235B')
+    expect(properties.findAll('dt').map(item => item.text())).toEqual(['料号', '名称', '型号', '品牌', '材质', '表面处理', '热处理'])
   })
 
   it('opens only PLM-controlled document identities in SolidWorks from the entity button and tree menu', async () => {

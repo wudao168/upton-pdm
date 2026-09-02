@@ -44,6 +44,19 @@ const currentProjectDocumentCount = computed(() => props.activeDocumentCounts?.a
   ?? 0)
 const sidebarProject = computed(() => props.project)
 const childProjectSelected = computed(() => !!sidebarProject.value.parentProjectId)
+const executionEngineers = computed(() => {
+  const usernames = childProjectSelected.value
+    ? sidebarProject.value.designers
+    : familyProjects.value.flatMap(item => item.designers)
+  const seen = new Set<string>()
+  return usernames.filter(username => {
+    const normalized = username.trim().toLocaleLowerCase()
+    if (!normalized || seen.has(normalized)) return false
+    seen.add(normalized)
+    return true
+  })
+})
+const executionEngineerNames = computed(() => executionEngineers.value.map(item => displayUserName(item)).join('、') || '待分配')
 const visibleTabs = computed(() => tabs.filter(tab => props.project.canReadContent || tab.key === 'overview' || tab.key === 'records'))
 const switchConfirmationPending = ref(false)
 const projectBrowserOpen = ref(false)
@@ -164,6 +177,7 @@ function drawingDocumentCount(project: ProjectSummary) {
           <div><dt>事业部</dt><dd :title="rootProject.executionUnitName">{{ rootProject.executionUnitName || '待分配' }}</dd></div>
           <div><dt>项目经理</dt><dd :title="displayUserName(rootProject.primaryProjectManager, '待分配')">{{ displayUserName(rootProject.primaryProjectManager, '待分配') }}</dd></div>
           <div><dt>主设</dt><dd :title="projectDesignLeads(rootProject).map(item => displayUserName(item)).join('、') || '待分配'">{{ projectDesignLeads(rootProject).map(item => displayUserName(item)).join('、') || '待分配' }}</dd></div>
+          <div><dt>工程师</dt><dd :title="executionEngineerNames">{{ executionEngineerNames }}</dd></div>
         </dl>
       </section>
 

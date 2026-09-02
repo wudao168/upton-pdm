@@ -58,6 +58,53 @@ public sealed class Phase1ReleaseWorkflowTests
     }
 
     [Fact]
+    public async Task CurrentApprovalAssignee_CanRejectWithoutApprovalRolePermission()
+    {
+        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(), new RecordingPublisher(), TimeProvider.System);
+        var packageId = Guid.NewGuid();
+        var task = new ApprovalTask(Guid.NewGuid(), packageId, ApprovalStage.MainDesigner, "designer", null, null, null, null)
+        {
+            StepOrder = 1,
+            StepName = "主设审核"
+        };
+        await repository.CreateReleasePackageAsync(new ReleasePackage(
+            packageId, ProjectId, "RP-ASSIGNEE", ReleasePackageState.ProcessReview, Guid.NewGuid(), "W1", "W1",
+            [task], DateTimeOffset.UtcNow, null, null), default);
+
+        var rejected = await workflow.DecideAsync(task.Id, "designer", UserRole.Engineer, ApprovalDecision.Rejected, "退回修改", default);
+
+        Assert.Equal(ReleasePackageState.Rejected, rejected.State);
+        Assert.Equal(ApprovalDecision.Rejected, Assert.Single(rejected.ApprovalTasks).Decision);
+    }
+
+    [Fact]
+    public async Task CurrentApprovalAssignee_CanTransferToEligibleProjectApprover()
+    {
+        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(), new RecordingPublisher(), TimeProvider.System);
+        await repository.CreateUserAsync(new UserAccount(
+            Guid.NewGuid(), "transfer-approver", "转交审批人", "unused", UserRole.Approver, true), default);
+        var packageId = Guid.NewGuid();
+        var task = new ApprovalTask(Guid.NewGuid(), packageId, ApprovalStage.MainDesigner, "designer", null, null, null, null)
+        {
+            StepOrder = 1,
+            StepName = "主设审核"
+        };
+        await repository.CreateReleasePackageAsync(new ReleasePackage(
+            packageId, ProjectId, "RP-TRANSFER", ReleasePackageState.ProcessReview, Guid.NewGuid(), "W1", "W1",
+            [task], DateTimeOffset.UtcNow, null, null), default);
+
+        var candidates = await workflow.ListApprovalTransferCandidatesAsync(task.Id, "designer", default);
+        var transferred = await workflow.TransferApprovalAsync(task.Id, "designer", "transfer-approver", "工作调整", default);
+
+        Assert.Contains(candidates, candidate => candidate.Username == "transfer-approver" && candidate.DisplayName == "转交审批人");
+        Assert.Equal("transfer-approver", Assert.Single(transferred.ApprovalTasks).Assignee);
+        await Assert.ThrowsAsync<PdmConflictException>(() =>
+            repository.TransferApprovalAsync(task.Id, "designer", "another-approver", default));
+    }
+
+    [Fact]
     public async Task ReleasePackage_RejectsUnclassifiedSourceItems()
     {
         var repository = new InMemoryPdmRepository(TimeProvider.System);
@@ -76,6 +123,35 @@ public sealed class Phase1ReleaseWorkflowTests
             ProjectId, null, $"RP-PENDING-{Guid.NewGuid():N}", "admin", "admin", "admin", UserRole.Administrator, default));
 
         Assert.Contains("待分类", exception.Message);
+    }
+
+    [Fact]
+    public async Task ReleasePackage_AllowsDrawingSourceMismatchAndPendingWritebackAsReminder()
+    {
+        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(), new RecordingPublisher(), TimeProvider.System);
+        foreach (var document in await repository.ListCheckedOutDocumentsAsync(default))
+            await repository.ForceReleaseCheckoutAsync(document.Id, "admin", "测试准备", default);
+        await PrepareApprovedNonStandardDrawingReviewAsync(repository, workflow);
+        var nonStandard = await repository.GetBomAsync(ProjectId, BomKind.NonStandard, default);
+        Assert.NotEmpty(nonStandard);
+        await repository.ReplaceBomAsync(ProjectId, BomKind.NonStandard, nonStandard.Select(item => item with
+        {
+            ReconciliationStatus = "ManualOverrideMismatch",
+            ReconciliationNote = "BOM维护值与最新图档源数据不一致：型号。",
+            PropertyWritebackStatus = CadPropertyWritebackStatus.Pending
+        }).ToArray(), default);
+        await workflow.ReplaceBomAsync(ProjectId, BomKind.Electrical,
+            [new BomItemInput(1, "EL-REMINDER", "提醒不阻断测试", 1, "件", null, "M18", "A", true)],
+            "admin", UserRole.Administrator, default);
+
+        var package = await workflow.CreateReleasePackageAsync(
+            ProjectId, null, $"RP-REMINDER-{Guid.NewGuid():N}", "admin", "admin", "admin", UserRole.Administrator, default);
+
+        Assert.Equal(ReleasePackageState.Draft, package.State);
+        Assert.Contains(package.NonStandardBomSnapshot, item =>
+            item.ReconciliationStatus == "ManualOverrideMismatch"
+            && item.PropertyWritebackStatus == CadPropertyWritebackStatus.Pending);
     }
 
     [Fact]
@@ -567,7 +643,7 @@ public sealed class Phase1ReleaseWorkflowTests
     }
 
     [Fact]
-    public async Task MaintainedBomDifference_DoesNotChangeRawSourceAndIsReportedByReconciliationStatus()
+    public async Task NonStandardReconciliation_IgnoresNameAndReportsMaterialDifference()
     {
         var repository = new InMemoryPdmRepository(TimeProvider.System);
         var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(), new RecordingPublisher(), TimeProvider.System);
@@ -588,8 +664,168 @@ public sealed class Phase1ReleaseWorkflowTests
 
         Assert.Equal(maintainedName, updated.Name);
         Assert.NotEqual(maintainedName, raw.Name);
+        Assert.Equal("SourceMatched", updated.ReconciliationStatus);
+        Assert.DoesNotContain("物料分类", updated.ReconciliationNote);
+        Assert.DoesNotContain("物料名称", updated.ReconciliationNote);
+
+        var materialUpdated = Assert.Single(await workflow.BatchUpdateBomItemsAsync(
+            ProjectId,
+            new BatchUpdateBomItemsCommand([sourceItem.Id], ["material"], Material: "6061"),
+            "admin", UserRole.Administrator, default));
+
+        Assert.Equal("SourceMatched", materialUpdated.ReconciliationStatus);
+        Assert.DoesNotContain("材质", materialUpdated.ReconciliationNote);
+    }
+
+    [Fact]
+    public async Task ApplyingMaterialCode_IgnoresSourceCodeAndBlankSourceModelAndBrand()
+    {
+        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(), new RecordingPublisher(), TimeProvider.System);
+        var initial = await workflow.GenerateMechanicalBomAsync(ProjectId, true, "admin", UserRole.Administrator, default);
+        var pending = initial.UnclassifiedItems.First(item => item.SourceDocumentId.HasValue);
+        var sourceDocument = await repository.FindDocumentAsync(pending.SourceDocumentId!.Value, default) ?? throw new InvalidOperationException();
+        if (!string.IsNullOrWhiteSpace(sourceDocument.CheckedOutBy))
+            await repository.ForceReleaseCheckoutAsync(sourceDocument.Id, "admin", "测试准备", default);
+        await repository.CheckoutAsync(sourceDocument.Id, "admin", default);
+        var snapshot = await repository.GetLatestReferenceSnapshotAsync(ProjectId, default) ?? throw new InvalidOperationException();
+        var properties = new Dictionary<string, string?>
+        {
+            [CadPropertyCardSnapshot.ScopePrefix + "物料分类"] = "Global",
+            [CadPropertyCardSnapshot.ScopePrefix + "物料编码"] = "Global",
+            ["全局/物料分类"] = "标准件",
+            ["全局/物料编码"] = "01020014733"
+        };
+        await repository.CheckInVersionAsync(sourceDocument.Id, "admin", new DocumentVersionCommit(
+            new StoredFile("versions/material-code.sldprt", 10, new string('B', 64), DateTimeOffset.UtcNow),
+            "料号对账测试", properties, snapshot, [], [], ForceVersion: true), default);
+        var generated = await workflow.GenerateMechanicalBomAsync(ProjectId, true, "admin", UserRole.Administrator, default);
+        var sourceItem = generated.StandardItems.First(item => item.SourceDocumentId == sourceDocument.Id);
+        var stale = sourceItem with
+        {
+            Specification = sourceItem.Specification + "-人工修改",
+            ReconciliationStatus = "ManualOverrideMismatch",
+            ReconciliationNote = "BOM维护值与最新图档源数据不一致：物料编码。"
+        };
+        await repository.ReplaceBomAsync(
+            ProjectId,
+            BomKind.Standard,
+            generated.StandardItems.Select(item => item.Id == stale.Id ? stale : item).ToArray(),
+            default);
+
+        var updated = await workflow.ApplyMaterialCodeToBomAsync(
+            ProjectId, stale.Id, "01020014734", "admin", default);
+
+        Assert.Equal("SourceMatched", updated.ReconciliationStatus);
+        Assert.DoesNotContain("物料编码", updated.ReconciliationNote);
+        Assert.DoesNotContain("型号", updated.ReconciliationNote);
+        Assert.DoesNotContain("品牌", updated.ReconciliationNote);
+    }
+
+    [Fact]
+    public async Task ApplyingMaterialCode_ReportsOnlyNonBlankSourceModelAndBrandDifferences()
+    {
+        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(), new RecordingPublisher(), TimeProvider.System);
+        var initial = await workflow.GenerateMechanicalBomAsync(ProjectId, true, "admin", UserRole.Administrator, default);
+        var pending = initial.UnclassifiedItems.First(item => item.SourceDocumentId.HasValue);
+        var sourceDocument = await repository.FindDocumentAsync(pending.SourceDocumentId!.Value, default) ?? throw new InvalidOperationException();
+        if (!string.IsNullOrWhiteSpace(sourceDocument.CheckedOutBy))
+            await repository.ForceReleaseCheckoutAsync(sourceDocument.Id, "admin", "测试准备", default);
+        await repository.CheckoutAsync(sourceDocument.Id, "admin", default);
+        var snapshot = await repository.GetLatestReferenceSnapshotAsync(ProjectId, default) ?? throw new InvalidOperationException();
+        await repository.CheckInVersionAsync(sourceDocument.Id, "admin", new DocumentVersionCommit(
+            new StoredFile("versions/source-model-brand.sldprt", 10, new string('E', 64), DateTimeOffset.UtcNow),
+            "源数据型号品牌对账测试", StandardMaterialProperties("SOURCE-CODE", "SHF20", "美亚特"), snapshot, [], [], ForceVersion: true), default);
+        var generated = await workflow.GenerateMechanicalBomAsync(ProjectId, true, "admin", UserRole.Administrator, default);
+        var sourceItem = generated.StandardItems.First(item => item.SourceDocumentId == sourceDocument.Id);
+        var maintained = sourceItem with
+        {
+            DrawingNumber = "BOM-CODE",
+            Specification = "OTHER-MODEL",
+            Brand = "其他品牌"
+        };
+        await repository.ReplaceBomAsync(
+            ProjectId,
+            BomKind.Standard,
+            generated.StandardItems.Select(item => item.Id == maintained.Id ? maintained : item).ToArray(),
+            default);
+
+        var updated = await workflow.ApplyMaterialCodeToBomAsync(
+            ProjectId, maintained.Id, "BOM-CODE", "admin", default);
+
         Assert.Equal("ManualOverrideMismatch", updated.ReconciliationStatus);
-        Assert.Contains("物料名称", updated.ReconciliationNote);
+        Assert.Contains("型号", updated.ReconciliationNote);
+        Assert.Contains("品牌", updated.ReconciliationNote);
+        Assert.DoesNotContain("物料编码", updated.ReconciliationNote);
+    }
+
+    [Fact]
+    public async Task ApplyingMaterialCode_ClearsStaleMismatch_WhenCodeModelAndBrandMatchApprovedMaster()
+    {
+        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var materials = new InMemoryMaterialRepository(TimeProvider.System);
+        var workflow = new PdmWorkflowService(
+            repository, new UnusedFileStorage(), new RecordingPublisher(), TimeProvider.System,
+            materialRepository: materials);
+        var initial = await workflow.GenerateMechanicalBomAsync(ProjectId, true, "admin", UserRole.Administrator, default);
+        var pending = initial.UnclassifiedItems.First(item => item.SourceDocumentId.HasValue);
+        var sourceDocument = await repository.FindDocumentAsync(pending.SourceDocumentId!.Value, default) ?? throw new InvalidOperationException();
+        if (!string.IsNullOrWhiteSpace(sourceDocument.CheckedOutBy))
+            await repository.ForceReleaseCheckoutAsync(sourceDocument.Id, "admin", "测试准备", default);
+        await repository.CheckoutAsync(sourceDocument.Id, "admin", default);
+        var snapshot = await repository.GetLatestReferenceSnapshotAsync(ProjectId, default) ?? throw new InvalidOperationException();
+        var properties = StandardMaterialProperties("01020014733", "SHF20", "美亚特");
+        await repository.CheckInVersionAsync(sourceDocument.Id, "admin", new DocumentVersionCommit(
+            new StoredFile("versions/material-identity.sldprt", 10, new string('C', 64), DateTimeOffset.UtcNow),
+            "料号一一对应测试", properties, snapshot, [], [], ForceVersion: true), default);
+        await AddApprovedStandardMaterialAsync(materials, "01020014733", "SHF20", "美亚特");
+        var generated = await workflow.GenerateMechanicalBomAsync(ProjectId, true, "admin", UserRole.Administrator, default);
+        var sourceItem = generated.StandardItems.First(item => item.SourceDocumentId == sourceDocument.Id);
+        var stale = sourceItem with
+        {
+            ReconciliationStatus = "ManualOverrideMismatch",
+            ReconciliationNote = "BOM维护值与最新图档源数据不一致：物料编码。"
+        };
+        await repository.ReplaceBomAsync(
+            ProjectId,
+            BomKind.Standard,
+            generated.StandardItems.Select(item => item.Id == stale.Id ? stale : item).ToArray(),
+            default);
+
+        var updated = await workflow.ApplyMaterialCodeToBomAsync(
+            ProjectId, stale.Id, "01020014733", "admin", default);
+
+        Assert.Equal("SourceMatched", updated.ReconciliationStatus);
+        Assert.DoesNotContain("不一致", updated.ReconciliationNote);
+    }
+
+    [Fact]
+    public async Task MechanicalBomReconcile_ReportsCanonicalBrandMismatch_WhenApprovedMasterDoesNotMatch()
+    {
+        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var materials = new InMemoryMaterialRepository(TimeProvider.System);
+        var workflow = new PdmWorkflowService(
+            repository, new UnusedFileStorage(), new RecordingPublisher(), TimeProvider.System,
+            materialRepository: materials);
+        var initial = await workflow.GenerateMechanicalBomAsync(ProjectId, true, "admin", UserRole.Administrator, default);
+        var pending = initial.UnclassifiedItems.First(item => item.SourceDocumentId.HasValue);
+        var sourceDocument = await repository.FindDocumentAsync(pending.SourceDocumentId!.Value, default) ?? throw new InvalidOperationException();
+        if (!string.IsNullOrWhiteSpace(sourceDocument.CheckedOutBy))
+            await repository.ForceReleaseCheckoutAsync(sourceDocument.Id, "admin", "测试准备", default);
+        await repository.CheckoutAsync(sourceDocument.Id, "admin", default);
+        var snapshot = await repository.GetLatestReferenceSnapshotAsync(ProjectId, default) ?? throw new InvalidOperationException();
+        await repository.CheckInVersionAsync(sourceDocument.Id, "admin", new DocumentVersionCommit(
+            new StoredFile("versions/material-brand-mismatch.sldprt", 10, new string('D', 64), DateTimeOffset.UtcNow),
+            "品牌对账测试", StandardMaterialProperties("01020014733", "SHF20", "美亚特"), snapshot, [], [], ForceVersion: true), default);
+        await AddApprovedStandardMaterialAsync(materials, "01020014733", "SHF20", "其他品牌");
+
+        var generated = await workflow.GenerateMechanicalBomAsync(ProjectId, true, "admin", UserRole.Administrator, default);
+        var item = generated.StandardItems.First(candidate => candidate.SourceDocumentId == sourceDocument.Id);
+
+        Assert.Equal("ManualOverrideMismatch", item.ReconciliationStatus);
+        Assert.Contains("品牌", item.ReconciliationNote);
+        Assert.DoesNotContain("品牌与料品主档不一致", item.ReconciliationNote);
     }
 
     [Fact]
@@ -703,7 +939,7 @@ public sealed class Phase1ReleaseWorkflowTests
         var previewItem = Assert.Single(preview.Items);
         Assert.Equal(BomKind.Unclassified, previewItem.CurrentKind);
         Assert.Equal(BomKind.Standard, previewItem.TargetKind);
-        Assert.Contains("物料名称", previewItem.ChangedFields);
+        Assert.DoesNotContain("物料名称", previewItem.ChangedFields);
 
         var updated = Assert.Single(await workflow.ReclassifyBomItemsFromSourceAsync(
             ProjectId, command, "admin", UserRole.Administrator, default));
@@ -967,11 +1203,13 @@ public sealed class Phase1ReleaseWorkflowTests
         await workflow.ReplaceBomAsync(ProjectId, BomKind.Standard,
         [
             new BomItemInput(1, "STD-LL-001", "长交期件A", 1, "个", null, "M1", "W1", true),
-            new BomItemInput(2, "STD-LL-002", "长交期件B", 1, "个", null, "M2", "W1", true)
+            new BomItemInput(2, "STD-LL-002", "长交期件B", 1, "个", null, "M2", "W1", true),
+            new BomItemInput(3, "STD-LL-001", "长交期件A另一实例", 2, "个", null, "M1", "W1", true)
         ], "admin", UserRole.Administrator, default);
         var standard = await repository.GetBomAsync(ProjectId, BomKind.Standard, default);
         var firstItem = standard[0].Id;
         var secondItem = standard[1].Id;
+        var sameMaterialInstance = standard[2].Id;
 
         var first = await workflow.CreateScopedReleasePackageAsync(
             ProjectId, null, $"RP-LONGLEAD-A-{Guid.NewGuid():N}", "LL-A", "第一批长交期件", "未指定", null,
@@ -983,10 +1221,58 @@ public sealed class Phase1ReleaseWorkflowTests
         Assert.Contains(first.Number, conflict.Message);
         Assert.Contains("不能同时进入", conflict.Message);
 
+        var sameMaterialConflict = await Assert.ThrowsAsync<PdmConflictException>(() => workflow.CreateScopedReleasePackageAsync(
+            ProjectId, null, $"RP-LONGLEAD-SAME-{Guid.NewGuid():N}", "LL-SAME", "同料号另一实例", "未指定", null,
+            ReleaseScope.StandardLongLead, [sameMaterialInstance], "admin", UserRole.Administrator, default));
+        Assert.Contains(first.Number, sameMaterialConflict.Message);
+
         var disjoint = await workflow.CreateScopedReleasePackageAsync(
             ProjectId, null, $"RP-LONGLEAD-C-{Guid.NewGuid():N}", "LL-C", "另一批长交期件", "未指定", null,
             ReleaseScope.StandardLongLead, [secondItem], "admin", UserRole.Administrator, default);
         Assert.Equal(new[] { secondItem }, disjoint.SelectedBomItemIds);
+    }
+
+    [Fact]
+    public async Task LongLeadStandardRelease_AllowsNewMaterialAfterFormalPublicationButRejectsPublishedMaterial()
+    {
+        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        await ConfigureApprovalWorkflowsAsync(repository);
+        var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(), new RecordingPublisher(), TimeProvider.System);
+        await workflow.ReplaceBomAsync(ProjectId, BomKind.Standard,
+        [
+            new BomItemInput(1, "STD-LL-PUBLISHED", "已发布长交期件", 1, "个", null, "M1", "W1", true),
+            new BomItemInput(2, "STD-LL-PUBLISHED", "已发布长交期件", 2, "个", null, "M1", "W1", true),
+            new BomItemInput(3, "STD-LL-NEW", "未发布长交期件", 1, "个", null, "M2", "W1", true)
+        ], "admin", UserRole.Administrator, default);
+        var standardItems = await repository.GetBomAsync(ProjectId, BomKind.Standard, default);
+        var publishedItem = standardItems[0];
+        var sameMaterialInstance = standardItems[1];
+        var newItem = standardItems[2];
+        await repository.CreateReleasePackageAsync(new ReleasePackage(
+            Guid.NewGuid(), ProjectId, "RP-STANDARD-PUBLISHED", ReleasePackageState.Published, Guid.NewGuid(), "W1", "W1",
+            [], DateTimeOffset.UtcNow.AddDays(-1), DateTimeOffset.UtcNow.AddDays(-1), "C:\\PDM\\Release\\standard")
+        {
+            Scope = ReleaseScope.StandardFormal
+        }, default);
+
+        await repository.CreateReleasePackageAsync(new ReleasePackage(
+            Guid.NewGuid(), ProjectId, "RP-LONGLEAD-PUBLISHED", ReleasePackageState.Published, Guid.NewGuid(), "W1", "W1",
+            [], DateTimeOffset.UtcNow.AddHours(-1), DateTimeOffset.UtcNow.AddHours(-1), "C:\\PDM\\Release\\long-lead")
+        {
+            Scope = ReleaseScope.StandardLongLead,
+            SelectedBomItemIds = [publishedItem.Id],
+            StandardBomSnapshot = [publishedItem]
+        }, default);
+
+        var repeated = await Assert.ThrowsAsync<PdmRuleException>(() => workflow.CreateScopedReleasePackageAsync(
+            ProjectId, null, $"RP-LONGLEAD-REPEAT-{Guid.NewGuid():N}", "LL-REPEAT", "同一物料再次长交期发布", "未指定", null,
+            ReleaseScope.StandardLongLead, [sameMaterialInstance.Id], "admin", UserRole.Administrator, default));
+        Assert.Contains("已发布物料不能重复提前发布", repeated.Message);
+
+        var second = await workflow.CreateScopedReleasePackageAsync(
+            ProjectId, null, $"RP-LONGLEAD-NEW-{Guid.NewGuid():N}", "LL-NEW", "另一物料长交期发布", "未指定", null,
+            ReleaseScope.StandardLongLead, [newItem.Id], "admin", UserRole.Administrator, default);
+        Assert.Equal(new[] { newItem.Id }, second.SelectedBomItemIds);
     }
 
     private static async Task ConfigureApprovalWorkflowsAsync(InMemoryPdmRepository repository)
@@ -1068,6 +1354,33 @@ public sealed class Phase1ReleaseWorkflowTests
             new CadReferenceSnapshot(Guid.NewGuid(), ProjectId, document.Id, DateTimeOffset.UtcNow, actor, root, new string('F', 64)),
             [],
             []), drawingReviewWritebackId, default);
+    }
+
+    private static Dictionary<string, string?> StandardMaterialProperties(string code, string model, string brand) => new()
+    {
+        [CadPropertyCardSnapshot.ScopePrefix + "物料分类"] = "Global",
+        [CadPropertyCardSnapshot.ScopePrefix + "物料编码"] = "Global",
+        [CadPropertyCardSnapshot.ScopePrefix + "型号"] = "Global",
+        [CadPropertyCardSnapshot.ScopePrefix + "品牌"] = "Global",
+        ["全局/物料分类"] = "标准件",
+        ["全局/物料编码"] = code,
+        ["全局/型号"] = model,
+        ["全局/品牌"] = brand
+    };
+
+    private static async Task AddApprovedStandardMaterialAsync(
+        InMemoryMaterialRepository repository,
+        string code,
+        string model,
+        string brand)
+    {
+        var category = await repository.FindCategoryAsync("0102", default) ?? throw new InvalidOperationException();
+        var now = DateTimeOffset.UtcNow;
+        await repository.CreateMaterialAsync(new PdmMaterial(
+            Guid.NewGuid(), code, $"料品{code}", MaterialKind.Standard, MaterialSupplyMode.Purchase, "001",
+            model, null, null, brand, null, null, null, null,
+            MaterialApprovalStatus.Approved, "admin", now, "0102", null, code, MaterialSyncStatus.Succeeded,
+            "admin", now, "admin", now, 1, "0102", U9SyncConfirmed: true), category, default);
     }
 
     private static async Task<ReleasePackage> PublishAsync(PdmWorkflowService workflow, ReleasePackage package)

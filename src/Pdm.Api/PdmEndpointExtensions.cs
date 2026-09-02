@@ -756,7 +756,7 @@ public static class PdmEndpointExtensions
             var command = new BatchUpdateBomItemsCommand(
                 request.ItemIds, request.Fields, request.TargetKind, request.Unit, request.DrawingNumber, request.Name,
                 request.Specification, request.Remark, request.Brand, request.Material, request.SurfaceTreatment,
-                request.Weight, request.Quantity, request.Revision, request.Complete);
+                request.Weight, request.Quantity, request.Revision, request.Complete, HeatTreatment: request.HeatTreatment);
             var updated = await workflow.BatchUpdateBomItemsAsync(projectId, command, actor, role, cancellationToken);
             if (request.ItemIds.Count == 1
                 && request.Fields.Contains("drawingNumber", StringComparer.OrdinalIgnoreCase)
@@ -1034,6 +1034,7 @@ public static class PdmEndpointExtensions
         api.MapPost("/approval-tasks/{taskId:guid}/decision", async (Guid taskId, ApprovalRequest request, HttpContext context, PdmWorkflowService workflow, MaterialService materials, CancellationToken cancellationToken) =>
         {
             var (actor, role) = CurrentUser(context.User);
+            await workflow.EnsureApprovalTaskActorAsync(taskId, actor, cancellationToken);
             if (request.Decision == ApprovalDecision.Approved)
             {
                 var itemIds = await workflow.GetNonStandardItemsForFinalApprovalAsync(taskId, cancellationToken);
@@ -1052,6 +1053,19 @@ public static class PdmEndpointExtensions
                 }
             }
             return Results.Ok(await workflow.DecideAsync(taskId, actor, role, request.Decision, request.Comment, cancellationToken));
+        });
+
+        api.MapGet("/approval-tasks/{taskId:guid}/transfer-candidates", async (Guid taskId, HttpContext context, PdmWorkflowService workflow, CancellationToken cancellationToken) =>
+        {
+            var (actor, _) = CurrentUser(context.User);
+            var candidates = await workflow.ListApprovalTransferCandidatesAsync(taskId, actor, cancellationToken);
+            return Results.Ok(candidates.Select(item => new ApprovalTransferCandidateResponse(item.Username, item.DisplayName)));
+        });
+
+        api.MapPost("/approval-tasks/{taskId:guid}/transfer", async (Guid taskId, ApprovalTransferRequest request, HttpContext context, PdmWorkflowService workflow, CancellationToken cancellationToken) =>
+        {
+            var (actor, _) = CurrentUser(context.User);
+            return Results.Ok(await workflow.TransferApprovalAsync(taskId, actor, request.TargetUsername, request.Comment, cancellationToken));
         });
 
         api.MapPost("/approval-tasks/{taskId:guid}/emergency-decision", async (Guid taskId, EmergencyApprovalRequest request, HttpContext context, PdmWorkflowService workflow, CancellationToken cancellationToken) =>

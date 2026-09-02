@@ -5,6 +5,7 @@ namespace Upton.Pdm.Api;
 
 public sealed class MaterialU9SyncHostedService(
     IServiceProvider serviceProvider,
+    U9MaterialFullSyncCoordinator coordinator,
     ILogger<MaterialU9SyncHostedService> logger,
     TimeProvider timeProvider) : BackgroundService
 {
@@ -48,11 +49,7 @@ public sealed class MaterialU9SyncHostedService(
             && now - latestLocal.Value < TimeSpan.FromHours(3);
         if (now.TimeOfDay < FullSyncStartTime || alreadySucceededToday || recentRunning) return;
 
-        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        timeout.CancelAfter(TimeSpan.FromHours(2));
-        var run = await synchronization.SynchronizeAsync(SystemActor, "Scheduled", timeout.Token);
-        logger.LogInformation(
-            "Scheduled U9C material full synchronization completed: {Status}; categories {Completed}/{Total}; created {Created}; refreshed {Refreshed}; skipped {Skipped}.",
-            run.Status, run.CompletedCategoryCount, run.CategoryCount, run.CreatedCount, run.RefreshedCount, run.SkippedCount);
+        if (!coordinator.TryStart(SystemActor, "Scheduled"))
+            logger.LogInformation("Scheduled U9C material full synchronization was skipped because another run is active.");
     }
 }

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { onBeforeUnmount, onMounted, ref } from 'vue'
-import { RefreshCw, Search } from '@lucide/vue'
+import { RotateCw, Search } from '@lucide/vue'
 import { postDesktopMessage } from '../api'
 import type { DocumentFilter, DocumentNode, DrawingReviewBadge, SolidWorksOpenMode, WorkspaceLocalFileState } from '../types'
 import CadDocumentIcon from './CadDocumentIcon.vue'
@@ -70,33 +70,25 @@ onBeforeUnmount(() => {
 
 <template>
   <section class="pdm-panel pdm-tree-panel" aria-label="项目设计树">
-    <header class="pdm-panel-heading pdm-tree-heading">
-      <h2>导航窗格</h2>
+    <div class="pdm-tree-search-row">
+      <label class="pdm-tree-search">
+        <Search :size="15" aria-hidden="true" />
+        <span class="pdm-sr-only">搜索图号或名称</span>
+        <input v-model="query" type="search" placeholder="搜索图号或名称">
+      </label>
       <div class="pdm-tree-refresh">
         <button
           type="button"
-          class="pdm-plain-button"
+          class="pdm-tree-refresh-button"
           :aria-label="refreshing ? '正在刷新设计树' : '刷新设计树'"
           :aria-busy="refreshing"
           :disabled="refreshing"
           @click="emit('refresh')"
         >
-          <RefreshCw :size="15" />
+          <RotateCw class="pdm-tree-refresh-icon" :class="{ 'is-spinning': refreshing }" :size="16" aria-hidden="true" />
         </button>
       </div>
-      <div
-        v-if="refreshing"
-        class="pdm-tree-refresh-progress"
-        role="progressbar"
-        aria-label="正在刷新设计树"
-        aria-valuetext="刷新中"
-      />
-    </header>
-    <label class="pdm-tree-search">
-      <Search :size="15" aria-hidden="true" />
-      <span class="pdm-sr-only">搜索图号或名称</span>
-      <input v-model="query" type="search" placeholder="搜索图号或名称">
-    </label>
+    </div>
     <div class="pdm-document-filters" role="tablist" aria-label="图档类型筛选">
       <button
         v-for="item in filters"

@@ -2,6 +2,7 @@ import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { ElMessageBox } from 'element-plus'
 import { batchDeleteBomItems as batchDeleteBomItemsRequest, batchRestoreBomItems as batchRestoreBomItemsRequest, restoreBomItemsFromSource as restoreBomItemsFromSourceRequest } from '../api'
 import { getBomSourceData } from '../api'
+import { transferApproval } from '../api'
 import { addDrawingReviewMarkup as addDrawingReviewMarkupRequest, createDrawingReview as createDrawingReviewRequest, decideDrawingReviewTarget as decideDrawingReviewTargetRequest, listDrawingReviewCandidates, listDrawingReviews, resolveDrawingReviewMarkup as resolveDrawingReviewMarkupRequest, withdrawDrawingReview as withdrawDrawingReviewRequest } from '../api'
 import { batchUpdateBomItems as batchUpdateBomItemsRequest, changeMyPassword as changeMyPasswordRequest, checkHealth, compareDocumentVersions, createProject as createProjectRequest, createRole as createRoleRequest, createSubproject as createSubprojectRequest, createReleasePackage, createUser as createUserRequest, decideApproval, deleteProject as deleteProjectRequest, deleteRole as deleteRoleRequest, emergencyDecideApproval, exportBom, forceReleaseEditLock as forceReleaseEditLockRequest, generateMechanicalBom, getBomValidationRules, getCrmIntegrationSettings, getMyProfile, getOrganizationDirectory, getProjectNumberingOptions, getRolePermissionDirectory, getStorageStatus, getSystemSettings, importBom, listAudit, listBomBaselines, listBomVersions, listCustomers, listDocumentVersions, listDocumentWhereUsed, listEditLocks, listEquipmentTypes, listFolderTemplate, listMaterialCodeApplications, listMaterialSyncTasks, listMyApprovalTasks, listPasswordResetTasks, listProgramTemplateTasks, listProjectAudit, listProjects, listProjectVersions, loadProjectDocumentWorkspace, loadProjectWorkspace, login as apiLogin, obsoleteDocument as obsoleteDocumentRequest, PdmApiError, postDesktopMessage, readDocumentVersionFile, requestEditLockRelease as requestEditLockReleaseRequest, resetRequestedPassword as resetRequestedPasswordRequest, resetUserPassword as resetUserPasswordRequest, resolveBomItem as resolveBomItemRequest, restoreDocumentVersion, resumeSession as apiResumeSession, saveBom, saveEquipmentType as saveEquipmentTypeRequest, saveFolderTemplate as saveFolderTemplateRequest, saveOrganizationUnit as saveOrganizationUnitRequest, saveProjectOrganization as saveProjectOrganizationRequest, setBomEmptyDeclaration as setBomEmptyDeclarationRequest, submitReleasePackage, syncCrmCustomers as syncCrmCustomersRequest, testCrmIntegration as testCrmIntegrationRequest, updateChildProjectDesigners as updateChildProjectDesignersRequest, updateChildProjectManager as updateChildProjectManagerRequest, updateCrmIntegrationSettings as updateCrmIntegrationSettingsRequest, updateMainProjectStaffing as updateMainProjectStaffingRequest, updateMyProfile as updateMyProfileRequest, updateOrganizationCounters as updateOrganizationCountersRequest, updateOrganizationMemberships as updateOrganizationMembershipsRequest, updateOrganizationUnitManagers as updateOrganizationUnitManagersRequest, updateProject as updateProjectRequest, updateProjectExecutionUnit as updateProjectExecutionUnitRequest, updateProjectFolderPermissions as updateProjectFolderPermissionsRequest, updateRolePermissions as updateRolePermissionsRequest, updateSystemSettings as updateSystemSettingsRequest, updateUser as updateUserRequest, uploadReleaseFile, withdrawReleasePackage } from '../api'
 import type { AuthSession } from '../api'
@@ -48,8 +49,9 @@ function bomPropertyMappingsFromLegacy(settings: PdmSystemSettings) {
 const defaultSystemSettings: PdmSystemSettings = { vaultRoot: '', releaseRoot: '', materialAttachmentRoot: '', checkoutHeartbeatSeconds: 180, checkoutLeaseMinutes: 15, checkoutOfflineGraceMinutes: 60, checkoutReminderHours: 4, checkoutStrongReminderHours: 8, checkoutOverdueHours: 24, checkoutForceReleaseHours: 48, bomDrawingNumberProperty: '物料编码', bomNameProperty: '物料名称', bomDescriptionProperty: '备注信息', bomMaterialProperty: '材质', bomSpecificationProperty: '型号', bomUnitProperty: '单位', bomBrandProperty: '品牌', bomSurfaceTreatmentProperty: '表面处理', bomWeightProperty: '重量', bomPropertyMappings: fallbackBomPropertyMappings.map(mapping => ({ ...mapping })), validationRules: { standard: ['drawingNumber', 'name', 'unit', 'specification', 'quantity', 'revision'], nonStandard: ['drawingNumber', 'name', 'unit', 'material', 'quantity', 'revision'], electrical: ['drawingNumber', 'name', 'unit', 'quantity', 'revision'], }, approvalWorkflows: { mechanical: { code: 'mechanical-release', name: '机械发布审批', version: 1, steps: [{ stage: 'MechanicalEngineer', name: '机械工程师自检', assigneeSource: 'Submitter' }, { stage: 'MainDesigner', name: '主设审核', assigneeSource: 'ProjectDesignLead' }, { stage: 'MechanicalSupervisor', name: '机械主管批准', assigneeSource: 'PrimaryUnitManager' }] }, electrical: { code: 'electrical-release', name: '电气发布审批', version: 1, steps: [{ stage: 'HardwareEngineer', name: '硬件工程师自检', assigneeSource: 'Submitter' }, { stage: 'HardwareSupervisor', name: '硬件主管审核', assigneeSource: 'PrimaryUnitManager' }, { stage: 'StandardizationSupervisor', name: '标准化主管批准', assigneeSource: 'ParentUnitManager' }] }, emergencySubstituteRoleCode: 'BusinessUnitManager' }, releaseChangeReasonTypes: ['设计变更', '客户需求', '物料替代', '质量整改', '生产反馈', '其他'] }
 const defaultCrmIntegrationSettings: CrmIntegrationSettings = { baseUrl: '', username: '', passwordConfigured: false, autoSyncEnabled: false, autoSyncIntervalMinutes: 60, lastSyncAt: null, lastSyncCount: 0, lastAutoSyncAttemptAt: null, lastAutoSyncError: null }
 
-export function formatBomGenerationConfirmation(preview: BomGenerationResult): string {
+export function formatBomGenerationConfirmation(preview: BomGenerationResult, discardUnsavedChanges = false): string {
   return [
+    ...(discardUnsavedChanges ? ['注意：当前BOM有未保存修改，确认更新后这些修改将被放弃。', ''] : []),
     '将按最新设计树更新机械BOM：',
     `• 标准件：${preview.standardItems.length} 条`,
     `• 非标件：${preview.nonStandardItems.length} 条`,
@@ -62,10 +64,10 @@ export function formatBomGenerationConfirmation(preview: BomGenerationResult): s
   ].join('\n')
 }
 
-export async function confirmBomGeneration(preview: BomGenerationResult): Promise<boolean> {
+export async function confirmBomGeneration(preview: BomGenerationResult, discardUnsavedChanges = false): Promise<boolean> {
   try {
     await ElMessageBox.confirm(
-      formatBomGenerationConfirmation(preview),
+      formatBomGenerationConfirmation(preview, discardUnsavedChanges),
       '确认重新对账',
       {
         confirmButtonText: '确认更新',
@@ -559,11 +561,11 @@ export function usePdmWorkspace() {
     window.setTimeout(() => URL.revokeObjectURL(url), 10_000)
   }
 
-  async function generateBomFromDrawings(): Promise<BomGenerationResult | null> {
+  async function generateBomFromDrawings(discardUnsavedChanges = false): Promise<BomGenerationResult | null> {
     operationPending.value = true
     try {
       const preview = await generateMechanicalBom(project.value.id, false, accessToken)
-      const confirmed = await confirmBomGeneration(preview)
+      const confirmed = await confirmBomGeneration(preview, discardUnsavedChanges)
       if (!confirmed) return null
       const result = await generateMechanicalBom(project.value.id, true, accessToken)
       standardBom.value = result.standardItems
@@ -852,6 +854,20 @@ export function usePdmWorkspace() {
     operationError.value = ''
     try {
       await decideApproval(taskId, decision, comment, accessToken)
+      await reload()
+    } catch (error) {
+      operationError.value = messageFrom(error)
+      throw error
+    } finally {
+      operationPending.value = false
+    }
+  }
+
+  async function transferApprovalTask(taskId: string, targetUsername: string, comment: string) {
+    operationPending.value = true
+    operationError.value = ''
+    try {
+      await transferApproval(taskId, targetUsername, comment, accessToken)
       await reload()
     } catch (error) {
       operationError.value = messageFrom(error)
@@ -1778,6 +1794,7 @@ export function usePdmWorkspace() {
     openWhereUsed,
     obsoleteSelectedDocument,
     decideApprovalTask,
+    transferApprovalTask,
     emergencyDecideApprovalTask,
     loadAuditEntries,
     loadMyApprovalTasks,

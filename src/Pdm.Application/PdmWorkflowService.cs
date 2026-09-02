@@ -1768,7 +1768,7 @@ public sealed class PdmWorkflowService(
             if (targetItems.Length != selectedIds.Count) throw new PdmRuleException("长交期发布选择中包含已删除或不属于标准件BOM的物料。");
         }
         if (targetKind == BomKind.Standard) await EnsureStandardMaterialMasterReadyAsync(targetItems, cancellationToken);
-        await EnsureReleaseScopeAvailableAsync(projectId, scope, targetItems.Select(item => item.Id).ToArray(), cancellationToken);
+        await EnsureReleaseScopeAvailableAsync(projectId, scope, targetItems, cancellationToken);
         if (!BomReady(targetKind, targetItems, settings.ValidationRules))
             throw new PdmRuleException($"{BomKindLabel(targetKind)}BOM仍有资料不完整的物料，不能创建发布包。{MissingBomSummary(targetKind, targetItems, settings.ValidationRules)}");
         if (targetKind != BomKind.Electrical)
@@ -1846,7 +1846,12 @@ public sealed class PdmWorkflowService(
     public async Task<BomItem> ApplyMaterialCodeToBomAsync(Guid projectId, Guid itemId, string materialCode, string actor, CancellationToken cancellationToken)
     {
         if (string.IsNullOrWhiteSpace(materialCode)) throw new PdmRuleException("料号不能为空。");
+        materialCode = materialCode.Trim();
+        var current = await repository.FindBomItemAsync(projectId, itemId, cancellationToken)
+            ?? throw new PdmNotFoundException("BOM物料不存在。");
+        await EnsureStandardMaterialIdentityAsync(current, materialCode, cancellationToken);
         var item = await repository.UpdateBomMaterialCodeAsync(projectId, itemId, materialCode, cancellationToken);
+        item = await RefreshBomItemReconciliationAsync(item, actor, cancellationToken);
         if (item.SourceDocumentId.HasValue && item.Kind != BomKind.Electrical)
         {
             await EnqueueCadPropertyWritebackAsync(item, actor, cancellationToken);
@@ -1923,6 +1928,7 @@ public sealed class PdmWorkflowService(
                 Remark = NullIfWhiteSpace(input.Remark),
                 Brand = NullIfWhiteSpace(input.Brand),
                 SurfaceTreatment = NullIfWhiteSpace(input.SurfaceTreatment),
+                HeatTreatment = NullIfWhiteSpace(input.HeatTreatment),
                 Weight = NullIfWhiteSpace(input.Weight),
                 SourceDocumentId = previous?.SourceDocumentId ?? input.SourceDocumentId,
                 SourceConfiguration = previous?.SourceConfiguration ?? NullIfWhiteSpace(input.SourceConfiguration),
@@ -2190,6 +2196,7 @@ public sealed class PdmWorkflowService(
                 Brand = fields.Contains("brand") ? Optional(command.Brand) : original.Brand,
                 Material = fields.Contains("material") ? Optional(command.Material) : original.Material,
                 SurfaceTreatment = fields.Contains("surfaceTreatment") ? Optional(command.SurfaceTreatment) : original.SurfaceTreatment,
+                HeatTreatment = fields.Contains("heatTreatment") ? Optional(command.HeatTreatment) : original.HeatTreatment,
                 Weight = fields.Contains("weight") ? Optional(command.Weight) : original.Weight,
                 Quantity = fields.Contains("quantity") ? command.Quantity!.Value : original.Quantity,
                 Revision = fields.Contains("revision") ? Required(command.Revision, "版本") : original.Revision,
@@ -2309,6 +2316,7 @@ public sealed class PdmWorkflowService(
                 Brand = source.Brand,
                 Material = source.Material,
                 SurfaceTreatment = source.SurfaceTreatment,
+                HeatTreatment = source.HeatTreatment,
                 Weight = source.Weight,
                 Quantity = source.Quantity,
                 Revision = source.Revision,
@@ -2432,6 +2440,7 @@ public sealed class PdmWorkflowService(
                 Brand = source.Brand,
                 Material = source.Material,
                 SurfaceTreatment = source.SurfaceTreatment,
+                HeatTreatment = source.HeatTreatment,
                 Weight = source.Weight,
                 Quantity = source.Quantity,
                 Revision = source.Revision,
@@ -3021,6 +3030,9 @@ public sealed class PdmWorkflowService(
         var result = await repository.FindDocumentVersionAsync(request.SourceDocumentId, resultVersionId, cancellationToken)
             ?? throw new PdmRuleException("写回结果版本不存在。");
         var updated = await repository.UpdateCadPropertyWritebackAsync(id, CadPropertyWritebackStatus.Succeeded, result.Id, null, cancellationToken);
+        var bomItem = await repository.FindBomItemAsync(request.ProjectId, request.BomItemId, cancellationToken);
+        if (bomItem is not null)
+            _ = await RefreshBomItemReconciliationAsync(bomItem, actor, cancellationToken);
         var review = await repository.RecordDrawingReviewWritebackResultAsync(id, result.Id, true, cancellationToken);
         await AuditAsync(actor, "cad-property-writeback.complete", nameof(CadPropertyWriteback), id.ToString(), result.Revision.Display, cancellationToken);
         if (review?.State == DrawingReviewPackageState.Approved)
@@ -3170,9 +3182,61 @@ public sealed class PdmWorkflowService(
 
     public async Task<ReleasePackage> DecideAsync(Guid taskId, string actor, UserRole role, ApprovalDecision decision, string? comment, CancellationToken cancellationToken)
     {
-        await RequirePermissionAsync(actor, role, PermissionCodes.ApprovalDecide, cancellationToken);
-
+        await EnsureApprovalTaskActorAsync(taskId, actor, cancellationToken);
         return await CompleteApprovalDecisionAsync(taskId, actor, decision, comment, false, null, cancellationToken);
+    }
+
+    public async Task EnsureApprovalTaskActorAsync(Guid taskId, string actor, CancellationToken cancellationToken)
+    {
+        var package = await repository.FindReleasePackageByApprovalTaskAsync(taskId, cancellationToken)
+            ?? throw new PdmNotFoundException("审批任务不存在。");
+        var task = package.ApprovalTasks.FirstOrDefault(item => item.Id == taskId)
+            ?? throw new PdmNotFoundException("审批任务不存在。");
+        var currentTask = package.ApprovalTasks.OrderBy(item => item.StepOrder).FirstOrDefault(item => item.Decision is null);
+        if (task.Decision is not null || currentTask?.Id != taskId || package.State is not (ReleasePackageState.ProcessReview or ReleasePackageState.Approval))
+            throw new PdmConflictException("当前发布包尚未到达该审批节点。 ");
+        if (!string.Equals(task.Assignee, actor, StringComparison.OrdinalIgnoreCase)
+            && !string.Equals(actor, "admin", StringComparison.OrdinalIgnoreCase))
+            throw new PdmRuleException("只能处理分配给自己的审批任务。 ");
+    }
+
+    public async Task<IReadOnlyList<ApprovalTransferCandidate>> ListApprovalTransferCandidatesAsync(
+        Guid taskId, string actor, CancellationToken cancellationToken)
+    {
+        await EnsureApprovalTaskActorAsync(taskId, actor, cancellationToken);
+        var package = await repository.FindReleasePackageByApprovalTaskAsync(taskId, cancellationToken)
+            ?? throw new PdmNotFoundException("审批任务不存在。");
+        var candidates = new List<ApprovalTransferCandidate>();
+        foreach (var user in await repository.ListUsersAsync(cancellationToken))
+        {
+            if (!user.IsActive || string.Equals(user.Username, actor, StringComparison.OrdinalIgnoreCase)) continue;
+            if (!await repository.HasUserPermissionAsync(user.Username, user.Role, PermissionCodes.ApprovalDecide, cancellationToken)) continue;
+            if (!await repository.HasProjectContentReadAccessAsync(package.ProjectId, user.Username, user.Role, cancellationToken)) continue;
+            candidates.Add(new ApprovalTransferCandidate(user.Username, user.DisplayName));
+        }
+        return candidates.OrderBy(item => item.DisplayName, StringComparer.OrdinalIgnoreCase).ToArray();
+    }
+
+    public async Task<ReleasePackage> TransferApprovalAsync(
+        Guid taskId, string actor, string targetUsername, string? comment, CancellationToken cancellationToken)
+    {
+        await EnsureApprovalTaskActorAsync(taskId, actor, cancellationToken);
+        targetUsername = targetUsername?.Trim() ?? string.Empty;
+        if (string.IsNullOrWhiteSpace(targetUsername)) throw new PdmRuleException("请选择转交人员。");
+        var package = await repository.FindReleasePackageByApprovalTaskAsync(taskId, cancellationToken)
+            ?? throw new PdmNotFoundException("审批任务不存在。");
+        var target = await repository.FindUserAsync(targetUsername, cancellationToken)
+            ?? throw new PdmNotFoundException("转交目标用户不存在。");
+        if (!target.IsActive) throw new PdmRuleException("转交目标用户已停用。");
+        if (!await repository.HasUserPermissionAsync(target.Username, target.Role, PermissionCodes.ApprovalDecide, cancellationToken))
+            throw new PdmRuleException("转交目标用户没有审批权限。");
+        if (!await repository.HasProjectContentReadAccessAsync(package.ProjectId, target.Username, target.Role, cancellationToken))
+            throw new PdmRuleException("转交目标用户没有该项目的访问权限。");
+
+        var transferred = await repository.TransferApprovalAsync(taskId, actor, target.Username, cancellationToken);
+        await AuditAsync(actor, "approval.transfer", nameof(ApprovalTask), taskId.ToString(),
+            $"{actor} -> {target.Username}{(string.IsNullOrWhiteSpace(comment) ? string.Empty : $"；{comment.Trim()}")}", cancellationToken);
+        return transferred;
     }
 
     public async Task<IReadOnlyList<Guid>> GetNonStandardItemsForFinalApprovalAsync(Guid taskId, CancellationToken cancellationToken)
@@ -3418,6 +3482,7 @@ public sealed class PdmWorkflowService(
                 var specification = PropertyValue(properties, node.Configuration, settings.BomSpecificationProperty);
                 var unit = PropertyValue(properties, node.Configuration, settings.BomUnitProperty) ?? "个";
                 var surfaceTreatment = PropertyValue(properties, node.Configuration, settings.BomSurfaceTreatmentProperty);
+                var heatTreatment = PropertyValue(properties, node.Configuration, BomPropertyMappingCatalog.SolidWorksProperty(settings, "heatTreatment", "热处理"));
                 var weight = PropertyValue(properties, node.Configuration, settings.BomWeightProperty);
                 var revision = document.Revision.Display;
                 var reconciliationStatus = previous?.ReconciliationStatus;
@@ -3477,6 +3542,7 @@ public sealed class PdmWorkflowService(
                     Remark = NullIfWhiteSpace(remark),
                     Brand = NullIfWhiteSpace(brand),
                     SurfaceTreatment = NullIfWhiteSpace(surfaceTreatment),
+                    HeatTreatment = NullIfWhiteSpace(heatTreatment),
                     Weight = NullIfWhiteSpace(weight),
                     SourceDocumentId = document.Id,
                     SourceConfiguration = NullIfWhiteSpace(node.Configuration),
@@ -3604,6 +3670,54 @@ public sealed class PdmWorkflowService(
         virtualCount = Math.Max(virtualCount, virtualItems.Length);
         var pendingRemovalCount = merged.Count(item => item.IsPendingRemoval && !item.IsManuallyExcluded);
         var manualUnmatchedCount = merged.Count(item => item.IsManualUnmatched && !item.IsManuallyExcluded);
+        if (materialRepository is not null)
+        {
+            var materialCodes = standard
+                .Where(item => !item.IsPendingRemoval && !item.IsManuallyExcluded && !string.IsNullOrWhiteSpace(item.DrawingNumber))
+                .Select(item => item.DrawingNumber.Trim())
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+            var materialGroups = (await materialRepository.FindMaterialsByCodesAsync(materialCodes, cancellationToken))
+                .GroupBy(item => item.MaterialCode.Trim(), StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+            var duplicateCodes = materialGroups
+                .Where(group => group.Skip(1).Any())
+                .Select(group => group.Key)
+                .OrderBy(code => code, StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+            if (duplicateCodes.Length > 0)
+                throw new PdmConflictException($"料品主档存在重复物料编码：{string.Join('、', duplicateCodes)}，无法保证物料号、型号、品牌一一对应，已取消BOM对账。");
+            var materialByCode = materialGroups
+                .ToDictionary(group => group.Key, group => group.Single(), StringComparer.OrdinalIgnoreCase);
+            standard = standard.Select(item =>
+            {
+                if (item.IsPendingRemoval || item.IsManuallyExcluded) return item;
+                var source = generated.FirstOrDefault(candidate => SameBomSource(candidate, item));
+                var differences = source is null ? [] : SourceDataDifferences(item, source).ToList();
+                materialByCode.TryGetValue(item.DrawingNumber.Trim(), out var material);
+                differences.AddRange(MaterialService.StandardBomMaterialMasterDifferenceFields(item, material));
+                differences = differences.Distinct(StringComparer.Ordinal).ToList();
+                if (differences.Count > 0)
+                {
+                    return item with
+                    {
+                        ReconciliationStatus = "ManualOverrideMismatch",
+                        ReconciliationNote = $"BOM维护值与最新图档源数据或料品主档不一致：{string.Join('、', differences)}。",
+                        ReconciliationUpdatedBy = actor,
+                        ReconciliationUpdatedAt = reconciliationTime
+                    };
+                }
+                return string.Equals(item.ReconciliationStatus, "ManualOverrideMismatch", StringComparison.Ordinal)
+                    ? item with
+                    {
+                        ReconciliationStatus = "SourceMatched",
+                        ReconciliationNote = "BOM维护值已与最新图档源数据及料品主档一致。",
+                        ReconciliationUpdatedBy = actor,
+                        ReconciliationUpdatedAt = reconciliationTime
+                    }
+                    : item;
+            }).ToArray();
+        }
         if (apply)
         {
             await repository.ApplyBomBatchAsync(projectId, standard, nonStandard, unclassified, electrical, virtualItems, [], [], cancellationToken);
@@ -3619,20 +3733,76 @@ public sealed class PdmWorkflowService(
     private static IReadOnlyList<string> SourceDataDifferences(BomItem maintained, BomItem source)
     {
         var differences = new List<string>();
-        static bool Different(string? left, string? right) => !string.Equals(left?.Trim() ?? string.Empty, right?.Trim() ?? string.Empty, StringComparison.OrdinalIgnoreCase);
-        if (maintained.Kind != source.Kind) differences.Add("物料分类");
-        if (Different(maintained.Unit, source.Unit)) differences.Add("单位");
-        if (Different(maintained.DrawingNumber, source.DrawingNumber)) differences.Add("物料编码");
-        if (Different(maintained.Name, source.Name)) differences.Add("物料名称");
-        if (Different(maintained.Specification, source.Specification)) differences.Add("型号");
-        if (Different(maintained.Remark, source.Remark)) differences.Add("备注信息");
-        if (Different(maintained.Brand, source.Brand)) differences.Add("品牌");
-        if (Different(maintained.Material, source.Material)) differences.Add("材质");
-        if (Different(maintained.SurfaceTreatment, source.SurfaceTreatment)) differences.Add("表面处理");
-        if (Different(maintained.Weight, source.Weight)) differences.Add("重量");
-        if (maintained.Quantity != source.Quantity) differences.Add("数量");
-        if (Different(maintained.Revision, source.Revision)) differences.Add("版本");
+        static bool DifferentWhenSourcePresent(string? maintainedValue, string? sourceValue) =>
+            !string.IsNullOrWhiteSpace(sourceValue)
+            && !string.Equals(maintainedValue?.Trim() ?? string.Empty, sourceValue.Trim(), StringComparison.OrdinalIgnoreCase);
+        if (source.Kind != BomKind.Unclassified && maintained.Kind != source.Kind) differences.Add("物料分类");
+        if (maintained.Kind == BomKind.Standard)
+        {
+            if (DifferentWhenSourcePresent(maintained.Specification, source.Specification)) differences.Add("型号");
+            if (DifferentWhenSourcePresent(maintained.Brand, source.Brand)) differences.Add("品牌");
+        }
+        else if (maintained.Kind == BomKind.NonStandard)
+        {
+            if (DifferentWhenSourcePresent(maintained.Specification, source.Specification)) differences.Add("型号");
+            if (DifferentWhenSourcePresent(maintained.Material, source.Material)) differences.Add("材质");
+            if (DifferentWhenSourcePresent(maintained.SurfaceTreatment, source.SurfaceTreatment)) differences.Add("表面处理");
+        }
         return differences;
+    }
+
+    private async Task<BomItem> RefreshBomItemReconciliationAsync(BomItem item, string actor, CancellationToken cancellationToken)
+    {
+        if (!item.SourceDocumentId.HasValue || item.Kind is not (BomKind.Standard or BomKind.NonStandard)) return item;
+        var latest = (await repository.ListDocumentVersionsAsync(item.SourceDocumentId.Value, cancellationToken)).FirstOrDefault();
+        if (latest is null) return item;
+        var settings = await repository.GetSystemSettingsAsync(cancellationToken);
+        var configuration = item.SourceConfiguration ?? string.Empty;
+        var classificationProperty = BomPropertyMappingCatalog.SolidWorksProperty(settings, "kind", "物料分类");
+        var classification = PropertyValue(latest.PropertySnapshot, configuration, classificationProperty);
+        var sourceKind = string.Equals(classification, "标准件", StringComparison.OrdinalIgnoreCase) ? BomKind.Standard
+            : string.Equals(classification, "非标件", StringComparison.OrdinalIgnoreCase) ? BomKind.NonStandard
+            : string.Equals(classification, "虚拟件", StringComparison.OrdinalIgnoreCase) ? BomKind.Virtual
+            : BomKind.Unclassified;
+        var source = item with
+        {
+            Kind = sourceKind,
+            DrawingNumber = PropertyValue(latest.PropertySnapshot, configuration, settings.BomDrawingNumberProperty) ?? string.Empty,
+            Specification = NullIfWhiteSpace(PropertyValue(latest.PropertySnapshot, configuration, settings.BomSpecificationProperty)),
+            Brand = NullIfWhiteSpace(PropertyValue(latest.PropertySnapshot, configuration, settings.BomBrandProperty)),
+            Material = NullIfWhiteSpace(PropertyValue(latest.PropertySnapshot, configuration, settings.BomMaterialProperty)),
+            SurfaceTreatment = NullIfWhiteSpace(PropertyValue(latest.PropertySnapshot, configuration, settings.BomSurfaceTreatmentProperty)),
+            HeatTreatment = NullIfWhiteSpace(PropertyValue(latest.PropertySnapshot, configuration, BomPropertyMappingCatalog.SolidWorksProperty(settings, "heatTreatment", "热处理")))
+        };
+        var differences = SourceDataDifferences(item, source).ToList();
+        if (item.Kind == BomKind.Standard && materialRepository is not null)
+        {
+            var material = string.IsNullOrWhiteSpace(item.DrawingNumber)
+                ? null
+                : await materialRepository.FindMaterialByCodeAsync(item.DrawingNumber.Trim(), cancellationToken);
+            differences.AddRange(MaterialService.StandardBomMaterialMasterDifferenceFields(item, material));
+        }
+        differences = differences.Distinct(StringComparer.Ordinal).ToList();
+        return await repository.UpdateBomReconciliationAsync(
+            item.ProjectId,
+            item.Id,
+            differences.Count == 0 ? "SourceMatched" : "ManualOverrideMismatch",
+            differences.Count == 0
+                ? "BOM维护值已与最新图档源数据一致。"
+                : $"BOM维护值与最新图档源数据或料品主档不一致：{string.Join('、', differences)}。",
+            actor,
+            timeProvider.GetUtcNow(),
+            cancellationToken);
+    }
+
+    private async Task EnsureStandardMaterialIdentityAsync(BomItem item, string materialCode, CancellationToken cancellationToken)
+    {
+        if (item.Kind != BomKind.Standard || materialRepository is null) return;
+        var material = await materialRepository.FindMaterialByCodeAsync(materialCode, cancellationToken);
+        var issues = MaterialService.StandardBomMaterialMasterIssues(item, material);
+        if (issues.Count == 0) return;
+        throw new PdmRuleException(
+            $"料号 {materialCode} 与当前标准件的型号、品牌未形成唯一对应，已取消写入：{string.Join('、', issues)}。");
     }
 
     private static bool SameBomSource(BomItem left, BomItem right) =>
@@ -3685,6 +3855,7 @@ public sealed class PdmWorkflowService(
             || Different(previous.Brand, current.Brand)
             || Different(previous.Material, current.Material)
             || Different(previous.SurfaceTreatment, current.SurfaceTreatment)
+            || Different(previous.HeatTreatment, current.HeatTreatment)
             || Different(previous.Weight, current.Weight);
     }
 
@@ -3718,6 +3889,7 @@ public sealed class PdmWorkflowService(
         Set(settings.BomBrandProperty, item.Brand);
         Set(settings.BomMaterialProperty, item.Material);
         Set(settings.BomSurfaceTreatmentProperty, item.SurfaceTreatment);
+        Set(BomPropertyMappingCatalog.SolidWorksProperty(settings, "heatTreatment", "热处理"), item.HeatTreatment);
         Set(settings.BomWeightProperty, item.Weight);
         return new CadPropertyWriteback(
             Guid.NewGuid(), item.ProjectId, item.Id, item.SourceDocumentId.Value, item.SourceConfiguration,
@@ -3758,7 +3930,6 @@ public sealed class PdmWorkflowService(
         var included = items.Where(item => !item.IsManuallyExcluded).ToArray();
         var active = included.Where(item => !item.IsPendingRemoval).ToArray();
         if (included.Any(item => item.IsPendingRemoval || item.IsPendingClassification || item.IsManualUnmatched)) return false;
-        if (active.Any(item => item.PropertyWritebackStatus is CadPropertyWritebackStatus.PendingSave or CadPropertyWritebackStatus.Pending or CadPropertyWritebackStatus.InProgress or CadPropertyWritebackStatus.Conflict or CadPropertyWritebackStatus.Failed)) return false;
         return active.Length == 0 || active.All(item => HasRequiredBomValues(item, kind, validationRules));
     }
 
@@ -4161,19 +4332,29 @@ public sealed class PdmWorkflowService(
         return tasks;
     }
 
-    private async Task EnsureReleaseScopeAvailableAsync(Guid projectId, ReleaseScope requestedScope, IReadOnlyCollection<Guid> requestedBomItemIds, CancellationToken cancellationToken)
+    private async Task EnsureReleaseScopeAvailableAsync(Guid projectId, ReleaseScope requestedScope, IReadOnlyCollection<BomItem> requestedBomItems, CancellationToken cancellationToken)
     {
         var packages = await repository.ListReleasePackagesAsync(projectId, cancellationToken);
-        if (requestedScope is ReleaseScope.StandardLongLead or ReleaseScope.StandardFormal
+        if (requestedScope == ReleaseScope.StandardFormal
             && packages.Any(package => package.Scope == ReleaseScope.StandardFormal && package.State == ReleasePackageState.Published))
             throw new PdmRuleException("标准件正式版已发布，后续只能发起增补/变更。");
         if (requestedScope == ReleaseScope.StandardLongLead)
         {
-            var requestedIds = requestedBomItemIds.ToHashSet();
+            var requestedIds = requestedBomItems.Select(item => item.Id).ToHashSet();
+            static string MaterialKey(BomItem item) => $"{item.DrawingNumber.Trim()}|{item.Unit.Trim()}";
+            var requestedKeys = requestedBomItems.Select(MaterialKey).ToHashSet(StringComparer.OrdinalIgnoreCase);
+            var publishedLongLead = packages.FirstOrDefault(package =>
+                package.Scope == ReleaseScope.StandardLongLead
+                && package.State == ReleasePackageState.Published
+                && (package.SelectedBomItemIds.Any(requestedIds.Contains)
+                    || package.StandardBomSnapshot.Any(item => requestedKeys.Contains(MaterialKey(item)))));
+            if (publishedLongLead is not null)
+                throw new PdmRuleException($"发布包{publishedLongLead.Number}已完成所选物料的长交期发布；已发布物料不能重复提前发布。");
             var activeLongLead = packages.FirstOrDefault(package =>
                 package.Scope == ReleaseScope.StandardLongLead
                 && package.State != ReleasePackageState.Published
-                && package.SelectedBomItemIds.Any(requestedIds.Contains));
+                && (package.SelectedBomItemIds.Any(requestedIds.Contains)
+                    || package.StandardBomSnapshot.Any(item => requestedKeys.Contains(MaterialKey(item)))));
             if (activeLongLead is not null)
                 throw new PdmConflictException($"发布包{activeLongLead.Number}已包含本次选择的长交期物料；同一物料不能同时进入多个长交期发布包。");
             return;

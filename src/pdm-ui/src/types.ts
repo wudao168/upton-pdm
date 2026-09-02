@@ -420,6 +420,7 @@ export interface BomItem {
   remark?: string
   brand?: string
   surfaceTreatment?: string
+  heatTreatment?: string
   weight?: string
   revision: string
   complete: boolean
@@ -458,6 +459,7 @@ export interface BatchUpdateBomItemsInput {
   brand?: string
   material?: string
   surfaceTreatment?: string
+  heatTreatment?: string
   weight?: string
   quantity?: number
   revision?: string
@@ -549,6 +551,11 @@ export interface ApprovalStep {
   stepOrder?: number
   emergencySubstitute?: boolean
   emergencyReason?: string
+}
+
+export interface ApprovalTransferCandidate {
+  username: string
+  displayName: string
 }
 
 export type ReleaseScope = 'LegacyCombined' | 'StandardLongLead' | 'StandardFormal' | 'StandardSupplement' | 'ElectricalFormal' | 'ElectricalSupplement' | 'NonStandardWithDrawing'
@@ -838,6 +845,20 @@ export interface PdmMaterial {
   coverImageAttachmentId?: string | null
 }
 
+export interface MaterialPage {
+  items: PdmMaterial[]
+  total: number
+  page: number
+  pageSize: number
+}
+
+export type MaterialDuplicateField = 'Name' | 'Specification' | 'Brand'
+
+export interface MaterialDuplicateRule {
+  categoryCode: string
+  fields: MaterialDuplicateField[]
+}
+
 export interface StandardLibraryCategory {
   id: string
   name: string
@@ -989,6 +1010,11 @@ export interface MaterialCategory {
   updatedAt: string
   rowVersion: number
   currentSequence: number
+}
+
+export interface MaterialNumberingSettings {
+  startSequence: number
+  sequenceLength: number
 }
 
 export interface MaterialRemovalResult {
@@ -1334,6 +1360,8 @@ export interface U9MaterialFullSyncCategoryResult {
   maximumSequence: number
   succeeded: boolean
   error?: string | null
+  inactivatedCount: number
+  conflictCount: number
 }
 
 export interface U9MaterialFullSyncRun {

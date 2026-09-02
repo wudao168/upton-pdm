@@ -46,6 +46,7 @@ const childProject: ProjectSummary = {
   executionUnitName: undefined,
   primaryProjectManager: undefined,
   designLead: undefined,
+  designers: ['child-engineer'],
   documentCount: 0,
   modelDocumentCount: 0,
   drawingDocumentCount: 0,
@@ -64,6 +65,7 @@ const drawingChild: ProjectSummary = {
   drawingDocumentCount: 1,
   businessStatus: '正常',
   rootDocumentCheckedOutBy: 'other-user',
+  designers: ['drawing-engineer', 'child-engineer'],
 }
 
 const otherRootProject: ProjectSummary = {
@@ -97,13 +99,15 @@ describe('ProjectWorkspaceHeader', () => {
     expect(wrapper.find('.pdm-project-context').exists()).toBe(false)
     expect(sidebar.text()).not.toContain('项目基本信息')
     expect(sidebar.get('.pdm-project-sidebar__summary').find('small').text()).toBe('子项目')
-    expect(sidebar.get('.pdm-project-sidebar__summary').findAll('dt').map(item => item.text())).toEqual(['状态', '型号', '序列号', '事业部', '项目经理', '主设'])
+    expect(sidebar.get('.pdm-project-sidebar__summary').findAll('dt').map(item => item.text())).toEqual(['状态', '型号', '序列号', '事业部', '项目经理', '主设', '工程师'])
     expect(sidebar.get('.pdm-project-sidebar__summary').text()).toContain('P700002-1 · 机架')
     expect(sidebar.get('.pdm-project-sidebar__summary').text()).toContain('AK-1-C00003-001-01')
     expect(sidebar.get('.pdm-project-sidebar__summary').text()).toContain('70000002')
     expect(sidebar.get('.pdm-project-sidebar__summary').text()).toContain('自动化事业部')
     expect(sidebar.get('.pdm-project-sidebar__summary').text()).toContain('project-manager')
     expect(sidebar.get('.pdm-project-sidebar__summary').text()).toContain('design-lead')
+    expect(sidebar.get('.pdm-project-sidebar__summary').text()).toContain('child-engineer')
+    expect(sidebar.get('.pdm-project-sidebar__summary').text()).not.toContain('drawing-engineer')
     expect(sidebar.get('.pdm-project-sidebar__summary').text()).not.toContain('中山联合光电科技有限公司')
     expect(wrapper.findAll('.pdm-project-family__list button')).toHaveLength(3)
     expect(wrapper.get('[aria-label="选择项目号 P700002-1"]').classes()).toContain('is-active')
@@ -146,10 +150,11 @@ describe('ProjectWorkspaceHeader', () => {
     const summary = wrapper.get('.pdm-project-sidebar__summary')
     expect(summary.find('small').text()).toBe('主项目')
     expect(summary.text()).toContain('P700002 · XXX设备')
-    expect(summary.findAll('dt').map(item => item.text())).toEqual(['状态', '型号', '序列号', '事业部', '项目经理', '主设'])
+    expect(summary.findAll('dt').map(item => item.text())).toEqual(['状态', '型号', '序列号', '事业部', '项目经理', '主设', '工程师'])
     expect(summary.text()).toContain('AK-1-C00003-001-00')
     expect(summary.text()).toContain('70000001')
     expect(summary.text()).toContain('自动化事业部')
+    expect(summary.text()).toContain('child-engineer、drawing-engineer')
     expect(wrapper.get('.pdm-project-sidebar__overview').text()).toContain('3图档')
     expect(wrapper.get('[aria-label="选择项目号 P700002"] .pdm-project-family__document-counts').text()).toBe('21')
   })

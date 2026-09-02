@@ -20,6 +20,7 @@ public sealed class MaterialCodeSynchronizationService(
     PdmWorkflowService workflow,
     TimeProvider timeProvider)
 {
+    private const int MaximumMaterialCodeConflictReassignments = 100;
     private U9MaterialExecutionSession? executionSession;
 
     public async Task<MaterialCodeSynchronizationResult> SynchronizeTaskAsync(
@@ -46,8 +47,9 @@ public sealed class MaterialCodeSynchronizationService(
             ?? throw new PdmNotFoundException("U9C同步任务不存在。");
         if (task.Status == MaterialSyncStatus.Superseded)
             throw new PdmRuleException("当前同步任务已废止，请刷新后选择最新任务。");
-        var material = await materials.FindMaterialAsync(task.MaterialId, cancellationToken)
-            ?? throw new PdmNotFoundException("同步任务对应的料品主档不存在。");
+        var baselineChecked = await materialService.EnsureMaterialCodeBaselineAsync(task.Id, actor, cancellationToken);
+        var material = baselineChecked.Material;
+        task = baselineChecked.Task;
         var applications = (await materials.ListMaterialCodeApplicationsAsync(null, MaterialCodeApplicationStatus.Approved, cancellationToken))
             .Where(application => application.MaterialId == material.Id)
             .ToArray();
@@ -57,7 +59,7 @@ public sealed class MaterialCodeSynchronizationService(
             MaterialSyncExecutionResult? itemSync = null;
             if (!material.U9SyncConfirmed || task.Status != MaterialSyncStatus.Succeeded)
             {
-                for (var conflictAttempt = 0; conflictAttempt < 5; conflictAttempt++)
+                for (var conflictAttempt = 0; ; conflictAttempt++)
                 {
                     try
                     {
@@ -66,8 +68,10 @@ public sealed class MaterialCodeSynchronizationService(
                         task = itemSync.Task;
                         break;
                     }
-                    catch (U9MaterialCodeConflictException) when (conflictAttempt < 4)
+                    catch (U9MaterialCodeConflictException)
                     {
+                        if (conflictAttempt >= MaximumMaterialCodeConflictReassignments)
+                            throw new PdmRuleException($"料号已连续自动重新分配 {MaximumMaterialCodeConflictReassignments} 次仍与U9C冲突，请检查U9C分类数据或接口返回。");
                         var recovered = await materialService.RecoverConflictingMaterialCodeAsync(
                             task.Id, actor, cancellationToken);
                         material = recovered.Material;

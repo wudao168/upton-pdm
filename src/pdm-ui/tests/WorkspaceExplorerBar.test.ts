@@ -32,16 +32,15 @@ describe('WorkspaceExplorerBar', () => {
     expect(wrapper.text()).not.toContain('D:\\')
   })
 
-  it('keeps only refresh and folder commands beside the workspace address', async () => {
+  it('keeps only the folder command beside the workspace address', async () => {
     const wrapper = mount(WorkspaceExplorerBar, { props: { project, selected, localState, desktopAvailable: true } })
 
     const buttons = wrapper.findAll('button')
     await buttons[0].trigger('click')
-    await buttons[1].trigger('click')
 
-    expect(wrapper.emitted('refresh')).toHaveLength(1)
     expect(wrapper.emitted('openFolder')).toEqual([[selected]])
-    expect(buttons).toHaveLength(2)
+    expect(buttons).toHaveLength(1)
+    expect(wrapper.text()).not.toContain('刷新')
     expect(wrapper.text()).not.toContain('查看最新版')
     expect(wrapper.text()).not.toContain('检出并编辑')
     expect(wrapper.get('.pdm-workspace-address__state').text()).toBe('可编辑')
@@ -51,6 +50,6 @@ describe('WorkspaceExplorerBar', () => {
     const wrapper = mount(WorkspaceExplorerBar, { props: { project, selected, desktopAvailable: false } })
     const buttons = wrapper.findAll('button')
 
-    expect(buttons[1].attributes()).toHaveProperty('disabled')
+    expect(buttons[0].attributes()).toHaveProperty('disabled')
   })
 })

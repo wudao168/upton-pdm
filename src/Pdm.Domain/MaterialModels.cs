@@ -347,7 +347,9 @@ public sealed record U9MaterialFullSyncCategoryResult(
     int SkippedCount,
     long MaximumSequence,
     bool Succeeded,
-    string? Error);
+    string? Error,
+    int InactivatedCount = 0,
+    int ConflictCount = 0);
 
 public sealed record U9MaterialFullSyncRun(
     Guid Id,

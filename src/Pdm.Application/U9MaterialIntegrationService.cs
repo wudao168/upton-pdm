@@ -8,8 +8,10 @@ internal sealed class U9MaterialExecutionSession(
     string token)
 {
     public U9MaterialIntegrationConfiguration Configuration { get; } = configuration;
-    public string Token { get; } = token;
+    public string Token { get; private set; } = token;
     public HashSet<string> ValidatedUnitCodes { get; } = new(StringComparer.OrdinalIgnoreCase);
+
+    public void UpdateToken(string refreshedToken) => Token = refreshedToken;
 }
 
 public sealed class U9MaterialIntegrationService(
@@ -21,6 +23,7 @@ public sealed class U9MaterialIntegrationService(
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web) { WriteIndented = true };
     private static readonly HashSet<string> SampleCategoryCodes = new(StringComparer.OrdinalIgnoreCase) { "0101", "0102", "0204" };
+    private const int ExpiredU9TokenResponseCode = 402;
 
     public async Task<U9ConnectionTestResult> TestConnectionAsync(
         string actor,
@@ -174,7 +177,7 @@ public sealed class U9MaterialIntegrationService(
                     category.Name,
                     category.PdmKind.Value,
                     ResolveSupplyMode(item.U9ItemFormAttribute, category.DefaultSupplyMode),
-                    U9UnitCatalog.Normalize(item.U9UnitCode),
+                    U9UnitCatalog.NormalizeInbound(item.U9UnitCode),
                     Clean(item.U9Specification),
                     Clean(item.U9Brand),
                     Clean(item.U9Material),
@@ -314,11 +317,8 @@ public sealed class U9MaterialIntegrationService(
         {
             if (!session.ValidatedUnitCodes.Contains(u9UnitCode))
             {
-                var uomQuery = await client.QueryUomsAsync(
-                    configuration.BaseUrl,
-                    session.Token,
-                    U9MaterialPayloadFactory.UomQueryPayload(u9UnitCode, task.CorrelationId),
-                    cancellationToken);
+                var uomQuery = await QueryUomsWithTokenRefreshAsync(
+                    session, U9MaterialPayloadFactory.UomQueryPayload(u9UnitCode, task.CorrelationId), cancellationToken);
                 if (uomQuery.ResponseCode != 0)
                     throw new PdmRuleException($"U9C计量单位查询失败（ResCode={uomQuery.ResponseCode}）：{uomQuery.ResponseMessage ?? "未返回错误说明"}。");
                 if (!uomQuery.Units.Any(unit => string.Equals(unit.U9UomCode?.Trim(), u9UnitCode, StringComparison.OrdinalIgnoreCase)))
@@ -326,12 +326,8 @@ public sealed class U9MaterialIntegrationService(
                 session.ValidatedUnitCodes.Add(u9UnitCode);
             }
 
-            var query = await client.QueryItemsAsync(
-                configuration.BaseUrl,
-                configuration.ItemQueryPath,
-                session.Token,
-                U9MaterialPayloadFactory.QueryPayload(sourceMaterial.MaterialCode, task.CorrelationId),
-                cancellationToken);
+            var query = await QueryItemsWithTokenRefreshAsync(
+                session, U9MaterialPayloadFactory.QueryPayload(sourceMaterial.MaterialCode, task.CorrelationId), cancellationToken);
             if (query.ResponseCode != 0)
                 throw new PdmRuleException($"U9C料品幂等查询失败（ResCode={query.ResponseCode}）：{query.ResponseMessage ?? "未返回错误说明"}。");
 
@@ -367,10 +363,9 @@ public sealed class U9MaterialIntegrationService(
                 throw new PdmRuleException("U9C不存在同料号，不能执行修改；请先核对创建任务和料号映射。");
 
             writeAttempted = true;
-            var write = await client.PostBatchAsync(
-                configuration.BaseUrl,
+            var write = await PostBatchWithTokenRefreshAsync(
+                session,
                 task.Operation == MaterialSyncOperation.Create ? configuration.ItemCreatePath : configuration.ItemModifyPath,
-                session.Token,
                 task.PayloadJson,
                 cancellationToken);
             writeResponseReceived = true;
@@ -382,8 +377,7 @@ public sealed class U9MaterialIntegrationService(
             var resultRow = write.Rows.FirstOrDefault();
             postWriteVerificationStarted = true;
             var verifiedItem = await VerifyWrittenMaterialAsync(
-                configuration,
-                session.Token,
+                session,
                 task,
                 sourceMaterial,
                 cancellationToken);
@@ -432,8 +426,7 @@ public sealed class U9MaterialIntegrationService(
     }
 
     private async Task<U9ItemReference> VerifyWrittenMaterialAsync(
-        U9MaterialIntegrationConfiguration configuration,
-        string token,
+        U9MaterialExecutionSession session,
         MaterialSyncTask task,
         PdmMaterial expected,
         CancellationToken cancellationToken)
@@ -446,10 +439,8 @@ public sealed class U9MaterialIntegrationService(
             U9ItemQueryResult query;
             try
             {
-                query = await client.QueryItemsAsync(
-                    configuration.BaseUrl,
-                    configuration.ItemQueryPath,
-                    token,
+                query = await QueryItemsWithTokenRefreshAsync(
+                    session,
                     U9MaterialPayloadFactory.QueryPayload(expected.MaterialCode, $"{task.CorrelationId}-verify"),
                     cancellationToken);
             }
@@ -474,6 +465,66 @@ public sealed class U9MaterialIntegrationService(
             lastDifferences = differences;
         }
         throw new PdmRuleException($"U9C写入已返回，但写后回查未确认字段一致，任务进入待复核：{string.Join("；", lastDifferences)}");
+    }
+
+    private async Task<U9UomQueryResult> QueryUomsWithTokenRefreshAsync(
+        U9MaterialExecutionSession session,
+        string payloadJson,
+        CancellationToken cancellationToken)
+    {
+        var result = await client.QueryUomsAsync(
+            session.Configuration.BaseUrl, session.Token, payloadJson, cancellationToken);
+        if (result.ResponseCode != ExpiredU9TokenResponseCode) return result;
+
+        await RefreshSessionTokenAsync(session, cancellationToken);
+        return await client.QueryUomsAsync(
+            session.Configuration.BaseUrl, session.Token, payloadJson, cancellationToken);
+    }
+
+    private async Task<U9ItemQueryResult> QueryItemsWithTokenRefreshAsync(
+        U9MaterialExecutionSession session,
+        string payloadJson,
+        CancellationToken cancellationToken)
+    {
+        var result = await client.QueryItemsAsync(
+            session.Configuration.BaseUrl, session.Configuration.ItemQueryPath,
+            session.Token, payloadJson, cancellationToken);
+        if (result.ResponseCode != ExpiredU9TokenResponseCode) return result;
+
+        await RefreshSessionTokenAsync(session, cancellationToken);
+        return await client.QueryItemsAsync(
+            session.Configuration.BaseUrl, session.Configuration.ItemQueryPath,
+            session.Token, payloadJson, cancellationToken);
+    }
+
+    private async Task<U9BusinessBatchResult> PostBatchWithTokenRefreshAsync(
+        U9MaterialExecutionSession session,
+        string path,
+        string payloadJson,
+        CancellationToken cancellationToken)
+    {
+        var result = await client.PostBatchAsync(
+            session.Configuration.BaseUrl, path, session.Token, payloadJson, cancellationToken);
+        if (result.ResponseCode != ExpiredU9TokenResponseCode) return result;
+
+        await RefreshSessionTokenAsync(session, cancellationToken);
+        return await client.PostBatchAsync(
+            session.Configuration.BaseUrl, path, session.Token, payloadJson, cancellationToken);
+    }
+
+    private async Task RefreshSessionTokenAsync(
+        U9MaterialExecutionSession session,
+        CancellationToken cancellationToken)
+    {
+        var configuration = session.Configuration;
+        var authentication = await client.AuthenticateAsync(new(
+            configuration.BaseUrl,
+            configuration.EnterpriseCode,
+            configuration.OrganizationCode,
+            configuration.UserCode,
+            configuration.ClientId,
+            secretProtector.Unprotect(configuration.ClientSecretCiphertext)), cancellationToken);
+        session.UpdateToken(authentication.Token);
     }
 
     private static IReadOnlyList<string> CompareMappedFields(PdmMaterial expected, U9ItemReference actual)

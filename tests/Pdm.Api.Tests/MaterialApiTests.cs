@@ -511,7 +511,7 @@ public sealed class MaterialApiTests : IClassFixture<PdmApiFactory>
             isVisible = true,
             isActive = true,
             numberPrefix = "LB-",
-            sequenceLength = 5,
+            sequenceLength = 7,
             counterScope = "labor-protection",
             sortOrder = 10401
         });
@@ -519,7 +519,7 @@ public sealed class MaterialApiTests : IClassFixture<PdmApiFactory>
 
         var calibrationResponse = await client.PutAsJsonAsync("/api/material-categories/010401/counter", new
         {
-            lastMaterialCode = "LB-00041"
+            lastMaterialCode = "LB-1000041"
         });
         Assert.True(calibrationResponse.IsSuccessStatusCode, await calibrationResponse.Content.ReadAsStringAsync());
 
@@ -533,10 +533,10 @@ public sealed class MaterialApiTests : IClassFixture<PdmApiFactory>
         });
         Assert.True(materialResponse.IsSuccessStatusCode, await materialResponse.Content.ReadAsStringAsync());
         using var material = JsonDocument.Parse(await materialResponse.Content.ReadAsStringAsync());
-        Assert.Equal("LB-00042", material.RootElement.GetProperty("materialCode").GetString());
+        Assert.Equal("LB-1000042", material.RootElement.GetProperty("materialCode").GetString());
         Assert.Equal("010401", material.RootElement.GetProperty("categoryCode").GetString());
 
-        var searchResponse = await client.GetAsync("/api/materials?query=LB-00042");
+        var searchResponse = await client.GetAsync("/api/materials?query=LB-1000042");
         Assert.True(searchResponse.IsSuccessStatusCode, await searchResponse.Content.ReadAsStringAsync());
         using var search = JsonDocument.Parse(await searchResponse.Content.ReadAsStringAsync());
         Assert.Single(search.RootElement.EnumerateArray());

@@ -91,16 +91,16 @@ const editStatusLabel = computed(() => {
     ? '可编辑'
     : `${displayUserName(owner)}编辑中`
 })
+const previewPropertyValue = (value?: string | null) => value?.trim() || '—'
 const previewProperties = computed(() => [
-  { label: '物料/图号', value: props.selected.drawingNumber?.trim() },
-  { label: '名称', value: meaningfulSelectedName.value },
-  { label: '规格/型号', value: props.bomItem?.specification?.trim() },
-  { label: '材质', value: props.bomItem?.material?.trim() },
-  { label: '品牌', value: props.bomItem?.brand?.trim() },
-  { label: '表面处理', value: props.bomItem?.surfaceTreatment?.trim() },
-  { label: '版本', value: displayedRevision.value?.trim() },
-  { label: '状态', value: lifecycleLabel.value },
-].filter((item): item is { label: string; value: string } => Boolean(item.value)))
+  { label: '料号', value: previewPropertyValue(props.selected.drawingNumber) },
+  { label: '名称', value: previewPropertyValue(meaningfulSelectedName.value) },
+  { label: '型号', value: previewPropertyValue(props.bomItem?.specification) },
+  { label: '品牌', value: previewPropertyValue(props.bomItem?.brand) },
+  { label: '材质', value: previewPropertyValue(props.bomItem?.material) },
+  { label: '表面处理', value: previewPropertyValue(props.bomItem?.surfaceTreatment) },
+  { label: '热处理', value: previewPropertyValue(props.bomItem?.heatTreatment) },
+])
 
 function activateMarkup(command: string) {
   if (!props.selected.documentId) return

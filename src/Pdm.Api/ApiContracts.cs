@@ -268,7 +268,8 @@ public sealed record BatchUpdateBomItemsRequest(
     string? Weight = null,
     decimal? Quantity = null,
     string? Revision = null,
-    bool? Complete = null);
+    bool? Complete = null,
+    string? HeatTreatment = null);
 
 public sealed record BatchDeleteBomItemsRequest(IReadOnlyList<Guid> ItemIds, string Reason);
 
@@ -285,6 +286,10 @@ public sealed record CompleteCadPropertyWritebackRequest(Guid ResultVersionId);
 public sealed record FailCadPropertyWritebackRequest(string Error, bool Conflict = false);
 
 public sealed record ApprovalRequest(ApprovalDecision Decision, string? Comment);
+
+public sealed record ApprovalTransferRequest(string TargetUsername, string? Comment);
+
+public sealed record ApprovalTransferCandidateResponse(string Username, string DisplayName);
 
 public sealed record MyApprovalTaskResponse(
     Guid Id,

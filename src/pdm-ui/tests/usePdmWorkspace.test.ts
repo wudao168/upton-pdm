@@ -58,6 +58,19 @@ describe('formatBomGenerationConfirmation', () => {
       '待处理项不会静默删除，并会阻止发布。是否应用本次更新？',
     ])
   })
+
+  it('adds the unsaved-edit warning to the same reconciliation confirmation', () => {
+    const preview: BomGenerationResult = {
+      standardItems: [], nonStandardItems: [], electricalItems: [], unclassifiedItems: [], virtualItems: [],
+      virtualCount: 0, unclassifiedCount: 0, pendingRemovalCount: 0, manualUnmatchedCount: 0, applied: false,
+    }
+
+    expect(formatBomGenerationConfirmation(preview, true).split('\n').slice(0, 3)).toEqual([
+      '注意：当前BOM有未保存修改，确认更新后这些修改将被放弃。',
+      '',
+      '将按最新设计树更新机械BOM：',
+    ])
+  })
 })
 
 describe('confirmBomGeneration', () => {
@@ -90,6 +103,17 @@ describe('confirmBomGeneration', () => {
         cancelButtonText: '取消',
         closeOnClickModal: false,
       }),
+    )
+  })
+
+  it('includes the unsaved-edit warning when reconciliation will replace local drafts', async () => {
+    const confirm = vi.spyOn(ElMessageBox, 'confirm').mockResolvedValue('confirm' as never)
+
+    await expect(confirmBomGeneration(preview, true)).resolves.toBe(true)
+    expect(confirm).toHaveBeenCalledWith(
+      formatBomGenerationConfirmation(preview, true),
+      '确认重新对账',
+      expect.any(Object),
     )
   })
 

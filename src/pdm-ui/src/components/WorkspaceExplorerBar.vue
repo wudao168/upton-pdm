@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ChevronRight, FolderLock, FolderOpen, RefreshCw } from '@lucide/vue'
+import { ChevronRight, FolderLock, FolderOpen } from '@lucide/vue'
 import type { DocumentNode, ProjectSummary, WorkspaceLocalFileState } from '../types'
 
 const props = withDefaults(defineProps<{
@@ -7,11 +7,9 @@ const props = withDefaults(defineProps<{
   selected: DocumentNode
   localState?: WorkspaceLocalFileState
   desktopAvailable?: boolean
-  refreshing?: boolean
-}>(), { desktopAvailable: false, refreshing: false })
+}>(), { desktopAvailable: false })
 
 const emit = defineEmits<{
-  refresh: []
   openFolder: [node: DocumentNode]
 }>()
 </script>
@@ -29,9 +27,6 @@ const emit = defineEmits<{
       <span v-if="desktopAvailable && localState" class="pdm-workspace-address__state" :class="`is-${localState.localState}`" :title="localState.message">{{ localState.localStateLabel }}</span>
     </nav>
     <div class="pdm-workspace-explorer__commands">
-      <button type="button" class="pdm-workspace-command" :disabled="refreshing" :aria-busy="refreshing" @click="emit('refresh')">
-        <RefreshCw :size="15" /><span>{{ refreshing ? '刷新中' : '刷新' }}</span>
-      </button>
       <button type="button" class="pdm-workspace-command" :disabled="!desktopAvailable" @click="emit('openFolder', selected)">
         <FolderOpen :size="15" /><span>打开文件夹</span>
       </button>

@@ -104,11 +104,14 @@ def build_icon() -> Image.Image:
 def main() -> None:
     icon = build_icon()
     ui_assets = REPO_ROOT / "src" / "pdm-ui" / "src" / "assets"
+    web_public = REPO_ROOT / "src" / "pdm-ui" / "public"
     desktop_assets = REPO_ROOT / "src" / "Pdm.Desktop" / "Assets"
+    web_public.mkdir(parents=True, exist_ok=True)
     icon.save(ui_assets / "pdm-client-icon.png", optimize=True)
     icon.resize((64, 64), Image.Resampling.LANCZOS).save(ui_assets / "plm-favicon.png", optimize=True)
     ico_image = icon.resize((256, 256), Image.Resampling.LANCZOS)
     ico_sizes = [(16, 16), (20, 20), (24, 24), (32, 32), (40, 40), (48, 48), (64, 64), (128, 128), (256, 256)]
+    ico_image.save(web_public / "favicon.ico", format="ICO", sizes=ico_sizes)
     for name in ("PdmClient.ico", "UPTON-PLM.ico"):
         ico_image.save(desktop_assets / name, format="ICO", sizes=ico_sizes)
 

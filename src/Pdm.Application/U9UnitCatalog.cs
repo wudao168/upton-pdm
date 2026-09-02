@@ -18,6 +18,14 @@ public static class U9UnitCatalog
         return code;
     }
 
+    public static string NormalizeInbound(string? value)
+    {
+        var unit = value?.Trim();
+        if (string.IsNullOrWhiteSpace(unit)) throw new PdmRuleException("计量单位不能为空。");
+        if (unit.Length > 80) throw new PdmRuleException("U9C库存计量单位编码不能超过80个字符。");
+        return unit;
+    }
+
     public static string NormalizeBomUnit(string? value)
     {
         var unit = value?.Trim();

@@ -173,6 +173,29 @@ public sealed class U9MaterialIntegrationServiceTests
     }
 
     [Fact]
+    public async Task ExecuteTask_WhenTokenExpires_RenewsAndRetriesEachRejectedRequest()
+    {
+        var fixture = await CreateApprovedTaskAsync(writeEnabled: true);
+        fixture.Client.ExpireNextUomQuery = true;
+        fixture.Client.ExpireNextItemQuery = true;
+        fixture.Client.ExpireNextPost = true;
+        fixture.Client.QueryResultSequence.Enqueue(new U9ItemQueryResult(0, null, []));
+        fixture.Client.QueryResultSequence.Enqueue(MatchingQuery(fixture.Material, "1001"));
+        fixture.Client.BatchResult = new U9BusinessBatchResult(0, null,
+            [new U9BusinessRowResult(true, null, "1001", fixture.Material.MaterialCode)]);
+
+        var result = await fixture.Service.ExecuteTaskAsync(
+            fixture.Task.Id, "admin", UserRole.Administrator, default);
+
+        Assert.True(result.Created);
+        Assert.Equal(MaterialSyncStatus.Succeeded, result.Task.Status);
+        Assert.Equal(4, fixture.Client.AuthenticationCount);
+        Assert.Equal(2, fixture.Client.UomQueryCallCount);
+        Assert.Equal(3, fixture.Client.QueryCallCount);
+        Assert.Equal(2, fixture.Client.PostCallCount);
+    }
+
+    [Fact]
     public async Task ExecuteTask_WhenCodeAlreadyExists_ReturnsRecoverableConflict()
     {
         var fixture = await CreateApprovedTaskAsync(writeEnabled: true);
@@ -431,8 +454,13 @@ public sealed class U9MaterialIntegrationServiceTests
         public U9CustomerQueryResult CustomerResult { get; set; } = new(0, null, [], 0);
         public Dictionary<string, U9ItemQueryResult> QueryResultsByCode { get; } = new(StringComparer.OrdinalIgnoreCase);
         public Queue<U9ItemQueryResult> QueryResultSequence { get; } = new();
+        public int AuthenticationCount { get; private set; }
+        public int UomQueryCallCount { get; private set; }
         public int QueryCallCount { get; private set; }
         public int PostCallCount { get; private set; }
+        public bool ExpireNextUomQuery { get; set; }
+        public bool ExpireNextItemQuery { get; set; }
+        public bool ExpireNextPost { get; set; }
         public bool ThrowOnPost { get; set; }
         public string LastCreatePayload { get; private set; } = string.Empty;
         public string LastUomPayload { get; private set; } = string.Empty;
@@ -448,7 +476,8 @@ public sealed class U9MaterialIntegrationServiceTests
         public Task<U9AuthenticationResult> AuthenticateAsync(U9AuthenticationRequest request, CancellationToken cancellationToken)
         {
             Request = request;
-            return Task.FromResult(new U9AuthenticationResult("token-123"));
+            AuthenticationCount++;
+            return Task.FromResult(new U9AuthenticationResult($"token-{AuthenticationCount}"));
         }
 
         public Task<U9BusinessBatchResult> PostBatchAsync(string baseUrl, string path, string token, string payloadJson, CancellationToken cancellationToken)
@@ -457,12 +486,22 @@ public sealed class U9MaterialIntegrationServiceTests
             LastCreatePayload = payloadJson;
             LastPostPath = path;
             if (ThrowOnPost) throw new PdmRuleException("U9C业务请求超时。");
+            if (ExpireNextPost)
+            {
+                ExpireNextPost = false;
+                return Task.FromResult(new U9BusinessBatchResult(402, "token已过期", []));
+            }
             return Task.FromResult(BatchResult);
         }
 
         public Task<U9ItemQueryResult> QueryItemsAsync(string baseUrl, string path, string token, string payloadJson, CancellationToken cancellationToken)
         {
             QueryCallCount++;
+            if (ExpireNextItemQuery)
+            {
+                ExpireNextItemQuery = false;
+                return Task.FromResult(new U9ItemQueryResult(402, "token已过期", []));
+            }
             if (QueryResultSequence.Count > 0) return Task.FromResult(QueryResultSequence.Dequeue());
             using var document = System.Text.Json.JsonDocument.Parse(payloadJson);
             if (document.RootElement.ValueKind == System.Text.Json.JsonValueKind.Array
@@ -475,7 +514,13 @@ public sealed class U9MaterialIntegrationServiceTests
 
         public Task<U9UomQueryResult> QueryUomsAsync(string baseUrl, string token, string payloadJson, CancellationToken cancellationToken)
         {
+            UomQueryCallCount++;
             LastUomPayload = payloadJson;
+            if (ExpireNextUomQuery)
+            {
+                ExpireNextUomQuery = false;
+                return Task.FromResult(new U9UomQueryResult(402, "token已过期", []));
+            }
             return Task.FromResult(UomResult);
         }
 

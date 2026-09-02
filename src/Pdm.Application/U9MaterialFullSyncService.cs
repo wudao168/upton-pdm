@@ -11,8 +11,10 @@ public sealed class U9MaterialFullSyncService(
     TimeProvider timeProvider)
 {
     private const int ReferencePageSize = 1000;
+    private const int FallbackReferencePageSize = 200;
     private const int MaximumReferencePages = 100;
     private const int DetailBatchSize = 50;
+    private const int ExpiredTokenResponseCode = 402;
 
     public Task<U9MaterialFullSyncRun?> GetLatestRunAsync(CancellationToken cancellationToken) =>
         materials.GetLatestU9MaterialFullSyncRunAsync(cancellationToken);
@@ -43,13 +45,7 @@ public sealed class U9MaterialFullSyncService(
         try
         {
             var configuration = await RequireConfigurationAsync(cancellationToken);
-            var authentication = await client.AuthenticateAsync(new(
-                configuration.BaseUrl,
-                configuration.EnterpriseCode,
-                configuration.OrganizationCode,
-                configuration.UserCode,
-                configuration.ClientId,
-                secretProtector.Unprotect(configuration.ClientSecretCiphertext)), cancellationToken);
+            var clientSecret = secretProtector.Unprotect(configuration.ClientSecretCiphertext);
 
             var results = new List<U9MaterialFullSyncCategoryResult>(categories.Length);
             foreach (var category in categories)
@@ -57,8 +53,15 @@ public sealed class U9MaterialFullSyncService(
                 U9MaterialFullSyncCategoryResult result;
                 try
                 {
+                    var authentication = await client.AuthenticateAsync(new(
+                        configuration.BaseUrl,
+                        configuration.EnterpriseCode,
+                        configuration.OrganizationCode,
+                        configuration.UserCode,
+                        configuration.ClientId,
+                        clientSecret), cancellationToken);
                     result = await SynchronizeCategoryAsync(
-                        configuration, authentication.Token, category, actor, cancellationToken);
+                        configuration, authentication.Token, clientSecret, category, actor, cancellationToken);
                 }
                 catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
                 {
@@ -78,7 +81,8 @@ public sealed class U9MaterialFullSyncService(
             await repository.AppendAuditAsync(new AuditEntry(
                 Guid.NewGuid(), run.CompletedAt!.Value, actor, "u9.material.full-sync", nameof(U9MaterialFullSyncRun), run.Id.ToString(),
                 $"U9C料品自动全量同步：分类{run.CategoryCount}，完成{run.CompletedCategoryCount}，失败{run.FailedCategoryCount}；" +
-                $"发现{run.DiscoveredCount}，新建{run.CreatedCount}，刷新{run.RefreshedCount}，跳过{run.SkippedCount}；未执行U9C写入。"), cancellationToken);
+                $"发现{run.DiscoveredCount}，新建{run.CreatedCount}，刷新{run.RefreshedCount}，停用{run.CategoryResults.Sum(item => item.InactivatedCount)}，" +
+                $"冲突{run.CategoryResults.Sum(item => item.ConflictCount)}，跳过{run.SkippedCount}；未执行U9C写入。"), cancellationToken);
             return run;
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -101,6 +105,7 @@ public sealed class U9MaterialFullSyncService(
     private async Task<U9MaterialFullSyncCategoryResult> SynchronizeCategoryAsync(
         U9MaterialIntegrationConfiguration configuration,
         string token,
+        string clientSecret,
         MaterialCategory category,
         string actor,
         CancellationToken cancellationToken)
@@ -109,25 +114,39 @@ public sealed class U9MaterialFullSyncService(
         var created = 0;
         var refreshed = 0;
         var skipped = 0;
+        var conflicts = 0;
+        var categorySyncStartedAt = timeProvider.GetUtcNow();
         var maximumSequence = category.CurrentSequence;
         var seenCodes = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        string? codeCursor = null;
+        var referencePageSize = ReferencePageSize;
 
-        for (var pageIndex = 0; pageIndex < MaximumReferencePages; pageIndex++)
+        for (var pageAttempt = 1; pageAttempt <= MaximumReferencePages; pageAttempt++)
         {
-            var payload = JsonSerializer.Serialize(new
+            var referenceFilter = $"MainItemCategory.Code = '{category.Code}'";
+            if (codeCursor is not null)
+                referenceFilter += $" and Code > '{codeCursor.Replace("'", "''", StringComparison.Ordinal)}'";
+            var payload = BuildReferencePayload(configuration, referenceFilter, referencePageSize);
+            U9CustomerQueryResult page;
+            try
             {
-                ReferenceCode = "ItemMaster",
-                ReferenceEntityFullName = "UFIDA.U9.CBO.SCM.Item.ItemMaster",
-                ReferenceDefaultFilter = $"MainItemCategory.Code = '{category.Code}'",
-                Transclude = string.Empty,
-                TargetOrgCode = configuration.OrganizationCode,
-                PageIndex = pageIndex,
-                PageSize = ReferencePageSize,
-                Filter = string.Empty,
-                FilterObjectXML = string.Empty
-            });
-            var page = await client.QueryCustomerReferencesAsync(
-                configuration.BaseUrl, configuration.CustomerQueryPath, token, payload, cancellationToken);
+                page = await client.QueryCustomerReferencesAsync(
+                    configuration.BaseUrl, configuration.CustomerQueryPath, token, payload, cancellationToken);
+            }
+            catch (Exception exception) when (exception is not OperationCanceledException)
+            {
+                referencePageSize = FallbackReferencePageSize;
+                token = await AuthenticateAsync(configuration, clientSecret, cancellationToken);
+                payload = BuildReferencePayload(configuration, referenceFilter, referencePageSize);
+                page = await client.QueryCustomerReferencesAsync(
+                    configuration.BaseUrl, configuration.CustomerQueryPath, token, payload, cancellationToken);
+            }
+            if (page.ResponseCode == ExpiredTokenResponseCode)
+            {
+                token = await AuthenticateAsync(configuration, clientSecret, cancellationToken);
+                page = await client.QueryCustomerReferencesAsync(
+                    configuration.BaseUrl, configuration.CustomerQueryPath, token, payload, cancellationToken);
+            }
             if (page.ResponseCode != 0)
                 throw new PdmRuleException($"U9C分类 {category.Code} 全量查询失败（ResCode={page.ResponseCode}）：{page.ResponseMessage ?? "未返回错误说明"}。");
 
@@ -137,6 +156,13 @@ public sealed class U9MaterialFullSyncService(
                 .ToArray();
             if (page.RawCount > 0 && pageCodes.Length == 0)
                 throw new PdmRuleException($"U9C分类 {category.Code} 分页未向后推进，已停止本次同步。");
+            if (pageCodes.Length > 0)
+            {
+                var nextCursor = pageCodes.Max(StringComparer.OrdinalIgnoreCase)!;
+                if (codeCursor is not null && string.Compare(nextCursor, codeCursor, StringComparison.OrdinalIgnoreCase) <= 0)
+                    throw new PdmRuleException($"U9C分类 {category.Code} 料号游标未向后推进，已停止本次同步。");
+                codeCursor = nextCursor;
+            }
 
             discovered += pageCodes.Length;
             foreach (var code in pageCodes)
@@ -146,8 +172,10 @@ public sealed class U9MaterialFullSyncService(
                 .ToDictionary(item => item.MaterialCode, StringComparer.OrdinalIgnoreCase);
             foreach (var codeBatch in pageCodes.Chunk(DetailBatchSize))
             {
-                var details = await QueryDetailsAsync(
-                    configuration, token, category.Code, codeBatch, cancellationToken);
+                var detailResult = await QueryDetailsAsync(
+                    configuration, token, clientSecret, category.Code, codeBatch, cancellationToken);
+                token = detailResult.Token;
+                var details = detailResult.Items;
                 var detailsByCode = details
                     .Where(item => !string.IsNullOrWhiteSpace(item.U9ItemCode))
                     .GroupBy(item => item.U9ItemCode!.Trim(), StringComparer.OrdinalIgnoreCase)
@@ -170,6 +198,7 @@ public sealed class U9MaterialFullSyncService(
                         && existing.MasterOwner != MaterialMasterOwner.U9C)
                     {
                         skipped++;
+                        conflicts++;
                         continue;
                     }
 
@@ -178,7 +207,7 @@ public sealed class U9MaterialFullSyncService(
                     var candidate = new PdmMaterial(
                         Guid.NewGuid(), code, (item.U9ItemName ?? code).Trim(), category.PdmKind!.Value,
                         ResolveSupplyMode(item.U9ItemFormAttribute, category.DefaultSupplyMode),
-                        U9UnitCatalog.Normalize(item.U9UnitCode), Clean(item.U9Specification), Clean(item.U9Material),
+                        U9UnitCatalog.NormalizeInbound(item.U9UnitCode), Clean(item.U9Specification), Clean(item.U9Material),
                         Clean(item.U9Description), Clean(item.U9Brand), Clean(item.U9SurfaceTreatment),
                         weight, weight is null ? null : Clean(item.U9WeightUnitCode), null,
                         MaterialApprovalStatus.Approved, actor, importedAt, category.Code,
@@ -192,19 +221,25 @@ public sealed class U9MaterialFullSyncService(
                 }
             }
 
-            if (page.RawCount == 0 || page.RawCount < ReferencePageSize) break;
-            if (pageIndex == MaximumReferencePages - 1)
+            if (page.RawCount == 0 || page.RawCount < referencePageSize) break;
+            if (pageAttempt == MaximumReferencePages)
                 throw new PdmRuleException($"U9C分类 {category.Code} 超过最大安全分页范围，已停止本次同步。");
         }
 
         if (maximumSequence > category.CurrentSequence)
             await materials.AdvanceCategoryCounterAsync(category, maximumSequence, cancellationToken);
-        return new(category.Code, category.Name, discovered, created, refreshed, skipped, maximumSequence, true, null);
+        await materials.MarkU9MaterialsObservedAsync(
+            category.Code, seenCodes, categorySyncStartedAt, cancellationToken);
+        var inactivated = await materials.ArchiveMissingU9MaterialsAsync(
+            category.Code, categorySyncStartedAt, actor, timeProvider.GetUtcNow(), cancellationToken);
+        return new(category.Code, category.Name, discovered, created, refreshed, skipped, maximumSequence, true, null,
+            inactivated, conflicts);
     }
 
-    private async Task<IReadOnlyList<U9ItemReference>> QueryDetailsAsync(
+    private async Task<(IReadOnlyList<U9ItemReference> Items, string Token)> QueryDetailsAsync(
         U9MaterialIntegrationConfiguration configuration,
         string token,
+        string clientSecret,
         string categoryCode,
         IReadOnlyList<string> materialCodes,
         CancellationToken cancellationToken)
@@ -213,9 +248,8 @@ public sealed class U9MaterialFullSyncService(
         U9ItemQueryResult batch;
         try
         {
-            batch = await client.QueryItemsAsync(
-                configuration.BaseUrl, configuration.ItemQueryPath, token,
-                U9MaterialPayloadFactory.QueryPayload(materialCodes, correlationId), cancellationToken);
+            batch = await QueryItemsWithTokenRefreshAsync(
+                U9MaterialPayloadFactory.QueryPayload(materialCodes, correlationId));
         }
         catch (Exception exception) when (exception is not OperationCanceledException && materialCodes.Count > 1)
         {
@@ -227,22 +261,64 @@ public sealed class U9MaterialFullSyncService(
                 .Where(item => !string.IsNullOrWhiteSpace(item.U9ItemCode))
                 .Select(item => item.U9ItemCode!.Trim())
                 .ToHashSet(StringComparer.OrdinalIgnoreCase);
-            if (materialCodes.All(returnedCodes.Contains)) return batch.Items;
+            if (materialCodes.All(returnedCodes.Contains)) return (batch.Items, token);
         }
 
         var items = new List<U9ItemReference>(materialCodes.Count);
         foreach (var code in materialCodes)
         {
-            var detail = await client.QueryItemsAsync(
-                configuration.BaseUrl, configuration.ItemQueryPath, token,
-                U9MaterialPayloadFactory.QueryPayload(code, correlationId), cancellationToken);
+            var detail = await QueryItemsWithTokenRefreshAsync(
+                U9MaterialPayloadFactory.QueryPayload(code, correlationId));
             if (detail.ResponseCode != 0)
                 throw new PdmRuleException($"U9C料品 {code} 查询失败（ResCode={detail.ResponseCode}）：{detail.ResponseMessage ?? "未返回错误说明"}。");
             var item = detail.Items.FirstOrDefault(value => string.Equals(value.U9ItemCode, code, StringComparison.OrdinalIgnoreCase));
             if (item is not null) items.Add(item);
         }
-        return items;
+        return (items, token);
+
+        async Task<U9ItemQueryResult> QueryItemsWithTokenRefreshAsync(string payload)
+        {
+            var result = await client.QueryItemsAsync(
+                configuration.BaseUrl, configuration.ItemQueryPath, token, payload, cancellationToken);
+            if (result.ResponseCode != ExpiredTokenResponseCode) return result;
+
+            token = await AuthenticateAsync(configuration, clientSecret, cancellationToken);
+            return await client.QueryItemsAsync(
+                configuration.BaseUrl, configuration.ItemQueryPath, token, payload, cancellationToken);
+        }
     }
+
+    private async Task<string> AuthenticateAsync(
+        U9MaterialIntegrationConfiguration configuration,
+        string clientSecret,
+        CancellationToken cancellationToken)
+    {
+        var authentication = await client.AuthenticateAsync(new(
+            configuration.BaseUrl,
+            configuration.EnterpriseCode,
+            configuration.OrganizationCode,
+            configuration.UserCode,
+            configuration.ClientId,
+            clientSecret), cancellationToken);
+        return authentication.Token;
+    }
+
+    private static string BuildReferencePayload(
+        U9MaterialIntegrationConfiguration configuration,
+        string referenceFilter,
+        int pageSize) =>
+        JsonSerializer.Serialize(new
+        {
+            ReferenceCode = "ItemMaster",
+            ReferenceEntityFullName = "UFIDA.U9.CBO.SCM.Item.ItemMaster",
+            ReferenceDefaultFilter = referenceFilter,
+            Transclude = string.Empty,
+            TargetOrgCode = configuration.OrganizationCode,
+            PageIndex = 1,
+            PageSize = pageSize,
+            Filter = string.Empty,
+            FilterObjectXML = string.Empty
+        });
 
     private async Task<U9MaterialIntegrationConfiguration> RequireConfigurationAsync(CancellationToken cancellationToken)
     {

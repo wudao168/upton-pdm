@@ -6,6 +6,7 @@ import U9IntegrationManagement from '../src/components/U9IntegrationManagement.v
 const api = vi.hoisted(() => ({
   getU9MaterialIntegration: vi.fn(),
   getU9MaterialFullSyncStatus: vi.fn(),
+  startU9MaterialFullSync: vi.fn(),
   updateU9MaterialIntegration: vi.fn(),
   testU9MaterialIntegration: vi.fn(),
   previewU9MaterialSample: vi.fn(),
@@ -59,6 +60,7 @@ describe('U9IntegrationManagement', () => {
         categoryResults: [{ categoryCode: '0302', categoryName: '设备', discoveredCount: 20, createdCount: 2, refreshedCount: 18, skippedCount: 0, maximumSequence: 5424, succeeded: true }],
       },
     })
+    api.startU9MaterialFullSync.mockResolvedValue({ message: '全量同步已启动' })
     api.updateU9MaterialIntegration.mockImplementation(async input => ({ ...input, clientSecretConfigured: true }))
     api.testU9MaterialIntegration.mockResolvedValue({ ...settings, testedAt: '2026-08-20T00:00:00Z' })
     api.previewU9MaterialSample.mockResolvedValue({ categoryCodes: ['0101', '0102', '0204'], limitPerCategory: 10, queriedAt: '2026-08-20T00:00:00Z', items: [] })
@@ -115,6 +117,7 @@ describe('U9IntegrationManagement', () => {
     expect(panel.text()).toContain('0302 设备')
     expect(panel.text()).toContain('发现料品120')
     expect(panel.text()).toContain('最大流水')
+    expect(panel.text()).toContain('立即全量同步')
     expect(panel.text()).not.toContain('每类最多10条')
     expect(panel.text()).not.toContain('只读预览')
     expect(api.getU9MaterialFullSyncStatus).toHaveBeenCalledWith('token')

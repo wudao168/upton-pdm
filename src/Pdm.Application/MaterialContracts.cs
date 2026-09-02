@@ -51,6 +51,18 @@ public sealed record SaveMaterialCategoryCommand(
 
 public sealed record CalibrateMaterialCategoryCounterCommand(string LastMaterialCode);
 
+public sealed record MaterialNumberingSettings(long StartSequence, int SequenceLength = 7);
+
+public sealed record MaterialDuplicateRule(
+    string CategoryCode,
+    IReadOnlyList<string> Fields);
+
+public sealed record MaterialPage(
+    IReadOnlyList<PdmMaterial> Items,
+    int Total,
+    int Page,
+    int PageSize);
+
 public sealed record LinkBomMaterialCommand(Guid ProjectId, Guid BomItemId, Guid MaterialId);
 
 public sealed record ResolveMaterialCodesCommand(Guid ProjectId, IReadOnlyList<Guid> BomItemIds);
@@ -241,6 +253,7 @@ public interface IU9OpenApiClient
 public interface IMaterialRepository
 {
     Task<IReadOnlyList<PdmMaterial>> ListMaterialsAsync(string? query, string? categoryCode, bool includeArchived, int limit, CancellationToken cancellationToken);
+    Task<MaterialPage> ListMaterialPageAsync(string? query, string? categoryCode, string? brand, bool includeArchived, int page, int pageSize, CancellationToken cancellationToken);
     Task<PdmMaterial?> FindMaterialAsync(Guid materialId, CancellationToken cancellationToken);
     Task<PdmMaterial?> FindMaterialByCodeAsync(string materialCode, CancellationToken cancellationToken);
     Task<IReadOnlyList<PdmMaterial>> FindMaterialsByCodesAsync(IReadOnlyList<string> materialCodes, CancellationToken cancellationToken);
@@ -259,8 +272,23 @@ public interface IMaterialRepository
     Task<bool> HasMaterialReferencesAsync(Guid materialId, CancellationToken cancellationToken);
     Task<int> CountMaterialReferencesAsync(Guid materialId, CancellationToken cancellationToken);
     Task<string> ReserveNextMaterialCodeAsync(MaterialCategory category, long minimumCurrentSequence, CancellationToken cancellationToken);
+    Task<long> GetMaterialCodeStartSequenceAsync(CancellationToken cancellationToken);
+    Task<long> SaveMaterialCodeStartSequenceAsync(long startSequence, DateTimeOffset updatedAt, CancellationToken cancellationToken);
+    Task<IReadOnlyList<MaterialDuplicateRule>> GetMaterialDuplicateRulesAsync(CancellationToken cancellationToken);
+    Task<IReadOnlyList<MaterialDuplicateRule>> SaveMaterialDuplicateRulesAsync(IReadOnlyList<MaterialDuplicateRule> rules, DateTimeOffset updatedAt, CancellationToken cancellationToken);
     Task<PdmMaterial> CreateMaterialAsync(PdmMaterial material, MaterialCategory category, CancellationToken cancellationToken);
     Task<PdmMaterial> UpsertU9MaterialAsync(PdmMaterial material, CancellationToken cancellationToken);
+    Task MarkU9MaterialsObservedAsync(
+        string categoryCode,
+        IReadOnlyCollection<string> materialCodes,
+        DateTimeOffset observedAt,
+        CancellationToken cancellationToken);
+    Task<int> ArchiveMissingU9MaterialsAsync(
+        string categoryCode,
+        DateTimeOffset synchronizedSince,
+        string actor,
+        DateTimeOffset archivedAt,
+        CancellationToken cancellationToken);
     Task<PdmMaterial> UpdateMaterialAsync(PdmMaterial material, long expectedRowVersion, CancellationToken cancellationToken);
     Task<PdmMaterial> UpdatePlmMetadataAsync(PdmMaterial material, long expectedRowVersion, CancellationToken cancellationToken);
     Task<(PdmMaterial Material, MaterialSyncTask Task)> UpdateAndEnqueueAsync(
