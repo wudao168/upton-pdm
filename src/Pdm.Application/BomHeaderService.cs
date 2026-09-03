@@ -149,46 +149,65 @@ public sealed class BomHeaderService(
         if (approvedKind == ProjectBomHeaderKind.Master)
             throw new PdmRuleException("主BOM批准不能作为三类BOM自动申请触发条件。");
 
-        var gate = AutomaticApplicationLocks.GetOrAdd(projectId, static _ => new SemaphoreSlim(1, 1));
+        var hierarchy = new List<Project>();
+        var current = await repository.FindProjectAsync(projectId, cancellationToken)
+            ?? throw new PdmNotFoundException("项目不存在。");
+        var visited = new HashSet<Guid>();
+        while (visited.Add(current.Id))
+        {
+            hierarchy.Add(current);
+            if (current.ParentProjectId is not Guid parentId) break;
+            current = await repository.FindProjectAsync(parentId, cancellationToken)
+                ?? throw new PdmNotFoundException("上级项目不存在。");
+        }
+
+        var rootProjectId = hierarchy[^1].Id;
+        var gate = AutomaticApplicationLocks.GetOrAdd(rootProjectId, static _ => new SemaphoreSlim(1, 1));
         await gate.WaitAsync(cancellationToken);
         try
         {
-            var project = await repository.FindProjectAsync(projectId, cancellationToken)
-                ?? throw new PdmNotFoundException("项目不存在。");
-            var bindings = (await repository.ListProjectBomHeaderBindingsAsync(projectId, cancellationToken))
-                .ToDictionary(binding => binding.Kind);
-            var applications = (await materials.ListMaterialCodeApplicationsAsync(projectId, null, cancellationToken)).ToList();
             var generatedCount = 0;
             var existingCount = 0;
-
-            foreach (var kind in new[] { ProjectBomHeaderKind.Master, approvedKind }.Distinct())
+            var expectedCount = 0;
+            for (var index = 0; index < hierarchy.Count; index++)
             {
-                bindings.TryGetValue(kind, out var binding);
-                var boundMaterial = binding is null
-                    ? null
-                    : await materials.FindMaterialAsync(binding.MaterialId, cancellationToken);
-                if (boundMaterial is not null)
+                var project = hierarchy[index];
+                var bindings = (await repository.ListProjectBomHeaderBindingsAsync(project.Id, cancellationToken))
+                    .ToDictionary(binding => binding.Kind);
+                var applications = (await materials.ListMaterialCodeApplicationsAsync(project.Id, null, cancellationToken)).ToList();
+                IEnumerable<ProjectBomHeaderKind> kinds = index == 0
+                    ? new[] { ProjectBomHeaderKind.Master, approvedKind }.Distinct()
+                    : new[] { ProjectBomHeaderKind.Master };
+                foreach (var kind in kinds)
                 {
-                    var latest = LatestHeaderApplication(applications, kind);
-                    if (boundMaterial.ApprovalStatus == MaterialApprovalStatus.Draft
-                        && (latest is null || latest.Status == MaterialCodeApplicationStatus.Rejected))
+                    expectedCount++;
+                    bindings.TryGetValue(kind, out var binding);
+                    var boundMaterial = binding is null
+                        ? null
+                        : await materials.FindMaterialAsync(binding.MaterialId, cancellationToken);
+                    if (boundMaterial is not null)
                     {
-                        var application = await CreateHeaderApplicationAsync(project, kind, boundMaterial, actor, cancellationToken);
-                        applications.Add(application);
-                        generatedCount++;
+                        var latest = LatestHeaderApplication(applications, kind);
+                        if (boundMaterial.ApprovalStatus == MaterialApprovalStatus.Draft
+                            && (latest is null || latest.Status == MaterialCodeApplicationStatus.Rejected))
+                        {
+                            var application = await CreateHeaderApplicationAsync(project, kind, boundMaterial, actor, cancellationToken);
+                            applications.Add(application);
+                            generatedCount++;
+                        }
+                        else
+                        {
+                            existingCount++;
+                        }
+                        continue;
                     }
-                    else
-                    {
-                        existingCount++;
-                    }
-                    continue;
-                }
 
-                await GenerateMaterialAfterBomApprovalAsync(project, kind, binding?.RowVersion ?? 0, actor, cancellationToken);
-                generatedCount++;
+                    await GenerateMaterialAfterBomApprovalAsync(project, kind, binding?.RowVersion ?? 0, actor, cancellationToken);
+                    generatedCount++;
+                }
             }
 
-            return new BomHeaderGenerationResult(project.Id, 2, generatedCount, existingCount, []);
+            return new BomHeaderGenerationResult(rootProjectId, expectedCount, generatedCount, existingCount, []);
         }
         finally
         {

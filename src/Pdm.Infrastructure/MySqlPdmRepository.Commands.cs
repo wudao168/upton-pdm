@@ -336,6 +336,67 @@ public sealed partial class MySqlPdmRepository
         return package;
     }
 
+    public async Task<ReleasePackage> UpdateDraftReleasePackageAsync(ReleasePackage package, CancellationToken cancellationToken)
+    {
+        await using var connection = await OpenAsync(cancellationToken);
+        var affected = await connection.ExecuteAsync(new CommandDefinition(
+            """
+            UPDATE release_package
+            SET reference_snapshot_id=@ReferenceSnapshotId,
+                selected_bom_item_ids_json=@SelectedBomItemIds,
+                mechanical_bom_revision=@MechanicalBomRevision,
+                electrical_bom_revision=@ElectricalBomRevision,
+                mechanical_bom_snapshot_json=@MechanicalBomSnapshot,
+                electrical_bom_snapshot_json=@ElectricalBomSnapshot,
+                standard_bom_revision=@StandardBomRevision,
+                non_standard_bom_revision=@NonStandardBomRevision,
+                standard_bom_snapshot_json=@StandardBomSnapshot,
+                non_standard_bom_snapshot_json=@NonStandardBomSnapshot,
+                change_reason=@ChangeReason,
+                row_version=row_version+1
+            WHERE id=@Id AND state='Draft'
+            """,
+            new
+            {
+                package.Id,
+                package.ReferenceSnapshotId,
+                SelectedBomItemIds = JsonSerializer.Serialize(package.SelectedBomItemIds, jsonOptions),
+                package.MechanicalBomRevision,
+                package.ElectricalBomRevision,
+                MechanicalBomSnapshot = JsonSerializer.Serialize(package.MechanicalBomSnapshot, jsonOptions),
+                ElectricalBomSnapshot = JsonSerializer.Serialize(package.ElectricalBomSnapshot, jsonOptions),
+                package.StandardBomRevision,
+                package.NonStandardBomRevision,
+                StandardBomSnapshot = JsonSerializer.Serialize(package.StandardBomSnapshot, jsonOptions),
+                NonStandardBomSnapshot = JsonSerializer.Serialize(package.NonStandardBomSnapshot, jsonOptions),
+                package.ChangeReason
+            },
+            cancellationToken: cancellationToken));
+        if (affected != 1) throw new PdmConflictException("只有草稿发布包可以编辑，请刷新后重试。");
+        return await FindReleasePackageAsync(package.Id, cancellationToken)
+            ?? throw new PdmNotFoundException("发布包不存在。");
+    }
+
+    public async Task DeleteDraftReleasePackageAsync(Guid releasePackageId, CancellationToken cancellationToken)
+    {
+        await using var connection = await OpenAsync(cancellationToken);
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+        var state = await connection.QuerySingleOrDefaultAsync<string>(new CommandDefinition(
+            "SELECT state FROM release_package WHERE id=@Id FOR UPDATE",
+            new { Id = releasePackageId }, transaction, cancellationToken: cancellationToken));
+        if (state is null) throw new PdmNotFoundException("发布包不存在。");
+        if (!string.Equals(state, ReleasePackageState.Draft.ToString(), StringComparison.Ordinal))
+            throw new PdmConflictException("只有草稿发布包可以删除，请刷新后重试。");
+        await connection.ExecuteAsync(new CommandDefinition(
+            "DELETE FROM approval_task WHERE release_package_id=@Id",
+            new { Id = releasePackageId }, transaction, cancellationToken: cancellationToken));
+        var affected = await connection.ExecuteAsync(new CommandDefinition(
+            "DELETE FROM release_package WHERE id=@Id AND state='Draft'",
+            new { Id = releasePackageId }, transaction, cancellationToken: cancellationToken));
+        if (affected != 1) throw new PdmConflictException("发布包状态已变化，不能删除。");
+        await transaction.CommitAsync(cancellationToken);
+    }
+
     public async Task<ReleasePackage> SubmitReleasePackageAsync(Guid releasePackageId, string actor, CancellationToken cancellationToken)
     {
         await using var connection = await OpenAsync(cancellationToken);

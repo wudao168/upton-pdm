@@ -35,6 +35,7 @@ public sealed class U9BomWriteService(
             ? U9BomWriteOperation.Create
             : U9BomWriteOperation.Modify;
         normalized = normalized with { Operation = operation };
+        normalized = ReconcileComponentTotals(normalized, current);
         ValidateCurrent(normalized, current);
         return BuildPreview(context, normalized, current);
     }
@@ -46,6 +47,7 @@ public sealed class U9BomWriteService(
         var normalized = Normalize(command);
         var context = await LoadContextAsync(cancellationToken);
         var current = await QueryAsync(context, normalized.ItemCode, normalized.BomVersionCode, cancellationToken);
+        normalized = ReconcileComponentTotals(normalized, current);
         ValidateCurrent(normalized, current);
         return BuildPreview(context, normalized, current);
     }
@@ -96,6 +98,7 @@ public sealed class U9BomWriteService(
         var current = normalized.Operation == U9BomWriteOperation.Create
             ? new U9BomQueryResult(0, null, [])
             : await QueryAsync(context, normalized.ItemCode, normalized.BomVersionCode, cancellationToken);
+        normalized = ReconcileComponentTotals(normalized, current);
         if (normalized.Operation != U9BomWriteOperation.Create
             && !string.Equals(Fingerprint(current), preview.BaselineSha256, StringComparison.OrdinalIgnoreCase))
             throw new PdmRuleException("BOM在确认后已被其他客户端修改，请重新生成预览。");
@@ -226,6 +229,38 @@ public sealed class U9BomWriteService(
             ProjectMapNum = NormalizeText(command.ProjectMapNum),
             Explain = NormalizeText(command.Explain)
         };
+    }
+
+    private static U9BomWriteCommand ReconcileComponentTotals(U9BomWriteCommand command, U9BomQueryResult current)
+    {
+        if (!command.ReconcileComponentTotals || command.Operation != U9BomWriteOperation.Modify) return command;
+        var existing = FindMatching(current, command)?.Components
+            .Where(component => component.IsDelete != true && component.Sequence is not null)
+            .ToArray() ?? [];
+        static string Key(string itemCode, string? unitCode, decimal parentQty) =>
+            $"{itemCode.Trim()}|{unitCode?.Trim()}|{parentQty.ToString(CultureInfo.InvariantCulture)}";
+        var existingTotals = existing
+            .Where(component => !string.IsNullOrWhiteSpace(component.ItemCode) && component.UsageQty.HasValue && component.ParentQty.HasValue)
+            .GroupBy(component => Key(component.ItemCode!, component.IssueUomCode, component.ParentQty!.Value), StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(group => group.Key, group => group.Sum(component => component.UsageQty!.Value), StringComparer.OrdinalIgnoreCase);
+        var desired = command.Components
+            .GroupBy(component => Key(component.ItemCode, component.IssueUomCode, component.ParentQty), StringComparer.OrdinalIgnoreCase)
+            .Select(group => (Template: group.First(), Total: group.Sum(component => component.UsageQty)))
+            .ToArray();
+        var nextSequence = existing.Select(component => component.Sequence!.Value).DefaultIfEmpty(0).Max();
+        var additions = new List<U9BomComponentCommand>();
+        foreach (var (template, total) in desired)
+        {
+            var key = Key(template.ItemCode, template.IssueUomCode, template.ParentQty);
+            var existingTotal = existingTotals.GetValueOrDefault(key);
+            if (existingTotal > total)
+                throw new PdmRuleException($"U9C BOM中子件{template.ItemCode}现有总用量{existingTotal}大于PLM审核总量{total}；只追加策略不能自动减少，请人工复核。");
+            var delta = total - existingTotal;
+            if (delta <= 0) continue;
+            nextSequence = ((nextSequence / 10) + 1) * 10;
+            additions.Add(template with { Sequence = nextSequence, UsageQty = delta });
+        }
+        return command with { Components = additions };
     }
 
     private static void ValidateCurrent(U9BomWriteCommand command, U9BomQueryResult current)

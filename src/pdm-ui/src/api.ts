@@ -1,6 +1,6 @@
-import type { AddDrawingReviewMarkupInput, ApprovalStep, ApprovalU9AutomationResult, AuditEntry, BatchUpdateBomItemsInput, BomClassification, BomEmptyDeclaration, BomGenerationResult, BomHeaderKind, BomItem, BomKind, BomValidationRules, BomVersion, BomVersionState, CreateProjectInput, CreateReleasePackageInput, CreateRoleInput, CreateSubprojectInput, CrmConnectionTestResult, CrmCustomerSyncResult, CrmIntegrationSettings, DocumentKind, DocumentModelDrawingRelation, DocumentNode, DocumentVersionComparison, DocumentVersionSummary, DocumentWhereUsed, DrawingReviewCandidate, DrawingReviewDecision, DrawingReviewPackage, DrawingReviewTarget, EditLockSummary, EquipmentTypeDefinition, FolderPermissionRule, MainProjectStaffingInput, ManagedDocument, ManufacturingBomBaseline, MaterialAttachment, MaterialAttachmentKind, MaterialCategory, MaterialCategoryRule, MaterialCodeApplication, MaterialCodeApplicationStatus, MaterialCodeDecisionResult, MaterialCodeResolution, MaterialDuplicateRule, MaterialKind, MaterialNumberingSettings, MaterialPage, MaterialRemovalReadiness, MaterialRemovalResult, MaterialSyncExecutionResult, MaterialSyncTask, MyApprovalTask, OrganizationDirectory, OrganizationUnit, PasswordResetTask, PdmCustomer, PdmMaterial, PdmSystemSettings, PdmUser, PdmUserProfile, ProgramTemplate, ProgramTemplateApprovalDecision, ProgramTemplateAttachmentKind, ProgramTemplateDraftInput, ProgramTemplateRevision, ProgramTemplateTask, ProgramTemplateVersionBump, ProjectBomHeader, ProjectBomU9SyncExecution, ProjectBomU9SyncPreview, ProjectFile, ProjectFileVersion, ProjectFolder, ProjectFolderTemplateNode, ProjectNumberingOptions, ProjectOrganization, ProjectSummary, ProjectVersionItem, ReferenceStatus, ReleasePackageSummary, ReleaseScope, RolePermissionDirectory, SaveMaterialInput, SaveOrganizationUnitInput, SavePdmUserInput, SaveProjectOrganizationInput, StandardLibraryCategory, StandardLibraryMaterialPage, U9BomQueryExecution, U9BomQueryInput, U9BomWriteExecution, U9BomWriteInput, U9BomWritePreview, U9ConnectionTestResult, U9ItemQueryResult, U9MaterialFullSyncStatusResponse, U9MaterialIntegrationSettings, U9MaterialSampleImportResult, U9MaterialSamplePreview, UpdateCrmIntegrationInput, UpdateProjectInput, UpdateU9MaterialIntegrationInput } from './types'
+import type { AddDrawingReviewMarkupInput, ApprovalStep, ApprovalU9AutomationResult, AuditEntry, BatchUpdateBomItemsInput, BomClassification, BomEmptyDeclaration, BomExportMode, BomGenerationResult, BomHeaderKind, BomItem, BomKind, BomValidationRules, BomVersion, BomVersionState, CreateProjectInput, CreateReleasePackageInput, CreateRoleInput, CreateSubprojectInput, CrmConnectionTestResult, CrmCustomerSyncResult, CrmIntegrationSettings, DocumentKind, DocumentModelDrawingRelation, DocumentNode, DocumentVersionComparison, DocumentVersionSummary, DocumentWhereUsed, DrawingReviewCandidate, DrawingReviewDecision, DrawingReviewPackage, DrawingReviewTarget, EditLockSummary, EquipmentTypeDefinition, FolderPermissionRule, MainProjectStaffingInput, ManagedDocument, ManufacturingBomBaseline, MaterialAttachment, MaterialAttachmentKind, MaterialCategory, MaterialCategoryRule, MaterialCodeApplication, MaterialCodeApplicationStatus, MaterialCodeDecisionResult, MaterialCodeResolution, MaterialDuplicateRule, MaterialKind, MaterialNumberingSettings, MaterialPage, MaterialRemovalReadiness, MaterialRemovalResult, MaterialSyncExecutionResult, MaterialSyncTask, MyApprovalTask, OrganizationDirectory, OrganizationUnit, PasswordResetTask, PdmCustomer, PdmMaterial, PdmSystemSettings, PdmUser, PdmUserProfile, ProgramTemplate, ProgramTemplateApprovalDecision, ProgramTemplateAttachmentKind, ProgramTemplateDraftInput, ProgramTemplateRevision, ProgramTemplateTask, ProgramTemplateVersionBump, ProjectBomHeader, ProjectBomU9SyncExecution, ProjectBomU9SyncPreview, ProjectFile, ProjectFileVersion, ProjectFolder, ProjectFolderTemplateNode, ProjectNumberingOptions, ProjectOrganization, ProjectSummary, ProjectVersionItem, ReferenceStatus, ReleaseItemComment, ReleasePackageSummary, ReleaseScope, RolePermissionDirectory, SaveMaterialInput, SaveOrganizationUnitInput, SavePdmUserInput, SaveProjectOrganizationInput, StandardLibraryCategory, StandardLibraryMaterialPage, U9BomQueryExecution, U9BomQueryInput, U9BomWriteExecution, U9BomWriteInput, U9BomWritePreview, U9ConnectionTestResult, U9ItemQueryResult, U9MaterialFullSyncStatusResponse, U9MaterialIntegrationSettings, U9MaterialSampleImportResult, U9MaterialSamplePreview, UpdateCrmIntegrationInput, UpdateProjectInput, UpdateReleasePackageDraftInput, UpdateU9MaterialIntegrationInput } from './types'
 import type { MaterialSyncBatch } from './types'
-import type { ApprovalTransferCandidate } from './types'
+import type { ApprovalTransferCandidate, UserNotification } from './types'
 
 import type { BomSourceReclassificationPreview } from './types'
 
@@ -965,14 +965,23 @@ export async function importBom(projectId: string, kind: BomKind, file: File, to
   return imported.map(mapBomItem)
 }
 
-export async function exportBom(projectId: string, kind: BomKind, token: string): Promise<Blob> {
-  const response = await fetch(`${apiBase}/api/projects/${projectId}/boms/${kind}/export`, { headers: authenticatedHeaders(token), cache: 'no-store' })
+export async function exportBom(projectId: string, kind: BomKind, mode: BomExportMode, token: string): Promise<{ blob: Blob; fileName: string }> {
+  const response = await fetch(`${apiBase}/api/projects/${projectId}/boms/${kind}/export?mode=${mode}`, { headers: authenticatedHeaders(token), cache: 'no-store' })
   if (!response.ok) throw new PdmApiError(`BOM导出失败（${response.status}）`, response.status)
-  return response.blob()
+  const disposition = response.headers.get('content-disposition') ?? ''
+  const encodedName = disposition.match(/filename\*=UTF-8''([^;]+)/i)?.[1]
+  const plainName = disposition.match(/filename="?([^";]+)"?/i)?.[1]
+  let fileName = `${kind.toLocaleLowerCase()}-bom.xlsx`
+  try {
+    fileName = encodedName ? decodeURIComponent(encodedName) : plainName ?? fileName
+  } catch {
+    fileName = plainName ?? fileName
+  }
+  return { blob: await response.blob(), fileName }
 }
 
-export async function generateMechanicalBom(projectId: string, apply: boolean, token: string): Promise<BomGenerationResult> {
-  const result = await requestJson<{ standardItems: ApiBomItem[]; nonStandardItems: ApiBomItem[]; electricalItems: ApiBomItem[]; unclassifiedItems: ApiBomItem[]; virtualItems: ApiBomItem[]; virtualCount: number; unclassifiedCount: number; pendingRemovalCount: number; manualUnmatchedCount: number; applied: boolean }>(`/api/projects/${projectId}/boms/generate?apply=${apply}`, { method: 'POST' }, token)
+export async function generateMechanicalBom(projectId: string, token: string): Promise<BomGenerationResult> {
+  const result = await requestJson<{ standardItems: ApiBomItem[]; nonStandardItems: ApiBomItem[]; electricalItems: ApiBomItem[]; unclassifiedItems: ApiBomItem[]; virtualItems: ApiBomItem[]; virtualCount: number; unclassifiedCount: number; pendingRemovalCount: number; manualUnmatchedCount: number; applied: boolean }>(`/api/projects/${projectId}/boms/generate?apply=false`, { method: 'POST' }, token)
   return { ...result, standardItems: result.standardItems.map(mapBomItem), nonStandardItems: result.nonStandardItems.map(mapBomItem), electricalItems: result.electricalItems.map(mapBomItem), unclassifiedItems: result.unclassifiedItems.map(mapBomItem), virtualItems: result.virtualItems.map(mapBomItem) }
 }
 
@@ -1083,6 +1092,14 @@ export function createReleasePackage(projectId: string, input: CreateReleasePack
   return requestJson('/api/release-packages', { method: 'POST', body: JSON.stringify({ projectId, referenceSnapshotId: null, ...input }) }, token)
 }
 
+export function updateReleasePackageDraft(releasePackageId: string, input: UpdateReleasePackageDraftInput, token: string): Promise<ApiReleasePackage> {
+  return requestJson(`/api/release-packages/${releasePackageId}/draft`, { method: 'PUT', body: JSON.stringify(input) }, token)
+}
+
+export function deleteReleasePackageDraft(releasePackageId: string, token: string): Promise<void> {
+  return requestJson(`/api/release-packages/${releasePackageId}/draft`, { method: 'DELETE' }, token)
+}
+
 export async function listBomVersions(projectId: string, token: string): Promise<BomVersion[]> {
   const versions = await requestJson<ApiBomVersion[]>(`/api/projects/${projectId}/bom-versions`, {}, token).catch(error => {
     if (error instanceof PdmApiError && error.status === 404) return []
@@ -1104,6 +1121,20 @@ export function submitReleasePackage(releasePackageId: string, token: string): P
 
 export function withdrawReleasePackage(releasePackageId: string, comment: string, token: string): Promise<ApiReleasePackage> {
   return requestJson(`/api/release-packages/${releasePackageId}/withdraw`, { method: 'POST', body: JSON.stringify({ comment }) }, token)
+}
+
+export function retryLongLeadU9(releasePackageId: string, token: string): Promise<{ releasePackageId: string; releasePackageNumber: string; headerApplications: { generatedCount: number; existingCount: number }; automation: ApprovalU9AutomationResult }> {
+  return requestJson(`/api/release-packages/${releasePackageId}/u9-retry`, { method: 'POST' }, token)
+}
+
+export function listReleaseItemComments(releasePackageId: string, token: string): Promise<ReleaseItemComment[]> {
+  return requestJson(`/api/release-packages/${releasePackageId}/item-comments`, {}, token)
+}
+
+export function addReleaseItemComment(releasePackageId: string, bomItemId: string, comment: string, token: string): Promise<ReleaseItemComment> {
+  return requestJson(`/api/release-packages/${releasePackageId}/item-comments`, {
+    method: 'POST', body: JSON.stringify({ bomItemId, comment }),
+  }, token)
 }
 
 export function listDocumentWhereUsed(documentId: string, token: string): Promise<DocumentWhereUsed[]> {
@@ -1153,6 +1184,18 @@ export function listAudit(token: string): Promise<AuditEntry[]> {
 
 export function listMyApprovalTasks(token: string): Promise<MyApprovalTask[]> {
   return requestJson('/api/approval-tasks/mine', {}, token)
+}
+
+export function listUserNotifications(token: string): Promise<UserNotification[]> {
+  return requestJson('/api/notifications/mine?take=200', {}, token)
+}
+
+export function markUserNotificationRead(notificationId: string, token: string): Promise<void> {
+  return requestJson(`/api/notifications/${notificationId}/read`, { method: 'POST' }, token)
+}
+
+export function markAllUserNotificationsRead(token: string): Promise<void> {
+  return requestJson('/api/notifications/read-all', { method: 'POST' }, token)
 }
 
 export function listEditLocks(token: string): Promise<EditLockSummary[]> {
@@ -1676,17 +1719,28 @@ function mapReleasePackage(releasePackage: ApiReleasePackage): ReleasePackageSum
   const state = releaseState(releasePackage.state)
   const approvalTasks = [...(releasePackage.approvalTasks ?? [])].sort((left, right) => (left.stepOrder ?? 0) - (right.stepOrder ?? 0))
   const currentTaskId = approvalTasks.find(task => !(task.decidedAt || task.decisionBy || task.decision !== null && task.decision !== undefined))?.id
+  const decisionOf = (task: ApiApprovalTask) => typeof task.decision === 'number'
+    ? (task.decision === 0 ? 'Approved' : task.decision === 1 ? 'Rejected' : undefined)
+    : task.decision
+  const rejectedOrder = approvalTasks.find(task => decisionOf(task) === 'Rejected')?.stepOrder
   const steps: ApprovalStep[] = approvalTasks.map((task) => {
     const stage = task.stepName || approvalStage(task.stage)
     const done = Boolean(task.decidedAt || task.decisionBy || task.decision !== null && task.decision !== undefined)
     const current = !done && currentTaskId === task.id && ['审批中', '工艺审核', '待批准'].includes(state)
+    const decision = decisionOf(task)
+    const skipped = !done && rejectedOrder !== undefined && (task.stepOrder ?? 0) > rejectedOrder
+    const status = decision === 'Approved' ? 'approved' : decision === 'Rejected' ? 'rejected' : skipped ? 'skipped' : current ? 'current' : 'waiting'
+    const decisionTime = task.decidedAt ? formatDate(task.decidedAt) : ''
     return {
       id: task.id,
       stage,
       assignee: task.assignee,
-      status: done ? 'done' : current ? 'current' : 'waiting',
-      detail: task.decidedAt ? formatDate(task.decidedAt) : done ? '已处理' : '待处理',
+      status,
+      detail: decision === 'Approved' ? `已同意${decisionTime ? ` · ${decisionTime}` : ''}`
+        : decision === 'Rejected' ? `已退回${decisionTime ? ` · ${decisionTime}` : ''}`
+          : skipped ? '本轮未到达' : '待处理',
       decision: task.decision ?? undefined,
+      decisionBy: task.decisionBy ?? undefined,
       comment: task.comment ?? undefined,
       stepOrder: task.stepOrder,
       emergencySubstitute: task.isEmergencySubstitute ?? false,
@@ -1698,8 +1752,8 @@ function mapReleasePackage(releasePackage: ApiReleasePackage): ReleasePackageSum
     id: 'production-release',
     stage: '生产发包',
     assignee: '生产部',
-    status: state === '已发布' ? 'done' : state === '发布中' ? 'current' : 'waiting',
-    detail: releasePackage.publishedAt ? formatDate(releasePackage.publishedAt) : '审批后自动推送',
+    status: state === '已发布' ? 'done' : state === '发布中' ? 'current' : state === '已驳回' ? 'skipped' : 'waiting',
+    detail: state === '已驳回' ? '本轮未到达' : releasePackage.publishedAt ? formatDate(releasePackage.publishedAt) : '审批后自动推送',
   })
 
   return {

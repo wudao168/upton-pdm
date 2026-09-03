@@ -911,6 +911,7 @@ public partial class MainWindow : Window
 
     private void OnWindowStateChanged(object? sender, EventArgs eventArgs)
     {
+        MaximizeGlyph.Text = WindowState == WindowState.Maximized ? "\uE923" : "\uE922";
         if (WindowState == WindowState.Minimized && !allowClose)
         {
             SuspendInteractiveSurfaces();
@@ -919,6 +920,21 @@ public partial class MainWindow : Window
         }
 
         ResumeInteractiveSurfaces();
+    }
+
+    private void OnMinimizeButtonClick(object sender, RoutedEventArgs eventArgs)
+    {
+        WindowState = WindowState.Minimized;
+    }
+
+    private void OnMaximizeButtonClick(object sender, RoutedEventArgs eventArgs)
+    {
+        WindowState = WindowState == WindowState.Maximized ? WindowState.Normal : WindowState.Maximized;
+    }
+
+    private void OnCloseButtonClick(object sender, RoutedEventArgs eventArgs)
+    {
+        ExitApplication();
     }
 
     private void OnWindowActivated(object? sender, EventArgs eventArgs) => ApplyPreviewSurfaces();

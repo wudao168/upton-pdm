@@ -93,7 +93,7 @@ const editStatusLabel = computed(() => {
 })
 const previewPropertyValue = (value?: string | null) => value?.trim() || '—'
 const previewProperties = computed(() => [
-  { label: '料号', value: previewPropertyValue(props.selected.drawingNumber) },
+  { label: '料号', value: previewPropertyValue(props.bomItem?.drawingNumber || props.selected.drawingNumber) },
   { label: '名称', value: previewPropertyValue(meaningfulSelectedName.value) },
   { label: '型号', value: previewPropertyValue(props.bomItem?.specification) },
   { label: '品牌', value: previewPropertyValue(props.bomItem?.brand) },
@@ -387,14 +387,13 @@ onBeforeUnmount(() => {
         <div class="pdm-preview-actions">
           <div class="pdm-markup-toolbar" aria-label="图形批注工具">
             <span>批注</span>
+            <button type="button" aria-label="保存批注" title="打开图纸审核面板保存批注" :disabled="!selected.documentId" @click="emit('review')">保存</button>
             <button type="button" aria-label="引线批注" title="带引线文字" :disabled="!selected.documentId" @click="activateMarkup('markup-text-leader')"><PencilLine :size="14" /></button>
             <button type="button" aria-label="云线批注" title="修订云线" :disabled="!selected.documentId" @click="activateMarkup('markup-cloud')"><Cloud :size="14" /></button>
             <button type="button" aria-label="框选批注" title="矩形框" :disabled="!selected.documentId" @click="activateMarkup('markup-rectangle')"><Square :size="14" /></button>
             <button type="button" aria-label="手绘批注" title="自由曲线" :disabled="!selected.documentId" @click="activateMarkup('markup-spline')"><RotateCcw :size="14" /></button>
           </div>
           <button type="button" class="pdm-review-toolbar-button" :class="[{ 'is-active': reviewPanelOpen }, `is-${reviewStatusTone}`]" aria-label="图纸审核" :aria-pressed="reviewPanelOpen" :disabled="!selected.documentId" @click="emit('review')"><ScanSearch :size="15" /><span>图纸审核</span><small>{{ reviewStatus }}</small></button>
-          <button type="button" aria-label="使用位置" title="查看该图档被哪些装配体引用" :disabled="!selected.documentId" @click="emit('whereUsed')"><Link2 :size="15" /><span>引用</span></button>
-          <button v-if="canManageLifecycle && lifecycleLabel !== '已作废'" type="button" aria-label="作废图档" title="受控作废当前图档" :disabled="!selected.documentId" @click="emit('obsolete')"><span>作废</span></button>
           <button type="button" aria-label="更多操作" title="查看更多图档操作" @click="emit('more')"><MoreHorizontal :size="17" /><span>更多</span></button>
         </div>
         <div class="pdm-solidworks-actions">

@@ -3,6 +3,29 @@ import { describe, expect, it, vi } from 'vitest'
 import MyTasks from '../src/components/MyTasks.vue'
 
 describe('MyTasks', () => {
+  it('shows persistent rejection notifications and deep-links to the release package', async () => {
+    const onMarkAllNotificationsRead = vi.fn().mockResolvedValue(undefined)
+    const notification = {
+      id: 'notification-1', recipient: 'designer', category: 'ReleaseApprovalRejected',
+      title: 'BOM发布审批已退回', content: 'P700005-3 · RP-001 被退回：结构需修改',
+      projectId: 'project-1', releasePackageId: 'release-1', sourceKey: 'release-package:release-1:rejected:task-1',
+      createdAt: '2026-09-03T08:11:56Z',
+    }
+    const wrapper = mount(MyTasks, {
+      props: {
+        tasks: [], notifications: [notification], locks: [], materialCodeTasks: [], passwordResetTasks: [], pending: false,
+        onRequestRelease: vi.fn(), onForceRelease: vi.fn(), onResetPassword: vi.fn(), onMarkAllNotificationsRead,
+      },
+    })
+
+    expect(wrapper.text()).toContain('BOM发布审批已退回')
+    expect(wrapper.text()).toContain('结构需修改')
+    await wrapper.findAll('button').find(button => button.text() === '查看发布包')!.trigger('click')
+    expect(wrapper.emitted('openNotification')).toEqual([[notification]])
+    await wrapper.findAll('button').find(button => button.text() === '全部已读')!.trigger('click')
+    expect(onMarkAllNotificationsRead).toHaveBeenCalledOnce()
+  })
+
   it('deep-links an approval task to its exact release package', async () => {
     const wrapper = mount(MyTasks, {
       props: {

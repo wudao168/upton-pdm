@@ -499,6 +499,8 @@ public interface IPdmRepository
     Task<IReadOnlyList<ReleasePackage>> ListReleasePackagesAsync(Guid projectId, CancellationToken cancellationToken);
     Task<ReleasePackage?> FindReleasePackageAsync(Guid releasePackageId, CancellationToken cancellationToken);
     Task<ReleasePackage?> FindReleasePackageByApprovalTaskAsync(Guid taskId, CancellationToken cancellationToken);
+    Task<IReadOnlyList<ReleaseItemComment>> ListReleaseItemCommentsAsync(Guid releasePackageId, CancellationToken cancellationToken);
+    Task<ReleaseItemComment> AddReleaseItemCommentAsync(ReleaseItemComment comment, CancellationToken cancellationToken);
     Task<IReadOnlyList<ReleasePreviewSource>> ListReleasePreviewSourcesAsync(Guid releasePackageId, CancellationToken cancellationToken);
     Task<IReadOnlyList<PdmDocument>> ListCheckedOutDocumentsAsync(CancellationToken cancellationToken);
     Task<PdmDocument> CheckoutAsync(Guid documentId, string actor, CancellationToken cancellationToken);
@@ -523,12 +525,18 @@ public interface IPdmRepository
         IReadOnlyDictionary<Guid, DocumentPreviewArtifact> previews,
         CancellationToken cancellationToken);
     Task<ReleasePackage> CreateReleasePackageAsync(ReleasePackage package, CancellationToken cancellationToken);
+    Task<ReleasePackage> UpdateDraftReleasePackageAsync(ReleasePackage package, CancellationToken cancellationToken);
+    Task DeleteDraftReleasePackageAsync(Guid releasePackageId, CancellationToken cancellationToken);
     Task<ReleasePackage> UpdateReleasePackageBomVersionsAsync(Guid releasePackageId, BomVersion standard, BomVersion nonStandard, BomVersion electrical, CancellationToken cancellationToken);
     Task<ReleasePackage> ApplyReleasePackageMaterialCodesAsync(Guid releasePackageId, IReadOnlyDictionary<Guid, string> materialCodes, string actor, CancellationToken cancellationToken);
     Task<ReleasePackage> SubmitReleasePackageAsync(Guid releasePackageId, string actor, CancellationToken cancellationToken);
     Task<ReleasePackage> WithdrawReleasePackageAsync(Guid releasePackageId, string actor, CancellationToken cancellationToken);
     Task<ReleasePackage> DecideApprovalAsync(Guid taskId, string actor, ApprovalDecision decision, string? comment, bool emergencySubstitute, string? emergencyReason, CancellationToken cancellationToken);
     Task<ReleasePackage> TransferApprovalAsync(Guid taskId, string expectedAssignee, string targetUsername, CancellationToken cancellationToken);
+    Task<IReadOnlyList<UserNotification>> ListUserNotificationsAsync(string recipient, int take, CancellationToken cancellationToken);
+    Task CreateUserNotificationsAsync(IReadOnlyList<UserNotification> notifications, CancellationToken cancellationToken);
+    Task MarkUserNotificationReadAsync(Guid notificationId, string recipient, DateTimeOffset readAt, CancellationToken cancellationToken);
+    Task MarkAllUserNotificationsReadAsync(string recipient, DateTimeOffset readAt, CancellationToken cancellationToken);
     Task<PdmDocument> ObsoleteDocumentAsync(Guid documentId, string actor, CancellationToken cancellationToken);
     Task MarkPublishedAsync(Guid releasePackageId, string publishedPath, DateTimeOffset publishedAt, CancellationToken cancellationToken);
     Task<ManufacturingBomBaseline> MarkPublishedWithBomBaselineAsync(ReleasePackage package, string publishedPath, DateTimeOffset publishedAt, string actor, CancellationToken cancellationToken);
@@ -565,6 +573,7 @@ public interface IFileStorage
 public interface IReleasePackagePublisher
 {
     Task PrepareAsync(ReleasePackage package, Project project, CancellationToken cancellationToken);
+    Task DiscardDraftAsync(ReleasePackage package, Project project, CancellationToken cancellationToken) => Task.CompletedTask;
     Task ValidateAsync(ReleasePackage package, Project project, CancellationToken cancellationToken);
     Task<ReleasePublication> PublishAsync(
         ReleasePackage package,

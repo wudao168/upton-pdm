@@ -1135,7 +1135,11 @@ describe('PLM client workspace', () => {
     expect(previewToolbar.get('.pdm-preview-document-name').text()).toBe('真实总装配')
     expect(previewToolbar.find('.pdm-selected-file').exists()).toBe(false)
     const markupToolbar = previewToolbar.get('[aria-label="图形批注工具"]')
-    expect(markupToolbar.findAll('button')).toHaveLength(4)
+    expect(markupToolbar.findAll('button').map(button => button.attributes('aria-label'))).toEqual([
+      '保存批注', '引线批注', '云线批注', '框选批注', '手绘批注',
+    ])
+    expect(previewToolbar.find('button[aria-label="使用位置"]').exists()).toBe(false)
+    expect(previewToolbar.find('button[aria-label="作废图档"]').exists()).toBe(false)
     await markupToolbar.get('button[aria-label="引线批注"]').trigger('click')
     expect(postMessage).toHaveBeenCalledWith({ type: 'preview-host-command', payload: { command: 'markup-text-leader' } })
 

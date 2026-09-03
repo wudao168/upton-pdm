@@ -45,7 +45,7 @@ const referenceChildren = Array.from({ length: 40 }, (_, index) => ({
 
 test.beforeEach(async ({ page }) => {
   let currentUsername = 'engineer'
-  await page.route(/^http:\/\/127\.0\.0\.1:(?:5080|5173)\/(?:api(?:\/.*)?|health)(?:\?.*)?$/, async (route) => {
+  await page.route(/^http:\/\/127\.0\.0\.1:(?:5080|5173|5193)\/(?:api(?:\/.*)?|health)(?:\?.*)?$/, async (route) => {
     const path = new URL(route.request().url()).pathname
     const fulfill = (body: unknown, status = 200) => route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(body) })
     if (path === '/health') return fulfill({ status: 'ok' })
@@ -225,14 +225,17 @@ test('engineer logs in and reads the API-backed PLM workspace', async ({ page },
   expect(previewLayout.pageHeight).toBeLessThanOrEqual(previewLayout.viewportHeight)
   await expect(page.getByText('PRJ-2026-018')).toHaveCount(0)
 
-  await page.getByRole('button', { name: '使用位置' }).click()
-  await expect(page.getByRole('heading', { name: '使用位置' })).toBeVisible()
-  await expect(page.getByText('REAL-TOP-001')).toBeVisible()
-  await page.keyboard.press('Escape')
-
-  await page.getByRole('button', { name: '作废图档' }).click()
-  await expect(page.getByText('作废后该图档不能再获取编辑权限。请填写可追溯的作废原因。')).toBeVisible()
-  await page.keyboard.press('Escape')
+  const markupToolbar = page.getByLabel('图形批注工具')
+  await expect(markupToolbar.locator('button')).toHaveCount(5)
+  expect(await markupToolbar.locator('button').evaluateAll(buttons => buttons.map(button => button.getAttribute('aria-label')))).toEqual([
+    '保存批注',
+    '引线批注',
+    '云线批注',
+    '框选批注',
+    '手绘批注',
+  ])
+  await expect(page.getByRole('button', { name: '使用位置' })).toHaveCount(0)
+  await expect(page.getByRole('button', { name: '作废图档' })).toHaveCount(0)
 
   await page.evaluate(() => window.dispatchEvent(new CustomEvent('pdm-solidworks-capability', { detail: { available: true } })))
   const solidWorksButton = page.getByRole('button', { name: '打开最新' })

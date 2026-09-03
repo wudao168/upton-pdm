@@ -7810,7 +7810,7 @@ public sealed class PdmAddin : ISwAddin
             if (identity == null && !referenceChanged && (fileMatchesLatest || historicalEditMatchesLatest) && !hasUnsavedChanges)
             {
                 LogOperation(string.Concat("Batch check-in skipped unchanged path=", node.FullPath));
-                await CompleteUnchangedEditAsync(node, node.FullPath, latest, cancellationToken);
+                await CompleteUnchangedEditAsync(node, node.FullPath, latest, projectId, cancellationToken);
                 return new BatchNodeCheckInResult(false, null);
             }
 
@@ -7869,7 +7869,7 @@ public sealed class PdmAddin : ISwAddin
                         && VersionMatchesLocalFile(latest, documentPath, localSha256))
                     || HistoricalPartEditMatchesLatest(node, latest, documentPath, localSha256)))
             {
-                await CompleteUnchangedEditAsync(node, documentPath, latest, cancellationToken);
+                await CompleteUnchangedEditAsync(node, documentPath, latest, projectId, cancellationToken);
                 return new BatchNodeCheckInResult(false, null);
             }
 
@@ -7922,6 +7922,7 @@ public sealed class PdmAddin : ISwAddin
             {
                 ProtectLoadedDocument(documentPath);
             }
+            RememberControlledVersionIdentity(documentPath, node.DocumentId.Value, projectId, checkIn.Version);
             LogOperation(string.Concat(
                 "Batch check-in file completed path=", node.FullPath,
                 " elapsedMs=", operationTimer.ElapsedMilliseconds));
@@ -7950,6 +7951,7 @@ public sealed class PdmAddin : ISwAddin
         CadTreeNode node,
         string activePath,
         DocumentVersionDto latest,
+        Guid projectId,
         CancellationToken cancellationToken)
     {
         var unchanged = await apiClient.CompleteEditWithoutChangesAsync(
@@ -7960,6 +7962,7 @@ public sealed class PdmAddin : ISwAddin
         ApplyCheckedInDocumentToMatchingInstances(node, unchanged, latest);
         historicalPartEditContexts.Remove(node.DocumentId.Value);
         ProtectLoadedDocument(activePath);
+        RememberControlledVersionIdentity(activePath, node.DocumentId.Value, projectId, latest);
     }
 
     private void OnCheckInRequested(object sender, CadTreeNodeEventArgs eventArgs)

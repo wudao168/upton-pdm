@@ -1,13 +1,14 @@
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
-import { ElMessageBox } from 'element-plus'
 import { batchDeleteBomItems as batchDeleteBomItemsRequest, batchRestoreBomItems as batchRestoreBomItemsRequest, restoreBomItemsFromSource as restoreBomItemsFromSourceRequest } from '../api'
 import { getBomSourceData } from '../api'
 import { transferApproval } from '../api'
+import { listUserNotifications, markAllUserNotificationsRead as markAllUserNotificationsReadRequest, markUserNotificationRead as markUserNotificationReadRequest } from '../api'
 import { addDrawingReviewMarkup as addDrawingReviewMarkupRequest, createDrawingReview as createDrawingReviewRequest, decideDrawingReviewTarget as decideDrawingReviewTargetRequest, listDrawingReviewCandidates, listDrawingReviews, resolveDrawingReviewMarkup as resolveDrawingReviewMarkupRequest, withdrawDrawingReview as withdrawDrawingReviewRequest } from '../api'
-import { batchUpdateBomItems as batchUpdateBomItemsRequest, changeMyPassword as changeMyPasswordRequest, checkHealth, compareDocumentVersions, createProject as createProjectRequest, createRole as createRoleRequest, createSubproject as createSubprojectRequest, createReleasePackage, createUser as createUserRequest, decideApproval, deleteProject as deleteProjectRequest, deleteRole as deleteRoleRequest, emergencyDecideApproval, exportBom, forceReleaseEditLock as forceReleaseEditLockRequest, generateMechanicalBom, getBomValidationRules, getCrmIntegrationSettings, getMyProfile, getOrganizationDirectory, getProjectNumberingOptions, getRolePermissionDirectory, getStorageStatus, getSystemSettings, importBom, listAudit, listBomBaselines, listBomVersions, listCustomers, listDocumentVersions, listDocumentWhereUsed, listEditLocks, listEquipmentTypes, listFolderTemplate, listMaterialCodeApplications, listMaterialSyncTasks, listMyApprovalTasks, listPasswordResetTasks, listProgramTemplateTasks, listProjectAudit, listProjects, listProjectVersions, loadProjectDocumentWorkspace, loadProjectWorkspace, login as apiLogin, obsoleteDocument as obsoleteDocumentRequest, PdmApiError, postDesktopMessage, readDocumentVersionFile, requestEditLockRelease as requestEditLockReleaseRequest, resetRequestedPassword as resetRequestedPasswordRequest, resetUserPassword as resetUserPasswordRequest, resolveBomItem as resolveBomItemRequest, restoreDocumentVersion, resumeSession as apiResumeSession, saveBom, saveEquipmentType as saveEquipmentTypeRequest, saveFolderTemplate as saveFolderTemplateRequest, saveOrganizationUnit as saveOrganizationUnitRequest, saveProjectOrganization as saveProjectOrganizationRequest, setBomEmptyDeclaration as setBomEmptyDeclarationRequest, submitReleasePackage, syncCrmCustomers as syncCrmCustomersRequest, testCrmIntegration as testCrmIntegrationRequest, updateChildProjectDesigners as updateChildProjectDesignersRequest, updateChildProjectManager as updateChildProjectManagerRequest, updateCrmIntegrationSettings as updateCrmIntegrationSettingsRequest, updateMainProjectStaffing as updateMainProjectStaffingRequest, updateMyProfile as updateMyProfileRequest, updateOrganizationCounters as updateOrganizationCountersRequest, updateOrganizationMemberships as updateOrganizationMembershipsRequest, updateOrganizationUnitManagers as updateOrganizationUnitManagersRequest, updateProject as updateProjectRequest, updateProjectExecutionUnit as updateProjectExecutionUnitRequest, updateProjectFolderPermissions as updateProjectFolderPermissionsRequest, updateRolePermissions as updateRolePermissionsRequest, updateSystemSettings as updateSystemSettingsRequest, updateUser as updateUserRequest, uploadReleaseFile, withdrawReleasePackage } from '../api'
+import { batchUpdateBomItems as batchUpdateBomItemsRequest, changeMyPassword as changeMyPasswordRequest, checkHealth, compareDocumentVersions, createProject as createProjectRequest, createRole as createRoleRequest, createSubproject as createSubprojectRequest, createReleasePackage, createUser as createUserRequest, decideApproval, deleteProject as deleteProjectRequest, deleteReleasePackageDraft as deleteReleasePackageDraftRequest, deleteRole as deleteRoleRequest, emergencyDecideApproval, exportBom, forceReleaseEditLock as forceReleaseEditLockRequest, generateMechanicalBom, getBomValidationRules, getCrmIntegrationSettings, getMyProfile, getOrganizationDirectory, getProjectNumberingOptions, getRolePermissionDirectory, getStorageStatus, getSystemSettings, importBom, listAudit, listBomBaselines, listBomVersions, listCustomers, listDocumentVersions, listDocumentWhereUsed, listEditLocks, listEquipmentTypes, listFolderTemplate, listMaterialCodeApplications, listMaterialSyncTasks, listMyApprovalTasks, listPasswordResetTasks, listProgramTemplateTasks, listProjectAudit, listProjects, listProjectVersions, loadProjectDocumentWorkspace, loadProjectWorkspace, login as apiLogin, obsoleteDocument as obsoleteDocumentRequest, PdmApiError, postDesktopMessage, readDocumentVersionFile, requestEditLockRelease as requestEditLockReleaseRequest, resetRequestedPassword as resetRequestedPasswordRequest, resetUserPassword as resetUserPasswordRequest, resolveBomItem as resolveBomItemRequest, restoreDocumentVersion, resumeSession as apiResumeSession, retryLongLeadU9 as retryLongLeadU9Request, saveBom, saveEquipmentType as saveEquipmentTypeRequest, saveFolderTemplate as saveFolderTemplateRequest, saveOrganizationUnit as saveOrganizationUnitRequest, saveProjectOrganization as saveProjectOrganizationRequest, setBomEmptyDeclaration as setBomEmptyDeclarationRequest, submitReleasePackage, syncCrmCustomers as syncCrmCustomersRequest, testCrmIntegration as testCrmIntegrationRequest, updateChildProjectDesigners as updateChildProjectDesignersRequest, updateChildProjectManager as updateChildProjectManagerRequest, updateCrmIntegrationSettings as updateCrmIntegrationSettingsRequest, updateMainProjectStaffing as updateMainProjectStaffingRequest, updateMyProfile as updateMyProfileRequest, updateOrganizationCounters as updateOrganizationCountersRequest, updateOrganizationMemberships as updateOrganizationMembershipsRequest, updateOrganizationUnitManagers as updateOrganizationUnitManagersRequest, updateProject as updateProjectRequest, updateProjectExecutionUnit as updateProjectExecutionUnitRequest, updateProjectFolderPermissions as updateProjectFolderPermissionsRequest, updateReleasePackageDraft as updateReleasePackageDraftRequest, updateRolePermissions as updateRolePermissionsRequest, updateSystemSettings as updateSystemSettingsRequest, updateUser as updateUserRequest, uploadReleaseFile, withdrawReleasePackage } from '../api'
 import type { AuthSession } from '../api'
-import type { AuditEntry, BatchUpdateBomItemsInput, BomEmptyDeclaration, BomGenerationResult, BomItem, BomKind, BomVersion, CreateProjectInput, CreateReleasePackageInput, CreateRoleInput, CreateSubprojectInput, CrmConnectionTestResult, CrmCustomerSyncResult, CrmIntegrationSettings, DocumentFilter, DocumentModelDrawingRelation, DocumentNode, DocumentVersionComparison, DocumentVersionSummary, DocumentWhereUsed, EditLockSummary, EquipmentTypeDefinition, FolderPermissionRule, MainProjectStaffingInput, ManagedDocument, ManufacturingBomBaseline, MaterialCodeApplication, MaterialSyncTask, MyApprovalTask, OrganizationDirectory, PasswordResetTask, PdmCustomer, PdmSystemSettings, PdmUser, PdmUserProfile, ProgramTemplateTask, ProjectFolder, ProjectFolderTemplateNode, ProjectNumberingOptions, ProjectSummary, ProjectVersionItem, ReleasePackageSummary, RolePermissionDirectory, SaveOrganizationUnitInput, SavePdmUserInput, SaveProjectOrganizationInput, SolidWorksOpenMode, UpdateCrmIntegrationInput, UpdateProjectInput } from '../types'
+import type { AuditEntry, BatchUpdateBomItemsInput, BomEmptyDeclaration, BomExportMode, BomGenerationResult, BomItem, BomKind, BomVersion, CreateProjectInput, CreateReleasePackageInput, CreateRoleInput, CreateSubprojectInput, CrmConnectionTestResult, CrmCustomerSyncResult, CrmIntegrationSettings, DocumentFilter, DocumentModelDrawingRelation, DocumentNode, DocumentVersionComparison, DocumentVersionSummary, DocumentWhereUsed, EditLockSummary, EquipmentTypeDefinition, FolderPermissionRule, MainProjectStaffingInput, ManagedDocument, ManufacturingBomBaseline, MaterialCodeApplication, MaterialSyncTask, MyApprovalTask, OrganizationDirectory, PasswordResetTask, PdmCustomer, PdmSystemSettings, PdmUser, PdmUserProfile, ProgramTemplateTask, ProjectFolder, ProjectFolderTemplateNode, ProjectNumberingOptions, ProjectSummary, ProjectVersionItem, ReleasePackageSummary, RolePermissionDirectory, SaveOrganizationUnitInput, SavePdmUserInput, SaveProjectOrganizationInput, SolidWorksOpenMode, UpdateCrmIntegrationInput, UpdateProjectInput, UpdateReleasePackageDraftInput } from '../types'
 import type { AddDrawingReviewMarkupInput, DrawingReviewCandidate, DrawingReviewDecision, DrawingReviewPackage, DrawingReviewTarget } from '../types'
+import type { UserNotification } from '../types'
 
 const sessionKey = 'upton-pdm-session'
 const fallbackBomPropertyMappings: PdmSystemSettings['bomPropertyMappings'] = [
@@ -48,41 +49,6 @@ function bomPropertyMappingsFromLegacy(settings: PdmSystemSettings) {
 }
 const defaultSystemSettings: PdmSystemSettings = { vaultRoot: '', releaseRoot: '', materialAttachmentRoot: '', checkoutHeartbeatSeconds: 180, checkoutLeaseMinutes: 15, checkoutOfflineGraceMinutes: 60, checkoutReminderHours: 4, checkoutStrongReminderHours: 8, checkoutOverdueHours: 24, checkoutForceReleaseHours: 48, bomDrawingNumberProperty: '物料编码', bomNameProperty: '物料名称', bomDescriptionProperty: '备注信息', bomMaterialProperty: '材质', bomSpecificationProperty: '型号', bomUnitProperty: '单位', bomBrandProperty: '品牌', bomSurfaceTreatmentProperty: '表面处理', bomWeightProperty: '重量', bomPropertyMappings: fallbackBomPropertyMappings.map(mapping => ({ ...mapping })), validationRules: { standard: ['drawingNumber', 'name', 'unit', 'specification', 'quantity', 'revision'], nonStandard: ['drawingNumber', 'name', 'unit', 'material', 'quantity', 'revision'], electrical: ['drawingNumber', 'name', 'unit', 'quantity', 'revision'], }, approvalWorkflows: { mechanical: { code: 'mechanical-release', name: '机械发布审批', version: 1, steps: [{ stage: 'MechanicalEngineer', name: '机械工程师自检', assigneeSource: 'Submitter' }, { stage: 'MainDesigner', name: '主设审核', assigneeSource: 'ProjectDesignLead' }, { stage: 'MechanicalSupervisor', name: '机械主管批准', assigneeSource: 'PrimaryUnitManager' }] }, electrical: { code: 'electrical-release', name: '电气发布审批', version: 1, steps: [{ stage: 'HardwareEngineer', name: '硬件工程师自检', assigneeSource: 'Submitter' }, { stage: 'HardwareSupervisor', name: '硬件主管审核', assigneeSource: 'PrimaryUnitManager' }, { stage: 'StandardizationSupervisor', name: '标准化主管批准', assigneeSource: 'ParentUnitManager' }] }, emergencySubstituteRoleCode: 'BusinessUnitManager' }, releaseChangeReasonTypes: ['设计变更', '客户需求', '物料替代', '质量整改', '生产反馈', '其他'] }
 const defaultCrmIntegrationSettings: CrmIntegrationSettings = { baseUrl: '', username: '', passwordConfigured: false, autoSyncEnabled: false, autoSyncIntervalMinutes: 60, lastSyncAt: null, lastSyncCount: 0, lastAutoSyncAttemptAt: null, lastAutoSyncError: null }
-
-export function formatBomGenerationConfirmation(preview: BomGenerationResult, discardUnsavedChanges = false): string {
-  return [
-    ...(discardUnsavedChanges ? ['注意：当前BOM有未保存修改，确认更新后这些修改将被放弃。', ''] : []),
-    '将按最新设计树更新机械BOM：',
-    `• 标准件：${preview.standardItems.length} 条`,
-    `• 非标件：${preview.nonStandardItems.length} 条`,
-    `• 待分类：${preview.unclassifiedCount} 条`,
-    `• 待移除：${preview.pendingRemovalCount} 条`,
-    `• 人工待确认：${preview.manualUnmatchedCount} 条`,
-    `• 虚拟件（仅源数据）：${preview.virtualCount} 条`,
-    '',
-    '待处理项不会静默删除，并会阻止发布。是否应用本次更新？',
-  ].join('\n')
-}
-
-export async function confirmBomGeneration(preview: BomGenerationResult, discardUnsavedChanges = false): Promise<boolean> {
-  try {
-    await ElMessageBox.confirm(
-      formatBomGenerationConfirmation(preview, discardUnsavedChanges),
-      '确认重新对账',
-      {
-        confirmButtonText: '确认更新',
-        cancelButtonText: '取消',
-        type: 'warning',
-        closeOnClickModal: false,
-        customClass: 'pdm-bom-generation-confirm',
-      },
-    )
-    return true
-  } catch (error) {
-    if (error === 'cancel' || error === 'close') return false
-    throw error
-  }
-}
 
 const emptyProject: ProjectSummary = {
   id: '',
@@ -292,6 +258,7 @@ export function usePdmWorkspace() {
   const uploadProgress = ref(0)
   const auditEntries = ref<AuditEntry[]>([])
   const myApprovalTasks = ref<MyApprovalTask[]>([])
+  const notifications = ref<UserNotification[]>([])
   const materialCodeApprovalTasks = ref<MaterialCodeApplication[]>([])
   const materialSyncTasks = ref<MaterialSyncTask[]>([])
   const programTemplateTasks = ref<ProgramTemplateTask[]>([])
@@ -551,30 +518,20 @@ export function usePdmWorkspace() {
     }
   }
 
-  async function exportBomFile(kind: BomKind) {
-    const blob = await exportBom(project.value.id, kind, accessToken)
+  async function exportBomFile(kind: BomKind, mode: BomExportMode) {
+    const { blob, fileName } = await exportBom(project.value.id, kind, mode, accessToken)
     const url = URL.createObjectURL(blob)
     const anchor = document.createElement('a')
     anchor.href = url
-    anchor.download = `${kind.toLocaleLowerCase()}-bom.xlsx`
+    anchor.download = fileName
     anchor.click()
     window.setTimeout(() => URL.revokeObjectURL(url), 10_000)
   }
 
-  async function generateBomFromDrawings(discardUnsavedChanges = false): Promise<BomGenerationResult | null> {
+  async function previewBomFromDrawings(): Promise<BomGenerationResult> {
     operationPending.value = true
     try {
-      const preview = await generateMechanicalBom(project.value.id, false, accessToken)
-      const confirmed = await confirmBomGeneration(preview, discardUnsavedChanges)
-      if (!confirmed) return null
-      const result = await generateMechanicalBom(project.value.id, true, accessToken)
-      standardBom.value = result.standardItems
-      nonStandardBom.value = result.nonStandardItems
-      electricalBom.value = result.electricalItems
-      unclassifiedBom.value = result.unclassifiedItems
-      bomSourceData.value = await getBomSourceData(project.value.id, accessToken)
-      await refreshBomVersionData()
-      return result
+      return await generateMechanicalBom(project.value.id, accessToken)
     } finally {
       operationPending.value = false
     }
@@ -777,6 +734,30 @@ export function usePdmWorkspace() {
     } finally { operationPending.value = false }
   }
 
+  async function updatePackageDraft(releasePackageId: string, input: UpdateReleasePackageDraftInput) {
+    operationPending.value = true
+    operationError.value = ''
+    try {
+      await updateReleasePackageDraftRequest(releasePackageId, input, accessToken)
+      await reload()
+    } catch (error) {
+      operationError.value = messageFrom(error)
+      throw error
+    } finally { operationPending.value = false }
+  }
+
+  async function deletePackageDraft(releasePackageId: string) {
+    operationPending.value = true
+    operationError.value = ''
+    try {
+      await deleteReleasePackageDraftRequest(releasePackageId, accessToken)
+      await reload()
+    } catch (error) {
+      operationError.value = messageFrom(error)
+      throw error
+    } finally { operationPending.value = false }
+  }
+
   async function uploadPackageFile(releasePackageId: string, file: File) {
     const targetPackage = releasePackages.value.find(item => item.id === releasePackageId)
     if (!targetPackage) throw new Error('发布包不存在，请刷新后重试。')
@@ -813,6 +794,21 @@ export function usePdmWorkspace() {
     try {
       await withdrawReleasePackage(releasePackageId, comment, accessToken)
       await reload()
+    } catch (error) {
+      operationError.value = messageFrom(error)
+      throw error
+    } finally {
+      operationPending.value = false
+    }
+  }
+
+  async function retryLongLeadU9(releasePackageId: string) {
+    operationPending.value = true
+    operationError.value = ''
+    try {
+      const result = await retryLongLeadU9Request(releasePackageId, accessToken)
+      await reload()
+      return result
     } catch (error) {
       operationError.value = messageFrom(error)
       throw error
@@ -890,6 +886,28 @@ export function usePdmWorkspace() {
     }
   }
 
+  async function requestUserNotifications() {
+    try {
+      return await listUserNotifications(accessToken)
+    } catch (error) {
+      if (error instanceof PdmApiError && error.status === 404) return []
+      throw error
+    }
+  }
+
+  async function markNotificationRead(notificationId: string) {
+    await markUserNotificationReadRequest(notificationId, accessToken)
+    notifications.value = notifications.value.map(item => item.id === notificationId
+      ? { ...item, readAt: item.readAt || new Date().toISOString() }
+      : item)
+  }
+
+  async function markAllNotificationsRead() {
+    await markAllUserNotificationsReadRequest(accessToken)
+    const readAt = new Date().toISOString()
+    notifications.value = notifications.value.map(item => ({ ...item, readAt: item.readAt || readAt }))
+  }
+
   async function requestEditLocks() {
     try {
       return await listEditLocks(accessToken)
@@ -900,8 +918,8 @@ export function usePdmWorkspace() {
   }
 
   async function loadMyApprovalTasks() {
-    [myApprovalTasks.value, materialCodeApprovalTasks.value, materialSyncTasks.value, programTemplateTasks.value, editLocks.value, passwordResetTasks.value] = await Promise.all([
-      requestMyApprovalTasks(), requestMaterialCodeApprovalTasks(), requestMaterialSyncTasks(), requestProgramTemplateTasks(), requestEditLocks(), requestPasswordResetTasks(),
+    [myApprovalTasks.value, notifications.value, materialCodeApprovalTasks.value, materialSyncTasks.value, programTemplateTasks.value, editLocks.value, passwordResetTasks.value] = await Promise.all([
+      requestMyApprovalTasks(), requestUserNotifications(), requestMaterialCodeApprovalTasks(), requestMaterialSyncTasks(), requestProgramTemplateTasks(), requestEditLocks(), requestPasswordResetTasks(),
     ])
   }
 
@@ -1032,6 +1050,7 @@ export function usePdmWorkspace() {
     folderTemplate.value = []
     clearProjectWorkspace()
     myApprovalTasks.value = []
+    notifications.value = []
     materialCodeApprovalTasks.value = []
     materialSyncTasks.value = []
     programTemplateTasks.value = []
@@ -1097,11 +1116,12 @@ export function usePdmWorkspace() {
     loading.value = true
     loadError.value = ''
     try {
-      const [loadedProjects, loadedOptions, loadedCustomers, loadedTasks, loadedMaterialCodeTasks, loadedMaterialSyncTasks, loadedProgramTemplateTasks, loadedEditLocks, loadedDirectory, loadedProfile, loadedPasswordResetTasks, loadedValidationRules] = await Promise.all([
+      const [loadedProjects, loadedOptions, loadedCustomers, loadedTasks, loadedNotifications, loadedMaterialCodeTasks, loadedMaterialSyncTasks, loadedProgramTemplateTasks, loadedEditLocks, loadedDirectory, loadedProfile, loadedPasswordResetTasks, loadedValidationRules] = await Promise.all([
         withLoadContext('项目列表', listProjects(accessToken)),
         withLoadContext('项目编号选项', getProjectNumberingOptions(accessToken)),
         withLoadContext('客户列表', listCustomers(accessToken)),
         withLoadContext('审批待办', requestMyApprovalTasks()),
+        withLoadContext('系统消息', requestUserNotifications()),
         withLoadContext('料号审批待办', requestMaterialCodeApprovalTasks()),
         withLoadContext('料品同步任务', requestMaterialSyncTasks()),
         withLoadContext('程序模板待办', requestProgramTemplateTasks()),
@@ -1119,6 +1139,7 @@ export function usePdmWorkspace() {
       projectNumberingOptions.value = loadedOptions
       customers.value = loadedCustomers
       myApprovalTasks.value = loadedTasks
+      notifications.value = loadedNotifications
       materialCodeApprovalTasks.value = loadedMaterialCodeTasks
       materialSyncTasks.value = loadedMaterialSyncTasks
       programTemplateTasks.value = loadedProgramTemplateTasks
@@ -1724,6 +1745,7 @@ export function usePdmWorkspace() {
     uploadProgress,
     auditEntries,
     myApprovalTasks,
+    notifications,
     materialCodeApprovalTasks,
     materialSyncTasks,
     programTemplateTasks,
@@ -1773,7 +1795,7 @@ export function usePdmWorkspace() {
     saveBomItems,
     importBomFile,
     exportBomFile,
-    generateBomFromDrawings,
+    previewBomFromDrawings,
     resolveBomItem,
     retainBomItems,
     batchUpdateBomItems,
@@ -1788,9 +1810,12 @@ export function usePdmWorkspace() {
     resolveDrawingReviewMarkup,
     decideDrawingReviewTarget,
     createPackage,
+    updatePackageDraft,
+    deletePackageDraft,
     uploadPackageFile,
     submitPackage,
     withdrawPackage,
+    retryLongLeadU9,
     openWhereUsed,
     obsoleteSelectedDocument,
     decideApprovalTask,
@@ -1798,6 +1823,8 @@ export function usePdmWorkspace() {
     emergencyDecideApprovalTask,
     loadAuditEntries,
     loadMyApprovalTasks,
+    markNotificationRead,
+    markAllNotificationsRead,
     requestEditLockRelease,
     forceReleaseEditLock,
     resetRequestedPassword,

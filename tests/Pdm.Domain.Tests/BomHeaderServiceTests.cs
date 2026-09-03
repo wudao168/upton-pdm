@@ -150,6 +150,30 @@ public sealed class BomHeaderServiceTests
     }
 
     [Fact]
+    public async Task BomApproval_OnChild_CreatesChildCategoryAndMasterPlusAncestorMasters()
+    {
+        var service = CreateService(out var materials, out var repository);
+        var root = await repository.CreateNumberedProjectAsync(new(
+            Guid.Parse("70000000-0000-0000-0000-000000000001"),
+            "P", 2, Guid.Parse("c0046500-0000-0000-0000-000000000001"), "自动申请主项目", null,
+            new DateOnly(2026, 9, 3), 1, "admin", @"D:\PDM\Vault", @"D:\PDM\Release"), default);
+        var child = await repository.CreateSubprojectAsync(new(root.Id, "自动申请子项目", null, 1), default);
+
+        var result = await service.EnsureApplicationsAfterBomApprovalAsync(
+            child.Id, ProjectBomHeaderKind.Standard, "reviewer", default);
+
+        Assert.Equal(root.Id, result.RootProjectId);
+        Assert.Equal(3, result.ExpectedCount);
+        Assert.Equal(3, result.GeneratedCount);
+        var applications = await materials.ListMaterialCodeApplicationsAsync(
+            null, MaterialCodeApplicationStatus.Pending, default);
+        Assert.Contains(applications, application => application.ProjectId == child.Id && application.BomHeaderKind == ProjectBomHeaderKind.Standard);
+        Assert.Contains(applications, application => application.ProjectId == child.Id && application.BomHeaderKind == ProjectBomHeaderKind.Master);
+        Assert.Contains(applications, application => application.ProjectId == root.Id && application.BomHeaderKind == ProjectBomHeaderKind.Master);
+        Assert.DoesNotContain(applications, application => application.ProjectId == root.Id && application.BomHeaderKind == ProjectBomHeaderKind.Standard);
+    }
+
+    [Fact]
     public async Task GenerateHierarchy_AfterChildAdded_AppliesOnlyForNewChildHeaders()
     {
         var service = CreateService(out var materials, out var repository);
@@ -329,6 +353,77 @@ public sealed class BomHeaderServiceTests
         var verified = await service.PreviewAsync(ProjectId, ProjectBomHeaderKind.Standard, "admin", UserRole.Administrator, default);
         Assert.Equal(ProjectBomU9SyncState.UpToDate, verified.State);
         Assert.Equal(0, verified.WritePreview!.AddedComponentCount);
+    }
+
+    [Fact]
+    public async Task ProjectBomU9Sync_UsesPublishedLongLeadTotalsUntilFormalReleaseBecomesAuthoritative()
+    {
+        var time = new FixedTimeProvider(DateTimeOffset.Parse("2026-09-03T08:00:00Z"));
+        var repository = new InMemoryPdmRepository(time);
+        var materials = new InMemoryMaterialRepository(time);
+        await materials.SaveIntegrationConfigurationAsync(new(
+            "http://u9.example.test/U9", "01", "7", "pdm", "PDM", "protected:test-secret",
+            U9MaterialContract.CreatePath, U9MaterialContract.QueryPath, true, "admin", time.GetUtcNow()), default);
+        var header = await AddMaterial(materials, MaterialKind.Product, MaterialApprovalStatus.Approved,
+            "0201", "02010000101", "02010000101", true);
+        var component = await AddMaterial(materials, MaterialKind.Standard, MaterialApprovalStatus.Approved,
+            "0102", "01020000057", "01020000057", true);
+        await repository.SaveProjectBomHeaderBindingAsync(
+            ProjectId, ProjectBomHeaderKind.Standard, header.Id, 0, "admin", default);
+        var item = new BomItem(
+            Guid.NewGuid(), ProjectId, BomKind.Standard, 1, component.MaterialCode, "阀岛", 4, "001",
+            null, "10P", "W1", true);
+        await repository.CreateReleasePackageAsync(new ReleasePackage(
+            Guid.NewGuid(), ProjectId, "RP-LL-1", ReleasePackageState.Published, Guid.NewGuid(), "LL1", "LL1",
+            [], time.GetUtcNow().AddHours(-2), time.GetUtcNow().AddHours(-2), "C:\\PDM\\Release\\LL1")
+        {
+            Scope = ReleaseScope.StandardLongLead,
+            StandardBomSnapshot = [item with { Quantity = 1 }]
+        }, default);
+        await repository.CreateReleasePackageAsync(new ReleasePackage(
+            Guid.NewGuid(), ProjectId, "RP-LL-2", ReleasePackageState.Published, Guid.NewGuid(), "LL2", "LL2",
+            [], time.GetUtcNow().AddHours(-1), time.GetUtcNow().AddHours(-1), "C:\\PDM\\Release\\LL2")
+        {
+            Scope = ReleaseScope.StandardLongLead,
+            StandardBomSnapshot = [item with { Quantity = 2 }]
+        }, default);
+        var client = new ApprovalAutomationClient();
+        var service = new ProjectBomU9SyncService(repository, materials,
+            new U9BomWriteService(materials, repository, client, client, new TestProtector(), time), time);
+
+        var longLead = await service.PreviewAsync(ProjectId, ProjectBomHeaderKind.Standard, "admin", UserRole.Administrator, default);
+
+        Assert.Equal(1, longLead.ComponentCount);
+        using (var payload = JsonDocument.Parse(longLead.WritePreview!.RequestPreview))
+            Assert.Equal(3, payload.RootElement[0].GetProperty("BOMComponents")[0].GetProperty("UsageQty").GetDecimal());
+        await service.ExecuteAsync(
+            ProjectId, ProjectBomHeaderKind.Standard,
+            longLead.WritePreview.RequestSha256, longLead.WritePreview.RequiredConfirmation,
+            "admin", UserRole.Administrator, default);
+
+        await repository.CreateReleasePackageAsync(new ReleasePackage(
+            Guid.NewGuid(), ProjectId, "RP-LL-3", ReleasePackageState.Published, Guid.NewGuid(), "LL3", "LL3",
+            [], time.GetUtcNow(), time.GetUtcNow(), "C:\\PDM\\Release\\LL3")
+        {
+            Scope = ReleaseScope.StandardLongLead,
+            StandardBomSnapshot = [item with { Quantity = 1 }]
+        }, default);
+        var incremental = await service.PreviewAsync(ProjectId, ProjectBomHeaderKind.Standard, "admin", UserRole.Administrator, default);
+        Assert.Equal(ProjectBomU9SyncState.ModifyRequired, incremental.State);
+        Assert.Equal(1, incremental.WritePreview!.AddedComponentCount);
+        using (var incrementalPayload = JsonDocument.Parse(incremental.WritePreview.RequestPreview))
+            Assert.Equal(1, incrementalPayload.RootElement[0].GetProperty("BOMComponents")[0].GetProperty("UsageQty").GetDecimal());
+        await service.ExecuteAsync(
+            ProjectId, ProjectBomHeaderKind.Standard,
+            incremental.WritePreview.RequestSha256, incremental.WritePreview.RequiredConfirmation,
+            "admin", UserRole.Administrator, default);
+        Assert.Equal(ProjectBomU9SyncState.UpToDate,
+            (await service.PreviewAsync(ProjectId, ProjectBomHeaderKind.Standard, "admin", UserRole.Administrator, default)).State);
+
+        var formal = await repository.SaveBomDraftAsync(ProjectId, BomKind.Standard, [item], "reviewer", default);
+        await repository.SetBomVersionStateAsync([formal.Id], BomVersionState.Released, "reviewer", time.GetUtcNow(), default);
+        var authoritative = await service.PreviewAsync(ProjectId, ProjectBomHeaderKind.Standard, "admin", UserRole.Administrator, default);
+        Assert.Equal(ProjectBomU9SyncState.UpToDate, authoritative.State);
     }
 
     [Fact]
@@ -563,6 +658,11 @@ public sealed class BomHeaderServiceTests
         return await repository.CreateMaterialAsync(material, category, default);
     }
 
+    private sealed class FixedTimeProvider(DateTimeOffset now) : TimeProvider
+    {
+        public override DateTimeOffset GetUtcNow() => now;
+    }
+
     private sealed class TestProtector : IU9SecretProtector
     {
         public string Protect(string secret) => $"protected:{secret}";
@@ -698,7 +798,7 @@ public sealed class BomHeaderServiceTests
                 .ToArray();
             var code = row.GetProperty("ItemMaster").GetProperty("Code").GetString();
             var uom = row.GetProperty("ProductUOM").GetProperty("Code").GetString();
-            var components = row.GetProperty("BOMComponents").EnumerateArray().Select(component => new U9BomComponentReference(
+            var writtenComponents = row.GetProperty("BOMComponents").EnumerateArray().Select(component => new U9BomComponentReference(
                 component.GetProperty("Sequence").GetInt32(),
                 null,
                 component.GetProperty("ItemMaster").GetProperty("Code").GetString(),
@@ -718,6 +818,7 @@ public sealed class BomHeaderServiceTests
                 0,
                 false,
                 false)).ToArray();
+            var components = bom is null ? writtenComponents : bom.Components.Concat(writtenComponents).ToArray();
             bom = new U9BomReference(
                 "bom-1", code, null, "A1", "7", null, 0, 1, uom, null,
                 null, null, 0, 0, 0, row.GetProperty("ProjectMapNum").GetString(),

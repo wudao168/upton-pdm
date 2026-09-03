@@ -729,19 +729,54 @@ public static class PdmEndpointExtensions
             return Results.Ok(await workflow.ReplaceBomAsync(projectId, bomKind, items, actor, role, cancellationToken));
         }).DisableAntiforgery();
 
-        api.MapGet("/projects/{projectId:guid}/boms/{kind}/export", async (Guid projectId, string kind, HttpContext context, IPdmRepository repository, CancellationToken cancellationToken) =>
+        api.MapGet("/projects/{projectId:guid}/boms/{kind}/export", async (Guid projectId, string kind, string? mode, HttpContext context, IPdmRepository repository, CancellationToken cancellationToken) =>
         {
             var (actor, role) = CurrentUser(context.User);
             if (!await repository.HasProjectContentReadAccessAsync(projectId, actor, role, cancellationToken)) return Results.Forbid();
             if (!Enum.TryParse<BomKind>(kind, true, out var bomKind) || bomKind is not (BomKind.Standard or BomKind.NonStandard or BomKind.Electrical)) return Results.BadRequest(new { message = "BOM类型必须是Standard、NonStandard或Electrical。" });
+            if (!Enum.TryParse<BomWorkbookExportMode>(mode ?? nameof(BomWorkbookExportMode.Summary), true, out var exportMode)) return Results.BadRequest(new { message = "导出方式必须是Summary或Structure。" });
+            var project = await repository.FindProjectAsync(projectId, cancellationToken);
+            if (project is null) return Results.NotFound();
             var items = (await repository.GetBomAsync(projectId, bomKind, cancellationToken)).Where(item => !item.IsManuallyExcluded).ToArray();
-            return Results.File(BomWorkbook.Write(items), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", $"{kind.ToLowerInvariant()}-bom.xlsx");
+            var mainProjectId = project.RootProjectId ?? project.ParentProjectId ?? project.Id;
+            var mainProject = mainProjectId == project.Id ? project : await repository.FindProjectAsync(mainProjectId, cancellationToken) ?? project;
+            var versions = await repository.ListBomVersionsAsync(projectId, bomKind, cancellationToken);
+            var latestVersion = versions.OrderByDescending(item => item.UpdatedAt).FirstOrDefault();
+            var versionLabel = latestVersion?.Label
+                ?? items.Select(item => item.Revision).FirstOrDefault(value => !string.IsNullOrWhiteSpace(value))
+                ?? "—";
+            var latestPackage = (await repository.ListReleasePackagesAsync(projectId, cancellationToken))
+                .OrderByDescending(item => item.CreatedAt)
+                .FirstOrDefault();
+            var directory = await repository.GetOrganizationDirectoryAsync(cancellationToken);
+            var bomName = BomExportName(bomKind);
+            var exportedAt = DateTimeOffset.Now;
+            var contextData = new BomWorkbookExportContext(
+                bomName,
+                mainProject.Code,
+                mainProject.Name,
+                project.Id == mainProject.Id ? "—" : project.Code,
+                project.Id == mainProject.Id ? "—" : project.Name,
+                versionLabel,
+                project.ExecutionUnitName ?? mainProject.ExecutionUnitName ?? "—",
+                DisplayUserNames(
+                    new[] { project.PrimaryProjectManager ?? mainProject.PrimaryProjectManager }
+                        .Concat(project.CollaborativeProjectManagers.Count > 0 ? project.CollaborativeProjectManagers : mainProject.CollaborativeProjectManagers),
+                    directory),
+                DisplayUserNames(project.DesignLeads.Concat(project.Designers), directory),
+                ApprovalPeople(latestPackage, directory),
+                latestVersion?.ReleasedAt,
+                exportedAt);
+            var fileName = BomWorkbook.ExportFileName(project.Code, bomName, versionLabel, exportedAt);
+            return Results.File(BomWorkbook.WriteExport(items, contextData, exportMode), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", fileName);
         });
 
         api.MapPost("/projects/{projectId:guid}/boms/generate", async (Guid projectId, bool? apply, HttpContext context, PdmWorkflowService workflow, CancellationToken cancellationToken) =>
         {
+            if (apply == true)
+                return Results.BadRequest(new { message = "机械BOM对账仅支持只读预览；请在对应BOM中人工处理差异并保存。" });
             var (actor, role) = CurrentUser(context.User);
-            return Results.Ok(await workflow.GenerateMechanicalBomAsync(projectId, apply ?? true, actor, role, cancellationToken));
+            return Results.Ok(await workflow.GenerateMechanicalBomAsync(projectId, false, actor, role, cancellationToken));
         });
 
         api.MapPost("/projects/{projectId:guid}/boms/items/{itemId:guid}/resolve", async (Guid projectId, Guid itemId, ResolveBomItemRequest request, HttpContext context, PdmWorkflowService workflow, CancellationToken cancellationToken) =>
@@ -1016,7 +1051,33 @@ public static class PdmEndpointExtensions
                     request.ChangeReason ?? string.Empty,
                     "未指定", null,
                     request.Scope, request.SelectedBomItemIds,
-                    actor, role, cancellationToken));
+                    actor, role, cancellationToken, request.SelectedBomItemQuantities));
+        });
+
+        api.MapPut("/release-packages/{releasePackageId:guid}/draft", async (Guid releasePackageId, UpdateReleasePackageDraftRequest request, HttpContext context, PdmWorkflowService workflow, CancellationToken cancellationToken) =>
+        {
+            var (actor, role) = CurrentUser(context.User);
+            return Results.Ok(await workflow.UpdateReleasePackageDraftAsync(
+                releasePackageId,
+                request.ChangeReason,
+                request.SelectedBomItemIds,
+                request.SelectedBomItemQuantities,
+                actor,
+                role,
+                cancellationToken));
+        });
+
+        api.MapDelete("/release-packages/{releasePackageId:guid}/draft", async (Guid releasePackageId, HttpContext context, PdmWorkflowService workflow, CancellationToken cancellationToken) =>
+        {
+            var (actor, role) = CurrentUser(context.User);
+            await workflow.DeleteReleasePackageDraftAsync(releasePackageId, actor, role, cancellationToken);
+            return Results.NoContent();
+        });
+
+        api.MapPost("/release-packages/{releasePackageId:guid}/u9-retry", async (Guid releasePackageId, HttpContext context, PdmWorkflowService workflow, CancellationToken cancellationToken) =>
+        {
+            var (actor, role) = CurrentUser(context.User);
+            return Results.Ok(await workflow.RetryLongLeadU9Async(releasePackageId, actor, role, cancellationToken));
         });
 
         api.MapPost("/release-packages/{releasePackageId:guid}/submit", async (Guid releasePackageId, HttpContext context, PdmWorkflowService workflow, CancellationToken cancellationToken) =>
@@ -1029,6 +1090,18 @@ public static class PdmEndpointExtensions
         {
             var (actor, role) = CurrentUser(context.User);
             return Results.Ok(await workflow.WithdrawReleasePackageAsync(releasePackageId, actor, role, request.Comment, cancellationToken));
+        });
+
+        api.MapGet("/release-packages/{releasePackageId:guid}/item-comments", async (Guid releasePackageId, HttpContext context, ReleaseItemCommentService comments, CancellationToken cancellationToken) =>
+        {
+            var (actor, role) = CurrentUser(context.User);
+            return Results.Ok(await comments.ListAsync(releasePackageId, actor, role, cancellationToken));
+        });
+
+        api.MapPost("/release-packages/{releasePackageId:guid}/item-comments", async (Guid releasePackageId, AddReleaseItemCommentRequest request, HttpContext context, ReleaseItemCommentService comments, CancellationToken cancellationToken) =>
+        {
+            var (actor, role) = CurrentUser(context.User);
+            return Results.Ok(await comments.AddAsync(releasePackageId, request.BomItemId, request.Comment, actor, role, cancellationToken));
         });
 
         api.MapPost("/approval-tasks/{taskId:guid}/decision", async (Guid taskId, ApprovalRequest request, HttpContext context, PdmWorkflowService workflow, MaterialService materials, CancellationToken cancellationToken) =>
@@ -1094,6 +1167,26 @@ public static class PdmEndpointExtensions
                 }
             }
             return Results.Ok(results.OrderBy(item => item.CreatedAt));
+        });
+
+        api.MapGet("/notifications/mine", async (int? take, HttpContext context, IPdmRepository repository, CancellationToken cancellationToken) =>
+        {
+            var (actor, _) = CurrentUser(context.User);
+            return Results.Ok(await repository.ListUserNotificationsAsync(actor, take ?? 100, cancellationToken));
+        });
+
+        api.MapPost("/notifications/{notificationId:guid}/read", async (Guid notificationId, HttpContext context, IPdmRepository repository, TimeProvider timeProvider, CancellationToken cancellationToken) =>
+        {
+            var (actor, _) = CurrentUser(context.User);
+            await repository.MarkUserNotificationReadAsync(notificationId, actor, timeProvider.GetUtcNow(), cancellationToken);
+            return Results.NoContent();
+        });
+
+        api.MapPost("/notifications/read-all", async (HttpContext context, IPdmRepository repository, TimeProvider timeProvider, CancellationToken cancellationToken) =>
+        {
+            var (actor, _) = CurrentUser(context.User);
+            await repository.MarkAllUserNotificationsReadAsync(actor, timeProvider.GetUtcNow(), cancellationToken);
+            return Results.NoContent();
         });
 
         api.MapGet("/projects/{projectId:guid}/versions", async (Guid projectId, HttpContext context, IPdmRepository repository, CancellationToken cancellationToken) =>
@@ -1240,4 +1333,45 @@ public static class PdmEndpointExtensions
         if (normalized.Length > maxLength) throw new PdmRuleException($"{fieldName}不能超过{maxLength}个字符。");
         return normalized;
     }
+
+    private static string BomExportName(BomKind kind) => kind switch
+    {
+        BomKind.Standard => "标准件BOM",
+        BomKind.NonStandard => "非标件BOM",
+        BomKind.Electrical => "电气BOM",
+        _ => "BOM"
+    };
+
+    private static string DisplayUserNames(IEnumerable<string?> usernames, OrganizationDirectory directory)
+    {
+        var names = directory.Users.ToDictionary(item => item.Username, item => item.DisplayName, StringComparer.OrdinalIgnoreCase);
+        var values = usernames
+            .Where(username => !string.IsNullOrWhiteSpace(username))
+            .Select(username => names.TryGetValue(username!, out var displayName) && !string.IsNullOrWhiteSpace(displayName) ? displayName : username!)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+        return values.Length == 0 ? "—" : string.Join('、', values);
+    }
+
+    private static IReadOnlyList<BomWorkbookApprovalEntry> ApprovalPeople(ReleasePackage? package, OrganizationDirectory directory)
+    {
+        if (package is null || package.ApprovalTasks.Count == 0) return [];
+        return package.ApprovalTasks
+            .OrderBy(item => item.StepOrder)
+            .Select(task => new BomWorkbookApprovalEntry(
+                BomExportApprovalLabel(task),
+                DisplayUserNames([task.DecisionBy ?? task.Assignee], directory)))
+            .ToArray();
+    }
+
+    private static string BomExportApprovalLabel(ApprovalTask task) => task.Stage switch
+    {
+        ApprovalStage.MechanicalEngineer or ApprovalStage.HardwareEngineer => "工程师",
+        ApprovalStage.MainDesigner => "主设",
+        ApprovalStage.MechanicalSupervisor => "机械主管",
+        ApprovalStage.HardwareSupervisor => "硬件主管",
+        ApprovalStage.StandardizationSupervisor => "标准化主管",
+        _ => string.IsNullOrWhiteSpace(task.StepName) ? task.Stage.ToString() : task.StepName
+    };
+
 }

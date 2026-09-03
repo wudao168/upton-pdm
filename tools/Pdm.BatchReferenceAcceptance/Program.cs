@@ -61,6 +61,7 @@ internal static class Program
         Test("workspace page explains location, local state, PLM state, and next action", TestWorkspaceGuidanceUi);
         Test("project tree resolves downloaded files by controlled workspace identity", TestProjectTreeLocalPathMapping);
         Test("desktop workspace states require identity and detect local version changes", TestWorkspaceLocalStates);
+        Test("batch completion refreshes local controlled version metadata", TestBatchControlledVersionBinding);
         Console.WriteLine($"Passed={passed}; Failed={failed}; no SolidWorks COM or production API calls.");
         return failed == 0 ? 0 : 1;
     }
@@ -565,6 +566,37 @@ internal static class Program
         snapshot = Static("WorkspaceLocalStateReader", "Read", Path.Combine(directory, "workspace"), projectId, "P700005-STATE", "engineer", requests);
         item = ((IEnumerable)Get(snapshot, "Items")).Cast<object>().Single();
         Assert((string)Get(item, "LocalState") == "Modified", "writable changed file was not protected as a local modification");
+    }
+
+    private static void TestBatchControlledVersionBinding()
+    {
+        var projectId = Guid.NewGuid();
+        var documentId = Guid.NewGuid();
+        var oldBytes = System.Text.Encoding.UTF8.GetBytes("controlled workspace version W1");
+        var newBytes = System.Text.Encoding.UTF8.GetBytes("controlled workspace version W2 after batch check-in");
+        var path = Path.Combine(directory, "workspace", "View", "P700005-BATCH", "batch.SLDPRT");
+        Directory.CreateDirectory(Path.GetDirectoryName(path));
+        File.WriteAllBytes(path, oldBytes);
+        Assert((bool)Static("PdmDocumentIdentityStore", "TryWriteControlledVersion", path, documentId, projectId, Guid.NewGuid(), "W1", Hash(oldBytes), (long)oldBytes.Length), "old version binding write failed");
+        File.WriteAllBytes(path, newBytes);
+        File.SetAttributes(path, File.GetAttributes(path) | FileAttributes.ReadOnly);
+
+        var request = New("WorkspaceDocumentStateRequest");
+        Set(request, "DocumentId", documentId);
+        Set(request, "FileName", "batch.SLDPRT");
+        Set(request, "LatestRevision", "W2");
+        var requests = TypedArray("WorkspaceDocumentStateRequest", request);
+        var snapshot = Static("WorkspaceLocalStateReader", "Read", Path.Combine(directory, "workspace"), projectId, "P700005-BATCH", "engineer", requests);
+        var item = ((IEnumerable)Get(snapshot, "Items")).Cast<object>().Single();
+        Assert((string)Get(item, "LocalState") == "IntegrityMismatch", "stale batch metadata did not reproduce the client warning");
+
+        var version = Version("W2", Hash(newBytes));
+        Set(version, "Id", Guid.NewGuid());
+        Static("PdmAddin", "RememberControlledVersionIdentity", path, documentId, projectId, version);
+        snapshot = Static("WorkspaceLocalStateReader", "Read", Path.Combine(directory, "workspace"), projectId, "P700005-BATCH", "engineer", requests);
+        item = ((IEnumerable)Get(snapshot, "Items")).Cast<object>().Single();
+        Assert((string)Get(item, "LocalState") == "ReadOnlyCache", "batch completion left the local file marked abnormal");
+        Assert((string)Get(item, "LocalRevision") == "W2", "batch completion did not store the returned revision");
     }
 
     private static string WriteFixture(string path, string content)

@@ -446,6 +446,7 @@ export interface BomItem {
 }
 
 export type BomKind = 'Standard' | 'NonStandard' | 'Unclassified' | 'Electrical'
+export type BomExportMode = 'Summary' | 'Structure'
 export type BomClassification = BomKind | 'Virtual'
 export interface BatchUpdateBomItemsInput {
   itemIds: string[]
@@ -544,18 +545,46 @@ export interface ApprovalStep {
   id: string
   stage: string
   assignee: string
-  status: 'done' | 'current' | 'waiting'
+  status: 'approved' | 'rejected' | 'current' | 'waiting' | 'skipped' | 'done'
   detail: string
   decision?: string | number
+  decisionBy?: string
   comment?: string
   stepOrder?: number
   emergencySubstitute?: boolean
   emergencyReason?: string
 }
 
+export interface UserNotification {
+  id: string
+  recipient: string
+  category: string
+  title: string
+  content: string
+  projectId?: string
+  releasePackageId?: string
+  sourceKey: string
+  createdAt: string
+  readAt?: string
+}
+
 export interface ApprovalTransferCandidate {
   username: string
   displayName: string
+}
+
+export interface ReleaseItemComment {
+  id: string
+  releasePackageId: string
+  bomItemId: string
+  materialKey: string
+  materialCode: string
+  materialName: string
+  specification?: string
+  sourceInstancePath?: string
+  comment: string
+  createdBy: string
+  createdAt: string
 }
 
 export type ReleaseScope = 'LegacyCombined' | 'StandardLongLead' | 'StandardFormal' | 'StandardSupplement' | 'ElectricalFormal' | 'ElectricalSupplement' | 'NonStandardWithDrawing'
@@ -564,6 +593,13 @@ export interface CreateReleasePackageInput {
   changeReason: string
   scope: Exclude<ReleaseScope, 'LegacyCombined'>
   selectedBomItemIds: string[]
+  selectedBomItemQuantities?: Record<string, number>
+}
+
+export interface UpdateReleasePackageDraftInput {
+  changeReason: string
+  selectedBomItemIds: string[]
+  selectedBomItemQuantities?: Record<string, number>
 }
 
 export interface ReleasePackageSummary {

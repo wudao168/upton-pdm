@@ -72,10 +72,16 @@ public sealed class Phase1ReleaseWorkflowTests
             packageId, ProjectId, "RP-ASSIGNEE", ReleasePackageState.ProcessReview, Guid.NewGuid(), "W1", "W1",
             [task], DateTimeOffset.UtcNow, null, null), default);
 
+        await Assert.ThrowsAsync<PdmRuleException>(() =>
+            workflow.DecideAsync(task.Id, "designer", UserRole.Engineer, ApprovalDecision.Rejected, null, default));
         var rejected = await workflow.DecideAsync(task.Id, "designer", UserRole.Engineer, ApprovalDecision.Rejected, "退回修改", default);
 
         Assert.Equal(ReleasePackageState.Rejected, rejected.State);
         Assert.Equal(ApprovalDecision.Rejected, Assert.Single(rejected.ApprovalTasks).Decision);
+        var notification = Assert.Single(await repository.ListUserNotificationsAsync("designer", 20, default));
+        Assert.Equal("BOM发布审批已退回", notification.Title);
+        Assert.Contains("退回修改", notification.Content);
+        Assert.Null(notification.ReadAt);
     }
 
     [Fact]
@@ -1135,9 +1141,10 @@ public sealed class Phase1ReleaseWorkflowTests
     [Fact]
     public async Task ScopedSupplement_GeneratesReadOnlyChangeNumber()
     {
-        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var time = new FixedTimeProvider(DateTimeOffset.Parse("2026-09-02T18:30:00Z"));
+        var repository = new InMemoryPdmRepository(time);
         await ConfigureApprovalWorkflowsAsync(repository);
-        var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(), new RecordingPublisher(), TimeProvider.System);
+        var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(), new RecordingPublisher(), time);
 
         var invalid = await Assert.ThrowsAsync<PdmRuleException>(() => workflow.CreateScopedReleasePackageAsync(
             ProjectId, null, string.Empty, string.Empty, "未配置原因", "SHOULD-NOT-APPLY", null,
@@ -1148,7 +1155,8 @@ public sealed class Phase1ReleaseWorkflowTests
             ProjectId, null, string.Empty, "MANUAL-VALUE-IGNORED", "设计变更；客户需求", "SHOULD-NOT-APPLY", null,
             ReleaseScope.StandardSupplement, [], "admin", UserRole.Administrator, default);
 
-        Assert.StartsWith("ECN-PRJ-2026-018-0-", package.ChangeNumber);
+        Assert.StartsWith("RP-PRJ-2026-018-0-20260903-", package.Number);
+        Assert.StartsWith("ECN-PRJ-2026-018-0-20260903-", package.ChangeNumber);
         Assert.NotEqual("MANUAL-VALUE-IGNORED", package.ChangeNumber);
         Assert.Equal("设计变更；客户需求", package.ChangeReason);
     }
@@ -1175,9 +1183,13 @@ public sealed class Phase1ReleaseWorkflowTests
     [Fact]
     public async Task LongLeadStandardRelease_PublishesSelectedControlledOutputWithoutManufacturingBaseline()
     {
-        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var time = TimeProvider.System;
+        var repository = new InMemoryPdmRepository(time);
+        var materials = new InMemoryMaterialRepository(time);
         await ConfigureApprovalWorkflowsAsync(repository);
-        var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(), new RecordingPublisher(), TimeProvider.System);
+        var materialService = new MaterialService(materials, repository, new TestU9SecretProtector(), new NoU9OpenApiClient(), time);
+        var headerService = new BomHeaderService(repository, materials, materialService, time);
+        var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(), new RecordingPublisher(), time, null, headerService);
         var selected = (await repository.GetBomAsync(ProjectId, BomKind.Standard, default)).Take(1).Select(item => item.Id).ToArray();
         var package = await workflow.CreateScopedReleasePackageAsync(
             ProjectId, null, $"RP-LONGLEAD-{Guid.NewGuid():N}", "LL-001", "长交期件提前采购", "未指定", null,
@@ -1192,6 +1204,10 @@ public sealed class Phase1ReleaseWorkflowTests
             package = await workflow.DecideAsync(task.Id, "admin", UserRole.Administrator, ApprovalDecision.Approved, "同意", default);
         Assert.Equal(ReleasePackageState.Published, package.State);
         Assert.Empty(await repository.ListManufacturingBomBaselinesAsync(ProjectId, default));
+        var applications = await materials.ListMaterialCodeApplicationsAsync(ProjectId, MaterialCodeApplicationStatus.Pending, default);
+        Assert.Equal(
+            [ProjectBomHeaderKind.Master, ProjectBomHeaderKind.Standard],
+            applications.Select(application => application.BomHeaderKind).OrderBy(kind => kind).ToArray());
     }
 
     [Fact]
@@ -1233,21 +1249,19 @@ public sealed class Phase1ReleaseWorkflowTests
     }
 
     [Fact]
-    public async Task LongLeadStandardRelease_AllowsNewMaterialAfterFormalPublicationButRejectsPublishedMaterial()
+    public async Task LongLeadStandardRelease_AllowsRemainingQuantityAfterPartialPublicationButRejectsOverRelease()
     {
         var repository = new InMemoryPdmRepository(TimeProvider.System);
         await ConfigureApprovalWorkflowsAsync(repository);
         var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(), new RecordingPublisher(), TimeProvider.System);
         await workflow.ReplaceBomAsync(ProjectId, BomKind.Standard,
         [
-            new BomItemInput(1, "STD-LL-PUBLISHED", "已发布长交期件", 1, "个", null, "M1", "W1", true),
-            new BomItemInput(2, "STD-LL-PUBLISHED", "已发布长交期件", 2, "个", null, "M1", "W1", true),
-            new BomItemInput(3, "STD-LL-NEW", "未发布长交期件", 1, "个", null, "M2", "W1", true)
+            new BomItemInput(1, "STD-LL-PUBLISHED", "部分已发布长交期件", 4, "个", null, "M1", "W1", true),
+            new BomItemInput(2, "STD-LL-NEW", "未发布长交期件", 1, "个", null, "M2", "W1", true)
         ], "admin", UserRole.Administrator, default);
         var standardItems = await repository.GetBomAsync(ProjectId, BomKind.Standard, default);
         var publishedItem = standardItems[0];
-        var sameMaterialInstance = standardItems[1];
-        var newItem = standardItems[2];
+        var newItem = standardItems[1];
         await repository.CreateReleasePackageAsync(new ReleasePackage(
             Guid.NewGuid(), ProjectId, "RP-STANDARD-PUBLISHED", ReleasePackageState.Published, Guid.NewGuid(), "W1", "W1",
             [], DateTimeOffset.UtcNow.AddDays(-1), DateTimeOffset.UtcNow.AddDays(-1), "C:\\PDM\\Release\\standard")
@@ -1261,18 +1275,89 @@ public sealed class Phase1ReleaseWorkflowTests
         {
             Scope = ReleaseScope.StandardLongLead,
             SelectedBomItemIds = [publishedItem.Id],
-            StandardBomSnapshot = [publishedItem]
+            StandardBomSnapshot = [publishedItem with { Quantity = 1 }]
+        }, default);
+        await repository.CreateReleasePackageAsync(new ReleasePackage(
+            Guid.NewGuid(), ProjectId, "RP-LONGLEAD-PUBLISHED-2", ReleasePackageState.Published, Guid.NewGuid(), "W1", "W1",
+            [], DateTimeOffset.UtcNow.AddMinutes(-30), DateTimeOffset.UtcNow.AddMinutes(-30), "C:\\PDM\\Release\\long-lead-2")
+        {
+            Scope = ReleaseScope.StandardLongLead,
+            SelectedBomItemIds = [publishedItem.Id],
+            StandardBomSnapshot = [publishedItem with { Quantity = 1 }]
         }, default);
 
-        var repeated = await Assert.ThrowsAsync<PdmRuleException>(() => workflow.CreateScopedReleasePackageAsync(
+        var overRelease = await Assert.ThrowsAsync<PdmRuleException>(() => workflow.CreateScopedReleasePackageAsync(
             ProjectId, null, $"RP-LONGLEAD-REPEAT-{Guid.NewGuid():N}", "LL-REPEAT", "同一物料再次长交期发布", "未指定", null,
-            ReleaseScope.StandardLongLead, [sameMaterialInstance.Id], "admin", UserRole.Administrator, default));
-        Assert.Contains("已发布物料不能重复提前发布", repeated.Message);
+            ReleaseScope.StandardLongLead, [publishedItem.Id], "admin", UserRole.Administrator, default,
+            new Dictionary<Guid, decimal> { [publishedItem.Id] = 3 }));
+        Assert.Contains("已提前发布2", overRelease.Message);
+        Assert.Contains("超过剩余可发布数量2", overRelease.Message);
+
+        var remaining = await workflow.CreateScopedReleasePackageAsync(
+            ProjectId, null, $"RP-LONGLEAD-REMAINING-{Guid.NewGuid():N}", "LL-REMAINING", "发布剩余长交期数量", "未指定", null,
+            ReleaseScope.StandardLongLead, [publishedItem.Id], "admin", UserRole.Administrator, default,
+            new Dictionary<Guid, decimal> { [publishedItem.Id] = 2 });
+        Assert.Equal(2, Assert.Single(remaining.StandardBomSnapshot).Quantity);
 
         var second = await workflow.CreateScopedReleasePackageAsync(
             ProjectId, null, $"RP-LONGLEAD-NEW-{Guid.NewGuid():N}", "LL-NEW", "另一物料长交期发布", "未指定", null,
             ReleaseScope.StandardLongLead, [newItem.Id], "admin", UserRole.Administrator, default);
         Assert.Equal(new[] { newItem.Id }, second.SelectedBomItemIds);
+    }
+
+    [Fact]
+    public async Task LongLeadStandardRelease_DraftCanUpdatePartialQuantityAndDeleteWithoutConflictingWithItself()
+    {
+        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        await ConfigureApprovalWorkflowsAsync(repository);
+        var publisher = new RecordingPublisher();
+        var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(), publisher, TimeProvider.System);
+        await workflow.ReplaceBomAsync(ProjectId, BomKind.Standard,
+        [
+            new BomItemInput(1, "STD-LL-EDIT", "可编辑长交期件", 4, "个", null, "M1", "W1", true)
+        ], "admin", UserRole.Administrator, default);
+        var selectedItem = Assert.Single(await repository.GetBomAsync(ProjectId, BomKind.Standard, default));
+
+        var package = await workflow.CreateScopedReleasePackageAsync(
+            ProjectId, null, $"RP-LONGLEAD-EDIT-{Guid.NewGuid():N}", "LL-EDIT", "首次长交期数量", "未指定", null,
+            ReleaseScope.StandardLongLead, [selectedItem.Id], "admin", UserRole.Administrator, default,
+            new Dictionary<Guid, decimal> { [selectedItem.Id] = 3 });
+
+        var updated = await workflow.UpdateReleasePackageDraftAsync(
+            package.Id, "调整长交期数量", [selectedItem.Id],
+            new Dictionary<Guid, decimal> { [selectedItem.Id] = 2 },
+            "admin", UserRole.Administrator, default);
+
+        Assert.Equal(package.Number, updated.Number);
+        Assert.Equal(package.Scope, updated.Scope);
+        Assert.Equal(package.WorkflowCode, updated.WorkflowCode);
+        Assert.Equal(package.WorkflowVersion, updated.WorkflowVersion);
+        Assert.Equal("调整长交期数量", updated.ChangeReason);
+        Assert.Equal(2, Assert.Single(updated.StandardBomSnapshot).Quantity);
+        Assert.Equal(2, publisher.PrepareCalls);
+
+        await workflow.DeleteReleasePackageDraftAsync(package.Id, "admin", UserRole.Administrator, default);
+
+        Assert.Null(await repository.FindReleasePackageAsync(package.Id, default));
+        Assert.Equal(1, publisher.DiscardCalls);
+    }
+
+    [Fact]
+    public async Task ReleasePackage_NonDraftCannotBeDeleted()
+    {
+        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        await ConfigureApprovalWorkflowsAsync(repository);
+        var publisher = new RecordingPublisher();
+        var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(), publisher, TimeProvider.System);
+        var package = await repository.CreateReleasePackageAsync(new ReleasePackage(
+            Guid.NewGuid(), ProjectId, $"RP-PUBLISHED-{Guid.NewGuid():N}", ReleasePackageState.Published, Guid.NewGuid(), "W1", "W1",
+            [], DateTimeOffset.UtcNow.AddHours(-1), DateTimeOffset.UtcNow, "C:\\PDM\\Release\\published"), default);
+
+        await Assert.ThrowsAsync<PdmConflictException>(() =>
+            workflow.DeleteReleasePackageDraftAsync(package.Id, "admin", UserRole.Administrator, default));
+
+        Assert.NotNull(await repository.FindReleasePackageAsync(package.Id, default));
+        Assert.Equal(0, publisher.DiscardCalls);
     }
 
     private static async Task ConfigureApprovalWorkflowsAsync(InMemoryPdmRepository repository)
@@ -1395,10 +1480,12 @@ public sealed class Phase1ReleaseWorkflowTests
     private sealed class RecordingPublisher : IReleasePackagePublisher
     {
         public int PrepareCalls { get; private set; }
+        public int DiscardCalls { get; private set; }
         public int ValidateCalls { get; private set; }
         public int PublishCalls { get; private set; }
         public IReadOnlyList<ReleasePreviewSource> PreviewSources { get; private set; } = [];
         public Task PrepareAsync(ReleasePackage package, Project project, CancellationToken cancellationToken) { PrepareCalls++; return Task.CompletedTask; }
+        public Task DiscardDraftAsync(ReleasePackage package, Project project, CancellationToken cancellationToken) { DiscardCalls++; return Task.CompletedTask; }
         public Task ValidateAsync(ReleasePackage package, Project project, CancellationToken cancellationToken) { ValidateCalls++; return Task.CompletedTask; }
         public Task<ReleasePublication> PublishAsync(ReleasePackage package, Project project, IReadOnlyList<ReleasePreviewSource> sources, CancellationToken cancellationToken)
         {
@@ -1414,6 +1501,11 @@ public sealed class Phase1ReleaseWorkflowTests
                     source.SourceSha256));
             return Task.FromResult(new ReleasePublication("C:\\PDM\\Release\\package", previews));
         }
+    }
+
+    private sealed class FixedTimeProvider(DateTimeOffset now) : TimeProvider
+    {
+        public override DateTimeOffset GetUtcNow() => now;
     }
 
     private sealed class UnusedFileStorage : IFileStorage

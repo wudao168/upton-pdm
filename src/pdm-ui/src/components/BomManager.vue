@@ -2,7 +2,7 @@
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { applyForBomMaterialCodes, linkBomMaterial, listMaterials, previewBomSourceReclassification, reclassifyBomItemsFromSource, resolveBomMaterialCodes } from '../api'
-import type { BatchUpdateBomItemsInput, BomClassification, BomEmptyDeclaration, BomItem, BomKind, BomSourceReclassificationPreview, BomValidationField, BomValidationRules, BomVersion, CreateReleasePackageInput, DocumentModelDrawingRelation, ManagedDocument, ManufacturingBomBaseline, MaterialCodeResolution, PdmMaterial, ProjectSummary, ReleasePackageSummary, ReleaseScope } from '../types'
+import type { BatchUpdateBomItemsInput, BomClassification, BomEmptyDeclaration, BomExportMode, BomGenerationResult, BomItem, BomKind, BomSourceReclassificationPreview, BomValidationField, BomValidationRules, BomVersion, CreateReleasePackageInput, DocumentModelDrawingRelation, ManagedDocument, ManufacturingBomBaseline, MaterialCodeResolution, PdmMaterial, ProjectSummary, ReleasePackageSummary, ReleaseScope, UpdateReleasePackageDraftInput } from '../types'
 import { u9UnitName, u9UnitOptions } from '../u9Units'
 import BomHierarchyOverview from './BomHierarchyOverview.vue'
 import ReleaseCenter from './ReleaseCenter.vue'
@@ -18,6 +18,9 @@ type BomRowEntry = { row: EditableBomRow; index: number; depth: number; hasChild
 type PendingMaterialLink = { kind: BomKind; materialId: string; materialCode: string; sequence: number; clientKey: string }
 type BomComparisonChange = { field: string; label: string; previous: string; current: string }
 type BomComparisonEntry = { status: BomComparisonStatus; current: EditableBomRow; previous?: BomItem; changes: BomComparisonChange[] }
+type BomIssueComparison = { field: string; sourceLabel: string; source: string; currentLabel: string; current: string }
+type ReconciliationChangeType = 'Added' | 'Quantity' | 'Attribute' | 'Classification' | 'Manual' | 'Removed'
+type ReconciliationDetail = { key: string; groupKey: string; type: ReconciliationChangeType; item: string; field: string; current: string; source: string; proposed: string; action: string; instances: number }
 
 const props = withDefaults(defineProps<{
   sourceData?: BomItem[]
@@ -46,6 +49,7 @@ const props = withDefaults(defineProps<{
   canDecideApproval?: boolean
   canEmergencyDecide?: boolean
   requestedReleasePackageId?: string
+  previewReconciliation?: () => Promise<BomGenerationResult>
 }>(), {
   editable: false,
   sourceData: () => [],
@@ -75,7 +79,7 @@ const props = withDefaults(defineProps<{
 const emit = defineEmits<{
   save: [kind: BomKind, items: BomItem[]]
   import: [kind: BomKind, file: File]
-  export: [kind: BomKind]
+  export: [kind: BomKind, mode: BomExportMode]
   generate: [discardUnsavedChanges: boolean]
   resolve: [itemId: string, action: 'classify' | 'retain' | 'remove', targetKind?: BomKind]
   batchRetain: [itemIds: string[]]
@@ -84,9 +88,12 @@ const emit = defineEmits<{
   batchRestore: [itemIds: string[], mode: 'Original' | 'AsManual']
   restoreSource: [itemIds: string[]]
   releaseCreate: [input: CreateReleasePackageInput]
+  releaseUpdateDraft: [releasePackageId: string, input: UpdateReleasePackageDraftInput]
+  releaseDeleteDraft: [releasePackageId: string]
   releaseUpload: [releasePackageId: string, file: File]
   releaseSubmit: [releasePackageId: string]
   releaseWithdraw: [releasePackageId: string]
+  releaseRetryU9: [releasePackageId: string]
   releaseDecide: [taskId: string, decision: 'Approved' | 'Rejected', comment: string]
   releaseTransfer: [taskId: string, targetUsername: string, comment: string]
   releaseEmergencyDecide: [taskId: string, decision: 'Approved' | 'Rejected', reason: string]
@@ -96,12 +103,16 @@ const emit = defineEmits<{
 }>()
 const kind = ref<BomView>('Source')
 const displayMode = ref<BomDisplayMode>('Summary')
+const exportDialogOpen = ref(false)
+const exportMode = ref<BomExportMode>('Summary')
+const exportKind = ref<BomKind>('Standard')
 const expandedStructurePaths = ref(new Set<string>())
 const selectedVersionId = ref('current')
 const versionSelectionTouched = ref(false)
 const selectedBaselineId = ref('')
 const comparisonOpen = ref(false)
 const comparisonFilter = ref<BomComparisonFilter>('All')
+const issueDetailRow = ref<EditableBomRow | null>(null)
 const rows = ref<EditableBomRow[]>([])
 const fileInput = ref<HTMLInputElement>()
 const selectedIds = ref<string[]>([])
@@ -139,6 +150,11 @@ const resolvedMaterialSignatures = new Map<string, string>()
 const autoLinkedDraftRows = new Set<string>()
 const releaseDrawerOpen = ref(false)
 const selectedReleasePackageId = ref('')
+const reconciliationDrawerOpen = ref(false)
+const reconciliationPreviewLoading = ref(false)
+const reconciliationPreviewError = ref('')
+const reconciliationPreview = ref<BomGenerationResult | null>(null)
+const reconciliationFilter = ref<ReconciliationChangeType | 'All'>('All')
 const draggedRowIndex = ref<number | null>(null)
 const dragOverRowIndex = ref<number | null>(null)
 const dragOverPosition = ref<'before' | 'after' | null>(null)
@@ -163,6 +179,17 @@ function createBatchDraft() {
   }
 }
 const batchDraft = ref(createBatchDraft())
+
+function openExportDialog(targetKind: BomKind) {
+  exportKind.value = targetKind
+  exportMode.value = 'Summary'
+  exportDialogOpen.value = true
+}
+
+function confirmExport() {
+  exportDialogOpen.value = false
+  emit('export', exportKind.value, exportMode.value)
+}
 
 const sourceDataRows = computed(() => props.sourceData)
 const sourceDisplayRows = computed(() => aggregateSourceRows(sourceDataRows.value))
@@ -244,39 +271,44 @@ const maintainedMechanicalById = computed(() => new Map(maintainedMechanicalRows
   .filter(item => !!item.id)
   .map(item => [item.id, item])))
 const sourceDataIds = computed(() => new Set(sourceDataRows.value.map(item => item.id).filter(Boolean)))
-const reconciliationReminderCount = computed(() => {
-  const changedSourceRows = sourceDataRows.value.filter(source => {
+const reconciliationReminderKeys = computed(() => {
+  const keys = new Set<string>()
+  sourceDataRows.value.forEach((source, index) => {
     const maintained = source.id ? maintainedMechanicalById.value.get(source.id) : undefined
-    if (!maintained) return true
-    return source.reconciliationStatus === 'ManualOverrideMismatch'
-      && Boolean(reconciliationIssueLabel(source))
-  }).length
-  const removedSourceRows = maintainedMechanicalRows.value.filter(item => item.source === 'Auto'
+    if (!maintained || (source.reconciliationStatus === 'ManualOverrideMismatch' && Boolean(reconciliationIssueLabel(source))))
+      keys.add(reconciliationGroupKey(source, index))
+  })
+  maintainedMechanicalRows.value.filter(item => item.source === 'Auto'
     && !!item.sourceDocumentId
     && !item.manuallyExcluded
     && !item.pendingRemoval
     && !item.manualUnmatched
     && !!item.id
-    && !sourceDataIds.value.has(item.id)).length
-  return changedSourceRows + removedSourceRows
+    && !sourceDataIds.value.has(item.id)).forEach((item, index) => keys.add(reconciliationGroupKey(item, index)))
+  return keys
 })
-const quantityMismatchCount = computed(() => {
-  const mismatchedMaterials = new Set<string>()
+const quantityMismatchKeys = computed(() => {
+  const keys = new Set<string>()
   maintainedMechanicalRows.value
     .filter(item => !item.manuallyExcluded && !item.pendingRemoval && !item.manualUnmatched)
-    .forEach(item => {
+    .forEach((item, index) => {
       const source = rawSourceRowFor(item)
       if (!source || Number(source.quantity) === Number(item.quantity)) return
-      mismatchedMaterials.add(summaryAggregationKey(source) || source.id || item.id || `${item.sequence}`)
+      keys.add(reconciliationGroupKey(source, index))
     })
-  return mismatchedMaterials.size
+  return keys
 })
-const reconcileActionText = computed(() => quantityMismatchCount.value > 0
-  ? `修正数量（${quantityMismatchCount.value}）`
-  : '重新对账')
-const reconcileActionTitle = computed(() => quantityMismatchCount.value > 0
-  ? `按最新设计树修正 ${quantityMismatchCount.value} 类物料数量；名称、型号、品牌等人工维护值保持不变`
-  : '图档提交后会自动更新；此操作用于人工重新对账')
+const reconciliationPendingKeys = computed(() => new Set([...reconciliationReminderKeys.value, ...quantityMismatchKeys.value]))
+const reconciliationReminderCount = computed(() => reconciliationPendingKeys.value.size)
+const reconciliationReminderInstanceCount = computed(() => {
+  if (!reconciliationReminderCount.value) return 0
+  const sourceInstances = sourceDataRows.value.filter((item, index) => reconciliationPendingKeys.value.has(reconciliationGroupKey(item, index))).length
+  const missingInstances = maintainedMechanicalRows.value.filter((item, index) => !item.manuallyExcluded
+    && !sourceDataIds.value.has(item.id)
+    && reconciliationPendingKeys.value.has(reconciliationGroupKey(item, index))).length
+  return sourceInstances + missingInstances
+})
+const reconcileActionTitle = '只读查看最新图档源数据与当前机械BOM工作区的差异；不会自动修改机械BOM'
 const brandOptions = computed(() => distinctFilterOptions(rows.value.map(item => item.brand)))
 const materialOptions = computed(() => distinctFilterOptions(rows.value.map(item => item.material)))
 function rowMatchesFilters(row: EditableBomRow) {
@@ -316,7 +348,7 @@ const structureRows = computed<BomRowEntry[]>(() => {
   })
   const children = new Map<string, typeof nodes>()
   nodes.forEach(node => children.set(node.parentKey, [...(children.get(node.parentKey) ?? []), node]))
-  children.forEach(items => items.sort((left, right) => left.path.localeCompare(right.path, 'zh-CN', { numeric: true }) || left.row.sequence - right.row.sequence))
+  children.forEach(items => items.sort((left, right) => left.row.sequence - right.row.sequence || left.path.localeCompare(right.path, 'zh-CN', { numeric: true })))
   const matched = new Set(nodes.filter(node => rowMatchesFilters(node.row)).map(node => node.structureKey))
   const included = new Set(matched)
   if (filtersActive.value) {
@@ -358,16 +390,27 @@ const selectedRows = computed(() => rows.value.filter(item => {
   const key = rowSelectionKey(item)
   return !!key && selectedIds.value.includes(key)
 }))
-const quantityTotals = computed(() => {
+function quantityTotalKey(row: BomItem) {
+  return summaryAggregationKey(row) || comparisonMaterialKey(row, 'Summary')
+}
+
+function buildQuantityTotals(items: BomItem[]) {
   const totals = new Map<string, number>()
-  rows.value.forEach(row => {
-    const key = quantityAggregationKey(row)
+  items.forEach(row => {
+    const key = quantityTotalKey(row)
     if (!key) return
     totals.set(key, (totals.get(key) ?? 0) + Number(row.quantity))
   })
   return totals
-})
+}
+
+const bomQuantityTotals = computed(() => buildQuantityTotals(rows.value.filter(row => !row._quickEntry)))
+const sourceQuantityTotals = computed(() => buildQuantityTotals(sourceDataRows.value))
+const publishedQuantityTotals = computed(() => buildQuantityTotals(
+  comparisonBaseline.value?.items.filter(item => !item.manuallyExcluded && !item.pendingClassification) ?? [],
+))
 function operationItemIds(row: EditableBomRow) {
+  if (displayMode.value === 'Structure') return row.id ? [row.id] : []
   if (row._sourceItemIds?.length) return row._sourceItemIds
   const materialKey = quantityAggregationKey(row)
   if (!materialKey) return row.id ? [row.id] : []
@@ -413,9 +456,9 @@ const preferredReleaseScope = computed<Exclude<ReleaseScope, 'LegacyCombined'> |
     ? 'StandardFormal'
     : 'StandardLongLead'
 })
-const publishedLongLeadItemIds = computed(() => [...new Set(props.releasePackages
+const publishedLongLeadItems = computed(() => props.releasePackages
   .filter(item => item.scope === 'StandardLongLead' && item.state === '已发布')
-  .flatMap(item => item.selectedBomItemIds))])
+  .flatMap(item => item.standardBomSnapshot))
 const materialReferenceBrandOptions = computed(() => [...new Set(materialReferenceResults.value
   .map(item => item.brand?.trim())
   .filter((brand): brand is string => Boolean(brand)))]
@@ -684,18 +727,6 @@ function comparisonRowTitle(row: EditableBomRow) {
   return `已修改：${entry.changes.map(change => `${change.label} ${change.previous} → ${change.current}`).join('；')}`
 }
 
-function comparisonQuantityDisplay(row: EditableBomRow) {
-  const quantityChange = comparisonEntry(row)?.changes.find(change => change.field === 'quantity')
-  return quantityChange ? `${quantityChange.previous} → ${quantityChange.current}` : quantityDisplay(row)
-}
-
-function comparisonQuantityTitle(row: EditableBomRow) {
-  const quantityChange = comparisonEntry(row)?.changes.find(change => change.field === 'quantity')
-  return quantityChange
-    ? `最近发布数量：${quantityChange.previous}；当前工作区数量：${quantityChange.current}`
-    : quantityTitle(row)
-}
-
 function releasePackageMatchesKind(releasePackage: ReleasePackageSummary, bomKind: BomView) {
   return bomKind === 'Standard'
     ? ['StandardLongLead', 'StandardFormal', 'StandardSupplement'].includes(releasePackage.scope)
@@ -790,6 +821,35 @@ function hasDrawingNameModelMismatch(row: BomItem) {
 
 function drawingNameMismatchTitle(row: BomItem) {
   return `设计树图纸名称：${drawingNameFor(row) || '未获取'}；BOM型号：${row.specification?.trim() || '未填写'}`
+}
+
+function issueCurrentRow(row: EditableBomRow) {
+  if (!isSourceView.value || !row.id) return row
+  return maintainedMechanicalById.value.get(row.id) ?? row
+}
+
+function issueComparisons(row: EditableBomRow): BomIssueComparison[] {
+  const current = issueCurrentRow(row)
+  const source = rawSourceRowFor(current) ?? row
+  const fields = mismatchFields(current)
+  const fieldValues: Record<string, { sourceLabel: string; source: string | undefined; currentLabel: string; current: string | undefined }> = {
+    物料分类: { sourceLabel: '图档源分类', source: rowKindLabel(source), currentLabel: 'BOM分类', current: rowKindLabel(current) },
+    物料编码: { sourceLabel: '图档源物料编码', source: source.drawingNumber, currentLabel: 'BOM物料编码', current: current.drawingNumber },
+    型号: hasDrawingNameModelMismatch(current)
+      ? { sourceLabel: '设计树图纸名称', source: drawingNameFor(current), currentLabel: 'BOM型号', current: current.specification }
+      : { sourceLabel: '图档源型号', source: source.specification, currentLabel: 'BOM型号', current: current.specification },
+    品牌: { sourceLabel: '图档源品牌', source: source.brand, currentLabel: 'BOM品牌', current: current.brand },
+    材质: { sourceLabel: '图档源材质', source: source.material, currentLabel: 'BOM材质', current: current.material },
+    表面处理: { sourceLabel: '图档源表面处理', source: source.surfaceTreatment, currentLabel: 'BOM表面处理', current: current.surfaceTreatment },
+  }
+  return fields.flatMap(field => {
+    const values = fieldValues[field]
+    return values ? [{ field, sourceLabel: values.sourceLabel, source: values.source?.trim() || '未填写', currentLabel: values.currentLabel, current: values.current?.trim() || '未填写' }] : []
+  })
+}
+
+function openIssueDetails(row: EditableBomRow) {
+  if (shouldShowReconciliation(row)) issueDetailRow.value = row
 }
 
 function rowKindLabel(row: BomItem) {
@@ -938,6 +998,131 @@ function aggregateSourceRows(items: BomItem[]): EditableBomRow[] {
   return [...grouped.values()]
 }
 
+function reconciliationGroupKey(row: BomItem, fallbackIndex = 0) {
+  if (row.sourceDocumentId) return ['document', row.sourceDocumentId, row.sourceConfiguration].map(value => normalizedAggregationValue(value)).join('|')
+  const materialKey = quantityAggregationKey(row)
+  if (materialKey) return `material:${materialKey}`
+  return row.id ? `id:${row.id.toLocaleLowerCase()}` : `row:${fallbackIndex}`
+}
+
+function groupReconciliationItems(items: BomItem[]) {
+  const groups = new Map<string, BomItem[]>()
+  items.filter(item => !item.manuallyExcluded).forEach((item, index) => {
+    const key = reconciliationGroupKey(item, index)
+    groups.set(key, [...(groups.get(key) ?? []), item])
+  })
+  return groups
+}
+
+function reconciliationKindLabel(value: BomClassification | undefined) {
+  return value === 'Standard' ? '标准件BOM' : value === 'NonStandard' ? '非标件BOM' : value === 'Electrical' ? '电气BOM' : value === 'Virtual' ? '虚拟件（仅源数据）' : '待分类'
+}
+
+function reconciliationGroupKind(items: BomItem[]) {
+  return items.find(item => item.kind)?.kind ?? (items.some(item => item.pendingClassification) ? 'Unclassified' : undefined)
+}
+
+function reconciliationGroupValue(items: BomItem[], field: keyof BomItem) {
+  if (field === 'quantity') return items.length ? formatQuantity(items.reduce((sum, item) => sum + Number(item.quantity || 0), 0)) : ''
+  const values = [...new Set(items.map(item => displayValue(item[field] as string | number | undefined)).filter(value => value !== '—'))]
+  return values.length > 1 ? '多个值' : values[0] ?? ''
+}
+
+function reconciliationItemLabel(items: BomItem[]) {
+  const row = items[0]
+  if (!row) return '未识别物料'
+  const code = row.drawingNumber?.trim()
+  const name = row.name?.trim() || row.specification?.trim()
+  return [code, name].filter(Boolean).join(' · ') || row.sourceDocumentId || '未编码物料'
+}
+
+const reconciliationFieldDefinitions: Array<{ field: keyof BomItem; label: string }> = [
+  { field: 'drawingNumber', label: '物料编码' },
+  { field: 'name', label: '物料名称' },
+  { field: 'unit', label: '单位' },
+  { field: 'specification', label: '型号' },
+  { field: 'remark', label: '备注信息' },
+  { field: 'brand', label: '品牌' },
+  { field: 'material', label: '材质' },
+  { field: 'surfaceTreatment', label: '表面处理' },
+  { field: 'heatTreatment', label: '热处理' },
+  { field: 'revision', label: '版本' },
+  { field: 'parentDrawingNumber', label: '上级物料编码' },
+]
+
+function buildReconciliationDetails(preview: BomGenerationResult) {
+  const currentItems = [
+    ...maintainedMechanicalRows.value,
+    ...sourceDataRows.value.filter(item => item.kind === 'Virtual'),
+  ]
+  const proposedItems = [...preview.standardItems, ...preview.nonStandardItems, ...preview.unclassifiedItems, ...preview.virtualItems]
+  const currentGroups = groupReconciliationItems(currentItems)
+  const sourceGroups = groupReconciliationItems(sourceDataRows.value)
+  const proposedGroups = groupReconciliationItems(proposedItems)
+  const keys = new Set([...currentGroups.keys(), ...sourceGroups.keys(), ...proposedGroups.keys()])
+  const details: ReconciliationDetail[] = []
+  const push = (groupKey: string, type: ReconciliationChangeType, items: BomItem[], field: string, current: string, source: string, proposed: string, action: string) => {
+    details.push({ key: `${groupKey}:${type}:${field}`, groupKey, type, item: reconciliationItemLabel(items), field, current: current || '—', source: source || '—', proposed: proposed || '—', action, instances: Math.max(1, items.length) })
+  }
+
+  keys.forEach(groupKey => {
+    const current = currentGroups.get(groupKey) ?? []
+    const source = sourceGroups.get(groupKey) ?? []
+    const proposed = proposedGroups.get(groupKey) ?? []
+    const displayItems = proposed.length ? proposed : current.length ? current : source
+    const proposedKind = reconciliationGroupKind(proposed)
+    const currentKind = reconciliationGroupKind(current)
+    const sourceKind = reconciliationGroupKind(source)
+    const instances = source.length ? source : displayItems
+
+    if (!current.length && proposed.length) {
+      push(groupKey, 'Added', instances, '整行', '', reconciliationKindLabel(sourceKind), reconciliationKindLabel(proposedKind), `提醒人工确认是否加入${reconciliationKindLabel(proposedKind)}`)
+      return
+    }
+    if (!proposed.length || proposed.some(item => item.pendingRemoval || item.manualUnmatched)) {
+      push(groupKey, 'Removed', instances, '来源状态', reconciliationKindLabel(currentKind), source.length ? '仍存在' : '最新源数据中不存在', '待处理', '提醒人工处理，不自动删除')
+      return
+    }
+    if (currentKind !== proposedKind)
+      push(groupKey, 'Classification', instances, '物料分类', reconciliationKindLabel(currentKind), reconciliationKindLabel(sourceKind), reconciliationKindLabel(proposedKind), '提醒人工核对分类')
+
+    const currentQuantity = reconciliationGroupValue(current, 'quantity')
+    const sourceQuantity = reconciliationGroupValue(source, 'quantity')
+    const proposedQuantity = reconciliationGroupValue(proposed, 'quantity')
+    if (currentQuantity !== proposedQuantity)
+      push(groupKey, 'Quantity', instances, '数量', currentQuantity, sourceQuantity, proposedQuantity, '提醒人工核对数量')
+
+    reconciliationFieldDefinitions.forEach(({ field, label }) => {
+      const currentValue = reconciliationGroupValue(current, field)
+      const sourceValue = reconciliationGroupValue(source, field)
+      const proposedValue = reconciliationGroupValue(proposed, field)
+      if (currentValue !== proposedValue) {
+        push(groupKey, 'Attribute', instances, label, currentValue, sourceValue, proposedValue, '提醒人工核对属性')
+        return
+      }
+      const manualFields = proposedKind === 'Standard'
+        ? ['drawingNumber', 'specification', 'brand']
+        : proposedKind === 'NonStandard' ? ['specification', 'material', 'surfaceTreatment'] : []
+      if (manualFields.includes(field) && sourceValue && currentValue !== sourceValue)
+        push(groupKey, 'Manual', instances, label, currentValue, sourceValue, proposedValue, '仅提示差异，不自动覆盖')
+    })
+  })
+  return details
+}
+
+const reconciliationDetails = computed(() => reconciliationPreview.value ? buildReconciliationDetails(reconciliationPreview.value) : [])
+const filteredReconciliationDetails = computed(() => reconciliationFilter.value === 'All'
+  ? reconciliationDetails.value
+  : reconciliationDetails.value.filter(item => item.type === reconciliationFilter.value))
+const reconciliationSummary = computed(() => {
+  const count = (type: ReconciliationChangeType) => new Set(reconciliationDetails.value.filter(item => item.type === type).map(item => item.groupKey)).size
+  return {
+    total: new Set(reconciliationDetails.value.map(item => item.groupKey)).size,
+    instances: new Set(reconciliationDetails.value.flatMap(item => Array.from({ length: item.instances }, (_, index) => `${item.groupKey}:${index}`))).size,
+    added: count('Added'), quantity: count('Quantity'), attribute: count('Attribute'), classification: count('Classification'), manual: count('Manual'), removed: count('Removed'),
+  }
+})
+
 function toggleStructureRow(structureKey: string) {
   const next = new Set(expandedStructurePaths.value)
   if (next.has(structureKey)) next.delete(structureKey)
@@ -960,15 +1145,11 @@ function formatQuantity(value: number) {
 }
 
 function quantityDisplay(row: BomItem) {
-  const source = sourceRowFor(row)
-  return `${formatQuantity(Number(row.quantity))} / ${source ? formatQuantity(Number(source.quantity)) : '—'}`
+  return formatQuantity(Number(row.quantity))
 }
 
 function quantityTitle(row: BomItem) {
-  const source = sourceRowFor(row)
-  const key = quantityAggregationKey(row)
-  const total = key ? quantityTotals.value.get(key) ?? Number(row.quantity) : Number(row.quantity)
-  return `BOM数量 ${formatQuantity(Number(row.quantity))}；源数量 ${source ? formatQuantity(Number(source.quantity)) : '无'}；同料号合计 ${formatQuantity(total)}`
+  return `当前数量：${quantityDisplay(row)}`
 }
 
 function rawSourceRowFor(row: BomItem) {
@@ -990,10 +1171,33 @@ function sourceRowFor(row: BomItem) {
   return key ? sourceDisplayRows.value.find(item => summaryAggregationKey(item) === key) : source
 }
 
-function quantityAuditClass(row: BomItem) {
-  const source = sourceRowFor(row)
-  if (!source) return 'is-blocking'
-  return Number(source.quantity) === Number(row.quantity) ? 'is-matched' : 'is-blocking'
+function bomQuantityTotal(row: BomItem) {
+  if (isSourceView.value) return undefined
+  return bomQuantityTotals.value.get(quantityTotalKey(row)) ?? Number(row.quantity)
+}
+
+function publishedQuantityTotal(row: BomItem) {
+  return publishedQuantityTotals.value.get(quantityTotalKey(row))
+}
+
+function sourceQuantityTotal(row: BomItem) {
+  const source = rawSourceRowFor(row)
+  if (!source) return undefined
+  return sourceQuantityTotals.value.get(quantityTotalKey(source)) ?? Number(source.quantity)
+}
+
+function quantityReferenceDisplay(value: number | undefined) {
+  return value === undefined ? '—' : formatQuantity(value)
+}
+
+function sourceQuantityDiffers(row: BomItem) {
+  const total = bomQuantityTotal(row)
+  const source = sourceQuantityTotal(row)
+  return total !== undefined && source !== undefined && total !== source
+}
+
+function quantityReferenceTitle(row: BomItem) {
+  return `已发布总数量：${quantityReferenceDisplay(publishedQuantityTotal(row) ?? 0)}；当前BOM总数量：${quantityReferenceDisplay(bomQuantityTotal(row))}；源总数量：${quantityReferenceDisplay(sourceQuantityTotal(row))}`
 }
 
 function drawingAudit(row: BomItem) {
@@ -1071,10 +1275,23 @@ async function requestKind(nextKind: BomView) {
   kind.value = nextKind
 }
 
-function requestGenerate() {
-  const discardUnsavedChanges = hasStagedEdits.value
-  if (discardUnsavedChanges) discardDraftsOnNextSourceRefresh = true
-  emit('generate', discardUnsavedChanges)
+async function requestGenerate() {
+  if (!props.previewReconciliation) {
+    emit('generate', false)
+    return
+  }
+  reconciliationDrawerOpen.value = true
+  reconciliationPreviewLoading.value = true
+  reconciliationPreviewError.value = ''
+  reconciliationPreview.value = null
+  reconciliationFilter.value = 'All'
+  try {
+    reconciliationPreview.value = await props.previewReconciliation()
+  } catch (error) {
+    reconciliationPreviewError.value = error instanceof Error ? error.message : '机械BOM对账预览失败'
+  } finally {
+    reconciliationPreviewLoading.value = false
+  }
 }
 
 function requestDisplayMode(nextMode: BomDisplayMode) {
@@ -1436,9 +1653,23 @@ function moveRowPointerDrag(event: PointerEvent) {
   if (!targetRow) return
   const index = Number(targetRow.dataset.rowIndex)
   if (!Number.isInteger(index)) return
+  if (displayMode.value === 'Structure' && structureParentKeyAtIndex(index) !== structureParentKeyAtIndex(draggedRowIndex.value)) {
+    dragOverRowIndex.value = null
+    dragOverPosition.value = null
+    return
+  }
   const bounds = targetRow.getBoundingClientRect()
   dragOverRowIndex.value = index
   dragOverPosition.value = event.clientY < bounds.top + bounds.height / 2 ? 'before' : 'after'
+}
+
+function structureParentKeyAtIndex(index: number) {
+  const path = normalizedStructurePath(rows.value[index]!)
+  if (!path) return ''
+  const paths = new Set(rows.value.map(normalizedStructurePath).filter(Boolean))
+  let parentPath = path.includes('/') ? path.slice(0, path.lastIndexOf('/')) : ''
+  while (parentPath && !paths.has(parentPath)) parentPath = parentPath.includes('/') ? parentPath.slice(0, parentPath.lastIndexOf('/')) : ''
+  return parentPath
 }
 
 async function applyRowDrop() {
@@ -1938,8 +2169,8 @@ async function submitBatchUpdate() {
       </div>
       <div v-if="isSourceView" class="pdm-bom-detail-actions">
         <div class="pdm-manager-actions">
-          <span v-if="editable && reconciliationReminderCount" class="pdm-bom-reconcile-hint" role="status" aria-live="polite">源数据更新 {{ reconciliationReminderCount }} 项</span>
-          <button v-if="editable" type="button" class="pdm-secondary-action" :class="{ 'is-reconcile-needed': reconciliationReminderCount > 0 || quantityMismatchCount > 0 }" :aria-label="quantityMismatchCount ? `${reconcileActionText}，按最新设计树重新计算并保留人工维护字段` : reconciliationReminderCount ? `源数据更新 ${reconciliationReminderCount} 项，重新对账` : '重新对账'" :title="reconcileActionTitle" :disabled="pending" @click="requestGenerate">{{ reconcileActionText }}</button>
+          <span v-if="editable && reconciliationReminderCount" class="pdm-bom-reconcile-hint" role="status" aria-live="polite">机械BOM待对账 {{ reconciliationReminderCount }} 类（{{ reconciliationReminderInstanceCount }} 个实例）</span>
+          <button v-if="editable" type="button" class="pdm-secondary-action" :class="{ 'is-reconcile-needed': reconciliationReminderCount > 0 }" aria-label="查看机械BOM对账明细" :title="reconcileActionTitle" :disabled="pending || reconciliationPreviewLoading" @click="requestGenerate">{{ reconciliationPreviewLoading ? '正在生成明细…' : '查看对账明细' }}</button>
         </div>
       </div>
     </div>
@@ -1963,13 +2194,13 @@ async function submitBatchUpdate() {
         <strong>{{ categoryReleasePackages.length }} 个</strong>
       </div>
       <div class="pdm-bom-release-strip-actions">
-        <span v-if="editable && reconciliationReminderCount" class="pdm-bom-reconcile-hint" role="status" aria-live="polite">源数据更新 {{ reconciliationReminderCount }} 项</span>
+        <span v-if="editable && reconciliationReminderCount" class="pdm-bom-reconcile-hint" role="status" aria-live="polite">机械BOM待对账 {{ reconciliationReminderCount }} 类（{{ reconciliationReminderInstanceCount }} 个实例）</span>
         <button v-if="canEditCurrentView" type="button" class="pdm-secondary-action" @click="selectImport">导入XLSX</button>
-        <button type="button" class="pdm-secondary-action" @click="emit('export', kind as BomKind)">导出XLSX</button>
-        <button v-if="editable" type="button" class="pdm-secondary-action" :class="{ 'is-reconcile-needed': reconciliationReminderCount > 0 || quantityMismatchCount > 0 }" :aria-label="quantityMismatchCount ? `${reconcileActionText}，按最新设计树重新计算并保留人工维护字段` : reconciliationReminderCount ? `源数据更新 ${reconciliationReminderCount} 项，重新对账` : '重新对账'" :title="reconcileActionTitle" :disabled="pending" @click="requestGenerate">{{ reconcileActionText }}</button>
+        <button type="button" class="pdm-secondary-action" @click="openExportDialog(kind as BomKind)">导出XLSX</button>
+        <button v-if="editable" type="button" class="pdm-secondary-action" :class="{ 'is-reconcile-needed': reconciliationReminderCount > 0 }" aria-label="查看机械BOM对账明细" :title="reconcileActionTitle" :disabled="pending || reconciliationPreviewLoading" @click="requestGenerate">{{ reconciliationPreviewLoading ? '正在生成明细…' : '查看对账明细' }}</button>
         <button type="button" class="pdm-secondary-action" @click="openReleaseDrawer(activeReleasePackages[0]?.id || latestPublishedPackage?.id)">{{ activeReleasePackages.length ? `处理审批 ${activeReleasePackages.length}` : '发布记录' }}</button>
         <span v-if="hasStagedEdits" class="pdm-bom-unsaved-count" role="status" aria-live="polite">未保存 {{ stagedEditCount }} 项</span>
-        <button v-if="canEditCurrentView && hasStagedEdits" type="button" class="pdm-secondary-action" :disabled="pending" @click="discardStagedEdits">撤销修改</button>
+        <button v-if="canEditCurrentView && hasStagedEdits" type="button" class="pdm-secondary-action pdm-bom-discard-action" :disabled="pending" @click="discardStagedEdits">撤销修改</button>
         <button v-if="canEditCurrentView" type="button" class="pdm-primary-action pdm-bom-save-action" :disabled="pending" @click="saveCurrentBom">{{ pending ? '保存中…' : hasStagedEdits ? `保存BOM（${stagedEditCount}）` : '保存BOM' }}</button>
         <button v-if="canManageRelease" type="button" class="pdm-primary-action" @click="openReleaseDrawer()">发起发布</button>
       </div>
@@ -2037,21 +2268,20 @@ async function submitBatchUpdate() {
         <colgroup>
           <col class="is-select"><col class="is-row-actions"><col class="is-sequence"><col class="is-kind"><col class="is-unit"><col class="is-code">
           <col class="is-name"><col class="is-parent-code"><col class="is-model"><col class="is-remark"><col class="is-brand">
-          <col class="is-material"><col class="is-surface"><col class="is-weight"><col class="is-quantity"><col class="is-drawing-audit">
+          <col class="is-material"><col class="is-surface"><col class="is-weight"><col class="is-quantity"><col class="is-quantity-reference"><col class="is-drawing-audit">
           <col class="is-revision"><col class="is-source"><col class="is-data-status">
         </colgroup>
-          <thead><tr><th><input type="checkbox" :aria-label="isSourceView ? '选择全部源数据物料' : '选择当前分类全部物料'" :checked="allRowsSelected" :disabled="!canSelectCurrentView || selectableIds.length === 0" @change="toggleAllRows"></th><th aria-label="行排序与插入操作"></th><th>序号</th><th>物料分类</th><th>单位</th><th>物料编码</th><th>物料名称</th><th>上级物料编码</th><th>型号</th><th>备注信息</th><th>品牌</th><th>材质</th><th>表面处理</th><th>重量</th><th>数量(BOM/源)</th><th class="pdm-bom-drawing-audit-header">图纸核对</th><th>版本</th><th class="pdm-bom-reconciliation-header">问题</th><th>资料状态</th></tr></thead>
+          <thead><tr><th><input type="checkbox" :aria-label="isSourceView ? '选择全部源数据物料' : '选择当前分类全部物料'" :checked="allRowsSelected" :disabled="!canSelectCurrentView || selectableIds.length === 0" @change="toggleAllRows"></th><th aria-label="行排序与插入操作"></th><th>序号</th><th>物料分类</th><th>单位</th><th>物料编码</th><th>物料名称</th><th>上级物料编码</th><th>型号</th><th>备注信息</th><th>品牌</th><th>材质</th><th>表面处理</th><th>重量</th><th>数量</th><th title="已发布总数量 / 当前BOM总数量 / 源总数量">发布&nbsp;&nbsp;总/源</th><th class="pdm-bom-drawing-audit-header">图纸核对</th><th>版本</th><th class="pdm-bom-reconciliation-header">问题</th><th>资料状态</th></tr></thead>
         <tbody>
           <tr v-for="{ row, index, depth, hasChildren, expanded, structureKey } in pagedRows" :key="row.id || row._clientKey" :data-row-index="index" :title="comparisonRowTitle(row)" :class="{ 'is-quick-entry': row._quickEntry, 'is-pending-removal': row.pendingRemoval, 'is-bom-unresolved': !row._quickEntry && (rowNeedsClassification(row) || row.manualUnmatched), 'is-data-exception': !row._quickEntry && dataStatusIssues(row).length > 0, 'is-reconciliation-issue': !row._quickEntry && shouldShowReconciliation(row), 'is-release-unchanged': comparisonRowStatus(row) === 'Released', 'is-release-added': comparisonRowStatus(row) === 'Added', 'is-release-modified': comparisonRowStatus(row) === 'Modified', 'is-row-dragging': draggedRowIndex === index, 'is-drag-over-before': dragOverRowIndex === index && dragOverPosition === 'before', 'is-drag-over-after': dragOverRowIndex === index && dragOverPosition === 'after' }">
             <td><input v-if="!row._quickEntry" type="checkbox" aria-label="选择物料" :checked="selectedIds.includes(rowSelectionKey(row) ?? '')" :disabled="!canSelectCurrentView || !rowSelectionKey(row)" @change="toggleRow(rowSelectionKey(row), $event)"></td>
             <td>
               <span v-if="isSourceView" class="pdm-bom-classification-indicator" :class="rowIsClassified(row) ? 'is-classified' : 'is-unclassified'" :aria-label="rowIsClassified(row) ? '已归类' : '未归类'" :title="rowIsClassified(row) ? '已归类' : '未归类'">{{ rowIsClassified(row) ? '✓' : '!' }}</span>
-              <div v-else-if="canEditCurrentView && !row._quickEntry && displayMode === 'Summary'" class="pdm-bom-row-actions">
-                <span class="pdm-bom-row-drag-handle" :class="{ 'is-disabled': pending }" role="button" tabindex="0" :aria-label="`拖动第 ${index + 1} 行排序`" :title="`按住拖动第 ${index + 1} 行`" @pointerdown="startRowPointerDrag(index, $event)">⠿</span>
+              <div v-else-if="canEditCurrentView && !row._quickEntry" class="pdm-bom-row-actions">
+                <span class="pdm-bom-row-drag-handle" :class="{ 'is-disabled': pending }" role="button" tabindex="0" :aria-label="`拖动第 ${index + 1} 行排序`" :title="displayMode === 'Structure' ? `按住拖动第 ${index + 1} 行，在当前层级内排序` : `按住拖动第 ${index + 1} 行`" @pointerdown="startRowPointerDrag(index, $event)">⠿</span>
                 <button type="button" class="pdm-bom-row-action pdm-bom-insert-button" :aria-label="`在第 ${index + 1} 行下方插入物料`" :title="`在第 ${index + 1} 行下方插入物料`" :disabled="pending" @click="addRow(index)">+</button>
                 <button v-if="!row.id" type="button" class="pdm-bom-row-action pdm-bom-delete-draft-button" :aria-label="`删除未保存的第 ${index + 1} 行`" :title="`删除未保存的第 ${index + 1} 行`" :disabled="pending" @click="removeDraftRow(index)">×</button>
               </div>
-              <span v-else-if="displayMode === 'Structure'" class="pdm-bom-structure-instance" :title="operationItemIds(row).length > 1 ? `此物料在结构中共 ${operationItemIds(row).length} 处；编辑将同步全部实例` : '结构实例'">↳</span>
             </td>
             <td><span v-if="!row._quickEntry" class="pdm-bom-sequence-value">{{ index + 1 }}</span></td>
             <td>
@@ -2123,12 +2353,18 @@ async function submitBatchUpdate() {
               <input v-if="!row.id && canEditCurrentView && !isSourceView" v-model.trim="row.weight" aria-label="重量">
               <span v-else class="pdm-bom-cell-value">{{ displayValue(row.weight) }}</span>
             </td>
-            <td class="pdm-bom-quantity-audit" :class="!row._quickEntry && quantityAuditClass(row)">
+            <td class="pdm-bom-quantity-audit">
               <template v-if="row._quickEntry"></template>
               <input v-if="isInlineEditing(row, 'quantity')" v-model.number="inlineValue" type="number" min="0.0001" step="0.0001" class="pdm-bom-inline-editor pdm-bom-quantity-editor" aria-label="内联编辑数量" autofocus @blur="commitInlineEdit(row)" @keydown.enter.prevent="commitInlineEdit(row)" @keydown.esc.prevent="cancelInlineEdit">
-              <button v-else-if="!row._quickEntry && row.id && canEditCurrentView && !(displayMode === 'Summary' && operationItemIds(row).length > 1)" type="button" class="pdm-bom-cell-edit" :title="comparisonQuantityTitle(row)" aria-label="编辑数量" @click="beginInlineEdit(row, 'quantity')">{{ comparisonQuantityDisplay(row) }}</button>
+              <button v-else-if="!row._quickEntry && row.id && canEditCurrentView && !(displayMode === 'Summary' && operationItemIds(row).length > 1)" type="button" class="pdm-bom-cell-edit" :title="quantityTitle(row)" aria-label="编辑数量" @click="beginInlineEdit(row, 'quantity')">{{ quantityDisplay(row) }}</button>
               <input v-else-if="!row._quickEntry && canEditCurrentView && !isSourceView && !(displayMode === 'Summary' && operationItemIds(row).length > 1)" v-model.number="row.quantity" type="number" min="0.0001" step="0.0001" class="pdm-bom-quantity-editor" aria-label="数量">
-              <span v-else-if="!row._quickEntry" class="pdm-bom-cell-value" :title="displayMode === 'Summary' && operationItemIds(row).length > 1 ? `${comparisonQuantityTitle(row)}；汇总数量来自多个结构实例，请切换到结构模式修改` : comparisonQuantityTitle(row)">{{ comparisonQuantityDisplay(row) }}</span>
+              <span v-else-if="!row._quickEntry" class="pdm-bom-cell-value" :title="displayMode === 'Summary' && operationItemIds(row).length > 1 ? `${quantityTitle(row)}；汇总数量来自多个结构实例，请切换到结构模式修改` : quantityTitle(row)">{{ quantityDisplay(row) }}</span>
+            </td>
+            <td class="pdm-bom-quantity-reference" :aria-label="row._quickEntry ? undefined : quantityReferenceTitle(row)" :title="row._quickEntry ? undefined : quantityReferenceTitle(row)">
+              <div v-if="!row._quickEntry" class="pdm-bom-quantity-reference-line">
+                <span :class="{ 'is-published': publishedQuantityTotal(row) !== undefined }">{{ quantityReferenceDisplay(publishedQuantityTotal(row) ?? 0) }}</span>
+                <span :class="{ 'is-total-source-mismatch': sourceQuantityDiffers(row) }"><span>{{ quantityReferenceDisplay(bomQuantityTotal(row)) }}</span><span>/</span><span>{{ quantityReferenceDisplay(sourceQuantityTotal(row)) }}</span></span>
+              </div>
             </td>
             <td class="pdm-bom-drawing-audit-cell">
               <div v-if="!row._quickEntry && drawingAudit(row)" class="pdm-bom-audit" :class="drawingAudit(row)!.blocking ? 'is-blocking' : 'is-matched'" :title="drawingAudit(row)!.detail"><strong>{{ drawingAudit(row)!.label }}</strong><small v-if="!drawingAudit(row)!.compact">{{ drawingAudit(row)!.detail }}</small></div>
@@ -2141,7 +2377,7 @@ async function submitBatchUpdate() {
             </td>
             <td class="pdm-bom-reconciliation-cell">
               <div v-if="!row._quickEntry && shouldShowReconciliation(row)" class="pdm-bom-reconciliation" :title="reconciliationDescription(row)">
-                <span class="pdm-bom-source" :class="reconciliationIssueTone(row)">{{ reconciliationIssueLabel(row) }}</span>
+                <button type="button" class="pdm-bom-issue-button pdm-bom-source" :class="reconciliationIssueTone(row)" :aria-label="`查看问题详情：${reconciliationIssueLabel(row)}`" @click="openIssueDetails(row)">{{ reconciliationIssueLabel(row) }}</button>
                 <div v-if="row.manualUnmatched && canEditCurrentView" class="pdm-bom-reconciliation-actions">
                   <button type="button" class="is-retain" :disabled="pending" :aria-label="`确认保留人工BOM项 ${row.drawingNumber || row.name}`" @click="confirmManualRetain(row)">保留</button>
                   <button type="button" class="is-delete" :disabled="pending" :aria-label="`确认删除人工BOM项 ${row.drawingNumber || row.name}`" @click="confirmManualDelete(row)">删除</button>
@@ -2158,12 +2394,43 @@ async function submitBatchUpdate() {
     </div>
     <div v-if="displayEntries.length" class="pdm-bom-pagination" aria-label="BOM明细分页"><span>{{ displayMode === 'Structure' ? `结构实例 ${rawSourceRows.length} 条 · 当前层级 ${displayEntries.length} 条` : `共 ${displayEntries.length} 条` }}</span><select v-model.number="bomPageSize" aria-label="BOM明细每页条数"><option :value="30">30条/页</option><option :value="50">50条/页</option><option :value="100">100条/页</option><option :value="200">200条/页</option></select><button type="button" class="pdm-secondary-action" aria-label="BOM明细上一页" :disabled="bomPage <= 1" @click="bomPage -= 1">‹</button><span>{{ bomPage }} / {{ bomPageCount }}</span><button type="button" class="pdm-secondary-action" aria-label="BOM明细下一页" :disabled="bomPage >= bomPageCount" @click="bomPage += 1">›</button></div>
 
+    <div v-if="issueDetailRow" class="pdm-dialog-backdrop pdm-bom-issue-backdrop" @click.self="issueDetailRow = null">
+      <section class="pdm-bom-issue-dialog" role="dialog" aria-modal="true" aria-labelledby="pdm-bom-issue-title">
+        <header>
+          <div><h3 id="pdm-bom-issue-title">问题详情</h3><p>{{ issueDetailRow.drawingNumber || issueDetailRow.name || '当前物料' }}</p></div>
+          <button type="button" class="pdm-icon-button" aria-label="关闭问题详情" @click="issueDetailRow = null">×</button>
+        </header>
+        <div class="pdm-bom-issue-body">
+          <div class="pdm-bom-issue-summary"><span :class="reconciliationIssueTone(issueDetailRow)">{{ reconciliationIssueLabel(issueDetailRow) }}</span><p>{{ reconciliationDescription(issueDetailRow) }}</p></div>
+          <div v-if="issueComparisons(issueDetailRow).length" class="pdm-bom-issue-comparisons">
+            <div v-for="comparison in issueComparisons(issueDetailRow)" :key="comparison.field" class="pdm-bom-issue-comparison">
+              <strong>{{ comparison.field }}</strong>
+              <dl><div><dt>{{ comparison.sourceLabel }}</dt><dd>{{ comparison.source }}</dd></div><div><dt>{{ comparison.currentLabel }}</dt><dd>{{ comparison.current }}</dd></div></dl>
+            </div>
+          </div>
+          <div class="pdm-bom-issue-notice">仅用于提醒，不限制保存、审批及后续操作。</div>
+        </div>
+        <footer><button type="button" class="pdm-primary-action" @click="issueDetailRow = null">知道了</button></footer>
+      </section>
+    </div>
+
     <div v-if="materialReferenceOpen" class="pdm-dialog-backdrop" @click.self="materialReferenceOpen = false">
       <section class="pdm-bom-batch-dialog pdm-material-reference-dialog" role="dialog" aria-modal="true" aria-labelledby="pdm-material-reference-title">
         <header><div><h3 id="pdm-material-reference-title">从料品主档引用</h3><p>{{ materialReferenceReason || '可按物料编码、名称或规格搜索，并按品牌筛选；只显示与当前BOM分类一致的已批准料品。' }}</p></div><button type="button" class="pdm-icon-button" aria-label="关闭料品引用" @click="materialReferenceOpen = false">×</button></header>
         <div class="pdm-material-reference-search"><input v-model.trim="materialReferenceBrandInput" list="pdm-material-reference-brands" aria-label="筛选引用料品品牌" placeholder="输入或选择品牌" @keydown.enter.prevent="searchMaterialReferences"><datalist id="pdm-material-reference-brands"><option v-for="brand in materialReferenceBrandOptions" :key="brand" :value="brand" /></datalist><input v-model.trim="materialReferenceQuery" type="search" aria-label="搜索料品主档" placeholder="搜索物料编码、名称或规格" @keydown.enter.prevent="searchMaterialReferences"><button type="button" class="pdm-primary-action" :disabled="materialReferenceLoading" @click="searchMaterialReferences">{{ materialReferenceLoading ? '查询中…' : '查询' }}</button></div>
         <div class="pdm-material-reference-table pdm-table-scroll"><table class="pdm-edit-table"><thead><tr><th>物料编码</th><th>名称</th><th>分类</th><th>引用次数</th><th>规格</th><th>品牌</th><th>备注</th><th>同步</th><th></th></tr></thead><tbody><tr v-for="materialItem in pagedMaterialReferenceResults" :key="materialItem.id"><td>{{ materialItem.materialCode }}</td><td>{{ materialItem.name }}</td><td>{{ materialItem.categoryCode }}</td><td>{{ materialItem.referenceCount ?? 0 }}</td><td>{{ materialItem.specification || '—' }}</td><td>{{ materialItem.brand || '—' }}</td><td>{{ materialItem.remark || '—' }}</td><td>{{ materialItem.syncStatus === 'Succeeded' ? '已同步' : '待同步' }}</td><td><button type="button" class="pdm-secondary-action" @click="applyMaterialReference(materialItem)">引用</button></td></tr><tr v-if="!materialReferenceLoading && filteredMaterialReferenceResults.length === 0"><td colspan="9" class="pdm-empty-info">没有符合条件的已批准料品。</td></tr></tbody></table></div>
         <div v-if="filteredMaterialReferenceResults.length" class="pdm-material-reference-pagination"><span>共 {{ filteredMaterialReferenceResults.length }} 条</span><select v-model.number="materialReferencePageSize" aria-label="料品引用每页条数"><option :value="20">20条/页</option><option :value="50">50条/页</option><option :value="100">100条/页</option></select><button type="button" class="pdm-secondary-action" aria-label="料品引用上一页" :disabled="materialReferencePage <= 1" @click="materialReferencePage -= 1">‹</button><span>{{ materialReferencePage }} / {{ materialReferencePageCount }}</span><button type="button" class="pdm-secondary-action" aria-label="料品引用下一页" :disabled="materialReferencePage >= materialReferencePageCount" @click="materialReferencePage += 1">›</button></div>
+      </section>
+    </div>
+
+    <div v-if="exportDialogOpen" class="pdm-dialog-backdrop pdm-export-dialog-backdrop" @click.self="exportDialogOpen = false">
+      <section class="pdm-bom-batch-dialog pdm-export-dialog" role="dialog" aria-modal="true" aria-labelledby="pdm-export-dialog-title">
+        <header><div><h3 id="pdm-export-dialog-title">导出BOM</h3><p>请选择 Excel 中的明细组织方式。</p></div><button type="button" class="pdm-icon-button" aria-label="关闭导出BOM" @click="exportDialogOpen = false">×</button></header>
+        <div class="pdm-export-options" role="radiogroup" aria-label="BOM导出方式">
+          <label :class="{ 'is-selected': exportMode === 'Summary' }"><input v-model="exportMode" type="radio" value="Summary"><span><strong>汇总导出</strong><small>相同物料编码及单位合并，并累计数量。</small></span></label>
+          <label :class="{ 'is-selected': exportMode === 'Structure' }"><input v-model="exportMode" type="radio" value="Structure"><span><strong>结构导出</strong><small>保留当前 BOM 的结构明细和原序号。</small></span></label>
+        </div>
+        <footer><span>默认使用汇总导出。</span><button type="button" class="pdm-secondary-action" @click="exportDialogOpen = false">取消</button><button type="button" class="pdm-primary-action" :disabled="pending" @click="confirmExport">确认导出</button></footer>
       </section>
     </div>
 
@@ -2243,10 +2510,58 @@ async function submitBatchUpdate() {
       </section>
     </div>
 
-    <el-drawer v-model="releaseDrawerOpen" class="pdm-bom-release-drawer" :title="kind === 'Standard' ? '标准件BOM审批发布' : kind === 'NonStandard' ? '非标件BOM与图纸发布' : '电气BOM审批发布'" size="min(1080px, 92vw)" destroy-on-close>
+    <el-drawer v-model="reconciliationDrawerOpen" class="pdm-bom-reconciliation-drawer" title="机械BOM对账明细" size="min(1180px, 94vw)" :close-on-click-modal="false">
+      <section class="pdm-reconciliation-workspace" aria-label="机械BOM对账预览">
+        <div class="pdm-reconciliation-scope">
+          <div><small>只读输入</small><strong>最新归档设计树／图档源数据</strong></div>
+          <span aria-hidden="true">→</span>
+          <div><small>只读差异提醒</small><strong>当前机械BOM工作区</strong><em>仅核对，不自动更新</em></div>
+          <div class="is-unaffected"><small>不受影响</small><strong>机械BOM · 电气BOM · 已发布BOM版本</strong></div>
+        </div>
+
+        <div v-if="reconciliationPreviewLoading" class="pdm-reconciliation-loading" role="status" aria-live="polite">
+          <strong>正在读取最新图档源数据并计算机械BOM差异…</strong>
+          <span>数据量较大时可能需要几十秒，请勿重复点击。</span>
+          <i aria-hidden="true"><b></b></i>
+        </div>
+        <div v-else-if="reconciliationPreviewError" class="pdm-reconciliation-error" role="alert">
+          <div><strong>对账明细生成失败</strong><span>{{ reconciliationPreviewError }}</span></div>
+          <button type="button" class="pdm-secondary-action" :disabled="pending" @click="requestGenerate">重试</button>
+        </div>
+        <template v-else-if="reconciliationPreview">
+          <div class="pdm-reconciliation-summary" aria-label="机械BOM变更汇总">
+            <button type="button" :class="{ 'is-active': reconciliationFilter === 'All' }" @click="reconciliationFilter = 'All'"><small>变更物料</small><strong>{{ reconciliationSummary.total }}</strong><em>{{ reconciliationSummary.instances }} 个实例</em></button>
+            <button type="button" :class="{ 'is-active': reconciliationFilter === 'Added' }" @click="reconciliationFilter = 'Added'"><small>新增</small><strong>{{ reconciliationSummary.added }}</strong></button>
+            <button type="button" :class="{ 'is-active': reconciliationFilter === 'Quantity' }" @click="reconciliationFilter = 'Quantity'"><small>数量变化</small><strong>{{ reconciliationSummary.quantity }}</strong></button>
+            <button type="button" :class="{ 'is-active': reconciliationFilter === 'Attribute' }" @click="reconciliationFilter = 'Attribute'"><small>属性变化</small><strong>{{ reconciliationSummary.attribute }}</strong></button>
+            <button type="button" :class="{ 'is-active': reconciliationFilter === 'Classification' }" @click="reconciliationFilter = 'Classification'"><small>分类变化</small><strong>{{ reconciliationSummary.classification }}</strong></button>
+            <button type="button" :class="{ 'is-active': reconciliationFilter === 'Manual' }" @click="reconciliationFilter = 'Manual'"><small>人工值保留</small><strong>{{ reconciliationSummary.manual }}</strong></button>
+            <button type="button" :class="{ 'is-active': reconciliationFilter === 'Removed' }" @click="reconciliationFilter = 'Removed'"><small>待移除</small><strong>{{ reconciliationSummary.removed }}</strong></button>
+          </div>
+          <div class="pdm-reconciliation-note">本页只计算并显示差异，不写入机械BOM。新增、删除、分类、数量和属性差异均需人工在对应BOM中处理并保存。</div>
+          <div class="pdm-reconciliation-table-wrap">
+            <table class="pdm-reconciliation-table">
+              <thead><tr><th>物料标识</th><th>字段</th><th>当前机械BOM</th><th>最新源数据</th><th>实例</th></tr></thead>
+              <tbody>
+                <tr v-for="detail in filteredReconciliationDetails" :key="detail.key">
+                  <td :title="detail.item">{{ detail.item }}</td><td>{{ detail.field }}</td><td :title="detail.current">{{ detail.current }}</td><td :title="detail.source">{{ detail.source }}</td><td>{{ detail.instances }}</td>
+                </tr>
+                <tr v-if="filteredReconciliationDetails.length === 0"><td colspan="8" class="pdm-empty-info">{{ reconciliationDetails.length ? '当前筛选项没有变更。' : '当前机械BOM已与最新图档源数据一致。' }}</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </template>
+        <footer class="pdm-reconciliation-footer">
+          <span>该页面为只读提醒，关闭后不会写入任何数据。</span>
+          <button type="button" class="pdm-primary-action" @click="reconciliationDrawerOpen = false">关闭</button>
+        </footer>
+      </section>
+    </el-drawer>
+
+    <el-drawer v-model="releaseDrawerOpen" class="pdm-bom-release-drawer" :title="kind === 'Standard' ? '标准件BOM审批发布' : kind === 'NonStandard' ? '非标件BOM与图纸发布' : '电气BOM审批发布'" size="min(1360px, 96vw)" destroy-on-close>
       <div class="pdm-bom-release-workspace">
         <aside class="pdm-bom-release-history" aria-label="发布包记录">
-          <header><strong>发布记录</strong></header>
+          <header><strong>发布记录</strong><button v-if="canManageRelease" type="button" class="pdm-secondary-action pdm-release-new-button" @click="selectReleasePackage('')">新建发布包</button></header>
           <button v-for="release in categoryReleasePackages" :key="release.id" type="button" :class="{ 'is-active': release.id === selectedReleasePackageId }" @click="selectReleasePackage(release.id)">
             <span><strong>{{ release.number }}</strong><small>{{ release.changeNumber && release.changeNumber !== release.number ? release.changeNumber : '—' }}</small></span>
             <em>{{ release.state }}</em>
@@ -2268,12 +2583,15 @@ async function submitBatchUpdate() {
           :allowed-scopes="createReleaseScopes"
           :preferred-scope="preferredReleaseScope"
           :change-reason-types="releaseChangeReasonTypes"
-          :long-lead-published-item-ids="publishedLongLeadItemIds"
+          :long-lead-published-items="publishedLongLeadItems"
           :previous-version-items="previousReleaseVersionItems"
           @create="emit('releaseCreate', $event)"
+          @update-draft="(releasePackageId, input) => emit('releaseUpdateDraft', releasePackageId, input)"
+          @delete-draft="releasePackageId => emit('releaseDeleteDraft', releasePackageId)"
           @upload="(releasePackageId, file) => emit('releaseUpload', releasePackageId, file)"
           @submit="releasePackageId => emit('releaseSubmit', releasePackageId)"
           @withdraw="releasePackageId => emit('releaseWithdraw', releasePackageId)"
+          @retry-u9="releasePackageId => emit('releaseRetryU9', releasePackageId)"
           @decide="(taskId, decision, comment) => emit('releaseDecide', taskId, decision, comment)"
           @transfer="(taskId, targetUsername, comment) => emit('releaseTransfer', taskId, targetUsername, comment)"
           @emergency-decide="(taskId, decision, reason) => emit('releaseEmergencyDecide', taskId, decision, reason)"
@@ -2290,19 +2608,26 @@ async function submitBatchUpdate() {
 .pdm-bom-manager-panel .pdm-bom-kind[data-kind="Electrical"]{color:#92400e}
 .pdm-bom-manager-panel .pdm-bom-kind[data-kind="Virtual"]{color:#6b7280}
 .pdm-bom-manager-panel{font-size:12px}.pdm-bom-manager-panel :deep(button),.pdm-bom-manager-panel :deep(input),.pdm-bom-manager-panel :deep(select),.pdm-bom-manager-panel :deep(textarea),.pdm-bom-manager-panel :deep(table),.pdm-bom-manager-panel :deep(label),.pdm-bom-manager-panel :deep(small),.pdm-bom-manager-panel :deep(strong){font-size:12px}
+.pdm-export-dialog-backdrop{align-items:center;justify-content:center;padding:12px}.pdm-export-dialog{width:min(440px,calc(100vw - 24px));height:auto;max-height:calc(100vh - 24px);border-radius:8px;animation:none}.pdm-export-options{display:grid;gap:10px;padding:18px}.pdm-export-options>label{display:flex;align-items:flex-start;gap:10px;padding:12px;border:1px solid var(--pdm-border);border-radius:7px;cursor:pointer}.pdm-export-options>label.is-selected{border-color:var(--pdm-theme-accent);background:var(--pdm-theme-accent-soft);box-shadow:0 0 0 1px var(--pdm-theme-accent)}.pdm-export-options input{margin-top:2px}.pdm-export-options span{display:grid;gap:3px}.pdm-export-options small{color:var(--pdm-muted);font-weight:400}
 .pdm-bom-manager-panel :deep(.pdm-bom-reconciliation){font-size:12px}
 .pdm-bom-manager-panel :deep(.pdm-bom-reconciliation-header),.pdm-bom-manager-panel :deep(.pdm-bom-reconciliation-cell){text-align:center}.pdm-bom-manager-panel :deep(.pdm-bom-reconciliation-cell){overflow:visible;vertical-align:middle;white-space:normal}.pdm-bom-manager-panel :deep(.pdm-bom-reconciliation){min-width:0;overflow:visible;text-align:center;white-space:normal;overflow-wrap:anywhere;line-height:1.35}.pdm-bom-manager-panel :deep(.pdm-bom-reconciliation .pdm-bom-source){display:block;overflow:visible;text-overflow:clip;white-space:normal;overflow-wrap:anywhere}.pdm-bom-manager-panel :deep(.pdm-bom-reconciliation .pdm-bom-source.is-critical){color:var(--pdm-danger);font-weight:700}
+.pdm-bom-issue-button{width:100%;min-height:26px;padding:3px 5px;border:0;border-radius:4px;background:transparent;font:inherit;line-height:1.35;cursor:pointer}.pdm-bom-issue-button:hover,.pdm-bom-issue-button:focus-visible{background:#ffedd5;outline:1px solid #fdba74}.pdm-bom-issue-button.is-warning{color:#b45309;font-weight:700}.pdm-bom-issue-button.is-critical{color:var(--pdm-danger);font-weight:700}.pdm-bom-issue-backdrop{align-items:center;justify-content:center;padding:16px}.pdm-bom-issue-dialog{display:flex;width:min(620px,calc(100vw - 32px));max-height:calc(100vh - 32px);flex-direction:column;overflow:hidden;border-radius:9px;background:#fff;box-shadow:0 20px 45px rgba(15,23,42,.22)}.pdm-bom-issue-dialog>header{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;padding:16px 18px;border-bottom:1px solid var(--pdm-border)}.pdm-bom-issue-dialog h3,.pdm-bom-issue-dialog p{margin:0}.pdm-bom-issue-dialog header p{margin-top:4px;color:var(--pdm-muted)}.pdm-bom-issue-body{display:grid;gap:14px;overflow:auto;padding:18px}.pdm-bom-issue-summary{display:grid;gap:7px}.pdm-bom-issue-summary>span{width:max-content;padding:3px 8px;border-radius:999px;background:#fff7ed;color:#b45309;font-weight:700}.pdm-bom-issue-summary>span.is-critical{background:#fef2f2;color:var(--pdm-danger)}.pdm-bom-issue-summary p{color:var(--pdm-text);line-height:1.55}.pdm-bom-issue-comparisons{display:grid;gap:10px}.pdm-bom-issue-comparison{display:grid;gap:7px;padding:11px;border:1px solid #fed7aa;border-radius:7px;background:#fffbeb}.pdm-bom-issue-comparison dl{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin:0}.pdm-bom-issue-comparison dl>div{min-width:0;padding:9px;border-radius:5px;background:#fff}.pdm-bom-issue-comparison dt{color:var(--pdm-muted);font-size:11px}.pdm-bom-issue-comparison dd{margin:5px 0 0;overflow-wrap:anywhere;color:var(--pdm-text);font-weight:700}.pdm-bom-issue-notice{padding:9px 11px;border-radius:6px;background:#f0fdf4;color:#166534}.pdm-bom-issue-dialog>footer{display:flex;justify-content:flex-end;padding:12px 18px;border-top:1px solid var(--pdm-border)}
 .pdm-bom-manager-panel :deep(.pdm-bom-drawing-audit-header),.pdm-bom-manager-panel :deep(.pdm-bom-drawing-audit-cell){text-align:center;vertical-align:middle}.pdm-bom-manager-panel :deep(.pdm-bom-drawing-audit-cell .pdm-bom-audit){width:100%;align-items:center;justify-content:center;text-align:center}
 .pdm-bom-manager-panel :deep(.pdm-bom-table){width:100%;max-width:100%;table-layout:fixed}.pdm-bom-manager-panel :deep(.pdm-bom-table col.is-select){width:28px}.pdm-bom-manager-panel :deep(.pdm-bom-table col.is-row-actions){width:72px}.pdm-bom-manager-panel :deep(.pdm-bom-table col.is-sequence),.pdm-bom-manager-panel :deep(.pdm-bom-table col.is-unit),.pdm-bom-manager-panel :deep(.pdm-bom-table col.is-weight),.pdm-bom-manager-panel :deep(.pdm-bom-table col.is-revision){width:2.43902439%}.pdm-bom-manager-panel :deep(.pdm-bom-table col.is-kind),.pdm-bom-manager-panel :deep(.pdm-bom-table col.is-brand),.pdm-bom-manager-panel :deep(.pdm-bom-table col.is-material),.pdm-bom-manager-panel :deep(.pdm-bom-table col.is-surface),.pdm-bom-manager-panel :deep(.pdm-bom-table col.is-quantity),.pdm-bom-manager-panel :deep(.pdm-bom-table col.is-drawing-audit),.pdm-bom-manager-panel :deep(.pdm-bom-table col.is-data-status){width:4.87804878%}.pdm-bom-manager-panel :deep(.pdm-bom-table col.is-code),.pdm-bom-manager-panel :deep(.pdm-bom-table col.is-name),.pdm-bom-manager-panel :deep(.pdm-bom-table col.is-parent-code){width:7.31707317%}.pdm-bom-manager-panel :deep(.pdm-bom-table col.is-model){width:14.63414634%}.pdm-bom-manager-panel :deep(.pdm-bom-table col.is-remark),.pdm-bom-manager-panel :deep(.pdm-bom-table col.is-source){width:9.75609756%}
+.pdm-bom-manager-panel :deep(.pdm-bom-table col:is(.is-sequence,.is-unit,.is-weight,.is-revision)){width:2.27272727%}.pdm-bom-manager-panel :deep(.pdm-bom-table col:is(.is-kind,.is-brand,.is-material,.is-surface,.is-quantity,.is-drawing-audit,.is-data-status)){width:4.54545455%}.pdm-bom-manager-panel :deep(.pdm-bom-table col:is(.is-name,.is-parent-code,.is-quantity-reference)){width:6.81818182%}.pdm-bom-manager-panel :deep(.pdm-bom-table col.is-code){width:120px}.pdm-bom-manager-panel :deep(.pdm-bom-table col.is-model){width:13.63636364%}.pdm-bom-manager-panel :deep(.pdm-bom-table col:is(.is-remark,.is-source)){width:9.09090909%}
+.pdm-bom-manager-panel :deep(.pdm-bom-quantity-audit),.pdm-bom-manager-panel :deep(.pdm-bom-quantity-reference){text-align:center;vertical-align:middle;white-space:nowrap}.pdm-bom-manager-panel :deep(.pdm-bom-quantity-reference){overflow:hidden;text-overflow:ellipsis}.pdm-bom-manager-panel :deep(.pdm-bom-quantity-reference-line){display:inline-flex;max-width:100%;align-items:center;justify-content:center;gap:8px}.pdm-bom-manager-panel :deep(.pdm-bom-quantity-reference span){display:inline}.pdm-bom-manager-panel :deep(.pdm-bom-quantity-reference .is-published){color:var(--pdm-green);font-weight:700}.pdm-bom-manager-panel :deep(.pdm-bom-quantity-reference .is-total-source-mismatch){color:var(--pdm-orange);font-weight:700}.pdm-bom-discard-action{border-color:var(--pdm-orange);background:var(--pdm-orange-soft);color:var(--pdm-orange)}
 .pdm-bom-display-control{display:flex;align-items:center;gap:3px;margin-left:auto;padding:2px 3px;border:1px solid var(--pdm-border);border-radius:6px;background:#fff;white-space:nowrap}.pdm-bom-display-control>span{padding:0 4px;color:var(--pdm-muted);font-size:11px}.pdm-bom-display-control button{min-width:42px;height:24px;padding:0 8px;border:0;border-radius:4px;background:transparent;color:var(--pdm-muted);cursor:pointer}.pdm-bom-display-control button.is-active{background:var(--pdm-theme-accent-soft);color:var(--pdm-theme-accent);font-weight:700}.pdm-bom-display-control small{padding:0 5px;color:var(--pdm-muted);font-size:11px}.pdm-bom-structure-code-cell{white-space:nowrap}.pdm-bom-structure-indent{display:inline-flex;align-items:center;margin-left:calc(var(--pdm-bom-depth) * 15px);margin-right:3px;vertical-align:middle}.pdm-bom-structure-toggle,.pdm-bom-structure-spacer{display:inline-grid;width:18px;height:18px;place-items:center}.pdm-bom-structure-toggle{padding:0;border:1px solid var(--pdm-theme-accent-border);border-radius:3px;background:var(--pdm-theme-accent-soft);color:var(--pdm-theme-accent);font-size:13px;line-height:16px;cursor:pointer}.pdm-bom-structure-spacer::before{content:'·';color:#94a3b8}.pdm-bom-structure-instance{color:var(--pdm-theme-accent);font-weight:700}.pdm-bom-structure-summary{padding:8px 10px;border-top:1px solid var(--pdm-border);color:var(--pdm-muted);font-size:11px;text-align:right}
-.pdm-bom-model-value{display:flex;min-width:0;align-items:center;gap:3px}.pdm-bom-model-value>:not(.pdm-bom-drawing-name-warning){min-width:0;flex:1}.pdm-bom-drawing-name-warning{display:inline-flex;flex:0 0 auto;align-items:center;justify-content:center;color:#d97706;font-size:13px;line-height:1;cursor:help}.pdm-bom-pagination{display:flex;align-items:center;justify-content:flex-end;gap:8px;padding:8px 10px;color:var(--pdm-muted);font-size:11px}.pdm-bom-pagination select{height:28px;padding:0 24px 0 8px;border:1px solid var(--pdm-border);border-radius:5px;background:#fff;color:var(--pdm-text)}.pdm-bom-pagination .pdm-secondary-action{width:28px;min-width:28px;height:28px;min-height:28px;padding:0}
+.pdm-bom-model-value{display:flex;min-width:0;align-items:center;gap:3px}.pdm-bom-model-value>:not(.pdm-bom-drawing-name-warning){min-width:0;flex:1}.pdm-bom-drawing-name-warning{display:inline-flex;flex:0 0 auto;align-items:center;justify-content:center;color:#d97706;font-size:13px;line-height:1;cursor:default}.pdm-bom-pagination{display:flex;align-items:center;justify-content:flex-end;gap:8px;padding:8px 10px;color:var(--pdm-muted);font-size:11px}.pdm-bom-pagination select{height:28px;padding:0 24px 0 8px;border:1px solid var(--pdm-border);border-radius:5px;background:#fff;color:var(--pdm-text)}.pdm-bom-pagination .pdm-secondary-action{width:28px;min-width:28px;height:28px;min-height:28px;padding:0}
 .pdm-bom-manager-panel :deep(.pdm-bom-table tbody tr:is(.is-data-exception,.is-reconciliation-issue)>td){background:#fffbeb}.pdm-bom-manager-panel :deep(.pdm-bom-table tbody tr:is(.is-data-exception,.is-reconciliation-issue):hover>td){background:#fef3c7}
 .pdm-bom-manager-panel :deep(.pdm-bom-table tbody tr.is-release-unchanged:not(.is-data-exception):not(.is-reconciliation-issue)>td){background:#f0fdf4}.pdm-bom-manager-panel :deep(.pdm-bom-table tbody tr.is-release-unchanged:not(.is-data-exception):not(.is-reconciliation-issue):hover>td){background:#dcfce7}.pdm-bom-manager-panel :deep(.pdm-bom-table tbody tr.is-release-added:not(.is-data-exception):not(.is-reconciliation-issue)>td){background:#eff6ff}.pdm-bom-manager-panel :deep(.pdm-bom-table tbody tr.is-release-added:not(.is-data-exception):not(.is-reconciliation-issue):hover>td){background:#dbeafe}.pdm-bom-manager-panel :deep(.pdm-bom-table tbody tr.is-release-modified:not(.is-data-exception):not(.is-reconciliation-issue)>td){background:#fff7ed}.pdm-bom-manager-panel :deep(.pdm-bom-table tbody tr.is-release-modified:not(.is-data-exception):not(.is-reconciliation-issue):hover>td){background:#ffedd5}
 .pdm-bom-comparison-filters{display:flex;align-items:center;gap:5px;flex-wrap:wrap}.pdm-bom-comparison-filters button{min-height:24px;padding:2px 8px;border:1px solid var(--pdm-border);border-radius:999px;background:#fff;color:var(--pdm-muted);font-size:10px;cursor:pointer}.pdm-bom-comparison-filters button.is-active{border-color:var(--pdm-blue);box-shadow:0 0 0 1px var(--pdm-blue);color:var(--pdm-text);font-weight:700}.pdm-bom-comparison-filters button.is-released{background:#f0fdf4;color:#15803d}.pdm-bom-comparison-filters button.is-added{background:#eff6ff;color:#2563eb}.pdm-bom-comparison-filters button.is-modified{background:#fff7ed;color:#c2410c}.pdm-bom-comparison-filters button.is-removed{background:#fef2f2;color:#b91c1c}
-.pdm-bom-release-strip{display:flex;align-items:center;gap:12px;padding:8px 11px;border:1px solid #bfdbfe;border-radius:7px;background:#eff6ff;font-size:12px;white-space:nowrap}.pdm-bom-release-strip>div{display:flex;align-items:center;gap:5px;white-space:nowrap}.pdm-bom-release-strip small,.pdm-bom-release-strip strong{font-size:12px;line-height:1.2;white-space:nowrap}.pdm-bom-release-strip small{color:var(--pdm-muted)}.pdm-bom-release-strip strong.is-active{color:#b45309}.pdm-bom-release-strip-actions{display:flex!important;align-items:center;gap:6px;margin-left:auto}.pdm-bom-release-strip-actions button{box-sizing:border-box;width:70px;min-width:70px;height:28px;min-height:28px;padding:4px 10px;font-size:12px;line-height:18px;white-space:nowrap}.pdm-bom-release-workspace{display:grid;grid-template-columns:210px minmax(0,1fr);gap:12px;min-height:100%}.pdm-bom-release-history{border:1px solid var(--pdm-border);border-radius:7px;overflow:auto;background:#fff}.pdm-bom-release-history header{display:flex;align-items:center;justify-content:space-between;padding:10px;border-bottom:1px solid var(--pdm-border)}.pdm-bom-release-history>button{display:flex;width:100%;justify-content:space-between;gap:8px;padding:10px;border:0;border-bottom:1px solid var(--pdm-border);background:#fff;text-align:left;color:var(--pdm-text)}.pdm-bom-release-history>button:hover,.pdm-bom-release-history>button.is-active{background:var(--pdm-blue-soft)}.pdm-bom-release-history>button span{display:grid;gap:3px;min-width:0}.pdm-bom-release-history>button small{overflow:hidden;text-overflow:ellipsis;color:var(--pdm-muted)}.pdm-bom-release-history>button em{font-style:normal;color:var(--pdm-blue);white-space:nowrap}.pdm-bom-release-history>p{padding:12px;color:var(--pdm-muted)}.pdm-bom-release-workspace .release-center{min-width:0;margin:0}@media(max-width:900px){.pdm-bom-release-strip{align-items:flex-start;flex-wrap:wrap}.pdm-bom-release-strip-actions{margin-left:0}.pdm-bom-release-workspace{grid-template-columns:1fr}.pdm-bom-release-history{max-height:180px}}
+.pdm-bom-release-strip{display:flex;align-items:center;gap:12px;padding:8px 11px;border:1px solid #bfdbfe;border-radius:7px;background:#eff6ff;font-size:12px;white-space:nowrap}.pdm-bom-release-strip>div{display:flex;align-items:center;gap:5px;white-space:nowrap}.pdm-bom-release-strip small,.pdm-bom-release-strip strong{font-size:12px;line-height:1.2;white-space:nowrap}.pdm-bom-release-strip small{color:var(--pdm-muted)}.pdm-bom-release-strip strong.is-active{color:#b45309}.pdm-bom-release-strip-actions{display:flex!important;align-items:center;gap:6px;margin-left:auto}.pdm-bom-release-strip-actions button{box-sizing:border-box;width:70px;min-width:70px;height:28px;min-height:28px;padding:4px 10px;font-size:12px;line-height:18px;white-space:nowrap}.pdm-bom-release-workspace{display:grid;grid-template-columns:210px minmax(0,1fr);gap:12px;min-height:100%}.pdm-bom-release-history{border:1px solid var(--pdm-border);border-radius:7px;overflow:auto;background:#fff}.pdm-bom-release-history header{position:sticky;top:0;z-index:1;display:flex;align-items:center;justify-content:space-between;gap:8px;padding:10px;border-bottom:1px solid var(--pdm-border);background:#fff}.pdm-bom-release-history header .pdm-release-new-button{flex:0 0 auto;min-height:28px;padding:4px 8px}.pdm-bom-release-history>button{display:flex;width:100%;justify-content:space-between;gap:8px;padding:10px;border:0;border-bottom:1px solid var(--pdm-border);background:#fff;text-align:left;color:var(--pdm-text)}.pdm-bom-release-history>button:hover,.pdm-bom-release-history>button.is-active{background:var(--pdm-blue-soft)}.pdm-bom-release-history>button span{display:grid;gap:3px;min-width:0}.pdm-bom-release-history>button small{overflow:hidden;text-overflow:ellipsis;color:var(--pdm-muted)}.pdm-bom-release-history>button em{font-style:normal;color:var(--pdm-blue);white-space:nowrap}.pdm-bom-release-history>p{padding:12px;color:var(--pdm-muted)}.pdm-bom-release-workspace .release-center{min-width:0;margin:0}@media(max-width:900px){.pdm-bom-release-strip{align-items:flex-start;flex-wrap:wrap}.pdm-bom-release-strip-actions{margin-left:0}.pdm-bom-release-workspace{grid-template-columns:1fr}.pdm-bom-release-history{max-height:180px}}
 .pdm-bom-release-strip{box-sizing:border-box;height:38px;min-height:38px;padding-block:4px;background:#fff}
 .pdm-bom-unsaved-count{padding:3px 7px;border:1px solid #f59e0b;border-radius:999px;background:#fffbeb;color:#b45309;font-weight:700;white-space:nowrap}
+.pdm-reconciliation-workspace{display:flex;height:100%;min-height:0;flex-direction:column;gap:12px}.pdm-reconciliation-scope{display:grid;grid-template-columns:minmax(210px,1fr) auto minmax(260px,1.2fr) minmax(240px,1fr);align-items:stretch;gap:10px;padding:12px;border:1px solid var(--pdm-theme-accent-border);border-radius:8px;background:var(--pdm-theme-accent-soft)}.pdm-reconciliation-scope>div{display:grid;align-content:center;gap:3px;padding:9px 11px;border:1px solid color-mix(in srgb,var(--pdm-theme-accent) 24%,white);border-radius:6px;background:#fff}.pdm-reconciliation-scope>span{align-self:center;color:var(--pdm-theme-accent);font-size:22px}.pdm-reconciliation-scope small{color:var(--pdm-muted)}.pdm-reconciliation-scope strong{color:var(--pdm-text)}.pdm-reconciliation-scope em{color:var(--pdm-theme-accent);font-style:normal}.pdm-reconciliation-scope .is-unaffected{border-color:var(--pdm-border);background:#f8fafc}.pdm-reconciliation-loading,.pdm-reconciliation-error{display:flex;min-height:96px;align-items:center;justify-content:center;gap:14px;padding:18px;border:1px solid var(--pdm-border);border-radius:8px;background:#f8fafc;text-align:center}.pdm-reconciliation-loading{flex-direction:column}.pdm-reconciliation-loading span,.pdm-reconciliation-error span{color:var(--pdm-muted)}.pdm-reconciliation-loading i{display:block;width:min(520px,75%);height:6px;overflow:hidden;border-radius:999px;background:#dbeafe}.pdm-reconciliation-loading b{display:block;width:35%;height:100%;border-radius:inherit;background:var(--pdm-theme-accent);animation:pdm-reconciliation-progress 1.2s ease-in-out infinite}.pdm-reconciliation-error{justify-content:space-between;border-color:#fecaca;background:#fef2f2;text-align:left}.pdm-reconciliation-error>div{display:grid;gap:3px}.pdm-reconciliation-error strong{color:var(--pdm-danger)}@keyframes pdm-reconciliation-progress{0%{transform:translateX(-100%)}100%{transform:translateX(390%)}}
+.pdm-reconciliation-summary{display:grid;grid-template-columns:repeat(7,minmax(88px,1fr));gap:7px}.pdm-reconciliation-summary button{display:grid;min-height:58px;place-items:center;padding:6px;border:1px solid var(--pdm-border);border-radius:7px;background:#fff;color:var(--pdm-text);cursor:pointer}.pdm-reconciliation-summary button.is-active{border-color:var(--pdm-theme-accent);box-shadow:0 0 0 1px var(--pdm-theme-accent)}.pdm-reconciliation-summary small{color:var(--pdm-muted)}.pdm-reconciliation-summary strong{font-size:18px!important}.pdm-reconciliation-summary em{color:var(--pdm-muted);font-size:10px;font-style:normal}.pdm-reconciliation-note{padding:8px 10px;border-left:3px solid var(--pdm-theme-accent);background:var(--pdm-theme-accent-soft);color:var(--pdm-muted);line-height:1.5}.pdm-reconciliation-table-wrap{min-height:0;flex:1;overflow:auto;border:1px solid var(--pdm-border);border-radius:8px}.pdm-reconciliation-table{width:100%;border-collapse:collapse;table-layout:fixed}.pdm-reconciliation-table th,.pdm-reconciliation-table td{padding:8px;border-bottom:1px solid var(--pdm-border);vertical-align:middle;text-align:center;white-space:normal;overflow-wrap:anywhere}.pdm-reconciliation-table th{position:sticky;top:0;z-index:1;background:#f8fafc}.pdm-reconciliation-table th:nth-child(1){width:220px}.pdm-reconciliation-table th:nth-child(2){width:100px}.pdm-reconciliation-table th:nth-child(5){width:64px}.pdm-reconciliation-footer{display:flex;align-items:center;justify-content:flex-end;gap:8px;padding-top:10px;border-top:1px solid var(--pdm-border)}.pdm-reconciliation-footer>span{margin-right:auto;color:var(--pdm-muted)}
 @media(max-width:900px){.pdm-bom-release-strip{height:auto}}
+@media(max-width:900px){.pdm-reconciliation-scope{grid-template-columns:1fr}.pdm-reconciliation-scope>span{display:none}.pdm-reconciliation-summary{grid-template-columns:repeat(2,minmax(100px,1fr))}}
 </style>
 <style scoped>
 .pdm-material-code-action{height:22px;padding:0 7px;border:1px solid var(--shell-accent-border);border-radius:5px;background:var(--pdm-blue-soft);color:var(--pdm-blue);font-size:11px;line-height:20px;white-space:nowrap;cursor:pointer}.pdm-material-code-action.is-review{border-color:#f59e0b;background:#fffbeb;color:#b45309}.pdm-material-code-state{color:#64748b;font-size:11px;white-space:nowrap}.pdm-material-code-state.is-pending{color:#b45309}

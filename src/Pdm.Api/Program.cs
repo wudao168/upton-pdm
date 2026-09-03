@@ -130,6 +130,7 @@ builder.Services.AddHttpClient<IU9OpenApiClient, U9OpenApiClient>(client => clie
 builder.Services.AddHttpClient<IU9BomQueryClient, U9OpenApiClient>(client => client.Timeout = TimeSpan.FromSeconds(20))
     .RemoveAllLoggers();
 builder.Services.AddScoped<PdmWorkflowService>();
+builder.Services.AddScoped<ReleaseItemCommentService>();
 builder.Services.AddScoped<CrmCustomerIntegrationService>();
 builder.Services.AddScoped<MaterialService>();
 builder.Services.AddScoped<MaterialAttachmentService>();

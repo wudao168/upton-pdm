@@ -58,6 +58,14 @@ public sealed class AtomicReleasePackagePublisher : IReleasePackagePublisher
         }
     }
 
+    public Task DiscardDraftAsync(ReleasePackage package, Project project, CancellationToken cancellationToken)
+    {
+        var vaultRoot = StorageLocationPolicy.Normalize(project.VaultLocation);
+        var stagingDirectory = StorageLocationPolicy.ResolveUnder(vaultRoot, Path.Combine(".release-staging", package.Number));
+        if (Directory.Exists(stagingDirectory)) Directory.Delete(stagingDirectory, true);
+        return Task.CompletedTask;
+    }
+
     public Task ValidateAsync(ReleasePackage package, Project project, CancellationToken cancellationToken)
     {
         var stagingDirectory = StorageLocationPolicy.ResolveUnder(StorageLocationPolicy.Normalize(project.VaultLocation), Path.Combine(".release-staging", package.Number));

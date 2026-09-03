@@ -241,7 +241,13 @@ public sealed record CreateReleasePackageRequest(
     string? EffectiveSerialFrom = null,
     string? EffectiveSerialTo = null,
     [property: JsonConverter(typeof(JsonStringEnumConverter))] ReleaseScope Scope = ReleaseScope.LegacyCombined,
-    IReadOnlyList<Guid>? SelectedBomItemIds = null);
+    IReadOnlyList<Guid>? SelectedBomItemIds = null,
+    IReadOnlyDictionary<Guid, decimal>? SelectedBomItemQuantities = null);
+
+public sealed record UpdateReleasePackageDraftRequest(
+    string? ChangeReason = null,
+    IReadOnlyList<Guid>? SelectedBomItemIds = null,
+    IReadOnlyDictionary<Guid, decimal>? SelectedBomItemQuantities = null);
 
 public sealed record EmergencyApprovalRequest(
     [property: JsonConverter(typeof(JsonStringEnumConverter))] ApprovalDecision Decision,
@@ -288,6 +294,8 @@ public sealed record FailCadPropertyWritebackRequest(string Error, bool Conflict
 public sealed record ApprovalRequest(ApprovalDecision Decision, string? Comment);
 
 public sealed record ApprovalTransferRequest(string TargetUsername, string? Comment);
+
+public sealed record AddReleaseItemCommentRequest(Guid BomItemId, string Comment);
 
 public sealed record ApprovalTransferCandidateResponse(string Username, string DisplayName);
 

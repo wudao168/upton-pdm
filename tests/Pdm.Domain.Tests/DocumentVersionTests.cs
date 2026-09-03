@@ -642,7 +642,7 @@ public sealed class DocumentVersionTests
     }
 
     [Fact]
-    public async Task ChildDocumentCheckIn_DefersBomReconciliationUntilProjectRootCheckIn()
+    public async Task ProjectRootCheckIn_RefreshesSourceSnapshotWithoutChangingMechanicalBom()
     {
         var repository = new Infrastructure.InMemoryPdmRepository(TimeProvider.System);
         var project = Assert.Single(await repository.ListProjectsAsync(CancellationToken.None));
@@ -685,6 +685,12 @@ public sealed class DocumentVersionTests
         Assert.Null(result.BomUpdateError);
         Assert.Null(result.BomUpdate);
 
+        var mechanicalBeforeRoot = (await repository.GetBomAsync(project.Id, BomKind.Standard, CancellationToken.None))
+            .Concat(await repository.GetBomAsync(project.Id, BomKind.NonStandard, CancellationToken.None))
+            .Concat(await repository.GetBomAsync(project.Id, BomKind.Unclassified, CancellationToken.None))
+            .Concat(await repository.GetBomAsync(project.Id, BomKind.Virtual, CancellationToken.None))
+            .ToArray();
+
         var rootId = Assert.IsType<Guid>(projectRoot.DocumentId);
         var rootDocument = Assert.Single(
             await repository.ListDocumentsAsync(project.Id, CancellationToken.None),
@@ -710,16 +716,21 @@ public sealed class DocumentVersionTests
 
         Assert.True(rootResult.VersionCreated);
         Assert.Null(rootResult.BomUpdateError);
-        Assert.NotNull(rootResult.BomUpdate);
-        Assert.True(rootResult.BomUpdate.Applied);
-        Assert.True(rootResult.BomUpdate.UnclassifiedCount + rootResult.BomUpdate.PendingRemovalCount + rootResult.BomUpdate.ManualUnmatchedCount > 0);
+        Assert.Null(rootResult.BomUpdate);
+        var mechanicalAfterRoot = (await repository.GetBomAsync(project.Id, BomKind.Standard, CancellationToken.None))
+            .Concat(await repository.GetBomAsync(project.Id, BomKind.NonStandard, CancellationToken.None))
+            .Concat(await repository.GetBomAsync(project.Id, BomKind.Unclassified, CancellationToken.None))
+            .Concat(await repository.GetBomAsync(project.Id, BomKind.Virtual, CancellationToken.None))
+            .ToArray();
+        Assert.Equal(mechanicalBeforeRoot, mechanicalAfterRoot);
+
         var refreshed = Assert.Single(
-            await repository.GetBomAsync(project.Id, BomKind.Standard, CancellationToken.None),
+            await workflow.GetBomSourceDataAsync(project.Id, rootActor, UserRole.Administrator, CancellationToken.None),
             item => item.SourceDocumentId == childId);
         Assert.Equal("AUTO-BOM-001", refreshed.DrawingNumber);
         Assert.Equal("自动更新标准组件", refreshed.Name);
         Assert.NotNull(refreshed.ReconciliationStatus);
-        Assert.Contains("图档源数据", refreshed.ReconciliationNote);
+        Assert.NotNull(refreshed.ReconciliationNote);
     }
 
     [Fact]

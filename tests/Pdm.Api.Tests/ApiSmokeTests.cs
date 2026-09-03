@@ -241,6 +241,25 @@ public sealed class ApiSmokeTests : IClassFixture<PdmApiFactory>
     }
 
     [Fact]
+    public async Task BomReconciliation_RejectsWriteModeAndKeepsMechanicalBomUnchanged()
+    {
+        var repository = factory.Services.GetRequiredService<IPdmRepository>();
+        var project = await repository.CreateProjectAsync(
+            new CreateProjectCommand($"BOM-READONLY-{Guid.NewGuid():N}", "BOM只读对账验收", "admin", @"D:\PDM\BomReadonly", @"D:\Release\BomReadonly"),
+            "admin",
+            CancellationToken.None);
+        var item = new BomItem(Guid.NewGuid(), project.Id, BomKind.Standard, 1, "READONLY-001", "只读对账零件", 1, "件", null, null, "W1", true);
+        await repository.ReplaceBomAsync(project.Id, BomKind.Standard, [item], CancellationToken.None);
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", CreateToken("admin", "Administrator"));
+
+        var response = await client.PostAsync($"/api/projects/{project.Id}/boms/generate?apply=true", new StringContent(string.Empty));
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        Assert.Contains("只读预览", await response.Content.ReadAsStringAsync());
+        Assert.Equal([item], await repository.GetBomAsync(project.Id, BomKind.Standard, CancellationToken.None));
+    }
+
+    [Fact]
     public async Task BomResolve_AcceptsStringTargetKindFromWebClient()
     {
         var repository = factory.Services.GetRequiredService<IPdmRepository>();
@@ -1070,6 +1089,58 @@ public sealed class ApiSmokeTests : IClassFixture<PdmApiFactory>
         var audit = await repository.ListAuditAsync("admin", UserRole.Administrator, 200, CancellationToken.None);
         Assert.Contains(audit, item => item.Action == "standard-library.membership.add");
         Assert.Contains(audit, item => item.Action == "standard-library.category.delete" && item.EntityId == categoryId.ToString());
+    }
+
+    [Fact]
+    public async Task ReleaseItemComments_AreAppendedAndReturnedByTheReleaseApi()
+    {
+        var repository = factory.Services.GetRequiredService<IPdmRepository>();
+        var packageId = Guid.NewGuid();
+        var itemId = Guid.NewGuid();
+        var approvalTaskId = Guid.NewGuid();
+        await repository.CreateReleasePackageAsync(new ReleasePackage(
+            packageId,
+            Guid.Parse("11111111-1111-1111-1111-111111111111"),
+            $"RP-API-COMMENT-{Guid.NewGuid():N}",
+            ReleasePackageState.Approval,
+            Guid.NewGuid(),
+            "W1",
+            "W1",
+            [new ApprovalTask(approvalTaskId, packageId, ApprovalStage.Approval, "release-comment-tester", null, null, null, null) { StepOrder = 1 }],
+            DateTimeOffset.UtcNow,
+            null,
+            null)
+        {
+            Scope = ReleaseScope.StandardFormal,
+            StandardBomSnapshot = [new BomItem(
+                itemId,
+                Guid.Parse("11111111-1111-1111-1111-111111111111"),
+                BomKind.Standard,
+                1,
+                "STD-API-001",
+                "接口测试件",
+                1,
+                "个",
+                null,
+                "M8",
+                "W1",
+                true)]
+        }, CancellationToken.None);
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", CreateToken("admin", "Administrator"));
+
+        var created = await client.PostAsJsonAsync($"/api/release-packages/{packageId}/item-comments", new
+        {
+            bomItemId = itemId,
+            comment = "逐条批注接口验收"
+        });
+
+        Assert.Equal(HttpStatusCode.OK, created.StatusCode);
+        var listed = await client.GetFromJsonAsync<List<ReleaseItemComment>>($"/api/release-packages/{packageId}/item-comments");
+        Assert.NotNull(listed);
+        var item = Assert.Single(listed);
+        Assert.Equal("逐条批注接口验收", item.Comment);
+        Assert.Equal("material:std-api-001|个", item.MaterialKey);
+        await repository.DecideApprovalAsync(approvalTaskId, "release-comment-tester", ApprovalDecision.Approved, "测试清理", false, null, CancellationToken.None);
     }
 
     private static string CreateToken(string username, string role)

@@ -1767,6 +1767,28 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
         return Task.FromResult(package);
     }
 
+    public Task<ReleasePackage> UpdateDraftReleasePackageAsync(ReleasePackage package, CancellationToken cancellationToken)
+    {
+        lock (gate)
+        {
+            if (!packages.TryGetValue(package.Id, out var current)) throw new PdmNotFoundException("发布包不存在。");
+            if (current.State != ReleasePackageState.Draft) throw new PdmConflictException("只有草稿发布包可以编辑，请刷新后重试。");
+            packages[package.Id] = package;
+            return Task.FromResult(package);
+        }
+    }
+
+    public Task DeleteDraftReleasePackageAsync(Guid releasePackageId, CancellationToken cancellationToken)
+    {
+        lock (gate)
+        {
+            if (!packages.TryGetValue(releasePackageId, out var package)) throw new PdmNotFoundException("发布包不存在。");
+            if (package.State != ReleasePackageState.Draft) throw new PdmConflictException("只有草稿发布包可以删除，请刷新后重试。");
+            packages.TryRemove(releasePackageId, out _);
+            return Task.CompletedTask;
+        }
+    }
+
     public Task<ReleasePackage> UpdateReleasePackageBomVersionsAsync(Guid releasePackageId, BomVersion standard, BomVersion nonStandard, BomVersion electrical, CancellationToken cancellationToken)
     {
         lock (gate)

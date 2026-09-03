@@ -196,7 +196,8 @@ public sealed class ProjectBomU9SyncService(
             disableDate,
             ProjectMapNum: project.Code,
             Explain: $"{project.Code} · {project.Name} · {KindLabel(kind)}",
-            AllowEmptyCreate: components.Count == 0);
+            AllowEmptyCreate: components.Count == 0,
+            ReconcileComponentTotals: true);
         return new(command, approved.Approved);
     }
 
@@ -216,10 +217,10 @@ public sealed class ProjectBomU9SyncService(
         {
             foreach (var kind in new[] { ProjectBomHeaderKind.Standard, ProjectBomHeaderKind.NonStandard, ProjectBomHeaderKind.Electrical })
             {
-                var released = await LatestReleasedAsync(project.Id, kind, cancellationToken);
-                if (released is null) continue;
+                var category = await ApprovedCategoryItemsAsync(project.Id, kind, cancellationToken);
+                if (!category.Approved) continue;
                 approved = true;
-                if (!EffectiveItems(released.Items).Any()) continue;
+                if (category.Items.Count == 0) continue;
                 if (!bindings.TryGetValue(kind, out var binding))
                     throw new PdmRuleException($"{KindLabel(kind)}已有物料，但尚未申请独立BOM料号。");
                 var material = await RequireOfficialMaterialAsync(binding.MaterialId, KindLabel(kind), cancellationToken);
@@ -248,9 +249,9 @@ public sealed class ProjectBomU9SyncService(
         ProjectBomHeaderKind kind,
         CancellationToken cancellationToken)
     {
-        var released = await LatestReleasedAsync(projectId, kind, cancellationToken);
-        if (released is null) return new(false, []);
-        var items = EffectiveItems(released.Items)
+        var category = await ApprovedCategoryItemsAsync(projectId, kind, cancellationToken);
+        if (!category.Approved) return new(false, []);
+        var items = category.Items
             .OrderBy(item => item.Sequence)
             .ThenBy(item => item.Id)
             .ToArray();
@@ -275,6 +276,42 @@ public sealed class ProjectBomU9SyncService(
         return new(true, result);
     }
 
+    private async Task<(bool Approved, IReadOnlyList<BomItem> Items)> ApprovedCategoryItemsAsync(
+        Guid projectId,
+        ProjectBomHeaderKind kind,
+        CancellationToken cancellationToken)
+    {
+        var released = await LatestReleasedAsync(projectId, kind, cancellationToken);
+        if (kind != ProjectBomHeaderKind.Standard)
+            return released is null
+                ? (false, [])
+                : (true, EffectiveItems(released.Items).ToArray());
+
+        var releasedAt = released?.ReleasedAt;
+        var longLeadPackages = (await repository.ListReleasePackagesAsync(projectId, cancellationToken))
+            .Where(package => package.Scope == ReleaseScope.StandardLongLead
+                && package.State == ReleasePackageState.Published
+                && package.PublishedAt.HasValue
+                && (!releasedAt.HasValue || package.PublishedAt.Value > releasedAt.Value))
+            .OrderBy(package => package.PublishedAt ?? package.CreatedAt)
+            .ToArray();
+        if (released is null && longLeadPackages.Length == 0) return (false, []);
+
+        static string MaterialKey(BomItem item) => $"{item.DrawingNumber.Trim()}|{item.Unit.Trim()}";
+        var merged = new Dictionary<string, BomItem>(StringComparer.OrdinalIgnoreCase);
+        IEnumerable<BomItem> baseItems = released is null ? Array.Empty<BomItem>() : EffectiveItems(released.Items);
+        foreach (var item in baseItems)
+            merged[MaterialKey(item)] = item;
+        foreach (var item in longLeadPackages.SelectMany(package => package.StandardBomSnapshot).Where(item => !item.IsManuallyExcluded && !item.IsPendingRemoval))
+        {
+            var key = MaterialKey(item);
+            merged[key] = merged.TryGetValue(key, out var existing)
+                ? existing with { Quantity = existing.Quantity + item.Quantity }
+                : item;
+        }
+        return (true, merged.Values.OrderBy(item => item.Sequence).ThenBy(item => item.Id).ToArray());
+    }
+
     private async Task<BomVersion?> LatestReleasedAsync(
         Guid projectId,
         ProjectBomHeaderKind kind,
@@ -287,7 +324,9 @@ public sealed class ProjectBomU9SyncService(
     private async Task<bool> HasReleasedCategoryBomAsync(Guid projectId, CancellationToken cancellationToken) =>
         (await repository.ListBomVersionsAsync(projectId, null, cancellationToken))
             .Any(version => version.State == BomVersionState.Released
-                && version.Kind is BomKind.Standard or BomKind.NonStandard or BomKind.Electrical);
+                && version.Kind is BomKind.Standard or BomKind.NonStandard or BomKind.Electrical)
+        || (await repository.ListReleasePackagesAsync(projectId, cancellationToken))
+            .Any(package => package.Scope == ReleaseScope.StandardLongLead && package.State == ReleasePackageState.Published);
 
     private async Task<bool> HasDirectChildrenAsync(Guid projectId, CancellationToken cancellationToken) =>
         (await repository.ListProjectsAsync(cancellationToken)).Any(project => project.ParentProjectId == projectId);

@@ -149,23 +149,40 @@ public static class MaterialEndpointExtensions
             return Results.Ok((await service.ListCodeApplicationsAsync(projectId, parsedStatus, actor, role, cancellationToken)).Select(MapApplication));
         });
 
-        api.MapPost("/material-code/applications/{applicationId:guid}/decision", async (Guid applicationId, DecideMaterialCodeApplicationRequest request, HttpContext context, MaterialService service, CancellationToken cancellationToken) =>
+        api.MapPost("/material-code/applications/{applicationId:guid}/decision", async (Guid applicationId, DecideMaterialCodeApplicationRequest request, HttpContext context, MaterialService service, MaterialSyncBatchService syncBatches, ApprovalU9AutomationService automation, CancellationToken cancellationToken) =>
         {
             var (actor, role) = CurrentUser(context.User);
             var result = await service.DecideMaterialCodeApplicationAsync(applicationId, request.ExpectedRowVersion, request.Approved, request.Comment, actor, role, cancellationToken);
-            var automationResult = request.Approved
-                ? new ApprovalU9AutomationResult(
+            MaterialSyncBatch? automaticBatch = null;
+            ApprovalU9AutomationResult? automationResult = null;
+            if (request.Approved && result.Application.BomHeaderKind is not null && result.Task is not null)
+            {
+                automaticBatch = await syncBatches.CreateAsync([result.Task.Id], actor, role, cancellationToken);
+                automationResult = new ApprovalU9AutomationResult(
+                    ApprovalU9AutomationStage.NotRequested,
+                    "BOM料号已批准，U9C料品与BOM自动同步已排队，无需再次确认。",
+                    null,
+                    []);
+            }
+            else if (request.Approved && result.Application.BomHeaderKind is not null && result.Material?.U9SyncConfirmed == true)
+            {
+                automationResult = await automation.ContinueAfterMaterialSyncAsync(result.Application.ProjectId, actor, cancellationToken);
+            }
+            else if (request.Approved)
+            {
+                automationResult = new ApprovalU9AutomationResult(
                     ApprovalU9AutomationStage.NotRequested,
                     "PLM料号已批准；请在当前页面勾选对应记录并执行批量同步到U9C。",
                     null,
-                    [])
-                : null;
+                    []);
+            }
             return Results.Ok(new
             {
                 Application = MapApplication(result.Application),
                 Material = result.Material is null ? null : MapMaterial(result.Material),
                 Task = result.Task is null ? null : MapTask(result.Task),
-                Automation = automationResult
+                Automation = automationResult,
+                AutomaticBatch = automaticBatch is null ? null : MapSyncBatch(automaticBatch)
             });
         });
 

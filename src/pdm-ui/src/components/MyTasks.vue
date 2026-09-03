@@ -2,13 +2,14 @@
 import { computed, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { ClipboardCheck, KeyRound, RefreshCw } from '@lucide/vue'
-import type { EditLockSummary, MaterialCodeApplication, MyApprovalTask, PasswordResetTask, ProgramTemplateTask } from '../types'
+import type { EditLockSummary, MaterialCodeApplication, MyApprovalTask, PasswordResetTask, ProgramTemplateTask, UserNotification } from '../types'
 import { useUserDisplayName } from '../userDisplay'
 
 const displayUserName = useUserDisplayName()
 
 const props = withDefaults(defineProps<{
   tasks: MyApprovalTask[]
+  notifications?: UserNotification[]
   materialCodeTasks: MaterialCodeApplication[]
   programTemplateTasks?: ProgramTemplateTask[]
   locks: EditLockSummary[]
@@ -17,10 +18,15 @@ const props = withDefaults(defineProps<{
   onRequestRelease: (documentId: string, reason: string) => Promise<void>
   onForceRelease: (documentId: string, reason: string) => Promise<void>
   onResetPassword: (taskId: string) => Promise<void>
-}>(), { programTemplateTasks: () => [] })
-defineEmits<{ open: [projectId: string, releasePackageId: string]; openMaterialApprovals: []; openProgramTemplate: [templateId: string]; refresh: [] }>()
+  onMarkAllNotificationsRead?: () => Promise<void>
+}>(), {
+  notifications: () => [],
+  programTemplateTasks: () => [],
+  onMarkAllNotificationsRead: async () => {},
+})
+defineEmits<{ open: [projectId: string, releasePackageId: string]; openNotification: [notification: UserNotification]; openMaterialApprovals: []; openProgramTemplate: [templateId: string]; refresh: [] }>()
 
-type TaskFilter = 'all' | 'approval' | 'material' | 'program' | 'lock' | 'password'
+type TaskFilter = 'all' | 'notification' | 'approval' | 'material' | 'program' | 'lock' | 'password'
 type TaskCenterRow = {
   key: string
   kind: Exclude<TaskFilter, 'all'>
@@ -29,6 +35,7 @@ type TaskCenterRow = {
   title: string
   content: string
   createdAt: string
+  notification?: UserNotification
   approval?: MyApprovalTask
   material?: MaterialCodeApplication
   program?: ProgramTemplateTask
@@ -147,6 +154,16 @@ function formatDateTime(value: string) {
 }
 
 const rows = computed<TaskCenterRow[]>(() => [
+  ...props.notifications.map(notification => ({
+    key: `notification-${notification.id}`,
+    kind: 'notification' as const,
+    status: notification.readAt ? '已读' : '未读',
+    statusClass: notification.readAt ? 'is-ok' : 'is-alert',
+    title: notification.title,
+    content: notification.content,
+    createdAt: notification.createdAt,
+    notification,
+  })),
   ...props.tasks.map(task => ({
     key: `approval-${task.id}`,
     kind: 'approval' as const,
@@ -200,6 +217,7 @@ const rows = computed<TaskCenterRow[]>(() => [
 
 const filterCounts = computed(() => ({
   all: rows.value.length,
+  notification: props.notifications.length,
   approval: props.tasks.length,
   material: materialTaskRows.value.length,
   program: props.programTemplateTasks.length,
@@ -307,6 +325,7 @@ async function resetPassword(task: PasswordResetTask) {
     <section class="pdm-panel pdm-task-message-panel" aria-label="消息中心">
       <div class="pdm-task-toolbar">
         <button type="button" class="pdm-secondary-action" :disabled="pending" @click="$emit('refresh')"><RefreshCw :size="14" />刷新</button>
+        <button v-if="notifications.some(item => !item.readAt)" type="button" class="pdm-secondary-action" :disabled="pending" @click="onMarkAllNotificationsRead">全部已读</button>
         <div class="pdm-task-filters" role="tablist" aria-label="待办类型">
           <button type="button" role="tab" :aria-selected="taskFilter === 'all'" @click="setTaskFilter('all')">全部待办（{{ filterCounts.all }}）</button>
           <button type="button" role="tab" :aria-selected="taskFilter === 'approval'" @click="setTaskFilter('approval')">审批任务（{{ filterCounts.approval }}）</button>
@@ -314,6 +333,7 @@ async function resetPassword(task: PasswordResetTask) {
           <button v-if="programTemplateTasks.length" type="button" role="tab" :aria-selected="taskFilter === 'program'" @click="setTaskFilter('program')">程序模板（{{ filterCounts.program }}）</button>
           <button type="button" role="tab" :aria-selected="taskFilter === 'lock'" @click="setTaskFilter('lock')">编辑权限（{{ filterCounts.lock }}）</button>
           <button type="button" role="tab" :aria-selected="taskFilter === 'password'" @click="setTaskFilter('password')">密码重置（{{ filterCounts.password }}）</button>
+          <button type="button" role="tab" :aria-selected="taskFilter === 'notification'" @click="setTaskFilter('notification')">系统消息（{{ filterCounts.notification }}）</button>
         </div>
       </div>
 
@@ -321,13 +341,14 @@ async function resetPassword(task: PasswordResetTask) {
         <table class="pdm-project-table pdm-task-table">
           <thead><tr><th>状态</th><th>标题</th><th>内容</th><th>创建时间</th><th>操作</th></tr></thead>
           <tbody>
-            <tr v-for="row in pagedRows" :key="row.key" :class="{ 'is-task-actionable': row.kind === 'approval' || row.kind === 'material' || row.kind === 'program' }" @click="row.approval ? $emit('open', row.approval.projectId, row.approval.releasePackageId) : row.material ? $emit('openMaterialApprovals') : row.program ? $emit('openProgramTemplate', row.program.templateId) : undefined">
+            <tr v-for="row in pagedRows" :key="row.key" :class="{ 'is-task-actionable': row.kind === 'notification' || row.kind === 'approval' || row.kind === 'material' || row.kind === 'program' }" @click="row.notification ? $emit('openNotification', row.notification) : row.approval ? $emit('open', row.approval.projectId, row.approval.releasePackageId) : row.material ? $emit('openMaterialApprovals') : row.program ? $emit('openProgramTemplate', row.program.templateId) : undefined">
               <td><span class="pdm-status" :class="row.statusClass">{{ row.status }}</span></td>
               <td><strong>{{ row.title }}</strong></td>
               <td :title="row.content">{{ row.content }}</td>
               <td>{{ formatDateTime(row.createdAt) }}</td>
               <td>
-                <button v-if="row.approval" type="button" class="pdm-text-action" @click.stop="$emit('open', row.approval.projectId, row.approval.releasePackageId)">查看</button>
+                <button v-if="row.notification" type="button" class="pdm-text-action" @click.stop="$emit('openNotification', row.notification)">查看发布包</button>
+                <button v-else-if="row.approval" type="button" class="pdm-text-action" @click.stop="$emit('open', row.approval.projectId, row.approval.releasePackageId)">查看</button>
                 <button v-else-if="row.material" type="button" class="pdm-text-action" @click.stop="$emit('openMaterialApprovals')">查看申请</button>
                 <button v-else-if="row.program" type="button" class="pdm-text-action" @click.stop="$emit('openProgramTemplate', row.program.templateId)">查看模板</button>
                 <button v-else-if="row.password" type="button" class="pdm-text-action" :disabled="pending" @click.stop="resetPassword(row.password)"><KeyRound :size="14" />重置密码</button>
@@ -341,7 +362,7 @@ async function resetPassword(task: PasswordResetTask) {
           </tbody>
         </table>
       </div>
-      <div v-else class="pdm-project-empty pdm-task-empty"><ClipboardCheck :size="42" /><h2>当前没有待办任务</h2><p>新的发布审批、料号审批、程序模板审核、编辑权限或密码重置任务会显示在这里。</p></div>
+      <div v-else class="pdm-project-empty pdm-task-empty"><ClipboardCheck :size="42" /><h2>当前没有待办或消息</h2><p>新的审批、退回消息、编辑权限或密码重置任务会显示在这里。</p></div>
 
       <footer class="pdm-task-pagination">
         <span>共 {{ filteredRows.length }} 条</span>

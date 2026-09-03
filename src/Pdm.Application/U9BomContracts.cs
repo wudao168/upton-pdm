@@ -101,7 +101,8 @@ public sealed record U9BomWriteCommand(
     int BomType = 0,
     string? ProjectMapNum = null,
     string? Explain = null,
-    bool AllowEmptyCreate = false);
+    bool AllowEmptyCreate = false,
+    bool ReconcileComponentTotals = false);
 
 public sealed record U9BomWritePreview(
     U9BomWriteOperation Operation,
