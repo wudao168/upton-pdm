@@ -918,6 +918,7 @@ export interface StandardLibraryCategory {
 export type MaterialRelationSelectionMode = 'Single' | 'Multiple'
 export type MaterialRelationQuantityMode = 'PerMainQuantity' | 'Fixed'
 export type MaterialRelationRevisionState = 'Draft' | 'Published' | 'Superseded'
+export type MaterialRelationReviewDecision = 'Selected' | 'NoAccessory' | 0 | 1
 
 export interface MaterialRelationOption {
   id: string
@@ -1005,6 +1006,10 @@ export interface MaterialRelationGroupCheck {
   expectedQuantity: number
   actualQuantity: number
   selectedOptionIds: string[]
+  reviewDecision?: MaterialRelationReviewDecision | null
+  reviewReason?: string | null
+  reviewedBy?: string | null
+  reviewedAt?: string | null
   options: MaterialRelationOption[]
 }
 

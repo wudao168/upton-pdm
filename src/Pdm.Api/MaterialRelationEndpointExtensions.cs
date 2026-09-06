@@ -90,9 +90,13 @@ public sealed record SaveMaterialRelationTemplateRequest(
 }
 
 public sealed record PublishMaterialRelationTemplateRequest(Guid RevisionId, long ExpectedRowVersion);
-public sealed record MaterialRelationChoiceRequest(Guid GroupId, IReadOnlyList<Guid> OptionIds)
+public sealed record MaterialRelationChoiceRequest(
+    Guid GroupId,
+    IReadOnlyList<Guid> OptionIds,
+    bool ConfirmNoAccessory = false,
+    string? NoAccessoryReason = null)
 {
-    public MaterialRelationChoice ToCommand() => new(GroupId, OptionIds);
+    public MaterialRelationChoice ToCommand() => new(GroupId, OptionIds, ConfirmNoAccessory, NoAccessoryReason);
 }
 public sealed record ApplyMaterialRelationRequest(Guid MainBomItemId, IReadOnlyList<MaterialRelationChoiceRequest> Choices)
 {

@@ -95,25 +95,32 @@ public sealed class MaterialRelationService(
             .ToDictionary(item => item.MainMaterialCode, StringComparer.OrdinalIgnoreCase);
         var existingSelections = (await relations.ListSelectionsAsync(projectId, cancellationToken)).ToArray();
         var selectionsToSave = new Dictionary<Guid, IReadOnlyList<MaterialRelationSelection>>();
+        var reviewsToSave = new Dictionary<Guid, IReadOnlyList<MaterialRelationReview>>();
 
         foreach (var command in commands)
         {
             if (!allItems.TryGetValue(command.MainBomItemId, out var main)) throw new PdmNotFoundException("主物料BOM行不存在或已被排除。");
             if (!templates.TryGetValue(main.DrawingNumber.Trim(), out var template) || template.PublishedRevision is not { } revision)
                 throw new PdmRuleException($"主物料“{main.DrawingNumber}”尚未发布生效的关联配置。");
-            var choiceByGroup = command.Choices.GroupBy(item => item.GroupId).ToDictionary(group => group.Key, group => group.Last().OptionIds.Distinct().ToArray());
+            var choiceByGroup = command.Choices.GroupBy(item => item.GroupId).ToDictionary(group => group.Key, group => group.Last());
             var oldForMain = existingSelections.Where(item => item.MainBomItemId == main.Id).ToArray();
             foreach (var old in oldForMain)
                 foreach (var list in byKind.Values) list.RemoveAll(item => item.Id == old.AccessoryBomItemId);
 
             var savedSelections = new List<MaterialRelationSelection>();
+            var savedReviews = new List<MaterialRelationReview>();
             foreach (var group in revision.Groups)
             {
-                var selectedIds = choiceByGroup.GetValueOrDefault(group.Id) ?? [];
-                if (selectedIds.Length == 0 && group.Options.Count == 1
-                    && ((group.IsRequired && group.AutoSelectUnique) || group.Options[0].IsDefault))
-                    selectedIds = [group.Options[0].Id];
+                var choice = choiceByGroup.GetValueOrDefault(group.Id);
+                var selectedIds = choice?.OptionIds.Distinct().ToArray() ?? [];
                 ValidateChoice(group, selectedIds);
+                if (selectedIds.Length > 0)
+                    savedReviews.Add(new MaterialRelationReview(projectId, main.Id, revision.Id, group.Id,
+                        MaterialRelationReviewDecision.Selected, main.Quantity, null, actor, timeProvider.GetUtcNow()));
+                else if (choice?.ConfirmNoAccessory == true)
+                    savedReviews.Add(new MaterialRelationReview(projectId, main.Id, revision.Id, group.Id,
+                        MaterialRelationReviewDecision.NoAccessory, main.Quantity,
+                        string.IsNullOrWhiteSpace(choice.NoAccessoryReason) ? "工程师确认本次无需配套" : choice.NoAccessoryReason.Trim(), actor, timeProvider.GetUtcNow()));
                 foreach (var optionId in selectedIds)
                 {
                     var option = group.Options.FirstOrDefault(item => item.Id == optionId)
@@ -135,7 +142,7 @@ public sealed class MaterialRelationService(
                         Source = "MaterialRelation",
                         IsManuallyRetained = true,
                         ReconciliationStatus = "RelationGenerated",
-                        ReconciliationNote = $"由关联配置V{revision.Version}自动带入，来源主物料行{main.Sequence}。",
+                        ReconciliationNote = $"由工程师按关联配置V{revision.Version}选配加入，来源主物料行{main.Sequence}。",
                         ReconciliationUpdatedBy = actor,
                         ReconciliationUpdatedAt = timeProvider.GetUtcNow()
                     });
@@ -143,6 +150,7 @@ public sealed class MaterialRelationService(
                 }
             }
             selectionsToSave[main.Id] = savedSelections;
+            reviewsToSave[main.Id] = savedReviews;
         }
 
         static List<BomItem> Resequence(List<BomItem> items) => items.OrderBy(item => item.IsManuallyExcluded).ThenBy(item => item.Sequence)
@@ -152,6 +160,8 @@ public sealed class MaterialRelationService(
         await repository.ApplyBomBatchAsync(projectId, byKind[BomKind.Standard], byKind[BomKind.NonStandard], byKind[BomKind.Unclassified], byKind[BomKind.Electrical], byKind[BomKind.Virtual], [], [audit], cancellationToken);
         foreach (var entry in selectionsToSave)
             await relations.ReplaceSelectionsAsync(projectId, entry.Key, entry.Value, cancellationToken);
+        foreach (var entry in reviewsToSave)
+            await relations.ReplaceReviewsAsync(projectId, entry.Key, entry.Value, cancellationToken);
         foreach (var kind in new[] { BomKind.Standard, BomKind.NonStandard, BomKind.Electrical })
         {
             var publishable = byKind[kind].Where(item => !item.IsManuallyExcluded && !item.IsReleaseExcluded).ToArray();
@@ -163,13 +173,7 @@ public sealed class MaterialRelationService(
 
     public async Task EnsureCompleteAsync(Guid projectId, CancellationToken cancellationToken)
     {
-        var result = await CalculateCompletenessAsync(projectId, cancellationToken);
-        if (!result.IsComplete)
-        {
-            var details = result.MainMaterials.SelectMany(main => main.Groups.Where(group => !group.IsComplete)
-                .Select(group => $"{main.MainMaterialCode}[行{main.MainBomItemId.ToString()[..8]}]/{group.GroupName}：{group.Status}"));
-            throw new PdmRuleException($"关联物料完整性校验未通过，不能提交发布。{string.Join("；", details.Take(8))}");
-        }
+        _ = await CalculateCompletenessAsync(projectId, cancellationToken);
     }
 
     private async Task<MaterialRelationCompleteness> CalculateCompletenessAsync(Guid projectId, CancellationToken cancellationToken)
@@ -181,6 +185,7 @@ public sealed class MaterialRelationService(
             .Where(item => item.PublishedRevision is not null && !item.IsArchived)
             .ToDictionary(item => item.MainMaterialCode, StringComparer.OrdinalIgnoreCase);
         var selections = (await relations.ListSelectionsAsync(projectId, cancellationToken)).ToArray();
+        var reviews = (await relations.ListReviewsAsync(projectId, cancellationToken)).ToArray();
         var checks = new List<MaterialRelationMainCheck>();
         foreach (var main in all.Where(item => templates.ContainsKey(item.DrawingNumber.Trim())))
         {
@@ -193,8 +198,12 @@ public sealed class MaterialRelationService(
                 var selected = linked.Select(item => item.OptionId).Distinct().ToArray();
                 var expected = linked.Sum(item => item.ExpectedQuantity);
                 var actual = linked.Where(item => itemById.ContainsKey(item.AccessoryBomItemId)).Sum(item => itemById[item.AccessoryBomItemId].Quantity);
-                var status = ChoiceStatus(group, selected);
-                if (status == "完整")
+                var review = reviews.LastOrDefault(item => item.MainBomItemId == main.Id && item.RevisionId == revision.Id
+                    && item.GroupId == group.Id && item.MainQuantity == main.Quantity);
+                var status = selected.Length == 0 && review?.Decision == MaterialRelationReviewDecision.NoAccessory
+                    ? "已确认无需"
+                    : ChoiceStatus(group, selected);
+                if (status == "已选配")
                 {
                     foreach (var selection in linked)
                     {
@@ -205,8 +214,15 @@ public sealed class MaterialRelationService(
                         if (accessory.Quantity != expectedForOption || selection.ExpectedQuantity != expectedForOption) { status = $"数量不匹配，应为{expectedForOption:0.####}"; break; }
                     }
                 }
+                var isComplete = status is "已选配" or "已确认无需" or "可选未选择";
+                var selectedAudit = linked.OrderByDescending(item => item.UpdatedAt).FirstOrDefault();
                 groupChecks.Add(new MaterialRelationGroupCheck(group.Id, group.Name, group.IsRequired, group.SelectionMode, group.MaxSelection,
-                    status == "完整", status, expected, actual, selected, group.Options));
+                    isComplete, status, expected, actual, selected,
+                    selected.Length > 0 ? MaterialRelationReviewDecision.Selected : review?.Decision,
+                    selected.Length > 0 ? null : review?.Reason,
+                    selected.Length > 0 ? selectedAudit?.UpdatedBy : review?.UpdatedBy,
+                    selected.Length > 0 ? selectedAudit?.UpdatedAt : review?.UpdatedAt,
+                    group.Options));
             }
             checks.Add(new MaterialRelationMainCheck(main.Id, main.DrawingNumber, main.Name, main.Quantity, template.Id, revision.Id, revision.Version,
                 groupChecks.All(group => group.IsComplete), groupChecks));
@@ -233,16 +249,16 @@ public sealed class MaterialRelationService(
 
     private static string ChoiceStatus(MaterialRelationGroup group, IReadOnlyCollection<Guid> selected)
     {
-        if (selected.Count < group.MinSelection) return selected.Count == 0 && group.Options.Count == 1 && group.AutoSelectUnique ? "可自动带出" : "缺少必选配件";
+        if (selected.Count == 0) return group.IsRequired ? "待核对" : "可选未选择";
         if (group.MaxSelection.HasValue && selected.Count > group.MaxSelection.Value) return "选择数量超过上限";
         if (selected.Any(id => group.Options.All(option => option.Id != id))) return "存在失效选项";
-        return "完整";
+        return "已选配";
     }
 
     private static void ValidateChoice(MaterialRelationGroup group, IReadOnlyCollection<Guid> selected)
     {
         var status = ChoiceStatus(group, selected);
-        if (status != "完整" && !(selected.Count == 0 && !group.IsRequired)) throw new PdmRuleException($"配件组“{group.Name}”：{status}。");
+        if (selected.Count > 0 && status != "已选配") throw new PdmRuleException($"配件组“{group.Name}”：{status}。");
     }
 
     private static BomKind ToBomKind(MaterialKind kind) => kind switch

@@ -50,7 +50,7 @@ function loadDraft(item?: MaterialRelationTemplate) {
       selectionMode: normalizeSelectionMode(group.selectionMode),
       minSelection: group.minSelection,
       maxSelection: group.maxSelection ?? null,
-      autoSelectUnique: group.autoSelectUnique,
+      autoSelectUnique: false,
       sortOrder: group.sortOrder,
       options: group.options.map(option => ({
         materialId: option.materialId,
@@ -92,7 +92,7 @@ function relationMaterial(materialId: string) {
 }
 
 function addGroup() {
-  draft.groups.push({ name: '', isRequired: true, selectionMode: 'Single', minSelection: 1, maxSelection: 1, autoSelectUnique: true, sortOrder: draft.groups.length + 1, options: [] })
+  draft.groups.push({ name: '', isRequired: true, selectionMode: 'Single', minSelection: 1, maxSelection: 1, autoSelectUnique: false, sortOrder: draft.groups.length + 1, options: [] })
 }
 
 function addOption(group: DraftGroup) {
@@ -118,6 +118,7 @@ async function save() {
       expectedRevisionRowVersion: draft.expectedRevisionRowVersion,
       groups: draft.groups.map((group, groupIndex) => ({
         ...group,
+        autoSelectUnique: false,
         sortOrder: groupIndex + 1,
         options: group.options.map((option, optionIndex) => ({ ...option, sortOrder: optionIndex + 1 })),
       })),
@@ -167,17 +168,16 @@ async function publish() {
         <label>修改说明</label>
         <el-input v-model="draft.changeNote" :disabled="!canManage" placeholder="说明本次关联物料变化" />
       </div>
-      <div class="material-relation-help">工程师选择方式：“只能选 1 项”表示该组只能选一个配件；“可同时选多项”表示该组可勾选多个配件。必选组只有 1 个有效候选时会自动带出；可选组仅在唯一候选标记为“默认”时自动带出。</div>
+      <div class="material-relation-help">关联物料只提供选型提醒，不会自动加入 BOM，也不会阻止保存或发布。“需要工程师核对”会显示待核对提醒；“只能选 1 项”或“可同时选多项”仅限定工程师主动选择时的范围。工程师也可确认本次无需配套。</div>
       <section v-for="(group, groupIndex) in draft.groups" :key="groupIndex" class="material-relation-group">
         <header>
           <el-input v-model="group.name" :disabled="!canManage" placeholder="配件组名称，如伺服控制器" />
-          <el-checkbox v-model="group.isRequired" :disabled="!canManage" @change="normalizeGroup(group)">此组必须选择</el-checkbox>
+          <el-checkbox v-model="group.isRequired" :disabled="!canManage" @change="normalizeGroup(group)">需要工程师核对</el-checkbox>
           <el-select v-model="group.selectionMode" :disabled="!canManage" aria-label="工程师选择方式" @change="normalizeGroup(group)"><el-option value="Single" label="只能选 1 项" /><el-option value="Multiple" label="可同时选多项" /></el-select>
-          <el-checkbox v-model="group.autoSelectUnique" :disabled="!canManage">只有一个选项时自动带出</el-checkbox>
           <el-button v-if="canManage" link type="danger" @click="draft.groups.splice(groupIndex, 1)">删除组</el-button>
         </header>
         <div class="material-relation-option-table">
-          <div class="material-relation-option-head"><span>料号</span><span>名称</span><span>型号</span><span>备注</span><span>数量计算</span><span>每套数量</span><span>默认</span><span>操作</span></div>
+          <div class="material-relation-option-head"><span>料号</span><span>名称</span><span>型号</span><span>备注</span><span>数量计算</span><span>每套数量</span><span>优先推荐</span><span>操作</span></div>
           <div v-for="(option, optionIndex) in group.options" :key="optionIndex" class="material-relation-option-row">
             <el-select v-model="option.materialId" filterable popper-class="material-relation-material-popper" :disabled="!canManage" placeholder="输入料号搜索">
               <el-option v-for="item in approvedMaterials" :key="item.id" :value="item.id" :label="item.materialCode">
@@ -207,7 +207,7 @@ async function publish() {
 </template>
 
 <style scoped>
-.material-relation-editor{min-height:420px;max-height:72vh;overflow:auto;padding:1px 3px 2px}.material-relation-summary{display:grid;grid-template-columns:160px minmax(150px,1fr) minmax(170px,1fr) minmax(180px,1.15fr) 150px;overflow:hidden;border:1px solid #dbe4ef;border-radius:7px}.material-relation-summary>div{display:grid;min-width:0;border-right:1px solid #dbe4ef}.material-relation-summary>div:last-child{border-right:0}.material-relation-summary span{padding:6px 9px;background:#f1f5f9;color:#475569;font-size:11px;font-weight:600}.material-relation-summary strong{min-width:0;padding:8px 9px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.material-relation-summary__status .el-tag{justify-self:start;margin:6px 9px}.material-relation-change-note{display:grid;margin-top:12px;grid-template-columns:80px minmax(0,1fr);align-items:center;gap:8px;color:#475569}.material-relation-help{margin:12px 0;padding:9px 11px;border-radius:6px;background:#eff6ff;color:#1d4ed8;line-height:1.55}.material-relation-group{margin-top:12px;padding:12px;border:1px solid #dbe4ef;border-radius:8px;background:#fafcff}.material-relation-group>header{display:grid;grid-template-columns:minmax(190px,1fr) auto 150px auto auto;align-items:center;gap:10px}.material-relation-option-table{margin:10px 0;overflow-x:auto;border:1px solid #dbe4ef;border-radius:6px}.material-relation-option-head,.material-relation-option-row{display:grid;min-width:1140px;grid-template-columns:165px minmax(130px,1fr) minmax(145px,1.1fr) minmax(155px,1.15fr) 155px 120px 58px 58px;align-items:center}.material-relation-option-head{background:#f1f5f9;color:#475569;font-size:12px;font-weight:600}.material-relation-option-head span{padding:8px;border-right:1px solid #dbe4ef}.material-relation-option-row{min-height:43px;border-top:1px solid #e5eaf1}.material-relation-option-row>span{min-width:0;padding:7px 8px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.material-relation-option-row>.el-select,.material-relation-option-row>.el-input-number{margin:5px 6px;width:calc(100% - 12px)}.material-relation-option-row>.el-checkbox,.material-relation-option-row>.el-button{justify-self:center}.material-relation-option-empty{padding:20px;color:#94a3b8;text-align:center}.material-relation-actions{display:flex;align-items:center;gap:8px;margin-top:12px}.material-relation-actions>span{flex:1}@media(max-width:1000px){.material-relation-summary{grid-template-columns:1fr 1fr}.material-relation-summary>div{border-bottom:1px solid #dbe4ef}.material-relation-group>header{grid-template-columns:1fr}}
+.material-relation-editor{min-height:420px;max-height:72vh;overflow:auto;padding:1px 3px 2px}.material-relation-summary{display:grid;grid-template-columns:160px minmax(150px,1fr) minmax(170px,1fr) minmax(180px,1.15fr) 150px;overflow:hidden;border:1px solid #dbe4ef;border-radius:7px}.material-relation-summary>div{display:grid;min-width:0;border-right:1px solid #dbe4ef}.material-relation-summary>div:last-child{border-right:0}.material-relation-summary span{padding:6px 9px;background:#f1f5f9;color:#475569;font-size:11px;font-weight:600}.material-relation-summary strong{min-width:0;padding:8px 9px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.material-relation-summary__status .el-tag{justify-self:start;margin:6px 9px}.material-relation-change-note{display:grid;margin-top:12px;grid-template-columns:80px minmax(0,1fr);align-items:center;gap:8px;color:#475569}.material-relation-help{margin:12px 0;padding:9px 11px;border-radius:6px;background:#eff6ff;color:#1d4ed8;line-height:1.55}.material-relation-group{margin-top:12px;padding:12px;border:1px solid #dbe4ef;border-radius:8px;background:#fafcff}.material-relation-group>header{display:grid;grid-template-columns:minmax(190px,1fr) auto 150px auto;align-items:center;gap:10px}.material-relation-option-table{margin:10px 0;overflow-x:auto;border:1px solid #dbe4ef;border-radius:6px}.material-relation-option-head,.material-relation-option-row{display:grid;min-width:1140px;grid-template-columns:165px minmax(130px,1fr) minmax(145px,1.1fr) minmax(155px,1.15fr) 155px 120px 76px 58px;align-items:center}.material-relation-option-head{background:#f1f5f9;color:#475569;font-size:12px;font-weight:600}.material-relation-option-head span{padding:8px;border-right:1px solid #dbe4ef}.material-relation-option-row{min-height:43px;border-top:1px solid #e5eaf1}.material-relation-option-row>span{min-width:0;padding:7px 8px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.material-relation-option-row>.el-select,.material-relation-option-row>.el-input-number{margin:5px 6px;width:calc(100% - 12px)}.material-relation-option-row>.el-checkbox,.material-relation-option-row>.el-button{justify-self:center}.material-relation-option-empty{padding:20px;color:#94a3b8;text-align:center}.material-relation-actions{display:flex;align-items:center;gap:8px;margin-top:12px}.material-relation-actions>span{flex:1}@media(max-width:1000px){.material-relation-summary{grid-template-columns:1fr 1fr}.material-relation-summary>div{border-bottom:1px solid #dbe4ef}.material-relation-group>header{grid-template-columns:1fr}}
 </style>
 
 <style>

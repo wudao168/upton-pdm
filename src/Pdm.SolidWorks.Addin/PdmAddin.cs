@@ -1217,88 +1217,7 @@ public sealed class PdmAddin : ISwAddin
                     return;
                 }
 
-                var oldPath = Path.GetFullPath(node.FullPath);
-                var newPath = Path.Combine(Path.GetDirectoryName(oldPath) ?? string.Empty, string.Concat(newBaseName, extension));
-                if (File.Exists(newPath) && !PathsEqual(oldPath, newPath))
-                {
-                    throw new IOException(string.Concat("目标文件已存在：", Path.GetFileName(newPath)));
-                }
-
-                if (renamingRoot)
-                {
-                    assemblyModel.ClearSelection2(true);
-                    var saveErrors = 0;
-                    var saveWarnings = 0;
-                    var saved = assemblyModel.Extension.SaveAs3(
-                        newPath,
-                        (int)swSaveAsVersion_e.swSaveAsCurrentVersion,
-                        (int)swSaveAsOptions_e.swSaveAsOptions_Silent,
-                        null,
-                        null,
-                        ref saveErrors,
-                        ref saveWarnings);
-                    if (!saved || saveErrors != 0 || !File.Exists(newPath) || !PathsEqual(assemblyModel.GetPathName(), newPath))
-                    {
-                        throw new IOException(string.Concat(
-                            "SolidWorks保存主装配体新名称失败，错误码：",
-                            saveErrors,
-                            "，警告码：",
-                            saveWarnings,
-                            "。"));
-                    }
-
-                    node.FullPath = newPath;
-                    node.FileName = Path.GetFileName(newPath);
-                    node.DrawingNumber = newBaseName;
-                    node.IsModifiedInSolidWorks = false;
-                    node.IsRenamePendingSave = false;
-                    node.Status = CadReferenceStatus.Normal;
-                    node.CurrentRevision = "本地修改";
-                    node.WorkState = CadWorkState.PendingCheckIn;
-                    PdmDocumentIdentityStore.TryWrite(newPath, node.DocumentId.Value, currentProjectId);
-                    if (currentProjectId.HasValue)
-                    {
-                        RememberExplicitProjectPath(newPath, currentProjectId.Value);
-                    }
-                    currentDocumentIdentity = newPath;
-                    taskPaneControl.SetTree(currentTree);
-                    ScheduleTreeRefresh();
-                    LogOperation(string.Concat("Root document rename saved old=", oldPath, " new=", newPath, " document=", node.DocumentId.Value));
-                    return;
-                }
-
-                if (!TrySelectComponentForNode(assemblyModel, node, out _))
-                {
-                    throw new InvalidOperationException("SolidWorks无法选中该零部件，请刷新设计树后重试。");
-                }
-
-                var renameStatus = (swRenameDocumentError_e)assemblyModel.Extension.RenameDocument(newBaseName);
-                assemblyModel.ClearSelection2(true);
-                if (renameStatus != swRenameDocumentError_e.swRenameDocumentError_None)
-                {
-                    throw new InvalidOperationException(RenameDocumentErrorText(renameStatus));
-                }
-
-                foreach (var matchingNode in EnumerateCadNodes(currentTree).Where(candidate => PathsEqual(candidate.FullPath, oldPath)))
-                {
-                    matchingNode.FullPath = newPath;
-                    matchingNode.FileName = Path.GetFileName(newPath);
-                    matchingNode.DrawingNumber = newBaseName;
-                    matchingNode.IsModifiedInSolidWorks = true;
-                    matchingNode.IsRenamePendingSave = true;
-                    matchingNode.Status = CadReferenceStatus.Normal;
-                    matchingNode.WorkState = CadWorkState.ModifiedUnsaved;
-                }
-                currentTree.IsModifiedInSolidWorks = true;
-                currentTree.WorkState = CadWorkState.ModifiedUnsaved;
-                if (currentProjectId.HasValue)
-                {
-                    RememberExplicitProjectPath(newPath, currentProjectId.Value);
-                }
-
-                taskPaneControl.SetTree(currentTree);
-                ScheduleTreeRefresh();
-                LogOperation(string.Concat("Document rename staged old=", oldPath, " new=", newPath, " document=", node.DocumentId.Value));
+                ApplyControlledDocumentRename(node, newBaseName, assemblyModel, renamingRoot);
             }
         }
         catch (Exception exception)
@@ -1309,36 +1228,312 @@ public sealed class PdmAddin : ISwAddin
     }
 
     private static string NormalizeRenamedDocumentName(string requestedName, string extension)
+        => BatchRenameRule.NormalizeFileBaseName(requestedName, extension);
+
+    private void ApplyControlledDocumentRename(
+        CadTreeNode node,
+        string requestedBaseName,
+        IModelDoc2 assemblyModel,
+        bool renamingRoot)
     {
-        var name = (requestedName ?? string.Empty).Trim();
-        if (!string.IsNullOrWhiteSpace(extension) && name.EndsWith(extension, StringComparison.OrdinalIgnoreCase))
+        var extension = Path.GetExtension(node.FileName);
+        var currentBaseName = Path.GetFileNameWithoutExtension(node.FileName);
+        var newBaseName = NormalizeRenamedDocumentName(requestedBaseName, extension);
+        if (string.Equals(currentBaseName, newBaseName, StringComparison.OrdinalIgnoreCase))
         {
-            name = name.Substring(0, name.Length - extension.Length).Trim();
-        }
-        if (string.IsNullOrWhiteSpace(name))
-        {
-            throw new InvalidOperationException("新文件名不能为空。");
-        }
-        if (name.EndsWith(".", StringComparison.Ordinal) || name.EndsWith(" ", StringComparison.Ordinal)
-            || name.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0)
-        {
-            throw new InvalidOperationException("新文件名包含Windows不允许的字符，或以句点、空格结尾。");
-        }
-        if (name.Length + (extension?.Length ?? 0) > 240)
-        {
-            throw new InvalidOperationException("新文件名过长。");
+            return;
         }
 
-        var deviceName = name.Split('.')[0].ToUpperInvariant();
-        var reserved = deviceName == "CON" || deviceName == "PRN" || deviceName == "AUX" || deviceName == "NUL"
-            || (deviceName.Length == 4
-                && (deviceName.StartsWith("COM", StringComparison.Ordinal) || deviceName.StartsWith("LPT", StringComparison.Ordinal))
-                && deviceName[3] >= '1' && deviceName[3] <= '9');
-        if (reserved)
+        var oldPath = Path.GetFullPath(node.FullPath);
+        var newPath = Path.Combine(Path.GetDirectoryName(oldPath) ?? string.Empty, string.Concat(newBaseName, extension));
+        if (File.Exists(newPath) && !PathsEqual(oldPath, newPath))
         {
-            throw new InvalidOperationException("该名称是Windows保留名称，请使用其他名称。");
+            throw new IOException(string.Concat("目标文件已存在：", Path.GetFileName(newPath)));
         }
-        return name;
+
+        if (renamingRoot)
+        {
+            assemblyModel.ClearSelection2(true);
+            var saveErrors = 0;
+            var saveWarnings = 0;
+            var saved = assemblyModel.Extension.SaveAs3(
+                newPath,
+                (int)swSaveAsVersion_e.swSaveAsCurrentVersion,
+                (int)swSaveAsOptions_e.swSaveAsOptions_Silent,
+                null,
+                null,
+                ref saveErrors,
+                ref saveWarnings);
+            if (!saved || saveErrors != 0 || !File.Exists(newPath) || !PathsEqual(assemblyModel.GetPathName(), newPath))
+            {
+                throw new IOException(string.Concat(
+                    "SolidWorks保存主装配体新名称失败，错误码：",
+                    saveErrors,
+                    "，警告码：",
+                    saveWarnings,
+                    "。"));
+            }
+
+            node.FullPath = newPath;
+            node.FileName = Path.GetFileName(newPath);
+            node.DrawingNumber = newBaseName;
+            node.IsModifiedInSolidWorks = false;
+            node.IsRenamePendingSave = false;
+            node.Status = CadReferenceStatus.Normal;
+            node.CurrentRevision = "本地修改";
+            node.WorkState = CadWorkState.PendingCheckIn;
+            PdmDocumentIdentityStore.TryWrite(newPath, node.DocumentId.Value, currentProjectId);
+            if (currentProjectId.HasValue)
+            {
+                RememberExplicitProjectPath(newPath, currentProjectId.Value);
+            }
+            currentDocumentIdentity = newPath;
+            taskPaneControl.SetTree(currentTree);
+            ScheduleTreeRefresh();
+            LogOperation(string.Concat("Root document rename saved old=", oldPath, " new=", newPath, " document=", node.DocumentId.Value));
+            return;
+        }
+
+        if (!TrySelectComponentForNode(assemblyModel, node, out _))
+        {
+            throw new InvalidOperationException("SolidWorks无法选中该零部件，请刷新设计树后重试。");
+        }
+
+        var renameStatus = (swRenameDocumentError_e)assemblyModel.Extension.RenameDocument(newBaseName);
+        assemblyModel.ClearSelection2(true);
+        if (renameStatus != swRenameDocumentError_e.swRenameDocumentError_None)
+        {
+            throw new InvalidOperationException(RenameDocumentErrorText(renameStatus));
+        }
+
+        foreach (var matchingNode in EnumerateCadNodes(currentTree).Where(candidate => PathsEqual(candidate.FullPath, oldPath)))
+        {
+            matchingNode.FullPath = newPath;
+            matchingNode.FileName = Path.GetFileName(newPath);
+            matchingNode.DrawingNumber = newBaseName;
+            matchingNode.IsModifiedInSolidWorks = true;
+            matchingNode.IsRenamePendingSave = true;
+            matchingNode.Status = CadReferenceStatus.Normal;
+            matchingNode.WorkState = CadWorkState.ModifiedUnsaved;
+        }
+        currentTree.IsModifiedInSolidWorks = true;
+        currentTree.WorkState = CadWorkState.ModifiedUnsaved;
+        if (currentProjectId.HasValue)
+        {
+            RememberExplicitProjectPath(newPath, currentProjectId.Value);
+        }
+
+        taskPaneControl.SetTree(currentTree);
+        ScheduleTreeRefresh();
+        LogOperation(string.Concat("Document rename staged old=", oldPath, " new=", newPath, " document=", node.DocumentId.Value));
+    }
+
+    private IReadOnlyDictionary<Guid, string> ValidateBatchDocumentRenames(
+        IReadOnlyList<BatchDocumentRenameRequest> requestedRenames)
+    {
+        var requests = (requestedRenames ?? Array.Empty<BatchDocumentRenameRequest>())
+            .Where(request => request?.Item?.OperationItem?.Node != null)
+            .GroupBy(request => request.Item.OperationItem.Node.FullPath ?? request.NodeId.ToString(), StringComparer.OrdinalIgnoreCase)
+            .Select(group => group.First())
+            .ToArray();
+        var errors = new Dictionary<Guid, string>();
+        if (requests.Length == 0)
+        {
+            return errors;
+        }
+
+        IModelDoc2 activeDocument = null;
+        try
+        {
+            activeDocument = application?.ActiveDoc as IModelDoc2;
+        }
+        catch
+        {
+            activeDocument = null;
+        }
+        if (currentTree == null || activeDocument == null || !PathsEqual(activeDocument.GetPathName(), currentTree.FullPath))
+        {
+            foreach (var request in requests)
+            {
+                AddBatchRenameError(errors, request.NodeId, "请先激活当前设计树对应的主图档");
+            }
+        }
+        if (currentTree == null || !IsCheckedOutByCurrentUser(currentTree))
+        {
+            foreach (var request in requests)
+            {
+                AddBatchRenameError(errors, request.NodeId, "请先获取当前主图档的编辑权限");
+            }
+        }
+
+        var targetPaths = new List<KeyValuePair<BatchDocumentRenameRequest, string>>();
+        foreach (var request in requests)
+        {
+            var node = request.Item.OperationItem.Node;
+            if (node.Kind != CadDocumentKind.Part && node.Kind != CadDocumentKind.Assembly)
+            {
+                AddBatchRenameError(errors, request.NodeId, "仅支持零件和装配体");
+            }
+            if (!node.DocumentId.HasValue)
+            {
+                AddBatchRenameError(errors, request.NodeId, "图档尚未入库");
+            }
+            if (node.IsReadOnlyPreview)
+            {
+                AddBatchRenameError(errors, request.NodeId, "只读预览不能重命名");
+            }
+            if (node.DrawingReviewLocked
+                || string.Equals(node.LifecycleState, "InReview", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(node.LifecycleState, "Obsolete", StringComparison.OrdinalIgnoreCase))
+            {
+                AddBatchRenameError(errors, request.NodeId, "图档正在审批、审核锁定或已作废");
+            }
+            if (node.IsExternalProvenance
+                || node.ProvenanceProjectId.HasValue && currentProjectId.HasValue && node.ProvenanceProjectId != currentProjectId)
+            {
+                AddBatchRenameError(errors, request.NodeId, "外部或跨项目引用不能批量重命名");
+            }
+            if (!IsCheckedOutByCurrentUser(node))
+            {
+                AddBatchRenameError(errors, request.NodeId, "请先获取该图档的编辑权限");
+            }
+            if (node.IsRenamePendingSave)
+            {
+                AddBatchRenameError(errors, request.NodeId, "已有重命名待保存，请先提交存档");
+            }
+            if (string.IsNullOrWhiteSpace(node.FullPath) || !File.Exists(node.FullPath))
+            {
+                AddBatchRenameError(errors, request.NodeId, "本地图档不存在");
+                continue;
+            }
+
+            var renamingRoot = currentTree != null && PathsEqual(node.FullPath, currentTree.FullPath);
+            if (!renamingRoot && string.IsNullOrWhiteSpace(node.ComponentSelectionName))
+            {
+                AddBatchRenameError(errors, request.NodeId, "SolidWorks未识别到零部件实例");
+            }
+            if (!renamingRoot && activeDocument != null && activeDocument.GetType() != (int)swDocumentTypes_e.swDocASSEMBLY)
+            {
+                AddBatchRenameError(errors, request.NodeId, "子件重命名需要激活主装配体");
+            }
+
+            try
+            {
+                var oldPath = Path.GetFullPath(node.FullPath);
+                var extension = Path.GetExtension(node.FileName);
+                var newBaseName = NormalizeRenamedDocumentName(request.NewBaseName, extension);
+                var newPath = Path.GetFullPath(Path.Combine(Path.GetDirectoryName(oldPath) ?? string.Empty, string.Concat(newBaseName, extension)));
+                if (PathsEqual(oldPath, newPath))
+                {
+                    AddBatchRenameError(errors, request.NodeId, "文件名没有变化");
+                }
+                else if (File.Exists(newPath))
+                {
+                    AddBatchRenameError(errors, request.NodeId, string.Concat("目标文件已存在：", Path.GetFileName(newPath)));
+                }
+                targetPaths.Add(new KeyValuePair<BatchDocumentRenameRequest, string>(request, newPath));
+            }
+            catch (Exception exception)
+            {
+                AddBatchRenameError(errors, request.NodeId, exception.Message);
+            }
+        }
+
+        foreach (var duplicate in targetPaths
+            .GroupBy(pair => pair.Value, StringComparer.OrdinalIgnoreCase)
+            .Where(group => group.Count() > 1))
+        {
+            foreach (var pair in duplicate)
+            {
+                AddBatchRenameError(errors, pair.Key.NodeId, string.Concat("批量结果重名：", Path.GetFileName(pair.Value)));
+            }
+        }
+        return errors;
+    }
+
+    private IReadOnlyDictionary<Guid, string> ExecuteBatchDocumentRenames(
+        IReadOnlyList<BatchDocumentRenameRequest> requestedRenames)
+    {
+        var requests = (requestedRenames ?? Array.Empty<BatchDocumentRenameRequest>())
+            .Where(request => request?.Item?.OperationItem?.Node != null)
+            .GroupBy(request => request.Item.OperationItem.Node.FullPath ?? request.NodeId.ToString(), StringComparer.OrdinalIgnoreCase)
+            .Select(group => group.First())
+            .OrderByDescending(request => request.Item.OperationItem.Depth)
+            .ThenBy(request => request.Item.FileName, StringComparer.CurrentCulture)
+            .ToArray();
+        var validationErrors = ValidateBatchDocumentRenames(requests);
+        if (validationErrors.Count > 0)
+        {
+            return requests.ToDictionary(
+                request => request.NodeId,
+                request => validationErrors.TryGetValue(request.NodeId, out var error)
+                    ? string.Concat("不可执行：", error)
+                    : "未执行：其他图档检查未通过");
+        }
+        if (!TryBeginWorkspaceOperation("正在批量重命名图档"))
+        {
+            return requests.ToDictionary(request => request.NodeId, _ => "未执行：已有工作文件操作正在进行");
+        }
+
+        var statuses = requests.ToDictionary(request => request.NodeId, _ => "未处理");
+        Interlocked.Increment(ref refreshSuppressionDepth);
+        try
+        {
+            taskPaneControl.UseWaitCursor = true;
+            var activeDocument = application?.ActiveDoc as IModelDoc2
+                ?? throw new InvalidOperationException("请先激活当前设计树对应的主图档。");
+            for (var index = 0; index < requests.Length; index++)
+            {
+                var request = requests[index];
+                var node = request.Item.OperationItem.Node;
+                taskPaneControl.SetWorkspaceOperationProgress(
+                    string.Concat("重命名图档", System.Environment.NewLine, node.FileName),
+                    index,
+                    requests.Length);
+                try
+                {
+                    var renamingRoot = currentTree != null && PathsEqual(node.FullPath, currentTree.FullPath);
+                    ApplyControlledDocumentRename(node, request.NewBaseName, activeDocument, renamingRoot);
+                    statuses[request.NodeId] = "已完成";
+                }
+                catch (Exception exception)
+                {
+                    statuses[request.NodeId] = string.Concat("失败：", exception.Message);
+                    LogDiagnostic(string.Concat("ExecuteBatchDocumentRenames.", node.FileName), exception);
+                    break;
+                }
+            }
+            var completed = statuses.Count(pair => string.Equals(pair.Value, "已完成", StringComparison.Ordinal));
+            taskPaneControl.SetWorkspaceOperationProgress("批量重命名结束", completed, requests.Length);
+            taskPaneControl.SetTree(currentTree);
+            LogOperation(string.Concat("Batch document rename completed=", completed, "/", requests.Length));
+            return statuses;
+        }
+        finally
+        {
+            taskPaneControl.UseWaitCursor = false;
+            Interlocked.Decrement(ref refreshSuppressionDepth);
+            EndWorkspaceOperation();
+            ScheduleTreeRefresh();
+        }
+    }
+
+    private static void AddBatchRenameError(
+        IDictionary<Guid, string> errors,
+        Guid nodeId,
+        string message)
+    {
+        var normalized = message?.Trim() ?? string.Empty;
+        if (string.IsNullOrWhiteSpace(normalized)) return;
+        if (errors.TryGetValue(nodeId, out var existing) && !string.IsNullOrWhiteSpace(existing))
+        {
+            if (!existing.Split('；').Contains(normalized, StringComparer.Ordinal))
+            {
+                errors[nodeId] = string.Concat(existing, "；", normalized);
+            }
+            return;
+        }
+        errors[nodeId] = normalized;
     }
 
     private static string RenameDocumentErrorText(swRenameDocumentError_e error)
@@ -4526,7 +4721,11 @@ public sealed class PdmAddin : ISwAddin
                         SynchronizeBatchPropertiesFromPlmAsync(selectedItems, projectId.Value))
                     : null,
                 (changedItems, settingPropertyCards, reportProgress) =>
-                    ExecuteLocalBatchPropertyOperation(changedItems, settingPropertyCards, reportProgress)))
+                    ExecuteLocalBatchPropertyOperation(changedItems, settingPropertyCards, reportProgress),
+                ValidateBatchDocumentRenames,
+                ExecuteBatchDocumentRenames,
+                currentTree?.FileName,
+                taskPaneControl.Handle))
             {
                 if (dialog.ShowDialog(taskPaneControl) != DialogResult.OK)
                 {

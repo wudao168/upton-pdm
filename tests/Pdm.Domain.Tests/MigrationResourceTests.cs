@@ -384,4 +384,22 @@ public sealed class MigrationResourceTests
         Assert.Contains("CREATE TABLE u9_inventory_snapshot", sql, StringComparison.Ordinal);
         Assert.Contains("refreshed_at", sql, StringComparison.Ordinal);
     }
+
+    [Fact]
+    public async Task MaterialRelationSoftReviewMigration_PersistsPerMainRowDecisionAndQuantity()
+    {
+        var assembly = typeof(MySqlMigrationRunner).Assembly;
+        var resourceName = assembly.GetManifestResourceNames()
+            .Single(name => name.EndsWith(".Migrations.089_material_relation_soft_review.sql", StringComparison.Ordinal));
+
+        await using var stream = assembly.GetManifestResourceStream(resourceName);
+        Assert.NotNull(stream);
+        using var reader = new StreamReader(stream!);
+        var sql = await reader.ReadToEndAsync();
+
+        Assert.Contains("CREATE TABLE material_relation_review", sql, StringComparison.Ordinal);
+        Assert.Contains("PRIMARY KEY(project_id,main_bom_item_id,group_id)", sql, StringComparison.Ordinal);
+        Assert.Contains("main_quantity DECIMAL(18,4) NOT NULL", sql, StringComparison.Ordinal);
+        Assert.Contains("reason VARCHAR(500)", sql, StringComparison.Ordinal);
+    }
 }

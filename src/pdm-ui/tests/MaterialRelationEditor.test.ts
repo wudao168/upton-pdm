@@ -58,14 +58,19 @@ describe('MaterialRelationEditor', () => {
     expect(wrapper.find('.material-relation-group').findComponent({ name: 'ElSelect' }).props('modelValue')).toBe('Single')
     expect(wrapper.find('.material-relation-option-row').findAllComponents({ name: 'ElSelect' })[1].props('modelValue')).toBe('PerMainQuantity')
     const headers = wrapper.findAll('.material-relation-option-head span').map(item => item.text())
-    expect(headers).toEqual(['料号', '名称', '型号', '备注', '数量计算', '每套数量', '默认', '操作'])
+    expect(headers).toEqual(['料号', '名称', '型号', '备注', '数量计算', '每套数量', '优先推荐', '操作'])
+    expect(wrapper.text()).toContain('需要工程师核对')
+    expect(wrapper.text()).toContain('不会自动加入 BOM')
+    expect(wrapper.text()).not.toContain('只有一个选项时自动带出')
     expect(wrapper.find('.material-relation-option-row').text()).toContain('伺服控制器')
     expect(wrapper.find('.material-relation-option-row').text()).toContain('1kW')
     expect(wrapper.find('.material-relation-option-row').text()).toContain('EtherCAT')
 
     await wrapper.findAll('button').find(button => button.text() === '保存修改')!.trigger('click')
     await flushPromises()
-    expect(api.saveMaterialRelationTemplate).toHaveBeenCalledWith(expect.objectContaining({ mainMaterialId: 'main-1', name: 'M-001关联物料' }), 'token', 'relation-1')
+    expect(api.saveMaterialRelationTemplate).toHaveBeenCalledWith(expect.objectContaining({
+      mainMaterialId: 'main-1', name: 'M-001关联物料', groups: [expect.objectContaining({ isRequired: true, autoSelectUnique: false })],
+    }), 'token', 'relation-1')
   })
 
   it('shows the effective association read-only to engineers', async () => {

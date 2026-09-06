@@ -26,7 +26,11 @@ public sealed record SaveMaterialRelationTemplateCommand(
     long? ExpectedRevisionRowVersion,
     IReadOnlyList<SaveMaterialRelationGroupCommand> Groups);
 
-public sealed record MaterialRelationChoice(Guid GroupId, IReadOnlyList<Guid> OptionIds);
+public sealed record MaterialRelationChoice(
+    Guid GroupId,
+    IReadOnlyList<Guid> OptionIds,
+    bool ConfirmNoAccessory = false,
+    string? NoAccessoryReason = null);
 
 public sealed record ApplyMaterialRelationsCommand(Guid MainBomItemId, IReadOnlyList<MaterialRelationChoice> Choices);
 
@@ -41,6 +45,10 @@ public sealed record MaterialRelationGroupCheck(
     decimal ExpectedQuantity,
     decimal ActualQuantity,
     IReadOnlyList<Guid> SelectedOptionIds,
+    MaterialRelationReviewDecision? ReviewDecision,
+    string? ReviewReason,
+    string? ReviewedBy,
+    DateTimeOffset? ReviewedAt,
     IReadOnlyList<MaterialRelationOption> Options);
 
 public sealed record MaterialRelationMainCheck(
@@ -68,6 +76,8 @@ public interface IMaterialRelationRepository
     Task<MaterialRelationTemplate> PublishAsync(Guid templateId, Guid revisionId, long expectedRowVersion, string actor, DateTimeOffset now, CancellationToken cancellationToken);
     Task<IReadOnlyList<MaterialRelationSelection>> ListSelectionsAsync(Guid projectId, CancellationToken cancellationToken);
     Task ReplaceSelectionsAsync(Guid projectId, Guid mainBomItemId, IReadOnlyList<MaterialRelationSelection> selections, CancellationToken cancellationToken);
+    Task<IReadOnlyList<MaterialRelationReview>> ListReviewsAsync(Guid projectId, CancellationToken cancellationToken);
+    Task ReplaceReviewsAsync(Guid projectId, Guid mainBomItemId, IReadOnlyList<MaterialRelationReview> reviews, CancellationToken cancellationToken);
 }
 
 public interface IMaterialRelationReleaseGuard

@@ -51,6 +51,7 @@ internal static class Program
         Test("packed nested assemblies may reference sibling folders", TestNestedPackedAssembly);
         Test("new assemblies block original external files but allow target project controlled references", TestExternalReferences);
         Test("registration persists identity on the source even after UI tree refresh", TestRegistrationBinding);
+        Test("overall and property actions need a structure but no selected tree node", TestSelectionIndependentStructureActions);
         Test("binding failure stops before assigning an in-memory identity", TestBindingFailure);
         Test("incremental plan submits ten new files and parent, not ten unchanged originals", TestIncrementalPlan);
         Test("one project uses one visible working directory", TestProjectWorkspaceDirectory);
@@ -297,6 +298,22 @@ internal static class Program
         Assert(Get(source, "DocumentId").Equals(id) && Get(ui, "DocumentId").Equals(id), "registration missed operation source or UI");
         Assert(ReadIdentity("TryRead", (string)Get(source, "FullPath")) == id, "retry would register another new document");
         Assert(Static("PdmDocumentIdentityStore", "ReadProjectId", Get(source, "FullPath")).Equals(project), "registration lost project");
+    }
+
+    private static void TestSelectionIndependentStructureActions()
+    {
+        using var pane = (Control)New("PdmTaskPaneControl");
+        Call(pane, "SetAuthenticatedUser", "设计员", "designer");
+        Call(pane, "SetTree", Node("selection-independent/main.SLDASM", Guid.NewGuid(), 0));
+
+        var tree = (TreeView)Field(pane, "structureTree");
+        var overall = (Button)Field(pane, "batchOperationButton");
+        var property = (Button)Field(pane, "propertyEditButton");
+        var update = (Button)Field(pane, "updateAllLatestButton");
+        Assert(tree.SelectedNode == null, "fixture unexpectedly selected a design-tree node");
+        Assert(overall.Enabled, "overall action still requires a selected design-tree node");
+        Assert(property.Enabled, "property action still requires a selected design-tree node");
+        Assert(!update.Enabled, "unrelated update action changed its initial selection behavior");
     }
 
     private static void TestBindingFailure()

@@ -93,6 +93,9 @@ test.beforeEach(async ({ page }) => {
       lastSuccessfulRefreshAt: null,
     })
     if (path === '/api/material-relations/templates') return fulfill([])
+    if (/^\/api\/material-relations\/projects\/[^/]+\/completeness$/.test(path)) return fulfill({
+      projectId: path.split('/')[4], isComplete: true, mainMaterialCount: 0, incompleteGroupCount: 0, mainMaterials: [],
+    })
     if (path === '/api/program-templates/tasks/mine') return fulfill([])
     if (path === '/api/customers') return fulfill([{ id: 'customer-1', code: 'C00465', name: '中山比亚迪电子有限公司', isActive: true }])
     if (path === '/api/organization-directory') return fulfill(organizationDirectory)

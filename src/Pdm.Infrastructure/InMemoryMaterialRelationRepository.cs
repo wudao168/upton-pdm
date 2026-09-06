@@ -8,6 +8,7 @@ public sealed class InMemoryMaterialRelationRepository : IMaterialRelationReposi
     private readonly object gate = new();
     private readonly Dictionary<Guid, MaterialRelationTemplate> templates = [];
     private readonly List<MaterialRelationSelection> selections = [];
+    private readonly List<MaterialRelationReview> reviews = [];
 
     public Task<IReadOnlyList<MaterialRelationTemplate>> ListTemplatesAsync(bool includeDraft, CancellationToken cancellationToken)
     {
@@ -65,6 +66,21 @@ public sealed class InMemoryMaterialRelationRepository : IMaterialRelationReposi
         {
             selections.RemoveAll(item => item.ProjectId == projectId && item.MainBomItemId == mainBomItemId);
             selections.AddRange(items);
+            return Task.CompletedTask;
+        }
+    }
+
+    public Task<IReadOnlyList<MaterialRelationReview>> ListReviewsAsync(Guid projectId, CancellationToken cancellationToken)
+    {
+        lock (gate) return Task.FromResult<IReadOnlyList<MaterialRelationReview>>(reviews.Where(item => item.ProjectId == projectId).ToArray());
+    }
+
+    public Task ReplaceReviewsAsync(Guid projectId, Guid mainBomItemId, IReadOnlyList<MaterialRelationReview> items, CancellationToken cancellationToken)
+    {
+        lock (gate)
+        {
+            reviews.RemoveAll(item => item.ProjectId == projectId && item.MainBomItemId == mainBomItemId);
+            reviews.AddRange(items);
             return Task.CompletedTask;
         }
     }

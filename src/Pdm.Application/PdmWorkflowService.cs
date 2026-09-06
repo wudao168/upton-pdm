@@ -4767,7 +4767,19 @@ public sealed class PdmWorkflowService(
     }
 
     private static bool BomSnapshotsEqual(IReadOnlyList<BomItem> left, IReadOnlyList<BomItem> right) =>
-        string.Equals(BomRevision("V", left), BomRevision("V", right), StringComparison.Ordinal);
+        string.Equals(
+            BomRevision("V", left.Select(ForReleaseComparison).ToArray()),
+            BomRevision("V", right.Select(ForReleaseComparison).ToArray()),
+            StringComparison.Ordinal);
+
+    private static BomItem ForReleaseComparison(BomItem item) => item with
+    {
+        ReconciliationStatus = null,
+        ReconciliationNote = null,
+        ReconciliationUpdatedBy = null,
+        ReconciliationUpdatedAt = null,
+        PropertyWritebackStatus = null
+    };
 
     private static string BomRevision(string prefix, IReadOnlyList<BomItem> items)
     {

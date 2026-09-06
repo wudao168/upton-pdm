@@ -578,7 +578,7 @@ export function getMaterialRelationCompleteness(projectId: string, token: string
   return requestJson<MaterialRelationCompleteness>(`/api/material-relations/projects/${projectId}/completeness`, {}, token)
 }
 
-export function applyMaterialRelations(projectId: string, mainMaterials: Array<{ mainBomItemId: string; choices: Array<{ groupId: string; optionIds: string[] }> }>, token: string): Promise<MaterialRelationCompleteness> {
+export function applyMaterialRelations(projectId: string, mainMaterials: Array<{ mainBomItemId: string; choices: Array<{ groupId: string; optionIds: string[]; confirmNoAccessory?: boolean; noAccessoryReason?: string | null }> }>, token: string): Promise<MaterialRelationCompleteness> {
   return requestJson<MaterialRelationCompleteness>(`/api/material-relations/projects/${projectId}/apply`, {
     method: 'POST', body: JSON.stringify({ mainMaterials }),
   }, token)

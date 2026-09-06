@@ -552,6 +552,9 @@ internal sealed class BatchPropertyEditDialog : Form
     private readonly Func<IReadOnlyList<BatchPropertyEditItem>, Action<string, int, int>, int> readCurrentPropertyCardValues;
     private readonly Func<IReadOnlyList<BatchPropertyEditItem>, Task<int>> synchronizePlmProperties;
     private readonly Func<IReadOnlyList<BatchPropertyEditItem>, bool, Action<string, int, int>, string> executeLocalOperation;
+    private readonly Func<IReadOnlyList<BatchDocumentRenameRequest>, IReadOnlyDictionary<Guid, string>> validateDocumentRenames;
+    private readonly Func<IReadOnlyList<BatchDocumentRenameRequest>, IReadOnlyDictionary<Guid, string>> executeDocumentRenames;
+    private readonly string rootFileName;
     private readonly Dictionary<CadDocumentKind, ComboBox> propertyCardSelectors = new Dictionary<CadDocumentKind, ComboBox>();
     private readonly BindingList<BatchPropertyEditItem> rows;
     private readonly BindingList<PropertyWritebackPreviewItem> writebackRows;
@@ -613,7 +616,11 @@ internal sealed class BatchPropertyEditDialog : Form
         IReadOnlyDictionary<CadDocumentKind, IReadOnlyList<string>> propertyCardTemplates = null,
         Func<IReadOnlyList<BatchPropertyEditItem>, Action<string, int, int>, int> readCurrentPropertyCardValues = null,
         Func<IReadOnlyList<BatchPropertyEditItem>, Task<int>> synchronizePlmProperties = null,
-        Func<IReadOnlyList<BatchPropertyEditItem>, bool, Action<string, int, int>, string> executeLocalOperation = null)
+        Func<IReadOnlyList<BatchPropertyEditItem>, bool, Action<string, int, int>, string> executeLocalOperation = null,
+        Func<IReadOnlyList<BatchDocumentRenameRequest>, IReadOnlyDictionary<Guid, string>> validateDocumentRenames = null,
+        Func<IReadOnlyList<BatchDocumentRenameRequest>, IReadOnlyDictionary<Guid, string>> executeDocumentRenames = null,
+        string rootFileName = null,
+        IntPtr solidWorksWindowHandle = default(IntPtr))
     {
         this.items = items ?? Array.Empty<BatchPropertyEditItem>();
         this.writebackItems = writebackItems ?? Array.Empty<PropertyWritebackPreviewItem>();
@@ -624,6 +631,9 @@ internal sealed class BatchPropertyEditDialog : Form
         this.readCurrentPropertyCardValues = readCurrentPropertyCardValues;
         this.synchronizePlmProperties = synchronizePlmProperties;
         this.executeLocalOperation = executeLocalOperation;
+        this.validateDocumentRenames = validateDocumentRenames;
+        this.executeDocumentRenames = executeDocumentRenames;
+        this.rootFileName = rootFileName?.Trim() ?? string.Empty;
         if (synchronizePlmProperties == null)
         {
             plmSyncStatus.Text = "未关联项目，可直接编辑本地属性";
@@ -634,12 +644,8 @@ internal sealed class BatchPropertyEditDialog : Form
         Text = initialOperation == PropertyOperationMode.PropertyWriteback
             ? "属性回写确认"
             : "属性";
-        StartPosition = FormStartPosition.CenterParent;
         MinimumSize = new Size(1100, 560);
-        var workingArea = Screen.PrimaryScreen.WorkingArea;
-        Size = new Size(
-            Math.Max(MinimumSize.Width, Math.Min(1600, workingArea.Width - 60)),
-            Math.Max(MinimumSize.Height, (int)Math.Round(workingArea.Height * 0.75)));
+        DialogWindowSizing.FitToOwner(this, solidWorksWindowHandle, 0.95, 24);
         FormBorderStyle = FormBorderStyle.Sizable;
         MaximizeBox = true;
         MinimizeBox = false;
@@ -808,7 +814,7 @@ internal sealed class BatchPropertyEditDialog : Form
             TextAlign = ContentAlignment.MiddleLeft,
             Margin = new Padding(0, 0, 0, 8)
         };
-        var toolbar = CreateAlignedRow(100F, 150F, 150F, 150F, 150F, 150F, 150F);
+        var toolbar = CreateAlignedRow(100F, 150F, 150F, 150F, 150F, 150F, 150F, 150F);
         ConfigureRowInput(fillProperty);
         ConfigureRowInput(fillValue);
         ConfigureRowInput(fillOptionValue);
@@ -828,6 +834,14 @@ internal sealed class BatchPropertyEditDialog : Form
             Margin = Padding.Empty
         };
         autoFillNameOrModel.Click += (_, _) => AutoFillNameOrModelForSelectedRows();
+        var batchRename = new Button
+        {
+            Text = "批量改名",
+            AutoSize = false,
+            Size = new Size(StandardControlWidth, StandardControlHeight),
+            Margin = Padding.Empty
+        };
+        batchRename.Click += (_, _) => OpenBatchRename();
         var readCurrent = CreateReadCurrentPropertyCardButton();
         var sync = new Button
         {
@@ -844,12 +858,13 @@ internal sealed class BatchPropertyEditDialog : Form
         toolbar.Controls.Add(fillValueHost, 2, 0);
         toolbar.Controls.Add(fill, 3, 0);
         toolbar.Controls.Add(autoFillNameOrModel, 4, 0);
-        toolbar.Controls.Add(readCurrent, 5, 0);
+        toolbar.Controls.Add(batchRename, 5, 0);
+        toolbar.Controls.Add(readCurrent, 6, 0);
         summary.Dock = DockStyle.Fill;
         summary.TextAlign = ContentAlignment.MiddleLeft;
-        toolbar.Controls.Add(sync, 6, 0);
+        toolbar.Controls.Add(sync, 7, 0);
         plmSyncStatus.Dock = DockStyle.Fill;
-        toolbar.Controls.Add(plmSyncStatus, 7, 0);
+        toolbar.Controls.Add(plmSyncStatus, 8, 0);
 
         page.Controls.Add(explanation, 0, 0);
         page.Controls.Add(toolbar, 0, 1);
@@ -1865,15 +1880,17 @@ internal sealed class BatchPropertyEditDialog : Form
                 continue;
             }
 
-            var targetProperty = ContainsChinese(drawingName) ? "物料名称" : "型号";
-            if (!item.IsPropertyApplicable(targetProperty)
-                || !string.IsNullOrWhiteSpace(item.PropertyValue(targetProperty)))
+            foreach (var targetProperty in BatchPropertyNameModelAutoFillRule.TargetPropertyNames(drawingName))
             {
-                continue;
-            }
+                if (!item.IsPropertyApplicable(targetProperty)
+                    || !string.IsNullOrWhiteSpace(item.PropertyValue(targetProperty)))
+                {
+                    continue;
+                }
 
-            item.SetPropertyValue(targetProperty, drawingName);
-            changedCount++;
+                item.SetPropertyValue(targetProperty, drawingName);
+                changedCount++;
+            }
         }
 
         if (changedCount == 0)
@@ -1886,12 +1903,32 @@ internal sealed class BatchPropertyEditDialog : Form
         UpdateSummary();
     }
 
-    private static bool ContainsChinese(string value)
+    private void OpenBatchRename()
     {
-        return (value ?? string.Empty).Any(character =>
-            character >= '\u3400' && character <= '\u4DBF'
-            || character >= '\u4E00' && character <= '\u9FFF'
-            || character >= '\uF900' && character <= '\uFAFF');
+        grid.EndEdit();
+        var selectedItems = rows.Where(candidate => candidate.Selected).ToArray();
+        if (selectedItems.Length == 0)
+        {
+            CancelValidation("请先勾选需要批量改名的图档。");
+            return;
+        }
+
+        using (var dialog = new BatchRenameDialog(
+            selectedItems,
+            rootFileName,
+            validateDocumentRenames,
+            executeDocumentRenames,
+            Handle))
+        {
+            if (dialog.ShowDialog(this) != DialogResult.OK)
+            {
+                return;
+            }
+        }
+
+        rows.ResetBindings();
+        grid.Refresh();
+        UpdateSummary();
     }
 
     private void RefreshFillValueEditor()

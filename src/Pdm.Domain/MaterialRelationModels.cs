@@ -19,6 +19,12 @@ public enum MaterialRelationQuantityMode
     Fixed
 }
 
+public enum MaterialRelationReviewDecision
+{
+    Selected,
+    NoAccessory
+}
+
 public sealed record MaterialRelationOption(
     Guid Id,
     Guid MaterialId,
@@ -75,5 +81,16 @@ public sealed record MaterialRelationSelection(
     Guid GroupId,
     Guid OptionId,
     decimal ExpectedQuantity,
+    string UpdatedBy,
+    DateTimeOffset UpdatedAt);
+
+public sealed record MaterialRelationReview(
+    Guid ProjectId,
+    Guid MainBomItemId,
+    Guid RevisionId,
+    Guid GroupId,
+    MaterialRelationReviewDecision Decision,
+    decimal MainQuantity,
+    string? Reason,
     string UpdatedBy,
     DateTimeOffset UpdatedAt);

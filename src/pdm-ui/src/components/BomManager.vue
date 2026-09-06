@@ -165,7 +165,10 @@ const relationCompleteness = ref<MaterialRelationCompleteness | null>(null)
 const relationDialogOpen = ref(false)
 const relationLoading = ref(false)
 const relationApplying = ref(false)
+const relationReminderPendingAfterSave = ref(false)
 const relationChoices = ref<Record<string, string[]>>({})
+const relationNoAccessoryConfirmed = ref<Record<string, boolean>>({})
+const relationNoAccessoryReasons = ref<Record<string, string>>({})
 const resolvedMaterialSignatures = new Map<string, string>()
 const autoLinkedDraftRows = new Set<string>()
 const unconfirmedDuplicateDraftRows = new Set<string>()
@@ -1470,6 +1473,7 @@ function saveCurrentBom() {
       return [{ ...item, complete: dataStatusIssues(item).length === 0 }]
     })
   }).map((item, index) => ({ ...item, sequence: index + 1 }))
+  relationReminderPendingAfterSave.value = true
   emit('save', kind.value, expanded)
 }
 
@@ -1629,6 +1633,18 @@ function relationChoice(mainBomItemId: string, groupId: string) {
   return relationChoices.value[relationChoiceKey(mainBomItemId, groupId)] ?? []
 }
 
+function relationNoAccessory(mainBomItemId: string, groupId: string) {
+  return relationNoAccessoryConfirmed.value[relationChoiceKey(mainBomItemId, groupId)] === true
+}
+
+function relationNoAccessoryReason(mainBomItemId: string, groupId: string) {
+  return relationNoAccessoryReasons.value[relationChoiceKey(mainBomItemId, groupId)] ?? ''
+}
+
+function updateRelationNoAccessoryReason(mainBomItemId: string, groupId: string, value: string) {
+  relationNoAccessoryReasons.value = { ...relationNoAccessoryReasons.value, [relationChoiceKey(mainBomItemId, groupId)]: value }
+}
+
 function isSingleRelationGroup(group: MaterialRelationGroupCheck) {
   return group.selectionMode === 'Single' || (group.selectionMode as unknown) === 0
 }
@@ -1638,7 +1654,19 @@ function isPerMainRelationQuantity(value: unknown) {
 }
 
 function updateRelationChoice(mainBomItemId: string, groupId: string, value: string | string[]) {
-  relationChoices.value = { ...relationChoices.value, [relationChoiceKey(mainBomItemId, groupId)]: Array.isArray(value) ? value : value ? [value] : [] }
+  const key = relationChoiceKey(mainBomItemId, groupId)
+  relationChoices.value = { ...relationChoices.value, [key]: Array.isArray(value) ? value : value ? [value] : [] }
+  relationNoAccessoryConfirmed.value = { ...relationNoAccessoryConfirmed.value, [key]: false }
+}
+
+function confirmRelationNoAccessory(mainBomItemId: string, groupId: string) {
+  const key = relationChoiceKey(mainBomItemId, groupId)
+  relationChoices.value = { ...relationChoices.value, [key]: [] }
+  relationNoAccessoryConfirmed.value = { ...relationNoAccessoryConfirmed.value, [key]: true }
+}
+
+function reopenRelationGroup(mainBomItemId: string, groupId: string) {
+  relationNoAccessoryConfirmed.value = { ...relationNoAccessoryConfirmed.value, [relationChoiceKey(mainBomItemId, groupId)]: false }
 }
 
 function updateRelationMultiple(mainBomItemId: string, groupId: string, value: unknown) {
@@ -1651,12 +1679,17 @@ function updateRelationSingle(mainBomItemId: string, groupId: string, value: unk
 
 function initializeRelationChoices(result: MaterialRelationCompleteness) {
   const next: Record<string, string[]> = {}
+  const nextNoAccessory: Record<string, boolean> = {}
+  const nextReasons: Record<string, string> = {}
   for (const main of result.mainMaterials) for (const group of main.groups) {
-    let ids = [...group.selectedOptionIds]
-    if (!ids.length && group.options.length === 1 && ((group.isRequired && group.status === '可自动带出') || group.options[0].isDefault)) ids = [group.options[0].id]
-    next[relationChoiceKey(main.mainBomItemId, group.groupId)] = ids
+    const key = relationChoiceKey(main.mainBomItemId, group.groupId)
+    next[key] = [...group.selectedOptionIds]
+    nextNoAccessory[key] = group.reviewDecision === 'NoAccessory' || group.reviewDecision === 1
+    nextReasons[key] = group.reviewReason ?? ''
   }
   relationChoices.value = next
+  relationNoAccessoryConfirmed.value = nextNoAccessory
+  relationNoAccessoryReasons.value = nextReasons
 }
 
 async function loadRelationCompleteness(showError = true) {
@@ -1670,6 +1703,12 @@ async function loadRelationCompleteness(showError = true) {
     relationCompleteness.value = null
     if (showError) ElMessage.error(error instanceof Error ? error.message : '配套完整性加载失败')
   } finally { relationLoading.value = false }
+}
+
+async function remindRelationsAfterBomSave() {
+  await loadRelationCompleteness(false)
+  if (relationCompleteness.value?.incompleteGroupCount)
+    ElMessage.warning(`BOM已保存；另有 ${relationCompleteness.value.incompleteGroupCount} 个关联物料组待核对，不影响后续保存或发布`)
 }
 
 async function openMaterialRelations() {
@@ -1686,21 +1725,72 @@ function relationQuantityText(group: MaterialRelationGroupCheck, optionId: strin
   return `${perMainQuantity ? `${option.quantityPerSet} × ${mainQuantity}` : '固定'} = ${quantity}`
 }
 
+function relationGroupStatus(mainBomItemId: string, group: MaterialRelationGroupCheck) {
+  if (relationChoice(mainBomItemId, group.groupId).length) return '已选配'
+  if (relationNoAccessory(mainBomItemId, group.groupId)) return '已确认无需'
+  return group.isRequired ? '待核对' : '可选未选择'
+}
+
+function relationGroupReviewed(mainBomItemId: string, group: MaterialRelationGroupCheck) {
+  return relationGroupStatus(mainBomItemId, group) !== '待核对'
+}
+
+function relationMainReviewed(main: MaterialRelationCompleteness['mainMaterials'][number]) {
+  return main.groups.every(group => relationGroupReviewed(main.mainBomItemId, group))
+}
+
 async function applySelectedRelations() {
   if (!props.projectId || !props.token || !relationCompleteness.value?.mainMaterials.length) return
   relationApplying.value = true
   try {
     const payload = relationCompleteness.value.mainMaterials.map(main => ({
       mainBomItemId: main.mainBomItemId,
-      choices: main.groups.map(group => ({ groupId: group.groupId, optionIds: relationChoice(main.mainBomItemId, group.groupId) })),
+      choices: main.groups.map(group => ({
+        groupId: group.groupId,
+        optionIds: relationChoice(main.mainBomItemId, group.groupId),
+        confirmNoAccessory: relationNoAccessory(main.mainBomItemId, group.groupId),
+        noAccessoryReason: relationNoAccessoryReason(main.mainBomItemId, group.groupId).trim() || null,
+      })),
     }))
     relationCompleteness.value = await applyMaterialRelations(props.projectId, payload, props.token)
     initializeRelationChoices(relationCompleteness.value)
     emit('materialRelationsApplied')
     emit('materialCodeChanged')
-    ElMessage.success(relationCompleteness.value.isComplete ? '配套物料已加入BOM，完整性校验通过' : '配套物料已更新，请继续处理未完整项')
+    ElMessage.success(relationCompleteness.value.isComplete ? '关联物料核对结果已保存' : '核对结果已保存，仍有待核对项；不会影响BOM保存或发布')
   } catch (error) { ElMessage.error(error instanceof Error ? error.message : '配套物料应用失败') }
   finally { relationApplying.value = false }
+}
+
+async function submitReleaseWithRelationReminder(releasePackageId: string) {
+  let result: MaterialRelationCompleteness | null = null
+  if (props.projectId && props.token) {
+    try {
+      result = await getMaterialRelationCompleteness(props.projectId, props.token)
+      relationCompleteness.value = result
+      initializeRelationChoices(result)
+    } catch (error) {
+      try {
+        await ElMessageBox.confirm(
+          `关联物料提醒暂时无法加载：${error instanceof Error ? error.message : '未知错误'}。是否仍然提交审批？`,
+          '关联物料提醒',
+          { type: 'warning', confirmButtonText: '仍然提交审批', cancelButtonText: '取消' },
+        )
+      } catch { return }
+    }
+  }
+  if (result && result.incompleteGroupCount > 0) {
+    try {
+      await ElMessageBox.confirm(
+        `还有 ${result.mainMaterials.filter(main => !main.isComplete).length} 条主物料、${result.incompleteGroupCount} 个关联物料组待核对。提交不会自动加入任何关联物料，是否仍然继续？`,
+        '关联物料待核对提醒',
+        { type: 'warning', confirmButtonText: '仍然提交审批', cancelButtonText: '返回核对', closeOnClickModal: false },
+      )
+    } catch {
+      relationDialogOpen.value = true
+      return
+    }
+  }
+  emit('releaseSubmit', releasePackageId)
 }
 
 function clearFilters() {
@@ -1868,6 +1958,10 @@ watch([() => props.sourceData, () => props.standard, () => props.nonStandard, ()
   void resolveMissingStandardMaterialCodes()
 }, { deep: true })
 watch(() => props.pending, (pending, previous) => {
+  if (previous && !pending && relationReminderPendingAfterSave.value) {
+    relationReminderPendingAfterSave.value = false
+    if (!props.operationError) void remindRelationsAfterBomSave()
+  }
   if (previous && !pending) discardDraftsOnNextSourceRefresh = false
   if (previous && !pending && saveRequested && props.operationError) saveRequested = false
   if (previous && !pending && props.operationError) restoreSourceRefreshIds = new Set()
@@ -1894,9 +1988,13 @@ watch([() => props.projectId, () => props.projects.length], ([projectId, project
     kind.value = 'Overview'
     relationCompleteness.value = null
     relationChoices.value = {}
+    relationNoAccessoryConfirmed.value = {}
+    relationNoAccessoryReasons.value = {}
+    relationReminderPendingAfterSave.value = false
     relationDialogOpen.value = false
   }
 }, { immediate: true })
+onMounted(() => { if (props.projectId && props.token) void loadRelationCompleteness(false) })
 watch(() => props.releasePackages, (packages, previousPackages) => {
   if (!releaseDrawerOpen.value) return
   if (selectedReleasePackageId.value && packages.some(item => item.id === selectedReleasePackageId.value)) return
@@ -2682,7 +2780,7 @@ async function submitBatchUpdate() {
         <template v-else-if="canEditCurrentView">
           <button type="button" class="pdm-secondary-action" :disabled="pending || selectedIds.length === 0 || hasSelectedDraftRows" :title="hasSelectedDraftRows ? '新增行请直接编辑表格字段' : ''" @click="openBatchEditor">{{ selectedIds.length > 1 ? '批量编辑' : '编辑' }}</button>
           <button v-if="!isSourceView" type="button" class="pdm-primary-action pdm-bom-material-code-toolbar-action" :disabled="pending || selectedIds.length > 1 || !token || !projectId" @click="openMaterialReference">引用物料</button>
-          <button v-if="!isSourceView" type="button" class="pdm-secondary-action pdm-bom-relation-action" :class="{ 'is-warning': relationCompleteness && !relationCompleteness.isComplete, 'is-complete': relationCompleteness?.isComplete }" :disabled="pending || !token || !projectId" @click="openMaterialRelations">配套选型<span v-if="relationCompleteness">（{{ relationCompleteness.isComplete ? '完整' : `${relationCompleteness.incompleteGroupCount}项待处理` }}）</span></button>
+          <button v-if="!isSourceView" type="button" class="pdm-secondary-action pdm-bom-relation-action" :class="{ 'is-warning': relationCompleteness && !relationCompleteness.isComplete, 'is-complete': relationCompleteness?.isComplete }" :disabled="pending || !token || !projectId" @click="openMaterialRelations">关联物料核对<span v-if="relationCompleteness">（{{ relationCompleteness.isComplete ? '已核对' : `${relationCompleteness.incompleteGroupCount}项待核对` }}）</span></button>
           <button v-if="kind === 'Standard'" type="button" class="pdm-secondary-action pdm-bom-material-code-toolbar-action" :disabled="pending || materialCodeResolving || !token || !projectId" @click="resolveMissingStandardMaterialCodes(true)">核对料号</button>
           <button v-if="kind === 'Standard'" type="button" class="pdm-secondary-action pdm-bom-material-code-toolbar-action" :disabled="pending || selectedStandardItemsWithoutCode.length === 0" @click="applyForMaterialCodes([...new Set(selectedStandardItemsWithoutCode.flatMap(operationItemIds))])">申请料号</button>
           <button v-if="hasRetainableSelection" type="button" class="pdm-secondary-action" :disabled="pending || !canRetainSelected" :title="!canRetainSelected ? '仅支持同时保留人工待确认或待确认删除的物料' : ''" @click="retainSelected">{{ selectedIds.length > 1 ? '批量确认保留' : '确认保留' }}</button>
@@ -2868,33 +2966,39 @@ async function submitBatchUpdate() {
       <div v-if="relationDialogOpen" class="pdm-dialog-backdrop pdm-material-relation-backdrop" @click.self="relationDialogOpen = false">
         <section class="pdm-material-relation-dialog" role="dialog" aria-modal="true" aria-labelledby="pdm-material-relation-title">
           <header>
-            <div><h3 id="pdm-material-relation-title">BOM 配套选型与完整性</h3><p>每一条主物料分别核对并生成自己的配件行；即使多个主物料选择同一配件，也不会合并或重复计数。</p></div>
+            <div><h3 id="pdm-material-relation-title">BOM 关联物料核对</h3><p>系统只提醒、不自动加入，也不会阻止保存或发布。每条主物料分别核对；相同配件仍按主物料行独立关联和计数。</p></div>
             <button type="button" class="pdm-icon-button" aria-label="关闭配套选型" @click="relationDialogOpen = false">×</button>
           </header>
           <div class="pdm-material-relation-body">
             <div v-if="relationLoading" class="pdm-empty-info">正在核对关联配置与 BOM…</div>
             <div v-else-if="!relationCompleteness?.mainMaterials.length" class="pdm-material-relation-empty"><strong>当前 BOM 没有需要选配的主物料</strong><span>标准化部门在料品明细中发布关联配置后，对应主物料会自动出现在这里。</span></div>
             <template v-else>
-            <article v-for="main in relationCompleteness?.mainMaterials ?? []" :key="main.mainBomItemId" class="pdm-material-relation-main" :class="{ 'is-complete': main.isComplete }">
-              <header><div><strong>{{ main.mainMaterialCode }} · {{ main.mainMaterialName }}</strong><span>主物料数量 {{ main.mainQuantity }} · 模板 V{{ main.revisionVersion }}</span></div><em>{{ main.isComplete ? '配套完整' : '待处理' }}</em></header>
-              <section v-for="group in main.groups" :key="group.groupId" class="pdm-material-relation-group" :class="{ 'is-incomplete': !group.isComplete }">
-                <div class="pdm-material-relation-group-title"><div><strong>{{ group.groupName }}</strong><span>{{ group.isRequired ? '必选' : '可选' }} · {{ isSingleRelationGroup(group) ? '只能选 1 项' : `可同时选多项（最多 ${group.maxSelection ?? group.options.length} 项）` }}</span></div><em>{{ group.status }}</em></div>
+            <article v-for="main in relationCompleteness?.mainMaterials ?? []" :key="main.mainBomItemId" class="pdm-material-relation-main" :class="{ 'is-complete': relationMainReviewed(main) }">
+              <header><div><strong>{{ main.mainMaterialCode }} · {{ main.mainMaterialName }}</strong><span>主物料数量 {{ main.mainQuantity }} · 关联配置 V{{ main.revisionVersion }}</span></div><em>{{ relationMainReviewed(main) ? '已核对' : '待核对' }}</em></header>
+              <section v-for="group in main.groups" :key="group.groupId" class="pdm-material-relation-group" :class="{ 'is-incomplete': !relationGroupReviewed(main.mainBomItemId, group) }">
+                <div class="pdm-material-relation-group-title"><div><strong>{{ group.groupName }}</strong><span>{{ group.isRequired ? '需核对' : '可选参考' }} · {{ isSingleRelationGroup(group) ? '只能选 1 项' : `可同时选多项（最多 ${group.maxSelection ?? group.options.length} 项）` }}</span></div><em>{{ relationGroupStatus(main.mainBomItemId, group) }}</em></div>
                 <el-radio-group v-if="isSingleRelationGroup(group)" :model-value="relationChoice(main.mainBomItemId, group.groupId)[0] ?? ''" @update:model-value="updateRelationSingle(main.mainBomItemId, group.groupId, $event)">
                   <el-radio v-for="option in group.options" :key="option.id" :value="option.id">
-                    <span class="pdm-material-relation-option"><strong>{{ option.materialCode }}</strong><span>{{ option.materialName }}</span><small>{{ relationQuantityText(group, option.id, main.mainQuantity) }}</small></span>
+                    <span class="pdm-material-relation-option"><strong>{{ option.materialCode }}<i v-if="group.options.length === 1 || option.isDefault">{{ group.options.length === 1 ? '唯一推荐' : '优先推荐' }}</i></strong><span>{{ option.materialName }}</span><small>{{ relationQuantityText(group, option.id, main.mainQuantity) }}</small></span>
                   </el-radio>
                 </el-radio-group>
                 <el-checkbox-group v-else :model-value="relationChoice(main.mainBomItemId, group.groupId)" @update:model-value="updateRelationMultiple(main.mainBomItemId, group.groupId, $event)">
                   <el-checkbox v-for="option in group.options" :key="option.id" :value="option.id">
-                    <span class="pdm-material-relation-option"><strong>{{ option.materialCode }}</strong><span>{{ option.materialName }}</span><small>{{ relationQuantityText(group, option.id, main.mainQuantity) }}</small></span>
+                    <span class="pdm-material-relation-option"><strong>{{ option.materialCode }}<i v-if="group.options.length === 1 || option.isDefault">{{ group.options.length === 1 ? '唯一推荐' : '优先推荐' }}</i></strong><span>{{ option.materialName }}</span><small>{{ relationQuantityText(group, option.id, main.mainQuantity) }}</small></span>
                   </el-checkbox>
                 </el-checkbox-group>
-                <button v-if="!group.isRequired && relationChoice(main.mainBomItemId, group.groupId).length" type="button" class="pdm-link-action" @click="updateRelationChoice(main.mainBomItemId, group.groupId, [])">不选择此组</button>
+                <div v-if="relationNoAccessory(main.mainBomItemId, group.groupId)" class="pdm-material-relation-no-accessory">
+                  <span>已确认本次无需配套</span>
+                  <input :value="relationNoAccessoryReason(main.mainBomItemId, group.groupId)" maxlength="500" placeholder="补充原因（选填）" :aria-label="`${main.mainMaterialCode} ${group.groupName} 无需配套原因`" @input="updateRelationNoAccessoryReason(main.mainBomItemId, group.groupId, ($event.target as HTMLInputElement).value)">
+                  <button type="button" class="pdm-link-action" @click="reopenRelationGroup(main.mainBomItemId, group.groupId)">重新核对</button>
+                </div>
+                <button v-else-if="group.isRequired" type="button" class="pdm-secondary-action pdm-material-relation-none-button" @click="confirmRelationNoAccessory(main.mainBomItemId, group.groupId)">确认本次无需配套</button>
+                <button v-else-if="relationChoice(main.mainBomItemId, group.groupId).length" type="button" class="pdm-link-action" @click="updateRelationChoice(main.mainBomItemId, group.groupId, [])">清除选择</button>
               </section>
             </article>
             </template>
           </div>
-          <footer><span v-if="relationCompleteness">共 {{ relationCompleteness.mainMaterialCount }} 条主物料，{{ relationCompleteness.incompleteGroupCount }} 个配件组待处理</span><button type="button" class="pdm-secondary-action" @click="relationDialogOpen = false">关闭</button><button type="button" class="pdm-primary-action" :disabled="relationApplying || relationLoading || !relationCompleteness?.mainMaterials.length" @click="applySelectedRelations">{{ relationApplying ? '正在加入…' : '加入并核对全部 BOM' }}</button></footer>
+          <footer><span v-if="relationCompleteness">共 {{ relationCompleteness.mainMaterialCount }} 条主物料；未核对项只提醒，不影响BOM保存和发布</span><button type="button" class="pdm-secondary-action" @click="relationDialogOpen = false">关闭</button><button type="button" class="pdm-primary-action" :disabled="relationApplying || relationLoading || !relationCompleteness?.mainMaterials.length" @click="applySelectedRelations">{{ relationApplying ? '正在保存…' : '保存核对结果' }}</button></footer>
         </section>
       </div>
     </Teleport>
@@ -3095,7 +3199,7 @@ async function submitBatchUpdate() {
           @update-draft="(releasePackageId, input) => emit('releaseUpdateDraft', releasePackageId, input)"
           @delete-draft="releasePackageId => emit('releaseDeleteDraft', releasePackageId)"
           @upload="(releasePackageId, file) => emit('releaseUpload', releasePackageId, file)"
-          @submit="releasePackageId => emit('releaseSubmit', releasePackageId)"
+          @submit="submitReleaseWithRelationReminder"
           @withdraw="releasePackageId => emit('releaseWithdraw', releasePackageId)"
           @retry-u9="releasePackageId => emit('releaseRetryU9', releasePackageId)"
           @decide="(taskId, decision, comment) => emit('releaseDecide', taskId, decision, comment)"
@@ -3140,5 +3244,5 @@ async function submitBatchUpdate() {
 .pdm-material-code-action{height:22px;padding:0 7px;border:1px solid var(--shell-accent-border);border-radius:5px;background:var(--pdm-blue-soft);color:var(--pdm-blue);font-size:11px;line-height:20px;white-space:nowrap;cursor:pointer}.pdm-material-code-action.is-review{border-color:#f59e0b;background:#fffbeb;color:#b45309}.pdm-material-code-state{color:#64748b;font-size:11px;white-space:nowrap}.pdm-material-code-state.is-pending{color:#b45309}
 .pdm-duplicate-material-dialog .pdm-material-reference-table table{width:100%;min-width:0;table-layout:fixed}.pdm-duplicate-material-dialog .pdm-material-reference-table :is(th,td){min-width:0;overflow:hidden;text-overflow:ellipsis}.pdm-duplicate-material-dialog .pdm-material-reference-table :is(th,td):nth-child(1){width:140px}.pdm-duplicate-material-dialog .pdm-material-reference-table :is(th,td):nth-child(2){width:160px}.pdm-duplicate-material-dialog .pdm-material-reference-table :is(th,td):nth-child(3){width:90px}.pdm-duplicate-material-dialog .pdm-material-reference-table :is(th,td):nth-child(4){width:150px}.pdm-duplicate-material-dialog .pdm-material-reference-table :is(th,td):nth-child(5){width:120px}.pdm-duplicate-material-dialog .pdm-material-reference-table :is(th,td):last-child{width:110px;min-width:110px}
 .pdm-summary-quantity-backdrop{align-items:center;justify-content:center!important;padding:16px}.pdm-summary-quantity-dialog{width:min(900px,calc(100vw - 32px));height:auto;max-height:calc(100vh - 32px);border-radius:9px;animation:none}.pdm-summary-quantity-material{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;margin:0;padding:12px 18px;border-bottom:1px solid var(--pdm-border);background:#f8fafc}.pdm-summary-quantity-material>div{min-width:0}.pdm-summary-quantity-material dt{color:var(--pdm-muted);font-size:10px}.pdm-summary-quantity-material dd{margin:4px 0 0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--pdm-text);font-weight:700}.pdm-summary-quantity-dialog .pdm-table-scroll{max-height:min(460px,calc(100vh - 300px))}.pdm-summary-quantity-dialog table{width:100%;table-layout:fixed}.pdm-summary-quantity-dialog th:first-child{width:38%}.pdm-summary-quantity-dialog th:nth-child(2){width:24%}.pdm-summary-quantity-dialog th:nth-child(3){width:14%}.pdm-summary-quantity-dialog th:nth-child(4){width:24%}.pdm-summary-quantity-dialog td{overflow:hidden;text-overflow:ellipsis}.pdm-summary-quantity-input{display:flex;min-width:0;align-items:center;gap:7px}.pdm-summary-quantity-input input{box-sizing:border-box;width:100px;height:30px;padding:4px 8px;border:1px solid var(--pdm-border);border-radius:5px;color:var(--pdm-text);text-align:right}.pdm-summary-quantity-input input:focus{border-color:var(--pdm-theme-accent);outline:2px solid var(--pdm-theme-accent-soft)}.pdm-summary-quantity-input small{color:var(--pdm-danger);font-weight:700;white-space:nowrap}.pdm-summary-quantity-dialog tr.is-summary-quantity-changed td{background:#eff6ff}.pdm-summary-quantity-dialog tr.is-summary-quantity-removed td{background:#fef2f2}.pdm-summary-quantity-dialog>footer{align-items:flex-end;flex-wrap:wrap}.pdm-summary-quantity-status{display:flex;min-width:360px;flex:1;align-items:center;gap:8px;flex-wrap:wrap}.pdm-summary-quantity-dialog>footer .pdm-summary-quantity-status span{min-width:auto;flex:0 0 auto;padding:5px 8px;border-radius:5px;background:#f8fafc;color:var(--pdm-muted);font-size:10px}.pdm-summary-quantity-status span.is-invalid{background:#fff7ed;color:#b45309}.pdm-summary-quantity-status strong{color:var(--pdm-text)}.pdm-summary-quantity-status em{width:100%;color:var(--pdm-danger);font-size:10px;font-style:normal;font-weight:700}@media(max-width:760px){.pdm-summary-quantity-material{grid-template-columns:repeat(2,minmax(0,1fr))}.pdm-summary-quantity-status{min-width:100%}}
-.pdm-bom-relation-action.is-warning{border-color:#f59e0b;background:#fffbeb;color:#b45309}.pdm-bom-relation-action.is-complete{border-color:#86efac;background:#f0fdf4;color:#15803d}.pdm-material-relation-backdrop{align-items:center;justify-content:center!important;padding:16px}.pdm-material-relation-dialog{display:flex;width:min(960px,calc(100vw - 32px));max-height:calc(100vh - 32px);flex-direction:column;overflow:hidden;border-radius:9px;background:#fff;box-shadow:0 20px 45px rgba(15,23,42,.22)}.pdm-material-relation-dialog>header{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;padding:16px 18px;border-bottom:1px solid var(--pdm-border)}.pdm-material-relation-dialog h3,.pdm-material-relation-dialog p{margin:0}.pdm-material-relation-dialog header p{margin-top:4px;color:var(--pdm-muted);line-height:1.5}.pdm-material-relation-body{display:grid;gap:12px;min-height:180px;overflow:auto;padding:16px 18px;background:#f8fafc}.pdm-material-relation-empty{display:grid;place-content:center;gap:7px;min-height:180px;text-align:center}.pdm-material-relation-empty span{color:var(--pdm-muted)}.pdm-material-relation-main{overflow:hidden;border:1px solid #f59e0b;border-radius:8px;background:#fff}.pdm-material-relation-main.is-complete{border-color:#86efac}.pdm-material-relation-main>header{display:flex;align-items:center;justify-content:space-between;gap:14px;padding:11px 13px;background:#fffbeb}.pdm-material-relation-main.is-complete>header{background:#f0fdf4}.pdm-material-relation-main>header div{display:grid;gap:3px}.pdm-material-relation-main>header span{color:var(--pdm-muted);font-size:11px}.pdm-material-relation-main>header em{color:#b45309;font-style:normal;font-weight:700}.pdm-material-relation-main.is-complete>header em{color:#15803d}.pdm-material-relation-group{display:grid;gap:9px;padding:12px 13px;border-top:1px solid var(--pdm-border)}.pdm-material-relation-group.is-incomplete{box-shadow:inset 3px 0 #f59e0b}.pdm-material-relation-group-title{display:flex;align-items:center;justify-content:space-between;gap:12px}.pdm-material-relation-group-title>div{display:flex;align-items:center;gap:8px}.pdm-material-relation-group-title span{color:var(--pdm-muted);font-size:11px}.pdm-material-relation-group-title em{padding:2px 7px;border-radius:999px;background:#f1f5f9;color:#475569;font-size:11px;font-style:normal}.pdm-material-relation-group :deep(.el-radio-group),.pdm-material-relation-group :deep(.el-checkbox-group){display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}.pdm-material-relation-group :deep(.el-radio),.pdm-material-relation-group :deep(.el-checkbox){box-sizing:border-box;width:100%;height:auto;min-height:52px;margin:0;padding:8px 10px;border:1px solid var(--pdm-border);border-radius:6px;background:#fff;white-space:normal}.pdm-material-relation-group :deep(.el-radio.is-checked),.pdm-material-relation-group :deep(.el-checkbox.is-checked){border-color:var(--pdm-theme-accent);background:var(--pdm-theme-accent-soft)}.pdm-material-relation-option{display:grid;min-width:0;gap:2px;line-height:1.35}.pdm-material-relation-option span,.pdm-material-relation-option small{overflow:hidden;text-overflow:ellipsis;color:var(--pdm-muted)}.pdm-material-relation-dialog>footer{display:flex;align-items:center;justify-content:flex-end;gap:8px;padding:12px 18px;border-top:1px solid var(--pdm-border)}.pdm-material-relation-dialog>footer>span{margin-right:auto;color:var(--pdm-muted)}@media(max-width:760px){.pdm-material-relation-group :deep(.el-radio-group),.pdm-material-relation-group :deep(.el-checkbox-group){grid-template-columns:1fr}}
+.pdm-bom-relation-action.is-warning{border-color:#f59e0b;background:#fffbeb;color:#b45309}.pdm-bom-relation-action.is-complete{border-color:#86efac;background:#f0fdf4;color:#15803d}.pdm-material-relation-backdrop{align-items:center;justify-content:center!important;padding:16px}.pdm-material-relation-dialog{display:flex;width:min(960px,calc(100vw - 32px));max-height:calc(100vh - 32px);flex-direction:column;overflow:hidden;border-radius:9px;background:#fff;box-shadow:0 20px 45px rgba(15,23,42,.22)}.pdm-material-relation-dialog>header{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;padding:16px 18px;border-bottom:1px solid var(--pdm-border)}.pdm-material-relation-dialog h3,.pdm-material-relation-dialog p{margin:0}.pdm-material-relation-dialog header p{margin-top:4px;color:var(--pdm-muted);line-height:1.5}.pdm-material-relation-body{display:grid;gap:12px;min-height:180px;overflow:auto;padding:16px 18px;background:#f8fafc}.pdm-material-relation-empty{display:grid;place-content:center;gap:7px;min-height:180px;text-align:center}.pdm-material-relation-empty span{color:var(--pdm-muted)}.pdm-material-relation-main{overflow:hidden;border:1px solid #f59e0b;border-radius:8px;background:#fff}.pdm-material-relation-main.is-complete{border-color:#86efac}.pdm-material-relation-main>header{display:flex;align-items:center;justify-content:space-between;gap:14px;padding:11px 13px;background:#fffbeb}.pdm-material-relation-main.is-complete>header{background:#f0fdf4}.pdm-material-relation-main>header div{display:grid;gap:3px}.pdm-material-relation-main>header span{color:var(--pdm-muted);font-size:11px}.pdm-material-relation-main>header em{color:#b45309;font-style:normal;font-weight:700}.pdm-material-relation-main.is-complete>header em{color:#15803d}.pdm-material-relation-group{display:grid;gap:9px;padding:12px 13px;border-top:1px solid var(--pdm-border)}.pdm-material-relation-group.is-incomplete{box-shadow:inset 3px 0 #f59e0b}.pdm-material-relation-group-title{display:flex;align-items:center;justify-content:space-between;gap:12px}.pdm-material-relation-group-title>div{display:flex;align-items:center;gap:8px}.pdm-material-relation-group-title span{color:var(--pdm-muted);font-size:11px}.pdm-material-relation-group-title em{padding:2px 7px;border-radius:999px;background:#f1f5f9;color:#475569;font-size:11px;font-style:normal}.pdm-material-relation-group :deep(.el-radio-group),.pdm-material-relation-group :deep(.el-checkbox-group){display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}.pdm-material-relation-group :deep(.el-radio),.pdm-material-relation-group :deep(.el-checkbox){box-sizing:border-box;width:100%;height:auto;min-height:52px;margin:0;padding:8px 10px;border:1px solid var(--pdm-border);border-radius:6px;background:#fff;white-space:normal}.pdm-material-relation-group :deep(.el-radio.is-checked),.pdm-material-relation-group :deep(.el-checkbox.is-checked){border-color:var(--pdm-theme-accent);background:var(--pdm-theme-accent-soft)}.pdm-material-relation-option{display:grid;min-width:0;gap:2px;line-height:1.35}.pdm-material-relation-option strong{display:flex;align-items:center;gap:7px}.pdm-material-relation-option i{padding:1px 6px;border-radius:999px;background:#e0f2fe;color:#0369a1;font-size:10px;font-style:normal;font-weight:600}.pdm-material-relation-option span,.pdm-material-relation-option small{overflow:hidden;text-overflow:ellipsis;color:var(--pdm-muted)}.pdm-material-relation-none-button{justify-self:start}.pdm-material-relation-no-accessory{display:grid;grid-template-columns:auto minmax(180px,1fr) auto;align-items:center;gap:9px;padding:8px 10px;border-radius:6px;background:#f1f5f9;color:#475569}.pdm-material-relation-no-accessory input{height:30px;padding:4px 8px;border:1px solid var(--pdm-border);border-radius:5px;background:#fff;color:var(--pdm-text)}.pdm-material-relation-dialog>footer{display:flex;align-items:center;justify-content:flex-end;gap:8px;padding:12px 18px;border-top:1px solid var(--pdm-border)}.pdm-material-relation-dialog>footer>span{margin-right:auto;color:var(--pdm-muted)}@media(max-width:760px){.pdm-material-relation-group :deep(.el-radio-group),.pdm-material-relation-group :deep(.el-checkbox-group){grid-template-columns:1fr}.pdm-material-relation-no-accessory{grid-template-columns:1fr}}
 </style>

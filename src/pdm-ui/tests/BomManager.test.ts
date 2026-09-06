@@ -1,8 +1,9 @@
 import { config, flushPromises, mount } from '@vue/test-utils'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import ElementPlus from 'element-plus'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import BomManager from '../src/components/BomManager.vue'
-import type { BomGenerationResult, BomItem, DocumentNode, PdmMaterial, ReleasePackageSummary } from '../src/types'
+import type { BomGenerationResult, BomItem, DocumentNode, MaterialRelationCompleteness, PdmMaterial, ReleasePackageSummary } from '../src/types'
 
 const materialApi = vi.hoisted(() => ({
   listMaterials: vi.fn(),
@@ -11,6 +12,8 @@ const materialApi = vi.hoisted(() => ({
   applyForBomMaterialCodes: vi.fn(),
   previewBomSourceReclassification: vi.fn(),
   reclassifyBomItemsFromSource: vi.fn(),
+  getMaterialRelationCompleteness: vi.fn(),
+  applyMaterialRelations: vi.fn(),
 }))
 
 vi.mock('../src/api', () => materialApi)
@@ -34,6 +37,8 @@ describe('BomManager', () => {
     materialApi.applyForBomMaterialCodes.mockReset().mockResolvedValue([])
     materialApi.previewBomSourceReclassification.mockReset()
     materialApi.reclassifyBomItemsFromSource.mockReset().mockResolvedValue([])
+    materialApi.getMaterialRelationCompleteness.mockReset().mockResolvedValue({ projectId: 'project', isComplete: true, mainMaterialCount: 0, incompleteGroupCount: 0, mainMaterials: [] })
+    materialApi.applyMaterialRelations.mockReset()
   })
 
   it('places the orange source-data view before categorized BOM tabs and treats empty BOMs automatically', async () => {
@@ -2534,5 +2539,100 @@ describe('BomManager', () => {
     expect(wrapper.find('tr.is-release-modified').exists()).toBe(false)
     expect(wrapper.get('.pdm-bom-quantity-reference').text()).toBe('44/4')
     expect(wrapper.get('.pdm-bom-quantity-reference').attributes('title')).toBe('已发布总数量：4；当前BOM总数量：4；源总数量：4')
+  })
+
+  it('keeps unique related material unselected and records an explicit no-accessory review', async () => {
+    const main: BomItem = { id: 'main-bom-1', sequence: 1, drawingNumber: 'MOTOR-1', name: '伺服电机', quantity: 2, unit: '个', revision: 'W1', complete: true, source: 'Manual' }
+    const reminder: MaterialRelationCompleteness = {
+      projectId: 'project', isComplete: false, mainMaterialCount: 1, incompleteGroupCount: 1,
+      mainMaterials: [{
+        mainBomItemId: main.id ?? '', mainMaterialCode: main.drawingNumber, mainMaterialName: main.name, mainQuantity: main.quantity,
+        templateId: 'relation', revisionId: 'revision', revisionVersion: 1, isComplete: false,
+        groups: [{
+          groupId: 'group', groupName: '伺服控制器', isRequired: true, selectionMode: 'Single', maxSelection: 1,
+          isComplete: false, status: '待核对', expectedQuantity: 0, actualQuantity: 0, selectedOptionIds: [], reviewDecision: null,
+          options: [{ id: 'option', materialId: 'controller', materialCode: 'CTRL-1', materialName: '控制器', materialKind: 'Electrical', unitCode: '001', quantityMode: 'PerMainQuantity', quantityPerSet: 1, isDefault: true, sortOrder: 1 }],
+        }],
+      }],
+    }
+    const reviewed: MaterialRelationCompleteness = {
+      ...reminder, isComplete: true, incompleteGroupCount: 0,
+      mainMaterials: [{ ...reminder.mainMaterials[0], isComplete: true, groups: [{ ...reminder.mainMaterials[0].groups[0], isComplete: true, status: '已确认无需', reviewDecision: 'NoAccessory', reviewReason: '仅补充主物料' }] }],
+    }
+    materialApi.getMaterialRelationCompleteness.mockResolvedValue(reminder)
+    materialApi.applyMaterialRelations.mockResolvedValue(reviewed)
+    const wrapper = mount(BomManager, {
+      props: { standard: [main], nonStandard: [], electrical: [], declarations: [], pending: false, editable: true, projectId: 'project', token: 'token' },
+      global: { plugins: [ElementPlus] },
+    })
+    await flushPromises()
+    await wrapper.findAll('button[role="tab"]')[1].trigger('click')
+    const reviewButton = wrapper.findAll('button').find(button => button.text().includes('关联物料核对'))!
+    expect(reviewButton.text()).toContain('1项待核对')
+    await reviewButton.trigger('click')
+    await flushPromises()
+
+    const dialog = wrapper.get('.pdm-material-relation-dialog')
+    expect(dialog.text()).toContain('系统只提醒、不自动加入')
+    expect(dialog.text()).toContain('唯一推荐')
+    expect((dialog.get('input[type="radio"]').element as HTMLInputElement).checked).toBe(false)
+    await dialog.findAll('button').find(button => button.text() === '确认本次无需配套')!.trigger('click')
+    await flushPromises()
+    const updatedDialog = wrapper.get('.pdm-material-relation-dialog')
+    await updatedDialog.get('input[aria-label="MOTOR-1 伺服控制器 无需配套原因"]').setValue('仅补充主物料')
+    await updatedDialog.findAll('button').find(button => button.text() === '保存核对结果')!.trigger('click')
+    await flushPromises()
+
+    expect(materialApi.applyMaterialRelations).toHaveBeenCalledWith('project', [{
+      mainBomItemId: 'main-bom-1', choices: [{ groupId: 'group', optionIds: [], confirmNoAccessory: true, noAccessoryReason: '仅补充主物料' }],
+    }], 'token')
+    expect(wrapper.text()).toContain('关联物料核对（已核对）')
+  })
+
+  it('refreshes related-material reminders after a BOM save completes', async () => {
+    const warning = vi.spyOn(ElMessage, 'warning').mockImplementation(() => undefined as never)
+    materialApi.getMaterialRelationCompleteness
+      .mockResolvedValueOnce({ projectId: 'project', isComplete: true, mainMaterialCount: 0, incompleteGroupCount: 0, mainMaterials: [] })
+      .mockResolvedValue({ projectId: 'project', isComplete: false, mainMaterialCount: 1, incompleteGroupCount: 2, mainMaterials: [] })
+    const wrapper = mount(BomManager, {
+      props: {
+        standard: [{ id: 'main', sequence: 1, drawingNumber: 'MOTOR-1', name: '电机', quantity: 1, unit: '个', revision: 'W1', complete: true }],
+        nonStandard: [], electrical: [], declarations: [], pending: false, editable: true, projectId: 'project', token: 'token',
+      },
+    })
+    await flushPromises()
+    await wrapper.findAll('button[role="tab"]')[1].trigger('click')
+    await wrapper.get('.pdm-bom-save-action').trigger('click')
+    await wrapper.setProps({ pending: true })
+    await wrapper.setProps({ pending: false })
+    await flushPromises()
+
+    expect(materialApi.getMaterialRelationCompleteness).toHaveBeenCalledTimes(2)
+    expect(warning).toHaveBeenCalledWith('BOM已保存；另有 2 个关联物料组待核对，不影响后续保存或发布')
+  })
+
+  it('warns about pending related materials but allows release submission after confirmation', async () => {
+    const confirm = vi.spyOn(ElMessageBox, 'confirm').mockResolvedValue('confirm' as never)
+    const releasePackage: ReleasePackageSummary = {
+      id: 'release-draft', number: 'RP-001', state: '草稿', scope: 'StandardFormal', workflowVersion: 1,
+      selectedBomItemIds: [], createsManufacturingBaseline: true, locksDocuments: true,
+      standardBomSnapshot: [], nonStandardBomSnapshot: [], electricalBomSnapshot: [], steps: [],
+    }
+    materialApi.getMaterialRelationCompleteness.mockResolvedValue({
+      projectId: 'project', isComplete: false, mainMaterialCount: 1, incompleteGroupCount: 1,
+      mainMaterials: [{ mainBomItemId: 'main', mainMaterialCode: 'MOTOR-1', mainMaterialName: '电机', mainQuantity: 1, templateId: 'relation', revisionId: 'revision', revisionVersion: 1, isComplete: false, groups: [] }],
+    })
+    const wrapper = mount(BomManager, {
+      props: {
+        standard: [], nonStandard: [], electrical: [], declarations: [], pending: false, editable: true,
+        projectId: 'project', token: 'token', canManageRelease: true, releasePackages: [releasePackage], requestedReleasePackageId: 'release-draft',
+      },
+    })
+    await flushPromises()
+    await wrapper.findAll('button').find(button => button.text() === '提交审批')!.trigger('click')
+    await flushPromises()
+
+    expect(confirm).toHaveBeenCalledWith(expect.stringContaining('1 个关联物料组待核对'), '关联物料待核对提醒', expect.objectContaining({ confirmButtonText: '仍然提交审批' }))
+    expect(wrapper.emitted('releaseSubmit')).toEqual([['release-draft']])
   })
 })

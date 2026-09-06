@@ -345,6 +345,7 @@ internal sealed class PdmTaskPaneControl : UserControl
                 : string.Concat(loginButton.Text, "（", username, "）");
             actionToolTip.SetToolTip(loginButton, loginButton.AccessibleDescription);
             projectDocuments.SetAuthenticatedUser(authenticatedUsername);
+            RefreshSelectionIndependentStructureActions();
             if (rootNode == null)
             {
                 UpdateSelected(SelectedNode);
@@ -400,6 +401,7 @@ internal sealed class PdmTaskPaneControl : UserControl
             activeHealthFilter = StructureHealthFilter.None;
             selectFirstHealthMatchAfterBuild = false;
             checkedCheckInPaths.Clear();
+            RefreshSelectionIndependentStructureActions();
             RebuildTree(searchBox.Text);
         });
     }
@@ -2568,6 +2570,18 @@ internal sealed class PdmTaskPaneControl : UserControl
             actionToolTip.SetToolTip(updateAllLatestButton, operationText);
         }
         UpdateTreeHealth();
+    }
+
+    private void RefreshSelectionIndependentStructureActions()
+    {
+        var enabled = !string.IsNullOrWhiteSpace(authenticatedUsername)
+            && rootNode != null
+            && !rootNode.IsReadOnlyPreview
+            && !workspaceOperationActive;
+        batchOperationButton.Enabled = enabled;
+        propertyEditButton.Enabled = enabled;
+        ApplyActionButtonAppearance(batchOperationButton, BatchOperationAvailableColor);
+        ApplyActionButtonAppearance(propertyEditButton, SecondaryActionAvailableColor);
     }
 
     private string ProvenanceProjectText(CadTreeNode node)

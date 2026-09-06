@@ -7,7 +7,7 @@ namespace Pdm.Domain.Tests;
 public sealed class MaterialRelationServiceTests
 {
     [Fact]
-    public async Task UniqueAccessory_IsAutoAddedPerMainRowWithoutMergingQuantities()
+    public async Task UniqueAccessory_RequiresExplicitSelectionAndKeepsEachMainRowIndependent()
     {
         var clock = TimeProvider.System;
         var pdm = new InMemoryPdmRepository(clock);
@@ -30,12 +30,23 @@ public sealed class MaterialRelationServiceTests
 
         var incomplete = await service.GetCompletenessAsync(project.Id, "admin", UserRole.Administrator, default);
         Assert.False(incomplete.IsComplete);
-        await Assert.ThrowsAsync<PdmRuleException>(() => service.EnsureCompleteAsync(project.Id, default));
+        Assert.All(incomplete.MainMaterials.SelectMany(item => item.Groups), group => Assert.Equal("待核对", group.Status));
+        await service.EnsureCompleteAsync(project.Id, default);
 
-        var result = await service.ApplyAsync(project.Id,
+        var unchanged = await service.ApplyAsync(project.Id,
         [
             new ApplyMaterialRelationsCommand(mainA.Id, []),
             new ApplyMaterialRelationsCommand(mainB.Id, [])
+        ], "admin", UserRole.Administrator, default);
+        Assert.False(unchanged.IsComplete);
+        Assert.DoesNotContain(await pdm.GetBomAsync(project.Id, BomKind.Electrical, default), item => item.Source == "MaterialRelation");
+
+        var groupA = publishedA.PublishedRevision!.Groups.Single();
+        var groupB = publishedB.PublishedRevision!.Groups.Single();
+        var result = await service.ApplyAsync(project.Id,
+        [
+            new ApplyMaterialRelationsCommand(mainA.Id, [new MaterialRelationChoice(groupA.Id, [groupA.Options.Single().Id])]),
+            new ApplyMaterialRelationsCommand(mainB.Id, [new MaterialRelationChoice(groupB.Id, [groupB.Options.Single().Id])])
         ], "admin", UserRole.Administrator, default);
 
         Assert.True(result.IsComplete);
@@ -51,6 +62,42 @@ public sealed class MaterialRelationServiceTests
         await service.EnsureCompleteAsync(project.Id, default);
     }
 
+    [Fact]
+    public async Task NoAccessoryConfirmation_IsRecordedAndQuantityChangeReturnsToPending()
+    {
+        var clock = TimeProvider.System;
+        var pdm = new InMemoryPdmRepository(clock);
+        var materials = new InMemoryMaterialRepository(clock);
+        var relations = new InMemoryMaterialRelationRepository();
+        var service = new MaterialRelationService(relations, materials, pdm, clock);
+        var project = await pdm.CreateProjectAsync(new(
+            $"REL-{Guid.NewGuid():N}", "无需配套测试", "admin", @"D:\PDM\RelationTest", @"D:\PDM\RelationRelease"), "admin", default);
+        var motor = await AddApprovedMaterialAsync(materials, MaterialKind.Standard, "0102", "MOTOR-A", "电机A");
+        var controller = await AddApprovedMaterialAsync(materials, MaterialKind.Electrical, "0101", "CTRL-01", "控制器");
+        var published = await SaveAndPublishAsync(service, motor, controller);
+        var main = new BomItem(Guid.NewGuid(), project.Id, BomKind.Standard, 1, motor.MaterialCode, motor.Name, 2, "001", null, null, "W1", true);
+        await pdm.ReplaceBomAsync(project.Id, BomKind.Standard, [main], default);
+        var group = published.PublishedRevision!.Groups.Single();
+
+        var reviewed = await service.ApplyAsync(project.Id,
+            [new ApplyMaterialRelationsCommand(main.Id, [new MaterialRelationChoice(group.Id, [], true, "仅补充主物料")])],
+            "admin", UserRole.Administrator, default);
+
+        var groupCheck = Assert.Single(Assert.Single(reviewed.MainMaterials).Groups);
+        Assert.True(groupCheck.IsComplete);
+        Assert.Equal("已确认无需", groupCheck.Status);
+        Assert.Equal(MaterialRelationReviewDecision.NoAccessory, groupCheck.ReviewDecision);
+        Assert.Equal("仅补充主物料", groupCheck.ReviewReason);
+        Assert.Empty(await relations.ListSelectionsAsync(project.Id, default));
+
+        await pdm.ReplaceBomAsync(project.Id, BomKind.Standard, [main with { Quantity = 3 }], default);
+        var changed = await service.GetCompletenessAsync(project.Id, "admin", UserRole.Administrator, default);
+        var changedGroup = Assert.Single(Assert.Single(changed.MainMaterials).Groups);
+        Assert.False(changedGroup.IsComplete);
+        Assert.Equal("待核对", changedGroup.Status);
+        await service.EnsureCompleteAsync(project.Id, default);
+    }
+
     private static async Task<MaterialRelationTemplate> SaveAndPublishAsync(MaterialRelationService service, PdmMaterial main, PdmMaterial accessory)
     {
         var draft = await service.SaveDraftAsync(null, new(
@@ -59,7 +106,7 @@ public sealed class MaterialRelationServiceTests
             "初版",
             null,
             [new SaveMaterialRelationGroupCommand(
-                "控制器", true, MaterialRelationSelectionMode.Single, 1, 1, true, 1,
+                "控制器", true, MaterialRelationSelectionMode.Single, 1, 1, false, 1,
                 [new SaveMaterialRelationOptionCommand(accessory.Id, MaterialRelationQuantityMode.PerMainQuantity, 1, false, 1)])]),
             "admin", UserRole.Administrator, default);
         return await service.PublishAsync(draft.Id, draft.DraftRevision!.Id, draft.DraftRevision.RowVersion, "admin", UserRole.Administrator, default);

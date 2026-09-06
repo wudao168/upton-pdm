@@ -1176,6 +1176,53 @@ public sealed class Phase1ReleaseWorkflowTests
     }
 
     [Fact]
+    public async Task ScopedStandardReview_IgnoresTransientReconciliationStateWhenSubmitting()
+    {
+        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        await ConfigureApprovalWorkflowsAsync(repository);
+        var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(), new RecordingPublisher(), TimeProvider.System);
+        var package = await workflow.CreateScopedReleasePackageAsync(
+            ProjectId, null, string.Empty, string.Empty, string.Empty, "未指定", null,
+            ReleaseScope.StandardFormal, [], "admin", UserRole.Administrator, default);
+        var items = await repository.GetBomAsync(ProjectId, BomKind.Standard, default);
+        var item = items.First();
+
+        await repository.ReplaceBomAsync(
+            ProjectId,
+            BomKind.Standard,
+            items.Select(current => current.Id == item.Id
+                ? current with { PropertyWritebackStatus = CadPropertyWritebackStatus.Pending }
+                : current).ToArray(),
+            default);
+
+        await repository.UpdateBomReconciliationAsync(
+            ProjectId, item.Id, "Matched", "后台重新核对", "system", DateTimeOffset.UtcNow, default);
+
+        var submitted = await workflow.SubmitReleasePackageAsync(package.Id, "admin", UserRole.Administrator, default);
+
+        Assert.NotEqual(ReleasePackageState.Draft, submitted.State);
+    }
+
+    [Fact]
+    public async Task ScopedStandardReview_StillBlocksRealBomChangesWhenSubmitting()
+    {
+        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        await ConfigureApprovalWorkflowsAsync(repository);
+        var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(), new RecordingPublisher(), TimeProvider.System);
+        var package = await workflow.CreateScopedReleasePackageAsync(
+            ProjectId, null, string.Empty, string.Empty, string.Empty, "未指定", null,
+            ReleaseScope.StandardFormal, [], "admin", UserRole.Administrator, default);
+        var items = await repository.GetBomAsync(ProjectId, BomKind.Standard, default);
+        var changed = items.Select((item, index) => index == 0 ? item with { Quantity = item.Quantity + 1 } : item).ToArray();
+        await repository.ReplaceBomAsync(ProjectId, BomKind.Standard, changed, default);
+
+        var conflict = await Assert.ThrowsAsync<PdmConflictException>(() =>
+            workflow.SubmitReleasePackageAsync(package.Id, "admin", UserRole.Administrator, default));
+
+        Assert.Contains("标准件BOM在发布包创建后已变化", conflict.Message);
+    }
+
+    [Fact]
     public async Task ApprovedCategoryBom_AutomaticallyCreatesCategoryAndMasterCodeApplications()
     {
         var time = TimeProvider.System;

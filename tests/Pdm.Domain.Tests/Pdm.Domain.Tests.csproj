@@ -19,4 +19,9 @@
     <ProjectReference Include="..\..\src\Pdm.Application\Pdm.Application.csproj" />
     <ProjectReference Include="..\..\src\Pdm.Infrastructure\Pdm.Infrastructure.csproj" />
   </ItemGroup>
+
+  <ItemGroup>
+    <Compile Include="..\..\src\Pdm.SolidWorks.Addin\BatchPropertyNameModelAutoFillRule.cs" Link="BatchPropertyNameModelAutoFillRule.cs" />
+    <Compile Include="..\..\src\Pdm.SolidWorks.Addin\BatchRenameRule.cs" Link="BatchRenameRule.cs" />
+  </ItemGroup>
 </Project>
