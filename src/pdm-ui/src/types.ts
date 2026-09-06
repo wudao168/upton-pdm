@@ -246,6 +246,8 @@ export interface MainProjectStaffingInput { primaryProjectManager: string; colla
 export interface DocumentNode {
   /** Unique assembly occurrence. Tree selection and rendering must use this value. */
   id: string
+  /** Stable occurrence path from the reference snapshot. */
+  instancePath?: string
   /** PLM document identity. Different occurrences of one part intentionally share this value. */
   documentId?: string
   drawingNumber: string
@@ -428,13 +430,15 @@ export interface BomItem {
   sourceConfiguration?: string
   sourceInstancePath?: string
   parentDrawingNumber?: string
-  source?: 'Auto' | 'Manual'
+  source?: 'Auto' | 'Manual' | 'MaterialRelation'
   manuallyOverridden?: boolean
   pendingRemoval?: boolean
   pendingClassification?: boolean
   manualUnmatched?: boolean
   manuallyRetained?: boolean
   manuallyExcluded?: boolean
+  releaseExcluded?: boolean
+  releaseExclusionReason?: string
   reconciliationStatus?: string
   reconciliationNote?: string
   reconciliationUpdatedBy?: string
@@ -594,12 +598,14 @@ export interface CreateReleasePackageInput {
   scope: Exclude<ReleaseScope, 'LegacyCombined'>
   selectedBomItemIds: string[]
   selectedBomItemQuantities?: Record<string, number>
+  wholeSetMultiplier: number
 }
 
 export interface UpdateReleasePackageDraftInput {
   changeReason: string
   selectedBomItemIds: string[]
   selectedBomItemQuantities?: Record<string, number>
+  wholeSetMultiplier?: number
 }
 
 export interface ReleasePackageSummary {
@@ -630,6 +636,7 @@ export interface ReleasePackageSummary {
   selectedBomItemIds: string[]
   createsManufacturingBaseline: boolean
   locksDocuments: boolean
+  wholeSetMultiplier?: number
 }
 
 export type DrawingReviewPackageState = 'InReview' | 'ChangesRequested' | 'WritingProperties' | 'Approved' | 'Stale' | 'Withdrawn'
@@ -906,6 +913,119 @@ export interface StandardLibraryCategory {
   updatedBy: string
   updatedAt: string
   rowVersion: number
+}
+
+export type MaterialRelationSelectionMode = 'Single' | 'Multiple'
+export type MaterialRelationQuantityMode = 'PerMainQuantity' | 'Fixed'
+export type MaterialRelationRevisionState = 'Draft' | 'Published' | 'Superseded'
+
+export interface MaterialRelationOption {
+  id: string
+  materialId: string
+  materialCode: string
+  materialName: string
+  materialKind: MaterialKind
+  unitCode: string
+  quantityMode: MaterialRelationQuantityMode
+  quantityPerSet: number
+  isDefault: boolean
+  sortOrder: number
+}
+
+export interface MaterialRelationGroup {
+  id: string
+  name: string
+  isRequired: boolean
+  selectionMode: MaterialRelationSelectionMode
+  minSelection: number
+  maxSelection?: number | null
+  autoSelectUnique: boolean
+  sortOrder: number
+  options: MaterialRelationOption[]
+}
+
+export interface MaterialRelationRevision {
+  id: string
+  version: number
+  state: MaterialRelationRevisionState
+  changeNote?: string | null
+  createdBy: string
+  createdAt: string
+  publishedBy?: string | null
+  publishedAt?: string | null
+  rowVersion: number
+  groups: MaterialRelationGroup[]
+}
+
+export interface MaterialRelationTemplate {
+  id: string
+  mainMaterialId: string
+  mainMaterialCode: string
+  mainMaterialName: string
+  name: string
+  isArchived: boolean
+  publishedRevision?: MaterialRelationRevision | null
+  draftRevision?: MaterialRelationRevision | null
+  updatedBy: string
+  updatedAt: string
+  rowVersion: number
+}
+
+export interface SaveMaterialRelationTemplateInput {
+  mainMaterialId: string
+  name: string
+  changeNote?: string | null
+  expectedRevisionRowVersion?: number | null
+  groups: Array<{
+    name: string
+    isRequired: boolean
+    selectionMode: MaterialRelationSelectionMode
+    minSelection: number
+    maxSelection?: number | null
+    autoSelectUnique: boolean
+    sortOrder: number
+    options: Array<{
+      materialId: string
+      quantityMode: MaterialRelationQuantityMode
+      quantityPerSet: number
+      isDefault: boolean
+      sortOrder: number
+    }>
+  }>
+}
+
+export interface MaterialRelationGroupCheck {
+  groupId: string
+  groupName: string
+  isRequired: boolean
+  selectionMode: MaterialRelationSelectionMode
+  maxSelection?: number | null
+  isComplete: boolean
+  status: string
+  expectedQuantity: number
+  actualQuantity: number
+  selectedOptionIds: string[]
+  options: MaterialRelationOption[]
+}
+
+export interface MaterialRelationMainCheck {
+  mainBomItemId: string
+  mainMaterialCode: string
+  mainMaterialName: string
+  mainQuantity: number
+  templateId: string
+  revisionId: string
+  revisionVersion: number
+  isComplete: boolean
+  groups: MaterialRelationGroupCheck[]
+}
+
+export interface MaterialRelationCompleteness {
+  projectId: string
+  isComplete: boolean
+  mainMaterialCount: number
+  incompleteGroupCount: number
+  mainMaterials: MaterialRelationMainCheck[]
 }
 
 export interface StandardLibraryMaterial {
@@ -1317,6 +1437,14 @@ export interface U9BomWritePreview {
   requiredConfirmation: string
   addedComponentCount: number
   retainedHistoricalComponentCount: number
+  quantityReconciliations: Array<{
+    itemCode: string
+    issueUomCode: string
+    parentQty: number
+    plmApprovedTotal: number
+    u9ExistingTotal: number
+    uploadDelta: number
+  }>
   generatedAt: string
 }
 
@@ -1423,6 +1551,77 @@ export interface U9MaterialFullSyncStatusResponse {
   checkIntervalMinutes: number
   categories: U9MaterialFullSyncCategory[]
   latestRun?: U9MaterialFullSyncRun | null
+}
+
+export interface U9InventoryRow {
+  organizationCode: string
+  warehouseCode: string
+  warehouseName: string
+  materialCode: string
+  itemName: string
+  brand?: string | null
+  specification?: string | null
+  projectCode?: string | null
+  projectName?: string | null
+  subproject?: string | null
+  stockQuantity: number
+  availableQuantity: number
+  reservedQuantity: number
+  unavailableQuantity: number
+  binCode?: string | null
+  binName?: string | null
+  storageType?: string | null
+  refreshedAt: string
+}
+
+export interface U9InventoryPage {
+  items: U9InventoryRow[]
+  total: number
+  page: number
+  pageSize: number
+  warehouseNames: string[]
+  brandNames: string[]
+  projectCodes: string[]
+  subprojectOptions: Array<{ projectCode: string; subproject: string }>
+  lastSuccessfulRefreshAt?: string | null
+}
+
+export interface U9InventorySyncSettings {
+  autoSyncEnabled: boolean
+  syncIntervalMinutes: number
+  queryPath: string
+  updatedBy?: string | null
+  updatedAt?: string | null
+}
+
+export interface U9InventorySyncRun {
+  id: string
+  triggerKind: string
+  status: 'Running' | 'Succeeded' | 'Failed'
+  sourceRowCount: number
+  storedRowCount: number
+  materialCount: number
+  lastError?: string | null
+  startedAt: string
+  completedAt?: string | null
+}
+
+export interface U9InventorySyncStatusResponse {
+  settings: U9InventorySyncSettings
+  latestRun?: U9InventorySyncRun | null
+}
+
+export interface U9InventoryFilters {
+  materialCode?: string
+  itemName?: string
+  specification?: string
+  brand?: string
+  warehouse?: string
+  projectCode?: string
+  subproject?: string
+  positiveStockOnly?: boolean
+  page?: number
+  pageSize?: number
 }
 
 export interface UpdateU9MaterialIntegrationInput {

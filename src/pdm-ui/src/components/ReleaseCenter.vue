@@ -54,6 +54,7 @@ const visibleReleaseTypes = computed(() => props.allowedScopes.length ? releaseT
 const releaseNote = ref('')
 const selectedChangeReasons = ref<string[]>([])
 const scope = ref<Exclude<ReleaseScope, 'LegacyCombined'>>('StandardLongLead')
+const wholeSetMultiplier = ref(1)
 const selectedLongLeadKeys = ref<string[]>([])
 const longLeadRequestedQuantities = ref<Record<string, number>>({})
 const editingDraft = ref(false)
@@ -84,7 +85,8 @@ const releaseBomRevisionLabel = computed(() => {
 })
 const canPrepare = computed(() => !props.releasePackage || ['草稿', '已驳回', '发布失败'].includes(props.releasePackage.state))
 const isSupplement = computed(() => scope.value === 'StandardSupplement' || scope.value === 'ElectricalSupplement')
-const availableReleaseItems = computed(() => (props.releaseItems.length ? props.releaseItems : props.standardItems).filter(row => !row.manuallyExcluded))
+const availableReleaseItems = computed(() => (props.releaseItems.length ? props.releaseItems : props.standardItems)
+  .filter(row => !row.manuallyExcluded && !row.releaseExcluded))
 const releasePageSize = 50
 const longLeadPage = ref(1)
 const formalPage = ref(1)
@@ -213,8 +215,8 @@ const releaseDetailPageCount = computed(() => {
 })
 const releaseDetailLegend = computed(() => {
   if (isLongLeadRelease.value) return `选择长交期标准件（已选 ${selectedLongLeadKeys.value.length} 项）`
-  if (isFormalRelease.value) return `正式发布内容（共 ${formalReleaseRows.value.length} 项）`
-  return `增补/变更内容（共 ${supplementRows.value.length} 项）`
+  if (isFormalRelease.value) return `正式发布内容（共 ${formalReleaseRows.value.length} 项 · 整套倍率 ×${wholeSetMultiplier.value}）`
+  return `增补/变更内容（共 ${supplementRows.value.length} 项 · 整套倍率 ×${wholeSetMultiplier.value}）`
 })
 const releaseDetailEmptyText = computed(() => {
   if (isLongLeadRelease.value) return '当前没有剩余可提前发布数量的标准件。'
@@ -226,9 +228,12 @@ const hasInvalidLongLeadQuantity = computed(() => selectedLongLeadKeys.value.som
   const requested = Number(longLeadRequestedQuantities.value[key])
   return !row || !Number.isFinite(requested) || requested <= 0 || requested > Number(row.item.quantity)
 }))
+const hasInvalidWholeSetMultiplier = computed(() => scope.value !== 'StandardLongLead'
+  && (!Number.isInteger(Number(wholeSetMultiplier.value)) || Number(wholeSetMultiplier.value) < 1 || Number(wholeSetMultiplier.value) > 1000))
 const createDisabled = computed(() => props.pending
   || scope.value === 'StandardLongLead' && selectedBomItemIds.value.length === 0
   || scope.value === 'StandardLongLead' && hasInvalidLongLeadQuantity.value
+  || hasInvalidWholeSetMultiplier.value
   || isSupplement.value && selectedChangeReasons.value.length === 0)
 const requiresDrawingFiles = computed(() => props.releasePackage?.locksDocuments ?? scope.value === 'NonStandardWithDrawing')
 const isCurrentTaskAssignee = computed(() => Boolean(currentTask.value
@@ -262,12 +267,15 @@ const frozenSummaryRows = computed<FrozenDisplayRow[]>(() => {
     existing.item.quantity = Number(existing.item.quantity) + Number(item.quantity)
     existing.sourceItems.push(item)
   })
-  return [...grouped.values()]
+  return [...grouped.values()].map(row => ({
+    ...row,
+    item: { ...row.item, quantity: Number(row.item.quantity) * (props.releasePackage?.wholeSetMultiplier ?? 1) },
+  }))
 })
 const frozenStructureRows = computed<FrozenDisplayRow[]>(() => frozenItems.value.map((item, index) => ({
   key: `structure:${item.id || index}`,
   materialKey: frozenMaterialKey(item),
-  item,
+  item: { ...item, quantity: Number(item.quantity) * (props.releasePackage?.wholeSetMultiplier ?? 1) },
   sourceItems: [item],
 })))
 const frozenDisplayRows = computed(() => frozenViewMode.value === 'Summary' ? frozenSummaryRows.value : frozenStructureRows.value)
@@ -306,6 +314,7 @@ watch(() => props.releasePackage?.id, () => {
 watch(frozenViewMode, () => { frozenPage.value = 1 })
 watch([() => props.releasePackage?.id, () => props.token], () => { void loadReleaseItemComments() }, { immediate: true })
 watch(scope, () => {
+  if (scope.value === 'StandardLongLead') wholeSetMultiplier.value = 1
   longLeadPage.value = 1
   formalPage.value = 1
   supplementPage.value = 1
@@ -329,12 +338,14 @@ function create() {
     scope: scope.value,
     selectedBomItemIds: scope.value === 'StandardLongLead' ? selectedBomItemIds.value : [],
     selectedBomItemQuantities: scope.value === 'StandardLongLead' ? selectedBomItemQuantities.value : undefined,
+    wholeSetMultiplier: scope.value === 'StandardLongLead' ? 1 : Number(wholeSetMultiplier.value),
   }
   if (editingDraft.value && props.releasePackage) {
     emit('updateDraft', props.releasePackage.id, {
       changeReason: input.changeReason,
       selectedBomItemIds: input.selectedBomItemIds,
       selectedBomItemQuantities: input.selectedBomItemQuantities,
+      wholeSetMultiplier: input.wholeSetMultiplier,
     })
     editingDraft.value = false
     return
@@ -360,6 +371,7 @@ function startDraftEdit() {
   selectedChangeReasons.value = releasePackage.scope === 'StandardSupplement' || releasePackage.scope === 'ElectricalSupplement'
     ? (releasePackage.changeReason || '').split('；').filter(Boolean)
     : []
+  wholeSetMultiplier.value = releasePackage.scope === 'StandardLongLead' ? 1 : releasePackage.wholeSetMultiplier ?? 1
   selectedLongLeadKeys.value = []
   longLeadRequestedQuantities.value = {}
   if (releasePackage.scope === 'StandardLongLead') {
@@ -515,6 +527,9 @@ async function saveItemComment() {
               <option v-for="item in visibleReleaseTypes" :key="item.value" :value="item.value">{{ item.label }}</option>
             </select>
           </label>
+          <label v-if="!isLongLeadRelease" title="仅影响本发布包的输出数量，与项目及子项目数量无关">整套倍率
+            <input v-model.number="wholeSetMultiplier" type="number" min="1" max="1000" step="1" aria-label="整套倍率">
+          </label>
           <div class="pdm-release-draft-actions">
             <button v-if="editingDraft" type="button" class="pdm-secondary-action" :disabled="pending" @click="editingDraft = false">取消编辑</button>
             <button type="submit" class="pdm-primary-action" :disabled="createDisabled">{{ editingDraft ? '保存草稿' : '创建草稿' }}</button>
@@ -547,13 +562,13 @@ async function saveItemComment() {
               </template>
               <template v-else-if="isFormalRelease">
                 <tr v-for="(row, index) in pagedFormalReleaseRows" :key="`${row.item.drawingNumber || row.item.id || index}-${row.item.unit}`">
-                  <td class="is-release-centered"><span class="release-inclusion-tag">全量</span></td><td class="is-release-centered">{{ (formalPage - 1) * releasePageSize + index + 1 }}</td><td>{{ row.item.drawingNumber || '—' }}</td><td>{{ row.item.name || '—' }}</td><td>{{ row.item.specification || '—' }}</td><td class="is-release-centered">{{ row.item.brand || '—' }}</td><td class="is-release-centered">{{ row.item.quantity }}</td><td class="is-release-centered">全量</td><td>{{ row.item.remark || '—' }}</td>
+                  <td class="is-release-centered"><span class="release-inclusion-tag">全量</span></td><td class="is-release-centered">{{ (formalPage - 1) * releasePageSize + index + 1 }}</td><td>{{ row.item.drawingNumber || '—' }}</td><td>{{ row.item.name || '—' }}</td><td>{{ row.item.specification || '—' }}</td><td class="is-release-centered">{{ row.item.brand || '—' }}</td><td class="is-release-centered">{{ row.item.quantity }}</td><td class="is-release-centered">{{ row.item.quantity }} × {{ wholeSetMultiplier }} = {{ Number(row.item.quantity) * Number(wholeSetMultiplier) }}</td><td>{{ row.item.remark || '—' }}</td>
                   <td class="is-release-centered"><span v-if="row.longLeadPublishedQuantity > 0" class="long-lead-tag">已提前发布 {{ row.longLeadPublishedQuantity }}/{{ row.item.quantity }}</span><span v-else>—</span></td>
                 </tr>
               </template>
               <template v-else>
                 <tr v-for="(row, index) in pagedSupplementRows" :key="`${row.change}-${row.item.id}-${index}`">
-                  <td class="is-release-centered"><span :class="`release-change-tag is-${row.change}`">{{ row.change }}</span></td><td class="is-release-centered">{{ (supplementPage - 1) * releasePageSize + index + 1 }}</td><td>{{ row.item.drawingNumber || '—' }}</td><td>{{ row.item.name || '—' }}</td><td>{{ row.item.specification || '—' }}</td><td class="is-release-centered">{{ row.item.brand || '—' }}</td><td class="is-release-centered">{{ row.item.quantity }}</td><td class="is-release-centered">全量</td><td>{{ row.item.remark || '—' }}</td><td class="is-release-centered"><span class="release-status-tag">待纳入变更</span></td>
+                  <td class="is-release-centered"><span :class="`release-change-tag is-${row.change}`">{{ row.change }}</span></td><td class="is-release-centered">{{ (supplementPage - 1) * releasePageSize + index + 1 }}</td><td>{{ row.item.drawingNumber || '—' }}</td><td>{{ row.item.name || '—' }}</td><td>{{ row.item.specification || '—' }}</td><td class="is-release-centered">{{ row.item.brand || '—' }}</td><td class="is-release-centered">{{ row.item.quantity }}</td><td class="is-release-centered">{{ row.change === '删除' ? '—' : `${row.item.quantity} × ${wholeSetMultiplier} = ${Number(row.item.quantity) * Number(wholeSetMultiplier)}` }}</td><td>{{ row.item.remark || '—' }}</td><td class="is-release-centered"><span class="release-status-tag">待纳入变更</span></td>
                 </tr>
               </template>
               <tr v-if="!releaseDetailRowCount"><td colspan="10" class="pdm-empty-info">{{ releaseDetailEmptyText }}</td></tr>
@@ -635,6 +650,7 @@ async function saveItemComment() {
         <div><small>发布范围</small><strong>{{ scopeLabels[releasePackage.scope] || '旧版组合发布' }}</strong></div>
         <div><small>当前状态</small><strong>{{ releasePackage.state }}</strong></div>
         <div><small>审批模板</small><strong>{{ releaseWorkflowLabel }}</strong></div>
+        <div><small>整套倍率</small><strong>× {{ releasePackage.wholeSetMultiplier ?? 1 }}</strong></div>
         <div v-if="releasePackage.changeNumber && releasePackage.changeNumber !== releasePackage.number"><small>变更单号</small><strong>{{ releasePackage.changeNumber }}</strong></div>
         <div><small>BOM版本</small><strong>{{ releaseBomRevisionLabel }}</strong></div>
         <div><small>制造基线</small><strong>{{ releasePackage.createsManufacturingBaseline ? '发布后生成新基线' : releasePackage.scope === 'StandardLongLead' ? '不更新（长交期输出）' : '三条正式流齐备后生成' }}</strong></div>
@@ -644,7 +660,7 @@ async function saveItemComment() {
 
       <section class="pdm-release-frozen-snapshot" aria-label="审批固化快照">
         <header>
-          <div><strong>审批固化快照</strong><small>审批、历史和发布均使用创建发布包时的不可变数据；批注独立保存，不修改BOM。</small></div>
+          <div><strong>审批固化快照</strong><small>显示发布后的最终数量（工作区数量 × 整套倍率 {{ releasePackage.wholeSetMultiplier ?? 1 }}）；批注独立保存，不修改BOM。</small></div>
           <div class="pdm-frozen-view-actions">
             <span>{{ frozenDisplayRows.length }} 项<span v-if="frozenViewMode === 'Summary' && frozenItems.length !== frozenDisplayRows.length"> · {{ frozenItems.length }} 个实例</span></span>
             <div class="pdm-view-switch" role="group" aria-label="审批快照显示方式">
@@ -726,7 +742,7 @@ async function saveItemComment() {
 
 <style scoped>
 .pdm-release-top-workflow{display:grid;gap:6px;margin-bottom:8px}.pdm-release-top-workflow .pdm-approval-chain,.pdm-release-summary{grid-template-columns:repeat(4,minmax(0,1fr));gap:6px}.pdm-release-top-workflow .pdm-approval-chain{margin:0}.pdm-release-top-workflow .pdm-approval-chain article,.pdm-release-summary>div{min-width:0;min-height:46px;box-sizing:border-box;align-content:center;gap:2px;padding:6px 8px;border:1px solid var(--pdm-border);border-radius:7px;background:var(--pdm-surface)}.pdm-release-top-workflow .pdm-approval-chain article{align-items:flex-start;gap:6px}.pdm-release-top-workflow .pdm-approval-chain article div{overflow:hidden}.pdm-release-top-workflow .pdm-approval-chain strong,.pdm-release-top-workflow .pdm-approval-chain small,.pdm-release-top-workflow .pdm-approval-chain em{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.pdm-release-top-workflow .pdm-release-draft-management{margin:0}.pdm-release-top-workflow .pdm-release-preparation{display:grid;grid-template-columns:auto minmax(0,1fr) auto;align-items:center;gap:8px;margin:0;padding:6px 8px}.pdm-release-top-workflow .pdm-release-preparation h3,.pdm-release-top-workflow .pdm-release-preparation p{margin:0}.pdm-release-top-workflow .pdm-release-preparation .pdm-manager-actions{flex-wrap:nowrap}.pdm-release-top-workflow .pdm-release-preparation progress{grid-column:1/-1;margin-top:0}.pdm-release-top-workflow .pdm-decision-box{grid-template-columns:minmax(0,1fr) auto;align-items:end;gap:8px;margin:0;padding:6px 8px}.pdm-release-top-workflow .pdm-decision-box textarea{min-height:30px;height:30px;box-sizing:border-box;resize:vertical}.pdm-release-top-workflow .pdm-withdraw-decision{align-items:center}.pdm-release-summary{grid-auto-rows:minmax(46px,auto);margin-bottom:8px}.pdm-release-summary small{font-size:10px}.pdm-release-summary strong{font-size:11px}@media(max-width:900px){.pdm-release-top-workflow .pdm-approval-chain,.pdm-release-summary{grid-template-columns:repeat(2,minmax(0,1fr))}.pdm-release-top-workflow .pdm-release-preparation,.pdm-release-top-workflow .pdm-decision-box{grid-template-columns:1fr}.pdm-release-top-workflow .pdm-release-preparation .pdm-manager-actions,.pdm-release-top-workflow .pdm-decision-box .pdm-manager-actions{justify-content:flex-end}}@media(max-width:560px){.pdm-release-top-workflow .pdm-approval-chain,.pdm-release-summary{grid-template-columns:1fr}}
-.release-center select{height:34px;border:1px solid var(--pdm-border);border-radius:6px;background:#fff;padding:0 9px;color:var(--pdm-text)}.pdm-release-create-header{grid-column:1/-1;display:grid;grid-template-rows:52px 82px;gap:8px;min-height:162px;padding:10px;box-sizing:border-box;border:1px solid var(--pdm-border);border-radius:7px;background:var(--pdm-surface)}.pdm-release-type-row{display:grid;grid-template-columns:minmax(0,1fr) auto minmax(0,1fr);gap:5px;align-items:end}.pdm-release-type-row label{min-width:0}.pdm-release-type-row select,.pdm-release-type-row input{width:100%;height:34px;box-sizing:border-box}.pdm-release-draft-actions{display:flex;gap:5px}.pdm-release-draft-actions button{height:34px;padding:0 10px;white-space:nowrap}.pdm-release-parameter-slot{min-height:82px;overflow:auto}.pdm-release-parameter-slot>.pdm-release-reason{height:100%;box-sizing:border-box}.pdm-release-parameter-slot>.pdm-release-reason textarea{height:60px;box-sizing:border-box;resize:none}.release-detail-picker,.release-change-reason-picker{grid-column:1/-1;margin:0;padding:10px;border:1px solid var(--pdm-border);border-radius:7px}.release-detail-picker legend,.release-change-reason-picker legend{padding:0 5px;font-weight:600}.release-detail-picker .pdm-table-scroll{border:1px solid var(--pdm-border);border-radius:5px}.release-detail-picker table{width:100%;min-width:0;table-layout:fixed}.release-detail-picker col:nth-child(1){width:6%}.release-detail-picker col:nth-child(2){width:5%}.release-detail-picker col:nth-child(3){width:12%}.release-detail-picker col:nth-child(4){width:13%}.release-detail-picker col:nth-child(5){width:15%}.release-detail-picker col:nth-child(6){width:8%}.release-detail-picker col:nth-child(7){width:9%}.release-detail-picker col:nth-child(8){width:10%}.release-detail-picker col:nth-child(9){width:12%}.release-detail-picker col:nth-child(10){width:10%}.release-detail-picker th,.release-detail-picker td{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;vertical-align:middle}.release-detail-picker th,.release-detail-picker td.is-release-centered{text-align:center}.release-detail-picker td:nth-child(9),.release-detail-picker td:nth-child(10){white-space:normal;overflow-wrap:anywhere}.long-lead-quantity-input{width:100%;min-width:0;height:26px;box-sizing:border-box;text-align:center}.pdm-release-draft-management{justify-content:flex-end;margin-bottom:8px}.release-change-reason-picker{display:flex;height:100%;box-sizing:border-box;flex-wrap:wrap;align-content:flex-start;gap:8px 18px}.release-change-reason-picker label{display:flex;align-items:center;gap:5px}.long-lead-tag,.release-change-tag,.release-inclusion-tag,.release-status-tag{display:inline-flex;align-items:center;min-height:20px;padding:0 6px;border-radius:10px}.long-lead-tag,.release-change-tag{background:#fff7ed;color:#c2410c}.release-inclusion-tag{background:#eff6ff;color:#1d4ed8}.release-status-tag{background:var(--pdm-surface-soft);color:var(--pdm-muted)}.release-change-tag.is-新增{background:#ecfdf5;color:#15803d}.release-change-tag.is-修改{background:#fff7ed;color:#b45309}.release-change-tag.is-删除{background:#fef2f2;color:#b91c1c}.pdm-release-create-form .pdm-release-reason{grid-column:1/-1}.emergency-decision{border-color:#f59e0b;background:#fffbeb}.pdm-release-frozen-snapshot{margin:12px 0;border:1px solid var(--pdm-border);border-radius:7px;overflow:hidden}.pdm-release-frozen-snapshot>header{display:flex;justify-content:space-between;gap:12px;align-items:center;padding:9px 11px;background:var(--pdm-surface-soft)}.pdm-release-frozen-snapshot>header>div:first-child{display:grid;gap:2px;min-width:0}.pdm-release-frozen-snapshot>header small{color:var(--pdm-muted)}.pdm-frozen-view-actions{display:flex;align-items:center;justify-content:flex-end;gap:10px;white-space:nowrap}.pdm-view-switch{display:inline-flex;padding:2px;border:1px solid var(--pdm-border);border-radius:6px;background:#fff}.pdm-view-switch button{height:24px;padding:0 9px;border:0;border-radius:4px;background:transparent;color:var(--pdm-muted)}.pdm-view-switch button.is-active{background:#0f9d90;color:#fff}.pdm-release-diff-summary{display:flex;align-items:center;gap:10px;padding:7px 11px;border-top:1px solid var(--pdm-border);border-bottom:1px solid var(--pdm-border)}.pdm-release-diff-summary small{margin-left:auto;color:var(--pdm-muted)}.pdm-release-diff-summary .is-added{color:#15803d}.pdm-release-diff-summary .is-modified{color:#b45309}.pdm-release-diff-summary .is-removed{color:#b91c1c}.pdm-release-frozen-snapshot .pdm-table-scroll{max-height:230px}.pdm-item-comments-load-error{margin:0;padding:7px 11px}.pdm-item-comment-action{border:0;background:transparent;color:#0f9d90;white-space:nowrap}.pdm-frozen-item-name{padding-left:7px}.pdm-frozen-item-name small{display:block;margin-top:2px;color:var(--pdm-muted);font-size:10px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.pdm-structure-marker{margin-right:4px;color:#0f9d90}.pdm-release-integration-note{margin:0;padding:8px 11px;color:#0f766e;background:#f0fdfa;border-top:1px solid #99f6e4}@media(max-width:900px){.pdm-release-type-row{grid-template-columns:minmax(0,1fr) auto minmax(0,1fr)}.pdm-release-frozen-snapshot>header{align-items:flex-start;flex-direction:column}.pdm-frozen-view-actions{width:100%;justify-content:space-between}}
+.release-center select{height:34px;border:1px solid var(--pdm-border);border-radius:6px;background:#fff;padding:0 9px;color:var(--pdm-text)}.pdm-release-create-header{grid-column:1/-1;display:grid;grid-template-rows:52px 82px;gap:8px;min-height:162px;padding:10px;box-sizing:border-box;border:1px solid var(--pdm-border);border-radius:7px;background:var(--pdm-surface)}.pdm-release-type-row{display:grid;grid-template-columns:minmax(220px,1fr) minmax(120px,180px) auto minmax(180px,1fr);gap:5px;align-items:end}.pdm-release-type-row label{min-width:0}.pdm-release-type-row select,.pdm-release-type-row input{width:100%;height:34px;box-sizing:border-box}.pdm-release-draft-actions{display:flex;gap:5px}.pdm-release-draft-actions button{height:34px;padding:0 10px;white-space:nowrap}.pdm-release-parameter-slot{min-height:82px;overflow:auto}.pdm-release-parameter-slot>.pdm-release-reason{height:100%;box-sizing:border-box}.pdm-release-parameter-slot>.pdm-release-reason textarea{height:60px;box-sizing:border-box;resize:none}.release-detail-picker,.release-change-reason-picker{grid-column:1/-1;margin:0;padding:10px;border:1px solid var(--pdm-border);border-radius:7px}.release-detail-picker legend,.release-change-reason-picker legend{padding:0 5px;font-weight:600}.release-detail-picker .pdm-table-scroll{border:1px solid var(--pdm-border);border-radius:5px}.release-detail-picker table{width:100%;min-width:0;table-layout:fixed}.release-detail-picker col:nth-child(1){width:6%}.release-detail-picker col:nth-child(2){width:5%}.release-detail-picker col:nth-child(3){width:12%}.release-detail-picker col:nth-child(4){width:13%}.release-detail-picker col:nth-child(5){width:15%}.release-detail-picker col:nth-child(6){width:8%}.release-detail-picker col:nth-child(7){width:9%}.release-detail-picker col:nth-child(8){width:10%}.release-detail-picker col:nth-child(9){width:12%}.release-detail-picker col:nth-child(10){width:10%}.release-detail-picker th,.release-detail-picker td{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;vertical-align:middle}.release-detail-picker th,.release-detail-picker td.is-release-centered{text-align:center}.release-detail-picker td:nth-child(9),.release-detail-picker td:nth-child(10){white-space:normal;overflow-wrap:anywhere}.long-lead-quantity-input{width:100%;min-width:0;height:26px;box-sizing:border-box;text-align:center}.pdm-release-draft-management{justify-content:flex-end;margin-bottom:8px}.release-change-reason-picker{display:flex;height:100%;box-sizing:border-box;flex-wrap:wrap;align-content:flex-start;gap:8px 18px}.release-change-reason-picker label{display:flex;align-items:center;gap:5px}.long-lead-tag,.release-change-tag,.release-inclusion-tag,.release-status-tag{display:inline-flex;align-items:center;min-height:20px;padding:0 6px;border-radius:10px}.long-lead-tag,.release-change-tag{background:#fff7ed;color:#c2410c}.release-inclusion-tag{background:#eff6ff;color:#1d4ed8}.release-status-tag{background:var(--pdm-surface-soft);color:var(--pdm-muted)}.release-change-tag.is-新增{background:#ecfdf5;color:#15803d}.release-change-tag.is-修改{background:#fff7ed;color:#b45309}.release-change-tag.is-删除{background:#fef2f2;color:#b91c1c}.pdm-release-create-form .pdm-release-reason{grid-column:1/-1}.emergency-decision{border-color:#f59e0b;background:#fffbeb}.pdm-release-frozen-snapshot{margin:12px 0;border:1px solid var(--pdm-border);border-radius:7px;overflow:hidden}.pdm-release-frozen-snapshot>header{display:flex;justify-content:space-between;gap:12px;align-items:center;padding:9px 11px;background:var(--pdm-surface-soft)}.pdm-release-frozen-snapshot>header>div:first-child{display:grid;gap:2px;min-width:0}.pdm-release-frozen-snapshot>header small{color:var(--pdm-muted)}.pdm-frozen-view-actions{display:flex;align-items:center;justify-content:flex-end;gap:10px;white-space:nowrap}.pdm-view-switch{display:inline-flex;padding:2px;border:1px solid var(--pdm-border);border-radius:6px;background:#fff}.pdm-view-switch button{height:24px;padding:0 9px;border:0;border-radius:4px;background:transparent;color:var(--pdm-muted)}.pdm-view-switch button.is-active{background:#0f9d90;color:#fff}.pdm-release-diff-summary{display:flex;align-items:center;gap:10px;padding:7px 11px;border-top:1px solid var(--pdm-border);border-bottom:1px solid var(--pdm-border)}.pdm-release-diff-summary small{margin-left:auto;color:var(--pdm-muted)}.pdm-release-diff-summary .is-added{color:#15803d}.pdm-release-diff-summary .is-modified{color:#b45309}.pdm-release-diff-summary .is-removed{color:#b91c1c}.pdm-release-frozen-snapshot .pdm-table-scroll{max-height:230px}.pdm-item-comments-load-error{margin:0;padding:7px 11px}.pdm-item-comment-action{border:0;background:transparent;color:#0f9d90;white-space:nowrap}.pdm-frozen-item-name{padding-left:7px}.pdm-frozen-item-name small{display:block;margin-top:2px;color:var(--pdm-muted);font-size:10px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.pdm-structure-marker{margin-right:4px;color:#0f9d90}.pdm-release-integration-note{margin:0;padding:8px 11px;color:#0f766e;background:#f0fdfa;border-top:1px solid #99f6e4}@media(max-width:900px){.pdm-release-type-row{grid-template-columns:repeat(2,minmax(0,1fr))}.pdm-release-frozen-snapshot>header{align-items:flex-start;flex-direction:column}.pdm-frozen-view-actions{width:100%;justify-content:space-between}}
 .release-detail-picker{display:flex;width:100%;min-width:0;min-height:0;box-sizing:border-box;flex-direction:column}.release-detail-picker .pdm-table-scroll{width:100%;height:clamp(220px,calc(100dvh - 440px),630px);max-width:100%;max-height:none;box-sizing:border-box;overflow-x:hidden;overflow-y:auto}.release-detail-pagination,.release-list-pagination{display:flex;align-items:center;justify-content:flex-end;gap:8px;padding-top:8px;color:var(--pdm-muted)}.release-detail-pagination span,.release-list-pagination span{margin-right:auto}.release-detail-pagination button,.release-list-pagination button{width:28px;height:28px;border:1px solid var(--pdm-border);border-radius:6px;background:var(--pdm-surface);color:var(--pdm-text);cursor:pointer}.release-detail-pagination button:disabled,.release-list-pagination button:disabled{cursor:not-allowed;opacity:.45}.release-detail-pagination strong,.release-list-pagination strong{min-width:54px;text-align:center;color:var(--pdm-text)}
 .pdm-release-frozen-snapshot{display:flex;min-width:0;min-height:0;flex-direction:column}.pdm-release-frozen-snapshot .pdm-table-scroll{width:100%;height:clamp(220px,calc(100dvh - 470px),620px);max-width:100%;max-height:none;box-sizing:border-box;overflow-x:hidden;overflow-y:auto}.pdm-release-frozen-snapshot .release-list-pagination{padding:8px 11px}
 .pdm-release-frozen-table{width:100%;min-width:0;table-layout:fixed}.pdm-release-frozen-table col:nth-child(1){width:5%}.pdm-release-frozen-table col:nth-child(2){width:12%}.pdm-release-frozen-table col:nth-child(3){width:21%}.pdm-release-frozen-table col:nth-child(4){width:15%}.pdm-release-frozen-table col:nth-child(5){width:10%}.pdm-release-frozen-table col:nth-child(6){width:13%}.pdm-release-frozen-table col:nth-child(7),.pdm-release-frozen-table col:nth-child(8){width:7%}.pdm-release-frozen-table col:nth-child(9){width:10%}.pdm-release-frozen-table th,.pdm-release-frozen-table td{white-space:normal;overflow-wrap:anywhere;vertical-align:middle}.pdm-release-frozen-table th,.pdm-release-frozen-table td.is-release-centered{text-align:center}

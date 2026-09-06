@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { computed, onMounted, reactive, ref } from 'vue'
-import { getU9MaterialFullSyncStatus, getU9MaterialIntegration, startU9MaterialFullSync, testU9MaterialIntegration, updateU9MaterialIntegration } from '../api'
+import { getU9InventorySyncStatus, getU9MaterialFullSyncStatus, getU9MaterialIntegration, startU9InventoryFullSync, startU9MaterialFullSync, testU9MaterialIntegration, updateU9InventorySyncSettings, updateU9MaterialIntegration } from '../api'
 import type {
   CrmConnectionTestResult,
   CrmCustomerSyncResult,
@@ -9,6 +9,7 @@ import type {
   PdmCustomer,
   U9MaterialFullSyncStatusResponse,
   U9MaterialIntegrationSettings,
+  U9InventorySyncStatusResponse,
   UpdateCrmIntegrationInput,
 } from '../types'
 import CustomerManagement from './CustomerManagement.vue'
@@ -37,6 +38,15 @@ const testingConnection = ref(false)
 const fullSyncLoading = ref(false)
 const fullSyncStarting = ref(false)
 const fullSyncStatus = ref<U9MaterialFullSyncStatusResponse | null>(null)
+const inventorySyncLoading = ref(false)
+const inventorySyncSaving = ref(false)
+const inventorySyncStarting = ref(false)
+const inventorySyncStatus = ref<U9InventorySyncStatusResponse | null>(null)
+const inventorySyncForm = reactive({
+  autoSyncEnabled: true,
+  syncIntervalMinutes: 60,
+  queryPath: '/webapi/Invtrans/QueryQohAndAvailable',
+})
 const integration = reactive<U9MaterialIntegrationSettings & { clientSecret: string }>({
   baseUrl: '', enterpriseCode: '', organizationCode: '', userCode: '', clientId: '', clientSecretConfigured: false,
   clientSecret: '', itemCreatePath: '/webapi/ItemMaster/Create', itemQueryPath: '/webapi/ItemMaster/Query',
@@ -107,6 +117,55 @@ async function runFullSyncNow() {
   }
 }
 
+async function loadInventorySyncStatus() {
+  if (!props.canManageBase) return
+  inventorySyncLoading.value = true
+  try {
+    inventorySyncStatus.value = await getU9InventorySyncStatus(props.token)
+    Object.assign(inventorySyncForm, inventorySyncStatus.value.settings)
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : 'U9C库存同步状态加载失败')
+  } finally {
+    inventorySyncLoading.value = false
+  }
+}
+
+async function saveInventorySyncSettings() {
+  if (!props.canManageBase || inventorySyncSaving.value) return
+  inventorySyncSaving.value = true
+  try {
+    const saved = await updateU9InventorySyncSettings(inventorySyncForm, props.token)
+    Object.assign(inventorySyncForm, saved)
+    if (inventorySyncStatus.value) inventorySyncStatus.value.settings = saved
+    ElMessage.success('库存自动同步设置已保存')
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '库存自动同步设置保存失败')
+  } finally {
+    inventorySyncSaving.value = false
+  }
+}
+
+async function runInventorySyncNow() {
+  if (!props.canManageBase || inventorySyncStarting.value) return
+  try {
+    await ElMessageBox.confirm(
+      '立即从U9C只读获取当前组织的完整库存，并在全部成功后切换PLM库存快照？该操作不会修改U9C。',
+      '确认库存全量刷新',
+      { confirmButtonText: '开始刷新', cancelButtonText: '取消' },
+    )
+  } catch { return }
+  inventorySyncStarting.value = true
+  try {
+    const result = await startU9InventoryFullSync(props.token)
+    ElMessage.success(result.message)
+    window.setTimeout(() => void loadInventorySyncStatus(), 800)
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : 'U9C库存全量刷新启动失败')
+  } finally {
+    inventorySyncStarting.value = false
+  }
+}
+
 function buildUpdateInput(clientSecret: string | null) {
   return {
     baseUrl: integration.baseUrl.trim(),
@@ -165,6 +224,15 @@ async function testConnection() {
 }
 
 async function saveInterfaceSettings() {
+  if (!inventorySyncStatus.value) {
+    ElMessage.warning('库存接口设置尚未加载完成，请刷新后重试')
+    return
+  }
+  const inventoryQueryPath = inventorySyncForm.queryPath.trim()
+  if (!inventoryQueryPath.startsWith('/')) {
+    ElMessage.warning('库存查询接口路径必须以/开头')
+    return
+  }
   if (integration.writeEnabled) {
     try {
       await ElMessageBox.confirm(
@@ -179,8 +247,17 @@ async function saveInterfaceSettings() {
   }
   savingInterfaces.value = true
   try {
-    const saved = await updateU9MaterialIntegration(buildUpdateInput(null), props.token)
+    const [saved, savedInventorySettings] = await Promise.all([
+      updateU9MaterialIntegration(buildUpdateInput(null), props.token),
+      updateU9InventorySyncSettings({
+        autoSyncEnabled: inventorySyncForm.autoSyncEnabled,
+        syncIntervalMinutes: inventorySyncForm.syncIntervalMinutes,
+        queryPath: inventoryQueryPath,
+      }, props.token),
+    ])
     applyIntegrationSettings(saved)
+    Object.assign(inventorySyncForm, savedInventorySettings)
+    inventorySyncStatus.value.settings = savedInventorySettings
     ElMessage.success(`U9C接口设置已保存，真实写入已${saved.writeEnabled ? '开启' : '关闭'}`)
   } catch (error) {
     ElMessage.error(error instanceof Error ? error.message : 'U9C接口设置保存失败')
@@ -213,6 +290,16 @@ const fullSyncInactivatedCount = computed(() =>
   (fullSyncStatus.value?.latestRun?.categoryResults ?? []).reduce((total, item) => total + (item.inactivatedCount ?? 0), 0))
 const fullSyncConflictCount = computed(() =>
   (fullSyncStatus.value?.latestRun?.categoryResults ?? []).reduce((total, item) => total + (item.conflictCount ?? 0), 0))
+const inventorySyncStatusText = computed(() => {
+  const status = inventorySyncStatus.value?.latestRun?.status
+  if (status === 'Running') return '刷新中'
+  if (status === 'Succeeded') return '最近刷新成功'
+  if (status === 'Failed') return '最近刷新失败'
+  return '尚未刷新'
+})
+const inventorySyncTagType = computed(() => inventorySyncStatus.value?.latestRun?.status === 'Succeeded' ? 'success'
+  : inventorySyncStatus.value?.latestRun?.status === 'Failed' ? 'danger'
+    : inventorySyncStatus.value?.latestRun?.status === 'Running' ? 'warning' : 'info')
 
 function formatSyncTime(value?: string | null) {
   return value ? new Date(value).toLocaleString('zh-CN', { hour12: false }) : '—'
@@ -221,6 +308,7 @@ function formatSyncTime(value?: string | null) {
 onMounted(() => {
   void loadIntegration()
   void loadFullSyncStatus()
+  void loadInventorySyncStatus()
 })
 </script>
 
@@ -274,6 +362,12 @@ onMounted(() => {
                 <el-form-item label="料品查询接口路径"><el-input v-model="integration.itemQueryPath" name="u9ItemQueryPath" /></el-form-item>
                 <el-form-item label="料品修改接口路径"><el-input v-model="integration.itemModifyPath" name="u9ItemModifyPath" /></el-form-item>
                 <el-form-item label="料品删除接口路径"><el-input v-model="integration.itemDeletePath" name="u9ItemDeletePath" /></el-form-item>
+              </div>
+            </section>
+            <section class="u9-interface-group" aria-label="库存接口">
+              <h3>库存接口</h3>
+              <div class="u9-form-grid">
+                <el-form-item label="库存查询接口路径"><el-input v-model.trim="inventorySyncForm.queryPath" name="u9InventoryQueryPath" /></el-form-item>
               </div>
             </section>
             <section class="u9-interface-group" aria-label="BOM接口">
@@ -342,6 +436,29 @@ onMounted(() => {
             <el-table-column prop="error" label="说明" min-width="220" show-overflow-tooltip />
           </el-table>
         </section>
+        <section class="pdm-panel u9-settings-card u9-inventory-sync-card pdm-loading-host" aria-label="U9C库存自动全量刷新">
+          <SquareLoader v-if="inventorySyncLoading" overlay label="正在加载库存同步状态" />
+          <header class="u9-card-heading">
+            <div><h2>U9C库存自动全量刷新</h2><p>按设置周期只读刷新“料品库存”快照；只有整批成功才切换新快照，失败时继续使用上一次完整数据。</p></div>
+            <div class="u9-actions"><el-tag :type="inventorySyncTagType">{{ inventorySyncStatusText }}</el-tag><el-button type="primary" :loading="inventorySyncStarting" @click="runInventorySyncNow">立即全量刷新</el-button><el-button :loading="inventorySyncLoading" @click="loadInventorySyncStatus">刷新状态</el-button></div>
+          </header>
+          <el-form label-position="top" class="u9-settings-form">
+            <div class="u9-form-grid">
+              <el-form-item label="自动同步"><el-switch v-model="inventorySyncForm.autoSyncEnabled" active-text="启用" inactive-text="关闭" /></el-form-item>
+              <el-form-item label="同步间隔（分钟）"><el-input-number v-model="inventorySyncForm.syncIntervalMinutes" :min="15" :max="1440" :step="15" controls-position="right" /></el-form-item>
+            </div>
+            <div class="u9-actions"><el-button type="primary" :loading="inventorySyncSaving" @click="saveInventorySyncSettings">保存库存同步设置</el-button></div>
+          </el-form>
+          <dl class="full-sync-summary inventory-sync-summary">
+            <div><dt>执行计划</dt><dd>{{ inventorySyncForm.autoSyncEnabled ? `每 ${inventorySyncForm.syncIntervalMinutes} 分钟` : '已关闭' }}</dd></div>
+            <div><dt>最近开始</dt><dd>{{ formatSyncTime(inventorySyncStatus?.latestRun?.startedAt) }}</dd></div>
+            <div><dt>最近完成</dt><dd>{{ formatSyncTime(inventorySyncStatus?.latestRun?.completedAt) }}</dd></div>
+            <div><dt>U9C源明细</dt><dd>{{ inventorySyncStatus?.latestRun?.sourceRowCount ?? 0 }}</dd></div>
+            <div><dt>库存快照明细</dt><dd>{{ inventorySyncStatus?.latestRun?.storedRowCount ?? 0 }}</dd></div>
+            <div><dt>覆盖料号</dt><dd>{{ inventorySyncStatus?.latestRun?.materialCount ?? 0 }}</dd></div>
+          </dl>
+          <el-alert v-if="inventorySyncStatus?.latestRun?.lastError" :title="inventorySyncStatus.latestRun.lastError" type="error" :closable="false" show-icon />
+        </section>
       </el-tab-pane>
 
       <el-tab-pane v-if="canManageBase" label="BOM维护" name="bom-query">
@@ -352,5 +469,5 @@ onMounted(() => {
 </template>
 
 <style scoped>
-.u9-integration-page{min-width:0;min-height:0}.u9-interface-tabs{min-height:0;flex:1 1 auto;display:flex;flex-direction:column;overflow:hidden;margin-top:4px}.u9-interface-tabs :deep(.el-tabs__content){min-height:0;flex:1 1 auto;overflow:hidden}.u9-interface-tabs :deep(.el-tab-pane){min-height:0;height:100%;overflow:auto}.u9-settings-card{padding:24px}.u9-card-heading{display:flex;align-items:flex-start;justify-content:space-between;gap:18px;margin-bottom:20px}.u9-card-heading h2{margin:0 0 6px;font-size:20px}.u9-card-heading p{margin:0;color:#64748b;line-height:1.6}.u9-settings-form{margin-top:18px}.u9-form-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:0 18px}.u9-interface-group{margin:0 0 16px;padding:16px 18px 4px;border:1px solid #e2e8f0;border-radius:8px;background:#f8fafc}.u9-interface-group h3{margin:0 0 14px;font-size:15px;color:#1e293b}.u9-actions{display:flex;align-items:center;gap:10px;margin-top:4px}.full-sync-summary{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:12px;margin:20px 0}.full-sync-summary div{padding:14px 16px;border:1px solid #e2e8f0;border-radius:8px;background:#f8fafc}.full-sync-summary dt{margin-bottom:6px;color:#64748b;font-size:12px}.full-sync-summary dd{margin:0;color:#0f172a;font-weight:600}.full-sync-categories{display:flex;align-items:center;flex-wrap:wrap;gap:8px;margin:0 0 16px}.full-sync-categories strong{margin-right:4px}.full-sync-table{width:100%}.u9-write-note{margin:6px 0 18px;color:#9a3412;font-size:13px}@media(max-width:900px){.u9-form-grid,.full-sync-summary{grid-template-columns:1fr}.u9-settings-card{padding:18px}}
+.u9-integration-page{min-width:0;min-height:0}.u9-interface-tabs{min-height:0;flex:1 1 auto;display:flex;flex-direction:column;overflow:hidden;margin-top:4px}.u9-interface-tabs :deep(.el-tabs__content){min-height:0;flex:1 1 auto;overflow:hidden}.u9-interface-tabs :deep(.el-tab-pane){min-height:0;height:100%;overflow:auto}.u9-settings-card{padding:24px}.u9-inventory-sync-card{margin-top:18px}.u9-card-heading{display:flex;align-items:flex-start;justify-content:space-between;gap:18px;margin-bottom:20px}.u9-card-heading h2{margin:0 0 6px;font-size:20px}.u9-card-heading p{margin:0;color:#64748b;line-height:1.6}.u9-settings-form{margin-top:18px}.u9-form-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:0 18px}.u9-interface-group{margin:0 0 16px;padding:16px 18px 4px;border:1px solid #e2e8f0;border-radius:8px;background:#f8fafc}.u9-interface-group h3{margin:0 0 14px;font-size:15px;color:#1e293b}.u9-actions{display:flex;align-items:center;gap:10px;margin-top:4px}.full-sync-summary{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:12px;margin:20px 0}.full-sync-summary div{padding:14px 16px;border:1px solid #e2e8f0;border-radius:8px;background:#f8fafc}.full-sync-summary dt{margin-bottom:6px;color:#64748b;font-size:12px}.full-sync-summary dd{margin:0;color:#0f172a;font-weight:600}.full-sync-categories{display:flex;align-items:center;flex-wrap:wrap;gap:8px;margin:0 0 16px}.full-sync-categories strong{margin-right:4px}.full-sync-table{width:100%}.u9-write-note{margin:6px 0 18px;color:#9a3412;font-size:13px}@media(max-width:900px){.u9-form-grid,.full-sync-summary{grid-template-columns:1fr}.u9-settings-card{padding:18px}}
 </style>

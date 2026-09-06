@@ -24,12 +24,16 @@ public sealed record BomHeaderGenerationResult(
     int ExpectedCount,
     int GeneratedCount,
     int ExistingCount,
-    IReadOnlyList<ProjectBomHeader> Headers);
+    IReadOnlyList<ProjectBomHeader> Headers,
+    int AutoApprovedCount = 0,
+    int QueuedSyncCount = 0,
+    Guid? AutomaticBatchId = null);
 
 public sealed class BomHeaderService(
     IPdmRepository repository,
     IMaterialRepository materials,
     MaterialService materialService,
+    MaterialSyncBatchService syncBatches,
     TimeProvider timeProvider)
 {
     private const string ChildBomCategoryCode = "0201";
@@ -102,6 +106,7 @@ public sealed class BomHeaderService(
 
         var generatedCount = 0;
         var existingCount = 0;
+        var applicationsToApprove = new List<MaterialCodeApplication>();
         var rootHasChildren = projects.Any(project => project.ParentProjectId == rootProjectId);
         foreach (var project in projects)
         {
@@ -123,21 +128,33 @@ public sealed class BomHeaderService(
                     {
                         var application = await CreateHeaderApplicationAsync(project, kind, boundMaterial, actor, cancellationToken);
                         applications.Add(application);
+                        applicationsToApprove.Add(application);
                         generatedCount++;
                     }
-                    else existingCount++;
+                    else
+                    {
+                        if (boundMaterial.ApprovalStatus == MaterialApprovalStatus.Draft
+                            && latest?.Status == MaterialCodeApplicationStatus.Pending)
+                            applicationsToApprove.Add(latest);
+                        existingCount++;
+                    }
                     continue;
                 }
-                await GenerateMaterialAsync(project, kind, binding?.RowVersion ?? 0, actor, role, cancellationToken);
+                applicationsToApprove.Add(await GenerateMaterialAsync(
+                    project, kind, binding?.RowVersion ?? 0, actor, role, cancellationToken));
                 generatedCount++;
             }
         }
+
+        var automatic = await ApproveAndQueueAsync(applicationsToApprove, actor, cancellationToken);
 
         var headers = new List<ProjectBomHeader>(projects.Length * AllKinds.Length);
         foreach (var project in projects)
             headers.AddRange(await ListAsync(project.Id, actor, role, cancellationToken));
         var expectedCount = rootHasChildren ? 1 + (projects.Length - 1) * AllKinds.Length : AllKinds.Length;
-        return new BomHeaderGenerationResult(rootProjectId, expectedCount, generatedCount, existingCount, headers);
+        return new BomHeaderGenerationResult(
+            rootProjectId, expectedCount, generatedCount, existingCount, headers,
+            automatic.ApprovedCount, automatic.QueuedCount, automatic.BatchId);
     }
 
     public async Task<BomHeaderGenerationResult> EnsureApplicationsAfterBomApprovalAsync(
@@ -169,6 +186,7 @@ public sealed class BomHeaderService(
             var generatedCount = 0;
             var existingCount = 0;
             var expectedCount = 0;
+            var applicationsToApprove = new List<MaterialCodeApplication>();
             for (var index = 0; index < hierarchy.Count; index++)
             {
                 var project = hierarchy[index];
@@ -193,21 +211,29 @@ public sealed class BomHeaderService(
                         {
                             var application = await CreateHeaderApplicationAsync(project, kind, boundMaterial, actor, cancellationToken);
                             applications.Add(application);
+                            applicationsToApprove.Add(application);
                             generatedCount++;
                         }
                         else
                         {
+                            if (boundMaterial.ApprovalStatus == MaterialApprovalStatus.Draft
+                                && latest?.Status == MaterialCodeApplicationStatus.Pending)
+                                applicationsToApprove.Add(latest);
                             existingCount++;
                         }
                         continue;
                     }
 
-                    await GenerateMaterialAfterBomApprovalAsync(project, kind, binding?.RowVersion ?? 0, actor, cancellationToken);
+                    applicationsToApprove.Add(await GenerateMaterialAfterBomApprovalAsync(
+                        project, kind, binding?.RowVersion ?? 0, actor, cancellationToken));
                     generatedCount++;
                 }
             }
 
-            return new BomHeaderGenerationResult(rootProjectId, expectedCount, generatedCount, existingCount, []);
+            var automatic = await ApproveAndQueueAsync(applicationsToApprove, actor, cancellationToken);
+            return new BomHeaderGenerationResult(
+                rootProjectId, expectedCount, generatedCount, existingCount, [],
+                automatic.ApprovedCount, automatic.QueuedCount, automatic.BatchId);
         }
         finally
         {
@@ -215,7 +241,7 @@ public sealed class BomHeaderService(
         }
     }
 
-    private async Task<ProjectBomHeader> GenerateMaterialAsync(Project project, ProjectBomHeaderKind kind, long expectedRowVersion, string actor, UserRole role, CancellationToken cancellationToken)
+    private async Task<MaterialCodeApplication> GenerateMaterialAsync(Project project, ProjectBomHeaderKind kind, long expectedRowVersion, string actor, UserRole role, CancellationToken cancellationToken)
     {
         var categoryCode = RequiredCategoryCode(project, kind);
         var material = await materialService.CreateApplicationDraftAsync(new SaveMaterialCommand(
@@ -232,17 +258,15 @@ public sealed class BomHeaderService(
             null,
             null,
             CategoryCode: categoryCode), actor, role, cancellationToken);
-        var saved = await repository.SaveProjectBomHeaderBindingAsync(project.Id, kind, material.Id, expectedRowVersion, actor, cancellationToken);
+        await repository.SaveProjectBomHeaderBindingAsync(project.Id, kind, material.Id, expectedRowVersion, actor, cancellationToken);
         var application = await CreateHeaderApplicationAsync(project, kind, material, actor, cancellationToken);
         await repository.AppendAuditAsync(new AuditEntry(
             Guid.NewGuid(), timeProvider.GetUtcNow(), actor, "bom.header.generate", nameof(ProjectBomHeaderBinding),
-            $"{project.Id}:{kind}", $"为{KindLabel(kind)}提交料号申请，料号分类{categoryCode}"), cancellationToken);
-        return new ProjectBomHeader(project.Id, kind, saved.ParentKind, material.Id, OfficialMaterialCode(material), material.Name,
-            material.CategoryCode, material.ApprovalStatus, saved.RowVersion, application.Status, application.Id,
-            application.RequestedBy, application.RequestedAt);
+            $"{project.Id}:{kind}", $"为{KindLabel(kind)}生成料号并进入自动U9C处理，料号分类{categoryCode}"), cancellationToken);
+        return application;
     }
 
-    private async Task<ProjectBomHeader> GenerateMaterialAfterBomApprovalAsync(
+    private async Task<MaterialCodeApplication> GenerateMaterialAfterBomApprovalAsync(
         Project project,
         ProjectBomHeaderKind kind,
         long expectedRowVersion,
@@ -264,14 +288,32 @@ public sealed class BomHeaderService(
             null,
             null,
             CategoryCode: categoryCode), actor, cancellationToken);
-        var saved = await repository.SaveProjectBomHeaderBindingAsync(project.Id, kind, material.Id, expectedRowVersion, actor, cancellationToken);
+        await repository.SaveProjectBomHeaderBindingAsync(project.Id, kind, material.Id, expectedRowVersion, actor, cancellationToken);
         var application = await CreateHeaderApplicationAsync(project, kind, material, actor, cancellationToken);
         await repository.AppendAuditAsync(new AuditEntry(
             Guid.NewGuid(), timeProvider.GetUtcNow(), actor, "bom.header.application.auto-create", nameof(ProjectBomHeaderBinding),
-            $"{project.Id}:{kind}", $"{KindLabel(kind)}批准后自动提交{KindLabel(kind)}料号申请，料号分类{categoryCode}"), cancellationToken);
-        return new ProjectBomHeader(project.Id, kind, saved.ParentKind, material.Id, OfficialMaterialCode(material), material.Name,
-            material.CategoryCode, material.ApprovalStatus, saved.RowVersion, application.Status, application.Id,
-            application.RequestedBy, application.RequestedAt);
+            $"{project.Id}:{kind}", $"{KindLabel(kind)}批准后自动生成料号并进入U9C处理，料号分类{categoryCode}"), cancellationToken);
+        return application;
+    }
+
+    private async Task<(int ApprovedCount, int QueuedCount, Guid? BatchId)> ApproveAndQueueAsync(
+        IReadOnlyList<MaterialCodeApplication> applications,
+        string actor,
+        CancellationToken cancellationToken)
+    {
+        if (applications.Count == 0) return (0, 0, null);
+        var approved = await materialService.AutomaticallyApproveBomHeaderApplicationsAsync(
+            applications.Select(application => (application.Id, application.RowVersion)).ToArray(),
+            actor,
+            cancellationToken);
+        var taskIds = approved
+            .Where(result => result.Task is not null)
+            .Select(result => result.Task!.Id)
+            .Distinct()
+            .ToArray();
+        if (taskIds.Length == 0) return (approved.Count, 0, null);
+        var batch = await syncBatches.CreateAutomaticAsync(taskIds, actor, cancellationToken);
+        return (approved.Count, taskIds.Length, batch.Id);
     }
 
     private async Task<MaterialCodeApplication> CreateHeaderApplicationAsync(
@@ -295,7 +337,7 @@ public sealed class BomHeaderService(
         var saved = await materials.CreateMaterialCodeApplicationAsync(application, cancellationToken);
         await repository.AppendAuditAsync(new AuditEntry(
             Guid.NewGuid(), now, actor, "bom.header.application.create", nameof(MaterialCodeApplication),
-            saved.Id.ToString(), $"提交{KindLabel(kind)}料号审批：{project.Code} · {material.Name}"), cancellationToken);
+            saved.Id.ToString(), $"生成{KindLabel(kind)}料号自动处理记录：{project.Code} · {material.Name}"), cancellationToken);
         return saved;
     }
 

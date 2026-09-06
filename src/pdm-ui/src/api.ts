@@ -1,8 +1,9 @@
-import type { AddDrawingReviewMarkupInput, ApprovalStep, ApprovalU9AutomationResult, AuditEntry, BatchUpdateBomItemsInput, BomClassification, BomEmptyDeclaration, BomExportMode, BomGenerationResult, BomHeaderKind, BomItem, BomKind, BomValidationRules, BomVersion, BomVersionState, CreateProjectInput, CreateReleasePackageInput, CreateRoleInput, CreateSubprojectInput, CrmConnectionTestResult, CrmCustomerSyncResult, CrmIntegrationSettings, DocumentKind, DocumentModelDrawingRelation, DocumentNode, DocumentVersionComparison, DocumentVersionSummary, DocumentWhereUsed, DrawingReviewCandidate, DrawingReviewDecision, DrawingReviewPackage, DrawingReviewTarget, EditLockSummary, EquipmentTypeDefinition, FolderPermissionRule, MainProjectStaffingInput, ManagedDocument, ManufacturingBomBaseline, MaterialAttachment, MaterialAttachmentKind, MaterialCategory, MaterialCategoryRule, MaterialCodeApplication, MaterialCodeApplicationStatus, MaterialCodeDecisionResult, MaterialCodeResolution, MaterialDuplicateRule, MaterialKind, MaterialNumberingSettings, MaterialPage, MaterialRemovalReadiness, MaterialRemovalResult, MaterialSyncExecutionResult, MaterialSyncTask, MyApprovalTask, OrganizationDirectory, OrganizationUnit, PasswordResetTask, PdmCustomer, PdmMaterial, PdmSystemSettings, PdmUser, PdmUserProfile, ProgramTemplate, ProgramTemplateApprovalDecision, ProgramTemplateAttachmentKind, ProgramTemplateDraftInput, ProgramTemplateRevision, ProgramTemplateTask, ProgramTemplateVersionBump, ProjectBomHeader, ProjectBomU9SyncExecution, ProjectBomU9SyncPreview, ProjectFile, ProjectFileVersion, ProjectFolder, ProjectFolderTemplateNode, ProjectNumberingOptions, ProjectOrganization, ProjectSummary, ProjectVersionItem, ReferenceStatus, ReleaseItemComment, ReleasePackageSummary, ReleaseScope, RolePermissionDirectory, SaveMaterialInput, SaveOrganizationUnitInput, SavePdmUserInput, SaveProjectOrganizationInput, StandardLibraryCategory, StandardLibraryMaterialPage, U9BomQueryExecution, U9BomQueryInput, U9BomWriteExecution, U9BomWriteInput, U9BomWritePreview, U9ConnectionTestResult, U9ItemQueryResult, U9MaterialFullSyncStatusResponse, U9MaterialIntegrationSettings, U9MaterialSampleImportResult, U9MaterialSamplePreview, UpdateCrmIntegrationInput, UpdateProjectInput, UpdateReleasePackageDraftInput, UpdateU9MaterialIntegrationInput } from './types'
+import type { AddDrawingReviewMarkupInput, ApprovalStep, ApprovalU9AutomationResult, AuditEntry, BatchUpdateBomItemsInput, BomClassification, BomEmptyDeclaration, BomExportMode, BomGenerationResult, BomHeaderKind, BomItem, BomKind, BomValidationRules, BomVersion, BomVersionState, CreateProjectInput, CreateReleasePackageInput, CreateRoleInput, CreateSubprojectInput, CrmConnectionTestResult, CrmCustomerSyncResult, CrmIntegrationSettings, DocumentKind, DocumentModelDrawingRelation, DocumentNode, DocumentVersionComparison, DocumentVersionSummary, DocumentWhereUsed, DrawingReviewCandidate, DrawingReviewDecision, DrawingReviewPackage, DrawingReviewTarget, EditLockSummary, EquipmentTypeDefinition, FolderPermissionRule, MainProjectStaffingInput, ManagedDocument, ManufacturingBomBaseline, MaterialAttachment, MaterialAttachmentKind, MaterialCategory, MaterialCategoryRule, MaterialCodeApplication, MaterialCodeApplicationStatus, MaterialCodeDecisionResult, MaterialCodeResolution, MaterialDuplicateRule, MaterialKind, MaterialNumberingSettings, MaterialPage, MaterialRemovalReadiness, MaterialRemovalResult, MaterialSyncExecutionResult, MaterialSyncTask, MyApprovalTask, OrganizationDirectory, OrganizationUnit, PasswordResetTask, PdmCustomer, PdmMaterial, PdmSystemSettings, PdmUser, PdmUserProfile, ProgramTemplate, ProgramTemplateApprovalDecision, ProgramTemplateAttachmentKind, ProgramTemplateDraftInput, ProgramTemplateRevision, ProgramTemplateTask, ProgramTemplateVersionBump, ProjectBomHeader, ProjectBomU9SyncExecution, ProjectBomU9SyncPreview, ProjectFile, ProjectFileVersion, ProjectFolder, ProjectFolderTemplateNode, ProjectNumberingOptions, ProjectOrganization, ProjectSummary, ProjectVersionItem, ReferenceStatus, ReleaseItemComment, ReleasePackageSummary, ReleaseScope, RolePermissionDirectory, SaveMaterialInput, SaveOrganizationUnitInput, SavePdmUserInput, SaveProjectOrganizationInput, StandardLibraryCategory, StandardLibraryMaterialPage, U9BomQueryExecution, U9BomQueryInput, U9BomWriteExecution, U9BomWriteInput, U9BomWritePreview, U9ConnectionTestResult, U9InventoryFilters, U9InventoryPage, U9InventorySyncSettings, U9InventorySyncStatusResponse, U9ItemQueryResult, U9MaterialFullSyncStatusResponse, U9MaterialIntegrationSettings, U9MaterialSampleImportResult, U9MaterialSamplePreview, UpdateCrmIntegrationInput, UpdateProjectInput, UpdateReleasePackageDraftInput, UpdateU9MaterialIntegrationInput } from './types'
 import type { MaterialSyncBatch } from './types'
 import type { ApprovalTransferCandidate, UserNotification } from './types'
 
 import type { BomSourceReclassificationPreview } from './types'
+import type { MaterialRelationCompleteness, MaterialRelationTemplate, SaveMaterialRelationTemplateInput } from './types'
 
 const localDesktopOrigin = window.location.hostname === 'appassets.pdm.local'
 const needsLocalApiFallback = localDesktopOrigin || import.meta.env.MODE === 'test'
@@ -12,6 +13,13 @@ export class PdmApiError extends Error {
   constructor(message: string, public readonly status: number) {
     super(message)
   }
+}
+
+function withApiContext<T>(label: string, request: Promise<T>): Promise<T> {
+  return request.catch(error => {
+    if (error instanceof PdmApiError) throw new PdmApiError(`${label}：${error.message}`, error.status)
+    throw error
+  })
 }
 
 export interface AuthSession {
@@ -264,6 +272,8 @@ interface ApiBomItem {
   isManualUnmatched?: boolean
   isManuallyRetained?: boolean
   isManuallyExcluded?: boolean
+  isReleaseExcluded?: boolean
+  releaseExclusionReason?: string | null
   reconciliationStatus?: string | null
   reconciliationNote?: string | null
   reconciliationUpdatedBy?: string | null
@@ -309,6 +319,7 @@ interface ApiReleasePackage {
   selectedBomItemIds?: string[]
   createsManufacturingBaseline?: boolean
   locksDocuments?: boolean
+  wholeSetMultiplier?: number
   standardBomVersionId?: string | null
   nonStandardBomVersionId?: string | null
   electricalBomVersionId?: string | null
@@ -412,7 +423,7 @@ export function bindProjectBomHeaderMaterial(projectId: string, kind: BomHeaderK
   }, token)
 }
 
-export function generateProjectBomHeaderHierarchy(projectId: string, token: string): Promise<{ rootProjectId: string; expectedCount: number; generatedCount: number; existingCount: number; headers: ProjectBomHeader[] }> {
+export function generateProjectBomHeaderHierarchy(projectId: string, token: string): Promise<{ rootProjectId: string; expectedCount: number; generatedCount: number; existingCount: number; headers: ProjectBomHeader[]; autoApprovedCount: number; queuedSyncCount: number; automaticBatchId?: string | null }> {
   return requestJson(`/api/projects/${projectId}/bom-headers/generate-hierarchy`, { method: 'POST' }, token)
 }
 
@@ -438,6 +449,10 @@ export function getMaterialRemovalReadiness(materialId: string, token: string): 
 
 export function archiveMaterial(materialId: string, expectedRowVersion: number, token: string): Promise<PdmMaterial> {
   return requestJson<PdmMaterial>(`/api/materials/${materialId}/archive?expectedRowVersion=${expectedRowVersion}`, { method: 'POST' }, token)
+}
+
+export function reactivateMaterial(materialId: string, expectedRowVersion: number, token: string): Promise<PdmMaterial> {
+  return requestJson<PdmMaterial>(`/api/materials/${materialId}/reactivate?expectedRowVersion=${expectedRowVersion}`, { method: 'POST' }, token)
 }
 
 export function listMaterialAttachments(materialId: string, token: string, kind?: MaterialAttachmentKind): Promise<MaterialAttachment[]> {
@@ -543,6 +558,32 @@ export function setStandardLibraryRecommendation(materialId: string, isRecommend
   }, token)
 }
 
+export function listMaterialRelationTemplates(token: string, includeDraft = false): Promise<MaterialRelationTemplate[]> {
+  return requestJson<MaterialRelationTemplate[]>(`/api/material-relations/templates${includeDraft ? '?includeDraft=true' : ''}`, {}, token)
+}
+
+export function saveMaterialRelationTemplate(input: SaveMaterialRelationTemplateInput, token: string, templateId?: string): Promise<MaterialRelationTemplate> {
+  return requestJson<MaterialRelationTemplate>(templateId ? `/api/material-relations/templates/${templateId}/draft` : '/api/material-relations/templates', {
+    method: templateId ? 'PUT' : 'POST', body: JSON.stringify(input),
+  }, token)
+}
+
+export function publishMaterialRelationTemplate(templateId: string, revisionId: string, expectedRowVersion: number, token: string): Promise<MaterialRelationTemplate> {
+  return requestJson<MaterialRelationTemplate>(`/api/material-relations/templates/${templateId}/publish`, {
+    method: 'POST', body: JSON.stringify({ revisionId, expectedRowVersion }),
+  }, token)
+}
+
+export function getMaterialRelationCompleteness(projectId: string, token: string): Promise<MaterialRelationCompleteness> {
+  return requestJson<MaterialRelationCompleteness>(`/api/material-relations/projects/${projectId}/completeness`, {}, token)
+}
+
+export function applyMaterialRelations(projectId: string, mainMaterials: Array<{ mainBomItemId: string; choices: Array<{ groupId: string; optionIds: string[] }> }>, token: string): Promise<MaterialRelationCompleteness> {
+  return requestJson<MaterialRelationCompleteness>(`/api/material-relations/projects/${projectId}/apply`, {
+    method: 'POST', body: JSON.stringify({ mainMaterials }),
+  }, token)
+}
+
 export function linkBomMaterial(projectId: string, bomItemId: string, materialId: string, token: string): Promise<PdmMaterial> {
   return requestJson<PdmMaterial>('/api/materials/link-bom', { method: 'POST', body: JSON.stringify({ projectId, bomItemId, materialId }) }, token)
 }
@@ -637,6 +678,37 @@ export function getU9MaterialIntegration(token: string): Promise<U9MaterialInteg
 
 export function getU9MaterialFullSyncStatus(token: string): Promise<U9MaterialFullSyncStatusResponse> {
   return requestJson<U9MaterialFullSyncStatusResponse>('/api/u9-material-full-sync/status', {}, token)
+}
+
+export function listMaterialInventory(filters: U9InventoryFilters, token: string): Promise<U9InventoryPage> {
+  const params = new URLSearchParams()
+  if (filters.materialCode?.trim()) params.set('materialCode', filters.materialCode.trim())
+  if (filters.itemName?.trim()) params.set('itemName', filters.itemName.trim())
+  if (filters.specification?.trim()) params.set('specification', filters.specification.trim())
+  if (filters.brand?.trim()) params.set('brand', filters.brand.trim())
+  if (filters.warehouse?.trim()) params.set('warehouse', filters.warehouse.trim())
+  if (filters.projectCode?.trim()) params.set('projectCode', filters.projectCode.trim())
+  if (filters.subproject?.trim()) params.set('subproject', filters.subproject.trim())
+  params.set('positiveStockOnly', String(filters.positiveStockOnly ?? true))
+  params.set('page', String(filters.page ?? 1))
+  params.set('pageSize', String(filters.pageSize ?? 50))
+  return requestJson<U9InventoryPage>(`/api/material-inventory?${params.toString()}`, {}, token)
+}
+
+export function refreshMaterialInventory(materialCode: string, token: string): Promise<U9InventoryPage> {
+  return requestJson<U9InventoryPage>(`/api/material-inventory/${encodeURIComponent(materialCode)}/refresh`, { method: 'POST' }, token)
+}
+
+export function getU9InventorySyncStatus(token: string): Promise<U9InventorySyncStatusResponse> {
+  return requestJson<U9InventorySyncStatusResponse>('/api/u9-inventory-sync/status', {}, token)
+}
+
+export function updateU9InventorySyncSettings(settings: Pick<U9InventorySyncSettings, 'autoSyncEnabled' | 'syncIntervalMinutes' | 'queryPath'>, token: string): Promise<U9InventorySyncSettings> {
+  return requestJson<U9InventorySyncSettings>('/api/u9-inventory-sync/settings', { method: 'PUT', body: JSON.stringify(settings) }, token)
+}
+
+export function startU9InventoryFullSync(token: string): Promise<{ message: string }> {
+  return requestJson<{ message: string }>('/api/u9-inventory-sync/run', { method: 'POST' }, token)
 }
 
 export function startU9MaterialFullSync(token: string): Promise<{ message: string }> {
@@ -1017,6 +1089,13 @@ export async function batchRestoreBomItems(projectId: string, itemIds: string[],
   return saved.map(mapBomItem)
 }
 
+export async function setBomReleaseExclusion(projectId: string, itemIds: string[], excluded: boolean, reason: string, token: string): Promise<BomItem[]> {
+  const saved = await requestJson<ApiBomItem[]>(`/api/projects/${projectId}/boms/items/release-exclusion`, {
+    method: 'POST', body: JSON.stringify({ itemIds, excluded, reason }),
+  }, token)
+  return saved.map(mapBomItem)
+}
+
 export async function restoreBomItemsFromSource(projectId: string, itemIds: string[], token: string): Promise<BomItem[]> {
   const saved = await requestJson<ApiBomItem[]>(`/api/projects/${projectId}/boms/items/restore-source`, {
     method: 'POST', body: JSON.stringify({ itemIds }),
@@ -1331,26 +1410,26 @@ function mapFolderTemplateNode(node: Omit<ProjectFolderTemplateNode, 'purpose' |
 }
 
 export async function loadProjectWorkspace(projectId: string, token: string): Promise<ProjectWorkspaceData> {
-  const project = await requestJson<ApiProject>(`/api/projects/${projectId}`, {}, token)
+  const project = await withApiContext('项目详情', requestJson<ApiProject>(`/api/projects/${projectId}`, {}, token))
   const mappedProject = mapProject(project)
   if (!mappedProject.canReadContent) {
     return { project: mappedProject, root: emptyProjectRoot(project), hasDocuments: false, documents: [], documentRelations: [], folders: [], standardBom: [], nonStandardBom: [], unclassifiedBom: [], electricalBom: [], bomSourceData: [], bomEmptyDeclarations: [], bomVersions: [], bomBaselines: [], drawingReviews: [], materialCodeApplications: [], releasePackages: [], releasePackage: null }
   }
 
   const [documentWorkspace, folders, standard, nonStandard, unclassified, electrical, sourceData, bomEmptyDeclarations, bomVersions, bomBaselines, drawingReviews, materialCodeApplications, releasePackages] = await Promise.all([
-    loadProjectDocumentWorkspace(project.id, token),
-    listProjectFolders(project.id, token),
-    requestJson<ApiBomItem[]>(`/api/projects/${project.id}/boms/Standard`, {}, token),
-    requestJson<ApiBomItem[]>(`/api/projects/${project.id}/boms/NonStandard`, {}, token),
-    requestJson<ApiBomItem[]>(`/api/projects/${project.id}/boms/Unclassified`, {}, token),
-    requestJson<ApiBomItem[]>(`/api/projects/${project.id}/boms/Electrical`, {}, token),
-    requestJson<ApiBomItem[]>(`/api/projects/${project.id}/bom-source-data`, {}, token),
-    requestJson<BomEmptyDeclaration[]>(`/api/projects/${project.id}/boms/empty-declarations`, {}, token),
-    listBomVersions(project.id, token),
-    listBomBaselines(project.id, token),
-    listDrawingReviews(project.id, token),
-    listMaterialCodeApplications(token, project.id),
-    requestJson<ApiReleasePackage[]>(`/api/projects/${project.id}/release-packages`, {}, token),
+    withApiContext('图档工作区', loadProjectDocumentWorkspace(project.id, token)),
+    withApiContext('项目文件夹', listProjectFolders(project.id, token)),
+    withApiContext('标准件BOM', requestJson<ApiBomItem[]>(`/api/projects/${project.id}/boms/Standard`, {}, token)),
+    withApiContext('非标件BOM', requestJson<ApiBomItem[]>(`/api/projects/${project.id}/boms/NonStandard`, {}, token)),
+    withApiContext('待分类BOM', requestJson<ApiBomItem[]>(`/api/projects/${project.id}/boms/Unclassified`, {}, token)),
+    withApiContext('电气BOM', requestJson<ApiBomItem[]>(`/api/projects/${project.id}/boms/Electrical`, {}, token)),
+    withApiContext('BOM源数据', requestJson<ApiBomItem[]>(`/api/projects/${project.id}/bom-source-data`, {}, token)),
+    withApiContext('空BOM声明', requestJson<BomEmptyDeclaration[]>(`/api/projects/${project.id}/boms/empty-declarations`, {}, token)),
+    withApiContext('BOM版本', listBomVersions(project.id, token)),
+    withApiContext('制造基线', listBomBaselines(project.id, token)),
+    withApiContext('图纸审核', listDrawingReviews(project.id, token)),
+    withApiContext('料号申请', listMaterialCodeApplications(token, project.id)),
+    withApiContext('发布记录', requestJson<ApiReleasePackage[]>(`/api/projects/${project.id}/release-packages`, {}, token)),
   ])
 
   return {
@@ -1374,13 +1453,13 @@ export async function loadProjectWorkspace(projectId: string, token: string): Pr
 
 export async function loadProjectDocumentWorkspace(projectId: string, token: string): Promise<ProjectDocumentWorkspaceData> {
   const [documents, libraryDocuments, documentRelations, referenceRoot] = await Promise.all([
-    requestJson<ApiDocument[]>(`/api/projects/${projectId}/documents`, {}, token),
-    requestJson<ApiDocument[]>(`/api/projects/${projectId}/folder-documents`, {}, token),
-    requestJson<DocumentModelDrawingRelation[]>(`/api/projects/${projectId}/document-relations`, {}, token),
-    requestJson<ApiReferenceNode>(`/api/projects/${projectId}/reference-tree`, {}, token).catch(error => {
+    withApiContext('项目图档', requestJson<ApiDocument[]>(`/api/projects/${projectId}/documents`, {}, token)),
+    withApiContext('文件夹图档', requestJson<ApiDocument[]>(`/api/projects/${projectId}/folder-documents`, {}, token)),
+    withApiContext('图档关系', requestJson<DocumentModelDrawingRelation[]>(`/api/projects/${projectId}/document-relations`, {}, token)),
+    withApiContext('引用结构', requestJson<ApiReferenceNode>(`/api/projects/${projectId}/reference-tree`, {}, token).catch(error => {
       if (error instanceof PdmApiError && error.status === 404) return null
       throw error
-    }),
+    })),
   ])
   const documentsById = new Map([...documents, ...libraryDocuments].map((document) => [document.id, document]))
   const documentsByFileName = uniqueDocumentsByFileName(documentsById.values())
@@ -1512,6 +1591,7 @@ function mapReferenceNode(
     .map((child) => mapReferenceNode(child, documentsById, documentsByFileName, snapshotVersionsByFileName, false))
   return {
     id: node.nodeId || node.instancePath,
+    instancePath: node.instancePath,
     documentId: documentId ?? undefined,
     drawingNumber: document?.drawingNumber ?? node.fileName.replace(/\.[^.]+$/, ''),
     name: document?.name || meaningfulReferenceName(node.displayName, node.fileName),
@@ -1675,6 +1755,8 @@ function mapBomItem(item: ApiBomItem): BomItem {
     manualUnmatched: item.isManualUnmatched ?? false,
     manuallyRetained: item.isManuallyRetained ?? false,
     manuallyExcluded: item.isManuallyExcluded ?? false,
+    releaseExcluded: item.isReleaseExcluded ?? false,
+    releaseExclusionReason: item.releaseExclusionReason ?? undefined,
     reconciliationStatus: item.reconciliationStatus ?? undefined,
     reconciliationNote: item.reconciliationNote ?? undefined,
     reconciliationUpdatedBy: item.reconciliationUpdatedBy ?? undefined,
@@ -1769,6 +1851,7 @@ function mapReleasePackage(releasePackage: ApiReleasePackage): ReleasePackageSum
     selectedBomItemIds: releasePackage.selectedBomItemIds ?? [],
     createsManufacturingBaseline: releasePackage.createsManufacturingBaseline ?? true,
     locksDocuments: releasePackage.locksDocuments ?? true,
+    wholeSetMultiplier: releasePackage.wholeSetMultiplier ?? 1,
     standardBomVersionId: releasePackage.standardBomVersionId ?? undefined,
     nonStandardBomVersionId: releasePackage.nonStandardBomVersionId ?? undefined,
     electricalBomVersionId: releasePackage.electricalBomVersionId ?? undefined,

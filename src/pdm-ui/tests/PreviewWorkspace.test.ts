@@ -1,5 +1,5 @@
 import { mount } from '@vue/test-utils'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import PreviewWorkspace from '../src/components/PreviewWorkspace.vue'
 import type { BomItem, DocumentNode } from '../src/types'
 
@@ -40,20 +40,38 @@ describe('PreviewWorkspace', () => {
     })
 
     const materialNumber = wrapper.get('[aria-label="图档属性"] > div:first-child')
-    expect(materialNumber.get('dt').text()).toBe('料号')
+    expect(materialNumber.get('dt').text()).toBe('物料编码')
     expect(materialNumber.get('dd').text()).toBe('01020014733')
+    const materialName = wrapper.get('[aria-label="图档属性"] > div:nth-child(2)')
+    expect(materialName.get('dd').text()).toBe('导向轴支座')
   })
 
-  it('shows only the active markup actions and hides reference and obsolete actions', () => {
+  it('shows only the active markup actions and hides reference and obsolete actions', async () => {
+    const postMessage = vi.fn()
+    Object.defineProperty(window, 'chrome', {
+      configurable: true,
+      value: { webview: { postMessage } },
+    })
     const wrapper = mount(PreviewWorkspace, {
-      props: { selected, related: [], bomItem, desktopAvailable: true, canManageLifecycle: true },
+      props: { selected, related: [], bomItem, desktopAvailable: true, canManageLifecycle: true, canEditDocuments: true },
     })
 
     const markupToolbar = wrapper.get('[aria-label="图形批注工具"]')
     expect(markupToolbar.findAll('button').map(button => button.attributes('aria-label'))).toEqual([
-      '保存批注', '引线批注', '云线批注', '框选批注', '手绘批注',
+      '引线批注', '云线批注', '框选批注', '手绘批注',
+    ])
+    expect(wrapper.findAll('.pdm-preview-command').map(button => button.attributes('aria-label'))).toEqual([
+      '保存批注', '打开最新', '编辑打开',
     ])
     expect(wrapper.find('button[aria-label="使用位置"]').exists()).toBe(false)
     expect(wrapper.find('button[aria-label="作废图档"]').exists()).toBe(false)
+    expect(wrapper.find('[aria-label="图档属性"]').exists()).toBe(false)
+
+    window.dispatchEvent(new CustomEvent('pdm-preview-markup-status', { detail: { state: 'dirty' } }))
+    await wrapper.vm.$nextTick()
+    expect(wrapper.get('button[aria-label="保存批注"]').classes()).toContain('is-markup-dirty')
+
+    await wrapper.get('button[aria-label="保存批注"]').trigger('click')
+    expect(postMessage).toHaveBeenCalledWith({ type: 'preview-host-save-markup', payload: undefined })
   })
 })

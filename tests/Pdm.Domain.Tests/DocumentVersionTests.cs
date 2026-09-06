@@ -642,7 +642,7 @@ public sealed class DocumentVersionTests
     }
 
     [Fact]
-    public async Task ProjectRootCheckIn_RefreshesSourceSnapshotWithoutChangingMechanicalBom()
+    public async Task ProjectRootAndChildCheckIn_RefreshSourceSnapshotAndMechanicalBom()
     {
         var repository = new Infrastructure.InMemoryPdmRepository(TimeProvider.System);
         var project = Assert.Single(await repository.ListProjectsAsync(CancellationToken.None));
@@ -683,7 +683,9 @@ public sealed class DocumentVersionTests
 
         Assert.True(result.VersionCreated);
         Assert.Null(result.BomUpdateError);
-        Assert.Null(result.BomUpdate);
+        var childBomUpdate = Assert.IsType<Application.BomGenerationResult>(result.BomUpdate);
+        Assert.True(childBomUpdate.Applied);
+        Assert.Contains(childBomUpdate.StandardItems, item => item.SourceDocumentId == childId && item.DrawingNumber == "AUTO-BOM-001");
 
         var mechanicalBeforeRoot = (await repository.GetBomAsync(project.Id, BomKind.Standard, CancellationToken.None))
             .Concat(await repository.GetBomAsync(project.Id, BomKind.NonStandard, CancellationToken.None))
@@ -716,13 +718,15 @@ public sealed class DocumentVersionTests
 
         Assert.True(rootResult.VersionCreated);
         Assert.Null(rootResult.BomUpdateError);
-        Assert.Null(rootResult.BomUpdate);
+        Assert.True(Assert.IsType<Application.BomGenerationResult>(rootResult.BomUpdate).Applied);
         var mechanicalAfterRoot = (await repository.GetBomAsync(project.Id, BomKind.Standard, CancellationToken.None))
             .Concat(await repository.GetBomAsync(project.Id, BomKind.NonStandard, CancellationToken.None))
             .Concat(await repository.GetBomAsync(project.Id, BomKind.Unclassified, CancellationToken.None))
             .Concat(await repository.GetBomAsync(project.Id, BomKind.Virtual, CancellationToken.None))
             .ToArray();
-        Assert.Equal(mechanicalBeforeRoot, mechanicalAfterRoot);
+        Assert.Equal(
+            mechanicalBeforeRoot.Select(item => (item.Id, item.Kind, item.DrawingNumber, item.Quantity)),
+            mechanicalAfterRoot.Select(item => (item.Id, item.Kind, item.DrawingNumber, item.Quantity)));
 
         var refreshed = Assert.Single(
             await workflow.GetBomSourceDataAsync(project.Id, rootActor, UserRole.Administrator, CancellationToken.None),
@@ -731,6 +735,65 @@ public sealed class DocumentVersionTests
         Assert.Equal("自动更新标准组件", refreshed.Name);
         Assert.NotNull(refreshed.ReconciliationStatus);
         Assert.NotNull(refreshed.ReconciliationNote);
+    }
+
+    [Fact]
+    public async Task CheckIn_DuringReleaseApproval_PreservesLockedBomAndReportsRefreshError()
+    {
+        var repository = new Infrastructure.InMemoryPdmRepository(TimeProvider.System);
+        var project = Assert.Single(await repository.ListProjectsAsync(CancellationToken.None));
+        var projectRoot = Assert.IsType<DocumentReferenceNode>(await repository.GetReferenceTreeAsync(project.Id, CancellationToken.None));
+        var child = projectRoot.Children.First(node => node.DocumentId.HasValue);
+        var childId = child.DocumentId!.Value;
+        var before = (await repository.GetBomAsync(project.Id, BomKind.Standard, CancellationToken.None))
+            .Concat(await repository.GetBomAsync(project.Id, BomKind.NonStandard, CancellationToken.None))
+            .Select(item => (item.Id, item.Kind, item.DrawingNumber, item.Quantity))
+            .ToArray();
+        await repository.CreateReleasePackageAsync(new ReleasePackage(
+            Guid.NewGuid(), project.Id, "RP-CHECKIN-LOCK", ReleasePackageState.ProcessReview,
+            Guid.NewGuid(), "W1", "W1", [], DateTimeOffset.UtcNow, null, null)
+        {
+            Scope = ReleaseScope.StandardSupplement
+        }, CancellationToken.None);
+        var sessionId = Guid.NewGuid();
+        await repository.CheckoutAsync(
+            childId, "admin", sessionId, "test-machine", DateTimeOffset.UtcNow.AddHours(1), CancellationToken.None);
+        var workflow = new Application.PdmWorkflowService(
+            repository,
+            new RecordingFileStorage(),
+            new Infrastructure.AtomicReleasePackagePublisher(TimeProvider.System),
+            TimeProvider.System);
+
+        var result = await workflow.CheckInAsync(
+            childId,
+            "admin",
+            UserRole.Administrator,
+            sessionId,
+            new Application.StoredFile("unused", 1, new string('F', 64), DateTimeOffset.UtcNow),
+            "审批期间更新图档",
+            new Dictionary<string, string?>
+            {
+                ["SourceFileSha256"] = new string('6', 64),
+                ["物料分类"] = "标准件",
+                ["物料编码"] = "LOCKED-BOM-001",
+                ["物料名称"] = "审批锁定测试组件",
+                ["型号"] = "M16",
+                ["单位"] = "个"
+            },
+            new CadReferenceSnapshot(
+                Guid.NewGuid(), project.Id, childId, DateTimeOffset.UtcNow, "admin", child, new string('E', 64)),
+            false,
+            true,
+            CancellationToken.None);
+
+        Assert.True(result.VersionCreated);
+        Assert.Null(result.BomUpdate);
+        Assert.Contains("标准件BOM已锁定", result.BomUpdateError);
+        var after = (await repository.GetBomAsync(project.Id, BomKind.Standard, CancellationToken.None))
+            .Concat(await repository.GetBomAsync(project.Id, BomKind.NonStandard, CancellationToken.None))
+            .Select(item => (item.Id, item.Kind, item.DrawingNumber, item.Quantity))
+            .ToArray();
+        Assert.Equal(before, after);
     }
 
     [Fact]

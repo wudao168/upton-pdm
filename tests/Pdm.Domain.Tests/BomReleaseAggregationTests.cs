@@ -42,6 +42,24 @@ public sealed class BomReleaseAggregationTests
         Assert.Equal(3, Assert.Single(summary.PurchaseDemand).Quantity);
     }
 
+    [Fact]
+    public void Build_AppliesWholeSetMultiplierAndSkipsNoPublishItems()
+    {
+        var included = Item("1001", 2, "PARENT-A");
+        var excluded = Item("1002", 5, "PARENT-A") with
+        {
+            IsReleaseExcluded = true,
+            ReleaseExclusionReason = "其他项目已发布"
+        };
+        var package = Package([included, excluded]) with { WholeSetMultiplier = 3 };
+
+        var summary = BomReleaseAggregation.Build(package);
+
+        Assert.Equal(6, Assert.Single(summary.ProductionStructure).Quantity);
+        Assert.Equal("1001", Assert.Single(summary.PurchaseDemand).MaterialCode);
+        Assert.Equal(6, Assert.Single(summary.PurchaseDemand).Quantity);
+    }
+
     private static BomItem Item(string materialCode, decimal quantity, string? parentMaterialCode) =>
         new(Guid.NewGuid(), Guid.NewGuid(), BomKind.Standard, 1, materialCode, "测试物料", quantity, "001", null, "M1", "W1", true)
         {

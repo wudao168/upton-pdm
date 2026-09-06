@@ -6,6 +6,7 @@ using System.Diagnostics;
 using System.Globalization;
 using System.IO;
 using System.Linq;
+using System.Net;
 using System.Net.Http;
 using System.Net.Http.Headers;
 using System.Runtime.InteropServices;
@@ -58,6 +59,10 @@ public partial class MainWindow : Window
     private bool reviewOverlaySuspended;
     private bool previewDocumentReady;
     private int previewRequestGeneration;
+    private Guid? previewDocumentId;
+    private Guid? previewVersionId;
+    private string previewMarkupDirectory = string.Empty;
+    private int previewMarkupSaveActive;
     private HwndSource? windowSource;
     private IntPtr systemMenu;
     private bool startWithWindows;
@@ -533,6 +538,12 @@ public partial class MainWindow : Window
         if (type == "preview-host-command" && TryReadPayloadString(message, "command", out var previewCommand))
         {
             embeddedPreview?.ExecuteCommand(previewCommand);
+            return;
+        }
+
+        if (type == "preview-host-save-markup")
+        {
+            _ = SaveCurrentMarkupAsync();
             return;
         }
 
@@ -1141,6 +1152,9 @@ public partial class MainWindow : Window
     {
         var requestGeneration = Interlocked.Increment(ref previewRequestGeneration);
         previewDocumentReady = false;
+        previewDocumentId = null;
+        previewVersionId = null;
+        previewMarkupDirectory = string.Empty;
         PreviewFrame.Visibility = Visibility.Collapsed;
         UpdatePreviewProperties(payload);
         try
@@ -1212,9 +1226,31 @@ public partial class MainWindow : Window
                 return;
             }
 
+            var markupPath = Path.Combine(cacheDirectory, "review.markup");
+            try
+            {
+                if (!await DownloadMarkupAsync(documentId, version.Id, markupPath))
+                {
+                    markupPath = string.Empty;
+                }
+            }
+            catch (Exception exception)
+            {
+                markupPath = string.Empty;
+                await PublishMarkupStatusAsync("warning", $"历史批注暂未加载：{exception.Message}");
+            }
+
+            if (requestGeneration != previewRequestGeneration)
+            {
+                return;
+            }
+
             EnsureEmbeddedPreview();
-            embeddedPreview!.OpenDocument(cachedFile);
+            embeddedPreview!.OpenDocument(cachedFile, markupPath);
             previewDocumentReady = true;
+            previewDocumentId = documentId;
+            previewVersionId = version.Id;
+            previewMarkupDirectory = cacheDirectory;
             ApplyPreviewBounds();
             await PublishPreviewStatusAsync("ready", Path.GetFileName(cachedFile), string.Empty);
         }
@@ -1226,10 +1262,123 @@ public partial class MainWindow : Window
             }
 
             previewDocumentReady = false;
+            previewDocumentId = null;
+            previewVersionId = null;
+            previewMarkupDirectory = string.Empty;
             PreviewFrame.Visibility = Visibility.Collapsed;
             embeddedPreview?.CloseDocument();
             await PublishPreviewStatusAsync("error", string.Empty, exception.Message);
         }
+    }
+
+    private async Task SaveCurrentMarkupAsync()
+    {
+        if (Interlocked.Exchange(ref previewMarkupSaveActive, 1) != 0)
+        {
+            return;
+        }
+
+        try
+        {
+            if (!previewDocumentReady || embeddedPreview == null
+                || previewDocumentId is not Guid documentId
+                || previewVersionId is not Guid versionId
+                || string.IsNullOrWhiteSpace(previewMarkupDirectory))
+            {
+                throw new InvalidOperationException("当前预览尚未加载完成，不能保存批注。");
+            }
+
+            await PublishMarkupStatusAsync("saving", "正在保存批注…");
+            Directory.CreateDirectory(previewMarkupDirectory);
+            var requestedPath = Path.Combine(previewMarkupDirectory, $"review-{Guid.NewGuid():N}.markup");
+            embeddedPreview.SaveMarkup(requestedPath);
+            var generatedMarkupPath = await WaitForMarkupFileAsync(requestedPath, TimeSpan.FromSeconds(15));
+
+            using var request = CreateApiRequest(HttpMethod.Put, $"/api/documents/{documentId}/versions/{versionId}/markup");
+            using var input = new FileStream(generatedMarkupPath, FileMode.Open, FileAccess.Read, FileShare.Read, 128 * 1024, true);
+            request.Content = new StreamContent(input, 128 * 1024);
+            request.Content.Headers.ContentType = new MediaTypeHeaderValue("application/octet-stream");
+            using var response = await apiClient.SendAsync(request);
+            var responseText = await response.Content.ReadAsStringAsync();
+            if (!response.IsSuccessStatusCode)
+            {
+                throw new InvalidOperationException(ReadApiError(responseText, "批注上传失败。"));
+            }
+
+            await PublishMarkupStatusAsync("saved", "批注已保存。切换图档时不会保存或修改源图纸。");
+        }
+        catch (Exception exception)
+        {
+            await PublishMarkupStatusAsync("error", exception.Message);
+        }
+        finally
+        {
+            Interlocked.Exchange(ref previewMarkupSaveActive, 0);
+        }
+    }
+
+    private async Task<bool> DownloadMarkupAsync(Guid documentId, Guid versionId, string targetPath)
+    {
+        using var request = CreateApiRequest(HttpMethod.Get, $"/api/documents/{documentId}/versions/{versionId}/markup");
+        using var response = await apiClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead);
+        if (response.StatusCode == HttpStatusCode.NotFound)
+        {
+            if (File.Exists(targetPath)) File.Delete(targetPath);
+            return false;
+        }
+        if (!response.IsSuccessStatusCode)
+        {
+            throw new InvalidOperationException(ReadApiError(await response.Content.ReadAsStringAsync(), "历史批注下载失败。"));
+        }
+
+        var temporaryPath = targetPath + $".{Guid.NewGuid():N}.download";
+        try
+        {
+            using (var input = await response.Content.ReadAsStreamAsync())
+            using (var output = new FileStream(temporaryPath, FileMode.CreateNew, FileAccess.Write, FileShare.None, 128 * 1024, true))
+            {
+                await input.CopyToAsync(output);
+            }
+            if (new FileInfo(temporaryPath).Length == 0)
+            {
+                throw new InvalidDataException("服务器返回的批注文件为空。");
+            }
+            if (File.Exists(targetPath)) File.Delete(targetPath);
+            File.Move(temporaryPath, targetPath);
+            return true;
+        }
+        finally
+        {
+            if (File.Exists(temporaryPath)) File.Delete(temporaryPath);
+        }
+    }
+
+    private static async Task<string> WaitForMarkupFileAsync(string requestedPath, TimeSpan timeout)
+    {
+        var directory = Path.GetDirectoryName(requestedPath) ?? throw new InvalidOperationException("批注缓存目录无效。");
+        var prefix = Path.GetFileNameWithoutExtension(requestedPath);
+        var deadline = DateTime.UtcNow + timeout;
+        string? previousPath = null;
+        long previousLength = -1;
+        while (DateTime.UtcNow < deadline)
+        {
+            var candidate = Directory.EnumerateFiles(directory, $"{prefix}*.markup")
+                .OrderByDescending(path => File.GetLastWriteTimeUtc(path))
+                .FirstOrDefault(path => new FileInfo(path).Length > 0);
+            if (candidate != null)
+            {
+                var length = new FileInfo(candidate).Length;
+                if (string.Equals(candidate, previousPath, StringComparison.OrdinalIgnoreCase) && length == previousLength)
+                {
+                    return candidate;
+                }
+                previousPath = candidate;
+                previousLength = length;
+            }
+            await Task.Delay(150);
+        }
+
+        throw new InvalidOperationException("eDrawings未生成有效的批注文件。");
     }
 
     private void EnsureEmbeddedPreview()
@@ -1243,6 +1392,8 @@ public partial class MainWindow : Window
         embeddedPreview.ApplyTheme(currentTheme);
         embeddedPreview.UserMessageRequested += message => Dispatcher.BeginInvoke(new Action(() =>
             WpfMessageBox.Show(this, message, "UPLM", MessageBoxButton.OK, MessageBoxImage.Information)));
+        embeddedPreview.MarkupModifiedChanged += modified => Dispatcher.BeginInvoke(new Action(() =>
+            _ = PublishMarkupStatusAsync(modified ? "dirty" : "clean", modified ? "批注尚未保存。" : string.Empty)));
         embeddedPreview.UpdateProperties(previewProperties);
         EmbeddedPreviewHost.Child = embeddedPreview;
     }
@@ -1329,11 +1480,11 @@ public partial class MainWindow : Window
 
         var scaleX = bounds.ViewportWidth > 0 ? WorkspaceView.ActualWidth / bounds.ViewportWidth : 1d;
         var scaleY = bounds.ViewportHeight > 0 ? WorkspaceView.ActualHeight / bounds.ViewportHeight : 1d;
-        var origin = WorkspaceView.TranslatePoint(new System.Windows.Point(0, 0), RootGrid);
+        var origin = WorkspaceView.TranslatePoint(new System.Windows.Point(0, 0), PreviewOverlay);
         var viewportLeft = Math.Max(0, origin.X);
         var viewportTop = Math.Max(0, origin.Y);
-        var viewportRight = Math.Min(RootGrid.ActualWidth, origin.X + WorkspaceView.ActualWidth);
-        var viewportBottom = Math.Min(RootGrid.ActualHeight, origin.Y + WorkspaceView.ActualHeight);
+        var viewportRight = Math.Min(PreviewOverlay.ActualWidth, origin.X + WorkspaceView.ActualWidth);
+        var viewportBottom = Math.Min(PreviewOverlay.ActualHeight, origin.Y + WorkspaceView.ActualHeight);
         var requestedLeft = origin.X + bounds.Left * scaleX;
         var requestedTop = origin.Y + bounds.Top * scaleY;
         var left = Math.Max(viewportLeft, requestedLeft);
@@ -1409,6 +1560,9 @@ public partial class MainWindow : Window
         if (closeDocument)
         {
             embeddedPreview?.CloseDocument();
+            previewDocumentId = null;
+            previewVersionId = null;
+            previewMarkupDirectory = string.Empty;
         }
     }
 
@@ -1416,7 +1570,7 @@ public partial class MainWindow : Window
     {
         var fields = new[]
         {
-            (Label: "物料/图号", Key: "drawingNumber"),
+            (Label: "物料编码", Key: "drawingNumber"),
             (Label: "名称", Key: "name"),
             (Label: "规格/型号", Key: "specification"),
             (Label: "材质", Key: "material"),
@@ -1450,6 +1604,25 @@ public partial class MainWindow : Window
 
         var detail = new { state, fileName, message };
         var script = $"window.dispatchEvent(new CustomEvent('pdm-preview-status', {{ detail: {Serialize(detail)} }}));";
+        try
+        {
+            await WorkspaceView.CoreWebView2.ExecuteScriptAsync(script);
+        }
+        catch (InvalidOperationException)
+        {
+            // The WebView is closing with the client window.
+        }
+    }
+
+    private async Task PublishMarkupStatusAsync(string state, string message)
+    {
+        if (WorkspaceView.CoreWebView2 == null)
+        {
+            return;
+        }
+
+        var detail = new { state, message };
+        var script = $"window.dispatchEvent(new CustomEvent('pdm-preview-markup-status', {{ detail: {Serialize(detail)} }}));";
         try
         {
             await WorkspaceView.CoreWebView2.ExecuteScriptAsync(script);

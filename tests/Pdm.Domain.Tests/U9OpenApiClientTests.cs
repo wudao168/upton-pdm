@@ -105,6 +105,54 @@ public sealed class U9OpenApiClientTests
     }
 
     [Fact]
+    public async Task QueryInventory_ParsesWarehouseProjectAndQuantityFields()
+    {
+        var rows = JsonSerializer.Serialize<object[]>(
+        [
+            new
+            {
+                m_orgCode = "7",
+                m_itemCode = "01020141559",
+                m_itemName = "LED背光板",
+                m_itemSPECS = "60W5件套",
+                m_whCode = "01",
+                m_whName = "1号常备仓",
+                m_binCode = "A-01",
+                m_binName = "A区01位",
+                m_storageType = "可用",
+                m_projectCode = "P700005",
+                m_projectName = "测试项目",
+                m_seiBanNo = "P700005-6",
+                m_storeQty = 16m,
+                m_canUseQty = 15m,
+                m_reservQty = 1m,
+                m_notUseQty = 0m
+            }
+        ]);
+        var handler = new RecordingHandler(JsonSerializer.Serialize(new { ResCode = 0, Success = true, Data = rows }));
+        var client = new U9OpenApiClient(new HttpClient(handler));
+
+        var result = await client.QueryInventoryAsync(
+            "http://u9.example.test/U9",
+            "/webapi/Invtrans/QueryQohAndAvailable",
+            "token-123",
+            "7",
+            "01020141559",
+            default);
+
+        Assert.True(result.Success);
+        var row = Assert.Single(result.Rows);
+        Assert.Equal(("01", "1号常备仓", "01020141559", "LED背光板", "60W5件套"),
+            (row.WarehouseCode, row.WarehouseName, row.MaterialCode, row.ItemName, row.Specification));
+        Assert.Equal(("P700005", "测试项目", "P700005-6"),
+            (row.ProjectCode, row.ProjectName, row.Subproject));
+        Assert.Equal((16m, 15m, 1m, 0m),
+            (row.StockQuantity, row.AvailableQuantity, row.ReservedQuantity, row.UnavailableQuantity));
+        Assert.Equal("token-123", handler.Token);
+        Assert.Contains("/webapi/Invtrans/QueryQohAndAvailable", handler.RequestUri);
+    }
+
+    [Fact]
     public async Task QueryItems_ParsesU9InternalNestedEntityNames()
     {
         var rows = JsonSerializer.Serialize<object[]>(

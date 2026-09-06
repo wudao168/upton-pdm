@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { Cloud, FileSearch, Link2, MoreHorizontal, PencilLine, Rotate3D, RotateCcw, ScanSearch, Square } from '@lucide/vue'
+import { Cloud, FileSearch, Link2, MoreHorizontal, PencilLine, Rotate3D, RotateCcw, Save, ScanSearch, Square } from '@lucide/vue'
 import { ElMessage } from 'element-plus'
 import { computed, defineAsyncComponent, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { listDocumentVersions, postDesktopMessage, readDocumentPreviewFile } from '../api'
@@ -62,6 +62,8 @@ const solidWorksAvailable = ref(false)
 const solidWorksPending = ref(false)
 const solidWorksMessage = ref('')
 const solidWorksError = ref(false)
+const markupSaving = ref(false)
+const markupDirty = ref(false)
 let resizeObserver: ResizeObserver | undefined
 let overlayObserver: MutationObserver | undefined
 let previewSyncFrame = 0
@@ -93,8 +95,8 @@ const editStatusLabel = computed(() => {
 })
 const previewPropertyValue = (value?: string | null) => value?.trim() || '—'
 const previewProperties = computed(() => [
-  { label: '料号', value: previewPropertyValue(props.bomItem?.drawingNumber || props.selected.drawingNumber) },
-  { label: '名称', value: previewPropertyValue(meaningfulSelectedName.value) },
+  { label: '物料编码', value: previewPropertyValue(props.bomItem?.drawingNumber || props.selected.drawingNumber) },
+  { label: '名称', value: previewPropertyValue(props.bomItem?.name || meaningfulSelectedName.value) },
   { label: '型号', value: previewPropertyValue(props.bomItem?.specification) },
   { label: '品牌', value: previewPropertyValue(props.bomItem?.brand) },
   { label: '材质', value: previewPropertyValue(props.bomItem?.material) },
@@ -109,6 +111,16 @@ function activateMarkup(command: string) {
     return
   }
   postDesktopMessage('preview-host-command', { command })
+}
+
+function saveMarkup() {
+  if (!props.selected.documentId || markupSaving.value) return
+  if (!props.desktopAvailable) {
+    ElMessage.info('图形批注仅支持在Windows客户端中保存。')
+    return
+  }
+  markupSaving.value = true
+  postDesktopMessage('preview-host-save-markup')
 }
 
 function reportPreviewBounds() {
@@ -278,6 +290,16 @@ function onPreviewStatus(event: Event) {
   }
 }
 
+function onMarkupStatus(event: Event) {
+  const detail = (event as CustomEvent<{ state?: string; message?: string }>).detail
+  if (!detail?.state) return
+  markupSaving.value = detail.state === 'saving'
+  if (detail.state === 'dirty') markupDirty.value = true
+  if (detail.state === 'clean' || detail.state === 'saved') markupDirty.value = false
+  if (detail.state === 'saved') ElMessage.success(detail.message || '批注已保存。')
+  if (detail.state === 'error') ElMessage.error(detail.message || '批注保存失败。')
+}
+
 function openInSolidWorks(mode: SolidWorksOpenMode, versionId?: string) {
   if (!props.selected.documentId || !solidWorksAvailable.value || solidWorksPending.value) return
   solidWorksPending.value = true
@@ -315,6 +337,8 @@ watch(() => props.reviewPanelOpen, () => {
 }, { flush: 'post' })
 
 watch([() => props.selected.id, () => props.reviewVersionId], () => {
+  markupSaving.value = false
+  markupDirty.value = false
   solidWorksPending.value = false
   solidWorksMessage.value = ''
   solidWorksError.value = false
@@ -341,6 +365,7 @@ onMounted(() => {
   window.addEventListener('scroll', schedulePreviewBounds, true)
   document.addEventListener('visibilitychange', schedulePreviewBounds)
   window.addEventListener('pdm-preview-status', onPreviewStatus)
+  window.addEventListener('pdm-preview-markup-status', onMarkupStatus)
   window.addEventListener('pdm-solidworks-capability', onSolidWorksCapability)
   window.addEventListener('pdm-solidworks-status', onSolidWorksStatus)
   postDesktopMessage('solidworks-capability-request')
@@ -364,6 +389,7 @@ onBeforeUnmount(() => {
   window.removeEventListener('scroll', schedulePreviewBounds, true)
   document.removeEventListener('visibilitychange', schedulePreviewBounds)
   window.removeEventListener('pdm-preview-status', onPreviewStatus)
+  window.removeEventListener('pdm-preview-markup-status', onMarkupStatus)
   window.removeEventListener('pdm-solidworks-capability', onSolidWorksCapability)
   window.removeEventListener('pdm-solidworks-status', onSolidWorksStatus)
 })
@@ -387,7 +413,6 @@ onBeforeUnmount(() => {
         <div class="pdm-preview-actions">
           <div class="pdm-markup-toolbar" aria-label="图形批注工具">
             <span>批注</span>
-            <button type="button" aria-label="保存批注" title="打开图纸审核面板保存批注" :disabled="!selected.documentId" @click="emit('review')">保存</button>
             <button type="button" aria-label="引线批注" title="带引线文字" :disabled="!selected.documentId" @click="activateMarkup('markup-text-leader')"><PencilLine :size="14" /></button>
             <button type="button" aria-label="云线批注" title="修订云线" :disabled="!selected.documentId" @click="activateMarkup('markup-cloud')"><Cloud :size="14" /></button>
             <button type="button" aria-label="框选批注" title="矩形框" :disabled="!selected.documentId" @click="activateMarkup('markup-rectangle')"><Square :size="14" /></button>
@@ -399,7 +424,17 @@ onBeforeUnmount(() => {
         <div class="pdm-solidworks-actions">
           <button
             type="button"
-            :class="reviewVersionId && canWritebackReviewProperties ? 'pdm-solidworks-edit' : 'pdm-solidworks-primary'"
+            class="pdm-solidworks-edit pdm-preview-command"
+            :class="{ 'is-markup-dirty': markupDirty }"
+            aria-label="保存批注"
+            title="保存当前版本批注"
+            :disabled="!selected.documentId || markupSaving"
+            @click="saveMarkup"
+          ><Save :size="15" />{{ markupSaving ? '保存中…' : '保存批注' }}</button>
+          <button
+            type="button"
+            :class="['pdm-preview-command', reviewVersionId && canWritebackReviewProperties ? 'pdm-solidworks-edit' : 'pdm-solidworks-primary']"
+            :aria-label="reviewVersionId ? '打开审核版（只读）' : '打开最新'"
             :disabled="!selected.documentId || !solidWorksAvailable || solidWorksPending"
             :title="solidWorksAvailable ? reviewVersionId ? `从PLM获取审核冻结版本${displayedRevision}并只读打开` : `从PLM获取${selected.version}并在SolidWorks中打开；需要修改时请在插件设计树中获取权限` : '当前电脑未安装SolidWorks或UPLM插件'"
             @click="openInSolidWorks(reviewVersionId ? 'SpecificReadOnly' : 'LatestReadOnly', reviewVersionId || undefined)"
@@ -407,7 +442,8 @@ onBeforeUnmount(() => {
           <button
             v-if="!reviewVersionId && canEditDocuments"
             type="button"
-            class="pdm-solidworks-edit"
+            class="pdm-solidworks-edit pdm-preview-command"
+            aria-label="编辑打开"
             :disabled="!selected.documentId || !solidWorksAvailable || solidWorksPending"
             :title="solidWorksAvailable ? '由客户端获取PLM最新受控文件和编辑权限，并交给SolidWorks打开' : '当前电脑未安装SolidWorks或UPLM插件'"
             @click="openInSolidWorks('LatestEdit')"
@@ -429,11 +465,11 @@ onBeforeUnmount(() => {
       <div
         ref="previewSlot"
         class="pdm-real-preview pdm-embedded-preview-slot"
-        :class="{ 'has-web-preview': !desktopAvailable && previewState === 'ready' }"
+        :class="{ 'has-web-preview': !desktopAvailable && previewState === 'ready', 'is-desktop-preview': desktopAvailable }"
         :data-preview-state="previewState"
         :aria-label="desktopAvailable ? '客户端内嵌eDrawings预览区' : '网页端图档预览状态'"
       >
-        <dl class="pdm-preview-properties" aria-label="图档属性">
+        <dl v-if="!desktopAvailable" class="pdm-preview-properties" aria-label="图档属性">
           <div v-for="property in previewProperties" :key="property.label">
             <dt>{{ property.label }}</dt>
             <dd :title="property.value">{{ property.value }}</dd>

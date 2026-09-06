@@ -314,6 +314,11 @@ public sealed record BatchDeleteBomItemsCommand(IReadOnlyList<Guid> ItemIds, str
 
 public sealed record BatchRestoreBomItemsCommand(IReadOnlyList<Guid> ItemIds, string Mode = "Original");
 
+public sealed record SetBomReleaseExclusionCommand(
+    IReadOnlyList<Guid> ItemIds,
+    bool Excluded,
+    string? Reason = null);
+
 public sealed record RestoreBomItemsFromSourceCommand(IReadOnlyList<Guid> ItemIds);
 
 public sealed record ReclassifyBomItemsFromSourceCommand(
@@ -497,6 +502,7 @@ public interface IPdmRepository
     Task<IReadOnlyList<ManufacturingBomBaseline>> ListManufacturingBomBaselinesAsync(Guid projectId, CancellationToken cancellationToken);
     Task<ManufacturingBomBaseline> CreateManufacturingBomBaselineAsync(ManufacturingBomBaseline baseline, CancellationToken cancellationToken);
     Task<IReadOnlyList<ReleasePackage>> ListReleasePackagesAsync(Guid projectId, CancellationToken cancellationToken);
+    Task<IReadOnlyList<PendingApprovalTask>> ListPendingApprovalTasksAsync(Guid projectId, CancellationToken cancellationToken);
     Task<ReleasePackage?> FindReleasePackageAsync(Guid releasePackageId, CancellationToken cancellationToken);
     Task<ReleasePackage?> FindReleasePackageByApprovalTaskAsync(Guid taskId, CancellationToken cancellationToken);
     Task<IReadOnlyList<ReleaseItemComment>> ListReleaseItemCommentsAsync(Guid releasePackageId, CancellationToken cancellationToken);

@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.IO;
+using System.Runtime.InteropServices;
 using System.Text;
 using Forms = System.Windows.Forms;
 
@@ -25,17 +26,25 @@ internal sealed class EDrawingsPreviewControl : Forms.UserControl
     private readonly Forms.ToolStrip toolbar = new();
     private readonly Forms.TableLayoutPanel propertiesPanel = new();
     private readonly Forms.Timer repaintTimer = new();
+    private readonly Forms.Timer markupDisplayTimer = new();
+    private readonly Forms.Timer markupStateTimer = new();
+    private readonly Font propertyLabelFont = new("Microsoft YaHei UI", 14F, FontStyle.Regular, GraphicsUnit.Pixel);
+    private readonly Font propertyValueFont = new("Microsoft YaHei UI", 14F, FontStyle.Bold, GraphicsUnit.Pixel);
     private readonly Dictionary<string, Forms.ToolStripButton> modeButtons = new(StringComparer.OrdinalIgnoreCase);
     private readonly Forms.ToolStripButton measureButton;
     private object? markupControl;
+    private string pendingMarkupPath = string.Empty;
     private string currentDocumentName = string.Empty;
     private int pendingRepaintAttempts;
+    private int pendingMarkupDisplayAttempts;
+    private bool? lastMarkupModified;
     private bool documentOpen;
     private bool documentTransitioning;
     private bool disposed;
     private PreviewButtonTheme buttonTheme = PreviewButtonTheme.Resolve("a");
 
     internal event Action<string>? UserMessageRequested;
+    internal event Action<bool>? MarkupModifiedChanged;
 
     internal void ApplyTheme(string theme)
     {
@@ -65,6 +74,7 @@ internal sealed class EDrawingsPreviewControl : Forms.UserControl
         viewer.BeginInit();
         Controls.Add(viewer);
         viewer.EndInit();
+        viewer.DocumentLoaded += OnDocumentLoaded;
 
         ConfigureToolbar();
         AddModeButton("select", "选择").Checked = true;
@@ -89,6 +99,10 @@ internal sealed class EDrawingsPreviewControl : Forms.UserControl
 
         repaintTimer.Interval = 220;
         repaintTimer.Tick += OnRepaintTimerTick;
+        markupDisplayTimer.Interval = 300;
+        markupDisplayTimer.Tick += OnMarkupDisplayTimerTick;
+        markupStateTimer.Interval = 500;
+        markupStateTimer.Tick += OnMarkupStateTimerTick;
         Resize += (_, _) =>
         {
             LayoutOverlays();
@@ -108,11 +122,12 @@ internal sealed class EDrawingsPreviewControl : Forms.UserControl
         LayoutOverlays();
     }
 
-    internal void OpenDocument(string path)
+    internal void OpenDocument(string path, string? markupPath = null)
     {
         ThrowIfDisposed();
         CloseDocument();
         var documentName = Path.GetFileName(path);
+        pendingMarkupPath = markupPath != null && File.Exists(markupPath) ? markupPath : string.Empty;
         WriteDiagnostic("open-start", documentName);
         documentTransitioning = true;
         try
@@ -132,8 +147,88 @@ internal sealed class EDrawingsPreviewControl : Forms.UserControl
             documentTransitioning = false;
         }
         UpdateToolbarState();
+        SetMarkupModified(false, true);
+        markupStateTimer.Start();
         LayoutOverlays();
         ScheduleRefresh(3);
+    }
+
+    internal void SaveMarkup(string path)
+    {
+        ThrowIfDisposed();
+        if (!CanUseDocument)
+        {
+            throw new InvalidOperationException("当前预览尚未加载完成，不能保存批注。");
+        }
+
+        dynamic control = viewer.ActiveControl;
+        markupControl ??= control.CoCreateInstance("{9FCFE7FE-2ED5-4720-94F9-6B712F7D11A2}");
+        if (markupControl == null)
+        {
+            throw new InvalidOperationException("当前 eDrawings 控件未提供图形批注组件。");
+        }
+
+        dynamic markup = markupControl;
+        markup.ShowSaveMarkup(path, false);
+    }
+
+    private void OnDocumentLoaded(string fileName)
+    {
+        if (InvokeRequired)
+        {
+            BeginInvoke(new Action<string>(OnDocumentLoaded), fileName);
+            return;
+        }
+
+        if (!documentOpen
+            || documentTransitioning
+            || !string.Equals(Path.GetFileName(fileName), currentDocumentName, StringComparison.OrdinalIgnoreCase))
+        {
+            return;
+        }
+
+        if (string.IsNullOrWhiteSpace(pendingMarkupPath))
+        {
+            return;
+        }
+
+        var markupPath = pendingMarkupPath;
+        pendingMarkupPath = string.Empty;
+        try
+        {
+            dynamic control = viewer.ActiveControl;
+            markupControl ??= control.CoCreateInstance("{9FCFE7FE-2ED5-4720-94F9-6B712F7D11A2}");
+            if (markupControl == null)
+            {
+                throw new InvalidOperationException("当前 eDrawings 控件未提供图形批注组件。");
+            }
+
+            viewer.OpenMarkup(markupPath);
+            viewer.ApplyDocumentSafety();
+            pendingMarkupDisplayAttempts = 8;
+            markupDisplayTimer.Stop();
+            WriteDiagnostic("markup-load-complete", $"{Path.GetFileName(fileName)} | {Path.GetFileName(markupPath)}");
+        }
+        catch (Exception exception)
+        {
+            WriteDiagnostic("markup-load-failed", $"{Path.GetFileName(fileName)} | {exception.GetType().Name}: {exception.Message}");
+            UserMessageRequested?.Invoke($"历史批注加载失败：{exception.Message}");
+            return;
+        }
+
+        try
+        {
+            if (TryShowLatestMarkupComment())
+            {
+                return;
+            }
+        }
+        catch (Exception exception)
+        {
+            WriteDiagnostic("markup-show-pending", $"{currentDocumentName} | {exception.GetType().Name}: {exception.Message}");
+        }
+
+        markupDisplayTimer.Start();
     }
 
     internal void FitDocument()
@@ -271,6 +366,7 @@ internal sealed class EDrawingsPreviewControl : Forms.UserControl
     private bool TryActivateMarkup(int markupOperator, out string message)
     {
         message = string.Empty;
+        WriteDiagnostic("markup-activate-start", $"{currentDocumentName} | operator={markupOperator}");
         try
         {
             dynamic control = viewer.ActiveControl;
@@ -282,10 +378,12 @@ internal sealed class EDrawingsPreviewControl : Forms.UserControl
             }
             dynamic markup = markupControl;
             markup.ViewOperator = markupOperator;
+            WriteDiagnostic("markup-activate-complete", $"{currentDocumentName} | operator={markupOperator}");
             return true;
         }
         catch (Exception exception)
         {
+            WriteDiagnostic("markup-activate-failed", $"{currentDocumentName} | operator={markupOperator} | {exception.GetType().Name}: {exception.Message}");
             message = $"图形批注工具启动失败：{exception.Message}";
             return false;
         }
@@ -318,7 +416,12 @@ internal sealed class EDrawingsPreviewControl : Forms.UserControl
         }
 
         propertiesPanel.SuspendLayout();
-        propertiesPanel.Controls.Clear();
+        while (propertiesPanel.Controls.Count > 0)
+        {
+            var previousControl = propertiesPanel.Controls[0];
+            propertiesPanel.Controls.RemoveAt(0);
+            previousControl.Dispose();
+        }
         propertiesPanel.RowStyles.Clear();
         propertiesPanel.RowCount = 0;
 
@@ -330,7 +433,7 @@ internal sealed class EDrawingsPreviewControl : Forms.UserControl
             var label = new Forms.Label
             {
                 AutoSize = true,
-                Font = new Font("Microsoft YaHei UI", 9F, FontStyle.Regular),
+                Font = propertyLabelFont,
                 ForeColor = SecondaryText,
                 Margin = new Forms.Padding(0, 0, 10, 5),
                 Text = item.Key,
@@ -339,7 +442,7 @@ internal sealed class EDrawingsPreviewControl : Forms.UserControl
             {
                 AutoEllipsis = false,
                 AutoSize = true,
-                Font = new Font("Microsoft YaHei UI", 9F, FontStyle.Bold),
+                Font = propertyValueFont,
                 ForeColor = PrimaryText,
                 Margin = new Forms.Padding(0, 0, 0, 5),
                 MaximumSize = new Size(420, 0),
@@ -369,8 +472,13 @@ internal sealed class EDrawingsPreviewControl : Forms.UserControl
         }
 
         repaintTimer.Stop();
+        markupDisplayTimer.Stop();
+        markupStateTimer.Stop();
         pendingRepaintAttempts = 0;
+        pendingMarkupDisplayAttempts = 0;
+        pendingMarkupPath = string.Empty;
         markupControl = null;
+        SetMarkupModified(false, true);
         if (!documentOpen)
         {
             UpdateToolbarState();
@@ -399,8 +507,20 @@ internal sealed class EDrawingsPreviewControl : Forms.UserControl
         {
             CloseDocument();
             repaintTimer.Dispose();
+            markupDisplayTimer.Dispose();
+            markupStateTimer.Dispose();
             viewer.Dispose();
             disposed = true;
+            try
+            {
+                base.Dispose(true);
+            }
+            finally
+            {
+                propertyLabelFont.Dispose();
+                propertyValueFont.Dispose();
+            }
+            return;
         }
 
         base.Dispose(disposing);
@@ -688,6 +808,116 @@ internal sealed class EDrawingsPreviewControl : Forms.UserControl
         }
     }
 
+    private void OnMarkupDisplayTimerTick(object? sender, EventArgs eventArgs)
+    {
+        markupDisplayTimer.Stop();
+        if (!CanUseDocument || !Visible)
+        {
+            pendingMarkupDisplayAttempts = 0;
+            return;
+        }
+
+        try
+        {
+            if (TryShowLatestMarkupComment())
+            {
+                return;
+            }
+        }
+        catch (Exception exception)
+        {
+            if (pendingMarkupDisplayAttempts <= 1)
+            {
+                WriteDiagnostic("markup-show-failed", $"{currentDocumentName} | {exception.GetType().Name}: {exception.Message}");
+            }
+        }
+
+        pendingMarkupDisplayAttempts--;
+        if (pendingMarkupDisplayAttempts > 0)
+        {
+            markupDisplayTimer.Start();
+        }
+        else
+        {
+            WriteDiagnostic("markup-show-empty", currentDocumentName);
+        }
+    }
+
+    private void OnMarkupStateTimerTick(object? sender, EventArgs eventArgs)
+    {
+        if (!CanUseDocument)
+        {
+            return;
+        }
+
+        try
+        {
+            dynamic control = viewer.ActiveControl;
+            SetMarkupModified(Convert.ToBoolean(control.IsMarkupModified));
+        }
+        catch
+        {
+            // The ActiveX control can briefly reject property reads while changing documents.
+        }
+    }
+
+    private void SetMarkupModified(bool modified, bool force = false)
+    {
+        if (!force && lastMarkupModified == modified)
+        {
+            return;
+        }
+
+        lastMarkupModified = modified;
+        MarkupModifiedChanged?.Invoke(modified);
+    }
+
+    private bool TryShowLatestMarkupComment()
+    {
+        if (markupControl == null
+            || !ShowLatestMarkupComment(markupControl, out var commentCount, out var commentId))
+        {
+            return false;
+        }
+
+        pendingMarkupDisplayAttempts = 0;
+        WriteDiagnostic("markup-show", $"{currentDocumentName} | count={commentCount} | comment={commentId}");
+        ScheduleRefresh(2);
+        return true;
+    }
+
+    private static bool ShowLatestMarkupComment(object markupControl, out long commentCount, out long commentId)
+    {
+        dynamic markup = markupControl;
+        try
+        {
+            commentCount = Convert.ToInt64(markup.CommentCountx64);
+            if (commentCount > 0)
+            {
+                commentId = Convert.ToInt64(markup.CommentIDx64[Convert.ToInt32(commentCount - 1)]);
+                markup.ShowCommentx64(commentId);
+                return true;
+            }
+        }
+        catch (Exception)
+        {
+            // eDrawings 2022 can reject the x64 comment accessor; use the legacy accessor below.
+        }
+
+        var count = Convert.ToInt32(markup.CommentCount);
+        commentCount = count;
+        if (count <= 0)
+        {
+            commentId = 0;
+            return false;
+        }
+
+        var id = Convert.ToInt32(markup.CommentID[count - 1]);
+        commentId = id;
+        markup.ShowComment(id);
+        return true;
+    }
+
     private void RedrawNow()
     {
         if (!CanUseDocument)
@@ -856,9 +1086,15 @@ internal sealed class EDrawingsPreviewControl : Forms.UserControl
 
     private sealed class EDrawingsAxHost : Forms.AxHost
     {
+        private static readonly Guid ModelViewEventsId = new("2EA4AE0F-494C-4554-97AE-F02F3076A90D");
+        private object? eventSource;
+        private Action<string>? documentLoadedHandler;
+
         internal EDrawingsAxHost() : base("{C59EEF21-0223-4C39-A708-A3BE9008C67E}")
         {
         }
+
+        internal event Action<string>? DocumentLoaded;
 
         internal dynamic ActiveControl
         {
@@ -873,8 +1109,66 @@ internal sealed class EDrawingsPreviewControl : Forms.UserControl
         {
             dynamic control = ActiveControl;
             ShowCompleteUi(control);
+            ApplyDocumentSafety(control);
             control.OpenDoc(path, false, false, true, string.Empty);
             ShowCompleteUi(control);
+            ApplyDocumentSafety(control);
+        }
+
+        internal void OpenMarkup(string path)
+        {
+            dynamic control = ActiveControl;
+            control.OpenMarkupFile(path);
+        }
+
+        internal void ApplyDocumentSafety()
+        {
+            ApplyDocumentSafety(ActiveControl);
+        }
+
+        private static void ApplyDocumentSafety(dynamic control)
+        {
+            const int suppressSavePrompt = 2;
+            const int disableMenuSave = 8;
+            const int readOnly = 64;
+            control.EnableFeatures = (int)control.EnableFeatures
+                | suppressSavePrompt
+                | disableMenuSave
+                | readOnly;
+        }
+
+        protected override void CreateSink()
+        {
+            base.CreateSink();
+            try
+            {
+                eventSource = GetOcx();
+                documentLoadedHandler = fileName => DocumentLoaded?.Invoke(fileName);
+                ComEventsHelper.Combine(eventSource, ModelViewEventsId, 3, documentLoadedHandler);
+            }
+            catch
+            {
+                eventSource = null;
+                documentLoadedHandler = null;
+            }
+        }
+
+        protected override void DetachSink()
+        {
+            if (eventSource != null && documentLoadedHandler != null)
+            {
+                try
+                {
+                    ComEventsHelper.Remove(eventSource, ModelViewEventsId, 3, documentLoadedHandler);
+                }
+                catch
+                {
+                    // The ActiveX control may already be disconnecting during client shutdown.
+                }
+            }
+            eventSource = null;
+            documentLoadedHandler = null;
+            base.DetachSink();
         }
 
         private static void ShowCompleteUi(dynamic control)

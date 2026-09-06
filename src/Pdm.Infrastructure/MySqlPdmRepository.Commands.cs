@@ -270,7 +270,7 @@ public sealed partial class MySqlPdmRepository
             """
             INSERT INTO release_package(
                 id, project_id, package_number, state, release_scope, workflow_code, workflow_version,
-                selected_bom_item_ids_json, creates_manufacturing_baseline, locks_documents,
+                selected_bom_item_ids_json, creates_manufacturing_baseline, locks_documents, whole_set_multiplier,
                 reference_snapshot_id, mechanical_bom_revision,
                 electrical_bom_revision, mechanical_bom_snapshot_json, electrical_bom_snapshot_json,
                 standard_bom_version_id, non_standard_bom_version_id, electrical_bom_version_id,
@@ -279,7 +279,7 @@ public sealed partial class MySqlPdmRepository
                 published_at, published_path, publish_error, row_version, created_at)
             VALUES (
                 @Id, @ProjectId, @PackageNumber, @State, @Scope, @WorkflowCode, @WorkflowVersion,
-                @SelectedBomItemIds, @CreatesManufacturingBaseline, @LocksDocuments,
+                @SelectedBomItemIds, @CreatesManufacturingBaseline, @LocksDocuments, @WholeSetMultiplier,
                 @ReferenceSnapshotId, @MechanicalBomRevision,
                 @ElectricalBomRevision, @MechanicalBomSnapshot, @ElectricalBomSnapshot,
                 @StandardBomVersionId, @NonStandardBomVersionId, @ElectricalBomVersionId,
@@ -299,6 +299,7 @@ public sealed partial class MySqlPdmRepository
                 SelectedBomItemIds = JsonSerializer.Serialize(package.SelectedBomItemIds, jsonOptions),
                 package.CreatesManufacturingBaseline,
                 package.LocksDocuments,
+                package.WholeSetMultiplier,
                 package.ReferenceSnapshotId,
                 package.MechanicalBomRevision,
                 package.ElectricalBomRevision,
@@ -353,6 +354,7 @@ public sealed partial class MySqlPdmRepository
                 standard_bom_snapshot_json=@StandardBomSnapshot,
                 non_standard_bom_snapshot_json=@NonStandardBomSnapshot,
                 change_reason=@ChangeReason,
+                whole_set_multiplier=@WholeSetMultiplier,
                 row_version=row_version+1
             WHERE id=@Id AND state='Draft'
             """,
@@ -369,7 +371,8 @@ public sealed partial class MySqlPdmRepository
                 package.NonStandardBomRevision,
                 StandardBomSnapshot = JsonSerializer.Serialize(package.StandardBomSnapshot, jsonOptions),
                 NonStandardBomSnapshot = JsonSerializer.Serialize(package.NonStandardBomSnapshot, jsonOptions),
-                package.ChangeReason
+                package.ChangeReason,
+                package.WholeSetMultiplier
             },
             cancellationToken: cancellationToken));
         if (affected != 1) throw new PdmConflictException("只有草稿发布包可以编辑，请刷新后重试。");

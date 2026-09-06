@@ -7,6 +7,11 @@ import type { PdmMaterial } from '../src/types'
 const api = vi.hoisted(() => ({
   listMaterials: vi.fn(),
   listMaterialPage: vi.fn(),
+  listMaterialRelationTemplates: vi.fn(),
+  saveMaterialRelationTemplate: vi.fn(),
+  publishMaterialRelationTemplate: vi.fn(),
+  listMaterialInventory: vi.fn(),
+  refreshMaterialInventory: vi.fn(),
   listMaterialCategories: vi.fn(),
   listMaterialSyncTasks: vi.fn(),
   getU9MaterialIntegration: vi.fn(),
@@ -15,6 +20,7 @@ const api = vi.hoisted(() => ({
   changeApprovedMaterial: vi.fn(),
   continueProjectBomU9Automation: vi.fn(),
   archiveMaterial: vi.fn(),
+  reactivateMaterial: vi.fn(),
   deleteMaterial: vi.fn(),
   listMaterialAttachments: vi.fn(),
   uploadMaterialAttachment: vi.fn(),
@@ -78,6 +84,9 @@ describe('MaterialManagement', () => {
       { code: '0204', name: '非标机加件', parentCode: null, pdmKind: 'NonStandard', defaultSupplyMode: 'Manufacture', allowCreate: true, isVisible: true, isActive: true, numberPrefix: '0204', sequenceLength: 7, counterScope: '0204', sortOrder: 4, updatedBy: 'system', updatedAt: '2026-08-17T00:00:00Z', rowVersion: 1 },
     ])
     api.listMaterialSyncTasks.mockResolvedValue([])
+    api.listMaterialRelationTemplates.mockResolvedValue([])
+    api.listMaterialInventory.mockResolvedValue({ items: [], total: 0, page: 1, pageSize: 50, lastSuccessfulRefreshAt: null })
+    api.refreshMaterialInventory.mockResolvedValue({ items: [], total: 0, page: 1, pageSize: 50, lastSuccessfulRefreshAt: null })
     api.listMaterialSyncBatches.mockResolvedValue([])
     api.listMaterialCodeApplications.mockResolvedValue([])
     api.listMaterialAttachments.mockResolvedValue([])
@@ -100,6 +109,64 @@ describe('MaterialManagement', () => {
     }))
   })
 
+  it('opens the selected material association from the material master list', async () => {
+    const approvedMaterial = { ...(await api.listMaterials())[0], approvalStatus: 'Approved' }
+    api.listMaterials.mockResolvedValue([approvedMaterial])
+    api.listMaterialRelationTemplates.mockResolvedValue([{
+      id: 'relation-1', mainMaterialId: approvedMaterial.id, mainMaterialCode: approvedMaterial.materialCode, mainMaterialName: approvedMaterial.name,
+      name: `${approvedMaterial.materialCode}关联物料`, isArchived: false, updatedBy: 'standard', updatedAt: '', rowVersion: 1, draftRevision: null,
+      publishedRevision: { id: 'revision-1', version: 1, state: 'Published', changeNote: '', createdBy: 'standard', createdAt: '', publishedBy: 'standard', publishedAt: '', rowVersion: 1, groups: [] },
+    }])
+    const wrapper = mount(MaterialManagement, {
+      attachTo: document.body,
+      props: { token: 'token', canEdit: false, canApprove: false, canManageIntegration: false, canViewRelations: true, canManageRelations: false, canPublishRelations: false },
+      global: { plugins: [ElementPlus] },
+    })
+    await flushPromises()
+
+    const labels = wrapper.findAllComponents({ name: 'ElTableColumn' }).map(column => column.props('label'))
+    expect(labels).toContain('关联配置')
+    const associationButton = wrapper.find('button[aria-label="查看 EL-001 的关联物料"]')
+    expect(associationButton.text()).toBe('已生效')
+    await associationButton.trigger('click')
+    await flushPromises()
+
+    expect(document.body.textContent).toContain('料品明细')
+    expect(document.body.textContent).toContain('关联物料')
+    expect(document.body.textContent).toContain('物料料号')
+    expect(document.body.textContent).not.toContain('配套物料模板')
+    expect(document.body.textContent).not.toContain('保存修改')
+    wrapper.unmount()
+  })
+
+  it('queries one material inventory in place without leaving the material master tab', async () => {
+    api.refreshMaterialInventory.mockResolvedValue({
+      items: [{ materialCode: 'EL-001', stockQuantity: 2.5, refreshedAt: '2026-09-05T10:00:00Z' }],
+      total: 2,
+      page: 1,
+      pageSize: 50,
+      lastSuccessfulRefreshAt: '2026-09-05T10:00:00Z',
+    })
+    api.listMaterialInventory.mockImplementation(async filters => filters.materialCode === 'EL-001' && filters.page === 2
+      ? { items: [{ materialCode: 'EL-001', stockQuantity: 3, refreshedAt: '2026-09-05T10:00:00Z' }], total: 2, page: 2, pageSize: 200, lastSuccessfulRefreshAt: '2026-09-05T10:00:00Z' }
+      : { items: [], total: 0, page: 1, pageSize: 50, lastSuccessfulRefreshAt: null })
+    const wrapper = mount(MaterialManagement, {
+      props: { token: 'token', canEdit: true, canApprove: true, canManageIntegration: false },
+      global: { plugins: [ElementPlus] },
+    })
+    await flushPromises()
+
+    const queryButton = wrapper.get('button[aria-label="查询 EL-001 的库存"]')
+    expect(queryButton.text()).toBe('查询')
+    await queryButton.trigger('click')
+    await flushPromises()
+
+    expect(api.refreshMaterialInventory).toHaveBeenCalledWith('EL-001', 'token')
+    expect(api.listMaterialInventory).toHaveBeenCalledWith({ materialCode: 'EL-001', positiveStockOnly: false, page: 2, pageSize: 200 }, 'token')
+    expect(queryButton.text()).toBe('5.50')
+    expect(wrapper.get('[role="tab"][aria-selected="true"]').text()).toContain('料品主档')
+  })
+
   it('加载料品且不在主档顶部显示U9C写入提示', async () => {
     const wrapper = mount(MaterialManagement, {
       props: { token: 'token', canEdit: true, canApprove: true, canManageIntegration: false },
@@ -109,7 +176,7 @@ describe('MaterialManagement', () => {
 
     expect(wrapper.find('.el-alert').exists()).toBe(false)
     expect(wrapper.find('.material-header').exists()).toBe(false)
-    expect(wrapper.findAll('[role="tab"]').slice(0, 3).map(tab => tab.text().trim())).toEqual(['料品主档', '料号审批', '分类维护'])
+    expect(wrapper.findAll('[role="tab"]').slice(0, 4).map(tab => tab.text().trim())).toEqual(['料品主档', '料品库存', '料号审批', '分类维护'])
     const toolbar = wrapper.get('.material-toolbar')
     expect(toolbar.findAll('button').some(button => button.text() === '刷新')).toBe(true)
     expect(toolbar.findAll('button').some(button => button.text() === '新增料品')).toBe(true)
@@ -140,6 +207,7 @@ describe('MaterialManagement', () => {
     expect(headers).not.toContain('U9C对应分类')
     expect(headers).not.toContain('采购链接')
     expect(headers.indexOf('引用')).toBe(headers.indexOf('名称') + 1)
+    expect(headers.indexOf('库存')).toBe(headers.indexOf('引用') + 1)
     const columns = wrapper.findComponent({ name: 'ElTable' }).findAllComponents({ name: 'ElTableColumn' })
     expect(columns.find(column => column.props('label') === '引用')?.props('minWidth')).toBe('48')
     expect(columns.find(column => column.props('label') === '备注')?.props('minWidth')).toBe('180')
@@ -656,10 +724,43 @@ describe('MaterialManagement', () => {
     await flushPromises()
 
     expect(prompt).toHaveBeenCalledOnce()
+    const inputValidator = prompt.mock.calls[0]?.[2]?.inputValidator as (value: string) => true | string
+    expect(inputValidator('   ')).toBe('请填写退回原因')
+    expect(inputValidator('x'.repeat(1001))).toBe('退回原因不能超过1000个字符')
+    expect(inputValidator('资料不完整')).toBe(true)
     expect(api.decideMaterialCodeApplication).toHaveBeenNthCalledWith(1, 'application-1', 7, false, '资料不完整', 'token')
     expect(api.decideMaterialCodeApplication).toHaveBeenNthCalledWith(2, 'application-2', 9, false, '资料不完整', 'token')
     expect(wrapper.get('.material-approval-feedback').text()).toContain('审批完成')
     expect(wrapper.get('.material-approval-feedback').text()).toContain('共 2 项，已退回 2 项，失败 0 项')
+    prompt.mockRestore()
+  })
+
+  it('单项退回要求填写原因并在审批历史中供只读用户查看', async () => {
+    const application = {
+      id: 'application-rejected', applicationType: 'StandardBomItem' as const, bomItemId: 'item-rejected', bomHeaderKind: 'Standard' as const,
+      projectId: 'project-1', projectCode: 'P700003', projectName: '氮检设备', categoryCode: '0102',
+      applicationName: '气缸', status: 'Pending' as const, requestedBy: 'engineer', requestedAt: '2026-09-04T01:00:00Z', rowVersion: 3,
+    }
+    const rejected = { ...application, status: 'Rejected' as const, decisionComment: '型号资料不完整', decidedBy: 'standardizer', decidedAt: '2026-09-04T02:00:00Z', rowVersion: 4 }
+    api.listMaterialCodeApplications.mockResolvedValueOnce([application]).mockResolvedValue([rejected])
+    api.decideMaterialCodeApplication.mockResolvedValue({ application: rejected })
+    const prompt = vi.spyOn(ElMessageBox, 'prompt').mockResolvedValue({ value: '  型号资料不完整  ', action: 'confirm' } as never)
+    const wrapper = mount(MaterialManagement, {
+      props: { token: 'token', canEdit: false, canApprove: false, canDecideMaterialCode: true, canManageIntegration: false, requestedTab: 'code-approvals' },
+      global: { plugins: [ElementPlus] },
+    })
+    await flushPromises()
+
+    const pendingTable = wrapper.get('.material-code-approval-table--pending')
+    await pendingTable.findAll('button').find(button => button.text() === '退回')!.trigger('click')
+    await flushPromises()
+
+    const inputValidator = prompt.mock.calls[0]?.[2]?.inputValidator as (value: string) => true | string
+    expect(inputValidator('  ')).toBe('请填写退回原因')
+    expect(inputValidator('原因明确')).toBe(true)
+    expect(api.decideMaterialCodeApplication).toHaveBeenCalledWith('application-rejected', 3, false, '型号资料不完整', 'token')
+    expect(wrapper.get('.material-code-approval-table--history').text()).toContain('退回原因')
+    expect(wrapper.get('.material-code-approval-table--history').text()).toContain('型号资料不完整')
     prompt.mockRestore()
   })
 
@@ -761,6 +862,7 @@ describe('MaterialManagement', () => {
 
     expect(wrapper.findAll('button').some(button => button.text() === '删除')).toBe(true)
     expect(wrapper.findAll('button').some(button => button.text() === '停用')).toBe(true)
+    expect(wrapper.findAll('button').some(button => button.text() === '启用')).toBe(true)
     expect(wrapper.find('.material-row-actions').exists()).toBe(false)
     expect(wrapper.find('.el-table-column--selection').exists()).toBe(true)
     expect(wrapper.find('.el-table__fixed-right').exists()).toBe(false)
@@ -789,6 +891,38 @@ describe('MaterialManagement', () => {
     const deleteButton = wrapper.findAll('button').find(button => button.text() === '删除')!
     expect(deleteButton.attributes('disabled')).toBeUndefined()
     expect(wrapper.text()).toContain('已停用')
+  })
+
+  it('选择单个已停用料品后可保留原料号直接启用', async () => {
+    const confirmSpy = vi.spyOn(ElMessageBox, 'confirm').mockResolvedValueOnce({ action: 'confirm' } as never)
+    const archived = {
+      id: 'material-archived', materialCode: '01020000001', name: '气缸', kind: 'Standard', supplyMode: 'Purchase',
+      unitCode: '001', specification: 'CDQ2B32-100', approvalStatus: 'Approved', syncStatus: 'Succeeded', rowVersion: 3,
+      categoryCode: '0102', isArchived: true, u9SyncConfirmed: true, sourceSystem: 'Pdm', masterOwner: 'Pdm',
+    } as PdmMaterial
+    api.reactivateMaterial.mockResolvedValueOnce({ ...archived, isArchived: false, rowVersion: 4 })
+    const wrapper = mount(MaterialManagement, {
+      props: { token: 'token', canEdit: true, canApprove: true, canManageIntegration: false },
+      global: { plugins: [ElementPlus] },
+    })
+    await flushPromises()
+
+    wrapper.findComponent({ name: 'ElTable' }).vm.$emit('selection-change', [archived])
+    await flushPromises()
+    const reactivateButton = wrapper.findAll('button').find(button => button.text() === '启用')!
+    expect(reactivateButton.attributes('disabled')).toBeUndefined()
+    expect(wrapper.findAll('button').find(button => button.text() === '停用')!.attributes('disabled')).toBeDefined()
+    await reactivateButton.trigger('click')
+    await flushPromises()
+
+    expect(confirmSpy).toHaveBeenCalledWith(
+      expect.stringContaining('保留原料号、审批状态和历史记录'),
+      '启用料品',
+      expect.objectContaining({ confirmButtonText: '确认启用' }),
+    )
+    expect(api.reactivateMaterial).toHaveBeenCalledWith('material-archived', 3, 'token')
+    expect(reactivateButton.attributes('disabled')).toBeDefined()
+    confirmSpy.mockRestore()
   })
 
   it('安全删除会把所选料品逐条交给后端校验', async () => {
@@ -1159,7 +1293,7 @@ describe('MaterialManagement', () => {
     })
     await flushPromises()
     expect(wrapper.findAll('[role="tab"]').some(tab => tab.text().includes('同步任务'))).toBe(false)
-    expect(wrapper.get('.material-code-approval-note').text()).toContain('本页按两步完成料号流程')
+    expect(wrapper.get('.material-code-approval-note').text()).toContain('项目多级BOM表头料号已改为系统自动批准')
     expect(wrapper.find('.material-sync-table').text()).not.toContain('已废止')
   })
 

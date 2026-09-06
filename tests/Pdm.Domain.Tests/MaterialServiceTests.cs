@@ -26,8 +26,7 @@ public sealed class MaterialServiceTests
 
         var bomLookup = await service.ListMaterialsAsync(created.MaterialCode, null, false, 100, "engineer", UserRole.Engineer, default);
         Assert.Contains(bomLookup, material => material.Id == created.Id);
-        await Assert.ThrowsAsync<UnauthorizedAccessException>(() =>
-            service.ListSyncTasksAsync("engineer", UserRole.Engineer, default));
+        Assert.Empty(await service.ListSyncTasksAsync("engineer", UserRole.Engineer, default));
     }
 
     [Fact]
@@ -491,6 +490,60 @@ public sealed class MaterialServiceTests
 
         Assert.True(archived.IsArchived);
         Assert.Contains(await service.ListMaterialsAsync(material.MaterialCode, null, true, 100, default), item => item.Id == material.Id);
+    }
+
+    [Fact]
+    public async Task Reactivate_RestoresPdmMaterialWithoutChangingCodeOrApproval()
+    {
+        var service = CreateService(out var materials, out var u9Client);
+        var material = await service.CreateAsync(new(
+            null, "待恢复料品", MaterialKind.Standard, MaterialSupplyMode.Purchase, "001",
+            "CDQ2B32", null, null, "SMC", null, null, null, CategoryCode: "0102"),
+            "admin", UserRole.Administrator, default);
+        var approved = await service.ApproveAsync(material.Id, material.RowVersion, "admin", UserRole.Administrator, default);
+        var archived = await service.ArchiveAsync(
+            material.Id, approved.Material.RowVersion, "admin", UserRole.Administrator, default);
+
+        var reactivated = await service.ReactivateAsync(
+            material.Id, archived.RowVersion, "admin", UserRole.Administrator, default);
+
+        Assert.False(reactivated.IsArchived);
+        Assert.Null(reactivated.ArchivedBy);
+        Assert.Null(reactivated.ArchivedAt);
+        Assert.Equal(material.MaterialCode, reactivated.MaterialCode);
+        Assert.Equal(MaterialApprovalStatus.Approved, reactivated.ApprovalStatus);
+        Assert.Equal(archived.RowVersion + 1, reactivated.RowVersion);
+        Assert.Equal(0, u9Client.AuthenticationCount);
+    }
+
+    [Fact]
+    public async Task Reactivate_U9ControlledMaterialRequiresExactLiveU9Match()
+    {
+        var service = CreateService(out var materials, out var u9Client);
+        var material = await service.CreateAsync(new(
+            null, "U9C停用料品", MaterialKind.Electrical, MaterialSupplyMode.Purchase, "001",
+            "E3Z", null, null, "OMRON", null, null, null, CategoryCode: "0101"),
+            "admin", UserRole.Administrator, default);
+        var u9Owned = await materials.UpdateMaterialAsync(material with
+        {
+            SourceSystem = MaterialDataSource.U9C,
+            MasterOwner = MaterialMasterOwner.U9C
+        }, material.RowVersion, default);
+        var archived = await materials.ArchiveMaterialAsync(
+            u9Owned.Id, u9Owned.RowVersion, "admin", DateTimeOffset.UtcNow, default);
+
+        var missing = await Assert.ThrowsAsync<PdmRuleException>(() => service.ReactivateAsync(
+            archived.Id, archived.RowVersion, "admin", UserRole.Administrator, default));
+        Assert.Contains("U9C未找到料品", missing.Message);
+        Assert.True((await materials.FindMaterialAsync(archived.Id, default))!.IsArchived);
+
+        u9Client.ItemsByCode[archived.MaterialCode] = new U9ItemReference("u9-item", archived.MaterialCode);
+        var reactivated = await service.ReactivateAsync(
+            archived.Id, archived.RowVersion, "admin", UserRole.Administrator, default);
+
+        Assert.False(reactivated.IsArchived);
+        Assert.Equal(2, u9Client.AuthenticationCount);
+        Assert.Equal([archived.MaterialCode, archived.MaterialCode], u9Client.QueriedCodes.ToArray());
     }
 
     [Fact]
@@ -1209,6 +1262,69 @@ public sealed class MaterialServiceTests
         var matched = Assert.Single(resolved, item => item.BomItemId == bom[1].Id);
         Assert.Equal(MaterialCodeResolutionStatus.Matched, matched.Status);
         Assert.Equal("FESTO", matched.Material?.Brand);
+    }
+
+    [Fact]
+    public async Task StandardBomMaterialCode_AutoLinksUniqueModelAndKeepsMissingBrandOnTheBomRow()
+    {
+        var service = CreateService(out var materials, out var repository, out _);
+        var material = await service.CreateAsync(new(
+            null, "PH602气缸", MaterialKind.Standard, MaterialSupplyMode.Purchase, "001",
+            "PH602", null, null, "AIRTAC", null, null, null, CategoryCode: "0102"),
+            "admin", UserRole.Administrator, default);
+        material = (await service.ApproveAsync(
+            material.Id, material.RowVersion, "admin", UserRole.Administrator, default)).Material;
+        var sourceDocumentId = (await repository.ListDocumentRelationsAsync(ProjectId, default)).First().ModelDocumentId;
+        var workflow = new PdmWorkflowService(
+            repository, null!, null!, TimeProvider.System,
+            materialRepository: materials);
+        var bomItem = Assert.Single(await workflow.ReplaceBomAsync(ProjectId, BomKind.Standard,
+        [
+            new BomItemInput(1, string.Empty, "PH602气缸", 1, "001", null, "PH602", "W1", true,
+                sourceDocumentId)
+        ], "admin", UserRole.Administrator, default));
+
+        var resolution = Assert.Single(await service.ResolveStandardBomMaterialsAsync(
+            new(ProjectId, [bomItem.Id]), "admin", UserRole.Administrator, default));
+
+        Assert.Equal(MaterialCodeResolutionStatus.Matched, resolution.Status);
+        Assert.Equal(material.MaterialCode, resolution.Material?.MaterialCode);
+        Assert.Contains("图档品牌缺失", resolution.Issues);
+        await Assert.ThrowsAsync<PdmRuleException>(() => workflow.ApplyMaterialCodeToBomAsync(
+            ProjectId, bomItem.Id, material.MaterialCode, "admin", default));
+
+        await service.LinkAutomaticallyMatchedBomMaterialAsync(
+            new(ProjectId, bomItem.Id, material.Id), "admin", UserRole.Administrator, default);
+        var updated = await workflow.ApplyAutomaticallyMatchedMaterialCodeToBomAsync(
+            ProjectId, bomItem.Id, material.MaterialCode, "admin", default);
+
+        Assert.Equal(material.MaterialCode, updated.DrawingNumber);
+        var afterLink = Assert.Single(await service.ResolveStandardBomMaterialsAsync(
+            new(ProjectId, [bomItem.Id]), "admin", UserRole.Administrator, default));
+        Assert.Equal(MaterialCodeResolutionStatus.ValidationFailed, afterLink.Status);
+        Assert.Contains("图档品牌缺失", afterLink.Issues);
+        Assert.Equal(1, Assert.Single(await service.ListMaterialsAsync(material.MaterialCode, null, false, 10, default)).ReferenceCount);
+    }
+
+    [Fact]
+    public async Task MaterialCodeApplication_RejectionRequiresReasonAndPersistsTrimmedComment()
+    {
+        var service = CreateService(out var materials);
+        var application = await materials.CreateMaterialCodeApplicationAsync(new(
+            Guid.NewGuid(), ProjectId, Guid.NewGuid(), MaterialCodeApplicationStatus.Pending,
+            "engineer", DateTimeOffset.UtcNow, null, null, null, null, null, 1), default);
+
+        var exception = await Assert.ThrowsAsync<PdmRuleException>(() => service.DecideMaterialCodeApplicationAsync(
+            application.Id, application.RowVersion, false, "   ", "standardizer", UserRole.ProcessReviewer, default));
+
+        Assert.Equal("不批准料号申请时必须填写原因。", exception.Message);
+        Assert.Equal(MaterialCodeApplicationStatus.Pending,
+            (await materials.FindMaterialCodeApplicationAsync(application.Id, default))!.Status);
+
+        var decision = await service.DecideMaterialCodeApplicationAsync(
+            application.Id, application.RowVersion, false, "  型号资料不完整  ", "standardizer", UserRole.ProcessReviewer, default);
+        Assert.Equal(MaterialCodeApplicationStatus.Rejected, decision.Application.Status);
+        Assert.Equal("型号资料不完整", decision.Application.DecisionComment);
     }
 
     [Fact]

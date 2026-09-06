@@ -28,10 +28,11 @@ public static class BomReleaseAggregation
     public static U9ReleaseBomSummary Build(ReleasePackage package)
     {
         var items = ReleasedItems(package)
-            .Where(item => !item.IsManuallyExcluded && !item.IsPendingRemoval)
+            .Where(item => !item.IsManuallyExcluded && !item.IsReleaseExcluded && !item.IsPendingRemoval)
             .Where(item => !string.IsNullOrWhiteSpace(item.DrawingNumber) && item.Quantity > 0)
             .GroupBy(item => item.Id)
             .Select(group => group.First())
+            .Select(item => item with { Quantity = item.Quantity * Math.Max(1, package.WholeSetMultiplier) })
             .ToArray();
 
         var production = items

@@ -18,7 +18,7 @@ public sealed class RolePermissionCatalogTests
         var mechanical = RolePermissionCatalog.InitialPermissions(UserRole.Engineer.ToString(), UserRole.Engineer);
         Assert.Contains(PermissionCodes.DocumentEdit, mechanical);
         Assert.Contains(PermissionCodes.BomEdit, mechanical);
-        Assert.DoesNotContain(PermissionCodes.MaterialView, mechanical);
+        Assert.Contains(PermissionCodes.MaterialView, mechanical);
         Assert.DoesNotContain(PermissionCodes.MaterialManage, mechanical);
 
         var standardizationEngineer = RolePermissionCatalog.InitialPermissions(UserRole.ProcessReviewer.ToString(), UserRole.ProcessReviewer);

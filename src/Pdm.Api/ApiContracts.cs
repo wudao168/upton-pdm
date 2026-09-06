@@ -242,12 +242,14 @@ public sealed record CreateReleasePackageRequest(
     string? EffectiveSerialTo = null,
     [property: JsonConverter(typeof(JsonStringEnumConverter))] ReleaseScope Scope = ReleaseScope.LegacyCombined,
     IReadOnlyList<Guid>? SelectedBomItemIds = null,
-    IReadOnlyDictionary<Guid, decimal>? SelectedBomItemQuantities = null);
+    IReadOnlyDictionary<Guid, decimal>? SelectedBomItemQuantities = null,
+    int WholeSetMultiplier = 1);
 
 public sealed record UpdateReleasePackageDraftRequest(
     string? ChangeReason = null,
     IReadOnlyList<Guid>? SelectedBomItemIds = null,
-    IReadOnlyDictionary<Guid, decimal>? SelectedBomItemQuantities = null);
+    IReadOnlyDictionary<Guid, decimal>? SelectedBomItemQuantities = null,
+    int WholeSetMultiplier = 1);
 
 public sealed record EmergencyApprovalRequest(
     [property: JsonConverter(typeof(JsonStringEnumConverter))] ApprovalDecision Decision,
@@ -280,6 +282,11 @@ public sealed record BatchUpdateBomItemsRequest(
 public sealed record BatchDeleteBomItemsRequest(IReadOnlyList<Guid> ItemIds, string Reason);
 
 public sealed record BatchRestoreBomItemsRequest(IReadOnlyList<Guid> ItemIds, string Mode = "Original");
+
+public sealed record SetBomReleaseExclusionRequest(
+    IReadOnlyList<Guid> ItemIds,
+    bool Excluded,
+    string? Reason = null);
 
 public sealed record RestoreBomItemsFromSourceRequest(IReadOnlyList<Guid> ItemIds);
 

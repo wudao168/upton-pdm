@@ -7,7 +7,7 @@ using Upton.Pdm.Domain;
 
 namespace Upton.Pdm.Infrastructure;
 
-public sealed class U9OpenApiClient(HttpClient httpClient) : IU9OpenApiClient, IU9BomQueryClient
+public sealed class U9OpenApiClient(HttpClient httpClient) : IU9OpenApiClient, IU9InventoryClient, IU9BomQueryClient
 {
     public async Task<U9AuthenticationResult> AuthenticateAsync(
         U9AuthenticationRequest request,
@@ -38,6 +38,43 @@ public sealed class U9OpenApiClient(HttpClient httpClient) : IU9OpenApiClient, I
         var token = ReadToken(root);
         if (string.IsNullOrWhiteSpace(token)) throw new PdmRuleException("U9C认证成功但未返回Token。");
         return new U9AuthenticationResult(token);
+    }
+
+    public async Task<U9InventoryQueryResult> QueryInventoryAsync(
+        string baseUrl,
+        string path,
+        string token,
+        string organizationCode,
+        string? materialCode,
+        CancellationToken cancellationToken)
+    {
+        var endpoint = BuildEndpoint(baseUrl, path);
+        var payload = new Dictionary<string, object?>
+        {
+            ["Org"] = Required(organizationCode, "组织编码"),
+            ["ItemCode"] = string.IsNullOrWhiteSpace(materialCode) ? null : materialCode.Trim()
+        };
+        using var request = new HttpRequestMessage(HttpMethod.Post, endpoint)
+        {
+            Content = new StringContent(
+                JsonSerializer.Serialize(payload.Where(pair => pair.Value is not null).ToDictionary(pair => pair.Key, pair => pair.Value)),
+                Encoding.UTF8,
+                "application/json")
+        };
+        request.Headers.TryAddWithoutValidation("token", Required(token, "U9C Token"));
+        request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
+
+        using var response = await SendAsync(request, "U9C库存查询", cancellationToken);
+        var responseJson = await response.Content.ReadAsStringAsync(cancellationToken);
+        if (!response.IsSuccessStatusCode)
+            throw new PdmRuleException($"U9C库存查询请求失败：HTTP {(int)response.StatusCode}。");
+
+        using var document = ParseJson(responseJson, "U9C库存查询响应不是有效JSON。");
+        var root = document.RootElement;
+        var responseCode = ReadInt(root, "ResCode") ?? throw new PdmRuleException("U9C库存查询响应缺少ResCode。");
+        var success = ReadBool(root, "Success") ?? responseCode == 0;
+        var rows = ReadInventoryRows(root, organizationCode, includeZeroStock: !string.IsNullOrWhiteSpace(materialCode));
+        return new U9InventoryQueryResult(responseCode, success, ReadMessage(root), rows);
     }
 
     public async Task<U9BusinessBatchResult> PostBatchAsync(
@@ -335,6 +372,48 @@ public sealed class U9OpenApiClient(HttpClient httpClient) : IU9OpenApiClient, I
         return value.ValueKind == JsonValueKind.Array
             ? value.EnumerateArray().Select(row => row.Clone()).ToArray()
             : [value.Clone()];
+    }
+
+    private static IReadOnlyList<U9InventorySourceRow> ReadInventoryRows(
+        JsonElement root,
+        string organizationCode,
+        bool includeZeroStock)
+    {
+        if (!TryGet(root, "Data", out var data) || data.ValueKind is JsonValueKind.Null or JsonValueKind.Undefined)
+            return [];
+        if (data.ValueKind == JsonValueKind.String && string.IsNullOrWhiteSpace(data.GetString())) return [];
+        using var serialized = data.ValueKind == JsonValueKind.String
+            ? ParseNestedJson(data.GetString() ?? "[]", "U9C库存响应Data不是有效JSON。")
+            : JsonDocument.Parse(data.GetRawText());
+        IEnumerable<JsonElement> values = serialized.RootElement.ValueKind == JsonValueKind.Array
+            ? serialized.RootElement.EnumerateArray().ToArray()
+            : [serialized.RootElement];
+        var rows = new List<U9InventorySourceRow>();
+        foreach (var row in values)
+        {
+            var materialCode = ReadString(row, "m_itemCode", "ItemCode");
+            if (string.IsNullOrWhiteSpace(materialCode)) continue;
+            var stockQuantity = ReadDecimal(row, "m_storeQty", "StoreQty") ?? 0m;
+            if (!includeZeroStock && stockQuantity == 0m) continue;
+            rows.Add(new(
+                ReadString(row, "m_orgCode", "OrgCode") ?? organizationCode.Trim(),
+                materialCode,
+                ReadString(row, "m_itemName", "ItemName") ?? string.Empty,
+                ReadString(row, "m_itemSPECS", "ItemSPECS", "SPECS"),
+                ReadString(row, "m_whCode", "WhCode"),
+                ReadString(row, "m_whName", "WhName") ?? ReadString(row, "m_whCode", "WhCode") ?? "—",
+                ReadString(row, "m_binCode", "BinCode"),
+                ReadString(row, "m_binName", "BinName"),
+                ReadString(row, "m_storageType", "StorageType"),
+                ReadString(row, "m_projectCode", "ProjectCode"),
+                ReadString(row, "m_projectName", "ProjectName"),
+                ReadString(row, "m_seiBanNo", "SeiBanNo", "Seiban"),
+                stockQuantity,
+                ReadDecimal(row, "m_canUseQty", "CanUseQty") ?? 0m,
+                ReadDecimal(row, "m_reservQty", "ReservQty") ?? 0m,
+                ReadDecimal(row, "m_notUseQty", "NotUseQty") ?? 0m));
+        }
+        return rows;
     }
 
     private static IReadOnlyList<JsonElement> ReadNestedDataRows(JsonElement root)

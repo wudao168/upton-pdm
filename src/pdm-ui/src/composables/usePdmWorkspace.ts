@@ -1,5 +1,5 @@
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
-import { batchDeleteBomItems as batchDeleteBomItemsRequest, batchRestoreBomItems as batchRestoreBomItemsRequest, restoreBomItemsFromSource as restoreBomItemsFromSourceRequest } from '../api'
+import { batchDeleteBomItems as batchDeleteBomItemsRequest, batchRestoreBomItems as batchRestoreBomItemsRequest, restoreBomItemsFromSource as restoreBomItemsFromSourceRequest, setBomReleaseExclusion as setBomReleaseExclusionRequest } from '../api'
 import { getBomSourceData } from '../api'
 import { transferApproval } from '../api'
 import { listUserNotifications, markAllUserNotificationsRead as markAllUserNotificationsReadRequest, markUserNotificationRead as markUserNotificationReadRequest } from '../api'
@@ -469,8 +469,8 @@ export function usePdmWorkspace() {
       versionId,
       fileName: node.fileName,
       revision: revision ?? node.version,
-      drawingNumber: node.drawingNumber,
-      name: node.name,
+      drawingNumber: bomItem?.drawingNumber ?? node.drawingNumber,
+      name: bomItem?.name ?? node.name,
       specification: bomItem?.specification ?? '',
       material: bomItem?.material ?? '',
       brand: bomItem?.brand ?? '',
@@ -591,6 +591,20 @@ export function usePdmWorkspace() {
     operationError.value = ''
     try {
       await batchRestoreBomItemsRequest(project.value.id, itemIds, mode, accessToken)
+      await reload()
+    } catch (error) {
+      operationError.value = messageFrom(error)
+      throw error
+    } finally {
+      operationPending.value = false
+    }
+  }
+
+  async function setBomReleaseExclusion(itemIds: string[], excluded: boolean, reason: string) {
+    operationPending.value = true
+    operationError.value = ''
+    try {
+      await setBomReleaseExclusionRequest(project.value.id, itemIds, excluded, reason, accessToken)
       await reload()
     } catch (error) {
       operationError.value = messageFrom(error)
@@ -1801,6 +1815,7 @@ export function usePdmWorkspace() {
     batchUpdateBomItems,
     batchDeleteBomItems,
     batchRestoreBomItems,
+    setBomReleaseExclusion,
     restoreBomItemsFromSource,
     setBomCategoryEmpty,
     refreshDrawingReviews,

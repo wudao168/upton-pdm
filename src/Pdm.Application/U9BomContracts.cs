@@ -104,6 +104,14 @@ public sealed record U9BomWriteCommand(
     bool AllowEmptyCreate = false,
     bool ReconcileComponentTotals = false);
 
+public sealed record U9BomQuantityReconciliation(
+    string ItemCode,
+    string IssueUomCode,
+    decimal ParentQty,
+    decimal PlmApprovedTotal,
+    decimal U9ExistingTotal,
+    decimal UploadDelta);
+
 public sealed record U9BomWritePreview(
     U9BomWriteOperation Operation,
     string Path,
@@ -113,6 +121,7 @@ public sealed record U9BomWritePreview(
     string RequiredConfirmation,
     int AddedComponentCount,
     int RetainedHistoricalComponentCount,
+    IReadOnlyList<U9BomQuantityReconciliation> QuantityReconciliations,
     DateTimeOffset GeneratedAt);
 
 public sealed record U9BomWriteExecution(

@@ -1,6 +1,7 @@
 import { expect, test } from '@playwright/test'
 
 const projectId = '11111111-1111-1111-1111-111111111111'
+let materialCodeApplications: Array<Record<string, unknown>> = []
 const versions = [
   { id: 'version-w1', documentId: 'doc-root', revision: { display: 'W1' }, status: 0, fileLength: 1024, sha256: 'A'.repeat(64), createdBy: 'engineer', createdAt: '2026-08-10T01:00:00Z', changeNote: '首次存档' },
   { id: 'version-w2', documentId: 'doc-root', revision: { display: 'W2' }, status: 0, fileLength: 2048, sha256: 'B'.repeat(64), createdBy: 'engineer', createdAt: '2026-08-11T01:00:00Z', changeNote: '完善结构' },
@@ -44,8 +45,9 @@ const referenceChildren = Array.from({ length: 40 }, (_, index) => ({
 }))
 
 test.beforeEach(async ({ page }) => {
+  materialCodeApplications = []
   let currentUsername = 'engineer'
-  await page.route(/^http:\/\/127\.0\.0\.1:(?:5080|5173|5193)\/(?:api(?:\/.*)?|health)(?:\?.*)?$/, async (route) => {
+  await page.route(/^http:\/\/127\.0\.0\.1:(?:5080|5173|519[3-5])\/(?:api(?:\/.*)?|health)(?:\?.*)?$/, async (route) => {
     const path = new URL(route.request().url()).pathname
     const fulfill = (body: unknown, status = 200) => route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(body) })
     if (path === '/health') return fulfill({ status: 'ok' })
@@ -53,13 +55,44 @@ test.beforeEach(async ({ page }) => {
       const credentials = route.request().postDataJSON() as { username?: string }
       const administrator = credentials.username === 'admin'
       currentUsername = administrator ? 'admin' : 'engineer'
-      return fulfill({ accessToken: 'e2e-token', expiresAt: '2099-01-01T00:00:00Z', resumeToken: 'e2e-resume-token', username: currentUsername, displayName: administrator ? '系统管理员' : '真实工程师', role: administrator ? 'Administrator' : 'Engineer', permissions: administrator ? ['project.view', 'project.create', 'project.child.create', 'project.content.view', 'document.edit', 'bom.edit', 'release.manage', 'settings.customer.manage', 'settings.organization.manage', 'settings.folder.manage', 'settings.storage.manage', 'system.role.view', 'system.role.edit', 'audit.view'] : ['project.view', 'project.create', 'project.child.create', 'project.content.view', 'document.edit', 'bom.edit', 'release.manage'], primaryCompanyId: 'org-ks', activeCompanyId: 'org-ks', activeCompanyName: '昆山阿普顿自动化系统有限公司', crossCompanyView: administrator, accessibleCompanies: administrator ? [{ id: 'org-ks', name: '昆山阿普顿自动化系统有限公司', code: '7' }, { id: 'org-gz', name: '广州阿普顿自动化系统有限公司', code: '3' }] : [{ id: 'org-ks', name: '昆山阿普顿自动化系统有限公司', code: '7' }] })
+      return fulfill({ accessToken: 'e2e-token', expiresAt: '2099-01-01T00:00:00Z', resumeToken: 'e2e-resume-token', username: currentUsername, displayName: administrator ? '系统管理员' : '真实工程师', role: administrator ? 'Administrator' : 'Engineer', permissions: administrator ? ['project.view', 'project.create', 'project.child.create', 'project.content.view', 'document.edit', 'bom.edit', 'release.manage', 'material.view', 'material.manage', 'settings.customer.manage', 'settings.organization.manage', 'settings.folder.manage', 'settings.storage.manage', 'system.role.view', 'system.role.edit', 'audit.view'] : ['project.view', 'project.create', 'project.child.create', 'project.content.view', 'document.edit', 'bom.edit', 'material.view', 'release.manage'], primaryCompanyId: 'org-ks', activeCompanyId: 'org-ks', activeCompanyName: '昆山阿普顿自动化系统有限公司', crossCompanyView: administrator, accessibleCompanies: administrator ? [{ id: 'org-ks', name: '昆山阿普顿自动化系统有限公司', code: '7' }, { id: 'org-gz', name: '广州阿普顿自动化系统有限公司', code: '3' }] : [{ id: 'org-ks', name: '昆山阿普顿自动化系统有限公司', code: '7' }] })
     }
     if (path === '/api/auth/me') return fulfill({ username: currentUsername, displayName: currentUsername === 'admin' ? '系统管理员' : '真实工程师', nickname: null, gender: 'unspecified', landline: null, mobilePhone: null, email: null })
     if (path === '/api/password-reset-requests') return fulfill([])
     if (path === '/api/approval-tasks/mine') return fulfill([])
-    if (path === '/api/material-code/applications') return fulfill([])
+    if (path === '/api/notifications/mine') return fulfill([])
+    if (path === '/api/bom-validation-rules') return fulfill({ standard: ['drawingNumber', 'name', 'unit', 'specification', 'quantity', 'revision'], nonStandard: ['drawingNumber', 'name', 'unit', 'material', 'quantity', 'revision'], electrical: ['drawingNumber', 'name', 'unit', 'quantity', 'revision'] })
+    if (path === '/api/material-code/applications') return fulfill(materialCodeApplications)
     if (path === '/api/material-sync-tasks') return fulfill([])
+    if (path === '/api/material-sync-batches') return fulfill([])
+    if (path === '/api/materials') {
+      const query = new URL(route.request().url()).searchParams.get('query') ?? ''
+      return fulfill(query.toLocaleLowerCase().includes('ph602') ? [
+        { id: 'material-ph602-a', materialCode: '01020000601', name: 'PH602候选A', kind: 'Standard', supplyMode: 'Purchase', unitCode: '001', specification: 'PH602', brand: 'AIRTAC', approvalStatus: 'Approved', syncStatus: 'Succeeded', createdBy: 'admin', createdAt: '2026-09-01T01:00:00Z', updatedBy: 'admin', updatedAt: '2026-09-03T01:00:00Z', rowVersion: 1, isArchived: false },
+        { id: 'material-ph602-b', materialCode: '01020000602', name: 'PH602候选B', kind: 'Standard', supplyMode: 'Purchase', unitCode: '001', specification: 'PH602', brand: 'FESTO', approvalStatus: 'Approved', syncStatus: 'Succeeded', createdBy: 'admin', createdAt: '2026-09-01T01:00:00Z', updatedBy: 'admin', updatedAt: '2026-09-03T01:00:00Z', rowVersion: 1, isArchived: false },
+      ] : [])
+    }
+    if (path === '/api/materials/page') {
+      const includeArchived = new URL(route.request().url()).searchParams.get('includeArchived') === 'true'
+      const items = includeArchived ? [{
+        id: 'material-archived', materialCode: '01021000001', name: '测试停用料品', kind: 'Standard', supplyMode: 'Purchase', unitCode: '001',
+        specification: 'TEST-001', material: null, remark: null, brand: 'UPTON', surfaceTreatment: null, weight: null, weightUnit: null,
+        approvalStatus: 'Approved', approvedBy: 'admin', approvedAt: '2026-09-01T01:00:00Z', categoryCode: '0102', u9CategoryCode: '0102',
+        u9ItemId: null, u9ItemCode: null, syncStatus: 'Succeeded', createdBy: 'admin', createdAt: '2026-09-01T01:00:00Z',
+        updatedBy: 'admin', updatedAt: '2026-09-03T01:00:00Z', rowVersion: 3, isArchived: true, archivedBy: 'admin',
+        archivedAt: '2026-09-03T01:00:00Z', u9SyncConfirmed: true, sourceSystem: 'Pdm', masterOwner: 'Pdm', referenceCount: 0,
+      }] : []
+      return fulfill({ items, total: items.length, page: 1, pageSize: 50 })
+    }
+    if (path === '/api/material-categories') return fulfill([{ code: '0102', name: '机械外购件', parentCode: null, pdmKind: 'Standard', defaultSupplyMode: 'Purchase', allowCreate: true, isVisible: true, isActive: true, numberPrefix: '0102', sequenceLength: 7, counterScope: '0102', sortOrder: 1, updatedBy: 'admin', updatedAt: '2026-09-01T01:00:00Z', rowVersion: 1 }])
+    if (path === '/api/material-numbering-settings') return fulfill({ startSequence: 1000000, sequenceLength: 7 })
+    if (path === '/api/material-duplicate-rules') return fulfill([{ categoryCode: '0102', fields: ['Specification', 'Brand'] }])
+    if (path === '/api/material-inventory') return fulfill({
+      items: [], total: 0, page: 1, pageSize: 50,
+      warehouseNames: [], brandNames: [], projectCodes: [], projectSubprojects: [],
+      lastSuccessfulRefreshAt: null,
+    })
+    if (path === '/api/material-relations/templates') return fulfill([])
     if (path === '/api/program-templates/tasks/mine') return fulfill([])
     if (path === '/api/customers') return fulfill([{ id: 'customer-1', code: 'C00465', name: '中山比亚迪电子有限公司', isActive: true }])
     if (path === '/api/organization-directory') return fulfill(organizationDirectory)
@@ -88,11 +121,17 @@ test.beforeEach(async ({ page }) => {
     if (path === `/api/projects/${projectId}/folder-documents`) return fulfill([{ id: 'doc-root', projectId, folderId: 'folder-main-mechanical', drawingNumber: 'REAL-ASM-001', name: '真实总装配', fileName: 'REAL-ASM-001.SLDASM', kind: 0, lifecycleState: 0, revision: { display: 'W2' }, checkedOutBy: 'engineer' }, { id: 'doc-part', projectId, folderId: 'folder-main-mechanical', drawingNumber: 'REAL-PRT-001', name: '真实底板', fileName: 'REAL-PRT-001.SLDPRT', kind: 1, lifecycleState: 0, revision: { display: 'A' }, checkedOutBy: null }, { id: 'doc-drawing', projectId, folderId: 'folder-main-mechanical', drawingNumber: 'REAL-ASM-001', name: '真实总装工程图', fileName: 'REAL-ASM-001.SLDDRW', kind: 2, lifecycleState: 0, revision: { display: 'W1' }, checkedOutBy: null }])
     if (path.endsWith('/documents')) return fulfill([{ id: 'doc-root', drawingNumber: 'REAL-ASM-001', name: '真实总装配', fileName: 'REAL-ASM-001.SLDASM', kind: 0, revision: { display: 'W2' }, checkedOutBy: 'engineer' }, { id: 'doc-part', drawingNumber: 'REAL-PRT-001', name: '真实底板', fileName: 'REAL-PRT-001.SLDPRT', kind: 1, revision: { display: 'A' }, checkedOutBy: null }, { id: 'doc-drawing', drawingNumber: 'REAL-ASM-001', name: '真实总装工程图', fileName: 'REAL-ASM-001.SLDDRW', kind: 2, revision: { display: 'W1' }, checkedOutBy: null }])
     if (path.endsWith('/reference-tree')) return fulfill({ nodeId: 'node-root', documentId: 'doc-root', instancePath: 'REAL-ASM-001', fileName: 'REAL-ASM-001.SLDASM', displayName: '真实总装配', kind: 0, configuration: '默认', quantity: 1, status: 0, revision: null, checkedOutBy: 'engineer', children: referenceChildren })
-    if (path.endsWith('/boms/Standard')) return fulfill([{ id: 'bom-standard-1', kind: 'Standard', sequence: 1, drawingNumber: 'REAL-STD-001', name: '标准紧固件', quantity: 4, unit: '件', material: null, specification: 'M8', revision: 'A', isComplete: true, source: 'Auto', isManuallyOverridden: false, isPendingRemoval: false }])
+    if (path.endsWith('/boms/Standard')) return fulfill([
+      { id: 'bom-standard-1', kind: 'Standard', sequence: 1, drawingNumber: 'REAL-STD-001', name: '标准紧固件', quantity: 4, unit: '件', material: null, specification: 'M8', brand: 'FESTO', revision: 'A', isComplete: true, source: 'Auto', isManuallyOverridden: false, isPendingRemoval: false },
+      { id: 'bom-standard-2', kind: 'Standard', sequence: 2, drawingNumber: 'REAL-STD-001', name: '标准紧固件', quantity: 6, unit: '件', material: null, specification: 'M8', brand: 'FESTO', revision: 'A', isComplete: true, source: 'Auto', isManuallyOverridden: false, isPendingRemoval: false },
+    ])
     if (path.endsWith('/boms/NonStandard')) return fulfill([{ id: 'bom-non-standard-1', kind: 'NonStandard', sequence: 1, drawingNumber: 'REAL-PRT-001', name: '真实底板', quantity: 2, unit: '件', material: 'Q235B', specification: '10mm', revision: 'A', isComplete: true, source: 'Auto', isManuallyOverridden: false, isPendingRemoval: false }])
     if (path.endsWith('/boms/Unclassified')) return fulfill([])
     if (path.endsWith('/boms/Electrical')) return fulfill([{ id: 'bom-electrical-1', kind: 'Electrical', sequence: 1, drawingNumber: 'REAL-EL-001', name: '真实传感器', quantity: 1, unit: '件', material: null, specification: 'PNP', revision: 'A', isComplete: false }])
     if (path.endsWith('/bom-source-data')) return fulfill([])
+    if (path.endsWith('/bom-versions')) return fulfill([])
+    if (path.endsWith('/bom-baselines')) return fulfill([])
+    if (path.endsWith('/bom-headers')) return fulfill([])
     if (path.endsWith('/boms/empty-declarations')) return fulfill([])
     if (path.endsWith('/release-packages')) return fulfill([{ id: 'package-1', number: 'RP-REAL-001', state: 2, approvalTasks: [{ stage: 1, assignee: '工艺工程师', decisionBy: '工艺工程师', decision: 0, decidedAt: '2026-08-11T01:00:00Z' }, { stage: 2, assignee: '批准人', decisionBy: null, decision: null, decidedAt: null }], publishedAt: null }])
     if (path === '/api/documents/doc-root/versions') return fulfill(versions)
@@ -219,6 +258,7 @@ test('engineer logs in and reads the API-backed PLM workspace', async ({ page },
     return { previewTop: preview?.top ?? -1, controlsBottom: controls?.bottom ?? -1, familyBottom: family?.bottom ?? -1, sidebarWidth: sidebar?.width ?? -1, sidebarBottom: sidebar?.bottom ?? -1, viewportHeight: window.innerHeight, pageHeight: document.documentElement.scrollHeight }
   })
   expect(previewLayout.previewTop).toBeGreaterThanOrEqual(previewLayout.controlsBottom)
+  expect(previewLayout.previewTop - previewLayout.controlsBottom).toBeLessThanOrEqual(1)
   expect(Math.abs(previewLayout.sidebarWidth - 200)).toBeLessThanOrEqual(2)
   expect(Math.abs(previewLayout.familyBottom - previewLayout.sidebarBottom)).toBeLessThanOrEqual(2)
   expect(previewLayout.sidebarBottom).toBeLessThanOrEqual(previewLayout.viewportHeight)
@@ -226,9 +266,8 @@ test('engineer logs in and reads the API-backed PLM workspace', async ({ page },
   await expect(page.getByText('PRJ-2026-018')).toHaveCount(0)
 
   const markupToolbar = page.getByLabel('图形批注工具')
-  await expect(markupToolbar.locator('button')).toHaveCount(5)
+  await expect(markupToolbar.locator('button')).toHaveCount(4)
   expect(await markupToolbar.locator('button').evaluateAll(buttons => buttons.map(button => button.getAttribute('aria-label')))).toEqual([
-    '保存批注',
     '引线批注',
     '云线批注',
     '框选批注',
@@ -236,8 +275,17 @@ test('engineer logs in and reads the API-backed PLM workspace', async ({ page },
   ])
   await expect(page.getByRole('button', { name: '使用位置' })).toHaveCount(0)
   await expect(page.getByRole('button', { name: '作废图档' })).toHaveCount(0)
+  await expect(page.getByLabel('图档属性')).toHaveCount(0)
+  await page.getByRole('button', { name: '保存批注' }).click()
+  await expect.poll(() => page.evaluate(() => (window as unknown as { pdmHostMessages: Array<{ type?: string }> }).pdmHostMessages.some(message => message.type === 'preview-host-save-markup'))).toBe(true)
+  await page.evaluate(() => window.dispatchEvent(new CustomEvent('pdm-preview-markup-status', { detail: { state: 'saved', message: '批注已保存。' } })))
 
   await page.evaluate(() => window.dispatchEvent(new CustomEvent('pdm-solidworks-capability', { detail: { available: true } })))
+  const previewCommands = page.locator('.pdm-preview-command')
+  await expect(previewCommands).toHaveCount(3)
+  expect(await previewCommands.evaluateAll(buttons => buttons.map(button => Math.round(button.getBoundingClientRect().width)))).toEqual([100, 100, 100])
+  await page.evaluate(() => window.dispatchEvent(new CustomEvent('pdm-preview-markup-status', { detail: { state: 'dirty', message: '批注尚未保存。' } })))
+  await expect(page.getByRole('button', { name: '保存批注' })).toHaveClass(/is-markup-dirty/)
   const solidWorksButton = page.getByRole('button', { name: '打开最新' })
   await expect(solidWorksButton).toBeEnabled()
   await page.screenshot({ path: testInfo.outputPath('controlled-open-actions.png'), fullPage: false })
@@ -274,6 +322,89 @@ test('engineer logs in and reads the API-backed PLM workspace', async ({ page },
   await page.screenshot({ path: testInfo.outputPath('bom-batch-editor.png'), fullPage: false })
   await batchDialog.getByRole('button', { name: '取消' }).click()
   await expect(batchDialog).toHaveCount(0)
+})
+
+test('BOM duplicate candidates require confirmation and summary quantity is editable', async ({ page }, testInfo) => {
+  const consoleMessages: string[] = []
+  const failedResponses: string[] = []
+  page.on('console', message => {
+    if (message.type() === 'error' || message.type() === 'warning') consoleMessages.push(`${message.type()}: ${message.text()}`)
+  })
+  page.on('response', response => {
+    if (response.status() >= 400) failedResponses.push(`${response.status()} ${response.url()}`)
+  })
+  await page.setViewportSize({ width: 1440, height: 900 })
+  await page.goto('/')
+  const loginForm = page.getByLabel('登录PLM')
+  await loginForm.getByRole('textbox', { name: '账号' }).fill('engineer')
+  await loginForm.getByRole('textbox', { name: '密码' }).fill('correct-password')
+  await loginForm.getByRole('button', { name: '登录', exact: true }).click()
+  await page.getByRole('button', { name: '项目列表', exact: true }).click()
+  await page.getByRole('button', { name: '进入项目' }).click()
+  await page.getByRole('button', { name: 'BOM', exact: true }).click()
+  await page.getByRole('tab', { name: '标准件BOM' }).click()
+
+  const materialCodeActions = page.locator('.pdm-bom-selection-actions .pdm-bom-material-code-toolbar-action')
+  await expect(materialCodeActions).toHaveText(['引用物料', '核对料号', '申请料号'])
+  expect(await materialCodeActions.evaluateAll(buttons => buttons.map(button => {
+    const box = button.getBoundingClientRect()
+    return { width: box.width, height: box.height }
+  }))).toEqual([
+    { width: 70, height: 28 },
+    { width: 70, height: 28 },
+    { width: 70, height: 28 },
+  ])
+  await page.screenshot({ path: testInfo.outputPath('bom-material-code-actions.png'), fullPage: false })
+
+  const row = page.locator('.pdm-edit-table tbody tr').first()
+  await expect(row.getByRole('button', { name: '编辑数量' })).toHaveText('10')
+  await row.getByRole('button', { name: '编辑数量' }).click()
+  await row.getByLabel('内联编辑数量').fill('2')
+  await row.getByLabel('内联编辑数量').press('Enter')
+  const quantityDialog = page.getByRole('dialog', { name: '分配汇总数量到结构位置' })
+  await expect(quantityDialog).toBeVisible()
+  await expect(quantityDialog.getByText('汇总数量 10 → 2')).toBeVisible()
+  await expect(quantityDialog.getByText('REAL-STD-001')).toBeVisible()
+  await expect(quantityDialog.getByText('标准紧固件')).toBeVisible()
+  await expect(quantityDialog.getByText('M8')).toBeVisible()
+  await expect(quantityDialog.getByText('FESTO')).toBeVisible()
+  await expect(quantityDialog.getByRole('row')).toHaveCount(3)
+  await expect(row.getByRole('button', { name: '编辑数量' })).toHaveText('10')
+  await expect(quantityDialog.getByRole('button', { name: '确认分配' })).toBeDisabled()
+  const quantityInputs = quantityDialog.getByRole('spinbutton')
+  await quantityInputs.nth(0).fill('0')
+  await quantityInputs.nth(1).fill('2')
+  await expect(quantityDialog.getByText('待分配 0')).toBeVisible()
+  await expect(quantityDialog.getByText('其中 1 个位置数量为 0')).toBeVisible()
+  await page.screenshot({ path: testInfo.outputPath('summary-quantity-location.png'), fullPage: false })
+  await quantityDialog.getByRole('button', { name: '确认分配' }).click()
+  await expect(page.getByText('保存BOM时这些位置将自动移入回收站')).toBeVisible()
+  await page.getByRole('button', { name: '确认删除并继续' }).click()
+  await expect(quantityDialog).toHaveCount(0)
+  await expect(row.getByRole('button', { name: '编辑数量' })).toHaveText('2')
+
+  await row.getByRole('button', { name: '编辑型号' }).click()
+  await row.getByLabel('内联编辑型号').fill('PH602')
+  await row.getByLabel('内联编辑型号').press('Enter')
+  const duplicateDialog = page.getByRole('dialog', { name: '重复料品，请确认选择' })
+  await expect(duplicateDialog).toBeVisible()
+  await expect(duplicateDialog.getByRole('row')).toHaveCount(3)
+  await expect.poll(() => duplicateDialog.evaluate(element => getComputedStyle(element).transform)).toBe('none')
+  const dialogBox = await duplicateDialog.boundingBox()
+  const confirmButtonBoxes = await duplicateDialog.getByRole('button', { name: '确认选择' }).evaluateAll(buttons => buttons.map(button => {
+    const box = button.getBoundingClientRect()
+    return { left: box.left, right: box.right }
+  }))
+  const viewportWidth = await page.evaluate(() => window.innerWidth)
+  expect(dialogBox?.width).toBeGreaterThan(900)
+  expect(confirmButtonBoxes.every(box => box.left >= 0 && box.right <= viewportWidth)).toBe(true)
+  await expect(row.getByRole('button', { name: '编辑物料编码' })).toHaveText('REAL-STD-001')
+  await page.screenshot({ path: testInfo.outputPath('duplicate-material-choice.png'), fullPage: false })
+  await duplicateDialog.getByRole('row').filter({ hasText: '01020000602' }).getByRole('button', { name: '确认选择' }).click()
+  await expect(duplicateDialog).toHaveCount(0)
+  await expect(row.getByRole('button', { name: '编辑物料编码' })).toHaveText('01020000602')
+  await page.screenshot({ path: testInfo.outputPath('bom-duplicate-confirmation.png'), fullPage: false })
+  expect({ consoleMessages, failedResponses }).toEqual({ consoleMessages: [], failedResponses: [] })
 })
 
 test('project numbers remain fully visible at the compact adaptive width', async ({ page }, testInfo) => {
@@ -420,3 +551,83 @@ for (const scale of [
     await page.screenshot({ path: testInfo.outputPath(`workspace-${scale.name}.png`), fullPage: false })
   })
 }
+
+test('administrator can select one archived material and open the reactivate confirmation', async ({ page }, testInfo) => {
+  const consoleErrors: string[] = []
+  const failedResponses: string[] = []
+  page.on('console', message => {
+    if (message.type() === 'error') consoleErrors.push(message.text())
+  })
+  page.on('response', response => {
+    if (response.status() >= 400) failedResponses.push(`${response.status()} ${response.url()}`)
+  })
+  await page.setViewportSize({ width: 956, height: 1114 })
+  await page.goto('/')
+  const loginForm = page.getByLabel('登录PLM')
+  await loginForm.getByRole('textbox', { name: '账号' }).fill('admin')
+  await loginForm.getByRole('textbox', { name: '密码' }).fill('correct-password')
+  await loginForm.getByRole('button', { name: '登录', exact: true }).click()
+  await expect(page.locator('.pdm-project-detail')).toBeVisible({ timeout: 15_000 })
+  await page.waitForLoadState('networkidle')
+  const materialNav = page.getByRole('button', { name: '料品管理', exact: true })
+  await expect(materialNav).toBeVisible()
+  await materialNav.click()
+  await expect(materialNav).toHaveAttribute('aria-current', 'page')
+  await expect(page.getByRole('tab', { name: '料品主档', exact: true })).toBeVisible()
+
+  await page.getByText('显示已停用', { exact: true }).click()
+  const archivedRow = page.locator('.material-table tbody tr').filter({ hasText: '01021000001' })
+  await expect(archivedRow).toHaveCount(1)
+  await archivedRow.locator('label.el-checkbox').click()
+
+  const toolbar = page.locator('.material-toolbar')
+  await expect(toolbar.getByRole('button', { name: '启用', exact: true })).toBeEnabled()
+  await expect(toolbar.getByRole('button', { name: '停用', exact: true })).toBeDisabled()
+  const toolbarLayout = await toolbar.evaluate(element => ({
+    clientWidth: element.clientWidth,
+    scrollWidth: element.scrollWidth,
+  }))
+  expect(toolbarLayout.scrollWidth).toBeLessThanOrEqual(toolbarLayout.clientWidth)
+
+  await toolbar.getByRole('button', { name: '启用', exact: true }).click()
+  await expect(page.getByRole('dialog')).toContainText('启用料品')
+  await expect(page.getByRole('dialog')).toContainText('保留原料号、审批状态和历史记录')
+  await page.screenshot({ path: testInfo.outputPath('material-reactivation-confirmation.png'), fullPage: false })
+  await page.getByRole('dialog').getByRole('button', { name: '取消', exact: true }).click()
+  await expect(page.getByRole('dialog')).toHaveCount(0)
+  expect({ consoleErrors, failedResponses }).toEqual({ consoleErrors: [], failedResponses: [] })
+})
+
+test('engineer can read a material rejection reason without approval controls', async ({ page }, testInfo) => {
+  materialCodeApplications = [{
+    id: 'application-rejected', projectId, bomItemId: 'bom-standard-1', bomHeaderKind: 'Standard', applicationType: 'StandardBomItem',
+    status: 'Rejected', requestedBy: 'engineer', requestedAt: '2026-09-04T01:00:00Z', decidedBy: 'standardizer',
+    decidedAt: '2026-09-04T02:00:00Z', decisionComment: '型号资料不完整', materialId: null, materialCode: null, rowVersion: 4,
+    applicationName: '标准紧固件', projectCode: 'PRJ-REAL-001', projectName: '真实装配项目', categoryCode: '0102',
+    specification: 'M8', brand: 'UPTON', remark: null, workflowState: 'Rejected',
+  }]
+  const consoleErrors: string[] = []
+  const failedResponses: string[] = []
+  page.on('console', message => { if (message.type() === 'error') consoleErrors.push(message.text()) })
+  page.on('response', response => { if (response.status() >= 400) failedResponses.push(`${response.status()} ${response.url()}`) })
+
+  await page.setViewportSize({ width: 1440, height: 900 })
+  await page.goto('/')
+  const loginForm = page.getByLabel('登录PLM')
+  await loginForm.getByRole('textbox', { name: '账号' }).fill('engineer')
+  await loginForm.getByRole('textbox', { name: '密码' }).fill('correct-password')
+  await loginForm.getByRole('button', { name: '登录', exact: true }).click()
+  await expect(page.locator('.pdm-project-detail')).toBeVisible({ timeout: 15_000 })
+
+  await page.getByRole('button', { name: '料品管理', exact: true }).click()
+  await page.getByRole('tab', { name: /料号审批/ }).click()
+  await page.getByRole('tab', { name: /审批\/同步历史/ }).click()
+  const history = page.getByLabel('第一步料号审批历史')
+  await expect(history).toContainText('已退回')
+  await expect(history).toContainText('退回原因')
+  await expect(history).toContainText('型号资料不完整')
+  await expect(history.getByRole('button', { name: '批准', exact: true })).toHaveCount(0)
+  await expect(history.getByRole('button', { name: '退回', exact: true })).toHaveCount(0)
+  await page.screenshot({ path: testInfo.outputPath('engineer-material-rejection-history.png'), fullPage: false })
+  expect({ consoleErrors, failedResponses }).toEqual({ consoleErrors: [], failedResponses: [] })
+})

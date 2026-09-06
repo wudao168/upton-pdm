@@ -1399,6 +1399,15 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
     public Task<IReadOnlyList<ReleasePackage>> ListReleasePackagesAsync(Guid projectId, CancellationToken cancellationToken) =>
         Task.FromResult<IReadOnlyList<ReleasePackage>>(packages.Values.Where(package => package.ProjectId == projectId).OrderByDescending(package => package.CreatedAt).ToArray());
 
+    public Task<IReadOnlyList<PendingApprovalTask>> ListPendingApprovalTasksAsync(Guid projectId, CancellationToken cancellationToken) =>
+        Task.FromResult<IReadOnlyList<PendingApprovalTask>>(packages.Values
+            .Where(package => package.ProjectId == projectId && package.State is ReleasePackageState.ProcessReview or ReleasePackageState.Approval)
+            .Select(package => (Package: package, Task: package.ApprovalTasks.OrderBy(task => task.StepOrder).FirstOrDefault(task => task.Decision is null)))
+            .Where(item => item.Task is not null)
+            .Select(item => new PendingApprovalTask(item.Task!.Id, item.Package.Id, item.Package.Number, item.Task.Stage, item.Package.State, item.Task.Assignee, item.Package.CreatedAt))
+            .OrderBy(item => item.CreatedAt)
+            .ToArray());
+
     public Task<ReleasePackage?> FindReleasePackageAsync(Guid releasePackageId, CancellationToken cancellationToken)
     {
         packages.TryGetValue(releasePackageId, out var package);

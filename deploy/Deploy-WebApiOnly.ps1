@@ -1,5 +1,7 @@
 [CmdletBinding()]
-param()
+param(
+    [switch]$DeferDesktopClient
+)
 
 $ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path -Parent $PSScriptRoot
@@ -40,11 +42,14 @@ foreach ($source in @($apiSource, $clientSource, $previewSource)) {
 
 $backupRoot = Join-Path $localRoot (Join-Path 'backup' ('webapi-' + [DateTimeOffset]::Now.ToString('yyyyMMdd-HHmmss')))
 New-Item -ItemType Directory -Path $backupRoot -Force | Out-Null
-foreach ($component in @(
+$backupComponents = @(
     @{ Source = $apiTarget; Name = 'api' },
-    @{ Source = $clientTarget; Name = 'client' },
     @{ Source = $previewTarget; Name = 'preview-worker' }
-)) {
+)
+if (-not $DeferDesktopClient) {
+    $backupComponents += @{ Source = $clientTarget; Name = 'client' }
+}
+foreach ($component in $backupComponents) {
     $backupTarget = Join-Path $backupRoot $component.Name
     New-Item -ItemType Directory -Path $backupTarget -Force | Out-Null
     Copy-Item -Path (Join-Path $component.Source '*') -Destination $backupTarget -Recurse -Force
@@ -64,7 +69,9 @@ try {
     }
 
     Copy-Item -Path (Join-Path $apiSource '*') -Destination $apiTarget -Recurse -Force
-    Copy-Item -Path (Join-Path $clientSource '*') -Destination $clientTarget -Recurse -Force
+    if (-not $DeferDesktopClient) {
+        Copy-Item -Path (Join-Path $clientSource '*') -Destination $clientTarget -Recurse -Force
+    }
     Copy-Item -Path (Join-Path $previewSource '*') -Destination $previewTarget -Recurse -Force
 
     $apiRegistryPath = "HKLM:\SYSTEM\CurrentControlSet\Services\$serviceName"
@@ -98,6 +105,8 @@ try {
         apiSha256 = $activeHash
         health = $health.status
         database = $health.database
+        desktopClient = if ($DeferDesktopClient) { 'update-package-published-active-client-deferred' } else { 'deployed' }
+        stagedDesktopSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $clientSource 'Upton.Pdm.Desktop.exe')).Hash
         solidWorksAddin = 'not-switched-while-solidworks-is-running'
     }
     $result | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $resultPath -Encoding UTF8

@@ -6,7 +6,10 @@ import U9IntegrationManagement from '../src/components/U9IntegrationManagement.v
 const api = vi.hoisted(() => ({
   getU9MaterialIntegration: vi.fn(),
   getU9MaterialFullSyncStatus: vi.fn(),
+  getU9InventorySyncStatus: vi.fn(),
   startU9MaterialFullSync: vi.fn(),
+  startU9InventoryFullSync: vi.fn(),
+  updateU9InventorySyncSettings: vi.fn(),
   updateU9MaterialIntegration: vi.fn(),
   testU9MaterialIntegration: vi.fn(),
   previewU9MaterialSample: vi.fn(),
@@ -61,6 +64,15 @@ describe('U9IntegrationManagement', () => {
       },
     })
     api.startU9MaterialFullSync.mockResolvedValue({ message: '全量同步已启动' })
+    api.getU9InventorySyncStatus.mockResolvedValue({
+      settings: { autoSyncEnabled: true, syncIntervalMinutes: 60, queryPath: '/webapi/Invtrans/QueryQohAndAvailable' },
+      latestRun: {
+        id: 'inventory-run-1', triggerKind: 'Scheduled', status: 'Succeeded', sourceRowCount: 200,
+        storedRowCount: 120, materialCount: 45, startedAt: '2026-09-05T00:00:00Z', completedAt: '2026-09-05T00:01:00Z',
+      },
+    })
+    api.startU9InventoryFullSync.mockResolvedValue({ message: '库存全量刷新已启动' })
+    api.updateU9InventorySyncSettings.mockImplementation(async input => ({ ...input }))
     api.updateU9MaterialIntegration.mockImplementation(async input => ({ ...input, clientSecretConfigured: true }))
     api.testU9MaterialIntegration.mockResolvedValue({ ...settings, testedAt: '2026-08-20T00:00:00Z' })
     api.previewU9MaterialSample.mockResolvedValue({ categoryCodes: ['0101', '0102', '0204'], limitPerCategory: 10, queriedAt: '2026-08-20T00:00:00Z', items: [] })
@@ -100,8 +112,10 @@ describe('U9IntegrationManagement', () => {
     const interfacePage = wrapper.get('[aria-label="U9C接口设置"]')
     expect(interfacePage.text()).toContain('客户接口')
     expect(interfacePage.text()).toContain('料品接口')
+    expect(interfacePage.text()).toContain('库存接口')
     expect(interfacePage.text()).toContain('BOM接口')
     expect(interfacePage.get('input[name="u9CustomerQueryPath"]').element).toHaveProperty('value', settings.customerQueryPath)
+    expect(interfacePage.get('input[name="u9InventoryQueryPath"]').element).toHaveProperty('value', '/webapi/Invtrans/QueryQohAndAvailable')
     expect(interfacePage.get('input[name="u9BomCreatePath"]').element).toHaveProperty('value', settings.bomCreatePath)
     expect(interfacePage.text()).toContain('启用人工确认后的真实写入')
   })
@@ -123,6 +137,14 @@ describe('U9IntegrationManagement', () => {
     expect(api.getU9MaterialFullSyncStatus).toHaveBeenCalledWith('token')
     expect(api.previewU9MaterialSample).not.toHaveBeenCalled()
     expect(api.importU9MaterialSample).not.toHaveBeenCalled()
+    const inventoryPanel = wrapper.get('[aria-label="U9C库存自动全量刷新"]')
+    expect(inventoryPanel.text()).toContain('每 60 分钟')
+    expect(inventoryPanel.text()).toContain('库存快照明细120')
+    expect(inventoryPanel.text()).toContain('覆盖料号45')
+    expect(inventoryPanel.text()).toContain('立即全量刷新')
+    expect(inventoryPanel.text()).not.toContain('库存查询接口路径')
+    expect(inventoryPanel.find('input[name="u9InventoryQueryPath"]').exists()).toBe(false)
+    expect(api.getU9InventorySyncStatus).toHaveBeenCalledWith('token')
   })
 
   it('保存基础设置时保留料品接口参数', async () => {
@@ -141,7 +163,7 @@ describe('U9IntegrationManagement', () => {
     }), 'token')
   })
 
-  it('保存统一接口设置时同时提交客户料品和BOM路径', async () => {
+  it('保存统一接口设置时同时提交客户料品库存和BOM路径', async () => {
     const wrapper = mountPage()
     await flushPromises()
     await wrapper.findAll('[role="tab"]').find(tab => tab.text().includes('接口设置'))!.trigger('click')
@@ -159,6 +181,11 @@ describe('U9IntegrationManagement', () => {
       bomBipQueryPagePath: settings.bomBipQueryPagePath,
       unitCodeMappings: {},
     }), 'token')
+    expect(api.updateU9InventorySyncSettings).toHaveBeenCalledWith({
+      autoSyncEnabled: true,
+      syncIntervalMinutes: 60,
+      queryPath: '/webapi/Invtrans/QueryQohAndAvailable',
+    }, 'token')
   })
 
   it('BOM维护可查询U9C并展示请求预览和子项', async () => {

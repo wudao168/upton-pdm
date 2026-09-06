@@ -471,6 +471,10 @@ public sealed record BomItem(
 
     public bool IsManuallyExcluded { get; init; }
 
+    public bool IsReleaseExcluded { get; init; }
+
+    public string? ReleaseExclusionReason { get; init; }
+
     public string? ReconciliationStatus { get; init; }
 
     public string? ReconciliationNote { get; init; }
@@ -580,6 +584,15 @@ public sealed record ApprovalTask(
     public string? EmergencyReason { get; init; }
 }
 
+public sealed record PendingApprovalTask(
+    Guid Id,
+    Guid ReleasePackageId,
+    string ReleasePackageNumber,
+    ApprovalStage Stage,
+    ReleasePackageState PackageState,
+    string Assignee,
+    DateTimeOffset CreatedAt);
+
 public sealed record ReleasePackage(
     Guid Id,
     Guid ProjectId,
@@ -632,6 +645,8 @@ public sealed record ReleasePackage(
     public bool CreatesManufacturingBaseline { get; init; } = true;
 
     public bool LocksDocuments { get; init; } = true;
+
+    public int WholeSetMultiplier { get; init; } = 1;
 }
 
 public sealed record AuditEntry(

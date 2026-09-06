@@ -351,7 +351,7 @@ describe('ReleaseCenter', () => {
     await wrapper.get('.pdm-release-draft-actions .pdm-primary-action').trigger('submit')
 
     expect(wrapper.emitted('updateDraft')).toEqual([['draft-long-lead', {
-      changeReason: '调整数量', selectedBomItemIds: ['item-1'], selectedBomItemQuantities: { 'item-1': 1 },
+      changeReason: '调整数量', selectedBomItemIds: ['item-1'], selectedBomItemQuantities: { 'item-1': 1 }, wholeSetMultiplier: 1,
     }]])
   })
 
@@ -414,11 +414,29 @@ describe('ReleaseCenter', () => {
       },
     })
 
-    expect(wrapper.text()).toContain('正式发布内容（共 2 项）')
+    expect(wrapper.text()).toContain('正式发布内容（共 2 项 · 整套倍率 ×1）')
     const rows = wrapper.findAll('.release-detail-picker tbody tr')
     expect(rows).toHaveLength(2)
-    expect(rows.at(0)!.findAll('td').map(cell => cell.text())).toEqual(['全量', '1', 'STD-001', '提前采购件', 'M12', 'SMC', '4', '全量', '—', '已提前发布 1/4'])
+    expect(rows.at(0)!.findAll('td').map(cell => cell.text())).toEqual(['全量', '1', 'STD-001', '提前采购件', 'M12', 'SMC', '4', '4 × 1 = 4', '—', '已提前发布 1/4'])
     expect(rows.at(1)!.text()).not.toContain('已提前发布')
+  })
+
+  it('uses an operator-selected whole-set multiplier without changing source quantities', async () => {
+    const wrapper = mount(ReleaseCenter, {
+      props: {
+        releasePackage: null, allowedScopes: ['StandardFormal'], preferredScope: 'StandardFormal',
+        standardItems: [{ id: 'item-1', kind: 'Standard', sequence: 1, drawingNumber: 'STD-001', name: '标准件', quantity: 2, unit: '001', revision: 'W1', complete: true }],
+        username: 'engineer', pending: false, progress: 0, error: '', canManage: true, canDecide: true,
+      },
+    })
+
+    await wrapper.get('input[aria-label="整套倍率"]').setValue(3)
+    expect(wrapper.get('.release-detail-picker legend').text()).toContain('整套倍率 ×3')
+    expect(wrapper.findAll('.release-detail-picker tbody td').at(7)!.text()).toBe('2 × 3 = 6')
+    await wrapper.get('.pdm-release-draft-actions .pdm-primary-action').trigger('submit')
+
+    expect(wrapper.emitted('create')?.[0]?.[0]).toMatchObject({ wholeSetMultiplier: 3 })
+    expect((wrapper.props('standardItems') ?? [])[0]?.quantity).toBe(2)
   })
 
   it('paginates every formal release list at 50 summarized rows per page', async () => {
@@ -461,7 +479,7 @@ describe('ReleaseCenter', () => {
       },
     })
 
-    expect(wrapper.text()).toContain('增补/变更内容（共 3 项）')
+    expect(wrapper.text()).toContain('增补/变更内容（共 3 项 · 整套倍率 ×1）')
     expect(wrapper.findAll('.release-change-tag').map(tag => tag.text()).sort()).toEqual(['修改', '删除', '新增'])
     expect(wrapper.text()).toContain('STD-001')
     expect(wrapper.text()).toContain('STD-002')

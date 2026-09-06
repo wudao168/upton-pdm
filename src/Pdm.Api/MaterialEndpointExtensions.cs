@@ -106,6 +106,12 @@ public static class MaterialEndpointExtensions
             return Results.Ok(MapMaterial(await service.ArchiveAsync(materialId, expectedRowVersion, actor, role, cancellationToken)));
         });
 
+        api.MapPost("/materials/{materialId:guid}/reactivate", async (Guid materialId, long expectedRowVersion, HttpContext context, MaterialService service, CancellationToken cancellationToken) =>
+        {
+            var (actor, role) = CurrentUser(context.User);
+            return Results.Ok(MapMaterial(await service.ReactivateAsync(materialId, expectedRowVersion, actor, role, cancellationToken)));
+        });
+
         api.MapPost("/materials/link-bom", async (LinkBomMaterialRequest request, HttpContext context, MaterialService service, CancellationToken cancellationToken) =>
         {
             var (actor, role) = CurrentUser(context.User);
@@ -124,8 +130,8 @@ public static class MaterialEndpointExtensions
             var results = await service.ResolveStandardBomMaterialsAsync(new(request.ProjectId, request.BomItemIds), actor, role, cancellationToken);
             foreach (var result in results.Where(item => item.Status == MaterialCodeResolutionStatus.Matched && item.Material?.U9SyncConfirmed == true))
             {
-                await service.LinkBomMaterialAsync(new(request.ProjectId, result.BomItemId, result.Material!.Id), actor, role, cancellationToken);
-                await workflow.ApplyMaterialCodeToBomAsync(request.ProjectId, result.BomItemId, result.Material.MaterialCode, actor, cancellationToken);
+                await service.LinkAutomaticallyMatchedBomMaterialAsync(new(request.ProjectId, result.BomItemId, result.Material!.Id), actor, role, cancellationToken);
+                await workflow.ApplyAutomaticallyMatchedMaterialCodeToBomAsync(request.ProjectId, result.BomItemId, result.Material.MaterialCode, actor, cancellationToken);
             }
             return Results.Ok(results.Select(MapResolution));
         });
@@ -136,8 +142,8 @@ public static class MaterialEndpointExtensions
             var results = await service.ApplyForMaterialCodesAsync(new(request.ProjectId, request.BomItemIds), actor, role, cancellationToken);
             foreach (var result in results.Where(item => item.Status == MaterialCodeResolutionStatus.Matched && item.Material?.U9SyncConfirmed == true))
             {
-                await service.LinkBomMaterialAsync(new(request.ProjectId, result.BomItemId, result.Material!.Id), actor, role, cancellationToken);
-                await workflow.ApplyMaterialCodeToBomAsync(request.ProjectId, result.BomItemId, result.Material.MaterialCode, actor, cancellationToken);
+                await service.LinkAutomaticallyMatchedBomMaterialAsync(new(request.ProjectId, result.BomItemId, result.Material!.Id), actor, role, cancellationToken);
+                await workflow.ApplyAutomaticallyMatchedMaterialCodeToBomAsync(request.ProjectId, result.BomItemId, result.Material.MaterialCode, actor, cancellationToken);
             }
             return Results.Ok(results.Select(MapResolution));
         });

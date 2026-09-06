@@ -18,7 +18,8 @@ public sealed class PdmWorkflowService(
     TimeProvider timeProvider,
     ApprovalU9AutomationService? approvalU9Automation = null,
     BomHeaderService? bomHeaderService = null,
-    IMaterialRepository? materialRepository = null)
+    IMaterialRepository? materialRepository = null,
+    IMaterialRelationReleaseGuard? materialRelationReleaseGuard = null)
 {
     private const string ReconcileAutoAdded = "AutoAdded";
     private const string ReconcileClassificationChanged = "ClassificationChanged";
@@ -1039,6 +1040,44 @@ public sealed class PdmWorkflowService(
                 string.Concat(document.DrawingNumber, " / ", document.Name, " -> ", result.Document.DrawingNumber, " / ", result.Document.Name),
                 cancellationToken);
         }
+        if (result.VersionCreated)
+        {
+            try
+            {
+                var bomSnapshot = isProjectRoot
+                    ? snapshot
+                    : await repository.GetLatestReferenceSnapshotAsync(document.ProjectId, cancellationToken);
+                if (bomSnapshot is not null)
+                    await EnsureBomChangeAllowedAsync(
+                        document.ProjectId,
+                        cancellationToken,
+                        BomKind.Standard,
+                        BomKind.NonStandard);
+                result = bomSnapshot is null
+                    ? result with { BomUpdateError = "项目尚无已存档的主结构，BOM未自动更新。请先提交主装配。" }
+                    : result with
+                    {
+                        BomUpdate = await GenerateMechanicalBomFromSnapshotAsync(
+                            document.ProjectId,
+                            bomSnapshot,
+                            actor,
+                            cancellationToken,
+                            true)
+                    };
+            }
+            catch (Exception exception) when (exception is not OperationCanceledException)
+            {
+                result = result with { BomUpdateError = exception.Message };
+                try
+                {
+                    await AuditAsync(actor, "bom.generate.failed", nameof(BomItem), document.ProjectId.ToString(), exception.Message, cancellationToken);
+                }
+                catch
+                {
+                    // BOM refresh is best-effort after the immutable document version has already been stored.
+                }
+            }
+        }
         return result;
     }
 
@@ -1642,7 +1681,7 @@ public sealed class PdmWorkflowService(
         var nonStandard = await repository.GetBomAsync(projectId, BomKind.NonStandard, cancellationToken);
         var unclassified = await repository.GetBomAsync(projectId, BomKind.Unclassified, cancellationToken);
         var legacyMechanical = await repository.GetBomAsync(projectId, BomKind.Mechanical, cancellationToken);
-        var mechanical = standard.Concat(nonStandard).Concat(legacyMechanical).Where(item => !item.IsManuallyExcluded).ToArray();
+        var mechanical = standard.Concat(nonStandard).Concat(legacyMechanical).Where(IsPublishableBomItem).ToArray();
         var electrical = await repository.GetBomAsync(projectId, BomKind.Electrical, cancellationToken);
         var validationRules = (await repository.GetSystemSettingsAsync(cancellationToken)).ValidationRules;
         var legacyMode = legacyMechanical.Count > 0 && standard.Count == 0 && nonStandard.Count == 0;
@@ -1656,9 +1695,9 @@ public sealed class PdmWorkflowService(
             throw new PdmRuleException("标准件BOM、非标件BOM和电气BOM中的有效物料资料必须齐全；空BOM自动按无此类物料处理。");
         }
 
-        var standardVersion = await ResolveBomVersionForReleaseAsync(projectId, BomKind.Standard, standard.Where(item => !item.IsManuallyExcluded).ToArray(), actor, changeNumber, changeReason, effectiveSerialFrom, effectiveSerialTo, validationRules, cancellationToken);
-        var nonStandardVersion = await ResolveBomVersionForReleaseAsync(projectId, BomKind.NonStandard, nonStandard.Where(item => !item.IsManuallyExcluded).ToArray(), actor, changeNumber, changeReason, effectiveSerialFrom, effectiveSerialTo, validationRules, cancellationToken);
-        var electricalVersion = await ResolveBomVersionForReleaseAsync(projectId, BomKind.Electrical, electrical.Where(item => !item.IsManuallyExcluded).ToArray(), actor, changeNumber, changeReason, effectiveSerialFrom, effectiveSerialTo, validationRules, cancellationToken);
+        var standardVersion = await ResolveBomVersionForReleaseAsync(projectId, BomKind.Standard, standard.Where(IsPublishableBomItem).ToArray(), actor, changeNumber, changeReason, effectiveSerialFrom, effectiveSerialTo, validationRules, cancellationToken);
+        var nonStandardVersion = await ResolveBomVersionForReleaseAsync(projectId, BomKind.NonStandard, nonStandard.Where(IsPublishableBomItem).ToArray(), actor, changeNumber, changeReason, effectiveSerialFrom, effectiveSerialTo, validationRules, cancellationToken);
+        var electricalVersion = await ResolveBomVersionForReleaseAsync(projectId, BomKind.Electrical, electrical.Where(IsPublishableBomItem).ToArray(), actor, changeNumber, changeReason, effectiveSerialFrom, effectiveSerialTo, validationRules, cancellationToken);
 
         var packageId = Guid.NewGuid();
         var tasks = new[]
@@ -1713,11 +1752,13 @@ public sealed class PdmWorkflowService(
         string actor,
         UserRole role,
         CancellationToken cancellationToken,
-        IReadOnlyDictionary<Guid, decimal>? selectedBomItemQuantities = null)
+        IReadOnlyDictionary<Guid, decimal>? selectedBomItemQuantities = null,
+        int wholeSetMultiplier = 1)
     {
         await RequirePermissionAsync(actor, role, PermissionCodes.ReleaseManage, cancellationToken);
         if (scope == ReleaseScope.LegacyCombined)
             throw new PdmRuleException("新发布流程必须指定标准件、电气或非标件发布类型。");
+        wholeSetMultiplier = NormalizeWholeSetMultiplier(scope, wholeSetMultiplier);
         var project = await repository.FindProjectAsync(projectId, cancellationToken)
             ?? throw new PdmNotFoundException("项目不存在。");
         var projectNumber = ProjectNumberPolicy.BusinessCode(project);
@@ -1736,9 +1777,9 @@ public sealed class PdmWorkflowService(
 
         var settings = await repository.GetSystemSettingsAsync(cancellationToken);
         changeReason = NormalizeScopedReleaseDescription(changeReason, scope, settings.ReleaseChangeReasonTypes);
-        var standard = (await repository.GetBomAsync(projectId, BomKind.Standard, cancellationToken)).Where(item => !item.IsManuallyExcluded).ToArray();
-        var nonStandard = (await repository.GetBomAsync(projectId, BomKind.NonStandard, cancellationToken)).Where(item => !item.IsManuallyExcluded).ToArray();
-        var electrical = (await repository.GetBomAsync(projectId, BomKind.Electrical, cancellationToken)).Where(item => !item.IsManuallyExcluded).ToArray();
+        var standard = (await repository.GetBomAsync(projectId, BomKind.Standard, cancellationToken)).Where(IsPublishableBomItem).ToArray();
+        var nonStandard = (await repository.GetBomAsync(projectId, BomKind.NonStandard, cancellationToken)).Where(IsPublishableBomItem).ToArray();
+        var electrical = (await repository.GetBomAsync(projectId, BomKind.Electrical, cancellationToken)).Where(IsPublishableBomItem).ToArray();
         var targetKind = ReleaseScopeBomKind(scope);
         var targetItems = targetKind == BomKind.Standard ? standard : targetKind == BomKind.NonStandard ? nonStandard : electrical;
         if (scope == ReleaseScope.StandardLongLead)
@@ -1817,7 +1858,8 @@ public sealed class PdmWorkflowService(
             ChangeNumber = changeNumber,
             ChangeReason = changeReason,
             EffectiveSerialFrom = effectiveSerialFrom,
-            EffectiveSerialTo = effectiveSerialTo
+            EffectiveSerialTo = effectiveSerialTo,
+            WholeSetMultiplier = wholeSetMultiplier
         };
         var created = await repository.CreateReleasePackageAsync(package, cancellationToken);
         await publisher.PrepareAsync(created, project, cancellationToken);
@@ -1832,7 +1874,8 @@ public sealed class PdmWorkflowService(
         IReadOnlyDictionary<Guid, decimal>? selectedBomItemQuantities,
         string actor,
         UserRole role,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        int wholeSetMultiplier = 1)
     {
         await RequirePermissionAsync(actor, role, PermissionCodes.ReleaseManage, cancellationToken);
         var package = await repository.FindReleasePackageAsync(releasePackageId, cancellationToken)
@@ -1843,14 +1886,15 @@ public sealed class PdmWorkflowService(
             ?? throw new PdmNotFoundException("发布包对应的项目不存在。");
         var settings = await repository.GetSystemSettingsAsync(cancellationToken);
         var normalizedReason = NormalizeScopedReleaseDescription(changeReason, package.Scope, settings.ReleaseChangeReasonTypes);
-        var updated = package with { ChangeReason = normalizedReason };
+        wholeSetMultiplier = NormalizeWholeSetMultiplier(package.Scope, wholeSetMultiplier);
+        var updated = package with { ChangeReason = normalizedReason, WholeSetMultiplier = wholeSetMultiplier };
 
         if (package.Scope == ReleaseScope.StandardLongLead)
         {
             var snapshot = await repository.GetLatestReferenceSnapshotAsync(package.ProjectId, cancellationToken)
                 ?? throw new PdmRuleException("项目尚无已存档的引用树快照，不能编辑发布包。");
             var standard = (await repository.GetBomAsync(package.ProjectId, BomKind.Standard, cancellationToken))
-                .Where(item => !item.IsManuallyExcluded).ToArray();
+                .Where(IsPublishableBomItem).ToArray();
             var selectedIds = (selectedBomItemIds ?? []).Distinct().ToHashSet();
             if (selectedIds.Count == 0) throw new PdmRuleException("长交期发布必须至少选择一个标准件物料。");
             var selectedItems = standard.Where(item => selectedIds.Contains(item.Id)).ToArray();
@@ -1880,7 +1924,8 @@ public sealed class PdmWorkflowService(
                 StandardBomRevision = BomRevision("LL", selectedItems),
                 StandardBomSnapshot = selectedItems,
                 MechanicalBomRevision = BomRevision("M", selectedItems.Concat(package.NonStandardBomSnapshot).ToArray()),
-                MechanicalBomSnapshot = selectedItems.Concat(package.NonStandardBomSnapshot).ToArray()
+                MechanicalBomSnapshot = selectedItems.Concat(package.NonStandardBomSnapshot).ToArray(),
+                WholeSetMultiplier = wholeSetMultiplier
             };
         }
 
@@ -1934,7 +1979,7 @@ public sealed class PdmWorkflowService(
         var automation = await approvalU9Automation.ContinueAfterMaterialSyncAsync(
             package.ProjectId, actor, cancellationToken);
         await AuditAsync(actor, "release-package.long-lead-u9.retry", nameof(ReleasePackage), package.Id.ToString(),
-            $"{package.Number}；BOM料号申请新增{generated.GeneratedCount}项、已存在{generated.ExistingCount}项；{automation.Stage}；{automation.Message}", cancellationToken);
+            $"{package.Number}；BOM料号自动生成{generated.GeneratedCount}项、自动批准{generated.AutoApprovedCount}项、排队同步{generated.QueuedSyncCount}项、已存在{generated.ExistingCount}项；{automation.Stage}；{automation.Message}", cancellationToken);
         return new(package.Id, package.Number, generated, automation);
     }
 
@@ -1949,13 +1994,25 @@ public sealed class PdmWorkflowService(
         return items.Select(item => item with { IsComplete = HasRequiredBomValues(item, kind, settings.ValidationRules) }).ToArray();
     }
 
-    public async Task<BomItem> ApplyMaterialCodeToBomAsync(Guid projectId, Guid itemId, string materialCode, string actor, CancellationToken cancellationToken)
+    public Task<BomItem> ApplyMaterialCodeToBomAsync(Guid projectId, Guid itemId, string materialCode, string actor, CancellationToken cancellationToken) =>
+        ApplyMaterialCodeToBomCoreAsync(projectId, itemId, materialCode, actor, false, cancellationToken);
+
+    public Task<BomItem> ApplyAutomaticallyMatchedMaterialCodeToBomAsync(Guid projectId, Guid itemId, string materialCode, string actor, CancellationToken cancellationToken) =>
+        ApplyMaterialCodeToBomCoreAsync(projectId, itemId, materialCode, actor, true, cancellationToken);
+
+    private async Task<BomItem> ApplyMaterialCodeToBomCoreAsync(
+        Guid projectId,
+        Guid itemId,
+        string materialCode,
+        string actor,
+        bool allowMissingDrawingIdentity,
+        CancellationToken cancellationToken)
     {
         if (string.IsNullOrWhiteSpace(materialCode)) throw new PdmRuleException("料号不能为空。");
         materialCode = materialCode.Trim();
         var current = await repository.FindBomItemAsync(projectId, itemId, cancellationToken)
             ?? throw new PdmNotFoundException("BOM物料不存在。");
-        await EnsureStandardMaterialIdentityAsync(current, materialCode, cancellationToken);
+        await EnsureStandardMaterialIdentityAsync(current, materialCode, allowMissingDrawingIdentity, cancellationToken);
         var item = await repository.UpdateBomMaterialCodeAsync(projectId, itemId, materialCode, cancellationToken);
         item = await RefreshBomItemReconciliationAsync(item, actor, cancellationToken);
         if (item.SourceDocumentId.HasValue && item.Kind != BomKind.Electrical)
@@ -1963,7 +2020,8 @@ public sealed class PdmWorkflowService(
             await EnqueueCadPropertyWritebackAsync(item, actor, cancellationToken);
             await EnqueueLinkedDrawingMaterialCodeWritebacksAsync(item, actor, cancellationToken);
         }
-        await AuditAsync(actor, "bom.material-code.apply", nameof(BomItem), item.Id.ToString(), materialCode.Trim(), cancellationToken);
+        await AuditAsync(actor, allowMissingDrawingIdentity ? "bom.material-code.auto-apply" : "bom.material-code.apply",
+            nameof(BomItem), item.Id.ToString(), materialCode.Trim(), cancellationToken);
         return item;
     }
 
@@ -2004,12 +2062,40 @@ public sealed class PdmWorkflowService(
             if (omittedSourceItem is not null)
                 throw new PdmRuleException($"图纸来源物料“{omittedSourceItem.DrawingNumber}”不可直接删除；请先从图纸更新，再处理待移除项。");
         }
+        var zeroQuantityDeletedAt = timeProvider.GetUtcNow();
+        var zeroQuantityDeletedCount = inputs.Count(item => item.Quantity == 0);
         var items = inputs.OrderBy(item => item.Sequence).Select(input =>
         {
             var isExistingSource = existing.Any(item => item.SourceDocumentId.HasValue
                 && (input.Id == item.Id || SameBomSource(input.SourceDocumentId, input.SourceConfiguration, input.SourceInstancePath, item)));
-            if (input.Sequence <= 0 || input.Quantity <= 0
-                || (kind == BomKind.Electrical && string.IsNullOrWhiteSpace(input.DrawingNumber))
+            var previous = input.Id.HasValue
+                ? existing.FirstOrDefault(item => item.Id == input.Id.Value)
+                : input.SourceDocumentId.HasValue
+                    ? existing.FirstOrDefault(item => SameBomSource(input.SourceDocumentId, input.SourceConfiguration, input.SourceInstancePath, item))
+                    : null;
+            if (input.Sequence <= 0 || input.Quantity < 0)
+                throw new PdmRuleException("BOM序号必须有效，数量不能小于0。");
+            if (input.Quantity == 0)
+            {
+                if (previous is null) throw new PdmRuleException("新增BOM物料的数量必须大于0。");
+                return previous with
+                {
+                    Sequence = input.Sequence,
+                    IsManuallyExcluded = true,
+                    IsPendingRemoval = false,
+                    IsPendingClassification = false,
+                    IsManualUnmatched = false,
+                    IsManuallyRetained = false,
+                    ReconciliationStatus = previous.SourceDocumentId.HasValue ? ReconcileManuallyExcluded : ReconcileDeleted,
+                    ReconciliationNote = $"已由{actor}将数量改为0并移入回收站。",
+                    ReconciliationUpdatedBy = actor,
+                    ReconciliationUpdatedAt = zeroQuantityDeletedAt,
+                    DeletedAt = zeroQuantityDeletedAt,
+                    DeletedBy = actor,
+                    DeleteReason = "数量修改为0，系统自动删除"
+                };
+            }
+            if ((kind == BomKind.Electrical && string.IsNullOrWhiteSpace(input.DrawingNumber))
                 || (string.IsNullOrWhiteSpace(input.Name) && (kind == BomKind.Electrical || !isExistingSource))
                 || string.IsNullOrWhiteSpace(input.Unit)
                 || string.IsNullOrWhiteSpace(input.Revision))
@@ -2019,11 +2105,6 @@ public sealed class PdmWorkflowService(
                     : "BOM序号、名称、数量、单位和版本必须有效。");
             }
 
-            var previous = input.Id.HasValue
-                ? existing.FirstOrDefault(item => item.Id == input.Id.Value)
-                : input.SourceDocumentId.HasValue
-                    ? existing.FirstOrDefault(item => SameBomSource(input.SourceDocumentId, input.SourceConfiguration, input.SourceInstancePath, item))
-                    : null;
             var material = NullIfWhiteSpace(input.Material);
             var specification = NullIfWhiteSpace(input.Specification);
             var candidate = new BomItem(
@@ -2047,6 +2128,8 @@ public sealed class PdmWorkflowService(
                 IsManualUnmatched = input.IsManualUnmatched,
                 IsManuallyRetained = input.IsManuallyRetained,
                 IsManuallyExcluded = false,
+                IsReleaseExcluded = previous?.IsReleaseExcluded == true,
+                ReleaseExclusionReason = previous?.ReleaseExclusionReason,
                 ReconciliationStatus = previous?.ReconciliationStatus ?? (previous is null ? ReconcileManualAdded : null),
                 ReconciliationNote = previous?.ReconciliationNote ?? (previous is null ? "人工新增物料，不来源于当前图档源数据。" : null),
                 ReconciliationUpdatedBy = previous?.ReconciliationUpdatedBy ?? (previous is null ? actor : null),
@@ -2062,7 +2145,7 @@ public sealed class PdmWorkflowService(
 
         var writebackIds = kind == BomKind.Electrical
             ? new HashSet<Guid>()
-            : items.Where(item => item.SourceDocumentId.HasValue
+            : items.Where(item => !item.IsManuallyExcluded && item.SourceDocumentId.HasValue
                     && (item.PropertyWritebackStatus == CadPropertyWritebackStatus.PendingSave
                         || CadWritableValuesChanged(existing.FirstOrDefault(previous => previous.Id == item.Id), item)))
                 .Select(item => item.Id)
@@ -2074,8 +2157,8 @@ public sealed class PdmWorkflowService(
         foreach (var item in saved.Where(item => writebackIds.Contains(item.Id)))
             await EnqueueCadPropertyWritebackAsync(item, actor, cancellationToken);
         await repository.SetBomEmptyDeclarationAsync(projectId, kind, false, actor, cancellationToken);
-        await repository.SaveBomDraftAsync(projectId, kind, saved.Where(item => !item.IsManuallyExcluded).ToArray(), actor, cancellationToken);
-        await AuditAsync(actor, "bom.replace", nameof(BomItem), projectId.ToString(), $"{kind}:{saved.Count}", cancellationToken);
+        await repository.SaveBomDraftAsync(projectId, kind, saved.Where(IsPublishableBomItem).ToArray(), actor, cancellationToken);
+        await AuditAsync(actor, "bom.replace", nameof(BomItem), projectId.ToString(), $"{kind}:{saved.Count};零数量移入回收站:{zeroQuantityDeletedCount}", cancellationToken);
         return await repository.GetBomAsync(projectId, kind, cancellationToken);
     }
 
@@ -2129,12 +2212,15 @@ public sealed class PdmWorkflowService(
                             ReconciliationUpdatedAt = now
                         };
                     }
+                    var classified = item.Kind is BomKind.Standard or BomKind.NonStandard;
                     return item with
                     {
                         Sequence = index + 1,
-                        IsComplete = item.Kind is BomKind.Standard or BomKind.NonStandard && HasRequiredBomValues(item, item.Kind, validationRules),
-                        ReconciliationStatus = ReconcilePendingClassification,
-                        ReconciliationNote = "尚未归入标准件或非标件BOM。",
+                        IsComplete = classified && HasRequiredBomValues(item, item.Kind, validationRules),
+                        ReconciliationStatus = classified ? "PendingBomSync" : ReconcilePendingClassification,
+                        ReconciliationNote = classified
+                            ? $"已识别为{BomKindLabel(item.Kind)}，尚未同步到维护BOM。"
+                            : "图档源数据未填写有效的物料分类，等待人工归入标准件或非标件BOM。",
                         ReconciliationUpdatedBy = actor,
                         ReconciliationUpdatedAt = now
                     };
@@ -2586,6 +2672,61 @@ public sealed class PdmWorkflowService(
         IReadOnlyDictionary<Guid, BomItem> Originals,
         IReadOnlyDictionary<Guid, BomItem> UpdatedById,
         BomSourceReclassificationPreview Preview);
+
+    public async Task<IReadOnlyList<BomItem>> SetBomReleaseExclusionAsync(
+        Guid projectId,
+        SetBomReleaseExclusionCommand command,
+        string actor,
+        UserRole role,
+        CancellationToken cancellationToken)
+    {
+        await RequirePermissionAsync(actor, role, PermissionCodes.BomEdit, cancellationToken);
+        if (!await repository.HasProjectContentReadAccessAsync(projectId, actor, role, cancellationToken))
+            throw new UnauthorizedAccessException("当前用户没有该项目的操作权限。");
+        var itemIds = command.ItemIds.Distinct().ToHashSet();
+        if (itemIds.Count == 0) throw new PdmRuleException("请至少选择一条BOM物料。");
+        if (itemIds.Count > 500) throw new PdmRuleException("单次最多处理500条BOM物料。");
+        var reason = command.Reason?.Trim();
+        if (command.Excluded && string.IsNullOrWhiteSpace(reason)) throw new PdmRuleException("请填写不发布原因。");
+        if (reason?.Length > 500) throw new PdmRuleException("不发布原因不能超过500个字符。");
+
+        var standard = (await repository.GetBomAsync(projectId, BomKind.Standard, cancellationToken)).ToList();
+        var nonStandard = (await repository.GetBomAsync(projectId, BomKind.NonStandard, cancellationToken)).ToList();
+        var unclassified = (await repository.GetBomAsync(projectId, BomKind.Unclassified, cancellationToken)).ToArray();
+        var electrical = (await repository.GetBomAsync(projectId, BomKind.Electrical, cancellationToken)).ToList();
+        var virtualItems = (await repository.GetBomAsync(projectId, BomKind.Virtual, cancellationToken)).ToArray();
+        var all = standard.Concat(nonStandard).Concat(electrical).ToArray();
+        var selected = all.Where(item => itemIds.Contains(item.Id)).ToArray();
+        if (selected.Length != itemIds.Count) throw new PdmNotFoundException("选中的BOM物料已变化，请刷新后重新选择。");
+        if (selected.Any(item => item.IsManuallyExcluded)) throw new PdmRuleException("回收站物料不能设置发布状态，请先恢复物料。");
+        if (command.Excluded && selected.Any(item => item.IsReleaseExcluded))
+            throw new PdmRuleException("选中的物料中包含已设置为不发布的物料，请分开处理。");
+        if (!command.Excluded && selected.Any(item => !item.IsReleaseExcluded))
+            throw new PdmRuleException("选中的物料中包含正在参与发布的物料，请分开处理。");
+        await EnsureBomChangeAllowedAsync(projectId, cancellationToken, selected.Select(item => item.Kind).ToArray());
+
+        IReadOnlyList<BomItem> Apply(IEnumerable<BomItem> source) => source.Select(item => !itemIds.Contains(item.Id)
+            ? item
+            : item with
+            {
+                IsReleaseExcluded = command.Excluded,
+                ReleaseExclusionReason = command.Excluded ? reason : null
+            }).ToArray();
+
+        var changedAt = timeProvider.GetUtcNow();
+        var updatedStandard = Apply(standard);
+        var updatedNonStandard = Apply(nonStandard);
+        var updatedElectrical = Apply(electrical);
+        var action = command.Excluded ? "bom.release-exclusion.set" : "bom.release-exclusion.restore";
+        var label = command.Excluded ? "不发布" : "恢复发布";
+        var detail = $"{label}{selected.Length}条；物料：{string.Join('、', selected.Select(item => item.DrawingNumber))}"
+            + (command.Excluded ? $"；原因：{reason}" : string.Empty);
+        var audit = new AuditEntry(Guid.NewGuid(), changedAt, actor, action, nameof(BomItem), projectId.ToString(), detail);
+        await repository.ApplyBomBatchAsync(projectId, updatedStandard, updatedNonStandard, unclassified, updatedElectrical, virtualItems, [], [audit], cancellationToken);
+        foreach (var changedKind in selected.Select(item => item.Kind).Distinct())
+            await SyncBomDraftAsync(projectId, changedKind, actor, cancellationToken);
+        return updatedStandard.Concat(updatedNonStandard).Concat(updatedElectrical).ToArray();
+    }
 
     public async Task<IReadOnlyList<BomItem>> BatchDeleteBomItemsAsync(Guid projectId, BatchDeleteBomItemsCommand command, string actor, UserRole role, CancellationToken cancellationToken)
     {
@@ -3188,9 +3329,9 @@ public sealed class PdmWorkflowService(
 
         if (package.Scope == ReleaseScope.LegacyCombined)
         {
-            var standard = (await repository.GetBomAsync(package.ProjectId, BomKind.Standard, cancellationToken)).Where(item => !item.IsManuallyExcluded).ToArray();
-            var nonStandard = (await repository.GetBomAsync(package.ProjectId, BomKind.NonStandard, cancellationToken)).Where(item => !item.IsManuallyExcluded).ToArray();
-            var electrical = (await repository.GetBomAsync(package.ProjectId, BomKind.Electrical, cancellationToken)).Where(item => !item.IsManuallyExcluded).ToArray();
+            var standard = (await repository.GetBomAsync(package.ProjectId, BomKind.Standard, cancellationToken)).Where(IsPublishableBomItem).ToArray();
+            var nonStandard = (await repository.GetBomAsync(package.ProjectId, BomKind.NonStandard, cancellationToken)).Where(IsPublishableBomItem).ToArray();
+            var electrical = (await repository.GetBomAsync(package.ProjectId, BomKind.Electrical, cancellationToken)).Where(IsPublishableBomItem).ToArray();
             var unclassified = await repository.GetBomAsync(package.ProjectId, BomKind.Unclassified, cancellationToken);
             await EnsureStandardMaterialMasterReadyAsync(standard, cancellationToken);
             if (unclassified.Any(item => !item.IsManuallyExcluded)
@@ -3222,7 +3363,7 @@ public sealed class PdmWorkflowService(
         else
         {
             var targetKind = ReleaseScopeBomKind(package.Scope);
-            var targetItems = (await repository.GetBomAsync(package.ProjectId, targetKind, cancellationToken)).Where(item => !item.IsManuallyExcluded).ToArray();
+            var targetItems = (await repository.GetBomAsync(package.ProjectId, targetKind, cancellationToken)).Where(IsPublishableBomItem).ToArray();
             if (targetKind == BomKind.Standard) await EnsureStandardMaterialMasterReadyAsync(targetItems, cancellationToken);
             if (!BomReady(targetKind, targetItems, validationRules))
                 throw new PdmRuleException($"{BomKindLabel(targetKind)}BOM仍有资料不完整的物料，不能提交审批。");
@@ -3241,6 +3382,8 @@ public sealed class PdmWorkflowService(
         }
         if (package.Scope is ReleaseScope.LegacyCombined or ReleaseScope.NonStandardWithDrawing)
             await EnsureNonStandardDrawingReviewReadyAsync(package.ProjectId, package.NonStandardBomSnapshot, cancellationToken);
+        if (materialRelationReleaseGuard is not null)
+            await materialRelationReleaseGuard.EnsureCompleteAsync(package.ProjectId, cancellationToken);
         await publisher.PrepareAsync(package, project, cancellationToken);
         await publisher.ValidateAsync(package, project, cancellationToken);
         var submitted = await repository.SubmitReleasePackageAsync(releasePackageId, actor, cancellationToken);
@@ -3456,7 +3599,7 @@ public sealed class PdmWorkflowService(
                 {
                     var generated = await bomHeaderService.EnsureApplicationsAfterBomApprovalAsync(project.Id, approvedKind, actor, cancellationToken);
                     await AuditAsync(actor, "bom.header.application.auto-trigger", nameof(ReleasePackage), package.Id.ToString(),
-                        $"{approvedKind}BOM批准后自动申请：新增{generated.GeneratedCount}项，已存在{generated.ExistingCount}项。", cancellationToken);
+                        $"{approvedKind}BOM批准后自动生成料号：新增{generated.GeneratedCount}项，自动批准{generated.AutoApprovedCount}项，排队同步{generated.QueuedSyncCount}项，已存在{generated.ExistingCount}项。", cancellationToken);
                 }
                 catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
                 {
@@ -3465,7 +3608,7 @@ public sealed class PdmWorkflowService(
                 catch (Exception exception)
                 {
                     await AuditAsync(actor, "bom.header.application.auto-trigger-failed", nameof(ReleasePackage), package.Id.ToString(),
-                        $"{approvedKind}BOM已批准发布，但自动创建BOM料号申请失败：{exception.Message}", cancellationToken);
+                        $"{approvedKind}BOM已批准发布，但自动生成或排队同步BOM料号失败：{exception.Message}", cancellationToken);
                 }
             }
         }
@@ -3739,6 +3882,8 @@ public sealed class PdmWorkflowService(
                     Id = previous?.Id ?? item.Id,
                     IsManuallyOverridden = preserveManualOverrides && previous?.IsManuallyOverridden == true,
                     IsManuallyExcluded = preserveManualOverrides && previous?.IsManuallyExcluded == true,
+                    IsReleaseExcluded = preserveManualOverrides && previous?.IsReleaseExcluded == true,
+                    ReleaseExclusionReason = preserveManualOverrides ? previous?.ReleaseExclusionReason : null,
                     DeletedAt = preserveManualOverrides ? previous?.DeletedAt : null,
                     DeletedBy = preserveManualOverrides ? previous?.DeletedBy : null,
                     DeleteReason = preserveManualOverrides ? previous?.DeleteReason : null,
@@ -3833,8 +3978,8 @@ public sealed class PdmWorkflowService(
         if (apply)
         {
             await repository.ApplyBomBatchAsync(projectId, standard, nonStandard, unclassified, electrical, virtualItems, [], [], cancellationToken);
-            await repository.SaveBomDraftAsync(projectId, BomKind.Standard, standard.Where(item => !item.IsManuallyExcluded).ToArray(), actor, cancellationToken);
-            await repository.SaveBomDraftAsync(projectId, BomKind.NonStandard, nonStandard.Where(item => !item.IsManuallyExcluded).ToArray(), actor, cancellationToken);
+            await repository.SaveBomDraftAsync(projectId, BomKind.Standard, standard.Where(IsPublishableBomItem).ToArray(), actor, cancellationToken);
+            await repository.SaveBomDraftAsync(projectId, BomKind.NonStandard, nonStandard.Where(IsPublishableBomItem).ToArray(), actor, cancellationToken);
             if (standard.Any(item => !item.IsPendingRemoval && !item.IsManuallyExcluded)) await repository.SetBomEmptyDeclarationAsync(projectId, BomKind.Standard, false, actor, cancellationToken);
             if (nonStandard.Any(item => !item.IsPendingRemoval && !item.IsManuallyExcluded)) await repository.SetBomEmptyDeclarationAsync(projectId, BomKind.NonStandard, false, actor, cancellationToken);
             await AuditAsync(actor, "bom.generate", nameof(BomItem), projectId.ToString(), $"标准件{standard.Length}；非标件{nonStandard.Length}；电气BOM独立维护；虚拟件{virtualCount}；待分类{unclassifiedCount}；待移除{pendingRemovalCount}；人工待确认{manualUnmatchedCount}", cancellationToken);
@@ -3907,11 +4052,13 @@ public sealed class PdmWorkflowService(
             cancellationToken);
     }
 
-    private async Task EnsureStandardMaterialIdentityAsync(BomItem item, string materialCode, CancellationToken cancellationToken)
+    private async Task EnsureStandardMaterialIdentityAsync(BomItem item, string materialCode, bool allowMissingDrawingIdentity, CancellationToken cancellationToken)
     {
         if (item.Kind != BomKind.Standard || materialRepository is null) return;
         var material = await materialRepository.FindMaterialByCodeAsync(materialCode, cancellationToken);
-        var issues = MaterialService.StandardBomMaterialMasterIssues(item, material);
+        var issues = allowMissingDrawingIdentity
+            ? MaterialService.StandardBomMaterialMasterBlockingIssues(item, material)
+            : MaterialService.StandardBomMaterialMasterIssues(item, material);
         if (issues.Count == 0) return;
         throw new PdmRuleException(
             $"料号 {materialCode} 与当前标准件的型号、品牌未形成唯一对应，已取消写入：{string.Join('、', issues)}。");
@@ -4074,7 +4221,7 @@ public sealed class PdmWorkflowService(
 
     private static bool BomReady(BomKind kind, IReadOnlyList<BomItem> items, BomValidationRules validationRules)
     {
-        var included = items.Where(item => !item.IsManuallyExcluded).ToArray();
+        var included = items.Where(IsPublishableBomItem).ToArray();
         var active = included.Where(item => !item.IsPendingRemoval).ToArray();
         if (included.Any(item => item.IsPendingRemoval || item.IsPendingClassification || item.IsManualUnmatched)) return false;
         return active.Length == 0 || active.All(item => HasRequiredBomValues(item, kind, validationRules));
@@ -4085,7 +4232,7 @@ public sealed class PdmWorkflowService(
         if (materialRepository is null) return;
         var targets = items.Where(item => item.Kind == BomKind.Standard
                 && item.SourceDocumentId.HasValue
-                && !item.IsManuallyExcluded
+                && IsPublishableBomItem(item)
                 && !item.IsPendingRemoval)
             .ToArray();
         if (targets.Length == 0) return;
@@ -4410,6 +4557,17 @@ public sealed class PdmWorkflowService(
         _ => throw new PdmRuleException("不支持的发布范围。")
     };
 
+    private static bool IsPublishableBomItem(BomItem item) =>
+        !item.IsManuallyExcluded && !item.IsReleaseExcluded;
+
+    private static int NormalizeWholeSetMultiplier(ReleaseScope scope, int multiplier)
+    {
+        if (scope == ReleaseScope.StandardLongLead) return 1;
+        if (multiplier is < 1 or > 1000)
+            throw new PdmRuleException("整套倍率必须是1到1000之间的整数。");
+        return multiplier;
+    }
+
     private async Task<IReadOnlyList<ApprovalTask>> BuildApprovalTasksAsync(
         Guid packageId,
         ApprovalWorkflowTemplate workflow,
@@ -4566,7 +4724,7 @@ public sealed class PdmWorkflowService(
 
     private async Task SyncBomDraftAsync(Guid projectId, BomKind kind, string actor, CancellationToken cancellationToken)
     {
-        var items = (await repository.GetBomAsync(projectId, kind, cancellationToken)).Where(item => !item.IsManuallyExcluded).ToArray();
+        var items = (await repository.GetBomAsync(projectId, kind, cancellationToken)).Where(IsPublishableBomItem).ToArray();
         await repository.SaveBomDraftAsync(projectId, kind, items, actor, cancellationToken);
     }
 

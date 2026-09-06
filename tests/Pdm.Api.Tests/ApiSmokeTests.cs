@@ -14,6 +14,7 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Upton.Pdm.Application;
 using Upton.Pdm.Domain;
+using Upton.Pdm.Infrastructure;
 
 namespace Upton.Pdm.Api.Tests;
 
@@ -45,6 +46,47 @@ public sealed class ApiSmokeTests : IClassFixture<PdmApiFactory>
         var response = await client.GetAsync("/api/projects");
 
         Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task MarkupApi_StoresAndReadsAnnotationSeparatelyFromDocumentVersion()
+    {
+        var repository = factory.Services.GetRequiredService<IPdmRepository>();
+        var testRoot = Path.Combine(Path.GetTempPath(), "upton-pdm-markup-tests", Guid.NewGuid().ToString("N"));
+        try
+        {
+            var project = await repository.CreateProjectAsync(
+                new CreateProjectCommand($"MARKUP-{Guid.NewGuid():N}", "批注文件接口验收", "admin", testRoot, Path.Combine(testRoot, "release")),
+                "admin",
+                CancellationToken.None);
+            var document = await repository.RegisterDocumentAsync(
+                new RegisterDocumentCommand(project.Id, "MARKUP-001", "批注图档", "MARKUP-001.SLDPRT", DocumentKind.Part),
+                "admin",
+                CancellationToken.None);
+            document = await repository.CheckoutAsync(document.Id, "admin", CancellationToken.None);
+            var root = new DocumentReferenceNode(Guid.NewGuid(), document.Id, document.DrawingNumber, document.FileName, document.Name, document.Kind, "Default", 1, ReferenceNodeStatus.Normal, document.Revision, "admin", []);
+            var snapshot = new CadReferenceSnapshot(Guid.NewGuid(), project.Id, document.Id, DateTimeOffset.UtcNow, "admin", root, new string('B', 64));
+            var checkIn = await repository.CheckInVersionAsync(document.Id, "admin", new DocumentVersionCommit(
+                new StoredFile(".versions/MARKUP-001/W1/MARKUP-001.SLDPRT", 128, new string('A', 64), DateTimeOffset.UtcNow),
+                "批注接口测试版本", new Dictionary<string, string?>(), snapshot, [], []), CancellationToken.None);
+            var version = Assert.IsType<DocumentVersion>(checkIn.Version);
+            var content = Encoding.UTF8.GetBytes("standalone-edrawings-markup");
+            client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", CreateToken("admin", "Administrator"));
+
+            using var uploadContent = new ByteArrayContent(content);
+            uploadContent.Headers.ContentType = new MediaTypeHeaderValue("application/octet-stream");
+            var upload = await client.PutAsync($"/api/documents/{document.Id}/versions/{version.Id}/markup", uploadContent);
+            Assert.Equal(HttpStatusCode.OK, upload.StatusCode);
+            var download = await client.GetAsync($"/api/documents/{document.Id}/versions/{version.Id}/markup");
+            Assert.Equal(HttpStatusCode.OK, download.StatusCode);
+            Assert.Equal(content, await download.Content.ReadAsByteArrayAsync());
+            var versionFilePath = StorageLocationPolicy.ResolveUnder(project.VaultLocation, version.StorageRelativePath);
+            Assert.False(File.Exists(versionFilePath));
+        }
+        finally
+        {
+            if (Directory.Exists(testRoot)) Directory.Delete(testRoot, true);
+        }
     }
 
     [Fact]
@@ -241,22 +283,21 @@ public sealed class ApiSmokeTests : IClassFixture<PdmApiFactory>
     }
 
     [Fact]
-    public async Task BomReconciliation_RejectsWriteModeAndKeepsMechanicalBomUnchanged()
+    public async Task BomReconciliation_WriteModeReachesWorkflowValidation()
     {
         var repository = factory.Services.GetRequiredService<IPdmRepository>();
         var project = await repository.CreateProjectAsync(
             new CreateProjectCommand($"BOM-READONLY-{Guid.NewGuid():N}", "BOM只读对账验收", "admin", @"D:\PDM\BomReadonly", @"D:\Release\BomReadonly"),
             "admin",
             CancellationToken.None);
-        var item = new BomItem(Guid.NewGuid(), project.Id, BomKind.Standard, 1, "READONLY-001", "只读对账零件", 1, "件", null, null, "W1", true);
-        await repository.ReplaceBomAsync(project.Id, BomKind.Standard, [item], CancellationToken.None);
         client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", CreateToken("admin", "Administrator"));
 
         var response = await client.PostAsync($"/api/projects/{project.Id}/boms/generate?apply=true", new StringContent(string.Empty));
 
         Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
-        Assert.Contains("只读预览", await response.Content.ReadAsStringAsync());
-        Assert.Equal([item], await repository.GetBomAsync(project.Id, BomKind.Standard, CancellationToken.None));
+        var responseText = await response.Content.ReadAsStringAsync();
+        Assert.Contains("尚无已存档的设计树", responseText);
+        Assert.DoesNotContain("只读预览", responseText);
     }
 
     [Fact]
@@ -345,6 +386,34 @@ public sealed class ApiSmokeTests : IClassFixture<PdmApiFactory>
         var restoredItem = Assert.Single(await repository.GetBomAsync(project.Id, BomKind.NonStandard, CancellationToken.None));
         Assert.False(restoredItem.IsManuallyExcluded);
         Assert.Null(restoredItem.SourceDocumentId);
+    }
+
+    [Fact]
+    public async Task BomNoPublish_RemainsVisibleAndCanBeRestoredThroughApi()
+    {
+        var repository = factory.Services.GetRequiredService<IPdmRepository>();
+        var project = await repository.CreateProjectAsync(
+            new CreateProjectCommand($"NO-PUBLISH-{Guid.NewGuid():N}", "BOM不发布验收", "admin", @"D:\PDM\NoPublish", @"D:\Release\NoPublish"),
+            "admin",
+            CancellationToken.None);
+        var item = new BomItem(Guid.NewGuid(), project.Id, BomKind.Standard, 1, "STD-001", "公共件", 2, "001", null, "M1", "W1", true);
+        await repository.ReplaceBomAsync(project.Id, BomKind.Standard, [item], CancellationToken.None);
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", CreateToken("admin", "Administrator"));
+
+        var excluded = await client.PostAsJsonAsync($"/api/projects/{project.Id}/boms/items/release-exclusion", new { itemIds = new[] { item.Id }, excluded = true, reason = "其他项目已发布" });
+
+        Assert.Equal(HttpStatusCode.OK, excluded.StatusCode);
+        var excludedItem = Assert.Single(await repository.GetBomAsync(project.Id, BomKind.Standard, CancellationToken.None));
+        Assert.False(excludedItem.IsManuallyExcluded);
+        Assert.True(excludedItem.IsReleaseExcluded);
+        Assert.Equal("其他项目已发布", excludedItem.ReleaseExclusionReason);
+
+        var restored = await client.PostAsJsonAsync($"/api/projects/{project.Id}/boms/items/release-exclusion", new { itemIds = new[] { item.Id }, excluded = false, reason = "" });
+
+        Assert.Equal(HttpStatusCode.OK, restored.StatusCode);
+        var restoredItem = Assert.Single(await repository.GetBomAsync(project.Id, BomKind.Standard, CancellationToken.None));
+        Assert.False(restoredItem.IsReleaseExcluded);
+        Assert.Null(restoredItem.ReleaseExclusionReason);
     }
 
     [Fact]

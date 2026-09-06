@@ -16,6 +16,33 @@ public sealed class MaterialSyncBatchService(
         if (!await CanSynchronizeAsync(actor, role, cancellationToken))
             throw new UnauthorizedAccessException("当前角色无权执行料号同步。");
 
+        return await CreateCoreAsync(taskIds, actor, role, cancellationToken);
+    }
+
+    public async Task<MaterialSyncBatch> CreateAutomaticAsync(
+        IReadOnlyList<Guid> taskIds,
+        string actor,
+        CancellationToken cancellationToken)
+    {
+        var batch = await CreateCoreAsync(taskIds, actor, UserRole.Administrator, cancellationToken);
+        await repository.AppendAuditAsync(new AuditEntry(
+            Guid.NewGuid(),
+            timeProvider.GetUtcNow(),
+            actor,
+            "u9.material-sync.batch.auto-create",
+            nameof(MaterialSyncBatch),
+            batch.Id.ToString(),
+            $"多级BOM表头料号自动同步批次：{batch.TotalCount}项。"), cancellationToken);
+        return batch;
+    }
+
+    private async Task<MaterialSyncBatch> CreateCoreAsync(
+        IReadOnlyList<Guid> taskIds,
+        string actor,
+        UserRole role,
+        CancellationToken cancellationToken)
+    {
+
         var selectedIds = taskIds.Distinct().ToArray();
         if (selectedIds.Length == 0) throw new PdmRuleException("请至少选择一个U9C同步任务。");
         if (selectedIds.Length > 500) throw new PdmRuleException("单次批量同步最多允许500项。");

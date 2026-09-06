@@ -282,35 +282,67 @@ public sealed class ProjectBomU9SyncService(
         CancellationToken cancellationToken)
     {
         var released = await LatestReleasedAsync(projectId, kind, cancellationToken);
-        if (kind != ProjectBomHeaderKind.Standard)
-            return released is null
-                ? (false, [])
-                : (true, EffectiveItems(released.Items).ToArray());
+        var packages = await repository.ListReleasePackagesAsync(projectId, cancellationToken);
+        var categoryPackage = packages
+            .Where(package => package.State == ReleasePackageState.Published
+                && package.PublishedAt.HasValue
+                && PackageMatchesKind(package.Scope, kind))
+            .OrderByDescending(package => package.PublishedAt ?? package.CreatedAt)
+            .FirstOrDefault();
+        var usePackage = categoryPackage is not null
+            && (released?.ReleasedAt is null || categoryPackage.PublishedAt!.Value >= released.ReleasedAt.Value);
+        var baseItems = usePackage
+            ? EffectiveItems(CategorySnapshot(categoryPackage!, kind))
+                .Select(item => item with { Quantity = item.Quantity * Math.Max(1, categoryPackage!.WholeSetMultiplier) })
+                .ToArray()
+            : released is null ? [] : EffectiveItems(released.Items).ToArray();
+        var basePublishedAt = usePackage ? categoryPackage!.PublishedAt : released?.ReleasedAt;
 
-        var releasedAt = released?.ReleasedAt;
-        var longLeadPackages = (await repository.ListReleasePackagesAsync(projectId, cancellationToken))
+        if (kind != ProjectBomHeaderKind.Standard)
+            return released is null && categoryPackage is null ? (false, []) : (true, baseItems);
+
+        var longLeadPackages = packages
             .Where(package => package.Scope == ReleaseScope.StandardLongLead
                 && package.State == ReleasePackageState.Published
                 && package.PublishedAt.HasValue
-                && (!releasedAt.HasValue || package.PublishedAt.Value > releasedAt.Value))
+                && (!basePublishedAt.HasValue || package.PublishedAt.Value > basePublishedAt.Value))
             .OrderBy(package => package.PublishedAt ?? package.CreatedAt)
             .ToArray();
-        if (released is null && longLeadPackages.Length == 0) return (false, []);
+        if (released is null && categoryPackage is null && longLeadPackages.Length == 0) return (false, []);
 
         static string MaterialKey(BomItem item) => $"{item.DrawingNumber.Trim()}|{item.Unit.Trim()}";
         var merged = new Dictionary<string, BomItem>(StringComparer.OrdinalIgnoreCase);
-        IEnumerable<BomItem> baseItems = released is null ? Array.Empty<BomItem>() : EffectiveItems(released.Items);
         foreach (var item in baseItems)
             merged[MaterialKey(item)] = item;
-        foreach (var item in longLeadPackages.SelectMany(package => package.StandardBomSnapshot).Where(item => !item.IsManuallyExcluded && !item.IsPendingRemoval))
+        foreach (var package in longLeadPackages)
         {
-            var key = MaterialKey(item);
-            merged[key] = merged.TryGetValue(key, out var existing)
-                ? existing with { Quantity = existing.Quantity + item.Quantity }
-                : item;
+            foreach (var item in EffectiveItems(package.StandardBomSnapshot))
+            {
+                var releasedItem = item with { Quantity = item.Quantity * Math.Max(1, package.WholeSetMultiplier) };
+                var key = MaterialKey(releasedItem);
+                merged[key] = merged.TryGetValue(key, out var existing)
+                    ? existing with { Quantity = existing.Quantity + releasedItem.Quantity }
+                    : releasedItem;
+            }
         }
         return (true, merged.Values.OrderBy(item => item.Sequence).ThenBy(item => item.Id).ToArray());
     }
+
+    private static bool PackageMatchesKind(ReleaseScope scope, ProjectBomHeaderKind kind) => kind switch
+    {
+        ProjectBomHeaderKind.Standard => scope is ReleaseScope.StandardFormal or ReleaseScope.StandardSupplement,
+        ProjectBomHeaderKind.NonStandard => scope == ReleaseScope.NonStandardWithDrawing,
+        ProjectBomHeaderKind.Electrical => scope is ReleaseScope.ElectricalFormal or ReleaseScope.ElectricalSupplement,
+        _ => false
+    };
+
+    private static IReadOnlyList<BomItem> CategorySnapshot(ReleasePackage package, ProjectBomHeaderKind kind) => kind switch
+    {
+        ProjectBomHeaderKind.Standard => package.StandardBomSnapshot,
+        ProjectBomHeaderKind.NonStandard => package.NonStandardBomSnapshot,
+        ProjectBomHeaderKind.Electrical => package.ElectricalBomSnapshot,
+        _ => []
+    };
 
     private async Task<BomVersion?> LatestReleasedAsync(
         Guid projectId,
@@ -349,7 +381,7 @@ public sealed class ProjectBomU9SyncService(
     }
 
     private static IEnumerable<BomItem> EffectiveItems(IEnumerable<BomItem> items) =>
-        items.Where(item => !item.IsManuallyExcluded && !item.IsPendingRemoval);
+        items.Where(item => !item.IsManuallyExcluded && !item.IsReleaseExcluded && !item.IsPendingRemoval);
 
     private static U9BomComponentCommand Component(int sequence, PdmMaterial material, decimal quantity, string remark) =>
         new(sequence, OfficialCode(material), quantity, U9UnitCatalog.NormalizeBomUnit(material.UnitCode), Remark: remark);

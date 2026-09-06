@@ -9,6 +9,31 @@ public sealed class Phase1ReleaseWorkflowTests
     private static readonly Guid ProjectId = Guid.Parse("11111111-1111-1111-1111-111111111111");
 
     [Fact]
+    public async Task NoPublish_KeepsBomItemVisibleAndCanRestorePublishing()
+    {
+        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(), new RecordingPublisher(), TimeProvider.System);
+        var item = new BomItem(Guid.NewGuid(), ProjectId, BomKind.Standard, 1, "STD-001", "公共标准件", 2, "001", null, "M1", "W1", true);
+        await repository.ReplaceBomAsync(ProjectId, BomKind.Standard, [item], default);
+
+        var excluded = await workflow.SetBomReleaseExclusionAsync(
+            ProjectId, new([item.Id], true, "其他项目已发布"), "admin", UserRole.Administrator, default);
+
+        var excludedItem = Assert.Single(excluded, candidate => candidate.Id == item.Id);
+        Assert.True(excludedItem.IsReleaseExcluded);
+        Assert.Equal("其他项目已发布", excludedItem.ReleaseExclusionReason);
+        Assert.Empty(Assert.Single(await repository.ListBomVersionsAsync(ProjectId, BomKind.Standard, default), version => version.State == BomVersionState.Draft).Items);
+
+        var restored = await workflow.SetBomReleaseExclusionAsync(
+            ProjectId, new([item.Id], false), "admin", UserRole.Administrator, default);
+
+        var restoredItem = Assert.Single(restored, candidate => candidate.Id == item.Id);
+        Assert.False(restoredItem.IsReleaseExcluded);
+        Assert.Null(restoredItem.ReleaseExclusionReason);
+        Assert.Contains(Assert.Single(await repository.ListBomVersionsAsync(ProjectId, BomKind.Standard, default), version => version.State == BomVersionState.Draft).Items, candidate => candidate.Id == item.Id);
+    }
+
+    [Fact]
     public async Task ApprovalChain_PublishesPreparedImmutablePackage()
     {
         var repository = new InMemoryPdmRepository(TimeProvider.System);
@@ -327,6 +352,51 @@ public sealed class Phase1ReleaseWorkflowTests
 
         Assert.Contains("图纸来源物料", exception.Message);
         Assert.Single(await repository.GetBomAsync(ProjectId, BomKind.NonStandard, default));
+    }
+
+    [Fact]
+    public async Task BomReplace_ZeroQuantityMovesExistingItemToRecycleBinAndPreservesItsQuantity()
+    {
+        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(), new RecordingPublisher(), TimeProvider.System);
+        var removed = new BomItem(Guid.NewGuid(), ProjectId, BomKind.NonStandard, 1, "ZERO-DELETE", "数量归零物料", 3, "件", "6061", "M3", "W1", true)
+        {
+            SourceDocumentId = Guid.NewGuid(),
+            Source = "Auto"
+        };
+        var retained = new BomItem(Guid.NewGuid(), ProjectId, BomKind.NonStandard, 2, "ZERO-KEEP", "保留物料", 2, "件", "6061", "M2", "W1", true);
+        await repository.ReplaceBomAsync(ProjectId, BomKind.NonStandard, [removed, retained], default);
+
+        var saved = await workflow.ReplaceBomAsync(ProjectId, BomKind.NonStandard,
+        [
+            new BomItemInput(1, removed.DrawingNumber, removed.Name, 0, removed.Unit, removed.Material, removed.Specification, removed.Revision, true,
+                Id: removed.Id, SourceDocumentId: removed.SourceDocumentId),
+            new BomItemInput(2, retained.DrawingNumber, retained.Name, 5, retained.Unit, retained.Material, retained.Specification, retained.Revision, true,
+                Id: retained.Id)
+        ], "admin", UserRole.Administrator, default);
+
+        var recycled = Assert.Single(saved, item => item.Id == removed.Id);
+        Assert.True(recycled.IsManuallyExcluded);
+        Assert.Equal(3, recycled.Quantity);
+        Assert.Equal("admin", recycled.DeletedBy);
+        Assert.Equal("数量修改为0，系统自动删除", recycled.DeleteReason);
+        Assert.Equal(5, Assert.Single(saved, item => item.Id == retained.Id).Quantity);
+        Assert.Contains(await repository.ListAuditAsync("admin", UserRole.Administrator, 100, default),
+            entry => entry.Action == "bom.replace" && entry.Detail.Contains("零数量移入回收站:1", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task BomReplace_RejectsZeroQuantityForANewItem()
+    {
+        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(), new RecordingPublisher(), TimeProvider.System);
+
+        var exception = await Assert.ThrowsAsync<PdmRuleException>(() => workflow.ReplaceBomAsync(
+            ProjectId, BomKind.Electrical,
+            [new BomItemInput(1, "ZERO-NEW", "新增零数量物料", 0, "件", null, "M1", "W1", true)],
+            "admin", UserRole.Administrator, default));
+
+        Assert.Contains("新增BOM物料的数量必须大于0", exception.Message);
     }
 
     [Fact]
@@ -1112,8 +1182,11 @@ public sealed class Phase1ReleaseWorkflowTests
         var repository = new InMemoryPdmRepository(time);
         var materials = new InMemoryMaterialRepository(time);
         await ConfigureApprovalWorkflowsAsync(repository);
-        var materialService = new MaterialService(materials, repository, new TestU9SecretProtector(), new NoU9OpenApiClient(), time);
-        var headerService = new BomHeaderService(repository, materials, materialService, time);
+        await ConfigureU9ReadOnlyAsync(materials, time);
+        var materialService = new MaterialService(materials, repository, new TestU9SecretProtector(), new ReadOnlyU9OpenApiClient(), time);
+        var headerService = new BomHeaderService(
+            repository, materials, materialService,
+            new MaterialSyncBatchService(materials, repository, time), time);
         var workflow = new PdmWorkflowService(
             repository, new UnusedFileStorage(), new RecordingPublisher(), time, null, headerService);
         var package = await workflow.CreateScopedReleasePackageAsync(
@@ -1125,17 +1198,20 @@ public sealed class Phase1ReleaseWorkflowTests
             package = await workflow.DecideAsync(task.Id, "admin", UserRole.Administrator, ApprovalDecision.Approved, "同意", default);
 
         Assert.Equal(ReleasePackageState.Published, package.State);
+        Assert.Empty(await materials.ListMaterialCodeApplicationsAsync(
+            ProjectId, MaterialCodeApplicationStatus.Pending, default));
         var applications = await materials.ListMaterialCodeApplicationsAsync(
-            ProjectId, MaterialCodeApplicationStatus.Pending, default);
+            ProjectId, MaterialCodeApplicationStatus.Approved, default);
         Assert.Equal(2, applications.Count);
         Assert.Equal(
             [ProjectBomHeaderKind.Master, ProjectBomHeaderKind.Standard],
             applications.Select(application => application.BomHeaderKind).OrderBy(kind => kind).ToArray());
 
         var headers = await headerService.ListAsync(ProjectId, "admin", UserRole.Administrator, default);
-        Assert.Equal(MaterialApprovalStatus.Draft, headers.Single(header => header.Kind == ProjectBomHeaderKind.Master).ApprovalStatus);
-        Assert.Equal(MaterialApprovalStatus.Draft, headers.Single(header => header.Kind == ProjectBomHeaderKind.Standard).ApprovalStatus);
+        Assert.Equal(MaterialApprovalStatus.Approved, headers.Single(header => header.Kind == ProjectBomHeaderKind.Master).ApprovalStatus);
+        Assert.Equal(MaterialApprovalStatus.Approved, headers.Single(header => header.Kind == ProjectBomHeaderKind.Standard).ApprovalStatus);
         Assert.Null(headers.Single(header => header.Kind == ProjectBomHeaderKind.Electrical).MaterialId);
+        Assert.Equal(2, Assert.Single(await materials.ListRecentSyncBatchesAsync("admin", 10, default)).TotalCount);
     }
 
     [Fact]
@@ -1187,8 +1263,10 @@ public sealed class Phase1ReleaseWorkflowTests
         var repository = new InMemoryPdmRepository(time);
         var materials = new InMemoryMaterialRepository(time);
         await ConfigureApprovalWorkflowsAsync(repository);
-        var materialService = new MaterialService(materials, repository, new TestU9SecretProtector(), new NoU9OpenApiClient(), time);
-        var headerService = new BomHeaderService(repository, materials, materialService, time);
+        await ConfigureU9ReadOnlyAsync(materials, time);
+        var materialService = new MaterialService(materials, repository, new TestU9SecretProtector(), new ReadOnlyU9OpenApiClient(), time);
+        var headerService = new BomHeaderService(repository, materials, materialService,
+            new MaterialSyncBatchService(materials, repository, time), time);
         var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(), new RecordingPublisher(), time, null, headerService);
         var selected = (await repository.GetBomAsync(ProjectId, BomKind.Standard, default)).Take(1).Select(item => item.Id).ToArray();
         var package = await workflow.CreateScopedReleasePackageAsync(
@@ -1204,7 +1282,8 @@ public sealed class Phase1ReleaseWorkflowTests
             package = await workflow.DecideAsync(task.Id, "admin", UserRole.Administrator, ApprovalDecision.Approved, "同意", default);
         Assert.Equal(ReleasePackageState.Published, package.State);
         Assert.Empty(await repository.ListManufacturingBomBaselinesAsync(ProjectId, default));
-        var applications = await materials.ListMaterialCodeApplicationsAsync(ProjectId, MaterialCodeApplicationStatus.Pending, default);
+        Assert.Empty(await materials.ListMaterialCodeApplicationsAsync(ProjectId, MaterialCodeApplicationStatus.Pending, default));
+        var applications = await materials.ListMaterialCodeApplicationsAsync(ProjectId, MaterialCodeApplicationStatus.Approved, default);
         Assert.Equal(
             [ProjectBomHeaderKind.Master, ProjectBomHeaderKind.Standard],
             applications.Select(application => application.BomHeaderKind).OrderBy(kind => kind).ToArray());
@@ -1380,6 +1459,12 @@ public sealed class Phase1ReleaseWorkflowTests
         await repository.SetMainProjectStaffingAsync(ProjectId, new SetMainProjectStaffingCommand("admin", [], ["admin"]), "admin", default);
     }
 
+    private static Task ConfigureU9ReadOnlyAsync(InMemoryMaterialRepository materials, TimeProvider time) =>
+        materials.SaveIntegrationConfigurationAsync(new(
+            "http://u9.example.test/U9", "01", "7", "pdm", "PDM", "protected:test-secret",
+            U9MaterialContract.CreatePath, U9MaterialContract.QueryPath, false, "admin", time.GetUtcNow(),
+            UnitCodeMappings: new Dictionary<string, string>()), default);
+
     private static async Task PrepareApprovedNonStandardDrawingReviewAsync(InMemoryPdmRepository repository, PdmWorkflowService workflow)
     {
         var documents = await repository.ListDocumentsAsync(ProjectId, default);
@@ -1526,10 +1611,10 @@ public sealed class Phase1ReleaseWorkflowTests
         public string Unprotect(string ciphertext) => ciphertext[10..];
     }
 
-    private sealed class NoU9OpenApiClient : IU9OpenApiClient
+    private sealed class ReadOnlyU9OpenApiClient : IU9OpenApiClient
     {
         public Task<U9AuthenticationResult> AuthenticateAsync(U9AuthenticationRequest request, CancellationToken cancellationToken) =>
-            throw new InvalidOperationException("自动创建BOM料号申请时不应访问U9C。");
+            Task.FromResult(new U9AuthenticationResult("token"));
         public Task<U9ItemQueryResult> QueryItemsAsync(string baseUrl, string path, string token, string payloadJson, CancellationToken cancellationToken) =>
             throw new InvalidOperationException("自动创建BOM料号申请时不应查询U9C料号。");
         public Task<U9UomQueryResult> QueryUomsAsync(string baseUrl, string token, string payloadJson, CancellationToken cancellationToken) =>
@@ -1537,6 +1622,6 @@ public sealed class Phase1ReleaseWorkflowTests
         public Task<U9BusinessBatchResult> PostBatchAsync(string baseUrl, string path, string token, string payloadJson, CancellationToken cancellationToken) =>
             throw new InvalidOperationException("自动创建BOM料号申请时不应写入U9C。");
         public Task<U9CustomerQueryResult> QueryCustomerReferencesAsync(string baseUrl, string path, string token, string payloadJson, CancellationToken cancellationToken) =>
-            throw new InvalidOperationException("自动创建BOM料号申请时不应查询U9C参考资料。");
+            Task.FromResult(new U9CustomerQueryResult(0, null, [], 0));
     }
 }

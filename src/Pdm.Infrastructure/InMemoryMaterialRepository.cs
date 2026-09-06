@@ -560,6 +560,27 @@ public sealed class InMemoryMaterialRepository : IMaterialRepository
         }
     }
 
+    public Task<PdmMaterial> ReactivateMaterialAsync(Guid materialId, long expectedRowVersion, string actor, DateTimeOffset reactivatedAt, CancellationToken cancellationToken)
+    {
+        lock (gate)
+        {
+            if (!materials.TryGetValue(materialId, out var existing)) throw new PdmNotFoundException("物料主档不存在。");
+            if (existing.RowVersion != expectedRowVersion) throw new PdmConflictException("物料主档已被其他用户修改，请刷新后重试。");
+            if (!existing.IsArchived) throw new PdmRuleException("料品当前已启用。");
+            var reactivated = existing with
+            {
+                IsArchived = false,
+                ArchivedBy = null,
+                ArchivedAt = null,
+                UpdatedBy = actor,
+                UpdatedAt = reactivatedAt,
+                RowVersion = existing.RowVersion + 1
+            };
+            materials[materialId] = reactivated;
+            return Task.FromResult(reactivated);
+        }
+    }
+
     public Task<PdmMaterial> DeleteLocalMaterialAsync(Guid materialId, long expectedRowVersion, bool u9AbsenceConfirmed, CancellationToken cancellationToken)
     {
         lock (gate)

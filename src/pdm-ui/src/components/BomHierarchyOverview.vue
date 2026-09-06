@@ -223,9 +223,13 @@ async function syncU9Bom(row: (typeof overviewRows.value)[number]) {
     }
     const operation = preview.state === 'CreateRequired' ? '创建BOM并同步子件' : '同步审核通过的子件'
     const required = preview.writePreview.requiredConfirmation
+    const quantities = preview.writePreview.quantityReconciliations ?? []
+    const quantitySummary = quantities.length
+      ? `\n\n数量核对：${quantities.map(item => `${item.itemCode}（单位 ${item.issueUomCode}、母件底数 ${formatU9Quantity(item.parentQty)}）：PLM审核总量 ${formatU9Quantity(item.plmApprovedTotal)} / U9C现有总量 ${formatU9Quantity(item.u9ExistingTotal)} / 本次上传 ${formatU9Quantity(item.uploadDelta)}`).join('；')}`
+      : ''
     try {
       await ElMessageBox.confirm(
-        `将以母件 ${preview.itemCode}、固定版本 A1 在U9C${operation}，仅使用BOM审核发布版本的 ${preview.componentCount} 个正式子件。U9C既有子件只保留、不删除；确认后立即执行并自动回查。`,
+        `将以母件 ${preview.itemCode}、固定版本 A1 在U9C${operation}，仅使用BOM审核发布版本的 ${preview.componentCount} 个正式子件。${quantitySummary}\n\nU9C既有子件只保留、不删除；确认后立即执行并自动回查。`,
         `确认${operation}`,
         { confirmButtonText: '确认同步', cancelButtonText: '取消', type: 'warning' },
       )
@@ -239,6 +243,7 @@ async function syncU9Bom(row: (typeof overviewRows.value)[number]) {
     u9BomStates.value = { ...u9BomStates.value, [row.key]: 'synced' }
     ElMessage.success(`U9C BOM${operation}成功，自动回查通过`)
   } catch (reason) {
+    u9BomStates.value = { ...u9BomStates.value, [row.key]: 'failed' }
     ElMessage.error(reason instanceof Error ? reason.message : 'U9C BOM同步失败')
   } finally {
     syncingRowKey.value = ''
@@ -247,19 +252,23 @@ async function syncU9Bom(row: (typeof overviewRows.value)[number]) {
 
 function headerCodeText(header?: ProjectBomHeader, eligible = true) {
   if (!eligible && !header?.materialId) return '不申请'
-  if (!header?.materialId) return '待申请'
+  if (!header?.materialId) return '待BOM发布'
   if (header.materialCode) return header.materialCode
-  if (header.applicationStatus === 'Rejected') return '已退回'
-  if (header.applicationStatus === 'Approved') return '待同步U9C'
-  return '审批中'
+  if (header.applicationStatus === 'Rejected') return '自动处理失败'
+  if (header.applicationStatus === 'Approved') return '自动同步中'
+  return '自动处理中'
+}
+
+function formatU9Quantity(value: number) {
+  return Number(value.toFixed(4)).toString()
 }
 
 function headerCodeTitle(header?: ProjectBomHeader) {
-  if (!header?.materialId) return '尚未提交BOM料号申请'
+  if (!header?.materialId) return 'BOM审核发布后由系统自动生成料号并同步U9C'
   if (header.materialCode) return `U9C正式料号：${header.materialCode}`
-  const applicant = header.requestedBy ? `申请人：${displayUserName(header.requestedBy)}` : '申请人待补充'
+  const applicant = header.requestedBy ? `触发人：${displayUserName(header.requestedBy)}` : '自动流程触发人待补充'
   const requestedAt = header.requestedAt ? `，申请时间：${formatDate(header.requestedAt)}` : ''
-  return `${applicant}${requestedAt}；审批并同步成功后显示U9C返回的正式料号`
+  return `${applicant}${requestedAt}；系统自动分配、同步并回查成功后显示U9C正式料号`
 }
 
 async function fetchProjectDetail(projectId: string): Promise<ProjectDetail> {
@@ -306,13 +315,13 @@ watch([rootProjectId, hierarchySignature, () => props.token], () => {
   <section class="bom-overview" aria-label="BOM多级总览">
     <div v-if="error" class="bom-overview__error" role="alert">{{ error }}</div>
     <div v-if="editable" class="bom-overview__generation">
-      <span>{{ missingHeaderCount ? `待BOM批准后自动申请 ${missingHeaderCount} 个BOM料号` : pendingHeaderCount ? `${pendingHeaderCount} 个BOM料号申请中` : '全部BOM料号已由U9C回写' }}</span>
+      <span>{{ missingHeaderCount ? `待BOM发布后自动生成并同步 ${missingHeaderCount} 个BOM料号` : pendingHeaderCount ? `${pendingHeaderCount} 个BOM料号正在自动同步U9C` : '全部BOM料号已由U9C回写' }}</span>
     </div>
 
     <div class="bom-overview__table-wrap">
       <table>
         <thead>
-          <tr><th>层级 / BOM</th><th>料号分类</th><th>本级BOM料号</th><th>上级BOM料号</th><th>物料数</th><th>PLM版本</th><th>发布状态</th><th>待处理</th><th>最近发布</th><th>审批任务</th><th>U9C料品</th><th>U9C BOM</th></tr>
+          <tr><th>层级 / BOM</th><th>料号分类</th><th>本级BOM料号</th><th>上级BOM料号</th><th>物料数</th><th>PLM版本</th><th>发布状态</th><th>待处理</th><th>最近发布</th><th>自动流程</th><th>U9C料品</th><th>U9C BOM</th></tr>
         </thead>
         <tbody>
           <tr v-for="row in overviewRows" :key="row.key" :class="{ 'is-master-row': row.isMaster }">
@@ -327,8 +336,8 @@ watch([rootProjectId, hierarchySignature, () => props.token], () => {
             <td><span :class="row.releaseStatus === '已发布' ? 'is-success' : row.releaseStatus.includes('未发布') ? 'is-warning' : 'is-muted'">{{ row.releaseStatus }}</span></td>
             <td><span :class="row.unresolvedCount ? 'is-warning' : 'is-success'">{{ row.unresolvedCount ? `${row.unresolvedCount} 项` : '正常' }}</span></td>
             <td :title="formatDate(row.releasedAt)">{{ formatDate(row.releasedAt) }}</td>
-            <td :title="isHeaderEligible(row) ? headerCodeTitle(row.header) : '主项目已有子项目，本级三类BOM不申请料号'"><span :class="row.header?.applicationStatus === 'Rejected' ? 'is-warning' : row.header?.applicationStatus === 'Approved' ? 'is-success' : row.header?.applicationId ? 'is-warning' : 'is-muted'">{{ !isHeaderEligible(row) && !row.header?.materialId ? '不申请' : row.header?.applicationStatus === 'Approved' ? '已批准' : row.header?.applicationStatus === 'Rejected' ? '已退回' : row.header?.applicationId ? `待审批 · ${displayUserName(row.header.requestedBy, '未知申请人')}` : '未提交' }}</span></td>
-            <td><span :class="row.header?.materialCode ? 'is-success' : row.header?.materialId ? 'is-warning' : 'is-muted'">{{ !isHeaderEligible(row) && !row.header?.materialId ? '不申请' : row.header?.materialCode ? '已回写' : row.header?.materialId ? '申请中' : '未申请' }}</span></td>
+            <td :title="isHeaderEligible(row) ? headerCodeTitle(row.header) : '主项目已有子项目，本级三类BOM不生成料号'"><span :class="row.header?.applicationStatus === 'Rejected' ? 'is-warning' : row.header?.applicationStatus === 'Approved' ? 'is-success' : row.header?.applicationId ? 'is-warning' : 'is-muted'">{{ !isHeaderEligible(row) && !row.header?.materialId ? '不生成' : row.header?.applicationStatus === 'Approved' ? '已自动批准' : row.header?.applicationStatus === 'Rejected' ? '自动处理失败' : row.header?.applicationId ? '自动处理中' : '待BOM发布' }}</span></td>
+            <td><span :class="row.header?.materialCode ? 'is-success' : row.header?.materialId ? 'is-warning' : 'is-muted'">{{ !isHeaderEligible(row) && !row.header?.materialId ? '不生成' : row.header?.materialCode ? '已回写' : row.header?.materialId ? '自动同步中' : '待生成' }}</span></td>
             <td>
               <button v-if="editable && isHeaderEligible(row) && row.header?.materialCode" type="button" class="bom-overview__sync" :disabled="!!syncingRowKey" @click="syncU9Bom(row)">{{ syncingRowKey === row.key ? '检查中…' : u9BomStateText(row) }}</button>
               <span v-else :class="row.header?.materialCode ? 'is-muted' : 'is-warning'">{{ u9BomStateText(row) }}</span>

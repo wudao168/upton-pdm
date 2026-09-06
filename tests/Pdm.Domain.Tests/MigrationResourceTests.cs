@@ -5,6 +5,23 @@ namespace Pdm.Domain.Tests;
 public sealed class MigrationResourceTests
 {
     [Fact]
+    public async Task EngineerMaterialViewMigration_GrantsReadOnlyMaterialPermissionToEngineeringRoles()
+    {
+        var assembly = typeof(MySqlMigrationRunner).Assembly;
+        var resourceName = assembly.GetManifestResourceNames()
+            .Single(name => name.EndsWith(".Migrations.085_engineer_material_view.sql", StringComparison.Ordinal));
+
+        await using var stream = assembly.GetManifestResourceStream(resourceName);
+        Assert.NotNull(stream);
+        using var reader = new StreamReader(stream!);
+        var sql = await reader.ReadToEndAsync();
+
+        Assert.Contains("'material.view'", sql, StringComparison.Ordinal);
+        Assert.Contains("base_role='Engineer'", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("material.manage", sql, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task ExecutionEngineerRoleMigration_GrantsCentralPermissionToDesignAndMechanicalRoles()
     {
         var assembly = typeof(MySqlMigrationRunner).Assembly;
@@ -328,5 +345,43 @@ public sealed class MigrationResourceTests
         Assert.Contains("CREATE TABLE u9_material_sync_batch", sql, StringComparison.Ordinal);
         Assert.Contains("ordinal_no INT NOT NULL", sql, StringComparison.Ordinal);
         Assert.Contains("lease_expires_at", sql, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task ReleaseMultiplierMigration_SeparatesNoPublishFromRecycleBin()
+    {
+        var assembly = typeof(MySqlMigrationRunner).Assembly;
+        var resourceName = assembly.GetManifestResourceNames()
+            .Single(name => name.EndsWith(".Migrations.086_release_multiplier_and_bom_publish_exclusion.sql", StringComparison.Ordinal));
+
+        await using var stream = assembly.GetManifestResourceStream(resourceName);
+        Assert.NotNull(stream);
+        using var reader = new StreamReader(stream!);
+        var sql = await reader.ReadToEndAsync();
+
+        Assert.Contains("whole_set_multiplier INT NOT NULL DEFAULT 1", sql, StringComparison.Ordinal);
+        Assert.Contains("is_release_excluded TINYINT(1) NOT NULL DEFAULT 0", sql, StringComparison.Ordinal);
+        Assert.Contains("release_exclusion_reason VARCHAR(500)", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("is_manually_excluded = 1", sql, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task U9InventoryMigration_PersistsAtomicSnapshotAndScheduleSettings()
+    {
+        var assembly = typeof(MySqlMigrationRunner).Assembly;
+        var resourceName = assembly.GetManifestResourceNames()
+            .Single(name => name.EndsWith(".Migrations.087_u9_inventory_snapshot.sql", StringComparison.Ordinal));
+
+        await using var stream = assembly.GetManifestResourceStream(resourceName);
+        Assert.NotNull(stream);
+        using var reader = new StreamReader(stream!);
+        var sql = await reader.ReadToEndAsync();
+
+        Assert.Contains("CREATE TABLE u9_inventory_sync_setting", sql, StringComparison.Ordinal);
+        Assert.Contains("current_snapshot_run_id", sql, StringComparison.Ordinal);
+        Assert.Contains("sync_interval_minutes", sql, StringComparison.Ordinal);
+        Assert.Contains("CREATE TABLE u9_inventory_sync_run", sql, StringComparison.Ordinal);
+        Assert.Contains("CREATE TABLE u9_inventory_snapshot", sql, StringComparison.Ordinal);
+        Assert.Contains("refreshed_at", sql, StringComparison.Ordinal);
     }
 }

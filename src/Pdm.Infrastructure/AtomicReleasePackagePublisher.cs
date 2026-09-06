@@ -34,10 +34,17 @@ public sealed class AtomicReleasePackagePublisher : IReleasePackagePublisher
         var nonStandard = package.NonStandardBomVersionId.HasValue
             ? package.NonStandardBomSnapshot.ToArray()
             : package.MechanicalBomSnapshot.Where(item => item.Kind is BomKind.NonStandard or BomKind.Mechanical).ToArray();
+        static BomItem[] ReleaseQuantities(IEnumerable<BomItem> items, int multiplier) => items
+            .Where(item => !item.IsManuallyExcluded && !item.IsReleaseExcluded && !item.IsPendingRemoval)
+            .Select(item => item with { Quantity = item.Quantity * Math.Max(1, multiplier) })
+            .ToArray();
+        standard = ReleaseQuantities(standard, package.WholeSetMultiplier);
+        nonStandard = ReleaseQuantities(nonStandard, package.WholeSetMultiplier);
+        var electrical = ReleaseQuantities(package.ElectricalBomSnapshot, package.WholeSetMultiplier);
         switch (package.Scope)
         {
             case ReleaseScope.StandardLongLead:
-                await File.WriteAllBytesAsync(Path.Combine(stagingDirectory, "long-lead-standard-parts-bom.xlsx"), BomWorkbook.Write(package.StandardBomSnapshot), cancellationToken);
+                await File.WriteAllBytesAsync(Path.Combine(stagingDirectory, "long-lead-standard-parts-bom.xlsx"), BomWorkbook.Write(standard), cancellationToken);
                 break;
             case ReleaseScope.StandardFormal:
             case ReleaseScope.StandardSupplement:
@@ -45,7 +52,7 @@ public sealed class AtomicReleasePackagePublisher : IReleasePackagePublisher
                 break;
             case ReleaseScope.ElectricalFormal:
             case ReleaseScope.ElectricalSupplement:
-                await File.WriteAllBytesAsync(Path.Combine(stagingDirectory, "electrical-bom.xlsx"), BomWorkbook.Write(package.ElectricalBomSnapshot), cancellationToken);
+                await File.WriteAllBytesAsync(Path.Combine(stagingDirectory, "electrical-bom.xlsx"), BomWorkbook.Write(electrical), cancellationToken);
                 break;
             case ReleaseScope.NonStandardWithDrawing:
                 await File.WriteAllBytesAsync(Path.Combine(stagingDirectory, "nonstandard-parts-bom.xlsx"), BomWorkbook.Write(nonStandard), cancellationToken);
@@ -53,7 +60,7 @@ public sealed class AtomicReleasePackagePublisher : IReleasePackagePublisher
             default:
                 await File.WriteAllBytesAsync(Path.Combine(stagingDirectory, "standard-parts-bom.xlsx"), BomWorkbook.Write(standard), cancellationToken);
                 await File.WriteAllBytesAsync(Path.Combine(stagingDirectory, "nonstandard-parts-bom.xlsx"), BomWorkbook.Write(nonStandard), cancellationToken);
-                await File.WriteAllBytesAsync(Path.Combine(stagingDirectory, "electrical-bom.xlsx"), BomWorkbook.Write(package.ElectricalBomSnapshot), cancellationToken);
+                await File.WriteAllBytesAsync(Path.Combine(stagingDirectory, "electrical-bom.xlsx"), BomWorkbook.Write(electrical), cancellationToken);
                 break;
         }
     }
@@ -132,6 +139,7 @@ public sealed class AtomicReleasePackagePublisher : IReleasePackagePublisher
                 package.Scope,
                 package.WorkflowCode,
                 package.WorkflowVersion,
+                package.WholeSetMultiplier,
                 package.CreatesManufacturingBaseline,
                 package.LocksDocuments,
                 package.SelectedBomItemIds,

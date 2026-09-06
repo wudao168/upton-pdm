@@ -679,6 +679,19 @@ public sealed class MySqlMaterialRepository : IMaterialRepository
         return (await FindMaterialAsync(materialId, cancellationToken))!;
     }
 
+    public async Task<PdmMaterial> ReactivateMaterialAsync(Guid materialId, long expectedRowVersion, string actor, DateTimeOffset reactivatedAt, CancellationToken cancellationToken)
+    {
+        await using var connection = await OpenAsync(cancellationToken);
+        var affected = await connection.ExecuteAsync(new CommandDefinition(
+            """
+            UPDATE material_master
+            SET is_archived=0,archived_by=NULL,archived_at=NULL,updated_by=@Actor,updated_at=@ReactivatedAt,row_version=row_version+1
+            WHERE id=@MaterialId AND row_version=@ExpectedRowVersion AND is_archived=1
+            """, new { MaterialId = materialId, ExpectedRowVersion = expectedRowVersion, Actor = actor, ReactivatedAt = reactivatedAt.UtcDateTime }, cancellationToken: cancellationToken));
+        if (affected != 1) throw new PdmConflictException("料品已启用或已被其他用户修改，请刷新后重试。");
+        return (await FindMaterialAsync(materialId, cancellationToken))!;
+    }
+
     public async Task<PdmMaterial> DeleteLocalMaterialAsync(Guid materialId, long expectedRowVersion, bool u9AbsenceConfirmed, CancellationToken cancellationToken)
     {
         if (!u9AbsenceConfirmed) throw new PdmRuleException("尚未实时确认U9C不存在，不能删除料品。");

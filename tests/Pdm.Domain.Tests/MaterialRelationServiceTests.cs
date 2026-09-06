@@ -1,0 +1,83 @@
+using Upton.Pdm.Application;
+using Upton.Pdm.Domain;
+using Upton.Pdm.Infrastructure;
+
+namespace Pdm.Domain.Tests;
+
+public sealed class MaterialRelationServiceTests
+{
+    [Fact]
+    public async Task UniqueAccessory_IsAutoAddedPerMainRowWithoutMergingQuantities()
+    {
+        var clock = TimeProvider.System;
+        var pdm = new InMemoryPdmRepository(clock);
+        var materials = new InMemoryMaterialRepository(clock);
+        var relations = new InMemoryMaterialRelationRepository();
+        var service = new MaterialRelationService(relations, materials, pdm, clock);
+        var project = await pdm.CreateProjectAsync(new(
+            $"REL-{Guid.NewGuid():N}", "配套物料测试", "admin", @"D:\PDM\RelationTest", @"D:\PDM\RelationRelease"), "admin", default);
+        var motorA = await AddApprovedMaterialAsync(materials, MaterialKind.Standard, "0102", "MOTOR-A", "电机A");
+        var motorB = await AddApprovedMaterialAsync(materials, MaterialKind.Standard, "0102", "MOTOR-B", "电机B");
+        var controller = await AddApprovedMaterialAsync(materials, MaterialKind.Electrical, "0101", "CTRL-01", "共用控制器");
+
+        var publishedA = await SaveAndPublishAsync(service, motorA, controller);
+        var publishedB = await SaveAndPublishAsync(service, motorB, controller);
+        Assert.NotEqual(publishedA.PublishedRevision!.Id, publishedB.PublishedRevision!.Id);
+
+        var mainA = new BomItem(Guid.NewGuid(), project.Id, BomKind.Standard, 1, motorA.MaterialCode, motorA.Name, 2, "001", null, null, "W1", true);
+        var mainB = new BomItem(Guid.NewGuid(), project.Id, BomKind.Standard, 2, motorB.MaterialCode, motorB.Name, 3, "001", null, null, "W1", true);
+        await pdm.ReplaceBomAsync(project.Id, BomKind.Standard, [mainA, mainB], default);
+
+        var incomplete = await service.GetCompletenessAsync(project.Id, "admin", UserRole.Administrator, default);
+        Assert.False(incomplete.IsComplete);
+        await Assert.ThrowsAsync<PdmRuleException>(() => service.EnsureCompleteAsync(project.Id, default));
+
+        var result = await service.ApplyAsync(project.Id,
+        [
+            new ApplyMaterialRelationsCommand(mainA.Id, []),
+            new ApplyMaterialRelationsCommand(mainB.Id, [])
+        ], "admin", UserRole.Administrator, default);
+
+        Assert.True(result.IsComplete);
+        Assert.Equal(2, result.MainMaterialCount);
+        var accessoryRows = (await pdm.GetBomAsync(project.Id, BomKind.Electrical, default))
+            .Where(item => item.Source == "MaterialRelation" && item.DrawingNumber == controller.MaterialCode)
+            .OrderBy(item => item.Quantity)
+            .ToArray();
+        Assert.Equal(2, accessoryRows.Length);
+        Assert.Equal([2m, 3m], accessoryRows.Select(item => item.Quantity).ToArray());
+        Assert.Equal(2, accessoryRows.Select(item => item.Id).Distinct().Count());
+        Assert.Equal(2, (await relations.ListSelectionsAsync(project.Id, default)).Count);
+        await service.EnsureCompleteAsync(project.Id, default);
+    }
+
+    private static async Task<MaterialRelationTemplate> SaveAndPublishAsync(MaterialRelationService service, PdmMaterial main, PdmMaterial accessory)
+    {
+        var draft = await service.SaveDraftAsync(null, new(
+            main.Id,
+            $"{main.Name}标准配套",
+            "初版",
+            null,
+            [new SaveMaterialRelationGroupCommand(
+                "控制器", true, MaterialRelationSelectionMode.Single, 1, 1, true, 1,
+                [new SaveMaterialRelationOptionCommand(accessory.Id, MaterialRelationQuantityMode.PerMainQuantity, 1, false, 1)])]),
+            "admin", UserRole.Administrator, default);
+        return await service.PublishAsync(draft.Id, draft.DraftRevision!.Id, draft.DraftRevision.RowVersion, "admin", UserRole.Administrator, default);
+    }
+
+    private static async Task<PdmMaterial> AddApprovedMaterialAsync(
+        InMemoryMaterialRepository repository,
+        MaterialKind kind,
+        string categoryCode,
+        string code,
+        string name)
+    {
+        var category = await repository.FindCategoryAsync(categoryCode, default) ?? throw new InvalidOperationException();
+        var now = DateTimeOffset.UtcNow;
+        var material = new PdmMaterial(
+            Guid.NewGuid(), code, name, kind, MaterialSupplyMode.Purchase, "001", null, null, null, null, null,
+            null, null, null, MaterialApprovalStatus.Approved, "admin", now, categoryCode, null, code,
+            MaterialSyncStatus.Succeeded, "admin", now, "admin", now, 1, categoryCode, U9SyncConfirmed: true);
+        return await repository.CreateMaterialAsync(material, category, default);
+    }
+}

@@ -3895,6 +3895,7 @@ public sealed class PdmAddin : ISwAddin
         string openWarning = null;
         Guid? missingReferenceRecoveryProjectId = null;
         Guid? preparedProjectId = null;
+        ControlledOpenManifestDto manifest = null;
         try
         {
             var requestsLatestEdit = mode == ControlledOpenMode.LatestEdit;
@@ -3909,7 +3910,7 @@ public sealed class PdmAddin : ISwAddin
                 documentId,
                 " mode=",
                 mode));
-            var manifest = await apiClient.CreateControlledOpenManifestAsync(
+            manifest = await apiClient.CreateControlledOpenManifestAsync(
                 documentId,
                 specificVersionId,
                 releasedOnly,
@@ -4013,6 +4014,11 @@ public sealed class PdmAddin : ISwAddin
                     lifetime.Token);
             }
 
+            if (mode == ControlledOpenMode.SpecificReadOnly)
+            {
+                CloseConflictingLoadedDocumentsForHistoricalOpen(manifest, Path.GetDirectoryName(rootPath));
+            }
+
             RememberControlledOpenManifest(manifest, Path.GetDirectoryName(rootPath));
 
             RememberExplicitProjectPath(rootPath, manifest.ProjectId);
@@ -4075,7 +4081,8 @@ public sealed class PdmAddin : ISwAddin
                 DocumentKindFromPath(rootPath),
                 string.Empty,
                 mode == ControlledOpenMode.PropertyWriteback,
-                preparedProjectId);
+                preparedProjectId,
+                mode == ControlledOpenMode.SpecificReadOnly ? manifest : null);
             if (!string.IsNullOrWhiteSpace(openWarning))
             {
                 taskPaneControl.SetCheckoutReminder(openWarning, true);
@@ -4117,7 +4124,8 @@ public sealed class PdmAddin : ISwAddin
         CadDocumentKind kind,
         string configuration,
         bool openPropertyWriteback = false,
-        Guid? propertyWritebackProjectId = null)
+        Guid? propertyWritebackProjectId = null,
+        ControlledOpenManifestDto historicalManifest = null)
     {
         var documentType = ToSolidWorksDocumentType(kind);
         if (documentType == (int)swDocumentTypes_e.swDocNONE)
@@ -4153,7 +4161,8 @@ public sealed class PdmAddin : ISwAddin
                 documentType,
                 configuration ?? string.Empty,
                 openPropertyWriteback,
-                propertyWritebackProjectId)));
+                propertyWritebackProjectId,
+                historicalManifest)));
         }
         catch (Exception exception)
         {
@@ -4169,7 +4178,8 @@ public sealed class PdmAddin : ISwAddin
         int documentType,
         string configuration,
         bool openPropertyWriteback = false,
-        Guid? propertyWritebackProjectId = null)
+        Guid? propertyWritebackProjectId = null,
+        ControlledOpenManifestDto historicalManifest = null)
     {
         Interlocked.Increment(ref refreshSuppressionDepth);
         try
@@ -4179,7 +4189,37 @@ public sealed class PdmAddin : ISwAddin
                 return;
             }
 
-            var openedDocument = OpenOrActivateDocumentOnSolidWorksThread(fullPath, documentType, configuration);
+            var previousWorkingDirectory = string.Empty;
+            if (historicalManifest != null)
+            {
+                previousWorkingDirectory = application.GetCurrentWorkingDirectory() ?? string.Empty;
+                application.SetCurrentWorkingDirectory(Path.GetDirectoryName(fullPath) ?? string.Empty);
+            }
+
+            IModelDoc2 openedDocument;
+            try
+            {
+                openedDocument = OpenOrActivateDocumentOnSolidWorksThread(fullPath, documentType, configuration);
+            }
+            finally
+            {
+                if (historicalManifest != null && !string.IsNullOrWhiteSpace(previousWorkingDirectory))
+                {
+                    application.SetCurrentWorkingDirectory(previousWorkingDirectory);
+                }
+            }
+            if (openedDocument != null && historicalManifest != null)
+            {
+                try
+                {
+                    ValidateHistoricalControlledOpenReferences(openedDocument, fullPath, historicalManifest);
+                }
+                catch
+                {
+                    application.CloseDoc(openedDocument.GetTitle());
+                    throw;
+                }
+            }
             if (openedDocument != null && openPropertyWriteback && propertyWritebackProjectId.HasValue)
             {
                 pendingPropertyWritebackProjectId = propertyWritebackProjectId;
@@ -6790,6 +6830,153 @@ public sealed class PdmAddin : ISwAddin
         }
     }
 
+    private void CloseConflictingLoadedDocumentsForHistoricalOpen(
+        ControlledOpenManifestDto manifest,
+        string historicalDirectory)
+    {
+        if (manifest?.Files == null || string.IsNullOrWhiteSpace(historicalDirectory))
+        {
+            return;
+        }
+
+        var expectedPaths = manifest.Files
+            .Where(file => !string.IsNullOrWhiteSpace(file.FileName))
+            .ToDictionary(
+                file => file.FileName,
+                file => Path.GetFullPath(Path.Combine(historicalDirectory, file.RelativePath ?? file.FileName)),
+                StringComparer.OrdinalIgnoreCase);
+        var loadedDocuments = (application?.GetDocuments() as Array)?.OfType<IModelDoc2>()
+            .Where(document =>
+            {
+                var path = document.GetPathName() ?? string.Empty;
+                return expectedPaths.TryGetValue(Path.GetFileName(path), out var expectedPath)
+                    && !PathsEqual(path, expectedPath);
+            })
+            .ToArray() ?? Array.Empty<IModelDoc2>();
+        var dirty = loadedDocuments
+            .Where(document => document.GetSaveFlag() && !HasDiscardableReadOnlySaveFlag(document))
+            .Select(document => Path.GetFileName(document.GetPathName()))
+            .ToArray();
+        if (dirty.Length > 0)
+        {
+            throw new InvalidOperationException(string.Concat(
+                "以下同名图档存在未保存修改，不能安全打开历史装配体：",
+                string.Join("、", dirty.Take(6)),
+                "。请先保存或放弃修改后重试。"));
+        }
+
+        var transientReadOnly = loadedDocuments
+            .Where(document => document.GetSaveFlag() && HasDiscardableReadOnlySaveFlag(document))
+            .Select(document => document.GetPathName() ?? string.Empty)
+            .ToArray();
+        if (transientReadOnly.Length > 0)
+        {
+            LogOperation(string.Concat(
+                "Historical controlled open discarded transient read-only save flags documents=",
+                transientReadOnly.Length,
+                " paths=",
+                string.Join(" | ", transientReadOnly.Take(6))));
+        }
+
+        foreach (var document in loadedDocuments.OrderByDescending(item => item.GetType() == (int)swDocumentTypes_e.swDocASSEMBLY))
+        {
+            var path = document.GetPathName() ?? string.Empty;
+            if (FindLoadedDocument(path) != null)
+            {
+                application.CloseDoc(document.GetTitle());
+                LogOperation(string.Concat("Historical controlled open closed conflicting document path=", path));
+            }
+        }
+
+        var remaining = (application?.GetDocuments() as Array)?.OfType<IModelDoc2>()
+            .Select(document => document.GetPathName() ?? string.Empty)
+            .FirstOrDefault(path => expectedPaths.TryGetValue(Path.GetFileName(path), out var expectedPath)
+                && !PathsEqual(path, expectedPath));
+        if (!string.IsNullOrWhiteSpace(remaining))
+        {
+            throw new IOException(string.Concat(
+                Path.GetFileName(remaining),
+                "仍被SolidWorks占用，不能安全打开历史装配体。请关闭该图档后重试。"));
+        }
+    }
+
+    private static bool HasDiscardableReadOnlySaveFlag(IModelDoc2 document)
+    {
+        if (document == null || !document.IsOpenedReadOnly())
+        {
+            return false;
+        }
+
+        var path = document.GetPathName() ?? string.Empty;
+        return !string.IsNullOrWhiteSpace(path)
+            && File.Exists(path)
+            && (File.GetAttributes(path) & FileAttributes.ReadOnly) != 0;
+    }
+
+    private static void ValidateHistoricalControlledOpenReferences(
+        IModelDoc2 openedDocument,
+        string rootPath,
+        ControlledOpenManifestDto manifest)
+    {
+        if (openedDocument == null
+            || openedDocument.GetType() != (int)swDocumentTypes_e.swDocASSEMBLY
+            || manifest?.Files == null)
+        {
+            return;
+        }
+
+        var historicalDirectory = Path.GetDirectoryName(rootPath) ?? string.Empty;
+        var expectedPaths = manifest.Files
+            .Where(file => !file.IsRoot
+                && !string.IsNullOrWhiteSpace(file.FileName)
+                && !string.Equals(Path.GetExtension(file.FileName), ".SLDDRW", StringComparison.OrdinalIgnoreCase))
+            .ToDictionary(
+                file => file.FileName,
+                file => Path.GetFullPath(Path.Combine(historicalDirectory, file.RelativePath ?? file.FileName)),
+                StringComparer.OrdinalIgnoreCase);
+        if (expectedPaths.Count == 0)
+        {
+            return;
+        }
+
+        var matched = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var mismatches = new List<string>();
+        var components = (openedDocument as IAssemblyDoc)?.GetComponents(false) as Array;
+        if (components != null)
+        {
+            foreach (var component in components.OfType<IComponent2>())
+            {
+                var actualPath = component.GetPathName() ?? string.Empty;
+                var fileName = Path.GetFileName(actualPath);
+                if (string.IsNullOrWhiteSpace(fileName) || !expectedPaths.TryGetValue(fileName, out var expectedPath))
+                {
+                    continue;
+                }
+
+                if (PathsEqual(actualPath, expectedPath))
+                {
+                    matched.Add(fileName);
+                }
+                else
+                {
+                    mismatches.Add(string.Concat(fileName, " 实际路径：", actualPath));
+                }
+            }
+        }
+
+        if (mismatches.Count > 0)
+        {
+            throw new InvalidOperationException(string.Concat(
+                "历史装配体引用版本校验失败，已关闭本次历史预览：",
+                string.Join("；", mismatches.Take(6)),
+                "。当前工作文件未被修改。"));
+        }
+
+        LogOperation(string.Concat(
+            "Historical controlled open reference validation passed root=", rootPath,
+            " files=", matched.Count));
+    }
+
     private void CloseDocumentsForWorkspaceUpdate(IEnumerable<string> updatePaths, string rootPath)
     {
         var targets = new HashSet<string>(updatePaths, StringComparer.OrdinalIgnoreCase);
@@ -8857,6 +9044,33 @@ public sealed class PdmAddin : ISwAddin
         if (!projectId.HasValue)
         {
             ShowError("未识别图档所属项目，请先选择当前项目。");
+            return;
+        }
+        if (node.Kind == CadDocumentKind.Assembly)
+        {
+            var selectedRevision = eventArgs.Version?.Revision?.Display ?? "-";
+            if (MessageBox.Show(
+                    taskPaneControl,
+                    string.Concat(
+                        "将按装配体", selectedRevision, "保存时的引用快照打开整套历史版本。\r\n",
+                        "装配体及其零件将下载到独立只读目录，不覆盖当前工作文件。\r\n",
+                        "为避免SolidWorks复用同名新版文件，已打开的同名图档将自动关闭；只读打开产生的临时重建状态会被放弃，可编辑图档有未保存修改时仍会停止。是否继续？"),
+                    "打开装配体历史版本",
+                    MessageBoxButtons.YesNo,
+                    MessageBoxIcon.Warning,
+                    MessageBoxDefaultButton.Button2) != DialogResult.Yes)
+            {
+                return;
+            }
+
+            LogOperation(string.Concat(
+                "Historical assembly redirected to controlled snapshot document=", node.DocumentId.Value,
+                " revision=", selectedRevision));
+            BeginControlledOpen(
+                projectId.Value,
+                node.DocumentId.Value,
+                ControlledOpenMode.SpecificReadOnly,
+                eventArgs.Version.Id);
             return;
         }
         if (!TryBeginWorkspaceOperation("正在切换图档版本"))

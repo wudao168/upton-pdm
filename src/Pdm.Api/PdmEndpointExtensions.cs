@@ -653,6 +653,65 @@ public static class PdmEndpointExtensions
             return Results.File(stream, contentType, enableRangeProcessing: true);
         });
 
+        api.MapGet("/documents/{documentId:guid}/versions/{versionId:guid}/markup", async (Guid documentId, Guid versionId, HttpContext context, IPdmRepository repository, PdmWorkflowService workflow, CancellationToken cancellationToken) =>
+        {
+            var (actor, role) = CurrentUser(context.User);
+            var document = await repository.FindDocumentAsync(documentId, cancellationToken);
+            var version = await repository.FindDocumentVersionAsync(documentId, versionId, cancellationToken);
+            if (document is null || version is null) return Results.NotFound();
+            if (!await repository.HasProjectContentReadAccessAsync(document.ProjectId, actor, role, cancellationToken)) return Results.Forbid();
+            var project = await repository.FindProjectAsync(document.ProjectId, cancellationToken);
+            if (project is null) return Results.NotFound();
+            var path = StorageLocationPolicy.ResolveUnder(project.VaultLocation, Path.Combine(".markups", documentId.ToString("N"), versionId.ToString("N"), "review.markup"));
+            if (!File.Exists(path)) return Results.NotFound();
+            await workflow.AuditVersionReadAsync(documentId, versionId, actor, role, "document.markup.read", cancellationToken);
+            return Results.File(path, "application/octet-stream", enableRangeProcessing: true);
+        });
+
+        api.MapPut("/documents/{documentId:guid}/versions/{versionId:guid}/markup", async (Guid documentId, Guid versionId, HttpRequest request, HttpContext context, IPdmRepository repository, TimeProvider timeProvider, CancellationToken cancellationToken) =>
+        {
+            const long maximumMarkupLength = 50L * 1024 * 1024;
+            var (actor, role) = CurrentUser(context.User);
+            var document = await repository.FindDocumentAsync(documentId, cancellationToken);
+            var version = await repository.FindDocumentVersionAsync(documentId, versionId, cancellationToken);
+            if (document is null || version is null) return Results.NotFound();
+            if (!await repository.HasProjectContentReadAccessAsync(document.ProjectId, actor, role, cancellationToken)
+                || !await repository.HasUserPermissionAsync(actor, role, PermissionCodes.DrawingReviewAnnotate, cancellationToken)) return Results.Forbid();
+            if (request.ContentLength is > maximumMarkupLength) return Results.BadRequest(new { detail = "批注文件不能超过50MB。" });
+            var project = await repository.FindProjectAsync(document.ProjectId, cancellationToken);
+            if (project is null) return Results.NotFound();
+
+            var path = StorageLocationPolicy.ResolveUnder(project.VaultLocation, Path.Combine(".markups", documentId.ToString("N"), versionId.ToString("N"), "review.markup"));
+            var directory = Path.GetDirectoryName(path) ?? throw new InvalidOperationException("批注存储目录无效。");
+            Directory.CreateDirectory(directory);
+            var temporaryPath = Path.Combine(directory, $"review-{Guid.NewGuid():N}.upload");
+            long length = 0;
+            try
+            {
+                await using (var output = new FileStream(temporaryPath, FileMode.CreateNew, FileAccess.Write, FileShare.None, 128 * 1024, FileOptions.Asynchronous))
+                {
+                    var buffer = new byte[128 * 1024];
+                    int read;
+                    while ((read = await request.Body.ReadAsync(buffer.AsMemory(0, buffer.Length), cancellationToken)) > 0)
+                    {
+                        length += read;
+                        if (length > maximumMarkupLength) throw new PdmRuleException("批注文件不能超过50MB。");
+                        await output.WriteAsync(buffer.AsMemory(0, read), cancellationToken);
+                    }
+                    await output.FlushAsync(cancellationToken);
+                }
+                if (length == 0) throw new PdmRuleException("批注文件不能为空。");
+                File.Move(temporaryPath, path, true);
+            }
+            finally
+            {
+                if (File.Exists(temporaryPath)) File.Delete(temporaryPath);
+            }
+
+            await repository.AppendAuditAsync(new AuditEntry(Guid.NewGuid(), timeProvider.GetUtcNow(), actor, "document.markup.save", nameof(DocumentVersion), versionId.ToString(), $"保存图档批注：{document.FileName}；{length}字节"), cancellationToken);
+            return Results.Ok(new { length });
+        });
+
         api.MapPost("/documents/{documentId:guid}/open-manifest", async (Guid documentId, CreateControlledOpenManifestRequest request, HttpContext context, PdmWorkflowService workflow, CancellationToken cancellationToken) =>
         {
             var (actor, role) = CurrentUser(context.User);
@@ -773,10 +832,8 @@ public static class PdmEndpointExtensions
 
         api.MapPost("/projects/{projectId:guid}/boms/generate", async (Guid projectId, bool? apply, HttpContext context, PdmWorkflowService workflow, CancellationToken cancellationToken) =>
         {
-            if (apply == true)
-                return Results.BadRequest(new { message = "机械BOM对账仅支持只读预览；请在对应BOM中人工处理差异并保存。" });
             var (actor, role) = CurrentUser(context.User);
-            return Results.Ok(await workflow.GenerateMechanicalBomAsync(projectId, false, actor, role, cancellationToken));
+            return Results.Ok(await workflow.GenerateMechanicalBomAsync(projectId, apply == true, actor, role, cancellationToken));
         });
 
         api.MapPost("/projects/{projectId:guid}/boms/items/{itemId:guid}/resolve", async (Guid projectId, Guid itemId, ResolveBomItemRequest request, HttpContext context, PdmWorkflowService workflow, CancellationToken cancellationToken) =>
@@ -810,6 +867,17 @@ public static class PdmEndpointExtensions
         {
             var (actor, role) = CurrentUser(context.User);
             return Results.Ok(await workflow.BatchRestoreBomItemsAsync(projectId, new BatchRestoreBomItemsCommand(request.ItemIds, request.Mode), actor, role, cancellationToken));
+        });
+
+        api.MapPost("/projects/{projectId:guid}/boms/items/release-exclusion", async (Guid projectId, SetBomReleaseExclusionRequest request, HttpContext context, PdmWorkflowService workflow, CancellationToken cancellationToken) =>
+        {
+            var (actor, role) = CurrentUser(context.User);
+            return Results.Ok(await workflow.SetBomReleaseExclusionAsync(
+                projectId,
+                new SetBomReleaseExclusionCommand(request.ItemIds, request.Excluded, request.Reason),
+                actor,
+                role,
+                cancellationToken));
         });
 
         api.MapPost("/projects/{projectId:guid}/boms/items/restore-source", async (Guid projectId, RestoreBomItemsFromSourceRequest request, HttpContext context, PdmWorkflowService workflow, CancellationToken cancellationToken) =>
@@ -1051,7 +1119,7 @@ public static class PdmEndpointExtensions
                     request.ChangeReason ?? string.Empty,
                     "未指定", null,
                     request.Scope, request.SelectedBomItemIds,
-                    actor, role, cancellationToken, request.SelectedBomItemQuantities));
+                    actor, role, cancellationToken, request.SelectedBomItemQuantities, request.WholeSetMultiplier));
         });
 
         api.MapPut("/release-packages/{releasePackageId:guid}/draft", async (Guid releasePackageId, UpdateReleasePackageDraftRequest request, HttpContext context, PdmWorkflowService workflow, CancellationToken cancellationToken) =>
@@ -1064,7 +1132,8 @@ public static class PdmEndpointExtensions
                 request.SelectedBomItemQuantities,
                 actor,
                 role,
-                cancellationToken));
+                cancellationToken,
+                request.WholeSetMultiplier));
         });
 
         api.MapDelete("/release-packages/{releasePackageId:guid}/draft", async (Guid releasePackageId, HttpContext context, PdmWorkflowService workflow, CancellationToken cancellationToken) =>
@@ -1155,15 +1224,13 @@ public static class PdmEndpointExtensions
             var results = new List<MyApprovalTaskResponse>();
             foreach (var project in projects)
             {
-                var packages = await repository.ListReleasePackagesAsync(project.Id, cancellationToken);
-                foreach (var package in packages)
+                var tasks = await repository.ListPendingApprovalTasksAsync(project.Id, cancellationToken);
+                foreach (var task in tasks)
                 {
-                    if (package.State is not (ReleasePackageState.ProcessReview or ReleasePackageState.Approval)) continue;
-                    var task = package.ApprovalTasks.OrderBy(item => item.StepOrder).FirstOrDefault(item => item.Decision is null);
-                    if (task is null || (!canEmergencySubstitute && !string.Equals(task.Assignee, actor, StringComparison.OrdinalIgnoreCase))) continue;
+                    if (!canEmergencySubstitute && !string.Equals(task.Assignee, actor, StringComparison.OrdinalIgnoreCase)) continue;
                     results.Add(new MyApprovalTaskResponse(
-                        task.Id, project.Id, project.Code, project.Name, package.Id, package.Number,
-                        task.Stage, package.State, package.CreatedAt));
+                        task.Id, project.Id, project.Code, project.Name, task.ReleasePackageId, task.ReleasePackageNumber,
+                        task.Stage, task.PackageState, task.CreatedAt));
                 }
             }
             return Results.Ok(results.OrderBy(item => item.CreatedAt));

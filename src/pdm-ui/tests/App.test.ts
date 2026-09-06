@@ -19,8 +19,8 @@ function installApiMock(projectsBeforeDefault: Array<Record<string, unknown>> = 
   let u9Settings = { baseUrl: 'http://10.7.7.188/U9', enterpriseCode: '01', organizationCode: '7', userCode: 'pdm', clientId: 'PDM', clientSecretConfigured: true, itemCreatePath: '/webapi/ItemMaster/Create', itemQueryPath: '/webapi/ItemMaster/Query', itemModifyPath: '/webapi/ItemMaster/Modify', itemDeletePath: '/webapi/ItemMaster/Delete', unitCodeMappings: {}, writeEnabled: false }
   const validationRules = { standard: ['drawingNumber', 'name', 'unit', 'specification', 'quantity', 'revision'], nonStandard: ['drawingNumber', 'name', 'unit', 'material', 'quantity', 'revision'], electrical: ['drawingNumber', 'name', 'unit', 'quantity', 'revision'] }
   const editLocks = [{ documentId: 'doc-lock', projectId, projectCode: 'PRJ-REAL-001', projectName: '真实装配项目', drawingNumber: 'LOCK-001', documentName: '长期编辑图档', fileName: 'LOCK-001.SLDPRT', checkedOutBy: 'designer', checkedOutAt: '2026-08-14T00:00:00Z', checkoutMachine: 'DESIGN-WS', lastHeartbeatAt: '2026-08-14T00:03:00Z', leaseExpiresAt: '2026-08-14T00:18:00Z', connectionState: 'Active', attentionLevel: 'Reminder', releaseRequestedBy: null, releaseRequestedAt: null, releaseRequestReason: null, ownedByCurrentUser: false, canRequestRelease: true, canForceRelease: false }]
-  const engineerPermissions = ['project.view', 'project.create', 'project.child.create', 'project.staffing.manage', 'project.designer.assign', 'project.content.view', 'document.edit', 'bom.edit', 'release.manage', 'standard-library.view']
-  const adminPermissions = [...engineerPermissions, 'material.view', 'material.manage', 'project.delete', 'project.execution.assign', 'approval.decide', 'settings.customer.manage', 'settings.organization.manage', 'settings.folder.manage', 'settings.storage.manage', 'system.role.view', 'system.role.edit', 'audit.view']
+  const engineerPermissions = ['project.view', 'project.create', 'project.child.create', 'project.staffing.manage', 'project.designer.assign', 'project.content.view', 'document.edit', 'bom.edit', 'material.view', 'release.manage', 'standard-library.view']
+  const adminPermissions = [...engineerPermissions, 'material.manage', 'project.delete', 'project.execution.assign', 'approval.decide', 'settings.customer.manage', 'settings.organization.manage', 'settings.folder.manage', 'settings.storage.manage', 'system.role.view', 'system.role.edit', 'audit.view']
   const roleDirectory = {
     permissions: [
       { code: 'project.view', name: '查看负责项目', module: '项目管理', sensitive: false },
@@ -343,7 +343,7 @@ describe('PLM client workspace', () => {
 
     const navigationLabels = wrapper.findAll('.pdm-sidebar__nav .pdm-nav-item').map(item => item.text().trim())
     expect(navigationLabels.slice(2, 4)).toEqual(['标准物料', '标准结构'])
-    expect(navigationLabels).not.toContain('料品管理')
+    expect(navigationLabels).toContain('料品管理')
 
     await buttonByText(wrapper, '标准结构').trigger('click')
     await flushPromises()
@@ -1136,7 +1136,10 @@ describe('PLM client workspace', () => {
     expect(previewToolbar.find('.pdm-selected-file').exists()).toBe(false)
     const markupToolbar = previewToolbar.get('[aria-label="图形批注工具"]')
     expect(markupToolbar.findAll('button').map(button => button.attributes('aria-label'))).toEqual([
-      '保存批注', '引线批注', '云线批注', '框选批注', '手绘批注',
+      '引线批注', '云线批注', '框选批注', '手绘批注',
+    ])
+    expect(previewToolbar.findAll('.pdm-preview-command').map(button => button.attributes('aria-label'))).toEqual([
+      '保存批注', '打开最新', '编辑打开',
     ])
     expect(previewToolbar.find('button[aria-label="使用位置"]').exists()).toBe(false)
     expect(previewToolbar.find('button[aria-label="作废图档"]').exists()).toBe(false)
@@ -1266,7 +1269,7 @@ describe('PLM client workspace', () => {
     expect(preview.attributes('data-preview-state')).toBe('unavailable')
     expect(preview.text()).toContain('该历史版本尚未生成STP/PDF预览')
     expect(preview.text()).not.toContain('正在加载 eDrawings')
-    expect(preview.get('[aria-label="图档属性"]').text()).toContain('料号REAL-ASM-001')
+    expect(preview.get('[aria-label="图档属性"]').text()).toContain('物料编码REAL-ASM-001')
     expect(preview.get('[aria-label="图档属性"]').text()).toContain('名称真实总装配')
 
     await buttonByText(wrapper, '查看并下载版本').trigger('click')
@@ -1283,7 +1286,7 @@ describe('PLM client workspace', () => {
     const properties = wrapper.get('[aria-label="图档属性"]')
     expect(properties.text()).toContain('型号10mm')
     expect(properties.text()).toContain('材质Q235B')
-    expect(properties.findAll('dt').map(item => item.text())).toEqual(['料号', '名称', '型号', '品牌', '材质', '表面处理', '热处理'])
+    expect(properties.findAll('dt').map(item => item.text())).toEqual(['物料编码', '名称', '型号', '品牌', '材质', '表面处理', '热处理'])
   })
 
   it('opens only PLM-controlled document identities in SolidWorks from the entity button and tree menu', async () => {

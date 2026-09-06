@@ -100,7 +100,9 @@ if (string.Equals(databaseOptions.Provider, "MySql", StringComparison.OrdinalIgn
     builder.Services.AddScoped<IPdmRepository, MySqlPdmRepository>();
     builder.Services.AddScoped<IProjectFileRepository, MySqlProjectFileRepository>();
     builder.Services.AddScoped<IMaterialRepository, MySqlMaterialRepository>();
+    builder.Services.AddScoped<IU9InventoryRepository, MySqlU9InventoryRepository>();
     builder.Services.AddScoped<IStandardLibraryRepository, MySqlStandardLibraryRepository>();
+    builder.Services.AddScoped<IMaterialRelationRepository, MySqlMaterialRelationRepository>();
     builder.Services.AddScoped<IProgramTemplateRepository, MySqlProgramTemplateRepository>();
 }
 else
@@ -108,7 +110,9 @@ else
     builder.Services.AddSingleton<IPdmRepository, InMemoryPdmRepository>();
     builder.Services.AddSingleton<IProjectFileRepository, InMemoryProjectFileRepository>();
     builder.Services.AddSingleton<IMaterialRepository, InMemoryMaterialRepository>();
+    builder.Services.AddSingleton<IU9InventoryRepository, InMemoryU9InventoryRepository>();
     builder.Services.AddSingleton<IStandardLibraryRepository, InMemoryStandardLibraryRepository>();
+    builder.Services.AddSingleton<IMaterialRelationRepository, InMemoryMaterialRelationRepository>();
     builder.Services.AddSingleton<IProgramTemplateRepository, InMemoryProgramTemplateRepository>();
 }
 
@@ -127,6 +131,8 @@ builder.Services.AddSingleton<IU9SecretProtector, DataProtectionU9SecretProtecto
 builder.Services.AddHttpClient<ICrmCustomerClient, CrmCustomerClient>(client => client.Timeout = TimeSpan.FromSeconds(20));
 builder.Services.AddHttpClient<IU9OpenApiClient, U9OpenApiClient>(client => client.Timeout = TimeSpan.FromSeconds(20))
     .RemoveAllLoggers();
+builder.Services.AddHttpClient<IU9InventoryClient, U9OpenApiClient>(client => client.Timeout = TimeSpan.FromMinutes(2))
+    .RemoveAllLoggers();
 builder.Services.AddHttpClient<IU9BomQueryClient, U9OpenApiClient>(client => client.Timeout = TimeSpan.FromSeconds(20))
     .RemoveAllLoggers();
 builder.Services.AddScoped<PdmWorkflowService>();
@@ -135,12 +141,16 @@ builder.Services.AddScoped<CrmCustomerIntegrationService>();
 builder.Services.AddScoped<MaterialService>();
 builder.Services.AddScoped<MaterialAttachmentService>();
 builder.Services.AddScoped<StandardLibraryService>();
+builder.Services.AddScoped<MaterialRelationService>();
+builder.Services.AddScoped<IMaterialRelationReleaseGuard>(provider => provider.GetRequiredService<MaterialRelationService>());
 builder.Services.AddScoped<ProgramTemplateService>();
 builder.Services.AddScoped<ProjectFileService>();
 builder.Services.AddScoped<BomHeaderService>();
 builder.Services.AddScoped<U9MaterialIntegrationService>();
 builder.Services.AddScoped<U9MaterialFullSyncService>();
 builder.Services.AddSingleton<U9MaterialFullSyncCoordinator>();
+builder.Services.AddScoped<U9InventoryService>();
+builder.Services.AddSingleton<U9InventorySyncCoordinator>();
 builder.Services.AddScoped<U9BomQueryService>();
 builder.Services.AddScoped<U9BomWriteService>();
 builder.Services.AddScoped<ProjectBomU9SyncService>();
@@ -150,6 +160,7 @@ builder.Services.AddScoped<MaterialSyncBatchService>();
 builder.Services.AddHostedService<PdmBootstrapHostedService>();
 builder.Services.AddHostedService<CrmCustomerSyncHostedService>();
 builder.Services.AddHostedService<MaterialU9SyncHostedService>();
+builder.Services.AddHostedService<U9InventorySyncHostedService>();
 builder.Services.AddHostedService<MaterialU9SyncBatchHostedService>();
 builder.Services.AddHostedService<ProjectFileRecycleCleanupService>();
 
@@ -230,7 +241,9 @@ app.UseMiddleware<CompanyContextMiddleware>();
 app.UseAuthorization();
 app.MapPdmEndpoints();
 app.MapPdmMaterialEndpoints();
+app.MapPdmInventoryEndpoints();
 app.MapStandardLibraryEndpoints();
+app.MapMaterialRelationEndpoints();
 app.MapPdmBomHeaderEndpoints();
 app.MapProgramTemplateEndpoints();
 app.MapProjectFileEndpoints();

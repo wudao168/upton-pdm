@@ -1,9 +1,11 @@
 <script setup lang="ts">
-import type { MaterialAttachment, MaterialAttachmentKind, MaterialCategory, SaveMaterialInput } from '../types'
+import type { MaterialAttachment, MaterialAttachmentKind, MaterialCategory, PdmMaterial, SaveMaterialInput } from '../types'
 import { u9UnitOptions } from '../u9Units'
-import { ref } from 'vue'
+import { computed, ref, watch } from 'vue'
+import MaterialRelationEditor from './MaterialRelationEditor.vue'
 
-const props = defineProps<{
+const props = withDefaults(defineProps<{
+  token: string
   modelValue: boolean
   editingId?: string | null
   form: SaveMaterialInput
@@ -15,7 +17,20 @@ const props = defineProps<{
   uploadProgress?: number
   coverUrl?: string
   u9FieldsLocked?: boolean
-}>()
+  canEdit?: boolean
+  mainMaterial?: PdmMaterial | null
+  initialTab?: 'material' | 'relations'
+  canViewRelations?: boolean
+  canManageRelations?: boolean
+  canPublishRelations?: boolean
+}>(), {
+  canEdit: true,
+  mainMaterial: null,
+  initialTab: 'material',
+  canViewRelations: false,
+  canManageRelations: false,
+  canPublishRelations: false,
+})
 const emit = defineEmits<{
   'update:modelValue': [value: boolean]
   categoryChange: [code: string]
@@ -23,7 +38,19 @@ const emit = defineEmits<{
   downloadAttachment: [attachment: MaterialAttachment]
   clearCover: []
   save: []
+  relationsChanged: []
 }>()
+
+const activePane = ref<'material' | 'relations'>('material')
+const relationPaneOpened = ref(false)
+const relationTabVisible = computed(() => Boolean(props.editingId && props.mainMaterial && props.canViewRelations))
+watch([() => props.modelValue, () => props.editingId, () => props.initialTab], ([visible]) => {
+  if (!visible) return
+  relationPaneOpened.value = false
+  activePane.value = props.initialTab === 'relations' && relationTabVisible.value ? 'relations' : 'material'
+  if (activePane.value === 'relations') relationPaneOpened.value = true
+})
+watch(activePane, value => { if (value === 'relations') relationPaneOpened.value = true })
 
 const model3DAccept = '.sldprt,.sldasm,.step,.stp,.igs,.iges,.x_t,.x_b,.sat'
 const documentAccept = '.pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.txt,.csv,.jpg,.jpeg,.png,.zip,.rar,.7z'
@@ -39,8 +66,14 @@ function chooseAttachment(kind: MaterialAttachmentKind) {
 </script>
 
 <template>
-  <el-dialog :model-value="modelValue" class="material-editor-dialog" :title="editingId ? '编辑或变更料品' : '新增料品草稿'" width="688px" @update:model-value="emit('update:modelValue', $event)">
+  <el-dialog :model-value="modelValue" class="material-editor-dialog" :title="editingId ? '料品明细' : '新增料品草稿'" :width="activePane === 'relations' ? 'min(1480px, 96vw)' : '688px'" top="3vh" @update:model-value="emit('update:modelValue', $event)">
+    <el-tabs v-if="editingId" v-model="activePane" class="material-editor-tabs">
+      <el-tab-pane label="料品信息" name="material" />
+      <el-tab-pane v-if="relationTabVisible" label="关联物料" name="relations" />
+    </el-tabs>
+    <div v-show="activePane === 'material'">
     <el-alert v-if="u9FieldsLocked" type="warning" :closable="false" title="U9C任务结果尚未确认，名称、分类、单位、规格等U9字段暂不可修改；推荐、选型建议、参考价格、封面和附件仍可维护。" />
+    <fieldset class="material-editor-fieldset" :disabled="!canEdit">
     <el-form label-position="top">
       <div class="material-editor-grid">
         <el-form-item label="PLM物料编码"><el-input v-model="form.materialCode" disabled :placeholder="materialCodePlaceholder" /><p class="field-help">保存时从PLM分类当前基线向后预留编号；U9C在后台同步，极少数重复号会自动校准并换号。</p></el-form-item>
@@ -70,10 +103,13 @@ function chooseAttachment(kind: MaterialAttachmentKind) {
         <el-form-item label="选型建议"><el-input v-model="form.selectionAdvice" maxlength="1000" show-word-limit /></el-form-item>
       </div>
     </el-form>
-    <template #footer><el-button @click="emit('update:modelValue', false)">取消</el-button><el-button type="primary" :loading="saving" @click="emit('save')">{{ editingId ? '保存修改' : '保存草稿' }}</el-button></template>
+    </fieldset>
+    </div>
+    <MaterialRelationEditor v-if="relationPaneOpened && mainMaterial" v-show="activePane === 'relations'" :token="token" :main-material="mainMaterial" :can-manage="canManageRelations" :can-publish="canPublishRelations" @changed="emit('relationsChanged')" />
+    <template #footer><el-button @click="emit('update:modelValue', false)">{{ activePane === 'relations' ? '关闭' : '取消' }}</el-button><el-button v-if="activePane === 'material' && canEdit" type="primary" :loading="saving" @click="emit('save')">{{ editingId ? '保存修改' : '保存草稿' }}</el-button></template>
   </el-dialog>
 </template>
 
 <style scoped>
-.material-editor-grid{display:grid;grid-template-columns:repeat(3,minmax(0,200px));gap:0 12px}.material-editor-grid :deep(.el-form-item){margin-bottom:10px}.material-editor-grid__wide{grid-column:span 2}.material-recommend-button{width:100%}.material-attachment-field{display:flex;min-width:0;width:100%;align-items:center;flex-wrap:wrap;gap:4px}.material-attachment-input{position:absolute;width:1px;height:1px;opacity:0}.material-attachment-list{display:flex;max-height:44px;min-width:0;width:100%;overflow:auto;align-items:flex-start;flex-direction:column}.material-cover-preview{width:48px;height:48px;border:1px solid #dbe3ee;border-radius:4px;object-fit:cover}@media(max-width:760px){.material-editor-grid{grid-template-columns:1fr}.material-editor-grid__wide{grid-column:auto}}
+.material-editor-tabs{margin-top:-10px}.material-editor-fieldset{min-width:0;margin:0;padding:0;border:0}.material-editor-grid{display:grid;grid-template-columns:repeat(3,minmax(0,200px));gap:0 12px}.material-editor-grid :deep(.el-form-item){margin-bottom:10px}.material-editor-grid__wide{grid-column:span 2}.material-recommend-button{width:100%}.material-attachment-field{display:flex;min-width:0;width:100%;align-items:center;flex-wrap:wrap;gap:4px}.material-attachment-input{position:absolute;width:1px;height:1px;opacity:0}.material-attachment-list{display:flex;max-height:44px;min-width:0;width:100%;overflow:auto;align-items:flex-start;flex-direction:column}.material-cover-preview{width:48px;height:48px;border:1px solid #dbe3ee;border-radius:4px;object-fit:cover}@media(max-width:760px){.material-editor-grid{grid-template-columns:1fr}.material-editor-grid__wide{grid-column:auto}}
 </style>

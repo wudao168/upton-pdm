@@ -56,8 +56,8 @@ describe('BomHierarchyOverview', () => {
     expect(wrapper.text()).toContain('上料设备')
     expect(wrapper.text()).toContain('本级BOM料号')
     expect(wrapper.text()).toContain('上级BOM料号')
-    expect(wrapper.text()).toContain('申请中')
-    expect(wrapper.text()).toContain('待申请')
+    expect(wrapper.text()).toContain('自动同步中')
+    expect(wrapper.text()).toContain('待BOM发布')
     expect(wrapper.findAll('tbody tr')).toHaveLength(8)
     const rootMaster = wrapper.findAll('tbody tr').find(row => row.text().includes('P-0301') && row.text().includes('三类汇总'))
     expect(rootMaster?.text()).toContain('ROOT-M')
@@ -117,7 +117,8 @@ describe('BomHierarchyOverview', () => {
     const wrapper = mount(BomHierarchyOverview, { props: { project: root, projects: [root], token: 'token', editable: true }, global: { plugins: [ElementPlus] } })
     await flushPromises()
 
-    expect(wrapper.text()).toContain('待BOM批准后自动申请 4 个BOM料号')
+    expect(wrapper.text()).toContain('待BOM发布后自动生成并同步 4 个BOM料号')
+    expect(wrapper.text()).toContain('自动流程')
     expect(wrapper.findAll('tbody tr')[0].text()).toContain('设备 0302')
     expect(wrapper.findAll('tbody tr')[1].text()).toContain('0201')
     expect(wrapper.find('.bom-overview__generation button').exists()).toBe(false)
@@ -140,10 +141,10 @@ describe('BomHierarchyOverview', () => {
     })
     await flushPromises()
 
-    expect(wrapper.text()).toContain('待BOM批准后自动申请 5 个BOM料号')
+    expect(wrapper.text()).toContain('待BOM发布后自动生成并同步 5 个BOM料号')
     const rootRows = wrapper.findAll('tbody tr').slice(0, 4)
-    expect(rootRows[0].text()).toContain('待申请')
-    expect(rootRows.slice(1).every(row => row.text().includes('不申请'))).toBe(true)
+    expect(rootRows[0].text()).toContain('待BOM发布')
+    expect(rootRows.slice(1).every(row => row.text().includes('不生成'))).toBe(true)
     expect(wrapper.find('.bom-overview__generation button').exists()).toBe(false)
   })
 
@@ -198,6 +199,39 @@ describe('BomHierarchyOverview', () => {
     expect(api.previewProjectBomU9Sync).toHaveBeenCalledWith('root', 'Master', 'token')
     expect(api.executeProjectBomU9Sync).not.toHaveBeenCalled()
     expect(wrapper.text()).toContain('待BOM审核')
+  })
+
+  it('shows the PLM total, U9C total, and upload delta before synchronization', async () => {
+    const root = project({ id: 'root', code: 'P700005-3', name: '测试项目', rootProjectId: 'root', bomItemCategoryCode: '0302' })
+    api.listBom.mockResolvedValue([])
+    api.listBomVersions.mockResolvedValue([])
+    api.listProjectBomHeaders.mockResolvedValue([
+      { projectId: 'root', kind: 'Standard', parentKind: 'Master', materialId: 'material-standard', materialCode: '02011000000', rowVersion: 1, applicationStatus: 'Approved' },
+    ])
+    api.previewProjectBomU9Sync.mockImplementation(async (_projectId: string, kind: string) => kind === 'Standard' ? ({
+      projectId: 'root', kind, itemCode: '02011000000', componentCount: 1, state: 'ModifyRequired',
+      writePreview: {
+        operation: 1, path: '/webapi/BOM/Modify', requestPreview: '[]', requestSha256: 'sha-1', baselineSha256: 'base-1',
+        requiredConfirmation: '修改 02011000000/A1', addedComponentCount: 1, retainedHistoricalComponentCount: 1,
+        quantityReconciliations: [{ itemCode: '01020000056', issueUomCode: '001', parentQty: 1, plmApprovedTotal: 4, u9ExistingTotal: 1, uploadDelta: 3 }],
+        generatedAt: '2026-09-05T08:00:00Z',
+      },
+    }) : ({ projectId: 'root', kind, itemCode: '', componentCount: 0, state: 'UpToDate', writePreview: null }))
+    const confirm = vi.spyOn(ElMessageBox, 'confirm').mockRejectedValue(new Error('cancel'))
+    const wrapper = mount(BomHierarchyOverview, {
+      props: { project: root, projects: [root], token: 'token', editable: true },
+      global: { plugins: [ElementPlus] },
+    })
+    await flushPromises()
+
+    await wrapper.get('button.bom-overview__sync').trigger('click')
+    await flushPromises()
+
+    expect(confirm).toHaveBeenCalledWith(
+      expect.stringContaining('PLM审核总量 4 / U9C现有总量 1 / 本次上传 3'),
+      '确认同步审核通过的子件', expect.any(Object),
+    )
+    expect(api.executeProjectBomU9Sync).not.toHaveBeenCalled()
   })
 
 })
