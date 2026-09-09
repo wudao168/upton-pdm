@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { ElMessage, ElMessageBox } from 'element-plus'
+import { ElMessage } from '../statusMessage'
+import { ElMessageBox } from 'element-plus'
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import MaterialEditorDialog from './MaterialEditorDialog.vue'
 import {

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { Eye, EyeOff, LockKeyhole, UserRound } from '@lucide/vue'
-import { ElMessage } from 'element-plus'
+import { ElMessage } from '../statusMessage'
 import { onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import { postDesktopMessage, requestPasswordReset } from '../api'
 import companyLogo from '../assets/company-logo-white.png'

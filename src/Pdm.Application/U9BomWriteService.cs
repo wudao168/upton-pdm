@@ -108,18 +108,69 @@ public sealed class U9BomWriteService(
         if (normalized.Operation != U9BomWriteOperation.Create
             && !string.Equals(Fingerprint(current), preview.BaselineSha256, StringComparison.OrdinalIgnoreCase))
             throw new PdmRuleException("BOM在确认后已被其他客户端修改，请重新生成预览。");
-        var write = await writeClient.PostBatchAsync(
-            context.BaseUrl, preview.Path, authentication.Token, preview.RequestPreview, cancellationToken);
-        EnsureWriteSucceeded(write, "写入");
-
-        var verification = await QueryAsync(context, normalized.ItemCode, normalized.BomVersionCode, cancellationToken);
+        if (preview.ModifiedComponentCount > 0 || preview.DeletedComponentCount > 0)
+            await repository.AppendAuditAsync(new AuditEntry(Guid.NewGuid(), timeProvider.GetUtcNow(), actor,
+                "u9.bom.before-change", nameof(U9BomReference), $"{normalized.ItemCode}/{normalized.BomVersionCode}",
+                JsonSerializer.Serialize(new { Before = current, Changes = preview.ComponentChanges, preview.RequestSha256 })), cancellationToken);
+        U9BusinessBatchResult write;
+        U9BomQueryResult verification;
+        if (preview.ModifiedComponentCount > 0 || preview.DeletedComponentCount > 0)
+            (write, verification) = await ExecuteControlledStepsAsync(context, authentication.Token, normalized, current, preview, actor, cancellationToken);
+        else
+        {
+            write = await writeClient.PostBatchAsync(
+                context.BaseUrl, preview.Path, authentication.Token, preview.RequestPreview, cancellationToken);
+            EnsureWriteSucceeded(write, "写入");
+            verification = await QueryAsync(context, normalized.ItemCode, normalized.BomVersionCode, cancellationToken);
+        }
         VerifyResult(normalized, current, verification);
         var executedAt = timeProvider.GetUtcNow();
         await repository.AppendAuditAsync(new AuditEntry(
             Guid.NewGuid(), executedAt, actor, $"u9.bom.{command.Operation.ToString().ToLowerInvariant()}",
             nameof(U9BomReference), $"{normalized.ItemCode}/{normalized.BomVersionCode}",
-            $"已执行U9C BOM{OperationName(normalized.Operation)}；A1固定版本；新增{preview.AddedComponentCount}项；U9C历史保留{preview.RetainedHistoricalComponentCount}项；接口{preview.Path}；请求SHA-256 {preview.RequestSha256}；自动回查通过。"), cancellationToken);
+            $"已执行U9C BOM{OperationName(normalized.Operation)}；A1固定版本；新增{preview.AddedComponentCount}项，修改{preview.ModifiedComponentCount}项，删除{preview.DeletedComponentCount}项；U9C历史保留{preview.RetainedHistoricalComponentCount}项；接口{preview.Path}；请求SHA-256 {preview.RequestSha256}；自动回查通过。"), cancellationToken);
         return new(preview, write, verification, executedAt);
+    }
+
+    private async Task<(U9BusinessBatchResult Write, U9BomQueryResult Verification)> ExecuteControlledStepsAsync(
+        WriteContext context, string token, U9BomWriteCommand command, U9BomQueryResult initial,
+        U9BomWritePreview preview, string actor, CancellationToken cancellationToken)
+    {
+        var verified = initial;
+        U9BusinessBatchResult? result = null;
+        var completed = 0;
+        try
+        {
+            // U9C may collapse same-material rows within one Modify request. Submit one explicit item at a time.
+            foreach (var component in command.Components)
+            {
+                var current = await QueryAsync(context, command.ItemCode, command.BomVersionCode, cancellationToken);
+                if (!string.Equals(Fingerprint(current), Fingerprint(verified), StringComparison.OrdinalIgnoreCase))
+                    throw new PdmRuleException("逐项同步期间U9C BOM被其他客户端修改，已停止后续步骤。");
+                var step = command with { Components = [component] };
+                var payload = BuildPayload(context.OrganizationCode, step, current);
+                await repository.AppendAuditAsync(new AuditEntry(Guid.NewGuid(), timeProvider.GetUtcNow(), actor,
+                    "u9.bom.step-request", nameof(U9BomReference), $"{command.ItemCode}/{command.BomVersionCode}",
+                    JsonSerializer.Serialize(new { preview.RequestSha256, Step = completed + 1, component.Sequence, Request = payload })), cancellationToken);
+                result = await writeClient.PostBatchAsync(context.BaseUrl, preview.Path, token, payload, cancellationToken);
+                await repository.AppendAuditAsync(new AuditEntry(Guid.NewGuid(), timeProvider.GetUtcNow(), actor,
+                    "u9.bom.step-response", nameof(U9BomReference), $"{command.ItemCode}/{command.BomVersionCode}",
+                    JsonSerializer.Serialize(new { preview.RequestSha256, Step = completed + 1, Result = result })), cancellationToken);
+                EnsureWriteSucceeded(result, "逐项写入");
+                var actual = await QueryAsync(context, command.ItemCode, command.BomVersionCode, cancellationToken);
+                await repository.AppendAuditAsync(new AuditEntry(Guid.NewGuid(), timeProvider.GetUtcNow(), actor,
+                    "u9.bom.step-readback", nameof(U9BomReference), $"{command.ItemCode}/{command.BomVersionCode}",
+                    JsonSerializer.Serialize(new { preview.RequestSha256, Step = completed + 1, Actual = actual })), cancellationToken);
+                VerifyResult(step, current, actual);
+                verified = actual;
+                completed++;
+            }
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            throw new PdmRuleException($"U9C逐项同步停止：已回查通过{completed}/{command.Components.Count}步；失败步骤可能已生效，请核对审计，勿直接重试。原因：{exception.Message}");
+        }
+        return (result!, verified);
     }
 
     private U9BomWritePreview BuildPreview(
@@ -141,7 +192,7 @@ public sealed class U9BomWriteService(
             addedCount,
             retainedCount,
             quantityReconciliations,
-            timeProvider.GetUtcNow());
+            timeProvider.GetUtcNow()) { ComponentChanges = Changes(normalized, current) };
     }
 
     private async Task DemandPermissionAsync(string actor, UserRole role, CancellationToken cancellationToken)
@@ -207,7 +258,8 @@ public sealed class U9BomWriteService(
         var productUomCode = Required(command.ProductUomCode, "产品计量单位");
         if (command.Lot <= 0) throw new PdmRuleException("生产批量必须大于0。");
         if (command.Components.Count == 0
-            && !(command.Operation == U9BomWriteOperation.Create && command.AllowEmptyCreate))
+            && !(command.Operation == U9BomWriteOperation.Create && command.AllowEmptyCreate)
+            && !(command.ReconcileComponentTotals && command.PreviousApprovedComponents is not null))
             throw new PdmRuleException("创建或修改BOM时至少需要一条子件。");
 
         var components = command.Components.Select(component =>
@@ -247,7 +299,7 @@ public sealed class U9BomWriteService(
         var desired = command.Components
             .GroupBy(component => Key(component.ItemCode, component.IssueUomCode, component.ParentQty), StringComparer.OrdinalIgnoreCase)
             .Select(group => (Key: group.Key, Template: group.First(), Total: group.Sum(component => component.UsageQty)))
-            .ToArray();
+            .ToList();
         if (command.Operation != U9BomWriteOperation.Modify)
             return new(command, desired.Select(item => new U9BomQuantityReconciliation(
                 item.Template.ItemCode, item.Template.IssueUomCode, item.Template.ParentQty,
@@ -258,6 +310,14 @@ public sealed class U9BomWriteService(
             .ToArray() ?? [];
         if (existing.Any(component => component.Sequence is null))
             throw new PdmRuleException("U9C BOM返回了缺少项次的历史子件，不能安全计算追加数量，请人工复核。");
+        if (existing.GroupBy(component => component.Sequence).Any(group => group.Count() > 1))
+            throw new PdmRuleException("U9C BOM历史子件项次重复，不能安全定位修改或删除行，请人工复核。");
+        foreach (var previous in command.PreviousApprovedComponents ?? [])
+        {
+            var key = Key(previous.ItemCode, previous.IssueUomCode, previous.ParentQty);
+            if (!desired.Any(item => string.Equals(item.Key, key, StringComparison.OrdinalIgnoreCase)))
+                desired.Add((key, previous, 0));
+        }
         foreach (var item in desired)
         {
             var related = existing.Where(component => string.Equals(
@@ -278,11 +338,31 @@ public sealed class U9BomWriteService(
         var nextSequence = existing.Select(component => component.Sequence!.Value).DefaultIfEmpty(0).Max();
         var additions = new List<U9BomComponentCommand>();
         var quantities = new List<U9BomQuantityReconciliation>();
+        var previousTotals = (command.PreviousApprovedComponents ?? [])
+            .GroupBy(component => Key(component.ItemCode, component.IssueUomCode, component.ParentQty), StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(group => group.Key, group => group.Sum(component => component.UsageQty), StringComparer.OrdinalIgnoreCase);
         foreach (var (key, template, total) in desired)
         {
             var existingTotal = existingTotals.GetValueOrDefault(key);
             if (existingTotal > total)
-                throw new PdmRuleException($"U9C BOM中子件{template.ItemCode}现有总用量{FormatQuantity(existingTotal)}大于PLM审核总量{FormatQuantity(total)}；只追加策略不能自动减少，请人工复核。");
+            {
+                if (!previousTotals.TryGetValue(key, out var previousTotal) || previousTotal != existingTotal)
+                    throw new PdmRuleException($"U9C BOM中子件{template.ItemCode}现有总用量{FormatQuantity(existingTotal)}大于PLM审核总量{FormatQuantity(total)}；与上一审核版本不一致或缺少归属依据，不能安全减量/删除，请人工复核。");
+                var remaining = existingTotal - total;
+                foreach (var row in existing.Where(component => string.Equals(component.ItemCode?.Trim(), template.ItemCode.Trim(), StringComparison.OrdinalIgnoreCase)).OrderByDescending(component => component.Sequence))
+                {
+                    if (row.UsageQty is null or <= 0 || row.ParentQty != template.ParentQty
+                        || !string.Equals(row.IssueUomCode, template.IssueUomCode, StringComparison.OrdinalIgnoreCase))
+                        throw new PdmRuleException($"子件{template.ItemCode}历史行数量或单位不完整，不能安全减量/删除。");
+                    if (remaining <= 0) break;
+                    var reduction = Math.Min(row.UsageQty.Value, remaining);
+                    additions.Add(template with { Sequence = row.Sequence!.Value, UsageQty = row.UsageQty.Value - reduction,
+                        IsDelete = reduction == row.UsageQty.Value });
+                    remaining -= reduction;
+                }
+                quantities.Add(new(template.ItemCode, template.IssueUomCode, template.ParentQty, total, existingTotal, total - existingTotal));
+                continue;
+            }
             var delta = total - existingTotal;
             quantities.Add(new(template.ItemCode, template.IssueUomCode, template.ParentQty, total, existingTotal, delta));
             if (delta <= 0) continue;
@@ -331,24 +411,45 @@ public sealed class U9BomWriteService(
         if (command.Operation == U9BomWriteOperation.Create)
         {
             if (expected.Length == actual.Length && expected.All(component =>
-                    actual.Any(reference => SameCore(component, reference)))) return;
+                    actual.Any(reference => SameCore(component, reference) && RequiredCreationFlags(reference, matching)))) return;
             throw new PdmRuleException(
                 $"U9C自动回查的BOM子件与PLM提交内容不一致：期望{DescribeComponents(expected)}；实际{DescribeComponents(actual)}。");
         }
 
         var baseline = FindMatching(beforeWrite, command)?.Components.Where(component => component.IsDelete != true).ToArray() ?? [];
-        if (baseline.Any(component => !actual.Any(reference => SameCore(component, reference))))
-            throw new PdmRuleException("U9C追加修改后回查发现原有子件被删除或变更，已停止确认本次同步成功。");
+        var changedSequences = expected.Select(component => component.Sequence).ToHashSet();
+        if (baseline.Where(component => !changedSequences.Contains(component.Sequence ?? 0)).Any(component => !actual.Any(reference => SameCore(component, reference) && SameAttributes(component, reference))))
+            throw new PdmRuleException("U9C修改后回查发现非本次变更的历史子件被删除或变更，已停止确认本次同步成功。");
+        foreach (var component in expected)
+        {
+            if (component.IsDelete ? actual.Any(reference => reference.Sequence == component.Sequence)
+                : !actual.Any(reference => SameCore(component, reference)))
+                throw new PdmRuleException($"U9C修改后回查不一致：子件{component.Sequence}/{component.ItemCode}应{(component.IsDelete ? "删除" : $"为数量{FormatQuantity(component.UsageQty)}")}，请人工复核；请勿盲目重试。");
+            var previous = baseline.FirstOrDefault(row => row.Sequence == component.Sequence);
+            if (!component.IsDelete && previous is not null && !actual.Any(row => SameCore(component, row) && SameAttributes(previous, row)))
+                throw new PdmRuleException($"U9C修改后子件{component.Sequence}/{component.ItemCode}的有效状态、日期或其他属性发生非预期变化，请人工复核。");
+        }
         var baselineSequences = baseline.Select(component => component.Sequence).ToHashSet();
-        var additions = expected.Where(component => !baselineSequences.Contains(component.Sequence)).ToArray();
-        if (additions.Any(component => !actual.Any(reference => SameCore(component, reference))))
+        var additions = expected.Where(component => !component.IsDelete && !baselineSequences.Contains(component.Sequence)).ToArray();
+        if (additions.Any(component => !actual.Any(reference => SameCore(component, reference) && RequiredCreationFlags(reference, matching))))
             throw new PdmRuleException($"U9C追加修改后回查缺少新增子件：{DescribeComponents(additions)}。");
+        if (actual.Length != baseline.Length + additions.Length - expected.Count(component => component.IsDelete))
+            throw new PdmRuleException("U9C回查子件行数与预期不一致，请人工复核。");
     }
 
-    private static U9BomReference? FindMatching(U9BomQueryResult result, U9BomWriteCommand command) =>
-        result.Boms.FirstOrDefault(bom =>
+    private static bool RequiredCreationFlags(U9BomComponentReference component, U9BomReference bom) =>
+        component.UsageQtyType == 1 && component.IsSpecialUseItem == true && component.IsIssueOrgFixed == true
+        && !string.IsNullOrWhiteSpace(component.IssueOrgCode)
+        && string.Equals(component.IssueOrgCode, bom.OrganizationCode, StringComparison.OrdinalIgnoreCase);
+
+    private static U9BomReference? FindMatching(U9BomQueryResult result, U9BomWriteCommand command)
+    {
+        var matches = result.Boms.Where(bom =>
             string.Equals(bom.ItemCode, command.ItemCode, StringComparison.OrdinalIgnoreCase)
-            && string.Equals(bom.BomVersionCode, command.BomVersionCode, StringComparison.OrdinalIgnoreCase));
+            && string.Equals(bom.BomVersionCode, command.BomVersionCode, StringComparison.OrdinalIgnoreCase)).Take(2).ToArray();
+        if (matches.Length > 1) throw new PdmRuleException("U9C返回多张相同母件和版本的BOM，不能安全定位，请人工复核。");
+        return matches.FirstOrDefault();
+    }
 
     private static void ValidateAppendOnlyModification(U9BomWriteCommand command, U9BomReference current)
     {
@@ -358,6 +459,10 @@ public sealed class U9BomWriteService(
         foreach (var component in command.Components)
         {
             if (!currentBySequence.TryGetValue(component.Sequence, out var existing)) continue;
+            if (command.PreviousApprovedComponents is not null && command.ReconcileComponentTotals
+                && string.Equals(component.ItemCode, existing.ItemCode, StringComparison.OrdinalIgnoreCase)
+                && component.ParentQty == existing.ParentQty
+                && string.Equals(component.IssueUomCode, existing.IssueUomCode, StringComparison.OrdinalIgnoreCase)) continue;
             if (!SameCore(component, existing))
                 throw new PdmRuleException($"U9C A1的原有项次{component.Sequence}不能修改料号、用量、单位或母件底数；请保留原行并新增项次。");
         }
@@ -390,6 +495,22 @@ public sealed class U9BomWriteService(
         && expected.ParentQty == actual.ParentQty
         && string.Equals(expected.IssueUomCode, actual.IssueUomCode, StringComparison.OrdinalIgnoreCase);
 
+    private static bool SameAttributes(U9BomComponentReference expected, U9BomComponentReference actual) =>
+        expected.IsEffective == actual.IsEffective
+        && expected.ComponentType == actual.ComponentType
+        && expected.EffectiveDate?.Date == actual.EffectiveDate?.Date
+        && expected.DisableDate?.Date == actual.DisableDate?.Date
+        && (expected.ItemVersionCode ?? "") == (actual.ItemVersionCode ?? "")
+        && (expected.Remark ?? "") == (actual.Remark ?? "")
+        && (expected.ProjectMapNum ?? "") == (actual.ProjectMapNum ?? "")
+        && expected.IssueStyle == actual.IssueStyle
+        && expected.SupplyStyle == actual.SupplyStyle
+        && expected.IsPhantomPart == actual.IsPhantomPart
+        && expected.UsageQtyType == actual.UsageQtyType
+        && expected.IsSpecialUseItem == actual.IsSpecialUseItem
+        && expected.IsIssueOrgFixed == actual.IsIssueOrgFixed
+        && string.Equals(expected.IssueOrgCode, actual.IssueOrgCode, StringComparison.OrdinalIgnoreCase);
+
     private static string DescribeComponents(IEnumerable<U9BomComponentCommand> components) =>
         string.Join(",", components.Select(component =>
             $"{component.Sequence}/{component.ItemCode}/{component.UsageQty.ToString(CultureInfo.InvariantCulture)}/{component.IssueUomCode}/{component.ParentQty.ToString(CultureInfo.InvariantCulture)}"));
@@ -405,7 +526,7 @@ public sealed class U9BomWriteService(
     {
         var row = new Dictionary<string, object?>
         {
-            ["BOMComponents"] = BuildComponents(command, current),
+            ["BOMComponents"] = BuildComponents(command, current, organizationCode),
             ["ItemMaster"] = Archive(command.ItemCode),
             ["BOMVersionCode"] = command.BomVersionCode,
             ["AlternateType"] = 0,
@@ -428,6 +549,10 @@ public sealed class U9BomWriteService(
         };
         if (command.Operation == U9BomWriteOperation.Modify)
         {
+            var existing = FindMatching(current, command)!;
+            row["Status"] = existing.Status ?? throw new PdmRuleException("U9C BOM缺少审核状态，不能安全修改。");
+            row["EffectiveDate"] = existing.EffectiveDate?.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture) ?? row["EffectiveDate"];
+            row["DisableDate"] = existing.DisableDate?.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture) ?? row["DisableDate"];
             row["BOMMasterChangeDTOList"] = new[]
             {
                 Change("Explain", AddOwnershipStamp(command.Explain, command.ItemCode, command.BomVersionCode))
@@ -438,21 +563,59 @@ public sealed class U9BomWriteService(
 
     private static IReadOnlyList<Dictionary<string, object?>> BuildComponents(
         U9BomWriteCommand command,
-        U9BomQueryResult current)
+        U9BomQueryResult current, string organizationCode)
     {
         if (command.Operation == U9BomWriteOperation.Create)
-            return command.Components.Select(BuildComponent).ToArray();
+            return command.Components.Select(component => BuildComponent(component, organizationCode)).ToArray();
         var existingSequences = FindMatching(current, command)?.Components
             .Where(component => component.IsDelete != true && component.Sequence is not null)
             .Select(component => component.Sequence!.Value)
             .ToHashSet() ?? [];
-        return command.Components
-            .Where(component => !existingSequences.Contains(component.Sequence))
-            .Select(BuildComponent)
-            .ToArray();
+        return command.Components.Where(component => !existingSequences.Contains(component.Sequence)
+            || component.IsDelete || !FindMatching(current, command)!.Components.Any(row => SameCore(component, row))).Select(component =>
+        {
+            if (!existingSequences.Contains(component.Sequence)) return BuildComponent(component, organizationCode);
+            var previous = FindMatching(current, command)!.Components.Single(row => row.Sequence == component.Sequence && row.IsDelete != true);
+            var row = BuildComponent(component with
+            {
+                UsageQty = component.IsDelete ? previous.UsageQty ?? throw new PdmRuleException("待删除子件缺少原数量。") : component.UsageQty,
+                IsEffective = previous.IsEffective ?? throw new PdmRuleException($"子件{component.Sequence}缺少有效状态，不能安全修改。"),
+                ItemVersionCode = previous.ItemVersionCode,
+                EffectiveDate = previous.EffectiveDate is { } effective ? DateOnly.FromDateTime(effective.DateTime) : component.EffectiveDate,
+                DisableDate = previous.DisableDate is { } disable ? DateOnly.FromDateTime(disable.DateTime) : component.DisableDate,
+                Remark = previous.Remark,
+                ComponentType = previous.ComponentType ?? component.ComponentType,
+                IssueStyle = previous.IssueStyle ?? component.IssueStyle,
+                SupplyStyle = previous.SupplyStyle ?? component.SupplyStyle,
+                IsPhantomPart = previous.IsPhantomPart ?? component.IsPhantomPart
+            }, organizationCode);
+            row["ProjectMapNum"] = previous.ProjectMapNum ?? string.Empty;
+            // Existing rows are not a historical-data migration; preserve their original usage type.
+            row["UsageQtyType"] = previous.UsageQtyType
+                ?? throw new PdmRuleException($"子件{component.Sequence}缺少用量类型，不能安全修改。");
+            row["IsSpecialUseItem"] = previous.IsSpecialUseItem
+                ?? throw new PdmRuleException($"子件{component.Sequence}缺少专项控制状态，不能安全修改。");
+            row["IsIssueOrgFixed"] = previous.IsIssueOrgFixed
+                ?? throw new PdmRuleException($"子件{component.Sequence}缺少特定供应组织状态，不能安全修改。");
+            if (string.IsNullOrWhiteSpace(previous.IssueOrgCode)) row.Remove("IssueOrg");
+            else row["IssueOrg"] = Archive(previous.IssueOrgCode);
+            if (!component.IsDelete) row["BOMComponentChangeDTOList"] = new[] { Change("UsageQty", FormatQuantity(component.UsageQty)) };
+            return row;
+        }).ToArray();
     }
 
-    private static Dictionary<string, object?> BuildComponent(U9BomComponentCommand component) => new()
+    private static IReadOnlyList<U9BomComponentChange> Changes(U9BomWriteCommand command, U9BomQueryResult current)
+    {
+        var existing = FindMatching(current, command)?.Components ?? [];
+        return command.Components.Where(component => component.IsDelete || !existing.Any(row => row.IsDelete != true && SameCore(component, row))).Select(component =>
+        {
+            var previous = existing.FirstOrDefault(row => row.Sequence == component.Sequence && row.IsDelete != true);
+            return new U9BomComponentChange(component.Sequence, component.ItemCode,
+                component.IsDelete ? "删除" : previous is null ? "新增" : "修改", previous?.UsageQty ?? 0, component.IsDelete ? 0 : component.UsageQty);
+        }).ToArray();
+    }
+
+    private static Dictionary<string, object?> BuildComponent(U9BomComponentCommand component, string organizationCode) => new()
         {
             ["Sequence"] = component.Sequence,
             ["ItemMaster"] = Archive(component.ItemCode),
@@ -465,7 +628,10 @@ public sealed class U9BomWriteService(
             ["IssueStyle"] = component.IssueStyle,
             ["SupplyStyle"] = component.SupplyStyle,
             ["IsPhantomPart"] = component.IsPhantomPart,
-            ["UsageQtyType"] = 0,
+            ["UsageQtyType"] = 1,
+            ["IsSpecialUseItem"] = true,
+            ["IsIssueOrgFixed"] = true,
+            ["IssueOrg"] = Archive(organizationCode),
             ["UsageQty"] = component.UsageQty,
             ["IssueUOM"] = Archive(component.IssueUomCode),
             ["ParentQty"] = component.ParentQty,
@@ -500,8 +666,22 @@ public sealed class U9BomWriteService(
                     component.Sequence,
                     component.ItemCode,
                     component.UsageQty,
+                    component.UsageQtyType,
+                    component.IsSpecialUseItem,
+                    component.IsIssueOrgFixed,
+                    component.IssueOrgCode,
                     component.IssueUomCode,
                     component.ParentQty,
+                    component.IsEffective,
+                    component.EffectiveDate,
+                    component.DisableDate,
+                    component.ItemVersionCode,
+                    component.Remark,
+                    component.ProjectMapNum,
+                    component.ComponentType,
+                    component.IssueStyle,
+                    component.SupplyStyle,
+                    component.IsPhantomPart,
                     component.IsDelete
                 })
             });

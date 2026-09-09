@@ -1,11 +1,11 @@
 <script setup lang="ts">
-import { Boxes, ClipboardList, FileClock, FolderOpen, FolderTree, LayoutDashboard, PackageCheck, Search } from '@lucide/vue'
+import { Boxes, ClipboardList, FileClock, FolderOpen, FolderTree, LayoutDashboard, PackageCheck, Search, ShoppingCart } from '@lucide/vue'
 import { ElMessageBox } from 'element-plus'
 import { computed, ref, watch } from 'vue'
 import type { ProjectSummary } from '../types'
 import { useUserDisplayName } from '../userDisplay'
 
-export type ProjectTab = 'overview' | 'files' | 'documents' | 'bom' | 'versions' | 'release' | 'records'
+export type ProjectTab = 'overview' | 'files' | 'documents' | 'bom' | 'versions' | 'release' | 'procurement' | 'records'
 
 const props = defineProps<{ project: ProjectSummary; projects: ProjectSummary[]; activeTab: ProjectTab; activeProjectDocumentStatus?: string; activeDocumentCounts?: { all: number; model: number; drawing: number }; currentUsername?: string; switchingProjectId?: string }>()
 const emit = defineEmits<{ back: []; switch: [projectId: string]; tab: [tab: ProjectTab] }>()
@@ -21,6 +21,7 @@ const tabs = [
   { key: 'documents', label: '图档', icon: FolderTree },
   { key: 'bom', label: 'BOM', icon: Boxes },
   { key: 'release', label: '发布', icon: PackageCheck },
+  { key: 'procurement', label: '备料', icon: ShoppingCart },
   { key: 'versions', label: '版本', icon: FileClock },
   { key: 'records', label: '记录', icon: ClipboardList },
 ] satisfies Array<{ key: ProjectTab; label: string; icon: typeof LayoutDashboard }>

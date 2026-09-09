@@ -1,5 +1,6 @@
 import { flushPromises, mount } from '@vue/test-utils'
-import ElementPlus, { ElMessage, ElMessageBox } from 'element-plus'
+import { ElMessage } from '../src/statusMessage'
+import ElementPlus, { ElMessageBox } from 'element-plus'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import MaterialManagement from '../src/components/MaterialManagement.vue'
 import type { PdmMaterial } from '../src/types'
@@ -139,16 +140,21 @@ describe('MaterialManagement', () => {
     wrapper.unmount()
   })
 
-  it('queries one material inventory in place without leaving the material master tab', async () => {
+  it.each([
+    [2.5, 3, '6'],
+    [2.4, 3, '5'],
+    [0, 0, '0'],
+    [1000, 234, '1,234'],
+  ])('queries inventory in place and displays the sum of %s and %s as integer %s', async (firstQuantity, nextQuantity, expected) => {
     api.refreshMaterialInventory.mockResolvedValue({
-      items: [{ materialCode: 'EL-001', stockQuantity: 2.5, refreshedAt: '2026-09-05T10:00:00Z' }],
+      items: [{ materialCode: 'EL-001', stockQuantity: firstQuantity, refreshedAt: '2026-09-05T10:00:00Z' }],
       total: 2,
       page: 1,
       pageSize: 50,
       lastSuccessfulRefreshAt: '2026-09-05T10:00:00Z',
     })
     api.listMaterialInventory.mockImplementation(async filters => filters.materialCode === 'EL-001' && filters.page === 2
-      ? { items: [{ materialCode: 'EL-001', stockQuantity: 3, refreshedAt: '2026-09-05T10:00:00Z' }], total: 2, page: 2, pageSize: 200, lastSuccessfulRefreshAt: '2026-09-05T10:00:00Z' }
+      ? { items: [{ materialCode: 'EL-001', stockQuantity: nextQuantity, refreshedAt: '2026-09-05T10:00:00Z' }], total: 2, page: 2, pageSize: 200, lastSuccessfulRefreshAt: '2026-09-05T10:00:00Z' }
       : { items: [], total: 0, page: 1, pageSize: 50, lastSuccessfulRefreshAt: null })
     const wrapper = mount(MaterialManagement, {
       props: { token: 'token', canEdit: true, canApprove: true, canManageIntegration: false },
@@ -163,7 +169,7 @@ describe('MaterialManagement', () => {
 
     expect(api.refreshMaterialInventory).toHaveBeenCalledWith('EL-001', 'token')
     expect(api.listMaterialInventory).toHaveBeenCalledWith({ materialCode: 'EL-001', positiveStockOnly: false, page: 2, pageSize: 200 }, 'token')
-    expect(queryButton.text()).toBe('5.50')
+    expect(queryButton.text()).toBe(expected)
     expect(wrapper.get('[role="tab"][aria-selected="true"]').text()).toContain('料品主档')
   })
 
@@ -479,8 +485,13 @@ describe('MaterialManagement', () => {
     expect(pendingTable.text()).toContain('待审批气缸')
     expect(pendingTable.text()).not.toContain('已批准主BOM')
     expect(pendingTable.findAllComponents({ name: 'ElTableColumn' }).some((column: { props: (name: string) => unknown }) => column.props('type') === 'selection')).toBe(true)
-    expect(historyTable.text()).toContain('已批准主BOM')
-    expect(historyTable.text()).toContain('已退回电气BOM')
+    expect(historyTable.text()).toContain('03020005424')
+    expect(historyTable.text()).toContain('已退回')
+    expect(historyTable.findAllComponents({ name: 'ElTableColumn' }).map((column: { props: (name: string) => unknown }) => column.props('label')))
+      .toEqual(['申请类型', '来源项目', '申请人', '申请时间', '状态', '审批料号', '审批人', '退回原因'])
+    for (const label of ['BOM层级', '料号分类', '申请对象']) {
+      expect(pendingTable.findAllComponents({ name: 'ElTableColumn' }).some((column: { props: (name: string) => unknown }) => column.props('label') === label)).toBe(true)
+    }
     expect(historyTable.text()).not.toContain('待审批气缸')
     expect(historyTable.findAllComponents({ name: 'ElTableColumn' }).some((column: { props: (name: string) => unknown }) => column.props('type') === 'selection')).toBe(false)
     expect(historyTable.findAll('button')).toHaveLength(0)
@@ -572,19 +583,19 @@ describe('MaterialManagement', () => {
     await flushPromises()
 
     expect(wrapper.get('.material-sync-table').text()).toContain('待同步A1 BOM')
-    expect(wrapper.get('.material-code-approval-table--history').text()).not.toContain('P700003 项目主BOM')
+    expect(wrapper.get('.material-code-approval-table--history').text()).not.toContain('03020005425')
     await wrapper.get('.material-sync-table').findAll('button').find(button => button.text() === '同步')!.trigger('click')
     await flushPromises()
 
     expect(api.executeMaterialSyncTask).toHaveBeenCalledWith('task-master', 'token')
-    expect(wrapper.get('.material-code-approval-table--history').text()).toContain('P700003 项目主BOM')
+    expect(wrapper.get('.material-code-approval-table--history').text()).toContain('03020005425')
     expect(wrapper.get('.material-sync-feedback').text()).toContain('同步完成')
     expect(wrapper.get('.material-sync-feedback').text()).toContain('料号审批与U9C同步流程已完成')
     expect(wrapper.get('.material-approval-feedback').text()).toContain('暂无结果')
     confirm.mockRestore()
   })
 
-  it('同一项目的待审批BOM料号合并显示并一次批准', async () => {
+  it('自动BOM料号不进入人工审批列表及数量，也不能被残留选择批量批准', async () => {
     const applications = [
       { id: 'master', applicationType: 'BomHeader' as const, bomItemId: null, bomHeaderKind: 'Master' as const, categoryCode: '0302', applicationName: 'P700002 项目主BOM', rowVersion: 1 },
       { id: 'standard', applicationType: 'BomHeader' as const, bomItemId: null, bomHeaderKind: 'Standard' as const, categoryCode: '0201', applicationName: 'P700002 标准件BOM', rowVersion: 2 },
@@ -608,31 +619,23 @@ describe('MaterialManagement', () => {
 
     const table = wrapper.findAllComponents({ name: 'ElTable' }).find(component => component.classes().includes('material-code-approval-table'))!
     const rows = table.findAll('.el-table__body-wrapper tbody tr')
-    expect(rows).toHaveLength(1)
-    expect(rows[0].text()).toContain('BOM料号（4项）')
-    expect(rows[0].text()).toContain('项目主BOM、标准件BOM、非标件BOM、电气BOM')
-    expect(rows[0].text()).toContain('P700002 4 个BOM料号')
-    expect(rows[0].text()).not.toContain('03020000013')
-    expect(rows[0].text()).not.toContain('02010000250')
-
-    await rows[0].findAll('button').find(button => button.text() === '批准')!.trigger('click')
+    expect(rows).toHaveLength(0)
+    expect(table.text()).not.toContain('P700002')
+    expect(wrapper.get('.material-code-approval-subtabs').text()).toContain('当前处理 0')
+    table.vm.$emit('selection-change', applications)
     await flushPromises()
-
-    expect(api.decideMaterialCodeApplication).toHaveBeenCalledTimes(4)
-    expect(api.decideMaterialCodeApplication).toHaveBeenNthCalledWith(1, 'master', 1, true, '', 'token')
-    expect(api.decideMaterialCodeApplication).toHaveBeenNthCalledWith(2, 'standard', 2, true, '', 'token')
-    expect(api.decideMaterialCodeApplication).toHaveBeenNthCalledWith(3, 'non-standard', 3, true, '', 'token')
-    expect(api.decideMaterialCodeApplication).toHaveBeenNthCalledWith(4, 'electrical', 4, true, '', 'token')
+    await wrapper.get('.material-code-approval-toolbar').findAll('button').find(button => button.text() === '批量批准')!.trigger('click')
+    await flushPromises()
+    expect(api.decideMaterialCodeApplication).not.toHaveBeenCalled()
     expect(api.continueProjectBomU9Automation).not.toHaveBeenCalled()
-    expect(wrapper.get('.material-approval-feedback').text()).toContain('审批完成')
-    expect(wrapper.get('.material-approval-feedback').text()).toContain('共 4 项，已批准 4 项，失败 0 项')
+    expect(wrapper.get('.material-approval-feedback').text()).toContain('暂无结果')
     expect(wrapper.get('.material-sync-feedback').text()).toContain('暂无结果')
   })
 
   it('可选择多项待审批申请并批量批准', async () => {
     const applications = [
       {
-        id: 'application-1', applicationType: 'BomHeader' as const, bomItemId: null, bomHeaderKind: 'Standard' as const,
+        id: 'application-1', applicationType: 'StandardBomItem' as const, bomItemId: 'item-1', bomHeaderKind: 'Standard' as const,
         projectId: 'project-1', projectCode: 'P700003', projectName: '氮检设备', categoryCode: '0201',
         applicationName: 'P700003 标准件BOM', status: 'Pending' as const, requestedBy: 'developer',
         requestedAt: '2026-08-23T14:47:51Z', createdAt: '2026-08-23T14:47:51Z', updatedAt: '2026-08-23T14:47:51Z', rowVersion: 3,
@@ -669,7 +672,7 @@ describe('MaterialManagement', () => {
 
   it('等待U9C返回正式料号时持续显示当前处理进度', async () => {
     const application = {
-      id: 'application-1', applicationType: 'BomHeader' as const, bomItemId: null, bomHeaderKind: 'Master' as const,
+      id: 'application-1', applicationType: 'StandardBomItem' as const, bomItemId: 'item-1', bomHeaderKind: 'Standard' as const,
       projectId: 'project-1', projectCode: 'P700003', projectName: '氮检设备', categoryCode: '0302',
       applicationName: 'P700003 项目主BOM', status: 'Pending' as const, requestedBy: 'developer',
       requestedAt: '2026-08-23T14:47:51Z', createdAt: '2026-08-23T14:47:51Z', updatedAt: '2026-08-23T14:47:51Z', rowVersion: 3,
@@ -696,7 +699,7 @@ describe('MaterialManagement', () => {
   it('批量退回只填写一次统一原因并逐项提交', async () => {
     const applications = [
       {
-        id: 'application-1', applicationType: 'BomHeader' as const, bomItemId: null, bomHeaderKind: 'Electrical' as const,
+        id: 'application-1', applicationType: 'StandardBomItem' as const, bomItemId: 'item-1', bomHeaderKind: 'Standard' as const,
         projectId: 'project-1', projectCode: 'P700003', projectName: '氮检设备', categoryCode: '0201',
         applicationName: 'P700003 电气BOM', status: 'Pending' as const, requestedBy: 'developer',
         requestedAt: '2026-08-23T14:47:51Z', createdAt: '2026-08-23T14:47:51Z', updatedAt: '2026-08-23T14:47:51Z', rowVersion: 7,

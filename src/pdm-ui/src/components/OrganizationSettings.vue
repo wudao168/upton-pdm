@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ElMessage } from 'element-plus'
+import { ElMessage } from '../statusMessage'
 import { computed, reactive, ref, watch } from 'vue'
 import type { OrganizationDirectory, OrganizationUnit, PdmUser, ProjectOrganization, SaveOrganizationUnitInput, SaveProjectOrganizationInput } from '../types'
 

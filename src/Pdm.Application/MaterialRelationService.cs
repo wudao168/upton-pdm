@@ -1,3 +1,6 @@
+using System.Globalization;
+using System.Security.Cryptography;
+using System.Text.Json;
 using Upton.Pdm.Domain;
 
 namespace Upton.Pdm.Application;
@@ -117,10 +120,10 @@ public sealed class MaterialRelationService(
                 if (selectedIds.Length > 0)
                     savedReviews.Add(new MaterialRelationReview(projectId, main.Id, revision.Id, group.Id,
                         MaterialRelationReviewDecision.Selected, main.Quantity, null, actor, timeProvider.GetUtcNow()));
-                else if (choice?.ConfirmNoAccessory == true)
+                else if (choice?.ConfirmNoAccessory == true || !group.IsRequired)
                     savedReviews.Add(new MaterialRelationReview(projectId, main.Id, revision.Id, group.Id,
                         MaterialRelationReviewDecision.NoAccessory, main.Quantity,
-                        string.IsNullOrWhiteSpace(choice.NoAccessoryReason) ? "工程师确认本次无需配套" : choice.NoAccessoryReason.Trim(), actor, timeProvider.GetUtcNow()));
+                        string.IsNullOrWhiteSpace(choice?.NoAccessoryReason) ? "工程师确认本次无需配套" : choice.NoAccessoryReason.Trim(), actor, timeProvider.GetUtcNow()));
                 foreach (var optionId in selectedIds)
                 {
                     var option = group.Options.FirstOrDefault(item => item.Id == optionId)
@@ -156,12 +159,13 @@ public sealed class MaterialRelationService(
         static List<BomItem> Resequence(List<BomItem> items) => items.OrderBy(item => item.IsManuallyExcluded).ThenBy(item => item.Sequence)
             .Select((item, index) => item with { Sequence = index + 1 }).ToList();
         foreach (var kind in byKind.Keys.ToArray()) byKind[kind] = Resequence(byKind[kind]);
+        var bomFingerprint = CalculateBomFingerprint(byKind.Values.SelectMany(items => items));
         var audit = new AuditEntry(Guid.NewGuid(), timeProvider.GetUtcNow(), actor, "material-relation.apply", nameof(BomItem), projectId.ToString(), $"主物料{commands.Count}项");
         await repository.ApplyBomBatchAsync(projectId, byKind[BomKind.Standard], byKind[BomKind.NonStandard], byKind[BomKind.Unclassified], byKind[BomKind.Electrical], byKind[BomKind.Virtual], [], [audit], cancellationToken);
         foreach (var entry in selectionsToSave)
             await relations.ReplaceSelectionsAsync(projectId, entry.Key, entry.Value, cancellationToken);
         foreach (var entry in reviewsToSave)
-            await relations.ReplaceReviewsAsync(projectId, entry.Key, entry.Value, cancellationToken);
+            await relations.ReplaceReviewsAsync(projectId, entry.Key, entry.Value.Select(review => review with { BomFingerprint = bomFingerprint }).ToArray(), cancellationToken);
         foreach (var kind in new[] { BomKind.Standard, BomKind.NonStandard, BomKind.Electrical })
         {
             var publishable = byKind[kind].Where(item => !item.IsManuallyExcluded && !item.IsReleaseExcluded).ToArray();
@@ -179,6 +183,7 @@ public sealed class MaterialRelationService(
     private async Task<MaterialRelationCompleteness> CalculateCompletenessAsync(Guid projectId, CancellationToken cancellationToken)
     {
         var byKind = await LoadBomByKindAsync(projectId, cancellationToken);
+        var bomFingerprint = CalculateBomFingerprint(byKind.Values.SelectMany(items => items));
         var all = byKind.Values.SelectMany(item => item).Where(IsActive).ToArray();
         var itemById = all.ToDictionary(item => item.Id);
         var templates = (await relations.ListTemplatesAsync(false, cancellationToken))
@@ -215,6 +220,11 @@ public sealed class MaterialRelationService(
                     }
                 }
                 var isComplete = status is "已选配" or "已确认无需" or "可选未选择";
+                if (isComplete && review?.BomFingerprint != bomFingerprint)
+                {
+                    isComplete = false;
+                    status = "BOM已变化或尚未核对，请重新核对";
+                }
                 var selectedAudit = linked.OrderByDescending(item => item.UpdatedAt).FirstOrDefault();
                 groupChecks.Add(new MaterialRelationGroupCheck(group.Id, group.Name, group.IsRequired, group.SelectionMode, group.MaxSelection,
                     isComplete, status, expected, actual, selected,
@@ -229,6 +239,23 @@ public sealed class MaterialRelationService(
         }
         return new MaterialRelationCompleteness(projectId, checks.All(item => item.IsComplete), checks.Count,
             checks.Sum(item => item.Groups.Count(group => !group.IsComplete)), checks);
+    }
+
+    private static string CalculateBomFingerprint(IEnumerable<BomItem> items)
+    {
+        // Only BOM content participates; loading, reconciliation timestamps and release status do not invalidate a review.
+        var content = items.OrderBy(item => item.Id).Select(item => new
+        {
+            item.Id, item.Kind, item.Sequence, item.DrawingNumber, item.Name,
+            Quantity = item.Quantity.ToString("G29", CultureInfo.InvariantCulture), item.Unit,
+            Material = item.Material ?? "", Specification = item.Specification ?? "", item.Revision,
+            Remark = item.Remark ?? "", Brand = item.Brand ?? "", SurfaceTreatment = item.SurfaceTreatment ?? "",
+            HeatTreatment = item.HeatTreatment ?? "", Weight = item.Weight ?? "",
+            item.SourceDocumentId, SourceConfiguration = item.SourceConfiguration ?? "", SourceInstancePath = item.SourceInstancePath ?? "",
+            ParentDrawingNumber = item.ParentDrawingNumber ?? "",
+            item.IsManuallyExcluded, item.IsReleaseExcluded
+        });
+        return Convert.ToHexString(SHA256.HashData(JsonSerializer.SerializeToUtf8Bytes(content)));
     }
 
     private async Task<Dictionary<BomKind, List<BomItem>>> LoadBomByKindAsync(Guid projectId, CancellationToken cancellationToken)

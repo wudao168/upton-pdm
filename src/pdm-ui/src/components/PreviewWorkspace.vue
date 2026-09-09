@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { Cloud, FileSearch, Link2, MoreHorizontal, PencilLine, Rotate3D, RotateCcw, Save, ScanSearch, Square } from '@lucide/vue'
-import { ElMessage } from 'element-plus'
+import { ElMessage } from '../statusMessage'
 import { computed, defineAsyncComponent, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { listDocumentVersions, postDesktopMessage, readDocumentPreviewFile } from '../api'
 import type { BomItem, DocumentNode, PreviewMode, SolidWorksOpenMode } from '../types'

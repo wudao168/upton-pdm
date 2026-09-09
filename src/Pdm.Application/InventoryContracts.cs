@@ -80,7 +80,10 @@ public sealed record U9InventorySnapshotRow(
     string? BinCode,
     string? BinName,
     string? StorageType,
-    DateTimeOffset RefreshedAt);
+    DateTimeOffset RefreshedAt)
+{
+    public decimal? SimilarityPercent { get; init; }
+}
 
 public sealed record U9InventorySubprojectOption(
     string ProjectCode,
@@ -107,7 +110,8 @@ public sealed record U9InventoryFilters(
     string? Subproject,
     bool PositiveStockOnly,
     int Page,
-    int PageSize);
+    int PageSize,
+    string? SimilarSpecification = null);
 
 public interface IU9InventoryRepository
 {

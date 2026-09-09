@@ -80,6 +80,7 @@ public sealed class InMemoryU9InventoryRepository(IMaterialRepository? materials
 
     public Task<U9InventoryPage> ListAsync(U9InventoryFilters filters, CancellationToken cancellationToken)
     {
+        filters = InventorySimilarity.Prepare(filters);
         lock (gate)
         {
             IEnumerable<U9InventorySnapshotRow> query = rows;
@@ -116,6 +117,8 @@ public sealed class InMemoryU9InventoryRepository(IMaterialRepository? materials
             if (!string.IsNullOrWhiteSpace(filters.Subproject)) query = query.Where(row => row.Subproject?.Contains(filters.Subproject.Trim(), StringComparison.OrdinalIgnoreCase) == true);
             if (filters.PositiveStockOnly) query = query.Where(row => row.StockQuantity > 0);
             var filtered = query.OrderBy(row => row.WarehouseName).ThenBy(row => row.MaterialCode).ToArray();
+            if (filters.SimilarSpecification is not null)
+                filtered = InventorySimilarity.Match(filtered, filters.SimilarSpecification, cancellationToken);
             var page = Math.Max(1, filters.Page);
             var pageSize = Math.Clamp(filters.PageSize, 1, 200);
             var items = filtered.Skip((page - 1) * pageSize).Take(pageSize).ToArray();

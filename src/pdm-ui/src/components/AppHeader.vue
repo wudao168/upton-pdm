@@ -1,8 +1,9 @@
 <script setup lang="ts">
 import { Bell, ChevronDown, ChevronLeft, ChevronRight, LogIn, LogOut } from '@lucide/vue'
-import { ElMessage } from 'element-plus'
+import { ElMessage } from '../statusMessage'
 import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
 import type { PdmUserProfile } from '../types'
+import GlobalStatusBar from './GlobalStatusBar.vue'
 
 type PdmTheme = 'a' | 'c' | 'o'
 
@@ -165,6 +166,7 @@ onUnmounted(() => {
     </div>
     <div class="pdm-titlebar__actions">
       <template v-if="props.userName">
+        <GlobalStatusBar :key="props.username || props.userName" />
         <time class="pdm-header-clock" :datetime="headerNow.toISOString()">{{ headerDateTime }}</time>
         <button type="button" class="pdm-header-control pdm-message-button" @click="emit('notifications')">
           <Bell :size="17" aria-hidden="true" />
@@ -190,7 +192,6 @@ onUnmounted(() => {
             </el-dropdown-menu>
           </template>
         </el-dropdown>
-        <span class="pdm-user-role">{{ roleName }}</span>
         <button type="button" class="pdm-user-profile-trigger" @click="openPersonalSettings">{{ props.userName }}</button>
         <button type="button" class="pdm-logout-button" @click="emit('logout')"><LogOut :size="16" aria-hidden="true" /><span>退出</span></button>
       </template>
@@ -205,6 +206,7 @@ onUnmounted(() => {
         <el-tab-pane label="个人资料" name="profile">
           <el-form label-width="82px" class="personal-settings-form">
             <el-form-item label="姓名"><el-input :model-value="props.profile?.displayName || props.userName || props.username" disabled /></el-form-item>
+            <el-form-item label="角色"><el-input :model-value="roleName" disabled /></el-form-item>
             <el-form-item label="昵称"><el-input v-model="profileForm.nickname" maxlength="80" show-word-limit /></el-form-item>
             <el-form-item label="性别">
               <el-radio-group v-model="profileForm.gender">

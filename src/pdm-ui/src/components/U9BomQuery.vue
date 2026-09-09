@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ElMessage } from 'element-plus'
+import { ElMessage } from '../statusMessage'
 import { computed, reactive, ref } from 'vue'
 import { executeU9BomWrite, previewU9BomWrite, queryU9Bom } from '../api'
 import type { U9BomComponentInput, U9BomQueryExecution, U9BomReference, U9BomWriteInput, U9BomWriteOperation, U9BomWritePreview } from '../types'

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { Boxes, ContactRound, FolderTree, PackageCheck, UsersRound } from '@lucide/vue'
-import { ElMessage } from 'element-plus'
+import { ElMessage } from '../statusMessage'
 import { computed, reactive, ref } from 'vue'
 import type { DocumentNode, DrawingReviewPackage, DrawingReviewTarget, MainProjectStaffingInput, MaterialCodeApplication, OrganizationDirectory, PdmUser, ProjectSummary, ReleasePackageSummary, ReleaseScope } from '../types'
 

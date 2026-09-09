@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ArrowLeft, Check, Cloud, History, MessageSquareText, PencilLine, RefreshCw, RotateCcw, Search, Send, Square, X } from '@lucide/vue'
-import { ElMessage, ElMessageBox } from 'element-plus'
+import { ElMessage } from '../statusMessage'
+import { ElMessageBox } from 'element-plus'
 import { computed, ref, watch } from 'vue'
 import { postDesktopMessage } from '../api'
 import type { AddDrawingReviewMarkupInput, BomKind, DrawingReviewCandidate, DrawingReviewDecision, DrawingReviewPackage, DrawingReviewTarget } from '../types'

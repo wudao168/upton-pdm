@@ -147,6 +147,7 @@ public sealed class MySqlU9InventoryRepository : IU9InventoryRepository
 
     public async Task<U9InventoryPage> ListAsync(U9InventoryFilters filters, CancellationToken cancellationToken)
     {
+        filters = InventorySimilarity.Prepare(filters);
         await using var connection = await OpenAsync(cancellationToken);
         var page = Math.Max(1, filters.Page);
         var pageSize = Math.Clamp(filters.PageSize, 1, 200);
@@ -178,8 +179,9 @@ public sealed class MySqlU9InventoryRepository : IU9InventoryRepository
               AND (@Subproject IS NULL OR COALESCE(inventory.subproject,'') LIKE @Subproject)
               AND (@PositiveStockOnly=0 OR inventory.stock_quantity>0)
             """;
-        var total = await connection.ExecuteScalarAsync<int>(new CommandDefinition(
-            "SELECT COUNT(*) " + fromAndFilters, parameters, cancellationToken: cancellationToken));
+        var total = filters.SimilarSpecification is null
+            ? await connection.ExecuteScalarAsync<int>(new CommandDefinition(
+                "SELECT COUNT(*) " + fromAndFilters, parameters, cancellationToken: cancellationToken)) : 0;
         var rows = await connection.QueryAsync<SnapshotRow>(new CommandDefinition("""
             SELECT inventory.snapshot_run_id,inventory.organization_code,inventory.warehouse_code,inventory.warehouse_name,
                    inventory.material_code,inventory.item_name,material.brand,
@@ -189,8 +191,14 @@ public sealed class MySqlU9InventoryRepository : IU9InventoryRepository
                    inventory.unavailable_quantity,inventory.bin_code,inventory.bin_name,inventory.storage_type,inventory.refreshed_at
             """ + "\n" + fromAndFilters + "\n" + """
             ORDER BY inventory.warehouse_name,inventory.material_code,inventory.project_code,inventory.subproject,inventory.id
-            LIMIT @Offset,@PageSize
-            """, parameters, cancellationToken: cancellationToken));
+            """ + (filters.SimilarSpecification is null ? "\nLIMIT @Offset,@PageSize" : string.Empty), parameters, cancellationToken: cancellationToken));
+        var items = rows.Select(MapSnapshot).ToArray();
+        if (filters.SimilarSpecification is not null)
+        {
+            var matches = InventorySimilarity.Match(items, filters.SimilarSpecification, cancellationToken);
+            total = matches.Length;
+            items = matches.Skip((page - 1) * pageSize).Take(pageSize).ToArray();
+        }
         var lastSuccessful = await connection.ExecuteScalarAsync<DateTime?>(new CommandDefinition("""
             SELECT completed_at FROM u9_inventory_sync_run
             WHERE status='Succeeded' AND completed_at IS NOT NULL
@@ -230,7 +238,7 @@ public sealed class MySqlU9InventoryRepository : IU9InventoryRepository
         var brandNames = (await optionReader.ReadAsync<string>()).ToArray();
         var projectCodes = (await optionReader.ReadAsync<string>()).ToArray();
         var subprojectOptions = (await optionReader.ReadAsync<U9InventorySubprojectOption>()).ToArray();
-        return new U9InventoryPage(rows.Select(MapSnapshot).ToArray(), total, page, pageSize,
+        return new U9InventoryPage(items, total, page, pageSize,
             warehouseNames, brandNames, projectCodes, subprojectOptions, Utc(lastSuccessful));
     }
 

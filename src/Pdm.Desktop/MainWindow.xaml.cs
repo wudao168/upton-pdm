@@ -71,6 +71,7 @@ public partial class MainWindow : Window
     private WinForms.NotifyIcon? trayIcon;
     private string[]? pendingExternalRequestArgs;
     private bool workspaceNavigationReady;
+    private bool hideAfterStartupNavigation;
     private ClientBootstrapConfiguration bootstrapConfiguration = new();
     private bool usingServerUi;
     private bool attemptedLocalUiFallback;
@@ -96,6 +97,15 @@ public partial class MainWindow : Window
         Closing += OnClosing;
         Closed += OnClosed;
         System.Windows.Application.Current.SessionEnding += OnSessionEnding;
+
+        // A collapsed WebView2 cannot reliably initialize its composition surface.
+        // Keep it active while minimized, then move the ready client to the tray.
+        hideAfterStartupNavigation = startedWithWindows;
+        if (hideAfterStartupNavigation)
+        {
+            ShowInTaskbar = false;
+            WindowState = WindowState.Minimized;
+        }
     }
 
     private void InitializeLoadingAnimation()
@@ -195,11 +205,6 @@ public partial class MainWindow : Window
 
     private async void OnLoaded(object sender, RoutedEventArgs e)
     {
-        if (startedWithWindows)
-        {
-            HideToNotificationArea();
-        }
-
         try
         {
             bootstrapConfiguration = await ClientBootstrapLoader.LoadAsync(bootstrapLifetime.Token);
@@ -210,6 +215,10 @@ public partial class MainWindow : Window
         catch (Exception exception)
         {
             LoadingPanel.Visibility = Visibility.Collapsed;
+            if (hideAfterStartupNavigation)
+            {
+                RestoreFromNotificationArea();
+            }
             WpfMessageBox.Show(
                 this,
                 $"PLM 客户端启动失败。\n\n{exception.Message}",
@@ -248,12 +257,19 @@ public partial class MainWindow : Window
                 }
 
                 LoadingPanel.Visibility = Visibility.Collapsed;
+                hideAfterStartupNavigation = false;
+                RestoreFromNotificationArea();
                 WpfMessageBox.Show(this, $"页面加载失败：{args.WebErrorStatus}", "UPLM");
             }
             else
             {
                 LoadingPanel.Visibility = Visibility.Collapsed;
                 workspaceNavigationReady = true;
+                if (hideAfterStartupNavigation)
+                {
+                    hideAfterStartupNavigation = false;
+                    HideToNotificationArea();
+                }
                 var requestArgs = pendingExternalRequestArgs ?? startupArgs;
                 pendingExternalRequestArgs = null;
                 await DispatchLaunchRequestAsync(requestArgs);
@@ -923,7 +939,7 @@ public partial class MainWindow : Window
     private void OnWindowStateChanged(object? sender, EventArgs eventArgs)
     {
         MaximizeGlyph.Text = WindowState == WindowState.Maximized ? "\uE923" : "\uE922";
-        if (WindowState == WindowState.Minimized && !allowClose)
+        if (WindowState == WindowState.Minimized && !allowClose && !hideAfterStartupNavigation)
         {
             SuspendInteractiveSurfaces();
             ShowInTaskbar = true;
@@ -1001,6 +1017,7 @@ public partial class MainWindow : Window
 
     private void RestoreFromNotificationArea()
     {
+        hideAfterStartupNavigation = false;
         ShowInTaskbar = true;
         Show();
         WindowState = WindowState.Maximized;

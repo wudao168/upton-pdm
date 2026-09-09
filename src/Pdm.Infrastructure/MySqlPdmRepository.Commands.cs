@@ -275,7 +275,9 @@ public sealed partial class MySqlPdmRepository
                 electrical_bom_revision, mechanical_bom_snapshot_json, electrical_bom_snapshot_json,
                 standard_bom_version_id, non_standard_bom_version_id, electrical_bom_version_id,
                 standard_bom_revision, non_standard_bom_revision, standard_bom_snapshot_json, non_standard_bom_snapshot_json,
-                change_number, change_reason, effective_serial_from, effective_serial_to,
+                change_number, change_reason, change_reason_selections_json,
+                formal_supplement_policy_snapshotted, formal_supplement_maximum_count, formal_supplement_valid_days,
+                effective_serial_from, effective_serial_to,
                 published_at, published_path, publish_error, row_version, created_at)
             VALUES (
                 @Id, @ProjectId, @PackageNumber, @State, @Scope, @WorkflowCode, @WorkflowVersion,
@@ -284,7 +286,9 @@ public sealed partial class MySqlPdmRepository
                 @ElectricalBomRevision, @MechanicalBomSnapshot, @ElectricalBomSnapshot,
                 @StandardBomVersionId, @NonStandardBomVersionId, @ElectricalBomVersionId,
                 @StandardBomRevision, @NonStandardBomRevision, @StandardBomSnapshot, @NonStandardBomSnapshot,
-                @ChangeNumber, @ChangeReason, @EffectiveSerialFrom, @EffectiveSerialTo,
+                @ChangeNumber, @ChangeReason, @ChangeReasonSelections,
+                @FormalSupplementPolicySnapshotted, @FormalSupplementMaximumCount, @FormalSupplementValidDays,
+                @EffectiveSerialFrom, @EffectiveSerialTo,
                 NULL, NULL, NULL, 1, @CreatedAt)
             """,
             new
@@ -314,6 +318,10 @@ public sealed partial class MySqlPdmRepository
                 NonStandardBomSnapshot = JsonSerializer.Serialize(package.NonStandardBomSnapshot, jsonOptions),
                 package.ChangeNumber,
                 package.ChangeReason,
+                ChangeReasonSelections = JsonSerializer.Serialize(package.ChangeReasonSelections, jsonOptions),
+                package.FormalSupplementPolicySnapshotted,
+                package.FormalSupplementMaximumCount,
+                package.FormalSupplementValidDays,
                 package.EffectiveSerialFrom,
                 package.EffectiveSerialTo,
                 CreatedAt = package.CreatedAt.UtcDateTime
@@ -354,6 +362,10 @@ public sealed partial class MySqlPdmRepository
                 standard_bom_snapshot_json=@StandardBomSnapshot,
                 non_standard_bom_snapshot_json=@NonStandardBomSnapshot,
                 change_reason=@ChangeReason,
+                change_reason_selections_json=@ChangeReasonSelections,
+                formal_supplement_policy_snapshotted=@FormalSupplementPolicySnapshotted,
+                formal_supplement_maximum_count=@FormalSupplementMaximumCount,
+                formal_supplement_valid_days=@FormalSupplementValidDays,
                 whole_set_multiplier=@WholeSetMultiplier,
                 row_version=row_version+1
             WHERE id=@Id AND state='Draft'
@@ -372,6 +384,10 @@ public sealed partial class MySqlPdmRepository
                 StandardBomSnapshot = JsonSerializer.Serialize(package.StandardBomSnapshot, jsonOptions),
                 NonStandardBomSnapshot = JsonSerializer.Serialize(package.NonStandardBomSnapshot, jsonOptions),
                 package.ChangeReason,
+                ChangeReasonSelections = JsonSerializer.Serialize(package.ChangeReasonSelections, jsonOptions),
+                package.FormalSupplementPolicySnapshotted,
+                package.FormalSupplementMaximumCount,
+                package.FormalSupplementValidDays,
                 package.WholeSetMultiplier
             },
             cancellationToken: cancellationToken));

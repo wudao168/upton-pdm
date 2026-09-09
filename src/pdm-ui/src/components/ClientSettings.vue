@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { ElMessage, ElMessageBox } from 'element-plus'
+import { ElMessage } from '../statusMessage'
+import { ElMessageBox } from 'element-plus'
 import { onBeforeUnmount, onMounted, ref } from 'vue'
 import { postDesktopMessage } from '../api'
 

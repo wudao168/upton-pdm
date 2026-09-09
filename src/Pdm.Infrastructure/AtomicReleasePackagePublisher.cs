@@ -11,11 +11,13 @@ public sealed class AtomicReleasePackagePublisher : IReleasePackagePublisher
     private static readonly HashSet<string> RetiredReleaseExtensions = new(StringComparer.OrdinalIgnoreCase) { ".DWG" };
     private readonly TimeProvider timeProvider;
     private readonly IServerPreviewConverter previewConverter;
+    private readonly IPdmRepository? repository;
 
-    public AtomicReleasePackagePublisher(TimeProvider timeProvider, IServerPreviewConverter previewConverter)
+    public AtomicReleasePackagePublisher(TimeProvider timeProvider, IServerPreviewConverter previewConverter, IPdmRepository? repository = null)
     {
         this.timeProvider = timeProvider;
         this.previewConverter = previewConverter;
+        this.repository = repository;
     }
 
     public AtomicReleasePackagePublisher(TimeProvider timeProvider)
@@ -47,6 +49,13 @@ public sealed class AtomicReleasePackagePublisher : IReleasePackagePublisher
                 await File.WriteAllBytesAsync(Path.Combine(stagingDirectory, "long-lead-standard-parts-bom.xlsx"), BomWorkbook.Write(standard), cancellationToken);
                 break;
             case ReleaseScope.StandardFormal:
+                var history = repository is null ? [] : await repository.ListReleasePackagesAsync(package.ProjectId, cancellationToken);
+                if (history.Any(previous => previous.Scope == ReleaseScope.StandardLongLead
+                    && previous.State is not (ReleasePackageState.Published or ReleasePackageState.Rejected)))
+                    throw new PdmRuleException("存在尚未完成的长交期发布，请完成或撤销后再进行正式发布。");
+                var prior = BomReleaseAggregation.PriorQuantities(BomReleaseAggregation.PriorLongLeadItems(package, history));
+                await File.WriteAllBytesAsync(Path.Combine(stagingDirectory, "standard-parts-bom.xlsx"), BomWorkbook.WriteStandardRelease(standard, prior), cancellationToken);
+                break;
             case ReleaseScope.StandardSupplement:
                 await File.WriteAllBytesAsync(Path.Combine(stagingDirectory, "standard-parts-bom.xlsx"), BomWorkbook.Write(standard), cancellationToken);
                 break;
@@ -98,6 +107,10 @@ public sealed class AtomicReleasePackagePublisher : IReleasePackagePublisher
         {
             throw new PdmRuleException($"发布暂存目录不存在：{stagingDirectory}");
         }
+
+        // Refresh legacy in-review packages as well; the approved full BOM snapshot is unchanged.
+        if (package.Scope == ReleaseScope.StandardFormal)
+            await PrepareAsync(package, project, cancellationToken);
 
         var previews = previewSources.Count == 0
             ? new Dictionary<Guid, DocumentPreviewArtifact>()

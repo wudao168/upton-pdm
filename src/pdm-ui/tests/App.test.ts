@@ -54,7 +54,8 @@ function installApiMock(projectsBeforeDefault: Array<Record<string, unknown>> = 
     if (url.includes('/api/materials/page')) return materialRequestsUnauthorized
       ? json({ title: 'Unauthorized' }, 401)
       : json({ items: [], total: 0, page: 1, pageSize: 50 })
-    if (url.endsWith('/api/materials')) return materialRequestsUnauthorized ? json({ title: 'Unauthorized' }, 401) : json([])
+    if (url.endsWith('/api/materials') || url.includes('/api/materials?')) return materialRequestsUnauthorized ? json({ title: 'Unauthorized' }, 401) : json([])
+    if (url.includes('/api/engineering-kits')) return json([])
     if (url.includes('/api/material-code/applications')) return json([])
     if (url.endsWith('/api/material-category-rules')) return json([])
     if (url.endsWith('/api/material-sync-tasks')) return json([])
@@ -337,7 +338,7 @@ describe('PLM client workspace', () => {
     wrapper.unmount()
   })
 
-  it('opens the standard structure placeholder below standard materials', async () => {
+  it('opens the UKIT standard structure library below standard materials', async () => {
     const wrapper = mount(App, { attachTo: document.body, global: { plugins: [ElementPlus] } })
     await login(wrapper, false)
 
@@ -349,13 +350,9 @@ describe('PLM client workspace', () => {
     await flushPromises()
 
     expect(wrapper.get('.pdm-sidebar__nav .pdm-nav-item.is-active').text()).toContain('标准结构')
-    const standardStructurePage = wrapper.get('[aria-label="标准结构"]')
-    expect(standardStructurePage.text()).toContain('开发中')
-    const standardStructureCube = standardStructurePage.get('.pdm-standard-structure-cube')
-    expect(standardStructureCube.classes()).toContain('is-axial')
-    expect(standardStructureCube.attributes('style')).toContain('--plm-cube-box-size: 132px')
-    expect(standardStructureCube.attributes('style')).toContain('--plm-cube-size: 76px')
-    expect(standardStructurePage.findAll('.plm-cube-icon__face')).toHaveLength(6)
+    const standardStructurePage = wrapper.get('[aria-label="标准结构套件库"]')
+    expect(standardStructurePage.text()).toContain('UKIT 套件仅供 PDM 工程引用')
+    expect(standardStructurePage.text()).toContain('套件本身不进入 U9C')
     expect(window.localStorage.getItem('upton-pdm-active-navigation')).toBe('standard-structure')
     wrapper.unmount()
   })

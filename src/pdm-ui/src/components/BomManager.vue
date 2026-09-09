@@ -1,8 +1,9 @@
 <script setup lang="ts">
-import { ElMessage, ElMessageBox } from 'element-plus'
+import { ElMessage } from '../statusMessage'
+import { ElMessageBox } from 'element-plus'
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { applyForBomMaterialCodes, applyMaterialRelations, getMaterialRelationCompleteness, linkBomMaterial, listMaterials, previewBomSourceReclassification, reclassifyBomItemsFromSource, resolveBomMaterialCodes } from '../api'
-import type { BatchUpdateBomItemsInput, BomClassification, BomEmptyDeclaration, BomExportMode, BomGenerationResult, BomItem, BomKind, BomSourceReclassificationPreview, BomValidationField, BomValidationRules, BomVersion, CreateReleasePackageInput, DocumentModelDrawingRelation, DocumentNode, ManagedDocument, ManufacturingBomBaseline, MaterialCodeResolution, MaterialRelationCompleteness, MaterialRelationGroupCheck, PdmMaterial, ProjectSummary, ReleasePackageSummary, ReleaseScope, UpdateReleasePackageDraftInput } from '../types'
+import { applyForBomMaterialCodes, applyMaterialRelations, expandEngineeringKit, getMaterialRelationCompleteness, linkBomMaterial, listEngineeringKits, listMaterials, previewBomSourceReclassification, reclassifyBomItemsFromSource, resolveBomMaterialCodes } from '../api'
+import type { BatchUpdateBomItemsInput, BomClassification, BomEmptyDeclaration, BomExportMode, BomGenerationResult, BomItem, BomKind, BomSourceReclassificationPreview, BomValidationField, BomValidationRules, BomVersion, CreateReleasePackageInput, DocumentModelDrawingRelation, DocumentNode, EngineeringKit, FormalSupplementPolicies, ManagedDocument, ManufacturingBomBaseline, MaterialCodeResolution, MaterialRelationCompleteness, MaterialRelationGroupCheck, PdmMaterial, ProjectSummary, ReleasePackageSummary, ReleaseScope, UpdateReleasePackageDraftInput } from '../types'
 import { u9UnitName, u9UnitOptions } from '../u9Units'
 import BomHierarchyOverview from './BomHierarchyOverview.vue'
 import ReleaseCenter from './ReleaseCenter.vue'
@@ -37,6 +38,7 @@ const props = withDefaults(defineProps<{
   documentRelations?: DocumentModelDrawingRelation[]
   validationRules?: BomValidationRules
   releaseChangeReasonTypes?: string[]
+  formalSupplementPolicies?: FormalSupplementPolicies
   declarations: BomEmptyDeclaration[]
   versions?: BomVersion[]
   baselines?: ManufacturingBomBaseline[]
@@ -54,6 +56,7 @@ const props = withDefaults(defineProps<{
   canDecideApproval?: boolean
   canEmergencyDecide?: boolean
   requestedReleasePackageId?: string
+  requestedBomKind?: Exclude<BomKind, 'Unclassified'>
   previewReconciliation?: () => Promise<BomGenerationResult>
 }>(), {
   editable: false,
@@ -79,7 +82,8 @@ const props = withDefaults(defineProps<{
     nonStandard: ['name', 'unit', 'material', 'quantity', 'revision'],
     electrical: ['drawingNumber', 'name', 'unit', 'quantity', 'revision'],
   }),
-  releaseChangeReasonTypes: () => ['设计变更', '客户需求', '物料替代', '质量整改', '生产反馈', '其他'],
+  releaseChangeReasonTypes: () => ['正式补充', '物料问题 / 交期不满足', '物料问题 / 物料下单晚', '物料问题 / 买错物料', '物料问题 / 物料漏买', '图纸问题 / 图纸漏下', '图纸问题 / 图纸错误', '设计问题 / 设计变更', '设计问题 / 设计错误', '客户原因 / 客户需求变更', '客户原因 / 客户信息输入错误', '客户原因 / 客户未及时确认', '客户原因 / 客户未及时提供产品', '其他'],
+  formalSupplementPolicies: () => ({ standard: { maximumCount: 2, validDays: null }, electrical: { maximumCount: 2, validDays: null } }),
 })
 const emit = defineEmits<{
   save: [kind: BomKind, items: BomItem[]]
@@ -104,6 +108,8 @@ const emit = defineEmits<{
   releaseTransfer: [taskId: string, targetUsername: string, comment: string]
   releaseEmergencyDecide: [taskId: string, decision: 'Approved' | 'Rejected', reason: string]
   releaseRequestHandled: []
+  openBom: [projectId: string, kind: Exclude<BomKind, 'Unclassified'>]
+  bomRequestHandled: []
   materialCodeChanged: []
   materialRelationsApplied: []
   dirtyChange: [dirty: boolean]
@@ -150,6 +156,14 @@ const materialReferenceReason = ref('')
 const materialReferenceResults = ref<PdmMaterial[]>([])
 const materialReferencePage = ref(1)
 const materialReferencePageSize = ref(20)
+const kitReferenceOpen = ref(false)
+const kitReferenceLoading = ref(false)
+const kitReferenceApplying = ref(false)
+const kitReferenceQuery = ref('')
+const kitReferenceItems = ref<EngineeringKit[]>([])
+const selectedKitId = ref('')
+const kitReferenceQuantity = ref(1)
+const selectedOptionalKitComponentIds = ref<string[]>([])
 const duplicateMaterialChoiceOpen = ref(false)
 const duplicateMaterialChoiceCandidates = ref<PdmMaterial[]>([])
 const duplicateMaterialChoiceReason = ref('')
@@ -195,6 +209,12 @@ const summaryQuantityTargets = new Map<string, SummaryQuantityAllocation>()
 
 const stagedEditCount = computed(() => stagedEditKeys.value.size)
 const hasStagedEdits = computed(() => stagedEditCount.value > 0)
+const relationReviewComplete = computed(() => !hasStagedEdits.value && !relationLoading.value && relationCompleteness.value?.isComplete === true)
+const relationReviewTitle = computed(() => hasStagedEdits.value ? 'BOM已修改，请保存后重新核对'
+  : relationLoading.value ? '正在检查关联物料核对状态'
+    : relationReviewComplete.value ? '已核对'
+      : relationCompleteness.value ? `${relationCompleteness.value.incompleteGroupCount}项待核对` : '尚未核对，请打开关联物料进行核对')
+let relationLoadSequence = 0
 
 function createBatchDraft() {
   return {
@@ -466,6 +486,7 @@ function buildQuantityTotals(items: BomItem[]) {
 const bomQuantityTotals = computed(() => buildQuantityTotals(rows.value.filter(row => !row._quickEntry)))
 const sourceQuantityTotals = computed(() => buildQuantityTotals(sourceDataRows.value))
 const publishedQuantityItems = computed(() => {
+  if (selectedVersion.value?.state === 'Released') return selectedVersion.value.items
   if (selectedVersionId.value !== 'current' || kind.value !== 'Standard')
     return comparisonBaseline.value?.items ?? []
   return publishedStandardBaselineItems.value
@@ -490,12 +511,20 @@ const selectedStandardItemsWithoutCode = computed(() => kind.value === 'Standard
     })
   : [])
 const hasSelectedDraftRows = computed(() => selectedRows.value.some(item => !item.id))
+const hasSelectedKitRows = computed(() => selectedRows.value.some(item => !!item.engineeringKitReferenceId))
+const selectedKitReferenceIds = computed(() => [...new Set(selectedRows.value.flatMap(item => item.engineeringKitReferenceId ? [item.engineeringKitReferenceId] : []))])
 const canSetNoPublish = computed(() => selectedRows.value.length > 0
   && !hasSelectedDraftRows.value
   && selectedRows.value.every(item => !item.releaseExcluded))
 const canRestorePublish = computed(() => selectedRows.value.length > 0
   && !hasSelectedDraftRows.value
   && selectedRows.value.every(item => item.releaseExcluded))
+const filteredKitReferenceItems = computed(() => {
+  const query = kitReferenceQuery.value.trim().toLocaleLowerCase()
+  return query ? kitReferenceItems.value.filter(item => `${item.code ?? ''} ${item.name} ${item.description ?? ''}`.toLocaleLowerCase().includes(query)) : kitReferenceItems.value
+})
+const selectedEngineeringKit = computed(() => kitReferenceItems.value.find(item => item.id === selectedKitId.value))
+const selectedEngineeringKitRevision = computed(() => selectedEngineeringKit.value?.revisions.find(item => item.id === selectedEngineeringKit.value?.currentReleasedRevisionId))
 const recycleBinRows = computed(() => [...props.standard, ...props.nonStandard, ...props.unclassified, ...props.electrical]
   .filter(item => item.id && item.manuallyExcluded)
   .sort((left, right) => (right.deletedAt ?? '').localeCompare(left.deletedAt ?? '') || left.sequence - right.sequence))
@@ -517,7 +546,7 @@ const allowedReleaseScopes = computed<Array<Exclude<ReleaseScope, 'LegacyCombine
 const hasPublishedStandardFormal = computed(() => props.releasePackages.some(item => item.scope === 'StandardFormal' && item.state === '已发布'))
 const createReleaseScopes = computed<Array<Exclude<ReleaseScope, 'LegacyCombined'>>>(() =>
   kind.value === 'Standard' && hasPublishedStandardFormal.value
-    ? ['StandardLongLead', 'StandardSupplement']
+    ? ['StandardSupplement']
     : allowedReleaseScopes.value)
 const preferredReleaseScope = computed<Exclude<ReleaseScope, 'LegacyCombined'> | undefined>(() => {
   if (kind.value !== 'Standard') return undefined
@@ -694,6 +723,13 @@ function distinctFilterOptions(values: Array<string | null | undefined>) {
 
 function displayVersionLabel(label?: string) {
   return label?.replace(/-B(?=\d+$)/, '-V') ?? '—'
+}
+
+function formatBomVersionDate(version: BomVersion) {
+  const date = new Date(version.releasedAt ?? version.updatedAt ?? version.createdAt)
+  if (Number.isNaN(date.getTime())) return '—'
+  const pad = (value: number) => String(value).padStart(2, '0')
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`
 }
 
 function versionLabel(versionId: string) {
@@ -1505,6 +1541,11 @@ async function requestKind(nextKind: BomView) {
   kind.value = nextKind
 }
 
+async function openHierarchyBom(projectId: string, targetKind: Exclude<BomKind, 'Unclassified'>) {
+  if (projectId === props.projectId) await requestKind(targetKind)
+  else emit('openBom', projectId, targetKind)
+}
+
 async function requestGenerate() {
   if (!props.previewReconciliation) {
     emit('generate', false)
@@ -1625,6 +1666,99 @@ async function applyMaterialReference(material: PdmMaterial) {
   }
 }
 
+async function openKitReference() {
+  if (isSourceView.value || !props.projectId || !props.token) return
+  kitReferenceOpen.value = true
+  kitReferenceLoading.value = true
+  kitReferenceQuery.value = ''
+  selectedKitId.value = ''
+  kitReferenceQuantity.value = 1
+  selectedOptionalKitComponentIds.value = []
+  try {
+    kitReferenceItems.value = await listEngineeringKits(props.token, true)
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '套件加载失败')
+  } finally {
+    kitReferenceLoading.value = false
+  }
+}
+
+function selectEngineeringKit(kitId: string) {
+  selectedKitId.value = kitId
+  selectedOptionalKitComponentIds.value = []
+}
+
+async function applyEngineeringKit() {
+  const kit = selectedEngineeringKit.value
+  const revision = selectedEngineeringKitRevision.value
+  if (!kit || !revision || !props.token || kitReferenceQuantity.value <= 0) return
+  kitReferenceApplying.value = true
+  try {
+    const expansion = await expandEngineeringKit(kit.id, {
+      revisionId: revision.id,
+      quantity: kitReferenceQuantity.value,
+      selectedOptionalComponentIds: selectedOptionalKitComponentIds.value,
+    }, props.token)
+    const existingCodes = new Set(rows.value.filter(item => !item.manuallyExcluded).map(item => item.drawingNumber.trim().toLocaleLowerCase()).filter(Boolean))
+    const duplicates = expansion.lines.filter(item => existingCodes.has(item.materialCode.trim().toLocaleLowerCase()))
+    if (duplicates.length) {
+      await ElMessageBox.confirm(
+        `套件展开后有 ${duplicates.length} 个料号已存在于当前BOM：${duplicates.map(item => item.materialCode).join('、')}。系统将保留独立套件来源，发布时按真实料号汇总。是否确认引用？`,
+        '重复料号确认',
+        { confirmButtonText: '确认引用', cancelButtonText: '取消', type: 'warning' },
+      )
+    }
+    const added = expansion.lines.map(line => withClientKey({
+      kind: kind.value as BomKind,
+      sequence: rows.value.length + 1,
+      drawingNumber: line.materialCode,
+      name: line.materialName,
+      quantity: line.quantity,
+      unit: line.unit,
+      material: line.material,
+      specification: line.specification,
+      remark: line.remark,
+      brand: line.brand,
+      surfaceTreatment: line.surfaceTreatment,
+      weight: line.weight,
+      revision: 'W1',
+      complete: true,
+      source: 'EngineeringKit',
+      engineeringKitReferenceId: expansion.referenceId,
+      engineeringKitId: expansion.kitId,
+      engineeringKitRevisionId: expansion.revisionId,
+      engineeringKitCode: expansion.kitCode,
+      engineeringKitVersionNumber: expansion.versionNumber,
+      engineeringKitComponentId: line.kitComponentId,
+      engineeringKitComponentOptional: line.isOptional,
+    }))
+    rows.value.push(...added)
+    resequence()
+    added.forEach(row => markStagedEdits(row, ['engineeringKitReference']))
+    kitReferenceOpen.value = false
+    saveCurrentBom()
+    ElMessage.success(`已引用 ${expansion.kitCode} / V${String(expansion.versionNumber).padStart(2, '0')}，展开 ${added.length} 个真实料品`)
+  } catch (error) {
+    if (error instanceof Error && error.message) ElMessage.error(error.message)
+  } finally {
+    kitReferenceApplying.value = false
+  }
+}
+
+async function removeSelectedKitReferences() {
+  if (!selectedKitReferenceIds.value.length) return
+  const references = new Set(selectedKitReferenceIds.value)
+  try {
+    await ElMessageBox.confirm(`将移除选中引用对应的 ${references.size} 个完整套件及其全部必选/可选子料，是否继续？`, '移除套件引用', { confirmButtonText: '确认移除', cancelButtonText: '取消', type: 'warning' })
+  } catch { return }
+  const removed = rows.value.filter(item => item.engineeringKitReferenceId && references.has(item.engineeringKitReferenceId))
+  rows.value = rows.value.filter(item => !item.engineeringKitReferenceId || !references.has(item.engineeringKitReferenceId))
+  resequence()
+  selectedIds.value = []
+  removed.forEach(row => markStagedEdits(row, ['engineeringKitReference']))
+  saveCurrentBom()
+}
+
 function relationChoiceKey(mainBomItemId: string, groupId: string) {
   return `${mainBomItemId}|${groupId}`
 }
@@ -1694,15 +1828,18 @@ function initializeRelationChoices(result: MaterialRelationCompleteness) {
 
 async function loadRelationCompleteness(showError = true) {
   if (!props.projectId || !props.token) return
+  const sequence = ++relationLoadSequence
   relationLoading.value = true
   try {
     const result = await getMaterialRelationCompleteness(props.projectId, props.token)
+    if (sequence !== relationLoadSequence) return
     relationCompleteness.value = result
     initializeRelationChoices(result)
   } catch (error) {
+    if (sequence !== relationLoadSequence) return
     relationCompleteness.value = null
     if (showError) ElMessage.error(error instanceof Error ? error.message : '配套完整性加载失败')
-  } finally { relationLoading.value = false }
+  } finally { if (sequence === relationLoadSequence) relationLoading.value = false }
 }
 
 async function remindRelationsAfterBomSave() {
@@ -1994,7 +2131,16 @@ watch([() => props.projectId, () => props.projects.length], ([projectId, project
     relationDialogOpen.value = false
   }
 }, { immediate: true })
-onMounted(() => { if (props.projectId && props.token) void loadRelationCompleteness(false) })
+watch(() => props.requestedBomKind, targetKind => {
+  if (!targetKind) return
+  void requestKind(targetKind).then(() => emit('bomRequestHandled'))
+}, { immediate: true })
+watch(() => JSON.stringify([props.projectId, props.token, props.standard, props.nonStandard, props.electrical, props.unclassified]), () => {
+  ++relationLoadSequence
+  relationCompleteness.value = null
+  relationLoading.value = false
+  if (props.projectId && props.token) void loadRelationCompleteness(false)
+}, { immediate: true })
 watch(() => props.releasePackages, (packages, previousPackages) => {
   if (!releaseDrawerOpen.value) return
   if (selectedReleasePackageId.value && packages.some(item => item.id === selectedReleasePackageId.value)) return
@@ -2341,6 +2487,7 @@ async function ensurePublishedRowsAcknowledged(targetRows: EditableBomRow[], act
 
 async function openBatchEditor() {
   if (selectedIds.value.length === 0 || hasSelectedDraftRows.value) return
+  if (hasSelectedKitRows.value) return ElMessage.warning('套件展开行不能批量改写；请移除整个套件后重新引用。')
   if (!await ensurePublishedRowsAcknowledged(selectedRows.value, '批量修改')) return
   batchDraft.value = createBatchDraft()
   batchValidation.value = ''
@@ -2349,6 +2496,7 @@ async function openBatchEditor() {
 
 async function beginInlineEdit(row: EditableBomRow, field: EditableBomField) {
   if (!canEditCurrentView.value || props.pending || !row.id) return
+  if (row.engineeringKitReferenceId && field !== 'parentDrawingNumber') return ElMessage.warning(`该行由 ${row.engineeringKitCode} 套件展开，不能单独改写。`)
   if (!await ensurePublishedRowsAcknowledged([row], `修改${editableFieldLabel(field)}`)) return
   const value = field === 'kind'
     ? row.pendingClassification ? '' : rowKind(row) ?? ''
@@ -2714,11 +2862,11 @@ async function submitBatchUpdate() {
       <div v-if="isSourceView" class="pdm-bom-detail-actions">
         <div class="pdm-manager-actions">
           <span v-if="editable && reconciliationReminderCount" class="pdm-bom-reconcile-hint" role="status" aria-live="polite">机械BOM待对账 {{ reconciliationReminderCount }} 类（{{ reconciliationReminderInstanceCount }} 个实例）</span>
-          <button v-if="editable" type="button" class="pdm-secondary-action" :class="{ 'is-reconcile-needed': reconciliationReminderCount > 0 }" aria-label="查看机械BOM对账明细" :title="reconcileActionTitle" :disabled="pending || reconciliationPreviewLoading" @click="requestGenerate">{{ reconciliationPreviewLoading ? '正在生成明细…' : '查看对账明细' }}</button>
+          <button v-if="editable" type="button" class="pdm-secondary-action" :class="{ 'is-reconcile-needed': reconciliationReminderCount > 0 }" aria-label="对比源数据" :title="reconcileActionTitle" :disabled="pending || reconciliationPreviewLoading" @click="requestGenerate">{{ reconciliationPreviewLoading ? '正在生成明细…' : '对比源数据' }}</button>
         </div>
       </div>
     </div>
-    <BomHierarchyOverview v-if="project" v-show="isOverviewView" :project="project" :projects="projects" :token="token" :editable="editable" />
+    <BomHierarchyOverview v-if="project" v-show="isOverviewView" :project="project" :projects="projects" :token="token" :editable="editable" @open-bom="openHierarchyBom" />
     <template v-if="!isOverviewView">
     <section v-if="!isSourceView" class="pdm-bom-release-strip" aria-label="当前BOM审批发布">
       <div>
@@ -2741,7 +2889,7 @@ async function submitBatchUpdate() {
         <span v-if="editable && reconciliationReminderCount" class="pdm-bom-reconcile-hint" role="status" aria-live="polite">机械BOM待对账 {{ reconciliationReminderCount }} 类（{{ reconciliationReminderInstanceCount }} 个实例）</span>
         <button v-if="canEditCurrentView" type="button" class="pdm-secondary-action" @click="selectImport">导入XLSX</button>
         <button type="button" class="pdm-secondary-action" @click="openExportDialog(kind as BomKind)">导出XLSX</button>
-        <button v-if="editable" type="button" class="pdm-secondary-action" :class="{ 'is-reconcile-needed': reconciliationReminderCount > 0 }" aria-label="查看机械BOM对账明细" :title="reconcileActionTitle" :disabled="pending || reconciliationPreviewLoading" @click="requestGenerate">{{ reconciliationPreviewLoading ? '正在生成明细…' : '查看对账明细' }}</button>
+        <button v-if="editable" type="button" class="pdm-secondary-action" :class="{ 'is-reconcile-needed': reconciliationReminderCount > 0 }" aria-label="对比源数据" :title="reconcileActionTitle" :disabled="pending || reconciliationPreviewLoading" @click="requestGenerate">{{ reconciliationPreviewLoading ? '正在生成明细…' : '对比源数据' }}</button>
         <button type="button" class="pdm-secondary-action" @click="openReleaseDrawer(activeReleasePackages[0]?.id || latestPublishedPackage?.id)">{{ activeReleasePackages.length ? `处理审批 ${activeReleasePackages.length}` : '发布记录' }}</button>
         <span v-if="hasStagedEdits" class="pdm-bom-unsaved-count" role="status" aria-live="polite">未保存 {{ stagedEditCount }} 项</span>
         <button v-if="canEditCurrentView && hasStagedEdits" type="button" class="pdm-secondary-action pdm-bom-discard-action" :disabled="pending" @click="discardStagedEdits">撤销修改</button>
@@ -2779,14 +2927,16 @@ async function submitBatchUpdate() {
         </template>
         <template v-else-if="canEditCurrentView">
           <button type="button" class="pdm-secondary-action" :disabled="pending || selectedIds.length === 0 || hasSelectedDraftRows" :title="hasSelectedDraftRows ? '新增行请直接编辑表格字段' : ''" @click="openBatchEditor">{{ selectedIds.length > 1 ? '批量编辑' : '编辑' }}</button>
-          <button v-if="!isSourceView" type="button" class="pdm-primary-action pdm-bom-material-code-toolbar-action" :disabled="pending || selectedIds.length > 1 || !token || !projectId" @click="openMaterialReference">引用物料</button>
-          <button v-if="!isSourceView" type="button" class="pdm-secondary-action pdm-bom-relation-action" :class="{ 'is-warning': relationCompleteness && !relationCompleteness.isComplete, 'is-complete': relationCompleteness?.isComplete }" :disabled="pending || !token || !projectId" @click="openMaterialRelations">关联物料核对<span v-if="relationCompleteness">（{{ relationCompleteness.isComplete ? '已核对' : `${relationCompleteness.incompleteGroupCount}项待核对` }}）</span></button>
-          <button v-if="kind === 'Standard'" type="button" class="pdm-secondary-action pdm-bom-material-code-toolbar-action" :disabled="pending || materialCodeResolving || !token || !projectId" @click="resolveMissingStandardMaterialCodes(true)">核对料号</button>
+          <button v-if="!isSourceView" type="button" class="pdm-secondary-action pdm-bom-material-code-toolbar-action" :disabled="pending || selectedIds.length > 1 || !token || !projectId" @click="openMaterialReference">引用物料</button>
+          <button v-if="!isSourceView" type="button" class="pdm-secondary-action pdm-bom-material-code-toolbar-action" :disabled="pending || !token || !projectId" title="选择已发布 UKIT 套件并展开为真实料品" @click="openKitReference">引用套件</button>
+          <button v-if="!isSourceView" type="button" class="pdm-secondary-action pdm-bom-relation-action pdm-bom-material-code-toolbar-action" :class="{ 'is-warning': !relationReviewComplete, 'is-complete': relationReviewComplete }" :title="relationReviewTitle" :disabled="pending || !token || !projectId" @click="openMaterialRelations">关联物料</button>
+          <button v-if="kind === 'Standard'" type="button" class="pdm-primary-action pdm-bom-material-code-toolbar-action pdm-bom-code-check-action" :disabled="pending || materialCodeResolving || !token || !projectId" @click="resolveMissingStandardMaterialCodes(true)">核对料号</button>
           <button v-if="kind === 'Standard'" type="button" class="pdm-secondary-action pdm-bom-material-code-toolbar-action" :disabled="pending || selectedStandardItemsWithoutCode.length === 0" @click="applyForMaterialCodes([...new Set(selectedStandardItemsWithoutCode.flatMap(operationItemIds))])">申请料号</button>
           <button v-if="hasRetainableSelection" type="button" class="pdm-secondary-action" :disabled="pending || !canRetainSelected" :title="!canRetainSelected ? '仅支持同时保留人工待确认或待确认删除的物料' : ''" @click="retainSelected">{{ selectedIds.length > 1 ? '批量确认保留' : '确认保留' }}</button>
           <button type="button" class="pdm-secondary-action pdm-bom-no-publish-action" :disabled="pending || !canSetNoPublish" title="物料保留在BOM中，但不进入发布文件和U9C发布汇总" @click="setSelectedReleaseExclusion(true)">不发布</button>
           <button type="button" class="pdm-secondary-action" :disabled="pending || !canRestorePublish" title="恢复参与后续发布" @click="setSelectedReleaseExclusion(false)">恢复发布</button>
-          <button v-if="!isSourceView || canConfirmDeleteSelected" type="button" class="pdm-secondary-action is-danger" :disabled="pending || selectedIds.length === 0 || hasSelectedDraftRows" @click="deleteItems(selectedPersistedIds)">{{ canConfirmDeleteSelected ? (selectedIds.length > 1 ? '批量确认删除' : '确认删除') : (selectedIds.length > 1 ? '批量删除' : '删除') }}</button>
+          <button v-if="hasSelectedKitRows" type="button" class="pdm-secondary-action is-danger" :disabled="pending" @click="removeSelectedKitReferences">移除套件</button>
+          <button v-if="(!isSourceView || canConfirmDeleteSelected) && !hasSelectedKitRows" type="button" class="pdm-secondary-action is-danger" :disabled="pending || selectedIds.length === 0 || hasSelectedDraftRows" @click="deleteItems(selectedPersistedIds)">{{ canConfirmDeleteSelected ? (selectedIds.length > 1 ? '批量确认删除' : '确认删除') : (selectedIds.length > 1 ? '批量删除' : '删除') }}</button>
           <button v-if="kind === 'Standard' || kind === 'NonStandard'" type="button" class="pdm-secondary-action" :disabled="pending || !canRestoreSourceSelected" :title="selectedIds.length > 0 && !canRestoreSourceSelected ? '仅支持恢复有图档来源的标准件或非标件' : '恢复最新图档源属性，保留分类与排序'" @click="restoreSelectedFromSource">恢复源数据</button>
         </template>
         <button v-if="editable" type="button" class="pdm-secondary-action" :disabled="pending" @click="recycleBinOpen = true">回收站（{{ recycleBinRows.length }}）</button>
@@ -2803,8 +2953,8 @@ async function submitBatchUpdate() {
       <div v-if="!isSourceView" class="pdm-bom-version-picker">
         <label>查看版本
           <select v-model="selectedVersionId" aria-label="选择BOM版本" @change="versionSelectionTouched = true">
-            <option value="current">当前工作区{{ activeDraftVersion ? ` · ${displayVersionLabel(activeDraftVersion.label)} 工作中` : ' · 修改后创建下一工作版' }}</option>
-            <option v-for="version in categoryVersions" :key="version.id" :value="version.id">{{ displayVersionLabel(version.label) }} · {{ versionStateLabel(version.state) }}{{ version.changeNumber ? ` · ${version.changeNumber}` : '' }}</option>
+            <option value="current">当前工作区{{ activeDraftVersion ? ` · ${displayVersionLabel(activeDraftVersion.label)} 工作中 · ${formatBomVersionDate(activeDraftVersion)}` : ' · 修改后创建下一工作版' }}</option>
+            <option v-for="version in categoryVersions" :key="version.id" :value="version.id">{{ displayVersionLabel(version.label) }} · {{ versionStateLabel(version.state) }} · {{ formatBomVersionDate(version) }}</option>
           </select>
         </label>
         <span v-if="selectedVersion" class="pdm-bom-version-state" :class="`is-${selectedVersion.state.toLocaleLowerCase()}`">{{ versionStateLabel(selectedVersion.state) }} · 只读</span>
@@ -2854,7 +3004,7 @@ async function submitBatchUpdate() {
             </td>
             <td>
               <input v-if="isInlineEditing(row, 'name')" v-model="inlineValue" class="pdm-bom-inline-editor pdm-bom-name-input" aria-label="内联编辑物料名称" autofocus @blur="commitInlineEdit(row)" @keydown.enter.prevent="commitInlineEdit(row)" @keydown.esc.prevent="cancelInlineEdit">
-              <button v-else-if="row.id && canEditCurrentView" type="button" class="pdm-bom-cell-edit pdm-bom-name-value" :title="row.name || '点击编辑物料名称'" aria-label="编辑物料名称" @click="beginInlineEdit(row, 'name')">{{ displayValue(row.name) }}</button>
+              <button v-else-if="row.id && canEditCurrentView" type="button" class="pdm-bom-cell-edit pdm-bom-name-value" :title="row.engineeringKitReferenceId ? `${row.engineeringKitCode} / V${String(row.engineeringKitVersionNumber).padStart(2, '0')} · ${row.engineeringKitComponentOptional ? '可选子料' : '必选子料'}` : row.name || '点击编辑物料名称'" aria-label="编辑物料名称" @click="beginInlineEdit(row, 'name')"><span v-if="row.engineeringKitReferenceId" class="pdm-bom-kit-chip">{{ row.engineeringKitCode }}</span>{{ displayValue(row.name) }}</button>
               <input v-else-if="canEditCurrentView && !isSourceView" v-model.trim="row.name" class="pdm-bom-name-input" required aria-label="物料名称" :title="row.name">
               <span v-else class="pdm-bom-cell-value pdm-bom-name-value" :title="row.name">{{ displayValue(row.name) }}</span>
             </td>
@@ -3002,6 +3152,24 @@ async function submitBatchUpdate() {
         </section>
       </div>
     </Teleport>
+
+    <div v-if="kitReferenceOpen" class="pdm-dialog-backdrop" @click.self="kitReferenceOpen = false">
+      <section class="pdm-material-reference-dialog pdm-kit-reference-dialog" role="dialog" aria-modal="true" aria-labelledby="pdm-kit-reference-title">
+        <header><div><h3 id="pdm-kit-reference-title">引用 UKIT 套件</h3><p>套件本身不会进入 U9C；确认后只把必选和已勾选的可选子料展开到当前BOM。</p></div><button type="button" class="pdm-icon-button" aria-label="关闭套件引用" @click="kitReferenceOpen = false">×</button></header>
+        <div class="pdm-material-reference-search"><input v-model.trim="kitReferenceQuery" type="search" aria-label="搜索套件" placeholder="搜索 UKIT 编码或名称"><label class="pdm-kit-quantity">套件数量<input v-model.number="kitReferenceQuantity" type="number" min="0.0001" step="1" aria-label="套件数量"></label></div>
+        <div class="pdm-kit-reference-body">
+          <div class="pdm-kit-reference-list pdm-table-scroll">
+            <table class="pdm-edit-table"><thead><tr><th>套件编码</th><th>名称</th><th>版本</th><th>子料</th></tr></thead><tbody><tr v-for="kitItem in filteredKitReferenceItems" :key="kitItem.id" :class="{ 'is-selected': selectedKitId === kitItem.id }" @click="selectEngineeringKit(kitItem.id)"><td><strong>{{ kitItem.code }}</strong></td><td>{{ kitItem.name }}</td><td>V{{ String(kitItem.revisions.find(item => item.id === kitItem.currentReleasedRevisionId)?.versionNumber).padStart(2, '0') }}</td><td>{{ kitItem.revisions.find(item => item.id === kitItem.currentReleasedRevisionId)?.components.length ?? 0 }}</td></tr><tr v-if="!kitReferenceLoading && !filteredKitReferenceItems.length"><td colspan="4" class="pdm-empty-info">暂无已发布套件。</td></tr></tbody></table>
+          </div>
+          <div class="pdm-kit-component-options">
+            <h4>{{ selectedEngineeringKit ? `${selectedEngineeringKit.code} · ${selectedEngineeringKit.name}` : '请选择套件' }}</h4>
+            <p v-if="selectedEngineeringKitRevision">固定引用 V{{ String(selectedEngineeringKitRevision.versionNumber).padStart(2, '0') }}；可选子料默认不选。</p>
+            <label v-for="component in selectedEngineeringKitRevision?.components ?? []" :key="component.id" :class="{ 'is-required': !component.isOptional }"><input v-if="component.isOptional" v-model="selectedOptionalKitComponentIds" type="checkbox" :value="component.id"><input v-else type="checkbox" checked disabled><span><strong>{{ component.materialCode }} · {{ component.materialName }}</strong><small>{{ component.quantity }} {{ u9UnitName(component.unit) }} / 套 · {{ component.isOptional ? '可选' : '必选' }}</small></span></label>
+          </div>
+        </div>
+        <footer><button type="button" class="pdm-secondary-action" @click="kitReferenceOpen = false">取消</button><button type="button" class="pdm-primary-action" :disabled="kitReferenceApplying || !selectedEngineeringKitRevision || kitReferenceQuantity <= 0" @click="applyEngineeringKit">{{ kitReferenceApplying ? '展开中…' : '确认引用并展开' }}</button></footer>
+      </section>
+    </div>
 
     <div v-if="materialReferenceOpen" class="pdm-dialog-backdrop" @click.self="materialReferenceOpen = false">
       <section class="pdm-bom-batch-dialog pdm-material-reference-dialog" role="dialog" aria-modal="true" aria-labelledby="pdm-material-reference-title">
@@ -3193,6 +3361,8 @@ async function submitBatchUpdate() {
           :allowed-scopes="createReleaseScopes"
           :preferred-scope="preferredReleaseScope"
           :change-reason-types="releaseChangeReasonTypes"
+          :formal-supplement-policies="formalSupplementPolicies"
+          :release-packages="releasePackages"
           :long-lead-published-items="publishedLongLeadItems"
           :previous-version-items="previousReleaseVersionItems"
           @create="emit('releaseCreate', $event)"
@@ -3228,9 +3398,8 @@ async function submitBatchUpdate() {
 .pdm-bom-manager-panel :deep(.pdm-bom-quantity-audit),.pdm-bom-manager-panel :deep(.pdm-bom-quantity-reference){text-align:center;vertical-align:middle;white-space:nowrap}.pdm-bom-manager-panel :deep(.pdm-bom-quantity-reference){overflow:hidden;text-overflow:ellipsis}.pdm-bom-manager-panel :deep(.pdm-bom-quantity-reference-line){display:inline-flex;max-width:100%;align-items:center;justify-content:center;gap:8px}.pdm-bom-manager-panel :deep(.pdm-bom-quantity-reference span){display:inline}.pdm-bom-manager-panel :deep(.pdm-bom-quantity-reference .is-published){color:var(--pdm-green);font-weight:700}.pdm-bom-manager-panel :deep(.pdm-bom-quantity-reference .is-total-source-mismatch){color:var(--pdm-orange);font-weight:700}.pdm-bom-discard-action{border-color:var(--pdm-orange);background:var(--pdm-orange-soft);color:var(--pdm-orange)}
 .pdm-bom-display-control{display:flex;align-items:center;gap:3px;margin-left:auto;padding:2px 3px;border:1px solid var(--pdm-border);border-radius:6px;background:#fff;white-space:nowrap}.pdm-bom-display-control>span{padding:0 4px;color:var(--pdm-muted);font-size:11px}.pdm-bom-display-control button{min-width:42px;height:24px;padding:0 8px;border:0;border-radius:4px;background:transparent;color:var(--pdm-muted);cursor:pointer}.pdm-bom-display-control button.is-active{background:var(--pdm-theme-accent-soft);color:var(--pdm-theme-accent);font-weight:700}.pdm-bom-display-control small{padding:0 5px;color:var(--pdm-muted);font-size:11px}.pdm-bom-structure-code-cell{white-space:nowrap}.pdm-bom-structure-indent{display:inline-flex;align-items:center;margin-left:calc(var(--pdm-bom-depth) * 15px);margin-right:3px;vertical-align:middle}.pdm-bom-structure-toggle,.pdm-bom-structure-spacer{display:inline-grid;width:18px;height:18px;place-items:center}.pdm-bom-structure-toggle{padding:0;border:1px solid var(--pdm-theme-accent-border);border-radius:3px;background:var(--pdm-theme-accent-soft);color:var(--pdm-theme-accent);font-size:13px;line-height:16px;cursor:pointer}.pdm-bom-structure-spacer::before{content:'·';color:#94a3b8}.pdm-bom-structure-instance{color:var(--pdm-theme-accent);font-weight:700}.pdm-bom-structure-summary{padding:8px 10px;border-top:1px solid var(--pdm-border);color:var(--pdm-muted);font-size:11px;text-align:right}
 .pdm-bom-model-value{display:flex;min-width:0;align-items:center;gap:3px}.pdm-bom-model-value>:not(.pdm-bom-drawing-name-warning){min-width:0;flex:1}.pdm-bom-drawing-name-warning{display:inline-flex;flex:0 0 auto;align-items:center;justify-content:center;color:#d97706;font-size:13px;line-height:1;cursor:default}.pdm-bom-pagination{display:flex;align-items:center;justify-content:flex-end;gap:8px;padding:8px 10px;color:var(--pdm-muted);font-size:11px}.pdm-bom-pagination select{height:28px;padding:0 24px 0 8px;border:1px solid var(--pdm-border);border-radius:5px;background:#fff;color:var(--pdm-text)}.pdm-bom-pagination .pdm-secondary-action{width:28px;min-width:28px;height:28px;min-height:28px;padding:0}
-.pdm-bom-manager-panel :deep(.pdm-bom-table tbody tr:is(.is-data-exception,.is-reconciliation-issue)>td){background:#fffbeb}.pdm-bom-manager-panel :deep(.pdm-bom-table tbody tr:is(.is-data-exception,.is-reconciliation-issue):hover>td){background:#fef3c7}
-.pdm-bom-manager-panel :deep(.pdm-bom-table tbody tr.is-release-excluded:not(.is-data-exception):not(.is-reconciliation-issue)>td){background:#f1f5f9;color:#64748b}.pdm-bom-manager-panel :deep(.pdm-bom-table tbody tr.is-release-excluded:not(.is-data-exception):not(.is-reconciliation-issue):hover>td){background:#e2e8f0}.pdm-bom-manager-panel :deep(.pdm-bom-data-status.is-release-excluded){background:#e2e8f0;color:#475569}.pdm-bom-no-publish-action{border-color:#94a3b8;color:#475569}
-.pdm-bom-manager-panel :deep(.pdm-bom-table tbody tr.is-release-unchanged:not(.is-data-exception):not(.is-reconciliation-issue)>td){background:#f0fdf4}.pdm-bom-manager-panel :deep(.pdm-bom-table tbody tr.is-release-unchanged:not(.is-data-exception):not(.is-reconciliation-issue):hover>td){background:#dcfce7}.pdm-bom-manager-panel :deep(.pdm-bom-table tbody tr.is-release-added:not(.is-data-exception):not(.is-reconciliation-issue)>td){background:#eff6ff}.pdm-bom-manager-panel :deep(.pdm-bom-table tbody tr.is-release-added:not(.is-data-exception):not(.is-reconciliation-issue):hover>td){background:#dbeafe}.pdm-bom-manager-panel :deep(.pdm-bom-table tbody tr.is-release-modified:not(.is-data-exception):not(.is-reconciliation-issue)>td){background:#fff7ed}.pdm-bom-manager-panel :deep(.pdm-bom-table tbody tr.is-release-modified:not(.is-data-exception):not(.is-reconciliation-issue):hover>td){background:#ffedd5}
+.pdm-bom-manager-panel :deep(.pdm-bom-table tbody tr.is-release-excluded>td){background:#f1f5f9;color:#64748b}.pdm-bom-manager-panel :deep(.pdm-bom-table tbody tr.is-release-excluded:hover>td){background:#e2e8f0}.pdm-bom-manager-panel :deep(.pdm-bom-data-status.is-release-excluded){background:#e2e8f0;color:#475569}.pdm-bom-no-publish-action{border-color:#94a3b8;color:#475569}
+.pdm-bom-manager-panel :deep(.pdm-bom-table tbody tr.is-release-unchanged>.pdm-bom-quantity-reference){background:#f0fdf4}.pdm-bom-manager-panel :deep(.pdm-bom-table tbody tr.is-release-added>td){background:#eff6ff}.pdm-bom-manager-panel :deep(.pdm-bom-table tbody tr.is-release-added:hover>td){background:#dbeafe}.pdm-bom-manager-panel :deep(.pdm-bom-table tbody tr.is-release-modified>td){background:#fff7ed}.pdm-bom-manager-panel :deep(.pdm-bom-table tbody tr.is-release-modified:hover>td){background:#ffedd5}
 .pdm-bom-comparison-filters{display:flex;align-items:center;gap:5px;flex-wrap:wrap}.pdm-bom-comparison-filters button{min-height:24px;padding:2px 8px;border:1px solid var(--pdm-border);border-radius:999px;background:#fff;color:var(--pdm-muted);font-size:10px;cursor:pointer}.pdm-bom-comparison-filters button.is-active{border-color:var(--pdm-blue);box-shadow:0 0 0 1px var(--pdm-blue);color:var(--pdm-text);font-weight:700}.pdm-bom-comparison-filters button.is-released{background:#f0fdf4;color:#15803d}.pdm-bom-comparison-filters button.is-added{background:#eff6ff;color:#2563eb}.pdm-bom-comparison-filters button.is-modified{background:#fff7ed;color:#c2410c}.pdm-bom-comparison-filters button.is-removed{background:#fef2f2;color:#b91c1c}
 .pdm-bom-release-strip{display:flex;align-items:center;gap:12px;padding:8px 11px;border:1px solid #bfdbfe;border-radius:7px;background:#eff6ff;font-size:12px;white-space:nowrap}.pdm-bom-release-strip>div{display:flex;align-items:center;gap:5px;white-space:nowrap}.pdm-bom-release-strip small,.pdm-bom-release-strip strong{font-size:12px;line-height:1.2;white-space:nowrap}.pdm-bom-release-strip small{color:var(--pdm-muted)}.pdm-bom-release-strip strong.is-active{color:#b45309}.pdm-bom-release-strip-actions{display:flex!important;align-items:center;gap:6px;margin-left:auto}.pdm-bom-release-strip-actions button{box-sizing:border-box;width:70px;min-width:70px;height:28px;min-height:28px;padding:4px 10px;font-size:12px;line-height:18px;white-space:nowrap}.pdm-bom-release-workspace{display:grid;grid-template-columns:210px minmax(0,1fr);gap:12px;min-height:100%}.pdm-bom-release-history{border:1px solid var(--pdm-border);border-radius:7px;overflow:auto;background:#fff}.pdm-bom-release-history header{position:sticky;top:0;z-index:1;display:flex;align-items:center;justify-content:space-between;gap:8px;padding:10px;border-bottom:1px solid var(--pdm-border);background:#fff}.pdm-bom-release-history header .pdm-release-new-button{flex:0 0 auto;min-height:28px;padding:4px 8px}.pdm-bom-release-history>button{display:flex;width:100%;justify-content:space-between;gap:8px;padding:10px;border:0;border-bottom:1px solid var(--pdm-border);background:#fff;text-align:left;color:var(--pdm-text)}.pdm-bom-release-history>button:hover,.pdm-bom-release-history>button.is-active{background:var(--pdm-blue-soft)}.pdm-bom-release-history>button span{display:grid;gap:3px;min-width:0}.pdm-bom-release-history>button small{overflow:hidden;text-overflow:ellipsis;color:var(--pdm-muted)}.pdm-bom-release-history>button em{font-style:normal;color:var(--pdm-blue);white-space:nowrap}.pdm-bom-release-history>p{padding:12px;color:var(--pdm-muted)}.pdm-bom-release-workspace .release-center{min-width:0;margin:0}@media(max-width:900px){.pdm-bom-release-strip{align-items:flex-start;flex-wrap:wrap}.pdm-bom-release-strip-actions{margin-left:0}.pdm-bom-release-workspace{grid-template-columns:1fr}.pdm-bom-release-history{max-height:180px}}
 .pdm-bom-release-strip{box-sizing:border-box;height:38px;min-height:38px;padding-block:4px;background:#fff}
@@ -3239,10 +3408,17 @@ async function submitBatchUpdate() {
 .pdm-reconciliation-summary{display:grid;grid-template-columns:repeat(7,minmax(88px,1fr));gap:7px}.pdm-reconciliation-summary button{display:grid;min-height:58px;place-items:center;padding:6px;border:1px solid var(--pdm-border);border-radius:7px;background:#fff;color:var(--pdm-text);cursor:pointer}.pdm-reconciliation-summary button.is-active{border-color:var(--pdm-theme-accent);box-shadow:0 0 0 1px var(--pdm-theme-accent)}.pdm-reconciliation-summary small{color:var(--pdm-muted)}.pdm-reconciliation-summary strong{font-size:18px!important}.pdm-reconciliation-summary em{color:var(--pdm-muted);font-size:10px;font-style:normal}.pdm-reconciliation-note{padding:8px 10px;border-left:3px solid var(--pdm-theme-accent);background:var(--pdm-theme-accent-soft);color:var(--pdm-muted);line-height:1.5}.pdm-reconciliation-table-wrap{min-height:0;flex:1;overflow:auto;border:1px solid var(--pdm-border);border-radius:8px}.pdm-reconciliation-table{width:100%;border-collapse:collapse;table-layout:fixed}.pdm-reconciliation-table th,.pdm-reconciliation-table td{padding:8px;border-bottom:1px solid var(--pdm-border);vertical-align:middle;text-align:center;white-space:normal;overflow-wrap:anywhere}.pdm-reconciliation-table th{position:sticky;top:0;z-index:1;background:#f8fafc}.pdm-reconciliation-table th:nth-child(1){width:220px}.pdm-reconciliation-table th:nth-child(2){width:100px}.pdm-reconciliation-table th:nth-child(5){width:64px}.pdm-reconciliation-footer{display:flex;align-items:center;justify-content:flex-end;gap:8px;padding-top:10px;border-top:1px solid var(--pdm-border)}.pdm-reconciliation-footer>span{margin-right:auto;color:var(--pdm-muted)}
 @media(max-width:900px){.pdm-bom-release-strip{height:auto}}
 @media(max-width:900px){.pdm-reconciliation-scope{grid-template-columns:1fr}.pdm-reconciliation-scope>span{display:none}.pdm-reconciliation-summary{grid-template-columns:repeat(2,minmax(100px,1fr))}}
+.pdm-bom-selection-toolbar{overflow-x:auto;grid-template-columns:auto minmax(260px,1fr) auto}
+.pdm-bom-selection-toolbar button{box-sizing:border-box;flex:0 0 70px;width:70px;min-width:70px;max-width:70px;height:28px;min-height:28px;max-height:28px;padding:0 4px;white-space:normal;line-height:12px}
+.pdm-bom-selection-toolbar .pdm-bom-relation-action.is-complete,.pdm-bom-selection-toolbar .pdm-bom-relation-action.is-complete:hover:not(:disabled){background:#16a34a;border-color:#16a34a;color:#fff}
+.pdm-bom-selection-toolbar .pdm-bom-relation-action.is-warning,.pdm-bom-selection-toolbar .pdm-bom-relation-action.is-warning:hover:not(:disabled){background:#f59e0b;border-color:#f59e0b;color:#422006}
+.pdm-bom-selection-toolbar .pdm-bom-code-check-action{background:#2563eb;border-color:#2563eb;color:#fff}
+.pdm-bom-selection-toolbar .pdm-bom-code-check-action:hover:not(:disabled){background:#1d4ed8;border-color:#1d4ed8}
 </style>
 <style scoped>
 .pdm-material-code-action{height:22px;padding:0 7px;border:1px solid var(--shell-accent-border);border-radius:5px;background:var(--pdm-blue-soft);color:var(--pdm-blue);font-size:11px;line-height:20px;white-space:nowrap;cursor:pointer}.pdm-material-code-action.is-review{border-color:#f59e0b;background:#fffbeb;color:#b45309}.pdm-material-code-state{color:#64748b;font-size:11px;white-space:nowrap}.pdm-material-code-state.is-pending{color:#b45309}
 .pdm-duplicate-material-dialog .pdm-material-reference-table table{width:100%;min-width:0;table-layout:fixed}.pdm-duplicate-material-dialog .pdm-material-reference-table :is(th,td){min-width:0;overflow:hidden;text-overflow:ellipsis}.pdm-duplicate-material-dialog .pdm-material-reference-table :is(th,td):nth-child(1){width:140px}.pdm-duplicate-material-dialog .pdm-material-reference-table :is(th,td):nth-child(2){width:160px}.pdm-duplicate-material-dialog .pdm-material-reference-table :is(th,td):nth-child(3){width:90px}.pdm-duplicate-material-dialog .pdm-material-reference-table :is(th,td):nth-child(4){width:150px}.pdm-duplicate-material-dialog .pdm-material-reference-table :is(th,td):nth-child(5){width:120px}.pdm-duplicate-material-dialog .pdm-material-reference-table :is(th,td):last-child{width:110px;min-width:110px}
 .pdm-summary-quantity-backdrop{align-items:center;justify-content:center!important;padding:16px}.pdm-summary-quantity-dialog{width:min(900px,calc(100vw - 32px));height:auto;max-height:calc(100vh - 32px);border-radius:9px;animation:none}.pdm-summary-quantity-material{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;margin:0;padding:12px 18px;border-bottom:1px solid var(--pdm-border);background:#f8fafc}.pdm-summary-quantity-material>div{min-width:0}.pdm-summary-quantity-material dt{color:var(--pdm-muted);font-size:10px}.pdm-summary-quantity-material dd{margin:4px 0 0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--pdm-text);font-weight:700}.pdm-summary-quantity-dialog .pdm-table-scroll{max-height:min(460px,calc(100vh - 300px))}.pdm-summary-quantity-dialog table{width:100%;table-layout:fixed}.pdm-summary-quantity-dialog th:first-child{width:38%}.pdm-summary-quantity-dialog th:nth-child(2){width:24%}.pdm-summary-quantity-dialog th:nth-child(3){width:14%}.pdm-summary-quantity-dialog th:nth-child(4){width:24%}.pdm-summary-quantity-dialog td{overflow:hidden;text-overflow:ellipsis}.pdm-summary-quantity-input{display:flex;min-width:0;align-items:center;gap:7px}.pdm-summary-quantity-input input{box-sizing:border-box;width:100px;height:30px;padding:4px 8px;border:1px solid var(--pdm-border);border-radius:5px;color:var(--pdm-text);text-align:right}.pdm-summary-quantity-input input:focus{border-color:var(--pdm-theme-accent);outline:2px solid var(--pdm-theme-accent-soft)}.pdm-summary-quantity-input small{color:var(--pdm-danger);font-weight:700;white-space:nowrap}.pdm-summary-quantity-dialog tr.is-summary-quantity-changed td{background:#eff6ff}.pdm-summary-quantity-dialog tr.is-summary-quantity-removed td{background:#fef2f2}.pdm-summary-quantity-dialog>footer{align-items:flex-end;flex-wrap:wrap}.pdm-summary-quantity-status{display:flex;min-width:360px;flex:1;align-items:center;gap:8px;flex-wrap:wrap}.pdm-summary-quantity-dialog>footer .pdm-summary-quantity-status span{min-width:auto;flex:0 0 auto;padding:5px 8px;border-radius:5px;background:#f8fafc;color:var(--pdm-muted);font-size:10px}.pdm-summary-quantity-status span.is-invalid{background:#fff7ed;color:#b45309}.pdm-summary-quantity-status strong{color:var(--pdm-text)}.pdm-summary-quantity-status em{width:100%;color:var(--pdm-danger);font-size:10px;font-style:normal;font-weight:700}@media(max-width:760px){.pdm-summary-quantity-material{grid-template-columns:repeat(2,minmax(0,1fr))}.pdm-summary-quantity-status{min-width:100%}}
 .pdm-bom-relation-action.is-warning{border-color:#f59e0b;background:#fffbeb;color:#b45309}.pdm-bom-relation-action.is-complete{border-color:#86efac;background:#f0fdf4;color:#15803d}.pdm-material-relation-backdrop{align-items:center;justify-content:center!important;padding:16px}.pdm-material-relation-dialog{display:flex;width:min(960px,calc(100vw - 32px));max-height:calc(100vh - 32px);flex-direction:column;overflow:hidden;border-radius:9px;background:#fff;box-shadow:0 20px 45px rgba(15,23,42,.22)}.pdm-material-relation-dialog>header{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;padding:16px 18px;border-bottom:1px solid var(--pdm-border)}.pdm-material-relation-dialog h3,.pdm-material-relation-dialog p{margin:0}.pdm-material-relation-dialog header p{margin-top:4px;color:var(--pdm-muted);line-height:1.5}.pdm-material-relation-body{display:grid;gap:12px;min-height:180px;overflow:auto;padding:16px 18px;background:#f8fafc}.pdm-material-relation-empty{display:grid;place-content:center;gap:7px;min-height:180px;text-align:center}.pdm-material-relation-empty span{color:var(--pdm-muted)}.pdm-material-relation-main{overflow:hidden;border:1px solid #f59e0b;border-radius:8px;background:#fff}.pdm-material-relation-main.is-complete{border-color:#86efac}.pdm-material-relation-main>header{display:flex;align-items:center;justify-content:space-between;gap:14px;padding:11px 13px;background:#fffbeb}.pdm-material-relation-main.is-complete>header{background:#f0fdf4}.pdm-material-relation-main>header div{display:grid;gap:3px}.pdm-material-relation-main>header span{color:var(--pdm-muted);font-size:11px}.pdm-material-relation-main>header em{color:#b45309;font-style:normal;font-weight:700}.pdm-material-relation-main.is-complete>header em{color:#15803d}.pdm-material-relation-group{display:grid;gap:9px;padding:12px 13px;border-top:1px solid var(--pdm-border)}.pdm-material-relation-group.is-incomplete{box-shadow:inset 3px 0 #f59e0b}.pdm-material-relation-group-title{display:flex;align-items:center;justify-content:space-between;gap:12px}.pdm-material-relation-group-title>div{display:flex;align-items:center;gap:8px}.pdm-material-relation-group-title span{color:var(--pdm-muted);font-size:11px}.pdm-material-relation-group-title em{padding:2px 7px;border-radius:999px;background:#f1f5f9;color:#475569;font-size:11px;font-style:normal}.pdm-material-relation-group :deep(.el-radio-group),.pdm-material-relation-group :deep(.el-checkbox-group){display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}.pdm-material-relation-group :deep(.el-radio),.pdm-material-relation-group :deep(.el-checkbox){box-sizing:border-box;width:100%;height:auto;min-height:52px;margin:0;padding:8px 10px;border:1px solid var(--pdm-border);border-radius:6px;background:#fff;white-space:normal}.pdm-material-relation-group :deep(.el-radio.is-checked),.pdm-material-relation-group :deep(.el-checkbox.is-checked){border-color:var(--pdm-theme-accent);background:var(--pdm-theme-accent-soft)}.pdm-material-relation-option{display:grid;min-width:0;gap:2px;line-height:1.35}.pdm-material-relation-option strong{display:flex;align-items:center;gap:7px}.pdm-material-relation-option i{padding:1px 6px;border-radius:999px;background:#e0f2fe;color:#0369a1;font-size:10px;font-style:normal;font-weight:600}.pdm-material-relation-option span,.pdm-material-relation-option small{overflow:hidden;text-overflow:ellipsis;color:var(--pdm-muted)}.pdm-material-relation-none-button{justify-self:start}.pdm-material-relation-no-accessory{display:grid;grid-template-columns:auto minmax(180px,1fr) auto;align-items:center;gap:9px;padding:8px 10px;border-radius:6px;background:#f1f5f9;color:#475569}.pdm-material-relation-no-accessory input{height:30px;padding:4px 8px;border:1px solid var(--pdm-border);border-radius:5px;background:#fff;color:var(--pdm-text)}.pdm-material-relation-dialog>footer{display:flex;align-items:center;justify-content:flex-end;gap:8px;padding:12px 18px;border-top:1px solid var(--pdm-border)}.pdm-material-relation-dialog>footer>span{margin-right:auto;color:var(--pdm-muted)}@media(max-width:760px){.pdm-material-relation-group :deep(.el-radio-group),.pdm-material-relation-group :deep(.el-checkbox-group){grid-template-columns:1fr}.pdm-material-relation-no-accessory{grid-template-columns:1fr}}
+.pdm-bom-kit-chip{display:inline-block;margin-right:4px;padding:1px 4px;border-radius:4px;background:#ccfbf1;color:#0f766e;font-size:9px;font-weight:700;vertical-align:middle}.pdm-kit-reference-dialog{width:min(980px,calc(100vw - 32px));height:min(680px,calc(100vh - 32px))}.pdm-kit-reference-dialog .pdm-material-reference-search{justify-content:space-between}.pdm-kit-quantity{display:flex;align-items:center;gap:7px;color:var(--pdm-muted)}.pdm-kit-quantity input{width:100px}.pdm-kit-reference-body{display:grid;min-height:0;flex:1;grid-template-columns:minmax(0,1.2fr) minmax(320px,.8fr);gap:12px;padding:0 18px 16px}.pdm-kit-reference-list{min-height:0;border:1px solid var(--pdm-border);border-radius:7px}.pdm-kit-reference-list tr{cursor:pointer}.pdm-kit-reference-list tr.is-selected td{background:var(--pdm-theme-accent-soft);color:var(--pdm-theme-accent)}.pdm-kit-component-options{min-height:0;overflow:auto;padding:12px;border:1px solid var(--pdm-border);border-radius:7px;background:#f8fafc}.pdm-kit-component-options h4,.pdm-kit-component-options p{margin:0}.pdm-kit-component-options p{margin-top:4px;color:var(--pdm-muted)}.pdm-kit-component-options>label{display:flex;margin-top:9px;padding:9px;border:1px solid var(--pdm-border);border-radius:6px;background:#fff;align-items:flex-start;gap:9px}.pdm-kit-component-options>label.is-required{border-color:#86efac;background:#f0fdf4}.pdm-kit-component-options>label span{display:grid;min-width:0;gap:3px}.pdm-kit-component-options>label small{color:var(--pdm-muted)}@media(max-width:760px){.pdm-kit-reference-body{grid-template-columns:1fr}.pdm-kit-reference-dialog{height:calc(100vh - 24px)}}
 </style>

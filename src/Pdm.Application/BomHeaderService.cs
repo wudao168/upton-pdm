@@ -17,7 +17,11 @@ public sealed record ProjectBomHeader(
     [property: JsonConverter(typeof(JsonStringEnumConverter))] MaterialCodeApplicationStatus? ApplicationStatus = null,
     Guid? ApplicationId = null,
     string? RequestedBy = null,
-    DateTimeOffset? RequestedAt = null);
+    DateTimeOffset? RequestedAt = null,
+    string? AutomaticStatus = null,
+    string? AutomaticMessage = null,
+    bool CanRetryAutomatic = false,
+    long ApplicationRowVersion = 0);
 
 public sealed record BomHeaderGenerationResult(
     Guid RootProjectId,
@@ -27,7 +31,8 @@ public sealed record BomHeaderGenerationResult(
     IReadOnlyList<ProjectBomHeader> Headers,
     int AutoApprovedCount = 0,
     int QueuedSyncCount = 0,
-    Guid? AutomaticBatchId = null);
+    Guid? AutomaticBatchId = null,
+    int QueuedApprovalCount = 0);
 
 public sealed class BomHeaderService(
     IPdmRepository repository,
@@ -41,6 +46,10 @@ public sealed class BomHeaderService(
         [ProjectBomHeaderKind.Master, ProjectBomHeaderKind.Standard, ProjectBomHeaderKind.NonStandard, ProjectBomHeaderKind.Electrical];
     private static readonly ProjectBomHeaderKind[] MasterOnly = [ProjectBomHeaderKind.Master];
     private static readonly ConcurrentDictionary<Guid, SemaphoreSlim> AutomaticApplicationLocks = new();
+    private static readonly ConcurrentDictionary<Guid, byte> RunningApplications = new();
+    private const string AutomaticFailurePrefix = "自动处理失败：";
+    // 队列标记持久化在现有工作流审计中；仅显式入队的记录可执行，历史失败不会启动即重试。
+    private const string AutomaticQueuePrefix = "自动审批后台队列：";
 
     public async Task<IReadOnlyList<ProjectBomHeader>> ListAsync(Guid projectId, string actor, UserRole role, CancellationToken cancellationToken)
     {
@@ -49,6 +58,11 @@ public sealed class BomHeaderService(
         var project = await repository.FindProjectAsync(projectId, cancellationToken) ?? throw new PdmNotFoundException("项目不存在。");
         var bindings = (await repository.ListProjectBomHeaderBindingsAsync(projectId, cancellationToken)).ToDictionary(item => item.Kind);
         var applications = (await materials.ListMaterialCodeApplicationsAsync(projectId, null, cancellationToken)).ToList();
+        var canRetry = await repository.HasUserPermissionAsync(actor, role, PermissionCodes.BomEdit, cancellationToken);
+        // 兼容旧版本仅在发布包审计中记录失败、申请仍为 Pending 的历史数据。
+        var legacyAudits = applications.Any(application => application.Status == MaterialCodeApplicationStatus.Pending
+            && string.IsNullOrWhiteSpace(application.WorkflowMessage))
+            ? await repository.ListProjectAuditAsync(projectId, 500, cancellationToken) : [];
         var result = new List<ProjectBomHeader>(AllKinds.Length);
         foreach (var kind in AllKinds)
         {
@@ -60,11 +74,17 @@ public sealed class BomHeaderService(
                 application = await CreateHeaderApplicationAsync(project, kind, material, actor, cancellationToken);
                 applications.Add(application);
             }
+            var legacyFailure = legacyAudits.FirstOrDefault(audit => audit.Action == "bom.header.application.auto-trigger-failed"
+                && application is not null && audit.OccurredAt >= application.RequestedAt
+                && (kind == ProjectBomHeaderKind.Master || audit.Detail.StartsWith($"{kind}BOM", StringComparison.Ordinal)));
+            var automatic = AutomaticState(material, application, legacyFailure?.Detail);
             result.Add(new ProjectBomHeader(
                 projectId, kind, kind == ProjectBomHeaderKind.Master ? null : ProjectBomHeaderKind.Master,
                 material?.Id, VisibleMaterialCode(material, application), material?.Name, material?.CategoryCode,
                 material?.ApprovalStatus, binding?.RowVersion ?? 0, application?.Status, application?.Id,
-                application?.RequestedBy, application?.RequestedAt));
+                application?.RequestedBy, application?.RequestedAt,
+                automatic.Status, automatic.Message, canRetry && automatic.Retry,
+                application?.RowVersion ?? 0));
         }
         return result;
     }
@@ -96,6 +116,10 @@ public sealed class BomHeaderService(
             throw new UnauthorizedAccessException("当前用户没有项目查看权限。");
 
         var rootProjectId = selectedProject.RootProjectId ?? selectedProject.Id;
+        var gate = AutomaticApplicationLocks.GetOrAdd(rootProjectId, static _ => new SemaphoreSlim(1, 1));
+        await gate.WaitAsync(cancellationToken);
+        try
+        {
         var projects = (await repository.ListProjectsForUserAsync(actor, role, cancellationToken))
             .Where(project => (project.RootProjectId ?? project.Id) == rootProjectId)
             .OrderBy(project => project.ParentProjectId is null ? 0 : 1)
@@ -146,7 +170,7 @@ public sealed class BomHeaderService(
             }
         }
 
-        var automatic = await ApproveAndQueueAsync(applicationsToApprove, actor, cancellationToken);
+        var queued = await QueueAutomaticAsync(applicationsToApprove, actor, cancellationToken);
 
         var headers = new List<ProjectBomHeader>(projects.Length * AllKinds.Length);
         foreach (var project in projects)
@@ -154,7 +178,9 @@ public sealed class BomHeaderService(
         var expectedCount = rootHasChildren ? 1 + (projects.Length - 1) * AllKinds.Length : AllKinds.Length;
         return new BomHeaderGenerationResult(
             rootProjectId, expectedCount, generatedCount, existingCount, headers,
-            automatic.ApprovedCount, automatic.QueuedCount, automatic.BatchId);
+            QueuedApprovalCount: queued);
+        }
+        finally { gate.Release(); }
     }
 
     public async Task<BomHeaderGenerationResult> EnsureApplicationsAfterBomApprovalAsync(
@@ -230,10 +256,10 @@ public sealed class BomHeaderService(
                 }
             }
 
-            var automatic = await ApproveAndQueueAsync(applicationsToApprove, actor, cancellationToken);
+            var queued = await QueueAutomaticAsync(applicationsToApprove, actor, cancellationToken);
             return new BomHeaderGenerationResult(
                 rootProjectId, expectedCount, generatedCount, existingCount, [],
-                automatic.ApprovedCount, automatic.QueuedCount, automatic.BatchId);
+                QueuedApprovalCount: queued);
         }
         finally
         {
@@ -302,6 +328,9 @@ public sealed class BomHeaderService(
         CancellationToken cancellationToken)
     {
         if (applications.Count == 0) return (0, 0, null);
+        foreach (var application in applications) RunningApplications.TryAdd(application.Id, 0);
+        try
+        {
         var approved = await materialService.AutomaticallyApproveBomHeaderApplicationsAsync(
             applications.Select(application => (application.Id, application.RowVersion)).ToArray(),
             actor,
@@ -313,7 +342,152 @@ public sealed class BomHeaderService(
             .ToArray();
         if (taskIds.Length == 0) return (approved.Count, 0, null);
         var batch = await syncBatches.CreateAutomaticAsync(taskIds, actor, cancellationToken);
+        foreach (var item in approved)
+            await materials.RecordMaterialCodeApplicationWorkflowAsync(item.Application.Id,
+                MaterialCodeWorkflowState.PendingMaterialSync, actor, timeProvider.GetUtcNow(),
+                "料号已自动批准，已进入U9C同步队列", cancellationToken);
         return (approved.Count, taskIds.Length, batch.Id);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            // 正常停服保留持久化队列，启动后从原申请继续，不依赖浏览器请求生命周期。
+            throw;
+        }
+        catch (Exception exception)
+        {
+            throw new PdmRuleException(exception.Message.StartsWith("步骤：", StringComparison.Ordinal)
+                ? exception.Message : $"步骤：加入U9C同步队列；{exception.Message}");
+        }
+        finally
+        {
+            foreach (var application in applications) RunningApplications.TryRemove(application.Id, out _);
+        }
+    }
+
+    private static (string Status, string Message, bool Retry) AutomaticState(
+        PdmMaterial? material, MaterialCodeApplication? application, string? legacyFailure)
+    {
+        if (application is null) return ("NotRequested", "待BOM发布后生成料号", false);
+        if (RunningApplications.ContainsKey(application.Id)) return ("Running", "正在自动批准并准备同步任务", false);
+        if (IsQueued(application)) return ("ApprovalQueued", "已加入自动审批后台队列，可离开页面；失败原因将在此保留", false);
+        if (application.Status == MaterialCodeApplicationStatus.Rejected)
+            return ("Rejected", application.DecisionComment ?? "申请已退回", false);
+        if (material?.U9SyncConfirmed == true) return ("Completed", "U9C正式料号已回查确认", false);
+        if (application.SyncStatus is MaterialSyncStatus.Failed or MaterialSyncStatus.NeedsReview)
+            return ("Failed", application.SyncError ?? "U9C料品同步失败，请核对后重试", true);
+        if (application.WorkflowMessage?.StartsWith(AutomaticFailurePrefix, StringComparison.Ordinal) == true)
+            return ("Failed", application.WorkflowMessage, true);
+        if (application.Status == MaterialCodeApplicationStatus.Pending)
+            return string.IsNullOrWhiteSpace(legacyFailure)
+                ? ("WaitingRetry", "申请尚未完成自动批准，未进入同步队列；请核对后重试", true)
+                : ("Failed", legacyFailure, true);
+        if (application.SyncTaskId is null)
+            return ("WaitingRetry", "自动批准后未找到同步任务，请检查处理记录", false);
+        return ("Queued", "料号已批准，等待U9C同步或回查；尚未取得正式料号", false);
+    }
+
+    public async Task<ProjectBomHeader> RetryAutomaticAsync(Guid projectId, ProjectBomHeaderKind kind,
+        Guid applicationId, long expectedRowVersion, string confirmation, string actor, UserRole role,
+        CancellationToken cancellationToken)
+    {
+        if (confirmation != "确认重试料号自动处理") throw new PdmRuleException("请确认重试料号自动处理后再执行。");
+        if (!await repository.HasUserPermissionAsync(actor, role, PermissionCodes.BomEdit, cancellationToken)
+            || !await repository.HasProjectContentReadAccessAsync(projectId, actor, role, cancellationToken))
+            throw new UnauthorizedAccessException("当前用户没有该项目的BOM料号重试权限。");
+        var project = await repository.FindProjectAsync(projectId, cancellationToken) ?? throw new PdmNotFoundException("项目不存在。");
+        var gate = AutomaticApplicationLocks.GetOrAdd(project.RootProjectId ?? project.Id, static _ => new SemaphoreSlim(1, 1));
+        if (!await gate.WaitAsync(0, cancellationToken)) throw new PdmConflictException("该项目层级正在自动处理，请勿重复重试。");
+        try
+        {
+            var application = LatestHeaderApplication(await materials.ListMaterialCodeApplicationsAsync(projectId, null, cancellationToken), kind);
+            var binding = (await repository.ListProjectBomHeaderBindingsAsync(projectId, cancellationToken)).SingleOrDefault(item => item.Kind == kind);
+            if (application is null || application.Id != applicationId || application.RowVersion != expectedRowVersion
+                || binding is null || binding.MaterialId != application.MaterialId)
+                throw new PdmConflictException("料号申请或绑定已经变化，请刷新后重试。");
+            var header = (await ListAsync(projectId, actor, role, cancellationToken)).Single(item => item.Kind == kind);
+            if (!header.CanRetryAutomatic) throw new PdmRuleException("当前申请不需要重试或正在同步，请刷新后核对。");
+            await repository.AppendAuditAsync(new AuditEntry(Guid.NewGuid(), timeProvider.GetUtcNow(), actor,
+                "bom.header.application.retry", nameof(MaterialCodeApplication), application.Id.ToString(),
+                "确认重试原BOM料号申请；复用原草稿和同步任务，不重新生成申请。"), cancellationToken);
+            await QueueAutomaticAsync([application], actor, cancellationToken);
+            return (await ListAsync(projectId, actor, role, cancellationToken)).Single(item => item.Kind == kind);
+        }
+        finally { gate.Release(); }
+    }
+
+    private static bool IsQueued(MaterialCodeApplication application) =>
+        application.WorkflowMessage?.StartsWith(AutomaticQueuePrefix, StringComparison.Ordinal) == true;
+
+    private async Task<int> QueueAutomaticAsync(IReadOnlyList<MaterialCodeApplication> applications,
+        string actor, CancellationToken cancellationToken)
+    {
+        var count = 0;
+        foreach (var application in applications.DistinctBy(item => item.Id))
+        {
+            if (IsQueued(application)) continue;
+            await materials.RecordMaterialCodeApplicationWorkflowAsync(application.Id,
+                MaterialCodeWorkflowState.PendingApproval, actor, timeProvider.GetUtcNow(),
+                AutomaticQueuePrefix + actor, cancellationToken);
+            count++;
+        }
+        return count;
+    }
+
+    public async Task<bool> ProcessAutomaticQueueAsync(CancellationToken cancellationToken)
+    {
+        var queued = (await materials.ListMaterialCodeApplicationsAsync(null, null, cancellationToken))
+            .Where(application => application.BomHeaderKind is not null && IsQueued(application)).ToArray();
+        var processed = false;
+        foreach (var application in queued)
+        {
+            var project = await repository.FindProjectAsync(application.ProjectId, cancellationToken);
+            if (project is null) continue;
+            var gate = AutomaticApplicationLocks.GetOrAdd(project.RootProjectId ?? project.Id, static _ => new SemaphoreSlim(1, 1));
+            if (!await gate.WaitAsync(0, cancellationToken)) continue;
+            try
+            {
+                var current = await materials.FindMaterialCodeApplicationAsync(application.Id, cancellationToken);
+                if (current is null || !IsQueued(current)) continue;
+                var actor = current.WorkflowMessage![AutomaticQueuePrefix.Length..];
+                var binding = (await repository.ListProjectBomHeaderBindingsAsync(project.Id, cancellationToken))
+                    .SingleOrDefault(item => item.Kind == current.BomHeaderKind);
+                var latest = LatestHeaderApplication(await materials.ListMaterialCodeApplicationsAsync(project.Id, null, cancellationToken), current.BomHeaderKind!.Value);
+                processed = true;
+                try
+                {
+                    using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+                    deadline.CancelAfter(TimeSpan.FromMinutes(5));
+                    if (binding?.MaterialId != current.MaterialId || latest?.Id != current.Id)
+                        throw new PdmConflictException("申请或主物料绑定已经变化，已停止后台执行，请核对。");
+                    if (current.Status == MaterialCodeApplicationStatus.Pending)
+                        await ApproveAndQueueAsync([current], actor, deadline.Token);
+                    else if (current.Status == MaterialCodeApplicationStatus.Approved && current.SyncTaskId is Guid taskId)
+                    {
+                        // 中断恢复或重试复用原任务；已有批次则等待其完成，避免重复入队。
+                        var active = (await materials.ListRecentSyncBatchesAsync(actor, 100, cancellationToken))
+                            .Any(batch => batch.Items.Any(item => item.TaskId == taskId
+                                && item.Status is MaterialSyncBatchItemStatus.Queued or MaterialSyncBatchItemStatus.Running));
+                        if (!active && current.SyncStatus != MaterialSyncStatus.Succeeded)
+                            await syncBatches.CreateAutomaticAsync([taskId], actor, cancellationToken);
+                        await materials.RecordMaterialCodeApplicationWorkflowAsync(current.Id,
+                            MaterialCodeWorkflowState.PendingMaterialSync, actor, timeProvider.GetUtcNow(),
+                            "原任务已进入同步流程，请查看U9C同步结果", cancellationToken);
+                    }
+                    else throw new PdmRuleException("原申请状态不支持自动恢复，请核对申请及同步任务。");
+                }
+                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
+                catch (Exception exception)
+                {
+                    await materials.RecordMaterialCodeApplicationWorkflowAsync(current.Id,
+                        MaterialCodeWorkflowState.PendingApproval, actor, timeProvider.GetUtcNow(),
+                        AutomaticFailurePrefix + (exception is OperationCanceledException
+                            ? "后台自动审批超过5分钟，已停止本次处理；请检查U9C查询与网络后重试"
+                            : exception.Message), CancellationToken.None);
+                }
+            }
+            finally { gate.Release(); }
+        }
+        return processed;
     }
 
     private async Task<MaterialCodeApplication> CreateHeaderApplicationAsync(

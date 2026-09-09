@@ -124,11 +124,11 @@ public sealed class MaterialServiceTests
         Assert.Equal("001", row.GetProperty("InventorySecondUOM").GetProperty("Code").GetString());
         Assert.Equal("true", row.GetProperty("Effective").GetProperty("IsEffective").GetString());
         Assert.Equal(4, row.GetProperty("InventoryInfo").GetProperty("InventoryPlanningMethod").GetInt32());
-        Assert.Equal(0, row.GetProperty("InventoryInfo").GetProperty("PurchaseControlMode").GetInt32());
-        Assert.Equal(1, row.GetProperty("InventoryInfo").GetProperty("TurnOverRate").GetInt32());
+        Assert.Equal(1, row.GetProperty("InventoryInfo").GetProperty("PurchaseControlMode").GetInt32());
+        Assert.Equal(0, row.GetProperty("InventoryInfo").GetProperty("TurnOverRate").GetInt32());
         Assert.Equal(-1, row.GetProperty("InventoryInfo").GetProperty("ReserveMode").GetInt32());
         Assert.Equal(-1, row.GetProperty("InventoryInfo").GetProperty("SupplyMethod").GetInt32());
-        Assert.Equal(1, row.GetProperty("MrpInfo").GetProperty("MRPPlanningType").GetInt32());
+        Assert.Equal(0, row.GetProperty("MrpInfo").GetProperty("MRPPlanningType").GetInt32());
         Assert.False(row.TryGetProperty("InventoryPlanningMethod", out _));
         Assert.False(row.TryGetProperty("MRPPlanningType", out _));
         Assert.False(row.TryGetProperty("Weight", out _));
@@ -1192,8 +1192,8 @@ public sealed class MaterialServiceTests
             RequestedMaterialCode = material.MaterialCode
         }, default);
 
-        var decision = await service.DecideMaterialCodeApplicationAsync(
-            application.Id, application.RowVersion, true, "同意", "standardizer", UserRole.ProcessReviewer, default);
+        var decision = Assert.Single(await service.AutomaticallyApproveBomHeaderApplicationsAsync(
+            [(application.Id, application.RowVersion)], "standardizer", default));
 
         Assert.Equal(MaterialCodeApplicationStatus.Approved, decision.Application.Status);
         Assert.Equal(ProjectBomHeaderKind.Standard, decision.Application.BomHeaderKind);
@@ -1225,8 +1225,8 @@ public sealed class MaterialServiceTests
             Guid.NewGuid(), ProjectId, null, MaterialCodeApplicationStatus.Pending, "developer", DateTimeOffset.UtcNow,
             null, null, null, completed.Material.Id, null, 1, ProjectBomHeaderKind.Master), default);
 
-        var decision = await service.DecideMaterialCodeApplicationAsync(
-            application.Id, application.RowVersion, true, "重新批准", "standardizer", UserRole.ProcessReviewer, default);
+        var decision = Assert.Single(await service.AutomaticallyApproveBomHeaderApplicationsAsync(
+            [(application.Id, application.RowVersion)], "standardizer", default));
 
         Assert.Equal(MaterialCodeApplicationStatus.Approved, decision.Application.Status);
         Assert.Null(decision.Task);

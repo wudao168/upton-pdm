@@ -105,7 +105,14 @@ public sealed record PdmCustomer(
 public sealed record PdmSystemSettings(string VaultRoot, string ReleaseRoot)
 {
     public static IReadOnlyList<string> DefaultReleaseChangeReasonTypes { get; } =
-        ["设计变更", "客户需求", "物料替代", "质量整改", "生产反馈", "其他"];
+        [
+            "正式补充",
+            "物料问题 / 交期不满足", "物料问题 / 物料下单晚", "物料问题 / 买错物料", "物料问题 / 物料漏买",
+            "图纸问题 / 图纸漏下", "图纸问题 / 图纸错误",
+            "设计问题 / 设计变更", "设计问题 / 设计错误",
+            "客户原因 / 客户需求变更", "客户原因 / 客户信息输入错误", "客户原因 / 客户未及时确认", "客户原因 / 客户未及时提供产品",
+            "其他"
+        ];
 
     public int CheckoutHeartbeatSeconds { get; init; } = 180;
 
@@ -150,7 +157,26 @@ public sealed record PdmSystemSettings(string VaultRoot, string ReleaseRoot)
     public MaterialCodeApprovalSettings MaterialCodeApproval { get; init; } = MaterialCodeApprovalSettings.Default;
 
     public IReadOnlyList<string> ReleaseChangeReasonTypes { get; init; } = DefaultReleaseChangeReasonTypes;
+
+    public FormalSupplementPolicies FormalSupplementPolicies { get; init; } = FormalSupplementPolicies.Default;
 }
+
+public sealed record FormalSupplementPolicy(int? MaximumCount, int? ValidDays)
+{
+    public static FormalSupplementPolicy Default { get; } = new(2, null);
+}
+
+public sealed record FormalSupplementPolicies(FormalSupplementPolicy Standard, FormalSupplementPolicy Electrical)
+{
+    public static FormalSupplementPolicies Default { get; } = new(FormalSupplementPolicy.Default, FormalSupplementPolicy.Default);
+}
+
+public sealed record ReleaseChangeReasonSelection(
+    string CategoryCode,
+    string ReasonCode,
+    string Category,
+    string Reason,
+    string? Detail = null);
 
 public sealed record MaterialCodeApprovalSettings(int Version, IReadOnlyList<string> ApproverRoleCodes)
 {
@@ -457,6 +483,20 @@ public sealed record BomItem(
 
     public string? ParentDrawingNumber { get; init; }
 
+    public Guid? EngineeringKitReferenceId { get; init; }
+
+    public Guid? EngineeringKitId { get; init; }
+
+    public Guid? EngineeringKitRevisionId { get; init; }
+
+    public string? EngineeringKitCode { get; init; }
+
+    public int? EngineeringKitVersionNumber { get; init; }
+
+    public Guid? EngineeringKitComponentId { get; init; }
+
+    public bool EngineeringKitComponentOptional { get; init; }
+
     public string Source { get; init; } = "Manual";
 
     public bool IsManuallyOverridden { get; init; }
@@ -647,6 +687,14 @@ public sealed record ReleasePackage(
     public bool LocksDocuments { get; init; } = true;
 
     public int WholeSetMultiplier { get; init; } = 1;
+
+    public IReadOnlyList<ReleaseChangeReasonSelection> ChangeReasonSelections { get; init; } = [];
+
+    public bool FormalSupplementPolicySnapshotted { get; init; }
+
+    public int? FormalSupplementMaximumCount { get; init; }
+
+    public int? FormalSupplementValidDays { get; init; }
 }
 
 public sealed record AuditEntry(

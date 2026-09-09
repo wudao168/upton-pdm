@@ -60,6 +60,31 @@ public sealed class MaterialRelationServiceTests
         Assert.Equal(2, accessoryRows.Select(item => item.Id).Distinct().Count());
         Assert.Equal(2, (await relations.ListSelectionsAsync(project.Id, default)).Count);
         await service.EnsureCompleteAsync(project.Id, default);
+
+        // A same-quantity attribute change must invalidate every main row, including rows sharing an accessory.
+        await pdm.ReplaceBomAsync(project.Id, BomKind.Standard, [mainA with { Remark = "设计备注变更" }, mainB], default);
+        var stale = await service.GetCompletenessAsync(project.Id, "admin", UserRole.Administrator, default);
+        Assert.False(stale.IsComplete);
+        Assert.All(stale.MainMaterials, item => Assert.False(item.IsComplete));
+        Assert.All(stale.MainMaterials.SelectMany(item => item.Groups), item => Assert.Contains("重新核对", item.Status));
+        await service.EnsureCompleteAsync(project.Id, default);
+        var rechecked = await service.ApplyAsync(project.Id,
+        [
+            new ApplyMaterialRelationsCommand(mainA.Id, [new MaterialRelationChoice(groupA.Id, [groupA.Options.Single().Id])]),
+            new ApplyMaterialRelationsCommand(mainB.Id, [new MaterialRelationChoice(groupB.Id, [groupB.Options.Single().Id])])
+        ], "admin", UserRole.Administrator, default);
+        Assert.True(rechecked.IsComplete);
+        Assert.True((await service.GetCompletenessAsync(project.Id, "admin", UserRole.Administrator, default)).IsComplete);
+        Assert.Equal(2, (await pdm.GetBomAsync(project.Id, BomKind.Electrical, default)).Count);
+
+        await pdm.ReplaceBomAsync(project.Id, BomKind.Standard, [mainA with { Remark = "设计备注变更", Quantity = 2.0000m, ReconciliationUpdatedAt = DateTimeOffset.UtcNow }, mainB], default);
+        Assert.True((await service.GetCompletenessAsync(project.Id, "admin", UserRole.Administrator, default)).IsComplete);
+        await pdm.ReplaceBomAsync(project.Id, BomKind.Standard, [mainA with { Remark = "设计备注变更" }], default);
+        Assert.False((await service.GetCompletenessAsync(project.Id, "admin", UserRole.Administrator, default)).IsComplete);
+
+        var extra = mainB with { Id = Guid.NewGuid(), DrawingNumber = "UNRELATED", Sequence = 3 };
+        await pdm.ReplaceBomAsync(project.Id, BomKind.Standard, [mainA with { Remark = "设计备注变更" }, mainB, extra], default);
+        Assert.False((await service.GetCompletenessAsync(project.Id, "admin", UserRole.Administrator, default)).IsComplete);
     }
 
     [Fact]

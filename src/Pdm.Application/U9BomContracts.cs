@@ -44,7 +44,13 @@ public sealed record U9BomComponentReference(
     int? IssueStyle,
     int? SupplyStyle,
     bool? IsPhantomPart,
-    bool? IsDelete);
+    bool? IsDelete)
+{
+    public int? UsageQtyType { get; init; }
+    public bool? IsSpecialUseItem { get; init; }
+    public bool? IsIssueOrgFixed { get; init; }
+    public string? IssueOrgCode { get; init; }
+}
 
 public sealed record U9BomReference(
     string? ItemId,
@@ -102,7 +108,14 @@ public sealed record U9BomWriteCommand(
     string? ProjectMapNum = null,
     string? Explain = null,
     bool AllowEmptyCreate = false,
-    bool ReconcileComponentTotals = false);
+    bool ReconcileComponentTotals = false)
+{
+    // Only the project release workflow supplies this baseline; never accept it from an API caller.
+    [System.Text.Json.Serialization.JsonIgnore]
+    public IReadOnlyList<U9BomComponentCommand>? PreviousApprovedComponents { get; init; }
+}
+
+public sealed record U9BomComponentChange(int Sequence, string ItemCode, string Change, decimal PreviousQuantity, decimal Quantity);
 
 public sealed record U9BomQuantityReconciliation(
     string ItemCode,
@@ -122,7 +135,12 @@ public sealed record U9BomWritePreview(
     int AddedComponentCount,
     int RetainedHistoricalComponentCount,
     IReadOnlyList<U9BomQuantityReconciliation> QuantityReconciliations,
-    DateTimeOffset GeneratedAt);
+    DateTimeOffset GeneratedAt)
+{
+    public IReadOnlyList<U9BomComponentChange> ComponentChanges { get; init; } = [];
+    public int ModifiedComponentCount => ComponentChanges.Count(item => item.Change == "修改");
+    public int DeletedComponentCount => ComponentChanges.Count(item => item.Change == "删除");
+}
 
 public sealed record U9BomWriteExecution(
     U9BomWritePreview Preview,

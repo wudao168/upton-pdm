@@ -5,6 +5,25 @@ namespace Pdm.Domain.Tests;
 public sealed class MigrationResourceTests
 {
     [Fact]
+    public async Task EngineeringKitMigration_UsesIndependentKitTablesAndRealMaterialComponents()
+    {
+        var assembly = typeof(MySqlMigrationRunner).Assembly;
+        var resourceName = assembly.GetManifestResourceNames()
+            .Single(name => name.EndsWith(".Migrations.092_engineering_kits.sql", StringComparison.Ordinal));
+        await using var stream = assembly.GetManifestResourceStream(resourceName);
+        Assert.NotNull(stream);
+        using var reader = new StreamReader(stream!);
+        var sql = await reader.ReadToEndAsync();
+
+        Assert.Contains("CREATE TABLE engineering_kit", sql, StringComparison.Ordinal);
+        Assert.Contains("CREATE TABLE engineering_kit_revision", sql, StringComparison.Ordinal);
+        Assert.Contains("CREATE TABLE engineering_kit_component", sql, StringComparison.Ordinal);
+        Assert.Contains("FOREIGN KEY (material_id) REFERENCES material_master(id)", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("parent_kit", sql, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("engineering_kit_reference_id", sql, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task EngineerMaterialViewMigration_GrantsReadOnlyMaterialPermissionToEngineeringRoles()
     {
         var assembly = typeof(MySqlMigrationRunner).Assembly;
@@ -401,5 +420,38 @@ public sealed class MigrationResourceTests
         Assert.Contains("PRIMARY KEY(project_id,main_bom_item_id,group_id)", sql, StringComparison.Ordinal);
         Assert.Contains("main_quantity DECIMAL(18,4) NOT NULL", sql, StringComparison.Ordinal);
         Assert.Contains("reason VARCHAR(500)", sql, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task MaterialRelationReviewFingerprintMigration_IsAdditive()
+    {
+        var assembly = typeof(MySqlMigrationRunner).Assembly;
+        var name = assembly.GetManifestResourceNames().Single(item => item.EndsWith(".091_material_relation_review_bom_fingerprint.sql", StringComparison.Ordinal));
+        using var reader = new StreamReader(assembly.GetManifestResourceStream(name)!);
+        var sql = await reader.ReadToEndAsync();
+        Assert.Contains("ADD COLUMN bom_fingerprint CHAR(64) NULL", sql);
+    }
+
+    [Fact]
+    public async Task U9ProcurementTrackingMigration_PersistsAtomicNonFinancialSnapshot()
+    {
+        var assembly = typeof(MySqlMigrationRunner).Assembly;
+        var resourceName = assembly.GetManifestResourceNames()
+            .Single(name => name.EndsWith(".Migrations.090_u9_procurement_tracking.sql", StringComparison.Ordinal));
+
+        await using var stream = assembly.GetManifestResourceStream(resourceName);
+        Assert.NotNull(stream);
+        using var reader = new StreamReader(stream!);
+        var sql = await reader.ReadToEndAsync();
+
+        Assert.Contains("CREATE TABLE u9_procurement_sync_setting", sql, StringComparison.Ordinal);
+        Assert.Contains("sync_interval_minutes INT NOT NULL DEFAULT 15", sql, StringComparison.Ordinal);
+        Assert.Contains("current_snapshot_run_id", sql, StringComparison.Ordinal);
+        Assert.Contains("CREATE TABLE u9_procurement_snapshot", sql, StringComparison.Ordinal);
+        Assert.Contains("source_pr_line_id", sql, StringComparison.Ordinal);
+        Assert.Contains("latest_delivery_date", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("price", sql, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("tax", sql, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("currency", sql, StringComparison.OrdinalIgnoreCase);
     }
 }

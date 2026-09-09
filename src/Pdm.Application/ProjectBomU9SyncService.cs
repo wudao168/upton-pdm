@@ -32,7 +32,8 @@ public enum ProjectBomU9AutomaticState
     Empty,
     UpToDate,
     Created,
-    Modified
+    Modified,
+    AwaitingConfirmation
 }
 
 public sealed record ProjectBomU9AutomaticResult(
@@ -70,7 +71,7 @@ public sealed class ProjectBomU9SyncService(
                 : new(projectId, kind, command.ItemCode, 0, ProjectBomU9SyncState.AwaitingApproval, null);
         var state = preview.Operation == U9BomWriteOperation.Create
             ? ProjectBomU9SyncState.CreateRequired
-            : preview.AddedComponentCount == 0
+            : preview.AddedComponentCount + preview.ModifiedComponentCount + preview.DeletedComponentCount == 0
                 ? ProjectBomU9SyncState.UpToDate
                 : ProjectBomU9SyncState.ModifyRequired;
         return new(projectId, kind, command.ItemCode, command.Components.Count, state, preview);
@@ -91,7 +92,7 @@ public sealed class ProjectBomU9SyncService(
         var preview = await u9BomWriteService.PreviewUpsertAsync(command, cancellationToken);
         if (!build.ComponentsApproved && preview.Operation != U9BomWriteOperation.Create)
             throw new PdmRuleException("U9C BOM档案已创建；当前BOM尚未审核发布，不能同步工作区子件。");
-        if (preview.Operation == U9BomWriteOperation.Modify && preview.AddedComponentCount == 0)
+        if (preview.Operation == U9BomWriteOperation.Modify && preview.AddedComponentCount + preview.ModifiedComponentCount + preview.DeletedComponentCount == 0)
             throw new PdmRuleException("U9C BOM已存在且PLM没有可追加的新子件，无需重复写入。");
         if (!string.Equals(preview.RequestSha256, requestSha256?.Trim(), StringComparison.OrdinalIgnoreCase))
             throw new PdmRuleException("BOM内容或U9C现状已变化，请重新生成预览后再确认。");
@@ -137,6 +138,9 @@ public sealed class ProjectBomU9SyncService(
             if (!build.ComponentsApproved && preview.Operation == U9BomWriteOperation.Modify)
                 return new(projectId, kind, ProjectBomU9AutomaticState.AwaitingApproval, command.ItemCode,
                     "U9C A1 BOM档案已存在；未写入工作区子件，等待BOM审核发布后再同步。");
+            if (preview.ModifiedComponentCount > 0 || preview.DeletedComponentCount > 0)
+                return new(projectId, kind, ProjectBomU9AutomaticState.AwaitingConfirmation, command.ItemCode,
+                    $"U9C BOM包含修改{preview.ModifiedComponentCount}行、删除{preview.DeletedComponentCount}行，请在BOM总览核对明细后人工确认同步；未执行写入。");
             if (preview.Operation == U9BomWriteOperation.Modify && preview.AddedComponentCount == 0)
                 return new(projectId, kind, ProjectBomU9AutomaticState.UpToDate, command.ItemCode, "U9C A1 BOM已与PLM一致。");
 
@@ -197,8 +201,29 @@ public sealed class ProjectBomU9SyncService(
             ProjectMapNum: project.Code,
             Explain: $"{project.Code} · {project.Name} · {KindLabel(kind)}",
             AllowEmptyCreate: components.Count == 0,
-            ReconcileComponentTotals: true);
+            ReconcileComponentTotals: true)
+        {
+            PreviousApprovedComponents = kind == ProjectBomHeaderKind.Master ? null
+                : await PreviousApprovedComponentsAsync(projectId, kind, cancellationToken)
+        };
         return new(command, approved.Approved);
+    }
+
+    private async Task<IReadOnlyList<U9BomComponentCommand>?> PreviousApprovedComponentsAsync(
+        Guid projectId, ProjectBomHeaderKind kind, CancellationToken cancellationToken)
+    {
+        var previous = (await repository.ListReleasePackagesAsync(projectId, cancellationToken))
+            .Where(package => package.State == ReleasePackageState.Published && package.PublishedAt.HasValue && PackageMatchesKind(package.Scope, kind))
+            .OrderByDescending(package => package.PublishedAt).Skip(1).FirstOrDefault();
+        if (previous is null) return null;
+        var result = new List<U9BomComponentCommand>();
+        foreach (var item in EffectiveItems(CategorySnapshot(previous, kind)))
+        {
+            var material = await materials.FindMaterialByCodeAsync(item.DrawingNumber.Trim(), cancellationToken);
+            result.Add(new((result.Count + 1) * 10, material?.U9ItemCode?.Trim() ?? item.DrawingNumber.Trim(),
+                item.Quantity * Math.Max(1, previous.WholeSetMultiplier), U9UnitCatalog.NormalizeBomUnit(item.Unit)));
+        }
+        return result;
     }
 
     private async Task<ApprovedComponents> BuildMasterComponentsAsync(
@@ -313,7 +338,12 @@ public sealed class ProjectBomU9SyncService(
         static string MaterialKey(BomItem item) => $"{item.DrawingNumber.Trim()}|{item.Unit.Trim()}";
         var merged = new Dictionary<string, BomItem>(StringComparer.OrdinalIgnoreCase);
         foreach (var item in baseItems)
-            merged[MaterialKey(item)] = item;
+        {
+            var key = MaterialKey(item);
+            merged[key] = merged.TryGetValue(key, out var existing)
+                ? existing with { Quantity = existing.Quantity + item.Quantity }
+                : item;
+        }
         foreach (var package in longLeadPackages)
         {
             foreach (var item in EffectiveItems(package.StandardBomSnapshot))

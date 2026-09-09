@@ -25,6 +25,13 @@ public static class BomHeaderEndpointExtensions
             var (actor, role) = CurrentUser(context.User);
             return Results.Ok(await service.GenerateHierarchyMaterialsAsync(projectId, actor, role, cancellationToken));
         });
+        api.MapPost("/{kind}/retry-automatic", async (Guid projectId, string kind, RetryBomHeaderRequest request, HttpContext context, BomHeaderService service, CancellationToken cancellationToken) =>
+        {
+            if (!Enum.TryParse<ProjectBomHeaderKind>(kind, true, out var parsed) || !Enum.IsDefined(parsed)) return Results.BadRequest(new { message = "BOM层级类型无效。" });
+            var (actor, role) = CurrentUser(context.User);
+            return Results.Ok(await service.RetryAutomaticAsync(projectId, parsed, request.ApplicationId,
+                request.ExpectedRowVersion, request.Confirmation, actor, role, cancellationToken));
+        });
         api.MapPost("/{kind}/u9-preview", async (Guid projectId, string kind, HttpContext context, ProjectBomU9SyncService service, CancellationToken cancellationToken) =>
         {
             if (!Enum.TryParse<ProjectBomHeaderKind>(kind, true, out var parsed)) return Results.BadRequest(new { message = "BOM层级类型无效。" });
@@ -50,5 +57,6 @@ public static class BomHeaderEndpointExtensions
     }
 
     private sealed record BindBomHeaderMaterialRequest(Guid MaterialId, long ExpectedRowVersion);
+    private sealed record RetryBomHeaderRequest(Guid ApplicationId, long ExpectedRowVersion, string Confirmation);
     private sealed record ProjectBomU9ExecuteRequest(string RequestSha256, string Confirmation);
 }

@@ -7,6 +7,7 @@ using Upton.Pdm.Infrastructure;
 
 namespace Upton.Pdm.Domain.Tests;
 
+[Collection("BomHeader automatic queue")]
 public sealed class BomHeaderServiceTests
 {
     private static readonly Guid ProjectId = Guid.Parse("11111111-1111-1111-1111-111111111111");
@@ -83,13 +84,14 @@ public sealed class BomHeaderServiceTests
         Assert.Equal(5, first.ExpectedCount);
         Assert.Equal(5, first.GeneratedCount);
         Assert.Equal(0, first.ExistingCount);
-        Assert.Equal(5, first.AutoApprovedCount);
-        Assert.Equal(5, first.QueuedSyncCount);
-        Assert.NotNull(first.AutomaticBatchId);
-        Assert.Equal(2, u9Client.AuthenticationCount);
+        Assert.Equal(5, first.QueuedApprovalCount);
+        Assert.Equal(0, first.AutoApprovedCount);
+        Assert.Equal(0, u9Client.AuthenticationCount);
+        Assert.True(await service.ProcessAutomaticQueueAsync(default));
+        Assert.Equal(5, u9Client.AuthenticationCount);
         Assert.Equal(0, u9Client.ItemQueryCount);
         Assert.Equal(0, u9Client.UomQueryCount);
-        Assert.Equal(2, u9Client.ReferenceQueryCount);
+        Assert.Equal(5, u9Client.ReferenceQueryCount);
         Assert.Equal(8, first.Headers.Count);
         Assert.Equal(2, first.Headers.Count(header => header.Kind == ProjectBomHeaderKind.Master));
         Assert.All(first.Headers.Where(header => header.Kind == ProjectBomHeaderKind.Master), header => Assert.Equal("0302", header.CategoryCode));
@@ -98,8 +100,7 @@ public sealed class BomHeaderServiceTests
         Assert.NotNull(rootHeaders.Single(header => header.Kind == ProjectBomHeaderKind.Master).MaterialId);
         Assert.All(rootHeaders.Where(header => header.Kind != ProjectBomHeaderKind.Master), header => Assert.Null(header.MaterialId));
         Assert.All(first.Headers.Where(header => header.MaterialId is not null), header => Assert.Null(header.MaterialCode));
-        Assert.All(first.Headers.Where(header => header.MaterialId is not null), header => Assert.Equal(MaterialApprovalStatus.Approved, header.ApprovalStatus));
-        Assert.All(first.Headers.Where(header => header.MaterialId is not null), header => Assert.Equal(MaterialCodeApplicationStatus.Approved, header.ApplicationStatus));
+        Assert.All(first.Headers.Where(header => header.MaterialId is not null), header => Assert.Equal("ApprovalQueued", header.AutomaticStatus));
         Assert.All(first.Headers.Where(header => header.MaterialId is not null), header => Assert.Equal("admin", header.RequestedBy));
         Assert.Empty(await materials.ListMaterialCodeApplicationsAsync(null, MaterialCodeApplicationStatus.Pending, default));
         var applications = await materials.ListMaterialCodeApplicationsAsync(null, MaterialCodeApplicationStatus.Approved, default);
@@ -117,9 +118,9 @@ public sealed class BomHeaderServiceTests
             ["02015000001", "02015000002", "02015000003"],
             pendingMaterials.Where(material => material.CategoryCode == "0201").Select(material => material.MaterialCode).Order().ToArray());
         Assert.Equal(5, pendingMaterials.Select(material => material.MaterialCode).Distinct().Count());
-        var batch = Assert.Single(await materials.ListRecentSyncBatchesAsync("admin", 10, default));
-        Assert.Equal(MaterialSyncBatchStatus.Queued, batch.Status);
-        Assert.Equal(5, batch.TotalCount);
+        var batches = await materials.ListRecentSyncBatchesAsync("admin", 10, default);
+        Assert.Equal(5, batches.Sum(batch => batch.TotalCount));
+        Assert.All(batches, batch => Assert.Equal(MaterialSyncBatchStatus.Queued, batch.Status));
 
         var second = await service.GenerateHierarchyMaterialsAsync(root.Id, "admin", UserRole.Administrator, default);
         Assert.Equal(0, second.GeneratedCount);
@@ -140,9 +141,8 @@ public sealed class BomHeaderServiceTests
         Assert.Equal(2, standard.ExpectedCount);
         Assert.Equal(2, standard.GeneratedCount);
         Assert.Equal(0, standard.ExistingCount);
-        Assert.Equal(2, standard.AutoApprovedCount);
-        Assert.Equal(2, standard.QueuedSyncCount);
-        Assert.NotNull(standard.AutomaticBatchId);
+        Assert.Equal(2, standard.QueuedApprovalCount);
+        Assert.True(await service.ProcessAutomaticQueueAsync(default));
         Assert.Empty(await materials.ListMaterialCodeApplicationsAsync(
             ProjectId, MaterialCodeApplicationStatus.Pending, default));
         var firstApplications = await materials.ListMaterialCodeApplicationsAsync(
@@ -163,8 +163,8 @@ public sealed class BomHeaderServiceTests
             ProjectId, ProjectBomHeaderKind.Electrical, "reviewer", default);
         Assert.Equal(1, electrical.GeneratedCount);
         Assert.Equal(1, electrical.ExistingCount);
-        Assert.Equal(1, electrical.AutoApprovedCount);
-        Assert.Equal(1, electrical.QueuedSyncCount);
+        Assert.Equal(1, electrical.QueuedApprovalCount);
+        Assert.True(await service.ProcessAutomaticQueueAsync(default));
         var allApplications = await materials.ListMaterialCodeApplicationsAsync(
             ProjectId, MaterialCodeApplicationStatus.Approved, default);
         Assert.Equal(3, allApplications.Count);
@@ -188,8 +188,8 @@ public sealed class BomHeaderServiceTests
         Assert.Equal(root.Id, result.RootProjectId);
         Assert.Equal(3, result.ExpectedCount);
         Assert.Equal(3, result.GeneratedCount);
-        Assert.Equal(3, result.AutoApprovedCount);
-        Assert.Equal(3, result.QueuedSyncCount);
+        Assert.Equal(3, result.QueuedApprovalCount);
+        Assert.True(await service.ProcessAutomaticQueueAsync(default));
         Assert.Empty(await materials.ListMaterialCodeApplicationsAsync(
             null, MaterialCodeApplicationStatus.Pending, default));
         var applications = await materials.ListMaterialCodeApplicationsAsync(
@@ -211,6 +211,7 @@ public sealed class BomHeaderServiceTests
 
         var initial = await service.GenerateHierarchyMaterialsAsync(root.Id, "admin", UserRole.Administrator, default);
         Assert.Equal(4, initial.GeneratedCount);
+        await service.ProcessAutomaticQueueAsync(default);
         var child = await repository.CreateSubprojectAsync(new(root.Id, "后增子项目", null, 1), default);
 
         var incremental = await service.GenerateHierarchyMaterialsAsync(root.Id, "admin", UserRole.Administrator, default);
@@ -218,8 +219,8 @@ public sealed class BomHeaderServiceTests
         Assert.Equal(5, incremental.ExpectedCount);
         Assert.Equal(4, incremental.GeneratedCount);
         Assert.Equal(1, incremental.ExistingCount);
-        Assert.Equal(4, incremental.AutoApprovedCount);
-        Assert.Equal(4, incremental.QueuedSyncCount);
+        Assert.Equal(4, incremental.QueuedApprovalCount);
+        await service.ProcessAutomaticQueueAsync(default);
         Assert.Empty(await materials.ListMaterialCodeApplicationsAsync(null, MaterialCodeApplicationStatus.Pending, default));
         var applications = await materials.ListMaterialCodeApplicationsAsync(null, MaterialCodeApplicationStatus.Approved, default);
         Assert.Equal(8, applications.Count);
@@ -273,6 +274,115 @@ public sealed class BomHeaderServiceTests
 
         Assert.Contains("料号仍在申请中", exception.Message);
         Assert.Contains("U9C正式料号", exception.Message);
+    }
+
+    [Fact]
+    public async Task AutomaticTimeout_ReportsFailureAndRetriesOriginalApplicationWithoutDuplicates()
+    {
+        var service = CreateService(out var materials, out _, out var client);
+        client.ReferenceFailure = new TimeoutException("U9C客户参照查询请求超时。");
+        await service.EnsureApplicationsAfterBomApprovalAsync(ProjectId, ProjectBomHeaderKind.Standard, "admin", default);
+        await service.ProcessAutomaticQueueAsync(default);
+        var before = await service.ListAsync(ProjectId, "admin", UserRole.Administrator, default);
+        var master = before.Single(item => item.Kind == ProjectBomHeaderKind.Master);
+        Assert.Equal("Failed", master.AutomaticStatus);
+        Assert.Contains("客户参照查询请求超时", master.AutomaticMessage);
+        Assert.True(master.CanRetryAutomatic);
+        Assert.Empty(await materials.ListSyncTasksAsync(default));
+        var originalApplications = await materials.ListMaterialCodeApplicationsAsync(ProjectId, null, default);
+
+        client.ReferenceFailure = null;
+        var retried = await service.RetryAutomaticAsync(ProjectId, master.Kind, master.ApplicationId!.Value,
+            master.ApplicationRowVersion, "确认重试料号自动处理", "admin", UserRole.Administrator, default);
+        Assert.Equal(master.ApplicationId, retried.ApplicationId);
+        Assert.Equal(master.MaterialId, retried.MaterialId);
+        Assert.Equal("ApprovalQueued", retried.AutomaticStatus);
+        Assert.False(retried.CanRetryAutomatic);
+        Assert.Null(retried.MaterialCode);
+        Assert.Empty(await materials.ListSyncTasksAsync(default));
+        await service.ProcessAutomaticQueueAsync(default);
+        Assert.Single(await materials.ListSyncTasksAsync(default));
+        Assert.Equal(originalApplications.Count, (await materials.ListMaterialCodeApplicationsAsync(ProjectId, null, default)).Count);
+        await Assert.ThrowsAsync<PdmConflictException>(() => service.RetryAutomaticAsync(ProjectId, master.Kind,
+            master.ApplicationId.Value, master.ApplicationRowVersion, "确认重试料号自动处理", "admin", UserRole.Administrator, default));
+        Assert.Single(await materials.ListSyncTasksAsync(default));
+    }
+
+    [Fact]
+    public async Task AutomaticRetry_RequiresConfirmationAndMatchingApplication()
+    {
+        var service = CreateService(out var materials, out _, out var client);
+        client.ReferenceFailure = new TimeoutException("超时");
+        await service.EnsureApplicationsAfterBomApprovalAsync(ProjectId, ProjectBomHeaderKind.Standard, "admin", default);
+        await service.ProcessAutomaticQueueAsync(default);
+        var header = (await service.ListAsync(ProjectId, "admin", UserRole.Administrator, default)).First();
+        await Assert.ThrowsAsync<PdmRuleException>(() => service.RetryAutomaticAsync(ProjectId, header.Kind,
+            header.ApplicationId!.Value, header.ApplicationRowVersion, "", "admin", UserRole.Administrator, default));
+        await Assert.ThrowsAsync<PdmConflictException>(() => service.RetryAutomaticAsync(ProjectId, header.Kind,
+            Guid.NewGuid(), header.ApplicationRowVersion, "确认重试料号自动处理", "admin", UserRole.Administrator, default));
+        await Assert.ThrowsAsync<UnauthorizedAccessException>(() => service.RetryAutomaticAsync(ProjectId, header.Kind,
+            header.ApplicationId!.Value, header.ApplicationRowVersion, "确认重试料号自动处理", "viewer", UserRole.ProductionViewer, default));
+        Assert.Empty(await materials.ListSyncTasksAsync(default));
+    }
+
+    [Fact]
+    public async Task LegacyPendingApplication_UsesReleaseAuditFailureWithoutChangingApproval()
+    {
+        var service = CreateService(out var materials, out var repository);
+        var draft = await AddMaterial(materials, MaterialKind.Product, MaterialApprovalStatus.Draft, "0302", "PDM-PENDING-TEST");
+        await repository.SaveProjectBomHeaderBindingAsync(ProjectId, ProjectBomHeaderKind.Master, draft.Id, 0, "admin", default);
+        var pending = (await service.ListAsync(ProjectId, "admin", UserRole.Administrator, default)).First();
+        await repository.AppendAuditAsync(new AuditEntry(Guid.NewGuid(), DateTimeOffset.UtcNow.AddSeconds(1), "admin",
+            "bom.header.application.auto-trigger-failed", nameof(Project), ProjectId.ToString(),
+            "StandardBOM已批准发布，但自动生成或排队同步BOM料号失败：U9C客户参照查询请求超时。"), default);
+        var header = (await service.ListAsync(ProjectId, "admin", UserRole.Administrator, default)).First();
+        Assert.Equal("Failed", header.AutomaticStatus);
+        Assert.Contains("U9C客户参照查询请求超时", header.AutomaticMessage);
+        Assert.Equal(pending.ApplicationId, header.ApplicationId);
+        Assert.Equal(MaterialCodeApplicationStatus.Pending, header.ApplicationStatus);
+        Assert.Empty(await materials.ListSyncTasksAsync(default));
+        Assert.False(await service.ProcessAutomaticQueueAsync(default));
+    }
+
+    [Fact]
+    public async Task AutomaticQueue_SurvivesRequestCancellationAndWorkerRestart()
+    {
+        var service = CreateService(out var materials, out var repository, out var client);
+        using var request = new CancellationTokenSource();
+        var result = await service.EnsureApplicationsAfterBomApprovalAsync(ProjectId, ProjectBomHeaderKind.Standard, "admin", request.Token);
+        Assert.Equal(2, result.QueuedApprovalCount);
+        Assert.Equal(0, client.ReferenceQueryCount);
+        request.Cancel();
+        using var stopping = new CancellationTokenSource();
+        client.BeforeReferenceQuery = stopping.Cancel;
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => service.ProcessAutomaticQueueAsync(stopping.Token));
+        Assert.Empty(await materials.ListSyncTasksAsync(default));
+        Assert.All((await service.ListAsync(ProjectId, "admin", UserRole.Administrator, default)).Where(item => item.ApplicationId is not null),
+            item => Assert.Equal("ApprovalQueued", item.AutomaticStatus));
+
+        client.BeforeReferenceQuery = null;
+        var materialService = new MaterialService(materials, repository, new TestProtector(), client, TimeProvider.System);
+        var resumed = new BomHeaderService(repository, materials, materialService,
+            new MaterialSyncBatchService(materials, repository, TimeProvider.System), TimeProvider.System);
+        await Task.WhenAll(resumed.ProcessAutomaticQueueAsync(default), service.ProcessAutomaticQueueAsync(default));
+        Assert.Equal(2, (await materials.ListSyncTasksAsync(default)).Count);
+        Assert.Equal(2, (await materials.ListMaterialCodeApplicationsAsync(ProjectId, null, default)).Count);
+        Assert.False(await resumed.ProcessAutomaticQueueAsync(default));
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task AutomaticHeader_RejectsManualApprovalAndRejection(bool approved)
+    {
+        var service = CreateService(out var materials, out var repository, out var client);
+        await service.EnsureApplicationsAfterBomApprovalAsync(ProjectId, ProjectBomHeaderKind.Standard, "admin", default);
+        var application = (await materials.ListMaterialCodeApplicationsAsync(ProjectId, null, default)).First();
+        var manual = new MaterialService(materials, repository, new TestProtector(), client, TimeProvider.System);
+        var error = await Assert.ThrowsAsync<PdmRuleException>(() => manual.DecideMaterialCodeApplicationAsync(
+            application.Id, application.RowVersion, approved, "test", "admin", UserRole.Administrator, default));
+        Assert.Contains("不能人工批准或退回", error.Message);
+        Assert.Empty(await materials.ListSyncTasksAsync(default));
     }
 
     private static BomHeaderService CreateService(out InMemoryMaterialRepository materials, out InMemoryPdmRepository repository)
@@ -457,6 +567,61 @@ public sealed class BomHeaderServiceTests
         Assert.Equal(ProjectBomU9SyncState.UpToDate, authoritative.State);
     }
 
+    [Theory]
+    [InlineData(false, 1, 4, 4, 0)]
+    [InlineData(false, 1, 1, 4, 3)]
+    [InlineData(true, 1, 4, 4, 0)]
+    [InlineData(true, 2, 4, 8, 4)]
+    [InlineData(true, 2, 8, 8, 0)]
+    public async Task ProjectBomU9Sync_SumsRepeatedReleasedMaterialRows(
+        bool usePackage, int multiplier, decimal existingTotal, decimal approvedTotal, decimal expectedDelta)
+    {
+        var time = new FixedTimeProvider(DateTimeOffset.Parse("2026-09-07T08:00:00Z"));
+        var repository = new InMemoryPdmRepository(time);
+        var materials = new InMemoryMaterialRepository(time);
+        await materials.SaveIntegrationConfigurationAsync(new(
+            "http://u9.example.test/U9", "01", "7", "pdm", "PDM", "protected:test-secret",
+            U9MaterialContract.CreatePath, U9MaterialContract.QueryPath, true, "admin", time.GetUtcNow()), default);
+        var header = await AddMaterial(materials, MaterialKind.Product, MaterialApprovalStatus.Approved,
+            "0201", "02010000101", "02010000101", true);
+        var component = await AddMaterial(materials, MaterialKind.Standard, MaterialApprovalStatus.Approved,
+            "0102", "01020000056", "01020000056", true);
+        await repository.SaveProjectBomHeaderBindingAsync(
+            ProjectId, ProjectBomHeaderKind.Standard, header.Id, 0, "admin", default);
+        var items = Enumerable.Range(1, 4).Select(sequence => new BomItem(
+            Guid.NewGuid(), ProjectId, BomKind.Standard, sequence, component.MaterialCode,
+            "平垫", 1, "001", null, "Φ3", "W1", true)).ToArray();
+        var version = await repository.SaveBomDraftAsync(ProjectId, BomKind.Standard, items, "reviewer", default);
+        await repository.SetBomVersionStateAsync([version.Id], BomVersionState.Released, "reviewer", time.GetUtcNow(), default);
+        if (usePackage)
+        {
+            await repository.CreateReleasePackageAsync(new ReleasePackage(
+                Guid.NewGuid(), ProjectId, "RP-DUPLICATE", ReleasePackageState.Published, version.Id, "V1", "V1",
+                [], time.GetUtcNow(), time.GetUtcNow(), "C:\\PDM\\Release\\DUPLICATE")
+            {
+                Scope = ReleaseScope.StandardFormal,
+                StandardBomSnapshot = items,
+                WholeSetMultiplier = multiplier
+            }, default);
+        }
+        var state = new BomWriteState
+        {
+            Exists = true,
+            Components = [new(10, null, "01020000056", "平垫", null, existingTotal, "001", "个", 1, 0, true, null, null, null, null, 0, 0, false, false)]
+        };
+        var service = new ProjectBomU9SyncService(repository, materials,
+            new U9BomWriteService(materials, repository, new BomWriteClient(state), new BomQueryClient(state), new TestProtector(), time), time);
+
+        var preview = await service.PreviewAsync(ProjectId, ProjectBomHeaderKind.Standard, "admin", UserRole.Administrator, default);
+
+        Assert.Equal(expectedDelta == 0 ? ProjectBomU9SyncState.UpToDate : ProjectBomU9SyncState.ModifyRequired, preview.State);
+        var quantity = Assert.Single(preview.WritePreview!.QuantityReconciliations);
+        Assert.Equal(approvedTotal, quantity.PlmApprovedTotal);
+        Assert.Equal(existingTotal, quantity.U9ExistingTotal);
+        Assert.Equal(expectedDelta, quantity.UploadDelta);
+        Assert.Equal(0, state.WriteCount);
+    }
+
     [Fact]
     public async Task U9BomWritePreview_UsesOnlyTheMissingApprovedQuantity()
     {
@@ -518,6 +683,274 @@ public sealed class BomHeaderServiceTests
 
         Assert.Contains("现有总用量5大于PLM审核总量4", error.Message);
         Assert.Equal(0, state.WriteCount);
+    }
+
+    [Theory]
+    [InlineData(8)]
+    [InlineData(0)]
+    public async Task U9ControlledChanges_UpdatesOrDeletesApprovedRowsAndRetainsUnrelatedRows(int desired)
+    {
+        var (service, state, repository) = await ControlledService();
+        var command = ControlledCommand(desired);
+        var preview = await service.PreviewAsync(command, "admin", UserRole.Administrator, default);
+        Assert.Equal(desired == 0 ? 1 : 0, preview.DeletedComponentCount);
+        Assert.Equal(desired == 0 ? 0 : 1, preview.ModifiedComponentCount);
+        Assert.Equal(0, preview.AddedComponentCount);
+        Assert.Equal(desired - 12, Assert.Single(preview.QuantityReconciliations).UploadDelta);
+        using var payload = JsonDocument.Parse(preview.RequestPreview);
+        var row = Assert.Single(payload.RootElement[0].GetProperty("BOMComponents").EnumerateArray());
+        Assert.Equal(10, row.GetProperty("Sequence").GetInt32());
+        if (desired == 0) Assert.True(row.GetProperty("IsDelete").GetBoolean());
+        else
+        {
+            Assert.Equal("8", row.GetProperty("BOMComponentChangeDTOList")[0].GetProperty("PropValue").GetString());
+            Assert.Equal(8, row.GetProperty("UsageQty").GetDecimal());
+            Assert.True(row.GetProperty("IsEffective").GetBoolean());
+        }
+        await service.ExecuteAsync(command, preview.RequestSha256, preview.RequiredConfirmation, "admin", UserRole.Administrator, default);
+        Assert.Contains(state.Components, item => item.ItemCode == "MANUAL" && item.UsageQty == 9);
+        Assert.Equal(desired, state.Components.Where(item => item.ItemCode == "01021000007").Sum(item => item.UsageQty));
+        Assert.Contains(await repository.ListAuditAsync("admin", UserRole.Administrator, 100, default), entry => entry.Action == "u9.bom.before-change");
+        var repeated = await service.PreviewAsync(command, "admin", UserRole.Administrator, default);
+        Assert.Empty(repeated.ComponentChanges);
+    }
+
+    [Fact]
+    public async Task U9ControlledChanges_BlocksUnknownOwnershipAndConcurrentChanges()
+    {
+        var (service, state, _) = await ControlledService();
+        var command = ControlledCommand(8);
+        var unknown = command with { PreviousApprovedComponents = [new(10, "01021000007", 11, "001")] };
+        await Assert.ThrowsAsync<PdmRuleException>(() => service.PreviewAsync(unknown, "admin", UserRole.Administrator, default));
+        var json = JsonSerializer.Serialize(command);
+        Assert.DoesNotContain("PreviousApprovedComponents", json);
+        var preview = await service.PreviewAsync(command, "admin", UserRole.Administrator, default);
+        state.Components = state.Components.Select(row => row.ItemCode == "MANUAL" ? row with { UsageQty = 10 } : row).ToArray();
+        await Assert.ThrowsAsync<PdmRuleException>(() => service.ExecuteAsync(command, preview.RequestSha256, preview.RequiredConfirmation, "admin", UserRole.Administrator, default));
+        Assert.Equal(0, state.WriteCount);
+    }
+
+    [Fact]
+    public async Task U9ControlledChanges_RejectsSuccessfulResponseWhenReadbackDidNotApplyDeletion()
+    {
+        var (service, state, _) = await ControlledService();
+        state.IgnoreControlledChanges = true;
+        var command = ControlledCommand(0);
+        var preview = await service.PreviewAsync(command, "admin", UserRole.Administrator, default);
+        var error = await Assert.ThrowsAsync<PdmRuleException>(() => service.ExecuteAsync(command, preview.RequestSha256, preview.RequiredConfirmation, "admin", UserRole.Administrator, default));
+        Assert.Contains("回查不一致", error.Message);
+        Assert.Equal(1, state.WriteCount);
+    }
+
+    private static U9BomWriteCommand ControlledCommand(int desired) => new(
+        U9BomWriteOperation.Modify, "02010000101", "A1", "001", 1,
+        desired == 0 ? [] : [new(10, "01021000007", desired, "001")], ReconcileComponentTotals: true)
+        { PreviousApprovedComponents = [new(10, "01021000007", 12, "001")] };
+
+    [Fact]
+    public async Task ProjectBomU9Sync_ReductionAndDeletionRequireConfirmationButManualExecutionWorks()
+    {
+        var time = TimeProvider.System;
+        var (writer, state, repository) = await ControlledService();
+        var materials = new InMemoryMaterialRepository(time);
+        var header = await AddMaterial(materials, MaterialKind.Product, MaterialApprovalStatus.Approved, "0201", "02010000101", "02010000101", true);
+        await AddMaterial(materials, MaterialKind.Standard, MaterialApprovalStatus.Approved, "0102", "01021000007", "01021000007", true);
+        await repository.SaveProjectBomHeaderBindingAsync(ProjectId, ProjectBomHeaderKind.Standard, header.Id, 0, "admin", default);
+        var item = new BomItem(Guid.NewGuid(), ProjectId, BomKind.Standard, 1, "01021000007", "平垫", 12, "001", null, null, "W1", true);
+        foreach (var (quantity, scope, age) in new[] { (12, ReleaseScope.StandardFormal, -2), (8, ReleaseScope.StandardSupplement, -1) })
+            await repository.CreateReleasePackageAsync(new ReleasePackage(Guid.NewGuid(), ProjectId, $"RP-{quantity}", ReleasePackageState.Published,
+                Guid.NewGuid(), "BOM", "BOM", [], time.GetUtcNow().AddHours(age), time.GetUtcNow().AddHours(age), "C:\\PDM\\Release")
+                { Scope = scope, StandardBomSnapshot = [item with { Quantity = quantity }] }, default);
+        var service = new ProjectBomU9SyncService(repository, materials, writer, time);
+        var automatic = await service.SynchronizeApprovedAsync(ProjectId, ProjectBomHeaderKind.Standard, "admin", default);
+        Assert.Equal(ProjectBomU9AutomaticState.AwaitingConfirmation, automatic.State);
+        Assert.Equal(0, state.WriteCount);
+        var preview = await service.PreviewAsync(ProjectId, ProjectBomHeaderKind.Standard, "admin", UserRole.Administrator, default);
+        Assert.Equal(ProjectBomU9SyncState.ModifyRequired, preview.State);
+        Assert.Equal(1, preview.WritePreview!.ModifiedComponentCount);
+        await service.ExecuteAsync(ProjectId, ProjectBomHeaderKind.Standard, preview.WritePreview.RequestSha256, preview.WritePreview.RequiredConfirmation, "admin", UserRole.Administrator, default);
+        Assert.Equal(8, state.Components.Single(row => row.ItemCode == "01021000007").UsageQty);
+        Assert.Equal(ProjectBomU9SyncState.UpToDate, (await service.PreviewAsync(ProjectId, ProjectBomHeaderKind.Standard, "admin", UserRole.Administrator, default)).State);
+    }
+
+    [Fact]
+    public async Task U9ControlledChanges_ReducesDuplicateHistoricalRowsBySequenceWithoutRebuildingBom()
+    {
+        var (service, state, _) = await ControlledService();
+        state.Components = [state.Components[0] with { UsageQty = 4 }, state.Components[0] with { Sequence = 30, UsageQty = 8 }, state.Components[1]];
+        var command = ControlledCommand(3);
+        var preview = await service.PreviewAsync(command, "admin", UserRole.Administrator, default);
+        Assert.Equal(1, preview.ModifiedComponentCount);
+        Assert.Equal(1, preview.DeletedComponentCount);
+        await service.ExecuteAsync(command, preview.RequestSha256, preview.RequiredConfirmation, "admin", UserRole.Administrator, default);
+        Assert.Equal(3, state.Components.Single(row => row.ItemCode == "01021000007").UsageQty);
+        Assert.Contains(state.Components, row => row.ItemCode == "MANUAL");
+    }
+
+    [Fact]
+    public async Task U9ControlledChanges_DeletesSameMaterialInSeparateVerifiedRequests()
+    {
+        var (service, state, repository) = await ControlledService();
+        state.Components = [state.Components[0] with { UsageQty = 4 }, state.Components[0] with { Sequence = 30, UsageQty = 8 }, state.Components[1]];
+        var command = ControlledCommand(0);
+        var preview = await service.PreviewAsync(command, "admin", UserRole.Administrator, default);
+        await service.ExecuteAsync(command, preview.RequestSha256, preview.RequiredConfirmation, "admin", UserRole.Administrator, default);
+        Assert.Equal(2, state.WriteCount);
+        Assert.Equal("MANUAL", Assert.Single(state.Components).ItemCode);
+        Assert.All(state.Payloads, payload =>
+        {
+            using var document = JsonDocument.Parse(payload);
+            var row = Assert.Single(document.RootElement[0].GetProperty("BOMComponents").EnumerateArray());
+            Assert.True(row.GetProperty("IsDelete").GetBoolean());
+            Assert.True(row.GetProperty("UsageQty").GetDecimal() > 0);
+        });
+        var audit = await repository.ListAuditAsync("admin", UserRole.Administrator, 100, default);
+        Assert.Equal(2, audit.Count(entry => entry.Action == "u9.bom.step-response"));
+        Assert.Equal(2, audit.Count(entry => entry.Action == "u9.bom.step-readback"));
+    }
+
+    [Fact]
+    public async Task U9ControlledChanges_PreservesOriginalAttributesInQuantityPayload()
+    {
+        var (service, state, _) = await ControlledService();
+        state.Components = [state.Components[0] with { IsEffective = false, ItemVersionCode = "V2", Remark = "原备注",
+            EffectiveDate = DateTimeOffset.Parse("2025-01-02T00:00:00+08:00"), DisableDate = DateTimeOffset.Parse("2030-01-02T00:00:00+08:00"),
+            IssueStyle = 1, SupplyStyle = 2, IsPhantomPart = true, ProjectMapNum = "原图号" }, state.Components[1]];
+        var command = ControlledCommand(8);
+        var preview = await service.PreviewAsync(command, "admin", UserRole.Administrator, default);
+        using var document = JsonDocument.Parse(preview.RequestPreview);
+        var row = document.RootElement[0].GetProperty("BOMComponents")[0];
+        Assert.Equal(8, row.GetProperty("UsageQty").GetDecimal());
+        Assert.False(row.GetProperty("IsEffective").GetBoolean());
+        Assert.Equal("2025-01-02", row.GetProperty("EffectiveDate").GetString());
+        Assert.Equal("2030-01-02", row.GetProperty("DisableDate").GetString());
+        Assert.Equal("V2", row.GetProperty("ItemVersionCode").GetString());
+        Assert.Equal("原备注", row.GetProperty("Remark").GetString());
+        Assert.Equal("原图号", row.GetProperty("ProjectMapNum").GetString());
+        Assert.Equal(1, row.GetProperty("IssueStyle").GetInt32());
+        Assert.Equal(2, row.GetProperty("SupplyStyle").GetInt32());
+        Assert.True(row.GetProperty("IsPhantomPart").GetBoolean());
+        await service.ExecuteAsync(command, preview.RequestSha256, preview.RequiredConfirmation, "admin", UserRole.Administrator, default);
+        Assert.False(state.Components[0].IsEffective);
+    }
+
+    [Fact]
+    public async Task U9ControlledChanges_StopsAfterUnexpectedEffectiveStateEvenWhenQuantityMatches()
+    {
+        var (service, state, repository) = await ControlledService();
+        state.CorruptEffectiveState = true;
+        var command = ControlledCommand(8);
+        var preview = await service.PreviewAsync(command, "admin", UserRole.Administrator, default);
+        var error = await Assert.ThrowsAsync<PdmRuleException>(() => service.ExecuteAsync(command, preview.RequestSha256, preview.RequiredConfirmation, "admin", UserRole.Administrator, default));
+        Assert.Contains("有效状态", error.Message);
+        Assert.Contains("0/1", error.Message);
+        Assert.Equal(1, state.WriteCount);
+        Assert.Contains(await repository.ListAuditAsync("admin", UserRole.Administrator, 100, default), entry => entry.Action == "u9.bom.step-readback");
+    }
+
+    [Fact]
+    public async Task U9ControlledChanges_StopsBetweenStepsWhenAnotherClientChangesEffectiveState()
+    {
+        var (service, state, _) = await ControlledService();
+        state.Components = [state.Components[0] with { UsageQty = 4 }, state.Components[0] with { Sequence = 30, UsageQty = 8 }, state.Components[1]];
+        state.MutateAfterFirstReadback = true;
+        var command = ControlledCommand(0);
+        var preview = await service.PreviewAsync(command, "admin", UserRole.Administrator, default);
+        var error = await Assert.ThrowsAsync<PdmRuleException>(() => service.ExecuteAsync(command, preview.RequestSha256, preview.RequiredConfirmation, "admin", UserRole.Administrator, default));
+        Assert.Contains("其他客户端", error.Message);
+        Assert.Contains("1/2", error.Message);
+        Assert.Equal(1, state.WriteCount);
+    }
+
+    [Fact]
+    public async Task U9ControlledChanges_MixedPlanUsesSixVerifiedSingleRowRequests()
+    {
+        var (service, state, _) = await ControlledService();
+        var template = state.Components[0];
+        state.Components = [template with { Sequence = 140 }, state.Components[1] with { Sequence = 900 },
+            template with { Sequence = 10, ItemCode = "01020000056", UsageQty = 1 },
+            template with { Sequence = 20, ItemCode = "01020000056", UsageQty = 3 },
+            template with { Sequence = 60, ItemCode = "01020014733", UsageQty = 6 }];
+        var command = ControlledCommand(8) with
+        {
+            Components = [new(10, "01021000007", 8, "001"), new(20, "01010000400", 1, "001"), new(30, "01010001817", 1, "001")],
+            PreviousApprovedComponents = [new(10, "01021000007", 12, "001"), new(20, "01020000056", 4, "001"), new(30, "01020014733", 6, "001")]
+        };
+        var preview = await service.PreviewAsync(command, "admin", UserRole.Administrator, default);
+        Assert.Equal(6, preview.ComponentChanges.Count);
+        await service.ExecuteAsync(command, preview.RequestSha256, preview.RequiredConfirmation, "admin", UserRole.Administrator, default);
+        Assert.Equal(6, state.WriteCount);
+        Assert.Equal(4, state.Components.Count);
+        Assert.Equal(8, state.Components.Single(row => row.Sequence == 140).UsageQty);
+        Assert.True(state.Components.Single(row => row.Sequence == 140).IsEffective);
+        Assert.DoesNotContain(state.Components, row => row.ItemCode is "01020000056" or "01020014733");
+        Assert.All(state.Payloads, payload =>
+        {
+            using var document = JsonDocument.Parse(payload);
+            Assert.Single(document.RootElement[0].GetProperty("BOMComponents").EnumerateArray());
+        });
+    }
+
+    [Fact]
+    public async Task U9ControlledChanges_DoesNotProceedOrRetryAfterFirstDeletionFailsReadback()
+    {
+        var (service, state, _) = await ControlledService();
+        state.Components = [state.Components[0] with { UsageQty = 4 }, state.Components[0] with { Sequence = 30, UsageQty = 8 }, state.Components[1]];
+        state.IgnoreControlledChanges = true;
+        var command = ControlledCommand(0);
+        var preview = await service.PreviewAsync(command, "admin", UserRole.Administrator, default);
+        var error = await Assert.ThrowsAsync<PdmRuleException>(() => service.ExecuteAsync(command, preview.RequestSha256, preview.RequiredConfirmation, "admin", UserRole.Administrator, default));
+        Assert.Contains("0/2", error.Message);
+        Assert.Equal(1, state.WriteCount);
+        Assert.Equal(3, state.Components.Count);
+    }
+
+    [Theory]
+    [InlineData("03021000000", "03021000001")]
+    [InlineData("03021000001", "02011000000")]
+    [InlineData("02011000000", "01021000008")]
+    public async Task NewBomRows_AllThreeLevelsUseVariableQuantityAndSpecialControl(string parent, string child)
+    {
+        var (service, state, _) = await ControlledService();
+        state.Exists = false;
+        var command = new U9BomWriteCommand(U9BomWriteOperation.Create, parent, "A1", "001", 1,
+            [new(10, child, 1, "001")]);
+        var preview = await service.PreviewAsync(command, "admin", UserRole.Administrator, default);
+        using var payload = JsonDocument.Parse(preview.RequestPreview);
+        var row = payload.RootElement[0].GetProperty("BOMComponents")[0];
+        Assert.Equal(1, row.GetProperty("UsageQtyType").GetInt32());
+        Assert.True(row.GetProperty("IsSpecialUseItem").GetBoolean());
+        Assert.Equal(0, state.WriteCount);
+    }
+
+    [Theory]
+    [InlineData(0, true)]
+    [InlineData(1, false)]
+    public async Task NewBomRows_RejectWrongUsageTypeOrSpecialControlReadback(int usageType, bool special)
+    {
+        var (service, state, _) = await ControlledService();
+        state.Exists = false;
+        state.ApplyControlledChanges = false;
+        state.Components = [state.Components[0] with { UsageQtyType = usageType, IsSpecialUseItem = special }];
+        var command = new U9BomWriteCommand(U9BomWriteOperation.Create, "02010000101", "A1", "001", 1,
+            [new(10, "01021000007", 12, "001")]);
+        var preview = await service.PreviewAsync(command, "admin", UserRole.Administrator, default);
+        await Assert.ThrowsAsync<PdmRuleException>(() => service.ExecuteAsync(command, preview.RequestSha256,
+            preview.RequiredConfirmation, "admin", UserRole.Administrator, default));
+        Assert.Equal(1, state.WriteCount);
+    }
+
+    private static async Task<(U9BomWriteService, BomWriteState, InMemoryPdmRepository)> ControlledService()
+    {
+        var time = TimeProvider.System;
+        var repository = new InMemoryPdmRepository(time);
+        var materials = new InMemoryMaterialRepository(time);
+        await materials.SaveIntegrationConfigurationAsync(new("http://u9.example.test/U9", "01", "7", "pdm", "PDM", "protected:test-secret",
+            U9MaterialContract.CreatePath, U9MaterialContract.QueryPath, true, "admin", time.GetUtcNow()), default);
+        var state = new BomWriteState { Exists = true, ApplyControlledChanges = true, Components = [
+            new(10, null, "01021000007", "平垫", null, 12, "001", "个", 1, 0, true, null, null, null, null, 0, 0, false, false),
+            new(20, null, "MANUAL", "人工添加", null, 9, "001", "个", 1, 0, true, null, null, null, null, 0, 0, false, false)] };
+        return (new(materials, repository, new BomWriteClient(state), new BomQueryClient(state), new TestProtector(), time), state, repository);
     }
 
     [Fact]
@@ -657,8 +1090,8 @@ public sealed class BomHeaderServiceTests
             Guid.NewGuid(), ProjectId, null, MaterialCodeApplicationStatus.Pending, "engineer", time.GetUtcNow(),
             null, null, null, header.Id, null, 1, ProjectBomHeaderKind.Standard), default);
 
-        var decision = await materialService.DecideMaterialCodeApplicationAsync(
-            application.Id, application.RowVersion, true, "同意", "standardizer", UserRole.ProcessReviewer, default);
+        var decision = Assert.Single(await materialService.AutomaticallyApproveBomHeaderApplicationsAsync(
+            [(application.Id, application.RowVersion)], "standardizer", default));
         var itemIntegration = new U9MaterialIntegrationService(materials, repository, new TestProtector(), client, time);
         var bomWrite = new U9BomWriteService(materials, repository, client, client, new TestProtector(), time);
         var projectBomSync = new ProjectBomU9SyncService(repository, materials, bomWrite, time);
@@ -765,6 +1198,8 @@ public sealed class BomHeaderServiceTests
 
     private sealed class AvailableCodeClient : IU9OpenApiClient
     {
+        public Exception? ReferenceFailure { get; set; }
+        public Action? BeforeReferenceQuery { get; set; }
         public List<string> ReferenceCodes { get; } = [];
         public int AuthenticationCount { get; private set; }
         public int ItemQueryCount { get; private set; }
@@ -795,6 +1230,9 @@ public sealed class BomHeaderServiceTests
         public Task<U9CustomerQueryResult> QueryCustomerReferencesAsync(string baseUrl, string path, string token, string payloadJson, CancellationToken cancellationToken)
         {
             ReferenceQueryCount++;
+            BeforeReferenceQuery?.Invoke();
+            cancellationToken.ThrowIfCancellationRequested();
+            if (ReferenceFailure is not null) throw ReferenceFailure;
             var items = ReferenceCodes.Select(code => new U9CustomerReference(code, code)).ToArray();
             return Task.FromResult(new U9CustomerQueryResult(0, null, items, items.Length));
         }
@@ -802,6 +1240,11 @@ public sealed class BomHeaderServiceTests
 
     private sealed class BomWriteState
     {
+        public bool ApplyControlledChanges { get; set; }
+        public bool IgnoreControlledChanges { get; set; }
+        public bool CorruptEffectiveState { get; set; }
+        public bool MutateAfterFirstReadback { get; set; }
+        public List<string> Payloads { get; } = [];
         public bool Exists { get; set; }
         public int WriteCount { get; set; }
         public IReadOnlyList<U9BomComponentReference> Components { get; set; } =
@@ -812,7 +1255,7 @@ public sealed class BomHeaderServiceTests
             null, "02010000101", "P700001 标准件BOM", "A1", "7", "昆山工厂", 0, 1,
             "001", "个", null, null, 0, 0, 0, "P700001", Explain,
             null, false, 0, 0,
-            Components);
+            Components.Select(row => row with { UsageQtyType = row.UsageQtyType ?? 1, IsSpecialUseItem = row.IsSpecialUseItem ?? true, IsIssueOrgFixed = row.IsIssueOrgFixed ?? true, IssueOrgCode = row.IssueOrgCode ?? "7" }).ToArray());
 
         private static string OwnershipExplain(string itemCode, string versionCode)
         {
@@ -827,8 +1270,16 @@ public sealed class BomHeaderServiceTests
         public Task<U9AuthenticationResult> AuthenticateAsync(U9AuthenticationRequest request, CancellationToken cancellationToken) =>
             Task.FromResult(new U9AuthenticationResult("token"));
 
-        public Task<U9BomQueryResult> QueryBomsAsync(string baseUrl, string path, string token, string payloadJson, CancellationToken cancellationToken) =>
-            Task.FromResult(new U9BomQueryResult(0, null, state.Exists ? [state.Bom] : []));
+        public Task<U9BomQueryResult> QueryBomsAsync(string baseUrl, string path, string token, string payloadJson, CancellationToken cancellationToken)
+        {
+            var result = new U9BomQueryResult(0, null, state.Exists ? [state.Bom] : []);
+            if (state.WriteCount == 1 && state.MutateAfterFirstReadback)
+            {
+                state.MutateAfterFirstReadback = false;
+                state.Components = state.Components.Select(row => row.ItemCode == "MANUAL" ? row with { IsEffective = false } : row).ToArray();
+            }
+            return Task.FromResult(result);
+        }
 
         public Task<U9BomOperationReference?> QueryBomOperationAsync(string baseUrl, string path, string token, string organizationCode, string itemCode, string bomVersionCode, string otherId, CancellationToken cancellationToken) =>
             Task.FromResult<U9BomOperationReference?>(null);
@@ -843,6 +1294,29 @@ public sealed class BomHeaderServiceTests
         {
             state.Exists = true;
             state.WriteCount++;
+            state.Payloads.Add(payloadJson);
+            if (state.ApplyControlledChanges && !state.IgnoreControlledChanges)
+            {
+                using var payload = JsonDocument.Parse(payloadJson);
+                // Model the observed server behavior: one row per material per request, direct fields with defaults.
+                foreach (var change in payload.RootElement[0].GetProperty("BOMComponents").EnumerateArray()
+                    .GroupBy(row => row.GetProperty("ItemMaster").GetProperty("Code").GetString()).Select(group => group.First()))
+                {
+                    var sequence = change.GetProperty("Sequence").GetInt32();
+                    if (change.GetProperty("IsDelete").GetBoolean()) state.Components = state.Components.Where(row => row.Sequence != sequence).ToArray();
+                    else
+                    {
+                        var quantity = change.TryGetProperty("UsageQty", out var usage) ? usage.GetDecimal() : 1;
+                        var effective = !state.CorruptEffectiveState && change.TryGetProperty("IsEffective", out var active) && active.GetBoolean();
+                        if (state.Components.Any(row => row.Sequence == sequence))
+                            state.Components = state.Components.Select(row => row.Sequence == sequence ? row with { UsageQty = quantity, IsEffective = effective } : row).ToArray();
+                        else
+                            state.Components = [..state.Components, new(sequence, null, change.GetProperty("ItemMaster").GetProperty("Code").GetString(), null, null,
+                                quantity, change.GetProperty("IssueUOM").GetProperty("Code").GetString(), null, change.GetProperty("ParentQty").GetDecimal(),
+                                0, effective, null, null, null, null, 0, 0, false, false)];
+                    }
+                }
+            }
             return Task.FromResult(new U9BusinessBatchResult(0, null, [new(true, null, null, "02010000101")]));
         }
 
@@ -888,7 +1362,8 @@ public sealed class BomHeaderServiceTests
                     row.GetProperty("InventoryUOM").GetProperty("Code").GetString(),
                     null,
                     null,
-                    row.TryGetProperty("Description", out var description) ? description.GetString() : null);
+                    row.TryGetProperty("Description", out var description) ? description.GetString() : null)
+                    { CreationAttributes = U9MaterialCreationRules.ReadAttributes(row) };
                 return Task.FromResult(new U9BusinessBatchResult(0, null, [new(true, null, "item-1", itemCode)]));
             }
 
@@ -918,7 +1393,13 @@ public sealed class BomHeaderServiceTests
                 0,
                 0,
                 false,
-                false)).ToArray();
+                false)
+                {
+                    UsageQtyType = component.GetProperty("UsageQtyType").GetInt32(),
+                    IsSpecialUseItem = component.GetProperty("IsSpecialUseItem").GetBoolean(),
+                    IsIssueOrgFixed = component.GetProperty("IsIssueOrgFixed").GetBoolean(),
+                    IssueOrgCode = component.GetProperty("IssueOrg").GetProperty("Code").GetString()
+                }).ToArray();
             var components = bom is null ? writtenComponents : bom.Components.Concat(writtenComponents).ToArray();
             bom = new U9BomReference(
                 "bom-1", code, null, "A1", "7", null, 0, 1, uom, null,

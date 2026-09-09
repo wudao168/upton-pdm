@@ -1,4 +1,5 @@
 import { flushPromises, mount } from '@vue/test-utils'
+import type { VNode } from 'vue'
 import ElementPlus, { ElMessageBox } from 'element-plus'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import BomHierarchyOverview from '../src/components/BomHierarchyOverview.vue'
@@ -7,6 +8,7 @@ import type { BomItem, ProjectSummary } from '../src/types'
 const api = vi.hoisted(() => ({
   listBom: vi.fn(), listBomVersions: vi.fn(), listProjectBomHeaders: vi.fn(),
   previewProjectBomU9Sync: vi.fn(), executeProjectBomU9Sync: vi.fn(),
+  retryProjectBomHeaderAutomatic: vi.fn(),
 }))
 
 vi.mock('../src/api', () => api)
@@ -32,6 +34,22 @@ describe('BomHierarchyOverview', () => {
   })
   afterEach(() => vi.restoreAllMocks())
 
+  it('opens the selected project and category even for an empty read-only BOM', async () => {
+    const root = project({ id: 'root', code: 'P-ROOT', name: '产线' })
+    const child = project({ id: 'child', code: 'P-CHILD', name: '设备', parentProjectId: 'root', rootProjectId: 'root' })
+    api.listBom.mockResolvedValue([])
+    api.listBomVersions.mockResolvedValue([])
+    api.listProjectBomHeaders.mockResolvedValue([])
+    const wrapper = mount(BomHierarchyOverview, { props: { project: root, projects: [root, child], token: 'token', editable: false } })
+    await flushPromises()
+    for (const [label, kind] of [['标准件BOM', 'Standard'], ['非标件BOM', 'NonStandard'], ['电气BOM', 'Electrical']]) {
+      await wrapper.get(`button[aria-label="进入P-CHILD的${label}"]`).trigger('click')
+      expect(wrapper.emitted('openBom')?.at(-1)).toEqual(['child', kind])
+    }
+    expect(api.executeProjectBomU9Sync).not.toHaveBeenCalled()
+    wrapper.unmount()
+  })
+
   it('shows one status row per hierarchy BOM without rendering material details', async () => {
     const root = project({ id: 'root', code: 'P-0301', name: '装配产线', rootProjectId: 'root', bomItemCategoryCode: '0301' })
     const child = project({ id: 'child', code: 'P-0302-01', name: '上料设备', parentProjectId: 'root', rootProjectId: 'root', childSequence: 1, bomItemCategoryCode: '0302' })
@@ -56,7 +74,7 @@ describe('BomHierarchyOverview', () => {
     expect(wrapper.text()).toContain('上料设备')
     expect(wrapper.text()).toContain('本级BOM料号')
     expect(wrapper.text()).toContain('上级BOM料号')
-    expect(wrapper.text()).toContain('自动同步中')
+    expect(wrapper.text()).toContain('待同步')
     expect(wrapper.text()).toContain('待BOM发布')
     expect(wrapper.findAll('tbody tr')).toHaveLength(8)
     const rootMaster = wrapper.findAll('tbody tr').find(row => row.text().includes('P-0301') && row.text().includes('三类汇总'))
@@ -81,7 +99,40 @@ describe('BomHierarchyOverview', () => {
     expect(wrapper.text()).not.toContain('归属主BOM')
     expect(wrapper.find('.bom-overview__header').exists()).toBe(false)
     expect(wrapper.find('input[type="search"]').exists()).toBe(false)
-    expect(wrapper.find('button').exists()).toBe(false)
+    expect(wrapper.findAll('.bom-overview__link')).toHaveLength(6)
+    expect(wrapper.findAll('button')).toHaveLength(7)
+    expect(wrapper.get('button[aria-label="刷新多级BOM"]').text()).toBe('刷新')
+  })
+
+  it('refreshes cached BOM data and U9 state without writes and blocks repeat clicks', async () => {
+    const root = project({ id: 'root', code: 'P-0302', name: '设备', rootProjectId: 'root' })
+    api.listBom.mockResolvedValue([])
+    api.listBomVersions.mockResolvedValue([])
+    api.listProjectBomHeaders.mockResolvedValue([{ projectId: 'root', kind: 'Master', materialCode: 'ROOT-M', rowVersion: 1 }])
+    const wrapper = mount(BomHierarchyOverview, { props: { project: root, projects: [root], token: 'token', editable: false } })
+    await flushPromises()
+    const previews = api.previewProjectBomU9Sync.mock.calls.length
+    let finish!: (value: BomItem[]) => void
+    api.listBom.mockImplementationOnce(() => new Promise<BomItem[]>(resolve => { finish = resolve }))
+    const button = wrapper.get('button[aria-label="刷新多级BOM"]')
+    await button.trigger('click')
+    expect(button.attributes('disabled')).toBeDefined()
+    expect(button.text()).toBe('刷新中…')
+    await button.trigger('click')
+    expect(api.listBom).toHaveBeenCalledTimes(6)
+    finish([item('NEW', '新物料')])
+    await flushPromises()
+    expect(button.attributes('disabled')).toBeUndefined()
+    expect(api.listBomVersions).toHaveBeenCalledTimes(2)
+    expect(api.listProjectBomHeaders).toHaveBeenCalledTimes(2)
+    expect(api.previewProjectBomU9Sync.mock.calls.length).toBeGreaterThan(previews)
+    expect(api.executeProjectBomU9Sync).not.toHaveBeenCalled()
+    expect(wrapper.findAll('tbody tr')[1].findAll('td')[4].text()).toBe('1')
+    api.listBom.mockRejectedValueOnce(new Error('刷新失败测试'))
+    await button.trigger('click')
+    await flushPromises()
+    expect(wrapper.get('[role="alert"]').text()).toBe('刷新失败测试')
+    expect(button.attributes('disabled')).toBeUndefined()
   })
 
   it('does not reload the hierarchy when background summaries only replace non-hierarchy fields', async () => {
@@ -121,7 +172,7 @@ describe('BomHierarchyOverview', () => {
     expect(wrapper.text()).toContain('自动流程')
     expect(wrapper.findAll('tbody tr')[0].text()).toContain('设备 0302')
     expect(wrapper.findAll('tbody tr')[1].text()).toContain('0201')
-    expect(wrapper.find('.bom-overview__generation button').exists()).toBe(false)
+    expect(wrapper.findAll('.bom-overview__generation button').map(button => button.text())).toEqual(['刷新'])
   })
 
   it('excludes the main project category BOMs when child projects exist', async () => {
@@ -145,7 +196,7 @@ describe('BomHierarchyOverview', () => {
     const rootRows = wrapper.findAll('tbody tr').slice(0, 4)
     expect(rootRows[0].text()).toContain('待BOM发布')
     expect(rootRows.slice(1).every(row => row.text().includes('不生成'))).toBe(true)
-    expect(wrapper.find('.bom-overview__generation button').exists()).toBe(false)
+    expect(wrapper.findAll('.bom-overview__generation button').map(button => button.text())).toEqual(['刷新'])
   })
 
   it('shows an unfinished automatic empty-BOM creation without requiring a second manual operation', async () => {
@@ -228,10 +279,76 @@ describe('BomHierarchyOverview', () => {
     await flushPromises()
 
     expect(confirm).toHaveBeenCalledWith(
-      expect.stringContaining('PLM审核总量 4 / U9C现有总量 1 / 本次上传 3'),
+      expect.objectContaining({ type: expect.any(Object) }),
       '确认同步审核通过的子件', expect.any(Object),
     )
+    const preview = mount({ render: () => confirm.mock.calls[0]![0] as VNode })
+    expect(preview.get('table[aria-label="完整数量核对"] tbody tr').findAll('td').map(cell => cell.text())).toEqual(['01020000056', '001', '1', '4', '1', '+3'])
+    expect(preview.get('details').attributes('open')).toBeDefined()
+    preview.unmount()
     expect(api.executeProjectBomU9Sync).not.toHaveBeenCalled()
   })
 
+  it('previews reductions and deletions and does not write when cancelled', async () => {
+    const root = project({ id: 'root', code: 'P700005-3', name: '测试项目', rootProjectId: 'root' })
+    api.listBom.mockResolvedValue([])
+    api.listBomVersions.mockResolvedValue([])
+    api.listProjectBomHeaders.mockResolvedValue([{ projectId: 'root', kind: 'Standard', materialCode: '02011000000', materialId: 'standard', rowVersion: 1 }])
+    api.previewProjectBomU9Sync.mockResolvedValue({ projectId: 'root', kind: 'Standard', itemCode: '02011000000', componentCount: 1, state: 'ModifyRequired',
+      writePreview: { requestSha256: 'sha', requiredConfirmation: '修改 02011000000/A1', quantityReconciliations: [],
+        componentChanges: [{ sequence: 140, itemCode: '01021000007', change: '修改', previousQuantity: 12, quantity: 8 },
+          { sequence: 10, itemCode: '01020000056', change: '删除', previousQuantity: 4, quantity: 0 }] } })
+    const confirm = vi.spyOn(ElMessageBox, 'confirm').mockRejectedValue(new Error('cancel'))
+    const wrapper = mount(BomHierarchyOverview, { props: { project: root, projects: [root], token: 'token', editable: true } })
+    await flushPromises()
+    await wrapper.get('button.bom-overview__sync').trigger('click')
+    await flushPromises()
+    const preview = mount({ render: () => confirm.mock.calls[0]![0] as VNode })
+    const rows = preview.findAll('table[aria-label="本次子件变更"] tbody tr')
+    expect(rows[0]!.findAll('td').map(cell => cell.text())).toEqual(['修改', '140', '01021000007', '12', '8', '-4'])
+    expect(rows[1]!.findAll('td').map(cell => cell.text())).toEqual(['删除', '10', '01020000056', '4', '0', '-4'])
+    expect(preview.text()).toContain('不删除整张BOM')
+    expect(preview.text()).toContain('减量/删除前记录快照')
+    preview.unmount()
+    expect(api.executeProjectBomU9Sync).not.toHaveBeenCalled()
+    confirm.mockResolvedValue('confirm' as Awaited<ReturnType<typeof ElMessageBox.confirm>>)
+    await wrapper.get('button.bom-overview__sync').trigger('click')
+    await flushPromises()
+    expect(api.executeProjectBomU9Sync).toHaveBeenCalledWith('root', 'Standard', 'sha', '修改 02011000000/A1', 'token')
+    wrapper.unmount()
+  })
+
+  it('失败状态显示原因，仅确认后重试原申请，取消和只读查看不发起写入', async () => {
+    const root = project({ id: 'root', code: 'P700005-4', name: '项目', rootProjectId: 'root' })
+    const header = { projectId: 'root', kind: 'Master', materialId: 'material', rowVersion: 1,
+      applicationId: 'application', applicationStatus: 'Pending', applicationRowVersion: 3,
+      automaticStatus: 'Failed', automaticMessage: 'U9C客户参照查询请求超时。', canRetryAutomatic: true }
+    api.listBom.mockResolvedValue([])
+    api.listBomVersions.mockResolvedValue([])
+    api.listProjectBomHeaders.mockResolvedValue([header])
+    const confirm = vi.spyOn(ElMessageBox, 'confirm').mockRejectedValue('cancel')
+    const wrapper = mount(BomHierarchyOverview, { props: { project: root, projects: [root], token: 'token', editable: true } })
+    await flushPromises()
+    expect(wrapper.text()).toContain('失败待重试')
+    expect(wrapper.text()).toContain('未同步')
+    expect(wrapper.text()).not.toContain('自动处理中')
+    const retry = wrapper.get('[aria-label="重试 P700005-4 Master 料号自动处理"]')
+    expect(retry.element.parentElement?.title).toContain('客户参照查询请求超时')
+    await retry.trigger('click')
+    await flushPromises()
+    expect(api.retryProjectBomHeaderAutomatic).not.toHaveBeenCalled()
+    confirm.mockResolvedValue('confirm' as Awaited<ReturnType<typeof ElMessageBox.confirm>>)
+    api.retryProjectBomHeaderAutomatic.mockResolvedValue({ ...header, automaticStatus: 'Queued', automaticMessage: '已进入队列', canRetryAutomatic: false, applicationStatus: 'Approved' })
+    await retry.trigger('click')
+    await flushPromises()
+    expect(api.retryProjectBomHeaderAutomatic).toHaveBeenCalledWith('root', 'Master', 'application', 3, 'token')
+    expect(wrapper.text()).toContain('已批准待同步')
+    expect(wrapper.find('[aria-label="重试 P700005-4 Master 料号自动处理"]').exists()).toBe(false)
+    wrapper.unmount()
+    const readonly = mount(BomHierarchyOverview, { props: { project: root, projects: [root], token: 'token', editable: false } })
+    await flushPromises()
+    expect(readonly.text()).toContain('失败待重试')
+    expect(readonly.find('[aria-label="重试 P700005-4 Master 料号自动处理"]').exists()).toBe(false)
+    readonly.unmount()
+  })
 })

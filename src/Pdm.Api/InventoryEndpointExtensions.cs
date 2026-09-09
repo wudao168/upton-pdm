@@ -19,6 +19,7 @@ public static class InventoryEndpointExtensions
             string? materialCode,
             string? itemName,
             string? specification,
+            string? similarSpecification,
             string? brand,
             string? warehouse,
             string? projectCode,
@@ -33,7 +34,7 @@ public static class InventoryEndpointExtensions
             var (actor, role) = CurrentUser(context.User);
             var result = await service.ListAsync(new(
                 materialCode, itemName, specification, brand, warehouse, projectCode, subproject,
-                positiveStockOnly ?? true, page ?? 1, pageSize ?? 50), actor, role, cancellationToken);
+                positiveStockOnly ?? true, page ?? 1, pageSize ?? 50, similarSpecification), actor, role, cancellationToken);
             return Results.Ok(MapPage(result));
         });
 
@@ -103,6 +104,7 @@ public static class InventoryEndpointExtensions
             row.ItemName,
             row.Brand,
             row.Specification,
+            row.SimilarityPercent,
             row.ProjectCode,
             row.ProjectName,
             row.Subproject,

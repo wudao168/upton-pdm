@@ -146,6 +146,50 @@ test.beforeEach(async ({ page }) => {
   })
 })
 
+test('hierarchy category links open the owning project BOM', async ({ page }, testInfo) => {
+  const childId = '22222222-2222-2222-2222-222222222222'
+  const base = { owner: '真实工程师', vaultLocation: 'D:\\PDM\\TEST', releaseLocation: 'D:\\Release\\TEST', isActive: true, quantity: 1, serialNumbers: [], designers: [], rootProjectId: projectId }
+  const root = { ...base, id: projectId, code: 'PRJ-REAL-001', name: '导航测试产线', bomItemCategoryCode: '0301' }
+  const child = { ...base, id: childId, code: 'PRJ-REAL-001-1', name: '导航测试子项目', parentProjectId: projectId, childSequence: 1, bomItemCategoryCode: '0302' }
+  await page.route('**/api/projects**', async route => {
+    const url = new URL(route.request().url())
+    if (url.pathname === '/api/projects') return route.fulfill({ json: [root, child] })
+    if (url.pathname === `/api/projects/${projectId}`) return route.fulfill({ json: root })
+    if (url.pathname === `/api/projects/${childId}`) return route.fulfill({ json: child })
+    if (url.pathname.startsWith(`/api/projects/${childId}/`)) return route.fallback({ url: url.toString().replace(childId, projectId) })
+    return route.fallback()
+  })
+  const errors: string[] = []
+  page.on('pageerror', error => errors.push(error.message))
+  page.on('console', message => { if (message.type() === 'error' || message.type() === 'warning') errors.push(message.text()) })
+  await page.setViewportSize({ width: 1988, height: 1114 })
+  await page.goto('/')
+  const login = page.getByLabel('登录PLM')
+  await login.getByRole('textbox', { name: '账号' }).fill('engineer')
+  await login.getByRole('textbox', { name: '密码' }).fill('correct-password')
+  await login.getByRole('button', { name: '登录', exact: true }).click()
+  await page.getByRole('button', { name: '项目列表', exact: true }).click()
+  await page.getByRole('button', { name: '进入项目' }).first().click()
+  await page.getByRole('button', { name: 'BOM', exact: true }).click()
+  await page.getByRole('tab', { name: '多级总览' }).click()
+  await expect(page.getByRole('button', { name: '进入PRJ-REAL-001-1的标准件BOM', exact: true })).toBeVisible()
+  await page.screenshot({ path: testInfo.outputPath('hierarchy-links.png') })
+  for (const category of ['标准件BOM', '非标件BOM', '电气BOM']) {
+    await page.getByRole('button', { name: `进入PRJ-REAL-001-1的${category}`, exact: true }).click()
+    await expect(page.getByRole('tab', { name: category })).toHaveAttribute('aria-selected', 'true')
+    await expect(page.locator('.pdm-project-detail')).toContainText('导航测试子项目')
+    await expect(page.getByLabel('BOM维护')).toBeVisible()
+    if (category === '标准件BOM') await page.screenshot({ path: testInfo.outputPath('child-standard-bom.png') })
+    await page.getByRole('tab', { name: '多级总览' }).click()
+  }
+  await page.getByRole('button', { name: '进入PRJ-REAL-001的标准件BOM', exact: true }).click()
+  await expect(page.getByRole('tab', { name: '标准件BOM' })).toHaveAttribute('aria-selected', 'true')
+  await expect(page.locator('.pdm-project-detail')).toContainText('导航测试产线')
+  await expect(page.locator('vite-error-overlay')).toHaveCount(0)
+  expect(await page.title()).not.toBe('')
+  expect(errors).toEqual([])
+})
+
 test('engineer logs in and reads the API-backed PLM workspace', async ({ page }, testInfo) => {
   await page.setViewportSize({ width: 1920, height: 1080 })
   await page.addInitScript(() => {
@@ -348,11 +392,13 @@ test('BOM duplicate candidates require confirmation and summary quantity is edit
   await page.getByRole('tab', { name: '标准件BOM' }).click()
 
   const materialCodeActions = page.locator('.pdm-bom-selection-actions .pdm-bom-material-code-toolbar-action')
-  await expect(materialCodeActions).toHaveText(['引用物料', '核对料号', '申请料号'])
+  await expect(materialCodeActions).toHaveText(['引用物料', '引用套件', '关联物料', '核对料号', '申请料号'])
   expect(await materialCodeActions.evaluateAll(buttons => buttons.map(button => {
     const box = button.getBoundingClientRect()
     return { width: box.width, height: box.height }
   }))).toEqual([
+    { width: 70, height: 28 },
+    { width: 70, height: 28 },
     { width: 70, height: 28 },
     { width: 70, height: 28 },
     { width: 70, height: 28 },

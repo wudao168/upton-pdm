@@ -181,8 +181,11 @@ export interface PdmSystemSettings {
   approvalWorkflows?: ReleaseApprovalSettings
   materialCodeApproval?: MaterialCodeApprovalSettings
   releaseChangeReasonTypes?: string[]
+  formalSupplementPolicies?: FormalSupplementPolicies
 }
 export interface MaterialCodeApprovalSettings { version: number; approverRoleCodes: string[] }
+export interface FormalSupplementPolicy { maximumCount?: number | null; validDays?: number | null }
+export interface FormalSupplementPolicies { standard: FormalSupplementPolicy; electrical: FormalSupplementPolicy }
 export type ApprovalStage = 'ProcessReview' | 'Approval' | 'MechanicalEngineer' | 'MainDesigner' | 'MechanicalSupervisor' | 'HardwareEngineer' | 'HardwareSupervisor' | 'StandardizationSupervisor'
 export type ApprovalAssigneeSource = 'Submitter' | 'ProjectDesignLead' | 'FixedUser' | 'PrimaryUnitManager' | 'ParentUnitManager'
 export interface ApprovalWorkflowStepTemplate { stage: ApprovalStage; name: string; assigneeSource: ApprovalAssigneeSource; fixedAssignee?: string | null }
@@ -430,7 +433,14 @@ export interface BomItem {
   sourceConfiguration?: string
   sourceInstancePath?: string
   parentDrawingNumber?: string
-  source?: 'Auto' | 'Manual' | 'MaterialRelation'
+  source?: 'Auto' | 'Manual' | 'MaterialRelation' | 'EngineeringKit'
+  engineeringKitReferenceId?: string
+  engineeringKitId?: string
+  engineeringKitRevisionId?: string
+  engineeringKitCode?: string
+  engineeringKitVersionNumber?: number
+  engineeringKitComponentId?: string
+  engineeringKitComponentOptional?: boolean
   manuallyOverridden?: boolean
   pendingRemoval?: boolean
   pendingClassification?: boolean
@@ -452,6 +462,74 @@ export interface BomItem {
 export type BomKind = 'Standard' | 'NonStandard' | 'Unclassified' | 'Electrical'
 export type BomExportMode = 'Summary' | 'Structure'
 export type BomClassification = BomKind | 'Virtual'
+
+export type EngineeringKitRevisionState = 'Draft' | 'Released'
+
+export interface EngineeringKitComponent {
+  id: string
+  revisionId: string
+  materialId: string
+  materialCode: string
+  materialName: string
+  quantity: number
+  unit: string
+  isOptional: boolean
+  sortOrder: number
+}
+
+export interface EngineeringKitRevision {
+  id: string
+  kitId: string
+  versionNumber: number
+  state: EngineeringKitRevisionState
+  changeNote?: string
+  components: EngineeringKitComponent[]
+  createdBy: string
+  createdAt: string
+  publishedBy?: string
+  publishedAt?: string
+}
+
+export interface EngineeringKit {
+  id: string
+  code?: string
+  name: string
+  description?: string
+  currentReleasedRevisionId?: string
+  revisions: EngineeringKitRevision[]
+  createdBy: string
+  createdAt: string
+  updatedBy: string
+  updatedAt: string
+  rowVersion: number
+}
+
+export interface EngineeringKitExpansionLine {
+  kitComponentId: string
+  materialId: string
+  materialCode: string
+  materialName: string
+  quantity: number
+  unit: string
+  material?: string
+  specification?: string
+  remark?: string
+  brand?: string
+  surfaceTreatment?: string
+  weight?: string
+  isOptional: boolean
+}
+
+export interface EngineeringKitExpansion {
+  referenceId: string
+  kitId: string
+  revisionId: string
+  kitCode: string
+  kitName: string
+  versionNumber: number
+  kitQuantity: number
+  lines: EngineeringKitExpansionLine[]
+}
 export interface BatchUpdateBomItemsInput {
   itemIds: string[]
   fields: string[]
@@ -637,6 +715,18 @@ export interface ReleasePackageSummary {
   createsManufacturingBaseline: boolean
   locksDocuments: boolean
   wholeSetMultiplier?: number
+  changeReasonSelections?: ReleaseChangeReasonSelection[]
+  formalSupplementPolicySnapshotted?: boolean
+  formalSupplementMaximumCount?: number | null
+  formalSupplementValidDays?: number | null
+}
+
+export interface ReleaseChangeReasonSelection {
+  categoryCode: string
+  reasonCode: string
+  category: string
+  reason: string
+  detail?: string | null
 }
 
 export type DrawingReviewPackageState = 'InReview' | 'ChangesRequested' | 'WritingProperties' | 'Approved' | 'Stale' | 'Withdrawn'
@@ -1062,6 +1152,10 @@ export interface ProjectBomHeader {
   applicationId?: string | null
   requestedBy?: string | null
   requestedAt?: string | null
+  automaticStatus?: 'NotRequested' | 'ApprovalQueued' | 'Running' | 'Rejected' | 'Completed' | 'Failed' | 'WaitingRetry' | 'Queued'
+  automaticMessage?: string | null
+  canRetryAutomatic?: boolean
+  applicationRowVersion?: number
 }
 
 export type MaterialCodeApplicationStatus = 'Pending' | 'Approved' | 'Rejected'
@@ -1434,6 +1528,9 @@ export interface U9BomWriteInput {
 }
 
 export interface U9BomWritePreview {
+  componentChanges?: Array<{ sequence: number; itemCode: string; change: string; previousQuantity: number; quantity: number }>
+  modifiedComponentCount?: number
+  deletedComponentCount?: number
   operation: U9BomWriteOperation
   path: string
   requestPreview: string
@@ -1559,6 +1656,7 @@ export interface U9MaterialFullSyncStatusResponse {
 }
 
 export interface U9InventoryRow {
+  similarityPercent?: number | null
   organizationCode: string
   warehouseCode: string
   warehouseName: string
@@ -1617,6 +1715,7 @@ export interface U9InventorySyncStatusResponse {
 }
 
 export interface U9InventoryFilters {
+  similarSpecification?: string
   materialCode?: string
   itemName?: string
   specification?: string
@@ -1627,6 +1726,85 @@ export interface U9InventoryFilters {
   positiveStockOnly?: boolean
   page?: number
   pageSize?: number
+}
+
+export interface ProcurementDocumentDetail {
+  kind: '请购' | '采购'
+  documentNumber: string
+  lineNumber: number
+  lineStatus: string
+  rawLineStatus: number
+  isCanceled: boolean
+  quantity: number
+  arrivedQuantity: number
+  remark?: string | null
+  businessDate?: string | null
+  deliveryDate?: string | null
+  latestDeliveryDate?: string | null
+  matchKind: string
+}
+
+export interface ProjectProcurementTrackingItem {
+  sequence: number
+  projectCode: string
+  subprojectCode?: string | null
+  materialCode: string
+  materialName: string
+  specification?: string | null
+  remark?: string | null
+  brand?: string | null
+  quantity: number | null
+  bomKind: string
+  releasePackageNumber?: string | null
+  purchaseRequisitionNumbers: string[]
+  purchaseRequisitionStatus: string
+  purchaseRequisitionDeliveryDate?: string | null
+  purchaseOrderNumbers: string[]
+  purchaseOrderStatus: string
+  purchaseQuantity: number
+  arrivedQuantity: number
+  purchaseRemark?: string | null
+  purchaseDeliveryDate?: string | null
+  latestDeliveryDate?: string | null
+  requestedQuantity: number | null
+  approvedQuantity: number | null
+  hasDeliveryDelay?: boolean
+  details: ProcurementDocumentDetail[]
+}
+
+export interface ProjectProcurementTrackingResult {
+  projectId: string
+  projectCode: string
+  subprojectCode?: string | null
+  items: ProjectProcurementTrackingItem[]
+  lastSuccessfulRefreshAt?: string | null
+  lastRefreshError?: string | null
+  hasPublishedBom: boolean
+}
+
+export interface U9ProcurementSyncSettings {
+  autoSyncEnabled: boolean
+  syncIntervalMinutes: number
+  queryPath: string
+  updatedBy?: string | null
+  updatedAt?: string | null
+}
+
+export interface U9ProcurementSyncRun {
+  id: string
+  triggerKind: string
+  status: 'Running' | 'Succeeded' | 'Failed'
+  sourceRowCount: number
+  storedRowCount: number
+  projectCount: number
+  lastError?: string | null
+  startedAt: string
+  completedAt?: string | null
+}
+
+export interface U9ProcurementSyncStatusResponse {
+  settings: U9ProcurementSyncSettings
+  latestRun?: U9ProcurementSyncRun | null
 }
 
 export interface UpdateU9MaterialIntegrationInput {

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, watch } from 'vue'
-import { ElMessage } from 'element-plus'
+import { ElMessage } from '../statusMessage'
 import { ArrowDown, ArrowUp } from '@lucide/vue'
 import type { FolderPermissionRule, PdmUser, ProjectFolderTemplateNode, RolePermissionSettings } from '../types'
 

@@ -113,7 +113,9 @@ describe('ProjectWorkspaceHeader', () => {
     expect(wrapper.get('[aria-label="选择项目号 P700002-1"]').classes()).toContain('is-active')
     expect(wrapper.findAll('.pdm-project-family__state i')).toHaveLength(0)
     expect(wrapper.find('.pdm-project-selected-summary').exists()).toBe(false)
-    expect(wrapper.findAll('.pdm-project-tabs button')).toHaveLength(7)
+    const projectTabs = wrapper.findAll('.pdm-project-tabs button')
+    expect(projectTabs).toHaveLength(8)
+    expect(projectTabs.map(button => button.text())).toEqual(['概览', '文件', '图档', 'BOM', '发布', '备料', '版本', '记录'])
     expect(wrapper.text()).not.toContain('图纸审核')
     expect(sidebar.get('[aria-label="选择项目号 P700002"] .pdm-project-family__state').text()).toBe('可编辑')
     expect(sidebar.get('[aria-label="选择项目号 P700002-1"] .pdm-project-family__state').text()).toBe('正常')
@@ -313,5 +315,19 @@ describe('ProjectWorkspaceHeader', () => {
 
     expect(wrapper.get('[aria-label="选择项目号 P700002"] .pdm-project-family__state').text()).toBe('正常')
     expect(wrapper.text()).not.toContain('已检出')
+  })
+
+  it('统一引用结构统计后，子项目选中和切走均保持41个三维图档', async () => {
+    const child = { ...childProject, documentCount: 41, modelDocumentCount: 41, drawingDocumentCount: 0 }
+    const wrapper = mount(ProjectWorkspaceHeader, {
+      props: { project: rootProject, projects: [rootProject, child], activeTab: 'overview', activeDocumentCounts: { all: 3, model: 2, drawing: 1 } },
+    })
+    const counts = () => wrapper.get('[aria-label="选择项目号 P700002-1"] .pdm-project-family__document-counts').attributes('aria-label')
+    expect(counts()).toBe('3D图档 41，2D图档 0')
+    await wrapper.setProps({ project: child, activeDocumentCounts: { all: 41, model: 41, drawing: 0 } })
+    expect(counts()).toBe('3D图档 41，2D图档 0')
+    await wrapper.setProps({ project: rootProject, activeDocumentCounts: { all: 3, model: 2, drawing: 1 } })
+    expect(counts()).toBe('3D图档 41，2D图档 0')
+    wrapper.unmount()
   })
 })

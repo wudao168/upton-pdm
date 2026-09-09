@@ -115,10 +115,13 @@ public sealed class ApprovalU9AutomationService(
         }
 
         var outcomes = new List<ApprovalU9BomOutcome>();
+        var hasPendingHeaders = false;
         foreach (var (project, masterOnly) in targets)
         {
             var approvedApplications = await materials.ListMaterialCodeApplicationsAsync(
                 project.Id, MaterialCodeApplicationStatus.Approved, cancellationToken);
+            hasPendingHeaders |= (await materials.ListMaterialCodeApplicationsAsync(
+                project.Id, MaterialCodeApplicationStatus.Pending, cancellationToken)).Any(application => application.BomHeaderKind is not null);
             var approvedHeaders = approvedApplications
                 .Where(application => application.BomHeaderKind is not null && application.MaterialId is not null)
                 .Select(application => (application.BomHeaderKind!.Value, application.MaterialId!.Value))
@@ -153,6 +156,12 @@ public sealed class ApprovalU9AutomationService(
                 "U9C料品已同步，但至少一张BOM创建或追加失败；可在项目BOM总览中检查并重试。",
                 null,
                 outcomes);
+        if (outcomes.Any(outcome => outcome.State == ProjectBomU9AutomaticState.AwaitingConfirmation))
+            return new(ApprovalU9AutomationStage.WaitingForDependencies,
+                "BOM包含减量或删除变更，请在项目BOM总览核对后人工确认同步；后台未执行这些变更。", null, outcomes);
+        if (hasPendingHeaders)
+            return new(ApprovalU9AutomationStage.WaitingForDependencies,
+                "BOM表头料号尚未完成自动审批；请在多级总览查看后台进度或失败原因，无需人工审批。", null, outcomes);
         if (outcomes.Any(outcome => outcome.State == ProjectBomU9AutomaticState.WaitingForDependencies))
             return new(ApprovalU9AutomationStage.WaitingForDependencies,
                 "U9C料品已同步；BOM正在等待其余正式料号，后续审批完成时会自动续跑。",

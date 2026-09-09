@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { ElMessage, ElMessageBox } from 'element-plus'
+import { ElMessage } from '../statusMessage'
+import { ElMessageBox } from 'element-plus'
 import { computed, onMounted, reactive, ref, watch } from 'vue'
 import SquareLoader from './SquareLoader.vue'
 import MaterialEditorDialog from './MaterialEditorDialog.vue'
@@ -204,11 +205,8 @@ const selectedExecutableSyncTasks = computed(() => {
 const syncTaskNoticeCount = computed(() => currentSynchronizationTasks.value.length)
 const codeApprovalNoticeCount = computed(() => props.canDecideMaterialCode
   ? codeApplications.value.filter(application => application.status === 'Pending' && application.applicationType !== 'BomHeader').length
-    + new Set(codeApplications.value
-      .filter(application => application.status === 'Pending' && application.applicationType === 'BomHeader')
-      .map(application => application.projectId)).size
   : 0)
-const pendingCodeApplicationCount = computed(() => codeApplications.value.filter(application => application.status === 'Pending').length)
+const pendingCodeApplicationCount = computed(() => codeApplications.value.filter(application => application.status === 'Pending' && application.applicationType !== 'BomHeader').length)
 const currentWorkCount = computed(() => pendingCodeApplicationCount.value + currentSynchronizationTasks.value.length)
 const historyCodeApplicationRows = computed(() => codeApplications.value.filter(application => applicationWorkflowCompleted(application)))
 const synchronizationHistoryTasks = computed(() => tasks.value
@@ -270,35 +268,8 @@ const workflowLabels: Record<string, string> = {
   PendingMaterialSync: '待同步料品', MaterialSyncFailed: '料品同步失败', PendingBomSync: '待同步A1 BOM', BomSyncFailed: 'A1 BOM同步失败',
 }
 const bomHeaderLabels: Record<string, string> = { Master: '项目主BOM', Standard: '标准件BOM', NonStandard: '非标件BOM', Electrical: '电气BOM' }
-const bomHeaderOrder: Record<string, number> = { Master: 0, Standard: 1, NonStandard: 2, Electrical: 3 }
-const pendingCodeApplicationRows = computed<MaterialCodeApprovalRow[]>(() => {
-  const pendingGroups = new Map<string, MaterialCodeApplication[]>()
-  for (const application of codeApplications.value) {
-    if (application.status !== 'Pending' || application.applicationType !== 'BomHeader') continue
-    const group = pendingGroups.get(application.projectId) ?? []
-    group.push(application)
-    pendingGroups.set(application.projectId, group)
-  }
-
-  const emittedProjects = new Set<string>()
-  return codeApplications.value.flatMap(application => {
-    if (application.status !== 'Pending') return []
-    if (application.applicationType !== 'BomHeader') return [application]
-    if (emittedProjects.has(application.projectId)) return []
-    emittedProjects.add(application.projectId)
-    const groupedApplications = [...(pendingGroups.get(application.projectId) ?? [application])]
-      .sort((left, right) => (bomHeaderOrder[left.bomHeaderKind ?? ''] ?? 99) - (bomHeaderOrder[right.bomHeaderKind ?? ''] ?? 99))
-    if (groupedApplications.length === 1) return [application]
-    const categoryCodes = [...new Set(groupedApplications.map(item => item.categoryCode).filter(Boolean))]
-    return [{
-      ...application,
-      id: `bom-header-group:${application.projectId}`,
-      categoryCode: categoryCodes.join('、'),
-      applicationName: `${application.projectCode || application.projectName || '项目'} ${groupedApplications.length} 个BOM料号`,
-      groupedApplications,
-    }]
-  })
-})
+const pendingCodeApplicationRows = computed<MaterialCodeApprovalRow[]>(() => codeApplications.value
+  .filter(application => application.status === 'Pending' && application.applicationType !== 'BomHeader'))
 const pagedPendingCodeApplicationRows = computed(() => pendingCodeApplicationRows.value.slice(
   (pendingApprovalPage.value - 1) * workflowPageSize,
   pendingApprovalPage.value * workflowPageSize,
@@ -367,7 +338,7 @@ function openInventory(item?: PdmMaterial) {
 }
 
 function formatInventoryQuantity(value: number) {
-  return Number(value || 0).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+  return Number(value || 0).toLocaleString('zh-CN', { maximumFractionDigits: 0 })
 }
 
 function rowInventoryTooltip(item: PdmMaterial) {
@@ -737,7 +708,8 @@ function showApprovalResult(
 }
 
 async function decideCodeApplication(application: MaterialCodeApprovalRow, approved: boolean) {
-  const targets = applicationsForApprovalRow(application)
+  const targets = applicationsForApprovalRow(application).filter(item => item.applicationType !== 'BomHeader')
+  if (!targets.length) return
   let comment = ''
   if (!approved) {
     try {
@@ -782,14 +754,14 @@ async function decideCodeApplication(application: MaterialCodeApprovalRow, appro
 }
 
 function canSelectCodeApplication(application: MaterialCodeApprovalRow) {
-  return applicationsForApprovalRow(application).every(item => item.status === 'Pending')
+  return applicationsForApprovalRow(application).every(item => item.status === 'Pending' && item.applicationType !== 'BomHeader')
     && props.canDecideMaterialCode && !batchDecidingApplications.value && decidingApplicationId.value === null
 }
 
 async function decideSelectedCodeApplications(approved: boolean) {
   const targets = [...new Map(selectedCodeApplications.value
     .flatMap(applicationsForApprovalRow)
-    .filter(application => application.status === 'Pending')
+    .filter(application => application.status === 'Pending' && application.applicationType !== 'BomHeader')
     .map(application => [application.id, application])).values()]
   if (targets.length === 0 || batchDecidingApplications.value || decidingApplicationId.value !== null) return
 
@@ -1455,9 +1427,6 @@ onMounted(() => {
                   <el-table class="material-code-approval-table material-code-approval-table--history" :data="pagedApprovalHistoryRows" row-key="id" stripe table-layout="fixed" :fit="true" empty-text="尚无审批历史">
                     <el-table-column label="申请类型" width="64"><template #default="{ row }">{{ applicationTypeLabel(row) }}</template></el-table-column>
                     <el-table-column label="来源项目" width="116" show-overflow-tooltip><template #default="{ row }">{{ row.projectCode ? `${row.projectCode} · ${row.projectName || '未命名项目'}` : row.projectId }}</template></el-table-column>
-                    <el-table-column label="BOM层级" width="82" show-overflow-tooltip><template #default="{ row }">{{ applicationTargetLabel(row) }}</template></el-table-column>
-                    <el-table-column prop="categoryCode" label="料号分类" width="64"><template #default="{ row }">{{ row.categoryCode || '—' }}</template></el-table-column>
-                    <el-table-column prop="applicationName" label="申请对象" width="110" show-overflow-tooltip><template #default="{ row }">{{ row.applicationName || row.bomItemName || '—' }}</template></el-table-column>
                     <el-table-column label="申请人" width="70" show-overflow-tooltip><template #default="{ row }">{{ displayUserName(row.requestedBy) }}</template></el-table-column>
                     <el-table-column label="申请时间" width="116" show-overflow-tooltip><template #default="{ row }">{{ dateTimeLabel(row.requestedAt) }}</template></el-table-column>
                     <el-table-column label="状态" width="72"><template #default="{ row }"><el-tag :type="row.status === 'Approved' ? 'success' : 'danger'">{{ row.status === 'Approved' ? '已批准' : '已退回' }}</el-tag></template></el-table-column>
@@ -1609,7 +1578,6 @@ onMounted(() => {
 .material-code-approval-workflow{height:100%;min-height:0;overflow:auto;padding-right:2px}.material-code-approval-subtabs{min-height:0}.material-code-approval-subtabs :deep(.el-tabs__content),.material-code-approval-subtabs :deep(.el-tab-pane){height:auto;min-height:0;overflow:visible}.material-code-approval-subtabs :deep(.el-tabs__header){margin:0 0 8px}.material-code-approval-subtabs :deep(.el-tabs__item){height:30px;font-size:11px;font-weight:600}.material-code-approval-subtab-label{display:inline-flex;align-items:center;gap:5px}.material-code-approval-subtab-label em{min-width:18px;height:18px;padding:0 5px;border-radius:9px;background:#e0f2fe;color:#0369a1;font-size:10px;font-style:normal;line-height:18px;text-align:center}
 .material-step-feedback{position:sticky;top:0;z-index:4;min-height:82px;max-height:132px;margin-bottom:8px;overflow:auto;padding:7px 9px;border:1px solid #cbd5e1;border-radius:6px;background:#f8fafc;color:#475569;font-size:11px}.material-step-feedback__status,.material-step-feedback__result header{display:flex;align-items:flex-start;gap:8px}.material-step-feedback__status{padding-bottom:5px;border-bottom:1px solid #e2e8f0}.material-step-feedback__status>strong,.material-step-feedback__result header>strong{flex:0 0 auto;color:#0f172a;font-size:11px}.material-step-feedback__status>span,.material-step-feedback__result header>span{min-width:0;font-weight:600;line-height:1.5}.material-step-feedback__status>span.is-running{color:#1d4ed8}.material-step-feedback__result{padding-top:5px}.material-step-feedback__result p{margin:3px 0 0;line-height:1.5}.material-step-feedback__result ul{margin:4px 0 0;padding-left:18px;line-height:1.5}.material-step-feedback.is-success{border-color:#bbf7d0;background:#f0fdf4}.material-step-feedback.is-success .material-step-feedback__result header>span{color:#15803d}.material-step-feedback.is-warning{border-color:#fde68a;background:#fffbeb}.material-step-feedback.is-warning .material-step-feedback__result header>span{color:#b45309}.material-step-feedback.is-error{border-color:#fecaca;background:#fef2f2}.material-step-feedback.is-error .material-step-feedback__result header>span{color:#dc2626}.material-step-feedback.is-empty .material-step-feedback__result header>span,.material-step-feedback.is-empty .material-step-feedback__result p{color:#64748b}
 .material-code-workflow-columns{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);align-items:start;gap:10px;min-width:0}.material-code-workflow-stage{min-width:0;overflow:hidden;padding:10px;border:1px solid #dbe4ef;border-radius:8px;background:#fff}.material-code-workflow-stage__title{display:flex;align-items:center;gap:8px;margin-bottom:8px;color:#334155}.material-code-workflow-stage__title strong{color:#0f766e;font-size:12px;white-space:nowrap}.material-code-workflow-stage__title span{overflow:hidden;color:#64748b;text-overflow:ellipsis;white-space:nowrap}
-.material-code-history-columns{grid-template-columns:1fr}
 .material-sync-toolbar{display:flex;align-items:center;gap:8px;margin-bottom:8px}.material-sync-toolbar :deep(.el-button){min-width:110px;height:28px;margin-left:0;font-size:11px}.material-sync-toolbar>span{color:#64748b;font-size:11px}
 .material-sync-table{width:100%;min-width:0;max-width:100%}.material-sync-table :deep(.el-table__cell){padding-left:0;padding-right:0;text-align:center}.material-sync-table :deep(.cell){overflow:hidden;padding:0 4px;text-overflow:ellipsis;white-space:nowrap}.material-sync-table :deep(.el-button){margin-left:0;padding:2px 3px;font-size:11px}
 .material-code-approval-toolbar{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:8px}.material-code-approval-toolbar__actions{display:flex;align-items:center;gap:6px}.material-code-approval-toolbar :deep(.el-button){min-width:76px;height:28px;margin-left:0;font-size:11px}.material-code-approval-toolbar>span{color:#64748b;font-size:11px}

@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, reactive, ref, watch } from 'vue'
-import { ElMessage, ElMessageBox } from 'element-plus'
+import { ElMessage } from '../statusMessage'
+import { ElMessageBox } from 'element-plus'
 import { CopyPlus, LockKeyhole, Trash2 } from '@lucide/vue'
 import type { CreateRoleInput, PermissionDefinition, RolePermissionDirectory, RolePermissionSettings } from '../types'
 

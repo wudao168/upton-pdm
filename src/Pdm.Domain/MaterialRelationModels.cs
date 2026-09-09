@@ -93,4 +93,5 @@ public sealed record MaterialRelationReview(
     decimal MainQuantity,
     string? Reason,
     string UpdatedBy,
-    DateTimeOffset UpdatedAt);
+    DateTimeOffset UpdatedAt,
+    string? BomFingerprint = null);

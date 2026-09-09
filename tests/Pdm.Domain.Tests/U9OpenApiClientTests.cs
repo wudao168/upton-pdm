@@ -153,6 +153,57 @@ public sealed class U9OpenApiClientTests
     }
 
     [Fact]
+    public async Task QueryProcurement_ParsesPrAndPoRows_WithoutFinancialFields()
+    {
+        var rows = JsonSerializer.Serialize<object[]>(
+        [
+            new
+            {
+                OrganizationCode = "7", RecordKind = "pr", LineId = "101", SourcePrLineId = "101",
+                DocumentNumber = "PR2601130042", LineNumber = 10, LineStatus = 2, IsCanceled = false,
+                BusinessDate = "2026-01-13", MaterialCode = "01020000089", ItemName = "接头",
+                Specification = "HG-10-16MM", Brand = "UPTON", ProjectCode = "P701911",
+                ProjectName = "88扁管手动封堵工装", Subproject = "P701911-1",
+                RequestedQuantity = 4m, ApprovedQuantity = 4m, PurchaseQuantity = 0m, ArrivedQuantity = 0m,
+                DeliveryDate = "2026-01-20"
+            },
+            new
+            {
+                OrganizationCode = "7", RecordKind = "po", LineId = "202", SourcePrLineId = "101",
+                DocumentNumber = "PO2601130099", LineNumber = 10, LineStatus = 3, IsCanceled = false,
+                BusinessDate = "2026-01-14", MaterialCode = "01020000089", ItemName = "接头",
+                Specification = "HG-10-16MM", Brand = "UPTON", ProjectCode = "P701911",
+                ProjectName = "88扁管手动封堵工装", Subproject = "P701911-1",
+                RequestedQuantity = 0m, ApprovedQuantity = 0m, PurchaseQuantity = 4m, ArrivedQuantity = 2m,
+                PurchaseRemark = "分批到货", DeliveryDate = "2026-01-25", LatestDeliveryDate = "2026-01-28"
+            }
+        ]);
+        var handler = new RecordingHandler(JsonSerializer.Serialize(new { ResCode = 0, Success = true, Data = rows }));
+        var client = new U9OpenApiClient(new HttpClient(handler));
+
+        var result = await client.QueryProcurementAsync(
+            "http://u9.example.test/U9", "/webapi/QueryCommon/QueryInfoBySql", "token-123", "7",
+            ["P701911", "P701911-1"], default);
+
+        Assert.True(result.Success);
+        Assert.Collection(result.Rows,
+            requisition => Assert.Equal(("PR", "101", "PR2601130042", 4m),
+                (requisition.RecordKind, requisition.LineId, requisition.DocumentNumber, requisition.RequestedQuantity)),
+            order =>
+            {
+                Assert.Equal(("PO", "101", "PO2601130099", 4m, 2m),
+                    (order.RecordKind, order.SourcePrLineId, order.DocumentNumber, order.PurchaseQuantity, order.ArrivedQuantity));
+                Assert.Equal("分批到货", order.PurchaseRemark);
+                Assert.Equal(new DateTime(2026, 1, 28), order.LatestDeliveryDate?.DateTime);
+            });
+        Assert.Contains("PM_POShipLine", handler.RequestBody);
+        Assert.Contains("SrcDocInfo_SrcDocLine_EntityID", handler.RequestBody);
+        Assert.DoesNotContain("OrderPrice", handler.RequestBody, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("TaxRate", handler.RequestBody, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("TotalMny", handler.RequestBody, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
     public async Task QueryItems_ParsesU9InternalNestedEntityNames()
     {
         var rows = JsonSerializer.Serialize<object[]>(
@@ -359,7 +410,9 @@ public sealed class U9OpenApiClientTests
                 component.UsageQty, component.IssueUomCode, component.ParentQty, component.IsEffective,
                 component.Remark, component.IsPhantomPart));
         Assert.Equal("token-123", handler.Token);
-        Assert.Contains(U9BomContract.QueryPath, handler.RequestUri);
+        Assert.Contains("/webapi/QueryCommon/QueryInfoBySql", handler.RequestUri);
+        Assert.Contains("b.ItemMaster IN (1001)", handler.RequestBody);
+        Assert.Null(component.IsIssueOrgFixed); // A missing supplemental row must not be treated as checked.
     }
 
     [Fact]
@@ -424,16 +477,18 @@ public sealed class U9OpenApiClientTests
         public HttpMethod? RequestMethod { get; private set; }
         public string RequestUri { get; private set; } = string.Empty;
         public string? Token { get; private set; }
+        public string RequestBody { get; private set; } = string.Empty;
 
-        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
         {
             RequestMethod = request.Method;
             RequestUri = request.RequestUri?.ToString() ?? string.Empty;
             Token = request.Headers.TryGetValues("token", out var values) ? values.SingleOrDefault() : null;
-            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+            RequestBody = request.Content is null ? string.Empty : await request.Content.ReadAsStringAsync(cancellationToken);
+            return new HttpResponseMessage(HttpStatusCode.OK)
             {
                 Content = new StringContent(responseJson, Encoding.UTF8, "application/json")
-            });
+            };
         }
     }
 }

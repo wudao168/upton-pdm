@@ -163,12 +163,12 @@ public sealed class MySqlMaterialRelationRepository : IMaterialRelationRepositor
         await using var connection = await OpenAsync(cancellationToken);
         var rows = await connection.QueryAsync<ReviewRow>(new CommandDefinition("""
             SELECT project_id ProjectId,main_bom_item_id MainBomItemId,revision_id RevisionId,group_id GroupId,
-                   decision Decision,main_quantity MainQuantity,reason Reason,updated_by UpdatedBy,updated_at UpdatedAt
+                   decision Decision,main_quantity MainQuantity,reason Reason,updated_by UpdatedBy,updated_at UpdatedAt,bom_fingerprint BomFingerprint
             FROM material_relation_review WHERE project_id=@ProjectId
             """, new { ProjectId = projectId }, cancellationToken: cancellationToken));
         return rows.Select(item => new MaterialRelationReview(item.ProjectId, item.MainBomItemId, item.RevisionId, item.GroupId,
             Enum.Parse<MaterialRelationReviewDecision>(item.Decision), item.MainQuantity, item.Reason, item.UpdatedBy,
-            new DateTimeOffset(item.UpdatedAt, TimeSpan.Zero))).ToArray();
+            new DateTimeOffset(item.UpdatedAt, TimeSpan.Zero), item.BomFingerprint)).ToArray();
     }
 
     public async Task ReplaceReviewsAsync(Guid projectId, Guid mainBomItemId, IReadOnlyList<MaterialRelationReview> reviews, CancellationToken cancellationToken)
@@ -180,9 +180,9 @@ public sealed class MySqlMaterialRelationRepository : IMaterialRelationRepositor
             new { ProjectId = projectId, MainBomItemId = mainBomItemId }, transaction, cancellationToken: cancellationToken));
         foreach (var item in reviews)
             await connection.ExecuteAsync(new CommandDefinition("""
-                INSERT INTO material_relation_review(project_id,main_bom_item_id,revision_id,group_id,decision,main_quantity,reason,updated_by,updated_at)
-                VALUES(@ProjectId,@MainBomItemId,@RevisionId,@GroupId,@Decision,@MainQuantity,@Reason,@UpdatedBy,@UpdatedAt)
-                """, new { item.ProjectId, item.MainBomItemId, item.RevisionId, item.GroupId, Decision = item.Decision.ToString(), item.MainQuantity, item.Reason, item.UpdatedBy, UpdatedAt = item.UpdatedAt.UtcDateTime }, transaction, cancellationToken: cancellationToken));
+                INSERT INTO material_relation_review(project_id,main_bom_item_id,revision_id,group_id,decision,main_quantity,reason,updated_by,updated_at,bom_fingerprint)
+                VALUES(@ProjectId,@MainBomItemId,@RevisionId,@GroupId,@Decision,@MainQuantity,@Reason,@UpdatedBy,@UpdatedAt,@BomFingerprint)
+                """, new { item.ProjectId, item.MainBomItemId, item.RevisionId, item.GroupId, Decision = item.Decision.ToString(), item.MainQuantity, item.Reason, item.UpdatedBy, UpdatedAt = item.UpdatedAt.UtcDateTime, item.BomFingerprint }, transaction, cancellationToken: cancellationToken));
         await transaction.CommitAsync(cancellationToken);
     }
 
@@ -226,7 +226,7 @@ public sealed class MySqlMaterialRelationRepository : IMaterialRelationRepositor
     private sealed record TemplateLockRow(Guid Id, Guid MainMaterialId, long RowVersion);
     private sealed record RevisionLockRow(Guid Id, int Version, long RowVersion);
     private sealed record SelectionRow(Guid ProjectId, Guid MainBomItemId, Guid AccessoryBomItemId, Guid RevisionId, Guid GroupId, Guid OptionId, decimal ExpectedQuantity, string UpdatedBy, DateTime UpdatedAt);
-    private sealed record ReviewRow(Guid ProjectId, Guid MainBomItemId, Guid RevisionId, Guid GroupId, string Decision, decimal MainQuantity, string? Reason, string UpdatedBy, DateTime UpdatedAt);
+    private sealed record ReviewRow(Guid ProjectId, Guid MainBomItemId, Guid RevisionId, Guid GroupId, string Decision, decimal MainQuantity, string? Reason, string UpdatedBy, DateTime UpdatedAt, string? BomFingerprint);
     private sealed record RelationRow
     {
         public Guid TemplateId { get; init; }

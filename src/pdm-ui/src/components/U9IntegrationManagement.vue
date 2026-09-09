@@ -1,7 +1,8 @@
 <script setup lang="ts">
-import { ElMessage, ElMessageBox } from 'element-plus'
+import { ElMessage } from '../statusMessage'
+import { ElMessageBox } from 'element-plus'
 import { computed, onMounted, reactive, ref } from 'vue'
-import { getU9InventorySyncStatus, getU9MaterialFullSyncStatus, getU9MaterialIntegration, startU9InventoryFullSync, startU9MaterialFullSync, testU9MaterialIntegration, updateU9InventorySyncSettings, updateU9MaterialIntegration } from '../api'
+import { getU9InventorySyncStatus, getU9MaterialFullSyncStatus, getU9MaterialIntegration, getU9ProcurementSyncStatus, startU9InventoryFullSync, startU9MaterialFullSync, startU9ProcurementFullSync, testU9MaterialIntegration, updateU9InventorySyncSettings, updateU9MaterialIntegration, updateU9ProcurementSyncSettings } from '../api'
 import type {
   CrmConnectionTestResult,
   CrmCustomerSyncResult,
@@ -10,6 +11,7 @@ import type {
   U9MaterialFullSyncStatusResponse,
   U9MaterialIntegrationSettings,
   U9InventorySyncStatusResponse,
+  U9ProcurementSyncStatusResponse,
   UpdateCrmIntegrationInput,
 } from '../types'
 import CustomerManagement from './CustomerManagement.vue'
@@ -46,6 +48,15 @@ const inventorySyncForm = reactive({
   autoSyncEnabled: true,
   syncIntervalMinutes: 60,
   queryPath: '/webapi/Invtrans/QueryQohAndAvailable',
+})
+const procurementSyncLoading = ref(false)
+const procurementSyncSaving = ref(false)
+const procurementSyncStarting = ref(false)
+const procurementSyncStatus = ref<U9ProcurementSyncStatusResponse | null>(null)
+const procurementSyncForm = reactive({
+  autoSyncEnabled: true,
+  syncIntervalMinutes: 15,
+  queryPath: '/webapi/QueryCommon/QueryInfoBySql',
 })
 const integration = reactive<U9MaterialIntegrationSettings & { clientSecret: string }>({
   baseUrl: '', enterpriseCode: '', organizationCode: '', userCode: '', clientId: '', clientSecretConfigured: false,
@@ -166,6 +177,55 @@ async function runInventorySyncNow() {
   }
 }
 
+async function loadProcurementSyncStatus() {
+  if (!props.canManageBase) return
+  procurementSyncLoading.value = true
+  try {
+    procurementSyncStatus.value = await getU9ProcurementSyncStatus(props.token)
+    Object.assign(procurementSyncForm, procurementSyncStatus.value.settings)
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : 'U9C采购跟踪同步状态加载失败')
+  } finally {
+    procurementSyncLoading.value = false
+  }
+}
+
+async function saveProcurementSyncSettings() {
+  if (!props.canManageBase || procurementSyncSaving.value) return
+  procurementSyncSaving.value = true
+  try {
+    const saved = await updateU9ProcurementSyncSettings(procurementSyncForm, props.token)
+    Object.assign(procurementSyncForm, saved)
+    if (procurementSyncStatus.value) procurementSyncStatus.value.settings = saved
+    ElMessage.success('采购跟踪自动同步设置已保存')
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '采购跟踪自动同步设置保存失败')
+  } finally {
+    procurementSyncSaving.value = false
+  }
+}
+
+async function runProcurementSyncNow() {
+  if (!props.canManageBase || procurementSyncStarting.value) return
+  try {
+    await ElMessageBox.confirm(
+      '立即从U9C只读获取PLM有效项目范围内的请购、标准采购状态，并在全部成功后切换快照？不会查询价格、税额或财务信息，也不会修改U9C。',
+      '确认采购跟踪全量刷新',
+      { confirmButtonText: '开始刷新', cancelButtonText: '取消' },
+    )
+  } catch { return }
+  procurementSyncStarting.value = true
+  try {
+    const response = await startU9ProcurementFullSync(props.token)
+    ElMessage.success(response.message)
+    window.setTimeout(() => void loadProcurementSyncStatus(), 1200)
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : 'U9C采购跟踪全量刷新启动失败')
+  } finally {
+    procurementSyncStarting.value = false
+  }
+}
+
 function buildUpdateInput(clientSecret: string | null) {
   return {
     baseUrl: integration.baseUrl.trim(),
@@ -224,13 +284,18 @@ async function testConnection() {
 }
 
 async function saveInterfaceSettings() {
-  if (!inventorySyncStatus.value) {
-    ElMessage.warning('库存接口设置尚未加载完成，请刷新后重试')
+  if (!inventorySyncStatus.value || !procurementSyncStatus.value) {
+    ElMessage.warning('库存或采购跟踪接口设置尚未加载完成，请刷新后重试')
     return
   }
   const inventoryQueryPath = inventorySyncForm.queryPath.trim()
+  const procurementQueryPath = procurementSyncForm.queryPath.trim()
   if (!inventoryQueryPath.startsWith('/')) {
     ElMessage.warning('库存查询接口路径必须以/开头')
+    return
+  }
+  if (!procurementQueryPath.startsWith('/webapi/')) {
+    ElMessage.warning('采购跟踪查询接口路径必须以/webapi/开头')
     return
   }
   if (integration.writeEnabled) {
@@ -247,17 +312,24 @@ async function saveInterfaceSettings() {
   }
   savingInterfaces.value = true
   try {
-    const [saved, savedInventorySettings] = await Promise.all([
+    const [saved, savedInventorySettings, savedProcurementSettings] = await Promise.all([
       updateU9MaterialIntegration(buildUpdateInput(null), props.token),
       updateU9InventorySyncSettings({
         autoSyncEnabled: inventorySyncForm.autoSyncEnabled,
         syncIntervalMinutes: inventorySyncForm.syncIntervalMinutes,
         queryPath: inventoryQueryPath,
       }, props.token),
+      updateU9ProcurementSyncSettings({
+        autoSyncEnabled: procurementSyncForm.autoSyncEnabled,
+        syncIntervalMinutes: procurementSyncForm.syncIntervalMinutes,
+        queryPath: procurementQueryPath,
+      }, props.token),
     ])
     applyIntegrationSettings(saved)
     Object.assign(inventorySyncForm, savedInventorySettings)
     inventorySyncStatus.value.settings = savedInventorySettings
+    Object.assign(procurementSyncForm, savedProcurementSettings)
+    procurementSyncStatus.value.settings = savedProcurementSettings
     ElMessage.success(`U9C接口设置已保存，真实写入已${saved.writeEnabled ? '开启' : '关闭'}`)
   } catch (error) {
     ElMessage.error(error instanceof Error ? error.message : 'U9C接口设置保存失败')
@@ -300,6 +372,16 @@ const inventorySyncStatusText = computed(() => {
 const inventorySyncTagType = computed(() => inventorySyncStatus.value?.latestRun?.status === 'Succeeded' ? 'success'
   : inventorySyncStatus.value?.latestRun?.status === 'Failed' ? 'danger'
     : inventorySyncStatus.value?.latestRun?.status === 'Running' ? 'warning' : 'info')
+const procurementSyncStatusText = computed(() => {
+  const status = procurementSyncStatus.value?.latestRun?.status
+  if (status === 'Running') return '刷新中'
+  if (status === 'Succeeded') return '最近刷新成功'
+  if (status === 'Failed') return '最近刷新失败'
+  return '尚未刷新'
+})
+const procurementSyncTagType = computed(() => procurementSyncStatus.value?.latestRun?.status === 'Succeeded' ? 'success'
+  : procurementSyncStatus.value?.latestRun?.status === 'Failed' ? 'danger'
+    : procurementSyncStatus.value?.latestRun?.status === 'Running' ? 'warning' : 'info')
 
 function formatSyncTime(value?: string | null) {
   return value ? new Date(value).toLocaleString('zh-CN', { hour12: false }) : '—'
@@ -309,6 +391,7 @@ onMounted(() => {
   void loadIntegration()
   void loadFullSyncStatus()
   void loadInventorySyncStatus()
+  void loadProcurementSyncStatus()
 })
 </script>
 
@@ -365,9 +448,10 @@ onMounted(() => {
               </div>
             </section>
             <section class="u9-interface-group" aria-label="库存接口">
-              <h3>库存接口</h3>
+              <h3>库存与采购接口</h3>
               <div class="u9-form-grid">
                 <el-form-item label="库存查询接口路径"><el-input v-model.trim="inventorySyncForm.queryPath" name="u9InventoryQueryPath" /></el-form-item>
+                <el-form-item label="采购跟踪查询接口路径"><el-input v-model.trim="procurementSyncForm.queryPath" name="u9ProcurementQueryPath" /></el-form-item>
               </div>
             </section>
             <section class="u9-interface-group" aria-label="BOM接口">
@@ -458,6 +542,29 @@ onMounted(() => {
             <div><dt>覆盖料号</dt><dd>{{ inventorySyncStatus?.latestRun?.materialCount ?? 0 }}</dd></div>
           </dl>
           <el-alert v-if="inventorySyncStatus?.latestRun?.lastError" :title="inventorySyncStatus.latestRun.lastError" type="error" :closable="false" show-icon />
+        </section>
+        <section class="pdm-panel u9-settings-card u9-inventory-sync-card pdm-loading-host" aria-label="U9C采购跟踪自动全量刷新">
+          <SquareLoader v-if="procurementSyncLoading" overlay label="正在加载采购跟踪同步状态" />
+          <header class="u9-card-heading">
+            <div><h2>U9C采购跟踪自动全量刷新</h2><p>每15分钟只读同步PLM有效项目范围内的请购与标准采购行状态；不读取价格、税额、币种及财务信息，失败时继续使用上一次完整快照。</p></div>
+            <div class="u9-actions"><el-tag :type="procurementSyncTagType">{{ procurementSyncStatusText }}</el-tag><el-button type="primary" :loading="procurementSyncStarting" @click="runProcurementSyncNow">立即全量刷新</el-button><el-button :loading="procurementSyncLoading" @click="loadProcurementSyncStatus">刷新状态</el-button></div>
+          </header>
+          <el-form label-position="top" class="u9-settings-form">
+            <div class="u9-form-grid">
+              <el-form-item label="自动同步"><el-switch v-model="procurementSyncForm.autoSyncEnabled" active-text="启用" inactive-text="关闭" /></el-form-item>
+              <el-form-item label="同步间隔（分钟）"><el-input-number v-model="procurementSyncForm.syncIntervalMinutes" :min="15" :max="1440" :step="15" controls-position="right" /></el-form-item>
+            </div>
+            <div class="u9-actions"><el-button type="primary" :loading="procurementSyncSaving" @click="saveProcurementSyncSettings">保存采购跟踪同步设置</el-button></div>
+          </el-form>
+          <dl class="full-sync-summary inventory-sync-summary">
+            <div><dt>执行计划</dt><dd>{{ procurementSyncForm.autoSyncEnabled ? `每 ${procurementSyncForm.syncIntervalMinutes} 分钟` : '已关闭' }}</dd></div>
+            <div><dt>最近开始</dt><dd>{{ formatSyncTime(procurementSyncStatus?.latestRun?.startedAt) }}</dd></div>
+            <div><dt>最近完成</dt><dd>{{ formatSyncTime(procurementSyncStatus?.latestRun?.completedAt) }}</dd></div>
+            <div><dt>U9C源明细</dt><dd>{{ procurementSyncStatus?.latestRun?.sourceRowCount ?? 0 }}</dd></div>
+            <div><dt>快照明细</dt><dd>{{ procurementSyncStatus?.latestRun?.storedRowCount ?? 0 }}</dd></div>
+            <div><dt>项目范围</dt><dd>{{ procurementSyncStatus?.latestRun?.projectCount ?? 0 }}</dd></div>
+          </dl>
+          <el-alert v-if="procurementSyncStatus?.latestRun?.lastError" :title="procurementSyncStatus.latestRun.lastError" type="error" :closable="false" show-icon />
         </section>
       </el-tab-pane>
 

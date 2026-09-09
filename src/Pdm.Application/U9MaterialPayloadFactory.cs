@@ -17,7 +17,8 @@ public static class U9MaterialPayloadFactory
         MaterialCategoryRule rule,
         string organizationCode,
         string correlationId,
-        string? u9UnitCode = null)
+        string? u9UnitCode = null,
+        ProjectBomHeaderKind? bomHeaderKind = null)
     {
         var unit = Archive(u9UnitCode ?? material.UnitCode);
         var data = new Dictionary<string, object?>
@@ -76,6 +77,7 @@ public static class U9MaterialPayloadFactory
             ["IsBOMEnable"] = true,
             ["Effective"] = new Dictionary<string, object?> { ["IsEffective"] = "true" }
         };
+        U9MaterialCreationRules.Apply(data, material, rule.U9CategoryCode, organizationCode, bomHeaderKind);
         var nonNullData = data
             .Where(pair => pair.Value is not null)
             .ToDictionary(pair => pair.Key, pair => pair.Value);

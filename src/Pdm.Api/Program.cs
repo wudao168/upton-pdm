@@ -101,7 +101,9 @@ if (string.Equals(databaseOptions.Provider, "MySql", StringComparison.OrdinalIgn
     builder.Services.AddScoped<IProjectFileRepository, MySqlProjectFileRepository>();
     builder.Services.AddScoped<IMaterialRepository, MySqlMaterialRepository>();
     builder.Services.AddScoped<IU9InventoryRepository, MySqlU9InventoryRepository>();
+    builder.Services.AddScoped<IU9ProcurementRepository, MySqlU9ProcurementRepository>();
     builder.Services.AddScoped<IStandardLibraryRepository, MySqlStandardLibraryRepository>();
+    builder.Services.AddScoped<IEngineeringKitRepository, MySqlEngineeringKitRepository>();
     builder.Services.AddScoped<IMaterialRelationRepository, MySqlMaterialRelationRepository>();
     builder.Services.AddScoped<IProgramTemplateRepository, MySqlProgramTemplateRepository>();
 }
@@ -111,7 +113,9 @@ else
     builder.Services.AddSingleton<IProjectFileRepository, InMemoryProjectFileRepository>();
     builder.Services.AddSingleton<IMaterialRepository, InMemoryMaterialRepository>();
     builder.Services.AddSingleton<IU9InventoryRepository, InMemoryU9InventoryRepository>();
+    builder.Services.AddSingleton<IU9ProcurementRepository, InMemoryU9ProcurementRepository>();
     builder.Services.AddSingleton<IStandardLibraryRepository, InMemoryStandardLibraryRepository>();
+    builder.Services.AddSingleton<IEngineeringKitRepository, InMemoryEngineeringKitRepository>();
     builder.Services.AddSingleton<IMaterialRelationRepository, InMemoryMaterialRelationRepository>();
     builder.Services.AddSingleton<IProgramTemplateRepository, InMemoryProgramTemplateRepository>();
 }
@@ -133,6 +137,8 @@ builder.Services.AddHttpClient<IU9OpenApiClient, U9OpenApiClient>(client => clie
     .RemoveAllLoggers();
 builder.Services.AddHttpClient<IU9InventoryClient, U9OpenApiClient>(client => client.Timeout = TimeSpan.FromMinutes(2))
     .RemoveAllLoggers();
+builder.Services.AddHttpClient<IU9ProcurementClient, U9OpenApiClient>(client => client.Timeout = TimeSpan.FromMinutes(5))
+    .RemoveAllLoggers();
 builder.Services.AddHttpClient<IU9BomQueryClient, U9OpenApiClient>(client => client.Timeout = TimeSpan.FromSeconds(20))
     .RemoveAllLoggers();
 builder.Services.AddScoped<PdmWorkflowService>();
@@ -141,6 +147,7 @@ builder.Services.AddScoped<CrmCustomerIntegrationService>();
 builder.Services.AddScoped<MaterialService>();
 builder.Services.AddScoped<MaterialAttachmentService>();
 builder.Services.AddScoped<StandardLibraryService>();
+builder.Services.AddScoped<EngineeringKitService>();
 builder.Services.AddScoped<MaterialRelationService>();
 builder.Services.AddScoped<IMaterialRelationReleaseGuard>(provider => provider.GetRequiredService<MaterialRelationService>());
 builder.Services.AddScoped<ProgramTemplateService>();
@@ -151,6 +158,8 @@ builder.Services.AddScoped<U9MaterialFullSyncService>();
 builder.Services.AddSingleton<U9MaterialFullSyncCoordinator>();
 builder.Services.AddScoped<U9InventoryService>();
 builder.Services.AddSingleton<U9InventorySyncCoordinator>();
+builder.Services.AddScoped<U9ProcurementService>();
+builder.Services.AddSingleton<U9ProcurementSyncCoordinator>();
 builder.Services.AddScoped<U9BomQueryService>();
 builder.Services.AddScoped<U9BomWriteService>();
 builder.Services.AddScoped<ProjectBomU9SyncService>();
@@ -161,7 +170,9 @@ builder.Services.AddHostedService<PdmBootstrapHostedService>();
 builder.Services.AddHostedService<CrmCustomerSyncHostedService>();
 builder.Services.AddHostedService<MaterialU9SyncHostedService>();
 builder.Services.AddHostedService<U9InventorySyncHostedService>();
+builder.Services.AddHostedService<U9ProcurementSyncHostedService>();
 builder.Services.AddHostedService<MaterialU9SyncBatchHostedService>();
+builder.Services.AddHostedService<BomHeaderAutomaticHostedService>();
 builder.Services.AddHostedService<ProjectFileRecycleCleanupService>();
 
 builder.Services.AddCors(options => options.AddPolicy("PdmClients", policy => policy
@@ -242,7 +253,9 @@ app.UseAuthorization();
 app.MapPdmEndpoints();
 app.MapPdmMaterialEndpoints();
 app.MapPdmInventoryEndpoints();
+app.MapPdmProcurementEndpoints();
 app.MapStandardLibraryEndpoints();
+app.MapEngineeringKitEndpoints();
 app.MapMaterialRelationEndpoints();
 app.MapPdmBomHeaderEndpoints();
 app.MapProgramTemplateEndpoints();

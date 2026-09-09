@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
-import { ElMessage, ElMessageBox } from 'element-plus'
+import { ElMessage } from '../statusMessage'
+import { ElMessageBox } from 'element-plus'
 import { ClipboardCheck, KeyRound, RefreshCw } from '@lucide/vue'
 import type { EditLockSummary, MaterialCodeApplication, MyApprovalTask, PasswordResetTask, ProgramTemplateTask, UserNotification } from '../types'
 import { useUserDisplayName } from '../userDisplay'

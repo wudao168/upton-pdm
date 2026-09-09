@@ -8,6 +8,43 @@ namespace Upton.Pdm.Domain.Tests;
 public sealed class ReleasePackagePublisherTests
 {
     [Fact]
+    public async Task FormalPublication_RefreshesOldStagingWithTotalAndRemainingQuantities()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "pdm-formal-issue-test", Guid.NewGuid().ToString("N"));
+        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var projectId = Guid.NewGuid();
+        var item = new BomItem(Guid.NewGuid(), projectId, BomKind.Standard, 1, "1001", "平垫", 4, "个", null, "M3", "W2", true);
+        var package = new ReleasePackage(Guid.NewGuid(), projectId, "RP-FORMAL", ReleasePackageState.Publishing, Guid.NewGuid(), "S1", "E1", [], DateTimeOffset.UtcNow, null, null)
+        { Scope = ReleaseScope.StandardFormal, StandardBomVersionId = Guid.NewGuid(), StandardBomSnapshot = [item] };
+        await repository.CreateReleasePackageAsync(package with { Id = Guid.NewGuid(), Number = "RP-LONG-1", Scope = ReleaseScope.StandardLongLead,
+            State = ReleasePackageState.Published, PublishedAt = package.CreatedAt.AddDays(-2), StandardBomSnapshot = [item with { Quantity = 1 }] }, default);
+        await repository.CreateReleasePackageAsync(package with { Id = Guid.NewGuid(), Number = "RP-LONG-2", Scope = ReleaseScope.StandardLongLead,
+            State = ReleasePackageState.Published, PublishedAt = package.CreatedAt.AddDays(-1), StandardBomSnapshot = [item with { Quantity = 3 }] }, default);
+        var project = new Project(projectId, "P-TEST", "测试", "admin", Path.Combine(root, "vault"), Path.Combine(root, "release"), true);
+        var staging = Path.Combine(project.VaultLocation, ".release-staging", package.Number);
+        try
+        {
+            Directory.CreateDirectory(staging);
+            await File.WriteAllBytesAsync(Path.Combine(staging, "standard-parts-bom.xlsx"), BomWorkbook.Write([item]));
+            var publisher = new AtomicReleasePackagePublisher(TimeProvider.System, new RecordingServerPreviewConverter(), repository);
+            var result = await publisher.PublishAsync(package, project, [], default);
+            using var zip = System.IO.Compression.ZipFile.OpenRead(Path.Combine(result.PublishedPath, "standard-parts-bom.xlsx"));
+            using var stream = zip.GetEntry("xl/worksheets/sheet1.xml")!.Open();
+            var xml = System.Xml.Linq.XDocument.Load(stream);
+            System.Xml.Linq.XNamespace ns = "http://schemas.openxmlformats.org/spreadsheetml/2006/main";
+            var rows = xml.Descendants(ns + "row").ToArray();
+            var headers = rows[0].Descendants(ns + "t").Select(value => value.Value).ToArray();
+            Assert.Contains("BOM总量", headers);
+            Assert.Equal(new[] { "已提前发布", "本次新增下发" }, headers[^2..]);
+            var cells = rows[1].Elements(ns + "c").ToArray();
+            Assert.Equal("4", cells[12].Element(ns + "v")!.Value);
+            Assert.Equal("4", cells[^2].Element(ns + "v")!.Value);
+            Assert.Equal("0", cells[^1].Element(ns + "v")!.Value);
+        }
+        finally { if (Directory.Exists(root)) Directory.Delete(root, true); }
+    }
+
+    [Fact]
     public async Task Upload_DoesNotAcceptNewDwgFiles()
     {
         var root = Path.Combine(Path.GetTempPath(), "pdm-dwg-upload-test", Guid.NewGuid().ToString("N"));

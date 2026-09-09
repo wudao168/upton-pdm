@@ -126,7 +126,10 @@ public sealed record U9ItemReference(
     string? U9SurfaceTreatment = null,
     decimal? U9Weight = null,
     string? U9WeightUnitCode = null,
-    string? U9PurchaseLink = null);
+    string? U9PurchaseLink = null)
+{
+    public IReadOnlyDictionary<string, string?> CreationAttributes { get; init; } = new Dictionary<string, string?>();
+}
 
 public sealed record U9ItemQueryResult(
     int ResponseCode,

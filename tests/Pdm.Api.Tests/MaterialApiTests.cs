@@ -180,7 +180,8 @@ public sealed class MaterialApiTests : IClassFixture<PdmApiFactory>
 
         U9BomComponentReference ExistingComponent(int sequence, string itemCode, decimal usageQty) =>
             new(sequence, $"id-{sequence}", itemCode, "测试子件", null, usageQty, "001", "个", 1m,
-                0, true, null, null, null, null, 0, 0, false, false);
+                0, true, null, null, null, null, 0, 0, false, false)
+            { UsageQtyType = 1, IsSpecialUseItem = true, IsIssueOrgFixed = true, IssueOrgCode = "7" };
 
         async Task<JsonDocument> PreviewAsync(object command)
         {
@@ -483,7 +484,28 @@ public sealed class MaterialApiTests : IClassFixture<PdmApiFactory>
         fake.QueryResults.Clear();
         fake.QueryResults.Enqueue(new U9ItemQueryResult(0, null, []));
         fake.QueryResults.Enqueue(new U9ItemQueryResult(0, null,
-            [new("u9-1001", materialCode, "API同步测试电气件", "M12", "0101", null, "001")]));
+            [new U9ItemReference("u9-1001", materialCode, "API同步测试电气件", "M12", "0101", null, "001")
+            {
+                CreationAttributes = new Dictionary<string, string?>
+                {
+                    ["ItemFormAttribute"] = "9", ["IsPurchaseEnable"] = "true", ["IsBuildEnable"] = "true",
+                    ["IsOutsideOperationEnable"] = "true", ["IsMRPEnable"] = "true", ["IsBOMEnable"] = "true",
+                    ["IsSalesEnable"] = "true", ["IsInventoryEnable"] = "true", ["IsVarRatio"] = "true",
+                    ["Effective.IsEffective"] = "true", ["CostCurrency.Code"] = "C001",
+                    ["InventoryInfo.PurchaseControlMode"] = "1", ["InventoryInfo.TurnOverRate"] = "0",
+                    ["InventoryInfo.LotControlMode"] = "2", ["InventoryInfo.IsBalanceByProject"] = "true",
+                    ["InventoryInfo.IsInvCalculateBySeiban"] = "true", ["MrpInfo.MRPPlanningType"] = "0",
+                    ["MrpInfo.ForecastContorlType"] = "1", ["MrpInfo.IsTraceRequirement"] = "true",
+                    ["MrpInfo.IsControlByDC"] = "true", ["MrpInfo.DemandRule"] = "0",
+                    ["MfgInfo.IsInheritBomMasterNo"] = "true", ["MfgInfo.DesignationRule"] = "1",
+                    ["MfgInfo.IsExpandByOrder"] = "true", ["MfgInfo.BuildShrinkageRate"] = "1",
+                    ["PurchaseInfo.IsNeedRequest"] = "true", ["PurchaseInfo.ReceiptModeAllowModify"] = "true",
+                    ["PurchaseInfo.IsPUTradePathModify"] = "true", ["PurchaseInfo.IsPURtnTradePathModify"] = "true",
+                    ["SaleInfo.IsReturnable"] = "true", ["SaleInfo.IsRMAAllowModify"] = "true",
+                    ["SaleInfo.IsSDTradePathModify"] = "true", ["SaleInfo.IsSDRtnTradePathModify"] = "true",
+                    ["SaleInfo.SupplySource"] = "4", ["SaleInfo.DemandTransType"] = "4", ["SaleInfo.SupplyOrg.Code"] = "7"
+                }
+            }]));
         fake.BusinessResult = new U9BusinessBatchResult(0, null, [new(true, null, "u9-1001", materialCode)]);
         var executeResponse = await client.PostAsync($"/api/material-sync-tasks/{taskId}/execute", null);
 

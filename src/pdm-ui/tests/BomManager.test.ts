@@ -1,5 +1,6 @@
 import { config, flushPromises, mount } from '@vue/test-utils'
-import { ElMessage, ElMessageBox } from 'element-plus'
+import { ElMessage } from '../src/statusMessage'
+import { ElMessageBox } from 'element-plus'
 import ElementPlus from 'element-plus'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import BomManager from '../src/components/BomManager.vue'
@@ -14,6 +15,8 @@ const materialApi = vi.hoisted(() => ({
   reclassifyBomItemsFromSource: vi.fn(),
   getMaterialRelationCompleteness: vi.fn(),
   applyMaterialRelations: vi.fn(),
+  listEngineeringKits: vi.fn(),
+  expandEngineeringKit: vi.fn(),
 }))
 
 vi.mock('../src/api', () => materialApi)
@@ -28,6 +31,19 @@ config.global.stubs = {
 }
 
 describe('BomManager', () => {
+  it('opens a requested category after project initialization and consumes the request', async () => {
+    const wrapper = mount(BomManager, {
+      props: { standard: [], nonStandard: [], electrical: [], declarations: [], pending: false, projectId: 'child', projects: [{ id: 'child' } as never], requestedBomKind: 'Electrical' },
+      global: { stubs: { BomHierarchyOverview: true } },
+    })
+    await flushPromises()
+    expect(wrapper.get('[role="tab"][aria-selected="true"]').text()).toContain('电气BOM')
+    expect(wrapper.emitted('bomRequestHandled')).toHaveLength(1)
+    await wrapper.setProps({ requestedBomKind: 'NonStandard' })
+    await flushPromises()
+    expect(wrapper.get('[role="tab"][aria-selected="true"]').text()).toContain('非标件BOM')
+    wrapper.unmount()
+  })
   beforeEach(() => {
     vi.restoreAllMocks()
     window.localStorage.clear()
@@ -39,6 +55,8 @@ describe('BomManager', () => {
     materialApi.reclassifyBomItemsFromSource.mockReset().mockResolvedValue([])
     materialApi.getMaterialRelationCompleteness.mockReset().mockResolvedValue({ projectId: 'project', isComplete: true, mainMaterialCount: 0, incompleteGroupCount: 0, mainMaterials: [] })
     materialApi.applyMaterialRelations.mockReset()
+    materialApi.listEngineeringKits.mockReset().mockResolvedValue([])
+    materialApi.expandEngineeringKit.mockReset()
   })
 
   it('places the orange source-data view before categorized BOM tabs and treats empty BOMs automatically', async () => {
@@ -54,8 +72,8 @@ describe('BomManager', () => {
     expect(toolbar.get('.pdm-source-data-tab').attributes('aria-selected')).toBe('true')
     expect(toolbar.get('.pdm-source-data-tab').classes()).toContain('pdm-source-data-tab')
     expect(toolbar.find('.pdm-bom-empty-declaration').exists()).toBe(false)
-    expect(toolbar.get('button[aria-label="查看机械BOM对账明细"]').classes()).not.toContain('is-reconcile-needed')
-    expect(toolbar.findAll('.pdm-manager-actions button').map(button => button.text())).toEqual(['查看对账明细'])
+    expect(toolbar.get('button[aria-label="对比源数据"]').classes()).not.toContain('is-reconcile-needed')
+    expect(toolbar.findAll('.pdm-manager-actions button').map(button => button.text())).toEqual(['对比源数据'])
     expect(wrapper.findAll('button').some(button => button.text() === '新增物料')).toBe(false)
     expect(wrapper.find('.pdm-bom-selection-summary').exists()).toBe(false)
     expect(wrapper.get('.pdm-bom-selection-actions').classes()).toContain('pdm-bom-selection-actions')
@@ -294,8 +312,8 @@ describe('BomManager', () => {
     })
 
     expect(wrapper.get('.pdm-bom-reconcile-hint').text()).toBe('机械BOM待对账 1 类（2 个实例）')
-    const reconciliationButton = wrapper.get('button[aria-label="查看机械BOM对账明细"]')
-    expect(reconciliationButton.text()).toBe('查看对账明细')
+    const reconciliationButton = wrapper.get('button[aria-label="对比源数据"]')
+    expect(reconciliationButton.text()).toBe('对比源数据')
     expect(reconciliationButton.classes()).toContain('is-reconcile-needed')
     await reconciliationButton.trigger('click')
     expect(wrapper.emitted('generate')).toHaveLength(1)
@@ -307,7 +325,7 @@ describe('BomManager', () => {
     expect(wrapper.get('.pdm-bom-quantity-audit').text()).toBe('10')
     expect(wrapper.get('.pdm-bom-quantity-reference').text()).toBe('010/10')
     expect(wrapper.find('.pdm-bom-reconcile-hint').exists()).toBe(false)
-    expect(wrapper.get('button[aria-label="查看机械BOM对账明细"]').classes()).not.toContain('is-reconcile-needed')
+    expect(wrapper.get('button[aria-label="对比源数据"]').classes()).not.toContain('is-reconcile-needed')
   })
 
   it('previews mechanical BOM differences as a read-only reminder', async () => {
@@ -329,7 +347,7 @@ describe('BomManager', () => {
       },
     })
 
-    await wrapper.get('button[aria-label="查看机械BOM对账明细"]').trigger('click')
+    await wrapper.get('button[aria-label="对比源数据"]').trigger('click')
     expect(wrapper.get('.pdm-reconciliation-loading').text()).toContain('正在读取最新图档源数据并计算机械BOM差异')
     expect(previewReconciliation).toHaveBeenCalledOnce()
 
@@ -531,7 +549,7 @@ describe('BomManager', () => {
     expect(wrapper.get('.pdm-bom-save-action').text()).toBe('保存BOM')
     expect(releaseStrip.findAll('.pdm-bom-release-strip-actions')).toHaveLength(1)
     expect(releaseStrip.find('.pdm-bom-release-maintenance-actions').exists()).toBe(false)
-    expect(releaseStrip.findAll('.pdm-bom-release-strip-actions button').map(button => button.text())).toEqual(['导入XLSX', '导出XLSX', '查看对账明细', '处理审批 1', '保存BOM', '发起发布'])
+    expect(releaseStrip.findAll('.pdm-bom-release-strip-actions button').map(button => button.text())).toEqual(['导入XLSX', '导出XLSX', '对比源数据', '处理审批 1', '保存BOM', '发起发布'])
     expect(releaseStrip.findAll('button').some(button => button.text() === '新增物料')).toBe(false)
 
     await releaseStrip.findAll('button').find(button => button.text() === '处理审批 1')!.trigger('click')
@@ -545,7 +563,7 @@ describe('BomManager', () => {
     expect(wrapper.find('.pdm-release-create-form').exists()).toBe(false)
 
     await wrapper.setProps({ releasePackages: [] })
-    expect(wrapper.findAll('.pdm-bom-release-strip-actions button').map(button => button.text())).toEqual(['导入XLSX', '导出XLSX', '查看对账明细', '发布记录', '保存BOM', '发起发布'])
+    expect(wrapper.findAll('.pdm-bom-release-strip-actions button').map(button => button.text())).toEqual(['导入XLSX', '导出XLSX', '对比源数据', '发布记录', '保存BOM', '发起发布'])
   })
 
   it('defaults Excel export to summary and allows structure export', async () => {
@@ -588,7 +606,7 @@ describe('BomManager', () => {
     expect((wrapper.get('.pdm-release-type-row select').element as HTMLSelectElement).value).toBe('StandardFormal')
 
     await wrapper.setProps({ releasePackages: [longLead, formal] })
-    expect(wrapper.findAll('.pdm-release-type-row option').map(option => option.text())).toEqual(['标准件 · 长交期提前发布', '标准件 · 增补/变更'])
+    expect(wrapper.findAll('.pdm-release-type-row option').map(option => option.text())).toEqual(['标准件 · 增补/变更'])
     expect((wrapper.get('.pdm-release-type-row select').element as HTMLSelectElement).value).toBe('StandardSupplement')
   })
 
@@ -976,9 +994,9 @@ describe('BomManager', () => {
       },
     })
 
-    const reconcileButton = wrapper.get('button[aria-label="查看机械BOM对账明细"]')
+    const reconcileButton = wrapper.get('button[aria-label="对比源数据"]')
     expect(wrapper.get('.pdm-bom-reconcile-hint').text()).toBe('机械BOM待对账 1 类（1 个实例）')
-    expect(reconcileButton.text()).toBe('查看对账明细')
+    expect(reconcileButton.text()).toBe('对比源数据')
     expect(reconcileButton.classes()).toContain('is-reconcile-needed')
     await reconcileButton.trigger('click')
     expect(wrapper.emitted('generate')).toEqual([[false]])
@@ -988,7 +1006,7 @@ describe('BomManager', () => {
       standard: [{ ...source, reconciliationStatus: 'SourceMatched', reconciliationNote: 'BOM维护值已与图档源数据一致。' }],
     })
     expect(wrapper.find('.pdm-bom-reconcile-hint').exists()).toBe(false)
-    expect(wrapper.get('button[aria-label="查看机械BOM对账明细"]').classes()).not.toContain('is-reconcile-needed')
+    expect(wrapper.get('button[aria-label="对比源数据"]').classes()).not.toContain('is-reconcile-needed')
   })
 
   it('keeps no-publish items visible and exposes only the matching publish action', async () => {
@@ -1034,7 +1052,7 @@ describe('BomManager', () => {
     await wrapper.get('input[aria-label="内联编辑物料名称"]').setValue('未保存名称')
     await wrapper.get('input[aria-label="内联编辑物料名称"]').trigger('keydown', { key: 'Enter' })
 
-    await wrapper.get('button[aria-label="查看机械BOM对账明细"]').trigger('click')
+    await wrapper.get('button[aria-label="对比源数据"]').trigger('click')
     expect(wrapper.emitted('generate')).toEqual([[false]])
     expect(wrapper.get('.pdm-bom-unsaved-count').text()).toBe('未保存 1 项')
 
@@ -1755,15 +1773,56 @@ describe('BomManager', () => {
     await flushPromises()
 
     const materialCodeActions = wrapper.findAll('.pdm-bom-selection-actions .pdm-bom-material-code-toolbar-action')
-    expect(materialCodeActions.map(button => button.text())).toEqual(['引用物料', '核对料号', '申请料号'])
+    expect(materialCodeActions.map(button => button.text())).toEqual(['引用物料', '引用套件', '关联物料', '核对料号', '申请料号'])
     expect(materialCodeActions.every(button => button.classes().includes('pdm-bom-material-code-toolbar-action'))).toBe(true)
     expect(materialApi.resolveBomMaterialCodes).toHaveBeenCalledTimes(1)
 
-    await materialCodeActions[1].trigger('click')
+    await materialCodeActions[3].trigger('click')
     await flushPromises()
 
     expect(materialApi.resolveBomMaterialCodes).toHaveBeenCalledTimes(2)
     expect(materialApi.resolveBomMaterialCodes).toHaveBeenLastCalledWith('project-1', ['standard-1'], 'token')
+  })
+
+  it('references a released UKIT with optional components unselected and expands only real materials', async () => {
+    materialApi.listEngineeringKits.mockResolvedValue([{
+      id: 'kit-1', code: 'UKIT-000001', name: '安装附件套件', description: 'PDM工程引用', currentReleasedRevisionId: 'revision-1',
+      revisions: [{
+        id: 'revision-1', kitId: 'kit-1', versionNumber: 1, state: 'Released', createdBy: 'admin', createdAt: '2026-09-08T00:00:00Z',
+        components: [
+          { id: 'required-1', revisionId: 'revision-1', materialId: 'material-1', materialCode: '0102000001', materialName: '必选螺栓', quantity: 5, unit: '001', isOptional: false, sortOrder: 1 },
+          { id: 'optional-1', revisionId: 'revision-1', materialId: 'material-2', materialCode: '0102000002', materialName: '可选垫圈', quantity: 2, unit: '001', isOptional: true, sortOrder: 2 },
+        ],
+      }],
+      createdBy: 'admin', createdAt: '2026-09-08T00:00:00Z', updatedBy: 'admin', updatedAt: '2026-09-08T00:00:00Z', rowVersion: 2,
+    }])
+    materialApi.expandEngineeringKit.mockResolvedValue({
+      referenceId: 'reference-1', kitId: 'kit-1', revisionId: 'revision-1', kitCode: 'UKIT-000001', kitName: '安装附件套件', versionNumber: 1, kitQuantity: 1,
+      lines: [{ kitComponentId: 'required-1', materialId: 'material-1', materialCode: '0102000001', materialName: '必选螺栓', quantity: 5, unit: '001', isOptional: false }],
+    })
+    const wrapper = mount(BomManager, {
+      props: { standard: [], nonStandard: [], electrical: [], declarations: [], pending: false, editable: true, token: 'token', projectId: 'project-1' },
+    })
+    await wrapper.findAll('button[role="tab"]')[1].trigger('click')
+    await wrapper.findAll('button').find(button => button.text() === '引用套件')!.trigger('click')
+    await flushPromises()
+
+    expect(materialApi.listEngineeringKits).toHaveBeenCalledWith('token', true)
+    expect(wrapper.get('#pdm-kit-reference-title').text()).toBe('引用 UKIT 套件')
+    await wrapper.get('.pdm-kit-reference-list tbody tr').trigger('click')
+    const optionals = wrapper.findAll('.pdm-kit-component-options input[type="checkbox"]')
+    expect(optionals).toHaveLength(2)
+    expect((optionals[0].element as HTMLInputElement).checked).toBe(true)
+    expect((optionals[1].element as HTMLInputElement).checked).toBe(false)
+
+    await wrapper.findAll('button').find(button => button.text() === '确认引用并展开')!.trigger('click')
+    await flushPromises()
+    expect(materialApi.expandEngineeringKit).toHaveBeenCalledWith('kit-1', { revisionId: 'revision-1', quantity: 1, selectedOptionalComponentIds: [] }, 'token')
+    const save = wrapper.emitted('save')?.at(-1) as [string, BomItem[]]
+    expect(save[0]).toBe('Standard')
+    expect(save[1]).toHaveLength(1)
+    expect(save[1][0]).toMatchObject({ drawingNumber: '0102000001', quantity: 5, source: 'EngineeringKit', engineeringKitCode: 'UKIT-000001', engineeringKitVersionNumber: 1, engineeringKitComponentOptional: false })
+    expect(save[1][0].drawingNumber).not.toBe('UKIT-000001')
   })
 
   it('searches approved material masters by code and links the selected BOM row', async () => {
@@ -1872,7 +1931,7 @@ describe('BomManager', () => {
     await wrapper.findAll('button[role="tab"]')[1].trigger('click')
     const referenceButton = wrapper.findAll('.pdm-bom-selection-actions button').find(button => button.text() === '引用物料')!
     expect((referenceButton.element as HTMLButtonElement).disabled).toBe(false)
-    expect(referenceButton.classes()).toContain('pdm-primary-action')
+    expect(referenceButton.classes()).toContain('pdm-secondary-action')
 
     await referenceButton.trigger('click')
     await flushPromises()
@@ -2402,6 +2461,26 @@ describe('BomManager', () => {
     expect(wrapper.text()).not.toContain('默认显示PLM最新正式发布版')
   })
 
+  it('shows the selected released quantity independently of its previous comparison baseline', async () => {
+    const oldItem: BomItem = { id: 'washer', sequence: 1, drawingNumber: '01021000007', name: '平垫', quantity: 12, unit: '个', revision: 'W2', complete: true }
+    const newItem = { ...oldItem, quantity: 8 }
+    const wrapper = mount(BomManager, { props: {
+      sourceData: [oldItem], standard: [newItem], nonStandard: [], electrical: [], declarations: [], pending: false, editable: true,
+      versions: [
+        { id: 'v1', projectId: 'project', kind: 'Standard', versionNumber: 1, label: 'S-V01', state: 'Released', items: [oldItem], createdBy: 'admin', createdAt: '2026-09-07', updatedBy: 'admin', updatedAt: '2026-09-07', releasedAt: '2026-09-07' },
+        { id: 'v2', projectId: 'project', kind: 'Standard', versionNumber: 2, label: 'S-V02', state: 'Released', items: [newItem], createdBy: 'admin', createdAt: '2026-09-08', updatedBy: 'admin', updatedAt: '2026-09-08', releasedAt: '2026-09-08' },
+      ],
+    } })
+    await wrapper.findAll('button[role="tab"]')[1].trigger('click')
+    await wrapper.get('select[aria-label="选择BOM版本"]').setValue('v2')
+    expect(wrapper.get('.pdm-bom-quantity-reference').attributes('title')).toBe('已发布总数量：8；当前BOM总数量：8；源总数量：12')
+    await wrapper.findAll('.pdm-bom-version-picker button').at(-1)!.trigger('click')
+    expect(wrapper.get('.pdm-bom-comparison-summary').text()).toContain('修改 1')
+    expect(wrapper.get('.pdm-bom-comparison-summary').text()).toContain('S-V01')
+    await wrapper.get('select[aria-label="选择BOM版本"]').setValue('v1')
+    expect(wrapper.get('.pdm-bom-quantity-reference').attributes('title')).toBe('已发布总数量：12；当前BOM总数量：12；源总数量：12')
+  })
+
   it('shows independent BOM history as read-only and displays the three-version manufacturing baseline', async () => {
     const releasedItem: BomItem = { id: 'released-item', sequence: 1, drawingNumber: 'S-001', name: '旧标准件', specification: 'M1', quantity: 1, unit: '个', revision: 'W1', complete: true, source: 'Manual' }
     const currentItem: BomItem = { ...releasedItem, id: 'current-item', name: '新标准件', quantity: 2 }
@@ -2420,6 +2499,8 @@ describe('BomManager', () => {
 
     await wrapper.findAll('button[role="tab"]')[1].trigger('click')
     expect(wrapper.get('select[aria-label="选择BOM版本"]').text()).toContain('S-V02 · 工作中')
+    expect(wrapper.get('select[aria-label="选择BOM版本"]').text()).toContain('S-V01 · 已发布 · 2026-08-18')
+    expect(wrapper.get('select[aria-label="选择BOM版本"]').text()).not.toContain('ECN-001')
     expect((wrapper.get('select[aria-label="选择BOM版本"]').element as HTMLSelectElement).value).toBe('current')
     expect(wrapper.get('.pdm-bom-baseline-picker').text()).toContain('S S-V01 · N N-V01 · E E-V01')
     expect(wrapper.get('.pdm-bom-baseline-picker').text()).not.toContain('序列号')
@@ -2567,8 +2648,10 @@ describe('BomManager', () => {
     })
     await flushPromises()
     await wrapper.findAll('button[role="tab"]')[1].trigger('click')
-    const reviewButton = wrapper.findAll('button').find(button => button.text().includes('关联物料核对'))!
-    expect(reviewButton.text()).toContain('1项待核对')
+    const reviewButton = wrapper.get('.pdm-bom-relation-action')
+    expect(reviewButton.text()).toBe('关联物料')
+    expect(reviewButton.attributes('title')).toBe('1项待核对')
+    expect(reviewButton.classes()).toContain('pdm-bom-material-code-toolbar-action')
     await reviewButton.trigger('click')
     await flushPromises()
 
@@ -2586,7 +2669,8 @@ describe('BomManager', () => {
     expect(materialApi.applyMaterialRelations).toHaveBeenCalledWith('project', [{
       mainBomItemId: 'main-bom-1', choices: [{ groupId: 'group', optionIds: [], confirmNoAccessory: true, noAccessoryReason: '仅补充主物料' }],
     }], 'token')
-    expect(wrapper.text()).toContain('关联物料核对（已核对）')
+    expect(reviewButton.text()).toBe('关联物料')
+    expect(reviewButton.attributes('title')).toBe('已核对')
   })
 
   it('refreshes related-material reminders after a BOM save completes', async () => {
@@ -2609,6 +2693,46 @@ describe('BomManager', () => {
 
     expect(materialApi.getMaterialRelationCompleteness).toHaveBeenCalledTimes(2)
     expect(warning).toHaveBeenCalledWith('BOM已保存；另有 2 个关联物料组待核对，不影响后续保存或发布')
+  })
+
+  it('invalidates the green relation button when BOM props change and ignores stale requests', async () => {
+    const complete: MaterialRelationCompleteness = { projectId: 'project', isComplete: true, mainMaterialCount: 1, incompleteGroupCount: 0, mainMaterials: [] }
+    materialApi.getMaterialRelationCompleteness.mockResolvedValue(complete)
+    const main: BomItem = { id: 'main', sequence: 1, drawingNumber: 'MOTOR-1', name: '电机', quantity: 1, unit: '个', revision: 'W1', complete: true }
+    const wrapper = mount(BomManager, { props: { standard: [main], nonStandard: [], electrical: [], declarations: [], pending: false, editable: true, projectId: 'project', token: 'token' } })
+    await flushPromises()
+    await wrapper.findAll('button[role="tab"]')[1].trigger('click')
+    const button = wrapper.get('.pdm-bom-relation-action')
+    expect(button.classes()).toContain('is-complete')
+    let resolveStale!: (result: MaterialRelationCompleteness) => void
+    materialApi.getMaterialRelationCompleteness.mockReturnValueOnce(new Promise(resolve => { resolveStale = resolve }))
+    await wrapper.setProps({ standard: [{ ...main, quantity: 2 }] })
+    expect(button.classes()).toContain('is-warning')
+    materialApi.getMaterialRelationCompleteness.mockResolvedValueOnce({ ...complete, isComplete: false, incompleteGroupCount: 1 })
+    await wrapper.setProps({ standard: [{ ...main, quantity: 3 }] })
+    await flushPromises()
+    resolveStale(complete)
+    await flushPromises()
+    expect(button.classes()).toContain('is-warning')
+    expect(button.attributes('title')).toBe('1项待核对')
+    expect(wrapper.findAll('button').find(item => item.text() === '核对料号')!.classes()).toContain('pdm-bom-code-check-action')
+  })
+
+  it('shows orange immediately for unsaved BOM edits', async () => {
+    materialApi.getMaterialRelationCompleteness.mockResolvedValue({ projectId: 'project', isComplete: true, mainMaterialCount: 1, incompleteGroupCount: 0, mainMaterials: [] })
+    const wrapper = mount(BomManager, { props: {
+      standard: [{ id: 'main', sequence: 1, drawingNumber: 'MOTOR', name: '电机', quantity: 1, unit: '个', revision: 'W1', complete: true }],
+      nonStandard: [], electrical: [], declarations: [], pending: false, editable: true, projectId: 'project', token: 'token',
+    } })
+    await flushPromises()
+    await wrapper.findAll('button[role="tab"]')[1].trigger('click')
+    expect(wrapper.get('.pdm-bom-relation-action').classes()).toContain('is-complete')
+    await wrapper.get('button[aria-label="编辑数量"]').trigger('click')
+    await wrapper.get('input[aria-label="内联编辑数量"]').setValue('2')
+    await wrapper.get('input[aria-label="内联编辑数量"]').trigger('keydown', { key: 'Enter' })
+    expect(wrapper.get('.pdm-bom-relation-action').classes()).toContain('is-warning')
+    expect(wrapper.get('.pdm-bom-relation-action').attributes('title')).toBe('BOM已修改，请保存后重新核对')
+    expect(wrapper.emitted('save')).toBeUndefined()
   })
 
   it('warns about pending related materials but allows release submission after confirmation', async () => {

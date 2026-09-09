@@ -37,13 +37,20 @@ describe('CRM-aligned personal settings', () => {
     ['Administrator', '系统管理员'],
     ['platform_admin', '平台管理员'],
     ['developer', '开发者'],
-  ])('shows role %s as the Chinese name %s', (role, expectedName) => {
+  ])('shows role %s as the Chinese name %s inside personal settings only', async (role, expectedName) => {
     const wrapper = mount(AppHeader, {
+      attachTo: document.body,
       props: { online: true, userName: '测试用户', role },
       global: { plugins: [ElementPlus] },
     })
 
-    expect(wrapper.get('.pdm-user-role').text()).toBe(expectedName)
+    expect(wrapper.find('.pdm-user-role').exists()).toBe(false)
+    expect(wrapper.get('.pdm-user-profile-trigger').text()).toBe('测试用户')
+    await wrapper.get('.pdm-user-profile-trigger').trigger('click')
+    await flushPromises()
+    const roleField = Array.from(document.body.querySelectorAll('.el-form-item')).find(field => field.querySelector('label')?.textContent === '角色')
+    expect(roleField?.querySelector('input')?.value).toBe(expectedName)
+    expect(roleField?.querySelector('input')?.disabled).toBe(true)
     wrapper.unmount()
   })
 

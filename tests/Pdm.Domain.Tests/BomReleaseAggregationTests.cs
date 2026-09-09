@@ -5,6 +5,46 @@ namespace Pdm.Domain.Tests;
 
 public sealed class BomReleaseAggregationTests
 {
+    [Theory]
+    [InlineData(0, 1, 4)]
+    [InlineData(1, 1, 3)]
+    [InlineData(4, 1, 0)]
+    [InlineData(6, 1, 0)]
+    [InlineData(4, 3, 8)]
+    public void FormalRelease_OnlyDeductsPriorLongLeadFromPurchaseDemand(decimal prior, int multiplier, decimal expected)
+    {
+        var items = new[] { Item("1001", 1, "A"), Item("1001", 3, "B") };
+        var package = Package(items) with { WholeSetMultiplier = multiplier };
+        var summary = BomReleaseAggregation.Build(package, [Item("1001", prior, "A") with { Unit = "个" }]);
+
+        Assert.Equal(4 * multiplier, summary.ProductionStructure.Sum(line => line.Quantity));
+        Assert.Equal(expected, summary.PurchaseDemand.Sum(line => line.Quantity));
+        Assert.All(summary.PurchaseDemand, line => Assert.True(line.Quantity > 0));
+        Assert.Equal(4, package.StandardBomSnapshot.Sum(item => item.Quantity));
+    }
+
+    [Fact]
+    public void LongLeadHistory_OnlyIncludesPublishedPackagesFromSameProjectBeforeFormalPublication()
+    {
+        var package = Package([Item("1001", 4, "A")]);
+        var prior = package with { Id = Guid.NewGuid(), Scope = ReleaseScope.StandardLongLead,
+            PublishedAt = package.CreatedAt.AddDays(-1), StandardBomSnapshot = [Item("1001", 1, "A")], WholeSetMultiplier = 2 };
+        var items = BomReleaseAggregation.PriorLongLeadItems(package, [prior,
+            prior with { Id = Guid.NewGuid(), State = ReleasePackageState.Rejected },
+            prior with { Id = Guid.NewGuid(), ProjectId = Guid.NewGuid() },
+            prior with { Id = Guid.NewGuid(), PublishedAt = package.CreatedAt.AddDays(1) }]);
+        Assert.Equal(2, Assert.Single(items).Quantity);
+    }
+
+    [Fact]
+    public void Deduction_DoesNotCrossMaterialOrUnitAndDoesNotAffectLongLeadRelease()
+    {
+        var package = Package([Item("1001", 4, "A")]);
+        var previous = new[] { Item("1001", 4, "A") with { Unit = "盒" }, Item("1002", 4, "A") };
+        Assert.Equal(4, Assert.Single(BomReleaseAggregation.Build(package, previous).PurchaseDemand).Quantity);
+        Assert.Equal(4, Assert.Single(BomReleaseAggregation.Build(package with { Scope = ReleaseScope.StandardLongLead }, [Item("1001", 4, "A")]).PurchaseDemand).Quantity);
+    }
+
     [Fact]
     public void Build_PreservesParentRelationshipsAndAggregatesPurchaseDemand()
     {

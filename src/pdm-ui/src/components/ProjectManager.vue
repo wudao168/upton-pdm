@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { ElMessage, ElMessageBox } from 'element-plus'
+import { ElMessage } from '../statusMessage'
+import { ElMessageBox } from 'element-plus'
 import { ChevronDown, ChevronRight, FolderKanban, FolderPlus, Search } from '@lucide/vue'
 import { computed, reactive, ref, watch } from 'vue'
 import type { CreateProjectInput, CreateSubprojectInput, MainProjectStaffingInput, OrganizationDirectory, PdmCustomer, PdmUser, ProjectNumberingOptions, ProjectSummary, UpdateProjectInput } from '../types'

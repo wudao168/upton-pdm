@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ElMessage } from 'element-plus'
+import { ElMessage } from '../statusMessage'
 import { reactive, ref, watch } from 'vue'
 import type { BomPropertyMapping, BomValidationField, EquipmentTypeDefinition, PdmSystemSettings, ProjectNumberingOptions } from '../types'
 

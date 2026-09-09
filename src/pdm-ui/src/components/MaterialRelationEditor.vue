@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { ElMessage, ElMessageBox } from 'element-plus'
+import { ElMessage } from '../statusMessage'
+import { ElMessageBox } from 'element-plus'
 import { computed, reactive, ref, watch } from 'vue'
 import { listMaterialRelationTemplates, listMaterials, publishMaterialRelationTemplate, saveMaterialRelationTemplate } from '../api'
 import type { MaterialRelationQuantityMode, MaterialRelationSelectionMode, MaterialRelationTemplate, PdmMaterial, SaveMaterialRelationTemplateInput } from '../types'

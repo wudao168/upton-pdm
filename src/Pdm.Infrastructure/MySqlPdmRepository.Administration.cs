@@ -190,7 +190,8 @@ public sealed partial class MySqlPdmRepository
                 ReadStringList(values, "bom_electrical_required_fields", BomValidationFieldCatalog.ElectricalDefaults)),
             ApprovalWorkflows = ReadApprovalWorkflows(values),
             MaterialCodeApproval = ReadMaterialCodeApproval(values),
-            ReleaseChangeReasonTypes = ReadStringList(values, "release_change_reason_types", PdmSystemSettings.DefaultReleaseChangeReasonTypes)
+            ReleaseChangeReasonTypes = ReadStringList(values, "release_change_reason_types", PdmSystemSettings.DefaultReleaseChangeReasonTypes),
+            FormalSupplementPolicies = ReadFormalSupplementPolicies(values)
         };
         return BomPropertyMappingCatalog.Apply(settings);
     }
@@ -227,7 +228,8 @@ public sealed partial class MySqlPdmRepository
             new { Key = "bom_electrical_required_fields", Value = JsonSerializer.Serialize(settings.ValidationRules.Electrical, jsonOptions) },
             new { Key = "release_approval_workflows", Value = JsonSerializer.Serialize(settings.ApprovalWorkflows, jsonOptions) },
             new { Key = "material_code_approval", Value = JsonSerializer.Serialize(settings.MaterialCodeApproval, jsonOptions) },
-            new { Key = "release_change_reason_types", Value = JsonSerializer.Serialize(settings.ReleaseChangeReasonTypes, jsonOptions) }
+            new { Key = "release_change_reason_types", Value = JsonSerializer.Serialize(settings.ReleaseChangeReasonTypes, jsonOptions) },
+            new { Key = "formal_supplement_policies", Value = JsonSerializer.Serialize(settings.FormalSupplementPolicies, jsonOptions) }
         })
         {
             await connection.ExecuteAsync(new CommandDefinition(
@@ -296,6 +298,14 @@ public sealed partial class MySqlPdmRepository
         if (!values.TryGetValue("material_code_approval", out var value) || string.IsNullOrWhiteSpace(value)) return MaterialCodeApprovalSettings.Default;
         try { return JsonSerializer.Deserialize<MaterialCodeApprovalSettings>(value, jsonOptions) ?? MaterialCodeApprovalSettings.Default; }
         catch (JsonException) { return MaterialCodeApprovalSettings.Default; }
+    }
+
+    private FormalSupplementPolicies ReadFormalSupplementPolicies(IReadOnlyDictionary<string, string> values)
+    {
+        if (!values.TryGetValue("formal_supplement_policies", out var value) || string.IsNullOrWhiteSpace(value))
+            return FormalSupplementPolicies.Default;
+        try { return JsonSerializer.Deserialize<FormalSupplementPolicies>(value, jsonOptions) ?? FormalSupplementPolicies.Default; }
+        catch (JsonException) { return FormalSupplementPolicies.Default; }
     }
 
     public async Task<IReadOnlyList<UserAccount>> ListUsersAsync(CancellationToken cancellationToken)

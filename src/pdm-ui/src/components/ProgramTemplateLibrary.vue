@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref, watch } from 'vue'
-import { ElMessage, ElMessageBox } from 'element-plus'
+import { ElMessage } from '../statusMessage'
+import { ElMessageBox } from 'element-plus'
 import { ArrowDown, ArrowUp, Blocks, Download, Plus, RefreshCw, Trash2, Upload } from '@lucide/vue'
 import FunctionBlockDiagram from './FunctionBlockDiagram.vue'
 import { useUserDisplayName } from '../userDisplay'

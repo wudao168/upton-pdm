@@ -404,6 +404,22 @@ public sealed class U9MaterialIntegrationServiceTests
         return new ExecutionFixture(service, repository, materials, client, timeProvider, approved.Material, approved.Task);
     }
 
+    [Fact]
+    public async Task ExecuteTask_WhenCreationRuleReadbackIsWrong_NeedsReviewWithoutSecondWrite()
+    {
+        var fixture = await CreateApprovedTaskAsync(writeEnabled: true);
+        var matching = MatchingQuery(fixture.Material, "1001");
+        var attributes = new Dictionary<string, string?>(matching.Items[0].CreationAttributes)
+        { ["InventoryInfo.LotControlMode"] = "0" };
+        fixture.Client.QueryResultSequence.Enqueue(new(0, null, []));
+        fixture.Client.QueryResult = matching with { Items = [matching.Items[0] with { CreationAttributes = attributes }] };
+        var error = await Assert.ThrowsAsync<PdmRuleException>(() => fixture.Service.ExecuteTaskAsync(
+            fixture.Task.Id, "admin", UserRole.Administrator, default));
+        Assert.Contains("LotControlMode", error.Message);
+        Assert.Equal(1, fixture.Client.PostCallCount);
+        Assert.Equal(MaterialSyncStatus.NeedsReview, (await fixture.Materials.FindSyncTaskAsync(fixture.Task.Id, default))!.Status);
+    }
+
     private static U9ItemQueryResult MatchingQuery(PdmMaterial material, string u9ItemId) => new(0, null,
     [new U9ItemReference(
         u9ItemId,
@@ -420,7 +436,28 @@ public sealed class U9MaterialIntegrationServiceTests
         material.SurfaceTreatment,
         material.Weight,
         material.WeightUnit,
-        material.PurchaseLink)]);
+        material.PurchaseLink)
+        {
+            CreationAttributes = new Dictionary<string, string?>
+            {
+                ["ItemFormAttribute"] = "9", ["IsPurchaseEnable"] = "true", ["IsBuildEnable"] = "true",
+                ["IsOutsideOperationEnable"] = "true", ["IsMRPEnable"] = "true", ["IsBOMEnable"] = "true",
+                ["CostCurrency.Code"] = "C001", ["InventoryInfo.PurchaseControlMode"] = "1",
+                ["InventoryInfo.TurnOverRate"] = "0", ["InventoryInfo.LotControlMode"] = "2",
+                ["InventoryInfo.IsBalanceByProject"] = "true", ["MrpInfo.MRPPlanningType"] = "0",
+                ["InventoryInfo.IsInvCalculateBySeiban"] = "true", ["IsSalesEnable"] = "true",
+                ["IsInventoryEnable"] = "true", ["IsVarRatio"] = "true", ["Effective.IsEffective"] = "true",
+                ["SaleInfo.IsReturnable"] = "true", ["SaleInfo.IsRMAAllowModify"] = "true",
+                ["MfgInfo.IsExpandByOrder"] = "true", ["MfgInfo.BuildShrinkageRate"] = "1",
+                ["PurchaseInfo.IsPUTradePathModify"] = "true", ["PurchaseInfo.IsPURtnTradePathModify"] = "true",
+                ["SaleInfo.IsSDTradePathModify"] = "true", ["SaleInfo.IsSDRtnTradePathModify"] = "true",
+                ["SaleInfo.SupplySource"] = "4", ["SaleInfo.DemandTransType"] = "4", ["SaleInfo.SupplyOrg.Code"] = "7",
+                ["MrpInfo.ForecastContorlType"] = "1", ["MrpInfo.IsTraceRequirement"] = "true",
+                ["MrpInfo.IsControlByDC"] = "true", ["MrpInfo.DemandRule"] = "0",
+                ["MfgInfo.IsInheritBomMasterNo"] = "true", ["MfgInfo.DesignationRule"] = "1",
+                ["PurchaseInfo.IsNeedRequest"] = "true", ["PurchaseInfo.ReceiptModeAllowModify"] = "true"
+            }
+        }]);
 
     private static async Task<ExecutionFixture> CreateSampleFixtureAsync()
     {

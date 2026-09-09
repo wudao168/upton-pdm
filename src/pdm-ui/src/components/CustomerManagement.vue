@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { PlugZap, RefreshCw, Search } from '@lucide/vue'
 import { computed, reactive, ref, watch } from 'vue'
-import { ElMessage } from 'element-plus'
+import { ElMessage } from '../statusMessage'
 import type { CrmConnectionTestResult, CrmCustomerSyncResult, CrmIntegrationSettings, PdmCustomer, UpdateCrmIntegrationInput } from '../types'
 
 const props = defineProps<{

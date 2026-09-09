@@ -44,7 +44,14 @@ public static class BomWorkbook
         ["011"] = "组", ["012"] = "箱", ["013"] = "包"
     };
 
-    public static byte[] Write(IReadOnlyList<BomItem> items)
+    public static byte[] Write(IReadOnlyList<BomItem> items) => WriteCore(items, null);
+
+    public static byte[] WriteStandardRelease(IReadOnlyList<BomItem> items, IReadOnlyDictionary<string, decimal> priorQuantities) =>
+        WriteCore(items.GroupBy(BomReleaseAggregation.MaterialKey)
+            .Select(group => group.First() with { Quantity = group.Sum(item => item.Quantity), ParentDrawingNumber = null })
+            .ToArray(), priorQuantities);
+
+    private static byte[] WriteCore(IReadOnlyList<BomItem> items, IReadOnlyDictionary<string, decimal>? priorQuantities)
     {
         using var output = new MemoryStream();
         using (var archive = new ZipArchive(output, ZipArchiveMode.Create, true))
@@ -83,11 +90,19 @@ public static class BomWorkbook
             writer.WriteStartDocument(true);
             writer.WriteStartElement("worksheet", "http://schemas.openxmlformats.org/spreadsheetml/2006/main");
             writer.WriteStartElement("sheetData");
-            WriteRow(writer, 1, Headers.Cast<object?>().ToArray());
+            var headers = priorQuantities is null ? Headers
+                : Headers.Select(header => header == "数量" ? "BOM总量" : header).Concat(["已提前发布", "本次新增下发"]).ToArray();
+            WriteRow(writer, 1, headers.Cast<object?>().ToArray());
             var rowNumber = 2;
             foreach (var item in items.OrderBy(item => item.Sequence))
             {
-                WriteRow(writer, rowNumber++, [item.Sequence, KindLabel(item.Kind), item.Unit, item.DrawingNumber, item.Name, item.ParentDrawingNumber, item.Specification, item.Remark, item.Brand, item.Material, item.SurfaceTreatment, item.Weight, item.Quantity, item.Revision, item.IsComplete ? "是" : "否"]);
+                object?[] values = [item.Sequence, KindLabel(item.Kind), item.Unit, item.DrawingNumber, item.Name, item.ParentDrawingNumber, item.Specification, item.Remark, item.Brand, item.Material, item.SurfaceTreatment, item.Weight, item.Quantity, item.Revision, item.IsComplete ? "是" : "否"];
+                if (priorQuantities is not null)
+                {
+                    var prior = priorQuantities.GetValueOrDefault(BomReleaseAggregation.MaterialKey(item));
+                    values = [.. values, prior, Math.Max(0, item.Quantity - prior)];
+                }
+                WriteRow(writer, rowNumber++, values);
             }
             writer.WriteEndElement();
             writer.WriteEndElement();

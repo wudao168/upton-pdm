@@ -393,7 +393,8 @@ public static class PdmEndpointExtensions
                 ValidationRules = validationRules,
                 ApprovalWorkflows = request.ApprovalWorkflows ?? currentSettings.ApprovalWorkflows,
                 MaterialCodeApproval = request.MaterialCodeApproval ?? currentSettings.MaterialCodeApproval,
-                ReleaseChangeReasonTypes = request.ReleaseChangeReasonTypes ?? currentSettings.ReleaseChangeReasonTypes
+                ReleaseChangeReasonTypes = request.ReleaseChangeReasonTypes ?? currentSettings.ReleaseChangeReasonTypes,
+                FormalSupplementPolicies = request.FormalSupplementPolicies ?? currentSettings.FormalSupplementPolicies
             };
             return Results.Ok(await workflow.UpdateSystemSettingsAsync(settings, actor, role, cancellationToken));
         });

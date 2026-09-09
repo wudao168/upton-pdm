@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
-import { ElMessage, ElMessageBox } from 'element-plus'
+import { ElMessage } from '../statusMessage'
+import { ElMessageBox } from 'element-plus'
 import { Download, Eye, File, Folder, FolderCog, FolderPlus, History, Pencil, RotateCcw, Search, ShieldCheck, Trash2, Upload, X } from '@lucide/vue'
 import type { FolderPermissionRule, ManagedDocument, PdmUser, ProjectFile, ProjectFileVersion, ProjectFolder, RolePermissionSettings } from '../types'
 import { createProjectFolder, deleteProjectFile, deleteProjectFolder, downloadProjectFile, listProjectFiles, listProjectFileVersions, moveProjectFile, moveProjectFolder, renameProjectFile, renameProjectFolder, restoreProjectFile, uploadProjectFile } from '../api'

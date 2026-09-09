@@ -109,7 +109,8 @@ public sealed record UpdateSystemSettingsRequest(
     BomValidationRules? ValidationRules = null,
     ReleaseApprovalSettings? ApprovalWorkflows = null,
     MaterialCodeApprovalSettings? MaterialCodeApproval = null,
-    IReadOnlyList<string>? ReleaseChangeReasonTypes = null);
+    IReadOnlyList<string>? ReleaseChangeReasonTypes = null,
+    FormalSupplementPolicies? FormalSupplementPolicies = null);
 
 public sealed record SetBomEmptyDeclarationRequest(bool DeclaredEmpty);
 

@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, reactive, ref, watch } from 'vue'
-import { ElMessage, ElMessageBox } from 'element-plus'
+import { ElMessage } from '../statusMessage'
+import { ElMessageBox } from 'element-plus'
 import OrganizationSettings from './OrganizationSettings.vue'
 import RolePermissionSettings from './RolePermissionSettings.vue'
 import type { CreateRoleInput, OrganizationDirectory, OrganizationUnit, PdmUser, RolePermissionDirectory, SaveOrganizationUnitInput, SavePdmUserInput, SaveProjectOrganizationInput, ProjectOrganization } from '../types'

@@ -1,5 +1,5 @@
 import { flushPromises, mount } from '@vue/test-utils'
-import { ElMessage } from 'element-plus'
+import { ElMessage } from '../src/statusMessage'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import ProgramTemplateLibrary from '../src/components/ProgramTemplateLibrary.vue'
 

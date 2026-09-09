@@ -1,4 +1,4 @@
-import type { AddDrawingReviewMarkupInput, ApprovalStep, ApprovalU9AutomationResult, AuditEntry, BatchUpdateBomItemsInput, BomClassification, BomEmptyDeclaration, BomExportMode, BomGenerationResult, BomHeaderKind, BomItem, BomKind, BomValidationRules, BomVersion, BomVersionState, CreateProjectInput, CreateReleasePackageInput, CreateRoleInput, CreateSubprojectInput, CrmConnectionTestResult, CrmCustomerSyncResult, CrmIntegrationSettings, DocumentKind, DocumentModelDrawingRelation, DocumentNode, DocumentVersionComparison, DocumentVersionSummary, DocumentWhereUsed, DrawingReviewCandidate, DrawingReviewDecision, DrawingReviewPackage, DrawingReviewTarget, EditLockSummary, EquipmentTypeDefinition, FolderPermissionRule, MainProjectStaffingInput, ManagedDocument, ManufacturingBomBaseline, MaterialAttachment, MaterialAttachmentKind, MaterialCategory, MaterialCategoryRule, MaterialCodeApplication, MaterialCodeApplicationStatus, MaterialCodeDecisionResult, MaterialCodeResolution, MaterialDuplicateRule, MaterialKind, MaterialNumberingSettings, MaterialPage, MaterialRemovalReadiness, MaterialRemovalResult, MaterialSyncExecutionResult, MaterialSyncTask, MyApprovalTask, OrganizationDirectory, OrganizationUnit, PasswordResetTask, PdmCustomer, PdmMaterial, PdmSystemSettings, PdmUser, PdmUserProfile, ProgramTemplate, ProgramTemplateApprovalDecision, ProgramTemplateAttachmentKind, ProgramTemplateDraftInput, ProgramTemplateRevision, ProgramTemplateTask, ProgramTemplateVersionBump, ProjectBomHeader, ProjectBomU9SyncExecution, ProjectBomU9SyncPreview, ProjectFile, ProjectFileVersion, ProjectFolder, ProjectFolderTemplateNode, ProjectNumberingOptions, ProjectOrganization, ProjectSummary, ProjectVersionItem, ReferenceStatus, ReleaseItemComment, ReleasePackageSummary, ReleaseScope, RolePermissionDirectory, SaveMaterialInput, SaveOrganizationUnitInput, SavePdmUserInput, SaveProjectOrganizationInput, StandardLibraryCategory, StandardLibraryMaterialPage, U9BomQueryExecution, U9BomQueryInput, U9BomWriteExecution, U9BomWriteInput, U9BomWritePreview, U9ConnectionTestResult, U9InventoryFilters, U9InventoryPage, U9InventorySyncSettings, U9InventorySyncStatusResponse, U9ItemQueryResult, U9MaterialFullSyncStatusResponse, U9MaterialIntegrationSettings, U9MaterialSampleImportResult, U9MaterialSamplePreview, UpdateCrmIntegrationInput, UpdateProjectInput, UpdateReleasePackageDraftInput, UpdateU9MaterialIntegrationInput } from './types'
+import type { AddDrawingReviewMarkupInput, ApprovalStep, ApprovalU9AutomationResult, AuditEntry, BatchUpdateBomItemsInput, BomClassification, BomEmptyDeclaration, BomExportMode, BomGenerationResult, BomHeaderKind, BomItem, BomKind, BomValidationRules, BomVersion, BomVersionState, CreateProjectInput, CreateReleasePackageInput, CreateRoleInput, CreateSubprojectInput, CrmConnectionTestResult, CrmCustomerSyncResult, CrmIntegrationSettings, DocumentKind, DocumentModelDrawingRelation, DocumentNode, DocumentVersionComparison, DocumentVersionSummary, DocumentWhereUsed, DrawingReviewCandidate, DrawingReviewDecision, DrawingReviewPackage, DrawingReviewTarget, EditLockSummary, EngineeringKit, EngineeringKitExpansion, EquipmentTypeDefinition, FolderPermissionRule, MainProjectStaffingInput, ManagedDocument, ManufacturingBomBaseline, MaterialAttachment, MaterialAttachmentKind, MaterialCategory, MaterialCategoryRule, MaterialCodeApplication, MaterialCodeApplicationStatus, MaterialCodeDecisionResult, MaterialCodeResolution, MaterialDuplicateRule, MaterialKind, MaterialNumberingSettings, MaterialPage, MaterialRemovalReadiness, MaterialRemovalResult, MaterialSyncExecutionResult, MaterialSyncTask, MyApprovalTask, OrganizationDirectory, OrganizationUnit, PasswordResetTask, PdmCustomer, PdmMaterial, PdmSystemSettings, PdmUser, PdmUserProfile, ProgramTemplate, ProgramTemplateApprovalDecision, ProgramTemplateAttachmentKind, ProgramTemplateDraftInput, ProgramTemplateRevision, ProgramTemplateTask, ProgramTemplateVersionBump, ProjectBomHeader, ProjectBomU9SyncExecution, ProjectBomU9SyncPreview, ProjectFile, ProjectFileVersion, ProjectFolder, ProjectFolderTemplateNode, ProjectNumberingOptions, ProjectOrganization, ProjectProcurementTrackingResult, ProjectSummary, ProjectVersionItem, ReferenceStatus, ReleaseItemComment, ReleasePackageSummary, ReleaseScope, RolePermissionDirectory, SaveMaterialInput, SaveOrganizationUnitInput, SavePdmUserInput, SaveProjectOrganizationInput, StandardLibraryCategory, StandardLibraryMaterialPage, U9BomQueryExecution, U9BomQueryInput, U9BomWriteExecution, U9BomWriteInput, U9BomWritePreview, U9ConnectionTestResult, U9InventoryFilters, U9InventoryPage, U9InventorySyncSettings, U9InventorySyncStatusResponse, U9ItemQueryResult, U9MaterialFullSyncStatusResponse, U9MaterialIntegrationSettings, U9MaterialSampleImportResult, U9MaterialSamplePreview, U9ProcurementSyncSettings, U9ProcurementSyncStatusResponse, UpdateCrmIntegrationInput, UpdateProjectInput, UpdateReleasePackageDraftInput, UpdateU9MaterialIntegrationInput } from './types'
 import type { MaterialSyncBatch } from './types'
 import type { ApprovalTransferCandidate, UserNotification } from './types'
 
@@ -282,6 +282,13 @@ interface ApiBomItem {
   deletedBy?: string | null
   deleteReason?: string | null
   propertyWritebackStatus?: string | number | null
+  engineeringKitReferenceId?: string | null
+  engineeringKitId?: string | null
+  engineeringKitRevisionId?: string | null
+  engineeringKitCode?: string | null
+  engineeringKitVersionNumber?: number | null
+  engineeringKitComponentId?: string | null
+  engineeringKitComponentOptional?: boolean
 }
 
 interface ApiApprovalTask {
@@ -320,6 +327,10 @@ interface ApiReleasePackage {
   createsManufacturingBaseline?: boolean
   locksDocuments?: boolean
   wholeSetMultiplier?: number
+  changeReasonSelections?: ReleasePackageSummary['changeReasonSelections']
+  formalSupplementPolicySnapshotted?: boolean
+  formalSupplementMaximumCount?: number | null
+  formalSupplementValidDays?: number | null
   standardBomVersionId?: string | null
   nonStandardBomVersionId?: string | null
   electricalBomVersionId?: string | null
@@ -414,6 +425,12 @@ export function updateMaterialDuplicateRules(rules: MaterialDuplicateRule[], tok
 
 export function listProjectBomHeaders(projectId: string, token: string): Promise<ProjectBomHeader[]> {
   return requestJson<ProjectBomHeader[]>(`/api/projects/${projectId}/bom-headers`, {}, token)
+}
+
+export function retryProjectBomHeaderAutomatic(projectId: string, kind: BomHeaderKind, applicationId: string, expectedRowVersion: number, token: string): Promise<ProjectBomHeader> {
+  return requestJson<ProjectBomHeader>(`/api/projects/${projectId}/bom-headers/${kind}/retry-automatic`, {
+    method: 'POST', body: JSON.stringify({ applicationId, expectedRowVersion, confirmation: '确认重试料号自动处理' }),
+  }, token)
 }
 
 export function bindProjectBomHeaderMaterial(projectId: string, kind: BomHeaderKind, materialId: string, expectedRowVersion: number, token: string): Promise<ProjectBomHeader> {
@@ -558,6 +575,34 @@ export function setStandardLibraryRecommendation(materialId: string, isRecommend
   }, token)
 }
 
+export function listEngineeringKits(token: string, releasedOnly = true): Promise<EngineeringKit[]> {
+  return requestJson<EngineeringKit[]>(`/api/engineering-kits?releasedOnly=${releasedOnly}`, {}, token)
+}
+
+export function saveEngineeringKit(input: {
+  name: string
+  description?: string
+  changeNote?: string
+  components: Array<{ materialId: string; quantity: number; isOptional: boolean; sortOrder: number }>
+  expectedRowVersion?: number
+}, token: string, kitId?: string): Promise<EngineeringKit> {
+  return requestJson<EngineeringKit>(kitId ? `/api/engineering-kits/${kitId}` : '/api/engineering-kits', {
+    method: kitId ? 'PUT' : 'POST', body: JSON.stringify(input),
+  }, token)
+}
+
+export function publishEngineeringKit(kitId: string, expectedRowVersion: number, token: string): Promise<EngineeringKit> {
+  return requestJson<EngineeringKit>(`/api/engineering-kits/${kitId}/publish`, {
+    method: 'POST', body: JSON.stringify({ expectedRowVersion }),
+  }, token)
+}
+
+export function expandEngineeringKit(kitId: string, input: { revisionId?: string; quantity: number; selectedOptionalComponentIds: string[] }, token: string): Promise<EngineeringKitExpansion> {
+  return requestJson<EngineeringKitExpansion>(`/api/engineering-kits/${kitId}/expand`, {
+    method: 'POST', body: JSON.stringify(input),
+  }, token)
+}
+
 export function listMaterialRelationTemplates(token: string, includeDraft = false): Promise<MaterialRelationTemplate[]> {
   return requestJson<MaterialRelationTemplate[]>(`/api/material-relations/templates${includeDraft ? '?includeDraft=true' : ''}`, {}, token)
 }
@@ -682,6 +727,7 @@ export function getU9MaterialFullSyncStatus(token: string): Promise<U9MaterialFu
 
 export function listMaterialInventory(filters: U9InventoryFilters, token: string): Promise<U9InventoryPage> {
   const params = new URLSearchParams()
+  if (filters.similarSpecification !== undefined) params.set('similarSpecification', filters.similarSpecification.trim())
   if (filters.materialCode?.trim()) params.set('materialCode', filters.materialCode.trim())
   if (filters.itemName?.trim()) params.set('itemName', filters.itemName.trim())
   if (filters.specification?.trim()) params.set('specification', filters.specification.trim())
@@ -709,6 +755,26 @@ export function updateU9InventorySyncSettings(settings: Pick<U9InventorySyncSett
 
 export function startU9InventoryFullSync(token: string): Promise<{ message: string }> {
   return requestJson<{ message: string }>('/api/u9-inventory-sync/run', { method: 'POST' }, token)
+}
+
+export function getProjectProcurementTracking(projectId: string, token: string): Promise<ProjectProcurementTrackingResult> {
+  return requestJson<ProjectProcurementTrackingResult>(`/api/projects/${projectId}/procurement-tracking`, {}, token)
+}
+
+export function refreshProjectProcurementTracking(projectId: string, token: string): Promise<{ message: string }> {
+  return requestJson<{ message: string }>(`/api/projects/${projectId}/procurement-tracking/refresh`, { method: 'POST' }, token)
+}
+
+export function getU9ProcurementSyncStatus(token: string): Promise<U9ProcurementSyncStatusResponse> {
+  return requestJson<U9ProcurementSyncStatusResponse>('/api/u9-procurement-sync/status', {}, token)
+}
+
+export function updateU9ProcurementSyncSettings(settings: Pick<U9ProcurementSyncSettings, 'autoSyncEnabled' | 'syncIntervalMinutes' | 'queryPath'>, token: string): Promise<U9ProcurementSyncSettings> {
+  return requestJson<U9ProcurementSyncSettings>('/api/u9-procurement-sync/settings', { method: 'PUT', body: JSON.stringify(settings) }, token)
+}
+
+export function startU9ProcurementFullSync(token: string): Promise<{ message: string }> {
+  return requestJson<{ message: string }>('/api/u9-procurement-sync/run', { method: 'POST' }, token)
 }
 
 export function startU9MaterialFullSync(token: string): Promise<{ message: string }> {
@@ -1748,7 +1814,14 @@ function mapBomItem(item: ApiBomItem): BomItem {
     complete: item.isComplete,
     sourceDocumentId: item.sourceDocumentId ?? undefined,
     sourceConfiguration: item.sourceConfiguration ?? undefined,
-    source: item.source === 'Auto' ? 'Auto' : 'Manual',
+    source: ['Auto', 'MaterialRelation', 'EngineeringKit'].includes(item.source ?? '') ? item.source as BomItem['source'] : 'Manual',
+    engineeringKitReferenceId: item.engineeringKitReferenceId ?? undefined,
+    engineeringKitId: item.engineeringKitId ?? undefined,
+    engineeringKitRevisionId: item.engineeringKitRevisionId ?? undefined,
+    engineeringKitCode: item.engineeringKitCode ?? undefined,
+    engineeringKitVersionNumber: item.engineeringKitVersionNumber ?? undefined,
+    engineeringKitComponentId: item.engineeringKitComponentId ?? undefined,
+    engineeringKitComponentOptional: item.engineeringKitComponentOptional ?? false,
     manuallyOverridden: item.isManuallyOverridden ?? false,
     pendingRemoval: item.isPendingRemoval ?? false,
     pendingClassification: item.isPendingClassification ?? false,
@@ -1852,6 +1925,10 @@ function mapReleasePackage(releasePackage: ApiReleasePackage): ReleasePackageSum
     createsManufacturingBaseline: releasePackage.createsManufacturingBaseline ?? true,
     locksDocuments: releasePackage.locksDocuments ?? true,
     wholeSetMultiplier: releasePackage.wholeSetMultiplier ?? 1,
+    changeReasonSelections: releasePackage.changeReasonSelections ?? [],
+    formalSupplementPolicySnapshotted: releasePackage.formalSupplementPolicySnapshotted ?? false,
+    formalSupplementMaximumCount: releasePackage.formalSupplementMaximumCount ?? null,
+    formalSupplementValidDays: releasePackage.formalSupplementValidDays ?? null,
     standardBomVersionId: releasePackage.standardBomVersionId ?? undefined,
     nonStandardBomVersionId: releasePackage.nonStandardBomVersionId ?? undefined,
     electricalBomVersionId: releasePackage.electricalBomVersionId ?? undefined,

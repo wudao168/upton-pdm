@@ -25,7 +25,23 @@ public sealed record U9ReleaseBomSummary(
 
 public static class BomReleaseAggregation
 {
-    public static U9ReleaseBomSummary Build(ReleasePackage package)
+    public static string MaterialKey(BomItem item) =>
+        $"{item.DrawingNumber.Trim().ToUpperInvariant()}|{U9UnitCatalog.NormalizeBomUnit(item.Unit)}";
+
+    public static IReadOnlyList<BomItem> PriorLongLeadItems(ReleasePackage package, IEnumerable<ReleasePackage> history) =>
+        history.Where(previous => previous.ProjectId == package.ProjectId && previous.Id != package.Id
+                && previous.Scope == ReleaseScope.StandardLongLead && previous.State == ReleasePackageState.Published
+                && previous.PublishedAt.HasValue
+                && (!package.PublishedAt.HasValue || previous.PublishedAt <= package.PublishedAt))
+            .SelectMany(previous => previous.StandardBomSnapshot
+                .Where(item => !item.IsManuallyExcluded && !item.IsReleaseExcluded && !item.IsPendingRemoval)
+                .Select(item => item with { Quantity = item.Quantity * Math.Max(1, previous.WholeSetMultiplier) }))
+            .ToArray();
+
+    public static IReadOnlyDictionary<string, decimal> PriorQuantities(IEnumerable<BomItem> items) =>
+        items.GroupBy(MaterialKey).ToDictionary(group => group.Key, group => group.Sum(item => item.Quantity));
+
+    public static U9ReleaseBomSummary Build(ReleasePackage package, IReadOnlyList<BomItem>? priorLongLeadItems = null)
     {
         var items = ReleasedItems(package)
             .Where(item => !item.IsManuallyExcluded && !item.IsReleaseExcluded && !item.IsPendingRemoval)
@@ -55,6 +71,9 @@ public static class BomReleaseAggregation
             .ThenBy(line => line.UnitCode, StringComparer.OrdinalIgnoreCase)
             .ToArray();
 
+        var priorQuantities = package.Scope == ReleaseScope.StandardFormal
+            ? PriorQuantities(priorLongLeadItems ?? [])
+            : new Dictionary<string, decimal>();
         var purchase = items
             .GroupBy(item => new
             {
@@ -64,8 +83,9 @@ public static class BomReleaseAggregation
             .Select(group => new U9PurchaseDemandSummaryLine(
                 group.Key.MaterialCode,
                 group.Key.UnitCode,
-                group.Sum(item => item.Quantity),
+                Math.Max(0, group.Sum(item => item.Quantity) - priorQuantities.GetValueOrDefault($"{group.Key.MaterialCode}|{group.Key.UnitCode}")),
                 group.Select(item => item.Id).Order().ToArray()))
+            .Where(line => line.Quantity > 0)
             .OrderBy(line => line.MaterialCode, StringComparer.OrdinalIgnoreCase)
             .ThenBy(line => line.UnitCode, StringComparer.OrdinalIgnoreCase)
             .ToArray();

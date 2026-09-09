@@ -275,7 +275,14 @@ public sealed record BomItemInput(
     Guid? Id = null,
     string? SourceInstancePath = null,
     string? ParentDrawingNumber = null,
-    string? HeatTreatment = null);
+    string? HeatTreatment = null,
+    Guid? EngineeringKitReferenceId = null,
+    Guid? EngineeringKitId = null,
+    Guid? EngineeringKitRevisionId = null,
+    string? EngineeringKitCode = null,
+    int? EngineeringKitVersionNumber = null,
+    Guid? EngineeringKitComponentId = null,
+    bool EngineeringKitComponentOptional = false);
 
 public sealed record BomGenerationResult(
     IReadOnlyList<BomItem> StandardItems,

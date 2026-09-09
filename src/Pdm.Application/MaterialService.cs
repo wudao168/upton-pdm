@@ -430,6 +430,8 @@ public sealed class MaterialService(
             throw new UnauthorizedAccessException("只有标准化角色可以处理料号申请。");
         var application = await materials.FindMaterialCodeApplicationAsync(applicationId, cancellationToken)
             ?? throw new PdmNotFoundException("料号申请不存在。");
+        if (application.BomHeaderKind is not null && application.BomItemId is null)
+            throw new PdmRuleException("BOM表头料号由系统自动审批，请在BOM多级总览查看进度或重试，不能人工批准或退回。");
         return await DecideMaterialCodeApplicationCoreAsync(
             application, expectedRowVersion, approved, comment, actor, false, cancellationToken);
     }
@@ -462,13 +464,19 @@ public sealed class MaterialService(
         {
             var category = await RequireCreatableCategoryAsync(material.CategoryCode, material.Kind, cancellationToken);
             if (synchronizedScopes.Add(category.CounterScope))
-                await SynchronizeCategoryCounterFromU9Async(category, actor, cancellationToken);
+            {
+                try { await SynchronizeCategoryCounterFromU9Async(category, actor, cancellationToken); }
+                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
+                catch (Exception exception) { throw new PdmRuleException($"步骤：查询U9C分类 {category.Code} 最新料号；{exception.Message}"); }
+            }
         }
 
         var results = new List<(MaterialCodeApplication Application, PdmMaterial? Material, MaterialSyncTask? Task)>(pending.Count);
         foreach (var item in pending)
         {
-            results.Add(await DecideMaterialCodeApplicationCoreAsync(
+            try
+            {
+                results.Add(await DecideMaterialCodeApplicationCoreAsync(
                 item.Application,
                 item.ExpectedRowVersion,
                 true,
@@ -476,6 +484,9 @@ public sealed class MaterialService(
                 actor,
                 true,
                 cancellationToken));
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
+            catch (Exception exception) { throw new PdmRuleException($"步骤：自动批准 {item.Application.BomHeaderKind} 并准备同步任务；{exception.Message}"); }
         }
         return results;
     }
@@ -817,6 +828,14 @@ public sealed class MaterialService(
         return await ApproveCoreAsync(materialId, expectedRowVersion, actor, cancellationToken);
     }
 
+    private async Task<string> CreateMaterialPayloadAsync(PdmMaterial material, MaterialCategoryRule rule,
+        string organizationCode, string correlationId, string u9UnitCode, CancellationToken cancellationToken)
+    {
+        var headerKind = material.Kind == MaterialKind.Product
+            ? await U9MaterialCreationRules.FindHeaderKindAsync(materials, material.Id, cancellationToken) : null;
+        return U9MaterialPayloadFactory.CreatePayload(material, rule, organizationCode, correlationId, u9UnitCode, headerKind);
+    }
+
     private async Task<(PdmMaterial Material, MaterialSyncTask Task)> ApproveCoreAsync(
         Guid materialId,
         long expectedRowVersion,
@@ -844,7 +863,7 @@ public sealed class MaterialService(
         var correlationId = $"pdm-material-{material.Id:N}-v{expectedRowVersion}";
         var configuration = await materials.GetIntegrationConfigurationAsync(cancellationToken);
         var u9UnitCode = U9MaterialPayloadFactory.ResolveUnitCode(material.UnitCode);
-        var payloadJson = U9MaterialPayloadFactory.CreatePayload(materialForApproval, rule, configuration.OrganizationCode, correlationId, u9UnitCode);
+        var payloadJson = await CreateMaterialPayloadAsync(materialForApproval, rule, configuration.OrganizationCode, correlationId, u9UnitCode, cancellationToken);
         var hash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(payloadJson)));
         var task = new MaterialSyncTask(
             taskId,
@@ -922,7 +941,7 @@ public sealed class MaterialService(
         var u9UnitCode = U9MaterialPayloadFactory.ResolveUnitCode(updated.UnitCode);
         var payloadJson = operation == MaterialSyncOperation.Update
             ? U9MaterialPayloadFactory.ModifyPayload(updated, correlationId, u9UnitCode)
-            : U9MaterialPayloadFactory.CreatePayload(updated, rule, configuration.OrganizationCode, correlationId, u9UnitCode);
+            : await CreateMaterialPayloadAsync(updated, rule, configuration.OrganizationCode, correlationId, u9UnitCode, cancellationToken);
         var hash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(payloadJson)));
         var task = new MaterialSyncTask(Guid.NewGuid(), materialId, operation, MaterialSyncStatus.PreviewReady,
             correlationId, payloadJson, hash, 0, null, null, null, existing.U9ItemId, existing.U9ItemCode, now, now);
@@ -1234,12 +1253,12 @@ public sealed class MaterialService(
                 category.AllowCreate,
                 category.UpdatedBy,
                 category.UpdatedAt);
-            payloadJson = U9MaterialPayloadFactory.CreatePayload(
+            payloadJson = await CreateMaterialPayloadAsync(
                 material,
                 rule,
                 configuration.OrganizationCode,
                 existingTask.CorrelationId,
-                u9UnitCode);
+                u9UnitCode, cancellationToken);
         }
         else if (existingTask.Operation == MaterialSyncOperation.Update)
         {
@@ -1328,8 +1347,8 @@ public sealed class MaterialService(
             category.AllowCreate, category.UpdatedBy, category.UpdatedAt);
         var correlationId = $"pdm-reissue-{Guid.NewGuid():N}";
         var u9UnitCode = U9MaterialPayloadFactory.ResolveUnitCode(material.UnitCode);
-        var payloadJson = U9MaterialPayloadFactory.CreatePayload(
-            replacementMaterial, rule, configuration.OrganizationCode, correlationId, u9UnitCode);
+        var payloadJson = await CreateMaterialPayloadAsync(
+            replacementMaterial, rule, configuration.OrganizationCode, correlationId, u9UnitCode, cancellationToken);
         var replacementTask = new MaterialSyncTask(
             Guid.NewGuid(), material.Id, MaterialSyncOperation.Create, MaterialSyncStatus.PreviewReady,
             correlationId, payloadJson, Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(payloadJson))),

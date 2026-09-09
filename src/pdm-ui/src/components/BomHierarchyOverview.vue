@@ -1,11 +1,14 @@
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
-import { ElMessage, ElMessageBox } from 'element-plus'
-import { executeProjectBomU9Sync, listBom, listBomVersions, listProjectBomHeaders, previewProjectBomU9Sync } from '../api'
+import { computed, h, onMounted, onUnmounted, ref, watch } from 'vue'
+import { ElMessage } from '../statusMessage'
+import { ElMessageBox } from 'element-plus'
+import U9BomSyncPreview from './U9BomSyncPreview.vue'
+import { executeProjectBomU9Sync, listBom, listBomVersions, listProjectBomHeaders, previewProjectBomU9Sync, retryProjectBomHeaderAutomatic } from '../api'
 import type { BomHeaderKind, BomItem, BomKind, BomVersion, ProjectBomHeader, ProjectSummary } from '../types'
 import { useUserDisplayName } from '../userDisplay'
 
 const displayUserName = useUserDisplayName()
+const emit = defineEmits<{ openBom: [projectId: string, kind: Exclude<BomKind, 'Unclassified'>] }>()
 
 type VisibleBomKind = Exclude<BomKind, 'Unclassified'>
 type ProjectDetail = {
@@ -31,8 +34,53 @@ const detailCache = ref<Record<string, ProjectDetail>>({})
 const loading = ref(false)
 const error = ref('')
 const syncingRowKey = ref('')
+const retryingApplicationId = ref('')
+
+function automaticText(header?: ProjectBomHeader) {
+  if (header?.automaticStatus) return ({ NotRequested: '待BOM发布', ApprovalQueued: '自动审批排队', Running: '自动处理中', Rejected: '申请已退回', Completed: '已自动批准', Failed: '失败待重试', WaitingRetry: '待重试', Queued: '已批准待同步' })[header.automaticStatus]
+  return header?.applicationStatus === 'Approved' ? '已自动批准' : header?.applicationStatus === 'Rejected' ? '自动处理失败' : header?.applicationId ? '待确认状态' : '待BOM发布'
+}
+
+async function retryAutomatic(header: ProjectBomHeader) {
+  if (!header.canRetryAutomatic || !header.applicationId || retryingApplicationId.value) return
+  retryingApplicationId.value = header.applicationId
+  try {
+    try {
+      await ElMessageBox.confirm(`${header.materialName ?? '当前BOM'}：${header.automaticMessage ?? '自动流程未完成'}。重试将复用原申请及料品，执行自动批准并排队同步U9C，可能写入U9C正式料号。是否确认？`, '重试料号自动处理', { type: 'warning', confirmButtonText: '确认重试', cancelButtonText: '取消' })
+    } catch { return }
+    const updated = await retryProjectBomHeaderAutomatic(header.projectId, header.kind, header.applicationId, header.applicationRowVersion ?? 0, props.token)
+    const detail = detailCache.value[header.projectId]
+    if (detail) detail.headers = detail.headers.map(item => item.kind === updated.kind ? updated : item)
+    ElMessage.success(updated.automaticMessage ?? '已提交原申请重试，请刷新查看进度')
+  } catch (reason) {
+    ElMessage.error(reason instanceof Error ? reason.message : '料号自动处理重试失败')
+    const detail = detailCache.value[header.projectId]
+    if (detail) {
+      try { detail.headers = await listProjectBomHeaders(header.projectId, props.token) } catch { /* 保留原失败状态。 */ }
+    }
+  } finally { retryingApplicationId.value = '' }
+}
 type U9BomViewState = 'checking' | 'synced' | 'empty' | 'approval-pending' | 'waiting-components' | 'create-pending' | 'modify-pending' | 'failed'
 const u9BomStates = ref<Record<string, U9BomViewState>>({})
+let automaticPoll: ReturnType<typeof setInterval> | undefined
+let pollingAutomatic = false
+onMounted(() => {
+  automaticPoll = setInterval(async () => {
+    if (pollingAutomatic || loading.value) return
+    const targets = Object.entries(detailCache.value).filter(([, detail]) =>
+      detail.headers.some(header => ['ApprovalQueued', 'Running', 'Queued'].includes(header.automaticStatus ?? '')))
+    if (!targets.length) return
+    pollingAutomatic = true
+    try {
+      for (const [projectId, detail] of targets) {
+        const headers = await listProjectBomHeaders(projectId, props.token)
+        if (detailCache.value[projectId] === detail) detail.headers = headers
+      }
+    } catch { /* 网络恢复后继续获取后台状态，不触发业务重试。 */ }
+    finally { pollingAutomatic = false }
+  }, 5000)
+})
+onUnmounted(() => clearInterval(automaticPoll))
 
 const rootProjectId = computed(() => props.project.rootProjectId || props.project.id)
 const hierarchyProjects = computed(() => props.projects
@@ -208,7 +256,7 @@ async function syncU9Bom(row: (typeof overviewRows.value)[number]) {
         return
       }
       u9BomStates.value = { ...u9BomStates.value, [row.key]: 'synced' }
-      ElMessage.success('U9C BOM已存在，PLM当前没有需要追加的新子件')
+      ElMessage.success('U9C BOM已存在，PLM当前没有需要同步的子件变更')
       return
     }
     u9BomStates.value = {
@@ -223,15 +271,11 @@ async function syncU9Bom(row: (typeof overviewRows.value)[number]) {
     }
     const operation = preview.state === 'CreateRequired' ? '创建BOM并同步子件' : '同步审核通过的子件'
     const required = preview.writePreview.requiredConfirmation
-    const quantities = preview.writePreview.quantityReconciliations ?? []
-    const quantitySummary = quantities.length
-      ? `\n\n数量核对：${quantities.map(item => `${item.itemCode}（单位 ${item.issueUomCode}、母件底数 ${formatU9Quantity(item.parentQty)}）：PLM审核总量 ${formatU9Quantity(item.plmApprovedTotal)} / U9C现有总量 ${formatU9Quantity(item.u9ExistingTotal)} / 本次上传 ${formatU9Quantity(item.uploadDelta)}`).join('；')}`
-      : ''
     try {
       await ElMessageBox.confirm(
-        `将以母件 ${preview.itemCode}、固定版本 A1 在U9C${operation}，仅使用BOM审核发布版本的 ${preview.componentCount} 个正式子件。${quantitySummary}\n\nU9C既有子件只保留、不删除；确认后立即执行并自动回查。`,
+        h(U9BomSyncPreview, { itemCode: preview.itemCode, componentCount: preview.componentCount, preview: preview.writePreview }),
         `确认${operation}`,
-        { confirmButtonText: '确认同步', cancelButtonText: '取消', type: 'warning' },
+        { confirmButtonText: '确认同步', cancelButtonText: '取消', customClass: 'u9-bom-sync-confirm' },
       )
     } catch {
       return
@@ -254,16 +298,14 @@ function headerCodeText(header?: ProjectBomHeader, eligible = true) {
   if (!eligible && !header?.materialId) return '不申请'
   if (!header?.materialId) return '待BOM发布'
   if (header.materialCode) return header.materialCode
+  if (header.automaticStatus === 'Failed' || header.automaticStatus === 'WaitingRetry') return automaticText(header)
   if (header.applicationStatus === 'Rejected') return '自动处理失败'
   if (header.applicationStatus === 'Approved') return '自动同步中'
-  return '自动处理中'
-}
-
-function formatU9Quantity(value: number) {
-  return Number(value.toFixed(4)).toString()
+  return header.automaticStatus === 'Running' ? '自动处理中' : '待自动处理'
 }
 
 function headerCodeTitle(header?: ProjectBomHeader) {
+  if (header?.automaticMessage) return header.automaticMessage
   if (!header?.materialId) return 'BOM审核发布后由系统自动生成料号并同步U9C'
   if (header.materialCode) return `U9C正式料号：${header.materialCode}`
   const applicant = header.requestedBy ? `触发人：${displayUserName(header.requestedBy)}` : '自动流程触发人待补充'
@@ -299,6 +341,11 @@ async function loadOverview(force = false) {
   }
 }
 
+function refreshOverview() {
+  if (loading.value || syncingRowKey.value) return
+  void loadOverview(true)
+}
+
 function formatDate(value?: string) {
   if (!value) return '—'
   const date = new Date(value)
@@ -314,8 +361,9 @@ watch([rootProjectId, hierarchySignature, () => props.token], () => {
 <template>
   <section class="bom-overview" aria-label="BOM多级总览">
     <div v-if="error" class="bom-overview__error" role="alert">{{ error }}</div>
-    <div v-if="editable" class="bom-overview__generation">
-      <span>{{ missingHeaderCount ? `待BOM发布后自动生成并同步 ${missingHeaderCount} 个BOM料号` : pendingHeaderCount ? `${pendingHeaderCount} 个BOM料号正在自动同步U9C` : '全部BOM料号已由U9C回写' }}</span>
+    <div class="bom-overview__generation">
+      <span v-if="editable">{{ missingHeaderCount ? `待BOM发布后自动生成并同步 ${missingHeaderCount} 个BOM料号` : pendingHeaderCount ? `${pendingHeaderCount} 个BOM料号尚未完成自动处理，请查看各行状态` : '全部BOM料号已由U9C回写' }}</span>
+      <button type="button" class="pdm-secondary-action" aria-label="刷新多级BOM" :disabled="loading || !!syncingRowKey || !token" @click="refreshOverview">{{ loading ? '刷新中…' : '刷新' }}</button>
     </div>
 
     <div class="bom-overview__table-wrap">
@@ -326,7 +374,7 @@ watch([rootProjectId, hierarchySignature, () => props.token], () => {
         <tbody>
           <tr v-for="row in overviewRows" :key="row.key" :class="{ 'is-master-row': row.isMaster }">
             <td :title="`${row.project.code} · ${row.project.name}`">
-              <span class="bom-overview__project" :style="{ paddingLeft: `${row.depth * 18}px` }"><i v-if="!row.isMaster">↳</i><strong v-if="row.isMaster">{{ row.project.code }}</strong><span>{{ row.isMaster ? `${row.project.name} · 项目主BOM` : row.label }}</span></span>
+              <span class="bom-overview__project" :style="{ paddingLeft: `${row.depth * 18}px` }"><i v-if="!row.isMaster">↳</i><strong v-if="row.isMaster">{{ row.project.code }}</strong><span v-if="row.isMaster">{{ row.project.name }} · 项目主BOM</span><button v-else type="button" class="bom-overview__link" :aria-label="`进入${row.project.code}的${row.label}`" :title="`进入${row.project.code}的${row.label}`" @click="emit('openBom', row.project.id, row.kind as VisibleBomKind)">{{ row.label }}</button></span>
             </td>
             <td>{{ headerCategoryLabel(row.project, row.headerKind) }}</td>
             <td><span :class="row.header?.materialCode ? '' : isHeaderEligible(row) ? 'is-warning' : 'is-muted'" :title="isHeaderEligible(row) ? headerCodeTitle(row.header) : '主项目已有子项目，本级三类BOM不申请料号'">{{ headerCodeText(row.header, isHeaderEligible(row)) }}</span></td>
@@ -336,8 +384,11 @@ watch([rootProjectId, hierarchySignature, () => props.token], () => {
             <td><span :class="row.releaseStatus === '已发布' ? 'is-success' : row.releaseStatus.includes('未发布') ? 'is-warning' : 'is-muted'">{{ row.releaseStatus }}</span></td>
             <td><span :class="row.unresolvedCount ? 'is-warning' : 'is-success'">{{ row.unresolvedCount ? `${row.unresolvedCount} 项` : '正常' }}</span></td>
             <td :title="formatDate(row.releasedAt)">{{ formatDate(row.releasedAt) }}</td>
-            <td :title="isHeaderEligible(row) ? headerCodeTitle(row.header) : '主项目已有子项目，本级三类BOM不生成料号'"><span :class="row.header?.applicationStatus === 'Rejected' ? 'is-warning' : row.header?.applicationStatus === 'Approved' ? 'is-success' : row.header?.applicationId ? 'is-warning' : 'is-muted'">{{ !isHeaderEligible(row) && !row.header?.materialId ? '不生成' : row.header?.applicationStatus === 'Approved' ? '已自动批准' : row.header?.applicationStatus === 'Rejected' ? '自动处理失败' : row.header?.applicationId ? '自动处理中' : '待BOM发布' }}</span></td>
-            <td><span :class="row.header?.materialCode ? 'is-success' : row.header?.materialId ? 'is-warning' : 'is-muted'">{{ !isHeaderEligible(row) && !row.header?.materialId ? '不生成' : row.header?.materialCode ? '已回写' : row.header?.materialId ? '自动同步中' : '待生成' }}</span></td>
+            <td :title="isHeaderEligible(row) ? headerCodeTitle(row.header) : '主项目已有子项目，本级三类BOM不生成料号'">
+              <button v-if="editable && row.header?.canRetryAutomatic" type="button" class="bom-overview__sync is-warning" :disabled="!!retryingApplicationId" :aria-label="`重试 ${row.project.code} ${row.headerKind} 料号自动处理`" @click="retryAutomatic(row.header)">{{ retryingApplicationId === row.header.applicationId ? '正在重试…' : automaticText(row.header) }}</button>
+              <span v-else :class="row.header?.materialCode ? 'is-success' : row.header?.applicationId ? 'is-warning' : 'is-muted'">{{ !isHeaderEligible(row) && !row.header?.materialId ? '不生成' : automaticText(row.header) }}</span>
+            </td>
+            <td :title="headerCodeTitle(row.header)"><span :class="row.header?.materialCode ? 'is-success' : row.header?.materialId ? 'is-warning' : 'is-muted'">{{ !isHeaderEligible(row) && !row.header?.materialId ? '不生成' : row.header?.materialCode ? '已回写' : row.header?.automaticStatus === 'Failed' || row.header?.automaticStatus === 'WaitingRetry' ? '未同步' : row.header?.materialId ? '待同步' : '待生成' }}</span></td>
             <td>
               <button v-if="editable && isHeaderEligible(row) && row.header?.materialCode" type="button" class="bom-overview__sync" :disabled="!!syncingRowKey" @click="syncU9Bom(row)">{{ syncingRowKey === row.key ? '检查中…' : u9BomStateText(row) }}</button>
               <span v-else :class="row.header?.materialCode ? 'is-muted' : 'is-warning'">{{ u9BomStateText(row) }}</span>
@@ -352,5 +403,6 @@ watch([rootProjectId, hierarchySignature, () => props.token], () => {
 </template>
 
 <style scoped>
+.bom-overview__link{min-width:0;overflow:hidden;padding:0;border:0;background:transparent;color:var(--pdm-blue);font:inherit;text-overflow:ellipsis;white-space:nowrap;cursor:pointer}.bom-overview__link:hover{text-decoration:underline}.bom-overview__link:focus-visible{outline:2px solid var(--pdm-blue);outline-offset:2px}
 .bom-overview{display:flex;min-height:560px;min-width:0;flex-direction:column;padding:0;border:1px solid var(--pdm-border);border-radius:7px;background:#fff}.bom-overview__error{margin:10px;padding:8px 10px;border-radius:5px;background:#fef2f2;color:#b91c1c}.bom-overview__generation{display:flex;min-height:38px;align-items:center;justify-content:flex-end;gap:10px;padding:5px 8px;border-bottom:1px solid var(--pdm-border);color:#64748b}.bom-overview__table-wrap{min-height:0;flex:1;overflow:auto;border-radius:6px}.bom-overview__table-wrap table{width:100%;table-layout:fixed;border-collapse:collapse;white-space:nowrap}.bom-overview__table-wrap th,.bom-overview__table-wrap td{overflow:hidden;padding:8px;border-bottom:1px solid var(--pdm-border);text-align:left;text-overflow:ellipsis}.bom-overview__table-wrap th{position:sticky;top:0;z-index:1;background:#f3f6fa}.bom-overview__table-wrap th:nth-child(1){width:205px}.bom-overview__table-wrap th:nth-child(2){width:85px}.bom-overview__table-wrap th:nth-child(3),.bom-overview__table-wrap th:nth-child(4){width:112px}.bom-overview__table-wrap th:nth-child(5){width:58px}.bom-overview__table-wrap th:nth-child(6){width:80px}.bom-overview__table-wrap th:nth-child(7){width:82px}.bom-overview__table-wrap th:nth-child(8){width:68px}.bom-overview__table-wrap th:nth-child(9){width:118px}.bom-overview__table-wrap th:nth-child(10){width:145px}.bom-overview__table-wrap th:nth-child(11){width:72px}.bom-overview__table-wrap th:nth-child(12){width:92px}.bom-overview__table-wrap tr.is-master-row td{background:#f8fafc;font-weight:600}.bom-overview__project{display:flex;min-width:0;align-items:center;gap:6px}.bom-overview__project i{color:var(--pdm-muted);font-style:normal}.bom-overview__project strong{flex:0 0 auto}.bom-overview__project span{overflow:hidden;color:var(--pdm-muted);text-overflow:ellipsis}.bom-overview__sync{border:0;background:transparent;color:var(--pdm-blue);cursor:pointer;font:inherit}.bom-overview__sync:disabled{cursor:wait;opacity:.6}.is-warning{color:#b45309}.is-success{color:#15803d}.is-muted{color:#64748b}.bom-overview__empty{padding:24px;text-align:center;color:var(--pdm-muted)}
 </style>

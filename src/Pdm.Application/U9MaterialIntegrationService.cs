@@ -309,6 +309,20 @@ public sealed class U9MaterialIntegrationService(
         if (!PayloadUsesUnitCode(existingTask, u9UnitCode))
             throw new PdmRuleException($"料品计量单位编码已变更为 {u9UnitCode}。请先点击“重试”重新生成请求预览和SHA-256，再执行同步。");
 
+        if (existingTask.Operation == MaterialSyncOperation.Create && existingTask.Status != MaterialSyncStatus.NeedsReview)
+        {
+            var headerKind = sourceMaterial.Kind == MaterialKind.Product
+                ? await U9MaterialCreationRules.FindHeaderKindAsync(materials, sourceMaterial.Id, cancellationToken) : null;
+            var category = sourceMaterial.CategoryCode ?? sourceMaterial.U9CategoryCode ?? string.Empty;
+            var rule = new MaterialCategoryRule(sourceMaterial.Kind, category, category, sourceMaterial.SupplyMode,
+                true, actor, timeProvider.GetUtcNow());
+            var currentPayload = U9MaterialPayloadFactory.CreatePayload(sourceMaterial, rule,
+                configuration.OrganizationCode, existingTask.CorrelationId, u9UnitCode, headerKind);
+            using var savedPayload = JsonDocument.Parse(existingTask.PayloadJson);
+            if (U9MaterialCreationRules.Compare(currentPayload, U9MaterialCreationRules.ReadAttributes(savedPayload.RootElement[0])).Count > 0)
+                throw new PdmRuleException("料品创建规则已更新；请先点击重试，重新生成并核对请求预览和SHA-256。未执行U9C写入。");
+        }
+
         var task = await materials.BeginSyncTaskAsync(taskId, timeProvider.GetUtcNow(), cancellationToken);
         var writeAttempted = false;
         var writeResponseReceived = false;
@@ -343,8 +357,9 @@ public sealed class U9MaterialIntegrationService(
                 if (existingTask.Status != MaterialSyncStatus.NeedsReview)
                     throw new U9MaterialCodeConflictException(sourceMaterial.MaterialCode);
 
-                var differences = CompareMappedFields(sourceMaterial, existingItem);
-                if (differences.Count > 0)
+                var differences = CompareMappedFields(sourceMaterial, existingItem)
+                    .Concat(U9MaterialCreationRules.Compare(task.PayloadJson, existingItem.CreationAttributes)).ToArray();
+                if (differences.Length > 0)
                     throw new PdmRuleException($"U9C已存在待复核料号 {sourceMaterial.MaterialCode}，但字段仍不一致：{string.Join("；", differences)}");
 
                 return await CompleteAsync(
@@ -460,8 +475,9 @@ public sealed class U9MaterialIntegrationService(
                 lastDifferences = [$"U9C写后查询未找到料号 {expected.MaterialCode}。"];
                 continue;
             }
-            var differences = CompareMappedFields(expected, actual);
-            if (differences.Count == 0) return actual;
+            var differences = CompareMappedFields(expected, actual).Concat(task.Operation == MaterialSyncOperation.Create
+                ? U9MaterialCreationRules.Compare(task.PayloadJson, actual.CreationAttributes) : []).ToArray();
+            if (differences.Length == 0) return actual;
             lastDifferences = differences;
         }
         throw new PdmRuleException($"U9C写入已返回，但写后回查未确认字段一致，任务进入待复核：{string.Join("；", lastDifferences)}");

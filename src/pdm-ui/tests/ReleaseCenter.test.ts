@@ -1,9 +1,103 @@
-import { mount } from '@vue/test-utils'
+import { flushPromises, mount } from '@vue/test-utils'
 import { describe, expect, it, vi } from 'vitest'
 import ReleaseCenter from '../src/components/ReleaseCenter.vue'
-import type { CreateReleasePackageInput, ReleasePackageSummary } from '../src/types'
+import * as api from '../src/api'
+import type { BomItem, CreateReleasePackageInput, ReleasePackageSummary } from '../src/types'
 
 describe('ReleaseCenter', () => {
+  const frozenItem = (id: string): BomItem => ({ id, kind: 'Standard', sequence: 1, drawingNumber: id,
+    name: `物料${id}`, specification: 'M5', brand: '国优', quantity: 1, unit: '个', revision: 'W1', complete: true })
+  const frozenPackage = (items: BomItem[], scope: ReleasePackageSummary['scope'] = 'StandardSupplement'): ReleasePackageSummary => ({
+    id: 'supplement-draft', number: 'RP-SUP', state: '草稿', scope, workflowVersion: 1, selectedBomItemIds: [],
+    createsManufacturingBaseline: false, locksDocuments: false, steps: [],
+    standardBomSnapshot: scope === 'StandardSupplement' ? items : [], nonStandardBomSnapshot: [],
+    electricalBomSnapshot: scope === 'ElectricalSupplement' ? items : [],
+  })
+  const frozenProps = { username: 'reviewer', pending: false, progress: 0, error: '', canManage: true, canDecide: false }
+
+  it.each(['StandardSupplement', 'ElectricalSupplement'] as const)('defaults %s to two additions and preserves the full snapshot toggle', async scope => {
+    const previous = Array.from({ length: 28 }, (_, index) => frozenItem(`old-${index}`))
+    const items = [...previous, frozenItem('new-1'), frozenItem('new-2')]
+    const releasePackage = frozenPackage(items, scope)
+    const snapshot = JSON.stringify(releasePackage)
+    const wrapper = mount(ReleaseCenter, { props: { ...frozenProps, releasePackage, previousVersionItems: previous } })
+    const rows = () => wrapper.findAll('.pdm-release-frozen-table tbody tr')
+    const click = async (text: string) => wrapper.findAll('button').find(button => button.text() === text)!.trigger('click')
+    expect(rows()).toHaveLength(2)
+    expect(rows().map(row => row.findAll('td')[1]!.text())).toEqual(['new-1', 'new-2'])
+    expect(wrapper.get('.pdm-release-diff-summary').text()).toContain('新增 2')
+    expect(wrapper.findAll('.pdm-release-frozen-table th')).toHaveLength(11)
+    await click('查看完整BOM')
+    expect(rows()).toHaveLength(30)
+    expect(wrapper.findAll('.pdm-release-frozen-table th')).toHaveLength(9)
+    await click('按结构')
+    expect(rows()).toHaveLength(30)
+    await click('仅看本次变更')
+    expect(rows()).toHaveLength(2)
+    await click('查看完整BOM')
+    await wrapper.setProps({ releasePackage: { ...releasePackage, id: 'another-draft' } })
+    expect(rows()).toHaveLength(2)
+    expect(JSON.stringify(releasePackage)).toBe(snapshot)
+    expect(wrapper.emitted('submit')).toBeUndefined()
+    wrapper.unmount()
+  })
+
+  it('shows original and new values, explicitly marks deletions and has an unchanged empty state', async () => {
+    const previous = [frozenItem('same'), frozenItem('modified'), frozenItem('deleted')]
+    const releasePackage = frozenPackage([previous[0]!, { ...previous[1]!, quantity: 3, brand: '新品牌' }])
+    const wrapper = mount(ReleaseCenter, { props: { ...frozenProps, releasePackage, previousVersionItems: previous } })
+    expect(wrapper.findAll('.release-change-tag').map(tag => tag.text())).toEqual(['修改', '删除'])
+    expect(wrapper.get('.pdm-frozen-change-details').text()).toContain('数量：1 → 3')
+    expect(wrapper.get('.pdm-frozen-change-details').text()).toContain('品牌：国优 → 新品牌')
+    const deleted = wrapper.findAll('.pdm-release-frozen-table tbody tr')[1]!
+    expect(deleted.text()).toContain('当前发布范围已移除此项')
+    expect(deleted.findAll('td')[6]!.text()).toBe('0')
+    expect(deleted.find('button').exists()).toBe(false)
+    await wrapper.setProps({ releasePackage: frozenPackage(previous) })
+    expect(wrapper.get('.pdm-empty-info').text()).toContain('本次没有增补或变更内容')
+    expect(wrapper.get('.pdm-empty-info').attributes('colspan')).toBe('11')
+    wrapper.unmount()
+  })
+
+  it('paginates changes independently and resets pagination when switching the full BOM', async () => {
+    const previous = [frozenItem('old')]
+    const additions = Array.from({ length: 51 }, (_, index) => frozenItem(`new-${index}`))
+    const wrapper = mount(ReleaseCenter, { props: { ...frozenProps, releasePackage: frozenPackage([...previous, ...additions]), previousVersionItems: previous } })
+    await wrapper.get('button[aria-label="固化快照下一页"]').trigger('click')
+    expect(wrapper.findAll('.pdm-release-frozen-table tbody tr')).toHaveLength(1)
+    await wrapper.findAll('button').find(button => button.text() === '查看完整BOM')!.trigger('click')
+    expect(wrapper.findAll('.pdm-release-frozen-table tbody tr')).toHaveLength(50)
+    expect(wrapper.get('button[aria-label="固化快照上一页"]').attributes('disabled')).toBeDefined()
+    wrapper.unmount()
+  })
+
+  it('shows total, previously released and new issue quantities and highlights existing comments', async () => {
+    const item = { id: 'item-1', kind: 'Standard' as const, sequence: 1, drawingNumber: '1001', name: '平垫', quantity: 4, unit: '个', revision: 'W2', complete: true }
+    const formal: ReleasePackageSummary = { id: 'formal', number: 'RP-FORMAL', state: '审批中', scope: 'StandardFormal', workflowVersion: 1,
+      selectedBomItemIds: [], createsManufacturingBaseline: false, locksDocuments: false, steps: [],
+      standardBomSnapshot: [item], nonStandardBomSnapshot: [], electricalBomSnapshot: [] }
+    const history: ReleasePackageSummary[] = [1, 3].map((quantity, index) => ({ ...formal, id: `long-${index}`, scope: 'StandardLongLead',
+      state: '已发布', publishedAt: `2026-09-0${index + 1}T00:00:00Z`, standardBomSnapshot: [{ ...item, quantity, unit: index ? '个' : '001' }] }))
+    const comments = vi.spyOn(api, 'listReleaseItemComments').mockResolvedValue([{ id: 'comment-1', releasePackageId: formal.id,
+      bomItemId: item.id, materialKey: 'material:1001|个', materialCode: '1001', materialName: '平垫', comment: '请核对', createdBy: 'reviewer', createdAt: '2026-09-07T00:00:00Z' }])
+    const wrapper = mount(ReleaseCenter, { props: { releasePackage: formal, releasePackages: history, token: 'test-token',
+      username: 'reviewer', pending: false, progress: 0, error: '', canManage: false, canDecide: false } })
+    try {
+      await flushPromises()
+      expect(wrapper.findAll('.pdm-release-frozen-table th').map(cell => cell.text())).toEqual(['序号', '物料编码', '物料名称', '型号', '品牌', '备注', 'BOM总量', '已提前发布', '本次新增下发', '版本', '批注'])
+      expect(wrapper.findAll('.pdm-release-frozen-table tbody td').slice(6, 9).map(cell => cell.text())).toEqual(['4', '4', '0'])
+      expect(wrapper.get('.pdm-item-comment-action').classes()).toContain('has-comments')
+      expect(wrapper.get('.pdm-item-comment-action').text()).toBe('批注（1）')
+      await wrapper.setProps({ releasePackage: { ...formal, wholeSetMultiplier: 3 } })
+      expect(wrapper.findAll('.pdm-release-frozen-table tbody td').slice(6, 9).map(cell => cell.text())).toEqual(['12', '4', '8'])
+      await wrapper.setProps({ releasePackages: [history[0]!] })
+      expect(wrapper.findAll('.pdm-release-frozen-table tbody td').slice(6, 9).map(cell => cell.text())).toEqual(['12', '1', '11'])
+      await wrapper.findAll('.pdm-view-switch button').find(button => button.text() === '按结构')!.trigger('click')
+      expect(wrapper.findAll('.pdm-release-frozen-table th')).toHaveLength(9)
+      expect(wrapper.findAll('.pdm-release-frozen-table tbody td')[6]!.text()).toBe('12')
+    } finally { wrapper.unmount(); comments.mockRestore() }
+  })
+
   it('renders rejected and skipped approval steps with their real decision details', () => {
     const releasePackage: ReleasePackageSummary = {
       id: 'release-rejected', number: 'RP-REJECTED-001', state: '已驳回', scope: 'StandardFormal',
@@ -55,7 +149,6 @@ describe('ReleaseCenter', () => {
         error: '',
         canManage: true,
         canDecide: true,
-        changeReasonTypes: ['设计变更', '客户需求'],
       },
     })
 
@@ -69,12 +162,12 @@ describe('ReleaseCenter', () => {
     expect(changeNumber.element.closest('.pdm-release-type-row')).toBe(wrapper.get('.pdm-release-type-row').element)
     expect(changeNumber.attributes()).toHaveProperty('readonly')
     expect((changeNumber.element as HTMLInputElement).value).toBe('创建草稿后自动生成')
-    await wrapper.get('input[aria-label="变更原因 设计变更"]').setValue(true)
-    await wrapper.get('input[aria-label="变更原因 客户需求"]').setValue(true)
+    await wrapper.get('input[aria-label="变更原因 物料问题 / 交期不满足"]').setValue(true)
+    await wrapper.get('input[aria-label="变更原因 客户原因 / 客户需求变更"]').setValue(true)
     await wrapper.get('form').trigger('submit')
 
     const created = wrapper.emitted('create')?.[0]?.[0] as CreateReleasePackageInput
-    expect(created.changeReason).toBe('设计变更；客户需求')
+    expect(created.changeReason).toBe('物料问题 / 交期不满足；客户原因 / 客户需求变更')
     expect(created.scope).toBe('StandardSupplement')
     expect(created.selectedBomItemIds).toEqual([])
     expect('number' in created).toBe(false)
@@ -82,6 +175,36 @@ describe('ReleaseCenter', () => {
     expect('effectiveSerialFrom' in created).toBe(false)
     expect('effectiveSerialTo' in created).toBe(false)
     expect(wrapper.text()).not.toContain('审批人由系统管理中的版本化模板自动解析')
+  })
+
+  it('requires other details and shows the snapshotted formal supplement quota', async () => {
+    const formal: ReleasePackageSummary = {
+      id: 'formal-1', number: 'RP-FORMAL-1', state: '已发布', scope: 'StandardFormal', workflowVersion: 1,
+      selectedBomItemIds: [], createsManufacturingBaseline: true, locksDocuments: false, steps: [],
+      standardBomSnapshot: [], nonStandardBomSnapshot: [], electricalBomSnapshot: [],
+      publishedAt: '2026-09-01T00:00:00Z', formalSupplementPolicySnapshotted: true,
+      formalSupplementMaximumCount: 2, formalSupplementValidDays: null,
+    }
+    const used: ReleasePackageSummary = {
+      id: 'supplement-1', number: 'RP-SUP-1', state: '已发布', scope: 'StandardSupplement', workflowVersion: 1,
+      selectedBomItemIds: [], createsManufacturingBaseline: true, locksDocuments: false, steps: [],
+      standardBomSnapshot: [], nonStandardBomSnapshot: [], electricalBomSnapshot: [],
+      changeReason: '正式补充', changeReasonSelections: [{ categoryCode: 'FormalSupplement', reasonCode: 'FormalSupplement', category: '正式补充', reason: '正式补充' }],
+    }
+    const wrapper = mount(ReleaseCenter, {
+      props: {
+        releasePackage: null, allowedScopes: ['StandardSupplement'], preferredScope: 'StandardSupplement',
+        releasePackages: [formal, used], username: 'engineer', pending: false, progress: 0, error: '', canManage: true, canDecide: true,
+      },
+    })
+
+    expect(wrapper.text()).toContain('已发布 1/2 次')
+    await wrapper.get('input[aria-label="变更原因 其他"]').setValue(true)
+    expect(wrapper.get('.pdm-release-draft-actions .pdm-primary-action').attributes()).toHaveProperty('disabled')
+    await wrapper.get('input[aria-label="其他具体原因"]').setValue('现场临时调整')
+    expect(wrapper.get('.pdm-release-draft-actions .pdm-primary-action').attributes()).not.toHaveProperty('disabled')
+    await wrapper.get('form').trigger('submit')
+    expect((wrapper.emitted('create')?.[0]?.[0] as CreateReleasePackageInput).changeReason).toBe('其他 / 现场临时调整')
   })
 
   it('limits release types per BOM and submits the selected frozen package', async () => {
@@ -111,7 +234,7 @@ describe('ReleaseCenter', () => {
     expect(wrapper.text()).toContain('修改 1')
     expect(wrapper.findAll('.pdm-release-frozen-table th').map(cell => cell.text())).toEqual(['序号', '物料编码', '物料名称', '型号', '品牌', '备注', '数量', '版本', '批注'])
     expect(wrapper.findAll('.pdm-release-frozen-table tbody tr').at(0)!.findAll('td').map(cell => cell.text())).toEqual(['1', 'EL-001', '电气元件', 'M18', 'SMC', '安装备注', '2', 'W2', '批注'])
-    expect(wrapper.findAll('.pdm-release-frozen-table tbody tr').at(0)!.findAll('td.is-release-centered')).toHaveLength(4)
+    expect(wrapper.findAll('.pdm-release-frozen-table tbody tr').at(0)!.findAll('td.is-release-centered')).toHaveLength(6)
     expect(wrapper.findAll('.pdm-release-frozen-table col')).toHaveLength(9)
     const topWorkflow = wrapper.get('.pdm-release-top-workflow')
     const summary = wrapper.get('.pdm-release-summary')
@@ -261,7 +384,7 @@ describe('ReleaseCenter', () => {
     expect(wrapper.get('.pdm-release-parameter-slot').element).toBe(parameterSlot)
     expect(wrapper.get('.release-detail-picker').element).toBe(detail)
     expect(wrapper.get('.release-detail-picker table').element).toBe(table)
-    expect(wrapper.findAll('.release-detail-picker th').map(cell => cell.text())).toEqual(columnHeaders)
+    expect(wrapper.findAll('.release-detail-picker th').map(cell => cell.text())).toEqual([...columnHeaders, '变更明细（原值 → 新值）'])
     expect(wrapper.get('.release-detail-picker legend').text()).toContain('增补/变更内容')
     expect(wrapper.findAll('.release-detail-picker tbody tr').at(0)!.findAll('td.is-release-centered')).toHaveLength(6)
   })
@@ -281,7 +404,7 @@ describe('ReleaseCenter', () => {
     expect(wrapper.get('.pdm-release-draft-actions .pdm-primary-action').text()).toBe('创建草稿')
     expect(wrapper.text()).toContain('备注')
     expect(wrapper.get('textarea').attributes()).not.toHaveProperty('required')
-    expect(wrapper.findAll('.release-detail-picker th').map(cell => cell.text())).toEqual(['标记', '序号', '物料编码', '名称', '型号', '品牌', '可发布数量', '本次发布', '备注', '发布状态'])
+    expect(wrapper.findAll('.release-detail-picker th').map(cell => cell.text())).toEqual(['标记', '序号', '物料编码', '名称', '型号', '品牌', '可发布数量', '发布总数量', '备注', '发布状态'])
     expect(wrapper.findAll('.release-detail-picker tbody tr').at(0)!.findAll('td').slice(1).map(cell => cell.text())).toEqual(['1', 'STD-001', '长交期件', 'M12', 'SMC', '1', '—', '提前采购', '剩余可发布'])
     expect(wrapper.get('.pdm-release-draft-actions .pdm-primary-action').attributes()).toHaveProperty('disabled')
 
@@ -396,7 +519,7 @@ describe('ReleaseCenter', () => {
     expect(wrapper.findAll('.release-detail-picker tbody tr').at(0)!.findAll('td').at(1)!.text()).toBe('51')
   })
 
-  it('summarizes formal items by material code and unit and keeps the long-lead marker', () => {
+  it('defaults formal items to selected and can defer a whole summarized material group', async () => {
     const wrapper = mount(ReleaseCenter, {
       props: {
         releasePackage: null,
@@ -414,11 +537,25 @@ describe('ReleaseCenter', () => {
       },
     })
 
-    expect(wrapper.text()).toContain('正式发布内容（共 2 项 · 整套倍率 ×1）')
+    expect(wrapper.text()).toContain('正式发布内容（已选 2 / 共 2 项 · 默认全选 · 整套倍率 ×1）')
     const rows = wrapper.findAll('.release-detail-picker tbody tr')
     expect(rows).toHaveLength(2)
-    expect(rows.at(0)!.findAll('td').map(cell => cell.text())).toEqual(['全量', '1', 'STD-001', '提前采购件', 'M12', 'SMC', '4', '4 × 1 = 4', '—', '已提前发布 1/4'])
-    expect(rows.at(1)!.text()).not.toContain('已提前发布')
+    expect(rows.at(0)!.findAll('td').map(cell => cell.text())).toEqual(['', '1', 'STD-001', '提前采购件', 'M12', 'SMC', '4', '4', '—', '已提前发布 1/4'])
+    expect(rows.at(1)!.text()).toContain('本次发布')
+    expect(wrapper.findAll('input[aria-label^="本次发布物料"]').every(input => (input.element as HTMLInputElement).checked)).toBe(true)
+
+    await wrapper.get('input[aria-label="本次发布物料 STD-001"]').setValue(false)
+    expect(wrapper.get('.release-detail-picker legend').text()).toContain('已选 1 / 共 2 项')
+    expect(rows.at(0)!.findAll('td').at(7)!.text()).toBe('—')
+    expect(rows.at(0)!.text()).toContain('本次不发布')
+    await wrapper.get('.pdm-release-draft-actions .pdm-primary-action').trigger('submit')
+    expect(wrapper.emitted('create')?.at(0)?.at(0)).toMatchObject({
+      scope: 'StandardFormal',
+      selectedBomItemIds: ['item-3'],
+    })
+
+    await wrapper.get('input[aria-label="本次发布物料 STD-002"]').setValue(false)
+    expect(wrapper.get('.pdm-release-draft-actions .pdm-primary-action').attributes()).toHaveProperty('disabled')
   })
 
   it('uses an operator-selected whole-set multiplier without changing source quantities', async () => {
@@ -432,7 +569,9 @@ describe('ReleaseCenter', () => {
 
     await wrapper.get('input[aria-label="整套倍率"]').setValue(3)
     expect(wrapper.get('.release-detail-picker legend').text()).toContain('整套倍率 ×3')
-    expect(wrapper.findAll('.release-detail-picker tbody td').at(7)!.text()).toBe('2 × 3 = 6')
+    const totalQuantityCell = wrapper.findAll('.release-detail-picker tbody td').at(7)!
+    expect(totalQuantityCell.text()).toBe('6')
+    expect(totalQuantityCell.classes()).toContain('is-release-multiplied')
     await wrapper.get('.pdm-release-draft-actions .pdm-primary-action').trigger('submit')
 
     expect(wrapper.emitted('create')?.[0]?.[0]).toMatchObject({ wholeSetMultiplier: 3 })
@@ -484,6 +623,29 @@ describe('ReleaseCenter', () => {
     expect(wrapper.text()).toContain('STD-001')
     expect(wrapper.text()).toContain('STD-002')
     expect(wrapper.text()).toContain('STD-003')
+    expect(wrapper.text()).toContain('数量：1 → 2')
+    expect(wrapper.text()).toContain('版本：W1 → W2')
+  })
+
+  it('matches repeated material instances one to one and shows only real field changes', async () => {
+    const previous: BomItem[] = [2, 2, 2, 2, 1, 1, 1, 1].map((quantity, index) => ({
+      id: `repeated-${index}`, kind: 'Standard', sequence: index + 1, drawingNumber: '01020000088',
+      name: '螺钉', specification: 'M5x18', brand: '国优', quantity, unit: '个', revision: 'W2', complete: true,
+    }))
+    const wrapper = mount(ReleaseCenter, { props: {
+      releasePackage: null, allowedScopes: ['StandardSupplement'], preferredScope: 'StandardSupplement',
+      standardItems: previous.map(item => ({ ...item, sequence: item.sequence + 2 })), previousVersionItems: previous,
+      username: 'engineer', pending: false, progress: 0, error: '', canManage: true, canDecide: true,
+    } })
+    expect(wrapper.findAll('.release-change-tag')).toHaveLength(0)
+    await wrapper.setProps({ standardItems: previous.map((item, index) => index === 1 ? { ...item, quantity: 3, brand: '新品牌' } : { ...item }) })
+    expect(wrapper.findAll('.release-change-tag').map(tag => tag.text())).toEqual(['修改'])
+    expect(wrapper.get('.release-change-details').text()).toContain('数量：2 → 3')
+    expect(wrapper.get('.release-change-details').text()).toContain('品牌：国优 → 新品牌')
+    await wrapper.setProps({ standardItems: previous.map(item => ({ ...item, id: `rebuilt-${item.id}` })).reverse() })
+    expect(wrapper.findAll('.release-change-tag')).toHaveLength(0)
+    await wrapper.setProps({ standardItems: previous.slice(1) })
+    expect(wrapper.findAll('.release-change-tag').map(tag => tag.text())).toEqual(['删除'])
   })
 
   it('defaults the approval snapshot to summary and switches to structured instances with per-material comments', async () => {
