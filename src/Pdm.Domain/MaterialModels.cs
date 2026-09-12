@@ -329,6 +329,9 @@ public sealed record MaterialSyncTask(
 {
     public string? MaterialCode { get; init; }
     public string? MaterialName { get; init; }
+    public string? Specification { get; init; }
+    public string? Brand { get; init; }
+    public string? Remark { get; init; }
     public string? CategoryCode { get; init; }
     public Guid? ProjectId { get; init; }
     public string? ProjectCode { get; init; }

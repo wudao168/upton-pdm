@@ -101,6 +101,7 @@ internal sealed class PdmTaskPaneControl : UserControl
     private readonly ImageList structureImages;
     private CadTreeNode rootNode;
     private string authenticatedUsername = string.Empty;
+    private IReadOnlyDictionary<string, string> userDisplayNames = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
     private Guid? displayedVersionDocumentId;
     private string displayedVersionFileName = string.Empty;
     private int treeBuildGeneration;
@@ -284,7 +285,7 @@ internal sealed class PdmTaskPaneControl : UserControl
             {
                 var item = new ListViewItem(version.Revision?.Display ?? "-") { Tag = version };
                 item.SubItems.Add(version.Status == 1 ? "正式" : "工作");
-                item.SubItems.Add(version.CreatedBy ?? string.Empty);
+                item.SubItems.Add(DisplayUserName(version.CreatedBy));
                 item.SubItems.Add(version.CreatedAt.ToLocalTime().ToString("yyyy-MM-dd HH:mm"));
                 item.SubItems.Add(version.ChangeNote ?? string.Empty);
                 versionList.Items.Add(item);
@@ -355,6 +356,31 @@ internal sealed class PdmTaskPaneControl : UserControl
                 RebuildTree(searchBox.Text);
             }
         });
+    }
+
+    public void SetUserDisplayNames(IReadOnlyDictionary<string, string> displayNames)
+    {
+        userDisplayNames = displayNames ?? new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        projectDocuments.SetUserDisplayNames(userDisplayNames);
+        RunOnUiThread(() =>
+        {
+            if (rootNode != null)
+            {
+                RebuildTree(searchBox.Text);
+            }
+            else
+            {
+                UpdateSelected(SelectedNode);
+            }
+        });
+    }
+
+    private string DisplayUserName(string username)
+    {
+        var value = username?.Trim() ?? string.Empty;
+        return userDisplayNames.TryGetValue(value, out var displayName) && !string.IsNullOrWhiteSpace(displayName)
+            ? displayName.Trim()
+            : value;
     }
 
     public void SetProjects(IReadOnlyList<ProjectDto> projects)
@@ -1196,7 +1222,7 @@ internal sealed class PdmTaskPaneControl : UserControl
         }
         else if (editing)
         {
-            updateReason = string.Concat("当前编辑人员：", node.CheckedOutBy);
+            updateReason = string.Concat("当前编辑人员：", DisplayUserName(node.CheckedOutBy));
         }
         else if (hasPendingLocalChange)
         {
@@ -1243,7 +1269,7 @@ internal sealed class PdmTaskPaneControl : UserControl
         var checkoutReason = PdmActionReason(registered, authenticated);
         if (registered && authenticated && editing)
         {
-            checkoutReason = editingByCurrentUser ? "您已获取该图档的编辑权限" : string.Concat("当前编辑人员：", node.CheckedOutBy);
+            checkoutReason = editingByCurrentUser ? "您已获取该图档的编辑权限" : string.Concat("当前编辑人员：", DisplayUserName(node.CheckedOutBy));
         }
         if (canRegister && authenticated)
         {
@@ -1297,7 +1323,7 @@ internal sealed class PdmTaskPaneControl : UserControl
         }
         else if (registered && authenticated && editing && !editingByCurrentUser)
         {
-            checkInReason = string.Concat("只有当前编辑人员", node.CheckedOutBy, "可以提交存档");
+            checkInReason = string.Concat("只有当前编辑人员", DisplayUserName(node.CheckedOutBy), "可以提交存档");
         }
         else if (registered && authenticated && editingByCurrentUser && !localFileExists)
         {
@@ -1313,12 +1339,12 @@ internal sealed class PdmTaskPaneControl : UserControl
             readOnlyPreview
                 ? "只读预览不能更改编辑状态"
                 : registered && authenticated && editing && !editingByCurrentUser
-                ? string.Concat("只有当前编辑人员", node.CheckedOutBy, "可以放弃编辑")
+                ? string.Concat("只有当前编辑人员", DisplayUserName(node.CheckedOutBy), "可以放弃编辑")
                 : registered && authenticated ? "尚未获取该图档的编辑权限" : PdmActionReason(registered, authenticated));
 
         SetContextState(contextWhereUsed, registered && authenticated, registered ? "请先登录PLM" : "该图档尚未入库");
         SetContextState(contextRequestRelease, registered && authenticated && !readOnlyPreview && editing && !editingByCurrentUser,
-            editingByCurrentUser ? "当前编辑权限属于您" : editing ? string.Concat("向", node.CheckedOutBy, "申请释放编辑权限") : "该图档当前未被检出");
+            editingByCurrentUser ? "当前编辑权限属于您" : editing ? string.Concat("向", DisplayUserName(node.CheckedOutBy), "申请释放编辑权限") : "该图档当前未被检出");
         SetContextState(contextOpenFolder, localFileExists, "本地文件不存在");
         var selectedRoot = rootNode != null
             && (ReferenceEquals(node, rootNode)
@@ -1359,7 +1385,7 @@ internal sealed class PdmTaskPaneControl : UserControl
         }
         else if (!editingByCurrentUser)
         {
-            renameReason = editing ? string.Concat("当前编辑人员：", node.CheckedOutBy) : "请先获取该图档的编辑权限";
+            renameReason = editing ? string.Concat("当前编辑人员：", DisplayUserName(node.CheckedOutBy)) : "请先获取该图档的编辑权限";
         }
         else if (!rootEditingByCurrentUser)
         {
@@ -1409,7 +1435,7 @@ internal sealed class PdmTaskPaneControl : UserControl
         }
         else if (editing)
         {
-            contextHint.Text = string.Concat("提示：", WorkStateText(node), "；编辑人员：", node.CheckedOutBy);
+            contextHint.Text = string.Concat("提示：", WorkStateText(node), "；编辑人员：", DisplayUserName(node.CheckedOutBy));
         }
         else if (node.Status == CadReferenceStatus.Lightweight)
         {
@@ -1634,7 +1660,7 @@ internal sealed class PdmTaskPaneControl : UserControl
         {
             reason = string.Equals(node.CheckedOutBy, authenticatedUsername, StringComparison.OrdinalIgnoreCase)
                 ? "请先提交存档或放弃编辑"
-                : string.Concat("该图档正在由", node.CheckedOutBy, "编辑");
+                : string.Concat("该图档正在由", DisplayUserName(node.CheckedOutBy), "编辑");
             return false;
         }
         if (node.IsModifiedInSolidWorks
@@ -1659,8 +1685,15 @@ internal sealed class PdmTaskPaneControl : UserControl
 
     private bool CanEditSelectedHistoricalVersion(out string reason)
     {
-        if (!CanSwitchDisplayedVersion(out reason))
+        var node = SelectedNode;
+        if (node == null || !node.DocumentId.HasValue || displayedVersionDocumentId != node.DocumentId)
         {
+            reason = "请先选择已入库图档";
+            return false;
+        }
+        if (string.IsNullOrWhiteSpace(authenticatedUsername))
+        {
+            reason = "请先登录PLM";
             return false;
         }
         if (versionList.SelectedItems.Count != 1 || !(versionList.SelectedItems[0].Tag is DocumentVersionDto selected))
@@ -1668,16 +1701,30 @@ internal sealed class PdmTaskPaneControl : UserControl
             reason = "请选择一个历史版本";
             return false;
         }
-        if (SelectedNode?.Kind != CadDocumentKind.Part)
+        if (node.Kind != CadDocumentKind.Part && node.Kind != CadDocumentKind.Assembly)
         {
-            reason = "当前仅支持零件基于历史版本获取编辑";
+            reason = "仅零件和装配体支持基于历史版本获取编辑";
             return false;
         }
-        if (SelectedNode.DrawingReviewLocked
-            || string.Equals(SelectedNode.LifecycleState, "InReview", StringComparison.OrdinalIgnoreCase)
-            || string.Equals(SelectedNode.LifecycleState, "Obsolete", StringComparison.OrdinalIgnoreCase))
+        if (!string.IsNullOrWhiteSpace(node.CheckedOutBy))
         {
-            reason = SelectedNode.DrawingReviewLocked ? "图纸审核中的零件不能获取编辑权限" : "审批中或已作废的零件不能获取编辑权限";
+            reason = string.Equals(node.CheckedOutBy, authenticatedUsername, StringComparison.OrdinalIgnoreCase)
+                ? "请先提交存档或放弃当前编辑"
+                : string.Concat("该图档正在由", DisplayUserName(node.CheckedOutBy), "编辑");
+            return false;
+        }
+        if (node.IsModifiedInSolidWorks
+            || node.WorkState == CadWorkState.ModifiedUnsaved
+            || node.WorkState == CadWorkState.PendingCheckIn)
+        {
+            reason = "存在未保存修改或待提交内容";
+            return false;
+        }
+        if (node.DrawingReviewLocked
+            || string.Equals(node.LifecycleState, "InReview", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(node.LifecycleState, "Obsolete", StringComparison.OrdinalIgnoreCase))
+        {
+            reason = node.DrawingReviewLocked ? "图纸审核中的图档不能获取编辑权限" : "审批中或已作废的图档不能获取编辑权限";
             return false;
         }
         if (versionList.Items.Count == 0
@@ -2128,7 +2175,7 @@ internal sealed class PdmTaskPaneControl : UserControl
         var status = model.Status == CadReferenceStatus.Normal || isMissing ? string.Empty : string.Concat(" · ", StatusText(model.Status));
         var editTip = isMissing
             ? "\r\n状态：文件缺失"
-            : string.Concat("\r\n状态：", WorkStateText(model), string.IsNullOrWhiteSpace(model.CheckedOutBy) ? string.Empty : string.Concat("\r\n编辑人员：", model.CheckedOutBy));
+            : string.Concat("\r\n状态：", WorkStateText(model), string.IsNullOrWhiteSpace(model.CheckedOutBy) ? string.Empty : string.Concat("\r\n编辑人员：", DisplayUserName(model.CheckedOutBy)));
         var text = string.Concat(Path.GetFileNameWithoutExtension(model.FileName), " · ", model.DisplayName, status);
         var node = new TreeNode(text)
         {
@@ -2337,7 +2384,7 @@ internal sealed class PdmTaskPaneControl : UserControl
         return bitmap;
     }
 
-    private static string WorkStateText(CadTreeNode node)
+    private string WorkStateText(CadTreeNode node)
     {
         if (node.IsLatestReadOnlyPreview)
         {
@@ -2378,7 +2425,7 @@ internal sealed class PdmTaskPaneControl : UserControl
             case CadWorkState.ModifiedUnsaved: editState = "修改未保存"; break;
             case CadWorkState.PendingCheckIn: editState = string.IsNullOrWhiteSpace(historicalSourceRevision) ? "待提交" : string.Concat("基于", historicalSourceRevision, "待提交"); break;
             case CadWorkState.Editable: editState = string.IsNullOrWhiteSpace(historicalSourceRevision) ? "可编辑" : string.Concat("基于", historicalSourceRevision, "编辑"); break;
-            case CadWorkState.EditingByOther: editState = node.CheckoutSessionLost ? "编辑权限已失效" : string.IsNullOrWhiteSpace(node.CheckedOutBy) ? "他人编辑中" : string.Concat(node.CheckedOutBy, "编辑中"); break;
+            case CadWorkState.EditingByOther: editState = node.CheckoutSessionLost ? "编辑权限已失效" : string.IsNullOrWhiteSpace(node.CheckedOutBy) ? "他人编辑中" : string.Concat(DisplayUserName(node.CheckedOutBy), "编辑中"); break;
             default: editState = !node.DocumentId.HasValue
                 ? "未入库"
                 : IsVersionOutdated(node) ? "版本落后" : "未获取权限";
@@ -2447,7 +2494,9 @@ internal sealed class PdmTaskPaneControl : UserControl
                 && rootNode is object
                 && rootNode.IsReadOnlyPreview == false
                 && workspaceOperationActive == false;
-            propertyEditButton.Enabled = batchOperationButton.Enabled;
+            propertyEditButton.Enabled = rootNode is object
+                && rootNode.IsReadOnlyPreview == false
+                && workspaceOperationActive == false;
             propertyCardButton.Enabled = propertyEditButton.Enabled;
             updateAllLatestButton.Enabled = batchOperationButton.Enabled;
             ApplyStructureActionButtonAppearances();
@@ -2466,7 +2515,7 @@ internal sealed class PdmTaskPaneControl : UserControl
             : VersionText(node);
         var editor = string.IsNullOrWhiteSpace(node.CheckedOutBy)
             ? "未检出"
-            : string.Concat(node.CheckedOutBy,
+            : string.Concat(DisplayUserName(node.CheckedOutBy),
                 string.IsNullOrWhiteSpace(node.CheckoutMachine) ? string.Empty : string.Concat(" @ ", node.CheckoutMachine),
                 node.CheckedOutAt.HasValue ? string.Concat(" · ", node.CheckedOutAt.Value.ToLocalTime().ToString("yyyy-MM-dd HH:mm")) : string.Empty);
         var provenance = node.IsExternalProvenance
@@ -2532,7 +2581,7 @@ internal sealed class PdmTaskPaneControl : UserControl
             || (!readOnlyPreview && node.DocumentId.HasValue && editingByCurrentUser);
         checkinButton.Enabled = !readOnlyPreview && (canCheckIn || checkedNodes.Length > 0 || canExplainCheckIn);
         batchOperationButton.Enabled = authenticated && rootNode != null && !rootNode.IsReadOnlyPreview;
-        propertyEditButton.Enabled = authenticated && rootNode != null && !rootNode.IsReadOnlyPreview;
+        propertyEditButton.Enabled = rootNode != null && !rootNode.IsReadOnlyPreview;
         propertyCardButton.Enabled = authenticated && rootNode != null && !rootNode.IsReadOnlyPreview;
         updateAllLatestButton.Enabled = authenticated && rootNode != null && !rootNode.IsReadOnlyPreview;
         if (workspaceOperationActive)
@@ -2558,7 +2607,7 @@ internal sealed class PdmTaskPaneControl : UserControl
             checkinButton,
             checkedNodes.Length > 0
                 ? string.Concat("提交已勾选的", checkedNodes.Length, "个图档")
-                : node.DrawingReviewLocked ? "图纸审核中，不能提交存档" : readOnlyPreview ? "只读预览不能提交存档；请先切换到编辑工作区" : canFirstCheckIn ? "首次提交存档时选择归属项目，系统将自动登记并准备权限" : !node.DocumentId.HasValue ? "本地文件不存在或文件类型不支持登记" : !editingByCurrentUser ? string.IsNullOrWhiteSpace(node.CheckedOutBy) ? "尚未获取编辑权限；点击后查看正确操作" : string.Concat("当前编辑人员：", node.CheckedOutBy) : !localFileExists ? "本地文件不存在，不能提交存档" : "提交当前文件并生成新工作版本");
+                : node.DrawingReviewLocked ? "图纸审核中，不能提交存档" : readOnlyPreview ? "只读预览不能提交存档；请先切换到编辑工作区" : canFirstCheckIn ? "首次提交存档时选择归属项目，系统将自动登记并准备权限" : !node.DocumentId.HasValue ? "本地文件不存在或文件类型不支持登记" : !editingByCurrentUser ? string.IsNullOrWhiteSpace(node.CheckedOutBy) ? "尚未获取编辑权限；点击后查看正确操作" : string.Concat("当前编辑人员：", DisplayUserName(node.CheckedOutBy)) : !localFileExists ? "本地文件不存在，不能提交存档" : "提交当前文件并生成新工作版本");
         if (workspaceOperationActive)
         {
             var operationText = string.Concat(workspaceOperationStatus.Text, "，完成后按钮会自动恢复");
@@ -2579,7 +2628,9 @@ internal sealed class PdmTaskPaneControl : UserControl
             && !rootNode.IsReadOnlyPreview
             && !workspaceOperationActive;
         batchOperationButton.Enabled = enabled;
-        propertyEditButton.Enabled = enabled;
+        propertyEditButton.Enabled = rootNode != null
+            && !rootNode.IsReadOnlyPreview
+            && !workspaceOperationActive;
         ApplyActionButtonAppearance(batchOperationButton, BatchOperationAvailableColor);
         ApplyActionButtonAppearance(propertyEditButton, SecondaryActionAvailableColor);
     }

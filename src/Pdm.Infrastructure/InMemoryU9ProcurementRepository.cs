@@ -47,7 +47,15 @@ public sealed class InMemoryU9ProcurementRepository : IU9ProcurementRepository
                 row.DocumentNumber, row.LineNumber, row.LineStatus, row.IsCanceled, row.BusinessDate,
                 row.MaterialCode, row.ItemName, row.Specification, row.Brand, row.ProjectCode, row.ProjectName,
                 row.Subproject, row.RequestedQuantity, row.ApprovedQuantity, row.PurchaseQuantity,
-                row.ArrivedQuantity, row.PurchaseRemark, row.DeliveryDate, row.LatestDeliveryDate, refreshedAt)));
+                row.ArrivedQuantity, row.PurchaseRemark, row.DeliveryDate, row.LatestDeliveryDate, refreshedAt)
+            {
+                SourcePoLineId = row.SourcePoLineId,
+                SourceCreatedAt = row.SourceCreatedAt,
+                BuyerName = row.BuyerName,
+                MovementDate = row.MovementDate,
+                MovementQuantity = row.MovementQuantity,
+                MovementUnit = row.MovementUnit
+            }));
             settings = settings with { CurrentSnapshotRunId = snapshotRunId };
         }
         return Task.CompletedTask;
@@ -65,8 +73,13 @@ public sealed class InMemoryU9ProcurementRepository : IU9ProcurementRepository
             var requisitionIds = rows.Where(row => row.RecordKind == U9ProcurementRecordKinds.PurchaseRequisition && Matches(row))
                 .Select(row => row.LineId)
                 .ToHashSet(StringComparer.OrdinalIgnoreCase);
+            bool MovementMatches(U9ProcurementSnapshotRow row) => !string.IsNullOrWhiteSpace(subprojectCode)
+                && row.RecordKind is U9ProcurementRecordKinds.Receipt or U9ProcurementRecordKinds.MaterialIssue or U9ProcurementRecordKinds.MiscShipment or U9ProcurementRecordKinds.TransferReceipt or U9ProcurementRecordKinds.DirectStockIssue
+                && string.IsNullOrWhiteSpace(row.ProjectCode)
+                && string.Equals(row.Subproject, subprojectCode, StringComparison.OrdinalIgnoreCase);
             IReadOnlyList<U9ProcurementSnapshotRow> result = rows
                 .Where(row => Matches(row)
+                    || MovementMatches(row)
                     || (row.RecordKind == U9ProcurementRecordKinds.PurchaseOrder
                         && requisitionIds.Contains(row.SourcePrLineId ?? string.Empty)))
                 .ToArray();

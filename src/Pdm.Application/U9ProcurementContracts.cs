@@ -6,6 +6,12 @@ public static class U9ProcurementRecordKinds
 {
     public const string PurchaseRequisition = "PR";
     public const string PurchaseOrder = "PO";
+    public const string Receipt = "RCV";
+    public const string MaterialIssue = "ISSUE";
+    public const string MiscShipment = "MISC";
+    public const string TransferReceipt = "TRANSFER";
+    public const string DirectStockIssue = "DIRECT";
+    public const string DeemedStockReceipt = "STOCKIN";
 }
 
 public sealed record U9ProcurementSourceRow(
@@ -31,7 +37,15 @@ public sealed record U9ProcurementSourceRow(
     decimal ArrivedQuantity,
     string? PurchaseRemark,
     DateTimeOffset? DeliveryDate,
-    DateTimeOffset? LatestDeliveryDate);
+    DateTimeOffset? LatestDeliveryDate)
+{
+    public string? SourcePoLineId { get; init; }
+    public DateTimeOffset? SourceCreatedAt { get; init; }
+    public string? BuyerName { get; init; }
+    public DateTimeOffset? MovementDate { get; init; }
+    public decimal? MovementQuantity { get; init; }
+    public string? MovementUnit { get; init; }
+}
 
 public sealed record U9ProcurementQueryResult(
     int ResponseCode,
@@ -94,7 +108,15 @@ public sealed record U9ProcurementSnapshotRow(
     string? PurchaseRemark,
     DateTimeOffset? DeliveryDate,
     DateTimeOffset? LatestDeliveryDate,
-    DateTimeOffset RefreshedAt);
+    DateTimeOffset RefreshedAt)
+{
+    public string? SourcePoLineId { get; init; }
+    public DateTimeOffset? SourceCreatedAt { get; init; }
+    public string? BuyerName { get; init; }
+    public DateTimeOffset? MovementDate { get; init; }
+    public decimal? MovementQuantity { get; init; }
+    public string? MovementUnit { get; init; }
+}
 
 public interface IU9ProcurementRepository
 {
@@ -120,6 +142,13 @@ public sealed record ProcurementDocumentDetail(
     DateTimeOffset? DeliveryDate,
     DateTimeOffset? LatestDeliveryDate,
     string MatchKind);
+
+public sealed record WarehouseMovementDetail(
+    string Kind, string DocumentNumber, int LineNumber,
+    DateTimeOffset Date, decimal Quantity, string? Unit)
+{
+    public string? LineId { get; init; }
+}
 
 public sealed record ProjectProcurementTrackingItem(
     int Sequence,
@@ -148,6 +177,11 @@ public sealed record ProjectProcurementTrackingItem(
     IReadOnlyList<ProcurementDocumentDetail> Details)
 {
     public bool HasDeliveryDelay { get; init; }
+    public DateTimeOffset? PurchaseRequisitionCreatedAt { get; init; }
+    public string? BuyerName { get; init; }
+    public IReadOnlyList<WarehouseMovementDetail> WarehouseMovements { get; init; } = [];
+    public bool IsWarehouseMovementRow { get; init; }
+    public bool IsFullyReceived { get; init; }
 }
 
 public sealed record ProjectProcurementTrackingResult(

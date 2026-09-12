@@ -19,7 +19,8 @@ public sealed class PdmWorkflowService(
     ApprovalU9AutomationService? approvalU9Automation = null,
     BomHeaderService? bomHeaderService = null,
     IMaterialRepository? materialRepository = null,
-    IMaterialRelationReleaseGuard? materialRelationReleaseGuard = null)
+    IMaterialRelationReleaseGuard? materialRelationReleaseGuard = null,
+    ProjectPlanningService? projectPlanningService = null)
 {
     private const string ReconcileAutoAdded = "AutoAdded";
     private const string ReconcileClassificationChanged = "ClassificationChanged";
@@ -162,7 +163,7 @@ public sealed class PdmWorkflowService(
         await AuditAsync(actor, "system.checkout-policy.update", nameof(PdmSystemSettings), "checkout-policy", $"心跳{settings.CheckoutHeartbeatSeconds}秒；离线宽限{settings.CheckoutOfflineGraceMinutes}分钟；超时{settings.CheckoutOverdueHours}小时；强制释放{settings.CheckoutForceReleaseHours}小时", cancellationToken);
         await AuditAsync(actor, "system.bom-property-mapping.update", nameof(PdmSystemSettings), "bom-property-mapping", $"PLM属性{settings.BomPropertyMappings.Count}项；SolidWorks映射{settings.BomPropertyMappings.Count(item => item.MappingEditable)}项", cancellationToken);
         await AuditAsync(actor, "system.bom-validation.update", nameof(PdmSystemSettings), "bom-validation", $"标准件{settings.ValidationRules.Standard.Count}项；非标件{settings.ValidationRules.NonStandard.Count}项；电气件{settings.ValidationRules.Electrical.Count}项", cancellationToken);
-        await AuditAsync(actor, "system.approval-workflows.update", nameof(PdmSystemSettings), "approval-workflows", $"机械模板v{settings.ApprovalWorkflows.Mechanical.Version}；电气模板v{settings.ApprovalWorkflows.Electrical.Version}；紧急代批角色{settings.ApprovalWorkflows.EmergencySubstituteRoleCode}", cancellationToken);
+        await AuditAsync(actor, "system.approval-workflows.update", nameof(PdmSystemSettings), "approval-workflows", $"机械模板v{settings.ApprovalWorkflows.Mechanical.Version}；电气模板v{settings.ApprovalWorkflows.Electrical.Version}；验证计划模板v{settings.ApprovalWorkflows.ValidationPlan?.Version ?? 1}；紧急代批角色{settings.ApprovalWorkflows.EmergencySubstituteRoleCode}", cancellationToken);
         await AuditAsync(actor, "system.material-code-approval.update", nameof(PdmSystemSettings), "material-code-approval", string.Join('、', settings.MaterialCodeApproval.ApproverRoleCodes), cancellationToken);
         await AuditAsync(actor, "system.release-change-reasons.update", nameof(PdmSystemSettings), "release-change-reasons", string.Join('、', settings.ReleaseChangeReasonTypes), cancellationToken);
         await AuditAsync(actor, "system.formal-supplement-policies.update", nameof(PdmSystemSettings), "formal-supplement-policies", $"标准件：{FormalSupplementPolicySummary(settings.FormalSupplementPolicies.Standard)}；电气：{FormalSupplementPolicySummary(settings.FormalSupplementPolicies.Electrical)}", cancellationToken);
@@ -300,7 +301,10 @@ public sealed class PdmWorkflowService(
             Normalize(input.Electrical, current.Electrical, "electrical-release", "电气发布审批",
                 [ApprovalStage.HardwareEngineer, ApprovalStage.HardwareSupervisor, ApprovalStage.StandardizationSupervisor],
                 [ApprovalAssigneeSource.Submitter, ApprovalAssigneeSource.PrimaryUnitManager, ApprovalAssigneeSource.ParentUnitManager]),
-            UserRole.BusinessUnitManager.ToString());
+            UserRole.BusinessUnitManager.ToString(),
+            Normalize(input.ValidationPlan ?? input.Mechanical, current.ValidationPlan ?? ReleaseApprovalSettings.Default.ValidationPlan!, "validation-plan", "验证计划审批",
+                [ApprovalStage.MechanicalEngineer, ApprovalStage.MainDesigner, ApprovalStage.MechanicalSupervisor],
+                [ApprovalAssigneeSource.Submitter, ApprovalAssigneeSource.ProjectDesignLead, ApprovalAssigneeSource.PrimaryUnitManager]));
     }
 
     private static BomValidationRules NormalizeBomValidationRules(BomValidationRules? input)
@@ -3805,6 +3809,16 @@ public sealed class PdmWorkflowService(
             await AuditAsync(actor, "release-package.long-lead-output", nameof(ReleasePackage), package.Id.ToString(), $"{package.Number}；标准件{package.StandardBomSnapshot.Count}项；待U9C接口消费", cancellationToken);
         }
         await AuditAsync(actor, "release-package.publish", nameof(ReleasePackage), package.Id.ToString(), publishedPath, cancellationToken);
+        if (projectPlanningService is not null)
+        {
+            try { await projectPlanningService.SyncReleasedBomProgressAsync(project.Id, cancellationToken); }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
+            catch (Exception exception)
+            {
+                await AuditAsync(actor, "project-plan.bom-release-failed", nameof(ReleasePackage), package.Id.ToString(),
+                    $"BOM已正式发布，计划进度同步失败，将在后台重试：{exception.Message}", cancellationToken);
+            }
+        }
         if (bomHeaderService is not null)
         {
             foreach (var approvedKind in ApprovedBomHeaderKinds(package.Scope))

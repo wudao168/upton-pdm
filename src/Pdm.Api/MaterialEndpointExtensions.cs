@@ -16,10 +16,10 @@ public static class MaterialEndpointExtensions
             return Results.Ok((await service.ListMaterialsAsync(query, categoryCode, includeArchived ?? false, limit ?? 100, actor, role, cancellationToken)).Select(MapMaterial));
         });
 
-        api.MapGet("/materials/page", async (string? query, string? categoryCode, string? brand, bool? includeArchived, int? page, int? pageSize, HttpContext context, MaterialService service, CancellationToken cancellationToken) =>
+        api.MapGet("/materials/page", async (string? query, string? categoryCode, string? brand, bool? includeArchived, int? page, int? pageSize, string? createdAtOrder, bool? ordinaryOnly, HttpContext context, MaterialService service, CancellationToken cancellationToken) =>
         {
             var (actor, role) = CurrentUser(context.User);
-            var result = await service.ListMaterialPageAsync(query, categoryCode, brand, includeArchived ?? false, page ?? 1, pageSize ?? 50, actor, role, cancellationToken);
+            var result = await service.ListMaterialPageAsync(query, categoryCode, brand, includeArchived ?? false, page ?? 1, pageSize ?? 50, actor, role, cancellationToken, createdAtOrder, ordinaryOnly ?? false);
             return Results.Ok(new
             {
                 Items = result.Items.Select(MapMaterial),
@@ -27,6 +27,18 @@ public static class MaterialEndpointExtensions
                 result.Page,
                 result.PageSize
             });
+        });
+
+        api.MapGet("/materials/bom-headers", async (HttpContext context, BomHeaderService service, CancellationToken cancellationToken) =>
+        {
+            var (actor, role) = CurrentUser(context.User);
+            return Results.Ok(await service.ListMaterialDirectoryAsync(actor, role, cancellationToken));
+        });
+
+        api.MapGet("/materials/pending-approval", async (HttpContext context, MaterialService service, CancellationToken cancellationToken) =>
+        {
+            var (actor, role) = CurrentUser(context.User);
+            return Results.Ok((await service.ListPendingMasterMaterialsAsync(actor, role, cancellationToken)).Select(MapMaterial));
         });
 
         api.MapGet("/materials/{materialId:guid}/attachments", async (Guid materialId, string? kind, HttpContext context, MaterialAttachmentService service, CancellationToken cancellationToken) =>
@@ -279,10 +291,10 @@ public static class MaterialEndpointExtensions
             return Results.Ok(MapRule(saved));
         });
 
-        api.MapGet("/material-sync-tasks", async (HttpContext context, MaterialService service, CancellationToken cancellationToken) =>
+        api.MapGet("/material-sync-tasks", async (bool? ordinaryOnly, HttpContext context, MaterialService service, CancellationToken cancellationToken) =>
         {
             var (actor, role) = CurrentUser(context.User);
-            return Results.Ok((await service.ListSyncTasksAsync(actor, role, cancellationToken)).Select(MapTask));
+            return Results.Ok((await service.ListSyncTasksAsync(actor, role, cancellationToken, ordinaryOnly ?? false)).Select(MapTask));
         });
 
         api.MapPost("/material-sync-tasks/{taskId:guid}/retry", async (Guid taskId, HttpContext context, MaterialService service, CancellationToken cancellationToken) =>
@@ -608,6 +620,9 @@ public static class MaterialEndpointExtensions
         task.U9ItemCode,
         task.MaterialCode,
         task.MaterialName,
+        task.Specification,
+        task.Brand,
+        task.Remark,
         task.CategoryCode,
         task.ProjectId,
         task.ProjectCode,

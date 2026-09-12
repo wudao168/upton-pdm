@@ -10,6 +10,37 @@ namespace Upton.Pdm.Domain.Tests;
 [Collection("BomHeader automatic queue")]
 public sealed class BomHeaderServiceTests
 {
+    [Fact]
+    public async Task HeaderDirectory_IsReadOnly_AndOrdinaryPagingUsesActualLinks()
+    {
+        var time = TimeProvider.System;
+        var repository = new InMemoryPdmRepository(time);
+        var materials = new InMemoryMaterialRepository(time, repository);
+        var client = new AvailableCodeClient();
+        var materialService = new MaterialService(materials, repository, new TestProtector(), client, time);
+        var service = new BomHeaderService(repository, materials, materialService, null!, time);
+        var draft = await AddMaterial(materials, MaterialKind.Product, MaterialApprovalStatus.Draft, "0201", "LEGACY-HEADER");
+        var official = await AddMaterial(materials, MaterialKind.Product, MaterialApprovalStatus.Approved, "0302", "03020000009", "03020000009", true);
+        var ordinary = await AddMaterial(materials, MaterialKind.Standard, MaterialApprovalStatus.Draft, "0102", "PDM-PENDING-ordinary");
+        await repository.SaveProjectBomHeaderBindingAsync(ProjectId, ProjectBomHeaderKind.Standard, draft.Id, 0, "admin", default);
+        await repository.SaveProjectBomHeaderBindingAsync(ProjectId, ProjectBomHeaderKind.Master, official.Id, 0, "admin", default);
+
+        var directory = await service.ListMaterialDirectoryAsync("admin", UserRole.Administrator, default);
+        Assert.Equal(2, directory.Count);
+        Assert.Equal("NotRequested", Assert.Single(directory, r => r.MaterialId == draft.Id).AutomaticStatus);
+        Assert.Equal("Completed", Assert.Single(directory, r => r.MaterialId == official.Id).AutomaticStatus);
+        Assert.Empty(await materials.ListMaterialCodeApplicationsAsync(null, null, default));
+        Assert.Empty(await materials.ListSyncTasksAsync(default));
+        Assert.Equal(0, client.AuthenticationCount);
+
+        var page = await materialService.ListMaterialPageAsync(null, null, null, false, 1, 1, "admin", UserRole.Administrator, default, ordinaryOnly: true);
+        Assert.Equal(1, page.Total);
+        Assert.Equal(ordinary.Id, Assert.Single(page.Items).Id);
+        Assert.Equal(ordinary.Id, Assert.Single(await materialService.ListPendingMasterMaterialsAsync("admin", UserRole.Administrator, default)).Id);
+        Assert.Equal(3, (await materialService.ListMaterialPageAsync(null, null, null, false, 1, 50, "admin", UserRole.Administrator, default)).Total);
+        var visibleProjects = (await repository.ListProjectsForUserAsync("engineer", UserRole.Engineer, default)).Select(p => p.Id).ToHashSet();
+        Assert.All(await service.ListMaterialDirectoryAsync("engineer", UserRole.Engineer, default), row => Assert.Contains(row.ProjectId, visibleProjects));
+    }
     private static readonly Guid ProjectId = Guid.Parse("11111111-1111-1111-1111-111111111111");
 
     [Fact]
@@ -742,6 +773,27 @@ public sealed class BomHeaderServiceTests
         Assert.Equal(1, state.WriteCount);
     }
 
+    [Theory]
+    [InlineData(8)]
+    [InlineData(0)]
+    public async Task U9ControlledChanges_PreserveHistoricalCostSettings(int desired)
+    {
+        var (service, state, _) = await ControlledService();
+        state.Components = state.Components.Select(row => row with { IsCharge = false, CostElementCode = "OLD-COST" }).ToArray();
+        var command = ControlledCommand(desired);
+        var preview = await service.PreviewAsync(command, "admin", UserRole.Administrator, default);
+        using var payload = JsonDocument.Parse(preview.RequestPreview);
+        var row = payload.RootElement[0].GetProperty("BOMComponents")[0];
+        Assert.False(row.GetProperty("IsCharge").GetBoolean());
+        Assert.Equal("OLD-COST", row.GetProperty("CostElement").GetProperty("Code").GetString());
+        await service.ExecuteAsync(command, preview.RequestSha256, preview.RequiredConfirmation, "admin", UserRole.Administrator, default);
+        Assert.All(state.Components, component =>
+        {
+            Assert.False(component.IsCharge);
+            Assert.Equal("OLD-COST", component.CostElementCode);
+        });
+    }
+
     private static U9BomWriteCommand ControlledCommand(int desired) => new(
         U9BomWriteOperation.Modify, "02010000101", "A1", "001", 1,
         desired == 0 ? [] : [new(10, "01021000007", desired, "001")], ReconcileComponentTotals: true)
@@ -920,6 +972,9 @@ public sealed class BomHeaderServiceTests
         var row = payload.RootElement[0].GetProperty("BOMComponents")[0];
         Assert.Equal(1, row.GetProperty("UsageQtyType").GetInt32());
         Assert.True(row.GetProperty("IsSpecialUseItem").GetBoolean());
+        Assert.True(row.GetProperty("IsCharge").GetBoolean());
+        Assert.Equal("No101", row.GetProperty("CostElement").GetProperty("Code").GetString());
+        Assert.False(payload.RootElement[0].GetProperty("IsCostRoll").GetBoolean());
         Assert.Equal(0, state.WriteCount);
     }
 
@@ -932,6 +987,27 @@ public sealed class BomHeaderServiceTests
         state.Exists = false;
         state.ApplyControlledChanges = false;
         state.Components = [state.Components[0] with { UsageQtyType = usageType, IsSpecialUseItem = special }];
+        var command = new U9BomWriteCommand(U9BomWriteOperation.Create, "02010000101", "A1", "001", 1,
+            [new(10, "01021000007", 12, "001")]);
+        var preview = await service.PreviewAsync(command, "admin", UserRole.Administrator, default);
+        await Assert.ThrowsAsync<PdmRuleException>(() => service.ExecuteAsync(command, preview.RequestSha256,
+            preview.RequiredConfirmation, "admin", UserRole.Administrator, default));
+        Assert.Equal(1, state.WriteCount);
+    }
+
+    [Theory]
+    [InlineData(false, "No101")]
+    [InlineData(null, "No101")]
+    [InlineData(true, "OTHER")]
+    [InlineData(true, null)]
+    public async Task NewBomRows_RejectMissingOrWrongCostControlReadback(bool? charge, string? costElement)
+    {
+        var (service, state, _) = await ControlledService();
+        state.Exists = false;
+        state.ApplyControlledChanges = false;
+        state.DefaultIsCharge = charge;
+        state.DefaultCostElementCode = costElement;
+        state.Components = [state.Components[0]];
         var command = new U9BomWriteCommand(U9BomWriteOperation.Create, "02010000101", "A1", "001", 1,
             [new(10, "01021000007", 12, "001")]);
         var preview = await service.PreviewAsync(command, "admin", UserRole.Administrator, default);
@@ -990,7 +1066,7 @@ public sealed class BomHeaderServiceTests
         using var payload = JsonDocument.Parse(preview.WritePreview!.RequestPreview);
         var row = payload.RootElement[0];
         Assert.Equal("02010000101", row.GetProperty("BOMComponents")[0].GetProperty("ItemMaster").GetProperty("Code").GetString());
-        var expectedEffectiveDate = DateOnly.FromDateTime(time.GetLocalNow().DateTime).ToString("yyyy-MM-dd");
+        var expectedEffectiveDate = "2019-01-01";
         Assert.Equal(expectedEffectiveDate, row.GetProperty("EffectiveDate").GetString());
         Assert.Equal(expectedEffectiveDate, row.GetProperty("BOMComponents")[0].GetProperty("EffectiveDate").GetString());
         Assert.Equal(0, client.BomWriteCount);
@@ -1118,7 +1194,7 @@ public sealed class BomHeaderServiceTests
         Assert.Equal(ApprovalU9AutomationStage.Completed, afterBomApproval.Stage);
         Assert.Equal(ProjectBomU9AutomaticState.Created, Assert.Single(afterBomApproval.Boms).State);
         Assert.Equal(1, client.BomWriteCount);
-        var expectedEffectiveDate = DateOnly.FromDateTime(time.GetLocalNow().DateTime).ToString("yyyy-MM-dd");
+        var expectedEffectiveDate = "2019-01-01";
         Assert.Equal(expectedEffectiveDate, client.LastBomEffectiveDate);
         Assert.All(client.LastComponentEffectiveDates, value => Assert.Equal(expectedEffectiveDate, value));
     }
@@ -1233,13 +1309,24 @@ public sealed class BomHeaderServiceTests
             BeforeReferenceQuery?.Invoke();
             cancellationToken.ThrowIfCancellationRequested();
             if (ReferenceFailure is not null) throw ReferenceFailure;
-            var items = ReferenceCodes.Select(code => new U9CustomerReference(code, code)).ToArray();
+            using var document = JsonDocument.Parse(payloadJson);
+            var filter = document.RootElement.GetProperty("ReferenceDefaultFilter").GetString()!;
+            var codes = ReferenceCodes.AsEnumerable();
+            const string marker = " and Code > '";
+            if (filter.Contains(marker, StringComparison.Ordinal))
+            {
+                var cursor = filter[(filter.IndexOf(marker, StringComparison.Ordinal) + marker.Length)..].TrimEnd('\'');
+                codes = codes.Where(code => string.Compare(code, cursor, StringComparison.OrdinalIgnoreCase) > 0);
+            }
+            var items = codes.Select(code => new U9CustomerReference(code, code)).ToArray();
             return Task.FromResult(new U9CustomerQueryResult(0, null, items, items.Length));
         }
     }
 
     private sealed class BomWriteState
     {
+        public bool? DefaultIsCharge { get; set; } = true;
+        public string? DefaultCostElementCode { get; set; } = "No101";
         public bool ApplyControlledChanges { get; set; }
         public bool IgnoreControlledChanges { get; set; }
         public bool CorruptEffectiveState { get; set; }
@@ -1255,7 +1342,7 @@ public sealed class BomHeaderServiceTests
             null, "02010000101", "P700001 标准件BOM", "A1", "7", "昆山工厂", 0, 1,
             "001", "个", null, null, 0, 0, 0, "P700001", Explain,
             null, false, 0, 0,
-            Components.Select(row => row with { UsageQtyType = row.UsageQtyType ?? 1, IsSpecialUseItem = row.IsSpecialUseItem ?? true, IsIssueOrgFixed = row.IsIssueOrgFixed ?? true, IssueOrgCode = row.IssueOrgCode ?? "7" }).ToArray());
+            Components.Select(row => row with { UsageQtyType = row.UsageQtyType ?? 1, IsSpecialUseItem = row.IsSpecialUseItem ?? true, IsIssueOrgFixed = row.IsIssueOrgFixed ?? true, IssueOrgCode = row.IssueOrgCode ?? "7", IsCharge = row.IsCharge ?? DefaultIsCharge, CostElementCode = row.CostElementCode ?? DefaultCostElementCode }).ToArray());
 
         private static string OwnershipExplain(string itemCode, string versionCode)
         {
@@ -1398,7 +1485,9 @@ public sealed class BomHeaderServiceTests
                     UsageQtyType = component.GetProperty("UsageQtyType").GetInt32(),
                     IsSpecialUseItem = component.GetProperty("IsSpecialUseItem").GetBoolean(),
                     IsIssueOrgFixed = component.GetProperty("IsIssueOrgFixed").GetBoolean(),
-                    IssueOrgCode = component.GetProperty("IssueOrg").GetProperty("Code").GetString()
+                    IssueOrgCode = component.GetProperty("IssueOrg").GetProperty("Code").GetString(),
+                    IsCharge = component.GetProperty("IsCharge").GetBoolean(),
+                    CostElementCode = component.GetProperty("CostElement").GetProperty("Code").GetString()
                 }).ToArray();
             var components = bom is null ? writtenComponents : bom.Components.Concat(writtenComponents).ToArray();
             bom = new U9BomReference(

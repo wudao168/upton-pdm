@@ -1,6 +1,7 @@
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { batchDeleteBomItems as batchDeleteBomItemsRequest, batchRestoreBomItems as batchRestoreBomItemsRequest, restoreBomItemsFromSource as restoreBomItemsFromSourceRequest, setBomReleaseExclusion as setBomReleaseExclusionRequest } from '../api'
 import { getBomSourceData } from '../api'
+import { copyProjectContent as copyProjectContentRequest, previewProjectCopy as previewProjectCopyRequest } from '../api'
 import { transferApproval } from '../api'
 import { listUserNotifications, markAllUserNotificationsRead as markAllUserNotificationsReadRequest, markUserNotificationRead as markUserNotificationReadRequest } from '../api'
 import { addDrawingReviewMarkup as addDrawingReviewMarkupRequest, createDrawingReview as createDrawingReviewRequest, decideDrawingReviewTarget as decideDrawingReviewTargetRequest, listDrawingReviewCandidates, listDrawingReviews, resolveDrawingReviewMarkup as resolveDrawingReviewMarkupRequest, withdrawDrawingReview as withdrawDrawingReviewRequest } from '../api'
@@ -9,6 +10,7 @@ import type { AuthSession } from '../api'
 import type { AuditEntry, BatchUpdateBomItemsInput, BomEmptyDeclaration, BomExportMode, BomGenerationResult, BomItem, BomKind, BomVersion, CreateProjectInput, CreateReleasePackageInput, CreateRoleInput, CreateSubprojectInput, CrmConnectionTestResult, CrmCustomerSyncResult, CrmIntegrationSettings, DocumentFilter, DocumentModelDrawingRelation, DocumentNode, DocumentVersionComparison, DocumentVersionSummary, DocumentWhereUsed, EditLockSummary, EquipmentTypeDefinition, FolderPermissionRule, MainProjectStaffingInput, ManagedDocument, ManufacturingBomBaseline, MaterialCodeApplication, MaterialSyncTask, MyApprovalTask, OrganizationDirectory, PasswordResetTask, PdmCustomer, PdmSystemSettings, PdmUser, PdmUserProfile, ProgramTemplateTask, ProjectFolder, ProjectFolderTemplateNode, ProjectNumberingOptions, ProjectSummary, ProjectVersionItem, ReleasePackageSummary, RolePermissionDirectory, SaveOrganizationUnitInput, SavePdmUserInput, SaveProjectOrganizationInput, SolidWorksOpenMode, UpdateCrmIntegrationInput, UpdateProjectInput, UpdateReleasePackageDraftInput } from '../types'
 import type { AddDrawingReviewMarkupInput, DrawingReviewCandidate, DrawingReviewDecision, DrawingReviewPackage, DrawingReviewTarget } from '../types'
 import type { UserNotification } from '../types'
+import type { ProjectCopyOptionsInput } from '../types'
 
 const sessionKey = 'upton-pdm-session'
 const fallbackBomPropertyMappings: PdmSystemSettings['bomPropertyMappings'] = [
@@ -1333,6 +1335,25 @@ export function usePdmWorkspace() {
     }
   }
 
+  function previewProjectCopy(projectId: string, input: ProjectCopyOptionsInput) {
+    return previewProjectCopyRequest(projectId, input, accessToken)
+  }
+
+  async function copyProjectContent(projectId: string, input: ProjectCopyOptionsInput) {
+    operationPending.value = true
+    operationError.value = ''
+    try {
+      const copied = await copyProjectContentRequest(projectId, input, accessToken)
+      await reload()
+      return copied
+    } catch (error) {
+      operationError.value = messageFrom(error)
+      throw error
+    } finally {
+      operationPending.value = false
+    }
+  }
+
   async function updateOrganizationCounters(organizationId: string, currentProjectSequence: number, currentSerialSequence: number) {
     operationPending.value = true
     operationError.value = ''
@@ -1771,6 +1792,8 @@ export function usePdmWorkspace() {
     createProject,
     createSubproject,
     deleteProject,
+    previewProjectCopy,
+    copyProjectContent,
     updateOrganizationCounters,
     saveCrmIntegrationSettings,
     testCrmIntegration,

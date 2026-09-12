@@ -6,7 +6,7 @@ import BomHierarchyOverview from '../src/components/BomHierarchyOverview.vue'
 import type { BomItem, ProjectSummary } from '../src/types'
 
 const api = vi.hoisted(() => ({
-  listBom: vi.fn(), listBomVersions: vi.fn(), listProjectBomHeaders: vi.fn(),
+  listBom: vi.fn(), listBomVersions: vi.fn(), listProjectBomHeaders: vi.fn(), listReleasePackages: vi.fn(),
   previewProjectBomU9Sync: vi.fn(), executeProjectBomU9Sync: vi.fn(),
   retryProjectBomHeaderAutomatic: vi.fn(),
 }))
@@ -28,11 +28,84 @@ function item(drawingNumber: string, name: string): BomItem {
 describe('BomHierarchyOverview', () => {
   beforeEach(() => {
     Object.values(api).forEach(mock => mock.mockReset())
+    api.listReleasePackages.mockResolvedValue([])
     api.previewProjectBomU9Sync.mockImplementation(async (projectId: string, kind: string) => ({
       projectId, kind, itemCode: 'U9-CODE', componentCount: 0, state: 'UpToDate', writePreview: null,
     }))
   })
   afterEach(() => vi.restoreAllMocks())
+
+  it('collapses unnumbered children, preserves all master rows and counts, and remembers toggles on refresh', async () => {
+    const root = project({ id: 'root', code: 'ROOT', name: '主项目' })
+    const child = project({ id: 'child', code: 'CHILD', name: '子项目', parentProjectId: 'root', rootProjectId: 'root' })
+    const grandchild = project({ id: 'grandchild', code: 'GRANDCHILD', name: '下级项目', parentProjectId: 'child', rootProjectId: 'root' })
+    api.listBom.mockResolvedValue([item('A', '物料')])
+    api.listBomVersions.mockResolvedValue([])
+    api.listProjectBomHeaders.mockResolvedValue([])
+    const wrapper = mount(BomHierarchyOverview, { props: { project: root, projects: [root, child, grandchild], token: 'token', editable: true } })
+    await flushPromises()
+    expect(wrapper.findAll('tbody tr')).toHaveLength(6)
+    expect(wrapper.findAll('.is-master-row')).toHaveLength(3)
+    expect(wrapper.text()).toContain('待BOM发布后自动生成并同步 9 个BOM料号')
+    expect(wrapper.find('[aria-label="进入CHILD的标准件BOM"]').exists()).toBe(false)
+    await wrapper.get('[aria-label="展开CHILD的三类BOM"]').trigger('click')
+    expect(wrapper.findAll('tbody tr')).toHaveLength(9)
+    expect(wrapper.get('[aria-label="折叠CHILD的三类BOM"]').attributes('aria-expanded')).toBe('true')
+    await wrapper.get('[aria-label="刷新多级BOM"]').trigger('click')
+    await flushPromises()
+    expect(wrapper.findAll('tbody tr')).toHaveLength(9)
+    expect(wrapper.text()).toContain('待BOM发布后自动生成并同步 9 个BOM料号')
+    await wrapper.get('[aria-label="折叠CHILD的三类BOM"]').trigger('click')
+    expect(wrapper.findAll('tbody tr')).toHaveLength(6)
+    expect(wrapper.findAll('.is-master-row')).toHaveLength(3)
+    expect(api.executeProjectBomU9Sync).not.toHaveBeenCalled()
+    expect(api.retryProjectBomHeaderAutomatic).not.toHaveBeenCalled()
+    wrapper.unmount()
+  })
+
+  it.each(['Master', 'Standard'])('expands a child when its %s receives a material code, but not for a draft material', async kind => {
+    const root = project({ id: 'root', code: 'ROOT', name: '主项目' })
+    const child = project({ id: 'child', code: 'CHILD', name: '子项目', parentProjectId: 'root', rootProjectId: 'root' })
+    let materialCode: string | undefined
+    api.listBom.mockResolvedValue([])
+    api.listBomVersions.mockResolvedValue([])
+    api.listProjectBomHeaders.mockImplementation(async (projectId: string) => projectId === 'child'
+      ? [{ projectId, kind, materialId: 'draft', materialCode, rowVersion: 1 }] : [])
+    const wrapper = mount(BomHierarchyOverview, { props: { project: root, projects: [root, child], token: 'token' } })
+    await flushPromises()
+    expect(wrapper.findAll('tbody tr')).toHaveLength(5)
+    materialCode = '02011000001'
+    await wrapper.get('[aria-label="刷新多级BOM"]').trigger('click')
+    await flushPromises()
+    expect(wrapper.findAll('tbody tr')).toHaveLength(8)
+    expect(wrapper.get('[aria-label="折叠CHILD的三类BOM"]').attributes('aria-expanded')).toBe('true')
+    wrapper.unmount()
+  })
+
+  it.each([
+    ['已发布', '2026-09-08T08:21:00Z', undefined, '2026-09-08T08:21:00Z'],
+    ['已发布', '2026-09-08T08:21:00Z', '2026-09-09T08:00:00Z', '2026-09-09T08:00:00Z'],
+    ['已发布', '2026-09-09T08:21:00Z', '2026-09-08T08:00:00Z', '2026-09-09T08:21:00Z'],
+    ['审批中', '2026-09-08T08:21:00Z', undefined, undefined],
+    ['发布失败', '2026-09-08T08:21:00Z', undefined, undefined],
+    ['已发布', undefined, undefined, undefined],
+  ])('includes only completed long-lead release dates without changing formal status (%s, %s)', async (state, publishedAt, formalAt, expectedAt) => {
+    const root = project({ id: 'root', code: 'P-ROOT', name: '设备' })
+    api.listBom.mockResolvedValue([item('A', '测试物料')])
+    api.listProjectBomHeaders.mockResolvedValue([])
+    api.listBomVersions.mockResolvedValue(formalAt ? [{ kind: 'Standard', state: 'Released', versionNumber: 1, label: 'S-V01', releasedAt: formalAt }] : [])
+    api.listReleasePackages.mockResolvedValue([{ scope: 'StandardLongLead', state, publishedAt }])
+    const wrapper = mount(BomHierarchyOverview, { props: { project: root, projects: [root], token: 'token' } })
+    await flushPromises()
+    const rows = wrapper.findAll('tbody tr')
+    const date = expectedAt ? new Date(expectedAt).toLocaleString('zh-CN', { hour12: false }) : '—'
+    expect(rows[0].findAll('td')[8].text()).toBe(date)
+    expect(rows[1].findAll('td')[8].text()).toBe(date)
+    expect(rows[1].findAll('td')[6].text()).toBe(formalAt ? '已发布' : '未发布')
+    expect(rows[2].findAll('td')[8].text()).toBe('—')
+    expect(rows[3].findAll('td')[8].text()).toBe('—')
+    wrapper.unmount()
+  })
 
   it('opens the selected project and category even for an empty read-only BOM', async () => {
     const root = project({ id: 'root', code: 'P-ROOT', name: '产线' })
@@ -42,6 +115,7 @@ describe('BomHierarchyOverview', () => {
     api.listProjectBomHeaders.mockResolvedValue([])
     const wrapper = mount(BomHierarchyOverview, { props: { project: root, projects: [root, child], token: 'token', editable: false } })
     await flushPromises()
+    await wrapper.get('button[aria-label="展开P-CHILD的三类BOM"]').trigger('click')
     for (const [label, kind] of [['标准件BOM', 'Standard'], ['非标件BOM', 'NonStandard'], ['电气BOM', 'Electrical']]) {
       await wrapper.get(`button[aria-label="进入P-CHILD的${label}"]`).trigger('click')
       expect(wrapper.emitted('openBom')?.at(-1)).toEqual(['child', kind])
@@ -100,7 +174,7 @@ describe('BomHierarchyOverview', () => {
     expect(wrapper.find('.bom-overview__header').exists()).toBe(false)
     expect(wrapper.find('input[type="search"]').exists()).toBe(false)
     expect(wrapper.findAll('.bom-overview__link')).toHaveLength(6)
-    expect(wrapper.findAll('button')).toHaveLength(7)
+    expect(wrapper.findAll('button')).toHaveLength(8)
     expect(wrapper.get('button[aria-label="刷新多级BOM"]').text()).toBe('刷新')
   })
 

@@ -64,6 +64,14 @@ public sealed record CreateProjectRequest(
 
 public sealed record CreateSubprojectRequest(string Name, string? ProjectAlias, int Quantity, int? EquipmentTypeCode = null);
 
+public sealed record CopyProjectContentRequest(
+    Guid SourceProjectId,
+    bool CopyModels = true,
+    bool CopyDrawings = true,
+    bool CopyBom = true,
+    bool CopyValidationItems = true,
+    IReadOnlyList<Guid>? FolderIds = null);
+
 public sealed record UpdateProjectDetailsRequest(
     Guid? OrganizationId,
     string? ProjectTypeCode,

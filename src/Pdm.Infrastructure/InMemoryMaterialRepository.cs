@@ -7,6 +7,7 @@ namespace Upton.Pdm.Infrastructure;
 public sealed class InMemoryMaterialRepository : IMaterialRepository
 {
     private readonly object gate = new();
+    private readonly IPdmRepository? projectRepository;
     private readonly ConcurrentDictionary<Guid, PdmMaterial> materials = new();
     private readonly ConcurrentDictionary<Guid, MaterialSyncTask> tasks = new();
     private readonly ConcurrentDictionary<Guid, MaterialSyncBatch> syncBatches = new();
@@ -25,8 +26,9 @@ public sealed class InMemoryMaterialRepository : IMaterialRepository
         U9MaterialContract.CreatePath, U9MaterialContract.QueryPath, false, "system", DateTimeOffset.UnixEpoch,
         UnitCodeMappings: new Dictionary<string, string>());
 
-    public InMemoryMaterialRepository(TimeProvider timeProvider)
+    public InMemoryMaterialRepository(TimeProvider timeProvider, IPdmRepository? projectRepository = null)
     {
+        this.projectRepository = projectRepository;
         var now = timeProvider.GetUtcNow();
         rules[MaterialKind.Electrical] = new(MaterialKind.Electrical, "0101", "电气外购件", MaterialSupplyMode.Purchase, true, "system", now);
         rules[MaterialKind.Standard] = new(MaterialKind.Standard, "0102", "机械外购件", MaterialSupplyMode.Purchase, true, "system", now);
@@ -65,19 +67,22 @@ public sealed class InMemoryMaterialRepository : IMaterialRepository
         return Task.FromResult<IReadOnlyList<PdmMaterial>>(result);
     }
 
-    public Task<MaterialPage> ListMaterialPageAsync(
+    public async Task<MaterialPage> ListMaterialPageAsync(
         string? query,
         string? categoryCode,
         string? brand,
         bool includeArchived,
         int page,
         int pageSize,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        string? createdAtOrder = null, bool ordinaryOnly = false)
     {
         var normalizedQuery = query?.Trim();
         var normalizedCategory = categoryCode?.Trim();
         var normalizedBrand = brand?.Trim();
+        var headers = ordinaryOnly ? (await ListBomHeaderMaterialLinksAsync(cancellationToken)).Select(link => link.MaterialId).ToHashSet() : [];
         var filtered = materials.Values
+            .Where(item => !headers.Contains(item.Id))
             .Where(item => includeArchived || !item.IsArchived)
             .Where(item => string.IsNullOrWhiteSpace(normalizedCategory)
                 || (item.CategoryCode?.StartsWith(normalizedCategory, StringComparison.OrdinalIgnoreCase) ?? false))
@@ -87,20 +92,50 @@ public sealed class InMemoryMaterialRepository : IMaterialRepository
             {
                 item.MaterialCode, item.Name, item.Specification, item.Material, item.Brand,
                 item.CategoryCode, item.U9CategoryCode, item.SurfaceTreatment, item.PurchaseLink, item.Remark
-            }.Any(value => value?.Contains(normalizedQuery, StringComparison.OrdinalIgnoreCase) == true))
-            .OrderByDescending(item => item.IsRecommended)
+            }.Any(value => value?.Contains(normalizedQuery, StringComparison.OrdinalIgnoreCase) == true));
+        var ordered = createdAtOrder switch
+        {
+            "asc" => filtered.OrderBy(item => item.CreatedAt).ThenBy(item => item.MaterialCode, StringComparer.OrdinalIgnoreCase).ThenBy(item => item.Id),
+            "desc" => filtered.OrderByDescending(item => item.CreatedAt).ThenBy(item => item.MaterialCode, StringComparer.OrdinalIgnoreCase).ThenBy(item => item.Id),
+            _ => filtered.OrderByDescending(item => item.ApprovalStatus == MaterialApprovalStatus.Draft && !item.IsArchived)
+            .ThenByDescending(item => item.ApprovalStatus == MaterialApprovalStatus.Draft && !item.IsArchived ? item.CreatedAt : (DateTimeOffset?)null)
+            .ThenByDescending(item => item.IsRecommended)
             .ThenByDescending(item => (item.SourceBomItemId is null ? 0 : 1) + bomLinks.Values.Count(value => value == item.Id))
             .ThenBy(item => item.MaterialCode, StringComparer.OrdinalIgnoreCase)
-            .ToArray();
+        };
+        var all = ordered.ToArray();
         var normalizedPageSize = Math.Clamp(pageSize, 1, 200);
         var normalizedPage = Math.Max(page, 1);
-        var items = filtered
+        var items = all
             .Skip((normalizedPage - 1) * normalizedPageSize)
             .Take(normalizedPageSize)
             .Select(WithCounts)
             .ToArray();
-        return Task.FromResult(new MaterialPage(items, filtered.Length, normalizedPage, normalizedPageSize));
+        return new MaterialPage(items, all.Length, normalizedPage, normalizedPageSize);
     }
+
+    public async Task<IReadOnlyList<BomHeaderMaterialLink>> ListBomHeaderMaterialLinksAsync(CancellationToken cancellationToken)
+    {
+        var links = applications.Values.Where(a => a.MaterialId is not null && a.BomItemId is null && a.BomHeaderKind is not null)
+            .Select(a => new BomHeaderMaterialLink(a.MaterialId!.Value, a.ProjectId, a.BomHeaderKind!.Value)).ToList();
+        if (projectRepository is not null)
+            foreach (var project in await projectRepository.ListProjectsAsync(cancellationToken))
+            {
+                links.AddRange((await projectRepository.ListProjectBomHeaderBindingsAsync(project.Id, cancellationToken))
+                    .Select(b => new BomHeaderMaterialLink(b.MaterialId, b.ProjectId, b.Kind)));
+                links.AddRange((await projectRepository.ListBomVersionsAsync(project.Id, null, cancellationToken))
+                    .Where(v => v.MotherMaterialId is not null && v.Kind != BomKind.Unclassified)
+                    .Select(v => new BomHeaderMaterialLink(v.MotherMaterialId!.Value, v.ProjectId, Enum.Parse<ProjectBomHeaderKind>(v.Kind.ToString()))));
+            }
+        return links.Distinct().ToArray();
+    }
+
+    public Task<IReadOnlyList<PdmMaterial>> ListPendingMasterMaterialsAsync(CancellationToken cancellationToken) =>
+        Task.FromResult<IReadOnlyList<PdmMaterial>>(materials.Values
+            .Where(item => item.ApprovalStatus == MaterialApprovalStatus.Draft && !item.IsArchived && item.SourceBomItemId is null
+                && !applications.Values.Any(application => application.MaterialId == item.Id))
+            .OrderByDescending(item => item.CreatedAt).ThenBy(item => item.MaterialCode, StringComparer.OrdinalIgnoreCase)
+            .Select(WithCounts).ToArray());
 
     public Task<PdmMaterial?> FindMaterialAsync(Guid materialId, CancellationToken cancellationToken) =>
         Task.FromResult(materials.TryGetValue(materialId, out var material) ? WithCounts(material) : null);
@@ -646,6 +681,9 @@ public sealed class InMemoryMaterialRepository : IMaterialRepository
         {
             MaterialCode = material?.MaterialCode,
             MaterialName = material?.Name,
+            Specification = material?.Specification,
+            Brand = material?.Brand,
+            Remark = material?.Remark,
             CategoryCode = material?.CategoryCode,
             ProjectId = application?.ProjectId,
             ProjectCode = application?.ProjectCode,

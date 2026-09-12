@@ -12,4 +12,7 @@
     <PackageReference Include="Microsoft.AspNetCore.Authentication.JwtBearer" Version="10.0.10" />
     <PackageReference Include="Microsoft.Extensions.Hosting.WindowsServices" Version="10.0.10" />
   </ItemGroup>
+  <ItemGroup>
+    <Content Include="..\Pdm.Infrastructure\Assets\ValidationPlanOcr.ps1" Link="ValidationPlanOcr.ps1" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+  </ItemGroup>
 </Project>

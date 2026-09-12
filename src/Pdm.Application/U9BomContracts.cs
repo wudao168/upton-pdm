@@ -50,6 +50,8 @@ public sealed record U9BomComponentReference(
     public bool? IsSpecialUseItem { get; init; }
     public bool? IsIssueOrgFixed { get; init; }
     public string? IssueOrgCode { get; init; }
+    public bool? IsCharge { get; init; }
+    public string? CostElementCode { get; init; }
 }
 
 public sealed record U9BomReference(

@@ -120,6 +120,56 @@ public sealed class LocalProjectFileStorage(IOptions<PdmStorageOptions> options,
         }
         return Task.CompletedTask;
     }
+    public async Task<StoredProjectFileUpload> CopyVersionAsync(
+        ProjectFileVersion source,
+        Guid targetProjectId,
+        Guid targetFolderId,
+        string targetStorageRoot,
+        string actor,
+        CancellationToken cancellationToken)
+    {
+        await VerifyAsync(source, cancellationToken);
+        var versionId = Guid.NewGuid();
+        var relative = Path.Combine(".project-files", targetProjectId.ToString("N"), "versions", versionId.ToString("N"), source.FileName);
+        var target = StorageLocationPolicy.ResolveUnder(targetStorageRoot, relative);
+        if (File.Exists(target)) throw new PdmConflictException("目标项目文件版本已存在，不能覆盖。");
+
+        Directory.CreateDirectory(Path.GetDirectoryName(target)!);
+        var temporary = target + ".tmp";
+        try
+        {
+            var sourcePath = StorageLocationPolicy.ResolveUnder(source.StorageRoot, source.StorageRelativePath);
+            using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+            await using (var input = new FileStream(sourcePath, FileMode.Open, FileAccess.Read, FileShare.Read, 256 * 1024, FileOptions.Asynchronous | FileOptions.SequentialScan))
+            await using (var output = new FileStream(temporary, FileMode.CreateNew, FileAccess.Write, FileShare.None, 256 * 1024, FileOptions.Asynchronous | FileOptions.SequentialScan))
+            {
+                var buffer = new byte[256 * 1024];
+                int read;
+                while ((read = await input.ReadAsync(buffer, cancellationToken)) > 0)
+                {
+                    hash.AppendData(buffer, 0, read);
+                    await output.WriteAsync(buffer.AsMemory(0, read), cancellationToken);
+                }
+                await output.FlushAsync(cancellationToken);
+            }
+
+            var actual = Convert.ToHexString(hash.GetHashAndReset());
+            var info = new FileInfo(temporary);
+            if (info.Length != source.FileLength || !actual.Equals(source.Sha256, StringComparison.OrdinalIgnoreCase))
+            {
+                throw new PdmConflictException("跨项目复制后的项目文件校验失败。");
+            }
+
+            File.Move(temporary, target);
+            File.SetAttributes(target, File.GetAttributes(target) | FileAttributes.ReadOnly);
+            return new(versionId, targetProjectId, targetFolderId, source.FileName, StorageLocationPolicy.Normalize(targetStorageRoot), relative,
+                source.FileLength, actual, timeProvider.GetUtcNow());
+        }
+        finally
+        {
+            if (File.Exists(temporary)) File.Delete(temporary);
+        }
+    }
     private string SessionDirectory(Guid id) => Path.Combine(StorageLocationPolicy.Normalize(settings.UploadTempRoot), "project-files", id.ToString("N"));
     private async Task<ProjectFileUploadSession> ReadMetadataAsync(Guid id, CancellationToken cancellationToken)
     {

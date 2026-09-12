@@ -198,7 +198,8 @@ public sealed record ApprovalWorkflowTemplate(
 public sealed record ReleaseApprovalSettings(
     ApprovalWorkflowTemplate Mechanical,
     ApprovalWorkflowTemplate Electrical,
-    string EmergencySubstituteRoleCode)
+    string EmergencySubstituteRoleCode,
+    ApprovalWorkflowTemplate? ValidationPlan = null)
 {
     public static ReleaseApprovalSettings Default { get; } = new(
         new ApprovalWorkflowTemplate(
@@ -219,7 +220,16 @@ public sealed record ReleaseApprovalSettings(
                 new(ApprovalStage.HardwareSupervisor, "硬件主管审核", ApprovalAssigneeSource.PrimaryUnitManager),
                 new(ApprovalStage.StandardizationSupervisor, "标准化主管批准", ApprovalAssigneeSource.ParentUnitManager)
             ]),
-        UserRole.BusinessUnitManager.ToString());
+        UserRole.BusinessUnitManager.ToString(),
+        new ApprovalWorkflowTemplate(
+            "validation-plan",
+            "验证计划审批",
+            1,
+            [
+                new(ApprovalStage.MechanicalEngineer, "编制人自检", ApprovalAssigneeSource.Submitter),
+                new(ApprovalStage.MainDesigner, "主设审核", ApprovalAssigneeSource.ProjectDesignLead),
+                new(ApprovalStage.MechanicalSupervisor, "机械主管批准", ApprovalAssigneeSource.PrimaryUnitManager)
+            ]));
 
     public static ReleaseApprovalSettings UseOrganizationHierarchy(ReleaseApprovalSettings? settings)
     {
@@ -250,6 +260,12 @@ public sealed record ReleaseApprovalSettings(
             {
                 [ApprovalStage.HardwareSupervisor] = ApprovalAssigneeSource.PrimaryUnitManager,
                 [ApprovalStage.StandardizationSupervisor] = ApprovalAssigneeSource.ParentUnitManager
+            }),
+            ValidationPlan = Upgrade(settings.ValidationPlan ?? Default.ValidationPlan!, new Dictionary<ApprovalStage, ApprovalAssigneeSource>
+            {
+                [ApprovalStage.MechanicalEngineer] = ApprovalAssigneeSource.Submitter,
+                [ApprovalStage.MainDesigner] = ApprovalAssigneeSource.ProjectDesignLead,
+                [ApprovalStage.MechanicalSupervisor] = ApprovalAssigneeSource.PrimaryUnitManager
             })
         };
     }

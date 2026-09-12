@@ -42,7 +42,7 @@ describe('ApprovalWorkflowSettings', () => {
     const standardCount = wrapper.find('.formal-supplement-policy-card input[type="number"]')
     expect((standardCount.element as HTMLInputElement).value).toBe('3')
     await standardCount.setValue(4)
-    await wrapper.findAll('button').find(button => button.text() === '保存发布设置')!.trigger('click')
+    await wrapper.findAll('button').find(button => button.text() === '保存审批设置')!.trigger('click')
     expect(onSave).toHaveBeenCalledWith(expect.objectContaining({
       releaseChangeReasonTypes: expect.arrayContaining(['正式补充', '物料问题 / 交期不满足', '设计问题 / 设计错误', '其他']),
       formalSupplementPolicies: expect.objectContaining({ standard: { maximumCount: 4, validDays: 10 } }),

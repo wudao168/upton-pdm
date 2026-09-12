@@ -9,6 +9,17 @@ namespace Upton.Pdm.Infrastructure;
 
 public sealed class MySqlMaterialRepository : IMaterialRepository
 {
+    private const string BomHeaderMaterialLinksSql = """
+        SELECT material_id AS MaterialId,project_id AS ProjectId,bom_kind AS Kind FROM project_bom_header
+        UNION SELECT mother_material_id,project_id,bom_kind FROM bom_version WHERE mother_material_id IS NOT NULL AND bom_kind IN ('Standard','NonStandard','Electrical')
+        UNION SELECT material_id,project_id,bom_header_kind FROM material_code_application WHERE material_id IS NOT NULL AND bom_item_id IS NULL AND bom_header_kind IS NOT NULL
+        """;
+
+    public async Task<IReadOnlyList<BomHeaderMaterialLink>> ListBomHeaderMaterialLinksAsync(CancellationToken cancellationToken)
+    {
+        await using var connection = await OpenAsync(cancellationToken);
+        return (await connection.QueryAsync<BomHeaderMaterialLink>(new CommandDefinition(BomHeaderMaterialLinksSql, cancellationToken: cancellationToken))).ToArray();
+    }
     private readonly string connectionString;
     private readonly JsonSerializerOptions jsonOptions = new(JsonSerializerDefaults.Web);
 
@@ -42,7 +53,8 @@ public sealed class MySqlMaterialRepository : IMaterialRepository
         bool includeArchived,
         int page,
         int pageSize,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        string? createdAtOrder = null, bool ordinaryOnly = false)
     {
         await using var connection = await OpenAsync(cancellationToken);
         var normalizedQuery = string.IsNullOrWhiteSpace(query) ? null : $"%{query.Trim()}%";
@@ -50,7 +62,7 @@ public sealed class MySqlMaterialRepository : IMaterialRepository
         var normalizedBrand = string.IsNullOrWhiteSpace(brand) ? null : brand.Trim();
         var normalizedPageSize = Math.Clamp(pageSize, 1, 200);
         var normalizedPage = Math.Max(page, 1);
-        const string filters =
+        var filters =
             " WHERE (@IncludeArchived=1 OR is_archived=0)" +
             " AND (@CategoryCode IS NULL OR category_code LIKE @CategoryCode)" +
             " AND (@Brand IS NULL OR brand=@Brand)" +
@@ -64,16 +76,34 @@ public sealed class MySqlMaterialRepository : IMaterialRepository
             Offset = (normalizedPage - 1) * normalizedPageSize,
             PageSize = normalizedPageSize
         };
+        if (ordinaryOnly) filters += " AND NOT EXISTS (SELECT 1 FROM (" + BomHeaderMaterialLinksSql + ") header_link WHERE header_link.MaterialId=material_master.id)";
         var total = await connection.ExecuteScalarAsync<int>(new CommandDefinition(
             "SELECT COUNT(*) FROM material_master" + filters,
             parameters,
             cancellationToken: cancellationToken));
+        var orderBy = createdAtOrder switch
+        {
+            "asc" => " ORDER BY created_at ASC,material_code,id",
+            "desc" => " ORDER BY created_at DESC,material_code,id",
+            _ => " ORDER BY (approval_status='Draft' AND is_archived=0) DESC," +
+            " CASE WHEN approval_status='Draft' AND is_archived=0 THEN created_at END DESC," +
+            " is_recommended DESC,reference_count DESC,material_code"
+        };
         var rows = await connection.QueryAsync<MaterialRow>(new CommandDefinition(
-            MaterialSelect + filters +
-            " ORDER BY is_recommended DESC,reference_count DESC,material_code LIMIT @PageSize OFFSET @Offset",
+            MaterialSelect + filters + orderBy + " LIMIT @PageSize OFFSET @Offset",
             parameters,
             cancellationToken: cancellationToken));
         return new(rows.Select(MapMaterial).ToArray(), total, normalizedPage, normalizedPageSize);
+    }
+
+    public async Task<IReadOnlyList<PdmMaterial>> ListPendingMasterMaterialsAsync(CancellationToken cancellationToken)
+    {
+        await using var connection = await OpenAsync(cancellationToken);
+        var rows = await connection.QueryAsync<MaterialRow>(new CommandDefinition(
+            MaterialSelect + " WHERE approval_status='Draft' AND is_archived=0 AND source_bom_item_id IS NULL" +
+            " AND NOT EXISTS (SELECT 1 FROM material_code_application a WHERE a.material_id=material_master.id)" +
+            " ORDER BY created_at DESC,material_code,id", cancellationToken: cancellationToken));
+        return rows.Select(MapMaterial).ToArray();
     }
 
     public async Task<PdmMaterial?> FindMaterialAsync(Guid materialId, CancellationToken cancellationToken)
@@ -1764,6 +1794,9 @@ public sealed class MySqlMaterialRepository : IMaterialRepository
         {
             MaterialCode = row.MaterialCode,
             MaterialName = row.MaterialName,
+            Specification = row.Specification,
+            Brand = row.Brand,
+            Remark = row.Remark,
             CategoryCode = row.CategoryCode,
             ProjectId = row.ProjectId,
             ProjectCode = row.ProjectCode,
@@ -1940,6 +1973,9 @@ public sealed class MySqlMaterialRepository : IMaterialRepository
                response_preview,u9_item_id,u9_item_code,created_at,updated_at,
                (SELECT material_code FROM material_master WHERE material_master.id=u9_material_sync_task.material_id) material_code,
                (SELECT name FROM material_master WHERE material_master.id=u9_material_sync_task.material_id) material_name,
+               (SELECT specification FROM material_master WHERE material_master.id=u9_material_sync_task.material_id) specification,
+               (SELECT brand FROM material_master WHERE material_master.id=u9_material_sync_task.material_id) brand,
+               (SELECT remark FROM material_master WHERE material_master.id=u9_material_sync_task.material_id) remark,
                (SELECT category_code FROM material_master WHERE material_master.id=u9_material_sync_task.material_id) category_code,
                (SELECT project_id FROM material_code_application WHERE material_code_application.material_id=u9_material_sync_task.material_id ORDER BY requested_at DESC LIMIT 1) project_id,
                (SELECT project.code FROM project WHERE project.id=(SELECT project_id FROM material_code_application WHERE material_code_application.material_id=u9_material_sync_task.material_id ORDER BY requested_at DESC LIMIT 1)) project_code,
@@ -2086,6 +2122,9 @@ public sealed class MySqlMaterialRepository : IMaterialRepository
         public DateTime UpdatedAt { get; init; }
         public string? MaterialCode { get; init; }
         public string? MaterialName { get; init; }
+        public string? Specification { get; init; }
+        public string? Brand { get; init; }
+        public string? Remark { get; init; }
         public string? CategoryCode { get; init; }
         public Guid? ProjectId { get; init; }
         public string? ProjectCode { get; init; }

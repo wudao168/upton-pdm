@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ElMessage } from '../statusMessage'
+import { clearGlobalStatus, ElMessage } from '../statusMessage'
 import { ElMessageBox } from 'element-plus'
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { applyForBomMaterialCodes, applyMaterialRelations, expandEngineeringKit, getMaterialRelationCompleteness, linkBomMaterial, listEngineeringKits, listMaterials, previewBomSourceReclassification, reclassifyBomItemsFromSource, resolveBomMaterialCodes } from '../api'
@@ -115,6 +115,7 @@ const emit = defineEmits<{
   dirtyChange: [dirty: boolean]
 }>()
 const kind = ref<BomView>('Source')
+watch(kind, clearGlobalStatus, { flush: 'sync' })
 const displayMode = ref<BomDisplayMode>('Summary')
 const exportDialogOpen = ref(false)
 const exportMode = ref<BomExportMode>('Summary')

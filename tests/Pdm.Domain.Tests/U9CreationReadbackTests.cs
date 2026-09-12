@@ -41,13 +41,29 @@ public sealed class U9CreationReadbackTests
     {
         var handler = new Responses(
             """{"ResCode":0,"Data":[{"m_itemMaster":{"m_iD":101,"m_code":"TEST"},"m_bOMVersionCode":"A1","m_lot":1,"m_bOMComponents":[{"m_sequence":10,"m_issueOrg":{"m_code":"7"}}]}]}""",
-            JsonSerializer.Serialize(new { ResCode = 0, Data = new[] { new { ItemId = 101, BOMVersionCode = "A1", Lot = 1, Sequence = 10, IsIssueOrgFixed = value } } }));
+            JsonSerializer.Serialize(new { ResCode = 0, Data = new[] { new { ItemId = 101, BOMVersionCode = "A1", Lot = 1, Sequence = 10, IsIssueOrgFixed = value, IsCharge = value, CostElementCode = "No101" } } }));
         var result = await new U9OpenApiClient(new HttpClient(handler)).QueryBomsAsync(
             "http://u9.test", U9BomContract.QueryPath, "test-token", "[]", default);
         var component = Assert.Single(Assert.Single(result.Boms).Components);
         Assert.Equal(value, component.IsIssueOrgFixed);
+        Assert.Equal(value, component.IsCharge);
+        Assert.Equal("No101", component.CostElementCode);
         Assert.Equal("7", component.IssueOrgCode);
         Assert.Contains("b.ItemMaster IN (101)", handler.LastBody);
+        Assert.Contains("CBO_CostElement", handler.LastBody);
+    }
+
+    [Fact]
+    public async Task Bom_MissingCostSupplementRemainsUnknown()
+    {
+        var handler = new Responses(
+            """{"ResCode":0,"Data":[{"m_itemMaster":{"m_iD":101},"m_bOMVersionCode":"A1","m_lot":1,"m_bOMComponents":[{"m_sequence":10,"m_isCharge":true,"m_costElement":{"m_code":"No101"}}]}]}""",
+            """{"ResCode":0,"Data":[]}""");
+        var result = await new U9OpenApiClient(new HttpClient(handler)).QueryBomsAsync(
+            "http://u9.test", U9BomContract.QueryPath, "test-token", "[]", default);
+        var component = Assert.Single(Assert.Single(result.Boms).Components);
+        Assert.Null(component.IsCharge);
+        Assert.Null(component.CostElementCode);
     }
 
     private sealed class Responses(params string[] responses) : HttpMessageHandler

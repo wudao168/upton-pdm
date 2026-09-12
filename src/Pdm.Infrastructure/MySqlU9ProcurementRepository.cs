@@ -95,11 +95,17 @@ public sealed class MySqlU9ProcurementRepository : IU9ProcurementRepository
                     RecordKind = row.RecordKind.Trim(),
                     LineId = row.LineId.Trim(),
                     SourcePrLineId = Clean(row.SourcePrLineId),
+                    SourcePoLineId = Clean(row.SourcePoLineId),
                     DocumentNumber = row.DocumentNumber.Trim(),
                     row.LineNumber,
                     row.LineStatus,
                     row.IsCanceled,
                     row.BusinessDate,
+                    row.SourceCreatedAt,
+                    BuyerName = Clean(row.BuyerName),
+                    row.MovementDate,
+                    row.MovementQuantity,
+                    MovementUnit = Clean(row.MovementUnit),
                     MaterialCode = row.MaterialCode.Trim(),
                     ItemName = row.ItemName.Trim(),
                     Specification = Clean(row.Specification),
@@ -123,11 +129,13 @@ public sealed class MySqlU9ProcurementRepository : IU9ProcurementRepository
                         snapshot_run_id,organization_code,record_kind,line_id,source_pr_line_id,document_number,
                         line_number,line_status,is_canceled,business_date,material_code,item_name,specification,brand,
                         project_code,project_name,subproject,requested_quantity,approved_quantity,purchase_quantity,
-                        arrived_quantity,purchase_remark,delivery_date,latest_delivery_date,refreshed_at)
+                        arrived_quantity,purchase_remark,delivery_date,latest_delivery_date,refreshed_at,source_created_at,buyer_name,
+                        movement_date,movement_quantity,movement_unit,source_po_line_id)
                     VALUES(@SnapshotRunId,@OrganizationCode,@RecordKind,@LineId,@SourcePrLineId,@DocumentNumber,
                         @LineNumber,@LineStatus,@IsCanceled,@BusinessDate,@MaterialCode,@ItemName,@Specification,@Brand,
                         @ProjectCode,@ProjectName,@Subproject,@RequestedQuantity,@ApprovedQuantity,@PurchaseQuantity,
-                        @ArrivedQuantity,@PurchaseRemark,@DeliveryDate,@LatestDeliveryDate,@RefreshedAt)
+                        @ArrivedQuantity,@PurchaseRemark,@DeliveryDate,@LatestDeliveryDate,@RefreshedAt,@SourceCreatedAt,@BuyerName,
+                        @MovementDate,@MovementQuantity,@MovementUnit,@SourcePoLineId)
                     """, values, transaction, cancellationToken: cancellationToken));
             }
             await connection.ExecuteAsync(new CommandDefinition(
@@ -171,6 +179,8 @@ public sealed class MySqlU9ProcurementRepository : IU9ProcurementRepository
                 ON setting.id=1 AND setting.current_snapshot_run_id=snapshot.snapshot_run_id
             WHERE
             """ + projectMatch + """
+              OR (snapshot.record_kind IN ('RCV','ISSUE','MISC','TRANSFER','DIRECT') AND @SubprojectCode IS NOT NULL
+                  AND COALESCE(snapshot.project_code,'')='' AND snapshot.subproject=@SubprojectCode)
               OR (snapshot.record_kind='PO' AND snapshot.source_pr_line_id IN (
                     SELECT requisition.line_id
                     FROM u9_procurement_snapshot requisition
@@ -204,7 +214,15 @@ public sealed class MySqlU9ProcurementRepository : IU9ProcurementRepository
         row.DocumentNumber, row.LineNumber, row.LineStatus, row.IsCanceled, Utc(row.BusinessDate),
         row.MaterialCode, row.ItemName, row.Specification, row.Brand, row.ProjectCode, row.ProjectName,
         row.Subproject, row.RequestedQuantity, row.ApprovedQuantity, row.PurchaseQuantity, row.ArrivedQuantity,
-        row.PurchaseRemark, Utc(row.DeliveryDate), Utc(row.LatestDeliveryDate), Utc(row.RefreshedAt));
+        row.PurchaseRemark, Utc(row.DeliveryDate), Utc(row.LatestDeliveryDate), Utc(row.RefreshedAt))
+    {
+        SourceCreatedAt = Utc(row.SourceCreatedAt),
+        BuyerName = row.BuyerName,
+        MovementDate = Utc(row.MovementDate),
+        MovementQuantity = row.MovementQuantity,
+        MovementUnit = row.MovementUnit,
+        SourcePoLineId = row.SourcePoLineId
+    };
 
     private sealed class SettingsRow
     {
@@ -236,11 +254,17 @@ public sealed class MySqlU9ProcurementRepository : IU9ProcurementRepository
         public string RecordKind { get; init; } = string.Empty;
         public string LineId { get; init; } = string.Empty;
         public string? SourcePrLineId { get; init; }
+        public string? SourcePoLineId { get; init; }
         public string DocumentNumber { get; init; } = string.Empty;
         public int LineNumber { get; init; }
         public int LineStatus { get; init; }
         public bool IsCanceled { get; init; }
         public DateTime? BusinessDate { get; init; }
+        public DateTime? SourceCreatedAt { get; init; }
+        public string? BuyerName { get; init; }
+        public DateTime? MovementDate { get; init; }
+        public decimal? MovementQuantity { get; init; }
+        public string? MovementUnit { get; init; }
         public string MaterialCode { get; init; } = string.Empty;
         public string ItemName { get; init; } = string.Empty;
         public string? Specification { get; init; }

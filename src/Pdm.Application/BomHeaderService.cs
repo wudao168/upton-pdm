@@ -34,7 +34,7 @@ public sealed record BomHeaderGenerationResult(
     Guid? AutomaticBatchId = null,
     int QueuedApprovalCount = 0);
 
-public sealed class BomHeaderService(
+public sealed partial class BomHeaderService(
     IPdmRepository repository,
     IMaterialRepository materials,
     MaterialService materialService,

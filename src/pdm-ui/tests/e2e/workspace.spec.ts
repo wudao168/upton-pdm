@@ -1,4 +1,6 @@
 import { expect, test } from '@playwright/test'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 
 const projectId = '11111111-1111-1111-1111-111111111111'
 let materialCodeApplications: Array<Record<string, unknown>> = []
@@ -60,9 +62,11 @@ test.beforeEach(async ({ page }) => {
     if (path === '/api/auth/me') return fulfill({ username: currentUsername, displayName: currentUsername === 'admin' ? '系统管理员' : '真实工程师', nickname: null, gender: 'unspecified', landline: null, mobilePhone: null, email: null })
     if (path === '/api/password-reset-requests') return fulfill([])
     if (path === '/api/approval-tasks/mine') return fulfill([])
+    if (path === '/api/validation-plan-approval-tasks/mine') return fulfill([])
     if (path === '/api/notifications/mine') return fulfill([])
     if (path === '/api/bom-validation-rules') return fulfill({ standard: ['drawingNumber', 'name', 'unit', 'specification', 'quantity', 'revision'], nonStandard: ['drawingNumber', 'name', 'unit', 'material', 'quantity', 'revision'], electrical: ['drawingNumber', 'name', 'unit', 'quantity', 'revision'] })
     if (path === '/api/material-code/applications') return fulfill(materialCodeApplications)
+    if (path === '/api/materials/pending-approval') return fulfill([])
     if (path === '/api/material-sync-tasks') return fulfill([])
     if (path === '/api/material-sync-batches') return fulfill([])
     if (path === '/api/materials') {
@@ -146,6 +150,125 @@ test.beforeEach(async ({ page }) => {
   })
 })
 
+test('project copy dialog keeps the confirmed default scope', async ({ page }, testInfo) => {
+  const targetId = '33333333-3333-3333-3333-333333333333'
+  const sourceId = '44444444-4444-4444-4444-444444444444'
+  const baseProject = { owner: 'admin', vaultLocation: 'D:\\PDM\\TEST', releaseLocation: 'D:\\Release\\TEST', isActive: true,
+    quantity: 1, serialNumbers: [], collaborativeProjectManagers: [], designers: [], canReadContent: true }
+  let previewBody: Record<string, unknown> | null = null
+  await page.route('**/api/projects', route => route.fulfill({ json: [
+    { ...baseProject, id: targetId, code: 'P700002', name: '新建目标项目' },
+    { ...baseProject, id: sourceId, code: 'P700001', name: '现有源项目' },
+  ] }))
+  await page.route(new RegExp(`/api/projects/(?:${targetId}|${sourceId})$`), route => {
+    const id = new URL(route.request().url()).pathname.split('/').at(-1)!
+    return route.fulfill({ json: { ...baseProject, canReadContent: false, id, code: id === targetId ? 'P700002' : 'P700001', name: id === targetId ? '新建目标项目' : '现有源项目' } })
+  })
+  await page.route(`**/api/projects/${targetId}/copy-preview`, async route => {
+    previewBody = route.request().postDataJSON()
+    await route.fulfill({ json: {
+      sourceProjectId: sourceId, targetProjectId: targetId, modelCount: 12, drawingCount: 8, bomItemCount: 36,
+      validationItemCount: 5, projectFileCount: 1, totalBytes: 10485760, blockingReasons: [], warnings: [], canExecute: true,
+      folders: [
+        { id: 'gas-folder', name: '气路时序', path: '机械图纸 / 气路时序', templateKey: 'mechanical.air-sequence', fileCount: 1, totalBytes: 1024, defaultSelected: true },
+        { id: 'other-folder', name: '其他资料', path: '机械图纸 / 其他资料', templateKey: 'mechanical.other', fileCount: 2, totalBytes: 2048, defaultSelected: false },
+      ],
+    } })
+  })
+  const errors: string[] = []
+  page.on('pageerror', error => errors.push(error.message))
+  page.on('console', message => { if (message.type() === 'error') errors.push(message.text()) })
+  await page.addInitScript(() => { window.setInterval = (() => 0) as unknown as typeof window.setInterval })
+  await page.setViewportSize({ width: 1600, height: 1000 })
+  await page.goto('/')
+  const login = page.getByLabel('登录PLM')
+  await login.getByRole('textbox', { name: '账号' }).fill('admin')
+  await login.getByRole('textbox', { name: '密码' }).fill('correct-password')
+  await login.getByRole('button', { name: '登录', exact: true }).click()
+  await expect(page.locator('section.pdm-project-workspace')).toBeVisible()
+  await page.getByRole('button', { name: '项目列表', exact: true }).click()
+  const actionBox = await page.getByRole('button', { name: '操作项目P700002' }).boundingBox()
+  expect(actionBox).not.toBeNull()
+  await page.mouse.click(actionBox!.x + actionBox!.width / 2, actionBox!.y + actionBox!.height / 2)
+  const copyMenuBox = await page.locator('.el-dropdown-menu__item:visible').filter({ hasText: '从现有项目复制内容' }).boundingBox()
+  expect(copyMenuBox).not.toBeNull()
+  await page.mouse.click(copyMenuBox!.x + copyMenuBox!.width / 2, copyMenuBox!.y + copyMenuBox!.height / 2)
+
+  const dialog = page.getByRole('dialog', { name: /从现有项目复制内容/ })
+  await expect(dialog).toContainText('目标项目')
+  await dialog.getByRole('combobox').click()
+  await page.getByRole('option', { name: 'P700001 · 现有源项目' }).click()
+  await expect(dialog.getByRole('checkbox', { name: '最新 3D 图档' })).toBeChecked()
+  await expect(dialog.getByRole('checkbox', { name: '最新 2D 图档' })).toBeChecked()
+  await expect(dialog.getByRole('checkbox', { name: 'BOM' })).toBeChecked()
+  await expect(dialog.getByRole('checkbox', { name: '验证计划检查项目' })).toBeChecked()
+  await expect(dialog.getByRole('checkbox', { name: /气路时序/ })).toBeChecked()
+  await expect(dialog.getByRole('checkbox', { name: /其他资料/ })).not.toBeChecked()
+  await expect(dialog).toContainText('验证检查项 5')
+  await expect(dialog).toContainText('共 10.0 MB')
+  expect(previewBody).toMatchObject({ sourceProjectId: sourceId, copyModels: true, copyDrawings: true, copyBom: true, copyValidationItems: true, folderIds: null })
+  await expect(page.locator('vite-error-overlay')).toHaveCount(0)
+  await page.screenshot({ path: testInfo.outputPath('project-copy-dialog.png') })
+  expect(await page.title()).toBe('UPTON-PLM')
+  expect(errors).toEqual([])
+})
+
+test('project plan week header centers ISO week and places Monday day on the gridline', async ({ page }) => {
+  const plan = {
+    id: 'plan-week-header', projectId, templateId: 'template-1', templateName: '设备模板', currentStage: 'Design',
+    approvalStatus: 'Draft', baselineVersion: 0, plannedStart: '2026-09-07', plannedFinish: '2026-11-08', forecastFinish: '2026-11-08', rowVersion: 1,
+    stages: [{ code: 'Design', name: '设计', participatesInDelivery: true, durationRatio: 1, progressRatio: 1 }],
+    stageSchedules: [{ stage: 'Design', startDate: '2026-09-07', durationDays: 63 }],
+    tasks: [{
+      id: 'task-week-header', name: '机械设计', stage: 'Design', assignee: 'engineer', durationDays: 63,
+      plannedStart: '2026-09-07', plannedFinish: '2026-11-08', completionPercent: 0, status: 'NotStarted',
+      predecessorTaskIds: [], weight: 1, isMilestone: false, isRequired: true, sortOrder: 10,
+    }],
+    createdBy: 'admin', createdAt: '2026-09-10T00:00:00Z', updatedBy: 'admin', updatedAt: '2026-09-10T00:00:00Z',
+  }
+  await page.route(/\/api\/(?:project-plan-templates|projects\/[^/]+\/plan(?:\/portfolio)?)(?:\?.*)?$/, async route => {
+    const path = new URL(route.request().url()).pathname
+    if (path === '/api/project-plan-templates') return route.fulfill({ json: [] })
+    if (path.endsWith('/portfolio')) return route.fulfill({ json: { rootProjectId: projectId, currentStage: 'Design', completionPercent: 0, laggingProjectCount: 0, riskProjectCount: 0, projects: [] } })
+    return route.fulfill({ json: plan })
+  })
+  const errors: string[] = []
+  page.on('pageerror', error => errors.push(error.message))
+  page.on('console', message => { if (message.type() === 'error' || message.type() === 'warning') errors.push(message.text()) })
+  await page.setViewportSize({ width: 1988, height: 1114 })
+  await page.goto('/')
+  const login = page.getByLabel('登录PLM')
+  await login.getByRole('textbox', { name: '账号' }).fill('admin')
+  await login.getByRole('textbox', { name: '密码' }).fill('correct-password')
+  await login.getByRole('button', { name: '登录', exact: true }).click()
+  await page.getByRole('button', { name: '项目列表', exact: true }).click()
+  await page.getByRole('button', { name: '进入项目' }).click()
+  await page.getByRole('button', { name: '项目计划', exact: true }).click()
+
+  await page.getByLabel('甘特图缩放').getByRole('button', { name: '周', exact: true }).click()
+  await expect(page.locator('.pdm-plan-switch')).toHaveText('休息日')
+  await expect(page.locator('.pdm-gantt-calendar-band.is-year')).toHaveText('2026年')
+  await expect(page.locator('.pdm-gantt-calendar-band.is-month')).toHaveText(['8月', '9月', '10月', '11月'])
+  const ticks = page.locator('.pdm-gantt-tick')
+  await expect(ticks.first().locator('.pdm-gantt-tick__week')).toHaveText(/^W\d{2}$/)
+  await expect(ticks.first().locator('.pdm-gantt-tick__week-start')).toHaveText(/^\d{1,2}$/)
+  const linePlacement = await ticks.nth(1).evaluate(tick => {
+    const tickBox = tick.getBoundingClientRect()
+    const dateBox = tick.querySelector<HTMLElement>('.pdm-gantt-tick__week-start')!.getBoundingClientRect()
+    return { lineX: tickBox.left, dateCenterX: dateBox.left + dateBox.width / 2 }
+  })
+  expect(Math.abs(linePlacement.dateCenterX - linePlacement.lineX)).toBeLessThanOrEqual(1)
+  const starts = await ticks.locator('time').evaluateAll(items => items.map(item => item.getAttribute('datetime')!))
+  expect(starts.length).toBeGreaterThan(2)
+  for (let index = 1; index < starts.length; index += 1) {
+    expect(new Date(starts[index]!).getTime() - new Date(starts[index - 1]!).getTime()).toBe(7 * 86_400_000)
+  }
+  await expect(page.locator('vite-error-overlay')).toHaveCount(0)
+  await page.screenshot({ path: join(tmpdir(), 'pdm-plan-week-header.png') })
+  expect(await page.title()).toBe('UPTON-PLM')
+  expect(errors).toEqual([])
+})
+
 test('hierarchy category links open the owning project BOM', async ({ page }, testInfo) => {
   const childId = '22222222-2222-2222-2222-222222222222'
   const base = { owner: '真实工程师', vaultLocation: 'D:\\PDM\\TEST', releaseLocation: 'D:\\Release\\TEST', isActive: true, quantity: 1, serialNumbers: [], designers: [], rootProjectId: projectId }
@@ -172,9 +295,11 @@ test('hierarchy category links open the owning project BOM', async ({ page }, te
   await page.getByRole('button', { name: '进入项目' }).first().click()
   await page.getByRole('button', { name: 'BOM', exact: true }).click()
   await page.getByRole('tab', { name: '多级总览' }).click()
-  await expect(page.getByRole('button', { name: '进入PRJ-REAL-001-1的标准件BOM', exact: true })).toBeVisible()
-  await page.screenshot({ path: testInfo.outputPath('hierarchy-links.png') })
   for (const category of ['标准件BOM', '非标件BOM', '电气BOM']) {
+    const expandChild = page.getByRole('button', { name: '展开PRJ-REAL-001-1的三类BOM', exact: true })
+    if (await expandChild.isVisible()) await expandChild.click()
+    await expect(page.getByRole('button', { name: `进入PRJ-REAL-001-1的${category}`, exact: true })).toBeVisible()
+    if (category === '标准件BOM') await page.screenshot({ path: testInfo.outputPath('hierarchy-links.png') })
     await page.getByRole('button', { name: `进入PRJ-REAL-001-1的${category}`, exact: true }).click()
     await expect(page.getByRole('tab', { name: category })).toHaveAttribute('aria-selected', 'true')
     await expect(page.locator('.pdm-project-detail')).toContainText('导航测试子项目')
@@ -190,8 +315,180 @@ test('hierarchy category links open the owning project BOM', async ({ page }, te
   expect(errors).toEqual([])
 })
 
+test('project plan toolbar uses uniform buttons and shows actual completion date', async ({ page }, testInfo) => {
+  const plan = {
+    id: 'plan-1', projectId, templateId: 'template-1', templateName: '设备模板', currentStage: 'Design',
+    approvalStatus: 'Draft', baselineVersion: 0, plannedStart: '2026-09-10', plannedFinish: '2026-09-22', forecastFinish: '2026-09-22', rowVersion: 1,
+    stages: [{ code: 'Design', name: '设计', participatesInDelivery: true, durationRatio: 1, progressRatio: 1 }],
+    stageSchedules: [{ stage: 'Design', startDate: '2026-09-10', durationDays: 13 }],
+    tasks: [{
+      id: 'task-1', name: '机械设计', stage: 'Design', assignee: 'engineer', durationDays: 13,
+      plannedStart: '2026-09-10', plannedFinish: '2026-09-22', actualStart: '2026-09-10', actualFinish: '2026-09-20',
+      completionPercent: 100, status: 'Completed', predecessorTaskIds: [], weight: 1, isMilestone: false, isRequired: true, sortOrder: 10,
+    }],
+    createdBy: 'admin', createdAt: '2026-09-10T00:00:00Z', updatedBy: 'admin', updatedAt: '2026-09-10T00:00:00Z',
+  }
+  await page.route(/\/api\/(?:project-plan-templates|projects\/[^/]+\/plan(?:\/portfolio)?)(?:\?.*)?$/, async route => {
+    const path = new URL(route.request().url()).pathname
+    const body = path === '/api/project-plan-templates'
+      ? []
+      : path.endsWith('/portfolio')
+        ? { rootProjectId: projectId, currentStage: 'Design', completionPercent: 100, laggingProjectCount: 0, riskProjectCount: 0, projects: [] }
+        : plan
+    await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(body) })
+  })
+  const errors: string[] = []
+  page.on('console', message => {
+    if (message.type() === 'error') errors.push(`${message.location().url}: ${message.text()}`)
+  })
+  await page.setViewportSize({ width: 1920, height: 1080 })
+  await page.goto('/')
+  const login = page.getByLabel('登录PLM')
+  await login.getByRole('textbox', { name: '账号' }).fill('admin')
+  await login.getByRole('textbox', { name: '密码' }).fill('correct-password')
+  await login.getByRole('button', { name: '登录', exact: true }).click()
+  await page.getByRole('button', { name: '项目列表', exact: true }).click()
+  await page.getByRole('button', { name: '进入项目' }).click()
+  await page.getByRole('button', { name: '项目计划', exact: true }).click()
+
+  const toolbar = page.locator('.pdm-plan-toolbar')
+  await expect(toolbar).toBeVisible()
+  const buttonSizes = await toolbar.locator('.pdm-plan-view-tabs > button, .pdm-plan-toolbar__actions > button').evaluateAll(buttons => buttons.map(button => {
+    const rect = button.getBoundingClientRect()
+    return { text: button.textContent?.trim(), width: rect.width, height: rect.height }
+  }))
+  expect(buttonSizes.length).toBeGreaterThan(2)
+  expect(buttonSizes.every(button => button.width === 80 && button.height === 32)).toBe(true)
+  const headerCells = await page.locator('.pdm-gantt-info-head > span').evaluateAll(cells => cells.map(cell => {
+    const rect = cell.getBoundingClientRect()
+    return { text: cell.textContent?.trim(), left: rect.left, centerY: rect.top + rect.height / 2 }
+  }))
+  expect(headerCells.map(cell => cell.text)).toEqual(['项目 / 任务', '责任人', '进度', '计划日期', '工期', '完成日期'])
+  expect(headerCells.every((cell, index) => index === 0 || cell.left > headerCells[index - 1]!.left), JSON.stringify(headerCells)).toBe(true)
+  expect(Math.max(...headerCells.map(cell => cell.centerY)) - Math.min(...headerCells.map(cell => cell.centerY))).toBeLessThanOrEqual(1)
+  await expect(page.locator('.pdm-gantt-info-row.is-task > span').nth(5)).toHaveText('2026-09-20')
+  await toolbar.getByRole('button', { name: '日', exact: true }).click()
+  await expect(toolbar.getByRole('button', { name: '日', exact: true })).toHaveClass(/is-active/)
+  await toolbar.getByRole('button', { name: '周', exact: true }).click()
+  await expect(toolbar.getByRole('button', { name: '周', exact: true })).toHaveClass(/is-active/)
+  await expect(page.locator('.pdm-gantt-tick', { hasText: 'W37' }).first()).toBeVisible()
+  const todayMarker = await page.locator('.pdm-gantt-today.is-header').evaluate(marker => {
+    const line = marker.getBoundingClientRect()
+    const label = marker.querySelector<HTMLElement>('.pdm-gantt-today__label')!.getBoundingClientRect()
+    return { text: marker.textContent?.trim(), lineX: line.left, labelCenterX: label.left + label.width / 2 }
+  })
+  expect(todayMarker.text).toBe('今天')
+  expect(Math.abs(todayMarker.labelCenterX - todayMarker.lineX)).toBeLessThanOrEqual(1)
+  await expect(page.locator('vite-error-overlay')).toHaveCount(0)
+  expect(errors).toEqual([])
+  await page.screenshot({ path: testInfo.outputPath('project-plan-toolbar-80x32-completion-date.png'), fullPage: false })
+  await page.setViewportSize({ width: 1285, height: 1114 })
+  await page.screenshot({ path: testInfo.outputPath('project-plan-week-number-today-1285.png'), fullPage: false })
+})
+
+test('project plan stages can overlap and moving one stage keeps unrelated stages unchanged', async ({ page }, testInfo) => {
+  const project = { id: projectId, code: 'PRJ-REAL-001', name: '并行排期项目', owner: 'admin', primaryProjectManager: 'admin', collaborativeProjectManagers: [],
+    vaultLocation: 'D:\\PDM\\PRJ-REAL-001', releaseLocation: 'D:\\Release\\PRJ-REAL-001', isActive: true, quantity: 1, serialNumbers: [], designers: [] }
+  const plan = {
+    id: 'parallel-plan', projectId, templateId: 'template-1', templateName: '并行模板', currentStage: 'Design',
+    approvalStatus: 'Draft', baselineVersion: 0, plannedStart: '2026-09-05', plannedFinish: '2026-09-25', forecastFinish: '2026-09-25', rowVersion: 1,
+    stages: [
+      { code: 'Design', name: '设计', participatesInDelivery: true, durationRatio: .5, progressRatio: .5 },
+      { code: 'Preparation', name: '备料', participatesInDelivery: true, durationRatio: .5, progressRatio: .5 },
+    ],
+    stageSchedules: [
+      { stage: 'Design', startDate: '2026-09-05', durationDays: 11 },
+      { stage: 'Preparation', startDate: '2026-09-16', durationDays: 10 },
+    ],
+    tasks: [
+      { id: 'design-task', name: '设计任务', stage: 'Design', assignee: 'admin', durationDays: 14, plannedStart: '2026-09-05', plannedFinish: '2026-09-18', completionPercent: 0, status: 'NotStarted', predecessorTaskIds: [], weight: 1, isMilestone: false, isRequired: true, sortOrder: 10 },
+      { id: 'prepare-task', name: '备料任务', stage: 'Preparation', assignee: 'admin', durationDays: 16, plannedStart: '2026-09-10', plannedFinish: '2026-09-25', completionPercent: 0, status: 'NotStarted', predecessorTaskIds: [], weight: 1, isMilestone: false, isRequired: true, sortOrder: 20 },
+    ],
+    createdBy: 'admin', createdAt: '2026-09-10T00:00:00Z', updatedBy: 'admin', updatedAt: '2026-09-10T00:00:00Z',
+  }
+  let saved: { tasks: typeof plan.tasks; changeReason: string } | null = null
+  await page.route('**/api/projects**', async route => {
+    const url = new URL(route.request().url())
+    if (url.pathname === '/api/projects') return route.fulfill({ json: [project] })
+    if (url.pathname === `/api/projects/${projectId}`) return route.fulfill({ json: project })
+    return route.fallback()
+  })
+  await page.route(/\/api\/(?:project-plan-templates|projects\/[^/]+\/plan(?:\/portfolio)?)(?:\?.*)?$/, async route => {
+    const path = new URL(route.request().url()).pathname
+    if (path === '/api/project-plan-templates') return route.fulfill({ json: [] })
+    if (path.endsWith('/portfolio')) return route.fulfill({ json: { rootProjectId: projectId, currentStage: 'Design', completionPercent: 0, laggingProjectCount: 0, riskProjectCount: 0, projects: [] } })
+    if (route.request().method() === 'PUT') {
+      saved = route.request().postDataJSON() as typeof saved
+      return route.fulfill({ json: { ...plan, ...(saved ?? {}), rowVersion: 2 } })
+    }
+    return route.fulfill({ json: plan })
+  })
+  const errors: string[] = []
+  page.on('pageerror', error => errors.push(error.message))
+  page.on('console', message => { if (message.type() === 'error' || message.type() === 'warning') errors.push(message.text()) })
+  await page.setViewportSize({ width: 1988, height: 1114 })
+  await page.goto('/')
+  const login = page.getByLabel('登录PLM')
+  await login.getByRole('textbox', { name: '账号' }).fill('admin')
+  await login.getByRole('textbox', { name: '密码' }).fill('correct-password')
+  await login.getByRole('button', { name: '登录', exact: true }).click()
+  await page.getByRole('button', { name: '项目列表', exact: true }).click()
+  await page.getByRole('button', { name: '进入项目' }).click()
+  await page.getByRole('button', { name: '项目计划', exact: true }).click()
+
+  await expect(page.getByText(/拖动阶段条可整体平移/)).toHaveCount(0)
+  await expect(page.getByText(/保存主项目计划会同步跟随且未批准/)).toHaveCount(0)
+  await expect(page.locator('.pdm-plan-summary')).toContainText('生效信息')
+  await expect(page.locator('.pdm-plan-summary')).toContainText('草稿')
+  await expect(page.getByText('资源冲突', { exact: true })).toHaveCount(0)
+  await expect(page.getByRole('button', { name: '收起阶段', exact: true })).toHaveCount(0)
+  await expect(page.getByRole('button', { name: '折叠列', exact: true })).toHaveCount(0)
+  await page.getByRole('button', { name: '收起全部阶段', exact: true }).click()
+  await expect(page.getByRole('button', { name: '展开全部阶段', exact: true })).toBeVisible()
+  await page.getByRole('button', { name: '展开全部阶段', exact: true }).click()
+  await page.getByRole('button', { name: '折叠信息列', exact: true }).click()
+  await expect(page.getByRole('button', { name: '展开信息列', exact: true })).toBeVisible()
+  await page.getByRole('button', { name: '展开信息列', exact: true }).click()
+  const infoRowHeights = await page.locator('.pdm-gantt-info-row').evaluateAll(rows => rows.map(row => row.getBoundingClientRect().height))
+  const timelineRowHeights = await page.locator('.pdm-gantt-timeline-row').evaluateAll(rows => rows.map(row => row.getBoundingClientRect().height))
+  expect([...new Set(infoRowHeights)]).toEqual([40])
+  expect([...new Set(timelineRowHeights)]).toEqual([40])
+  const stageBars = page.locator('.pdm-gantt-timeline-row.is-stage .pdm-gantt-bar')
+  await expect(stageBars).toHaveCount(2)
+  const boxes = await stageBars.evaluateAll(items => items.map(item => {
+    const rect = item.getBoundingClientRect()
+    return { left: rect.left, right: rect.right }
+  }))
+  expect(boxes[0]!.right).toBeGreaterThan(boxes[1]!.left)
+  const first = await stageBars.first().boundingBox()
+  expect(first).not.toBeNull()
+  await page.mouse.move(first!.x + first!.width / 2, first!.y + first!.height / 2)
+  await page.mouse.down()
+  await page.mouse.move(first!.x + first!.width / 2 + 60, first!.y + first!.height / 2)
+  await page.mouse.up()
+  await expect.poll(() => saved).not.toBeNull()
+  const design = saved!.tasks.find(task => task.id === 'design-task')!
+  const preparation = saved!.tasks.find(task => task.id === 'prepare-task')!
+  expect(design.plannedStart).not.toBe('2026-09-05')
+  expect(preparation.plannedStart).toBe('2026-09-10')
+  expect(preparation.plannedFinish).toBe('2026-09-25')
+  expect(saved!.changeReason).toContain('其他阶段不再保持首尾连续')
+  await expect(page.locator('vite-error-overlay')).toHaveCount(0)
+  expect(errors).toEqual([])
+  await page.screenshot({ path: testInfo.outputPath('project-plan-overlapping-stages.png'), fullPage: false })
+})
+
 test('engineer logs in and reads the API-backed PLM workspace', async ({ page }, testInfo) => {
   await page.setViewportSize({ width: 1920, height: 1080 })
+  const projectTabErrors: string[] = []
+  page.on('pageerror', error => projectTabErrors.push(error.message))
+  page.on('console', message => {
+    if (message.type() === 'error' || message.type() === 'warning') projectTabErrors.push(message.text())
+  })
+  const contentResponses: number[] = []
+  page.on('response', response => {
+    if (response.url().includes('globalStatusContent')) contentResponses.push(response.status())
+  })
   await page.addInitScript(() => {
     Object.defineProperty(window, 'pdmHostMessages', {
       configurable: true,
@@ -217,6 +514,42 @@ test('engineer logs in and reads the API-backed PLM workspace', async ({ page },
   await expect(titlebar.getByRole('button', { name: '消息' })).toBeVisible()
   await expect(titlebar.getByRole('button', { name: '主题' })).toBeVisible()
   await expect(titlebar.getByRole('button', { name: '退出' })).toBeVisible()
+  const idleStatus = titlebar.locator('.pdm-global-status.is-idle')
+  await expect(idleStatus).toBeVisible()
+  await expect(idleStatus.locator('.pdm-global-status__text')).not.toBeEmpty()
+  await expect(idleStatus.locator('.pdm-global-status__source')).not.toBeEmpty()
+  await expect(idleStatus).not.toContainText('UPTON')
+  await idleStatus.click()
+  await expect(page.locator('.pdm-global-status-detail')).toContainText('来源：')
+  await page.screenshot({ path: testInfo.outputPath('global-status-content.png'), fullPage: false })
+  await page.keyboard.press('Escape')
+  await page.setViewportSize({ width: 1285, height: 1114 })
+  const statusGeometry = await page.evaluate(() => {
+    const company = document.querySelector<HTMLElement>('.pdm-tenant-company')?.getBoundingClientRect()
+    const statusElement = document.querySelector<HTMLElement>('.pdm-global-status')
+    const textElement = statusElement?.querySelector<HTMLElement>('.pdm-global-status__text')
+    const sourceElement = statusElement?.querySelector<HTMLElement>('.pdm-global-status__source')
+    const status = statusElement?.getBoundingClientRect()
+    const text = textElement?.getBoundingClientRect()
+    const source = sourceElement?.getBoundingClientRect()
+    return {
+      gap: company && status ? status.left - company.right : -1,
+      overflow: document.documentElement.scrollWidth - window.innerWidth,
+      lineHeight: statusElement ? getComputedStyle(statusElement).lineHeight : '',
+      sourceFontWeight: sourceElement ? getComputedStyle(sourceElement).fontWeight : '',
+      textInside: Boolean(status && text && text.top >= status.top && text.bottom <= status.bottom),
+      sourceInside: Boolean(status && source && source.top >= status.top && source.bottom <= status.bottom),
+    }
+  })
+  expect(Math.abs(statusGeometry.gap - 50)).toBeLessThanOrEqual(1)
+  expect(statusGeometry.overflow).toBeLessThanOrEqual(0)
+  expect(statusGeometry.lineHeight).toBe('20px')
+  expect(statusGeometry.sourceFontWeight).toBe('400')
+  expect(statusGeometry.textInside).toBe(true)
+  expect(statusGeometry.sourceInside).toBe(true)
+  await page.screenshot({ path: testInfo.outputPath('global-status-content-1285.png'), fullPage: false })
+  expect(contentResponses).toContain(200)
+  await page.setViewportSize({ width: 1920, height: 1080 })
   const crmShellLayout = await page.evaluate(() => {
     const sidebar = document.querySelector<HTMLElement>('.pdm-sidebar')
     const brand = document.querySelector<HTMLElement>('.pdm-sidebar__brand')
@@ -261,8 +594,16 @@ test('engineer logs in and reads the API-backed PLM workspace', async ({ page },
 
   await expect(page.locator('.pdm-project-sidebar__summary').getByText('PRJ-REAL-001 · 真实装配项目', { exact: true })).toBeVisible()
   await expect(page.getByRole('banner').getByText('真实工程师', { exact: true })).toBeVisible()
+  await expect(page.locator('.pdm-project-tabs button')).toHaveText(['概览', '文件', '项目计划', '验证计划', '图档', 'BOM', '发布', '备料', '版本', '记录'])
   await page.getByRole('button', { name: '文件', exact: true }).click()
   await expect(page.getByText('项目文件夹', { exact: true })).toBeVisible()
+  await page.screenshot({ path: testInfo.outputPath('project-tabs-overview-file-project-plan-1920.png'), fullPage: false })
+  await page.setViewportSize({ width: 1285, height: 1114 })
+  await expect(page.locator('.pdm-project-tabs button')).toHaveText(['概览', '文件', '项目计划', '验证计划', '图档', 'BOM', '发布', '备料', '版本', '记录'])
+  await page.screenshot({ path: testInfo.outputPath('project-tabs-overview-file-project-plan-1285.png'), fullPage: false })
+  await expect(page.locator('vite-error-overlay')).toHaveCount(0)
+  expect(projectTabErrors).toEqual([])
+  await page.setViewportSize({ width: 1920, height: 1080 })
   await expect(page.getByText('机械图纸', { exact: true })).toBeVisible()
   await page.getByText('PRJ-REAL-001-0', { exact: true }).first().click()
   const fileDetails = page.getByRole('table', { name: '受控图档' })
@@ -481,6 +822,30 @@ test('project numbers remain fully visible at the compact adaptive width', async
   expect(layout.codeScrollWidth).toBeLessThanOrEqual(layout.codeClientWidth)
   expect(layout.tableScrollWidth).toBeLessThanOrEqual(layout.containerClientWidth)
   await page.screenshot({ path: testInfo.outputPath('project-number-compact.png'), fullPage: false })
+})
+
+test('operator columns display the user name instead of the account name', async ({ page }, testInfo) => {
+  const errors: string[] = []
+  page.on('pageerror', error => errors.push(error.message))
+  page.on('console', message => {
+    if (message.type() === 'error' || message.type() === 'warning') errors.push(message.text())
+  })
+  await page.setViewportSize({ width: 1285, height: 1114 })
+  await page.goto('/')
+  const login = page.getByLabel('登录PLM')
+  await login.getByRole('textbox', { name: '账号' }).fill('engineer')
+  await login.getByRole('textbox', { name: '密码' }).fill('correct-password')
+  await login.getByRole('button', { name: '登录', exact: true }).click()
+  await page.getByRole('button', { name: '项目列表', exact: true }).click()
+  await page.getByRole('button', { name: '进入项目' }).click()
+  await page.getByRole('button', { name: '版本', exact: true }).click()
+
+  const versionRow = page.getByRole('row').filter({ hasText: '首次存档' })
+  await expect(versionRow).toContainText('真实工程师')
+  await expect(versionRow).not.toContainText('engineer')
+  await expect(page.locator('vite-error-overlay')).toHaveCount(0)
+  expect(errors).toEqual([])
+  await page.screenshot({ path: testInfo.outputPath('operator-display-name.png'), fullPage: false })
 })
 
 test('administrator switches independent company organization trees', async ({ page }, testInfo) => {

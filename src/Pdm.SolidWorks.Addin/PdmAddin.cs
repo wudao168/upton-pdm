@@ -69,7 +69,7 @@ public sealed class PdmAddin : ISwAddin
     private readonly object checkoutDocumentSync = new object();
     private readonly HashSet<Guid> activeCheckoutDocumentIds = new HashSet<Guid>();
     private readonly Dictionary<Guid, int> checkoutReminderLevels = new Dictionary<Guid, int>();
-    private readonly Dictionary<Guid, HistoricalPartEditContext> historicalPartEditContexts = new Dictionary<Guid, HistoricalPartEditContext>();
+    private readonly Dictionary<Guid, HistoricalEditContext> historicalEditContexts = new Dictionary<Guid, HistoricalEditContext>();
     private DateTime nextCheckoutHeartbeatUtc = DateTime.MinValue;
     private int checkoutHeartbeatSeconds = 180;
     private int checkoutReminderHours = 4;
@@ -204,7 +204,7 @@ public sealed class PdmAddin : ISwAddin
             pendingAssemblyItemRenames.Clear();
             lock (checkoutDocumentSync) activeCheckoutDocumentIds.Clear();
             checkoutReminderLevels.Clear();
-            historicalPartEditContexts.Clear();
+            historicalEditContexts.Clear();
         }
 
         return true;
@@ -867,6 +867,7 @@ public sealed class PdmAddin : ISwAddin
         authenticatedUsername = string.Empty;
         availableProjects = Array.Empty<ProjectDto>();
         userDisplayNames = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        taskPaneControl?.SetUserDisplayNames(userDisplayNames);
         taskPaneControl?.SetAuthenticatedUser(string.Empty, string.Empty);
         taskPaneControl?.SetConnectionState(false, "登录已过期");
         taskPaneControl?.SetCheckoutReminder("PLM登录已过期，请点击右上角“登录”重新登录。", true);
@@ -926,6 +927,16 @@ public sealed class PdmAddin : ISwAddin
             userDisplayNames = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
             LogDiagnostic("RefreshUserDisplayNames", exception);
         }
+
+        taskPaneControl?.SetUserDisplayNames(userDisplayNames);
+    }
+
+    private string ResolveUserDisplayName(string username)
+    {
+        var value = username?.Trim() ?? string.Empty;
+        return userDisplayNames.TryGetValue(value, out var displayName) && !string.IsNullOrWhiteSpace(displayName)
+            ? displayName.Trim()
+            : value;
     }
 
     private async Task LoginRememberedCredentialsAsync()
@@ -1073,7 +1084,7 @@ public sealed class PdmAddin : ISwAddin
     private async void OnRequestReleaseRequested(object sender, CadTreeNodeEventArgs eventArgs)
     {
         if (!eventArgs.Node.DocumentId.HasValue) return;
-        using (var dialog = new LifecycleActionDialog("申请释放编辑权限", string.Concat("当前编辑人员：", eventArgs.Node.CheckedOutBy, "。\r\n请填写申请原因，对方可在客户端待办中处理。"), "发送申请"))
+        using (var dialog = new LifecycleActionDialog("申请释放编辑权限", string.Concat("当前编辑人员：", ResolveUserDisplayName(eventArgs.Node.CheckedOutBy), "。\r\n请填写申请原因，对方可在客户端待办中处理。"), "发送申请"))
         {
             if (dialog.ShowDialog(taskPaneControl) != DialogResult.OK) return;
             try
@@ -1887,7 +1898,7 @@ public sealed class PdmAddin : ISwAddin
             {
                 throw new InvalidOperationException(string.IsNullOrWhiteSpace(drawingNode.CheckedOutBy)
                     ? "请先在设计树中为工程图获取编辑权限，再提交存档。"
-                    : string.Concat("该工程图正在由", drawingNode.CheckedOutBy, "编辑。"));
+                    : string.Concat("该工程图正在由", ResolveUserDisplayName(drawingNode.CheckedOutBy), "编辑。"));
             }
 
             OnCheckInRequested(
@@ -3424,7 +3435,7 @@ public sealed class PdmAddin : ISwAddin
         {
             throw new InvalidOperationException(string.IsNullOrWhiteSpace(drawingNode.CheckedOutBy)
                 ? "该工程图已入库。请先获取工程图的编辑权限，再进行更新。"
-                : string.Concat("该工程图正在由", drawingNode.CheckedOutBy, "编辑。"));
+                : string.Concat("该工程图正在由", ResolveUserDisplayName(drawingNode.CheckedOutBy), "编辑。"));
         }
 
         if ((File.GetAttributes(drawingPath) & FileAttributes.ReadOnly) != 0)
@@ -3987,7 +3998,7 @@ public sealed class PdmAddin : ISwAddin
         {
             throw new InvalidOperationException(string.Equals(node.CheckedOutBy, authenticatedUsername, StringComparison.OrdinalIgnoreCase)
                 ? "当前用户正在编辑该图档，请先提交存档或放弃编辑。"
-                : string.Concat("该图档正在由", node.CheckedOutBy, "编辑，不能更新工作区。"));
+                : string.Concat("该图档正在由", ResolveUserDisplayName(node.CheckedOutBy), "编辑，不能更新工作区。"));
         }
         if (node.IsModifiedInSolidWorks
             || node.WorkState == CadWorkState.ModifiedUnsaved
@@ -4091,6 +4102,7 @@ public sealed class PdmAddin : ISwAddin
         Guid? missingReferenceRecoveryProjectId = null;
         Guid? preparedProjectId = null;
         ControlledOpenManifestDto manifest = null;
+        string historicalOpenRecoveryPath = null;
         try
         {
             var requestsLatestEdit = mode == ControlledOpenMode.LatestEdit;
@@ -4211,6 +4223,7 @@ public sealed class PdmAddin : ISwAddin
 
             if (mode == ControlledOpenMode.SpecificReadOnly)
             {
+                historicalOpenRecoveryPath = (application?.ActiveDoc as IModelDoc2)?.GetPathName() ?? string.Empty;
                 CloseConflictingLoadedDocumentsForHistoricalOpen(manifest, Path.GetDirectoryName(rootPath));
             }
 
@@ -4233,6 +4246,25 @@ public sealed class PdmAddin : ISwAddin
         catch (Exception exception)
         {
             LogDiagnostic("ExecuteControlledOpenAsync", exception);
+            if (!string.IsNullOrWhiteSpace(historicalOpenRecoveryPath) && File.Exists(historicalOpenRecoveryPath))
+            {
+                try
+                {
+                    var restored = OpenOrActivateDocumentOnSolidWorksThread(
+                        historicalOpenRecoveryPath,
+                        ToSolidWorksDocumentType(DocumentKindFromPath(historicalOpenRecoveryPath)),
+                        string.Empty);
+                    if (restored != null)
+                    {
+                        LogOperation(string.Concat("Historical controlled open restored previous document path=", historicalOpenRecoveryPath));
+                        ScheduleTreeRefresh();
+                    }
+                }
+                catch (Exception recoveryException)
+                {
+                    LogDiagnostic("Historical controlled open restore previous document", recoveryException);
+                }
+            }
             var recoveryProjectId = requestedProjectId != Guid.Empty
                 ? requestedProjectId
                 : currentProjectId ?? Guid.Empty;
@@ -4484,6 +4516,12 @@ public sealed class PdmAddin : ISwAddin
             return;
         }
 
+        if (IsHistoricalDerivedPath(currentTree?.FullPath))
+        {
+            await AcquireHistoricalDerivedDocumentsAsync(requestedNodes);
+            return;
+        }
+
         IReadOnlyDictionary<string, RegistrationDecision> registrationDecisions = null;
         var acquireItems = requestedNodes.Select(candidate => new BatchOperationItem(candidate, 0)).ToArray();
         if (eventArgs.UsesCheckedSelection && requestedNodes.Length > 1)
@@ -4580,6 +4618,135 @@ public sealed class PdmAddin : ISwAddin
         }
         catch (Exception exception)
         {
+            ShowError(exception.Message);
+        }
+        finally
+        {
+            Interlocked.Decrement(ref refreshSuppressionDepth);
+            EndWorkspaceOperation();
+            ScheduleTreeRefresh();
+        }
+    }
+
+    private async Task AcquireHistoricalDerivedDocumentsAsync(IReadOnlyCollection<CadTreeNode> requestedNodes)
+    {
+        var manifest = ApplyControlledOpenMetadata(currentTree);
+        if (manifest == null)
+        {
+            ShowError("未找到当前历史派生工作区的受控清单，请重新打开历史版本后重试。");
+            return;
+        }
+        if (!TryBeginWorkspaceOperation("正在获取历史派生图档编辑权限"))
+        {
+            ShowWorkspaceOperationBusy();
+            return;
+        }
+
+        var acquiredDocumentIds = new List<Guid>();
+        Interlocked.Increment(ref refreshSuppressionDepth);
+        try
+        {
+            RefreshLoadedDocumentModificationFlags(currentTree);
+            var filesByDocumentId = manifest.Files.ToDictionary(file => file.DocumentId);
+            var targets = requestedNodes
+                .Where(node => node?.DocumentId.HasValue == true)
+                .GroupBy(node => node.DocumentId.Value)
+                .Select(group => group.First())
+                .ToArray();
+            if (targets.Length == 0 || targets.Any(node => !filesByDocumentId.ContainsKey(node.DocumentId.Value)))
+            {
+                throw new InvalidOperationException("所选图档不属于当前历史派生快照，不能在此工作区获取权限。");
+            }
+
+            var projectDocuments = await apiClient.GetDocumentsAsync(manifest.ProjectId, lifetime.Token);
+            var documentsById = projectDocuments.ToDictionary(document => document.Id);
+            foreach (var target in targets)
+            {
+                if (!documentsById.TryGetValue(target.DocumentId.Value, out var document))
+                {
+                    throw new InvalidOperationException(string.Concat(target.FileName, "不在当前项目或无权访问。"));
+                }
+                if (!string.IsNullOrWhiteSpace(document.CheckedOutBy)
+                    && (document.CheckoutSessionId != checkoutSessionId
+                        || !string.Equals(document.CheckedOutBy, authenticatedUsername, StringComparison.OrdinalIgnoreCase)))
+                {
+                    throw new InvalidOperationException(string.Concat(target.FileName, "正在由", ResolveUserDisplayName(document.CheckedOutBy), "编辑。"));
+                }
+                if (target.IsModifiedInSolidWorks
+                    || target.WorkState == CadWorkState.ModifiedUnsaved
+                    || target.WorkState == CadWorkState.PendingCheckIn)
+                {
+                    throw new InvalidOperationException(string.Concat(target.FileName, "存在未保存修改或待提交内容。"));
+                }
+            }
+
+            foreach (var target in targets)
+            {
+                var document = documentsById[target.DocumentId.Value];
+                if (document.CheckoutSessionId != checkoutSessionId
+                    || !string.Equals(document.CheckedOutBy, authenticatedUsername, StringComparison.OrdinalIgnoreCase))
+                {
+                    document = await apiClient.CheckoutAsync(
+                        target.DocumentId.Value,
+                        checkoutSessionId,
+                        checkoutMachineName,
+                        lifetime.Token);
+                    acquiredDocumentIds.Add(target.DocumentId.Value);
+                    documentsById[target.DocumentId.Value] = document;
+                }
+                TrackCheckoutDocument(document);
+
+                var versions = await apiClient.GetVersionsAsync(target.DocumentId.Value, lifetime.Token);
+                var latest = versions.FirstOrDefault()
+                    ?? throw new InvalidOperationException(string.Concat(target.FileName, "尚无PLM版本。"));
+                var sourceFile = filesByDocumentId[target.DocumentId.Value];
+                var source = versions.FirstOrDefault(version => version.Id == sourceFile.VersionId)
+                    ?? throw new InvalidOperationException(string.Concat(target.FileName, "的历史快照版本已不存在。"));
+                if (source.Id == latest.Id)
+                {
+                    historicalEditContexts.Remove(target.DocumentId.Value);
+                }
+                else
+                {
+                    historicalEditContexts[target.DocumentId.Value] = new HistoricalEditContext(source, latest);
+                }
+            }
+
+            var editableDocumentIds = documentsById.Values
+                .Where(document => document.CheckoutSessionId == checkoutSessionId
+                    && string.Equals(document.CheckedOutBy, authenticatedUsername, StringComparison.OrdinalIgnoreCase))
+                .Select(document => document.Id)
+                .ToArray();
+            controlledWorkspace.ApplyHistoricalDerivedPermissions(manifest, editableDocumentIds);
+            foreach (var target in targets)
+            {
+                var document = documentsById[target.DocumentId.Value];
+                ApplyCheckoutDocumentToMatchingInstances(
+                    EnumerateCadNodes(currentTree).Where(candidate => candidate.DocumentId == target.DocumentId),
+                    document);
+                SetFileReadOnly(target.FullPath, false);
+                EnsureLoadedDocumentEditable(target.FullPath);
+            }
+            taskPaneControl.SetTree(currentTree);
+            LogOperation(string.Concat(
+                "Historical derived child checkout completed files=", targets.Length,
+                " newlyAcquired=", acquiredDocumentIds.Count));
+        }
+        catch (Exception exception)
+        {
+            foreach (var documentId in acquiredDocumentIds.AsEnumerable().Reverse())
+            {
+                try
+                {
+                    var discarded = await apiClient.DiscardCheckoutAsync(documentId, checkoutSessionId, lifetime.Token);
+                    TrackCheckoutDocument(discarded);
+                    historicalEditContexts.Remove(documentId);
+                }
+                catch (Exception rollbackException)
+                {
+                    LogDiagnostic(string.Concat("Historical derived child checkout rollback.", documentId), rollbackException);
+                }
+            }
             ShowError(exception.Message);
         }
         finally
@@ -4700,7 +4867,7 @@ public sealed class PdmAddin : ISwAddin
                 item.Properties == null || item.Properties.Count == 0
                     ? "-"
                     : string.Join("；", item.Properties.Select(pair => string.Concat(pair.Key, "=", pair.Value)).Take(8)),
-                item.RequestedBy,
+                ResolveUserDisplayName(item.RequestedBy),
                 item.RequestedAt.ToLocalTime().ToString("yyyy-MM-dd HH:mm")))
                 .ToArray();
             using (var dialog = new BatchPropertyEditDialog(
@@ -6461,7 +6628,7 @@ public sealed class PdmAddin : ISwAddin
                 if (!string.IsNullOrWhiteSpace(node.CheckedOutBy)
                     && !string.Equals(node.CheckedOutBy, authenticatedUsername, StringComparison.OrdinalIgnoreCase))
                 {
-                    throw new InvalidOperationException(string.Concat(node.FileName, "正在由", node.CheckedOutBy, "编辑，整套获取已停止。"));
+                    throw new InvalidOperationException(string.Concat(node.FileName, "正在由", ResolveUserDisplayName(node.CheckedOutBy), "编辑，整套获取已停止。"));
                 }
 
                 if (IsCheckedOutByCurrentUser(node))
@@ -6570,7 +6737,7 @@ public sealed class PdmAddin : ISwAddin
                     var wasAlreadyCheckedOut = IsCheckedOutByCurrentUser(node);
                     if (wasAlreadyCheckedOut)
                     {
-                        historicalPartEditContexts.Remove(node.DocumentId.Value);
+                        historicalEditContexts.Remove(node.DocumentId.Value);
                         SetFileReadOnly(node.FullPath, false);
                         EnsureLoadedDocumentEditable(node.FullPath);
                         if (!node.IsModifiedInSolidWorks
@@ -6597,7 +6764,7 @@ public sealed class PdmAddin : ISwAddin
                         drawingReviewWritebackId);
                     ApplyCheckoutDocument(node, document);
                     node.WorkState = CadWorkState.Editable;
-                    historicalPartEditContexts.Remove(node.DocumentId.Value);
+                    historicalEditContexts.Remove(node.DocumentId.Value);
                     if (!wasAlreadyCheckedOut)
                     {
                         newlyCheckedOut.Add(node);
@@ -7044,17 +7211,13 @@ public sealed class PdmAddin : ISwAddin
                 file => file.FileName,
                 file => Path.GetFullPath(Path.Combine(historicalDirectory, file.RelativePath ?? file.FileName)),
                 StringComparer.OrdinalIgnoreCase);
-        var loadedDocuments = (application?.GetDocuments() as Array)?.OfType<IModelDoc2>()
-            .Where(document =>
-            {
-                var path = document.GetPathName() ?? string.Empty;
-                return expectedPaths.TryGetValue(Path.GetFileName(path), out var expectedPath)
-                    && !PathsEqual(path, expectedPath);
-            })
-            .ToArray() ?? Array.Empty<IModelDoc2>();
+        var loadedDocuments = CaptureLoadedDocumentSnapshots()
+            .Where(document => expectedPaths.TryGetValue(Path.GetFileName(document.Path), out var expectedPath)
+                && !PathsEqual(document.Path, expectedPath))
+            .ToArray();
         var dirty = loadedDocuments
-            .Where(document => document.GetSaveFlag() && !HasDiscardableReadOnlySaveFlag(document))
-            .Select(document => Path.GetFileName(document.GetPathName()))
+            .Where(document => document.HasUnsavedChanges && !document.HasDiscardableReadOnlySaveFlag)
+            .Select(document => Path.GetFileName(document.Path))
             .ToArray();
         if (dirty.Length > 0)
         {
@@ -7065,8 +7228,8 @@ public sealed class PdmAddin : ISwAddin
         }
 
         var transientReadOnly = loadedDocuments
-            .Where(document => document.GetSaveFlag() && HasDiscardableReadOnlySaveFlag(document))
-            .Select(document => document.GetPathName() ?? string.Empty)
+            .Where(document => document.HasUnsavedChanges && document.HasDiscardableReadOnlySaveFlag)
+            .Select(document => document.Path)
             .ToArray();
         if (transientReadOnly.Length > 0)
         {
@@ -7077,18 +7240,14 @@ public sealed class PdmAddin : ISwAddin
                 string.Join(" | ", transientReadOnly.Take(6))));
         }
 
-        foreach (var document in loadedDocuments.OrderByDescending(item => item.GetType() == (int)swDocumentTypes_e.swDocASSEMBLY))
+        foreach (var document in loadedDocuments.OrderByDescending(item => item.DocumentType == (int)swDocumentTypes_e.swDocASSEMBLY))
         {
-            var path = document.GetPathName() ?? string.Empty;
-            if (FindLoadedDocument(path) != null)
-            {
-                application.CloseDoc(document.GetTitle());
-                LogOperation(string.Concat("Historical controlled open closed conflicting document path=", path));
-            }
+            application.CloseDoc(document.Title);
+            LogOperation(string.Concat("Historical controlled open closed conflicting document path=", document.Path));
         }
 
-        var remaining = (application?.GetDocuments() as Array)?.OfType<IModelDoc2>()
-            .Select(document => document.GetPathName() ?? string.Empty)
+        var remaining = CaptureLoadedDocumentSnapshots()
+            .Select(document => document.Path)
             .FirstOrDefault(path => expectedPaths.TryGetValue(Path.GetFileName(path), out var expectedPath)
                 && !PathsEqual(path, expectedPath));
         if (!string.IsNullOrWhiteSpace(remaining))
@@ -7099,14 +7258,54 @@ public sealed class PdmAddin : ISwAddin
         }
     }
 
-    private static bool HasDiscardableReadOnlySaveFlag(IModelDoc2 document)
+    private LoadedDocumentSnapshot[] CaptureLoadedDocumentSnapshots()
+    {
+        var documents = application?.GetDocuments() as Array;
+        if (documents == null)
+        {
+            return Array.Empty<LoadedDocumentSnapshot>();
+        }
+
+        var snapshots = new List<LoadedDocumentSnapshot>();
+        foreach (var item in documents)
+        {
+            if (!(item is IModelDoc2 document))
+            {
+                continue;
+            }
+
+            try
+            {
+                var path = document.GetPathName() ?? string.Empty;
+                if (string.IsNullOrWhiteSpace(path))
+                {
+                    continue;
+                }
+
+                var hasUnsavedChanges = document.GetSaveFlag();
+                snapshots.Add(new LoadedDocumentSnapshot(
+                    path,
+                    document.GetTitle(),
+                    document.GetType(),
+                    hasUnsavedChanges,
+                    hasUnsavedChanges && HasDiscardableReadOnlySaveFlag(document, path)));
+            }
+            catch (COMException exception) when (exception.ErrorCode == unchecked((int)0x80010108))
+            {
+                LogOperation("Historical controlled open ignored disconnected document proxy while refreshing loaded documents");
+            }
+        }
+
+        return snapshots.ToArray();
+    }
+
+    private static bool HasDiscardableReadOnlySaveFlag(IModelDoc2 document, string path)
     {
         if (document == null || !document.IsOpenedReadOnly())
         {
             return false;
         }
 
-        var path = document.GetPathName() ?? string.Empty;
         return !string.IsNullOrWhiteSpace(path)
             && File.Exists(path)
             && (File.GetAttributes(path) & FileAttributes.ReadOnly) != 0;
@@ -7599,7 +7798,7 @@ public sealed class PdmAddin : ISwAddin
                 && !IsCheckedOutByCurrentUser(node)
                 && !CanRecoverCurrentCheckoutSession(node))
             {
-                throw new InvalidOperationException(string.Concat(node.FileName, "正在由", node.CheckedOutBy, "编辑，整套提交已停止。"));
+                throw new InvalidOperationException(string.Concat(node.FileName, "正在由", ResolveUserDisplayName(node.CheckedOutBy), "编辑，整套提交已停止。"));
             }
 
             if (!node.DocumentId.HasValue
@@ -8131,7 +8330,7 @@ public sealed class PdmAddin : ISwAddin
         {
             throw new InvalidOperationException(string.IsNullOrWhiteSpace(node.CheckedOutBy)
                 ? "尚未获取编辑权限。"
-                : string.Concat("正在由", node.CheckedOutBy, "编辑。"));
+                : string.Concat("正在由", ResolveUserDisplayName(node.CheckedOutBy), "编辑。"));
         }
 
         if (string.IsNullOrWhiteSpace(node.FullPath) || !File.Exists(node.FullPath))
@@ -8187,7 +8386,7 @@ public sealed class PdmAddin : ISwAddin
                 : await Task.Run(() => ComputeFileHash(node.FullPath), cancellationToken);
             var fileMatchesLatest = !string.IsNullOrWhiteSpace(node.LatestStoredSha256)
                 && VersionMatchesLocalFile(latest, node.FullPath, localSha256);
-            var historicalEditMatchesLatest = HistoricalPartEditMatchesLatest(node, latest, node.FullPath, localSha256);
+            var historicalEditMatchesLatest = HistoricalEditMatchesLatest(node, latest, node.FullPath, localSha256);
             LogOperation(string.Concat(
                 "Batch check-in change detection path=", node.FullPath,
                 " fileMatches=", fileMatchesLatest,
@@ -8253,7 +8452,7 @@ public sealed class PdmAddin : ISwAddin
                 && !referenceChanged
                 && ((!string.IsNullOrWhiteSpace(node.LatestStoredSha256)
                         && VersionMatchesLocalFile(latest, documentPath, localSha256))
-                    || HistoricalPartEditMatchesLatest(node, latest, documentPath, localSha256)))
+                    || HistoricalEditMatchesLatest(node, latest, documentPath, localSha256)))
             {
                 await CompleteUnchangedEditAsync(node, documentPath, latest, projectId, cancellationToken);
                 return new BatchNodeCheckInResult(false, null);
@@ -8288,7 +8487,7 @@ public sealed class PdmAddin : ISwAddin
                 node.DocumentId.Value,
                 projectId,
                 node,
-                BuildHistoricalPartChangeNote(node, changeNote),
+                BuildHistoricalChangeNote(node, changeNote),
                 storedFile,
                 modelProperties,
                 checkoutSessionId,
@@ -8303,12 +8502,12 @@ public sealed class PdmAddin : ISwAddin
                 " projectRoot=", isProjectRoot,
                 " elapsedMs=", registerTimer.ElapsedMilliseconds));
             ApplyCheckedInDocumentToMatchingInstances(node, checkIn.Document, checkIn.Version);
-            historicalPartEditContexts.Remove(node.DocumentId.Value);
+            historicalEditContexts.Remove(node.DocumentId.Value);
             if (!openedForBatch && document != null)
             {
                 ProtectLoadedDocument(documentPath);
             }
-            RememberControlledVersionIdentity(documentPath, node.DocumentId.Value, projectId, checkIn.Version);
+            RememberControlledVersionIdentityAndManifest(documentPath, node.DocumentId.Value, projectId, checkIn.Version);
             LogOperation(string.Concat(
                 "Batch check-in file completed path=", node.FullPath,
                 " elapsedMs=", operationTimer.ElapsedMilliseconds));
@@ -8346,9 +8545,9 @@ public sealed class PdmAddin : ISwAddin
             node.LatestStoredSha256,
             cancellationToken);
         ApplyCheckedInDocumentToMatchingInstances(node, unchanged, latest);
-        historicalPartEditContexts.Remove(node.DocumentId.Value);
+        historicalEditContexts.Remove(node.DocumentId.Value);
         ProtectLoadedDocument(activePath);
-        RememberControlledVersionIdentity(activePath, node.DocumentId.Value, projectId, latest);
+        RememberControlledVersionIdentityAndManifest(activePath, node.DocumentId.Value, projectId, latest);
     }
 
     private void OnCheckInRequested(object sender, CadTreeNodeEventArgs eventArgs)
@@ -8537,7 +8736,7 @@ public sealed class PdmAddin : ISwAddin
                     {
                         instance.WorkState = CadWorkState.None;
                     }
-                    historicalPartEditContexts.Remove(document.Id);
+                    historicalEditContexts.Remove(document.Id);
                 }
                 catch (Exception exception)
                 {
@@ -8686,7 +8885,7 @@ public sealed class PdmAddin : ISwAddin
             var currentSha256 = ComputeFileHash(activePath);
             var fileMatchesLatest = !string.IsNullOrWhiteSpace(node.LatestStoredSha256)
                 && VersionMatchesLocalFile(latestVersion, activePath, currentSha256);
-            var historicalEditMatchesLatest = HistoricalPartEditMatchesLatest(node, latestVersion, activePath, currentSha256);
+            var historicalEditMatchesLatest = HistoricalEditMatchesLatest(node, latestVersion, activePath, currentSha256);
             LogOperation(string.Concat(
                 "CheckIn change detection path=", activePath,
                 " fileMatches=", fileMatchesLatest,
@@ -8709,9 +8908,9 @@ public sealed class PdmAddin : ISwAddin
             {
                 var unchanged = await apiClient.CompleteEditWithoutChangesAsync(node.DocumentId.Value, checkoutSessionId, node.LatestStoredSha256, lifetime.Token);
                 ApplyCheckedInDocumentToMatchingInstances(node, unchanged, latestVersion);
-                historicalPartEditContexts.Remove(node.DocumentId.Value);
+                historicalEditContexts.Remove(node.DocumentId.Value);
                 ProtectLoadedDocument(activePath);
-                RememberControlledVersionIdentity(activePath, node.DocumentId.Value, projectId, latestVersion);
+                RememberControlledVersionIdentityAndManifest(activePath, node.DocumentId.Value, projectId, latestVersion);
                 taskPaneControl.SetTree(currentTree);
                 MessageBox.Show(taskPaneControl, string.Concat("未检测到变更，已结束编辑，版本仍为", node.Revision, "。"), "UPLM", MessageBoxButtons.OK, MessageBoxIcon.Information);
                 return;
@@ -8738,7 +8937,7 @@ public sealed class PdmAddin : ISwAddin
                 node.DocumentId.Value,
                 projectId,
                 node,
-                BuildHistoricalPartChangeNote(node, changeNote),
+                BuildHistoricalChangeNote(node, changeNote),
                 storedFile,
                 modelProperties,
                 checkoutSessionId,
@@ -8748,9 +8947,9 @@ public sealed class PdmAddin : ISwAddin
                 null,
                 lifetime.Token);
             ApplyCheckedInDocumentToMatchingInstances(node, result.Document, result.Version);
-            historicalPartEditContexts.Remove(node.DocumentId.Value);
+            historicalEditContexts.Remove(node.DocumentId.Value);
             ProtectLoadedDocument(activePath);
-            RememberControlledVersionIdentity(activePath, node.DocumentId.Value, projectId, result.Version);
+            RememberControlledVersionIdentityAndManifest(activePath, node.DocumentId.Value, projectId, result.Version);
             taskPaneControl.SetTree(currentTree);
             var bomNotice = BuildBomUpdateNotice(result, true);
             MessageBox.Show(
@@ -8799,14 +8998,175 @@ public sealed class PdmAddin : ISwAddin
         DocumentVersionDto version)
     {
         if (version == null || string.IsNullOrWhiteSpace(path) || !File.Exists(path)) return;
+        var localSha256 = VersionSourceSha256(version);
+        if (string.IsNullOrWhiteSpace(localSha256))
+        {
+            localSha256 = ComputeFileHash(path);
+        }
         PdmDocumentIdentityStore.TryWriteControlledVersion(
             path,
             documentId,
             projectId,
             version.Id,
             version.Revision?.Display,
-            version.Sha256,
+            localSha256,
             new FileInfo(path).Length);
+    }
+
+    private void RememberControlledVersionIdentityAndManifest(
+        string path,
+        Guid documentId,
+        Guid projectId,
+        DocumentVersionDto version)
+    {
+        RememberControlledVersionIdentity(path, documentId, projectId, version);
+        if (version == null || string.IsNullOrWhiteSpace(path) || !File.Exists(path)) return;
+
+        var revision = version.Revision?.Display ?? string.Empty;
+        var localSha256 = VersionSourceSha256(version);
+        if (string.IsNullOrWhiteSpace(localSha256))
+        {
+            localSha256 = ComputeFileHash(path);
+        }
+        var fileLength = new FileInfo(path).Length;
+        var fullPath = Path.GetFullPath(path);
+        foreach (var context in controlledOpenManifests
+            .Where(pair => pair.Value?.ProjectId == projectId && IsPathWithinDirectory(fullPath, pair.Key))
+            .ToArray())
+        {
+            foreach (var file in (context.Value.Files ?? new List<ControlledOpenFileDto>())
+                .Where(file => file.DocumentId == documentId))
+            {
+                file.VersionId = version.Id;
+                file.Revision = revision;
+                file.Sha256 = localSha256;
+                file.FileLength = fileLength;
+            }
+            if (context.Value.RootDocumentId == documentId)
+            {
+                context.Value.RootVersionId = version.Id;
+                context.Value.RootRevision = revision;
+            }
+        }
+
+        var projectCode = availableProjects.FirstOrDefault(project => project.Id == projectId)?.Code;
+        if (string.IsNullOrWhiteSpace(projectCode)) return;
+        try
+        {
+            var cachedPath = CacheCheckedInVersionInProjectView(
+                WorkspaceSettingsStore.GetWorkspaceRoot(),
+                projectCode,
+                path,
+                documentId,
+                projectId,
+                version);
+            if (!string.IsNullOrWhiteSpace(cachedPath) && !PathsEqual(cachedPath, path))
+            {
+                LogOperation(string.Concat("Checked-in file cached in project workspace source=", path, " target=", cachedPath));
+            }
+        }
+        catch (Exception exception)
+        {
+            // The PLM version is already committed. A local cache failure must not report the
+            // completed archive as failed or overwrite an existing working file.
+            LogDiagnostic(string.Concat("Cache checked-in file in project workspace.", Path.GetFileName(path)), exception);
+        }
+    }
+
+    private static string CacheCheckedInVersionInProjectView(
+        string workspaceRoot,
+        string projectCode,
+        string sourcePath,
+        Guid documentId,
+        Guid projectId,
+        DocumentVersionDto version)
+    {
+        if (version == null
+            || string.IsNullOrWhiteSpace(workspaceRoot)
+            || string.IsNullOrWhiteSpace(projectCode)
+            || string.IsNullOrWhiteSpace(sourcePath)
+            || !File.Exists(sourcePath))
+        {
+            return string.Empty;
+        }
+
+        var source = Path.GetFullPath(sourcePath);
+        var projectDirectory = Path.GetFullPath(
+            ControlledWorkspaceManager.ProjectViewDirectory(workspaceRoot, projectCode));
+        var target = Path.GetFullPath(Path.Combine(projectDirectory, Path.GetFileName(source)));
+        if (!IsPathWithinDirectory(target, projectDirectory))
+        {
+            return string.Empty;
+        }
+
+        var sourceSha256 = ComputeFileHash(source);
+        var expectedSha256 = VersionSourceSha256(version);
+        if (!string.IsNullOrWhiteSpace(expectedSha256)
+            && !string.Equals(sourceSha256, expectedSha256, StringComparison.OrdinalIgnoreCase))
+        {
+            return string.Empty;
+        }
+
+        var created = false;
+        var temporaryPath = string.Empty;
+        try
+        {
+            if (!PathsEqual(source, target))
+            {
+                Directory.CreateDirectory(projectDirectory);
+                if (File.Exists(target))
+                {
+                    if (!string.Equals(ComputeFileHash(target), sourceSha256, StringComparison.OrdinalIgnoreCase))
+                    {
+                        return string.Empty;
+                    }
+                }
+                else
+                {
+                    temporaryPath = string.Concat(target, ".", Guid.NewGuid().ToString("N"), ".pdm-cache");
+                    File.Copy(source, temporaryPath, false);
+                    if (!string.Equals(ComputeFileHash(temporaryPath), sourceSha256, StringComparison.OrdinalIgnoreCase))
+                    {
+                        return string.Empty;
+                    }
+                    File.Move(temporaryPath, target);
+                    temporaryPath = string.Empty;
+                    created = true;
+                }
+            }
+
+            File.SetAttributes(target, File.GetAttributes(target) | FileAttributes.ReadOnly);
+            if (!PdmDocumentIdentityStore.TryWriteControlledVersion(
+                target,
+                documentId,
+                projectId,
+                version.Id,
+                version.Revision?.Display,
+                sourceSha256,
+                new FileInfo(target).Length))
+            {
+                if (created)
+                {
+                    File.SetAttributes(target, FileAttributes.Normal);
+                    File.Delete(target);
+                }
+                return string.Empty;
+            }
+            return target;
+        }
+        finally
+        {
+            if (!string.IsNullOrWhiteSpace(temporaryPath) && File.Exists(temporaryPath))
+            {
+                try
+                {
+                    File.SetAttributes(temporaryPath, FileAttributes.Normal);
+                    File.Delete(temporaryPath);
+                }
+                catch (IOException) { }
+                catch (UnauthorizedAccessException) { }
+            }
+        }
     }
 
     private static string CreateCheckInUploadCopy(IModelDoc2 document, string sourcePath, Guid documentId)
@@ -9139,6 +9499,30 @@ public sealed class PdmAddin : ISwAddin
         }
     }
 
+    private static bool IsHistoricalDerivedPath(string path)
+    {
+        if (string.IsNullOrWhiteSpace(path))
+        {
+            return false;
+        }
+
+        try
+        {
+            var workspaceRoot = Path.GetFullPath(WorkspaceSettingsStore.GetWorkspaceRoot())
+                .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
+                + Path.DirectorySeparatorChar;
+            var fullPath = Path.GetFullPath(path);
+            return fullPath.StartsWith(workspaceRoot, StringComparison.OrdinalIgnoreCase)
+                && fullPath.IndexOf(
+                    string.Concat(Path.DirectorySeparatorChar, ".uplm", Path.DirectorySeparatorChar, "Derived", Path.DirectorySeparatorChar),
+                    StringComparison.OrdinalIgnoreCase) >= 0;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
     private static bool IsReadOnlyPreviewPath(string path) =>
         IsHistoricalPreviewPath(path) || IsLatestReadOnlyPreviewPath(path);
 
@@ -9431,24 +9815,19 @@ public sealed class PdmAddin : ISwAddin
         }
         if (node == null || !node.DocumentId.HasValue)
         {
-            ShowError("当前设计树中未找到该零件，请刷新后重试。");
+            ShowError("当前设计树中未找到该图档，请刷新后重试。");
             return;
         }
-        if (node.Kind != CadDocumentKind.Part)
+        if (node.Kind != CadDocumentKind.Part && node.Kind != CadDocumentKind.Assembly)
         {
-            ShowError("当前仅支持零件基于历史版本获取编辑。");
-            return;
-        }
-        if (node.IsReadOnlyPreview || IsReadOnlyPreviewContext(node))
-        {
-            ShowError("只读预览目录不能基于历史版本编辑，请先切换到当前工作区。");
+            ShowError("仅零件和装配体支持基于历史版本获取编辑。");
             return;
         }
         if (node.DrawingReviewLocked
             || string.Equals(node.LifecycleState, "InReview", StringComparison.OrdinalIgnoreCase)
             || string.Equals(node.LifecycleState, "Obsolete", StringComparison.OrdinalIgnoreCase))
         {
-            ShowError(node.DrawingReviewLocked ? "图纸审核中的零件不能获取编辑权限。" : "审批中或已作废的零件不能获取编辑权限。");
+            ShowError(node.DrawingReviewLocked ? "图纸审核中的图档不能获取编辑权限。" : "审批中或已作废的图档不能获取编辑权限。");
             return;
         }
 
@@ -9464,12 +9843,9 @@ public sealed class PdmAddin : ISwAddin
             return;
         }
 
-        var stagedPath = string.Empty;
-        var reopenPath = string.Empty;
-        var reopenKind = CadDocumentKind.Other;
-        var reopenConfiguration = string.Empty;
-        string initialLocalSha256 = null;
-        var localFileExisted = false;
+        var derivedRootPath = string.Empty;
+        var recoveryPath = string.Empty;
+        ControlledOpenManifestDto manifest = null;
         var checkoutAcquired = false;
         var editPrepared = false;
         var successMessage = string.Empty;
@@ -9479,13 +9855,13 @@ public sealed class PdmAddin : ISwAddin
             RefreshLoadedDocumentModificationFlags(currentTree);
             var projectDocuments = await apiClient.GetDocumentsAsync(projectId.Value, lifetime.Token);
             var serverDocument = projectDocuments.FirstOrDefault(document => document.Id == node.DocumentId.Value)
-                ?? throw new InvalidOperationException("当前项目中未找到该零件，请刷新设计树后重试。");
+                ?? throw new InvalidOperationException("当前项目中未找到该图档，请刷新设计树后重试。");
             ApplyCheckoutDocument(node, serverDocument);
             ValidateUpdateLatestNode(node);
 
             var versions = await apiClient.GetVersionsAsync(node.DocumentId.Value, lifetime.Token);
             var latest = versions.FirstOrDefault()
-                ?? throw new InvalidOperationException("该零件尚无可选择的PLM版本。");
+                ?? throw new InvalidOperationException("该图档尚无可选择的PLM版本。");
             var selected = versions.FirstOrDefault(version => version.Id == eventArgs.Version.Id)
                 ?? throw new InvalidOperationException("所选版本已不存在，请刷新版本列表后重试。");
             if (selected.Id == latest.Id)
@@ -9494,99 +9870,118 @@ public sealed class PdmAddin : ISwAddin
             }
             ApplyLatestVersion(node, latest);
 
-            DocumentVersionDto current = null;
-            localFileExisted = File.Exists(node.FullPath);
-            if (localFileExisted)
-            {
-                initialLocalSha256 = await Task.Run(() => ComputeFileHash(node.FullPath), lifetime.Token);
-                current = versions.FirstOrDefault(version => VersionMatchesLocalFile(version, node.FullPath, initialLocalSha256));
-                if (current == null)
-                {
-                    throw new InvalidOperationException(string.Concat(
-                        node.FileName,
-                        "的本地内容无法对应任何PLM历史版本，可能存在待提交修改。为避免覆盖，已停止获取编辑。"));
-                }
-            }
-
             var selectedRevision = selected.Revision?.Display ?? "-";
             var latestRevision = latest.Revision?.Display ?? "-";
-            var currentRevision = current?.Revision?.Display ?? "文件缺失";
-            var confirmation = string.Concat(
-                "将零件", node.FileName, "的本地工作版本从", currentRevision, "切换到", selectedRevision, "并获取独占编辑权限。\r\n",
-                "服务器最新版本为", latestRevision, "；提交时将从服务器最新版本继续升版（例如最新W4则生成W5），不会覆盖历史记录。\r\n",
-                "若提交时内容与服务器最新版本完全一致，则只结束编辑、不生成新版本。\r\n",
-                "原工作文件将自动备份。是否继续？");
+            var confirmation = node.Kind == CadDocumentKind.Assembly
+                ? string.Concat(
+                    "将基于装配体", node.FileName, "的历史版本", selectedRevision, "创建独立派生工作区。\r\n",
+                    "整套引用将固定为该历史快照；仅根装配体获取编辑权限，子件保持只读，需要修改时再单独获取。\r\n",
+                    "服务器最新版本为", latestRevision, "；提交将从最新版本继续升版，不覆盖任何历史记录。是否继续？")
+                : string.Concat(
+                    "将基于零件", node.FileName, "的历史版本", selectedRevision, "创建独立派生工作区并获取编辑权限。\r\n",
+                    "服务器最新版本为", latestRevision, "；提交将从最新版本继续升版，不覆盖任何历史记录。\r\n",
+                    "若提交时内容与服务器最新版本完全一致，则只结束编辑、不生成新版本。是否继续？");
             if (MessageBox.Show(taskPaneControl, confirmation, "基于历史版本获取编辑", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) != DialogResult.Yes)
             {
                 return;
             }
 
-            var needsReplacement = current == null || current.Id != selected.Id;
-            if (needsReplacement)
+            manifest = await apiClient.CreateControlledOpenManifestAsync(
+                node.DocumentId.Value,
+                selected.Id,
+                false,
+                false,
+                lifetime.Token);
+            if (manifest == null
+                || manifest.RootDocumentId != node.DocumentId.Value
+                || manifest.RootVersionId != selected.Id)
             {
-                stagedPath = await apiClient.DownloadVersionToWorkspaceStageAsync(
-                    node.DocumentId.Value,
-                    selected.Id,
-                    node.FileName,
-                    selected.Sha256,
-                    lifetime.Token);
-
-                var rootPath = currentTree?.FullPath ?? string.Empty;
-                var rootLoaded = !string.IsNullOrWhiteSpace(rootPath) && FindLoadedDocument(rootPath) != null;
-                var selectedLoaded = FindLoadedDocument(node.FullPath) != null;
-                if (rootLoaded)
-                {
-                    reopenPath = rootPath;
-                    reopenKind = currentTree.Kind;
-                    reopenConfiguration = currentTree.Configuration;
-                }
-                else if (selectedLoaded)
-                {
-                    reopenPath = node.FullPath;
-                    reopenKind = node.Kind;
-                    reopenConfiguration = node.Configuration;
-                }
-
-                EnsureWorkspaceDocumentsAreSaved();
-                if (localFileExisted != File.Exists(node.FullPath)
-                    || localFileExisted && !string.Equals(initialLocalSha256, ComputeFileHash(node.FullPath), StringComparison.OrdinalIgnoreCase))
-                {
-                    throw new IOException("本地工作文件在版本准备期间发生变化，已停止获取编辑。");
-                }
+                throw new InvalidDataException("PLM返回的历史版本清单与所选图档不一致，已停止获取编辑。");
+            }
+            if (manifest.ProjectId != projectId.Value)
+            {
+                throw new InvalidOperationException("历史版本所属项目与当前项目不一致，已停止获取编辑。");
+            }
+            if (manifest.Files == null || manifest.Files.Count == 0)
+            {
+                throw new InvalidDataException("PLM返回的历史版本清单为空。");
+            }
+            if (manifest.Warnings?.Count > 0)
+            {
+                throw new InvalidDataException(string.Concat(
+                    "历史版本引用快照不完整：",
+                    string.Join("；", manifest.Warnings.Take(5)),
+                    manifest.Warnings.Count > 5 ? "；其余问题请在PLM中处理后重试" : string.Empty));
+            }
+            var duplicateFileName = manifest.Files
+                .Where(file => !string.IsNullOrWhiteSpace(file.FileName))
+                .GroupBy(file => file.FileName, StringComparer.OrdinalIgnoreCase)
+                .FirstOrDefault(group => group.Count() > 1);
+            if (duplicateFileName != null)
+            {
+                throw new InvalidDataException(string.Concat(
+                    "历史版本包含重名引用“", duplicateFileName.Key, "”，不能安全派生编辑。请先消除重名或引用冲突。"));
             }
 
-            var checkout = await apiClient.CheckoutAsync(node.DocumentId.Value, checkoutSessionId, checkoutMachineName, lifetime.Token);
+            var manifestDocumentIds = new HashSet<Guid>(manifest.Files.Select(file => file.DocumentId));
+            var unavailableDocument = manifestDocumentIds.FirstOrDefault(documentId => projectDocuments.All(document => document.Id != documentId));
+            if (unavailableDocument != Guid.Empty)
+            {
+                throw new InvalidOperationException("历史版本包含当前项目之外或无权访问的引用，已停止获取编辑。");
+            }
+            var existingCheckout = projectDocuments.FirstOrDefault(document =>
+                manifestDocumentIds.Contains(document.Id) && !string.IsNullOrWhiteSpace(document.CheckedOutBy));
+            if (existingCheckout != null)
+            {
+                throw new InvalidOperationException(string.Concat(
+                    existingCheckout.FileName ?? "清单内图档",
+                    "正在由", ResolveUserDisplayName(existingCheckout.CheckedOutBy), "编辑，请先完成或放弃该编辑后重试。"));
+            }
+            var pendingLocalNode = EnumerateCadNodes(currentTree).FirstOrDefault(candidate =>
+                candidate.DocumentId.HasValue
+                && manifestDocumentIds.Contains(candidate.DocumentId.Value)
+                && (candidate.IsModifiedInSolidWorks
+                    || candidate.WorkState == CadWorkState.ModifiedUnsaved
+                    || candidate.WorkState == CadWorkState.PendingCheckIn));
+            if (pendingLocalNode != null)
+            {
+                throw new InvalidOperationException(string.Concat(
+                    pendingLocalNode.FileName, "存在未保存修改或待提交内容，已停止创建历史派生工作区。"));
+            }
+
+            derivedRootPath = await controlledWorkspace.PrepareHistoricalDerivedCopyAsync(manifest, lifetime.Token);
+            recoveryPath = (application?.ActiveDoc as IModelDoc2)?.GetPathName() ?? string.Empty;
+            CloseConflictingLoadedDocumentsForHistoricalOpen(manifest, Path.GetDirectoryName(derivedRootPath));
+
+            var checkout = await apiClient.CheckoutAsync(
+                node.DocumentId.Value,
+                checkoutSessionId,
+                checkoutMachineName,
+                lifetime.Token);
             checkoutAcquired = true;
+            TrackCheckoutDocument(checkout);
+            derivedRootPath = controlledWorkspace.ApplyHistoricalDerivedPermissions(
+                manifest,
+                new[] { node.DocumentId.Value });
+            RememberControlledOpenManifest(manifest, Path.GetDirectoryName(derivedRootPath));
+            RememberExplicitProjectPath(derivedRootPath, manifest.ProjectId);
+            historicalEditContexts[node.DocumentId.Value] = new HistoricalEditContext(selected, latest);
+            editPrepared = true;
 
-            if (needsReplacement)
-            {
-                var rootPath = currentTree?.FullPath ?? string.Empty;
-                CloseDocumentsForWorkspaceUpdate(new[] { node.FullPath }, rootPath);
-                ApplyWorkspaceUpdates(new[] { new WorkspaceUpdatePlan(node, selected, stagedPath) });
-            }
-
-            ApplySelectedWorkingVersion(node, selected, latest);
             var matchingNodes = EnumerateCadNodes(currentTree)
-                .Where(candidate => PathsEqual(candidate.FullPath, node.FullPath))
+                .Where(candidate => candidate.DocumentId == node.DocumentId)
                 .ToArray();
             ApplyCheckoutDocumentToMatchingInstances(matchingNodes, checkout);
-            foreach (var matchingNode in matchingNodes)
-            {
-                matchingNode.WorkState = CadWorkState.Editable;
-            }
-            SetFileReadOnly(node.FullPath, false);
-            EnsureLoadedDocumentEditable(node.FullPath);
-            historicalPartEditContexts[node.DocumentId.Value] = new HistoricalPartEditContext(selected, latest);
-            editPrepared = true;
-            taskPaneControl.SetTree(currentTree);
             LogOperation(string.Concat(
-                "Historical part edit acquired document=", node.DocumentId.Value,
+                "Historical derived edit acquired document=", node.DocumentId.Value,
+                " kind=", node.Kind,
                 " source=", selectedRevision,
                 " latest=", latestRevision,
-                " path=", node.FullPath));
+                " path=", derivedRootPath,
+                " files=", manifest.Files.Count));
             successMessage = string.Concat(
-                "已基于历史版本", selectedRevision, "获取编辑权限。\r\n",
-                "设计树版本：", selectedRevision, " / ", latestRevision, "；提交后按最新版本继续升版。");
+                "已基于历史版本", selectedRevision, "创建独立编辑副本；提交后从最新版本", latestRevision, "继续升版。",
+                node.Kind == CadDocumentKind.Assembly ? " 根装配体可编辑，子件保持只读。" : string.Empty);
         }
         catch (Exception exception)
         {
@@ -9596,47 +9991,54 @@ public sealed class PdmAddin : ISwAddin
                 try
                 {
                     var discarded = await apiClient.DiscardCheckoutAsync(node.DocumentId.Value, checkoutSessionId, lifetime.Token);
+                    TrackCheckoutDocument(discarded);
                     ApplyCheckoutDocumentToMatchingInstances(
                         EnumerateCadNodes(currentTree).Where(candidate => candidate.DocumentId == node.DocumentId),
                         discarded);
-                    ProtectLoadedDocument(node.FullPath);
+                    if (manifest != null)
+                    {
+                        controlledWorkspace.ApplyHistoricalDerivedPermissions(manifest, Array.Empty<Guid>());
+                    }
                 }
                 catch (Exception rollbackException)
                 {
-                    LogDiagnostic("Historical part edit checkout rollback", rollbackException);
+                    LogDiagnostic("Historical derived edit checkout rollback", rollbackException);
                 }
             }
-            historicalPartEditContexts.Remove(node.DocumentId.Value);
+            historicalEditContexts.Remove(node.DocumentId.Value);
+            if (!string.IsNullOrWhiteSpace(recoveryPath) && File.Exists(recoveryPath))
+            {
+                try
+                {
+                    OpenOrActivateDocumentOnSolidWorksThread(
+                        recoveryPath,
+                        ToSolidWorksDocumentType(DocumentKindFromPath(recoveryPath)),
+                        string.Empty);
+                }
+                catch (Exception recoveryException)
+                {
+                    LogDiagnostic("Historical derived edit restore previous document", recoveryException);
+                }
+            }
             ShowError(exception.Message);
         }
         finally
         {
-            DeleteWorkspaceStage(stagedPath);
-            if (!string.IsNullOrWhiteSpace(reopenPath) && File.Exists(reopenPath))
-            {
-                OpenOrActivateDocumentOnSolidWorksThread(reopenPath, ToSolidWorksDocumentType(reopenKind), reopenConfiguration);
-            }
-            if (editPrepared)
-            {
-                try
-                {
-                    SetFileReadOnly(node.FullPath, false);
-                    EnsureLoadedDocumentEditable(node.FullPath);
-                }
-                catch (Exception exception)
-                {
-                    LogDiagnostic("Historical part edit editable state", exception);
-                    successMessage = string.Empty;
-                    ShowError(string.Concat("已获取编辑权限，但SolidWorks未能切换为可编辑状态：", exception.Message));
-                }
-            }
             Interlocked.Decrement(ref refreshSuppressionDepth);
             EndWorkspaceOperation();
             ScheduleTreeRefresh();
-            if (!string.IsNullOrWhiteSpace(successMessage))
-            {
-                MessageBox.Show(taskPaneControl, successMessage, "UPLM", MessageBoxButtons.OK, MessageBoxIcon.Information);
-            }
+        }
+
+        if (editPrepared && !string.IsNullOrWhiteSpace(derivedRootPath))
+        {
+            taskPaneControl.SetCheckoutReminder(successMessage, false);
+            QueueOpenDocument(
+                derivedRootPath,
+                DocumentKindFromPath(derivedRootPath),
+                string.Empty,
+                false,
+                manifest.ProjectId,
+                manifest);
         }
     }
 
@@ -10840,7 +11242,7 @@ public sealed class PdmAddin : ISwAddin
         return property.Value;
     }
 
-    private bool HistoricalPartEditMatchesLatest(
+    private bool HistoricalEditMatchesLatest(
         CadTreeNode node,
         DocumentVersionDto latest,
         string fullPath,
@@ -10848,7 +11250,7 @@ public sealed class PdmAddin : ISwAddin
     {
         if (node?.Kind != CadDocumentKind.Part
             || !node.DocumentId.HasValue
-            || !historicalPartEditContexts.TryGetValue(node.DocumentId.Value, out var context)
+            || !historicalEditContexts.TryGetValue(node.DocumentId.Value, out var context)
             || !HistoricalVersionContentMatches(context.SourceVersion, latest))
         {
             return false;
@@ -10857,11 +11259,11 @@ public sealed class PdmAddin : ISwAddin
         return VersionMatchesLocalFile(context.SourceVersion, fullPath, localSha256);
     }
 
-    private string BuildHistoricalPartChangeNote(CadTreeNode node, string changeNote)
+    private string BuildHistoricalChangeNote(CadTreeNode node, string changeNote)
     {
         if (node == null
             || !node.DocumentId.HasValue
-            || !historicalPartEditContexts.TryGetValue(node.DocumentId.Value, out var context))
+            || !historicalEditContexts.TryGetValue(node.DocumentId.Value, out var context))
         {
             return changeNote ?? string.Empty;
         }
@@ -10936,7 +11338,7 @@ public sealed class PdmAddin : ISwAddin
             ? string.Concat(
                 "当前图档尚未获取编辑权限，不能", operation,
                 "。请先点击“获取”取得编辑权限，完成编辑并保存后再提交；整套装配请使用“整体”中的“获取最新并获取权限”。")
-            : string.Concat("当前图档正在由", node.CheckedOutBy, "编辑，不能", operation, "。"));
+            : string.Concat("当前图档正在由", ResolveUserDisplayName(node.CheckedOutBy), "编辑，不能", operation, "。"));
         return false;
     }
 
@@ -11206,6 +11608,29 @@ public sealed class PdmAddin : ISwAddin
         public FileAttributes? OriginalAttributes { get; set; }
     }
 
+    private sealed class LoadedDocumentSnapshot
+    {
+        public LoadedDocumentSnapshot(
+            string path,
+            string title,
+            int documentType,
+            bool hasUnsavedChanges,
+            bool hasDiscardableReadOnlySaveFlag)
+        {
+            Path = path;
+            Title = title;
+            DocumentType = documentType;
+            HasUnsavedChanges = hasUnsavedChanges;
+            HasDiscardableReadOnlySaveFlag = hasDiscardableReadOnlySaveFlag;
+        }
+
+        public string Path { get; }
+        public string Title { get; }
+        public int DocumentType { get; }
+        public bool HasUnsavedChanges { get; }
+        public bool HasDiscardableReadOnlySaveFlag { get; }
+    }
+
     private sealed class LatestWorkspacePreparation
     {
         public LatestWorkspacePreparation(
@@ -11229,9 +11654,9 @@ public sealed class PdmAddin : ISwAddin
         public string SkipReason { get; }
     }
 
-    private sealed class HistoricalPartEditContext
+    private sealed class HistoricalEditContext
     {
-        public HistoricalPartEditContext(DocumentVersionDto sourceVersion, DocumentVersionDto latestVersion)
+        public HistoricalEditContext(DocumentVersionDto sourceVersion, DocumentVersionDto latestVersion)
         {
             SourceVersion = sourceVersion;
             LatestVersion = latestVersion;

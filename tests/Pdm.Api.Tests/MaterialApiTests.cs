@@ -24,6 +24,50 @@ public sealed class MaterialApiTests : IClassFixture<PdmApiFactory>
     }
 
     [Fact]
+    public async Task MaterialWorkflowApi_PendingMasterAndCreationSortAndCompletePreview()
+    {
+        using var scope = factory.Services.CreateScope();
+        var service = scope.ServiceProvider.GetRequiredService<MaterialService>();
+        var repository = scope.ServiceProvider.GetRequiredService<IMaterialRepository>();
+        var marker = $"WORKFLOW-{Guid.NewGuid():N}";
+        var rows = new List<Upton.Pdm.Domain.PdmMaterial>();
+        for (var index = 0; index < 3; index++)
+        {
+            var created = await service.CreateAsync(new(null, $"{marker}-{index}", Upton.Pdm.Domain.MaterialKind.Electrical,
+                Upton.Pdm.Domain.MaterialSupplyMode.Purchase, "001", $"{marker}-MODEL-{index}", null, null, "TEST-BRAND", null, null, "统一备注",
+                CategoryCode: "0101"), "admin", Upton.Pdm.Domain.UserRole.Administrator, default);
+            rows.Add(await repository.UpdateMaterialAsync(created with { CreatedAt = DateTimeOffset.UnixEpoch.AddDays(index) }, created.RowVersion, default));
+        }
+        foreach (var direction in new[] { "asc", "desc" })
+        {
+            var response = await client.GetAsync($"/api/materials/page?query={marker}&page=2&pageSize=1&createdAtOrder={direction}");
+            response.EnsureSuccessStatusCode();
+            using var page = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+            Assert.Equal(3, page.RootElement.GetProperty("total").GetInt32());
+            Assert.Equal(rows[1].Id.ToString(), page.RootElement.GetProperty("items")[0].GetProperty("id").GetString());
+        }
+        var invalid = await client.GetAsync("/api/materials/page?createdAtOrder=invalid");
+        Assert.Equal(HttpStatusCode.BadRequest, invalid.StatusCode);
+        using var pending = JsonDocument.Parse(await client.GetStringAsync("/api/materials/pending-approval"));
+        Assert.All(rows, row => Assert.Contains(pending.RootElement.EnumerateArray(), item => item.GetProperty("id").GetString() == row.Id.ToString()));
+        var approved = await client.PostAsync($"/api/materials/{rows[0].Id}/approve?expectedRowVersion={rows[0].RowVersion}", null);
+        approved.EnsureSuccessStatusCode();
+        using var result = JsonDocument.Parse(await approved.Content.ReadAsStringAsync());
+        var task = result.RootElement.GetProperty("task");
+        Assert.Equal(rows[0].Name, task.GetProperty("materialName").GetString());
+        Assert.Equal(rows[0].Specification, task.GetProperty("specification").GetString());
+        Assert.Equal(rows[0].Brand, task.GetProperty("brand").GetString());
+        Assert.Equal(rows[0].Remark, task.GetProperty("remark").GetString());
+        Assert.Equal("PreviewReady", task.GetProperty("status").GetString());
+        using var refreshed = JsonDocument.Parse(await client.GetStringAsync("/api/materials/pending-approval"));
+        Assert.DoesNotContain(refreshed.RootElement.EnumerateArray(), item => item.GetProperty("id").GetString() == rows[0].Id.ToString());
+        using var tasks = JsonDocument.Parse(await client.GetStringAsync("/api/material-sync-tasks"));
+        var reloaded = Assert.Single(tasks.RootElement.EnumerateArray(), item => item.GetProperty("id").GetString() == task.GetProperty("id").GetString());
+        Assert.Equal(rows[0].Specification, reloaded.GetProperty("specification").GetString());
+        Assert.Equal(rows[0].Brand, reloaded.GetProperty("brand").GetString());
+    }
+
+    [Fact]
     public async Task U9IntegrationApi_SavesSecretAndTestsOAuthWithoutReturningToken()
     {
         var settingsResponse = await client.PutAsJsonAsync("/api/u9-material-integration", new
@@ -181,7 +225,7 @@ public sealed class MaterialApiTests : IClassFixture<PdmApiFactory>
         U9BomComponentReference ExistingComponent(int sequence, string itemCode, decimal usageQty) =>
             new(sequence, $"id-{sequence}", itemCode, "测试子件", null, usageQty, "001", "个", 1m,
                 0, true, null, null, null, null, 0, 0, false, false)
-            { UsageQtyType = 1, IsSpecialUseItem = true, IsIssueOrgFixed = true, IssueOrgCode = "7" };
+            { UsageQtyType = 1, IsSpecialUseItem = true, IsIssueOrgFixed = true, IssueOrgCode = "7", IsCharge = true, CostElementCode = "No101" };
 
         async Task<JsonDocument> PreviewAsync(object command)
         {
@@ -494,7 +538,7 @@ public sealed class MaterialApiTests : IClassFixture<PdmApiFactory>
                     ["Effective.IsEffective"] = "true", ["CostCurrency.Code"] = "C001",
                     ["InventoryInfo.PurchaseControlMode"] = "1", ["InventoryInfo.TurnOverRate"] = "0",
                     ["InventoryInfo.LotControlMode"] = "2", ["InventoryInfo.IsBalanceByProject"] = "true",
-                    ["InventoryInfo.IsInvCalculateBySeiban"] = "true", ["MrpInfo.MRPPlanningType"] = "0",
+                    ["InventoryInfo.IsInvCalculateBySeiban"] = "true", ["MrpInfo.MRPPlanningType"] = "1",
                     ["MrpInfo.ForecastContorlType"] = "1", ["MrpInfo.IsTraceRequirement"] = "true",
                     ["MrpInfo.IsControlByDC"] = "true", ["MrpInfo.DemandRule"] = "0",
                     ["MfgInfo.IsInheritBomMasterNo"] = "true", ["MfgInfo.DesignationRule"] = "1",

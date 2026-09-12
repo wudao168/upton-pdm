@@ -3,7 +3,7 @@ import { ElMessage } from '../statusMessage'
 import { ElMessageBox } from 'element-plus'
 import { ChevronDown, ChevronRight, FolderKanban, FolderPlus, Search } from '@lucide/vue'
 import { computed, reactive, ref, watch } from 'vue'
-import type { CreateProjectInput, CreateSubprojectInput, MainProjectStaffingInput, OrganizationDirectory, PdmCustomer, PdmUser, ProjectNumberingOptions, ProjectSummary, UpdateProjectInput } from '../types'
+import type { CreateProjectInput, CreateSubprojectInput, MainProjectStaffingInput, OrganizationDirectory, PdmCustomer, PdmUser, ProjectCopyOptionsInput, ProjectCopyPreview, ProjectCopyResult, ProjectNumberingOptions, ProjectSummary, UpdateProjectInput } from '../types'
 
 const props = defineProps<{
   projects: ProjectSummary[]
@@ -22,6 +22,8 @@ const props = defineProps<{
   onCreateSubproject: (parentProjectId: string, input: CreateSubprojectInput) => Promise<ProjectSummary>
   onUpdateProject: (projectId: string, input: UpdateProjectInput) => Promise<ProjectSummary>
   onDeleteProject: (projectId: string) => Promise<void>
+  onPreviewProjectCopy: (projectId: string, input: ProjectCopyOptionsInput) => Promise<ProjectCopyPreview>
+  onCopyProjectContent: (projectId: string, input: ProjectCopyOptionsInput) => Promise<ProjectCopyResult>
   onUpdateExecutionUnit: (projectId: string, executionUnitId: string) => Promise<ProjectSummary>
   onUpdateMainStaffing: (projectId: string, input: MainProjectStaffingInput) => Promise<ProjectSummary>
   onUpdateDesigners: (projectId: string, designers: string[]) => Promise<ProjectSummary>
@@ -29,7 +31,7 @@ const props = defineProps<{
 }>()
 
 const emit = defineEmits<{ open: [projectId: string] }>()
-type ProjectAction = 'edit' | 'delete' | 'configure-staffing' | 'create-child' | 'assign-designers'
+type ProjectAction = 'edit' | 'delete' | 'configure-staffing' | 'create-child' | 'assign-designers' | 'copy-content'
 const dialogOpen = ref(false)
 const editDialogOpen = ref(false)
 const editProject = ref<ProjectSummary | null>(null)
@@ -47,6 +49,13 @@ const designerDraft = ref<string[]>([])
 const childManagerDialogOpen = ref(false)
 const childManagerProject = ref<ProjectSummary | null>(null)
 const childManagerDraft = ref('')
+const copyDialogOpen = ref(false)
+const copyTarget = ref<ProjectSummary | null>(null)
+const copyPreview = ref<ProjectCopyPreview | null>(null)
+const copyPreviewPending = ref(false)
+const copyInput = reactive<ProjectCopyOptionsInput>({
+  sourceProjectId: '', copyModels: true, copyDrawings: true, copyBom: true, copyValidationItems: true, folderIds: null,
+})
 const expanded = ref(new Set<string>())
 const projectQuery = ref('')
 const hierarchyFilter = ref<'all' | 'parent' | 'child'>('all')
@@ -77,6 +86,9 @@ function projectDesignLeads(project: ProjectSummary) {
 
 const rootProjects = computed(() => props.projects.filter(item => !item.parentProjectId).sort(compareProjectCodeDescending))
 const activeCustomers = computed(() => props.customers.filter(item => item.isActive))
+const copySourceProjects = computed(() => props.projects
+  .filter(item => item.id !== copyTarget.value?.id && item.canReadContent)
+  .sort(compareProjectCodeDescending))
 const responsibleOptions = computed(() => [...new Set(props.projects.flatMap(item => [item.primaryProjectManager, ...projectDesignLeads(item), ...item.collaborativeProjectManagers, ...item.designers]).filter((item): item is string => Boolean(item)))].sort((left, right) => userDisplayName(left).localeCompare(userDisplayName(right), 'zh-CN')))
 const executionUnitOptions = computed(() => [...new Set(props.projects.map(item => item.executionUnitName).filter((item): item is string => Boolean(item)))].sort((left, right) => left.localeCompare(right, 'zh-CN')))
 const projectManagerOptions = computed(() => [...new Set(props.projects.flatMap(item => [item.primaryProjectManager, ...item.collaborativeProjectManagers]).filter((item): item is string => Boolean(item)))].sort((left, right) => userDisplayName(left).localeCompare(userDisplayName(right), 'zh-CN')))
@@ -456,6 +468,64 @@ async function deleteProject(project: ProjectSummary) {
   }
 }
 
+function openCopyDialog(project: ProjectSummary) {
+  copyTarget.value = project
+  copyPreview.value = null
+  copyInput.sourceProjectId = ''
+  copyInput.copyModels = true
+  copyInput.copyDrawings = true
+  copyInput.copyBom = true
+  copyInput.copyValidationItems = true
+  copyInput.folderIds = null
+  copyDialogOpen.value = true
+}
+
+function formatCopyBytes(value: number) {
+  if (value < 1024) return `${value} B`
+  if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`
+  if (value < 1024 * 1024 * 1024) return `${(value / 1024 / 1024).toFixed(1)} MB`
+  return `${(value / 1024 / 1024 / 1024).toFixed(2)} GB`
+}
+
+async function refreshCopyPreview(resetFolders = false) {
+  if (!copyTarget.value || !copyInput.sourceProjectId) {
+    copyPreview.value = null
+    return
+  }
+  copyPreviewPending.value = true
+  try {
+    const preview = await props.onPreviewProjectCopy(copyTarget.value.id, {
+      ...copyInput,
+      folderIds: resetFolders ? null : [...(copyInput.folderIds ?? [])],
+    })
+    copyPreview.value = preview
+    if (resetFolders) copyInput.folderIds = preview.folders.filter(folder => folder.defaultSelected).map(folder => folder.id)
+  } catch (error) {
+    copyPreview.value = null
+    ElMessage.error(error instanceof Error ? error.message : '复制范围预检失败')
+  } finally {
+    copyPreviewPending.value = false
+  }
+}
+
+async function executeProjectCopy() {
+  if (!copyTarget.value || !copyPreview.value?.canExecute || !copyInput.sourceProjectId) return
+  const source = props.projects.find(item => item.id === copyInput.sourceProjectId)
+  try {
+    await ElMessageBox.confirm(
+      `确认将“${source?.code ?? '源项目'}”的所选最新内容复制到已创建项目“${copyTarget.value.code}”吗？\n\n新图档将获得新的受控身份并从 W1 开始；不会覆盖目标已有内容。验证计划只复制检查项目，不复制附件、审批、执行记录和结果。`,
+      '确认复制项目内容',
+      { type: 'warning', confirmButtonText: '确认复制', cancelButtonText: '取消' },
+    )
+    const result = await props.onCopyProjectContent(copyTarget.value.id, { ...copyInput, folderIds: [...(copyInput.folderIds ?? [])] })
+    copyDialogOpen.value = false
+    ElMessage.success(`复制完成：图档 ${result.documentCount}，BOM ${result.bomItemCount}，验证检查项 ${result.validationItemCount}，项目文件 ${result.projectFileCount}`)
+  } catch (error) {
+    if (error === 'cancel' || error === 'close') return
+    ElMessage.error(error instanceof Error ? error.message : '项目内容复制失败')
+  }
+}
+
 function projectManagerText(project: ProjectSummary) {
   const managers = [project.primaryProjectManager, ...project.collaborativeProjectManagers].filter((item): item is string => Boolean(item))
   return managers.length ? [...new Set(managers)].map(item => userDisplayName(item)).join('、') : '待分配'
@@ -481,6 +551,7 @@ function handleProjectAction(project: ProjectSummary, action: ProjectAction) {
   else if (action === 'configure-staffing') openStaffingDialog(project)
   else if (action === 'create-child') openChildDialog(project)
   else if (action === 'assign-designers') openDesignerDialog(project)
+  else if (action === 'copy-content') openCopyDialog(project)
 }
 </script>
 
@@ -517,7 +588,7 @@ function handleProjectAction(project: ProjectSummary, action: ProjectAction) {
               <td><button v-if="row.depth === 0 && canManageMainStaffing(row.project)" type="button" class="pdm-project-assignment-button" :aria-label="`配置主设 ${row.project.code}`" title="点击配置主设" @click="openStaffingDialog(row.project)"><span>{{ designOwnerText(row.project) }}</span></button><button v-else-if="row.depth > 0 && row.project.canAssignDesigners" type="button" class="pdm-project-assignment-button" :aria-label="`分配工程师 ${row.project.code}`" title="点击分配执行工程师" @click="openDesignerDialog(row.project)"><span>{{ designOwnerText(row.project) }}</span></button><div v-else class="pdm-project-cell-text" :title="designOwnerText(row.project)">{{ designOwnerText(row.project) }}</div></td>
               <td><span class="pdm-status" :class="row.project.stage === '进行中' ? 'is-ok' : 'is-warn'">{{ row.project.stage }}</span></td>
               <td class="pdm-project-order-date">{{ row.project.signedDate || '—' }}</td>
-              <td><el-dropdown :aria-label="`操作项目${row.project.code}`" trigger="click" placement="bottom-end" popper-class="pdm-project-action-menu" @command="handleProjectAction(row.project, $event)"><button type="button" class="pdm-project-action-trigger" :aria-label="`操作项目${row.project.code}`">操作<ChevronDown :size="13" /></button><template #dropdown><el-dropdown-menu><el-dropdown-item v-if="canEdit" command="edit">编辑项目</el-dropdown-item><el-dropdown-item v-if="row.depth === 0 && canManageMainStaffing(row.project)" command="configure-staffing">配置分工</el-dropdown-item><el-dropdown-item v-if="row.depth === 0 && canCreateSubproject && row.project.deviceModel" command="create-child">创建设备子项目</el-dropdown-item><el-dropdown-item v-if="row.project.canAssignDesigners" command="assign-designers">分配执行工程师</el-dropdown-item><el-dropdown-item v-if="canDelete" command="delete" divided>删除项目</el-dropdown-item></el-dropdown-menu></template></el-dropdown></td>
+              <td><el-dropdown :aria-label="`操作项目${row.project.code}`" trigger="click" placement="bottom-end" popper-class="pdm-project-action-menu" @command="handleProjectAction(row.project, $event)"><button type="button" class="pdm-project-action-trigger" :aria-label="`操作项目${row.project.code}`">操作<ChevronDown :size="13" /></button><template #dropdown><el-dropdown-menu><el-dropdown-item v-if="canEdit" command="edit">编辑项目</el-dropdown-item><el-dropdown-item v-if="canCreate" command="copy-content">从现有项目复制内容</el-dropdown-item><el-dropdown-item v-if="row.depth === 0 && canManageMainStaffing(row.project)" command="configure-staffing">配置分工</el-dropdown-item><el-dropdown-item v-if="row.depth === 0 && canCreateSubproject && row.project.deviceModel" command="create-child">创建设备子项目</el-dropdown-item><el-dropdown-item v-if="row.project.canAssignDesigners" command="assign-designers">分配执行工程师</el-dropdown-item><el-dropdown-item v-if="canDelete" command="delete" divided>删除项目</el-dropdown-item></el-dropdown-menu></template></el-dropdown></td>
             </tr>
           </tbody>
         </table>
@@ -566,6 +637,34 @@ function handleProjectAction(project: ProjectSummary, action: ProjectAction) {
       <label class="pdm-dialog-field">执行事业部<el-select v-model="executionUnitId" filterable style="width:100%"><el-option v-for="unit in executionUnitCandidates.filter(item => item.organizationId === executionProject?.organizationId)" :key="unit.id" :label="unit.name" :value="unit.id" :disabled="unit.canManufacture !== true" /></el-select></label>
       <p class="pdm-counter-note">由系统管理员或拥有“分配执行事业部”权限的计划人员操作。更换事业部会清空项目经理、主设和子项目工程师。</p>
       <template #footer><button type="button" class="pdm-secondary-action" :disabled="pending" @click="executionDialogOpen=false">取消</button><button type="button" class="pdm-primary-action" :disabled="pending" @click="saveExecutionUnit">确认分配</button></template>
+    </el-dialog>
+
+    <el-dialog v-model="copyDialogOpen" :title="`从现有项目复制内容 · ${copyTarget?.code ?? ''}`" width="720px" :close-on-click-modal="false">
+      <div class="pdm-project-staffing-form" aria-label="复制项目内容设置">
+        <label class="pdm-dialog-field">目标项目<el-input :model-value="`${copyTarget?.code ?? ''} · ${copyTarget?.name ?? ''}`" disabled /></label>
+        <label class="pdm-dialog-field">源项目<el-select v-model="copyInput.sourceProjectId" filterable placeholder="选择已有项目" style="width:100%" @change="refreshCopyPreview(true)"><el-option v-for="item in copySourceProjects" :key="item.id" :label="`${item.code} · ${item.name}`" :value="item.id" /></el-select></label>
+        <div class="pdm-dialog-field">
+          <span>默认复制内容</span>
+          <el-checkbox v-model="copyInput.copyModels" @change="refreshCopyPreview()">最新 3D 图档</el-checkbox>
+          <el-checkbox v-model="copyInput.copyDrawings" @change="refreshCopyPreview()">最新 2D 图档</el-checkbox>
+          <el-checkbox v-model="copyInput.copyBom" @change="refreshCopyPreview()">BOM</el-checkbox>
+          <el-checkbox v-model="copyInput.copyValidationItems" @change="refreshCopyPreview()">验证计划检查项目</el-checkbox>
+        </div>
+        <div v-if="copyPreview" class="pdm-dialog-field">
+          <span>其他项目文件夹（仅“气路时序”默认勾选）</span>
+          <el-checkbox-group v-model="copyInput.folderIds" @change="refreshCopyPreview()">
+            <div v-for="folder in copyPreview.folders" :key="folder.id"><el-checkbox :value="folder.id">{{ folder.path }}（{{ folder.fileCount }} 个文件）</el-checkbox></div>
+          </el-checkbox-group>
+        </div>
+        <p v-if="copyPreviewPending" class="pdm-counter-note">正在检查源文件、目标空白状态和权限…</p>
+        <template v-else-if="copyPreview">
+          <p class="pdm-counter-note">预检范围：3D {{ copyPreview.modelCount }}，2D {{ copyPreview.drawingCount }}，BOM {{ copyPreview.bomItemCount }}，验证检查项 {{ copyPreview.validationItemCount }}，项目文件 {{ copyPreview.projectFileCount }}；共 {{ formatCopyBytes(copyPreview.totalBytes) }}。</p>
+          <p v-for="reason in copyPreview.blockingReasons" :key="reason" class="pdm-counter-note is-warning">不能复制：{{ reason }}</p>
+          <p v-for="warning in copyPreview.warnings" :key="warning" class="pdm-counter-note">提示：{{ warning }}</p>
+        </template>
+        <p v-else class="pdm-counter-note">目标项目必须先创建。选择源项目后，系统会检查目标是否已有同类内容；复制不会覆盖已有内容。</p>
+      </div>
+      <template #footer><button type="button" class="pdm-secondary-action" :disabled="pending" @click="copyDialogOpen=false">取消</button><button type="button" class="pdm-primary-action" :disabled="pending || copyPreviewPending || !copyPreview?.canExecute" @click="executeProjectCopy">{{ pending ? '正在复制…' : '确认复制' }}</button></template>
     </el-dialog>
 
     <el-dialog v-model="staffingDialogOpen" :title="`配置主项目分工 · ${staffingProject?.code ?? ''}`" width="620px" :close-on-click-modal="false">

@@ -90,6 +90,92 @@ public sealed class MaterialServiceTests
     }
 
     [Fact]
+    public async Task MaterialPage_PinsActiveDraftsNewestFirstBeforePaginationAndUnpinsApproved()
+    {
+        var service = CreateService(out var repository);
+        var rows = new List<PdmMaterial>();
+        for (var index = 0; index < 5; index++)
+        {
+            var created = await service.CreateAsync(new(
+                null, $"置顶验证{index}", MaterialKind.Electrical, MaterialSupplyMode.Purchase, "001",
+                $"PIN-{index}", null, null, "PIN", null, null, null, CategoryCode: "0101"),
+                "admin", UserRole.Administrator, default);
+            rows.Add(await repository.UpdateMaterialAsync(created with
+            {
+                CreatedAt = DateTimeOffset.Parse("2026-09-01T00:00:00Z").AddDays(index),
+                ApprovalStatus = index is 2 or 3 ? MaterialApprovalStatus.Approved : MaterialApprovalStatus.Draft,
+                IsRecommended = index == 2,
+                IsArchived = index == 4
+            }, created.RowVersion, default));
+        }
+
+        var first = await repository.ListMaterialPageAsync("置顶验证", null, "PIN", true, 1, 2, default);
+        Assert.Equal(5, first.Total);
+        Assert.Equal(new[] { rows[1].Id, rows[0].Id }, first.Items.Select(item => item.Id));
+        var second = await repository.ListMaterialPageAsync("置顶验证", null, "PIN", true, 2, 2, default);
+        Assert.Equal(new[] { rows[2].Id, rows[3].Id }, second.Items.Select(item => item.Id));
+
+        await repository.UpdateMaterialAsync(rows[1] with { ApprovalStatus = MaterialApprovalStatus.Approved }, rows[1].RowVersion, default);
+        var refreshed = await repository.ListMaterialPageAsync("置顶验证", null, "PIN", false, 1, 2, default);
+        Assert.Equal(4, refreshed.Total);
+        Assert.Equal(new[] { rows[0].Id, rows[2].Id }, refreshed.Items.Select(item => item.Id));
+    }
+
+    [Fact]
+    public async Task MaterialPage_CreationOrderSortsAcrossPagesAndDefaultRestoresDraftPriority()
+    {
+        var service = CreateService(out var repository);
+        var rows = new List<PdmMaterial>();
+        for (var index = 0; index < 4; index++)
+        {
+            var item = await service.CreateAsync(new(null, $"日期排序{index}", MaterialKind.Electrical, MaterialSupplyMode.Purchase, "001",
+                $"DATE-{index}", null, null, "DATE", null, null, null, CategoryCode: "0101"), "admin", UserRole.Administrator, default);
+            rows.Add(await repository.UpdateMaterialAsync(item with { CreatedAt = DateTimeOffset.UnixEpoch.AddDays(index),
+                ApprovalStatus = index == 1 ? MaterialApprovalStatus.Draft : MaterialApprovalStatus.Approved }, item.RowVersion, default));
+        }
+        foreach (var direction in new[] { "asc", "desc" })
+        {
+            var first = await service.ListMaterialPageAsync("日期排序", null, "DATE", false, 1, 2, "admin", UserRole.Administrator, default, direction);
+            var second = await service.ListMaterialPageAsync("日期排序", null, "DATE", false, 2, 2, "admin", UserRole.Administrator, default, direction);
+            Assert.Equal((direction == "asc" ? rows : rows.AsEnumerable().Reverse()).Select(r => r.Id), first.Items.Concat(second.Items).Select(r => r.Id));
+        }
+        var reset = await service.ListMaterialPageAsync("日期排序", null, null, false, 1, 2, "admin", UserRole.Administrator, default);
+        Assert.Equal(rows[1].Id, reset.Items[0].Id);
+        await Assert.ThrowsAsync<PdmRuleException>(() => service.ListMaterialPageAsync(null, null, null, false, 1, 50, "admin", UserRole.Administrator, default, "DROP TABLE"));
+    }
+
+    [Fact]
+    public async Task PendingMasterMaterials_ExcludeArchivedApprovedAndApplicationDraftsAndEnrichPreview()
+    {
+        var service = CreateService(out var repository);
+        var rows = new List<PdmMaterial>();
+        for (var index = 0; index < 5; index++)
+        {
+            var item = await service.CreateAsync(new(null, $"主档待审{index}", MaterialKind.Electrical, MaterialSupplyMode.Purchase, "001",
+                $"PENDING-{index}", null, null, "TEST", null, null, "待审备注", CategoryCode: "0101"), "admin", UserRole.Administrator, default);
+            rows.Add(await repository.UpdateMaterialAsync(item with { IsArchived = index == 1,
+                ApprovalStatus = index == 2 ? MaterialApprovalStatus.Approved : MaterialApprovalStatus.Draft,
+                SourceBomItemId = index == 4 ? Guid.NewGuid() : null }, item.RowVersion, default));
+        }
+        await repository.CreateMaterialCodeApplicationAsync(new(Guid.NewGuid(), ProjectId, null, MaterialCodeApplicationStatus.Pending,
+            "admin", DateTimeOffset.UtcNow, null, null, null, rows[3].Id, rows[3].MaterialCode, 1, ProjectBomHeaderKind.Master), default);
+        var pending = await service.ListPendingMasterMaterialsAsync("admin", UserRole.Administrator, default);
+        Assert.Equal(rows[0].Id, Assert.Single(pending).Id);
+        var approved = await service.ApproveAsync(rows[0].Id, rows[0].RowVersion, "admin", UserRole.Administrator, default);
+        Assert.Equal(rows[0].Name, approved.Task.MaterialName);
+        Assert.Equal(rows[0].MaterialCode, approved.Task.MaterialCode);
+        Assert.Equal(rows[0].Specification, approved.Task.Specification);
+        Assert.Equal(rows[0].Brand, approved.Task.Brand);
+        Assert.Equal(rows[0].Remark, approved.Task.Remark);
+        Assert.Equal(MaterialSyncStatus.PreviewReady, approved.Task.Status);
+        Assert.Empty(await service.ListPendingMasterMaterialsAsync("admin", UserRole.Administrator, default));
+        var task = Assert.Single(await repository.ListSyncTasksAsync(default));
+        Assert.Equal(approved.Task.Specification, task.Specification);
+        Assert.Equal(approved.Task.Brand, task.Brand);
+        Assert.Equal(approved.Task.Remark, task.Remark);
+    }
+
+    [Fact]
     public async Task Approval_UsesConfigured0101RuleAndCreatesDeterministicPreviewTask()
     {
         var service = CreateService(out var materials);
@@ -128,7 +214,7 @@ public sealed class MaterialServiceTests
         Assert.Equal(0, row.GetProperty("InventoryInfo").GetProperty("TurnOverRate").GetInt32());
         Assert.Equal(-1, row.GetProperty("InventoryInfo").GetProperty("ReserveMode").GetInt32());
         Assert.Equal(-1, row.GetProperty("InventoryInfo").GetProperty("SupplyMethod").GetInt32());
-        Assert.Equal(0, row.GetProperty("MrpInfo").GetProperty("MRPPlanningType").GetInt32());
+        Assert.Equal(1, row.GetProperty("MrpInfo").GetProperty("MRPPlanningType").GetInt32());
         Assert.False(row.TryGetProperty("InventoryPlanningMethod", out _));
         Assert.False(row.TryGetProperty("MRPPlanningType", out _));
         Assert.False(row.TryGetProperty("Weight", out _));
@@ -1508,6 +1594,53 @@ public sealed class MaterialServiceTests
         return CreateService(out materials, out _);
     }
 
+    [Theory]
+    [InlineData(1)]
+    [InlineData(1000)]
+    [InlineData(1001)]
+    public async Task LatestU9Number_UsesFirstPageWithAdvancingCodeCursor(int count)
+    {
+        var service = CreateService(out var materials, out var client);
+        client.UseReferenceCursor = true;
+        client.ExpireNextReferenceQuery = true;
+        for (var i = 1; i <= count; i++)
+        {
+            var code = $"0102{(1_000_000 + i):D7}";
+            client.ItemsByCode[code] = new($"u9-{i}", code, code, null);
+        }
+
+        await service.SynchronizeActiveCategoryCountersFromU9Async("system", default);
+
+        var category = (await materials.ListCategoriesAsync(true, default)).Single(item => item.Code == "0102");
+        Assert.Equal(1_000_000 + count, category.CurrentSequence);
+        if (count >= 1000)
+            Assert.Contains(client.ReferencePayloads, payload => JsonDocument.Parse(payload).RootElement
+                .GetProperty("ReferenceDefaultFilter").GetString()!.Contains("Code >"));
+        Assert.All(client.ReferencePayloads, payload =>
+            Assert.Equal(0, JsonDocument.Parse(payload).RootElement.GetProperty("PageIndex").GetInt32()));
+        Assert.Equal(2, client.AuthenticationCount);
+        Assert.Empty(await materials.ListSyncTasksAsync(default));
+    }
+
+    [Fact]
+    public async Task LatestU9Number_RejectsRepeatedPageWithoutAdvancingCounter()
+    {
+        var service = CreateService(out var materials, out var client);
+        client.UseReferenceCursor = true;
+        client.IgnoreReferenceCursor = true;
+        var before = (await materials.ListCategoriesAsync(true, default)).Single(item => item.Code == "0102").CurrentSequence;
+        for (var i = 1; i <= 1000; i++)
+        {
+            var code = $"0102{(1_000_000 + i):D7}";
+            client.ItemsByCode[code] = new($"u9-{i}", code, code, null);
+        }
+        var exception = await Assert.ThrowsAsync<PdmRuleException>(() =>
+            service.SynchronizeActiveCategoryCountersFromU9Async("system", default));
+        Assert.Contains("未遵守料号游标条件", exception.Message);
+        Assert.Equal(before, (await materials.ListCategoriesAsync(true, default)).Single(item => item.Code == "0102").CurrentSequence);
+        Assert.Empty(await materials.ListSyncTasksAsync(default));
+    }
+
     private static MaterialService CreateService(out InMemoryMaterialRepository materials, out AvailableCodeClient u9Client)
     {
         return CreateService(out materials, out _, out u9Client);
@@ -1558,6 +1691,8 @@ public sealed class MaterialServiceTests
         public int AuthenticationCount { get; private set; }
         public int UomQueryCount { get; private set; }
         public bool ExpireNextReferenceQuery { get; set; }
+        public bool UseReferenceCursor { get; set; }
+        public bool IgnoreReferenceCursor { get; set; }
         public U9BusinessBatchResult DeleteResult { get; set; } = new(0, null, [new(true, null, null, null)]);
         public bool DeleteRemovesItem { get; set; } = true;
         public string LastPostPath { get; private set; } = string.Empty;
@@ -1614,7 +1749,25 @@ public sealed class MaterialServiceTests
                 ExpireNextReferenceQuery = false;
                 return Task.FromResult(new U9CustomerQueryResult(402, "token已过期", [], 0));
             }
-            var references = ItemsByCode.Values
+            var items = ItemsByCode.Values.AsEnumerable();
+            if (UseReferenceCursor)
+            {
+                using var document = JsonDocument.Parse(payloadJson);
+                var filter = document.RootElement.GetProperty("ReferenceDefaultFilter").GetString()!;
+                var category = filter.Split('\'')[1];
+                items = items.Where(item => item.U9ItemCode!.StartsWith(category, StringComparison.Ordinal));
+                var marker = " and Code > '";
+                if (!IgnoreReferenceCursor && filter.Contains(marker, StringComparison.Ordinal))
+                {
+                    var cursor = filter[(filter.IndexOf(marker, StringComparison.Ordinal) + marker.Length)..].TrimEnd('\'');
+                    items = items.Where(item => string.Compare(item.U9ItemCode, cursor, StringComparison.OrdinalIgnoreCase) > 0);
+                }
+                // The real endpoint is zero-based; using page 1 with a cursor skips rows.
+                items = items.OrderBy(item => item.U9ItemCode, StringComparer.OrdinalIgnoreCase)
+                    .Skip(document.RootElement.GetProperty("PageIndex").GetInt32() * document.RootElement.GetProperty("PageSize").GetInt32())
+                    .Take(document.RootElement.GetProperty("PageSize").GetInt32());
+            }
+            var references = items
                 .Select(item => new U9CustomerReference(item.U9ItemCode!, item.U9ItemName ?? item.U9ItemCode!))
                 .OrderBy(item => item.Code, StringComparer.OrdinalIgnoreCase)
                 .ToArray();

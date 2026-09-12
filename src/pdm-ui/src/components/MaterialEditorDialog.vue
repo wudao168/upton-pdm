@@ -13,6 +13,7 @@ const props = withDefaults(defineProps<{
   materialCodePlaceholder: string
   attachments: MaterialAttachment[]
   saving: boolean
+  errorMessage?: string
   uploadingKind?: MaterialAttachmentKind | null
   uploadProgress?: number
   coverUrl?: string
@@ -106,10 +107,14 @@ function chooseAttachment(kind: MaterialAttachmentKind) {
     </fieldset>
     </div>
     <MaterialRelationEditor v-if="relationPaneOpened && mainMaterial" v-show="activePane === 'relations'" :token="token" :main-material="mainMaterial" :can-manage="canManageRelations" :can-publish="canPublishRelations" @changed="emit('relationsChanged')" />
-    <template #footer><el-button @click="emit('update:modelValue', false)">{{ activePane === 'relations' ? '关闭' : '取消' }}</el-button><el-button v-if="activePane === 'material' && canEdit" type="primary" :loading="saving" @click="emit('save')">{{ editingId ? '保存修改' : '保存草稿' }}</el-button></template>
+    <template #footer>
+      <el-alert v-if="errorMessage && activePane === 'material'" class="material-editor-error" type="error" :closable="false" show-icon :title="errorMessage" />
+      <el-button @click="emit('update:modelValue', false)">{{ activePane === 'relations' ? '关闭' : '取消' }}</el-button><el-button v-if="activePane === 'material' && canEdit" type="primary" :loading="saving" @click="emit('save')">{{ editingId ? '保存修改' : '保存草稿' }}</el-button>
+    </template>
   </el-dialog>
 </template>
 
 <style scoped>
+.material-editor-error{margin-bottom:10px;text-align:left;overflow-wrap:anywhere;white-space:normal}
 .material-editor-tabs{margin-top:-10px}.material-editor-fieldset{min-width:0;margin:0;padding:0;border:0}.material-editor-grid{display:grid;grid-template-columns:repeat(3,minmax(0,200px));gap:0 12px}.material-editor-grid :deep(.el-form-item){margin-bottom:10px}.material-editor-grid__wide{grid-column:span 2}.material-recommend-button{width:100%}.material-attachment-field{display:flex;min-width:0;width:100%;align-items:center;flex-wrap:wrap;gap:4px}.material-attachment-input{position:absolute;width:1px;height:1px;opacity:0}.material-attachment-list{display:flex;max-height:44px;min-width:0;width:100%;overflow:auto;align-items:flex-start;flex-direction:column}.material-cover-preview{width:48px;height:48px;border:1px solid #dbe3ee;border-radius:4px;object-fit:cover}@media(max-width:760px){.material-editor-grid{grid-template-columns:1fr}.material-editor-grid__wide{grid-column:auto}}
 </style>

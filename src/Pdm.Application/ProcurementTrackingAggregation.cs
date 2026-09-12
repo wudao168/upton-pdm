@@ -15,6 +15,46 @@ public static class ProcurementTrackingAggregation
                 .DistinctBy(row => (Code(row.OrganizationCode), row.RecordKind, Code(row.LineId))).ToArray();
             var prs = rows.Where(row => row.RecordKind == "PR").ToArray();
             var pos = rows.Where(row => row.RecordKind == "PO").ToArray();
+            var movements = rows.Where(row =>
+                    row.RecordKind is U9ProcurementRecordKinds.Receipt or U9ProcurementRecordKinds.MaterialIssue or U9ProcurementRecordKinds.MiscShipment or U9ProcurementRecordKinds.TransferReceipt or U9ProcurementRecordKinds.DirectStockIssue
+                    && !row.IsCanceled && row.MovementDate.HasValue && row.MovementQuantity.HasValue)
+                .OrderBy(row => row.MovementDate).ThenBy(row => row.DocumentNumber).ThenBy(row => row.LineNumber).ToArray();
+            var linkedMovements = new HashSet<U9ProcurementSnapshotRow>();
+            // Consume earlier project receipts once. Only the uncovered part of a direct
+            // stock issue is deemed received; later receipts cannot erase that history.
+            var deemedReceipts = new Dictionary<U9ProcurementSnapshotRow, WarehouseMovementDetail>();
+            foreach (var organization in movements.GroupBy(row => Code(row.OrganizationCode)))
+            {
+                decimal available = 0;
+                foreach (var movement in organization.OrderBy(row => row.MovementDate)
+                    .ThenBy(row => row.RecordKind is U9ProcurementRecordKinds.Receipt or U9ProcurementRecordKinds.TransferReceipt ? 0 : 1))
+                {
+                    var quantity = movement.MovementQuantity!.Value;
+                    if (movement.RecordKind is U9ProcurementRecordKinds.Receipt or U9ProcurementRecordKinds.TransferReceipt)
+                        available = Math.Max(0, available + quantity);
+                    else
+                    {
+                        var uncovered = Math.Max(0, quantity - available);
+                        if (movement.RecordKind == U9ProcurementRecordKinds.DirectStockIssue && uncovered > 0)
+                            deemedReceipts.Add(movement, Movement(movement) with { Kind = U9ProcurementRecordKinds.DeemedStockReceipt, Quantity = uncovered });
+                        available = Math.Max(0, available - quantity);
+                    }
+                }
+            }
+            IReadOnlyList<WarehouseMovementDetail> MovementDetails(U9ProcurementSnapshotRow row) =>
+                deemedReceipts.TryGetValue(row, out var deemed) ? [deemed, Movement(row)] : [Movement(row)];
+            var purchaseRowIndexes = new List<int>();
+            decimal Received(U9ProcurementSnapshotRow po) => movements.Where(row => row.RecordKind == U9ProcurementRecordKinds.Receipt
+                && Code(row.SourcePoLineId) == Code(po.LineId) && Code(row.OrganizationCode) == Code(po.OrganizationCode))
+                .Sum(row => row.MovementQuantity!.Value);
+            // Unlinked project stock must cover the whole organization's outstanding balance.
+            // Do not allocate the same transfer to every PO or guess which partial batch it covers.
+            var coveredOrganizations = pos.Where(po => !po.IsCanceled).GroupBy(po => Code(po.OrganizationCode))
+                .Where(group => movements.Where(row => row.RecordKind == U9ProcurementRecordKinds.TransferReceipt
+                        && Code(row.OrganizationCode) == group.Key).Sum(row => row.MovementQuantity!.Value)
+                        + deemedReceipts.Where(pair => Code(pair.Key.OrganizationCode) == group.Key).Sum(pair => pair.Value.Quantity)
+                    >= group.Sum(po => Math.Max(0, po.PurchaseQuantity - Received(po))))
+                .Select(group => group.Key).ToHashSet();
             var pairs = new List<(U9ProcurementSnapshotRow? Pr, U9ProcurementSnapshotRow? Po)>();
             foreach (var po in pos)
             {
@@ -48,7 +88,7 @@ public static class ProcurementTrackingAggregation
                 var newPr = batchPr.Where(pr => countedPr.Add((Code(pr.OrganizationCode), Code(pr.LineId)))).ToArray();
                 var activePr = newPr.Where(pr => !pr.IsCanceled).ToArray();
                 var activePo = batchPo.Where(po => !po.IsCanceled).ToArray();
-                result.Add(first with
+                var batchRow = first with
                 {
                     Sequence = result.Count + 1,
                     Quantity = firstBatch ? material.Sum(row => row.Quantity) : null,
@@ -57,9 +97,11 @@ public static class ProcurementTrackingAggregation
                     ReleasePackageNumber = Join(material.SelectMany(row => (row.ReleasePackageNumber ?? "").Split('、'))),
                     PurchaseRequisitionNumbers = batchPr.Select(pr => pr.DocumentNumber).Distinct().ToArray(),
                     PurchaseRequisitionStatus = batch.Key.PrStatus,
+                    PurchaseRequisitionCreatedAt = batchPr.Select(pr => pr.SourceCreatedAt).Min(),
                     PurchaseRequisitionDeliveryDate = Latest(batchPr.Select(pr => pr.DeliveryDate)),
                     PurchaseOrderNumbers = batchPo.Select(po => po.DocumentNumber).Distinct().ToArray(),
-                    PurchaseOrderStatus = batch.Key.PoStatus + (batch.Key.Arrival.Length == 0 ? "" : $"（{batch.Key.Arrival}）"),
+                    BuyerName = Join(batchPo.Select(po => po.BuyerName)),
+                    PurchaseOrderStatus = batch.Key.PoStatus,
                     PurchaseQuantity = activePo.Sum(po => po.PurchaseQuantity),
                     ArrivedQuantity = activePo.Sum(po => po.ArrivedQuantity),
                     PurchaseRemark = Join(activePo.Select(po => po.PurchaseRemark)),
@@ -71,15 +113,72 @@ public static class ProcurementTrackingAggregation
                         .Concat(batchPo.Select(po => U9ProcurementService.Detail(po, "采购", batchPr.Length > 0 ? "源请购行" : "未关联请购"))).ToArray(),
                     HasDeliveryDelay = batch.Any(pair => pair.Po is { IsCanceled: false }
                         && pair.Pr is { IsCanceled: false }
-                        && pair.Po.DeliveryDate?.Date > pair.Pr.DeliveryDate?.Date)
-                });
+                        && pair.Po.DeliveryDate?.Date > pair.Pr.DeliveryDate?.Date),
+                    IsFullyReceived = activePo.Length > 0 && activePo.Sum(po => po.PurchaseQuantity) > 0
+                        && activePo.All(po => Received(po) >= po.PurchaseQuantity || coveredOrganizations.Contains(Code(po.OrganizationCode)))
+                };
+                var receipts = movements.Where(row => row.RecordKind == U9ProcurementRecordKinds.Receipt
+                    && !string.IsNullOrWhiteSpace(row.SourcePoLineId)
+                    && batchPo.Any(po => Code(po.LineId) == Code(row.SourcePoLineId)
+                        && Code(po.OrganizationCode) == Code(row.OrganizationCode))).ToArray();
+                purchaseRowIndexes.Add(result.Count);
+                result.Add(receipts.Length == 0 ? batchRow : batchRow with { WarehouseMovements = [Movement(receipts[0])] });
+                foreach (var receipt in receipts) linkedMovements.Add(receipt);
+                foreach (var receipt in receipts.Skip(1))
+                    result.Add(batchRow with
+                    {
+                        Sequence = result.Count + 1,
+                        Quantity = null, RequestedQuantity = null, ApprovedQuantity = null,
+                        PurchaseQuantity = 0, ArrivedQuantity = 0, IsWarehouseMovementRow = true,
+                        WarehouseMovements = [Movement(receipt)]
+                    });
                 firstBatch = false;
+            }
+            // Transfers and stock issues need no PO. Share the unique material/batch row for
+            // display only; keep one document per direction and never mix organizations.
+            if (purchaseRowIndexes.Count == 1 && (pos.Length == 0 || pos.Any(po => !po.IsCanceled)))
+            {
+                var index = purchaseRowIndexes[0];
+                bool SameOrganization(U9ProcurementSnapshotRow row) => rows.All(other => Code(other.OrganizationCode) == Code(row.OrganizationCode));
+                var transfer = movements.FirstOrDefault(row => row.RecordKind == U9ProcurementRecordKinds.TransferReceipt && SameOrganization(row));
+                if (transfer is not null && result[index].WarehouseMovements.Count == 0)
+                {
+                    result[index] = result[index] with { WarehouseMovements = [Movement(transfer)] };
+                    linkedMovements.Add(transfer);
+                }
+                var outbound = movements.FirstOrDefault(row =>
+                    row.RecordKind is U9ProcurementRecordKinds.MaterialIssue or U9ProcurementRecordKinds.MiscShipment or U9ProcurementRecordKinds.DirectStockIssue
+                    && SameOrganization(row) && (!deemedReceipts.ContainsKey(row) || result[index].WarehouseMovements.Count == 0));
+                if (outbound is not null)
+                {
+                    result[index] = result[index] with { WarehouseMovements = [.. result[index].WarehouseMovements, .. MovementDetails(outbound)] };
+                    linkedMovements.Add(outbound);
+                }
+            }
+            // Further movements and ambiguous or unlinked records keep their own rows.
+            foreach (var movement in movements.Where(row => !linkedMovements.Contains(row)))
+            {
+                result.Add(first with
+                {
+                    Sequence = result.Count + 1,
+                    Quantity = null, RequestedQuantity = null, ApprovedQuantity = null,
+                    PurchaseRequisitionNumbers = [], PurchaseRequisitionStatus = "",
+                    PurchaseRequisitionCreatedAt = null, PurchaseRequisitionDeliveryDate = null,
+                    PurchaseOrderNumbers = [], PurchaseOrderStatus = "", BuyerName = null,
+                    PurchaseQuantity = 0, ArrivedQuantity = 0, PurchaseRemark = null,
+                    PurchaseDeliveryDate = null, LatestDeliveryDate = null, HasDeliveryDelay = false,
+                    Details = [], IsWarehouseMovementRow = true,
+                    WarehouseMovements = MovementDetails(movement)
+                });
             }
         }
         return result;
     }
 
     private static string Code(string? value) => (value ?? "").Trim().ToUpperInvariant();
+    private static WarehouseMovementDetail Movement(U9ProcurementSnapshotRow row) =>
+        new(row.RecordKind == U9ProcurementRecordKinds.DirectStockIssue ? U9ProcurementRecordKinds.MaterialIssue : row.RecordKind,
+            row.DocumentNumber, row.LineNumber, row.MovementDate!.Value, row.MovementQuantity!.Value, row.MovementUnit) { LineId = row.LineId };
     private static string Status(U9ProcurementSnapshotRow? row, string empty) => row is null ? empty
         : U9ProcurementService.DescribeStatus(row.RecordKind, row.LineStatus, row.IsCanceled);
     private static string Arrival(U9ProcurementSnapshotRow? po) => po is null || po.IsCanceled ? ""

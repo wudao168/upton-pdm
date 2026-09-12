@@ -1,8 +1,9 @@
 import { flushPromises, mount } from '@vue/test-utils'
 import ElementPlus, { ElMessage as toastMessage } from 'element-plus'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import AppHeader from '../src/components/AppHeader.vue'
-import { ElMessage, globalStatus } from '../src/statusMessage'
+import { resetGlobalStatusContentCacheForTests } from '../src/globalStatusContent'
+import { clearGlobalStatus, ElMessage, globalStatus } from '../src/statusMessage'
 
 const wrappers: ReturnType<typeof mount>[] = []
 function header() {
@@ -14,30 +15,47 @@ function header() {
   wrappers.push(wrapper)
   return wrapper
 }
+beforeEach(() => {
+  vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('offline test')))
+})
 afterEach(() => {
   wrappers.splice(0).forEach(wrapper => wrapper.unmount())
   vi.useRealTimers()
   vi.restoreAllMocks()
+  vi.unstubAllGlobals()
+  resetGlobalStatusContentCacheForTests()
   document.body.innerHTML = ''
 })
 
 describe('global operation status', () => {
-  it('shows the animated UPTON mark without visible text or an empty popover while idle', async () => {
+  it('clears old page status and restores the idle animation without suppressing new messages', async () => {
     const wrapper = header()
-    expect(wrapper.get('.pdm-global-status').text()).toBe('')
-    expect(wrapper.get('.pdm-global-status').element.tagName).toBe('DIV')
-    expect(wrapper.findAll('.pdm-global-status__letter').map(letter => letter.attributes('data-letter'))).toEqual(['U', 'P', 'T', 'O', 'N'])
-    expect(wrapper.findAll('.pdm-global-status__letter .dash')).toHaveLength(4)
-    expect(wrapper.findAll('.pdm-global-status__letter .spin')).toHaveLength(1)
-    expect(wrapper.findComponent({ name: 'ElPopover' }).exists()).toBe(false)
+    const old = ElMessage.success('旧页面的状态')
+    clearGlobalStatus()
+    await flushPromises()
+    expect(wrapper.find('.pdm-global-status.is-idle').exists()).toBe(true)
+    expect(wrapper.text()).not.toContain('旧页面的状态')
+    ElMessage.success('新页面的状态')
+    old.close()
+    await flushPromises()
+    expect(wrapper.get('[role="status"]').text()).toBe('新页面的状态')
+  })
+  it('shows sourced local content instead of the UPTON animation while idle', async () => {
+    vi.useFakeTimers()
+    const interval = vi.spyOn(globalThis, 'setInterval')
+    const wrapper = header()
+    expect(wrapper.get('.pdm-global-status').text()).toContain('确认需求，让执行更准确。')
+    expect(wrapper.get('.pdm-global-status').text()).toContain('系统原创')
+    expect(wrapper.get('.pdm-global-status').element.tagName).toBe('BUTTON')
+    expect(wrapper.find('.pdm-global-status__letter').exists()).toBe(false)
+    expect(wrapper.findComponent({ name: 'ElPopover' }).exists()).toBe(true)
     const result = ElMessage.success('BOM已保存')
     await flushPromises()
-    expect(wrapper.find('.pdm-global-status__loader').exists()).toBe(false)
     expect(wrapper.get('.pdm-global-status').text()).toBe('成功BOM已保存')
     result.close()
     await flushPromises()
-    expect(wrapper.get('.pdm-global-status').text()).toBe('')
-    expect(wrapper.findAll('.pdm-global-status__letter')).toHaveLength(5)
+    expect(wrapper.get('.pdm-global-status').text()).toContain('确认需求，让执行更准确。')
+    expect(interval).toHaveBeenCalledWith(expect.any(Function), 600_000)
   })
 
   it('sits immediately before the date and persists without a toast or timeout', async () => {

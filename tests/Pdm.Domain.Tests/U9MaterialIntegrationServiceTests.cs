@@ -420,6 +420,49 @@ public sealed class U9MaterialIntegrationServiceTests
         Assert.Equal(MaterialSyncStatus.NeedsReview, (await fixture.Materials.FindSyncTaskAsync(fixture.Task.Id, default))!.Status);
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ExecuteTask_LegacyVirtualBomReview_ReusesItemAndStillChecksOtherFields(bool anotherMismatch)
+    {
+        var fixture = await CreateApprovedTaskAsync(writeEnabled: true);
+        var draft = fixture.Material with { Id = Guid.NewGuid(), MaterialCode = "02011000001", Kind = MaterialKind.Product,
+            SupplyMode = MaterialSupplyMode.Manufacture, CategoryCode = "0201", U9CategoryCode = "0201",
+            ApprovalStatus = MaterialApprovalStatus.Draft, RowVersion = 1 };
+        draft = await fixture.Materials.CreateMaterialAsync(draft, (await fixture.Materials.FindCategoryAsync("0201", default))!, default);
+        var payload = U9MaterialPayloadFactory.CreatePayload(draft,
+            new(MaterialKind.Product, "0201", "虚拟BOM", MaterialSupplyMode.Manufacture, true, "admin", DateTimeOffset.UtcNow),
+            "7", "legacy-bom", bomHeaderKind: ProjectBomHeaderKind.Standard);
+        using var parsed = System.Text.Json.JsonDocument.Parse(payload);
+        var attributes = U9MaterialCreationRules.ReadAttributes(parsed.RootElement[0]).ToDictionary();
+        if (anotherMismatch) attributes["InventoryInfo.LotControlMode"] = "0";
+        var legacy = payload.Replace("\"IsOutsideOperationEnable\": false", "\"IsOutsideOperationEnable\": true");
+        var task = fixture.Task with { Id = Guid.NewGuid(), MaterialId = draft.Id, PayloadJson = legacy,
+            PayloadSha256 = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(legacy))) };
+        var audit = new AuditEntry(Guid.NewGuid(), DateTimeOffset.UtcNow, "admin", "test", nameof(PdmMaterial), draft.Id.ToString(), "test");
+        var approved = await fixture.Materials.ApproveAndEnqueueAsync(draft, draft.RowVersion, "0201", task, audit, default);
+        await fixture.Materials.BeginSyncTaskAsync(task.Id, DateTimeOffset.UtcNow, default);
+        await fixture.Materials.FailSyncTaskAsync(task.Id, MaterialSyncStatus.NeedsReview, "委外字段不一致", null, audit, default);
+        var matching = MatchingQuery(approved.Material, "1001");
+        fixture.Client.QueryResult = matching with { Items = [matching.Items[0] with { CreationAttributes = attributes }] };
+        if (anotherMismatch)
+        {
+            var error = await Assert.ThrowsAsync<PdmRuleException>(() => fixture.Service.ExecuteTaskAsync(task.Id, "admin", UserRole.Administrator, default));
+            Assert.Contains("LotControlMode", error.Message);
+            Assert.Equal(MaterialSyncStatus.NeedsReview, (await fixture.Materials.FindSyncTaskAsync(task.Id, default))!.Status);
+        }
+        else
+        {
+            var result = await fixture.Service.ExecuteTaskAsync(task.Id, "admin", UserRole.Administrator, default);
+            Assert.True(result.AlreadyExisted);
+            Assert.True(result.Material.U9SyncConfirmed);
+            Assert.Equal("02011000001", result.Material.MaterialCode);
+            Assert.Equal(legacy, result.Task.PayloadJson);
+            Assert.Equal(task.PayloadSha256, result.Task.PayloadSha256);
+        }
+        Assert.Equal(0, fixture.Client.PostCallCount);
+    }
+
     private static U9ItemQueryResult MatchingQuery(PdmMaterial material, string u9ItemId) => new(0, null,
     [new U9ItemReference(
         u9ItemId,
@@ -444,7 +487,7 @@ public sealed class U9MaterialIntegrationServiceTests
                 ["IsOutsideOperationEnable"] = "true", ["IsMRPEnable"] = "true", ["IsBOMEnable"] = "true",
                 ["CostCurrency.Code"] = "C001", ["InventoryInfo.PurchaseControlMode"] = "1",
                 ["InventoryInfo.TurnOverRate"] = "0", ["InventoryInfo.LotControlMode"] = "2",
-                ["InventoryInfo.IsBalanceByProject"] = "true", ["MrpInfo.MRPPlanningType"] = "0",
+                ["InventoryInfo.IsBalanceByProject"] = "true", ["MrpInfo.MRPPlanningType"] = "1",
                 ["InventoryInfo.IsInvCalculateBySeiban"] = "true", ["IsSalesEnable"] = "true",
                 ["IsInventoryEnable"] = "true", ["IsVarRatio"] = "true", ["Effective.IsEffective"] = "true",
                 ["SaleInfo.IsReturnable"] = "true", ["SaleInfo.IsRMAAllowModify"] = "true",

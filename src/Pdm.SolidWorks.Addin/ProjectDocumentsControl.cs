@@ -61,6 +61,7 @@ internal sealed class ProjectDocumentsControl : UserControl
     private Func<string> workspaceRootResolver = Upton.Pdm.LocalSettings.WorkspaceSettingsStore.GetWorkspaceRoot;
     private CadTreeNode root;
     private string authenticatedUsername = string.Empty;
+    private IReadOnlyDictionary<string, string> userDisplayNames = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
 
     public ProjectDocumentsControl()
     {
@@ -236,6 +237,21 @@ internal sealed class ProjectDocumentsControl : UserControl
         SetTree(null);
     }
 
+    public void SetUserDisplayNames(IReadOnlyDictionary<string, string> displayNames)
+    {
+        userDisplayNames = displayNames ?? new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        UpdateSelectionState();
+        tree.Invalidate();
+    }
+
+    private string DisplayUserName(string username)
+    {
+        var value = username?.Trim() ?? string.Empty;
+        return userDisplayNames.TryGetValue(value, out var displayName) && !string.IsNullOrWhiteSpace(displayName)
+            ? displayName.Trim()
+            : value;
+    }
+
     public event EventHandler<ControlledOpenEventArgs> OpenRequested;
     public event EventHandler<ProjectBrowseEventArgs> ProjectSelected;
 
@@ -374,7 +390,7 @@ internal sealed class ProjectDocumentsControl : UserControl
         }
         else if (checkedOutByOther)
         {
-            SetSelectionMessage(string.Concat("当前由 ", node.CheckedOutBy, " 编辑"), "你可以查看最新版，但不能取得编辑权限", Color.FromArgb(174, 94, 0));
+            SetSelectionMessage(string.Concat("当前由 ", DisplayUserName(node.CheckedOutBy), " 编辑"), "你可以查看最新版，但不能取得编辑权限", Color.FromArgb(174, 94, 0));
         }
         else if (checkedOutByMe)
         {
@@ -699,7 +715,7 @@ internal sealed class ProjectDocumentsControl : UserControl
         {
             return string.Equals(node.CheckedOutBy, authenticatedUsername, StringComparison.OrdinalIgnoreCase)
                 ? "我正在编辑"
-                : string.Concat(node.CheckedOutBy, "编辑");
+                : string.Concat(DisplayUserName(node.CheckedOutBy), "编辑");
         }
         var current = Revision(node.CurrentRevision, node.Revision);
         var latest = Revision(node.LatestRevision, node.Revision);

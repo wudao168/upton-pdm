@@ -2,6 +2,7 @@ import { flushPromises, mount } from '@vue/test-utils'
 import ElementPlus, { ElMessageBox } from 'element-plus'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import App from '../src/App.vue'
+import { ElMessage, globalStatus } from '../src/statusMessage'
 
 const projectId = '11111111-1111-1111-1111-111111111111'
 let materialRequestsUnauthorized = false
@@ -12,8 +13,8 @@ function json(value: unknown, status = 200) {
   return new Response(JSON.stringify(value), { status, headers: { 'Content-Type': 'application/json' } })
 }
 
-function installApiMock(projectsBeforeDefault: Array<Record<string, unknown>> = []) {
-  const projects: Array<Record<string, unknown>> = [...projectsBeforeDefault, { id: projectId, code: 'PRJ-REAL-001', name: '真实装配项目', owner: 'engineer', responsibleUsers: ['engineer'], vaultLocation: 'D:\\PDM\\PRJ-REAL-001', releaseLocation: 'D:\\Release\\PRJ-REAL-001', isActive: true, quantity: 1, serialNumbers: [] }]
+function installApiMock(projectsBeforeDefault: Array<Record<string, unknown>> = [], loginRoleCodes?: string[]) {
+  const projects: Array<Record<string, unknown>> = [...projectsBeforeDefault, { id: projectId, code: 'PRJ-REAL-001', name: '真实装配项目', owner: 'engineer', primaryProjectManager: 'engineer', collaborativeProjectManagers: [], responsibleUsers: ['engineer'], vaultLocation: 'D:\\PDM\\PRJ-REAL-001', releaseLocation: 'D:\\Release\\PRJ-REAL-001', isActive: true, quantity: 1, serialNumbers: [] }]
   const customers = [{ id: 'customer-1', code: 'C00465', name: '中山比亚迪电子有限公司', isActive: true }]
   let crmSettings = { baseUrl: 'http://10.7.7.188/U9', username: 'pdm', passwordConfigured: true, autoSyncEnabled: false, autoSyncIntervalMinutes: 60, lastSyncAt: null as string | null, lastSyncCount: 0, lastAutoSyncAttemptAt: null as string | null, lastAutoSyncError: null as string | null }
   let u9Settings = { baseUrl: 'http://10.7.7.188/U9', enterpriseCode: '01', organizationCode: '7', userCode: 'pdm', clientId: 'PDM', clientSecretConfigured: true, itemCreatePath: '/webapi/ItemMaster/Create', itemQueryPath: '/webapi/ItemMaster/Query', itemModifyPath: '/webapi/ItemMaster/Modify', itemDeletePath: '/webapi/ItemMaster/Delete', unitCodeMappings: {}, writeEnabled: false }
@@ -43,7 +44,7 @@ function installApiMock(projectsBeforeDefault: Array<Record<string, unknown>> = 
     if (url.endsWith('/api/auth/login')) {
       const credentials = JSON.parse(String(init?.body)) as { username: string; password: string }
       return credentials.password === 'correct-password'
-        ? json({ accessToken: 'test-token', expiresAt: '2099-01-01T00:00:00Z', resumeToken: 'test-resume-token', username: credentials.username, displayName: credentials.username === 'admin' ? '系统管理员' : '真实工程师', role: credentials.username === 'admin' ? 'Administrator' : 'Engineer', permissions: credentials.username === 'admin' ? adminPermissions : engineerPermissions })
+        ? json({ accessToken: 'test-token', expiresAt: '2099-01-01T00:00:00Z', resumeToken: 'test-resume-token', username: credentials.username, displayName: credentials.username === 'admin' ? '系统管理员' : '真实工程师', role: credentials.username === 'admin' ? 'Administrator' : 'Engineer', roles: loginRoleCodes, permissions: credentials.username === 'admin' ? adminPermissions : engineerPermissions })
         : json({ title: 'Unauthorized' }, 401)
     }
     if (url.endsWith('/api/auth/resume')) return resumeRequestsUnauthorized
@@ -265,6 +266,42 @@ describe('PLM client workspace', () => {
     installApiMock()
   })
 
+  it.each([
+    ['Administrator', true], ['platform_admin', true], ['developer', true],
+    ['PlanningManager', false], ['Engineer', false],
+  ])('项目计划模板入口按实际登录角色 %s 显示，不按姓名或普通设置权限放行', async (roleCode, visible) => {
+    installApiMock([], [String(roleCode)])
+    const wrapper = mount(App, { attachTo: document.body, global: { plugins: [ElementPlus] } })
+    try {
+      await login(wrapper, false, 'admin')
+      await buttonByText(wrapper, '系统管理').trigger('click')
+      await flushPromises()
+      const tabs = wrapper.get('.pdm-admin-tabs').text()
+      expect(tabs.includes('项目计划模板')).toBe(visible)
+    } finally { wrapper.unmount() }
+  })
+
+  it('项目计划维护权限授予主项目经理和开发者，系统管理员不越权', async () => {
+    const stub = { props: ['canEdit'], template: '<div data-test="project-plan-permission">{{ String(canEdit) }}</div>' }
+    const verify = async (username: string, expected: string, roles: string[] = []) => {
+      window.sessionStorage.clear()
+      window.localStorage.clear()
+      installApiMock([], roles)
+      const wrapper = mount(App, { attachTo: document.body, global: { plugins: [ElementPlus], stubs: { ProjectPlanManager: stub } } })
+      try {
+        await login(wrapper, false, username)
+        await runProjectAction(wrapper, 'open')
+        await flushPromises()
+        await projectTabByText(wrapper, '项目计划').trigger('click')
+        await flushPromises()
+        expect(wrapper.get('[data-test="project-plan-permission"]').text()).toBe(expected)
+      } finally { wrapper.unmount() }
+    }
+    await verify('admin', 'false')
+    await verify('engineer', 'true')
+    await verify('developer', 'true', ['developer'])
+  })
+
   it('applies the saved theme to web buttons and synchronizes it to the Windows client', async () => {
     const postMessage = vi.fn()
     window.localStorage.setItem('pdm_theme', 'c')
@@ -280,6 +317,21 @@ describe('PLM client workspace', () => {
 
     wrapper.unmount()
     expect(document.documentElement.dataset.pdmTheme).toBeUndefined()
+  })
+
+  it('clears operation status when changing project tabs or main pages', async () => {
+    const wrapper = mount(App, { attachTo: document.body, global: { plugins: [ElementPlus] } })
+    await login(wrapper)
+    ElMessage.success('图档旧状态')
+    await projectTabByText(wrapper, '概览').trigger('click')
+    await flushPromises()
+    expect(globalStatus.value).toBeUndefined()
+    ElMessage.warning('概览旧状态')
+    await buttonByText(wrapper, '项目列表').trigger('click')
+    await flushPromises()
+    expect(globalStatus.value).toBeUndefined()
+    expect(wrapper.find('.pdm-global-status.is-idle').exists()).toBe(true)
+    wrapper.unmount()
   })
 
   it('restores and toggles the collapsed main navigation', async () => {

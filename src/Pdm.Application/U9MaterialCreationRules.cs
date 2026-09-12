@@ -46,7 +46,8 @@ public static class U9MaterialCreationRules
         data["ItemFormAttribute"] = virtualBom ? 6 : purchased ? 9 : 10;
         data["IsPurchaseEnable"] = true;
         data["IsBuildEnable"] = true;
-        data["IsOutsideOperationEnable"] = true;
+        // Organization-7 virtual BOM items are persisted by U9C with outsourcing disabled.
+        data["IsOutsideOperationEnable"] = !virtualBom;
         // C001 is the RMB archive Code verified through ItemMaster/Query, not a database ID or ISO code.
         data["CostCurrency"] = new Dictionary<string, object?> { ["Code"] = "C001" };
         var inventory = (Dictionary<string, object?>)data["InventoryInfo"]!;
@@ -56,7 +57,8 @@ public static class U9MaterialCreationRules
         inventory["IsBalanceByProject"] = true;
         inventory["IsInvCalculateBySeiban"] = true;
         var mrp = (Dictionary<string, object?>)data["MrpInfo"]!;
-        mrp["MRPPlanningType"] = 0;
+        // U9C: 0 = MPS for BOM headers; 1 = MRP for ordinary materials.
+        mrp["MRPPlanningType"] = master || virtualBom ? 0 : 1;
         mrp["ForecastContorlType"] = 1;
         mrp["IsTraceRequirement"] = true;
         mrp["IsControlByDC"] = true;
@@ -106,13 +108,27 @@ public static class U9MaterialCreationRules
         return result;
     }
 
-    public static IReadOnlyList<string> Compare(string payload, IReadOnlyDictionary<string, string?> actual)
+    public static IReadOnlyList<string> Compare(string payload, IReadOnlyDictionary<string, string?> actual) =>
+        Compare(payload, actual, reconcileLegacyVirtualBom: false);
+
+    public static IReadOnlyList<string> Compare(string payload, IReadOnlyDictionary<string, string?> actual,
+        bool reconcileLegacyVirtualBom)
     {
         using var document = JsonDocument.Parse(payload);
         var row = document.RootElement[0];
         // Historical/unsupported templates are not silently migrated by readback.
         if (!row.TryGetProperty("MfgInfo", out _) || !row.TryGetProperty("CostCurrency", out _)) return [];
-        return ReadAttributes(row).Where(pair => pair.Value is not null
+        var expected = ReadAttributes(row).ToDictionary();
+        // Only reconcile the known legacy template on read-only recovery of an uncertain create.
+        // Keep the original payload/hash and every other comparison intact; never rewrite U9C.
+        if (reconcileLegacyVirtualBom && expected["ItemFormAttribute"] == "6"
+            && expected["IsOutsideOperationEnable"] == "true"
+            && row.TryGetProperty("MainItemCategory", out var category)
+            && category.TryGetProperty("Code", out var categoryCode) && categoryCode.GetString() == "0201"
+            && row.TryGetProperty("Org", out var organization)
+            && organization.TryGetProperty("Code", out var organizationCode) && organizationCode.GetString() == "7")
+            expected["IsOutsideOperationEnable"] = "false";
+        return expected.Where(pair => pair.Value is not null
                 && (!actual.TryGetValue(pair.Key, out var value)
                     || !string.Equals(pair.Value, value, StringComparison.OrdinalIgnoreCase)))
             .Select(pair => $"{pair.Key} 期望={pair.Value} 回查={(actual.GetValueOrDefault(pair.Key) ?? "<缺失>")}")

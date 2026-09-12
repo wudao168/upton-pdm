@@ -69,6 +69,7 @@ internal sealed class BatchOperationDialog : Form
     private readonly IReadOnlyDictionary<string, Guid> inheritedDrawingProjects;
     private readonly IReadOnlyDictionary<string, string> userDisplayNames;
     private readonly HashSet<string> checkedPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+    private readonly CadTreeNode root;
     private readonly string username;
     private readonly TextBox changeNote = new TextBox
     {
@@ -80,6 +81,8 @@ internal sealed class BatchOperationDialog : Form
     };
     private readonly Button execute = new Button { Text = "开始执行", DialogResult = DialogResult.OK };
     private readonly Button selectChanged = new Button { Text = "勾选变更项" };
+    private readonly Button showCheckedOnly = new Button { Text = "仅显示勾选" };
+    private bool showCheckedOnlyActive;
     private readonly Label selectionSummary = new Label
     {
         AutoSize = true,
@@ -97,6 +100,7 @@ internal sealed class BatchOperationDialog : Form
         IReadOnlyDictionary<string, Guid> inheritedDrawingProjects = null,
         IReadOnlyDictionary<string, string> userDisplayNames = null)
     {
+        this.root = root;
         this.username = username ?? string.Empty;
         operationItems = items ?? Array.Empty<BatchOperationItem>();
         this.projects = projects ?? Array.Empty<ProjectDto>();
@@ -188,41 +192,18 @@ internal sealed class BatchOperationDialog : Form
         projectSelector.Height = projectInputHeight;
         projectSelector.Margin = Padding.Empty;
 
-        files.BeginUpdate();
-        try
+        foreach (var item in operationItems)
         {
-            var treeRoot = CreateOccurrenceNode(root);
-            if (treeRoot != null)
+            var path = item.Node.FullPath;
+            var shouldCheck = selectedPaths != null
+                ? selectedPaths.Contains(path)
+                : startWithCheckIn ? ShouldSelectForCheckIn(item.Node, this.username) : CanAcquire(item.Node);
+            if (shouldCheck)
             {
-                files.Nodes.Add(treeRoot);
+                checkedPaths.Add(path);
             }
-            else
-            {
-                foreach (var item in operationItems)
-                {
-                    files.Nodes.Add(CreateFlatNode(item));
-                }
-            }
-
-            foreach (var item in operationItems)
-            {
-                var path = item.Node.FullPath;
-                var shouldCheck = selectedPaths != null
-                    ? selectedPaths.Contains(path)
-                    : startWithCheckIn ? ShouldSelectForCheckIn(item.Node, this.username) : CanAcquire(item.Node);
-                if (shouldCheck)
-                {
-                    checkedPaths.Add(path);
-                }
-            }
-
-            UpdateAllTreeNodes();
-            ExpandRootOnly();
         }
-        finally
-        {
-            files.EndUpdate();
-        }
+        RebuildFileTree();
 
         var operationPanel = new TableLayoutPanel
         {
@@ -277,6 +258,9 @@ internal sealed class BatchOperationDialog : Form
         selectChanged.Enabled = startWithCheckIn;
         execute.AutoSize = false;
         execute.Size = standardButtonSize;
+        showCheckedOnly.AutoSize = false;
+        showCheckedOnly.Size = new Size(105, standardButtonSize.Height);
+        showCheckedOnly.Anchor = AnchorStyles.Right;
         selectAll.Margin = new Padding(0, 0, 6, 0);
         clear.Margin = new Padding(0, 0, 6, 0);
         selectChanged.Margin = new Padding(0, 0, 6, 0);
@@ -285,6 +269,7 @@ internal sealed class BatchOperationDialog : Form
         selectAll.Click += (_, _) => SetAllChecked(true);
         clear.Click += (_, _) => SetAllChecked(false);
         selectChanged.Click += async (_, _) => await SelectChangedItemsAsync(username);
+        showCheckedOnly.Click += (_, _) => ToggleShowCheckedOnly();
         ApplyCommandButtonAppearance(execute, Color.FromArgb(21, 126, 77));
         ApplyCommandButtonAppearance(cancel, Color.FromArgb(230, 126, 34));
         selectionButtons.Controls.Add(selectAll);
@@ -297,17 +282,19 @@ internal sealed class BatchOperationDialog : Form
         {
             Dock = DockStyle.Fill,
             AutoSize = true,
-            ColumnCount = 2,
+            ColumnCount = 3,
             RowCount = 1,
             Margin = Padding.Empty
         };
         selectionBar.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
         selectionBar.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        selectionBar.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
         selectionSummary.Dock = DockStyle.Fill;
         selectionSummary.TextAlign = ContentAlignment.MiddleLeft;
         selectionSummary.Margin = new Padding(8, 0, 8, 0);
         selectionBar.Controls.Add(selectionButtons, 0, 0);
         selectionBar.Controls.Add(selectionSummary, 1, 0);
+        selectionBar.Controls.Add(showCheckedOnly, 2, 0);
 
         var layout = new TableLayoutPanel
         {
@@ -376,7 +363,7 @@ internal sealed class BatchOperationDialog : Form
                 checkedPaths.Add(item.Node.FullPath);
             }
         }
-        UpdateAllTreeNodes();
+        RefreshFileTreePresentation();
     }
 
     private void ValidateBeforeClose(object sender, FormClosingEventArgs eventArgs)
@@ -432,7 +419,7 @@ internal sealed class BatchOperationDialog : Form
                 checkedPaths.Add(item.Node.FullPath);
             }
         }
-        UpdateAllTreeNodes();
+        RefreshFileTreePresentation();
         selectionSummary.Text = string.Empty;
     }
 
@@ -478,7 +465,7 @@ internal sealed class BatchOperationDialog : Form
             {
                 checkedPaths.Add(item.Node.FullPath);
             }
-            UpdateAllTreeNodes();
+            RefreshFileTreePresentation();
 
             selectionSummary.Text = directItems.Count == 0
                 ? "未检测到需要提交的变更"
@@ -522,14 +509,16 @@ internal sealed class BatchOperationDialog : Form
             .Select(CreateOccurrenceNode)
             .Where(child => child != null)
             .ToArray();
-        if (item == null && children.Length == 0)
+        var includeItem = item != null
+            && (!showCheckedOnlyActive || checkedPaths.Contains(item.Node.FullPath));
+        if (!includeItem && children.Length == 0)
         {
             return null;
         }
 
         var node = new TreeNode
         {
-            Tag = new BatchTreeOccurrence(model, item),
+            Tag = new BatchTreeOccurrence(model, includeItem ? item : null),
             ImageKey = PdmTaskPaneControl.StructureImageKey(model.Kind),
             SelectedImageKey = PdmTaskPaneControl.StructureImageKey(model.Kind),
             ToolTipText = string.Concat(
@@ -553,6 +542,56 @@ internal sealed class BatchOperationDialog : Form
         return node;
     }
 
+    private void ToggleShowCheckedOnly()
+    {
+        showCheckedOnlyActive = !showCheckedOnlyActive;
+        showCheckedOnly.Text = showCheckedOnlyActive ? "显示全部" : "仅显示勾选";
+        showCheckedOnly.BackColor = showCheckedOnlyActive ? Color.FromArgb(220, 245, 240) : SystemColors.Control;
+        RebuildFileTree();
+    }
+
+    private void RefreshFileTreePresentation()
+    {
+        if (showCheckedOnlyActive)
+        {
+            RebuildFileTree();
+            return;
+        }
+
+        UpdateAllTreeNodes();
+    }
+
+    private void RebuildFileTree()
+    {
+        files.BeginUpdate();
+        try
+        {
+            files.Nodes.Clear();
+            var treeRoot = CreateOccurrenceNode(root);
+            if (treeRoot != null)
+            {
+                files.Nodes.Add(treeRoot);
+            }
+            else
+            {
+                foreach (var item in operationItems.Where(item => !showCheckedOnlyActive || checkedPaths.Contains(item.Node.FullPath)))
+                {
+                    files.Nodes.Add(CreateFlatNode(item));
+                }
+            }
+
+            foreach (TreeNode treeNode in files.Nodes)
+            {
+                UpdateTreeNode(treeNode);
+            }
+            ExpandRootOnly();
+        }
+        finally
+        {
+            files.EndUpdate();
+        }
+    }
+
     private void ToggleNode(TreeNode node)
     {
         var paths = SelectablePaths(node).ToArray();
@@ -574,7 +613,7 @@ internal sealed class BatchOperationDialog : Form
             }
         }
 
-        UpdateAllTreeNodes();
+        RefreshFileTreePresentation();
         selectionSummary.Text = string.Concat("已选择 ", SelectedItems.Count, " 个图档");
     }
 
@@ -948,7 +987,7 @@ internal sealed class BatchOperationDialog : Form
         button.FlatAppearance.BorderSize = 0;
     }
 
-    private static string StateText(CadTreeNode node, string username)
+    private string StateText(CadTreeNode node, string username)
     {
         if (node.IsLatestReadOnlyPreview) return "最新只读";
         if (node.IsHistoricalPreview) return "历史预览（只读）";
@@ -964,7 +1003,15 @@ internal sealed class BatchOperationDialog : Form
         }
         return string.Equals(node.CheckedOutBy, username, StringComparison.OrdinalIgnoreCase)
             ? "当前用户正在编辑"
-            : string.Concat(node.CheckedOutBy, "正在编辑");
+            : string.Concat(DisplayUserName(node.CheckedOutBy), "正在编辑");
+    }
+
+    private string DisplayUserName(string username)
+    {
+        var value = username?.Trim() ?? string.Empty;
+        return userDisplayNames.TryGetValue(value, out var displayName) && !string.IsNullOrWhiteSpace(displayName)
+            ? displayName.Trim()
+            : value;
     }
 
     private enum SelectionState

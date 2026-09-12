@@ -581,6 +581,8 @@ public interface IFileStorage
         VerifyStoredFileAsync(project, file, cancellationToken);
     Task VerifyStoredFileAsync(Project project, StoredFile file, CancellationToken cancellationToken);
     Task<StoredFile> CopyVersionAsync(Project project, StoredFile source, string relativeTargetPath, CancellationToken cancellationToken);
+    Task<StoredFile> CopyVersionAsync(Project sourceProject, Project targetProject, StoredFile source, string relativeTargetPath, CancellationToken cancellationToken) =>
+        throw new NotSupportedException("当前文件存储不支持跨项目复制版本。");
 }
 
 public interface IReleasePackagePublisher

@@ -1,49 +1,61 @@
 <script setup lang="ts">
 import { ElMessage } from '../statusMessage'
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { getProjectProcurementTracking, listMaterialInventory, refreshProjectProcurementTracking } from '../api'
 import type { ProjectProcurementTrackingItem, ProjectProcurementTrackingResult, U9InventoryRow } from '../types'
 import { inventoryScopes, isDefaultInventoryWarehouse, sumProcurementInventory } from '../procurementInventory'
 import SquareLoader from './SquareLoader.vue'
+import { downloadProcurementWorkbook } from '../procurementWorkbook'
 
 const props = defineProps<{ projectId: string; token: string; username: string }>()
 
 type ColumnKey = keyof Pick<ProjectProcurementTrackingItem,
   'sequence' | 'projectCode' | 'subprojectCode' | 'materialCode' | 'materialName' | 'specification' | 'remark' | 'brand' |
-  'quantity' | 'purchaseRequisitionNumbers' | 'purchaseRequisitionStatus' | 'purchaseRequisitionDeliveryDate' |
-  'purchaseOrderNumbers' | 'purchaseOrderStatus' | 'purchaseQuantity' | 'arrivedQuantity' | 'purchaseRemark' |
-  'purchaseDeliveryDate' | 'latestDeliveryDate' | 'bomKind' | 'releasePackageNumber' | 'requestedQuantity' | 'approvedQuantity'> | 'inventoryQuantity'
+  'quantity' | 'purchaseRequisitionNumbers' | 'purchaseRequisitionStatus' | 'purchaseRequisitionCreatedAt' | 'purchaseRequisitionDeliveryDate' |
+  'purchaseOrderNumbers' | 'purchaseOrderStatus' | 'buyerName' | 'purchaseQuantity' | 'arrivedQuantity' | 'purchaseRemark' |
+  'purchaseDeliveryDate' | 'latestDeliveryDate' | 'bomKind' | 'releasePackageNumber' | 'requestedQuantity' | 'approvedQuantity'> | 'inventoryQuantity' | MovementColumn
+
+type MovementColumn = 'receiptDate' | 'receiptQuantity' | 'issueDate' | 'issueQuantity'
+const movementColumns: MovementColumn[] = ['receiptDate', 'receiptQuantity', 'issueDate', 'issueQuantity']
+const isMovementColumn = (key: ColumnKey): key is MovementColumn => movementColumns.includes(key as MovementColumn)
 
 interface ColumnDefinition { key: ColumnKey; label: string; width: number; fixedWidth?: number; defaultVisible: boolean; align?: 'left' | 'center' | 'right' }
 
 const columnDefinitions: ColumnDefinition[] = [
-  { key: 'sequence', label: '序号', width: 64, defaultVisible: true, align: 'center' },
-  { key: 'projectCode', label: '项目号', width: 118, fixedWidth: 85, defaultVisible: true },
-  { key: 'subprojectCode', label: '子项目号', width: 126, fixedWidth: 85, defaultVisible: true },
-  { key: 'materialCode', label: '物料编码', width: 142, fixedWidth: 100, defaultVisible: true },
-  { key: 'materialName', label: '物料名称', width: 240, defaultVisible: true },
+  { key: 'sequence', label: '序号', width: 64, fixedWidth: 40, defaultVisible: true, align: 'center' },
+  { key: 'projectCode', label: '项目号', width: 118, fixedWidth: 70, defaultVisible: true },
+  { key: 'subprojectCode', label: '子项目号', width: 126, fixedWidth: 70, defaultVisible: true },
+  { key: 'materialCode', label: '物料编码', width: 142, fixedWidth: 85, defaultVisible: true },
+  { key: 'materialName', label: '物料名称', width: 240, fixedWidth: 120, defaultVisible: true },
   { key: 'specification', label: '型号', width: 260, defaultVisible: true },
   { key: 'remark', label: '备注', width: 150, defaultVisible: true },
   { key: 'brand', label: '品牌', width: 110, defaultVisible: true },
-  { key: 'quantity', label: '数量', width: 88, defaultVisible: true, align: 'right' },
-  { key: 'inventoryQuantity', label: '库存', width: 100, defaultVisible: true, align: 'right' },
+  { key: 'quantity', label: '数量', width: 88, fixedWidth: 40, defaultVisible: true, align: 'right' },
+  { key: 'inventoryQuantity', label: '库存', width: 100, fixedWidth: 40, defaultVisible: true, align: 'right' },
   { key: 'purchaseRequisitionNumbers', label: 'PR编号', width: 170, defaultVisible: false },
-  { key: 'purchaseRequisitionStatus', label: '请购状态', width: 132, defaultVisible: true },
-  { key: 'purchaseRequisitionDeliveryDate', label: '请购交期', width: 116, defaultVisible: true },
+  { key: 'purchaseRequisitionStatus', label: '请购状态', width: 132, fixedWidth: 60, defaultVisible: true },
+  { key: 'purchaseRequisitionCreatedAt', label: '请购日期', width: 132, fixedWidth: 70, defaultVisible: true },
+  { key: 'purchaseRequisitionDeliveryDate', label: '需求日期', width: 100, fixedWidth: 70, defaultVisible: true },
   { key: 'purchaseOrderNumbers', label: 'PO编号', width: 170, defaultVisible: true },
-  { key: 'purchaseOrderStatus', label: '采购状态', width: 124, defaultVisible: true },
-  { key: 'purchaseQuantity', label: '购买数', width: 100, defaultVisible: true, align: 'right' },
-  { key: 'arrivedQuantity', label: '到货数', width: 100, defaultVisible: true, align: 'right' },
+  { key: 'purchaseOrderStatus', label: '采购状态', width: 124, fixedWidth: 60, defaultVisible: true },
+  { key: 'buyerName', label: '采购员', width: 124, fixedWidth: 50, defaultVisible: true },
+  { key: 'purchaseQuantity', label: '购买数', width: 100, fixedWidth: 40, defaultVisible: true, align: 'right' },
+  { key: 'arrivedQuantity', label: '到货数', width: 100, fixedWidth: 40, defaultVisible: true, align: 'right' },
   { key: 'purchaseRemark', label: '采购备注', width: 180, defaultVisible: true },
-  { key: 'purchaseDeliveryDate', label: '预计交期', width: 116, defaultVisible: true },
-  { key: 'latestDeliveryDate', label: '最新交期', width: 116, defaultVisible: true },
+  { key: 'purchaseDeliveryDate', label: '预计交期', width: 100, fixedWidth: 70, defaultVisible: true },
+  { key: 'latestDeliveryDate', label: '最新交期', width: 100, fixedWidth: 70, defaultVisible: true },
+  { key: 'receiptDate', label: '入库日期', width: 100, fixedWidth: 70, defaultVisible: true },
+  { key: 'receiptQuantity', label: '入库数', width: 100, fixedWidth: 40, defaultVisible: true, align: 'right' },
+  { key: 'issueDate', label: '出库日期', width: 100, fixedWidth: 70, defaultVisible: true },
+  { key: 'issueQuantity', label: '出库数', width: 100, fixedWidth: 40, defaultVisible: true, align: 'right' },
   { key: 'bomKind', label: 'BOM类别', width: 96, defaultVisible: false },
   { key: 'releasePackageNumber', label: '发布包号', width: 170, defaultVisible: false },
-  { key: 'requestedQuantity', label: '请购数量', width: 100, defaultVisible: false, align: 'right' },
-  { key: 'approvedQuantity', label: '已批准数量', width: 112, defaultVisible: false, align: 'right' },
+  { key: 'requestedQuantity', label: '请购数量', width: 100, fixedWidth: 40, defaultVisible: false, align: 'right' },
+  { key: 'approvedQuantity', label: '已批准数量', width: 112, fixedWidth: 40, defaultVisible: false, align: 'right' },
 ]
 
 const loading = ref(false)
+const exporting = ref(false)
 const refreshStarting = ref(false)
 const refreshCoolingDown = ref(false)
 const result = ref<ProjectProcurementTrackingResult | null>(null)
@@ -96,6 +108,7 @@ function inventoryHint(row: ProjectProcurementTrackingItem) {
 let loadVersion = 0
 let inventoryWorkers = 0
 let inventoryQueue: Array<() => Promise<void>> = []
+let inventoryRequests = new Map<string, Promise<void>>()
 
 function drainInventoryQueue() {
   while (inventoryWorkers < 4 && inventoryQueue.length) {
@@ -105,14 +118,15 @@ function drainInventoryQueue() {
   }
 }
 
-function loadVisibleInventory() {
-  if (!visibleKeys.value.includes('inventoryQuantity')) return
+function loadVisibleInventory(items = pagedItems.value) {
   const version = loadVersion
   const token = props.token
-  for (const row of pagedItems.value) {
+  for (const row of items) {
     const code = row.materialCode.trim()
     if (!code || inventory.value[code]) continue
     inventory.value[code] = { hint: '正在查询库存快照' }
+    let completed!: () => void
+    inventoryRequests.set(code, new Promise<void>(resolve => { completed = resolve }))
     inventoryQueue.push(async () => {
       try {
         const rows: U9InventoryRow[] = []
@@ -139,21 +153,63 @@ function loadVisibleInventory() {
           : { rows, hint: `U9C库存快照：按所选范围汇总现存量（库存单位，非可用量）；同料号各批次共用此库存，不可重复累加。最近全量刷新：${formatDate(refreshedAt, true)}` }
       } catch (error) {
         if (version === loadVersion) inventory.value[code] = { hint: error instanceof Error ? `库存查询失败：${error.message}` : '库存查询失败' }
+      } finally {
+        completed()
       }
     })
   }
   drainInventoryQueue()
+  return Promise.all(items.map(row => inventoryRequests.get(row.materialCode.trim())))
 }
 const page = ref(1)
 const pageSize = ref(50)
-const pageCount = computed(() => Math.max(1, Math.ceil((result.value?.items.length ?? 0) / pageSize.value)))
+const filterFields = [
+  { key: 'brand', label: '品牌' },
+  { key: 'purchaseRequisitionStatus', label: '请购状态' },
+  { key: 'purchaseOrderStatus', label: '采购状态' },
+  { key: 'buyerName', label: '采购员' },
+] as const
+type FilterKey = typeof filterFields[number]['key']
+const multiFilterFields = filterFields.filter((field): field is Exclude<typeof filterFields[number], { key: 'brand' }> => field.key !== 'brand')
+const filters = reactive({ keyword: '', brand: '', purchaseRequisitionStatus: [] as string[], purchaseOrderStatus: [] as string[], buyerName: [] as string[], delayedOnly: false, unreceivedOnly: false, unissuedOnly: false })
+function resetFilters() {
+  Object.assign(filters, { keyword: '', brand: '', purchaseRequisitionStatus: [], purchaseOrderStatus: [], buyerName: [], delayedOnly: false, unreceivedOnly: false, unissuedOnly: false })
+}
+function filterValues(row: ProjectProcurementTrackingItem, key: FilterKey) {
+  const value = row[key]?.trim() ?? ''
+  return key === 'buyerName' ? value.split('；').map(name => name.trim()).filter(Boolean) : value ? [value] : []
+}
+function filterOptions(key: FilterKey) {
+  return [...new Set((result.value?.items ?? []).flatMap(row => filterValues(row, key)))].sort((a, b) => a.localeCompare(b, 'zh-CN'))
+}
+const brandOptions = computed(() => filterOptions('brand'))
+const multiFilterOptions = computed(() => ({
+  purchaseRequisitionStatus: filterOptions('purchaseRequisitionStatus'),
+  purchaseOrderStatus: filterOptions('purchaseOrderStatus'),
+  buyerName: filterOptions('buyerName'),
+}))
+function multiFilterSummary(field: typeof multiFilterFields[number]) {
+  const selected = filters[field.key]
+  return !selected.length ? `全部${field.label}` : selected.length === 1 ? selected[0] : `${selected[0]} +${selected.length - 1}`
+}
+const filteredItems = computed(() => {
+  const keyword = filters.keyword.trim().toLocaleLowerCase()
+  return (result.value?.items ?? []).filter(row =>
+    (!keyword || [row.materialCode, row.materialName, row.specification].some(value => value?.toLocaleLowerCase().includes(keyword)))
+    && (!filters.brand || filterValues(row, 'brand').some(value => value.toLocaleLowerCase().includes(filters.brand.trim().toLocaleLowerCase())))
+    && multiFilterFields.every(({ key }) => !filters[key].length || filterValues(row, key).some(value => filters[key].includes(value)))
+    && (!filters.delayedOnly || hasDeliveryDelay(row))
+    && (!filters.unreceivedOnly || !movementFor(row, 'receiptQuantity'))
+    && (!filters.unissuedOnly || !movementFor(row, 'issueQuantity')))
+})
+const pageCount = computed(() => Math.max(1, Math.ceil(filteredItems.value.length / pageSize.value)))
 const pagedItems = computed(() => sortedItems.value.slice((page.value - 1) * pageSize.value, page.value * pageSize.value))
 const settingsVisible = ref(false)
 const deliveryColumns = ['purchaseRequisitionDeliveryDate', 'purchaseDeliveryDate', 'latestDeliveryDate'] as const
 type DeliveryColumn = typeof deliveryColumns[number]
 const deliverySort = ref<{ prop: DeliveryColumn; order: 'ascending' | 'descending' } | null>(null)
 const sortedItems = computed(() => {
-  const items = result.value?.items ?? []
+  const items = filteredItems.value
   const sort = deliverySort.value
   if (!sort) return items
   return [...items].sort((a, b) => {
@@ -193,6 +249,20 @@ function restoreColumns() {
       orderedKeys.value.splice(orderedKeys.value.indexOf('quantity') + 1, 0, 'inventoryQuantity')
       if (!visibleKeys.value.includes('inventoryQuantity')) visibleKeys.value.push('inventoryQuantity')
     }
+    for (const [key, after] of [
+      ['purchaseRequisitionCreatedAt', 'purchaseRequisitionStatus'],
+      ['buyerName', 'purchaseOrderStatus'],
+      ['receiptDate', 'latestDeliveryDate'],
+      ['receiptQuantity', 'receiptDate'],
+      ['issueDate', 'receiptQuantity'],
+      ['issueQuantity', 'issueDate'],
+    ] as const) {
+      if (saved && !savedOrder.includes(key)) {
+        orderedKeys.value = orderedKeys.value.filter(column => column !== key)
+        orderedKeys.value.splice(orderedKeys.value.indexOf(after) + 1, 0, key)
+        if (!visibleKeys.value.includes(key)) visibleKeys.value.push(key)
+      }
+    }
   } catch {
     // 无法读取个人浏览器设置时使用系统默认列。
   }
@@ -224,7 +294,7 @@ function moveColumn(key: ColumnKey, direction: -1 | 1) {
 
 async function load(showError = true) {
   const version = ++loadVersion
-  inventoryQueue = []
+  inventoryRequests = new Map()
   inventory.value = {}
   inventorySettingsVisible.value = false
   result.value = null
@@ -278,6 +348,7 @@ function statusType(status: string) {
 }
 
 function rowClassName({ row }: { row: ProjectProcurementTrackingItem }) {
+  if (row.isWarehouseMovementRow || isFullyReceived(row)) return ''
   if (!row.purchaseRequisitionNumbers.length) return 'is-procurement-missing'
   if (!row.purchaseOrderNumbers.length) return 'is-procurement-warning'
   if (row.latestDeliveryDate && row.arrivedQuantity < row.purchaseQuantity && new Date(row.latestDeliveryDate).getTime() < Date.now()) return 'is-procurement-late'
@@ -291,25 +362,131 @@ function deliveryDay(value?: string | null) {
 }
 
 function cellClassName({ row, column }: { row: ProjectProcurementTrackingItem; column: { property: string } }) {
-  return column.property === 'purchaseDeliveryDate'
-    && (row.hasDeliveryDelay ?? (deliveryDay(row.purchaseDeliveryDate) > deliveryDay(row.purchaseRequisitionDeliveryDate)))
-    ? 'is-delivery-delay' : ''
+  if (row.isWarehouseMovementRow || isFullyReceived(row)) return ''
+  const required = deliveryDay(row.purchaseRequisitionDeliveryDate)
+  const expected = deliveryDay(row.purchaseDeliveryDate)
+  const latest = deliveryDay(row.latestDeliveryDate)
+  const delayed = column.property === 'purchaseDeliveryDate' ? expected > required
+    : column.property === 'latestDeliveryDate' && latest > required && latest > expected
+  return delayed ? 'is-delivery-delay' : ''
+}
+
+function purchaseBatchKey(row: ProjectProcurementTrackingItem) {
+  const lines = row.details.filter(detail => detail.kind === '采购' && !detail.isCanceled)
+    .map(detail => [detail.documentNumber, detail.lineNumber]).sort()
+  return lines.length ? JSON.stringify([row.projectCode, row.subprojectCode, row.materialCode, lines]) : null
+}
+
+const receivedByBatch = computed(() => {
+  const batches = new Map<string, Map<string, number>>()
+  for (const row of result.value?.items ?? []) {
+    const key = purchaseBatchKey(row)
+    if (!key) continue
+    const receipts = batches.get(key) ?? new Map<string, number>()
+    for (const movement of row.warehouseMovements ?? []) {
+      if (movement.kind === 'RCV' && Number.isFinite(movement.quantity))
+        receipts.set(JSON.stringify([movement.documentNumber, movement.lineNumber]), movement.quantity)
+    }
+    batches.set(key, receipts)
+  }
+  return new Map([...batches].map(([key, receipts]) => [key, [...receipts.values()].reduce((sum, quantity) => sum + quantity, 0)]))
+})
+
+function isFullyReceived(row: ProjectProcurementTrackingItem) {
+  // The server includes project transfers once across all outstanding PO batches.
+  if (typeof row.isFullyReceived === 'boolean') return row.isFullyReceived
+  if (!(row.purchaseQuantity > 0)) return false
+  const key = purchaseBatchKey(row)
+  const received = key ? receivedByBatch.value.get(key) ?? 0
+    : (row.warehouseMovements ?? []).filter(movement => movement.kind === 'RCV' && Number.isFinite(movement.quantity))
+      .reduce((sum, movement) => sum + movement.quantity, 0)
+  return received >= row.purchaseQuantity
+}
+
+function hasDeliveryDelay(row: ProjectProcurementTrackingItem) {
+  return row.hasDeliveryDelay ?? (deliveryDay(row.purchaseDeliveryDate) > deliveryDay(row.purchaseRequisitionDeliveryDate))
 }
 
 function cellText(row: ProjectProcurementTrackingItem, key: ColumnKey) {
+  if (isMovementColumn(key)) return movementText(row, key)
+  if (row.isWarehouseMovementRow && ['purchaseQuantity', 'arrivedQuantity', 'inventoryQuantity'].includes(key)) return '—'
   if (key === 'inventoryQuantity') {
     const rows = inventory.value[row.materialCode.trim()]?.rows
     return rows ? formatNumber(sumProcurementInventory(rows, row.projectCode, selectedInventoryWarehouses.value)) : '—'
   }
   const value = row[key]
   if (Array.isArray(value)) return value.length ? value.join('、') : '—'
-  if (key === 'purchaseRequisitionDeliveryDate' || key === 'purchaseDeliveryDate' || key === 'latestDeliveryDate') return formatDate(value as string | null)
+  if (key === 'purchaseRequisitionCreatedAt' || key === 'purchaseRequisitionDeliveryDate' || key === 'purchaseDeliveryDate' || key === 'latestDeliveryDate') return formatDate(value as string | null)
   if (key === 'quantity' || key === 'purchaseQuantity' || key === 'arrivedQuantity' || key === 'requestedQuantity' || key === 'approvedQuantity') return formatNumber(value as number)
   return value === null || value === undefined || value === '' ? '—' : String(value)
 }
 
-watch(() => [props.projectId, props.token], () => { page.value = 1; void load() })
-watch([pagedItems, visibleKeys], loadVisibleInventory, { deep: true })
+function movementFor(row: ProjectProcurementTrackingItem, key: MovementColumn) {
+  return row.warehouseMovements?.find(movement => key.startsWith('receipt') ? movement.kind === 'RCV' || movement.kind === 'TRANSFER' || movement.kind === 'STOCKIN' : movement.kind === 'ISSUE' || movement.kind === 'MISC')
+}
+
+function movementText(row: ProjectProcurementTrackingItem, key: MovementColumn) {
+  const movement = movementFor(row, key)
+  if (!movement) return '—'
+  if (key.endsWith('Quantity')) return formatNumber(movement.quantity)
+  const date = new Date(movement.date)
+  if (Number.isNaN(date.getTime())) return '—'
+  return date.toLocaleDateString('zh-CN', { timeZone: 'Asia/Shanghai' })
+}
+
+function movementHint(row: ProjectProcurementTrackingItem, key: MovementColumn) {
+  const movement = movementFor(row, key)
+  return movement ? `${movement.kind === 'RCV' ? '标准收货·入库确认日期' : movement.kind === 'TRANSFER' ? '形态转换·转换后·日期' : movement.kind === 'STOCKIN' ? '库存领用·视同入库·确认日期' : movement.kind === 'ISSUE' ? '材料出库单·确认日期' : '杂发单·日期'}：${movement.documentNumber}，${movement.kind === 'TRANSFER' ? '子行' : '行'} ${movement.lineNumber}；${movementText(row, key)}` : ''
+}
+
+function movementTone(row: ProjectProcurementTrackingItem, key: MovementColumn) {
+  if (!key.startsWith('receipt')) return ''
+  const kind = movementFor(row, key)?.kind
+  return kind === 'TRANSFER' ? 'is-transfer' : kind === 'STOCKIN' ? 'is-stockin' : ''
+}
+
+async function exportExcel() {
+  if (exporting.value || loading.value || !sortedItems.value.length || !columns.value.length) return
+  const version = loadVersion
+  const exportColumns = [...columns.value]
+  const items = [...sortedItems.value]
+  const warehouses = selectedInventoryWarehouses.value === null ? null : [...selectedInventoryWarehouses.value]
+  const projectCode = result.value?.subprojectCode || result.value?.projectCode || props.projectId
+  exporting.value = true
+  try {
+    if (exportColumns.some(column => column.key === 'inventoryQuantity')) await loadVisibleInventory(items)
+    if (version !== loadVersion) return
+    const rows = items.map(row => exportColumns.map(({ key }) => {
+      if (isMovementColumn(key)) {
+        if (key.endsWith('Quantity')) return movementFor(row, key)?.quantity ?? '—'
+        return movementText(row, key)
+      }
+      if (row.isWarehouseMovementRow && ['purchaseQuantity', 'arrivedQuantity', 'inventoryQuantity'].includes(key)) return '—'
+      if (key === 'inventoryQuantity') {
+        const stock = inventory.value[row.materialCode.trim()]
+        if (!stock?.rows) throw new Error(`${row.materialCode}：${stock?.hint ?? '库存未加载'}，请刷新后重试`)
+        return sumProcurementInventory(stock.rows, row.projectCode, warehouses)
+      }
+      return typeof row[key] === 'number' ? row[key] as number : cellText(row, key)
+    }))
+    const date = new Date().toLocaleDateString('sv-SE', { timeZone: 'Asia/Shanghai' }).replaceAll('-', '')
+    const sequenceKey = `upton-pdm:material-status-export:${props.username}:${props.projectId}:${date}`
+    const previousSequence = Number(window.localStorage.getItem(sequenceKey) ?? '0')
+    if (!Number.isInteger(previousSequence) || previousSequence < 0 || previousSequence >= 99) throw new Error('当日导出流水号不可用或已达99次，请次日再导出')
+    const sequence = previousSequence + 1
+    window.localStorage.setItem(sequenceKey, String(sequence))
+    downloadProcurementWorkbook(`${projectCode}_物料状态清单_${date}_${String(sequence).padStart(2, '0')}.xlsx`, exportColumns.map(column => column.label), rows)
+    ElMessage.success(`已导出 ${items.length} 条采购跟踪记录`)
+  } catch (error) {
+    if (version === loadVersion) ElMessage.error(error instanceof Error ? error.message : '采购跟踪导出失败')
+  } finally {
+    exporting.value = false
+  }
+}
+
+watch(() => [props.projectId, props.token], () => { resetFilters(); page.value = 1; void load() })
+watch(filters, () => { page.value = 1 })
+watch([pagedItems, visibleKeys], () => { if (visibleKeys.value.includes('inventoryQuantity')) void loadVisibleInventory() }, { deep: true })
 watch([pageSize, deliverySort], () => { page.value = 1 })
 watch(pageCount, () => { page.value = Math.min(page.value, pageCount.value) })
 watch(storageKey, restoreColumns)
@@ -317,7 +494,6 @@ watch(inventoryStorageKey, restoreInventoryScopes)
 onMounted(() => { restoreColumns(); restoreInventoryScopes(); void load() })
 onBeforeUnmount(() => {
   loadVersion++
-  inventoryQueue = []
   window.clearTimeout(refreshTimer)
   window.clearTimeout(refreshCooldownTimer)
 })
@@ -327,12 +503,34 @@ onBeforeUnmount(() => {
   <section class="procurement-tracking pdm-panel pdm-loading-host" aria-label="采购跟踪">
     <SquareLoader v-if="loading" overlay label="正在加载采购跟踪" />
     <header class="procurement-tracking__heading">
+      <div class="procurement-tracking__filters" role="group" aria-label="采购跟踪筛选">
+      <input v-model="filters.keyword" type="search" aria-label="搜索料号、名称、型号" placeholder="搜索料号、名称、型号" class="procurement-tracking__search">
+      <input v-model="filters.brand" type="search" :list="`procurement-brands-${projectId}`" placeholder="全部品牌" aria-label="筛选品牌" class="procurement-tracking__brand-filter">
+      <datalist :id="`procurement-brands-${projectId}`"><option v-for="brand in brandOptions" :key="brand" :value="brand" /></datalist>
+      <el-popover v-for="field in multiFilterFields" :key="field.key" placement="bottom-start" trigger="click" :width="190">
+        <template #reference>
+          <button type="button" class="procurement-tracking__multi-filter" :class="{ 'has-value': filters[field.key].length }" :aria-label="`筛选${field.label}`">
+            <span>{{ multiFilterSummary(field) }}</span><span aria-hidden="true">⌄</span>
+          </button>
+        </template>
+        <div class="procurement-tracking__multi-options" :aria-label="`${field.label}多选项`">
+          <label v-for="value in multiFilterOptions[field.key]" :key="value"><input v-model="filters[field.key]" type="checkbox" :value="value">{{ value }}</label>
+          <span v-if="!multiFilterOptions[field.key].length">暂无选项</span>
+          <button v-if="filters[field.key].length" type="button" @click="filters[field.key] = []">清空</button>
+        </div>
+      </el-popover>
+      <label class="procurement-tracking__delay-filter"><input v-model="filters.delayedOnly" type="checkbox" aria-label="交期不符">交期不符</label>
+      <label class="procurement-tracking__delay-filter"><input v-model="filters.unreceivedOnly" type="checkbox" aria-label="未入库">未入库</label>
+      <label class="procurement-tracking__delay-filter"><input v-model="filters.unissuedOnly" type="checkbox" aria-label="未出库">未出库</label>
+      <el-button @click="resetFilters">重置筛选</el-button>
+      </div>
       <div class="procurement-tracking__actions">
         <el-button @click="settingsVisible = true">列设置</el-button>
         <el-button type="primary" :loading="refreshStarting" :disabled="refreshCoolingDown" @click="refreshFromU9">立即刷新</el-button>
         <el-button @click="openInventorySettings">库存设置</el-button>
+        <el-button :loading="exporting" :disabled="loading || !filteredItems.length || !columns.length" @click="exportExcel">导出 Excel</el-button>
       </div>
-      <span class="procurement-tracking__updated">最近成功刷新：{{ formatDate(result?.lastSuccessfulRefreshAt, true) }}</span>
+      <span class="procurement-tracking__updated">刷新：{{ formatDate(result?.lastSuccessfulRefreshAt, true) }}</span>
     </header>
 
     <el-alert v-if="result?.lastRefreshError" :title="`最近一次刷新失败，当前继续显示上次完整快照：${result.lastRefreshError}`" type="warning" :closable="false" show-icon />
@@ -351,7 +549,7 @@ onBeforeUnmount(() => {
         <div class="procurement-tracking__empty-tip">
           {{ result && !result.hasPublishedBom
             ? '当前项目尚无已发布的标准件或电气件BOM，发布后将自动进入采购跟踪。'
-            : '暂无采购跟踪数据' }}
+            : result?.items.length ? '没有符合筛选条件的记录' : '暂无采购跟踪数据' }}
         </div>
       </template>
       <el-table-column
@@ -361,13 +559,14 @@ onBeforeUnmount(() => {
         :label="column.label"
         :sortable="deliveryColumns.includes(column.key as DeliveryColumn) ? 'custom' : false"
         :width="column.fixedWidth"
-        :min-width="column.fixedWidth ? undefined : column.width / 10"
+        :min-width="column.fixedWidth ? undefined : column.width / 2.5"
         :resizable="false"
         :align="column.align ?? 'left'"
         show-overflow-tooltip
       >
         <template #default="{ row }">
-          <el-tag v-if="column.key === 'purchaseRequisitionStatus' || column.key === 'purchaseOrderStatus'" :type="statusType(row[column.key])" size="small">{{ row[column.key] }}</el-tag>
+          <span v-if="isMovementColumn(column.key)" class="procurement-tracking__movement" :class="movementTone(row, column.key)" :title="movementHint(row, column.key)">{{ movementText(row, column.key) }}</span>
+          <el-tag v-else-if="(column.key === 'purchaseRequisitionStatus' || column.key === 'purchaseOrderStatus') && !row.isWarehouseMovementRow" :type="statusType(row[column.key])" size="small">{{ row[column.key] }}</el-tag>
           <span v-else-if="column.key === 'inventoryQuantity'" :title="inventoryHint(row)">{{ cellText(row, column.key) }}</span>
           <span v-else :title="cellText(row, column.key)">{{ cellText(row, column.key) }}</span>
         </template>
@@ -375,7 +574,7 @@ onBeforeUnmount(() => {
     </el-table>
 
     <div v-if="result?.items.length" class="procurement-tracking__pagination" aria-label="备料明细分页">
-      <span>共 {{ result.items.length }} 条</span>
+      <span>共 {{ filteredItems.length }} 条<span v-if="filteredItems.length !== result.items.length">（全部 {{ result.items.length }} 条）</span></span>
       <select v-model.number="pageSize" aria-label="备料明细每页条数"><option :value="30">30条/页</option><option :value="50">50条/页</option><option :value="100">100条/页</option><option :value="200">200条/页</option></select>
       <button type="button" class="pdm-secondary-action" aria-label="备料明细上一页" :disabled="page <= 1" @click="page -= 1">‹</button>
       <span>{{ page }} / {{ pageCount }}</span>
@@ -420,19 +619,30 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
+.procurement-tracking__filters{display:flex;flex-wrap:nowrap;align-items:center;gap:8px;flex:0 0 auto;margin:0}
+.procurement-tracking__brand-filter{width:118px;flex:0 0 118px}
+.procurement-tracking__brand-filter{height:30px;box-sizing:border-box;border:1px solid var(--pdm-border);border-radius:4px;background:var(--pdm-panel,#fff);color:var(--pdm-text);font:inherit;font-size:12px;padding:0 8px;min-width:0}
+.procurement-tracking__movement{white-space:pre-line;line-height:18px;display:block}
+.procurement-tracking__movement.is-transfer{color:var(--pdm-orange)}
+.procurement-tracking__movement.is-stockin{color:var(--pdm-blue)}
+.procurement-tracking__search{height:30px;box-sizing:border-box;border:1px solid var(--pdm-border);border-radius:4px;background:var(--pdm-panel,#fff);color:var(--pdm-text);font:inherit;font-size:12px;padding:0 8px;min-width:0}
+.procurement-tracking__multi-filter{display:flex;width:118px;max-width:100%;height:30px;box-sizing:border-box;flex:0 0 118px;align-items:center;justify-content:space-between;gap:5px;padding:0 8px;border:1px solid var(--pdm-border);border-radius:4px;background:var(--pdm-panel,#fff);color:var(--pdm-text);font:inherit;font-size:12px;cursor:pointer}.procurement-tracking__multi-filter>span:first-child{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.procurement-tracking__multi-filter.has-value{border-color:var(--pdm-blue);color:var(--pdm-blue)}.procurement-tracking__search{width:220px;max-width:100%}
+.procurement-tracking__multi-options{display:grid;gap:7px;max-height:260px;overflow:auto}.procurement-tracking__multi-options label{display:flex;align-items:center;gap:7px;color:var(--pdm-text);font-size:12px}.procurement-tracking__multi-options>span{color:var(--pdm-muted);font-size:12px}.procurement-tracking__multi-options>button{justify-self:end;border:0;background:transparent;color:var(--pdm-blue);font-size:12px;cursor:pointer}
+.procurement-tracking__delay-filter{display:flex;align-items:center;gap:4px;font-size:12px;color:var(--pdm-text);white-space:nowrap}
+.procurement-tracking__filters .el-button{height:30px;margin:0}
 .procurement-tracking__warehouse-list{display:flex;flex-direction:column;max-height:60vh;overflow:auto}
 .procurement-tracking__pagination{display:flex;flex:0 0 auto;align-items:center;justify-content:flex-end;gap:8px;padding:8px 10px;color:var(--pdm-muted);font-size:11px}
 .procurement-tracking__pagination select{height:28px;padding:0 24px 0 8px;border:1px solid var(--pdm-border);border-radius:5px;background:#fff;color:var(--pdm-text)}
 .procurement-tracking__pagination .pdm-secondary-action{width:28px;min-width:28px;height:28px;min-height:28px;padding:0}
-.procurement-tracking{display:flex;flex-direction:column;min-width:0;min-height:0;height:100%;padding:8px 18px 18px}.procurement-tracking__heading{display:flex;align-items:center;justify-content:space-between;gap:8px;min-height:30px;flex-shrink:0;margin-bottom:6px}.procurement-tracking__actions{display:flex;align-items:center;gap:8px;flex-shrink:0}.procurement-tracking__actions :deep(.el-button){box-sizing:border-box;width:80px;min-width:80px;height:30px;min-height:30px;flex:0 0 80px;margin:0;padding:0 8px}.procurement-tracking__updated{margin-left:auto;color:#64748b;font-size:12px}.procurement-tracking__table{min-height:0;flex:1 1 auto;margin-top:0}.procurement-tracking__settings-note{margin:0 0 12px;color:#64748b;line-height:1.6}.procurement-tracking__column-list{max-height:460px;overflow:auto;border:1px solid #e2e8f0;border-radius:8px}.procurement-tracking__column-item{display:flex;align-items:center;justify-content:space-between;padding:7px 12px;border-bottom:1px solid #eef2f7}.procurement-tracking__column-item:last-child{border-bottom:0}.procurement-tracking :deep(.is-procurement-late td.el-table__cell){background:#fff7ed!important}@media(max-width:1000px){.procurement-tracking__heading{flex-wrap:wrap}}
+.procurement-tracking{display:flex;flex-direction:column;min-width:0;min-height:0;height:100%;padding:8px 18px 18px}.procurement-tracking__heading{display:flex;overflow-x:auto;align-items:center;justify-content:space-between;gap:8px;min-height:30px;flex-shrink:0;margin-bottom:6px}.procurement-tracking__actions{display:flex;align-items:center;gap:8px;flex-shrink:0}.procurement-tracking__actions :deep(.el-button){box-sizing:border-box;width:80px;min-width:80px;height:30px;min-height:30px;flex:0 0 80px;margin:0;padding:0 8px}.procurement-tracking__updated{margin-left:auto;flex-shrink:0;white-space:nowrap;color:#64748b;font-size:12px}.procurement-tracking__table{min-height:0;flex:1 1 auto;margin-top:0}.procurement-tracking__settings-note{margin:0 0 12px;color:#64748b;line-height:1.6}.procurement-tracking__column-list{max-height:460px;overflow:auto;border:1px solid #e2e8f0;border-radius:8px}.procurement-tracking__column-item{display:flex;align-items:center;justify-content:space-between;padding:7px 12px;border-bottom:1px solid #eef2f7}.procurement-tracking__column-item:last-child{border-bottom:0}.procurement-tracking :deep(.is-procurement-late td.el-table__cell){background:#fff7ed!important}@media(max-width:1000px){.procurement-tracking__heading{flex-wrap:nowrap}}
 </style>
 
 <style scoped>
 /* Fit the panel with single-line cells; overflow tooltips retain access to full text. */
 .procurement-tracking__table { width: 100%; max-width: 100%; }
-.procurement-tracking__table :deep(.cell) { min-width: 0; padding-right: 6px; padding-left: 6px; text-align: center; font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.procurement-tracking__table :deep(.cell) { min-width: 0; padding-right: 6px; padding-left: 6px; text-align: center; font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .procurement-tracking__table :deep(.cell.el-tooltip) { min-width: 0; max-width: 100%; }
-.procurement-tracking__table :deep(.el-tag) { max-width: 100%; padding-right: 3px; padding-left: 3px; border: 0; background: transparent; font-size: 13px; }
+.procurement-tracking__table :deep(.el-tag) { max-width: 100%; padding-right: 3px; padding-left: 3px; border: 0; background: transparent; font-size: 11px; }
 .procurement-tracking__table :deep(.el-tag__content) { overflow: hidden; text-overflow: ellipsis; }
 .procurement-tracking__settings-body { display: flex; flex-direction: column; height: 100%; min-height: 0; }
 .procurement-tracking__settings-note { flex: 0 0 auto; }

@@ -52,4 +52,12 @@ public interface IProjectFileStorage
     Task<Stream> OpenReadAsync(ProjectFileVersion version, CancellationToken cancellationToken);
     Task DiscardAsync(StoredProjectFileUpload upload, CancellationToken cancellationToken);
     Task DeleteVersionsAsync(IReadOnlyList<ProjectFileVersion> versions, CancellationToken cancellationToken);
+    Task<StoredProjectFileUpload> CopyVersionAsync(
+        ProjectFileVersion source,
+        Guid targetProjectId,
+        Guid targetFolderId,
+        string targetStorageRoot,
+        string actor,
+        CancellationToken cancellationToken) =>
+        throw new NotSupportedException("当前项目文件存储不支持跨项目复制版本。");
 }

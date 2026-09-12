@@ -39,10 +39,19 @@ public sealed class MaterialService(
         int pageSize,
         string actor,
         UserRole role,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        string? createdAtOrder = null, bool ordinaryOnly = false)
     {
         await RequireAnyPermissionAsync(actor, role, [PermissionCodes.MaterialView, PermissionCodes.BomEdit, PermissionCodes.StandardLibraryView], cancellationToken);
-        return await materials.ListMaterialPageAsync(query, categoryCode, brand, includeArchived, page, pageSize, cancellationToken);
+        if (createdAtOrder is not (null or "" or "asc" or "desc")) throw new PdmRuleException("创建时间排序仅支持asc或desc。");
+        return await materials.ListMaterialPageAsync(query, categoryCode, brand, includeArchived, page, pageSize, cancellationToken, createdAtOrder, ordinaryOnly);
+    }
+
+    public async Task<IReadOnlyList<PdmMaterial>> ListPendingMasterMaterialsAsync(string actor, UserRole role, CancellationToken cancellationToken)
+    {
+        await RequirePermissionAsync(actor, role, PermissionCodes.MaterialView, cancellationToken);
+        var headers = (await materials.ListBomHeaderMaterialLinksAsync(cancellationToken)).Select(link => link.MaterialId).ToHashSet();
+        return (await materials.ListPendingMasterMaterialsAsync(cancellationToken)).Where(item => !headers.Contains(item.Id)).ToArray();
     }
 
     public Task<IReadOnlyList<MaterialCategory>> ListCategoriesAsync(bool includeHidden, CancellationToken cancellationToken) =>
@@ -129,10 +138,13 @@ public sealed class MaterialService(
     public Task<IReadOnlyList<MaterialSyncTask>> ListSyncTasksAsync(CancellationToken cancellationToken) =>
         materials.ListSyncTasksAsync(cancellationToken);
 
-    public async Task<IReadOnlyList<MaterialSyncTask>> ListSyncTasksAsync(string actor, UserRole role, CancellationToken cancellationToken)
+    public async Task<IReadOnlyList<MaterialSyncTask>> ListSyncTasksAsync(string actor, UserRole role, CancellationToken cancellationToken, bool ordinaryOnly = false)
     {
         await RequirePermissionAsync(actor, role, PermissionCodes.MaterialView, cancellationToken);
-        return await materials.ListSyncTasksAsync(cancellationToken);
+        var tasks = await materials.ListSyncTasksAsync(cancellationToken);
+        if (!ordinaryOnly) return tasks;
+        var headers = (await materials.ListBomHeaderMaterialLinksAsync(cancellationToken)).Select(link => link.MaterialId).ToHashSet();
+        return tasks.Where(task => !headers.Contains(task.MaterialId)).ToArray();
     }
 
     public async Task<IReadOnlyList<MaterialCodeApplication>> ListCodeApplicationsAsync(Guid? projectId, MaterialCodeApplicationStatus? status, string actor, UserRole role, CancellationToken cancellationToken)
@@ -754,18 +766,25 @@ public sealed class MaterialService(
         MaterialCategory category,
         CancellationToken cancellationToken)
     {
-        var latestSequence = 0L;
+        var latestSequence = category.CurrentSequence;
         var seenCodes = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        string? codeCursor = category.CurrentSequence > 0
+            ? $"{category.NumberPrefix}{category.CurrentSequence.ToString($"D{category.SequenceLength}")}"
+            : null;
         for (var pageIndex = 0; pageIndex < MaximumU9MaterialReferencePages; pageIndex++)
         {
+            // 固定查询首批数据，以料号游标推进；只需查找已知流水之后的号码。
+            var referenceFilter = $"MainItemCategory.Code = '{category.Code}'";
+            if (codeCursor is not null)
+                referenceFilter += $" and Code > '{codeCursor.Replace("'", "''", StringComparison.Ordinal)}'";
             var payload = JsonSerializer.Serialize(new
             {
                 ReferenceCode = "ItemMaster",
                 ReferenceEntityFullName = "UFIDA.U9.CBO.SCM.Item.ItemMaster",
-                ReferenceDefaultFilter = $"MainItemCategory.Code = '{category.Code}'",
+                ReferenceDefaultFilter = referenceFilter,
                 Transclude = string.Empty,
                 TargetOrgCode = configuration.OrganizationCode,
-                PageIndex = pageIndex,
+                PageIndex = 0,
                 PageSize = U9MaterialReferencePageSize,
                 Filter = string.Empty,
                 FilterObjectXML = string.Empty
@@ -793,14 +812,18 @@ public sealed class MaterialService(
             foreach (var item in page.Customers)
             {
                 var code = item.Code.Trim();
+                if (codeCursor is not null && string.Compare(code, codeCursor, StringComparison.OrdinalIgnoreCase) <= 0)
+                    throw new PdmRuleException("U9C最新料号查询未遵守料号游标条件，无法可靠确定当前最新序号。");
                 if (!seenCodes.Add(code)) continue;
                 if (TryParseMaterialSequence(code, category, out var sequence)) latestSequence = Math.Max(latestSequence, sequence);
             }
 
+            if (page.RawCount > 0 && seenCodes.Count == countBeforePage)
+                throw new PdmRuleException("U9C最新料号分页查询未向后推进，无法可靠确定当前最新序号。");
+            if (seenCodes.Count > countBeforePage)
+                codeCursor = seenCodes.Max(StringComparer.OrdinalIgnoreCase);
             if (page.RawCount == 0 || page.RawCount < U9MaterialReferencePageSize)
                 return new(latestSequence, token);
-            if (seenCodes.Count == countBeforePage)
-                throw new PdmRuleException("U9C最新料号分页查询未向后推进，无法可靠确定当前最新序号。");
         }
 
         throw new PdmRuleException($"U9C分类 {category.Code} 的料号超过可安全读取的分页范围，无法可靠确定当前最新序号。");
@@ -880,7 +903,17 @@ public sealed class MaterialService(
             null,
             null,
             now,
-            now);
+            now)
+        {
+            MaterialCode = materialForApproval.MaterialCode,
+            MaterialName = materialForApproval.Name,
+            Specification = materialForApproval.Specification,
+            Brand = materialForApproval.Brand,
+            Remark = materialForApproval.Remark,
+            CategoryCode = materialForApproval.CategoryCode,
+            RequestedBy = materialForApproval.CreatedBy,
+            RequestedAt = materialForApproval.CreatedAt
+        };
         var audit = new AuditEntry(
             Guid.NewGuid(),
             now,

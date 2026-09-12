@@ -3,6 +3,7 @@ import { ElMessageBox } from 'element-plus'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import ProjectWorkspaceHeader from '../src/components/ProjectWorkspaceHeader.vue'
 import type { ProjectSummary } from '../src/types'
+import { userDisplayNameKey } from '../src/userDisplay'
 
 const rootProject: ProjectSummary = {
   id: 'root-1',
@@ -114,8 +115,8 @@ describe('ProjectWorkspaceHeader', () => {
     expect(wrapper.findAll('.pdm-project-family__state i')).toHaveLength(0)
     expect(wrapper.find('.pdm-project-selected-summary').exists()).toBe(false)
     const projectTabs = wrapper.findAll('.pdm-project-tabs button')
-    expect(projectTabs).toHaveLength(8)
-    expect(projectTabs.map(button => button.text())).toEqual(['概览', '文件', '图档', 'BOM', '发布', '备料', '版本', '记录'])
+    expect(projectTabs).toHaveLength(10)
+    expect(projectTabs.map(button => button.text())).toEqual(['概览', '文件', '项目计划', '验证计划', '图档', 'BOM', '发布', '备料', '版本', '记录'])
     expect(wrapper.text()).not.toContain('图纸审核')
     expect(sidebar.get('[aria-label="选择项目号 P700002"] .pdm-project-family__state').text()).toBe('可编辑')
     expect(sidebar.get('[aria-label="选择项目号 P700002-1"] .pdm-project-family__state').text()).toBe('正常')
@@ -315,6 +316,17 @@ describe('ProjectWorkspaceHeader', () => {
 
     expect(wrapper.get('[aria-label="选择项目号 P700002"] .pdm-project-family__state').text()).toBe('正常')
     expect(wrapper.text()).not.toContain('已检出')
+  })
+
+  it('其他用户编辑图档时显示姓名而不是账号', () => {
+    const wrapper = mount(ProjectWorkspaceHeader, {
+      props: { project: rootProject, projects: [rootProject, drawingChild], activeTab: 'documents', currentUsername: 'engineer' },
+      global: { provide: { [userDisplayNameKey as symbol]: (username?: string | null) => username === 'other-user' ? '王勇煌' : username || '—' } },
+    })
+
+    const state = wrapper.get('[aria-label="选择项目号 P700002-2"] .pdm-project-family__state')
+    expect(state.text()).toBe('王勇煌编辑中')
+    expect(state.text()).not.toContain('other-user')
   })
 
   it('统一引用结构统计后，子项目选中和切走均保持41个三维图档', async () => {

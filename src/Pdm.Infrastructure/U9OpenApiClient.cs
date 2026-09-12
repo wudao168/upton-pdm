@@ -106,6 +106,8 @@ public sealed class U9OpenApiClient(HttpClient httpClient) : IU9OpenApiClient, I
                 line.Status AS LineStatus,
                 line.Cancel_Canceled AS IsCanceled,
                 pr.BusinessDate AS BusinessDate,
+                line.CreatedOn AS SourceCreatedAt,
+                CAST(NULL AS NVARCHAR(255)) AS BuyerName,
                 line.ItemInfo_ItemCode AS MaterialCode,
                 line.ItemInfo_ItemName AS ItemName,
                 item.SPECS AS Specification,
@@ -119,7 +121,11 @@ public sealed class U9OpenApiClient(HttpClient httpClient) : IU9OpenApiClient, I
                 CAST(0 AS DECIMAL(24,9)) AS ArrivedQuantity,
                 CAST(NULL AS NVARCHAR(1000)) AS PurchaseRemark,
                 line.DeliveryDate AS DeliveryDate,
-                CAST(NULL AS DATETIME) AS LatestDeliveryDate
+                CAST(NULL AS DATETIME) AS LatestDeliveryDate,
+                CAST(NULL AS DATETIME) AS MovementDate,
+                CAST(NULL AS DECIMAL(24,9)) AS MovementQuantity,
+                CAST(NULL AS NVARCHAR(100)) AS MovementUnit,
+                CAST(NULL AS VARCHAR(80)) AS SourcePoLineId
             FROM PR_PR pr
             INNER JOIN PR_PRLine line ON line.PR=pr.ID
             INNER JOIN Base_Organization org ON org.ID=pr.Org
@@ -140,6 +146,8 @@ public sealed class U9OpenApiClient(HttpClient httpClient) : IU9OpenApiClient, I
                 pol.Status AS LineStatus,
                 pol.Cancel_Canceled AS IsCanceled,
                 po.BusinessDate AS BusinessDate,
+                pol.CreatedOn AS SourceCreatedAt,
+                buyer.Name AS BuyerName,
                 pol.ItemInfo_ItemCode AS MaterialCode,
                 pol.ItemInfo_ItemName AS ItemName,
                 item.SPECS AS Specification,
@@ -153,13 +161,20 @@ public sealed class U9OpenApiClient(HttpClient httpClient) : IU9OpenApiClient, I
                 pol.TotalRecievedQtyTU AS ArrivedQuantity,
                 po.PurAdviceMemo AS PurchaseRemark,
                 ship.DeliveryDate AS DeliveryDate,
-                ship.LatestDeliveryDate AS LatestDeliveryDate
+                ship.LatestDeliveryDate AS LatestDeliveryDate,
+                CAST(NULL AS DATETIME) AS MovementDate,
+                CAST(NULL AS DECIMAL(24,9)) AS MovementQuantity,
+                CAST(NULL AS NVARCHAR(100)) AS MovementUnit,
+                CAST(NULL AS VARCHAR(80)) AS SourcePoLineId
             FROM PM_PurchaseOrder po
             INNER JOIN PM_POLine pol ON pol.PurchaseOrder=po.ID
             INNER JOIN PM_PODocType documentType ON documentType.ID=po.DocumentType
             INNER JOIN Base_Organization org ON org.ID=po.Org
             LEFT JOIN CBO_ItemMaster item ON item.ID=pol.ItemInfo_ItemID
             LEFT JOIN CBO_Project project ON project.ID=pol.Project
+            LEFT JOIN (
+                SELECT ID,MAX(Name) AS Name FROM CBO_Operators_Trl WHERE SysMLFlag='zh-CN' GROUP BY ID
+            ) buyer ON buyer.ID=po.PurOper
             LEFT JOIN (
                 SELECT POLine,MAX(DeliveryDate) AS DeliveryDate,MAX(COALESCE(PlanArriveDate,DeliveryDate)) AS LatestDeliveryDate
                 FROM PM_POShipLine
@@ -178,6 +193,94 @@ public sealed class U9OpenApiClient(HttpClient httpClient) : IU9OpenApiClient, I
                         WHERE sourceProject.Code IN ({{codeList}}) OR sourceLine.SeiBanCode IN ({{codeList}})
                     )
                   )
+
+            UNION ALL
+
+            SELECT 'RCV',CAST(line.ID AS VARCHAR(80)),NULL,org.Code,receipt.DocNo,line.DocLineNo,
+                line.Status,0,receipt.BusinessDate,line.CreatedOn,NULL,
+                line.ItemInfo_ItemCode,line.ItemInfo_ItemName,NULL,NULL,project.Code,project.ShortName,line.SeiBanCode,
+                0,0,0,0,NULL,NULL,NULL,line.ConfirmDate,line.RcvQtyTU,unit.Name,
+                CASE WHEN receiptPo.ID IS NOT NULL THEN CAST(receiptPoLine.ID AS VARCHAR(80)) END
+            FROM PM_Receivement receipt
+            INNER JOIN PM_RcvLine line ON line.Receivement=receipt.ID
+            LEFT JOIN PM_POLine receiptPoLine ON receiptPoLine.ID=line.SrcPO_SrcDocLine_EntityID
+                AND receiptPoLine.ItemInfo_ItemCode=line.ItemInfo_ItemCode
+                AND line.SrcPO_SrcDocLine_EntityType='UFIDA.U9.PM.PO.POLine'
+            LEFT JOIN PM_PurchaseOrder receiptPo ON receiptPo.ID=receiptPoLine.PurchaseOrder AND receiptPo.Org=receipt.Org
+            INNER JOIN PM_RcvDocType receiptType ON receiptType.ID=receipt.RcvDocType
+            INNER JOIN Base_Organization org ON org.ID=receipt.Org
+            LEFT JOIN CBO_Project project ON project.ID=line.Project
+            LEFT JOIN Base_UOM_Trl unit ON unit.ID=line.TradeUOM AND unit.SysMLFlag='zh-CN'
+            WHERE org.Code='{{organization}}' AND receiptType.Code='RCV01'
+              AND COALESCE(receipt.Cancel_Canceled,0)=0 AND COALESCE(line.Cancel_Canceled,0)=0
+              AND line.Status IN (4,5) AND line.ConfirmDate IS NOT NULL AND line.RcvQtyTU<>0
+              AND (line.Project IN (SELECT ID FROM CBO_Project WHERE Code IN ({{codeList}})) OR line.SeiBanCode IN ({{codeList}}))
+
+            UNION ALL
+
+            SELECT CASE WHEN COALESCE(line.Project,0)=0 AND COALESCE(line.SeibanCode,'')='' AND applyDoc.ID IS NOT NULL THEN 'DIRECT' ELSE 'ISSUE' END,
+                CAST(line.ID AS VARCHAR(80)),NULL,org.Code,issue.DocNo,line.DocLineNo,
+                issue.DocState,0,issue.BusinessDate,issue.CreatedOn,NULL,
+                item.Code,item.Name,NULL,NULL,project.Code,project.ShortName,
+                CASE WHEN applyDoc.ID IS NOT NULL THEN applyLine.IssueOrgSeibanNo ELSE line.SeibanCode END,
+                0,0,0,0,NULL,NULL,NULL,issue.ConfirmDate,line.IssuedQtyUOM,unit.Name,NULL
+            FROM Issue_MaterialDeliveryDoc issue
+            INNER JOIN Issue_MaterialDeliveryDocLine line ON line.MaterialDeliveryDoc=issue.ID
+            INNER JOIN Base_Organization org ON org.ID=issue.Org
+            INNER JOIN CBO_ItemMaster item ON item.ID=line.ItemInfo
+            LEFT JOIN Issue_IssueApplyDocLine applyLine ON applyLine.ID=line.SourceDoc_SrcDocLine_EntityID
+                AND line.SourceDoc_SrcDocLine_EntityType='UFIDA.U9.IssueNew.IssueApplyBE.IssueApplyDocLine'
+                AND applyLine.ItemInfo=line.ItemInfo
+            LEFT JOIN Issue_IssueApplyDoc applyDoc ON applyDoc.ID=applyLine.IssueApplyDoc AND applyDoc.Org=issue.Org
+                AND applyDoc.ID=line.SourceDoc_SrcDoc_EntityID
+            LEFT JOIN CBO_Project project ON project.ID=CASE WHEN applyDoc.ID IS NOT NULL THEN applyLine.Project ELSE line.Project END
+            LEFT JOIN Base_UOM_Trl unit ON unit.ID=line.IssueUOM AND unit.SysMLFlag='zh-CN'
+            WHERE org.Code='{{organization}}' AND issue.IssueType=0 AND issue.DocState IN (2,3)
+              AND COALESCE(issue.Cancel_Canceled,0)=0 AND issue.ConfirmDate IS NOT NULL AND line.IssuedQtyUOM<>0
+              AND (line.Project IN (SELECT ID FROM CBO_Project WHERE Code IN ({{codeList}}))
+                   OR line.SeibanCode IN ({{codeList}})
+                   OR line.SourceDoc_SrcDocLine_EntityID IN (
+                       SELECT requested.ID FROM Issue_IssueApplyDocLine requested
+                       INNER JOIN Issue_IssueApplyDoc requestDoc ON requestDoc.ID=requested.IssueApplyDoc AND requestDoc.Org=issue.Org
+                       WHERE requested.Project IN (SELECT ID FROM CBO_Project WHERE Code IN ({{codeList}}))
+                          OR requested.IssueOrgSeibanNo IN ({{codeList}})))
+              AND (project.Code IN ({{codeList}})
+                   OR CASE WHEN applyDoc.ID IS NOT NULL THEN applyLine.IssueOrgSeibanNo ELSE line.SeibanCode END IN ({{codeList}}))
+
+            UNION ALL
+
+            SELECT 'MISC',CAST(line.ID AS VARCHAR(80)),NULL,org.Code,misc.DocNo,line.DocLineNo,
+                misc.Status,0,misc.BusinessDate,misc.CreatedOn,NULL,
+                line.ItemInfo_ItemCode,line.ItemInfo_ItemName,NULL,NULL,project.Code,project.ShortName,line.SeibanCode,
+                0,0,0,0,NULL,NULL,NULL,misc.BusinessDate,line.StoreUOMQty,unit.Name,NULL
+            FROM InvDoc_MiscShip misc
+            INNER JOIN InvDoc_MiscShipL line ON line.MiscShip=misc.ID
+            INNER JOIN Base_Organization org ON org.ID=misc.Org
+            LEFT JOIN CBO_Project project ON project.ID=line.Project
+            LEFT JOIN Base_UOM_Trl unit ON unit.ID=line.StoreUOM AND unit.SysMLFlag='zh-CN'
+            WHERE org.Code='{{organization}}' AND misc.Status=2 AND COALESCE(misc.Cancel_Canceled,0)=0
+              AND misc.BusinessDate IS NOT NULL AND line.StoreUOMQty<>0
+              AND (line.Project IN (SELECT ID FROM CBO_Project WHERE Code IN ({{codeList}})) OR line.SeibanCode IN ({{codeList}}))
+
+            UNION ALL
+
+            -- Only the converted-to child is a project receipt; never count the before row.
+            SELECT 'TRANSFER',CAST(child.ID AS VARCHAR(80)),NULL,org.Code,transfer.DocNo,child.DocLineNo,
+                transfer.Status,0,transfer.BusinessDate,NULL,NULL,
+                child.ItemInfo_ItemCode,child.ItemInfo_ItemName,NULL,NULL,project.Code,project.ShortName,child.SeibanCode,
+                0,0,0,0,NULL,NULL,NULL,transfer.BusinessDate,child.StoreUOMQty,unit.Name,NULL
+            FROM InvDoc_TransferForm transfer
+            INNER JOIN InvDoc_TransferFormL parent ON parent.TransferForm=transfer.ID
+            INNER JOIN InvDoc_TransferFormSL child ON child.TransferFormL=parent.ID
+            INNER JOIN Base_Organization org ON org.ID=transfer.Org
+            LEFT JOIN CBO_Project project ON project.ID=child.Project
+            LEFT JOIN Base_UOM_Trl unit ON unit.ID=child.StoreUOM AND unit.SysMLFlag='zh-CN'
+            WHERE org.Code='{{organization}}' AND transfer.Status=2 AND COALESCE(transfer.Cancel_Canceled,0)=0
+              AND parent.TransferFormType=0 AND child.TransferFormType=1
+              AND (COALESCE(parent.Project,0)<>COALESCE(child.Project,0)
+                   OR COALESCE(parent.SeibanCode,'')<>COALESCE(child.SeibanCode,''))
+              AND transfer.BusinessDate IS NOT NULL AND child.StoreUOMQty>0
+              AND (child.Project IN (SELECT ID FROM CBO_Project WHERE Code IN ({{codeList}})) OR child.SeibanCode IN ({{codeList}}))
             """;
         using var request = new HttpRequestMessage(HttpMethod.Post, endpoint)
         {
@@ -390,13 +493,18 @@ public sealed class U9OpenApiClient(HttpClient httpClient) : IU9OpenApiClient, I
         if (responseCode == 0 && motherIds.Length > 0 && boms.Any(bom => bom.Components.Count > 0))
         {
             var flags = await QueryCreationFlagsAsync(baseUrl, token,
-                $"SELECT b.ItemMaster AS ItemId,b.BOMVersionCode,b.Lot,c.Sequence,c.IsIssueOrgFixed FROM CBO_BOMMaster b JOIN CBO_BOMComponent c ON c.BOMMaster=b.ID WHERE b.ItemMaster IN ({string.Join(",", motherIds)})", cancellationToken);
+                $"SELECT b.ItemMaster AS ItemId,b.BOMVersionCode,b.Lot,c.Sequence,c.IsIssueOrgFixed,c.IsCharge,e.Code AS CostElementCode FROM CBO_BOMMaster b JOIN CBO_BOMComponent c ON c.BOMMaster=b.ID LEFT JOIN CBO_CostElement e ON e.ID=c.CostElement WHERE b.ItemMaster IN ({string.Join(",", motherIds)})", cancellationToken);
             boms = boms.Select(bom => bom with { Components = bom.Components.Select(component =>
             {
                 var matches = flags.Where(row => ReadString(row, "ItemId") == bom.ItemId
                     && ReadString(row, "BOMVersionCode") == bom.BomVersionCode && ReadInt(row, "Lot") == bom.Lot
                     && ReadInt(row, "Sequence") == component.Sequence).ToArray();
-                return component with { IsIssueOrgFixed = matches.Length == 1 ? ReadBool(matches[0], "IsIssueOrgFixed") : null };
+                return component with
+                {
+                    IsIssueOrgFixed = matches.Length == 1 ? ReadBool(matches[0], "IsIssueOrgFixed") : null,
+                    IsCharge = matches.Length == 1 ? ReadBool(matches[0], "IsCharge") : null,
+                    CostElementCode = matches.Length == 1 ? ReadString(matches[0], "CostElementCode") : null
+                };
             }).ToArray() }).ToArray();
         }
         return new U9BomQueryResult(responseCode, ReadMessage(root), boms);
@@ -606,12 +714,36 @@ public sealed class U9OpenApiClient(HttpClient httpClient) : IU9OpenApiClient, I
                 ReadDecimal(row, "ArrivedQuantity") ?? 0m,
                 ReadString(row, "PurchaseRemark"),
                 ReadDateTimeOffset(row, "DeliveryDate"),
-                ReadDateTimeOffset(row, "LatestDeliveryDate")))
+                ReadDateTimeOffset(row, "LatestDeliveryDate"))
+            {
+                SourceCreatedAt = ReadDateTimeOffset(row, "SourceCreatedAt"),
+                BuyerName = ReadString(row, "BuyerName"),
+                MovementDate = ReadWarehouseDate(row),
+                MovementQuantity = ReadDecimal(row, "MovementQuantity"),
+                MovementUnit = ReadString(row, "MovementUnit"),
+                SourcePoLineId = ReadString(row, "SourcePoLineId")
+            })
             .Where(row => row.RecordKind is U9ProcurementRecordKinds.PurchaseRequisition or U9ProcurementRecordKinds.PurchaseOrder
+                    or U9ProcurementRecordKinds.Receipt or U9ProcurementRecordKinds.MaterialIssue or U9ProcurementRecordKinds.MiscShipment or U9ProcurementRecordKinds.TransferReceipt or U9ProcurementRecordKinds.DirectStockIssue
                 && !string.IsNullOrWhiteSpace(row.LineId)
                 && !string.IsNullOrWhiteSpace(row.DocumentNumber)
                 && !string.IsNullOrWhiteSpace(row.MaterialCode))
+            .Select(row => row.RecordKind is U9ProcurementRecordKinds.Receipt or U9ProcurementRecordKinds.MaterialIssue or U9ProcurementRecordKinds.MiscShipment or U9ProcurementRecordKinds.TransferReceipt or U9ProcurementRecordKinds.DirectStockIssue
+                && (!row.MovementDate.HasValue || !row.MovementQuantity.HasValue)
+                    ? throw new PdmRuleException($"U9C出入库明细不完整：{row.DocumentNumber}，行{row.LineNumber}；保留上一份快照。")
+                    : row)
             .ToArray();
+    }
+
+    private static DateTimeOffset? ReadWarehouseDate(JsonElement row)
+    {
+        var text = ReadString(row, "MovementDate");
+        if (string.IsNullOrWhiteSpace(text)) return null;
+        // U9 returns China-local confirmation times without an offset.
+        if (DateTime.TryParseExact(text, ["yyyy-MM-dd", "yyyy-MM-dd'T'HH:mm:ss", "yyyy-MM-dd'T'HH:mm:ss.FFFFFFF", "yyyy-MM-dd HH:mm:ss"],
+            System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.None, out var local))
+            return new DateTimeOffset(DateTime.SpecifyKind(local, DateTimeKind.Unspecified), TimeSpan.FromHours(8));
+        return ReadDateTimeOffset(row, "MovementDate");
     }
 
     private static IReadOnlyList<JsonElement> ReadNestedDataRows(JsonElement root)
@@ -686,7 +818,9 @@ public sealed class U9OpenApiClient(HttpClient httpClient) : IU9OpenApiClient, I
             UsageQtyType = ReadInt(row, "UsageQtyType", "m_usageQtyType"),
             IsSpecialUseItem = ReadBool(row, "IsSpecialUseItem", "m_isSpecialUseItem"),
             IsIssueOrgFixed = ReadBool(row, "IsIssueOrgFixed", "m_isIssueOrgFixed"),
-            IssueOrgCode = ReadEntityString(row, "IssueOrg", "Code")
+            IssueOrgCode = ReadEntityString(row, "IssueOrg", "Code"),
+            IsCharge = ReadBool(row, "IsCharge", "m_isCharge"),
+            CostElementCode = ReadEntityString(row, "CostElement", "Code")
         };
 
     private static IReadOnlyList<JsonElement> ReadArray(JsonElement element, params string[] names)

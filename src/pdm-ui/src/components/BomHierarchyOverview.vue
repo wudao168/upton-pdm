@@ -3,8 +3,8 @@ import { computed, h, onMounted, onUnmounted, ref, watch } from 'vue'
 import { ElMessage } from '../statusMessage'
 import { ElMessageBox } from 'element-plus'
 import U9BomSyncPreview from './U9BomSyncPreview.vue'
-import { executeProjectBomU9Sync, listBom, listBomVersions, listProjectBomHeaders, previewProjectBomU9Sync, retryProjectBomHeaderAutomatic } from '../api'
-import type { BomHeaderKind, BomItem, BomKind, BomVersion, ProjectBomHeader, ProjectSummary } from '../types'
+import { executeProjectBomU9Sync, listBom, listBomVersions, listProjectBomHeaders, listReleasePackages, previewProjectBomU9Sync, retryProjectBomHeaderAutomatic } from '../api'
+import type { BomHeaderKind, BomItem, BomKind, BomVersion, ProjectBomHeader, ProjectSummary, ReleasePackageSummary } from '../types'
 import { useUserDisplayName } from '../userDisplay'
 
 const displayUserName = useUserDisplayName()
@@ -14,6 +14,7 @@ type VisibleBomKind = Exclude<BomKind, 'Unclassified'>
 type ProjectDetail = {
   current: Record<VisibleBomKind, BomItem[]>
   versions: BomVersion[]
+  releases: ReleasePackageSummary[]
   headers: ProjectBomHeader[]
 }
 
@@ -31,6 +32,7 @@ const categoryLabels: Record<VisibleBomKind, string> = {
   Electrical: '电气BOM',
 }
 const detailCache = ref<Record<string, ProjectDetail>>({})
+const expandedProjects = ref<Record<string, boolean>>({})
 const loading = ref(false)
 const error = ref('')
 const syncingRowKey = ref('')
@@ -118,6 +120,15 @@ const orderedProjects = computed(() => {
 })
 const rootHasChildren = computed(() => hierarchyProjects.value.some(project => project.parentProjectId === rootProjectId.value))
 
+function isProjectExpanded(project: ProjectSummary) {
+  return !project.parentProjectId || (expandedProjects.value[project.id]
+    ?? !!detailCache.value[project.id]?.headers.some(header => header.materialCode))
+}
+
+function toggleProject(project: ProjectSummary) {
+  expandedProjects.value[project.id] = !isProjectExpanded(project)
+}
+
 function includedRows(items: BomItem[]) {
   return items.filter(item => !item.manuallyExcluded && !item.pendingClassification)
 }
@@ -165,7 +176,11 @@ const overviewRows = computed(() => orderedProjects.value.flatMap(({ project, de
       unresolvedCount,
       version: released?.label || '工作区',
       releaseStatus: released ? '已发布' : currentItems.length ? '未发布' : '空BOM',
-      releasedAt: released?.releasedAt,
+      releasedAt: [released?.releasedAt, ...(kind === 'Standard' ? (detail?.releases ?? [])
+        .filter(pack => pack.scope === 'StandardLongLead' && pack.state === '已发布')
+        .map(pack => pack.publishedAt) : [])]
+        .filter((value): value is string => !!value && Number.isFinite(Date.parse(value)))
+        .sort((left, right) => Date.parse(right) - Date.parse(left))[0],
       header,
       parentHeader: masterHeader,
     }
@@ -195,6 +210,8 @@ const overviewRows = computed(() => orderedProjects.value.flatMap(({ project, de
     parentHeader: undefined,
   }, ...categoryRows]
 }))
+const visibleOverviewRows = computed(() => overviewRows.value.filter(row => row.isMaster || isProjectExpanded(row.project)))
+
 function isHeaderEligible(row: (typeof overviewRows.value)[number]) {
   return !rootHasChildren.value || row.project.id !== rootProjectId.value || row.headerKind === 'Master'
 }
@@ -314,14 +331,15 @@ function headerCodeTitle(header?: ProjectBomHeader) {
 }
 
 async function fetchProjectDetail(projectId: string): Promise<ProjectDetail> {
-  const [standard, nonStandard, electrical, versions, headers] = await Promise.all([
+  const [standard, nonStandard, electrical, versions, headers, releases] = await Promise.all([
     listBom(projectId, 'Standard', props.token),
     listBom(projectId, 'NonStandard', props.token),
     listBom(projectId, 'Electrical', props.token),
     listBomVersions(projectId, props.token),
     listProjectBomHeaders(projectId, props.token),
+    listReleasePackages(projectId, props.token),
   ])
-  return { current: { Standard: standard, NonStandard: nonStandard, Electrical: electrical }, versions, headers }
+  return { current: { Standard: standard, NonStandard: nonStandard, Electrical: electrical }, versions, headers, releases }
 }
 
 async function loadOverview(force = false) {
@@ -352,6 +370,8 @@ function formatDate(value?: string) {
   return Number.isNaN(date.getTime()) ? value : date.toLocaleString('zh-CN', { hour12: false })
 }
 
+watch([rootProjectId, () => props.token], () => { expandedProjects.value = {} })
+
 watch([rootProjectId, hierarchySignature, () => props.token], () => {
   detailCache.value = {}
   void loadOverview(true)
@@ -372,9 +392,9 @@ watch([rootProjectId, hierarchySignature, () => props.token], () => {
           <tr><th>层级 / BOM</th><th>料号分类</th><th>本级BOM料号</th><th>上级BOM料号</th><th>物料数</th><th>PLM版本</th><th>发布状态</th><th>待处理</th><th>最近发布</th><th>自动流程</th><th>U9C料品</th><th>U9C BOM</th></tr>
         </thead>
         <tbody>
-          <tr v-for="row in overviewRows" :key="row.key" :class="{ 'is-master-row': row.isMaster }">
+          <tr v-for="row in visibleOverviewRows" :key="row.key" :class="{ 'is-master-row': row.isMaster }">
             <td :title="`${row.project.code} · ${row.project.name}`">
-              <span class="bom-overview__project" :style="{ paddingLeft: `${row.depth * 18}px` }"><i v-if="!row.isMaster">↳</i><strong v-if="row.isMaster">{{ row.project.code }}</strong><span v-if="row.isMaster">{{ row.project.name }} · 项目主BOM</span><button v-else type="button" class="bom-overview__link" :aria-label="`进入${row.project.code}的${row.label}`" :title="`进入${row.project.code}的${row.label}`" @click="emit('openBom', row.project.id, row.kind as VisibleBomKind)">{{ row.label }}</button></span>
+              <span class="bom-overview__project" :style="{ paddingLeft: `${row.depth * 18}px` }"><button v-if="row.isMaster && row.project.parentProjectId" type="button" class="bom-overview__toggle" :aria-expanded="isProjectExpanded(row.project)" :aria-label="`${isProjectExpanded(row.project) ? '折叠' : '展开'}${row.project.code}的三类BOM`" @click="toggleProject(row.project)">{{ isProjectExpanded(row.project) ? '▾' : '▸' }}</button><i v-if="!row.isMaster">↳</i><strong v-if="row.isMaster">{{ row.project.code }}</strong><span v-if="row.isMaster">{{ row.project.name }} · 项目主BOM</span><button v-else type="button" class="bom-overview__link" :aria-label="`进入${row.project.code}的${row.label}`" :title="`进入${row.project.code}的${row.label}`" @click="emit('openBom', row.project.id, row.kind as VisibleBomKind)">{{ row.label }}</button></span>
             </td>
             <td>{{ headerCategoryLabel(row.project, row.headerKind) }}</td>
             <td><span :class="row.header?.materialCode ? '' : isHeaderEligible(row) ? 'is-warning' : 'is-muted'" :title="isHeaderEligible(row) ? headerCodeTitle(row.header) : '主项目已有子项目，本级三类BOM不申请料号'">{{ headerCodeText(row.header, isHeaderEligible(row)) }}</span></td>
@@ -403,6 +423,7 @@ watch([rootProjectId, hierarchySignature, () => props.token], () => {
 </template>
 
 <style scoped>
+.bom-overview__toggle{display:inline-flex;flex:0 0 16px;width:16px;height:18px;align-items:center;justify-content:center;padding:0;border:0;background:transparent;color:var(--pdm-blue);font:inherit;cursor:pointer}.bom-overview__toggle:focus-visible{outline:2px solid var(--pdm-blue);outline-offset:1px}
 .bom-overview__link{min-width:0;overflow:hidden;padding:0;border:0;background:transparent;color:var(--pdm-blue);font:inherit;text-overflow:ellipsis;white-space:nowrap;cursor:pointer}.bom-overview__link:hover{text-decoration:underline}.bom-overview__link:focus-visible{outline:2px solid var(--pdm-blue);outline-offset:2px}
 .bom-overview{display:flex;min-height:560px;min-width:0;flex-direction:column;padding:0;border:1px solid var(--pdm-border);border-radius:7px;background:#fff}.bom-overview__error{margin:10px;padding:8px 10px;border-radius:5px;background:#fef2f2;color:#b91c1c}.bom-overview__generation{display:flex;min-height:38px;align-items:center;justify-content:flex-end;gap:10px;padding:5px 8px;border-bottom:1px solid var(--pdm-border);color:#64748b}.bom-overview__table-wrap{min-height:0;flex:1;overflow:auto;border-radius:6px}.bom-overview__table-wrap table{width:100%;table-layout:fixed;border-collapse:collapse;white-space:nowrap}.bom-overview__table-wrap th,.bom-overview__table-wrap td{overflow:hidden;padding:8px;border-bottom:1px solid var(--pdm-border);text-align:left;text-overflow:ellipsis}.bom-overview__table-wrap th{position:sticky;top:0;z-index:1;background:#f3f6fa}.bom-overview__table-wrap th:nth-child(1){width:205px}.bom-overview__table-wrap th:nth-child(2){width:85px}.bom-overview__table-wrap th:nth-child(3),.bom-overview__table-wrap th:nth-child(4){width:112px}.bom-overview__table-wrap th:nth-child(5){width:58px}.bom-overview__table-wrap th:nth-child(6){width:80px}.bom-overview__table-wrap th:nth-child(7){width:82px}.bom-overview__table-wrap th:nth-child(8){width:68px}.bom-overview__table-wrap th:nth-child(9){width:118px}.bom-overview__table-wrap th:nth-child(10){width:145px}.bom-overview__table-wrap th:nth-child(11){width:72px}.bom-overview__table-wrap th:nth-child(12){width:92px}.bom-overview__table-wrap tr.is-master-row td{background:#f8fafc;font-weight:600}.bom-overview__project{display:flex;min-width:0;align-items:center;gap:6px}.bom-overview__project i{color:var(--pdm-muted);font-style:normal}.bom-overview__project strong{flex:0 0 auto}.bom-overview__project span{overflow:hidden;color:var(--pdm-muted);text-overflow:ellipsis}.bom-overview__sync{border:0;background:transparent;color:var(--pdm-blue);cursor:pointer;font:inherit}.bom-overview__sync:disabled{cursor:wait;opacity:.6}.is-warning{color:#b45309}.is-success{color:#15803d}.is-muted{color:#64748b}.bom-overview__empty{padding:24px;text-align:center;color:var(--pdm-muted)}
 </style>

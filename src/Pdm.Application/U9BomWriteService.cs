@@ -439,6 +439,7 @@ public sealed class U9BomWriteService(
 
     private static bool RequiredCreationFlags(U9BomComponentReference component, U9BomReference bom) =>
         component.UsageQtyType == 1 && component.IsSpecialUseItem == true && component.IsIssueOrgFixed == true
+        && component.IsCharge == true && string.Equals(component.CostElementCode, "No101", StringComparison.OrdinalIgnoreCase)
         && !string.IsNullOrWhiteSpace(component.IssueOrgCode)
         && string.Equals(component.IssueOrgCode, bom.OrganizationCode, StringComparison.OrdinalIgnoreCase);
 
@@ -509,6 +510,8 @@ public sealed class U9BomWriteService(
         && expected.UsageQtyType == actual.UsageQtyType
         && expected.IsSpecialUseItem == actual.IsSpecialUseItem
         && expected.IsIssueOrgFixed == actual.IsIssueOrgFixed
+        && expected.IsCharge == actual.IsCharge
+        && string.Equals(expected.CostElementCode, actual.CostElementCode, StringComparison.OrdinalIgnoreCase)
         && string.Equals(expected.IssueOrgCode, actual.IssueOrgCode, StringComparison.OrdinalIgnoreCase);
 
     private static string DescribeComponents(IEnumerable<U9BomComponentCommand> components) =>
@@ -599,6 +602,11 @@ public sealed class U9BomWriteService(
                 ?? throw new PdmRuleException($"子件{component.Sequence}缺少特定供应组织状态，不能安全修改。");
             if (string.IsNullOrWhiteSpace(previous.IssueOrgCode)) row.Remove("IssueOrg");
             else row["IssueOrg"] = Archive(previous.IssueOrgCode);
+            // Quantity changes/deletions must not migrate historical cost settings.
+            if (previous.IsCharge is { } isCharge) row["IsCharge"] = isCharge;
+            else row.Remove("IsCharge");
+            if (string.IsNullOrWhiteSpace(previous.CostElementCode)) row.Remove("CostElement");
+            else row["CostElement"] = Archive(previous.CostElementCode);
             if (!component.IsDelete) row["BOMComponentChangeDTOList"] = new[] { Change("UsageQty", FormatQuantity(component.UsageQty)) };
             return row;
         }).ToArray();
@@ -632,6 +640,9 @@ public sealed class U9BomWriteService(
             ["IsSpecialUseItem"] = true,
             ["IsIssueOrgFixed"] = true,
             ["IssueOrg"] = Archive(organizationCode),
+            ["IsCharge"] = true,
+            // Organization 7's active material-cost archive, verified by code (not database ID).
+            ["CostElement"] = Archive("No101"),
             ["UsageQty"] = component.UsageQty,
             ["IssueUOM"] = Archive(component.IssueUomCode),
             ["ParentQty"] = component.ParentQty,
@@ -670,6 +681,8 @@ public sealed class U9BomWriteService(
                     component.IsSpecialUseItem,
                     component.IsIssueOrgFixed,
                     component.IssueOrgCode,
+                    component.IsCharge,
+                    component.CostElementCode,
                     component.IssueUomCode,
                     component.ParentQty,
                     component.IsEffective,

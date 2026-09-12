@@ -20,6 +20,11 @@ function fallback(): ReleaseApprovalSettings {
       { stage: 'HardwareSupervisor', name: '硬件主管审核', assigneeSource: 'PrimaryUnitManager' },
       { stage: 'StandardizationSupervisor', name: '标准化主管批准', assigneeSource: 'ParentUnitManager' },
     ] },
+    validationPlan: { code: 'validation-plan', name: '验证计划审批', version: 1, steps: [
+      { stage: 'MechanicalEngineer', name: '编制人自检', assigneeSource: 'Submitter' },
+      { stage: 'MainDesigner', name: '主设审核', assigneeSource: 'ProjectDesignLead' },
+      { stage: 'MechanicalSupervisor', name: '机械主管批准', assigneeSource: 'PrimaryUnitManager' },
+    ] },
     emergencySubstituteRoleCode: 'BusinessUnitManager',
   }
 }
@@ -54,6 +59,7 @@ function cloneSettings(settings: ReleaseApprovalSettings): ReleaseApprovalSettin
   return {
     mechanical: { ...settings.mechanical, steps: settings.mechanical.steps.map(cloneStep) },
     electrical: { ...settings.electrical, steps: settings.electrical.steps.map(cloneStep) },
+    validationPlan: { ...(settings.validationPlan ?? fallback().validationPlan!), steps: (settings.validationPlan ?? fallback().validationPlan!).steps.map(cloneStep) },
     emergencySubstituteRoleCode: settings.emergencySubstituteRoleCode,
   }
 }
@@ -101,17 +107,17 @@ function toggleUnlimited(kind: keyof FormalSupplementPolicies, field: 'maximumCo
     <header class="workflow-heading">
       <div>
         <div class="pdm-breadcrumb">系统管理 <span>/</span> 审批流程</div>
-        <h1>发布审批流程</h1>
-        <p>审批人按提交人的主部门和上级部门负责人动态解析；发布包创建后固化账号，组织调整不影响在途审批。</p>
+        <h1>审批流程</h1>
+        <p>审批人按提交人的主部门和上级部门负责人动态解析；提交后固化账号和模板版本，组织调整不影响在途审批。</p>
       </div>
-      <button type="button" class="pdm-primary-action" :disabled="pending" @click="save">保存发布设置</button>
+      <button type="button" class="pdm-primary-action" :disabled="pending" @click="save">保存审批设置</button>
     </header>
 
     <div class="workflow-grid">
-      <section v-for="flow in [draft.mechanical, draft.electrical]" :key="flow.code" class="pdm-panel workflow-card">
+      <section v-for="flow in [draft.mechanical, draft.electrical, draft.validationPlan!]" :key="flow.code" class="pdm-panel workflow-card">
         <div class="workflow-card-title">
           <div><h2>{{ flow.name }}</h2><p>当前模板 v{{ flow.version }}</p></div>
-          <span>{{ flow.code === 'mechanical-release' ? '标准件 / 非标件与图纸' : '电气BOM' }}</span>
+          <span>{{ flow.code === 'mechanical-release' ? '标准件 / 非标件与图纸' : flow.code === 'electrical-release' ? '电气BOM' : '项目验证计划' }}</span>
         </div>
         <ol class="workflow-steps">
           <li v-for="(step, index) in flow.steps" :key="step.stage">

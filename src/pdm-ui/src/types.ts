@@ -49,6 +49,197 @@ export interface ProjectSummary {
   canReadContent: boolean
 }
 
+export interface ProjectCopyOptionsInput {
+  sourceProjectId: string
+  copyModels: boolean
+  copyDrawings: boolean
+  copyBom: boolean
+  copyValidationItems: boolean
+  folderIds: string[] | null
+}
+
+export interface ProjectCopyFolderOption {
+  id: string
+  name: string
+  path: string
+  templateKey: string
+  fileCount: number
+  totalBytes: number
+  defaultSelected: boolean
+}
+
+export interface ProjectCopyPreview {
+  sourceProjectId: string
+  targetProjectId: string
+  modelCount: number
+  drawingCount: number
+  bomItemCount: number
+  validationItemCount: number
+  projectFileCount: number
+  totalBytes: number
+  folders: ProjectCopyFolderOption[]
+  blockingReasons: string[]
+  warnings: string[]
+  canExecute: boolean
+}
+
+export interface ProjectCopyResult {
+  sourceProjectId: string
+  targetProjectId: string
+  documentCount: number
+  bomItemCount: number
+  validationItemCount: number
+  projectFileCount: number
+  totalBytes: number
+}
+
+export type ProjectPlanStage = string
+export interface ProjectPlanStageDefinition {
+  code: string; name: string
+  participatesInDelivery?: boolean | null
+  durationRatio?: number
+  progressRatio?: number
+  independentDurationDays?: number
+}
+export type ProjectPlanTaskStatus = 'NotStarted' | 'InProgress' | 'Completed'
+
+export interface ProjectPlanTemplateTask {
+  startOffsetDays?: number
+  fixedDurationDays?: number | null
+  id: string
+  name: string
+  stage: ProjectPlanStage
+  durationRatio: number
+  predecessorSortOrders: number[]
+  defaultAssigneeRole?: string
+  weight: number
+  isMilestone: boolean
+  isRequired: boolean
+  sortOrder: number
+}
+
+export interface ProjectPlanTemplate {
+  stages?: ProjectPlanStageDefinition[]
+  id: string
+  name: string
+  projectTypeCode?: string
+  isActive: boolean
+  tasks: ProjectPlanTemplateTask[]
+  createdBy: string
+  createdAt: string
+  updatedBy: string
+  updatedAt: string
+  rowVersion: number
+}
+
+export interface ProjectPlanTask {
+  templateTaskId?: string | null
+  sourceTaskId?: string | null
+  id: string
+  name: string
+  stage: ProjectPlanStage
+  assignee?: string
+  durationDays: number
+  plannedStart: string
+  plannedFinish: string
+  baselineStart?: string
+  baselineFinish?: string
+  actualStart?: string
+  actualFinish?: string
+  completionPercent: number
+  status: ProjectPlanTaskStatus
+  predecessorTaskIds: string[]
+  weight: number
+  isMilestone: boolean
+  isRequired: boolean
+  sortOrder: number
+}
+
+export interface ProjectPlan {
+  changeRequest?: {
+    id: string; tasks: Array<{ taskId: string; plannedStart: string; plannedFinish: string; assignee?: string | null }>
+    reason: string; submittedBy: string; submittedAt: string; approvalAssignee: string
+    status: 'Pending' | 'Approved' | 'Rejected'; comment?: string; decidedBy?: string; decidedAt?: string
+  } | null
+  changeDraftSource?: ProjectPlan | null
+  followsParentPlan?: boolean
+  parentPlanId?: string | null
+  parentPlanRowVersion?: number | null
+  childSyncResults?: Array<{ projectId: string; projectCode: string; result: string; differences: string[] }>
+  stageSchedules?: Array<{ stage: string; startDate: string; durationDays: number }>
+  stages?: ProjectPlanStageDefinition[]
+  approvalStatus?: 'Draft' | 'Pending' | 'Rejected' | 'Approved'
+  approvalAssignee?: string
+  submittedBy?: string
+  submittedAt?: string
+  approvedBy?: string
+  approvedAt?: string
+  approvalComment?: string
+  id: string
+  projectId: string
+  templateId: string
+  templateName: string
+  currentStage: ProjectPlanStage
+  manualStage?: ProjectPlanStage
+  manualStageReason?: string
+  plannedStart: string
+  plannedFinish: string
+  forecastFinish: string
+  baselineVersion: number
+  tasks: ProjectPlanTask[]
+  createdBy: string
+  createdAt: string
+  updatedBy: string
+  updatedAt: string
+  rowVersion: number
+}
+
+export interface ProjectPlanVersion {
+  id: string
+  planId: string
+  versionNumber: number
+  changeReason: string
+  snapshot: ProjectPlan
+  createdBy: string
+  createdAt: string
+}
+
+export interface ProjectPlanPortfolioItem {
+  projectId: string
+  projectCode: string
+  projectName: string
+  isRoot: boolean
+  hasPlan: boolean
+  currentStage?: ProjectPlanStage
+  completionPercent: number
+  plannedStart?: string
+  plannedFinish?: string
+  forecastFinish?: string
+  isLagging: boolean
+  isAtRisk: boolean
+  plan?: ProjectPlan
+}
+
+export interface ProjectPlanPortfolio {
+  rootProjectId: string
+  currentStage: ProjectPlanStage
+  completionPercent: number
+  laggingProjectCount: number
+  riskProjectCount: number
+  plannedStart?: string
+  plannedFinish?: string
+  projects: ProjectPlanPortfolioItem[]
+}
+
+export interface SaveProjectPlanTemplateInput {
+  stages?: ProjectPlanStageDefinition[]
+  name: string
+  projectTypeCode?: string
+  isActive: boolean
+  tasks: ProjectPlanTemplateTask[]
+  expectedRowVersion?: number
+}
+
 export interface CreateProjectInput {
   organizationId: string
   projectTypeCode: string
@@ -190,7 +381,7 @@ export type ApprovalStage = 'ProcessReview' | 'Approval' | 'MechanicalEngineer' 
 export type ApprovalAssigneeSource = 'Submitter' | 'ProjectDesignLead' | 'FixedUser' | 'PrimaryUnitManager' | 'ParentUnitManager'
 export interface ApprovalWorkflowStepTemplate { stage: ApprovalStage; name: string; assigneeSource: ApprovalAssigneeSource; fixedAssignee?: string | null }
 export interface ApprovalWorkflowTemplate { code: string; name: string; version: number; steps: ApprovalWorkflowStepTemplate[] }
-export interface ReleaseApprovalSettings { mechanical: ApprovalWorkflowTemplate; electrical: ApprovalWorkflowTemplate; emergencySubstituteRoleCode: string }
+export interface ReleaseApprovalSettings { mechanical: ApprovalWorkflowTemplate; electrical: ApprovalWorkflowTemplate; validationPlan?: ApprovalWorkflowTemplate; emergencySubstituteRoleCode: string }
 export type BomValidationField = 'drawingNumber' | 'name' | 'unit' | 'specification' | 'brand' | 'material' | 'surfaceTreatment' | 'weight' | 'quantity' | 'revision' | 'remark'
 export interface BomValidationRules {
   standard: BomValidationField[]
@@ -852,8 +1043,12 @@ export interface MyApprovalTask {
   projectId: string
   projectCode: string
   projectName: string
-  releasePackageId: string
-  releasePackageNumber: string
+  kind?: 'release' | 'validationPlan'
+  releasePackageId?: string
+  releasePackageNumber?: string
+  validationPlanId?: string
+  validationPlanRevision?: number
+  stepName?: string
   stage: string | number
   packageState: string | number
   createdAt: string
@@ -983,6 +1178,20 @@ export interface MaterialPage {
   total: number
   page: number
   pageSize: number
+}
+
+export interface BomHeaderMaterialDirectoryItem {
+  materialId: string
+  projectId: string
+  projectCode: string
+  subprojectCode: string
+  projectName: string
+  kind: BomHeaderKind
+  materialCode: string
+  materialName: string
+  automaticStatus: string
+  automaticMessage: string
+  isArchived: boolean
 }
 
 export type MaterialDuplicateField = 'Name' | 'Specification' | 'Brand'
@@ -1315,6 +1524,9 @@ export interface MaterialSyncTask {
   u9ItemCode?: string | null
   materialCode?: string | null
   materialName?: string | null
+  specification?: string | null
+  brand?: string | null
+  remark?: string | null
   categoryCode?: string | null
   projectId?: string | null
   projectCode?: string | null
@@ -1744,6 +1956,16 @@ export interface ProcurementDocumentDetail {
   matchKind: string
 }
 
+export interface WarehouseMovementDetail {
+  kind: 'RCV' | 'ISSUE' | 'MISC' | 'TRANSFER' | 'STOCKIN'
+  lineId?: string | null
+  documentNumber: string
+  lineNumber: number
+  date: string
+  quantity: number
+  unit?: string | null
+}
+
 export interface ProjectProcurementTrackingItem {
   sequence: number
   projectCode: string
@@ -1758,9 +1980,11 @@ export interface ProjectProcurementTrackingItem {
   releasePackageNumber?: string | null
   purchaseRequisitionNumbers: string[]
   purchaseRequisitionStatus: string
+  purchaseRequisitionCreatedAt?: string | null
   purchaseRequisitionDeliveryDate?: string | null
   purchaseOrderNumbers: string[]
   purchaseOrderStatus: string
+  buyerName?: string | null
   purchaseQuantity: number
   arrivedQuantity: number
   purchaseRemark?: string | null
@@ -1769,6 +1993,9 @@ export interface ProjectProcurementTrackingItem {
   requestedQuantity: number | null
   approvedQuantity: number | null
   hasDeliveryDelay?: boolean
+  warehouseMovements?: WarehouseMovementDetail[]
+  isWarehouseMovementRow?: boolean
+  isFullyReceived?: boolean
   details: ProcurementDocumentDetail[]
 }
 
@@ -1925,4 +2152,217 @@ export interface ProgramTemplateDraftInput {
   tags: string[]
   changeNote: string
   parameters: ProgramTemplateParameterInput[]
+}
+
+export interface ValidationCheckCategory {
+  id: string
+  name: string
+  sortOrder: number
+  isActive: boolean
+  note?: string | null
+  itemCount: number
+  referenceCount: number
+  createdBy: string
+  createdAt: string
+  updatedBy: string
+  updatedAt: string
+  rowVersion: number
+}
+
+export interface ValidationCheckItem {
+  id: string
+  categoryId: string
+  content: string
+  defaultInformationSource: string
+  sortOrder: number
+  isActive: boolean
+  note?: string | null
+  referenceCount: number
+  createdBy: string
+  createdAt: string
+  updatedBy: string
+  updatedAt: string
+  rowVersion: number
+}
+
+export interface ValidationCheckCatalog {
+  categories: ValidationCheckCategory[]
+  items: ValidationCheckItem[]
+}
+
+export interface ProjectValidationPlanItem {
+  id: string
+  catalogCategoryId?: string | null
+  catalogItemId?: string | null
+  categoryName: string
+  validationContent: string
+  informationSource?: string | null
+  validationDate?: string | null
+  result?: string | null
+  responsiblePerson?: string | null
+  remark?: string | null
+  sortOrder: number
+}
+
+export interface ProjectValidationPlan {
+  id: string
+  projectId: string
+  revisionNumber: number
+  state: 'Draft' | 'PendingApproval' | 'Effective' | 'Rejected' | 'Superseded' | number
+  preparedBy?: string | null
+  validationDate?: string | null
+  items: ProjectValidationPlanItem[]
+  approvalTasks: ValidationPlanApprovalTask[]
+  attachments: ValidationPlanAttachment[]
+  workflowCode?: string | null
+  workflowVersion?: number | null
+  submittedBy?: string | null
+  submittedAt?: string | null
+  effectiveBy?: string | null
+  effectiveAt?: string | null
+  createdBy: string
+  createdAt: string
+  updatedBy: string
+  updatedAt: string
+  rowVersion: number
+}
+
+export interface ValidationPlanApprovalTask {
+  id: string
+  planId: string
+  stepOrder: number
+  stage: ApprovalStage | number
+  stepName: string
+  assignee: string
+  decision?: 'Approved' | 'Rejected' | number | null
+  decisionBy?: string | null
+  decisionComment?: string | null
+  createdAt: string
+  decidedAt?: string | null
+}
+
+export interface ValidationPlanAttachment {
+  id: string
+  planId: string
+  kind: 'PlanDocument' | 'Evidence' | number
+  originalFileName: string
+  fileVersion: number
+  storageRelativePath: string
+  fileLength: number
+  sha256: string
+  uploadedBy: string
+  uploadedAt: string
+}
+
+export interface ValidationPlanRecognitionCandidate {
+  planItemId: string
+  categoryName: string
+  validationContent: string
+  matchConfidence: number
+  matchStatus: 'Matched' | 'Review' | 'Unmatched'
+  recognizedResult?: string | null
+  recognizedValidationDate?: string | null
+  recognizedResponsiblePerson?: string | null
+  recognizedRemark?: string | null
+  sourceText: string
+}
+
+export interface ValidationPlanRecognitionDraft {
+  planId: string
+  attachmentId: string
+  originalFileName: string
+  recognizedAt: string
+  ocrText: string
+  candidates: ValidationPlanRecognitionCandidate[]
+}
+
+export interface ValidationPlanExecutionItem {
+  id: string
+  executionRecordId: string
+  planItemId: string
+  matchConfidence: number
+  sourceText: string
+  recognizedResult?: string | null
+  recognizedValidationDate?: string | null
+  recognizedResponsiblePerson?: string | null
+  recognizedRemark?: string | null
+  result?: string | null
+  validationDate?: string | null
+  responsiblePerson?: string | null
+  remark?: string | null
+}
+
+export interface ValidationPlanExecutionRecord {
+  id: string
+  planId: string
+  sourceAttachmentId: string
+  sourceFileName: string
+  ocrText: string
+  items: ValidationPlanExecutionItem[]
+  confirmedBy: string
+  confirmedAt: string
+}
+
+export interface ConfirmValidationPlanExecutionInput {
+  sourceAttachmentId: string
+  ocrText: string
+  items: Array<{
+    planItemId: string
+    matchConfidence: number
+    sourceText: string
+    recognizedResult?: string | null
+    recognizedValidationDate?: string | null
+    recognizedResponsiblePerson?: string | null
+    recognizedRemark?: string | null
+    result?: string | null
+    validationDate?: string | null
+    responsiblePerson?: string | null
+    remark?: string | null
+  }>
+}
+
+export interface ValidationPlanApprovalTaskSummary {
+  id: string
+  planId: string
+  projectId: string
+  projectCode: string
+  projectName: string
+  revisionNumber: number
+  stage: ApprovalStage | number
+  stepName: string
+  createdAt: string
+}
+
+export interface SaveValidationCheckCategoryInput {
+  name: string
+  sortOrder: number
+  isActive: boolean
+  note?: string | null
+  expectedRowVersion?: number | null
+}
+
+export interface SaveValidationCheckItemInput {
+  categoryId: string
+  content: string
+  defaultInformationSource?: string | null
+  sortOrder: number
+  isActive: boolean
+  note?: string | null
+  expectedRowVersion?: number | null
+}
+
+export interface SaveProjectValidationPlanInput {
+  preparedBy?: string | null
+  validationDate?: string | null
+  items: Array<{
+    catalogItemId?: string | null
+    validationContent?: string | null
+    informationSource?: string | null
+    validationDate?: string | null
+    result?: string | null
+    responsiblePerson?: string | null
+    remark?: string | null
+    sortOrder: number
+  }>
+  expectedRowVersion?: number | null
 }

@@ -106,6 +106,8 @@ if (string.Equals(databaseOptions.Provider, "MySql", StringComparison.OrdinalIgn
     builder.Services.AddScoped<IEngineeringKitRepository, MySqlEngineeringKitRepository>();
     builder.Services.AddScoped<IMaterialRelationRepository, MySqlMaterialRelationRepository>();
     builder.Services.AddScoped<IProgramTemplateRepository, MySqlProgramTemplateRepository>();
+    builder.Services.AddScoped<IValidationPlanRepository, MySqlValidationPlanRepository>();
+    builder.Services.AddScoped<IProjectPlanningRepository, MySqlProjectPlanningRepository>();
 }
 else
 {
@@ -118,6 +120,8 @@ else
     builder.Services.AddSingleton<IEngineeringKitRepository, InMemoryEngineeringKitRepository>();
     builder.Services.AddSingleton<IMaterialRelationRepository, InMemoryMaterialRelationRepository>();
     builder.Services.AddSingleton<IProgramTemplateRepository, InMemoryProgramTemplateRepository>();
+    builder.Services.AddSingleton<IValidationPlanRepository, InMemoryValidationPlanRepository>();
+    builder.Services.AddSingleton<IProjectPlanningRepository, InMemoryProjectPlanningRepository>();
 }
 
 builder.Services.AddScoped<MySqlMigrationRunner>();
@@ -128,6 +132,7 @@ builder.Services.AddScoped<IFileStorage, LocalFileStorage>();
 builder.Services.AddScoped<IMaterialAttachmentStorage, LocalMaterialAttachmentStorage>();
 builder.Services.AddScoped<IProgramTemplateStorage, LocalProgramTemplateStorage>();
 builder.Services.AddScoped<IProjectFileStorage, LocalProjectFileStorage>();
+builder.Services.AddSingleton<IValidationPlanTextRecognitionService, WindowsValidationPlanTextRecognitionService>();
 builder.Services.AddSingleton<IServerPreviewConverter, SolidWorksServerPreviewConverter>();
 builder.Services.AddSingleton<IReleasePackagePublisher, AtomicReleasePackagePublisher>();
 builder.Services.AddSingleton<ICrmCredentialProtector, DataProtectionCrmCredentialProtector>();
@@ -142,6 +147,7 @@ builder.Services.AddHttpClient<IU9ProcurementClient, U9OpenApiClient>(client => 
 builder.Services.AddHttpClient<IU9BomQueryClient, U9OpenApiClient>(client => client.Timeout = TimeSpan.FromSeconds(20))
     .RemoveAllLoggers();
 builder.Services.AddScoped<PdmWorkflowService>();
+builder.Services.AddScoped<ProjectCopyService>();
 builder.Services.AddScoped<ReleaseItemCommentService>();
 builder.Services.AddScoped<CrmCustomerIntegrationService>();
 builder.Services.AddScoped<MaterialService>();
@@ -153,6 +159,8 @@ builder.Services.AddScoped<IMaterialRelationReleaseGuard>(provider => provider.G
 builder.Services.AddScoped<ProgramTemplateService>();
 builder.Services.AddScoped<ProjectFileService>();
 builder.Services.AddScoped<BomHeaderService>();
+builder.Services.AddScoped<ValidationPlanService>();
+builder.Services.AddScoped<ProjectPlanningService>();
 builder.Services.AddScoped<U9MaterialIntegrationService>();
 builder.Services.AddScoped<U9MaterialFullSyncService>();
 builder.Services.AddSingleton<U9MaterialFullSyncCoordinator>();
@@ -174,6 +182,7 @@ builder.Services.AddHostedService<U9ProcurementSyncHostedService>();
 builder.Services.AddHostedService<MaterialU9SyncBatchHostedService>();
 builder.Services.AddHostedService<BomHeaderAutomaticHostedService>();
 builder.Services.AddHostedService<ProjectFileRecycleCleanupService>();
+builder.Services.AddHostedService<ProjectPlanningReminderHostedService>();
 
 builder.Services.AddCors(options => options.AddPolicy("PdmClients", policy => policy
     .WithOrigins("http://127.0.0.1:5173", "http://localhost:5173", "http://127.0.0.1:5175", "http://localhost:5175", "https://appassets.pdm.local")
@@ -261,6 +270,8 @@ app.MapPdmBomHeaderEndpoints();
 app.MapProgramTemplateEndpoints();
 app.MapProjectFileEndpoints();
 app.MapU9BomEndpoints();
+app.MapValidationPlanEndpoints();
+app.MapProjectPlanningEndpoints();
 if (Directory.Exists(deployedWebRoot))
 {
     app.MapGet("/{**path}", async context =>

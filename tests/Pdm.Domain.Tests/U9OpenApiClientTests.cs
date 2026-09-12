@@ -162,6 +162,7 @@ public sealed class U9OpenApiClientTests
                 OrganizationCode = "7", RecordKind = "pr", LineId = "101", SourcePrLineId = "101",
                 DocumentNumber = "PR2601130042", LineNumber = 10, LineStatus = 2, IsCanceled = false,
                 BusinessDate = "2026-01-13", MaterialCode = "01020000089", ItemName = "接头",
+                SourceCreatedAt = "2026-01-12T09:30:00+08:00",
                 Specification = "HG-10-16MM", Brand = "UPTON", ProjectCode = "P701911",
                 ProjectName = "88扁管手动封堵工装", Subproject = "P701911-1",
                 RequestedQuantity = 4m, ApprovedQuantity = 4m, PurchaseQuantity = 0m, ArrivedQuantity = 0m,
@@ -172,6 +173,7 @@ public sealed class U9OpenApiClientTests
                 OrganizationCode = "7", RecordKind = "po", LineId = "202", SourcePrLineId = "101",
                 DocumentNumber = "PO2601130099", LineNumber = 10, LineStatus = 3, IsCanceled = false,
                 BusinessDate = "2026-01-14", MaterialCode = "01020000089", ItemName = "接头",
+                BuyerName = "孟丹",
                 Specification = "HG-10-16MM", Brand = "UPTON", ProjectCode = "P701911",
                 ProjectName = "88扁管手动封堵工装", Subproject = "P701911-1",
                 RequestedQuantity = 0m, ApprovedQuantity = 0m, PurchaseQuantity = 4m, ArrivedQuantity = 2m,
@@ -197,10 +199,55 @@ public sealed class U9OpenApiClientTests
                 Assert.Equal(new DateTime(2026, 1, 28), order.LatestDeliveryDate?.DateTime);
             });
         Assert.Contains("PM_POShipLine", handler.RequestBody);
+        Assert.Equal(DateTimeOffset.Parse("2026-01-12T09:30:00+08:00"), result.Rows[0].SourceCreatedAt);
+        Assert.Equal("孟丹", result.Rows[1].BuyerName);
+        Assert.Contains("line.CreatedOn AS SourceCreatedAt", handler.RequestBody);
+        using var sqlRequest = JsonDocument.Parse(handler.RequestBody!);
+        Assert.Contains("buyer.ID=po.PurOper", sqlRequest.RootElement.GetProperty("SqlString").GetString());
         Assert.Contains("SrcDocInfo_SrcDocLine_EntityID", handler.RequestBody);
         Assert.DoesNotContain("OrderPrice", handler.RequestBody, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("TaxRate", handler.RequestBody, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("TotalMny", handler.RequestBody, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("line.ConfirmDate,line.RcvQtyTU,unit.Name", sqlRequest.RootElement.GetProperty("SqlString").GetString());
+        Assert.Contains("issue.ConfirmDate,line.IssuedQtyUOM,unit.Name", sqlRequest.RootElement.GetProperty("SqlString").GetString());
+        Assert.Contains("misc.BusinessDate,line.StoreUOMQty,unit.Name", sqlRequest.RootElement.GetProperty("SqlString").GetString());
+        Assert.Contains("issue.IssueType=0", sqlRequest.RootElement.GetProperty("SqlString").GetString());
+        Assert.Contains("misc.Status=2", sqlRequest.RootElement.GetProperty("SqlString").GetString());
+        Assert.Contains("receiptType.Code='RCV01'", sqlRequest.RootElement.GetProperty("SqlString").GetString());
+        Assert.Contains("receiptPoLine.ID=line.SrcPO_SrcDocLine_EntityID", sqlRequest.RootElement.GetProperty("SqlString").GetString());
+        Assert.Contains("receiptPo.Org=receipt.Org", sqlRequest.RootElement.GetProperty("SqlString").GetString());
+        Assert.Contains("InvDoc_TransferFormSL child ON child.TransferFormL=parent.ID", sqlRequest.RootElement.GetProperty("SqlString").GetString());
+        Assert.Contains("parent.TransferFormType=0 AND child.TransferFormType=1", sqlRequest.RootElement.GetProperty("SqlString").GetString());
+        Assert.Contains("COALESCE(parent.Project,0)<>COALESCE(child.Project,0)", sqlRequest.RootElement.GetProperty("SqlString").GetString());
+        Assert.Contains("COALESCE(parent.SeibanCode,'')<>COALESCE(child.SeibanCode,'')", sqlRequest.RootElement.GetProperty("SqlString").GetString());
+        Assert.Contains("transfer.Status=2 AND COALESCE(transfer.Cancel_Canceled,0)=0", sqlRequest.RootElement.GetProperty("SqlString").GetString());
+        Assert.Contains("transfer.BusinessDate,child.StoreUOMQty,unit.Name", sqlRequest.RootElement.GetProperty("SqlString").GetString());
+        Assert.Contains("project.ID=child.Project", sqlRequest.RootElement.GetProperty("SqlString").GetString());
+        Assert.Contains("applyLine.ID=line.SourceDoc_SrcDocLine_EntityID", sqlRequest.RootElement.GetProperty("SqlString").GetString());
+        Assert.Contains("applyLine.ItemInfo=line.ItemInfo", sqlRequest.RootElement.GetProperty("SqlString").GetString());
+        Assert.Contains("applyDoc.Org=issue.Org", sqlRequest.RootElement.GetProperty("SqlString").GetString());
+        Assert.Contains("THEN applyLine.IssueOrgSeibanNo ELSE line.SeibanCode", sqlRequest.RootElement.GetProperty("SqlString").GetString());
+        Assert.Contains("THEN 'DIRECT' ELSE 'ISSUE'", sqlRequest.RootElement.GetProperty("SqlString").GetString());
+    }
+
+    [Theory]
+    [InlineData("RCV")]
+    [InlineData("ISSUE")]
+    [InlineData("MISC")]
+    [InlineData("TRANSFER")]
+    [InlineData("DIRECT")]
+    public async Task QueryProcurement_ParsesWarehouseDateAndQuantityWithoutChangingTimezone(string kind)
+    {
+        var json = JsonSerializer.Serialize(new { ResCode = 0, Success = true, Data = new[] {
+            new { RecordKind = kind, LineId = "123", DocumentNumber = "DOC1", MaterialCode = "00123",
+                MovementDate = "2026-09-09T11:28:38", MovementQuantity = 2.5m, MovementUnit = "米", SourcePoLineId = "1002912015526078" }
+        } });
+        var client = new U9OpenApiClient(new HttpClient(new RecordingHandler(json)));
+        var row = Assert.Single((await client.QueryProcurementAsync("http://u9.example.test/U9", "/webapi/QueryCommon/QueryInfoBySql", "token", "7", ["P1"], default)).Rows);
+        Assert.Equal(DateTimeOffset.Parse("2026-09-09T11:28:38+08:00"), row.MovementDate);
+        Assert.Equal(2.5m, row.MovementQuantity);
+        Assert.Equal("米", row.MovementUnit);
+        Assert.Equal("1002912015526078", row.SourcePoLineId);
     }
 
     [Fact]

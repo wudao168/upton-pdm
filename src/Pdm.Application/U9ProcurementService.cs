@@ -307,9 +307,10 @@ public sealed class U9ProcurementService(
     internal static string DescribeStatus(string recordKind, int status, bool canceled)
     {
         if (canceled) return "已取消";
+        // U9 native enums: PRStatusEnum / PODOCStatusEnum (zh-CN, verified 2026-09-09).
         return recordKind == U9ProcurementRecordKinds.PurchaseRequisition
-            ? status switch { 0 => "开立", 1 => "审核中", 2 => "已核准", 3 => "已下单", 4 => "已关闭", _ => $"状态{status}" }
-            : status switch { 0 => "开立", 1 => "已核准", 2 => "执行中", 3 => "已关闭", 4 => "已关闭", _ => $"状态{status}" };
+            ? status switch { 0 => "开立", 1 => "核准中", 2 => "已核准", 3 => "自然关闭", 4 => "短缺关闭", 5 => "超额关闭", _ => $"状态{status}" }
+            : status switch { 0 => "开立", 1 => "审核中", 2 => "已核准", 3 => "自然关闭", 4 => "短缺关闭", 5 => "超额关闭", _ => $"状态{status}" };
     }
 
     private static IReadOnlyList<string> DistinctDocuments(IEnumerable<U9ProcurementSnapshotRow> rows) => rows

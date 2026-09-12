@@ -1,11 +1,11 @@
 <script setup lang="ts">
-import { Boxes, ClipboardList, FileClock, FolderOpen, FolderTree, LayoutDashboard, PackageCheck, Search, ShoppingCart } from '@lucide/vue'
+import { Boxes, Calendar, ClipboardCheck, ClipboardList, FileClock, FolderOpen, FolderTree, LayoutDashboard, PackageCheck, Search, ShoppingCart } from '@lucide/vue'
 import { ElMessageBox } from 'element-plus'
 import { computed, ref, watch } from 'vue'
 import type { ProjectSummary } from '../types'
 import { useUserDisplayName } from '../userDisplay'
 
-export type ProjectTab = 'overview' | 'files' | 'documents' | 'bom' | 'versions' | 'release' | 'procurement' | 'records'
+export type ProjectTab = 'overview' | 'project-plan' | 'files' | 'validation-plan' | 'documents' | 'bom' | 'versions' | 'release' | 'procurement' | 'records'
 
 const props = defineProps<{ project: ProjectSummary; projects: ProjectSummary[]; activeTab: ProjectTab; activeProjectDocumentStatus?: string; activeDocumentCounts?: { all: number; model: number; drawing: number }; currentUsername?: string; switchingProjectId?: string }>()
 const emit = defineEmits<{ back: []; switch: [projectId: string]; tab: [tab: ProjectTab] }>()
@@ -18,6 +18,8 @@ function projectDesignLeads(project: ProjectSummary) {
 const tabs = [
   { key: 'overview', label: '概览', icon: LayoutDashboard },
   { key: 'files', label: '文件', icon: FolderOpen },
+  { key: 'project-plan', label: '项目计划', icon: Calendar },
+  { key: 'validation-plan', label: '验证计划', icon: ClipboardCheck },
   { key: 'documents', label: '图档', icon: FolderTree },
   { key: 'bom', label: 'BOM', icon: Boxes },
   { key: 'release', label: '发布', icon: PackageCheck },
@@ -140,7 +142,7 @@ function documentStatus(project: ProjectSummary, activeProject = false) {
   const currentUsername = props.currentUsername?.trim()
   return currentUsername && owner.localeCompare(currentUsername, undefined, { sensitivity: 'accent' }) === 0
     ? '可编辑'
-    : `${owner}编辑中`
+    : `${displayUserName(owner)}编辑中`
 }
 
 function modelDocumentCount(project: ProjectSummary) {

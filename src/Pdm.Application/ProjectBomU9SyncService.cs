@@ -182,7 +182,8 @@ public sealed class ProjectBomU9SyncService(
             ? await BuildMasterComponentsAsync(project, bindings, cancellationToken)
             : await BuildCategoryComponentsAsync(projectId, kind, cancellationToken);
         var components = approved.Components;
-        var effectiveDate = DateOnly.FromDateTime(timeProvider.GetLocalNow().DateTime);
+        _ = timeProvider; // 保留现有构造函数契约；新建生效日期不再依赖当前时间。
+        var effectiveDate = new DateOnly(2019, 1, 1);
         var disableDate = new DateOnly(9999, 12, 31);
         components = components.Select(component => component with
         {

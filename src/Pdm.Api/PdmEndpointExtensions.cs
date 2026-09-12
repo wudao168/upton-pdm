@@ -451,6 +451,32 @@ public static class PdmEndpointExtensions
             return Results.Created($"/api/projects/{project.Id}", project);
         });
 
+        api.MapPost("/projects/{projectId:guid}/copy-preview", async (
+            Guid projectId,
+            CopyProjectContentRequest request,
+            HttpContext context,
+            ProjectCopyService service,
+            CancellationToken cancellationToken) =>
+        {
+            var (actor, role) = CurrentUser(context.User);
+            return Results.Ok(await service.PreviewAsync(request.SourceProjectId, projectId,
+                new(request.CopyModels, request.CopyDrawings, request.CopyBom, request.CopyValidationItems, request.FolderIds),
+                actor, role, cancellationToken));
+        });
+
+        api.MapPost("/projects/{projectId:guid}/copy", async (
+            Guid projectId,
+            CopyProjectContentRequest request,
+            HttpContext context,
+            ProjectCopyService service,
+            CancellationToken cancellationToken) =>
+        {
+            var (actor, role) = CurrentUser(context.User);
+            return Results.Ok(await service.ExecuteAsync(request.SourceProjectId, projectId,
+                new(request.CopyModels, request.CopyDrawings, request.CopyBom, request.CopyValidationItems, request.FolderIds),
+                actor, role, cancellationToken));
+        });
+
         api.MapPost("/projects/{projectId:guid}/children", async (Guid projectId, CreateSubprojectRequest request, HttpContext context, PdmWorkflowService workflow, CancellationToken cancellationToken) =>
         {
             var (actor, role) = CurrentUser(context.User);

@@ -63,6 +63,8 @@ internal static class Program
         Test("project tree resolves downloaded files by controlled workspace identity", TestProjectTreeLocalPathMapping);
         Test("desktop workspace states require identity and detect local version changes", TestWorkspaceLocalStates);
         Test("batch completion refreshes local controlled version metadata", TestBatchControlledVersionBinding);
+        Test("post-check-in refresh cannot restore stale controlled-open metadata", TestCheckedInManifestRefresh);
+        Test("batch archive seeds a safe read-only project workspace cache", TestBatchArchiveSeedsProjectCache);
         Console.WriteLine($"Passed={passed}; Failed={failed}; no SolidWorks COM or production API calls.");
         return failed == 0 ? 0 : 1;
     }
@@ -614,6 +616,111 @@ internal static class Program
         item = ((IEnumerable)Get(snapshot, "Items")).Cast<object>().Single();
         Assert((string)Get(item, "LocalState") == "ReadOnlyCache", "batch completion left the local file marked abnormal");
         Assert((string)Get(item, "LocalRevision") == "W2", "batch completion did not store the returned revision");
+    }
+
+    private static void TestCheckedInManifestRefresh()
+    {
+        var projectId = Guid.NewGuid();
+        var documentId = Guid.NewGuid();
+        var oldBytes = System.Text.Encoding.UTF8.GetBytes("controlled workspace version W1");
+        var newBytes = System.Text.Encoding.UTF8.GetBytes("controlled workspace version W2 after check-in");
+        var projectDirectory = Path.Combine(directory, "workspace", "View", "P700007-1");
+        var path = Path.Combine(projectDirectory, "root.SLDASM");
+        Directory.CreateDirectory(projectDirectory);
+        File.WriteAllBytes(path, newBytes);
+        File.SetAttributes(path, File.GetAttributes(path) | FileAttributes.ReadOnly);
+
+        var file = ControlledFile("root.SLDASM", oldBytes);
+        Set(file, "DocumentId", documentId);
+        Set(file, "Revision", "W1");
+        var oldVersionId = (Guid)Get(file, "VersionId");
+        var files = Activator.CreateInstance(typeof(List<>).MakeGenericType(Type("ControlledOpenFileDto")));
+        ((IList)files).Add(file);
+        var manifest = Manifest("P700007-1", "root.SLDASM");
+        Set(manifest, "ProjectId", projectId);
+        Set(manifest, "RootDocumentId", documentId);
+        Set(manifest, "RootVersionId", oldVersionId);
+        Set(manifest, "RootRevision", "W1");
+        Set(manifest, "Files", files);
+
+        var plugin = New("PdmAddin");
+        ((IDictionary)Field(plugin, "controlledOpenManifests"))[projectDirectory + Path.DirectorySeparatorChar] = manifest;
+        var version = Version("W2", "stored-copy-hash");
+        var newVersionId = Guid.NewGuid();
+        Set(version, "Id", newVersionId);
+        Set(version, "PropertySnapshot", new Dictionary<string, string> { ["SourceFileSha256"] = Hash(newBytes) });
+        Call(plugin, "RememberControlledVersionIdentityAndManifest", path, documentId, projectId, version);
+
+        Assert((string)Get(file, "Revision") == "W2", "cached manifest retained the stale revision");
+        Assert((Guid)Get(file, "VersionId") == newVersionId, "cached manifest retained the stale version id");
+        Assert((string)Get(file, "Sha256") == Hash(newBytes), "cached manifest retained the archive-copy fingerprint");
+        Assert((string)Get(manifest, "RootRevision") == "W2", "root manifest revision was not refreshed");
+
+        var node = Node("root.SLDASM", documentId, 0);
+        Set(node, "FullPath", path);
+        plugin.GetType().GetMethods(Members)
+            .Single(method => method.Name == "ApplyControlledOpenMetadata" && method.GetParameters().Length == 1)
+            .Invoke(plugin, new[] { node });
+
+        var request = New("WorkspaceDocumentStateRequest");
+        Set(request, "DocumentId", documentId);
+        Set(request, "FileName", "root.SLDASM");
+        Set(request, "LatestRevision", "W2");
+        var snapshot = Static("WorkspaceLocalStateReader", "Read", Path.Combine(directory, "workspace"), projectId, "P700007-1", "engineer", TypedArray("WorkspaceDocumentStateRequest", request));
+        var item = ((IEnumerable)Get(snapshot, "Items")).Cast<object>().Single();
+        Assert((string)Get(item, "LocalState") == "ReadOnlyCache", "refresh restored stale metadata and marked the checked-in file abnormal");
+        Assert((string)Get(item, "LocalRevision") == "W2", "refresh restored the stale local revision");
+    }
+
+    private static void TestBatchArchiveSeedsProjectCache()
+    {
+        var workspaceRoot = Path.Combine(directory, "workspace");
+        var projectCode = "P700007-1";
+        var projectId = Guid.NewGuid();
+        var documentId = Guid.NewGuid();
+        var bytes = System.Text.Encoding.UTF8.GetBytes("standalone drawing archived in batch");
+        var source = WriteFixture(Path.Combine(directory, "external", "drawing.SLDDRW"), "standalone drawing archived in batch");
+        var version = Version("W1", "stored-copy-hash");
+        Set(version, "Id", Guid.NewGuid());
+        Set(version, "PropertySnapshot", new Dictionary<string, string> { ["SourceFileSha256"] = Hash(bytes) });
+
+        var cached = (string)Static(
+            "PdmAddin",
+            "CacheCheckedInVersionInProjectView",
+            workspaceRoot,
+            projectCode,
+            source,
+            documentId,
+            projectId,
+            version);
+        var expected = Path.Combine(workspaceRoot, "View", projectCode, "drawing.SLDDRW");
+        Assert(string.Equals(cached, expected, StringComparison.OrdinalIgnoreCase), "batch archive did not create the project cache path");
+        Assert(File.Exists(expected), "batch archive project cache file is missing");
+        Assert((File.GetAttributes(expected) & FileAttributes.ReadOnly) != 0, "batch archive project cache is not read-only");
+
+        var request = New("WorkspaceDocumentStateRequest");
+        Set(request, "DocumentId", documentId);
+        Set(request, "FileName", "drawing.SLDDRW");
+        Set(request, "LatestRevision", "W1");
+        var snapshot = Static("WorkspaceLocalStateReader", "Read", workspaceRoot, projectId, projectCode, "engineer", TypedArray("WorkspaceDocumentStateRequest", request));
+        var item = ((IEnumerable)Get(snapshot, "Items")).Cast<object>().Single();
+        Assert((string)Get(item, "LocalState") == "ReadOnlyCache", "batch archived drawing still appears undownloaded");
+
+        File.SetAttributes(expected, FileAttributes.Normal);
+        File.WriteAllText(expected, "protected local content");
+        File.SetAttributes(expected, FileAttributes.ReadOnly);
+        var before = File.ReadAllText(expected);
+        var refused = (string)Static(
+            "PdmAddin",
+            "CacheCheckedInVersionInProjectView",
+            workspaceRoot,
+            projectCode,
+            source,
+            documentId,
+            projectId,
+            version);
+        Assert(string.IsNullOrWhiteSpace(refused), "different existing project file was treated as replaceable cache");
+        Assert(File.ReadAllText(expected) == before, "different existing project file was overwritten");
     }
 
     private static string WriteFixture(string path, string content)

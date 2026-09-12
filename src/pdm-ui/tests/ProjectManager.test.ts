@@ -74,6 +74,16 @@ function mountProjectManager(directory = emptyDirectory, sourceProjects = [paren
       onCreateSubproject: vi.fn(),
       onUpdateProject: vi.fn().mockResolvedValue(parent),
       onDeleteProject: vi.fn().mockResolvedValue(undefined),
+      onPreviewProjectCopy: vi.fn().mockResolvedValue({
+        sourceProjectId: child.id, targetProjectId: parent.id,
+        modelCount: 2, drawingCount: 2, bomItemCount: 8, validationItemCount: 3, projectFileCount: 1, totalBytes: 2048,
+        folders: [
+          { id: 'gas-folder', name: '气路时序', path: '机械设计 / 气路时序', templateKey: 'mechanical.air-sequence', fileCount: 1, totalBytes: 512, defaultSelected: true },
+          { id: 'other-folder', name: '其他资料', path: '机械设计 / 其他资料', templateKey: 'mechanical.other', fileCount: 2, totalBytes: 1024, defaultSelected: false },
+        ],
+        blockingReasons: [], warnings: [], canExecute: true,
+      }),
+      onCopyProjectContent: vi.fn().mockResolvedValue({ sourceProjectId: child.id, targetProjectId: parent.id, documentCount: 4, bomItemCount: 8, validationItemCount: 3, projectFileCount: 1, totalBytes: 2048 }),
       onUpdateExecutionUnit: vi.fn(),
       onUpdateMainStaffing: vi.fn(),
       onUpdateDesigners: vi.fn(),
@@ -547,6 +557,37 @@ describe('ProjectManager', () => {
       expect.objectContaining({ type: 'warning' }),
     )
     expect(wrapper.props('onDeleteProject')).toHaveBeenCalledWith(parent.id)
+    confirm.mockRestore()
+  })
+
+  it('项目内容复制默认勾选最新图档、BOM、验证检查项和气路时序', async () => {
+    const wrapper = mountProjectManager(emptyDirectory, [parent, child], false, true, false, true)
+    const menu = wrapper.findAllComponents({ name: 'ElDropdown' }).find(item => item.attributes('aria-label') === '操作项目P700001')
+    menu!.vm.$emit('command', 'copy-content')
+    await wrapper.vm.$nextTick()
+
+    const sourceSelect = wrapper.findAllComponents({ name: 'ElSelect' }).find(item => item.props('placeholder') === '选择已有项目')
+    expect(sourceSelect).toBeDefined()
+    sourceSelect!.vm.$emit('update:modelValue', child.id)
+    sourceSelect!.vm.$emit('change', child.id)
+    await flushPromises()
+
+    expect(wrapper.props('onPreviewProjectCopy')).toHaveBeenCalledWith(parent.id, expect.objectContaining({
+      sourceProjectId: child.id,
+      copyModels: true,
+      copyDrawings: true,
+      copyBom: true,
+      copyValidationItems: true,
+      folderIds: null,
+    }))
+    expect(wrapper.text()).toContain('仅“气路时序”默认勾选')
+    expect(wrapper.text()).toContain('验证计划检查项目')
+
+    const confirm = vi.spyOn(ElMessageBox, 'confirm').mockResolvedValue('confirm' as never)
+    const copyButton = wrapper.findAll('button').find(item => item.text() === '确认复制')
+    await copyButton!.trigger('click')
+    await flushPromises()
+    expect(wrapper.props('onCopyProjectContent')).toHaveBeenCalledWith(parent.id, expect.objectContaining({ folderIds: ['gas-folder'] }))
     confirm.mockRestore()
   })
 })

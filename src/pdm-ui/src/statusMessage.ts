@@ -7,6 +7,10 @@ export const globalStatus = readonly(currentStatus)
 let hostCount = 0
 let sequence = 0
 
+export function clearGlobalStatus() {
+  currentStatus.value = undefined
+}
+
 export function registerStatusHost() {
   hostCount += 1
   return () => {

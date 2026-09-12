@@ -358,7 +358,8 @@ public sealed class U9MaterialIntegrationService(
                     throw new U9MaterialCodeConflictException(sourceMaterial.MaterialCode);
 
                 var differences = CompareMappedFields(sourceMaterial, existingItem)
-                    .Concat(U9MaterialCreationRules.Compare(task.PayloadJson, existingItem.CreationAttributes)).ToArray();
+                    .Concat(U9MaterialCreationRules.Compare(task.PayloadJson, existingItem.CreationAttributes,
+                        reconcileLegacyVirtualBom: true)).ToArray();
                 if (differences.Length > 0)
                     throw new PdmRuleException($"U9C已存在待复核料号 {sourceMaterial.MaterialCode}，但字段仍不一致：{string.Join("；", differences)}");
 

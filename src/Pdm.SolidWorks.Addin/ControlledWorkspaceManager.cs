@@ -98,6 +98,56 @@ internal sealed class ControlledWorkspaceManager
         return ResolveRootPath(target, manifest);
     }
 
+    public async Task<string> PrepareHistoricalDerivedCopyAsync(
+        ControlledOpenManifestDto manifest,
+        CancellationToken cancellationToken)
+    {
+        var readOnlyRootPath = await PrepareReadOnlyAsync(manifest, true, cancellationToken).ConfigureAwait(false);
+        var source = Path.GetDirectoryName(readOnlyRootPath) ?? throw new InvalidDataException("历史只读工作区路径无效。");
+        var target = HistoricalDerivedDirectory(manifest);
+        if (Directory.Exists(target))
+        {
+            if (!ValidateWorkspace(target, manifest.Files))
+            {
+                throw new InvalidDataException(
+                    "该历史版本的派生编辑工作区已存在变化或不完整，已停止覆盖。请先提交、备份或清理该派生工作区后重试。");
+            }
+
+            SetWorkspaceAttributes(target, manifest, Array.Empty<Guid>());
+            return ResolveRootPath(target, manifest);
+        }
+
+        try
+        {
+            CopyDirectory(source, target);
+            if (!ValidateWorkspace(target, manifest.Files))
+            {
+                throw new InvalidDataException("历史版本派生工作区复制校验失败。");
+            }
+            SetWorkspaceAttributes(target, manifest, Array.Empty<Guid>());
+            return ResolveRootPath(target, manifest);
+        }
+        catch
+        {
+            if (Directory.Exists(target)) DeleteDirectory(target);
+            throw;
+        }
+    }
+
+    public string ApplyHistoricalDerivedPermissions(
+        ControlledOpenManifestDto manifest,
+        IReadOnlyCollection<Guid> editableDocumentIds)
+    {
+        var target = HistoricalDerivedDirectory(manifest);
+        if (!Directory.Exists(target) || !HasAllManifestFiles(target, manifest.Files))
+        {
+            throw new InvalidDataException("历史版本派生工作区不完整，未更改文件权限。");
+        }
+
+        SetWorkspaceAttributes(target, manifest, editableDocumentIds);
+        return ResolveRootPath(target, manifest);
+    }
+
     public string PromoteToEditable(ControlledOpenManifestDto manifest, string readOnlyRootPath)
     {
         var source = Path.GetDirectoryName(readOnlyRootPath) ?? throw new InvalidDataException("只读工作区路径无效。");
@@ -199,6 +249,16 @@ internal sealed class ControlledWorkspaceManager
 
     private string WorkingDirectory(ControlledOpenManifestDto manifest) =>
         ProjectViewDirectory(workspaceRoot, manifest.ProjectCode);
+
+    private string HistoricalDerivedDirectory(ControlledOpenManifestDto manifest) =>
+        Path.Combine(
+            workspaceRoot,
+            ".uplm",
+            "Derived",
+            SafeSegment(manifest.ProjectCode),
+            manifest.RootDocumentId.ToString("N"),
+            manifest.RootVersionId.ToString("N"),
+            manifest.Id.ToString("N"));
 
     internal static string ProjectViewDirectory(string root, string projectCode) =>
         Path.Combine(root, "View", SafeSegment(projectCode));

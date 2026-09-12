@@ -5,7 +5,8 @@
   "type": "module",
   "scripts": {
     "dev": "vite --host 127.0.0.1 --port 5173 --strictPort",
-    "build": "vue-tsc --noEmit && vite build",
+    "sync:global-status-content": "node tools/sync-global-status-content.mjs",
+    "build": "node tools/sync-global-status-content.mjs --if-stale && vue-tsc --noEmit && vite build",
     "typecheck": "vue-tsc --noEmit",
     "test": "vitest run",
     "test:e2e": "playwright test"

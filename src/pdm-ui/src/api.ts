@@ -1,9 +1,11 @@
 import type { AddDrawingReviewMarkupInput, ApprovalStep, ApprovalU9AutomationResult, AuditEntry, BatchUpdateBomItemsInput, BomClassification, BomEmptyDeclaration, BomExportMode, BomGenerationResult, BomHeaderKind, BomItem, BomKind, BomValidationRules, BomVersion, BomVersionState, CreateProjectInput, CreateReleasePackageInput, CreateRoleInput, CreateSubprojectInput, CrmConnectionTestResult, CrmCustomerSyncResult, CrmIntegrationSettings, DocumentKind, DocumentModelDrawingRelation, DocumentNode, DocumentVersionComparison, DocumentVersionSummary, DocumentWhereUsed, DrawingReviewCandidate, DrawingReviewDecision, DrawingReviewPackage, DrawingReviewTarget, EditLockSummary, EngineeringKit, EngineeringKitExpansion, EquipmentTypeDefinition, FolderPermissionRule, MainProjectStaffingInput, ManagedDocument, ManufacturingBomBaseline, MaterialAttachment, MaterialAttachmentKind, MaterialCategory, MaterialCategoryRule, MaterialCodeApplication, MaterialCodeApplicationStatus, MaterialCodeDecisionResult, MaterialCodeResolution, MaterialDuplicateRule, MaterialKind, MaterialNumberingSettings, MaterialPage, MaterialRemovalReadiness, MaterialRemovalResult, MaterialSyncExecutionResult, MaterialSyncTask, MyApprovalTask, OrganizationDirectory, OrganizationUnit, PasswordResetTask, PdmCustomer, PdmMaterial, PdmSystemSettings, PdmUser, PdmUserProfile, ProgramTemplate, ProgramTemplateApprovalDecision, ProgramTemplateAttachmentKind, ProgramTemplateDraftInput, ProgramTemplateRevision, ProgramTemplateTask, ProgramTemplateVersionBump, ProjectBomHeader, ProjectBomU9SyncExecution, ProjectBomU9SyncPreview, ProjectFile, ProjectFileVersion, ProjectFolder, ProjectFolderTemplateNode, ProjectNumberingOptions, ProjectOrganization, ProjectProcurementTrackingResult, ProjectSummary, ProjectVersionItem, ReferenceStatus, ReleaseItemComment, ReleasePackageSummary, ReleaseScope, RolePermissionDirectory, SaveMaterialInput, SaveOrganizationUnitInput, SavePdmUserInput, SaveProjectOrganizationInput, StandardLibraryCategory, StandardLibraryMaterialPage, U9BomQueryExecution, U9BomQueryInput, U9BomWriteExecution, U9BomWriteInput, U9BomWritePreview, U9ConnectionTestResult, U9InventoryFilters, U9InventoryPage, U9InventorySyncSettings, U9InventorySyncStatusResponse, U9ItemQueryResult, U9MaterialFullSyncStatusResponse, U9MaterialIntegrationSettings, U9MaterialSampleImportResult, U9MaterialSamplePreview, U9ProcurementSyncSettings, U9ProcurementSyncStatusResponse, UpdateCrmIntegrationInput, UpdateProjectInput, UpdateReleasePackageDraftInput, UpdateU9MaterialIntegrationInput } from './types'
 import type { MaterialSyncBatch } from './types'
 import type { ApprovalTransferCandidate, UserNotification } from './types'
+import type { ProjectCopyOptionsInput, ProjectCopyPreview, ProjectCopyResult } from './types'
 
 import type { BomSourceReclassificationPreview } from './types'
 import type { MaterialRelationCompleteness, MaterialRelationTemplate, SaveMaterialRelationTemplateInput } from './types'
+import type { ConfirmValidationPlanExecutionInput, ProjectValidationPlan, SaveProjectValidationPlanInput, SaveValidationCheckCategoryInput, SaveValidationCheckItemInput, ValidationCheckCatalog, ValidationCheckCategory, ValidationCheckItem, ValidationPlanAttachment, ValidationPlanApprovalTaskSummary, ValidationPlanExecutionRecord, ValidationPlanRecognitionDraft } from './types'
 
 const localDesktopOrigin = window.location.hostname === 'appassets.pdm.local'
 const needsLocalApiFallback = localDesktopOrigin || import.meta.env.MODE === 'test'
@@ -383,7 +385,8 @@ async function requestJson<T>(path: string, init: RequestInit = {}, token?: stri
   }
 
   if (response.status === 204) return undefined as T
-  return response.json() as Promise<T>
+  const responseBody = await response.text()
+  return (responseBody ? JSON.parse(responseBody) : null) as T
 }
 
 function authenticatedHeaders(token: string): Headers {
@@ -391,6 +394,115 @@ function authenticatedHeaders(token: string): Headers {
   const activeCompanyId = window.localStorage.getItem('pdm_active_organization')
   if (activeCompanyId) headers.set('X-Company-Id', activeCompanyId)
   return headers
+}
+
+export function readValidationCheckCatalog(token: string, includeInactive = false): Promise<ValidationCheckCatalog> {
+  return requestJson<ValidationCheckCatalog>(`/api/validation-check-catalog${includeInactive ? '?includeInactive=true' : ''}`, {}, token)
+}
+
+export function saveValidationCheckCategory(categoryId: string | null, input: SaveValidationCheckCategoryInput, token: string): Promise<ValidationCheckCategory> {
+  return requestJson<ValidationCheckCategory>(categoryId ? `/api/validation-check-catalog/categories/${categoryId}` : '/api/validation-check-catalog/categories', {
+    method: categoryId ? 'PUT' : 'POST',
+    body: JSON.stringify(input),
+  }, token)
+}
+
+export function deleteValidationCheckCategory(categoryId: string, expectedRowVersion: number, token: string): Promise<void> {
+  return requestJson<void>(`/api/validation-check-catalog/categories/${categoryId}?expectedRowVersion=${expectedRowVersion}`, { method: 'DELETE' }, token)
+}
+
+export function saveValidationCheckItem(itemId: string | null, input: SaveValidationCheckItemInput, token: string): Promise<ValidationCheckItem> {
+  return requestJson<ValidationCheckItem>(itemId ? `/api/validation-check-catalog/items/${itemId}` : '/api/validation-check-catalog/items', {
+    method: itemId ? 'PUT' : 'POST',
+    body: JSON.stringify(input),
+  }, token)
+}
+
+export function deleteValidationCheckItem(itemId: string, expectedRowVersion: number, token: string): Promise<void> {
+  return requestJson<void>(`/api/validation-check-catalog/items/${itemId}?expectedRowVersion=${expectedRowVersion}`, { method: 'DELETE' }, token)
+}
+
+export function readProjectValidationPlan(projectId: string, token: string): Promise<ProjectValidationPlan | null> {
+  return requestJson<ProjectValidationPlan | null>(`/api/projects/${projectId}/validation-plan`, {}, token)
+}
+
+export function saveProjectValidationPlan(projectId: string, input: SaveProjectValidationPlanInput, token: string): Promise<ProjectValidationPlan> {
+  return requestJson<ProjectValidationPlan>(`/api/projects/${projectId}/validation-plan`, { method: 'PUT', body: JSON.stringify(input) }, token)
+}
+
+export function createProjectValidationPlanRevision(projectId: string, expectedRowVersion: number, token: string): Promise<ProjectValidationPlan> {
+  return requestJson<ProjectValidationPlan>(`/api/projects/${projectId}/validation-plan/revisions?expectedRowVersion=${expectedRowVersion}`, { method: 'POST' }, token)
+}
+
+export function submitProjectValidationPlan(projectId: string, expectedRowVersion: number, token: string): Promise<ProjectValidationPlan> {
+  return requestJson<ProjectValidationPlan>(`/api/projects/${projectId}/validation-plan/submit?expectedRowVersion=${expectedRowVersion}`, { method: 'POST' }, token)
+}
+
+export function decideValidationPlanApproval(taskId: string, decision: 'Approved' | 'Rejected', comment: string, token: string): Promise<ProjectValidationPlan> {
+  return requestJson<ProjectValidationPlan>(`/api/validation-plan-approval-tasks/${taskId}/decision`, { method: 'POST', body: JSON.stringify({ decision: decision === 'Approved' ? 0 : 1, comment }) }, token)
+}
+
+export function listMyValidationPlanApprovalTasks(token: string): Promise<ValidationPlanApprovalTaskSummary[]> {
+  return requestJson<ValidationPlanApprovalTaskSummary[]>('/api/validation-plan-approval-tasks/mine', {}, token)
+}
+
+export async function uploadValidationPlanAttachment(planId: string, kind: 'PlanDocument' | 'Evidence', file: File, token: string): Promise<ValidationPlanAttachment> {
+  const digest = await crypto.subtle.digest('SHA-256', await file.arrayBuffer())
+  const sha256 = Array.from(new Uint8Array(digest), value => value.toString(16).padStart(2, '0')).join('').toUpperCase()
+  const session = await requestJson<{ id: string; chunkSize: number }>(`/api/validation-plans/${planId}/attachment-uploads`, {
+    method: 'POST', body: JSON.stringify({ kind, fileName: file.name, totalLength: file.size, sha256 }),
+  }, token)
+  const chunks = Math.ceil(file.size / session.chunkSize)
+  for (let index = 0; index < chunks; index++) {
+    const body = file.slice(index * session.chunkSize, Math.min(file.size, (index + 1) * session.chunkSize))
+    const response = await fetch(`${apiBase}/api/uploads/sessions/${session.id}/chunks/${index}`, { method: 'PUT', headers: authenticatedHeaders(token), body })
+    if (!response.ok) throw new PdmApiError(`验证计划文件上传失败（${response.status}）`, response.status)
+  }
+  return requestJson<ValidationPlanAttachment>(`/api/validation-plans/${planId}/attachment-uploads/${session.id}/complete`, { method: 'POST', body: JSON.stringify({ kind }) }, token)
+}
+
+export async function downloadValidationPlanAttachment(attachmentId: string, fileName: string, token: string): Promise<void> {
+  const response = await fetch(`${apiBase}/api/validation-plan-attachments/${attachmentId}/download`, { headers: authenticatedHeaders(token) })
+  if (!response.ok) throw new PdmApiError(`验证计划附件下载失败（${response.status}）`, response.status)
+  const url = URL.createObjectURL(await response.blob())
+  const anchor = document.createElement('a')
+  anchor.href = url
+  anchor.download = fileName
+  anchor.click()
+  URL.revokeObjectURL(url)
+}
+
+export function recognizeValidationPlanAttachment(attachmentId: string, token: string): Promise<ValidationPlanRecognitionDraft> {
+  return requestJson<ValidationPlanRecognitionDraft>(`/api/validation-plan-attachments/${attachmentId}/recognize`, { method: 'POST' }, token)
+}
+
+export function readValidationPlanExecutionRecords(planId: string, token: string): Promise<ValidationPlanExecutionRecord[]> {
+  return requestJson<ValidationPlanExecutionRecord[]>(`/api/validation-plans/${planId}/execution-records`, {}, token)
+}
+
+export function confirmValidationPlanExecution(planId: string, input: ConfirmValidationPlanExecutionInput, token: string): Promise<ValidationPlanExecutionRecord> {
+  return requestJson<ValidationPlanExecutionRecord>(`/api/validation-plans/${planId}/execution-records`, { method: 'POST', body: JSON.stringify(input) }, token)
+}
+
+export async function exportProjectValidationPlan(projectId: string, projectCode: string, token: string): Promise<void> {
+  const response = await fetch(`${apiBase}/api/projects/${projectId}/validation-plan/export`, { headers: authenticatedHeaders(token) })
+  if (!response.ok) {
+    let message = `验证计划导出失败（${response.status}）`
+    try {
+      const problem = await response.json() as { title?: string; detail?: string }
+      message = problem.detail || problem.title || message
+    } catch { /* 保留状态码信息。 */ }
+    throw new PdmApiError(message, response.status)
+  }
+  const url = URL.createObjectURL(await response.blob())
+  const disposition = response.headers.get('content-disposition') ?? ''
+  const encodedName = /filename\*=UTF-8''([^;]+)/i.exec(disposition)?.[1]
+  const fileName = encodedName ? decodeURIComponent(encodedName) : `${projectCode}_验证计划.xlsx`
+  const link = document.createElement('a')
+  link.href = url
+  link.download = fileName
+  link.click()
+  window.setTimeout(() => URL.revokeObjectURL(url), 60_000)
 }
 
 export function listMaterials(token: string, query = '', includeArchived = false, limit = 100, categoryCode = ''): Promise<PdmMaterial[]> {
@@ -403,7 +515,15 @@ export function listMaterials(token: string, query = '', includeArchived = false
   return requestJson<PdmMaterial[]>(`/api/materials${suffix}`, {}, token)
 }
 
-export function listMaterialPage(token: string, input: { query?: string; categoryCode?: string; brand?: string; includeArchived?: boolean; page?: number; pageSize?: number }): Promise<MaterialPage> {
+export function listPendingMasterMaterials(token: string): Promise<PdmMaterial[]> {
+  return requestJson<PdmMaterial[]>('/api/materials/pending-approval', {}, token)
+}
+
+export function listBomHeaderMaterialDirectory(token: string): Promise<import('./types').BomHeaderMaterialDirectoryItem[]> {
+  return requestJson('/api/materials/bom-headers', {}, token)
+}
+
+export function listMaterialPage(token: string, input: { query?: string; categoryCode?: string; brand?: string; includeArchived?: boolean; page?: number; pageSize?: number; createdAtOrder?: 'asc' | 'desc'; ordinaryOnly?: boolean }): Promise<MaterialPage> {
   const parameters = new URLSearchParams()
   if (input.query?.trim()) parameters.set('query', input.query.trim())
   if (input.categoryCode?.trim()) parameters.set('categoryCode', input.categoryCode.trim())
@@ -411,6 +531,8 @@ export function listMaterialPage(token: string, input: { query?: string; categor
   if (input.includeArchived) parameters.set('includeArchived', 'true')
   if (input.page && input.page !== 1) parameters.set('page', String(input.page))
   if (input.pageSize && input.pageSize !== 50) parameters.set('pageSize', String(input.pageSize))
+  if (input.createdAtOrder) parameters.set('createdAtOrder', input.createdAtOrder)
+  if (input.ordinaryOnly) parameters.set('ordinaryOnly', 'true')
   const suffix = parameters.size ? `?${parameters}` : ''
   return requestJson<MaterialPage>(`/api/materials/page${suffix}`, {}, token)
 }
@@ -693,8 +815,8 @@ export function calibrateMaterialCategoryCounter(code: string, lastMaterialCode:
   }, token)
 }
 
-export function listMaterialSyncTasks(token: string): Promise<MaterialSyncTask[]> {
-  return requestJson<MaterialSyncTask[]>('/api/material-sync-tasks', {}, token)
+export function listMaterialSyncTasks(token: string, ordinaryOnly = false): Promise<MaterialSyncTask[]> {
+  return requestJson<MaterialSyncTask[]>(`/api/material-sync-tasks${ordinaryOnly ? '?ordinaryOnly=true' : ''}`, {}, token)
 }
 
 export function retryMaterialSyncTask(taskId: string, token: string): Promise<MaterialSyncTask> {
@@ -1083,6 +1205,14 @@ export async function deleteProject(projectId: string, token: string): Promise<v
   await requestJson(`/api/projects/${projectId}`, { method: 'DELETE' }, token)
 }
 
+export function previewProjectCopy(targetProjectId: string, input: ProjectCopyOptionsInput, token: string): Promise<ProjectCopyPreview> {
+  return requestJson(`/api/projects/${targetProjectId}/copy-preview`, { method: 'POST', body: JSON.stringify(input) }, token)
+}
+
+export function copyProjectContent(targetProjectId: string, input: ProjectCopyOptionsInput, token: string): Promise<ProjectCopyResult> {
+  return requestJson(`/api/projects/${targetProjectId}/copy`, { method: 'POST', body: JSON.stringify(input) }, token)
+}
+
 export async function saveBom(projectId: string, kind: BomKind, items: BomItem[], token: string): Promise<BomItem[]> {
   const saved = await requestJson<ApiBomItem[]>(`/api/projects/${projectId}/boms/${kind}`, {
     method: 'PUT',
@@ -1233,6 +1363,10 @@ export async function decideDrawingReviewTarget(packageId: string, itemId: strin
   }, token))
 }
 
+export async function listReleasePackages(projectId: string, token: string): Promise<ReleasePackageSummary[]> {
+  return (await requestJson<ApiReleasePackage[]>(`/api/projects/${projectId}/release-packages`, {}, token)).map(mapReleasePackage)
+}
+
 export function createReleasePackage(projectId: string, input: CreateReleasePackageInput, token: string): Promise<ApiReleasePackage> {
   return requestJson('/api/release-packages', { method: 'POST', body: JSON.stringify({ projectId, referenceSnapshotId: null, ...input }) }, token)
 }
@@ -1328,7 +1462,25 @@ export function listAudit(token: string): Promise<AuditEntry[]> {
 }
 
 export function listMyApprovalTasks(token: string): Promise<MyApprovalTask[]> {
-  return requestJson('/api/approval-tasks/mine', {}, token)
+  return Promise.all([
+    requestJson<MyApprovalTask[]>('/api/approval-tasks/mine', {}, token),
+    listMyValidationPlanApprovalTasks(token),
+  ]).then(([releaseTasks, validationTasks]) => [
+    ...releaseTasks.map(task => ({ ...task, kind: 'release' as const })),
+    ...validationTasks.map(task => ({
+      id: task.id,
+      kind: 'validationPlan' as const,
+      projectId: task.projectId,
+      projectCode: task.projectCode,
+      projectName: task.projectName,
+      validationPlanId: task.planId,
+      validationPlanRevision: task.revisionNumber,
+      stage: task.stage,
+      stepName: task.stepName,
+      packageState: 'PendingApproval',
+      createdAt: task.createdAt,
+    })),
+  ])
 }
 
 export function listUserNotifications(token: string): Promise<UserNotification[]> {
@@ -1341,6 +1493,81 @@ export function markUserNotificationRead(notificationId: string, token: string):
 
 export function markAllUserNotificationsRead(token: string): Promise<void> {
   return requestJson('/api/notifications/read-all', { method: 'POST' }, token)
+}
+
+export function listProjectPlanTemplates(token: string, includeInactive = false): Promise<import('./types').ProjectPlanTemplate[]> {
+  return requestJson(`/api/project-plan-templates${includeInactive ? '?includeInactive=true' : ''}`, {}, token)
+}
+
+export function saveProjectPlanTemplate(templateId: string | null, input: import('./types').SaveProjectPlanTemplateInput, token: string): Promise<import('./types').ProjectPlanTemplate> {
+  return requestJson(templateId ? `/api/project-plan-templates/${templateId}` : '/api/project-plan-templates', {
+    method: templateId ? 'PUT' : 'POST',
+    body: JSON.stringify(input),
+  }, token)
+}
+
+export function readProjectPlan(projectId: string, token: string): Promise<import('./types').ProjectPlan | null> {
+  return requestJson(`/api/projects/${projectId}/plan`, {}, token)
+}
+
+export function readProjectPlanPortfolio(projectId: string, token: string): Promise<import('./types').ProjectPlanPortfolio> {
+  return requestJson(`/api/projects/${projectId}/plan/portfolio`, {}, token)
+}
+
+export function listProjectPlanVersions(projectId: string, token: string): Promise<import('./types').ProjectPlanVersion[]> {
+  return requestJson(`/api/projects/${projectId}/plan/versions`, {}, token)
+}
+
+export function generateProjectPlan(projectId: string, input: { templateId: string; startDate: string; totalDurationDays: number; replaceExisting: boolean; changeReason?: string; independentStages?: Array<{ stage: string; startDate: string; durationDays: number }>; deferredStages?: string[] }, token: string): Promise<import('./types').ProjectPlan> {
+  return requestJson(`/api/projects/${projectId}/plan/generate`, { method: 'POST', body: JSON.stringify(input) }, token)
+}
+
+export function saveProjectPlan(projectId: string, input: { tasks: import('./types').ProjectPlanTask[]; changeReason: string; expectedRowVersion: number; stages?: import('./types').ProjectPlanStageDefinition[]; createMissingFollowers?: boolean }, token: string): Promise<import('./types').ProjectPlan> {
+  return requestJson(`/api/projects/${projectId}/plan`, { method: 'PUT', body: JSON.stringify(input) }, token)
+}
+
+export function deleteProjectPlan(projectId: string, expectedRowVersion: number, includeIndependentChildren: boolean, token: string): Promise<void> {
+  return requestJson<void>(`/api/projects/${projectId}/plan?expectedRowVersion=${expectedRowVersion}&includeIndependentChildren=${includeIndependentChildren}`, { method: 'DELETE' }, token)
+}
+
+export function supplementProjectPlanStageSchedule(projectId: string, input: { startDate: string; totalDurationDays: number; expectedRowVersion: number }, token: string): Promise<import('./types').ProjectPlan> {
+  return requestJson(`/api/projects/${projectId}/plan/stage-schedule`, { method: 'POST', body: JSON.stringify(input) }, token)
+}
+
+export function setProjectPlanBaseline(projectId: string, expectedRowVersion: number, token: string): Promise<import('./types').ProjectPlan> {
+  return requestJson(`/api/projects/${projectId}/plan/baseline`, { method: 'POST', body: JSON.stringify({ expectedRowVersion }) }, token)
+}
+
+export function submitProjectPlan(projectId: string, expectedRowVersion: number, token: string): Promise<import('./types').ProjectPlan> {
+  return requestJson(`/api/projects/${projectId}/plan/submit`, { method: 'POST', body: JSON.stringify({ expectedRowVersion }) }, token)
+}
+
+export function submitProjectPlanChange(projectId: string, input: { tasks: NonNullable<import('./types').ProjectPlan['changeRequest']>['tasks']; reason: string; expectedRowVersion: number }, token: string): Promise<import('./types').ProjectPlan> {
+  return requestJson(`/api/projects/${projectId}/plan/change-request`, { method: 'POST', body: JSON.stringify(input) }, token)
+}
+
+export function completeProjectPlanChange(projectId: string, expectedRowVersion: number, token: string): Promise<import('./types').ProjectPlan> {
+  return requestJson(`/api/projects/${projectId}/plan/change-complete`, { method: 'POST', body: JSON.stringify({ expectedRowVersion }) }, token)
+}
+
+export function abandonProjectPlanChange(projectId: string, expectedRowVersion: number, token: string): Promise<import('./types').ProjectPlan> {
+  return requestJson(`/api/projects/${projectId}/plan/change-abandon`, { method: 'POST', body: JSON.stringify({ expectedRowVersion }) }, token)
+}
+
+export function decideProjectPlan(projectId: string, input: { expectedRowVersion: number; approve: boolean; comment?: string }, token: string): Promise<import('./types').ProjectPlan> {
+  return requestJson(`/api/projects/${projectId}/plan/decision`, { method: 'POST', body: JSON.stringify(input) }, token)
+}
+
+export function updateProjectPlanTaskProgress(projectId: string, taskId: string, input: { completionPercent: number; actualStart?: string; actualFinish?: string; expectedRowVersion: number }, token: string): Promise<import('./types').ProjectPlan> {
+  return requestJson(`/api/projects/${projectId}/plan/tasks/${taskId}/progress`, { method: 'PUT', body: JSON.stringify(input) }, token)
+}
+
+export function setProjectPlanStage(projectId: string, input: { stage?: import('./types').ProjectPlanStage; reason: string; expectedRowVersion: number }, token: string): Promise<import('./types').ProjectPlan> {
+  return requestJson(`/api/projects/${projectId}/plan/stage`, { method: 'PUT', body: JSON.stringify(input) }, token)
+}
+
+export function reuseProjectPlan(rootProjectId: string, input: { sourceProjectId: string; targetProjectIds: string[]; replaceExisting: boolean; changeReason: string }, token: string): Promise<import('./types').ProjectPlan[]> {
+  return requestJson(`/api/projects/${rootProjectId}/plan/reuse`, { method: 'POST', body: JSON.stringify(input) }, token)
 }
 
 export function listEditLocks(token: string): Promise<EditLockSummary[]> {
