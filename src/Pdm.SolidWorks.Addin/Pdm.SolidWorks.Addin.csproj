@@ -18,17 +18,17 @@
   <ItemGroup>
     <Reference Include="SolidWorks.Interop.sldworks">
       <HintPath>$(SolidWorksInstallDir)\SolidWorks.Interop.sldworks.dll</HintPath>
-      <Private>false</Private>
+      <Private>true</Private>
       <EmbedInteropTypes>false</EmbedInteropTypes>
     </Reference>
     <Reference Include="SolidWorks.Interop.swconst">
       <HintPath>$(SolidWorksInstallDir)\SolidWorks.Interop.swconst.dll</HintPath>
-      <Private>false</Private>
+      <Private>true</Private>
       <EmbedInteropTypes>false</EmbedInteropTypes>
     </Reference>
     <Reference Include="SolidWorks.Interop.swpublished">
       <HintPath>$(SolidWorksInstallDir)\SolidWorks.Interop.swpublished.dll</HintPath>
-      <Private>false</Private>
+      <Private>true</Private>
       <EmbedInteropTypes>false</EmbedInteropTypes>
     </Reference>
     <Reference Include="System.Net.Http" />

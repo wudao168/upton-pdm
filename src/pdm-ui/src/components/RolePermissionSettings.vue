@@ -18,24 +18,22 @@ const props = defineProps<{
 const selectedRole = ref('')
 const draft = ref<string[]>([])
 const permissionDialog = ref(false)
-const permissionScope = ref<'basic' | 'document'>('basic')
 const createDialog = ref(false)
 const createForm = reactive<CreateRoleInput>({ name: '', description: '', sourceRoleCode: '' })
 
 const roles = computed(() => props.directory.roles)
 const selected = computed(() => roles.value.find(role => role.role === selectedRole.value) ?? null)
-const documentModules = new Set(['项目内容', '图纸审核', '审批发布'])
-const visiblePermissions = computed(() => props.directory.permissions.filter(permission =>
-  permissionScope.value === 'document' ? documentModules.has(permission.module) : !documentModules.has(permission.module)))
 const groups = computed(() => {
   const result = new Map<string, PermissionDefinition[]>()
-  for (const permission of visiblePermissions.value) {
+  for (const permission of props.directory.permissions) {
     const items = result.get(permission.module) ?? []
     items.push(permission)
     result.set(permission.module, items)
   }
   return [...result.entries()].map(([name, permissions]) => ({ name, permissions }))
 })
+const moduleCount = computed(() => groups.value.length)
+const permissionCount = computed(() => props.directory.permissions.length)
 const editable = computed(() => props.canEdit && !selected.value?.isSystemAdministrator)
 const copySources = computed(() => roles.value.filter(role => !role.isSystemAdministrator))
 const deletable = computed(() => props.canEdit && selected.value && !selected.value.isSystem && selected.value.userCount === 0)
@@ -45,9 +43,8 @@ function selectRole(role: RolePermissionSettings) {
   draft.value = [...role.permissions]
 }
 
-function openPermissions(role: RolePermissionSettings, scope: 'basic' | 'document') {
+function openPermissions(role: RolePermissionSettings) {
   selectRole(role)
-  permissionScope.value = scope
   permissionDialog.value = true
 }
 
@@ -138,13 +135,14 @@ watch(roles, value => {
         <el-table-column prop="description" label="说明" min-width="300" show-overflow-tooltip />
         <el-table-column prop="userCount" label="用户数" width="90" />
         <el-table-column label="类型" width="90"><template #default="{ row }">{{ row.isSystem ? '系统' : '自定义' }}</template></el-table-column>
-        <el-table-column label="操作" width="220" fixed="right"><template #default="{ row }"><div class="pdm-role-row-actions"><button type="button" class="pdm-text-action" @click="openPermissions(row, 'basic')">基础权限</button><button type="button" class="pdm-text-action" @click="openPermissions(row, 'document')">单据权限</button></div></template></el-table-column>
+        <el-table-column label="操作" width="120" fixed="right"><template #default="{ row }"><div class="pdm-role-row-actions"><button type="button" class="pdm-text-action" @click="openPermissions(row)">权限设置</button></div></template></el-table-column>
       </el-table>
     </section>
 
-    <el-dialog v-model="permissionDialog" :title="`${selected?.name ?? ''} · ${permissionScope === 'basic' ? '基础权限' : '单据权限'}`" width="1040px" class="pdm-role-permission-dialog">
+    <el-dialog v-model="permissionDialog" :title="`${selected?.name ?? ''} · 权限设置`" width="1040px" class="pdm-role-permission-dialog">
       <template v-if="selected">
         <div class="pdm-role-dialog-summary"><div><strong>{{ selected.name }}</strong><span>{{ selected.role }}</span></div><p>{{ selected.description }}</p><small>{{ selected.isSystem ? '系统角色' : '自定义角色' }} · {{ selected.userCount }} 个用户</small></div>
+        <p class="pdm-role-directory-note">权限模块由系统功能目录自动生成；当前共 {{ moduleCount }} 个模块、{{ permissionCount }} 项权限，后续新增模块会自动加入。</p>
         <div class="pdm-permission-groups">
           <section v-for="group in groups" :key="group.name" class="pdm-permission-group">
             <header><h3>{{ group.name }}</h3><label v-if="editable"><input type="checkbox" :checked="group.permissions.every(item => hasPermission(item.code))" @change="setGroup(group.permissions, ($event.target as HTMLInputElement).checked)">全选本组</label></header>
@@ -178,6 +176,7 @@ watch(roles, value => {
 .pdm-role-row-actions { display: flex; align-items: center; gap: 12px; white-space: nowrap; }
 .pdm-role-dialog-summary { display: grid; grid-template-columns: minmax(180px, auto) minmax(0, 1fr) auto; align-items: center; gap: 16px; padding: 0 2px 14px; border-bottom: 1px solid var(--pdm-border); }
 .pdm-role-dialog-summary > div { display: flex; align-items: baseline; gap: 10px; }.pdm-role-dialog-summary > div span, .pdm-role-dialog-summary small { color: var(--pdm-muted); }.pdm-role-dialog-summary p { margin: 0; color: var(--pdm-muted); }
+.pdm-role-directory-note { margin: 12px 2px 4px; color: var(--pdm-muted); font-size: 12px; }
 .pdm-role-permission-dialog :deep(.el-dialog__body) { max-height: 68vh; overflow: auto; }
 .pdm-role-permission-dialog :deep(.el-dialog__footer) { display: flex; align-items: center; gap: 8px; }
 .pdm-role-dialog-footer-spacer { flex: 1; }

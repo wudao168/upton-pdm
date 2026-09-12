@@ -187,6 +187,38 @@ public sealed class ApiSmokeTests : IClassFixture<PdmApiFactory>
     }
 
     [Fact]
+    public async Task PasswordResetTasks_UseEffectiveAdministratorRole()
+    {
+        var repository = factory.Services.GetRequiredService<IPdmRepository>();
+        var passwords = factory.Services.GetRequiredService<IPasswordService>();
+        var operatorUsername = $"reset-effective-admin-{Guid.NewGuid():N}";
+        var ordinaryUsername = $"reset-ordinary-planner-{Guid.NewGuid():N}";
+        var targetUsername = $"reset-target-{Guid.NewGuid():N}";
+        await repository.CreateUserAsync(new UserAccount(
+            Guid.NewGuid(), operatorUsername, "附加系统管理员", passwords.Hash("OperatorPassword1"), UserRole.PlanningManager, true,
+            RoleCodes: [nameof(UserRole.PlanningManager), nameof(UserRole.Administrator)]), CancellationToken.None);
+        await repository.CreateUserAsync(new UserAccount(
+            Guid.NewGuid(), ordinaryUsername, "普通计划管理员", passwords.Hash("PlannerPassword1"), UserRole.PlanningManager, true), CancellationToken.None);
+        await repository.CreateUserAsync(new UserAccount(
+            Guid.NewGuid(), targetUsername, "待重置用户", passwords.Hash("OldPassword1"), UserRole.Engineer, true), CancellationToken.None);
+
+        client.DefaultRequestHeaders.Authorization = null;
+        var requested = await client.PostAsJsonAsync("/api/auth/password-reset-request", new { username = targetUsername, displayName = "待重置用户" });
+        Assert.Equal(HttpStatusCode.OK, requested.StatusCode);
+
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", CreateToken(operatorUsername, nameof(UserRole.PlanningManager)));
+        var tasksResponse = await client.GetAsync("/api/password-reset-requests");
+        Assert.Equal(HttpStatusCode.OK, tasksResponse.StatusCode);
+        var task = Assert.Single((await tasksResponse.Content.ReadFromJsonAsync<IReadOnlyList<PasswordResetTaskResponse>>())!, item => item.Username == targetUsername);
+        var reset = await client.PutAsJsonAsync($"/api/password-reset-requests/{task.Id}/reset", new { });
+        Assert.Equal(HttpStatusCode.OK, reset.StatusCode);
+        Assert.True(passwords.Verify("11111111", (await repository.FindUserAsync(targetUsername, CancellationToken.None))!.PasswordHash));
+
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", CreateToken(ordinaryUsername, nameof(UserRole.PlanningManager)));
+        Assert.Equal(HttpStatusCode.Forbidden, (await client.GetAsync("/api/password-reset-requests")).StatusCode);
+    }
+
+    [Fact]
     public async Task UserAdministration_CreatesUpdatesAndResetsUser()
     {
         var repository = factory.Services.GetRequiredService<IPdmRepository>();

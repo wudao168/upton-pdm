@@ -81,6 +81,8 @@ describe('ValidationPlanManager', () => {
     await flushPromises()
 
     expect(wrapper.text()).toContain('P700005 · 主项目及子项目验证计划')
+    expect(wrapper.text()).toContain('模板管理')
+    expect(wrapper.text()).not.toContain('检查项库管理')
     await wrapper.findAll('tbody tr').find(row => row.text().includes('P700005-3'))!.trigger('click')
     await flushPromises()
     expect(wrapper.text()).toContain('当前项目还没有验证检查项')

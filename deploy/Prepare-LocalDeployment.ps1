@@ -2,7 +2,8 @@
 param(
     [string]$MySqlVersion = '8.4.11',
     [string]$LanBaseUrl = 'http://192.168.2.8:5173',
-    [string]$ReleaseVersion = ''
+    [string]$ReleaseVersion = '',
+    [switch]$ServerOnly
 )
 
 $ErrorActionPreference = 'Stop'
@@ -25,15 +26,19 @@ $myIniPath = Join-Path $localRoot 'mysql\my.ini'
 $isUpgrade = $null -ne (Get-Service -Name 'UptonPdmApi' -ErrorAction SilentlyContinue)
 if ($isUpgrade) {
     $apiOutput = Join-Path $localRoot 'api-next'
-    $clientOutput = Join-Path $localRoot 'staged-client'
-    $addinOutput = Join-Path $localRoot 'staged-solidworks-addin'
-    $previewWorkerOutput = Join-Path $localRoot 'staged-preview-worker'
+    if (-not $ServerOnly) {
+        $clientOutput = Join-Path $localRoot 'staged-client'
+        $addinOutput = Join-Path $localRoot 'staged-solidworks-addin'
+        $previewWorkerOutput = Join-Path $localRoot 'staged-preview-worker'
+    }
 }
 else {
     $apiOutput = Join-Path $localRoot 'api'
-    $clientOutput = Join-Path $localRoot 'client'
-    $addinOutput = Join-Path $localRoot 'solidworks-addin'
-    $previewWorkerOutput = Join-Path $localRoot 'preview-worker'
+    if (-not $ServerOnly) {
+        $clientOutput = Join-Path $localRoot 'client'
+        $addinOutput = Join-Path $localRoot 'solidworks-addin'
+        $previewWorkerOutput = Join-Path $localRoot 'preview-worker'
+    }
 }
 
 function New-RandomText([int]$byteCount) {
@@ -71,9 +76,6 @@ foreach ($directory in @(
     (Join-Path $localRoot 'mysql\logs'),
     (Join-Path $localRoot 'mysql\tmp'),
     (Join-Path $localRoot 'api'),
-    (Join-Path $localRoot 'client'),
-    (Join-Path $localRoot 'solidworks-addin'),
-    (Join-Path $localRoot 'preview-worker'),
     (Join-Path $localRoot 'program-templates'),
     (Join-Path $localRoot 'vault\PRJ-2026-018'),
     (Join-Path $localRoot 'release\PRJ-2026-018'),
@@ -82,8 +84,20 @@ foreach ($directory in @(
     New-Item -ItemType Directory -Path $directory -Force | Out-Null
 }
 
+if (-not $ServerOnly) {
+    foreach ($directory in @(
+        (Join-Path $localRoot 'client'),
+        (Join-Path $localRoot 'solidworks-addin'),
+        (Join-Path $localRoot 'preview-worker')
+    )) {
+        New-Item -ItemType Directory -Path $directory -Force | Out-Null
+    }
+}
+
 if ($isUpgrade) {
-    foreach ($directory in @($apiOutput, $clientOutput, $addinOutput, $previewWorkerOutput)) {
+    $upgradeOutputs = @($apiOutput)
+    if (-not $ServerOnly) { $upgradeOutputs += @($clientOutput, $addinOutput, $previewWorkerOutput) }
+    foreach ($directory in $upgradeOutputs) {
         $resolvedLocal = [IO.Path]::GetFullPath($localRoot).TrimEnd('\') + '\'
         $resolvedTarget = [IO.Path]::GetFullPath($directory)
         if (-not $resolvedTarget.StartsWith($resolvedLocal, [StringComparison]::OrdinalIgnoreCase)) {
@@ -205,18 +219,21 @@ try {
     }
     # Local deployments use the locked dependency graph and may run on an isolated factory network.
     # NuGet vulnerability auditing is a separate online gate; do not let its network call block deployment.
-    & $dotnetPath restore Pdm.slnx --nologo -p:NuGetAudit=false
+    $restoreTarget = if ($ServerOnly) { 'src\Pdm.Api\Pdm.Api.csproj' } else { 'Pdm.slnx' }
+    & $dotnetPath restore $restoreTarget --nologo -p:NuGetAudit=false
     if ($LASTEXITCODE -ne 0) {
         throw 'Solution restore failed.'
     }
-    & $dotnetPath build Pdm.slnx --configuration Release --no-restore --nologo
-    if ($LASTEXITCODE -ne 0) {
-        throw 'Release build failed.'
-    }
+    if (-not $ServerOnly) {
+        & $dotnetPath build Pdm.slnx --configuration Release --no-restore --nologo
+        if ($LASTEXITCODE -ne 0) {
+            throw 'Release build failed.'
+        }
 
-    & $dotnetPath test Pdm.slnx --configuration Release --no-build --no-restore --nologo
-    if ($LASTEXITCODE -ne 0) {
-        throw 'Release tests failed.'
+        & $dotnetPath test Pdm.slnx --configuration Release --no-build --no-restore --nologo
+        if ($LASTEXITCODE -ne 0) {
+            throw 'Release tests failed.'
+        }
     }
 
     & $dotnetPath publish 'src\Pdm.Api\Pdm.Api.csproj' --configuration Release --no-restore --output $apiOutput --nologo
@@ -226,6 +243,29 @@ try {
 }
 finally {
     Pop-Location
+}
+
+if ($ServerOnly) {
+    $webRoot = Join-Path $apiOutput 'wwwroot'
+    New-Item -ItemType Directory -Path $webRoot -Force | Out-Null
+    Get-ChildItem -LiteralPath (Join-Path $projectRoot 'src\pdm-ui\dist') -Force | ForEach-Object {
+        Copy-Item -LiteralPath $_.FullName -Destination (Join-Path $webRoot $_.Name) -Recurse -Force
+    }
+    $receipt = [ordered]@{
+        deploymentMode = 'server-only'
+        preparedAt = [DateTimeOffset]::Now.ToString('O')
+        mysqlVersion = $MySqlVersion
+        mysqlArchive = $mysqlArchive
+        mysqlArchiveSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $mysqlArchive).Hash
+        mysqlHome = $mysqlHome
+        localRoot = $localRoot
+        apiPath = Join-Path $localRoot 'api\Pdm.Api.dll'
+        lanBaseUrl = $LanBaseUrl.TrimEnd('/')
+    }
+    $receipt | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $localRoot 'deployment-receipt.json') -Encoding UTF8
+    Write-Host 'UPLM server-only deployment files are prepared.'
+    Write-Host "Receipt: $(Join-Path $localRoot 'deployment-receipt.json')"
+    return
 }
 
 $clientBuildOutput = Join-Path $projectRoot 'src\Pdm.Desktop\bin\Release\net48'
@@ -249,7 +289,9 @@ foreach ($output in @($clientOutput, $addinOutput)) {
 $webRoot = Join-Path $apiOutput 'wwwroot'
 $updatesRoot = Join-Path $webRoot 'updates'
 New-Item -ItemType Directory -Path $updatesRoot -Force | Out-Null
-Copy-Item -Path (Join-Path $projectRoot 'src\pdm-ui\dist\*') -Destination $webRoot -Recurse -Force
+Get-ChildItem -LiteralPath (Join-Path $projectRoot 'src\pdm-ui\dist') -Force | ForEach-Object {
+    Copy-Item -LiteralPath $_.FullName -Destination (Join-Path $webRoot $_.Name) -Recurse -Force
+}
 $desktopArchive = Join-Path $updatesRoot "uplm-desktop-$ReleaseVersion.zip"
 $addinArchive = Join-Path $updatesRoot "uplm-solidworks-addin-$ReleaseVersion.zip"
 Compress-Archive -Path (Join-Path $clientOutput '*') -DestinationPath $desktopArchive -CompressionLevel Optimal -Force

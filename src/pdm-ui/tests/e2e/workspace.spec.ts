@@ -105,6 +105,9 @@ test.beforeEach(async ({ page }) => {
     if (path === '/api/organization-directory') return fulfill(organizationDirectory)
     if (path === '/api/crm-integration') return fulfill({ baseUrl: '', username: '', passwordConfigured: false, autoSyncEnabled: false, autoSyncIntervalMinutes: 60, lastSyncAt: null, lastSyncCount: 0, lastAutoSyncAttemptAt: null, lastAutoSyncError: null })
     if (path === '/api/u9-material-integration') return fulfill({ baseUrl: '', enterpriseCode: '', organizationCode: '', userCode: '', clientId: '', clientSecretConfigured: false, itemCreatePath: '', itemQueryPath: '', itemModifyPath: '', itemDeletePath: '', unitCodeMappings: {}, writeEnabled: false, updatedBy: null, updatedAt: null })
+    if (path === '/api/u9-material-full-sync/status') return fulfill({ scheduleTime: '02:00', checkIntervalMinutes: 30, categories: [], latestRun: null })
+    if (path === '/api/u9-inventory-sync/status') return fulfill({ settings: { autoSyncEnabled: false, syncIntervalMinutes: 60, queryPath: '' }, latestRun: null })
+    if (path === '/api/u9-procurement-sync/status') return fulfill({ settings: { autoSyncEnabled: false, syncIntervalMinutes: 60, queryPath: '' }, latestRun: null })
     if (path === '/api/role-permissions') return fulfill({ permissions: [], roles: [] })
     if (path === '/api/system-settings') return fulfill({ vaultRoot: 'D:\\PDM\\Vault', releaseRoot: 'D:\\PDM\\Release', checkoutHeartbeatSeconds: 180, checkoutLeaseMinutes: 15, checkoutOfflineGraceMinutes: 60, checkoutReminderHours: 4, checkoutStrongReminderHours: 8, checkoutOverdueHours: 24, checkoutForceReleaseHours: 48 })
     if (path === '/api/system-settings/equipment-types') return fulfill([])
@@ -150,7 +153,7 @@ test.beforeEach(async ({ page }) => {
   })
 })
 
-test('project copy dialog keeps the confirmed default scope', async ({ page }, testInfo) => {
+test('project settings keeps the confirmed project-copy scope', async ({ page }, testInfo) => {
   const targetId = '33333333-3333-3333-3333-333333333333'
   const sourceId = '44444444-4444-4444-4444-444444444444'
   const baseProject = { owner: 'admin', vaultLocation: 'D:\\PDM\\TEST', releaseLocation: 'D:\\Release\\TEST', isActive: true,
@@ -162,7 +165,13 @@ test('project copy dialog keeps the confirmed default scope', async ({ page }, t
   ] }))
   await page.route(new RegExp(`/api/projects/(?:${targetId}|${sourceId})$`), route => {
     const id = new URL(route.request().url()).pathname.split('/').at(-1)!
-    return route.fulfill({ json: { ...baseProject, canReadContent: false, id, code: id === targetId ? 'P700002' : 'P700001', name: id === targetId ? '新建目标项目' : '现有源项目' } })
+    return route.fulfill({ json: { ...baseProject, id, code: id === targetId ? 'P700002' : 'P700001', name: id === targetId ? '新建目标项目' : '现有源项目' } })
+  })
+  await page.route(`**/api/projects/${targetId}/**`, route => {
+    const path = new URL(route.request().url()).pathname
+    if (path.endsWith('/reference-tree')) return route.fulfill({ json: null })
+    if (['/folders', '/documents', '/folder-documents', '/document-relations', '/boms/Standard', '/boms/NonStandard', '/boms/Unclassified', '/boms/Electrical', '/bom-source-data', '/boms/empty-declarations', '/bom-versions', '/bom-baselines', '/drawing-reviews', '/release-packages'].some(suffix => path.endsWith(suffix))) return route.fulfill({ json: [] })
+    return route.fallback()
   })
   await page.route(`**/api/projects/${targetId}/copy-preview`, async route => {
     previewBody = route.request().postDataJSON()
@@ -179,22 +188,20 @@ test('project copy dialog keeps the confirmed default scope', async ({ page }, t
   page.on('pageerror', error => errors.push(error.message))
   page.on('console', message => { if (message.type() === 'error') errors.push(message.text()) })
   await page.addInitScript(() => { window.setInterval = (() => 0) as unknown as typeof window.setInterval })
-  await page.setViewportSize({ width: 1600, height: 1000 })
+  await page.setViewportSize({ width: 1988, height: 1114 })
   await page.goto('/')
   const login = page.getByLabel('登录PLM')
   await login.getByRole('textbox', { name: '账号' }).fill('admin')
   await login.getByRole('textbox', { name: '密码' }).fill('correct-password')
   await login.getByRole('button', { name: '登录', exact: true }).click()
   await expect(page.locator('section.pdm-project-workspace')).toBeVisible()
-  await page.getByRole('button', { name: '项目列表', exact: true }).click()
-  const actionBox = await page.getByRole('button', { name: '操作项目P700002' }).boundingBox()
-  expect(actionBox).not.toBeNull()
-  await page.mouse.click(actionBox!.x + actionBox!.width / 2, actionBox!.y + actionBox!.height / 2)
-  const copyMenuBox = await page.locator('.el-dropdown-menu__item:visible').filter({ hasText: '从现有项目复制内容' }).boundingBox()
-  expect(copyMenuBox).not.toBeNull()
-  await page.mouse.click(copyMenuBox!.x + copyMenuBox!.width / 2, copyMenuBox!.y + copyMenuBox!.height / 2)
+  const projectTabs = page.getByRole('navigation', { name: '项目功能' })
+  await expect(projectTabs.getByRole('button').last()).toHaveAccessibleName('项目设置')
+  await page.screenshot({ path: testInfo.outputPath('project-settings-entry.png') })
+  await projectTabs.getByRole('button', { name: '项目设置' }).click()
 
-  const dialog = page.getByRole('dialog', { name: /从现有项目复制内容/ })
+  const dialog = page.getByRole('dialog', { name: /项目设置 · P700002/ })
+  await expect(dialog).toContainText('项目内容复制')
   await expect(dialog).toContainText('目标项目')
   await dialog.getByRole('combobox').click()
   await page.getByRole('option', { name: 'P700001 · 现有源项目' }).click()
@@ -208,7 +215,7 @@ test('project copy dialog keeps the confirmed default scope', async ({ page }, t
   await expect(dialog).toContainText('共 10.0 MB')
   expect(previewBody).toMatchObject({ sourceProjectId: sourceId, copyModels: true, copyDrawings: true, copyBom: true, copyValidationItems: true, folderIds: null })
   await expect(page.locator('vite-error-overlay')).toHaveCount(0)
-  await page.screenshot({ path: testInfo.outputPath('project-copy-dialog.png') })
+  await page.screenshot({ path: testInfo.outputPath('project-settings-copy.png') })
   expect(await page.title()).toBe('UPTON-PLM')
   expect(errors).toEqual([])
 })
@@ -594,12 +601,12 @@ test('engineer logs in and reads the API-backed PLM workspace', async ({ page },
 
   await expect(page.locator('.pdm-project-sidebar__summary').getByText('PRJ-REAL-001 · 真实装配项目', { exact: true })).toBeVisible()
   await expect(page.getByRole('banner').getByText('真实工程师', { exact: true })).toBeVisible()
-  await expect(page.locator('.pdm-project-tabs button')).toHaveText(['概览', '文件', '项目计划', '验证计划', '图档', 'BOM', '发布', '备料', '版本', '记录'])
+  await expect(page.locator('.pdm-project-tabs button')).toHaveText(['概览', '文件', '项目计划', '验证计划', '图档', 'BOM', '发布', '备料', '版本', '记录', '设置'])
   await page.getByRole('button', { name: '文件', exact: true }).click()
   await expect(page.getByText('项目文件夹', { exact: true })).toBeVisible()
   await page.screenshot({ path: testInfo.outputPath('project-tabs-overview-file-project-plan-1920.png'), fullPage: false })
   await page.setViewportSize({ width: 1285, height: 1114 })
-  await expect(page.locator('.pdm-project-tabs button')).toHaveText(['概览', '文件', '项目计划', '验证计划', '图档', 'BOM', '发布', '备料', '版本', '记录'])
+  await expect(page.locator('.pdm-project-tabs button')).toHaveText(['概览', '文件', '项目计划', '验证计划', '图档', 'BOM', '发布', '备料', '版本', '记录', '设置'])
   await page.screenshot({ path: testInfo.outputPath('project-tabs-overview-file-project-plan-1285.png'), fullPage: false })
   await expect(page.locator('vite-error-overlay')).toHaveCount(0)
   expect(projectTabErrors).toEqual([])
@@ -883,6 +890,60 @@ test('administrator switches independent company organization trees', async ({ p
   await expect(page.getByLabel('公司管理')).toContainText('昆山阿普顿自动化系统有限公司')
   await expect(page.getByLabel('公司管理')).toContainText('广州阿普顿自动化系统有限公司')
   await page.screenshot({ path: testInfo.outputPath('company-organization-management.png'), fullPage: false })
+})
+
+test('role permissions follow the system module directory and include future modules', async ({ page }, testInfo) => {
+  const errors: string[] = []
+  page.on('pageerror', error => errors.push(error.message))
+  page.on('console', message => {
+    if (message.type() === 'error' || message.type() === 'warning') errors.push(`${message.text()} ${message.location().url}`.trim())
+  })
+  await page.route('**/api/role-permissions', route => route.fulfill({
+    status: 200,
+    contentType: 'application/json',
+    body: JSON.stringify({
+      permissions: [
+        { code: 'project.view', name: '查看项目清单', module: '项目管理', description: '查看当前公司范围内的项目。', sensitive: false },
+        { code: 'document.edit', name: '编辑项目图档', module: '项目内容', description: '编辑图档并创建新版本。', sensitive: false },
+        { code: 'future-module.view', name: '查看新增模块', module: '新增模块', description: '模拟后续发布的系统模块权限。', sensitive: false },
+      ],
+      roles: [
+        { role: 'PlanningManager', name: '计划管理', description: '按所属公司分配项目执行事业部。', baseRole: 'PlanningManager', isSystem: true, isSystemAdministrator: false, permissions: ['project.view'], userCount: 2 },
+      ],
+    }),
+  }))
+
+  await page.setViewportSize({ width: 1988, height: 1114 })
+  await page.goto('/')
+  const loginForm = page.getByLabel('登录PLM')
+  await loginForm.getByRole('textbox', { name: '账号' }).fill('admin')
+  await loginForm.getByRole('textbox', { name: '密码' }).fill('correct-password')
+  await loginForm.getByRole('button', { name: '登录', exact: true }).click()
+  await expect(page.locator('.pdm-project-sidebar__summary').getByText('PRJ-REAL-001 · 真实装配项目', { exact: true })).toBeVisible()
+  await page.getByRole('button', { name: '系统管理', exact: true }).click()
+  const systemManagement = page.getByRole('region', { name: '系统管理', exact: true })
+  await expect(systemManagement).toBeVisible()
+  await systemManagement.getByRole('button', { name: '用户设置', exact: true }).click()
+  await page.getByLabel('用户设置功能').getByRole('button', { name: '角色权限', exact: true }).click()
+
+  const roleList = page.getByLabel('角色列表')
+  await expect(roleList).toContainText('计划管理')
+  await expect(roleList.getByRole('button', { name: '权限设置', exact: true })).toHaveCount(1)
+  await expect(roleList.getByText('基础权限', { exact: true })).toHaveCount(0)
+  await expect(roleList.getByText('单据权限', { exact: true })).toHaveCount(0)
+  await roleList.getByRole('button', { name: '权限设置', exact: true }).click()
+
+  const dialog = page.getByRole('dialog', { name: '计划管理 · 权限设置' })
+  await expect(dialog).toBeVisible()
+  await expect(dialog).toContainText('权限模块由系统功能目录自动生成')
+  await expect(dialog).toContainText('3 个模块、3 项权限')
+  await expect(dialog).toContainText('项目管理')
+  await expect(dialog).toContainText('项目内容')
+  await expect(dialog).toContainText('新增模块')
+  await expect(dialog).toContainText('查看新增模块')
+  await expect(page.locator('vite-error-overlay')).toHaveCount(0)
+  expect(errors).toEqual([])
+  await page.screenshot({ path: testInfo.outputPath('role-permission-system-modules.png'), fullPage: false })
 })
 
 for (const scale of [

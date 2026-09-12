@@ -67,6 +67,7 @@ const projectCenterMemoryKey = 'upton-pdm-project-center'
 const activeNavigationMemoryKey = 'upton-pdm-active-navigation'
 const sidebarCollapsedMemoryKey = 'upton-pdm-sidebar-collapsed'
 const sidebarCollapsed = ref(window.localStorage.getItem(sidebarCollapsedMemoryKey) === 'true')
+const productVersion = ref('')
 const savedTheme = window.localStorage.getItem('pdm_theme')
 const theme = ref<PdmTheme>(savedTheme === 'c' || savedTheme === 'o' ? savedTheme : 'a')
 const notificationCount = computed(() => workspace.notifications.value.filter(item => !item.readAt).length + workspace.myApprovalTasks.value.length + workspace.materialCodeApprovalTasks.value.length + workspace.programTemplateTasks.value.length + workspace.passwordResetTasks.value.length + new Set(workspace.editLocks.value.filter(lock => lock.ownedByCurrentUser || lock.releaseRequestedBy || lock.canForceRelease).map(lock => lock.projectId)).size)
@@ -123,6 +124,22 @@ function requestWorkspaceLocalState() {
     currentUsername: workspace.currentUsername.value,
     documents: workspaceDocuments(workspace.root.value, workspace.filteredDrawings.value),
   })
+}
+
+async function loadServerVersion() {
+  try {
+    const response = await fetch('/client-bootstrap.json', { cache: 'no-store' })
+    if (!response.ok) return
+    const configuration = await response.json() as { ConfigurationVersion?: string }
+    productVersion.value = configuration.ConfigurationVersion?.trim() ?? ''
+  } catch {
+    productVersion.value = ''
+  }
+}
+
+function handleClientVersion(event: Event) {
+  const detail = (event as CustomEvent<{ version?: string }>).detail
+  productVersion.value = detail?.version?.trim() ?? ''
 }
 
 function handleWorkspaceLocalState(event: Event) {
@@ -556,13 +573,17 @@ onMounted(() => {
   window.addEventListener('pdm-open-project', handleProjectNavigation)
   window.addEventListener('pdm-workspace-local-state', handleWorkspaceLocalState)
   window.addEventListener('pdm-solidworks-status', handleWorkspaceSolidWorksStatus)
+  window.addEventListener('pdm-client-version', handleClientVersion)
   window.chrome?.webview?.addEventListener('message', handleReviewOverlayAction)
+  if (desktopAvailable) postDesktopMessage('client-version-request')
+  else void loadServerVersion()
   requestWorkspaceLocalState()
 })
 onBeforeUnmount(() => {
   window.removeEventListener('pdm-open-project', handleProjectNavigation)
   window.removeEventListener('pdm-workspace-local-state', handleWorkspaceLocalState)
   window.removeEventListener('pdm-solidworks-status', handleWorkspaceSolidWorksStatus)
+  window.removeEventListener('pdm-client-version', handleClientVersion)
   window.chrome?.webview?.removeEventListener?.('message', handleReviewOverlayAction)
   if (document.documentElement.dataset.pdmTheme === theme.value) delete document.documentElement.dataset.pdmTheme
 })
@@ -762,6 +783,7 @@ async function openWhereUsedParent(projectId: string, parentDocumentId: string) 
         :can-view-standard-library="workspace.hasPermission('standard-library.view')"
         :can-view-materials="workspace.hasPermission('material.view')"
         :collapsed="sidebarCollapsed"
+        :version="productVersion"
         @navigate="handleNavigation"
       />
       <section class="pdm-shell-content">
@@ -823,8 +845,6 @@ async function openWhereUsedParent(projectId: string, parentDocumentId: string) 
           :on-create-subproject="workspace.createSubproject"
           :on-update-project="workspace.updateProject"
           :on-delete-project="workspace.deleteProject"
-          :on-preview-project-copy="workspace.previewProjectCopy"
-          :on-copy-project-content="workspace.copyProjectContent"
           :on-update-execution-unit="workspace.updateProjectExecutionUnit"
           :on-update-main-staffing="workspace.updateMainProjectStaffing"
           :on-update-designers="workspace.updateChildProjectDesigners"
@@ -903,7 +923,7 @@ async function openWhereUsedParent(projectId: string, parentDocumentId: string) 
           @refresh-audit="runOperation(workspace.loadAuditEntries, '全局审计已刷新')"
         />
         <section v-else-if="activeView === 'workspace'" class="pdm-project-workspace">
-          <ProjectWorkspaceHeader :project="workspace.project.value" :projects="workspace.projects.value" :active-tab="projectTab" :active-project-document-status="activeProjectDocumentStatus" :active-document-counts="workspace.documentFilterCounts.value" :current-username="workspace.currentUsername.value" :switching-project-id="switchingProjectId" @back="openProjectList" @switch="switchProject" @tab="openProjectTabFromHeader">
+          <ProjectWorkspaceHeader :project="workspace.project.value" :projects="workspace.projects.value" :active-tab="projectTab" :active-project-document-status="activeProjectDocumentStatus" :active-document-counts="workspace.documentFilterCounts.value" :current-username="workspace.currentUsername.value" :switching-project-id="switchingProjectId" :can-copy-content="workspace.hasPermission('project.create')" :pending="workspace.operationPending.value" :on-preview-project-copy="workspace.previewProjectCopy" :on-copy-project-content="workspace.copyProjectContent" @back="openProjectList" @switch="switchProject" @tab="openProjectTabFromHeader">
             <div class="pdm-project-tab-content">
             <BomManager :requested-bom-kind="requestedBomKind" @open-bom="openHierarchyBom" @bom-request-handled="requestedBomKind = undefined" v-if="mountedBomProjectId === workspace.project.value.id" v-show="projectTab === 'bom'" :source-data="workspace.bomSourceData.value" :standard="workspace.standardBom.value" :non-standard="workspace.nonStandardBom.value" :unclassified="workspace.unclassifiedBom.value" :electrical="workspace.electricalBom.value" :reference-root="workspace.root.value" :documents="workspace.managedDocuments.value" :document-relations="workspace.documentRelations.value" :validation-rules="workspace.systemSettings.value.validationRules" :release-change-reason-types="workspace.systemSettings.value.releaseChangeReasonTypes" :formal-supplement-policies="workspace.systemSettings.value.formalSupplementPolicies" :declarations="workspace.bomEmptyDeclarations.value" :versions="workspace.bomVersions.value" :baselines="workspace.bomBaselines.value" :release-packages="workspace.releasePackages.value" :username="workspace.currentUsername.value" :upload-progress="workspace.uploadProgress.value" :operation-error="workspace.operationError.value" :can-manage-release="workspace.hasPermission('release.manage')" :can-decide-approval="workspace.hasPermission('approval.decide')" :can-emergency-decide="workspace.hasPermission('approval.emergency-substitute')" :requested-release-package-id="requestedReleasePackageId" :pending="workspace.operationPending.value" :editable="workspace.hasPermission('bom.edit')" :token="workspace.getAccessToken()" :project-id="workspace.project.value.id" :project="workspace.project.value" :projects="workspace.projects.value" :preview-reconciliation="workspace.previewBomFromDrawings" @dirty-change="bomHasUnsavedChanges = $event" @save="(kind, items) => runOperation(() => workspace.saveBomItems(kind, items), 'BOM已保存；CAD来源物料的变更已进入SolidWorks待写回队列')" @import="(kind, file) => runOperation(() => workspace.importBomFile(kind, file), 'BOM已导入并保存')" @export="(kind, mode) => runOperation(() => workspace.exportBomFile(kind, mode), 'BOM已导出')" @resolve="(itemId, action, targetKind) => runOperation(() => workspace.resolveBomItem(itemId, action, targetKind), '待处理项已更新，保存BOM后再写回SolidWorks')" @batch-retain="itemIds => runOperation(() => workspace.retainBomItems(itemIds), '所选待处理BOM项已确认保留')" @batch-update="(input) => runOperation(() => workspace.batchUpdateBomItems(input), 'BOM属性已更新，保存BOM后再写回SolidWorks')" @batch-delete="(itemIds, reason) => runOperation(() => workspace.batchDeleteBomItems(itemIds, reason), '所选BOM物料已移入回收站')" @batch-restore="(itemIds, mode) => runOperation(() => workspace.batchRestoreBomItems(itemIds, mode), mode === 'AsManual' ? '所选物料已转为人工物料并恢复' : '所选BOM物料已恢复')" @release-exclusion="(itemIds, excluded, reason) => runOperation(() => workspace.setBomReleaseExclusion(itemIds, excluded, reason), excluded ? '所选物料已设为不发布' : '所选物料已恢复发布')" @restore-source="(itemIds) => runOperation(() => workspace.restoreBomItemsFromSource(itemIds), '所选BOM属性已恢复为最新图档源数据；分类与排序保持不变')" @release-create="(input) => runOperation(() => workspace.createPackage(input), '发布草稿已创建，范围与审批模板已固化')" @release-update-draft="(releasePackageId, input) => runOperation(() => workspace.updatePackageDraft(releasePackageId, input), '发布草稿已更新')" @release-delete-draft="releasePackageId => runOperation(() => workspace.deletePackageDraft(releasePackageId), '发布草稿已删除')" @release-upload="(releasePackageId, file) => runOperation(() => workspace.uploadPackageFile(releasePackageId, file), '发包文件已上传并通过SHA-256校验')" @release-submit="releasePackageId => runOperation(() => workspace.submitPackage(releasePackageId), '发布包已提交审批')" @release-withdraw="withdrawCurrentPackage" @release-retry-u9="releasePackageId => runOperation(() => workspace.retryLongLeadU9(releasePackageId), 'BOM料号申请已补建，正式料号齐全后将自动续传U9C')" @release-decide="(taskId, decision, comment) => runOperation(() => workspace.decideApprovalTask(taskId, decision, comment), decision === 'Approved' ? '审批已流转' : '发布包已驳回')" @release-transfer="(taskId, targetUsername, comment) => runOperation(() => workspace.transferApprovalTask(taskId, targetUsername, comment), '审批已转交')" @release-emergency-decide="(taskId, decision, reason) => runOperation(() => workspace.emergencyDecideApprovalTask(taskId, decision, reason), decision === 'Approved' ? '当前节点已紧急代批并继续流转' : '当前节点已紧急代驳回')" @release-request-handled="requestedReleasePackageId = ''" @material-code-changed="workspace.reload(workspace.project.value.id)" />
             <WorkbenchHome

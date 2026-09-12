@@ -1,13 +1,26 @@
 <script setup lang="ts">
-import { Boxes, Calendar, ClipboardCheck, ClipboardList, FileClock, FolderOpen, FolderTree, LayoutDashboard, PackageCheck, Search, ShoppingCart } from '@lucide/vue'
+import { Boxes, Calendar, ClipboardCheck, ClipboardList, FileClock, FolderOpen, FolderTree, LayoutDashboard, PackageCheck, Search, Settings, ShoppingCart } from '@lucide/vue'
 import { ElMessageBox } from 'element-plus'
 import { computed, ref, watch } from 'vue'
-import type { ProjectSummary } from '../types'
+import type { ProjectCopyOptionsInput, ProjectCopyPreview, ProjectCopyResult, ProjectSummary } from '../types'
 import { useUserDisplayName } from '../userDisplay'
+import ProjectSettingsDrawer from './ProjectSettingsDrawer.vue'
 
 export type ProjectTab = 'overview' | 'project-plan' | 'files' | 'validation-plan' | 'documents' | 'bom' | 'versions' | 'release' | 'procurement' | 'records'
 
-const props = defineProps<{ project: ProjectSummary; projects: ProjectSummary[]; activeTab: ProjectTab; activeProjectDocumentStatus?: string; activeDocumentCounts?: { all: number; model: number; drawing: number }; currentUsername?: string; switchingProjectId?: string }>()
+const props = defineProps<{
+  project: ProjectSummary
+  projects: ProjectSummary[]
+  activeTab: ProjectTab
+  activeProjectDocumentStatus?: string
+  activeDocumentCounts?: { all: number; model: number; drawing: number }
+  currentUsername?: string
+  switchingProjectId?: string
+  canCopyContent?: boolean
+  pending?: boolean
+  onPreviewProjectCopy?: (projectId: string, input: ProjectCopyOptionsInput) => Promise<ProjectCopyPreview>
+  onCopyProjectContent?: (projectId: string, input: ProjectCopyOptionsInput) => Promise<ProjectCopyResult>
+}>()
 const emit = defineEmits<{ back: []; switch: [projectId: string]; tab: [tab: ProjectTab] }>()
 const displayUserName = useUserDisplayName()
 
@@ -62,6 +75,7 @@ const executionEngineers = computed(() => {
 const executionEngineerNames = computed(() => executionEngineers.value.map(item => displayUserName(item)).join('、') || '待分配')
 const visibleTabs = computed(() => tabs.filter(tab => props.project.canReadContent || tab.key === 'overview' || tab.key === 'records'))
 const switchConfirmationPending = ref(false)
+const projectSettingsOpen = ref(false)
 const projectBrowserOpen = ref(false)
 const projectSearchQuery = ref('')
 const projectCustomerFilter = ref('')
@@ -91,6 +105,7 @@ const pagedRootProjects = computed(() => {
 
 watch([projectSearchQuery, projectCustomerFilter, projectExecutionUnitFilter, projectPersonFilter, projectPageSize], () => { projectPage.value = 1 })
 watch(projectPageCount, pageCount => { if (projectPage.value > pageCount) projectPage.value = pageCount })
+watch(() => props.project.id, () => { projectSettingsOpen.value = false })
 
 async function confirmProjectSwitch(projectId: string) {
   if (switchConfirmationPending.value || projectId === rootProject.value.id) return false
@@ -221,6 +236,7 @@ function drawingDocumentCount(project: ProjectSummary) {
       <header class="pdm-project-detail__header">
         <nav class="pdm-project-tabs" aria-label="项目功能">
           <button v-for="tab in visibleTabs" :key="tab.key" type="button" :class="{ 'is-active': activeTab === tab.key }" @click="emit('tab', tab.key)"><component :is="tab.icon" :size="15" /><span>{{ tab.label }}</span></button>
+          <button type="button" class="pdm-project-tabs__settings" aria-label="项目设置" @click="projectSettingsOpen = true"><Settings :size="15" /><span>设置</span></button>
         </nav>
       </header>
       <slot />
@@ -272,5 +288,16 @@ function drawingDocumentCount(project: ProjectSummary) {
         <footer><button type="button" class="pdm-secondary-action" :disabled="switchConfirmationPending" @click="closeProjectBrowser">取消</button></footer>
       </section>
     </div>
+
+    <ProjectSettingsDrawer
+      v-if="projectSettingsOpen && onPreviewProjectCopy && onCopyProjectContent"
+      v-model="projectSettingsOpen"
+      :project="project"
+      :projects="projects"
+      :can-copy-content="Boolean(canCopyContent)"
+      :pending="Boolean(pending)"
+      :on-preview-project-copy="onPreviewProjectCopy"
+      :on-copy-project-content="onCopyProjectContent"
+    />
   </div>
 </template>

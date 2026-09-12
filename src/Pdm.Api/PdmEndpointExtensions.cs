@@ -170,7 +170,7 @@ public static class PdmEndpointExtensions
         api.MapGet("/password-reset-requests", async (HttpContext context, IPdmRepository repository, CancellationToken cancellationToken) =>
         {
             var (actor, role) = CurrentUser(context.User);
-            return role is not (UserRole.Administrator or UserRole.PlatformAdministrator)
+            return !CanManagePasswordResetRequests(role)
                 ? Results.Forbid()
                 : Results.Ok(await repository.ListPasswordResetTasksAsync(cancellationToken));
         });
@@ -178,7 +178,7 @@ public static class PdmEndpointExtensions
         api.MapPut("/password-reset-requests/{taskId:guid}/reset", async (Guid taskId, HttpContext context, IPdmRepository repository, IPasswordService passwords, TimeProvider timeProvider, CancellationToken cancellationToken) =>
         {
             var (actor, role) = CurrentUser(context.User);
-            if (role is not (UserRole.Administrator or UserRole.PlatformAdministrator)) return Results.Forbid();
+            if (!CanManagePasswordResetRequests(role)) return Results.Forbid();
             var now = timeProvider.GetUtcNow();
             await repository.CompletePasswordResetTaskAsync(taskId, passwords.Hash("11111111"), actor, now, cancellationToken);
             await repository.AppendAuditAsync(new AuditEntry(Guid.NewGuid(), now, actor, "user.password.reset", nameof(UserAccount), taskId.ToString(), "管理员将用户密码重置为初始密码"), cancellationToken);
@@ -1378,6 +1378,12 @@ public static class PdmEndpointExtensions
         var roleValue = principal.FindFirstValue(ClaimTypes.Role) ?? throw new UnauthorizedAccessException("角色信息无效。 ");
         return (actor, Enum.Parse<UserRole>(roleValue));
     }
+
+    private static bool CanManagePasswordResetRequests(UserRole role) =>
+        role is UserRole.Administrator or UserRole.PlatformAdministrator
+        || TenantContext.Current?.HasRole(nameof(UserRole.Administrator)) == true
+        || TenantContext.Current?.HasRole("platform_admin") == true
+        || TenantContext.Current?.HasRole("developer") == true;
 
     private static OrganizationDirectory ScopeOrganizationDirectory(OrganizationDirectory directory)
     {

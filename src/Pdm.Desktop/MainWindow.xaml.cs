@@ -275,6 +275,7 @@ public partial class MainWindow : Window
                 await DispatchLaunchRequestAsync(requestArgs);
             }
             _ = PublishSolidWorksCapabilityAsync();
+            _ = PublishClientVersionAsync();
         };
         var uiVersion = File.GetLastWriteTimeUtc(indexFile).Ticks;
         reviewOverlay = new ReviewOverlayWindow(this, WorkspaceView.CoreWebView2.Environment, uiFolder, uiVersion);
@@ -393,6 +394,12 @@ public partial class MainWindow : Window
         if (type == "desktop-settings-request")
         {
             _ = PublishDesktopSettingsAsync();
+            return;
+        }
+
+        if (type == "client-version-request")
+        {
+            _ = PublishClientVersionAsync();
             return;
         }
 
@@ -805,6 +812,16 @@ public partial class MainWindow : Window
             message
         };
         var script = $"window.dispatchEvent(new CustomEvent('pdm-desktop-settings', {{ detail: {Serialize(detail)} }}));";
+        try { await WorkspaceView.CoreWebView2.ExecuteScriptAsync(script); }
+        catch (InvalidOperationException) { }
+    }
+
+    private async Task PublishClientVersionAsync()
+    {
+        if (WorkspaceView.CoreWebView2 == null) return;
+        var version = ClientPackageUpdater.GetInstalledVersion(AppDomain.CurrentDomain.BaseDirectory);
+        var detail = new { version };
+        var script = $"window.dispatchEvent(new CustomEvent('pdm-client-version', {{ detail: {Serialize(detail)} }}));";
         try { await WorkspaceView.CoreWebView2.ExecuteScriptAsync(script); }
         catch (InvalidOperationException) { }
     }

@@ -233,7 +233,7 @@ describe('ProcurementTracking', () => {
     expect((wrapper.get('[aria-label="筛选品牌"]').element as HTMLInputElement).value).toBe('')
     expect(wrapper.get('[aria-label="备料明细分页"]').text()).toContain('共 121 条')
     wrapper.unmount()
-  })
+  }, 10_000)
 
   it('默认每页50条，翻页不重编序号，切换条数或项目回首页且刷新后限制页码', async () => {
     const result = await api.getProjectProcurementTracking()

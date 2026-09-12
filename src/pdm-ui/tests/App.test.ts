@@ -7,6 +7,7 @@ import { ElMessage, globalStatus } from '../src/statusMessage'
 const projectId = '11111111-1111-1111-1111-111111111111'
 let materialRequestsUnauthorized = false
 let resumeRequestsUnauthorized = false
+let passwordResetRequestsForbidden = false
 let drawingReviewsResponse: Array<Record<string, unknown>> = []
 
 function json(value: unknown, status = 200) {
@@ -37,6 +38,7 @@ function installApiMock(projectsBeforeDefault: Array<Record<string, unknown>> = 
   }
   vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input)
+    if (url.endsWith('/client-bootstrap.json')) return json({ ConfigurationVersion: '2026.09.12.1234-version-display' })
     if (url.endsWith('/health')) return json({ status: 'ok' })
     if (url.endsWith('/api/approval-tasks/mine')) return json([])
     if (url.endsWith('/api/edit-locks')) return json(editLocks)
@@ -51,7 +53,7 @@ function installApiMock(projectsBeforeDefault: Array<Record<string, unknown>> = 
       ? json({ title: 'Unauthorized' }, 401)
       : json({ accessToken: 'renewed-token', expiresAt: '2099-01-01T00:00:00Z', resumeToken: 'renewed-resume-token', username: 'engineer', displayName: '真实工程师', role: 'Engineer', permissions: engineerPermissions })
     if (url.endsWith('/api/auth/me')) return json({ username: 'admin', displayName: '系统管理员', nickname: null, gender: 'unspecified', landline: null, mobilePhone: null, email: null })
-    if (url.endsWith('/api/password-reset-requests')) return json([])
+    if (url.endsWith('/api/password-reset-requests')) return passwordResetRequestsForbidden ? json({ title: 'Forbidden' }, 403) : json([])
     if (url.includes('/api/materials/page')) return materialRequestsUnauthorized
       ? json({ title: 'Unauthorized' }, 401)
       : json({ items: [], total: 0, page: 1, pageSize: 50 })
@@ -259,11 +261,22 @@ describe('PLM client workspace', () => {
   beforeEach(() => {
     materialRequestsUnauthorized = false
     resumeRequestsUnauthorized = false
+    passwordResetRequestsForbidden = false
     drawingReviewsResponse = []
     window.sessionStorage.clear()
     window.localStorage.clear()
     Object.defineProperty(window, 'chrome', { configurable: true, value: undefined })
     installApiMock()
+  })
+
+  it('在系统管理上方显示网页发布版本', async () => {
+    const wrapper = mount(App, { attachTo: document.body, global: { plugins: [ElementPlus] } })
+    try {
+      await login(wrapper, false)
+      await flushPromises()
+      expect(wrapper.get('.pdm-sidebar__version').text()).toBe('版本 V2026.09.12.1234')
+      expect(wrapper.get('.pdm-sidebar__version').attributes('title')).toBe('版本 2026.09.12.1234-version-display')
+    } finally { wrapper.unmount() }
   })
 
   it.each([
@@ -278,6 +291,18 @@ describe('PLM client workspace', () => {
       await flushPromises()
       const tabs = wrapper.get('.pdm-admin-tabs').text()
       expect(tabs.includes('项目计划模板')).toBe(visible)
+    } finally { wrapper.unmount() }
+  })
+
+  it('密码重置待办被拒绝时仍可加载首页', async () => {
+    installApiMock([], ['Administrator'])
+    passwordResetRequestsForbidden = true
+    const wrapper = mount(App, { attachTo: document.body, global: { plugins: [ElementPlus] } })
+    try {
+      await login(wrapper, false)
+      expect(wrapper.find('.pdm-workspace-state.is-error').exists()).toBe(false)
+      expect(wrapper.find('[aria-label="项目列表"]').exists()).toBe(true)
+      expect(vi.mocked(fetch).mock.calls.some(([input]) => String(input).endsWith('/api/password-reset-requests'))).toBe(true)
     } finally { wrapper.unmount() }
   })
 
@@ -730,6 +755,11 @@ describe('PLM client workspace', () => {
     await login(wrapper, false)
 
     expect(wrapper.findAll('.pdm-sidebar__footer button').map(button => button.text())).toEqual(['系统管理'])
+    expect(wrapper.get('.pdm-sidebar__version').text()).toBe('版本 未知')
+    window.dispatchEvent(new CustomEvent('pdm-client-version', { detail: { version: '2026.09.12.1234-version-display' } }))
+    await wrapper.vm.$nextTick()
+    expect(wrapper.get('.pdm-sidebar__version').text()).toBe('版本 V2026.09.12.1234')
+    expect(wrapper.get('.pdm-sidebar__version').attributes('title')).toBe('版本 2026.09.12.1234-version-display')
     await buttonByText(wrapper, '系统管理').trigger('click')
     expect(buttonByText(wrapper, '客户端设置')).toBeDefined()
     expect(postMessage).toHaveBeenCalledWith({ type: 'desktop-settings-request', payload: undefined })
@@ -967,10 +997,8 @@ describe('PLM client workspace', () => {
     expect(wrapper.get('[aria-label="角色权限设置"]').text()).toContain('工程师')
     const engineerRoleRow = wrapper.findAll('.el-table__row').find(row => row.text().includes('Engineer'))
     expect(engineerRoleRow).toBeDefined()
-    await engineerRoleRow!.findAll('button').find(button => button.text().trim() === '基础权限')!.trigger('click')
+    await engineerRoleRow!.findAll('button').find(button => button.text().trim() === '权限设置')!.trigger('click')
     expect(wrapper.text()).toContain('分配子项目设计人员')
-    await buttonByText(wrapper, '取消').trigger('click')
-    await engineerRoleRow!.findAll('button').find(button => button.text().trim() === '单据权限')!.trigger('click')
     const documentPermission = wrapper.findAll('.pdm-permission-card').find(item => item.text().includes('document.edit'))
     expect(documentPermission).toBeDefined()
     await documentPermission!.get('input[type="checkbox"]').setValue(false)

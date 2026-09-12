@@ -1,5 +1,7 @@
 [CmdletBinding()]
-param()
+param(
+    [switch]$ServerOnly
+)
 
 $ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path -Parent $PSScriptRoot
@@ -73,6 +75,7 @@ if (-not (Test-Path -LiteralPath $receiptPath) -or -not (Test-Path -LiteralPath 
 }
 
 $receipt = Get-Content -LiteralPath $receiptPath -Raw -Encoding UTF8 | ConvertFrom-Json
+$ServerOnly = $ServerOnly -or ($receipt.deploymentMode -eq 'server-only')
 $secrets = Get-Content -LiteralPath $secretPath -Raw -Encoding UTF8 | ConvertFrom-Json
 $mysqldPath = Join-Path $receipt.mysqlHome 'bin\mysqld.exe'
 $mysqlClient = Join-Path $receipt.mysqlHome 'bin\mysql.exe'
@@ -92,11 +95,14 @@ if (-not (Test-Path -LiteralPath $mysqldPath) -or -not (Test-Path -LiteralPath $
     throw 'MySQL binaries are missing from the prepared runtime.'
 }
 
-if ($hasPreparedUpgrade -and -not ($hasPreparedApiUpgrade -and $hasPreparedClientUpgrade -and $hasPreparedAddinUpgrade -and $hasPreparedPreviewWorkerUpgrade)) {
+if ($ServerOnly -and $hasPreparedUpgrade -and -not $hasPreparedApiUpgrade) {
+    throw 'The server-only upgrade is missing its staged API payload.'
+}
+if (-not $ServerOnly -and $hasPreparedUpgrade -and -not ($hasPreparedApiUpgrade -and $hasPreparedClientUpgrade -and $hasPreparedAddinUpgrade -and $hasPreparedPreviewWorkerUpgrade)) {
     throw 'The PLM upgrade is incomplete. API, Windows client, SolidWorks add-in and server preview worker must be staged together.'
 }
 
-if ($hasPreparedUpgrade) {
+if ($hasPreparedUpgrade -and -not $ServerOnly) {
     $blockingProcesses = Get-Process -Name 'SLDWORKS', 'Upton.Pdm.Desktop' -ErrorAction SilentlyContinue
     if ($blockingProcesses) {
         $names = ($blockingProcesses | Select-Object -ExpandProperty ProcessName -Unique) -join ', '
@@ -147,7 +153,8 @@ if ($hasPreparedUpgrade) {
     $backupRoot = Join-Path $localRoot (Join-Path 'backup' ([DateTimeOffset]::Now.ToString('yyyyMMdd-HHmmss')))
     $databaseBackupPath = Join-Path $backupRoot 'pdm.sql'
     New-Item -ItemType Directory -Path $backupRoot -Force | Out-Null
-    foreach ($component in @('api', 'client', 'solidworks-addin', 'preview-worker')) {
+    $backupComponents = if ($ServerOnly) { @('api') } else { @('api', 'client', 'solidworks-addin', 'preview-worker') }
+    foreach ($component in $backupComponents) {
         $source = Join-Path $localRoot $component
         if (Test-Path -LiteralPath $source) {
             Copy-Item -LiteralPath $source -Destination (Join-Path $backupRoot $component) -Recurse -Force
@@ -188,12 +195,14 @@ if ($hasPreparedApiUpgrade -and $null -ne $apiService -and $apiService.Status -n
 if ($hasPreparedApiUpgrade) {
     Copy-Item -Path (Join-Path $preparedApiUpgrade '*') -Destination (Join-Path $localRoot 'api') -Recurse -Force
     Remove-Item -LiteralPath $preparedApiUpgrade -Recurse -Force
-    Copy-Item -Path (Join-Path $preparedClientUpgrade '*') -Destination (Join-Path $localRoot 'client') -Recurse -Force
-    Remove-Item -LiteralPath $preparedClientUpgrade -Recurse -Force
-    Copy-Item -Path (Join-Path $preparedAddinUpgrade '*') -Destination (Join-Path $localRoot 'solidworks-addin') -Recurse -Force
-    Remove-Item -LiteralPath $preparedAddinUpgrade -Recurse -Force
-    Copy-Item -Path (Join-Path $preparedPreviewWorkerUpgrade '*') -Destination (Join-Path $localRoot 'preview-worker') -Recurse -Force
-    Remove-Item -LiteralPath $preparedPreviewWorkerUpgrade -Recurse -Force
+    if (-not $ServerOnly) {
+        Copy-Item -Path (Join-Path $preparedClientUpgrade '*') -Destination (Join-Path $localRoot 'client') -Recurse -Force
+        Remove-Item -LiteralPath $preparedClientUpgrade -Recurse -Force
+        Copy-Item -Path (Join-Path $preparedAddinUpgrade '*') -Destination (Join-Path $localRoot 'solidworks-addin') -Recurse -Force
+        Remove-Item -LiteralPath $preparedAddinUpgrade -Recurse -Force
+        Copy-Item -Path (Join-Path $preparedPreviewWorkerUpgrade '*') -Destination (Join-Path $localRoot 'preview-worker') -Recurse -Force
+        Remove-Item -LiteralPath $preparedPreviewWorkerUpgrade -Recurse -Force
+    }
 }
 
 if ($null -eq $apiService) {
@@ -212,10 +221,12 @@ $apiEnvironment = @(
     "PDM_DB_PASSWORD=$($secrets.databasePassword)",
     "PDM_JWT_SIGNING_KEY=$($secrets.jwtSigningKey)",
     "PDM_BOOTSTRAP_ADMIN_PASSWORD=$($secrets.bootstrapAdminPassword)",
-    "PDM_PREVIEW_WORKER_PATH=$($receipt.previewWorkerPath)",
     "Pdm__Storage__UploadTempRoot=$(Join-Path $localRoot 'uploads')",
     "Pdm__Storage__ProgramTemplateRoot=$(Join-Path $localRoot 'program-templates')"
 )
+if (-not $ServerOnly) {
+    $apiEnvironment += "PDM_PREVIEW_WORKER_PATH=$($receipt.previewWorkerPath)"
+}
 $apiRegistryPath = "HKLM:\SYSTEM\CurrentControlSet\Services\$apiServiceName"
 New-ItemProperty -LiteralPath $apiRegistryPath -Name Environment -PropertyType MultiString -Value $apiEnvironment -Force | Out-Null
 
@@ -254,6 +265,23 @@ ON DUPLICATE KEY UPDATE name=VALUES(name), quantity=VALUES(quantity), material=V
 
 $apiEnvironmentWithoutBootstrap = $apiEnvironment | Where-Object { $_ -notlike 'PDM_BOOTSTRAP_ADMIN_PASSWORD=*' }
 Set-ItemProperty -LiteralPath $apiRegistryPath -Name Environment -Value $apiEnvironmentWithoutBootstrap
+
+if ($ServerOnly) {
+    $status = [ordered]@{
+        installedAt = [DateTimeOffset]::Now.ToString('O')
+        deploymentMode = 'server-only'
+        mysqlService = (Get-Service -Name $mysqlServiceName).Status.ToString()
+        apiService = (Get-Service -Name $apiServiceName).Status.ToString()
+        healthStatus = $health.status
+        database = $health.database
+        apiPort = $health.apiPort
+        mysqlPort = $health.mysqlPort
+    }
+    $status | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $localRoot 'installation-status.json') -Encoding UTF8
+    Write-Host 'UPLM server-only services are installed.'
+    Stop-Transcript | Out-Null
+    return
+}
 
 $regAsmPath = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\RegAsm.exe'
 $addinPath = $receipt.addinPath

@@ -696,7 +696,7 @@ function formatDateTime(value?: string | null) {
         <p>{{ rootProject?.code || projectCode }} · 主项目及子项目验证计划</p>
       </div>
       <div class="validation-plan__actions">
-        <button v-if="canManageCatalog" type="button" class="pdm-secondary-action" @click="openCatalogManager"><LibraryBig :size="14" />检查项库管理</button>
+        <button v-if="canManageCatalog" type="button" class="pdm-secondary-action" @click="openCatalogManager"><LibraryBig :size="14" />模板管理</button>
       </div>
     </header>
 
@@ -742,7 +742,7 @@ function formatDateTime(value?: string | null) {
         <p>{{ activeDetailProject?.code }} · {{ activeDetailProject?.name }} · 从全局检查项库选取后形成项目快照</p>
       </div>
       <div class="validation-plan__actions">
-        <button v-if="canManageCatalog" type="button" class="pdm-secondary-action" @click="openCatalogManager"><LibraryBig :size="14" />检查项库管理</button>
+        <button v-if="canManageCatalog" type="button" class="pdm-secondary-action" @click="openCatalogManager"><LibraryBig :size="14" />模板管理</button>
         <input ref="planFileInput" class="validation-plan__file-input" type="file" accept=".pdf,.png,.jpg,.jpeg,.xlsx,.xls" @change="uploadFile('PlanDocument', $event)">
         <input ref="evidenceFileInput" class="validation-plan__file-input" type="file" accept=".pdf,.png,.jpg,.jpeg,.xlsx,.xls,.csv,.zip" @change="uploadFile('Evidence', $event)">
         <button type="button" class="pdm-secondary-action validation-plan__upload-action" :disabled="!plan || normalizedState !== 'Effective' || uploading" title="验证计划审批完成并生效后可上传" @click="planFileInput?.click()"><FileUp :size="14" />上传计划</button>

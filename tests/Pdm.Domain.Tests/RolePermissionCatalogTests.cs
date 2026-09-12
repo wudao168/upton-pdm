@@ -1,9 +1,28 @@
+using System.Reflection;
 using Upton.Pdm.Domain;
 
 namespace Upton.Pdm.Domain.Tests;
 
 public sealed class RolePermissionCatalogTests
 {
+    [Fact]
+    public void EveryPermissionCode_IsPublishedThroughTheSystemModuleDirectory()
+    {
+        var declaredCodes = typeof(PermissionCodes)
+            .GetFields(BindingFlags.Public | BindingFlags.Static)
+            .Where(field => field.IsLiteral && !field.IsInitOnly && field.FieldType == typeof(string))
+            .Select(field => (string)field.GetRawConstantValue()!)
+            .OrderBy(code => code, StringComparer.Ordinal)
+            .ToArray();
+        var publishedCodes = RolePermissionCatalog.Permissions
+            .Select(permission => permission.Code)
+            .OrderBy(code => code, StringComparer.Ordinal)
+            .ToArray();
+
+        Assert.Equal(declaredCodes, publishedCodes);
+        Assert.All(RolePermissionCatalog.Permissions, permission => Assert.False(string.IsNullOrWhiteSpace(permission.Module)));
+    }
+
     [Fact]
     public void InitialRoles_ContainConfirmedBusinessRolesWithLeastPrivilegeDefaults()
     {

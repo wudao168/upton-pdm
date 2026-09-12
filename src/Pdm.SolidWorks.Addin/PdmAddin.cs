@@ -95,7 +95,8 @@ public sealed class PdmAddin : ISwAddin
             controlledOpenListener = new SolidWorksOpenRequestListener();
             controlledOpenListener.Start();
             scanner = new SolidWorksReferenceTreeScanner(application);
-            taskPaneControl = new PdmTaskPaneControl();
+            var addinDirectory = Path.GetDirectoryName(typeof(PdmAddin).Assembly.Location) ?? AppDomain.CurrentDomain.BaseDirectory;
+            taskPaneControl = new PdmTaskPaneControl(ClientPackageUpdater.GetInstalledVersion(addinDirectory));
             taskPaneControl.CreateControl();
             WireEvents();
             WireSolidWorksEvents();

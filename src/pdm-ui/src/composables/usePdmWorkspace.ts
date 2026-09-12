@@ -959,7 +959,12 @@ export function usePdmWorkspace() {
   }
 
   async function requestPasswordResetTasks() {
-    return ['Administrator', 'platform_admin', 'developer'].some(hasRole) ? listPasswordResetTasks(accessToken) : []
+    if (!['Administrator', 'platform_admin', 'developer'].some(hasRole)) return []
+    try {
+      return await listPasswordResetTasks(accessToken)
+    } catch {
+      return []
+    }
   }
 
   async function resetRequestedPassword(taskId: string) {

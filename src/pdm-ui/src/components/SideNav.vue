@@ -1,19 +1,28 @@
 <script setup lang="ts">
+import { computed } from 'vue'
 import { Blocks, Boxes, ClipboardCheck, FolderKanban, Library, ListTree, Network, Settings } from '@lucide/vue'
 import uptonLogo from '../assets/upton-logo-white.png'
 import PlmCubeIcon from './PlmCubeIcon.vue'
 
 type NavKey = 'project-center' | 'projects' | 'materials' | 'standard-library' | 'standard-structure' | 'program-templates' | 'tasks' | 'admin'
 
-const props = withDefaults(defineProps<{ active: NavKey; approvalCount?: number; materialCount?: number; canManageSystem?: boolean; canViewStandardLibrary?: boolean; canViewMaterials?: boolean; collapsed?: boolean }>(), {
+const props = withDefaults(defineProps<{ active: NavKey; approvalCount?: number; materialCount?: number; canManageSystem?: boolean; canViewStandardLibrary?: boolean; canViewMaterials?: boolean; collapsed?: boolean; version?: string }>(), {
   approvalCount: 0,
   materialCount: 0,
   canManageSystem: false,
   canViewStandardLibrary: false,
   canViewMaterials: false,
   collapsed: false,
+  version: '',
 })
 const emit = defineEmits<{ navigate: [key: NavKey, label: string] }>()
+
+const fullVersion = computed(() => props.version.trim())
+const displayVersion = computed(() => {
+  if (!fullVersion.value) return '未知'
+  return `V${fullVersion.value.split('-', 1)[0]}`
+})
+const versionTitle = computed(() => fullVersion.value ? `版本 ${fullVersion.value}` : '版本未知')
 
 const items = [
   { key: 'project-center', label: '项目中心', icon: FolderKanban },
@@ -53,6 +62,10 @@ const items = [
       </button>
     </nav>
     <div class="pdm-sidebar__footer">
+      <div class="pdm-sidebar__version" :title="versionTitle" :aria-label="versionTitle">
+        <span class="pdm-sidebar__version-icon" aria-hidden="true" />
+        <span class="pdm-sidebar__version-copy">版本 {{ displayVersion }}</span>
+      </div>
       <button
         v-if="props.canManageSystem"
         type="button"

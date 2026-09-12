@@ -48,6 +48,9 @@ internal sealed class PdmTaskPaneControl : UserControl
     private readonly Label workspaceOperationStatus = new Label();
     private readonly PdmQuantityProgressBar workspaceOperationProgress = new PdmQuantityProgressBar();
     private readonly TabControl tabs = new TabControl();
+    private readonly Panel tabsHost = new Panel();
+    private readonly Label pluginVersion = new Label();
+    private readonly string installedPluginVersion;
     private readonly ProjectDocumentsControl projectDocuments = new ProjectDocumentsControl();
     private readonly AutomaticDrawingControl automaticDrawing = new AutomaticDrawingControl();
     private CadTreeNode activeDrawingSource;
@@ -119,8 +122,9 @@ internal sealed class PdmTaskPaneControl : UserControl
     private bool workspaceOperationActive;
     private bool refreshingWorkspaceOperationUi;
 
-    public PdmTaskPaneControl()
+    public PdmTaskPaneControl(string installedVersion = "")
     {
+        installedPluginVersion = installedVersion?.Trim() ?? string.Empty;
         Dock = DockStyle.Fill;
         MinimumSize = new Size(250, 420);
         Font = new Font("Microsoft YaHei UI", 8.5F);
@@ -133,7 +137,13 @@ internal sealed class PdmTaskPaneControl : UserControl
         var projectPanel = BuildProjectPanel();
         ConfigureCheckoutReminder();
         BuildTabs();
-        Controls.Add(tabs);
+        ConfigurePluginVersion();
+        tabsHost.Dock = DockStyle.Fill;
+        tabsHost.BackColor = Color.FromArgb(244, 247, 251);
+        tabsHost.Controls.Add(tabs);
+        tabsHost.Controls.Add(pluginVersion);
+        tabsHost.Layout += (_, _) => PositionPluginVersion();
+        Controls.Add(tabsHost);
         Controls.Add(workspaceOperationPanel);
         Controls.Add(checkoutReminder);
         Controls.Add(projectPanel);
@@ -141,6 +151,7 @@ internal sealed class PdmTaskPaneControl : UserControl
         ApplyContentTypography(projectPanel);
         ApplyContentTypography(checkoutReminder);
         ApplyContentTypography(tabs);
+        pluginVersion.BringToFront();
     }
 
     protected override void Dispose(bool disposing)
@@ -632,6 +643,44 @@ internal sealed class PdmTaskPaneControl : UserControl
                 RaiseVersionsRequested();
             }
         };
+    }
+
+    private void ConfigurePluginVersion()
+    {
+        pluginVersion.AutoSize = true;
+        pluginVersion.BackColor = Color.FromArgb(244, 247, 251);
+        pluginVersion.ForeColor = Color.FromArgb(95, 108, 124);
+        pluginVersion.Font = new Font("Microsoft YaHei UI", 8F);
+        pluginVersion.Text = FormatDisplayVersion(installedPluginVersion);
+        pluginVersion.AccessibleName = string.IsNullOrWhiteSpace(installedPluginVersion)
+            ? "插件版本未知"
+            : string.Concat("插件版本 ", installedPluginVersion);
+        actionToolTip.SetToolTip(pluginVersion, pluginVersion.AccessibleName);
+    }
+
+    private void PositionPluginVersion()
+    {
+        if (tabs.TabPages.Count == 0 || tabsHost.ClientSize.Width <= 0)
+        {
+            return;
+        }
+
+        var lastTab = tabs.GetTabRect(tabs.TabPages.Count - 1);
+        var fullText = FormatDisplayVersion(installedPluginVersion);
+        var fullWidth = TextRenderer.MeasureText(fullText, pluginVersion.Font).Width;
+        var availableWidth = tabsHost.ClientSize.Width - lastTab.Right - 14;
+        pluginVersion.Text = availableWidth >= fullWidth ? fullText : "V";
+        pluginVersion.Location = new Point(
+            Math.Max(lastTab.Right + 8, tabsHost.ClientSize.Width - pluginVersion.PreferredWidth - 8),
+            7);
+        pluginVersion.BringToFront();
+    }
+
+    private static string FormatDisplayVersion(string version)
+    {
+        if (string.IsNullOrWhiteSpace(version)) return "版本未知";
+        var separator = version.IndexOf('-');
+        return string.Concat("V", separator > 0 ? version.Substring(0, separator) : version);
     }
 
     private TabPage BuildStructureTab()
