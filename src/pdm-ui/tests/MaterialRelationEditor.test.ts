@@ -18,6 +18,7 @@ const mainMaterial = {
   u9SyncConfirmed: true, sourceSystem: 'Pdm', masterOwner: 'Pdm', referenceCount: 0, model3DAttachmentCount: 0, documentAttachmentCount: 0,
 } as const
 const accessory = { ...mainMaterial, id: 'accessory-1', materialCode: 'C-001', name: '伺服控制器', specification: '1kW', remark: 'EtherCAT' }
+const modelMatch = { ...mainMaterial, id: 'accessory-2', materialCode: 'C-750', name: '伺服驱动器', specification: 'SV-750W', remark: '脉冲型' }
 const relation = {
   id: 'relation-1', mainMaterialId: mainMaterial.id, mainMaterialCode: mainMaterial.materialCode, mainMaterialName: mainMaterial.name,
   name: 'M-001关联物料', isArchived: false, updatedBy: 'standard', updatedAt: '2026-09-05T08:00:00Z', rowVersion: 1,
@@ -65,6 +66,18 @@ describe('MaterialRelationEditor', () => {
     expect(wrapper.find('.material-relation-option-row').text()).toContain('伺服控制器')
     expect(wrapper.find('.material-relation-option-row').text()).toContain('1kW')
     expect(wrapper.find('.material-relation-option-row').text()).toContain('EtherCAT')
+    expect(api.listMaterials).toHaveBeenCalledWith('token', '', false, 100)
+    expect(api.listMaterials).toHaveBeenCalledWith('token', 'C-001', false, 20)
+
+    const materialSelect = wrapper.find('.material-relation-option-row').findAllComponents({ name: 'ElSelect' })[0]
+    expect(materialSelect.props('remote')).toBe(true)
+    expect(materialSelect.props('placeholder')).toBe('输入料号或型号搜索')
+    api.listMaterials.mockResolvedValueOnce([modelMatch])
+    await materialSelect.props('remoteMethod')('SV-750W')
+    await flushPromises()
+    expect(api.listMaterials).toHaveBeenCalledWith('token', 'SV-750W', false, 100)
+    expect(document.body.textContent).toContain('C-750')
+    expect(document.body.textContent).toContain('SV-750W')
 
     await wrapper.findAll('button').find(button => button.text() === '保存修改')!.trigger('click')
     await flushPromises()

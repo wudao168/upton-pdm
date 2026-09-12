@@ -1,5 +1,6 @@
 import type { AddDrawingReviewMarkupInput, ApprovalStep, ApprovalU9AutomationResult, AuditEntry, BatchUpdateBomItemsInput, BomClassification, BomEmptyDeclaration, BomExportMode, BomGenerationResult, BomHeaderKind, BomItem, BomKind, BomValidationRules, BomVersion, BomVersionState, CreateProjectInput, CreateReleasePackageInput, CreateRoleInput, CreateSubprojectInput, CrmConnectionTestResult, CrmCustomerSyncResult, CrmIntegrationSettings, DocumentKind, DocumentModelDrawingRelation, DocumentNode, DocumentVersionComparison, DocumentVersionSummary, DocumentWhereUsed, DrawingReviewCandidate, DrawingReviewDecision, DrawingReviewPackage, DrawingReviewTarget, EditLockSummary, EngineeringKit, EngineeringKitExpansion, EquipmentTypeDefinition, FolderPermissionRule, MainProjectStaffingInput, ManagedDocument, ManufacturingBomBaseline, MaterialAttachment, MaterialAttachmentKind, MaterialCategory, MaterialCategoryRule, MaterialCodeApplication, MaterialCodeApplicationStatus, MaterialCodeDecisionResult, MaterialCodeResolution, MaterialDuplicateRule, MaterialKind, MaterialNumberingSettings, MaterialPage, MaterialRemovalReadiness, MaterialRemovalResult, MaterialSyncExecutionResult, MaterialSyncTask, MyApprovalTask, OrganizationDirectory, OrganizationUnit, PasswordResetTask, PdmCustomer, PdmMaterial, PdmSystemSettings, PdmUser, PdmUserProfile, ProgramTemplate, ProgramTemplateApprovalDecision, ProgramTemplateAttachmentKind, ProgramTemplateDraftInput, ProgramTemplateRevision, ProgramTemplateTask, ProgramTemplateVersionBump, ProjectBomHeader, ProjectBomU9SyncExecution, ProjectBomU9SyncPreview, ProjectFile, ProjectFileVersion, ProjectFolder, ProjectFolderTemplateNode, ProjectNumberingOptions, ProjectOrganization, ProjectProcurementTrackingResult, ProjectSummary, ProjectVersionItem, ReferenceStatus, ReleaseItemComment, ReleasePackageSummary, ReleaseScope, RolePermissionDirectory, SaveMaterialInput, SaveOrganizationUnitInput, SavePdmUserInput, SaveProjectOrganizationInput, StandardLibraryCategory, StandardLibraryMaterialPage, U9BomQueryExecution, U9BomQueryInput, U9BomWriteExecution, U9BomWriteInput, U9BomWritePreview, U9ConnectionTestResult, U9InventoryFilters, U9InventoryPage, U9InventorySyncSettings, U9InventorySyncStatusResponse, U9ItemQueryResult, U9MaterialFullSyncStatusResponse, U9MaterialIntegrationSettings, U9MaterialSampleImportResult, U9MaterialSamplePreview, U9ProcurementSyncSettings, U9ProcurementSyncStatusResponse, UpdateCrmIntegrationInput, UpdateProjectInput, UpdateReleasePackageDraftInput, UpdateU9MaterialIntegrationInput } from './types'
 import type { MaterialSyncBatch } from './types'
+import type { ControlledDocumentRecycleReadiness } from './types'
 import type { ApprovalTransferCandidate, UserNotification } from './types'
 import type { ProjectCopyOptionsInput, ProjectCopyPreview, ProjectCopyResult } from './types'
 
@@ -220,6 +221,7 @@ interface ApiDocument {
   fileName: string
   kind: number | string
   revision?: ApiRevision | null
+  rowVersion?: number
   checkedOutBy?: string | null
   checkedOutAt?: string | null
   checkoutMachine?: string | null
@@ -231,6 +233,10 @@ interface ApiDocument {
   state?: number | string
   storedVersionCount?: number | null
   updatedAt?: string
+  deletedAt?: string | null
+  deletedBy?: string | null
+  deleteReason?: string | null
+  purgedAt?: string | null
 }
 
 interface ApiReferenceNode {
@@ -1606,8 +1612,26 @@ export async function updateProjectFolderPermissions(projectId: string, folderId
   return result.map(mapProjectFolder)
 }
 
-export function listProjectFiles(projectId: string, folderId: string, includeDeleted: boolean, token: string): Promise<ProjectFile[]> {
-  return requestJson(`/api/projects/${projectId}/files?folderId=${encodeURIComponent(folderId)}&includeDeleted=${includeDeleted}`, {}, token)
+export function listProjectFiles(projectId: string, folderId: string | undefined, includeDeleted: boolean, token: string): Promise<ProjectFile[]> {
+  const folderQuery = folderId ? `folderId=${encodeURIComponent(folderId)}&` : ''
+  return requestJson(`/api/projects/${projectId}/files?${folderQuery}includeDeleted=${includeDeleted}`, {}, token)
+}
+
+export async function listControlledDocumentRecycleBin(projectId: string, token: string): Promise<ManagedDocument[]> {
+  return (await requestJson<ApiDocument[]>(`/api/projects/${projectId}/documents/recycle-bin`, {}, token)).map(mapManagedDocument)
+}
+
+export async function getControlledDocumentRecycleReadiness(projectId: string, documentId: string, token: string): Promise<ControlledDocumentRecycleReadiness> {
+  const result = await requestJson<Omit<ControlledDocumentRecycleReadiness, 'document'> & { document: ApiDocument }>(`/api/projects/${projectId}/documents/${documentId}/recycle-readiness`, {}, token)
+  return { ...result, document: mapManagedDocument(result.document) }
+}
+
+export function recycleControlledDocument(projectId: string, documentId: string, expectedRowVersion: number, reason: string, confirmation: string, token: string): Promise<ManagedDocument> {
+  return requestJson(`/api/projects/${projectId}/documents/${documentId}/recycle`, { method: 'POST', body: JSON.stringify({ expectedRowVersion, reason, confirmation }) }, token)
+}
+
+export function restoreControlledDocument(projectId: string, documentId: string, expectedRowVersion: number, token: string): Promise<ManagedDocument> {
+  return requestJson(`/api/projects/${projectId}/documents/${documentId}/restore`, { method: 'POST', body: JSON.stringify({ expectedRowVersion }) }, token)
 }
 
 export async function uploadProjectFile(projectId: string, folderId: string, file: File, token: string, comment = '', onProgress?: (percent: number) => void, signal?: AbortSignal): Promise<ProjectFile> {
@@ -1779,6 +1803,7 @@ function mapManagedDocument(document: ApiDocument): ManagedDocument {
     kind: mapDocumentKind(document.kind),
     state: document.state ?? document.lifecycleState ?? 'Work',
     revision: document.storedVersionCount === 0 ? '—' : revisionDisplay(document.revision),
+    rowVersion: document.rowVersion ?? 1,
     storedVersionCount: document.storedVersionCount ?? undefined,
     checkedOutBy: document.checkedOutBy ?? undefined,
     checkedOutAt: document.checkedOutAt ?? undefined,
@@ -1788,6 +1813,10 @@ function mapManagedDocument(document: ApiDocument): ManagedDocument {
     checkoutReleaseRequestedBy: document.checkoutReleaseRequestedBy ?? undefined,
     checkoutReleaseRequestedAt: document.checkoutReleaseRequestedAt ?? undefined,
     updatedAt: document.updatedAt,
+    deletedAt: document.deletedAt ?? undefined,
+    deletedBy: document.deletedBy ?? undefined,
+    deleteReason: document.deleteReason ?? undefined,
+    purgedAt: document.purgedAt ?? undefined,
   }
 }
 

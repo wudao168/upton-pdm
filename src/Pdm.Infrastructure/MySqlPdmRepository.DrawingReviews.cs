@@ -25,11 +25,6 @@ public sealed partial class MySqlPdmRepository
         await using var connection = await OpenAsync(cancellationToken);
         var ids = await connection.QueryAsync<Guid>(new CommandDefinition(
             """
-            SELECT item.model_document_id
-            FROM drawing_review_item item
-            JOIN drawing_review_package package ON package.id=item.package_id
-            WHERE package.project_id=@ProjectId AND package.state IN ('InReview','WritingProperties')
-            UNION
             SELECT item.drawing_document_id
             FROM drawing_review_item item
             JOIN drawing_review_package package ON package.id=item.package_id
@@ -62,9 +57,7 @@ public sealed partial class MySqlPdmRepository
         await using var connection = await OpenAsync(cancellationToken);
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
         var documentIds = package.Items
-            .SelectMany(item => item.DrawingDocumentId.HasValue
-                ? new[] { item.ModelDocumentId, item.DrawingDocumentId.Value }
-                : new[] { item.ModelDocumentId })
+            .Select(item => item.DrawingDocumentId ?? throw new PdmRuleException("非标件缺少唯一关联的2D工程图。"))
             .Distinct()
             .OrderBy(id => id)
             .ToArray();
@@ -81,7 +74,7 @@ public sealed partial class MySqlPdmRepository
             FROM drawing_review_item item
             JOIN drawing_review_package package ON package.id=item.package_id
             WHERE package.state IN ('InReview','WritingProperties')
-              AND (item.model_document_id IN @DocumentIds OR item.drawing_document_id IN @DocumentIds)
+              AND item.drawing_document_id IN @DocumentIds
             """,
             new { DocumentIds = documentIds }, transaction, cancellationToken: cancellationToken));
         if (activeReviewCount > 0)
@@ -162,7 +155,7 @@ public sealed partial class MySqlPdmRepository
             FROM drawing_review_item item
             JOIN drawing_review_package package ON package.id=item.package_id
             WHERE package.state IN ('InReview','WritingProperties')
-              AND (item.model_document_id=@DocumentId OR item.drawing_document_id=@DocumentId)
+              AND item.drawing_document_id=@DocumentId
             """,
             new { DocumentId = documentId }, transaction, cancellationToken: cancellationToken));
         return count > 0;
@@ -290,18 +283,14 @@ public sealed partial class MySqlPdmRepository
         if (itemCount != requests.Count) throw new PdmRuleException("图纸审核属性写回必须覆盖审核单中的全部图档。");
         foreach (var request in requests)
         {
-            await InsertDrawingReviewWritebackAsync(connection, transaction, request.Model, cancellationToken);
-            if (request.Drawing is not null)
-                await InsertDrawingReviewWritebackAsync(connection, transaction, request.Drawing, cancellationToken);
+            await InsertDrawingReviewWritebackAsync(connection, transaction, request.Drawing, cancellationToken);
             var affected = await connection.ExecuteAsync(new CommandDefinition(
                 """
                 UPDATE drawing_review_item
-                SET model_writeback_id=@ModelWritebackId,drawing_writeback_id=@DrawingWritebackId
-                WHERE id=@ItemId AND package_id=@PackageId AND model_state='Approved' AND model_writeback_id IS NULL
-                  AND ((drawing_state='Approved' AND @DrawingWritebackId IS NOT NULL AND drawing_writeback_id IS NULL)
-                    OR (drawing_state='NotRequired' AND @DrawingWritebackId IS NULL))
+                SET drawing_writeback_id=@DrawingWritebackId
+                WHERE id=@ItemId AND package_id=@PackageId AND drawing_state='Approved' AND drawing_writeback_id IS NULL
                 """,
-                new { request.ItemId, PackageId = packageId, ModelWritebackId = request.Model.Id, DrawingWritebackId = request.Drawing?.Id }, transaction, cancellationToken: cancellationToken));
+                new { request.ItemId, PackageId = packageId, DrawingWritebackId = request.Drawing.Id }, transaction, cancellationToken: cancellationToken));
             if (affected != 1) throw new PdmConflictException("图纸审核结果已变化，不能生成属性写回任务。");
         }
         await connection.ExecuteAsync(new CommandDefinition(
@@ -341,7 +330,7 @@ public sealed partial class MySqlPdmRepository
             await connection.ExecuteAsync(new CommandDefinition(sql,
                 new { link.ItemId, ResultVersionId = resultVersionId.Value }, transaction, cancellationToken: cancellationToken));
             var remaining = await connection.ExecuteScalarAsync<int>(new CommandDefinition(
-                "SELECT COUNT(*) FROM drawing_review_item WHERE package_id=@PackageId AND (model_state<>'Marked' OR drawing_state NOT IN ('Marked','NotRequired'))",
+                "SELECT COUNT(*) FROM drawing_review_item WHERE package_id=@PackageId AND drawing_state NOT IN ('Marked','NotRequired')",
                 new { link.PackageId }, transaction, cancellationToken: cancellationToken));
             await connection.ExecuteAsync(new CommandDefinition(
                 remaining == 0

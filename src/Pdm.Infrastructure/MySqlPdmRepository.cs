@@ -387,11 +387,11 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
             SELECT d.id,d.project_id,d.folder_id,d.drawing_number,d.name,d.file_name,d.kind,d.lifecycle_state,d.revision_label,
                    d.checked_out_by,d.checked_out_at,d.checkout_session_id,d.checkout_machine,d.checkout_last_heartbeat_at,
                    d.checkout_lease_expires_at,d.checkout_release_requested_by,d.checkout_release_requested_at,
-                   d.checkout_release_request_reason,d.updated_at,
+                   d.checkout_release_request_reason,d.row_version,d.updated_at,d.deleted_at,d.deleted_by,d.delete_reason,d.purged_at,
                    (SELECT v.property_snapshot_json FROM document_version v WHERE v.document_id=d.id ORDER BY v.created_at DESC LIMIT 1) latest_property_snapshot_json,
                    (SELECT COUNT(*) FROM document_version v WHERE v.document_id=d.id) stored_version_count
             FROM document d
-            WHERE d.project_id = @ProjectId
+            WHERE d.project_id = @ProjectId AND d.deleted_at IS NULL AND d.purged_at IS NULL
             ORDER BY d.drawing_number, d.kind
             """,
             new { ProjectId = projectId },
@@ -408,14 +408,15 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
             SELECT d.id,d.project_id,d.folder_id,d.drawing_number,d.name,d.file_name,d.kind,d.lifecycle_state,d.revision_label,
                    d.checked_out_by,d.checked_out_at,d.checkout_session_id,d.checkout_machine,d.checkout_last_heartbeat_at,
                    d.checkout_lease_expires_at,d.checkout_release_requested_by,d.checkout_release_requested_at,
-                   d.checkout_release_request_reason,d.updated_at,
+                   d.checkout_release_request_reason,d.row_version,d.updated_at,d.deleted_at,d.deleted_by,d.delete_reason,d.purged_at,
                    (SELECT v.property_snapshot_json FROM document_version v WHERE v.document_id=d.id ORDER BY v.created_at DESC LIMIT 1) latest_property_snapshot_json,
                    (SELECT COUNT(*) FROM document_version v WHERE v.document_id=d.id) stored_version_count
             FROM document d
             INNER JOIN project requested ON requested.id=@ProjectId
             INNER JOIN project owner_project ON owner_project.id=d.project_id
-            WHERE owner_project.id=COALESCE(requested.parent_project_id,requested.id)
-               OR owner_project.parent_project_id=COALESCE(requested.parent_project_id,requested.id)
+            WHERE (owner_project.id=COALESCE(requested.parent_project_id,requested.id)
+               OR owner_project.parent_project_id=COALESCE(requested.parent_project_id,requested.id))
+              AND d.deleted_at IS NULL AND d.purged_at IS NULL
             ORDER BY owner_project.parent_project_id,owner_project.child_sequence,d.drawing_number,d.kind
             """,
             new { ProjectId = projectId }, cancellationToken: cancellationToken));
@@ -436,9 +437,9 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
             SELECT id,project_id,folder_id,drawing_number,name,file_name,kind,lifecycle_state,revision_label,
                    checked_out_by,checked_out_at,checkout_session_id,checkout_machine,checkout_last_heartbeat_at,
                    checkout_lease_expires_at,checkout_release_requested_by,checkout_release_requested_at,
-                   checkout_release_request_reason,updated_at,source_fingerprint_sha256
+                   checkout_release_request_reason,row_version,updated_at,deleted_at,deleted_by,delete_reason,purged_at,source_fingerprint_sha256
             FROM document
-            WHERE project_id IN @ProjectIds
+            WHERE project_id IN @ProjectIds AND deleted_at IS NULL AND purged_at IS NULL
             """,
             new { ProjectIds = ids },
             cancellationToken: cancellationToken));
@@ -485,8 +486,9 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
             SELECT id,project_id,folder_id,drawing_number,name,file_name,kind,lifecycle_state,revision_label,
                    checked_out_by,checked_out_at,checkout_session_id,checkout_machine,checkout_last_heartbeat_at,
                    checkout_lease_expires_at,checkout_release_requested_by,checkout_release_requested_at,
-                   checkout_release_request_reason,updated_at
+                   checkout_release_request_reason,row_version,updated_at,deleted_at,deleted_by,delete_reason,purged_at
             FROM document
+            WHERE deleted_at IS NULL AND purged_at IS NULL
             """,
             cancellationToken: cancellationToken));
         var documentsById = documentRows.Select(row => MapDocument(row)).ToDictionary(document => document.Id);
@@ -558,6 +560,11 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
             throw new PdmNotFoundException("项目不存在或已停用。");
         }
 
+        if (await connection.ExecuteScalarAsync<bool>(new CommandDefinition(
+            "SELECT EXISTS(SELECT 1 FROM document WHERE project_id=@ProjectId AND file_name=@FileName AND deleted_at IS NOT NULL AND purged_at IS NULL)",
+            new { command.ProjectId, command.FileName }, transaction, cancellationToken: cancellationToken)))
+            throw new PdmConflictException($"同名图档{command.FileName}仍在30天回收站中，请先恢复或等待恢复期结束。");
+
         if (!string.IsNullOrWhiteSpace(command.SourceSha256))
         {
             var matches = (await connection.QueryAsync<RegistrationFingerprintRow>(new CommandDefinition(
@@ -566,6 +573,7 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
                 FROM document
                 WHERE project_id=@ProjectId
                   AND file_name=@FileName
+                  AND purged_at IS NULL
                 FOR UPDATE
                 """,
                 new { command.ProjectId, command.FileName },
@@ -608,8 +616,8 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
             SELECT id,project_id,folder_id,drawing_number,name,file_name,kind,lifecycle_state,revision_label,
                    checked_out_by,checked_out_at,checkout_session_id,checkout_machine,checkout_last_heartbeat_at,
                    checkout_lease_expires_at,checkout_release_requested_by,checkout_release_requested_at,
-                   checkout_release_request_reason,updated_at
-            FROM document WHERE project_id=@ProjectId AND file_name=@FileName
+                   checkout_release_request_reason,row_version,updated_at,deleted_at,deleted_by,delete_reason,purged_at
+            FROM document WHERE project_id=@ProjectId AND file_name=@FileName AND purged_at IS NULL
             """,
             new { command.ProjectId, command.FileName },
             transaction,
@@ -1175,8 +1183,8 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
             SELECT id,project_id,folder_id,drawing_number,name,file_name,kind,lifecycle_state,revision_label,
                    checked_out_by,checked_out_at,checkout_session_id,checkout_machine,checkout_last_heartbeat_at,
                    checkout_lease_expires_at,checkout_release_requested_by,checkout_release_requested_at,
-                   checkout_release_request_reason,updated_at
-            FROM document WHERE id = @DocumentId
+                   checkout_release_request_reason,row_version,updated_at,deleted_at,deleted_by,delete_reason,purged_at
+            FROM document WHERE id = @DocumentId AND deleted_at IS NULL AND purged_at IS NULL
             """,
             new { DocumentId = documentId },
             transaction,
@@ -1521,6 +1529,7 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
     private static PdmDocument MapDocument(DocumentRow row, string? displayName = null) =>
         new(row.Id, row.ProjectId, row.DrawingNumber, displayName ?? row.Name, row.FileName, Enum.Parse<DocumentKind>(row.Kind), Enum.Parse<DocumentLifecycleState>(row.LifecycleState), RevisionLabel.Parse(row.RevisionLabel), row.CheckedOutBy, AsUtc(row.UpdatedAt))
         {
+            RowVersion = row.RowVersion > 0 ? row.RowVersion : 1,
             FolderId = row.FolderId,
             StoredVersionCount = row.StoredVersionCount,
             CheckedOutAt = AsNullableUtc(row.CheckedOutAt),
@@ -1530,7 +1539,11 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
             CheckoutLeaseExpiresAt = AsNullableUtc(row.CheckoutLeaseExpiresAt),
             CheckoutReleaseRequestedBy = row.CheckoutReleaseRequestedBy,
             CheckoutReleaseRequestedAt = AsNullableUtc(row.CheckoutReleaseRequestedAt),
-            CheckoutReleaseRequestReason = row.CheckoutReleaseRequestReason
+            CheckoutReleaseRequestReason = row.CheckoutReleaseRequestReason,
+            DeletedAt = AsNullableUtc(row.DeletedAt),
+            DeletedBy = row.DeletedBy,
+            DeleteReason = row.DeleteReason,
+            PurgedAt = AsNullableUtc(row.PurgedAt)
         };
 
     private static async Task<string> GetBomNamePropertyAsync(DbConnection connection, CancellationToken cancellationToken) =>
@@ -1808,7 +1821,12 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
         public string? CheckoutReleaseRequestedBy { get; init; }
         public DateTime? CheckoutReleaseRequestedAt { get; init; }
         public string? CheckoutReleaseRequestReason { get; init; }
+        public long RowVersion { get; init; }
         public DateTime UpdatedAt { get; init; }
+        public DateTime? DeletedAt { get; init; }
+        public string? DeletedBy { get; init; }
+        public string? DeleteReason { get; init; }
+        public DateTime? PurgedAt { get; init; }
     }
 
     private sealed class DocumentFingerprintRow : DocumentRow

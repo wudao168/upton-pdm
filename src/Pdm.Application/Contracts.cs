@@ -463,9 +463,13 @@ public interface IPdmRepository
     Task DeleteProjectFolderAsync(Guid projectId, Guid folderId, CancellationToken cancellationToken);
     Task<IReadOnlyList<PdmDocument>> ListDocumentsAsync(Guid projectId, CancellationToken cancellationToken);
     Task<IReadOnlyList<PdmDocument>> ListProjectTreeDocumentsAsync(Guid projectId, CancellationToken cancellationToken);
+    Task<IReadOnlyList<PdmDocument>> ListDeletedDocumentsAsync(Guid projectId, CancellationToken cancellationToken);
     Task<IReadOnlyList<DocumentModelDrawingRelation>> ListDocumentRelationsAsync(Guid projectId, CancellationToken cancellationToken);
     Task<IReadOnlyList<DocumentWhereUsed>> ListWhereUsedAsync(Guid documentId, CancellationToken cancellationToken);
     Task<PdmDocument?> FindDocumentAsync(Guid documentId, CancellationToken cancellationToken);
+    Task<PdmDocument?> FindDocumentIncludingDeletedAsync(Guid documentId, CancellationToken cancellationToken);
+    Task<PdmDocument> SetDocumentDeletedAsync(Guid documentId, bool deleted, long expectedRowVersion, string actor, string? reason, DateTimeOffset now, CancellationToken cancellationToken);
+    Task<int> PurgeExpiredDeletedDocumentsAsync(DateTimeOffset cutoff, DateTimeOffset purgedAt, CancellationToken cancellationToken);
     Task<IReadOnlyList<DocumentContentFingerprint>> ListDocumentContentFingerprintsAsync(IReadOnlyCollection<Guid> projectIds, CancellationToken cancellationToken);
     Task<PdmDocument> RegisterDocumentAsync(RegisterDocumentCommand command, string actor, CancellationToken cancellationToken);
     Task<bool> HasDocumentReadAccessAsync(Guid documentId, string actor, UserRole role, CancellationToken cancellationToken);

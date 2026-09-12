@@ -209,5 +209,4 @@ public sealed record DrawingReviewMarkup
 
 public sealed record DrawingReviewWritebackRequest(
     Guid ItemId,
-    CadPropertyWriteback Model,
-    CadPropertyWriteback? Drawing);
+    CadPropertyWriteback Drawing);

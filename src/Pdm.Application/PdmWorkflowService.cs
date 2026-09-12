@@ -3092,7 +3092,7 @@ public sealed class PdmWorkflowService(
         else
         {
             var requested = modelDocumentIds.Distinct().ToArray();
-            if (requested.Length == 0) throw new PdmRuleException("请至少选择一组3D/2D图档进行审核。");
+            if (requested.Length == 0) throw new PdmRuleException("请至少选择一张2D工程图进行审核。");
             var byModel = candidates
                 .Where(candidate => candidate.Candidate.ModelDocumentId.HasValue)
                 .ToDictionary(candidate => candidate.Candidate.ModelDocumentId!.Value);
@@ -3108,7 +3108,7 @@ public sealed class PdmWorkflowService(
         {
             if (candidates.Count > 0 && candidates.All(candidate => candidate.Candidate.State == DrawingReviewCandidateState.InReview))
                 throw new PdmConflictException("当前项目图档均已在审核中，请勿重复发起。");
-            throw new PdmRuleException("当前项目没有可发起审核的3D/2D图档。");
+            throw new PdmRuleException("当前项目没有可发起审核的非标件2D工程图。");
         }
 
         var packageId = Guid.NewGuid();
@@ -3125,12 +3125,13 @@ public sealed class PdmWorkflowService(
             ModelRevision = candidate.ModelVersion.Revision.Display,
             ModelSha256 = candidate.ModelVersion.Sha256,
             ModelCreatedBy = candidate.ModelVersion.CreatedBy,
+            ModelState = DrawingReviewTargetState.NotRequired,
             DrawingDocumentId = candidate.Candidate.DrawingDocumentId,
             DrawingVersionId = candidate.DrawingVersion?.Id,
             DrawingRevision = candidate.DrawingVersion?.Revision.Display,
             DrawingSha256 = candidate.DrawingVersion?.Sha256,
             DrawingCreatedBy = candidate.DrawingVersion?.CreatedBy,
-            DrawingState = candidate.Candidate.DrawingDocumentId.HasValue ? DrawingReviewTargetState.Pending : DrawingReviewTargetState.NotRequired
+            DrawingState = DrawingReviewTargetState.Pending
         }).ToArray();
         var now = timeProvider.GetUtcNow();
         var package = new DrawingReviewPackage
@@ -3144,7 +3145,7 @@ public sealed class PdmWorkflowService(
             Items = items
         };
         package = await repository.CreateDrawingReviewPackageAsync(package, cancellationToken);
-        await AuditAsync(actor, "drawing-review.create", nameof(DrawingReviewPackage), package.Id.ToString(), $"{package.Number}；选择3D/2D {package.Items.Count}组", cancellationToken);
+        await AuditAsync(actor, "drawing-review.create", nameof(DrawingReviewPackage), package.Id.ToString(), $"{package.Number}；选择2D工程图 {package.Items.Count}张", cancellationToken);
         return package;
     }
 
@@ -3172,23 +3173,23 @@ public sealed class PdmWorkflowService(
     {
         var packages = await repository.ListDrawingReviewPackagesAsync(projectId, cancellationToken);
         var activePackages = packages.Where(package => package.State is DrawingReviewPackageState.InReview or DrawingReviewPackageState.WritingProperties).ToArray();
-        var activeDocumentIds = activePackages.SelectMany(package => package.Items).SelectMany(item => item.DrawingDocumentId.HasValue
-            ? new[] { item.ModelDocumentId, item.DrawingDocumentId.Value }
-            : new[] { item.ModelDocumentId }).ToHashSet();
+        var activeDocumentIds = activePackages.SelectMany(package => package.Items)
+            .Where(item => item.DrawingDocumentId.HasValue)
+            .Select(item => item.DrawingDocumentId!.Value)
+            .ToHashSet();
         var approvedPackages = packages.Where(package => package.State == DrawingReviewPackageState.Approved).ToArray();
 
-        var effectiveBomItems = new List<BomItem>();
-        foreach (var bomKind in new[] { BomKind.Standard, BomKind.NonStandard, BomKind.Unclassified, BomKind.Electrical })
-            effectiveBomItems.AddRange((await repository.GetBomAsync(projectId, bomKind, cancellationToken))
-                .Where(item => !item.IsManuallyExcluded && !item.IsPendingRemoval && !item.DeletedAt.HasValue));
+        var effectiveBomItems = (await repository.GetBomAsync(projectId, BomKind.NonStandard, cancellationToken))
+            .Where(item => !item.IsManuallyExcluded && !item.IsPendingRemoval && !item.DeletedAt.HasValue)
+            .ToArray();
         var sources = effectiveBomItems
             .Where(item => item.SourceDocumentId.HasValue)
             .GroupBy(item => item.SourceDocumentId!.Value)
             .Select(group =>
             {
-                var preferred = group.OrderBy(item => item.Kind == BomKind.NonStandard ? 0 : 1).ThenBy(item => item.Sequence).First();
+                var preferred = group.OrderBy(item => item.Sequence).First();
                 return new DrawingReviewCandidateSource(preferred.Id, preferred.DrawingNumber, preferred.Name, preferred.SourceConfiguration,
-                    preferred.SourceDocumentId!.Value, group.Select(item => item.Kind).Distinct().OrderBy(kind => kind).ToArray());
+                    preferred.SourceDocumentId!.Value, [BomKind.NonStandard]);
             })
             .ToList();
 
@@ -3205,27 +3206,12 @@ public sealed class PdmWorkflowService(
                 BomKinds = [BomKind.NonStandard],
                 ModelRevision = "—",
                 State = DrawingReviewCandidateState.Unavailable,
-                Reason = "非标BOM没有来源3D模型，必须补齐3D及唯一2D工程图关系"
+                Reason = "非标BOM没有来源模型，无法定位唯一2D工程图"
             }, null, null))
             .ToList();
 
         var documents = await repository.ListDocumentsAsync(projectId, cancellationToken);
         var documentById = documents.ToDictionary(document => document.Id);
-        var referenceTree = await repository.GetReferenceTreeAsync(projectId, cancellationToken);
-        var knownModelIds = sources.Select(source => source.ModelDocumentId).ToHashSet();
-        if (referenceTree is not null)
-        {
-            foreach (var node in FlattenOpenNodes(referenceTree)
-                         .Where(node => node.DocumentId.HasValue && node.Kind == DocumentKind.Assembly)
-                         .GroupBy(node => node.DocumentId!.Value)
-                         .Select(group => group.First()))
-            {
-                var modelDocumentId = node.DocumentId!.Value;
-                if (!knownModelIds.Add(modelDocumentId) || !documentById.TryGetValue(modelDocumentId, out var assembly)) continue;
-                sources.Add(new DrawingReviewCandidateSource(assembly.Id, assembly.DrawingNumber, assembly.Name, node.Configuration, assembly.Id, []));
-            }
-        }
-
         var relations = await repository.ListDocumentRelationsAsync(projectId, cancellationToken);
         foreach (var source in sources.OrderBy(source => source.DrawingNumber, StringComparer.OrdinalIgnoreCase))
         {
@@ -3255,11 +3241,7 @@ public sealed class PdmWorkflowService(
                 .Where(id => documentById.TryGetValue(id, out var related) && related.Kind == DocumentKind.Drawing)
                 .Select(id => documentById[id])
                 .ToArray();
-            var strictNonStandard = source.BomKinds.Contains(BomKind.NonStandard);
-            var drawing = strictNonStandard
-                ? relatedDrawings.Length == 1 ? relatedDrawings[0] : null
-                : relatedDrawings.FirstOrDefault(related => string.Equals(related.DrawingNumber, source.DrawingNumber, StringComparison.OrdinalIgnoreCase))
-                    ?? (relatedDrawings.Length == 1 ? relatedDrawings[0] : null);
+            var drawing = relatedDrawings.Length == 1 ? relatedDrawings[0] : null;
             var modelVersions = (await repository.ListDocumentVersionsAsync(model.Id, cancellationToken)).OrderByDescending(version => version.CreatedAt).ToArray();
             var drawingVersions = drawing is null
                 ? []
@@ -3268,24 +3250,19 @@ public sealed class PdmWorkflowService(
             var drawingVersion = drawingVersions.FirstOrDefault();
             var state = DrawingReviewCandidateState.Ready;
             string? reason = null;
-            if (strictNonStandard && relatedDrawings.Length != 1)
+            if (relatedDrawings.Length != 1)
             {
                 state = DrawingReviewCandidateState.Unavailable;
                 reason = relatedDrawings.Length == 0
                     ? "非标BOM缺少关联2D工程图"
                     : $"非标BOM关联了{relatedDrawings.Length}张2D工程图，必须保持唯一";
             }
-            else if (activeDocumentIds.Contains(model.Id) || drawing is not null && activeDocumentIds.Contains(drawing.Id))
+            else if (drawing is not null && activeDocumentIds.Contains(drawing.Id))
             {
                 state = DrawingReviewCandidateState.InReview;
                 reason = "已在其他审核单中";
             }
-            else if (drawing is null && model.Kind != DocumentKind.Assembly)
-            {
-                state = DrawingReviewCandidateState.Unavailable;
-                reason = "未找到唯一关联的2D工程图";
-            }
-            else if (!string.IsNullOrWhiteSpace(model.CheckedOutBy) || drawing is not null && !string.IsNullOrWhiteSpace(drawing.CheckedOutBy))
+            else if (drawing is not null && !string.IsNullOrWhiteSpace(drawing.CheckedOutBy))
             {
                 state = DrawingReviewCandidateState.Unavailable;
                 reason = "图档仍处于签出编辑状态";
@@ -3296,13 +3273,10 @@ public sealed class PdmWorkflowService(
                 reason = "图档尚无已存档版本";
             }
             else if (approvedPackages.Any(package => package.Items.Any(item => item.ModelDocumentId == model.Id
-                         && item.ModelState == DrawingReviewTargetState.Marked
-                         && MatchesReviewedVersion(modelVersion, item.EffectiveModelVersionId, modelVersions)
-                         && (drawing is null
-                             ? item.DrawingState == DrawingReviewTargetState.NotRequired
-                             : item.DrawingDocumentId == drawing.Id && item.DrawingState == DrawingReviewTargetState.Marked
-                               && item.EffectiveDrawingVersionId.HasValue
-                               && MatchesReviewedVersion(drawingVersion!, item.EffectiveDrawingVersionId.Value, drawingVersions)))))
+                         && item.DrawingDocumentId == drawing!.Id
+                         && item.DrawingState == DrawingReviewTargetState.Marked
+                         && item.EffectiveDrawingVersionId.HasValue
+                         && MatchesReviewedVersion(drawingVersion!, item.EffectiveDrawingVersionId.Value, drawingVersions))))
             {
                 state = DrawingReviewCandidateState.ApprovedCurrent;
                 reason = "当前版本已审核，可选择重新审核";
@@ -3341,8 +3315,13 @@ public sealed class PdmWorkflowService(
             throw new UnauthorizedAccessException("当前用户没有该项目的操作权限。");
         if (package.State != DrawingReviewPackageState.InReview)
             throw new PdmConflictException("当前图纸审核单不允许继续添加批注。");
-        if (!package.Items.Any(item => item.Id == command.ItemId))
+        var item = package.Items.SingleOrDefault(item => item.Id == command.ItemId);
+        if (item is null)
             throw new PdmNotFoundException("图纸审核项不存在。");
+        if (command.Target != DrawingReviewTarget.Drawing2D)
+            throw new PdmRuleException("当前流程仅允许在2D工程图上添加批注。");
+        if (!item.RequiresDrawingReview)
+            throw new PdmRuleException("该非标件没有唯一关联的2D工程图。");
         var text = RequiredComment(command.Text, "批注内容");
         if (text.Length > 2000) throw new PdmRuleException("批注内容不能超过2000个字符。");
         if (command.NormalizedX is < 0 or > 1 || command.NormalizedY is < 0 or > 1)
@@ -3391,12 +3370,14 @@ public sealed class PdmWorkflowService(
             throw new PdmConflictException("当前图纸审核单不允许继续审核。");
         var item = package.Items.SingleOrDefault(candidate => candidate.Id == itemId)
             ?? throw new PdmNotFoundException("图纸审核项不存在。");
-        if (command.Target == DrawingReviewTarget.Drawing2D && !item.RequiresDrawingReview)
-            throw new PdmRuleException("该装配体没有关联工程图，仅需审核3D模型。");
-        var targetState = command.Target == DrawingReviewTarget.Model3D ? item.ModelState : item.DrawingState;
+        if (command.Target != DrawingReviewTarget.Drawing2D)
+            throw new PdmRuleException("当前流程仅审核2D工程图。");
+        if (!item.RequiresDrawingReview)
+            throw new PdmRuleException("该非标件没有唯一关联的2D工程图。");
+        var targetState = item.DrawingState;
         if (targetState != DrawingReviewTargetState.Pending)
-            throw new PdmConflictException("该3D或2D图档已经完成审核，请刷新后重试。");
-        var createdBy = command.Target == DrawingReviewTarget.Model3D ? item.ModelCreatedBy : item.DrawingCreatedBy;
+            throw new PdmConflictException("该2D工程图已经完成审核，请刷新后重试。");
+        var createdBy = item.DrawingCreatedBy;
         var developerSelfReviewAllowed = TenantContext.Current?.HasRole("developer") == true;
         if (!developerSelfReviewAllowed && string.Equals(createdBy, actor, StringComparison.OrdinalIgnoreCase))
             throw new PdmRuleException("设计者不能审核自己生成的图档版本，请由其他审核人处理。");
@@ -3414,29 +3395,20 @@ public sealed class PdmWorkflowService(
         package = await repository.DecideDrawingReviewTargetAsync(itemId, command.Target, state, actor, reviewerName, now, comment, cancellationToken);
         await AuditAsync(actor, "drawing-review.decide", nameof(DrawingReviewItem), itemId.ToString(), $"{command.Target}；{command.Decision}；{comment}", cancellationToken);
         if (command.Decision != DrawingReviewDecision.Approve
-            || package.Items.Any(candidate => candidate.ModelState != DrawingReviewTargetState.Approved
-                || candidate.DrawingState is not (DrawingReviewTargetState.Approved or DrawingReviewTargetState.NotRequired)))
+            || package.Items.Any(candidate => candidate.DrawingState != DrawingReviewTargetState.Approved))
             return package;
 
         var writebacks = package.Items.Select(candidate =>
         {
-            var modelId = Guid.NewGuid();
-            var modelProperties = DrawingReviewProperties(package, DrawingReviewTarget.Model3D, candidate.ModelReviewer!, candidate.ModelReviewerName!, candidate.ModelReviewedAt!.Value, candidate.ModelRevision);
-            CadPropertyWriteback? drawingWriteback = null;
-            if (candidate.RequiresDrawingReview)
-            {
-                var drawingId = Guid.NewGuid();
-                var drawingProperties = DrawingReviewProperties(package, DrawingReviewTarget.Drawing2D, candidate.DrawingReviewer!, candidate.DrawingReviewerName!, candidate.DrawingReviewedAt!.Value, candidate.DrawingRevision!);
-                drawingWriteback = new CadPropertyWriteback(drawingId, package.ProjectId, drawingId, candidate.DrawingDocumentId!.Value, null, candidate.DrawingVersionId!.Value, candidate.DrawingRevision!, drawingProperties, CadPropertyWritebackStatus.Pending, candidate.DrawingReviewer!, now);
-            }
+            var drawingId = Guid.NewGuid();
+            var drawingProperties = DrawingReviewProperties(package, DrawingReviewTarget.Drawing2D, candidate.DrawingReviewer!, candidate.DrawingReviewerName!, candidate.DrawingReviewedAt!.Value, candidate.DrawingRevision!);
+            var drawingWriteback = new CadPropertyWriteback(drawingId, package.ProjectId, drawingId, candidate.DrawingDocumentId!.Value, null, candidate.DrawingVersionId!.Value, candidate.DrawingRevision!, drawingProperties, CadPropertyWritebackStatus.Pending, candidate.DrawingReviewer!, now);
             return new DrawingReviewWritebackRequest(
                 candidate.Id,
-                new CadPropertyWriteback(modelId, package.ProjectId, modelId, candidate.ModelDocumentId, null, candidate.ModelVersionId, candidate.ModelRevision, modelProperties, CadPropertyWritebackStatus.Pending, candidate.ModelReviewer!, now),
                 drawingWriteback);
         }).ToArray();
         package = await repository.QueueDrawingReviewWritebacksAsync(package.Id, writebacks, cancellationToken);
-        var writebackCount = writebacks.Sum(request => 1 + (request.Drawing is null ? 0 : 1));
-        await AuditAsync(actor, "drawing-review.writeback.queue", nameof(DrawingReviewPackage), package.Id.ToString(), $"图档审核属性写回{writebackCount}项", cancellationToken);
+        await AuditAsync(actor, "drawing-review.writeback.queue", nameof(DrawingReviewPackage), package.Id.ToString(), $"2D图纸审核属性写回{writebacks.Length}项", cancellationToken);
         return package;
     }
 
@@ -3467,7 +3439,7 @@ public sealed class PdmWorkflowService(
         var review = await repository.RecordDrawingReviewWritebackResultAsync(id, result.Id, true, cancellationToken);
         await AuditAsync(actor, "cad-property-writeback.complete", nameof(CadPropertyWriteback), id.ToString(), result.Revision.Display, cancellationToken);
         if (review?.State == DrawingReviewPackageState.Approved)
-            await AuditAsync(actor, "drawing-review.approved", nameof(DrawingReviewPackage), review.Id.ToString(), $"{review.Number}；3D和2D审核属性已写回", cancellationToken);
+            await AuditAsync(actor, "drawing-review.approved", nameof(DrawingReviewPackage), review.Id.ToString(), $"{review.Number}；2D图纸审核属性已写回", cancellationToken);
         return updated;
     }
 
@@ -4679,7 +4651,7 @@ public sealed class PdmWorkflowService(
             .ToArray();
         var withoutDrawingSource = effectiveItems.Where(item => !item.SourceDocumentId.HasValue).Select(item => item.DrawingNumber).ToArray();
         if (withoutDrawingSource.Length > 0)
-            throw new PdmRuleException($"以下非标件没有3D/2D图档关系，不能进入正式BOM审核发布：{string.Join("、", withoutDrawingSource.Take(12))}。");
+            throw new PdmRuleException($"以下非标件没有来源模型，无法定位2D工程图，不能进入正式BOM审核发布：{string.Join("、", withoutDrawingSource.Take(12))}。");
         var referenceSnapshot = await repository.GetLatestReferenceSnapshotAsync(projectId, cancellationToken)
             ?? throw new PdmRuleException("项目尚无最新设计树，不能核对非标件BOM数量。");
         var generated = await GenerateMechanicalBomFromSnapshotAsync(projectId, referenceSnapshot, "release-validation", cancellationToken, false, false);
@@ -4714,7 +4686,7 @@ public sealed class PdmWorkflowService(
             .Where(package => package.State == DrawingReviewPackageState.Approved)
             .ToArray();
         if (approvedPackages.Length == 0)
-            throw new PdmRuleException("非标件BOM尚无已完成的3D和2D图纸审核，不能进入正式BOM审核发布。");
+            throw new PdmRuleException("非标件BOM尚无已完成的2D图纸审核，不能进入正式BOM审核发布。");
         var relations = await repository.ListDocumentRelationsAsync(projectId, cancellationToken);
         var missing = new List<string>();
         foreach (var sourceItem in sourceItems)
@@ -4733,24 +4705,21 @@ public sealed class PdmWorkflowService(
                 continue;
             }
             var requiredDrawingDocumentId = drawingDocumentIds[0];
-            var modelVersions = await repository.ListDocumentVersionsAsync(modelDocumentId, cancellationToken);
-            var latestModel = modelVersions.OrderByDescending(version => version.CreatedAt).FirstOrDefault();
+            var drawingVersions = await repository.ListDocumentVersionsAsync(requiredDrawingDocumentId, cancellationToken);
+            var latestDrawing = drawingVersions.OrderByDescending(version => version.CreatedAt).FirstOrDefault();
             var matched = false;
-            if (latestModel is not null)
+            if (latestDrawing is not null)
             {
                 foreach (var package in approvedPackages)
                 {
                     foreach (var reviewItem in package.Items.Where(item => item.ModelDocumentId == modelDocumentId
-                                 && MatchesReviewedVersion(latestModel, item.EffectiveModelVersionId, modelVersions)
-                                 && item.ModelState == DrawingReviewTargetState.Marked
                                  && item.DrawingDocumentId == requiredDrawingDocumentId
-                                 && item.DrawingState == DrawingReviewTargetState.Marked))
+                                 && item.DrawingState == DrawingReviewTargetState.Marked
+                                 && item.EffectiveDrawingVersionId.HasValue
+                                 && MatchesReviewedVersion(latestDrawing, item.EffectiveDrawingVersionId.Value, drawingVersions)))
                     {
-                        var drawingVersions = await repository.ListDocumentVersionsAsync(requiredDrawingDocumentId, cancellationToken);
-                        var latestDrawing = drawingVersions.OrderByDescending(version => version.CreatedAt).FirstOrDefault();
-                        if (latestDrawing is null || !reviewItem.EffectiveDrawingVersionId.HasValue
-                            || !MatchesReviewedVersion(latestDrawing, reviewItem.EffectiveDrawingVersionId.Value, drawingVersions)) continue;
                         if (package.Markups.Any(markup => markup.ItemId == reviewItem.Id
+                                && markup.Target == DrawingReviewTarget.Drawing2D
                                 && markup.Severity == DrawingReviewMarkupSeverity.Blocking
                                 && markup.State == DrawingReviewMarkupState.Open))
                             continue;
@@ -4763,7 +4732,7 @@ public sealed class PdmWorkflowService(
             if (!matched) missing.Add(sourceItem.DrawingNumber);
         }
         if (missing.Count > 0)
-            throw new PdmRuleException($"以下非标件的3D/2D审核标记缺失或审核后版本已变化：{string.Join("、", missing.Take(12))}{(missing.Count > 12 ? $"等{missing.Count}项" : string.Empty)}。请重新发起图纸审核。");
+            throw new PdmRuleException($"以下非标件的2D审核标记缺失、写回未完成或审核后2D版本已变化：{string.Join("、", missing.Take(12))}{(missing.Count > 12 ? $"等{missing.Count}项" : string.Empty)}。请重新发起图纸审核。");
     }
 
     private static bool MatchesReviewedVersion(

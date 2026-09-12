@@ -158,6 +158,7 @@ builder.Services.AddScoped<MaterialRelationService>();
 builder.Services.AddScoped<IMaterialRelationReleaseGuard>(provider => provider.GetRequiredService<MaterialRelationService>());
 builder.Services.AddScoped<ProgramTemplateService>();
 builder.Services.AddScoped<ProjectFileService>();
+builder.Services.AddScoped<ControlledDocumentRecycleService>();
 builder.Services.AddScoped<BomHeaderService>();
 builder.Services.AddScoped<ValidationPlanService>();
 builder.Services.AddScoped<ProjectPlanningService>();
@@ -182,6 +183,7 @@ builder.Services.AddHostedService<U9ProcurementSyncHostedService>();
 builder.Services.AddHostedService<MaterialU9SyncBatchHostedService>();
 builder.Services.AddHostedService<BomHeaderAutomaticHostedService>();
 builder.Services.AddHostedService<ProjectFileRecycleCleanupService>();
+builder.Services.AddHostedService<ControlledDocumentRecycleCleanupService>();
 builder.Services.AddHostedService<ProjectPlanningReminderHostedService>();
 
 builder.Services.AddCors(options => options.AddPolicy("PdmClients", policy => policy
@@ -269,6 +271,7 @@ app.MapMaterialRelationEndpoints();
 app.MapPdmBomHeaderEndpoints();
 app.MapProgramTemplateEndpoints();
 app.MapProjectFileEndpoints();
+app.MapControlledDocumentRecycleEndpoints();
 app.MapU9BomEndpoints();
 app.MapValidationPlanEndpoints();
 app.MapProjectPlanningEndpoints();

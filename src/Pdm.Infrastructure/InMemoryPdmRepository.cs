@@ -926,7 +926,7 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
 
     public Task<IReadOnlyList<PdmDocument>> ListDocumentsAsync(Guid projectId, CancellationToken cancellationToken) =>
         Task.FromResult<IReadOnlyList<PdmDocument>>(documents.Values
-            .Where(document => document.ProjectId == projectId)
+            .Where(document => document.ProjectId == projectId && document.DeletedAt is null && document.PurgedAt is null)
             .Select(WithStoredVersionCount)
             .OrderBy(document => document.DrawingNumber)
             .ThenBy(document => document.Kind)
@@ -938,7 +938,7 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
         var rootId = project.RootProjectId ?? project.Id;
         var projectIds = projects.Values.Where(item => item.Id == rootId || item.RootProjectId == rootId).Select(item => item.Id).ToHashSet();
         return Task.FromResult<IReadOnlyList<PdmDocument>>(documents.Values
-            .Where(item => projectIds.Contains(item.ProjectId))
+            .Where(item => projectIds.Contains(item.ProjectId) && item.DeletedAt is null && item.PurgedAt is null)
             .Select(WithStoredVersionCount)
             .OrderBy(item => item.ProjectId)
             .ThenBy(item => item.DrawingNumber)
@@ -1005,7 +1005,51 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
     public Task<PdmDocument?> FindDocumentAsync(Guid documentId, CancellationToken cancellationToken)
     {
         documents.TryGetValue(documentId, out var document);
+        return Task.FromResult(document is { DeletedAt: null, PurgedAt: null } ? document : null);
+    }
+
+    public Task<IReadOnlyList<PdmDocument>> ListDeletedDocumentsAsync(Guid projectId, CancellationToken cancellationToken) =>
+        Task.FromResult<IReadOnlyList<PdmDocument>>(documents.Values
+            .Where(document => document.ProjectId == projectId && document.DeletedAt is not null && document.PurgedAt is null)
+            .Select(WithStoredVersionCount)
+            .OrderByDescending(document => document.DeletedAt)
+            .ToArray());
+
+    public Task<PdmDocument?> FindDocumentIncludingDeletedAsync(Guid documentId, CancellationToken cancellationToken)
+    {
+        documents.TryGetValue(documentId, out var document);
         return Task.FromResult(document);
+    }
+
+    public Task<PdmDocument> SetDocumentDeletedAsync(Guid documentId, bool deleted, long expectedRowVersion, string actor, string? reason, DateTimeOffset now, CancellationToken cancellationToken)
+    {
+        lock (gate)
+        {
+            var current = documents.GetValueOrDefault(documentId) ?? throw new PdmNotFoundException("图档不存在。");
+            if (current.RowVersion != expectedRowVersion || current.PurgedAt is not null || deleted == (current.DeletedAt is not null))
+                throw new PdmConflictException("图档状态已变化，请刷新后重试。");
+            var updated = current with
+            {
+                RowVersion = current.RowVersion + 1,
+                DeletedAt = deleted ? now : null,
+                DeletedBy = deleted ? actor : null,
+                DeleteReason = deleted ? reason : null,
+                UpdatedAt = now
+            };
+            documents[documentId] = updated;
+            return Task.FromResult(WithStoredVersionCount(updated));
+        }
+    }
+
+    public Task<int> PurgeExpiredDeletedDocumentsAsync(DateTimeOffset cutoff, DateTimeOffset purgedAt, CancellationToken cancellationToken)
+    {
+        lock (gate)
+        {
+            var expired = documents.Values.Where(document => document.DeletedAt < cutoff && document.PurgedAt is null).ToArray();
+            foreach (var document in expired)
+                documents[document.Id] = document with { PurgedAt = purgedAt, UpdatedAt = purgedAt, RowVersion = document.RowVersion + 1 };
+            return Task.FromResult(expired.Length);
+        }
     }
 
     public Task<IReadOnlyList<DocumentContentFingerprint>> ListDocumentContentFingerprintsAsync(
@@ -1014,7 +1058,7 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
     {
         var ids = (projectIds ?? Array.Empty<Guid>()).ToHashSet();
         var result = documents.Values
-            .Where(document => ids.Contains(document.ProjectId))
+            .Where(document => ids.Contains(document.ProjectId) && document.DeletedAt is null && document.PurgedAt is null)
             .Select(document => new { Document = document, Sha256 = CurrentSourceFingerprint(document.Id) })
             .Select(item => new DocumentContentFingerprint(item.Document, item.Sha256 ?? string.Empty))
             .ToArray();
@@ -1035,9 +1079,12 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
 
             var existing = documents.Values.FirstOrDefault(document =>
                 document.ProjectId == command.ProjectId
+                && document.PurgedAt is null
                 && string.Equals(document.FileName, command.FileName, StringComparison.OrdinalIgnoreCase));
             if (existing is not null)
             {
+                if (existing.DeletedAt is not null)
+                    throw new PdmConflictException($"同名图档{command.FileName}仍在30天回收站中，请先恢复或等待恢复期结束。");
                 if (!string.IsNullOrWhiteSpace(command.SourceSha256)
                     && !string.Equals(CurrentSourceFingerprint(existing.Id), command.SourceSha256, StringComparison.OrdinalIgnoreCase))
                 {
@@ -1112,7 +1159,7 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
         lock (gate)
         {
             var projectDocumentIds = documents.Values
-                .Where(document => document.ProjectId == projectId)
+                .Where(document => document.ProjectId == projectId && document.DeletedAt is null && document.PurgedAt is null)
                 .Select(document => document.Id)
                 .ToHashSet();
             return Task.FromResult<IReadOnlyList<DocumentVersion>>(versions.Values

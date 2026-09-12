@@ -358,6 +358,8 @@ public sealed record PdmDocument(
     string? CheckedOutBy,
     DateTimeOffset UpdatedAt)
 {
+    public long RowVersion { get; init; } = 1;
+
     public Guid? FolderId { get; init; }
 
     public int? StoredVersionCount { get; init; }
@@ -379,6 +381,14 @@ public sealed record PdmDocument(
     public string? CheckoutReleaseRequestReason { get; init; }
 
     public bool DrawingReviewLocked { get; init; }
+
+    public DateTimeOffset? DeletedAt { get; init; }
+
+    public string? DeletedBy { get; init; }
+
+    public string? DeleteReason { get; init; }
+
+    public DateTimeOffset? PurgedAt { get; init; }
 }
 
 public sealed record DocumentModelDrawingRelation(

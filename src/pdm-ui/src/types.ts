@@ -129,7 +129,7 @@ export interface ProjectPlanTemplate {
   createdAt: string
   updatedBy: string
   updatedAt: string
-  rowVersion: number
+  rowVersion?: number
 }
 
 export interface ProjectPlanTask {
@@ -543,6 +543,7 @@ export interface ManagedDocument {
   kind: DocumentKind
   state: string | number
   revision: string
+  rowVersion?: number
   storedVersionCount?: number
   checkedOutBy?: string
   checkedOutAt?: string
@@ -552,6 +553,19 @@ export interface ManagedDocument {
   checkoutReleaseRequestedBy?: string
   checkoutReleaseRequestedAt?: string
   updatedAt?: string
+  deletedAt?: string
+  deletedBy?: string
+  deleteReason?: string
+  purgedAt?: string
+}
+
+export interface ControlledDocumentRecycleReadiness {
+  document: ManagedDocument
+  canRecycle: boolean
+  blockers: string[]
+  storedVersionCount: number
+  whereUsedCount: number
+  restoreDeadline?: string
 }
 
 export interface ProjectFileVersion {

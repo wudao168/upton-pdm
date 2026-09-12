@@ -13,12 +13,19 @@ const emit = defineEmits<{ changed: [] }>()
 const loading = ref(false)
 const saving = ref(false)
 const configuring = ref(false)
+const materialSearchLoading = ref(false)
 const relations = ref<MaterialRelationTemplate[]>([])
 const materials = ref<PdmMaterial[]>([])
+const materialSearchResults = ref<PdmMaterial[]>([])
 const draft = reactive<{ changeNote: string; expectedRevisionRowVersion: number | null; groups: DraftGroup[] }>({ changeNote: '', expectedRevisionRowVersion: null, groups: [] })
+let materialSearchRequest = 0
 
 const relation = computed(() => relations.value.find(item => item.mainMaterialId === props.mainMaterial.id))
-const approvedMaterials = computed(() => materials.value.filter(item => item.approvalStatus === 'Approved' && !item.isArchived && item.id !== props.mainMaterial.id))
+const selectedMaterialIds = computed(() => new Set(draft.groups.flatMap(group => group.options.map(option => option.materialId).filter(Boolean))))
+const approvedMaterials = computed(() => {
+  const visibleIds = new Set([...materialSearchResults.value.map(item => item.id), ...selectedMaterialIds.value])
+  return materials.value.filter(item => visibleIds.has(item.id) && item.approvalStatus === 'Approved' && !item.isArchived && item.id !== props.mainMaterial.id)
+})
 const materialById = computed(() => new Map(materials.value.map(item => [item.id, item])))
 const canConfigure = computed(() => props.canManage && props.mainMaterial.approvalStatus === 'Approved' && !props.mainMaterial.isArchived)
 const visibleRevision = computed(() => relation.value?.draftRevision ?? relation.value?.publishedRevision)
@@ -68,17 +75,38 @@ function loadDraft(item?: MaterialRelationTemplate) {
 async function load() {
   loading.value = true
   try {
-    const [relationRows, materialRows] = await Promise.all([
-      listMaterialRelationTemplates(props.token, props.canManage || props.canPublish),
-      listMaterials(props.token, '', false, 1000),
+    const relationRows = await listMaterialRelationTemplates(props.token, props.canManage || props.canPublish)
+    const currentRelation = relationRows.find(item => item.mainMaterialId === props.mainMaterial.id)
+    const revision = currentRelation?.draftRevision ?? currentRelation?.publishedRevision
+    const selectedCodes = [...new Set((revision?.groups ?? []).flatMap(group => group.options.map(option => option.materialCode)).filter(Boolean))]
+    const materialBatches = await Promise.all([
+      listMaterials(props.token, '', false, 100),
+      ...selectedCodes.map(code => listMaterials(props.token, code, false, 20)),
     ])
+    const materialRows = [...new Map(materialBatches.flat().map(item => [item.id, item])).values()]
     relations.value = relationRows
     materials.value = materialRows
-    loadDraft(relationRows.find(item => item.mainMaterialId === props.mainMaterial.id))
+    materialSearchResults.value = materialBatches[0]
+    loadDraft(currentRelation)
   } catch (error) {
     ElMessage.error(error instanceof Error ? error.message : '关联物料加载失败')
   } finally {
     loading.value = false
+  }
+}
+
+async function searchMaterialOptions(query: string) {
+  const request = ++materialSearchRequest
+  materialSearchLoading.value = true
+  try {
+    const rows = await listMaterials(props.token, query, false, 100)
+    if (request !== materialSearchRequest) return
+    materials.value = [...new Map([...materials.value, ...rows].map(item => [item.id, item])).values()]
+    materialSearchResults.value = rows
+  } catch (error) {
+    if (request === materialSearchRequest) ElMessage.error(error instanceof Error ? error.message : '候选物料搜索失败')
+  } finally {
+    if (request === materialSearchRequest) materialSearchLoading.value = false
   }
 }
 
@@ -180,7 +208,7 @@ async function publish() {
         <div class="material-relation-option-table">
           <div class="material-relation-option-head"><span>料号</span><span>名称</span><span>型号</span><span>备注</span><span>数量计算</span><span>每套数量</span><span>优先推荐</span><span>操作</span></div>
           <div v-for="(option, optionIndex) in group.options" :key="optionIndex" class="material-relation-option-row">
-            <el-select v-model="option.materialId" filterable popper-class="material-relation-material-popper" :disabled="!canManage" placeholder="输入料号搜索">
+            <el-select v-model="option.materialId" filterable remote :remote-method="searchMaterialOptions" :loading="materialSearchLoading" popper-class="material-relation-material-popper" :disabled="!canManage" placeholder="输入料号或型号搜索">
               <el-option v-for="item in approvedMaterials" :key="item.id" :value="item.id" :label="item.materialCode">
                 <span class="material-relation-select-option"><b>{{ item.materialCode }}</b><span>{{ item.name || '—' }}</span><span>{{ item.specification || '—' }}</span><span>{{ item.remark || '—' }}</span></span>
               </el-option>

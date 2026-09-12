@@ -27,7 +27,7 @@ const review: DrawingReviewPackage = {
     drawingRevision: 'W1',
     drawingSha256: 'B'.repeat(64),
     drawingCreatedBy: 'drawing-designer',
-    modelState: 'Pending',
+    modelState: 'NotRequired',
     drawingState: 'Pending',
     effectiveModelVersionId: 'model-version-1',
     effectiveDrawingVersionId: 'drawing-version-1',
@@ -51,13 +51,13 @@ const candidate: DrawingReviewCandidate = {
 }
 
 describe('DrawingReviewPanel', () => {
-  it('在图档侧栏中禁止自审，并把批注保存到切换后的2D图档', async () => {
+  it('在2D图纸侧栏中禁止自审，并把批注保存到当前2D图档', async () => {
     const wrapper = mount(DrawingReviewPanel, {
       props: {
         packageId: review.id,
         packages: [review],
-        selectedDocumentId: 'model-1',
-        currentUsername: 'designer',
+        selectedDocumentId: 'drawing-1',
+        currentUsername: 'drawing-designer',
         ...permissions,
       },
     })
@@ -65,11 +65,7 @@ describe('DrawingReviewPanel', () => {
     expect(wrapper.text()).toContain('当前版本由你生成，系统禁止审核自己的图。')
     expect(wrapper.findAll('.drawing-review-decision-buttons button').every(button => button.attributes('disabled') !== undefined)).toBe(true)
 
-    await wrapper.findAll('.drawing-review-target-switch button')[1].trigger('click')
-    expect(wrapper.emitted('selectDocument')?.[0]).toEqual(['drawing-1'])
-    await wrapper.setProps({ selectedDocumentId: 'drawing-1' })
-
-    expect(wrapper.text()).not.toContain('当前版本由你生成，系统禁止审核自己的图。')
+    await wrapper.setProps({ currentUsername: 'reviewer' })
     expect(wrapper.findAll('.drawing-review-decision-buttons button').every(button => button.attributes('disabled') === undefined)).toBe(true)
     expect(wrapper.get('.drawing-review-markup-form select').text()).toContain('必须整改')
     expect(wrapper.get('.drawing-review-markup-form select').text()).toContain('优化建议')
@@ -85,14 +81,14 @@ describe('DrawingReviewPanel', () => {
     }])
   })
 
-  it('精简图档信息并把审核结论放在3D和2D切换上方', () => {
+  it('精简2D图档信息并把审核结论放在状态上方', () => {
     const reviewWithMarkups: DrawingReviewPackage = {
       ...review,
       markups: [{
         id: 'markup-1',
         packageId: review.id,
         itemId: review.items[0]!.id,
-        target: 'Model3D',
+        target: 'Drawing2D',
         text: '检查孔位',
         severity: 'Blocking',
         state: 'Open',
@@ -104,7 +100,7 @@ describe('DrawingReviewPanel', () => {
       props: {
         packageId: reviewWithMarkups.id,
         packages: [reviewWithMarkups],
-        selectedDocumentId: 'model-1',
+        selectedDocumentId: 'drawing-1',
         currentUsername: 'reviewer',
         ...permissions,
       },
@@ -124,8 +120,8 @@ describe('DrawingReviewPanel', () => {
       props: {
         packageId: review.id,
         packages: [review],
-        selectedDocumentId: 'model-1',
-        currentUsername: 'designer',
+        selectedDocumentId: 'drawing-1',
+        currentUsername: 'drawing-designer',
         allowSelfReview: true,
         ...permissions,
       },
@@ -136,7 +132,7 @@ describe('DrawingReviewPanel', () => {
     expect(wrapper.findAll('.drawing-review-decision-buttons button').every(button => button.attributes('disabled') === undefined)).toBe(true)
   })
 
-  it('没有审核单时从图档侧栏选择范围后发起双审', async () => {
+  it('没有审核单时从图档侧栏选择非标2D范围后发起审核', async () => {
     const wrapper = mount(DrawingReviewPanel, {
       props: { packageId: '', packages: [], candidates: [candidate], selectedDocumentId: 'model-1', currentUsername: 'designer', ...permissions },
     })
@@ -179,7 +175,7 @@ describe('DrawingReviewPanel', () => {
       bomKinds: ['NonStandard'],
       modelRevision: '—',
       state: 'Unavailable',
-      reason: '非标BOM没有来源3D模型，必须补齐3D及唯一2D工程图关系',
+      reason: '非标BOM没有来源模型，无法定位唯一2D工程图',
       selectable: false,
     }
     const wrapper = mount(DrawingReviewPanel, {
@@ -191,25 +187,22 @@ describe('DrawingReviewPanel', () => {
     const blockedRow = wrapper.get('.drawing-review-candidate.is-unavailable')
     expect(blockedRow.attributes('disabled')).toBeDefined()
     expect(blockedRow.text()).toContain('02040000005')
-    expect(blockedRow.text()).toContain('没有来源3D模型')
-    expect(wrapper.get('.drawing-review-scope__footer').text()).toContain('已选择 1 组')
+    expect(blockedRow.text()).toContain('没有来源模型')
+    expect(wrapper.get('.drawing-review-scope__footer').text()).toContain('已选择 1 张')
   })
 
-  it('按BOM分类选择范围，并允许手工重新选择已审核版本', async () => {
+  it('默认只选待审图纸，并允许手工重新选择已审核版本', async () => {
     const candidates: DrawingReviewCandidate[] = [
       candidate,
-      { ...candidate, candidateId: 'standard-candidate', modelDocumentId: 'standard-model', drawingDocumentId: 'standard-drawing', drawingNumber: 'STD-200', bomKinds: ['Standard'] },
+      { ...candidate, candidateId: 'second-candidate', modelDocumentId: 'second-model', drawingDocumentId: 'second-drawing', drawingNumber: 'NS-200' },
       { ...candidate, candidateId: 'approved-candidate', modelDocumentId: 'approved-model', drawingDocumentId: 'approved-drawing', drawingNumber: 'OLD-100', state: 'ApprovedCurrent', reason: '当前版本已审核，可选择重新审核' },
     ]
     const wrapper = mount(DrawingReviewPanel, {
       props: { packageId: '', packages: [], candidates, selectedDocumentId: 'model-1', currentUsername: 'designer', ...permissions },
     })
     await wrapper.get('.drawing-review-panel__empty button').trigger('click')
+    expect(wrapper.findAll('.drawing-review-candidate.is-selected')).toHaveLength(2)
     await wrapper.findAll('.drawing-review-scope__modes button')[1]!.trigger('click')
-    await wrapper.get('select[aria-label="选择BOM分类"]').setValue('Standard')
-
-    expect(wrapper.get('.drawing-review-candidate.is-selected').text()).toContain('STD-200')
-    await wrapper.findAll('.drawing-review-scope__modes button')[2]!.trigger('click')
     const approved = wrapper.findAll('.drawing-review-candidate').find(button => button.text().includes('OLD-100'))!
     await approved.trigger('click')
     expect(approved.classes()).toContain('is-selected')
@@ -227,7 +220,7 @@ describe('DrawingReviewPanel', () => {
     prompt.mockRestore()
   })
 
-  it('装配体没有工程图时仅显示并统计3D审核', () => {
+  it('历史无工程图审核项不再进入2D审核面板', () => {
     const modelOnlyReview: DrawingReviewPackage = {
       ...review,
       items: [{
@@ -251,9 +244,8 @@ describe('DrawingReviewPanel', () => {
       },
     })
 
-    expect(wrapper.findAll('.drawing-review-target-switch button')).toHaveLength(1)
-    expect(wrapper.get('.drawing-review-target-switch').classes()).toContain('is-single')
-    expect(wrapper.get('.drawing-review-package-summary p').text()).toContain('0/1项完成')
+    expect(wrapper.find('.drawing-review-target-switch').exists()).toBe(false)
+    expect(wrapper.text()).toContain('当前图档未纳入此审核单')
   })
 
   it('可以调节并保存审核栏透明度', async () => {

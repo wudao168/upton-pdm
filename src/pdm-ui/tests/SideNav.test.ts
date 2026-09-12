@@ -1,15 +1,20 @@
-import { mount } from '@vue/test-utils'
-import { describe, expect, it } from 'vitest'
+import { flushPromises, mount } from '@vue/test-utils'
+import ElementPlus from 'element-plus'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import SideNav from '../src/components/SideNav.vue'
 
 describe('SideNav', () => {
-  it('places the project list directly below the project center', async () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    document.body.innerHTML = ''
+  })
+  it('places the project workbench and project list directly below the project center', async () => {
     const wrapper = mount(SideNav, { props: { active: 'project-center' } })
     const navigationLabels = wrapper.findAll('.pdm-sidebar__nav .pdm-nav-item').map(item => item.text().trim())
 
-    expect(navigationLabels.slice(0, 2)).toEqual(['项目中心', '项目列表'])
+    expect(navigationLabels.slice(0, 3)).toEqual(['项目中心', '项目工作台', '项目列表'])
     await wrapper.findAll('.pdm-sidebar__nav .pdm-nav-item')[1]!.trigger('click')
-    expect(wrapper.emitted('navigate')?.[0]).toEqual(['projects', '项目列表'])
+    expect(wrapper.emitted('navigate')?.[0]).toEqual(['project-workbench', '项目工作台'])
   })
 
   it('hides material management without material view permission', () => {
@@ -29,14 +34,14 @@ describe('SideNav', () => {
     const wrapper = mount(SideNav, { props: { active: 'materials', canViewStandardLibrary: true, canViewMaterials: true } })
     const labels = wrapper.findAll('.pdm-sidebar__nav .pdm-nav-item').map(item => item.text().trim())
 
-    expect(labels.slice(2, 5)).toEqual(['标准物料', '标准结构', '料品管理'])
-    await wrapper.findAll('.pdm-sidebar__nav .pdm-nav-item')[3]!.trigger('click')
+    expect(labels.slice(3, 6)).toEqual(['标准物料', '标准结构', '料品管理'])
+    await wrapper.findAll('.pdm-sidebar__nav .pdm-nav-item')[4]!.trigger('click')
     expect(wrapper.emitted('navigate')?.[0]).toEqual(['standard-structure', '标准结构'])
   })
 
   it('shows the combined material task count on material management', () => {
     const wrapper = mount(SideNav, { props: { active: 'projects', materialCount: 3, canViewMaterials: true } })
-    const materialItem = wrapper.findAll('.pdm-sidebar__nav .pdm-nav-item')[2]!
+    const materialItem = wrapper.findAll('.pdm-sidebar__nav .pdm-nav-item')[3]!
 
     expect(materialItem.text()).toContain('料品管理')
     expect(materialItem.get('em').text()).toBe('3')
@@ -72,5 +77,23 @@ describe('SideNav', () => {
     expect(wrapper.get('.pdm-sidebar').classes()).toContain('is-collapsed')
     expect(wrapper.get('.pdm-nav-item[aria-label="料品管理"]').attributes('title')).toBe('料品管理')
     expect(wrapper.get('.pdm-sidebar__settings').attributes('title')).toBe('系统管理')
+  })
+
+  it('opens detailed runtime information when the version is clicked', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({ database: 'MySql', databaseName: 'pdm' }), { status: 200 })))
+    const wrapper = mount(SideNav, {
+      props: { active: 'projects', version: '2026.09.12.1710-version-information' },
+      global: { plugins: [ElementPlus] },
+    })
+
+    await wrapper.get('.pdm-sidebar__version').trigger('click')
+    await flushPromises()
+
+    expect(document.body.textContent).toContain('系统版本信息')
+    expect(document.body.textContent).toContain('V2026.09.12.1710')
+    expect(document.body.textContent).toContain('2026-09-12 17:10')
+    expect(document.body.textContent).toContain('MySql · pdm')
+    expect(document.body.textContent).toContain('增加网页端、Windows 客户端及 SolidWorks 插件端版本信息。')
+    expect(fetch).toHaveBeenCalledWith('/health', { cache: 'no-store' })
   })
 })

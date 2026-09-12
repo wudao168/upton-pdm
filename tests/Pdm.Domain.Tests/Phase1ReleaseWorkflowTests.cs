@@ -1729,20 +1729,15 @@ public sealed class Phase1ReleaseWorkflowTests
         var review = await workflow.CreateDrawingReviewPackageAsync(ProjectId, "submitter", UserRole.Administrator, default);
         var item = Assert.Single(review.Items);
         review = await workflow.DecideDrawingReviewTargetAsync(review.Id, item.Id,
-            new DecideDrawingReviewTargetCommand(DrawingReviewTarget.Model3D, DrawingReviewDecision.Approve, "3D通过"),
-            "model-reviewer", UserRole.Administrator, default);
-        review = await workflow.DecideDrawingReviewTargetAsync(review.Id, item.Id,
             new DecideDrawingReviewTargetCommand(DrawingReviewTarget.Drawing2D, DrawingReviewDecision.Approve, "2D通过"),
             "drawing-reviewer", UserRole.Administrator, default);
 
-        foreach (var request in (await repository.ListCadPropertyWritebacksAsync(ProjectId, default)).OrderBy(request => request.SourceDocumentId))
-        {
-            await workflow.StartCadPropertyWritebackAsync(request.Id, "cad-client", UserRole.Administrator, default);
-            var result = await CheckInAsync(repository, request.SourceDocumentId, "cad-client", request.Properties,
-                request.SourceDocumentId == model.Id ? 'C' : 'D', request.Id);
-            await workflow.CompleteCadPropertyWritebackAsync(request.Id, Assert.IsType<DocumentVersion>(result.Version).Id,
-                "cad-client", UserRole.Administrator, default);
-        }
+        var request = Assert.Single(await repository.ListCadPropertyWritebacksAsync(ProjectId, default));
+        Assert.Equal(drawing.Id, request.SourceDocumentId);
+        await workflow.StartCadPropertyWritebackAsync(request.Id, "cad-client", UserRole.Administrator, default);
+        var result = await CheckInAsync(repository, request.SourceDocumentId, "cad-client", request.Properties, 'D', request.Id);
+        await workflow.CompleteCadPropertyWritebackAsync(request.Id, Assert.IsType<DocumentVersion>(result.Version).Id,
+            "cad-client", UserRole.Administrator, default);
 
         Assert.Equal(DrawingReviewPackageState.Approved,
             (await repository.FindDrawingReviewPackageAsync(review.Id, default))?.State);

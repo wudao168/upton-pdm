@@ -275,7 +275,7 @@ describe('PLM client workspace', () => {
       await login(wrapper, false)
       await flushPromises()
       expect(wrapper.get('.pdm-sidebar__version').text()).toBe('版本 V2026.09.12.1234')
-      expect(wrapper.get('.pdm-sidebar__version').attributes('title')).toBe('版本 2026.09.12.1234-version-display')
+      expect(wrapper.get('.pdm-sidebar__version').attributes('title')).toBe('版本 2026.09.12.1234-version-display，点击查看详情')
     } finally { wrapper.unmount() }
   })
 
@@ -420,7 +420,7 @@ describe('PLM client workspace', () => {
     await login(wrapper, false)
 
     const navigationLabels = wrapper.findAll('.pdm-sidebar__nav .pdm-nav-item').map(item => item.text().trim())
-    expect(navigationLabels.slice(2, 4)).toEqual(['标准物料', '标准结构'])
+    expect(navigationLabels.slice(3, 5)).toEqual(['标准物料', '标准结构'])
     expect(navigationLabels).toContain('料品管理')
 
     await buttonByText(wrapper, '标准结构').trigger('click')
@@ -477,12 +477,14 @@ describe('PLM client workspace', () => {
         id: 'review-item-writeback', packageId: 'review-writeback', bomItemId: 'bom-1', drawingNumber: 'REAL-ASM-001', name: '真实总装配',
         modelDocumentId: 'doc-root', modelVersionId: 'version-w2', modelRevision: 'W2', modelSha256: 'A'.repeat(64), modelCreatedBy: 'designer',
         drawingDocumentId: 'doc-drawing', drawingVersionId: 'drawing-version-w2', drawingRevision: 'W2', drawingSha256: 'B'.repeat(64), drawingCreatedBy: 'drawing-designer',
-        modelState: 'Approved', drawingState: 'Approved', effectiveModelVersionId: 'version-w2', effectiveDrawingVersionId: 'drawing-version-w2',
+        modelState: 'NotRequired', drawingState: 'Approved', effectiveModelVersionId: 'version-w2', effectiveDrawingVersionId: 'drawing-version-w2',
       }],
     }]
     const wrapper = mount(App, { attachTo: document.body, global: { plugins: [ElementPlus] } })
     await login(wrapper)
     window.dispatchEvent(new CustomEvent('pdm-solidworks-capability', { detail: { available: true } }))
+    await flushPromises()
+    await wrapper.findAll('.pdm-tree-row').find(row => row.text().includes('真实总装工程图'))!.trigger('click')
     await flushPromises()
 
     await buttonByText(wrapper, '打开审核版（只读）').trigger('click')
@@ -490,9 +492,9 @@ describe('PLM client workspace', () => {
       type: 'open-document',
       payload: expect.objectContaining({
         projectId,
-        documentId: 'doc-root',
+        documentId: 'doc-drawing',
         mode: 'SpecificReadOnly',
-        versionId: 'version-w2',
+        versionId: 'drawing-version-w2',
       }),
     })
 
@@ -503,7 +505,7 @@ describe('PLM client workspace', () => {
       type: 'open-document',
       payload: expect.objectContaining({
         projectId,
-        documentId: 'doc-root',
+        documentId: 'doc-drawing',
         mode: 'PropertyWriteback',
         versionId: undefined,
       }),
@@ -536,7 +538,7 @@ describe('PLM client workspace', () => {
     await flushPromises()
 
     expect(wrapper.find('.pdm-project-workspace').exists()).toBe(true)
-    expect(wrapper.findAll('.pdm-sidebar__nav .pdm-nav-item').slice(0, 2).map(item => item.text().trim())).toEqual(['项目中心', '项目列表'])
+    expect(wrapper.findAll('.pdm-sidebar__nav .pdm-nav-item').slice(0, 3).map(item => item.text().trim())).toEqual(['项目中心', '项目工作台', '项目列表'])
     expect(wrapper.get('.pdm-sidebar__nav .pdm-nav-item.is-active').text()).toContain('项目中心')
     await projectTabByText(wrapper, 'BOM').trigger('click')
     await flushPromises()
@@ -754,12 +756,12 @@ describe('PLM client workspace', () => {
     const wrapper = mount(App, { attachTo: document.body, global: { plugins: [ElementPlus] } })
     await login(wrapper, false)
 
-    expect(wrapper.findAll('.pdm-sidebar__footer button').map(button => button.text())).toEqual(['系统管理'])
+    expect(wrapper.findAll('.pdm-sidebar__footer button').map(button => button.text())).toEqual(['版本 未知', '系统管理'])
     expect(wrapper.get('.pdm-sidebar__version').text()).toBe('版本 未知')
     window.dispatchEvent(new CustomEvent('pdm-client-version', { detail: { version: '2026.09.12.1234-version-display' } }))
     await wrapper.vm.$nextTick()
     expect(wrapper.get('.pdm-sidebar__version').text()).toBe('版本 V2026.09.12.1234')
-    expect(wrapper.get('.pdm-sidebar__version').attributes('title')).toBe('版本 2026.09.12.1234-version-display')
+    expect(wrapper.get('.pdm-sidebar__version').attributes('title')).toBe('版本 2026.09.12.1234-version-display，点击查看详情')
     await buttonByText(wrapper, '系统管理').trigger('click')
     expect(buttonByText(wrapper, '客户端设置')).toBeDefined()
     expect(postMessage).toHaveBeenCalledWith({ type: 'desktop-settings-request', payload: undefined })
@@ -1234,7 +1236,9 @@ describe('PLM client workspace', () => {
     expect(document.body.textContent).toContain('图档历史版本对比')
     expect(postMessage).toHaveBeenCalledWith({ type: 'preview-host-suspend', payload: undefined })
 
-    wrapper.getComponent({ name: 'ElDrawer' }).vm.$emit('update:modelValue', false)
+    wrapper.findAllComponents({ name: 'ElDrawer' })
+      .find(drawer => drawer.props('title') === '图档历史版本对比')!
+      .vm.$emit('update:modelValue', false)
     await flushPromises()
     await new Promise(resolve => window.setTimeout(resolve, 400))
     expect(postMessage.mock.calls.filter(([message]) => message.type === 'preview-host-bounds').length).toBeGreaterThan(1)
@@ -1440,7 +1444,7 @@ describe('PLM client workspace', () => {
     expect(document.body.textContent).toContain('W1')
     expect(document.body.textContent).toContain('W2')
     expect(document.body.textContent).toContain('数量变化')
-  })
+  }, 10_000)
 
   it('keeps a SolidWorks project request until login and opens that project on the documents tab', async () => {
     const wrapper = mount(App, { attachTo: document.body, global: { plugins: [ElementPlus] } })

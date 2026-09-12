@@ -12,6 +12,7 @@ public static class PermissionCodes
     public const string ProjectDesignerAssign = "project.designer.assign";
     public const string ProjectContentView = "project.content.view";
     public const string DocumentEdit = "document.edit";
+    public const string DocumentRecycle = "document.recycle";
     public const string DocumentLockRequestRelease = "document.lock.request-release";
     public const string DocumentLockForceRelease = "document.lock.force-release";
     public const string BomEdit = "bom.edit";
@@ -58,6 +59,7 @@ public static class RolePermissionCatalog
         new(PermissionCodes.ProjectDesignerAssign, "分配执行工程师", "项目分工", "事业部负责人、机械主管、当前项目经理或主设可在本人负责范围内配置。"),
         new(PermissionCodes.ProjectContentView, "查看项目图档与业务内容", "项目内容", "拥有此权限的角色可查看所属公司内项目的图档、BOM、发布和版本内容。"),
         new(PermissionCodes.DocumentEdit, "登记、签出和存档图档", "项目内容", Sensitive: true),
+        new(PermissionCodes.DocumentRecycle, "管理受控图档回收站", "项目内容", "将未发布且无受控引用的图档移入回收站，并可在30天内恢复；已发布图档只能作废。", Sensitive: true),
         new(PermissionCodes.DocumentLockRequestRelease, "催办并申请释放编辑权限", "项目内容"),
         new(PermissionCodes.DocumentLockForceRelease, "强制释放超时编辑权限", "项目内容", "仅限本人负责项目，系统管理员不受项目岗位限制。", Sensitive: true),
         new(PermissionCodes.BomEdit, "维护项目BOM", "项目内容"),
@@ -65,9 +67,9 @@ public static class RolePermissionCatalog
         new(PermissionCodes.ValidationCatalogManage, "管理验证检查项库", "标准库", "维护全局验证分类和检查项；已被项目引用的内容只能停用，不能删除。", Sensitive: true),
         new(PermissionCodes.MaterialView, "查看料品管理", "料品管理", "查看料品主档、审批状态和U9C同步结果。"),
         new(PermissionCodes.MaterialManage, "维护料品主档", "料品管理", "新增、修改、批准、停用或删除料品，并执行U9C料品同步。", Sensitive: true),
-        new(PermissionCodes.DrawingReviewSubmit, "发起图纸审核", "图纸审核", "按当前非标件BOM冻结3D和2D图档版本。", Sensitive: true),
+        new(PermissionCodes.DrawingReviewSubmit, "发起图纸审核", "图纸审核", "按当前非标件BOM冻结唯一关联的2D工程图版本。", Sensitive: true),
         new(PermissionCodes.DrawingReviewAnnotate, "添加和处理图纸批注", "图纸审核"),
-        new(PermissionCodes.DrawingReviewDecide, "审核3D和2D图纸", "图纸审核", "设计者不能审核自己生成的图档版本。", Sensitive: true),
+        new(PermissionCodes.DrawingReviewDecide, "审核2D图纸", "图纸审核", "设计者不能审核自己生成的2D图纸版本。", Sensitive: true),
         new(PermissionCodes.ReleaseManage, "创建并提交发布包", "审批发布", Sensitive: true),
         new(PermissionCodes.ApprovalDecide, "处理发布审批", "审批发布", Sensitive: true),
         new(PermissionCodes.ApprovalEmergencySubstitute, "紧急代批当前节点", "审批发布", "仅在紧急情况下替代当前审批人，必须填写原因，后续节点仍正常流转。", Sensitive: true),

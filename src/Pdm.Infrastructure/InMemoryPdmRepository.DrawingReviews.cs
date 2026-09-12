@@ -20,9 +20,7 @@ public sealed partial class InMemoryPdmRepository
         {
             return Task.FromResult<IReadOnlySet<Guid>>(drawingReviewPackages.Values
                 .Where(package => package.ProjectId == projectId && IsActiveDrawingReview(package))
-                .SelectMany(package => package.Items.SelectMany(item => item.DrawingDocumentId.HasValue
-                    ? new[] { item.ModelDocumentId, item.DrawingDocumentId.Value }
-                    : new[] { item.ModelDocumentId }))
+                .SelectMany(package => package.Items.Where(item => item.DrawingDocumentId.HasValue).Select(item => item.DrawingDocumentId!.Value))
                 .ToHashSet());
         }
     }
@@ -54,9 +52,7 @@ public sealed partial class InMemoryPdmRepository
         lock (gate)
         {
             var documentIds = package.Items
-                .SelectMany(item => item.DrawingDocumentId.HasValue
-                    ? new[] { item.ModelDocumentId, item.DrawingDocumentId.Value }
-                    : new[] { item.ModelDocumentId })
+                .Select(item => item.DrawingDocumentId ?? throw new PdmRuleException("非标件缺少唯一关联的2D工程图。"))
                 .Distinct()
                 .ToArray();
             if (documentIds.Any(documentId => !documents.TryGetValue(documentId, out var document) || !string.IsNullOrWhiteSpace(document.CheckedOutBy)))
@@ -94,7 +90,7 @@ public sealed partial class InMemoryPdmRepository
 
     private bool IsDocumentUnderActiveDrawingReview(Guid documentId) => drawingReviewPackages.Values.Any(package =>
         IsActiveDrawingReview(package)
-        && package.Items.Any(item => item.ModelDocumentId == documentId || item.DrawingDocumentId == documentId));
+        && package.Items.Any(item => item.DrawingDocumentId == documentId));
 
     private bool IsActiveDrawingReviewWriteback(Guid documentId, Guid writebackId) =>
         cadPropertyWritebacks.TryGetValue(writebackId, out var writeback)
@@ -177,12 +173,10 @@ public sealed partial class InMemoryPdmRepository
                 throw new PdmNotFoundException("图纸审核单不存在。");
             var byItem = requests.ToDictionary(request => request.ItemId);
             if (byItem.Count != package.Items.Count || package.Items.Any(item => !byItem.ContainsKey(item.Id)))
-                throw new PdmRuleException("图纸审核属性写回必须同时覆盖审核单中的全部3D和2D图档。");
+                throw new PdmRuleException("图纸审核属性写回必须覆盖审核单中的全部2D图纸。");
             foreach (var request in requests)
             {
-                cadPropertyWritebacks[request.Model.Id] = request.Model;
-                if (request.Drawing is not null)
-                    cadPropertyWritebacks[request.Drawing.Id] = request.Drawing;
+                cadPropertyWritebacks[request.Drawing.Id] = request.Drawing;
             }
             package = package with
             {
@@ -190,9 +184,9 @@ public sealed partial class InMemoryPdmRepository
                 Items = package.Items.Select(item =>
                 {
                     var request = byItem[item.Id];
-                    if (item.RequiresDrawingReview != (request.Drawing is not null))
+                    if (!item.RequiresDrawingReview || item.DrawingState != DrawingReviewTargetState.Approved)
                         throw new PdmRuleException("图纸审核属性写回与审核目标不一致。");
-                    return item with { ModelWritebackId = request.Model.Id, DrawingWritebackId = request.Drawing?.Id };
+                    return item with { DrawingWritebackId = request.Drawing.Id };
                 }).ToArray()
             };
             drawingReviewPackages[package.Id] = package;
@@ -214,8 +208,7 @@ public sealed partial class InMemoryPdmRepository
                     return succeeded ? item with { DrawingState = DrawingReviewTargetState.Marked, DrawingResultVersionId = resultVersionId } : item;
                 return item;
             }).ToArray();
-            var approved = succeeded && items.All(item => item.ModelState == DrawingReviewTargetState.Marked
-                && item.DrawingState is DrawingReviewTargetState.Marked or DrawingReviewTargetState.NotRequired);
+            var approved = succeeded && items.All(item => item.DrawingState is DrawingReviewTargetState.Marked or DrawingReviewTargetState.NotRequired);
             package = package with
             {
                 Items = items,

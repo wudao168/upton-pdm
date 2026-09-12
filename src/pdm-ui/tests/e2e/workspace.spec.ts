@@ -120,6 +120,7 @@ test.beforeEach(async ({ page }) => {
     if (path === `/api/projects/${projectId}/audit`) return fulfill([])
     if (path === `/api/projects/${projectId}/drawing-reviews`) return fulfill([])
     if (path === `/api/projects/${projectId}/drawing-review-candidates`) return fulfill([])
+    if (path === `/api/projects/${projectId}/files`) return fulfill([])
     if (path === `/api/projects/${projectId}/folders`) return fulfill([
       { id: 'folder-root', rootProjectId: projectId, parentFolderId: null, targetProjectId: projectId, folderKey: 'root', templateKey: 'root', name: 'PRJ-REAL-001', purpose: 0, sortOrder: 0, isSystem: true, inheritPermissions: true, effectiveAccess: 127, permissions: [] },
       { id: 'folder-mechanical', rootProjectId: projectId, parentFolderId: 'folder-root', targetProjectId: null, folderKey: 'mechanical', templateKey: 'mechanical', name: '机械图纸', purpose: 1, sortOrder: 10, isSystem: true, inheritPermissions: true, effectiveAccess: 15, permissions: [] },

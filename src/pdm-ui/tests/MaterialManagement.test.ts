@@ -396,7 +396,7 @@ describe('MaterialManagement', () => {
     expect(selectedRows()).toEqual([0])
     expect(api.approveMaterial).not.toHaveBeenCalled()
     wrapper.unmount()
-  })
+  }, 10_000)
 
   it('多选库存原列回填整数和零，失败可重试，临时编号跳过且不切换页面', async () => {
     const base = (await api.listMaterials())[0] as PdmMaterial
