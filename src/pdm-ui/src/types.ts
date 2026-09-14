@@ -568,6 +568,36 @@ export interface ControlledDocumentRecycleReadiness {
   restoreDeadline?: string
 }
 
+export interface ControlledDocumentRecycleBatchResult {
+  recycledDocumentIds: string[]
+  failures: Array<{ documentId: string; reason: string }>
+}
+
+export interface ProjectContentResetSnapshotSummary {
+  id: string
+  projectId: string
+  projectCode: string
+  includedProjectIds: string[]
+  reason: string
+  counts: Record<string, number>
+  createdBy: string
+  createdAt: string
+  expiresAt: string
+  restoredBy?: string
+  restoredAt?: string
+  purgedAt?: string
+}
+
+export interface ProjectContentResetReadiness {
+  project: ProjectSummary
+  includeChildren: boolean
+  includedProjects: ProjectSummary[]
+  canReset: boolean
+  blockers: string[]
+  counts: Record<string, number>
+  restorableSnapshots: ProjectContentResetSnapshotSummary[]
+}
+
 export interface ProjectFileVersion {
   id: string
   projectFileId: string
@@ -874,7 +904,7 @@ export interface ReleaseItemComment {
   createdAt: string
 }
 
-export type ReleaseScope = 'LegacyCombined' | 'StandardLongLead' | 'StandardFormal' | 'StandardSupplement' | 'ElectricalFormal' | 'ElectricalSupplement' | 'NonStandardWithDrawing'
+export type ReleaseScope = 'LegacyCombined' | 'StandardLongLead' | 'StandardFormal' | 'StandardSupplement' | 'ElectricalFormal' | 'ElectricalSupplement' | 'NonStandardWithDrawing' | 'NonStandardLongLead' | 'NonStandardSupplement'
 
 export interface CreateReleasePackageInput {
   changeReason: string
@@ -2213,6 +2243,7 @@ export interface ProjectValidationPlanItem {
   informationSource?: string | null
   validationDate?: string | null
   result?: string | null
+  reviewer?: string | null
   responsiblePerson?: string | null
   remark?: string | null
   sortOrder: number
@@ -2374,6 +2405,7 @@ export interface SaveProjectValidationPlanInput {
     informationSource?: string | null
     validationDate?: string | null
     result?: string | null
+    reviewer?: string | null
     responsiblePerson?: string | null
     remark?: string | null
     sortOrder: number

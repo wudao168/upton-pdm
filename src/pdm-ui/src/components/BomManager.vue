@@ -542,23 +542,27 @@ const canRestoreSourceSelected = computed(() => selectedRows.value.length > 0
 const filtersActive = computed(() => !!searchQuery.value.trim() || kindFilter.value !== 'All' || !!brandFilter.value || !!materialFilter.value || showPendingOnly.value || comparisonFilter.value !== 'All')
 const allowedReleaseScopes = computed<Array<Exclude<ReleaseScope, 'LegacyCombined'>>>(() => kind.value === 'Standard'
   ? ['StandardLongLead', 'StandardFormal', 'StandardSupplement']
-  : kind.value === 'NonStandard' ? ['NonStandardWithDrawing']
+  : kind.value === 'NonStandard' ? ['NonStandardLongLead', 'NonStandardWithDrawing', 'NonStandardSupplement']
     : kind.value === 'Electrical' ? ['ElectricalFormal', 'ElectricalSupplement'] : [])
-const hasPublishedStandardFormal = computed(() => props.releasePackages.some(item => item.scope === 'StandardFormal' && item.state === '已发布'))
+const hasPublishedFormal = computed(() => props.releasePackages.some(item => item.scope === (kind.value === 'NonStandard' ? 'NonStandardWithDrawing' : 'StandardFormal') && item.state === '已发布'))
 const createReleaseScopes = computed<Array<Exclude<ReleaseScope, 'LegacyCombined'>>>(() =>
-  kind.value === 'Standard' && hasPublishedStandardFormal.value
-    ? ['StandardSupplement']
+  (kind.value === 'Standard' || kind.value === 'NonStandard') && hasPublishedFormal.value
+    ? [kind.value === 'NonStandard' ? 'NonStandardSupplement' : 'StandardSupplement']
     : allowedReleaseScopes.value)
 const preferredReleaseScope = computed<Exclude<ReleaseScope, 'LegacyCombined'> | undefined>(() => {
-  if (kind.value !== 'Standard') return undefined
-  if (hasPublishedStandardFormal.value) return 'StandardSupplement'
-  return props.releasePackages.some(item => item.scope === 'StandardLongLead' && item.state === '已发布')
-    ? 'StandardFormal'
-    : 'StandardLongLead'
+  if (kind.value === 'Standard') {
+    if (hasPublishedFormal.value) return 'StandardSupplement'
+    return props.releasePackages.some(item => item.scope === 'StandardLongLead' && item.state === '已发布') ? 'StandardFormal' : 'StandardLongLead'
+  }
+  if (kind.value === 'NonStandard') {
+    if (hasPublishedFormal.value) return 'NonStandardSupplement'
+    return props.releasePackages.some(item => item.scope === 'NonStandardLongLead' && item.state === '已发布') ? 'NonStandardWithDrawing' : 'NonStandardLongLead'
+  }
+  return undefined
 })
 const publishedLongLeadItems = computed(() => props.releasePackages
-  .filter(item => item.scope === 'StandardLongLead' && item.state === '已发布')
-  .flatMap(item => item.standardBomSnapshot))
+  .filter(item => item.scope === (kind.value === 'NonStandard' ? 'NonStandardLongLead' : 'StandardLongLead') && item.state === '已发布')
+  .flatMap(item => kind.value === 'NonStandard' ? item.nonStandardBomSnapshot : item.standardBomSnapshot))
 const materialReferenceBrandOptions = computed(() => [...new Set(materialReferenceResults.value
   .map(item => item.brand?.trim())
   .filter((brand): brand is string => Boolean(brand)))]
@@ -590,7 +594,7 @@ const selectedReleaseVersionId = computed(() => {
   const release = selectedReleasePackage.value
   if (!release) return undefined
   if (release.scope.startsWith('Electrical')) return release.electricalBomVersionId
-  if (release.scope === 'NonStandardWithDrawing') return release.nonStandardBomVersionId
+  if (release.scope.startsWith('NonStandard')) return release.nonStandardBomVersionId
   return release.standardBomVersionId
 })
 const selectedReleaseVersion = computed(() => props.versions.find(version => version.id === selectedReleaseVersionId.value))
@@ -837,7 +841,7 @@ function comparisonRowTitle(row: EditableBomRow) {
 function releasePackageMatchesKind(releasePackage: ReleasePackageSummary, bomKind: BomView) {
   return bomKind === 'Standard'
     ? ['StandardLongLead', 'StandardFormal', 'StandardSupplement'].includes(releasePackage.scope)
-    : bomKind === 'NonStandard' ? releasePackage.scope === 'NonStandardWithDrawing'
+    : bomKind === 'NonStandard' ? ['NonStandardLongLead', 'NonStandardWithDrawing', 'NonStandardSupplement'].includes(releasePackage.scope)
       : bomKind === 'Electrical' ? ['ElectricalFormal', 'ElectricalSupplement'].includes(releasePackage.scope) : false
 }
 
@@ -2117,7 +2121,7 @@ watch(() => props.requestedReleasePackageId, releasePackageId => {
   const release = props.releasePackages.find(item => item.id === releasePackageId)
   if (!release) return
   kind.value = release.scope.startsWith('Electrical') ? 'Electrical'
-    : release.scope === 'NonStandardWithDrawing' ? 'NonStandard' : 'Standard'
+    : release.scope.startsWith('NonStandard') ? 'NonStandard' : 'Standard'
   openReleaseDrawer(release.id)
   emit('releaseRequestHandled')
 }, { immediate: true })

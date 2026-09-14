@@ -41,6 +41,9 @@ internal sealed class BatchRenamePreviewRow
     public bool CanExecute { get; set; }
 
     [Browsable(false)]
+    public bool IsInformational { get; set; }
+
+    [Browsable(false)]
     public BatchPropertyEditItem Item { get; set; }
 
     [Browsable(false)]
@@ -200,7 +203,7 @@ internal sealed class BatchRenameDialog : Form
         var page = new TabPage("图档文件名改名");
         page.Controls.Add(new Label
         {
-            Text = "只处理已勾选的零件和装配体，扩展名保持不变。工程图及其他类型会在预览中标记为不支持。",
+            Text = "只处理已勾选的零件和装配体，扩展名保持不变。唯一关联的工程图会随模型同步改名并更新引用。",
             Dock = DockStyle.Fill,
             TextAlign = ContentAlignment.MiddleLeft,
             Padding = new Padding(10),
@@ -249,13 +252,18 @@ internal sealed class BatchRenameDialog : Form
         previewGrid.Columns.Add(TextColumn("字段", nameof(BatchRenamePreviewRow.Field), 100));
         previewGrid.Columns.Add(TextColumn("原值", nameof(BatchRenamePreviewRow.CurrentValue), 260));
         previewGrid.Columns.Add(TextColumn("新值", nameof(BatchRenamePreviewRow.NewValue), 260));
-        previewGrid.Columns.Add(TextColumn("状态", nameof(BatchRenamePreviewRow.Status), 190));
+        var statusColumn = TextColumn("状态", nameof(BatchRenamePreviewRow.Status), 320);
+        statusColumn.AutoSizeMode = DataGridViewAutoSizeColumnMode.Fill;
+        statusColumn.MinimumWidth = 320;
+        previewGrid.Columns.Add(statusColumn);
         previewGrid.CellFormatting += (_, eventArgs) =>
         {
             if (eventArgs.RowIndex < 0 || eventArgs.RowIndex >= previewRows.Count) return;
             var row = previewRows[eventArgs.RowIndex];
             previewGrid.Rows[eventArgs.RowIndex].Cells[0].ReadOnly = !row.CanExecute;
-            if (!row.CanExecute && !string.Equals(row.Status, "无变化", StringComparison.Ordinal))
+            if (!row.CanExecute
+                && !row.IsInformational
+                && !string.Equals(row.Status, "无变化", StringComparison.Ordinal))
             {
                 previewGrid.Rows[eventArgs.RowIndex].DefaultCellStyle.ForeColor = Color.FromArgb(190, 55, 55);
             }
@@ -390,7 +398,10 @@ internal sealed class BatchRenameDialog : Form
             var supported = item.OperationItem.Node.Kind == CadDocumentKind.Part
                 || item.OperationItem.Node.Kind == CadDocumentKind.Assembly;
             var changed = !string.Equals(currentBaseName, nextBaseName, StringComparison.OrdinalIgnoreCase);
-            var status = supported ? changed ? "待检查" : "无变化" : "工程图或其他类型不支持";
+            var linkedDrawing = item.OperationItem.Node.Kind == CadDocumentKind.Drawing;
+            var status = supported
+                ? changed ? "待检查" : "无变化"
+                : linkedDrawing ? "由关联模型联动处理" : "其他文件类型不支持";
             BatchDocumentRenameRequest request = null;
             if (supported && changed)
             {
@@ -414,9 +425,28 @@ internal sealed class BatchRenameDialog : Form
                 NewValue = string.Concat(nextBaseName, extension),
                 Status = status,
                 CanExecute = request != null,
+                IsInformational = linkedDrawing,
                 Item = item,
                 DocumentRequest = request
             });
+        }
+
+        foreach (var row in previewRows.Where(candidate => candidate.Item?.OperationItem?.Node?.Kind == CadDocumentKind.Drawing))
+        {
+            var linkedModels = requests.Where(request => DrawingMatchesModel(row.Item, request.Item)).ToArray();
+            if (linkedModels.Length == 1)
+            {
+                row.NewValue = string.Concat(linkedModels[0].NewBaseName, ".SLDDRW");
+                row.Status = string.Concat("将随模型 ", linkedModels[0].Item.FileName, " 联动");
+            }
+            else if (linkedModels.Length > 1)
+            {
+                row.Status = "关联模型不唯一，不单独处理";
+            }
+            else
+            {
+                row.Status = "未匹配到改名模型，不单独处理";
+            }
         }
 
         if (requests.Count > 0)
@@ -452,6 +482,40 @@ internal sealed class BatchRenameDialog : Form
         UpdateSummary();
     }
 
+    private static bool DrawingMatchesModel(BatchPropertyEditItem drawingItem, BatchPropertyEditItem modelItem)
+    {
+        var drawing = drawingItem?.OperationItem?.Node;
+        var model = modelItem?.OperationItem?.Node;
+        if (drawing == null || model == null)
+        {
+            return false;
+        }
+        if (drawing.RelatedModelDocumentId.HasValue && model.DocumentId.HasValue)
+        {
+            return drawing.RelatedModelDocumentId == model.DocumentId;
+        }
+        if (drawing.RelatedModelDocumentId.HasValue)
+        {
+            return false;
+        }
+
+        try
+        {
+            return string.Equals(
+                       Path.GetDirectoryName(Path.GetFullPath(drawing.FullPath)) ?? string.Empty,
+                       Path.GetDirectoryName(Path.GetFullPath(model.FullPath)) ?? string.Empty,
+                       StringComparison.OrdinalIgnoreCase)
+                && string.Equals(
+                    Path.GetFileNameWithoutExtension(drawing.FileName),
+                    Path.GetFileNameWithoutExtension(model.FileName),
+                    StringComparison.OrdinalIgnoreCase);
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
     private void ValidateRuleInput()
     {
         var selected = SelectedTextOperation;
@@ -484,8 +548,16 @@ internal sealed class BatchRenameDialog : Form
     private void UpdateSummary()
     {
         var executable = previewRows.Count(row => row.CanExecute && row.Selected);
-        var blocked = previewRows.Count(row => !row.CanExecute && !string.Equals(row.Status, "无变化", StringComparison.Ordinal));
-        summary.Text = string.Concat("预览 ", previewRows.Count, " 项；将执行 ", executable, " 项；不可执行 ", blocked, " 项");
+        var blocked = previewRows.Count(row => !row.CanExecute
+            && !row.IsInformational
+            && !string.Equals(row.Status, "无变化", StringComparison.Ordinal));
+        var linkedDrawings = previewRows.Count(row => row.IsInformational
+            && row.Status.StartsWith("将随模型 ", StringComparison.Ordinal));
+        summary.Text = string.Concat(
+            "预览 ", previewRows.Count,
+            " 项；将执行 ", executable,
+            " 项；联动工程图 ", linkedDrawings,
+            " 项；不可执行 ", blocked, " 项");
     }
 
     private void ApplyPreview()
@@ -521,9 +593,9 @@ internal sealed class BatchRenameDialog : Form
         var confirmation = MessageBox.Show(
             this,
             string.Concat(
-                "将受控重命名 ", requests.Length, " 个图档。\r\n",
+                "将重命名 ", requests.Length, " 个零件或装配体；唯一关联工程图将同步改名并更新引用。\r\n",
                 string.IsNullOrWhiteSpace(rootFileName) ? string.Empty : string.Concat("影响主装配体：", rootFileName, "\r\n"),
-                "执行后请将重命名图档和主装配体一起提交存档。是否继续？"),
+                "已入库图档执行后需连同主装配体一起提交存档；未入库图档直接保留本地改名结果。是否继续？"),
             "确认批量重命名图档",
             MessageBoxButtons.YesNo,
             MessageBoxIcon.Warning,
@@ -554,7 +626,7 @@ internal sealed class BatchRenameDialog : Form
                 && string.Equals(status, "已完成", StringComparison.Ordinal));
             if (completed == requests.Length)
             {
-                MessageBox.Show(this, string.Concat("已完成 ", completed, " 个图档重命名。请连同主装配体一起提交存档。"), "UPLM", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                MessageBox.Show(this, string.Concat("已完成 ", completed, " 个模型重命名；关联工程图已联动处理。已入库图档请连同主装配体一起提交存档。"), "UPLM", MessageBoxButtons.OK, MessageBoxIcon.Information);
                 DialogResult = DialogResult.OK;
                 Close();
             }

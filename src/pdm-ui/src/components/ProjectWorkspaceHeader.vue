@@ -17,9 +17,12 @@ const props = defineProps<{
   currentUsername?: string
   switchingProjectId?: string
   canCopyContent?: boolean
+  token?: string
+  canResetContent?: boolean
   pending?: boolean
   onPreviewProjectCopy?: (projectId: string, input: ProjectCopyOptionsInput) => Promise<ProjectCopyPreview>
   onCopyProjectContent?: (projectId: string, input: ProjectCopyOptionsInput) => Promise<ProjectCopyResult>
+  onContentResetComplete?: () => Promise<unknown>
 }>()
 const emit = defineEmits<{ back: []; switch: [projectId: string]; tab: [tab: ProjectTab] }>()
 const displayUserName = useUserDisplayName()
@@ -290,14 +293,17 @@ function drawingDocumentCount(project: ProjectSummary) {
     </div>
 
     <ProjectSettingsDrawer
-      v-if="projectSettingsOpen && onPreviewProjectCopy && onCopyProjectContent"
+      v-if="projectSettingsOpen"
       v-model="projectSettingsOpen"
       :project="project"
       :projects="projects"
+      :token="token ?? ''"
       :can-copy-content="Boolean(canCopyContent)"
+      :can-reset-content="Boolean(canResetContent)"
       :pending="Boolean(pending)"
       :on-preview-project-copy="onPreviewProjectCopy"
       :on-copy-project-content="onCopyProjectContent"
+      :on-content-reset-complete="onContentResetComplete ?? (async () => undefined)"
     />
   </div>
 </template>

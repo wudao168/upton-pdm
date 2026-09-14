@@ -8,7 +8,7 @@ const api = vi.hoisted(() => ({
   listProjectFiles: vi.fn(), uploadProjectFile: vi.fn(), createProjectFolder: vi.fn(), deleteProjectFolder: vi.fn(),
   renameProjectFolder: vi.fn(), moveProjectFolder: vi.fn(), renameProjectFile: vi.fn(), moveProjectFile: vi.fn(),
   deleteProjectFile: vi.fn(), restoreProjectFile: vi.fn(), listProjectFileVersions: vi.fn(), downloadProjectFile: vi.fn(),
-  listControlledDocumentRecycleBin: vi.fn(), getControlledDocumentRecycleReadiness: vi.fn(), recycleControlledDocument: vi.fn(), restoreControlledDocument: vi.fn(),
+  listControlledDocumentRecycleBin: vi.fn(), getControlledDocumentRecycleReadiness: vi.fn(), recycleControlledDocument: vi.fn(), recycleControlledDocumentsBatch: vi.fn(), restoreControlledDocument: vi.fn(),
 }))
 vi.mock('../src/api', () => api)
 
@@ -56,6 +56,22 @@ describe('ProjectFileLibrary', () => {
     expect(api.getControlledDocumentRecycleReadiness).toHaveBeenCalledWith('project-1', 'document-1', 'token')
     expect(wrapper.text()).toContain('进入回收站后30天内可恢复')
     expect(wrapper.text()).toContain('确认图号或文件名')
+  })
+
+  it('管理员可多选受控图档并批量移入回收站', async () => {
+    const documents = [
+      { id: 'document-1', projectId: 'project-1', folderId: 'folder-2', drawingNumber: 'A-001', name: '测试零件一', fileName: 'A-001.SLDPRT', kind: 'Part', state: 'Work', revision: 'W1', rowVersion: 3 },
+      { id: 'document-2', projectId: 'project-1', folderId: 'folder-2', drawingNumber: 'A-002', name: '测试零件二', fileName: 'A-002.SLDPRT', kind: 'Part', state: 'Work', revision: 'W1', rowVersion: 5 },
+    ]
+    api.recycleControlledDocumentsBatch.mockResolvedValue({ recycledDocumentIds: ['document-1', 'document-2'], failures: [] })
+    const wrapper = mountLibrary([controlledFolder], documents, true)
+    await flushPromises()
+
+    await wrapper.find('input[aria-label="选择当前列表全部受控图档"]').setValue(true)
+    await wrapper.findAll('button').find(button => button.text().includes('批量移入回收站'))!.trigger('click')
+    await flushPromises()
+    expect(wrapper.text()).toContain('已选择 2 项受控图档')
+    expect(wrapper.text()).toContain('允许部分成功')
   })
 
   it('本层直接含文件的文件夹使用主题色图标', async () => {

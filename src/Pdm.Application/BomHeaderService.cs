@@ -569,7 +569,7 @@ public sealed partial class BomHeaderService(
     {
         ReleaseScope.StandardLongLead or ReleaseScope.StandardFormal or ReleaseScope.StandardSupplement => ProjectBomHeaderKind.Standard,
         ReleaseScope.ElectricalFormal or ReleaseScope.ElectricalSupplement => ProjectBomHeaderKind.Electrical,
-        ReleaseScope.NonStandardWithDrawing => ProjectBomHeaderKind.NonStandard,
+        ReleaseScope.NonStandardWithDrawing or ReleaseScope.NonStandardLongLead or ReleaseScope.NonStandardSupplement => ProjectBomHeaderKind.NonStandard,
         _ => throw new PdmRuleException("当前发布范围没有独立BOM料号。")
     };
 

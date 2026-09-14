@@ -14,7 +14,7 @@ public sealed class ValidationPlanServiceTests
         var (service, _, _, _, project) = await CreateFixtureAsync();
 
         var saved = await service.SavePlanAsync(project.Id,
-            new("管理员", new DateOnly(2026, 9, 10), [new(null, "人工确认安全门互锁", "内部评审", null, null, null, null, 1)], null),
+            new("管理员", new DateOnly(2026, 9, 10), [new(null, "人工确认安全门互锁", "内部评审", null, null, null, null, null, 1)], null),
             "admin", UserRole.Administrator, default);
 
         var item = Assert.Single(saved.Items);
@@ -29,13 +29,14 @@ public sealed class ValidationPlanServiceTests
         var (service, _, _, _, project) = await CreateFixtureAsync();
         var category = await service.SaveCategoryAsync(null, new("安全相关", 10, true, null), "developer", UserRole.Administrator, CancellationToken.None);
         var item = await service.SaveItemAsync(null, new(category.Id, "急停按钮便于触及", "内部评审", 10, true, null), "developer", UserRole.Administrator, CancellationToken.None);
-        var saved = await service.SavePlanAsync(project.Id, new("测试员", null, [new(item.Id, null, "内部评审", null, null, null, null, 1)]), "developer", UserRole.Administrator, CancellationToken.None);
+        var saved = await service.SavePlanAsync(project.Id, new("测试员", null, [new(item.Id, null, "内部评审", null, null, null, null, null, 1)]), "developer", UserRole.Administrator, CancellationToken.None);
 
         await service.SaveItemAsync(item.Id, new(category.Id, "急停按钮可在一秒内触及", "内部评审", 10, true, null, item.RowVersion), "developer", UserRole.Administrator, CancellationToken.None);
-        var resaved = await service.SavePlanAsync(project.Id, new("测试员", null, [new(item.Id, null, "内部评审", null, "通过", "张三", null, 1)], saved.RowVersion), "developer", UserRole.Administrator, CancellationToken.None);
+        var resaved = await service.SavePlanAsync(project.Id, new("测试员", null, [new(item.Id, null, "内部评审", null, "通过", "李四", "张三", null, 1)], saved.RowVersion), "developer", UserRole.Administrator, CancellationToken.None);
 
         Assert.Equal("急停按钮便于触及", Assert.Single(resaved.Items).ValidationContent);
         Assert.Equal("通过", resaved.Items[0].Result);
+        Assert.Equal("李四", resaved.Items[0].Reviewer);
     }
 
     [Fact]
@@ -44,7 +45,7 @@ public sealed class ValidationPlanServiceTests
         var (service, _, _, _, project) = await CreateFixtureAsync();
         var category = await service.SaveCategoryAsync(null, new("定位工装", 10, true, null), "developer", UserRole.Administrator, CancellationToken.None);
         var item = await service.SaveItemAsync(null, new(category.Id, "定位销无松动", "技术方案", 10, true, null), "developer", UserRole.Administrator, CancellationToken.None);
-        await service.SavePlanAsync(project.Id, new(null, null, [new(item.Id, null, null, null, null, null, null, 1)]), "developer", UserRole.Administrator, CancellationToken.None);
+        await service.SavePlanAsync(project.Id, new(null, null, [new(item.Id, null, null, null, null, null, null, null, 1)]), "developer", UserRole.Administrator, CancellationToken.None);
 
         var conflict = await Assert.ThrowsAsync<PdmConflictException>(() => service.DeleteItemAsync(item.Id, item.RowVersion, "developer", UserRole.Administrator, CancellationToken.None));
         Assert.Contains("不能删除", conflict.Message);
@@ -59,10 +60,18 @@ public sealed class ValidationPlanServiceTests
     [Fact]
     public async Task Workbook_ProducesReadableXlsxWithProjectSnapshot()
     {
-        var (service, _, repository, _, project) = await CreateFixtureAsync();
+        var (service, plans, repository, _, project) = await CreateFixtureAsync();
         var category = await service.SaveCategoryAsync(null, new("泄漏测试", 10, true, null), "developer", UserRole.Administrator, CancellationToken.None);
         var item = await service.SaveItemAsync(null, new(category.Id, "保压时间满足技术协议", "技术协议", 10, true, null), "developer", UserRole.Administrator, CancellationToken.None);
-        await service.SavePlanAsync(project.Id, new("李四", new DateOnly(2026, 9, 9), [new(item.Id, null, "技术协议", new DateOnly(2026, 9, 10), "合格", "王五", "已复核", 1)]), "developer", UserRole.Administrator, CancellationToken.None);
+        await repository.CreateUserAsync(new UserAccount(Guid.NewGuid(), "designer", "马文豪", "unused", UserRole.Engineer, true), default);
+        await repository.CreateUserAsync(new UserAccount(Guid.NewGuid(), "manager", "王袁杰", "unused", UserRole.BusinessUnitManager, true), default);
+        var saved = await service.SavePlanAsync(project.Id, new("李四", new DateOnly(2026, 9, 9), [new(item.Id, null, "技术协议", new DateOnly(2026, 9, 10), "合格", "赵六", "王五", "已复核", 1)]), "developer", UserRole.Administrator, CancellationToken.None);
+        var now = DateTimeOffset.UtcNow;
+        await plans.SubmitAsync(saved.Id, saved.RowVersion, "validation-plan", 1,
+        [
+            new(Guid.NewGuid(), saved.Id, 1, ApprovalStage.MainDesigner, "主设审核", "designer", ApprovalDecision.Approved, "designer", "同意", now, now),
+            new(Guid.NewGuid(), saved.Id, 2, ApprovalStage.MechanicalSupervisor, "机械主管批准", "manager", null, null, null, now, null)
+        ], "developer", now, default);
 
         var export = await service.PrepareExportAsync(project.Id, "developer", UserRole.Administrator, CancellationToken.None);
         var bytes = ValidationPlanWorkbook.Write(export);
@@ -79,15 +88,24 @@ public sealed class ValidationPlanServiceTests
         var document = XDocument.Parse(xml);
         XNamespace spreadsheet = "http://schemas.openxmlformats.org/spreadsheetml/2006/main";
         var columns = document.Descendants(spreadsheet + "col").ToArray();
-        Assert.Equal(10, columns.Length);
-        Assert.Equal(Enumerable.Repeat("17", 8), columns.Skip(2).Select(column => column.Attribute("width")?.Value));
+        Assert.Equal(11, columns.Length);
+        Assert.Equal(Enumerable.Repeat("17", 9), columns.Skip(2).Select(column => column.Attribute("width")?.Value));
+        Assert.Contains("审核人", xml);
+        Assert.Contains("赵六", xml);
+        Assert.Contains("r=\"J3\"", xml);
         var rows = document.Descendants(spreadsheet + "row").ToArray();
+        var signatureRow = Assert.Single(rows, row => row.Attribute("r")?.Value == "3");
+        Assert.Equal(["编制", "李四", "审核", "马文豪", "批准", "王袁杰"], signatureRow.Descendants(spreadsheet + "t").Select(value => value.Value));
+        Assert.DoesNotContain("校对", xml);
         var reviewIndex = Array.FindIndex(rows, row => row.Descendants(spreadsheet + "t").Any(value => value.Value == "评审结果"));
         var manualRows = rows.Skip(reviewIndex - 5).Take(5).ToArray();
         Assert.Equal(5, manualRows.Length);
-        Assert.All(manualRows, row => Assert.Equal(10, row.Elements(spreadsheet + "c").Count()));
+        Assert.All(manualRows, row => Assert.Equal(11, row.Elements(spreadsheet + "c").Count()));
         Assert.Equal(["2", "3", "4", "5", "6"], manualRows.Select(row => row.Element(spreadsheet + "c")?.Element(spreadsheet + "v")?.Value));
         var mergeReferences = document.Descendants(spreadsheet + "mergeCell").Select(merge => merge.Attribute("ref")?.Value).ToHashSet();
+        Assert.Contains("B3:D3", mergeReferences);
+        Assert.Contains("F3:H3", mergeReferences);
+        Assert.Contains("J3:K3", mergeReferences);
         Assert.All(manualRows, row =>
         {
             var rowNumber = row.Attribute("r")?.Value;
@@ -96,19 +114,69 @@ public sealed class ValidationPlanServiceTests
     }
 
     [Fact]
+    public async Task Submit_AutoApprovesSelfCheckAndCurrentDesignLead()
+    {
+        var (service, _, repository, _, project) = await CreateFixtureAsync();
+        var directory = await repository.GetOrganizationDirectoryAsync(default);
+        var company = directory.Organizations.First();
+        var unit = await repository.SaveOrganizationUnitAsync(new(null, company.Id, null, "T3", "T3事业部", OrganizationUnitKind.BusinessDivision, true, 10, true), default);
+        await repository.CreateUserAsync(new UserAccount(Guid.NewGuid(), "designer", "主设", "unused", UserRole.Engineer, true), default);
+        await repository.CreateUserAsync(new UserAccount(Guid.NewGuid(), "manager", "机械主管", "unused", UserRole.BusinessUnitManager, true), default);
+        await repository.SetOrganizationMembershipsAsync("designer", [unit.Id], unit.Id, default);
+        await repository.SetOrganizationMembershipsAsync("manager", [unit.Id], unit.Id, default);
+        await repository.SetOrganizationUnitManagersAsync(unit.Id, "manager", [], default);
+        await repository.SetProjectExecutionUnitAsync(project.Id, unit.Id, "admin", default);
+        await repository.SetMainProjectStaffingAsync(project.Id, new("manager", [], ["designer"]), "admin", default);
+
+        var saved = await service.SavePlanAsync(project.Id,
+            new("主设", new DateOnly(2026, 9, 14), [new(null, "确认设备安全门联锁", "内部评审", null, null, null, null, null, 1)]),
+            "designer", UserRole.Engineer, default);
+        var submitted = await service.SubmitAsync(project.Id, saved.RowVersion, "designer", UserRole.Engineer, default);
+
+        Assert.Equal(ProjectValidationPlanState.PendingApproval, submitted.State);
+        Assert.Equal(3, submitted.ApprovalTasks.Count);
+        Assert.All(submitted.ApprovalTasks.Take(2), task =>
+        {
+            Assert.Equal(ApprovalDecision.Approved, task.Decision);
+            Assert.Equal("designer", task.DecisionBy);
+            Assert.NotNull(task.DecidedAt);
+        });
+        Assert.Contains("自检", submitted.ApprovalTasks[0].DecisionComment);
+        Assert.Contains("系统自动通过", submitted.ApprovalTasks[1].DecisionComment);
+        Assert.Null(submitted.ApprovalTasks[2].Decision);
+        Assert.Equal("manager", submitted.ApprovalTasks[2].Assignee);
+    }
+
+    [Fact]
+    public async Task AssignedValidationPlanEditor_CanDecideWithoutReleaseApprovalPermission()
+    {
+        var (service, plans, _, _, project) = await CreateFixtureAsync();
+        var draft = await service.SavePlanAsync(project.Id,
+            new("工程师", new DateOnly(2026, 9, 14), [new(null, "确认设备安全门联锁", "内部评审", null, null, null, null, null, 1)]),
+            "admin", UserRole.Administrator, default);
+        var task = new ValidationPlanApprovalTask(Guid.NewGuid(), draft.Id, 1, ApprovalStage.MainDesigner, "主设审核", "engineer", null, null, null, DateTimeOffset.UtcNow, null);
+        await plans.SubmitAsync(draft.Id, draft.RowVersion, "validation-plan", 1, [task], "admin", DateTimeOffset.UtcNow, default);
+
+        var decided = await service.DecideAsync(task.Id, ApprovalDecision.Approved, "同意", "engineer", UserRole.Engineer, default);
+
+        Assert.Equal(ProjectValidationPlanState.Effective, decided.State);
+        Assert.Equal("engineer", Assert.Single(decided.ApprovalTasks).DecisionBy);
+    }
+
+    [Fact]
     public async Task Approval_GatesEdits_AndEffectiveRevisionCreatesNewDraft()
     {
         var (service, plans, _, _, project) = await CreateFixtureAsync();
         var category = await service.SaveCategoryAsync(null, new("安全相关", 10, true, null), "admin", UserRole.Administrator, default);
         var item = await service.SaveItemAsync(null, new(category.Id, "防护门联锁有效", "内部评审", 10, true, null), "admin", UserRole.Administrator, default);
-        var draft = await service.SavePlanAsync(project.Id, new("管理员", new DateOnly(2026, 9, 9), [new(item.Id, null, "内部评审", null, null, null, null, 1)]), "admin", UserRole.Administrator, default);
+        var draft = await service.SavePlanAsync(project.Id, new("管理员", new DateOnly(2026, 9, 9), [new(item.Id, null, "内部评审", null, null, null, null, null, 1)]), "admin", UserRole.Administrator, default);
 
         var now = DateTimeOffset.UtcNow;
         var tasks = Enumerable.Range(1, 3).Select(index => new ValidationPlanApprovalTask(Guid.NewGuid(), draft.Id, index, (ApprovalStage)(index * 10), $"节点{index}", "admin", null, null, null, now, null)).ToArray();
         var submitted = await plans.SubmitAsync(draft.Id, draft.RowVersion, "validation-plan", 1, tasks, "admin", now, default);
         Assert.Equal(ProjectValidationPlanState.PendingApproval, submitted.State);
         await Assert.ThrowsAsync<PdmConflictException>(() => service.SavePlanAsync(project.Id,
-            new("管理员", new DateOnly(2026, 9, 9), [new(item.Id, null, "内部评审", null, null, null, null, 1)], submitted.RowVersion), "admin", UserRole.Administrator, default));
+            new("管理员", new DateOnly(2026, 9, 9), [new(item.Id, null, "内部评审", null, null, null, null, null, 1)], submitted.RowVersion), "admin", UserRole.Administrator, default));
 
         var current = submitted;
         while (current.State == ProjectValidationPlanState.PendingApproval)
@@ -130,7 +198,7 @@ public sealed class ValidationPlanServiceTests
         var (service, plans, _, storage, project) = await CreateFixtureAsync();
         var category = await service.SaveCategoryAsync(null, new("安全相关", 10, true, null), "developer", UserRole.Administrator, default);
         var item = await service.SaveItemAsync(null, new(category.Id, "急停回路验证", "内部评审", 10, true, null), "developer", UserRole.Administrator, default);
-        var draft = await service.SavePlanAsync(project.Id, new("测试员", new DateOnly(2026, 9, 9), [new(item.Id, null, "内部评审", null, null, null, null, 1)]), "developer", UserRole.Administrator, default);
+        var draft = await service.SavePlanAsync(project.Id, new("测试员", new DateOnly(2026, 9, 9), [new(item.Id, null, "内部评审", null, null, null, null, null, 1)]), "developer", UserRole.Administrator, default);
         const string sha256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
         await Assert.ThrowsAsync<PdmConflictException>(() => service.StartAttachmentUploadAsync(
@@ -166,7 +234,7 @@ public sealed class ValidationPlanServiceTests
         var (service, plans, _, _, project) = await CreateFixtureAsync();
         var category = await service.SaveCategoryAsync(null, new("安全相关", 10, true, null), "developer", UserRole.Administrator, default);
         var item = await service.SaveItemAsync(null, new(category.Id, "急停回路验证", "内部评审", 10, true, null), "developer", UserRole.Administrator, default);
-        var draft = await service.SavePlanAsync(project.Id, new("测试员", new DateOnly(2026, 9, 9), [new(item.Id, null, "内部评审", null, null, null, null, 1)]), "developer", UserRole.Administrator, default);
+        var draft = await service.SavePlanAsync(project.Id, new("测试员", new DateOnly(2026, 9, 9), [new(item.Id, null, "内部评审", null, null, null, null, null, 1)]), "developer", UserRole.Administrator, default);
         var plan = await MakeEffectiveAsync(plans, draft);
         const string sha256 = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
         var session = await service.StartAttachmentUploadAsync(plan.Id, ValidationPlanAttachmentKind.PlanDocument, "现场结果.png", 2048, sha256, "developer", UserRole.Administrator, default);

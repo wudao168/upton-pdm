@@ -45,8 +45,13 @@ const releaseTypes: { value: Exclude<ReleaseScope, 'LegacyCombined'>; label: str
   { value: 'StandardSupplement', label: '标准件 · 增补/变更' },
   { value: 'ElectricalFormal', label: '电气BOM · 正式发布' },
   { value: 'ElectricalSupplement', label: '电气BOM · 增补/变更' },
-  { value: 'NonStandardWithDrawing', label: '非标件BOM + 图纸' },
+  { value: 'NonStandardLongLead', label: '非标件 · 长交期提前发布' },
+  { value: 'NonStandardWithDrawing', label: '非标件BOM + 图纸 · 正式发布' },
+  { value: 'NonStandardSupplement', label: '非标件 · 增补/变更' },
 ]
+const isLongLeadScope = (value: ReleaseScope) => value === 'StandardLongLead' || value === 'NonStandardLongLead'
+const isSupplementScope = (value: ReleaseScope) => value === 'StandardSupplement' || value === 'ElectricalSupplement' || value === 'NonStandardSupplement'
+const isNonStandardScope = (value: ReleaseScope) => value === 'NonStandardWithDrawing' || value === 'NonStandardLongLead' || value === 'NonStandardSupplement'
 const scopeLabels = Object.fromEntries(releaseTypes.map(item => [item.value, item.label])) as Record<string, string>
 const workflowNames: Record<string, string> = {
   'mechanical-release': '机械发布审批',
@@ -54,8 +59,10 @@ const workflowNames: Record<string, string> = {
 }
 const visibleReleaseTypes = computed(() => releaseTypes.filter(item =>
   (!props.allowedScopes.length || props.allowedScopes.includes(item.value))
-  && !(props.releasePackages.some(previous => previous.scope === 'StandardFormal' && previous.state === '已发布')
-    && (item.value === 'StandardLongLead' || item.value === 'StandardFormal'))))
+  && !((item.value === 'StandardLongLead' || item.value === 'StandardFormal')
+    && props.releasePackages.some(previous => previous.scope === 'StandardFormal' && previous.state === '已发布'))
+  && !((item.value === 'NonStandardLongLead' || item.value === 'NonStandardWithDrawing')
+    && props.releasePackages.some(previous => previous.scope === 'NonStandardWithDrawing' && previous.state === '已发布'))))
 const releaseNote = ref('')
 const selectedChangeReasons = ref<string[]>([])
 const otherChangeReason = ref('')
@@ -96,22 +103,26 @@ const releaseBomRevisionLabel = computed(() => {
   if (releasePackage.scope === 'StandardLongLead') {
     return `标准件：长交期批次 ${releasePackage.standardBomRevision || '未生成'} · 非标件：不适用 · 电气件：不适用`
   }
+  if (releasePackage.scope === 'NonStandardLongLead') {
+    return `标准件：不适用 · 非标件：长交期批次 ${releasePackage.nonStandardBomRevision || '未生成'} · 电气件：不适用`
+  }
   return `标准件：${releasePackage.standardBomRevision || '未发布'} · 非标件：${releasePackage.nonStandardBomRevision || '未发布'} · 电气件：${releasePackage.electricalBomRevision || '未发布'}`
 })
 const canPrepare = computed(() => !props.releasePackage || ['草稿', '已驳回', '发布失败'].includes(props.releasePackage.state))
-const isSupplement = computed(() => scope.value === 'StandardSupplement' || scope.value === 'ElectricalSupplement')
+const isSupplement = computed(() => isSupplementScope(scope.value))
 const isFormalSupplementReason = (releasePackage: ReleasePackageSummary) =>
   Boolean(releasePackage.changeReasonSelections?.some(item => item.categoryCode === 'FormalSupplement'))
   || (releasePackage.changeReason || '').split('；').some(reason => reason.trim() === '正式补充')
 const formalSupplementAvailability = computed(() => {
-  const standard = scope.value === 'StandardSupplement'
-  const formalScope: ReleaseScope = standard ? 'StandardFormal' : 'ElectricalFormal'
-  const supplementScope: ReleaseScope = standard ? 'StandardSupplement' : 'ElectricalSupplement'
+  const standardPolicy = scope.value !== 'ElectricalSupplement'
+  const formalScope: ReleaseScope = scope.value === 'StandardSupplement' ? 'StandardFormal'
+    : scope.value === 'NonStandardSupplement' ? 'NonStandardWithDrawing' : 'ElectricalFormal'
+  const supplementScope: ReleaseScope = scope.value
   const formal = props.releasePackages
     .filter(item => item.scope === formalScope && item.state === '已发布' && item.publishedAt)
     .sort((left, right) => new Date(left.publishedAt!).getTime() - new Date(right.publishedAt!).getTime())[0]
   if (!formal) return { allowed: false, status: '尚未完成首次正式发布', used: 0, active: 0, maximum: 0 as number | null, validUntil: '' }
-  const configured = standard ? props.formalSupplementPolicies.standard : props.formalSupplementPolicies.electrical
+  const configured = standardPolicy ? props.formalSupplementPolicies.standard : props.formalSupplementPolicies.electrical
   const maximum = formal.formalSupplementPolicySnapshotted ? formal.formalSupplementMaximumCount ?? null : configured.maximumCount ?? null
   const validDays = formal.formalSupplementPolicySnapshotted ? formal.formalSupplementValidDays ?? null : configured.validDays ?? null
   const relevant = props.releasePackages.filter(item => item.id !== props.releasePackage?.id && item.scope === supplementScope && isFormalSupplementReason(item))
@@ -277,7 +288,7 @@ const pagedSupplementRows = computed(() => {
   const start = (supplementPage.value - 1) * releasePageSize
   return supplementRows.value.slice(start, start + releasePageSize)
 })
-const isLongLeadRelease = computed(() => scope.value === 'StandardLongLead')
+const isLongLeadRelease = computed(() => isLongLeadScope(scope.value))
 const isFormalRelease = computed(() => scope.value === 'StandardFormal' || scope.value === 'ElectricalFormal' || scope.value === 'NonStandardWithDrawing')
 const releaseDetailRowCount = computed(() => {
   if (isLongLeadRelease.value) return longLeadReleaseRows.value.length
@@ -295,13 +306,13 @@ const releaseDetailPageCount = computed(() => {
   return supplementPageCount.value
 })
 const releaseDetailLegend = computed(() => {
-  if (isLongLeadRelease.value) return `选择长交期标准件（已选 ${selectedLongLeadKeys.value.length} 项）`
+  if (isLongLeadRelease.value) return `选择长交期${scope.value === 'NonStandardLongLead' ? '非标件' : '标准件'}（已选 ${selectedLongLeadKeys.value.length} 项）`
   if (scope.value === 'StandardFormal') return `正式发布内容（已选 ${selectedFormalKeys.value.length} / 共 ${formalReleaseRows.value.length} 项 · 默认全选 · 整套倍率 ×${wholeSetMultiplier.value}）`
   if (isFormalRelease.value) return `正式发布内容（共 ${formalReleaseRows.value.length} 项 · 整套倍率 ×${wholeSetMultiplier.value}）`
   return `增补/变更内容（共 ${supplementRows.value.length} 项 · 整套倍率 ×${wholeSetMultiplier.value}）`
 })
 const releaseDetailEmptyText = computed(() => {
-  if (isLongLeadRelease.value) return '当前没有剩余可提前发布数量的标准件。'
+  if (isLongLeadRelease.value) return `当前没有剩余可提前发布数量的${scope.value === 'NonStandardLongLead' ? '非标件' : '标准件'}。`
   if (isFormalRelease.value) return '当前没有可发布的物料。'
   return '与上一正式发布版相比，当前没有增补或变更内容。'
 })
@@ -310,17 +321,17 @@ const hasInvalidLongLeadQuantity = computed(() => selectedLongLeadKeys.value.som
   const requested = Number(longLeadRequestedQuantities.value[key])
   return !row || !Number.isFinite(requested) || requested <= 0 || requested > Number(row.item.quantity)
 }))
-const hasInvalidWholeSetMultiplier = computed(() => scope.value !== 'StandardLongLead'
+const hasInvalidWholeSetMultiplier = computed(() => !isLongLeadRelease.value
   && (!Number.isInteger(Number(wholeSetMultiplier.value)) || Number(wholeSetMultiplier.value) < 1 || Number(wholeSetMultiplier.value) > 1000))
 const createDisabled = computed(() => props.pending
-  || scope.value === 'StandardLongLead' && selectedBomItemIds.value.length === 0
-  || scope.value === 'StandardLongLead' && hasInvalidLongLeadQuantity.value
+  || isLongLeadRelease.value && selectedBomItemIds.value.length === 0
+  || isLongLeadRelease.value && hasInvalidLongLeadQuantity.value
   || scope.value === 'StandardFormal' && selectedFormalBomItemIds.value.length === 0
   || hasInvalidWholeSetMultiplier.value
   || isSupplement.value && selectedChangeReasons.value.length === 0
   || isSupplement.value && selectedChangeReasons.value.includes('其他') && !otherChangeReason.value.trim()
   || isSupplement.value && selectedChangeReasons.value.includes('正式补充') && !formalSupplementAvailability.value.allowed)
-const requiresDrawingFiles = computed(() => props.releasePackage?.locksDocuments ?? scope.value === 'NonStandardWithDrawing')
+const requiresDrawingFiles = computed(() => props.releasePackage?.locksDocuments ?? isNonStandardScope(scope.value))
 const isCurrentTaskAssignee = computed(() => Boolean(currentTask.value
   && currentTask.value.assignee.toLowerCase() === props.username.toLowerCase()))
 const canHandleCurrentTask = computed(() => isCurrentTaskAssignee.value
@@ -333,7 +344,7 @@ const filteredTransferCandidates = computed(() => {
 const frozenItems = computed(() => {
   if (!props.releasePackage) return []
   if (props.releasePackage.scope.startsWith('Electrical')) return props.releasePackage.electricalBomSnapshot
-  if (props.releasePackage.scope === 'NonStandardWithDrawing') return props.releasePackage.nonStandardBomSnapshot
+  if (isNonStandardScope(props.releasePackage.scope)) return props.releasePackage.nonStandardBomSnapshot
   return props.releasePackage.standardBomSnapshot
 })
 const frozenMaterialKey = (item: BomItem) => {
@@ -363,7 +374,7 @@ const frozenStructureRows = computed<FrozenDisplayRow[]>(() => frozenItems.value
   item: { ...item, quantity: Number(item.quantity) * (props.releasePackage?.wholeSetMultiplier ?? 1) },
   sourceItems: [item],
 })))
-const isFrozenSupplement = computed(() => props.releasePackage?.scope === 'StandardSupplement' || props.releasePackage?.scope === 'ElectricalSupplement')
+const isFrozenSupplement = computed(() => Boolean(props.releasePackage && isSupplementScope(props.releasePackage.scope)))
 const showFrozenChanges = computed(() => isFrozenSupplement.value && !frozenShowFullBom.value)
 const frozenChanges = computed(() => changedRows(frozenItems.value, props.previousVersionItems))
 const frozenChangeRows = computed<FrozenDisplayRow[]>(() => frozenChanges.value.map((row, index) => ({
@@ -430,13 +441,13 @@ watch(frozenViewMode, () => { frozenPage.value = 1 })
 watch(showFrozenChanges, () => { frozenPage.value = 1; frozenViewMode.value = 'Summary' })
 watch([() => props.releasePackage?.id, () => props.token], () => { void loadReleaseItemComments() }, { immediate: true })
 watch(scope, () => {
-  if (scope.value === 'StandardLongLead') wholeSetMultiplier.value = 1
+  if (isLongLeadRelease.value) wholeSetMultiplier.value = 1
   longLeadPage.value = 1
   formalPage.value = 1
   supplementPage.value = 1
 })
 watch([() => availableReleaseItems.value.length, () => supplementRows.value.length], () => {
-  if (scope.value !== 'StandardLongLead') longLeadPage.value = 1
+  if (!isLongLeadRelease.value) longLeadPage.value = 1
   else longLeadPage.value = Math.min(longLeadPage.value, longLeadPageCount.value)
   formalPage.value = Math.min(formalPage.value, formalPageCount.value)
   supplementPage.value = Math.min(supplementPage.value, supplementPageCount.value)
@@ -455,11 +466,11 @@ function create() {
   const input: CreateReleasePackageInput = {
     changeReason: isSupplement.value ? changeReasonText.value : releaseNote.value,
     scope: scope.value,
-    selectedBomItemIds: scope.value === 'StandardLongLead'
+    selectedBomItemIds: isLongLeadRelease.value
       ? selectedBomItemIds.value
       : scope.value === 'StandardFormal' ? selectedFormalBomItemIds.value : [],
-    selectedBomItemQuantities: scope.value === 'StandardLongLead' ? selectedBomItemQuantities.value : undefined,
-    wholeSetMultiplier: scope.value === 'StandardLongLead' ? 1 : Number(wholeSetMultiplier.value),
+    selectedBomItemQuantities: isLongLeadRelease.value ? selectedBomItemQuantities.value : undefined,
+    wholeSetMultiplier: isLongLeadRelease.value ? 1 : Number(wholeSetMultiplier.value),
   }
   if (editingDraft.value && props.releasePackage) {
     emit('updateDraft', props.releasePackage.id, {
@@ -494,10 +505,10 @@ function startDraftEdit() {
   const releasePackage = props.releasePackage
   if (!releasePackage || releasePackage.state !== '草稿' || releasePackage.scope === 'LegacyCombined') return
   scope.value = releasePackage.scope
-  releaseNote.value = releasePackage.scope === 'StandardSupplement' || releasePackage.scope === 'ElectricalSupplement' ? '' : releasePackage.changeReason || ''
+  releaseNote.value = isSupplementScope(releasePackage.scope) ? '' : releasePackage.changeReason || ''
   selectedChangeReasons.value = []
   otherChangeReason.value = ''
-  if (releasePackage.scope === 'StandardSupplement' || releasePackage.scope === 'ElectricalSupplement') {
+  if (isSupplementScope(releasePackage.scope)) {
     if (releasePackage.changeReasonSelections?.length) {
       selectedChangeReasons.value = releasePackage.changeReasonSelections.map(item => {
         if (item.categoryCode === 'FormalSupplement') return '正式补充'
@@ -517,12 +528,13 @@ function startDraftEdit() {
       })
     }
   }
-  wholeSetMultiplier.value = releasePackage.scope === 'StandardLongLead' ? 1 : releasePackage.wholeSetMultiplier ?? 1
+  wholeSetMultiplier.value = isLongLeadScope(releasePackage.scope) ? 1 : releasePackage.wholeSetMultiplier ?? 1
   selectedLongLeadKeys.value = []
   longLeadRequestedQuantities.value = {}
-  if (releasePackage.scope === 'StandardLongLead') {
+  if (isLongLeadScope(releasePackage.scope)) {
     const selectedByKey = new Map<string, number>()
-    releasePackage.standardBomSnapshot.forEach((item, index) => {
+    const snapshot = releasePackage.scope === 'NonStandardLongLead' ? releasePackage.nonStandardBomSnapshot : releasePackage.standardBomSnapshot
+    snapshot.forEach((item, index) => {
       const key = releaseItemGroupKey(item, index)
       selectedByKey.set(key, (selectedByKey.get(key) ?? 0) + Number(item.quantity))
     })
@@ -801,7 +813,7 @@ async function saveItemComment() {
             <button type="button" class="pdm-primary-action" :disabled="pending || !emergencyReason" @click="emit('emergencyDecide', currentTask.id, 'Approved', emergencyReason)">紧急代批当前节点</button>
           </div>
         </div>
-        <div v-if="canManage && releasePackage.scope === 'StandardLongLead' && releasePackage.state === '已发布'" class="pdm-decision-box pdm-long-lead-u9-retry">
+        <div v-if="canManage && isLongLeadScope(releasePackage.scope) && releasePackage.state === '已发布'" class="pdm-decision-box pdm-long-lead-u9-retry">
           <small>自动补建当前及上级BOM料号申请；正式料号齐全后按BOM层级续传U9C。</small>
           <div class="pdm-manager-actions">
             <button type="button" class="pdm-secondary-action" :disabled="pending" @click="emit('retryU9', releasePackage.id)">{{ pending ? '处理中…' : '重试U9C' }}</button>
@@ -817,10 +829,10 @@ async function saveItemComment() {
         <div><small>整套倍率</small><strong>× {{ releasePackage.wholeSetMultiplier ?? 1 }}</strong></div>
         <div v-if="releasePackage.changeNumber && releasePackage.changeNumber !== releasePackage.number"><small>变更单号</small><strong>{{ releasePackage.changeNumber }}</strong></div>
         <div><small>BOM版本</small><strong>{{ releaseBomRevisionLabel }}</strong></div>
-        <div><small>制造基线</small><strong>{{ releasePackage.createsManufacturingBaseline ? '发布后生成新基线' : releasePackage.scope === 'StandardLongLead' ? '不更新（长交期输出）' : '三条正式流齐备后生成' }}</strong></div>
+        <div><small>制造基线</small><strong>{{ releasePackage.createsManufacturingBaseline ? '发布后生成新基线' : isLongLeadScope(releasePackage.scope) ? '不更新（长交期输出）' : '三条正式流齐备后生成' }}</strong></div>
         <div><small>发布目录</small><strong>{{ releasePackage.publishedPath || '审批通过后自动投放' }}</strong></div>
       </div>
-      <p v-if="releasePackage.changeReason" class="pdm-release-change-reason"><strong>{{ releasePackage.scope === 'StandardSupplement' || releasePackage.scope === 'ElectricalSupplement' ? '变更原因' : '备注' }}：</strong>{{ releasePackage.changeReason }}</p>
+      <p v-if="releasePackage.changeReason" class="pdm-release-change-reason"><strong>{{ isSupplementScope(releasePackage.scope) ? '变更原因' : '备注' }}：</strong>{{ releasePackage.changeReason }}</p>
 
       <section class="pdm-release-frozen-snapshot" aria-label="审批固化快照">
         <header>
@@ -867,7 +879,7 @@ async function saveItemComment() {
           <strong>{{ frozenPage }} / {{ frozenPageCount }}</strong>
           <button type="button" :disabled="frozenPage >= frozenPageCount" aria-label="固化快照下一页" @click="frozenPage++">›</button>
         </nav>
-        <p v-if="releasePackage.scope === 'StandardLongLead'" class="pdm-release-integration-note">发布后正常输出长交期BOM，并写入U9C待同步集成事件；不更新制造基线。</p>
+        <p v-if="isLongLeadScope(releasePackage.scope)" class="pdm-release-integration-note">发布后正常输出长交期BOM，并写入U9C待同步集成事件；不更新制造基线。</p>
         <p v-if="releasePackage.scope === 'StandardFormal'" class="pdm-release-integration-note">完整BOM保留总量；按物料编码和单位汇总扣除已提前发布量，仅下发剩余需求。按结构查看完整BOM，按汇总查看新增下发数量。</p>
       </section>
 

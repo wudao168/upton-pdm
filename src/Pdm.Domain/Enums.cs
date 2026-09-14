@@ -216,7 +216,9 @@ public enum ReleaseScope
     StandardSupplement,
     ElectricalFormal,
     ElectricalSupplement,
-    NonStandardWithDrawing
+    NonStandardWithDrawing,
+    NonStandardLongLead,
+    NonStandardSupplement
 }
 
 public enum ApprovalDecision

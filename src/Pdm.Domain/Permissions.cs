@@ -11,6 +11,7 @@ public static class PermissionCodes
     public const string ProjectStaffingManage = "project.staffing.manage";
     public const string ProjectDesignerAssign = "project.designer.assign";
     public const string ProjectContentView = "project.content.view";
+    public const string ProjectContentReset = "project.content.reset";
     public const string DocumentEdit = "document.edit";
     public const string DocumentRecycle = "document.recycle";
     public const string DocumentLockRequestRelease = "document.lock.request-release";
@@ -58,6 +59,7 @@ public static class RolePermissionCatalog
         new(PermissionCodes.ProjectStaffingManage, "配置项目经理与设计负责人", "项目分工", "非管理员还必须是执行事业部负责人。"),
         new(PermissionCodes.ProjectDesignerAssign, "分配执行工程师", "项目分工", "事业部负责人、机械主管、当前项目经理或主设可在本人负责范围内配置。"),
         new(PermissionCodes.ProjectContentView, "查看项目图档与业务内容", "项目内容", "拥有此权限的角色可查看所属公司内项目的图档、BOM、发布和版本内容。"),
+        new(PermissionCodes.ProjectContentReset, "重置项目内容", "项目内容", "仅管理员可在项目从未发布且未同步外部系统时，将项目内容整体重置并保留30天恢复快照。", Sensitive: true),
         new(PermissionCodes.DocumentEdit, "登记、签出和存档图档", "项目内容", Sensitive: true),
         new(PermissionCodes.DocumentRecycle, "管理受控图档回收站", "项目内容", "将未发布且无受控引用的图档移入回收站，并可在30天内恢复；已发布图档只能作废。", Sensitive: true),
         new(PermissionCodes.DocumentLockRequestRelease, "催办并申请释放编辑权限", "项目内容"),

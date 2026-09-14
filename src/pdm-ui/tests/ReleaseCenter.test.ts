@@ -10,12 +10,12 @@ describe('ReleaseCenter', () => {
   const frozenPackage = (items: BomItem[], scope: ReleasePackageSummary['scope'] = 'StandardSupplement'): ReleasePackageSummary => ({
     id: 'supplement-draft', number: 'RP-SUP', state: '草稿', scope, workflowVersion: 1, selectedBomItemIds: [],
     createsManufacturingBaseline: false, locksDocuments: false, steps: [],
-    standardBomSnapshot: scope === 'StandardSupplement' ? items : [], nonStandardBomSnapshot: [],
+    standardBomSnapshot: scope === 'StandardSupplement' ? items : [], nonStandardBomSnapshot: scope === 'NonStandardSupplement' ? items : [],
     electricalBomSnapshot: scope === 'ElectricalSupplement' ? items : [],
   })
   const frozenProps = { username: 'reviewer', pending: false, progress: 0, error: '', canManage: true, canDecide: false }
 
-  it.each(['StandardSupplement', 'ElectricalSupplement'] as const)('defaults %s to two additions and preserves the full snapshot toggle', async scope => {
+  it.each(['StandardSupplement', 'ElectricalSupplement', 'NonStandardSupplement'] as const)('defaults %s to two additions and preserves the full snapshot toggle', async scope => {
     const previous = Array.from({ length: 28 }, (_, index) => frozenItem(`old-${index}`))
     const items = [...previous, frozenItem('new-1'), frozenItem('new-2')]
     const releasePackage = frozenPackage(items, scope)
@@ -283,15 +283,27 @@ describe('ReleaseCenter', () => {
     expect(wrapper.emitted('retryU9')).toEqual([['release-long-lead']])
   })
 
-  it('shows only the release scopes owned by the current BOM page', () => {
+  it('shows non-standard long-lead, formal and supplement scopes with the same controls as standard parts', async () => {
+    const item: BomItem = { id: 'ns-1', kind: 'NonStandard', sequence: 1, drawingNumber: 'NS-001',
+      name: '非标长交期件', quantity: 2, unit: '个', revision: 'W1', complete: true }
     const wrapper = mount(ReleaseCenter, {
       props: {
-        releasePackage: null, allowedScopes: ['NonStandardWithDrawing'], username: 'engineer',
+        releasePackage: null, allowedScopes: ['NonStandardLongLead', 'NonStandardWithDrawing', 'NonStandardSupplement'],
+        preferredScope: 'NonStandardLongLead', releaseItems: [item], username: 'engineer',
         pending: false, progress: 0, error: '', canManage: true, canDecide: true,
       },
     })
 
-    expect(wrapper.findAll('option').map(option => option.text())).toEqual(['非标件BOM + 图纸'])
+    expect(wrapper.findAll('option').map(option => option.text())).toEqual([
+      '非标件 · 长交期提前发布', '非标件BOM + 图纸 · 正式发布', '非标件 · 增补/变更',
+    ])
+    expect(wrapper.get('.release-detail-picker legend').text()).toContain('选择长交期非标件')
+    await wrapper.get('input[aria-label="选择长交期物料 NS-001"]').setValue(true)
+    await wrapper.get('form').trigger('submit')
+    const created = wrapper.emitted<CreateReleasePackageInput[]>('create')![0]![0]!
+    expect(created.scope).toBe('NonStandardLongLead')
+    expect(created.selectedBomItemIds).toEqual(['ns-1'])
+    expect(created.selectedBomItemQuantities).toEqual({ 'ns-1': 2 })
   })
 
   it('lets the current assignee decide or transfer without showing the withdraw action', () => {

@@ -2,16 +2,20 @@
 import { ElMessage } from '../statusMessage'
 import { ElMessageBox } from 'element-plus'
 import { computed, reactive, ref, watch } from 'vue'
-import type { ProjectCopyOptionsInput, ProjectCopyPreview, ProjectCopyResult, ProjectSummary } from '../types'
+import type { ProjectContentResetReadiness, ProjectContentResetSnapshotSummary, ProjectCopyOptionsInput, ProjectCopyPreview, ProjectCopyResult, ProjectSummary } from '../types'
+import { getProjectContentResetReadiness, resetProjectContent, restoreProjectContent } from '../api'
 
 const props = defineProps<{
   modelValue: boolean
   project: ProjectSummary
   projects: ProjectSummary[]
+  token?: string
   canCopyContent: boolean
+  canResetContent?: boolean
   pending: boolean
-  onPreviewProjectCopy: (projectId: string, input: ProjectCopyOptionsInput) => Promise<ProjectCopyPreview>
-  onCopyProjectContent: (projectId: string, input: ProjectCopyOptionsInput) => Promise<ProjectCopyResult>
+  onPreviewProjectCopy?: (projectId: string, input: ProjectCopyOptionsInput) => Promise<ProjectCopyPreview>
+  onCopyProjectContent?: (projectId: string, input: ProjectCopyOptionsInput) => Promise<ProjectCopyResult>
+  onContentResetComplete?: () => Promise<unknown>
 }>()
 
 const emit = defineEmits<{ 'update:modelValue': [value: boolean] }>()
@@ -20,6 +24,11 @@ const copyPreviewPending = ref(false)
 const copyInput = reactive<ProjectCopyOptionsInput>({
   sourceProjectId: '', copyModels: true, copyDrawings: true, copyBom: true, copyValidationItems: true, folderIds: null,
 })
+const resetReadiness = ref<ProjectContentResetReadiness | null>(null)
+const resetPending = ref(false)
+const includeChildren = ref(false)
+const resetReason = ref('')
+const resetConfirmation = ref('')
 
 const copySourceProjects = computed(() => props.projects
   .filter(item => item.id !== props.project.id && item.canReadContent)
@@ -36,8 +45,16 @@ function resetCopy() {
   copyInput.folderIds = null
 }
 
-watch(() => props.modelValue, open => { if (open) resetCopy() })
-watch(() => props.project.id, resetCopy)
+function resetDangerForm() {
+  resetReadiness.value = null
+  resetPending.value = false
+  includeChildren.value = false
+  resetReason.value = ''
+  resetConfirmation.value = ''
+}
+
+watch(() => props.modelValue, open => { if (open) { resetCopy(); resetDangerForm(); if (props.canResetContent) void refreshResetReadiness() } }, { immediate: true })
+watch(() => props.project.id, () => { resetCopy(); resetDangerForm(); if (props.modelValue && props.canResetContent) void refreshResetReadiness() })
 
 function closeSettings() {
   emit('update:modelValue', false)
@@ -51,7 +68,7 @@ function formatCopyBytes(value: number) {
 }
 
 async function refreshCopyPreview(resetFolders = false) {
-  if (!copyInput.sourceProjectId) {
+  if (!copyInput.sourceProjectId || !props.onPreviewProjectCopy) {
     copyPreview.value = null
     return
   }
@@ -72,7 +89,7 @@ async function refreshCopyPreview(resetFolders = false) {
 }
 
 async function executeProjectCopy() {
-  if (!copyPreview.value?.canExecute || !copyInput.sourceProjectId) return
+  if (!copyPreview.value?.canExecute || !copyInput.sourceProjectId || !props.onCopyProjectContent) return
   const source = props.projects.find(item => item.id === copyInput.sourceProjectId)
   try {
     await ElMessageBox.confirm(
@@ -86,6 +103,61 @@ async function executeProjectCopy() {
   } catch (error) {
     if (error === 'cancel' || error === 'close') return
     ElMessage.error(error instanceof Error ? error.message : '项目内容复制失败')
+  }
+}
+
+async function refreshResetReadiness() {
+  resetPending.value = true
+  try {
+    resetReadiness.value = await getProjectContentResetReadiness(props.project.id, includeChildren.value, props.token ?? '')
+  } catch (error) {
+    resetReadiness.value = null
+    ElMessage.error(error instanceof Error ? error.message : '项目内容检查失败')
+  } finally {
+    resetPending.value = false
+  }
+}
+
+function formatResetDate(value: string) {
+  return new Date(value).toLocaleString('zh-CN', { hour12: false })
+}
+
+async function executeProjectReset() {
+  if (!resetReadiness.value?.canReset || !resetReason.value.trim() || resetConfirmation.value.trim().toLocaleLowerCase() !== props.project.code.toLocaleLowerCase()) return
+  try {
+    await ElMessageBox.confirm(
+      `确认重置“${props.project.code}”的项目内容？\n\n系统将保留项目基本信息和人员分配，清空所列业务内容，并创建可恢复30天的整项快照。该操作不能通过刷新页面撤销。`,
+      '确认重置项目内容',
+      { type: 'error', confirmButtonText: '确认重置', cancelButtonText: '取消' },
+    )
+    resetPending.value = true
+    await resetProjectContent(props.project.id, includeChildren.value, resetReason.value.trim(), resetConfirmation.value.trim(), props.token ?? '')
+    await props.onContentResetComplete?.()
+    resetReason.value = ''
+    resetConfirmation.value = ''
+    await refreshResetReadiness()
+    ElMessage.success('项目内容已重置，整项快照将在30天内保留')
+  } catch (error) {
+    if (error !== 'cancel' && error !== 'close') ElMessage.error(error instanceof Error ? error.message : '项目内容重置失败')
+  } finally {
+    resetPending.value = false
+  }
+}
+
+async function executeSnapshotRestore(snapshot: ProjectContentResetSnapshotSummary) {
+  try {
+    const { value } = await ElMessageBox.prompt(`输入项目号 ${snapshot.projectCode} 以恢复此快照。恢复仅能在项目尚未产生新内容时执行。`, '恢复项目内容快照', {
+      type: 'warning', confirmButtonText: '确认恢复', cancelButtonText: '取消', inputPattern: new RegExp(`^${snapshot.projectCode.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i'), inputErrorMessage: '项目号不匹配',
+    })
+    resetPending.value = true
+    await restoreProjectContent(props.project.id, snapshot.id, value, props.token ?? '')
+    await props.onContentResetComplete?.()
+    await refreshResetReadiness()
+    ElMessage.success('项目内容快照已恢复')
+  } catch (error) {
+    if (error !== 'cancel' && error !== 'close') ElMessage.error(error instanceof Error ? error.message : '快照恢复失败')
+  } finally {
+    resetPending.value = false
   }
 }
 </script>
@@ -123,7 +195,27 @@ async function executeProjectCopy() {
           <p v-else class="pdm-counter-note">目标项目必须先创建。选择源项目后，系统会检查目标是否已有同类内容。</p>
         </div>
       </section>
-      <p v-else class="pdm-project-settings__empty">当前账号没有可操作的项目设置。</p>
+      <section v-if="canResetContent" class="pdm-project-settings__section pdm-project-settings__danger" aria-labelledby="pdm-project-reset-settings-title">
+        <header><h3 id="pdm-project-reset-settings-title">重置项目内容</h3><p>仅系统管理员可执行。保留项目基本信息和人员分配，业务内容进入可恢复30天的整项快照。</p></header>
+        <el-alert title="危险操作" type="error" :closable="false" description="如存在已发布内容、进行中的审批或发布、U9C正式回写、已生效验证计划或已签出图档，服务端将拒绝重置。" />
+        <div class="pdm-reset-scope">
+          <el-checkbox v-model="includeChildren" :disabled="resetPending" @change="refreshResetReadiness">同时重置下属子项目</el-checkbox>
+          <button type="button" class="pdm-secondary-action" :disabled="resetPending" @click="refreshResetReadiness">{{ resetPending ? '正在检查…' : '重新检查范围' }}</button>
+        </div>
+        <template v-if="resetReadiness">
+          <p class="pdm-counter-note">重置范围：{{ resetReadiness.includedProjects.map(item => item.code).join('、') }}</p>
+          <div class="pdm-reset-counts"><span v-for="(count, label) in resetReadiness.counts" :key="label"><strong>{{ count }}</strong>{{ label }}</span></div>
+          <el-alert v-if="resetReadiness.blockers.length" title="当前不能重置" type="error" :closable="false"><ul><li v-for="blocker in resetReadiness.blockers" :key="blocker">{{ blocker }}</li></ul></el-alert>
+          <div v-if="resetReadiness.restorableSnapshots.length" class="pdm-reset-snapshots"><strong>30天内可恢复的快照</strong><div v-for="snapshot in resetReadiness.restorableSnapshots" :key="snapshot.id"><span>{{ formatResetDate(snapshot.createdAt) }} · {{ snapshot.createdBy }} · {{ snapshot.reason }}</span><button type="button" class="pdm-secondary-action" :disabled="resetPending" @click="executeSnapshotRestore(snapshot)">恢复</button></div></div>
+          <template v-if="resetReadiness.canReset && Object.values(resetReadiness.counts).some(count => count > 0)">
+            <label class="pdm-dialog-field">重置原因 <b>*</b><el-input v-model="resetReason" type="textarea" :rows="3" maxlength="500" show-word-limit placeholder="请填写可审计的重置原因" /></label>
+            <label class="pdm-dialog-field">输入项目号确认 <b>*</b><el-input v-model="resetConfirmation" :placeholder="`请输入 ${project.code}`" /></label>
+            <button type="button" class="pdm-danger-action" :disabled="resetPending || !resetReason.trim() || resetConfirmation.trim().toLocaleLowerCase() !== project.code.toLocaleLowerCase()" @click="executeProjectReset">{{ resetPending ? '正在重置…' : '重置项目内容' }}</button>
+          </template>
+          <p v-else-if="resetReadiness.canReset" class="pdm-counter-note">当前项目没有可重置的业务内容。</p>
+        </template>
+      </section>
+      <p v-if="!canCopyContent && !canResetContent" class="pdm-project-settings__empty">当前账号没有可操作的项目设置。</p>
     </section>
     <template #footer>
       <button type="button" class="pdm-secondary-action" :disabled="pending" @click="closeSettings">取消</button>
@@ -131,3 +223,7 @@ async function executeProjectCopy() {
     </template>
   </el-drawer>
 </template>
+
+<style scoped>
+.pdm-project-settings{display:flex;flex-direction:column;gap:18px}.pdm-project-settings__section{display:flex;flex-direction:column;gap:14px;padding-bottom:18px;border-bottom:1px solid var(--pdm-border)}.pdm-project-settings__section header h3{margin:0 0 5px}.pdm-project-settings__section header p{margin:0;color:#64748b}.pdm-project-settings__danger{border:1px solid #f2c5c0;border-radius:8px;padding:16px;background:#fffafa}.pdm-reset-scope{display:flex;align-items:center;justify-content:space-between;gap:12px}.pdm-reset-counts{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}.pdm-reset-counts span{display:flex;align-items:baseline;gap:7px;padding:9px 11px;border:1px solid #e2e8f0;border-radius:6px;background:#fff;color:#64748b}.pdm-reset-counts strong{font-size:18px;color:#0f172a}.pdm-reset-snapshots{display:flex;flex-direction:column;gap:8px}.pdm-reset-snapshots>div{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:8px 10px;border:1px solid #e2e8f0;border-radius:6px;background:#fff}.pdm-reset-snapshots span{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.pdm-project-settings__danger ul{margin:8px 0 0;padding-left:20px}.pdm-dialog-field b{color:#dc2626}.pdm-danger-action{align-self:flex-start;min-height:34px;border:1px solid #dc2626;border-radius:5px;padding:0 14px;background:#dc2626;color:#fff;cursor:pointer}.pdm-danger-action:disabled{cursor:not-allowed;opacity:.45}
+</style>

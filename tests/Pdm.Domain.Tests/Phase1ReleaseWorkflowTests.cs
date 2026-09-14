@@ -1666,6 +1666,67 @@ public sealed class Phase1ReleaseWorkflowTests
     }
 
     [Fact]
+    public async Task NonStandardRelease_AddsLongLeadAndSupplementWithStandardRulesAndDrawingGate()
+    {
+        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        await ConfigureApprovalWorkflowsAsync(repository);
+        var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(), new RecordingPublisher(), TimeProvider.System);
+        await workflow.ReplaceBomAsync(ProjectId, BomKind.NonStandard,
+            [new BomItemInput(1, "NS-LL-001", "非标长交期件", 4, "个", "Q235B", "机架", "W1", true)],
+            "admin", UserRole.Administrator, default);
+        var item = Assert.Single(await repository.GetBomAsync(ProjectId, BomKind.NonStandard, default));
+
+        var draft = await workflow.CreateScopedReleasePackageAsync(
+            ProjectId, null, string.Empty, string.Empty, "非标长交期", "未指定", null,
+            ReleaseScope.NonStandardLongLead, [item.Id], "admin", UserRole.Administrator, default,
+            new Dictionary<Guid, decimal> { [item.Id] = 2 });
+
+        Assert.True(draft.LocksDocuments);
+        Assert.False(draft.CreatesManufacturingBaseline);
+        Assert.Null(draft.NonStandardBomVersionId);
+        Assert.Equal(2, Assert.Single(draft.NonStandardBomSnapshot).Quantity);
+        var reviewGate = await Assert.ThrowsAsync<PdmRuleException>(() =>
+            workflow.SubmitReleasePackageAsync(draft.Id, "admin", UserRole.Administrator, default));
+        Assert.Contains("非标件BOM审核发布", reviewGate.Message);
+        await workflow.DeleteReleasePackageDraftAsync(draft.Id, "admin", UserRole.Administrator, default);
+
+        await repository.CreateReleasePackageAsync(new ReleasePackage(
+            Guid.NewGuid(), ProjectId, "RP-NS-LL-PUBLISHED", ReleasePackageState.Published, Guid.NewGuid(), "W1", "W1",
+            [], DateTimeOffset.UtcNow.AddHours(-2), DateTimeOffset.UtcNow.AddHours(-2), "C:\\PDM\\Release\\nonstandard-long-lead")
+        {
+            Scope = ReleaseScope.NonStandardLongLead,
+            SelectedBomItemIds = [item.Id],
+            NonStandardBomSnapshot = [item with { Quantity = 2 }]
+        }, default);
+        var overRelease = await Assert.ThrowsAsync<PdmRuleException>(() => workflow.CreateScopedReleasePackageAsync(
+            ProjectId, null, string.Empty, string.Empty, "超量", "未指定", null,
+            ReleaseScope.NonStandardLongLead, [item.Id], "admin", UserRole.Administrator, default,
+            new Dictionary<Guid, decimal> { [item.Id] = 3 }));
+        Assert.Contains("超过剩余可发布数量2", overRelease.Message);
+
+        await repository.CreateReleasePackageAsync(new ReleasePackage(
+            Guid.NewGuid(), ProjectId, "RP-NS-FORMAL-PUBLISHED", ReleasePackageState.Published, Guid.NewGuid(), "W1", "W1",
+            [], DateTimeOffset.UtcNow.AddHours(-1), DateTimeOffset.UtcNow.AddHours(-1), "C:\\PDM\\Release\\nonstandard-formal")
+        {
+            Scope = ReleaseScope.NonStandardWithDrawing,
+            NonStandardBomSnapshot = [item]
+        }, default);
+        var blockedLongLead = await Assert.ThrowsAsync<PdmRuleException>(() => workflow.CreateScopedReleasePackageAsync(
+            ProjectId, null, string.Empty, string.Empty, "正式后提前发布", "未指定", null,
+            ReleaseScope.NonStandardLongLead, [item.Id], "admin", UserRole.Administrator, default));
+        Assert.Contains("请使用增补/变更", blockedLongLead.Message);
+
+        var supplement = await workflow.CreateScopedReleasePackageAsync(
+            ProjectId, null, string.Empty, string.Empty, "设计问题 / 设计变更", "未指定", null,
+            ReleaseScope.NonStandardSupplement, [], "admin", UserRole.Administrator, default);
+        Assert.Equal(ReleaseScope.NonStandardSupplement, supplement.Scope);
+        Assert.StartsWith("ECN-", supplement.ChangeNumber);
+        Assert.True(supplement.LocksDocuments);
+        Assert.Equal(item.Id, Assert.Single(supplement.NonStandardBomSnapshot).Id);
+        Assert.Equal(FormalSupplementPolicy.Default.MaximumCount, supplement.FormalSupplementMaximumCount);
+    }
+
+    [Fact]
     public async Task ReleasePackage_NonDraftCannotBeDeleted()
     {
         var repository = new InMemoryPdmRepository(TimeProvider.System);

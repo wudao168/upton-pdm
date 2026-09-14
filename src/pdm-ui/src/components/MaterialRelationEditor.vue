@@ -217,7 +217,7 @@ async function publish() {
             <span>{{ relationMaterial(option.materialId)?.specification || '—' }}</span>
             <span>{{ relationMaterial(option.materialId)?.remark || '—' }}</span>
             <el-select v-model="option.quantityMode" :disabled="!canManage"><el-option value="PerMainQuantity" label="按主物料数量" /><el-option value="Fixed" label="固定数量" /></el-select>
-            <el-input-number v-model="option.quantityPerSet" :disabled="!canManage" :min="0.0001" :precision="4" controls-position="right" />
+            <el-input-number v-model="option.quantityPerSet" :disabled="!canManage" :min="1" :step="1" :precision="0" controls-position="right" />
             <el-checkbox v-model="option.isDefault" :disabled="!canManage" aria-label="默认候选" />
             <el-button v-if="canManage" link type="danger" @click="group.options.splice(optionIndex, 1)">移除</el-button>
           </div>

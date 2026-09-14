@@ -108,6 +108,7 @@ if (string.Equals(databaseOptions.Provider, "MySql", StringComparison.OrdinalIgn
     builder.Services.AddScoped<IProgramTemplateRepository, MySqlProgramTemplateRepository>();
     builder.Services.AddScoped<IValidationPlanRepository, MySqlValidationPlanRepository>();
     builder.Services.AddScoped<IProjectPlanningRepository, MySqlProjectPlanningRepository>();
+    builder.Services.AddScoped<IProjectContentResetStore, MySqlProjectContentResetStore>();
 }
 else
 {
@@ -122,6 +123,7 @@ else
     builder.Services.AddSingleton<IProgramTemplateRepository, InMemoryProgramTemplateRepository>();
     builder.Services.AddSingleton<IValidationPlanRepository, InMemoryValidationPlanRepository>();
     builder.Services.AddSingleton<IProjectPlanningRepository, InMemoryProjectPlanningRepository>();
+    builder.Services.AddSingleton<IProjectContentResetStore, InMemoryProjectContentResetStore>();
 }
 
 builder.Services.AddScoped<MySqlMigrationRunner>();
@@ -159,6 +161,7 @@ builder.Services.AddScoped<IMaterialRelationReleaseGuard>(provider => provider.G
 builder.Services.AddScoped<ProgramTemplateService>();
 builder.Services.AddScoped<ProjectFileService>();
 builder.Services.AddScoped<ControlledDocumentRecycleService>();
+builder.Services.AddScoped<ProjectContentResetService>();
 builder.Services.AddScoped<BomHeaderService>();
 builder.Services.AddScoped<ValidationPlanService>();
 builder.Services.AddScoped<ProjectPlanningService>();
@@ -184,6 +187,7 @@ builder.Services.AddHostedService<MaterialU9SyncBatchHostedService>();
 builder.Services.AddHostedService<BomHeaderAutomaticHostedService>();
 builder.Services.AddHostedService<ProjectFileRecycleCleanupService>();
 builder.Services.AddHostedService<ControlledDocumentRecycleCleanupService>();
+builder.Services.AddHostedService<ProjectContentResetCleanupService>();
 builder.Services.AddHostedService<ProjectPlanningReminderHostedService>();
 
 builder.Services.AddCors(options => options.AddPolicy("PdmClients", policy => policy
@@ -272,6 +276,7 @@ app.MapPdmBomHeaderEndpoints();
 app.MapProgramTemplateEndpoints();
 app.MapProjectFileEndpoints();
 app.MapControlledDocumentRecycleEndpoints();
+app.MapProjectContentResetEndpoints();
 app.MapU9BomEndpoints();
 app.MapValidationPlanEndpoints();
 app.MapProjectPlanningEndpoints();

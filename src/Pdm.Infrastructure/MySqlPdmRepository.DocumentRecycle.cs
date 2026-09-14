@@ -17,7 +17,7 @@ public sealed partial class MySqlPdmRepository
                    checkout_release_request_reason,row_version,updated_at,deleted_at,deleted_by,delete_reason,purged_at,
                    (SELECT COUNT(*) FROM document_version v WHERE v.document_id=document.id) stored_version_count
             FROM document
-            WHERE project_id=@ProjectId AND deleted_at IS NOT NULL AND purged_at IS NULL
+            WHERE project_id=@ProjectId AND deleted_at IS NOT NULL AND purged_at IS NULL AND reset_snapshot_id IS NULL
             ORDER BY deleted_at DESC,drawing_number,kind
             """, new { ProjectId = projectId }, cancellationToken: cancellationToken));
         return rows.Select(row => MapDocument(row)).ToArray();
@@ -52,7 +52,7 @@ public sealed partial class MySqlPdmRepository
                 : """
                   UPDATE document
                   SET deleted_at=NULL,deleted_by=NULL,delete_reason=NULL,row_version=row_version+1,updated_at=@Now
-                  WHERE id=@DocumentId AND row_version=@ExpectedRowVersion AND deleted_at IS NOT NULL AND purged_at IS NULL
+                  WHERE id=@DocumentId AND row_version=@ExpectedRowVersion AND deleted_at IS NOT NULL AND purged_at IS NULL AND reset_snapshot_id IS NULL
                   """,
             new { DocumentId = documentId, ExpectedRowVersion = expectedRowVersion, Actor = actor, Reason = reason, Now = now.UtcDateTime },
             transaction,

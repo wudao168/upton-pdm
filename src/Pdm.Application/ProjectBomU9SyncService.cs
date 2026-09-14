@@ -324,11 +324,12 @@ public sealed class ProjectBomU9SyncService(
             : released is null ? [] : EffectiveItems(released.Items).ToArray();
         var basePublishedAt = usePackage ? categoryPackage!.PublishedAt : released?.ReleasedAt;
 
-        if (kind != ProjectBomHeaderKind.Standard)
+        if (kind is not (ProjectBomHeaderKind.Standard or ProjectBomHeaderKind.NonStandard))
             return released is null && categoryPackage is null ? (false, []) : (true, baseItems);
 
+        var longLeadScope = kind == ProjectBomHeaderKind.Standard ? ReleaseScope.StandardLongLead : ReleaseScope.NonStandardLongLead;
         var longLeadPackages = packages
-            .Where(package => package.Scope == ReleaseScope.StandardLongLead
+            .Where(package => package.Scope == longLeadScope
                 && package.State == ReleasePackageState.Published
                 && package.PublishedAt.HasValue
                 && (!basePublishedAt.HasValue || package.PublishedAt.Value > basePublishedAt.Value))
@@ -347,7 +348,7 @@ public sealed class ProjectBomU9SyncService(
         }
         foreach (var package in longLeadPackages)
         {
-            foreach (var item in EffectiveItems(package.StandardBomSnapshot))
+            foreach (var item in EffectiveItems(kind == ProjectBomHeaderKind.Standard ? package.StandardBomSnapshot : package.NonStandardBomSnapshot))
             {
                 var releasedItem = item with { Quantity = item.Quantity * Math.Max(1, package.WholeSetMultiplier) };
                 var key = MaterialKey(releasedItem);
@@ -362,7 +363,7 @@ public sealed class ProjectBomU9SyncService(
     private static bool PackageMatchesKind(ReleaseScope scope, ProjectBomHeaderKind kind) => kind switch
     {
         ProjectBomHeaderKind.Standard => scope is ReleaseScope.StandardFormal or ReleaseScope.StandardSupplement,
-        ProjectBomHeaderKind.NonStandard => scope == ReleaseScope.NonStandardWithDrawing,
+        ProjectBomHeaderKind.NonStandard => scope is ReleaseScope.NonStandardWithDrawing or ReleaseScope.NonStandardSupplement,
         ProjectBomHeaderKind.Electrical => scope is ReleaseScope.ElectricalFormal or ReleaseScope.ElectricalSupplement,
         _ => false
     };
@@ -389,7 +390,7 @@ public sealed class ProjectBomU9SyncService(
             .Any(version => version.State == BomVersionState.Released
                 && version.Kind is BomKind.Standard or BomKind.NonStandard or BomKind.Electrical)
         || (await repository.ListReleasePackagesAsync(projectId, cancellationToken))
-            .Any(package => package.Scope == ReleaseScope.StandardLongLead && package.State == ReleasePackageState.Published);
+            .Any(package => package.Scope is ReleaseScope.StandardLongLead or ReleaseScope.NonStandardLongLead && package.State == ReleasePackageState.Published);
 
     private async Task<bool> HasDirectChildrenAsync(Guid projectId, CancellationToken cancellationToken) =>
         (await repository.ListProjectsAsync(cancellationToken)).Any(project => project.ParentProjectId == projectId);

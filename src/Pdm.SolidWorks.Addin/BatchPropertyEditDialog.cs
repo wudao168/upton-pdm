@@ -191,7 +191,9 @@ internal sealed class BatchPropertyEditItem
             .Where(pair => !Same(pair.Value, OriginalValue(pair.Key)));
 
     internal IReadOnlyList<string> VisiblePropertyNames => VisiblePropertyCardNames
+        .Concat(sourcePropertyNames)
         .Where(name => !IsIdentityProperty(name))
+        .Distinct(StringComparer.OrdinalIgnoreCase)
         .ToArray();
 
     internal IReadOnlyList<string> VisiblePropertyCardNames => EffectivePropertyCardFields
@@ -236,9 +238,10 @@ internal sealed class BatchPropertyEditItem
     {
         var normalized = NormalizePropertyName(propertyName);
         return EffectivePropertyCardFields.Any(field => string.Equals(
-                NormalizePropertyName(field.EditorPropertyName),
-                normalized,
-                StringComparison.OrdinalIgnoreCase));
+                   NormalizePropertyName(field.EditorPropertyName),
+                   normalized,
+                   StringComparison.OrdinalIgnoreCase))
+            || sourcePropertyNames.Contains(normalized, StringComparer.OrdinalIgnoreCase);
     }
 
     internal string OriginalValue(string propertyName) => Value(originalValues, propertyName);
@@ -1853,12 +1856,21 @@ internal sealed class BatchPropertyEditDialog : Form
         var value = fillOptionValue.Visible
             ? fillOptionValue.SelectedItem?.ToString() ?? string.Empty
             : fillValue.Text ?? string.Empty;
-        foreach (var item in rows.Where(candidate => candidate.Selected))
+        var selectedRows = rows.Where(candidate => candidate.Selected).ToArray();
+        var applicableRows = selectedRows.Where(item => item.IsPropertyApplicable(property)).ToArray();
+        foreach (var item in applicableRows)
         {
             item.SetPropertyValue(property, value);
         }
         grid.Refresh();
         UpdateSummary();
+        var skipped = selectedRows.Length - applicableRows.Length;
+        plmSyncStatus.Text = skipped > 0
+            ? string.Concat("已填入 ", applicableRows.Length, " 个图档；跳过 ", skipped, " 个不包含该字段的图档")
+            : string.Concat("已填入 ", applicableRows.Length, " 个图档");
+        plmSyncStatus.ForeColor = skipped > 0
+            ? Color.FromArgb(210, 110, 0)
+            : Color.FromArgb(31, 132, 92);
     }
 
     private void AutoFillNameOrModelForSelectedRows()
@@ -1955,15 +1967,11 @@ internal sealed class BatchPropertyEditDialog : Form
     {
         var current = fillProperty.SelectedItem as string;
         var selectedRows = rows.Where(item => item.Selected).ToArray();
-        var fieldSets = selectedRows
-            .Select(item => new HashSet<string>(
-                item.VisiblePropertyNames,
-                StringComparer.OrdinalIgnoreCase))
-            .ToArray();
-        var available = selectedRows.Length > 0 && fieldSets.All(set => set.Count > 0)
-            ? grid.Columns.Cast<DataGridViewColumn>()
-                .Select(column => column.Tag as string)
-                .Where(name => !string.IsNullOrWhiteSpace(name) && fieldSets.All(set => set.Contains(name)))
+        var available = selectedRows.Length > 0
+            ? selectedRows
+                .SelectMany(item => item.VisiblePropertyNames)
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .OrderBy(name => name, StringComparer.CurrentCulture)
                 .ToArray()
             : Array.Empty<string>();
 

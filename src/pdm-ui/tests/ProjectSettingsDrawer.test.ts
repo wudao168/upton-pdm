@@ -4,6 +4,11 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import ProjectSettingsDrawer from '../src/components/ProjectSettingsDrawer.vue'
 import type { ProjectSummary } from '../src/types'
 
+const api = vi.hoisted(() => ({
+  getProjectContentResetReadiness: vi.fn(), resetProjectContent: vi.fn(), restoreProjectContent: vi.fn(),
+}))
+vi.mock('../src/api', () => api)
+
 const target: ProjectSummary = {
   id: 'target-project', code: 'P700002', name: '新建目标项目', owner: 'admin', stage: '进行中', vaultName: 'P700002',
   vaultLocation: 'D:\\PDM\\P700002', releaseLocation: 'D:\\Release\\P700002', quantity: 1, serialNumbers: [],
@@ -69,5 +74,28 @@ describe('ProjectSettingsDrawer', () => {
     expect(copy).toHaveBeenCalledWith(target.id, expect.objectContaining({ folderIds: ['gas-folder'] }))
     expect(wrapper.emitted('update:modelValue')).toContainEqual([false])
     wrapper.unmount()
+  })
+
+  it('管理员看到服务端重置检查结果和30天恢复入口', async () => {
+    api.getProjectContentResetReadiness.mockResolvedValue({
+      project: target, includeChildren: false, includedProjects: [target], canReset: false,
+      blockers: ['存在已正式发布的发布包或BOM基线'], counts: { 受控图档: 3, BOM物料: 8 },
+      restorableSnapshots: [{ id: 'snapshot-1', projectId: target.id, projectCode: target.code, includedProjectIds: [target.id], reason: '误导入', counts: { 受控图档: 2 }, createdBy: 'admin', createdAt: '2026-09-14T01:00:00Z', expiresAt: '2026-10-14T01:00:00Z' }],
+    })
+    const wrapper = mount(ProjectSettingsDrawer, {
+      props: { modelValue: true, project: target, projects: [target], token: 'token', canCopyContent: false, canResetContent: true, pending: false, onContentResetComplete: vi.fn() },
+      global: { stubs: {
+        ElDrawer: { props: ['modelValue', 'title'], emits: ['update:modelValue'], template: '<section role="dialog"><h2>{{ title }}</h2><slot /><footer><slot name="footer" /></footer></section>' },
+        ElInput: { props: ['modelValue'], template: '<input :value="modelValue">' }, ElAlert: { props: ['title', 'description'], template: '<div>{{ title }} {{ description }}<slot /></div>' },
+        ElCheckbox: { props: ['modelValue'], emits: ['update:modelValue', 'change'], template: '<label><slot /></label>' },
+      } },
+    })
+    await flushPromises()
+
+    expect(api.getProjectContentResetReadiness).toHaveBeenCalledWith(target.id, false, 'token')
+    expect(wrapper.text()).toContain('重置项目内容')
+    expect(wrapper.text()).toContain('存在已正式发布的发布包或BOM基线')
+    expect(wrapper.text()).toContain('30天内可恢复的快照')
+    expect(wrapper.text()).toContain('误导入')
   })
 })

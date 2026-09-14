@@ -69,8 +69,8 @@ describe('项目计划审批和配置', () => {
     const prompt = vi.spyOn(ElMessageBox, 'prompt')
     const wrapper = render()
     await flushPromises()
-    expect(wrapper.find('.pdm-gantt-info-head').text()).toBe('项目 / 任务责任人进度计划日期工期完成日期')
-    expect(wrapper.find('.pdm-gantt-info-row.is-stage > span:nth-child(5)').text()).toBe('4天')
+    expect(wrapper.find('.pdm-gantt-info-head').text()).toBe('项目 / 任务阶段责任人进度计划日期工期完成日期')
+    expect(wrapper.find('.pdm-gantt-info-row.is-stage > span:nth-child(6)').text()).toBe('4天')
     expect(wrapper.find('[aria-label="编辑完成节点工期"]').exists()).toBe(false)
     expect(wrapper.find('[aria-label="编辑方案检查计划日期"]').findAll('time').map(item => item.text())).toEqual(['2026-09-28', '2026-09-30'])
     await wrapper.find('[aria-label="编辑方案检查工期"]').trigger('click')
@@ -390,7 +390,7 @@ describe('项目计划审批和配置', () => {
   })
 
   it('无独立计划的子项目在汇总中默认显示主计划日期和甘特条', async () => {
-    const rootPlan = { ...structuredClone(draft), id: 'root-plan', projectId: 'root', plannedStart: '2026-09-11', plannedFinish: '2026-11-04' }
+    const rootPlan = { ...structuredClone(draft), id: 'root-plan', projectId: 'root', approvalStatus: 'Approved' as const, plannedStart: '2026-09-11', plannedFinish: '2026-11-04' }
     api.readProjectPlan.mockResolvedValue(rootPlan)
     api.readProjectPlanPortfolio.mockResolvedValue({ rootProjectId: 'root', currentStage: 'custom-review', completionPercent: 0, laggingProjectCount: 0, riskProjectCount: 0, projects: [
       { projectId: 'root', projectCode: 'P1', projectName: '主项目', isRoot: true, hasPlan: true, currentStage: 'custom-review', completionPercent: 20, plannedStart: '2026-09-11', plannedFinish: '2026-11-04', plan: rootPlan },
@@ -399,6 +399,10 @@ describe('项目计划审批和配置', () => {
     const wrapper = render(root)
     await flushPromises()
     const inheritedRow = wrapper.findAll('.pdm-gantt-info-row.is-project').find(row => row.text().includes('P1-2'))!
+    const rootRow = wrapper.findAll('.pdm-gantt-info-row.is-project').find(row => row.text().includes('P1主项目'))!
+    expect(rootRow.find('.pdm-gantt-stage-cell').text()).toBe('方案确认')
+    expect(rootRow.find('.pdm-gantt-stage-cell').classes()).toContain('is-current')
+    expect(inheritedRow.find('.pdm-gantt-stage-cell').text()).toBe('方案确认（跟随）')
     expect(inheritedRow.classes()).toContain('is-inherited-plan')
     expect(inheritedRow.attributes('title')).toBe('默认跟随主计划')
     expect(inheritedRow.findAll('time').map(item => item.text())).toEqual(['2026-09-11', '2026-11-04'])
@@ -830,7 +834,7 @@ describe('项目计划审批和配置', () => {
     await flushPromises()
     expect(document.body.textContent).toContain('待计划生效')
     const row = document.querySelector<HTMLElement>('.pdm-gantt-info-row.is-task')!
-    expect(row.textContent).not.toContain('方案确认')
+    expect(row.querySelector('.pdm-gantt-stage-cell')?.textContent).toBe('方案确认')
     row.click()
     await flushPromises()
     expect(document.body.textContent).toContain('批准生效后才可填报实际进度')
@@ -885,7 +889,7 @@ describe('项目计划审批和配置', () => {
     expect(wrapper.find('.pdm-gantt-info-row.is-task .pdm-gantt-name').text()).toBe('方案检查')
     expect(wrapper.find('[aria-label="编辑方案检查计划日期"]').text()).toBe('2026-09-10 ~ 2026-09-15')
     expect(wrapper.find('.pdm-gantt-info-head').text()).toContain('完成日期')
-    expect(wrapper.find('.pdm-gantt-info-row.is-task > span:nth-child(6)').text()).toBe('2026-09-16')
+    expect(wrapper.find('.pdm-gantt-info-row.is-task > span:nth-child(7)').text()).toBe('2026-09-16')
     expect(wrapper.find('.pdm-gantt-info-row.is-task').exists()).toBe(true)
     await wrapper.find('.pdm-gantt-info-row.is-stage').trigger('click')
     expect(wrapper.find('.pdm-gantt-info-row.is-task').exists()).toBe(false)
@@ -896,22 +900,24 @@ describe('项目计划审批和配置', () => {
     expect(wrapper.find('.pdm-plan-summary').text()).toContain('生效信息草稿')
   })
 
-  it('阶段列始终隐藏，左侧列可一键折叠并释放时间轴空间', async () => {
+  it('阶段列紧邻任务显示所属阶段，折叠信息列后释放时间轴空间', async () => {
     vi.spyOn(HTMLElement.prototype, 'clientWidth', 'get').mockReturnValue(1390)
     const wrapper = render()
     await flushPromises()
-    expect(wrapper.find('.pdm-gantt-info-head').text()).toBe('项目 / 任务责任人进度计划日期工期完成日期')
+    expect(wrapper.find('.pdm-gantt-info-head').text()).toBe('项目 / 任务阶段责任人进度计划日期工期完成日期')
     expect(wrapper.find('[aria-label="收起全部阶段"]').exists()).toBe(true)
     expect(wrapper.find('[aria-label="折叠信息列"]').exists()).toBe(true)
-    expect(wrapper.find('.pdm-gantt-info-head').text()).not.toContain('阶段')
+    expect(wrapper.find('.pdm-gantt-info-row.is-stage .pdm-gantt-stage-cell').text()).toBe('方案确认')
+    expect(wrapper.find('.pdm-gantt-info-row.is-task .pdm-gantt-stage-cell').text()).toBe('方案确认')
     expect((wrapper.find('.pdm-gantt-timeline-head').element as HTMLElement).style.width).toBe('800px')
     await wrapper.find('[aria-label="折叠信息列"]').trigger('click')
     expect(wrapper.find('.pdm-gantt-table').classes()).toContain('is-info-collapsed')
     expect(wrapper.find('.pdm-gantt-info-head').text()).toBe('项目 / 任务计划日期工期')
+    expect(wrapper.find('.pdm-gantt-stage-cell').exists()).toBe(false)
     expect((wrapper.find('.pdm-gantt-timeline-head').element as HTMLElement).style.width).toBe('1040px')
     await wrapper.find('[aria-label="展开信息列"]').trigger('click')
     expect(wrapper.find('.pdm-gantt-table').classes()).not.toContain('is-info-collapsed')
-    expect(wrapper.find('.pdm-gantt-info-head').text()).toBe('项目 / 任务责任人进度计划日期工期完成日期')
+    expect(wrapper.find('.pdm-gantt-info-head').text()).toBe('项目 / 任务阶段责任人进度计划日期工期完成日期')
   })
 
   it('新计划默认60天，厂外调试计划统一暂不建立', async () => {

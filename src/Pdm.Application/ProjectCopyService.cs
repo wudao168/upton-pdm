@@ -257,6 +257,7 @@ public sealed class ProjectCopyService(
                 Id = Guid.NewGuid(),
                 ValidationDate = null,
                 Result = null,
+                Reviewer = null,
                 ResponsiblePerson = null,
                 Remark = null
             }).ToArray();

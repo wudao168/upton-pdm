@@ -8,7 +8,7 @@ namespace Upton.Pdm.Infrastructure;
 
 public static class ValidationPlanWorkbook
 {
-    private static readonly double[] ColumnWidths = [8, 16, 17, 17, 17, 17, 17, 17, 17, 17];
+    private static readonly double[] ColumnWidths = [8, 16, 17, 17, 17, 17, 17, 17, 17, 17, 17];
 
     public static byte[] Write(ValidationPlanExportData export)
     {
@@ -58,7 +58,7 @@ public static class ValidationPlanWorkbook
         var entry = archive.CreateEntry("xl/worksheets/sheet1.xml", CompressionLevel.Optimal);
         using var stream = entry.Open();
         using var writer = XmlWriter.Create(stream, new XmlWriterSettings { Encoding = new UTF8Encoding(false), Indent = true });
-        var merges = new List<string> { "A1:J1", "A2:J2", "B3:C3", "E3:F3", "H3:I3", "B4:D4", "F4:H4", "B5:E5" };
+        var merges = new List<string> { "A1:K1", "A2:K2", "B3:D3", "F3:H3", "J3:K3", "B4:D4", "F4:H4", "J4:K4", "B5:E5" };
 
         writer.WriteStartDocument(true);
         writer.WriteStartElement("worksheet", SpreadsheetNamespace);
@@ -87,9 +87,9 @@ public static class ValidationPlanWorkbook
         writer.WriteStartElement("sheetData");
         WriteRow(writer, 1, 34, 1, ["项目验证计划"]);
         WriteRow(writer, 2, 48, 2, ["说明：本计划由项目成员线上维护；需要数据支撑的验证项应填写实际数据。导出文件中的评审与会签栏用于打印签字。"]);
-        WriteRow(writer, 3, 28, 3, ["编制", export.Plan.PreparedBy ?? export.Plan.UpdatedBy, null, "校对", null, null, "审核", null, null, "批准"]);
-        WriteRow(writer, 4, 28, 3, ["项目号", export.Project.Code, null, null, "项目名称", export.Project.Name, null, null, "验证日期", Date(export.Plan.ValidationDate)]);
-        WriteRow(writer, 5, 34, 4, ["序号", "验证内容", null, null, null, "信息来源", "验证日期", "结果（如有数据需填入）", "责任人", "备注"]);
+        WriteRow(writer, 3, 28, 3, ["编制", export.Plan.PreparedBy ?? export.Plan.UpdatedBy, null, null, "审核", export.ReviewPerson, null, null, "批准", export.ApprovalPerson, null]);
+        WriteRow(writer, 4, 28, 3, ["项目号", export.Project.Code, null, null, "项目名称", export.Project.Name, null, null, "验证日期", Date(export.Plan.ValidationDate), null]);
+        WriteRow(writer, 5, 34, 4, ["序号", "验证内容", null, null, null, "信息来源", "验证日期", "结果（如有数据需填入）", "审核人", "责任人", "备注"]);
 
         var rowNumber = 6;
         var sequence = 1;
@@ -103,7 +103,7 @@ public static class ValidationPlanWorkbook
                 WriteRow(writer, rowNumber, 36, 5,
                 [
                     sequence++, item.ValidationContent, null, null, null, item.InformationSource,
-                    Date(item.ValidationDate), item.Result, item.ResponsiblePerson, item.Remark
+                    Date(item.ValidationDate), item.Result, item.Reviewer, item.ResponsiblePerson, item.Remark
                 ]);
                 merges.Add($"B{rowNumber}:E{rowNumber}");
                 rowNumber++;
@@ -112,22 +112,22 @@ public static class ValidationPlanWorkbook
 
         for (var index = 0; index < 5; index++)
         {
-            WriteRow(writer, rowNumber, 36, 5, [sequence++, "", "", "", "", "", "", "", "", ""]);
+            WriteRow(writer, rowNumber, 36, 5, [sequence++, "", "", "", "", "", "", "", "", "", ""]);
             merges.Add($"B{rowNumber}:E{rowNumber}");
             rowNumber++;
         }
 
         WriteRow(writer, rowNumber, 34, 7, ["评审结果", "□ 本次项目验证计划通过", null, null, null, null, "□ 本次项目验证计划不通过"]);
         merges.Add($"B{rowNumber}:F{rowNumber}");
-        merges.Add($"G{rowNumber}:J{rowNumber}");
+        merges.Add($"G{rowNumber}:K{rowNumber}");
         rowNumber++;
-        WriteRow(writer, rowNumber, 28, 3, ["会签", null, "项目经理", "机械负责人", "电气负责人", "装配钳工", "调试工程师", "生产经理", "技术经理", "质量经理"]);
+        WriteRow(writer, rowNumber, 28, 3, ["会签", null, "项目经理", "机械负责人", "电气负责人", "装配钳工", "调试工程师", "生产经理", "技术经理", "质量经理", ""]);
         merges.Add($"A{rowNumber}:B{rowNumber + 1}");
         rowNumber++;
         WriteRow(writer, rowNumber, 42, 5, []);
         rowNumber++;
         WriteRow(writer, rowNumber, 30, 2, ["签字确认（责任确权）需对验证内容及结果进行检查；技术经理、质量经理负责监督和确认。"]);
-        merges.Add($"A{rowNumber}:J{rowNumber}");
+        merges.Add($"A{rowNumber}:K{rowNumber}");
         writer.WriteEndElement();
 
         writer.WriteStartElement("mergeCells");

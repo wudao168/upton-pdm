@@ -24,6 +24,7 @@ public sealed record SaveProjectValidationPlanItemCommand(
     string? InformationSource,
     DateOnly? ValidationDate,
     string? Result,
+    string? Reviewer,
     string? ResponsiblePerson,
     string? Remark,
     int SortOrder);
@@ -34,7 +35,12 @@ public sealed record SaveProjectValidationPlanCommand(
     IReadOnlyList<SaveProjectValidationPlanItemCommand> Items,
     long? ExpectedRowVersion = null);
 
-public sealed record ValidationPlanExportData(Project Project, ProjectValidationPlan Plan, DateTimeOffset ExportedAt);
+public sealed record ValidationPlanExportData(
+    Project Project,
+    ProjectValidationPlan Plan,
+    DateTimeOffset ExportedAt,
+    string? ReviewPerson = null,
+    string? ApprovalPerson = null);
 
 public sealed record ValidationPlanAttachmentDownload(ValidationPlanAttachment Attachment, Stream Content);
 

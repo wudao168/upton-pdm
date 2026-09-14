@@ -1630,8 +1630,24 @@ export function recycleControlledDocument(projectId: string, documentId: string,
   return requestJson(`/api/projects/${projectId}/documents/${documentId}/recycle`, { method: 'POST', body: JSON.stringify({ expectedRowVersion, reason, confirmation }) }, token)
 }
 
+export function recycleControlledDocumentsBatch(projectId: string, items: Array<{ documentId: string; expectedRowVersion: number }>, reason: string, token: string): Promise<import('./types').ControlledDocumentRecycleBatchResult> {
+  return requestJson(`/api/projects/${projectId}/documents/recycle-batch`, { method: 'POST', body: JSON.stringify({ items, reason }) }, token)
+}
+
 export function restoreControlledDocument(projectId: string, documentId: string, expectedRowVersion: number, token: string): Promise<ManagedDocument> {
   return requestJson(`/api/projects/${projectId}/documents/${documentId}/restore`, { method: 'POST', body: JSON.stringify({ expectedRowVersion }) }, token)
+}
+
+export function getProjectContentResetReadiness(projectId: string, includeChildren: boolean, token: string): Promise<import('./types').ProjectContentResetReadiness> {
+  return requestJson(`/api/projects/${projectId}/content-reset/readiness?includeChildren=${includeChildren}`, {}, token)
+}
+
+export function resetProjectContent(projectId: string, includeChildren: boolean, reason: string, confirmation: string, token: string): Promise<import('./types').ProjectContentResetSnapshotSummary> {
+  return requestJson(`/api/projects/${projectId}/content-reset`, { method: 'POST', body: JSON.stringify({ includeChildren, reason, confirmation }) }, token)
+}
+
+export function restoreProjectContent(projectId: string, snapshotId: string, confirmation: string, token: string): Promise<import('./types').ProjectContentResetSnapshotSummary> {
+  return requestJson(`/api/projects/${projectId}/content-reset/${snapshotId}/restore`, { method: 'POST', body: JSON.stringify({ confirmation }) }, token)
 }
 
 export async function uploadProjectFile(projectId: string, folderId: string, file: File, token: string, comment = '', onProgress?: (percent: number) => void, signal?: AbortSignal): Promise<ProjectFile> {
@@ -2198,7 +2214,7 @@ function mapReleasePackage(releasePackage: ApiReleasePackage): ReleasePackageSum
 
 function mapReleaseScope(value?: string | number): ReleaseScope {
   if (typeof value === 'string') return value as ReleaseScope
-  return ['LegacyCombined', 'StandardLongLead', 'StandardFormal', 'StandardSupplement', 'ElectricalFormal', 'ElectricalSupplement', 'NonStandardWithDrawing'][value ?? 0] as ReleaseScope
+  return ['LegacyCombined', 'StandardLongLead', 'StandardFormal', 'StandardSupplement', 'ElectricalFormal', 'ElectricalSupplement', 'NonStandardWithDrawing', 'NonStandardLongLead', 'NonStandardSupplement'][value ?? 0] as ReleaseScope
 }
 
 function mapBomVersionState(value: string | number): BomVersionState {

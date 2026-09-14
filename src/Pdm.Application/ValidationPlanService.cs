@@ -152,7 +152,7 @@ public sealed class ValidationPlanService(
             {
                 items.Add(new(Guid.NewGuid(), null, null, "人工项", Required(input.ValidationContent, 1500, "验证内容"),
                     NormalizeInformationSource(input.InformationSource), input.ValidationDate,
-                    Optional(input.Result, 1500, "验证结果"), Optional(input.ResponsiblePerson, 100, "责任人"),
+                    Optional(input.Result, 1500, "验证结果"), Optional(input.Reviewer, 100, "审核人"), Optional(input.ResponsiblePerson, 100, "责任人"),
                     Optional(input.Remark, 1000, "备注"), input.SortOrder));
                 continue;
             }
@@ -166,7 +166,7 @@ public sealed class ValidationPlanService(
                 snapshot?.CategoryName ?? category.Name,
                 snapshot?.ValidationContent ?? catalogItem.Content,
                 NormalizeInformationSource(input.InformationSource), input.ValidationDate,
-                Optional(input.Result, 1500, "验证结果"), Optional(input.ResponsiblePerson, 100, "责任人"),
+                Optional(input.Result, 1500, "验证结果"), Optional(input.Reviewer, 100, "审核人"), Optional(input.ResponsiblePerson, 100, "责任人"),
                 Optional(input.Remark, 1000, "备注"), input.SortOrder));
         }
 
@@ -223,7 +223,9 @@ public sealed class ValidationPlanService(
 
     public async Task<ProjectValidationPlan> DecideAsync(Guid taskId, ApprovalDecision decision, string? comment, string actor, UserRole role, CancellationToken cancellationToken)
     {
-        await RequirePermissionAsync(actor, role, PermissionCodes.ApprovalDecide, cancellationToken);
+        if (!await repository.HasUserPermissionAsync(actor, role, PermissionCodes.ApprovalDecide, cancellationToken)
+            && !await repository.HasUserPermissionAsync(actor, role, PermissionCodes.ValidationPlanEdit, cancellationToken))
+            throw new UnauthorizedAccessException("当前角色无权处理验证计划审批。");
         var includeAll = string.Equals(actor, "admin", StringComparison.OrdinalIgnoreCase);
         var task = (await validationPlans.ListPendingApprovalTasksAsync(actor, includeAll, cancellationToken)).FirstOrDefault(item => item.Id == taskId)
             ?? throw new PdmRuleException("只能处理当前分配给自己的验证计划审批任务。");
@@ -344,8 +346,16 @@ public sealed class ValidationPlanService(
         await RequireProjectReadAsync(projectId, actor, role, cancellationToken);
         var project = await repository.FindProjectAsync(projectId, cancellationToken) ?? throw new PdmNotFoundException("项目不存在。");
         var plan = await validationPlans.FindPlanAsync(projectId, cancellationToken) ?? throw new PdmNotFoundException("项目尚未建立验证计划。");
+        var users = await repository.ListUsersAsync(cancellationToken);
+        string? DisplayName(string? username) => string.IsNullOrWhiteSpace(username)
+            ? null
+            : users.FirstOrDefault(user => string.Equals(user.Username, username, StringComparison.OrdinalIgnoreCase))?.DisplayName ?? username;
+        var reviewTask = plan.ApprovalTasks.OrderBy(task => task.StepOrder).FirstOrDefault(task => task.Stage == ApprovalStage.MainDesigner);
+        var approvalTask = plan.ApprovalTasks.OrderByDescending(task => task.StepOrder).FirstOrDefault();
         await AuditAsync(actor, "project.validation-plan.export", nameof(ProjectValidationPlan), plan.Id, $"导出项目验证计划：{project.Code} · {plan.Items.Count}项", cancellationToken);
-        return new(project, plan, timeProvider.GetUtcNow());
+        return new(project, plan, timeProvider.GetUtcNow(),
+            DisplayName(reviewTask?.DecisionBy ?? reviewTask?.Assignee ?? project.DesignLead),
+            DisplayName(approvalTask?.DecisionBy ?? approvalTask?.Assignee));
     }
 
     private async Task RequireProjectReadAsync(Guid projectId, string actor, UserRole role, CancellationToken cancellationToken)
@@ -500,7 +510,14 @@ public sealed class ValidationPlanService(
             };
             if (string.IsNullOrWhiteSpace(assignee)) throw new PdmRuleException($"审批模板“{workflow.Name}”的“{step.Name}”尚未配置审批人。");
             if (!users.Any(user => user.IsActive && string.Equals(user.Username, assignee, StringComparison.OrdinalIgnoreCase))) throw new PdmRuleException($"审批节点“{step.Name}”的账号{assignee}不存在或已停用。");
-            result.Add(new ValidationPlanApprovalTask(Guid.NewGuid(), planId, index + 1, step.Stage, step.Name, assignee, null, null, null, createdAt, null));
+            var autoApproved = step.AssigneeSource == ApprovalAssigneeSource.Submitter
+                || step.AssigneeSource == ApprovalAssigneeSource.ProjectDesignLead
+                    && string.Equals(assignee, actor, StringComparison.OrdinalIgnoreCase);
+            var autoComment = step.AssigneeSource == ApprovalAssigneeSource.Submitter
+                ? "提交验证计划即完成编制人自检"
+                : autoApproved ? "提交人为当前主设，系统自动通过" : null;
+            result.Add(new ValidationPlanApprovalTask(Guid.NewGuid(), planId, index + 1, step.Stage, step.Name, assignee,
+                autoApproved ? ApprovalDecision.Approved : null, autoApproved ? actor : null, autoComment, createdAt, autoApproved ? createdAt : null));
         }
         return result;
     }

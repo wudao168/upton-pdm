@@ -55,4 +55,23 @@ public sealed class ControlledDocumentRecycleServiceTests
         await Assert.ThrowsAsync<PdmRuleException>(() => service.RecycleAsync(project.Id, document.Id, document.RowVersion, "清理", "错误名称", "admin", UserRole.Administrator, CancellationToken.None));
         await Assert.ThrowsAsync<PdmConflictException>(() => repository.SetDocumentDeletedAsync(document.Id, true, document.RowVersion + 1, "admin", "清理", DateTimeOffset.UtcNow, CancellationToken.None));
     }
+
+    [Fact]
+    public async Task BatchRecycleKeepsBlockedItemsAndReportsPartialSuccess()
+    {
+        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var project = Assert.Single(await repository.ListProjectsAsync(CancellationToken.None));
+        var first = await repository.RegisterDocumentAsync(new RegisterDocumentCommand(project.Id, "BATCH-001", "批量测试一", "BATCH-001.SLDPRT", DocumentKind.Part), "admin", CancellationToken.None);
+        var second = await repository.RegisterDocumentAsync(new RegisterDocumentCommand(project.Id, "BATCH-002", "批量测试二", "BATCH-002.SLDPRT", DocumentKind.Part), "admin", CancellationToken.None);
+        var service = new ControlledDocumentRecycleService(repository, TimeProvider.System);
+
+        var result = await service.RecycleBatchAsync(project.Id,
+            [new(first.Id, first.RowVersion), new(second.Id, second.RowVersion + 1)],
+            "清理重复上传", "admin", UserRole.Administrator, CancellationToken.None);
+
+        Assert.Contains(first.Id, result.RecycledDocumentIds);
+        Assert.Contains(result.Failures, item => item.DocumentId == second.Id);
+        Assert.Null(await repository.FindDocumentAsync(first.Id, CancellationToken.None));
+        Assert.NotNull(await repository.FindDocumentAsync(second.Id, CancellationToken.None));
+    }
 }

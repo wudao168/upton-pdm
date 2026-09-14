@@ -131,7 +131,7 @@ describe('ValidationPlanManager', () => {
     wrapper.unmount()
   })
 
-  it('责任人列显示在结果列之前', async () => {
+  it('在结果右侧显示审核人列并保存审核人', async () => {
     const planWithRow = { ...childPlan, items: [{ id: 'row-1', catalogCategoryId: category.id, catalogItemId: item.id, categoryName: category.name, validationContent: item.content, informationSource: '内部评审', validationDate: null, result: null, responsiblePerson: null, remark: null, sortOrder: 1 }] }
     api.readProjectValidationPlan.mockImplementation(async (projectId: string) => projectId === childProject.id ? planWithRow : null)
     const wrapper = mount(ValidationPlanManager, {
@@ -144,8 +144,40 @@ describe('ValidationPlanManager', () => {
     await flushPromises()
 
     expect(wrapper.findAll('.validation-plan__table th').map(cell => cell.text())).toEqual([
-      '序号', '分类', '验证内容', '信息来源', '验证日期', '责任人', '结果', '备注', '操作',
+      '序号', '分类', '验证内容', '信息来源', '验证日期', '责任人', '结果', '审核人', '备注', '操作',
     ])
+    await wrapper.find<HTMLInputElement>('input[placeholder="审核人"]').setValue('李审核')
+    await wrapper.findAll('button').find(button => button.text().includes('保存'))!.trigger('click')
+    await flushPromises()
+    expect(api.saveProjectValidationPlan).toHaveBeenCalledWith('project-1', expect.objectContaining({
+      items: [expect.objectContaining({ reviewer: '李审核' })],
+    }), 'token')
+    wrapper.unmount()
+  })
+
+  it('显示当前审批人、自动通过记录和分配给主设的审批按钮', async () => {
+    const pendingPlan = {
+      ...childPlan,
+      state: 'PendingApproval' as const,
+      approvalTasks: [
+        { id: 'task-1', planId: childPlan.id, stepOrder: 1, stage: 'MechanicalEngineer', stepName: '编制人自检', assignee: 'engineer', decision: 'Approved' as const, decisionBy: 'engineer', decisionComment: '提交验证计划即完成编制人自检', createdAt: '2026-09-14T00:00:00Z', decidedAt: '2026-09-14T00:00:00Z' },
+        { id: 'task-2', planId: childPlan.id, stepOrder: 2, stage: 'MainDesigner', stepName: '主设审核', assignee: 'designer', decision: null, decisionBy: null, decisionComment: null, createdAt: '2026-09-14T00:00:00Z', decidedAt: null },
+      ],
+    }
+    api.readProjectValidationPlan.mockImplementation(async (projectId: string) => projectId === childProject.id ? pendingPlan : null)
+    const wrapper = mount(ValidationPlanManager, {
+      attachTo: document.body,
+      props: { projectId: childProject.id, projectCode: childProject.code, projectName: childProject.name, projects: [rootProject, childProject], token: 'token', currentUsername: 'designer', currentDisplayName: '主设', canEdit: true, canManageCatalog: false, canDecideApproval: true },
+      global: { plugins: [ElementPlus] },
+    })
+    await flushPromises()
+    await wrapper.findAll('tbody tr').find(row => row.text().includes('P700005-3'))!.trigger('click')
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('当前等待：主设审核 · designer')
+    expect(wrapper.text()).toContain('编制人自检 · engineer · 系统自动通过')
+    expect(wrapper.findAll('button').some(button => button.text().includes('批准'))).toBe(true)
+    expect(wrapper.findAll('button').some(button => button.text().includes('驳回'))).toBe(true)
     wrapper.unmount()
   })
 
@@ -193,6 +225,49 @@ describe('ValidationPlanManager', () => {
     selectAll.click()
     await flushPromises()
     expect(document.body.textContent).toContain('已选 0 项')
+    wrapper.unmount()
+  })
+
+  it('跨分类保留多选并一次加入且优先打开仍有可加入项的分类', async () => {
+    const secondCategory = { ...category, id: 'category-2', name: '独立工装', itemCount: 1 }
+    const secondItem = { ...item, id: 'item-2', categoryId: secondCategory.id, content: '独立工装应完成装配确认' }
+    const planWithExistingItem = {
+      ...childPlan,
+      items: [{ id: 'row-existing', catalogCategoryId: category.id, catalogItemId: item.id, categoryName: category.name, validationContent: item.content, informationSource: '内部评审', validationDate: null, result: null, responsiblePerson: null, remark: null, sortOrder: 1 }],
+    }
+    api.readValidationCheckCatalog.mockResolvedValue({ categories: [category, secondCategory], items: [item, secondItem] })
+    api.readProjectValidationPlan.mockImplementation(async (projectId: string) => projectId === childProject.id ? planWithExistingItem : null)
+    const wrapper = mount(ValidationPlanManager, {
+      attachTo: document.body,
+      props: { projectId: childProject.id, projectCode: childProject.code, projectName: childProject.name, projects: [rootProject, childProject], token: 'token', currentUsername: 'engineer', currentDisplayName: '工程师', canEdit: true, canManageCatalog: true },
+      global: { plugins: [ElementPlus] },
+    })
+    await flushPromises()
+
+    await wrapper.findAll('tbody tr').find(row => row.text().includes('P700005-3'))!.trigger('click')
+    await flushPromises()
+    await wrapper.findAll('button').find(button => button.text().includes('选取内容'))!.trigger('click')
+    await flushPromises()
+
+    const categoryButtons = [...document.querySelectorAll<HTMLButtonElement>('.validation-selector aside button')]
+    expect(categoryButtons[0]!.textContent).toContain('可加 0')
+    expect(categoryButtons[1]!.classList.contains('is-active')).toBe(true)
+    document.querySelector<HTMLInputElement>('.validation-selector__items input[type="checkbox"]')!.click()
+    await flushPromises()
+    expect(document.body.textContent).toContain('跨分类已选 1 项')
+
+    categoryButtons[0]!.click()
+    await flushPromises()
+    expect(document.body.textContent).toContain('该分类的 1 项已全部加入当前计划')
+    expect(document.body.textContent).toContain('跨分类已选 1 项')
+
+    categoryButtons[1]!.click()
+    await flushPromises()
+    const addButton = [...document.querySelectorAll<HTMLButtonElement>('button')].find(button => button.textContent?.includes('加入计划（1）'))!
+    expect(addButton.disabled).toBe(false)
+    addButton.click()
+    await flushPromises()
+    expect(wrapper.text()).toContain('独立工装应完成装配确认')
     wrapper.unmount()
   })
 

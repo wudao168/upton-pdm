@@ -157,9 +157,9 @@ public sealed record SaveValidationCheckItemRequest(Guid CategoryId, string Cont
     public SaveValidationCheckItemCommand ToCommand() => new(CategoryId, Content, DefaultInformationSource, SortOrder, IsActive, Note, ExpectedRowVersion);
 }
 
-public sealed record SaveProjectValidationPlanItemRequest(Guid? CatalogItemId, string? ValidationContent, string? InformationSource, DateOnly? ValidationDate, string? Result, string? ResponsiblePerson, string? Remark, int SortOrder)
+public sealed record SaveProjectValidationPlanItemRequest(Guid? CatalogItemId, string? ValidationContent, string? InformationSource, DateOnly? ValidationDate, string? Result, string? Reviewer, string? ResponsiblePerson, string? Remark, int SortOrder)
 {
-    public SaveProjectValidationPlanItemCommand ToCommand() => new(CatalogItemId, ValidationContent, InformationSource, ValidationDate, Result, ResponsiblePerson, Remark, SortOrder);
+    public SaveProjectValidationPlanItemCommand ToCommand() => new(CatalogItemId, ValidationContent, InformationSource, ValidationDate, Result, Reviewer, ResponsiblePerson, Remark, SortOrder);
 }
 
 public sealed record SaveProjectValidationPlanRequest(string? PreparedBy, DateOnly? ValidationDate, IReadOnlyList<SaveProjectValidationPlanItemRequest> Items, long? ExpectedRowVersion)

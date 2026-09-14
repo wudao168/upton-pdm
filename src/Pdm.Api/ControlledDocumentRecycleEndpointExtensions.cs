@@ -29,6 +29,11 @@ public static class ControlledDocumentRecycleEndpointExtensions
             var (actor, role) = CurrentUser(context.User);
             return Results.Ok(await service.RestoreAsync(projectId, documentId, request.ExpectedRowVersion, actor, role, cancellationToken));
         });
+        api.MapPost("/recycle-batch", async (Guid projectId, RecycleControlledDocumentBatchRequest request, HttpContext context, ControlledDocumentRecycleService service, CancellationToken cancellationToken) =>
+        {
+            var (actor, role) = CurrentUser(context.User);
+            return Results.Ok(await service.RecycleBatchAsync(projectId, request.Items, request.Reason, actor, role, cancellationToken));
+        });
     }
 
     private static (string Actor, UserRole Role) CurrentUser(ClaimsPrincipal principal)
@@ -41,3 +46,4 @@ public static class ControlledDocumentRecycleEndpointExtensions
 
 public sealed record RecycleControlledDocumentRequest(long ExpectedRowVersion, string Reason, string Confirmation);
 public sealed record RestoreControlledDocumentRequest(long ExpectedRowVersion);
+public sealed record RecycleControlledDocumentBatchRequest(IReadOnlyList<ControlledDocumentRecycleBatchItem> Items, string Reason);

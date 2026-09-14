@@ -57,7 +57,7 @@ test.beforeEach(async ({ page }) => {
       const credentials = route.request().postDataJSON() as { username?: string }
       const administrator = credentials.username === 'admin'
       currentUsername = administrator ? 'admin' : 'engineer'
-      return fulfill({ accessToken: 'e2e-token', expiresAt: '2099-01-01T00:00:00Z', resumeToken: 'e2e-resume-token', username: currentUsername, displayName: administrator ? '系统管理员' : '真实工程师', role: administrator ? 'Administrator' : 'Engineer', permissions: administrator ? ['project.view', 'project.create', 'project.child.create', 'project.content.view', 'document.edit', 'bom.edit', 'release.manage', 'material.view', 'material.manage', 'settings.customer.manage', 'settings.organization.manage', 'settings.folder.manage', 'settings.storage.manage', 'system.role.view', 'system.role.edit', 'audit.view'] : ['project.view', 'project.create', 'project.child.create', 'project.content.view', 'document.edit', 'bom.edit', 'material.view', 'release.manage'], primaryCompanyId: 'org-ks', activeCompanyId: 'org-ks', activeCompanyName: '昆山阿普顿自动化系统有限公司', crossCompanyView: administrator, accessibleCompanies: administrator ? [{ id: 'org-ks', name: '昆山阿普顿自动化系统有限公司', code: '7' }, { id: 'org-gz', name: '广州阿普顿自动化系统有限公司', code: '3' }] : [{ id: 'org-ks', name: '昆山阿普顿自动化系统有限公司', code: '7' }] })
+      return fulfill({ accessToken: 'e2e-token', expiresAt: '2099-01-01T00:00:00Z', resumeToken: 'e2e-resume-token', username: currentUsername, displayName: administrator ? '系统管理员' : '真实工程师', role: administrator ? 'Administrator' : 'Engineer', permissions: administrator ? ['project.view', 'project.create', 'project.child.create', 'project.content.view', 'project.content.reset', 'document.edit', 'document.recycle', 'bom.edit', 'release.manage', 'material.view', 'material.manage', 'settings.customer.manage', 'settings.organization.manage', 'settings.folder.manage', 'settings.storage.manage', 'system.role.view', 'system.role.edit', 'audit.view'] : ['project.view', 'project.create', 'project.child.create', 'project.content.view', 'document.edit', 'bom.edit', 'material.view', 'release.manage'], primaryCompanyId: 'org-ks', activeCompanyId: 'org-ks', activeCompanyName: '昆山阿普顿自动化系统有限公司', crossCompanyView: administrator, accessibleCompanies: administrator ? [{ id: 'org-ks', name: '昆山阿普顿自动化系统有限公司', code: '7' }, { id: 'org-gz', name: '广州阿普顿自动化系统有限公司', code: '3' }] : [{ id: 'org-ks', name: '昆山阿普顿自动化系统有限公司', code: '7' }] })
     }
     if (path === '/api/auth/me') return fulfill({ username: currentUsername, displayName: currentUsername === 'admin' ? '系统管理员' : '真实工程师', nickname: null, gender: 'unspecified', landline: null, mobilePhone: null, email: null })
     if (path === '/api/password-reset-requests') return fulfill([])
@@ -115,6 +115,10 @@ test.beforeEach(async ({ page }) => {
     if (path === '/api/edit-locks') return fulfill([])
     if (path === '/api/project-numbering/options') return fulfill({ organizations: [{ id: '70000000-0000-0000-0000-000000000001', name: '昆山阿普顿自动化系统有限公司', projectCompanyCode: '7', modelCompanyCode: 'AK', crmCompanyName: '昆山阿普顿自动化系统有限公司' }], projectTypes: [{ code: 'P', name: '标准项目' }], equipmentTypes: [{ code: 2, name: '类型02' }] })
     if (path === '/api/projects') return fulfill([{ id: projectId, code: 'PRJ-REAL-001', name: '真实装配项目', owner: '真实工程师', vaultLocation: 'D:\\PDM\\PRJ-REAL-001', releaseLocation: 'D:\\Release\\PRJ-REAL-001', isActive: true, quantity: 1, serialNumbers: ['70000001'], executionUnitName: '自动化事业部', primaryProjectManager: 'project-manager', collaborativeProjectManagers: ['project-manager-2'], designLead: 'design-lead', designers: [] }])
+    if (/^\/api\/projects\/[^/]+\/content-reset\/readiness$/.test(path)) {
+      const resetProjectId = path.split('/')[3]
+      return fulfill({ project: { id: resetProjectId, code: resetProjectId === projectId ? 'PRJ-REAL-001' : 'P700002', name: '测试项目' }, includeChildren: false, includedProjects: [{ id: resetProjectId, code: resetProjectId === projectId ? 'PRJ-REAL-001' : 'P700002', name: '测试项目' }], canReset: true, blockers: [], counts: {}, restorableSnapshots: [] })
+    }
     if (path === `/api/projects/${projectId}`) return fulfill({ id: projectId, code: 'PRJ-REAL-001', name: '真实装配项目', owner: '真实工程师', vaultLocation: 'D:\\PDM\\PRJ-REAL-001', releaseLocation: 'D:\\Release\\PRJ-REAL-001', isActive: true, quantity: 1, serialNumbers: ['70000001'], executionUnitName: '自动化事业部', primaryProjectManager: 'project-manager', collaborativeProjectManagers: ['project-manager-2'], designLead: 'design-lead', designers: [] })
     if (path === `/api/projects/${projectId}/versions`) return fulfill(versions.map(version => ({ ...version, drawingNumber: 'REAL-ASM-001', documentName: '真实总装配', fileName: 'REAL-ASM-001.SLDASM' })))
     if (path === `/api/projects/${projectId}/audit`) return fulfill([])
@@ -203,6 +207,8 @@ test('project settings keeps the confirmed project-copy scope', async ({ page },
 
   const dialog = page.getByRole('dialog', { name: /项目设置 · P700002/ })
   await expect(dialog).toContainText('项目内容复制')
+  await expect(dialog).toContainText('重置项目内容')
+  await expect(dialog).toContainText('当前项目没有可重置的业务内容')
   await expect(dialog).toContainText('目标项目')
   await dialog.getByRole('combobox').click()
   await page.getByRole('option', { name: 'P700001 · 现有源项目' }).click()
@@ -371,10 +377,10 @@ test('project plan toolbar uses uniform buttons and shows actual completion date
     const rect = cell.getBoundingClientRect()
     return { text: cell.textContent?.trim(), left: rect.left, centerY: rect.top + rect.height / 2 }
   }))
-  expect(headerCells.map(cell => cell.text)).toEqual(['项目 / 任务', '责任人', '进度', '计划日期', '工期', '完成日期'])
+  expect(headerCells.map(cell => cell.text)).toEqual(['项目 / 任务', '阶段', '责任人', '进度', '计划日期', '工期', '完成日期'])
   expect(headerCells.every((cell, index) => index === 0 || cell.left > headerCells[index - 1]!.left), JSON.stringify(headerCells)).toBe(true)
   expect(Math.max(...headerCells.map(cell => cell.centerY)) - Math.min(...headerCells.map(cell => cell.centerY))).toBeLessThanOrEqual(1)
-  await expect(page.locator('.pdm-gantt-info-row.is-task > span').nth(5)).toHaveText('2026-09-20')
+  await expect(page.locator('.pdm-gantt-info-row.is-task > span').nth(6)).toHaveText('2026-09-20')
   await toolbar.getByRole('button', { name: '日', exact: true }).click()
   await expect(toolbar.getByRole('button', { name: '日', exact: true })).toHaveClass(/is-active/)
   await toolbar.getByRole('button', { name: '周', exact: true }).click()
@@ -857,6 +863,14 @@ test('operator columns display the user name instead of the account name', async
 })
 
 test('administrator switches independent company organization trees', async ({ page }, testInfo) => {
+  const errors: string[] = []
+  page.on('pageerror', error => errors.push(error.message))
+  page.on('console', message => {
+    if (message.type() !== 'error' && message.type() !== 'warning') return
+    const location = message.location().url
+    if (location.endsWith('/api/auth/resume') && message.text().includes('404')) return
+    errors.push(`${message.text()} ${location}`.trim())
+  })
   await page.setViewportSize({ width: 1536, height: 864 })
   await page.addInitScript(() => localStorage.setItem('pdm_active_organization', 'org-ks'))
   await page.goto('/')
@@ -896,8 +910,33 @@ test('administrator switches independent company organization trees', async ({ p
   const activeToggle = companyDialog.locator('.org-form-check').filter({ hasText: '启用' })
   await expect(activeToggle).toBeVisible()
   await expect(activeToggle.locator('input[type="checkbox"]')).toBeChecked()
+  const companyAlignment = await activeToggle.evaluate(element => {
+    const checkboxBox = element.querySelector('input[type="checkbox"]')!.getBoundingClientRect()
+    const textBox = element.querySelector('span')!.getBoundingClientRect()
+    return { checkboxX: checkboxBox.x, textX: textBox.x, centerDelta: Math.abs((checkboxBox.y + checkboxBox.height / 2) - (textBox.y + textBox.height / 2)) }
+  })
+  expect(companyAlignment.checkboxX).toBeLessThan(companyAlignment.textX)
+  expect(companyAlignment.centerDelta).toBeLessThanOrEqual(1)
   await page.screenshot({ path: testInfo.outputPath('company-active-checkbox.png'), fullPage: false })
   await companyDialog.getByRole('button', { name: '取消', exact: true }).click()
+
+  await page.getByLabel('用户设置功能').getByRole('button', { name: '组织关系', exact: true }).click()
+  await page.getByRole('button', { name: '新建部门', exact: true }).click()
+  const unitDialog = page.getByRole('dialog', { name: '新建部门' })
+  for (const label of ['制造部门（可承接项目）', '启用']) {
+    const toggle = unitDialog.locator('.org-form-check').filter({ hasText: label })
+    const alignment = await toggle.evaluate(element => {
+      const checkboxBox = element.querySelector('input[type="checkbox"]')!.getBoundingClientRect()
+      const textBox = element.querySelector('span')!.getBoundingClientRect()
+      return { checkboxX: checkboxBox.x, textX: textBox.x, centerDelta: Math.abs((checkboxBox.y + checkboxBox.height / 2) - (textBox.y + textBox.height / 2)) }
+    })
+    expect(alignment.checkboxX).toBeLessThan(alignment.textX)
+    expect(alignment.centerDelta).toBeLessThanOrEqual(1)
+  }
+  await page.screenshot({ path: testInfo.outputPath('organization-checkbox-alignment.png'), fullPage: false })
+  await unitDialog.getByRole('button', { name: '取消', exact: true }).click()
+  await expect(page.locator('vite-error-overlay')).toHaveCount(0)
+  expect(errors).toEqual([])
 })
 
 test('role permissions follow the system module directory and include future modules', async ({ page }, testInfo) => {
@@ -941,13 +980,16 @@ test('role permissions follow the system module directory and include future mod
   await expect(roleList.getByText('单据权限', { exact: true })).toHaveCount(0)
   await roleList.getByRole('button', { name: '权限设置', exact: true }).click()
 
-  const dialog = page.getByRole('dialog', { name: '计划管理 · 权限设置' })
+  const dialog = page.getByRole('dialog', { name: '角色权限' })
   await expect(dialog).toBeVisible()
   await expect(dialog).toContainText('权限模块由系统功能目录自动生成')
   await expect(dialog).toContainText('3 个模块、3 项权限')
-  await expect(dialog).toContainText('项目管理')
-  await expect(dialog).toContainText('项目内容')
-  await expect(dialog).toContainText('新增模块')
+  const modules = dialog.getByRole('navigation', { name: '权限模块' })
+  await expect(modules).toContainText('项目管理')
+  await expect(dialog).toContainText('查看项目清单')
+  await modules.getByRole('button', { name: /项目内容/ }).click()
+  await expect(dialog).toContainText('编辑项目图档')
+  await modules.getByRole('button', { name: /新增模块/ }).click()
   await expect(dialog).toContainText('查看新增模块')
   await expect(page.locator('vite-error-overlay')).toHaveCount(0)
   expect(errors).toEqual([])
@@ -1113,4 +1155,61 @@ test('engineer can read a material rejection reason without approval controls', 
   await expect(history.getByRole('button', { name: '退回', exact: true })).toHaveCount(0)
   await page.screenshot({ path: testInfo.outputPath('engineer-material-rejection-history.png'), fullPage: false })
   expect({ consoleErrors, failedResponses }).toEqual({ consoleErrors: [], failedResponses: [] })
+})
+
+test('validation plan selector keeps selections across categories and skips completed category', async ({ page }) => {
+  const categories = [
+    { id: 'validation-category-complete', name: '定位工装', sortOrder: 10, isActive: true, itemCount: 1, referenceCount: 1, createdBy: 'system', createdAt: '2026-09-09T00:00:00Z', updatedBy: 'system', updatedAt: '2026-09-09T00:00:00Z', rowVersion: 1 },
+    { id: 'validation-category-second', name: '独立工装', sortOrder: 20, isActive: true, itemCount: 1, referenceCount: 0, createdBy: 'system', createdAt: '2026-09-09T00:00:00Z', updatedBy: 'system', updatedAt: '2026-09-09T00:00:00Z', rowVersion: 1 },
+    { id: 'validation-category-third', name: '安全相关', sortOrder: 30, isActive: true, itemCount: 1, referenceCount: 0, createdBy: 'system', createdAt: '2026-09-09T00:00:00Z', updatedBy: 'system', updatedAt: '2026-09-09T00:00:00Z', rowVersion: 1 },
+  ]
+  const items = [
+    { id: 'validation-item-complete', categoryId: categories[0]!.id, content: '定位销检查', defaultInformationSource: '内部评审', sortOrder: 10, isActive: true, referenceCount: 1, createdBy: 'system', createdAt: '2026-09-09T00:00:00Z', updatedBy: 'system', updatedAt: '2026-09-09T00:00:00Z', rowVersion: 1 },
+    { id: 'validation-item-second', categoryId: categories[1]!.id, content: '独立工装装配确认', defaultInformationSource: '内部评审', sortOrder: 10, isActive: true, referenceCount: 0, createdBy: 'system', createdAt: '2026-09-09T00:00:00Z', updatedBy: 'system', updatedAt: '2026-09-09T00:00:00Z', rowVersion: 1 },
+    { id: 'validation-item-third', categoryId: categories[2]!.id, content: '安全门互锁确认', defaultInformationSource: '内部评审', sortOrder: 10, isActive: true, referenceCount: 0, createdBy: 'system', createdAt: '2026-09-09T00:00:00Z', updatedBy: 'system', updatedAt: '2026-09-09T00:00:00Z', rowVersion: 1 },
+  ]
+  const plan = {
+    id: 'validation-plan-e2e', projectId, preparedBy: 'engineer', validationDate: '2026-09-14', revisionNumber: 1, state: 'Draft', approvalTasks: [], attachments: [],
+    items: [{ id: 'validation-plan-row-existing', catalogCategoryId: categories[0]!.id, catalogItemId: items[0]!.id, categoryName: categories[0]!.name, validationContent: items[0]!.content, informationSource: '内部评审', validationDate: null, result: null, responsiblePerson: null, remark: null, sortOrder: 1 }],
+    createdBy: 'engineer', createdAt: '2026-09-14T00:00:00Z', updatedBy: 'engineer', updatedAt: '2026-09-14T00:00:00Z', rowVersion: 1,
+  }
+  await page.route('**/api/auth/login', route => route.fulfill({ json: {
+    accessToken: 'e2e-token', expiresAt: '2099-01-01T00:00:00Z', resumeToken: 'e2e-resume-token', username: 'engineer', displayName: '真实工程师', role: 'Engineer',
+    permissions: ['project.view', 'project.content.view', 'validation-plan.edit'], primaryCompanyId: 'org-ks', activeCompanyId: 'org-ks', activeCompanyName: '昆山阿普顿自动化系统有限公司', crossCompanyView: false,
+    accessibleCompanies: [{ id: 'org-ks', name: '昆山阿普顿自动化系统有限公司', code: '7' }],
+  } }))
+  await page.route('**/api/validation-check-catalog', route => route.fulfill({ json: { categories, items } }))
+  await page.route(`**/api/projects/${projectId}/validation-plan`, route => route.fulfill({ json: plan }))
+  await page.route('**/api/validation-plans/validation-plan-e2e/execution-records', route => route.fulfill({ json: [] }))
+  const consoleErrors: string[] = []
+  page.on('console', message => { if (message.type() === 'error') consoleErrors.push(message.text()) })
+
+  await page.setViewportSize({ width: 1440, height: 900 })
+  await page.goto('/')
+  const loginForm = page.getByLabel('登录PLM')
+  await loginForm.getByRole('textbox', { name: '账号' }).fill('engineer')
+  await loginForm.getByRole('textbox', { name: '密码' }).fill('correct-password')
+  await loginForm.getByRole('button', { name: '登录', exact: true }).click()
+  await page.getByRole('button', { name: '验证计划', exact: true }).click()
+  await page.locator('.validation-plan-summary__table tbody tr').click()
+  await page.getByRole('button', { name: '选取内容' }).click()
+
+  const dialog = page.getByRole('dialog', { name: '选择验证检查项' })
+  const completeCategory = dialog.getByRole('button', { name: /定位工装/ })
+  const secondCategory = dialog.getByRole('button', { name: /独立工装/ })
+  const thirdCategory = dialog.getByRole('button', { name: /安全相关/ })
+  await expect(completeCategory).toContainText('可加 0')
+  await expect(secondCategory).toHaveClass(/is-active/)
+  await dialog.getByText('独立工装装配确认').click()
+  await thirdCategory.click()
+  await dialog.getByText('安全门互锁确认').click()
+  await expect(dialog).toContainText('跨分类已选 2 项')
+  await completeCategory.click()
+  await expect(dialog).toContainText('该分类的 1 项已全部加入当前计划')
+  await expect(dialog).toContainText('跨分类已选 2 项')
+  await page.screenshot({ path: join(tmpdir(), 'uplm-validation-plan-multiselect-20260914.png'), fullPage: false })
+  await dialog.getByRole('button', { name: '加入计划（2）' }).click()
+  await expect(page.locator('.validation-plan__table')).toContainText('独立工装装配确认')
+  await expect(page.locator('.validation-plan__table')).toContainText('安全门互锁确认')
+  expect(consoleErrors).toEqual([])
 })

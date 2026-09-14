@@ -4,7 +4,7 @@ import { ElMessage } from '../statusMessage'
 import { ElMessageBox } from 'element-plus'
 import { Download, Eye, File, Folder, FolderCog, FolderPlus, History, Pencil, RotateCcw, Search, ShieldCheck, Trash2, Upload, X } from '@lucide/vue'
 import type { ControlledDocumentRecycleReadiness, FolderPermissionRule, ManagedDocument, PdmUser, ProjectFile, ProjectFileVersion, ProjectFolder, RolePermissionSettings } from '../types'
-import { createProjectFolder, deleteProjectFile, deleteProjectFolder, downloadProjectFile, getControlledDocumentRecycleReadiness, listControlledDocumentRecycleBin, listProjectFiles, listProjectFileVersions, moveProjectFile, moveProjectFolder, recycleControlledDocument, renameProjectFile, renameProjectFolder, restoreControlledDocument, restoreProjectFile, uploadProjectFile } from '../api'
+import { createProjectFolder, deleteProjectFile, deleteProjectFolder, downloadProjectFile, getControlledDocumentRecycleReadiness, listControlledDocumentRecycleBin, listProjectFiles, listProjectFileVersions, moveProjectFile, moveProjectFolder, recycleControlledDocument, recycleControlledDocumentsBatch, renameProjectFile, renameProjectFolder, restoreControlledDocument, restoreProjectFile, uploadProjectFile } from '../api'
 import { resolveUserDisplayName } from '../userDisplay'
 
 const props = defineProps<{
@@ -38,6 +38,9 @@ const recycleLoading = ref(false)
 const recycleReadiness = ref<ControlledDocumentRecycleReadiness | null>(null)
 const recycleReason = ref('')
 const recycleConfirmation = ref('')
+const selectedDocumentIds = ref<string[]>([])
+const batchRecycleOpen = ref(false)
+const batchRecycleReason = ref('')
 const moveTargetOpen = ref(false)
 const moveTargetTitle = ref('')
 const moveTargetId = ref('')
@@ -78,6 +81,8 @@ const displayedFiles = computed(() => {
   return projectFiles.value.filter(file => file.folderId === selectedFolderId.value
     && (!keyword || `${file.fileName} ${file.currentVersion?.uploadedBy ?? ''}`.toLocaleLowerCase('zh-CN').includes(keyword)))
 })
+const selectableDocuments = computed(() => displayedDocuments.value.filter(document => !document.deletedAt))
+const allDisplayedDocumentsSelected = computed(() => selectableDocuments.value.length > 0 && selectableDocuments.value.every(document => selectedDocumentIds.value.includes(document.id)))
 const standardTargets = computed(() => visibleFolders.value.filter(folder => folder.purpose === 'Standard' && hasAccess(folder, 8)))
 const moveTargetTreeData = computed<MoveFolderTreeNode[]>(() => {
   const excluded = new Set(moveExcludedIds.value)
@@ -93,6 +98,7 @@ watch(() => props.folders, () => {
   if (!visibleFolders.value.some(folder => folder.id === selectedFolderId.value)) selectedFolderId.value = treeData.value[0]?.id ?? ''
 }, { immediate: true, deep: true })
 watch([selectedFolderId, includeDeleted], loadFiles, { immediate: true })
+watch([selectedFolderId, includeDeleted, kindFilter, query], () => { selectedDocumentIds.value = [] })
 onBeforeUnmount(() => { uploadController?.abort(); rejectMoveTarget?.('cancel') })
 
 function hasAccess(folder: ProjectFolder | undefined, mask: number) { return Boolean(folder && (folder.effectiveAccess & mask) === mask) }
@@ -236,6 +242,38 @@ async function restoreDocument(document: ManagedDocument) {
     ElMessage.success('受控图档已恢复')
   } catch (error) { if (error !== 'cancel' && error !== 'close') ElMessage.error(error instanceof Error ? error.message : '恢复失败') }
 }
+function toggleDisplayedDocuments(checked: boolean) {
+  selectedDocumentIds.value = checked ? selectableDocuments.value.map(document => document.id) : []
+}
+function toggleDocument(documentId: string, checked: boolean) {
+  selectedDocumentIds.value = checked
+    ? [...new Set([...selectedDocumentIds.value, documentId])]
+    : selectedDocumentIds.value.filter(id => id !== documentId)
+}
+function openBatchRecycle() {
+  if (!selectedDocumentIds.value.length) return
+  batchRecycleReason.value = ''
+  batchRecycleOpen.value = true
+}
+async function confirmBatchRecycle() {
+  const selected = props.documents.filter(document => selectedDocumentIds.value.includes(document.id) && !document.deletedAt)
+  if (!selected.length || !batchRecycleReason.value.trim()) return
+  recycleLoading.value = true
+  try {
+    const result = await recycleControlledDocumentsBatch(props.projectId, selected.map(document => ({ documentId: document.id, expectedRowVersion: document.rowVersion ?? 1 })), batchRecycleReason.value.trim(), props.token)
+    batchRecycleOpen.value = false
+    await props.onReload()
+    await loadFiles()
+    selectedDocumentIds.value = result.failures.map(item => item.documentId)
+    if (result.failures.length) {
+      const drawingNumbers = new Map(selected.map(document => [document.id, document.drawingNumber]))
+      await ElMessageBox.alert(result.failures.map(item => `${drawingNumbers.get(item.documentId) ?? item.documentId}：${item.reason}`).join('\n'), '部分图档未处理', {
+        type: 'warning', confirmButtonText: '知道了', dangerouslyUseHTMLString: false,
+      })
+    } else ElMessage.success(`已将 ${result.recycledDocumentIds.length} 项受控图档移入回收站，30天内可恢复`)
+  } catch (error) { ElMessage.error(error instanceof Error ? error.message : '批量删除失败') }
+  finally { recycleLoading.value = false }
+}
 async function download(file: ProjectFile, versionId?: string, preview = false) { try { await downloadProjectFile(props.projectId, file, props.token, versionId, preview) } catch (error) { ElMessage.error(error instanceof Error ? error.message : '文件读取失败') } }
 async function openVersions(file: ProjectFile) { try { versionFile.value = file; versions.value = await listProjectFileVersions(props.projectId, file.id, props.token); versionOpen.value = true } catch (error) { ElMessage.error(error instanceof Error ? error.message : '版本历史加载失败') } }
 
@@ -258,6 +296,7 @@ async function savePermissions() { if (!selectedFolder.value) return; try { awai
       <header class="pdm-folder-toolbar">
         <div><div class="pdm-breadcrumb">项目文件 <span>/</span> {{ selectedFolder?.name || '请选择目录' }}</div><h2>{{ selectedFolder?.name || '项目文件库' }}</h2><p v-if="!businessFolder && selectedFolder">该目录由图档或发布流程受控，网页不维护普通文件。</p></div>
         <div class="pdm-file-actions" v-if="selectedFolder">
+          <button v-if="!businessFolder && canRecycleDocuments" type="button" class="pdm-danger-action" :disabled="recycleLoading || selectedDocumentIds.length === 0" @click="openBatchRecycle"><Trash2 :size="15" />批量移入回收站（{{ selectedDocumentIds.length }}）</button>
           <button v-if="businessFolder && hasAccess(selectedFolder, 4)" type="button" class="pdm-primary-action" :disabled="Boolean(uploadingName)" @click="chooseFiles"><Upload :size="15" />上传文件</button>
           <button v-if="businessFolder && hasAccess(selectedFolder, 8)" type="button" class="pdm-secondary-action" @click="newFolder"><FolderPlus :size="15" />新建文件夹</button>
           <el-dropdown v-if="businessFolder && !selectedFolder.isSystem && hasAccess(selectedFolder, 8)"><button type="button" class="pdm-secondary-action">文件夹操作</button><template #dropdown><el-dropdown-menu><el-dropdown-item @click="renameFolderEntry">重命名</el-dropdown-item><el-dropdown-item @click="moveFolderEntry">移动</el-dropdown-item><el-dropdown-item v-if="hasAccess(selectedFolder, 16)" divided @click="removeFolder">删除空文件夹</el-dropdown-item></el-dropdown-menu></template></el-dropdown>
@@ -277,7 +316,7 @@ async function savePermissions() { if (!selectedFolder.value) return; try { awai
           <td><div class="pdm-row-actions"><button v-if="!item.deletedAt && canPreview(item) && hasAccess(selectedFolder, 2)" type="button" title="预览" @click="download(item, undefined, true)"><Eye :size="14" /></button><button v-if="!item.deletedAt && hasAccess(selectedFolder, 2)" type="button" title="下载" @click="download(item)"><Download :size="14" /></button><button v-if="!item.deletedAt && hasAccess(selectedFolder, 1)" type="button" title="版本历史" @click="openVersions(item)"><History :size="14" /></button><button v-if="!item.deletedAt && hasAccess(selectedFolder, 8)" type="button" title="重命名" @click="renameFileEntry(item)"><Pencil :size="14" /></button><button v-if="!item.deletedAt && hasAccess(selectedFolder, 8)" type="button" title="移动" @click="moveFileEntry(item)"><Folder :size="14" /></button><button v-if="!item.deletedAt && hasAccess(selectedFolder, 16)" type="button" title="删除" @click="removeFile(item)"><Trash2 :size="14" /></button><button v-if="item.deletedAt && hasAccess(selectedFolder, 16)" type="button" title="恢复" @click="restoreFile(item)"><RotateCcw :size="14" /></button></div></td>
         </tr></tbody></table>
       </div>
-      <div v-else-if="!businessFolder && displayedDocuments.length" class="pdm-file-table-wrap"><table class="pdm-file-detail-table" aria-label="受控图档"><colgroup><col class="pdm-file-column-number"><col class="pdm-file-column-name"><col class="pdm-file-column-kind"><col class="pdm-file-column-revision"><col class="pdm-file-column-state"><col class="pdm-file-column-editor"><col class="pdm-file-column-updated"><col v-if="canRecycleDocuments" class="pdm-file-column-actions"></colgroup><thead><tr><th>图号</th><th>名称</th><th>类型</th><th>版本</th><th>状态</th><th>编辑人</th><th>更新时间</th><th v-if="canRecycleDocuments">操作</th></tr></thead><tbody><tr v-for="document in displayedDocuments" :key="document.id" :class="{ 'is-deleted': document.deletedAt }"><td><span class="pdm-file-name"><File :size="15" />{{ document.drawingNumber }}</span><small v-if="document.deletedAt" class="pdm-deleted-badge">回收站</small></td><td>{{ document.name }}</td><td>{{ kindLabel(document.kind) }}</td><td>{{ document.revision }}</td><td>{{ document.deletedAt ? '待清理' : stateLabel(document.state) }}</td><td>{{ document.deletedAt ? displayUserName(document.deletedBy) : displayUserName(document.checkedOutBy) }}</td><td>{{ document.updatedAt ? new Date(document.updatedAt).toLocaleString() : '—' }}</td><td v-if="canRecycleDocuments"><div class="pdm-row-actions"><button v-if="!document.deletedAt" type="button" :title="stateLabel(document.state) === '已发布' ? '已发布图档仅允许作废' : '删除前检查'" :disabled="recycleLoading" @click="prepareDocumentRecycle(document)"><Trash2 :size="14" /></button><button v-else type="button" title="恢复" :disabled="recycleLoading" @click="restoreDocument(document)"><RotateCcw :size="14" /></button></div></td></tr></tbody></table></div>
+      <div v-else-if="!businessFolder && displayedDocuments.length" class="pdm-file-table-wrap"><table class="pdm-file-detail-table" aria-label="受控图档"><colgroup><col v-if="canRecycleDocuments" class="pdm-file-column-select"><col class="pdm-file-column-number"><col class="pdm-file-column-name"><col class="pdm-file-column-kind"><col class="pdm-file-column-revision"><col class="pdm-file-column-state"><col class="pdm-file-column-editor"><col class="pdm-file-column-updated"><col v-if="canRecycleDocuments" class="pdm-file-column-actions"></colgroup><thead><tr><th v-if="canRecycleDocuments"><input type="checkbox" aria-label="选择当前列表全部受控图档" :checked="allDisplayedDocumentsSelected" :disabled="selectableDocuments.length === 0" @change="toggleDisplayedDocuments(($event.target as HTMLInputElement).checked)"></th><th>图号</th><th>名称</th><th>类型</th><th>版本</th><th>状态</th><th>编辑人</th><th>更新时间</th><th v-if="canRecycleDocuments">操作</th></tr></thead><tbody><tr v-for="document in displayedDocuments" :key="document.id" :class="{ 'is-deleted': document.deletedAt }"><td v-if="canRecycleDocuments"><input v-if="!document.deletedAt" type="checkbox" :aria-label="`选择 ${document.drawingNumber}`" :checked="selectedDocumentIds.includes(document.id)" @change="toggleDocument(document.id, ($event.target as HTMLInputElement).checked)"></td><td><span class="pdm-file-name"><File :size="15" />{{ document.drawingNumber }}</span><small v-if="document.deletedAt" class="pdm-deleted-badge">回收站</small></td><td>{{ document.name }}</td><td>{{ kindLabel(document.kind) }}</td><td>{{ document.revision }}</td><td>{{ document.deletedAt ? '待清理' : stateLabel(document.state) }}</td><td>{{ document.deletedAt ? displayUserName(document.deletedBy) : displayUserName(document.checkedOutBy) }}</td><td>{{ document.updatedAt ? new Date(document.updatedAt).toLocaleString() : '—' }}</td><td v-if="canRecycleDocuments"><div class="pdm-row-actions"><button v-if="!document.deletedAt" type="button" :title="stateLabel(document.state) === '已发布' ? '已发布图档仅允许作废' : '删除前检查'" :disabled="recycleLoading" @click="prepareDocumentRecycle(document)"><Trash2 :size="14" /></button><button v-else type="button" title="恢复" :disabled="recycleLoading" @click="restoreDocument(document)"><RotateCcw :size="14" /></button></div></td></tr></tbody></table></div>
       <div v-else class="pdm-folder-empty" v-loading="loadingFiles"><FolderCog :size="34" /><strong>{{ query ? '没有匹配的文件' : includeDeleted ? '此目录及回收站暂无文件' : '此目录暂无文件' }}</strong><span v-if="businessFolder && hasAccess(selectedFolder, 4)">可上传项目资料，或在此目录下新建子文件夹。</span><span v-else-if="businessFolder">当前账号可查看该目录，但没有上传权限。</span><span v-else>受控图档由SolidWorks存档，发布文件由审批发布流程生成。</span></div>
     </section>
   </section>
@@ -301,12 +340,18 @@ async function savePermissions() { if (!selectedFolder.value) return; try { awai
     </template>
     <template #footer><button type="button" class="pdm-secondary-action" @click="recycleOpen=false">取消</button><button v-if="recycleReadiness?.canRecycle" type="button" class="pdm-danger-action" :disabled="recycleLoading || !recycleReason.trim() || !recycleConfirmation.trim()" @click="confirmDocumentRecycle">移入回收站</button></template>
   </el-dialog>
+  <el-dialog v-model="batchRecycleOpen" title="批量移入受控图档回收站" width="620px" class="pdm-document-recycle-dialog">
+    <el-alert title="系统会逐项执行服务端安全检查" type="warning" :closable="false" description="已发布、审批中、已签出或仍被引用的图档不会删除；其他可删除项会进入30天回收站。" />
+    <div class="pdm-recycle-summary"><strong>已选择 {{ selectedDocumentIds.length }} 项受控图档</strong><span>允许部分成功，失败项会保留并返回具体原因。</span></div>
+    <label class="pdm-recycle-field"><span>删除原因 <b>*</b></span><el-input v-model="batchRecycleReason" type="textarea" :rows="3" maxlength="500" show-word-limit placeholder="请填写本次批量删除的可审计原因" /></label>
+    <template #footer><button type="button" class="pdm-secondary-action" @click="batchRecycleOpen=false">取消</button><button type="button" class="pdm-danger-action" :disabled="recycleLoading || !batchRecycleReason.trim()" @click="confirmBatchRecycle">确认批量移入回收站</button></template>
+  </el-dialog>
   <el-dialog v-model="permissionOpen" title="目录独立权限" width="760px"><p class="pdm-dialog-help">未配置时继承上级或模板权限；后端对每个文件操作再次校验当前有效权限。</p><div class="pdm-permission-list"><div v-for="(rule, index) in permissionRows" :key="rule.id || index" class="pdm-permission-row"><el-select v-model="rule.principalType" style="width:100px"><el-option label="角色" value="Role" /><el-option label="用户" value="User" /></el-select><el-select v-if="rule.principalType === 'Role'" v-model="rule.principalKey" filterable style="width:165px"><el-option v-for="role in roles" :key="role.role" :label="role.name" :value="role.role" /></el-select><el-select v-else v-model="rule.principalKey" filterable style="width:165px"><el-option v-for="user in users" :key="user.username" :label="user.displayName" :value="user.username" /></el-select><el-checkbox-group :model-value="accessValues(rule)" @update:model-value="setAccess(rule, $event as number[])"><el-checkbox v-for="item in accessOptions" :key="item.value" :value="item.value">{{ item.label }}</el-checkbox></el-checkbox-group><button type="button" class="pdm-text-danger" @click="permissionRows.splice(index, 1)">移除</button></div></div><button type="button" class="pdm-secondary-action" @click="addPermission">添加权限主体</button><template #footer><button type="button" class="pdm-secondary-action" @click="permissionOpen=false">取消</button><button type="button" class="pdm-primary-action" :disabled="pending" @click="savePermissions">保存权限</button></template></el-dialog>
 </template>
 
 <style scoped>
 .pdm-folder-node__icon{display:inline-flex;flex:0 0 auto}.pdm-folder-node__icon.is-populated{color:var(--pdm-theme-accent)}.pdm-folder-node__icon.is-populated svg{fill:currentColor}
-.pdm-file-column-actions{width:76px}.pdm-recycle-summary{display:flex;flex-direction:column;gap:5px;margin-bottom:14px;padding:12px;border:1px solid #dbe7ef;border-radius:6px;background:#f7fafc}.pdm-recycle-summary span{font-size:12px;color:#64748b}.pdm-recycle-field{display:flex;flex-direction:column;gap:6px;margin-top:14px}.pdm-recycle-field>span{font-size:13px;color:#334155}.pdm-recycle-field b{color:#dc2626}.pdm-document-recycle-dialog ul{margin:8px 0 0;padding-left:20px}.pdm-danger-action{display:inline-flex;min-height:34px;align-items:center;border:1px solid #f2c5c0;border-radius:5px;padding:0 11px;background:#fff7f6;color:#c8473d;cursor:pointer}.pdm-danger-action:disabled{cursor:not-allowed;opacity:.45}
+.pdm-file-column-select{width:42px}.pdm-file-column-actions{width:76px}.pdm-recycle-summary{display:flex;flex-direction:column;gap:5px;margin:14px 0;padding:12px;border:1px solid #dbe7ef;border-radius:6px;background:#f7fafc}.pdm-recycle-summary span{font-size:12px;color:#64748b}.pdm-recycle-field{display:flex;flex-direction:column;gap:6px;margin-top:14px}.pdm-recycle-field>span{font-size:13px;color:#334155}.pdm-recycle-field b{color:#dc2626}.pdm-document-recycle-dialog ul{margin:8px 0 0;padding-left:20px}.pdm-danger-action{display:inline-flex;min-height:34px;align-items:center;gap:5px;border:1px solid #f2c5c0;border-radius:5px;padding:0 11px;background:#fff7f6;color:#c8473d;cursor:pointer}.pdm-danger-action:disabled{cursor:not-allowed;opacity:.45}
 .pdm-file-actions,.pdm-row-actions,.pdm-upload-strip{display:flex;align-items:center;gap:8px}.pdm-file-actions{flex-wrap:wrap;justify-content:flex-end}.pdm-upload-strip{padding:8px 14px;background:#f0fdfa;border-bottom:1px solid #ccfbf1}.pdm-upload-strip>span{max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.pdm-upload-strip :deep(.el-progress){flex:1}.pdm-row-actions button,.pdm-icon-action{display:inline-flex;align-items:center;justify-content:center;border:0;background:transparent;color:var(--pdm-blue);cursor:pointer;padding:4px;border-radius:4px}.pdm-row-actions button:hover,.pdm-icon-action:hover{background:var(--pdm-blue-soft)}.is-deleted{opacity:.65}.pdm-deleted-badge{margin-left:8px;color:#b45309}.pdm-file-detail-table th:last-child{width:180px}
 :global(.pdm-move-folder-overlay .el-overlay-dialog){align-items:center;justify-content:center;padding:12px}:global(.pdm-move-folder-overlay .el-overlay-dialog>.pdm-move-folder-dialog){width:min(520px,calc(100vw - 24px))!important;height:min(720px,calc(100dvh - 24px));max-height:calc(100dvh - 24px);margin:auto;border-radius:8px;box-shadow:0 16px 42px rgba(15,23,42,.22)}:global(.pdm-move-folder-overlay .el-overlay-dialog>.pdm-move-folder-dialog .el-dialog__body){display:flex;min-height:0;flex-direction:column;overflow:hidden}.pdm-move-folder-tree{box-sizing:border-box;min-height:0;flex:1 1 auto;padding:8px;border:1px solid var(--pdm-border);border-radius:6px;overflow:auto}.pdm-move-folder-tree :deep(.el-tree-node__content){height:28px}.pdm-folder-node.is-move-disabled{color:#94a3b8}
 </style>

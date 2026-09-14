@@ -66,6 +66,10 @@ describe('MaterialRelationEditor', () => {
     expect(wrapper.find('.material-relation-option-row').text()).toContain('伺服控制器')
     expect(wrapper.find('.material-relation-option-row').text()).toContain('1kW')
     expect(wrapper.find('.material-relation-option-row').text()).toContain('EtherCAT')
+    const quantityInput = wrapper.find('.material-relation-option-row').findComponent({ name: 'ElInputNumber' })
+    expect(quantityInput.props('min')).toBe(1)
+    expect(quantityInput.props('step')).toBe(1)
+    expect(quantityInput.props('precision')).toBe(0)
     expect(api.listMaterials).toHaveBeenCalledWith('token', '', false, 100)
     expect(api.listMaterials).toHaveBeenCalledWith('token', 'C-001', false, 20)
 

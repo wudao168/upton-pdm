@@ -9,6 +9,7 @@ const directory: RolePermissionDirectory = {
     { code: 'project.view', name: '查看项目', module: '项目管理', sensitive: false },
     { code: 'document.edit', name: '编辑图档', module: '项目内容', sensitive: true },
     { code: 'future-module.view', name: '查看新增模块', module: '新增模块', sensitive: false },
+    { code: 'future-module.publish', name: '发布新增模块', module: '新增模块', sensitive: true },
   ],
   roles: [
     { role: 'Engineer', name: '工程师', description: '设计岗位', baseRole: 'Engineer', isSystem: true, isSystemAdministrator: false, permissions: ['project.view'], userCount: 1 },
@@ -52,12 +53,22 @@ describe('RolePermissionSettings', () => {
     expect(actions).toHaveLength(directory.roles.length)
     await actions[0].trigger('click')
     await flushPromises()
-    expect(document.body.textContent).toContain('工程师 · 权限设置')
+    expect(document.body.querySelector('.el-dialog__title')?.textContent).toBe('角色权限')
+    expect(document.body.querySelector<HTMLInputElement>('.pdm-role-overview input')?.value).toBe('工程师')
     expect(document.body.textContent).toContain('权限模块由系统功能目录自动生成')
-    expect(document.body.textContent).toContain('3 个模块、3 项权限')
+    expect(document.body.textContent).toContain('3 个模块、4 项权限')
     expect(document.body.textContent).toContain('查看项目')
-    expect(document.body.textContent).toContain('编辑图档')
+    expect(document.body.querySelectorAll('.pdm-permission-sidebar button')).toHaveLength(3)
+    expect(Array.from(document.body.querySelectorAll('.pdm-permission-table-wrap thead th')).map(item => item.textContent)).toEqual(['分类', '查看', '新增', '编辑', '删除/停用', '其他操作'])
+    expect(document.body.querySelector('.pdm-permission-category-cell')?.textContent).toBe('项目管理')
+    expect(document.body.textContent).not.toContain('编辑图档')
+    const newModuleButton = Array.from(document.body.querySelectorAll<HTMLButtonElement>('.pdm-permission-sidebar button')).find(button => button.textContent?.includes('新增模块'))!
+    newModuleButton.click()
+    await flushPromises()
     expect(document.body.textContent).toContain('查看新增模块')
+    expect(document.body.querySelectorAll('.pdm-permission-matrix td')[4]?.textContent).toContain('发布新增模块')
+    expect(document.body.querySelector('.pdm-permission-category-cell')?.textContent).toBe('新增模块')
+    expect(document.body.textContent).not.toContain('查看项目')
   })
 
   it('自定义角色的权限设置保留安全删除入口', async () => {

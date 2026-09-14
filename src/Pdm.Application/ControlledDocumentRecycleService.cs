@@ -10,6 +10,12 @@ public sealed record ControlledDocumentRecycleReadiness(
     int WhereUsedCount,
     DateTimeOffset? RestoreDeadline);
 
+public sealed record ControlledDocumentRecycleBatchItem(Guid DocumentId, long ExpectedRowVersion);
+public sealed record ControlledDocumentRecycleBatchFailure(Guid DocumentId, string Reason);
+public sealed record ControlledDocumentRecycleBatchResult(
+    IReadOnlyList<Guid> RecycledDocumentIds,
+    IReadOnlyList<ControlledDocumentRecycleBatchFailure> Failures);
+
 public sealed class ControlledDocumentRecycleService(IPdmRepository repository, TimeProvider timeProvider)
 {
     private static readonly TimeSpan Retention = TimeSpan.FromDays(30);
@@ -89,6 +95,46 @@ public sealed class ControlledDocumentRecycleService(IPdmRepository repository, 
         var updated = await repository.SetDocumentDeletedAsync(documentId, false, expectedRowVersion, actor, null, now, cancellationToken);
         await repository.AppendAuditAsync(new AuditEntry(Guid.NewGuid(), now, actor, "document.restore", nameof(PdmDocument), documentId.ToString(), $"{updated.DrawingNumber} · 从受控回收站恢复"), cancellationToken);
         return updated;
+    }
+
+    public async Task<ControlledDocumentRecycleBatchResult> RecycleBatchAsync(
+        Guid projectId,
+        IReadOnlyList<ControlledDocumentRecycleBatchItem> items,
+        string? reason,
+        string actor,
+        UserRole role,
+        CancellationToken cancellationToken)
+    {
+        reason = reason?.Trim();
+        if (string.IsNullOrWhiteSpace(reason)) throw new PdmRuleException("删除原因不能为空。");
+        if (reason.Length > 500) throw new PdmRuleException("删除原因不能超过500个字符。");
+        if (items.Count == 0) throw new PdmRuleException("请至少选择一个受控图档。");
+        if (items.Count > 500) throw new PdmRuleException("一次最多处理500个受控图档。");
+        await RequireAccessAsync(projectId, actor, role, cancellationToken);
+
+        var recycled = new List<Guid>();
+        var failures = new List<ControlledDocumentRecycleBatchFailure>();
+        foreach (var item in items.DistinctBy(item => item.DocumentId))
+        {
+            try
+            {
+                var readiness = await GetReadinessAsync(projectId, item.DocumentId, actor, role, cancellationToken);
+                if (!readiness.CanRecycle)
+                {
+                    failures.Add(new(item.DocumentId, string.Join("；", readiness.Blockers)));
+                    continue;
+                }
+                var now = timeProvider.GetUtcNow();
+                var updated = await repository.SetDocumentDeletedAsync(item.DocumentId, true, item.ExpectedRowVersion, actor, reason, now, cancellationToken);
+                await repository.AppendAuditAsync(new AuditEntry(Guid.NewGuid(), now, actor, "document.recycle.batch", nameof(PdmDocument), item.DocumentId.ToString(), $"{updated.DrawingNumber} · 原因：{reason} · 30天内可恢复"), cancellationToken);
+                recycled.Add(item.DocumentId);
+            }
+            catch (Exception exception) when (exception is PdmRuleException or PdmConflictException or PdmNotFoundException or UnauthorizedAccessException)
+            {
+                failures.Add(new(item.DocumentId, exception.Message));
+            }
+        }
+        return new(recycled, failures);
     }
 
     private async Task RequireAccessAsync(Guid projectId, string actor, UserRole role, CancellationToken cancellationToken)

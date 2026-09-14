@@ -17,13 +17,15 @@ public sealed partial class MySqlPdmRepository
         CancellationToken cancellationToken)
     {
         var priorItems = new List<BomItem>();
-        if (package.Scope == ReleaseScope.StandardFormal)
+        if (package.Scope is ReleaseScope.StandardFormal or ReleaseScope.NonStandardWithDrawing)
         {
+            var longLeadScope = package.Scope == ReleaseScope.StandardFormal ? ReleaseScope.StandardLongLead : ReleaseScope.NonStandardLongLead;
+            var snapshotColumn = package.Scope == ReleaseScope.StandardFormal ? "standard_bom_snapshot_json" : "non_standard_bom_snapshot_json";
             var rows = await connection.QueryAsync<PriorLongLeadRow>(new CommandDefinition(
-                "SELECT standard_bom_snapshot_json,whole_set_multiplier FROM release_package WHERE project_id=@ProjectId AND id<>@Id AND release_scope='StandardLongLead' AND state='Published' AND published_at<=@PublishedAt",
-                new { package.ProjectId, package.Id, PublishedAt = publishedAt.UtcDateTime }, transaction, cancellationToken: cancellationToken));
+                $"SELECT {snapshotColumn} AS SnapshotJson,whole_set_multiplier FROM release_package WHERE project_id=@ProjectId AND id<>@Id AND release_scope=@LongLeadScope AND state='Published' AND published_at<=@PublishedAt",
+                new { package.ProjectId, package.Id, LongLeadScope = longLeadScope.ToString(), PublishedAt = publishedAt.UtcDateTime }, transaction, cancellationToken: cancellationToken));
             foreach (var row in rows)
-                priorItems.AddRange((JsonSerializer.Deserialize<BomItem[]>(row.StandardBomSnapshotJson, jsonOptions) ?? [])
+                priorItems.AddRange((JsonSerializer.Deserialize<BomItem[]>(row.SnapshotJson, jsonOptions) ?? [])
                     .Where(item => !item.IsManuallyExcluded && !item.IsReleaseExcluded && !item.IsPendingRemoval)
                     .Select(item => item with { Quantity = item.Quantity * Math.Max(1, row.WholeSetMultiplier) }));
         }
@@ -71,7 +73,7 @@ public sealed partial class MySqlPdmRepository
 
     private sealed class PriorLongLeadRow
     {
-        public string StandardBomSnapshotJson { get; init; } = "[]";
+        public string SnapshotJson { get; init; } = "[]";
         public int WholeSetMultiplier { get; init; } = 1;
     }
 }

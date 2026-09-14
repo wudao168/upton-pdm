@@ -113,10 +113,20 @@ const categoryForm = reactive({ id: '', name: '', sortOrder: 10, isActive: true,
 const itemForm = reactive({ id: '', categoryId: '', content: '', defaultInformationSource: '内部评审', sortOrder: 10, isActive: true, note: '', rowVersion: 0 })
 
 const activeCategories = computed(() => catalog.value.categories.filter(item => item.isActive))
+const existingCatalogItemIds = computed(() => new Set(rows.value.map(item => item.catalogItemId).filter(Boolean)))
+function availableItemCount(categoryId: string) {
+  return catalog.value.items.filter(item => item.categoryId === categoryId && item.isActive && !existingCatalogItemIds.value.has(item.id)).length
+}
+function activeItemCount(categoryId: string) {
+  return catalog.value.items.filter(item => item.categoryId === categoryId && item.isActive).length
+}
+function selectedItemCount(categoryId: string) {
+  const selected = new Set(selectedItemIds.value)
+  return catalog.value.items.filter(item => item.categoryId === categoryId && selected.has(item.id)).length
+}
 const selectableItems = computed(() => {
   const query = selectionQuery.value.trim().toLocaleLowerCase()
-  const existing = new Set(rows.value.map(item => item.catalogItemId).filter(Boolean))
-  return catalog.value.items.filter(item => item.categoryId === selectionCategoryId.value && item.isActive && !existing.has(item.id)
+  return catalog.value.items.filter(item => item.categoryId === selectionCategoryId.value && item.isActive && !existingCatalogItemIds.value.has(item.id)
     && (!query || item.content.toLocaleLowerCase().includes(query)))
 })
 const selectedCatalogCategory = computed(() => catalogAll.value.categories.find(item => item.id === catalogCategoryId.value) ?? null)
@@ -222,11 +232,13 @@ function currentShanghaiDate() {
 async function openSelection() {
   try {
     catalog.value = await readValidationCheckCatalog(props.token)
-    selectionCategoryId.value = activeCategories.value.some(item => item.id === selectionCategoryId.value)
-      ? selectionCategoryId.value
-      : activeCategories.value[0]?.id ?? ''
     selectedItemIds.value = []
     selectionQuery.value = ''
+    const currentCategory = activeCategories.value.find(item => item.id === selectionCategoryId.value && availableItemCount(item.id) > 0)
+    selectionCategoryId.value = currentCategory?.id
+      ?? activeCategories.value.find(item => availableItemCount(item.id) > 0)?.id
+      ?? activeCategories.value[0]?.id
+      ?? ''
     selectionOpen.value = true
   } catch (error) {
     ElMessage.error(errorMessage(error))
@@ -249,6 +261,7 @@ function appendSelectedItems() {
       informationSource: item.defaultInformationSource,
       validationDate: null,
       result: null,
+      reviewer: null,
       responsiblePerson: null,
       remark: null,
       sortOrder: rows.value.length + 1,
@@ -261,7 +274,7 @@ function appendSelectedItems() {
 function addManualRow(afterIndex: number) {
   rows.value.splice(afterIndex + 1, 0, {
     id: crypto.randomUUID(), catalogCategoryId: null, catalogItemId: null, categoryName: '人工项', validationContent: '',
-    informationSource: '内部评审', validationDate: null, result: null, responsiblePerson: null, remark: null, sortOrder: rows.value.length + 1,
+    informationSource: '内部评审', validationDate: null, result: null, reviewer: null, responsiblePerson: null, remark: null, sortOrder: rows.value.length + 1,
   })
   normalizeRowOrder()
 }
@@ -362,6 +375,7 @@ async function savePlan() {
         informationSource: item.informationSource || null,
         validationDate: item.validationDate || null,
         result: item.result || null,
+        reviewer: item.reviewer || null,
         responsiblePerson: item.responsiblePerson || null,
         remark: item.remark || null,
         sortOrder: index + 1,
@@ -686,6 +700,12 @@ function fileSize(value: number) {
 function formatDateTime(value?: string | null) {
   return value ? new Date(value).toLocaleString() : '—'
 }
+
+function approvalTaskStatus(task: ProjectValidationPlan['approvalTasks'][number]) {
+  if (task.decision == null) return '待处理'
+  if (task.decision === 'Rejected' || task.decision === 1) return '已驳回'
+  return task.decisionComment?.includes('系统自动通过') || task.decisionComment?.includes('即完成编制人自检') ? '系统自动通过' : '已批准'
+}
 </script>
 
 <template>
@@ -763,13 +783,14 @@ function formatDateTime(value?: string | null) {
       <label>编制人<input :value="preparedBy" readonly></label>
       <label>编制日期<input :value="planDate" readonly type="date"></label>
       <span v-if="plan" class="validation-plan__state">R{{ plan.revisionNumber }} · {{ stateLabel() }}</span>
+      <span v-if="currentApprovalTask" class="validation-plan__current-approval">当前等待：{{ currentApprovalTask.stepName }} · {{ displayUserName(currentApprovalTask.assignee, currentApprovalTask.assignee) }}</span>
       <span v-if="dirty" class="validation-plan__dirty">有未保存修改</span>
     </div>
 
     <div v-if="loading" class="validation-plan__empty">正在加载验证计划…</div>
     <div v-else-if="rows.length" class="validation-plan__table-scroll">
       <table class="validation-plan__table">
-        <thead><tr><th>序号</th><th>分类</th><th>验证内容</th><th>信息来源</th><th>验证日期</th><th>责任人</th><th>结果</th><th>备注</th><th>操作</th></tr></thead>
+        <thead><tr><th>序号</th><th>分类</th><th>验证内容</th><th>信息来源</th><th>验证日期</th><th>责任人</th><th>结果</th><th>审核人</th><th>备注</th><th>操作</th></tr></thead>
         <tbody>
           <tr v-for="(row, index) in rows" :key="row.id" :data-row-index="index" :class="{ 'is-row-dragging': draggedRowIndex === index, 'is-drag-over-before': dragOverRowIndex === index && dragOverPosition === 'before', 'is-drag-over-after': dragOverRowIndex === index && dragOverPosition === 'after' }">
             <td class="is-sequence">{{ index + 1 }}</td>
@@ -779,6 +800,7 @@ function formatDateTime(value?: string | null) {
             <td class="validation-plan__date-cell"><input v-model="row.validationDate" :disabled="!editable" type="date" tabindex="-1" aria-hidden="true"><button type="button" :disabled="!editable" title="选择验证日期" aria-label="选择验证日期" @click="openDatePicker($event)"><CalendarDays :size="14" /></button></td>
             <td><input v-model="row.responsiblePerson" :disabled="!editable" maxlength="100" placeholder="责任人"></td>
             <td><input v-model="row.result" :disabled="!editable" maxlength="1500" placeholder="填写结果"></td>
+            <td><input v-model="row.reviewer" :disabled="!editable" maxlength="100" placeholder="审核人"></td>
             <td><input v-model="row.remark" :disabled="!editable" maxlength="1000" placeholder="备注"></td>
             <td><div class="validation-plan__row-actions"><span v-if="editable" class="validation-plan__drag-handle" role="button" tabindex="0" :aria-label="`拖动第 ${index + 1} 行排序`" :title="`按住拖动第 ${index + 1} 行排序`" @pointerdown="startRowPointerDrag(index, $event)">⠿</span><button type="button" :disabled="!editable" :title="`在第 ${index + 1} 行下方添加人工项`" :aria-label="`在第 ${index + 1} 行下方添加人工项`" @click="addManualRow(index)"><Plus :size="14" /></button><button type="button" :disabled="!editable" title="移除" @click="removeRow(index)"><Trash2 :size="14" /></button></div></td>
           </tr>
@@ -787,7 +809,7 @@ function formatDateTime(value?: string | null) {
     </div>
     <div v-else class="validation-plan__empty"><ListChecks :size="42" /><h3>当前项目还没有验证检查项</h3><p>按分类从全局检查项库选取，或直接添加人工项。</p><div v-if="editable" class="validation-plan__actions"><button type="button" class="pdm-primary-action" @click="openSelection">选择检查项</button><button type="button" class="pdm-secondary-action" @click="addManualRow(-1)"><Plus :size="14" />添加人工项</button></div></div>
     <section v-if="plan?.approvalTasks?.length || plan?.attachments?.length || executionRecords.length" class="validation-plan__records">
-      <div v-if="plan?.approvalTasks?.length"><strong>审批记录</strong><span v-for="task in plan.approvalTasks" :key="task.id">{{ task.stepOrder }}. {{ task.stepName }} · {{ displayUserName(task.assignee, task.assignee) }} · {{ task.decision == null ? '待处理' : (task.decision === 'Approved' || task.decision === 0 ? '已批准' : '已驳回') }}</span></div>
+      <div v-if="plan?.approvalTasks?.length"><strong>审批记录</strong><span v-for="task in plan.approvalTasks" :key="task.id">{{ task.stepOrder }}. {{ task.stepName }} · {{ displayUserName(task.assignee, task.assignee) }} · {{ approvalTaskStatus(task) }}</span></div>
       <div v-if="plan?.attachments?.length"><strong>归档文件（验收资料 / 验证计划）</strong><div v-for="file in plan.attachments" :key="file.id" class="validation-plan__attachment-row"><button type="button" class="validation-plan__attachment" :title="`SHA-256 ${file.sha256}`" @click="downloadAttachment(file.id, file.originalFileName)">{{ file.kind === 'PlanDocument' || file.kind === 0 ? '验证计划' : '佐证附件' }} · {{ file.originalFileName }} · V{{ file.fileVersion }} · {{ fileSize(file.fileLength) }} · {{ displayUserName(file.uploadedBy, file.uploadedBy) }}</button><button v-if="normalizedState === 'Effective' && isRecognizableAttachment(file)" type="button" class="pdm-text-action" :disabled="recognizing" @click="recognizeAttachment(file)">{{ recognizing ? '识别中…' : '识别结果' }}</button></div></div>
       <div v-if="executionRecords.length"><strong>验证执行记录</strong><article v-for="record in executionRecords" :key="record.id" class="validation-plan__execution-record"><span>{{ record.sourceFileName }} · {{ displayUserName(record.confirmedBy, record.confirmedBy) }} · {{ formatDateTime(record.confirmedAt) }}</span><small v-for="item in record.items" :key="item.id" :title="item.sourceText">{{ planItemLabel(item.planItemId) }}：{{ item.result || '未填写结果' }}<template v-if="item.responsiblePerson"> · {{ item.responsiblePerson }}</template><template v-if="item.validationDate"> · {{ item.validationDate }}</template></small></article></div>
     </section>
@@ -807,10 +829,10 @@ function formatDateTime(value?: string | null) {
 
     <el-dialog v-model="selectionOpen" class="validation-plan-selector-dialog" title="选择验证检查项" width="920px" append-to-body destroy-on-close>
       <div class="validation-selector">
-        <aside><strong>检查分类</strong><button v-for="category in activeCategories" :key="category.id" type="button" :class="{ 'is-active': selectionCategoryId === category.id }" @click="selectionCategoryId = category.id; selectedItemIds = []"><span>{{ category.name }}</span><small>{{ catalog.items.filter(item => item.categoryId === category.id && item.isActive).length }}</small></button></aside>
-        <section><div class="validation-selector__filter"><input v-model="selectionQuery" type="search" placeholder="搜索检查项内容" aria-label="搜索验证检查项"><label class="validation-selector__select-all"><input type="checkbox" :checked="allSelectableItemsSelected" :disabled="!selectableItems.length" @change="toggleSelectableItems(($event.target as HTMLInputElement).checked)">全选当前列表</label></div><div class="validation-selector__items"><label v-for="item in selectableItems" :key="item.id"><input v-model="selectedItemIds" type="checkbox" :value="item.id"><span>{{ item.content }}</span><small>{{ item.defaultInformationSource }}</small></label><p v-if="!selectableItems.length">当前分类没有可加入的检查项。</p></div></section>
+        <aside><strong>检查分类</strong><button v-for="category in activeCategories" :key="category.id" type="button" :class="{ 'is-active': selectionCategoryId === category.id, 'is-complete': availableItemCount(category.id) === 0 }" @click="selectionCategoryId = category.id"><span>{{ category.name }}</span><small>可加 {{ availableItemCount(category.id) }}<template v-if="selectedItemCount(category.id)"> · 已选 {{ selectedItemCount(category.id) }}</template></small></button></aside>
+        <section><div class="validation-selector__filter"><input v-model="selectionQuery" type="search" placeholder="搜索检查项内容" aria-label="搜索验证检查项"><label class="validation-selector__select-all"><input type="checkbox" :checked="allSelectableItemsSelected" :disabled="!selectableItems.length" @change="toggleSelectableItems(($event.target as HTMLInputElement).checked)">全选当前列表</label></div><div class="validation-selector__items"><label v-for="item in selectableItems" :key="item.id"><input v-model="selectedItemIds" type="checkbox" :value="item.id"><span>{{ item.content }}</span><small>{{ item.defaultInformationSource }}</small></label><p v-if="!selectableItems.length">{{ availableItemCount(selectionCategoryId) === 0 && activeItemCount(selectionCategoryId) > 0 ? `该分类的 ${activeItemCount(selectionCategoryId)} 项已全部加入当前计划，请选择其他分类。` : selectionQuery.trim() ? '没有符合搜索条件的检查项。' : '当前分类没有可加入的检查项。' }}</p></div></section>
       </div>
-      <template #footer><span>已选 {{ selectedItemIds.length }} 项</span><button type="button" class="pdm-secondary-action" @click="selectionOpen = false">取消</button><button type="button" class="pdm-primary-action" :disabled="!selectedItemIds.length" @click="appendSelectedItems">加入计划</button></template>
+      <template #footer><span>跨分类已选 {{ selectedItemIds.length }} 项</span><button type="button" class="pdm-secondary-action" @click="selectionOpen = false">取消</button><button type="button" class="pdm-primary-action" :disabled="!selectedItemIds.length" @click="appendSelectedItems">加入计划（{{ selectedItemIds.length }}）</button></template>
     </el-dialog>
 
     <el-dialog v-model="catalogOpen" title="全局验证检查项库" width="1100px" append-to-body destroy-on-close>
@@ -851,7 +873,7 @@ function formatDateTime(value?: string | null) {
 .validation-plan__meta input { width:190px; height:30px; padding:0 9px; border:1px solid var(--pdm-border); border-radius:5px; background:var(--pdm-surface); color:var(--pdm-text); }
 .validation-plan__dirty { margin-left:auto; color:#b56a00; font-size:12px; }
 .validation-plan__table-scroll { min-height:0; flex:1 1 auto; overflow:auto; border:1px solid var(--pdm-border); border-radius:7px; }
-.validation-plan__table { width:100%; min-width:1320px; border-collapse:collapse; table-layout:fixed; font-size:12px; }
+.validation-plan__table { width:100%; min-width:1430px; border-collapse:collapse; table-layout:fixed; font-size:12px; }
 .validation-plan-summary__table { width:100%; min-width:1240px; border-collapse:collapse; table-layout:fixed; font-size:12px; }
 .validation-plan-summary__table th { position:sticky; top:0; z-index:1; padding:9px 6px; border:0; background:#f3f6f9; color:var(--pdm-muted); font-weight:500; text-align:center; vertical-align:middle; }
 .validation-plan-summary__table tbody tr { background:var(--pdm-surface); cursor:pointer; }
@@ -868,7 +890,7 @@ function formatDateTime(value?: string | null) {
 .validation-plan__table th { position:sticky; top:0; z-index:1; padding:9px 3px; border:0; background:#f3f6f9; color:var(--pdm-muted); font-weight:500; text-align:center; vertical-align:middle; }
 .validation-plan__table tbody tr { background:var(--pdm-surface); }
 .validation-plan__table td { padding:0 3px; border:0; border-top:1px solid var(--pdm-border-soft); color:var(--pdm-text); text-align:center; vertical-align:middle; }
-.validation-plan__table th:nth-child(1){width:50px}.validation-plan__table th:nth-child(2){width:105px}.validation-plan__table th:nth-child(3){width:320px}.validation-plan__table th:nth-child(4){width:110px}.validation-plan__table th:nth-child(5){width:125px}.validation-plan__table th:nth-child(6){width:145px}.validation-plan__table th:nth-child(7){width:110px}.validation-plan__table th:nth-child(8){width:145px}.validation-plan__table th:nth-child(9){width:94px}
+.validation-plan__table th:nth-child(1){width:50px}.validation-plan__table th:nth-child(2){width:105px}.validation-plan__table th:nth-child(3){width:320px}.validation-plan__table th:nth-child(4){width:110px}.validation-plan__table th:nth-child(5){width:125px}.validation-plan__table th:nth-child(6){width:145px}.validation-plan__table th:nth-child(7){width:110px}.validation-plan__table th:nth-child(8){width:110px}.validation-plan__table th:nth-child(9){width:145px}.validation-plan__table th:nth-child(10){width:94px}
 .validation-plan__table input,.validation-plan__table select { box-sizing:border-box; width:100%; min-width:0; height:24px; padding:3px 2px; border:1px solid transparent; border-radius:4px; background:transparent; color:var(--pdm-text); font:inherit; text-align:center; }
 .validation-plan__table input:focus,.validation-plan__table select:focus { border-color:var(--pdm-blue); background:var(--pdm-surface); outline:2px solid var(--pdm-theme-accent-focus); }
 .validation-plan__table input:disabled,.validation-plan__table select:disabled { border-color:transparent; background:transparent; color:inherit; opacity:1; }
@@ -879,6 +901,7 @@ function formatDateTime(value?: string | null) {
 .validation-plan__footer { color:var(--pdm-muted); font-size:11px; }
 .validation-plan__file-input { display:none; }
 .validation-plan__state { align-self:flex-end; padding:4px 9px; border-radius:999px; background:var(--pdm-theme-accent-soft); color:var(--pdm-primary); font-size:12px; white-space:nowrap; }
+.validation-plan__current-approval { color:var(--pdm-text); font-size:12px; white-space:nowrap; }
 .validation-plan__records { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:10px; }
 .validation-plan__records>div { display:flex; flex-direction:column; gap:6px; min-width:0; padding:9px 11px; border:1px solid var(--pdm-border-soft); border-radius:7px; background:var(--pdm-soft); font-size:11px; }
 .validation-plan__records>div>strong { color:var(--pdm-text); }
@@ -899,6 +922,7 @@ function formatDateTime(value?: string | null) {
 .validation-selector { display:grid; grid-template-columns:220px 1fr; height:100%; min-height:0; border:1px solid var(--pdm-border); border-radius:7px; overflow:hidden; }
 .validation-selector aside,.validation-catalog aside { display:flex; flex-direction:column; min-height:0; overflow:auto; padding:10px; background:var(--pdm-soft); border-right:1px solid var(--pdm-border); }
 .validation-selector aside>strong { padding:5px 7px 10px; }.validation-selector aside>button,.validation-catalog aside>button { display:flex; justify-content:space-between; gap:8px; width:100%; padding:8px; border:0; border-radius:5px; background:transparent; color:var(--pdm-text); text-align:left; }.validation-selector aside>button.is-active,.validation-catalog aside>button.is-active { background:#dff4ef; color:#087f72; }
+.validation-selector aside>button.is-complete:not(.is-active) { color:var(--pdm-muted); opacity:.68; }
 .validation-selector section { display:flex; flex-direction:column; min-height:0; padding:12px; }.validation-selector__filter { display:flex; flex:0 0 auto; align-items:center; gap:12px; }.validation-selector__filter>input,.validation-catalog section>input { height:34px; padding:0 10px; border:1px solid var(--pdm-border); border-radius:5px; }.validation-selector__filter>input { min-width:0; flex:1 1 auto; }
 .validation-selector__select-all { display:flex; flex:0 0 auto; align-items:center; gap:6px; color:var(--pdm-text); font-size:12px; white-space:nowrap; }.validation-selector__items { min-height:0; flex:1 1 auto; margin-top:10px; overflow:auto; }.validation-selector__items label { display:grid; grid-template-columns:22px 1fr 90px; align-items:start; gap:6px; padding:9px 6px; border-bottom:1px solid var(--pdm-border); }.validation-selector__items small { color:var(--pdm-muted); text-align:right; }
 .validation-catalog { display:grid; grid-template-columns:240px 1fr; height:600px; min-height:0; border:1px solid var(--pdm-border); border-radius:7px; overflow:hidden; }.validation-catalog aside header,.validation-catalog section>header { display:flex; align-items:center; justify-content:space-between; gap:8px; padding:4px 4px 10px; }.validation-catalog aside>button.is-disabled,.validation-catalog__items article.is-disabled { opacity:.55; }

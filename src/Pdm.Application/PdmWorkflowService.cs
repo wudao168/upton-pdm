@@ -229,7 +229,7 @@ public sealed class PdmWorkflowService(
     {
         _ = configuredReasonTypes;
         var value = input?.Trim() ?? string.Empty;
-        if (scope is ReleaseScope.StandardSupplement or ReleaseScope.ElectricalSupplement)
+        if (IsSupplementScope(scope))
         {
             var selected = value.Split('；', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
                 .Distinct(StringComparer.OrdinalIgnoreCase)
@@ -1831,7 +1831,7 @@ public sealed class PdmWorkflowService(
         var projectNumber = ProjectNumberPolicy.BusinessCode(project);
         var businessTime = timeProvider.GetUtcNow().ToOffset(TimeSpan.FromHours(8));
         number = $"RP-{projectNumber}-{businessTime:yyyyMMdd}-{Guid.NewGuid().ToString("N")[..8].ToUpperInvariant()}";
-        changeNumber = scope is ReleaseScope.StandardSupplement or ReleaseScope.ElectricalSupplement
+        changeNumber = IsSupplementScope(scope)
             ? $"ECN-{projectNumber}-{businessTime:yyyyMMdd}-{Guid.NewGuid().ToString("N")[..8].ToUpperInvariant()}"
             : number;
         effectiveSerialFrom = project.SerialNumbers.FirstOrDefault() ?? "未指定";
@@ -1846,9 +1846,9 @@ public sealed class PdmWorkflowService(
         var normalizedDescription = NormalizeScopedReleaseDescription(changeReason, scope, settings.ReleaseChangeReasonTypes);
         changeReason = normalizedDescription.Text;
         FormalSupplementPolicy? formalSupplementPolicy = null;
-        if (scope is ReleaseScope.StandardFormal or ReleaseScope.ElectricalFormal)
+        if (scope is ReleaseScope.StandardFormal or ReleaseScope.ElectricalFormal or ReleaseScope.NonStandardWithDrawing)
             formalSupplementPolicy = FormalSupplementPolicyForScope(settings.FormalSupplementPolicies, scope);
-        else if (scope is ReleaseScope.StandardSupplement or ReleaseScope.ElectricalSupplement)
+        else if (IsSupplementScope(scope))
             formalSupplementPolicy = await EnsureFormalSupplementPolicyAvailableAsync(
                 projectId, scope, normalizedDescription.Selections, settings.FormalSupplementPolicies, cancellationToken);
         var standard = (await repository.GetBomAsync(projectId, BomKind.Standard, cancellationToken)).Where(IsPublishableBomItem).ToArray();
@@ -1856,31 +1856,14 @@ public sealed class PdmWorkflowService(
         var electrical = (await repository.GetBomAsync(projectId, BomKind.Electrical, cancellationToken)).Where(IsPublishableBomItem).ToArray();
         var targetKind = ReleaseScopeBomKind(scope);
         var targetItems = targetKind == BomKind.Standard ? standard : targetKind == BomKind.NonStandard ? nonStandard : electrical;
-        if (scope == ReleaseScope.StandardLongLead)
-        {
-            var selectedIds = (selectedBomItemIds ?? []).Distinct().ToHashSet();
-            if (selectedIds.Count == 0) throw new PdmRuleException("长交期发布必须至少选择一个标准件物料。");
-            targetItems = standard.Where(item => selectedIds.Contains(item.Id)).ToArray();
-            if (targetItems.Length != selectedIds.Count) throw new PdmRuleException("长交期发布选择中包含已删除或不属于标准件BOM的物料。");
-            if (selectedBomItemQuantities is not null)
-            {
-                if (selectedBomItemQuantities.Keys.Any(id => !selectedIds.Contains(id)))
-                    throw new PdmRuleException("长交期发布数量中包含未选择的标准件物料。");
-                targetItems = targetItems.Select(item =>
-                {
-                    var quantity = selectedBomItemQuantities.GetValueOrDefault(item.Id, item.Quantity);
-                    if (quantity <= 0 || quantity > item.Quantity)
-                        throw new PdmRuleException($"物料{item.DrawingNumber}的长交期发布数量必须大于0且不能超过当前BOM数量{item.Quantity}。");
-                    return item with { Quantity = quantity };
-                }).ToArray();
-            }
-        }
+        if (IsLongLeadScope(scope))
+            targetItems = SelectLongLeadItems(targetKind, targetItems, selectedBomItemIds, selectedBomItemQuantities);
         else if (scope == ReleaseScope.StandardFormal)
         {
             targetItems = SelectFormalStandardItems(standard, selectedBomItemIds);
         }
         if (targetKind == BomKind.Standard) await EnsureStandardMaterialMasterReadyAsync(targetItems, cancellationToken);
-        await EnsureReleaseScopeAvailableAsync(projectId, scope, targetItems, standard, cancellationToken);
+        await EnsureReleaseScopeAvailableAsync(projectId, scope, targetItems, targetKind == BomKind.Standard ? standard : targetKind == BomKind.NonStandard ? nonStandard : electrical, cancellationToken);
         if (!BomReady(targetKind, targetItems, settings.ValidationRules))
             throw new PdmRuleException($"{BomKindLabel(targetKind)}BOM仍有资料不完整的物料，不能创建发布包。{MissingBomSummary(targetKind, targetItems, settings.ValidationRules)}");
         if (targetKind != BomKind.Electrical)
@@ -1893,7 +1876,7 @@ public sealed class PdmWorkflowService(
         BomVersion? standardVersion = null;
         BomVersion? nonStandardVersion = null;
         BomVersion? electricalVersion = null;
-        if (scope != ReleaseScope.StandardLongLead)
+        if (!IsLongLeadScope(scope))
         {
             var allVersions = await repository.ListBomVersionsAsync(projectId, null, cancellationToken);
             BomVersion? LatestReleased(BomKind kind) => allVersions.FirstOrDefault(version => version.Kind == kind && version.State == BomVersionState.Released);
@@ -1911,7 +1894,8 @@ public sealed class PdmWorkflowService(
         var workflow = targetKind == BomKind.Electrical ? settings.ApprovalWorkflows.Electrical : settings.ApprovalWorkflows.Mechanical;
         var packageId = Guid.NewGuid();
         var tasks = await BuildApprovalTasksAsync(packageId, workflow, project, actor, cancellationToken);
-        var selectedSnapshot = scope == ReleaseScope.StandardLongLead ? targetItems : standardVersion?.Items ?? [];
+        var selectedStandardSnapshot = scope == ReleaseScope.StandardLongLead ? targetItems : standardVersion?.Items ?? [];
+        var selectedNonStandardSnapshot = scope == ReleaseScope.NonStandardLongLead ? targetItems : nonStandardVersion?.Items ?? [];
         var package = new ReleasePackage(
             packageId, projectId, number, ReleasePackageState.Draft, snapshot.SnapshotId,
             BomRevision("M", (standardVersion?.Items ?? []).Concat(nonStandardVersion?.Items ?? []).ToArray()),
@@ -1920,19 +1904,19 @@ public sealed class PdmWorkflowService(
             Scope = scope,
             WorkflowCode = workflow.Code,
             WorkflowVersion = workflow.Version,
-            SelectedBomItemIds = scope is ReleaseScope.StandardLongLead or ReleaseScope.StandardFormal ? targetItems.Select(item => item.Id).ToArray() : [],
-            CreatesManufacturingBaseline = scope != ReleaseScope.StandardLongLead
+            SelectedBomItemIds = IsLongLeadScope(scope) || scope == ReleaseScope.StandardFormal ? targetItems.Select(item => item.Id).ToArray() : [],
+            CreatesManufacturingBaseline = !IsLongLeadScope(scope)
                 && standardVersion is not null && nonStandardVersion is not null && electricalVersion is not null,
-            LocksDocuments = scope == ReleaseScope.NonStandardWithDrawing,
+            LocksDocuments = IsNonStandardScope(scope),
             StandardBomVersionId = standardVersion?.Id,
             NonStandardBomVersionId = nonStandardVersion?.Id,
             ElectricalBomVersionId = electricalVersion?.Id,
             StandardBomRevision = scope == ReleaseScope.StandardLongLead ? BomRevision("LL", targetItems) : standardVersion?.Label,
-            NonStandardBomRevision = nonStandardVersion?.Label,
-            StandardBomSnapshot = selectedSnapshot.ToArray(),
-            NonStandardBomSnapshot = nonStandardVersion?.Items.ToArray() ?? [],
+            NonStandardBomRevision = scope == ReleaseScope.NonStandardLongLead ? BomRevision("LL", targetItems) : nonStandardVersion?.Label,
+            StandardBomSnapshot = selectedStandardSnapshot.ToArray(),
+            NonStandardBomSnapshot = selectedNonStandardSnapshot.ToArray(),
             ElectricalBomSnapshot = electricalVersion?.Items.ToArray() ?? [],
-            MechanicalBomSnapshot = selectedSnapshot.Concat(nonStandardVersion?.Items ?? []).ToArray(),
+            MechanicalBomSnapshot = selectedStandardSnapshot.Concat(selectedNonStandardSnapshot).ToArray(),
             ChangeNumber = changeNumber,
             ChangeReason = changeReason,
             ChangeReasonSelections = normalizedDescription.Selections,
@@ -1973,9 +1957,9 @@ public sealed class PdmWorkflowService(
         FormalSupplementPolicy? formalSupplementPolicy = package.FormalSupplementPolicySnapshotted
             ? new FormalSupplementPolicy(package.FormalSupplementMaximumCount, package.FormalSupplementValidDays)
             : null;
-        if (package.Scope is ReleaseScope.StandardFormal or ReleaseScope.ElectricalFormal)
+        if (package.Scope is ReleaseScope.StandardFormal or ReleaseScope.ElectricalFormal or ReleaseScope.NonStandardWithDrawing)
             formalSupplementPolicy ??= FormalSupplementPolicyForScope(settings.FormalSupplementPolicies, package.Scope);
-        else if (package.Scope is ReleaseScope.StandardSupplement or ReleaseScope.ElectricalSupplement)
+        else if (IsSupplementScope(package.Scope))
             formalSupplementPolicy = await EnsureFormalSupplementPolicyAvailableAsync(
                 package.ProjectId, package.Scope, normalizedDescription.Selections, settings.FormalSupplementPolicies, cancellationToken, package.Id);
         var updated = package with
@@ -1988,43 +1972,30 @@ public sealed class PdmWorkflowService(
             FormalSupplementValidDays = formalSupplementPolicy?.ValidDays
         };
 
-        if (package.Scope == ReleaseScope.StandardLongLead)
+        if (IsLongLeadScope(package.Scope))
         {
             var snapshot = await repository.GetLatestReferenceSnapshotAsync(package.ProjectId, cancellationToken)
                 ?? throw new PdmRuleException("项目尚无已存档的引用树快照，不能编辑发布包。");
-            var standard = (await repository.GetBomAsync(package.ProjectId, BomKind.Standard, cancellationToken))
+            var targetKind = ReleaseScopeBomKind(package.Scope);
+            var currentItems = (await repository.GetBomAsync(package.ProjectId, targetKind, cancellationToken))
                 .Where(IsPublishableBomItem).ToArray();
-            var selectedIds = (selectedBomItemIds ?? []).Distinct().ToHashSet();
-            if (selectedIds.Count == 0) throw new PdmRuleException("长交期发布必须至少选择一个标准件物料。");
-            var selectedItems = standard.Where(item => selectedIds.Contains(item.Id)).ToArray();
-            if (selectedItems.Length != selectedIds.Count)
-                throw new PdmRuleException("长交期发布选择中包含已删除或不属于标准件BOM的物料。");
-            if (selectedBomItemQuantities is not null)
-            {
-                if (selectedBomItemQuantities.Keys.Any(id => !selectedIds.Contains(id)))
-                    throw new PdmRuleException("长交期发布数量中包含未选择的标准件物料。");
-                selectedItems = selectedItems.Select(item =>
-                {
-                    var quantity = selectedBomItemQuantities.GetValueOrDefault(item.Id, item.Quantity);
-                    if (quantity <= 0 || quantity > item.Quantity)
-                        throw new PdmRuleException($"物料{item.DrawingNumber}的长交期发布数量必须大于0且不能超过当前BOM数量{item.Quantity}。");
-                    return item with { Quantity = quantity };
-                }).ToArray();
-            }
-            await EnsureStandardMaterialMasterReadyAsync(selectedItems, cancellationToken);
-            await EnsureReleaseScopeAvailableAsync(package.ProjectId, package.Scope, selectedItems, standard, cancellationToken, package.Id);
-            if (!BomReady(BomKind.Standard, selectedItems, settings.ValidationRules))
-                throw new PdmRuleException($"标准件BOM仍有资料不完整的物料，不能保存发布草稿。{MissingBomSummary(BomKind.Standard, selectedItems, settings.ValidationRules)}");
+            var selectedItems = SelectLongLeadItems(targetKind, currentItems, selectedBomItemIds, selectedBomItemQuantities);
+            if (targetKind == BomKind.Standard) await EnsureStandardMaterialMasterReadyAsync(selectedItems, cancellationToken);
+            await EnsureReleaseScopeAvailableAsync(package.ProjectId, package.Scope, selectedItems, currentItems, cancellationToken, package.Id);
+            if (!BomReady(targetKind, selectedItems, settings.ValidationRules))
+                throw new PdmRuleException($"{BomKindLabel(targetKind)}BOM仍有资料不完整的物料，不能保存发布草稿。{MissingBomSummary(targetKind, selectedItems, settings.ValidationRules)}");
             updated = package with
             {
                 ReferenceSnapshotId = snapshot.SnapshotId,
                 ChangeReason = normalizedReason,
                 ChangeReasonSelections = normalizedDescription.Selections,
                 SelectedBomItemIds = selectedItems.Select(item => item.Id).ToArray(),
-                StandardBomRevision = BomRevision("LL", selectedItems),
-                StandardBomSnapshot = selectedItems,
-                MechanicalBomRevision = BomRevision("M", selectedItems.Concat(package.NonStandardBomSnapshot).ToArray()),
-                MechanicalBomSnapshot = selectedItems.Concat(package.NonStandardBomSnapshot).ToArray(),
+                StandardBomRevision = targetKind == BomKind.Standard ? BomRevision("LL", selectedItems) : package.StandardBomRevision,
+                NonStandardBomRevision = targetKind == BomKind.NonStandard ? BomRevision("LL", selectedItems) : package.NonStandardBomRevision,
+                StandardBomSnapshot = targetKind == BomKind.Standard ? selectedItems : package.StandardBomSnapshot,
+                NonStandardBomSnapshot = targetKind == BomKind.NonStandard ? selectedItems : package.NonStandardBomSnapshot,
+                MechanicalBomRevision = BomRevision("M", targetKind == BomKind.Standard ? selectedItems.Concat(package.NonStandardBomSnapshot).ToArray() : package.StandardBomSnapshot.Concat(selectedItems).ToArray()),
+                MechanicalBomSnapshot = targetKind == BomKind.Standard ? selectedItems.Concat(package.NonStandardBomSnapshot).ToArray() : package.StandardBomSnapshot.Concat(selectedItems).ToArray(),
                 WholeSetMultiplier = wholeSetMultiplier
             };
         }
@@ -2101,8 +2072,8 @@ public sealed class PdmWorkflowService(
             ?? throw new PdmNotFoundException("发布包不存在。");
         if (!await repository.HasProjectContentReadAccessAsync(package.ProjectId, actor, role, cancellationToken))
             throw new UnauthorizedAccessException("当前用户没有该项目的操作权限。");
-        if (package.Scope != ReleaseScope.StandardLongLead || package.State != ReleasePackageState.Published)
-            throw new PdmRuleException("只有已发布的长交期标准件发布包可以重试U9C串联。");
+        if (!IsLongLeadScope(package.Scope) || package.State != ReleasePackageState.Published)
+            throw new PdmRuleException("只有已发布的长交期发布包可以重试U9C串联。");
         if (bomHeaderService is null || approvalU9Automation is null)
             throw new PdmRuleException("U9C自动串联服务尚未启用。");
 
@@ -3475,10 +3446,13 @@ public sealed class PdmWorkflowService(
         await RequirePermissionAsync(actor, role, PermissionCodes.ReleaseManage, cancellationToken);
         var package = await repository.FindReleasePackageAsync(releasePackageId, cancellationToken)
             ?? throw new PdmNotFoundException("发布包不存在。");
-        if (package.Scope == ReleaseScope.StandardLongLead
-            && (await repository.ListReleasePackagesAsync(package.ProjectId, cancellationToken))
-                .Any(previous => previous.Scope == ReleaseScope.StandardFormal && previous.State == ReleasePackageState.Published))
-            throw new PdmRuleException("标准件正式版已发布，不能再提前发布长交期件，请使用增补/变更。");
+        if (IsLongLeadScope(package.Scope))
+        {
+            var formalScope = package.Scope == ReleaseScope.StandardLongLead ? ReleaseScope.StandardFormal : ReleaseScope.NonStandardWithDrawing;
+            if ((await repository.ListReleasePackagesAsync(package.ProjectId, cancellationToken))
+                .Any(previous => previous.Scope == formalScope && previous.State == ReleasePackageState.Published))
+                throw new PdmRuleException($"{BomKindLabel(ReleaseScopeBomKind(package.Scope))}正式版已发布，不能再提前发布长交期件，请使用增补/变更。");
+        }
         var project = await repository.FindProjectAsync(package.ProjectId, cancellationToken)
             ?? throw new PdmNotFoundException("发布包对应的项目不存在。");
         var settings = await repository.GetSystemSettingsAsync(cancellationToken);
@@ -3490,9 +3464,9 @@ public sealed class PdmWorkflowService(
         FormalSupplementPolicy? formalSupplementPolicy = package.FormalSupplementPolicySnapshotted
             ? new FormalSupplementPolicy(package.FormalSupplementMaximumCount, package.FormalSupplementValidDays)
             : null;
-        if (package.Scope is ReleaseScope.StandardFormal or ReleaseScope.ElectricalFormal)
+        if (package.Scope is ReleaseScope.StandardFormal or ReleaseScope.ElectricalFormal or ReleaseScope.NonStandardWithDrawing)
             formalSupplementPolicy ??= FormalSupplementPolicyForScope(settings.FormalSupplementPolicies, package.Scope);
-        else if (package.Scope is ReleaseScope.StandardSupplement or ReleaseScope.ElectricalSupplement)
+        else if (IsSupplementScope(package.Scope))
             formalSupplementPolicy = await EnsureFormalSupplementPolicyAvailableAsync(
                 package.ProjectId, package.Scope, normalizedDescription.Selections, settings.FormalSupplementPolicies, cancellationToken, package.Id);
         var normalizedPackage = package with
@@ -3542,11 +3516,13 @@ public sealed class PdmWorkflowService(
             package = await repository.UpdateReleasePackageBomVersionsAsync(package.Id, standardVersion, nonStandardVersion, electricalVersion, cancellationToken);
             versionsForReview.AddRange([standardVersion, nonStandardVersion, electricalVersion]);
         }
-        else if (package.Scope == ReleaseScope.StandardLongLead)
+        else if (IsLongLeadScope(package.Scope))
         {
-            await EnsureStandardMaterialMasterReadyAsync(package.StandardBomSnapshot, cancellationToken);
-            if (!BomReady(BomKind.Standard, package.StandardBomSnapshot, validationRules))
-                throw new PdmRuleException("长交期标准件清单中仍有资料不完整的物料，不能提交审批。");
+            var targetKind = ReleaseScopeBomKind(package.Scope);
+            var items = targetKind == BomKind.Standard ? package.StandardBomSnapshot : package.NonStandardBomSnapshot;
+            if (targetKind == BomKind.Standard) await EnsureStandardMaterialMasterReadyAsync(items, cancellationToken);
+            if (!BomReady(targetKind, items, validationRules))
+                throw new PdmRuleException($"长交期{BomKindLabel(targetKind)}清单中仍有资料不完整的物料，不能提交审批。");
         }
         else
         {
@@ -3570,8 +3546,8 @@ public sealed class PdmWorkflowService(
                 throw new PdmConflictException($"{BomKindLabel(targetKind)}BOM在发布包创建后已变化，请撤销该草稿并重新创建。");
             versionsForReview.Add(targetVersion);
         }
-        if (package.Scope is ReleaseScope.LegacyCombined or ReleaseScope.NonStandardWithDrawing)
-            await EnsureNonStandardDrawingReviewReadyAsync(package.ProjectId, package.NonStandardBomSnapshot, cancellationToken);
+        if (package.Scope == ReleaseScope.LegacyCombined || IsNonStandardScope(package.Scope))
+            await EnsureNonStandardDrawingReviewReadyAsync(package.ProjectId, package.NonStandardBomSnapshot, cancellationToken, package.Scope != ReleaseScope.NonStandardLongLead);
         if (materialRelationReleaseGuard is not null)
             await materialRelationReleaseGuard.EnsureCompleteAsync(package.ProjectId, cancellationToken);
         await publisher.PrepareAsync(package, project, cancellationToken);
@@ -3682,7 +3658,7 @@ public sealed class PdmWorkflowService(
     {
         var package = await repository.FindReleasePackageByApprovalTaskAsync(taskId, cancellationToken)
             ?? throw new PdmNotFoundException("审批任务不存在。");
-        if (package.Scope is not (ReleaseScope.NonStandardWithDrawing or ReleaseScope.LegacyCombined)) return [];
+        if (package.Scope != ReleaseScope.LegacyCombined && !IsNonStandardScope(package.Scope)) return [];
         var task = package.ApprovalTasks.FirstOrDefault(item => item.Id == taskId)
             ?? throw new PdmNotFoundException("审批任务不存在。");
         if (task.Decision is not null || task.StepOrder != package.ApprovalTasks.Max(item => item.StepOrder)) return [];
@@ -3728,8 +3704,8 @@ public sealed class PdmWorkflowService(
         var pendingPackage = await repository.FindReleasePackageByApprovalTaskAsync(taskId, cancellationToken)
             ?? throw new PdmNotFoundException("审批任务不存在。");
         if (decision == ApprovalDecision.Approved
-            && pendingPackage.Scope is ReleaseScope.LegacyCombined or ReleaseScope.NonStandardWithDrawing)
-            await EnsureNonStandardDrawingReviewReadyAsync(pendingPackage.ProjectId, pendingPackage.NonStandardBomSnapshot, cancellationToken);
+            && (pendingPackage.Scope == ReleaseScope.LegacyCombined || IsNonStandardScope(pendingPackage.Scope)))
+            await EnsureNonStandardDrawingReviewReadyAsync(pendingPackage.ProjectId, pendingPackage.NonStandardBomSnapshot, cancellationToken, pendingPackage.Scope != ReleaseScope.NonStandardLongLead);
         var package = await repository.DecideApprovalAsync(taskId, actor, decision, comment, emergencySubstitute, emergencyReason, cancellationToken);
         await AuditAsync(actor, emergencySubstitute ? "approval.emergency-substitute" : "approval.decide", nameof(ApprovalTask), taskId.ToString(), emergencySubstitute ? $"{decision}；原因：{emergencyReason}" : decision.ToString(), cancellationToken);
 
@@ -3778,7 +3754,14 @@ public sealed class PdmWorkflowService(
         else
         {
             await repository.MarkPublishedAsync(package.Id, publishedPath, publishedAt, cancellationToken);
-            await AuditAsync(actor, "release-package.long-lead-output", nameof(ReleasePackage), package.Id.ToString(), $"{package.Number}；标准件{package.StandardBomSnapshot.Count}项；待U9C接口消费", cancellationToken);
+            if (IsLongLeadScope(package.Scope))
+            {
+                var outputKind = ReleaseScopeBomKind(package.Scope);
+                var outputCount = outputKind == BomKind.Standard ? package.StandardBomSnapshot.Count : package.NonStandardBomSnapshot.Count;
+                await AuditAsync(actor, "release-package.long-lead-output", nameof(ReleasePackage), package.Id.ToString(), $"{package.Number}；{BomKindLabel(outputKind)}{outputCount}项；待U9C接口消费", cancellationToken);
+            }
+            else
+                await AuditAsync(actor, "release-package.long-lead-output", nameof(ReleasePackage), package.Id.ToString(), $"{package.Number}；标准件{package.StandardBomSnapshot.Count}项；待U9C接口消费", cancellationToken);
         }
         await AuditAsync(actor, "release-package.publish", nameof(ReleasePackage), package.Id.ToString(), publishedPath, cancellationToken);
         if (projectPlanningService is not null)
@@ -3836,7 +3819,7 @@ public sealed class PdmWorkflowService(
     private static IReadOnlyList<ProjectBomHeaderKind> ApprovedBomHeaderKinds(ReleaseScope scope) => scope switch
     {
         ReleaseScope.StandardLongLead or ReleaseScope.StandardFormal or ReleaseScope.StandardSupplement => [ProjectBomHeaderKind.Standard],
-        ReleaseScope.NonStandardWithDrawing => [ProjectBomHeaderKind.NonStandard],
+        ReleaseScope.NonStandardWithDrawing or ReleaseScope.NonStandardLongLead or ReleaseScope.NonStandardSupplement => [ProjectBomHeaderKind.NonStandard],
         ReleaseScope.ElectricalFormal or ReleaseScope.ElectricalSupplement => [ProjectBomHeaderKind.Electrical],
         ReleaseScope.LegacyCombined =>
             [ProjectBomHeaderKind.Standard, ProjectBomHeaderKind.NonStandard, ProjectBomHeaderKind.Electrical],
@@ -4644,14 +4627,14 @@ public sealed class PdmWorkflowService(
             ["PLM_原审版本"] = reviewedRevision
         };
 
-    private async Task EnsureNonStandardDrawingReviewReadyAsync(Guid projectId, IReadOnlyList<BomItem> snapshot, CancellationToken cancellationToken)
+    private async Task EnsureNonStandardDrawingReviewReadyAsync(Guid projectId, IReadOnlyList<BomItem> snapshot, CancellationToken cancellationToken, bool requireExactQuantities = true)
     {
         var effectiveItems = snapshot
             .Where(item => !item.IsManuallyExcluded && !item.IsPendingRemoval && !item.DeletedAt.HasValue)
             .ToArray();
         var withoutDrawingSource = effectiveItems.Where(item => !item.SourceDocumentId.HasValue).Select(item => item.DrawingNumber).ToArray();
         if (withoutDrawingSource.Length > 0)
-            throw new PdmRuleException($"以下非标件没有来源模型，无法定位2D工程图，不能进入正式BOM审核发布：{string.Join("、", withoutDrawingSource.Take(12))}。");
+            throw new PdmRuleException($"以下非标件没有来源模型，无法定位2D工程图，不能进入非标件BOM审核发布：{string.Join("、", withoutDrawingSource.Take(12))}。");
         var referenceSnapshot = await repository.GetLatestReferenceSnapshotAsync(projectId, cancellationToken)
             ?? throw new PdmRuleException("项目尚无最新设计树，不能核对非标件BOM数量。");
         var generated = await GenerateMechanicalBomFromSnapshotAsync(projectId, referenceSnapshot, "release-validation", cancellationToken, false, false);
@@ -4670,7 +4653,7 @@ public sealed class PdmWorkflowService(
                 missingSources.Add(item.DrawingNumber);
                 continue;
             }
-            if (item.Quantity != source.Quantity)
+            if (requireExactQuantities && item.Quantity != source.Quantity)
                 quantityMismatches.Add($"{item.DrawingNumber}（BOM {item.Quantity} / 源 {source.Quantity}）");
         }
         if (missingSources.Count > 0)
@@ -4686,7 +4669,7 @@ public sealed class PdmWorkflowService(
             .Where(package => package.State == DrawingReviewPackageState.Approved)
             .ToArray();
         if (approvedPackages.Length == 0)
-            throw new PdmRuleException("非标件BOM尚无已完成的2D图纸审核，不能进入正式BOM审核发布。");
+            throw new PdmRuleException("非标件BOM尚无已完成的2D图纸审核，不能进入非标件BOM审核发布。");
         var relations = await repository.ListDocumentRelationsAsync(projectId, cancellationToken);
         var missing = new List<string>();
         foreach (var sourceItem in sourceItems)
@@ -4750,16 +4733,25 @@ public sealed class PdmWorkflowService(
     {
         ReleaseScope.StandardLongLead or ReleaseScope.StandardFormal or ReleaseScope.StandardSupplement => BomKind.Standard,
         ReleaseScope.ElectricalFormal or ReleaseScope.ElectricalSupplement => BomKind.Electrical,
-        ReleaseScope.NonStandardWithDrawing => BomKind.NonStandard,
+        ReleaseScope.NonStandardWithDrawing or ReleaseScope.NonStandardLongLead or ReleaseScope.NonStandardSupplement => BomKind.NonStandard,
         _ => throw new PdmRuleException("不支持的发布范围。")
     };
+
+    private static bool IsLongLeadScope(ReleaseScope scope) =>
+        scope is ReleaseScope.StandardLongLead or ReleaseScope.NonStandardLongLead;
+
+    private static bool IsSupplementScope(ReleaseScope scope) =>
+        scope is ReleaseScope.StandardSupplement or ReleaseScope.ElectricalSupplement or ReleaseScope.NonStandardSupplement;
+
+    private static bool IsNonStandardScope(ReleaseScope scope) =>
+        scope is ReleaseScope.NonStandardWithDrawing or ReleaseScope.NonStandardLongLead or ReleaseScope.NonStandardSupplement;
 
     private static bool IsPublishableBomItem(BomItem item) =>
         !item.IsManuallyExcluded && !item.IsReleaseExcluded;
 
     private static int NormalizeWholeSetMultiplier(ReleaseScope scope, int multiplier)
     {
-        if (scope == ReleaseScope.StandardLongLead) return 1;
+        if (IsLongLeadScope(scope)) return 1;
         if (multiplier is < 1 or > 1000)
             throw new PdmRuleException("整套倍率必须是1到1000之间的整数。");
         return multiplier;
@@ -4838,31 +4830,35 @@ public sealed class PdmWorkflowService(
         Guid projectId,
         ReleaseScope requestedScope,
         IReadOnlyCollection<BomItem> requestedBomItems,
-        IReadOnlyCollection<BomItem> currentStandardBomItems,
+        IReadOnlyCollection<BomItem> currentBomItems,
         CancellationToken cancellationToken,
         Guid? excludedReleasePackageId = null)
     {
         var packages = (await repository.ListReleasePackagesAsync(projectId, cancellationToken))
             .Where(package => package.Id != excludedReleasePackageId).ToArray();
-        if (requestedScope == ReleaseScope.StandardFormal
-            && packages.Any(package => package.Scope == ReleaseScope.StandardFormal && package.State == ReleasePackageState.Published))
-            throw new PdmRuleException("标准件正式版已发布，后续只能发起增补/变更。");
-        if (requestedScope == ReleaseScope.StandardLongLead)
+        var targetKind = ReleaseScopeBomKind(requestedScope);
+        var formalScope = targetKind == BomKind.Standard ? ReleaseScope.StandardFormal
+            : targetKind == BomKind.NonStandard ? ReleaseScope.NonStandardWithDrawing
+            : ReleaseScope.ElectricalFormal;
+        if (requestedScope is ReleaseScope.StandardFormal or ReleaseScope.NonStandardWithDrawing
+            && packages.Any(package => package.Scope == formalScope && package.State == ReleasePackageState.Published))
+            throw new PdmRuleException($"{BomKindLabel(targetKind)}正式版已发布，后续只能发起增补/变更。");
+        if (IsLongLeadScope(requestedScope))
         {
-            if (packages.Any(package => package.Scope == ReleaseScope.StandardFormal && package.State == ReleasePackageState.Published))
-                throw new PdmRuleException("标准件正式版已发布，不能再提前发布长交期件，请使用增补/变更。");
-            if (packages.Any(package => package.Scope == ReleaseScope.StandardFormal
+            if (packages.Any(package => package.Scope == formalScope && package.State == ReleasePackageState.Published))
+                throw new PdmRuleException($"{BomKindLabel(targetKind)}正式版已发布，不能再提前发布长交期件，请使用增补/变更。");
+            if (packages.Any(package => package.Scope == formalScope
                 && package.State is not (ReleasePackageState.Published or ReleasePackageState.Rejected)))
-                throw new PdmConflictException("标准件正式发布正在进行中，请先完成或撤销该发布包，不能同时提前发布。");
+                throw new PdmConflictException($"{BomKindLabel(targetKind)}正式发布正在进行中，请先完成或撤销该发布包，不能同时提前发布。");
             var requestedIds = requestedBomItems.Select(item => item.Id).ToHashSet();
             static string MaterialKey(BomItem item) => $"{item.DrawingNumber.Trim()}|{item.Unit.Trim()}";
             var requestedKeys = requestedBomItems.Select(MaterialKey).ToHashSet(StringComparer.OrdinalIgnoreCase);
-            var currentQuantities = currentStandardBomItems
+            var currentQuantities = currentBomItems
                 .GroupBy(MaterialKey, StringComparer.OrdinalIgnoreCase)
                 .ToDictionary(group => group.Key, group => group.Sum(item => item.Quantity), StringComparer.OrdinalIgnoreCase);
             var publishedQuantities = packages
-                .Where(package => package.Scope == ReleaseScope.StandardLongLead && package.State == ReleasePackageState.Published)
-                .SelectMany(package => package.StandardBomSnapshot)
+                .Where(package => package.Scope == requestedScope && package.State == ReleasePackageState.Published)
+                .SelectMany(package => targetKind == BomKind.Standard ? package.StandardBomSnapshot : package.NonStandardBomSnapshot)
                 .GroupBy(MaterialKey, StringComparer.OrdinalIgnoreCase)
                 .ToDictionary(group => group.Key, group => group.Sum(item => item.Quantity), StringComparer.OrdinalIgnoreCase);
             var requestedQuantities = requestedBomItems
@@ -4880,25 +4876,25 @@ public sealed class PdmWorkflowService(
                 }
             }
             var activeLongLead = packages.FirstOrDefault(package =>
-                package.Scope == ReleaseScope.StandardLongLead
+                package.Scope == requestedScope
                 && package.State != ReleasePackageState.Published
                 && (package.SelectedBomItemIds.Any(requestedIds.Contains)
-                    || package.StandardBomSnapshot.Any(item => requestedKeys.Contains(MaterialKey(item)))));
+                    || (targetKind == BomKind.Standard ? package.StandardBomSnapshot : package.NonStandardBomSnapshot)
+                        .Any(item => requestedKeys.Contains(MaterialKey(item)))));
             if (activeLongLead is not null)
                 throw new PdmConflictException($"发布包{activeLongLead.Number}已包含本次选择的长交期物料；同一物料不能同时进入多个长交期发布包。");
             return;
         }
-        var targetKind = ReleaseScopeBomKind(requestedScope);
         var active = packages.FirstOrDefault(package =>
             package.State != ReleasePackageState.Published
             && (package.Scope == ReleaseScope.LegacyCombined && PackageBomVersionIds(package).Length == 3
-                || package.Scope is not (ReleaseScope.LegacyCombined or ReleaseScope.StandardLongLead) && ReleaseScopeBomKind(package.Scope) == targetKind));
+                || package.Scope != ReleaseScope.LegacyCombined && !IsLongLeadScope(package.Scope) && ReleaseScopeBomKind(package.Scope) == targetKind));
         if (active is not null)
             throw new PdmConflictException($"发布包{active.Number}正在审批或发布，{BomKindLabel(targetKind)}BOM暂时锁定。");
     }
 
     private static FormalSupplementPolicy FormalSupplementPolicyForScope(FormalSupplementPolicies policies, ReleaseScope scope) =>
-        scope is ReleaseScope.StandardFormal or ReleaseScope.StandardSupplement ? policies.Standard
+        scope is ReleaseScope.StandardFormal or ReleaseScope.StandardSupplement or ReleaseScope.NonStandardWithDrawing or ReleaseScope.NonStandardSupplement ? policies.Standard
         : scope is ReleaseScope.ElectricalFormal or ReleaseScope.ElectricalSupplement ? policies.Electrical
         : throw new ArgumentOutOfRangeException(nameof(scope), scope, "发布范围不适用正式补充规则。");
 
@@ -4919,6 +4915,8 @@ public sealed class PdmWorkflowService(
             ? ReleaseScope.StandardFormal
             : supplementScope == ReleaseScope.ElectricalSupplement
                 ? ReleaseScope.ElectricalFormal
+                : supplementScope == ReleaseScope.NonStandardSupplement
+                    ? ReleaseScope.NonStandardWithDrawing
                 : throw new ArgumentOutOfRangeException(nameof(supplementScope), supplementScope, "发布范围不是增补/变更。");
         var packages = (await repository.ListReleasePackagesAsync(projectId, cancellationToken))
             .Where(package => package.Id != excludedReleasePackageId).ToArray();
@@ -4956,7 +4954,7 @@ public sealed class PdmWorkflowService(
         var active = (await repository.ListReleasePackagesAsync(projectId, cancellationToken)).FirstOrDefault(package =>
             package.State is (ReleasePackageState.ProcessReview or ReleasePackageState.Approval or ReleasePackageState.Publishing)
             && (package.Scope == ReleaseScope.LegacyCombined && PackageBomVersionIds(package).Length == 3
-                || package.Scope is not (ReleaseScope.LegacyCombined or ReleaseScope.StandardLongLead)
+                || package.Scope != ReleaseScope.LegacyCombined && !IsLongLeadScope(package.Scope)
                     && (normalizedKinds.Count == 0 || normalizedKinds.Contains(ReleaseScopeBomKind(package.Scope)))));
         if (active is not null)
         {
@@ -5019,6 +5017,30 @@ public sealed class PdmWorkflowService(
             effectiveSerialTo,
             validationRules.RequiredFields(kind),
             cancellationToken);
+    }
+
+    private static BomItem[] SelectLongLeadItems(
+        BomKind kind,
+        IReadOnlyList<BomItem> currentItems,
+        IReadOnlyList<Guid>? selectedBomItemIds,
+        IReadOnlyDictionary<Guid, decimal>? selectedBomItemQuantities)
+    {
+        var label = BomKindLabel(kind);
+        var selectedIds = (selectedBomItemIds ?? []).Distinct().ToHashSet();
+        if (selectedIds.Count == 0) throw new PdmRuleException($"长交期发布必须至少选择一个{label}物料。");
+        var selectedItems = currentItems.Where(item => selectedIds.Contains(item.Id)).ToArray();
+        if (selectedItems.Length != selectedIds.Count)
+            throw new PdmRuleException($"长交期发布选择中包含已删除或不属于{label}BOM的物料。");
+        if (selectedBomItemQuantities is null) return selectedItems;
+        if (selectedBomItemQuantities.Keys.Any(id => !selectedIds.Contains(id)))
+            throw new PdmRuleException($"长交期发布数量中包含未选择的{label}物料。");
+        return selectedItems.Select(item =>
+        {
+            var quantity = selectedBomItemQuantities.GetValueOrDefault(item.Id, item.Quantity);
+            if (quantity <= 0 || quantity > item.Quantity)
+                throw new PdmRuleException($"物料{item.DrawingNumber}的长交期发布数量必须大于0且不能超过当前BOM数量{item.Quantity}。");
+            return item with { Quantity = quantity };
+        }).ToArray();
     }
 
     private static BomItem[] SelectFormalStandardItems(

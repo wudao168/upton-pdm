@@ -7,6 +7,33 @@ namespace Upton.Pdm.Domain.Tests;
 
 public sealed class ReleasePackagePublisherTests
 {
+    [Theory]
+    [InlineData(ReleaseScope.NonStandardLongLead, "long-lead-nonstandard-parts-bom.xlsx")]
+    [InlineData(ReleaseScope.NonStandardSupplement, "nonstandard-parts-bom.xlsx")]
+    public async Task NonStandardRelease_PreparesAndValidatesControlledWorkbook(ReleaseScope scope, string expectedFile)
+    {
+        var root = Path.Combine(Path.GetTempPath(), "pdm-nonstandard-release-test", Guid.NewGuid().ToString("N"));
+        var projectId = Guid.NewGuid();
+        var item = new BomItem(Guid.NewGuid(), projectId, BomKind.NonStandard, 1, "NS-001", "非标件", 2, "个", "Q235B", "机架", "W1", true);
+        var package = new ReleasePackage(Guid.NewGuid(), projectId, $"RP-{Guid.NewGuid():N}", ReleasePackageState.Draft,
+            Guid.NewGuid(), "M1", "E1", [], DateTimeOffset.UtcNow, null, null)
+        {
+            Scope = scope,
+            LocksDocuments = true,
+            NonStandardBomSnapshot = [item],
+            MechanicalBomSnapshot = [item]
+        };
+        var project = new Project(projectId, "P-TEST", "非标发布测试", "admin", Path.Combine(root, "vault"), Path.Combine(root, "release"), true);
+        try
+        {
+            var publisher = new AtomicReleasePackagePublisher(TimeProvider.System);
+            await publisher.PrepareAsync(package, project, default);
+            await publisher.ValidateAsync(package, project, default);
+            Assert.True(File.Exists(Path.Combine(project.VaultLocation, ".release-staging", package.Number, expectedFile)));
+        }
+        finally { if (Directory.Exists(root)) Directory.Delete(root, true); }
+    }
+
     [Fact]
     public async Task FormalPublication_RefreshesOldStagingWithTotalAndRemainingQuantities()
     {

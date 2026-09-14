@@ -26,7 +26,7 @@ public sealed class ProjectCopyServiceTests
             var sourceItemId = Guid.NewGuid();
             await validationPlans.SavePlanAsync(new ProjectValidationPlan(
                 sourcePlanId, source.Id, 3, ProjectValidationPlanState.Effective, "编制人", new DateOnly(2026, 9, 10),
-                [new(sourceItemId, null, null, "安全", "检查急停按钮", "技术协议", new DateOnly(2026, 9, 11), "合格", "张三", "已确认", 1)],
+                [new(sourceItemId, null, null, "安全", "检查急停按钮", "技术协议", new DateOnly(2026, 9, 11), "合格", null, "张三", "已确认", 1)],
                 [new(Guid.NewGuid(), sourcePlanId, 1, ApprovalStage.Approval, "审核", "manager", ApprovalDecision.Approved, "manager", "同意", now, now)],
                 [new(Guid.NewGuid(), sourcePlanId, ValidationPlanAttachmentKind.PlanDocument, "验证计划.pdf", 1, "plan.pdf", 10, new string('A', 64), "admin", now)],
                 "admin", now, "admin", now, 1), null, default);

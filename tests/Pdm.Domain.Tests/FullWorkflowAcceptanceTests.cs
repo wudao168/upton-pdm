@@ -164,7 +164,7 @@ public sealed class FullWorkflowAcceptanceTests
             new(category.Id, "急停回路验证", "内部评审", 9000, true, "隔离验收"), "admin", UserRole.Administrator, default);
         var validationPlan = await validation.SavePlanAsync(child.Id,
             new("qa_engineer", new DateOnly(2026, 9, 13),
-                [new(check.Id, null, "内部评审", new DateOnly(2026, 9, 13), null, "qa_engineer", null, 1)]),
+                [new(check.Id, null, "内部评审", new DateOnly(2026, 9, 13), null, null, "qa_engineer", null, 1)]),
             "qa_engineer", UserRole.Engineer, default);
         validationPlan = await validation.SubmitAsync(child.Id, validationPlan.RowVersion, "qa_engineer", UserRole.Engineer, default);
         while (validationPlan.State == ProjectValidationPlanState.PendingApproval)

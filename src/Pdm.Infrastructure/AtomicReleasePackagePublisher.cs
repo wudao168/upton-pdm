@@ -59,12 +59,23 @@ public sealed class AtomicReleasePackagePublisher : IReleasePackagePublisher
             case ReleaseScope.StandardSupplement:
                 await File.WriteAllBytesAsync(Path.Combine(stagingDirectory, "standard-parts-bom.xlsx"), BomWorkbook.Write(standard), cancellationToken);
                 break;
+            case ReleaseScope.NonStandardLongLead:
+                await File.WriteAllBytesAsync(Path.Combine(stagingDirectory, "long-lead-nonstandard-parts-bom.xlsx"), BomWorkbook.Write(nonStandard), cancellationToken);
+                break;
+            case ReleaseScope.NonStandardSupplement:
+                await File.WriteAllBytesAsync(Path.Combine(stagingDirectory, "nonstandard-parts-bom.xlsx"), BomWorkbook.Write(nonStandard), cancellationToken);
+                break;
             case ReleaseScope.ElectricalFormal:
             case ReleaseScope.ElectricalSupplement:
                 await File.WriteAllBytesAsync(Path.Combine(stagingDirectory, "electrical-bom.xlsx"), BomWorkbook.Write(electrical), cancellationToken);
                 break;
             case ReleaseScope.NonStandardWithDrawing:
-                await File.WriteAllBytesAsync(Path.Combine(stagingDirectory, "nonstandard-parts-bom.xlsx"), BomWorkbook.Write(nonStandard), cancellationToken);
+                var nonStandardHistory = repository is null ? [] : await repository.ListReleasePackagesAsync(package.ProjectId, cancellationToken);
+                if (nonStandardHistory.Any(previous => previous.Scope == ReleaseScope.NonStandardLongLead
+                    && previous.State is not (ReleasePackageState.Published or ReleasePackageState.Rejected)))
+                    throw new PdmRuleException("存在尚未完成的非标件长交期发布，请完成或撤销后再进行正式发布。");
+                var priorNonStandard = BomReleaseAggregation.PriorQuantities(BomReleaseAggregation.PriorLongLeadItems(package, nonStandardHistory));
+                await File.WriteAllBytesAsync(Path.Combine(stagingDirectory, "nonstandard-parts-bom.xlsx"), BomWorkbook.WriteStandardRelease(nonStandard, priorNonStandard), cancellationToken);
                 break;
             default:
                 await File.WriteAllBytesAsync(Path.Combine(stagingDirectory, "standard-parts-bom.xlsx"), BomWorkbook.Write(standard), cancellationToken);
@@ -109,7 +120,7 @@ public sealed class AtomicReleasePackagePublisher : IReleasePackagePublisher
         }
 
         // Refresh legacy in-review packages as well; the approved full BOM snapshot is unchanged.
-        if (package.Scope == ReleaseScope.StandardFormal)
+        if (package.Scope is ReleaseScope.StandardFormal or ReleaseScope.NonStandardWithDrawing)
             await PrepareAsync(package, project, cancellationToken);
 
         var previews = previewSources.Count == 0
@@ -228,9 +239,11 @@ public sealed class AtomicReleasePackagePublisher : IReleasePackagePublisher
         }
         if (scope == ReleaseScope.StandardLongLead)
             RequireFile(sourceFiles, path => string.Equals(Path.GetFileName(path), "long-lead-standard-parts-bom.xlsx", StringComparison.OrdinalIgnoreCase), "长交期标准件BOM XLSX");
+        if (scope == ReleaseScope.NonStandardLongLead)
+            RequireFile(sourceFiles, path => string.Equals(Path.GetFileName(path), "long-lead-nonstandard-parts-bom.xlsx", StringComparison.OrdinalIgnoreCase), "长交期非标件BOM XLSX");
         if (scope is ReleaseScope.LegacyCombined or ReleaseScope.StandardFormal or ReleaseScope.StandardSupplement)
             RequireFile(sourceFiles, path => string.Equals(Path.GetFileName(path), "standard-parts-bom.xlsx", StringComparison.OrdinalIgnoreCase), "标准件BOM XLSX");
-        if (scope is ReleaseScope.LegacyCombined or ReleaseScope.NonStandardWithDrawing)
+        if (scope is ReleaseScope.LegacyCombined or ReleaseScope.NonStandardWithDrawing or ReleaseScope.NonStandardSupplement)
             RequireFile(sourceFiles, path => string.Equals(Path.GetFileName(path), "nonstandard-parts-bom.xlsx", StringComparison.OrdinalIgnoreCase), "非标件BOM XLSX");
         if (scope is ReleaseScope.LegacyCombined or ReleaseScope.ElectricalFormal or ReleaseScope.ElectricalSupplement)
             RequireFile(sourceFiles, path => string.Equals(Path.GetFileName(path), "electrical-bom.xlsx", StringComparison.OrdinalIgnoreCase), "电气BOM XLSX");

@@ -22,7 +22,7 @@ public sealed class MySqlProjectFileRepository : IProjectFileRepository
     {
         await using var connection = await OpenAsync(cancellationToken);
         var rows = await connection.QueryAsync<ProjectFileRow>(new CommandDefinition(
-            Select + " WHERE f.root_project_id=@RootProjectId AND (@FolderId IS NULL OR f.folder_id=@FolderId) AND (@IncludeDeleted OR f.deleted_at IS NULL) ORDER BY f.deleted_at IS NOT NULL,f.file_name",
+            Select + " WHERE f.root_project_id=@RootProjectId AND f.reset_snapshot_id IS NULL AND (@FolderId IS NULL OR f.folder_id=@FolderId) AND (@IncludeDeleted OR f.deleted_at IS NULL) ORDER BY f.deleted_at IS NOT NULL,f.file_name",
             new { RootProjectId = rootProjectId, FolderId = folderId, IncludeDeleted = includeDeleted }, cancellationToken: cancellationToken));
         return rows.Select(row => Map(row)!).ToArray();
     }
@@ -93,7 +93,7 @@ public sealed class MySqlProjectFileRepository : IProjectFileRepository
             affected = await connection.ExecuteAsync(new CommandDefinition(
                 deleted
                     ? "UPDATE project_file SET deleted_at=@Now,deleted_by=@Actor,updated_by=@Actor,updated_at=@Now WHERE id=@FileId AND deleted_at IS NULL"
-                    : "UPDATE project_file SET deleted_at=NULL,deleted_by=NULL,updated_by=@Actor,updated_at=@Now WHERE id=@FileId AND deleted_at IS NOT NULL",
+                    : "UPDATE project_file SET deleted_at=NULL,deleted_by=NULL,updated_by=@Actor,updated_at=@Now WHERE id=@FileId AND deleted_at IS NOT NULL AND reset_snapshot_id IS NULL",
                 new { FileId = fileId, Actor = actor, Now = timeProvider.GetUtcNow().UtcDateTime }, cancellationToken: cancellationToken));
         }
         catch (MySqlException exception) when (exception.Number == 1062) { throw new PdmConflictException("该目录已存在同名文件，无法恢复。"); }

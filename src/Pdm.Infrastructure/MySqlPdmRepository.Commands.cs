@@ -704,7 +704,7 @@ public sealed partial class MySqlPdmRepository
             await connection.ExecuteAsync(new CommandDefinition(
                 "UPDATE bom_version SET state='Released',updated_at=@PublishedAt,released_at=@PublishedAt,row_version=row_version+1 WHERE id IN @VersionIds AND state='InReview'",
                 new { VersionIds = versionIds, PublishedAt = publishedAt.UtcDateTime }, transaction, cancellationToken: cancellationToken));
-        var eventType = package.Scope == ReleaseScope.StandardLongLead ? "LongLeadBomReleased" : "BomStreamReleased";
+        var eventType = package.Scope is ReleaseScope.StandardLongLead or ReleaseScope.NonStandardLongLead ? "LongLeadBomReleased" : "BomStreamReleased";
         await connection.ExecuteAsync(new CommandDefinition(
             """
             INSERT INTO integration_outbox(id,event_type,aggregate_type,aggregate_id,payload_json,occurred_at,retry_count)

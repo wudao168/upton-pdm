@@ -57,6 +57,7 @@ public sealed record ProjectValidationPlanItem(
     string? InformationSource,
     DateOnly? ValidationDate,
     string? Result,
+    string? Reviewer,
     string? ResponsiblePerson,
     string? Remark,
     int SortOrder);

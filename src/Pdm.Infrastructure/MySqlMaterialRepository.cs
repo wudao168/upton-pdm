@@ -627,7 +627,7 @@ public sealed class MySqlMaterialRepository : IMaterialRepository
         {
             var affected = await connection.ExecuteAsync(new CommandDefinition(
                 """
-                UPDATE material_master
+                UPDATE material_master AS current_material
                 SET name=@Name,material_kind=@MaterialKind,supply_mode=@SupplyMode,unit_code=@UnitCode,
                     specification=@Specification,material=@Material,remark=@Remark,brand=@Brand,surface_treatment=@SurfaceTreatment,purchase_link=@PurchaseLink,
                     selection_advice=@SelectionAdvice,reference_price=@ReferencePrice,model_3d_link=@Model3DLink,document_link=@DocumentLink,is_recommended=@IsRecommended,
