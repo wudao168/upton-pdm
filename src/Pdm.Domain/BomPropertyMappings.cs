@@ -99,4 +99,7 @@ public static class BomPropertyMappingCatalog
         Normalize(settings).FirstOrDefault(mapping =>
             string.Equals(mapping.PdmPropertyKey, key, StringComparison.OrdinalIgnoreCase))?.SolidWorksProperty
         ?? fallback;
+
+    public static bool IsWearPartValue(string? value) => value?.Trim().ToLowerInvariant() is
+        "是" or "1" or "true" or "yes" or "√" or "易损件";
 }

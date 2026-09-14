@@ -815,6 +815,37 @@ public static class PdmEndpointExtensions
             return Results.Ok(await workflow.ReplaceBomAsync(projectId, bomKind, items, actor, role, cancellationToken));
         }).DisableAntiforgery();
 
+        api.MapGet("/projects/{projectId:guid}/boms/wear-parts/export", async (Guid projectId, string? mode, HttpContext context, IPdmRepository repository, PdmWorkflowService workflow, CancellationToken cancellationToken) =>
+        {
+            var (actor, role) = CurrentUser(context.User);
+            if (!Enum.TryParse<BomWorkbookExportMode>(mode ?? nameof(BomWorkbookExportMode.Summary), true, out var exportMode)) return Results.BadRequest(new { message = "导出方式必须是Summary或Structure。" });
+            var project = await repository.FindProjectAsync(projectId, cancellationToken);
+            if (project is null) return Results.NotFound();
+            var items = await workflow.GetWearPartBomAsync(projectId, actor, role, cancellationToken);
+            var mainProjectId = project.RootProjectId ?? project.ParentProjectId ?? project.Id;
+            var mainProject = mainProjectId == project.Id ? project : await repository.FindProjectAsync(mainProjectId, cancellationToken) ?? project;
+            var directory = await repository.GetOrganizationDirectoryAsync(cancellationToken);
+            var exportedAt = DateTimeOffset.Now;
+            var contextData = new BomWorkbookExportContext(
+                "易损件BOM（统计）",
+                mainProject.Code,
+                mainProject.Name,
+                project.Id == mainProject.Id ? "—" : project.Code,
+                project.Id == mainProject.Id ? "—" : project.Name,
+                "自动汇总，不用于发布",
+                project.ExecutionUnitName ?? mainProject.ExecutionUnitName ?? "—",
+                DisplayUserNames(
+                    new[] { project.PrimaryProjectManager ?? mainProject.PrimaryProjectManager }
+                        .Concat(project.CollaborativeProjectManagers.Count > 0 ? project.CollaborativeProjectManagers : mainProject.CollaborativeProjectManagers),
+                    directory),
+                DisplayUserNames(project.DesignLeads.Concat(project.Designers), directory),
+                [],
+                null,
+                exportedAt);
+            var fileName = BomWorkbook.ExportFileName(project.Code, "易损件BOM", "统计", exportedAt);
+            return Results.File(BomWorkbook.WriteExport(items, contextData, exportMode), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", fileName);
+        });
+
         api.MapGet("/projects/{projectId:guid}/boms/{kind}/export", async (Guid projectId, string kind, string? mode, HttpContext context, IPdmRepository repository, CancellationToken cancellationToken) =>
         {
             var (actor, role) = CurrentUser(context.User);

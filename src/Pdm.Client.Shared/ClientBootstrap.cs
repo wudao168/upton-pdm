@@ -38,7 +38,20 @@ internal static class ClientBootstrapLoader
 
     public static async Task<ClientBootstrapConfiguration> LoadAsync(CancellationToken cancellationToken)
     {
-        var bootstrapUrl = ResolveBootstrapUrl();
+        return await LoadAsync(ResolveBootstrapUrl(), cancellationToken).ConfigureAwait(false);
+    }
+
+    public static async Task<ClientBootstrapConfiguration> LoadAsync(Uri bootstrapUrl, CancellationToken cancellationToken)
+    {
+        return await LoadAsync(bootstrapUrl, cancellationToken, true).ConfigureAwait(false);
+    }
+
+    public static async Task<ClientBootstrapConfiguration> LoadAsync(
+        Uri bootstrapUrl,
+        CancellationToken cancellationToken,
+        bool allowCache)
+    {
+        if (bootstrapUrl == null) throw new ArgumentNullException(nameof(bootstrapUrl));
         try
         {
             using (var client = new HttpClient { Timeout = TimeSpan.FromSeconds(5) })
@@ -53,6 +66,7 @@ internal static class ClientBootstrapLoader
         }
         catch when (!cancellationToken.IsCancellationRequested)
         {
+            if (!allowCache) throw;
             var cached = TryLoadCache(bootstrapUrl);
             return cached ?? Normalize(new ClientBootstrapConfiguration(), new Uri(DefaultBootstrapUrl));
         }
@@ -63,7 +77,11 @@ internal static class ClientBootstrapLoader
         var environmentValue = Environment.GetEnvironmentVariable("UPLM_BOOTSTRAP_URL");
         if (Uri.TryCreate(environmentValue, UriKind.Absolute, out var environmentUrl)) return environmentUrl;
 
-        var locatorPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "uplm-bootstrap.json");
+        var assemblyDirectory = Path.GetDirectoryName(typeof(ClientBootstrapLoader).Assembly.Location);
+        var locatorDirectory = string.IsNullOrWhiteSpace(assemblyDirectory)
+            ? AppDomain.CurrentDomain.BaseDirectory
+            : assemblyDirectory;
+        var locatorPath = Path.Combine(locatorDirectory, "uplm-bootstrap.json");
         if (File.Exists(locatorPath))
         {
             try
@@ -161,7 +179,12 @@ internal static class ClientPackageUpdater
         }
     }
 
-    public static async Task<bool> StageAsync(string component, ClientPackageConfiguration package, string targetDirectory, CancellationToken cancellationToken)
+    public static async Task<bool> StageAsync(
+        string component,
+        ClientPackageConfiguration package,
+        string targetDirectory,
+        CancellationToken cancellationToken,
+        IProgress<ClientUpdateProgress> progress = null)
     {
         if (package == null
             || string.IsNullOrWhiteSpace(package.Version)
@@ -191,7 +214,16 @@ internal static class ClientPackageUpdater
             using (var source = await response.Content.ReadAsStreamAsync().ConfigureAwait(false))
             using (var destination = new FileStream(archivePath, FileMode.Create, FileAccess.Write, FileShare.None))
             {
-                await source.CopyToAsync(destination, 81920, cancellationToken).ConfigureAwait(false);
+                var buffer = new byte[81920];
+                var totalBytes = response.Content.Headers.ContentLength;
+                long receivedBytes = 0;
+                int read;
+                while ((read = await source.ReadAsync(buffer, 0, buffer.Length, cancellationToken).ConfigureAwait(false)) > 0)
+                {
+                    await destination.WriteAsync(buffer, 0, read, cancellationToken).ConfigureAwait(false);
+                    receivedBytes += read;
+                    progress?.Report(new ClientUpdateProgress(receivedBytes, totalBytes));
+                }
             }
         }
 
@@ -264,6 +296,27 @@ internal static class ClientPackageUpdater
         }
     }
 
+    public static bool TryGetPendingUpdate(string component, out string version, out string error)
+    {
+        version = string.Empty;
+        error = string.Empty;
+        var pendingPath = GetPendingPath(component);
+        try
+        {
+            if (!File.Exists(pendingPath)) return false;
+            var pending = Serializer.Deserialize<PendingUpdate>(File.ReadAllText(pendingPath, Encoding.UTF8));
+            version = pending?.Version ?? string.Empty;
+            var errorPath = pendingPath + ".error.txt";
+            if (File.Exists(errorPath)) error = File.ReadAllText(errorPath, Encoding.UTF8).Trim();
+            return true;
+        }
+        catch (Exception exception)
+        {
+            error = exception.Message;
+            return true;
+        }
+    }
+
     private static string GetPendingPath(string component) => Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
         "UPLM",
@@ -312,4 +365,19 @@ try {
         public string PayloadDirectory { get; set; } = string.Empty;
         public string TargetDirectory { get; set; } = string.Empty;
     }
+}
+
+internal sealed class ClientUpdateProgress
+{
+    public ClientUpdateProgress(long receivedBytes, long? totalBytes)
+    {
+        ReceivedBytes = receivedBytes;
+        TotalBytes = totalBytes;
+    }
+
+    public long ReceivedBytes { get; }
+    public long? TotalBytes { get; }
+    public int? Percentage => TotalBytes.HasValue && TotalBytes.Value > 0
+        ? (int)Math.Min(100, ReceivedBytes * 100L / TotalBytes.Value)
+        : (int?)null;
 }

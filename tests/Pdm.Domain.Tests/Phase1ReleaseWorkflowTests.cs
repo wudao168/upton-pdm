@@ -10,6 +10,31 @@ public sealed class Phase1ReleaseWorkflowTests
     private static readonly Guid ProjectId = Guid.Parse("11111111-1111-1111-1111-111111111111");
 
     [Fact]
+    public async Task WearPartBom_CollectsMarkedItemsAcrossCategoriesAndKeepsTheirOriginalBomKinds()
+    {
+        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(), new RecordingPublisher(), TimeProvider.System);
+        var standard = await workflow.ReplaceBomAsync(ProjectId, BomKind.Standard,
+            [new BomItemInput(1, "STD-WEAR", "标准易损件", 2, "001", null, "M1", "W1", true, IsWearPart: true)],
+            "admin", UserRole.Administrator, default);
+        var nonStandard = await workflow.ReplaceBomAsync(ProjectId, BomKind.NonStandard,
+            [new BomItemInput(1, "NST-WEAR", "非标易损件", 1, "001", "6061", null, "W1", true, IsWearPart: true)],
+            "admin", UserRole.Administrator, default);
+        await workflow.ReplaceBomAsync(ProjectId, BomKind.Electrical,
+            [new BomItemInput(1, "ELE-NORMAL", "普通电气件", 1, "001", null, "M18", "W1", true)],
+            "admin", UserRole.Administrator, default);
+
+        var wearParts = await workflow.GetWearPartBomAsync(ProjectId, "admin", UserRole.Administrator, default);
+
+        Assert.Equal(2, wearParts.Count);
+        Assert.Contains(wearParts, item => item.Id == Assert.Single(standard).Id && item.Kind == BomKind.Standard && item.Source == "Manual");
+        Assert.Contains(wearParts, item => item.Id == Assert.Single(nonStandard).Id && item.Kind == BomKind.NonStandard && item.Source == "Manual");
+        Assert.DoesNotContain(wearParts, item => item.DrawingNumber == "ELE-NORMAL");
+        Assert.True(Assert.Single(await repository.GetBomAsync(ProjectId, BomKind.Standard, default)).IsWearPart);
+        Assert.True(Assert.Single(await repository.GetBomAsync(ProjectId, BomKind.NonStandard, default)).IsWearPart);
+    }
+
+    [Fact]
     public async Task NoPublish_KeepsBomItemVisibleAndCanRestorePublishing()
     {
         var repository = new InMemoryPdmRepository(TimeProvider.System);

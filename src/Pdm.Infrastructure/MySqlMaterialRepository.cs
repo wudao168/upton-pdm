@@ -434,6 +434,39 @@ public sealed class MySqlMaterialRepository : IMaterialRepository
         }
     }
 
+    public async Task<IReadOnlyList<PdmMaterial>> CreateMaterialsAsync(IReadOnlyList<MaterialCreation> creations, CancellationToken cancellationToken)
+    {
+        if (creations.Count == 0) return [];
+        if (creations.Any(item => string.IsNullOrWhiteSpace(item.Material.MaterialCode))) throw new PdmRuleException("物料编码尚未预留。");
+        await using var connection = await OpenAsync(cancellationToken);
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+        var saved = creations.Select(item => item.Material with { CategoryCode = item.Category.Code }).ToArray();
+        try
+        {
+            foreach (var material in saved)
+            {
+                await connection.ExecuteAsync(new CommandDefinition(
+                    """
+                    INSERT INTO material_master(
+                        id,material_code,name,material_kind,supply_mode,unit_code,specification,material,remark,brand,surface_treatment,purchase_link,selection_advice,reference_price,model_3d_link,document_link,is_recommended,
+                        weight,weight_unit,source_bom_item_id,approval_status,approved_by,approved_at,u9_category_code,u9_item_id,u9_item_code,u9_sync_confirmed,
+                        source_system,master_owner,last_u9_synced_at,sync_status,created_by,created_at,updated_by,updated_at,row_version,category_code,is_archived,archived_by,archived_at)
+                    VALUES(
+                        @Id,@MaterialCode,@Name,@MaterialKind,@SupplyMode,@UnitCode,@Specification,@Material,@Remark,@Brand,@SurfaceTreatment,@PurchaseLink,@SelectionAdvice,@ReferencePrice,@Model3DLink,@DocumentLink,@IsRecommended,
+                        @Weight,@WeightUnit,@SourceBomItemId,@ApprovalStatus,@ApprovedBy,@ApprovedAt,@U9CategoryCode,@U9ItemId,@U9ItemCode,@U9SyncConfirmed,
+                        @SourceSystem,@MasterOwner,@LastU9SyncedAt,@SyncStatus,@CreatedBy,@CreatedAt,@UpdatedBy,@UpdatedAt,@RowVersion,@CategoryCode,@IsArchived,@ArchivedBy,@ArchivedAt)
+                    """, MaterialParameters(material), transaction, cancellationToken: cancellationToken));
+            }
+            await transaction.CommitAsync(cancellationToken);
+            return saved;
+        }
+        catch (MySqlException exception) when (exception.Number == 1062)
+        {
+            await transaction.RollbackAsync(cancellationToken);
+            throw new PdmConflictException("批量导入时预留的PLM物料编码或料品数据发生冲突，请重新预检后再试。");
+        }
+    }
+
     public async Task<PdmMaterial> UpsertU9MaterialAsync(PdmMaterial material, CancellationToken cancellationToken)
     {
         if (material.SourceSystem != MaterialDataSource.U9C || material.MasterOwner != MaterialMasterOwner.U9C)

@@ -191,9 +191,7 @@ internal sealed class BatchPropertyEditItem
             .Where(pair => !Same(pair.Value, OriginalValue(pair.Key)));
 
     internal IReadOnlyList<string> VisiblePropertyNames => VisiblePropertyCardNames
-        .Concat(sourcePropertyNames)
         .Where(name => !IsIdentityProperty(name))
-        .Distinct(StringComparer.OrdinalIgnoreCase)
         .ToArray();
 
     internal IReadOnlyList<string> VisiblePropertyCardNames => EffectivePropertyCardFields
@@ -238,10 +236,9 @@ internal sealed class BatchPropertyEditItem
     {
         var normalized = NormalizePropertyName(propertyName);
         return EffectivePropertyCardFields.Any(field => string.Equals(
-                   NormalizePropertyName(field.EditorPropertyName),
-                   normalized,
-                   StringComparison.OrdinalIgnoreCase))
-            || sourcePropertyNames.Contains(normalized, StringComparer.OrdinalIgnoreCase);
+            NormalizePropertyName(field.EditorPropertyName),
+            normalized,
+            StringComparison.OrdinalIgnoreCase));
     }
 
     internal string OriginalValue(string propertyName) => Value(originalValues, propertyName);
@@ -547,6 +544,9 @@ internal sealed class BatchPropertyEditDialog : Form
     private const int StandardControlWidth = 150;
     private const int StandardControlHeight = 30;
     private const int StandardControlGap = 6;
+    private const int ThumbnailSize = 36;
+    private const int ThumbnailPreviewSize = 512;
+    private const string ThumbnailColumnName = "FileThumbnail";
     private readonly IReadOnlyList<BatchPropertyEditItem> items;
     private readonly IReadOnlyList<PropertyWritebackPreviewItem> writebackItems;
     private readonly int unavailableWritebackCount;
@@ -564,6 +564,9 @@ internal sealed class BatchPropertyEditDialog : Form
     private readonly DataGridView grid = new DataGridView();
     private readonly DataGridView propertyCardGrid = new DataGridView();
     private readonly DataGridView writebackGrid = new DataGridView();
+    private readonly CancellationTokenSource thumbnailCancellation = new CancellationTokenSource();
+    private readonly Dictionary<string, Image> thumbnails = new Dictionary<string, Image>(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<CadDocumentKind, Image> fallbackThumbnails = BuildFallbackThumbnails();
     private readonly TabControl operationTabs = new TabControl();
     private readonly TabControl propertyTabs = new TabControl();
     private readonly TabPage propertyPage = new TabPage("属性") { BackColor = Color.White };
@@ -610,6 +613,7 @@ internal sealed class BatchPropertyEditDialog : Form
     private bool operationRunning;
     private bool operationPaused;
     private bool operationStopRequested;
+    private bool thumbnailLoadingStarted;
 
     public BatchPropertyEditDialog(
         IReadOnlyList<BatchPropertyEditItem> items,
@@ -658,6 +662,7 @@ internal sealed class BatchPropertyEditDialog : Form
         BuildWritebackGrid();
         Controls.Add(BuildLayout());
         StyleButtons(this);
+        Shown += (_, _) => StartThumbnailLoading();
         propertyTabs.SelectedTab = initialOperation == PropertyOperationMode.PropertyCardAssignment
             ? propertyCardPage
             : batchEditPage;
@@ -1499,6 +1504,7 @@ internal sealed class BatchPropertyEditDialog : Form
         grid.ClipboardCopyMode = DataGridViewClipboardCopyMode.EnableWithoutHeaderText;
         grid.BackgroundColor = Color.White;
         grid.BorderStyle = BorderStyle.FixedSingle;
+        grid.RowTemplate.Height = ThumbnailSize + 6;
         grid.DataSource = rows;
         grid.CurrentCellDirtyStateChanged += (_, _) =>
         {
@@ -1530,10 +1536,12 @@ internal sealed class BatchPropertyEditDialog : Form
             UpdateSummary();
         };
         grid.CellFormatting += OnGridCellFormatting;
+        grid.CellClick += OnThumbnailCellClick;
         grid.KeyDown += OnGridKeyDown;
         grid.DataError += OnGridDataError;
 
         grid.Columns.Add(CheckColumn("选择", nameof(BatchPropertyEditItem.Selected), 48));
+        grid.Columns.Add(ThumbnailColumn());
         grid.Columns.Add(TextColumn("文件", nameof(BatchPropertyEditItem.FileName), 170, true));
         grid.Columns.Add(TextColumn("类型", nameof(BatchPropertyEditItem.Kind), 62, true));
         grid.Columns.Add(TextColumn("配置", nameof(BatchPropertyEditItem.ConfigurationDisplay), 90, true));
@@ -1648,8 +1656,19 @@ internal sealed class BatchPropertyEditDialog : Form
     {
         if (eventArgs.RowIndex < 0
             || eventArgs.ColumnIndex < 0
-            || !(grid.Columns[eventArgs.ColumnIndex].Tag is string propertyName)
             || !(grid.Rows[eventArgs.RowIndex].DataBoundItem is BatchPropertyEditItem item))
+        {
+            return;
+        }
+
+        if (string.Equals(grid.Columns[eventArgs.ColumnIndex].Name, ThumbnailColumnName, StringComparison.Ordinal))
+        {
+            eventArgs.Value = ThumbnailFor(item);
+            eventArgs.FormattingApplied = true;
+            return;
+        }
+
+        if (!(grid.Columns[eventArgs.ColumnIndex].Tag is string propertyName))
         {
             return;
         }
@@ -1681,6 +1700,7 @@ internal sealed class BatchPropertyEditDialog : Form
         propertyCardGrid.MultiSelect = true;
         propertyCardGrid.BackgroundColor = Color.White;
         propertyCardGrid.BorderStyle = BorderStyle.FixedSingle;
+        propertyCardGrid.RowTemplate.Height = ThumbnailSize + 6;
         propertyCardGrid.DataSource = rows;
         propertyCardGrid.CurrentCellDirtyStateChanged += (_, _) =>
         {
@@ -1700,8 +1720,10 @@ internal sealed class BatchPropertyEditDialog : Form
             UpdateSummary();
         };
         propertyCardGrid.CellFormatting += OnPropertyCardGridCellFormatting;
+        propertyCardGrid.CellClick += OnThumbnailCellClick;
 
         propertyCardGrid.Columns.Add(CheckColumn("选择", nameof(BatchPropertyEditItem.Selected), 48));
+        propertyCardGrid.Columns.Add(ThumbnailColumn());
         propertyCardGrid.Columns.Add(TextColumn("文件", nameof(BatchPropertyEditItem.FileName), 170, true));
         propertyCardGrid.Columns.Add(TextColumn("类型", nameof(BatchPropertyEditItem.Kind), 62, true));
         propertyCardGrid.Columns.Add(TextColumn("待设置原生属性卡", nameof(BatchPropertyEditItem.PropertyCard), 220, true));
@@ -1713,8 +1735,19 @@ internal sealed class BatchPropertyEditDialog : Form
     {
         if (eventArgs.RowIndex < 0
             || eventArgs.ColumnIndex < 0
-            || !(propertyCardGrid.Columns[eventArgs.ColumnIndex].Tag is string propertyName)
             || !(propertyCardGrid.Rows[eventArgs.RowIndex].DataBoundItem is BatchPropertyEditItem item))
+        {
+            return;
+        }
+
+        if (string.Equals(propertyCardGrid.Columns[eventArgs.ColumnIndex].Name, ThumbnailColumnName, StringComparison.Ordinal))
+        {
+            eventArgs.Value = ThumbnailFor(item);
+            eventArgs.FormattingApplied = true;
+            return;
+        }
+
+        if (!(propertyCardGrid.Columns[eventArgs.ColumnIndex].Tag is string propertyName))
         {
             return;
         }
@@ -1772,6 +1805,197 @@ internal sealed class BatchPropertyEditDialog : Form
 
     private static DataGridViewCheckBoxColumn CheckColumn(string header, string property, int width) =>
         new DataGridViewCheckBoxColumn { HeaderText = header, DataPropertyName = property, Width = width, SortMode = DataGridViewColumnSortMode.NotSortable };
+
+    private void StartThumbnailLoading()
+    {
+        if (thumbnailLoadingStarted || IsDisposed)
+        {
+            return;
+        }
+        thumbnailLoadingStarted = true;
+
+        var requests = rows
+            .Select(item => new
+            {
+                Path = item?.OperationItem?.Node?.FullPath?.Trim() ?? string.Empty
+            })
+            .Where(request => !string.IsNullOrWhiteSpace(request.Path) && File.Exists(request.Path))
+            .GroupBy(request => request.Path, StringComparer.OrdinalIgnoreCase)
+            .Select(group => group.Key)
+            .ToArray();
+        if (requests.Length == 0)
+        {
+            return;
+        }
+
+        var cancellationToken = thumbnailCancellation.Token;
+        var loader = new Thread(() =>
+        {
+            foreach (var filePath in requests)
+            {
+                if (cancellationToken.IsCancellationRequested)
+                {
+                    return;
+                }
+
+                var image = CadFileThumbnailCache.Load(filePath, ThumbnailPreviewSize);
+                if (image == null)
+                {
+                    continue;
+                }
+
+                try
+                {
+                    if (cancellationToken.IsCancellationRequested || IsDisposed || !IsHandleCreated)
+                    {
+                        image.Dispose();
+                        return;
+                    }
+                    BeginInvoke(new Action(() => AcceptThumbnail(filePath, image)));
+                }
+                catch (InvalidOperationException)
+                {
+                    image.Dispose();
+                    return;
+                }
+            }
+        })
+        {
+            IsBackground = true,
+            Name = "UPLM CAD thumbnail loader"
+        };
+        loader.SetApartmentState(ApartmentState.STA);
+        loader.Start();
+    }
+
+    private void AcceptThumbnail(string filePath, Image image)
+    {
+        if (image == null)
+        {
+            return;
+        }
+        if (IsDisposed || thumbnailCancellation.IsCancellationRequested)
+        {
+            image.Dispose();
+            return;
+        }
+
+        if (thumbnails.TryGetValue(filePath, out var existing))
+        {
+            existing.Dispose();
+        }
+        thumbnails[filePath] = image;
+        InvalidateThumbnailColumn(grid);
+        InvalidateThumbnailColumn(propertyCardGrid);
+    }
+
+    private Image ThumbnailFor(BatchPropertyEditItem item)
+    {
+        var filePath = item?.OperationItem?.Node?.FullPath?.Trim() ?? string.Empty;
+        if (!string.IsNullOrWhiteSpace(filePath) && thumbnails.TryGetValue(filePath, out var thumbnail))
+        {
+            return thumbnail;
+        }
+
+        var kind = item?.OperationItem?.Node?.Kind ?? CadDocumentKind.Other;
+        return fallbackThumbnails.TryGetValue(kind, out var fallback)
+            ? fallback
+            : fallbackThumbnails[CadDocumentKind.Other];
+    }
+
+    private void OnThumbnailCellClick(object sender, DataGridViewCellEventArgs eventArgs)
+    {
+        if (!(sender is DataGridView source)
+            || eventArgs.RowIndex < 0
+            || eventArgs.ColumnIndex < 0
+            || !string.Equals(source.Columns[eventArgs.ColumnIndex].Name, ThumbnailColumnName, StringComparison.Ordinal)
+            || !(source.Rows[eventArgs.RowIndex].DataBoundItem is BatchPropertyEditItem item))
+        {
+            return;
+        }
+
+        var filePath = item.OperationItem?.Node?.FullPath?.Trim() ?? string.Empty;
+        if (string.IsNullOrWhiteSpace(filePath) || !thumbnails.TryGetValue(filePath, out var thumbnail))
+        {
+            return;
+        }
+
+        using (var preview = new ThumbnailPreviewDialog(thumbnail, item.FileName, Screen.FromControl(this).WorkingArea))
+        {
+            preview.ShowDialog(this);
+        }
+    }
+
+    private static void InvalidateThumbnailColumn(DataGridView source)
+    {
+        if (source.Columns.Contains(ThumbnailColumnName))
+        {
+            source.InvalidateColumn(source.Columns[ThumbnailColumnName].Index);
+        }
+    }
+
+    private static Dictionary<CadDocumentKind, Image> BuildFallbackThumbnails()
+    {
+        var result = new Dictionary<CadDocumentKind, Image>();
+        using (var sourceImages = PdmTaskPaneControl.BuildStructureImages())
+        {
+            foreach (var kind in new[]
+            {
+                CadDocumentKind.Assembly,
+                CadDocumentKind.Part,
+                CadDocumentKind.Drawing,
+                CadDocumentKind.Other
+            })
+            {
+                var source = sourceImages.Images[PdmTaskPaneControl.StructureImageKey(kind)];
+                var canvas = new Bitmap(ThumbnailSize, ThumbnailSize);
+                using (var graphics = Graphics.FromImage(canvas))
+                {
+                    graphics.Clear(Color.Transparent);
+                    graphics.DrawImageUnscaled(
+                        source,
+                        (ThumbnailSize - source.Width) / 2,
+                        (ThumbnailSize - source.Height) / 2);
+                }
+                result[kind] = canvas;
+            }
+        }
+        return result;
+    }
+
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing)
+        {
+            thumbnailCancellation.Cancel();
+            foreach (var image in thumbnails.Values.Concat(fallbackThumbnails.Values))
+            {
+                image.Dispose();
+            }
+            thumbnails.Clear();
+            fallbackThumbnails.Clear();
+            thumbnailCancellation.Dispose();
+        }
+        base.Dispose(disposing);
+    }
+
+    private static DataGridViewImageColumn ThumbnailColumn() =>
+        new DataGridViewImageColumn
+        {
+            Name = ThumbnailColumnName,
+            HeaderText = "预览",
+            ToolTipText = "单击查看大图",
+            Width = ThumbnailSize + 8,
+            ReadOnly = true,
+            ImageLayout = DataGridViewImageCellLayout.Zoom,
+            SortMode = DataGridViewColumnSortMode.NotSortable,
+            DefaultCellStyle = new DataGridViewCellStyle
+            {
+                Alignment = DataGridViewContentAlignment.MiddleCenter,
+                NullValue = null,
+                Padding = new Padding(3)
+            }
+        };
 
     private static DataGridViewTextBoxColumn TextColumn(string header, string property, int width, bool readOnly = false) =>
         new DataGridViewTextBoxColumn { HeaderText = header, DataPropertyName = property, Width = width, ReadOnly = readOnly, SortMode = DataGridViewColumnSortMode.NotSortable };

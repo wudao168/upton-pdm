@@ -311,11 +311,9 @@ internal static class Program
         var tree = (TreeView)Field(pane, "structureTree");
         var overall = (Button)Field(pane, "batchOperationButton");
         var property = (Button)Field(pane, "propertyEditButton");
-        var update = (Button)Field(pane, "updateAllLatestButton");
         Assert(tree.SelectedNode == null, "fixture unexpectedly selected a design-tree node");
         Assert(overall.Enabled, "overall action still requires a selected design-tree node");
         Assert(property.Enabled, "property action still requires a selected design-tree node");
-        Assert(!update.Enabled, "unrelated update action changed its initial selection behavior");
     }
 
     private static void TestBindingFailure()

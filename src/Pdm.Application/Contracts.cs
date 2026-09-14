@@ -282,7 +282,8 @@ public sealed record BomItemInput(
     string? EngineeringKitCode = null,
     int? EngineeringKitVersionNumber = null,
     Guid? EngineeringKitComponentId = null,
-    bool EngineeringKitComponentOptional = false);
+    bool EngineeringKitComponentOptional = false,
+    bool IsWearPart = false);
 
 public sealed record BomGenerationResult(
     IReadOnlyList<BomItem> StandardItems,

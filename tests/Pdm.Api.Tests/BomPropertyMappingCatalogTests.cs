@@ -4,6 +4,21 @@ namespace Pdm.Api.Tests;
 
 public sealed class BomPropertyMappingCatalogTests
 {
+    [Theory]
+    [InlineData("是", true)]
+    [InlineData("1", true)]
+    [InlineData("TRUE", true)]
+    [InlineData("yes", true)]
+    [InlineData("√", true)]
+    [InlineData("易损件", true)]
+    [InlineData("否", false)]
+    [InlineData("0", false)]
+    [InlineData("", false)]
+    public void IsWearPartValue_NormalizesCommonSolidWorksValues(string value, bool expected)
+    {
+        Assert.Equal(expected, BomPropertyMappingCatalog.IsWearPartValue(value));
+    }
+
     [Fact]
     public void Apply_MergesServerPropertiesAndKeepsSystemSourcesFixed()
     {

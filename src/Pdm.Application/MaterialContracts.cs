@@ -24,6 +24,43 @@ public sealed record SaveMaterialCommand(
     string? DocumentLink = null,
     bool IsRecommended = false);
 
+public sealed record MaterialImportRowCommand(
+    int RowNumber,
+    string CategoryCode,
+    string Name,
+    string UnitCode,
+    string Specification,
+    string? Material = null,
+    string? Brand = null,
+    string? SurfaceTreatment = null,
+    decimal? Weight = null,
+    string? WeightUnit = null,
+    string? Remark = null,
+    string? PurchaseLink = null,
+    string? SelectionAdvice = null,
+    decimal? ReferencePrice = null,
+    string? Model3DLink = null,
+    string? DocumentLink = null,
+    bool IsRecommended = false);
+
+public sealed record MaterialImportRowPreview(
+    int RowNumber,
+    string CategoryCode,
+    string Name,
+    string UnitCode,
+    string Specification,
+    IReadOnlyList<string> Errors);
+
+public sealed record MaterialImportPreview(
+    int TotalCount,
+    int ValidCount,
+    int ErrorCount,
+    IReadOnlyList<MaterialImportRowPreview> Rows);
+
+public sealed record MaterialImportResult(int ImportedCount, IReadOnlyList<PdmMaterial> Materials);
+
+public sealed record MaterialCreation(PdmMaterial Material, MaterialCategory Category);
+
 public sealed record CreateMaterialFromBomCommand(Guid ProjectId, Guid BomItemId);
 
 public sealed record SaveMaterialCategoryRuleCommand(
@@ -282,6 +319,7 @@ public interface IMaterialRepository
     Task<IReadOnlyList<MaterialDuplicateRule>> GetMaterialDuplicateRulesAsync(CancellationToken cancellationToken);
     Task<IReadOnlyList<MaterialDuplicateRule>> SaveMaterialDuplicateRulesAsync(IReadOnlyList<MaterialDuplicateRule> rules, DateTimeOffset updatedAt, CancellationToken cancellationToken);
     Task<PdmMaterial> CreateMaterialAsync(PdmMaterial material, MaterialCategory category, CancellationToken cancellationToken);
+    Task<IReadOnlyList<PdmMaterial>> CreateMaterialsAsync(IReadOnlyList<MaterialCreation> creations, CancellationToken cancellationToken);
     Task<PdmMaterial> UpsertU9MaterialAsync(PdmMaterial material, CancellationToken cancellationToken);
     Task MarkU9MaterialsObservedAsync(
         string categoryCode,

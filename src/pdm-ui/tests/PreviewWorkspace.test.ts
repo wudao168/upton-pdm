@@ -44,6 +44,9 @@ describe('PreviewWorkspace', () => {
     expect(materialNumber.get('dd').text()).toBe('01020014733')
     const materialName = wrapper.get('[aria-label="图档属性"] > div:nth-child(2)')
     expect(materialName.get('dd').text()).toBe('导向轴支座')
+    expect(wrapper.get('.pdm-preview-properties').element).toBeTruthy()
+    expect(wrapper.find('.pdm-web-preview-side-controls').exists()).toBe(false)
+    expect(wrapper.get('.pdm-preview-state-content').text()).toContain('加载预览')
   })
 
   it('shows only the active markup actions and hides reference and obsolete actions', async () => {
@@ -73,5 +76,43 @@ describe('PreviewWorkspace', () => {
 
     await wrapper.get('button[aria-label="保存批注"]').trigger('click')
     expect(postMessage).toHaveBeenCalledWith({ type: 'preview-host-save-markup', payload: undefined })
+  })
+
+  it('shows a local lightweight image and keeps eDrawings behind an explicit action', async () => {
+    const postMessage = vi.fn()
+    Object.defineProperty(window, 'chrome', {
+      configurable: true,
+      value: { webview: { postMessage } },
+    })
+    const wrapper = mount(PreviewWorkspace, {
+      props: { selected, related: [], bomItem, desktopAvailable: true },
+    })
+
+    expect(postMessage).toHaveBeenCalledWith({
+      type: 'lightweight-preview-request',
+      payload: { documentId: 'document-1' },
+    })
+    expect(wrapper.emitted('preview')).toBeUndefined()
+
+    window.dispatchEvent(new CustomEvent('pdm-lightweight-preview-status', {
+      detail: { documentId: 'document-1', state: 'ready', dataUrl: 'data:image/jpeg;base64,preview' },
+    }))
+    await wrapper.vm.$nextTick()
+    expect(wrapper.get('.pdm-lightweight-preview-image').attributes('src')).toBe('data:image/jpeg;base64,preview')
+    expect(wrapper.get('.pdm-lightweight-preview-stage .pdm-lightweight-preview-controls').text()).toContain('加载交互预览')
+    expect(wrapper.text()).toContain('本地轻量预览')
+
+    await wrapper.setProps({ selected: { ...selected, id: 'node-2', documentId: 'document-2', fileName: 'SECOND.SLDPRT' } })
+    window.dispatchEvent(new CustomEvent('pdm-lightweight-preview-status', {
+      detail: { documentId: 'document-1', state: 'ready', dataUrl: 'data:image/jpeg;base64,stale' },
+    }))
+    await wrapper.vm.$nextTick()
+    expect(wrapper.find('.pdm-lightweight-preview-image').exists()).toBe(false)
+    expect(wrapper.emitted('preview')).toBeUndefined()
+
+    const interactionButton = wrapper.findAll('button').find(button => button.text() === '加载交互预览')
+    expect(interactionButton).toBeTruthy()
+    await interactionButton!.trigger('click')
+    expect(wrapper.emitted('preview')?.[0]?.[0]).toMatchObject({ documentId: 'document-2' })
   })
 })

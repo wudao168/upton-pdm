@@ -1,4 +1,4 @@
-import type { AddDrawingReviewMarkupInput, ApprovalStep, ApprovalU9AutomationResult, AuditEntry, BatchUpdateBomItemsInput, BomClassification, BomEmptyDeclaration, BomExportMode, BomGenerationResult, BomHeaderKind, BomItem, BomKind, BomValidationRules, BomVersion, BomVersionState, CreateProjectInput, CreateReleasePackageInput, CreateRoleInput, CreateSubprojectInput, CrmConnectionTestResult, CrmCustomerSyncResult, CrmIntegrationSettings, DocumentKind, DocumentModelDrawingRelation, DocumentNode, DocumentVersionComparison, DocumentVersionSummary, DocumentWhereUsed, DrawingReviewCandidate, DrawingReviewDecision, DrawingReviewPackage, DrawingReviewTarget, EditLockSummary, EngineeringKit, EngineeringKitExpansion, EquipmentTypeDefinition, FolderPermissionRule, MainProjectStaffingInput, ManagedDocument, ManufacturingBomBaseline, MaterialAttachment, MaterialAttachmentKind, MaterialCategory, MaterialCategoryRule, MaterialCodeApplication, MaterialCodeApplicationStatus, MaterialCodeDecisionResult, MaterialCodeResolution, MaterialDuplicateRule, MaterialKind, MaterialNumberingSettings, MaterialPage, MaterialRemovalReadiness, MaterialRemovalResult, MaterialSyncExecutionResult, MaterialSyncTask, MyApprovalTask, OrganizationDirectory, OrganizationUnit, PasswordResetTask, PdmCustomer, PdmMaterial, PdmSystemSettings, PdmUser, PdmUserProfile, ProgramTemplate, ProgramTemplateApprovalDecision, ProgramTemplateAttachmentKind, ProgramTemplateDraftInput, ProgramTemplateRevision, ProgramTemplateTask, ProgramTemplateVersionBump, ProjectBomHeader, ProjectBomU9SyncExecution, ProjectBomU9SyncPreview, ProjectFile, ProjectFileVersion, ProjectFolder, ProjectFolderTemplateNode, ProjectNumberingOptions, ProjectOrganization, ProjectProcurementTrackingResult, ProjectSummary, ProjectVersionItem, ReferenceStatus, ReleaseItemComment, ReleasePackageSummary, ReleaseScope, RolePermissionDirectory, SaveMaterialInput, SaveOrganizationUnitInput, SavePdmUserInput, SaveProjectOrganizationInput, StandardLibraryCategory, StandardLibraryMaterialPage, U9BomQueryExecution, U9BomQueryInput, U9BomWriteExecution, U9BomWriteInput, U9BomWritePreview, U9ConnectionTestResult, U9InventoryFilters, U9InventoryPage, U9InventorySyncSettings, U9InventorySyncStatusResponse, U9ItemQueryResult, U9MaterialFullSyncStatusResponse, U9MaterialIntegrationSettings, U9MaterialSampleImportResult, U9MaterialSamplePreview, U9ProcurementSyncSettings, U9ProcurementSyncStatusResponse, UpdateCrmIntegrationInput, UpdateProjectInput, UpdateReleasePackageDraftInput, UpdateU9MaterialIntegrationInput } from './types'
+import type { AddDrawingReviewMarkupInput, ApprovalStep, ApprovalU9AutomationResult, AuditEntry, BatchUpdateBomItemsInput, BomClassification, BomEmptyDeclaration, BomExportMode, BomGenerationResult, BomHeaderKind, BomItem, BomKind, BomValidationRules, BomVersion, BomVersionState, CreateProjectInput, CreateReleasePackageInput, CreateRoleInput, CreateSubprojectInput, CrmConnectionTestResult, CrmCustomerSyncResult, CrmIntegrationSettings, DocumentKind, DocumentModelDrawingRelation, DocumentNode, DocumentVersionComparison, DocumentVersionSummary, DocumentWhereUsed, DrawingReviewCandidate, DrawingReviewDecision, DrawingReviewPackage, DrawingReviewTarget, EditLockSummary, EngineeringKit, EngineeringKitExpansion, EquipmentTypeDefinition, FolderPermissionRule, MainProjectStaffingInput, ManagedDocument, ManufacturingBomBaseline, MaterialAttachment, MaterialAttachmentKind, MaterialCategory, MaterialCategoryRule, MaterialCodeApplication, MaterialCodeApplicationStatus, MaterialCodeDecisionResult, MaterialCodeResolution, MaterialDuplicateRule, MaterialImportPreview, MaterialImportResult, MaterialKind, MaterialNumberingSettings, MaterialPage, MaterialRemovalReadiness, MaterialRemovalResult, MaterialSyncExecutionResult, MaterialSyncTask, MyApprovalTask, OrganizationDirectory, OrganizationUnit, PasswordResetTask, PdmCustomer, PdmMaterial, PdmSystemSettings, PdmUser, PdmUserProfile, ProgramTemplate, ProgramTemplateApprovalDecision, ProgramTemplateAttachmentKind, ProgramTemplateDraftInput, ProgramTemplateRevision, ProgramTemplateTask, ProgramTemplateVersionBump, ProjectBomHeader, ProjectBomU9SyncExecution, ProjectBomU9SyncPreview, ProjectFile, ProjectFileVersion, ProjectFolder, ProjectFolderTemplateNode, ProjectNumberingOptions, ProjectOrganization, ProjectProcurementTrackingResult, ProjectSummary, ProjectVersionItem, ReferenceStatus, ReleaseItemComment, ReleasePackageSummary, ReleaseScope, RolePermissionDirectory, SaveMaterialInput, SaveOrganizationUnitInput, SavePdmUserInput, SaveProjectOrganizationInput, StandardLibraryCategory, StandardLibraryMaterialPage, U9BomQueryExecution, U9BomQueryInput, U9BomWriteExecution, U9BomWriteInput, U9BomWritePreview, U9ConnectionTestResult, U9InventoryFilters, U9InventoryPage, U9InventorySyncSettings, U9InventorySyncStatusResponse, U9ItemQueryResult, U9MaterialFullSyncStatusResponse, U9MaterialIntegrationSettings, U9MaterialSampleImportResult, U9MaterialSamplePreview, U9ProcurementSyncSettings, U9ProcurementSyncStatusResponse, UpdateCrmIntegrationInput, UpdateProjectInput, UpdateReleasePackageDraftInput, UpdateU9MaterialIntegrationInput } from './types'
 import type { MaterialSyncBatch } from './types'
 import type { ControlledDocumentRecycleReadiness } from './types'
 import type { ApprovalTransferCandidate, UserNotification } from './types'
@@ -269,6 +269,7 @@ interface ApiBomItem {
   surfaceTreatment?: string | null
   heatTreatment?: string | null
   weight?: string | null
+  isWearPart?: boolean
   revision: string
   isComplete: boolean
   sourceDocumentId?: string | null
@@ -574,6 +575,18 @@ export function generateProjectBomHeaderHierarchy(projectId: string, token: stri
 
 export function createMaterial(input: SaveMaterialInput, token: string): Promise<PdmMaterial> {
   return requestJson<PdmMaterial>('/api/materials', { method: 'POST', body: JSON.stringify(input) }, token)
+}
+
+export function previewMaterialImport(file: File, token: string): Promise<MaterialImportPreview> {
+  const body = new FormData()
+  body.append('file', file)
+  return requestJson<MaterialImportPreview>('/api/materials/import/preview', { method: 'POST', body }, token)
+}
+
+export function importMaterials(file: File, token: string): Promise<MaterialImportResult> {
+  const body = new FormData()
+  body.append('file', file)
+  return requestJson<MaterialImportResult>('/api/materials/import', { method: 'POST', body }, token)
 }
 
 export function updateMaterial(materialId: string, input: SaveMaterialInput, token: string): Promise<PdmMaterial> {
@@ -1246,6 +1259,21 @@ export async function exportBom(projectId: string, kind: BomKind, mode: BomExpor
   const encodedName = disposition.match(/filename\*=UTF-8''([^;]+)/i)?.[1]
   const plainName = disposition.match(/filename="?([^";]+)"?/i)?.[1]
   let fileName = `${kind.toLocaleLowerCase()}-bom.xlsx`
+  try {
+    fileName = encodedName ? decodeURIComponent(encodedName) : plainName ?? fileName
+  } catch {
+    fileName = plainName ?? fileName
+  }
+  return { blob: await response.blob(), fileName }
+}
+
+export async function exportWearPartBom(projectId: string, mode: BomExportMode, token: string): Promise<{ blob: Blob; fileName: string }> {
+  const response = await fetch(`${apiBase}/api/projects/${projectId}/boms/wear-parts/export?mode=${mode}`, { headers: authenticatedHeaders(token), cache: 'no-store' })
+  if (!response.ok) throw new PdmApiError(`易损件BOM导出失败（${response.status}）`, response.status)
+  const disposition = response.headers.get('content-disposition') ?? ''
+  const encodedName = disposition.match(/filename\*=UTF-8''([^;]+)/i)?.[1]
+  const plainName = disposition.match(/filename="?([^";]+)"?/i)?.[1]
+  let fileName = 'wear-part-bom.xlsx'
   try {
     fileName = encodedName ? decodeURIComponent(encodedName) : plainName ?? fileName
   } catch {
@@ -2082,6 +2110,7 @@ function mapBomItem(item: ApiBomItem): BomItem {
     surfaceTreatment: item.surfaceTreatment ?? undefined,
     heatTreatment: item.heatTreatment ?? undefined,
     weight: item.weight ?? undefined,
+    isWearPart: item.isWearPart ?? false,
     revision: item.revision,
     complete: item.isComplete,
     sourceDocumentId: item.sourceDocumentId ?? undefined,

@@ -2097,6 +2097,21 @@ public sealed class PdmWorkflowService(
         return items.Select(item => item with { IsComplete = HasRequiredBomValues(item, kind, settings.ValidationRules) }).ToArray();
     }
 
+    public async Task<IReadOnlyList<BomItem>> GetWearPartBomAsync(Guid projectId, string actor, UserRole role, CancellationToken cancellationToken)
+    {
+        if (!await repository.HasProjectContentReadAccessAsync(projectId, actor, role, cancellationToken))
+            throw new UnauthorizedAccessException("当前用户没有该项目的读取权限。");
+        var kinds = new[] { BomKind.Standard, BomKind.NonStandard, BomKind.Electrical, BomKind.Unclassified };
+        var items = new List<BomItem>();
+        foreach (var kind in kinds)
+            items.AddRange(await repository.GetBomAsync(projectId, kind, cancellationToken));
+        return items
+            .Where(item => item.IsWearPart && !item.IsManuallyExcluded && !item.IsPendingRemoval)
+            .OrderBy(item => item.Kind)
+            .ThenBy(item => item.Sequence)
+            .ToArray();
+    }
+
     public Task<BomItem> ApplyMaterialCodeToBomAsync(Guid projectId, Guid itemId, string materialCode, string actor, CancellationToken cancellationToken) =>
         ApplyMaterialCodeToBomCoreAsync(projectId, itemId, materialCode, actor, false, cancellationToken);
 
@@ -2259,6 +2274,7 @@ public sealed class PdmWorkflowService(
                 SurfaceTreatment = NullIfWhiteSpace(input.SurfaceTreatment),
                 HeatTreatment = NullIfWhiteSpace(input.HeatTreatment),
                 Weight = NullIfWhiteSpace(input.Weight),
+                IsWearPart = input.IsWearPart,
                 SourceDocumentId = previous?.SourceDocumentId ?? input.SourceDocumentId,
                 SourceConfiguration = previous?.SourceConfiguration ?? NullIfWhiteSpace(input.SourceConfiguration),
                 SourceInstancePath = previous?.SourceInstancePath ?? NullIfWhiteSpace(input.SourceInstancePath),
@@ -3922,6 +3938,7 @@ public sealed class PdmWorkflowService(
                 var surfaceTreatment = PropertyValue(properties, node.Configuration, settings.BomSurfaceTreatmentProperty);
                 var heatTreatment = PropertyValue(properties, node.Configuration, BomPropertyMappingCatalog.SolidWorksProperty(settings, "heatTreatment", "热处理"));
                 var weight = PropertyValue(properties, node.Configuration, settings.BomWeightProperty);
+                var wearPart = PropertyValue(properties, node.Configuration, BomPropertyMappingCatalog.SolidWorksProperty(settings, "wearPart", "易损件"));
                 var revision = document.Revision.Display;
                 var reconciliationStatus = previous?.ReconciliationStatus;
                 var reconciliationNote = previous?.ReconciliationNote;
@@ -3982,6 +3999,7 @@ public sealed class PdmWorkflowService(
                     SurfaceTreatment = NullIfWhiteSpace(surfaceTreatment),
                     HeatTreatment = NullIfWhiteSpace(heatTreatment),
                     Weight = NullIfWhiteSpace(weight),
+                    IsWearPart = BomPropertyMappingCatalog.IsWearPartValue(wearPart),
                     SourceDocumentId = document.Id,
                     SourceConfiguration = NullIfWhiteSpace(node.Configuration),
                     SourceInstancePath = NullIfWhiteSpace(node.InstancePath),
@@ -4052,6 +4070,7 @@ public sealed class PdmWorkflowService(
                     Revision = item.Revision,
                     SourceInstancePath = item.SourceInstancePath,
                     ParentDrawingNumber = item.ParentDrawingNumber,
+                    IsWearPart = item.IsWearPart,
                     IsPendingRemoval = false,
                     IsPendingClassification = item.IsPendingClassification,
                     IsManualUnmatched = false,
@@ -4212,7 +4231,8 @@ public sealed class PdmWorkflowService(
             Brand = NullIfWhiteSpace(PropertyValue(latest.PropertySnapshot, configuration, settings.BomBrandProperty)),
             Material = NullIfWhiteSpace(PropertyValue(latest.PropertySnapshot, configuration, settings.BomMaterialProperty)),
             SurfaceTreatment = NullIfWhiteSpace(PropertyValue(latest.PropertySnapshot, configuration, settings.BomSurfaceTreatmentProperty)),
-            HeatTreatment = NullIfWhiteSpace(PropertyValue(latest.PropertySnapshot, configuration, BomPropertyMappingCatalog.SolidWorksProperty(settings, "heatTreatment", "热处理")))
+            HeatTreatment = NullIfWhiteSpace(PropertyValue(latest.PropertySnapshot, configuration, BomPropertyMappingCatalog.SolidWorksProperty(settings, "heatTreatment", "热处理"))),
+            IsWearPart = BomPropertyMappingCatalog.IsWearPartValue(PropertyValue(latest.PropertySnapshot, configuration, BomPropertyMappingCatalog.SolidWorksProperty(settings, "wearPart", "易损件")))
         };
         var differences = SourceDataDifferences(item, source).ToList();
         if (item.Kind == BomKind.Standard && materialRepository is not null)
@@ -4298,7 +4318,8 @@ public sealed class PdmWorkflowService(
             || Different(previous.Material, current.Material)
             || Different(previous.SurfaceTreatment, current.SurfaceTreatment)
             || Different(previous.HeatTreatment, current.HeatTreatment)
-            || Different(previous.Weight, current.Weight);
+            || Different(previous.Weight, current.Weight)
+            || previous.IsWearPart != current.IsWearPart;
     }
 
     private async Task<CadPropertyWriteback?> EnqueueCadPropertyWritebackAsync(BomItem item, string actor, CancellationToken cancellationToken)
@@ -4332,6 +4353,7 @@ public sealed class PdmWorkflowService(
         Set(settings.BomMaterialProperty, item.Material);
         Set(settings.BomSurfaceTreatmentProperty, item.SurfaceTreatment);
         Set(BomPropertyMappingCatalog.SolidWorksProperty(settings, "heatTreatment", "热处理"), item.HeatTreatment);
+        Set(BomPropertyMappingCatalog.SolidWorksProperty(settings, "wearPart", "易损件"), item.IsWearPart ? "是" : "否");
         Set(settings.BomWeightProperty, item.Weight);
         return new CadPropertyWriteback(
             Guid.NewGuid(), item.ProjectId, item.Id, item.SourceDocumentId.Value, item.SourceConfiguration,

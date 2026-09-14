@@ -28,7 +28,9 @@ import {
   listMaterialRelationTemplates,
   listMaterialSyncTasks,
   listMaterialSyncBatches,
+  importMaterials,
   materialAttachmentObjectUrl,
+  previewMaterialImport,
   queryU9Material,
   refreshMaterialInventory,
   reactivateMaterial,
@@ -46,6 +48,7 @@ import type {
   MaterialCategory,
   MaterialCodeApplication,
   MaterialKind,
+  MaterialImportPreview,
   MaterialDuplicateField,
   MaterialDuplicateRule,
   MaterialRemovalReadiness,
@@ -56,6 +59,7 @@ import type {
   PdmMaterial,
   SaveMaterialInput,
 } from '../types'
+import { downloadMaterialImportTemplate } from '../materialImportWorkbook'
 import { u9UnitLabel, u9UnitOptions } from '../u9Units'
 import { useUserDisplayName } from '../userDisplay'
 
@@ -161,6 +165,12 @@ const attachmentViewerKind = ref<MaterialAttachmentKind>('Model3D')
 const attachmentViewerItems = ref<MaterialAttachment[]>([])
 const selectedMaterials = ref<PdmMaterial[]>([])
 const batchEditorOpen = ref(false)
+const importDialogOpen = ref(false)
+const importFileInput = ref<HTMLInputElement | null>(null)
+const importFile = ref<File | null>(null)
+const importPreview = ref<MaterialImportPreview | null>(null)
+const importPreviewing = ref(false)
+const importingMaterials = ref(false)
 type BatchEditableField = 'supplyMode' | 'unitCode' | 'specification' | 'material' | 'brand' | 'surfaceTreatment' | 'remark'
 const batchFields = ref<BatchEditableField[]>([])
 const batchForm = reactive({
@@ -172,6 +182,49 @@ const batchForm = reactive({
   surfaceTreatment: '',
   remark: '',
 })
+
+function openMaterialImport() {
+  importFile.value = null
+  importPreview.value = null
+  importDialogOpen.value = true
+}
+
+function downloadImportTemplate() {
+  downloadMaterialImportTemplate(categories.value)
+  ElMessage.success('料品批量导入模板已下载')
+}
+
+async function selectImportFile(event: Event) {
+  const input = event.target as HTMLInputElement
+  const file = input.files?.[0] ?? null
+  input.value = ''
+  importFile.value = file
+  importPreview.value = null
+  if (!file) return
+  if (!file.name.toLowerCase().endsWith('.xlsx')) return ElMessage.warning('请选择.xlsx格式的Excel文件')
+  if (file.size > 10 * 1024 * 1024) return ElMessage.warning('Excel文件不能超过10MB')
+  importPreviewing.value = true
+  try {
+    importPreview.value = await previewMaterialImport(file, props.token)
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : 'Excel预检失败')
+  } finally { importPreviewing.value = false }
+}
+
+async function confirmMaterialImport() {
+  if (!importFile.value || !importPreview.value || importPreview.value.errorCount > 0) return
+  try {
+    await ElMessageBox.confirm(`确认导入 ${importPreview.value.validCount} 项料品？导入后均为草稿，不会自动批准或写入U9C。`, '确认批量导入', { type: 'warning', confirmButtonText: '确认导入', cancelButtonText: '取消' })
+    importingMaterials.value = true
+    const result = await importMaterials(importFile.value, props.token)
+    importDialogOpen.value = false
+    ElMessage.success(`已导入 ${result.importedCount} 项料品草稿`)
+    await load()
+  } catch (error) {
+    if (error === 'cancel' || error === 'close') return
+    ElMessage.error(error instanceof Error ? error.message : '料品批量导入失败')
+  } finally { importingMaterials.value = false }
+}
 const previewTask = ref<MaterialSyncTask | null>(null)
 const previewOpen = ref(false)
 const selectedMaterialCategoryCode = ref('')
@@ -1451,7 +1504,7 @@ onMounted(() => {
           </aside>
           <section class="material-master-content" aria-label="料品列表">
             <div class="material-toolbar">
-              <div class="material-toolbar__actions"><el-button @click="load">刷新</el-button><el-button class="material-select-drafts" aria-label="勾选本页草稿" :disabled="!pageDrafts.length || loading || materialPageLoading || queryingInventory" @click="selectPageDrafts">勾选本页草稿</el-button><el-button v-if="canEdit" type="primary" @click="openCreate">新增料品</el-button><el-button v-if="canEdit" :disabled="selectedMaterials.length > 1 ? !canBatchEditSelected : !canEditSelected" @click="selectedMaterials.length > 1 ? openBatchEdit() : openSelectedEdit()">{{ selectedMaterials.length > 1 ? '批量编辑' : '编辑' }}</el-button><el-button v-if="canApprove" :disabled="!canApproveSelected" @click="approveSelected">批准</el-button><el-button :disabled="selectedMaterials.length === 0" :loading="queryingU9" @click="querySelected">查询U9C</el-button><el-button :loading="queryingInventory" :disabled="Object.values(rowInventoryLoading).some(Boolean)" @click="querySelectedInventory">库存查询</el-button><el-button v-if="canEdit" :disabled="!canArchiveSelected" @click="archiveSelected">停用</el-button><el-button v-if="canEdit" :disabled="!canReactivateSelected" @click="reactivateSelected">启用</el-button><el-button v-if="canEdit" type="danger" :disabled="!canDeleteSelected" @click="deleteSelected">删除</el-button></div>
+              <div class="material-toolbar__actions"><el-button @click="load">刷新</el-button><el-button class="material-select-drafts" aria-label="勾选本页草稿" :disabled="!pageDrafts.length || loading || materialPageLoading || queryingInventory" @click="selectPageDrafts">勾选本页草稿</el-button><el-button v-if="canEdit" type="primary" @click="openCreate">新增料品</el-button><el-button v-if="canEdit" @click="openMaterialImport">批量导入</el-button><el-button v-if="canEdit" :disabled="selectedMaterials.length > 1 ? !canBatchEditSelected : !canEditSelected" @click="selectedMaterials.length > 1 ? openBatchEdit() : openSelectedEdit()">{{ selectedMaterials.length > 1 ? '批量编辑' : '编辑' }}</el-button><el-button v-if="canApprove" :disabled="!canApproveSelected" @click="approveSelected">批准</el-button><el-button :disabled="selectedMaterials.length === 0" :loading="queryingU9" @click="querySelected">查询U9C</el-button><el-button :loading="queryingInventory" :disabled="Object.values(rowInventoryLoading).some(Boolean)" @click="querySelectedInventory">库存查询</el-button><el-button v-if="canEdit" :disabled="!canArchiveSelected" @click="archiveSelected">停用</el-button><el-button v-if="canEdit" :disabled="!canReactivateSelected" @click="reactivateSelected">启用</el-button><el-button v-if="canEdit" type="danger" :disabled="!canDeleteSelected" @click="deleteSelected">删除</el-button></div>
               <div class="material-toolbar__filters"><el-checkbox v-model="showArchived">显示已停用</el-checkbox><el-select v-model="brandFilter" class="material-brand-filter" clearable filterable placeholder="筛选品牌"><el-option v-for="brand in brandOptions" :key="brand" :label="brand" :value="brand" /></el-select><el-input v-model="query" clearable placeholder="搜索编码、名称、规格、品牌或分类" /></div>
             </div>
             <div class="material-table-shell pdm-loading-host">
@@ -1720,12 +1773,35 @@ onMounted(() => {
       <template #footer><el-button @click="batchEditorOpen = false">取消</el-button><el-button type="primary" :loading="saving" @click="saveBatchEdit">保存批量修改</el-button></template>
     </el-dialog>
 
+    <el-dialog v-model="importDialogOpen" title="Excel批量新增料品" width="900px" class="material-import-dialog">
+      <input ref="importFileInput" class="pdm-visually-hidden" type="file" accept=".xlsx" @change="selectImportFile">
+      <div class="material-import-actions">
+        <el-button @click="downloadImportTemplate">下载Excel模板</el-button>
+        <el-button type="primary" :loading="importPreviewing" @click="importFileInput?.click()">{{ importFile ? '重新选择Excel' : '上传Excel' }}</el-button>
+        <span>{{ importFile?.name || '请先下载模板并填写；单次最多1000行、10MB。' }}</span>
+      </div>
+      <el-alert title="必填：U9C分类编码、物料名称、计量单位、规格型号。计量单位默认“个”；分类和单位均可在Excel中下拉选择。" type="info" :closable="false" show-icon />
+      <div v-if="importPreview" class="material-import-summary" :class="{ 'has-errors': importPreview.errorCount > 0 }">
+        <strong>预检结果</strong><span>共 {{ importPreview.totalCount }} 行</span><span>可导入 {{ importPreview.validCount }} 行</span><span>错误 {{ importPreview.errorCount }} 行</span>
+      </div>
+      <el-table v-if="importPreview" :data="importPreview.rows" max-height="390" stripe empty-text="没有数据行">
+        <el-table-column prop="rowNumber" label="Excel行" width="72" />
+        <el-table-column prop="categoryCode" label="分类编码" width="100" />
+        <el-table-column prop="name" label="物料名称" min-width="150" show-overflow-tooltip />
+        <el-table-column prop="unitCode" label="单位" width="72" />
+        <el-table-column prop="specification" label="规格型号" min-width="150" show-overflow-tooltip />
+        <el-table-column label="校验结果" min-width="230"><template #default="{ row }"><el-tag v-if="!row.errors.length" type="success">可导入</el-tag><span v-else class="material-import-errors">{{ row.errors.join('；') }}</span></template></el-table-column>
+      </el-table>
+      <template #footer><el-button @click="importDialogOpen=false">取消</el-button><el-button type="primary" :loading="importingMaterials" :disabled="!importPreview || importPreview.errorCount > 0 || importPreview.validCount === 0" @click="confirmMaterialImport">确认导入草稿</el-button></template>
+    </el-dialog>
+
     <el-dialog v-model="previewOpen" title="U9C请求预览" width="760px"><div v-if="previewTask" class="preview-meta"><span>关联号：{{ previewTask.correlationId }}</span><span>SHA-256：{{ previewTask.payloadSha256 }}</span></div><pre v-if="previewTask" class="payload-preview">{{ previewTask.payloadJson }}</pre></el-dialog>
   </section>
 </template>
 
 <style scoped>
 .material-toolbar__actions :deep(.el-button.material-select-drafts){min-width:88px!important;flex:0 0 88px}
+.material-import-actions{display:flex;align-items:center;gap:8px;margin-bottom:12px}.material-import-actions>span{min-width:0;overflow:hidden;color:#64748b;text-overflow:ellipsis;white-space:nowrap}.material-import-summary{display:flex;align-items:center;gap:18px;margin:12px 0 8px;padding:9px 12px;border:1px solid #bbf7d0;border-radius:6px;background:#f0fdf4;color:#166534}.material-import-summary.has-errors{border-color:#fecaca;background:#fef2f2;color:#b91c1c}.material-import-errors{color:#dc2626;line-height:1.5}.material-import-dialog :deep(.el-alert){margin-bottom:10px}
 @media(max-width:1000px){.material-page .material-toolbar{flex-wrap:wrap}.material-page .material-toolbar__actions{flex:0 0 auto;max-width:100%;flex-wrap:wrap}}
 .material-code-refresh-toolbar{display:flex;justify-content:flex-end;margin-bottom:8px}
 .material-table :deep(.el-table__body tr.is-pending-material > td.el-table__cell){background-color:#fff8d6}

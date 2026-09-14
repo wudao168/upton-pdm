@@ -8,13 +8,13 @@ import { u9UnitName, u9UnitOptions } from '../u9Units'
 import BomHierarchyOverview from './BomHierarchyOverview.vue'
 import ReleaseCenter from './ReleaseCenter.vue'
 
-type BomView = 'Overview' | 'Source' | BomKind
+type BomView = 'Overview' | 'Source' | 'WearPart' | BomKind
 type BomDisplayMode = 'Summary' | 'Structure'
 type BomKindFilter = 'All' | BomClassification
 type BomComparisonFilter = 'All' | 'Released' | 'Added' | 'Modified' | 'Removed'
 type BomComparisonStatus = Exclude<BomComparisonFilter, 'All' | 'Removed'>
 type EditableBomField = 'kind' | 'drawingNumber' | 'name' | 'parentDrawingNumber' | 'specification' | 'remark' | 'brand' | 'material' | 'surfaceTreatment' | 'quantity'
-type EditableBomRow = BomItem & { _clientKey?: string; _quickEntry?: boolean; _sourceItemIds?: string[]; _sourceKinds?: BomClassification[] }
+type EditableBomRow = BomItem & { _clientKey?: string; _quickEntry?: boolean; _sourceItemIds?: string[]; _sourceKinds?: BomClassification[]; _sourceTypes?: NonNullable<BomItem['source']>[] }
 type BomRowEntry = { row: EditableBomRow; index: number; depth: number; hasChildren: boolean; expanded: boolean; structureKey: string }
 type PendingMaterialLink = { kind: BomKind; materialId: string; materialCode: string; sequence: number; clientKey: string }
 type MaterialMatchResult = { candidates: PdmMaterial[]; duplicateDetected: boolean }
@@ -89,6 +89,7 @@ const emit = defineEmits<{
   save: [kind: BomKind, items: BomItem[]]
   import: [kind: BomKind, file: File]
   export: [kind: BomKind, mode: BomExportMode]
+  exportWearParts: [mode: BomExportMode]
   generate: [discardUnsavedChanges: boolean]
   resolve: [itemId: string, action: 'classify' | 'retain' | 'remove', targetKind?: BomKind]
   batchRetain: [itemIds: string[]]
@@ -119,7 +120,7 @@ watch(kind, clearGlobalStatus, { flush: 'sync' })
 const displayMode = ref<BomDisplayMode>('Summary')
 const exportDialogOpen = ref(false)
 const exportMode = ref<BomExportMode>('Summary')
-const exportKind = ref<BomKind>('Standard')
+const exportKind = ref<BomKind | 'WearPart'>('Standard')
 const expandedStructurePaths = ref(new Set<string>())
 const selectedVersionId = ref('current')
 const versionSelectionTouched = ref(false)
@@ -228,7 +229,7 @@ function createBatchDraft() {
 }
 const batchDraft = ref(createBatchDraft())
 
-function openExportDialog(targetKind: BomKind) {
+function openExportDialog(targetKind: BomKind | 'WearPart') {
   exportKind.value = targetKind
   exportMode.value = 'Summary'
   exportDialogOpen.value = true
@@ -236,7 +237,8 @@ function openExportDialog(targetKind: BomKind) {
 
 function confirmExport() {
   exportDialogOpen.value = false
-  emit('export', exportKind.value, exportMode.value)
+  if (exportKind.value === 'WearPart') emit('exportWearParts', exportMode.value)
+  else emit('export', exportKind.value, exportMode.value)
 }
 
 const sourceDataRows = computed(() => props.sourceData)
@@ -255,6 +257,15 @@ const electricalRows = computed(() => props.electrical.filter(item => !item.manu
 const standardSummaryRows = computed(() => aggregateSourceRows(standardRows.value))
 const nonStandardSummaryRows = computed(() => aggregateSourceRows(nonStandardRows.value))
 const electricalSummaryRows = computed(() => aggregateSourceRows(electricalRows.value))
+const wearPartRows = computed(() => [
+  ...standardRows.value,
+  ...nonStandardRows.value,
+  ...electricalRows.value,
+  ...props.unclassified.filter(item => !item.manuallyExcluded),
+].filter(item => item.isWearPart && !item.pendingRemoval))
+const wearPartSummaryRows = computed(() => aggregateSourceRows(wearPartRows.value))
+const wearPartTotalQuantity = computed(() => wearPartRows.value.reduce((total, item) => total + Number(item.quantity || 0), 0))
+const wearPartManualCount = computed(() => wearPartRows.value.filter(item => item.source === 'Manual').length)
 const maintainedKindById = computed(() => new Map(
   [
     ...sourceDataRows.value.filter(item => item.kind === 'Virtual' && !item.pendingClassification).map(item => [item.id, 'Virtual'] as const),
@@ -263,12 +274,15 @@ const maintainedKindById = computed(() => new Map(
     ...electricalRows.value.map(item => [item.id, 'Electrical'] as const),
   ].filter((entry): entry is readonly [string, Exclude<BomClassification, 'Unclassified'>] => !!entry[0]),
 ))
-const categoryVersions = computed(() => kind.value === 'Source' || kind.value === 'Overview' ? [] : props.versions
+const categoryVersions = computed(() => kind.value === 'Source' || kind.value === 'Overview' || kind.value === 'WearPart' ? [] : props.versions
   .filter(version => version.kind === kind.value)
   .sort((left, right) => right.versionNumber - left.versionNumber))
 const activeDraftVersion = computed(() => categoryVersions.value.find(version => version.state === 'Draft'))
 const selectedVersion = computed(() => selectedVersionId.value === 'current' ? undefined : categoryVersions.value.find(version => version.id === selectedVersionId.value))
-const currentCategoryRows = computed(() => kind.value === 'Standard' ? standardRows.value : kind.value === 'NonStandard' ? nonStandardRows.value : electricalRows.value)
+const currentCategoryRows = computed(() => kind.value === 'Standard' ? standardRows.value
+  : kind.value === 'NonStandard' ? nonStandardRows.value
+    : kind.value === 'Electrical' ? electricalRows.value
+      : kind.value === 'WearPart' ? wearPartRows.value : [])
 const rawSourceRows = computed(() => kind.value === 'Source'
   ? sourceDataRows.value
   : (selectedVersion.value?.items.filter(item => !item.manuallyExcluded && !item.pendingClassification) ?? currentCategoryRows.value))
@@ -276,8 +290,9 @@ const summaryRowCount = computed(() => aggregateSourceRows(rawSourceRows.value).
 const sourceRows = computed(() => displayMode.value === 'Summary' ? aggregateSourceRows(rawSourceRows.value) : rawSourceRows.value)
 const isSourceView = computed(() => kind.value === 'Source')
 const isOverviewView = computed(() => kind.value === 'Overview')
+const isWearPartView = computed(() => kind.value === 'WearPart')
 const canClassifySourceView = computed(() => props.editable && isSourceView.value)
-const canEditCurrentView = computed(() => props.editable && !isSourceView.value && !isOverviewView.value && selectedVersionId.value === 'current')
+const canEditCurrentView = computed(() => props.editable && !isSourceView.value && !isOverviewView.value && !isWearPartView.value && selectedVersionId.value === 'current')
 const canShowQuickEntry = computed(() => canEditCurrentView.value && !!props.projectId && comparisonFilter.value === 'All')
 const canSelectCurrentView = computed(() => canClassifySourceView.value || canEditCurrentView.value)
 const latestReleasedVersion = computed(() => categoryVersions.value.find(version => version.state === 'Released'))
@@ -1073,6 +1088,11 @@ function quantityAggregationKey(row: BomItem) {
   return `${materialCode}|${row.unit?.trim().toLocaleLowerCase() ?? ''}`
 }
 
+function bomSourceLabel(row: EditableBomRow) {
+  const sources = row._sourceTypes?.length ? row._sourceTypes : [row.source ?? 'Manual']
+  return sources.map(source => source === 'Auto' ? '图档自动提取' : source === 'EngineeringKit' ? '套件展开' : source === 'MaterialRelation' ? '关联物料' : '手动添加').join('、')
+}
+
 function normalizedAggregationValue(value: string | null | undefined) {
   return value?.trim().toLocaleLowerCase() ?? ''
 }
@@ -1099,16 +1119,19 @@ function aggregateSourceRows(items: BomItem[]): EditableBomRow[] {
         ...item,
         _sourceItemIds: item.id ? [item.id] : [],
         _sourceKinds: item.kind ? [item.kind] : [],
+        _sourceTypes: [item.source ?? 'Manual'],
       })
       return
     }
     existing.quantity = Number(existing.quantity) + Number(item.quantity)
     if (item.id && !existing._sourceItemIds?.includes(item.id)) existing._sourceItemIds = [...(existing._sourceItemIds ?? []), item.id]
     if (item.kind && !existing._sourceKinds?.includes(item.kind)) existing._sourceKinds = [...(existing._sourceKinds ?? []), item.kind]
+    if (!existing._sourceTypes?.includes(item.source ?? 'Manual')) existing._sourceTypes = [...(existing._sourceTypes ?? []), item.source ?? 'Manual']
     existing.pendingClassification ||= item.pendingClassification
     existing.pendingRemoval ||= item.pendingRemoval
     existing.manualUnmatched ||= item.manualUnmatched
     existing.releaseExcluded ||= item.releaseExcluded
+    existing.isWearPart ||= item.isWearPart
     if (!existing.releaseExclusionReason && item.releaseExclusionReason) existing.releaseExclusionReason = item.releaseExclusionReason
     existing.complete &&= item.complete
   })
@@ -1486,7 +1509,7 @@ function saveCurrentBom() {
   saveRequested = true
   const rawById = new Map(rawSourceRows.value.flatMap(item => item.id ? [[item.id, item] as const] : []))
   const expanded = rows.value.flatMap(row => {
-    const { _clientKey, _quickEntry, _sourceItemIds, _sourceKinds, ...displayItem } = row
+    const { _clientKey, _quickEntry, _sourceItemIds, _sourceKinds, _sourceTypes, ...displayItem } = row
     if (!_sourceItemIds?.length) return [{ ...displayItem, complete: dataStatusIssues(row).length === 0 }]
     const originals = _sourceItemIds.flatMap(id => {
       const original = rawById.get(id)
@@ -1507,6 +1530,7 @@ function saveCurrentBom() {
         brand: displayItem.brand,
         surfaceTreatment: displayItem.surfaceTreatment,
         weight: displayItem.weight,
+        isWearPart: displayItem.isWearPart,
         quantity: summaryQuantityForSave(row, originals, original),
         revision: displayItem.revision,
         parentDrawingNumber: displayItem.parentDrawingNumber,
@@ -1585,6 +1609,12 @@ function markStagedEdits(row: EditableBomRow, fields: string[]) {
   const next = new Set(stagedEditKeys.value)
   targets.forEach(itemId => fields.forEach(field => next.add(`${itemId}:${field}`)))
   stagedEditKeys.value = next
+}
+
+function setWearPart(row: EditableBomRow, event: Event) {
+  if (!canEditCurrentView.value || row.source !== 'Manual') return
+  row.isWearPart = (event.target as HTMLInputElement).checked
+  markStagedEdits(row, ['isWearPart'])
 }
 
 function applyBatchInputToRows(input: BatchUpdateBomItemsInput) {
@@ -1985,7 +2015,7 @@ function createQuickEntryRow(): EditableBomRow {
 }
 
 function hasQuickEntryInformation(row: EditableBomRow) {
-  return [row.drawingNumber, row.name, row.parentDrawingNumber, row.specification, row.remark, row.brand, row.material, row.surfaceTreatment, row.weight]
+  return [row.drawingNumber, row.name, row.parentDrawingNumber, row.specification, row.remark, row.brand, row.material, row.surfaceTreatment, row.weight, row.isWearPart ? '易损件' : '']
     .some(value => String(value ?? '').trim().length > 0)
 }
 
@@ -2045,7 +2075,7 @@ watch(kind, () => {
   clearFilters()
   versionSelectionTouched.value = false
   selectedVersionId.value = 'current'
-  comparisonOpen.value = kind.value !== 'Source' && kind.value !== 'Overview' && !!comparisonBaseline.value
+  comparisonOpen.value = kind.value !== 'Source' && kind.value !== 'Overview' && kind.value !== 'WearPart' && !!comparisonBaseline.value
   acknowledgedPublishedRows = new Set()
   expandedStructurePaths.value = new Set()
   discardDraftsOnNextSourceRefresh = false
@@ -2857,6 +2887,7 @@ async function submitBatchUpdate() {
         <button type="button" role="tab" :aria-selected="kind === 'Standard'" @click="requestKind('Standard')">标准件BOM（{{ standardSummaryRows.length }}）</button>
         <button type="button" role="tab" :aria-selected="kind === 'NonStandard'" @click="requestKind('NonStandard')">非标件BOM（{{ nonStandardSummaryRows.length }}）</button>
         <button type="button" role="tab" :aria-selected="kind === 'Electrical'" @click="requestKind('Electrical')">电气BOM（{{ electricalSummaryRows.length }}）</button>
+        <button type="button" role="tab" class="pdm-wear-part-tab" :aria-selected="kind === 'WearPart'" @click="requestKind('WearPart')">易损件BOM（{{ wearPartSummaryRows.length }}）</button>
         <span v-if="unresolvedCount" class="pdm-bom-unresolved-count">待处理 {{ unresolvedCount }}</span>
       </div>
       <div v-if="!isOverviewView" class="pdm-bom-display-control" role="group" aria-label="BOM显示方式">
@@ -2873,7 +2904,17 @@ async function submitBatchUpdate() {
     </div>
     <BomHierarchyOverview v-if="project" v-show="isOverviewView" :project="project" :projects="projects" :token="token" :editable="editable" @open-bom="openHierarchyBom" />
     <template v-if="!isOverviewView">
-    <section v-if="!isSourceView" class="pdm-bom-release-strip" aria-label="当前BOM审批发布">
+    <section v-if="isWearPartView" class="pdm-bom-release-strip pdm-wear-part-summary" aria-label="易损件BOM统计说明">
+      <div><small>统计物料</small><strong>{{ wearPartSummaryRows.length }} 种</strong></div>
+      <div><small>结构实例</small><strong>{{ wearPartRows.length }} 条</strong></div>
+      <div><small>合计数量</small><strong>{{ formatQuantity(wearPartTotalQuantity) }}</strong></div>
+      <div><small>手动添加</small><strong>{{ wearPartManualCount }} 条</strong></div>
+      <div class="pdm-bom-release-strip-actions">
+        <span class="pdm-wear-part-notice">自动汇总 · 不参与审批、版本、发布包及 U9C</span>
+        <button type="button" class="pdm-secondary-action" @click="openExportDialog('WearPart')">导出XLSX</button>
+      </div>
+    </section>
+    <section v-else-if="!isSourceView" class="pdm-bom-release-strip" aria-label="当前BOM审批发布">
       <div>
         <small>当前工作版</small>
         <strong>{{ activeDraftVersion ? displayVersionLabel(activeDraftVersion.label) : '修改后创建下一工作版' }}</strong>
@@ -2902,7 +2943,7 @@ async function submitBatchUpdate() {
         <button v-if="canManageRelease" type="button" class="pdm-primary-action" @click="openReleaseDrawer()">发起发布</button>
       </div>
     </section>
-    <div v-if="!isSourceView && baselines.length" class="pdm-bom-version-toolbar">
+    <div v-if="!isSourceView && !isWearPartView && baselines.length" class="pdm-bom-version-toolbar">
       <div v-if="baselines.length" class="pdm-bom-baseline-picker">
         <label>制造基线
           <select v-model="selectedBaselineId" aria-label="选择制造BOM基线">
@@ -2924,7 +2965,7 @@ async function submitBatchUpdate() {
       <small v-if="comparison.removed.length">已移除：{{ comparison.removed.map(item => item.drawingNumber || item.name).join('、') }}</small>
     </div>
     <div v-if="canSelectCurrentView || !isSourceView" class="pdm-bom-selection-toolbar">
-      <div class="pdm-bom-selection-actions">
+      <div v-if="!isWearPartView" class="pdm-bom-selection-actions">
         <template v-if="canClassifySourceView">
           <button type="button" class="pdm-secondary-action" :disabled="pending || reclassifyPending || selectedIds.length === 0" title="已分类物料也可重新归类，并同步最新图档源属性" @click="classifySelected('Standard')">归入标准件BOM</button>
           <button type="button" class="pdm-secondary-action" :disabled="pending || reclassifyPending || selectedIds.length === 0" title="已分类物料也可重新归类，并同步最新图档源属性" @click="classifySelected('NonStandard')">归入非标件BOM</button>
@@ -2955,7 +2996,7 @@ async function submitBatchUpdate() {
         <select v-model="materialFilter" aria-label="筛选材质"><option value="">全部材质</option><option v-for="material in materialOptions" :key="material" :value="material">{{ material }}</option></select>
         <button type="button" class="pdm-secondary-action" :disabled="!filtersActive" @click="clearFilters">清空筛选</button>
       </div>
-      <div v-if="!isSourceView" class="pdm-bom-version-picker">
+      <div v-if="!isSourceView && !isWearPartView" class="pdm-bom-version-picker">
         <label>查看版本
           <select v-model="selectedVersionId" aria-label="选择BOM版本" @change="versionSelectionTouched = true">
             <option value="current">当前工作区{{ activeDraftVersion ? ` · ${displayVersionLabel(activeDraftVersion.label)} 工作中 · ${formatBomVersionDate(activeDraftVersion)}` : ' · 修改后创建下一工作版' }}</option>
@@ -2969,12 +3010,12 @@ async function submitBatchUpdate() {
     <div class="pdm-table-scroll">
       <table class="pdm-edit-table pdm-bom-table">
         <colgroup>
-          <col class="is-select"><col class="is-row-actions"><col class="is-sequence"><col class="is-kind"><col class="is-unit"><col class="is-code">
+          <col class="is-select"><col class="is-row-actions"><col class="is-sequence"><col class="is-kind"><col class="is-wear-part"><col class="is-unit"><col class="is-code">
           <col class="is-name"><col class="is-parent-code"><col class="is-model"><col class="is-remark"><col class="is-brand">
           <col class="is-material"><col class="is-surface"><col class="is-weight"><col class="is-quantity"><col class="is-quantity-reference"><col class="is-drawing-audit">
           <col class="is-revision"><col class="is-source"><col class="is-data-status">
         </colgroup>
-          <thead><tr><th><input type="checkbox" :aria-label="isSourceView ? '选择全部源数据物料' : '选择当前分类全部物料'" :checked="allRowsSelected" :disabled="!canSelectCurrentView || selectableIds.length === 0" @change="toggleAllRows"></th><th aria-label="行排序与插入操作"></th><th>序号</th><th>物料分类</th><th>单位</th><th>物料编码</th><th>物料名称</th><th>上级物料编码</th><th>型号</th><th>备注信息</th><th>品牌</th><th>材质</th><th>表面处理</th><th>重量</th><th>数量</th><th title="已发布总数量 / 当前BOM总数量 / 源总数量">发布&nbsp;&nbsp;总/源</th><th class="pdm-bom-drawing-audit-header">图纸核对</th><th>版本</th><th class="pdm-bom-reconciliation-header">问题</th><th>资料状态</th></tr></thead>
+          <thead><tr><th><input type="checkbox" :aria-label="isSourceView ? '选择全部源数据物料' : '选择当前分类全部物料'" :checked="allRowsSelected" :disabled="!canSelectCurrentView || selectableIds.length === 0" @change="toggleAllRows"></th><th aria-label="行排序与插入操作"></th><th>序号</th><th>物料分类</th><th>易损件</th><th>单位</th><th>物料编码</th><th>物料名称</th><th>上级物料编码</th><th>型号</th><th>备注信息</th><th>品牌</th><th>材质</th><th>表面处理</th><th>重量</th><th>数量</th><th :title="isWearPartView ? '易损件统计视图不参与发布' : '已发布总数量 / 当前BOM总数量 / 源总数量'">{{ isWearPartView ? '发布状态' : '发布  总/源' }}</th><th class="pdm-bom-drawing-audit-header">图纸核对</th><th>版本</th><th class="pdm-bom-reconciliation-header">{{ isWearPartView ? '数据来源' : '问题' }}</th><th>资料状态</th></tr></thead>
         <tbody>
           <tr v-for="{ row, index, depth, hasChildren, expanded, structureKey } in pagedRows" :key="row.id || row._clientKey" :data-row-index="index" :title="comparisonRowTitle(row)" :class="{ 'is-quick-entry': row._quickEntry, 'is-pending-removal': row.pendingRemoval, 'is-release-excluded': row.releaseExcluded, 'is-bom-unresolved': !row._quickEntry && (rowNeedsClassification(row) || row.manualUnmatched), 'is-data-exception': !row._quickEntry && dataStatusIssues(row).length > 0, 'is-reconciliation-issue': !row._quickEntry && shouldShowReconciliation(row), 'is-release-unchanged': comparisonRowStatus(row) === 'Released', 'is-release-added': comparisonRowStatus(row) === 'Added', 'is-release-modified': comparisonRowStatus(row) === 'Modified', 'is-row-dragging': draggedRowIndex === index, 'is-drag-over-before': dragOverRowIndex === index && dragOverPosition === 'before', 'is-drag-over-after': dragOverRowIndex === index && dragOverPosition === 'after' }">
             <td><input v-if="!row._quickEntry" type="checkbox" aria-label="选择物料" :checked="selectedIds.includes(rowSelectionKey(row) ?? '')" :disabled="!canSelectCurrentView || !rowSelectionKey(row)" @change="toggleRow(rowSelectionKey(row), $event)"></td>
@@ -2991,6 +3032,10 @@ async function submitBatchUpdate() {
               <select v-if="isInlineEditing(row, 'kind')" v-model="inlineValue" class="pdm-bom-inline-editor" aria-label="内联编辑物料分类" autofocus @change="commitInlineEdit(row)" @keydown.esc.prevent="cancelInlineEdit"><option v-if="row.pendingClassification" value="" disabled>请选择分类</option><option value="Standard">标准件</option><option value="NonStandard">非标件</option><option value="Electrical">电气件</option><option value="Virtual">虚拟件</option></select>
               <button v-else-if="row.id && canEditCurrentView" type="button" class="pdm-bom-cell-edit pdm-bom-kind" :data-kind="rowKind(row)" :class="{ 'is-warning': row.pendingClassification }" title="点击编辑分类" aria-label="编辑物料分类" @click="beginInlineEdit(row, 'kind')">{{ rowKindLabel(row) }}</button>
               <span v-else class="pdm-bom-kind" :data-kind="rowKind(row)" :class="{ 'is-warning': rowNeedsClassification(row) }">{{ rowKindLabel(row) }}</span>
+            </td>
+            <td class="pdm-bom-wear-part-cell">
+              <input v-if="canEditCurrentView && row.source === 'Manual'" :checked="row.isWearPart === true" type="checkbox" :aria-label="`设置${row.drawingNumber || row.name || '当前物料'}为易损件`" @change="setWearPart(row, $event)">
+              <span v-else class="pdm-wear-part-state" :class="{ 'is-active': row.isWearPart }">{{ row.isWearPart ? '是' : '否' }}</span>
             </td>
             <td><span class="pdm-bom-cell-value">{{ u9UnitName(row.unit || '001') }}</span></td>
             <td :class="{ 'pdm-bom-structure-code-cell': displayMode === 'Structure' }">
@@ -3063,8 +3108,9 @@ async function submitBatchUpdate() {
               <input v-else-if="!row._quickEntry && canEditCurrentView && !isSourceView" v-model.number="row.quantity" type="number" min="0.0001" step="0.0001" class="pdm-bom-quantity-editor" aria-label="数量">
               <span v-else-if="!row._quickEntry" class="pdm-bom-cell-value" :title="quantityTitle(row)">{{ quantityDisplay(row) }}</span>
             </td>
-            <td class="pdm-bom-quantity-reference" :aria-label="row._quickEntry ? undefined : quantityReferenceTitle(row)" :title="row._quickEntry ? undefined : quantityReferenceTitle(row)">
-              <div v-if="!row._quickEntry" class="pdm-bom-quantity-reference-line">
+            <td class="pdm-bom-quantity-reference" :aria-label="row._quickEntry ? undefined : isWearPartView ? '统计清单，不参与发布' : quantityReferenceTitle(row)" :title="row._quickEntry ? undefined : isWearPartView ? '统计清单，不参与发布' : quantityReferenceTitle(row)">
+              <span v-if="isWearPartView" class="pdm-wear-part-no-release">不参与发布</span>
+              <div v-else-if="!row._quickEntry" class="pdm-bom-quantity-reference-line">
                 <span :class="{ 'is-published': publishedQuantityTotal(row) !== undefined }">{{ quantityReferenceDisplay(publishedQuantityTotal(row) ?? 0) }}</span>
                 <span :class="{ 'is-total-source-mismatch': sourceQuantityDiffers(row) }"><span>{{ quantityReferenceDisplay(bomQuantityTotal(row)) }}</span><span>/</span><span>{{ quantityReferenceDisplay(sourceQuantityTotal(row)) }}</span></span>
               </div>
@@ -3079,7 +3125,8 @@ async function submitBatchUpdate() {
               <span v-else class="pdm-bom-cell-value">{{ displayValue(row.revision) }}</span>
             </td>
             <td class="pdm-bom-reconciliation-cell">
-              <div v-if="!row._quickEntry && shouldShowReconciliation(row)" class="pdm-bom-reconciliation" :title="reconciliationDescription(row)">
+              <span v-if="isWearPartView" class="pdm-bom-cell-value">{{ bomSourceLabel(row) }}</span>
+              <div v-else-if="!row._quickEntry && shouldShowReconciliation(row)" class="pdm-bom-reconciliation" :title="reconciliationDescription(row)">
                 <button type="button" class="pdm-bom-issue-button pdm-bom-source" :class="reconciliationIssueTone(row)" :aria-label="`查看问题详情：${reconciliationIssueLabel(row)}`" @click="openIssueDetails(row)">{{ reconciliationIssueLabel(row) }}</button>
                 <div v-if="row.manualUnmatched && canEditCurrentView" class="pdm-bom-reconciliation-actions">
                   <button type="button" class="is-retain" :disabled="pending" :aria-label="`确认保留人工BOM项 ${row.drawingNumber || row.name}`" @click="confirmManualRetain(row)">保留</button>
@@ -3091,7 +3138,7 @@ async function submitBatchUpdate() {
             <td v-if="row._quickEntry" class="pdm-bom-data-status-cell"><span class="pdm-bom-data-status">待录入</span></td>
             <td v-else class="pdm-bom-data-status-cell" :class="dataStatusIssues(row).length ? 'is-incomplete' : row.releaseExcluded ? 'is-release-excluded' : 'is-complete'"><span class="pdm-bom-data-status" :class="dataStatusIssues(row).length ? 'is-incomplete' : row.releaseExcluded ? 'is-release-excluded' : 'is-complete'" :title="row.releaseExcluded ? `不发布：${row.releaseExclusionReason || '未记录原因'}` : dataStatusIssues(row).length ? `待完善：${dataStatusIssues(row).join('、')}` : '必填资料及料品主档校验均已通过'">{{ dataStatusLabel(row) }}</span></td>
           </tr>
-          <tr v-if="filteredRows.length === 0 && !canShowQuickEntry"><td colspan="19" class="pdm-empty-info">{{ rows.length ? '没有符合当前筛选条件的物料。' : isSourceView ? '当前没有图档源数据。' : '当前BOM为空，系统自动按无此类物料处理；可新增物料或导入标准XLSX。' }}</td></tr>
+          <tr v-if="filteredRows.length === 0 && !canShowQuickEntry"><td colspan="21" class="pdm-empty-info">{{ rows.length ? '没有符合当前筛选条件的物料。' : isWearPartView ? '当前没有标记为易损件的物料。' : isSourceView ? '当前没有图档源数据。' : '当前BOM为空，系统自动按无此类物料处理；可新增物料或导入标准XLSX。' }}</td></tr>
         </tbody>
       </table>
     </div>
@@ -3400,6 +3447,7 @@ async function submitBatchUpdate() {
 .pdm-bom-manager-panel :deep(.pdm-bom-drawing-audit-header),.pdm-bom-manager-panel :deep(.pdm-bom-drawing-audit-cell){text-align:center;vertical-align:middle}.pdm-bom-manager-panel :deep(.pdm-bom-drawing-audit-cell .pdm-bom-audit){width:100%;align-items:center;justify-content:center;text-align:center}
 .pdm-bom-manager-panel :deep(.pdm-bom-table){width:100%;max-width:100%;table-layout:fixed}.pdm-bom-manager-panel :deep(.pdm-bom-table col.is-select){width:28px}.pdm-bom-manager-panel :deep(.pdm-bom-table col.is-row-actions){width:72px}.pdm-bom-manager-panel :deep(.pdm-bom-table col.is-sequence),.pdm-bom-manager-panel :deep(.pdm-bom-table col.is-unit),.pdm-bom-manager-panel :deep(.pdm-bom-table col.is-weight),.pdm-bom-manager-panel :deep(.pdm-bom-table col.is-revision){width:2.43902439%}.pdm-bom-manager-panel :deep(.pdm-bom-table col.is-kind),.pdm-bom-manager-panel :deep(.pdm-bom-table col.is-brand),.pdm-bom-manager-panel :deep(.pdm-bom-table col.is-material),.pdm-bom-manager-panel :deep(.pdm-bom-table col.is-surface),.pdm-bom-manager-panel :deep(.pdm-bom-table col.is-quantity),.pdm-bom-manager-panel :deep(.pdm-bom-table col.is-drawing-audit),.pdm-bom-manager-panel :deep(.pdm-bom-table col.is-data-status){width:4.87804878%}.pdm-bom-manager-panel :deep(.pdm-bom-table col.is-code),.pdm-bom-manager-panel :deep(.pdm-bom-table col.is-name),.pdm-bom-manager-panel :deep(.pdm-bom-table col.is-parent-code){width:7.31707317%}.pdm-bom-manager-panel :deep(.pdm-bom-table col.is-model){width:14.63414634%}.pdm-bom-manager-panel :deep(.pdm-bom-table col.is-remark),.pdm-bom-manager-panel :deep(.pdm-bom-table col.is-source){width:9.75609756%}
 .pdm-bom-manager-panel :deep(.pdm-bom-table col:is(.is-sequence,.is-unit,.is-weight,.is-revision)){width:2.27272727%}.pdm-bom-manager-panel :deep(.pdm-bom-table col:is(.is-kind,.is-brand,.is-material,.is-surface,.is-quantity,.is-drawing-audit,.is-data-status)){width:4.54545455%}.pdm-bom-manager-panel :deep(.pdm-bom-table col:is(.is-name,.is-parent-code,.is-quantity-reference)){width:6.81818182%}.pdm-bom-manager-panel :deep(.pdm-bom-table col.is-code){width:120px}.pdm-bom-manager-panel :deep(.pdm-bom-table col.is-model){width:13.63636364%}.pdm-bom-manager-panel :deep(.pdm-bom-table col:is(.is-remark,.is-source)){width:9.09090909%}
+.pdm-bom-manager-panel :deep(.pdm-bom-table col.is-wear-part){width:54px}.pdm-bom-wear-part-cell{text-align:center}.pdm-bom-wear-part-cell input{width:15px;height:15px;accent-color:var(--pdm-theme-accent);cursor:pointer}.pdm-wear-part-state{display:inline-flex;min-width:28px;justify-content:center;padding:2px 6px;border-radius:999px;background:#f1f5f9;color:#64748b}.pdm-wear-part-state.is-active{background:var(--pdm-theme-accent-soft);color:var(--pdm-theme-accent);font-weight:700}.pdm-wear-part-no-release{color:#64748b;font-weight:700}
 .pdm-bom-manager-panel :deep(.pdm-bom-quantity-audit),.pdm-bom-manager-panel :deep(.pdm-bom-quantity-reference){text-align:center;vertical-align:middle;white-space:nowrap}.pdm-bom-manager-panel :deep(.pdm-bom-quantity-reference){overflow:hidden;text-overflow:ellipsis}.pdm-bom-manager-panel :deep(.pdm-bom-quantity-reference-line){display:inline-flex;max-width:100%;align-items:center;justify-content:center;gap:8px}.pdm-bom-manager-panel :deep(.pdm-bom-quantity-reference span){display:inline}.pdm-bom-manager-panel :deep(.pdm-bom-quantity-reference .is-published){color:var(--pdm-green);font-weight:700}.pdm-bom-manager-panel :deep(.pdm-bom-quantity-reference .is-total-source-mismatch){color:var(--pdm-orange);font-weight:700}.pdm-bom-discard-action{border-color:var(--pdm-orange);background:var(--pdm-orange-soft);color:var(--pdm-orange)}
 .pdm-bom-display-control{display:flex;align-items:center;gap:3px;margin-left:auto;padding:2px 3px;border:1px solid var(--pdm-border);border-radius:6px;background:#fff;white-space:nowrap}.pdm-bom-display-control>span{padding:0 4px;color:var(--pdm-muted);font-size:11px}.pdm-bom-display-control button{min-width:42px;height:24px;padding:0 8px;border:0;border-radius:4px;background:transparent;color:var(--pdm-muted);cursor:pointer}.pdm-bom-display-control button.is-active{background:var(--pdm-theme-accent-soft);color:var(--pdm-theme-accent);font-weight:700}.pdm-bom-display-control small{padding:0 5px;color:var(--pdm-muted);font-size:11px}.pdm-bom-structure-code-cell{white-space:nowrap}.pdm-bom-structure-indent{display:inline-flex;align-items:center;margin-left:calc(var(--pdm-bom-depth) * 15px);margin-right:3px;vertical-align:middle}.pdm-bom-structure-toggle,.pdm-bom-structure-spacer{display:inline-grid;width:18px;height:18px;place-items:center}.pdm-bom-structure-toggle{padding:0;border:1px solid var(--pdm-theme-accent-border);border-radius:3px;background:var(--pdm-theme-accent-soft);color:var(--pdm-theme-accent);font-size:13px;line-height:16px;cursor:pointer}.pdm-bom-structure-spacer::before{content:'·';color:#94a3b8}.pdm-bom-structure-instance{color:var(--pdm-theme-accent);font-weight:700}.pdm-bom-structure-summary{padding:8px 10px;border-top:1px solid var(--pdm-border);color:var(--pdm-muted);font-size:11px;text-align:right}
 .pdm-bom-model-value{display:flex;min-width:0;align-items:center;gap:3px}.pdm-bom-model-value>:not(.pdm-bom-drawing-name-warning){min-width:0;flex:1}.pdm-bom-drawing-name-warning{display:inline-flex;flex:0 0 auto;align-items:center;justify-content:center;color:#d97706;font-size:13px;line-height:1;cursor:default}.pdm-bom-pagination{display:flex;align-items:center;justify-content:flex-end;gap:8px;padding:8px 10px;color:var(--pdm-muted);font-size:11px}.pdm-bom-pagination select{height:28px;padding:0 24px 0 8px;border:1px solid var(--pdm-border);border-radius:5px;background:#fff;color:var(--pdm-text)}.pdm-bom-pagination .pdm-secondary-action{width:28px;min-width:28px;height:28px;min-height:28px;padding:0}
@@ -3408,6 +3456,7 @@ async function submitBatchUpdate() {
 .pdm-bom-comparison-filters{display:flex;align-items:center;gap:5px;flex-wrap:wrap}.pdm-bom-comparison-filters button{min-height:24px;padding:2px 8px;border:1px solid var(--pdm-border);border-radius:999px;background:#fff;color:var(--pdm-muted);font-size:10px;cursor:pointer}.pdm-bom-comparison-filters button.is-active{border-color:var(--pdm-blue);box-shadow:0 0 0 1px var(--pdm-blue);color:var(--pdm-text);font-weight:700}.pdm-bom-comparison-filters button.is-released{background:#f0fdf4;color:#15803d}.pdm-bom-comparison-filters button.is-added{background:#eff6ff;color:#2563eb}.pdm-bom-comparison-filters button.is-modified{background:#fff7ed;color:#c2410c}.pdm-bom-comparison-filters button.is-removed{background:#fef2f2;color:#b91c1c}
 .pdm-bom-release-strip{display:flex;align-items:center;gap:12px;padding:8px 11px;border:1px solid #bfdbfe;border-radius:7px;background:#eff6ff;font-size:12px;white-space:nowrap}.pdm-bom-release-strip>div{display:flex;align-items:center;gap:5px;white-space:nowrap}.pdm-bom-release-strip small,.pdm-bom-release-strip strong{font-size:12px;line-height:1.2;white-space:nowrap}.pdm-bom-release-strip small{color:var(--pdm-muted)}.pdm-bom-release-strip strong.is-active{color:#b45309}.pdm-bom-release-strip-actions{display:flex!important;align-items:center;gap:6px;margin-left:auto}.pdm-bom-release-strip-actions button{box-sizing:border-box;width:70px;min-width:70px;height:28px;min-height:28px;padding:4px 10px;font-size:12px;line-height:18px;white-space:nowrap}.pdm-bom-release-workspace{display:grid;grid-template-columns:210px minmax(0,1fr);gap:12px;min-height:100%}.pdm-bom-release-history{border:1px solid var(--pdm-border);border-radius:7px;overflow:auto;background:#fff}.pdm-bom-release-history header{position:sticky;top:0;z-index:1;display:flex;align-items:center;justify-content:space-between;gap:8px;padding:10px;border-bottom:1px solid var(--pdm-border);background:#fff}.pdm-bom-release-history header .pdm-release-new-button{flex:0 0 auto;min-height:28px;padding:4px 8px}.pdm-bom-release-history>button{display:flex;width:100%;justify-content:space-between;gap:8px;padding:10px;border:0;border-bottom:1px solid var(--pdm-border);background:#fff;text-align:left;color:var(--pdm-text)}.pdm-bom-release-history>button:hover,.pdm-bom-release-history>button.is-active{background:var(--pdm-blue-soft)}.pdm-bom-release-history>button span{display:grid;gap:3px;min-width:0}.pdm-bom-release-history>button small{overflow:hidden;text-overflow:ellipsis;color:var(--pdm-muted)}.pdm-bom-release-history>button em{font-style:normal;color:var(--pdm-blue);white-space:nowrap}.pdm-bom-release-history>p{padding:12px;color:var(--pdm-muted)}.pdm-bom-release-workspace .release-center{min-width:0;margin:0}@media(max-width:900px){.pdm-bom-release-strip{align-items:flex-start;flex-wrap:wrap}.pdm-bom-release-strip-actions{margin-left:0}.pdm-bom-release-workspace{grid-template-columns:1fr}.pdm-bom-release-history{max-height:180px}}
 .pdm-bom-release-strip{box-sizing:border-box;height:38px;min-height:38px;padding-block:4px;background:#fff}
+.pdm-wear-part-summary{border-color:var(--pdm-theme-accent-border);background:var(--pdm-theme-accent-soft)}.pdm-wear-part-notice{color:var(--pdm-theme-accent);font-weight:700;white-space:nowrap}.pdm-wear-part-tab[aria-selected="true"]{color:var(--pdm-theme-accent)}
 .pdm-bom-unsaved-count{padding:3px 7px;border:1px solid #f59e0b;border-radius:999px;background:#fffbeb;color:#b45309;font-weight:700;white-space:nowrap}
 .pdm-reconciliation-workspace{display:flex;height:100%;min-height:0;flex-direction:column;gap:12px}.pdm-reconciliation-scope{display:grid;grid-template-columns:minmax(210px,1fr) auto minmax(260px,1.2fr) minmax(240px,1fr);align-items:stretch;gap:10px;padding:12px;border:1px solid var(--pdm-theme-accent-border);border-radius:8px;background:var(--pdm-theme-accent-soft)}.pdm-reconciliation-scope>div{display:grid;align-content:center;gap:3px;padding:9px 11px;border:1px solid color-mix(in srgb,var(--pdm-theme-accent) 24%,white);border-radius:6px;background:#fff}.pdm-reconciliation-scope>span{align-self:center;color:var(--pdm-theme-accent);font-size:22px}.pdm-reconciliation-scope small{color:var(--pdm-muted)}.pdm-reconciliation-scope strong{color:var(--pdm-text)}.pdm-reconciliation-scope em{color:var(--pdm-theme-accent);font-style:normal}.pdm-reconciliation-scope .is-unaffected{border-color:var(--pdm-border);background:#f8fafc}.pdm-reconciliation-loading,.pdm-reconciliation-error{display:flex;min-height:96px;align-items:center;justify-content:center;gap:14px;padding:18px;border:1px solid var(--pdm-border);border-radius:8px;background:#f8fafc;text-align:center}.pdm-reconciliation-loading{flex-direction:column}.pdm-reconciliation-loading span,.pdm-reconciliation-error span{color:var(--pdm-muted)}.pdm-reconciliation-loading i{display:block;width:min(520px,75%);height:6px;overflow:hidden;border-radius:999px;background:#dbeafe}.pdm-reconciliation-loading b{display:block;width:35%;height:100%;border-radius:inherit;background:var(--pdm-theme-accent);animation:pdm-reconciliation-progress 1.2s ease-in-out infinite}.pdm-reconciliation-error{justify-content:space-between;border-color:#fecaca;background:#fef2f2;text-align:left}.pdm-reconciliation-error>div{display:grid;gap:3px}.pdm-reconciliation-error strong{color:var(--pdm-danger)}@keyframes pdm-reconciliation-progress{0%{transform:translateX(-100%)}100%{transform:translateX(390%)}}
 .pdm-reconciliation-summary{display:grid;grid-template-columns:repeat(7,minmax(88px,1fr));gap:7px}.pdm-reconciliation-summary button{display:grid;min-height:58px;place-items:center;padding:6px;border:1px solid var(--pdm-border);border-radius:7px;background:#fff;color:var(--pdm-text);cursor:pointer}.pdm-reconciliation-summary button.is-active{border-color:var(--pdm-theme-accent);box-shadow:0 0 0 1px var(--pdm-theme-accent)}.pdm-reconciliation-summary small{color:var(--pdm-muted)}.pdm-reconciliation-summary strong{font-size:18px!important}.pdm-reconciliation-summary em{color:var(--pdm-muted);font-size:10px;font-style:normal}.pdm-reconciliation-note{padding:8px 10px;border-left:3px solid var(--pdm-theme-accent);background:var(--pdm-theme-accent-soft);color:var(--pdm-muted);line-height:1.5}.pdm-reconciliation-table-wrap{min-height:0;flex:1;overflow:auto;border:1px solid var(--pdm-border);border-radius:8px}.pdm-reconciliation-table{width:100%;border-collapse:collapse;table-layout:fixed}.pdm-reconciliation-table th,.pdm-reconciliation-table td{padding:8px;border-bottom:1px solid var(--pdm-border);vertical-align:middle;text-align:center;white-space:normal;overflow-wrap:anywhere}.pdm-reconciliation-table th{position:sticky;top:0;z-index:1;background:#f8fafc}.pdm-reconciliation-table th:nth-child(1){width:220px}.pdm-reconciliation-table th:nth-child(2){width:100px}.pdm-reconciliation-table th:nth-child(5){width:64px}.pdm-reconciliation-footer{display:flex;align-items:center;justify-content:flex-end;gap:8px;padding-top:10px;border-top:1px solid var(--pdm-border)}.pdm-reconciliation-footer>span{margin-right:auto;color:var(--pdm-muted)}

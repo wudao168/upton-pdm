@@ -43,7 +43,7 @@ internal sealed class PdmTaskPaneControl : UserControl
     private readonly Button batchOperationButton = new Button();
     private readonly Button propertyEditButton = new Button();
     private readonly Button propertyCardButton = new Button();
-    private readonly Button updateAllLatestButton = new Button();
+    private readonly Button settingsButton = new Button();
     private readonly Panel workspaceOperationPanel = new Panel();
     private readonly Label workspaceOperationStatus = new Label();
     private readonly PdmQuantityProgressBar workspaceOperationProgress = new PdmQuantityProgressBar();
@@ -182,7 +182,7 @@ internal sealed class PdmTaskPaneControl : UserControl
     public event EventHandler BatchOperationRequested;
     public event EventHandler<CadTreeNodeEventArgs> BatchPropertyEditRequested;
     public event EventHandler<CadTreeNodeEventArgs> BatchPropertyCardRequested;
-    public event EventHandler UpdateAllLatestRequested;
+    public event EventHandler SettingsRequested;
     public event EventHandler<AutomaticDrawingRequestEventArgs> AutomaticDrawingGenerateRequested;
     public event EventHandler<AutomaticDrawingRequestEventArgs> AutomaticDrawingOpenRequested;
     public event EventHandler<AutomaticDrawingRequestEventArgs> AutomaticDrawingImportAnnotationsRequested;
@@ -694,29 +694,29 @@ internal sealed class PdmTaskPaneControl : UserControl
         ConfigureCompactActionButton(checkinButton, "存档", SubmitAvailableColor);
         ConfigureCompactActionButton(batchOperationButton, "整体", BatchOperationAvailableColor);
         ConfigureCompactActionButton(propertyEditButton, "属性", SecondaryActionAvailableColor);
-        ConfigureCompactActionButton(updateAllLatestButton, "更新", SecondaryActionAvailableColor);
+        ConfigureCompactActionButton(settingsButton, "设置", SecondaryActionAvailableColor);
         actionToolTip.SetToolTip(checkoutButton, "获取编辑权限");
         actionToolTip.SetToolTip(checkinButton, "提交存档");
         actionToolTip.SetToolTip(batchOperationButton, "整体获取最新文件及权限，或按子件优先顺序提交存档");
         actionToolTip.SetToolTip(propertyEditButton, "批量编辑图档属性，或在属性窗口内设置SolidWorks原生属性卡");
-        actionToolTip.SetToolTip(updateAllLatestButton, "将结构中版本落后的受控图档批量更新到最新版本；本地有修改或正在编辑的图档自动跳过");
+        actionToolTip.SetToolTip(settingsButton, "设置服务器连接，查看插件版本与更新状态");
         checkoutButton.Click += (_, _) => RaiseCheckoutToggle();
         checkinButton.Click += (_, _) => RaiseCheckInRequested();
         batchOperationButton.Click += (_, _) => BatchOperationRequested?.Invoke(this, EventArgs.Empty);
         propertyEditButton.Click += (_, _) => RaiseBatchPropertyRequested();
-        updateAllLatestButton.Click += (_, _) => UpdateAllLatestRequested?.Invoke(this, EventArgs.Empty);
+        settingsButton.Click += (_, _) => SettingsRequested?.Invoke(this, EventArgs.Empty);
         checkoutButton.Enabled = false;
         checkinButton.Enabled = false;
         batchOperationButton.Enabled = false;
         propertyEditButton.Enabled = false;
         propertyCardButton.Enabled = false;
-        updateAllLatestButton.Enabled = false;
+        settingsButton.Enabled = true;
         ApplyStructureActionButtonAppearances();
         actions.Controls.Add(checkoutButton, 0, 0);
         actions.Controls.Add(checkinButton, 1, 0);
         actions.Controls.Add(batchOperationButton, 2, 0);
         actions.Controls.Add(propertyEditButton, 3, 0);
-        actions.Controls.Add(updateAllLatestButton, 4, 0);
+        actions.Controls.Add(settingsButton, 4, 0);
 
         workspaceOperationPanel.Dock = DockStyle.Bottom;
         workspaceOperationPanel.Height = 72;
@@ -2547,7 +2547,7 @@ internal sealed class PdmTaskPaneControl : UserControl
                 && rootNode.IsReadOnlyPreview == false
                 && workspaceOperationActive == false;
             propertyCardButton.Enabled = propertyEditButton.Enabled;
-            updateAllLatestButton.Enabled = batchOperationButton.Enabled;
+            settingsButton.Enabled = true;
             ApplyStructureActionButtonAppearances();
             UpdateTreeHealth();
             return;
@@ -2632,7 +2632,7 @@ internal sealed class PdmTaskPaneControl : UserControl
         batchOperationButton.Enabled = authenticated && rootNode != null && !rootNode.IsReadOnlyPreview;
         propertyEditButton.Enabled = rootNode != null && !rootNode.IsReadOnlyPreview;
         propertyCardButton.Enabled = authenticated && rootNode != null && !rootNode.IsReadOnlyPreview;
-        updateAllLatestButton.Enabled = authenticated && rootNode != null && !rootNode.IsReadOnlyPreview;
+        settingsButton.Enabled = true;
         if (workspaceOperationActive)
         {
             checkoutButton.Enabled = false;
@@ -2640,7 +2640,6 @@ internal sealed class PdmTaskPaneControl : UserControl
             batchOperationButton.Enabled = false;
             propertyEditButton.Enabled = false;
             propertyCardButton.Enabled = false;
-            updateAllLatestButton.Enabled = false;
         }
         ApplyStructureActionButtonAppearances();
         actionToolTip.SetToolTip(
@@ -2665,7 +2664,6 @@ internal sealed class PdmTaskPaneControl : UserControl
             actionToolTip.SetToolTip(batchOperationButton, operationText);
             actionToolTip.SetToolTip(propertyEditButton, operationText);
             actionToolTip.SetToolTip(propertyCardButton, operationText);
-            actionToolTip.SetToolTip(updateAllLatestButton, operationText);
         }
         UpdateTreeHealth();
     }
@@ -3177,7 +3175,7 @@ internal sealed class PdmTaskPaneControl : UserControl
         ApplyActionButtonAppearance(batchOperationButton, BatchOperationAvailableColor);
         ApplyActionButtonAppearance(propertyEditButton, SecondaryActionAvailableColor);
         ApplyActionButtonAppearance(propertyCardButton, SecondaryActionAvailableColor);
-        ApplyActionButtonAppearance(updateAllLatestButton, SecondaryActionAvailableColor);
+        ApplyActionButtonAppearance(settingsButton, SecondaryActionAvailableColor);
     }
 
     private static void ApplyActionButtonAppearance(Button button, Color availableColor)

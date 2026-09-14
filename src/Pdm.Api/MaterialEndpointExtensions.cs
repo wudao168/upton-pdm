@@ -1,6 +1,7 @@
 using System.Security.Claims;
 using Upton.Pdm.Application;
 using Upton.Pdm.Domain;
+using Upton.Pdm.Infrastructure;
 
 namespace Upton.Pdm.Api;
 
@@ -85,6 +86,25 @@ public static class MaterialEndpointExtensions
             var (actor, role) = CurrentUser(context.User);
             return Results.Ok(MapMaterial(await service.CreateAsync(ToCommand(request), actor, role, cancellationToken)));
         });
+
+        api.MapPost("/materials/import/preview", async (IFormFile file, HttpContext context, MaterialService service, CancellationToken cancellationToken) =>
+        {
+            ValidateMaterialImportFile(file);
+            var (actor, role) = CurrentUser(context.User);
+            await using var input = file.OpenReadStream();
+            var rows = ReadMaterialImportWorkbook(input);
+            return Results.Ok(await service.PreviewImportAsync(rows, actor, role, cancellationToken));
+        }).DisableAntiforgery();
+
+        api.MapPost("/materials/import", async (IFormFile file, HttpContext context, MaterialService service, CancellationToken cancellationToken) =>
+        {
+            ValidateMaterialImportFile(file);
+            var (actor, role) = CurrentUser(context.User);
+            await using var input = file.OpenReadStream();
+            var rows = ReadMaterialImportWorkbook(input);
+            var result = await service.ImportAsync(rows, actor, role, cancellationToken);
+            return Results.Ok(new { result.ImportedCount, Materials = result.Materials.Select(MapMaterial) });
+        }).DisableAntiforgery();
 
         api.MapPut("/materials/{materialId:guid}", async (Guid materialId, SaveMaterialRequest request, HttpContext context, MaterialService service, CancellationToken cancellationToken) =>
         {
@@ -482,6 +502,24 @@ public static class MaterialEndpointExtensions
         request.Model3DLink,
         request.DocumentLink,
         request.IsRecommended);
+
+    private static void ValidateMaterialImportFile(IFormFile file)
+    {
+        if (file.Length == 0) throw new PdmRuleException("请选择包含料品数据的Excel文件。");
+        if (file.Length > 10 * 1024 * 1024) throw new PdmRuleException("Excel文件不能超过10MB。");
+        if (!string.Equals(Path.GetExtension(file.FileName), ".xlsx", StringComparison.OrdinalIgnoreCase))
+            throw new PdmRuleException("只支持.xlsx格式的料品导入文件。");
+    }
+
+    private static IReadOnlyList<MaterialImportRowCommand> ReadMaterialImportWorkbook(Stream input)
+    {
+        try { return MaterialImportWorkbook.Read(input); }
+        catch (PdmRuleException) { throw; }
+        catch (Exception error) when (error is InvalidDataException or IOException or System.Xml.XmlException)
+        {
+            throw new PdmRuleException("Excel文件损坏或格式不正确，请重新下载模板后填写。");
+        }
+    }
 
     private static SaveMaterialCategoryCommand ToCommand(SaveMaterialCategoryRequest request) => new(
         request.Code,

@@ -69,6 +69,7 @@ internal sealed class BatchRenameDialog : Form
     private readonly CheckBox caseSensitive = new CheckBox { Text = "区分大小写", AutoSize = true, Anchor = AnchorStyles.Left };
     private readonly DataGridView previewGrid = new DataGridView();
     private readonly BindingList<BatchRenamePreviewRow> previewRows = new BindingList<BatchRenamePreviewRow>();
+    private readonly Button selectExecutable = new Button { Text = "勾选可操作项", Enabled = false, AutoSize = true };
     private readonly Button apply = new Button { Text = "执行", Enabled = false, AutoSize = true };
     private readonly Label summary = new Label { AutoSize = true, ForeColor = Color.FromArgb(73, 88, 108) };
     private bool previewCurrent;
@@ -157,6 +158,8 @@ internal sealed class BatchRenameDialog : Form
         };
         var preview = new Button { Text = "生成预览", AutoSize = true };
         preview.Click += (_, _) => GeneratePreview();
+        selectExecutable.Click += (_, _) => SelectExecutableRows();
+        previewToolbar.Controls.Add(selectExecutable);
         previewToolbar.Controls.Add(preview);
         previewToolbar.Controls.Add(summary);
         layout.Controls.Add(previewToolbar, 0, 3);
@@ -218,11 +221,11 @@ internal sealed class BatchRenameDialog : Form
         row.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 80));
         row.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 150));
         row.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 80));
-        row.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
+        row.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 25));
         row.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 70));
-        row.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
+        row.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 25));
         row.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 110));
-        row.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 1));
+        row.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
         row.Controls.Add(new Label { Text = "操作方式", AutoSize = true, Anchor = AnchorStyles.Left }, 0, 0);
         operation.Dock = DockStyle.Fill;
         row.Controls.Add(operation, 1, 0);
@@ -322,6 +325,7 @@ internal sealed class BatchRenameDialog : Form
     {
         previewCurrent = false;
         apply.Enabled = false;
+        selectExecutable.Enabled = false;
         summary.Text = previewRows.Count == 0 ? string.Empty : "条件已变化，请重新生成预览。";
     }
 
@@ -340,14 +344,26 @@ internal sealed class BatchRenameDialog : Form
                 GeneratePropertyPreview();
             }
             previewCurrent = true;
+            selectExecutable.Enabled = previewRows.Any(row => row.CanExecute);
             RefreshApplyState();
         }
         catch (Exception exception)
         {
             previewCurrent = false;
             apply.Enabled = false;
+            selectExecutable.Enabled = false;
             MessageBox.Show(this, exception.Message, "UPLM", MessageBoxButtons.OK, MessageBoxIcon.Warning);
         }
+    }
+
+    private void SelectExecutableRows()
+    {
+        foreach (var row in previewRows)
+        {
+            row.Selected = row.CanExecute;
+        }
+        previewRows.ResetBindings();
+        RefreshApplyState();
     }
 
     private void GeneratePropertyPreview()

@@ -137,10 +137,10 @@ test.beforeEach(async ({ page }) => {
     if (path.endsWith('/documents')) return fulfill([{ id: 'doc-root', drawingNumber: 'REAL-ASM-001', name: '真实总装配', fileName: 'REAL-ASM-001.SLDASM', kind: 0, revision: { display: 'W2' }, checkedOutBy: 'engineer' }, { id: 'doc-part', drawingNumber: 'REAL-PRT-001', name: '真实底板', fileName: 'REAL-PRT-001.SLDPRT', kind: 1, revision: { display: 'A' }, checkedOutBy: null }, { id: 'doc-drawing', drawingNumber: 'REAL-ASM-001', name: '真实总装工程图', fileName: 'REAL-ASM-001.SLDDRW', kind: 2, revision: { display: 'W1' }, checkedOutBy: null }])
     if (path.endsWith('/reference-tree')) return fulfill({ nodeId: 'node-root', documentId: 'doc-root', instancePath: 'REAL-ASM-001', fileName: 'REAL-ASM-001.SLDASM', displayName: '真实总装配', kind: 0, configuration: '默认', quantity: 1, status: 0, revision: null, checkedOutBy: 'engineer', children: referenceChildren })
     if (path.endsWith('/boms/Standard')) return fulfill([
-      { id: 'bom-standard-1', kind: 'Standard', sequence: 1, drawingNumber: 'REAL-STD-001', name: '标准紧固件', quantity: 4, unit: '件', material: null, specification: 'M8', brand: 'FESTO', revision: 'A', isComplete: true, source: 'Auto', isManuallyOverridden: false, isPendingRemoval: false },
-      { id: 'bom-standard-2', kind: 'Standard', sequence: 2, drawingNumber: 'REAL-STD-001', name: '标准紧固件', quantity: 6, unit: '件', material: null, specification: 'M8', brand: 'FESTO', revision: 'A', isComplete: true, source: 'Auto', isManuallyOverridden: false, isPendingRemoval: false },
+      { id: 'bom-standard-1', kind: 'Standard', sequence: 1, drawingNumber: 'REAL-STD-001', name: '标准紧固件', quantity: 4, unit: '件', material: null, specification: 'M8', brand: 'FESTO', revision: 'A', isComplete: true, source: 'Auto', isWearPart: true, isManuallyOverridden: false, isPendingRemoval: false },
+      { id: 'bom-standard-2', kind: 'Standard', sequence: 2, drawingNumber: 'REAL-STD-001', name: '标准紧固件', quantity: 6, unit: '件', material: null, specification: 'M8', brand: 'FESTO', revision: 'A', isComplete: true, source: 'Auto', isWearPart: true, isManuallyOverridden: false, isPendingRemoval: false },
     ])
-    if (path.endsWith('/boms/NonStandard')) return fulfill([{ id: 'bom-non-standard-1', kind: 'NonStandard', sequence: 1, drawingNumber: 'REAL-PRT-001', name: '真实底板', quantity: 2, unit: '件', material: 'Q235B', specification: '10mm', revision: 'A', isComplete: true, source: 'Auto', isManuallyOverridden: false, isPendingRemoval: false }])
+    if (path.endsWith('/boms/NonStandard')) return fulfill([{ id: 'bom-non-standard-1', kind: 'NonStandard', sequence: 1, drawingNumber: 'REAL-PRT-001', name: '真实底板', quantity: 2, unit: '件', material: 'Q235B', specification: '10mm', revision: 'A', isComplete: true, source: 'Auto', isWearPart: true, isManuallyOverridden: false, isPendingRemoval: false }])
     if (path.endsWith('/boms/Unclassified')) return fulfill([])
     if (path.endsWith('/boms/Electrical')) return fulfill([{ id: 'bom-electrical-1', kind: 'Electrical', sequence: 1, drawingNumber: 'REAL-EL-001', name: '真实传感器', quantity: 1, unit: '件', material: null, specification: 'PNP', revision: 'A', isComplete: false }])
     if (path.endsWith('/bom-source-data')) return fulfill([])
@@ -156,6 +156,35 @@ test.beforeEach(async ({ page }) => {
     if (path.endsWith('/storage-status')) return fulfill({ vaultAvailable: true, releaseAvailable: true })
     return fulfill({ title: `Unexpected route: ${path}` }, 404)
   })
+})
+
+test('wear-part BOM aggregates categories and stays outside release', async ({ page }, testInfo) => {
+  const errors: string[] = []
+  page.on('pageerror', error => errors.push(error.message))
+  page.on('console', message => { if (message.type() === 'error') errors.push(message.text()) })
+  await page.addInitScript(() => { window.setInterval = (() => 0) as unknown as typeof window.setInterval })
+  await page.setViewportSize({ width: 1988, height: 1114 })
+  await page.goto('/')
+  const login = page.getByLabel('登录PLM')
+  await login.getByRole('textbox', { name: '账号' }).fill('engineer')
+  await login.getByRole('textbox', { name: '密码' }).fill('correct-password')
+  await login.getByRole('button', { name: '登录', exact: true }).click()
+  await page.getByRole('button', { name: '项目列表', exact: true }).click()
+  await page.getByRole('button', { name: '进入项目' }).click()
+  await page.getByRole('button', { name: 'BOM', exact: true }).click()
+  await page.getByRole('tab', { name: /易损件BOM/ }).click()
+
+  await expect(page.getByRole('tab', { name: '易损件BOM（2）' })).toHaveAttribute('aria-selected', 'true')
+  const summary = page.getByLabel('易损件BOM统计说明')
+  await expect(summary).toContainText('统计物料2 种')
+  await expect(summary).toContainText('结构实例3 条')
+  await expect(summary).toContainText('合计数量12')
+  await expect(summary).toContainText('不参与审批、版本、发布包及 U9C')
+  await expect(page.getByRole('button', { name: '发起发布' })).toHaveCount(0)
+  await expect(page.getByRole('button', { name: '保存BOM' })).toHaveCount(0)
+  await expect(page.locator('vite-error-overlay')).toHaveCount(0)
+  await page.screenshot({ path: testInfo.outputPath('wear-part-bom-statistics.png'), fullPage: true })
+  expect(errors).toEqual([])
 })
 
 test('project settings keeps the confirmed project-copy scope', async ({ page }, testInfo) => {

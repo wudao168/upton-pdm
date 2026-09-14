@@ -1174,7 +1174,7 @@ describe('PLM client workspace', () => {
     expect(tree.get('.pdm-tree-row.is-selected').text()).toContain('REAL-PRT-001')
   })
 
-  it('loads the first preview on demand and then keeps automatic preview within the drawings tab', async () => {
+  it('shows lightweight previews on selection and keeps interactive previews explicit', async () => {
     const postMessage = vi.fn()
     Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'visible' })
     Object.defineProperty(window, 'chrome', {
@@ -1187,7 +1187,7 @@ describe('PLM client workspace', () => {
     const slot = wrapper.get('[aria-label="客户端内嵌eDrawings预览区"]')
     expect(slot.attributes('data-preview-state')).toBe('idle')
     expect(postMessage.mock.calls.filter(([message]) => message.type === 'preview-document')).toHaveLength(0)
-    await buttonByText(wrapper, '加载预览').trigger('click')
+    await buttonByText(wrapper, '加载交互预览').trigger('click')
     await flushPromises()
     expect(slot.get('[aria-label="正在加载 eDrawings"]')).toBeTruthy()
     expect(slot.get('.plm-cube-icon').classes()).toContain('is-axial')
@@ -1312,6 +1312,13 @@ describe('PLM client workspace', () => {
     await flushPromises()
     expect(postMessage).toHaveBeenCalledWith({ type: 'preview-host-hide', payload: undefined })
     expect(postMessage).toHaveBeenCalledWith({
+      type: 'lightweight-preview-request',
+      payload: { documentId: 'doc-drawing' },
+    })
+    expect(postMessage.mock.calls.filter(([message]) => message.type === 'preview-document')).toHaveLength(previewDocumentCalls)
+    await buttonByText(wrapper, '加载交互预览').trigger('click')
+    await flushPromises()
+    expect(postMessage).toHaveBeenCalledWith({
       type: 'preview-document',
       payload: {
         documentId: 'doc-drawing', fileName: 'REAL-ASM-001.SLDDRW', revision: 'W2',
@@ -1324,6 +1331,9 @@ describe('PLM client workspace', () => {
     expect(wrapper.find('[aria-label="图纸页切换"]').exists()).toBe(false)
 
     await wrapper.get('.pdm-related-documents button').trigger('click')
+    await flushPromises()
+    expect(postMessage.mock.calls.filter(([message]) => message.type === 'preview-document')).toHaveLength(2)
+    await buttonByText(wrapper, '加载交互预览').trigger('click')
     await flushPromises()
     expect(postMessage.mock.calls.filter(([message]) => message.type === 'preview-document')).toHaveLength(3)
 

@@ -662,6 +662,7 @@ export interface BomItem {
   surfaceTreatment?: string
   heatTreatment?: string
   weight?: string
+  isWearPart?: boolean
   revision: string
   complete: boolean
   sourceDocumentId?: string
@@ -1222,6 +1223,27 @@ export interface MaterialPage {
   total: number
   page: number
   pageSize: number
+}
+
+export interface MaterialImportRowPreview {
+  rowNumber: number
+  categoryCode: string
+  name: string
+  unitCode: string
+  specification: string
+  errors: string[]
+}
+
+export interface MaterialImportPreview {
+  totalCount: number
+  validCount: number
+  errorCount: number
+  rows: MaterialImportRowPreview[]
+}
+
+export interface MaterialImportResult {
+  importedCount: number
+  materials: PdmMaterial[]
 }
 
 export interface BomHeaderMaterialDirectoryItem {

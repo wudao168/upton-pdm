@@ -106,10 +106,61 @@ describe('BomManager', () => {
     })
 
     const tabs = wrapper.findAll('button[role="tab"]')
-    expect(tabs.map(tab => tab.text())).toEqual(['源数据（2）', '标准件BOM（2）', '非标件BOM（1）', '电气BOM（1）'])
+    expect(tabs.map(tab => tab.text())).toEqual(['源数据（2）', '标准件BOM（2）', '非标件BOM（1）', '电气BOM（1）', '易损件BOM（0）'])
     expect(wrapper.findAll('.pdm-bom-table tbody tr')).toHaveLength(2)
     expect(wrapper.findAll('.pdm-bom-quantity-audit')[0].text()).toBe('2')
     expect(wrapper.findAll('.pdm-bom-quantity-reference')[0].text()).toBe('0—/2')
+  })
+
+  it('collects automatic and manual wear parts without exposing release actions', async () => {
+    const wrapper = mount(BomManager, {
+      props: {
+        standard: [
+          { id: 'auto-wear', kind: 'Standard', sequence: 1, drawingNumber: 'WEAR-001', name: '自动易损件', quantity: 1, unit: '001', revision: 'W1', complete: true, source: 'Auto', isWearPart: true },
+          { id: 'normal', kind: 'Standard', sequence: 2, drawingNumber: 'NORMAL-001', name: '普通件', quantity: 1, unit: '001', revision: 'W1', complete: true, source: 'Auto', isWearPart: false },
+        ],
+        nonStandard: [
+          { id: 'manual-wear', kind: 'NonStandard', sequence: 1, drawingNumber: 'WEAR-001', name: '手动易损件', quantity: 2, unit: '001', revision: 'W1', complete: true, source: 'Manual', isWearPart: true },
+        ],
+        electrical: [], declarations: [], pending: false, editable: true,
+      },
+    })
+
+    await wrapper.findAll('button[role="tab"]').at(-1)!.trigger('click')
+
+    expect(wrapper.get('[role="tab"][aria-selected="true"]').text()).toBe('易损件BOM（1）')
+    expect(wrapper.get('[aria-label="易损件BOM统计说明"]').text()).toContain('统计物料1 种')
+    expect(wrapper.get('[aria-label="易损件BOM统计说明"]').text()).toContain('结构实例2 条')
+    expect(wrapper.get('[aria-label="易损件BOM统计说明"]').text()).toContain('合计数量3')
+    expect(wrapper.get('[aria-label="易损件BOM统计说明"]').text()).toContain('手动添加1 条')
+    expect(wrapper.get('.pdm-bom-quantity-audit').text()).toBe('3')
+    expect(wrapper.get('.pdm-bom-reconciliation-cell').text()).toContain('图档自动提取、手动添加')
+    expect(wrapper.get('.pdm-wear-part-no-release').text()).toBe('不参与发布')
+    expect(wrapper.findAll('button').some(button => button.text() === '发起发布')).toBe(false)
+    expect(wrapper.findAll('button').some(button => button.text() === '保存BOM')).toBe(false)
+    await wrapper.get('[aria-label="易损件BOM统计说明"] button').trigger('click')
+    await wrapper.get('[aria-labelledby="pdm-export-dialog-title"] .pdm-primary-action').trigger('click')
+    expect(wrapper.emitted('exportWearParts')).toEqual([['Summary']])
+  })
+
+  it('allows a manually added BOM row to be marked as a wear part and saved in its original category', async () => {
+    const wrapper = mount(BomManager, {
+      props: { projectId: 'project-1', standard: [], nonStandard: [], electrical: [], declarations: [], pending: false, editable: true },
+    })
+    await wrapper.findAll('button[role="tab"]')[1].trigger('click')
+    const quickEntry = wrapper.get('.pdm-bom-table tbody tr.is-quick-entry')
+    await quickEntry.get('input[aria-label^="设置"]').setValue(true)
+    await flushPromises()
+    const draft = wrapper.findAll('.pdm-bom-table tbody tr').find(row => !row.classes().includes('is-quick-entry'))!
+    await draft.get('input[aria-label="物料名称"]').setValue('手动易损件')
+    await draft.get('input[aria-label="物料编码"]').setValue('MANUAL-WEAR')
+    await draft.get('input[aria-label="型号"]').setValue('M1')
+    await wrapper.findAll('button').find(button => button.text().includes('保存BOM'))!.trigger('click')
+
+    expect(wrapper.emitted('save')?.[0]?.[0]).toBe('Standard')
+    const saved = wrapper.emitted('save')?.[0]?.[1] as BomItem[]
+    expect(saved).toHaveLength(1)
+    expect(saved[0]).toMatchObject({ drawingNumber: 'MANUAL-WEAR', isWearPart: true, source: 'Manual' })
   })
 
   it.each([
@@ -618,7 +669,7 @@ describe('BomManager', () => {
     await wrapper.findAll('button[role="tab"]')[1].trigger('click')
 
     expect(wrapper.findAll('thead th').map(header => header.text())).toEqual([
-      '', '', '序号', '物料分类', '单位', '物料编码', '物料名称', '上级物料编码', '型号', '备注信息', '品牌', '材质', '表面处理', '重量', '数量', '发布  总/源', '图纸核对', '版本', '问题', '资料状态',
+      '', '', '序号', '物料分类', '易损件', '单位', '物料编码', '物料名称', '上级物料编码', '型号', '备注信息', '品牌', '材质', '表面处理', '重量', '数量', '发布  总/源', '图纸核对', '版本', '问题', '资料状态',
     ])
   })
 
@@ -633,7 +684,7 @@ describe('BomManager', () => {
     expect(quickEntry.classes()).toContain('is-quick-entry')
     expect(quickEntry.text()).toContain('标准件')
     expect(quickEntry.text()).toContain('个')
-    expect(quickEntry.findAll('td')[17].text()).toBe('W1')
+    expect(quickEntry.findAll('td')[18].text()).toBe('W1')
     expect(quickEntry.text()).toContain('待录入')
     expect(quickEntry.text()).not.toContain('缺3D图')
     expect(quickEntry.text()).not.toContain('—')
@@ -1302,6 +1353,7 @@ describe('BomManager', () => {
     expect(rows[0].get('.pdm-bom-source').text()).toBe('分类不一致')
     expect(rows[0].classes()).toContain('is-reconciliation-issue')
     expect(rows[0].findAll('td').filter(cell => cell.classes().some(name => name.endsWith('-cell'))).map(cell => cell.classes())).toEqual([
+      ['pdm-bom-wear-part-cell'],
       ['pdm-bom-model-cell'],
       ['pdm-bom-drawing-audit-cell'],
       ['pdm-bom-reconciliation-cell'],
@@ -1516,7 +1568,7 @@ describe('BomManager', () => {
     await flushPromises()
     elementFromPoint.mockRestore()
     expect(wrapper.findAll('tbody tr').some(row => row.classes().includes('is-drag-over-after'))).toBe(false)
-    expect(wrapper.findAll('tbody tr').slice(0, 2).map(row => row.find('td:nth-child(6)').text())).toEqual(['S-002', 'S-001'])
+    expect(wrapper.findAll('tbody tr').slice(0, 2).map(row => row.find('td:nth-child(7)').text())).toEqual(['S-002', 'S-001'])
     expect(wrapper.findAll('tbody tr').slice(0, 2).map(row => row.get('.pdm-bom-sequence-value').text())).toEqual(['1', '2'])
     expect(wrapper.find('td:nth-child(3) input').exists()).toBe(false)
     expect(wrapper.findAll('thead th').map(header => header.text())).not.toContain('操作')
@@ -1542,10 +1594,10 @@ describe('BomManager', () => {
     const rows = wrapper.findAll('tbody tr')
     expect(rows).toHaveLength(3)
     expect(rows.map(row => row.get('.pdm-bom-sequence-value').text())).toEqual(['1', '2', '3'])
-    expect(rows[0].find('td:nth-child(6)').text()).toBe('S-001')
+    expect(rows[0].find('td:nth-child(7)').text()).toBe('S-001')
     expect((rows[1].get('input[aria-label="物料编码"]').element as HTMLInputElement).value).toBe('')
-    expect(rows[1].find('td:nth-child(5)').text()).toBe('个')
-    expect(rows[2].find('td:nth-child(6)').text()).toBe('S-002')
+    expect(rows[1].find('td:nth-child(6)').text()).toBe('个')
+    expect(rows[2].find('td:nth-child(7)').text()).toBe('S-002')
     expect(wrapper.findAll('.pdm-bom-insert-button')).toHaveLength(3)
     expect(wrapper.findAll('.pdm-bom-delete-draft-button')).toHaveLength(1)
 

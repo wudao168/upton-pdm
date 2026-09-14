@@ -47,6 +47,8 @@ public partial class MainWindow : Window
     private readonly HttpClient apiClient = new() { Timeout = TimeSpan.FromMinutes(5) };
     private readonly CancellationTokenSource bootstrapLifetime = new();
     private readonly SolidWorksOpenBridge solidWorksBridge = new();
+    private readonly LightweightPreviewProvider lightweightPreviewProvider = new(20);
+    private readonly SemaphoreSlim lightweightPreviewGate = new(1, 1);
     private string accessToken = string.Empty;
     private string activeCompanyId = string.Empty;
     private string currentTheme = "a";
@@ -80,6 +82,8 @@ public partial class MainWindow : Window
     private FileSystemWatcher? workspaceWatcher;
     private System.Threading.Timer? workspaceRefreshTimer;
     private int workspaceStateGeneration;
+    private int lightweightPreviewGeneration;
+    private Guid? selectedDocumentId;
 
     public MainWindow()
     {
@@ -500,6 +504,15 @@ public partial class MainWindow : Window
             return;
         }
 
+        if (type == "lightweight-preview-request"
+            && TryReadPayloadString(message, "documentId", out var lightweightDocumentIdValue)
+            && Guid.TryParse(lightweightDocumentIdValue, out var lightweightDocumentId))
+        {
+            selectedDocumentId = lightweightDocumentId;
+            _ = PublishLightweightPreviewAsync(lightweightDocumentId);
+            return;
+        }
+
         if (type == "preview-host-hide")
         {
             HideEmbeddedPreview(true);
@@ -654,6 +667,7 @@ public partial class MainWindow : Window
                 request.Documents));
             if (generation != workspaceStateGeneration) return;
             workspaceStateSnapshot = snapshot;
+            if (selectedDocumentId.HasValue) _ = PublishLightweightPreviewAsync(selectedDocumentId.Value);
             var detail = new
             {
                 projectId = snapshot.ProjectId,
@@ -1648,6 +1662,56 @@ public partial class MainWindow : Window
         }
     }
 
+    private async Task PublishLightweightPreviewAsync(Guid documentId)
+    {
+        var generation = Interlocked.Increment(ref lightweightPreviewGeneration);
+        await Task.Delay(150);
+        if (generation != lightweightPreviewGeneration || selectedDocumentId != documentId) return;
+
+        await lightweightPreviewGate.WaitAsync();
+        try
+        {
+            if (generation != lightweightPreviewGeneration || selectedDocumentId != documentId) return;
+            var localFile = workspaceStateSnapshot?.Items.FirstOrDefault(item =>
+                item.DocumentId == documentId
+                && string.Equals(item.LocalState, "ReadOnlyCache", StringComparison.Ordinal)
+                && File.Exists(item.FullPath));
+            if (localFile == null)
+            {
+                await PublishLightweightPreviewStatusAsync(documentId, "unavailable", string.Empty, "本地没有可用的只读缓存缩略图。");
+                return;
+            }
+
+            var dataUrl = await Task.Run(() => lightweightPreviewProvider.TryCreateDataUrl(localFile.FullPath));
+            if (generation != lightweightPreviewGeneration || selectedDocumentId != documentId) return;
+            if (string.IsNullOrWhiteSpace(dataUrl))
+            {
+                await PublishLightweightPreviewStatusAsync(documentId, "unavailable", string.Empty, "该只读缓存没有内嵌缩略图。");
+                return;
+            }
+            await PublishLightweightPreviewStatusAsync(documentId, "ready", dataUrl!, string.Empty);
+        }
+        finally
+        {
+            lightweightPreviewGate.Release();
+        }
+    }
+
+    private async Task PublishLightweightPreviewStatusAsync(Guid documentId, string state, string dataUrl, string message)
+    {
+        if (WorkspaceView.CoreWebView2 == null) return;
+        var detail = new { documentId, state, dataUrl, message };
+        var script = $"window.dispatchEvent(new CustomEvent('pdm-lightweight-preview-status', {{ detail: {Serialize(detail)} }}));";
+        try
+        {
+            await WorkspaceView.CoreWebView2.ExecuteScriptAsync(script);
+        }
+        catch (InvalidOperationException)
+        {
+            // The WebView is closing with the client window.
+        }
+    }
+
     private async Task PublishMarkupStatusAsync(string state, string message)
     {
         if (WorkspaceView.CoreWebView2 == null)
@@ -1682,6 +1746,7 @@ public partial class MainWindow : Window
         embeddedPreview?.Dispose();
         embeddedPreview = null;
         apiClient.Dispose();
+        lightweightPreviewGate.Dispose();
         bootstrapLifetime.Dispose();
     }
 

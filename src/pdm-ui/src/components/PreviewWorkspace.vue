@@ -58,6 +58,9 @@ const webPreviewFormat = ref<'Step' | 'Pdf'>()
 const webPreviewUrl = ref('')
 const webStepBuffer = ref<ArrayBuffer>()
 const previewSessionActivated = ref(false)
+const lightweightPreviewState = ref<'loading' | 'ready' | 'unavailable'>('loading')
+const lightweightPreviewUrl = ref('')
+const lightweightPreviewMessage = ref('')
 const solidWorksAvailable = ref(false)
 const solidWorksPending = ref(false)
 const solidWorksMessage = ref('')
@@ -201,6 +204,14 @@ function hidePreview() {
   postDesktopMessage('review-overlay-hide')
 }
 
+function requestLightweightPreview() {
+  lightweightPreviewUrl.value = ''
+  lightweightPreviewMessage.value = ''
+  lightweightPreviewState.value = 'loading'
+  if (!props.desktopAvailable || !props.selected.documentId) return
+  postDesktopMessage('lightweight-preview-request', { documentId: props.selected.documentId })
+}
+
 function clearWebPreview() {
   webPreviewRequest++
   if (webPreviewUrl.value) URL.revokeObjectURL(webPreviewUrl.value)
@@ -290,6 +301,15 @@ function onPreviewStatus(event: Event) {
   }
 }
 
+function onLightweightPreviewStatus(event: Event) {
+  const detail = (event as CustomEvent<{ documentId?: string; state?: string; dataUrl?: string; message?: string }>).detail
+  if (!detail?.state || detail.documentId !== props.selected.documentId) return
+  if (detail.state !== 'ready' && detail.state !== 'unavailable') return
+  lightweightPreviewState.value = detail.state
+  lightweightPreviewUrl.value = detail.state === 'ready' ? detail.dataUrl ?? '' : ''
+  lightweightPreviewMessage.value = detail.message ?? ''
+}
+
 function onMarkupStatus(event: Event) {
   const detail = (event as CustomEvent<{ state?: string; message?: string }>).detail
   if (!detail?.state) return
@@ -342,12 +362,14 @@ watch([() => props.selected.id, () => props.reviewVersionId], () => {
   solidWorksPending.value = false
   solidWorksMessage.value = ''
   solidWorksError.value = false
-  if (previewSessionActivated.value) void restartPreview()
+  if (!props.desktopAvailable && previewSessionActivated.value) void restartPreview()
   else {
+    previewSessionActivated.value = false
     hidePreview()
     clearWebPreview()
     previewState.value = 'idle'
     previewError.value = ''
+    requestLightweightPreview()
   }
 })
 
@@ -365,10 +387,12 @@ onMounted(() => {
   window.addEventListener('scroll', schedulePreviewBounds, true)
   document.addEventListener('visibilitychange', schedulePreviewBounds)
   window.addEventListener('pdm-preview-status', onPreviewStatus)
+  window.addEventListener('pdm-lightweight-preview-status', onLightweightPreviewStatus)
   window.addEventListener('pdm-preview-markup-status', onMarkupStatus)
   window.addEventListener('pdm-solidworks-capability', onSolidWorksCapability)
   window.addEventListener('pdm-solidworks-status', onSolidWorksStatus)
   postDesktopMessage('solidworks-capability-request')
+  requestLightweightPreview()
   if (typeof ResizeObserver !== 'undefined' && previewSlot.value) {
     resizeObserver = new ResizeObserver(schedulePreviewBounds)
     resizeObserver.observe(previewSlot.value)
@@ -389,6 +413,7 @@ onBeforeUnmount(() => {
   window.removeEventListener('scroll', schedulePreviewBounds, true)
   document.removeEventListener('visibilitychange', schedulePreviewBounds)
   window.removeEventListener('pdm-preview-status', onPreviewStatus)
+  window.removeEventListener('pdm-lightweight-preview-status', onLightweightPreviewStatus)
   window.removeEventListener('pdm-preview-markup-status', onMarkupStatus)
   window.removeEventListener('pdm-solidworks-capability', onSolidWorksCapability)
   window.removeEventListener('pdm-solidworks-status', onSolidWorksStatus)
@@ -488,22 +513,46 @@ onBeforeUnmount(() => {
           @error="onWebStepError"
         />
         <template v-if="previewState === 'unavailable'">
-          <FileSearch :size="52" />
-          <h3>{{ previewError || '该版本尚无网页预览文件' }}</h3>
-          <p>{{ selected.fileName }} · {{ displayedRevision }}</p>
-          <small>工作版本签入时不生成预览；最终审批通过后由服务器生成并绑定正式版本：三维使用STP/STEP，工程图使用PDF。历史DWG不会自动删除，但不再作为预览或发布必需文件。</small>
-          <button type="button" class="pdm-primary-action" :disabled="!selected.documentId" @click="emit('more')">查看并下载版本</button>
+          <div class="pdm-preview-state-content">
+            <FileSearch :size="52" />
+            <h3>{{ previewError || '该版本尚无网页预览文件' }}</h3>
+            <p>{{ selected.fileName }} · {{ displayedRevision }}</p>
+            <small>工作版本签入时不生成预览；最终审批通过后由服务器生成并绑定正式版本：三维使用STP/STEP，工程图使用PDF。历史DWG不会自动删除，但不再作为预览或发布必需文件。</small>
+            <button type="button" class="pdm-primary-action" :disabled="!selected.documentId" @click="emit('more')">查看并下载版本</button>
+          </div>
+        </template>
+        <template v-else-if="desktopAvailable && previewState === 'idle'">
+          <div class="pdm-lightweight-preview-stage">
+            <img
+              v-if="lightweightPreviewState === 'ready' && lightweightPreviewUrl"
+              class="pdm-lightweight-preview-image"
+              :src="lightweightPreviewUrl"
+              :alt="`${selected.fileName} 轻量预览`"
+            />
+            <div v-else class="pdm-lightweight-preview-placeholder">
+              <SquareLoader v-if="lightweightPreviewState === 'loading'" label="正在读取本地轻量预览" />
+              <FileSearch v-else :size="52" />
+            </div>
+            <div class="pdm-lightweight-preview-controls">
+              <h3>{{ lightweightPreviewState === 'loading' ? '正在读取轻量预览…' : lightweightPreviewState === 'ready' ? '本地轻量预览' : '暂无轻量预览' }}</h3>
+              <p>{{ selected.fileName }} · {{ displayedRevision }}</p>
+              <small>{{ lightweightPreviewState === 'unavailable' ? lightweightPreviewMessage : '当前仅显示本地只读缓存中的静态缩略图，不会启动 SolidWorks 或 eDrawings。' }}</small>
+              <button type="button" class="pdm-primary-action" :disabled="!selected.documentId" @click="startPreview">加载交互预览</button>
+            </div>
+          </div>
         </template>
         <template v-else-if="previewState !== 'ready'">
-          <SquareLoader v-if="previewState === 'loading'" :label="desktopAvailable ? '正在加载 eDrawings' : '正在加载网页预览'" />
-          <FileSearch v-else :size="52" />
-          <h3>{{ previewState === 'loading' ? desktopAvailable ? '正在加载 eDrawings…' : '正在加载网页预览…' : previewState === 'idle' ? '预览尚未加载' : desktopAvailable ? mode === 'model' ? 'eDrawings 内嵌三维预览' : 'eDrawings 内嵌图纸预览' : mode === 'model' ? 'STP/STEP三维预览' : 'PDF工程图预览' }}</h3>
-          <p>{{ selected.fileName }} · {{ displayedRevision }}</p>
-          <small>{{ previewState === 'idle' ? '首次进入图档或切换项目时不自动加载；手动加载后，本次停留在图档页期间会随所选图档自动更新。' : '文件通过PLM权限校验和SHA-256校验后下载到独立只读缓存，不会覆盖工作文件。' }}</small>
-          <p v-if="previewState === 'error'" class="pdm-preview-error" role="alert">{{ previewError || 'eDrawings加载失败，请重试。' }}</p>
-          <button v-if="previewState === 'idle' || previewState === 'error'" type="button" class="pdm-primary-action" :disabled="!selected.documentId" @click="startPreview">
-            {{ previewState === 'error' ? '重新加载预览' : '加载预览' }}
-          </button>
+          <div class="pdm-preview-state-content">
+            <SquareLoader v-if="previewState === 'loading'" :label="desktopAvailable ? '正在加载 eDrawings' : '正在加载网页预览'" />
+            <FileSearch v-else :size="52" />
+            <h3>{{ previewState === 'loading' ? desktopAvailable ? '正在加载 eDrawings…' : '正在加载网页预览…' : previewState === 'idle' ? '预览尚未加载' : desktopAvailable ? mode === 'model' ? 'eDrawings 内嵌三维预览' : 'eDrawings 内嵌图纸预览' : mode === 'model' ? 'STP/STEP三维预览' : 'PDF工程图预览' }}</h3>
+            <p>{{ selected.fileName }} · {{ displayedRevision }}</p>
+            <small>{{ previewState === 'idle' ? '首次进入图档或切换项目时不自动加载；手动加载后，本次停留在图档页期间会随所选图档自动更新。' : '文件通过PLM权限校验和SHA-256校验后下载到独立只读缓存，不会覆盖工作文件。' }}</small>
+            <p v-if="previewState === 'error'" class="pdm-preview-error" role="alert">{{ previewError || 'eDrawings加载失败，请重试。' }}</p>
+            <button v-if="previewState === 'idle' || previewState === 'error'" type="button" class="pdm-primary-action" :disabled="!selected.documentId" @click="startPreview">
+              {{ previewState === 'error' ? '重新加载预览' : '加载预览' }}
+            </button>
+          </div>
         </template>
       </div>
       <slot />

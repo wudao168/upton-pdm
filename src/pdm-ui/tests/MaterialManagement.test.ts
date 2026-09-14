@@ -45,6 +45,8 @@ const api = vi.hoisted(() => ({
   updateMaterialNumberingSettings: vi.fn(),
   getMaterialDuplicateRules: vi.fn(),
   updateMaterialDuplicateRules: vi.fn(),
+  previewMaterialImport: vi.fn(),
+  importMaterials: vi.fn(),
 }))
 
 vi.mock('../src/api', () => api)
@@ -79,6 +81,11 @@ describe('MaterialManagement', () => {
       { categoryCode: '0204', fields: ['Name', 'Specification'] },
     ])
     api.updateMaterialDuplicateRules.mockImplementation(async rules => rules)
+    api.previewMaterialImport.mockResolvedValue({
+      totalCount: 1, validCount: 1, errorCount: 0,
+      rows: [{ rowNumber: 2, categoryCode: '0102', name: '批量轴承', unitCode: '001', specification: 'BRG-01', errors: [] }],
+    })
+    api.importMaterials.mockResolvedValue({ importedCount: 1, materials: [] })
     api.listMaterialCategories.mockResolvedValue([
       { code: '01', name: '原材料', parentCode: null, pdmKind: null, defaultSupplyMode: 'Purchase', allowCreate: false, isVisible: true, isActive: true, numberPrefix: '01', sequenceLength: 7, counterScope: '01', sortOrder: 1, updatedBy: 'system', updatedAt: '2026-08-17T00:00:00Z', rowVersion: 1 },
       { code: '0101', name: '电气外购件', parentCode: '01', pdmKind: 'Electrical', defaultSupplyMode: 'Purchase', allowCreate: true, isVisible: true, isActive: true, numberPrefix: '0101', sequenceLength: 7, counterScope: '0101', sortOrder: 2, updatedBy: 'system', updatedAt: '2026-08-17T00:00:00Z', rowVersion: 1 },
@@ -110,6 +117,35 @@ describe('MaterialManagement', () => {
       isPdmMaster: true, localDeletePreconditionsPassed: true, u9ReferenceCheckAvailable: false,
       synchronizedDeleteAvailable: false, decision: 'PLM未发现引用；U9C引用查询合同尚未验证，同步删除保持关闭。',
     }))
+  })
+
+  it('上传Excel后先预检，确认后仅导入料品草稿', async () => {
+    const confirm = vi.spyOn(ElMessageBox, 'confirm').mockResolvedValue('confirm' as never)
+    const wrapper = mount(MaterialManagement, {
+      attachTo: document.body,
+      props: { token: 'token', canEdit: true, canApprove: false, canManageIntegration: false },
+      global: { plugins: [ElementPlus] },
+    })
+    await flushPromises()
+    await wrapper.findAll('button').find(button => button.text() === '批量导入')!.trigger('click')
+    await flushPromises()
+    expect(document.body.textContent).toContain('Excel批量新增料品')
+    expect(document.body.textContent).toContain('U9C分类编码、物料名称、计量单位、规格型号')
+
+    const file = new File(['xlsx'], '料品.xlsx', { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' })
+    const input = wrapper.get('input[type="file"]')
+    Object.defineProperty(input.element, 'files', { configurable: true, value: [file] })
+    await input.trigger('change')
+    await flushPromises()
+    expect(api.previewMaterialImport).toHaveBeenCalledWith(file, 'token')
+    expect(document.body.textContent).toContain('可导入 1 行')
+
+    await wrapper.findAll('button').find(button => button.text() === '确认导入草稿')!.trigger('click')
+    await flushPromises()
+    expect(confirm).toHaveBeenCalledWith(expect.stringContaining('不会自动批准或写入U9C'), '确认批量导入', expect.any(Object))
+    expect(api.importMaterials).toHaveBeenCalledWith(file, 'token')
+    wrapper.unmount()
+    confirm.mockRestore()
   })
 
   it('opens the selected material association from the material master list', async () => {

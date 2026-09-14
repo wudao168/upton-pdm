@@ -1594,6 +1594,49 @@ public sealed class MaterialServiceTests
         return CreateService(out materials, out _);
     }
 
+    [Fact]
+    public async Task MaterialImport_PreviewsAndCreatesDraftsWithoutCallingU9()
+    {
+        var service = CreateService(out var materials, out var client);
+        var rows = new[]
+        {
+            new MaterialImportRowCommand(2, "0102", "批量轴承A", "个", "BRG-A", Brand: "TEST"),
+            new MaterialImportRowCommand(3, "0102", "批量轴承B", "001", "BRG-B", Brand: "TEST")
+        };
+
+        var preview = await service.PreviewImportAsync(rows, "standardizer", UserRole.ProcessReviewer, default);
+        Assert.Equal((2, 2, 0), (preview.TotalCount, preview.ValidCount, preview.ErrorCount));
+
+        var result = await service.ImportAsync(rows, "standardizer", UserRole.ProcessReviewer, default);
+        Assert.Equal(2, result.ImportedCount);
+        Assert.All(result.Materials, material =>
+        {
+            Assert.Equal(MaterialApprovalStatus.Draft, material.ApprovalStatus);
+            Assert.Equal("001", material.UnitCode);
+            Assert.Equal("0102", material.CategoryCode);
+        });
+        Assert.Equal(0, client.AuthenticationCount);
+        Assert.Empty(await materials.ListSyncTasksAsync(default));
+    }
+
+    [Fact]
+    public async Task MaterialImport_BlocksWholeBatchWhenRowsDuplicate()
+    {
+        var service = CreateService(out var materials, out _);
+        var rows = new[]
+        {
+            new MaterialImportRowCommand(2, "0102", "重复A", "个", "DUP-01", Brand: "TEST"),
+            new MaterialImportRowCommand(3, "0102", "重复B", "个", "DUP-01", Brand: "TEST")
+        };
+
+        var preview = await service.PreviewImportAsync(rows, "standardizer", UserRole.ProcessReviewer, default);
+        Assert.Equal(1, preview.ErrorCount);
+        Assert.Contains("与Excel第2行重复", preview.Rows.Single(row => row.RowNumber == 3).Errors);
+        await Assert.ThrowsAsync<PdmRuleException>(() =>
+            service.ImportAsync(rows, "standardizer", UserRole.ProcessReviewer, default));
+        Assert.Empty(await materials.ListMaterialsAsync("重复", null, false, 20, default));
+    }
+
     [Theory]
     [InlineData(1)]
     [InlineData(1000)]

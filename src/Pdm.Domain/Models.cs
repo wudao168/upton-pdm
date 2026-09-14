@@ -501,6 +501,8 @@ public sealed record BomItem(
 
     public string? Weight { get; init; }
 
+    public bool IsWearPart { get; init; }
+
     public Guid? SourceDocumentId { get; init; }
 
     public string? SourceConfiguration { get; init; }

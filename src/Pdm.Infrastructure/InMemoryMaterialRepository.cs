@@ -329,6 +329,20 @@ public sealed class InMemoryMaterialRepository : IMaterialRepository
         }
     }
 
+    public Task<IReadOnlyList<PdmMaterial>> CreateMaterialsAsync(IReadOnlyList<MaterialCreation> creations, CancellationToken cancellationToken)
+    {
+        lock (gate)
+        {
+            var saved = creations.Select(item => item.Material with { CategoryCode = item.Category.Code }).ToArray();
+            if (saved.Any(item => string.IsNullOrWhiteSpace(item.MaterialCode))) throw new PdmRuleException("物料编码尚未预留。");
+            if (saved.Select(item => item.MaterialCode).Distinct(StringComparer.OrdinalIgnoreCase).Count() != saved.Length
+                || saved.Any(item => materials.Values.Any(existing => existing.MaterialCode.Equals(item.MaterialCode, StringComparison.OrdinalIgnoreCase))))
+                throw new PdmConflictException("批量导入时预留的PLM物料编码或料品数据发生冲突，请重新预检后再试。");
+            foreach (var material in saved) materials[material.Id] = material;
+            return Task.FromResult<IReadOnlyList<PdmMaterial>>(saved);
+        }
+    }
+
     public Task<PdmMaterial> UpsertU9MaterialAsync(PdmMaterial material, CancellationToken cancellationToken)
     {
         lock (gate)

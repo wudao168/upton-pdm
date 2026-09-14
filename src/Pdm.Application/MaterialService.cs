@@ -717,6 +717,112 @@ public sealed class MaterialService(
         return saved;
     }
 
+    public async Task<MaterialImportPreview> PreviewImportAsync(
+        IReadOnlyList<MaterialImportRowCommand> rows,
+        string actor,
+        UserRole role,
+        CancellationToken cancellationToken)
+    {
+        await RequirePermissionAsync(actor, role, PermissionCodes.MaterialManage, cancellationToken);
+        var validated = await ValidateImportRowsAsync(rows, actor, cancellationToken);
+        var previews = validated.Select(item => new MaterialImportRowPreview(
+            item.Command.RowNumber, item.Command.CategoryCode, item.Command.Name, item.Command.UnitCode,
+            item.Command.Specification, item.Errors)).ToArray();
+        return new(rows.Count, previews.Count(item => item.Errors.Count == 0), previews.Count(item => item.Errors.Count > 0), previews);
+    }
+
+    public async Task<MaterialImportResult> ImportAsync(
+        IReadOnlyList<MaterialImportRowCommand> rows,
+        string actor,
+        UserRole role,
+        CancellationToken cancellationToken)
+    {
+        await RequirePermissionAsync(actor, role, PermissionCodes.MaterialManage, cancellationToken);
+        var validated = await ValidateImportRowsAsync(rows, actor, cancellationToken);
+        var invalid = validated.Where(item => item.Errors.Count > 0).ToArray();
+        if (invalid.Length > 0)
+            throw new PdmRuleException($"Excel仍有 {invalid.Length} 行校验错误，请重新预检。{string.Join("；", invalid.Take(5).Select(item => $"第{item.Command.RowNumber}行：{string.Join("、", item.Errors)}"))}");
+
+        var creations = new List<MaterialCreation>(validated.Count);
+        foreach (var item in validated)
+        {
+            var reservation = await ReserveAvailableMaterialCodeAsync(item.Category!, item.Material!.UnitCode, cancellationToken);
+            creations.Add(new(item.Material with { MaterialCode = reservation.Code }, item.Category!));
+        }
+        var saved = await materials.CreateMaterialsAsync(creations, cancellationToken);
+        await AuditAsync(actor, "material.batch-import", Guid.NewGuid(), $"Excel批量新增料品草稿：{saved.Count} 项；未批准、未写入U9C。", cancellationToken);
+        return new(saved.Count, saved);
+    }
+
+    private async Task<IReadOnlyList<ValidatedImportRow>> ValidateImportRowsAsync(
+        IReadOnlyList<MaterialImportRowCommand> rows,
+        string actor,
+        CancellationToken cancellationToken)
+    {
+        if (rows.Count == 0) throw new PdmRuleException("Excel没有可导入的数据行。");
+        if (rows.Count > 1000) throw new PdmRuleException("单次最多导入1000行料品。");
+        var now = timeProvider.GetUtcNow();
+        var validated = new List<ValidatedImportRow>(rows.Count);
+        var keys = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        foreach (var command in rows)
+        {
+            var errors = new List<string>();
+            MaterialCategory? category = null;
+            PdmMaterial? material = null;
+            IReadOnlyList<string> duplicateFields = [];
+            try
+            {
+                if (string.IsNullOrWhiteSpace(command.Specification)) errors.Add("规格型号不能为空");
+                category = await RequireCreatableCategoryAsync(command.CategoryCode, MaterialKind.Standard, cancellationToken, allowCategoryKindOverride: true);
+                if (category.PdmKind is null) errors.Add("分类未配置PLM业务分类");
+                var kind = category.PdmKind ?? MaterialKind.Standard;
+                var save = new SaveMaterialCommand(null, command.Name, kind, category.DefaultSupplyMode, U9UnitCatalog.NormalizeBomUnit(command.UnitCode),
+                    command.Specification, command.Material, command.Remark, command.Brand, command.SurfaceTreatment,
+                    command.Weight, command.WeightUnit, CategoryCode: category.Code, PurchaseLink: command.PurchaseLink,
+                    SelectionAdvice: command.SelectionAdvice, ReferencePrice: command.ReferencePrice, Model3DLink: command.Model3DLink,
+                    DocumentLink: command.DocumentLink, IsRecommended: command.IsRecommended);
+                material = Normalize(Guid.NewGuid(), save, null, actor, now, category.Code);
+                var duplicateRule = await GetEffectiveDuplicateRuleAsync(category, cancellationToken);
+                duplicateFields = duplicateRule.Fields;
+                var duplicates = await FindDuplicateMaterialsAsync(category, material.Name, material.Specification, material.Brand, duplicateRule, false, true, cancellationToken);
+                if (duplicates.Count > 0) errors.Add($"已存在重复料品：{string.Join("、", duplicates.Take(5).Select(item => item.MaterialCode))}");
+            }
+            catch (InvalidOperationException error) { errors.Add(error.Message); }
+
+            if (category is not null && material is not null && errors.Count == 0)
+            {
+                var key = ImportDuplicateKey(category.Code, material, duplicateFields);
+                if (key is not null)
+                {
+                    if (keys.TryGetValue(key, out var firstRow)) errors.Add($"与Excel第{firstRow}行重复");
+                    else keys[key] = command.RowNumber;
+                }
+            }
+            validated.Add(new(command, category, material, errors));
+        }
+        return validated;
+    }
+
+    private static string? ImportDuplicateKey(string categoryCode, PdmMaterial material, IReadOnlyList<string> fields)
+    {
+        var values = fields.Select(field => field.ToUpperInvariant() switch
+        {
+            "NAME" => material.Name,
+            "SPECIFICATION" => material.Specification ?? string.Empty,
+            "BRAND" => material.Brand ?? string.Empty,
+            _ => string.Empty
+        }).ToArray();
+        return values.Length == 0 || values.Any(string.IsNullOrWhiteSpace)
+            ? null
+            : string.Join('|', new[] { categoryCode }.Concat(values).Select(value => value.Trim().ToUpperInvariant()));
+    }
+
+    private sealed record ValidatedImportRow(
+        MaterialImportRowCommand Command,
+        MaterialCategory? Category,
+        PdmMaterial? Material,
+        IReadOnlyList<string> Errors);
+
     private static void EnsureMaterialCodeRequiredFields(BomItem item)
     {
         IReadOnlyList<string> requiredFields = item.Kind switch
@@ -1690,7 +1796,7 @@ public sealed class MaterialService(
         return rule;
     }
 
-    private async Task<MaterialCategory> RequireCreatableCategoryAsync(string? categoryCode, MaterialKind kind, CancellationToken cancellationToken)
+    private async Task<MaterialCategory> RequireCreatableCategoryAsync(string? categoryCode, MaterialKind kind, CancellationToken cancellationToken, bool allowCategoryKindOverride = false)
     {
         if (string.IsNullOrWhiteSpace(categoryCode))
         {
@@ -1702,7 +1808,7 @@ public sealed class MaterialService(
         if (!category.IsActive) throw new PdmRuleException("料品分类已停用。");
         if (!category.IsVisible) throw new PdmRuleException("料品分类在PLM中已屏蔽。");
         if (!category.AllowCreate) throw new PdmRuleException("料品分类未开放创建。");
-        if (category.PdmKind is not null && category.PdmKind != kind)
+        if (!allowCategoryKindOverride && category.PdmKind is not null && category.PdmKind != kind)
             throw new PdmRuleException($"料品分类 {category.Code} 仅允许创建{category.PdmKind}类型料品。");
         return category;
     }
