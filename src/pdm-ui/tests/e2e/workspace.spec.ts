@@ -891,6 +891,13 @@ test('administrator switches independent company organization trees', async ({ p
   await expect(page.getByLabel('公司管理')).toContainText('昆山阿普顿自动化系统有限公司')
   await expect(page.getByLabel('公司管理')).toContainText('广州阿普顿自动化系统有限公司')
   await page.screenshot({ path: testInfo.outputPath('company-organization-management.png'), fullPage: false })
+  await page.getByLabel('公司管理').getByRole('button', { name: '编辑', exact: true }).first().click()
+  const companyDialog = page.getByRole('dialog', { name: '编辑公司' })
+  const activeToggle = companyDialog.locator('.org-form-check').filter({ hasText: '启用' })
+  await expect(activeToggle).toBeVisible()
+  await expect(activeToggle.locator('input[type="checkbox"]')).toBeChecked()
+  await page.screenshot({ path: testInfo.outputPath('company-active-checkbox.png'), fullPage: false })
+  await companyDialog.getByRole('button', { name: '取消', exact: true }).click()
 })
 
 test('role permissions follow the system module directory and include future modules', async ({ page }, testInfo) => {

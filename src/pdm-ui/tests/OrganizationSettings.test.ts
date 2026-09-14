@@ -74,6 +74,10 @@ describe('OrganizationSettings', () => {
     await buttonByText(wrapper, '公司管理').trigger('click')
     expect(wrapper.get('[aria-label="公司管理"]').text()).toContain('昆山阿普顿自动化系统有限公司')
     expect(wrapper.get('[aria-label="公司管理"]').text()).toContain('广州阿普顿自动化系统有限公司')
+    await buttonByText(wrapper, '编辑').trigger('click')
+    await flushPromises()
+    const companyDialog = document.body.querySelector('.el-dialog')!
+    expect(companyDialog.querySelector('.org-form-check span')?.textContent).toBe('启用')
   })
 
   it('新建组织显示明确保存按钮且不再要求排序，所有层级均可设置负责人', async () => {
@@ -98,6 +102,7 @@ describe('OrganizationSettings', () => {
     const dialog = document.body.querySelector('.el-dialog')!
     expect(dialog.textContent).not.toContain('排序')
     expect(dialog.textContent).toContain('保存组织')
+    expect(Array.from(dialog.querySelectorAll('.org-form-check span')).map(item => item.textContent)).toEqual(['制造部门（可承接项目）', '启用'])
     Array.from(dialog.querySelectorAll<HTMLButtonElement>('button')).find(button => button.textContent?.trim() === '保存组织')!.click()
     await flushPromises()
     expect(dialog.querySelector('.pdm-dialog-status')?.textContent).toContain('提醒请完整填写组织资料')
@@ -137,6 +142,7 @@ describe('OrganizationSettings', () => {
     const dialog = document.body.querySelector('.el-dialog')!
     const manufacturingLabel = Array.from(dialog.querySelectorAll('label')).find(label => label.textContent?.includes('制造部门'))
     expect(manufacturingLabel?.textContent).toContain('可承接项目')
+    expect(manufacturingLabel?.classList.contains('org-form-check')).toBe(true)
     const manufacturingCheckbox = manufacturingLabel!.querySelector<HTMLInputElement>('input[type="checkbox"]')!
     manufacturingCheckbox.checked = true
     manufacturingCheckbox.dispatchEvent(new Event('change'))
