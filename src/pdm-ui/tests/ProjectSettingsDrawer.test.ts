@@ -49,7 +49,7 @@ describe('ProjectSettingsDrawer', () => {
       } },
     })
 
-    expect(wrapper.text()).toContain('项目内容复制')
+    expect(wrapper.text()).toContain('项目复制')
     expect(wrapper.text()).toContain('验证计划检查项目')
     const sourceSelect = wrapper.findAllComponents({ name: 'ElSelect' }).find(item => item.props('placeholder') === '选择已有项目')
     expect(sourceSelect).toBeDefined()
@@ -76,25 +76,35 @@ describe('ProjectSettingsDrawer', () => {
     wrapper.unmount()
   })
 
-  it('管理员看到服务端重置检查结果和30天恢复入口', async () => {
+  it('项目复制和项目重置使用选项卡分页，并在打开重置页后检查范围', async () => {
     api.getProjectContentResetReadiness.mockResolvedValue({
       project: target, includeChildren: false, includedProjects: [target], canReset: false,
-      blockers: ['存在已正式发布的发布包或BOM基线'], counts: { 受控图档: 3, BOM物料: 8 },
+      blockers: ['存在已发布的BOM，项目内容不能重置'], counts: { 受控图档: 3, BOM物料: 8 },
       restorableSnapshots: [{ id: 'snapshot-1', projectId: target.id, projectCode: target.code, includedProjectIds: [target.id], reason: '误导入', counts: { 受控图档: 2 }, createdBy: 'admin', createdAt: '2026-09-14T01:00:00Z', expiresAt: '2026-10-14T01:00:00Z' }],
     })
     const wrapper = mount(ProjectSettingsDrawer, {
-      props: { modelValue: true, project: target, projects: [target], token: 'token', canCopyContent: false, canResetContent: true, pending: false, onContentResetComplete: vi.fn() },
+      props: { modelValue: true, project: target, projects: [target, source], token: 'token', canCopyContent: true, canResetContent: true, pending: false, onContentResetComplete: vi.fn() },
       global: { stubs: {
         ElDrawer: { props: ['modelValue', 'title'], emits: ['update:modelValue'], template: '<section role="dialog"><h2>{{ title }}</h2><slot /><footer><slot name="footer" /></footer></section>' },
         ElInput: { props: ['modelValue'], template: '<input :value="modelValue">' }, ElAlert: { props: ['title', 'description'], template: '<div>{{ title }} {{ description }}<slot /></div>' },
         ElCheckbox: { props: ['modelValue'], emits: ['update:modelValue', 'change'], template: '<label><slot /></label>' },
       } },
     })
+    expect(api.getProjectContentResetReadiness).not.toHaveBeenCalled()
+    const tabs = wrapper.findAll('[role="tab"]')
+    expect(tabs.map(tab => tab.text())).toEqual(['项目复制', '项目重置'])
+    expect(tabs[0].attributes('aria-selected')).toBe('true')
+    expect(wrapper.find('[aria-labelledby="pdm-project-copy-settings-title"]').attributes('style') ?? '').not.toContain('display: none')
+    expect(wrapper.find('[aria-labelledby="pdm-project-reset-settings-title"]').attributes('style')).toContain('display: none')
+
+    await tabs[1].trigger('click')
     await flushPromises()
 
     expect(api.getProjectContentResetReadiness).toHaveBeenCalledWith(target.id, false, 'token')
-    expect(wrapper.text()).toContain('重置项目内容')
-    expect(wrapper.text()).toContain('存在已正式发布的发布包或BOM基线')
+    expect(tabs[1].attributes('aria-selected')).toBe('true')
+    expect(wrapper.find('[aria-labelledby="pdm-project-copy-settings-title"]').attributes('style')).toContain('display: none')
+    expect(wrapper.find('[aria-labelledby="pdm-project-reset-settings-title"]').attributes('style') ?? '').not.toContain('display: none')
+    expect(wrapper.text()).toContain('存在已发布的BOM，项目内容不能重置')
     expect(wrapper.text()).toContain('30天内可恢复的快照')
     expect(wrapper.text()).toContain('误导入')
   })

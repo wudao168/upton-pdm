@@ -85,7 +85,8 @@ public sealed class PdmAddin : ISwAddin
     private int checkoutReminderHours = 4;
     private int checkoutStrongReminderHours = 8;
     private bool disconnecting;
-    private const int ActiveDocumentRefreshDebounceMilliseconds = 150;
+    private const int ActiveDocumentRefreshDebounceMilliseconds = 200;
+    private const int MetadataRefreshDelayMilliseconds = 300;
     private static readonly TimeSpan NavigationMetadataCacheDuration = TimeSpan.FromSeconds(2);
     private const long OperationLogMaxBytes = 10L * 1024L * 1024L;
     private const int OperationLogBackupCount = 3;
@@ -656,14 +657,15 @@ public sealed class PdmAddin : ISwAddin
         return 0;
     }
 
-    private void ScheduleTreeRefresh()
+    private void ScheduleTreeRefresh(bool restartDebounce = true)
     {
         if (disconnecting)
         {
             return;
         }
 
-        if (Interlocked.CompareExchange(ref pendingTreeRefresh, 1, 0) == 0)
+        var wasPending = Interlocked.Exchange(ref pendingTreeRefresh, 1);
+        if (restartDebounce || wasPending == 0)
         {
             Interlocked.Exchange(ref pendingTreeRefreshScheduledAt, Stopwatch.GetTimestamp());
         }
@@ -705,14 +707,14 @@ public sealed class PdmAddin : ISwAddin
             if (currentTree == null
                 || !string.Equals(currentDocumentIdentity, activeIdentity, StringComparison.OrdinalIgnoreCase))
             {
-                ScheduleTreeRefresh();
+                ScheduleTreeRefresh(false);
             }
         }
         catch (Exception exception)
         {
             // A closing COM document can become invalid between ActiveDoc and GetPathName.
             LogDiagnostic("SynchronizeActiveDocumentContextOnIdle", exception);
-            ScheduleTreeRefresh();
+            ScheduleTreeRefresh(false);
         }
     }
 
@@ -10529,6 +10531,7 @@ public sealed class PdmAddin : ISwAddin
         var targetTree = currentTree;
         try
         {
+            await Task.Delay(MetadataRefreshDelayMilliseconds, cancellationToken);
             var documents = await GetProjectDocumentsForNavigationAsync(projectId, cancellationToken);
             cancellationToken.ThrowIfCancellationRequested();
             if (disconnecting

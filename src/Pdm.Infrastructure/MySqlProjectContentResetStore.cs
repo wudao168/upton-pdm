@@ -42,24 +42,12 @@ public sealed class MySqlProjectContentResetStore : IProjectContentResetStore
         };
 
         var blockers = new List<string>();
-        if (await ExistsAsync(connection, "SELECT EXISTS(SELECT 1 FROM document d WHERE d.project_id IN @Ids AND (d.lifecycle_state IN ('Released','Obsolete') OR EXISTS(SELECT 1 FROM document_version v WHERE v.document_id=d.id AND (v.version_status='Released' OR v.release_package_id IS NOT NULL))))", ids, cancellationToken))
-            blockers.Add("存在已发布或已作废的受控图档。已发布内容必须保留审计链，不能重置。");
-        if (await ExistsAsync(connection, "SELECT EXISTS(SELECT 1 FROM release_package WHERE project_id IN @Ids AND (state='Published' OR published_at IS NOT NULL))", ids, cancellationToken))
-            blockers.Add("存在已正式发布的发布包或BOM基线。");
-        if (await ExistsAsync(connection, "SELECT EXISTS(SELECT 1 FROM bom_version WHERE project_id IN @Ids AND (state='Released' OR released_at IS NOT NULL))", ids, cancellationToken))
-            blockers.Add("存在已发布的BOM版本。");
-        if (await ExistsAsync(connection, "SELECT EXISTS(SELECT 1 FROM manufacturing_bom_baseline WHERE project_id IN @Ids)", ids, cancellationToken))
-            blockers.Add("存在制造BOM冻结基线。");
+        if (await ExistsAsync(connection, PublishedBomBlockerSql, ids, cancellationToken))
+            blockers.Add("存在已发布的BOM，项目内容不能重置。");
         if (await ExistsAsync(connection, "SELECT EXISTS(SELECT 1 FROM release_package WHERE project_id IN @Ids AND state IN ('ProcessReview','Approval','Publishing'))", ids, cancellationToken))
             blockers.Add("存在正在审批或发布的发布包，请先撤回或结束流程。");
         if (await ExistsAsync(connection, "SELECT EXISTS(SELECT 1 FROM drawing_review_package WHERE project_id IN @Ids AND state IN ('InReview','WritingProperties'))", ids, cancellationToken))
             blockers.Add("存在正在进行的图纸审核或属性写回。");
-        if (await ExistsAsync(connection, "SELECT EXISTS(SELECT 1 FROM project_validation_plan WHERE project_id IN @Ids AND state IN ('PendingApproval','Effective','Superseded'))", ids, cancellationToken))
-            blockers.Add("存在审批中或已经生效的验证计划。");
-        if (await ExistsAsync(connection, "SELECT EXISTS(SELECT 1 FROM project_plan WHERE project_id IN @Ids AND JSON_UNQUOTE(JSON_EXTRACT(payload_json,'$.approvalStatus')) IN ('Pending','Approved'))", ids, cancellationToken))
-            blockers.Add("存在正在审批或已经生效的项目计划。");
-        if (await ExistsAsync(connection, MaterialApplicationBlockerSql, ids, cancellationToken))
-            blockers.Add("存在已经批准、生成正式料号或完成U9C同步的物料申请。");
         if (await ExistsAsync(connection, "SELECT EXISTS(SELECT 1 FROM document WHERE project_id IN @Ids AND checked_out_by IS NOT NULL)", ids, cancellationToken))
             blockers.Add("存在已签出的图档，请先存档或释放编辑权限。");
         if (await ExistsAsync(connection, "SELECT EXISTS(SELECT 1 FROM cad_property_writeback w INNER JOIN bom_item b ON b.id=w.bom_item_id WHERE b.project_id IN @Ids AND w.status IN ('Pending','InProgress'))", ids, cancellationToken))
@@ -178,15 +166,9 @@ public sealed class MySqlProjectContentResetStore : IProjectContentResetStore
             ["备料及通知"] = await CountAsync(connection, transaction, "SELECT COUNT(*) FROM user_notification WHERE project_id IN @Ids", ids, cancellationToken)
         };
         var blockers = new List<string>();
-        if (await ExistsAsync(connection, transaction, "SELECT EXISTS(SELECT 1 FROM document d WHERE d.project_id IN @Ids AND (d.lifecycle_state IN ('Released','Obsolete') OR EXISTS(SELECT 1 FROM document_version v WHERE v.document_id=d.id AND (v.version_status='Released' OR v.release_package_id IS NOT NULL))))", ids, cancellationToken)) blockers.Add("存在已发布或已作废的受控图档");
-        if (await ExistsAsync(connection, transaction, "SELECT EXISTS(SELECT 1 FROM release_package WHERE project_id IN @Ids AND (state='Published' OR published_at IS NOT NULL))", ids, cancellationToken)) blockers.Add("存在已正式发布的发布包或BOM基线");
-        if (await ExistsAsync(connection, transaction, "SELECT EXISTS(SELECT 1 FROM bom_version WHERE project_id IN @Ids AND (state='Released' OR released_at IS NOT NULL))", ids, cancellationToken)) blockers.Add("存在已发布的BOM版本");
-        if (await ExistsAsync(connection, transaction, "SELECT EXISTS(SELECT 1 FROM manufacturing_bom_baseline WHERE project_id IN @Ids)", ids, cancellationToken)) blockers.Add("存在制造BOM冻结基线");
+        if (await ExistsAsync(connection, transaction, PublishedBomBlockerSql, ids, cancellationToken)) blockers.Add("存在已发布的BOM，项目内容不能重置");
         if (await ExistsAsync(connection, transaction, "SELECT EXISTS(SELECT 1 FROM release_package WHERE project_id IN @Ids AND state IN ('ProcessReview','Approval','Publishing'))", ids, cancellationToken)) blockers.Add("存在正在审批或发布的发布包");
         if (await ExistsAsync(connection, transaction, "SELECT EXISTS(SELECT 1 FROM drawing_review_package WHERE project_id IN @Ids AND state IN ('InReview','WritingProperties'))", ids, cancellationToken)) blockers.Add("存在正在进行的图纸审核或属性写回");
-        if (await ExistsAsync(connection, transaction, "SELECT EXISTS(SELECT 1 FROM project_validation_plan WHERE project_id IN @Ids AND state IN ('PendingApproval','Effective','Superseded'))", ids, cancellationToken)) blockers.Add("存在审批中或已经生效的验证计划");
-        if (await ExistsAsync(connection, transaction, "SELECT EXISTS(SELECT 1 FROM project_plan WHERE project_id IN @Ids AND JSON_UNQUOTE(JSON_EXTRACT(payload_json,'$.approvalStatus')) IN ('Pending','Approved'))", ids, cancellationToken)) blockers.Add("存在正在审批或已经生效的项目计划");
-        if (await ExistsAsync(connection, transaction, MaterialApplicationBlockerSql, ids, cancellationToken)) blockers.Add("存在已经批准、生成正式料号或完成U9C同步的物料申请");
         if (await ExistsAsync(connection, transaction, "SELECT EXISTS(SELECT 1 FROM document WHERE project_id IN @Ids AND checked_out_by IS NOT NULL)", ids, cancellationToken)) blockers.Add("存在已签出的图档");
         if (await ExistsAsync(connection, transaction, "SELECT EXISTS(SELECT 1 FROM cad_property_writeback w INNER JOIN bom_item b ON b.id=w.bom_item_id WHERE b.project_id IN @Ids AND w.status IN ('Pending','InProgress'))", ids, cancellationToken)) blockers.Add("存在正在执行的CAD属性写回任务");
         if (await HasPendingProjectOutboxAsync(connection, transaction, ids, cancellationToken)) blockers.Add("存在尚未处理完成的外部集成事件");
@@ -386,7 +368,7 @@ public sealed class MySqlProjectContentResetStore : IProjectContentResetStore
     private const string SnapshotSelect = "SELECT id Id,project_id ProjectId,project_code ProjectCode,included_project_ids_json IncludedProjectIdsJson,reason Reason,summary_json SummaryJson,CAST(NULL AS BINARY) PayloadJson,created_by CreatedBy,created_at CreatedAt,expires_at ExpiresAt,restored_by RestoredBy,restored_at RestoredAt,purged_at PurgedAt FROM project_content_reset_snapshot";
     private const string SnapshotPayloadSelect = "SELECT id Id,project_id ProjectId,project_code ProjectCode,included_project_ids_json IncludedProjectIdsJson,reason Reason,summary_json SummaryJson,payload_json PayloadJson,created_by CreatedBy,created_at CreatedAt,expires_at ExpiresAt,restored_by RestoredBy,restored_at RestoredAt,purged_at PurgedAt FROM project_content_reset_snapshot";
     private const string ProjectFileCountSql = "SELECT COUNT(*) FROM project_file f INNER JOIN project_folder folder ON folder.id=f.folder_id WHERE f.deleted_at IS NULL AND (folder.target_project_id IN @Ids OR (folder.root_project_id IN @Ids AND folder.target_project_id IS NULL))";
-    private const string MaterialApplicationBlockerSql = "SELECT EXISTS(SELECT 1 FROM material_code_application a LEFT JOIN material_master m ON m.id=a.material_id WHERE a.project_id IN @Ids AND (a.status='Approved' OR a.material_code IS NOT NULL OR COALESCE(m.u9_sync_confirmed,0)=1 OR EXISTS(SELECT 1 FROM u9_material_sync_task t WHERE t.material_id=a.material_id AND t.status='Succeeded')))";
+    private const string PublishedBomBlockerSql = "SELECT EXISTS(SELECT 1 FROM release_package WHERE project_id IN @Ids AND (state='Published' OR published_at IS NOT NULL) UNION ALL SELECT 1 FROM bom_version WHERE project_id IN @Ids AND (state='Released' OR released_at IS NOT NULL) UNION ALL SELECT 1 FROM manufacturing_bom_baseline WHERE project_id IN @Ids)";
     private sealed record SnapshotCell(string Kind, string? Value);
     private sealed record TableSnapshot(string Name, List<Dictionary<string, SnapshotCell?>> Rows);
     private sealed record ResetPayload(Guid SnapshotId, List<TableSnapshot> Tables);

@@ -42,7 +42,7 @@ UPLM 客户端和 SolidWorks 插件统一升级包
 5. 不修改 MySQL、API 程序或业务数据。
 
 服务器操作（管理员 PowerShell）：
-Set-Location 'C:\UPLM\upgrade-$Version'
+Set-Location 'C:\UPLM\package\upgrade-$Version'
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File '.\Verify-ClientPluginUpgradePackage.ps1'
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File '.\Server\Install-ClientPluginUpgradeOnServer.ps1' -InstallRoot 'C:\UPLM\pdm'
 `$result = Invoke-RestMethod 'http://127.0.0.1:5173/client-bootstrap.json'

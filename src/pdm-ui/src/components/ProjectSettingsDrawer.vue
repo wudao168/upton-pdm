@@ -29,6 +29,8 @@ const resetPending = ref(false)
 const includeChildren = ref(false)
 const resetReason = ref('')
 const resetConfirmation = ref('')
+type SettingsTab = 'copy' | 'reset'
+const activeSettingsTab = ref<SettingsTab>(props.canCopyContent ? 'copy' : 'reset')
 
 const copySourceProjects = computed(() => props.projects
   .filter(item => item.id !== props.project.id && item.canReadContent)
@@ -53,8 +55,17 @@ function resetDangerForm() {
   resetConfirmation.value = ''
 }
 
-watch(() => props.modelValue, open => { if (open) { resetCopy(); resetDangerForm(); if (props.canResetContent) void refreshResetReadiness() } }, { immediate: true })
-watch(() => props.project.id, () => { resetCopy(); resetDangerForm(); if (props.modelValue && props.canResetContent) void refreshResetReadiness() })
+function resetSettingsTab() {
+  activeSettingsTab.value = props.canCopyContent ? 'copy' : 'reset'
+}
+
+function selectSettingsTab(tab: SettingsTab) {
+  activeSettingsTab.value = tab
+  if (tab === 'reset' && props.canResetContent && !resetReadiness.value) void refreshResetReadiness()
+}
+
+watch(() => props.modelValue, open => { if (open) { resetCopy(); resetDangerForm(); resetSettingsTab(); if (activeSettingsTab.value === 'reset' && props.canResetContent) void refreshResetReadiness() } }, { immediate: true })
+watch(() => props.project.id, () => { resetCopy(); resetDangerForm(); resetSettingsTab(); if (props.modelValue && activeSettingsTab.value === 'reset' && props.canResetContent) void refreshResetReadiness() })
 
 function closeSettings() {
   emit('update:modelValue', false)
@@ -165,9 +176,13 @@ async function executeSnapshotRestore(snapshot: ProjectContentResetSnapshotSumma
 <template>
   <el-drawer :model-value="modelValue" :title="`项目设置 · ${project.code}`" size="720px" :close-on-click-modal="false" @update:model-value="emit('update:modelValue', $event)">
     <section class="pdm-project-settings" aria-label="项目设置内容">
-      <section v-if="canCopyContent" class="pdm-project-settings__section" aria-labelledby="pdm-project-copy-settings-title">
+      <nav v-if="canCopyContent || canResetContent" class="pdm-project-settings__tabs" role="tablist" aria-label="项目设置选项卡">
+        <button v-if="canCopyContent" type="button" role="tab" :aria-selected="activeSettingsTab === 'copy'" @click="selectSettingsTab('copy')">项目复制</button>
+        <button v-if="canResetContent" type="button" role="tab" :aria-selected="activeSettingsTab === 'reset'" @click="selectSettingsTab('reset')">项目重置</button>
+      </nav>
+      <section v-if="canCopyContent" v-show="activeSettingsTab === 'copy'" class="pdm-project-settings__section" aria-labelledby="pdm-project-copy-settings-title">
         <header>
-          <h3 id="pdm-project-copy-settings-title">项目内容复制</h3>
+          <h3 id="pdm-project-copy-settings-title">项目复制</h3>
           <p>从已有项目选择需要复用的最新设计资料，不会覆盖目标项目已有内容。</p>
         </header>
         <div class="pdm-project-staffing-form" aria-label="复制项目内容设置">
@@ -195,9 +210,9 @@ async function executeSnapshotRestore(snapshot: ProjectContentResetSnapshotSumma
           <p v-else class="pdm-counter-note">目标项目必须先创建。选择源项目后，系统会检查目标是否已有同类内容。</p>
         </div>
       </section>
-      <section v-if="canResetContent" class="pdm-project-settings__section pdm-project-settings__danger" aria-labelledby="pdm-project-reset-settings-title">
-        <header><h3 id="pdm-project-reset-settings-title">重置项目内容</h3><p>仅系统管理员可执行。保留项目基本信息和人员分配，业务内容进入可恢复30天的整项快照。</p></header>
-        <el-alert title="危险操作" type="error" :closable="false" description="如存在已发布内容、进行中的审批或发布、U9C正式回写、已生效验证计划或已签出图档，服务端将拒绝重置。" />
+      <section v-if="canResetContent" v-show="activeSettingsTab === 'reset'" class="pdm-project-settings__section pdm-project-settings__danger" aria-labelledby="pdm-project-reset-settings-title">
+        <header><h3 id="pdm-project-reset-settings-title">项目重置</h3><p>仅系统管理员可执行。保留项目基本信息和人员分配，业务内容进入可恢复30天的整项快照。</p></header>
+        <el-alert title="危险操作" type="error" :closable="false" description="如已发布BOM，或存在进行中的审批、发布、CAD属性写回、外部同步及已签出图档，服务端将拒绝重置。项目计划和验证计划会随项目内容一并进入快照。" />
         <div class="pdm-reset-scope">
           <el-checkbox v-model="includeChildren" :disabled="resetPending" @change="refreshResetReadiness">同时重置下属子项目</el-checkbox>
           <button type="button" class="pdm-secondary-action" :disabled="resetPending" @click="refreshResetReadiness">{{ resetPending ? '正在检查…' : '重新检查范围' }}</button>
@@ -219,11 +234,11 @@ async function executeSnapshotRestore(snapshot: ProjectContentResetSnapshotSumma
     </section>
     <template #footer>
       <button type="button" class="pdm-secondary-action" :disabled="pending" @click="closeSettings">取消</button>
-      <button v-if="canCopyContent" type="button" class="pdm-primary-action" :disabled="pending || copyPreviewPending || !copyPreview?.canExecute" @click="executeProjectCopy">{{ pending ? '正在复制…' : '确认复制' }}</button>
+      <button v-if="canCopyContent && activeSettingsTab === 'copy'" type="button" class="pdm-primary-action" :disabled="pending || copyPreviewPending || !copyPreview?.canExecute" @click="executeProjectCopy">{{ pending ? '正在复制…' : '确认复制' }}</button>
     </template>
   </el-drawer>
 </template>
 
 <style scoped>
-.pdm-project-settings{display:flex;flex-direction:column;gap:18px}.pdm-project-settings__section{display:flex;flex-direction:column;gap:14px;padding-bottom:18px;border-bottom:1px solid var(--pdm-border)}.pdm-project-settings__section header h3{margin:0 0 5px}.pdm-project-settings__section header p{margin:0;color:#64748b}.pdm-project-settings__danger{border:1px solid #f2c5c0;border-radius:8px;padding:16px;background:#fffafa}.pdm-reset-scope{display:flex;align-items:center;justify-content:space-between;gap:12px}.pdm-reset-counts{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}.pdm-reset-counts span{display:flex;align-items:baseline;gap:7px;padding:9px 11px;border:1px solid #e2e8f0;border-radius:6px;background:#fff;color:#64748b}.pdm-reset-counts strong{font-size:18px;color:#0f172a}.pdm-reset-snapshots{display:flex;flex-direction:column;gap:8px}.pdm-reset-snapshots>div{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:8px 10px;border:1px solid #e2e8f0;border-radius:6px;background:#fff}.pdm-reset-snapshots span{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.pdm-project-settings__danger ul{margin:8px 0 0;padding-left:20px}.pdm-dialog-field b{color:#dc2626}.pdm-danger-action{align-self:flex-start;min-height:34px;border:1px solid #dc2626;border-radius:5px;padding:0 14px;background:#dc2626;color:#fff;cursor:pointer}.pdm-danger-action:disabled{cursor:not-allowed;opacity:.45}
+.pdm-project-settings{display:flex;flex-direction:column;gap:18px}.pdm-project-settings__tabs{display:flex;gap:4px;padding:3px;border:1px solid var(--pdm-border);border-radius:7px;background:var(--pdm-surface-muted)}.pdm-project-settings__tabs button{flex:1;min-height:34px;border:0;border-radius:5px;background:transparent;color:var(--pdm-muted);font-weight:650;cursor:pointer}.pdm-project-settings__tabs button[aria-selected="true"]{background:#fff;color:var(--pdm-blue);box-shadow:0 1px 4px rgba(15,23,42,.1)}.pdm-project-settings__section{display:flex;flex-direction:column;gap:14px;padding-bottom:18px;border-bottom:1px solid var(--pdm-border)}.pdm-project-settings__section header h3{margin:0 0 5px}.pdm-project-settings__section header p{margin:0;color:#64748b}.pdm-project-settings__danger{border:1px solid #f2c5c0;border-radius:8px;padding:16px;background:#fffafa}.pdm-reset-scope{display:flex;align-items:center;justify-content:space-between;gap:12px}.pdm-reset-counts{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}.pdm-reset-counts span{display:flex;align-items:baseline;gap:7px;padding:9px 11px;border:1px solid #e2e8f0;border-radius:6px;background:#fff;color:#64748b}.pdm-reset-counts strong{font-size:18px;color:#0f172a}.pdm-reset-snapshots{display:flex;flex-direction:column;gap:8px}.pdm-reset-snapshots>div{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:8px 10px;border:1px solid #e2e8f0;border-radius:6px;background:#fff}.pdm-reset-snapshots span{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.pdm-project-settings__danger ul{margin:8px 0 0;padding-left:20px}.pdm-dialog-field b{color:#dc2626}.pdm-danger-action{align-self:flex-start;min-height:34px;border:1px solid #dc2626;border-radius:5px;padding:0 14px;background:#dc2626;color:#fff;cursor:pointer}.pdm-danger-action:disabled{cursor:not-allowed;opacity:.45}
 </style>
