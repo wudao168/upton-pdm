@@ -17,6 +17,7 @@ const props = withDefaults(defineProps<{ active: NavKey; approvalCount?: number;
 })
 const emit = defineEmits<{ navigate: [key: NavKey, label: string] }>()
 const versionDialogOpen = ref(false)
+const versionHistoryOpen = ref(false)
 const versionLoading = ref(false)
 const runtimeDatabase = ref('—')
 
@@ -32,7 +33,7 @@ const releaseTime = computed(() => {
 })
 const releaseNote = computed(() => {
   const separator = fullVersion.value.indexOf('-')
-  if (separator < 0) return '当前部署版本'
+  if (separator < 0) return '移除侧栏版本号前的“版本”文字，增加系统版本记录入口，在个人设置中显示全部已分配角色，并将弹窗操作提醒显示在当前弹窗内。'
   const tag = fullVersion.value.slice(separator + 1)
   if (tag === 'version-information') return '增加网页端、Windows 客户端及 SolidWorks 插件端版本信息。'
   return tag
@@ -40,6 +41,7 @@ const releaseNote = computed(() => {
 
 async function openVersionInfo() {
   versionDialogOpen.value = true
+  versionHistoryOpen.value = false
   versionLoading.value = true
   try {
     const response = await fetch('/health', { cache: 'no-store' })
@@ -94,7 +96,7 @@ const items = [
     <div class="pdm-sidebar__footer">
       <button type="button" class="pdm-sidebar__version" :title="`${versionTitle}，点击查看详情`" :aria-label="`${versionTitle}，点击查看详情`" @click="openVersionInfo">
         <span class="pdm-sidebar__version-icon" aria-hidden="true" />
-        <span class="pdm-sidebar__version-copy">版本 {{ displayVersion }}</span>
+        <span class="pdm-sidebar__version-copy">{{ displayVersion }}</span>
       </button>
       <button
         v-if="props.canManageSystem"
@@ -119,6 +121,24 @@ const items = [
           <div><dt>数据库</dt><dd>{{ runtimeDatabase }}</dd></div>
         </dl>
         <section><h3>版本说明</h3><p>{{ releaseNote }}</p></section>
+        <button
+          type="button"
+          class="pdm-system-version-history__toggle"
+          :aria-expanded="versionHistoryOpen"
+          aria-controls="pdm-system-version-history"
+          @click="versionHistoryOpen = !versionHistoryOpen"
+        >
+          版本记录
+        </button>
+        <section
+          v-if="versionHistoryOpen"
+          id="pdm-system-version-history"
+          class="pdm-system-version-history"
+          aria-label="版本记录"
+        >
+          <header><strong>{{ displayVersion }}</strong><time>{{ releaseTime }}</time></header>
+          <p>{{ releaseNote }}</p>
+        </section>
         <p class="pdm-system-version-detail__note">版本信息来自当前部署标识；数据库状态在打开详情时实时读取。</p>
       </section>
     </el-drawer>

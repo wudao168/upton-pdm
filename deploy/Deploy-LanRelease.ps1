@@ -1,5 +1,7 @@
 [CmdletBinding()]
-param()
+param(
+    [switch]$PreserveFirewallRule
+)
 
 $ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path -Parent $PSScriptRoot
@@ -112,9 +114,11 @@ try {
         if ($sourceHash -ne $targetHash) { throw "$assemblyName hash mismatch after deployment." }
     }
 
-    $existingRule = Get-NetFirewallRule -DisplayName 'UPLM LAN UI (5173)' -ErrorAction SilentlyContinue
-    if ($existingRule) { Remove-NetFirewallRule -DisplayName 'UPLM LAN UI (5173)' }
-    New-NetFirewallRule -DisplayName 'UPLM LAN UI (5173)' -Direction Inbound -Action Allow -Protocol TCP -LocalPort 5173 -RemoteAddress LocalSubnet -Profile Domain,Private | Out-Null
+    if (-not $PreserveFirewallRule) {
+        $existingRule = Get-NetFirewallRule -DisplayName 'UPLM LAN UI (5173)' -ErrorAction SilentlyContinue
+        if ($existingRule) { Remove-NetFirewallRule -DisplayName 'UPLM LAN UI (5173)' }
+        New-NetFirewallRule -DisplayName 'UPLM LAN UI (5173)' -Direction Inbound -Action Allow -Protocol TCP -LocalPort 5173 -RemoteAddress LocalSubnet -Profile Domain,Private | Out-Null
+    }
 
     Start-Service -Name $serviceName
     $serviceStopped = $false
@@ -155,7 +159,7 @@ try {
         apiAssemblies = [ordered]@{}
         desktopSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $clientTarget 'Upton.Pdm.Desktop.exe')).Hash
         solidWorksAddin = $addinState
-        firewallScope = 'LocalSubnet Domain,Private'
+        firewallScope = if ($PreserveFirewallRule) { 'preserved-existing-rule' } else { 'LocalSubnet Domain,Private' }
     }
     foreach ($assemblyName in @('Pdm.Api.dll', 'Pdm.Domain.dll', 'Pdm.Application.dll', 'Pdm.Infrastructure.dll')) {
         $result.apiAssemblies[$assemblyName] = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $apiTarget $assemblyName)).Hash

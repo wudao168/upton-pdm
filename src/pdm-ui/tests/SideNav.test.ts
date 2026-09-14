@@ -95,5 +95,35 @@ describe('SideNav', () => {
     expect(document.body.textContent).toContain('MySql · pdm')
     expect(document.body.textContent).toContain('增加网页端、Windows 客户端及 SolidWorks 插件端版本信息。')
     expect(fetch).toHaveBeenCalledWith('/health', { cache: 'no-store' })
+
+    const historyButton = Array.from(document.body.querySelectorAll('button')).find(button => button.textContent?.trim() === '版本记录')
+    expect(historyButton?.getAttribute('aria-expanded')).toBe('false')
+    historyButton?.click()
+    await wrapper.vm.$nextTick()
+
+    expect(historyButton?.getAttribute('aria-expanded')).toBe('true')
+    const history = document.body.querySelector('[aria-label="版本记录"]')
+    expect(history?.textContent).toContain('V2026.09.12.1710')
+    expect(history?.textContent).toContain('2026-09-12 17:10')
+    expect(history?.textContent).toContain('增加网页端、Windows 客户端及 SolidWorks 插件端版本信息。')
+  })
+
+  it('shows the current update description for an untagged deployment version', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({ database: 'MySql' }), { status: 200 })))
+    const wrapper = mount(SideNav, {
+      attachTo: document.body,
+      props: { active: 'projects', version: '2026.09.13.1510' },
+      global: { plugins: [ElementPlus] },
+    })
+
+    await wrapper.get('.pdm-sidebar__version').trigger('click')
+    await flushPromises()
+    const historyButton = Array.from(document.body.querySelectorAll<HTMLButtonElement>('button')).find(button => button.textContent?.trim() === '版本记录')
+    historyButton?.click()
+    await wrapper.vm.$nextTick()
+
+    expect(document.body.querySelector('[aria-label="版本记录"]')?.textContent)
+      .toContain('移除侧栏版本号前的“版本”文字，增加系统版本记录入口，在个人设置中显示全部已分配角色，并将弹窗操作提醒显示在当前弹窗内。')
+    wrapper.unmount()
   })
 })

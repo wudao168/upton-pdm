@@ -49,6 +49,21 @@ public sealed class ApiSmokeTests : IClassFixture<PdmApiFactory>
     }
 
     [Fact]
+    public async Task ProjectWithoutReferenceTree_ReturnsNoContentInsteadOfNotFound()
+    {
+        var repository = factory.Services.GetRequiredService<IPdmRepository>();
+        var project = await repository.CreateProjectAsync(
+            new CreateProjectCommand($"EMPTY-{Guid.NewGuid():N}", "空引用结构接口验收", "admin", @"D:\PDM\QA", @"D:\PDM\QA-Release"),
+            "admin",
+            CancellationToken.None);
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", CreateToken("admin", "Administrator"));
+
+        var response = await client.GetAsync($"/api/projects/{project.Id}/reference-tree");
+
+        Assert.Equal(HttpStatusCode.NoContent, response.StatusCode);
+    }
+
+    [Fact]
     public async Task MarkupApi_StoresAndReadsAnnotationSeparatelyFromDocumentVersion()
     {
         var repository = factory.Services.GetRequiredService<IPdmRepository>();

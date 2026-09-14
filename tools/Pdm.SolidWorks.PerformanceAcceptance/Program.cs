@@ -48,7 +48,7 @@ internal static class Program
                 }
             }
 
-            var control = (Control)Activator.CreateInstance(controlType, true);
+            var control = (Control)Activator.CreateInstance(controlType, new object[] { string.Empty });
             var nodeSelectedEvent = controlType.GetEvent("NodeSelected", BindingFlags.Instance | BindingFlags.Public)
                 ?? throw new MissingMemberException(controlType.FullName, "NodeSelected");
             nodeSelectedEvent.AddEventHandler(control, CreateNotificationHandler(nodeSelectedEvent.EventHandlerType));

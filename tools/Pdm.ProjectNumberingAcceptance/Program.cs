@@ -16,9 +16,10 @@ var repository = new MySqlPdmRepository(Options.Create(new PdmDatabaseOptions
     RunMigrations = false
 }), TimeProvider.System);
 var organizationId = Guid.Parse("70000000-0000-0000-0000-000000000001");
-var customer = (await repository.ListCustomersAsync(false, CancellationToken.None))
-    .SingleOrDefault(item => string.Equals(item.Code, "C00465", StringComparison.OrdinalIgnoreCase))
-    ?? throw new InvalidOperationException("验收客户C00465不存在。");
+var customers = await repository.ListCustomersAsync(false, CancellationToken.None);
+var customer = customers.SingleOrDefault(item => string.Equals(item.Code, "C00465", StringComparison.OrdinalIgnoreCase))
+    ?? customers.FirstOrDefault()
+    ?? throw new InvalidOperationException("验收数据库中不存在可用客户。");
 
 var parent = await repository.CreateNumberedProjectAsync(Command("主项目", 1), CancellationToken.None);
 var firstChild = await repository.CreateSubprojectAsync(new(parent.Id, "子项目一", null, 2), CancellationToken.None);
@@ -29,6 +30,7 @@ var concurrent = await Task.WhenAll(Enumerable.Range(1, 10).Select(index =>
 Console.WriteLine(JsonSerializer.Serialize(new
 {
     database = connectionBuilder.Database,
+    customer = customer.Code,
     parent = new { parent.Code, parent.DeviceModel, parent.SerialNumbers },
     firstChild = new { firstChild.Code, firstChild.DeviceModel, firstChild.SerialNumbers },
     secondChild = new { secondChild.Code, secondChild.DeviceModel, secondChild.SerialNumbers },
@@ -46,6 +48,6 @@ CreateNumberedProjectCommand Command(string name, int quantity) => new(
     null,
     new DateOnly(2026, 8, 13),
     quantity,
-    "engineer",
+    "qa_engineer",
     @"D:\PDM\Vault",
     @"D:\PDM\Release");

@@ -285,7 +285,7 @@ internal static class Program
     private static void TestRegistrationBinding()
     {
         var plugin = New("PdmAddin");
-        using var pane = (IDisposable)New("PdmTaskPaneControl");
+        using var pane = (IDisposable)New("PdmTaskPaneControl", "");
         plugin.GetType().GetField("taskPaneControl", Members).SetValue(plugin, pane);
         var source = Node("workspace/View/registered/new.SLDPRT", null);
         WorkspaceFile("registered/new.SLDPRT");
@@ -304,7 +304,7 @@ internal static class Program
 
     private static void TestSelectionIndependentStructureActions()
     {
-        using var pane = (Control)New("PdmTaskPaneControl");
+        using var pane = (Control)New("PdmTaskPaneControl", "");
         Call(pane, "SetAuthenticatedUser", "设计员", "designer");
         Call(pane, "SetTree", Node("selection-independent/main.SLDASM", Guid.NewGuid(), 0));
 

@@ -274,7 +274,7 @@ describe('PLM client workspace', () => {
     try {
       await login(wrapper, false)
       await flushPromises()
-      expect(wrapper.get('.pdm-sidebar__version').text()).toBe('版本 V2026.09.12.1234')
+      expect(wrapper.get('.pdm-sidebar__version').text()).toBe('V2026.09.12.1234')
       expect(wrapper.get('.pdm-sidebar__version').attributes('title')).toBe('版本 2026.09.12.1234-version-display，点击查看详情')
     } finally { wrapper.unmount() }
   })
@@ -756,11 +756,11 @@ describe('PLM client workspace', () => {
     const wrapper = mount(App, { attachTo: document.body, global: { plugins: [ElementPlus] } })
     await login(wrapper, false)
 
-    expect(wrapper.findAll('.pdm-sidebar__footer button').map(button => button.text())).toEqual(['版本 未知', '系统管理'])
-    expect(wrapper.get('.pdm-sidebar__version').text()).toBe('版本 未知')
+    expect(wrapper.findAll('.pdm-sidebar__footer button').map(button => button.text())).toEqual(['未知', '系统管理'])
+    expect(wrapper.get('.pdm-sidebar__version').text()).toBe('未知')
     window.dispatchEvent(new CustomEvent('pdm-client-version', { detail: { version: '2026.09.12.1234-version-display' } }))
     await wrapper.vm.$nextTick()
-    expect(wrapper.get('.pdm-sidebar__version').text()).toBe('版本 V2026.09.12.1234')
+    expect(wrapper.get('.pdm-sidebar__version').text()).toBe('V2026.09.12.1234')
     expect(wrapper.get('.pdm-sidebar__version').attributes('title')).toBe('版本 2026.09.12.1234-version-display，点击查看详情')
     await buttonByText(wrapper, '系统管理').trigger('click')
     expect(buttonByText(wrapper, '客户端设置')).toBeDefined()

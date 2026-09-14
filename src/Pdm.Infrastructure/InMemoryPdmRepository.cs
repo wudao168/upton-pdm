@@ -42,8 +42,7 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
     private readonly ConcurrentDictionary<Guid, BomVersion> bomVersions = new();
     private readonly ConcurrentDictionary<Guid, ManufacturingBomBaseline> manufacturingBomBaselines = new();
     private readonly Dictionary<Guid, CadPropertyWriteback> cadPropertyWritebacks = new();
-    private DocumentReferenceNode referenceTree;
-    private Guid referenceRootDocumentId = SeedData.RootDocumentId;
+    private readonly ConcurrentDictionary<Guid, CadReferenceSnapshot> referenceSnapshots = new();
     private PdmSystemSettings systemSettings = new(@"D:\PDM\Vault", @"D:\PDM\Release")
     {
         MaterialAttachmentRoot = @"D:\PDM\MaterialAttachments"
@@ -85,7 +84,15 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
             if (model is not null) documentRelations[drawing.Id] = new(model.Id, drawing.Id);
         }
 
-        referenceTree = SeedData.Tree(documents);
+        var referenceTree = SeedData.Tree(documents);
+        referenceSnapshots[project.Id] = new CadReferenceSnapshot(
+            SeedData.SnapshotId,
+            project.Id,
+            SeedData.RootDocumentId,
+            timeProvider.GetUtcNow(),
+            "seed",
+            referenceTree,
+            string.Empty);
         bomItems = SeedData.Bom().ToList();
         var package = SeedData.ReleasePackage(timeProvider.GetUtcNow());
         packages[package.Id] = package;
@@ -965,7 +972,10 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
     {
         if (!documents.ContainsKey(documentId)) throw new PdmNotFoundException("图档不存在。");
         var result = new List<DocumentWhereUsed>();
-        CollectWhereUsed(referenceTree, documentId, result);
+        foreach (var snapshot in referenceSnapshots.Values)
+        {
+            CollectWhereUsed(snapshot.Root, documentId, result);
+        }
         return Task.FromResult<IReadOnlyList<DocumentWhereUsed>>(result
             .OrderBy(item => item.ProjectCode)
             .ThenBy(item => item.ParentDrawingNumber)
@@ -1177,12 +1187,10 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
     }
 
     public Task<DocumentReferenceNode?> GetReferenceTreeAsync(Guid projectId, CancellationToken cancellationToken) =>
-        Task.FromResult<DocumentReferenceNode?>(projectId == SeedData.ProjectId ? referenceTree : null);
+        Task.FromResult<DocumentReferenceNode?>(referenceSnapshots.TryGetValue(projectId, out var snapshot) ? snapshot.Root : null);
 
     public Task<CadReferenceSnapshot?> GetLatestReferenceSnapshotAsync(Guid projectId, CancellationToken cancellationToken) =>
-        Task.FromResult<CadReferenceSnapshot?>(projectId == SeedData.ProjectId
-            ? new CadReferenceSnapshot(SeedData.SnapshotId, projectId, referenceRootDocumentId, DateTimeOffset.UtcNow, "seed", referenceTree, string.Empty)
-            : null);
+        Task.FromResult<CadReferenceSnapshot?>(referenceSnapshots.GetValueOrDefault(projectId));
 
     public Task<IReadOnlyList<BomItem>> GetBomAsync(Guid projectId, BomKind kind, CancellationToken cancellationToken) =>
         Task.FromResult<IReadOnlyList<BomItem>>(bomItems.Where(item => item.ProjectId == projectId && item.Kind == kind).OrderBy(item => item.Sequence).ToArray());
@@ -1616,7 +1624,7 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
 
             var updated = ClearEditLock(document with { Revision = nextRevision }, timeProvider.GetUtcNow());
             documents[documentId] = updated;
-            referenceTree = snapshot.Root;
+            referenceSnapshots[snapshot.ProjectId] = snapshot;
             return Task.FromResult(updated);
         }
     }
@@ -1660,8 +1668,7 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
             {
                 if (commit.IsProjectRoot)
                 {
-                    referenceTree = commit.ReferenceSnapshot.Root;
-                    referenceRootDocumentId = documentId;
+                    referenceSnapshots[document.ProjectId] = commit.ReferenceSnapshot with { RootDocumentId = documentId };
                 }
 
                 var unchanged = ClearEditLock(renamedDocument, timeProvider.GetUtcNow());
@@ -1677,8 +1684,7 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
             if (!string.IsNullOrWhiteSpace(sourceFileSha256)) documentSourceFingerprints[documentId] = sourceFileSha256;
             if (commit.IsProjectRoot)
             {
-                referenceTree = commit.ReferenceSnapshot.Root;
-                referenceRootDocumentId = documentId;
+                referenceSnapshots[document.ProjectId] = commit.ReferenceSnapshot with { RootDocumentId = documentId };
             }
 
             return Task.FromResult(new DocumentCheckInResult(updated, version, true));
@@ -1742,7 +1748,7 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
             if (!packages.TryGetValue(releasePackageId, out var package) || package.State != ReleasePackageState.Publishing)
                 throw new PdmConflictException("发布包尚未进入服务器转换状态。");
             var sources = new List<ReleasePreviewSource>();
-            foreach (var documentId in EnumerateDocumentIds(referenceTree).Distinct())
+            foreach (var documentId in EnumerateDocumentIds(ReferenceTree(package.ProjectId)).Distinct())
             {
                 if (!documents.TryGetValue(documentId, out var document)
                     || document.Kind is not (DocumentKind.Assembly or DocumentKind.Part or DocumentKind.Drawing)) continue;
@@ -1781,7 +1787,7 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
             if (!package.ApprovalTasks.Any(task => task.Id == approvalTaskId && task.Decision == ApprovalDecision.Approved))
                 throw new PdmConflictException("最终批准记录无效。");
             var released = new List<DocumentVersion>();
-            foreach (var documentId in EnumerateDocumentIds(referenceTree).Distinct())
+            foreach (var documentId in EnumerateDocumentIds(ReferenceTree(package.ProjectId)).Distinct())
             {
                 if (!documents.TryGetValue(documentId, out var document)) continue;
                 var source = versions.Values.Where(version => version.DocumentId == documentId).OrderByDescending(version => version.CreatedAt).FirstOrDefault();
@@ -1797,7 +1803,7 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
                 released.Add(version);
             }
             var now = timeProvider.GetUtcNow();
-            foreach (var documentId in EnumerateDocumentIds(referenceTree).Distinct())
+            foreach (var documentId in EnumerateDocumentIds(ReferenceTree(package.ProjectId)).Distinct())
             {
                 if (documents.TryGetValue(documentId, out var document) && document.State == DocumentLifecycleState.InReview)
                     documents[documentId] = document with { State = DocumentLifecycleState.Released, UpdatedAt = now };
@@ -1895,7 +1901,7 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
             var now = timeProvider.GetUtcNow();
             if (package.LocksDocuments)
             {
-                var documentIds = EnumerateDocumentIds(referenceTree).Distinct().ToArray();
+                var documentIds = EnumerateDocumentIds(ReferenceTree(package.ProjectId)).Distinct().ToArray();
                 var editing = documentIds.Select(id => documents.GetValueOrDefault(id)).FirstOrDefault(document => document?.CheckedOutBy is not null);
                 if (editing is not null) throw new PdmConflictException($"图档{editing.DrawingNumber}正在由{editing.CheckedOutBy}编辑，不能提交审批。");
                 foreach (var documentId in documentIds)
@@ -1929,7 +1935,7 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
             var now = timeProvider.GetUtcNow();
             if (package.LocksDocuments)
             {
-                foreach (var documentId in EnumerateDocumentIds(referenceTree).Distinct())
+                foreach (var documentId in EnumerateDocumentIds(ReferenceTree(package.ProjectId)).Distinct())
                 {
                     if (documents.TryGetValue(documentId, out var document) && document.State == DocumentLifecycleState.InReview)
                         documents[documentId] = document with { State = DocumentLifecycleState.Work, UpdatedAt = now };
@@ -1992,7 +1998,7 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
                 var now = timeProvider.GetUtcNow();
                 if (package.LocksDocuments)
                 {
-                    foreach (var documentId in EnumerateDocumentIds(referenceTree).Distinct())
+                    foreach (var documentId in EnumerateDocumentIds(ReferenceTree(package.ProjectId)).Distinct())
                     {
                         if (documents.TryGetValue(documentId, out var document) && document.State == DocumentLifecycleState.InReview)
                             documents[documentId] = document with { State = DocumentLifecycleState.Work, UpdatedAt = now };
@@ -2392,8 +2398,13 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
         return statuses.Count == 0 ? "正常" : string.Join("、", statuses);
     }
 
+    private DocumentReferenceNode ReferenceTree(Guid projectId) =>
+        referenceSnapshots.TryGetValue(projectId, out var snapshot)
+            ? snapshot.Root
+            : throw new PdmNotFoundException("项目尚无已存档的引用树快照。");
+
     private string? RootDocumentCheckedOutBy(Guid projectId) =>
-        projectId == SeedData.ProjectId && documents.TryGetValue(referenceRootDocumentId, out var rootDocument)
+        referenceSnapshots.TryGetValue(projectId, out var snapshot) && documents.TryGetValue(snapshot.RootDocumentId, out var rootDocument)
             ? rootDocument.CheckedOutBy
             : null;
 

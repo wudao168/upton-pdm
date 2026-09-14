@@ -54,6 +54,27 @@ describe('CRM-aligned personal settings', () => {
     wrapper.unmount()
   })
 
+  it('shows every assigned role in personal settings', async () => {
+    const wrapper = mount(AppHeader, {
+      attachTo: document.body,
+      props: {
+        online: true,
+        userName: '多角色用户',
+        role: 'Engineer',
+        roles: ['Engineer', 'ProjectManager', 'developer', 'CustomQualityRole'],
+      },
+      global: { plugins: [ElementPlus] },
+    })
+
+    await wrapper.get('.pdm-user-profile-trigger').trigger('click')
+    await flushPromises()
+    const roleField = Array.from(document.body.querySelectorAll('.el-form-item')).find(field => field.querySelector('label')?.textContent === '角色')
+
+    expect(roleField?.querySelector('input')?.value).toBe('机械工程师、项目经理、开发者、CustomQualityRole')
+    expect(roleField?.querySelector('input')?.disabled).toBe(true)
+    wrapper.unmount()
+  })
+
   it('shows the same profile and password functions when clicking the user name', async () => {
     const wrapper = mount(AppHeader, {
       attachTo: document.body,

@@ -12,6 +12,7 @@ const props = withDefaults(defineProps<{
   userName?: string
   username?: string
   role?: string
+  roles?: string[]
   companyName?: string
   activeCompanyId?: string
   accessibleCompanies?: Array<{ id: string; name: string; code: string }>
@@ -25,6 +26,7 @@ const props = withDefaults(defineProps<{
   userName: '',
   username: '',
   role: '',
+  roles: () => [],
   companyName: '昆山阿普顿自动化系统有限公司',
   activeCompanyId: '',
   accessibleCompanies: () => [],
@@ -70,7 +72,11 @@ const roleNames: Record<string, string> = {
   platform_admin: '平台管理员',
   developer: '开发者',
 }
-const roleName = computed(() => roleNames[props.role] || (props.role ? '自定义角色' : '未分配角色'))
+const roleName = computed(() => {
+  const assignedRoles = props.roles.length ? props.roles : (props.role ? [props.role] : [])
+  const labels = [...new Set(assignedRoles)].map(role => roleNames[role] || role)
+  return labels.length ? labels.join('、') : '未分配角色'
+})
 
 const headerDateTime = computed(() => {
   const value = headerNow.value

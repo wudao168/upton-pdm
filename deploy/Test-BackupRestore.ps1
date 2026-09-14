@@ -54,6 +54,16 @@ $verification = $verificationJson | ConvertFrom-Json
 $restoredCounts = $verification.tableCounts
 foreach ($property in $manifest.databaseCounts.PSObject.Properties) {
     $actual = $restoredCounts.PSObject.Properties[$property.Name].Value
+    if ($property.Name -eq 'audit_entry' -and $null -ne $manifest.databaseCountBounds.audit_entry) {
+        $before = [long]$manifest.databaseCountBounds.audit_entry.before
+        $after = [long]$manifest.databaseCountBounds.audit_entry.after
+        $minimum = [Math]::Min($before, $after)
+        $maximum = [Math]::Max($before, $after)
+        if ([long]$actual -lt $minimum -or [long]$actual -gt $maximum) {
+            throw "Restored audit entry count is outside the backup window: $actual (expected $minimum..$maximum)"
+        }
+        continue
+    }
     if ([long]$actual -ne [long]$property.Value) { throw "Restored table count mismatch: $($property.Name)" }
 }
 if (-not $verification.expectedMigrationApplied -or $verification.releaseColumns -ne 3) { throw 'The restored database is missing phase-one schema.' }

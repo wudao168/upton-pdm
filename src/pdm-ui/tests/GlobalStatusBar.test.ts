@@ -113,4 +113,26 @@ describe('global operation status', () => {
     expect(toast).toHaveBeenCalledWith('登录失败')
     expect(globalStatus.value).toBeUndefined()
   })
+
+  it('shows operation feedback inside the topmost open dialog instead of the page header', async () => {
+    const wrapper = header()
+    const dialog = document.createElement('section')
+    dialog.className = 'el-dialog'
+    dialog.innerHTML = '<header class="el-dialog__header">新建部门</header><div class="el-dialog__body">表单内容</div>'
+    const overlay = document.createElement('div')
+    overlay.className = 'el-overlay'
+    overlay.append(dialog)
+    document.body.append(overlay)
+
+    const result = ElMessage.warning('请完整填写组织资料')
+    await flushPromises()
+
+    const status = dialog.querySelector('.pdm-dialog-status')
+    expect(status?.textContent).toContain('提醒请完整填写组织资料')
+    expect(status?.nextElementSibling).toBe(dialog.querySelector('.el-dialog__body'))
+    expect(wrapper.find('.pdm-global-status.is-idle').exists()).toBe(true)
+    expect(globalStatus.value).toBeUndefined()
+    result.close()
+    expect(dialog.querySelector('.pdm-dialog-status')).toBeNull()
+  })
 })

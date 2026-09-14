@@ -225,12 +225,12 @@ try {
         throw 'Solution restore failed.'
     }
     if (-not $ServerOnly) {
-        & $dotnetPath build Pdm.slnx --configuration Release --no-restore --nologo
+        & $dotnetPath build Pdm.slnx --configuration Release --no-restore --nologo --disable-build-servers -m:1
         if ($LASTEXITCODE -ne 0) {
             throw 'Release build failed.'
         }
 
-        & $dotnetPath test Pdm.slnx --configuration Release --no-build --no-restore --nologo
+        & $dotnetPath test Pdm.slnx --configuration Release --no-build --no-restore --nologo --disable-build-servers
         if ($LASTEXITCODE -ne 0) {
             throw 'Release tests failed.'
         }

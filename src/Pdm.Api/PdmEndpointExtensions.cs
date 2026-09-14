@@ -776,7 +776,7 @@ public static class PdmEndpointExtensions
             var (actor, role) = CurrentUser(context.User);
             if (!await repository.HasProjectContentReadAccessAsync(projectId, actor, role, cancellationToken)) return Results.Forbid();
             var tree = await repository.GetReferenceTreeAsync(projectId, cancellationToken);
-            return tree is null ? Results.NotFound() : Results.Ok(tree);
+            return tree is null ? Results.NoContent() : Results.Ok(tree);
         });
 
         api.MapGet("/projects/{projectId:guid}/boms/{kind}", async (Guid projectId, string kind, HttpContext context, PdmWorkflowService workflow, CancellationToken cancellationToken) =>

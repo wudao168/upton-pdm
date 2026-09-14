@@ -21,9 +21,11 @@ public sealed class CompanySessionService(IPdmRepository repository)
             .ToArray();
         var primary = organizations.SingleOrDefault(item => item.Id == primaryCompanyId)
             ?? throw new UnauthorizedAccessException("所属公司已停用。");
-        var platformAdministrator = account.HasRole("platform_admin") || account.HasRole("developer");
+        var globalAdministrator = string.Equals(account.Username, "admin", StringComparison.OrdinalIgnoreCase)
+            || account.HasRole("platform_admin")
+            || account.HasRole("developer");
         var accessibleIds = new HashSet<Guid> { primaryCompanyId };
-        if (platformAdministrator)
+        if (globalAdministrator)
         {
             foreach (var organization in organizations) accessibleIds.Add(organization.Id);
         }
@@ -38,11 +40,11 @@ public sealed class CompanySessionService(IPdmRepository repository)
                 ? parsed
                 : throw new UnauthorizedAccessException("当前公司无效。");
         if (activeCompanyId != primaryCompanyId
-            && !platformAdministrator
+            && !globalAdministrator
             && (!scope.CrossCompanyView || !scope.AccessibleCompanyIds.Contains(activeCompanyId)))
             throw new UnauthorizedAccessException("无权访问所选公司。");
         var active = organizations.SingleOrDefault(item => item.Id == activeCompanyId)
             ?? throw new UnauthorizedAccessException("当前公司不可用。");
-        return new ResolvedCompanySession(primaryCompanyId, activeCompanyId, active.Name, scope.CrossCompanyView, accessibleCompanies);
+        return new ResolvedCompanySession(primaryCompanyId, activeCompanyId, active.Name, globalAdministrator || scope.CrossCompanyView, accessibleCompanies);
     }
 }

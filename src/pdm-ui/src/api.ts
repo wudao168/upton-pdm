@@ -1773,7 +1773,7 @@ export async function loadProjectDocumentWorkspace(projectId: string, token: str
     withApiContext('项目图档', requestJson<ApiDocument[]>(`/api/projects/${projectId}/documents`, {}, token)),
     withApiContext('文件夹图档', requestJson<ApiDocument[]>(`/api/projects/${projectId}/folder-documents`, {}, token)),
     withApiContext('图档关系', requestJson<DocumentModelDrawingRelation[]>(`/api/projects/${projectId}/document-relations`, {}, token)),
-    withApiContext('引用结构', requestJson<ApiReferenceNode>(`/api/projects/${projectId}/reference-tree`, {}, token).catch(error => {
+    withApiContext('引用结构', requestJson<ApiReferenceNode | null>(`/api/projects/${projectId}/reference-tree`, {}, token).catch(error => {
       if (error instanceof PdmApiError && error.status === 404) return null
       throw error
     })),

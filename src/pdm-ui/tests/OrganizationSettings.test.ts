@@ -98,6 +98,10 @@ describe('OrganizationSettings', () => {
     const dialog = document.body.querySelector('.el-dialog')!
     expect(dialog.textContent).not.toContain('排序')
     expect(dialog.textContent).toContain('保存组织')
+    Array.from(dialog.querySelectorAll<HTMLButtonElement>('button')).find(button => button.textContent?.trim() === '保存组织')!.click()
+    await flushPromises()
+    expect(dialog.querySelector('.pdm-dialog-status')?.textContent).toContain('提醒请完整填写组织资料')
+    expect(document.body.querySelector(':scope > .el-message')).toBeNull()
     const inputs = Array.from(dialog.querySelectorAll<HTMLInputElement>('input:not([disabled]):not([type="checkbox"])'))
     inputs[0].value = 'KS-NEW'; inputs[0].dispatchEvent(new Event('input'))
     inputs[1].value = '新部门'; inputs[1].dispatchEvent(new Event('input'))

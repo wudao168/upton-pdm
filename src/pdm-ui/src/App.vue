@@ -792,6 +792,7 @@ async function openWhereUsedParent(projectId: string, parentDocumentId: string) 
           :user-name="workspace.currentUser.value"
           :username="workspace.currentUsername.value"
           :role="workspace.currentRole.value"
+          :roles="workspace.currentRoles.value"
           :company-name="companyName"
           :active-company-id="workspace.activeCompanyId.value"
           :accessible-companies="workspace.accessibleCompanies.value"

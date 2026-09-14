@@ -35,6 +35,8 @@ public sealed class RolePermissionCatalogTests
         Assert.Contains(RolePermissionCatalog.Roles, role => role.RoleCode == "developer" && role.Name == "开发者" && role.IsSystemAdministrator);
 
         var mechanical = RolePermissionCatalog.InitialPermissions(UserRole.Engineer.ToString(), UserRole.Engineer);
+        Assert.Contains(PermissionCodes.DrawingReviewSubmit, mechanical);
+        Assert.Contains(PermissionCodes.DrawingReviewAnnotate, mechanical);
         Assert.Contains(PermissionCodes.DocumentEdit, mechanical);
         Assert.Contains(PermissionCodes.BomEdit, mechanical);
         Assert.Contains(PermissionCodes.MaterialView, mechanical);

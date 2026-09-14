@@ -71,4 +71,37 @@ public sealed class CompanySessionServiceTests
         Assert.Contains(session.AccessibleCompanies, company => company.Id == KunshanCompanyId);
         Assert.Contains(session.AccessibleCompanies, company => company.Id == GuangzhouCompanyId);
     }
+
+    [Fact]
+    public async Task CanonicalAdmin_CanSwitchToEveryEnabledCompanyWithoutManualCompanyGrants()
+    {
+        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var account = new UserAccount(Guid.NewGuid(), "admin", "系统管理员", "unused", UserRole.Administrator, true,
+            RoleCode: "Administrator", CompanyId: KunshanCompanyId);
+        await repository.CreateUserAsync(account, default);
+        var service = new CompanySessionService(repository);
+
+        var session = await service.ResolveAsync(account, GuangzhouCompanyId.ToString(), default);
+
+        Assert.True(session.CrossCompanyView);
+        Assert.Equal(GuangzhouCompanyId, session.ActiveCompanyId);
+        Assert.Contains(session.AccessibleCompanies, company => company.Id == KunshanCompanyId);
+        Assert.Contains(session.AccessibleCompanies, company => company.Id == GuangzhouCompanyId);
+    }
+
+    [Fact]
+    public async Task OtherAdministrator_RemainsLimitedToItsConfiguredCompany()
+    {
+        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var account = new UserAccount(Guid.NewGuid(), "company-admin", "公司管理员", "unused", UserRole.Administrator, true,
+            RoleCode: "Administrator", CompanyId: KunshanCompanyId);
+        await repository.CreateUserAsync(account, default);
+        var service = new CompanySessionService(repository);
+
+        var session = await service.ResolveAsync(account, null, default);
+
+        Assert.False(session.CrossCompanyView);
+        Assert.Single(session.AccessibleCompanies);
+        await Assert.ThrowsAsync<UnauthorizedAccessException>(() => service.ResolveAsync(account, GuangzhouCompanyId.ToString(), default));
+    }
 }

@@ -30,6 +30,17 @@ if (-not (Test-Path -LiteralPath $mysqlDump)) {
 
 New-Item -ItemType Directory -Path $backupRoot -Force | Out-Null
 try {
+$secretPath = Join-Path $localRoot 'secrets\pdm-secrets.json'
+$dotnet = Join-Path $projectRoot '.dotnet\dotnet.exe'
+$acceptanceDll = Join-Path $projectRoot 'tools\Pdm.Acceptance\bin\Debug\net10.0\Pdm.Acceptance.dll'
+$secrets = Get-Content -LiteralPath $secretPath -Raw -Encoding UTF8 | ConvertFrom-Json
+$env:PDM_DB_PASSWORD = $secrets.databasePassword
+$env:PDM_ACCEPTANCE_CONNECTION = 'Server=127.0.0.1;Port=3308;Database=pdm;UserID=pdm_app;GuidFormat=Binary16;SslMode=None;AllowUserVariables=true;ConnectionTimeout=5;DefaultCommandTimeout=30'
+Remove-Item Env:PDM_ACCEPTANCE_SEED -ErrorAction SilentlyContinue
+$preDumpVerificationJson = (& $dotnet $acceptanceDll | Out-String)
+if ($LASTEXITCODE -ne 0) { throw 'PLM pre-backup database verification failed.' }
+$preDumpVerification = $preDumpVerificationJson | ConvertFrom-Json
+
 $databasePath = Join-Path $backupRoot 'pdm.sql'
 & $mysqlDump "--defaults-extra-file=$rootClientPath" --single-transaction --routines --triggers --hex-blob "--result-file=$databasePath" pdm
 if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $databasePath)) { throw 'PLM database backup failed.' }
@@ -46,13 +57,6 @@ foreach ($name in @('vault', 'release', 'program-templates')) {
     }
 }
 
-$secretPath = Join-Path $localRoot 'secrets\pdm-secrets.json'
-$dotnet = Join-Path $projectRoot '.dotnet\dotnet.exe'
-$acceptanceDll = Join-Path $projectRoot 'tools\Pdm.Acceptance\bin\Debug\net10.0\Pdm.Acceptance.dll'
-$secrets = Get-Content -LiteralPath $secretPath -Raw -Encoding UTF8 | ConvertFrom-Json
-$env:PDM_DB_PASSWORD = $secrets.databasePassword
-$env:PDM_ACCEPTANCE_CONNECTION = 'Server=127.0.0.1;Port=3308;Database=pdm;UserID=pdm_app;GuidFormat=Binary16;SslMode=None;AllowUserVariables=true;ConnectionTimeout=5;DefaultCommandTimeout=30'
-Remove-Item Env:PDM_ACCEPTANCE_SEED -ErrorAction SilentlyContinue
 $verificationJson = (& $dotnet $acceptanceDll | Out-String)
 if ($LASTEXITCODE -ne 0) { throw 'PLM database verification failed.' }
 $verification = $verificationJson | ConvertFrom-Json
@@ -73,6 +77,12 @@ $manifest = [ordered]@{
     sourceDatabase = 'pdm'
     databaseDump = [ordered]@{ relativePath = 'pdm.sql'; length = (Get-Item -LiteralPath $databasePath).Length; sha256 = (Get-FileHash -LiteralPath $databasePath -Algorithm SHA256).Hash }
     databaseCounts = $databaseCounts
+    databaseCountBounds = [ordered]@{
+        audit_entry = [ordered]@{
+            before = [long]$preDumpVerification.tableCounts.audit_entry
+            after = [long]$databaseCounts.audit_entry
+        }
+    }
     files = $files
 }
 $manifest | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $backupRoot 'manifest.json') -Encoding UTF8

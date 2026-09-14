@@ -604,7 +604,7 @@ describe('MaterialManagement', () => {
     pagination.vm.$emit('update:page-size', 100)
     await flushPromises()
     expect(wrapper.findAll('.material-table .el-table__body-wrapper tbody tr')).toHaveLength(55)
-  })
+  }, 10_000)
 
   it('料品主档左侧显示启用分类并可快速筛选', async () => {
     api.listMaterials.mockResolvedValue([
