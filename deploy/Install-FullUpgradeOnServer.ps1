@@ -135,6 +135,12 @@ try {
     if ($bootstrap.ConfigurationVersion -ne $manifest.version) {
         throw "服务器客户端升级版本错误：$($bootstrap.ConfigurationVersion)"
     }
+    if ($bootstrap.Desktop.Version -ne $manifest.desktopVersion) {
+        throw "服务器桌面客户端版本错误：$($bootstrap.Desktop.Version)"
+    }
+    if ($bootstrap.SolidWorksAddin.Version -ne $manifest.solidWorksAddinVersion) {
+        throw "服务器 SolidWorks 插件版本错误：$($bootstrap.SolidWorksAddin.Version)"
+    }
     $web = Invoke-WebRequest 'http://127.0.0.1:5173/' -UseBasicParsing -TimeoutSec 5
     if ($web.StatusCode -ne 200) { throw "网页健康检查失败：HTTP $($web.StatusCode)" }
 
@@ -150,6 +156,8 @@ try {
     [ordered]@{
         deployedAt = [DateTimeOffset]::Now.ToString('O')
         version = $manifest.version
+        desktopVersion = $bootstrap.Desktop.Version
+        solidWorksAddinVersion = $bootstrap.SolidWorksAddin.Version
         scope = 'web-api-database-client-solidworks-addin-preview-worker'
         backupRoot = $backupRoot
         databaseBackup = $databaseBackup
@@ -192,5 +200,6 @@ finally {
 }
 
 Write-Host "UPLM 全量升级完成：$($manifest.version)" -ForegroundColor Green
+Write-Host "桌面客户端版本：$($manifest.desktopVersion)；SolidWorks 插件版本：$($manifest.solidWorksAddinVersion)"
 Write-Host "API 与数据库备份：$backupRoot"
 Write-Host '现有客户端与 SolidWorks 插件将在程序正常退出后通过服务器发布文件自动升级。'

@@ -5,12 +5,19 @@ $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
 $artifacts = Join-Path $root '.artifacts'
 $clientSource = Join-Path $artifacts "UPLM-Client-Setup-$Version.exe"
+$clientManifestSource = Join-Path $artifacts "uplm-client-test-$Version\manifest.json"
 $releaseSource = Join-Path $artifacts "uplm-client-test-$Version\server-publish"
 $webUiSource = Join-Path $artifacts "uplm-client-test-$Version\payload\desktop\ui"
 $stage = Join-Path $artifacts "uplm-client-plugin-upgrade-$Version"
 $outputZip = Join-Path $artifacts "UPLM-Client-Plugin-Upgrade-$Version.zip"
-foreach ($required in @($clientSource, $releaseSource, (Join-Path $webUiSource 'index.html'), (Join-Path $webUiSource 'assets'))) {
+foreach ($required in @($clientSource, $clientManifestSource, $releaseSource, (Join-Path $webUiSource 'index.html'), (Join-Path $webUiSource 'assets'))) {
     if (-not (Test-Path -LiteralPath $required)) { throw "缺少统一升级包输入：$required" }
+}
+$clientManifest = Get-Content -LiteralPath $clientManifestSource -Raw -Encoding UTF8 | ConvertFrom-Json
+$desktopVersion = [string]$clientManifest.desktopVersion
+$solidWorksAddinVersion = [string]$clientManifest.solidWorksAddinVersion
+if ([string]::IsNullOrWhiteSpace($desktopVersion) -or [string]::IsNullOrWhiteSpace($solidWorksAddinVersion)) {
+    throw '客户端构建清单缺少独立组件版本。'
 }
 
 if (Test-Path -LiteralPath $stage) { Remove-Item -LiteralPath $stage -Recurse -Force }
@@ -32,7 +39,9 @@ foreach ($script in @(
 
 $readme = @"
 UPLM 客户端和 SolidWorks 插件统一升级包
-版本：$Version
+服务器发布版本：$Version
+桌面客户端版本：$desktopVersion
+SolidWorks 插件版本：$solidWorksAddinVersion
 
 范围：
 1. 发布桌面客户端自动升级包。
@@ -61,6 +70,8 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File '.\Server\Install-Client
 $files = Get-ChildItem -LiteralPath $stage -Recurse -File | Where-Object { $_.Name -ne 'manifest.json' }
 $manifest = [ordered]@{
     version = $Version
+    desktopVersion = $desktopVersion
+    solidWorksAddinVersion = $solidWorksAddinVersion
     createdAt = [DateTimeOffset]::Now.ToString('O')
     scope = 'desktop-client-and-solidworks-addin'
     serverBaseUrl = 'http://10.7.7.62:5173/'

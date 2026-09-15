@@ -1,4 +1,4 @@
-function Get-UplmReleaseNote {
+﻿function Get-UplmReleaseNote {
     param(
         [string]$Version,
         [string]$ReleaseNote,

@@ -188,6 +188,62 @@ test('wear-part BOM aggregates categories and stays outside release', async ({ p
   expect(errors).toEqual([])
 })
 
+test('related materials use a scoped right drawer for electrical BOM', async ({ page }, testInfo) => {
+  await page.route(`**/api/projects/${projectId}/boms/Electrical`, route => route.fulfill({ json: [
+    { id: 'bom-electrical-1', kind: 'Electrical', sequence: 1, drawingNumber: 'REAL-EL-001', name: '真实传感器', quantity: 1, unit: '件', material: null, specification: 'PNP', revision: 'A', isComplete: false },
+    { id: 'bom-electrical-unconfigured', kind: 'Electrical', sequence: 2, drawingNumber: 'REAL-EL-UNCONFIGURED', name: '无关联配置电气料', quantity: 1, unit: '件', material: null, specification: 'NPN', revision: 'A', isComplete: false },
+  ] }))
+  await page.route(`**/api/material-relations/projects/${projectId}/completeness`, route => route.fulfill({ json: {
+    projectId, isComplete: false, mainMaterialCount: 2, incompleteGroupCount: 2,
+    mainMaterials: [
+      { mainBomItemId: 'bom-standard-1', mainMaterialCode: 'REAL-STD-001', mainMaterialName: '标准紧固件', mainQuantity: 4, templateId: 'standard-template', revisionId: 'standard-revision', revisionVersion: 1, isComplete: false, groups: [{ groupId: 'standard-group', groupName: '标准配件', isRequired: true, selectionMode: 'Single', maxSelection: 1, isComplete: false, status: '待核对', expectedQuantity: 0, actualQuantity: 0, selectedOptionIds: [], reviewDecision: null, options: [{ id: 'standard-option', materialId: 'standard-accessory', materialCode: 'STD-ACC-001', materialName: '标准附件', materialKind: 'Standard', unitCode: '001', quantityMode: 'PerMainQuantity', quantityPerSet: 1, isDefault: true, sortOrder: 1 }] }] },
+      { mainBomItemId: 'bom-electrical-1', mainMaterialCode: 'REAL-EL-001', mainMaterialName: '真实传感器', mainQuantity: 1, templateId: 'electrical-template', revisionId: 'electrical-revision', revisionVersion: 2, isComplete: false, groups: [{ groupId: 'electrical-group', groupName: '传感器附件', isRequired: true, selectionMode: 'Single', maxSelection: 1, isComplete: false, status: '待核对', expectedQuantity: 0, actualQuantity: 0, selectedOptionIds: [], reviewDecision: null, options: [{ id: 'electrical-option', materialId: 'electrical-accessory', materialCode: 'EL-ACC-001', materialName: '电气附件', materialKind: 'Electrical', unitCode: '001', quantityMode: 'PerMainQuantity', quantityPerSet: 1, isDefault: true, sortOrder: 1 }] }] },
+    ],
+  } }))
+  const errors: string[] = []
+  page.on('pageerror', error => errors.push(error.message))
+  page.on('console', message => { if (message.type() === 'error') errors.push(message.text()) })
+  await page.addInitScript(() => { window.setInterval = (() => 0) as unknown as typeof window.setInterval })
+  await page.setViewportSize({ width: 1925, height: 1114 })
+  await page.goto('/')
+  const login = page.getByLabel('登录PLM')
+  await login.getByRole('textbox', { name: '账号' }).fill('engineer')
+  await login.getByRole('textbox', { name: '密码' }).fill('correct-password')
+  await login.getByRole('button', { name: '登录', exact: true }).click()
+  await page.getByRole('button', { name: '项目列表', exact: true }).click()
+  await page.getByRole('button', { name: '进入项目' }).click()
+  await page.getByRole('button', { name: 'BOM', exact: true }).click()
+  await page.getByRole('tab', { name: /电气BOM/ }).click()
+  await page.getByRole('button', { name: '关联物料', exact: true }).click()
+
+  const drawer = page.getByRole('dialog', { name: 'BOM 关联物料核对' })
+  await expect(drawer).toBeVisible()
+  const mainPane = drawer.getByLabel('主物料明细')
+  const relationPane = drawer.getByLabel('关联物料明细')
+  await expect(mainPane).toContainText('REAL-EL-001')
+  await expect(mainPane).not.toContainText('REAL-EL-UNCONFIGURED')
+  await expect(mainPane).not.toContainText('REAL-STD-001')
+  await expect(mainPane).toContainText('共 1 条')
+  await expect(relationPane).toContainText('EL-ACC-001')
+  await expect.poll(async () => {
+    const box = await drawer.boundingBox()
+    return (box?.x ?? 0) + (box?.width ?? 0)
+  }).toBeLessThanOrEqual(page.viewportSize()!.width + 1)
+  const [mainBox, relationBox] = await Promise.all([mainPane.boundingBox(), relationPane.boundingBox()])
+  const drawerBox = await drawer.boundingBox()
+  expect(mainBox).not.toBeNull()
+  expect(relationBox).not.toBeNull()
+  expect(drawerBox).not.toBeNull()
+  expect(Math.abs((mainBox?.width ?? 0) - (relationBox?.width ?? 0))).toBeLessThanOrEqual(2)
+  expect((drawerBox?.x ?? 0) + (drawerBox?.width ?? 0)).toBeLessThanOrEqual(page.viewportSize()!.width + 1)
+  expect(await mainPane.locator('tbody td').first().evaluate(element => getComputedStyle(element).fontSize)).toBe('12px')
+  expect(await relationPane.locator('tbody td').first().evaluate(element => getComputedStyle(element).fontSize)).toBe('12px')
+  await expect(drawer.getByRole('button', { name: '保存核对结果' })).toBeInViewport()
+  await expect(page.locator('vite-error-overlay')).toHaveCount(0)
+  await page.screenshot({ path: testInfo.outputPath('electrical-related-material-drawer.png') })
+  expect(errors).toEqual([])
+})
+
 test('project settings keeps the confirmed project-copy scope', async ({ page }, testInfo) => {
   const targetId = '33333333-3333-3333-3333-333333333333'
   const sourceId = '44444444-4444-4444-4444-444444444444'

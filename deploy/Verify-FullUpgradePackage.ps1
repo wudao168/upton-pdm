@@ -18,6 +18,10 @@ if ($manifest.format -ne 'upton-pdm-full-upgrade-v1') {
 if ([string]::IsNullOrWhiteSpace([string]$manifest.version)) {
     throw '升级包版本为空。'
 }
+if ([string]::IsNullOrWhiteSpace([string]$manifest.desktopVersion) -or
+    [string]::IsNullOrWhiteSpace([string]$manifest.solidWorksAddinVersion)) {
+    throw '升级包缺少独立的桌面客户端或 SolidWorks 插件版本。'
+}
 
 foreach ($entry in @($manifest.files)) {
     $relativePath = ([string]$entry.path).Replace('/', '\')
@@ -59,6 +63,12 @@ foreach ($relativePath in $required) {
 $bootstrap = Get-Content -LiteralPath (Join-Path $packageRootFull 'Server\app\wwwroot\client-bootstrap.json') -Raw -Encoding UTF8 | ConvertFrom-Json
 if ($bootstrap.ConfigurationVersion -ne $manifest.version) {
     throw "客户端自动升级版本不匹配：$($bootstrap.ConfigurationVersion)"
+}
+if ($bootstrap.Desktop.Version -ne $manifest.desktopVersion) {
+    throw "桌面客户端版本不匹配：$($bootstrap.Desktop.Version)"
+}
+if ($bootstrap.SolidWorksAddin.Version -ne $manifest.solidWorksAddinVersion) {
+    throw "SolidWorks 插件版本不匹配：$($bootstrap.SolidWorksAddin.Version)"
 }
 if (@($manifest.databaseMigrations).Count -eq 0) {
     throw '完整升级包没有数据库迁移清单。'

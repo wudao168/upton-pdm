@@ -2,6 +2,8 @@
 param(
     [string]$ServerBaseUrl = 'http://10.7.7.62:5173',
     [string]$Version = ([DateTimeOffset]::Now.ToString('yyyy.MM.dd.HHmm')),
+    [string]$DesktopVersion = '',
+    [string]$SolidWorksAddinVersion = '',
     [string]$ReleaseNote = ''
 )
 
@@ -9,6 +11,11 @@ $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
 . (Join-Path $PSScriptRoot 'SystemReleaseHistory.ps1')
 $ReleaseNote = Get-UplmReleaseNote -Version $Version -ReleaseNote $ReleaseNote -Fallback '本次发布未填写版本说明。'
+if ([string]::IsNullOrWhiteSpace($DesktopVersion) -or [string]::IsNullOrWhiteSpace($SolidWorksAddinVersion)) {
+    throw '必须分别指定 DesktopVersion 和 SolidWorksAddinVersion；未变化的组件请填写服务器当前组件版本。'
+}
+$DesktopVersion = $DesktopVersion.Trim()
+$SolidWorksAddinVersion = $SolidWorksAddinVersion.Trim()
 $releasedAt = Get-UplmReleasedAt -Version $Version
 $dotnet = Join-Path $root '.dotnet\dotnet.exe'
 $prerequisiteSource = Join-Path $root '.artifacts\client-prerequisites'
@@ -60,19 +67,19 @@ catch { Write-Warning "Server release history could not be read; the retained ba
 $releaseHistory = Get-UplmReleaseHistory `
     -CurrentVersion $Version `
     -CurrentReleaseNote $ReleaseNote `
-    -CurrentDesktopVersion $Version `
-    -CurrentSolidWorksAddinVersion $Version `
+    -CurrentDesktopVersion $DesktopVersion `
+    -CurrentSolidWorksAddinVersion $SolidWorksAddinVersion `
     -SourceBootstraps @($existingBootstrap) `
     -BaselinePath (Join-Path $PSScriptRoot 'system-release-history.json')
 $locatorJson = [ordered]@{ BootstrapUrl = "$serverBase/client-bootstrap.json" } | ConvertTo-Json
 $encoding = New-Object Text.UTF8Encoding($false)
-foreach ($componentOutput in @($desktopOutput, $addinOutput)) {
-    [IO.File]::WriteAllText((Join-Path $componentOutput 'uplm-bootstrap.json'), $locatorJson, $encoding)
-    [IO.File]::WriteAllText((Join-Path $componentOutput '.uplm-version'), $Version, $encoding)
-}
+[IO.File]::WriteAllText((Join-Path $desktopOutput 'uplm-bootstrap.json'), $locatorJson, $encoding)
+[IO.File]::WriteAllText((Join-Path $desktopOutput '.uplm-version'), $DesktopVersion, $encoding)
+[IO.File]::WriteAllText((Join-Path $addinOutput 'uplm-bootstrap.json'), $locatorJson, $encoding)
+[IO.File]::WriteAllText((Join-Path $addinOutput '.uplm-version'), $SolidWorksAddinVersion, $encoding)
 
-$desktopArchive = Join-Path $updates "uplm-desktop-$Version.zip"
-$addinArchive = Join-Path $updates "uplm-solidworks-addin-$Version.zip"
+$desktopArchive = Join-Path $updates "uplm-desktop-$DesktopVersion.zip"
+$addinArchive = Join-Path $updates "uplm-solidworks-addin-$SolidWorksAddinVersion.zip"
 Compress-Archive -Path (Join-Path $desktopOutput '*') -DestinationPath $desktopArchive -CompressionLevel Optimal -Force
 Compress-Archive -Path (Join-Path $addinOutput '*') -DestinationPath $addinArchive -CompressionLevel Optimal -Force
 $bootstrap = [ordered]@{
@@ -85,12 +92,12 @@ $bootstrap = [ordered]@{
     UiBaseUrl = "$serverBase/"
     PollSeconds = 30
     Desktop = [ordered]@{
-        Version = $Version
+        Version = $DesktopVersion
         PackageUrl = "/updates/$([IO.Path]::GetFileName($desktopArchive))"
         Sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $desktopArchive).Hash
     }
     SolidWorksAddin = [ordered]@{
-        Version = $Version
+        Version = $SolidWorksAddinVersion
         PackageUrl = "/updates/$([IO.Path]::GetFileName($addinArchive))"
         Sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $addinArchive).Hash
     }
@@ -107,6 +114,8 @@ foreach ($scriptName in @('Install-ClientTestPackage.ps1', 'Publish-ClientUpdate
 }
 $manifest = [ordered]@{
     version = $Version
+    desktopVersion = $DesktopVersion
+    solidWorksAddinVersion = $SolidWorksAddinVersion
     releaseNote = $ReleaseNote
     releaseHistoryCount = $releaseHistory.Count
     createdAt = [DateTimeOffset]::Now.ToString('O')

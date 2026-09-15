@@ -2,6 +2,8 @@
 param(
     [string]$Version = ([DateTimeOffset]::Now.ToString('yyyy.MM.dd.HHmm')),
     [string]$ServerBaseUrl = 'http://10.7.7.62:5173',
+    [string]$DesktopVersion = '',
+    [string]$SolidWorksAddinVersion = '',
     [string]$ReleaseNote = ''
 )
 
@@ -9,6 +11,11 @@ $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
 . (Join-Path $PSScriptRoot 'SystemReleaseHistory.ps1')
 $ReleaseNote = Get-UplmReleaseNote -Version $Version -ReleaseNote $ReleaseNote -Fallback '本次发布未填写版本说明。'
+if ([string]::IsNullOrWhiteSpace($DesktopVersion) -or [string]::IsNullOrWhiteSpace($SolidWorksAddinVersion)) {
+    throw '必须分别指定 DesktopVersion 和 SolidWorksAddinVersion；未变化的组件请填写服务器当前组件版本。'
+}
+$DesktopVersion = $DesktopVersion.Trim()
+$SolidWorksAddinVersion = $SolidWorksAddinVersion.Trim()
 $artifacts = Join-Path $root '.artifacts'
 $stage = Join-Path $artifacts "uplm-full-upgrade-$Version"
 $outputZip = Join-Path $artifacts "UPLM-Full-Upgrade-$Version-final.zip"
@@ -21,7 +28,7 @@ $clientInstaller = Join-Path $artifacts "UPLM-Client-Setup-$Version.exe"
 $dotnet = Join-Path $root '.dotnet\dotnet.exe'
 if (-not (Test-Path -LiteralPath $dotnet -PathType Leaf)) { throw "项目 .NET SDK 不存在：$dotnet" }
 
-& powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'New-ClientTestPackage.ps1') -ServerBaseUrl $ServerBaseUrl -Version $Version -ReleaseNote $ReleaseNote
+& powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'New-ClientTestPackage.ps1') -ServerBaseUrl $ServerBaseUrl -Version $Version -DesktopVersion $DesktopVersion -SolidWorksAddinVersion $SolidWorksAddinVersion -ReleaseNote $ReleaseNote
 if ($LASTEXITCODE -ne 0) { throw "客户端与插件升级包生成失败，退出码：$LASTEXITCODE" }
 & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'New-ClientSetupExe.ps1') -Version $Version
 if ($LASTEXITCODE -ne 0) { throw "客户端安装 EXE 生成失败，退出码：$LASTEXITCODE" }
@@ -80,7 +87,9 @@ foreach ($scriptName in @('Install-FullUpgradeOnServer.ps1','Verify-FullUpgradeP
 
 $readme = @"
 UPLM 全量升级部署包
-版本：$Version
+服务器版本：$Version
+桌面客户端版本：$DesktopVersion
+SolidWorks 插件版本：$SolidWorksAddinVersion
 版本说明：$ReleaseNote
 
 包含：Web、API、数据库增量迁移、Windows 客户端、SolidWorks 插件、服务器预览组件。
@@ -110,6 +119,8 @@ $files = Get-ChildItem -LiteralPath $stage -Recurse -File | Where-Object { $_.Na
 $manifest = [ordered]@{
     format = 'upton-pdm-full-upgrade-v1'
     version = $Version
+    desktopVersion = $DesktopVersion
+    solidWorksAddinVersion = $SolidWorksAddinVersion
     releaseNote = $ReleaseNote
     createdAt = [DateTimeOffset]::Now.ToString('O')
     serverBaseUrl = $ServerBaseUrl.TrimEnd('/')

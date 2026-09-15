@@ -26,7 +26,7 @@ config.global.stubs = {
   Teleport: true,
   ElDrawer: {
     props: ['modelValue'],
-    template: '<div v-if="modelValue"><slot /></div>',
+    template: '<div v-if="modelValue"><slot /><slot name="footer" /></div>',
   },
 }
 
@@ -2811,15 +2811,15 @@ describe('BomManager', () => {
     await reviewButton.trigger('click')
     await flushPromises()
 
-    const dialog = wrapper.get('.pdm-material-relation-dialog')
-    expect(dialog.text()).toContain('系统只提醒、不自动加入')
-    expect(dialog.text()).toContain('唯一推荐')
-    expect((dialog.get('input[type="radio"]').element as HTMLInputElement).checked).toBe(false)
-    await dialog.findAll('button').find(button => button.text() === '确认本次无需配套')!.trigger('click')
+    const drawer = wrapper.get('.pdm-material-relation-drawer')
+    expect(drawer.text()).toContain('系统只提醒、不自动加入')
+    expect(drawer.text()).toContain('唯一推荐')
+    expect((drawer.get('input[type="radio"]').element as HTMLInputElement).checked).toBe(false)
+    await drawer.findAll('button').find(button => button.text() === '确认本次无需配套')!.trigger('click')
     await flushPromises()
-    const updatedDialog = wrapper.get('.pdm-material-relation-dialog')
-    await updatedDialog.get('input[aria-label="MOTOR-1 伺服控制器 无需配套原因"]').setValue('仅补充主物料')
-    await updatedDialog.findAll('button').find(button => button.text() === '保存核对结果')!.trigger('click')
+    const updatedDrawer = wrapper.get('.pdm-material-relation-drawer')
+    await updatedDrawer.get('input[aria-label="MOTOR-1 伺服控制器 无需配套原因"]').setValue('仅补充主物料')
+    await updatedDrawer.findAll('button').find(button => button.text() === '保存核对结果')!.trigger('click')
     await flushPromises()
 
     expect(materialApi.applyMaterialRelations).toHaveBeenCalledWith('project', [{
@@ -2827,6 +2827,43 @@ describe('BomManager', () => {
     }], 'token')
     expect(reviewButton.text()).toBe('关联物料')
     expect(reviewButton.attributes('title')).toBe('已核对')
+  })
+
+  it('opens the related-material drawer for electrical BOM and scopes the lists and save payload to the current BOM', async () => {
+    const standard: BomItem = { id: 'standard-main', kind: 'Standard', sequence: 1, drawingNumber: 'STD-1', name: '标准主料', quantity: 1, unit: '001', revision: 'W1', complete: true }
+    const electrical: BomItem = { id: 'electrical-main', kind: 'Electrical', sequence: 1, drawingNumber: 'ELE-1', name: '电气主料', specification: 'E-100', quantity: 2, unit: '001', revision: 'W1', complete: true }
+    const unconfiguredElectrical: BomItem = { id: 'electrical-unconfigured', kind: 'Electrical', sequence: 2, drawingNumber: 'ELE-2', name: '无关联配置电气料', specification: 'E-200', quantity: 1, unit: '001', revision: 'W1', complete: true }
+    const relationResult: MaterialRelationCompleteness = {
+      projectId: 'project', isComplete: false, mainMaterialCount: 2, incompleteGroupCount: 2,
+      mainMaterials: [
+        { mainBomItemId: 'standard-main', mainMaterialCode: 'STD-1', mainMaterialName: '标准主料', mainQuantity: 1, templateId: 'std-template', revisionId: 'std-revision', revisionVersion: 1, isComplete: false, groups: [{ groupId: 'std-group', groupName: '标准配件', isRequired: true, selectionMode: 'Single', maxSelection: 1, isComplete: false, status: '待核对', expectedQuantity: 0, actualQuantity: 0, selectedOptionIds: [], reviewDecision: null, options: [] }] },
+        { mainBomItemId: 'electrical-main', mainMaterialCode: 'ELE-1', mainMaterialName: '电气主料', mainQuantity: 2, templateId: 'ele-template', revisionId: 'ele-revision', revisionVersion: 3, isComplete: false, groups: [{ groupId: 'ele-group', groupName: '电气配件', isRequired: true, selectionMode: 'Single', maxSelection: 1, isComplete: false, status: '待核对', expectedQuantity: 0, actualQuantity: 0, selectedOptionIds: [], reviewDecision: null, options: [{ id: 'ele-option', materialId: 'accessory', materialCode: 'ACC-1', materialName: '电气附件', materialKind: 'Electrical', unitCode: '001', quantityMode: 'PerMainQuantity', quantityPerSet: 1, isDefault: true, sortOrder: 1 }] }] },
+      ],
+    }
+    materialApi.getMaterialRelationCompleteness.mockResolvedValue(relationResult)
+    materialApi.applyMaterialRelations.mockResolvedValue(relationResult)
+    const wrapper = mount(BomManager, { props: { standard: [standard], nonStandard: [], electrical: [electrical, unconfiguredElectrical], declarations: [], pending: false, editable: true, projectId: 'project', token: 'token' } })
+    await flushPromises()
+
+    await wrapper.findAll('button[role="tab"]')[2].trigger('click')
+    expect(wrapper.find('.pdm-bom-relation-action').exists()).toBe(false)
+    await wrapper.findAll('button[role="tab"]')[3].trigger('click')
+    const relationButton = wrapper.get('.pdm-bom-relation-action')
+    await relationButton.trigger('click')
+    await flushPromises()
+
+    const drawer = wrapper.get('.pdm-material-relation-drawer')
+    const mainPane = drawer.get('[aria-label="主物料明细"]')
+    expect(mainPane.text()).toContain('ELE-1')
+    expect(mainPane.text()).not.toContain('ELE-2')
+    expect(mainPane.text()).not.toContain('STD-1')
+    expect(mainPane.text()).toContain('共 1 条')
+    expect(drawer.get('[aria-label="关联物料明细"]').text()).toContain('ACC-1')
+    await drawer.get('input[aria-label="选择关联物料 ACC-1"]').setValue(true)
+    await drawer.findAll('button').find(button => button.text() === '保存核对结果')!.trigger('click')
+    await flushPromises()
+
+    expect(materialApi.applyMaterialRelations).toHaveBeenCalledWith('project', [{ mainBomItemId: 'electrical-main', choices: [{ groupId: 'ele-group', optionIds: ['ele-option'], confirmNoAccessory: false, noAccessoryReason: null }] }], 'token')
   })
 
   it('refreshes related-material reminders after a BOM save completes', async () => {
@@ -2852,9 +2889,14 @@ describe('BomManager', () => {
   })
 
   it('invalidates the green relation button when BOM props change and ignores stale requests', async () => {
-    const complete: MaterialRelationCompleteness = { projectId: 'project', isComplete: true, mainMaterialCount: 1, incompleteGroupCount: 0, mainMaterials: [] }
-    materialApi.getMaterialRelationCompleteness.mockResolvedValue(complete)
     const main: BomItem = { id: 'main', sequence: 1, drawingNumber: 'MOTOR-1', name: '电机', quantity: 1, unit: '个', revision: 'W1', complete: true }
+    const completeMain: MaterialRelationCompleteness['mainMaterials'][number] = { mainBomItemId: 'main', mainMaterialCode: 'MOTOR-1', mainMaterialName: '电机', mainQuantity: 1, templateId: 'template', revisionId: 'revision', revisionVersion: 1, isComplete: true, groups: [] }
+    const incompleteMain: MaterialRelationCompleteness['mainMaterials'][number] = {
+      ...completeMain, isComplete: false,
+      groups: [{ groupId: 'group', groupName: '驱动器', isRequired: true, selectionMode: 'Single', maxSelection: 1, isComplete: false, status: '待核对', expectedQuantity: 0, actualQuantity: 0, selectedOptionIds: [], reviewDecision: null, options: [] }],
+    }
+    const complete: MaterialRelationCompleteness = { projectId: 'project', isComplete: true, mainMaterialCount: 1, incompleteGroupCount: 0, mainMaterials: [completeMain] }
+    materialApi.getMaterialRelationCompleteness.mockResolvedValue(complete)
     const wrapper = mount(BomManager, { props: { standard: [main], nonStandard: [], electrical: [], declarations: [], pending: false, editable: true, projectId: 'project', token: 'token' } })
     await flushPromises()
     await wrapper.findAll('button[role="tab"]')[1].trigger('click')
@@ -2864,7 +2906,7 @@ describe('BomManager', () => {
     materialApi.getMaterialRelationCompleteness.mockReturnValueOnce(new Promise(resolve => { resolveStale = resolve }))
     await wrapper.setProps({ standard: [{ ...main, quantity: 2 }] })
     expect(button.classes()).toContain('is-warning')
-    materialApi.getMaterialRelationCompleteness.mockResolvedValueOnce({ ...complete, isComplete: false, incompleteGroupCount: 1 })
+    materialApi.getMaterialRelationCompleteness.mockResolvedValueOnce({ ...complete, isComplete: false, incompleteGroupCount: 1, mainMaterials: [incompleteMain] })
     await wrapper.setProps({ standard: [{ ...main, quantity: 3 }] })
     await flushPromises()
     resolveStale(complete)

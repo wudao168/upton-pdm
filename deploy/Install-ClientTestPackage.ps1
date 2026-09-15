@@ -82,7 +82,9 @@ New-ItemProperty -Path $runKey -Name UPLM -PropertyType String -Value ('"{0}" --
 
 $receipt = [ordered]@{
     installedAt = [DateTimeOffset]::Now.ToString('O')
-    version = $manifest.version
+    releaseVersion = $manifest.version
+    desktopVersion = $manifest.desktopVersion
+    solidWorksAddinVersion = $manifest.solidWorksAddinVersion
     serverBaseUrl = $manifest.serverBaseUrl
     desktopPath = $desktopExe
     addinPath = $addinDll
@@ -91,7 +93,7 @@ $receipt = [ordered]@{
 }
 $receipt | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $InstallRoot 'client-install-receipt.json') -Encoding UTF8
 
-Write-Host "UPLM 客户端和 SolidWorks 插件安装完成：$($manifest.version)" -ForegroundColor Green
+Write-Host "UPLM 客户端安装完成：桌面端 $($manifest.desktopVersion)，SolidWorks 插件 $($manifest.solidWorksAddinVersion)" -ForegroundColor Green
 Write-Host "桌面快捷方式：$shortcutPath"
 if ($rebootRequired) { Write-Host '系统运行环境已更新，请重启电脑后再打开 UPLM 和 SolidWorks。' -ForegroundColor Yellow }
 else { Write-Host '现在可以从桌面打开 UPLM，并在 SolidWorks 工具 > 插件中确认 UPLM。' }
