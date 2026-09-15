@@ -1,8 +1,8 @@
 <script setup lang="ts">
 import { ElMessage } from '../statusMessage'
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
-import { getProjectProcurementTracking, listMaterialInventory, refreshProjectProcurementTracking } from '../api'
-import type { ProjectProcurementTrackingItem, ProjectProcurementTrackingResult, U9InventoryRow } from '../types'
+import { getProjectProcurementTracking, listBom, listMaterialInventory, refreshProjectProcurementTracking } from '../api'
+import type { BomItem, ProjectProcurementTrackingItem, ProjectProcurementTrackingResult, U9InventoryRow } from '../types'
 import { inventoryScopes, isDefaultInventoryWarehouse, sumProcurementInventory } from '../procurementInventory'
 import SquareLoader from './SquareLoader.vue'
 import { downloadProcurementWorkbook } from '../procurementWorkbook'
@@ -27,7 +27,7 @@ const columnDefinitions: ColumnDefinition[] = [
   { key: 'subprojectCode', label: '子项目号', width: 126, fixedWidth: 70, defaultVisible: true },
   { key: 'materialCode', label: '物料编码', width: 142, fixedWidth: 85, defaultVisible: true },
   { key: 'materialName', label: '物料名称', width: 240, fixedWidth: 120, defaultVisible: true },
-  { key: 'impactStage', label: '影响', width: 90, fixedWidth: 60, defaultVisible: true, align: 'center' },
+  { key: 'impactStage', label: '关键', width: 90, fixedWidth: 60, defaultVisible: true, align: 'center' },
   { key: 'specification', label: '型号', width: 260, defaultVisible: true },
   { key: 'remark', label: '备注', width: 150, defaultVisible: true },
   { key: 'brand', label: '品牌', width: 110, defaultVisible: true },
@@ -213,10 +213,7 @@ const deliverySort = ref<{ prop: DeliveryColumn; order: 'ascending' | 'descendin
 const sortedItems = computed(() => {
   const items = filteredItems.value
   const sort = deliverySort.value
-  if (!sort) return [...items].sort((a, b) => {
-    const rank = (value: ProjectProcurementTrackingItem['impactStage']) => value === 'Assembly' ? 0 : value === 'Commissioning' ? 1 : 2
-    return rank(a.impactStage) - rank(b.impactStage) || a.sequence - b.sequence
-  })
+  if (!sort) return [...items]
   return [...items].sort((a, b) => {
     const left = deliveryDay(a[sort.prop])
     const right = deliveryDay(b[sort.prop])
@@ -306,8 +303,33 @@ async function load(showError = true) {
   result.value = null
   loading.value = true
   try {
-    const response = await getProjectProcurementTracking(props.projectId, props.token)
-    if (version === loadVersion) result.value = response
+    const [response, currentBom] = await Promise.all([
+      getProjectProcurementTracking(props.projectId, props.token),
+      Promise.allSettled([
+        listBom(props.projectId, 'Standard', props.token),
+        listBom(props.projectId, 'NonStandard', props.token),
+        listBom(props.projectId, 'Electrical', props.token),
+      ]),
+    ])
+    const currentImpactByMaterialCode = new Map<string, BomItem['impactStage']>()
+    for (const request of currentBom) {
+      if (request.status !== 'fulfilled') continue
+      for (const item of request.value) {
+        const materialCode = item.drawingNumber.trim().toLocaleLowerCase()
+        if (materialCode) currentImpactByMaterialCode.set(materialCode, item.impactStage)
+      }
+    }
+    if (version === loadVersion) {
+      result.value = {
+        ...response,
+        items: response.items.map(item => {
+          const materialCode = item.materialCode.trim().toLocaleLowerCase()
+          return currentImpactByMaterialCode.has(materialCode)
+            ? { ...item, impactStage: currentImpactByMaterialCode.get(materialCode) }
+            : item
+        }),
+      }
+    }
   } catch (error) {
     if (version === loadVersion && showError) ElMessage.error(error instanceof Error ? error.message : '采购跟踪加载失败')
   } finally {
@@ -529,7 +551,7 @@ onBeforeUnmount(() => {
       <label class="procurement-tracking__delay-filter"><input v-model="filters.delayedOnly" type="checkbox" aria-label="交期不符">交期不符</label>
       <label class="procurement-tracking__delay-filter"><input v-model="filters.unreceivedOnly" type="checkbox" aria-label="未入库">未入库</label>
       <label class="procurement-tracking__delay-filter"><input v-model="filters.unissuedOnly" type="checkbox" aria-label="未出库">未出库</label>
-      <label class="procurement-tracking__delay-filter"><input v-model="filters.impactedOnly" type="checkbox" aria-label="只看有影响物料">有影响</label>
+      <label class="procurement-tracking__delay-filter"><input v-model="filters.impactedOnly" type="checkbox" aria-label="只看关键物料">关键</label>
       <el-button @click="resetFilters">重置筛选</el-button>
       </div>
       <div class="procurement-tracking__actions">

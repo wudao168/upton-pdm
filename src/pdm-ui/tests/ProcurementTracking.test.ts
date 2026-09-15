@@ -8,6 +8,7 @@ vi.mock('../src/procurementWorkbook', () => ({ downloadProcurementWorkbook: vi.f
 
 const api = vi.hoisted(() => ({
   getProjectProcurementTracking: vi.fn(),
+  listBom: vi.fn(),
   refreshProjectProcurementTracking: vi.fn(),
   listMaterialInventory: vi.fn(),
 }))
@@ -19,6 +20,7 @@ describe('ProcurementTracking', () => {
     vi.clearAllMocks()
     window.localStorage.clear()
     api.listMaterialInventory.mockReset().mockResolvedValue({ items: [], total: 0, lastSuccessfulRefreshAt: '2026-09-08T01:00:00Z' })
+    api.listBom.mockReset().mockResolvedValue([])
     api.getProjectProcurementTracking.mockResolvedValue({
       projectId: 'project-1', projectCode: 'P701911', subprojectCode: 'P701911-1', hasPublishedBom: true,
       lastSuccessfulRefreshAt: '2026-09-07T01:02:03Z', lastRefreshError: null,
@@ -37,6 +39,21 @@ describe('ProcurementTracking', () => {
       }],
     })
     api.refreshProjectProcurementTracking.mockResolvedValue({ message: '只读刷新已启动' })
+  })
+
+  it('使用当前BOM影响属性覆盖已发布备料快照且不改变其他字段', async () => {
+    api.listBom.mockImplementation(async (_projectId: string, kind: string) => kind === 'Standard' ? [{
+      drawingNumber: '01020000089', impactStage: 'Assembly', name: '当前名称', quantity: 99,
+    }] : [])
+    const wrapper = mount(ProcurementTracking, { props: { projectId: 'project-1', token: 'token', username: 'engineer' }, global: { plugins: [ElementPlus] } })
+    await flushPromises()
+
+    const row = wrapper.get('.el-table__body tbody tr')
+    expect(row.text()).toContain('装配')
+    expect(row.text()).toContain('接头')
+    expect(row.text()).toContain('4')
+    expect(api.listBom).toHaveBeenCalledTimes(3)
+    wrapper.unmount()
   })
 
   it('导出文件优先用子项目号，日期按中国时区且流水刷新保留、次日重置', async () => {
@@ -208,7 +225,7 @@ describe('ProcurementTracking', () => {
     wrapper.unmount()
   })
 
-  it('默认按装配、调试、未标记排序并可只看有影响物料', async () => {
+  it('默认保持原始顺序并可只看关键物料', async () => {
     const result = await api.getProjectProcurementTracking()
     const first = result.items[0]
     api.getProjectProcurementTracking.mockResolvedValue({ ...result, items: [
@@ -219,9 +236,9 @@ describe('ProcurementTracking', () => {
     const wrapper = mount(ProcurementTracking, { props: { projectId: 'project-1', token: 'token', username: 'engineer' }, global: { plugins: [ElementPlus] } })
     await flushPromises()
     const materialCodes = () => wrapper.findAll('.el-table__body tbody tr').map(row => row.findAll('td')[3].text())
-    expect(materialCodes()).toEqual(['ASSEMBLY', 'DEBUG', 'NONE'])
-    await wrapper.get('[aria-label="只看有影响物料"]').setValue(true)
-    expect(materialCodes()).toEqual(['ASSEMBLY', 'DEBUG'])
+    expect(materialCodes()).toEqual(['NONE', 'DEBUG', 'ASSEMBLY'])
+    await wrapper.get('[aria-label="只看关键物料"]').setValue(true)
+    expect(materialCodes()).toEqual(['DEBUG', 'ASSEMBLY'])
     wrapper.unmount()
   })
 
@@ -298,7 +315,7 @@ describe('ProcurementTracking', () => {
 
     const headers = wrapper.find('.el-table__header-wrapper').findAll('th .cell').map(item => item.text().trim()).filter(Boolean)
     expect(headers).toEqual([
-      '序号', '项目号', '子项目号', '物料编码', '物料名称', '影响', '型号', '备注', '品牌', '数量', '库存',
+      '序号', '项目号', '子项目号', '物料编码', '物料名称', '关键', '型号', '备注', '品牌', '数量', '库存',
       '请购状态', '请购日期', '需求日期', 'PO编号', '采购状态', '采购员', '购买数',
       '到货数', '采购备注', '预计交期', '最新交期',
       '入库日期', '入库数', '出库日期', '出库数',
@@ -313,7 +330,7 @@ describe('ProcurementTracking', () => {
     expect(wrapper.findAll('.procurement-tracking__actions button').map(button => button.text())).toEqual(['列设置', '立即刷新', '库存设置', '导出 Excel'])
     expect(wrapper.get('.procurement-tracking__heading').element.lastElementChild?.classList.contains('procurement-tracking__updated')).toBe(true)
     expect(wrapper.get('[aria-label="采购跟踪筛选"]').element.nextElementSibling).toBe(wrapper.get('.procurement-tracking__actions').element)
-    expect(wrapper.findAll('.procurement-tracking__delay-filter').map(label => label.text())).toEqual(['交期不符', '未入库', '未出库', '有影响'])
+    expect(wrapper.findAll('.procurement-tracking__delay-filter').map(label => label.text())).toEqual(['交期不符', '未入库', '未出库', '关键'])
     expect(wrapper.get('[aria-label="筛选品牌"]').attributes('list')).toBe('procurement-brands-project-1')
     expect(wrapper.get('datalist option').attributes('value')).toBe('UPTON')
     expect(wrapper.find('.procurement-tracking__heading h2').exists()).toBe(false)
@@ -357,7 +374,7 @@ describe('ProcurementTracking', () => {
     expect(downloadProcurementWorkbook).toHaveBeenCalledTimes(1)
     const [filename, headers, rows] = vi.mocked(downloadProcurementWorkbook).mock.calls[0]
     expect(filename).toMatch(/^P701911-1_物料状态清单_\d{8}_01\.xlsx$/)
-    expect(headers).toEqual(['物料编码', '库存', '数量', '最新交期', '入库日期', '入库数', '出库日期', '出库数', '请购日期', '采购员', '影响'])
+    expect(headers).toEqual(['物料编码', '库存', '数量', '最新交期', '入库日期', '入库数', '出库日期', '出库数', '请购日期', '采购员', '关键'])
     expect(rows).toHaveLength(61)
     expect(rows[0]).toEqual(['01020000060', 0, 4, '2026/1/1', '—', '—', '—', '—', '2026/1/12', '孟丹', '—'])
     wrapper.unmount()
@@ -644,7 +661,7 @@ describe('ProcurementTracking', () => {
     let wrapper = mount(ProcurementTracking, options)
     await flushPromises()
     const headers = () => wrapper.findAll('th .cell').map(cell => cell.text().trim())
-    expect(headers()).toEqual(['物料编码', '数量', '库存', '品牌', '影响', '请购日期', '采购员', '入库日期', '入库数', '出库日期', '出库数'])
+    expect(headers()).toEqual(['物料编码', '数量', '库存', '品牌', '关键', '请购日期', '采购员', '入库日期', '入库数', '出库日期', '出库数'])
     wrapper.unmount()
     window.localStorage.setItem(key, JSON.stringify({ order: ['materialCode', 'quantity', 'inventoryQuantity', 'brand', 'impactStage', 'purchaseRequisitionCreatedAt', 'buyerName', 'receiptDate', 'receiptQuantity', 'issueDate', 'issueQuantity'], visible: ['materialCode', 'quantity', 'brand'] }))
     wrapper = mount(ProcurementTracking, options)

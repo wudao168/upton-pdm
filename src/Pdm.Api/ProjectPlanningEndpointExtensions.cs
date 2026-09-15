@@ -10,10 +10,10 @@ public static class ProjectPlanningEndpointExtensions
     {
         var api = app.MapGroup("/api").RequireAuthorization();
 
-        api.MapGet("/project-plan-templates", async (bool? includeInactive, HttpContext context, ProjectPlanningService service, CancellationToken cancellationToken) =>
+        api.MapGet("/project-plan-templates", async (bool? includeInactive, Guid? projectId, HttpContext context, ProjectPlanningService service, CancellationToken cancellationToken) =>
         {
             var (actor, role) = CurrentUser(context.User);
-            return Results.Ok(await service.ListTemplatesAsync(includeInactive ?? false, actor, role, cancellationToken));
+            return Results.Ok(await service.ListTemplatesAsync(includeInactive ?? false, actor, role, cancellationToken, projectId));
         });
 
         api.MapPost("/project-plan-templates", async (SaveProjectPlanTemplateRequest request, HttpContext context, ProjectPlanningService service, CancellationToken cancellationToken) =>
@@ -134,9 +134,10 @@ public static class ProjectPlanningEndpointExtensions
     }
 }
 
-public sealed record SaveProjectPlanTemplateRequest(string Name, string? ProjectTypeCode, bool IsActive, IReadOnlyList<ProjectPlanTemplateTask> Tasks, long? ExpectedRowVersion, IReadOnlyList<ProjectPlanStageDefinition>? Stages = null)
+public sealed record SaveProjectPlanTemplateRequest(string Name, string? ProjectTypeCode, bool IsActive, IReadOnlyList<ProjectPlanTemplateTask> Tasks, long? ExpectedRowVersion, IReadOnlyList<ProjectPlanStageDefinition>? Stages = null,
+    ProjectPlanTemplateScope Scope = ProjectPlanTemplateScope.System, Guid? BaseSystemTemplateId = null, Guid? ProjectId = null)
 {
-    public SaveProjectPlanTemplateCommand ToCommand() => new(Name, ProjectTypeCode, IsActive, Tasks, ExpectedRowVersion, Stages);
+    public SaveProjectPlanTemplateCommand ToCommand() => new(Name, ProjectTypeCode, IsActive, Tasks, ExpectedRowVersion, Stages, Scope, BaseSystemTemplateId, ProjectId);
 }
 
 public sealed record GenerateProjectPlanRequest(Guid TemplateId, DateOnly StartDate, int TotalDurationDays, bool ReplaceExisting, string? ChangeReason)

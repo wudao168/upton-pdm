@@ -7,6 +7,63 @@ namespace Upton.Pdm.Domain.Tests;
 public sealed class ProjectPlanningServiceTests
 {
     [Fact]
+    public async Task Project_manager_can_create_personal_template_but_cannot_modify_system_template()
+    {
+        var pdm = new InMemoryPdmRepository(TimeProvider.System);
+        var plans = new InMemoryProjectPlanningRepository();
+        var service = new ProjectPlanningService(plans, pdm, TimeProvider.System);
+        var project = await AssignProjectManager(pdm, Assert.Single(await pdm.ListProjectsAsync(default)));
+        var system = Assert.Single(await service.ListTemplatesAsync(false, "admin", UserRole.Engineer, default, project.Id));
+
+        await Assert.ThrowsAsync<UnauthorizedAccessException>(() => service.SaveTemplateAsync(system.Id,
+            new(system.Name, system.ProjectTypeCode, true, system.Tasks, system.RowVersion, system.Stages, ProjectPlanTemplateScope.System, null, project.Id),
+            "admin", UserRole.Engineer, default));
+
+        var withoutStartup = system.Tasks.Where(task => task.WorkflowKey != ProjectPlanWorkflowTask.ProjectStart).ToArray();
+        var personal = await service.SaveTemplateAsync(null,
+            new("我的设备模板", null, true, withoutStartup, null, system.Stages, ProjectPlanTemplateScope.Personal, system.Id, project.Id),
+            "admin", UserRole.Engineer, default);
+
+        Assert.Equal(ProjectPlanTemplateScope.Personal, personal.Scope);
+        Assert.Equal("admin", personal.OwnerUsername);
+        Assert.Equal(system.Id, personal.BaseSystemTemplateId);
+        Assert.Contains(personal.Tasks, task => task.WorkflowKey == ProjectPlanWorkflowTask.ProjectStart);
+        var visible = await service.ListTemplatesAsync(true, "admin", UserRole.Engineer, default, project.Id);
+        Assert.Equal(2, visible.Count);
+        Assert.Contains(visible, item => item.Id == personal.Id);
+        Assert.DoesNotContain(await service.ListTemplatesAsync(true, "other", UserRole.Engineer, default), item => item.Id == personal.Id);
+    }
+
+    [Fact]
+    public async Task Project_plan_can_remove_optional_task_and_rewire_dependencies_but_keeps_workflow_task()
+    {
+        var pdm = new InMemoryPdmRepository(TimeProvider.System);
+        var plans = new InMemoryProjectPlanningRepository();
+        var service = new ProjectPlanningService(plans, pdm, TimeProvider.System);
+        var project = await AssignProjectManager(pdm, Assert.Single(await pdm.ListProjectsAsync(default)));
+        ProjectPlanTemplateTask[] tasks =
+        [
+            new(Guid.NewGuid(), "准备", "design", .2m, [], "ProjectManager", 1, false, true, 10) { FixedDurationDays = 1 },
+            new(Guid.NewGuid(), "可选评审", "design", .2m, [10], "ProjectManager", 1, false, false, 20) { FixedDurationDays = 1 },
+            new(Guid.NewGuid(), "标准件BOM", "design", .2m, [20], "ProjectManager", 1, false, true, 30)
+                { FixedDurationDays = 1, WorkflowKey = ProjectPlanWorkflowTask.StandardBom },
+        ];
+        ProjectPlanStageDefinition[] stages = [new("design", "设计") { ParticipatesInDelivery = true, DurationRatio = 1, ProgressRatio = 1 }];
+        var template = await service.SaveTemplateAsync(null, new("可删减模板", null, true, tasks, null, stages), "admin", UserRole.Administrator, default);
+        var plan = await service.GenerateAsync(project.Id, new(template.Id, new DateOnly(2026, 9, 15), 30, false, null), "admin", UserRole.Administrator, default);
+        var optional = plan.Tasks.Single(task => task.Name == "可选评审");
+        var prepared = plan.Tasks.Single(task => task.Name == "准备");
+        var saved = await service.SaveAsync(project.Id, new(plan.Tasks.Where(task => task.Id != optional.Id).ToArray(), "按项目删减", plan.RowVersion), "admin", UserRole.Administrator, default);
+
+        Assert.Equal(2, saved.Tasks.Count);
+        Assert.Equal([prepared.Id], saved.Tasks.Single(task => task.WorkflowKey == ProjectPlanWorkflowTask.StandardBom).PredecessorTaskIds);
+        var locked = saved.Tasks.Single(task => task.WorkflowKey == ProjectPlanWorkflowTask.StandardBom);
+        var error = await Assert.ThrowsAsync<PdmRuleException>(() => service.SaveAsync(project.Id,
+            new(saved.Tasks.Where(task => task.Id != locked.Id).ToArray(), "错误删除", saved.RowVersion), "admin", UserRole.Administrator, default));
+        Assert.Contains("流程必需任务", error.Message);
+    }
+
+    [Fact]
     public async Task Approved_plan_can_only_be_deleted_by_the_approved_change_requester()
     {
         var clock = new FixedTimeProvider(new DateTimeOffset(2026, 9, 10, 1, 0, 0, TimeSpan.Zero));
@@ -969,7 +1026,7 @@ public sealed class ProjectPlanningServiceTests
     [InlineData(UserRole.Engineer)]
     [InlineData(UserRole.PlanningManager)]
     [InlineData(UserRole.ProductionViewer)]
-    public async Task Non_administrators_cannot_create_or_edit_even_their_own_template(UserRole role)
+    public async Task Project_manager_can_manage_personal_but_not_system_templates_for_any_base_role(UserRole role)
     {
         var pdm = new InMemoryPdmRepository(TimeProvider.System);
         var planning = new InMemoryProjectPlanningRepository();
@@ -977,17 +1034,16 @@ public sealed class ProjectPlanningServiceTests
         var project = await AssignProjectManager(pdm, Assert.Single(await pdm.ListProjectsAsync(default)));
         await pdm.SetMainProjectStaffingAsync(project.Id, new("pm", [], ["designer"]), "admin", default);
         var shared = Assert.Single(await service.ListTemplatesAsync(false, "admin", UserRole.Administrator, default));
-        var own = await planning.SaveTemplateAsync(shared with { Id = Guid.NewGuid(), CreatedBy = "pm", RowVersion = 0 }, null, default);
         await Assert.ThrowsAsync<UnauthorizedAccessException>(() => service.SaveTemplateAsync(shared.Id, new("修改公共模板", null, true, shared.Tasks, shared.RowVersion, shared.Stages), "pm", role, default));
-        await Assert.ThrowsAsync<UnauthorizedAccessException>(() => service.SaveTemplateAsync(own.Id, new("修改旧个人模板", null, true, own.Tasks, own.RowVersion, own.Stages), "pm", role, default));
         await Assert.ThrowsAsync<UnauthorizedAccessException>(() => service.SaveTemplateAsync(null, new("新模板", null, true, shared.Tasks, null, shared.Stages), "pm", role, default));
-        await Assert.ThrowsAsync<UnauthorizedAccessException>(() => service.ListTemplatesAsync(true, "pm", role, default));
-        Assert.NotEmpty(await service.ListTemplatesAsync(false, "pm", role, default));
-        if (role == UserRole.Engineer)
-        {
-            var draft = await service.GenerateAsync(project.Id, new(shared.Id, new DateOnly(2026, 9, 10), 30, false, null), "pm", role, default);
-            Assert.Equal(ProjectPlanApprovalStatus.Draft, draft.ApprovalStatus);
-        }
+        var own = await service.SaveTemplateAsync(null,
+            new("个人模板", null, true, shared.Tasks, null, shared.Stages, ProjectPlanTemplateScope.Personal, shared.Id, project.Id), "pm", role, default);
+        own = await service.SaveTemplateAsync(own.Id,
+            new("修改个人模板", null, true, own.Tasks, own.RowVersion, own.Stages, ProjectPlanTemplateScope.Personal, shared.Id, project.Id), "pm", role, default);
+        Assert.Equal("修改个人模板", own.Name);
+        Assert.Contains((await service.ListTemplatesAsync(true, "pm", role, default, project.Id)), item => item.Id == own.Id);
+        var draft = await service.GenerateAsync(project.Id, new(own.Id, new DateOnly(2026, 9, 10), 30, false, null), "pm", role, default);
+        Assert.Equal(ProjectPlanApprovalStatus.Draft, draft.ApprovalStatus);
     }
 
     [Theory]

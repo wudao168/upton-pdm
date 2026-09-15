@@ -1735,16 +1735,20 @@ public sealed class PdmAddin : ISwAddin
                 return pendingSnapshot.Clone();
             }
 
-            var updateAvailable = !string.IsNullOrWhiteSpace(availableVersion)
-                && !string.Equals(installedVersion, availableVersion, StringComparison.OrdinalIgnoreCase);
+            var updateAvailable = ClientPackageUpdater.IsUpdateAvailable(installedVersion, availableVersion);
             if (!updateAvailable)
             {
+                var serverVersionIsOlder = ClientPackageUpdater.IsUpdateAvailable(availableVersion, installedVersion);
                 var currentSnapshot = new PluginUpdateSnapshot
                 {
                     InstalledVersion = installedVersion,
                     AvailableVersion = availableVersion,
                     LastCheckedAt = checkedAt,
-                    Status = string.IsNullOrWhiteSpace(availableVersion) ? "服务器未发布插件版本" : "已是最新版本"
+                    Status = string.IsNullOrWhiteSpace(availableVersion)
+                        ? "服务器未发布插件版本"
+                        : serverVersionIsOlder
+                            ? "服务器发布版本低于当前版本，已阻止降级"
+                            : "已是最新版本"
                 };
                 SetClientUpdateSnapshot(currentSnapshot);
                 return currentSnapshot.Clone();

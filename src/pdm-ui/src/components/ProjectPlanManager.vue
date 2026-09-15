@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { Calendar, ChevronDown, ChevronRight, History, ListCollapse, ListTree, PanelLeftClose, PanelLeftOpen, RefreshCw } from '@lucide/vue'
+import { Calendar, ChevronDown, ChevronRight, History, ListCollapse, ListTree, PanelLeftClose, PanelLeftOpen, RefreshCw, Settings } from '@lucide/vue'
 import { ElMessageBox } from 'element-plus'
 import { computed, onBeforeUnmount, reactive, ref, watch } from 'vue'
 import { ElMessage } from '../statusMessage'
@@ -24,6 +24,7 @@ import type { ProjectPlan, ProjectPlanPortfolio, ProjectPlanPortfolioItem, Proje
 import { useUserDisplayName } from '../userDisplay'
 import { hasStageAllocation, planProgress, stageProgress } from '../projectPlanAllocation'
 import { loadGlobalStatusContent } from '../globalStatusContent'
+import ProjectPlanTemplateSettings from './ProjectPlanTemplateSettings.vue'
 
 const props = defineProps<{
   project: ProjectSummary
@@ -33,6 +34,7 @@ const props = defineProps<{
   currentRole: string
   developer: boolean
   canEdit: boolean
+  canManageSystemTemplates: boolean
 }>()
 const emit = defineEmits<{ switchProject: [projectId: string] }>()
 const displayUserName = useUserDisplayName()
@@ -113,6 +115,7 @@ const deleteIndependentChildren = ref(false)
 const masterPlanMode = ref(false)
 const syncResultsDialogOpen = ref(false)
 const versionsDialogOpen = ref(false)
+const templatesDrawerOpen = ref(false)
 const compareBaseKey = ref('')
 const compareTargetKey = ref('current')
 const stageDialogOpen = ref(false)
@@ -180,6 +183,10 @@ const deleteDisabledReason = computed(() => {
   return ''
 })
 const canEditSelectedPlan = computed(() => canEditSchedule(selectedOwnerPlan.value))
+const canDeleteSelectedTask = computed(() => Boolean(selectedTask.value && canEditSelectedPlan.value
+  && !selectedTask.value.workflowKey && selectedTask.value.status === 'NotStarted'
+  && !selectedTask.value.actualStart && !selectedTask.value.actualFinish && selectedTask.value.completionPercent === 0
+  && (selectedOwnerPlan.value?.tasks.length ?? 0) > 1))
 
 function editChildPlan(projectId: string) {
   manageDialogOpen.value = false
@@ -805,7 +812,7 @@ async function load() {
   error.value = ''
   try {
     const [loadedTemplates, loadedPlan, loadedPortfolio, loadedParentPlan] = await Promise.all([
-      listProjectPlanTemplates(props.token, false),
+      listProjectPlanTemplates(props.token, false, props.project.id),
       readProjectPlan(props.project.id, props.token),
       readProjectPlanPortfolio(props.project.id, props.token),
       props.project.parentProjectId ? readProjectPlan(rootProject.value.id, props.token) : Promise.resolve(null),
@@ -909,6 +916,31 @@ async function saveTask() {
   } finally {
     saving.value = false
   }
+}
+
+async function deleteSelectedTask() {
+  const task = selectedTask.value
+  const ownerPlan = selectedOwnerPlan.value
+  if (!task || !ownerPlan || !canDeleteSelectedTask.value) return
+  try {
+    await ElMessageBox.confirm(
+      `确认删除非必需任务“${task.name}”？系统会移除该任务，并将后续任务改接到它的前置任务后重新计算排期。`,
+      '删除项目任务',
+      { confirmButtonText: '确认删除', cancelButtonText: '取消', type: 'warning' },
+    )
+    saving.value = true
+    await saveProjectPlan(ownerPlan.projectId, {
+      tasks: ownerPlan.tasks.filter(item => item.id !== task.id),
+      changeReason: `删除非必需任务：${task.name}`,
+      expectedRowVersion: ownerPlan.rowVersion,
+    }, props.token)
+    taskDialogOpen.value = false
+    selectedTask.value = null
+    await load()
+    ElMessage.success(isEffective(ownerPlan) ? '任务删减已保存到变更草稿' : '非必需任务已删除，排期已重新计算')
+  } catch (reason) {
+    if (reason !== 'cancel' && reason !== 'close') ElMessage.error(reason instanceof Error ? reason.message : '任务删除失败')
+  } finally { saving.value = false }
 }
 
 async function shiftPlan() {
@@ -1241,6 +1273,7 @@ watch(() => props.project.id, () => { masterPlanMode.value = false; return load(
             <button v-if="portfolioMode && canEdit" type="button" class="pdm-secondary-action" :disabled="sourceProjectOptions.length === 0" @click="openReuse">复制计划</button>
             <button v-if="portfolioMode && isMasterWithChildren" type="button" class="pdm-primary-action" @click="masterPlanMode = true">编辑主计划</button>
             <button v-if="portfolioMode && (managedChildPlans.length || plan?.childSyncResults?.length || canEditSchedule(plan))" type="button" class="pdm-secondary-action" @click="manageDialogOpen = true">编辑子计划</button>
+            <button v-if="canEdit || canManageSystemTemplates" type="button" class="pdm-secondary-action" @click="templatesDrawerOpen = true"><Settings :size="14" />计划模板</button>
             <button type="button" class="pdm-secondary-action" :disabled="loading" @click="load"><RefreshCw :size="14" />刷新</button>
             <button v-if="!portfolioMode && isMasterWithChildren" type="button" class="pdm-secondary-action" @click="masterPlanMode = false">查看子项目汇总</button>
             <button v-if="!portfolioMode && canEdit && ((!plan && !project.parentProjectId) || (ownsDisplayedPlan && canEditSchedule(plan)))" type="button" class="pdm-primary-action" @click="openGenerate()"><Calendar :size="14" />{{ plan ? '重新生成' : '生成初始计划' }}</button>
@@ -1353,7 +1386,7 @@ watch(() => props.project.id, () => { masterPlanMode.value = false; return load(
         <label>计划模板<el-select v-model="generateForm.templateId"><el-option v-for="item in templates.filter(template => template.isActive)" :key="item.id" :label="item.name" :value="item.id" /></el-select></label>
         <p>任务按固定天数或初始阶段比例及前置关系生成；首次生成时各阶段在主项目计划范围内首尾连续。生成后可独立平移或调整各阶段，允许交叉，仅显式前置关系联动。</p>
         <div class="pdm-plan-form__grid"><label>交付计划开始<el-date-picker v-model="generateForm.startDate" value-format="YYYY-MM-DD" type="date" /></label><label>交付总工期（自然日）<el-input-number v-model="generateForm.totalDurationDays" aria-label="交付总工期" :min="1" :max="3650" :precision="0" /></label></div>
-        <p v-if="!hasStageAllocation(generationTemplate?.stages)">此模板尚未配置两级分配，请管理员在系统管理 → 项目计划模板中补齐阶段比例。</p>
+        <p v-if="!hasStageAllocation(generationTemplate?.stages)">此模板尚未配置两级分配，请管理员在“项目计划 → 计划模板”中补齐阶段比例。</p>
         <p v-if="earliestPostDeliveryStart && scheduledPostDeliveryStages.length">交付计划完成：{{ addDays(earliestPostDeliveryStart, -1) }}</p>
         <section v-if="scheduledPostDeliveryStages.length" class="pdm-offsite-plan" aria-label="厂外调试计划">
           <header><strong>厂外调试计划</strong><el-checkbox :model-value="allPostDeliveryDeferred" :indeterminate="somePostDeliveryDeferred && !allPostDeliveryDeferred" aria-label="厂外调试计划暂不建立" @update:model-value="deferOffsitePlan(Boolean($event))">暂不建立</el-checkbox></header>
@@ -1412,6 +1445,7 @@ watch(() => props.project.id, () => { masterPlanMode.value = false; return load(
     <el-dialog v-model="taskDialogOpen" title="任务详情与实际进度" width="620px" destroy-on-close>
       <div class="pdm-plan-form">
         <label>任务名称<el-input :model-value="taskForm.name" aria-label="任务名称" readonly /></label>
+        <p v-if="selectedTask?.workflowKey" class="pdm-plan-workflow-lock">流程必需任务：由系统模板维护，不允许从项目计划中删除。</p>
         <div class="pdm-plan-form__grid"><label>阶段<el-input :model-value="stageLabel(taskForm.stage, selectedOwnerPlan)" aria-label="阶段" readonly /></label><label>责任人<el-select v-model="taskForm.assignee" :disabled="!canEditSelectedPlan" filterable clearable placeholder="选择责任人"><el-option v-for="username in assigneeOptions" :key="username" :label="displayUserName(username)" :value="username" /></el-select></label></div>
         <label>计划日期<el-date-picker v-model="taskDateRange" class="pdm-plan-date-range" aria-label="计划日期区间" value-format="YYYY-MM-DD" type="daterange" range-separator="至" start-placeholder="开始日期" end-placeholder="完成日期" :clearable="false" :disabled="!canEditSelectedPlan" /></label>
         <p v-if="!isEffective(selectedOwnerPlan)">当前为{{ approvalLabel(selectedOwnerPlan) }}，可修改安排并保存草稿；批准生效后才可填报实际进度。</p>
@@ -1420,8 +1454,12 @@ watch(() => props.project.id, () => { masterPlanMode.value = false; return load(
         <div class="pdm-plan-form__grid"><label>进度权重<el-input :model-value="String(taskForm.weight)" aria-label="进度权重" readonly /></label><label v-if="canEditSelectedPlan" class="pdm-plan-checkbox"><el-checkbox v-model="taskForm.isRequired">作为阶段门必需任务</el-checkbox></label></div>
         <p>任务名称、阶段和权重沿用生成计划时的模板配置；权重由系统自动换算占比，无需人工凑到100。</p>
       </div>
-      <template #footer><button type="button" class="pdm-secondary-action" @click="taskDialogOpen = false">取消</button><button type="button" class="pdm-primary-action" :disabled="saving || (!canEditSelectedPlan && !isEffective(selectedOwnerPlan))" @click="saveTask">保存</button></template>
+      <template #footer><button v-if="canEditSelectedPlan" type="button" class="pdm-plan-delete-task" :disabled="saving || !canDeleteSelectedTask" :title="selectedTask?.workflowKey ? '流程必需任务不能删除' : selectedTask?.status !== 'NotStarted' ? '已有进度的任务不能删除' : ''" @click="deleteSelectedTask">删除任务</button><span class="pdm-plan-dialog-spacer" /><button type="button" class="pdm-secondary-action" @click="taskDialogOpen = false">取消</button><button type="button" class="pdm-primary-action" :disabled="saving || (!canEditSelectedPlan && !isEffective(selectedOwnerPlan))" @click="saveTask">保存</button></template>
     </el-dialog>
+
+    <el-drawer v-model="templatesDrawerOpen" title="项目计划模板" size="min(1520px, 96vw)" destroy-on-close @closed="load">
+      <ProjectPlanTemplateSettings :token="token" :current-username="currentUsername" :project-id="project.id" :can-manage-system="canManageSystemTemplates" />
+    </el-drawer>
 
     <el-dialog v-model="stageDialogOpen" :title="hasStageException ? '恢复正常阶段' : '设置阶段例外'" width="520px" destroy-on-close>
       <div class="pdm-plan-form">
@@ -1550,6 +1588,7 @@ watch(() => props.project.id, () => { masterPlanMode.value = false; return load(
 .pdm-plan-approval-strip{display:flex;align-items:center;gap:12px;padding:10px 12px;border:1px solid var(--plan-accent-border);border-radius:6px;background:var(--plan-accent-soft);font-size:12px}.pdm-plan-approval-strip span{flex:1}.pdm-plan-targets{border:1px solid var(--pdm-border);border-radius:6px;overflow:hidden}.pdm-plan-targets__header{display:flex;align-items:center;gap:12px;padding:8px 10px;background:var(--pdm-surface-muted);font-size:12px}.pdm-plan-targets__header>span{flex:1;color:var(--pdm-muted)}.pdm-plan-targets__list{display:flex;flex-direction:column;max-height:340px;overflow:auto;padding:4px 10px}.pdm-plan-targets__list :deep(.el-checkbox){margin:0;min-height:38px;flex-shrink:0;display:flex;flex-direction:row;align-items:center;border-bottom:1px solid var(--pdm-border)}.pdm-plan-targets__list :deep(.el-checkbox__label){display:flex;flex:1;justify-content:space-between;gap:12px;white-space:normal}.pdm-plan-targets__list small{color:var(--pdm-muted);white-space:nowrap}.pdm-plan-stage-list{max-height:280px;overflow:auto;margin:8px 0}.pdm-plan-stage-editor{display:flex;gap:6px;align-items:center;margin:6px 0}.pdm-plan-stage-editor>.el-input{flex:1}.pdm-plan-stage-editor>span{width:22px}.pdm-plan-stage-editor>button{white-space:nowrap;border:1px solid var(--pdm-border);border-radius:4px;background:var(--pdm-surface);color:var(--plan-accent);padding:6px}.pdm-plan-stage-editor>button:disabled{opacity:.4}
 .pdm-plan-page { --plan-accent: var(--shell-accent, var(--pdm-blue)); --plan-accent-hover: var(--shell-accent-hover, var(--pdm-blue)); --plan-accent-soft: var(--shell-accent-soft, var(--pdm-blue-soft)); --plan-accent-border: var(--shell-accent-border, var(--pdm-border)); min-width: 0; height: 100%; display: flex; flex-direction: column; gap: 12px; padding: 14px; overflow: auto; color: var(--pdm-text); background: var(--pdm-bg); }
 .pdm-plan-toolbar__actions { min-width: max-content; display: flex; flex: 0 0 auto; flex-wrap: nowrap; align-items: center; gap: 4px; white-space: nowrap; }.pdm-plan-toolbar__actions > .pdm-primary-action,.pdm-plan-toolbar__actions > .pdm-secondary-action,.pdm-plan-toolbar__actions > .pdm-plan-delete-action{box-sizing:border-box;width:80px;min-width:80px;height:32px;min-height:32px;padding:0 4px;font-size:11px}.pdm-plan-delete-action{border:1px solid var(--pdm-danger);border-radius:5px;background:var(--pdm-danger);color:#fff;cursor:pointer}.pdm-plan-delete-action:not(:disabled):hover,.pdm-plan-delete-action:not(:disabled):focus-visible{filter:brightness(.92);outline:2px solid color-mix(in srgb,var(--pdm-danger) 25%,transparent);outline-offset:1px}.pdm-plan-delete-action:disabled{border-color:var(--pdm-border);background:var(--pdm-surface-muted);color:var(--pdm-muted);cursor:not-allowed;opacity:1}
+.pdm-plan-delete-task{border:1px solid var(--pdm-danger);border-radius:5px;background:transparent;color:var(--pdm-danger);padding:7px 12px}.pdm-plan-delete-task:disabled{border-color:var(--pdm-border);color:var(--pdm-muted);cursor:not-allowed}.pdm-plan-dialog-spacer{flex:1}.pdm-plan-workflow-lock{padding:8px 10px;border:1px solid var(--plan-accent-border);border-radius:5px;background:var(--plan-accent-soft);color:var(--plan-accent)!important}
 .pdm-plan-summary { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 10px; }
 .pdm-plan-summary-action{width:100%;min-width:0;display:flex;flex:1;flex-direction:column;justify-content:center;align-items:flex-start;padding:0;border:0;background:transparent;color:var(--pdm-text);text-align:left;cursor:pointer}.pdm-plan-summary-action>span{color:var(--pdm-muted);font-size:11px}.pdm-plan-summary-action:hover>span{color:var(--plan-accent)}.pdm-plan-summary-action:focus-visible{outline:2px solid var(--plan-accent);outline-offset:5px}.pdm-plan-summary-action .is-risk{color:var(--pdm-orange)}
 .pdm-plan-summary article { min-height: 86px; display: flex; flex-direction: column; justify-content: center; padding: 12px 15px; border: 1px solid var(--pdm-border); border-radius: 8px; background: var(--pdm-surface); box-shadow: var(--pdm-shadow-sm); }

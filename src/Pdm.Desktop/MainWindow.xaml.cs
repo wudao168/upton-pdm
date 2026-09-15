@@ -307,6 +307,21 @@ public partial class MainWindow : Window
                     latest.Desktop,
                     AppDomain.CurrentDomain.BaseDirectory,
                     bootstrapLifetime.Token);
+                var executablePath = Process.GetCurrentProcess().MainModule?.FileName ?? string.Empty;
+                var desktopUpdaterStarted = ClientPackageUpdater.TryLaunchPendingUpdate(
+                    "desktop",
+                    Process.GetCurrentProcess().Id,
+                    executablePath);
+                if (desktopUpdaterStarted)
+                {
+                    await Dispatcher.BeginInvoke(new Action(() =>
+                    {
+                        allowClose = true;
+                        System.Windows.Application.Current.Shutdown();
+                    }));
+                    return;
+                }
+                await MaintainSolidWorksAddinUpdateAsync(latest, bootstrapLifetime.Token);
 
                 if (!string.Equals(observedConfigurationVersion, latest.ConfigurationVersion, StringComparison.Ordinal)
                     || !string.Equals(observedUiBaseUrl, latest.UiBaseUrl, StringComparison.OrdinalIgnoreCase))
@@ -336,6 +351,35 @@ public partial class MainWindow : Window
                 // Keep the current cached configuration and retry on the next interval.
             }
         }
+    }
+
+    private static async Task MaintainSolidWorksAddinUpdateAsync(
+        ClientBootstrapConfiguration configuration,
+        CancellationToken cancellationToken)
+    {
+        var addinDirectory = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "UPLM",
+            "solidworks-addin");
+        if (!Directory.Exists(addinDirectory)) return;
+
+        await ClientPackageUpdater.StageAsync(
+            "solidworks-addin",
+            configuration.SolidWorksAddin,
+            addinDirectory,
+            cancellationToken);
+
+        var solidWorksProcesses = Process.GetProcessesByName("SLDWORKS");
+        try
+        {
+            if (solidWorksProcesses.Any(process => !process.HasExited)) return;
+        }
+        finally
+        {
+            foreach (var process in solidWorksProcesses) process.Dispose();
+        }
+
+        ClientPackageUpdater.TryLaunchPendingUpdate("solidworks-addin", 0, string.Empty);
     }
 
     private static string Serialize(object value) => new JavaScriptSerializer().Serialize(value);

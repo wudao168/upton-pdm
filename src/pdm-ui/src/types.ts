@@ -116,6 +116,7 @@ export interface ProjectPlanTemplateTask {
   isMilestone: boolean
   isRequired: boolean
   sortOrder: number
+  workflowKey?: string | null
 }
 
 export interface ProjectPlanTemplate {
@@ -130,6 +131,9 @@ export interface ProjectPlanTemplate {
   updatedBy: string
   updatedAt: string
   rowVersion?: number
+  scope?: 'System' | 'Personal'
+  ownerUsername?: string | null
+  baseSystemTemplateId?: string | null
 }
 
 export interface ProjectPlanTask {
@@ -153,6 +157,7 @@ export interface ProjectPlanTask {
   isMilestone: boolean
   isRequired: boolean
   sortOrder: number
+  workflowKey?: string | null
 }
 
 export interface ProjectPlan {
@@ -238,6 +243,9 @@ export interface SaveProjectPlanTemplateInput {
   isActive: boolean
   tasks: ProjectPlanTemplateTask[]
   expectedRowVersion?: number
+  scope?: 'System' | 'Personal'
+  baseSystemTemplateId?: string | null
+  projectId?: string
 }
 
 export interface CreateProjectInput {

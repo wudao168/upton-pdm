@@ -68,7 +68,20 @@ const projectCenterMemoryKey = 'upton-pdm-project-center'
 const activeNavigationMemoryKey = 'upton-pdm-active-navigation'
 const sidebarCollapsedMemoryKey = 'upton-pdm-sidebar-collapsed'
 const sidebarCollapsed = ref(window.localStorage.getItem(sidebarCollapsedMemoryKey) === 'true')
+type SystemReleaseHistoryEntry = {
+  Version?: string
+  ReleasedAt?: string
+  ReleaseNote?: string
+  DesktopVersion?: string
+  SolidWorksAddinVersion?: string
+}
+
 const productVersion = ref('')
+const productReleasedAt = ref('')
+const productReleaseNote = ref('')
+const productReleaseHistory = ref<SystemReleaseHistoryEntry[]>([])
+const desktopClientVersion = ref('')
+const solidWorksAddinVersion = ref('')
 const savedTheme = window.localStorage.getItem('pdm_theme')
 const theme = ref<PdmTheme>(savedTheme === 'c' || savedTheme === 'o' ? savedTheme : 'a')
 const notificationCount = computed(() => workspace.notifications.value.filter(item => !item.readAt).length + workspace.myApprovalTasks.value.length + workspace.materialCodeApprovalTasks.value.length + workspace.programTemplateTasks.value.length + workspace.passwordResetTasks.value.length + new Set(workspace.editLocks.value.filter(lock => lock.ownedByCurrentUser || lock.releaseRequestedBy || lock.canForceRelease).map(lock => lock.projectId)).size)
@@ -131,16 +144,30 @@ async function loadServerVersion() {
   try {
     const response = await fetch('/client-bootstrap.json', { cache: 'no-store' })
     if (!response.ok) return
-    const configuration = await response.json() as { ConfigurationVersion?: string }
+    const configuration = await response.json() as {
+      ConfigurationVersion?: string
+      ReleasedAt?: string
+      ReleaseNote?: string
+      ReleaseHistory?: SystemReleaseHistoryEntry[]
+      SolidWorksAddin?: { Version?: string }
+    }
     productVersion.value = configuration.ConfigurationVersion?.trim() ?? ''
+    productReleasedAt.value = configuration.ReleasedAt?.trim() ?? ''
+    productReleaseNote.value = configuration.ReleaseNote?.trim() ?? ''
+    productReleaseHistory.value = Array.isArray(configuration.ReleaseHistory) ? configuration.ReleaseHistory : []
+    solidWorksAddinVersion.value = configuration.SolidWorksAddin?.Version?.trim() ?? ''
   } catch {
     productVersion.value = ''
+    productReleasedAt.value = ''
+    productReleaseNote.value = ''
+    productReleaseHistory.value = []
+    solidWorksAddinVersion.value = ''
   }
 }
 
 function handleClientVersion(event: Event) {
   const detail = (event as CustomEvent<{ version?: string }>).detail
-  productVersion.value = detail?.version?.trim() ?? ''
+  desktopClientVersion.value = detail?.version?.trim() ?? ''
 }
 
 function handleWorkspaceLocalState(event: Event) {
@@ -340,6 +367,7 @@ async function openProjectTab(tab: ProjectTab) {
 }
 
 async function openProjectTabFromHeader(tab: ProjectTab) {
+  if (projectSwitchPromise) await projectSwitchPromise
   const project = workspace.project.value
   if (tab === 'project-plan' && project.parentProjectId) {
     await openManagedProject(project.rootProjectId ?? project.parentProjectId, tab)
@@ -463,6 +491,7 @@ const supportedProjectTabs: ProjectTab[] = ['overview', 'project-plan', 'files',
 let pendingProjectNavigation: ProjectNavigationRequest | null = null
 let projectNavigationInProgress = false
 let initialPageRestored = false
+let projectSwitchPromise: Promise<boolean> | null = null
 
 async function openProjectCenter(resetToOverview = false) {
   if (projectCenterOpening.value) return
@@ -573,8 +602,8 @@ onMounted(() => {
   window.addEventListener('pdm-solidworks-status', handleWorkspaceSolidWorksStatus)
   window.addEventListener('pdm-client-version', handleClientVersion)
   window.chrome?.webview?.addEventListener('message', handleReviewOverlayAction)
+  void loadServerVersion()
   if (desktopAvailable) postDesktopMessage('client-version-request')
-  else void loadServerVersion()
   requestWorkspaceLocalState()
 })
 onBeforeUnmount(() => {
@@ -593,9 +622,13 @@ async function login(username: string, password: string, rememberCredentials: bo
 async function switchProject(projectId: string) {
   if (switchingProjectId.value || projectId === workspace.project.value.id) return
   switchingProjectId.value = projectId
+  const requestedTab = projectTab.value
+  const pendingSwitch = openManagedProject(projectId, requestedTab)
+  projectSwitchPromise = pendingSwitch
   try {
-    await openManagedProject(projectId, projectTab.value)
+    await pendingSwitch
   } finally {
+    if (projectSwitchPromise === pendingSwitch) projectSwitchPromise = null
     switchingProjectId.value = ''
   }
 }
@@ -784,6 +817,11 @@ async function openWhereUsedParent(projectId: string, parentDocumentId: string) 
         :can-view-materials="workspace.hasPermission('material.view')"
         :collapsed="sidebarCollapsed"
         :version="productVersion"
+        :released-at="productReleasedAt"
+        :release-note="productReleaseNote"
+        :release-history="productReleaseHistory"
+        :desktop-version="desktopClientVersion"
+        :solid-works-addin-version="solidWorksAddinVersion"
         @navigate="handleNavigation"
       />
       <section class="pdm-shell-content">
@@ -908,8 +946,8 @@ async function openWhereUsedParent(projectId: string, parentDocumentId: string) 
           :active-organization-id="systemOrganizationId"
           :permissions="workspace.currentPermissions.value"
           :current-username="workspace.currentUsername.value"
+          :project-id="workspace.project.value.id"
           :platform-administrator="workspace.hasRole('platform_admin') || workspace.hasRole('developer')"
-          :can-manage-project-plan-templates="canManageProjectPlanTemplates"
           :audit-entries="workspace.auditEntries.value"
           :folder-template="workspace.folderTemplate.value"
           :pending="workspace.operationPending.value"
@@ -966,7 +1004,7 @@ async function openWhereUsedParent(projectId: string, parentDocumentId: string) 
               @bom="openProjectTab('bom')"
             />
             <ProjectFileLibrary v-else-if="projectTab === 'files'" :project-id="workspace.project.value.id" :token="workspace.getAccessToken()" :folders="workspace.projectFolders.value" :documents="workspace.managedDocuments.value" :users="workspace.users.value" :roles="workspace.rolePermissionDirectory.value.roles" :administrator="workspace.hasPermission('settings.folder.manage')" :can-recycle-documents="workspace.hasPermission('document.recycle')" :pending="workspace.operationPending.value" :on-update-permissions="workspace.updateProjectFolderPermissions" :on-reload="() => workspace.reload(workspace.project.value.id)" />
-            <ProjectPlanManager v-else-if="projectTab === 'project-plan'" :project="workspace.project.value" :projects="workspace.projects.value" :token="workspace.getAccessToken()" :current-username="workspace.currentUsername.value" :current-role="workspace.currentRole.value" :developer="workspace.hasRole('developer')" :can-edit="canManageProjectPlan" @switch-project="projectId => openManagedProject(projectId, 'project-plan')" />
+            <ProjectPlanManager v-else-if="projectTab === 'project-plan'" :project="workspace.project.value" :projects="workspace.projects.value" :token="workspace.getAccessToken()" :current-username="workspace.currentUsername.value" :current-role="workspace.currentRole.value" :developer="workspace.hasRole('developer')" :can-edit="canManageProjectPlan" :can-manage-system-templates="canManageProjectPlanTemplates" @switch-project="projectId => openManagedProject(projectId, 'project-plan')" />
             <ValidationPlanManager v-else-if="projectTab === 'validation-plan'" :project-id="workspace.project.value.id" :project-code="workspace.project.value.code" :project-name="workspace.project.value.name" :projects="workspace.projects.value" :token="workspace.getAccessToken()" :current-username="workspace.currentUsername.value" :current-display-name="workspace.currentUser.value" :can-edit="workspace.hasPermission('validation-plan.edit')" :can-manage-catalog="workspace.hasPermission('validation-catalog.manage')" :can-decide-approval="workspace.hasPermission('approval.decide') || workspace.hasPermission('validation-plan.edit')" :requested-project-id="requestedValidationPlanProjectId" @request-handled="requestedValidationPlanProjectId = ''" />
             <section v-else-if="projectTab === 'documents'" class="pdm-document-workspace">
               <section v-if="!workspace.hasDocuments.value" class="pdm-panel pdm-workspace-state">

@@ -748,7 +748,7 @@ describe('BomManager', () => {
     await wrapper.findAll('button[role="tab"]')[1].trigger('click')
 
     expect(wrapper.findAll('thead th').map(header => header.text())).toEqual([
-      '', '', '序号', '物料分类', '易损件', '影响', '单位', '物料编码', '物料名称', '上级物料编码', '型号', '备注信息', '品牌', '材质', '表面处理', '重量', '数量', '发布  总/源', '图纸核对', '版本', '问题', '资料状态',
+      '', '', '序号', '物料分类', '易损件', '关键', '单位', '物料编码', '物料名称', '上级物料编码', '型号', '备注信息', '品牌', '材质', '表面处理', '重量', '数量', '发布  总/源', '图纸核对', '版本', '问题', '资料状态',
     ])
   })
 
@@ -838,7 +838,7 @@ describe('BomManager', () => {
       nonStandard: [], electrical: [], declarations: [], pending: false, editable: true,
     } })
     await wearWrapper.findAll('button[role="tab"]').find(tab => tab.text().startsWith('易损件BOM'))!.trigger('click')
-    expect(wearWrapper.findAll('thead th').map(header => header.text())).not.toContain('影响')
+    expect(wearWrapper.findAll('thead th').map(header => header.text())).not.toContain('关键')
     expect(wearWrapper.find('.pdm-bom-impact-cell').exists()).toBe(false)
     wearWrapper.unmount()
   })

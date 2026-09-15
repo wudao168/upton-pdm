@@ -3,6 +3,7 @@ param(
     [string]$MySqlVersion = '8.4.11',
     [string]$LanBaseUrl = 'http://192.168.2.8:5173',
     [string]$ReleaseVersion = '',
+    [string]$ReleaseNote = '',
     [switch]$ServerOnly
 )
 
@@ -10,6 +11,7 @@ $ErrorActionPreference = 'Stop'
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
 $projectRoot = Split-Path -Parent $PSScriptRoot
+. (Join-Path $PSScriptRoot 'SystemReleaseHistory.ps1')
 $runtimeRoot = Join-Path $projectRoot '.runtime'
 $localRoot = Join-Path $projectRoot '.local'
 $downloadRoot = Join-Path $runtimeRoot 'downloads'
@@ -24,6 +26,19 @@ $secretPath = Join-Path $secretRoot 'pdm-secrets.json'
 $rootClientPath = Join-Path $secretRoot 'mysql-root-client.ini'
 $myIniPath = Join-Path $localRoot 'mysql\my.ini'
 $isUpgrade = $null -ne (Get-Service -Name 'UptonPdmApi' -ErrorAction SilentlyContinue)
+$existingBootstrapPath = Join-Path $localRoot 'api\wwwroot\client-bootstrap.json'
+$existingBootstrap = $null
+if (Test-Path -LiteralPath $existingBootstrapPath -PathType Leaf) {
+    try { $existingBootstrap = Get-Content -LiteralPath $existingBootstrapPath -Raw -Encoding UTF8 | ConvertFrom-Json }
+    catch { Write-Warning "Existing release history could not be read: $($_.Exception.Message)" }
+}
+if ([string]::IsNullOrWhiteSpace($ReleaseVersion)) {
+    $ReleaseVersion = [DateTimeOffset]::Now.ToString('yyyy.MM.dd.HHmm')
+}
+$ReleaseNote = Get-UplmReleaseNote -Version $ReleaseVersion -ReleaseNote $ReleaseNote -Fallback '本次发布未填写版本说明。'
+$releasedAt = Get-UplmReleasedAt -Version $ReleaseVersion
+$lanBase = $LanBaseUrl.TrimEnd('/')
+$releaseHistoryBaseline = Join-Path $PSScriptRoot 'system-release-history.json'
 if ($isUpgrade) {
     $apiOutput = Join-Path $localRoot 'api-next'
     if (-not $ServerOnly) {
@@ -251,6 +266,28 @@ if ($ServerOnly) {
     Get-ChildItem -LiteralPath (Join-Path $projectRoot 'src\pdm-ui\dist') -Force | ForEach-Object {
         Copy-Item -LiteralPath $_.FullName -Destination (Join-Path $webRoot $_.Name) -Recurse -Force
     }
+    $desktopPackage = if ($null -ne $existingBootstrap -and $null -ne $existingBootstrap.Desktop) { $existingBootstrap.Desktop } else { [ordered]@{ Version = ''; PackageUrl = ''; Sha256 = '' } }
+    $addinPackage = if ($null -ne $existingBootstrap -and $null -ne $existingBootstrap.SolidWorksAddin) { $existingBootstrap.SolidWorksAddin } else { [ordered]@{ Version = ''; PackageUrl = ''; Sha256 = '' } }
+    $releaseHistory = Get-UplmReleaseHistory `
+        -CurrentVersion $ReleaseVersion `
+        -CurrentReleaseNote $ReleaseNote `
+        -CurrentDesktopVersion ([string]$desktopPackage.Version) `
+        -CurrentSolidWorksAddinVersion ([string]$addinPackage.Version) `
+        -SourceBootstraps @($existingBootstrap) `
+        -BaselinePath $releaseHistoryBaseline
+    $bootstrap = [ordered]@{
+        SchemaVersion = 2
+        ConfigurationVersion = $ReleaseVersion
+        ReleasedAt = $releasedAt
+        ReleaseNote = $ReleaseNote
+        ReleaseHistory = $releaseHistory
+        ApiBaseUrl = "$lanBase/"
+        UiBaseUrl = "$lanBase/"
+        PollSeconds = 30
+        Desktop = $desktopPackage
+        SolidWorksAddin = $addinPackage
+    }
+    Write-Utf8File (Join-Path $webRoot 'client-bootstrap.json') @(($bootstrap | ConvertTo-Json -Depth 8))
     $receipt = [ordered]@{
         deploymentMode = 'server-only'
         preparedAt = [DateTimeOffset]::Now.ToString('O')
@@ -260,7 +297,10 @@ if ($ServerOnly) {
         mysqlHome = $mysqlHome
         localRoot = $localRoot
         apiPath = Join-Path $localRoot 'api\Pdm.Api.dll'
-        lanBaseUrl = $LanBaseUrl.TrimEnd('/')
+        lanBaseUrl = $lanBase
+        releaseVersion = $ReleaseVersion
+        releaseNote = $ReleaseNote
+        releaseHistoryCount = $releaseHistory.Count
     }
     $receipt | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $localRoot 'deployment-receipt.json') -Encoding UTF8
     Write-Host 'UPLM server-only deployment files are prepared.'
@@ -275,10 +315,6 @@ Get-ChildItem -LiteralPath $clientBuildOutput |
 Copy-Item -Path (Join-Path $projectRoot 'src\Pdm.SolidWorks.Addin\bin\Release\net48\*') -Destination $addinOutput -Recurse -Force
 Copy-Item -Path (Join-Path $projectRoot 'src\Pdm.SolidWorks.PreviewWorker\bin\Release\net48\*') -Destination $previewWorkerOutput -Recurse -Force
 
-if ([string]::IsNullOrWhiteSpace($ReleaseVersion)) {
-    $ReleaseVersion = [DateTimeOffset]::Now.ToString('yyyy.MM.dd.HHmm')
-}
-$lanBase = $LanBaseUrl.TrimEnd('/')
 $bootstrapUrl = "$lanBase/client-bootstrap.json"
 $locator = [ordered]@{ BootstrapUrl = $bootstrapUrl }
 foreach ($output in @($clientOutput, $addinOutput)) {
@@ -296,9 +332,19 @@ $desktopArchive = Join-Path $updatesRoot "uplm-desktop-$ReleaseVersion.zip"
 $addinArchive = Join-Path $updatesRoot "uplm-solidworks-addin-$ReleaseVersion.zip"
 Compress-Archive -Path (Join-Path $clientOutput '*') -DestinationPath $desktopArchive -CompressionLevel Optimal -Force
 Compress-Archive -Path (Join-Path $addinOutput '*') -DestinationPath $addinArchive -CompressionLevel Optimal -Force
+$releaseHistory = Get-UplmReleaseHistory `
+    -CurrentVersion $ReleaseVersion `
+    -CurrentReleaseNote $ReleaseNote `
+    -CurrentDesktopVersion $ReleaseVersion `
+    -CurrentSolidWorksAddinVersion $ReleaseVersion `
+    -SourceBootstraps @($existingBootstrap) `
+    -BaselinePath $releaseHistoryBaseline
 $bootstrap = [ordered]@{
-    SchemaVersion = 1
+    SchemaVersion = 2
     ConfigurationVersion = $ReleaseVersion
+    ReleasedAt = $releasedAt
+    ReleaseNote = $ReleaseNote
+    ReleaseHistory = $releaseHistory
     ApiBaseUrl = "$lanBase/"
     UiBaseUrl = "$lanBase/"
     PollSeconds = 30
@@ -313,7 +359,7 @@ $bootstrap = [ordered]@{
         Sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $addinArchive).Hash
     }
 }
-Write-Utf8File (Join-Path $webRoot 'client-bootstrap.json') @(($bootstrap | ConvertTo-Json -Depth 5))
+Write-Utf8File (Join-Path $webRoot 'client-bootstrap.json') @(($bootstrap | ConvertTo-Json -Depth 8))
 
 $desktopDirectory = [Environment]::GetFolderPath('Desktop')
 $shortcutPath = Join-Path $desktopDirectory 'UPLM.lnk'
@@ -354,6 +400,8 @@ $receipt = [ordered]@{
     previewWorkerPath = Join-Path $localRoot 'preview-worker\Upton.Pdm.SolidWorks.PreviewWorker.exe'
     lanBaseUrl = $lanBase
     releaseVersion = $ReleaseVersion
+    releaseNote = $ReleaseNote
+    releaseHistoryCount = $releaseHistory.Count
     bootstrapPath = Join-Path $webRoot 'client-bootstrap.json'
     desktopPackageSha256 = $bootstrap.Desktop.Sha256
     solidWorksAddinPackageSha256 = $bootstrap.SolidWorksAddin.Sha256

@@ -122,6 +122,22 @@ function installApiMock(projectsBeforeDefault: Array<Record<string, unknown>> = 
       projects.push(child)
       return json(child, 201)
     }
+    if (url.includes('/api/projects/') && url.endsWith('/procurement-tracking')) {
+      const requestedProjectId = url.split('/api/projects/')[1]?.split('/')[0] ?? ''
+      const requestedProject = projects.find(project => project.id === requestedProjectId)
+      const rootProject = requestedProject?.parentProjectId
+        ? projects.find(project => project.id === requestedProject.parentProjectId)
+        : requestedProject
+      return json({
+        projectId: requestedProjectId,
+        projectCode: rootProject?.code ?? '',
+        subprojectCode: requestedProject?.parentProjectId ? requestedProject.code : null,
+        items: [],
+        lastSuccessfulRefreshAt: null,
+        lastRefreshError: null,
+        hasPublishedBom: false,
+      })
+    }
     if (url.endsWith('/api/projects/project-child')) return json(projects.find(project => project.id === 'project-child'))
     if (url.includes('/api/projects/project-child/')) {
       if (url.endsWith('/reference-tree')) return json({ title: 'Not Found' }, 404)
@@ -279,10 +295,7 @@ describe('PLM client workspace', () => {
     } finally { wrapper.unmount() }
   })
 
-  it.each([
-    ['Administrator', true], ['platform_admin', true], ['developer', true],
-    ['PlanningManager', false], ['Engineer', false],
-  ])('项目计划模板入口按实际登录角色 %s 显示，不按姓名或普通设置权限放行', async (roleCode, visible) => {
+  it.each(['Administrator', 'platform_admin', 'developer', 'PlanningManager', 'Engineer'])('项目计划模板已从系统管理移除（角色 %s）', async roleCode => {
     installApiMock([], [String(roleCode)])
     const wrapper = mount(App, { attachTo: document.body, global: { plugins: [ElementPlus] } })
     try {
@@ -290,7 +303,7 @@ describe('PLM client workspace', () => {
       await buttonByText(wrapper, '系统管理').trigger('click')
       await flushPromises()
       const tabs = wrapper.get('.pdm-admin-tabs').text()
-      expect(tabs.includes('项目计划模板')).toBe(visible)
+      expect(tabs).not.toContain('项目计划模板')
     } finally { wrapper.unmount() }
   })
 
@@ -616,6 +629,52 @@ describe('PLM client workspace', () => {
     wrapper.unmount()
   })
 
+  it('keeps the child project when BOM and procurement are clicked during the first switch', async () => {
+    const child = {
+      id: 'project-child',
+      code: 'PRJ-REAL-001-1',
+      name: '泵组单元',
+      parentProjectId: projectId,
+      childSequence: 1,
+      owner: 'engineer',
+      responsibleUsers: ['engineer'],
+      vaultLocation: 'D:\\PDM\\PRJ-REAL-001-1',
+      releaseLocation: 'D:\\Release\\PRJ-REAL-001-1',
+      isActive: true,
+      quantity: 1,
+      serialNumbers: [],
+    }
+    installApiMock([child])
+    const wrapper = mount(App, { attachTo: document.body, global: { plugins: [ElementPlus] } })
+    await login(wrapper)
+
+    const originalFetch = vi.mocked(fetch)
+    let releaseChildRequest!: () => void
+    const childRequestGate = new Promise<void>(resolve => { releaseChildRequest = resolve })
+    let blockChildDetail = true
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (blockChildDetail && String(input).endsWith('/api/projects/project-child')) {
+        blockChildDetail = false
+        await childRequestGate
+      }
+      return originalFetch(input, init)
+    }))
+
+    await wrapper.get('[aria-label="选择项目号 PRJ-REAL-001-1"]').trigger('click')
+    await new Promise(resolve => window.setTimeout(resolve, 0))
+    await projectTabByText(wrapper, 'BOM').trigger('click')
+    await projectTabByText(wrapper, '备料').trigger('click')
+    releaseChildRequest()
+    await flushPromises()
+
+    expect(wrapper.get('.pdm-project-sidebar__summary').text()).toContain('PRJ-REAL-001-1 · 泵组单元')
+    expect(wrapper.get('.pdm-project-tabs button.is-active').text()).toBe('备料')
+    const requestedUrls = vi.mocked(fetch).mock.calls.map(([input]) => String(input))
+    expect(requestedUrls).toContain('http://127.0.0.1:5080/api/projects/project-child/procurement-tracking')
+    expect(requestedUrls).not.toContain(`http://127.0.0.1:5080/api/projects/${projectId}/procurement-tracking`)
+    wrapper.unmount()
+  })
+
   it('opens the most recently used project overview after Windows client login', async () => {
     const fallbackProject = { id: 'project-fallback', code: 'PRJ-FALLBACK-001', name: '回退项目', owner: 'engineer', responsibleUsers: ['engineer'], vaultLocation: 'D:\\PDM\\PRJ-FALLBACK-001', releaseLocation: 'D:\\Release\\PRJ-FALLBACK-001', isActive: true, quantity: 1, serialNumbers: [] }
     installApiMock([fallbackProject])
@@ -756,9 +815,9 @@ describe('PLM client workspace', () => {
     const wrapper = mount(App, { attachTo: document.body, global: { plugins: [ElementPlus] } })
     await login(wrapper, false)
 
-    expect(wrapper.findAll('.pdm-sidebar__footer button').map(button => button.text())).toEqual(['未知', '系统管理'])
-    expect(wrapper.get('.pdm-sidebar__version').text()).toBe('未知')
-    window.dispatchEvent(new CustomEvent('pdm-client-version', { detail: { version: '2026.09.12.1234-version-display' } }))
+    expect(wrapper.findAll('.pdm-sidebar__footer button').map(button => button.text())).toEqual(['V2026.09.12.1234', '系统管理'])
+    expect(wrapper.get('.pdm-sidebar__version').text()).toBe('V2026.09.12.1234')
+    window.dispatchEvent(new CustomEvent('pdm-client-version', { detail: { version: '2026.09.12.1200-desktop-client' } }))
     await wrapper.vm.$nextTick()
     expect(wrapper.get('.pdm-sidebar__version').text()).toBe('V2026.09.12.1234')
     expect(wrapper.get('.pdm-sidebar__version').attributes('title')).toBe('版本 2026.09.12.1234-version-display，点击查看详情')

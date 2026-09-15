@@ -220,13 +220,26 @@ public sealed class U9ProcurementService(
             package => package.NonStandardBomSnapshot, ReleaseScope.NonStandardLongLead);
         AddCategory(lines, packages, "电气件", package => package.Scope is ReleaseScope.ElectricalFormal or ReleaseScope.ElectricalSupplement or ReleaseScope.LegacyCombined,
             package => package.ElectricalBomSnapshot, null);
-        return lines
+        var published = lines
             .GroupBy(line => (line.Item.Id, line.BomKind))
             .Select(group => new PublishedBomLine(
                 group.Last().Item,
                 group.Key.BomKind,
                 string.Join("、", group.Select(item => item.PackageNumbers).Distinct(StringComparer.OrdinalIgnoreCase)),
                 group.Sum(item => item.Quantity)))
+            .ToArray();
+        var currentImpactStages = new Dictionary<Guid, string?>();
+        foreach (var kind in new[] { BomKind.Standard, BomKind.NonStandard, BomKind.Electrical })
+        {
+            foreach (var item in await repository.GetBomAsync(projectId, kind, cancellationToken))
+            {
+                if (item.DeletedAt is null) currentImpactStages[item.Id] = item.ImpactStage;
+            }
+        }
+        return published
+            .Select(line => currentImpactStages.TryGetValue(line.Item.Id, out var impactStage)
+                ? line with { Item = line.Item with { ImpactStage = impactStage } }
+                : line)
             .ToArray();
     }
 

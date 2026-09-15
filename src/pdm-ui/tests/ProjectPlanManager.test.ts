@@ -30,7 +30,7 @@ const draft = {
 const template = { ...metadata, id: 'template', name: '设备模板', isActive: true, createdBy: 'admin', rowVersion: 1, stages, tasks: [{ id: 'tt', name: '方案检查', stage: 'custom-review', durationRatio: .5, predecessorSortOrders: [], weight: 1, isRequired: true, isMilestone: false, defaultAssigneeRole: 'ProjectManager', sortOrder: 10 }] } as ProjectPlanTemplate
 const wrappers: ReturnType<typeof mount>[] = []
 function render(project = child) {
-  const wrapper = mount(ProjectPlanManager, { attachTo: document.body, props: { project, projects: [root, child, target, approvedTarget], token: 'test', currentUsername: 'pm', currentRole: 'ProjectManager', developer: false, canEdit: true }, global: { plugins: [ElementPlus] } })
+  const wrapper = mount(ProjectPlanManager, { attachTo: document.body, props: { project, projects: [root, child, target, approvedTarget], token: 'test', currentUsername: 'pm', currentRole: 'ProjectManager', developer: false, canEdit: true, canManageSystemTemplates: false }, global: { plugins: [ElementPlus] } })
   wrappers.push(wrapper)
   return wrapper
 }
@@ -358,7 +358,7 @@ describe('项目计划审批和配置', () => {
     await flushPromises()
     expect(wrapper.find('.pdm-plan-view-label').text()).toMatch(/^全部子项目（\d+）$/)
     expect(wrapper.findAll('.pdm-plan-toolbar__actions > button').slice(0, 3).map(item => item.text())).toEqual(['删除计划', '复制计划', '编辑主计划'])
-    expect(wrapper.find('.pdm-plan-toolbar__actions').text()).toContain('删除计划复制计划编辑主计划编辑子计划刷新')
+    expect(wrapper.find('.pdm-plan-toolbar__actions').text()).toContain('删除计划复制计划编辑主计划编辑子计划计划模板刷新')
     expect(wrapper.find('.pdm-plan-toolbar__actions').text()).not.toContain('同步子项目')
     expect(wrapper.find('.pdm-plan-toolbar__actions').text()).not.toContain('同步结果与差异')
     expect(wrapper.find('.pdm-plan-toolbar__actions').text()).not.toContain('显示基线')
@@ -846,12 +846,12 @@ describe('项目计划审批和配置', () => {
     expect(api.updateProjectPlanTaskProgress).not.toHaveBeenCalled()
   })
 
-  it('项目页面不再提供模板编辑或复制入口，但保留模板选择', async () => {
+  it('项目页面提供计划模板入口并保留生成时模板选择', async () => {
     const wrapper = render()
     await flushPromises()
     expect(wrapper.text()).not.toContain('模板设置')
     expect(wrapper.text()).not.toContain('复制为新模板')
-    expect(api.listProjectPlanTemplates).toHaveBeenCalledWith('test', false)
+    expect(api.listProjectPlanTemplates).toHaveBeenCalledWith('test', false, 'child')
     await clickText('重新生成')
     expect(document.body.textContent).toContain('设备模板')
     expect(api.saveProjectPlanTemplate).not.toHaveBeenCalled()
@@ -896,7 +896,7 @@ describe('项目计划审批和配置', () => {
     expect(wrapper.find('.pdm-gantt-timeline-head').text()).toBe(ticks)
     await wrapper.find('[aria-label="展开全部阶段"]').trigger('click')
     expect(wrapper.findAll('.pdm-gantt-info-row')).toHaveLength(wrapper.findAll('.pdm-gantt-timeline-row').length)
-    expect(wrapper.findAll('.pdm-plan-toolbar__actions > button').slice(0, 3).map(item => item.text())).toEqual(['删除计划', '提交审批', '刷新'])
+    expect(wrapper.findAll('.pdm-plan-toolbar__actions > button').slice(0, 4).map(item => item.text())).toEqual(['删除计划', '提交审批', '计划模板', '刷新'])
     expect(wrapper.find('.pdm-plan-summary').text()).toContain('生效信息草稿')
   })
 
@@ -1113,5 +1113,41 @@ describe('项目计划审批和配置', () => {
     expect(wrapper.find('.pdm-plan-summary').text()).toContain('生效信息待审批')
     expect(wrapper.text()).not.toContain('修改计划会自动撤回本次审批')
     expect(wrapper.text()).toContain('删除计划')
+  })
+
+  it('项目计划工具栏打开模板设置，项目经理可复制系统模板', async () => {
+    const wrapper = render()
+    await flushPromises()
+    expect(wrapper.findAll('.pdm-plan-toolbar__actions button').some(button => button.text().includes('计划模板'))).toBe(true)
+    await clickText('计划模板')
+    expect(document.body.textContent).toContain('项目计划模板')
+    expect(document.body.textContent).toContain('复制为个人模板')
+    expect(api.listProjectPlanTemplates).toHaveBeenCalledWith('test', true, 'child')
+  })
+
+  it('可删除无进度的非流程任务，流程必需任务保持锁定', async () => {
+    vi.spyOn(ElMessageBox, 'confirm').mockResolvedValue('confirm' as never)
+    const optionalPlan = { ...structuredClone(draft), tasks: [
+      structuredClone(draft.tasks[0]!),
+      { ...structuredClone(draft.tasks[0]!), id: 'keep', name: '保留任务', sortOrder: 20 },
+    ] }
+    api.readProjectPlan.mockResolvedValue(optionalPlan)
+    const wrapper = render()
+    await flushPromises()
+    await wrapper.find('.pdm-gantt-info-row.is-task').trigger('click')
+    await clickText('删除任务')
+    expect(api.saveProjectPlan).toHaveBeenCalledWith('child', expect.objectContaining({
+      tasks: [expect.objectContaining({ id: 'keep' })], expectedRowVersion: 1, changeReason: '删除非必需任务：方案检查',
+    }), 'test')
+
+    api.saveProjectPlan.mockClear()
+    wrapper.unmount()
+    api.readProjectPlan.mockResolvedValue({ ...structuredClone(draft), tasks: [{ ...structuredClone(draft.tasks[0]!), workflowKey: 'drawing.review' }] })
+    const lockedWrapper = render()
+    await flushPromises()
+    await lockedWrapper.find('.pdm-gantt-info-row.is-task').trigger('click')
+    expect(document.body.textContent).toContain('流程必需任务')
+    const deleteButton = [...document.querySelectorAll<HTMLButtonElement>('button')].find(button => button.textContent?.trim() === '删除任务')!
+    expect(deleteButton.disabled).toBe(true)
   })
 })

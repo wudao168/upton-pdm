@@ -2,7 +2,6 @@ import ElementPlus from 'element-plus'
 import { mount, flushPromises } from '@vue/test-utils'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import ProjectPlanTemplateSettings from '../src/components/ProjectPlanTemplateSettings.vue'
-import SystemManagement from '../src/components/SystemManagement.vue'
 import type { ProjectPlanTemplate } from '../src/types'
 
 const api = vi.hoisted(() => ({ listProjectPlanTemplates: vi.fn(), saveProjectPlanTemplate: vi.fn() }))
@@ -14,8 +13,8 @@ const template: ProjectPlanTemplate = {
   tasks: [{ id: 'task', name: '设计评审', stage: 'design', sortOrder: 10, durationRatio: .5, weight: 1, predecessorSortOrders: [], defaultAssigneeRole: 'DesignLead', isRequired: true, isMilestone: false }],
 }
 const wrappers: ReturnType<typeof mount>[] = []
-function render(canManage = true) {
-  const wrapper = mount(ProjectPlanTemplateSettings, { props: { token: 'test', currentUsername: 'admin', canManage }, global: { plugins: [ElementPlus] } })
+function render(canManage = true, currentUsername = 'admin') {
+  const wrapper = mount(ProjectPlanTemplateSettings, { props: { token: 'test', currentUsername, projectId: 'project', canManageSystem: canManage }, global: { plugins: [ElementPlus] } })
   wrappers.push(wrapper)
   return wrapper
 }
@@ -105,14 +104,14 @@ describe('设置页项目计划模板', () => {
   it('可修改初始值并带版本保存，复制时不会直接写入', async () => {
     const wrapper = render()
     await flushPromises()
-    expect(api.listProjectPlanTemplates).toHaveBeenCalledWith('test', true)
+    expect(api.listProjectPlanTemplates).toHaveBeenCalledWith('test', true, 'project')
     await wrapper.find('input[aria-label="模板名称"]').setValue('标准设备')
     await wrapper.find('.pdm-plan-stage-editor input').setValue('方案确认')
     await wrapper.find('footer .pdm-primary-action').trigger('click')
     await flushPromises()
     expect(api.saveProjectPlanTemplate).toHaveBeenCalledWith('template', expect.objectContaining({ name: '标准设备', expectedRowVersion: 1, stages: expect.arrayContaining([expect.objectContaining({ name: '方案确认' })]) }), 'test')
     api.saveProjectPlanTemplate.mockClear()
-    await wrapper.findAll('button').find(button => button.text() === '复制为新模板')!.trigger('click')
+    await wrapper.findAll('button').find(button => button.text() === '复制为个人模板')!.trigger('click')
     expect(api.saveProjectPlanTemplate).not.toHaveBeenCalled()
     await wrapper.find('footer .pdm-secondary-action').trigger('click')
     expect((wrapper.find('input[aria-label="模板名称"]').element as HTMLInputElement).value).toBe('标准设备')
@@ -182,7 +181,7 @@ describe('设置页项目计划模板', () => {
     await flushPromises()
     expect(wrapper.find('.pdm-plan-template-settings > header').exists()).toBe(false)
     expect(wrapper.find('.pdm-template-fields > .pdm-allocation-summary').exists()).toBe(false)
-    expect(wrapper.find('.pdm-template-picker').text()).toContain('选择模板')
+    expect(wrapper.find('.pdm-template-access').text()).toContain('选择模板')
     expect(wrapper.find('.pdm-template-picker').text()).toContain('模板名称')
     expect(wrapper.find('.pdm-template-picker').text()).toContain('项目类型')
     expect(wrapper.find('.pdm-template-picker').text()).toContain('启用模板')
@@ -198,22 +197,15 @@ describe('设置页项目计划模板', () => {
     expect(api.listProjectPlanTemplates).toHaveBeenCalledTimes(2)
     expect(api.saveProjectPlanTemplate).not.toHaveBeenCalled()
   })
-  it('无管理权限时不读取停用模板，也不显示任何编辑控件', async () => {
-    const wrapper = render(false)
+  it('项目经理只读查看系统模板，可复制为个人模板后编辑', async () => {
+    const wrapper = render(false, 'pm')
     await flushPromises()
-    expect(wrapper.text()).toContain('仅开发者和管理员')
-    expect(wrapper.find('input').exists()).toBe(false)
-    expect(api.listProjectPlanTemplates).not.toHaveBeenCalled()
+    expect(wrapper.text()).toContain('系统模板由管理员维护')
+    expect(wrapper.find('fieldset').attributes('disabled')).toBeDefined()
+    await wrapper.findAll('button').find(button => button.text() === '复制为个人模板')!.trigger('click')
+    await flushPromises()
+    expect(wrapper.text()).toContain('个人模板')
+    expect(wrapper.find('fieldset').attributes('disabled')).toBeUndefined()
     expect(api.saveProjectPlanTemplate).not.toHaveBeenCalled()
-  })
-  it('设置页只为获准角色显示模板入口，普通设置权限不授予编辑权', async () => {
-    const wrapper = mount(SystemManagement, { props: { permissions: ['settings.storage.manage'], canManageProjectPlanTemplates: false } as InstanceType<typeof SystemManagement>['$props'], global: { stubs: { U9IntegrationManagement: true, StorageSettings: true, ProjectPlanTemplateSettings: true } } })
-    wrappers.push(wrapper)
-    expect(wrapper.find('nav').text()).not.toContain('项目计划模板')
-    await wrapper.setProps({ canManageProjectPlanTemplates: true })
-    await wrapper.findAll('nav button').find(button => button.text() === '项目计划模板')!.trigger('click')
-    expect(wrapper.findComponent(ProjectPlanTemplateSettings).exists()).toBe(true)
-    await wrapper.setProps({ canManageProjectPlanTemplates: false })
-    expect(wrapper.findComponent(ProjectPlanTemplateSettings).exists()).toBe(false)
   })
 })

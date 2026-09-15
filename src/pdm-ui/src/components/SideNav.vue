@@ -6,7 +6,29 @@ import PlmCubeIcon from './PlmCubeIcon.vue'
 
 type NavKey = 'project-center' | 'project-workbench' | 'projects' | 'materials' | 'standard-library' | 'standard-structure' | 'program-templates' | 'tasks' | 'admin'
 
-const props = withDefaults(defineProps<{ active: NavKey; approvalCount?: number; materialCount?: number; canManageSystem?: boolean; canViewStandardLibrary?: boolean; canViewMaterials?: boolean; collapsed?: boolean; version?: string }>(), {
+type SystemReleaseHistoryEntry = {
+  Version?: string
+  ReleasedAt?: string
+  ReleaseNote?: string
+  DesktopVersion?: string
+  SolidWorksAddinVersion?: string
+}
+
+const props = withDefaults(defineProps<{
+  active: NavKey
+  approvalCount?: number
+  materialCount?: number
+  canManageSystem?: boolean
+  canViewStandardLibrary?: boolean
+  canViewMaterials?: boolean
+  collapsed?: boolean
+  version?: string
+  releasedAt?: string
+  releaseNote?: string
+  releaseHistory?: SystemReleaseHistoryEntry[]
+  desktopVersion?: string
+  solidWorksAddinVersion?: string
+}>(), {
   approvalCount: 0,
   materialCount: 0,
   canManageSystem: false,
@@ -14,6 +36,11 @@ const props = withDefaults(defineProps<{ active: NavKey; approvalCount?: number;
   canViewMaterials: false,
   collapsed: false,
   version: '',
+  releasedAt: '',
+  releaseNote: '',
+  releaseHistory: () => [],
+  desktopVersion: '',
+  solidWorksAddinVersion: '',
 })
 const emit = defineEmits<{ navigate: [key: NavKey, label: string] }>()
 const versionDialogOpen = ref(false)
@@ -27,16 +54,44 @@ const displayVersion = computed(() => {
   return `V${fullVersion.value.split('-', 1)[0]}`
 })
 const versionTitle = computed(() => fullVersion.value ? `版本 ${fullVersion.value}` : '版本未知')
-const releaseTime = computed(() => {
-  const match = /^(\d{4})\.(\d{2})\.(\d{2})\.(\d{2})(\d{2})/.exec(fullVersion.value)
+function displayReleaseVersion(version: string) {
+  const normalized = version.trim()
+  return normalized ? `V${normalized.split('-', 1)[0]}` : '未知'
+}
+function formatReleaseTime(releasedAt: string | undefined, version: string) {
+  const normalizedReleasedAt = releasedAt?.trim() ?? ''
+  const isoMatch = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})/.exec(normalizedReleasedAt)
+  if (isoMatch) return `${isoMatch[1]}-${isoMatch[2]}-${isoMatch[3]} ${isoMatch[4]}:${isoMatch[5]}`
+  const match = /^(\d{4})\.(\d{2})\.(\d{2})\.(\d{2})(\d{2})/.exec(version)
   return match ? `${match[1]}-${match[2]}-${match[3]} ${match[4]}:${match[5]}` : '—'
-})
-const releaseNote = computed(() => {
-  const separator = fullVersion.value.indexOf('-')
-  if (separator < 0) return '移除侧栏版本号前的“版本”文字，增加系统版本记录入口，在个人设置中显示全部已分配角色，并将弹窗操作提醒显示在当前弹窗内。'
-  const tag = fullVersion.value.slice(separator + 1)
+}
+function releaseNoteFromVersion(version: string) {
+  const separator = version.indexOf('-')
+  if (separator < 0) return ''
+  const tag = version.slice(separator + 1).trim()
   if (tag === 'version-information') return '增加网页端、Windows 客户端及 SolidWorks 插件端版本信息。'
   return tag
+}
+const releaseTime = computed(() => formatReleaseTime(props.releasedAt, fullVersion.value))
+const releaseNote = computed(() => {
+  return props.releaseNote.trim() || releaseNoteFromVersion(fullVersion.value) || '本次发布未填写版本说明。'
+})
+const releaseHistory = computed(() => {
+  const entries = [...props.releaseHistory]
+  if (fullVersion.value && !entries.some(entry => entry.Version?.trim() === fullVersion.value)) {
+    entries.unshift({
+      Version: fullVersion.value,
+      ReleasedAt: props.releasedAt,
+      ReleaseNote: releaseNote.value,
+      DesktopVersion: props.desktopVersion,
+      SolidWorksAddinVersion: props.solidWorksAddinVersion,
+    })
+  }
+  return entries.filter(entry => entry.Version?.trim()).map(entry => ({
+    version: entry.Version!.trim(),
+    releasedAt: formatReleaseTime(entry.ReleasedAt, entry.Version!.trim()),
+    note: entry.ReleaseNote?.trim() || releaseNoteFromVersion(entry.Version!.trim()) || '历史发布未填写说明。',
+  }))
 })
 
 async function openVersionInfo() {
@@ -117,7 +172,9 @@ const items = [
         <dl>
           <div><dt>发布标识</dt><dd>{{ fullVersion || '—' }}</dd></div>
           <div><dt>发布时间</dt><dd>{{ releaseTime }}</dd></div>
-          <div><dt>运行端</dt><dd>网页端 / Windows 客户端</dd></div>
+          <div><dt>服务器 / 网页端</dt><dd>{{ displayVersion }}</dd></div>
+          <div><dt>Windows客户端</dt><dd>{{ props.desktopVersion ? displayReleaseVersion(props.desktopVersion) : '未连接客户端' }}</dd></div>
+          <div><dt>SolidWorks插件</dt><dd>{{ props.solidWorksAddinVersion ? displayReleaseVersion(props.solidWorksAddinVersion) : '—' }}</dd></div>
           <div><dt>数据库</dt><dd>{{ runtimeDatabase }}</dd></div>
         </dl>
         <section><h3>版本说明</h3><p>{{ releaseNote }}</p></section>
@@ -136,10 +193,12 @@ const items = [
           class="pdm-system-version-history"
           aria-label="版本记录"
         >
-          <header><strong>{{ displayVersion }}</strong><time>{{ releaseTime }}</time></header>
-          <p>{{ releaseNote }}</p>
+          <article v-for="entry in releaseHistory" :key="entry.version" class="pdm-system-version-history__item">
+            <header><strong>{{ displayReleaseVersion(entry.version) }}</strong><time>{{ entry.releasedAt }}</time></header>
+            <p>{{ entry.note }}</p>
+          </article>
         </section>
-        <p class="pdm-system-version-detail__note">版本信息来自当前部署标识；数据库状态在打开详情时实时读取。</p>
+        <p class="pdm-system-version-detail__note">版本说明与历史记录来自服务器发布清单；数据库状态在打开详情时实时读取。</p>
       </section>
     </el-drawer>
   </aside>

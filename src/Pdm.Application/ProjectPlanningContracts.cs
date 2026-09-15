@@ -8,7 +8,10 @@ public sealed record SaveProjectPlanTemplateCommand(
     bool IsActive,
     IReadOnlyList<ProjectPlanTemplateTask> Tasks,
     long? ExpectedRowVersion,
-    IReadOnlyList<ProjectPlanStageDefinition>? Stages = null);
+    IReadOnlyList<ProjectPlanStageDefinition>? Stages = null,
+    ProjectPlanTemplateScope Scope = ProjectPlanTemplateScope.System,
+    Guid? BaseSystemTemplateId = null,
+    Guid? ProjectId = null);
 
 public sealed record GenerateProjectPlanCommand(
     Guid TemplateId,

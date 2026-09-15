@@ -1,11 +1,15 @@
 ﻿[CmdletBinding()]
 param(
     [string]$ServerBaseUrl = 'http://10.7.7.62:5173',
-    [string]$Version = ([DateTimeOffset]::Now.ToString('yyyy.MM.dd.HHmm'))
+    [string]$Version = ([DateTimeOffset]::Now.ToString('yyyy.MM.dd.HHmm')),
+    [string]$ReleaseNote = ''
 )
 
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
+. (Join-Path $PSScriptRoot 'SystemReleaseHistory.ps1')
+$ReleaseNote = Get-UplmReleaseNote -Version $Version -ReleaseNote $ReleaseNote -Fallback '本次发布未填写版本说明。'
+$releasedAt = Get-UplmReleasedAt -Version $Version
 $dotnet = Join-Path $root '.dotnet\dotnet.exe'
 $prerequisiteSource = Join-Path $root '.artifacts\client-prerequisites'
 $webViewInstaller = Join-Path $prerequisiteSource 'MicrosoftEdgeWebView2RuntimeInstallerX64.exe'
@@ -50,6 +54,16 @@ Get-ChildItem -LiteralPath $addinBuild | ForEach-Object {
 }
 
 $serverBase = $ServerBaseUrl.TrimEnd('/')
+$existingBootstrap = $null
+try { $existingBootstrap = Invoke-RestMethod -Uri "$serverBase/client-bootstrap.json" -TimeoutSec 5 }
+catch { Write-Warning "Server release history could not be read; the retained baseline will be used: $($_.Exception.Message)" }
+$releaseHistory = Get-UplmReleaseHistory `
+    -CurrentVersion $Version `
+    -CurrentReleaseNote $ReleaseNote `
+    -CurrentDesktopVersion $Version `
+    -CurrentSolidWorksAddinVersion $Version `
+    -SourceBootstraps @($existingBootstrap) `
+    -BaselinePath (Join-Path $PSScriptRoot 'system-release-history.json')
 $locatorJson = [ordered]@{ BootstrapUrl = "$serverBase/client-bootstrap.json" } | ConvertTo-Json
 $encoding = New-Object Text.UTF8Encoding($false)
 foreach ($componentOutput in @($desktopOutput, $addinOutput)) {
@@ -62,8 +76,11 @@ $addinArchive = Join-Path $updates "uplm-solidworks-addin-$Version.zip"
 Compress-Archive -Path (Join-Path $desktopOutput '*') -DestinationPath $desktopArchive -CompressionLevel Optimal -Force
 Compress-Archive -Path (Join-Path $addinOutput '*') -DestinationPath $addinArchive -CompressionLevel Optimal -Force
 $bootstrap = [ordered]@{
-    SchemaVersion = 1
+    SchemaVersion = 2
     ConfigurationVersion = $Version
+    ReleasedAt = $releasedAt
+    ReleaseNote = $ReleaseNote
+    ReleaseHistory = $releaseHistory
     ApiBaseUrl = "$serverBase/"
     UiBaseUrl = "$serverBase/"
     PollSeconds = 30
@@ -78,7 +95,7 @@ $bootstrap = [ordered]@{
         Sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $addinArchive).Hash
     }
 }
-[IO.File]::WriteAllText((Join-Path $serverPublish 'client-bootstrap.json'), ($bootstrap | ConvertTo-Json -Depth 5), $encoding)
+[IO.File]::WriteAllText((Join-Path $serverPublish 'client-bootstrap.json'), ($bootstrap | ConvertTo-Json -Depth 8), $encoding)
 
 Copy-Item -LiteralPath $webViewInstaller -Destination $prerequisites
 Copy-Item -LiteralPath $net48Installer -Destination $prerequisites
@@ -90,6 +107,8 @@ foreach ($scriptName in @('Install-ClientTestPackage.ps1', 'Publish-ClientUpdate
 }
 $manifest = [ordered]@{
     version = $Version
+    releaseNote = $ReleaseNote
+    releaseHistoryCount = $releaseHistory.Count
     createdAt = [DateTimeOffset]::Now.ToString('O')
     serverBaseUrl = $serverBase
     desktopExeSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $desktopOutput 'Upton.Pdm.Desktop.exe')).Hash

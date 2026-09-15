@@ -1527,8 +1527,11 @@ export function markAllUserNotificationsRead(token: string): Promise<void> {
   return requestJson('/api/notifications/read-all', { method: 'POST' }, token)
 }
 
-export function listProjectPlanTemplates(token: string, includeInactive = false): Promise<import('./types').ProjectPlanTemplate[]> {
-  return requestJson(`/api/project-plan-templates${includeInactive ? '?includeInactive=true' : ''}`, {}, token)
+export function listProjectPlanTemplates(token: string, includeInactive = false, projectId?: string): Promise<import('./types').ProjectPlanTemplate[]> {
+  const query = new URLSearchParams()
+  if (includeInactive) query.set('includeInactive', 'true')
+  if (projectId) query.set('projectId', projectId)
+  return requestJson(`/api/project-plan-templates${query.size ? `?${query}` : ''}`, {}, token)
 }
 
 export function saveProjectPlanTemplate(templateId: string | null, input: import('./types').SaveProjectPlanTemplateInput, token: string): Promise<import('./types').ProjectPlanTemplate> {

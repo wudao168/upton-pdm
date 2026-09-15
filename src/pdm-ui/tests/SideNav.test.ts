@@ -82,7 +82,16 @@ describe('SideNav', () => {
   it('opens detailed runtime information when the version is clicked', async () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({ database: 'MySql', databaseName: 'pdm' }), { status: 200 })))
     const wrapper = mount(SideNav, {
-      props: { active: 'projects', version: '2026.09.12.1710-version-information' },
+      props: {
+        active: 'projects',
+        version: '2026.09.12.1710-version-information',
+        desktopVersion: '2026.09.12.1700',
+        solidWorksAddinVersion: '2026.09.12.1650',
+        releaseHistory: [
+          { Version: '2026.09.12.1710-version-information', ReleasedAt: '2026-09-12T17:10:00+08:00', ReleaseNote: '增加网页端、Windows 客户端及 SolidWorks 插件端版本信息。' },
+          { Version: '2026.09.11.1456-user-display-name', ReleasedAt: '2026-09-11T14:56:00+08:00', ReleaseNote: '完善用户显示名称。' },
+        ],
+      },
       global: { plugins: [ElementPlus] },
     })
 
@@ -93,6 +102,8 @@ describe('SideNav', () => {
     expect(document.body.textContent).toContain('V2026.09.12.1710')
     expect(document.body.textContent).toContain('2026-09-12 17:10')
     expect(document.body.textContent).toContain('MySql · pdm')
+    expect(document.body.textContent).toContain('V2026.09.12.1700')
+    expect(document.body.textContent).toContain('V2026.09.12.1650')
     expect(document.body.textContent).toContain('增加网页端、Windows 客户端及 SolidWorks 插件端版本信息。')
     expect(fetch).toHaveBeenCalledWith('/health', { cache: 'no-store' })
 
@@ -106,9 +117,11 @@ describe('SideNav', () => {
     expect(history?.textContent).toContain('V2026.09.12.1710')
     expect(history?.textContent).toContain('2026-09-12 17:10')
     expect(history?.textContent).toContain('增加网页端、Windows 客户端及 SolidWorks 插件端版本信息。')
+    expect(history?.textContent).toContain('V2026.09.11.1456')
+    expect(history?.textContent).toContain('完善用户显示名称。')
   })
 
-  it('shows the current update description for an untagged deployment version', async () => {
+  it('does not reuse an old hard-coded description for an untagged deployment version', async () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({ database: 'MySql' }), { status: 200 })))
     const wrapper = mount(SideNav, {
       attachTo: document.body,
@@ -122,8 +135,8 @@ describe('SideNav', () => {
     historyButton?.click()
     await wrapper.vm.$nextTick()
 
-    expect(document.body.querySelector('[aria-label="版本记录"]')?.textContent)
-      .toContain('移除侧栏版本号前的“版本”文字，增加系统版本记录入口，在个人设置中显示全部已分配角色，并将弹窗操作提醒显示在当前弹窗内。')
+    expect(document.body.textContent).toContain('本次发布未填写版本说明。')
+    expect(document.body.textContent).not.toContain('移除侧栏版本号前的“版本”文字')
     wrapper.unmount()
   })
 })

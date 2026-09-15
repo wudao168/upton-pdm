@@ -165,6 +165,7 @@ internal static class ClientBootstrapLoader
 internal static class ClientPackageUpdater
 {
     private static readonly JavaScriptSerializer Serializer = new JavaScriptSerializer { MaxJsonLength = int.MaxValue };
+    private static readonly object PendingUpdateSync = new object();
 
     public static string GetInstalledVersion(string targetDirectory)
     {
@@ -179,6 +180,17 @@ internal static class ClientPackageUpdater
         }
     }
 
+    public static bool IsUpdateAvailable(string installedVersion, string availableVersion)
+    {
+        if (string.IsNullOrWhiteSpace(availableVersion)) return false;
+        if (string.IsNullOrWhiteSpace(installedVersion)) return true;
+        if (string.Equals(installedVersion.Trim(), availableVersion.Trim(), StringComparison.OrdinalIgnoreCase)) return false;
+
+        return TryParseReleaseVersion(installedVersion, out var installed)
+            && TryParseReleaseVersion(availableVersion, out var available)
+            && available > installed;
+    }
+
     public static async Task<bool> StageAsync(
         string component,
         ClientPackageConfiguration package,
@@ -190,11 +202,12 @@ internal static class ClientPackageUpdater
             || string.IsNullOrWhiteSpace(package.Version)
             || string.IsNullOrWhiteSpace(package.PackageUrl)
             || string.IsNullOrWhiteSpace(package.Sha256)
-            || string.Equals(GetInstalledVersion(targetDirectory), package.Version, StringComparison.OrdinalIgnoreCase))
+            || !IsUpdateAvailable(GetInstalledVersion(targetDirectory), package.Version))
         {
             return false;
         }
 
+        var installedVersion = GetInstalledVersion(targetDirectory);
         var componentRoot = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
             "UPLM",
@@ -203,7 +216,19 @@ internal static class ClientPackageUpdater
         var stageRoot = Path.Combine(componentRoot, SanitizeSegment(package.Version));
         var payloadRoot = Path.Combine(stageRoot, "payload");
         var pendingPath = GetPendingPath(component);
-        if (File.Exists(pendingPath)) return false;
+        lock (PendingUpdateSync)
+        {
+            if (File.Exists(pendingPath))
+            {
+                if (TryReadPendingUpdate(pendingPath, out var existing, out _)
+                    && string.Equals(existing.Version, package.Version, StringComparison.OrdinalIgnoreCase)
+                    && IsUpdateAvailable(installedVersion, existing.Version))
+                {
+                    return false;
+                }
+                QuarantinePendingUpdate(pendingPath);
+            }
+        }
 
         Directory.CreateDirectory(stageRoot);
         var archivePath = Path.Combine(stageRoot, "package.zip");
@@ -252,47 +277,65 @@ internal static class ClientPackageUpdater
             }
         }
 
-        Directory.CreateDirectory(Path.GetDirectoryName(pendingPath));
-        File.WriteAllText(pendingPath, Serializer.Serialize(new PendingUpdate
+        var pendingJson = Serializer.Serialize(new PendingUpdate
         {
             Component = component,
             Version = package.Version,
             PayloadDirectory = payloadRoot,
             TargetDirectory = Path.GetFullPath(targetDirectory)
-        }), new UTF8Encoding(false));
+        });
+        lock (PendingUpdateSync)
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(pendingPath));
+            WriteAllTextAtomically(pendingPath, pendingJson);
+        }
         return true;
     }
 
     public static bool TryLaunchPendingUpdate(string component, int processId, string restartPath)
     {
         var pendingPath = GetPendingPath(component);
-        if (!File.Exists(pendingPath)) return false;
-        var launchMarker = pendingPath + ".launched";
-        if (File.Exists(launchMarker)) return false;
-
-        try
+        lock (PendingUpdateSync)
         {
-            var pending = Serializer.Deserialize<PendingUpdate>(File.ReadAllText(pendingPath, Encoding.UTF8));
-            if (pending == null || !Directory.Exists(pending.PayloadDirectory) || string.IsNullOrWhiteSpace(pending.TargetDirectory)) return false;
-            File.WriteAllText(launchMarker, DateTimeOffset.UtcNow.ToString("O"), new UTF8Encoding(false));
-            var scriptPath = Path.Combine(Path.GetDirectoryName(pendingPath), "apply-pending-update.ps1");
-            File.WriteAllText(scriptPath, ApplyScript, new UTF8Encoding(false));
-            Process.Start(new ProcessStartInfo
+            if (!File.Exists(pendingPath)) return false;
+            var launchMarker = pendingPath + ".launched";
+            if (File.Exists(launchMarker))
             {
-                FileName = "powershell.exe",
-                Arguments = string.Format(
-                    "-NoProfile -ExecutionPolicy Bypass -File \"{0}\" -ProcessId {1} -PendingPath \"{2}\" -LaunchMarker \"{3}\" -RestartPath \"{4}\"",
-                    scriptPath, processId, pendingPath, launchMarker, restartPath ?? string.Empty),
-                UseShellExecute = false,
-                CreateNoWindow = true,
-                WindowStyle = ProcessWindowStyle.Hidden
-            });
-            return true;
-        }
-        catch
-        {
-            try { if (File.Exists(launchMarker)) File.Delete(launchMarker); } catch { }
-            return false;
+                if (TryGetRunningUpdater(launchMarker)) return false;
+                try { File.Delete(launchMarker); } catch { return false; }
+            }
+
+            try
+            {
+                if (!TryReadPendingUpdate(pendingPath, out var pending, out _)
+                    || !Directory.Exists(pending.PayloadDirectory)
+                    || string.IsNullOrWhiteSpace(pending.TargetDirectory))
+                {
+                    QuarantinePendingUpdate(pendingPath);
+                    return false;
+                }
+
+                var scriptPath = Path.Combine(Path.GetDirectoryName(pendingPath), "apply-pending-update.ps1");
+                WriteAllTextAtomically(scriptPath, ApplyScript);
+                var updater = Process.Start(new ProcessStartInfo
+                {
+                    FileName = "powershell.exe",
+                    Arguments = string.Format(
+                        "-NoProfile -ExecutionPolicy Bypass -File \"{0}\" -ProcessId {1} -PendingPath \"{2}\" -LaunchMarker \"{3}\" -RestartPath \"{4}\"",
+                        scriptPath, processId, pendingPath, launchMarker, restartPath ?? string.Empty),
+                    UseShellExecute = false,
+                    CreateNoWindow = true,
+                    WindowStyle = ProcessWindowStyle.Hidden
+                });
+                if (updater == null) return false;
+                WriteAllTextAtomically(launchMarker, updater.Id.ToString());
+                return true;
+            }
+            catch
+            {
+                try { if (File.Exists(launchMarker)) File.Delete(launchMarker); } catch { }
+                return false;
+            }
         }
     }
 
@@ -304,7 +347,11 @@ internal static class ClientPackageUpdater
         try
         {
             if (!File.Exists(pendingPath)) return false;
-            var pending = Serializer.Deserialize<PendingUpdate>(File.ReadAllText(pendingPath, Encoding.UTF8));
+            if (!TryReadPendingUpdate(pendingPath, out var pending, out var pendingError))
+            {
+                error = pendingError;
+                return true;
+            }
             version = pending?.Version ?? string.Empty;
             var errorPath = pendingPath + ".error.txt";
             if (File.Exists(errorPath)) error = File.ReadAllText(errorPath, Encoding.UTF8).Trim();
@@ -333,10 +380,101 @@ internal static class ClientPackageUpdater
     private static string SanitizeSegment(string value) => new string(value.Select(character =>
         Path.GetInvalidFileNameChars().Contains(character) ? '_' : character).ToArray());
 
+    private static bool TryReadPendingUpdate(string path, out PendingUpdate pending, out string error)
+    {
+        pending = null;
+        error = string.Empty;
+        try
+        {
+            pending = Serializer.Deserialize<PendingUpdate>(File.ReadAllText(path, Encoding.UTF8));
+            if (pending == null
+                || string.IsNullOrWhiteSpace(pending.Component)
+                || string.IsNullOrWhiteSpace(pending.Version)
+                || string.IsNullOrWhiteSpace(pending.PayloadDirectory)
+                || string.IsNullOrWhiteSpace(pending.TargetDirectory))
+            {
+                error = "待安装更新状态文件不完整。";
+                pending = null;
+                return false;
+            }
+            return true;
+        }
+        catch (Exception exception)
+        {
+            error = string.Concat("待安装更新状态文件已损坏：", exception.Message);
+            return false;
+        }
+    }
+
+    private static bool TryGetRunningUpdater(string launchMarker)
+    {
+        try
+        {
+            if (!int.TryParse(File.ReadAllText(launchMarker, Encoding.UTF8).Trim(), out var updaterProcessId)) return false;
+            using (var updater = Process.GetProcessById(updaterProcessId)) return !updater.HasExited;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private static void QuarantinePendingUpdate(string pendingPath)
+    {
+        var root = Path.Combine(
+            Path.GetDirectoryName(pendingPath),
+            string.Concat("cancelled-", DateTimeOffset.Now.ToString("yyyyMMdd-HHmmss-fff")));
+        Directory.CreateDirectory(root);
+        foreach (var path in new[] { pendingPath, pendingPath + ".launched", pendingPath + ".error.txt" })
+        {
+            if (!File.Exists(path)) continue;
+            File.Move(path, Path.Combine(root, Path.GetFileName(path)));
+        }
+    }
+
+    private static void WriteAllTextAtomically(string path, string content)
+    {
+        var temporaryPath = string.Concat(path, ".", Guid.NewGuid().ToString("N"), ".tmp");
+        try
+        {
+            File.WriteAllText(temporaryPath, content, new UTF8Encoding(false));
+            if (File.Exists(path)) File.Replace(temporaryPath, path, null);
+            else File.Move(temporaryPath, path);
+        }
+        finally
+        {
+            try { if (File.Exists(temporaryPath)) File.Delete(temporaryPath); } catch { }
+        }
+    }
+
+    private static bool TryParseReleaseVersion(string value, out Version version)
+    {
+        var normalized = (value ?? string.Empty).Trim().TrimStart('V', 'v');
+        var qualifierIndex = normalized.IndexOf('-');
+        if (qualifierIndex >= 0) normalized = normalized.Substring(0, qualifierIndex);
+        return Version.TryParse(normalized, out version);
+    }
+
     private const string ApplyScript = @"param([int]$ProcessId,[string]$PendingPath,[string]$LaunchMarker,[string]$RestartPath)
 $ErrorActionPreference='Stop'
+function Copy-DirectoryWithRetry([string]$Source,[string]$Destination) {
+  $lastError = $null
+  for ($attempt = 1; $attempt -le 30; $attempt++) {
+    try {
+      New-Item -ItemType Directory -Path $Destination -Force | Out-Null
+      Get-ChildItem -LiteralPath $Source -Force | ForEach-Object {
+        Copy-Item -LiteralPath $_.FullName -Destination $Destination -Recurse -Force -ErrorAction Stop
+      }
+      return
+    } catch {
+      $lastError = $_
+      Start-Sleep -Seconds 1
+    }
+  }
+  throw $lastError
+}
 try {
-  Wait-Process -Id $ProcessId -ErrorAction SilentlyContinue
+  if ($ProcessId -gt 0) { Wait-Process -Id $ProcessId -ErrorAction SilentlyContinue }
   $pending = Get-Content -LiteralPath $PendingPath -Raw -Encoding UTF8 | ConvertFrom-Json
   $target = [IO.Path]::GetFullPath([string]$pending.TargetDirectory)
   $payload = [IO.Path]::GetFullPath([string]$pending.PayloadDirectory)
@@ -344,12 +482,17 @@ try {
   $backupRoot = Split-Path -Parent $PendingPath
   $backup = Join-Path $backupRoot ('backup-' + [DateTimeOffset]::Now.ToString('yyyyMMdd-HHmmss'))
   New-Item -ItemType Directory -Path $backup -Force | Out-Null
-  if (Test-Path -LiteralPath $target) { Copy-Item -Path (Join-Path $target '*') -Destination $backup -Recurse -Force }
+  if (Test-Path -LiteralPath $target) { Copy-DirectoryWithRetry $target $backup }
   Get-ChildItem -LiteralPath $backupRoot -Directory -Filter 'backup-*' -ErrorAction SilentlyContinue |
     Where-Object { -not [string]::Equals($_.FullName, $backup, [StringComparison]::OrdinalIgnoreCase) } |
     Remove-Item -Recurse -Force
-  New-Item -ItemType Directory -Path $target -Force | Out-Null
-  Copy-Item -Path (Join-Path $payload '*') -Destination $target -Recurse -Force
+  Copy-DirectoryWithRetry $payload $target
+  $installedVersionPath = Join-Path $target '.uplm-version'
+  if (-not (Test-Path -LiteralPath $installedVersionPath)) { throw 'Installed version marker is missing.' }
+  $installedVersion = (Get-Content -LiteralPath $installedVersionPath -Raw -Encoding UTF8).Trim()
+  if (-not [string]::Equals($installedVersion, [string]$pending.Version, [StringComparison]::OrdinalIgnoreCase)) {
+    throw ('Installed version verification failed. Expected=' + [string]$pending.Version + ' Actual=' + $installedVersion)
+  }
   Remove-Item -LiteralPath $PendingPath -Force
   Remove-Item -LiteralPath $LaunchMarker -Force -ErrorAction SilentlyContinue
   if ($RestartPath -and (Test-Path -LiteralPath $RestartPath)) { Start-Process -FilePath $RestartPath -WorkingDirectory (Split-Path -Parent $RestartPath) -WindowStyle Hidden }

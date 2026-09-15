@@ -7,32 +7,76 @@ public sealed class ProjectPlanningService(
     IPdmRepository repository,
     TimeProvider timeProvider)
 {
-    public async Task<IReadOnlyList<ProjectPlanTemplate>> ListTemplatesAsync(bool includeInactive, string actor, UserRole role, CancellationToken cancellationToken)
+    public async Task<IReadOnlyList<ProjectPlanTemplate>> ListTemplatesAsync(bool includeInactive, string actor, UserRole role, CancellationToken cancellationToken, Guid? projectId = null)
     {
-        if (includeInactive && !CanManageTemplates(role)) throw new UnauthorizedAccessException("仅开发者和管理员可查看停用模板。");
-        return await EnsureDefaultTemplateAsync(includeInactive, actor, cancellationToken);
+        var canManageSystem = CanManageTemplates(role);
+        var canManagePersonal = projectId is Guid id && CanManage(await RequireReadProjectAsync(id, actor, role, cancellationToken), actor, role);
+        var templates = await EnsureDefaultTemplateAsync(includeInactive, actor, cancellationToken);
+        var visible = templates.Where(template =>
+            template.Scope == ProjectPlanTemplateScope.System
+                ? template.IsActive || canManageSystem && includeInactive
+                : (template.IsActive || includeInactive) && canManagePersonal && string.Equals(template.OwnerUsername, actor, StringComparison.OrdinalIgnoreCase)
+                    || canManageSystem && includeInactive).ToArray();
+        var result = new List<ProjectPlanTemplate>(visible.Length);
+        foreach (var template in visible)
+            result.Add(await EffectiveTemplateAsync(NormalizeLegacyWorkflowTasks(template), cancellationToken));
+        return result.OrderBy(item => item.Scope).ThenBy(item => item.Name).ToArray();
     }
 
     public async Task<ProjectPlanTemplate> SaveTemplateAsync(Guid? templateId, SaveProjectPlanTemplateCommand command, string actor, UserRole role, CancellationToken cancellationToken)
     {
-        if (!CanManageTemplates(role)) throw new UnauthorizedAccessException("仅开发者和管理员可修改计划模板。");
-        var name = Required(command.Name, 120, "模板名称");
-        ValidateTemplateTasks(command.Tasks);
-        var now = timeProvider.GetUtcNow();
+        var canManageSystem = CanManageTemplates(role);
         var current = templateId is Guid id ? await plans.FindTemplateAsync(id, cancellationToken) : null;
         if (templateId is not null && current is null) throw new PdmNotFoundException("计划模板不存在。");
-        var stages = ValidateStages(command.Stages ?? current?.Stages ?? ProjectPlanStage.Defaults, command.Tasks.Select(item => item.Stage));
-        ValidateAllocation(stages, command.Tasks);
+        current = current is null ? null : NormalizeLegacyWorkflowTasks(current);
+        var scope = current?.Scope ?? command.Scope;
+        if (scope == ProjectPlanTemplateScope.System && !canManageSystem)
+            throw new UnauthorizedAccessException("仅开发者和管理员可修改系统计划模板。");
+        if (scope == ProjectPlanTemplateScope.Personal)
+        {
+            if (!canManageSystem && !string.Equals(current?.OwnerUsername ?? actor, actor, StringComparison.OrdinalIgnoreCase))
+                throw new UnauthorizedAccessException("只能修改自己的个人计划模板。");
+            if (!canManageSystem)
+            {
+                if (command.ProjectId is not Guid projectId) throw new UnauthorizedAccessException("请从可管理项目的计划页面维护个人模板。");
+                await RequireManageAsync(projectId, actor, role, cancellationToken);
+            }
+        }
+        var name = Required(command.Name, 120, "模板名称");
+        var now = timeProvider.GetUtcNow();
+        Guid? baseSystemTemplateId = scope == ProjectPlanTemplateScope.Personal
+            ? current?.BaseSystemTemplateId ?? command.BaseSystemTemplateId ?? throw new PdmRuleException("个人模板必须由一个系统模板创建。")
+            : null;
+        var input = new ProjectPlanTemplate(
+            templateId ?? Guid.NewGuid(), name, Optional(command.ProjectTypeCode, 64), command.IsActive,
+            command.Tasks, current?.CreatedBy ?? actor, current?.CreatedAt ?? now, actor, now, current?.RowVersion ?? 0)
+        {
+            Stages = command.Stages ?? current?.Stages ?? ProjectPlanStage.Defaults,
+            Scope = scope,
+            OwnerUsername = scope == ProjectPlanTemplateScope.Personal ? current?.OwnerUsername ?? actor : null,
+            BaseSystemTemplateId = baseSystemTemplateId
+        };
+        if (scope == ProjectPlanTemplateScope.Personal) input = await EffectiveTemplateAsync(input, cancellationToken);
+        var normalizedTasks = input.Tasks.OrderBy(item => item.SortOrder).Select(item => item with
+        {
+            Id = item.Id == Guid.Empty ? Guid.NewGuid() : item.Id,
+            Name = Required(item.Name, 160, "任务名称"),
+            DurationRatio = Math.Round(item.DurationRatio, 4),
+            Weight = Math.Round(item.Weight, 4),
+            WorkflowKey = Optional(item.WorkflowKey, 80),
+            IsRequired = !string.IsNullOrWhiteSpace(item.WorkflowKey) || item.IsRequired
+        }).ToArray();
+        ValidateTemplateTasks(normalizedTasks);
+        var stages = ValidateStages(input.Stages, normalizedTasks.Select(item => item.Stage));
+        ValidateAllocation(stages, normalizedTasks);
         var template = new ProjectPlanTemplate(
             templateId ?? Guid.NewGuid(), name, Optional(command.ProjectTypeCode, 64), command.IsActive,
-            command.Tasks.OrderBy(item => item.SortOrder).Select(item => item with
-            {
-                Id = item.Id == Guid.Empty ? Guid.NewGuid() : item.Id,
-                Name = Required(item.Name, 160, "任务名称"),
-                DurationRatio = Math.Round(item.DurationRatio, 4),
-                Weight = Math.Round(item.Weight, 4)
-            }).ToArray(),
-            current?.CreatedBy ?? actor, current?.CreatedAt ?? now, actor, now, current?.RowVersion ?? 0) { Stages = stages };
+            normalizedTasks, current?.CreatedBy ?? actor, current?.CreatedAt ?? now, actor, now, current?.RowVersion ?? 0)
+        {
+            Stages = stages, Scope = scope,
+            OwnerUsername = scope == ProjectPlanTemplateScope.Personal ? current?.OwnerUsername ?? actor : null,
+            BaseSystemTemplateId = baseSystemTemplateId
+        };
         var saved = await plans.SaveTemplateAsync(template, command.ExpectedRowVersion, cancellationToken);
         await AuditAsync(actor, templateId is null ? "project-plan.template.create" : "project-plan.template.update", nameof(ProjectPlanTemplate), saved.Id, $"计划模板：{saved.Name}；{saved.Tasks.Count}项", cancellationToken);
         return saved;
@@ -52,6 +96,9 @@ public sealed class ProjectPlanningService(
         var template = await plans.FindTemplateAsync(command.TemplateId, cancellationToken)
             ?? (await EnsureDefaultTemplateAsync(false, actor, cancellationToken)).FirstOrDefault(item => item.Id == command.TemplateId)
             ?? throw new PdmNotFoundException("计划模板不存在。");
+        template = await EffectiveTemplateAsync(NormalizeLegacyWorkflowTasks(template), cancellationToken);
+        if (template.Scope == ProjectPlanTemplateScope.Personal && !string.Equals(template.OwnerUsername, actor, StringComparison.OrdinalIgnoreCase) && !CanManageTemplates(role))
+            throw new UnauthorizedAccessException("无权使用其他项目经理的个人计划模板。");
         if (!template.IsActive) throw new PdmRuleException("停用模板不能用于生成计划。");
         var current = await plans.FindPlanAsync(projectId, cancellationToken);
         if (current?.ApprovalStatus == ProjectPlanApprovalStatus.Approved) throw new PdmRuleException("已生效计划请通过任务编辑或批量调整修改，不能重新生成首版计划。");
@@ -141,10 +188,16 @@ public sealed class ProjectPlanningService(
         if (editingChangeDraft && !string.Equals(actor, current.ChangeRequest!.SubmittedBy, StringComparison.OrdinalIgnoreCase))
             throw new UnauthorizedAccessException("仅变更申请人可以编辑本次变更草稿。");
         var reason = editingChangeDraft ? "保存计划变更草稿" : "修改未批准计划";
+        current = current with { Tasks = current.Tasks.Select(NormalizeLegacyWorkflowTask).ToArray() };
         var tasks = NormalizeTasks(command.Tasks);
+        if (tasks.Any(task => !current.Tasks.Any(old => old.Id == task.Id)))
+            throw new PdmRuleException("不能通过任务编辑新增或替换模板任务。");
+        var removedTasks = current.Tasks.Where(old => tasks.All(task => task.Id != old.Id)).ToArray();
+        if (removedTasks.Any(IsWorkflowTask)) throw new PdmRuleException("流程必需任务不能从项目计划中删除。");
+        if (removedTasks.Any(task => task.Status != ProjectPlanTaskStatus.NotStarted || task.ActualStart is not null || task.ActualFinish is not null || task.CompletionPercent != 0))
+            throw new PdmRuleException("已有实际进度的任务不能删除。");
+        tasks = RewireRemovedDependencies(current.Tasks, tasks);
         ValidatePlanTasks(tasks);
-        if (tasks.Count != current.Tasks.Count || tasks.Any(task => !current.Tasks.Any(old => old.Id == task.Id)))
-            throw new PdmRuleException("不能通过任务编辑新增、删除或替换模板任务。");
         if (tasks.Any(task => current.Tasks.Any(old => old.Id == task.Id && (old.Name != task.Name || old.Stage != task.Stage || old.Weight != task.Weight))))
             throw new PdmRuleException("任务名称、所属阶段和进度权重采用生成计划时的模板配置，不能在项目计划中修改。");
         if (editingChangeDraft && tasks.Any(task => current.Tasks.Any(old => old.Id == task.Id && old.Status == ProjectPlanTaskStatus.Completed
@@ -157,7 +210,7 @@ public sealed class ProjectPlanningService(
                 && old.ParticipatesInDelivery == stage.ParticipatesInDelivery && old.DurationRatio == stage.DurationRatio
                 && old.ProgressRatio == stage.ProgressRatio && old.IndependentDurationDays == stage.IndependentDurationDays)))
                 throw new PdmRuleException("阶段分配采用生成计划时的模板快照，不能通过任务编辑修改分配规则。");
-            if (stages.Any(stage => tasks.Where(task => task.Stage == stage.Code).Sum(task => task.Weight) <= 0))
+            if (stages.Any(stage => tasks.Any(task => task.Stage == stage.Code) && tasks.Where(task => task.Stage == stage.Code).Sum(task => task.Weight) <= 0))
                 throw new PdmRuleException("每个阶段的子任务总权重必须大于0。");
         }
         if (tasks.Any(item => item.CompletionPercent != (current.Tasks.FirstOrDefault(old => old.Id == item.Id)?.CompletionPercent ?? 0)
@@ -168,6 +221,7 @@ public sealed class ProjectPlanningService(
         {
             TemplateTaskId = current.Tasks.First(old => old.Id == item.Id).TemplateTaskId,
             SourceTaskId = current.Tasks.First(old => old.Id == item.Id).SourceTaskId,
+            WorkflowKey = current.Tasks.First(old => old.Id == item.Id).WorkflowKey,
             BaselineStart = current.Tasks.FirstOrDefault(old => old.Id == item.Id)?.BaselineStart,
             BaselineFinish = current.Tasks.FirstOrDefault(old => old.Id == item.Id)?.BaselineFinish
         }).ToArray();
@@ -176,7 +230,7 @@ public sealed class ProjectPlanningService(
         var shiftedTogether = shiftDays != 0 && tasks.All(task => current.Tasks.Any(old => old.Id == task.Id
             && task.PlannedStart == old.PlannedStart.AddDays(shiftDays) && task.PlannedFinish == old.PlannedFinish.AddDays(shiftDays)));
         var now = timeProvider.GetUtcNow();
-        var planningChanged = tasks.Any(task => current.Tasks.Any(old => old.Id == task.Id
+        var planningChanged = tasks.Count != current.Tasks.Count || tasks.Any(task => current.Tasks.Any(old => old.Id == task.Id
             && (task.PlannedStart != old.PlannedStart || task.PlannedFinish != old.PlannedFinish
                 || task.IsRequired != old.IsRequired || task.IsMilestone != old.IsMilestone
                 || !task.PredecessorTaskIds.SequenceEqual(old.PredecessorTaskIds)))) || !stages.SequenceEqual(current.Stages);
@@ -373,6 +427,9 @@ public sealed class ProjectPlanningService(
         {
             DateOnly? finish = task.Name.Trim() switch
             {
+                _ when task.WorkflowKey == ProjectPlanWorkflowTask.StandardBom => standard,
+                _ when task.WorkflowKey == ProjectPlanWorkflowTask.NonStandardBom => nonStandard,
+                _ when task.WorkflowKey == ProjectPlanWorkflowTask.MechanicalDesign && standard.HasValue && nonStandard.HasValue => standard > nonStandard ? standard : nonStandard,
                 "标准件BOM" => standard,
                 "非标件BOM" or "非标件BOM+图纸" => nonStandard,
                 "机械设计" when standard.HasValue && nonStandard.HasValue => standard > nonStandard ? standard : nonStandard,
@@ -754,14 +811,79 @@ public sealed class ProjectPlanningService(
         return await plans.ListTemplatesAsync(includeInactive, cancellationToken);
     }
 
+    private async Task<ProjectPlanTemplate> EffectiveTemplateAsync(ProjectPlanTemplate template, CancellationToken cancellationToken)
+    {
+        if (template.Scope != ProjectPlanTemplateScope.Personal || template.BaseSystemTemplateId is not Guid baseId) return template;
+        var system = await plans.FindTemplateAsync(baseId, cancellationToken)
+            ?? throw new PdmRuleException($"个人模板“{template.Name}”关联的系统模板已不存在。");
+        system = NormalizeLegacyWorkflowTasks(system);
+        if (system.Scope != ProjectPlanTemplateScope.System) throw new PdmRuleException("个人模板关联的基础模板不是系统模板。");
+        var tasks = template.Tasks.ToList();
+        var stages = template.Stages.ToList();
+        foreach (var required in system.Tasks.Where(IsWorkflowTask))
+        {
+            var existingIndex = tasks.FindIndex(item => string.Equals(item.WorkflowKey, required.WorkflowKey, StringComparison.OrdinalIgnoreCase));
+            if (!stages.Any(stage => stage.Code == required.Stage))
+            {
+                var stage = system.Stages.First(item => item.Code == required.Stage);
+                stages.Add(stage);
+            }
+            if (existingIndex >= 0)
+            {
+                var existing = tasks[existingIndex];
+                tasks[existingIndex] = existing with
+                {
+                    Name = required.Name, Stage = required.Stage, IsRequired = true,
+                    WorkflowKey = required.WorkflowKey
+                };
+            }
+            else
+            {
+                var nextOrder = (tasks.Count == 0 ? 0 : tasks.Max(item => item.SortOrder)) + 10;
+                tasks.Add(required with { SortOrder = nextOrder, PredecessorSortOrders = [] });
+            }
+        }
+        return template with { Tasks = tasks.OrderBy(item => item.SortOrder).ToArray(), Stages = stages };
+    }
+
+    private static ProjectPlanTemplate NormalizeLegacyWorkflowTasks(ProjectPlanTemplate template) => template with
+    {
+        Tasks = template.Tasks.Select(NormalizeLegacyWorkflowTask).ToArray()
+    };
+
+    private static ProjectPlanTemplateTask NormalizeLegacyWorkflowTask(ProjectPlanTemplateTask task) =>
+        string.IsNullOrWhiteSpace(task.WorkflowKey) && LegacyWorkflowKey(task.Name) is { } workflowKey
+            ? task with { WorkflowKey = workflowKey, IsRequired = true }
+            : task;
+
+    private static ProjectPlanTask NormalizeLegacyWorkflowTask(ProjectPlanTask task) =>
+        string.IsNullOrWhiteSpace(task.WorkflowKey) && LegacyWorkflowKey(task.Name) is { } workflowKey
+            ? task with { WorkflowKey = workflowKey, IsRequired = true }
+            : task;
+
+    private static string? LegacyWorkflowKey(string name) => name.Trim() switch
+    {
+        "项目启动" or "项目启动会" => ProjectPlanWorkflowTask.ProjectStart,
+        "机械设计" or "机械设计与内部评审" => ProjectPlanWorkflowTask.MechanicalDesign,
+        "图纸审核" => ProjectPlanWorkflowTask.DrawingReview,
+        "标准件BOM" => ProjectPlanWorkflowTask.StandardBom,
+        "非标件BOM" or "非标件BOM+图纸" => ProjectPlanWorkflowTask.NonStandardBom,
+        "电气BOM" or "电气件BOM" => ProjectPlanWorkflowTask.ElectricalBom,
+        "验证计划" => ProjectPlanWorkflowTask.ValidationPlan,
+        _ => null
+    };
+
+    private static bool IsWorkflowTask(ProjectPlanTemplateTask task) => !string.IsNullOrWhiteSpace(task.WorkflowKey);
+    private static bool IsWorkflowTask(ProjectPlanTask task) => !string.IsNullOrWhiteSpace(task.WorkflowKey) || LegacyWorkflowKey(task.Name) is not null;
+
     private static ProjectPlanTemplate DefaultTemplate(string actor, DateTimeOffset now)
     {
         ProjectPlanTemplateTask Task(int order, string name, string stage, decimal ratio, int[] predecessors, string role, decimal weight, bool milestone = false) =>
             new(Guid.NewGuid(), name, stage, ratio, predecessors, role, weight, milestone, true, order);
         return new ProjectPlanTemplate(Guid.NewGuid(), "专业设备交付标准模板", null, true,
         [
-            Task(10, "项目启动会", ProjectPlanStage.Design, 0, [], "ProjectManager", 2) with { FixedDurationDays = 1 },
-            Task(20, "机械设计与内部评审", ProjectPlanStage.Design, .6m, [], "DesignLead", 15),
+            Task(10, "项目启动会", ProjectPlanStage.Design, 0, [], "ProjectManager", 2) with { FixedDurationDays = 1, WorkflowKey = ProjectPlanWorkflowTask.ProjectStart },
+            Task(20, "机械设计与内部评审", ProjectPlanStage.Design, .6m, [], "DesignLead", 15) with { WorkflowKey = ProjectPlanWorkflowTask.MechanicalDesign },
             Task(30, "电气设计与图纸", ProjectPlanStage.Design, .6m, [], "Designer", 10),
             Task(40, "BOM与长交期物料下发", ProjectPlanStage.Design, .2m, [20, 30], "DesignLead", 8),
             Task(50, "标准件采购", ProjectPlanStage.MaterialPreparation, 1, [], "ProjectManager", 14),
@@ -860,7 +982,8 @@ public sealed class ProjectPlanningService(
             if (finish > window.Start.AddDays(window.Days - 1)) throw new PdmRuleException($"任务“{source.Name}”超出所属阶段的分配工期，请调整阶段工期、任务固定天数/比例、开始偏移或前置关系（并行任务不必设置前置）。");
             var id = Guid.NewGuid();
             var task = new ProjectPlanTask(id, source.Name, source.Stage, ResolveAssignee(source.DefaultAssigneeRole, project), duration, taskStart, finish, null, null, null, null, 0,
-                ProjectPlanTaskStatus.NotStarted, predecessors.Select(item => item.Id).ToArray(), source.Weight, source.IsMilestone, source.IsRequired, source.SortOrder) { TemplateTaskId = source.Id };
+                ProjectPlanTaskStatus.NotStarted, predecessors.Select(item => item.Id).ToArray(), source.Weight, source.IsMilestone, source.IsRequired, source.SortOrder)
+            { TemplateTaskId = source.Id, WorkflowKey = source.WorkflowKey };
             scheduled.Add(source.SortOrder, task);
             visiting.Remove(source.SortOrder);
             return task;
@@ -895,6 +1018,8 @@ public sealed class ProjectPlanningService(
         if (tasks.Count > 200) throw new PdmRuleException("计划模板最多包含200个任务。");
         if (tasks.GroupBy(item => item.SortOrder).Any(group => group.Count() > 1)) throw new PdmRuleException("模板任务排序号不能重复。");
         if (tasks.Where(item => item.Id != Guid.Empty).GroupBy(item => item.Id).Any(group => group.Count() > 1)) throw new PdmRuleException("模板任务标识不能重复。");
+        if (tasks.Where(IsWorkflowTask).GroupBy(item => item.WorkflowKey!, StringComparer.OrdinalIgnoreCase).Any(group => group.Count() > 1))
+            throw new PdmRuleException("同一流程节点在一个模板中只能配置一次。");
         foreach (var task in tasks)
         {
             if (task.DurationRatio < 0 || task.DurationRatio > 1) throw new PdmRuleException("任务工期比例必须在0至1之间。");
@@ -903,6 +1028,7 @@ public sealed class ProjectPlanningService(
             if (task.FixedDurationDays is < 1 or > 3650) throw new PdmRuleException("固定工期必须为1至3650天；里程碑按0天计算。");
             if (task.PredecessorSortOrders.Contains(task.SortOrder)) throw new PdmRuleException("任务不能将自身设为前置任务。");
             if (task.PredecessorSortOrders.Any(order => !tasks.Any(item => item.SortOrder == order))) throw new PdmRuleException("前置任务序号不存在。");
+            if (task.WorkflowKey is not null && !ProjectPlanWorkflowTask.Supported.Contains(task.WorkflowKey)) throw new PdmRuleException("模板包含不支持的流程节点标识。");
         }
         var byOrder = tasks.ToDictionary(item => item.SortOrder);
         var visiting = new HashSet<int>();
@@ -929,6 +1055,29 @@ public sealed class ProjectPlanningService(
             if (task.PlannedFinish < task.PlannedStart) throw new PdmRuleException($"任务“{task.Name}”的计划完成日期不能早于开始日期。");
             if (task.PredecessorTaskIds.Any(id => !ids.Contains(id))) throw new PdmRuleException($"任务“{task.Name}”存在无效前置任务。");
         }
+    }
+
+    private static ProjectPlanTask[] RewireRemovedDependencies(IReadOnlyList<ProjectPlanTask> current, IReadOnlyList<ProjectPlanTask> submitted)
+    {
+        var retained = submitted.Select(item => item.Id).ToHashSet();
+        var currentById = current.ToDictionary(item => item.Id);
+        IReadOnlyList<Guid> Expand(Guid id, HashSet<Guid> visiting)
+        {
+            if (retained.Contains(id)) return [id];
+            if (!currentById.TryGetValue(id, out var removed)) return [];
+            if (!visiting.Add(id)) throw new PdmRuleException("计划任务存在循环前置依赖。");
+            var result = removed.PredecessorTaskIds.SelectMany(predecessor => Expand(predecessor, visiting)).Distinct().ToArray();
+            visiting.Remove(id);
+            return result;
+        }
+        return submitted.Select(task => task with
+        {
+            PredecessorTaskIds = task.PredecessorTaskIds
+                .SelectMany(id => Expand(id, []))
+                .Where(id => id != task.Id)
+                .Distinct()
+                .ToArray()
+        }).ToArray();
     }
 
     private static ProjectPlanTask[] CascadeDependentTasks(IReadOnlyList<ProjectPlanTask> tasks)
@@ -982,12 +1131,17 @@ public sealed class ProjectPlanningService(
     private static int CompletionPercent(IReadOnlyList<ProjectPlanTask> tasks, IReadOnlyList<ProjectPlanStageDefinition> stages)
     {
         if (stages.All(stage => stage.ParticipatesInDelivery is not null))
-            return (int)Math.Round(stages.Where(stage => stage.ParticipatesInDelivery == true).Sum(stage =>
+        {
+            var activeStages = stages.Where(stage => stage.ParticipatesInDelivery == true && tasks.Any(task => task.Stage == stage.Code)).ToArray();
+            var activeRatio = activeStages.Sum(stage => stage.ProgressRatio);
+            if (activeRatio <= 0) return 0;
+            return (int)Math.Round(activeStages.Sum(stage =>
             {
                 var children = tasks.Where(task => task.Stage == stage.Code).ToArray();
                 var weight = children.Sum(task => task.Weight);
-                return weight > 0 ? stage.ProgressRatio * children.Sum(task => task.Weight * task.CompletionPercent) / weight : 0;
+                return weight > 0 ? stage.ProgressRatio / activeRatio * children.Sum(task => task.Weight * task.CompletionPercent) / weight : 0;
             }), MidpointRounding.AwayFromZero);
+        }
         var totalWeight = tasks.Sum(item => item.Weight > 0 ? item.Weight : 1);
         return totalWeight <= 0 ? 0 : (int)Math.Round(tasks.Sum(item => (item.Weight > 0 ? item.Weight : 1) * item.CompletionPercent) / totalWeight);
     }

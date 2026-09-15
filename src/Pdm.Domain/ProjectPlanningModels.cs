@@ -44,6 +44,25 @@ public enum ProjectPlanTaskStatus
 [JsonConverter(typeof(JsonStringEnumConverter))]
 public enum ProjectPlanApprovalStatus { Draft, Pending, Rejected, Approved }
 
+[JsonConverter(typeof(JsonStringEnumConverter))]
+public enum ProjectPlanTemplateScope { System, Personal }
+
+public static class ProjectPlanWorkflowTask
+{
+    public const string ProjectStart = "project.start";
+    public const string MechanicalDesign = "design.mechanical";
+    public const string DrawingReview = "drawing.review";
+    public const string StandardBom = "bom.standard";
+    public const string NonStandardBom = "bom.non-standard";
+    public const string ElectricalBom = "bom.electrical";
+    public const string ValidationPlan = "validation-plan";
+
+    public static IReadOnlySet<string> Supported { get; } = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+    {
+        ProjectStart, MechanicalDesign, DrawingReview, StandardBom, NonStandardBom, ElectricalBom, ValidationPlan
+    };
+}
+
 public sealed record ProjectPlanTemplateTask(
     Guid Id,
     string Name,
@@ -58,6 +77,7 @@ public sealed record ProjectPlanTemplateTask(
 {
     public int StartOffsetDays { get; init; }
     public int? FixedDurationDays { get; init; }
+    public string? WorkflowKey { get; init; }
 }
 
 public sealed record ProjectPlanTemplate(
@@ -73,6 +93,9 @@ public sealed record ProjectPlanTemplate(
     long RowVersion)
 {
     public IReadOnlyList<ProjectPlanStageDefinition> Stages { get; init; } = ProjectPlanStage.Defaults;
+    public ProjectPlanTemplateScope Scope { get; init; } = ProjectPlanTemplateScope.System;
+    public string? OwnerUsername { get; init; }
+    public Guid? BaseSystemTemplateId { get; init; }
 }
 
 public sealed record ProjectPlanTask(
@@ -97,6 +120,7 @@ public sealed record ProjectPlanTask(
 {
     public Guid? TemplateTaskId { get; init; }
     public Guid? SourceTaskId { get; init; }
+    public string? WorkflowKey { get; init; }
 }
 
 public sealed record ProjectPlanSyncResult(Guid ProjectId, string ProjectCode, string Result, IReadOnlyList<string> Differences);
