@@ -67,6 +67,12 @@ public interface IValidationPlanTextRecognitionService
     Task<string> RecognizeAsync(string absolutePath, CancellationToken cancellationToken);
 }
 
+public interface IValidationPlanFileArchive
+{
+    Task ArchiveWorkbookAsync(ValidationPlanExportData export, string actor, CancellationToken cancellationToken);
+    Task ArchiveAttachmentAsync(ProjectValidationPlan plan, ValidationPlanAttachment attachment, string actor, CancellationToken cancellationToken);
+}
+
 public interface IValidationPlanRepository
 {
     Task<ValidationCheckCatalog> ListCatalogAsync(bool includeInactive, CancellationToken cancellationToken);

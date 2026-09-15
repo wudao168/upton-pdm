@@ -22,6 +22,10 @@ public sealed class ProjectFolderTreeTests
         Assert.Contains(containers, item => item.TemplateKey == "electrical.project" && item.TargetProjectId == main.Id && item.Name == $"{main.Code}-0");
         Assert.Contains(containers, item => item.TemplateKey == "mechanical.project" && item.TargetProjectId == child.Id && item.Name == child.Code);
         Assert.Contains(containers, item => item.TemplateKey == "electrical.project" && item.TargetProjectId == child.Id && item.Name == child.Code);
+        var acceptance = folders.Single(item => item.TemplateKey == "acceptance");
+        var validationPlan = folders.Single(item => item.TemplateKey == "acceptance.validation-plan");
+        Assert.Equal(acceptance.Id, validationPlan.ParentFolderId);
+        Assert.Equal("验证计划", validationPlan.Name);
     }
 
     [Fact]

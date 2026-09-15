@@ -1,9 +1,19 @@
-import { expect, test } from '@playwright/test'
+import { expect, test, type Page } from '@playwright/test'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 const projectId = '11111111-1111-1111-1111-111111111111'
 let materialCodeApplications: Array<Record<string, unknown>> = []
+
+async function enterProject(page: Page) {
+  const projectNavigation = page.getByRole('navigation', { name: '项目功能' })
+  const projectEntry = page.locator('button.pdm-project-code-link').first()
+  await expect.poll(async () => await projectNavigation.isVisible() || await projectEntry.isVisible()).toBe(true)
+  if (await projectNavigation.isVisible()) return
+  await projectEntry.evaluate(button => (button as HTMLButtonElement).click())
+  await expect(projectNavigation).toBeVisible()
+}
+
 const versions = [
   { id: 'version-w1', documentId: 'doc-root', revision: { display: 'W1' }, status: 0, fileLength: 1024, sha256: 'A'.repeat(64), createdBy: 'engineer', createdAt: '2026-08-10T01:00:00Z', changeNote: '首次存档' },
   { id: 'version-w2', documentId: 'doc-root', revision: { display: 'W2' }, status: 0, fileLength: 2048, sha256: 'B'.repeat(64), createdBy: 'engineer', createdAt: '2026-08-11T01:00:00Z', changeNote: '完善结构' },
@@ -125,6 +135,9 @@ test.beforeEach(async ({ page }) => {
     if (path === `/api/projects/${projectId}/audit`) return fulfill([])
     if (path === `/api/projects/${projectId}/drawing-reviews`) return fulfill([])
     if (path === `/api/projects/${projectId}/drawing-review-candidates`) return fulfill([])
+    if (path === `/api/projects/${projectId}/plan/portfolio`) return fulfill({ projects: [], completionPercent: 0, plannedFinish: null })
+    if (path === `/api/projects/${projectId}/validation-plan`) return fulfill(null)
+    if (path === `/api/projects/${projectId}/procurement-tracking`) return fulfill({ items: [] })
     if (path === `/api/projects/${projectId}/files`) return fulfill([])
     if (path === `/api/projects/${projectId}/folders`) return fulfill([
       { id: 'folder-root', rootProjectId: projectId, parentFolderId: null, targetProjectId: projectId, folderKey: 'root', templateKey: 'root', name: 'PRJ-REAL-001', purpose: 0, sortOrder: 0, isSystem: true, inheritPermissions: true, effectiveAccess: 127, permissions: [] },
@@ -159,6 +172,59 @@ test.beforeEach(async ({ page }) => {
   })
 })
 
+test('project overview prioritizes current status, actions, tasks, team and locations', async ({ page }, testInfo) => {
+  const overviewProject = { id: projectId, code: 'PRJ-REAL-001', name: '真实装配项目', owner: 'engineer', stage: 'Design', vaultLocation: 'D:\\PDM\\PRJ-REAL-001', releaseLocation: 'D:\\Release\\PRJ-REAL-001', isActive: true, quantity: 1, serialNumbers: ['70000001'], executionUnitName: '自动化事业部', primaryProjectManager: 'engineer', collaborativeProjectManagers: [], designLead: 'engineer', designers: ['engineer'] }
+  await page.route('**/api/projects', route => route.fulfill({ json: [overviewProject] }))
+  await page.route(`**/api/projects/${projectId}`, route => route.fulfill({ json: overviewProject }))
+  await page.route(`**/api/projects/${projectId}/plan/portfolio`, route => route.fulfill({ json: {
+    rootProjectId: projectId, currentStage: 'Design', completionPercent: 62, laggingProjectCount: 0, riskProjectCount: 0, plannedStart: '2026-08-01', plannedFinish: '2026-10-18',
+    projects: [{ projectId, projectCode: 'PRJ-REAL-001', projectName: '真实装配项目', isRoot: true, hasPlan: true, currentStage: 'Design', completionPercent: 62, plannedFinish: '2026-10-18', isLagging: false, isAtRisk: false, plan: {
+      id: 'plan-1', projectId, currentStage: 'Design', plannedStart: '2026-08-01', plannedFinish: '2026-10-18', approvalStatus: 'Approved', stages: [{ code: 'Design', name: '设计' }], tasks: [
+        { id: 'task-drawing', name: '完成图纸审核', stage: 'Design', assignee: 'engineer', plannedStart: '2026-09-16', plannedFinish: '2026-09-18', completionPercent: 40, status: 'InProgress', predecessorTaskIds: [], weight: 1, isMilestone: false, isRequired: true, sortOrder: 1, durationDays: 3 },
+        { id: 'task-bom', name: '标准件BOM核对', stage: 'Design', assignee: 'engineer', plannedStart: '2026-09-17', plannedFinish: '2026-09-19', completionPercent: 0, status: 'NotStarted', predecessorTaskIds: [], weight: 1, isMilestone: false, isRequired: true, sortOrder: 2, durationDays: 3 },
+      ],
+    } }],
+  } }))
+  await page.route(`**/api/projects/${projectId}/validation-plan`, route => route.fulfill({ json: { id: 'validation-1', projectId, revisionNumber: 1, state: 'PendingApproval', items: [], approvalTasks: [], attachments: [], createdBy: 'engineer', createdAt: '2026-09-10', updatedBy: 'engineer', updatedAt: '2026-09-10', rowVersion: 1 } }))
+  await page.route(`**/api/material-relations/projects/${projectId}/completeness`, route => route.fulfill({ json: { projectId, isComplete: false, mainMaterialCount: 2, incompleteGroupCount: 2, mainMaterials: [] } }))
+  await page.route(`**/api/projects/${projectId}/procurement-tracking`, route => route.fulfill({ json: { projectId, projectCode: 'PRJ-REAL-001', hasPublishedBom: true, items: [
+    { sequence: 1, projectCode: 'PRJ-REAL-001', materialCode: 'MAT-001', materialName: '关键传感器', impactStage: 'Assembly', quantity: 1, bomKind: 'Electrical', purchaseRequisitionNumbers: [], purchaseRequisitionStatus: '未请购', purchaseOrderNumbers: [], purchaseOrderStatus: '未采购', purchaseQuantity: 0, arrivedQuantity: 0, details: [] },
+    { sequence: 2, projectCode: 'PRJ-REAL-001', materialCode: 'MAT-002', materialName: '普通紧固件', impactStage: null, quantity: 2, bomKind: 'Standard', purchaseRequisitionNumbers: [], purchaseRequisitionStatus: '未请购', purchaseOrderNumbers: [], purchaseOrderStatus: '未采购', purchaseQuantity: 0, arrivedQuantity: 0, details: [] },
+  ] } }))
+  const errors: string[] = []
+  page.on('pageerror', error => errors.push(error.message))
+  page.on('console', message => { if (message.type() === 'error') errors.push(message.text()) })
+  await page.addInitScript(() => { window.setInterval = (() => 0) as unknown as typeof window.setInterval })
+  await page.setViewportSize({ width: 1236, height: 1114 })
+  await page.goto('/')
+  const login = page.getByLabel('登录PLM')
+  await login.getByRole('textbox', { name: '账号' }).fill('engineer')
+  await login.getByRole('textbox', { name: '密码' }).fill('correct-password')
+  await login.getByRole('button', { name: '登录', exact: true }).click()
+  await enterProject(page)
+
+  const overview = page.getByLabel('工作台主页面')
+  await expect(overview.getByLabel('项目状态与下一步')).toContainText('设计阶段')
+  await expect(overview.getByLabel('项目状态与下一步')).toContainText('项目进度 62%')
+  await expect(overview.getByLabel('项目状态与下一步')).toContainText('2026/10/18')
+  await expect(overview.getByLabel('图档与审核')).toContainText('3D 41')
+  await expect(overview.getByLabel('图档与审核')).toContainText('2D 1')
+  await expect(overview.getByLabel('BOM与物料')).toContainText('关联物料待核对 2')
+  await expect(overview.getByLabel('发布与备料')).toContainText('关键物料1')
+  await expect(overview.getByLabel('当前阶段任务')).toContainText('完成图纸审核')
+  await expect(overview.getByLabel('项目团队')).toContainText('真实工程师')
+  await expect(overview.getByLabel('项目位置')).toContainText('D:\\PDM\\PRJ-REAL-001')
+  const overviewBox = await overview.boundingBox()
+  expect(overviewBox).not.toBeNull()
+  expect((overviewBox?.y ?? 0) + (overviewBox?.height ?? 0)).toBeLessThanOrEqual(page.viewportSize()!.height + 1)
+  expect(await overview.getByLabel('当前阶段任务').locator('tbody td').first().evaluate(element => getComputedStyle(element).fontSize)).toBe('10px')
+  await expect(page.locator('vite-error-overlay')).toHaveCount(0)
+  await page.screenshot({ path: testInfo.outputPath('project-overview-command-center.png') })
+  await overview.getByRole('button', { name: '进入BOM数据' }).click()
+  await expect(page.getByRole('button', { name: 'BOM', exact: true })).toHaveClass(/is-active/)
+  expect(errors).toEqual([])
+})
+
 test('wear-part BOM aggregates categories and stays outside release', async ({ page }, testInfo) => {
   const errors: string[] = []
   page.on('pageerror', error => errors.push(error.message))
@@ -170,8 +236,7 @@ test('wear-part BOM aggregates categories and stays outside release', async ({ p
   await login.getByRole('textbox', { name: '账号' }).fill('engineer')
   await login.getByRole('textbox', { name: '密码' }).fill('correct-password')
   await login.getByRole('button', { name: '登录', exact: true }).click()
-  await page.getByRole('button', { name: '项目列表', exact: true }).click()
-  await page.getByRole('button', { name: '进入项目' }).click()
+  await enterProject(page)
   await page.getByRole('button', { name: 'BOM', exact: true }).click()
   await page.getByRole('tab', { name: /易损件BOM/ }).click()
 
@@ -210,8 +275,7 @@ test('related materials use a scoped right drawer for electrical BOM', async ({ 
   await login.getByRole('textbox', { name: '账号' }).fill('engineer')
   await login.getByRole('textbox', { name: '密码' }).fill('correct-password')
   await login.getByRole('button', { name: '登录', exact: true }).click()
-  await page.getByRole('button', { name: '项目列表', exact: true }).click()
-  await page.getByRole('button', { name: '进入项目' }).click()
+  await enterProject(page)
   await page.getByRole('button', { name: 'BOM', exact: true }).click()
   await page.getByRole('tab', { name: /电气BOM/ }).click()
   await page.getByRole('button', { name: '关联物料', exact: true }).click()
@@ -261,6 +325,9 @@ test('project settings keeps the confirmed project-copy scope', async ({ page },
   await page.route(`**/api/projects/${targetId}/**`, route => {
     const path = new URL(route.request().url()).pathname
     if (path.endsWith('/reference-tree')) return route.fulfill({ json: null })
+    if (path.endsWith('/plan/portfolio')) return route.fulfill({ json: { projects: [], completionPercent: 0, plannedFinish: null } })
+    if (path.endsWith('/validation-plan')) return route.fulfill({ json: null })
+    if (path.endsWith('/procurement-tracking')) return route.fulfill({ json: { items: [] } })
     if (['/folders', '/documents', '/folder-documents', '/document-relations', '/boms/Standard', '/boms/NonStandard', '/boms/Unclassified', '/boms/Electrical', '/bom-source-data', '/boms/empty-declarations', '/bom-versions', '/bom-baselines', '/drawing-reviews', '/release-packages'].some(suffix => path.endsWith(suffix))) return route.fulfill({ json: [] })
     return route.fallback()
   })
@@ -349,8 +416,7 @@ test('project plan week header centers ISO week and places Monday day on the gri
   await login.getByRole('textbox', { name: '账号' }).fill('admin')
   await login.getByRole('textbox', { name: '密码' }).fill('correct-password')
   await login.getByRole('button', { name: '登录', exact: true }).click()
-  await page.getByRole('button', { name: '项目列表', exact: true }).click()
-  await page.getByRole('button', { name: '进入项目' }).click()
+  await enterProject(page)
   await page.getByRole('button', { name: '项目计划', exact: true }).click()
 
   await page.getByLabel('甘特图缩放').getByRole('button', { name: '周', exact: true }).click()
@@ -399,8 +465,7 @@ test('hierarchy category links open the owning project BOM', async ({ page }, te
   await login.getByRole('textbox', { name: '账号' }).fill('engineer')
   await login.getByRole('textbox', { name: '密码' }).fill('correct-password')
   await login.getByRole('button', { name: '登录', exact: true }).click()
-  await page.getByRole('button', { name: '项目列表', exact: true }).click()
-  await page.getByRole('button', { name: '进入项目' }).first().click()
+  await enterProject(page)
   await page.getByRole('button', { name: 'BOM', exact: true }).click()
   await page.getByRole('tab', { name: '多级总览' }).click()
   for (const category of ['标准件BOM', '非标件BOM', '电气BOM']) {
@@ -455,8 +520,7 @@ test('project plan toolbar uses uniform buttons and shows actual completion date
   await login.getByRole('textbox', { name: '账号' }).fill('admin')
   await login.getByRole('textbox', { name: '密码' }).fill('correct-password')
   await login.getByRole('button', { name: '登录', exact: true }).click()
-  await page.getByRole('button', { name: '项目列表', exact: true }).click()
-  await page.getByRole('button', { name: '进入项目' }).click()
+  await enterProject(page)
   await page.getByRole('button', { name: '项目计划', exact: true }).click()
 
   const toolbar = page.locator('.pdm-plan-toolbar')
@@ -540,8 +604,7 @@ test('project plan stages can overlap and moving one stage keeps unrelated stage
   await login.getByRole('textbox', { name: '账号' }).fill('admin')
   await login.getByRole('textbox', { name: '密码' }).fill('correct-password')
   await login.getByRole('button', { name: '登录', exact: true }).click()
-  await page.getByRole('button', { name: '项目列表', exact: true }).click()
-  await page.getByRole('button', { name: '进入项目' }).click()
+  await enterProject(page)
   await page.getByRole('button', { name: '项目计划', exact: true }).click()
 
   await expect(page.getByText(/拖动阶段条可整体平移/)).toHaveCount(0)
@@ -697,17 +760,17 @@ test('engineer logs in and reads the API-backed PLM workspace', async ({ page },
   await page.getByLabel('事业部筛选').selectOption('自动化事业部')
   await page.getByLabel('项目经理筛选').selectOption('project-manager-2')
   await page.getByLabel('主设工程师筛选').selectOption('design-lead')
-  await expect(page.getByRole('button', { name: '进入项目' })).toBeVisible()
-  await page.getByRole('button', { name: '进入项目' }).click()
+  await expect(page.getByRole('button', { name: '进入项目 PRJ-REAL-001', exact: true })).toBeVisible()
+  await page.getByRole('button', { name: '进入项目 PRJ-REAL-001', exact: true }).click()
 
   await expect(page.locator('.pdm-project-sidebar__summary').getByText('PRJ-REAL-001 · 真实装配项目', { exact: true })).toBeVisible()
   await expect(page.getByRole('banner').getByText('真实工程师', { exact: true })).toBeVisible()
-  await expect(page.locator('.pdm-project-tabs button')).toHaveText(['概览', '文件', '项目计划', '验证计划', '图档', 'BOM', '发布', '备料', '版本', '记录', '设置'])
+  await expect(page.locator('.pdm-project-tabs button')).toHaveText(['概览', '文件', '项目计划', '验证计划', '图档', 'BOM', '备料', '发布', '版本', '记录', '设置'])
   await page.getByRole('button', { name: '文件', exact: true }).click()
   await expect(page.getByText('项目文件夹', { exact: true })).toBeVisible()
   await page.screenshot({ path: testInfo.outputPath('project-tabs-overview-file-project-plan-1920.png'), fullPage: false })
   await page.setViewportSize({ width: 1285, height: 1114 })
-  await expect(page.locator('.pdm-project-tabs button')).toHaveText(['概览', '文件', '项目计划', '验证计划', '图档', 'BOM', '发布', '备料', '版本', '记录', '设置'])
+  await expect(page.locator('.pdm-project-tabs button')).toHaveText(['概览', '文件', '项目计划', '验证计划', '图档', 'BOM', '备料', '发布', '版本', '记录', '设置'])
   await page.screenshot({ path: testInfo.outputPath('project-tabs-overview-file-project-plan-1285.png'), fullPage: false })
   await expect(page.locator('vite-error-overlay')).toHaveCount(0)
   expect(projectTabErrors).toEqual([])
@@ -837,13 +900,12 @@ test('BOM duplicate candidates require confirmation and summary quantity is edit
   await loginForm.getByRole('textbox', { name: '账号' }).fill('engineer')
   await loginForm.getByRole('textbox', { name: '密码' }).fill('correct-password')
   await loginForm.getByRole('button', { name: '登录', exact: true }).click()
-  await page.getByRole('button', { name: '项目列表', exact: true }).click()
-  await page.getByRole('button', { name: '进入项目' }).click()
+  await enterProject(page)
   await page.getByRole('button', { name: 'BOM', exact: true }).click()
   await page.getByRole('tab', { name: '标准件BOM' }).click()
 
   const materialCodeActions = page.locator('.pdm-bom-selection-actions .pdm-bom-material-code-toolbar-action')
-  await expect(materialCodeActions).toHaveText(['引用物料', '引用套件', '关联物料', '核对料号', '申请料号'])
+  await expect(materialCodeActions).toHaveText(['引用物料', '关联物料', '核对料号', '申请料号'])
   expect(await materialCodeActions.evaluateAll(buttons => buttons.map(button => {
     const box = button.getBoundingClientRect()
     return { width: box.width, height: box.height }
@@ -852,9 +914,16 @@ test('BOM duplicate candidates require confirmation and summary quantity is edit
     { width: 70, height: 28 },
     { width: 70, height: 28 },
     { width: 70, height: 28 },
-    { width: 70, height: 28 },
   ])
   await page.screenshot({ path: testInfo.outputPath('bom-material-code-actions.png'), fullPage: false })
+  await page.getByRole('button', { name: '引用物料', exact: true }).click()
+  const materialReferenceDialog = page.getByRole('dialog', { name: '引用物料' })
+  await expect(materialReferenceDialog).toBeVisible()
+  await expect(materialReferenceDialog.getByRole('button', { name: '普通料品', exact: true })).toBeVisible()
+  await expect(materialReferenceDialog.getByRole('button', { name: 'UKIT套件', exact: true })).toBeVisible()
+  await expect(page.getByRole('button', { name: '引用套件', exact: true })).toHaveCount(0)
+  await page.screenshot({ path: testInfo.outputPath('bom-unified-material-reference.png'), fullPage: false })
+  await materialReferenceDialog.getByRole('button', { name: '关闭物料引用' }).click()
 
   const row = page.locator('.pdm-edit-table tbody tr').first()
   await expect(row.getByRole('button', { name: '编辑数量' })).toHaveText('10')
@@ -946,8 +1015,7 @@ test('operator columns display the user name instead of the account name', async
   await login.getByRole('textbox', { name: '账号' }).fill('engineer')
   await login.getByRole('textbox', { name: '密码' }).fill('correct-password')
   await login.getByRole('button', { name: '登录', exact: true }).click()
-  await page.getByRole('button', { name: '项目列表', exact: true }).click()
-  await page.getByRole('button', { name: '进入项目' }).click()
+  await enterProject(page)
   await page.getByRole('button', { name: '版本', exact: true }).click()
 
   const versionRow = page.getByRole('row').filter({ hasText: '首次存档' })
@@ -1053,23 +1121,29 @@ test('administrator switches independent company organization trees', async ({ p
 
 test('role permissions follow the system module directory and include future modules', async ({ page }, testInfo) => {
   const errors: string[] = []
+  const permissionDirectory = {
+    permissions: [
+      { code: 'project.view', name: '查看项目清单', module: '项目管理', description: '查看当前公司范围内的项目。', sensitive: false },
+      { code: 'document.edit', name: '编辑项目图档', module: '项目内容', description: '编辑图档并创建新版本。', sensitive: false },
+      { code: 'future-module.view', name: '查看新增模块', module: '新增模块', description: '模拟后续发布的系统模块权限。', sensitive: false },
+    ],
+    roles: [
+      { role: 'PlanningManager', name: '计划管理', description: '按所属公司分配项目执行事业部。', baseRole: 'PlanningManager', isSystem: true, isSystemAdministrator: false, permissions: ['project.view'], userCount: 2 },
+    ],
+  }
   page.on('pageerror', error => errors.push(error.message))
   page.on('console', message => {
     if (message.type() === 'error' || message.type() === 'warning') errors.push(`${message.text()} ${message.location().url}`.trim())
   })
+  await page.route('**/api/role-permissions/PlanningManager', route => route.fulfill({
+    status: 200,
+    contentType: 'application/json',
+    body: JSON.stringify(permissionDirectory),
+  }))
   await page.route('**/api/role-permissions', route => route.fulfill({
     status: 200,
     contentType: 'application/json',
-    body: JSON.stringify({
-      permissions: [
-        { code: 'project.view', name: '查看项目清单', module: '项目管理', description: '查看当前公司范围内的项目。', sensitive: false },
-        { code: 'document.edit', name: '编辑项目图档', module: '项目内容', description: '编辑图档并创建新版本。', sensitive: false },
-        { code: 'future-module.view', name: '查看新增模块', module: '新增模块', description: '模拟后续发布的系统模块权限。', sensitive: false },
-      ],
-      roles: [
-        { role: 'PlanningManager', name: '计划管理', description: '按所属公司分配项目执行事业部。', baseRole: 'PlanningManager', isSystem: true, isSystemAdministrator: false, permissions: ['project.view'], userCount: 2 },
-      ],
-    }),
+    body: JSON.stringify(permissionDirectory),
   }))
 
   await page.setViewportSize({ width: 1988, height: 1114 })
@@ -1103,6 +1177,9 @@ test('role permissions follow the system module directory and include future mod
   await expect(dialog).toContainText('编辑项目图档')
   await modules.getByRole('button', { name: /新增模块/ }).click()
   await expect(dialog).toContainText('查看新增模块')
+  await dialog.getByRole('button', { name: '保存并立即生效', exact: true }).click()
+  await expect(dialog).toBeVisible()
+  await expect(dialog).toContainText('角色权限已保存并立即生效')
   await expect(page.locator('vite-error-overlay')).toHaveCount(0)
   expect(errors).toEqual([])
   await page.screenshot({ path: testInfo.outputPath('role-permission-system-modules.png'), fullPage: false })
@@ -1132,7 +1209,7 @@ for (const scale of [
     expect(shellLayout.sidebarWidth).toBe(155)
     expect(shellLayout.titlebarHeight).toBe(62)
     expect(shellLayout.clippedLabels).toEqual([])
-    await page.getByRole('button', { name: '进入项目' }).click()
+    await enterProject(page)
     await page.getByRole('button', { name: '图档', exact: true }).click()
     await expect(page.getByLabel('项目设计树')).toBeVisible()
 

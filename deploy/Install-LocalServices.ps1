@@ -209,7 +209,7 @@ if ($null -eq $apiService) {
     New-Service -Name $apiServiceName -BinaryPathName $apiBinaryPath -DisplayName 'UPLM API' -Description 'UPLM API on 127.0.0.1:5080' -StartupType Automatic | Out-Null
 }
 else {
-    & sc.exe config $apiServiceName "binPath= $apiBinaryPath" start= auto | Out-Null
+    & sc.exe config $apiServiceName binPath= $apiBinaryPath start= auto | Out-Null
 }
 & sc.exe config $apiServiceName depend= $mysqlServiceName | Out-Null
 & sc.exe config $apiServiceName DisplayName= 'UPLM API' | Out-Null

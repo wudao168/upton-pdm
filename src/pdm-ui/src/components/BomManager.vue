@@ -158,7 +158,7 @@ const materialReferenceReason = ref('')
 const materialReferenceResults = ref<PdmMaterial[]>([])
 const materialReferencePage = ref(1)
 const materialReferencePageSize = ref(20)
-const kitReferenceOpen = ref(false)
+const materialReferenceMode = ref<'material' | 'kit'>('material')
 const kitReferenceLoading = ref(false)
 const kitReferenceApplying = ref(false)
 const kitReferenceQuery = ref('')
@@ -733,6 +733,7 @@ function openMaterialCandidates(row: BomItem) {
   if (!row.id) return
   const resolution = materialResolution(row)
   selectedIds.value = [row.id]
+  materialReferenceMode.value = 'material'
   materialReferenceQuery.value = row.specification ?? ''
   materialReferenceBrandInput.value = row.brand ?? ''
   materialReferenceBrandFilter.value = row.brand ?? ''
@@ -1691,6 +1692,7 @@ async function searchMaterialReferences() {
 
 async function openMaterialReference() {
   if (selectedRows.value.length > 1 || isSourceView.value || !props.projectId || !props.token) return
+  materialReferenceMode.value = 'material'
   materialReferenceQuery.value = selectedRows.value[0]?.drawingNumber ?? ''
   materialReferenceBrandInput.value = ''
   materialReferenceBrandFilter.value = ''
@@ -1739,7 +1741,8 @@ async function applyMaterialReference(material: PdmMaterial) {
 
 async function openKitReference() {
   if (isSourceView.value || !props.projectId || !props.token) return
-  kitReferenceOpen.value = true
+  materialReferenceMode.value = 'kit'
+  materialReferenceOpen.value = true
   kitReferenceLoading.value = true
   kitReferenceQuery.value = ''
   selectedKitId.value = ''
@@ -1806,7 +1809,7 @@ async function applyEngineeringKit() {
     rows.value.push(...added)
     resequence()
     added.forEach(row => markStagedEdits(row, ['engineeringKitReference']))
-    kitReferenceOpen.value = false
+    materialReferenceOpen.value = false
     saveCurrentBom()
     ElMessage.success(`已引用 ${expansion.kitCode} / V${String(expansion.versionNumber).padStart(2, '0')}，展开 ${added.length} 个真实料品`)
   } catch (error) {
@@ -1864,10 +1867,17 @@ function updateRelationChoice(mainBomItemId: string, groupId: string, value: str
   relationNoAccessoryConfirmed.value = { ...relationNoAccessoryConfirmed.value, [key]: false }
 }
 
-function confirmRelationNoAccessory(mainBomItemId: string, groupId: string) {
-  const key = relationChoiceKey(mainBomItemId, groupId)
-  relationChoices.value = { ...relationChoices.value, [key]: [] }
-  relationNoAccessoryConfirmed.value = { ...relationNoAccessoryConfirmed.value, [key]: true }
+async function confirmRelationNoAccessory(mainBomItemId: string, groupId: string) {
+  try {
+    await ElMessageBox.confirm('确认本次该主物料无需配套吗？确认后会清空当前组已选的关联物料。', '二次确认', {
+      type: 'warning', confirmButtonText: '确认无需配套', cancelButtonText: '取消', confirmButtonClass: 'pdm-danger-confirm',
+    })
+    const key = relationChoiceKey(mainBomItemId, groupId)
+    relationChoices.value = { ...relationChoices.value, [key]: [] }
+    relationNoAccessoryConfirmed.value = { ...relationNoAccessoryConfirmed.value, [key]: true }
+  } catch (error) {
+    if (error !== 'cancel' && error !== 'close') ElMessage.error(error instanceof Error ? error.message : '无需配套确认失败')
+  }
 }
 
 function reopenRelationGroup(mainBomItemId: string, groupId: string) {
@@ -3039,7 +3049,6 @@ async function submitBatchUpdate() {
         <template v-else-if="canEditCurrentView">
           <button type="button" class="pdm-secondary-action" :disabled="pending || selectedIds.length === 0 || hasSelectedDraftRows" :title="hasSelectedDraftRows ? '新增行请直接编辑表格字段' : ''" @click="openBatchEditor">{{ selectedIds.length > 1 ? '批量编辑' : '编辑' }}</button>
           <button v-if="!isSourceView" type="button" class="pdm-secondary-action pdm-bom-material-code-toolbar-action" :disabled="pending || selectedIds.length > 1 || !token || !projectId" @click="openMaterialReference">引用物料</button>
-          <button v-if="!isSourceView" type="button" class="pdm-secondary-action pdm-bom-material-code-toolbar-action" :disabled="pending || !token || !projectId" title="选择已发布 UKIT 套件并展开为真实料品" @click="openKitReference">引用套件</button>
           <button v-if="kind === 'Standard' || kind === 'Electrical'" type="button" class="pdm-secondary-action pdm-bom-relation-action pdm-bom-material-code-toolbar-action" :class="{ 'is-warning': !relationReviewComplete, 'is-complete': relationReviewComplete }" :title="relationReviewTitle" :disabled="pending || !token || !projectId || selectedVersionId !== 'current'" @click="openMaterialRelations">关联物料</button>
           <button v-if="kind === 'Standard'" type="button" class="pdm-primary-action pdm-bom-material-code-toolbar-action pdm-bom-code-check-action" :disabled="pending || materialCodeResolving || !token || !projectId" @click="resolveMissingStandardMaterialCodes(true)">核对料号</button>
           <button v-if="kind === 'Standard'" type="button" class="pdm-secondary-action pdm-bom-material-code-toolbar-action" :disabled="pending || selectedStandardItemsWithoutCode.length === 0" @click="applyForMaterialCodes([...new Set(selectedStandardItemsWithoutCode.flatMap(operationItemIds))])">申请料号</button>
@@ -3274,9 +3283,9 @@ async function submitBatchUpdate() {
               <div v-if="relationNoAccessory(selectedRelationMainCheck.mainBomItemId, group.groupId)" class="pdm-material-relation-no-accessory">
                 <span>已确认本次无需配套</span>
                 <input :value="relationNoAccessoryReason(selectedRelationMainCheck.mainBomItemId, group.groupId)" maxlength="500" placeholder="补充原因（选填）" :aria-label="`${selectedRelationMainCheck.mainMaterialCode} ${group.groupName} 无需配套原因`" @input="updateRelationNoAccessoryReason(selectedRelationMainCheck.mainBomItemId, group.groupId, ($event.target as HTMLInputElement).value)">
-                <button type="button" class="pdm-link-action" @click="reopenRelationGroup(selectedRelationMainCheck.mainBomItemId, group.groupId)">重新核对</button>
+                <button type="button" class="pdm-secondary-action pdm-material-relation-review-button" @click="reopenRelationGroup(selectedRelationMainCheck.mainBomItemId, group.groupId)">重新核对</button>
               </div>
-              <button v-else-if="group.isRequired" type="button" class="pdm-secondary-action pdm-material-relation-none-button" @click="confirmRelationNoAccessory(selectedRelationMainCheck.mainBomItemId, group.groupId)">确认本次无需配套</button>
+              <button v-else-if="group.isRequired" type="button" class="pdm-material-relation-none-button" @click="confirmRelationNoAccessory(selectedRelationMainCheck.mainBomItemId, group.groupId)">确认本次无需配套</button>
               <button v-else-if="relationChoice(selectedRelationMainCheck.mainBomItemId, group.groupId).length" type="button" class="pdm-link-action" @click="updateRelationChoice(selectedRelationMainCheck.mainBomItemId, group.groupId, [])">清除选择</button>
             </section>
           </div>
@@ -3285,30 +3294,20 @@ async function submitBatchUpdate() {
       <template #footer><div class="pdm-material-relation-footer"><span>当前 BOM 共 {{ relationMainRows.length }} 条已配置主物料；未核对项只提醒，不影响BOM保存和发布</span><button type="button" class="pdm-secondary-action" @click="relationDialogOpen = false">关闭</button><button type="button" class="pdm-primary-action" :disabled="relationApplying || relationLoading || !currentRelationChecks.length" @click="applySelectedRelations">{{ relationApplying ? '正在保存…' : '保存核对结果' }}</button></div></template>
     </el-drawer>
 
-    <div v-if="kitReferenceOpen" class="pdm-dialog-backdrop" @click.self="kitReferenceOpen = false">
-      <section class="pdm-material-reference-dialog pdm-kit-reference-dialog" role="dialog" aria-modal="true" aria-labelledby="pdm-kit-reference-title">
-        <header><div><h3 id="pdm-kit-reference-title">引用 UKIT 套件</h3><p>套件本身不会进入 U9C；确认后只把必选和已勾选的可选子料展开到当前BOM。</p></div><button type="button" class="pdm-icon-button" aria-label="关闭套件引用" @click="kitReferenceOpen = false">×</button></header>
-        <div class="pdm-material-reference-search"><input v-model.trim="kitReferenceQuery" type="search" aria-label="搜索套件" placeholder="搜索 UKIT 编码或名称"><label class="pdm-kit-quantity">套件数量<input v-model.number="kitReferenceQuantity" type="number" min="0.0001" step="1" aria-label="套件数量"></label></div>
-        <div class="pdm-kit-reference-body">
-          <div class="pdm-kit-reference-list pdm-table-scroll">
-            <table class="pdm-edit-table"><thead><tr><th>套件编码</th><th>名称</th><th>版本</th><th>子料</th></tr></thead><tbody><tr v-for="kitItem in filteredKitReferenceItems" :key="kitItem.id" :class="{ 'is-selected': selectedKitId === kitItem.id }" @click="selectEngineeringKit(kitItem.id)"><td><strong>{{ kitItem.code }}</strong></td><td>{{ kitItem.name }}</td><td>V{{ String(kitItem.revisions.find(item => item.id === kitItem.currentReleasedRevisionId)?.versionNumber).padStart(2, '0') }}</td><td>{{ kitItem.revisions.find(item => item.id === kitItem.currentReleasedRevisionId)?.components.length ?? 0 }}</td></tr><tr v-if="!kitReferenceLoading && !filteredKitReferenceItems.length"><td colspan="4" class="pdm-empty-info">暂无已发布套件。</td></tr></tbody></table>
-          </div>
-          <div class="pdm-kit-component-options">
-            <h4>{{ selectedEngineeringKit ? `${selectedEngineeringKit.code} · ${selectedEngineeringKit.name}` : '请选择套件' }}</h4>
-            <p v-if="selectedEngineeringKitRevision">固定引用 V{{ String(selectedEngineeringKitRevision.versionNumber).padStart(2, '0') }}；可选子料默认不选。</p>
-            <label v-for="component in selectedEngineeringKitRevision?.components ?? []" :key="component.id" :class="{ 'is-required': !component.isOptional }"><input v-if="component.isOptional" v-model="selectedOptionalKitComponentIds" type="checkbox" :value="component.id"><input v-else type="checkbox" checked disabled><span><strong>{{ component.materialCode }} · {{ component.materialName }}</strong><small>{{ component.quantity }} {{ u9UnitName(component.unit) }} / 套 · {{ component.isOptional ? '可选' : '必选' }}</small></span></label>
-          </div>
-        </div>
-        <footer><button type="button" class="pdm-secondary-action" @click="kitReferenceOpen = false">取消</button><button type="button" class="pdm-primary-action" :disabled="kitReferenceApplying || !selectedEngineeringKitRevision || kitReferenceQuantity <= 0" @click="applyEngineeringKit">{{ kitReferenceApplying ? '展开中…' : '确认引用并展开' }}</button></footer>
-      </section>
-    </div>
-
     <div v-if="materialReferenceOpen" class="pdm-dialog-backdrop" @click.self="materialReferenceOpen = false">
-      <section class="pdm-bom-batch-dialog pdm-material-reference-dialog" role="dialog" aria-modal="true" aria-labelledby="pdm-material-reference-title">
-        <header><div><h3 id="pdm-material-reference-title">从料品主档引用</h3><p>{{ materialReferenceReason || '可按物料编码、名称或规格搜索，并按品牌筛选；只显示与当前BOM分类一致的已批准料品。' }}</p></div><button type="button" class="pdm-icon-button" aria-label="关闭料品引用" @click="materialReferenceOpen = false">×</button></header>
-        <div class="pdm-material-reference-search"><input v-model.trim="materialReferenceBrandInput" list="pdm-material-reference-brands" aria-label="筛选引用料品品牌" placeholder="输入或选择品牌" @keydown.enter.prevent="searchMaterialReferences"><datalist id="pdm-material-reference-brands"><option v-for="brand in materialReferenceBrandOptions" :key="brand" :value="brand" /></datalist><input v-model.trim="materialReferenceQuery" type="search" aria-label="搜索料品主档" placeholder="搜索物料编码、名称或规格" @keydown.enter.prevent="searchMaterialReferences"><button type="button" class="pdm-primary-action" :disabled="materialReferenceLoading" @click="searchMaterialReferences">{{ materialReferenceLoading ? '查询中…' : '查询' }}</button></div>
-        <div class="pdm-material-reference-table pdm-table-scroll"><table class="pdm-edit-table"><thead><tr><th>物料编码</th><th>名称</th><th>分类</th><th>引用次数</th><th>规格</th><th>品牌</th><th>备注</th><th>同步</th><th></th></tr></thead><tbody><tr v-for="materialItem in pagedMaterialReferenceResults" :key="materialItem.id"><td>{{ materialItem.materialCode }}</td><td>{{ materialItem.name }}</td><td>{{ materialItem.categoryCode }}</td><td>{{ materialItem.referenceCount ?? 0 }}</td><td>{{ materialItem.specification || '—' }}</td><td>{{ materialItem.brand || '—' }}</td><td>{{ materialItem.remark || '—' }}</td><td>{{ materialItem.syncStatus === 'Succeeded' ? '已同步' : '待同步' }}</td><td><button type="button" class="pdm-secondary-action" @click="applyMaterialReference(materialItem)">引用</button></td></tr><tr v-if="!materialReferenceLoading && filteredMaterialReferenceResults.length === 0"><td colspan="9" class="pdm-empty-info">没有符合条件的已批准料品。</td></tr></tbody></table></div>
-        <div v-if="filteredMaterialReferenceResults.length" class="pdm-material-reference-pagination"><span>共 {{ filteredMaterialReferenceResults.length }} 条</span><select v-model.number="materialReferencePageSize" aria-label="料品引用每页条数"><option :value="20">20条/页</option><option :value="50">50条/页</option><option :value="100">100条/页</option></select><button type="button" class="pdm-secondary-action" aria-label="料品引用上一页" :disabled="materialReferencePage <= 1" @click="materialReferencePage -= 1">‹</button><span>{{ materialReferencePage }} / {{ materialReferencePageCount }}</span><button type="button" class="pdm-secondary-action" aria-label="料品引用下一页" :disabled="materialReferencePage >= materialReferencePageCount" @click="materialReferencePage += 1">›</button></div>
+      <section class="pdm-bom-batch-dialog pdm-material-reference-dialog pdm-kit-reference-dialog" role="dialog" aria-modal="true" aria-labelledby="pdm-material-reference-title">
+        <header><div><h3 id="pdm-material-reference-title">引用物料</h3><p>{{ materialReferenceMode === 'material' ? (materialReferenceReason || '可按物料编码、名称或规格搜索，并按品牌筛选；只显示与当前BOM分类一致的已批准料品。') : '套件本身不会进入 U9C；确认后只把必选和已勾选的可选子料展开到当前BOM。' }}</p></div><button type="button" class="pdm-icon-button" aria-label="关闭物料引用" @click="materialReferenceOpen = false">×</button></header>
+        <div class="pdm-reference-kind-switch" aria-label="选择引用类型"><button type="button" class="pdm-secondary-action" :class="{ 'is-active': materialReferenceMode === 'material' }" @click="materialReferenceMode = 'material'">普通料品</button><button type="button" class="pdm-secondary-action" :class="{ 'is-active': materialReferenceMode === 'kit' }" @click="openKitReference">UKIT套件</button></div>
+        <template v-if="materialReferenceMode === 'material'">
+          <div class="pdm-material-reference-search"><input v-model.trim="materialReferenceBrandInput" list="pdm-material-reference-brands" aria-label="筛选引用料品品牌" placeholder="输入或选择品牌" @keydown.enter.prevent="searchMaterialReferences"><datalist id="pdm-material-reference-brands"><option v-for="brand in materialReferenceBrandOptions" :key="brand" :value="brand" /></datalist><input v-model.trim="materialReferenceQuery" type="search" aria-label="搜索料品主档" placeholder="搜索物料编码、名称或规格" @keydown.enter.prevent="searchMaterialReferences"><button type="button" class="pdm-primary-action" :disabled="materialReferenceLoading" @click="searchMaterialReferences">{{ materialReferenceLoading ? '查询中…' : '查询' }}</button></div>
+          <div class="pdm-material-reference-table pdm-table-scroll"><table class="pdm-edit-table"><thead><tr><th>物料编码</th><th>名称</th><th>分类</th><th>引用次数</th><th>规格</th><th>品牌</th><th>备注</th><th>同步</th><th></th></tr></thead><tbody><tr v-for="materialItem in pagedMaterialReferenceResults" :key="materialItem.id"><td>{{ materialItem.materialCode }}</td><td>{{ materialItem.name }}</td><td>{{ materialItem.categoryCode }}</td><td>{{ materialItem.referenceCount ?? 0 }}</td><td>{{ materialItem.specification || '—' }}</td><td>{{ materialItem.brand || '—' }}</td><td>{{ materialItem.remark || '—' }}</td><td>{{ materialItem.syncStatus === 'Succeeded' ? '已同步' : '待同步' }}</td><td><button type="button" class="pdm-secondary-action" @click="applyMaterialReference(materialItem)">引用</button></td></tr><tr v-if="!materialReferenceLoading && filteredMaterialReferenceResults.length === 0"><td colspan="9" class="pdm-empty-info">没有符合条件的已批准料品。</td></tr></tbody></table></div>
+          <div v-if="filteredMaterialReferenceResults.length" class="pdm-material-reference-pagination"><span>共 {{ filteredMaterialReferenceResults.length }} 条</span><select v-model.number="materialReferencePageSize" aria-label="料品引用每页条数"><option :value="20">20条/页</option><option :value="50">50条/页</option><option :value="100">100条/页</option></select><button type="button" class="pdm-secondary-action" aria-label="料品引用上一页" :disabled="materialReferencePage <= 1" @click="materialReferencePage -= 1">‹</button><span>{{ materialReferencePage }} / {{ materialReferencePageCount }}</span><button type="button" class="pdm-secondary-action" aria-label="料品引用下一页" :disabled="materialReferencePage >= materialReferencePageCount" @click="materialReferencePage += 1">›</button></div>
+        </template>
+        <template v-else>
+          <div class="pdm-material-reference-search"><input v-model.trim="kitReferenceQuery" type="search" aria-label="搜索套件" placeholder="搜索 UKIT 编码或名称"><label class="pdm-kit-quantity">套件数量<input v-model.number="kitReferenceQuantity" type="number" min="0.0001" step="1" aria-label="套件数量"></label></div>
+          <div class="pdm-kit-reference-body"><div class="pdm-kit-reference-list pdm-table-scroll"><table class="pdm-edit-table"><thead><tr><th>套件编码</th><th>名称</th><th>版本</th><th>子料</th></tr></thead><tbody><tr v-for="kitItem in filteredKitReferenceItems" :key="kitItem.id" :class="{ 'is-selected': selectedKitId === kitItem.id }" @click="selectEngineeringKit(kitItem.id)"><td><strong>{{ kitItem.code }}</strong></td><td>{{ kitItem.name }}</td><td>V{{ String(kitItem.revisions.find(item => item.id === kitItem.currentReleasedRevisionId)?.versionNumber).padStart(2, '0') }}</td><td>{{ kitItem.revisions.find(item => item.id === kitItem.currentReleasedRevisionId)?.components.length ?? 0 }}</td></tr><tr v-if="!kitReferenceLoading && !filteredKitReferenceItems.length"><td colspan="4" class="pdm-empty-info">暂无已发布套件。</td></tr></tbody></table></div><div class="pdm-kit-component-options"><h4>{{ selectedEngineeringKit ? `${selectedEngineeringKit.code} · ${selectedEngineeringKit.name}` : '请选择套件' }}</h4><p v-if="selectedEngineeringKitRevision">固定引用 V{{ String(selectedEngineeringKitRevision.versionNumber).padStart(2, '0') }}；可选子料默认不选。</p><label v-for="component in selectedEngineeringKitRevision?.components ?? []" :key="component.id" :class="{ 'is-required': !component.isOptional }"><input v-if="component.isOptional" v-model="selectedOptionalKitComponentIds" type="checkbox" :value="component.id"><input v-else type="checkbox" checked disabled><span><strong>{{ component.materialCode }} · {{ component.materialName }}</strong><small>{{ component.quantity }} {{ u9UnitName(component.unit) }} / 套 · {{ component.isOptional ? '可选' : '必选' }}</small></span></label></div></div>
+          <footer><button type="button" class="pdm-secondary-action" @click="materialReferenceOpen = false">取消</button><button type="button" class="pdm-primary-action" :disabled="kitReferenceApplying || !selectedEngineeringKitRevision || kitReferenceQuantity <= 0" @click="applyEngineeringKit">{{ kitReferenceApplying ? '展开中…' : '确认引用并展开' }}</button></footer>
+        </template>
       </section>
     </div>
 
@@ -3559,6 +3558,7 @@ async function submitBatchUpdate() {
 :global(.pdm-material-relation-drawer .el-drawer__header){min-height:48px;margin-bottom:0;padding:0 16px;border-bottom:1px solid var(--pdm-border)}
 :global(.pdm-material-relation-drawer .el-drawer__body){display:flex;min-height:0;flex-direction:column;padding:0;background:#f8fafc}
 :global(.pdm-material-relation-drawer .el-drawer__footer){padding:0;border-top:1px solid var(--pdm-border)}
+:global(.pdm-danger-confirm){border-color:var(--pdm-danger)!important;background:var(--pdm-danger)!important;color:#fff!important}
 .pdm-material-relation-help{padding:9px 12px;border-bottom:1px solid #bfdbfe;background:#eff6ff;color:#1d4ed8;line-height:1.5}
 .pdm-material-relation-loading{display:grid;min-height:180px;place-content:center}
 .pdm-material-relation-workspace{display:grid;min-height:0;flex:1;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:10px;padding:10px}
@@ -3573,9 +3573,9 @@ async function submitBatchUpdate() {
 .pdm-material-relation-groups{display:grid;align-content:start;gap:10px;padding:10px}
 .pdm-material-relation-group{display:grid;gap:8px;overflow:hidden;padding:10px;border:1px solid var(--pdm-border);border-radius:6px}.pdm-material-relation-group.is-incomplete{border-color:#f59e0b;box-shadow:inset 3px 0 #f59e0b}
 .pdm-material-relation-group-title{display:flex;align-items:center;justify-content:space-between;gap:10px}.pdm-material-relation-group-title>div{display:flex;min-width:0;align-items:center;gap:7px}.pdm-material-relation-group-title span{overflow:hidden;color:var(--pdm-muted);font-size:11px;text-overflow:ellipsis;white-space:nowrap}.pdm-material-relation-group-title em{padding:1px 6px;border-radius:999px;background:#f1f5f9;color:#475569;font-size:11px;font-style:normal;white-space:nowrap}
-.pdm-material-relation-option-list{overflow:auto;border:1px solid var(--pdm-border);border-radius:5px}.pdm-material-relation-option-list table{width:100%;min-width:600px;table-layout:fixed}.pdm-material-relation-option-list th:first-child{width:44px}.pdm-material-relation-option-list th:nth-child(2){width:105px}.pdm-material-relation-option-list th:nth-child(3){width:120px}.pdm-material-relation-option-list th:nth-child(4){width:62px}.pdm-material-relation-option-list th:nth-child(5){width:52px}.pdm-material-relation-option-list th:nth-child(6){width:110px}.pdm-material-relation-option-list th:nth-child(7){width:72px}.pdm-material-relation-option-list tbody tr{height:30px;cursor:pointer}.pdm-material-relation-option-list tbody tr.is-selected td{background:var(--pdm-theme-accent-soft)}.pdm-material-relation-option-list td{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.pdm-material-relation-none-button{justify-self:start}.pdm-material-relation-no-accessory{display:grid;grid-template-columns:auto minmax(180px,1fr) auto;align-items:center;gap:9px;padding:7px 9px;border-radius:5px;background:#f1f5f9;color:#475569}.pdm-material-relation-no-accessory input{height:28px;padding:3px 7px;border:1px solid var(--pdm-border);border-radius:5px;background:#fff;color:var(--pdm-text)}
+.pdm-material-relation-option-list{overflow:auto;border:1px solid var(--pdm-border);border-radius:5px}.pdm-material-relation-option-list table{width:100%;min-width:760px;table-layout:fixed}.pdm-material-relation-option-list th:first-child{width:52px}.pdm-material-relation-option-list th:nth-child(2){width:132px}.pdm-material-relation-option-list th:nth-child(3){width:174px}.pdm-material-relation-option-list th:nth-child(4){width:82px}.pdm-material-relation-option-list th:nth-child(5){width:64px}.pdm-material-relation-option-list th:nth-child(6){width:140px}.pdm-material-relation-option-list th:nth-child(7){width:96px}.pdm-material-relation-option-list tbody tr{height:30px;cursor:pointer}.pdm-material-relation-option-list tbody tr.is-selected td{background:var(--pdm-theme-accent-soft)}.pdm-material-relation-option-list td{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.pdm-material-relation-none-button{justify-self:end;border:1px solid var(--pdm-danger);border-radius:5px;background:var(--pdm-danger);color:#fff;padding:7px 12px;cursor:pointer}.pdm-material-relation-none-button:hover,.pdm-material-relation-none-button:focus-visible{filter:brightness(.92);outline:2px solid color-mix(in srgb,var(--pdm-danger) 25%,transparent);outline-offset:1px}.pdm-material-relation-no-accessory{display:grid;grid-template-columns:auto minmax(180px,1fr) auto;align-items:center;gap:9px;padding:7px 9px;border-radius:5px;background:#f1f5f9;color:#475569}.pdm-material-relation-no-accessory input{height:28px;padding:3px 7px;border:1px solid var(--pdm-border);border-radius:5px;background:#fff;color:var(--pdm-text)}.pdm-material-relation-review-button{justify-self:end;white-space:nowrap}
 .pdm-material-relation-footer{display:flex;align-items:center;justify-content:flex-end;gap:8px;padding:10px 12px}.pdm-material-relation-footer>span{margin-right:auto;color:var(--pdm-muted)}
-@media(max-width:900px){.pdm-material-relation-workspace{grid-template-columns:1fr;grid-template-rows:minmax(180px,.8fr) minmax(240px,1.2fr)}.pdm-material-relation-no-accessory{grid-template-columns:1fr}}
-.pdm-bom-kit-chip{display:inline-block;margin-right:4px;padding:1px 4px;border-radius:4px;background:#ccfbf1;color:#0f766e;font-size:9px;font-weight:700;vertical-align:middle}.pdm-kit-reference-dialog{width:min(980px,calc(100vw - 32px));height:min(680px,calc(100vh - 32px))}.pdm-kit-reference-dialog .pdm-material-reference-search{justify-content:space-between}.pdm-kit-quantity{display:flex;align-items:center;gap:7px;color:var(--pdm-muted)}.pdm-kit-quantity input{width:100px}.pdm-kit-reference-body{display:grid;min-height:0;flex:1;grid-template-columns:minmax(0,1.2fr) minmax(320px,.8fr);gap:12px;padding:0 18px 16px}.pdm-kit-reference-list{min-height:0;border:1px solid var(--pdm-border);border-radius:7px}.pdm-kit-reference-list tr{cursor:pointer}.pdm-kit-reference-list tr.is-selected td{background:var(--pdm-theme-accent-soft);color:var(--pdm-theme-accent)}.pdm-kit-component-options{min-height:0;overflow:auto;padding:12px;border:1px solid var(--pdm-border);border-radius:7px;background:#f8fafc}.pdm-kit-component-options h4,.pdm-kit-component-options p{margin:0}.pdm-kit-component-options p{margin-top:4px;color:var(--pdm-muted)}.pdm-kit-component-options>label{display:flex;margin-top:9px;padding:9px;border:1px solid var(--pdm-border);border-radius:6px;background:#fff;align-items:flex-start;gap:9px}.pdm-kit-component-options>label.is-required{border-color:#86efac;background:#f0fdf4}.pdm-kit-component-options>label span{display:grid;min-width:0;gap:3px}.pdm-kit-component-options>label small{color:var(--pdm-muted)}@media(max-width:760px){.pdm-kit-reference-body{grid-template-columns:1fr}.pdm-kit-reference-dialog{height:calc(100vh - 24px)}}
+@media(max-width:900px){.pdm-material-relation-workspace{grid-template-columns:1fr;grid-template-rows:minmax(180px,.8fr) minmax(240px,1.2fr)}}
+.pdm-bom-kit-chip{display:inline-block;margin-right:4px;padding:1px 4px;border-radius:4px;background:#ccfbf1;color:#0f766e;font-size:9px;font-weight:700;vertical-align:middle}.pdm-kit-reference-dialog{width:min(980px,calc(100vw - 32px));height:min(680px,calc(100vh - 32px))}.pdm-reference-kind-switch{display:flex;gap:8px;padding:12px 18px 0}.pdm-reference-kind-switch .pdm-secondary-action.is-active{border-color:var(--pdm-theme-accent);background:var(--pdm-theme-accent-soft);color:var(--pdm-theme-accent)}.pdm-kit-reference-dialog .pdm-material-reference-search{justify-content:space-between}.pdm-kit-quantity{display:flex;align-items:center;gap:7px;color:var(--pdm-muted)}.pdm-kit-quantity input{width:100px}.pdm-kit-reference-body{display:grid;min-height:0;flex:1;grid-template-columns:minmax(0,1.2fr) minmax(320px,.8fr);gap:12px;padding:0 18px 16px}.pdm-kit-reference-list{min-height:0;border:1px solid var(--pdm-border);border-radius:7px}.pdm-kit-reference-list tr{cursor:pointer}.pdm-kit-reference-list tr.is-selected td{background:var(--pdm-theme-accent-soft);color:var(--pdm-theme-accent)}.pdm-kit-component-options{min-height:0;overflow:auto;padding:12px;border:1px solid var(--pdm-border);border-radius:7px;background:#f8fafc}.pdm-kit-component-options h4,.pdm-kit-component-options p{margin:0}.pdm-kit-component-options p{margin-top:4px;color:var(--pdm-muted)}.pdm-kit-component-options>label{display:flex;margin-top:9px;padding:9px;border:1px solid var(--pdm-border);border-radius:6px;background:#fff;align-items:flex-start;gap:9px}.pdm-kit-component-options>label.is-required{border-color:#86efac;background:#f0fdf4}.pdm-kit-component-options>label span{display:grid;min-width:0;gap:3px}.pdm-kit-component-options>label small{color:var(--pdm-muted)}@media(max-width:760px){.pdm-kit-reference-body{grid-template-columns:1fr}.pdm-kit-reference-dialog{height:calc(100vh - 24px)}}
 </style>

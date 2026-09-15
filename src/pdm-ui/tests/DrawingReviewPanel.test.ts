@@ -145,6 +145,18 @@ describe('DrawingReviewPanel', () => {
     expect(wrapper.emitted('create')).toEqual([[['model-1']]])
   })
 
+  it('没有有效非标BOM候选时显示可操作的门禁说明', async () => {
+    const wrapper = mount(DrawingReviewPanel, {
+      props: { packageId: '', packages: [], candidates: [], selectedDocumentId: 'drawing-1', currentUsername: 'designer', ...permissions },
+    })
+
+    await wrapper.get('.drawing-review-panel__empty button').trigger('click')
+
+    expect(wrapper.get('.drawing-review-no-candidate').text()).toContain('当前没有有效非标件BOM候选')
+    expect(wrapper.get('.drawing-review-no-candidate').text()).toContain('唯一关联的2D工程图')
+    expect(wrapper.get('.drawing-review-scope__footer button').attributes('disabled')).toBeDefined()
+  })
+
   it('已有审核中的图纸包时仍可继续发起其余图纸', async () => {
     const wrapper = mount(DrawingReviewPanel, {
       props: {

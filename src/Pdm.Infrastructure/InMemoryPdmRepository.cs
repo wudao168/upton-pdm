@@ -2334,6 +2334,7 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
             Node("presales", null, "售前资料", ProjectFolderPurpose.Standard, 60),
             Node("customer-files", null, "客户资料", ProjectFolderPurpose.Standard, 70),
             Node("acceptance", null, "验收资料", ProjectFolderPurpose.Standard, 80),
+            Node("acceptance.validation-plan", "acceptance", "验证计划", ProjectFolderPurpose.Standard, 10),
             Node("media", null, "照片视频", ProjectFolderPurpose.Standard, 90),
             Node("minutes", null, "会议纪要", ProjectFolderPurpose.Standard, 100),
             Node("mechanical.project", "mechanical", "项目目录（自动生成）", ProjectFolderPurpose.ProjectContainer, 10),

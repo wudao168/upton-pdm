@@ -9,6 +9,7 @@ public sealed class ValidationPlanService(
     IPdmRepository repository,
     IFileStorage storage,
     IValidationPlanTextRecognitionService recognition,
+    IValidationPlanFileArchive fileArchive,
     TimeProvider timeProvider)
 {
     private static readonly HashSet<string> InformationSources =
@@ -125,7 +126,13 @@ public sealed class ValidationPlanService(
     public async Task<ProjectValidationPlan?> GetPlanAsync(Guid projectId, string actor, UserRole role, CancellationToken cancellationToken)
     {
         await RequireProjectReadAsync(projectId, actor, role, cancellationToken);
-        return await validationPlans.FindPlanAsync(projectId, cancellationToken);
+        var plan = await validationPlans.FindPlanAsync(projectId, cancellationToken);
+        if (plan?.State == ProjectValidationPlanState.Effective)
+        {
+            var project = await repository.FindProjectAsync(projectId, cancellationToken) ?? throw new PdmNotFoundException("项目不存在。");
+            await EnsureArchivedAsync(project, plan, cancellationToken);
+        }
+        return plan;
     }
 
     public async Task<ProjectValidationPlan> SavePlanAsync(Guid projectId, SaveProjectValidationPlanCommand command, string actor, UserRole role, CancellationToken cancellationToken)
@@ -230,6 +237,11 @@ public sealed class ValidationPlanService(
         var task = (await validationPlans.ListPendingApprovalTasksAsync(actor, includeAll, cancellationToken)).FirstOrDefault(item => item.Id == taskId)
             ?? throw new PdmRuleException("只能处理当前分配给自己的验证计划审批任务。");
         var saved = await validationPlans.DecideAsync(taskId, actor, decision, Optional(comment, 500, "审批意见"), timeProvider.GetUtcNow(), cancellationToken);
+        if (saved.State == ProjectValidationPlanState.Effective)
+        {
+            var project = await repository.FindProjectAsync(saved.ProjectId, cancellationToken) ?? throw new PdmNotFoundException("项目不存在。");
+            await EnsureArchivedAsync(project, saved, cancellationToken);
+        }
         await AuditAsync(actor, "project.validation-plan.approval.decide", nameof(ValidationPlanApprovalTask), taskId, $"R{saved.RevisionNumber}；{decision}", cancellationToken);
         return saved;
     }
@@ -265,6 +277,7 @@ public sealed class ValidationPlanService(
         var stored = await storage.CompleteUploadAsync(sessionId, relativePath, cancellationToken);
         var attachment = new ValidationPlanAttachment(id, plan.Id, kind, session.FileName, fileVersion, stored.RelativePath, stored.Length, stored.Sha256, actor, stored.StoredAt);
         var saved = await validationPlans.AddAttachmentAsync(attachment, cancellationToken);
+        await fileArchive.ArchiveAttachmentAsync(plan, saved, saved.UploadedBy, cancellationToken);
         await AuditAsync(actor, "project.validation-plan.attachment.upload", nameof(ValidationPlanAttachment), saved.Id, $"{kind}；{saved.OriginalFileName}；V{saved.FileVersion}；SHA-256 {saved.Sha256}", cancellationToken);
         return saved;
     }
@@ -346,13 +359,27 @@ public sealed class ValidationPlanService(
         await RequireProjectReadAsync(projectId, actor, role, cancellationToken);
         var project = await repository.FindProjectAsync(projectId, cancellationToken) ?? throw new PdmNotFoundException("项目不存在。");
         var plan = await validationPlans.FindPlanAsync(projectId, cancellationToken) ?? throw new PdmNotFoundException("项目尚未建立验证计划。");
+        var export = await BuildExportAsync(project, plan, cancellationToken);
+        await AuditAsync(actor, "project.validation-plan.export", nameof(ProjectValidationPlan), plan.Id, $"导出项目验证计划：{project.Code} · {plan.Items.Count}项", cancellationToken);
+        return export;
+    }
+
+    private async Task EnsureArchivedAsync(Project project, ProjectValidationPlan plan, CancellationToken cancellationToken)
+    {
+        var export = await BuildExportAsync(project, plan, cancellationToken);
+        await fileArchive.ArchiveWorkbookAsync(export, plan.EffectiveBy ?? plan.UpdatedBy, cancellationToken);
+        foreach (var attachment in plan.Attachments)
+            await fileArchive.ArchiveAttachmentAsync(plan, attachment, attachment.UploadedBy, cancellationToken);
+    }
+
+    private async Task<ValidationPlanExportData> BuildExportAsync(Project project, ProjectValidationPlan plan, CancellationToken cancellationToken)
+    {
         var users = await repository.ListUsersAsync(cancellationToken);
         string? DisplayName(string? username) => string.IsNullOrWhiteSpace(username)
             ? null
             : users.FirstOrDefault(user => string.Equals(user.Username, username, StringComparison.OrdinalIgnoreCase))?.DisplayName ?? username;
         var reviewTask = plan.ApprovalTasks.OrderBy(task => task.StepOrder).FirstOrDefault(task => task.Stage == ApprovalStage.MainDesigner);
         var approvalTask = plan.ApprovalTasks.OrderByDescending(task => task.StepOrder).FirstOrDefault();
-        await AuditAsync(actor, "project.validation-plan.export", nameof(ProjectValidationPlan), plan.Id, $"导出项目验证计划：{project.Code} · {plan.Items.Count}项", cancellationToken);
         return new(project, plan, timeProvider.GetUtcNow(),
             DisplayName(reviewTask?.DecisionBy ?? reviewTask?.Assignee ?? project.DesignLead),
             DisplayName(approvalTask?.DecisionBy ?? approvalTask?.Assignee));

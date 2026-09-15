@@ -986,6 +986,7 @@ async function openWhereUsedParent(projectId: string, parentDocumentId: string) 
               :model-count="workspace.documentFilterCounts.value.model"
               :drawing-count="workspace.documentFilterCounts.value.drawing"
               :warning-count="workspace.warningCount.value"
+              :bom-pending-count="workspace.unclassifiedBom.value.length"
               :standard-count="workspace.standardBom.value.filter(item => !item.manuallyExcluded && !item.pendingClassification).length"
               :non-standard-count="workspace.nonStandardBom.value.filter(item => !item.manuallyExcluded && !item.pendingClassification).length"
               :electrical-count="workspace.electricalBom.value.length"
@@ -998,10 +999,15 @@ async function openWhereUsedParent(projectId: string, parentDocumentId: string) 
               :release-package="workspace.releasePackage.value"
               :organization-directory="workspace.organizationDirectory.value"
               :pending="workspace.operationPending.value"
+              :token="workspace.getAccessToken()"
               :on-update-main-staffing="workspace.updateMainProjectStaffing"
               :on-update-designers="workspace.updateChildProjectDesigners"
               @documents="openProjectTab('documents')"
               @bom="openProjectTab('bom')"
+              @project-plan="openProjectTab('project-plan')"
+              @validation-plan="openProjectTab('validation-plan')"
+              @procurement="openProjectTab('procurement')"
+              @release="openProjectTab('release')"
             />
             <ProjectFileLibrary v-else-if="projectTab === 'files'" :project-id="workspace.project.value.id" :token="workspace.getAccessToken()" :folders="workspace.projectFolders.value" :documents="workspace.managedDocuments.value" :users="workspace.users.value" :roles="workspace.rolePermissionDirectory.value.roles" :administrator="workspace.hasPermission('settings.folder.manage')" :can-recycle-documents="workspace.hasPermission('document.recycle')" :pending="workspace.operationPending.value" :on-update-permissions="workspace.updateProjectFolderPermissions" :on-reload="() => workspace.reload(workspace.project.value.id)" />
             <ProjectPlanManager v-else-if="projectTab === 'project-plan'" :project="workspace.project.value" :projects="workspace.projects.value" :token="workspace.getAccessToken()" :current-username="workspace.currentUsername.value" :current-role="workspace.currentRole.value" :developer="workspace.hasRole('developer')" :can-edit="canManageProjectPlan" :can-manage-system-templates="canManageProjectPlanTemplates" @switch-project="projectId => openManagedProject(projectId, 'project-plan')" />

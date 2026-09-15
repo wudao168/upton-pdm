@@ -874,8 +874,8 @@ describe('PLM client workspace', () => {
     await flushPromises()
 
     expect(wrapper.text()).toContain('PRJ-REAL-001 · 真实装配项目')
-    expect(wrapper.get('button[aria-label="进入项目图档"]').text()).toContain('项目图档')
-    expect(wrapper.get('button[aria-label="进入BOM数据"]').text()).toContain('BOM数据')
+    expect(wrapper.get('button[aria-label="进入项目图档"]').text()).toContain('查看图档')
+    expect(wrapper.get('button[aria-label="进入BOM数据"]').text()).toContain('查看BOM')
     await projectTabByText(wrapper, '文件').trigger('click')
     await flushPromises()
     expect(wrapper.text()).toContain('项目文件夹')
@@ -1147,7 +1147,7 @@ describe('PLM client workspace', () => {
     await login(wrapper)
 
     await projectTabByText(wrapper, '概览').trigger('click')
-    expect(wrapper.get('[aria-label="工作台主页面"]').text()).toContain('项目图档')
+    expect(wrapper.get('[aria-label="工作台主页面"]').text()).toContain('图档与审核')
 
     await wrapper.get('button[aria-label="进入项目图档"]').trigger('click')
     expect(wrapper.find('[aria-label="项目设计树"]').exists()).toBe(true)

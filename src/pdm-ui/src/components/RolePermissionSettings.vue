@@ -121,7 +121,6 @@ async function save() {
     const directory = await props.onSave(selected.value.role, draft.value)
     const saved = directory.roles.find(role => role.role === selected.value?.role)
     if (saved) selectRole(saved)
-    permissionDialog.value = false
     ElMessage.success('角色权限已保存并立即生效')
   } catch (error) {
     ElMessage.error(error instanceof Error ? error.message : '角色权限保存失败')

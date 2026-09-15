@@ -83,4 +83,23 @@ describe('RolePermissionSettings', () => {
     await flushPromises()
     expect(document.body.textContent).toContain('删除角色')
   })
+
+  it('保存权限后保留当前弹窗以便继续编辑', async () => {
+    const onSave = vi.fn().mockResolvedValue(directory)
+    const wrapper = mount(RolePermissionSettings, {
+      attachTo: document.body,
+      props: { directory, canEdit: true, pending: false, onSave, onCreate: vi.fn(), onDelete: vi.fn() },
+      global: { plugins: [ElementPlus] },
+    })
+    await flushPromises()
+    await wrapper.findAll('button').find(button => button.text().trim() === '权限设置')!.trigger('click')
+    await flushPromises()
+
+    const save = Array.from(document.body.querySelectorAll<HTMLButtonElement>('.el-dialog button')).find(button => button.textContent?.trim() === '保存并立即生效')!
+    save.click()
+    await flushPromises()
+
+    expect(onSave).toHaveBeenCalledWith('Engineer', ['project.view'])
+    expect(document.body.querySelector('.pdm-role-permission-dialog')).not.toBeNull()
+  })
 })

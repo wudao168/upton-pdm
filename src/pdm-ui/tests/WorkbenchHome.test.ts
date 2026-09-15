@@ -1,8 +1,17 @@
-import { mount } from '@vue/test-utils'
+import { flushPromises, mount } from '@vue/test-utils'
 import ElementPlus from 'element-plus'
-import { describe, expect, it } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 import WorkbenchHome from '../src/components/WorkbenchHome.vue'
 import type { DocumentNode, ProjectSummary } from '../src/types'
+
+const apiMocks = vi.hoisted(() => ({
+  readProjectPlanPortfolio: vi.fn(),
+  readProjectValidationPlan: vi.fn(),
+  getMaterialRelationCompleteness: vi.fn(),
+  getProjectProcurementTracking: vi.fn(),
+}))
+
+vi.mock('../src/api', () => apiMocks)
 
 const project = {
   id: 'project-root',
@@ -58,7 +67,24 @@ const selected = {
 } as DocumentNode
 
 describe('WorkbenchHome', () => {
-  it('删除概览页头，并通过统计卡直接进入图档和BOM', async () => {
+  beforeEach(() => {
+    apiMocks.readProjectPlanPortfolio.mockResolvedValue({
+      rootProjectId: 'project-root', currentStage: 'Design', completionPercent: 62, laggingProjectCount: 0, riskProjectCount: 0, plannedFinish: '2026-10-18',
+      projects: [{ projectId: 'project-root', projectCode: 'P700001', projectName: '气密设备', isRoot: true, hasPlan: true, currentStage: 'Design', completionPercent: 62, plannedFinish: '2026-10-18', isLagging: false, isAtRisk: false,
+        plan: { currentStage: 'Design', stages: [{ code: 'Design', name: '设计' }], tasks: [
+          { id: 'task-1', name: '完成图纸审核', stage: 'Design', assignee: 'engineer', plannedStart: '2026-09-16', plannedFinish: '2026-09-18', status: 'InProgress', sortOrder: 1 },
+          { id: 'task-2', name: '标准件BOM核对', stage: 'Design', assignee: 'lead', plannedStart: '2026-09-17', plannedFinish: '2026-09-19', status: 'NotStarted', sortOrder: 2 },
+        ] } }],
+    })
+    apiMocks.readProjectValidationPlan.mockResolvedValue({ state: 'PendingApproval' })
+    apiMocks.getMaterialRelationCompleteness.mockResolvedValue({ projectId: 'project-root', isComplete: false, mainMaterialCount: 2, incompleteGroupCount: 2, mainMaterials: [] })
+    apiMocks.getProjectProcurementTracking.mockResolvedValue({ projectId: 'project-root', projectCode: 'P700001', hasPublishedBom: true, items: [
+      { impactStage: 'Assembly', purchaseOrderNumbers: [], purchaseOrderStatus: '未采购' },
+      { impactStage: null, purchaseOrderNumbers: [], purchaseOrderStatus: '未采购' },
+    ] })
+  })
+
+  it('以项目状态和下一步为核心，并进入对应业务页面', async () => {
     const wrapper = mount(WorkbenchHome, {
       props: {
         project,
@@ -75,6 +101,7 @@ describe('WorkbenchHome', () => {
         modelCount: 30,
         drawingCount: 18,
         warningCount: 0,
+        bomPendingCount: 3,
         standardCount: 2,
         nonStandardCount: 1,
         electricalCount: 0,
@@ -112,11 +139,13 @@ describe('WorkbenchHome', () => {
           users: [],
         },
         pending: false,
+        token: 'token',
         onUpdateMainStaffing: async () => project,
         onUpdateDesigners: async () => childProject,
       },
       global: { plugins: [ElementPlus] },
     })
+    await flushPromises()
 
     expect(wrapper.find('.pdm-project-overview-heading').exists()).toBe(false)
     expect(wrapper.text()).not.toContain('当前工作图档')
@@ -124,36 +153,41 @@ describe('WorkbenchHome', () => {
     expect(wrapper.find('.pdm-current-document').exists()).toBe(false)
     expect(wrapper.find('.pdm-project-link-guide').exists()).toBe(false)
     expect(wrapper.find('.pdm-page-actions').exists()).toBe(false)
-    expect(wrapper.get('button[aria-label="进入项目图档"]').text()).toContain('图纸审核：审核中 · 双审 2/4')
-    expect(wrapper.get('button[aria-label="进入BOM数据"]').text()).toContain('BOM审批：审批中 · 主设审核')
-    expect(wrapper.get('button[aria-label="进入BOM数据"]').text()).toContain('物料申请：待审 1 · 已批 1 · 驳回 1')
-    expect(wrapper.get('[aria-label="3D图档统计"]').text()).toContain('3D图档30审核中 1/2')
-    expect(wrapper.get('[aria-label="2D图纸统计"]').text()).toContain('2D图纸18已退改 1')
-    expect(wrapper.get('[aria-label="标准件BOM统计"]').text()).toContain('标准件2审批中 · 主设审核待审1 · 已批1')
-    expect(wrapper.get('[aria-label="非标件BOM统计"]').text()).toContain('非标件1未发起驳回1')
-    expect(wrapper.get('[aria-label="电气BOM统计"]').text()).toContain('电气0未发起暂无')
-    expect(wrapper.get('[aria-label="人员组织结构"]').text()).toContain('人员组织结构')
-    expect(wrapper.get('[aria-label="项目阶段负责人"]').text()).toContain('项目经理甲')
-    expect(wrapper.get('[aria-label="项目阶段负责人"]').text()).toContain('协同经理乙')
-    expect(wrapper.get('[aria-label="项目阶段负责人"]').text()).toContain('主设丙')
-    expect(wrapper.get('[aria-label="项目阶段负责人"]').text()).toContain('工程师丁')
-    expect(wrapper.get('[aria-label="客户联络人"]').text()).toContain('宁波均普智能制造有限公司')
-    expect(wrapper.get('[aria-label="客户联络人"]').text()).toContain('待维护')
-    expect(wrapper.get('[aria-label="人员组织结构"]').text()).toContain('配置主项目分工')
-    expect(wrapper.get('[aria-label="人员组织结构"]').text()).toContain('配置当前项目执行工程师')
+    expect(wrapper.get('[aria-label="项目状态与下一步"]').text()).toContain('设计阶段正常')
+    expect(wrapper.get('[aria-label="项目状态与下一步"]').text()).toContain('项目进度 62%')
+    expect(wrapper.get('[aria-label="项目状态与下一步"]').text()).toContain('计划完成2026/10/18')
+    expect(wrapper.get('button[aria-label="查看待处理"]').text()).toContain('5')
+    expect(wrapper.get('button[aria-label="查看关键物料"]').text()).toContain('1')
+    expect(wrapper.get('[aria-label="图档与审核"]').text()).toContain('3D 30')
+    expect(wrapper.get('[aria-label="图档与审核"]').text()).toContain('审核中 · 双审 2/4')
+    expect(wrapper.get('[aria-label="BOM与物料"]').text()).toContain('标准件 2')
+    expect(wrapper.get('[aria-label="BOM与物料"]').text()).toContain('待审 1 · 已批 1 · 驳回 1')
+    expect(wrapper.get('[aria-label="BOM与物料"]').text()).toContain('待核对 2')
+    expect(wrapper.get('[aria-label="发布与备料"]').text()).toContain('关键物料1')
+    expect(wrapper.get('[aria-label="发布与备料"]').text()).toContain('未采购2')
+    expect(wrapper.get('[aria-label="当前阶段任务"]').text()).toContain('完成图纸审核')
+    expect(wrapper.get('[aria-label="项目团队"]').text()).toContain('项目经理甲')
+    expect(wrapper.get('[aria-label="项目团队"]').text()).toContain('主设丙')
+    expect(wrapper.get('[aria-label="项目团队"]').text()).toContain('工程师丁')
+    expect(wrapper.get('[aria-label="项目团队"]').text()).toContain('配置分工')
+    expect(wrapper.get('[aria-label="项目团队"]').text()).toContain('配置工程师')
+    expect(wrapper.get('[aria-label="项目位置"]').text()).toContain('D:\\PDM\\Vault\\P700001')
 
     await wrapper.setProps({ projects: [{ ...project, collaborativeProjectManagers: [] }, childProject] })
-    const collaborativeManager = wrapper.findAll('.pdm-project-staffing-row').find(row => row.text().includes('协同项目经理'))
-    expect(collaborativeManager?.text()).toContain('无')
-
-    await wrapper.setProps({ project: { ...childProject, canAssignDesigners: false } })
-    expect(wrapper.get('[aria-label="项目阶段负责人"]').text()).toContain('执行工程师')
-    expect(wrapper.get('[aria-label="人员组织结构"]').text()).toContain('配置当前项目执行工程师')
+    await wrapper.setProps({ project: { ...childProject, canAssignDesigners: false }, projects: [project, { ...childProject, canAssignDesigners: false }] })
+    expect(wrapper.get('[aria-label="项目团队"]').text()).toContain('执行工程师')
+    expect(wrapper.get('[aria-label="项目团队"]').text()).not.toContain('配置工程师')
 
     await wrapper.get('button[aria-label="进入项目图档"]').trigger('click')
     await wrapper.get('button[aria-label="进入BOM数据"]').trigger('click')
+    await wrapper.findAll('button').find(button => button.text().includes('进入项目计划'))!.trigger('click')
+    await wrapper.findAll('button').find(button => button.text().includes('查看备料'))!.trigger('click')
+    await wrapper.findAll('button').find(button => button.text().includes('查看发布'))!.trigger('click')
 
     expect(wrapper.emitted('documents')).toEqual([[]])
     expect(wrapper.emitted('bom')).toEqual([[]])
+    expect(wrapper.emitted('projectPlan')).toEqual([[]])
+    expect(wrapper.emitted('procurement')).toEqual([[]])
+    expect(wrapper.emitted('release')).toEqual([[]])
   })
 })

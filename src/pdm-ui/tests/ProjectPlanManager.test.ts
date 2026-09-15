@@ -13,6 +13,8 @@ const api = vi.hoisted(() => ({
 vi.mock('../src/api', () => api)
 const statusContent = vi.hoisted(() => ({ loadGlobalStatusContent: vi.fn() }))
 vi.mock('../src/globalStatusContent', () => statusContent)
+const planExport = vi.hoisted(() => ({ exportProjectPlansExcel: vi.fn(), exportProjectPlansPdf: vi.fn() }))
+vi.mock('../src/projectPlanExport', () => planExport)
 
 const base = { owner: 'pm', primaryProjectManager: 'pm', collaborativeProjectManagers: [], designLeads: [], designers: [], quantity: 1, serialNumbers: [], responsibleUsers: [] }
 const root = { ...base, id: 'root', name: '主项目', code: 'P1' } as unknown as ProjectSummary
@@ -60,6 +62,34 @@ beforeEach(() => {
 afterEach(() => { wrappers.splice(0).forEach(item => item.unmount()); document.body.innerHTML = ''; vi.restoreAllMocks() })
 
 describe('项目计划审批和配置', () => {
+  it('可按主项目或多个子项目导出 Excel 和 PDF', async () => {
+    const rootPlan = { ...structuredClone(draft), id: 'root-plan', projectId: 'root' }
+    api.readProjectPlan.mockResolvedValue(rootPlan)
+    api.readProjectPlanPortfolio.mockResolvedValue({ rootProjectId: 'root', currentStage: 'Design', completionPercent: 0, laggingProjectCount: 0, riskProjectCount: 0, projects: [
+      { projectId: 'root', projectCode: 'P1', projectName: '主项目', isRoot: true, hasPlan: true, plan: rootPlan },
+      { projectId: 'child', projectCode: 'P1-1', projectName: '设备一', isRoot: false, hasPlan: true, plan: structuredClone(draft) },
+      { projectId: 'target', projectCode: 'P1-2', projectName: '设备二', isRoot: false, hasPlan: false },
+    ] })
+    const wrapper = render(root)
+    await flushPromises()
+    await clickText('导出计划')
+    expect(document.body.textContent).toContain('请选择导出主项目计划')
+    await clickText('导出 Excel')
+    expect(planExport.exportProjectPlansExcel).toHaveBeenCalledWith('P1', [expect.objectContaining({ projectCode: 'P1', plan: expect.objectContaining({ projectId: 'root' }) })])
+
+    await clickText('导出计划')
+    await wrapper.get('.pdm-plan-export__scope input[value="children"]').setValue(true)
+    const childChecks = wrapper.findAll('.pdm-plan-export__children input[type="checkbox"]')
+    expect(childChecks).toHaveLength(2)
+    await childChecks[0]!.setValue(true)
+    await childChecks[1]!.setValue(true)
+    await clickText('导出 PDF')
+    expect(planExport.exportProjectPlansPdf).toHaveBeenCalledWith('P1', [
+      expect.objectContaining({ projectCode: 'P1-1', inherited: false }),
+      expect.objectContaining({ projectCode: 'P1-2', inherited: true }),
+    ])
+  })
+
   it('编辑工期保留开始日期，跨月调整结束日期，阶段及里程碑只读', async () => {
     const source = { ...structuredClone(draft), tasks: [
       { ...structuredClone(draft.tasks[0]!), plannedStart: '2026-09-28', plannedFinish: '2026-09-30' },

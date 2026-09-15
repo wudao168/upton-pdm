@@ -150,7 +150,8 @@ public sealed class ValidationPlanServiceTests
     [Fact]
     public async Task AssignedValidationPlanEditor_CanDecideWithoutReleaseApprovalPermission()
     {
-        var (service, plans, _, _, project) = await CreateFixtureAsync();
+        var archive = new RecordingValidationPlanFileArchive();
+        var (service, plans, _, _, project) = await CreateFixtureAsync(archive);
         var draft = await service.SavePlanAsync(project.Id,
             new("工程师", new DateOnly(2026, 9, 14), [new(null, "确认设备安全门联锁", "内部评审", null, null, null, null, null, 1)]),
             "admin", UserRole.Administrator, default);
@@ -161,6 +162,7 @@ public sealed class ValidationPlanServiceTests
 
         Assert.Equal(ProjectValidationPlanState.Effective, decided.State);
         Assert.Equal("engineer", Assert.Single(decided.ApprovalTasks).DecisionBy);
+        Assert.Equal(decided.Id, Assert.Single(archive.Workbooks).Plan.Id);
     }
 
     [Fact]
@@ -256,13 +258,13 @@ public sealed class ValidationPlanServiceTests
         Assert.Single(await service.ListExecutionRecordsAsync(plan.Id, "developer", UserRole.Administrator, default));
     }
 
-    private static async Task<(ValidationPlanService Service, InMemoryValidationPlanRepository Plans, InMemoryPdmRepository Repository, RecordingFileStorage Storage, Project Project)> CreateFixtureAsync()
+    private static async Task<(ValidationPlanService Service, InMemoryValidationPlanRepository Plans, InMemoryPdmRepository Repository, RecordingFileStorage Storage, Project Project)> CreateFixtureAsync(IValidationPlanFileArchive? archive = null)
     {
         var time = TimeProvider.System;
         var repository = new InMemoryPdmRepository(time);
         var plans = new InMemoryValidationPlanRepository();
         var storage = new RecordingFileStorage(time);
-        var service = new ValidationPlanService(plans, repository, storage, new StubRecognitionService(), time);
+        var service = new ValidationPlanService(plans, repository, storage, new StubRecognitionService(), archive ?? new RecordingValidationPlanFileArchive(), time);
         var project = Assert.Single(await repository.ListProjectsAsync(CancellationToken.None));
         return (service, plans, repository, storage, project);
     }
@@ -279,6 +281,24 @@ public sealed class ValidationPlanServiceTests
     {
         public Task<string> RecognizeAsync(string absolutePath, CancellationToken cancellationToken) =>
             Task.FromResult("急停回路验证 结果：合格 验证日期：2026-09-10 责任人：张三");
+    }
+
+    private sealed class RecordingValidationPlanFileArchive : IValidationPlanFileArchive
+    {
+        public List<ValidationPlanExportData> Workbooks { get; } = [];
+        public List<ValidationPlanAttachment> Attachments { get; } = [];
+
+        public Task ArchiveWorkbookAsync(ValidationPlanExportData export, string actor, CancellationToken cancellationToken)
+        {
+            Workbooks.Add(export);
+            return Task.CompletedTask;
+        }
+
+        public Task ArchiveAttachmentAsync(ProjectValidationPlan plan, ValidationPlanAttachment attachment, string actor, CancellationToken cancellationToken)
+        {
+            Attachments.Add(attachment);
+            return Task.CompletedTask;
+        }
     }
 
     private sealed class RecordingFileStorage(TimeProvider timeProvider) : IFileStorage

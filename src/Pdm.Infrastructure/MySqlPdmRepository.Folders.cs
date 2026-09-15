@@ -56,12 +56,19 @@ public sealed partial class MySqlPdmRepository
             ProjectFolderPurpose.Root, 0, true, true, now, cancellationToken);
         actualIds["root"] = rootFolderId;
 
-        foreach (var node in template.Where(item => item.Purpose != ProjectFolderPurpose.ProjectContainer))
+        var pending = template.Where(item => item.Purpose != ProjectFolderPurpose.ProjectContainer).ToList();
+        while (pending.Count > 0)
         {
-            var parentId = string.IsNullOrWhiteSpace(node.ParentKey) ? rootFolderId : actualIds[node.ParentKey];
-            actualIds[node.FolderKey] = await UpsertFolderAsync(connection, transaction, existingFolders, rootId, parentId, null,
-                node.FolderKey, node.FolderKey, node.Name, node.Purpose, node.SortOrder, node.IsSystem,
-                node.InheritPermissions, now, cancellationToken);
+            var ready = pending.Where(item => string.IsNullOrWhiteSpace(item.ParentKey) || actualIds.ContainsKey(item.ParentKey)).ToArray();
+            if (ready.Length == 0) throw new PdmRuleException("目录模板存在无效的父子关系。");
+            foreach (var node in ready)
+            {
+                var parentId = string.IsNullOrWhiteSpace(node.ParentKey) ? rootFolderId : actualIds[node.ParentKey];
+                actualIds[node.FolderKey] = await UpsertFolderAsync(connection, transaction, existingFolders, rootId, parentId, null,
+                    node.FolderKey, node.FolderKey, node.Name, node.Purpose, node.SortOrder, node.IsSystem,
+                    node.InheritPermissions, now, cancellationToken);
+                pending.Remove(node);
+            }
         }
 
         foreach (var templateKey in new[] { "mechanical.project", "electrical.project" })

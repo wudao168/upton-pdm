@@ -160,6 +160,7 @@ builder.Services.AddScoped<MaterialRelationService>();
 builder.Services.AddScoped<IMaterialRelationReleaseGuard>(provider => provider.GetRequiredService<MaterialRelationService>());
 builder.Services.AddScoped<ProgramTemplateService>();
 builder.Services.AddScoped<ProjectFileService>();
+builder.Services.AddScoped<IValidationPlanFileArchive, ValidationPlanFileArchive>();
 builder.Services.AddScoped<ControlledDocumentRecycleService>();
 builder.Services.AddScoped<ProjectContentResetService>();
 builder.Services.AddScoped<BomHeaderService>();

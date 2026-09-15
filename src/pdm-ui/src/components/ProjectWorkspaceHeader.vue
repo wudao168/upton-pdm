@@ -38,8 +38,8 @@ const tabs = [
   { key: 'validation-plan', label: '验证计划', icon: ClipboardCheck },
   { key: 'documents', label: '图档', icon: FolderTree },
   { key: 'bom', label: 'BOM', icon: Boxes },
-  { key: 'release', label: '发布', icon: PackageCheck },
   { key: 'procurement', label: '备料', icon: ShoppingCart },
+  { key: 'release', label: '发布', icon: PackageCheck },
   { key: 'versions', label: '版本', icon: FileClock },
   { key: 'records', label: '记录', icon: ClipboardList },
 ] satisfies Array<{ key: ProjectTab; label: string; icon: typeof LayoutDashboard }>

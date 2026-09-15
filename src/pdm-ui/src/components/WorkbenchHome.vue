@@ -1,8 +1,9 @@
 <script setup lang="ts">
-import { Boxes, ContactRound, FolderTree, PackageCheck, UsersRound } from '@lucide/vue'
+import { Boxes, CalendarRange, CheckCircle2, ChevronRight, ClipboardCopy, FolderTree, ListChecks, PackageCheck, UsersRound } from '@lucide/vue'
+import { getMaterialRelationCompleteness, getProjectProcurementTracking, readProjectPlanPortfolio, readProjectValidationPlan } from '../api'
 import { ElMessage } from '../statusMessage'
-import { computed, reactive, ref } from 'vue'
-import type { DocumentNode, DrawingReviewPackage, DrawingReviewTarget, MainProjectStaffingInput, MaterialCodeApplication, OrganizationDirectory, PdmUser, ProjectSummary, ReleasePackageSummary, ReleaseScope } from '../types'
+import { computed, reactive, ref, watch } from 'vue'
+import type { DocumentNode, DrawingReviewPackage, DrawingReviewTarget, MainProjectStaffingInput, MaterialCodeApplication, MaterialRelationCompleteness, OrganizationDirectory, PdmUser, ProjectPlanPortfolio, ProjectPlanTask, ProjectProcurementTrackingResult, ProjectSummary, ProjectValidationPlan, ReleasePackageSummary, ReleaseScope } from '../types'
 
 const props = defineProps<{
   project: ProjectSummary
@@ -15,6 +16,7 @@ const props = defineProps<{
   modelCount: number
   drawingCount: number
   warningCount: number
+  bomPendingCount: number
   standardCount: number
   nonStandardCount: number
   electricalCount: number
@@ -27,11 +29,12 @@ const props = defineProps<{
   releasePackage: ReleasePackageSummary | null
   organizationDirectory: OrganizationDirectory
   pending: boolean
+  token: string
   onUpdateMainStaffing: (projectId: string, input: MainProjectStaffingInput) => Promise<ProjectSummary>
   onUpdateDesigners: (projectId: string, designers: string[]) => Promise<ProjectSummary>
 }>()
 
-const emit = defineEmits<{ documents: []; bom: [] }>()
+const emit = defineEmits<{ documents: []; bom: []; projectPlan: []; validationPlan: []; procurement: []; release: [] }>()
 
 const activeProject = computed(() => props.projects.find(item => item.id === props.project.id) ?? props.project)
 const rootProject = computed(() => {
@@ -41,6 +44,11 @@ const rootProject = computed(() => {
 
 const staffingDialogOpen = ref(false)
 const designerDialogOpen = ref(false)
+const planPortfolio = ref<ProjectPlanPortfolio | null>(null)
+const validationPlan = ref<ProjectValidationPlan | null>(null)
+const relationCompleteness = ref<MaterialRelationCompleteness | null>(null)
+const procurementTracking = ref<ProjectProcurementTrackingResult | null>(null)
+let overviewRequestId = 0
 const staffingForm = reactive<MainProjectStaffingInput>({ primaryProjectManager: '', collaborativeProjectManagers: [], designLeads: [] })
 const designerDraft = ref<string[]>([])
 
@@ -104,6 +112,31 @@ const designerCandidates = computed(() => {
     .sort((left, right) => Number(right.ownDivision) - Number(left.ownDivision) || left.divisionName.localeCompare(right.divisionName, 'zh-CN') || left.displayName.localeCompare(right.displayName, 'zh-CN'))
 })
 const hasCrossDivisionSelection = computed(() => designerCandidates.value.some(user => designerDraft.value.includes(user.username) && !user.ownDivision))
+
+async function loadOperationalSummary() {
+  const requestId = ++overviewRequestId
+  const token = props.token
+  if (!token) {
+    planPortfolio.value = null
+    validationPlan.value = null
+    relationCompleteness.value = null
+    procurementTracking.value = null
+    return
+  }
+  const [planResult, validationResult, relationResult, procurementResult] = await Promise.allSettled([
+    readProjectPlanPortfolio(rootProject.value.id, token),
+    readProjectValidationPlan(activeProject.value.id, token),
+    getMaterialRelationCompleteness(activeProject.value.id, token),
+    getProjectProcurementTracking(activeProject.value.id, token),
+  ])
+  if (requestId !== overviewRequestId) return
+  planPortfolio.value = planResult.status === 'fulfilled' ? planResult.value : null
+  validationPlan.value = validationResult.status === 'fulfilled' ? validationResult.value : null
+  relationCompleteness.value = relationResult.status === 'fulfilled' ? relationResult.value : null
+  procurementTracking.value = procurementResult.status === 'fulfilled' ? procurementResult.value : null
+}
+
+watch(() => [props.project.id, props.token], loadOperationalSummary, { immediate: true })
 
 function openStaffingDialog() {
   staffingForm.primaryProjectManager = rootProject.value.primaryProjectManager ?? ''
@@ -233,66 +266,168 @@ const materialApplicationSummary = computed(() => {
   const rejected = props.materialApplications.filter(item => item.status === 'Rejected').length
   return `物料申请：待审 ${pending} · 已批 ${approved} · 驳回 ${rejected}`
 })
+
+const stageNames: Record<string, string> = {
+  Design: '设计', MaterialPreparation: '备料', Assembly: '装配', Commissioning: '调试',
+  ClientCommissioning: '客户端调试', AcceptanceProgress: '验收推进', FinalAcceptance: '终验收',
+  Paused: '暂停', Cancelled: '取消', Terminated: '终止',
+}
+const activePlanItem = computed(() => planPortfolio.value?.projects?.find(item => item.projectId === activeProject.value.id)
+  ?? planPortfolio.value?.projects?.find(item => item.isRoot)
+  ?? null)
+const activePlan = computed(() => activePlanItem.value?.plan ?? null)
+const projectStage = computed(() => activePlanItem.value?.currentStage ?? activePlan.value?.currentStage ?? activeProject.value.stage)
+const projectStageLabel = computed(() => activePlan.value?.stages?.find(item => item.code === projectStage.value)?.name
+  ?? stageNames[projectStage.value ?? ''] ?? projectStage.value ?? '未排程')
+const projectProgress = computed(() => activePlanItem.value?.hasPlan
+  ? activePlanItem.value.completionPercent
+  : activeProject.value.id === rootProject.value.id && planPortfolio.value?.projects?.some(item => item.hasPlan)
+    ? planPortfolio.value.completionPercent
+    : null)
+const projectHealth = computed(() => {
+  if (!activePlanItem.value?.hasPlan) return { label: '计划未建立', tone: 'warning' }
+  if (activePlanItem.value.isLagging) return { label: '已滞后', tone: 'danger' }
+  if (activePlanItem.value.isAtRisk) return { label: '有风险', tone: 'warning' }
+  return { label: '正常', tone: 'success' }
+})
+
+function displayDate(value?: string | null) {
+  if (!value) return '—'
+  return value.slice(0, 10).replaceAll('-', '/')
+}
+
+const projectFinish = computed(() => displayDate(activePlanItem.value?.forecastFinish
+  ?? activePlanItem.value?.plannedFinish
+  ?? (activeProject.value.id === rootProject.value.id ? planPortfolio.value?.plannedFinish : undefined)))
+const currentStageTasks = computed(() => {
+  const tasks = activePlan.value?.tasks ?? []
+  const current = tasks.filter(task => task.stage === projectStage.value && task.status !== 'Completed')
+  const candidates = current.length ? current : tasks.filter(task => task.status !== 'Completed')
+  return [...candidates].sort((left, right) => left.plannedFinish.localeCompare(right.plannedFinish) || left.sortOrder - right.sortOrder).slice(0, 6)
+})
+
+function personName(username?: string | null) {
+  if (!username) return '待分配'
+  return props.users.find(user => user.username.localeCompare(username, undefined, { sensitivity: 'accent' }) === 0)?.displayName ?? username
+}
+
+function taskState(task: ProjectPlanTask) {
+  if (task.status === 'Completed') return { label: '已完成', tone: 'success' }
+  if (task.plannedFinish < new Date().toISOString().slice(0, 10)) return { label: '已逾期', tone: 'danger' }
+  if (task.status === 'InProgress') return { label: '进行中', tone: 'success' }
+  const days = Math.ceil((new Date(`${task.plannedFinish}T00:00:00`).getTime() - Date.now()) / 86400000)
+  if (days <= 3) return { label: '待处理', tone: 'warning' }
+  return { label: '未开始', tone: 'neutral' }
+}
+
+const teamRows = computed(() => staffingRows.value.filter(row => ['manager', 'design-lead', 'engineers'].includes(row.key)))
+const latestReleasePackage = computed(() => props.releasePackage ?? [...props.releasePackages]
+  .sort((left, right) => (right.createdAt ?? '').localeCompare(left.createdAt ?? ''))[0] ?? null)
+const releaseApprovalText = computed(() => {
+  const release = latestReleasePackage.value
+  if (!release) return '未发起'
+  const step = release.steps.find(item => item.status === 'current')
+  return `${release.state}${step ? ` · ${step.stage}` : ''}`
+})
+const criticalMaterialCount = computed(() => procurementTracking.value?.items?.filter(item => !!item.impactStage).length ?? null)
+const unpurchasedCount = computed(() => procurementTracking.value?.items?.filter(item => !(item.purchaseOrderNumbers ?? []).length).length ?? null)
+const relationSummary = computed(() => {
+  if (!relationCompleteness.value) return '关联核对 —'
+  if (!relationCompleteness.value.mainMaterialCount) return '关联配置 暂无'
+  return relationCompleteness.value.incompleteGroupCount
+    ? `关联待核对 ${relationCompleteness.value.incompleteGroupCount}`
+    : '关联物料 已核对'
+})
+const approvalCount = computed(() => {
+  const drawing = props.drawingReviews.some(item => ['InReview', 'WritingProperties'].includes(item.state)) ? 1 : 0
+  const validation = validationPlan.value?.state === 'PendingApproval' ? 1 : 0
+  const releases = props.releasePackages.filter(item => /审批|Pending|Submitted|InReview/i.test(item.state)).length
+  return drawing + validation + releases
+})
+const attentionCount = computed(() => props.bomPendingCount + (relationCompleteness.value?.incompleteGroupCount ?? 0))
+const overviewAlerts = computed(() => [
+  { key: 'attention', label: '待处理', value: attentionCount.value, tone: attentionCount.value ? 'warning' : 'neutral', open: () => emit('bom') },
+  { key: 'critical', label: '关键物料', value: criticalMaterialCount.value ?? '—', tone: criticalMaterialCount.value ? 'danger' : 'neutral', open: () => emit('procurement') },
+  { key: 'approval', label: '审批中', value: approvalCount.value, tone: approvalCount.value ? 'info' : 'neutral', open: () => latestReleasePackage.value ? emit('release') : validationPlan.value?.state === 'PendingApproval' ? emit('validationPlan') : emit('documents') },
+])
+
+async function copyLocation(label: string, value: string) {
+  try {
+    await navigator.clipboard.writeText(value)
+    ElMessage.success(`${label}已复制`)
+  } catch { ElMessage.error(`${label}复制失败`) }
+}
 </script>
 
 <template>
   <section class="pdm-workbench" aria-label="工作台主页面">
-    <div class="pdm-workbench-grid">
-      <button type="button" class="pdm-panel pdm-stat-card pdm-stat-card-action" aria-label="进入项目图档" @click="emit('documents')">
-        <span class="is-blue"><FolderTree :size="19" /></span>
-        <div><small>项目图档</small><strong>{{ documentCount }}</strong><em>{{ warningCount ? `${warningCount} 个异常引用` : '引用结构正常' }}</em><em class="pdm-stat-card__flow">{{ drawingReviewSummary }}</em><div class="pdm-stat-card__table is-document"><div class="is-heading"><span>类型</span><span>数量</span><span>审批情况</span></div><div v-for="row in documentRows" :key="row.key" :aria-label="`${row.label}统计`"><span>{{ row.label }}</span><b>{{ row.count }}</b><em>{{ row.approval }}</em></div></div></div>
-      </button>
-      <button type="button" class="pdm-panel pdm-stat-card pdm-stat-card-action" aria-label="进入BOM数据" @click="emit('bom')">
-        <span class="is-green"><Boxes :size="19" /></span>
-        <div><small>BOM数据</small><strong>{{ standardCount + nonStandardCount + electricalCount }}</strong><em class="pdm-stat-card__flow">{{ bomApprovalSummary }}</em><em class="pdm-stat-card__flow">{{ materialApplicationSummary }}</em><div class="pdm-stat-card__table is-bom"><div class="is-heading"><span>类别</span><span>零件</span><span>审批情况</span><span>物料申请</span></div><div v-for="row in bomRows" :key="row.key" :aria-label="`${row.label}BOM统计`"><span>{{ row.label }}</span><b>{{ row.count }}</b><em>{{ row.approval }}</em><em>{{ row.application }}</em></div></div></div>
-      </button>
-      <article class="pdm-panel pdm-stat-card">
-        <span class="is-orange"><PackageCheck :size="19" /></span>
-        <div><small>当前发布包</small><strong class="is-code">{{ releasePackage?.number || '暂无' }}</strong><em>{{ releasePackage?.state || '尚未创建发布包' }}</em></div>
-      </article>
-
-      <div class="pdm-workbench-primary">
-        <article class="pdm-panel pdm-workbench-detail pdm-project-people" aria-label="人员组织结构">
-          <header class="pdm-panel-heading">
-            <h2>人员组织结构</h2>
-            <small>按项目阶段展示当前负责人</small>
-            <span class="pdm-project-people__actions">
-              <button v-if="rootProject.canManageMainStaffing" type="button" class="pdm-text-action" @click="openStaffingDialog">配置主项目分工</button>
-              <button v-if="activeProject.canAssignDesigners" type="button" class="pdm-text-action" @click="openDesignerDialog">配置当前项目执行工程师</button>
-            </span>
-          </header>
-          <div class="pdm-project-people__layout">
-            <section class="pdm-project-people__section" aria-label="项目阶段负责人">
-              <header><span><UsersRound :size="17" /></span><div><strong>项目阶段负责人</strong><small>{{ rootProject.executionUnitName || '执行事业部待分配' }}</small></div></header>
-              <div class="pdm-project-staffing-list">
-                <div v-for="row in staffingRows" :key="row.key" class="pdm-project-staffing-row">
-                  <span><small>{{ row.stage }}</small><strong>{{ row.role }}</strong></span>
-                  <div v-if="row.people.length" class="pdm-project-person-list">
-                    <span v-for="person in row.people" :key="person.username" :title="person.name">{{ person.name }}</span>
-                  </div>
-                  <em v-else>无</em>
-                </div>
-              </div>
-            </section>
-
-            <section class="pdm-project-people__section is-customer" aria-label="客户联络人">
-              <header><span><ContactRound :size="17" /></span><div><strong>客户联络人</strong><small>项目外部沟通窗口</small></div></header>
-              <dl>
-                <div><dt>客户单位</dt><dd :title="rootProject.customerName">{{ rootProject.customerName || '待关联客户' }}</dd></div>
-                <div><dt>联络人</dt><dd class="is-pending">待维护</dd></div>
-              </dl>
-            </section>
+    <div class="pdm-overview-layout">
+      <section class="pdm-panel pdm-overview-status" aria-label="项目状态与下一步">
+        <header><span><CheckCircle2 :size="18" /></span><h2>项目状态与下一步</h2></header>
+        <div class="pdm-overview-status__body">
+          <div class="pdm-overview-phase">
+            <div class="pdm-overview-phase__title"><span><CalendarRange :size="20" /></span><strong>{{ projectStageLabel }}阶段</strong><em :class="`is-${projectHealth.tone}`">{{ projectHealth.label }}</em></div>
+            <div class="pdm-overview-phase__metrics">
+              <div class="pdm-overview-progress"><span>项目进度 <b>{{ projectProgress === null ? '—' : `${projectProgress}%` }}</b></span><i><em :style="{ width: `${projectProgress ?? 0}%` }" /></i></div>
+              <div class="pdm-overview-finish"><span>计划完成</span><strong>{{ projectFinish }}</strong></div>
+            </div>
           </div>
+          <div class="pdm-overview-alerts" aria-label="项目待办与风险">
+            <button v-for="alert in overviewAlerts" :key="alert.key" type="button" :class="`is-${alert.tone}`" :aria-label="`查看${alert.label}`" @click="alert.open">
+              <span>{{ alert.label }}</span><strong>{{ alert.value }}</strong><em>查看{{ alert.label }} <ChevronRight :size="13" /></em>
+            </button>
+          </div>
+        </div>
+      </section>
+
+      <div class="pdm-overview-summary" aria-label="项目核心业务概览">
+        <article class="pdm-panel pdm-overview-card" aria-label="图档与审核">
+          <header><span class="is-blue"><FolderTree :size="18" /></span><h2>图档与审核</h2></header>
+          <strong class="pdm-overview-card__value">{{ documentCount }}</strong>
+          <div class="pdm-overview-card__facts"><span>3D <b>{{ modelCount }}</b></span><span>2D <b>{{ drawingCount }}</b></span></div>
+          <dl><div><dt>图纸审核</dt><dd>{{ drawingReviewSummary.replace('图纸审核：', '') }}</dd></div><div><dt>异常引用</dt><dd :class="{ 'is-danger': warningCount > 0 }">{{ warningCount }}</dd></div></dl>
+          <button type="button" class="pdm-overview-link" aria-label="进入项目图档" @click="emit('documents')">查看图档 <ChevronRight :size="13" /></button>
+        </article>
+
+        <article class="pdm-panel pdm-overview-card" aria-label="BOM与物料">
+          <header><span class="is-green"><Boxes :size="18" /></span><h2>BOM与物料</h2></header>
+          <strong class="pdm-overview-card__value">{{ standardCount + nonStandardCount + electricalCount }}</strong>
+          <div class="pdm-overview-card__facts"><span>标准件 <b>{{ standardCount }}</b></span><span>非标件 <b>{{ nonStandardCount }}</b></span><span>电气 <b>{{ electricalCount }}</b></span></div>
+          <dl><div><dt>待处理</dt><dd :class="{ 'is-warning': bomPendingCount > 0 }">{{ bomPendingCount }}</dd></div><div><dt>料号申请</dt><dd>{{ materialApplicationSummary.replace('物料申请：', '') }}</dd></div><div><dt>关联物料</dt><dd>{{ relationSummary.replace('关联', '') }}</dd></div></dl>
+          <button type="button" class="pdm-overview-link" aria-label="进入BOM数据" @click="emit('bom')">查看BOM <ChevronRight :size="13" /></button>
+        </article>
+
+        <article class="pdm-panel pdm-overview-card" aria-label="发布与备料">
+          <header><span class="is-orange"><PackageCheck :size="18" /></span><h2>发布与备料</h2></header>
+          <strong class="pdm-overview-card__value is-package">{{ latestReleasePackage?.number || '暂无发布包' }}</strong>
+          <dl><div><dt>发布审批</dt><dd>{{ releaseApprovalText }}</dd></div><div><dt>关键物料</dt><dd :class="{ 'is-danger': criticalMaterialCount }">{{ criticalMaterialCount ?? '—' }}</dd></div><div><dt>未采购</dt><dd :class="{ 'is-warning': unpurchasedCount }">{{ unpurchasedCount ?? '—' }}</dd></div></dl>
+          <div class="pdm-overview-card__actions"><button type="button" class="pdm-overview-link" @click="emit('release')">查看发布 <ChevronRight :size="13" /></button><button type="button" class="pdm-overview-link" @click="emit('procurement')">查看备料 <ChevronRight :size="13" /></button></div>
         </article>
       </div>
 
-      <article class="pdm-panel pdm-workbench-detail">
-        <header class="pdm-panel-heading"><h2>项目存储位置</h2></header>
-        <dl class="pdm-location-list">
-          <div><dt>图档库</dt><dd :title="project.vaultLocation">{{ project.vaultLocation }}</dd></div>
-          <div><dt>发包目录</dt><dd :title="project.releaseLocation">{{ project.releaseLocation }}</dd></div>
-        </dl>
-      </article>
+      <div class="pdm-overview-bottom">
+        <article class="pdm-panel pdm-overview-tasks" aria-label="当前阶段任务">
+          <header><span><ListChecks :size="18" /></span><h2>当前阶段任务</h2><button type="button" class="pdm-overview-link" @click="emit('projectPlan')">进入项目计划 <ChevronRight :size="13" /></button></header>
+          <div class="pdm-overview-task-table">
+            <table><thead><tr><th>任务名称</th><th>负责人</th><th>计划完成</th><th>状态</th></tr></thead><tbody>
+              <tr v-for="task in currentStageTasks" :key="task.id" tabindex="0" @click="emit('projectPlan')" @keydown.enter="emit('projectPlan')"><td :title="task.name">{{ task.name }}</td><td>{{ personName(task.assignee) }}</td><td>{{ displayDate(task.plannedFinish).slice(5) }}</td><td><span :class="`is-${taskState(task).tone}`">{{ taskState(task).label }}</span></td></tr>
+              <tr v-if="!currentStageTasks.length" class="is-empty"><td colspan="4">{{ activePlanItem?.hasPlan ? '当前阶段没有待处理任务' : '项目计划尚未建立' }}</td></tr>
+            </tbody></table>
+          </div>
+        </article>
+
+        <aside class="pdm-overview-support">
+          <article class="pdm-panel pdm-overview-team" aria-label="项目团队">
+            <header><span><UsersRound :size="18" /></span><h2>项目团队</h2><span class="pdm-overview-team__actions"><button v-if="rootProject.canManageMainStaffing" type="button" class="pdm-text-action" @click="openStaffingDialog">配置分工</button><button v-if="activeProject.canAssignDesigners" type="button" class="pdm-text-action" @click="openDesignerDialog">配置工程师</button></span></header>
+            <dl><div v-for="row in teamRows" :key="row.key"><dt>{{ row.role }}</dt><dd :class="{ 'is-pending': !row.people.length }">{{ row.people.map(person => person.name).join('、') || '待分配' }}<small v-if="row.key === 'manager' && rootProject.executionUnitName">{{ rootProject.executionUnitName }}</small></dd></div></dl>
+          </article>
+
+          <article class="pdm-panel pdm-overview-locations" aria-label="项目位置">
+            <header><span><FolderTree :size="18" /></span><h2>项目位置</h2></header>
+            <dl><div><dt>图档库</dt><dd :title="project.vaultLocation">{{ project.vaultLocation }}</dd><button type="button" aria-label="复制图档库位置" @click="copyLocation('图档库位置', project.vaultLocation)"><ClipboardCopy :size="14" /></button></div><div><dt>发包目录</dt><dd :title="project.releaseLocation">{{ project.releaseLocation }}</dd><button type="button" aria-label="复制发包目录位置" @click="copyLocation('发包目录位置', project.releaseLocation)"><ClipboardCopy :size="14" /></button></div></dl>
+          </article>
+        </aside>
+      </div>
     </div>
 
     <el-dialog v-model="staffingDialogOpen" :title="`配置主项目分工 · ${rootProject.code}`" width="500px" append-to-body>

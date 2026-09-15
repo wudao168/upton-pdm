@@ -17,7 +17,7 @@ public sealed class FullWorkflowAcceptanceTests
         var planning = new ProjectPlanningService(projectPlans, repository, time);
         var workflow = new PdmWorkflowService(repository, storage, publisher, time, projectPlanningService: planning);
         var validationPlans = new InMemoryValidationPlanRepository();
-        var validation = new ValidationPlanService(validationPlans, repository, storage, new StubRecognitionService(), time);
+        var validation = new ValidationPlanService(validationPlans, repository, storage, new StubRecognitionService(), new NoOpValidationPlanFileArchive(), time);
 
         var numbering = await repository.GetProjectNumberingOptionsAsync(default);
         var organizationId = numbering.Organizations.First(item => item.IsActive).Id;
@@ -275,5 +275,11 @@ public sealed class FullWorkflowAcceptanceTests
     {
         public Task<string> RecognizeAsync(string absolutePath, CancellationToken cancellationToken) =>
             Task.FromResult("急停回路验证 结果：合格 验证日期：2026-09-13 责任人：qa_engineer");
+    }
+
+    private sealed class NoOpValidationPlanFileArchive : IValidationPlanFileArchive
+    {
+        public Task ArchiveWorkbookAsync(ValidationPlanExportData export, string actor, CancellationToken cancellationToken) => Task.CompletedTask;
+        public Task ArchiveAttachmentAsync(ProjectValidationPlan plan, ValidationPlanAttachment attachment, string actor, CancellationToken cancellationToken) => Task.CompletedTask;
     }
 }

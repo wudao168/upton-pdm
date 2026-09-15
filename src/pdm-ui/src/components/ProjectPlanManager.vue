@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { Calendar, ChevronDown, ChevronRight, History, ListCollapse, ListTree, PanelLeftClose, PanelLeftOpen, RefreshCw, Settings } from '@lucide/vue'
+import { Calendar, ChevronDown, ChevronRight, Download, History, ListCollapse, ListTree, PanelLeftClose, PanelLeftOpen, RefreshCw, Settings } from '@lucide/vue'
 import { ElMessageBox } from 'element-plus'
 import { computed, onBeforeUnmount, reactive, ref, watch } from 'vue'
 import { ElMessage } from '../statusMessage'
@@ -24,6 +24,8 @@ import type { ProjectPlan, ProjectPlanPortfolio, ProjectPlanPortfolioItem, Proje
 import { useUserDisplayName } from '../userDisplay'
 import { hasStageAllocation, planProgress, stageProgress } from '../projectPlanAllocation'
 import { loadGlobalStatusContent } from '../globalStatusContent'
+import { exportProjectPlansExcel, exportProjectPlansPdf } from '../projectPlanExport'
+import type { ProjectPlanExportItem } from '../projectPlanExport'
 import ProjectPlanTemplateSettings from './ProjectPlanTemplateSettings.vue'
 
 const props = defineProps<{
@@ -116,6 +118,9 @@ const masterPlanMode = ref(false)
 const syncResultsDialogOpen = ref(false)
 const versionsDialogOpen = ref(false)
 const templatesDrawerOpen = ref(false)
+const exportDialogOpen = ref(false)
+const exportScope = ref<'root' | 'children'>('root')
+const exportChildIds = ref<string[]>([])
 const compareBaseKey = ref('')
 const compareTargetKey = ref('current')
 const stageDialogOpen = ref(false)
@@ -387,6 +392,35 @@ async function saveInlineEdit() {
 const hasEffectivePlans = computed(() => portfolioMode.value ? portfolio.value?.projects.some(item => isEffective(item.plan)) : isEffective(plan.value))
 const displayedPlans = computed(() => portfolioMode.value ? (portfolio.value?.projects ?? []).flatMap(item => item.plan ? [item.plan] : []) : plan.value ? [plan.value] : [])
 const hasVisibleBaseline = computed(() => displayedPlans.value.some(item => item.baselineVersion > 0))
+const rootPortfolioItem = computed(() => portfolio.value?.projects.find(item => item.isRoot))
+const rootExportPlan = computed(() => rootPortfolioItem.value?.plan ?? (plan.value?.projectId === rootProject.value.id ? plan.value : null))
+const childExportOptions = computed<ProjectPlanExportItem[]>(() => (portfolio.value?.projects ?? []).filter(item => !item.isRoot).flatMap(item => {
+  const owner = item.plan ?? rootExportPlan.value
+  return owner ? [{ projectCode: item.projectCode, projectName: item.projectName, plan: owner, inherited: !item.plan }] : []
+}))
+const selectedExportItems = computed<ProjectPlanExportItem[]>(() => {
+  if (exportScope.value === 'root') return rootExportPlan.value ? [{ projectCode: rootProject.value.code, projectName: rootProject.value.name, plan: rootExportPlan.value }] : []
+  const selected = new Set(exportChildIds.value)
+  return childExportOptions.value.filter(item => selected.has(item.projectCode))
+})
+
+function openExportDialog() {
+  exportScope.value = rootExportPlan.value ? 'root' : 'children'
+  exportChildIds.value = []
+  exportDialogOpen.value = true
+}
+
+function exportPlans(format: 'excel' | 'pdf') {
+  if (!selectedExportItems.value.length) return ElMessage.warning(exportScope.value === 'root' ? '主项目尚未建立可导出的计划' : '请至少选择一个子项目')
+  try {
+    if (format === 'excel') exportProjectPlansExcel(rootProject.value.code, selectedExportItems.value)
+    else exportProjectPlansPdf(rootProject.value.code, selectedExportItems.value)
+    exportDialogOpen.value = false
+    ElMessage.success(format === 'excel' ? '项目计划 Excel 已导出' : '已打开 PDF 打印页，请选择“另存为 PDF”')
+  } catch (reason) {
+    ElMessage.error(reason instanceof Error ? reason.message : '项目计划导出失败')
+  }
+}
 
 function planStageGroups(owner: ProjectPlan) {
   const definitions: ProjectPlanStageDefinition[] = [...(owner.stages ?? defaultStages)]
@@ -1275,6 +1309,7 @@ watch(() => props.project.id, () => { masterPlanMode.value = false; return load(
             <button v-if="portfolioMode && (managedChildPlans.length || plan?.childSyncResults?.length || canEditSchedule(plan))" type="button" class="pdm-secondary-action" @click="manageDialogOpen = true">编辑子计划</button>
             <button v-if="canEdit || canManageSystemTemplates" type="button" class="pdm-secondary-action" @click="templatesDrawerOpen = true"><Settings :size="14" />计划模板</button>
             <button type="button" class="pdm-secondary-action" :disabled="loading" @click="load"><RefreshCw :size="14" />刷新</button>
+            <button type="button" class="pdm-secondary-action" :disabled="!rootExportPlan && !childExportOptions.length" @click="openExportDialog"><Download :size="14" />导出计划</button>
             <button v-if="!portfolioMode && isMasterWithChildren" type="button" class="pdm-secondary-action" @click="masterPlanMode = false">查看子项目汇总</button>
             <button v-if="!portfolioMode && canEdit && ((!plan && !project.parentProjectId) || (ownsDisplayedPlan && canEditSchedule(plan)))" type="button" class="pdm-primary-action" @click="openGenerate()"><Calendar :size="14" />{{ plan ? '重新生成' : '生成初始计划' }}</button>
             <label v-if="hasVisibleBaseline" class="pdm-plan-switch"><input v-model="showBaseline" type="checkbox">显示基线</label>
@@ -1461,6 +1496,18 @@ watch(() => props.project.id, () => { masterPlanMode.value = false; return load(
       <ProjectPlanTemplateSettings :token="token" :current-username="currentUsername" :project-id="project.id" :can-manage-system="canManageSystemTemplates" />
     </el-drawer>
 
+    <el-dialog v-model="exportDialogOpen" title="导出项目计划" width="640px" destroy-on-close>
+      <div class="pdm-plan-export">
+        <p>请选择导出主项目计划，或选择一个及以上子项目计划。PDF 将打开打印页，请选择“另存为 PDF”。</p>
+        <label class="pdm-plan-export__scope" :class="{ 'is-disabled': !rootExportPlan }"><input v-model="exportScope" type="radio" value="root" :disabled="!rootExportPlan"><span><strong>主项目</strong><small>{{ rootProject.code }} · {{ rootProject.name }}{{ rootExportPlan ? '' : '（尚未建立计划）' }}</small></span></label>
+        <label class="pdm-plan-export__scope" :class="{ 'is-disabled': !childExportOptions.length }"><input v-model="exportScope" type="radio" value="children" :disabled="!childExportOptions.length"><span><strong>子项目</strong><small>可多选，未单独建立的子项目按主计划导出</small></span></label>
+        <div v-if="exportScope === 'children'" class="pdm-plan-export__children">
+          <label v-for="item in childExportOptions" :key="item.projectCode"><input v-model="exportChildIds" type="checkbox" :value="item.projectCode"><span><strong>{{ item.projectCode }} · {{ item.projectName }}</strong><small>{{ item.inherited ? '跟随主项目计划' : '独立计划' }} · {{ item.plan.tasks.length }} 项任务</small></span></label>
+        </div>
+      </div>
+      <template #footer><button type="button" class="pdm-secondary-action" @click="exportDialogOpen = false">取消</button><button type="button" class="pdm-secondary-action" :disabled="!selectedExportItems.length" @click="exportPlans('pdf')">导出 PDF</button><button type="button" class="pdm-primary-action" :disabled="!selectedExportItems.length" @click="exportPlans('excel')">导出 Excel</button></template>
+    </el-dialog>
+
     <el-dialog v-model="stageDialogOpen" :title="hasStageException ? '恢复正常阶段' : '设置阶段例外'" width="520px" destroy-on-close>
       <div class="pdm-plan-form">
         <template v-if="hasStageException"><p>当前处于“{{ stageLabel(plan?.manualStage, plan) }}”状态。恢复后，系统将按第一个未完成的必需任务自动判断正常阶段。</p><label>恢复原因<el-input v-model="stageForm.reason" aria-label="恢复正常阶段原因" type="textarea" :rows="3" /></label></template>
@@ -1584,6 +1631,7 @@ watch(() => props.project.id, () => { masterPlanMode.value = false; return load(
 .pdm-plan-edit-hint{padding:6px 12px;color:var(--pdm-muted);font-size:11px;border-bottom:1px solid var(--pdm-border)}
 .pdm-plan-edit-hint.is-change-draft{color:var(--pdm-text);background:color-mix(in srgb,var(--pdm-orange) 10%,var(--pdm-surface));border-color:color-mix(in srgb,var(--pdm-orange) 30%,var(--pdm-border))}.pdm-plan-compare-selectors{display:grid;grid-template-columns:1fr auto 1fr;align-items:end;gap:12px}.pdm-plan-compare-selectors label{display:flex;flex-direction:column;gap:6px;font-size:12px}.pdm-plan-compare-summary{font-size:11px;color:var(--pdm-muted)}.pdm-plan-compare-table{max-height:42vh;overflow:auto;border:1px solid var(--pdm-border);border-radius:6px}.pdm-plan-compare-table article{display:grid;grid-template-columns:170px 1fr 24px 1fr;gap:10px;align-items:center;padding:9px 10px;border-bottom:1px solid var(--pdm-border);font-size:11px}.pdm-plan-compare-table article:last-child{border-bottom:0}.pdm-plan-compare-table strong small{margin-left:6px;color:var(--plan-accent)}.pdm-plan-compare-table span{line-height:1.6}.pdm-plan-compare-table b{text-align:center;color:var(--pdm-muted)}
 .pdm-plan-management-list{display:flex;flex-direction:column;gap:8px;max-height:52vh;overflow:auto}.pdm-plan-management-list article{display:flex;align-items:center;gap:8px;padding:10px;border:1px solid var(--pdm-border);border-radius:6px}.pdm-plan-management-list article>div{display:flex;flex:1;min-width:0;flex-direction:column;gap:4px}.pdm-plan-management-list strong{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px}.pdm-plan-management-list small{color:var(--pdm-muted);font-size:11px}.pdm-plan-management-list button{flex-shrink:0}
+.pdm-plan-export{display:grid;gap:9px}.pdm-plan-export>p{margin:0 0 3px;color:var(--pdm-muted);line-height:1.6}.pdm-plan-export__scope,.pdm-plan-export__children>label{display:flex;align-items:center;gap:9px;padding:10px;border:1px solid var(--pdm-border);border-radius:6px;background:var(--pdm-surface);cursor:pointer}.pdm-plan-export__scope:has(input:checked),.pdm-plan-export__children>label:has(input:checked){border-color:var(--plan-accent);background:var(--plan-accent-soft)}.pdm-plan-export__scope.is-disabled{cursor:not-allowed;opacity:.55}.pdm-plan-export__scope>span,.pdm-plan-export__children span{display:grid;min-width:0;gap:3px}.pdm-plan-export__scope small,.pdm-plan-export__children small{color:var(--pdm-muted)}.pdm-plan-export__children{display:grid;max-height:280px;gap:6px;overflow:auto;padding:8px 0 0 26px}.pdm-plan-export__scope input,.pdm-plan-export__children input{accent-color:var(--plan-accent)}
 .pdm-plan-sync-management{display:flex;align-items:center;gap:8px;padding-top:10px;border-top:1px solid var(--pdm-border)}.pdm-plan-sync-management>div{display:flex;flex:1;min-width:0;flex-direction:column;gap:3px}.pdm-plan-sync-management strong{font-size:12px}.pdm-plan-sync-management small{color:var(--pdm-muted);font-size:11px}.pdm-plan-sync-management button{flex-shrink:0}
 .pdm-plan-approval-strip{display:flex;align-items:center;gap:12px;padding:10px 12px;border:1px solid var(--plan-accent-border);border-radius:6px;background:var(--plan-accent-soft);font-size:12px}.pdm-plan-approval-strip span{flex:1}.pdm-plan-targets{border:1px solid var(--pdm-border);border-radius:6px;overflow:hidden}.pdm-plan-targets__header{display:flex;align-items:center;gap:12px;padding:8px 10px;background:var(--pdm-surface-muted);font-size:12px}.pdm-plan-targets__header>span{flex:1;color:var(--pdm-muted)}.pdm-plan-targets__list{display:flex;flex-direction:column;max-height:340px;overflow:auto;padding:4px 10px}.pdm-plan-targets__list :deep(.el-checkbox){margin:0;min-height:38px;flex-shrink:0;display:flex;flex-direction:row;align-items:center;border-bottom:1px solid var(--pdm-border)}.pdm-plan-targets__list :deep(.el-checkbox__label){display:flex;flex:1;justify-content:space-between;gap:12px;white-space:normal}.pdm-plan-targets__list small{color:var(--pdm-muted);white-space:nowrap}.pdm-plan-stage-list{max-height:280px;overflow:auto;margin:8px 0}.pdm-plan-stage-editor{display:flex;gap:6px;align-items:center;margin:6px 0}.pdm-plan-stage-editor>.el-input{flex:1}.pdm-plan-stage-editor>span{width:22px}.pdm-plan-stage-editor>button{white-space:nowrap;border:1px solid var(--pdm-border);border-radius:4px;background:var(--pdm-surface);color:var(--plan-accent);padding:6px}.pdm-plan-stage-editor>button:disabled{opacity:.4}
 .pdm-plan-page { --plan-accent: var(--shell-accent, var(--pdm-blue)); --plan-accent-hover: var(--shell-accent-hover, var(--pdm-blue)); --plan-accent-soft: var(--shell-accent-soft, var(--pdm-blue-soft)); --plan-accent-border: var(--shell-accent-border, var(--pdm-border)); min-width: 0; height: 100%; display: flex; flex-direction: column; gap: 12px; padding: 14px; overflow: auto; color: var(--pdm-text); background: var(--pdm-bg); }

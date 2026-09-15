@@ -89,6 +89,9 @@ const filteredCandidates = computed(() => {
   })
 })
 const selectedCandidateCount = computed(() => selectedCandidateIds.value.length)
+const candidateEmptyMessage = computed(() => props.candidates.length === 0
+  ? '当前没有有效非标件BOM候选；请先将3D模型归入非标件BOM，并保持唯一关联的2D工程图。'
+  : '没有符合搜索条件的图档。')
 
 watch(() => props.candidates, () => {
   if (scopeOpen.value && scopeMode.value !== 'manual') applyScopeMode(scopeMode.value)
@@ -237,7 +240,7 @@ function targetStateLabel(state: DrawingReviewPackage['items'][number]['modelSta
           <span class="drawing-review-candidate__versions"><strong>2D {{ candidate.drawingRevision || '—' }}</strong><em>{{ candidateStateLabel(candidate) }}</em></span>
           <span v-if="candidate.reason" class="drawing-review-candidate__reason">{{ candidate.reason }}</span>
         </button>
-        <p v-if="!filteredCandidates.length" class="drawing-review-no-candidate">当前范围没有可显示的图档</p>
+        <p v-if="!filteredCandidates.length" class="drawing-review-no-candidate">{{ candidateEmptyMessage }}</p>
       </section>
       <footer class="drawing-review-scope__footer"><span>已选择 {{ selectedCandidateCount }} 张</span><button type="button" class="is-primary" :disabled="pending || !selectedCandidateCount" @click="submitScope"><Send :size="14" />发起审核</button></footer>
     </template>
