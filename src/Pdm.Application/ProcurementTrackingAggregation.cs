@@ -94,6 +94,8 @@ public static class ProcurementTrackingAggregation
                     Quantity = firstBatch ? material.Sum(row => row.Quantity) : null,
                     Remark = Join(material.Select(row => row.Remark)),
                     BomKind = Join(material.Select(row => row.BomKind)) ?? first.BomKind,
+                    ImpactStage = material.Any(row => row.ImpactStage == "Assembly") ? "Assembly"
+                        : material.Any(row => row.ImpactStage == "Commissioning") ? "Commissioning" : null,
                     ReleasePackageNumber = Join(material.SelectMany(row => (row.ReleasePackageNumber ?? "").Split('、'))),
                     PurchaseRequisitionNumbers = batchPr.Select(pr => pr.DocumentNumber).Distinct().ToArray(),
                     PurchaseRequisitionStatus = batch.Key.PrStatus,

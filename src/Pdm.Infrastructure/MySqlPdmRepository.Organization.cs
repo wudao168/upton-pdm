@@ -112,7 +112,7 @@ public sealed partial class MySqlPdmRepository
         }
         catch (MySqlException exception) when (exception.Number == 1062)
         {
-            throw new PdmConflictException("同一公司内的组织编码已经存在。");
+            throw new PdmConflictException("同一公司内的完整组织编码已经存在。");
         }
         return new OrganizationUnit(id, command.OrganizationId, command.ParentUnitId, command.Code, command.Name, command.Kind, command.IsActive, command.SortOrder, command.CanManufacture);
     }

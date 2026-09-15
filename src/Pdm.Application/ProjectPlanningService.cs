@@ -530,14 +530,24 @@ public sealed class ProjectPlanningService(
             if (plan.ApprovalStatus != ProjectPlanApprovalStatus.Approved) continue;
             var project = await repository.FindProjectAsync(plan.ProjectId, cancellationToken);
             if (project is null) continue;
+            var impactedItems = new List<BomItem>();
+            foreach (var kind in new[] { BomKind.Standard, BomKind.NonStandard, BomKind.Electrical })
+                impactedItems.AddRange((await repository.GetBomAsync(project.Id, kind, cancellationToken))
+                    .Where(item => !item.IsManuallyExcluded && !item.IsReleaseExcluded && !item.IsPendingRemoval
+                        && item.ImpactStage is ProjectPlanStage.Assembly or ProjectPlanStage.Commissioning));
             foreach (var task in EffectivePlan(plan).Tasks.Where(item => item.Status != ProjectPlanTaskStatus.Completed && !string.IsNullOrWhiteSpace(item.Assignee)))
             {
                 var days = task.PlannedFinish.DayNumber - today.DayNumber;
                 if (days is not (7 or 3 or 0) && days >= 0) continue;
                 var kind = days < 0 ? "overdue" : $"d{days}";
                 var title = days < 0 ? $"项目计划任务已逾期{-days}天" : days == 0 ? "项目计划任务今天到期" : $"项目计划任务还有{days}天到期";
+                var impacted = impactedItems.Where(item => item.ImpactStage == task.Stage)
+                    .GroupBy(item => string.IsNullOrWhiteSpace(item.DrawingNumber) ? item.Name : item.DrawingNumber)
+                    .Select(group => group.First()).ToArray();
+                var impactReminder = impacted.Length == 0 ? string.Empty
+                    : $" 本阶段影响物料 {impacted.Length} 项：{string.Join("、", impacted.Take(3).Select(item => string.IsNullOrWhiteSpace(item.DrawingNumber) ? item.Name : item.DrawingNumber))}{(impacted.Length > 3 ? "等" : string.Empty)}；请在备料页核对到货和出库状态。";
                 var notification = new UserNotification(Guid.NewGuid(), task.Assignee!, "project-plan", title,
-                    $"{project.Code} · {task.Name}，计划完成日期 {task.PlannedFinish:yyyy-MM-dd}。", project.Id, null,
+                    $"{project.Code} · {task.Name}，计划完成日期 {task.PlannedFinish:yyyy-MM-dd}。{impactReminder}", project.Id, null,
                     $"project-plan:{task.Id:N}:{kind}:{today:yyyyMMdd}", now, null);
                 await repository.CreateUserNotificationsAsync([notification], cancellationToken);
             }

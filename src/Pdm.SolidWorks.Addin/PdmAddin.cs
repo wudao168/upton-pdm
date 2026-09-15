@@ -42,10 +42,13 @@ public sealed class PdmAddin : ISwAddin
     private readonly object metadataRefreshSync = new object();
     private readonly object metadataCacheSync = new object();
     private readonly object fileHashCacheSync = new object();
+    private readonly object activeTreeCacheSync = new object();
     private readonly Dictionary<Guid, ProjectDocumentsCacheEntry> projectDocumentsCache = new Dictionary<Guid, ProjectDocumentsCacheEntry>();
     private readonly Dictionary<Guid, DocumentVersionsCacheEntry> documentVersionsCache = new Dictionary<Guid, DocumentVersionsCacheEntry>();
     private readonly Dictionary<string, FileHashCacheEntry> fileHashCache = new Dictionary<string, FileHashCacheEntry>(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, ActiveTreeCacheEntry> activeTreeCache = new Dictionary<string, ActiveTreeCacheEntry>(StringComparer.OrdinalIgnoreCase);
     private CadTreeNode currentTree;
+    private string currentTreeCacheKey = string.Empty;
     private Guid? currentProjectId;
     private IReadOnlyList<ProjectDto> availableProjects = Array.Empty<ProjectDto>();
     private IReadOnlyDictionary<string, string> userDisplayNames = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
@@ -69,6 +72,7 @@ public sealed class PdmAddin : ISwAddin
     private int controlledOpenInProgress;
     private int refreshSuppressionDepth;
     private int pendingTreeRefresh;
+    private int pendingTreeRefreshForceScan;
     private long pendingTreeRefreshScheduledAt;
     private int pendingPropertyWritebackDialog;
     private int openPropertyWritebackTab;
@@ -93,6 +97,8 @@ public sealed class PdmAddin : ISwAddin
     private ClientBootstrapConfiguration currentBootstrap;
     private PluginUpdateSnapshot clientUpdateSnapshot = new PluginUpdateSnapshot();
     private const int ActiveDocumentRefreshDebounceMilliseconds = 200;
+    private const int StructuralRefreshDebounceMilliseconds = 800;
+    private const int ActiveTreeCacheCapacity = 8;
     private const int MetadataRefreshDelayMilliseconds = 300;
     private static readonly TimeSpan NavigationMetadataCacheDuration = TimeSpan.FromSeconds(2);
     private const long OperationLogMaxBytes = 10L * 1024L * 1024L;
@@ -223,6 +229,7 @@ public sealed class PdmAddin : ISwAddin
             availableProjects = Array.Empty<ProjectDto>();
             userDisplayNames = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
             currentDocumentIdentity = string.Empty;
+            currentTreeCacheKey = string.Empty;
             currentProjectId = null;
             controlledOpenManifests.Clear();
             explicitProjectPaths.Clear();
@@ -236,6 +243,7 @@ public sealed class PdmAddin : ISwAddin
                 documentVersionsCache.Clear();
             }
             lock (fileHashCacheSync) fileHashCache.Clear();
+            lock (activeTreeCacheSync) activeTreeCache.Clear();
         }
 
         return true;
@@ -416,9 +424,9 @@ public sealed class PdmAddin : ISwAddin
                 {
                     partEventDocumentPath = activePath;
                     partEvents.UserSelectionPostNotify += OnSolidWorksSelectionChanged;
-                    partEvents.ModifyNotify += OnAssemblyTreeChanged;
+                    partEvents.ModifyNotify += OnDocumentStateChanged;
                     partEvents.FileSavePostNotify += OnAssemblyFileSaved;
-                    partEvents.RegenPostNotify += OnAssemblyTreeChanged;
+                    partEvents.RegenPostNotify += OnDocumentStateChanged;
                     partEvents.UndoPostNotify += OnAssemblyTreeChanged;
                     partEvents.RedoPostNotify += OnAssemblyTreeChanged;
                 }
@@ -439,8 +447,8 @@ public sealed class PdmAddin : ISwAddin
             assemblyEventDocumentPath = activePath;
 
             assemblyEvents.UserSelectionPostNotify += OnSolidWorksSelectionChanged;
-            assemblyEvents.RegenPostNotify += OnAssemblyTreeChanged;
-            assemblyEvents.ModifyNotify += OnAssemblyTreeChanged;
+            assemblyEvents.RegenPostNotify += OnDocumentStateChanged;
+            assemblyEvents.ModifyNotify += OnDocumentStateChanged;
             assemblyEvents.FileSavePostNotify += OnAssemblyFileSaved;
             assemblyEvents.ActiveConfigChangePostNotify += OnAssemblyTreeChanged;
             assemblyEvents.UndoPostNotify += OnAssemblyTreeChanged;
@@ -469,8 +477,8 @@ public sealed class PdmAddin : ISwAddin
         try
         {
             assemblyEvents.UserSelectionPostNotify -= OnSolidWorksSelectionChanged;
-            assemblyEvents.RegenPostNotify -= OnAssemblyTreeChanged;
-            assemblyEvents.ModifyNotify -= OnAssemblyTreeChanged;
+            assemblyEvents.RegenPostNotify -= OnDocumentStateChanged;
+            assemblyEvents.ModifyNotify -= OnDocumentStateChanged;
             assemblyEvents.FileSavePostNotify -= OnAssemblyFileSaved;
             assemblyEvents.ActiveConfigChangePostNotify -= OnAssemblyTreeChanged;
             assemblyEvents.UndoPostNotify -= OnAssemblyTreeChanged;
@@ -502,9 +510,9 @@ public sealed class PdmAddin : ISwAddin
         try
         {
             partEvents.UserSelectionPostNotify -= OnSolidWorksSelectionChanged;
-            partEvents.ModifyNotify -= OnAssemblyTreeChanged;
+            partEvents.ModifyNotify -= OnDocumentStateChanged;
             partEvents.FileSavePostNotify -= OnAssemblyFileSaved;
-            partEvents.RegenPostNotify -= OnAssemblyTreeChanged;
+            partEvents.RegenPostNotify -= OnDocumentStateChanged;
             partEvents.UndoPostNotify -= OnAssemblyTreeChanged;
             partEvents.RedoPostNotify -= OnAssemblyTreeChanged;
         }
@@ -520,7 +528,20 @@ public sealed class PdmAddin : ISwAddin
     private int OnActiveDocumentChanged()
     {
         CancelMetadataRefresh();
-        ScheduleTreeRefresh();
+        CacheCurrentTreeContext();
+        try
+        {
+            var activeKey = BuildActiveTreeCacheKey(application?.ActiveDoc as IModelDoc2);
+            if (!string.Equals(activeKey, currentTreeCacheKey, StringComparison.OrdinalIgnoreCase))
+            {
+                Interlocked.Exchange(ref pendingTreeRefreshForceScan, 0);
+            }
+        }
+        catch
+        {
+            Interlocked.Exchange(ref pendingTreeRefreshForceScan, 0);
+        }
+        ScheduleTreeRefresh(forceScan: false);
         return 0;
     }
 
@@ -538,6 +559,7 @@ public sealed class PdmAddin : ISwAddin
 
     private int OnFileClosed(string fileName, int reason)
     {
+        InvalidateTreeCacheForPath(fileName);
         var closedCurrentDocument = IsCurrentDocument(fileName);
         if (closedCurrentDocument)
         {
@@ -548,7 +570,7 @@ public sealed class PdmAddin : ISwAddin
             "FileCloseNotify file=", fileName,
             " reason=", reason,
             " current=", closedCurrentDocument));
-        ScheduleTreeRefresh();
+        ScheduleTreeRefresh(forceScan: false);
         return 0;
     }
 
@@ -578,7 +600,14 @@ public sealed class PdmAddin : ISwAddin
 
     private int OnAssemblyTreeChanged()
     {
+        InvalidateCurrentTreeCache();
         ScheduleTreeRefresh();
+        return 0;
+    }
+
+    private int OnDocumentStateChanged()
+    {
+        ScheduleTreeRefresh(forceScan: false);
         return 0;
     }
 
@@ -624,12 +653,14 @@ public sealed class PdmAddin : ISwAddin
 
     private int OnAssemblyFileSaved(int saveType, string fileName)
     {
+        InvalidateCurrentTreeCache();
         ScheduleTreeRefresh();
         return 0;
     }
 
     private int OnAssemblyItemChanged(int entityType, string itemName)
     {
+        InvalidateCurrentTreeCache();
         ScheduleTreeRefresh();
         return 0;
     }
@@ -641,35 +672,43 @@ public sealed class PdmAddin : ISwAddin
             pendingAssemblyItemRenames.Add(new AssemblyItemRename(oldName, newName));
             LogOperation(string.Concat("Assembly item renamed old=", oldName, " new=", newName));
         }
+        InvalidateCurrentTreeCache();
         ScheduleTreeRefresh();
         return 0;
     }
 
     private int OnAssemblyComponentStateChanged(object component, string componentName, short oldState, short newState)
     {
+        InvalidateCurrentTreeCache();
         ScheduleTreeRefresh();
         return 0;
     }
 
     private int OnAssemblyComponentReorganized(string sourceName, string targetName)
     {
+        InvalidateCurrentTreeCache();
         ScheduleTreeRefresh();
         return 0;
     }
 
     private int OnAssemblyComponentConfigurationChanged(string componentName, string oldConfigurationName, string newConfigurationName)
     {
+        InvalidateCurrentTreeCache();
         ScheduleTreeRefresh();
         return 0;
     }
 
-    private void ScheduleTreeRefresh(bool restartDebounce = true)
+    private void ScheduleTreeRefresh(bool restartDebounce = true, bool forceScan = true)
     {
         if (disconnecting)
         {
             return;
         }
 
+        if (forceScan)
+        {
+            Interlocked.Exchange(ref pendingTreeRefreshForceScan, 1);
+        }
         var wasPending = Interlocked.Exchange(ref pendingTreeRefresh, 1);
         if (restartDebounce || wasPending == 0)
         {
@@ -699,6 +738,7 @@ public sealed class PdmAddin : ISwAddin
                 {
                     ClearActiveDocumentContext();
                     Interlocked.Exchange(ref pendingTreeRefresh, 0);
+                    Interlocked.Exchange(ref pendingTreeRefreshForceScan, 0);
                     Interlocked.Exchange(ref pendingTreeRefreshScheduledAt, 0);
                     LogOperation("Idle context synchronized to no open document");
                 }
@@ -713,14 +753,14 @@ public sealed class PdmAddin : ISwAddin
             if (currentTree == null
                 || !string.Equals(currentDocumentIdentity, activeIdentity, StringComparison.OrdinalIgnoreCase))
             {
-                ScheduleTreeRefresh(false);
+                ScheduleTreeRefresh(false, false);
             }
         }
         catch (Exception exception)
         {
             // A closing COM document can become invalid between ActiveDoc and GetPathName.
             LogDiagnostic("SynchronizeActiveDocumentContextOnIdle", exception);
-            ScheduleTreeRefresh(false);
+            ScheduleTreeRefresh(false, false);
         }
     }
 
@@ -742,10 +782,11 @@ public sealed class PdmAddin : ISwAddin
         try
         {
             Interlocked.Exchange(ref pendingTreeRefresh, 0);
+            var forceScan = Interlocked.Exchange(ref pendingTreeRefreshForceScan, 0) != 0;
             Interlocked.Exchange(ref pendingTreeRefreshScheduledAt, 0);
-            LogOperation(string.Concat(source, " start"));
+            LogOperation(string.Concat(source, " start forceScan=", forceScan));
             BindAssemblyEvents();
-            RefreshTree(false);
+            RefreshTree(false, !forceScan);
             TryOpenPendingPropertyWritebackDialog();
             LogOperation(string.Concat(source, " end"));
         }
@@ -768,7 +809,10 @@ public sealed class PdmAddin : ISwAddin
         }
 
         var elapsedMilliseconds = (Stopwatch.GetTimestamp() - scheduledAt) * 1000L / Stopwatch.Frequency;
-        return elapsedMilliseconds >= ActiveDocumentRefreshDebounceMilliseconds;
+        var debounceMilliseconds = Volatile.Read(ref pendingTreeRefreshForceScan) != 0
+            ? StructuralRefreshDebounceMilliseconds
+            : ActiveDocumentRefreshDebounceMilliseconds;
+        return elapsedMilliseconds >= debounceMilliseconds;
     }
 
     private void TryOpenPendingPropertyWritebackDialog()
@@ -5408,13 +5452,14 @@ public sealed class PdmAddin : ISwAddin
         try
         {
             IReadOnlyList<DocumentDto> projectDocuments = Array.Empty<DocumentDto>();
-            ProjectDto selectedProject = null;
+            var selectedProject = projectId.HasValue
+                ? availableProjects.FirstOrDefault(project => project.Id == projectId.Value)
+                : null;
             if (initialOperation == PropertyOperationMode.PropertyWriteback
                 && projectId.HasValue
                 && apiClient.IsAuthenticated)
             {
                 projectDocuments = await apiClient.GetDocumentsAsync(projectId.Value, lifetime.Token);
-                selectedProject = availableProjects.FirstOrDefault(project => project.Id == projectId.Value);
                 if (selectedProject == null)
                 {
                     throw new InvalidOperationException("当前归属项目不在用户的可用项目列表中，请刷新项目权限后重试。");
@@ -5482,6 +5527,7 @@ public sealed class PdmAddin : ISwAddin
                     ExecuteLocalBatchPropertyOperation(changedItems, settingPropertyCards, reportProgress),
                 ValidateBatchDocumentRenames,
                 ExecuteBatchDocumentRenames,
+                (IReadOnlyList<string>)(selectedProject?.SerialNumbers ?? new List<string>()),
                 currentTree?.FileName,
                 taskPaneControl.Handle))
             {
@@ -10835,9 +10881,10 @@ public sealed class PdmAddin : ISwAddin
         return null;
     }
 
-    private void RefreshTree(bool showErrors)
+    private void RefreshTree(bool showErrors, bool allowCachedTree = false)
     {
-        if (application?.ActiveDoc == null)
+        var activeDocument = application?.ActiveDoc as IModelDoc2;
+        if (activeDocument == null)
         {
             ClearActiveDocumentContext();
             return;
@@ -10845,6 +10892,12 @@ public sealed class PdmAddin : ISwAddin
 
         try
         {
+            var activeTreeKey = BuildActiveTreeCacheKey(activeDocument);
+            if (allowCachedTree && TryRestoreActiveTreeFromCache(activeTreeKey))
+            {
+                return;
+            }
+
             taskPaneControl.SetProjectContextAvailable(true);
             var previousTree = currentTree;
             var scannedTree = scanner.ScanActiveDocument();
@@ -10862,6 +10915,7 @@ public sealed class PdmAddin : ISwAddin
             }
 
             currentTree = scannedTree;
+            currentTreeCacheKey = activeTreeKey;
             MarkReadOnlyPreview(currentTree, false, false);
             var controlledManifest = ApplyControlledOpenMetadata(currentTree);
             var activeDrawingSource = ResolveActiveDrawingSource(currentTree, previousTree);
@@ -10876,6 +10930,7 @@ public sealed class PdmAddin : ISwAddin
                 currentProjectId = controlledManifest.ProjectId;
                 taskPaneControl.SelectProject(controlledManifest.ProjectId);
             }
+            CacheActiveTree(activeTreeKey, currentTree, currentProjectId);
             taskPaneControl.SetTree(currentTree);
             taskPaneControl.SetActiveDrawingSource(activeDrawingSource);
             LogOperation(string.Concat("RefreshTree success nodes=", CountTreeNodes(currentTree), " path=", currentTree?.FullPath ?? string.Empty));
@@ -10908,6 +10963,7 @@ public sealed class PdmAddin : ISwAddin
     {
         Interlocked.Increment(ref projectResolutionGeneration);
         currentTree = null;
+        currentTreeCacheKey = string.Empty;
         currentDocumentIdentity = string.Empty;
         currentProjectId = null;
         taskPaneControl.SetProjectContextAvailable(false);
@@ -10948,6 +11004,164 @@ public sealed class PdmAddin : ISwAddin
 
     private static string DocumentIdentity(CadTreeNode tree) =>
         string.IsNullOrWhiteSpace(tree?.FullPath) ? tree?.FileName ?? string.Empty : tree.FullPath;
+
+    private static string BuildActiveTreeCacheKey(IModelDoc2 document)
+    {
+        if (document == null)
+        {
+            return string.Empty;
+        }
+        var path = document.GetPathName() ?? string.Empty;
+        var identity = string.IsNullOrWhiteSpace(path) ? document.GetTitle() ?? string.Empty : path;
+        var configuration = document.ConfigurationManager?.ActiveConfiguration?.Name ?? string.Empty;
+        return string.Concat(identity.Trim(), "\n", configuration.Trim());
+    }
+
+    private bool TryRestoreActiveTreeFromCache(string cacheKey)
+    {
+        if (string.IsNullOrWhiteSpace(cacheKey))
+        {
+            return false;
+        }
+
+        ActiveTreeCacheEntry entry;
+        lock (activeTreeCacheSync)
+        {
+            if (!activeTreeCache.TryGetValue(cacheKey, out entry) || entry?.Tree == null)
+            {
+                return false;
+            }
+            entry.LastAccessUtc = DateTime.UtcNow;
+        }
+
+        var previousTree = currentTree;
+        var documentIdentity = DocumentIdentity(entry.Tree);
+        var documentChanged = !string.Equals(currentTreeCacheKey, cacheKey, StringComparison.OrdinalIgnoreCase);
+        if (documentChanged)
+        {
+            CancelMetadataRefresh();
+            Interlocked.Increment(ref projectResolutionGeneration);
+        }
+
+        currentTree = entry.Tree;
+        currentTreeCacheKey = cacheKey;
+        currentDocumentIdentity = documentIdentity;
+        currentProjectId = entry.ProjectId ?? GetExplicitProjectId(currentTree.FullPath);
+        taskPaneControl.SetProjectContextAvailable(true);
+        taskPaneControl.SelectProject(currentProjectId);
+        MarkReadOnlyPreview(currentTree, false, false);
+        var controlledManifest = ApplyControlledOpenMetadata(currentTree);
+        if (controlledManifest != null)
+        {
+            currentProjectId = controlledManifest.ProjectId;
+            taskPaneControl.SelectProject(currentProjectId);
+        }
+        var activeDrawingSource = ResolveActiveDrawingSource(currentTree, previousTree);
+        taskPaneControl.SetTree(currentTree);
+        taskPaneControl.SetActiveDrawingSource(activeDrawingSource);
+        CacheActiveTree(cacheKey, currentTree, currentProjectId);
+        LogOperation(string.Concat(
+            "RefreshTree cache hit nodes=", CountTreeNodes(currentTree),
+            " path=", currentTree.FullPath ?? string.Empty));
+        if (currentProjectId.HasValue && apiClient.IsAuthenticated)
+        {
+            _ = RefreshMetadataAsync(currentProjectId.Value, BeginMetadataRefresh());
+        }
+        else if (apiClient.IsAuthenticated)
+        {
+            _ = ResolveProjectForCurrentDocumentAsync(currentTree, documentIdentity);
+        }
+        return true;
+    }
+
+    private void CacheCurrentTreeContext()
+    {
+        if (currentTree == null || string.IsNullOrWhiteSpace(currentTreeCacheKey))
+        {
+            return;
+        }
+        CacheActiveTree(currentTreeCacheKey, currentTree, currentProjectId);
+    }
+
+    private void CacheActiveTree(string cacheKey, CadTreeNode tree, Guid? projectId)
+    {
+        if (string.IsNullOrWhiteSpace(cacheKey) || tree == null)
+        {
+            return;
+        }
+        lock (activeTreeCacheSync)
+        {
+            activeTreeCache[cacheKey] = new ActiveTreeCacheEntry(tree, projectId, DateTime.UtcNow);
+            while (activeTreeCache.Count > ActiveTreeCacheCapacity)
+            {
+                var oldest = activeTreeCache.OrderBy(pair => pair.Value.LastAccessUtc).First();
+                activeTreeCache.Remove(oldest.Key);
+            }
+        }
+    }
+
+    private void InvalidateCurrentTreeCache()
+    {
+        string cacheKey = null;
+        try
+        {
+            cacheKey = BuildActiveTreeCacheKey(application?.ActiveDoc as IModelDoc2);
+        }
+        catch
+        {
+            cacheKey = currentTreeCacheKey;
+        }
+        if (string.IsNullOrWhiteSpace(cacheKey))
+        {
+            return;
+        }
+        lock (activeTreeCacheSync)
+        {
+            activeTreeCache.Remove(cacheKey);
+        }
+    }
+
+    private void InvalidateTreeCacheForPath(string fileName)
+    {
+        if (string.IsNullOrWhiteSpace(fileName))
+        {
+            return;
+        }
+        var normalized = fileName.Trim();
+        string normalizedName;
+        try
+        {
+            normalizedName = Path.GetFileName(normalized);
+        }
+        catch
+        {
+            normalizedName = normalized;
+        }
+        lock (activeTreeCacheSync)
+        {
+            foreach (var key in activeTreeCache.Keys
+                .Where(key =>
+                {
+                    var separator = key.IndexOf('\n');
+                    var identity = separator < 0 ? key : key.Substring(0, separator);
+                    string identityName;
+                    try
+                    {
+                        identityName = Path.GetFileName(identity);
+                    }
+                    catch
+                    {
+                        identityName = identity;
+                    }
+                    return string.Equals(identity, normalized, StringComparison.OrdinalIgnoreCase)
+                        || string.Equals(identityName, normalizedName, StringComparison.OrdinalIgnoreCase);
+                })
+                .ToArray())
+            {
+                activeTreeCache.Remove(key);
+            }
+        }
+    }
 
     private static int CountTreeNodes(CadTreeNode node)
     {
@@ -12585,6 +12799,20 @@ public sealed class PdmAddin : ISwAddin
         public long Length { get; }
         public long LastWriteTimeUtcTicks { get; }
         public string Sha256 { get; }
+    }
+
+    private sealed class ActiveTreeCacheEntry
+    {
+        public ActiveTreeCacheEntry(CadTreeNode tree, Guid? projectId, DateTime lastAccessUtc)
+        {
+            Tree = tree;
+            ProjectId = projectId;
+            LastAccessUtc = lastAccessUtc;
+        }
+
+        public CadTreeNode Tree { get; }
+        public Guid? ProjectId { get; }
+        public DateTime LastAccessUtc { get; set; }
     }
 
     private sealed class ProjectDocumentsCacheEntry

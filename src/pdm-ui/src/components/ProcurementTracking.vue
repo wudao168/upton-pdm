@@ -10,7 +10,7 @@ import { downloadProcurementWorkbook } from '../procurementWorkbook'
 const props = defineProps<{ projectId: string; token: string; username: string }>()
 
 type ColumnKey = keyof Pick<ProjectProcurementTrackingItem,
-  'sequence' | 'projectCode' | 'subprojectCode' | 'materialCode' | 'materialName' | 'specification' | 'remark' | 'brand' |
+  'sequence' | 'projectCode' | 'subprojectCode' | 'materialCode' | 'materialName' | 'impactStage' | 'specification' | 'remark' | 'brand' |
   'quantity' | 'purchaseRequisitionNumbers' | 'purchaseRequisitionStatus' | 'purchaseRequisitionCreatedAt' | 'purchaseRequisitionDeliveryDate' |
   'purchaseOrderNumbers' | 'purchaseOrderStatus' | 'buyerName' | 'purchaseQuantity' | 'arrivedQuantity' | 'purchaseRemark' |
   'purchaseDeliveryDate' | 'latestDeliveryDate' | 'bomKind' | 'releasePackageNumber' | 'requestedQuantity' | 'approvedQuantity'> | 'inventoryQuantity' | MovementColumn
@@ -27,6 +27,7 @@ const columnDefinitions: ColumnDefinition[] = [
   { key: 'subprojectCode', label: '子项目号', width: 126, fixedWidth: 70, defaultVisible: true },
   { key: 'materialCode', label: '物料编码', width: 142, fixedWidth: 85, defaultVisible: true },
   { key: 'materialName', label: '物料名称', width: 240, fixedWidth: 120, defaultVisible: true },
+  { key: 'impactStage', label: '影响', width: 90, fixedWidth: 60, defaultVisible: true, align: 'center' },
   { key: 'specification', label: '型号', width: 260, defaultVisible: true },
   { key: 'remark', label: '备注', width: 150, defaultVisible: true },
   { key: 'brand', label: '品牌', width: 110, defaultVisible: true },
@@ -171,9 +172,9 @@ const filterFields = [
 ] as const
 type FilterKey = typeof filterFields[number]['key']
 const multiFilterFields = filterFields.filter((field): field is Exclude<typeof filterFields[number], { key: 'brand' }> => field.key !== 'brand')
-const filters = reactive({ keyword: '', brand: '', purchaseRequisitionStatus: [] as string[], purchaseOrderStatus: [] as string[], buyerName: [] as string[], delayedOnly: false, unreceivedOnly: false, unissuedOnly: false })
+const filters = reactive({ keyword: '', brand: '', purchaseRequisitionStatus: [] as string[], purchaseOrderStatus: [] as string[], buyerName: [] as string[], impactedOnly: false, delayedOnly: false, unreceivedOnly: false, unissuedOnly: false })
 function resetFilters() {
-  Object.assign(filters, { keyword: '', brand: '', purchaseRequisitionStatus: [], purchaseOrderStatus: [], buyerName: [], delayedOnly: false, unreceivedOnly: false, unissuedOnly: false })
+  Object.assign(filters, { keyword: '', brand: '', purchaseRequisitionStatus: [], purchaseOrderStatus: [], buyerName: [], impactedOnly: false, delayedOnly: false, unreceivedOnly: false, unissuedOnly: false })
 }
 function filterValues(row: ProjectProcurementTrackingItem, key: FilterKey) {
   const value = row[key]?.trim() ?? ''
@@ -198,6 +199,7 @@ const filteredItems = computed(() => {
     (!keyword || [row.materialCode, row.materialName, row.specification].some(value => value?.toLocaleLowerCase().includes(keyword)))
     && (!filters.brand || filterValues(row, 'brand').some(value => value.toLocaleLowerCase().includes(filters.brand.trim().toLocaleLowerCase())))
     && multiFilterFields.every(({ key }) => !filters[key].length || filterValues(row, key).some(value => filters[key].includes(value)))
+    && (!filters.impactedOnly || !!row.impactStage)
     && (!filters.delayedOnly || hasDeliveryDelay(row))
     && (!filters.unreceivedOnly || !movementFor(row, 'receiptQuantity'))
     && (!filters.unissuedOnly || !movementFor(row, 'issueQuantity')))
@@ -211,7 +213,10 @@ const deliverySort = ref<{ prop: DeliveryColumn; order: 'ascending' | 'descendin
 const sortedItems = computed(() => {
   const items = filteredItems.value
   const sort = deliverySort.value
-  if (!sort) return items
+  if (!sort) return [...items].sort((a, b) => {
+    const rank = (value: ProjectProcurementTrackingItem['impactStage']) => value === 'Assembly' ? 0 : value === 'Commissioning' ? 1 : 2
+    return rank(a.impactStage) - rank(b.impactStage) || a.sequence - b.sequence
+  })
   return [...items].sort((a, b) => {
     const left = deliveryDay(a[sort.prop])
     const right = deliveryDay(b[sort.prop])
@@ -250,6 +255,7 @@ function restoreColumns() {
       if (!visibleKeys.value.includes('inventoryQuantity')) visibleKeys.value.push('inventoryQuantity')
     }
     for (const [key, after] of [
+      ['impactStage', 'materialName'],
       ['purchaseRequisitionCreatedAt', 'purchaseRequisitionStatus'],
       ['buyerName', 'purchaseOrderStatus'],
       ['receiptDate', 'latestDeliveryDate'],
@@ -409,6 +415,7 @@ function hasDeliveryDelay(row: ProjectProcurementTrackingItem) {
 
 function cellText(row: ProjectProcurementTrackingItem, key: ColumnKey) {
   if (isMovementColumn(key)) return movementText(row, key)
+  if (key === 'impactStage') return row.impactStage === 'Assembly' ? '装配' : row.impactStage === 'Commissioning' ? '调试' : '—'
   if (row.isWarehouseMovementRow && ['purchaseQuantity', 'arrivedQuantity', 'inventoryQuantity'].includes(key)) return '—'
   if (key === 'inventoryQuantity') {
     const rows = inventory.value[row.materialCode.trim()]?.rows
@@ -522,6 +529,7 @@ onBeforeUnmount(() => {
       <label class="procurement-tracking__delay-filter"><input v-model="filters.delayedOnly" type="checkbox" aria-label="交期不符">交期不符</label>
       <label class="procurement-tracking__delay-filter"><input v-model="filters.unreceivedOnly" type="checkbox" aria-label="未入库">未入库</label>
       <label class="procurement-tracking__delay-filter"><input v-model="filters.unissuedOnly" type="checkbox" aria-label="未出库">未出库</label>
+      <label class="procurement-tracking__delay-filter"><input v-model="filters.impactedOnly" type="checkbox" aria-label="只看有影响物料">有影响</label>
       <el-button @click="resetFilters">重置筛选</el-button>
       </div>
       <div class="procurement-tracking__actions">
@@ -548,7 +556,7 @@ onBeforeUnmount(() => {
       <template #empty>
         <div class="procurement-tracking__empty-tip">
           {{ result && !result.hasPublishedBom
-            ? '当前项目尚无已发布的标准件或电气件BOM，发布后将自动进入采购跟踪。'
+            ? '当前项目尚无已发布的标准件、非标件或电气件BOM，发布后将自动进入采购跟踪。'
             : result?.items.length ? '没有符合筛选条件的记录' : '暂无采购跟踪数据' }}
         </div>
       </template>
@@ -567,6 +575,7 @@ onBeforeUnmount(() => {
         <template #default="{ row }">
           <span v-if="isMovementColumn(column.key)" class="procurement-tracking__movement" :class="movementTone(row, column.key)" :title="movementHint(row, column.key)">{{ movementText(row, column.key) }}</span>
           <el-tag v-else-if="(column.key === 'purchaseRequisitionStatus' || column.key === 'purchaseOrderStatus') && !row.isWarehouseMovementRow" :type="statusType(row[column.key])" size="small">{{ row[column.key] }}</el-tag>
+          <el-tag v-else-if="column.key === 'impactStage' && row.impactStage" :type="row.impactStage === 'Assembly' ? 'warning' : 'info'" size="small">{{ cellText(row, column.key) }}</el-tag>
           <span v-else-if="column.key === 'inventoryQuantity'" :title="inventoryHint(row)">{{ cellText(row, column.key) }}</span>
           <span v-else :title="cellText(row, column.key)">{{ cellText(row, column.key) }}</span>
         </template>

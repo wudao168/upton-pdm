@@ -283,7 +283,8 @@ public sealed record BomItemInput(
     int? EngineeringKitVersionNumber = null,
     Guid? EngineeringKitComponentId = null,
     bool EngineeringKitComponentOptional = false,
-    bool IsWearPart = false);
+    bool IsWearPart = false,
+    string? ImpactStage = null);
 
 public sealed record BomGenerationResult(
     IReadOnlyList<BomItem> StandardItems,
@@ -316,7 +317,9 @@ public sealed record BatchUpdateBomItemsCommand(
     string? Revision = null,
     bool? Complete = null,
     string? ParentDrawingNumber = null,
-    string? HeatTreatment = null);
+    string? HeatTreatment = null,
+    string? ImpactStage = null,
+    bool? IsWearPart = null);
 
 public sealed record BatchDeleteBomItemsCommand(IReadOnlyList<Guid> ItemIds, string Reason);
 

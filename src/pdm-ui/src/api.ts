@@ -7,6 +7,7 @@ import type { ProjectCopyOptionsInput, ProjectCopyPreview, ProjectCopyResult } f
 import type { BomSourceReclassificationPreview } from './types'
 import type { MaterialRelationCompleteness, MaterialRelationTemplate, SaveMaterialRelationTemplateInput } from './types'
 import type { ConfirmValidationPlanExecutionInput, ProjectValidationPlan, SaveProjectValidationPlanInput, SaveValidationCheckCategoryInput, SaveValidationCheckItemInput, ValidationCheckCatalog, ValidationCheckCategory, ValidationCheckItem, ValidationPlanAttachment, ValidationPlanApprovalTaskSummary, ValidationPlanExecutionRecord, ValidationPlanRecognitionDraft } from './types'
+import { sha256Hex } from './fileHash'
 
 const localDesktopOrigin = window.location.hostname === 'appassets.pdm.local'
 const needsLocalApiFallback = localDesktopOrigin || import.meta.env.MODE === 'test'
@@ -75,8 +76,7 @@ export async function uploadProgramTemplateFile(
   onProgress?: (percent: number) => void,
 ): Promise<ProgramTemplateRevision> {
   onProgress?.(0)
-  const digest = await crypto.subtle.digest('SHA-256', await file.arrayBuffer())
-  const sha256 = [...new Uint8Array(digest)].map(value => value.toString(16).padStart(2, '0')).join('').toUpperCase()
+  const sha256 = await sha256Hex(await file.arrayBuffer())
   const session = await requestJson<{ id: string; chunkSize: number }>(`/api/program-templates/revisions/${revisionId}/uploads`, {
     method: 'POST', body: JSON.stringify({ kind, fileName: file.name, totalLength: file.size, sha256 }),
   }, token)
@@ -270,6 +270,7 @@ interface ApiBomItem {
   heatTreatment?: string | null
   weight?: string | null
   isWearPart?: boolean
+  impactStage?: string | null
   revision: string
   isComplete: boolean
   sourceDocumentId?: string | null
@@ -454,8 +455,7 @@ export function listMyValidationPlanApprovalTasks(token: string): Promise<Valida
 }
 
 export async function uploadValidationPlanAttachment(planId: string, kind: 'PlanDocument' | 'Evidence', file: File, token: string): Promise<ValidationPlanAttachment> {
-  const digest = await crypto.subtle.digest('SHA-256', await file.arrayBuffer())
-  const sha256 = Array.from(new Uint8Array(digest), value => value.toString(16).padStart(2, '0')).join('').toUpperCase()
+  const sha256 = await sha256Hex(await file.arrayBuffer())
   const session = await requestJson<{ id: string; chunkSize: number }>(`/api/validation-plans/${planId}/attachment-uploads`, {
     method: 'POST', body: JSON.stringify({ kind, fileName: file.name, totalLength: file.size, sha256 }),
   }, token)
@@ -623,8 +623,7 @@ export function listMaterialAttachments(materialId: string, token: string, kind?
 
 export async function uploadMaterialAttachment(materialId: string, kind: MaterialAttachmentKind, file: File, token: string, onProgress?: (percent: number) => void): Promise<MaterialAttachment> {
   onProgress?.(0)
-  const digest = await crypto.subtle.digest('SHA-256', await file.arrayBuffer())
-  const sha256 = [...new Uint8Array(digest)].map(value => value.toString(16).padStart(2, '0')).join('').toUpperCase()
+  const sha256 = await sha256Hex(await file.arrayBuffer())
   const session = await requestJson<{ id: string; chunkSize: number }>(`/api/materials/${materialId}/attachments/uploads`, {
     method: 'POST', body: JSON.stringify({ kind, fileName: file.name, totalLength: file.size, sha256 }),
   }, token)
@@ -1477,8 +1476,7 @@ export function emergencyDecideApproval(taskId: string, decision: 'Approved' | '
 export async function uploadReleaseFile(projectId: string, packageNumber: string, file: File, token: string, onProgress?: (percent: number) => void): Promise<void> {
   const extension = file.name.split('.').pop()?.toLocaleLowerCase()
   if (extension !== 'pdf') throw new PdmApiError('生产发包只允许上传PDF。', 400)
-  const digest = await crypto.subtle.digest('SHA-256', await file.arrayBuffer())
-  const sha256 = [...new Uint8Array(digest)].map(value => value.toString(16).padStart(2, '0')).join('').toUpperCase()
+  const sha256 = await sha256Hex(await file.arrayBuffer())
   const session = await requestJson<{ id: string; chunkSize: number }>(`/api/uploads/sessions`, { method: 'POST', body: JSON.stringify({ projectId, fileName: file.name, totalLength: file.size, sha256 }) }, token)
   const chunks = Math.ceil(file.size / session.chunkSize)
   for (let index = 0; index < chunks; index++) {
@@ -1680,8 +1678,7 @@ export function restoreProjectContent(projectId: string, snapshotId: string, con
 
 export async function uploadProjectFile(projectId: string, folderId: string, file: File, token: string, comment = '', onProgress?: (percent: number) => void, signal?: AbortSignal): Promise<ProjectFile> {
   onProgress?.(0)
-  const digest = await crypto.subtle.digest('SHA-256', await file.arrayBuffer())
-  const sha256 = [...new Uint8Array(digest)].map(value => value.toString(16).padStart(2, '0')).join('').toUpperCase()
+  const sha256 = await sha256Hex(await file.arrayBuffer())
   const session = await requestJson<{ id: string; chunkSize: number }>(`/api/projects/${projectId}/folders/${folderId}/file-uploads`, {
     method: 'POST', body: JSON.stringify({ fileName: file.name, totalLength: file.size, sha256 }), signal,
   }, token)
@@ -2111,6 +2108,7 @@ function mapBomItem(item: ApiBomItem): BomItem {
     heatTreatment: item.heatTreatment ?? undefined,
     weight: item.weight ?? undefined,
     isWearPart: item.isWearPart ?? false,
+    impactStage: item.impactStage === 'Assembly' || item.impactStage === 'Commissioning' ? item.impactStage : undefined,
     revision: item.revision,
     complete: item.isComplete,
     sourceDocumentId: item.sourceDocumentId ?? undefined,

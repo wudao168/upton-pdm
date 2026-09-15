@@ -374,6 +374,17 @@ public sealed class ProcurementTrackingAggregationTests
         Assert.Equal(12, rows.Sum(row => row.RequestedQuantity));
     }
 
+    [Fact]
+    public void ImpactStage_PrefersAssemblyThenCommissioningWhenMaterialRowsMerge()
+    {
+        var rows = ProcurementTrackingAggregation.Group([
+            Item(1) with { ImpactStage = ProjectPlanStage.Commissioning },
+            Item(2) with { ImpactStage = ProjectPlanStage.Assembly }
+        ], []);
+
+        Assert.Equal(ProjectPlanStage.Assembly, Assert.Single(rows).ImpactStage);
+    }
+
     private static ProjectProcurementTrackingItem Item(decimal quantity) => new(1, "P1", "P1-1", "A", "平垫", "M4", null, "国优",
         quantity, "标准件", "R1", [], "未请购", null, [], "未采购", 0, 0, null, null, null, 0, 0, []);
     private static U9ProcurementSnapshotRow Pr(string id, string number, decimal quantity) => new(Guid.Empty, "001", "PR", id, null,

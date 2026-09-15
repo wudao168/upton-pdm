@@ -81,7 +81,10 @@ public sealed class U9ProcurementService(
                 Latest(activeOrders.Select(row => row.LatestDeliveryDate ?? row.DeliveryDate)),
                 activeRequisitions.Sum(row => row.RequestedQuantity),
                 activeRequisitions.Sum(row => row.ApprovedQuantity),
-                details));
+                details)
+            {
+                ImpactStage = line.Item.ImpactStage
+            });
         }
 
         return new ProjectProcurementTrackingResult(
@@ -212,9 +215,11 @@ public sealed class U9ProcurementService(
             .ToArray();
         var lines = new List<PublishedBomLine>();
         AddCategory(lines, packages, "标准件", package => package.Scope is ReleaseScope.StandardFormal or ReleaseScope.StandardSupplement or ReleaseScope.LegacyCombined,
-            package => package.StandardBomSnapshot, includeLongLead: true);
+            package => package.StandardBomSnapshot, ReleaseScope.StandardLongLead);
+        AddCategory(lines, packages, "非标件", package => package.Scope is ReleaseScope.NonStandardWithDrawing or ReleaseScope.NonStandardSupplement or ReleaseScope.LegacyCombined,
+            package => package.NonStandardBomSnapshot, ReleaseScope.NonStandardLongLead);
         AddCategory(lines, packages, "电气件", package => package.Scope is ReleaseScope.ElectricalFormal or ReleaseScope.ElectricalSupplement or ReleaseScope.LegacyCombined,
-            package => package.ElectricalBomSnapshot, includeLongLead: false);
+            package => package.ElectricalBomSnapshot, null);
         return lines
             .GroupBy(line => (line.Item.Id, line.BomKind))
             .Select(group => new PublishedBomLine(
@@ -231,7 +236,7 @@ public sealed class U9ProcurementService(
         string label,
         Func<ReleasePackage, bool> isBaseline,
         Func<ReleasePackage, IReadOnlyList<BomItem>> items,
-        bool includeLongLead)
+        ReleaseScope? longLeadScope)
     {
         var baseline = packages.LastOrDefault(package => isBaseline(package) && items(package).Count > 0);
         if (baseline is not null)
@@ -239,11 +244,11 @@ public sealed class U9ProcurementService(
             foreach (var item in EffectiveItems(items(baseline)))
                 target.Add(new(item, label, baseline.Number, item.Quantity * Math.Max(1, baseline.WholeSetMultiplier)));
         }
-        if (!includeLongLead) return;
+        if (!longLeadScope.HasValue) return;
         var baselineAt = baseline?.PublishedAt;
-        foreach (var package in packages.Where(package => package.Scope == ReleaseScope.StandardLongLead
+        foreach (var package in packages.Where(package => package.Scope == longLeadScope.Value
                      && (!baselineAt.HasValue || package.PublishedAt > baselineAt)))
-            foreach (var item in EffectiveItems(package.StandardBomSnapshot))
+            foreach (var item in EffectiveItems(items(package)))
                 target.Add(new(item, label, package.Number, item.Quantity * Math.Max(1, package.WholeSetMultiplier)));
     }
 

@@ -59,6 +59,15 @@ describe('ReleaseCenter', () => {
     wrapper.unmount()
   })
 
+  it('does not treat wear-part or impact annotations as release changes', () => {
+    const previous = [{ ...frozenItem('auxiliary'), isWearPart: false, impactStage: 'Assembly' as const }]
+    const annotated = [{ ...previous[0]!, isWearPart: true, impactStage: 'Commissioning' as const }]
+    const wrapper = mount(ReleaseCenter, { props: { ...frozenProps, releasePackage: frozenPackage(annotated), previousVersionItems: previous } })
+
+    expect(wrapper.get('.pdm-empty-info').text()).toContain('本次没有增补或变更内容')
+    expect(wrapper.find('.release-change-tag').exists()).toBe(false)
+  })
+
   it('paginates changes independently and resets pagination when switching the full BOM', async () => {
     const previous = [frozenItem('old')]
     const additions = Array.from({ length: 51 }, (_, index) => frozenItem(`new-${index}`))

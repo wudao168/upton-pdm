@@ -1,5 +1,7 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Text;
 
 namespace Upton.Pdm.SolidWorks;
@@ -12,8 +14,109 @@ internal enum BatchRenameTextOperation
     Remove
 }
 
+internal enum BatchRenameHierarchyKind
+{
+    Assembly,
+    Part
+}
+
+internal sealed class BatchRenameHierarchyItem
+{
+    internal BatchRenameHierarchyItem(string key, string parentKey, BatchRenameHierarchyKind kind, bool isRoot = false)
+    {
+        Key = key ?? string.Empty;
+        ParentKey = parentKey ?? string.Empty;
+        Kind = kind;
+        IsRoot = isRoot;
+    }
+
+    internal string Key { get; }
+    internal string ParentKey { get; }
+    internal BatchRenameHierarchyKind Kind { get; }
+    internal bool IsRoot { get; }
+}
+
 internal static class BatchRenameRule
 {
+    internal static IReadOnlyDictionary<string, string> BuildHierarchyNumbers(IEnumerable<BatchRenameHierarchyItem> source)
+    {
+        var items = (source ?? Array.Empty<BatchRenameHierarchyItem>())
+            .Where(item => item != null && !string.IsNullOrWhiteSpace(item.Key))
+            .GroupBy(item => item.Key, StringComparer.OrdinalIgnoreCase)
+            .Select(group => group.First())
+            .ToArray();
+        var result = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        var assemblyCounters = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        var partCounters = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        var root = items.FirstOrDefault(item => item.IsRoot && item.Kind == BatchRenameHierarchyKind.Assembly);
+        if (root == null)
+        {
+            throw new InvalidOperationException("当前结构缺少根装配体，不能生成层级编号。");
+        }
+        result[root.Key] = "00";
+
+        foreach (var key in BuildHierarchyOrder(items).Skip(1))
+        {
+            var item = items.First(candidate => string.Equals(candidate.Key, key, StringComparison.OrdinalIgnoreCase));
+            if (string.IsNullOrWhiteSpace(item.ParentKey) || !result.TryGetValue(item.ParentKey, out var parentNumber))
+            {
+                throw new InvalidOperationException("图档层级关系不完整，不能生成层级编号。");
+            }
+
+            if (item.Kind == BatchRenameHierarchyKind.Assembly)
+            {
+                var index = NextCounter(assemblyCounters, item.ParentKey);
+                result[item.Key] = string.Equals(item.ParentKey, root.Key, StringComparison.OrdinalIgnoreCase)
+                    ? index.ToString("00")
+                    : string.Concat(parentNumber, ".", index.ToString("00"));
+            }
+            else
+            {
+                var index = NextCounter(partCounters, item.ParentKey);
+                result[item.Key] = string.Concat(parentNumber, "-", index.ToString("00"));
+            }
+        }
+        return result;
+    }
+
+    internal static IReadOnlyList<string> BuildHierarchyOrder(IEnumerable<BatchRenameHierarchyItem> source)
+    {
+        var items = (source ?? Array.Empty<BatchRenameHierarchyItem>())
+            .Where(item => item != null && !string.IsNullOrWhiteSpace(item.Key))
+            .GroupBy(item => item.Key, StringComparer.OrdinalIgnoreCase)
+            .Select(group => group.First())
+            .ToArray();
+        var root = items.FirstOrDefault(item => item.IsRoot && item.Kind == BatchRenameHierarchyKind.Assembly);
+        if (root == null)
+        {
+            throw new InvalidOperationException("当前结构缺少根装配体，不能生成层级编号。");
+        }
+
+        var result = new List<string> { root.Key };
+        var visited = new HashSet<string>(result, StringComparer.OrdinalIgnoreCase);
+        AppendHierarchyChildren(root.Key, items, result, visited);
+        if (visited.Count != items.Length)
+        {
+            throw new InvalidOperationException("图档层级关系不完整，不能生成层级编号。");
+        }
+        return result;
+    }
+
+    internal static string HierarchyFileBaseName(string serialNumber, string hierarchyNumber)
+    {
+        var serial = (serialNumber ?? string.Empty).Trim();
+        var number = (hierarchyNumber ?? string.Empty).Trim();
+        if (string.IsNullOrWhiteSpace(serial))
+        {
+            throw new InvalidOperationException("项目序列号不能为空。");
+        }
+        if (string.IsNullOrWhiteSpace(number))
+        {
+            throw new InvalidOperationException("层级编号不能为空。");
+        }
+        return NormalizeFileBaseName(string.Concat(serial, ".", number), string.Empty);
+    }
+
     internal static string Apply(
         string currentValue,
         BatchRenameTextOperation operation,
@@ -77,6 +180,35 @@ internal static class BatchRenameRule
             throw new InvalidOperationException("查找文字不能为空。");
         }
         return search;
+    }
+
+    private static int NextCounter(IDictionary<string, int> counters, string key)
+    {
+        counters.TryGetValue(key ?? string.Empty, out var current);
+        current++;
+        counters[key ?? string.Empty] = current;
+        return current;
+    }
+
+    private static void AppendHierarchyChildren(
+        string parentKey,
+        IReadOnlyList<BatchRenameHierarchyItem> items,
+        ICollection<string> result,
+        ISet<string> visited)
+    {
+        var children = items
+            .Where(item => !item.IsRoot && string.Equals(item.ParentKey, parentKey, StringComparison.OrdinalIgnoreCase))
+            .ToArray();
+        foreach (var part in children.Where(item => item.Kind == BatchRenameHierarchyKind.Part))
+        {
+            if (visited.Add(part.Key)) result.Add(part.Key);
+        }
+        foreach (var assembly in children.Where(item => item.Kind == BatchRenameHierarchyKind.Assembly))
+        {
+            if (!visited.Add(assembly.Key)) continue;
+            result.Add(assembly.Key);
+            AppendHierarchyChildren(assembly.Key, items, result, visited);
+        }
     }
 
     private static string ReplaceLiteral(

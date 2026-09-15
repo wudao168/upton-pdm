@@ -286,7 +286,8 @@ public sealed record BatchUpdateBomItemsRequest(
     decimal? Quantity = null,
     string? Revision = null,
     bool? Complete = null,
-    string? HeatTreatment = null);
+    string? HeatTreatment = null,
+    string? ImpactStage = null);
 
 public sealed record BatchDeleteBomItemsRequest(IReadOnlyList<Guid> ItemIds, string Reason);
 

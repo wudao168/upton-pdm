@@ -420,7 +420,7 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
         lock (gate)
         {
             if (organizationUnits.Values.Any(item => item.Id != command.Id && item.OrganizationId == command.OrganizationId && string.Equals(item.Code, command.Code, StringComparison.OrdinalIgnoreCase)))
-                throw new PdmConflictException("同一公司内的组织编码已经存在。");
+                throw new PdmConflictException("同一公司内的完整组织编码已经存在。");
             if (command.Id is not null && !organizationUnits.ContainsKey(command.Id.Value)) throw new PdmNotFoundException("组织单元不存在。");
             var saved = new OrganizationUnit(command.Id ?? Guid.NewGuid(), command.OrganizationId, command.ParentUnitId, command.Code, command.Name, command.Kind, command.IsActive, command.SortOrder, command.CanManufacture);
             organizationUnits[saved.Id] = saved;

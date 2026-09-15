@@ -18,6 +18,8 @@ internal enum BatchOperationKind
 internal sealed class BatchOperationItem
 {
     private readonly List<CadTreeNode> ancestors = new List<CadTreeNode>();
+    private readonly List<CadTreeNode> primaryAncestors = new List<CadTreeNode>();
+    private bool primaryAncestorsCaptured;
 
     public BatchOperationItem(CadTreeNode node, int depth)
     {
@@ -31,9 +33,17 @@ internal sealed class BatchOperationItem
 
     public IReadOnlyList<CadTreeNode> Ancestors => ancestors;
 
+    public IReadOnlyList<CadTreeNode> PrimaryAncestors => primaryAncestors;
+
     public void AddAncestors(IEnumerable<CadTreeNode> values)
     {
-        foreach (var value in values ?? Array.Empty<CadTreeNode>())
+        var candidates = (values ?? Array.Empty<CadTreeNode>()).Where(value => value != null).ToArray();
+        if (!primaryAncestorsCaptured)
+        {
+            primaryAncestorsCaptured = true;
+            primaryAncestors.AddRange(candidates);
+        }
+        foreach (var value in candidates)
         {
             if (value == null || ancestors.Any(existing => SameDocumentPath(existing, value)))
             {

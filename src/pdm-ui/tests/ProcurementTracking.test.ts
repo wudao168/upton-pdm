@@ -176,7 +176,7 @@ describe('ProcurementTracking', () => {
     await wrapper.get('.procurement-tracking__delay-filter input').setValue(true)
     const rows = wrapper.findAll('.el-table__body tbody tr')
     expect(rows.map(row => row.find('td').text())).toEqual(['2', '3'])
-    expect(rows[0].findAll('td')[8].text()).toBe('—')
+    expect(rows[0].findAll('td')[9].text()).toBe('—')
     expect(wrapper.get('[aria-label="备料明细分页"]').text()).toContain('共 2 条（全部 5 条）')
     wrapper.unmount()
   })
@@ -205,6 +205,23 @@ describe('ProcurementTracking', () => {
     await wrapper.findAll('button').find(button => button.text() === '重置筛选')!.trigger('click')
     expect(sequences()).toEqual(['1', '2', '3', '4'])
     expect((wrapper.get('[aria-label="未出库"]').element as HTMLInputElement).checked).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('默认按装配、调试、未标记排序并可只看有影响物料', async () => {
+    const result = await api.getProjectProcurementTracking()
+    const first = result.items[0]
+    api.getProjectProcurementTracking.mockResolvedValue({ ...result, items: [
+      { ...first, sequence: 1, materialCode: 'NONE', impactStage: undefined },
+      { ...first, sequence: 2, materialCode: 'DEBUG', impactStage: 'Commissioning' },
+      { ...first, sequence: 3, materialCode: 'ASSEMBLY', impactStage: 'Assembly' },
+    ] })
+    const wrapper = mount(ProcurementTracking, { props: { projectId: 'project-1', token: 'token', username: 'engineer' }, global: { plugins: [ElementPlus] } })
+    await flushPromises()
+    const materialCodes = () => wrapper.findAll('.el-table__body tbody tr').map(row => row.findAll('td')[3].text())
+    expect(materialCodes()).toEqual(['ASSEMBLY', 'DEBUG', 'NONE'])
+    await wrapper.get('[aria-label="只看有影响物料"]').setValue(true)
+    expect(materialCodes()).toEqual(['ASSEMBLY', 'DEBUG'])
     wrapper.unmount()
   })
 
@@ -281,7 +298,7 @@ describe('ProcurementTracking', () => {
 
     const headers = wrapper.find('.el-table__header-wrapper').findAll('th .cell').map(item => item.text().trim()).filter(Boolean)
     expect(headers).toEqual([
-      '序号', '项目号', '子项目号', '物料编码', '物料名称', '型号', '备注', '品牌', '数量', '库存',
+      '序号', '项目号', '子项目号', '物料编码', '物料名称', '影响', '型号', '备注', '品牌', '数量', '库存',
       '请购状态', '请购日期', '需求日期', 'PO编号', '采购状态', '采购员', '购买数',
       '到货数', '采购备注', '预计交期', '最新交期',
       '入库日期', '入库数', '出库日期', '出库数',
@@ -296,7 +313,7 @@ describe('ProcurementTracking', () => {
     expect(wrapper.findAll('.procurement-tracking__actions button').map(button => button.text())).toEqual(['列设置', '立即刷新', '库存设置', '导出 Excel'])
     expect(wrapper.get('.procurement-tracking__heading').element.lastElementChild?.classList.contains('procurement-tracking__updated')).toBe(true)
     expect(wrapper.get('[aria-label="采购跟踪筛选"]').element.nextElementSibling).toBe(wrapper.get('.procurement-tracking__actions').element)
-    expect(wrapper.findAll('.procurement-tracking__delay-filter').map(label => label.text())).toEqual(['交期不符', '未入库', '未出库'])
+    expect(wrapper.findAll('.procurement-tracking__delay-filter').map(label => label.text())).toEqual(['交期不符', '未入库', '未出库', '有影响'])
     expect(wrapper.get('[aria-label="筛选品牌"]').attributes('list')).toBe('procurement-brands-project-1')
     expect(wrapper.get('datalist option').attributes('value')).toBe('UPTON')
     expect(wrapper.find('.procurement-tracking__heading h2').exists()).toBe(false)
@@ -340,9 +357,9 @@ describe('ProcurementTracking', () => {
     expect(downloadProcurementWorkbook).toHaveBeenCalledTimes(1)
     const [filename, headers, rows] = vi.mocked(downloadProcurementWorkbook).mock.calls[0]
     expect(filename).toMatch(/^P701911-1_物料状态清单_\d{8}_01\.xlsx$/)
-    expect(headers).toEqual(['物料编码', '库存', '数量', '最新交期', '入库日期', '入库数', '出库日期', '出库数', '请购日期', '采购员'])
+    expect(headers).toEqual(['物料编码', '库存', '数量', '最新交期', '入库日期', '入库数', '出库日期', '出库数', '请购日期', '采购员', '影响'])
     expect(rows).toHaveLength(61)
-    expect(rows[0]).toEqual(['01020000060', 0, 4, '2026/1/1', '—', '—', '—', '—', '2026/1/12', '孟丹'])
+    expect(rows[0]).toEqual(['01020000060', 0, 4, '2026/1/1', '—', '—', '—', '—', '2026/1/12', '孟丹', '—'])
     wrapper.unmount()
   })
 
@@ -388,10 +405,10 @@ describe('ProcurementTracking', () => {
     await flushPromises()
     const rows = wrapper.findAll('.el-table__body tbody tr')
     expect(rows).toHaveLength(2)
-    expect(rows[0].findAll('td')[8].text()).toBe('4')
-    expect(rows[1].findAll('td')[8].text()).toBe('—')
-    expect(rows[1].findAll('td')[13].text()).toBe('PO2')
-    expect(rows[1].findAll('td')[19].classes()).not.toContain('is-delivery-delay')
+    expect(rows[0].findAll('td')[9].text()).toBe('4')
+    expect(rows[1].findAll('td')[9].text()).toBe('—')
+    expect(rows[1].findAll('td')[14].text()).toBe('PO2')
+    expect(rows[1].findAll('td')[20].classes()).not.toContain('is-delivery-delay')
     wrapper.unmount()
   })
 
@@ -407,7 +424,8 @@ describe('ProcurementTracking', () => {
       props: { projectId: 'project-1', token: 'token', username: 'engineer' }, global: { plugins: [ElementPlus] },
     })
     await flushPromises()
-    const cells = wrapper.findAll('.el-table__body tbody tr:first-child td .cell').slice(1, 6)
+    const allCells = wrapper.findAll('.el-table__body tbody tr:first-child td .cell')
+    const cells = [allCells[1], allCells[2], allCells[3], allCells[4], allCells[6]]
     expect(cells.map(cell => cell.text())).toEqual([
       result.items[0].projectCode, result.items[0].subprojectCode, result.items[0].materialCode,
       result.items[0].materialName, result.items[0].specification,
@@ -417,7 +435,7 @@ describe('ProcurementTracking', () => {
     const columns = wrapper.findAll('.el-table__body colgroup col')
     expect(columns.slice(1, 4).map(column => Number(column.attributes('width')))).toEqual([70, 70, 85])
     expect(Number(columns[4].attributes('width'))).toBe(120)
-    expect(Number(columns[5].attributes('width'))).toBe(104)
+    expect(Number(columns[6].attributes('width'))).toBe(104)
     wrapper.unmount()
   })
 
@@ -496,7 +514,7 @@ describe('ProcurementTracking', () => {
     expect(wrapper.findAll('.procurement-tracking__empty-tip')).toHaveLength(1)
     expect(wrapper.find('.el-table__empty-block').text()).toBe(hasPublishedBom
       ? '暂无采购跟踪数据'
-      : '当前项目尚无已发布的标准件或电气件BOM，发布后将自动进入采购跟踪。')
+      : '当前项目尚无已发布的标准件、非标件或电气件BOM，发布后将自动进入采购跟踪。')
     wrapper.unmount()
   })
 
@@ -519,7 +537,7 @@ describe('ProcurementTracking', () => {
     })
     await flushPromises()
     const cells = wrapper.findAll('.el-table__body tbody tr:first-child td')
-    expect(cells[19].classes().includes('is-delivery-delay')).toBe(delayed)
+    expect(cells[20].classes().includes('is-delivery-delay')).toBe(delayed)
     expect(wrapper.findAll('td.is-delivery-delay')).toHaveLength(delayed ? 1 : 0)
     wrapper.unmount()
   })
@@ -543,8 +561,8 @@ describe('ProcurementTracking', () => {
     const wrapper = mount(ProcurementTracking, { props: { projectId: 'project-1', token: 'token', username: 'engineer' }, global: { plugins: [ElementPlus] } })
     await flushPromises()
     const cells = wrapper.findAll('.el-table__body tbody tr:first-child td')
-    expect(cells[19].classes().includes('is-delivery-delay')).toBe(expectedRed)
-    expect(cells[20].classes().includes('is-delivery-delay')).toBe(latestRed)
+    expect(cells[20].classes().includes('is-delivery-delay')).toBe(expectedRed)
+    expect(cells[21].classes().includes('is-delivery-delay')).toBe(latestRed)
     expect(wrapper.findAll('th').some(cell => cell.text() === '需求日期')).toBe(true)
     wrapper.unmount()
   })
@@ -602,10 +620,10 @@ describe('ProcurementTracking', () => {
     }))
     const wrapper = mount(ProcurementTracking, { props: { projectId: 'project-1', token: 'token', username: 'engineer' }, global: { plugins: [ElementPlus] } })
     await flushPromises()
-    expect(wrapper.findAll('.el-table__body tbody tr').map(row => row.findAll('td')[9].text())).toEqual(['6.5', '6.5'])
+    expect(wrapper.findAll('.el-table__body tbody tr').map(row => row.findAll('td')[10].text())).toEqual(['6.5', '6.5'])
     expect(api.listMaterialInventory).toHaveBeenCalledTimes(2)
     expect(api.listMaterialInventory).toHaveBeenLastCalledWith({ materialCode: '01020000089', positiveStockOnly: false, page: 2, pageSize: 200 }, 'token')
-    expect(wrapper.findAll('.el-table__body tbody tr')[0].findAll('td')[9].get('span').attributes('title')).toContain('不可重复累加')
+    expect(wrapper.findAll('.el-table__body tbody tr')[0].findAll('td')[10].get('span').attributes('title')).toContain('不可重复累加')
     wrapper.unmount()
   })
 
@@ -615,7 +633,7 @@ describe('ProcurementTracking', () => {
     if (state === 'partial') api.listMaterialInventory.mockResolvedValue({ items: [], total: 1 })
     const wrapper = mount(ProcurementTracking, { props: { projectId: 'project-1', token: 'token', username: 'engineer' }, global: { plugins: [ElementPlus] } })
     await flushPromises()
-    expect(wrapper.findAll('.el-table__body tbody tr')[0].findAll('td')[9].text()).toBe(state === 'zero' ? '0' : '—')
+    expect(wrapper.findAll('.el-table__body tbody tr')[0].findAll('td')[10].text()).toBe(state === 'zero' ? '0' : '—')
     wrapper.unmount()
   })
 
@@ -626,9 +644,9 @@ describe('ProcurementTracking', () => {
     let wrapper = mount(ProcurementTracking, options)
     await flushPromises()
     const headers = () => wrapper.findAll('th .cell').map(cell => cell.text().trim())
-    expect(headers()).toEqual(['物料编码', '数量', '库存', '品牌', '请购日期', '采购员', '入库日期', '入库数', '出库日期', '出库数'])
+    expect(headers()).toEqual(['物料编码', '数量', '库存', '品牌', '影响', '请购日期', '采购员', '入库日期', '入库数', '出库日期', '出库数'])
     wrapper.unmount()
-    window.localStorage.setItem(key, JSON.stringify({ order: ['materialCode', 'quantity', 'inventoryQuantity', 'brand', 'purchaseRequisitionCreatedAt', 'buyerName', 'receiptDate', 'receiptQuantity', 'issueDate', 'issueQuantity'], visible: ['materialCode', 'quantity', 'brand'] }))
+    window.localStorage.setItem(key, JSON.stringify({ order: ['materialCode', 'quantity', 'inventoryQuantity', 'brand', 'impactStage', 'purchaseRequisitionCreatedAt', 'buyerName', 'receiptDate', 'receiptQuantity', 'issueDate', 'issueQuantity'], visible: ['materialCode', 'quantity', 'brand'] }))
     wrapper = mount(ProcurementTracking, options)
     await flushPromises()
     expect(headers()).toEqual(['物料编码', '数量', '品牌'])
@@ -644,7 +662,7 @@ describe('ProcurementTracking', () => {
     await flushPromises()
     finish({ items: [{ materialCode: '01020000089', stockQuantity: 999 }], total: 1, lastSuccessfulRefreshAt: '2026-09-08T01:00:00Z' })
     await flushPromises()
-    expect(wrapper.findAll('.el-table__body tbody tr')[0].findAll('td')[9].text()).toBe('0')
+    expect(wrapper.findAll('.el-table__body tbody tr')[0].findAll('td')[10].text()).toBe('0')
     wrapper.unmount()
   })
 
@@ -655,7 +673,7 @@ describe('ProcurementTracking', () => {
     ], total: 2, warehouseNames: ['2号项目仓', '零成本呆滞仓', '2号常备仓', '项目退料仓', '昆山应急仓', '机加工仓库'], lastSuccessfulRefreshAt: '2026-09-08T01:00:00Z' })
     const options = { props: { projectId: 'project-1', token: 'token', username: 'engineer' }, global: { plugins: [ElementPlus], stubs: { teleport: true } } }
     let wrapper = mount(ProcurementTracking, options)
-    const stock = () => wrapper.findAll('.el-table__body tbody tr')[0].findAll('td')[9].text()
+    const stock = () => wrapper.findAll('.el-table__body tbody tr')[0].findAll('td')[10].text()
     const open = async () => { await wrapper.findAll('button').find(b => b.text() === '库存设置')!.trigger('click'); await flushPromises() }
     const dialog = () => wrapper.findAll('.el-dialog').find(d => d.text().includes('库存汇总设置'))!
     await flushPromises()

@@ -772,10 +772,17 @@ public sealed class ProjectPlanningServiceTests
         var project = await AssignProjectManager(pdm, Assert.Single(await pdm.ListProjectsAsync(default)));
         var template = Assert.Single(await service.ListTemplatesAsync(false, "admin", UserRole.Administrator, default));
         var generated = await service.GenerateAsync(project.Id, new(template.Id, new DateOnly(2026, 9, 3), 10, false, null), "admin", UserRole.Administrator, default);
-        var owner = generated.Tasks[0].Assignee!;
         await ConfigureApprover(pdm, project.Id);
         var pending = await service.SubmitApprovalAsync(project.Id, generated.RowVersion, "admin", UserRole.Administrator, default);
-        await service.DecideApprovalAsync(project.Id, pending.RowVersion, true, null, "division-gm", UserRole.BusinessUnitManager, default);
+        var approved = await service.DecideApprovalAsync(project.Id, pending.RowVersion, true, null, "division-gm", UserRole.BusinessUnitManager, default);
+
+        await pdm.ReplaceBomAsync(project.Id, BomKind.Standard,
+            [new BomItem(Guid.NewGuid(), project.Id, BomKind.Standard, 1, "STD-IMPACT", "装配关键件", 1, "001", null, "M8", "W1", true)
+            { ImpactStage = ProjectPlanStage.Assembly }], default);
+        var assemblyTask = approved.Tasks.First(item => item.Stage == ProjectPlanStage.Assembly);
+        var owner = assemblyTask.Assignee!;
+        var reminderClock = new FixedTimeProvider(new DateTimeOffset(assemblyTask.PlannedFinish.ToDateTime(TimeOnly.MinValue), TimeSpan.Zero));
+        service = new ProjectPlanningService(planning, pdm, reminderClock);
 
         await service.SendDueRemindersAsync(default);
         await service.SendDueRemindersAsync(default);
@@ -784,6 +791,7 @@ public sealed class ProjectPlanningServiceTests
         Assert.NotEmpty(notifications);
         Assert.Equal(notifications.Length, notifications.Select(item => item.SourceKey).Distinct().Count());
         Assert.All(notifications, item => Assert.Equal("project-plan", item.Category));
+        Assert.Contains(notifications, item => item.Content.Contains("STD-IMPACT") && item.Content.Contains("备料页"));
     }
 
     [Fact]

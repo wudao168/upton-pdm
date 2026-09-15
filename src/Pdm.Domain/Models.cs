@@ -503,6 +503,8 @@ public sealed record BomItem(
 
     public bool IsWearPart { get; init; }
 
+    public string? ImpactStage { get; init; }
+
     public Guid? SourceDocumentId { get; init; }
 
     public string? SourceConfiguration { get; init; }

@@ -182,6 +182,7 @@ public sealed record ProjectProcurementTrackingItem(
     public IReadOnlyList<WarehouseMovementDetail> WarehouseMovements { get; init; } = [];
     public bool IsWarehouseMovementRow { get; init; }
     public bool IsFullyReceived { get; init; }
+    public string? ImpactStage { get; init; }
 }
 
 public sealed record ProjectProcurementTrackingResult(

@@ -906,7 +906,8 @@ public static class PdmEndpointExtensions
             var command = new BatchUpdateBomItemsCommand(
                 request.ItemIds, request.Fields, request.TargetKind, request.Unit, request.DrawingNumber, request.Name,
                 request.Specification, request.Remark, request.Brand, request.Material, request.SurfaceTreatment,
-                request.Weight, request.Quantity, request.Revision, request.Complete, HeatTreatment: request.HeatTreatment);
+                request.Weight, request.Quantity, request.Revision, request.Complete, HeatTreatment: request.HeatTreatment,
+                ImpactStage: request.ImpactStage);
             var updated = await workflow.BatchUpdateBomItemsAsync(projectId, command, actor, role, cancellationToken);
             if (request.ItemIds.Count == 1
                 && request.Fields.Contains("drawingNumber", StringComparer.OrdinalIgnoreCase)

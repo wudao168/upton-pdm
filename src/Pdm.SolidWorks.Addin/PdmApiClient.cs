@@ -647,6 +647,7 @@ internal sealed class ProjectDto
     public string DesignLead { get; set; }
     public List<string> DesignLeads { get; set; }
     public List<string> Designers { get; set; }
+    public List<string> SerialNumbers { get; set; }
 
     public override string ToString() => string.Concat(Code, " · ", Name);
 }

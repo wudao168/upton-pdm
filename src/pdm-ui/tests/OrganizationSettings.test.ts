@@ -11,7 +11,7 @@ const directory: OrganizationDirectory = {
   ],
   units: [
     { id: 'ks-division', organizationId: 'org-ks', code: 'KS-AUTO', name: '昆山自动化事业部', kind: 'BusinessDivision', canManufacture: true, isActive: true, sortOrder: 1 },
-    { id: 'ks-department', organizationId: 'org-ks', parentUnitId: 'ks-division', code: 'KS-DESIGN', name: '昆山设计部', kind: 'Department', canManufacture: false, isActive: true, sortOrder: 1 },
+    { id: 'ks-department', organizationId: 'org-ks', parentUnitId: 'ks-division', code: 'KS-AUTO-DESIGN', name: '昆山设计部', kind: 'Department', canManufacture: false, isActive: true, sortOrder: 1 },
     { id: 'ks-other', organizationId: 'org-ks', code: 'KS-OTHER', name: '昆山其他部门', kind: 'BusinessDivision', canManufacture: false, isActive: true, sortOrder: 2 },
     { id: 'gz-division', organizationId: 'org-gz', code: 'GZ-AUTO', name: '广州自动化事业部', kind: 'BusinessDivision', canManufacture: true, isActive: true, sortOrder: 1 },
   ],
@@ -150,6 +150,43 @@ describe('OrganizationSettings', () => {
     await flushPromises()
 
     expect(saveUnit).toHaveBeenCalledWith(expect.objectContaining({ id: 'ks-division', canManufacture: true }))
+  })
+
+  it('下级组织仅编辑本级编码并按上级生成完整编码', async () => {
+    const saveUnit = vi.fn().mockImplementation(input => Promise.resolve({ id: 'ks-department', ...input }))
+    const wrapper = mount(OrganizationSettings, {
+      attachTo: document.body,
+      props: {
+        directory,
+        activeCompanyId: 'org-ks',
+        pending: false,
+        onSaveOrganization: vi.fn(),
+        onSaveUnit: saveUnit,
+        onUpdateMemberships: vi.fn(),
+        onUpdateManagers: vi.fn(),
+      },
+      global: { plugins: [ElementPlus] },
+    })
+    await flushPromises()
+
+    await wrapper.get('[aria-label="组织架构树"]').findAll('[role="treeitem"]')[1].trigger('click')
+    await flushPromises()
+    await buttonByText(wrapper, '编辑').trigger('click')
+    await flushPromises()
+    const dialog = document.body.querySelector('.el-dialog')!
+    const codeInput = dialog.querySelector<HTMLInputElement>('input[aria-label="本级组织编码"]')!
+    expect(codeInput.value).toBe('DESIGN')
+    expect(dialog.textContent).toContain('完整编码：KS-AUTO-DESIGN')
+    const parentLabel = Array.from(dialog.querySelectorAll('label')).find(label => label.textContent?.includes('上级组织'))!
+    const parentSelect = parentLabel.querySelector('select')!
+    parentSelect.value = 'ks-other'
+    parentSelect.dispatchEvent(new Event('change'))
+    await flushPromises()
+    expect(dialog.textContent).toContain('完整编码：KS-OTHER-DESIGN')
+    Array.from(dialog.querySelectorAll<HTMLButtonElement>('button')).find(button => button.textContent?.trim() === '保存组织')!.click()
+    await flushPromises()
+
+    expect(saveUnit).toHaveBeenCalledWith(expect.objectContaining({ id: 'ks-department', parentUnitId: 'ks-other', code: 'KS-OTHER-DESIGN' }))
   })
 
   it('可向当前组织添加人员并保留原归属', async () => {

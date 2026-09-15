@@ -473,8 +473,6 @@ public sealed class PdmWorkflowService(
         if (!directory.Organizations.Any(item => item.Id == command.OrganizationId)) throw new PdmRuleException("所属公司不存在。");
         var code = command.Code?.Trim().ToUpperInvariant() ?? string.Empty;
         var name = command.Name?.Trim() ?? string.Empty;
-        if (code.Length is < 1 or > 40 || code.Any(character => !char.IsLetterOrDigit(character) && character is not ('-' or '_')))
-            throw new PdmRuleException("组织编码只能包含字母、数字、短横线和下划线，且不能超过40位。");
         if (name.Length is < 1 or > 160) throw new PdmRuleException("组织名称不能为空且不能超过160个字符。");
         if (command.CanManufacture && command.Kind != OrganizationUnitKind.BusinessDivision)
             throw new PdmRuleException("只有公司直属部门可以设为制造部门。");
@@ -484,6 +482,23 @@ public sealed class PdmWorkflowService(
             if (parent is null || parent.OrganizationId != command.OrganizationId) throw new PdmRuleException("上级组织必须属于同一公司。");
             if (command.Kind == OrganizationUnitKind.BusinessDivision) throw new PdmRuleException("可承接项目的部门必须直接隶属于公司。");
             if (command.Id is not null && IsUnitWithin(directory.Units, parent.Id, command.Id.Value)) throw new PdmRuleException("上级组织不能选择当前组织自身或其下级。");
+            var parentCode = parent.Code.Trim().ToUpperInvariant();
+            var parentPrefix = $"{parentCode}-";
+            if (code.StartsWith(parentPrefix, StringComparison.OrdinalIgnoreCase))
+            {
+                code = code[parentPrefix.Length..].Trim();
+            }
+            else if (command.Id is Guid unitId)
+            {
+                var current = directory.Units.SingleOrDefault(item => item.Id == unitId);
+                var currentParent = current?.ParentUnitId is Guid currentParentId
+                    ? directory.Units.SingleOrDefault(item => item.Id == currentParentId)
+                    : null;
+                var currentPrefix = currentParent is null ? string.Empty : $"{currentParent.Code.Trim().ToUpperInvariant()}-";
+                if (currentPrefix.Length > 0 && code.StartsWith(currentPrefix, StringComparison.OrdinalIgnoreCase)) code = code[currentPrefix.Length..].Trim();
+            }
+            if (code.Length == 0) throw new PdmRuleException("本级组织编码不能为空。");
+            code = $"{parentPrefix}{code}";
             var proposedDepth = GetOrganizationUnitDepth(directory.Units, parent.Id) + 1;
             var subtreeHeight = command.Id is null ? 1 : GetOrganizationSubtreeHeight(directory.Units, command.Id.Value);
             if (proposedDepth + subtreeHeight - 1 > 10) throw new PdmRuleException("公司下的组织层级不能超过10级。");
@@ -492,6 +507,8 @@ public sealed class PdmWorkflowService(
         {
             throw new PdmRuleException("部门或团队必须选择上级组织。");
         }
+        if (code.Length is < 1 or > 40 || code.Any(character => !char.IsLetterOrDigit(character) && character is not ('-' or '_')))
+            throw new PdmRuleException("完整组织编码只能包含字母、数字、短横线和下划线，且不能超过40位。");
         var saved = await repository.SaveOrganizationUnitAsync(command with { Code = code, Name = name }, cancellationToken);
         await AuditAsync(actor, command.Id is null ? "organization-unit.create" : "organization-unit.update", nameof(OrganizationUnit), saved.Id.ToString(), $"{saved.Code} · {saved.Name} · {saved.Kind}", cancellationToken);
         return saved;
@@ -2195,9 +2212,15 @@ public sealed class PdmWorkflowService(
             throw new PdmRuleException($"套件“{omittedRequiredKitItem.EngineeringKitCode}”的必选子料“{omittedRequiredKitItem.DrawingNumber}”不能删除；请删除整个套件引用后重新选择。");
         var validationRules = (await repository.GetSystemSettingsAsync(cancellationToken)).ValidationRules;
         var recycledConflict = existing.FirstOrDefault(existingItem => existingItem.IsManuallyExcluded && inputs.Any(input =>
-            input.Id == existingItem.Id || SameBomSource(input.SourceDocumentId, input.SourceConfiguration, input.SourceInstancePath, existingItem)));
+            input.Id.HasValue
+                ? input.Id == existingItem.Id
+                : SameBomSource(input.SourceDocumentId, input.SourceConfiguration, input.SourceInstancePath, existingItem)));
         if (recycledConflict is not null)
-            throw new PdmConflictException($"物料“{recycledConflict.DrawingNumber}”已在回收站中，请先从回收站恢复。");
+        {
+            var recycledLabel = new[] { recycledConflict.DrawingNumber, recycledConflict.Name, recycledConflict.Specification }
+                .FirstOrDefault(value => !string.IsNullOrWhiteSpace(value))?.Trim() ?? recycledConflict.Id.ToString();
+            throw new PdmConflictException($"物料“{recycledLabel}”已在回收站中，请先从回收站恢复。");
+        }
         if (kind is BomKind.Standard or BomKind.NonStandard)
         {
         var omittedSourceItem = existing.FirstOrDefault(existingItem => existingItem.SourceDocumentId.HasValue
@@ -2264,6 +2287,9 @@ public sealed class PdmWorkflowService(
 
             var material = NullIfWhiteSpace(input.Material);
             var specification = NullIfWhiteSpace(input.Specification);
+            var impactStage = NullIfWhiteSpace(input.ImpactStage);
+            if (impactStage is not null && impactStage is not (ProjectPlanStage.Assembly or ProjectPlanStage.Commissioning))
+                throw new PdmRuleException("影响只能选择装配、调试或不设置。");
             var candidate = new BomItem(
                 previous?.Id ?? Guid.NewGuid(), projectId, kind, input.Sequence, (input.DrawingNumber ?? string.Empty).Trim(), input.Name?.Trim() ?? string.Empty, input.Quantity,
                 U9UnitCatalog.NormalizeBomUnit(input.Unit), material, specification, input.Revision.Trim(),
@@ -2275,6 +2301,7 @@ public sealed class PdmWorkflowService(
                 HeatTreatment = NullIfWhiteSpace(input.HeatTreatment),
                 Weight = NullIfWhiteSpace(input.Weight),
                 IsWearPart = input.IsWearPart,
+                ImpactStage = impactStage,
                 SourceDocumentId = previous?.SourceDocumentId ?? input.SourceDocumentId,
                 SourceConfiguration = previous?.SourceConfiguration ?? NullIfWhiteSpace(input.SourceConfiguration),
                 SourceInstancePath = previous?.SourceInstancePath ?? NullIfWhiteSpace(input.SourceInstancePath),
@@ -2328,7 +2355,10 @@ public sealed class PdmWorkflowService(
         foreach (var item in saved.Where(item => writebackIds.Contains(item.Id)))
             await EnqueueCadPropertyWritebackAsync(item, actor, cancellationToken);
         await repository.SetBomEmptyDeclarationAsync(projectId, kind, false, actor, cancellationToken);
-        await repository.SaveBomDraftAsync(projectId, kind, saved.Where(IsPublishableBomItem).ToArray(), actor, cancellationToken);
+        if (!BomSnapshotsEqual(
+                existing.Where(IsPublishableBomItem).ToArray(),
+                saved.Where(IsPublishableBomItem).ToArray()))
+            await repository.SaveBomDraftAsync(projectId, kind, saved.Where(IsPublishableBomItem).ToArray(), actor, cancellationToken);
         await AuditAsync(actor, "bom.replace", nameof(BomItem), projectId.ToString(), $"{kind}:{saved.Count};零数量移入回收站:{zeroQuantityDeletedCount}", cancellationToken);
         return await repository.GetBomAsync(projectId, kind, cancellationToken);
     }
@@ -2508,13 +2538,20 @@ public sealed class PdmWorkflowService(
         if (itemIds.Length > 500) throw new PdmRuleException("单次最多批量编辑500条BOM物料。");
         var fields = command.Fields.Select(field => field.Trim()).Where(field => field.Length > 0).ToHashSet(StringComparer.OrdinalIgnoreCase);
         if (fields.Count == 0) throw new PdmRuleException("请至少选择一个要批量修改的属性。");
-        var allowedFields = new HashSet<string>(["kind", "unit", "drawingNumber", "name", "specification", "remark", "brand", "material", "surfaceTreatment", "weight", "quantity", "revision", "parentDrawingNumber"], StringComparer.OrdinalIgnoreCase);
+        var affectsRelease = fields.Any(field => !field.Equals("isWearPart", StringComparison.OrdinalIgnoreCase)
+            && !field.Equals("impactStage", StringComparison.OrdinalIgnoreCase));
+        var allowedFields = new HashSet<string>(["kind", "unit", "drawingNumber", "name", "specification", "remark", "brand", "material", "surfaceTreatment", "weight", "quantity", "revision", "parentDrawingNumber", "impactStage", "isWearPart"], StringComparer.OrdinalIgnoreCase);
         var unsupported = fields.FirstOrDefault(field => !allowedFields.Contains(field));
         if (unsupported is not null) throw new PdmRuleException($"不支持批量修改属性：{unsupported}。");
         if (fields.Contains("kind") && command.TargetKind is not (BomKind.Standard or BomKind.NonStandard or BomKind.Electrical or BomKind.Virtual))
             throw new PdmRuleException("物料分类只能批量改为标准件、非标件、电气件或虚拟件。");
         if (fields.Contains("quantity") && command.Quantity is null or <= 0)
             throw new PdmRuleException("数量必须大于0。");
+        if (fields.Contains("isWearPart") && command.IsWearPart is null)
+            throw new PdmRuleException("易损件必须选择是或否。");
+        var impactStage = Optional(command.ImpactStage);
+        if (fields.Contains("impactStage") && impactStage is not null && impactStage is not (ProjectPlanStage.Assembly or ProjectPlanStage.Commissioning))
+            throw new PdmRuleException("影响只能选择装配、调试或不设置。");
         static string Required(string? value, string label)
         {
             value = value?.Trim();
@@ -2564,6 +2601,8 @@ public sealed class PdmWorkflowService(
                 Quantity = fields.Contains("quantity") ? command.Quantity!.Value : original.Quantity,
                 Revision = fields.Contains("revision") ? Required(command.Revision, "版本") : original.Revision,
                 ParentDrawingNumber = fields.Contains("parentDrawingNumber") ? Optional(command.ParentDrawingNumber) : original.ParentDrawingNumber,
+                ImpactStage = fields.Contains("impactStage") ? impactStage : original.ImpactStage,
+                IsWearPart = fields.Contains("isWearPart") ? command.IsWearPart!.Value : original.IsWearPart,
                 IsManuallyOverridden = original.IsManuallyOverridden || original.Source == "Auto",
                 IsPendingClassification = fields.Contains("kind") ? false : original.IsPendingClassification,
                 IsPendingRemoval = fields.Contains("kind") ? false : original.IsPendingRemoval,
@@ -2621,20 +2660,25 @@ public sealed class PdmWorkflowService(
             else virtualItems.Add(item);
         static BomItem[] Resequence(IEnumerable<BomItem> items) => items.OrderBy(item => item.DrawingNumber, StringComparer.OrdinalIgnoreCase)
             .Select((item, index) => item with { Sequence = index + 1 }).ToArray();
-        var updatedStandard = Resequence(standard);
-        var updatedNonStandard = Resequence(nonStandard);
-        var updatedUnclassified = Resequence(unclassified);
-        var updatedElectrical = Resequence(electrical);
-        var updatedVirtual = Resequence(virtualItems);
+        BomItem[] PreserveSequence(IEnumerable<BomItem> source) => source.OrderBy(item => item.Sequence).ToArray();
+        var updatedStandard = affectsRelease ? Resequence(standard) : PreserveSequence(standard);
+        var updatedNonStandard = affectsRelease ? Resequence(nonStandard) : PreserveSequence(nonStandard);
+        var updatedUnclassified = affectsRelease ? Resequence(unclassified) : PreserveSequence(unclassified);
+        var updatedElectrical = affectsRelease ? Resequence(electrical) : PreserveSequence(electrical);
+        var updatedVirtual = affectsRelease ? Resequence(virtualItems) : PreserveSequence(virtualItems);
         var now = timeProvider.GetUtcNow();
         var audits = new[]
         {
-            new AuditEntry(Guid.NewGuid(), now, actor, "bom.batch-update", nameof(BomItem), projectId.ToString(), $"物料{itemIds.Length}条；属性{string.Join(',', fields.Order())}；待保存BOM")
+            new AuditEntry(Guid.NewGuid(), now, actor, "bom.batch-update", nameof(BomItem), projectId.ToString(),
+                $"物料{itemIds.Length}条；属性{string.Join(',', fields.Order())}；{(affectsRelease ? "待保存BOM" : "辅助属性即时保存，不触发发布版本")}")
         };
         await repository.ApplyBomBatchAsync(projectId, updatedStandard, updatedNonStandard, updatedUnclassified, updatedElectrical, updatedVirtual, [], audits, cancellationToken);
-        foreach (var changedKind in originals.Values.Select(item => item.Kind).Concat(updatedById.Values.Select(item => item.Kind))
-                     .Where(candidate => candidate is BomKind.Standard or BomKind.NonStandard or BomKind.Electrical).Distinct())
-            await SyncBomDraftAsync(projectId, changedKind, actor, cancellationToken);
+        if (affectsRelease)
+        {
+            foreach (var changedKind in originals.Values.Select(item => item.Kind).Concat(updatedById.Values.Select(item => item.Kind))
+                         .Where(candidate => candidate is BomKind.Standard or BomKind.NonStandard or BomKind.Electrical).Distinct())
+                await SyncBomDraftAsync(projectId, changedKind, actor, cancellationToken);
+        }
         return updatedStandard.Concat(updatedNonStandard).Concat(updatedUnclassified).Concat(updatedElectrical).Concat(updatedVirtual).Where(item => itemIds.Contains(item.Id)).ToArray();
     }
 
@@ -5090,6 +5134,9 @@ public sealed class PdmWorkflowService(
 
     private static BomItem ForReleaseComparison(BomItem item) => item with
     {
+        IsWearPart = false,
+        ImpactStage = null,
+        IsManuallyOverridden = false,
         ReconciliationStatus = null,
         ReconciliationNote = null,
         ReconciliationUpdatedBy = null,
@@ -5099,7 +5146,7 @@ public sealed class PdmWorkflowService(
 
     private static string BomRevision(string prefix, IReadOnlyList<BomItem> items)
     {
-        var json = JsonSerializer.Serialize(items, new JsonSerializerOptions(JsonSerializerDefaults.Web));
+        var json = JsonSerializer.Serialize(items.Select(ForReleaseComparison), new JsonSerializerOptions(JsonSerializerDefaults.Web));
         return $"{prefix}-{Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(json)))[..8]}";
     }
 

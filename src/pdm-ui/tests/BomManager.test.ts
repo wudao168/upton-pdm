@@ -143,13 +143,15 @@ describe('BomManager', () => {
     expect(wrapper.emitted('exportWearParts')).toEqual([['Summary']])
   })
 
-  it('allows a manually added BOM row to be marked as a wear part and saved in its original category', async () => {
+  it('uses an explicit yes-or-no selector for wear parts and saves the selected value', async () => {
     const wrapper = mount(BomManager, {
       props: { projectId: 'project-1', standard: [], nonStandard: [], electrical: [], declarations: [], pending: false, editable: true },
     })
     await wrapper.findAll('button[role="tab"]')[1].trigger('click')
     const quickEntry = wrapper.get('.pdm-bom-table tbody tr.is-quick-entry')
-    await quickEntry.get('input[aria-label^="设置"]').setValue(true)
+    const wearPartSelect = quickEntry.get('select[aria-label^="选择"]')
+    expect(wearPartSelect.findAll('option').map(option => option.text())).toEqual(['否', '是'])
+    await wearPartSelect.setValue('true')
     await flushPromises()
     const draft = wrapper.findAll('.pdm-bom-table tbody tr').find(row => !row.classes().includes('is-quick-entry'))!
     await draft.get('input[aria-label="物料名称"]').setValue('手动易损件')
@@ -161,6 +163,60 @@ describe('BomManager', () => {
     const saved = wrapper.emitted('save')?.[0]?.[1] as BomItem[]
     expect(saved).toHaveLength(1)
     expect(saved[0]).toMatchObject({ drawingNumber: 'MANUAL-WEAR', isWearPart: true, source: 'Manual' })
+  })
+
+  it('allows a source-backed formal BOM row to select whether it is a wear part', async () => {
+    const wrapper = mount(BomManager, {
+      props: {
+        projectId: 'project-1',
+        standard: [{ id: 'auto-part', sequence: 1, drawingNumber: 'AUTO-001', name: '图档物料', quantity: 1, unit: '001', revision: 'W1', complete: true, source: 'Auto', isWearPart: false }],
+        nonStandard: [], electrical: [], declarations: [], pending: false, editable: true,
+      },
+    })
+    await wrapper.findAll('button[role="tab"]')[1].trigger('click')
+
+    const selector = wrapper.get('select[aria-label="选择AUTO-001是否为易损件"]')
+    expect((selector.element as HTMLSelectElement).value).toBe('false')
+    await selector.setValue('true')
+    await wrapper.get('.pdm-bom-save-action').trigger('click')
+
+    expect((wrapper.emitted('save')?.[0]?.[1] as BomItem[])[0]).toMatchObject({ id: 'auto-part', isWearPart: true, source: 'Auto' })
+  })
+
+  it('batch edits wear-part state for source-backed and manual mechanical BOM rows only', async () => {
+    const standard: BomItem[] = [
+      { id: 'auto-part', kind: 'Standard', sequence: 1, drawingNumber: 'AUTO-001', name: '图档物料', quantity: 1, unit: '001', revision: 'W1', complete: true, source: 'Auto', sourceDocumentId: 'document-1', isWearPart: false },
+      { id: 'manual-part', kind: 'Standard', sequence: 2, drawingNumber: 'MANUAL-001', name: '人工物料', quantity: 1, unit: '001', revision: 'W1', complete: true, source: 'Manual', isWearPart: false },
+    ]
+    const wrapper = mount(BomManager, {
+      props: { projectId: 'project-1', standard, nonStandard: [], electrical: [], declarations: [], pending: false, editable: true },
+    })
+    await wrapper.findAll('button[role="tab"]')[1].trigger('click')
+    for (const checkbox of wrapper.findAll('input[aria-label="选择物料"]')) await checkbox.setValue(true)
+    await wrapper.findAll('.pdm-bom-selection-toolbar button').find(button => button.text().includes('编辑'))!.trigger('click')
+
+    const dialog = wrapper.get('[role="dialog"][aria-labelledby="pdm-bom-batch-title"]')
+    await dialog.get('input[aria-label="修改易损件"]').setValue(true)
+    await dialog.get('select[aria-label="易损件批量值"]').setValue('true')
+    expect(dialog.text()).toContain('2 条物料 · 1 个属性')
+    await dialog.findAll('button').find(button => button.text() === '确认批量修改')!.trigger('click')
+    await wrapper.get('.pdm-bom-save-action').trigger('click')
+
+    expect(wrapper.emitted('batchUpdate')).toBeUndefined()
+    expect((wrapper.emitted('save')?.[0]?.[1] as BomItem[]).map(item => ({ id: item.id, source: item.source, isWearPart: item.isWearPart }))).toEqual([
+      { id: 'auto-part', source: 'Auto', isWearPart: true },
+      { id: 'manual-part', source: 'Manual', isWearPart: true },
+    ])
+    wrapper.unmount()
+
+    const electricalWrapper = mount(BomManager, {
+      props: { standard: [], nonStandard: [], electrical: [{ id: 'electrical-1', kind: 'Electrical', sequence: 1, drawingNumber: 'E-001', name: '电气件', quantity: 1, unit: '001', revision: 'W1', complete: true }], declarations: [], pending: false, editable: true },
+    })
+    await electricalWrapper.findAll('button[role="tab"]')[3].trigger('click')
+    await electricalWrapper.get('input[aria-label="选择物料"]').setValue(true)
+    await electricalWrapper.findAll('.pdm-bom-selection-toolbar button').find(button => button.text() === '编辑')!.trigger('click')
+    expect(electricalWrapper.find('input[aria-label="修改易损件"]').exists()).toBe(false)
+    electricalWrapper.unmount()
   })
 
   it.each([
@@ -532,6 +588,29 @@ describe('BomManager', () => {
     expect(wrapper.emitted('save')).toBeUndefined()
   })
 
+  it('shows the actual parent assembly drawing number when the stored parent code is empty', async () => {
+    const row: BomItem = {
+      id: 'part-with-parent', kind: 'Standard', sequence: 1, drawingNumber: 'PART-001', name: '零件', quantity: 1,
+      unit: '个', revision: 'W1', complete: true, source: 'Auto', sourceDocumentId: 'part-document', sourceInstancePath: 'ROOT/PART-1',
+    }
+    const referenceRoot: DocumentNode = {
+      id: 'root-node', documentId: 'root-document', instancePath: 'ROOT', drawingNumber: 'ASM-ROOT', fileName: 'ASM-ROOT.SLDASM',
+      name: '根装配体', kind: 'Assembly', configuration: '默认', quantity: 1, version: 'W1', status: 'Normal',
+      children: [{
+        id: 'part-node', documentId: 'part-document', instancePath: 'ROOT/PART-1', drawingNumber: 'PART-001', fileName: 'PART-001.SLDPRT',
+        name: '零件', kind: 'Part', configuration: '默认', quantity: 1, version: 'W1', status: 'Normal', children: [],
+      }],
+    }
+    const wrapper = mount(BomManager, {
+      props: { projectId: 'project-parent-display', sourceData: [row], standard: [row], nonStandard: [], electrical: [], referenceRoot, declarations: [], pending: false, editable: true },
+    })
+
+    await wrapper.findAll('button[role="tab"]').find(tab => tab.text().includes('标准件BOM'))!.trigger('click')
+    const parentButton = wrapper.get('button[aria-label="编辑上级物料编码"]')
+    expect(parentButton.text()).toBe('ASM-ROOT')
+    expect(parentButton.attributes('title')).toBe('ASM-ROOT')
+  })
+
   it('supports row operations in structure view without editing duplicate instances together', async () => {
     const structure: BomItem[] = [
       { id: 'instance-1', kind: 'Standard', sequence: 1, drawingNumber: 'PART-001', name: '第一实例', quantity: 1, unit: '个', revision: 'W1', complete: true, source: 'Auto', sourceInstancePath: 'ROOT/PART-1' },
@@ -669,7 +748,7 @@ describe('BomManager', () => {
     await wrapper.findAll('button[role="tab"]')[1].trigger('click')
 
     expect(wrapper.findAll('thead th').map(header => header.text())).toEqual([
-      '', '', '序号', '物料分类', '易损件', '单位', '物料编码', '物料名称', '上级物料编码', '型号', '备注信息', '品牌', '材质', '表面处理', '重量', '数量', '发布  总/源', '图纸核对', '版本', '问题', '资料状态',
+      '', '', '序号', '物料分类', '易损件', '影响', '单位', '物料编码', '物料名称', '上级物料编码', '型号', '备注信息', '品牌', '材质', '表面处理', '重量', '数量', '发布  总/源', '图纸核对', '版本', '问题', '资料状态',
     ])
   })
 
@@ -684,7 +763,7 @@ describe('BomManager', () => {
     expect(quickEntry.classes()).toContain('is-quick-entry')
     expect(quickEntry.text()).toContain('标准件')
     expect(quickEntry.text()).toContain('个')
-    expect(quickEntry.findAll('td')[18].text()).toBe('W1')
+    expect(quickEntry.findAll('td')[19].text()).toBe('W1')
     expect(quickEntry.text()).toContain('待录入')
     expect(quickEntry.text()).not.toContain('缺3D图')
     expect(quickEntry.text()).not.toContain('—')
@@ -738,6 +817,30 @@ describe('BomManager', () => {
     expect(warning.attributes('title')).toBe('设计树图纸名称：CQ-WS-ISO63-PT2-20250520113101861；BOM型号：MODEL-002')
     expect(wrapper.get('.pdm-bom-reconciliation-cell').text()).toBe('—')
     expect(wrapper.find('.pdm-bom-reconciliation').exists()).toBe(false)
+  })
+
+  it('edits one impact stage on formal BOMs and hides the field from wear parts', async () => {
+    const wrapper = mount(BomManager, { props: {
+      standard: [{ id: 'bom-impact', sequence: 1, drawingNumber: 'S-001', name: '关键件', quantity: 1, unit: '001', revision: 'W1', complete: true, source: 'Manual', isWearPart: true }],
+      nonStandard: [], electrical: [], declarations: [], pending: false, editable: true,
+    } })
+
+    await wrapper.findAll('button[role="tab"]')[1].trigger('click')
+    const impact = wrapper.get('select[aria-label="设置S-001影响阶段"]')
+    expect(impact.findAll('option').map(option => option.text())).toEqual(['—', '装配', '调试'])
+    await impact.setValue('Commissioning')
+    await wrapper.get('.pdm-bom-save-action').trigger('click')
+    expect((wrapper.emitted('save')?.at(-1)?.[1] as BomItem[])[0].impactStage).toBe('Commissioning')
+    wrapper.unmount()
+
+    const wearWrapper = mount(BomManager, { props: {
+      standard: [{ id: 'bom-impact', sequence: 1, drawingNumber: 'S-001', name: '关键件', quantity: 1, unit: '001', revision: 'W1', complete: true, source: 'Manual', isWearPart: true }],
+      nonStandard: [], electrical: [], declarations: [], pending: false, editable: true,
+    } })
+    await wearWrapper.findAll('button[role="tab"]').find(tab => tab.text().startsWith('易损件BOM'))!.trigger('click')
+    expect(wearWrapper.findAll('thead th').map(header => header.text())).not.toContain('影响')
+    expect(wearWrapper.find('.pdm-bom-impact-cell').exists()).toBe(false)
+    wearWrapper.unmount()
   })
 
   it('opens the full issue comparison from the problem column while keeping the model warning passive', async () => {
@@ -1354,6 +1457,7 @@ describe('BomManager', () => {
     expect(rows[0].classes()).toContain('is-reconciliation-issue')
     expect(rows[0].findAll('td').filter(cell => cell.classes().some(name => name.endsWith('-cell'))).map(cell => cell.classes())).toEqual([
       ['pdm-bom-wear-part-cell'],
+      ['pdm-bom-impact-cell'],
       ['pdm-bom-model-cell'],
       ['pdm-bom-drawing-audit-cell'],
       ['pdm-bom-reconciliation-cell'],
@@ -1568,7 +1672,7 @@ describe('BomManager', () => {
     await flushPromises()
     elementFromPoint.mockRestore()
     expect(wrapper.findAll('tbody tr').some(row => row.classes().includes('is-drag-over-after'))).toBe(false)
-    expect(wrapper.findAll('tbody tr').slice(0, 2).map(row => row.find('td:nth-child(7)').text())).toEqual(['S-002', 'S-001'])
+    expect(wrapper.findAll('tbody tr').slice(0, 2).map(row => row.find('td:nth-child(8)').text())).toEqual(['S-002', 'S-001'])
     expect(wrapper.findAll('tbody tr').slice(0, 2).map(row => row.get('.pdm-bom-sequence-value').text())).toEqual(['1', '2'])
     expect(wrapper.find('td:nth-child(3) input').exists()).toBe(false)
     expect(wrapper.findAll('thead th').map(header => header.text())).not.toContain('操作')
@@ -1594,10 +1698,10 @@ describe('BomManager', () => {
     const rows = wrapper.findAll('tbody tr')
     expect(rows).toHaveLength(3)
     expect(rows.map(row => row.get('.pdm-bom-sequence-value').text())).toEqual(['1', '2', '3'])
-    expect(rows[0].find('td:nth-child(7)').text()).toBe('S-001')
+    expect(rows[0].find('td:nth-child(8)').text()).toBe('S-001')
     expect((rows[1].get('input[aria-label="物料编码"]').element as HTMLInputElement).value).toBe('')
-    expect(rows[1].find('td:nth-child(6)').text()).toBe('个')
-    expect(rows[2].find('td:nth-child(7)').text()).toBe('S-002')
+    expect(rows[1].find('td:nth-child(7)').text()).toBe('个')
+    expect(rows[2].find('td:nth-child(8)').text()).toBe('S-002')
     expect(wrapper.findAll('.pdm-bom-insert-button')).toHaveLength(3)
     expect(wrapper.findAll('.pdm-bom-delete-draft-button')).toHaveLength(1)
 

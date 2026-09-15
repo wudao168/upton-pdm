@@ -15,7 +15,8 @@ const organizationDirectory = {
   ],
   units: [
     { id: 'ks-division', organizationId: 'org-ks', code: 'KS-AUTO', name: '昆山自动化事业部', kind: 'BusinessDivision', isActive: true, sortOrder: 1 },
-    { id: 'ks-department', organizationId: 'org-ks', parentUnitId: 'ks-division', code: 'KS-DESIGN', name: '昆山设计部', kind: 'Department', isActive: true, sortOrder: 1 },
+    { id: 'ks-department', organizationId: 'org-ks', parentUnitId: 'ks-division', code: 'KS-AUTO-DESIGN', name: '昆山设计部', kind: 'Department', isActive: true, sortOrder: 1 },
+    { id: 'ks-other', organizationId: 'org-ks', code: 'KS-OTHER', name: '昆山其他部门', kind: 'BusinessDivision', isActive: true, sortOrder: 2 },
     { id: 'gz-division', organizationId: 'org-gz', code: 'GZ-AUTO', name: '广州自动化事业部', kind: 'BusinessDivision', isActive: true, sortOrder: 1 },
   ],
   memberships: [
@@ -757,8 +758,10 @@ test('engineer logs in and reads the API-backed PLM workspace', async ({ page },
   await expect(batchDialog.getByText('1 条物料 · 0 个属性')).toBeVisible()
   await batchDialog.getByLabel('修改品牌').check()
   await batchDialog.getByPlaceholder('勾选后留空即清空').nth(2).fill('UPTON')
-  await expect(batchDialog.getByText('1 条物料 · 1 个属性')).toBeVisible()
-  await page.screenshot({ path: testInfo.outputPath('bom-batch-editor.png'), fullPage: false })
+  await batchDialog.getByLabel('修改易损件').check()
+  await batchDialog.getByLabel('易损件批量值').selectOption({ label: '否' })
+  await expect(batchDialog.getByText('1 条物料 · 2 个属性')).toBeVisible()
+  await page.screenshot({ path: join(tmpdir(), 'pdm-bom-batch-wearpart-20260915.png'), fullPage: false })
   await batchDialog.getByRole('button', { name: '取消' }).click()
   await expect(batchDialog).toHaveCount(0)
 })
@@ -972,6 +975,22 @@ test('administrator switches independent company organization trees', async ({ p
   }
   await page.screenshot({ path: testInfo.outputPath('organization-checkbox-alignment.png'), fullPage: false })
   await unitDialog.getByRole('button', { name: '取消', exact: true }).click()
+  await page.getByLabel('选择当前公司').selectOption('org-ks')
+  await expect(page.getByRole('button', { name: '切换当前公司' })).toContainText('昆山阿普顿自动化系统有限公司')
+  await page.getByRole('button', { name: '系统管理', exact: true }).click()
+  await page.getByRole('button', { name: '用户设置', exact: true }).click()
+  await page.getByLabel('用户设置功能').getByRole('button', { name: '组织关系', exact: true }).click()
+  const returnedCompanyTree = page.getByLabel('公司组织树')
+  await expect(returnedCompanyTree).toContainText('昆山设计部')
+  await returnedCompanyTree.getByText('昆山设计部', { exact: true }).click()
+  await page.getByLabel('组织详情').getByRole('button', { name: '编辑', exact: true }).click()
+  const editUnitDialog = page.getByRole('dialog', { name: '编辑组织' })
+  await expect(editUnitDialog.getByLabel('本级组织编码')).toHaveValue('DESIGN')
+  await expect(editUnitDialog).toContainText('完整编码：KS-AUTO-DESIGN')
+  await editUnitDialog.locator('label').filter({ hasText: '上级组织' }).locator('select').selectOption('ks-other')
+  await expect(editUnitDialog).toContainText('完整编码：KS-OTHER-DESIGN')
+  await page.screenshot({ path: testInfo.outputPath('organization-hierarchical-code.png'), fullPage: false })
+  await editUnitDialog.getByRole('button', { name: '取消', exact: true }).click()
   await expect(page.locator('vite-error-overlay')).toHaveCount(0)
   expect(errors).toEqual([])
 })

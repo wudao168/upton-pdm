@@ -663,6 +663,7 @@ export interface BomItem {
   heatTreatment?: string
   weight?: string
   isWearPart?: boolean
+  impactStage?: 'Assembly' | 'Commissioning'
   revision: string
   complete: boolean
   sourceDocumentId?: string
@@ -784,6 +785,8 @@ export interface BatchUpdateBomItemsInput {
   revision?: string
   parentDrawingNumber?: string
   complete?: boolean
+  impactStage?: 'Assembly' | 'Commissioning' | null
+  isWearPart?: boolean
 }
 
 export interface BomSourceReclassificationItemPreview {
@@ -2038,6 +2041,7 @@ export interface ProjectProcurementTrackingItem {
   subprojectCode?: string | null
   materialCode: string
   materialName: string
+  impactStage?: 'Assembly' | 'Commissioning' | null
   specification?: string | null
   remark?: string | null
   brand?: string | null

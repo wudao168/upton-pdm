@@ -295,6 +295,30 @@ public sealed class Phase1ReleaseWorkflowTests
     }
 
     [Fact]
+    public async Task BomImpactStage_IsSingleSelectAndCanBeCleared()
+    {
+        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(), new RecordingPublisher(), TimeProvider.System);
+        var item = Assert.Single(await workflow.ReplaceBomAsync(ProjectId, BomKind.Standard,
+            [new BomItemInput(1, "STD-IMPACT", "影响阶段测试", 1, "001", null, "M8", "W1", true, ImpactStage: ProjectPlanStage.Assembly)],
+            "admin", UserRole.Administrator, default));
+
+        Assert.Equal(ProjectPlanStage.Assembly, item.ImpactStage);
+        var updated = Assert.Single(await workflow.BatchUpdateBomItemsAsync(ProjectId,
+            new BatchUpdateBomItemsCommand([item.Id], ["impactStage"], ImpactStage: ProjectPlanStage.Commissioning),
+            "admin", UserRole.Administrator, default));
+        Assert.Equal(ProjectPlanStage.Commissioning, updated.ImpactStage);
+
+        updated = Assert.Single(await workflow.BatchUpdateBomItemsAsync(ProjectId,
+            new BatchUpdateBomItemsCommand([item.Id], ["impactStage"], ImpactStage: null),
+            "admin", UserRole.Administrator, default));
+        Assert.Null(updated.ImpactStage);
+        await Assert.ThrowsAsync<PdmRuleException>(() => workflow.BatchUpdateBomItemsAsync(ProjectId,
+            new BatchUpdateBomItemsCommand([item.Id], ["impactStage"], ImpactStage: "采购"),
+            "admin", UserRole.Administrator, default));
+    }
+
+    [Fact]
     public async Task BomDataStatus_UsesConfiguredRulesAndKeepsCoreFieldsRequired()
     {
         var repository = new InMemoryPdmRepository(TimeProvider.System);
@@ -517,6 +541,47 @@ public sealed class Phase1ReleaseWorkflowTests
     }
 
     [Fact]
+    public async Task BomReplace_DoesNotMistakeAnActiveSourceRowForARecycledRowAndNamesTheRealConflict()
+    {
+        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(), new RecordingPublisher(), TimeProvider.System);
+        var sourceDocumentId = Guid.NewGuid();
+        var active = new BomItem(Guid.NewGuid(), ProjectId, BomKind.NonStandard, 1, "ACTIVE-001", "当前在用物料", 1, "001", "6061", "M1", "W1", true)
+        {
+            Source = "Auto",
+            SourceDocumentId = sourceDocumentId,
+            SourceConfiguration = "默认",
+            SourceInstancePath = "ROOT/ACTIVE"
+        };
+        var recycled = new BomItem(Guid.NewGuid(), ProjectId, BomKind.NonStandard, 2, string.Empty, "旧回收物料", 1, "001", "6061", "M1", "W1", true)
+        {
+            Source = "Auto",
+            SourceDocumentId = sourceDocumentId,
+            SourceConfiguration = "默认",
+            IsManuallyExcluded = true,
+            DeletedAt = DateTimeOffset.UtcNow,
+            DeletedBy = "admin",
+            DeleteReason = "旧装配实例"
+        };
+        await repository.ReplaceBomAsync(ProjectId, BomKind.NonStandard, [active, recycled], default);
+
+        var saved = await workflow.ReplaceBomAsync(ProjectId, BomKind.NonStandard,
+        [
+            new BomItemInput(1, active.DrawingNumber, active.Name, active.Quantity, active.Unit, active.Material, active.Specification, active.Revision, true,
+                Id: active.Id, SourceDocumentId: active.SourceDocumentId, SourceConfiguration: active.SourceConfiguration, SourceInstancePath: active.SourceInstancePath)
+        ], "admin", UserRole.Administrator, default);
+
+        Assert.Contains(saved, item => item.Id == active.Id && !item.IsManuallyExcluded);
+        var conflict = await Assert.ThrowsAsync<PdmConflictException>(() => workflow.ReplaceBomAsync(ProjectId, BomKind.NonStandard,
+        [
+            new BomItemInput(1, recycled.DrawingNumber, recycled.Name, recycled.Quantity, recycled.Unit, recycled.Material, recycled.Specification, recycled.Revision, true,
+                Id: recycled.Id, SourceDocumentId: recycled.SourceDocumentId, SourceConfiguration: recycled.SourceConfiguration)
+        ], "admin", UserRole.Administrator, default));
+        Assert.Contains("旧回收物料", conflict.Message);
+        Assert.DoesNotContain("物料“”", conflict.Message);
+    }
+
+    [Fact]
     public async Task OrganizationHierarchy_RejectsMoreThanTenLevels()
     {
         var repository = new InMemoryPdmRepository(TimeProvider.System);
@@ -527,17 +592,56 @@ public sealed class Phase1ReleaseWorkflowTests
         for (var level = 1; level <= 10; level++)
         {
             var unit = await workflow.SaveOrganizationUnitAsync(
-                new SaveOrganizationUnitCommand(null, organizationId, parentUnitId, $"LEVEL-{level}", $"第{level}级组织",
+                new SaveOrganizationUnitCommand(null, organizationId, parentUnitId, $"L{level}", $"第{level}级组织",
                     level == 1 ? OrganizationUnitKind.BusinessDivision : OrganizationUnitKind.Department, true, level),
                 "admin", UserRole.Administrator, default);
             parentUnitId = unit.Id;
         }
 
         var exception = await Assert.ThrowsAsync<PdmRuleException>(() => workflow.SaveOrganizationUnitAsync(
-            new SaveOrganizationUnitCommand(null, organizationId, parentUnitId, "LEVEL-11", "第11级组织", OrganizationUnitKind.Team, true, 11),
+            new SaveOrganizationUnitCommand(null, organizationId, parentUnitId, "L11", "第11级组织", OrganizationUnitKind.Team, true, 11),
             "admin", UserRole.Administrator, default));
 
         Assert.Equal("公司下的组织层级不能超过10级。", exception.Message);
+    }
+
+    [Fact]
+    public async Task OrganizationCode_UsesParentPathAndOnlyFinalCodeMustBeUnique()
+    {
+        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(), new RecordingPublisher(), TimeProvider.System);
+        var organizationId = Guid.Parse("70000000-0000-0000-0000-000000000001");
+        var t1 = await workflow.SaveOrganizationUnitAsync(
+            new SaveOrganizationUnitCommand(null, organizationId, null, "T1", "T1事业部", OrganizationUnitKind.BusinessDivision, true, 0),
+            "admin", UserRole.Administrator, default);
+        var t2 = await workflow.SaveOrganizationUnitAsync(
+            new SaveOrganizationUnitCommand(null, organizationId, null, "T2", "T2事业部", OrganizationUnitKind.BusinessDivision, true, 1),
+            "admin", UserRole.Administrator, default);
+        var t3 = await workflow.SaveOrganizationUnitAsync(
+            new SaveOrganizationUnitCommand(null, organizationId, null, "T3", "T3事业部", OrganizationUnitKind.BusinessDivision, true, 2),
+            "admin", UserRole.Administrator, default);
+
+        var t1Mechanical = await workflow.SaveOrganizationUnitAsync(
+            new SaveOrganizationUnitCommand(null, organizationId, t1.Id, "JX", "T1机械组", OrganizationUnitKind.Department, true, 0),
+            "admin", UserRole.Administrator, default);
+        var t2Mechanical = await workflow.SaveOrganizationUnitAsync(
+            new SaveOrganizationUnitCommand(null, organizationId, t2.Id, "T2-JX", "T2机械组", OrganizationUnitKind.Department, true, 0),
+            "admin", UserRole.Administrator, default);
+
+        Assert.Equal("T1-JX", t1Mechanical.Code);
+        Assert.Equal("T2-JX", t2Mechanical.Code);
+        var edited = await workflow.SaveOrganizationUnitAsync(
+            new SaveOrganizationUnitCommand(t1Mechanical.Id, organizationId, t1.Id, "T1-JX", "T1机械组", OrganizationUnitKind.Department, true, 0),
+            "admin", UserRole.Administrator, default);
+        Assert.Equal("T1-JX", edited.Code);
+        var conflict = await Assert.ThrowsAsync<PdmConflictException>(() => workflow.SaveOrganizationUnitAsync(
+            new SaveOrganizationUnitCommand(null, organizationId, t1.Id, "JX", "重复机械组", OrganizationUnitKind.Department, true, 1),
+            "admin", UserRole.Administrator, default));
+        Assert.Equal("同一公司内的完整组织编码已经存在。", conflict.Message);
+        var moved = await workflow.SaveOrganizationUnitAsync(
+            new SaveOrganizationUnitCommand(t1Mechanical.Id, organizationId, t3.Id, "T1-JX", "T3机械组", OrganizationUnitKind.Department, true, 0),
+            "admin", UserRole.Administrator, default);
+        Assert.Equal("T3-JX", moved.Code);
     }
 
     [Fact]
@@ -948,9 +1052,10 @@ public sealed class Phase1ReleaseWorkflowTests
 
         var maintained = Assert.Single(await workflow.BatchUpdateBomItemsAsync(
             ProjectId,
-            new BatchUpdateBomItemsCommand([pending.Id], ["kind", "material"], BomKind.NonStandard, Material: "6061"),
+            new BatchUpdateBomItemsCommand([pending.Id], ["kind", "material", "isWearPart"], BomKind.NonStandard, Material: "6061", IsWearPart: true),
             "admin", UserRole.Administrator, default));
 
+        Assert.True(maintained.IsWearPart);
         Assert.Equal(CadPropertyWritebackStatus.PendingSave, maintained.PropertyWritebackStatus);
         Assert.Empty(await repository.ListCadPropertyWritebacksAsync(ProjectId, default));
 
@@ -958,13 +1063,38 @@ public sealed class Phase1ReleaseWorkflowTests
         var saved = await workflow.ReplaceBomAsync(ProjectId, BomKind.NonStandard, current.Select(item => new BomItemInput(
             item.Sequence, item.DrawingNumber, item.Name, item.Quantity, item.Unit, item.Material, item.Specification, item.Revision, item.IsComplete,
             item.SourceDocumentId, item.SourceConfiguration, item.Remark, item.Brand, item.SurfaceTreatment, item.Weight,
-            item.IsPendingClassification, item.IsManualUnmatched, item.IsManuallyRetained)).ToArray(),
+            item.IsPendingClassification, item.IsManualUnmatched, item.IsManuallyRetained, IsWearPart: item.IsWearPart)).ToArray(),
             "admin", UserRole.Administrator, default);
 
         Assert.Equal(CadPropertyWritebackStatus.Pending, saved.Single(item => item.Id == maintained.Id).PropertyWritebackStatus);
         var writeback = Assert.Single(await repository.ListCadPropertyWritebacksAsync(ProjectId, default));
         Assert.Equal(maintained.Id, writeback.BomItemId);
         Assert.Equal(CadPropertyWritebackStatus.Pending, writeback.Status);
+        Assert.Equal("是", writeback.Properties["易损件"]);
+    }
+
+    [Fact]
+    public async Task BatchWearPartUpdate_KeepsManualRowsLocalAndRequiresAnExplicitValue()
+    {
+        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(), new RecordingPublisher(), TimeProvider.System);
+        var manual = new BomItem(Guid.NewGuid(), ProjectId, BomKind.Standard, 1, "MANUAL-WEAR", "人工易损件", 1, "001", null, "M1", "W1", true)
+        {
+            Source = "Manual",
+            IsWearPart = false
+        };
+        await repository.ReplaceBomAsync(ProjectId, BomKind.Standard, [manual], default);
+
+        var updated = Assert.Single(await workflow.BatchUpdateBomItemsAsync(ProjectId,
+            new BatchUpdateBomItemsCommand([manual.Id], ["isWearPart"], IsWearPart: true),
+            "admin", UserRole.Administrator, default));
+
+        Assert.True(updated.IsWearPart);
+        Assert.Empty(await repository.ListCadPropertyWritebacksAsync(ProjectId, default));
+        var exception = await Assert.ThrowsAsync<PdmRuleException>(() => workflow.BatchUpdateBomItemsAsync(ProjectId,
+            new BatchUpdateBomItemsCommand([manual.Id], ["isWearPart"]),
+            "admin", UserRole.Administrator, default));
+        Assert.Equal("易损件必须选择是或否。", exception.Message);
     }
 
     [Fact]
@@ -1273,6 +1403,80 @@ public sealed class Phase1ReleaseWorkflowTests
         var submitted = await workflow.SubmitReleasePackageAsync(package.Id, "admin", UserRole.Administrator, default);
 
         Assert.NotEqual(ReleasePackageState.Draft, submitted.State);
+    }
+
+    [Fact]
+    public async Task ScopedStandardReview_IgnoresAuxiliaryWearPartAndImpactChangesWhenSubmitting()
+    {
+        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        await ConfigureApprovalWorkflowsAsync(repository);
+        var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(), new RecordingPublisher(), TimeProvider.System);
+        var package = await workflow.CreateScopedReleasePackageAsync(
+            ProjectId, null, string.Empty, string.Empty, string.Empty, "未指定", null,
+            ReleaseScope.StandardFormal, [], "admin", UserRole.Administrator, default);
+        var items = await repository.GetBomAsync(ProjectId, BomKind.Standard, default);
+
+        await repository.ReplaceBomAsync(
+            ProjectId,
+            BomKind.Standard,
+            items.Select((item, index) => index == 0
+                ? item with
+                {
+                    IsWearPart = !item.IsWearPart,
+                    ImpactStage = ProjectPlanStage.Assembly,
+                    IsManuallyOverridden = !item.IsManuallyOverridden,
+                    PropertyWritebackStatus = CadPropertyWritebackStatus.Pending
+                }
+                : item).ToArray(),
+            default);
+
+        var submitted = await workflow.SubmitReleasePackageAsync(package.Id, "admin", UserRole.Administrator, default);
+
+        Assert.NotEqual(ReleasePackageState.Draft, submitted.State);
+    }
+
+    [Fact]
+    public async Task PublishedBom_AuxiliaryEditsDoNotCreateSecondReleaseVersion()
+    {
+        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        await ConfigureApprovalWorkflowsAsync(repository);
+        var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(), new RecordingPublisher(), TimeProvider.System);
+        var package = await workflow.CreateScopedReleasePackageAsync(
+            ProjectId, null, string.Empty, string.Empty, string.Empty, "未指定", null,
+            ReleaseScope.StandardFormal, [], "admin", UserRole.Administrator, default);
+        package = await workflow.SubmitReleasePackageAsync(package.Id, "admin", UserRole.Administrator, default);
+        foreach (var task in package.ApprovalTasks.Where(task => task.Decision is null).OrderBy(task => task.StepOrder))
+            package = await workflow.DecideAsync(task.Id, "admin", UserRole.Administrator, ApprovalDecision.Approved, "同意", default);
+        Assert.Equal(ReleasePackageState.Published, package.State);
+        var versionsBefore = (await repository.ListBomVersionsAsync(ProjectId, BomKind.Standard, default))
+            .Select(version => (version.Id, version.State)).OrderBy(version => version.Id).ToArray();
+        var original = (await repository.GetBomAsync(ProjectId, BomKind.Standard, default)).First();
+
+        var batchUpdated = Assert.Single(await workflow.BatchUpdateBomItemsAsync(
+            ProjectId,
+            new BatchUpdateBomItemsCommand([original.Id], ["isWearPart", "impactStage"], IsWearPart: !original.IsWearPart, ImpactStage: ProjectPlanStage.Assembly),
+            "admin", UserRole.Administrator, default));
+        Assert.Equal(!original.IsWearPart, batchUpdated.IsWearPart);
+        Assert.Equal(ProjectPlanStage.Assembly, batchUpdated.ImpactStage);
+        Assert.Equal(versionsBefore, (await repository.ListBomVersionsAsync(ProjectId, BomKind.Standard, default))
+            .Select(version => (version.Id, version.State)).OrderBy(version => version.Id).ToArray());
+
+        var current = await repository.GetBomAsync(ProjectId, BomKind.Standard, default);
+        await workflow.ReplaceBomAsync(ProjectId, BomKind.Standard, current.Select(item => new BomItemInput(
+            item.Sequence, item.DrawingNumber, item.Name, item.Quantity, item.Unit, item.Material, item.Specification, item.Revision, item.IsComplete,
+            item.SourceDocumentId, item.SourceConfiguration, item.Remark, item.Brand, item.SurfaceTreatment, item.Weight,
+            item.IsPendingClassification, item.IsManualUnmatched, item.IsManuallyRetained, item.Id, item.SourceInstancePath, item.ParentDrawingNumber,
+            item.HeatTreatment, item.EngineeringKitReferenceId, item.EngineeringKitId, item.EngineeringKitRevisionId, item.EngineeringKitCode,
+            item.EngineeringKitVersionNumber, item.EngineeringKitComponentId, item.EngineeringKitComponentOptional,
+            IsWearPart: item.Id == original.Id ? original.IsWearPart : item.IsWearPart,
+            ImpactStage: item.Id == original.Id ? ProjectPlanStage.Commissioning : item.ImpactStage)).ToArray(),
+            "admin", UserRole.Administrator, default);
+
+        Assert.Equal(versionsBefore, (await repository.ListBomVersionsAsync(ProjectId, BomKind.Standard, default))
+            .Select(version => (version.Id, version.State)).OrderBy(version => version.Id).ToArray());
+        var saved = Assert.Single(await repository.GetBomAsync(ProjectId, BomKind.Standard, default), item => item.Id == original.Id);
+        Assert.Equal(original.IsWearPart, saved.IsWearPart);
+        Assert.Equal(ProjectPlanStage.Commissioning, saved.ImpactStage);
     }
 
     [Fact]
