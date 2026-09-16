@@ -41,6 +41,7 @@ describe('EngineeringKitLibrary', () => {
     expect(wrapper.text()).toContain('V02 草稿')
     expect(wrapper.text()).toContain('必选 1 · 可选 1')
     expect(wrapper.text()).toContain('套件本身不进入 U9C')
+    expect(wrapper.get('[aria-label="料品套件"]').text()).toContain('料品套件')
   })
 
   it('publishes the current draft without changing the UKIT code', async () => {

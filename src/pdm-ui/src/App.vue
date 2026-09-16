@@ -7,7 +7,6 @@ import AuditLog from './components/AuditLog.vue'
 import BomManager from './components/BomManager.vue'
 import DocumentTree from './components/DocumentTree.vue'
 import DrawingReviewPanel from './components/DrawingReviewPanel.vue'
-import EngineeringKitLibrary from './components/EngineeringKitLibrary.vue'
 import ProjectFileLibrary from './components/ProjectFileLibrary.vue'
 import ValidationPlanManager from './components/ValidationPlanManager.vue'
 import LoginView from './components/LoginView.vue'
@@ -912,12 +911,14 @@ async function openWhereUsedParent(projectId: string, parentDocumentId: string) 
           v-else-if="activeView === 'materials'"
           :token="workspace.getAccessToken()"
           :can-edit="workspace.hasPermission('material.manage')"
+          :can-create="workspace.hasPermission('material.apply') || workspace.hasPermission('material.manage')"
           :can-approve="workspace.hasPermission('material.manage')"
           :can-decide-material-code="workspace.hasPermission('approval.decide')"
           :can-manage-integration="workspace.hasPermission('settings.storage.manage')"
           :can-view-relations="workspace.hasPermission('material-relation.view')"
           :can-manage-relations="workspace.hasPermission('material-relation.manage')"
           :can-publish-relations="workspace.hasPermission('material-relation.publish')"
+          :can-manage-kits="workspace.hasPermission('standard-library.manage')"
           :requested-tab="materialRequestedTab"
           @notice-counts-change="updateMaterialNoticeCount"
         />
@@ -927,11 +928,9 @@ async function openWhereUsedParent(projectId: string, parentDocumentId: string) 
           :can-manage="workspace.hasPermission('standard-library.manage')"
           :can-edit="workspace.hasPermission('material.manage')"
         />
-        <EngineeringKitLibrary
-          v-else-if="activeView === 'standard-structure'"
-          :token="workspace.getAccessToken()"
-          :can-manage="workspace.hasPermission('standard-library.manage')"
-        />
+        <section v-else-if="activeView === 'standard-structure'" class="standard-structure-empty pdm-panel" aria-label="标准结构空状态">
+          <el-empty description="标准结构当前不用于存放套件，暂时留空" />
+        </section>
         <SystemManagement
           v-else-if="activeView === 'admin'"
           :desktop-available="desktopAvailable"

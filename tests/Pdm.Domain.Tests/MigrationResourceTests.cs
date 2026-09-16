@@ -41,6 +41,24 @@ public sealed class MigrationResourceTests
     }
 
     [Fact]
+    public async Task EngineerMaterialApplyMigration_GrantsDraftCreationWithoutManagementPermission()
+    {
+        var assembly = typeof(MySqlMigrationRunner).Assembly;
+        var resourceName = assembly.GetManifestResourceNames()
+            .Single(name => name.EndsWith(".Migrations.110_engineer_material_apply.sql", StringComparison.Ordinal));
+
+        await using var stream = assembly.GetManifestResourceStream(resourceName);
+        Assert.NotNull(stream);
+        using var reader = new StreamReader(stream!);
+        var sql = await reader.ReadToEndAsync();
+
+        Assert.Contains("'material.apply'", sql, StringComparison.Ordinal);
+        Assert.Contains("base_role='Engineer'", sql, StringComparison.Ordinal);
+        Assert.Contains("permission_code='bom.edit'", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("material.manage", sql, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task ExecutionEngineerRoleMigration_GrantsCentralPermissionToDesignAndMechanicalRoles()
     {
         var assembly = typeof(MySqlMigrationRunner).Assembly;
@@ -430,6 +448,16 @@ public sealed class MigrationResourceTests
         using var reader = new StreamReader(assembly.GetManifestResourceStream(name)!);
         var sql = await reader.ReadToEndAsync();
         Assert.Contains("ADD COLUMN bom_fingerprint CHAR(64) NULL", sql);
+    }
+
+    [Fact]
+    public async Task MaterialRelationSelectionAdviceMigration_IsAdditive()
+    {
+        var assembly = typeof(MySqlMigrationRunner).Assembly;
+        var name = assembly.GetManifestResourceNames().Single(item => item.EndsWith(".109_material_relation_selection_advice.sql", StringComparison.Ordinal));
+        using var reader = new StreamReader(assembly.GetManifestResourceStream(name)!);
+        var sql = await reader.ReadToEndAsync();
+        Assert.Contains("ADD COLUMN selection_advice VARCHAR(500) NULL", sql);
     }
 
     [Fact]

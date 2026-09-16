@@ -38,6 +38,23 @@ internal sealed class BatchRenameHierarchyItem
 
 internal static class BatchRenameRule
 {
+    internal const string ComponentDrawingScope = "部件图";
+    internal const string NonStandardScope = "非标件";
+
+    internal static bool IsInHierarchyScope(
+        BatchRenameHierarchyKind kind,
+        string classification,
+        bool includeComponentDrawings,
+        bool includeNonStandardParts)
+    {
+        var normalizedClassification = (classification ?? string.Empty).Trim();
+        var isComponentDrawing = kind == BatchRenameHierarchyKind.Assembly
+            || string.Equals(normalizedClassification, ComponentDrawingScope, StringComparison.OrdinalIgnoreCase);
+        var isNonStandard = string.Equals(normalizedClassification, NonStandardScope, StringComparison.OrdinalIgnoreCase);
+        return includeComponentDrawings && isComponentDrawing
+            || includeNonStandardParts && isNonStandard;
+    }
+
     internal static IReadOnlyDictionary<string, string> BuildHierarchyNumbers(IEnumerable<BatchRenameHierarchyItem> source)
     {
         var items = (source ?? Array.Empty<BatchRenameHierarchyItem>())

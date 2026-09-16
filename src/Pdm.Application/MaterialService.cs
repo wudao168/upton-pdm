@@ -589,7 +589,7 @@ public sealed class MaterialService(
 
     public async Task<PdmMaterial> CreateAsync(SaveMaterialCommand command, string actor, UserRole role, CancellationToken cancellationToken)
     {
-        await RequirePermissionAsync(actor, role, PermissionCodes.MaterialManage, cancellationToken);
+        await RequireAnyPermissionAsync(actor, role, [PermissionCodes.MaterialApply, PermissionCodes.MaterialManage], cancellationToken);
         var category = await RequireCreatableCategoryAsync(command.CategoryCode, command.Kind, cancellationToken);
         var now = timeProvider.GetUtcNow();
         var normalized = Normalize(Guid.NewGuid(), command, null, actor, now, category.Code);
@@ -723,7 +723,7 @@ public sealed class MaterialService(
         UserRole role,
         CancellationToken cancellationToken)
     {
-        await RequirePermissionAsync(actor, role, PermissionCodes.MaterialManage, cancellationToken);
+        await RequireAnyPermissionAsync(actor, role, [PermissionCodes.MaterialApply, PermissionCodes.MaterialManage], cancellationToken);
         var validated = await ValidateImportRowsAsync(rows, actor, cancellationToken);
         var previews = validated.Select(item => new MaterialImportRowPreview(
             item.Command.RowNumber, item.Command.CategoryCode, item.Command.Name, item.Command.UnitCode,
@@ -737,7 +737,7 @@ public sealed class MaterialService(
         UserRole role,
         CancellationToken cancellationToken)
     {
-        await RequirePermissionAsync(actor, role, PermissionCodes.MaterialManage, cancellationToken);
+        await RequireAnyPermissionAsync(actor, role, [PermissionCodes.MaterialApply, PermissionCodes.MaterialManage], cancellationToken);
         var validated = await ValidateImportRowsAsync(rows, actor, cancellationToken);
         var invalid = validated.Where(item => item.Errors.Count > 0).ToArray();
         if (invalid.Length > 0)

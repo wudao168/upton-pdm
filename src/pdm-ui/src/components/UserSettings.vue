@@ -35,7 +35,7 @@ const editingUsername = ref('')
 const selectedUser = ref<PdmUser | null>(null)
 const membershipUnits = ref<string[]>([])
 const primaryUnitId = ref('')
-const userForm = reactive<SavePdmUserInput>({ username: '', displayName: '', role: 'Engineer', roles: ['Engineer'], isActive: true, companyId: '', crossCompanyView: false, accessibleCompanyIds: [], password: '11111111' })
+const userForm = reactive<SavePdmUserInput>({ username: '', displayName: '', role: '', roles: [], isActive: true, companyId: '', crossCompanyView: false, accessibleCompanyIds: [], password: '11111111' })
 
 const canManageOrganization = computed(() => props.permissions.includes('settings.organization.manage'))
 const canViewRoles = computed(() => props.permissions.includes('system.role.view'))
@@ -87,7 +87,7 @@ function openUser(user?: PdmUser) {
   editingUsername.value = user?.username ?? ''
   Object.assign(userForm, user
     ? { username: user.username, displayName: user.displayName, role: user.role, roles: [...(user.roles ?? [user.role])], isActive: user.isActive, companyId: user.companyId ?? props.activeOrganizationId, crossCompanyView: Boolean(user.crossCompanyView), accessibleCompanyIds: [...(user.accessibleCompanyIds ?? [])], password: '' }
-    : { username: '', displayName: '', role: 'Engineer', roles: ['Engineer'], isActive: true, companyId: props.activeOrganizationId, crossCompanyView: false, accessibleCompanyIds: [], password: '11111111' })
+    : { username: '', displayName: '', role: '', roles: [], isActive: true, companyId: props.activeOrganizationId, crossCompanyView: false, accessibleCompanyIds: [], password: '11111111' })
   userDialog.value = true
 }
 

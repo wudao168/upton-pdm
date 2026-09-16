@@ -38,7 +38,7 @@ const membershipUnits = ref<string[]>([])
 const primaryUnit = ref('')
 const primaryManager = ref('')
 const collaborativeManagers = ref<string[]>([])
-const memberToAdd = ref('')
+const membersToAdd = ref<string[]>([])
 
 const sortedCompanies = computed(() => [...props.directory.organizations].sort((left, right) => Number(right.isActive !== false) - Number(left.isActive !== false) || left.name.localeCompare(right.name, 'zh-CN')))
 const selectableCompanies = computed(() => sortedCompanies.value.filter(company => company.isActive !== false))
@@ -193,7 +193,7 @@ function openManagers(unit: OrganizationUnit) {
   managerDialog.value = true
 }
 function openAddMember() {
-  memberToAdd.value = ''
+  membersToAdd.value = []
   addMemberDialog.value = true
 }
 
@@ -236,14 +236,17 @@ async function saveManagers() {
   } catch (error) { ElMessage.error(error instanceof Error ? error.message : '负责人保存失败') }
 }
 async function addMember() {
-  if (!currentUnit.value || !memberToAdd.value) return ElMessage.warning('请选择要添加的人员')
-  const memberships = userMemberships(memberToAdd.value)
-  const unitIds = [...new Set([...memberships.map(item => item.unitId), currentUnit.value.id])]
-  const primaryUnitId = memberships.find(item => item.isPrimary)?.unitId ?? currentUnit.value.id
+  if (!currentUnit.value || !membersToAdd.value.length) return ElMessage.warning('请选择要添加的人员')
+  const unitId = currentUnit.value.id
   try {
-    await props.onUpdateMemberships(memberToAdd.value, unitIds, primaryUnitId)
+    await Promise.all(membersToAdd.value.map(username => {
+      const memberships = userMemberships(username)
+      const unitIds = [...new Set([...memberships.map(item => item.unitId), unitId])]
+      const primaryUnitId = memberships.find(item => item.isPrimary)?.unitId ?? unitId
+      return props.onUpdateMemberships(username, unitIds, primaryUnitId)
+    }))
     addMemberDialog.value = false
-    ElMessage.success('人员已添加到本组织')
+    ElMessage.success(`${membersToAdd.value.length} 人已添加到本组织`)
   } catch (error) { ElMessage.error(error instanceof Error ? error.message : '人员添加失败') }
 }
 </script>
@@ -305,7 +308,7 @@ async function addMember() {
     <el-dialog v-model="companyDialog" :title="companyForm.id ? '编辑公司' : '新增公司'" width="520px"><div class="org-form"><label>公司名称<input v-model="companyForm.name" maxlength="200"></label><label>项目号公司代码<input v-model="companyForm.projectCompanyCode" maxlength="1" placeholder="如 7"></label><label>设备型号公司代码<input v-model="companyForm.modelCompanyCode" maxlength="8" placeholder="如 AK"></label><label class="org-form-check"><input v-model="companyForm.isActive" type="checkbox"><span>启用</span></label></div><template #footer><button class="pdm-secondary-action" type="button" @click="companyDialog=false">取消</button><button class="pdm-primary-action" type="button" :disabled="pending" @click="saveCompany">保存</button></template></el-dialog>
     <el-dialog v-model="unitDialog" :title="unitForm.id ? '编辑组织' : unitForm.parentUnitId ? '新增下级组织' : '新建部门'" width="560px" :close-on-click-modal="false"><div class="org-form"><label>所属公司<input :value="companyName(unitForm.organizationId)" disabled></label><label>类型<select v-model="unitForm.kind" :disabled="!unitForm.parentUnitId"><option v-if="!unitForm.parentUnitId" value="BusinessDivision">部门（公司直属）</option><option value="Department">下级部门</option><option value="Team">团队</option></select></label><label v-if="unitForm.kind !== 'BusinessDivision'">上级组织<select v-model="unitForm.parentUnitId"><option value="" disabled>请选择</option><option v-for="unit in unitOptions" :key="unit.id" :value="unit.id">{{ unitPath(unit.id) }}</option></select></label><label>{{ unitForm.kind === 'BusinessDivision' ? '组织编码' : '本级编码' }}<span class="org-code-input" :class="{ 'has-prefix': unitCodePrefix }"><span v-if="unitCodePrefix">{{ unitCodePrefix }}</span><input v-model="unitForm.code" :maxlength="unitCodeMaxLength" aria-label="本级组织编码"></span><small v-if="unitCodePrefix" class="org-code-preview">完整编码：{{ completeUnitCode || '—' }}</small></label><label>组织名称<input v-model="unitForm.name" maxlength="160"></label><label v-if="unitForm.kind === 'BusinessDivision'" class="org-form-check"><input v-model="unitForm.canManufacture" type="checkbox"><span>制造部门（可承接项目）</span></label><label class="org-form-check"><input v-model="unitForm.isActive" type="checkbox"><span>启用</span></label><small class="org-form-note">组织编码按上级完整编码逐级拼接，仅最终完整编码不能重复；下级部门和团队最多10级。</small></div><template #footer><button class="pdm-secondary-action" type="button" @click="unitDialog=false">取消</button><button class="pdm-primary-action" type="button" :disabled="pending" @click="saveUnit">{{ pending ? '保存中…' : '保存组织' }}</button></template></el-dialog>
     <el-dialog v-model="membershipDialog" :title="`人员归属 · ${selectedUser?.displayName ?? ''}`" width="600px"><div class="org-form"><label>主公司<input :value="currentCompany?.name || ''" disabled></label><label>所属组织<el-select v-model="membershipUnits" multiple filterable style="width:100%"><el-option v-for="unit in companyUnits.filter(item => item.isActive)" :key="unit.id" :label="unitPath(unit.id)" :value="unit.id" /></el-select></label><label>主组织<el-select v-model="primaryUnit" style="width:100%"><el-option v-for="unitId in membershipUnits" :key="unitId" :label="unitPath(unitId)" :value="unitId" /></el-select></label><small class="org-form-note">组织关系仅在用户主公司内维护；可加入多个组织，但必须指定一个主组织。</small></div><template #footer><button class="pdm-secondary-action" type="button" @click="membershipDialog=false">取消</button><button class="pdm-primary-action" type="button" :disabled="pending" @click="saveMemberships">保存</button></template></el-dialog>
-    <el-dialog v-model="addMemberDialog" :title="`添加人员 · ${currentUnit?.name ?? ''}`" width="520px" :close-on-click-modal="false"><div class="org-form"><label>选择人员<el-select v-model="memberToAdd" filterable clearable placeholder="请选择" aria-label="选择要添加的人员" style="width:100%"><el-option v-for="user in addableUsers" :key="user.username" :label="user.displayName" :value="user.username" /></el-select></label><small class="org-form-note">可按姓名筛选；将人员添加到当前组织时，已有的其他组织归属和主组织保持不变。</small></div><template #footer><button class="pdm-secondary-action" type="button" @click="addMemberDialog=false">取消</button><button class="pdm-primary-action" type="button" :disabled="pending || !memberToAdd" @click="addMember">添加到本组织</button></template></el-dialog>
+    <el-dialog v-model="addMemberDialog" :title="`添加人员 · ${currentUnit?.name ?? ''}`" width="520px" :close-on-click-modal="false"><div class="org-form"><label>选择人员<el-select v-model="membersToAdd" multiple collapse-tags filterable clearable placeholder="请选择" aria-label="选择要添加的人员" style="width:100%"><el-option v-for="user in addableUsers" :key="user.username" :label="user.displayName" :value="user.username" /></el-select></label><small class="org-form-note">可多选并按姓名筛选；将人员添加到当前组织时，已有的其他组织归属和主组织保持不变。</small></div><template #footer><button class="pdm-secondary-action" type="button" @click="addMemberDialog=false">取消</button><button class="pdm-primary-action" type="button" :disabled="pending || !membersToAdd.length" @click="addMember">添加到本组织</button></template></el-dialog>
     <el-dialog v-model="managerDialog" :title="`部门负责人 · ${selectedUnit?.name ?? ''}`" width="600px" :close-on-click-modal="false"><div class="org-form"><label>主负责人<el-select v-model="primaryManager" clearable filterable style="width:100%" @clear="collaborativeManagers=[]"><el-option v-for="user in managerCandidates()" :key="user.username" :label="user.displayName" :value="user.username" /></el-select></label><label>协同负责人<el-select v-model="collaborativeManagers" multiple filterable style="width:100%"><el-option v-for="user in managerCandidates().filter(item => item.username !== primaryManager)" :key="user.username" :label="user.displayName" :value="user.username" /></el-select></label><small class="org-form-note">每级部门都可设置负责人；清空主负责人并保存，即删除该组织的全部负责人。</small></div><template #footer><button v-if="primaryManager || collaborativeManagers.length" class="org-clear-manager" type="button" @click="primaryManager=''; collaborativeManagers=[]">清空负责人</button><button class="pdm-secondary-action" type="button" @click="managerDialog=false">取消</button><button class="pdm-primary-action" type="button" :disabled="pending" @click="saveManagers">{{ pending ? '保存中…' : '保存负责人' }}</button></template></el-dialog>
   </section>
 </template>

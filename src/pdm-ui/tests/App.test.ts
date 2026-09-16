@@ -21,13 +21,14 @@ function installApiMock(projectsBeforeDefault: Array<Record<string, unknown>> = 
   let u9Settings = { baseUrl: 'http://10.7.7.188/U9', enterpriseCode: '01', organizationCode: '7', userCode: 'pdm', clientId: 'PDM', clientSecretConfigured: true, itemCreatePath: '/webapi/ItemMaster/Create', itemQueryPath: '/webapi/ItemMaster/Query', itemModifyPath: '/webapi/ItemMaster/Modify', itemDeletePath: '/webapi/ItemMaster/Delete', unitCodeMappings: {}, writeEnabled: false }
   const validationRules = { standard: ['drawingNumber', 'name', 'unit', 'specification', 'quantity', 'revision'], nonStandard: ['drawingNumber', 'name', 'unit', 'material', 'quantity', 'revision'], electrical: ['drawingNumber', 'name', 'unit', 'quantity', 'revision'] }
   const editLocks = [{ documentId: 'doc-lock', projectId, projectCode: 'PRJ-REAL-001', projectName: '真实装配项目', drawingNumber: 'LOCK-001', documentName: '长期编辑图档', fileName: 'LOCK-001.SLDPRT', checkedOutBy: 'designer', checkedOutAt: '2026-08-14T00:00:00Z', checkoutMachine: 'DESIGN-WS', lastHeartbeatAt: '2026-08-14T00:03:00Z', leaseExpiresAt: '2026-08-14T00:18:00Z', connectionState: 'Active', attentionLevel: 'Reminder', releaseRequestedBy: null, releaseRequestedAt: null, releaseRequestReason: null, ownedByCurrentUser: false, canRequestRelease: true, canForceRelease: false }]
-  const engineerPermissions = ['project.view', 'project.create', 'project.child.create', 'project.staffing.manage', 'project.designer.assign', 'project.content.view', 'document.edit', 'bom.edit', 'material.view', 'release.manage', 'standard-library.view']
+  const engineerPermissions = ['project.view', 'project.create', 'project.child.create', 'project.staffing.manage', 'project.designer.assign', 'project.content.view', 'document.edit', 'bom.edit', 'material.view', 'material.apply', 'release.manage', 'standard-library.view']
   const adminPermissions = [...engineerPermissions, 'material.manage', 'project.delete', 'project.execution.assign', 'approval.decide', 'settings.customer.manage', 'settings.organization.manage', 'settings.folder.manage', 'settings.storage.manage', 'system.role.view', 'system.role.edit', 'audit.view']
   const roleDirectory = {
     permissions: [
       { code: 'project.view', name: '查看负责项目', module: '项目管理', sensitive: false },
       { code: 'project.designer.assign', name: '分配子项目设计人员', module: '项目分工', sensitive: false },
       { code: 'document.edit', name: '登记、签出和存档图档', module: '项目内容', sensitive: true },
+      { code: 'material.apply', name: '申请新增料品', module: '料品管理', sensitive: false },
       { code: 'system.role.view', name: '查看角色权限', module: '角色权限', sensitive: false },
       { code: 'system.role.edit', name: '修改角色权限', module: '角色权限', sensitive: true },
     ],
@@ -428,7 +429,7 @@ describe('PLM client workspace', () => {
     wrapper.unmount()
   })
 
-  it('opens the UKIT standard structure library below standard materials', async () => {
+  it('keeps the standard structure entry but shows its reserved empty state', async () => {
     const wrapper = mount(App, { attachTo: document.body, global: { plugins: [ElementPlus] } })
     await login(wrapper, false)
 
@@ -440,9 +441,8 @@ describe('PLM client workspace', () => {
     await flushPromises()
 
     expect(wrapper.get('.pdm-sidebar__nav .pdm-nav-item.is-active').text()).toContain('标准结构')
-    const standardStructurePage = wrapper.get('[aria-label="标准结构套件库"]')
-    expect(standardStructurePage.text()).toContain('UKIT 套件仅供 PDM 工程引用')
-    expect(standardStructurePage.text()).toContain('套件本身不进入 U9C')
+    const standardStructurePage = wrapper.get('[aria-label="标准结构空状态"]')
+    expect(standardStructurePage.text()).toContain('标准结构当前不用于存放套件，暂时留空')
     expect(window.localStorage.getItem('upton-pdm-active-navigation')).toBe('standard-structure')
     wrapper.unmount()
   })

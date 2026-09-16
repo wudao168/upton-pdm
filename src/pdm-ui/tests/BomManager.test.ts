@@ -17,6 +17,8 @@ const materialApi = vi.hoisted(() => ({
   applyMaterialRelations: vi.fn(),
   listEngineeringKits: vi.fn(),
   expandEngineeringKit: vi.fn(),
+  listDocumentVersions: vi.fn(),
+  downloadDocumentPreviewFile: vi.fn(),
 }))
 
 vi.mock('../src/api', () => materialApi)
@@ -57,6 +59,8 @@ describe('BomManager', () => {
     materialApi.applyMaterialRelations.mockReset()
     materialApi.listEngineeringKits.mockReset().mockResolvedValue([])
     materialApi.expandEngineeringKit.mockReset()
+    materialApi.listDocumentVersions.mockReset().mockResolvedValue([])
+    materialApi.downloadDocumentPreviewFile.mockReset().mockResolvedValue(undefined)
   })
 
   it('places the orange source-data view before categorized BOM tabs and treats empty BOMs automatically', async () => {
@@ -748,8 +752,61 @@ describe('BomManager', () => {
     await wrapper.findAll('button[role="tab"]')[1].trigger('click')
 
     expect(wrapper.findAll('thead th').map(header => header.text())).toEqual([
-      '', '', '序号', '物料分类', '易损件', '关键', '单位', '物料编码', '物料名称', '上级物料编码', '型号', '备注信息', '品牌', '材质', '表面处理', '重量', '数量', '发布  总/源', '图纸核对', '版本', '问题', '资料状态',
+      '', '', '序号', '物料分类', '易损件', '关键', '单位', '物料编码', '物料名称', '上级物料编码', '型号', '备注信息', '品牌', '材质', '表面处理', '重量', '数量', '发布  总/源', '图纸', '版本', '问题', '资料状态',
     ])
+  })
+
+  it('defaults heat treatment by BOM type and saves personal column visibility', async () => {
+    const standard = { id: 'standard-heat', kind: 'Standard' as const, sequence: 1, drawingNumber: 'S-001', name: '标准件', quantity: 1, unit: '001', revision: 'W1', complete: true, heatTreatment: '调质' }
+    const nonStandard = { id: 'non-standard-heat', kind: 'NonStandard' as const, sequence: 1, drawingNumber: 'N-001', name: '非标件', quantity: 1, unit: '001', revision: 'W1', complete: true, heatTreatment: '淬火', isWearPart: true }
+    const electrical = { id: 'electrical-heat', kind: 'Electrical' as const, sequence: 1, drawingNumber: 'E-001', name: '电气件', quantity: 1, unit: '001', revision: 'W1', complete: true, heatTreatment: '退火' }
+    const wrapper = mount(BomManager, {
+      props: { standard: [standard], nonStandard: [nonStandard], electrical: [electrical], declarations: [], pending: false, editable: true, username: 'engineer' },
+      global: { plugins: [ElementPlus] },
+    })
+    const headers = () => wrapper.findAll('thead th').map(header => header.text())
+
+    await wrapper.findAll('button[role="tab"]')[1].trigger('click')
+    expect(headers()).not.toContain('热处理')
+    await wrapper.get('.pdm-bom-column-settings-action').trigger('click')
+    const heatTreatmentOption = wrapper.findAll('.pdm-bom-column-settings-list .el-checkbox').find(option => option.text() === '热处理')!
+    await heatTreatmentOption.get('input[type="checkbox"]').setValue(true)
+    await wrapper.findAll('.el-dialog button').find(button => button.text() === '保存')!.trigger('click')
+    expect(headers()).toContain('热处理')
+    expect(window.localStorage.getItem('upton-pdm:bom-columns:engineer:Standard')).toContain('heatTreatment')
+
+    await wrapper.findAll('button[role="tab"]')[2].trigger('click')
+    expect(headers()).toContain('热处理')
+    expect(wrapper.get('button[aria-label="编辑热处理"]').text()).toBe('淬火')
+
+    await wrapper.findAll('button[role="tab"]')[3].trigger('click')
+    expect(headers()).not.toContain('热处理')
+
+    await wrapper.findAll('button[role="tab"]')[4].trigger('click')
+    expect(headers()).toContain('热处理')
+    expect(wrapper.get('.pdm-bom-table tbody').text()).toContain('淬火')
+
+    await wrapper.findAll('button[role="tab"]')[2].trigger('click')
+    await wrapper.get('button[aria-label="编辑热处理"]').trigger('click')
+    const heatTreatmentEditor = wrapper.get('input[aria-label="内联编辑热处理"]')
+    await heatTreatmentEditor.setValue('渗碳')
+    await heatTreatmentEditor.trigger('keydown', { key: 'Enter' })
+    expect(wrapper.get('button[aria-label="编辑热处理"]').text()).toBe('渗碳')
+    expect(wrapper.get('.pdm-bom-unsaved-count').text()).toBe('未保存 1 项')
+  })
+
+  it('keeps the three-category BOM toolbar labels compact', async () => {
+    const wrapper = mount(BomManager, {
+      props: {
+        standard: [{ id: 'standard-toolbar', kind: 'Standard', sequence: 1, drawingNumber: 'S-001', name: '标准件', quantity: 1, unit: '001', revision: 'W1', complete: true }],
+        nonStandard: [], electrical: [], declarations: [], pending: false, editable: true,
+      },
+    })
+
+    await wrapper.findAll('button[role="tab"]')[1].trigger('click')
+
+    expect(wrapper.get('.pdm-bom-version-picker').text()).not.toContain('查看版本')
+    expect(wrapper.findAll('.pdm-bom-version-picker button').map(button => button.text())).toContain('对比发布')
   })
 
   it('keeps one quick-entry row at the bottom and excludes an untouched row from save', async () => {
@@ -1025,7 +1082,7 @@ describe('BomManager', () => {
     expect(wrapper.get('.pdm-bom-discard-action').classes()).toContain('pdm-bom-discard-action')
   })
 
-  it('shows strict 3D and unique 2D checks for non-standard BOM rows', async () => {
+  it('shows downloadable 2D and 3D drawings for released non-standard BOM rows', async () => {
     const linked = { id: 'bom-linked', kind: 'NonStandard' as const, sequence: 1, drawingNumber: 'N-001', name: '非标零件', quantity: 2, unit: '件', revision: 'W1', complete: true, source: 'Auto' as const, sourceDocumentId: 'model-1' }
     const missingDrawing = { id: 'bom-missing-drawing', kind: 'NonStandard' as const, sequence: 2, drawingNumber: 'N-002', name: '缺工程图零件', quantity: 1, unit: '件', revision: 'W1', complete: true, source: 'Auto' as const, sourceDocumentId: 'model-2' }
     const manual = { id: 'bom-manual', kind: 'NonStandard' as const, sequence: 3, drawingNumber: 'N-003', name: '人工非标件', quantity: 1, unit: '件', revision: 'W1', complete: true, source: 'Manual' as const }
@@ -1033,20 +1090,28 @@ describe('BomManager', () => {
       props: {
         sourceData: [linked, missingDrawing], standard: [], nonStandard: [linked, missingDrawing, manual], electrical: [], declarations: [], pending: false, editable: true,
         documents: [
-          { id: 'model-1', projectId: 'project-1', drawingNumber: 'N-001', name: '非标零件', fileName: 'N-001.SLDPRT', kind: 'Part', state: 'Working', revision: 'W1' },
+          { id: 'model-1', projectId: 'project-1', drawingNumber: 'N-001', name: '非标零件', fileName: 'N-001.SLDPRT', kind: 'Part', state: 'Released', revision: 'W1' },
           { id: 'model-2', projectId: 'project-1', drawingNumber: 'N-002', name: '缺工程图零件', fileName: 'N-002.SLDPRT', kind: 'Part', state: 'Working', revision: 'W1' },
-          { id: 'drawing-1', projectId: 'project-1', drawingNumber: 'N-001', name: '非标工程图', fileName: 'N-001.SLDDRW', kind: 'Drawing', state: 'Working', revision: 'W2' },
+          { id: 'drawing-1', projectId: 'project-1', drawingNumber: 'N-001', name: '非标工程图', fileName: 'N-001.SLDDRW', kind: 'Drawing', state: 'Released', revision: 'W2' },
         ],
-        documentRelations: [{ modelDocumentId: 'model-1', drawingDocumentId: 'drawing-1' }],
+        documentRelations: [{ modelDocumentId: 'model-1', drawingDocumentId: 'drawing-1' }], token: 'token-1',
       },
     })
 
     await wrapper.findAll('button[role="tab"]')[2].trigger('click')
 
-    expect(wrapper.get('.pdm-bom-drawing-audit-header').text()).toBe('图纸核对')
-    expect(wrapper.findAll('.pdm-bom-audit strong').map(item => item.text())).toEqual(['3D+2D已对应', '缺2D图', '缺3D图'])
-    expect(wrapper.findAll('.pdm-bom-audit small').map(item => item.text())).toEqual(['N-001 · W2'])
-    expect(wrapper.findAll('.pdm-bom-audit')[2].attributes('title')).toBe('必须补齐3D及唯一2D工程图')
+    expect(wrapper.get('.pdm-bom-drawing-audit-header').text()).toBe('图纸')
+    expect(wrapper.findAll('.pdm-bom-drawing-link').map(item => item.text())).toEqual(['2D', '3D'])
+    expect(wrapper.findAll('.pdm-bom-drawing-audit-cell').map(item => item.text())).toEqual(['2D3D', '—', '—'])
+
+    materialApi.listDocumentVersions.mockResolvedValueOnce([{
+      id: 'drawing-version-1', documentId: 'drawing-1', revision: { display: 'W2' }, status: 'Released', fileLength: 12, sha256: 'drawing', createdBy: 'developer', createdAt: '2026-09-16T00:00:00Z', changeNote: '',
+      preview: { format: 'Pdf', storageRelativePath: 'previews/N-001.pdf', fileLength: 10, sha256: 'pdf', sourceSha256: 'drawing' },
+    }])
+    await wrapper.get('button[aria-label="下载2D图纸 N-001"]').trigger('click')
+    await flushPromises()
+    expect(materialApi.listDocumentVersions).toHaveBeenCalledWith('drawing-1', 'token-1')
+    expect(materialApi.downloadDocumentPreviewFile).toHaveBeenCalledWith('drawing-1', 'drawing-version-1', 'N-001.pdf', 'token-1')
     expect(wrapper.findAll('.pdm-bom-quantity-audit').map(item => item.text())).toEqual(['2', '1', '1'])
     expect(wrapper.findAll('.pdm-bom-quantity-reference').map(item => item.text())).toEqual(['02/2', '01/1', '01/—'])
   })
@@ -2791,7 +2856,7 @@ describe('BomManager', () => {
         groups: [{
           groupId: 'group', groupName: '伺服控制器', isRequired: true, selectionMode: 'Single', maxSelection: 1,
           isComplete: false, status: '待核对', expectedQuantity: 0, actualQuantity: 0, selectedOptionIds: [], reviewDecision: null,
-          options: [{ id: 'option', materialId: 'controller', materialCode: 'CTRL-1', materialName: '控制器', materialKind: 'Electrical', unitCode: '001', quantityMode: 'PerMainQuantity', quantityPerSet: 1, isDefault: true, sortOrder: 1 }],
+          options: [{ id: 'option', materialId: 'controller', materialCode: 'CTRL-1', materialName: '控制器', materialKind: 'Electrical', unitCode: '001', quantityMode: 'PerMainQuantity', quantityPerSet: 1, isDefault: true, sortOrder: 1, selectionAdvice: '适配 750W 电机' }],
         }],
       }],
     }
@@ -2817,6 +2882,7 @@ describe('BomManager', () => {
     const drawer = wrapper.get('.pdm-material-relation-drawer')
     expect(drawer.text()).toContain('系统只提醒、不自动加入')
     expect(drawer.text()).toContain('唯一推荐')
+    expect(drawer.text()).toContain('适配 750W 电机')
     expect((drawer.get('input[type="radio"]').element as HTMLInputElement).checked).toBe(false)
     const noAccessoryButton = drawer.findAll('button').find(button => button.text() === '确认本次无需配套')!
     expect(noAccessoryButton.classes()).toContain('pdm-material-relation-none-button')

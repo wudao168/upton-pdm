@@ -23,6 +23,7 @@ public sealed class MaterialRelationServiceTests
         var publishedA = await SaveAndPublishAsync(service, motorA, controller);
         var publishedB = await SaveAndPublishAsync(service, motorB, controller);
         Assert.NotEqual(publishedA.PublishedRevision!.Id, publishedB.PublishedRevision!.Id);
+        Assert.Equal("适配 750W 电机", publishedA.PublishedRevision.Groups.Single().Options.Single().SelectionAdvice);
 
         var mainA = new BomItem(Guid.NewGuid(), project.Id, BomKind.Standard, 1, motorA.MaterialCode, motorA.Name, 2, "001", null, null, "W1", true);
         var mainB = new BomItem(Guid.NewGuid(), project.Id, BomKind.Standard, 2, motorB.MaterialCode, motorB.Name, 3, "001", null, null, "W1", true);
@@ -132,7 +133,7 @@ public sealed class MaterialRelationServiceTests
             null,
             [new SaveMaterialRelationGroupCommand(
                 "控制器", true, MaterialRelationSelectionMode.Single, 1, 1, false, 1,
-                [new SaveMaterialRelationOptionCommand(accessory.Id, MaterialRelationQuantityMode.PerMainQuantity, 1, false, 1)])]),
+                [new SaveMaterialRelationOptionCommand(accessory.Id, MaterialRelationQuantityMode.PerMainQuantity, 1, false, 1, " 适配 750W 电机 ")])]),
             "admin", UserRole.Administrator, default);
         return await service.PublishAsync(draft.Id, draft.DraftRevision!.Id, draft.DraftRevision.RowVersion, "admin", UserRole.Administrator, default);
     }

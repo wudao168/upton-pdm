@@ -78,4 +78,24 @@ public sealed class BatchRenameRuleTests
         Assert.Equal("70000030.01.02-01", BatchRenameRule.HierarchyFileBaseName("70000030", "01.02-01"));
         Assert.Throws<InvalidOperationException>(() => BatchRenameRule.HierarchyFileBaseName("", "01"));
     }
+
+    [Fact]
+    public void HierarchyScope_DefaultCategoriesSelectAssembliesAndNonStandardParts()
+    {
+        Assert.True(BatchRenameRule.IsInHierarchyScope(BatchRenameHierarchyKind.Assembly, "标准件", true, true));
+        Assert.True(BatchRenameRule.IsInHierarchyScope(BatchRenameHierarchyKind.Part, "非标件", true, true));
+        Assert.False(BatchRenameRule.IsInHierarchyScope(BatchRenameHierarchyKind.Part, "标准件", true, true));
+        Assert.True(BatchRenameRule.IsInHierarchyScope(BatchRenameHierarchyKind.Part, "部件图", true, false));
+    }
+
+    [Fact]
+    public void PropertyFilter_CanIncludeOrExcludeMatchesAcrossAllValues()
+    {
+        var values = new[] { "文件.SLDPRT", "AIRTEC", "非标件" };
+
+        Assert.True(BatchPropertyFilterRule.MatchesQuery(values, "air", false));
+        Assert.False(BatchPropertyFilterRule.MatchesQuery(values, "air", true));
+        Assert.True(BatchPropertyFilterRule.MatchesQuery(values, "SMC", true));
+        Assert.True(BatchPropertyFilterRule.MatchesQuery(values, "", true));
+    }
 }

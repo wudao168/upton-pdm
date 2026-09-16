@@ -577,6 +577,7 @@ internal sealed class BatchPropertyEditDialog : Form
     private BatchRenameControl batchRenameControl;
     private readonly ComboBox documentTypeFilter = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList };
     private readonly ComboBox propertyColumnFilter = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList };
+    private readonly ComboBox propertyMatchFilter = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList };
     private readonly TextBox itemFilterText = new TextBox();
     private readonly CheckBox emptyPropertyFilter = new CheckBox
     {
@@ -1056,8 +1057,11 @@ internal sealed class BatchPropertyEditDialog : Form
         var panel = CreateAlignedRow(90F, 120F, 120F, 120F, 120F, 120F, 120F, 120F);
         documentTypeFilter.Items.AddRange(new object[] { "全部类型", "装配体", "零件", "工程图" });
         documentTypeFilter.SelectedIndex = 0;
+        propertyMatchFilter.Items.AddRange(new object[] { "包含", "不包含" });
+        propertyMatchFilter.SelectedIndex = 0;
         ConfigureRowInput(documentTypeFilter, 120);
         ConfigureRowInput(propertyColumnFilter, 120);
+        ConfigureRowInput(propertyMatchFilter, 120);
         ConfigureRowInput(itemFilterText, 120);
         includeRelatedModels.CheckedChanged += (_, _) =>
         {
@@ -1088,7 +1092,6 @@ internal sealed class BatchPropertyEditDialog : Form
         var search = new Button { Text = "搜索", AutoSize = false, Size = new Size(StandardControlWidth, StandardControlHeight), Margin = Padding.Empty };
         var selectAll = new Button { Text = "全选全部", AutoSize = false, Size = new Size(StandardControlWidth, StandardControlHeight), Margin = Padding.Empty };
         var clear = new Button { Text = "清空全部", AutoSize = false, Size = new Size(StandardControlWidth, StandardControlHeight), Margin = Padding.Empty };
-        var invert = new Button { Text = "反选", AutoSize = false, Size = new Size(StandardControlWidth, StandardControlHeight), Margin = Padding.Empty };
         search.Click += (_, _) => ApplyItemFilter();
         itemFilterText.KeyDown += (_, eventArgs) =>
         {
@@ -1102,15 +1105,14 @@ internal sealed class BatchPropertyEditDialog : Form
         };
         selectAll.Click += (_, _) => SetFilteredSelected(true);
         clear.Click += (_, _) => SetFilteredSelected(false);
-        invert.Click += (_, _) => InvertFilteredSelection();
         panel.Controls.Add(CreateRowLabel("范围筛选"), 0, 0);
         panel.Controls.Add(documentTypeFilter, 1, 0);
         panel.Controls.Add(propertyColumnFilter, 2, 0);
-        panel.Controls.Add(itemFilterText, 3, 0);
-        panel.Controls.Add(search, 4, 0);
-        panel.Controls.Add(selectAll, 5, 0);
-        panel.Controls.Add(clear, 6, 0);
-        panel.Controls.Add(invert, 7, 0);
+        panel.Controls.Add(propertyMatchFilter, 3, 0);
+        panel.Controls.Add(itemFilterText, 4, 0);
+        panel.Controls.Add(search, 5, 0);
+        panel.Controls.Add(selectAll, 6, 0);
+        panel.Controls.Add(clear, 7, 0);
         return panel;
     }
 
@@ -1252,6 +1254,7 @@ internal sealed class BatchPropertyEditDialog : Form
             AutoSize = false,
             Dock = DockStyle.Fill,
             TextAlign = ContentAlignment.MiddleLeft,
+            UseCompatibleTextRendering = false,
             Margin = new Padding(0, 0, 3, 0)
         };
     }
@@ -1324,9 +1327,10 @@ internal sealed class BatchPropertyEditDialog : Form
     {
         var kind = documentTypeFilter.SelectedItem as string ?? "全部类型";
         var propertyName = propertyColumnFilter.SelectedItem as string ?? "全部属性";
+        var excludeMatches = string.Equals(propertyMatchFilter.SelectedItem as string, "不包含", StringComparison.Ordinal);
         var query = itemFilterText.Text?.Trim() ?? string.Empty;
         var filtered = items
-            .Where(item => MatchesItemFilter(item, kind, propertyName, query, emptyPropertyFilter.Checked))
+            .Where(item => MatchesItemFilter(item, kind, propertyName, query, emptyPropertyFilter.Checked, excludeMatches))
             .ToArray();
         if (includeRelatedModels.Checked && string.Equals(kind, "工程图", StringComparison.Ordinal))
         {
@@ -1412,7 +1416,8 @@ internal sealed class BatchPropertyEditDialog : Form
         string kind,
         string propertyName,
         string query,
-        bool emptyOnly)
+        bool emptyOnly,
+        bool excludeMatches)
     {
         if (!string.Equals(kind, "全部类型", StringComparison.Ordinal)
             && !string.Equals(item.Kind, kind, StringComparison.Ordinal))
@@ -1432,18 +1437,17 @@ internal sealed class BatchPropertyEditDialog : Form
                 return string.IsNullOrWhiteSpace(propertyValue);
             }
 
-            return string.IsNullOrWhiteSpace(query)
-                || propertyValue.IndexOf(query, StringComparison.CurrentCultureIgnoreCase) >= 0;
+            return BatchPropertyFilterRule.MatchesQuery(new[] { propertyValue }, query, excludeMatches);
         }
         if (string.IsNullOrWhiteSpace(query))
         {
             return true;
         }
 
-        return new[] { item.FileName, item.ProjectNumber, item.ProjectName }
-            .Concat(item.SearchValues)
-            .Any(value => !string.IsNullOrWhiteSpace(value)
-            && value.IndexOf(query, StringComparison.CurrentCultureIgnoreCase) >= 0);
+        return BatchPropertyFilterRule.MatchesQuery(
+            new[] { item.FileName, item.ProjectNumber, item.ProjectName }.Concat(item.SearchValues),
+            query,
+            excludeMatches);
     }
 
     private Control BuildWritebackPage()
@@ -2088,18 +2092,6 @@ internal sealed class BatchPropertyEditDialog : Form
         UpdateSummary();
     }
 
-    private void InvertFilteredSelection()
-    {
-        foreach (var item in rows)
-        {
-            item.Selected = !item.Selected;
-        }
-        grid.Refresh();
-        propertyCardGrid.Refresh();
-        InvalidatePropertyCardConfirmation();
-        UpdateSummary();
-    }
-
     private void SetAllWritebacksSelected(bool selected)
     {
         foreach (var item in writebackItems)
@@ -2421,7 +2413,7 @@ internal sealed class BatchPropertyEditDialog : Form
     }
 
     private static readonly string[] AllowedClassificationValues =
-        { string.Empty, "标准件", "非标件", "虚拟件" };
+        { string.Empty, "标准件", "非标件", "虚拟件", BatchRenameRule.ComponentDrawingScope };
 
     private static bool IsAllowedClassification(string value) =>
         AllowedClassificationValues.Contains(value?.Trim() ?? string.Empty, StringComparer.OrdinalIgnoreCase);

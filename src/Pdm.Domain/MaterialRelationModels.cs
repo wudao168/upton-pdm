@@ -35,7 +35,8 @@ public sealed record MaterialRelationOption(
     MaterialRelationQuantityMode QuantityMode,
     decimal QuantityPerSet,
     bool IsDefault,
-    int SortOrder);
+    int SortOrder,
+    string? SelectionAdvice = null);
 
 public sealed record MaterialRelationGroup(
     Guid Id,

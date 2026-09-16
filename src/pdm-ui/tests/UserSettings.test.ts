@@ -68,7 +68,7 @@ describe('UserSettings', () => {
     const dialog = document.body.querySelector('.el-dialog')!
     const roleSelect = wrapper.findAllComponents({ name: 'ElSelect' })[0]
     expect(roleSelect.props('multiple')).toBe(true)
-    expect(roleSelect.props('modelValue')).toEqual(['Engineer'])
+    expect(roleSelect.props('modelValue')).toEqual([])
     await roleSelect.vm.$emit('update:modelValue', ['Engineer', 'PlanningManager'])
     const inputs = Array.from(dialog.querySelectorAll<HTMLInputElement>('input'))
     inputs[0].value = 'new-user'; inputs[0].dispatchEvent(new Event('input'))

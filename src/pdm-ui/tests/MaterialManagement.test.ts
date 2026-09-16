@@ -12,6 +12,9 @@ const api = vi.hoisted(() => ({
   listMaterialRelationTemplates: vi.fn(),
   saveMaterialRelationTemplate: vi.fn(),
   publishMaterialRelationTemplate: vi.fn(),
+  listEngineeringKits: vi.fn(),
+  saveEngineeringKit: vi.fn(),
+  publishEngineeringKit: vi.fn(),
   listMaterialInventory: vi.fn(),
   refreshMaterialInventory: vi.fn(),
   listMaterialCategories: vi.fn(),
@@ -95,6 +98,7 @@ describe('MaterialManagement', () => {
     api.listMaterialSyncTasks.mockResolvedValue([])
     api.listPendingMasterMaterials.mockResolvedValue([])
     api.listMaterialRelationTemplates.mockResolvedValue([])
+    api.listEngineeringKits.mockResolvedValue([])
     api.listMaterialInventory.mockResolvedValue({ items: [], total: 0, page: 1, pageSize: 50, lastSuccessfulRefreshAt: null })
     api.refreshMaterialInventory.mockResolvedValue({ items: [], total: 0, page: 1, pageSize: 50, lastSuccessfulRefreshAt: null })
     api.listMaterialSyncBatches.mockResolvedValue([])
@@ -175,6 +179,67 @@ describe('MaterialManagement', () => {
     expect(document.body.textContent).toContain('物料料号')
     expect(document.body.textContent).not.toContain('配套物料模板')
     expect(document.body.textContent).not.toContain('保存修改')
+    wrapper.unmount()
+  })
+
+  it('summarizes configured materials on the association tab and keeps the requested tab order', async () => {
+    const approvedMaterial = { ...(await api.listMaterials())[0], approvalStatus: 'Approved' }
+    api.listMaterials.mockResolvedValue([approvedMaterial])
+    api.listMaterialRelationTemplates.mockResolvedValue([{
+      id: 'relation-1', mainMaterialId: approvedMaterial.id, mainMaterialCode: approvedMaterial.materialCode, mainMaterialName: approvedMaterial.name,
+      name: `${approvedMaterial.materialCode}关联物料`, isArchived: false, updatedBy: 'standard', updatedAt: '2026-09-16T00:00:00Z', rowVersion: 1, draftRevision: null,
+      publishedRevision: { id: 'revision-1', version: 1, state: 'Published', changeNote: '', createdBy: 'standard', createdAt: '', publishedBy: 'standard', publishedAt: '', rowVersion: 1, groups: [{ id: 'group-1', name: '安装件', isRequired: true, selectionMode: 'Single', minSelection: 1, maxSelection: 1, autoSelectUnique: false, sortOrder: 1, options: [{ id: 'option-1', materialId: 'material-2', materialCode: 'EL-002', materialName: '安装件', quantityMode: 'Fixed', quantityPerSet: 1, isDefault: true, sortOrder: 1 }] }] },
+    }])
+    const wrapper = mount(MaterialManagement, {
+      props: { token: 'token', canEdit: false, canApprove: false, canManageIntegration: true, canViewRelations: true, canManageRelations: true, canPublishRelations: true, canManageKits: true },
+      global: { plugins: [ElementPlus] },
+    })
+    await flushPromises()
+
+    expect(wrapper.findAll('.material-tabs > .el-tabs__header [role="tab"]').map(tab => tab.text().replace(/\d+/g, '').trim())).toEqual([
+      '料品主档', '料品库存', 'BOM表头料号', '关联配置', '料品套件', '料号审批', '取号设置', '分类维护',
+    ])
+    await wrapper.findAll('.el-tabs__item').find(tab => tab.text() === '关联配置')!.trigger('click')
+    await flushPromises()
+    const directory = wrapper.get('[aria-label="关联配置汇总"]')
+    expect(directory.text()).toContain('共 1 个已配置物料')
+    expect(directory.text()).toContain('EL-001')
+    expect(directory.text()).toContain('已生效')
+    expect(directory.text()).toContain('M18')
+    expect(directory.text()).toContain('欧姆龙')
+    expect(directory.text()).toContain('0101')
+    expect(directory.get('input[placeholder="搜索编码、名称、规格、品牌、分类或配置名称"]')).toBeTruthy()
+    await directory.get('input[placeholder="搜索编码、名称、规格、品牌、分类或配置名称"]').setValue('M18')
+    expect(directory.text()).toContain('共 1 个已配置物料')
+    await directory.get('input[placeholder="搜索编码、名称、规格、品牌、分类或配置名称"]').setValue('不存在的规格')
+    expect(directory.text()).toContain('共 0 个已配置物料')
+    await directory.get('input[placeholder="搜索编码、名称、规格、品牌、分类或配置名称"]').setValue('')
+    await directory.get('button[aria-label="维护 EL-001 的关联配置"]').trigger('click')
+    await flushPromises()
+    expect(wrapper.findComponent({ name: 'MaterialRelationEditor' }).get('.material-relation-group input').element).toHaveProperty('value', '安装件')
+    wrapper.unmount()
+  })
+
+  it('工程师可新增或批量导入草稿，但不显示维护和批准操作', async () => {
+    const wrapper = mount(MaterialManagement, {
+      props: { token: 'token', canCreate: true, canEdit: false, canApprove: false, canManageIntegration: false },
+      global: { plugins: [ElementPlus] },
+    })
+    await flushPromises()
+
+    const toolbar = wrapper.get('.material-toolbar__actions')
+    expect(toolbar.text()).toContain('新增料品')
+    expect(toolbar.text()).toContain('批量导入')
+    expect(toolbar.text()).not.toContain('编辑')
+    expect(toolbar.text()).not.toContain('批准')
+    expect(toolbar.text()).not.toContain('停用')
+    expect(toolbar.text()).not.toContain('删除')
+
+    await toolbar.findAll('button').find(button => button.text() === '新增料品')!.trigger('click')
+    const editor = wrapper.findComponent({ name: 'MaterialEditorDialog' })
+    expect(editor.props('modelValue')).toBe(true)
+    expect(editor.props('canEdit')).toBe(true)
+    expect(editor.props('editingId')).toBeNull()
     wrapper.unmount()
   })
 
@@ -487,7 +552,7 @@ describe('MaterialManagement', () => {
 
     expect(wrapper.find('.el-alert').exists()).toBe(false)
     expect(wrapper.find('.material-header').exists()).toBe(false)
-    expect(wrapper.findAll('[role="tab"]').slice(0, 5).map(tab => tab.text().trim())).toEqual(['料品主档', '料品库存', 'BOM表头料号', '料号审批', '分类维护'])
+    expect(wrapper.findAll('.material-tabs > .el-tabs__header [role="tab"]').map(tab => tab.text().trim())).toEqual(['料品主档', '料品库存', 'BOM表头料号', '料品套件', '料号审批', '分类维护'])
     expect(api.listMaterialPage).toHaveBeenCalledWith('token', expect.objectContaining({ ordinaryOnly: true }))
     const toolbar = wrapper.get('.material-toolbar')
     expect(toolbar.findAll('button').some(button => button.text() === '刷新')).toBe(true)

@@ -1307,6 +1307,7 @@ export interface MaterialRelationOption {
   quantityPerSet: number
   isDefault: boolean
   sortOrder: number
+  selectionAdvice?: string | null
 }
 
 export interface MaterialRelationGroup {
@@ -1367,6 +1368,7 @@ export interface SaveMaterialRelationTemplateInput {
       quantityPerSet: number
       isDefault: boolean
       sortOrder: number
+      selectionAdvice?: string | null
     }>
   }>
 }

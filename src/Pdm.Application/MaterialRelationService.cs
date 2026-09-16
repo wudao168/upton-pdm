@@ -46,7 +46,8 @@ public sealed class MaterialRelationService(
                 if (material.Kind == MaterialKind.Product) throw new PdmRuleException($"成品“{material.MaterialCode}”不能作为BOM配件。");
                 if (option.QuantityPerSet <= 0) throw new PdmRuleException($"配件“{material.MaterialCode}”的每套数量必须大于0。");
                 options.Add(new MaterialRelationOption(Guid.NewGuid(), material.Id, material.MaterialCode, material.Name, material.Kind, material.UnitCode,
-                    option.QuantityMode, option.QuantityPerSet, option.IsDefault, option.SortOrder == 0 ? optionIndex + 1 : option.SortOrder));
+                    option.QuantityMode, option.QuantityPerSet, option.IsDefault, option.SortOrder == 0 ? optionIndex + 1 : option.SortOrder,
+                    string.IsNullOrWhiteSpace(option.SelectionAdvice) ? null : option.SelectionAdvice.Trim()));
             }
             groups.Add(new MaterialRelationGroup(Guid.NewGuid(), groupName, input.IsRequired, input.SelectionMode, min, max,
                 input.AutoSelectUnique, input.SortOrder == 0 ? groupIndex + 1 : input.SortOrder, options));

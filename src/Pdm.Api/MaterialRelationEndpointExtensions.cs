@@ -61,9 +61,10 @@ public sealed record SaveMaterialRelationOptionRequest(
     [property: JsonConverter(typeof(JsonStringEnumConverter))] MaterialRelationQuantityMode QuantityMode,
     decimal QuantityPerSet,
     bool IsDefault,
-    int SortOrder)
+    int SortOrder,
+    string? SelectionAdvice = null)
 {
-    public SaveMaterialRelationOptionCommand ToCommand() => new(MaterialId, QuantityMode, QuantityPerSet, IsDefault, SortOrder);
+    public SaveMaterialRelationOptionCommand ToCommand() => new(MaterialId, QuantityMode, QuantityPerSet, IsDefault, SortOrder, SelectionAdvice);
 }
 
 public sealed record SaveMaterialRelationGroupRequest(

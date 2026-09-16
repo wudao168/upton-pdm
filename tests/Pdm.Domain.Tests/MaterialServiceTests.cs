@@ -11,22 +11,27 @@ public sealed class MaterialServiceTests
     private static readonly Guid ProjectId = Guid.Parse("11111111-1111-1111-1111-111111111111");
 
     [Fact]
-    public async Task MaterialMasterMaintenance_IsLimitedToMaterialManagersWhileBomLookupStillWorks()
+    public async Task EngineerCanCreateDraftButCannotMaintainOrApproveMaterialMaster()
     {
         var service = CreateService(out _);
         var command = new SaveMaterialCommand(
             $"STD-{Guid.NewGuid():N}", "标准化维护料品", MaterialKind.Standard, MaterialSupplyMode.Purchase, "001",
             "MODEL-001", null, null, "UPTON", null, null, null);
 
-        await Assert.ThrowsAsync<UnauthorizedAccessException>(() =>
-            service.CreateAsync(command, "engineer", UserRole.Engineer, default));
-
-        var created = await service.CreateAsync(command, "standardizer", UserRole.ProcessReviewer, default);
+        var created = await service.CreateAsync(command, "engineer", UserRole.Engineer, default);
         Assert.Equal("标准化维护料品", created.Name);
+        Assert.Equal(MaterialApprovalStatus.Draft, created.ApprovalStatus);
+        await Assert.ThrowsAsync<UnauthorizedAccessException>(() =>
+            service.UpdateAsync(created.Id, command with { ExpectedRowVersion = created.RowVersion }, "engineer", UserRole.Engineer, default));
+        await Assert.ThrowsAsync<UnauthorizedAccessException>(() =>
+            service.ApproveAsync(created.Id, created.RowVersion, "engineer", UserRole.Engineer, default));
 
         var bomLookup = await service.ListMaterialsAsync(created.MaterialCode, null, false, 100, "engineer", UserRole.Engineer, default);
         Assert.Contains(bomLookup, material => material.Id == created.Id);
         Assert.Empty(await service.ListSyncTasksAsync("engineer", UserRole.Engineer, default));
+
+        var approved = await service.ApproveAsync(created.Id, created.RowVersion, "standardizer", UserRole.ProcessReviewer, default);
+        Assert.Equal(MaterialApprovalStatus.Approved, approved.Material.ApprovalStatus);
     }
 
     [Fact]
@@ -1604,10 +1609,10 @@ public sealed class MaterialServiceTests
             new MaterialImportRowCommand(3, "0102", "批量轴承B", "001", "BRG-B", Brand: "TEST")
         };
 
-        var preview = await service.PreviewImportAsync(rows, "standardizer", UserRole.ProcessReviewer, default);
+        var preview = await service.PreviewImportAsync(rows, "engineer", UserRole.Engineer, default);
         Assert.Equal((2, 2, 0), (preview.TotalCount, preview.ValidCount, preview.ErrorCount));
 
-        var result = await service.ImportAsync(rows, "standardizer", UserRole.ProcessReviewer, default);
+        var result = await service.ImportAsync(rows, "engineer", UserRole.Engineer, default);
         Assert.Equal(2, result.ImportedCount);
         Assert.All(result.Materials, material =>
         {

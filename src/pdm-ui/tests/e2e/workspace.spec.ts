@@ -253,6 +253,74 @@ test('wear-part BOM aggregates categories and stays outside release', async ({ p
   expect(errors).toEqual([])
 })
 
+test('released BOM rows expose linked 2D and 3D preview downloads', async ({ page }) => {
+  const releasedDocuments = [
+    { id: 'doc-root', projectId, folderId: 'folder-main-mechanical', drawingNumber: 'REAL-ASM-001', name: '真实总装配', fileName: 'REAL-ASM-001.SLDASM', kind: 0, lifecycleState: 2, revision: { display: 'W2' }, storedVersionCount: 2, checkedOutBy: null },
+    { id: 'doc-drawing', projectId, folderId: 'folder-main-mechanical', drawingNumber: 'REAL-ASM-001', name: '真实总装工程图', fileName: 'REAL-ASM-001.SLDDRW', kind: 2, lifecycleState: 2, revision: { display: 'W2' }, storedVersionCount: 2, checkedOutBy: null },
+  ]
+  await page.route(`**/api/projects/${projectId}/folder-documents`, route => route.fulfill({ json: releasedDocuments }))
+  await page.route(`**/api/projects/${projectId}/boms/NonStandard`, route => route.fulfill({ json: [{
+    id: 'bom-non-standard-1', kind: 'NonStandard', sequence: 1, drawingNumber: 'REAL-ASM-001', name: '真实总装配', quantity: 1, unit: '件', material: 'Q235B', specification: '总装', heatTreatment: '淬火', revision: 'W2', isComplete: true, source: 'Auto', sourceDocumentId: 'doc-root', isWearPart: false, isManuallyOverridden: false, isPendingRemoval: false,
+  }] }))
+  await page.route('**/api/documents/doc-drawing/versions', route => route.fulfill({ json: [{
+    id: 'drawing-release-w2', documentId: 'doc-drawing', revision: { display: 'W2' }, status: 1, fileLength: 100, sha256: 'D'.repeat(64), createdBy: 'engineer', createdAt: '2026-09-16T01:00:00Z', changeNote: '发布',
+    preview: { format: 1, storageRelativePath: '.release-previews/drawing.pdf', fileLength: 80, sha256: 'P'.repeat(64), sourceSha256: 'D'.repeat(64) },
+  }] }))
+  await page.route('**/api/documents/doc-drawing/versions/drawing-release-w2/preview', route => route.fulfill({ contentType: 'application/pdf', body: '%PDF-1.4\n%%EOF' }))
+
+  const errors: string[] = []
+  page.on('pageerror', error => errors.push(error.message))
+  page.on('console', message => { if (message.type() === 'error') errors.push(message.text()) })
+  await page.addInitScript(() => { window.setInterval = (() => 0) as unknown as typeof window.setInterval })
+  await page.setViewportSize({ width: 1925, height: 1114 })
+  await page.goto('/')
+  const login = page.getByLabel('登录PLM')
+  await login.getByRole('textbox', { name: '账号' }).fill('engineer')
+  await login.getByRole('textbox', { name: '密码' }).fill('correct-password')
+  await login.getByRole('button', { name: '登录', exact: true }).click()
+  await enterProject(page)
+  await page.getByRole('button', { name: 'BOM', exact: true }).click()
+  await page.getByRole('tab', { name: /非标件BOM/ }).click()
+
+  const table = page.locator('.pdm-bom-table')
+  await expect(table.getByRole('columnheader', { name: '图纸', exact: true })).toBeVisible()
+  await expect(table.getByRole('columnheader', { name: '热处理', exact: true })).toBeVisible()
+  await expect(table.getByRole('button', { name: '编辑热处理' })).toHaveText('淬火')
+  await expect(table.getByRole('button', { name: '下载2D图纸 REAL-ASM-001' })).toBeVisible()
+  await expect(table.getByRole('button', { name: '下载3D图纸 REAL-ASM-001' })).toBeVisible()
+  expect(await table.locator('tbody tr').first().evaluate(element => getComputedStyle(element).height)).toBe('30px')
+
+  const downloadPromise = page.waitForEvent('download')
+  await table.getByRole('button', { name: '下载2D图纸 REAL-ASM-001' }).click()
+  const download = await downloadPromise
+  expect(download.suggestedFilename()).toBe('REAL-ASM-001.pdf')
+
+  await page.getByRole('tab', { name: /标准件BOM/ }).click()
+  await expect(table.getByRole('columnheader', { name: '热处理', exact: true })).toHaveCount(0)
+  await expect(page.getByText('查看版本', { exact: true })).toHaveCount(0)
+  await expect(page.getByRole('button', { name: '对比发布', exact: true })).toBeVisible()
+  const filterRows = await page.locator('.pdm-bom-filters > *').evaluateAll(elements =>
+    elements.map(element => Math.round(element.getBoundingClientRect().top)),
+  )
+  expect(new Set(filterRows).size).toBe(1)
+  const filterWidth = await page.locator('.pdm-bom-filters').evaluate(element => ({
+    clientWidth: element.clientWidth,
+    scrollWidth: element.scrollWidth,
+  }))
+  expect(filterWidth.scrollWidth).toBeLessThanOrEqual(filterWidth.clientWidth)
+  await page.getByRole('button', { name: '列设置', exact: true }).click()
+  const columnDialog = page.getByRole('dialog', { name: 'BOM列设置' })
+  const heatTreatmentCheckbox = columnDialog.getByRole('checkbox', { name: '热处理' })
+  await expect(heatTreatmentCheckbox).not.toBeChecked()
+  await columnDialog.locator('label.el-checkbox').filter({ hasText: '热处理' }).click()
+  await expect(heatTreatmentCheckbox).toBeChecked()
+  await columnDialog.getByRole('button', { name: '保存', exact: true }).click()
+  await expect(table.getByRole('columnheader', { name: '热处理', exact: true })).toBeVisible()
+  await expect(page.locator('vite-error-overlay')).toHaveCount(0)
+  await page.screenshot({ path: join(tmpdir(), `pdm-bom-drawing-links-${Date.now()}.png`) })
+  expect(errors).toEqual([])
+})
+
 test('related materials use a scoped right drawer for electrical BOM', async ({ page }, testInfo) => {
   await page.route(`**/api/projects/${projectId}/boms/Electrical`, route => route.fulfill({ json: [
     { id: 'bom-electrical-1', kind: 'Electrical', sequence: 1, drawingNumber: 'REAL-EL-001', name: '真实传感器', quantity: 1, unit: '件', material: null, specification: 'PNP', revision: 'A', isComplete: false },
@@ -1310,6 +1378,100 @@ test('administrator can select one archived material and open the reactivate con
   await page.getByRole('dialog').getByRole('button', { name: '取消', exact: true }).click()
   await expect(page.getByRole('dialog')).toHaveCount(0)
   expect({ consoleErrors, failedResponses }).toEqual({ consoleErrors: [], failedResponses: [] })
+})
+
+test('material relation editor keeps confirmed columns inside the dialog and saves selection advice', async ({ page }, testInfo) => {
+  const mainMaterial = {
+    id: 'relation-main', materialCode: '01021000002', name: '弹垫 Φ5', kind: 'Standard', supplyMode: 'Purchase', unitCode: '001',
+    specification: '弹垫 Φ5', material: null, remark: '主物料备注', brand: 'MITSUBISHI', surfaceTreatment: null, weight: null, weightUnit: null,
+    approvalStatus: 'Approved', approvedBy: 'admin', approvedAt: '2026-09-01T01:00:00Z', categoryCode: '0102', u9CategoryCode: '0102',
+    u9ItemId: null, u9ItemCode: null, syncStatus: 'Succeeded', createdBy: 'admin', createdAt: '2026-09-01T01:00:00Z',
+    updatedBy: 'admin', updatedAt: '2026-09-16T01:00:00Z', rowVersion: 3, isArchived: false, archivedBy: null,
+    archivedAt: null, u9SyncConfirmed: true, sourceSystem: 'Pdm', masterOwner: 'Pdm', referenceCount: 0,
+  }
+  const optionMaterial = {
+    ...mainMaterial,
+    id: 'relation-option', materialCode: '01021000006', name: '弹垫 Φ6', specification: 'MR-J3-40A', brand: 'YASKAWA', remark: '候选备注', rowVersion: 2,
+  }
+  const relation = {
+    id: 'relation-template', mainMaterialId: mainMaterial.id, mainMaterialCode: mainMaterial.materialCode, mainMaterialName: mainMaterial.name,
+    name: `${mainMaterial.materialCode}关联物料`, isArchived: false, updatedBy: 'admin', updatedAt: '2026-09-16T01:00:00Z', rowVersion: 2,
+    publishedRevision: null,
+    draftRevision: {
+      id: 'relation-revision', version: 1, state: 'Draft', changeNote: '', createdBy: 'admin', createdAt: '2026-09-16T01:00:00Z',
+      publishedBy: null, publishedAt: null, rowVersion: 1,
+      groups: [{
+        id: 'relation-group', name: '安装件', isRequired: true, selectionMode: 'Single', minSelection: 1, maxSelection: 1,
+        autoSelectUnique: false, sortOrder: 1,
+        options: [{
+          id: 'relation-option-row', materialId: optionMaterial.id, materialCode: optionMaterial.materialCode, materialName: optionMaterial.name,
+          materialKind: 'Standard', unitCode: '001', quantityMode: 'PerMainQuantity', quantityPerSet: 1, isDefault: true, sortOrder: 1,
+          selectionAdvice: '优先用于高速工位',
+        }],
+      }],
+    },
+  }
+  let searchedByModel = false
+  let savedBody: Record<string, unknown> | null = null
+  await page.route('**/api/materials/page**', route => route.fulfill({ json: { items: [mainMaterial], total: 1, page: 1, pageSize: 50 } }))
+  await page.route(/^http:\/\/127\.0\.0\.1:(?:5080|5173|519[3-5])\/api\/materials(?:\?.*)?$/, route => {
+    const query = new URL(route.request().url()).searchParams.get('query') ?? ''
+    if (query.includes('MR-J3')) searchedByModel = true
+    return route.fulfill({ json: query && !optionMaterial.specification.includes(query) ? [] : [mainMaterial, optionMaterial] })
+  })
+  await page.route('**/api/material-relations/templates**', async route => {
+    if (route.request().method() === 'GET') return route.fulfill({ json: [relation] })
+    return route.fallback()
+  })
+  await page.route('**/api/material-relations/templates/relation-template/draft', async route => {
+    savedBody = route.request().postDataJSON() as Record<string, unknown>
+    return route.fulfill({ json: relation })
+  })
+  await page.route('**/api/materials/relation-main/attachments', route => route.fulfill({ json: [] }))
+
+  const errors: string[] = []
+  page.on('pageerror', error => errors.push(error.message))
+  page.on('console', message => { if (message.type() === 'error') errors.push(message.text()) })
+  await page.addInitScript(() => { window.setInterval = (() => 0) as unknown as typeof window.setInterval })
+  await page.setViewportSize({ width: 1236, height: 1114 })
+  await page.goto('/')
+  const login = page.getByLabel('登录PLM')
+  await login.getByRole('textbox', { name: '账号' }).fill('admin')
+  await login.getByRole('textbox', { name: '密码' }).fill('correct-password')
+  await login.getByRole('button', { name: '登录', exact: true }).click()
+  await expect(page.locator('.pdm-project-detail')).toBeVisible({ timeout: 15_000 })
+  await page.getByRole('button', { name: '料品管理', exact: true }).click()
+  await page.getByRole('button', { name: `查看 ${mainMaterial.materialCode} 的关联物料` }).click()
+
+  const dialog = page.getByRole('dialog', { name: '料品明细' })
+  const editor = dialog.getByLabel('关联物料')
+  await expect(editor).toBeVisible()
+  await expect(editor.locator('.material-relation-summary')).toContainText('品牌MITSUBISHI')
+  await expect(editor.locator('.material-relation-help')).toHaveCount(0)
+  await expect(editor.getByText('分类名称 *', { exact: true })).toBeVisible()
+  await expect(editor.locator('.material-relation-option-head span')).toHaveText([
+    '料号', '名称', '型号', '品牌', '备注', '选型建议', '数量计算', '每套数量', '优先推荐', '操作',
+  ])
+  await expect(editor.locator('.material-relation-option-row')).toContainText('YASKAWA')
+  const optionTableLayout = await editor.locator('.material-relation-option-table').evaluate(element => ({
+    clientWidth: element.clientWidth,
+    scrollWidth: element.scrollWidth,
+  }))
+  expect(optionTableLayout.scrollWidth).toBeLessThanOrEqual(optionTableLayout.clientWidth)
+
+  const materialSearch = editor.locator('.material-relation-option-row .el-select input').first()
+  await materialSearch.fill('MR-J3')
+  await expect.poll(() => searchedByModel).toBe(true)
+  await page.keyboard.press('Escape')
+  await editor.getByRole('textbox', { name: '选型建议' }).fill('高速工位优先，低速工位可替代')
+  await editor.getByRole('button', { name: '保存修改', exact: true }).click()
+  await expect.poll(() => savedBody).not.toBeNull()
+  expect(savedBody).toMatchObject({
+    groups: [{ options: [{ selectionAdvice: '高速工位优先，低速工位可替代' }] }],
+  })
+  await expect(page.locator('vite-error-overlay')).toHaveCount(0)
+  expect(errors).toEqual([])
+  await page.screenshot({ path: testInfo.outputPath('material-relation-editor-confirmed-layout.png'), fullPage: false })
 })
 
 test('engineer can read a material rejection reason without approval controls', async ({ page }, testInfo) => {

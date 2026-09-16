@@ -189,7 +189,7 @@ describe('OrganizationSettings', () => {
     expect(saveUnit).toHaveBeenCalledWith(expect.objectContaining({ id: 'ks-department', parentUnitId: 'ks-other', code: 'KS-OTHER-DESIGN' }))
   })
 
-  it('可向当前组织添加人员并保留原归属', async () => {
+  it('可向当前组织批量添加人员并分别保留原归属', async () => {
     const updateMemberships = vi.fn().mockResolvedValue(directory)
     const wrapper = mount(OrganizationSettings, {
       attachTo: document.body,
@@ -210,13 +210,16 @@ describe('OrganizationSettings', () => {
     await flushPromises()
     const select = wrapper.findComponent({ name: 'ElSelect' })
     expect(select.props('filterable')).toBe(true)
+    expect(select.props('multiple')).toBe(true)
     expect(select.findAllComponents({ name: 'ElOption' }).map(option => option.props('label'))).toContain('已分配人员')
-    select.vm.$emit('update:modelValue', 'existing-user')
+    select.vm.$emit('update:modelValue', ['existing-user', 'new-user'])
     await flushPromises()
     Array.from(document.body.querySelectorAll<HTMLButtonElement>('button')).find(button => button.textContent?.trim() === '添加到本组织')!.click()
     await flushPromises()
 
     expect(updateMemberships).toHaveBeenCalledWith('existing-user', ['ks-other', 'ks-division'], 'ks-other')
+    expect(updateMemberships).toHaveBeenCalledWith('new-user', ['ks-division'], 'ks-division')
+    expect(updateMemberships).toHaveBeenCalledTimes(2)
   })
 
   it('清空主负责人后可删除部门负责人', async () => {

@@ -990,6 +990,16 @@ export async function readDocumentPreviewFile(documentId: string, versionId: str
   return response.blob()
 }
 
+export async function downloadDocumentPreviewFile(documentId: string, versionId: string, fileName: string, token: string): Promise<void> {
+  const blob = await readDocumentPreviewFile(documentId, versionId, token)
+  const url = URL.createObjectURL(blob)
+  const anchor = document.createElement('a')
+  anchor.href = url
+  anchor.download = fileName
+  anchor.click()
+  URL.revokeObjectURL(url)
+}
+
 export function compareDocumentVersions(documentId: string, left: string, right: string, token: string): Promise<DocumentVersionComparison> {
   return requestJson<DocumentVersionComparison>(`/api/documents/${documentId}/versions/compare?left=${encodeURIComponent(left)}&right=${encodeURIComponent(right)}`, {}, token)
 }

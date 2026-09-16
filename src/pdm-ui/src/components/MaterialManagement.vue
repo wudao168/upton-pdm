@@ -6,6 +6,8 @@ import SquareLoader from './SquareLoader.vue'
 import MaterialEditorDialog from './MaterialEditorDialog.vue'
 import MaterialInventory from './MaterialInventory.vue'
 import BomHeaderMaterialDirectory from './BomHeaderMaterialDirectory.vue'
+import MaterialRelationDirectory from './MaterialRelationDirectory.vue'
+import EngineeringKitLibrary from './EngineeringKitLibrary.vue'
 import {
   archiveMaterial,
   approveMaterial,
@@ -68,6 +70,7 @@ const displayUserName = useUserDisplayName()
 const props = withDefaults(defineProps<{
   token: string
   canEdit: boolean
+  canCreate?: boolean
   canApprove: boolean
   canDecideMaterialCode?: boolean
   canManageIntegration: boolean
@@ -75,8 +78,10 @@ const props = withDefaults(defineProps<{
   canViewRelations?: boolean
   canManageRelations?: boolean
   canPublishRelations?: boolean
-}>(), { canDecideMaterialCode: false, requestedTab: 'materials', canViewRelations: false, canManageRelations: false, canPublishRelations: false })
+  canManageKits?: boolean
+}>(), { canCreate: false, canDecideMaterialCode: false, requestedTab: 'materials', canViewRelations: false, canManageRelations: false, canPublishRelations: false, canManageKits: false })
 const emit = defineEmits<{ noticeCountsChange: [counts: { syncTasks: number; codeApprovals: number }] }>()
+const canCreateMaterial = computed(() => props.canCreate || props.canEdit)
 
 const activeTab = ref('materials')
 const inventoryRequestedMaterialCode = ref('')
@@ -1101,7 +1106,9 @@ async function saveMaterial() {
       ? existing?.u9SyncConfirmed
         ? '料品已更新，并生成U9C修改预览'
         : '料品已更新，旧请求已废止并生成新的U9C创建预览'
-      : wasCreating ? '料品草稿已创建，可以继续上传3D和资料' : changeResult ? 'PLM专属字段已更新，不生成U9C任务' : '料品已更新')
+      : wasCreating
+        ? props.canEdit ? '料品草稿已创建，可以继续上传3D和资料' : '料品申请草稿已创建，待标准化审批后生效'
+        : changeResult ? 'PLM专属字段已更新，不生成U9C任务' : '料品已更新')
   } catch (error) {
     editorError.value = error instanceof Error ? error.message : '料品保存失败'
   } finally {
@@ -1504,7 +1511,7 @@ onMounted(() => {
           </aside>
           <section class="material-master-content" aria-label="料品列表">
             <div class="material-toolbar">
-              <div class="material-toolbar__actions"><el-button @click="load">刷新</el-button><el-button class="material-select-drafts" aria-label="勾选本页草稿" :disabled="!pageDrafts.length || loading || materialPageLoading || queryingInventory" @click="selectPageDrafts">勾选本页草稿</el-button><el-button v-if="canEdit" type="primary" @click="openCreate">新增料品</el-button><el-button v-if="canEdit" @click="openMaterialImport">批量导入</el-button><el-button v-if="canEdit" :disabled="selectedMaterials.length > 1 ? !canBatchEditSelected : !canEditSelected" @click="selectedMaterials.length > 1 ? openBatchEdit() : openSelectedEdit()">{{ selectedMaterials.length > 1 ? '批量编辑' : '编辑' }}</el-button><el-button v-if="canApprove" :disabled="!canApproveSelected" @click="approveSelected">批准</el-button><el-button :disabled="selectedMaterials.length === 0" :loading="queryingU9" @click="querySelected">查询U9C</el-button><el-button :loading="queryingInventory" :disabled="Object.values(rowInventoryLoading).some(Boolean)" @click="querySelectedInventory">库存查询</el-button><el-button v-if="canEdit" :disabled="!canArchiveSelected" @click="archiveSelected">停用</el-button><el-button v-if="canEdit" :disabled="!canReactivateSelected" @click="reactivateSelected">启用</el-button><el-button v-if="canEdit" type="danger" :disabled="!canDeleteSelected" @click="deleteSelected">删除</el-button></div>
+              <div class="material-toolbar__actions"><el-button @click="load">刷新</el-button><el-button class="material-select-drafts" aria-label="勾选本页草稿" :disabled="!pageDrafts.length || loading || materialPageLoading || queryingInventory" @click="selectPageDrafts">勾选本页草稿</el-button><el-button v-if="canCreateMaterial" type="primary" @click="openCreate">新增料品</el-button><el-button v-if="canCreateMaterial" @click="openMaterialImport">批量导入</el-button><el-button v-if="canEdit" :disabled="selectedMaterials.length > 1 ? !canBatchEditSelected : !canEditSelected" @click="selectedMaterials.length > 1 ? openBatchEdit() : openSelectedEdit()">{{ selectedMaterials.length > 1 ? '批量编辑' : '编辑' }}</el-button><el-button v-if="canApprove" :disabled="!canApproveSelected" @click="approveSelected">批准</el-button><el-button :disabled="selectedMaterials.length === 0" :loading="queryingU9" @click="querySelected">查询U9C</el-button><el-button :loading="queryingInventory" :disabled="Object.values(rowInventoryLoading).some(Boolean)" @click="querySelectedInventory">库存查询</el-button><el-button v-if="canEdit" :disabled="!canArchiveSelected" @click="archiveSelected">停用</el-button><el-button v-if="canEdit" :disabled="!canReactivateSelected" @click="reactivateSelected">启用</el-button><el-button v-if="canEdit" type="danger" :disabled="!canDeleteSelected" @click="deleteSelected">删除</el-button></div>
               <div class="material-toolbar__filters"><el-checkbox v-model="showArchived">显示已停用</el-checkbox><el-select v-model="brandFilter" class="material-brand-filter" clearable filterable placeholder="筛选品牌"><el-option v-for="brand in brandOptions" :key="brand" :label="brand" :value="brand" /></el-select><el-input v-model="query" clearable placeholder="搜索编码、名称、规格、品牌或分类" /></div>
             </div>
             <div class="material-table-shell pdm-loading-host">
@@ -1546,6 +1553,21 @@ onMounted(() => {
 
       <el-tab-pane label="BOM表头料号" name="bom-headers">
         <BomHeaderMaterialDirectory v-if="activeTab === 'bom-headers'" :token="token" />
+      </el-tab-pane>
+
+      <el-tab-pane v-if="canViewRelations" label="关联配置" name="relations">
+        <MaterialRelationDirectory
+          v-if="activeTab === 'relations'"
+          :token="token"
+          :relations="materialRelations"
+          :can-manage="canManageRelations"
+          :can-publish="canPublishRelations"
+          @refresh="loadMaterialRelations"
+        />
+      </el-tab-pane>
+
+      <el-tab-pane label="料品套件" name="kits">
+        <EngineeringKitLibrary v-if="activeTab === 'kits'" :token="token" :can-manage="canManageKits" />
       </el-tab-pane>
 
       <el-tab-pane name="code-approvals">
@@ -1724,7 +1746,7 @@ onMounted(() => {
       :editing-id="editingId"
       :main-material="editingMaterial"
       :initial-tab="editorInitialTab"
-      :can-edit="canEdit"
+      :can-edit="canEdit || (!editingId && canCreateMaterial)"
       :can-view-relations="canViewRelations"
       :can-manage-relations="canManageRelations"
       :can-publish-relations="canPublishRelations"

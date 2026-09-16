@@ -5453,8 +5453,23 @@ public sealed class PdmAddin : ISwAddin
             }
         }
 
+        var propertyReadOperationStarted = false;
         try
         {
+            if (initialOperation != PropertyOperationMode.PropertyWriteback)
+            {
+                if (!TryBeginWorkspaceOperation("正在批量读取图纸属性"))
+                {
+                    ShowWorkspaceOperationBusy();
+                    return;
+                }
+                propertyReadOperationStarted = true;
+                taskPaneControl.SetWorkspaceOperationProgress(
+                    string.Concat("准备读取图纸属性，共 ", operationItems.Length, " 个图档"),
+                    0,
+                    operationItems.Length);
+            }
+
             IReadOnlyList<DocumentDto> projectDocuments = Array.Empty<DocumentDto>();
             var selectedProject = projectId.HasValue
                 ? availableProjects.FirstOrDefault(project => project.Id == projectId.Value)
@@ -5472,11 +5487,24 @@ public sealed class PdmAddin : ISwAddin
             var nativePropertyCards = DiscoverNativePropertyCards();
             var editItems = initialOperation != PropertyOperationMode.PropertyWriteback
                 ? BuildBatchPropertyEditItems(
-                    operationItems,
-                    string.Empty,
-                    string.Empty,
-                    nativePropertyCards)
-                : Array.Empty<BatchPropertyEditItem>();
+                     operationItems,
+                     string.Empty,
+                     string.Empty,
+                     nativePropertyCards,
+                     (message, completed, total) => taskPaneControl.SetWorkspaceOperationProgress(
+                         string.Concat(message, "（", completed, "/", total, "）"),
+                         completed,
+                         total))
+                 : Array.Empty<BatchPropertyEditItem>();
+            if (propertyReadOperationStarted)
+            {
+                taskPaneControl.SetWorkspaceOperationProgress(
+                    string.Concat("图纸属性读取完成，共 ", editItems.Count, " 个图档"),
+                    editItems.Count,
+                    editItems.Count);
+                EndWorkspaceOperation();
+                propertyReadOperationStarted = false;
+            }
             foreach (var item in editItems)
             {
                 item.Selected = initiallySelectedPaths.Contains(item.OperationItem.Node.FullPath);
@@ -5558,6 +5586,13 @@ public sealed class PdmAddin : ISwAddin
         {
             LogDiagnostic("OnBatchPropertyEditRequested", exception);
             ShowError(exception.Message);
+        }
+        finally
+        {
+            if (propertyReadOperationStarted)
+            {
+                EndWorkspaceOperation();
+            }
         }
     }
 
@@ -6304,15 +6339,18 @@ public sealed class PdmAddin : ISwAddin
         IReadOnlyList<BatchOperationItem> operationItems,
         string projectNumber,
         string projectName,
-        IReadOnlyDictionary<CadDocumentKind, IReadOnlyList<string>> nativePropertyCards)
+        IReadOnlyDictionary<CadDocumentKind, IReadOnlyList<string>> nativePropertyCards,
+        Action<string, int, int> reportProgress = null)
     {
         var result = new List<BatchPropertyEditItem>();
         Interlocked.Increment(ref refreshSuppressionDepth);
         try
         {
-            foreach (var operationItem in operationItems)
+            for (var index = 0; index < operationItems.Count; index++)
             {
+                var operationItem = operationItems[index];
                 var node = operationItem.Node;
+                reportProgress?.Invoke(string.Concat("正在读取图纸属性：", node.FileName), index, operationItems.Count);
                 var activePropertyCard = ResolveActiveNativePropertyCard(node, nativePropertyCards);
                 var localProperties = ReadBatchPropertyValues(node);
                 var configurationName = BatchConfigurationName(node, localProperties);
@@ -6354,6 +6392,7 @@ public sealed class PdmAddin : ISwAddin
                     values["项目名称"]);
                 item.SetActivePropertyCard(activePropertyCard);
                 result.Add(item);
+                reportProgress?.Invoke(string.Concat("已读取图纸属性：", node.FileName), index + 1, operationItems.Count);
             }
         }
         finally

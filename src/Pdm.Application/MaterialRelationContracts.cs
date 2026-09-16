@@ -7,7 +7,8 @@ public sealed record SaveMaterialRelationOptionCommand(
     MaterialRelationQuantityMode QuantityMode,
     decimal QuantityPerSet,
     bool IsDefault,
-    int SortOrder);
+    int SortOrder,
+    string? SelectionAdvice = null);
 
 public sealed record SaveMaterialRelationGroupCommand(
     string Name,

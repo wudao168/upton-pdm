@@ -55,6 +55,7 @@ internal sealed class BatchRenamePreviewRow
 
 internal sealed class CheckedDropDownBox : UserControl
 {
+    private bool suppressItemCheck;
     private readonly TextBox display = new TextBox
     {
         ReadOnly = true,
@@ -116,6 +117,10 @@ internal sealed class CheckedDropDownBox : UserControl
         arrow.MouseDown += (_, _) => ShowChoices();
         choices.ItemCheck += (_, eventArgs) =>
         {
+            if (suppressItemCheck)
+            {
+                return;
+            }
             ItemCheck?.Invoke(this, eventArgs);
             BeginInvoke(new Action(UpdateDisplayText));
         };
@@ -130,11 +135,24 @@ internal sealed class CheckedDropDownBox : UserControl
         .Where(value => !string.IsNullOrWhiteSpace(value))
         .ToArray();
 
-    public void SetItems(IEnumerable<string> items)
+    public void SetItems(IEnumerable<string> items, IEnumerable<string> checkedItems = null)
     {
-        choices.Items.Clear();
-        choices.Items.AddRange((items ?? Array.Empty<string>()).Cast<object>().ToArray());
-        UpdateDisplayText();
+        var selected = new HashSet<string>(checkedItems ?? Array.Empty<string>(), StringComparer.OrdinalIgnoreCase);
+        suppressItemCheck = true;
+        try
+        {
+            choices.Items.Clear();
+            choices.Items.AddRange((items ?? Array.Empty<string>()).Cast<object>().ToArray());
+            for (var index = 0; index < choices.Items.Count; index++)
+            {
+                choices.SetItemChecked(index, selected.Contains(choices.Items[index]?.ToString() ?? string.Empty));
+            }
+        }
+        finally
+        {
+            suppressItemCheck = false;
+            UpdateDisplayText();
+        }
     }
 
     private void ShowChoices()
@@ -173,6 +191,7 @@ internal sealed class BatchRenameControl : UserControl
     private const int SharedControlWidth = 120;
     private const int SharedControlHeight = 30;
     private const int SharedControlGap = 3;
+    private const int SharedTextBottomPadding = 2;
     private const string SharedRenameFieldColumnName = "BatchRenameField";
     private const string SharedRenameValueColumnName = "BatchRenameValue";
     private const string SharedRenameStatusColumnName = "BatchRenameStatus";
@@ -200,6 +219,7 @@ internal sealed class BatchRenameControl : UserControl
     private readonly TextBox documentReplacementText = new TextBox();
     private readonly CheckBox documentCaseSensitive = new CheckBox { Text = "区分大小写", AutoSize = true, Anchor = AnchorStyles.Left };
     private readonly ComboBox serialNumber = new ComboBox { DropDownStyle = ComboBoxStyle.DropDown };
+    private readonly CheckedDropDownBox hierarchyScope = new CheckedDropDownBox();
     private readonly DataGridView previewGrid;
     private readonly bool usesSharedPreviewGrid;
     private readonly BindingList<BatchRenamePreviewRow> previewRows = new BindingList<BatchRenamePreviewRow>();
@@ -244,6 +264,10 @@ internal sealed class BatchRenameControl : UserControl
 
         BuildLayout();
         LoadPropertyFields();
+        hierarchyScope.SetItems(
+            new[] { BatchRenameRule.ComponentDrawingScope, BatchRenameRule.NonStandardScope },
+            new[] { BatchRenameRule.ComponentDrawingScope, BatchRenameRule.NonStandardScope });
+        hierarchyScope.ItemCheck += (_, _) => InvalidatePreview();
         serialNumber.Items.AddRange(this.projectSerialNumbers.Cast<object>().ToArray());
         if (serialNumber.Items.Count > 0)
         {
@@ -452,19 +476,16 @@ internal sealed class BatchRenameControl : UserControl
         ConfigureSharedInput(operation, SharedControlWidth);
         ConfigureSharedInput(searchText, SharedControlWidth);
         ConfigureSharedInput(replacementText, SharedControlWidth);
+        ConfigureSharedCheckBox(caseSensitive);
         var preview = CreateSharedButton("生成预览", () => GenerateSharedPreview(0));
         propertyApply.Click += (_, _) => ApplySharedPreview(0);
         row.Controls.Add(CreateSharedLabel("属性替换"), 0, 0);
         row.Controls.Add(sharedPropertyFields, 1, 0);
         row.Controls.Add(operation, 2, 0);
-        searchLabel.AutoSize = false;
-        searchLabel.Dock = DockStyle.Fill;
-        searchLabel.TextAlign = ContentAlignment.MiddleLeft;
+        ConfigureSharedTextLabel(searchLabel);
         row.Controls.Add(searchLabel, 3, 0);
         row.Controls.Add(searchText, 4, 0);
-        replacementLabel.AutoSize = false;
-        replacementLabel.Dock = DockStyle.Fill;
-        replacementLabel.TextAlign = ContentAlignment.MiddleLeft;
+        ConfigureSharedTextLabel(replacementLabel);
         row.Controls.Add(replacementLabel, 5, 0);
         row.Controls.Add(replacementText, 6, 0);
         row.Controls.Add(caseSensitive, 7, 0);
@@ -488,14 +509,15 @@ internal sealed class BatchRenameControl : UserControl
         ConfigureSharedInput(documentOperation, SharedControlWidth);
         ConfigureSharedInput(documentSearchText, SharedControlWidth);
         ConfigureSharedInput(documentReplacementText, SharedControlWidth);
+        ConfigureSharedCheckBox(documentCaseSensitive);
         var documentPreview = CreateSharedButton("生成预览", () => GenerateSharedPreview(1));
         documentApply.Click += (_, _) => ApplySharedPreview(1);
         row.Controls.Add(CreateSharedLabel("图档改名"), 0, 0);
         row.Controls.Add(documentOperation, 1, 0);
-        documentSearchLabel.Dock = DockStyle.Fill;
+        ConfigureSharedTextLabel(documentSearchLabel);
         row.Controls.Add(documentSearchLabel, 2, 0);
         row.Controls.Add(documentSearchText, 3, 0);
-        documentReplacementLabel.Dock = DockStyle.Fill;
+        ConfigureSharedTextLabel(documentReplacementLabel);
         row.Controls.Add(documentReplacementLabel, 4, 0);
         row.Controls.Add(documentReplacementText, 5, 0);
         row.Controls.Add(documentCaseSensitive, 6, 0);
@@ -509,15 +531,20 @@ internal sealed class BatchRenameControl : UserControl
         var row = CreateSharedActionRow(
             70F,
             SharedControlWidth + SharedControlGap,
+            50F,
+            243F + SharedControlGap,
             SharedControlWidth + SharedControlGap,
             SharedControlWidth + SharedControlGap);
         ConfigureSharedInput(serialNumber, SharedControlWidth);
+        ConfigureSharedInput(hierarchyScope, 243);
         var hierarchyPreview = CreateSharedButton("生成预览", () => GenerateSharedPreview(2));
         hierarchyApply.Click += (_, _) => ApplySharedPreview(2);
         row.Controls.Add(CreateSharedLabel("批量图号"), 0, 0);
         row.Controls.Add(serialNumber, 1, 0);
-        row.Controls.Add(hierarchyPreview, 2, 0);
-        row.Controls.Add(hierarchyApply, 3, 0);
+        row.Controls.Add(CreateSharedLabel("范围"), 2, 0);
+        row.Controls.Add(hierarchyScope, 3, 0);
+        row.Controls.Add(hierarchyPreview, 4, 0);
+        row.Controls.Add(hierarchyApply, 5, 0);
         return row;
     }
 
@@ -558,8 +585,20 @@ internal sealed class BatchRenameControl : UserControl
         Text = text,
         Dock = DockStyle.Fill,
         TextAlign = ContentAlignment.MiddleLeft,
+        UseCompatibleTextRendering = false,
+        Padding = new Padding(0, 0, 0, SharedTextBottomPadding),
         Margin = Padding.Empty
     };
+
+    private static void ConfigureSharedTextLabel(Label label)
+    {
+        label.AutoSize = false;
+        label.Dock = DockStyle.Fill;
+        label.TextAlign = ContentAlignment.MiddleLeft;
+        label.UseCompatibleTextRendering = false;
+        label.Padding = new Padding(0, 0, 0, SharedTextBottomPadding);
+        label.Margin = Padding.Empty;
+    }
 
     private static void ConfigureSharedInput(Control control, int width)
     {
@@ -578,6 +617,17 @@ internal sealed class BatchRenameControl : UserControl
             comboBox.ItemHeight = 24;
             comboBox.DrawItem += DrawSharedComboBoxItem;
         }
+    }
+
+    private static void ConfigureSharedCheckBox(CheckBox checkBox)
+    {
+        checkBox.AutoSize = false;
+        checkBox.Dock = DockStyle.Fill;
+        checkBox.TextAlign = ContentAlignment.MiddleLeft;
+        checkBox.CheckAlign = ContentAlignment.MiddleLeft;
+        checkBox.Margin = new Padding(0, 0, SharedControlGap, 0);
+        checkBox.UseCompatibleTextRendering = false;
+        checkBox.Padding = new Padding(0, 0, 0, SharedTextBottomPadding);
     }
 
     private static void DrawSharedComboBoxItem(object sender, DrawItemEventArgs eventArgs)
@@ -660,7 +710,9 @@ internal sealed class BatchRenameControl : UserControl
 
     private Control BuildHierarchyRuleRow()
     {
-        var row = new TableLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, ColumnCount = 4, Margin = new Padding(0, 8, 0, 0) };
+        var row = new TableLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, ColumnCount = 6, Margin = new Padding(0, 8, 0, 0) };
+        row.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 100));
+        row.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 240));
         row.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 100));
         row.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 240));
         row.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 100));
@@ -668,14 +720,17 @@ internal sealed class BatchRenameControl : UserControl
         row.Controls.Add(new Label { Text = "项目序列号", AutoSize = true, Anchor = AnchorStyles.Left }, 0, 0);
         serialNumber.Dock = DockStyle.Fill;
         row.Controls.Add(serialNumber, 1, 0);
-        row.Controls.Add(new Label { Text = "编号规则", AutoSize = true, Anchor = AnchorStyles.Left }, 2, 0);
+        row.Controls.Add(new Label { Text = "修改范围", AutoSize = true, Anchor = AnchorStyles.Left }, 2, 0);
+        hierarchyScope.Dock = DockStyle.Fill;
+        row.Controls.Add(hierarchyScope, 3, 0);
+        row.Controls.Add(new Label { Text = "编号规则", AutoSize = true, Anchor = AnchorStyles.Left }, 4, 0);
         row.Controls.Add(new Label
         {
             Text = "00 / 01 / 01.01 / 01.01-01（按SolidWorks设计树顺序）",
             AutoSize = true,
             Anchor = AnchorStyles.Left,
             ForeColor = Color.FromArgb(73, 88, 108)
-        }, 3, 0);
+        }, 5, 0);
         return row;
     }
 
@@ -1225,6 +1280,9 @@ internal sealed class BatchRenameControl : UserControl
         var modelItemsByKey = modelItems.ToDictionary(ItemKey, StringComparer.OrdinalIgnoreCase);
         var requests = new List<BatchDocumentRenameRequest>();
         var rowsByNodeId = new Dictionary<Guid, BatchRenamePreviewRow>();
+        var selectedScopes = hierarchyScope.CheckedItems;
+        var includeComponentDrawings = selectedScopes.Contains(BatchRenameRule.ComponentDrawingScope, StringComparer.OrdinalIgnoreCase);
+        var includeNonStandardParts = selectedScopes.Contains(BatchRenameRule.NonStandardScope, StringComparer.OrdinalIgnoreCase);
 
         foreach (var hierarchyKey in orderedHierarchyKeys)
         {
@@ -1238,7 +1296,13 @@ internal sealed class BatchRenameControl : UserControl
                 Path.GetFileNameWithoutExtension(item.FileName),
                 nextBaseName,
                 StringComparison.OrdinalIgnoreCase);
-            var selected = IsItemSelected(item);
+            var selected = BatchRenameRule.IsInHierarchyScope(
+                item.OperationItem.Node.Kind == CadDocumentKind.Assembly
+                    ? BatchRenameHierarchyKind.Assembly
+                    : BatchRenameHierarchyKind.Part,
+                item.Classification,
+                includeComponentDrawings,
+                includeNonStandardParts);
             var request = changed ? new BatchDocumentRenameRequest(item, nextBaseName) : null;
             if (request != null)
             {

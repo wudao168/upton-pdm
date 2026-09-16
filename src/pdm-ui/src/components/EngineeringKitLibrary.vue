@@ -132,9 +132,9 @@ onMounted(load)
 </script>
 
 <template>
-  <section class="engineering-kit-library pdm-panel" aria-label="标准结构套件库">
+  <section class="engineering-kit-library" aria-label="料品套件">
     <header class="engineering-kit-library__header">
-      <div><h1>标准结构</h1><p>UKIT 套件仅供 PDM 工程引用，套件本身不进入 U9C；发布到 BOM 时自动展开为真实料品。</p></div>
+      <div><h1>料品套件</h1><p>UKIT 套件仅供 PDM 工程引用，套件本身不进入 U9C；发布到 BOM 时自动展开为真实料品。</p></div>
       <el-button v-if="canManage" type="primary" @click="openEditor()">新建套件</el-button>
     </header>
     <div class="engineering-kit-library__toolbar">
@@ -186,5 +186,5 @@ onMounted(load)
 </template>
 
 <style scoped>
-.engineering-kit-library{display:flex;height:calc(100vh - 104px);min-height:560px;flex-direction:column;overflow:hidden}.engineering-kit-library__header{display:flex;padding:16px 20px;border-bottom:1px solid #e5eaf1;align-items:center;justify-content:space-between}.engineering-kit-library__header h1{margin:0;font-size:18px}.engineering-kit-library__header p{margin:4px 0 0;color:#64748b;font-size:12px}.engineering-kit-library__toolbar{display:flex;padding:12px 16px;align-items:center;gap:12px}.engineering-kit-library__toolbar .el-input{max-width:360px}.engineering-kit-library__toolbar span{color:#64748b;font-size:12px}.engineering-kit-library>:deep(.el-table){min-height:0;flex:1}.engineering-kit-components{padding:12px 48px}.engineering-kit-components>strong{display:block;margin-bottom:10px}.kit-code{color:#0f766e}.engineering-kit-form-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}.engineering-kit-component-title{display:flex;margin:8px 0 10px;align-items:center;justify-content:space-between}.engineering-kit-component-title div{display:flex;flex-direction:column;gap:3px}.engineering-kit-component-title span{color:#64748b;font-size:12px}@media(max-width:760px){.engineering-kit-library__header{align-items:flex-start;gap:12px}.engineering-kit-form-grid{grid-template-columns:1fr}}
+.engineering-kit-library{display:flex;height:100%;min-height:0;flex-direction:column;overflow:hidden}.engineering-kit-library__header{display:flex;padding:10px 16px;border-bottom:1px solid #e5eaf1;align-items:center;justify-content:space-between}.engineering-kit-library__header h1{margin:0;font-size:18px}.engineering-kit-library__header p{margin:4px 0 0;color:#64748b;font-size:12px}.engineering-kit-library__toolbar{display:flex;padding:10px 16px;align-items:center;gap:12px}.engineering-kit-library__toolbar .el-input{max-width:360px}.engineering-kit-library__toolbar span{color:#64748b;font-size:12px}.engineering-kit-library>:deep(.el-table){min-height:0;flex:1}.engineering-kit-components{padding:12px 48px}.engineering-kit-components>strong{display:block;margin-bottom:10px}.kit-code{color:#0f766e}.engineering-kit-form-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}.engineering-kit-component-title{display:flex;margin:8px 0 10px;align-items:center;justify-content:space-between}.engineering-kit-component-title div{display:flex;flex-direction:column;gap:3px}.engineering-kit-component-title span{color:#64748b;font-size:12px}@media(max-width:760px){.engineering-kit-library__header{align-items:flex-start;gap:12px}.engineering-kit-form-grid{grid-template-columns:1fr}}
 </style>

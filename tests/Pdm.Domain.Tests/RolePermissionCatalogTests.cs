@@ -40,6 +40,7 @@ public sealed class RolePermissionCatalogTests
         Assert.Contains(PermissionCodes.DocumentEdit, mechanical);
         Assert.Contains(PermissionCodes.BomEdit, mechanical);
         Assert.Contains(PermissionCodes.MaterialView, mechanical);
+        Assert.Contains(PermissionCodes.MaterialApply, mechanical);
         Assert.DoesNotContain(PermissionCodes.MaterialManage, mechanical);
 
         var standardizationEngineer = RolePermissionCatalog.InitialPermissions(UserRole.ProcessReviewer.ToString(), UserRole.ProcessReviewer);
@@ -77,6 +78,7 @@ public sealed class RolePermissionCatalogTests
         var normalized = RolePermissionCatalog.Normalize(UserRole.Engineer, [PermissionCodes.MaterialManage]);
 
         Assert.Contains(PermissionCodes.MaterialManage, normalized);
+        Assert.Contains(PermissionCodes.MaterialApply, normalized);
         Assert.Contains(PermissionCodes.MaterialView, normalized);
     }
 }

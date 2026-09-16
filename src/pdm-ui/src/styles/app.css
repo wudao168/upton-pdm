@@ -580,7 +580,7 @@
 @media (max-width:900px) { .pdm-permission-grid { grid-template-columns:1fr; } }
 .pdm-bom-row-drag-handle { touch-action: none; }
 .pdm-bom-drag-ghost { position: fixed; z-index: 6000; box-sizing: border-box; max-width: min(720px, calc(100vw - 30px)); padding: 8px 12px; overflow: hidden; border: 1px solid var(--pdm-theme-accent); border-radius: 5px; background: var(--pdm-theme-accent-soft); box-shadow: 0 8px 24px rgba(29,78,137,.24); color: var(--pdm-theme-accent-hover); font-size: 11px; font-weight: 600; pointer-events: none; text-overflow: ellipsis; white-space: nowrap; }
-.pdm-bom-filters { grid-template-columns: minmax(110px, 1.5fr) repeat(3, minmax(70px, .8fr)) auto; }
+.pdm-bom-filters { grid-template-columns: minmax(90px, 1.5fr) repeat(3, minmax(70px, .8fr)) auto auto; }
 .pdm-bom-generation-confirm .el-message-box__message p {
   white-space: pre-line;
 }

@@ -29,7 +29,7 @@ public sealed class MySqlMaterialRelationRepository : IMaterialRelationRepositor
                    g.max_selection MaxSelection,g.auto_select_unique AutoSelectUnique,g.sort_order GroupSortOrder,
                    o.id OptionId,o.material_id OptionMaterialId,om.material_code OptionMaterialCode,om.name OptionMaterialName,
                    om.material_kind OptionMaterialKind,om.unit_code OptionUnitCode,o.quantity_mode QuantityMode,o.quantity_per_set QuantityPerSet,
-                   o.is_default IsDefault,o.sort_order OptionSortOrder
+                   o.is_default IsDefault,o.sort_order OptionSortOrder,o.selection_advice SelectionAdvice
             FROM material_relation_template t
             INNER JOIN material_master mm ON mm.id=t.main_material_id
             LEFT JOIN material_relation_revision r ON r.template_id=t.id AND r.revision_state IN ('Published','Draft')
@@ -97,9 +97,9 @@ public sealed class MySqlMaterialRelationRepository : IMaterialRelationRepositor
                 """, new { group.Id, RevisionId = revisionId, group.Name, group.IsRequired, SelectionMode = group.SelectionMode.ToString(), group.MinSelection, group.MaxSelection, group.AutoSelectUnique, group.SortOrder }, transaction, cancellationToken: cancellationToken));
             foreach (var option in group.Options)
                 await connection.ExecuteAsync(new CommandDefinition("""
-                    INSERT INTO material_relation_option(id,group_id,material_id,quantity_mode,quantity_per_set,is_default,sort_order)
-                    VALUES(@Id,@GroupId,@MaterialId,@QuantityMode,@QuantityPerSet,@IsDefault,@SortOrder)
-                    """, new { option.Id, GroupId = group.Id, option.MaterialId, QuantityMode = option.QuantityMode.ToString(), option.QuantityPerSet, option.IsDefault, option.SortOrder }, transaction, cancellationToken: cancellationToken));
+                    INSERT INTO material_relation_option(id,group_id,material_id,quantity_mode,quantity_per_set,is_default,sort_order,selection_advice)
+                    VALUES(@Id,@GroupId,@MaterialId,@QuantityMode,@QuantityPerSet,@IsDefault,@SortOrder,@SelectionAdvice)
+                    """, new { option.Id, GroupId = group.Id, option.MaterialId, QuantityMode = option.QuantityMode.ToString(), option.QuantityPerSet, option.IsDefault, option.SortOrder, option.SelectionAdvice }, transaction, cancellationToken: cancellationToken));
         }
         await connection.ExecuteAsync(new CommandDefinition("""
             UPDATE material_relation_template SET name=@Name,updated_by=@Actor,updated_at=@Now,row_version=row_version+1 WHERE id=@Id
@@ -208,7 +208,8 @@ public sealed class MySqlMaterialRelationRepository : IMaterialRelationRepositor
                     var group = groupRows.First();
                     var options = groupRows.Where(row => row.OptionId.HasValue).Select(row => new MaterialRelationOption(row.OptionId!.Value, row.OptionMaterialId!.Value,
                         row.OptionMaterialCode!, row.OptionMaterialName!, Enum.Parse<MaterialKind>(row.OptionMaterialKind!), row.OptionUnitCode!,
-                        Enum.Parse<MaterialRelationQuantityMode>(row.QuantityMode!), row.QuantityPerSet!.Value, row.IsDefault!.Value, row.OptionSortOrder!.Value)).ToArray();
+                        Enum.Parse<MaterialRelationQuantityMode>(row.QuantityMode!), row.QuantityPerSet!.Value, row.IsDefault!.Value, row.OptionSortOrder!.Value,
+                        row.SelectionAdvice)).ToArray();
                     return new MaterialRelationGroup(group.GroupId!.Value, group.GroupName!, group.IsRequired!.Value,
                         Enum.Parse<MaterialRelationSelectionMode>(group.SelectionMode!), group.MinSelection!.Value, group.MaxSelection,
                         group.AutoSelectUnique!.Value, group.GroupSortOrder!.Value, options);
@@ -265,5 +266,6 @@ public sealed class MySqlMaterialRelationRepository : IMaterialRelationRepositor
         public decimal? QuantityPerSet { get; init; }
         public bool? IsDefault { get; init; }
         public int? OptionSortOrder { get; init; }
+        public string? SelectionAdvice { get; init; }
     }
 }
