@@ -424,7 +424,7 @@ public sealed partial class MySqlPdmRepository
             """
             SELECT package.state,package.release_scope,package.locks_documents,snapshot.root_json
             FROM release_package package
-            INNER JOIN reference_snapshot snapshot ON snapshot.id=package.reference_snapshot_id
+            LEFT JOIN reference_snapshot snapshot ON snapshot.id=package.reference_snapshot_id
             WHERE package.id=@PackageId
             FOR UPDATE
             """,
@@ -432,7 +432,9 @@ public sealed partial class MySqlPdmRepository
             ?? throw new PdmNotFoundException("发布包不存在。");
         if (packageState.State is not ("Draft" or "Rejected" or "PublishFailed"))
             throw new PdmConflictException("只有草稿、已驳回或发布失败的发布包可以提交。");
-        var documentIds = DeserializeDocumentIds(packageState.RootJson);
+        var documentIds = string.IsNullOrWhiteSpace(packageState.RootJson) ? [] : DeserializeDocumentIds(packageState.RootJson);
+        if (packageState.LocksDocuments && string.IsNullOrWhiteSpace(packageState.RootJson))
+            throw new PdmConflictException("正式发布包缺少引用树快照，不能提交审批。");
         if (packageState.LocksDocuments && documentIds.Length == 0) throw new PdmConflictException("发布包引用快照中没有可审批图档。");
         var blocked = packageState.LocksDocuments ? await connection.QuerySingleOrDefaultAsync<DocumentApprovalBlockRow>(new CommandDefinition(
             """
@@ -487,7 +489,7 @@ public sealed partial class MySqlPdmRepository
             """
             SELECT package.state,package.release_scope,package.locks_documents,snapshot.root_json
             FROM release_package package
-            INNER JOIN reference_snapshot snapshot ON snapshot.id=package.reference_snapshot_id
+            LEFT JOIN reference_snapshot snapshot ON snapshot.id=package.reference_snapshot_id
             WHERE package.id=@PackageId
             FOR UPDATE
             """,
@@ -495,7 +497,7 @@ public sealed partial class MySqlPdmRepository
             ?? throw new PdmNotFoundException("发布包不存在。");
         if (packageState.State is not ("ProcessReview" or "Approval"))
             throw new PdmConflictException("只有审批中的发布包可以撤回。");
-        var documentIds = DeserializeDocumentIds(packageState.RootJson);
+        var documentIds = string.IsNullOrWhiteSpace(packageState.RootJson) ? [] : DeserializeDocumentIds(packageState.RootJson);
         await connection.ExecuteAsync(new CommandDefinition(
             "UPDATE approval_task SET decision_by=NULL,decision_value=NULL,decision_comment=NULL,decided_at=NULL,is_emergency_substitute=0,emergency_reason=NULL WHERE release_package_id=@PackageId",
             new { PackageId = releasePackageId }, transaction, cancellationToken: cancellationToken));
@@ -704,7 +706,7 @@ public sealed partial class MySqlPdmRepository
             await connection.ExecuteAsync(new CommandDefinition(
                 "UPDATE bom_version SET state='Released',updated_at=@PublishedAt,released_at=@PublishedAt,row_version=row_version+1 WHERE id IN @VersionIds AND state='InReview'",
                 new { VersionIds = versionIds, PublishedAt = publishedAt.UtcDateTime }, transaction, cancellationToken: cancellationToken));
-        var eventType = package.Scope is ReleaseScope.StandardLongLead or ReleaseScope.NonStandardLongLead ? "LongLeadBomReleased" : "BomStreamReleased";
+        var eventType = package.Scope is ReleaseScope.StandardLongLead or ReleaseScope.NonStandardLongLead or ReleaseScope.ElectricalLongLead ? "LongLeadBomReleased" : "BomStreamReleased";
         await connection.ExecuteAsync(new CommandDefinition(
             """
             INSERT INTO integration_outbox(id,event_type,aggregate_type,aggregate_id,payload_json,occurred_at,retry_count)
@@ -860,7 +862,7 @@ public sealed partial class MySqlPdmRepository
         public string State { get; init; } = string.Empty;
         public string ReleaseScope { get; init; } = Upton.Pdm.Domain.ReleaseScope.LegacyCombined.ToString();
         public bool LocksDocuments { get; init; }
-        public string RootJson { get; init; } = string.Empty;
+        public string? RootJson { get; init; }
     }
 
     private sealed class DocumentApprovalBlockRow

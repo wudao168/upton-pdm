@@ -15,29 +15,29 @@ public sealed class EngineeringKitServiceTests
         var pdm = new InMemoryPdmRepository(time);
         var service = new EngineeringKitService(kits, materials, pdm, time);
         var required = Material("0102000001", "必选螺栓");
-        var optional = Material("0102000002", "可选垫圈");
+        var second = Material("0102000002", "配套垫圈");
         await materials.UpsertU9MaterialAsync(required, CancellationToken.None);
-        await materials.UpsertU9MaterialAsync(optional, CancellationToken.None);
+        await materials.UpsertU9MaterialAsync(second, CancellationToken.None);
 
         var draft = await service.SaveDraftAsync(null, new(
-            "安装附件套件", "仅供PDM工程引用", "首次建立",
-            [new(required.Id, 5, false, 1), new(optional.Id, 2, true, 2)]),
+            "安装附件套件", "UPTON", null, "首次建立",
+            [new(required.Id, 5, false, 1), new(second.Id, 2, false, 2)]),
             "developer", UserRole.Administrator, CancellationToken.None);
 
         Assert.Null(draft.Code);
+        Assert.Null(draft.Model);
         var released = await service.PublishAsync(draft.Id, draft.RowVersion, "developer", UserRole.Administrator, CancellationToken.None);
         Assert.Equal("UKIT-000001", released.Code);
+        Assert.Equal(released.Code, released.Model);
+        Assert.Equal("UPTON", released.Brand);
         Assert.Equal(1, released.CurrentReleasedRevision?.VersionNumber);
 
-        var requiredOnly = await service.ExpandAsync(released.Id, new(null, 3, []), "engineer", UserRole.Engineer, CancellationToken.None);
-        Assert.Single(requiredOnly.Lines);
-        Assert.Equal("0102000001", requiredOnly.Lines[0].MaterialCode);
-        Assert.Equal(15, requiredOnly.Lines[0].Quantity);
-        Assert.DoesNotContain(requiredOnly.Lines, item => item.MaterialCode.StartsWith("UKIT-", StringComparison.Ordinal));
-
-        var withOptional = await service.ExpandAsync(released.Id, new(null, 2, [optionalComponent(released)]), "engineer", UserRole.Engineer, CancellationToken.None);
-        Assert.Equal(2, withOptional.Lines.Count);
-        Assert.Equal(4, withOptional.Lines.Single(item => item.IsOptional).Quantity);
+        var expansion = await service.ExpandAsync(released.Id, new(null, 3, []), "engineer", UserRole.Engineer, CancellationToken.None);
+        Assert.Equal(2, expansion.Lines.Count);
+        Assert.Equal(15, expansion.Lines.Single(item => item.MaterialCode == "0102000001").Quantity);
+        Assert.Equal(6, expansion.Lines.Single(item => item.MaterialCode == "0102000002").Quantity);
+        Assert.DoesNotContain(expansion.Lines, item => item.MaterialCode.StartsWith("UKIT-", StringComparison.Ordinal));
+        Assert.All(expansion.Lines, item => Assert.False(item.IsOptional));
     }
 
     [Fact]
@@ -50,11 +50,11 @@ public sealed class EngineeringKitServiceTests
         var service = new EngineeringKitService(kits, materials, pdm, time);
         var material = Material("0102000003", "定位销");
         await materials.UpsertU9MaterialAsync(material, CancellationToken.None);
-        var draft = await service.SaveDraftAsync(null, new("定位套件", null, null, [new(material.Id, 1, false, 1)]), "developer", UserRole.Administrator, CancellationToken.None);
+        var draft = await service.SaveDraftAsync(null, new("定位套件", "UPTON", null, null, [new(material.Id, 1, false, 1)]), "developer", UserRole.Administrator, CancellationToken.None);
         var released = await service.PublishAsync(draft.Id, draft.RowVersion, "developer", UserRole.Administrator, CancellationToken.None);
 
         var changed = await service.SaveDraftAsync(released.Id,
-            new("定位套件", null, "数量调整", [new(material.Id, 2, false, 1)], released.RowVersion),
+            new("定位套件", "UPTON", null, "数量调整", [new(material.Id, 2, false, 1)], released.RowVersion),
             "developer", UserRole.Administrator, CancellationToken.None);
 
         Assert.Equal("UKIT-000001", changed.Code);
@@ -65,24 +65,21 @@ public sealed class EngineeringKitServiceTests
     }
 
     [Fact]
-    public async Task SaveDraft_RejectsAllOptionalOrUnknownComponents()
+    public async Task SaveDraft_RejectsOptionalOrUnknownComponents()
     {
         var time = TimeProvider.System;
         var service = new EngineeringKitService(new InMemoryEngineeringKitRepository(), new InMemoryMaterialRepository(time), new InMemoryPdmRepository(time), time);
 
         var allOptional = await Assert.ThrowsAsync<PdmRuleException>(() => service.SaveDraftAsync(null,
-            new("无必选套件", null, null, [new(Guid.NewGuid(), 1, true, 1)]),
+            new("不允许可选件", "UPTON", null, null, [new(Guid.NewGuid(), 1, true, 1)]),
             "developer", UserRole.Administrator, CancellationToken.None));
-        Assert.Contains("至少需要一个必选子料", allOptional.Message);
+        Assert.Contains("不支持可选子料", allOptional.Message);
 
         var unknown = await Assert.ThrowsAsync<PdmRuleException>(() => service.SaveDraftAsync(null,
-            new("嵌套尝试", null, null, [new(Guid.NewGuid(), 1, false, 1)]),
+            new("嵌套尝试", "UPTON", null, null, [new(Guid.NewGuid(), 1, false, 1)]),
             "developer", UserRole.Administrator, CancellationToken.None));
         Assert.Contains("不能引用另一个套件", unknown.Message);
     }
-
-    private static Guid optionalComponent(EngineeringKit kit) =>
-        kit.CurrentReleasedRevision!.Components.Single(item => item.IsOptional).Id;
 
     private static PdmMaterial Material(string code, string name)
     {

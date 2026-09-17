@@ -93,7 +93,7 @@ describe('ReleaseCenter', () => {
       username: 'reviewer', pending: false, progress: 0, error: '', canManage: false, canDecide: false } })
     try {
       await flushPromises()
-      expect(wrapper.findAll('.pdm-release-frozen-table th').map(cell => cell.text())).toEqual(['序号', '物料编码', '物料名称', '型号', '品牌', '备注', 'BOM总量', '已提前发布', '本次新增下发', '版本', '批注'])
+      expect(wrapper.findAll('.pdm-release-frozen-table th').map(cell => cell.text())).toEqual(['序号', '物料编码', '物料名称', '型号', '品牌', '备注', 'BOM总量', '前期已发布', '本次新增下发', '版本', '批注'])
       expect(wrapper.findAll('.pdm-release-frozen-table tbody td').slice(6, 9).map(cell => cell.text())).toEqual(['4', '4', '0'])
       expect(wrapper.get('.pdm-item-comment-action').classes()).toContain('has-comments')
       expect(wrapper.get('.pdm-item-comment-action').text()).toBe('批注（1）')
@@ -241,10 +241,10 @@ describe('ReleaseCenter', () => {
     expect(wrapper.text()).not.toContain('生效序列号')
     expect(wrapper.text()).toContain('EL-001')
     expect(wrapper.text()).toContain('修改 1')
-    expect(wrapper.findAll('.pdm-release-frozen-table th').map(cell => cell.text())).toEqual(['序号', '物料编码', '物料名称', '型号', '品牌', '备注', '数量', '版本', '批注'])
-    expect(wrapper.findAll('.pdm-release-frozen-table tbody tr').at(0)!.findAll('td').map(cell => cell.text())).toEqual(['1', 'EL-001', '电气元件', 'M18', 'SMC', '安装备注', '2', 'W2', '批注'])
-    expect(wrapper.findAll('.pdm-release-frozen-table tbody tr').at(0)!.findAll('td.is-release-centered')).toHaveLength(6)
-    expect(wrapper.findAll('.pdm-release-frozen-table col')).toHaveLength(9)
+    expect(wrapper.findAll('.pdm-release-frozen-table th').map(cell => cell.text())).toEqual(['序号', '物料编码', '物料名称', '型号', '品牌', '备注', 'BOM总量', '前期已发布', '本次新增下发', '版本', '批注'])
+    expect(wrapper.findAll('.pdm-release-frozen-table tbody tr').at(0)!.findAll('td').map(cell => cell.text())).toEqual(['1', 'EL-001', '电气元件', 'M18', 'SMC', '安装备注', '2', '0', '2', 'W2', '批注'])
+    expect(wrapper.findAll('.pdm-release-frozen-table tbody tr').at(0)!.findAll('td.is-release-centered')).toHaveLength(8)
+    expect(wrapper.findAll('.pdm-release-frozen-table col')).toHaveLength(11)
     const topWorkflow = wrapper.get('.pdm-release-top-workflow')
     const summary = wrapper.get('.pdm-release-summary')
     expect(topWorkflow.find('.pdm-release-preparation').exists()).toBe(true)
@@ -304,9 +304,9 @@ describe('ReleaseCenter', () => {
     })
 
     expect(wrapper.findAll('option').map(option => option.text())).toEqual([
-      '非标件 · 长交期提前发布', '非标件BOM + 图纸 · 正式发布', '非标件 · 增补/变更',
+      '非标件 · 前期BOM发布', '非标件BOM + 图纸 · 正式发布', '非标件 · 增补/变更',
     ])
-    expect(wrapper.get('.release-detail-picker legend').text()).toContain('选择长交期非标件')
+    expect(wrapper.get('.release-detail-picker legend').text()).toContain('选择前期非标件')
     await wrapper.get('input[aria-label="选择长交期物料 NS-001"]').setValue(true)
     await wrapper.get('form').trigger('submit')
     const created = wrapper.emitted<CreateReleasePackageInput[]>('create')![0]![0]!

@@ -355,6 +355,14 @@ export interface BomPropertyMapping {
   source: 'SolidWorks' | 'Assembly' | 'Pdm'
   mappingEditable: boolean
 }
+export interface DrawingQrPolicy {
+  enabled: boolean
+  sourceProperty: string
+  ruleVersion: string
+  sizeMillimeters: number
+  marginMillimeters: number
+  everySheet: boolean
+}
 export interface PdmSystemSettings {
   vaultRoot: string
   releaseRoot: string
@@ -381,6 +389,7 @@ export interface PdmSystemSettings {
   materialCodeApproval?: MaterialCodeApprovalSettings
   releaseChangeReasonTypes?: string[]
   formalSupplementPolicies?: FormalSupplementPolicies
+  drawingQrPolicy?: DrawingQrPolicy
 }
 export interface MaterialCodeApprovalSettings { version: number; approverRoleCodes: string[] }
 export interface FormalSupplementPolicy { maximumCount?: number | null; validDays?: number | null }
@@ -657,6 +666,7 @@ export interface EditLockSummary {
 
 export interface BomItem {
   id?: string
+  releaseTrackingId?: string
   kind?: BomClassification
   sequence: number
   drawingNumber: string
@@ -738,7 +748,9 @@ export interface EngineeringKitRevision {
 export interface EngineeringKit {
   id: string
   code?: string
+  model?: string
   name: string
+  brand: string
   description?: string
   currentReleasedRevisionId?: string
   revisions: EngineeringKitRevision[]
@@ -916,7 +928,7 @@ export interface ReleaseItemComment {
   createdAt: string
 }
 
-export type ReleaseScope = 'LegacyCombined' | 'StandardLongLead' | 'StandardFormal' | 'StandardSupplement' | 'ElectricalFormal' | 'ElectricalSupplement' | 'NonStandardWithDrawing' | 'NonStandardLongLead' | 'NonStandardSupplement'
+export type ReleaseScope = 'LegacyCombined' | 'StandardLongLead' | 'StandardFormal' | 'StandardSupplement' | 'ElectricalFormal' | 'ElectricalSupplement' | 'NonStandardWithDrawing' | 'NonStandardLongLead' | 'NonStandardSupplement' | 'ElectricalLongLead'
 
 export interface CreateReleasePackageInput {
   changeReason: string

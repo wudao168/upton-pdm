@@ -36,17 +36,17 @@ public sealed class MySqlEngineeringKitRepository : IEngineeringKitRepository
         if (expectedRowVersion is null)
         {
             await connection.ExecuteAsync(new CommandDefinition("""
-                INSERT INTO engineering_kit(id,kit_code,name,description,current_released_revision_id,created_by,created_at,updated_by,updated_at,row_version)
-                VALUES(@Id,NULL,@Name,@Description,NULL,@CreatedBy,@CreatedAt,@UpdatedBy,@UpdatedAt,1)
-                """, new { kit.Id, kit.Name, kit.Description, kit.CreatedBy, CreatedAt = kit.CreatedAt.UtcDateTime, kit.UpdatedBy, UpdatedAt = kit.UpdatedAt.UtcDateTime }, transaction, cancellationToken: cancellationToken));
+                INSERT INTO engineering_kit(id,kit_code,kit_model,name,brand,description,current_released_revision_id,created_by,created_at,updated_by,updated_at,row_version)
+                VALUES(@Id,NULL,NULL,@Name,@Brand,@Description,NULL,@CreatedBy,@CreatedAt,@UpdatedBy,@UpdatedAt,1)
+                """, new { kit.Id, kit.Name, kit.Brand, kit.Description, kit.CreatedBy, CreatedAt = kit.CreatedAt.UtcDateTime, kit.UpdatedBy, UpdatedAt = kit.UpdatedAt.UtcDateTime }, transaction, cancellationToken: cancellationToken));
         }
         else
         {
             var affected = await connection.ExecuteAsync(new CommandDefinition("""
                 UPDATE engineering_kit
-                SET name=@Name,description=@Description,updated_by=@UpdatedBy,updated_at=@UpdatedAt,row_version=row_version+1
+                SET name=@Name,brand=@Brand,description=@Description,updated_by=@UpdatedBy,updated_at=@UpdatedAt,row_version=row_version+1
                 WHERE id=@Id AND row_version=@ExpectedRowVersion
-                """, new { kit.Id, kit.Name, kit.Description, kit.UpdatedBy, UpdatedAt = kit.UpdatedAt.UtcDateTime, ExpectedRowVersion = expectedRowVersion.Value }, transaction, cancellationToken: cancellationToken));
+                """, new { kit.Id, kit.Name, kit.Brand, kit.Description, kit.UpdatedBy, UpdatedAt = kit.UpdatedAt.UtcDateTime, ExpectedRowVersion = expectedRowVersion.Value }, transaction, cancellationToken: cancellationToken));
             if (affected == 0) throw new PdmConflictException("套件已被其他用户修改，请刷新后重试。");
         }
 
@@ -106,7 +106,7 @@ public sealed class MySqlEngineeringKitRepository : IEngineeringKitRepository
             UPDATE engineering_kit_revision SET revision_state='Released',published_by=@Actor,published_at=@PublishedAt WHERE id=@RevisionId
             """, new { Actor = actor, PublishedAt = publishedAt.UtcDateTime, RevisionId = draft.Id }, transaction, cancellationToken: cancellationToken));
         await connection.ExecuteAsync(new CommandDefinition("""
-            UPDATE engineering_kit SET kit_code=@Code,current_released_revision_id=@RevisionId,updated_by=@Actor,updated_at=@PublishedAt,row_version=row_version+1
+            UPDATE engineering_kit SET kit_code=@Code,kit_model=@Code,current_released_revision_id=@RevisionId,updated_by=@Actor,updated_at=@PublishedAt,row_version=row_version+1
             WHERE id=@KitId
             """, new { Code = code, RevisionId = draft.Id, Actor = actor, PublishedAt = publishedAt.UtcDateTime, KitId = kitId }, transaction, cancellationToken: cancellationToken));
         await transaction.CommitAsync(cancellationToken);
@@ -142,7 +142,7 @@ public sealed class MySqlEngineeringKitRepository : IEngineeringKitRepository
     }
 
     private static EngineeringKit MapKit(KitRow row, IReadOnlyList<EngineeringKitRevision> revisions) =>
-        new(row.Id, row.KitCode, row.Name, row.Description, row.CurrentReleasedRevisionId, revisions,
+        new(row.Id, row.KitCode, row.KitModel, row.Name, row.Brand, row.Description, row.CurrentReleasedRevisionId, revisions,
             row.CreatedBy, Utc(row.CreatedAt), row.UpdatedBy, Utc(row.UpdatedAt), row.RowVersion);
 
     private static EngineeringKitRevision MapRevision(RevisionRow row, IReadOnlyList<EngineeringKitComponent> components) =>
@@ -155,7 +155,7 @@ public sealed class MySqlEngineeringKitRepository : IEngineeringKitRepository
     private static DateTimeOffset Utc(DateTime value) => new(DateTime.SpecifyKind(value, DateTimeKind.Utc));
 
     private const string KitSelect = """
-        SELECT k.id,k.kit_code,k.name,k.description,k.current_released_revision_id,k.created_by,k.created_at,k.updated_by,k.updated_at,k.row_version
+        SELECT k.id,k.kit_code,k.kit_model,k.name,k.brand,k.description,k.current_released_revision_id,k.created_by,k.created_at,k.updated_by,k.updated_at,k.row_version
         FROM engineering_kit k
         """;
 
@@ -168,7 +168,9 @@ public sealed class MySqlEngineeringKitRepository : IEngineeringKitRepository
     {
         public Guid Id { get; init; }
         public string? KitCode { get; init; }
+        public string? KitModel { get; init; }
         public string Name { get; init; } = string.Empty;
+        public string Brand { get; init; } = string.Empty;
         public string? Description { get; init; }
         public Guid? CurrentReleasedRevisionId { get; init; }
         public string CreatedBy { get; init; } = string.Empty;

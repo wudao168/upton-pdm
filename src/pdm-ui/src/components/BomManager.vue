@@ -590,11 +590,14 @@ const filtersActive = computed(() => !!searchQuery.value.trim() || kindFilter.va
 const allowedReleaseScopes = computed<Array<Exclude<ReleaseScope, 'LegacyCombined'>>>(() => kind.value === 'Standard'
   ? ['StandardLongLead', 'StandardFormal', 'StandardSupplement']
   : kind.value === 'NonStandard' ? ['NonStandardLongLead', 'NonStandardWithDrawing', 'NonStandardSupplement']
-    : kind.value === 'Electrical' ? ['ElectricalFormal', 'ElectricalSupplement'] : [])
-const hasPublishedFormal = computed(() => props.releasePackages.some(item => item.scope === (kind.value === 'NonStandard' ? 'NonStandardWithDrawing' : 'StandardFormal') && item.state === '已发布'))
+    : kind.value === 'Electrical' ? ['ElectricalLongLead', 'ElectricalFormal', 'ElectricalSupplement'] : [])
+const formalScopeForCurrentKind = computed<ReleaseScope>(() => kind.value === 'NonStandard'
+  ? 'NonStandardWithDrawing'
+  : kind.value === 'Electrical' ? 'ElectricalFormal' : 'StandardFormal')
+const hasPublishedFormal = computed(() => props.releasePackages.some(item => item.scope === formalScopeForCurrentKind.value && item.state === '已发布'))
 const createReleaseScopes = computed<Array<Exclude<ReleaseScope, 'LegacyCombined'>>>(() =>
-  (kind.value === 'Standard' || kind.value === 'NonStandard') && hasPublishedFormal.value
-    ? [kind.value === 'NonStandard' ? 'NonStandardSupplement' : 'StandardSupplement']
+  (kind.value === 'Standard' || kind.value === 'NonStandard' || kind.value === 'Electrical') && hasPublishedFormal.value
+    ? [kind.value === 'NonStandard' ? 'NonStandardSupplement' : kind.value === 'Electrical' ? 'ElectricalSupplement' : 'StandardSupplement']
     : allowedReleaseScopes.value)
 const preferredReleaseScope = computed<Exclude<ReleaseScope, 'LegacyCombined'> | undefined>(() => {
   if (kind.value === 'Standard') {
@@ -605,11 +608,15 @@ const preferredReleaseScope = computed<Exclude<ReleaseScope, 'LegacyCombined'> |
     if (hasPublishedFormal.value) return 'NonStandardSupplement'
     return props.releasePackages.some(item => item.scope === 'NonStandardLongLead' && item.state === '已发布') ? 'NonStandardWithDrawing' : 'NonStandardLongLead'
   }
+  if (kind.value === 'Electrical') {
+    if (hasPublishedFormal.value) return 'ElectricalSupplement'
+    return props.releasePackages.some(item => item.scope === 'ElectricalLongLead' && item.state === '已发布') ? 'ElectricalFormal' : 'ElectricalLongLead'
+  }
   return undefined
 })
 const publishedLongLeadItems = computed(() => props.releasePackages
-  .filter(item => item.scope === (kind.value === 'NonStandard' ? 'NonStandardLongLead' : 'StandardLongLead') && item.state === '已发布')
-  .flatMap(item => kind.value === 'NonStandard' ? item.nonStandardBomSnapshot : item.standardBomSnapshot))
+  .filter(item => item.scope === (kind.value === 'NonStandard' ? 'NonStandardLongLead' : kind.value === 'Electrical' ? 'ElectricalLongLead' : 'StandardLongLead') && item.state === '已发布')
+  .flatMap(item => kind.value === 'NonStandard' ? item.nonStandardBomSnapshot : kind.value === 'Electrical' ? item.electricalBomSnapshot : item.standardBomSnapshot))
 const materialReferenceBrandOptions = computed(() => [...new Set(materialReferenceResults.value
   .map(item => item.brand?.trim())
   .filter((brand): brand is string => Boolean(brand)))]
@@ -890,7 +897,7 @@ function releasePackageMatchesKind(releasePackage: ReleasePackageSummary, bomKin
   return bomKind === 'Standard'
     ? ['StandardLongLead', 'StandardFormal', 'StandardSupplement'].includes(releasePackage.scope)
     : bomKind === 'NonStandard' ? ['NonStandardLongLead', 'NonStandardWithDrawing', 'NonStandardSupplement'].includes(releasePackage.scope)
-      : bomKind === 'Electrical' ? ['ElectricalFormal', 'ElectricalSupplement'].includes(releasePackage.scope) : false
+      : bomKind === 'Electrical' ? ['ElectricalLongLead', 'ElectricalFormal', 'ElectricalSupplement'].includes(releasePackage.scope) : false
 }
 
 function hasManualClassificationMismatch(row: BomItem) {
@@ -1574,6 +1581,15 @@ async function downloadDrawing(link: BomDrawingLink) {
 
 function saveCurrentBom() {
   if (kind.value !== 'Standard' && kind.value !== 'NonStandard' && kind.value !== 'Electrical') return
+  if (kind.value === 'NonStandard' && props.validationRules.nonStandard.includes('material')) {
+    const missingMaterialRows = rows.value
+      .filter(row => Number(row.quantity) > 0 && !hasValidationValue(row, 'material'))
+      .map(row => row.sequence)
+    if (missingMaterialRows.length > 0) {
+      ElMessage.error(`非标件BOM保存前必须补全材质；第 ${missingMaterialRows.join('、')} 行缺少材质`)
+      return
+    }
+  }
   const unconfirmed = rows.value.find(row => {
     const key = rowSelectionKey(row)
     return key && unconfirmedDuplicateDraftRows.has(key)
@@ -2136,7 +2152,7 @@ function restoreBomColumns() {
 }
 
 function isBomColumnVisible(key: BomColumnKey) {
-  if (kind.value === 'Source') return key !== 'impact' && key !== 'heatTreatment'
+  if (kind.value === 'Source') return key !== 'impact'
   return visibleBomColumnKeys.value.includes(key)
 }
 
@@ -3446,7 +3462,7 @@ async function submitBatchUpdate() {
         </template>
         <template v-else>
           <div class="pdm-material-reference-search"><input v-model.trim="kitReferenceQuery" type="search" aria-label="搜索套件" placeholder="搜索 UKIT 编码或名称"><label class="pdm-kit-quantity">套件数量<input v-model.number="kitReferenceQuantity" type="number" min="0.0001" step="1" aria-label="套件数量"></label></div>
-          <div class="pdm-kit-reference-body"><div class="pdm-kit-reference-list pdm-table-scroll"><table class="pdm-edit-table"><thead><tr><th>套件编码</th><th>名称</th><th>版本</th><th>子料</th></tr></thead><tbody><tr v-for="kitItem in filteredKitReferenceItems" :key="kitItem.id" :class="{ 'is-selected': selectedKitId === kitItem.id }" @click="selectEngineeringKit(kitItem.id)"><td><strong>{{ kitItem.code }}</strong></td><td>{{ kitItem.name }}</td><td>V{{ String(kitItem.revisions.find(item => item.id === kitItem.currentReleasedRevisionId)?.versionNumber).padStart(2, '0') }}</td><td>{{ kitItem.revisions.find(item => item.id === kitItem.currentReleasedRevisionId)?.components.length ?? 0 }}</td></tr><tr v-if="!kitReferenceLoading && !filteredKitReferenceItems.length"><td colspan="4" class="pdm-empty-info">暂无已发布套件。</td></tr></tbody></table></div><div class="pdm-kit-component-options"><h4>{{ selectedEngineeringKit ? `${selectedEngineeringKit.code} · ${selectedEngineeringKit.name}` : '请选择套件' }}</h4><p v-if="selectedEngineeringKitRevision">固定引用 V{{ String(selectedEngineeringKitRevision.versionNumber).padStart(2, '0') }}；可选子料默认不选。</p><label v-for="component in selectedEngineeringKitRevision?.components ?? []" :key="component.id" :class="{ 'is-required': !component.isOptional }"><input v-if="component.isOptional" v-model="selectedOptionalKitComponentIds" type="checkbox" :value="component.id"><input v-else type="checkbox" checked disabled><span><strong>{{ component.materialCode }} · {{ component.materialName }}</strong><small>{{ component.quantity }} {{ u9UnitName(component.unit) }} / 套 · {{ component.isOptional ? '可选' : '必选' }}</small></span></label></div></div>
+          <div class="pdm-kit-reference-body"><div class="pdm-kit-reference-list pdm-table-scroll"><table class="pdm-edit-table"><thead><tr><th>套件编码</th><th>名称</th><th>版本</th><th>物料数量</th></tr></thead><tbody><tr v-for="kitItem in filteredKitReferenceItems" :key="kitItem.id" :class="{ 'is-selected': selectedKitId === kitItem.id }" @click="selectEngineeringKit(kitItem.id)"><td><strong>{{ kitItem.code }}</strong></td><td>{{ kitItem.name }}</td><td>V{{ String(kitItem.revisions.find(item => item.id === kitItem.currentReleasedRevisionId)?.versionNumber).padStart(2, '0') }}</td><td>{{ kitItem.revisions.find(item => item.id === kitItem.currentReleasedRevisionId)?.components.length ?? 0 }}</td></tr><tr v-if="!kitReferenceLoading && !filteredKitReferenceItems.length"><td colspan="4" class="pdm-empty-info">暂无已发布套件。</td></tr></tbody></table></div><div class="pdm-kit-component-options"><h4>{{ selectedEngineeringKit ? `${selectedEngineeringKit.code} · ${selectedEngineeringKit.name}` : '请选择套件' }}</h4><p v-if="selectedEngineeringKitRevision">固定引用 V{{ String(selectedEngineeringKitRevision.versionNumber).padStart(2, '0') }}；套件明细将全部展开为真实物料。</p><label v-for="component in selectedEngineeringKitRevision?.components ?? []" :key="component.id" class="is-required"><input type="checkbox" checked disabled><span><strong>{{ component.materialCode }} · {{ component.materialName }}</strong><small>{{ component.quantity }} {{ u9UnitName(component.unit) }} / 套</small></span></label></div></div>
           <footer><button type="button" class="pdm-secondary-action" @click="materialReferenceOpen = false">取消</button><button type="button" class="pdm-primary-action" :disabled="kitReferenceApplying || !selectedEngineeringKitRevision || kitReferenceQuantity <= 0" @click="applyEngineeringKit">{{ kitReferenceApplying ? '展开中…' : '确认引用并展开' }}</button></footer>
         </template>
       </section>

@@ -46,6 +46,37 @@ public sealed class BomReleaseAggregationTests
     }
 
     [Fact]
+    public void ElectricalFormalRelease_DeductsPublishedEarlyBomQuantity()
+    {
+        var current = Item("E-1001", 5, null) with { Kind = BomKind.Electrical };
+        var package = Package([]) with
+        {
+            Scope = ReleaseScope.ElectricalFormal,
+            StandardBomSnapshot = [],
+            ElectricalBomSnapshot = [current]
+        };
+
+        var summary = BomReleaseAggregation.Build(package, [current with { Quantity = 2 }]);
+
+        Assert.Equal(5, Assert.Single(summary.ProductionStructure).Quantity);
+        Assert.Equal(3, Assert.Single(summary.PurchaseDemand).Quantity);
+    }
+
+    [Fact]
+    public void FormalRelease_UsesStableTrackingIdentityWhenMaterialCodeChanges()
+    {
+        var trackingId = Guid.NewGuid();
+        var prior = Item("TEMP-001", 2, null) with { ReleaseTrackingId = trackingId };
+        var current = Item("01021000999", 5, null) with { ReleaseTrackingId = trackingId };
+
+        var summary = BomReleaseAggregation.Build(Package([current]), [prior]);
+
+        var demand = Assert.Single(summary.PurchaseDemand);
+        Assert.Equal("01021000999", demand.MaterialCode);
+        Assert.Equal(3, demand.Quantity);
+    }
+
+    [Fact]
     public void Build_PreservesParentRelationshipsAndAggregatesPurchaseDemand()
     {
         var first = Item("1001", 2, "PARENT-A");

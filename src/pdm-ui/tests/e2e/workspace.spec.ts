@@ -259,6 +259,9 @@ test('released BOM rows expose linked 2D and 3D preview downloads', async ({ pag
     { id: 'doc-drawing', projectId, folderId: 'folder-main-mechanical', drawingNumber: 'REAL-ASM-001', name: '真实总装工程图', fileName: 'REAL-ASM-001.SLDDRW', kind: 2, lifecycleState: 2, revision: { display: 'W2' }, storedVersionCount: 2, checkedOutBy: null },
   ]
   await page.route(`**/api/projects/${projectId}/folder-documents`, route => route.fulfill({ json: releasedDocuments }))
+  await page.route(`**/api/projects/${projectId}/bom-source-data`, route => route.fulfill({ json: [{
+    id: 'source-non-standard-1', kind: 'NonStandard', sequence: 1, drawingNumber: 'REAL-ASM-001', name: '真实总装配', quantity: 1, unit: '件', material: 'Q235B', specification: '总装', heatTreatment: '调质', revision: 'W2', isComplete: true, source: 'Auto', sourceDocumentId: 'doc-root', isWearPart: false, isManuallyOverridden: false, isPendingRemoval: false,
+  }] }))
   await page.route(`**/api/projects/${projectId}/boms/NonStandard`, route => route.fulfill({ json: [{
     id: 'bom-non-standard-1', kind: 'NonStandard', sequence: 1, drawingNumber: 'REAL-ASM-001', name: '真实总装配', quantity: 1, unit: '件', material: 'Q235B', specification: '总装', heatTreatment: '淬火', revision: 'W2', isComplete: true, source: 'Auto', sourceDocumentId: 'doc-root', isWearPart: false, isManuallyOverridden: false, isPendingRemoval: false,
   }] }))
@@ -280,9 +283,17 @@ test('released BOM rows expose linked 2D and 3D preview downloads', async ({ pag
   await login.getByRole('button', { name: '登录', exact: true }).click()
   await enterProject(page)
   await page.getByRole('button', { name: 'BOM', exact: true }).click()
-  await page.getByRole('tab', { name: /非标件BOM/ }).click()
 
   const table = page.locator('.pdm-bom-table')
+  await page.getByRole('tab', { name: '源数据（1）' }).click()
+  await expect(page.getByRole('tab', { name: '源数据（1）' })).toHaveAttribute('aria-selected', 'true')
+  await expect(table.getByRole('columnheader', { name: '热处理', exact: true })).toBeVisible()
+  await expect(table.locator('tbody tr').first()).toContainText('调质')
+  await expect(table.getByRole('button', { name: '编辑热处理' })).toHaveCount(0)
+  await page.screenshot({ path: join(tmpdir(), `pdm-bom-source-heat-treatment-${Date.now()}.png`) })
+
+  await page.getByRole('tab', { name: /非标件BOM/ }).click()
+
   await expect(table.getByRole('columnheader', { name: '图纸', exact: true })).toBeVisible()
   await expect(table.getByRole('columnheader', { name: '热处理', exact: true })).toBeVisible()
   await expect(table.getByRole('button', { name: '编辑热处理' })).toHaveText('淬火')

@@ -265,7 +265,7 @@ public sealed class Phase1ReleaseWorkflowTests
     }
 
     [Fact]
-    public async Task BomDataStatus_IsDerivedByCategoryAndElectricalDoesNotRequireMaterial()
+    public async Task BomSave_RequiresNonStandardMaterialAndElectricalDoesNotRequireIt()
     {
         var repository = new InMemoryPdmRepository(TimeProvider.System);
         var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(), new RecordingPublisher(), TimeProvider.System);
@@ -277,21 +277,21 @@ public sealed class Phase1ReleaseWorkflowTests
         var standard = Assert.Single(await workflow.ReplaceBomAsync(project.Id, BomKind.Standard,
             [new BomItemInput(1, "STD-STATUS", "标准件", 1, "件", null, null, "W1", true)],
             "admin", UserRole.Administrator, default));
-        var nonStandard = Assert.Single(await workflow.ReplaceBomAsync(project.Id, BomKind.NonStandard,
+        var missingMaterial = await Assert.ThrowsAsync<PdmRuleException>(() => workflow.ReplaceBomAsync(project.Id, BomKind.NonStandard,
             [new BomItemInput(1, "NONSTD-STATUS", "非标件", 1, "件", null, "M10", "W1", true)],
+            "admin", UserRole.Administrator, default));
+        Assert.Contains("保存前必须补全材质", missingMaterial.Message);
+        Assert.Contains("第 1 行缺少材质", missingMaterial.Message);
+        var nonStandard = Assert.Single(await workflow.ReplaceBomAsync(project.Id, BomKind.NonStandard,
+            [new BomItemInput(1, "NONSTD-STATUS", "非标件", 1, "件", "6061", "M10", "W1", true)],
             "admin", UserRole.Administrator, default));
         var electrical = Assert.Single(await workflow.ReplaceBomAsync(project.Id, BomKind.Electrical,
             [new BomItemInput(1, "ELEC-STATUS", "电气件", 1, "件", null, null, "W1", false)],
             "admin", UserRole.Administrator, default));
 
         Assert.False(standard.IsComplete);
-        Assert.False(nonStandard.IsComplete);
+        Assert.True(nonStandard.IsComplete);
         Assert.True(electrical.IsComplete);
-
-        var updated = await workflow.BatchUpdateBomItemsAsync(project.Id,
-            new BatchUpdateBomItemsCommand([nonStandard.Id], ["material"], Material: "6061"),
-            "admin", UserRole.Administrator, default);
-        Assert.True(Assert.Single(updated, item => item.Id == nonStandard.Id).IsComplete);
     }
 
     [Fact]
@@ -1895,7 +1895,7 @@ public sealed class Phase1ReleaseWorkflowTests
     }
 
     [Fact]
-    public async Task NonStandardRelease_AddsLongLeadAndSupplementWithStandardRulesAndDrawingGate()
+    public async Task NonStandardRelease_AddsEarlyBomAndSupplementWithStandardRules()
     {
         var repository = new InMemoryPdmRepository(TimeProvider.System);
         await ConfigureApprovalWorkflowsAsync(repository);
@@ -1910,13 +1910,10 @@ public sealed class Phase1ReleaseWorkflowTests
             ReleaseScope.NonStandardLongLead, [item.Id], "admin", UserRole.Administrator, default,
             new Dictionary<Guid, decimal> { [item.Id] = 2 });
 
-        Assert.True(draft.LocksDocuments);
+        Assert.False(draft.LocksDocuments);
         Assert.False(draft.CreatesManufacturingBaseline);
         Assert.Null(draft.NonStandardBomVersionId);
         Assert.Equal(2, Assert.Single(draft.NonStandardBomSnapshot).Quantity);
-        var reviewGate = await Assert.ThrowsAsync<PdmRuleException>(() =>
-            workflow.SubmitReleasePackageAsync(draft.Id, "admin", UserRole.Administrator, default));
-        Assert.Contains("非标件BOM审核发布", reviewGate.Message);
         await workflow.DeleteReleasePackageDraftAsync(draft.Id, "admin", UserRole.Administrator, default);
 
         await repository.CreateReleasePackageAsync(new ReleasePackage(
@@ -1953,6 +1950,49 @@ public sealed class Phase1ReleaseWorkflowTests
         Assert.True(supplement.LocksDocuments);
         Assert.Equal(item.Id, Assert.Single(supplement.NonStandardBomSnapshot).Id);
         Assert.Equal(FormalSupplementPolicy.Default.MaximumCount, supplement.FormalSupplementMaximumCount);
+    }
+
+    [Theory]
+    [InlineData(BomKind.Standard, ReleaseScope.StandardLongLead, ReleaseScope.StandardFormal)]
+    [InlineData(BomKind.NonStandard, ReleaseScope.NonStandardLongLead, ReleaseScope.NonStandardWithDrawing)]
+    [InlineData(BomKind.Electrical, ReleaseScope.ElectricalLongLead, ReleaseScope.ElectricalFormal)]
+    public async Task EarlyBomRelease_AllowsProjectWithoutReferenceTreeWhileFormalReleaseStillRequiresIt(
+        BomKind kind,
+        ReleaseScope earlyScope,
+        ReleaseScope formalScope)
+    {
+        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        await ConfigureApprovalWorkflowsAsync(repository);
+        var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(), new RecordingPublisher(), TimeProvider.System);
+        var project = await repository.CreateProjectAsync(
+            new CreateProjectCommand($"EARLY-{Guid.NewGuid():N}", "无引用树前期发布", "admin", @"D:\PDM\Early", @"D:\Release\Early"),
+            "admin",
+            default);
+        await repository.SetMainProjectStaffingAsync(
+            project.Id, new SetMainProjectStaffingCommand("admin", [], ["admin"]), "admin", default);
+        var item = Assert.Single(await workflow.ReplaceBomAsync(project.Id, kind,
+            [new BomItemInput(1, $"{kind}-001", $"{kind}前期物料", 2, "个", kind == BomKind.NonStandard ? "Q235B" : null, "M1", "W1", true)],
+            "admin", UserRole.Administrator, default));
+
+        var early = await workflow.CreateScopedReleasePackageAsync(
+            project.Id, null, string.Empty, string.Empty, "前期下发", "未指定", null,
+            earlyScope, [item.Id], "admin", UserRole.Administrator, default,
+            new Dictionary<Guid, decimal> { [item.Id] = 1 });
+
+        Assert.Null(early.ReferenceSnapshotId);
+        Assert.False(early.LocksDocuments);
+        Assert.Equal(1, earlyScope switch
+        {
+            ReleaseScope.StandardLongLead => Assert.Single(early.StandardBomSnapshot).Quantity,
+            ReleaseScope.NonStandardLongLead => Assert.Single(early.NonStandardBomSnapshot).Quantity,
+            ReleaseScope.ElectricalLongLead => Assert.Single(early.ElectricalBomSnapshot).Quantity,
+            _ => throw new InvalidOperationException()
+        });
+
+        var formalError = await Assert.ThrowsAsync<PdmRuleException>(() => workflow.CreateScopedReleasePackageAsync(
+            project.Id, null, string.Empty, string.Empty, "正式发布", "未指定", null,
+            formalScope, [], "admin", UserRole.Administrator, default));
+        Assert.Contains("引用树快照", formalError.Message);
     }
 
     [Fact]

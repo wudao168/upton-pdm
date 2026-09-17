@@ -62,12 +62,13 @@ public sealed record SaveEngineeringKitComponentRequest(Guid MaterialId, decimal
 
 public sealed record SaveEngineeringKitRequest(
     string Name,
+    string Brand,
     string? Description,
     string? ChangeNote,
     IReadOnlyList<SaveEngineeringKitComponentRequest> Components,
     long? ExpectedRowVersion = null)
 {
-    public SaveEngineeringKitDraftCommand ToCommand() => new(Name, Description, ChangeNote, Components.Select(item => item.ToCommand()).ToArray(), ExpectedRowVersion);
+    public SaveEngineeringKitDraftCommand ToCommand() => new(Name, Brand, Description, ChangeNote, Components.Select(item => item.ToCommand()).ToArray(), ExpectedRowVersion);
 }
 
 public sealed record PublishEngineeringKitRequest(long ExpectedRowVersion);

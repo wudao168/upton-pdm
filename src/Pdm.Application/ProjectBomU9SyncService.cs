@@ -324,12 +324,17 @@ public sealed class ProjectBomU9SyncService(
             : released is null ? [] : EffectiveItems(released.Items).ToArray();
         var basePublishedAt = usePackage ? categoryPackage!.PublishedAt : released?.ReleasedAt;
 
-        if (kind is not (ProjectBomHeaderKind.Standard or ProjectBomHeaderKind.NonStandard))
+        var longLeadScope = kind switch
+        {
+            ProjectBomHeaderKind.Standard => ReleaseScope.StandardLongLead,
+            ProjectBomHeaderKind.NonStandard => ReleaseScope.NonStandardLongLead,
+            ProjectBomHeaderKind.Electrical => ReleaseScope.ElectricalLongLead,
+            _ => (ReleaseScope?)null
+        };
+        if (!longLeadScope.HasValue)
             return released is null && categoryPackage is null ? (false, []) : (true, baseItems);
-
-        var longLeadScope = kind == ProjectBomHeaderKind.Standard ? ReleaseScope.StandardLongLead : ReleaseScope.NonStandardLongLead;
         var longLeadPackages = packages
-            .Where(package => package.Scope == longLeadScope
+            .Where(package => package.Scope == longLeadScope.Value
                 && package.State == ReleasePackageState.Published
                 && package.PublishedAt.HasValue
                 && (!basePublishedAt.HasValue || package.PublishedAt.Value > basePublishedAt.Value))
@@ -348,7 +353,7 @@ public sealed class ProjectBomU9SyncService(
         }
         foreach (var package in longLeadPackages)
         {
-            foreach (var item in EffectiveItems(kind == ProjectBomHeaderKind.Standard ? package.StandardBomSnapshot : package.NonStandardBomSnapshot))
+            foreach (var item in EffectiveItems(CategorySnapshot(package, kind)))
             {
                 var releasedItem = item with { Quantity = item.Quantity * Math.Max(1, package.WholeSetMultiplier) };
                 var key = MaterialKey(releasedItem);
@@ -390,7 +395,8 @@ public sealed class ProjectBomU9SyncService(
             .Any(version => version.State == BomVersionState.Released
                 && version.Kind is BomKind.Standard or BomKind.NonStandard or BomKind.Electrical)
         || (await repository.ListReleasePackagesAsync(projectId, cancellationToken))
-            .Any(package => package.Scope is ReleaseScope.StandardLongLead or ReleaseScope.NonStandardLongLead && package.State == ReleasePackageState.Published);
+            .Any(package => package.Scope is ReleaseScope.StandardLongLead or ReleaseScope.NonStandardLongLead or ReleaseScope.ElectricalLongLead
+                && package.State == ReleasePackageState.Published);
 
     private async Task<bool> HasDirectChildrenAsync(Guid projectId, CancellationToken cancellationToken) =>
         (await repository.ListProjectsAsync(cancellationToken)).Any(project => project.ParentProjectId == projectId);

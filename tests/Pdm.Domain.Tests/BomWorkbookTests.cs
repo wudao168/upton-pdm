@@ -101,14 +101,18 @@ public sealed class BomWorkbookTests
     }
 
     [Fact]
-    public void WriteExport_CreatesApprovedTwelveColumnLayoutWithProjectHeaderAndLogo()
+    public void WriteExport_CreatesImportableLayoutWithProjectHeaderAndLogo()
     {
         var item = new BomItem(Guid.NewGuid(), Guid.NewGuid(), BomKind.Standard, 1, "01020013531", "平垫 φ3", 2, "001", "钢", "DIN 125-A", "W2", true)
         {
             Remark = "项目装配标准件",
             Brand = "国优",
             SurfaceTreatment = "镀锌",
-            Weight = "1.50"
+            HeatTreatment = "淬火",
+            Weight = "1.50",
+            ParentDrawingNumber = "ASM-001",
+            IsWearPart = true,
+            ImpactStage = ProjectPlanStage.Assembly
         };
         var exportedAt = new DateTimeOffset(2026, 9, 3, 10, 32, 18, TimeSpan.FromHours(8));
         var publishedAt = new DateTimeOffset(2026, 9, 2, 16, 20, 0, TimeSpan.FromHours(8));
@@ -132,13 +136,10 @@ public sealed class BomWorkbookTests
         var widths = sheet.Descendants(ns + "col").Select(column => (int)double.Parse((string)column.Attribute("width")!, CultureInfo.InvariantCulture)).ToArray();
         var mergedRanges = sheet.Descendants(ns + "mergeCell").Select(cell => (string)cell.Attribute("ref")!).ToArray();
 
-        Assert.Equal(new[] { "序号", "物料分类", "单位", "物料编码", "物料名称", "型号", "备注信息", "品牌", "材质", "表面处理", "重量", "数量" }, headers);
-        Assert.DoesNotContain("上级物料编码", headers);
-        Assert.DoesNotContain("版本", headers);
-        Assert.DoesNotContain("完整", headers);
-        Assert.Equal("个", data[2]);
-        Assert.Equal(new[] { 10, 10, 10, 15, 15, 25, 30, 10, 10, 15, 10, 10 }, widths);
-        Assert.Contains("A1:L2", mergedRanges);
+        Assert.Equal(new[] { "序号", "物料分类", "易损件", "关键", "单位", "物料编码", "物料名称", "上级物料编码", "型号", "备注信息", "品牌", "材质", "表面处理", "热处理", "重量", "数量", "版本", "完整" }, headers);
+        Assert.Equal("个", data[4]);
+        Assert.Equal(new[] { 10, 10, 10, 10, 10, 15, 15, 15, 25, 30, 10, 10, 15, 15, 10, 10, 10, 10 }, widths);
+        Assert.Contains("A1:R2", mergedRanges);
         Assert.Contains("B3:C3", mergedRanges);
         Assert.Contains("K4:L4", mergedRanges);
         Assert.DoesNotContain("A5:B5", mergedRanges);
@@ -181,6 +182,66 @@ public sealed class BomWorkbookTests
     }
 
     [Fact]
+    public void WriteExportAndRead_RoundTripsFormattedWorkbook()
+    {
+        var item = new BomItem(Guid.NewGuid(), Guid.NewGuid(), BomKind.Standard, 1, "01020013531", "平垫 φ3", 2, "001", "钢", "DIN 125-A", "W2", true)
+        {
+            Remark = "项目装配标准件",
+            Brand = "国优",
+            SurfaceTreatment = "镀锌",
+            HeatTreatment = "淬火",
+            Weight = "1.50",
+            ParentDrawingNumber = "ASM-001",
+            IsWearPart = true,
+            ImpactStage = ProjectPlanStage.Assembly
+        };
+        var context = new BomWorkbookExportContext(
+            "标准件BOM", "P700005", "钢珠检测设备", "P700005-3", "3号工位", "W2", "机械设计部",
+            "刘鹏", "王工", [], null, DateTimeOffset.Now, [1, 2, 3, 4]);
+
+        using var stream = new MemoryStream(BomWorkbook.WriteExport([item], context));
+        var imported = Assert.Single(BomWorkbook.Read(stream));
+
+        Assert.Equal(item.DrawingNumber, imported.DrawingNumber);
+        Assert.Equal(item.Name, imported.Name);
+        Assert.Equal(item.Quantity, imported.Quantity);
+        Assert.Equal("个", imported.Unit);
+        Assert.Equal(item.Revision, imported.Revision);
+        Assert.True(imported.IsComplete);
+        Assert.Equal(item.ParentDrawingNumber, imported.ParentDrawingNumber);
+        Assert.Equal(item.HeatTreatment, imported.HeatTreatment);
+        Assert.True(imported.IsWearPart);
+        Assert.Equal(ProjectPlanStage.Assembly, imported.ImpactStage);
+    }
+
+    [Fact]
+    public void Read_AcceptsPreviouslyExportedFormattedWorkbook()
+    {
+        using var workbook = new MemoryStream();
+        using (var archive = new ZipArchive(workbook, ZipArchiveMode.Create, true))
+        {
+            var entry = archive.CreateEntry("xl/worksheets/sheet1.xml");
+            using var writer = new StreamWriter(entry.Open(), new UTF8Encoding(false));
+            writer.Write("""
+                <?xml version="1.0" encoding="UTF-8"?>
+                <worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>
+                  <row r="1"><c r="A1" t="inlineStr"><is><t>标准件BOM</t></is></c></row>
+                  <row r="4"><c r="A4" t="inlineStr"><is><t>BOM版本</t></is></c><c r="B4" t="inlineStr"><is><t>W2</t></is></c></row>
+                  <row r="7"><c r="A7" t="inlineStr"><is><t>序号</t></is></c><c r="B7" t="inlineStr"><is><t>物料分类</t></is></c><c r="C7" t="inlineStr"><is><t>单位</t></is></c><c r="D7" t="inlineStr"><is><t>物料编码</t></is></c><c r="E7" t="inlineStr"><is><t>物料名称</t></is></c><c r="F7" t="inlineStr"><is><t>型号</t></is></c><c r="G7" t="inlineStr"><is><t>备注信息</t></is></c><c r="H7" t="inlineStr"><is><t>品牌</t></is></c><c r="I7" t="inlineStr"><is><t>材质</t></is></c><c r="J7" t="inlineStr"><is><t>表面处理</t></is></c><c r="K7" t="inlineStr"><is><t>重量</t></is></c><c r="L7" t="inlineStr"><is><t>数量</t></is></c></row>
+                  <row r="8"><c r="A8"><v>1</v></c><c r="B8" t="inlineStr"><is><t>标准件</t></is></c><c r="C8" t="inlineStr"><is><t>个</t></is></c><c r="D8" t="inlineStr"><is><t>OLD-EXPORT-001</t></is></c><c r="E8" t="inlineStr"><is><t>旧版导出物料</t></is></c><c r="L8"><v>2</v></c></row>
+                </sheetData></worksheet>
+                """);
+        }
+        workbook.Position = 0;
+
+        var imported = Assert.Single(BomWorkbook.Read(workbook));
+
+        Assert.Equal("OLD-EXPORT-001", imported.DrawingNumber);
+        Assert.Equal("W2", imported.Revision);
+        Assert.False(imported.IsComplete);
+    }
+
+    [Fact]
     public void WriteExport_DisplaysNotPublishedWhenReleaseHasNoPublishedAt()
     {
         var context = new BomWorkbookExportContext(
@@ -213,12 +274,12 @@ public sealed class BomWorkbookTests
         var summaryRows = ExportDataRows(BomWorkbook.WriteExport(items, context));
         Assert.Equal(3, summaryRows.Length);
         Assert.Equal("1", CellValue(summaryRows[0], "A"));
-        Assert.Equal(4m, decimal.Parse(CellValue(summaryRows[0], "L"), CultureInfo.InvariantCulture));
+        Assert.Equal(4m, decimal.Parse(CellValue(summaryRows[0], "P"), CultureInfo.InvariantCulture));
 
         var structureRows = ExportDataRows(BomWorkbook.WriteExport(items, context, BomWorkbookExportMode.Structure));
         Assert.Equal(4, structureRows.Length);
         Assert.Equal(new[] { "3", "7", "8", "9" }, structureRows.Select(row => CellValue(row, "A")));
-        Assert.Equal(new[] { 1.5m, 2.5m, 1m, 1m }, structureRows.Select(row => decimal.Parse(CellValue(row, "L"), CultureInfo.InvariantCulture)));
+        Assert.Equal(new[] { 1.5m, 2.5m, 1m, 1m }, structureRows.Select(row => decimal.Parse(CellValue(row, "P"), CultureInfo.InvariantCulture)));
     }
 
     [Fact]

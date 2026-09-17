@@ -80,12 +80,55 @@ public sealed class BatchRenameRuleTests
     }
 
     [Fact]
+    public void HierarchyNumbering_PreservesExistingNumbersAndAppendsNewSiblings()
+    {
+        var items = new[]
+        {
+            new BatchRenameHierarchyItem("root", "", BatchRenameHierarchyKind.Assembly, true, "00"),
+            new BatchRenameHierarchyItem("asm-existing", "root", BatchRenameHierarchyKind.Assembly, false, "01"),
+            new BatchRenameHierarchyItem("asm-new", "root", BatchRenameHierarchyKind.Assembly),
+            new BatchRenameHierarchyItem("part-new", "asm-existing", BatchRenameHierarchyKind.Part),
+            new BatchRenameHierarchyItem("part-existing-2", "asm-existing", BatchRenameHierarchyKind.Part, false, "01-02"),
+            new BatchRenameHierarchyItem("part-existing-5", "asm-existing", BatchRenameHierarchyKind.Part, false, "01-05")
+        };
+
+        var numbers = BatchRenameRule.BuildHierarchyNumbers(items);
+
+        Assert.Equal("01", numbers["asm-existing"]);
+        Assert.Equal("02", numbers["asm-new"]);
+        Assert.Equal("01-06", numbers["part-new"]);
+        Assert.Equal("01-02", numbers["part-existing-2"]);
+        Assert.Equal("01-05", numbers["part-existing-5"]);
+    }
+
+    [Theory]
+    [InlineData("7000034.01-05", "01-05")]
+    [InlineData("7000030.01.02-03", "01.02-03")]
+    [InlineData("普通零件", "")]
+    [InlineData("7000034.虚拟件", "")]
+    public void ExistingHierarchyNumber_IsExtractedOnlyFromNumberedNames(string fileBaseName, string expected)
+    {
+        Assert.Equal(expected, BatchRenameRule.ExtractExistingHierarchyNumber(fileBaseName));
+    }
+
+    [Fact]
     public void HierarchyScope_DefaultCategoriesSelectAssembliesAndNonStandardParts()
     {
         Assert.True(BatchRenameRule.IsInHierarchyScope(BatchRenameHierarchyKind.Assembly, "标准件", true, true));
         Assert.True(BatchRenameRule.IsInHierarchyScope(BatchRenameHierarchyKind.Part, "非标件", true, true));
         Assert.False(BatchRenameRule.IsInHierarchyScope(BatchRenameHierarchyKind.Part, "标准件", true, true));
         Assert.True(BatchRenameRule.IsInHierarchyScope(BatchRenameHierarchyKind.Part, "部件图", true, false));
+    }
+
+    [Fact]
+    public void HierarchyRename_RequiresBothRowSelectionAndCurrentScopeMatch()
+    {
+        Assert.False(BatchRenameRule.CanGenerateHierarchyRename(
+            false, BatchRenameHierarchyKind.Part, "非标件", true, true));
+        Assert.False(BatchRenameRule.CanGenerateHierarchyRename(
+            true, BatchRenameHierarchyKind.Part, "虚拟件", true, true));
+        Assert.True(BatchRenameRule.CanGenerateHierarchyRename(
+            true, BatchRenameHierarchyKind.Part, "非标件", true, true));
     }
 
     [Fact]
@@ -97,5 +140,14 @@ public sealed class BatchRenameRuleTests
         Assert.False(BatchPropertyFilterRule.MatchesQuery(values, "air", true));
         Assert.True(BatchPropertyFilterRule.MatchesQuery(values, "SMC", true));
         Assert.True(BatchPropertyFilterRule.MatchesQuery(values, "", true));
+    }
+
+    [Fact]
+    public void LocalBatchPropertyEdit_IncludesLoadedUnsavedDocumentWithoutDiskFallback()
+    {
+        Assert.True(BatchLocalDocumentRule.CanEdit(true, false, false, false));
+        Assert.True(BatchLocalDocumentRule.CanEdit(false, true, false, false));
+        Assert.False(BatchLocalDocumentRule.CanEdit(false, false, false, false));
+        Assert.False(BatchLocalDocumentRule.CanEdit(true, true, true, false));
     }
 }

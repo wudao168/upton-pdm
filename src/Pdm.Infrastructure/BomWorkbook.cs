@@ -34,9 +34,10 @@ public enum BomWorkbookExportMode
 public static class BomWorkbook
 {
     private static readonly string[] Headers = ["序号", "物料分类", "单位", "物料编码", "物料名称", "上级物料编码", "型号", "备注信息", "品牌", "材质", "表面处理", "重量", "数量", "版本", "完整"];
-    private static readonly string[] RequiredHeaders = ["序号", "单位", "物料编码", "物料名称", "数量", "版本", "完整"];
-    private static readonly string[] ExportHeaders = ["序号", "物料分类", "单位", "物料编码", "物料名称", "型号", "备注信息", "品牌", "材质", "表面处理", "重量", "数量"];
-    private static readonly int[] ExportColumnWidths = [10, 10, 10, 15, 15, 25, 30, 10, 10, 15, 10, 10];
+    private static readonly string[] ImportHeaders = [.. Headers, "易损件", "关键", "热处理"];
+    private static readonly string[] RequiredHeaders = ["序号", "单位", "物料编码", "物料名称", "数量", "版本"];
+    private static readonly string[] ExportHeaders = ["序号", "物料分类", "易损件", "关键", "单位", "物料编码", "物料名称", "上级物料编码", "型号", "备注信息", "品牌", "材质", "表面处理", "热处理", "重量", "数量", "版本", "完整"];
+    private static readonly int[] ExportColumnWidths = [10, 10, 10, 10, 10, 15, 15, 15, 25, 30, 10, 10, 15, 15, 10, 10, 10, 10];
     private static readonly IReadOnlyDictionary<string, string> UnitNames = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
     {
         ["001"] = "个", ["002"] = "台", ["003"] = "个", ["004"] = "盒", ["005"] = "卷",
@@ -210,8 +211,10 @@ public static class BomWorkbook
             {
                 WriteStyledRow(writer, rowNumber++, 22, 4,
                 [
-                    item.Sequence, KindLabel(item.Kind), DisplayUnit(item.Unit), item.DrawingNumber, item.Name,
-                    item.Specification, item.Remark, item.Brand, item.Material, item.SurfaceTreatment, item.Weight, item.Quantity
+                    item.Sequence, KindLabel(item.Kind), item.IsWearPart ? "是" : "否", ImpactStageLabel(item.ImpactStage),
+                    DisplayUnit(item.Unit), item.DrawingNumber, item.Name, item.ParentDrawingNumber, item.Specification,
+                    item.Remark, item.Brand, item.Material, item.SurfaceTreatment, item.HeatTreatment, item.Weight,
+                    item.Quantity, item.Revision, item.IsComplete ? "是" : "否"
                 ]);
             }
             writer.WriteEndElement();
@@ -219,7 +222,7 @@ public static class BomWorkbook
             writer.WriteAttributeString("count", "13");
             foreach (var range in new[]
             {
-                "A1:L2",
+                "A1:R2",
                 "B3:C3", "E3:F3", "H3:I3", "K3:L3",
                 "B4:C4", "E4:F4", "H4:I4", "K4:L4",
                 "B5:C5", "E5:F5", "H5:I5", "K5:L5"
@@ -277,24 +280,30 @@ public static class BomWorkbook
         var rows = document.Descendants(ns + "row").ToArray();
         if (rows.Length < 2) throw new PdmRuleException("BOM Excel没有数据行。");
 
-        var headerValues = ReadCells(rows[0], ns, sharedStrings);
-        var columns = Headers.ToDictionary(
+        var rowValues = rows.Select(row => ReadCells(row, ns, sharedStrings)).ToArray();
+        var headerIndex = Enumerable.Range(0, rowValues.Length)
+            .OrderByDescending(index => ImportHeaders.Count(header => FindHeaderColumn(rowValues[index], header) >= 0))
+            .First();
+        var headerValues = rowValues[headerIndex];
+        var columns = ImportHeaders.ToDictionary(
             header => header,
             header => FindHeaderColumn(headerValues, header),
             StringComparer.OrdinalIgnoreCase);
-        var missing = RequiredHeaders.Where(header => columns[header] < 0).ToArray();
+        var defaultRevision = FindMetadataValue(rowValues.Take(headerIndex), "BOM版本");
+        var missing = RequiredHeaders.Where(header => columns[header] < 0
+            && !(header == "版本" && !string.IsNullOrWhiteSpace(defaultRevision))).ToArray();
         if (missing.Length > 0)
         {
             throw new PdmRuleException($"BOM Excel必须包含列：{string.Join("、", missing)}。");
         }
 
         var result = new List<BomItemInput>();
-        foreach (var row in rows.Skip(1))
+        foreach (var cells in rowValues.Skip(headerIndex + 1))
         {
-            var cells = ReadCells(row, ns, sharedStrings);
             if (cells.Values.All(string.IsNullOrWhiteSpace)) continue;
             var sequence = ParseInt(Value(cells, columns["序号"]), "序号");
             var quantity = ParseDecimal(Value(cells, columns["数量"]), "数量");
+            var revision = columns["版本"] >= 0 ? Value(cells, columns["版本"]) : defaultRevision;
             result.Add(new BomItemInput(
                 sequence,
                 Value(cells, columns["物料编码"]),
@@ -303,13 +312,16 @@ public static class BomWorkbook
                 Value(cells, columns["单位"]),
                 EmptyToNull(Value(cells, columns["材质"])),
                 EmptyToNull(Value(cells, columns["型号"])),
-                Value(cells, columns["版本"]),
-                ParseComplete(Value(cells, columns["完整"])),
+                revision,
+                columns["完整"] >= 0 && ParseComplete(Value(cells, columns["完整"])),
                 Remark: EmptyToNull(Value(cells, columns["备注信息"])),
                 Brand: EmptyToNull(Value(cells, columns["品牌"])),
                 SurfaceTreatment: EmptyToNull(Value(cells, columns["表面处理"])),
                 Weight: EmptyToNull(Value(cells, columns["重量"])),
-                ParentDrawingNumber: EmptyToNull(Value(cells, columns["上级物料编码"]))));
+                ParentDrawingNumber: EmptyToNull(Value(cells, columns["上级物料编码"])),
+                HeatTreatment: EmptyToNull(Value(cells, columns["热处理"])),
+                IsWearPart: columns["易损件"] >= 0 && ParseComplete(Value(cells, columns["易损件"])),
+                ImpactStage: ParseImpactStage(Value(cells, columns["关键"]))));
         }
 
         if (result.Count == 0) throw new PdmRuleException("BOM Excel没有有效数据行。");
@@ -439,6 +451,12 @@ public static class BomWorkbook
     }
 
     private static string DisplayUnit(string value) => UnitNames.TryGetValue(value.Trim(), out var name) ? name : value.Trim();
+    private static string ImpactStageLabel(string? value) => value switch
+    {
+        ProjectPlanStage.Assembly => "装配",
+        ProjectPlanStage.Commissioning => "调试",
+        _ => string.Empty
+    };
     private static string DisplayValue(string? value) => string.IsNullOrWhiteSpace(value) ? "—" : value.Trim();
     private static string WorksheetName(string value)
     {
@@ -511,9 +529,27 @@ public static class BomWorkbook
     };
     private static string Value(IReadOnlyDictionary<int, string> cells, int column) => cells.TryGetValue(column, out var value) ? value : string.Empty;
     private static string? EmptyToNull(string value) => string.IsNullOrWhiteSpace(value) ? null : value;
+    private static string FindMetadataValue(IEnumerable<IReadOnlyDictionary<int, string>> rows, string label)
+    {
+        foreach (var cells in rows)
+        {
+            var labelCell = cells.FirstOrDefault(pair => string.Equals(NormalizeHeader(pair.Value), NormalizeHeader(label), StringComparison.OrdinalIgnoreCase));
+            if (!string.IsNullOrWhiteSpace(labelCell.Value)
+                && cells.TryGetValue(labelCell.Key + 1, out var value)
+                && !string.IsNullOrWhiteSpace(value)) return value.Trim();
+        }
+        return string.Empty;
+    }
     private static int ParseInt(string value, string field) => int.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var result) ? result : throw new PdmRuleException($"BOM{field}“{value}”不是有效整数。");
     private static decimal ParseDecimal(string value, string field) => decimal.TryParse(value, NumberStyles.Number, CultureInfo.InvariantCulture, out var result) || decimal.TryParse(value, out result) ? result : throw new PdmRuleException($"BOM{field}“{value}”不是有效数字。");
     private static bool ParseComplete(string value) => value.Equals("是", StringComparison.OrdinalIgnoreCase) || value.Equals("true", StringComparison.OrdinalIgnoreCase) || value == "1" || value.Equals("yes", StringComparison.OrdinalIgnoreCase);
+    private static string? ParseImpactStage(string value) => value.Trim() switch
+    {
+        "" => null,
+        "装配" or ProjectPlanStage.Assembly => ProjectPlanStage.Assembly,
+        "调试" or ProjectPlanStage.Commissioning => ProjectPlanStage.Commissioning,
+        _ => throw new PdmRuleException($"BOM关键“{value}”只能填写装配、调试或留空。")
+    };
 
     private static int ColumnIndex(string reference)
     {

@@ -188,9 +188,11 @@ public sealed partial class MySqlPdmRepository
             ?? throw new PdmNotFoundException("发布包不存在。");
         if (package.State != ReleasePackageState.Publishing.ToString())
             throw new PdmConflictException("发布包尚未进入服务器转换状态。");
+        if (!package.ReferenceSnapshotId.HasValue)
+            return [];
         var rootJson = await connection.QuerySingleOrDefaultAsync<string>(new CommandDefinition(
             "SELECT root_json FROM reference_snapshot WHERE id=@SnapshotId AND project_id=@ProjectId",
-            new { SnapshotId = package.ReferenceSnapshotId, package.ProjectId }, cancellationToken: cancellationToken))
+            new { SnapshotId = package.ReferenceSnapshotId.Value, package.ProjectId }, cancellationToken: cancellationToken))
             ?? throw new PdmConflictException("发布包引用树快照不存在。");
         var root = JsonSerializer.Deserialize<DocumentReferenceNode>(rootJson, jsonOptions)
             ?? throw new InvalidDataException("发布包引用树快照损坏。");
@@ -243,9 +245,14 @@ public sealed partial class MySqlPdmRepository
             "SELECT COUNT(*) FROM approval_task WHERE id=@ApprovalTaskId AND release_package_id=@PackageId AND decision_value='Approved'",
             new { ApprovalTaskId = approvalTaskId, PackageId = releasePackageId }, transaction, cancellationToken: cancellationToken));
         if (taskMatches != 1) throw new PdmConflictException("最终批准记录与发布包不匹配或尚未批准。");
+        if (!package.ReferenceSnapshotId.HasValue)
+        {
+            await transaction.CommitAsync(cancellationToken);
+            return [];
+        }
         var rootJson = await connection.QuerySingleOrDefaultAsync<string>(new CommandDefinition(
             "SELECT root_json FROM reference_snapshot WHERE id=@SnapshotId AND project_id=@ProjectId",
-            new { SnapshotId = package.ReferenceSnapshotId, package.ProjectId }, transaction, cancellationToken: cancellationToken))
+            new { SnapshotId = package.ReferenceSnapshotId.Value, package.ProjectId }, transaction, cancellationToken: cancellationToken))
             ?? throw new PdmConflictException("发布包引用树快照不存在。");
         var root = JsonSerializer.Deserialize<DocumentReferenceNode>(rootJson, jsonOptions)
             ?? throw new InvalidDataException("发布包引用树快照损坏。");
@@ -377,7 +384,7 @@ public sealed partial class MySqlPdmRepository
 
     private sealed class LockedDocumentRow { public Guid Id { get; init; } public string Kind { get; init; } = string.Empty; public string RevisionLabel { get; init; } = string.Empty; public string? CheckedOutBy { get; init; } public Guid? CheckoutSessionId { get; init; } public long RowVersion { get; init; } }
     private sealed class LatestVersionFingerprintRow { public string Sha256 { get; init; } = string.Empty; public string? SourceFileSha256 { get; init; } }
-    private sealed class PackagePublishRow { public Guid ProjectId { get; init; } public Guid ReferenceSnapshotId { get; init; } public string State { get; init; } = string.Empty; }
+    private sealed class PackagePublishRow { public Guid ProjectId { get; init; } public Guid? ReferenceSnapshotId { get; init; } public string State { get; init; } = string.Empty; }
     private sealed class ReleasePreviewSourceRow
     {
         public Guid DocumentId { get; init; }

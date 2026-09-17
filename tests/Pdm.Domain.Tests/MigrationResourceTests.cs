@@ -482,4 +482,22 @@ public sealed class MigrationResourceTests
         Assert.DoesNotContain("tax", sql, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("currency", sql, StringComparison.OrdinalIgnoreCase);
     }
+
+    [Fact]
+    public async Task EngineeringKitVirtualHeaderMigration_AddsGeneratedModelAndBrand()
+    {
+        var assembly = typeof(MySqlMigrationRunner).Assembly;
+        var resourceName = assembly.GetManifestResourceNames()
+            .Single(name => name.EndsWith(".Migrations.111_engineering_kit_virtual_header.sql", StringComparison.Ordinal));
+
+        await using var stream = assembly.GetManifestResourceStream(resourceName);
+        Assert.NotNull(stream);
+        using var reader = new StreamReader(stream!);
+        var sql = await reader.ReadToEndAsync();
+
+        Assert.Contains("ADD COLUMN kit_model VARCHAR(20) NULL", sql, StringComparison.Ordinal);
+        Assert.Contains("ADD COLUMN brand VARCHAR(160) NOT NULL", sql, StringComparison.Ordinal);
+        Assert.Contains("SET kit_model = kit_code", sql, StringComparison.Ordinal);
+        Assert.Contains("SET is_optional = 0", sql, StringComparison.Ordinal);
+    }
 }

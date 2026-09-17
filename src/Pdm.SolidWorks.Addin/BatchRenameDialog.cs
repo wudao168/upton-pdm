@@ -1273,7 +1273,9 @@ internal sealed class BatchRenameControl : UserControl
                 item.OperationItem.Node.Kind == CadDocumentKind.Assembly
                     ? BatchRenameHierarchyKind.Assembly
                     : BatchRenameHierarchyKind.Part,
-                string.Equals(ItemKey(item), rootKey, StringComparison.OrdinalIgnoreCase));
+                string.Equals(ItemKey(item), rootKey, StringComparison.OrdinalIgnoreCase),
+                BatchRenameRule.ExtractExistingHierarchyNumber(
+                    Path.GetFileNameWithoutExtension(item.FileName)));
         }).ToArray();
         var hierarchyNumbers = BatchRenameRule.BuildHierarchyNumbers(hierarchyItems);
         var orderedHierarchyKeys = BatchRenameRule.BuildHierarchyOrder(hierarchyItems);
@@ -1296,26 +1298,38 @@ internal sealed class BatchRenameControl : UserControl
                 Path.GetFileNameWithoutExtension(item.FileName),
                 nextBaseName,
                 StringComparison.OrdinalIgnoreCase);
-            var selected = BatchRenameRule.IsInHierarchyScope(
-                item.OperationItem.Node.Kind == CadDocumentKind.Assembly
-                    ? BatchRenameHierarchyKind.Assembly
-                    : BatchRenameHierarchyKind.Part,
+            var itemSelected = IsItemSelected(item);
+            var hierarchyKind = item.OperationItem.Node.Kind == CadDocumentKind.Assembly
+                ? BatchRenameHierarchyKind.Assembly
+                : BatchRenameHierarchyKind.Part;
+            var inScope = BatchRenameRule.IsInHierarchyScope(
+                hierarchyKind,
                 item.Classification,
                 includeComponentDrawings,
                 includeNonStandardParts);
-            var request = changed ? new BatchDocumentRenameRequest(item, nextBaseName) : null;
+            var selected = BatchRenameRule.CanGenerateHierarchyRename(
+                itemSelected,
+                hierarchyKind,
+                item.Classification,
+                includeComponentDrawings,
+                includeNonStandardParts);
+            var request = selected && changed ? new BatchDocumentRenameRequest(item, nextBaseName) : null;
             if (request != null)
             {
                 requests.Add(request);
             }
             var row = new BatchRenamePreviewRow
             {
-                Selected = selected && request != null,
+                Selected = request != null,
                 FileName = item.FileName,
                 Field = "层级图档文件名",
                 CurrentValue = item.FileName,
-                NewValue = string.Concat(nextBaseName, extension),
-                Status = !changed ? "无变化" : selected ? "待检查" : "未勾选",
+                NewValue = selected ? string.Concat(nextBaseName, extension) : item.FileName,
+                Status = !itemSelected
+                    ? "未勾选，不参与批量图号"
+                    : !inScope
+                        ? "不在批量图号范围"
+                        : !changed ? "无变化" : "待检查",
                 CanExecute = request != null,
                 Item = item,
                 DocumentRequest = request

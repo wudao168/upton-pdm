@@ -14,7 +14,7 @@ const props = defineProps<{
 }>()
 
 const activeTab = ref('storage')
-const storageDraft = reactive<PdmSystemSettings>({ vaultRoot: '', releaseRoot: '', materialAttachmentRoot: '', checkoutHeartbeatSeconds: 180, checkoutLeaseMinutes: 15, checkoutOfflineGraceMinutes: 60, checkoutReminderHours: 4, checkoutStrongReminderHours: 8, checkoutOverdueHours: 24, checkoutForceReleaseHours: 48, bomDrawingNumberProperty: '物料编码', bomNameProperty: '物料名称', bomDescriptionProperty: '备注信息', bomMaterialProperty: '材质', bomSpecificationProperty: '型号', bomUnitProperty: '单位', bomBrandProperty: '品牌', bomSurfaceTreatmentProperty: '表面处理', bomWeightProperty: '重量', bomPropertyMappings: [], validationRules: { standard: [], nonStandard: [], electrical: [] } })
+const storageDraft = reactive<PdmSystemSettings>({ vaultRoot: '', releaseRoot: '', materialAttachmentRoot: '', checkoutHeartbeatSeconds: 180, checkoutLeaseMinutes: 15, checkoutOfflineGraceMinutes: 60, checkoutReminderHours: 4, checkoutStrongReminderHours: 8, checkoutOverdueHours: 24, checkoutForceReleaseHours: 48, bomDrawingNumberProperty: '物料编码', bomNameProperty: '物料名称', bomDescriptionProperty: '备注信息', bomMaterialProperty: '材质', bomSpecificationProperty: '型号', bomUnitProperty: '单位', bomBrandProperty: '品牌', bomSurfaceTreatmentProperty: '表面处理', bomWeightProperty: '重量', bomPropertyMappings: [], validationRules: { standard: [], nonStandard: [], electrical: [] }, drawingQrPolicy: { enabled: true, sourceProperty: '型号', ruleVersion: '1', sizeMillimeters: 20, marginMillimeters: 5, everySheet: true } })
 const equipmentDialogOpen = ref(false)
 const equipmentDraft = reactive<EquipmentTypeDefinition>({ code: 0, name: '', isActive: true })
 const counterDrafts = ref<Array<{ id: string; name: string; project: number; serial: number }>>([])
@@ -50,6 +50,7 @@ watch(() => props.settings, settings => Object.assign(storageDraft, {
     nonStandard: [...settings.validationRules.nonStandard],
     electrical: [...settings.validationRules.electrical],
   },
+  drawingQrPolicy: { enabled: true, sourceProperty: '型号', ruleVersion: '1', sizeMillimeters: 20, marginMillimeters: 5, everySheet: true, ...settings.drawingQrPolicy },
 }), { immediate: true, deep: true })
 watch(() => props.numberingOptions.organizations, organizations => {
   counterDrafts.value = organizations.map(item => ({ id: item.id, name: item.name, project: item.currentProjectSequence, serial: item.currentSerialSequence }))
@@ -131,6 +132,23 @@ async function saveValidationRules() {
     ElMessage.success('三类BOM资料校验规则已保存')
   } catch (error) {
     ElMessage.error(error instanceof Error ? error.message : 'BOM资料校验规则保存失败')
+  }
+}
+
+async function saveDrawingQrPolicy() {
+  const policy = storageDraft.drawingQrPolicy!
+  if (!policy.sourceProperty.trim() || !policy.ruleVersion.trim()) {
+    ElMessage.warning('二维码来源属性和规则版本不能为空')
+    return
+  }
+  try {
+    await props.onSaveSettings({
+      ...storageDraft,
+      drawingQrPolicy: { ...policy, sourceProperty: policy.sourceProperty.trim(), ruleVersion: policy.ruleVersion.trim() },
+    })
+    ElMessage.success('工程图二维码规则已保存')
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '工程图二维码规则保存失败')
   }
 }
 
@@ -250,6 +268,20 @@ async function saveCounters(row: { id: string; project: number; serial: number }
           </div>
           <p class="pdm-settings-note">物料分类本身始终必须有效；电气件不要求材质。修改规则只影响当前工作区和后续发布，不重算已有正式BOM版本。</p>
           <div class="pdm-settings-actions"><button type="button" class="pdm-primary-action" :disabled="pending" @click="saveValidationRules">保存校验规则</button></div>
+        </section>
+      </el-tab-pane>
+      <el-tab-pane label="工程图二维码" name="drawing-qr">
+        <section class="pdm-panel pdm-manager-panel">
+          <header class="pdm-manager-heading"><div><h2>工程图二维码规则</h2><p>插件按此规则把型号二维码嵌入工程图；提交存档时服务端再次核对内容和规则版本。</p></div></header>
+          <div class="pdm-settings-form">
+            <label class="pdm-checkbox-field"><input v-model="storageDraft.drawingQrPolicy!.enabled" type="checkbox">启用工程图二维码</label>
+            <label>来源属性<input v-model="storageDraft.drawingQrPolicy!.sourceProperty" maxlength="100"><small>工程图为空时读取唯一关联模型；当前使用“型号”。</small></label>
+            <label>规则版本<input v-model="storageDraft.drawingQrPolicy!.ruleVersion" maxlength="50"><small>调整二维码规则后递增，插件会自动刷新旧二维码。</small></label>
+            <label>二维码尺寸（毫米）<input v-model.number="storageDraft.drawingQrPolicy!.sizeMillimeters" type="number" min="8" max="100"></label>
+            <label>右下边距（毫米）<input v-model.number="storageDraft.drawingQrPolicy!.marginMillimeters" type="number" min="0" max="100"></label>
+            <label class="pdm-checkbox-field"><input v-model="storageDraft.drawingQrPolicy!.everySheet" type="checkbox">每张图纸页均写入</label>
+          </div>
+          <div class="pdm-settings-actions"><button type="button" class="pdm-primary-action" :disabled="pending" @click="saveDrawingQrPolicy">保存二维码规则</button></div>
         </section>
       </el-tab-pane>
     </el-tabs>

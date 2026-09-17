@@ -24,11 +24,12 @@ public sealed class EngineeringKitService(
     {
         await RequireAsync(actor, role, PermissionCodes.StandardLibraryManage, cancellationToken);
         var name = Required(command.Name, 160, "套件名称");
+        var brand = Required(command.Brand, 160, "套件品牌");
         var description = Optional(command.Description, 500, "套件说明");
         var changeNote = Optional(command.ChangeNote, 500, "变更说明");
         var normalized = command.Components.OrderBy(item => item.SortOrder).ToArray();
-        if (normalized.Length == 0) throw new PdmRuleException("套件至少需要一个必选子料。");
-        if (!normalized.Any(item => !item.IsOptional)) throw new PdmRuleException("套件至少需要一个必选子料。");
+        if (normalized.Length == 0) throw new PdmRuleException("套件至少需要一个明细物料。");
+        if (normalized.Any(item => item.IsOptional)) throw new PdmRuleException("套件明细全部为固定组成物料，不支持可选子料。");
         if (normalized.Any(item => item.Quantity <= 0)) throw new PdmRuleException("套件子料数量必须大于0。");
         if (normalized.GroupBy(item => item.MaterialId).Any(group => group.Count() > 1)) throw new PdmRuleException("同一真实物料在一个套件版本中只能出现一次。");
 
@@ -51,7 +52,7 @@ public sealed class EngineeringKitService(
             var revisionId = Guid.NewGuid();
             revision = new(revisionId, id, 1, EngineeringKitRevisionState.Draft, changeNote,
                 Components(revisionId, normalized, materialRows), actor, now, null, null);
-            kit = new(id, null, name, description, null, [revision], actor, now, actor, now, 1);
+            kit = new(id, null, null, name, brand, description, null, [revision], actor, now, actor, now, 1);
         }
         else
         {
@@ -62,7 +63,7 @@ public sealed class EngineeringKitService(
             var revisionId = draft?.Id ?? Guid.NewGuid();
             revision = new(revisionId, current.Id, versionNumber, EngineeringKitRevisionState.Draft, changeNote,
                 Components(revisionId, normalized, materialRows), draft?.CreatedBy ?? actor, draft?.CreatedAt ?? now, null, null);
-            kit = current with { Name = name, Description = description, UpdatedBy = actor, UpdatedAt = now };
+            kit = current with { Name = name, Brand = brand, Description = description, UpdatedBy = actor, UpdatedAt = now };
         }
 
         var saved = await kits.SaveDraftAsync(kit, revision, command.ExpectedRowVersion, cancellationToken);
@@ -75,8 +76,8 @@ public sealed class EngineeringKitService(
         await RequireAsync(actor, role, PermissionCodes.StandardLibraryManage, cancellationToken);
         var current = await kits.FindAsync(kitId, cancellationToken) ?? throw new PdmNotFoundException("套件不存在。");
         var draft = current.DraftRevision ?? throw new PdmRuleException("套件没有待发布草稿。");
-        if (draft.Components.Count == 0 || !draft.Components.Any(item => !item.IsOptional))
-            throw new PdmRuleException("套件至少需要一个必选子料。");
+        if (draft.Components.Count == 0)
+            throw new PdmRuleException("套件至少需要一个明细物料。");
         var saved = await kits.PublishAsync(kitId, expectedRowVersion, actor, timeProvider.GetUtcNow(), cancellationToken);
         await AuditAsync(actor, "engineering-kit.publish", saved.Id, $"{saved.Code} / V{draft.VersionNumber:D2}", cancellationToken);
         return saved;

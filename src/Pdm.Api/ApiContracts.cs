@@ -118,7 +118,8 @@ public sealed record UpdateSystemSettingsRequest(
     ReleaseApprovalSettings? ApprovalWorkflows = null,
     MaterialCodeApprovalSettings? MaterialCodeApproval = null,
     IReadOnlyList<string>? ReleaseChangeReasonTypes = null,
-    FormalSupplementPolicies? FormalSupplementPolicies = null);
+    FormalSupplementPolicies? FormalSupplementPolicies = null,
+    DrawingQrPolicy? DrawingQrPolicy = null);
 
 public sealed record SetBomEmptyDeclarationRequest(bool DeclaredEmpty);
 

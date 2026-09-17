@@ -191,7 +191,8 @@ public sealed partial class MySqlPdmRepository
             ApprovalWorkflows = ReadApprovalWorkflows(values),
             MaterialCodeApproval = ReadMaterialCodeApproval(values),
             ReleaseChangeReasonTypes = ReadStringList(values, "release_change_reason_types", PdmSystemSettings.DefaultReleaseChangeReasonTypes),
-            FormalSupplementPolicies = ReadFormalSupplementPolicies(values)
+            FormalSupplementPolicies = ReadFormalSupplementPolicies(values),
+            DrawingQrPolicy = ReadDrawingQrPolicy(values)
         };
         return BomPropertyMappingCatalog.Apply(settings);
     }
@@ -229,7 +230,8 @@ public sealed partial class MySqlPdmRepository
             new { Key = "release_approval_workflows", Value = JsonSerializer.Serialize(settings.ApprovalWorkflows, jsonOptions) },
             new { Key = "material_code_approval", Value = JsonSerializer.Serialize(settings.MaterialCodeApproval, jsonOptions) },
             new { Key = "release_change_reason_types", Value = JsonSerializer.Serialize(settings.ReleaseChangeReasonTypes, jsonOptions) },
-            new { Key = "formal_supplement_policies", Value = JsonSerializer.Serialize(settings.FormalSupplementPolicies, jsonOptions) }
+            new { Key = "formal_supplement_policies", Value = JsonSerializer.Serialize(settings.FormalSupplementPolicies, jsonOptions) },
+            new { Key = "drawing_qr_policy", Value = JsonSerializer.Serialize(settings.DrawingQrPolicy, jsonOptions) }
         })
         {
             await connection.ExecuteAsync(new CommandDefinition(
@@ -248,6 +250,20 @@ public sealed partial class MySqlPdmRepository
 
     private static string ReadString(IReadOnlyDictionary<string, string> values, string key, string defaultValue) =>
         values.TryGetValue(key, out var value) && !string.IsNullOrWhiteSpace(value) ? value : defaultValue;
+
+    private DrawingQrPolicy ReadDrawingQrPolicy(IReadOnlyDictionary<string, string> values)
+    {
+        if (!values.TryGetValue("drawing_qr_policy", out var json) || string.IsNullOrWhiteSpace(json))
+            return DrawingQrPolicy.Default;
+        try
+        {
+            return JsonSerializer.Deserialize<DrawingQrPolicy>(json, jsonOptions) ?? DrawingQrPolicy.Default;
+        }
+        catch (JsonException)
+        {
+            return DrawingQrPolicy.Default;
+        }
+    }
 
     private IReadOnlyList<BomPropertyMapping> ReadBomPropertyMappings(IReadOnlyDictionary<string, string> values)
     {

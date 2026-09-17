@@ -394,7 +394,8 @@ public static class PdmEndpointExtensions
                 ApprovalWorkflows = request.ApprovalWorkflows ?? currentSettings.ApprovalWorkflows,
                 MaterialCodeApproval = request.MaterialCodeApproval ?? currentSettings.MaterialCodeApproval,
                 ReleaseChangeReasonTypes = request.ReleaseChangeReasonTypes ?? currentSettings.ReleaseChangeReasonTypes,
-                FormalSupplementPolicies = request.FormalSupplementPolicies ?? currentSettings.FormalSupplementPolicies
+                FormalSupplementPolicies = request.FormalSupplementPolicies ?? currentSettings.FormalSupplementPolicies,
+                DrawingQrPolicy = request.DrawingQrPolicy ?? currentSettings.DrawingQrPolicy
             };
             return Results.Ok(await workflow.UpdateSystemSettingsAsync(settings, actor, role, cancellationToken));
         });
@@ -404,6 +405,9 @@ public static class PdmEndpointExtensions
 
         api.MapGet("/bom-property-mappings", async (IPdmRepository repository, CancellationToken cancellationToken) =>
             Results.Ok((await repository.GetSystemSettingsAsync(cancellationToken)).BomPropertyMappings));
+
+        api.MapGet("/drawing-qr-policy", async (IPdmRepository repository, CancellationToken cancellationToken) =>
+            Results.Ok((await repository.GetSystemSettingsAsync(cancellationToken)).DrawingQrPolicy));
 
         api.MapGet("/system-settings/equipment-types", async (HttpContext context, IPdmRepository repository, CancellationToken cancellationToken) =>
         {

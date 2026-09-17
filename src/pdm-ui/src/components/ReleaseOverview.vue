@@ -15,7 +15,7 @@ const emit = defineEmits<{ open: [releasePackageId: string] }>()
 const streams = [
   { kind: 'Standard', label: '标准件BOM', scopes: ['StandardLongLead', 'StandardFormal', 'StandardSupplement'] as ReleaseScope[] },
   { kind: 'NonStandard', label: '非标件BOM + 图纸', scopes: ['NonStandardLongLead', 'NonStandardWithDrawing', 'NonStandardSupplement'] as ReleaseScope[] },
-  { kind: 'Electrical', label: '电气BOM', scopes: ['ElectricalFormal', 'ElectricalSupplement'] as ReleaseScope[] },
+  { kind: 'Electrical', label: '电气BOM', scopes: ['ElectricalLongLead', 'ElectricalFormal', 'ElectricalSupplement'] as ReleaseScope[] },
   { kind: 'LegacyCombined', label: '历史组合发布', scopes: ['LegacyCombined'] as ReleaseScope[] },
 ].map(stream => computed(() => {
   const packages = props.releasePackages.filter(item => stream.scopes.includes(item.scope))
@@ -32,8 +32,8 @@ const streams = [
 
 function scopeLabel(scope: ReleaseScope) {
   return ({
-    StandardLongLead: '长交期', StandardFormal: '正式', StandardSupplement: '增补/变更',
-    ElectricalFormal: '正式', ElectricalSupplement: '增补/变更', NonStandardLongLead: '长交期', NonStandardWithDrawing: 'BOM+图纸', NonStandardSupplement: '增补/变更', LegacyCombined: '历史组合',
+    StandardLongLead: '前期BOM', StandardFormal: '正式', StandardSupplement: '增补/变更',
+    ElectricalLongLead: '前期BOM', ElectricalFormal: '正式', ElectricalSupplement: '增补/变更', NonStandardLongLead: '前期BOM', NonStandardWithDrawing: 'BOM+图纸', NonStandardSupplement: '增补/变更', LegacyCombined: '历史组合',
   } as Record<ReleaseScope, string>)[scope]
 }
 

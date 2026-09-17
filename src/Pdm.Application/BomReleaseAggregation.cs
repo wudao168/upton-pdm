@@ -28,19 +28,41 @@ public static class BomReleaseAggregation
     public static string MaterialKey(BomItem item) =>
         $"{item.DrawingNumber.Trim().ToUpperInvariant()}|{U9UnitCatalog.NormalizeBomUnit(item.Unit)}";
 
-    public static IReadOnlyList<BomItem> PriorLongLeadItems(ReleasePackage package, IEnumerable<ReleasePackage> history) =>
-        history.Where(previous => previous.ProjectId == package.ProjectId && previous.Id != package.Id
-                && previous.Scope == (package.Scope == ReleaseScope.NonStandardWithDrawing ? ReleaseScope.NonStandardLongLead : ReleaseScope.StandardLongLead)
+    public static IReadOnlyList<BomItem> PriorLongLeadItems(ReleasePackage package, IEnumerable<ReleasePackage> history)
+    {
+        var longLeadScope = package.Scope switch
+        {
+            ReleaseScope.StandardFormal => ReleaseScope.StandardLongLead,
+            ReleaseScope.NonStandardWithDrawing => ReleaseScope.NonStandardLongLead,
+            ReleaseScope.ElectricalFormal => ReleaseScope.ElectricalLongLead,
+            _ => (ReleaseScope?)null
+        };
+        if (!longLeadScope.HasValue) return [];
+        return history.Where(previous => previous.ProjectId == package.ProjectId && previous.Id != package.Id
+                && previous.Scope == longLeadScope.Value
                 && previous.State == ReleasePackageState.Published
                 && previous.PublishedAt.HasValue
                 && (!package.PublishedAt.HasValue || previous.PublishedAt <= package.PublishedAt))
-            .SelectMany(previous => (previous.Scope == ReleaseScope.NonStandardLongLead ? previous.NonStandardBomSnapshot : previous.StandardBomSnapshot)
+            .SelectMany(previous => ReleasedItems(previous)
                 .Where(item => !item.IsManuallyExcluded && !item.IsReleaseExcluded && !item.IsPendingRemoval)
                 .Select(item => item with { Quantity = item.Quantity * Math.Max(1, previous.WholeSetMultiplier) }))
             .ToArray();
+    }
 
     public static IReadOnlyDictionary<string, decimal> PriorQuantities(IEnumerable<BomItem> items) =>
         items.GroupBy(MaterialKey).ToDictionary(group => group.Key, group => group.Sum(item => item.Quantity));
+
+    public static IReadOnlyDictionary<string, decimal> PriorQuantities(
+        IEnumerable<BomItem> priorItems,
+        IEnumerable<BomItem> currentItems)
+    {
+        var currentKeys = currentItems
+            .GroupBy(item => item.ReleaseTrackingId)
+            .ToDictionary(group => group.Key, group => MaterialKey(group.First()));
+        return priorItems
+            .GroupBy(item => currentKeys.GetValueOrDefault(item.ReleaseTrackingId) ?? MaterialKey(item), StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(group => group.Key, group => group.Sum(item => item.Quantity), StringComparer.OrdinalIgnoreCase);
+    }
 
     public static U9ReleaseBomSummary Build(ReleasePackage package, IReadOnlyList<BomItem>? priorLongLeadItems = null)
     {
@@ -72,8 +94,8 @@ public static class BomReleaseAggregation
             .ThenBy(line => line.UnitCode, StringComparer.OrdinalIgnoreCase)
             .ToArray();
 
-        var priorQuantities = package.Scope is ReleaseScope.StandardFormal or ReleaseScope.NonStandardWithDrawing
-            ? PriorQuantities(priorLongLeadItems ?? [])
+        var priorQuantities = package.Scope is ReleaseScope.StandardFormal or ReleaseScope.NonStandardWithDrawing or ReleaseScope.ElectricalFormal
+            ? PriorQuantities(priorLongLeadItems ?? [], items)
             : new Dictionary<string, decimal>();
         var purchase = items
             .GroupBy(item => new
@@ -103,6 +125,7 @@ public static class BomReleaseAggregation
     {
         if (package.Scope == ReleaseScope.StandardLongLead) return package.StandardBomSnapshot;
         if (package.Scope == ReleaseScope.NonStandardLongLead) return package.NonStandardBomSnapshot;
+        if (package.Scope == ReleaseScope.ElectricalLongLead) return package.ElectricalBomSnapshot;
         if (package.StandardBomSnapshot.Count + package.NonStandardBomSnapshot.Count + package.ElectricalBomSnapshot.Count > 0)
             return package.StandardBomSnapshot.Concat(package.NonStandardBomSnapshot).Concat(package.ElectricalBomSnapshot);
         return package.MechanicalBomSnapshot.Concat(package.ElectricalBomSnapshot);

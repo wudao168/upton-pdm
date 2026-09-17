@@ -17,6 +17,11 @@ internal sealed class PluginSettingsDialog : Form
     private readonly Label lastCheckedAt = new Label();
     private readonly ProgressBar updateProgress = new ProgressBar();
     private readonly CheckBox automaticUpdates = new CheckBox();
+    private readonly CheckBox useCustomDrawingQrPosition = new CheckBox();
+    private readonly NumericUpDown drawingQrXMillimeters = new NumericUpDown();
+    private readonly NumericUpDown drawingQrYMillimeters = new NumericUpDown();
+    private readonly NumericUpDown drawingQrLengthMillimeters = new NumericUpDown();
+    private readonly NumericUpDown drawingQrWidthMillimeters = new NumericUpDown();
     private readonly Button checkUpdateButton = new Button();
     private readonly Button installUpdateButton = new Button();
     private readonly Button saveButton = new Button();
@@ -26,19 +31,19 @@ internal sealed class PluginSettingsDialog : Form
     private readonly Func<string, Task<PluginConnectionResult>> testConnection;
     private readonly Func<string, Task<PluginUpdateSnapshot>> checkUpdate;
     private readonly Func<string, Task<PluginUpdateSnapshot>> installUpdate;
-    private readonly Func<string, bool, Task<PluginConnectionResult>> saveSettings;
+    private readonly Func<PluginSettings, Task<PluginConnectionResult>> saveSettings;
     private bool actionRunning;
 
     public PluginSettingsDialog(
-        string initialServerAddress,
-        bool automaticUpdatesEnabled,
+        PluginSettings initialSettings,
         PluginUpdateSnapshot initialSnapshot,
         Func<PluginUpdateSnapshot> readSnapshot,
         Func<string, Task<PluginConnectionResult>> testConnection,
         Func<string, Task<PluginUpdateSnapshot>> checkUpdate,
         Func<string, Task<PluginUpdateSnapshot>> installUpdate,
-        Func<string, bool, Task<PluginConnectionResult>> saveSettings)
+        Func<PluginSettings, Task<PluginConnectionResult>> saveSettings)
     {
+        initialSettings ??= new PluginSettings();
         this.readSnapshot = readSnapshot ?? throw new ArgumentNullException(nameof(readSnapshot));
         this.testConnection = testConnection ?? throw new ArgumentNullException(nameof(testConnection));
         this.checkUpdate = checkUpdate ?? throw new ArgumentNullException(nameof(checkUpdate));
@@ -52,7 +57,7 @@ internal sealed class PluginSettingsDialog : Form
         MaximizeBox = false;
         ShowInTaskbar = false;
         AutoScaleMode = AutoScaleMode.Dpi;
-        ClientSize = new Size(520, 500);
+        ClientSize = new Size(540, 716);
         Font = new Font("Microsoft YaHei UI", 9F);
 
         var root = new TableLayoutPanel
@@ -60,9 +65,10 @@ internal sealed class PluginSettingsDialog : Form
             Dock = DockStyle.Fill,
             Padding = new Padding(16),
             ColumnCount = 1,
-            RowCount = 3
+            RowCount = 4
         };
         root.RowStyles.Add(new RowStyle(SizeType.Absolute, 145F));
+        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 166F));
         root.RowStyles.Add(new RowStyle(SizeType.Percent, 100F));
         root.RowStyles.Add(new RowStyle(SizeType.Absolute, 44F));
         Controls.Add(root);
@@ -78,7 +84,7 @@ internal sealed class PluginSettingsDialog : Form
         connectionLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 76F));
         connectionLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100F));
         connectionLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 88F));
-        connectionLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 34F));
+        connectionLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 30F));
         connectionLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 28F));
         connectionLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100F));
         connectionGroup.Controls.Add(connectionLayout);
@@ -89,12 +95,13 @@ internal sealed class PluginSettingsDialog : Form
             TextAlign = ContentAlignment.MiddleLeft,
             Dock = DockStyle.Fill
         }, 0, 0);
-        serverAddress.Text = initialServerAddress ?? string.Empty;
+        serverAddress.Text = initialSettings.ServerAddress ?? string.Empty;
         serverAddress.Dock = DockStyle.Fill;
         serverAddress.AccessibleName = "服务器地址";
         connectionLayout.Controls.Add(serverAddress, 1, 0);
         testConnectionButton.Text = "测试连接";
         testConnectionButton.Dock = DockStyle.Fill;
+        ConfigureDialogButton(testConnectionButton);
         testConnectionButton.Click += async (_, _) => await RunConnectionTestAsync();
         connectionLayout.Controls.Add(testConnectionButton, 2, 0);
         connectionStatus.Text = "修改地址前可先测试；测试失败不会覆盖原配置。";
@@ -113,6 +120,57 @@ internal sealed class PluginSettingsDialog : Form
         connectionLayout.SetColumnSpan(addressHint, 3);
         connectionLayout.Controls.Add(addressHint, 0, 2);
         root.Controls.Add(connectionGroup, 0, 0);
+
+        var qrPositionGroup = new GroupBox { Text = "工程图二维码位置与尺寸", Dock = DockStyle.Fill };
+        var qrPositionLayout = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            Padding = new Padding(10, 7, 10, 7),
+            ColumnCount = 4,
+            RowCount = 5
+        };
+        qrPositionLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 90F));
+        qrPositionLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 100F));
+        qrPositionLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 90F));
+        qrPositionLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 100F));
+        qrPositionLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 28F));
+        qrPositionLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 27F));
+        qrPositionLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 27F));
+        qrPositionLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 3F));
+        qrPositionLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100F));
+        qrPositionGroup.Controls.Add(qrPositionLayout);
+
+        useCustomDrawingQrPosition.Text = "使用自定义坐标";
+        useCustomDrawingQrPosition.Checked = initialSettings.UseCustomDrawingQrPosition;
+        useCustomDrawingQrPosition.Dock = DockStyle.Fill;
+        useCustomDrawingQrPosition.CheckedChanged += (_, _) => UpdateQrPositionControls();
+        qrPositionLayout.Controls.Add(useCustomDrawingQrPosition, 0, 0);
+        qrPositionLayout.SetColumnSpan(useCustomDrawingQrPosition, 4);
+
+        qrPositionLayout.Controls.Add(new Label { Text = "X（毫米）", Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleLeft }, 0, 1);
+        ConfigureCoordinateInput(drawingQrXMillimeters, initialSettings.DrawingQrXMillimeters, "二维码 X 坐标（距图纸右边，向左）");
+        qrPositionLayout.Controls.Add(drawingQrXMillimeters, 1, 1);
+        qrPositionLayout.Controls.Add(new Label { Text = "Y（毫米）", Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleLeft }, 2, 1);
+        ConfigureCoordinateInput(drawingQrYMillimeters, initialSettings.DrawingQrYMillimeters, "二维码 Y 坐标（距图纸下边，向上）");
+        qrPositionLayout.Controls.Add(drawingQrYMillimeters, 3, 1);
+
+        qrPositionLayout.Controls.Add(new Label { Text = "长（毫米）", Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleLeft }, 0, 2);
+        ConfigureSizeInput(drawingQrLengthMillimeters, initialSettings.DrawingQrLengthMillimeters, "二维码长度");
+        qrPositionLayout.Controls.Add(drawingQrLengthMillimeters, 1, 2);
+        qrPositionLayout.Controls.Add(new Label { Text = "宽（毫米）", Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleLeft }, 2, 2);
+        ConfigureSizeInput(drawingQrWidthMillimeters, initialSettings.DrawingQrWidthMillimeters, "二维码宽度");
+        qrPositionLayout.Controls.Add(drawingQrWidthMillimeters, 3, 2);
+
+        var qrPositionHint = new Label
+        {
+            Text = "以上尺寸均基于图纸右下角，X 向左、Y 向上设置。",
+            ForeColor = Color.FromArgb(95, 108, 124),
+            Dock = DockStyle.Fill,
+            TextAlign = ContentAlignment.TopLeft
+        };
+        qrPositionLayout.SetColumnSpan(qrPositionHint, 4);
+        qrPositionLayout.Controls.Add(qrPositionHint, 0, 4);
+        root.Controls.Add(qrPositionGroup, 0, 1);
 
         var updateGroup = new GroupBox { Text = "版本与更新", Dock = DockStyle.Fill };
         var updateLayout = new TableLayoutPanel
@@ -140,7 +198,7 @@ internal sealed class PluginSettingsDialog : Form
         updateLayout.Controls.Add(updateProgress, 1, 4);
         updateLayout.SetColumnSpan(updateProgress, 2);
         automaticUpdates.Text = "启用自动更新";
-        automaticUpdates.Checked = automaticUpdatesEnabled;
+        automaticUpdates.Checked = initialSettings.AutomaticUpdatesEnabled;
         automaticUpdates.Dock = DockStyle.Fill;
         updateLayout.Controls.Add(automaticUpdates, 0, 5);
         updateLayout.SetColumnSpan(automaticUpdates, 3);
@@ -152,16 +210,16 @@ internal sealed class PluginSettingsDialog : Form
             WrapContents = false
         };
         checkUpdateButton.Text = "检查更新";
-        checkUpdateButton.Width = 92;
+        ConfigureDialogButton(checkUpdateButton);
         checkUpdateButton.Click += async (_, _) => await RunUpdateActionAsync(false);
         installUpdateButton.Text = "立即更新";
-        installUpdateButton.Width = 92;
+        ConfigureDialogButton(installUpdateButton);
         installUpdateButton.Click += async (_, _) => await RunUpdateActionAsync(true);
         updateActions.Controls.Add(installUpdateButton);
         updateActions.Controls.Add(checkUpdateButton);
         updateLayout.Controls.Add(updateActions, 0, 6);
         updateLayout.SetColumnSpan(updateActions, 3);
-        root.Controls.Add(updateGroup, 0, 1);
+        root.Controls.Add(updateGroup, 0, 2);
 
         var footer = new FlowLayoutPanel
         {
@@ -170,19 +228,24 @@ internal sealed class PluginSettingsDialog : Form
             WrapContents = false,
             Padding = new Padding(0, 8, 0, 0)
         };
-        saveButton.Text = "保存并应用";
-        saveButton.AutoSize = true;
+        saveButton.Text = "保存";
+        ConfigureDialogButton(saveButton);
+        saveButton.UseVisualStyleBackColor = false;
+        saveButton.BackColor = Color.FromArgb(21, 126, 77);
+        saveButton.ForeColor = Color.White;
+        saveButton.FlatAppearance.BorderSize = 0;
         saveButton.Click += async (_, _) => await SaveAsync();
         cancelButton.Text = "取消";
-        cancelButton.AutoSize = true;
+        ConfigureDialogButton(cancelButton);
         cancelButton.DialogResult = DialogResult.Cancel;
         footer.Controls.Add(saveButton);
         footer.Controls.Add(cancelButton);
-        root.Controls.Add(footer, 0, 2);
+        root.Controls.Add(footer, 0, 3);
 
         AcceptButton = saveButton;
         CancelButton = cancelButton;
         ApplySnapshot(initialSnapshot ?? new PluginUpdateSnapshot());
+        UpdateQrPositionControls();
         refreshTimer.Interval = 500;
         refreshTimer.Tick += (_, _) =>
         {
@@ -262,7 +325,16 @@ internal sealed class PluginSettingsDialog : Form
         connectionStatus.Text = "正在验证并应用设置…";
         try
         {
-            var result = await saveSettings(serverAddress.Text, automaticUpdates.Checked);
+            var result = await saveSettings(new PluginSettings
+            {
+                ServerAddress = serverAddress.Text,
+                AutomaticUpdatesEnabled = automaticUpdates.Checked,
+                UseCustomDrawingQrPosition = useCustomDrawingQrPosition.Checked,
+                DrawingQrXMillimeters = decimal.ToDouble(drawingQrXMillimeters.Value),
+                DrawingQrYMillimeters = decimal.ToDouble(drawingQrYMillimeters.Value),
+                DrawingQrLengthMillimeters = decimal.ToDouble(drawingQrLengthMillimeters.Value),
+                DrawingQrWidthMillimeters = decimal.ToDouble(drawingQrWidthMillimeters.Value)
+            });
             connectionStatus.ForeColor = Color.FromArgb(0, 128, 96);
             connectionStatus.Text = result?.Message ?? "设置已保存";
             DialogResult = DialogResult.OK;
@@ -284,6 +356,8 @@ internal sealed class PluginSettingsDialog : Form
         actionRunning = running;
         serverAddress.Enabled = !running;
         automaticUpdates.Enabled = !running;
+        useCustomDrawingQrPosition.Enabled = !running;
+        UpdateQrPositionControls();
         testConnectionButton.Enabled = !running;
         checkUpdateButton.Enabled = !running;
         saveButton.Enabled = !running;
@@ -316,5 +390,47 @@ internal sealed class PluginSettingsDialog : Form
         if (string.IsNullOrWhiteSpace(version)) return "—";
         var value = version.Trim();
         return value.StartsWith("V", StringComparison.OrdinalIgnoreCase) ? value : string.Concat("V", value);
+    }
+
+    private void UpdateQrPositionControls()
+    {
+        var enabled = !actionRunning && useCustomDrawingQrPosition.Checked;
+        drawingQrXMillimeters.Enabled = enabled;
+        drawingQrYMillimeters.Enabled = enabled;
+        drawingQrLengthMillimeters.Enabled = !actionRunning;
+        drawingQrWidthMillimeters.Enabled = !actionRunning;
+    }
+
+    private static void ConfigureCoordinateInput(NumericUpDown input, double value, string accessibleName)
+    {
+        input.DecimalPlaces = 1;
+        input.Increment = 1M;
+        input.Minimum = 0M;
+        input.Maximum = 2000M;
+        input.Dock = DockStyle.Fill;
+        input.AccessibleName = accessibleName;
+        var safeValue = double.IsNaN(value) || double.IsInfinity(value) ? 0M : (decimal)value;
+        input.Value = Math.Max(input.Minimum, Math.Min(input.Maximum, safeValue));
+    }
+
+    private static void ConfigureSizeInput(NumericUpDown input, double value, string accessibleName)
+    {
+        input.DecimalPlaces = 1;
+        input.Increment = 1M;
+        input.Minimum = 8M;
+        input.Maximum = 2000M;
+        input.Dock = DockStyle.Fill;
+        input.AccessibleName = accessibleName;
+        var safeValue = double.IsNaN(value) || double.IsInfinity(value) || value <= 0d ? 20M : (decimal)value;
+        input.Value = Math.Max(input.Minimum, Math.Min(input.Maximum, safeValue));
+    }
+
+    private static void ConfigureDialogButton(Button button)
+    {
+        button.AutoSize = false;
+        button.Size = new Size(88, 30);
+        button.TextAlign = ContentAlignment.MiddleCenter;
+        button.UseCompatibleTextRendering = false;
+        button.FlatStyle = FlatStyle.Flat;
     }
 }

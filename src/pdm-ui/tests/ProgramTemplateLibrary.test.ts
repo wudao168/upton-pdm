@@ -1,6 +1,6 @@
 import { flushPromises, mount } from '@vue/test-utils'
 import { ElMessage } from '../src/statusMessage'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import ProgramTemplateLibrary from '../src/components/ProgramTemplateLibrary.vue'
 
 const api = vi.hoisted(() => ({
@@ -25,7 +25,10 @@ describe('ProgramTemplateLibrary', () => {
     api.listProgramTemplateTasks.mockResolvedValue([])
   })
 
+  afterEach(() => vi.unstubAllGlobals())
+
   it('缺少受控文件时不创建草稿或提交审核', async () => {
+    vi.stubGlobal('crypto', {})
     const warning = vi.spyOn(ElMessage, 'warning').mockImplementation(() => undefined as never)
     const wrapper = mount(ProgramTemplateLibrary, {
       props: {
@@ -63,6 +66,7 @@ describe('ProgramTemplateLibrary', () => {
     expect(wrapper.findAll('.table-column-label').map(column => column.text())).toEqual(expect.arrayContaining(['程序名称', '功能说明']))
     await wrapper.findAll('button').find(button => button.text().includes('上传程序模板'))!.trigger('click')
     await flushPromises()
+    expect(wrapper.text()).toContain('保存草稿')
     await wrapper.findAll('button').find(button => button.text().includes('提交审核'))!.trigger('click')
     await flushPromises()
 

@@ -21,6 +21,7 @@ const settings: PdmSystemSettings = {
   bomMaterialProperty: '材质', bomSpecificationProperty: '型号', bomUnitProperty: '单位', bomBrandProperty: '品牌',
   bomSurfaceTreatmentProperty: '表面处理', bomWeightProperty: '重量', bomPropertyMappings: mappings,
   validationRules: { standard: ['drawingNumber', 'name', 'unit', 'quantity', 'revision'], nonStandard: ['drawingNumber', 'name', 'unit', 'quantity', 'revision'], electrical: ['drawingNumber', 'name', 'unit', 'quantity', 'revision'] },
+  drawingQrPolicy: { enabled: true, sourceProperty: '型号', ruleVersion: '1', sizeMillimeters: 20, marginMillimeters: 5, everySheet: true },
 }
 
 describe('StorageSettings BOM property mappings', () => {
@@ -84,6 +85,30 @@ describe('StorageSettings BOM property mappings', () => {
         expect.objectContaining({ pdmPropertyKey: 'wearPart', solidWorksProperty: '易损件标识' }),
         expect.objectContaining({ pdmPropertyKey: 'heatTreatment', solidWorksProperty: '热处理方式' }),
       ]),
+    }))
+    wrapper.unmount()
+  })
+
+  it('saves the centralized drawing QR policy', async () => {
+    const onSaveSettings = vi.fn().mockImplementation(async input => input)
+    const wrapper = mount(StorageSettings, {
+      props: {
+        settings, equipmentTypes: [], numberingOptions: { organizations: [], projectTypes: [], equipmentTypes: [] }, pending: false,
+        onSaveSettings, onSaveEquipmentType: vi.fn(), onUpdateCounters: vi.fn(),
+      },
+      global: { plugins: [ElementPlus] },
+    })
+
+    const tab = wrapper.findAll('.el-tabs__item').find(item => item.text() === '工程图二维码')!
+    await tab.trigger('click')
+    await flushPromises()
+    const versionLabel = wrapper.findAll('.pdm-settings-form label').find(label => label.text().includes('规则版本'))!
+    await versionLabel.get('input').setValue('2')
+    await wrapper.findAll('button').find(button => button.text() === '保存二维码规则')!.trigger('click')
+    await flushPromises()
+
+    expect(onSaveSettings).toHaveBeenCalledWith(expect.objectContaining({
+      drawingQrPolicy: expect.objectContaining({ sourceProperty: '型号', ruleVersion: '2', sizeMillimeters: 20, marginMillimeters: 5, everySheet: true }),
     }))
     wrapper.unmount()
   })

@@ -159,6 +159,19 @@ public sealed record PdmSystemSettings(string VaultRoot, string ReleaseRoot)
     public IReadOnlyList<string> ReleaseChangeReasonTypes { get; init; } = DefaultReleaseChangeReasonTypes;
 
     public FormalSupplementPolicies FormalSupplementPolicies { get; init; } = FormalSupplementPolicies.Default;
+
+    public DrawingQrPolicy DrawingQrPolicy { get; init; } = DrawingQrPolicy.Default;
+}
+
+public sealed record DrawingQrPolicy(
+    bool Enabled,
+    string SourceProperty,
+    string RuleVersion,
+    int SizeMillimeters,
+    int MarginMillimeters,
+    bool EverySheet)
+{
+    public static DrawingQrPolicy Default { get; } = new(true, "型号", "1", 20, 5, true);
 }
 
 public sealed record FormalSupplementPolicy(int? MaximumCount, int? ValidDays)
@@ -491,6 +504,8 @@ public sealed record BomItem(
     string Revision,
     bool IsComplete)
 {
+    public Guid ReleaseTrackingId { get; init; } = Id;
+
     public string? Remark { get; init; }
 
     public string? Brand { get; init; }
@@ -668,7 +683,7 @@ public sealed record ReleasePackage(
     Guid ProjectId,
     string Number,
     ReleasePackageState State,
-    Guid ReferenceSnapshotId,
+    Guid? ReferenceSnapshotId,
     string MechanicalBomRevision,
     string ElectricalBomRevision,
     IReadOnlyList<ApprovalTask> ApprovalTasks,

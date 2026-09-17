@@ -17,10 +17,14 @@ public sealed partial class MySqlPdmRepository
         CancellationToken cancellationToken)
     {
         var priorItems = new List<BomItem>();
-        if (package.Scope is ReleaseScope.StandardFormal or ReleaseScope.NonStandardWithDrawing)
+        if (package.Scope is ReleaseScope.StandardFormal or ReleaseScope.NonStandardWithDrawing or ReleaseScope.ElectricalFormal)
         {
-            var longLeadScope = package.Scope == ReleaseScope.StandardFormal ? ReleaseScope.StandardLongLead : ReleaseScope.NonStandardLongLead;
-            var snapshotColumn = package.Scope == ReleaseScope.StandardFormal ? "standard_bom_snapshot_json" : "non_standard_bom_snapshot_json";
+            var (longLeadScope, snapshotColumn) = package.Scope switch
+            {
+                ReleaseScope.StandardFormal => (ReleaseScope.StandardLongLead, "standard_bom_snapshot_json"),
+                ReleaseScope.NonStandardWithDrawing => (ReleaseScope.NonStandardLongLead, "non_standard_bom_snapshot_json"),
+                _ => (ReleaseScope.ElectricalLongLead, "electrical_bom_snapshot_json")
+            };
             var rows = await connection.QueryAsync<PriorLongLeadRow>(new CommandDefinition(
                 $"SELECT {snapshotColumn} AS SnapshotJson,whole_set_multiplier FROM release_package WHERE project_id=@ProjectId AND id<>@Id AND release_scope=@LongLeadScope AND state='Published' AND published_at<=@PublishedAt",
                 new { package.ProjectId, package.Id, LongLeadScope = longLeadScope.ToString(), PublishedAt = publishedAt.UtcDateTime }, transaction, cancellationToken: cancellationToken));

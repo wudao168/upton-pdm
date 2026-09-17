@@ -66,6 +66,9 @@ internal sealed class PdmApiClient : IDisposable
     public Task<List<BomPropertyMappingDto>> GetBomPropertyMappingsAsync(CancellationToken cancellationToken) =>
         GetJsonAsync<List<BomPropertyMappingDto>>("api/bom-property-mappings", cancellationToken);
 
+    public Task<DrawingQrPolicyDto> GetDrawingQrPolicyAsync(CancellationToken cancellationToken) =>
+        GetJsonAsync<DrawingQrPolicyDto>("api/drawing-qr-policy", cancellationToken);
+
     public Task<List<BomItemDto>> GetBomAsync(Guid projectId, string kind, CancellationToken cancellationToken) =>
         GetJsonAsync<List<BomItemDto>>(
             string.Concat("api/projects/", projectId, "/boms/", Uri.EscapeDataString(kind ?? string.Empty)),
@@ -793,6 +796,16 @@ internal sealed class BomPropertyMappingDto
     public string SolidWorksProperty { get; set; }
     public string Source { get; set; }
     public bool MappingEditable { get; set; }
+}
+
+internal sealed class DrawingQrPolicyDto
+{
+    public bool Enabled { get; set; } = true;
+    public string SourceProperty { get; set; } = "型号";
+    public string RuleVersion { get; set; } = "1";
+    public int SizeMillimeters { get; set; } = 20;
+    public int MarginMillimeters { get; set; } = 5;
+    public bool EverySheet { get; set; } = true;
 }
 
 internal sealed class BomItemDto

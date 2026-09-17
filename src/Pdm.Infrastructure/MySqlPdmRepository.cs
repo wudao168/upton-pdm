@@ -1934,7 +1934,7 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
         public bool CreatesManufacturingBaseline { get; init; }
         public bool LocksDocuments { get; init; }
         public int WholeSetMultiplier { get; init; } = 1;
-        public Guid ReferenceSnapshotId { get; init; }
+        public Guid? ReferenceSnapshotId { get; init; }
         public string MechanicalBomRevision { get; init; } = string.Empty;
         public string ElectricalBomRevision { get; init; } = string.Empty;
         public string MechanicalBomSnapshotJson { get; init; } = "[]";

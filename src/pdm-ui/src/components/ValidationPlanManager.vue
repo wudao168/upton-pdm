@@ -3,6 +3,7 @@ import { ArrowLeft, CalendarDays, CheckCircle2, Download, FileUp, LibraryBig, Li
 import { ElMessageBox } from 'element-plus'
 import { computed, onBeforeUnmount, reactive, ref, watch } from 'vue'
 import { confirmValidationPlanExecution, createProjectValidationPlanRevision, decideValidationPlanApproval, deleteValidationCheckCategory, deleteValidationCheckItem, downloadValidationPlanAttachment, exportProjectValidationPlan, readProjectValidationPlan, readValidationCheckCatalog, readValidationPlanExecutionRecords, recognizeValidationPlanAttachment, saveProjectValidationPlan, saveValidationCheckCategory, saveValidationCheckItem, submitProjectValidationPlan, uploadValidationPlanAttachment } from '../api'
+import { createClientId } from '../clientId'
 import { ElMessage } from '../statusMessage'
 import type { ProjectSummary, ProjectValidationPlan, ProjectValidationPlanItem, ValidationCheckCatalog, ValidationCheckCategory, ValidationCheckItem, ValidationPlanAttachment, ValidationPlanExecutionRecord, ValidationPlanRecognitionCandidate, ValidationPlanRecognitionDraft } from '../types'
 import { useUserDisplayName } from '../userDisplay'
@@ -253,7 +254,7 @@ function appendSelectedItems() {
     const category = item ? categoryById.get(item.categoryId) : undefined
     if (!item || !category || rows.value.some(row => row.catalogItemId === item.id)) continue
     rows.value.push({
-      id: crypto.randomUUID(),
+      id: createClientId(),
       catalogCategoryId: category.id,
       catalogItemId: item.id,
       categoryName: category.name,
@@ -273,7 +274,7 @@ function appendSelectedItems() {
 
 function addManualRow(afterIndex: number) {
   rows.value.splice(afterIndex + 1, 0, {
-    id: crypto.randomUUID(), catalogCategoryId: null, catalogItemId: null, categoryName: '人工项', validationContent: '',
+    id: createClientId(), catalogCategoryId: null, catalogItemId: null, categoryName: '人工项', validationContent: '',
     informationSource: '内部评审', validationDate: null, result: null, reviewer: null, responsiblePerson: null, remark: null, sortOrder: rows.value.length + 1,
   })
   normalizeRowOrder()

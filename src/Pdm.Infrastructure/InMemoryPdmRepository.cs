@@ -45,7 +45,8 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
     private readonly ConcurrentDictionary<Guid, CadReferenceSnapshot> referenceSnapshots = new();
     private PdmSystemSettings systemSettings = new(@"D:\PDM\Vault", @"D:\PDM\Release")
     {
-        MaterialAttachmentRoot = @"D:\PDM\MaterialAttachments"
+        MaterialAttachmentRoot = @"D:\PDM\MaterialAttachments",
+        DrawingQrPolicy = DrawingQrPolicy.Default with { Enabled = false }
     };
     private CrmIntegrationConfiguration crmIntegrationConfiguration = new(string.Empty, string.Empty, string.Empty, false, 60, null, 0, null, null);
 

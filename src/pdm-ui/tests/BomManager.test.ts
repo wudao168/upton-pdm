@@ -91,6 +91,22 @@ describe('BomManager', () => {
     expect(wrapper.get('.pdm-empty-info').text()).toContain('系统自动按无此类物料处理')
   })
 
+  it('shows heat treatment as a read-only column in source data', () => {
+    const wrapper = mount(BomManager, {
+      props: {
+        sourceData: [{ id: 'source-1', sequence: 1, drawingNumber: 'NST-001', name: '热处理零件', quantity: 1, unit: '个', heatTreatment: '调质', revision: 'W1', complete: true, source: 'Auto' }],
+        standard: [], nonStandard: [], electrical: [], declarations: [], pending: false, editable: true,
+      },
+    })
+
+    const table = wrapper.get('.pdm-bom-table')
+    expect(table.findAll('thead th').map(header => header.text())).toContain('热处理')
+    expect(table.find('col.is-heat').exists()).toBe(true)
+    expect(table.findAll('tbody td').some(cell => cell.text() === '调质')).toBe(true)
+    expect(table.find('[aria-label="编辑热处理"]').exists()).toBe(false)
+    expect(table.find('[aria-label="热处理"]').exists()).toBe(false)
+  })
+
   it('aggregates duplicate source instances into one material row and keeps categorized BOM counts', () => {
     const wrapper = mount(BomManager, {
       props: {
@@ -263,7 +279,7 @@ describe('BomManager', () => {
     const confirm = vi.spyOn(ElMessageBox, 'confirm').mockResolvedValue('confirm' as never)
     const sourceData: BomItem[] = Array.from({ length: 6 }, (_, index) => ({
       id: `source-${index}`, sequence: index + 1, drawingNumber: 'PART-001', name: '重复零件', quantity: 1,
-      unit: '个', specification: 'PH602', brand: 'FESTO', revision: 'W1', complete: true, sourceDocumentId: 'doc-1', sourceInstancePath: `root/${index}`,
+      unit: '个', specification: 'PH602', brand: 'FESTO', material: '6061', revision: 'W1', complete: true, sourceDocumentId: 'doc-1', sourceInstancePath: `root/${index}`,
     }))
     const wrapper = mount(BomManager, {
       props: { sourceData, standard: [], nonStandard: [], electrical: [], [category]: sourceData, declarations: [], pending: false, editable: true },
@@ -2005,21 +2021,24 @@ describe('BomManager', () => {
     expect(materialApi.resolveBomMaterialCodes).toHaveBeenLastCalledWith('project-1', ['standard-1'], 'token')
   })
 
-  it('references a released UKIT with optional components unselected and expands only real materials', async () => {
+  it('references a released UKIT and expands every fixed component into real materials', async () => {
     materialApi.listEngineeringKits.mockResolvedValue([{
       id: 'kit-1', code: 'UKIT-000001', name: '安装附件套件', description: 'PDM工程引用', currentReleasedRevisionId: 'revision-1',
       revisions: [{
         id: 'revision-1', kitId: 'kit-1', versionNumber: 1, state: 'Released', createdBy: 'admin', createdAt: '2026-09-08T00:00:00Z',
         components: [
-          { id: 'required-1', revisionId: 'revision-1', materialId: 'material-1', materialCode: '0102000001', materialName: '必选螺栓', quantity: 5, unit: '001', isOptional: false, sortOrder: 1 },
-          { id: 'optional-1', revisionId: 'revision-1', materialId: 'material-2', materialCode: '0102000002', materialName: '可选垫圈', quantity: 2, unit: '001', isOptional: true, sortOrder: 2 },
+          { id: 'component-1', revisionId: 'revision-1', materialId: 'material-1', materialCode: '0102000001', materialName: '螺栓', quantity: 5, unit: '001', isOptional: false, sortOrder: 1 },
+          { id: 'component-2', revisionId: 'revision-1', materialId: 'material-2', materialCode: '0102000002', materialName: '垫圈', quantity: 2, unit: '001', isOptional: false, sortOrder: 2 },
         ],
       }],
       createdBy: 'admin', createdAt: '2026-09-08T00:00:00Z', updatedBy: 'admin', updatedAt: '2026-09-08T00:00:00Z', rowVersion: 2,
     }])
     materialApi.expandEngineeringKit.mockResolvedValue({
       referenceId: 'reference-1', kitId: 'kit-1', revisionId: 'revision-1', kitCode: 'UKIT-000001', kitName: '安装附件套件', versionNumber: 1, kitQuantity: 1,
-      lines: [{ kitComponentId: 'required-1', materialId: 'material-1', materialCode: '0102000001', materialName: '必选螺栓', quantity: 5, unit: '001', isOptional: false }],
+      lines: [
+        { kitComponentId: 'component-1', materialId: 'material-1', materialCode: '0102000001', materialName: '螺栓', quantity: 5, unit: '001', isOptional: false },
+        { kitComponentId: 'component-2', materialId: 'material-2', materialCode: '0102000002', materialName: '垫圈', quantity: 2, unit: '001', isOptional: false },
+      ],
     })
     const wrapper = mount(BomManager, {
       props: { standard: [], nonStandard: [], electrical: [], declarations: [], pending: false, editable: true, token: 'token', projectId: 'project-1' },
@@ -2037,14 +2056,14 @@ describe('BomManager', () => {
     const optionals = wrapper.findAll('.pdm-kit-component-options input[type="checkbox"]')
     expect(optionals).toHaveLength(2)
     expect((optionals[0].element as HTMLInputElement).checked).toBe(true)
-    expect((optionals[1].element as HTMLInputElement).checked).toBe(false)
+    expect((optionals[1].element as HTMLInputElement).checked).toBe(true)
 
     await wrapper.findAll('button').find(button => button.text() === '确认引用并展开')!.trigger('click')
     await flushPromises()
     expect(materialApi.expandEngineeringKit).toHaveBeenCalledWith('kit-1', { revisionId: 'revision-1', quantity: 1, selectedOptionalComponentIds: [] }, 'token')
     const save = wrapper.emitted('save')?.at(-1) as [string, BomItem[]]
     expect(save[0]).toBe('Standard')
-    expect(save[1]).toHaveLength(1)
+    expect(save[1]).toHaveLength(2)
     expect(save[1][0]).toMatchObject({ drawingNumber: '0102000001', quantity: 5, source: 'EngineeringKit', engineeringKitCode: 'UKIT-000001', engineeringKitVersionNumber: 1, engineeringKitComponentOptional: false })
     expect(save[1][0].drawingNumber).not.toBe('UKIT-000001')
   })
@@ -2554,6 +2573,23 @@ describe('BomManager', () => {
     expect(wrapper.get('.pdm-bom-data-status').text()).toBe('已完善')
     expect(wrapper.find('input[aria-label="物料完整"]').exists()).toBe(false)
     expect(wrapper.text()).not.toContain('完整状态')
+  })
+
+  it('requires non-standard material when saving instead of deferring the error to release', async () => {
+    const error = vi.spyOn(ElMessage, 'error').mockImplementation(() => undefined as never)
+    const wrapper = mount(BomManager, {
+      props: {
+        standard: [],
+        nonStandard: [{ id: 'custom', sequence: 1, drawingNumber: 'N-001', name: '非标件', quantity: 1, unit: '件', revision: 'W1', complete: false, source: 'Manual' }],
+        electrical: [], declarations: [], pending: false, editable: true,
+      },
+    })
+
+    await wrapper.findAll('button[role="tab"]')[2].trigger('click')
+    await wrapper.get('.pdm-bom-save-action').trigger('click')
+
+    expect(wrapper.emitted('save')).toBeUndefined()
+    expect(error).toHaveBeenCalledWith('非标件BOM保存前必须补全材质；第 1 行缺少材质')
   })
 
   it('validates drawing material codes against model and brand without rewriting the code', async () => {

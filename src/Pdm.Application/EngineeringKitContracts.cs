@@ -10,6 +10,7 @@ public sealed record SaveEngineeringKitComponentCommand(
 
 public sealed record SaveEngineeringKitDraftCommand(
     string Name,
+    string Brand,
     string? Description,
     string? ChangeNote,
     IReadOnlyList<SaveEngineeringKitComponentCommand> Components,

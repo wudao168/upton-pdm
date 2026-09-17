@@ -22,18 +22,25 @@ internal enum BatchRenameHierarchyKind
 
 internal sealed class BatchRenameHierarchyItem
 {
-    internal BatchRenameHierarchyItem(string key, string parentKey, BatchRenameHierarchyKind kind, bool isRoot = false)
+    internal BatchRenameHierarchyItem(
+        string key,
+        string parentKey,
+        BatchRenameHierarchyKind kind,
+        bool isRoot = false,
+        string existingNumber = "")
     {
         Key = key ?? string.Empty;
         ParentKey = parentKey ?? string.Empty;
         Kind = kind;
         IsRoot = isRoot;
+        ExistingNumber = existingNumber?.Trim() ?? string.Empty;
     }
 
     internal string Key { get; }
     internal string ParentKey { get; }
     internal BatchRenameHierarchyKind Kind { get; }
     internal bool IsRoot { get; }
+    internal string ExistingNumber { get; }
 }
 
 internal static class BatchRenameRule
@@ -55,6 +62,18 @@ internal static class BatchRenameRule
             || includeNonStandardParts && isNonStandard;
     }
 
+    internal static bool CanGenerateHierarchyRename(
+        bool selected,
+        BatchRenameHierarchyKind kind,
+        string classification,
+        bool includeComponentDrawings,
+        bool includeNonStandardParts) =>
+        selected && IsInHierarchyScope(
+            kind,
+            classification,
+            includeComponentDrawings,
+            includeNonStandardParts);
+
     internal static IReadOnlyDictionary<string, string> BuildHierarchyNumbers(IEnumerable<BatchRenameHierarchyItem> source)
     {
         var items = (source ?? Array.Empty<BatchRenameHierarchyItem>())
@@ -63,8 +82,7 @@ internal static class BatchRenameRule
             .Select(group => group.First())
             .ToArray();
         var result = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-        var assemblyCounters = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
-        var partCounters = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        var siblingStates = new Dictionary<string, HierarchySiblingNumberState>(StringComparer.OrdinalIgnoreCase);
         var root = items.FirstOrDefault(item => item.IsRoot && item.Kind == BatchRenameHierarchyKind.Assembly);
         if (root == null)
         {
@@ -82,14 +100,14 @@ internal static class BatchRenameRule
 
             if (item.Kind == BatchRenameHierarchyKind.Assembly)
             {
-                var index = NextCounter(assemblyCounters, item.ParentKey);
+                var index = NextHierarchyIndex(item, items, parentNumber, root.Key, siblingStates);
                 result[item.Key] = string.Equals(item.ParentKey, root.Key, StringComparison.OrdinalIgnoreCase)
                     ? index.ToString("00")
                     : string.Concat(parentNumber, ".", index.ToString("00"));
             }
             else
             {
-                var index = NextCounter(partCounters, item.ParentKey);
+                var index = NextHierarchyIndex(item, items, parentNumber, root.Key, siblingStates);
                 result[item.Key] = string.Concat(parentNumber, "-", index.ToString("00"));
             }
         }
@@ -132,6 +150,20 @@ internal static class BatchRenameRule
             throw new InvalidOperationException("层级编号不能为空。");
         }
         return NormalizeFileBaseName(string.Concat(serial, ".", number), string.Empty);
+    }
+
+    internal static string ExtractExistingHierarchyNumber(string currentFileBaseName)
+    {
+        var name = (currentFileBaseName ?? string.Empty).Trim();
+        var separator = name.IndexOf('.');
+        if (separator <= 0 || separator >= name.Length - 1)
+        {
+            return string.Empty;
+        }
+        var candidate = name.Substring(separator + 1);
+        return candidate.All(character => char.IsDigit(character) || character == '.' || character == '-')
+            ? candidate
+            : string.Empty;
     }
 
     internal static string Apply(
@@ -199,12 +231,85 @@ internal static class BatchRenameRule
         return search;
     }
 
-    private static int NextCounter(IDictionary<string, int> counters, string key)
+    private static int NextHierarchyIndex(
+        BatchRenameHierarchyItem item,
+        IReadOnlyList<BatchRenameHierarchyItem> items,
+        string parentNumber,
+        string rootKey,
+        IDictionary<string, HierarchySiblingNumberState> states)
     {
-        counters.TryGetValue(key ?? string.Empty, out var current);
-        current++;
-        counters[key ?? string.Empty] = current;
-        return current;
+        var stateKey = string.Concat((int)item.Kind, "\0", item.ParentKey ?? string.Empty);
+        if (!states.TryGetValue(stateKey, out var state))
+        {
+            state = new HierarchySiblingNumberState();
+            foreach (var sibling in items.Where(candidate => candidate.Kind == item.Kind
+                && string.Equals(candidate.ParentKey, item.ParentKey, StringComparison.OrdinalIgnoreCase)))
+            {
+                if (!TryGetExistingSiblingIndex(sibling, parentNumber, rootKey, out var index)
+                    || !state.Used.Add(index))
+                {
+                    continue;
+                }
+                state.ExistingByKey[sibling.Key] = index;
+                state.Next = Math.Max(state.Next, index + 1);
+            }
+            states[stateKey] = state;
+        }
+
+        if (state.ExistingByKey.TryGetValue(item.Key, out var existing))
+        {
+            return existing;
+        }
+        while (state.Used.Contains(state.Next))
+        {
+            state.Next++;
+        }
+        var next = state.Next++;
+        state.Used.Add(next);
+        return next;
+    }
+
+    private static bool TryGetExistingSiblingIndex(
+        BatchRenameHierarchyItem item,
+        string parentNumber,
+        string rootKey,
+        out int index)
+    {
+        index = 0;
+        var existing = item.ExistingNumber ?? string.Empty;
+        string leaf;
+        if (item.Kind == BatchRenameHierarchyKind.Assembly)
+        {
+            if (string.Equals(item.ParentKey, rootKey, StringComparison.OrdinalIgnoreCase))
+            {
+                leaf = existing;
+            }
+            else
+            {
+                var prefix = string.Concat(parentNumber, ".");
+                if (!existing.StartsWith(prefix, StringComparison.Ordinal)) return false;
+                leaf = existing.Substring(prefix.Length);
+            }
+        }
+        else
+        {
+            var prefix = string.Concat(parentNumber, "-");
+            if (!existing.StartsWith(prefix, StringComparison.Ordinal)) return false;
+            leaf = existing.Substring(prefix.Length);
+        }
+
+        return leaf.Length >= 2
+            && leaf.All(char.IsDigit)
+            && int.TryParse(leaf, out index)
+            && index > 0;
+    }
+
+    private sealed class HierarchySiblingNumberState
+    {
+        internal Dictionary<string, int> ExistingByKey { get; } =
+            new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        internal HashSet<int> Used { get; } = new HashSet<int>();
+        internal int Next { get; set; } = 1;
     }
 
     private static void AppendHierarchyChildren(

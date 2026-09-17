@@ -62,6 +62,8 @@ public sealed class PdmAddin : ISwAddin
     private string assemblyEventDocumentPath = string.Empty;
     private DPartDocEvents_Event partEvents;
     private string partEventDocumentPath = string.Empty;
+    private DDrawingDocEvents_Event drawingEvents;
+    private string drawingEventDocumentPath = string.Empty;
     private string authenticatedUsername = string.Empty;
     private int openOperationInProgress;
     private int checkInOperationInProgress;
@@ -94,6 +96,13 @@ public sealed class PdmAddin : ISwAddin
     private bool disconnecting;
     private string addinDirectory = string.Empty;
     private PluginSettings pluginSettings = new PluginSettings();
+    private DrawingQrPolicyDto drawingQrPolicy = new DrawingQrPolicyDto();
+    private int drawingQrSyncInProgress;
+    private int pendingDrawingQrSaveRequest;
+    private int pendingDrawingQrPostSaveSync;
+    private string pendingDrawingQrPostSavePath = string.Empty;
+    private int pendingDrawingQrGraphicsRefresh;
+    private string pendingDrawingQrGraphicsRefreshPath = string.Empty;
     private ClientBootstrapConfiguration currentBootstrap;
     private PluginUpdateSnapshot clientUpdateSnapshot = new PluginUpdateSnapshot();
     private const int ActiveDocumentRefreshDebounceMilliseconds = 200;
@@ -217,6 +226,12 @@ public sealed class PdmAddin : ISwAddin
             Interlocked.Exchange(ref pendingPropertyWritebackDialog, 0);
             Interlocked.Exchange(ref openPropertyWritebackTab, 0);
             Interlocked.Exchange(ref openPropertyCardTab, 0);
+            Interlocked.Exchange(ref drawingQrSyncInProgress, 0);
+            Interlocked.Exchange(ref pendingDrawingQrSaveRequest, 0);
+            Interlocked.Exchange(ref pendingDrawingQrPostSaveSync, 0);
+            Interlocked.Exchange(ref pendingDrawingQrPostSavePath, string.Empty);
+            Interlocked.Exchange(ref pendingDrawingQrGraphicsRefresh, 0);
+            Interlocked.Exchange(ref pendingDrawingQrGraphicsRefreshPath, string.Empty);
             Interlocked.Exchange(ref openOperationInProgress, 0);
             Interlocked.Exchange(ref checkInOperationInProgress, 0);
             Interlocked.Exchange(ref workspaceOperationInProgress, 0);
@@ -375,6 +390,7 @@ public sealed class PdmAddin : ISwAddin
     {
         UnwireAssemblyEvents();
         UnwirePartEvents();
+        UnwireDrawingEvents();
         if (applicationEvents == null)
         {
             return;
@@ -406,6 +422,7 @@ public sealed class PdmAddin : ISwAddin
             var activePath = activeDocument?.GetPathName() ?? string.Empty;
             var isAssembly = activeDocument != null && activeDocument.GetType() == (int)swDocumentTypes_e.swDocASSEMBLY;
             var isPart = activeDocument != null && activeDocument.GetType() == (int)swDocumentTypes_e.swDocPART;
+            var isDrawing = activeDocument != null && activeDocument.GetType() == (int)swDocumentTypes_e.swDocDRAWING;
             if (isAssembly && assemblyEvents != null && string.Equals(activePath, assemblyEventDocumentPath, StringComparison.OrdinalIgnoreCase))
             {
                 return;
@@ -414,9 +431,25 @@ public sealed class PdmAddin : ISwAddin
             {
                 return;
             }
+            if (isDrawing && drawingEvents != null && string.Equals(activePath, drawingEventDocumentPath, StringComparison.OrdinalIgnoreCase))
+            {
+                return;
+            }
 
             UnwireAssemblyEvents();
             UnwirePartEvents();
+            UnwireDrawingEvents();
+            if (isDrawing)
+            {
+                drawingEvents = activeDocument as DDrawingDocEvents_Event;
+                if (drawingEvents != null)
+                {
+                    drawingEventDocumentPath = activePath;
+                    drawingEvents.FileSaveNotify += OnDrawingFileSaving;
+                    drawingEvents.FileSavePostNotify += OnDrawingFileSaved;
+                }
+                return;
+            }
             if (isPart)
             {
                 partEvents = activeDocument as DPartDocEvents_Event;
@@ -523,6 +556,27 @@ public sealed class PdmAddin : ISwAddin
 
         partEvents = null;
         partEventDocumentPath = string.Empty;
+    }
+
+    private void UnwireDrawingEvents()
+    {
+        if (drawingEvents == null)
+        {
+            return;
+        }
+
+        try
+        {
+            drawingEvents.FileSaveNotify -= OnDrawingFileSaving;
+            drawingEvents.FileSavePostNotify -= OnDrawingFileSaved;
+        }
+        catch (Exception exception)
+        {
+            LogDiagnostic("UnwireDrawingEvents", exception);
+        }
+
+        drawingEvents = null;
+        drawingEventDocumentPath = string.Empty;
     }
 
     private int OnActiveDocumentChanged()
@@ -658,6 +712,122 @@ public sealed class PdmAddin : ISwAddin
         return 0;
     }
 
+    private int OnDrawingFileSaved(int saveType, string fileName)
+    {
+        InvalidateCurrentTreeCache();
+        ScheduleTreeRefresh(forceScan: false);
+        var pendingPath = Interlocked.CompareExchange(ref pendingDrawingQrPostSavePath, null, null);
+        if (Interlocked.Exchange(ref pendingDrawingQrSaveRequest, 0) != 0
+            && PathsEqual(pendingPath, fileName))
+        {
+            Interlocked.Exchange(ref pendingDrawingQrPostSaveSync, 1);
+        }
+        return 0;
+    }
+
+    private int OnDrawingFileSaving(string fileName)
+    {
+        // Do not modify a drawing while SolidWorks is composing its save snapshot. The completed
+        // save is followed by one idle-time synchronization and a silent save of that update.
+        if (disconnecting
+            || Volatile.Read(ref drawingQrSyncInProgress) != 0
+            || string.IsNullOrWhiteSpace(fileName)) return 0;
+
+        Interlocked.Exchange(ref pendingDrawingQrPostSavePath, fileName);
+        Interlocked.Exchange(ref pendingDrawingQrSaveRequest, 1);
+        return 0;
+    }
+
+    private void TrySynchronizeSavedDrawingQrCode()
+    {
+        if (disconnecting || Interlocked.Exchange(ref pendingDrawingQrPostSaveSync, 0) == 0) return;
+        var fileName = Interlocked.Exchange(ref pendingDrawingQrPostSavePath, string.Empty);
+        if (string.IsNullOrWhiteSpace(fileName)
+            || Interlocked.Exchange(ref drawingQrSyncInProgress, 1) != 0) return;
+
+        try
+        {
+            var document = application?.ActiveDoc as IModelDoc2;
+            if (document == null
+                || document.GetType() != (int)swDocumentTypes_e.swDocDRAWING
+                || drawingQrPolicy == null
+                || !drawingQrPolicy.Enabled
+                || apiClient == null
+                || !apiClient.IsAuthenticated)
+            {
+                return;
+            }
+
+            var drawingPath = document.GetPathName() ?? string.Empty;
+            if (string.IsNullOrWhiteSpace(drawingPath)
+                || !PathsEqual(drawingPath, fileName)
+                || IsReadOnlyPreviewPath(drawingPath)
+                || document.IsOpenedReadOnly()
+                || (File.GetAttributes(drawingPath) & FileAttributes.ReadOnly) != 0)
+            {
+                return;
+            }
+
+            var drawingNode = FindCadNodeByPath(currentTree, drawingPath)
+                ?? (currentTree?.Kind == CadDocumentKind.Drawing ? currentTree : null);
+            if (drawingNode?.DocumentId.HasValue == true && !IsCheckedOutByCurrentUser(drawingNode))
+            {
+                LogOperation(string.Concat("Drawing QR skipped after save: drawing is not checked out path=", drawingPath));
+                return;
+            }
+
+            var relatedModel = ResolveActiveDrawingSource(drawingNode, currentTree);
+            if (!SynchronizeDrawingQrCode(document, drawingNode, relatedModel, drawingQrPolicy))
+            {
+                LogOperation(string.Concat("Drawing QR is already current after save path=", drawingPath));
+                return;
+            }
+
+            if (drawingNode != null)
+            {
+                drawingNode.WorkState = CadWorkState.PendingCheckIn;
+            }
+            InvalidateCurrentTreeCache();
+            SaveSolidWorksDocument(document);
+            document.ForceRebuild3(false);
+            document.GraphicsRedraw2();
+            Interlocked.Exchange(ref pendingDrawingQrGraphicsRefreshPath, drawingPath);
+            Interlocked.Exchange(ref pendingDrawingQrGraphicsRefresh, 1);
+            LogOperation(string.Concat("Drawing QR synchronized and saved after initial save path=", drawingPath));
+        }
+        catch (Exception exception)
+        {
+            LogDiagnostic("Drawing QR synchronization after save", exception);
+        }
+        finally
+        {
+            Interlocked.Exchange(ref drawingQrSyncInProgress, 0);
+        }
+    }
+
+    private void TryRefreshSavedDrawingQrGraphics()
+    {
+        if (disconnecting || Interlocked.Exchange(ref pendingDrawingQrGraphicsRefresh, 0) == 0) return;
+        var fileName = Interlocked.Exchange(ref pendingDrawingQrGraphicsRefreshPath, string.Empty);
+        if (string.IsNullOrWhiteSpace(fileName)) return;
+
+        try
+        {
+            var document = application?.ActiveDoc as IModelDoc2;
+            if (document == null
+                || document.GetType() != (int)swDocumentTypes_e.swDocDRAWING
+                || !PathsEqual(document.GetPathName(), fileName)) return;
+
+            document.ForceRebuild3(false);
+            document.GraphicsRedraw2();
+            LogOperation(string.Concat("Drawing QR graphics refreshed after save path=", fileName));
+        }
+        catch (Exception exception)
+        {
+            LogDiagnostic("Drawing QR graphics refresh after save", exception);
+        }
+    }
+
     private int OnAssemblyItemChanged(int entityType, string itemName)
     {
         InvalidateCurrentTreeCache();
@@ -720,6 +890,8 @@ public sealed class PdmAddin : ISwAddin
     {
         TryStartControlledOpenRequest();
         TryStartCheckoutHeartbeat();
+        TryRefreshSavedDrawingQrGraphics();
+        TrySynchronizeSavedDrawingQrCode();
         SynchronizeActiveDocumentContextOnIdle();
         TryRefreshPendingTree("IdleRefresh");
         return 0;
@@ -814,6 +986,7 @@ public sealed class PdmAddin : ISwAddin
             : ActiveDocumentRefreshDebounceMilliseconds;
         return elapsedMilliseconds >= debounceMilliseconds;
     }
+
 
     private void TryOpenPendingPropertyWritebackDialog()
     {
@@ -990,8 +1163,16 @@ public sealed class PdmAddin : ISwAddin
             ? PluginSettingsStore.ServerAddressFromConfiguration(currentBootstrap)
             : pluginSettings.ServerAddress;
         using (var dialog = new PluginSettingsDialog(
-            serverAddress,
-            pluginSettings?.AutomaticUpdatesEnabled != false,
+            new PluginSettings
+            {
+                ServerAddress = serverAddress,
+                AutomaticUpdatesEnabled = pluginSettings?.AutomaticUpdatesEnabled != false,
+                UseCustomDrawingQrPosition = pluginSettings?.UseCustomDrawingQrPosition == true,
+                DrawingQrXMillimeters = pluginSettings?.DrawingQrXMillimeters ?? 0d,
+                DrawingQrYMillimeters = pluginSettings?.DrawingQrYMillimeters ?? 0d,
+                DrawingQrLengthMillimeters = pluginSettings?.DrawingQrLengthMillimeters ?? 20d,
+                DrawingQrWidthMillimeters = pluginSettings?.DrawingQrWidthMillimeters ?? 20d
+            },
             GetClientUpdateSnapshot(),
             GetClientUpdateSnapshot,
             TestPluginConnectionAsync,
@@ -1013,6 +1194,7 @@ public sealed class PdmAddin : ISwAddin
         taskPaneControl.SetCheckoutReminder(string.Empty, false);
         var projects = await apiClient.GetProjectsAsync(lifetime.Token);
         availableProjects = projects;
+        drawingQrPolicy = await apiClient.GetDrawingQrPolicyAsync(lifetime.Token);
         await RefreshUserDisplayNamesAsync();
         taskPaneControl.SetProjects(projects);
         if (currentTree != null && application?.ActiveDoc != null)
@@ -1851,8 +2033,9 @@ public sealed class PdmAddin : ISwAddin
         };
     }
 
-    private async Task<PluginConnectionResult> SavePluginSettingsAsync(string serverAddress, bool automaticUpdatesEnabled)
+    private async Task<PluginConnectionResult> SavePluginSettingsAsync(PluginSettings requestedSettings)
     {
+        if (requestedSettings == null) throw new ArgumentNullException(nameof(requestedSettings));
         if (GetClientUpdateSnapshot().Busy)
             throw new InvalidOperationException("插件更新正在进行，请等待完成后再切换服务器。");
         if (Volatile.Read(ref openOperationInProgress) != 0
@@ -1861,7 +2044,7 @@ public sealed class PdmAddin : ISwAddin
             || Volatile.Read(ref automaticDrawingOperationInProgress) != 0)
             throw new InvalidOperationException("当前图档操作尚未完成，请完成后再切换服务器。");
 
-        var normalizedAddress = PluginSettingsStore.NormalizeServerAddress(serverAddress);
+        var normalizedAddress = PluginSettingsStore.NormalizeServerAddress(requestedSettings.ServerAddress);
         var currentServerAddress = string.IsNullOrWhiteSpace(pluginSettings?.ServerAddress)
             ? PluginSettingsStore.ServerAddressFromConfiguration(currentBootstrap)
             : PluginSettingsStore.NormalizeServerAddress(pluginSettings.ServerAddress);
@@ -1895,7 +2078,12 @@ public sealed class PdmAddin : ISwAddin
         var settings = new PluginSettings
         {
             ServerAddress = normalizedAddress,
-            AutomaticUpdatesEnabled = automaticUpdatesEnabled
+            AutomaticUpdatesEnabled = requestedSettings.AutomaticUpdatesEnabled,
+            UseCustomDrawingQrPosition = requestedSettings.UseCustomDrawingQrPosition,
+            DrawingQrXMillimeters = requestedSettings.DrawingQrXMillimeters,
+            DrawingQrYMillimeters = requestedSettings.DrawingQrYMillimeters,
+            DrawingQrLengthMillimeters = requestedSettings.DrawingQrLengthMillimeters,
+            DrawingQrWidthMillimeters = requestedSettings.DrawingQrWidthMillimeters
         };
         PluginSettingsStore.Save(settings);
         pluginSettings = settings;
@@ -1928,7 +2116,7 @@ public sealed class PdmAddin : ISwAddin
             connection.Message = "设置已保存并应用";
         }
 
-        if (!automaticUpdatesEnabled)
+        if (!settings.AutomaticUpdatesEnabled)
         {
             ChangeClientUpdateSnapshot(snapshot =>
             {
@@ -2567,6 +2755,7 @@ public sealed class PdmAddin : ISwAddin
 
             ApplyGbDrawingStandard(drawingModel);
             CreateAutomaticDrawingViews(drawingModel, drawing, source.FullPath, options ?? new AutomaticDrawingOptions());
+            SynchronizeDrawingQrCode(drawingModel, null, source, drawingQrPolicy);
             drawingModel.ForceRebuild3(false);
             var errors = 0;
             var warnings = 0;
@@ -2623,6 +2812,7 @@ public sealed class PdmAddin : ISwAddin
                 options ?? new AutomaticDrawingOptions());
         }
 
+        SynchronizeDrawingQrCode(drawingModel, FindCadNodeByPath(currentTree, drawingPath), source, drawingQrPolicy);
         drawingModel.ForceRebuild3(false);
         SaveSolidWorksDocument(drawingModel);
     }
@@ -2638,6 +2828,78 @@ public sealed class PdmAddin : ISwAddin
             (int)swUserPreferenceIntegerValue_e.swDetailingDimensionStandard,
             (int)swUserPreferenceOption_e.swDetailingNoOptionSpecified,
             (int)swDetailingStandard_e.swDetailingStandardGB);
+    }
+
+    private bool SynchronizeDrawingQrCode(
+        IModelDoc2 drawingModel,
+        CadTreeNode drawingNode,
+        CadTreeNode relatedModel,
+        DrawingQrPolicyDto policy)
+    {
+        if (policy == null || !policy.Enabled) return false;
+        relatedModel ??= ResolveRelatedModelNode(drawingNode);
+        if (relatedModel == null
+            && drawingNode?.Kind == CadDocumentKind.Drawing
+            && PathsEqual(drawingModel?.GetPathName(), (application?.ActiveDoc as IModelDoc2)?.GetPathName()))
+        {
+            relatedModel = ResolveActiveDrawingSource(drawingNode, currentTree);
+        }
+        // Drawing properties can resolve a linked model property in the drawing's active view/configuration.
+        // Prefer that resolved value; fall back to the associated local model when the drawing has no value.
+        var content = ReadResolvedCustomProperty(drawingModel, string.Empty, policy.SourceProperty);
+        if (string.IsNullOrWhiteSpace(content))
+        {
+            content = ReadNodeCustomProperty(relatedModel, policy.SourceProperty);
+        }
+        return DrawingQrCodeService.Synchronize(application, drawingModel, policy, pluginSettings, content);
+    }
+
+    private CadTreeNode ResolveRelatedModelNode(CadTreeNode drawingNode)
+    {
+        if (drawingNode == null || currentTree == null) return null;
+        ApplyDrawingModelRelation(drawingNode);
+        return drawingNode.RelatedModelDocumentId.HasValue
+            ? EnumerateCadNodes(currentTree).FirstOrDefault(node => node.DocumentId == drawingNode.RelatedModelDocumentId
+                && node.Kind is CadDocumentKind.Part or CadDocumentKind.Assembly)
+            : null;
+    }
+
+    private string ReadNodeCustomProperty(CadTreeNode node, string propertyName)
+    {
+        if (node == null || string.IsNullOrWhiteSpace(node.FullPath) || !File.Exists(node.FullPath)) return string.Empty;
+        IModelDoc2 model = null;
+        var openedForRead = false;
+        try
+        {
+            model = FindLoadedDocument(node.FullPath);
+            if (model == null)
+            {
+                model = OpenDocumentInvisiblyForBatch(node.FullPath, ToSolidWorksDocumentType(node.Kind), node.Configuration ?? string.Empty);
+                openedForRead = true;
+            }
+            return ReadResolvedCustomProperty(model, node.Configuration, propertyName);
+        }
+        finally
+        {
+            if (openedForRead && model != null) CloseBatchOpenedDocument(model);
+        }
+    }
+
+    private static string ReadResolvedCustomProperty(IModelDoc2 model, string configuration, string propertyName)
+    {
+        if (model?.Extension == null || string.IsNullOrWhiteSpace(propertyName)) return string.Empty;
+        foreach (var scope in new[] { string.Empty, configuration?.Trim() ?? string.Empty }.Distinct(StringComparer.Ordinal))
+        {
+            var manager = model.Extension.CustomPropertyManager[scope];
+            var raw = string.Empty;
+            var resolved = string.Empty;
+            var wasResolved = false;
+            var linked = false;
+            manager.Get6(propertyName.Trim(), false, out raw, out resolved, out wasResolved, out linked);
+            var value = (wasResolved ? resolved : raw)?.Trim() ?? string.Empty;
+            if (!string.IsNullOrWhiteSpace(value)) return value;
+        }
+        return string.Empty;
     }
 
     private static int AutoDimensionPrimaryView(
@@ -5125,6 +5387,88 @@ public sealed class PdmAddin : ISwAddin
         return null;
     }
 
+    private IModelDoc2 FindLoadedBatchDocument(CadTreeNode node)
+    {
+        if (node == null)
+        {
+            return null;
+        }
+
+        var loaded = FindLoadedDocument(node.FullPath);
+        if (loaded != null)
+        {
+            return loaded;
+        }
+
+        try
+        {
+            var rootDocument = FindLoadedDocument(currentTree?.FullPath)
+                ?? application?.ActiveDoc as IModelDoc2;
+            if (rootDocument?.GetType() != (int)swDocumentTypes_e.swDocASSEMBLY)
+            {
+                return null;
+            }
+
+            var components = ((rootDocument as IAssemblyDoc)?.GetComponents(false) as Array)
+                ?.OfType<IComponent2>()
+                .ToArray()
+                ?? Array.Empty<IComponent2>();
+            var nameMatches = components.Where(candidate =>
+                !string.IsNullOrWhiteSpace(node.ComponentSelectionName)
+                && string.Equals(candidate.Name2, node.ComponentSelectionName, StringComparison.OrdinalIgnoreCase))
+                .ToArray();
+            var component = !string.IsNullOrWhiteSpace(node.FullPath)
+                ? nameMatches.FirstOrDefault(candidate =>
+                    {
+                        try
+                        {
+                            return PathsEqual(candidate.GetPathName(), node.FullPath);
+                        }
+                        catch
+                        {
+                            return false;
+                        }
+                    })
+                : null;
+            if (component == null && nameMatches.Length == 1)
+            {
+                component = nameMatches[0];
+            }
+            if (component == null && !string.IsNullOrWhiteSpace(node.FullPath))
+            {
+                var pathMatches = components.Where(candidate =>
+                    {
+                        try
+                        {
+                            return PathsEqual(candidate.GetPathName(), node.FullPath);
+                        }
+                        catch
+                        {
+                            return false;
+                        }
+                    })
+                    .Take(2)
+                    .ToArray();
+                component = pathMatches.Length == 1 ? pathMatches[0] : null;
+            }
+
+            var componentDocument = component?.GetModelDoc2() as IModelDoc2;
+            if (componentDocument != null)
+            {
+                LogOperation(string.Concat(
+                    "Batch property reused component memory document name=", node.ComponentSelectionName,
+                    " path=", node.FullPath,
+                    " modified=", componentDocument.GetSaveFlag()));
+            }
+            return componentDocument;
+        }
+        catch (Exception exception)
+        {
+            LogDiagnostic(string.Concat("FindLoadedBatchDocument.", node.FileName), exception);
+            return null;
+        }
+    }
+
     private async void OnCheckoutRequested(object sender, CadTreeNodeEventArgs eventArgs)
     {
         var requestedNodes = eventArgs.Nodes
@@ -5441,10 +5785,11 @@ public sealed class PdmAddin : ISwAddin
                 .Where(node => !string.IsNullOrWhiteSpace(node?.FullPath))
                 .Select(node => node.FullPath), StringComparer.OrdinalIgnoreCase);
             operationItems = BuildBatchOperationItems(currentTree)
-                .Where(item => !string.IsNullOrWhiteSpace(item.Node.FullPath)
-                    && File.Exists(item.Node.FullPath)
-                    && item.Node.Status != CadReferenceStatus.Virtual
-                    && !IsSolidWorksTemporaryVirtualComponentPath(item.Node.FullPath))
+                .Where(item => BatchLocalDocumentRule.CanEdit(
+                    FindLoadedBatchDocument(item.Node) != null,
+                    !string.IsNullOrWhiteSpace(item.Node.FullPath) && File.Exists(item.Node.FullPath),
+                    item.Node.Status == CadReferenceStatus.Virtual,
+                    IsSolidWorksTemporaryVirtualComponentPath(item.Node.FullPath)))
                 .ToArray();
             if (operationItems.Length == 0)
             {
@@ -5630,7 +5975,7 @@ public sealed class PdmAddin : ISwAddin
                     items.Length);
                 try
                 {
-                    document = FindLoadedDocument(node.FullPath);
+                    document = FindLoadedBatchDocument(node);
                     if (document == null)
                     {
                         document = OpenDocumentInvisiblyForBatch(
@@ -6038,7 +6383,7 @@ public sealed class PdmAddin : ISwAddin
         var openedForBatch = false;
         try
         {
-            document = FindLoadedDocument(node.FullPath);
+            document = FindLoadedBatchDocument(node);
             if (document == null)
             {
                 document = OpenDocumentInvisiblyForBatch(
@@ -6418,7 +6763,7 @@ public sealed class PdmAddin : ISwAddin
         var templateReference = string.Empty;
         try
         {
-            var document = FindLoadedDocument(node.FullPath);
+            var document = FindLoadedBatchDocument(node);
             templateReference = document?.Extension?.CustomPropertyBuilderTemplate[false] ?? string.Empty;
         }
         catch (Exception exception)
@@ -6670,7 +7015,7 @@ public sealed class PdmAddin : ISwAddin
         var openedForRead = false;
         try
         {
-            document = FindLoadedDocument(node.FullPath);
+            document = FindLoadedBatchDocument(node);
             if (document == null)
             {
                 document = OpenDocumentInvisiblyForBatch(
@@ -6922,7 +7267,7 @@ public sealed class PdmAddin : ISwAddin
         var openedForBatch = false;
         try
         {
-            document = FindLoadedDocument(node.FullPath);
+            document = FindLoadedBatchDocument(node);
             if (document == null)
             {
                 document = OpenDocumentInvisiblyForBatch(node.FullPath, ToSolidWorksDocumentType(node.Kind), node.Configuration ?? string.Empty);
@@ -9145,10 +9490,17 @@ public sealed class PdmAddin : ISwAddin
         var uploadCopyPath = string.Empty;
         IModelDoc2 document = null;
         var openedForBatch = false;
+        var qrCodeChanged = false;
         var operationTimer = Stopwatch.StartNew();
         try
         {
             cancellationToken.ThrowIfCancellationRequested();
+            var activeQrPolicy = drawingQrPolicy;
+            if (node.Kind == CadDocumentKind.Drawing)
+            {
+                activeQrPolicy = await apiClient.GetDrawingQrPolicyAsync(cancellationToken);
+                drawingQrPolicy = activeQrPolicy;
+            }
             IReadOnlyList<DocumentVersionDto> versions;
             if (preflight != null && preflight.MatchesCurrentFile(node.FullPath))
             {
@@ -9173,12 +9525,15 @@ public sealed class PdmAddin : ISwAddin
             var fileMatchesLatest = !string.IsNullOrWhiteSpace(node.LatestStoredSha256)
                 && VersionMatchesLocalFile(latest, node.FullPath, localSha256);
             var historicalEditMatchesLatest = HistoricalEditMatchesLatest(node, latest, node.FullPath, localSha256);
+            var qrCodeRequiresSync = node.Kind == CadDocumentKind.Drawing
+                && activeQrPolicy.Enabled
+                && !DrawingQrSnapshotMatchesPolicy(latest, activeQrPolicy);
             LogOperation(string.Concat(
                 "Batch check-in change detection path=", node.FullPath,
                 " fileMatches=", fileMatchesLatest,
                 " referenceMatches=", referenceMatchesLatest,
                 " unsaved=", hasUnsavedChanges));
-            if (identity == null && !referenceChanged && (fileMatchesLatest || historicalEditMatchesLatest) && !hasUnsavedChanges)
+            if (identity == null && !referenceChanged && (fileMatchesLatest || historicalEditMatchesLatest) && !hasUnsavedChanges && !qrCodeRequiresSync)
             {
                 LogOperation(string.Concat("Batch check-in skipped unchanged path=", node.FullPath));
                 await CompleteUnchangedEditAsync(node, node.FullPath, latest, projectId, cancellationToken);
@@ -9187,7 +9542,7 @@ public sealed class PdmAddin : ISwAddin
 
             var documentPath = node.FullPath;
             IReadOnlyDictionary<string, string> modelProperties;
-            if (document == null && latest != null)
+            if (document == null && latest != null && !(node.Kind == CadDocumentKind.Drawing && activeQrPolicy.Enabled))
             {
                 reportFileStage?.Invoke("阶段3/3：正在读取PLM属性快照…");
                 modelProperties = new Dictionary<string, string>(
@@ -9228,10 +9583,20 @@ public sealed class PdmAddin : ISwAddin
                         "在SolidWorks中处于未保存状态。为避免未变更图档误升版，请先手动保存确认内容，再提交存档；如无需保留修改，请使用“放弃编辑”。"));
                 }
 
+                if (node.Kind == CadDocumentKind.Drawing && activeQrPolicy.Enabled)
+                {
+                    qrCodeChanged = SynchronizeDrawingQrCode(document, node, null, activeQrPolicy);
+                    if (qrCodeChanged)
+                    {
+                        SaveSolidWorksDocument(document);
+                        node.WorkState = CadWorkState.PendingCheckIn;
+                    }
+                }
+
                 modelProperties = ReadCheckInProperties(document, node);
             }
 
-            localSha256 = preflight != null && preflight.MatchesCurrentFile(documentPath)
+            localSha256 = !qrCodeChanged && preflight != null && preflight.MatchesCurrentFile(documentPath)
                 ? preflight.LocalSha256
                 : await Task.Run(() => ComputeFileHash(documentPath), cancellationToken);
             if (identity == null
@@ -9688,6 +10053,22 @@ public sealed class PdmAddin : ISwAddin
                     node.FileName,
                     "在SolidWorks中处于未保存状态。已保持该文件为当前文档，请按Ctrl+S保存确认内容，再提交存档；如无需保留修改，请使用“放弃编辑”。"));
                 return;
+            }
+
+            if (node.Kind == CadDocumentKind.Drawing)
+            {
+                drawingQrPolicy = await apiClient.GetDrawingQrPolicyAsync(lifetime.Token);
+                if (drawingQrPolicy.Enabled
+                    && SynchronizeDrawingQrCode(document, node, null, drawingQrPolicy))
+                {
+                    SaveSolidWorksDocument(document);
+                    node.WorkState = CadWorkState.PendingCheckIn;
+                    currentSha256 = ComputeFileHash(activePath);
+                    fileMatchesLatest = !string.IsNullOrWhiteSpace(node.LatestStoredSha256)
+                        && VersionMatchesLocalFile(latestVersion, activePath, currentSha256);
+                    historicalEditMatchesLatest = HistoricalEditMatchesLatest(node, latestVersion, activePath, currentSha256);
+                    LogOperation(string.Concat("CheckIn synchronized drawing QR path=", activePath));
+                }
             }
 
             if (!referenceChanged && (fileMatchesLatest || historicalEditMatchesLatest))
@@ -10357,6 +10738,28 @@ public sealed class PdmAddin : ISwAddin
                     field.ConfigurationSpecific && node.Kind != CadDocumentKind.Drawing);
         }
         return properties;
+    }
+
+    private static bool DrawingQrSnapshotMatchesPolicy(DocumentVersionDto version, DrawingQrPolicyDto policy)
+    {
+        if (version?.PropertySnapshot == null || policy == null) return false;
+        var content = ReadSnapshotProperty(version.PropertySnapshot, policy.SourceProperty);
+        return !string.IsNullOrWhiteSpace(content)
+            && string.Equals(ReadSnapshotProperty(version.PropertySnapshot, DrawingQrCodeService.ContentProperty), content, StringComparison.Ordinal)
+            && string.Equals(ReadSnapshotProperty(version.PropertySnapshot, DrawingQrCodeService.RuleVersionProperty), policy.RuleVersion?.Trim(), StringComparison.Ordinal)
+            && string.Equals(ReadSnapshotProperty(version.PropertySnapshot, DrawingQrCodeService.SourcePropertyProperty), policy.SourceProperty?.Trim(), StringComparison.Ordinal)
+            && string.Equals(ReadSnapshotProperty(version.PropertySnapshot, DrawingQrCodeService.RendererVersionProperty), DrawingQrCodeService.RendererVersion, StringComparison.Ordinal);
+    }
+
+    private static string ReadSnapshotProperty(IReadOnlyDictionary<string, string> properties, string propertyName)
+    {
+        if (properties == null || string.IsNullOrWhiteSpace(propertyName)) return string.Empty;
+        var suffix = string.Concat("/", propertyName.Trim());
+        var match = properties.FirstOrDefault(item =>
+            (string.Equals(item.Key, propertyName.Trim(), StringComparison.OrdinalIgnoreCase)
+                || item.Key.EndsWith(suffix, StringComparison.OrdinalIgnoreCase))
+            && !string.IsNullOrWhiteSpace(item.Value));
+        return match.Value?.Trim() ?? string.Empty;
     }
 
     private static IReadOnlyDictionary<string, string> ReadModelProperties(IModelDoc2 document, string configurationName = null)

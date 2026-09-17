@@ -54,7 +54,10 @@ describe('ValidationPlanManager', () => {
     }))
   })
 
-  afterEach(() => { document.body.innerHTML = '' })
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    document.body.innerHTML = ''
+  })
 
   it('最近保存人显示姓名而不是账号', async () => {
     api.readProjectValidationPlan.mockResolvedValue(childPlan)
@@ -73,6 +76,7 @@ describe('ValidationPlanManager', () => {
   })
 
   it('按分类选择检查项并保存项目快照字段', async () => {
+    vi.stubGlobal('crypto', {})
     const wrapper = mount(ValidationPlanManager, {
       attachTo: document.body,
       props: { projectId: 'project-1', projectCode: 'P700005-3', projectName: '切料机构', projects: [rootProject, childProject], token: 'token', currentUsername: 'engineer', currentDisplayName: '工程师', canEdit: true, canManageCatalog: true },

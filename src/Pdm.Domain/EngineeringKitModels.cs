@@ -32,7 +32,9 @@ public sealed record EngineeringKitRevision(
 public sealed record EngineeringKit(
     Guid Id,
     string? Code,
+    string? Model,
     string Name,
+    string Brand,
     string? Description,
     Guid? CurrentReleasedRevisionId,
     IReadOnlyList<EngineeringKitRevision> Revisions,

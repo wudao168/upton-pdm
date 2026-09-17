@@ -226,43 +226,34 @@ const sortedItems = computed(() => {
 function changeDeliverySort({ prop, order }: { prop: string; order: 'ascending' | 'descending' | null }) {
   deliverySort.value = order && deliveryColumns.includes(prop as DeliveryColumn) ? { prop: prop as DeliveryColumn, order } : null
 }
-const orderedKeys = ref<ColumnKey[]>(columnDefinitions.map(column => column.key))
 const visibleKeys = ref<ColumnKey[]>(columnDefinitions.filter(column => column.defaultVisible).map(column => column.key))
 let refreshTimer: number | undefined
 let refreshCooldownTimer: number | undefined
 
 const storageKey = computed(() => `upton-pdm:procurement-columns:${props.username || 'anonymous'}`)
-const columns = computed(() => orderedKeys.value
-  .map(key => columnDefinitions.find(column => column.key === key))
-  .filter((column): column is ColumnDefinition => Boolean(column) && visibleKeys.value.includes(column!.key)))
+const columns = computed(() => columnDefinitions.filter(column => visibleKeys.value.includes(column.key)))
 
 function restoreColumns() {
-  orderedKeys.value = columnDefinitions.map(column => column.key)
   visibleKeys.value = columnDefinitions.filter(column => column.defaultVisible).map(column => column.key)
   try {
-    const saved = JSON.parse(window.localStorage.getItem(storageKey.value) ?? 'null') as { order?: ColumnKey[]; visible?: ColumnKey[] } | null
+    const saved = JSON.parse(window.localStorage.getItem(storageKey.value) ?? 'null') as { version?: number; order?: ColumnKey[]; visible?: ColumnKey[] } | null
     const allowed = new Set(columnDefinitions.map(column => column.key))
     const savedOrder = (saved?.order ?? []).filter((key, index, array) => allowed.has(key) && array.indexOf(key) === index)
-    orderedKeys.value = [...savedOrder, ...columnDefinitions.map(column => column.key).filter(key => !savedOrder.includes(key))]
     const savedVisible = (saved?.visible ?? []).filter(key => allowed.has(key))
     if (savedVisible.length) visibleKeys.value = savedVisible
-    if (saved && !savedOrder.includes('inventoryQuantity')) {
-      orderedKeys.value = orderedKeys.value.filter(key => key !== 'inventoryQuantity')
-      orderedKeys.value.splice(orderedKeys.value.indexOf('quantity') + 1, 0, 'inventoryQuantity')
+    if (saved && saved.version !== 2 && !savedOrder.includes('inventoryQuantity')) {
       if (!visibleKeys.value.includes('inventoryQuantity')) visibleKeys.value.push('inventoryQuantity')
     }
-    for (const [key, after] of [
-      ['impactStage', 'materialName'],
-      ['purchaseRequisitionCreatedAt', 'purchaseRequisitionStatus'],
-      ['buyerName', 'purchaseOrderStatus'],
-      ['receiptDate', 'latestDeliveryDate'],
-      ['receiptQuantity', 'receiptDate'],
-      ['issueDate', 'receiptQuantity'],
-      ['issueQuantity', 'issueDate'],
+    for (const key of [
+      'impactStage',
+      'purchaseRequisitionCreatedAt',
+      'buyerName',
+      'receiptDate',
+      'receiptQuantity',
+      'issueDate',
+      'issueQuantity',
     ] as const) {
-      if (saved && !savedOrder.includes(key)) {
-        orderedKeys.value = orderedKeys.value.filter(column => column !== key)
-        orderedKeys.value.splice(orderedKeys.value.indexOf(after) + 1, 0, key)
+      if (saved && saved.version !== 2 && !savedOrder.includes(key)) {
         if (!visibleKeys.value.includes(key)) visibleKeys.value.push(key)
       }
     }
@@ -276,23 +267,13 @@ function saveColumns() {
     ElMessage.warning('请至少保留一列')
     return
   }
-  window.localStorage.setItem(storageKey.value, JSON.stringify({ order: orderedKeys.value, visible: visibleKeys.value }))
+  window.localStorage.setItem(storageKey.value, JSON.stringify({ version: 2, visible: visibleKeys.value }))
   settingsVisible.value = false
   ElMessage.success('采购跟踪列设置已保存到当前账号')
 }
 
 function resetColumns() {
-  orderedKeys.value = columnDefinitions.map(column => column.key)
   visibleKeys.value = columnDefinitions.filter(column => column.defaultVisible).map(column => column.key)
-}
-
-function moveColumn(key: ColumnKey, direction: -1 | 1) {
-  const index = orderedKeys.value.indexOf(key)
-  const target = index + direction
-  if (index < 0 || target < 0 || target >= orderedKeys.value.length) return
-  const next = [...orderedKeys.value]
-  ;[next[index], next[target]] = [next[target], next[index]]
-  orderedKeys.value = next
 }
 
 async function load(showError = true) {
@@ -629,15 +610,9 @@ onBeforeUnmount(() => {
 
     <el-dialog v-model="settingsVisible" title="采购跟踪列设置" width="520px" append-to-body>
       <div class="procurement-tracking__settings-body">
-      <p class="procurement-tracking__settings-note">可按当前账号隐藏、显示和调整列顺序；价格、税额、币种及其他财务信息不提供。</p>
-      <el-checkbox-group v-model="visibleKeys" class="procurement-tracking__column-list">
-        <div v-for="(key, index) in orderedKeys" :key="key" class="procurement-tracking__column-item">
-          <el-checkbox :value="key">{{ columnDefinitions.find(column => column.key === key)?.label }}</el-checkbox>
-          <span>
-            <el-button text :disabled="index === 0" @click="moveColumn(key, -1)">上移</el-button>
-            <el-button text :disabled="index === orderedKeys.length - 1" @click="moveColumn(key, 1)">下移</el-button>
-          </span>
-        </div>
+      <p class="procurement-tracking__settings-note">可按当前账号选择显示列；价格、税额、币种及其他财务信息不提供。</p>
+      <el-checkbox-group v-model="visibleKeys" class="procurement-tracking__column-list" aria-label="采购跟踪显示列">
+        <el-checkbox v-for="column in columnDefinitions" :key="column.key" :value="column.key">{{ column.label }}</el-checkbox>
       </el-checkbox-group>
       </div>
       <template #footer>
@@ -665,7 +640,7 @@ onBeforeUnmount(() => {
 .procurement-tracking__pagination{display:flex;flex:0 0 auto;align-items:center;justify-content:flex-end;gap:8px;padding:8px 10px;color:var(--pdm-muted);font-size:11px}
 .procurement-tracking__pagination select{height:28px;padding:0 24px 0 8px;border:1px solid var(--pdm-border);border-radius:5px;background:#fff;color:var(--pdm-text)}
 .procurement-tracking__pagination .pdm-secondary-action{width:28px;min-width:28px;height:28px;min-height:28px;padding:0}
-.procurement-tracking{display:flex;flex-direction:column;min-width:0;min-height:0;height:100%;padding:8px 18px 18px}.procurement-tracking__heading{display:flex;overflow-x:auto;align-items:center;justify-content:space-between;gap:8px;min-height:30px;flex-shrink:0;margin-bottom:6px}.procurement-tracking__actions{display:flex;align-items:center;gap:8px;flex-shrink:0}.procurement-tracking__actions :deep(.el-button){box-sizing:border-box;width:80px;min-width:80px;height:30px;min-height:30px;flex:0 0 80px;margin:0;padding:0 8px}.procurement-tracking__updated{margin-left:auto;flex-shrink:0;white-space:nowrap;color:#64748b;font-size:12px}.procurement-tracking__table{min-height:0;flex:1 1 auto;margin-top:0}.procurement-tracking__settings-note{margin:0 0 12px;color:#64748b;line-height:1.6}.procurement-tracking__column-list{max-height:460px;overflow:auto;border:1px solid #e2e8f0;border-radius:8px}.procurement-tracking__column-item{display:flex;align-items:center;justify-content:space-between;padding:7px 12px;border-bottom:1px solid #eef2f7}.procurement-tracking__column-item:last-child{border-bottom:0}.procurement-tracking :deep(.is-procurement-late td.el-table__cell){background:#fff7ed!important}@media(max-width:1000px){.procurement-tracking__heading{flex-wrap:nowrap}}
+.procurement-tracking{display:flex;flex-direction:column;min-width:0;min-height:0;height:100%;padding:8px 18px 18px}.procurement-tracking__heading{display:flex;overflow-x:auto;align-items:center;justify-content:space-between;gap:8px;min-height:30px;flex-shrink:0;margin-bottom:6px}.procurement-tracking__actions{display:flex;align-items:center;gap:8px;flex-shrink:0}.procurement-tracking__actions :deep(.el-button){box-sizing:border-box;width:80px;min-width:80px;height:30px;min-height:30px;flex:0 0 80px;margin:0;padding:0 8px}.procurement-tracking__updated{margin-left:auto;flex-shrink:0;white-space:nowrap;color:#64748b;font-size:12px}.procurement-tracking__table{min-height:0;flex:1 1 auto;margin-top:0}.procurement-tracking__settings-note{margin:0 0 12px;color:#64748b;line-height:1.6}.procurement-tracking__column-list{display:grid;max-height:calc(100vh - 190px);grid-template-columns:repeat(2,minmax(0,1fr));gap:0;overflow:auto;border:1px solid #e2e8f0;border-radius:8px}.procurement-tracking__column-list :deep(.el-checkbox){box-sizing:border-box;width:100%;min-height:36px;margin:0;padding:7px 12px;border-bottom:1px solid #eef2f7}.procurement-tracking__column-list :deep(.el-checkbox:nth-child(odd)){border-right:1px solid #eef2f7}.procurement-tracking :deep(.is-procurement-late td.el-table__cell){background:#fff7ed!important}@media(max-width:1000px){.procurement-tracking__heading{flex-wrap:nowrap}}
 </style>
 
 <style scoped>
@@ -675,9 +650,6 @@ onBeforeUnmount(() => {
 .procurement-tracking__table :deep(.cell.el-tooltip) { min-width: 0; max-width: 100%; }
 .procurement-tracking__table :deep(.el-tag) { max-width: 100%; padding-right: 3px; padding-left: 3px; border: 0; background: transparent; font-size: 11px; }
 .procurement-tracking__table :deep(.el-tag__content) { overflow: hidden; text-overflow: ellipsis; }
-.procurement-tracking__settings-body { display: flex; flex-direction: column; height: 100%; min-height: 0; }
-.procurement-tracking__settings-note { flex: 0 0 auto; }
-.procurement-tracking__column-list { flex: 1 1 auto; min-height: 0; max-height: none; }
 .procurement-tracking__empty-tip { position: static; transform: none; padding: 16px; line-height: 1.6; overflow-wrap: anywhere; }
 .procurement-tracking :deep(td.el-table__cell.is-delivery-delay) { background: #fee2e2 !important; color: #991b1b; animation: procurement-delivery-delay 2s ease-in-out infinite; }
 @keyframes procurement-delivery-delay {

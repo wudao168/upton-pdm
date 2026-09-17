@@ -23,6 +23,8 @@
   <ItemGroup>
     <Compile Include="..\..\src\Pdm.SolidWorks.Addin\BatchPropertyNameModelAutoFillRule.cs" Link="BatchPropertyNameModelAutoFillRule.cs" />
     <Compile Include="..\..\src\Pdm.SolidWorks.Addin\BatchPropertyFilterRule.cs" Link="BatchPropertyFilterRule.cs" />
+    <Compile Include="..\..\src\Pdm.SolidWorks.Addin\BatchLocalDocumentRule.cs" Link="BatchLocalDocumentRule.cs" />
     <Compile Include="..\..\src\Pdm.SolidWorks.Addin\BatchRenameRule.cs" Link="BatchRenameRule.cs" />
+    <Compile Include="..\..\src\Pdm.SolidWorks.Addin\DrawingQrLayoutRule.cs" Link="DrawingQrLayoutRule.cs" />
   </ItemGroup>
 </Project>

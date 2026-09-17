@@ -5,6 +5,7 @@ import { ElMessageBox } from 'element-plus'
 import { ArrowDown, ArrowUp, Blocks, Download, Plus, RefreshCw, Trash2, Upload } from '@lucide/vue'
 import FunctionBlockDiagram from './FunctionBlockDiagram.vue'
 import { useUserDisplayName } from '../userDisplay'
+import { createClientId } from '../clientId'
 import {
   createProgramTemplate,
   createProgramTemplateRevision,
@@ -158,7 +159,7 @@ async function openDetail(templateId: string, revisionId?: string) {
 }
 
 function blankParameter(direction: ProgramTemplateParameterDirection): DraftParameter {
-  return { id: crypto.randomUUID(), direction, sortOrder: form.parameters.length, name: '', dataType: 'BOOL', defaultValue: '', unit: '', description: '' }
+  return { id: createClientId(), direction, sortOrder: form.parameters.length, name: '', dataType: 'BOOL', defaultValue: '', unit: '', description: '' }
 }
 
 function resetForm() {

@@ -260,7 +260,14 @@ if (Directory.Exists(deployedWebRoot))
 {
     var deployedFiles = new Microsoft.Extensions.FileProviders.PhysicalFileProvider(deployedWebRoot);
     app.UseDefaultFiles(new DefaultFilesOptions { FileProvider = deployedFiles });
-    app.UseStaticFiles(new StaticFileOptions { FileProvider = deployedFiles });
+    app.UseStaticFiles(new StaticFileOptions
+    {
+        FileProvider = deployedFiles,
+        ContentTypeProvider = new Microsoft.AspNetCore.StaticFiles.FileExtensionContentTypeProvider
+        {
+            Mappings = { [".zip"] = "application/zip" }
+        }
+    });
 }
 app.UseCors("PdmClients");
 app.UseAuthentication();

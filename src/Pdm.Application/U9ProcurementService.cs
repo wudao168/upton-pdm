@@ -219,7 +219,7 @@ public sealed class U9ProcurementService(
         AddCategory(lines, packages, "非标件", package => package.Scope is ReleaseScope.NonStandardWithDrawing or ReleaseScope.NonStandardSupplement or ReleaseScope.LegacyCombined,
             package => package.NonStandardBomSnapshot, ReleaseScope.NonStandardLongLead);
         AddCategory(lines, packages, "电气件", package => package.Scope is ReleaseScope.ElectricalFormal or ReleaseScope.ElectricalSupplement or ReleaseScope.LegacyCombined,
-            package => package.ElectricalBomSnapshot, null);
+            package => package.ElectricalBomSnapshot, ReleaseScope.ElectricalLongLead);
         var published = lines
             .GroupBy(line => (line.Item.Id, line.BomKind))
             .Select(group => new PublishedBomLine(

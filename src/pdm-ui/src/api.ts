@@ -721,6 +721,7 @@ export function listEngineeringKits(token: string, releasedOnly = true): Promise
 
 export function saveEngineeringKit(input: {
   name: string
+  brand: string
   description?: string
   changeNote?: string
   components: Array<{ materialId: string; quantity: number; isOptional: boolean; sortOrder: number }>
@@ -2254,7 +2255,7 @@ function mapReleasePackage(releasePackage: ApiReleasePackage): ReleasePackageSum
 
 function mapReleaseScope(value?: string | number): ReleaseScope {
   if (typeof value === 'string') return value as ReleaseScope
-  return ['LegacyCombined', 'StandardLongLead', 'StandardFormal', 'StandardSupplement', 'ElectricalFormal', 'ElectricalSupplement', 'NonStandardWithDrawing', 'NonStandardLongLead', 'NonStandardSupplement'][value ?? 0] as ReleaseScope
+  return ['LegacyCombined', 'StandardLongLead', 'StandardFormal', 'StandardSupplement', 'ElectricalFormal', 'ElectricalSupplement', 'NonStandardWithDrawing', 'NonStandardLongLead', 'NonStandardSupplement', 'ElectricalLongLead'][value ?? 0] as ReleaseScope
 }
 
 function mapBomVersionState(value: string | number): BomVersionState {

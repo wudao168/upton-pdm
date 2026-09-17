@@ -8,9 +8,35 @@ namespace Upton.Pdm.SolidWorks;
 
 internal sealed class PluginSettings
 {
-    public int SchemaVersion { get; set; } = 1;
+    private const double DefaultDrawingQrXMillimeters = 10d;
+    private const double DefaultDrawingQrYMillimeters = 55d;
+    private const double DefaultDrawingQrSizeMillimeters = 20d;
+
+    public int SchemaVersion { get; set; } = 3;
     public string ServerAddress { get; set; } = string.Empty;
     public bool AutomaticUpdatesEnabled { get; set; } = true;
+    public bool UseCustomDrawingQrPosition { get; set; }
+    public double DrawingQrXMillimeters { get; set; } = DefaultDrawingQrXMillimeters;
+    public double DrawingQrYMillimeters { get; set; } = DefaultDrawingQrYMillimeters;
+    public double DrawingQrLengthMillimeters { get; set; } = DefaultDrawingQrSizeMillimeters;
+    public double DrawingQrWidthMillimeters { get; set; } = DefaultDrawingQrSizeMillimeters;
+
+    public void Normalize()
+    {
+        SchemaVersion = 3;
+        DrawingQrXMillimeters = Clamp(DrawingQrXMillimeters, 0d, 2000d);
+        DrawingQrYMillimeters = Clamp(DrawingQrYMillimeters, 0d, 2000d);
+        DrawingQrLengthMillimeters = ClampSize(DrawingQrLengthMillimeters);
+        DrawingQrWidthMillimeters = ClampSize(DrawingQrWidthMillimeters);
+    }
+
+    private static double Clamp(double value, double minimum, double maximum) =>
+        double.IsNaN(value) || double.IsInfinity(value) ? minimum : Math.Max(minimum, Math.Min(maximum, value));
+
+    private static double ClampSize(double value) =>
+        value <= 0d || double.IsNaN(value) || double.IsInfinity(value)
+            ? DefaultDrawingQrSizeMillimeters
+            : Clamp(value, 8d, 2000d);
 }
 
 internal static class PluginSettingsStore
@@ -24,7 +50,10 @@ internal static class PluginSettingsStore
             var path = GetPath();
             if (!File.Exists(path)) return new PluginSettings();
             var settings = Serializer.Deserialize<PluginSettings>(File.ReadAllText(path, Encoding.UTF8));
-            return settings?.SchemaVersion == 1 ? settings : new PluginSettings();
+            if (settings == null || settings.SchemaVersion < 1 || settings.SchemaVersion > 3)
+                return new PluginSettings();
+            settings.Normalize();
+            return settings;
         }
         catch
         {
@@ -35,6 +64,7 @@ internal static class PluginSettingsStore
     public static void Save(PluginSettings settings)
     {
         if (settings == null) throw new ArgumentNullException(nameof(settings));
+        settings.Normalize();
         var path = GetPath();
         Directory.CreateDirectory(Path.GetDirectoryName(path));
         File.WriteAllText(path, Serializer.Serialize(settings), new UTF8Encoding(false));

@@ -52,6 +52,7 @@ public sealed class InMemoryEngineeringKitRepository : IEngineeringKitRepository
             var saved = current with
             {
                 Code = code,
+                Model = code,
                 CurrentReleasedRevisionId = released.Id,
                 Revisions = revisions,
                 UpdatedBy = actor,

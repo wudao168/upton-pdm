@@ -568,7 +568,7 @@ public sealed partial class BomHeaderService(
     private static ProjectBomHeaderKind HeaderKind(ReleaseScope scope) => scope switch
     {
         ReleaseScope.StandardLongLead or ReleaseScope.StandardFormal or ReleaseScope.StandardSupplement => ProjectBomHeaderKind.Standard,
-        ReleaseScope.ElectricalFormal or ReleaseScope.ElectricalSupplement => ProjectBomHeaderKind.Electrical,
+        ReleaseScope.ElectricalLongLead or ReleaseScope.ElectricalFormal or ReleaseScope.ElectricalSupplement => ProjectBomHeaderKind.Electrical,
         ReleaseScope.NonStandardWithDrawing or ReleaseScope.NonStandardLongLead or ReleaseScope.NonStandardSupplement => ProjectBomHeaderKind.NonStandard,
         _ => throw new PdmRuleException("当前发布范围没有独立BOM料号。")
     };

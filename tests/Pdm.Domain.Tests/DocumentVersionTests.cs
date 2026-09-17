@@ -1468,6 +1468,62 @@ public sealed class DocumentVersionTests
         Assert.Equal(w2Sha256, Assert.Single(versions, version => version.Revision.Display == "W2").Sha256);
     }
 
+    [Fact]
+    public async Task DrawingCheckIn_RequiresQrCodeToMatchUniqueRelatedModelSpecification()
+    {
+        var repository = new Infrastructure.InMemoryPdmRepository(TimeProvider.System);
+        var settings = await repository.GetSystemSettingsAsync(CancellationToken.None);
+        await repository.UpdateSystemSettingsAsync(settings with { DrawingQrPolicy = DrawingQrPolicy.Default }, CancellationToken.None);
+        var project = Assert.Single(await repository.ListProjectsAsync(CancellationToken.None));
+        var model = await repository.RegisterDocumentAsync(
+            new Application.RegisterDocumentCommand(project.Id, "QR-001", "QR Model", "QR-001.SLDPRT", DocumentKind.Part),
+            "engineer",
+            CancellationToken.None);
+        model = await repository.CheckoutAsync(model.Id, "engineer", CancellationToken.None);
+        var modelCommit = Commit(project, model, ReferenceRoot(model, "engineer"), new string('1', 64), "model");
+        modelCommit = modelCommit with { Properties = new Dictionary<string, string?> { ["全局/型号"] = "MODEL-QR-001" } };
+        await repository.CheckInVersionAsync(model.Id, "engineer", modelCommit, CancellationToken.None);
+
+        var drawing = await repository.RegisterDocumentAsync(
+            new Application.RegisterDocumentCommand(project.Id, "QR-001", "QR Drawing", "QR-001.SLDDRW", DocumentKind.Drawing, RelatedModelDocumentId: model.Id),
+            "engineer",
+            CancellationToken.None);
+        var workflow = new Application.PdmWorkflowService(repository, new RecordingFileStorage(), new NoOpPublisher(), TimeProvider.System);
+        var sessionId = Guid.NewGuid();
+        drawing = await workflow.CheckoutAsync(drawing.Id, "engineer", UserRole.Administrator, sessionId, "test", CancellationToken.None);
+        var snapshot = new CadReferenceSnapshot(
+            Guid.NewGuid(),
+            project.Id,
+            drawing.Id,
+            DateTimeOffset.UtcNow,
+            "engineer",
+            ReferenceRoot(drawing, "engineer"),
+            new string('F', 64));
+        var file = new Application.StoredFile(".versions/QR-001/W1/QR-001.SLDDRW", 128, new string('2', 64), DateTimeOffset.UtcNow);
+        var invalid = new Dictionary<string, string?>
+        {
+            ["全局/UPLM_QR_CONTENT"] = "WRONG",
+            ["全局/UPLM_QR_RULE_VERSION"] = "1",
+            ["全局/UPLM_QR_SOURCE_PROPERTY"] = "型号"
+        };
+
+        var exception = await Assert.ThrowsAsync<Application.PdmRuleException>(() => workflow.CheckInAsync(
+            drawing.Id, "engineer", UserRole.Administrator, sessionId, file, "drawing", invalid, snapshot, false, false,
+            CancellationToken.None));
+        Assert.Contains("二维码", exception.Message);
+
+        var valid = new Dictionary<string, string?>(invalid, StringComparer.OrdinalIgnoreCase)
+        {
+            ["全局/UPLM_QR_CONTENT"] = "MODEL-QR-001"
+        };
+        var result = await workflow.CheckInAsync(
+            drawing.Id, "engineer", UserRole.Administrator, sessionId, file, "drawing", valid, snapshot, false, false,
+            CancellationToken.None);
+
+        Assert.True(result.VersionCreated);
+        Assert.Equal("MODEL-QR-001", Assert.IsType<DocumentVersion>(result.Version).PropertySnapshot["全局/UPLM_QR_CONTENT"]);
+    }
+
     private static async Task<PdmDocument> RegisterAndCheckInAsync(Infrastructure.InMemoryPdmRepository repository, Project project, string drawingNumber, string sha256)
     {
         var document = await repository.RegisterDocumentAsync(
