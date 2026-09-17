@@ -500,4 +500,19 @@ public sealed class MigrationResourceTests
         Assert.Contains("SET kit_model = kit_code", sql, StringComparison.Ordinal);
         Assert.Contains("SET is_optional = 0", sql, StringComparison.Ordinal);
     }
+
+    [Fact]
+    public async Task ProgramTemplateDraftParameterMigration_AllowsRepeatedBlankNames()
+    {
+        var assembly = typeof(MySqlMigrationRunner).Assembly;
+        var resourceName = assembly.GetManifestResourceNames()
+            .Single(name => name.EndsWith(".Migrations.113_program_template_draft_parameter_names.sql", StringComparison.Ordinal));
+
+        await using var stream = assembly.GetManifestResourceStream(resourceName);
+        Assert.NotNull(stream);
+        using var reader = new StreamReader(stream!);
+        var sql = await reader.ReadToEndAsync();
+
+        Assert.Contains("DROP INDEX ux_program_template_parameter_name", sql, StringComparison.Ordinal);
+    }
 }

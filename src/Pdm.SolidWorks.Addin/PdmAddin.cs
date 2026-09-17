@@ -13,6 +13,7 @@ using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Forms;
+using System.Web.Script.Serialization;
 using Microsoft.Win32;
 using SolidWorks.Interop.sldworks;
 using SolidWorks.Interop.swconst;
@@ -65,6 +66,7 @@ public sealed class PdmAddin : ISwAddin
     private DDrawingDocEvents_Event drawingEvents;
     private string drawingEventDocumentPath = string.Empty;
     private string authenticatedUsername = string.Empty;
+    private string authenticatedSessionJson = string.Empty;
     private int openOperationInProgress;
     private int checkInOperationInProgress;
     private int workspaceOperationInProgress;
@@ -245,6 +247,7 @@ public sealed class PdmAddin : ISwAddin
             lifetime = null;
             application = null;
             authenticatedUsername = string.Empty;
+            authenticatedSessionJson = string.Empty;
             availableProjects = Array.Empty<ProjectDto>();
             userDisplayNames = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
             currentDocumentIdentity = string.Empty;
@@ -1147,6 +1150,7 @@ public sealed class PdmAddin : ISwAddin
         }
 
         authenticatedUsername = string.Empty;
+        authenticatedSessionJson = string.Empty;
         availableProjects = Array.Empty<ProjectDto>();
         userDisplayNames = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         taskPaneControl?.SetUserDisplayNames(userDisplayNames);
@@ -1203,6 +1207,24 @@ public sealed class PdmAddin : ISwAddin
         taskPaneControl.SetConnectionState(false, "正在登录");
         var response = await apiClient.LoginAsync(username, password, lifetime.Token);
         authenticatedUsername = response.Username ?? string.Empty;
+        authenticatedSessionJson = new JavaScriptSerializer().Serialize(new
+        {
+            accessToken = response.AccessToken,
+            expiresAt = response.ExpiresAt,
+            resumeToken = response.ResumeToken,
+            username = response.Username,
+            displayName = response.DisplayName,
+            role = response.Role,
+            roles = response.Roles ?? new List<string>(),
+            permissions = response.Permissions ?? new List<string>(),
+            primaryCompanyId = response.PrimaryCompanyId,
+            activeCompanyId = response.ActiveCompanyId,
+            activeCompanyName = response.ActiveCompanyName,
+            crossCompanyView = response.CrossCompanyView,
+            accessibleCompanies = (response.AccessibleCompanies ?? new List<CompanyOptionDto>())
+                .Select(company => new { id = company.Id, name = company.Name, code = company.Code })
+                .ToArray()
+        });
         taskPaneControl.SetAuthenticatedUser(response.DisplayName, response.Username);
         taskPaneControl.SetConnectionState(true, "服务正常");
         taskPaneControl.SetCheckoutReminder(string.Empty, false);
@@ -2116,6 +2138,7 @@ public sealed class PdmAddin : ISwAddin
             apiClient = replacement;
             controlledWorkspace = new ControlledWorkspaceManager(replacement);
             authenticatedUsername = string.Empty;
+            authenticatedSessionJson = string.Empty;
             availableProjects = Array.Empty<ProjectDto>();
             userDisplayNames = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
             currentProjectId = null;
@@ -2757,9 +2780,45 @@ public sealed class PdmAddin : ISwAddin
         }
     }
 
+    private IModelDoc2 EnsureAutomaticDrawingSourceLoaded(CadTreeNode source)
+    {
+        var loaded = FindLoadedDocument(source.FullPath);
+        if (loaded != null)
+        {
+            return loaded;
+        }
+
+        var errors = 0;
+        var warnings = 0;
+        var documentType = source.Kind == CadDocumentKind.Assembly
+            ? (int)swDocumentTypes_e.swDocASSEMBLY
+            : (int)swDocumentTypes_e.swDocPART;
+        LogOperation(string.Concat("Automatic drawing source OpenDoc6 start path=", source.FullPath));
+        loaded = application.OpenDoc6(
+            source.FullPath,
+            documentType,
+            (int)swOpenDocOptions_e.swOpenDocOptions_Silent,
+            source.Configuration ?? string.Empty,
+            ref errors,
+            ref warnings);
+        LogOperation(string.Concat(
+            "Automatic drawing source OpenDoc6 end path=", source.FullPath,
+            " errors=", errors,
+            " warnings=", warnings,
+            " null=", loaded == null));
+        if (loaded == null)
+        {
+            throw new InvalidOperationException(string.Concat(
+                "SolidWorks未能加载三维模型，不能生成工程图。错误码：", errors,
+                "，警告码：", warnings));
+        }
+        return loaded;
+    }
+
     private void CreateAutomaticDrawing(CadTreeNode source, string drawingPath, AutomaticDrawingOptions options)
     {
         var template = ResolveDrawingTemplate(options?.TemplatePath);
+        EnsureAutomaticDrawingSourceLoaded(source);
         IModelDoc2 drawingModel = null;
         var saved = false;
         try
@@ -2771,6 +2830,7 @@ public sealed class PdmAddin : ISwAddin
                 throw new InvalidOperationException("SolidWorks未能创建工程图，请检查工程图模板。");
             }
 
+            EnsureDrawingSheetEditMode(drawing);
             ApplyGbDrawingStandard(drawingModel);
             CreateAutomaticDrawingViews(drawingModel, drawing, source.FullPath, options ?? new AutomaticDrawingOptions());
             drawingModel.ForceRebuild3(false);
@@ -2808,6 +2868,7 @@ public sealed class PdmAddin : ISwAddin
     private void UpdateAutomaticDrawing(CadTreeNode source, string drawingPath, AutomaticDrawingOptions options)
     {
         EnsureDrawingCanBeChanged(drawingPath);
+        EnsureAutomaticDrawingSourceLoaded(source);
         var drawingModel = OpenOrActivateDocumentOnSolidWorksThread(
             drawingPath,
             (int)swDocumentTypes_e.swDocDRAWING,
@@ -2818,10 +2879,17 @@ public sealed class PdmAddin : ISwAddin
             throw new InvalidOperationException("关联文件不是SolidWorks工程图。");
         }
 
+        var switchedFromTemplateEdit = EnsureDrawingSheetEditMode(drawing);
         ApplyGbDrawingStandard(drawingModel);
-        var firstModelView = (drawing.GetFirstView() as IView)?.GetNextView() as IView;
-        if (firstModelView == null)
+        TryResolveDrawingViews(drawing, drawingModel);
+        var existingViews = EnumerateDrawingModelViews(drawing).ToList();
+        var firstModelView = existingViews.FirstOrDefault();
+        if (switchedFromTemplateEdit || firstModelView == null || !HasVisibleDrawingGeometry(existingViews))
         {
+            LogOperation(string.Concat(
+                "Automatic drawing rebuilding empty views path=", drawingPath,
+                " existingViewCount=", existingViews.Count,
+                " switchedFromTemplateEdit=", switchedFromTemplateEdit));
             CreateAutomaticDrawingViews(drawingModel, drawing, source.FullPath, options ?? new AutomaticDrawingOptions());
         }
         else if (!ReferencesSource(firstModelView.GetReferencedModelName(), source.FullPath))
@@ -2846,6 +2914,87 @@ public sealed class PdmAddin : ISwAddin
         {
             EndAutomaticDrawingSave();
         }
+    }
+
+    private static bool EnsureDrawingSheetEditMode(IDrawingDoc drawing)
+    {
+        if (drawing == null || drawing.GetEditSheet())
+        {
+            return false;
+        }
+
+        drawing.EditSheet();
+        return true;
+    }
+
+    private static void TryResolveDrawingViews(IDrawingDoc drawing, IModelDoc2 drawingModel)
+    {
+        try
+        {
+            drawing.ResolveOutOfDateLightWeightComponents();
+            foreach (var view in EnumerateDrawingModelViews(drawing))
+            {
+                PrepareAutomaticDrawingView(view);
+            }
+            drawingModel.ForceRebuild3(false);
+        }
+        catch (COMException)
+        {
+            // Some drawing modes do not expose lightweight resolution; geometry checks below remain authoritative.
+        }
+    }
+
+    private static bool HasVisibleDrawingGeometry(IEnumerable<IView> views)
+    {
+        foreach (var view in views ?? Enumerable.Empty<IView>())
+        {
+            try
+            {
+                var referencedModel = view.GetReferencedModelName() ?? string.Empty;
+                var outline = GetDrawingViewOutline(view);
+                if (!view.GetVisible()
+                    || string.IsNullOrWhiteSpace(referencedModel)
+                    || outline.Width <= 0.000001f
+                    || outline.Height <= 0.000001f)
+                {
+                    continue;
+                }
+
+                var splinePointCount = 0;
+                var polylinePointCount = 0;
+                if (view.GetLineCount2(0) > 0
+                    || view.GetArcCount() > 0
+                    || view.GetEllipseCount() > 0
+                    || view.GetParabolaCount() > 0
+                    || view.GetSplineCount(out splinePointCount) > 0
+                    || view.GetPolyLineCount5(0, out polylinePointCount) > 0)
+                {
+                    return true;
+                }
+            }
+            catch (COMException)
+            {
+                // Continue checking the remaining model views.
+            }
+        }
+        return false;
+    }
+
+    private static void PrepareAutomaticDrawingView(IView view)
+    {
+        if (view == null)
+        {
+            return;
+        }
+
+        view.SetLightweightToResolved();
+        view.SetVisible(true, true);
+        view.SetDisplayMode3(
+            false,
+            (int)swDisplayMode_e.swHIDDEN,
+            false,
+            true);
+        view.UpdateViewDisplayGeometry();
     }
 
     private void BeginAutomaticDrawingSave(string drawingPath)
@@ -3815,21 +3964,21 @@ public sealed class PdmAddin : ISwAddin
         var primaryView = CreateAutomaticDrawingModelView(
             drawing,
             sourcePath,
-            "*Front",
+            new[] { "*Front", "*前视", "*前视图", "*正视图" },
             sheetWidth: width * 0.30d,
             sheetHeight: height * 0.66d,
             "主视图");
         var topView = CreateAutomaticDrawingModelView(
             drawing,
             sourcePath,
-            "*Top",
+            new[] { "*Top", "*上视", "*俯视", "*俯视图" },
             sheetWidth: width * 0.30d,
             sheetHeight: height * 0.30d,
             "俯视图");
         var sideView = CreateAutomaticDrawingModelView(
             drawing,
             sourcePath,
-            "*Right",
+            new[] { "*Right", "*右视", "*右视图" },
             sheetWidth: width * 0.67d,
             sheetHeight: height * 0.66d,
             "右视图");
@@ -3854,7 +4003,8 @@ public sealed class PdmAddin : ISwAddin
             primaryView,
             topView,
             sideView,
-            isometricView);
+            isometricView,
+            options);
 
         foreach (var view in createdViews)
         {
@@ -3923,7 +4073,8 @@ public sealed class PdmAddin : ISwAddin
             frontView,
             topView,
             sideView,
-            isometricView);
+            isometricView,
+            options);
     }
 
     private static IView CreateAutomaticDrawingIsometricView(
@@ -3942,30 +4093,35 @@ public sealed class PdmAddin : ISwAddin
         {
             throw new InvalidOperationException("SolidWorks未能创建轴测图，请确认模型包含标准轴测视图。");
         }
+        PrepareAutomaticDrawingView(view);
         return view;
     }
 
     private static IView CreateAutomaticDrawingModelView(
         IDrawingDoc drawing,
         string sourcePath,
-        string orientation,
+        IReadOnlyList<string> orientations,
         double sheetWidth,
         double sheetHeight,
         string viewName)
     {
-        var view = drawing.CreateDrawViewFromModelView3(
-            sourcePath,
-            orientation,
-            sheetWidth,
-            sheetHeight,
-            0d) as IView;
-        if (view == null)
+        foreach (var orientation in orientations ?? Array.Empty<string>())
         {
-            throw new InvalidOperationException(string.Concat(
-                "SolidWorks未能创建", viewName,
-                "。请确认零件可正常打开，并检查标准视图是否完整。"));
+            var view = drawing.CreateDrawViewFromModelView3(
+                sourcePath,
+                orientation,
+                sheetWidth,
+                sheetHeight,
+                0d) as IView;
+            if (view != null)
+            {
+                PrepareAutomaticDrawingView(view);
+                return view;
+            }
         }
-        return view;
+        throw new InvalidOperationException(string.Concat(
+            "SolidWorks未能创建", viewName,
+            "。请确认零件可正常打开，并检查标准视图是否完整。"));
     }
 
     private static void ResolveAutomaticDrawingViews(
@@ -4018,18 +4174,21 @@ public sealed class PdmAddin : ISwAddin
         IView frontView,
         IView topView,
         IView sideView,
-        IView isometricView)
+        IView isometricView,
+        AutomaticDrawingOptions options)
     {
         var rules = AutomaticDrawingRuleStore.Load();
+        var primaryViewMaximumSheetFraction = AutomaticDrawingOptions.NormalizePrimaryViewMaximumSheetFraction(
+            options?.PrimaryViewMaximumSheetFraction
+                ?? AutomaticDrawingOptions.DefaultPrimaryViewMaximumSheetFraction);
         var frameLeft = sheetWidth * 0.05;
         var frameRight = sheetWidth * 0.95;
         var frameBottom = sheetHeight * 0.18;
         var frameTop = sheetHeight * 0.94;
-        var maximumScale = double.MaxValue;
-        maximumScale = Math.Min(maximumScale, GetMaximumDrawingViewScale(
+        var maximumScale = GetMaximumDrawingViewScale(
             frontView,
-            sheetWidth * 0.34,
-            sheetHeight * 0.36));
+            sheetWidth * primaryViewMaximumSheetFraction,
+            sheetHeight * primaryViewMaximumSheetFraction);
         maximumScale = Math.Min(maximumScale, GetMaximumDrawingViewScale(
             topView,
             sheetWidth * 0.34,
@@ -4047,14 +4206,22 @@ public sealed class PdmAddin : ISwAddin
                     sheetWidth * 0.30,
                     sheetHeight * 0.30) / rules.IsometricScaleRatio);
         }
-
         if (double.IsInfinity(maximumScale) || maximumScale == double.MaxValue)
         {
             maximumScale = frontView.ScaleDecimal;
         }
-        var targetScale = SelectStandardDrawingScale(maximumScale * 0.98, rules);
+        var targetScale = SelectStandardDrawingScale(maximumScale, rules);
+
         ApplyDrawingSheetScale(sheet, targetScale);
-        ApplyProjectedDrawingViewScale(frontView, topView, sideView, isometricView, targetScale, rules);
+        ApplyAutomaticDrawingViewScales(
+            frontView,
+            topView,
+            sideView,
+            isometricView,
+            targetScale,
+            targetScale,
+            targetScale,
+            targetScale * rules.IsometricScaleRatio);
         drawingModel.ForceRebuild3(false);
 
         var frontX = sheetWidth * 0.30;
@@ -4077,43 +4244,39 @@ public sealed class PdmAddin : ISwAddin
 
         var annotationFrameReserve = rules.AnnotationFrameReserveMeters;
         var annotationViewGap = rules.ViewAnnotationGapMeters;
-        var boundaryFactor = 1.0;
+        var boundaryFactor = 1.0d;
         foreach (var view in new[] { frontView, topView, sideView, isometricView }.Where(view => view != null))
         {
-            boundaryFactor = Math.Min(
-                boundaryFactor,
-                GetDrawingViewBoundaryScaleFactor(
-                    view,
-                    frameLeft + annotationFrameReserve,
-                    frameRight - annotationFrameReserve,
-                    frameBottom + annotationFrameReserve,
-                    frameTop - annotationFrameReserve));
+            boundaryFactor = Math.Min(boundaryFactor, GetDrawingViewBoundaryScaleFactor(
+                view,
+                frameLeft + annotationFrameReserve,
+                frameRight - annotationFrameReserve,
+                frameBottom + annotationFrameReserve,
+                frameTop - annotationFrameReserve));
         }
-        boundaryFactor = Math.Min(
-            boundaryFactor,
-            GetVerticalDrawingViewGapScaleFactor(frontView, topView, annotationViewGap));
-        boundaryFactor = Math.Min(
-            boundaryFactor,
-            GetHorizontalDrawingViewGapScaleFactor(frontView, sideView, annotationViewGap));
-        boundaryFactor = Math.Min(
-            boundaryFactor,
-            GetVerticalDrawingViewGapScaleFactor(sideView, isometricView, annotationViewGap));
-        boundaryFactor = Math.Min(
-            boundaryFactor,
-            GetHorizontalDrawingViewGapScaleFactor(topView, isometricView, annotationViewGap));
-        if (boundaryFactor < 0.999)
+        boundaryFactor = Math.Min(boundaryFactor, GetVerticalDrawingViewGapScaleFactor(
+            frontView, topView, annotationViewGap));
+        boundaryFactor = Math.Min(boundaryFactor, GetHorizontalDrawingViewGapScaleFactor(
+            frontView, sideView, annotationViewGap));
+        boundaryFactor = Math.Min(boundaryFactor, GetVerticalDrawingViewGapScaleFactor(
+            sideView, isometricView, annotationViewGap));
+        boundaryFactor = Math.Min(boundaryFactor, GetHorizontalDrawingViewGapScaleFactor(
+            topView, isometricView, annotationViewGap));
+        if (boundaryFactor < 0.999d)
         {
-            var reducedScale = SelectStandardDrawingScale(targetScale * boundaryFactor * 0.98, rules);
+            var reducedScale = SelectStandardDrawingScale(targetScale * boundaryFactor, rules);
             if (reducedScale < targetScale)
             {
                 ApplyDrawingSheetScale(sheet, reducedScale);
-                ApplyProjectedDrawingViewScale(
+                ApplyAutomaticDrawingViewScales(
                     frontView,
                     topView,
                     sideView,
                     isometricView,
                     reducedScale,
-                    rules);
+                    reducedScale,
+                    reducedScale,
+                    reducedScale * rules.IsometricScaleRatio);
                 drawingModel.ForceRebuild3(false);
             }
         }
@@ -4126,9 +4289,8 @@ public sealed class PdmAddin : ISwAddin
     {
         if (upperView == null || lowerView == null)
         {
-            return 1.0;
+            return 1.0d;
         }
-
         var upperOutline = GetDrawingViewOutline(upperView);
         var lowerOutline = GetDrawingViewOutline(lowerView);
         var upperPosition = GetDrawingViewPosition(upperView);
@@ -4136,9 +4298,9 @@ public sealed class PdmAddin : ISwAddin
         var currentExtents = upperPosition.Y - upperOutline.Top
             + lowerOutline.Bottom - lowerPosition.Y;
         var availableExtents = upperPosition.Y - lowerPosition.Y - minimumGap;
-        return currentExtents > 0
-            ? Math.Max(0.05, availableExtents / currentExtents)
-            : 1.0;
+        return currentExtents > 0d
+            ? Math.Max(0.05d, availableExtents / currentExtents)
+            : 1.0d;
     }
 
     private static double GetHorizontalDrawingViewGapScaleFactor(
@@ -4148,9 +4310,8 @@ public sealed class PdmAddin : ISwAddin
     {
         if (leftView == null || rightView == null)
         {
-            return 1.0;
+            return 1.0d;
         }
-
         var leftOutline = GetDrawingViewOutline(leftView);
         var rightOutline = GetDrawingViewOutline(rightView);
         var leftPosition = GetDrawingViewPosition(leftView);
@@ -4158,9 +4319,9 @@ public sealed class PdmAddin : ISwAddin
         var currentExtents = leftOutline.Right - leftPosition.X
             + rightPosition.X - rightOutline.Left;
         var availableExtents = rightPosition.X - leftPosition.X - minimumGap;
-        return currentExtents > 0
-            ? Math.Max(0.05, availableExtents / currentExtents)
-            : 1.0;
+        return currentExtents > 0d
+            ? Math.Max(0.05d, availableExtents / currentExtents)
+            : 1.0d;
     }
 
     private static double GetMaximumDrawingViewScale(IView view, double maximumWidth, double maximumHeight)
@@ -4218,30 +4379,32 @@ public sealed class PdmAddin : ISwAddin
             properties[7] != 0);
     }
 
-    private static void ApplyProjectedDrawingViewScale(
+    private static void ApplyAutomaticDrawingViewScales(
         IView frontView,
         IView topView,
         IView sideView,
         IView isometricView,
-        double scale,
-        AutomaticDrawingRuleProfile rules)
+        double frontScale,
+        double topScale,
+        double sideScale,
+        double isometricScale)
     {
         frontView.UseParentScale = false;
-        frontView.ScaleDecimal = scale;
+        frontView.ScaleDecimal = frontScale;
         if (topView != null)
         {
             topView.UseParentScale = false;
-            topView.ScaleDecimal = scale;
+            topView.ScaleDecimal = topScale;
         }
         if (sideView != null)
         {
             sideView.UseParentScale = false;
-            sideView.ScaleDecimal = scale;
+            sideView.ScaleDecimal = sideScale;
         }
         if (isometricView != null)
         {
             isometricView.UseParentScale = false;
-            isometricView.ScaleDecimal = scale * (rules?.IsometricScaleRatio ?? 0.5d);
+            isometricView.ScaleDecimal = isometricScale;
         }
     }
 
@@ -9327,7 +9490,9 @@ public sealed class PdmAddin : ISwAddin
                     if (node.Kind == CadDocumentKind.Assembly)
                     {
                         var failedDescendants = failedItems
-                            .Where(failed => failed.Ancestors.Any(ancestor => PathsEqual(ancestor.FullPath, node.FullPath)))
+                            .Where(failed => BatchCheckInDependencyRule.BlocksParentAssembly(
+                                    failed.Node.Kind == CadDocumentKind.Drawing)
+                                && failed.Ancestors.Any(ancestor => PathsEqual(ancestor.FullPath, node.FullPath)))
                             .Select(failed => failed.Node?.FileName)
                             .Where(fileName => !string.IsNullOrWhiteSpace(fileName))
                             .Distinct(StringComparer.OrdinalIgnoreCase)
@@ -11335,17 +11500,31 @@ public sealed class PdmAddin : ISwAddin
         catch (Exception exception) { ShowError(exception.Message); }
     }
 
-    private static void StartDesktopClient(string arguments)
+    private void StartDesktopClient(string arguments)
     {
         var executable = FindDesktopClientExecutable();
+        var handoffId = string.IsNullOrWhiteSpace(authenticatedSessionJson)
+            ? string.Empty
+            : DesktopAuthHandoffStore.Create(authenticatedSessionJson);
+        var launchArguments = string.IsNullOrWhiteSpace(handoffId)
+            ? arguments ?? string.Empty
+            : string.Concat(arguments ?? string.Empty, string.IsNullOrWhiteSpace(arguments) ? string.Empty : " ", "--auth-handoff ", handoffId);
 
-        System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+        try
         {
-            FileName = executable,
-            Arguments = arguments ?? string.Empty,
-            WorkingDirectory = Path.GetDirectoryName(executable),
-            UseShellExecute = true
-        });
+            System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+            {
+                FileName = executable,
+                Arguments = launchArguments,
+                WorkingDirectory = Path.GetDirectoryName(executable),
+                UseShellExecute = true
+            });
+        }
+        catch
+        {
+            DesktopAuthHandoffStore.Delete(handoffId);
+            throw;
+        }
     }
 
     private static string FindDesktopClientExecutable()

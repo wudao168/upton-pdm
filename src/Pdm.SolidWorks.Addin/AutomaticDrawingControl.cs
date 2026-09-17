@@ -18,11 +18,15 @@ internal enum AutomaticDrawingPrimaryView
 
 internal sealed class AutomaticDrawingOptions
 {
+    public const double DefaultPrimaryViewMaximumSheetFraction = 1d / 3d;
+
     public int SettingsVersion { get; set; }
 
     public string TemplatePath { get; set; } = string.Empty;
 
     public AutomaticDrawingPrimaryView PrimaryView { get; set; } = AutomaticDrawingPrimaryView.Front;
+
+    public double PrimaryViewMaximumSheetFraction { get; set; } = DefaultPrimaryViewMaximumSheetFraction;
 
     public bool IncludeAssemblyBom { get; set; } = true;
 
@@ -31,6 +35,15 @@ internal sealed class AutomaticDrawingOptions
     public bool ImportHoleDimensions { get; set; } = true;
 
     public bool GenerateIsometric { get; set; }
+
+    public static double NormalizePrimaryViewMaximumSheetFraction(double value)
+    {
+        if (double.IsNaN(value) || double.IsInfinity(value))
+        {
+            return DefaultPrimaryViewMaximumSheetFraction;
+        }
+        return Math.Max(0.10d, Math.Min(0.50d, value));
+    }
 }
 
 internal sealed class AutomaticDrawingRequestEventArgs : EventArgs
@@ -57,6 +70,7 @@ internal sealed class AutomaticDrawingControl : UserControl
     private readonly Label sourceStatus = new Label();
     private readonly TextBox templatePath = new TextBox();
     private readonly ComboBox primaryView = new ComboBox();
+    private readonly NumericUpDown primaryViewMaximumPercent = new NumericUpDown();
     private readonly CheckBox includeAssemblyBom = new CheckBox();
     private readonly CheckBox importMarkedDimensions = new CheckBox();
     private readonly CheckBox importHoleDimensions = new CheckBox();
@@ -191,10 +205,11 @@ internal sealed class AutomaticDrawingControl : UserControl
             Padding = new Padding(8),
             Margin = new Padding(0, 0, 0, 7)
         };
-        var settings = new TableLayoutPanel { Dock = DockStyle.Top, AutoSize = true, ColumnCount = 3, RowCount = 6 };
-        settings.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 66));
+        var settings = new TableLayoutPanel { Dock = DockStyle.Top, AutoSize = true, ColumnCount = 3, RowCount = 7 };
+        settings.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 78));
         settings.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         settings.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 58));
+        settings.RowStyles.Add(new RowStyle(SizeType.Absolute, 32));
         settings.RowStyles.Add(new RowStyle(SizeType.Absolute, 32));
         settings.RowStyles.Add(new RowStyle(SizeType.Absolute, 32));
         settings.RowStyles.Add(new RowStyle(SizeType.Absolute, 28));
@@ -223,6 +238,18 @@ internal sealed class AutomaticDrawingControl : UserControl
         settings.Controls.Add(primaryView, 1, 1);
         settings.SetColumnSpan(primaryView, 2);
 
+        settings.Controls.Add(BuildFieldLabel("主视图上限"), 0, 2);
+        primaryViewMaximumPercent.Dock = DockStyle.Fill;
+        primaryViewMaximumPercent.Margin = new Padding(0, 3, 4, 3);
+        primaryViewMaximumPercent.Minimum = 10m;
+        primaryViewMaximumPercent.Maximum = 50m;
+        primaryViewMaximumPercent.DecimalPlaces = 1;
+        primaryViewMaximumPercent.Increment = 1m;
+        primaryViewMaximumPercent.AccessibleName = "主视图最大图纸占比";
+        settings.Controls.Add(primaryViewMaximumPercent, 1, 2);
+        settings.Controls.Add(BuildFieldLabel("% 宽/高"), 2, 2);
+        toolTip.SetToolTip(primaryViewMaximumPercent, "主视图宽度和高度占图纸尺寸的最大百分比，保持纵横比且不会超过该值");
+
         includeAssemblyBom.Text = "装配体生成层级BOM";
         importMarkedDimensions.Text = "导入标记用于工程图的尺寸和公差";
         importHoleDimensions.Text = "导入孔向导尺寸和孔定位尺寸";
@@ -232,13 +259,13 @@ internal sealed class AutomaticDrawingControl : UserControl
             option.Dock = DockStyle.Fill;
             option.Margin = new Padding(0, 2, 0, 1);
         }
-        settings.Controls.Add(includeAssemblyBom, 0, 2);
+        settings.Controls.Add(includeAssemblyBom, 0, 3);
         settings.SetColumnSpan(includeAssemblyBom, 3);
-        settings.Controls.Add(importMarkedDimensions, 0, 3);
+        settings.Controls.Add(importMarkedDimensions, 0, 4);
         settings.SetColumnSpan(importMarkedDimensions, 3);
-        settings.Controls.Add(importHoleDimensions, 0, 4);
+        settings.Controls.Add(importHoleDimensions, 0, 5);
         settings.SetColumnSpan(importHoleDimensions, 3);
-        settings.Controls.Add(generateIsometric, 0, 5);
+        settings.Controls.Add(generateIsometric, 0, 6);
         settings.SetColumnSpan(generateIsometric, 3);
         settingsGroup.Controls.Add(settings);
 
@@ -410,9 +437,10 @@ internal sealed class AutomaticDrawingControl : UserControl
 
     private AutomaticDrawingOptions ReadOptions() => new AutomaticDrawingOptions
     {
-        SettingsVersion = 4,
+        SettingsVersion = 5,
         TemplatePath = templatePath.Text?.Trim() ?? string.Empty,
         PrimaryView = AutomaticDrawingPrimaryView.Front,
+        PrimaryViewMaximumSheetFraction = (double)primaryViewMaximumPercent.Value / 100d,
         IncludeAssemblyBom = includeAssemblyBom.Checked,
         ImportMarkedDimensions = importMarkedDimensions.Checked,
         ImportHoleDimensions = importHoleDimensions.Checked,
@@ -422,16 +450,32 @@ internal sealed class AutomaticDrawingControl : UserControl
     private void LoadSettings()
     {
         var settings = AutomaticDrawingSettingsStore.Load();
+        var originalSettingsVersion = settings.SettingsVersion;
         if (settings.SettingsVersion < 4)
         {
-            settings.SettingsVersion = 4;
             settings.ImportMarkedDimensions = true;
             settings.ImportHoleDimensions = true;
             settings.GenerateIsometric = false;
+        }
+        if (settings.SettingsVersion < 5)
+        {
+            settings.PrimaryViewMaximumSheetFraction = AutomaticDrawingOptions.DefaultPrimaryViewMaximumSheetFraction;
+        }
+        settings.SettingsVersion = 5;
+        var normalizedMaximumFraction = AutomaticDrawingOptions.NormalizePrimaryViewMaximumSheetFraction(
+            settings.PrimaryViewMaximumSheetFraction);
+        var normalizedMaximumChanged = Math.Abs(
+            normalizedMaximumFraction - settings.PrimaryViewMaximumSheetFraction) > 0.0000001d;
+        settings.PrimaryViewMaximumSheetFraction = normalizedMaximumFraction;
+        if (originalSettingsVersion < 5 || normalizedMaximumChanged)
+        {
             AutomaticDrawingSettingsStore.Save(settings);
         }
         templatePath.Text = settings.TemplatePath ?? string.Empty;
         primaryView.SelectedIndex = 0;
+        primaryViewMaximumPercent.Value = Math.Round(
+            (decimal)(settings.PrimaryViewMaximumSheetFraction * 100d),
+            primaryViewMaximumPercent.DecimalPlaces);
         includeAssemblyBom.Checked = settings.IncludeAssemblyBom;
         importMarkedDimensions.Checked = settings.ImportMarkedDimensions;
         importHoleDimensions.Checked = settings.ImportHoleDimensions;

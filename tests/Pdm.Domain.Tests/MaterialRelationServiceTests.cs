@@ -24,6 +24,8 @@ public sealed class MaterialRelationServiceTests
         var publishedB = await SaveAndPublishAsync(service, motorB, controller);
         Assert.NotEqual(publishedA.PublishedRevision!.Id, publishedB.PublishedRevision!.Id);
         Assert.Equal("适配 750W 电机", publishedA.PublishedRevision.Groups.Single().Options.Single().SelectionAdvice);
+        Assert.Equal("CTRL-750", publishedA.PublishedRevision.Groups.Single().Options.Single().Specification);
+        Assert.Equal("UPTON", publishedA.PublishedRevision.Groups.Single().Options.Single().Brand);
 
         var mainA = new BomItem(Guid.NewGuid(), project.Id, BomKind.Standard, 1, motorA.MaterialCode, motorA.Name, 2, "001", null, null, "W1", true);
         var mainB = new BomItem(Guid.NewGuid(), project.Id, BomKind.Standard, 2, motorB.MaterialCode, motorB.Name, 3, "001", null, null, "W1", true);
@@ -148,7 +150,7 @@ public sealed class MaterialRelationServiceTests
         var category = await repository.FindCategoryAsync(categoryCode, default) ?? throw new InvalidOperationException();
         var now = DateTimeOffset.UtcNow;
         var material = new PdmMaterial(
-            Guid.NewGuid(), code, name, kind, MaterialSupplyMode.Purchase, "001", null, null, null, null, null,
+            Guid.NewGuid(), code, name, kind, MaterialSupplyMode.Purchase, "001", code == "CTRL-01" ? "CTRL-750" : null, null, null, code == "CTRL-01" ? "UPTON" : null, null,
             null, null, null, MaterialApprovalStatus.Approved, "admin", now, categoryCode, null, code,
             MaterialSyncStatus.Succeeded, "admin", now, "admin", now, 1, categoryCode, U9SyncConfirmed: true);
         return await repository.CreateMaterialAsync(material, category, default);

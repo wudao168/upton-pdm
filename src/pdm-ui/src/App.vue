@@ -470,6 +470,14 @@ async function openHierarchyBom(projectId: string, kind: Exclude<import('./types
 
 async function openNotification(notification: UserNotification) {
   await workspace.markNotificationRead(notification.id)
+  if (notification.category === 'MaterialCodeApplicationRejected') {
+    openMaterialApprovals()
+    return
+  }
+  if (notification.category === 'MaterialMasterRejected') {
+    await handleNavigation('materials')
+    return
+  }
   if ((notification.category === 'project-plan' || notification.category === 'project-plan-approval') && notification.projectId) {
     await openManagedProject(notification.projectId, 'project-plan')
     return

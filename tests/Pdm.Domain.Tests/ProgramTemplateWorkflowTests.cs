@@ -26,12 +26,25 @@ public sealed class ProgramTemplateWorkflowTests
             string.Empty,
             [],
             string.Empty,
-            []), "uploader", UserRole.Engineer, default);
+            [
+                new(ProgramTemplateParameterDirection.Input, 0, string.Empty, "BOOL", null, null, null),
+                new(ProgramTemplateParameterDirection.Output, 1, string.Empty, "BOOL", null, null, null)
+            ]), "uploader", UserRole.Engineer, default);
         var revision = created.Revisions.Single();
+
+        Assert.Equal(2, revision.Parameters.Count);
+        Assert.All(revision.Parameters, parameter => Assert.Equal(string.Empty, parameter.Name));
 
         revision = await service.UpdateDraftAsync(revision.Id, new UpdateProgramTemplateDraftCommand(
             string.Empty, string.Empty, string.Empty, string.Empty, string.Empty, string.Empty,
-            string.Empty, [], string.Empty, [], revision.RowVersion), "uploader", UserRole.Engineer, default);
+            string.Empty, [], string.Empty,
+            [
+                new(ProgramTemplateParameterDirection.Input, 0, string.Empty, "BOOL", null, null, null),
+                new(ProgramTemplateParameterDirection.Output, 1, string.Empty, "BOOL", null, null, null)
+            ], revision.RowVersion), "uploader", UserRole.Engineer, default);
+
+        Assert.Equal(2, revision.Parameters.Count);
+        Assert.All(revision.Parameters, parameter => Assert.Equal(string.Empty, parameter.Name));
 
         var exception = await Assert.ThrowsAsync<PdmRuleException>(() =>
             service.SubmitAsync(revision.Id, revision.RowVersion, "uploader", UserRole.Engineer, default));

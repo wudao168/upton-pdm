@@ -388,6 +388,20 @@ public partial class MainWindow : Window
     {
         if (WorkspaceView.CoreWebView2 == null || arguments == null || arguments.Count == 0) return;
 
+        var handoffArgumentIndex = FindArgument(arguments, "--auth-handoff");
+        if (handoffArgumentIndex >= 0
+            && handoffArgumentIndex + 1 < arguments.Count
+            && DesktopAuthHandoffStore.TryConsume(arguments[handoffArgumentIndex + 1], out var sessionJson))
+        {
+            var session = new JavaScriptSerializer().DeserializeObject(sessionJson);
+            pendingExternalRequestArgs = arguments
+                .Where((_, index) => index != handoffArgumentIndex && index != handoffArgumentIndex + 1)
+                .ToArray();
+            var handoffScript = $"window.localStorage.setItem('upton-pdm-session', JSON.stringify({Serialize(session)})); window.sessionStorage.removeItem('upton-pdm-session'); window.location.reload();";
+            await WorkspaceView.CoreWebView2.ExecuteScriptAsync(handoffScript);
+            return;
+        }
+
         if (arguments.Count >= 4 && string.Equals(arguments[0], "--compare", StringComparison.OrdinalIgnoreCase))
         {
             var compareScript = $"window.dispatchEvent(new CustomEvent('pdm-open-version-compare', {{ detail: {{ documentId: {Serialize(arguments[1])}, leftVersionId: {Serialize(arguments[2])}, rightVersionId: {Serialize(arguments[3])} }} }}));";

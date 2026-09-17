@@ -28,7 +28,8 @@ public sealed class MySqlMaterialRelationRepository : IMaterialRelationRepositor
                    g.id GroupId,g.name GroupName,g.is_required IsRequired,g.selection_mode SelectionMode,g.min_selection MinSelection,
                    g.max_selection MaxSelection,g.auto_select_unique AutoSelectUnique,g.sort_order GroupSortOrder,
                    o.id OptionId,o.material_id OptionMaterialId,om.material_code OptionMaterialCode,om.name OptionMaterialName,
-                   om.material_kind OptionMaterialKind,om.unit_code OptionUnitCode,o.quantity_mode QuantityMode,o.quantity_per_set QuantityPerSet,
+                   om.material_kind OptionMaterialKind,om.unit_code OptionUnitCode,om.specification OptionSpecification,om.brand OptionBrand,
+                   o.quantity_mode QuantityMode,o.quantity_per_set QuantityPerSet,
                    o.is_default IsDefault,o.sort_order OptionSortOrder,o.selection_advice SelectionAdvice
             FROM material_relation_template t
             INNER JOIN material_master mm ON mm.id=t.main_material_id
@@ -209,7 +210,7 @@ public sealed class MySqlMaterialRelationRepository : IMaterialRelationRepositor
                     var options = groupRows.Where(row => row.OptionId.HasValue).Select(row => new MaterialRelationOption(row.OptionId!.Value, row.OptionMaterialId!.Value,
                         row.OptionMaterialCode!, row.OptionMaterialName!, Enum.Parse<MaterialKind>(row.OptionMaterialKind!), row.OptionUnitCode!,
                         Enum.Parse<MaterialRelationQuantityMode>(row.QuantityMode!), row.QuantityPerSet!.Value, row.IsDefault!.Value, row.OptionSortOrder!.Value,
-                        row.SelectionAdvice)).ToArray();
+                        row.SelectionAdvice, row.OptionSpecification, row.OptionBrand)).ToArray();
                     return new MaterialRelationGroup(group.GroupId!.Value, group.GroupName!, group.IsRequired!.Value,
                         Enum.Parse<MaterialRelationSelectionMode>(group.SelectionMode!), group.MinSelection!.Value, group.MaxSelection,
                         group.AutoSelectUnique!.Value, group.GroupSortOrder!.Value, options);
@@ -262,6 +263,8 @@ public sealed class MySqlMaterialRelationRepository : IMaterialRelationRepositor
         public string? OptionMaterialName { get; init; }
         public string? OptionMaterialKind { get; init; }
         public string? OptionUnitCode { get; init; }
+        public string? OptionSpecification { get; init; }
+        public string? OptionBrand { get; init; }
         public string? QuantityMode { get; init; }
         public decimal? QuantityPerSet { get; init; }
         public bool? IsDefault { get; init; }

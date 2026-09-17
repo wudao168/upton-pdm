@@ -62,7 +62,7 @@ Get-ChildItem -LiteralPath $addinBuild | ForEach-Object {
 
 $serverBase = $ServerBaseUrl.TrimEnd('/')
 $existingBootstrap = $null
-try { $existingBootstrap = Invoke-RestMethod -Uri "$serverBase/client-bootstrap.json" -TimeoutSec 5 }
+try { $existingBootstrap = Get-UplmJsonUtf8 -Uri "$serverBase/client-bootstrap.json" }
 catch { Write-Warning "Server release history could not be read; the retained baseline will be used: $($_.Exception.Message)" }
 $releaseHistory = Get-UplmReleaseHistory `
     -CurrentVersion $Version `

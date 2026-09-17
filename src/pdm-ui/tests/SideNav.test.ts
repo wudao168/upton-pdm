@@ -139,4 +139,29 @@ describe('SideNav', () => {
     expect(document.body.textContent).not.toContain('移除侧栏版本号前的“版本”文字')
     wrapper.unmount()
   })
+
+  it('repairs UTF-8 release notes that were previously decoded as latin1', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({ database: 'MySql' }), { status: 200 })))
+    const wrapper = mount(SideNav, {
+      attachTo: document.body,
+      props: {
+        active: 'projects',
+        version: '2026.09.17.1303',
+        releaseHistory: [
+          { Version: '2026.09.17.1303', ReleasedAt: '2026-09-17T13:03:00+08:00', ReleaseNote: 'å®Œå–„BOMæ˜¾ç¤ºä¸Žæ’ä»¶æ›´æ–°ã€‚' },
+        ],
+      },
+      global: { plugins: [ElementPlus] },
+    })
+
+    await wrapper.get('.pdm-sidebar__version').trigger('click')
+    await flushPromises()
+    const historyButton = Array.from(document.body.querySelectorAll<HTMLButtonElement>('button')).find(button => button.textContent?.trim() === '版本记录')
+    historyButton?.click()
+    await wrapper.vm.$nextTick()
+
+    expect(document.body.textContent).toContain('完善BOM显示与插件更新。')
+    expect(document.body.textContent).not.toContain('å®Œå–„')
+    wrapper.unmount()
+  })
 })

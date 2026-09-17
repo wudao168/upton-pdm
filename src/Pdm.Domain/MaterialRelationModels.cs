@@ -36,7 +36,9 @@ public sealed record MaterialRelationOption(
     decimal QuantityPerSet,
     bool IsDefault,
     int SortOrder,
-    string? SelectionAdvice = null);
+    string? SelectionAdvice = null,
+    string? Specification = null,
+    string? Brand = null);
 
 public sealed record MaterialRelationGroup(
     Guid Id,

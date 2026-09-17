@@ -2892,7 +2892,7 @@ describe('BomManager', () => {
         groups: [{
           groupId: 'group', groupName: '伺服控制器', isRequired: true, selectionMode: 'Single', maxSelection: 1,
           isComplete: false, status: '待核对', expectedQuantity: 0, actualQuantity: 0, selectedOptionIds: [], reviewDecision: null,
-          options: [{ id: 'option', materialId: 'controller', materialCode: 'CTRL-1', materialName: '控制器', materialKind: 'Electrical', unitCode: '001', quantityMode: 'PerMainQuantity', quantityPerSet: 1, isDefault: true, sortOrder: 1, selectionAdvice: '适配 750W 电机' }],
+          options: [{ id: 'option', materialId: 'controller', materialCode: 'CTRL-1', materialName: '控制器', materialKind: 'Electrical', unitCode: '001', quantityMode: 'PerMainQuantity', quantityPerSet: 1, isDefault: true, sortOrder: 1, selectionAdvice: '适配 750W 电机', specification: 'HMI-750', brand: 'UPTON' }],
         }],
       }],
     }
@@ -2917,20 +2917,32 @@ describe('BomManager', () => {
 
     const drawer = wrapper.get('.pdm-material-relation-drawer')
     expect(drawer.text()).toContain('系统只提醒、不自动加入')
-    expect(drawer.text()).toContain('唯一推荐')
+    expect(drawer.text()).toContain('优先')
     expect(drawer.text()).toContain('适配 750W 电机')
+    expect(drawer.text()).toContain('HMI-750')
+    expect(drawer.text()).toContain('UPTON')
+    expect(drawer.get('[aria-label="关联物料候选列表"]').findAll('th').map(cell => cell.text())).toEqual(['选择', '名称', '型号', '品牌', '选型建议', '数量'])
+    expect(drawer.get('[aria-label="关联物料明细"] header').text()).toBe('关联物料明细配置 V1')
     expect((drawer.get('input[type="radio"]').element as HTMLInputElement).checked).toBe(false)
-    const noAccessoryButton = drawer.findAll('button').find(button => button.text() === '确认本次无需配套')!
+    const noAccessoryButton = drawer.findAll('button').find(button => button.text() === '无需配套')!
     expect(noAccessoryButton.classes()).toContain('pdm-material-relation-none-button')
+    const noAccessoryReason = drawer.get('input[aria-label="MOTOR-1 伺服控制器 无需配套原因"]')
+    const reopenButton = drawer.findAll('button').find(button => button.text() === '重新核对')!
+    const clearButton = drawer.findAll('button').find(button => button.text() === '清除选择')!
+    expect((noAccessoryReason.element as HTMLInputElement).disabled).toBe(true)
+    expect(reopenButton.attributes('disabled')).toBeDefined()
+    expect([noAccessoryButton, reopenButton, clearButton].every(button => button.classes().includes('pdm-material-relation-group-button'))).toBe(true)
     const confirmNoAccessory = vi.spyOn(ElMessageBox, 'confirm').mockRejectedValueOnce('cancel').mockResolvedValueOnce('confirm' as never)
     await noAccessoryButton.trigger('click')
     await flushPromises()
-    expect(wrapper.find('input[aria-label="MOTOR-1 伺服控制器 无需配套原因"]').exists()).toBe(false)
+    expect(wrapper.find('input[aria-label="MOTOR-1 伺服控制器 无需配套原因"]').exists()).toBe(true)
     await noAccessoryButton.trigger('click')
     await flushPromises()
     expect(confirmNoAccessory).toHaveBeenCalledWith(expect.stringContaining('会清空当前组已选'), '二次确认', expect.objectContaining({ confirmButtonText: '确认无需配套', confirmButtonClass: 'pdm-danger-confirm' }))
     const updatedDrawer = wrapper.get('.pdm-material-relation-drawer')
     expect(updatedDrawer.findAll('button').find(button => button.text() === '重新核对')!.classes()).toContain('pdm-material-relation-review-button')
+    expect((updatedDrawer.get('input[aria-label="MOTOR-1 伺服控制器 无需配套原因"]').element as HTMLInputElement).disabled).toBe(false)
+    expect(updatedDrawer.findAll('button').find(button => button.text() === '无需配套')!.attributes('disabled')).toBeDefined()
     await updatedDrawer.get('input[aria-label="MOTOR-1 伺服控制器 无需配套原因"]').setValue('仅补充主物料')
     await updatedDrawer.findAll('button').find(button => button.text() === '保存核对结果')!.trigger('click')
     await flushPromises()
@@ -2971,7 +2983,7 @@ describe('BomManager', () => {
     expect(mainPane.text()).not.toContain('ELE-2')
     expect(mainPane.text()).not.toContain('STD-1')
     expect(mainPane.text()).toContain('共 1 条')
-    expect(drawer.get('[aria-label="关联物料明细"]').text()).toContain('ACC-1')
+    expect(drawer.find('input[aria-label="选择关联物料 ACC-1"]').exists()).toBe(true)
     await drawer.get('input[aria-label="选择关联物料 ACC-1"]').setValue(true)
     await drawer.findAll('button').find(button => button.text() === '保存核对结果')!.trigger('click')
     await flushPromises()
@@ -2999,6 +3011,46 @@ describe('BomManager', () => {
 
     expect(materialApi.getMaterialRelationCompleteness).toHaveBeenCalledTimes(2)
     expect(warning).toHaveBeenCalledWith('BOM已保存；另有 2 个关联物料组待核对，不影响后续保存或发布')
+  })
+
+  it('does not publish a stale related-material warning when a newer refresh supersedes the save check', async () => {
+    const warning = vi.spyOn(ElMessage, 'warning').mockImplementation(() => undefined as never)
+    const main: BomItem = { id: 'main', sequence: 1, drawingNumber: 'MOTOR-1', name: '电机', quantity: 1, unit: '个', revision: 'W1', complete: true }
+    const incomplete: MaterialRelationCompleteness = {
+      projectId: 'project', isComplete: false, mainMaterialCount: 1, incompleteGroupCount: 1,
+      mainMaterials: [{
+        mainBomItemId: 'main', mainMaterialCode: 'MOTOR-1', mainMaterialName: '电机', mainQuantity: 1,
+        templateId: 'template', revisionId: 'revision', revisionVersion: 1, isComplete: false,
+        groups: [{ groupId: 'group', groupName: '驱动器', isRequired: true, selectionMode: 'Single', maxSelection: 1, isComplete: false, status: '待核对', expectedQuantity: 0, actualQuantity: 0, selectedOptionIds: [], reviewDecision: null, options: [] }],
+      }],
+    }
+    const complete: MaterialRelationCompleteness = {
+      ...incomplete, isComplete: true, incompleteGroupCount: 0,
+      mainMaterials: [{ ...incomplete.mainMaterials[0], isComplete: true, groups: [{ ...incomplete.mainMaterials[0].groups[0], isComplete: true, status: '已确认无需', reviewDecision: 'NoAccessory' }] }],
+    }
+    materialApi.getMaterialRelationCompleteness.mockResolvedValueOnce(incomplete)
+    const wrapper = mount(BomManager, { props: {
+      standard: [main], nonStandard: [], electrical: [], declarations: [], pending: false, editable: true, projectId: 'project', token: 'token',
+    } })
+    await flushPromises()
+    await wrapper.findAll('button[role="tab"]')[1].trigger('click')
+
+    let resolveSaveCheck!: (result: MaterialRelationCompleteness) => void
+    let resolveLatestRefresh!: (result: MaterialRelationCompleteness) => void
+    materialApi.getMaterialRelationCompleteness
+      .mockReturnValueOnce(new Promise(resolve => { resolveSaveCheck = resolve }))
+      .mockReturnValueOnce(new Promise(resolve => { resolveLatestRefresh = resolve }))
+    await wrapper.get('.pdm-bom-save-action').trigger('click')
+    await wrapper.setProps({ pending: true })
+    await wrapper.setProps({ pending: false })
+    await wrapper.setProps({ standard: [{ ...main, reconciliationUpdatedAt: '2026-09-17T10:00:00Z' }] })
+    resolveSaveCheck(incomplete)
+    await flushPromises()
+    resolveLatestRefresh(complete)
+    await flushPromises()
+
+    expect(warning).not.toHaveBeenCalled()
+    expect(wrapper.get('.pdm-bom-relation-action').attributes('title')).toBe('已核对')
   })
 
   it('invalidates the green relation button when BOM props change and ignores stale requests', async () => {

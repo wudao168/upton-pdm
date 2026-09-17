@@ -144,6 +144,26 @@ function managedDocumentNode(document: ManagedDocument): DocumentNode {
   }
 }
 
+export function buildDocumentDisplayRoot(
+  referenceRoot: DocumentNode,
+  documents: ManagedDocument[],
+  projectId: string,
+): DocumentNode {
+  if (referenceRoot.documentId || referenceRoot.children.length > 0) return referenceRoot
+
+  const models = documents
+    .filter(document => document.projectId === projectId && document.kind !== 'Drawing')
+    .map(managedDocumentNode)
+    .sort((left, right) => left.drawingNumber.localeCompare(right.drawingNumber, 'zh-CN', { numeric: true }))
+  if (models.length === 0) return referenceRoot
+
+  return {
+    ...referenceRoot,
+    name: '三维图档（尚未建立装配引用结构）',
+    children: models,
+  }
+}
+
 function firstMatchingNode(root: DocumentNode | undefined, predicate: (node: DocumentNode) => boolean): DocumentNode | undefined {
   if (!root) return undefined
   if (predicate(root)) return root
@@ -282,9 +302,10 @@ export function usePdmWorkspace() {
   const managedDocumentNodes = computed(() => managedDocuments.value.map(managedDocumentNode))
   const currentProjectManagedDocuments = computed(() => managedDocuments.value.filter(document => document.projectId === project.value.id))
   const drawingNodes = computed(() => currentProjectManagedDocuments.value.map(managedDocumentNode).filter(node => node.kind === 'Drawing'))
-  const selectedNode = computed(() => findNode(root.value, selectedId.value)
+  const documentDisplayRoot = computed(() => buildDocumentDisplayRoot(root.value, managedDocuments.value, project.value.id))
+  const selectedNode = computed(() => findNode(documentDisplayRoot.value, selectedId.value)
     ?? managedDocumentNodes.value.find(node => node.id === selectedId.value)
-    ?? root.value)
+    ?? documentDisplayRoot.value)
   const allBomItems = computed(() => [...standardBom.value, ...nonStandardBom.value, ...unclassifiedBom.value, ...electricalBom.value])
   function bomItemForNode(node: DocumentNode) {
     const items = allBomItems.value.filter(item => !item.manuallyExcluded)
@@ -298,11 +319,11 @@ export function usePdmWorkspace() {
   const selectedDocumentId = computed(() => selectedNode.value.documentId)
   const filteredTree = computed<DocumentNode | undefined>(() => documentFilter.value === 'drawing'
     ? undefined
-    : filterNode(root.value, searchQuery.value, documentFilter.value))
+    : filterNode(documentDisplayRoot.value, searchQuery.value, documentFilter.value))
   const filteredDrawings = computed(() => drawingNodes.value.filter(node => matchesQuery(node, searchQuery.value)))
   const documentFilterCounts = computed(() => {
-    const unresolvedIssues = countUniqueIssues(root.value)
-    return { ...countUniqueDocumentKinds(root.value, drawingNodes.value), issue: unresolvedIssues }
+    const unresolvedIssues = countUniqueIssues(documentDisplayRoot.value)
+    return { ...countUniqueDocumentKinds(documentDisplayRoot.value, drawingNodes.value), issue: unresolvedIssues }
   })
   const relatedNodes = computed(() => {
     const documentId = selectedNode.value.documentId
@@ -312,7 +333,7 @@ export function usePdmWorkspace() {
       if (relation.modelDocumentId === documentId) relatedIds.add(relation.drawingDocumentId)
       if (relation.drawingDocumentId === documentId) relatedIds.add(relation.modelDocumentId)
     }
-    return [...relatedIds].map(id => findNodeByDocumentId(root.value, id)
+    return [...relatedIds].map(id => findNodeByDocumentId(documentDisplayRoot.value, id)
       ?? managedDocumentNodes.value.find(node => node.documentId === id))
       .filter((node): node is DocumentNode => Boolean(node))
   })

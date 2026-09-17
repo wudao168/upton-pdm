@@ -127,6 +127,12 @@ function stageLabel(stage: string | number) {
   } as Record<string, string>)[key] ?? String(stage)
 }
 
+function notificationActionLabel(notification: UserNotification) {
+  return notification.category === 'MaterialMasterRejected' || notification.category === 'MaterialCodeApplicationRejected'
+    ? '查看料品'
+    : '查看发布包'
+}
+
 function attentionIndex(value: EditLockSummary['attentionLevel']) {
   return typeof value === 'number' ? value : ['Normal', 'Reminder', 'StrongReminder', 'Overdue', 'Reclaimable'].indexOf(value)
 }
@@ -348,7 +354,7 @@ async function resetPassword(task: PasswordResetTask) {
               <td :title="row.content">{{ row.content }}</td>
               <td>{{ formatDateTime(row.createdAt) }}</td>
               <td>
-                <button v-if="row.notification" type="button" class="pdm-text-action" @click.stop="$emit('openNotification', row.notification)">查看发布包</button>
+                <button v-if="row.notification" type="button" class="pdm-text-action" @click.stop="$emit('openNotification', row.notification)">{{ notificationActionLabel(row.notification) }}</button>
                 <button v-else-if="row.approval?.kind === 'validationPlan'" type="button" class="pdm-text-action" @click.stop="$emit('openValidationPlan', row.approval.projectId)">查看</button>
                 <button v-else-if="row.approval" type="button" class="pdm-text-action" @click.stop="$emit('open', row.approval.projectId, row.approval.releasePackageId!)">查看</button>
                 <button v-else-if="row.material" type="button" class="pdm-text-action" @click.stop="$emit('openMaterialApprovals')">查看申请</button>

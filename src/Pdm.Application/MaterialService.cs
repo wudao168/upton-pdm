@@ -519,8 +519,13 @@ public sealed class MaterialService(
             throw new PdmRuleException("审批备注不能超过1000个字符。");
         if (!approved)
         {
+            var decidedAt = timeProvider.GetUtcNow();
             var rejected = await materials.DecideMaterialCodeApplicationAsync(application.Id, expectedRowVersion, MaterialCodeApplicationStatus.Rejected,
-                actor, normalizedComment, null, null, timeProvider.GetUtcNow(), cancellationToken);
+                actor, normalizedComment, null, null, decidedAt, cancellationToken);
+            await repository.CreateUserNotificationsAsync([new UserNotification(
+                Guid.NewGuid(), application.RequestedBy, "MaterialCodeApplicationRejected", "料号申请已退回",
+                $"{application.ApplicationName ?? application.BomItemName ?? "料号申请"} 被 {actor} 退回：{normalizedComment}",
+                application.ProjectId, null, $"material-code-application:{application.Id:N}:rejected:v{rejected.RowVersion}", decidedAt, null)], cancellationToken);
             await AuditAsync(actor, "material-code.application.reject", rejected.Id, rejected.DecisionComment ?? "退回", cancellationToken);
             return (rejected, null, null);
         }
@@ -968,6 +973,10 @@ public sealed class MaterialService(
         if (existing.ApprovalStatus != MaterialApprovalStatus.Draft) throw new PdmRuleException("只有待审批料品申请可以退回。");
         var rejectedAt = timeProvider.GetUtcNow();
         var rejected = await materials.ArchiveMaterialAsync(materialId, expectedRowVersion, actor, rejectedAt, cancellationToken);
+        await repository.CreateUserNotificationsAsync([new UserNotification(
+            Guid.NewGuid(), existing.CreatedBy, "MaterialMasterRejected", "料品申请已退回",
+            $"{existing.MaterialCode} · {existing.Name} 被 {actor} 退回：{normalizedComment}",
+            null, null, $"material-master:{existing.Id:N}:rejected:v{rejected.RowVersion}", rejectedAt, null)], cancellationToken);
         await AuditAsync(actor, "material.reject", rejected.Id, $"退回料品申请：{rejected.MaterialCode} · {rejected.Name}；原因：{normalizedComment}", cancellationToken);
         return rejected;
     }

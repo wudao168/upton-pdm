@@ -5,7 +5,7 @@
         [string]$Fallback = '历史发布未填写说明。'
     )
 
-    if (-not [string]::IsNullOrWhiteSpace($ReleaseNote)) { return $ReleaseNote.Trim() }
+    if (-not [string]::IsNullOrWhiteSpace($ReleaseNote)) { return (ConvertFrom-UplmMojibake $ReleaseNote).Trim() }
     $separator = $Version.IndexOf('-')
     if ($separator -lt 0) { return $Fallback }
     $tag = $Version.Substring($separator + 1).Trim()
@@ -40,6 +40,39 @@ function Get-UplmPropertyValue {
     $property = $InputObject.PSObject.Properties[$Name]
     if ($null -eq $property) { return $null }
     return $property.Value
+}
+
+function ConvertFrom-UplmMojibake {
+    param([string]$Value)
+
+    if ([string]::IsNullOrWhiteSpace($Value)) { return $Value }
+    $current = $Value
+    $strictUtf8 = New-Object Text.UTF8Encoding($false, $true)
+    $windows1252 = [Text.Encoding]::GetEncoding(1252)
+    for ($attempt = 0; $attempt -lt 3; $attempt++) {
+        if ($current -match '[\u3400-\u9fff]') { break }
+        try {
+            $bytes = $windows1252.GetBytes($current)
+            $decoded = $strictUtf8.GetString($bytes)
+        }
+        catch { break }
+        if ($decoded -eq $current -or $decoded -notmatch '[\u3400-\u9fff]') { break }
+        $current = $decoded
+    }
+    return $current
+}
+
+function Get-UplmJsonUtf8 {
+    param([Parameter(Mandatory = $true)][string]$Uri)
+
+    $client = New-Object Net.WebClient
+    try {
+        $bytes = $client.DownloadData($Uri)
+        return ([Text.Encoding]::UTF8.GetString($bytes) | ConvertFrom-Json)
+    }
+    finally {
+        $client.Dispose()
+    }
 }
 
 function Get-UplmReleaseHistory {

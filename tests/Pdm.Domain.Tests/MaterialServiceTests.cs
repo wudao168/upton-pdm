@@ -37,7 +37,7 @@ public sealed class MaterialServiceTests
     [Fact]
     public async Task MaterialManagerCanRejectPendingMaterialMasterWithReason()
     {
-        var service = CreateService(out _);
+        var service = CreateService(out _, out var repository, out _);
         var created = await service.CreateAsync(new(
             null, "待退回普通料品", MaterialKind.Standard, MaterialSupplyMode.Purchase, "001",
             "MODEL-REJECT", null, null, "UPTON", null, null, null, CategoryCode: "0102"),
@@ -53,6 +53,10 @@ public sealed class MaterialServiceTests
         Assert.True(rejected.IsArchived);
         Assert.Equal("standardizer", rejected.ArchivedBy);
         Assert.Empty(await service.ListPendingMasterMaterialsAsync("standardizer", UserRole.ProcessReviewer, default));
+        var notification = Assert.Single(await repository.ListUserNotificationsAsync("engineer", 20, default));
+        Assert.Equal("MaterialMasterRejected", notification.Category);
+        Assert.Equal("料品申请已退回", notification.Title);
+        Assert.Contains("型号资料不完整", notification.Content);
     }
 
     [Fact]
@@ -204,7 +208,7 @@ public sealed class MaterialServiceTests
     [Fact]
     public async Task Approval_UsesConfigured0101RuleAndCreatesDeterministicPreviewTask()
     {
-        var service = CreateService(out var materials);
+        var service = CreateService(out var materials, out var repository, out _);
         var rules = await service.ListCategoryRulesAsync(default);
 
         Assert.Collection(rules.OrderBy(rule => rule.U9CategoryCode),
@@ -1421,7 +1425,7 @@ public sealed class MaterialServiceTests
     [Fact]
     public async Task MaterialCodeApplication_RejectionRequiresReasonAndPersistsTrimmedComment()
     {
-        var service = CreateService(out var materials);
+        var service = CreateService(out var materials, out var repository, out _);
         var application = await materials.CreateMaterialCodeApplicationAsync(new(
             Guid.NewGuid(), ProjectId, Guid.NewGuid(), MaterialCodeApplicationStatus.Pending,
             "engineer", DateTimeOffset.UtcNow, null, null, null, null, null, 1), default);
@@ -1437,6 +1441,10 @@ public sealed class MaterialServiceTests
             application.Id, application.RowVersion, false, "  型号资料不完整  ", "standardizer", UserRole.ProcessReviewer, default);
         Assert.Equal(MaterialCodeApplicationStatus.Rejected, decision.Application.Status);
         Assert.Equal("型号资料不完整", decision.Application.DecisionComment);
+        var notification = Assert.Single(await repository.ListUserNotificationsAsync("engineer", 20, default));
+        Assert.Equal("MaterialCodeApplicationRejected", notification.Category);
+        Assert.Equal(ProjectId, notification.ProjectId);
+        Assert.Contains("型号资料不完整", notification.Content);
     }
 
     [Fact]

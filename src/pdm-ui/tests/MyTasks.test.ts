@@ -26,6 +26,25 @@ describe('MyTasks', () => {
     expect(onMarkAllNotificationsRead).toHaveBeenCalledOnce()
   })
 
+  it('shows a material rejection message with a material action', async () => {
+    const notification = {
+      id: 'notification-material', recipient: 'engineer', category: 'MaterialMasterRejected',
+      title: '料品申请已退回', content: '01021000055 · RFID读写头 被 standardizer 退回：型号资料不完整',
+      sourceKey: 'material-master:material-1:rejected:v7', createdAt: '2026-09-17T07:00:00Z',
+    }
+    const wrapper = mount(MyTasks, {
+      props: {
+        tasks: [], notifications: [notification], locks: [], materialCodeTasks: [], passwordResetTasks: [], pending: false,
+        onRequestRelease: vi.fn(), onForceRelease: vi.fn(), onResetPassword: vi.fn(),
+      },
+    })
+
+    expect(wrapper.text()).toContain('料品申请已退回')
+    expect(wrapper.text()).toContain('型号资料不完整')
+    await wrapper.findAll('button').find(button => button.text() === '查看料品')!.trigger('click')
+    expect(wrapper.emitted('openNotification')).toEqual([[notification]])
+  })
+
   it('deep-links an approval task to its exact release package', async () => {
     const wrapper = mount(MyTasks, {
       props: {

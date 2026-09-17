@@ -1320,6 +1320,8 @@ export interface MaterialRelationOption {
   isDefault: boolean
   sortOrder: number
   selectionAdvice?: string | null
+  specification?: string | null
+  brand?: string | null
 }
 
 export interface MaterialRelationGroup {

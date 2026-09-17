@@ -619,9 +619,13 @@ internal sealed class PdmApiClient : IDisposable
 internal sealed class LoginResponseDto
 {
     public string AccessToken { get; set; }
+    public string ExpiresAt { get; set; }
+    public string ResumeToken { get; set; }
     public string Username { get; set; }
     public string DisplayName { get; set; }
     public string Role { get; set; }
+    public List<string> Roles { get; set; }
+    public List<string> Permissions { get; set; }
     public Guid PrimaryCompanyId { get; set; }
     public Guid ActiveCompanyId { get; set; }
     public string ActiveCompanyName { get; set; }
@@ -633,6 +637,7 @@ internal sealed class CompanyOptionDto
 {
     public Guid Id { get; set; }
     public string Name { get; set; }
+    public string Code { get; set; }
 }
 
 internal sealed class ProjectDto
