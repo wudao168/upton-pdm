@@ -208,6 +208,11 @@ function installApiMock(projectsBeforeDefault: Array<Record<string, unknown>> = 
         { id: 'version-w1', documentId: 'doc-root', revision: { display: 'W1' }, status: 'Work', fileLength: 10, sha256: 'A'.repeat(64), createdBy: 'engineer', createdAt: '2026-08-10T02:00:00Z', changeNote: '首次存档' },
       ])
     }
+    if (url.endsWith('/api/documents/doc-part/versions')) {
+      return json([
+        { id: 'version-a', documentId: 'doc-part', revision: { display: 'A' }, status: 'Work', fileLength: 30, sha256: 'C'.repeat(64), createdBy: 'engineer', createdAt: '2026-08-12T03:04:05Z', changeNote: '首次存档' },
+      ])
+    }
     if (url.includes('/api/documents/doc-root/versions/compare')) {
       return json({ documentId: 'doc-root', left: { revision: { display: 'W1' }, status: 0, createdBy: 'engineer', createdAt: '2026-08-10T02:00:00Z', changeNote: '首次存档' }, right: { revision: { display: 'W2' }, status: 0, createdBy: 'engineer', createdAt: '2026-08-11T02:00:00Z', changeNote: '调整材料' }, propertyChanges: [{ kind: 2, name: 'Material', previousValue: 'Q235B', currentValue: '304' }], referenceChanges: [{ kind: 5, instancePath: 'ROOT/P-001', previousValue: '1', currentValue: '2' }], bomChanges: [{ kind: 3, drawingNumber: 'P-001', field: '材料', previousValue: 'Q235B', currentValue: '304' }] })
     }
@@ -1438,7 +1443,9 @@ describe('PLM client workspace', () => {
     const properties = wrapper.get('[aria-label="图档属性"]')
     expect(properties.text()).toContain('型号10mm')
     expect(properties.text()).toContain('材质Q235B')
-    expect(properties.findAll('dt').map(item => item.text())).toEqual(['物料编码', '名称', '型号', '品牌', '材质', '表面处理', '热处理'])
+    expect(properties.text()).toContain('最近存档')
+    expect(properties.text()).toContain('2026/8/12 11:04:05')
+    expect(properties.findAll('dt').map(item => item.text())).toEqual(['物料编码', '名称', '型号', '品牌', '材质', '表面处理', '热处理', '最近存档'])
   })
 
   it('opens only PLM-controlled document identities in SolidWorks from the entity button and tree menu', async () => {

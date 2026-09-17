@@ -32,6 +32,7 @@ const api = vi.hoisted(() => ({
   downloadMaterialAttachment: vi.fn(),
   getMaterialRemovalReadiness: vi.fn(),
   approveMaterial: vi.fn(),
+  rejectMaterial: vi.fn(),
   executeMaterialSyncTask: vi.fn(),
   createMaterialSyncBatch: vi.fn(),
   getMaterialSyncBatch: vi.fn(),
@@ -378,7 +379,7 @@ describe('MaterialManagement', () => {
     expect(approvalTable.text()).toContain(material.specification)
     expect(approvalTable.text()).toContain(material.brand)
     expect(approvalTable.text()).toContain('料品主档')
-    expect(approvalTable.findAll('button').some(button => button.text() === '退回')).toBe(false)
+    expect(approvalTable.findAll('button').some(button => button.text() === '退回')).toBe(true)
     await approvalTable.findAll('button').find(button => button.text() === '批准')!.trigger('click')
     await flushPromises()
     expect(confirm).toHaveBeenCalled()
@@ -1137,6 +1138,35 @@ describe('MaterialManagement', () => {
     expect(api.decideMaterialCodeApplication).toHaveBeenNthCalledWith(2, 'application-2', 9, false, '资料不完整', 'token')
     expect(wrapper.get('.material-approval-feedback').text()).toContain('审批完成')
     expect(wrapper.get('.material-approval-feedback').text()).toContain('共 2 项，已退回 2 项，失败 0 项')
+    prompt.mockRestore()
+  })
+
+  it('普通料品申请选中后可批量退回', async () => {
+    const material = {
+      ...(await api.listMaterials())[0], id: 'master-pending', materialCode: '01021000055', name: 'RFID读写头',
+      kind: 'Standard' as const, categoryCode: '0102', approvalStatus: 'Draft' as const, rowVersion: 6,
+    }
+    api.listPendingMasterMaterials.mockResolvedValueOnce([material]).mockResolvedValue([])
+    api.rejectMaterial.mockResolvedValue({ ...material, isArchived: true, archivedBy: 'standardizer', rowVersion: 7 })
+    const prompt = vi.spyOn(ElMessageBox, 'prompt').mockResolvedValue({ value: '型号资料不完整', action: 'confirm' } as never)
+    const wrapper = mount(MaterialManagement, {
+      props: { token: 'token', canEdit: true, canApprove: true, canDecideMaterialCode: true, canManageIntegration: false, requestedTab: 'code-approvals' },
+      global: { plugins: [ElementPlus] },
+    })
+    await flushPromises()
+
+    const table = wrapper.findAllComponents({ name: 'ElTable' }).find(component => component.classes().includes('material-code-approval-table'))!
+    const approvalRow = (table.props('data') as Array<{ masterMaterial?: PdmMaterial }>)[0]
+    table.vm.$emit('selection-change', [approvalRow])
+    await flushPromises()
+    const rejectButton = wrapper.get('.material-code-approval-toolbar').findAll('button').find(button => button.text() === '批量退回')!
+    expect(rejectButton.attributes('disabled')).toBeUndefined()
+
+    await rejectButton.trigger('click')
+    await flushPromises()
+
+    expect(api.rejectMaterial).toHaveBeenCalledWith('master-pending', 6, '型号资料不完整', 'token')
+    expect(wrapper.get('.material-approval-feedback').text()).toContain('共 1 项，已退回 1 项，失败 0 项')
     prompt.mockRestore()
   })
 

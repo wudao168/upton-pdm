@@ -35,6 +35,10 @@ public sealed record SaveProjectValidationPlanCommand(
     IReadOnlyList<SaveProjectValidationPlanItemCommand> Items,
     long? ExpectedRowVersion = null);
 
+public sealed record AppendProjectValidationPlanItemsCommand(
+    IReadOnlyList<SaveProjectValidationPlanItemCommand> Items,
+    long ExpectedRowVersion);
+
 public sealed record ValidationPlanExportData(
     Project Project,
     ProjectValidationPlan Plan,
@@ -85,6 +89,7 @@ public interface IValidationPlanRepository
     Task<ProjectValidationPlan?> FindPlanAsync(Guid projectId, CancellationToken cancellationToken);
     Task<ProjectValidationPlan?> FindPlanByIdAsync(Guid planId, CancellationToken cancellationToken);
     Task<ProjectValidationPlan> SavePlanAsync(ProjectValidationPlan plan, long? expectedRowVersion, CancellationToken cancellationToken);
+    Task<ProjectValidationPlan> AppendPlanItemsAsync(Guid planId, IReadOnlyList<ProjectValidationPlanItem> items, long expectedRowVersion, string actor, DateTimeOffset updatedAt, CancellationToken cancellationToken);
     Task<ProjectValidationPlan> CreateRevisionAsync(ProjectValidationPlan plan, CancellationToken cancellationToken);
     Task<ProjectValidationPlan> SubmitAsync(Guid planId, long expectedRowVersion, string workflowCode, int workflowVersion, IReadOnlyList<ValidationPlanApprovalTask> tasks, string actor, DateTimeOffset submittedAt, CancellationToken cancellationToken);
     Task<ProjectValidationPlan> DecideAsync(Guid taskId, string actor, ApprovalDecision decision, string? comment, DateTimeOffset decidedAt, CancellationToken cancellationToken);

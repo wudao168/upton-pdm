@@ -195,6 +195,34 @@ public sealed class ValidationPlanServiceTests
     }
 
     [Fact]
+    public async Task EffectivePlan_AllowsAppendingItemsWithoutReplacingApprovedContent()
+    {
+        var (service, plans, _, _, project) = await CreateFixtureAsync();
+        var category = await service.SaveCategoryAsync(null, new("安全相关", 10, true, null), "admin", UserRole.Administrator, default);
+        var approvedItem = await service.SaveItemAsync(null, new(category.Id, "防护门联锁有效", "内部评审", 10, true, null), "admin", UserRole.Administrator, default);
+        var addedItem = await service.SaveItemAsync(null, new(category.Id, "急停回路验证", "内部评审", 20, true, null), "admin", UserRole.Administrator, default);
+        var draft = await service.SavePlanAsync(project.Id,
+            new("管理员", new DateOnly(2026, 9, 17), [new(approvedItem.Id, null, "内部评审", null, null, null, null, null, 1)]),
+            "admin", UserRole.Administrator, default);
+        var effective = await MakeEffectiveAsync(plans, draft);
+        var approvedPlanItem = Assert.Single(effective.Items);
+
+        var saved = await service.AppendPlanItemsAsync(project.Id,
+            new([new(addedItem.Id, null, "内部评审", null, null, null, null, null, 1), new(null, "人工确认新增防护项", "内部评审", null, null, null, null, null, 2)], effective.RowVersion),
+            "admin", UserRole.Administrator, default);
+
+        Assert.Equal(ProjectValidationPlanState.Effective, saved.State);
+        Assert.Equal(effective.RowVersion + 1, saved.RowVersion);
+        Assert.Equal(3, saved.Items.Count);
+        Assert.Contains(saved.Items, item => item.Id == approvedPlanItem.Id && item.ValidationContent == approvedPlanItem.ValidationContent);
+        Assert.Contains(saved.Items, item => item.CatalogItemId == addedItem.Id);
+        Assert.Contains(saved.Items, item => item.CatalogItemId is null && item.ValidationContent == "人工确认新增防护项");
+        await Assert.ThrowsAsync<PdmConflictException>(() => service.AppendPlanItemsAsync(project.Id,
+            new([new(approvedItem.Id, null, "内部评审", null, null, null, null, null, 1)], saved.RowVersion),
+            "admin", UserRole.Administrator, default));
+    }
+
+    [Fact]
     public async Task PlanDocumentUpload_AllowsExcel_AndVersionsWithoutOverwriting()
     {
         var (service, plans, _, storage, project) = await CreateFixtureAsync();

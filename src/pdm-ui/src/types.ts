@@ -2460,3 +2460,8 @@ export interface SaveProjectValidationPlanInput {
   }>
   expectedRowVersion?: number | null
 }
+
+export interface AppendProjectValidationPlanItemsInput {
+  items: SaveProjectValidationPlanInput['items']
+  expectedRowVersion: number
+}

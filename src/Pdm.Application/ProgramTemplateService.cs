@@ -122,18 +122,18 @@ public sealed class ProgramTemplateService(
         var current = await RequireEditableDraftAsync(revisionId, actor, role, cancellationToken);
         var template = await templates.FindAsync(current.TemplateId, cancellationToken)
             ?? throw new PdmNotFoundException("程序模板不存在。");
-        var parameters = NormalizeParameters(template.AssetType, revisionId, command.Parameters);
+        var parameters = NormalizeDraftParameters(revisionId, command.Parameters);
         var updated = current with
         {
-            Name = Required(command.Name, "模板名称", 200),
+            Name = Optional(command.Name, 200),
             Category = Optional(command.Category, 100),
-            Description = Required(command.Description, "功能说明", 2000),
-            Vendor = Required(command.Vendor, "厂商", 100),
-            Platform = Required(command.Platform, "平台", 100),
-            SoftwareVersion = Required(command.SoftwareVersion, "软件版本", 100),
+            Description = Optional(command.Description, 2000),
+            Vendor = Optional(command.Vendor, 100),
+            Platform = Optional(command.Platform, 100),
+            SoftwareVersion = Optional(command.SoftwareVersion, 100),
             ApplicableSeries = Optional(command.ApplicableSeries, 300),
             Tags = NormalizeTags(command.Tags),
-            ChangeNote = Required(command.ChangeNote, "版本说明", 1000),
+            ChangeNote = Optional(command.ChangeNote, 1000),
             Parameters = parameters
         };
         var saved = await templates.UpdateDraftAsync(updated, command.ExpectedRowVersion, cancellationToken);
@@ -329,39 +329,45 @@ public sealed class ProgramTemplateService(
         string actor,
         DateTimeOffset now)
     {
-        var parameters = NormalizeParameters(command.AssetType, revisionId, command.Parameters);
+        var parameters = NormalizeDraftParameters(revisionId, command.Parameters);
         return new ProgramTemplateRevision(
             revisionId, templateId, major, minor, patch, attempt, ProgramTemplateRevisionState.Draft,
-            Required(command.Name, "模板名称", 200), Optional(command.Category, 100), Required(command.Description, "功能说明", 2000),
-            Required(command.Vendor, "厂商", 100), Required(command.Platform, "平台", 100), Required(command.SoftwareVersion, "软件版本", 100),
-            Optional(command.ApplicableSeries, 300), NormalizeTags(command.Tags), Required(command.ChangeNote, "版本说明", 1000),
+            Optional(command.Name, 200), Optional(command.Category, 100), Optional(command.Description, 2000),
+            Optional(command.Vendor, 100), Optional(command.Platform, 100), Optional(command.SoftwareVersion, 100),
+            Optional(command.ApplicableSeries, 300), NormalizeTags(command.Tags), Optional(command.ChangeNote, 1000),
             null, null, null, null, null, null, null, null, actor, now, null, null, 1, parameters);
     }
 
-    private static IReadOnlyList<ProgramTemplateParameter> NormalizeParameters(
-        ProgramTemplateAssetType assetType,
+    private static IReadOnlyList<ProgramTemplateParameter> NormalizeDraftParameters(
         Guid revisionId,
         IReadOnlyList<ProgramTemplateParameterInput>? inputs)
     {
         inputs ??= [];
-        if (assetType == ProgramTemplateAssetType.PlcFunctionBlock && inputs.Count == 0)
-            throw new PdmRuleException("PLC功能块至少需要定义一个输入、输出或双向接口。");
-        var normalized = inputs.Select((item, index) => new ProgramTemplateParameter(
+        return inputs.Select((item, index) => new ProgramTemplateParameter(
             Guid.NewGuid(), revisionId, item.Direction, index,
-            Required(item.Name, "接口名称", 100), Required(item.DataType, "数据类型", 100),
+            Optional(item.Name, 100), Optional(item.DataType, 100),
             Optional(item.DefaultValue, 200), Optional(item.Unit, 50), Optional(item.Description, 500))).ToArray();
-        var duplicate = normalized.GroupBy(item => item.Name, StringComparer.OrdinalIgnoreCase).FirstOrDefault(group => group.Count() > 1);
-        if (duplicate is not null) throw new PdmRuleException($"接口名称不能重复：{duplicate.Key}。");
-        return normalized;
     }
 
     private static void ValidateSubmission(ProgramTemplateAssetType assetType, ProgramTemplateRevision revision)
     {
-        if (revision.PackageStoragePath is null || revision.PackageSha256 is null) throw new PdmRuleException("请先上传ZIP程序包。");
+        Required(revision.Name, "模板名称", 200);
+        Required(revision.Description, "功能说明", 2000);
+        Required(revision.Vendor, "厂商", 100);
+        Required(revision.Platform, "平台", 100);
+        Required(revision.SoftwareVersion, "软件版本", 100);
+        Required(revision.ChangeNote, "版本说明", 1000);
+        if (revision.PackageStoragePath is null || revision.PackageSha256 is null) throw new PdmRuleException("请先上传ZIP或RAR程序包。");
         if (revision.EvidenceStoragePath is null || revision.EvidenceSha256 is null) throw new PdmRuleException("请先上传离线测试证据。");
-        if (string.IsNullOrWhiteSpace(revision.ChangeNote)) throw new PdmRuleException("版本说明不能为空。");
         if (assetType == ProgramTemplateAssetType.PlcFunctionBlock && revision.Parameters.Count == 0)
             throw new PdmRuleException("PLC功能块必须维护接口定义。");
+        foreach (var parameter in revision.Parameters)
+        {
+            Required(parameter.Name, "接口名称", 100);
+            Required(parameter.DataType, "数据类型", 100);
+        }
+        var duplicate = revision.Parameters.GroupBy(item => item.Name, StringComparer.OrdinalIgnoreCase).FirstOrDefault(group => group.Count() > 1);
+        if (duplicate is not null) throw new PdmRuleException($"接口名称不能重复：{duplicate.Key}。");
     }
 
     private async Task RequirePermissionAsync(string actor, UserRole role, string permission, CancellationToken cancellationToken)

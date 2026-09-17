@@ -38,7 +38,7 @@ describe('ProgramTemplateLibrary', () => {
       },
       global: {
         stubs: {
-          ElButton: { template: '<button type="button" @click="$emit(\'click\')"><slot /></button>' },
+          ElButton: { template: '<button type="button"><slot /></button>' },
           ElDrawer: { props: ['modelValue'], template: '<section v-if="modelValue"><slot /><slot name="footer" /></section>' },
           ElTable: { template: '<div><slot /></div>' },
           ElTableColumn: { props: ['label'], template: '<span class="table-column-label">{{ label }}</span>' },
@@ -70,8 +70,43 @@ describe('ProgramTemplateLibrary', () => {
     await wrapper.findAll('button').find(button => button.text().includes('提交审核'))!.trigger('click')
     await flushPromises()
 
-    expect(warning).toHaveBeenCalledWith('请先上传ZIP程序包')
+    expect(warning).toHaveBeenCalledWith('请先上传ZIP或RAR程序包')
     expect(api.createProgramTemplate).not.toHaveBeenCalled()
     expect(api.submitProgramTemplateRevision).not.toHaveBeenCalled()
+  })
+
+  it('草稿可以信息不完整保存，并开放RAR和Word文件', async () => {
+    vi.stubGlobal('crypto', {})
+    api.createProgramTemplate.mockResolvedValue({
+      id: 'template-1',
+      assetType: 'PlcFunctionBlock',
+      revisions: [{ id: 'revision-1', version: 'v1.0.0', attemptNumber: 1, rowVersion: 1 }],
+    })
+    const wrapper = mount(ProgramTemplateLibrary, {
+      props: { token: 'token', username: 'developer', permissions: ['program-template.view', 'program-template.submit'] },
+      global: {
+        stubs: {
+          ElButton: { template: '<button type="button"><slot /></button>' },
+          ElDrawer: { props: ['modelValue'], template: '<section v-if="modelValue"><slot /><slot name="footer" /></section>' },
+          ElTable: { template: '<div><slot /></div>' }, ElTableColumn: true,
+          ElSelect: { props: ['modelValue', 'allowCreate', 'filterable'], template: '<div class="select-stub" :data-allow-create="allowCreate" :data-filterable="filterable"><slot /></div>' },
+          ElOption: true, ElDialog: true, ElForm: { template: '<form><slot /></form>' }, ElFormItem: { template: '<label><slot /></label>' },
+          ElInput: true, ElTag: true, ElEmpty: true, ElProgress: true, ElButtonGroup: true,
+          ElCheckbox: true, ElCheckboxGroup: true, ElRadioButton: true, ElRadioGroup: true,
+        },
+      },
+    })
+    await flushPromises()
+    await wrapper.findAll('button').find(button => button.text().includes('上传程序模板'))!.trigger('click')
+    await flushPromises()
+
+    expect(wrapper.find('input[accept=".zip,.rar"]').exists()).toBe(true)
+    expect(wrapper.find('input[accept=".pdf,.doc,.docx,.xls,.xlsx,.png,.jpg,.jpeg"]').exists()).toBe(true)
+    expect(wrapper.findAll('.select-stub[data-allow-create]').length).toBe(3)
+    await wrapper.findAll('button').find(button => button.text().includes('保存草稿'))!.trigger('click')
+    await flushPromises()
+
+    expect(api.createProgramTemplate).toHaveBeenCalledOnce()
+    expect(api.createProgramTemplate.mock.calls[0]![0]).toMatchObject({ name: '', vendor: '', platform: '', softwareVersion: '' })
   })
 })

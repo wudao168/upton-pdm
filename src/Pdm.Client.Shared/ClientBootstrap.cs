@@ -201,13 +201,13 @@ internal static class ClientPackageUpdater
         if (package == null
             || string.IsNullOrWhiteSpace(package.Version)
             || string.IsNullOrWhiteSpace(package.PackageUrl)
-            || string.IsNullOrWhiteSpace(package.Sha256)
-            || !IsUpdateAvailable(GetInstalledVersion(targetDirectory), package.Version))
+            || string.IsNullOrWhiteSpace(package.Sha256))
         {
             return false;
         }
 
         var installedVersion = GetInstalledVersion(targetDirectory);
+        var repairFailedUpdate = false;
         var componentRoot = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
             "UPLM",
@@ -220,14 +220,26 @@ internal static class ClientPackageUpdater
         {
             if (File.Exists(pendingPath))
             {
-                if (TryReadPendingUpdate(pendingPath, out var existing, out _)
-                    && string.Equals(existing.Version, package.Version, StringComparison.OrdinalIgnoreCase)
-                    && IsUpdateAvailable(installedVersion, existing.Version))
+                if (TryReadPendingUpdate(pendingPath, out var existing, out _))
                 {
-                    return false;
+                    var samePackage = string.Equals(
+                        existing.Version,
+                        package.Version,
+                        StringComparison.OrdinalIgnoreCase);
+                    var hasInstallError = File.Exists(pendingPath + ".error.txt");
+                    if (samePackage && !hasInstallError)
+                    {
+                        return false;
+                    }
+                    repairFailedUpdate = samePackage && hasInstallError;
                 }
                 QuarantinePendingUpdate(pendingPath);
             }
+        }
+
+        if (!repairFailedUpdate && !IsUpdateAvailable(installedVersion, package.Version))
+        {
+            return false;
         }
 
         Directory.CreateDirectory(stageRoot);
@@ -287,6 +299,7 @@ internal static class ClientPackageUpdater
         lock (PendingUpdateSync)
         {
             Directory.CreateDirectory(Path.GetDirectoryName(pendingPath));
+            try { File.Delete(pendingPath + ".error.txt"); } catch { }
             WriteAllTextAtomically(pendingPath, pendingJson);
         }
         return true;
@@ -473,20 +486,62 @@ function Copy-DirectoryWithRetry([string]$Source,[string]$Destination) {
   }
   throw $lastError
 }
+function Move-DirectoryWithRetry([string]$Source,[string]$Destination) {
+  $lastError = $null
+  for ($attempt = 1; $attempt -le 30; $attempt++) {
+    try {
+      Move-Item -LiteralPath $Source -Destination $Destination -ErrorAction Stop
+      return
+    } catch {
+      $lastError = $_
+      Start-Sleep -Seconds 1
+    }
+  }
+  throw $lastError
+}
+function Wait-ForSolidWorksExit {
+  for ($attempt = 1; $attempt -le 600; $attempt++) {
+    $running = @(Get-Process -Name 'SLDWORKS' -ErrorAction SilentlyContinue)
+    try {
+      if ($running.Count -eq 0) { return }
+    } finally {
+      foreach ($process in $running) { $process.Dispose() }
+    }
+    Start-Sleep -Seconds 1
+  }
+  throw 'SolidWorks is still running after 10 minutes.'
+}
 try {
   if ($ProcessId -gt 0) { Wait-Process -Id $ProcessId -ErrorAction SilentlyContinue }
   $pending = Get-Content -LiteralPath $PendingPath -Raw -Encoding UTF8 | ConvertFrom-Json
   $target = [IO.Path]::GetFullPath([string]$pending.TargetDirectory)
   $payload = [IO.Path]::GetFullPath([string]$pending.PayloadDirectory)
   if (-not (Test-Path -LiteralPath $payload)) { throw 'Update payload is missing.' }
+  if ([string]$pending.Component -eq 'solidworks-addin') { Wait-ForSolidWorksExit }
   $backupRoot = Split-Path -Parent $PendingPath
-  $backup = Join-Path $backupRoot ('backup-' + [DateTimeOffset]::Now.ToString('yyyyMMdd-HHmmss'))
-  New-Item -ItemType Directory -Path $backup -Force | Out-Null
-  if (Test-Path -LiteralPath $target) { Copy-DirectoryWithRetry $target $backup }
-  Get-ChildItem -LiteralPath $backupRoot -Directory -Filter 'backup-*' -ErrorAction SilentlyContinue |
+  $component = [string]$pending.Component
+  $backup = Join-Path $backupRoot ('backup-' + $component + '-' + [DateTimeOffset]::Now.ToString('yyyyMMdd-HHmmss-fff'))
+  $targetParent = Split-Path -Parent $target
+  $candidate = Join-Path $targetParent ('.uplm-update-' + $component + '-' + [Guid]::NewGuid().ToString('N'))
+  Copy-DirectoryWithRetry $payload $candidate
+  $candidateVersionPath = Join-Path $candidate '.uplm-version'
+  if (-not (Test-Path -LiteralPath $candidateVersionPath)) { throw 'Update package version marker is missing.' }
+  $candidateVersion = (Get-Content -LiteralPath $candidateVersionPath -Raw -Encoding UTF8).Trim()
+  if (-not [string]::Equals($candidateVersion, [string]$pending.Version, [StringComparison]::OrdinalIgnoreCase)) {
+    throw ('Update package version verification failed. Expected=' + [string]$pending.Version + ' Actual=' + $candidateVersion)
+  }
+  if (Test-Path -LiteralPath $target) { Move-DirectoryWithRetry $target $backup }
+  try {
+    Move-DirectoryWithRetry $candidate $target
+  } catch {
+    if ((-not (Test-Path -LiteralPath $target)) -and (Test-Path -LiteralPath $backup)) {
+      Move-DirectoryWithRetry $backup $target
+    }
+    throw
+  }
+  Get-ChildItem -LiteralPath $backupRoot -Directory -Filter ('backup-' + $component + '-*') -ErrorAction SilentlyContinue |
     Where-Object { -not [string]::Equals($_.FullName, $backup, [StringComparison]::OrdinalIgnoreCase) } |
-    Remove-Item -Recurse -Force
-  Copy-DirectoryWithRetry $payload $target
+    Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
   $installedVersionPath = Join-Path $target '.uplm-version'
   if (-not (Test-Path -LiteralPath $installedVersionPath)) { throw 'Installed version marker is missing.' }
   $installedVersion = (Get-Content -LiteralPath $installedVersionPath -Raw -Encoding UTF8).Trim()
@@ -495,6 +550,7 @@ try {
   }
   Remove-Item -LiteralPath $PendingPath -Force
   Remove-Item -LiteralPath $LaunchMarker -Force -ErrorAction SilentlyContinue
+  Remove-Item -LiteralPath ($PendingPath + '.error.txt') -Force -ErrorAction SilentlyContinue
   if ($RestartPath -and (Test-Path -LiteralPath $RestartPath)) { Start-Process -FilePath $RestartPath -WorkingDirectory (Split-Path -Parent $RestartPath) -WindowStyle Hidden }
 } catch {
   ($_ | Out-String) | Set-Content -LiteralPath ($PendingPath + '.error.txt') -Encoding UTF8

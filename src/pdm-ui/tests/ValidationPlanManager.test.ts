@@ -8,6 +8,7 @@ const api = vi.hoisted(() => ({
   readValidationCheckCatalog: vi.fn(),
   readProjectValidationPlan: vi.fn(),
   saveProjectValidationPlan: vi.fn(),
+  appendProjectValidationPlanItems: vi.fn(),
   saveValidationCheckCategory: vi.fn(),
   deleteValidationCheckCategory: vi.fn(),
   saveValidationCheckItem: vi.fn(),
@@ -51,6 +52,10 @@ describe('ValidationPlanManager', () => {
       revisionNumber: 1, state: 'Draft', approvalTasks: [], attachments: [],
       items: input.items.map((value: any, index: number) => ({ ...value, id: `row-${index}`, catalogCategoryId: category.id, categoryName: category.name, validationContent: item.content })),
       createdBy: 'engineer', createdAt: '2026-09-09T00:00:00Z', updatedBy: 'engineer', updatedAt: '2026-09-09T00:00:00Z', rowVersion: 1,
+    }))
+    api.appendProjectValidationPlanItems.mockImplementation(async (projectId: string, input: any) => ({
+      ...childPlan, projectId, state: 'Effective', rowVersion: 2,
+      items: input.items.map((value: any, index: number) => ({ ...value, id: `appended-${index}`, catalogCategoryId: category.id, categoryName: category.name, validationContent: item.content })),
     }))
   })
 
@@ -221,6 +226,11 @@ describe('ValidationPlanManager', () => {
     await wrapper.findAll('button').find(button => button.text().includes('选取内容'))!.trigger('click')
     await flushPromises()
 
+    const filter = document.querySelector<HTMLElement>('.validation-selector__filter')!
+    const selectAllLabel = filter.querySelector<HTMLLabelElement>('.validation-selector__select-all')!
+    expect(selectAllLabel.textContent?.trim()).toBe('全选')
+    expect(filter.firstElementChild).toBe(selectAllLabel)
+    expect(filter.lastElementChild?.getAttribute('aria-label')).toBe('搜索验证检查项')
     const selectAll = document.querySelector<HTMLInputElement>('.validation-selector__select-all input')!
     selectAll.click()
     await flushPromises()
@@ -254,7 +264,8 @@ describe('ValidationPlanManager', () => {
     await flushPromises()
 
     const categoryButtons = [...document.querySelectorAll<HTMLButtonElement>('.validation-selector aside button')]
-    expect(categoryButtons[0]!.textContent).toContain('可加 0')
+    expect(categoryButtons[0]!.querySelector('small')?.textContent?.trim()).toBe('0')
+    expect(categoryButtons[0]!.textContent).not.toContain('可加')
     expect(categoryButtons[1]!.classList.contains('is-active')).toBe(true)
     document.querySelector<HTMLInputElement>('.validation-selector__items input[type="checkbox"]')!.click()
     await flushPromises()
@@ -390,6 +401,46 @@ describe('ValidationPlanManager', () => {
       sourceAttachmentId: attachment.id,
       items: [expect.objectContaining({ planItemId: planItem.id, result: '合格', responsiblePerson: '张三' })],
     }), 'token')
+    wrapper.unmount()
+  })
+
+  it('已生效计划允许追加内容但禁止删除已生效内容', async () => {
+    const addedItem = { ...item, id: 'item-2', content: '新增检查防护罩固定状态' }
+    const approvedRow = { id: 'row-approved', catalogCategoryId: category.id, catalogItemId: item.id, categoryName: category.name, validationContent: item.content, informationSource: '内部评审', validationDate: null, result: null, reviewer: null, responsiblePerson: null, remark: null, sortOrder: 1 }
+    const effectivePlan = { ...childPlan, state: 'Effective' as const, effectiveAt: '2026-09-10T00:20:00Z', items: [approvedRow] }
+    api.readValidationCheckCatalog.mockResolvedValue({ categories: [{ ...category, itemCount: 2 }], items: [item, addedItem] })
+    api.readProjectValidationPlan.mockImplementation(async (projectId: string) => projectId === childProject.id ? effectivePlan : null)
+    api.appendProjectValidationPlanItems.mockResolvedValue({ ...effectivePlan, rowVersion: 2, items: [approvedRow, { ...approvedRow, id: 'row-added', catalogItemId: addedItem.id, validationContent: addedItem.content, sortOrder: 2 }] })
+    const wrapper = mount(ValidationPlanManager, {
+      attachTo: document.body,
+      props: { projectId: childProject.id, projectCode: childProject.code, projectName: childProject.name, projects: [rootProject, childProject], token: 'token', currentUsername: 'engineer', currentDisplayName: '工程师', canEdit: true, canManageCatalog: true },
+      global: { plugins: [ElementPlus] },
+    })
+    await flushPromises()
+    await wrapper.findAll('tbody tr').find(row => row.text().includes('P700005-3'))!.trigger('click')
+    await flushPromises()
+
+    const selectButton = wrapper.findAll<HTMLButtonElement>('button').find(button => button.text().includes('选取内容'))!
+    expect(selectButton.element.disabled).toBe(false)
+    expect(wrapper.find<HTMLButtonElement>('button[title="移除"]').element.disabled).toBe(true)
+    expect(wrapper.find<HTMLSelectElement>('.validation-plan__table select').element.disabled).toBe(true)
+    await selectButton.trigger('click')
+    await flushPromises()
+    document.querySelector<HTMLInputElement>('.validation-selector__items input[type="checkbox"]')!.click()
+    await flushPromises()
+    ;[...document.querySelectorAll<HTMLButtonElement>('button')].find(button => button.textContent?.includes('加入计划（1）'))!.click()
+    await flushPromises()
+
+    const saveButton = wrapper.findAll<HTMLButtonElement>('button').find(button => button.text().includes('保存新增'))!
+    expect(saveButton.element.disabled).toBe(false)
+    await saveButton.trigger('click')
+    await flushPromises()
+
+    expect(api.appendProjectValidationPlanItems).toHaveBeenCalledWith(childProject.id, {
+      expectedRowVersion: effectivePlan.rowVersion,
+      items: [expect.objectContaining({ catalogItemId: addedItem.id })],
+    }, 'token')
+    expect(api.saveProjectValidationPlan).not.toHaveBeenCalled()
     wrapper.unmount()
   })
 })

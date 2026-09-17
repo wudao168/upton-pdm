@@ -39,6 +39,7 @@ New-Item -ItemType Directory -Path $programTemplateRoot -Force | Out-Null
 foreach ($source in @($apiSource, $clientSource, $previewSource)) {
     if (-not (Test-Path -LiteralPath $source)) { throw "Deployment staging directory does not exist: $source" }
 }
+$stagedApiHash = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $apiSource 'Pdm.Api.dll')).Hash
 
 $backupRoot = Join-Path $localRoot (Join-Path 'backup' ('webapi-' + [DateTimeOffset]::Now.ToString('yyyyMMdd-HHmmss')))
 New-Item -ItemType Directory -Path $backupRoot -Force | Out-Null
@@ -80,14 +81,13 @@ try {
     $serviceEnvironment += "Pdm__Storage__ProgramTemplateRoot=$programTemplateRoot"
     New-ItemProperty -LiteralPath $apiRegistryPath -Name Environment -PropertyType MultiString -Value $serviceEnvironment -Force | Out-Null
 
-    $stagedHash = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $apiSource 'Pdm.Api.dll')).Hash
     $activeHash = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $apiTarget 'Pdm.Api.dll')).Hash
-    if ($stagedHash -ne $activeHash) { throw 'Pdm.Api.dll hash mismatch after deployment.' }
+    if ($stagedApiHash -ne $activeHash) { throw 'Pdm.Api.dll hash mismatch after deployment.' }
 
     Start-Service -Name $serviceName
     $serviceStopped = $false
     $health = $null
-    for ($attempt = 0; $attempt -lt 60; $attempt++) {
+    for ($attempt = 0; $attempt -lt 160; $attempt++) {
         try {
             $health = Invoke-RestMethod -Uri 'http://127.0.0.1:5080/health' -TimeoutSec 3
             if ($health.status -eq 'ok') { break }
@@ -106,7 +106,12 @@ try {
         health = $health.status
         database = $health.database
         desktopClient = if ($DeferDesktopClient) { 'update-package-published-active-client-deferred' } else { 'deployed' }
-        stagedDesktopSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $clientSource 'Upton.Pdm.Desktop.exe')).Hash
+        stagedDesktopSha256 = if ($DeferDesktopClient) {
+            $null
+        }
+        else {
+            (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $clientSource 'Upton.Pdm.Desktop.exe')).Hash
+        }
         solidWorksAddin = 'not-switched-while-solidworks-is-running'
     }
     $result | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $resultPath -Encoding UTF8

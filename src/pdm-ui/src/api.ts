@@ -6,7 +6,7 @@ import type { ProjectCopyOptionsInput, ProjectCopyPreview, ProjectCopyResult } f
 
 import type { BomSourceReclassificationPreview } from './types'
 import type { MaterialRelationCompleteness, MaterialRelationTemplate, SaveMaterialRelationTemplateInput } from './types'
-import type { ConfirmValidationPlanExecutionInput, ProjectValidationPlan, SaveProjectValidationPlanInput, SaveValidationCheckCategoryInput, SaveValidationCheckItemInput, ValidationCheckCatalog, ValidationCheckCategory, ValidationCheckItem, ValidationPlanAttachment, ValidationPlanApprovalTaskSummary, ValidationPlanExecutionRecord, ValidationPlanRecognitionDraft } from './types'
+import type { AppendProjectValidationPlanItemsInput, ConfirmValidationPlanExecutionInput, ProjectValidationPlan, SaveProjectValidationPlanInput, SaveValidationCheckCategoryInput, SaveValidationCheckItemInput, ValidationCheckCatalog, ValidationCheckCategory, ValidationCheckItem, ValidationPlanAttachment, ValidationPlanApprovalTaskSummary, ValidationPlanExecutionRecord, ValidationPlanRecognitionDraft } from './types'
 import { sha256Hex } from './fileHash'
 
 const localDesktopOrigin = window.location.hostname === 'appassets.pdm.local'
@@ -438,6 +438,10 @@ export function saveProjectValidationPlan(projectId: string, input: SaveProjectV
   return requestJson<ProjectValidationPlan>(`/api/projects/${projectId}/validation-plan`, { method: 'PUT', body: JSON.stringify(input) }, token)
 }
 
+export function appendProjectValidationPlanItems(projectId: string, input: AppendProjectValidationPlanItemsInput, token: string): Promise<ProjectValidationPlan> {
+  return requestJson<ProjectValidationPlan>(`/api/projects/${projectId}/validation-plan/items`, { method: 'POST', body: JSON.stringify(input) }, token)
+}
+
 export function createProjectValidationPlanRevision(projectId: string, expectedRowVersion: number, token: string): Promise<ProjectValidationPlan> {
   return requestJson<ProjectValidationPlan>(`/api/projects/${projectId}/validation-plan/revisions?expectedRowVersion=${expectedRowVersion}`, { method: 'POST' }, token)
 }
@@ -798,6 +802,10 @@ export function decideMaterialCodeApplication(applicationId: string, expectedRow
 
 export function approveMaterial(materialId: string, expectedRowVersion: number, token: string): Promise<{ material: PdmMaterial; task: MaterialSyncTask }> {
   return requestJson(`/api/materials/${materialId}/approve?expectedRowVersion=${expectedRowVersion}`, { method: 'POST' }, token)
+}
+
+export function rejectMaterial(materialId: string, expectedRowVersion: number, comment: string, token: string): Promise<PdmMaterial> {
+  return requestJson<PdmMaterial>(`/api/materials/${materialId}/reject`, { method: 'POST', body: JSON.stringify({ expectedRowVersion, comment }) }, token)
 }
 
 export function listMaterialCategoryRules(token: string): Promise<MaterialCategoryRule[]> {

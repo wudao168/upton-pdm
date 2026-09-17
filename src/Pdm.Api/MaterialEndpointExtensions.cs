@@ -239,6 +239,12 @@ public static class MaterialEndpointExtensions
             return Results.Ok(new { Material = MapMaterial(approved.Material), Task = MapTask(approved.Task) });
         });
 
+        api.MapPost("/materials/{materialId:guid}/reject", async (Guid materialId, RejectMaterialRequest request, HttpContext context, MaterialService service, CancellationToken cancellationToken) =>
+        {
+            var (actor, role) = CurrentUser(context.User);
+            return Results.Ok(MapMaterial(await service.RejectAsync(materialId, request.ExpectedRowVersion, request.Comment, actor, role, cancellationToken)));
+        });
+
         api.MapGet("/material-category-rules", async (HttpContext context, MaterialService service, CancellationToken cancellationToken) =>
         {
             var (actor, role) = CurrentUser(context.User);

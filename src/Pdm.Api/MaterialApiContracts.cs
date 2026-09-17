@@ -77,6 +77,8 @@ public sealed record ApplyMaterialCodesRequest(Guid ProjectId, IReadOnlyList<Gui
 
 public sealed record DecideMaterialCodeApplicationRequest(long ExpectedRowVersion, bool Approved, string? Comment);
 
+public sealed record RejectMaterialRequest(long ExpectedRowVersion, string? Comment);
+
 public sealed record UpdateU9MaterialIntegrationRequest(
     string BaseUrl,
     string EnterpriseCode,

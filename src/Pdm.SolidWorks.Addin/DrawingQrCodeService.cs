@@ -200,15 +200,33 @@ internal static class DrawingQrCodeService
         {
             var feature = FindFeatureByPrefix(model, FeaturePrefix);
             if (feature == null) return;
-            model.ClearSelection2(true);
-            if (!feature.Select2(false, 0))
-                throw new InvalidOperationException("SolidWorks未能选中旧二维码特征。");
-            if (!model.Extension.DeleteSelection2(
+            var featureName = feature.Name;
+            var removed = DrawingQrDeletionRule.TryDelete(
+                () => SelectAndDelete(
+                    model,
+                    feature,
                     (int)swDeleteSelectionOptions_e.swDelete_Children
-                    | (int)swDeleteSelectionOptions_e.swDelete_Absorbed))
+                    | (int)swDeleteSelectionOptions_e.swDelete_Absorbed),
+                () => SelectAndDelete(model, feature, 0),
+                () => SelectAndEditDelete(model, feature));
+            if (!removed || FindFeature(model, featureName) != null)
                 throw new InvalidOperationException("SolidWorks未能删除旧二维码特征。");
         }
         throw new InvalidOperationException("工程图中的旧二维码特征数量异常，已停止自动处理。");
+    }
+
+    private static bool SelectAndDelete(IModelDoc2 model, IFeature feature, int options)
+    {
+        model.ClearSelection2(true);
+        return feature.Select2(false, 0) && model.Extension.DeleteSelection2(options);
+    }
+
+    private static bool SelectAndEditDelete(IModelDoc2 model, IFeature feature)
+    {
+        model.ClearSelection2(true);
+        if (!feature.Select2(false, 0)) return false;
+        model.EditDelete();
+        return true;
     }
 
     private static IFeature FindFeature(IModelDoc2 model, string featureName)

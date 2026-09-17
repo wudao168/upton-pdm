@@ -108,6 +108,25 @@ public sealed class InMemoryValidationPlanRepository : IValidationPlanRepository
         }
     }
 
+    public Task<ProjectValidationPlan> AppendPlanItemsAsync(Guid planId, IReadOnlyList<ProjectValidationPlanItem> newItems, long expectedRowVersion, string actor, DateTimeOffset updatedAt, CancellationToken cancellationToken)
+    {
+        lock (gate)
+        {
+            var current = plans.GetValueOrDefault(planId) ?? throw new PdmNotFoundException("验证计划不存在。");
+            if (current.State != ProjectValidationPlanState.Effective || current.RowVersion != expectedRowVersion)
+                throw new PdmConflictException("验证计划状态已变化，请刷新后重试。");
+            var saved = current with { Items = [.. current.Items, .. newItems], UpdatedBy = actor, UpdatedAt = updatedAt, RowVersion = current.RowVersion + 1 };
+            plans[planId] = saved;
+            foreach (var item in items.Values.ToArray())
+            {
+                var references = plans.Values.SelectMany(value => value.Items).Count(value => value.CatalogItemId == item.Id);
+                items[item.Id] = item with { ReferenceCount = references };
+            }
+            RefreshCounts();
+            return Task.FromResult(saved);
+        }
+    }
+
     public Task<ProjectValidationPlan> CreateRevisionAsync(ProjectValidationPlan plan, CancellationToken cancellationToken)
     {
         lock (gate)

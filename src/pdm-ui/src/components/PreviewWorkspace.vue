@@ -67,11 +67,13 @@ const solidWorksMessage = ref('')
 const solidWorksError = ref(false)
 const markupSaving = ref(false)
 const markupDirty = ref(false)
+const lastArchivedAt = ref('')
 let resizeObserver: ResizeObserver | undefined
 let overlayObserver: MutationObserver | undefined
 let previewSyncFrame = 0
 let previewSuspended = false
 let webPreviewRequest = 0
+let archiveDateRequest = 0
 
 const mode = computed<PreviewMode>(() => props.selected.kind === 'Drawing' ? 'drawing' : 'model')
 const previewKindLabel = computed(() => mode.value === 'drawing' ? '2D工程图' : '3D模型')
@@ -97,6 +99,11 @@ const editStatusLabel = computed(() => {
     : `${displayUserName(owner)}编辑中`
 })
 const previewPropertyValue = (value?: string | null) => value?.trim() || '—'
+const formatArchiveDate = (value?: string | null) => {
+  if (!value) return '—'
+  const date = new Date(value)
+  return Number.isNaN(date.getTime()) ? '—' : date.toLocaleString('zh-CN', { hour12: false })
+}
 const previewProperties = computed(() => [
   { label: '物料编码', value: previewPropertyValue(props.bomItem?.drawingNumber || props.selected.drawingNumber) },
   { label: '名称', value: previewPropertyValue(props.bomItem?.name || meaningfulSelectedName.value) },
@@ -105,7 +112,25 @@ const previewProperties = computed(() => [
   { label: '材质', value: previewPropertyValue(props.bomItem?.material) },
   { label: '表面处理', value: previewPropertyValue(props.bomItem?.surfaceTreatment) },
   { label: '热处理', value: previewPropertyValue(props.bomItem?.heatTreatment) },
+  { label: '最近存档', value: formatArchiveDate(lastArchivedAt.value) },
 ])
+
+async function loadLastArchivedAt() {
+  const request = ++archiveDateRequest
+  lastArchivedAt.value = ''
+  if (!props.selected.documentId || !props.accessToken) return
+  try {
+    const versions = await listDocumentVersions(props.selected.documentId, props.accessToken)
+    if (request !== archiveDateRequest) return
+    lastArchivedAt.value = versions.reduce((latest, version) => {
+      if (!version.createdAt) return latest
+      if (!latest) return version.createdAt
+      return new Date(version.createdAt).getTime() > new Date(latest).getTime() ? version.createdAt : latest
+    }, '')
+  } catch {
+    if (request === archiveDateRequest) lastArchivedAt.value = ''
+  }
+}
 
 function activateMarkup(command: string) {
   if (!props.selected.documentId) return
@@ -355,6 +380,10 @@ watch(() => props.obscured, obscured => {
 watch(() => props.reviewPanelOpen, () => {
   void nextTick(schedulePreviewBounds)
 }, { flush: 'post' })
+
+watch([() => props.selected.documentId, () => props.accessToken], () => {
+  void loadLastArchivedAt()
+}, { immediate: true })
 
 watch([() => props.selected.id, () => props.reviewVersionId], () => {
   markupSaving.value = false

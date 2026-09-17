@@ -103,6 +103,8 @@ public sealed class PdmAddin : ISwAddin
     private string pendingDrawingQrPostSavePath = string.Empty;
     private int pendingDrawingQrGraphicsRefresh;
     private string pendingDrawingQrGraphicsRefreshPath = string.Empty;
+    private int suppressDrawingQrForAutomaticDrawingSave;
+    private string automaticDrawingSavePath = string.Empty;
     private ClientBootstrapConfiguration currentBootstrap;
     private PluginUpdateSnapshot clientUpdateSnapshot = new PluginUpdateSnapshot();
     private const int ActiveDocumentRefreshDebounceMilliseconds = 200;
@@ -232,6 +234,8 @@ public sealed class PdmAddin : ISwAddin
             Interlocked.Exchange(ref pendingDrawingQrPostSavePath, string.Empty);
             Interlocked.Exchange(ref pendingDrawingQrGraphicsRefresh, 0);
             Interlocked.Exchange(ref pendingDrawingQrGraphicsRefreshPath, string.Empty);
+            Interlocked.Exchange(ref suppressDrawingQrForAutomaticDrawingSave, 0);
+            Interlocked.Exchange(ref automaticDrawingSavePath, string.Empty);
             Interlocked.Exchange(ref openOperationInProgress, 0);
             Interlocked.Exchange(ref checkInOperationInProgress, 0);
             Interlocked.Exchange(ref workspaceOperationInProgress, 0);
@@ -732,6 +736,16 @@ public sealed class PdmAddin : ISwAddin
         if (disconnecting
             || Volatile.Read(ref drawingQrSyncInProgress) != 0
             || string.IsNullOrWhiteSpace(fileName)) return 0;
+
+        if (Volatile.Read(ref suppressDrawingQrForAutomaticDrawingSave) != 0
+            && PathsEqual(Interlocked.CompareExchange(ref automaticDrawingSavePath, null, null), fileName))
+        {
+            Interlocked.Exchange(ref pendingDrawingQrSaveRequest, 0);
+            Interlocked.Exchange(ref pendingDrawingQrPostSaveSync, 0);
+            Interlocked.Exchange(ref pendingDrawingQrPostSavePath, string.Empty);
+            LogOperation(string.Concat("Drawing QR deferred after automatic drawing save path=", fileName));
+            return 0;
+        }
 
         Interlocked.Exchange(ref pendingDrawingQrPostSavePath, fileName);
         Interlocked.Exchange(ref pendingDrawingQrSaveRequest, 1);
@@ -1902,22 +1916,26 @@ public sealed class PdmAddin : ISwAddin
             var availableVersion = bootstrap?.SolidWorksAddin?.Version?.Trim() ?? string.Empty;
             var checkedAt = DateTimeOffset.Now;
 
+            var repairFailedUpdate = false;
             if (ClientPackageUpdater.TryGetPendingUpdate("solidworks-addin", out var pendingVersion, out var pendingError))
             {
-                var pendingSnapshot = new PluginUpdateSnapshot
+                repairFailedUpdate = !string.IsNullOrWhiteSpace(pendingError);
+                if (!repairFailedUpdate)
                 {
-                    InstalledVersion = installedVersion,
-                    AvailableVersion = string.IsNullOrWhiteSpace(pendingVersion) ? availableVersion : pendingVersion,
-                    LastCheckedAt = checkedAt,
-                    Status = string.IsNullOrWhiteSpace(pendingError)
-                        ? "更新包已下载，退出并重新打开SolidWorks后完成安装"
-                        : string.Concat("更新失败：", pendingError)
-                };
-                SetClientUpdateSnapshot(pendingSnapshot);
-                return pendingSnapshot.Clone();
+                    var pendingSnapshot = new PluginUpdateSnapshot
+                    {
+                        InstalledVersion = installedVersion,
+                        AvailableVersion = string.IsNullOrWhiteSpace(pendingVersion) ? availableVersion : pendingVersion,
+                        LastCheckedAt = checkedAt,
+                        Status = "更新包已下载，退出并重新打开SolidWorks后完成安装"
+                    };
+                    SetClientUpdateSnapshot(pendingSnapshot);
+                    return pendingSnapshot.Clone();
+                }
             }
 
-            var updateAvailable = ClientPackageUpdater.IsUpdateAvailable(installedVersion, availableVersion);
+            var updateAvailable = repairFailedUpdate
+                || ClientPackageUpdater.IsUpdateAvailable(installedVersion, availableVersion);
             if (!updateAvailable)
             {
                 var serverVersionIsOlder = ClientPackageUpdater.IsUpdateAvailable(availableVersion, installedVersion);
@@ -1943,7 +1961,7 @@ public sealed class PdmAddin : ISwAddin
                     InstalledVersion = installedVersion,
                     AvailableVersion = availableVersion,
                     LastCheckedAt = checkedAt,
-                    Status = "发现新版本",
+                    Status = repairFailedUpdate ? "检测到更新安装不完整，可立即修复" : "发现新版本",
                     UpdateAvailable = true
                 };
                 SetClientUpdateSnapshot(availableSnapshot);
@@ -2755,17 +2773,24 @@ public sealed class PdmAddin : ISwAddin
 
             ApplyGbDrawingStandard(drawingModel);
             CreateAutomaticDrawingViews(drawingModel, drawing, source.FullPath, options ?? new AutomaticDrawingOptions());
-            SynchronizeDrawingQrCode(drawingModel, null, source, drawingQrPolicy);
             drawingModel.ForceRebuild3(false);
             var errors = 0;
             var warnings = 0;
-            saved = drawingModel.Extension.SaveAs(
-                drawingPath,
-                (int)swSaveAsVersion_e.swSaveAsCurrentVersion,
-                (int)swSaveAsOptions_e.swSaveAsOptions_Silent,
-                null,
-                ref errors,
-                ref warnings);
+            BeginAutomaticDrawingSave(drawingPath);
+            try
+            {
+                saved = drawingModel.Extension.SaveAs(
+                    drawingPath,
+                    (int)swSaveAsVersion_e.swSaveAsCurrentVersion,
+                    (int)swSaveAsOptions_e.swSaveAsOptions_Silent,
+                    null,
+                    ref errors,
+                    ref warnings);
+            }
+            finally
+            {
+                EndAutomaticDrawingSave();
+            }
             if (!saved || errors != 0)
             {
                 throw new IOException(string.Concat("SolidWorks保存工程图失败，错误码：", errors, "，警告码：", warnings));
@@ -2811,10 +2836,31 @@ public sealed class PdmAddin : ISwAddin
                 source.FullPath,
                 options ?? new AutomaticDrawingOptions());
         }
-
-        SynchronizeDrawingQrCode(drawingModel, FindCadNodeByPath(currentTree, drawingPath), source, drawingQrPolicy);
         drawingModel.ForceRebuild3(false);
-        SaveSolidWorksDocument(drawingModel);
+        BeginAutomaticDrawingSave(drawingPath);
+        try
+        {
+            SaveSolidWorksDocument(drawingModel);
+        }
+        finally
+        {
+            EndAutomaticDrawingSave();
+        }
+    }
+
+    private void BeginAutomaticDrawingSave(string drawingPath)
+    {
+        Interlocked.Exchange(ref automaticDrawingSavePath, drawingPath ?? string.Empty);
+        Interlocked.Exchange(ref suppressDrawingQrForAutomaticDrawingSave, 1);
+        Interlocked.Exchange(ref pendingDrawingQrSaveRequest, 0);
+        Interlocked.Exchange(ref pendingDrawingQrPostSaveSync, 0);
+        Interlocked.Exchange(ref pendingDrawingQrPostSavePath, string.Empty);
+    }
+
+    private void EndAutomaticDrawingSave()
+    {
+        Interlocked.Exchange(ref suppressDrawingQrForAutomaticDrawingSave, 0);
+        Interlocked.Exchange(ref automaticDrawingSavePath, string.Empty);
     }
 
     private static void ApplyGbDrawingStandard(IModelDoc2 drawingModel)
@@ -3766,41 +3812,29 @@ public sealed class PdmAddin : ISwAddin
             height = 0.297;
         }
 
-        var sheetProperties = sheet?.GetProperties2() as double[];
-        if (sheetProperties == null || sheetProperties.Length < 8)
-        {
-            throw new InvalidOperationException("SolidWorks未能读取工程图图纸属性，不能设置第一角法投影。");
-        }
-        sheet.SetProperties2(
-            (int)sheetProperties[0],
-            (int)sheetProperties[1],
-            sheetProperties[2],
-            sheetProperties[3],
-            true,
-            sheetProperties[5],
-            sheetProperties[6],
-            sheetProperties[7] != 0);
-
-        if (!drawing.Create1stAngleViews2(sourcePath))
-        {
-            throw new InvalidOperationException("SolidWorks未能创建标准三视图。请确认模型可正常打开，并检查工程图模板。");
-        }
-
-        var createdViews = EnumerateDrawingModelViews(drawing).ToList();
-        IView primaryView;
-        IView topView;
-        IView sideView;
-        IView isometricView;
-        ResolveAutomaticDrawingViews(
-            createdViews,
-            out primaryView,
-            out topView,
-            out sideView,
-            out isometricView);
-        if (primaryView == null)
-        {
-            throw new InvalidOperationException("SolidWorks已执行三视图生成，但未返回可用的工程图视图。");
-        }
+        var primaryView = CreateAutomaticDrawingModelView(
+            drawing,
+            sourcePath,
+            "*Front",
+            sheetWidth: width * 0.30d,
+            sheetHeight: height * 0.66d,
+            "主视图");
+        var topView = CreateAutomaticDrawingModelView(
+            drawing,
+            sourcePath,
+            "*Top",
+            sheetWidth: width * 0.30d,
+            sheetHeight: height * 0.30d,
+            "俯视图");
+        var sideView = CreateAutomaticDrawingModelView(
+            drawing,
+            sourcePath,
+            "*Right",
+            sheetWidth: width * 0.67d,
+            sheetHeight: height * 0.66d,
+            "右视图");
+        IView isometricView = null;
+        var createdViews = new List<IView> { primaryView, topView, sideView };
 
         if (options.GenerateIsometric && isometricView == null)
         {
@@ -3907,6 +3941,29 @@ public sealed class PdmAddin : ISwAddin
         if (view == null)
         {
             throw new InvalidOperationException("SolidWorks未能创建轴测图，请确认模型包含标准轴测视图。");
+        }
+        return view;
+    }
+
+    private static IView CreateAutomaticDrawingModelView(
+        IDrawingDoc drawing,
+        string sourcePath,
+        string orientation,
+        double sheetWidth,
+        double sheetHeight,
+        string viewName)
+    {
+        var view = drawing.CreateDrawViewFromModelView3(
+            sourcePath,
+            orientation,
+            sheetWidth,
+            sheetHeight,
+            0d) as IView;
+        if (view == null)
+        {
+            throw new InvalidOperationException(string.Concat(
+                "SolidWorks未能创建", viewName,
+                "。请确认零件可正常打开，并检查标准视图是否完整。"));
         }
         return view;
     }
@@ -4173,11 +4230,13 @@ public sealed class PdmAddin : ISwAddin
         frontView.ScaleDecimal = scale;
         if (topView != null)
         {
-            topView.UseParentScale = true;
+            topView.UseParentScale = false;
+            topView.ScaleDecimal = scale;
         }
         if (sideView != null)
         {
-            sideView.UseParentScale = true;
+            sideView.UseParentScale = false;
+            sideView.ScaleDecimal = scale;
         }
         if (isometricView != null)
         {
@@ -9233,6 +9292,21 @@ public sealed class PdmAddin : ISwAddin
         var failedItems = new List<BatchOperationItem>();
         var projectReferenceRoot = await apiClient.GetReferenceTreeOrNullAsync(projectId, cancellationToken);
         var projectRootDocumentId = projectReferenceRoot?.DocumentId;
+        var selectedRoot = items.FirstOrDefault(candidate => candidate.Depth == 0 && candidate.Node.Kind == CadDocumentKind.Assembly)?.Node;
+        var rootIncompatibility = selectedRoot == null
+            ? string.Empty
+            : BatchProjectRootRule.IncompatibilityReason(
+                projectRootDocumentId,
+                projectReferenceRoot?.FileName,
+                selectedRoot.DocumentId,
+                selectedRoot.FileName);
+        if (!string.IsNullOrWhiteSpace(rootIncompatibility))
+        {
+            LogOperation(string.Concat(
+                "Batch check-in blocked project root mismatch existing=", projectReferenceRoot?.FileName,
+                " selected=", selectedRoot?.FileName));
+            throw new InvalidOperationException(rootIncompatibility);
+        }
         var orderedItems = items
             .OrderByDescending(candidate => candidate.Depth)
             .ThenBy(candidate => candidate.Node.Kind == CadDocumentKind.Assembly ? 1 : 0)

@@ -7,6 +7,38 @@ namespace Upton.Pdm.Domain.Tests;
 public sealed class ProgramTemplateWorkflowTests
 {
     [Fact]
+    public async Task IncompleteDraft_CanBeCreatedAndUpdated_ButCannotBeSubmitted()
+    {
+        var clock = TimeProvider.System;
+        var pdmRepository = new InMemoryPdmRepository(clock);
+        var templateRepository = new InMemoryProgramTemplateRepository(clock);
+        var service = new ProgramTemplateService(templateRepository, pdmRepository, new UnusedProgramTemplateStorage(), clock);
+        await ConfigureElectricalApprovalChainAsync(pdmRepository);
+
+        var created = await service.CreateAsync(new CreateProgramTemplateCommand(
+            ProgramTemplateAssetType.PlcFunctionBlock,
+            string.Empty,
+            string.Empty,
+            string.Empty,
+            string.Empty,
+            string.Empty,
+            string.Empty,
+            string.Empty,
+            [],
+            string.Empty,
+            []), "uploader", UserRole.Engineer, default);
+        var revision = created.Revisions.Single();
+
+        revision = await service.UpdateDraftAsync(revision.Id, new UpdateProgramTemplateDraftCommand(
+            string.Empty, string.Empty, string.Empty, string.Empty, string.Empty, string.Empty,
+            string.Empty, [], string.Empty, [], revision.RowVersion), "uploader", UserRole.Engineer, default);
+
+        var exception = await Assert.ThrowsAsync<PdmRuleException>(() =>
+            service.SubmitAsync(revision.Id, revision.RowVersion, "uploader", UserRole.Engineer, default));
+        Assert.Equal("模板名称不能为空。", exception.Message);
+    }
+
+    [Fact]
     public async Task SubmitRequiresBothControlledFiles()
     {
         var clock = TimeProvider.System;
@@ -32,7 +64,7 @@ public sealed class ProgramTemplateWorkflowTests
 
         var missingPackage = await Assert.ThrowsAsync<PdmRuleException>(() =>
             service.SubmitAsync(revision.Id, revision.RowVersion, "uploader", UserRole.Engineer, default));
-        Assert.Equal("请先上传ZIP程序包。", missingPackage.Message);
+        Assert.Equal("请先上传ZIP或RAR程序包。", missingPackage.Message);
 
         revision = await templateRepository.AttachFileAsync(revision.Id,
             new(revision.Id, ProgramTemplateAttachmentKind.Package, "template.zip", "package/template.zip", 128, new string('A', 64), clock.GetUtcNow()),

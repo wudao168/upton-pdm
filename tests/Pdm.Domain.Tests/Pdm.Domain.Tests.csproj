@@ -26,5 +26,7 @@
     <Compile Include="..\..\src\Pdm.SolidWorks.Addin\BatchLocalDocumentRule.cs" Link="BatchLocalDocumentRule.cs" />
     <Compile Include="..\..\src\Pdm.SolidWorks.Addin\BatchRenameRule.cs" Link="BatchRenameRule.cs" />
     <Compile Include="..\..\src\Pdm.SolidWorks.Addin\DrawingQrLayoutRule.cs" Link="DrawingQrLayoutRule.cs" />
+    <Compile Include="..\..\src\Pdm.SolidWorks.Addin\DrawingQrDeletionRule.cs" Link="DrawingQrDeletionRule.cs" />
+    <Compile Include="..\..\src\Pdm.SolidWorks.Addin\BatchProjectRootRule.cs" Link="BatchProjectRootRule.cs" />
   </ItemGroup>
 </Project>

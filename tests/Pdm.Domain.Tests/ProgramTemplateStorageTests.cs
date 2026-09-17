@@ -74,6 +74,35 @@ public sealed class ProgramTemplateStorageTests
         }
     }
 
+    [Fact]
+    public async Task Upload_AcceptsRarPackageAndWordEvidence()
+    {
+        var testRoot = NewTestRoot();
+        var storageRoot = Path.Combine(testRoot, "program-templates");
+        var storage = CreateStorage(Path.Combine(testRoot, "uploads"), storageRoot, 32);
+        var rar = new byte[] { 0x52, 0x61, 0x72, 0x21, 0x1A, 0x07, 0x01, 0x00, 0x00 };
+
+        try
+        {
+            var packageSession = await storage.StartUploadAsync(
+                Guid.NewGuid(), "PT-FB-0001", ProgramTemplateAttachmentKind.Package, "motor.rar",
+                rar.Length, Convert.ToHexString(SHA256.HashData(rar)), "engineer", default);
+            await using (var chunk = new MemoryStream(rar, writable: false))
+                await storage.WriteChunkAsync(packageSession.Id, 0, chunk, "engineer", default);
+            var stored = await storage.CompleteUploadAsync(packageSession.Id, "engineer", default);
+            Assert.Equal("motor.rar", stored.OriginalFileName);
+
+            var evidence = await storage.StartUploadAsync(
+                Guid.NewGuid(), "PT-FB-0001", ProgramTemplateAttachmentKind.TestEvidence, "offline-test.docx",
+                1, new string('A', 64), "engineer", default);
+            Assert.Equal("offline-test.docx", evidence.FileName);
+        }
+        finally
+        {
+            DeleteTestRoot(testRoot);
+        }
+    }
+
     private static LocalProgramTemplateStorage CreateStorage(string uploadRoot, string storageRoot, int chunkSize) =>
         new(Options.Create(new PdmStorageOptions
         {

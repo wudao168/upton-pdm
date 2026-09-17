@@ -11,7 +11,7 @@ public sealed class LocalProgramTemplateStorage(IOptions<PdmStorageOptions> opti
 {
     private static readonly IReadOnlySet<string> EvidenceExtensions = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
     {
-        ".pdf", ".xlsx", ".png", ".jpg", ".jpeg"
+        ".pdf", ".doc", ".docx", ".xls", ".xlsx", ".png", ".jpg", ".jpeg"
     };
 
     private readonly PdmStorageOptions settings = options.Value;
@@ -104,7 +104,13 @@ public sealed class LocalProgramTemplateStorage(IOptions<PdmStorageOptions> opti
             File.Delete(assembledPath);
             throw new PdmConflictException("上传文件SHA-256校验失败。");
         }
-        if (session.Kind == ProgramTemplateAttachmentKind.Package) await ValidateZipAsync(assembledPath, cancellationToken);
+        if (session.Kind == ProgramTemplateAttachmentKind.Package)
+        {
+            if (string.Equals(Path.GetExtension(session.FileName), ".rar", StringComparison.OrdinalIgnoreCase))
+                await ValidateRarAsync(assembledPath, cancellationToken);
+            else
+                await ValidateZipAsync(assembledPath, cancellationToken);
+        }
 
         var root = StorageLocationPolicy.Normalize(settings.ProgramTemplateRoot);
         var storedAt = timeProvider.GetUtcNow();
@@ -195,6 +201,16 @@ public sealed class LocalProgramTemplateStorage(IOptions<PdmStorageOptions> opti
         }
     }
 
+    private static async Task ValidateRarAsync(string path, CancellationToken cancellationToken)
+    {
+        var signature = new byte[8];
+        await using var input = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, 8, FileOptions.Asynchronous | FileOptions.SequentialScan);
+        var length = await input.ReadAsync(signature, cancellationToken);
+        var isRar4 = length >= 7 && signature.AsSpan(0, 7).SequenceEqual(new byte[] { 0x52, 0x61, 0x72, 0x21, 0x1A, 0x07, 0x00 });
+        var isRar5 = length >= 8 && signature.AsSpan(0, 8).SequenceEqual(new byte[] { 0x52, 0x61, 0x72, 0x21, 0x1A, 0x07, 0x01, 0x00 });
+        if (!isRar4 && !isRar5) throw new PdmRuleException("RAR程序包损坏或格式不受支持。");
+    }
+
     private static void RequireOwner(ProgramTemplateUploadSession session, string actor)
     {
         if (!string.Equals(session.Owner, actor, StringComparison.OrdinalIgnoreCase))
@@ -204,10 +220,12 @@ public sealed class LocalProgramTemplateStorage(IOptions<PdmStorageOptions> opti
     private static void ValidateExtension(ProgramTemplateAttachmentKind kind, string fileName)
     {
         var extension = Path.GetExtension(fileName);
-        if (kind == ProgramTemplateAttachmentKind.Package && !string.Equals(extension, ".zip", StringComparison.OrdinalIgnoreCase))
-            throw new PdmRuleException("主程序包仅支持未加密ZIP格式。");
+        if (kind == ProgramTemplateAttachmentKind.Package
+            && !string.Equals(extension, ".zip", StringComparison.OrdinalIgnoreCase)
+            && !string.Equals(extension, ".rar", StringComparison.OrdinalIgnoreCase))
+            throw new PdmRuleException("主程序包仅支持ZIP或RAR格式。");
         if (kind == ProgramTemplateAttachmentKind.TestEvidence && !EvidenceExtensions.Contains(extension))
-            throw new PdmRuleException("离线测试证据仅支持PDF、XLSX、PNG和JPG格式。");
+            throw new PdmRuleException("离线测试证据仅支持PDF、Word、Excel、PNG和JPG格式。");
     }
 
     private static string RequiredPathSegment(string value)

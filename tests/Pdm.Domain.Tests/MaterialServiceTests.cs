@@ -35,6 +35,27 @@ public sealed class MaterialServiceTests
     }
 
     [Fact]
+    public async Task MaterialManagerCanRejectPendingMaterialMasterWithReason()
+    {
+        var service = CreateService(out _);
+        var created = await service.CreateAsync(new(
+            null, "待退回普通料品", MaterialKind.Standard, MaterialSupplyMode.Purchase, "001",
+            "MODEL-REJECT", null, null, "UPTON", null, null, null, CategoryCode: "0102"),
+            "engineer", UserRole.Engineer, default);
+
+        var missingReason = await Assert.ThrowsAsync<PdmRuleException>(() =>
+            service.RejectAsync(created.Id, created.RowVersion, "   ", "standardizer", UserRole.ProcessReviewer, default));
+        Assert.Equal("退回料品申请时必须填写原因。", missingReason.Message);
+
+        var rejected = await service.RejectAsync(
+            created.Id, created.RowVersion, "  型号资料不完整  ", "standardizer", UserRole.ProcessReviewer, default);
+
+        Assert.True(rejected.IsArchived);
+        Assert.Equal("standardizer", rejected.ArchivedBy);
+        Assert.Empty(await service.ListPendingMasterMaterialsAsync("standardizer", UserRole.ProcessReviewer, default));
+    }
+
+    [Fact]
     public async Task DuplicateRules_AreConfigurablePerCategoryAndBlockMatchingMaterials()
     {
         var service = CreateService(out _);

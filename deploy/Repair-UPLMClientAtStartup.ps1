@@ -113,7 +113,10 @@ foreach ($profile in @(Get-ChildItem -LiteralPath $UsersRoot -Directory -ErrorAc
         [pscustomobject]@{ Name = 'solidworks-addin'; Target = (Join-Path $localRoot 'solidworks-addin'); Package = $bootstrap.SolidWorksAddin; Payload = $addinPayload }
     )) {
         if (-not (Test-Path -LiteralPath $component.Target -PathType Container)) { continue }
-        if (-not (Test-UpdateRequired $component.Target ([string]$component.Package.Version))) {
+        $pendingStatePath = Join-Path (Join-Path $localRoot 'updates') ($component.Name + '-pending.json')
+        $hasPendingState = Test-Path -LiteralPath $pendingStatePath -PathType Leaf
+        $updateRequired = Test-UpdateRequired $component.Target ([string]$component.Package.Version)
+        if (-not $updateRequired -and -not $hasPendingState) {
             $results += [pscustomobject]@{ Profile = $profile.Name; Component = $component.Name; Status = 'Current'; Version = [string]$component.Package.Version }
             continue
         }
@@ -129,7 +132,8 @@ foreach ($profile in @(Get-ChildItem -LiteralPath $UsersRoot -Directory -ErrorAc
         if (-not [string]::Equals($installedVersion, [string]$component.Package.Version, [StringComparison]::OrdinalIgnoreCase)) {
             throw "Installed version validation failed: $($profile.Name)/$($component.Name)"
         }
-        $results += [pscustomobject]@{ Profile = $profile.Name; Component = $component.Name; Status = 'Updated'; Version = $installedVersion }
+        $status = if ($hasPendingState) { 'Repaired' } else { 'Updated' }
+        $results += [pscustomobject]@{ Profile = $profile.Name; Component = $component.Name; Status = $status; Version = $installedVersion }
     }
 }
 

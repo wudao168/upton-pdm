@@ -36,6 +36,7 @@ import {
   queryU9Material,
   refreshMaterialInventory,
   reactivateMaterial,
+  rejectMaterial,
   decideMaterialCodeApplication,
   saveMaterialCategory,
   setMaterialCover,
@@ -866,7 +867,7 @@ function showApprovalResult(
 }
 
 async function decideCodeApplication(application: MaterialCodeApprovalRow, approved: boolean) {
-  if (!canSelectCodeApplication(application) || !approved && application.masterMaterial) return
+  if (!canSelectCodeApplication(application) || !approved && !canRejectCodeApplication(application)) return
   const targets = applicationsForApprovalRow(application).filter(item => item.applicationType !== 'BomHeader')
   if (!targets.length) return
   let comment = ''
@@ -924,9 +925,18 @@ function canSelectCodeApplication(application: MaterialCodeApprovalRow) {
     && !batchDecidingApplications.value && decidingApplicationId.value === null
 }
 
+function canRejectCodeApplication(application: MaterialCodeApprovalRow) {
+  return application.masterMaterial ? props.canApprove : props.canDecideMaterialCode
+}
+
 async function processApprovalRow(application: MaterialCodeApprovalRow, approved: boolean, comment: string) {
   if (!application.masterMaterial) return decideMaterialCodeApplication(application.id, application.rowVersion, approved, comment, props.token)
-  if (!props.canApprove || !approved) throw new Error('普通料品仅支持由料品管理员批准，不支持退回申请。')
+  if (!props.canApprove) throw new Error('当前账号没有普通料品审批权限。')
+  if (!approved) {
+    const rejected = await rejectMaterial(application.masterMaterial.id, application.rowVersion, comment, props.token)
+    pendingMasterMaterials.value = pendingMasterMaterials.value.filter(item => item.id !== rejected.id)
+    return { automation: null }
+  }
   const result = await approveMaterial(application.masterMaterial.id, application.rowVersion, props.token)
   pendingMasterMaterials.value = pendingMasterMaterials.value.filter(item => item.id !== result.material.id)
   tasks.value = [result.task, ...tasks.value.filter(item => item.id !== result.task.id)]
@@ -934,9 +944,8 @@ async function processApprovalRow(application: MaterialCodeApprovalRow, approved
 }
 
 async function decideSelectedCodeApplications(approved: boolean) {
-  if (!approved && selectedCodeApplications.value.some(item => item.masterMaterial)) return
   const targets = [...new Map(selectedCodeApplications.value
-    .filter(canSelectCodeApplication)
+    .filter(item => canSelectCodeApplication(item) && (approved || canRejectCodeApplication(item)))
     .flatMap(applicationsForApprovalRow)
     .filter(application => application.status === 'Pending' && application.applicationType !== 'BomHeader')
     .map(application => [application.id, application])).values()]
@@ -1592,7 +1601,7 @@ onMounted(() => {
                 <div v-if="canDecideMaterialCode || canApprove" class="material-code-approval-toolbar">
                   <div class="material-code-approval-toolbar__actions">
                     <el-button type="primary" :disabled="selectedCodeApplications.length === 0 || decidingApplicationId !== null" :loading="batchDecidingApplications" @click="decideSelectedCodeApplications(true)">批量批准</el-button>
-                    <el-button v-if="canDecideMaterialCode" type="danger" plain :disabled="selectedCodeApplications.length === 0 || selectedCodeApplications.some(row => row.masterMaterial) || batchDecidingApplications || decidingApplicationId !== null" @click="decideSelectedCodeApplications(false)">批量退回</el-button>
+                    <el-button v-if="canDecideMaterialCode || canApprove" type="danger" plain :disabled="selectedCodeApplications.length === 0 || batchDecidingApplications || decidingApplicationId !== null" @click="decideSelectedCodeApplications(false)">批量退回</el-button>
                   </div>
                   <span>已选择 {{ selectedCodeApplications.length }} 项待审批申请</span>
                 </div>
@@ -1611,7 +1620,7 @@ onMounted(() => {
                     <el-table-column label="申请人" width="70" show-overflow-tooltip><template #default="{ row }">{{ displayUserName(row.requestedBy) }}</template></el-table-column>
                     <el-table-column label="申请时间" width="116" show-overflow-tooltip><template #default="{ row }">{{ dateTimeLabel(row.requestedAt) }}</template></el-table-column>
                     <el-table-column label="状态" width="72"><template #default><el-tag type="warning">待审批</el-tag></template></el-table-column>
-                    <el-table-column label="操作" width="92"><template #default="{ row }"><el-button v-if="row.masterMaterial ? canApprove : canDecideMaterialCode" link type="primary" :loading="decidingApplicationId === row.id" :disabled="batchDecidingApplications" @click="decideCodeApplication(row, true)">批准</el-button><el-button v-if="canDecideMaterialCode && !row.masterMaterial" link type="danger" :disabled="decidingApplicationId === row.id || batchDecidingApplications" @click="decideCodeApplication(row, false)">退回</el-button><span v-if="row.masterMaterial ? !canApprove : !canDecideMaterialCode">—</span></template></el-table-column>
+                    <el-table-column label="操作" width="92"><template #default="{ row }"><el-button v-if="row.masterMaterial ? canApprove : canDecideMaterialCode" link type="primary" :loading="decidingApplicationId === row.id" :disabled="batchDecidingApplications" @click="decideCodeApplication(row, true)">批准</el-button><el-button v-if="canRejectCodeApplication(row)" link type="danger" :disabled="decidingApplicationId === row.id || batchDecidingApplications" @click="decideCodeApplication(row, false)">退回</el-button><span v-if="row.masterMaterial ? !canApprove : !canDecideMaterialCode">—</span></template></el-table-column>
                   </el-table>
                 </div>
                 <el-pagination v-model:current-page="pendingApprovalPage" class="material-workflow-pagination material-pending-approval-pagination" :page-size="workflowPageSize" :total="pendingCodeApplicationRows.length" layout="total, prev, pager, next" size="small" @current-change="changePendingApprovalPage" />

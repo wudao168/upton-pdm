@@ -957,6 +957,21 @@ public sealed class MaterialService(
         return await ApproveCoreAsync(materialId, expectedRowVersion, actor, cancellationToken);
     }
 
+    public async Task<PdmMaterial> RejectAsync(Guid materialId, long expectedRowVersion, string? comment, string actor, UserRole role, CancellationToken cancellationToken)
+    {
+        await RequirePermissionAsync(actor, role, PermissionCodes.MaterialManage, cancellationToken);
+        var normalizedComment = comment?.Trim();
+        if (string.IsNullOrWhiteSpace(normalizedComment)) throw new PdmRuleException("退回料品申请时必须填写原因。");
+        if (normalizedComment.Length > 1000) throw new PdmRuleException("退回原因不能超过1000个字符。");
+        var existing = await materials.FindMaterialAsync(materialId, cancellationToken) ?? throw new PdmNotFoundException("物料主档不存在。");
+        if (existing.IsArchived) throw new PdmRuleException("料品申请已经退回。");
+        if (existing.ApprovalStatus != MaterialApprovalStatus.Draft) throw new PdmRuleException("只有待审批料品申请可以退回。");
+        var rejectedAt = timeProvider.GetUtcNow();
+        var rejected = await materials.ArchiveMaterialAsync(materialId, expectedRowVersion, actor, rejectedAt, cancellationToken);
+        await AuditAsync(actor, "material.reject", rejected.Id, $"退回料品申请：{rejected.MaterialCode} · {rejected.Name}；原因：{normalizedComment}", cancellationToken);
+        return rejected;
+    }
+
     private async Task<string> CreateMaterialPayloadAsync(PdmMaterial material, MaterialCategoryRule rule,
         string organizationCode, string correlationId, string u9UnitCode, CancellationToken cancellationToken)
     {

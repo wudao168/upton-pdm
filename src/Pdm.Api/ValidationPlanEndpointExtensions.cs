@@ -67,6 +67,12 @@ public static class ValidationPlanEndpointExtensions
             return Results.Ok(await service.SavePlanAsync(projectId, request.ToCommand(), actor, role, cancellationToken));
         });
 
+        api.MapPost("/projects/{projectId:guid}/validation-plan/items", async (Guid projectId, AppendProjectValidationPlanItemsRequest request, HttpContext context, ValidationPlanService service, CancellationToken cancellationToken) =>
+        {
+            var (actor, role) = CurrentUser(context.User);
+            return Results.Ok(await service.AppendPlanItemsAsync(projectId, request.ToCommand(), actor, role, cancellationToken));
+        });
+
         api.MapGet("/projects/{projectId:guid}/validation-plan/export", async (Guid projectId, HttpContext context, ValidationPlanService service, CancellationToken cancellationToken) =>
         {
             var (actor, role) = CurrentUser(context.User);
@@ -165,6 +171,11 @@ public sealed record SaveProjectValidationPlanItemRequest(Guid? CatalogItemId, s
 public sealed record SaveProjectValidationPlanRequest(string? PreparedBy, DateOnly? ValidationDate, IReadOnlyList<SaveProjectValidationPlanItemRequest> Items, long? ExpectedRowVersion)
 {
     public SaveProjectValidationPlanCommand ToCommand() => new(PreparedBy, ValidationDate, Items.Select(item => item.ToCommand()).ToArray(), ExpectedRowVersion);
+}
+
+public sealed record AppendProjectValidationPlanItemsRequest(IReadOnlyList<SaveProjectValidationPlanItemRequest> Items, long ExpectedRowVersion)
+{
+    public AppendProjectValidationPlanItemsCommand ToCommand() => new(Items.Select(item => item.ToCommand()).ToArray(), ExpectedRowVersion);
 }
 
 public sealed record StartValidationPlanAttachmentUploadRequest(ValidationPlanAttachmentKind Kind, string FileName, long TotalLength, string Sha256);

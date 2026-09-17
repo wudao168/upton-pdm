@@ -195,6 +195,54 @@ public sealed class ValidationPlanService(
         return saved;
     }
 
+    public async Task<ProjectValidationPlan> AppendPlanItemsAsync(Guid projectId, AppendProjectValidationPlanItemsCommand command, string actor, UserRole role, CancellationToken cancellationToken)
+    {
+        await RequireProjectReadAsync(projectId, actor, role, cancellationToken);
+        await RequirePermissionAsync(actor, role, PermissionCodes.ValidationPlanEdit, cancellationToken);
+        var project = await repository.FindProjectAsync(projectId, cancellationToken) ?? throw new PdmNotFoundException("项目不存在。");
+        var current = await validationPlans.FindPlanAsync(projectId, cancellationToken) ?? throw new PdmNotFoundException("项目尚未建立验证计划。");
+        if (current.State != ProjectValidationPlanState.Effective) throw new PdmConflictException("只有已生效验证计划可以追加检查项。");
+        if (command.Items.Count == 0) throw new PdmRuleException("请至少选择一项新增内容。");
+        if (current.Items.Count + command.Items.Count > 500) throw new PdmRuleException("单个项目验证计划最多支持500条检查项。");
+
+        var duplicate = command.Items.Where(item => item.CatalogItemId.HasValue).GroupBy(item => item.CatalogItemId).FirstOrDefault(group => group.Count() > 1);
+        if (duplicate is not null) throw new PdmConflictException("同一个检查项不能重复加入验证计划。");
+        var existingCatalogItemIds = current.Items.Where(item => item.CatalogItemId.HasValue).Select(item => item.CatalogItemId!.Value).ToHashSet();
+        if (command.Items.Any(item => item.CatalogItemId.HasValue && existingCatalogItemIds.Contains(item.CatalogItemId.Value)))
+            throw new PdmConflictException("所选检查项已存在于当前验证计划中。");
+
+        var catalog = await validationPlans.ListCatalogAsync(true, cancellationToken);
+        var itemById = catalog.Items.ToDictionary(item => item.Id);
+        var categoryById = catalog.Categories.ToDictionary(item => item.Id);
+        var nextSortOrder = current.Items.Count == 0 ? 1 : current.Items.Max(item => item.SortOrder) + 1;
+        var items = new List<ProjectValidationPlanItem>(command.Items.Count);
+        foreach (var input in command.Items.OrderBy(item => item.SortOrder))
+        {
+            if (!input.CatalogItemId.HasValue)
+            {
+                items.Add(new(Guid.NewGuid(), null, null, "人工项", Required(input.ValidationContent, 1500, "验证内容"),
+                    NormalizeInformationSource(input.InformationSource), input.ValidationDate,
+                    Optional(input.Result, 1500, "验证结果"), Optional(input.Reviewer, 100, "审核人"), Optional(input.ResponsiblePerson, 100, "责任人"),
+                    Optional(input.Remark, 1000, "备注"), nextSortOrder++));
+                continue;
+            }
+
+            if (!itemById.TryGetValue(input.CatalogItemId.Value, out var catalogItem)) throw new PdmNotFoundException("所选检查项不存在。");
+            if (!categoryById.TryGetValue(catalogItem.CategoryId, out var category)) throw new PdmNotFoundException("所选检查项分类不存在。");
+            if (!catalogItem.IsActive || !category.IsActive) throw new PdmRuleException("停用的分类或检查项不能新加入验证计划。");
+            items.Add(new(Guid.NewGuid(), category.Id, catalogItem.Id, category.Name, catalogItem.Content,
+                NormalizeInformationSource(input.InformationSource), input.ValidationDate,
+                Optional(input.Result, 1500, "验证结果"), Optional(input.Reviewer, 100, "审核人"), Optional(input.ResponsiblePerson, 100, "责任人"),
+                Optional(input.Remark, 1000, "备注"), nextSortOrder++));
+        }
+
+        var now = timeProvider.GetUtcNow();
+        var saved = await validationPlans.AppendPlanItemsAsync(current.Id, items, command.ExpectedRowVersion, actor, now, cancellationToken);
+        await EnsureArchivedAsync(project, saved, cancellationToken);
+        await AuditAsync(actor, "project.validation-plan.items.append", nameof(ProjectValidationPlan), saved.Id, $"已生效验证计划追加检查项：{project.Code} · {items.Count}项", cancellationToken);
+        return saved;
+    }
+
     public async Task<ProjectValidationPlan> CreateRevisionAsync(Guid projectId, long expectedRowVersion, string actor, UserRole role, CancellationToken cancellationToken)
     {
         await RequireProjectReadAsync(projectId, actor, role, cancellationToken);

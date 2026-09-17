@@ -135,6 +135,25 @@ public sealed class MySqlValidationPlanRepository : IValidationPlanRepository
         return await FindPlanByIdAsync(connection, null, plan.Id, cancellationToken) ?? throw new PdmNotFoundException("验证计划保存失败。");
     }
 
+    public async Task<ProjectValidationPlan> AppendPlanItemsAsync(Guid planId, IReadOnlyList<ProjectValidationPlanItem> items, long expectedRowVersion, string actor, DateTimeOffset updatedAt, CancellationToken cancellationToken)
+    {
+        await using var connection = await OpenAsync(cancellationToken);
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+        var affected = await connection.ExecuteAsync(new CommandDefinition(
+            "UPDATE project_validation_plan SET updated_by=@Actor,updated_at=@UpdatedAt,row_version=row_version+1 WHERE id=@PlanId AND state='Effective' AND row_version=@ExpectedRowVersion",
+            new { PlanId = planId, ExpectedRowVersion = expectedRowVersion, Actor = actor, UpdatedAt = updatedAt.UtcDateTime }, transaction, cancellationToken: cancellationToken));
+        if (affected == 0) throw new PdmConflictException("验证计划状态已变化，请刷新后重试。");
+        if (items.Count > 0)
+        {
+            await connection.ExecuteAsync(new CommandDefinition(
+                "INSERT INTO project_validation_plan_item(id,plan_id,catalog_category_id,catalog_item_id,category_name,validation_content,information_source,validation_date,result,reviewer,responsible_person,remark,sort_order) VALUES(@Id,@PlanId,@CatalogCategoryId,@CatalogItemId,@CategoryName,@ValidationContent,@InformationSource,@ValidationDate,@Result,@Reviewer,@ResponsiblePerson,@Remark,@SortOrder)",
+                items.Select(item => new { item.Id, PlanId = planId, item.CatalogCategoryId, item.CatalogItemId, item.CategoryName, item.ValidationContent, item.InformationSource, ValidationDate = ToDateTime(item.ValidationDate), item.Result, item.Reviewer, item.ResponsiblePerson, item.Remark, item.SortOrder }),
+                transaction, cancellationToken: cancellationToken));
+        }
+        await transaction.CommitAsync(cancellationToken);
+        return await FindPlanByIdAsync(connection, null, planId, cancellationToken) ?? throw new PdmNotFoundException("验证计划不存在。");
+    }
+
     public async Task<ProjectValidationPlan> CreateRevisionAsync(ProjectValidationPlan plan, CancellationToken cancellationToken)
     {
         await using var connection = await OpenAsync(cancellationToken);
