@@ -287,10 +287,12 @@ public partial class MainWindow : Window
             _ = PublishClientVersionAsync();
         };
         var uiVersion = File.GetLastWriteTimeUtc(indexFile).Ticks;
-        reviewOverlay = new ReviewOverlayWindow(this, WorkspaceView.CoreWebView2.Environment, uiFolder, uiVersion);
+        reviewOverlay = new ReviewOverlayWindow(this, WorkspaceView.CoreWebView2.Environment, uiFolder, uiVersion,
+            bootstrapConfiguration.UiBaseUrl, bootstrapConfiguration.ConfigurationVersion);
         reviewOverlay.MessageReceived += OnReviewOverlayMessageReceived;
         reviewOverlay.ActivityChanged += ApplyPreviewSurfaces;
-        reviewAnnotationOverlay = new ReviewAnnotationOverlayWindow(this, WorkspaceView.CoreWebView2.Environment, uiFolder, uiVersion);
+        reviewAnnotationOverlay = new ReviewAnnotationOverlayWindow(this, WorkspaceView.CoreWebView2.Environment, uiFolder, uiVersion,
+            bootstrapConfiguration.UiBaseUrl, bootstrapConfiguration.ConfigurationVersion);
         reviewAnnotationOverlay.MessageReceived += OnReviewOverlayMessageReceived;
         reviewAnnotationOverlay.ActivityChanged += ApplyPreviewSurfaces;
         usingServerUi = Uri.TryCreate(bootstrapConfiguration.UiBaseUrl, UriKind.Absolute, out var serverUiUrl)
@@ -331,6 +333,9 @@ public partial class MainWindow : Window
                         usingServerUi = true;
                         attemptedLocalUiFallback = false;
                         WorkspaceView.Source = new Uri(uiUrl, $"?configuration={Uri.EscapeDataString(latest.ConfigurationVersion)}");
+                        // 审核浮层同样跟随服务器版本刷新，避免客户端停留在旧审核界面。
+                        reviewOverlay?.UseConfiguration(latest.UiBaseUrl, latest.ConfigurationVersion);
+                        reviewAnnotationOverlay?.UseConfiguration(latest.UiBaseUrl, latest.ConfigurationVersion);
                     }));
                 }
                 else
