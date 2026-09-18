@@ -260,8 +260,19 @@ const formalReleaseRows = computed(() => {
     existing.item.quantity = Number(existing.item.quantity) + Number(item.quantity)
     if (item.id) existing.sourceItems.push(item)
   })
-  return [...grouped.values()]
+  return [...grouped.values()].map(row => ({
+    ...row,
+    remainingQuantity: Math.max(0, Number(row.item.quantity) - row.longLeadPublishedQuantity),
+  }))
 })
+const isFormalRowFullyPublished = (row: { remainingQuantity: number }) => row.remainingQuantity <= 0
+const fullyPublishedFormalRowCount = computed(() => formalReleaseRows.value.filter(isFormalRowFullyPublished).length)
+const formalRowPublishQuantity = (row: { item: BomItem; longLeadPublishedQuantity: number }) =>
+  Math.max(0, Number(row.item.quantity) * Number(wholeSetMultiplier.value) - row.longLeadPublishedQuantity)
+const formalRowPublishTitle = (row: { item: BomItem; longLeadPublishedQuantity: number; remainingQuantity: number }) =>
+  isFormalRowFullyPublished(row)
+    ? `该物料已提前发布${row.longLeadPublishedQuantity}/${row.item.quantity}，已发布的零件不允许再发布，本次不再重复下发数量。`
+    : `该物料已提前发布${row.longLeadPublishedQuantity}/${row.item.quantity}，本次正式发布只下发剩余数量${row.remainingQuantity}。`
 const selectedFormalBomItemIds = computed(() => formalReleaseRows.value
   .filter(row => selectedFormalKeys.value.includes(row.key))
   .flatMap(row => row.sourceItems.map(item => item.id).filter((id): id is string => Boolean(id))))
@@ -336,7 +347,7 @@ const releaseDetailPageCount = computed(() => {
 })
 const releaseDetailLegend = computed(() => {
   if (isLongLeadRelease.value) return `选择前期${scope.value === 'NonStandardLongLead' ? '非标件' : scope.value === 'ElectricalLongLead' ? '电气件' : '标准件'}（已选 ${selectedLongLeadKeys.value.length} 项）`
-  if (scope.value === 'StandardFormal') return `正式发布内容（已选 ${selectedFormalKeys.value.length} / 共 ${formalReleaseRows.value.length} 项 · 默认全选 · 整套倍率 ×${wholeSetMultiplier.value}）`
+  if (scope.value === 'StandardFormal') return `正式发布内容（已选 ${selectedFormalKeys.value.length} / 共 ${formalReleaseRows.value.length} 项 · 默认全选 · 整套倍率 ×${wholeSetMultiplier.value}${fullyPublishedFormalRowCount.value ? ` · ${fullyPublishedFormalRowCount.value} 项已提前发布不再重复下发` : ''}）`
   if (isFormalRelease.value) return `正式发布内容（共 ${formalReleaseRows.value.length} 项 · 整套倍率 ×${wholeSetMultiplier.value}）`
   return `增补/变更内容（共 ${supplementRows.value.length} 项 · 整套倍率 ×${wholeSetMultiplier.value}）`
 })
@@ -559,6 +570,8 @@ function toggleLongLeadSelection(key: string, checked: boolean, maximum: number)
 }
 
 function toggleFormalSelection(key: string, checked: boolean) {
+  const row = formalReleaseRows.value.find(candidate => candidate.key === key)
+  if (row && isFormalRowFullyPublished(row)) return
   selectedFormalKeys.value = checked
     ? [...new Set([...selectedFormalKeys.value, key])]
     : selectedFormalKeys.value.filter(item => item !== key)
@@ -612,7 +625,8 @@ function startDraftEdit() {
   if (releasePackage.scope === 'StandardFormal' && releasePackage.selectedBomItemIds.length > 0) {
     const selectedIds = new Set(releasePackage.selectedBomItemIds)
     selectedFormalKeys.value = formalReleaseRows.value
-      .filter(row => row.sourceItems.length > 0 && row.sourceItems.every(item => selectedIds.has(item.id!)))
+      .filter(row => isFormalRowFullyPublished(row)
+        || row.sourceItems.length > 0 && row.sourceItems.every(item => selectedIds.has(item.id!)))
       .map(row => row.key)
   }
   editingDraft.value = true
@@ -803,8 +817,8 @@ async function saveItemComment() {
               </template>
               <template v-else-if="isFormalRelease">
                 <tr v-for="(row, index) in pagedFormalReleaseRows" :key="row.key" :class="{ 'is-release-unselected': scope === 'StandardFormal' && !selectedFormalKeys.includes(row.key) }">
-                  <td class="is-release-centered"><input v-if="scope === 'StandardFormal'" :checked="selectedFormalKeys.includes(row.key)" type="checkbox" :aria-label="`本次发布物料 ${row.item.drawingNumber}`" @change="toggleFormalSelection(row.key, ($event.target as HTMLInputElement).checked)"><span v-else class="release-inclusion-tag">全量</span></td><td class="is-release-centered">{{ (formalPage - 1) * releasePageSize + index + 1 }}</td><td>{{ row.item.drawingNumber || '—' }}</td><td>{{ row.item.name || '—' }}</td><td>{{ row.item.specification || '—' }}</td><td class="is-release-centered">{{ row.item.brand || '—' }}</td><td class="is-release-centered">{{ row.item.quantity }}</td><td class="is-release-centered" :class="{ 'is-release-multiplied': Number(wholeSetMultiplier) !== 1 && !(scope === 'StandardFormal' && !selectedFormalKeys.includes(row.key)) }">{{ scope === 'StandardFormal' && !selectedFormalKeys.includes(row.key) ? '—' : Number(row.item.quantity) * Number(wholeSetMultiplier) }}</td><td>{{ row.item.remark || '—' }}</td>
-                  <td class="is-release-centered"><span v-if="scope === 'NonStandardWithDrawing'" class="release-status-tag" :class="{ 'is-blocked': !releaseRowDrawingReviewReady(row) }">{{ releaseRowDrawingReviewStatus(row) }}</span><span v-else-if="scope === 'StandardFormal' && !selectedFormalKeys.includes(row.key)" class="release-status-tag">本次不发布</span><span v-else-if="row.longLeadPublishedQuantity > 0" class="long-lead-tag">已提前发布 {{ row.longLeadPublishedQuantity }}/{{ row.item.quantity }}</span><span v-else-if="scope === 'StandardFormal'" class="release-status-tag">本次发布</span><span v-else>—</span></td>
+                  <td class="is-release-centered"><input v-if="scope === 'StandardFormal'" :checked="selectedFormalKeys.includes(row.key)" type="checkbox" :disabled="isFormalRowFullyPublished(row)" :title="isFormalRowFullyPublished(row) ? formalRowPublishTitle(row) : undefined" :aria-label="`本次发布物料 ${row.item.drawingNumber}`" @change="toggleFormalSelection(row.key, ($event.target as HTMLInputElement).checked)"><span v-else class="release-inclusion-tag">全量</span></td><td class="is-release-centered">{{ (formalPage - 1) * releasePageSize + index + 1 }}</td><td>{{ row.item.drawingNumber || '—' }}</td><td>{{ row.item.name || '—' }}</td><td>{{ row.item.specification || '—' }}</td><td class="is-release-centered">{{ row.item.brand || '—' }}</td><td class="is-release-centered">{{ row.remainingQuantity }}</td><td class="is-release-centered" :class="{ 'is-release-multiplied': Number(wholeSetMultiplier) !== 1 && !(scope === 'StandardFormal' && !selectedFormalKeys.includes(row.key)) }">{{ scope === 'StandardFormal' && !selectedFormalKeys.includes(row.key) ? '—' : formalRowPublishQuantity(row) }}</td><td>{{ row.item.remark || '—' }}</td>
+                  <td class="is-release-centered"><span v-if="scope === 'NonStandardWithDrawing'" class="release-status-tag" :class="{ 'is-blocked': !releaseRowDrawingReviewReady(row) }">{{ releaseRowDrawingReviewStatus(row) }}</span><span v-else-if="scope === 'StandardFormal' && !selectedFormalKeys.includes(row.key)" class="release-status-tag">本次不发布</span><span v-else-if="row.longLeadPublishedQuantity > 0" class="long-lead-tag" :title="formalRowPublishTitle(row)">已提前发布 {{ row.longLeadPublishedQuantity }}/{{ row.item.quantity }}<template v-if="isFormalRowFullyPublished(row)"> · 不再重复下发</template></span><span v-else-if="scope === 'StandardFormal'" class="release-status-tag">本次发布</span><span v-else>—</span></td>
                 </tr>
               </template>
               <template v-else>
