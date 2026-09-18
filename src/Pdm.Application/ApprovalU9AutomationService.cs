@@ -133,12 +133,20 @@ public sealed class ApprovalU9AutomationService(
                 var binding = bindings.SingleOrDefault(item => item.Kind == kind);
                 if (binding is null
                     || !approvedHeaders.Contains((kind, binding.MaterialId)))
+                {
+                    // 表头料号尚未批准或绑定缺失：登记重试，避免依赖晚于触发时点就绪后不再自动创建。
+                    BomU9AutomationRetryQueue.Schedule(project.Id, kind, "BOM表头料号尚未完成自动审批", timeProvider.GetUtcNow());
                     continue;
+                }
 
                 try
                 {
                     var synchronized = await bomSync.SynchronizeApprovedAsync(project.Id, kind, actor, cancellationToken);
                     outcomes.Add(new(project.Id, project.Code, kind, synchronized.State, synchronized.Message));
+                    if (synchronized.State is ProjectBomU9AutomaticState.WaitingForDependencies or ProjectBomU9AutomaticState.AwaitingApproval)
+                        BomU9AutomationRetryQueue.Schedule(project.Id, kind, synchronized.Message, timeProvider.GetUtcNow());
+                    else
+                        BomU9AutomationRetryQueue.Clear(project.Id, kind);
                 }
                 catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
                 {
@@ -147,6 +155,7 @@ public sealed class ApprovalU9AutomationService(
                 catch (Exception exception)
                 {
                     outcomes.Add(new(project.Id, project.Code, kind, null, exception.Message, Failed: true));
+                    BomU9AutomationRetryQueue.Schedule(project.Id, kind, exception.Message, timeProvider.GetUtcNow());
                 }
             }
         }

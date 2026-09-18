@@ -140,7 +140,7 @@ builder.Services.AddSingleton<IReleasePackagePublisher, AtomicReleasePackagePubl
 builder.Services.AddSingleton<ICrmCredentialProtector, DataProtectionCrmCredentialProtector>();
 builder.Services.AddSingleton<IU9SecretProtector, DataProtectionU9SecretProtector>();
 builder.Services.AddHttpClient<ICrmCustomerClient, CrmCustomerClient>(client => client.Timeout = TimeSpan.FromSeconds(20));
-builder.Services.AddHttpClient<IU9OpenApiClient, U9OpenApiClient>(client => client.Timeout = TimeSpan.FromSeconds(20))
+builder.Services.AddHttpClient<IU9OpenApiClient, U9OpenApiClient>(client => client.Timeout = TimeSpan.FromSeconds(60))
     .RemoveAllLoggers();
 builder.Services.AddHttpClient<IU9InventoryClient, U9OpenApiClient>(client => client.Timeout = TimeSpan.FromMinutes(2))
     .RemoveAllLoggers();
@@ -186,6 +186,7 @@ builder.Services.AddHostedService<U9InventorySyncHostedService>();
 builder.Services.AddHostedService<U9ProcurementSyncHostedService>();
 builder.Services.AddHostedService<MaterialU9SyncBatchHostedService>();
 builder.Services.AddHostedService<BomHeaderAutomaticHostedService>();
+builder.Services.AddHostedService<BomU9AutomationRetryHostedService>();
 builder.Services.AddHostedService<ProjectFileRecycleCleanupService>();
 builder.Services.AddHostedService<ControlledDocumentRecycleCleanupService>();
 builder.Services.AddHostedService<ProjectContentResetCleanupService>();
