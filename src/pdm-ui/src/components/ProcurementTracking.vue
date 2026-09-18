@@ -523,12 +523,15 @@ onBeforeUnmount(() => {
       <input v-model="filters.keyword" type="search" aria-label="搜索料号、名称、型号" placeholder="搜索料号、名称、型号" class="procurement-tracking__search">
       <input v-model="filters.brand" type="search" :list="`procurement-brands-${projectId}`" placeholder="全部品牌" aria-label="筛选品牌" class="procurement-tracking__brand-filter">
       <datalist :id="`procurement-brands-${projectId}`"><option v-for="brand in brandOptions" :key="brand" :value="brand" /></datalist>
-      <select v-model="filters.bomKind" aria-label="筛选物料分类" class="procurement-tracking__kind-filter">
-        <option value="">全部分类</option>
-        <option value="标准件">标准件</option>
-        <option value="非标件">非标件</option>
-        <option value="电气件">电气件</option>
-      </select>
+      <label class="procurement-tracking__kind-filter">
+        <select v-model="filters.bomKind" aria-label="筛选物料分类">
+          <option value="">全部分类</option>
+          <option value="标准件">标准件</option>
+          <option value="非标件">非标件</option>
+          <option value="电气件">电气件</option>
+        </select>
+        <span aria-hidden="true">⌄</span>
+      </label>
       <el-popover v-for="field in multiFilterFields" :key="field.key" placement="bottom-start" trigger="click" :width="190">
         <template #reference>
           <button type="button" class="procurement-tracking__multi-filter" :class="{ 'has-value': filters[field.key].length }" :aria-label="`筛选${field.label}`">
@@ -637,10 +640,12 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
-.procurement-tracking__filters{display:flex;flex-wrap:nowrap;align-items:center;gap:5px;flex:0 0 auto;margin:0;white-space:nowrap}
+.procurement-tracking__filters{display:flex;flex-wrap:nowrap;align-items:center;gap:4px;flex:0 0 auto;margin:0;white-space:nowrap}
 .procurement-tracking__brand-filter{width:90px;flex:0 0 90px}
-.procurement-tracking__brand-filter,.procurement-tracking__kind-filter{height:30px;box-sizing:border-box;border:1px solid var(--pdm-border);border-radius:4px;background:var(--pdm-panel,#fff);color:var(--pdm-text);font:inherit;font-size:12px;padding:0 8px;min-width:0}
-.procurement-tracking__kind-filter{width:90px;flex:0 0 90px;padding-right:20px}
+.procurement-tracking__brand-filter{height:30px;box-sizing:border-box;border:1px solid var(--pdm-border);border-radius:4px;background:var(--pdm-panel,#fff);color:var(--pdm-text);font:inherit;font-size:12px;padding:0 8px;min-width:0}
+.procurement-tracking__kind-filter{display:flex;width:100px;max-width:100%;height:30px;box-sizing:border-box;flex:0 0 100px;align-items:center;justify-content:space-between;gap:5px;padding:0 7px;border:1px solid var(--pdm-border);border-radius:4px;background:var(--pdm-panel,#fff);color:var(--pdm-text);font:inherit;font-size:12px;min-width:0;cursor:pointer}
+.procurement-tracking__kind-filter select{min-width:0;flex:1;height:100%;padding:0;border:0;background:transparent;color:inherit;font:inherit;font-size:12px;appearance:none;-webkit-appearance:none;cursor:pointer}
+.procurement-tracking__kind-filter select:focus{outline:0}
 .procurement-tracking__movement{white-space:pre-line;line-height:18px;display:block}
 .procurement-tracking__movement.is-transfer{color:var(--pdm-orange)}
 .procurement-tracking__movement.is-stockin{color:var(--pdm-blue)}
