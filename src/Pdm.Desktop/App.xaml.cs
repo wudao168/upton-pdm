@@ -17,12 +17,6 @@ public partial class App : System.Windows.Application
     protected override void OnStartup(StartupEventArgs e)
     {
         var executablePath = Process.GetCurrentProcess().MainModule?.FileName ?? string.Empty;
-        if (ClientPackageUpdater.TryLaunchPendingUpdate("desktop", Process.GetCurrentProcess().Id, executablePath))
-        {
-            Shutdown();
-            return;
-        }
-
         singleInstanceMutex = new Mutex(true, InstanceMutexName, out var createdNew);
         if (!createdNew)
         {
@@ -33,6 +27,13 @@ public partial class App : System.Windows.Application
             {
                 showEvent.Set();
             }
+            Shutdown();
+            return;
+        }
+
+        // 只有确认当前是唯一实例后才能切换版本：其它实例仍在运行时替换目录会失败，客户端会表现为刚打开就关闭。
+        if (ClientPackageUpdater.TryLaunchPendingUpdate("desktop", Process.GetCurrentProcess().Id, executablePath))
+        {
             Shutdown();
             return;
         }

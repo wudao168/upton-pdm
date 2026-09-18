@@ -1,10 +1,9 @@
 <script setup lang="ts">
-import { Cloud, FileSearch, Link2, MoreHorizontal, PencilLine, Rotate3D, RotateCcw, Save, ScanSearch, Square } from '@lucide/vue'
+import { Cloud, FileSearch, MoreHorizontal, PencilLine, Rotate3D, RotateCcw, Save, Square } from '@lucide/vue'
 import { ElMessage } from '../statusMessage'
 import { computed, defineAsyncComponent, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { listDocumentVersions, postDesktopMessage, readDocumentPreviewFile } from '../api'
 import type { BomItem, DocumentNode, PreviewMode, SolidWorksOpenMode } from '../types'
-import { useUserDisplayName } from '../userDisplay'
 import SquareLoader from './SquareLoader.vue'
 
 const StepPreviewViewer = defineAsyncComponent(() => import('./StepPreviewViewer.vue'))
@@ -18,28 +17,26 @@ const props = withDefaults(defineProps<{
   canEditDocuments?: boolean
   desktopAvailable?: boolean
   obscured?: boolean
-  reviewPanelOpen?: boolean
-  reviewStatus?: string
-  reviewStatusTone?: 'neutral' | 'pending' | 'warning' | 'success' | 'danger'
+  reviewPanelCollapsed?: boolean
   reviewVersionId?: string
   reviewRevision?: string
   canWritebackReviewProperties?: boolean
   accessToken?: string
   projectId?: string
+  active?: boolean
 }>(), {
   currentUsername: '',
   canManageLifecycle: false,
   canEditDocuments: false,
   desktopAvailable: false,
   obscured: false,
-  reviewPanelOpen: false,
-  reviewStatus: '未发起',
-  reviewStatusTone: 'neutral',
+  reviewPanelCollapsed: true,
   reviewVersionId: '',
   reviewRevision: '',
   canWritebackReviewProperties: false,
   accessToken: '',
   projectId: '',
+  active: true,
 })
 const emit = defineEmits<{
   open: [node: DocumentNode, mode: SolidWorksOpenMode, versionId?: string]
@@ -48,9 +45,7 @@ const emit = defineEmits<{
   more: []
   whereUsed: []
   obsolete: []
-  review: []
 }>()
-const displayUserName = useUserDisplayName()
 const previewSlot = ref<HTMLElement>()
 const previewState = ref<'idle' | 'loading' | 'ready' | 'error' | 'unavailable'>('idle')
 const previewError = ref('')
@@ -76,27 +71,10 @@ let webPreviewRequest = 0
 let archiveDateRequest = 0
 
 const mode = computed<PreviewMode>(() => props.selected.kind === 'Drawing' ? 'drawing' : 'model')
-const previewKindLabel = computed(() => mode.value === 'drawing' ? '2D工程图' : '3D模型')
 const displayedRevision = computed(() => props.reviewVersionId && props.reviewRevision ? props.reviewRevision : props.selected.version)
-const selectedDisplayName = computed(() => {
-  const name = meaningfulSelectedName.value
-  return name || props.selected.drawingNumber?.trim() || props.selected.fileName
-})
 const meaningfulSelectedName = computed(() => {
   const name = props.selected.name?.trim()
   return name && name !== props.selected.drawingNumber?.trim() ? name : ''
-})
-const lifecycleLabel = computed(() => {
-  const value = props.selected.lifecycleState
-  if (typeof value === 'number') return ['工作中', '审批中', '已发布', '已作废'][value] ?? String(value)
-  return ({ Work: '工作中', InReview: '审批中', Released: '已发布', Obsolete: '已作废' } as Record<string, string>)[value ?? ''] ?? value ?? '工作中'
-})
-const editStatusLabel = computed(() => {
-  const owner = props.selected.checkedOutBy?.trim()
-  if (!owner) return '正常'
-  return owner.localeCompare(props.currentUsername.trim(), undefined, { sensitivity: 'accent' }) === 0
-    ? '可编辑'
-    : `${displayUserName(owner)}编辑中`
 })
 const previewPropertyValue = (value?: string | null) => value?.trim() || '—'
 const formatArchiveDate = (value?: string | null) => {
@@ -184,7 +162,8 @@ function reportPreviewBounds() {
     viewportHeight: window.innerHeight,
     visible: true,
   })
-  const reviewWidth = Math.min(width, Math.min(440, Math.max(360, width * 0.34)))
+  // 客户端审核浮窗宽度与网页端审核栏保持一致：收起时只留窄条，展开时固定 300px（预览区更窄时按可用宽度收窄）。
+  const reviewWidth = props.reviewPanelCollapsed ? 34 : Math.min(width, 300)
   postDesktopMessage('review-overlay-bounds', {
     left: right - reviewWidth,
     top,
@@ -192,7 +171,16 @@ function reportPreviewBounds() {
     height,
     viewportWidth: window.innerWidth,
     viewportHeight: window.innerHeight,
-    visible: props.reviewPanelOpen,
+    visible: true,
+  })
+  postDesktopMessage('review-annotation-bounds', {
+    left: left + 14,
+    top: top + 14,
+    width: Math.min(320, Math.max(220, width - 28)),
+    height: Math.min(Math.max(240, height - 28), 560),
+    viewportWidth: window.innerWidth,
+    viewportHeight: window.innerHeight,
+    visible: true,
   })
 }
 
@@ -377,7 +365,7 @@ watch(() => props.obscured, obscured => {
   void nextTick(schedulePreviewBounds)
 }, { flush: 'post' })
 
-watch(() => props.reviewPanelOpen, () => {
+watch(() => props.reviewPanelCollapsed, () => {
   void nextTick(schedulePreviewBounds)
 }, { flush: 'post' })
 
@@ -391,16 +379,27 @@ watch([() => props.selected.id, () => props.reviewVersionId], () => {
   solidWorksPending.value = false
   solidWorksMessage.value = ''
   solidWorksError.value = false
-  if (!props.desktopAvailable && previewSessionActivated.value) void restartPreview()
-  else {
-    previewSessionActivated.value = false
-    hidePreview()
-    clearWebPreview()
-    previewState.value = 'idle'
-    previewError.value = ''
-    requestLightweightPreview()
+  // 已经加载过预览时，同一项目内切换图档直接续用当前会话；只有首次加载需要手动触发。
+  if (previewSessionActivated.value) {
+    if (props.desktopAvailable) void startPreview()
+    else void restartPreview()
+    return
   }
+  hidePreview()
+  clearWebPreview()
+  previewState.value = 'idle'
+  previewError.value = ''
+  requestLightweightPreview()
 })
+
+watch(() => props.active, active => {
+  if (!props.desktopAvailable) return
+  if (active) {
+    void nextTick(schedulePreviewBounds)
+    return
+  }
+  suspendPreview()
+}, { flush: 'post' })
 
 watch(() => props.projectId, (projectId, previousProjectId) => {
   if (!previousProjectId || projectId === previousProjectId) return
@@ -453,46 +452,24 @@ onBeforeUnmount(() => {
   <section class="pdm-preview-panel" aria-label="图档预览">
     <section class="pdm-panel pdm-preview-control-panel" aria-label="图档查看与操作">
       <header class="pdm-preview-toolbar">
-        <div class="pdm-preview-document-switcher">
-          <span class="pdm-preview-kind">{{ previewKindLabel }}</span>
-          <strong class="pdm-preview-document-name" :title="selectedDisplayName">{{ selectedDisplayName }}</strong>
-          <span class="pdm-selected-version" :aria-label="`${reviewVersionId ? '审核冻结版本' : '工作版本'} ${displayedRevision}`">{{ displayedRevision }}</span>
-          <span class="pdm-selected-version" :aria-label="`业务状态 ${lifecycleLabel}`">{{ lifecycleLabel }}</span>
-          <span class="pdm-selected-status">{{ editStatusLabel }}</span>
-          <div v-if="related.length" class="pdm-related-documents" aria-label="关联图档">
-            <span><Link2 :size="13" />关联{{ mode === 'model' ? '图纸' : '模型' }}</span>
-            <button v-for="document in related" :key="document.id" type="button" :title="document.name" @click="emit('related', document)">{{ document.drawingNumber }}</button>
-          </div>
-        </div>
-        <div class="pdm-preview-actions">
-          <div class="pdm-markup-toolbar" aria-label="图形批注工具">
-            <span>批注</span>
-            <button type="button" aria-label="引线批注" title="带引线文字" :disabled="!selected.documentId" @click="activateMarkup('markup-text-leader')"><PencilLine :size="14" /></button>
-            <button type="button" aria-label="云线批注" title="修订云线" :disabled="!selected.documentId" @click="activateMarkup('markup-cloud')"><Cloud :size="14" /></button>
-            <button type="button" aria-label="框选批注" title="矩形框" :disabled="!selected.documentId" @click="activateMarkup('markup-rectangle')"><Square :size="14" /></button>
-            <button type="button" aria-label="手绘批注" title="自由曲线" :disabled="!selected.documentId" @click="activateMarkup('markup-spline')"><RotateCcw :size="14" /></button>
-          </div>
-          <button type="button" class="pdm-review-toolbar-button" :class="[{ 'is-active': reviewPanelOpen }, `is-${reviewStatusTone}`]" aria-label="图纸审核" :aria-pressed="reviewPanelOpen" :disabled="!selected.documentId" @click="emit('review')"><ScanSearch :size="15" /><span>图纸审核</span><small>{{ reviewStatus }}</small></button>
-          <button type="button" aria-label="更多操作" title="查看更多图档操作" @click="emit('more')"><MoreHorizontal :size="17" /><span>更多</span></button>
-        </div>
+        <section v-if="!desktopAvailable" class="pdm-preview-properties-bar" aria-label="图档信息">
+          <span class="pdm-preview-properties-bar__title">图档属性</span>
+          <dl class="pdm-preview-properties" aria-label="图档属性">
+            <div v-for="property in previewProperties" :key="property.label">
+              <dt>{{ property.label }}</dt>
+              <dd :title="property.value">{{ property.value }}</dd>
+            </div>
+          </dl>
+        </section>
         <div class="pdm-solidworks-actions">
           <button
             type="button"
-            class="pdm-solidworks-edit pdm-preview-command"
-            :class="{ 'is-markup-dirty': markupDirty }"
-            aria-label="保存批注"
-            title="保存当前版本批注"
-            :disabled="!selected.documentId || markupSaving"
-            @click="saveMarkup"
-          ><Save :size="15" />{{ markupSaving ? '保存中…' : '保存批注' }}</button>
-          <button
-            type="button"
             :class="['pdm-preview-command', reviewVersionId && canWritebackReviewProperties ? 'pdm-solidworks-edit' : 'pdm-solidworks-primary']"
-            :aria-label="reviewVersionId ? '打开审核版（只读）' : '打开最新'"
+            :aria-label="reviewVersionId ? '打开审核版' : '打开最新'"
             :disabled="!selected.documentId || !solidWorksAvailable || solidWorksPending"
             :title="solidWorksAvailable ? reviewVersionId ? `从PLM获取审核冻结版本${displayedRevision}并只读打开` : `从PLM获取${selected.version}并在SolidWorks中打开；需要修改时请在插件设计树中获取权限` : '当前电脑未安装SolidWorks或UPLM插件'"
             @click="openInSolidWorks(reviewVersionId ? 'SpecificReadOnly' : 'LatestReadOnly', reviewVersionId || undefined)"
-          ><Rotate3D :size="15" />{{ reviewVersionId ? '打开审核版（只读）' : '打开最新' }}</button>
+          ><Rotate3D :size="15" />{{ reviewVersionId ? '打开审核版' : '打开最新' }}</button>
           <button
             v-if="!reviewVersionId && canEditDocuments"
             type="button"
@@ -512,6 +489,28 @@ onBeforeUnmount(() => {
           ><Rotate3D :size="15" />回写审核标记</button>
         </div>
       </header>
+      <div class="pdm-preview-toolbar pdm-preview-markup-row">
+        <div id="drawing-review-decision-host" class="pdm-review-decision-host" aria-label="图纸审核结论" />
+        <div class="pdm-preview-actions">
+          <div class="pdm-markup-toolbar" aria-label="图形批注工具">
+            <span>批注</span>
+            <button type="button" aria-label="引线批注" title="带引线文字" :disabled="!selected.documentId" @click="activateMarkup('markup-text-leader')"><PencilLine :size="14" /></button>
+            <button type="button" aria-label="云线批注" title="修订云线" :disabled="!selected.documentId" @click="activateMarkup('markup-cloud')"><Cloud :size="14" /></button>
+            <button type="button" aria-label="框选批注" title="矩形框" :disabled="!selected.documentId" @click="activateMarkup('markup-rectangle')"><Square :size="14" /></button>
+            <button type="button" aria-label="手绘批注" title="自由曲线" :disabled="!selected.documentId" @click="activateMarkup('markup-spline')"><RotateCcw :size="14" /></button>
+          </div>
+          <button type="button" aria-label="更多操作" title="查看更多图档操作" @click="emit('more')"><MoreHorizontal :size="17" /><span>更多</span></button>
+        </div>
+        <button
+          type="button"
+          class="pdm-solidworks-edit pdm-preview-command pdm-markup-save"
+          :class="{ 'is-markup-dirty': markupDirty }"
+          aria-label="保存批注"
+          title="保存当前版本批注"
+          :disabled="!selected.documentId || markupSaving"
+          @click="saveMarkup"
+        ><Save :size="15" />{{ markupSaving ? '保存中…' : '保存批注' }}</button>
+      </div>
       <p v-if="solidWorksMessage" class="pdm-solidworks-feedback" :class="{ 'is-error': solidWorksError }" role="status">{{ solidWorksMessage }}</p>
     </section>
 
@@ -523,15 +522,6 @@ onBeforeUnmount(() => {
         :data-preview-state="previewState"
         :aria-label="desktopAvailable ? '客户端内嵌eDrawings预览区' : '网页端图档预览状态'"
       >
-        <div v-if="!desktopAvailable" class="pdm-preview-left-stack">
-          <dl class="pdm-preview-properties" aria-label="图档属性">
-            <div v-for="property in previewProperties" :key="property.label">
-              <dt>{{ property.label }}</dt>
-              <dd :title="property.value">{{ property.value }}</dd>
-            </div>
-          </dl>
-          <div id="drawing-review-annotation-host" class="pdm-review-annotation-host" />
-        </div>
         <iframe
           v-if="!desktopAvailable && previewState === 'ready' && webPreviewFormat === 'Pdf' && webPreviewUrl"
           class="pdm-web-preview-frame"
@@ -579,7 +569,7 @@ onBeforeUnmount(() => {
             <FileSearch v-else :size="52" />
             <h3>{{ previewState === 'loading' ? desktopAvailable ? '正在加载 eDrawings…' : '正在加载网页预览…' : previewState === 'idle' ? '预览尚未加载' : desktopAvailable ? mode === 'model' ? 'eDrawings 内嵌三维预览' : 'eDrawings 内嵌图纸预览' : mode === 'model' ? 'STP/STEP三维预览' : 'PDF工程图预览' }}</h3>
             <p>{{ selected.fileName }} · {{ displayedRevision }}</p>
-            <small>{{ previewState === 'idle' ? '首次进入图档或切换项目时不自动加载；手动加载后，本次停留在图档页期间会随所选图档自动更新。' : '文件通过PLM权限校验和SHA-256校验后下载到独立只读缓存，不会覆盖工作文件。' }}</small>
+            <small>{{ previewState === 'idle' ? '首次进入图档或切换项目时需手动加载一次；加载后只要不切换项目就保持预览，切换到其他页签再返回不会重新加载。' : '文件通过PLM权限校验和SHA-256校验后下载到独立只读缓存，不会覆盖工作文件。' }}</small>
             <p v-if="previewState === 'error'" class="pdm-preview-error" role="alert">{{ previewError || 'eDrawings加载失败，请重试。' }}</p>
             <button v-if="previewState === 'idle' || previewState === 'error'" type="button" class="pdm-primary-action" :disabled="!selected.documentId" @click="startPreview">
               {{ previewState === 'error' ? '重新加载预览' : '加载预览' }}

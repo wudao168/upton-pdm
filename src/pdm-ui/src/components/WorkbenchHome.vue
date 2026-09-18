@@ -189,13 +189,13 @@ const staffingRows = computed(() => [
 
 const drawingReviewSummary = computed(() => {
   const review = [...props.drawingReviews].sort((left, right) => right.createdAt.localeCompare(left.createdAt))[0]
-  if (!review) return '图纸审核：未发起'
+  if (!review) return '图纸审核：待提交'
   const stateLabels = {
-    InReview: '审核中',
-    PendingSupervisorApproval: '待机械主管批准',
-    ChangesRequested: '已退改',
-    WritingProperties: '写入标记',
-    Approved: '已完成',
+    InReview: '待审核',
+    PendingSupervisorApproval: '待批准',
+    ChangesRequested: '已退回（待修改）',
+    WritingProperties: '已批准',
+    Approved: '已批准',
     Stale: '版本冲突',
     Withdrawn: '已撤销',
   }
@@ -209,15 +209,15 @@ function drawingTargetSummary(target: DrawingReviewTarget) {
   const count = target === 'Model3D' ? props.modelCount : props.drawingCount
   if (count === 0) return '无图档'
   const review = [...props.drawingReviews].sort((left, right) => right.createdAt.localeCompare(left.createdAt))[0]
-  if (!review) return '未发起'
+  if (!review) return '待提交'
   if (review.state === 'Stale') return '版本冲突'
   const states = review.items.map(item => target === 'Model3D' ? item.modelState : item.drawingState)
   const completed = states.filter(state => state === 'Approved' || state === 'Marked').length
   const changesRequested = states.filter(state => state === 'ChangesRequested').length
-  if (states.length > 0 && completed === states.length) return '已完成'
-  if (changesRequested > 0) return `已退改 ${changesRequested}`
-  if (review.state === 'WritingProperties') return `写入标记 ${completed}/${states.length}`
-  return `审核中 ${completed}/${states.length}`
+  if (states.length > 0 && completed === states.length) return '已批准'
+  if (changesRequested > 0) return `已退回 ${changesRequested}`
+  if (review.state === 'WritingProperties') return `已批准 ${completed}/${states.length}`
+  return `待审核 ${completed}/${states.length}`
 }
 
 function latestReleaseFor(scopes: ReleaseScope[]) {

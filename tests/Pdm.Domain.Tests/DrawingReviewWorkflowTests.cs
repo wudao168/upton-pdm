@@ -39,8 +39,8 @@ public sealed class DrawingReviewWorkflowTests
             State = DrawingReviewPackageState.InReview,
             CreatedBy = "submitter",
             CreatedAt = DateTimeOffset.UtcNow,
-            AssignedReviewer = "reviewer",
-            AssignedReviewerName = "指定审核员",
+            AssignedReviewers = ["reviewer"],
+            AssignedReviewerNames = ["指定审核员"],
             Supervisor = "manager",
             SupervisorName = "机械主管",
             Items = [new DrawingReviewItem
@@ -67,6 +67,192 @@ public sealed class DrawingReviewWorkflowTests
         Assert.Equal(DrawingReviewPackageState.WritingProperties, package.State);
         Assert.Equal("manager", package.SupervisorReviewedBy);
         Assert.NotNull(package.SupervisorReviewedAt);
+    }
+
+    [Fact]
+    public async Task ParallelAssignedReviewersLetAnyOneApproveAndRejectOutsiders()
+    {
+        var (repository, workflow, _, _) = await PrepareReviewAsync();
+        await repository.CreateUserAsync(new UserAccount(Guid.NewGuid(), "reviewer-a", "审图员甲", "unused", UserRole.ProcessReviewer, true), default);
+        await repository.CreateUserAsync(new UserAccount(Guid.NewGuid(), "reviewer-b", "审图员乙", "unused", UserRole.ProcessReviewer, true), default);
+
+        var package = await workflow.CreateDrawingReviewPackageAsync(
+            ProjectId, null, ["reviewer-a", "reviewer-b"], "submitter", UserRole.Administrator, default);
+
+        Assert.Equal(["reviewer-a", "reviewer-b"], package.AssignedReviewers);
+        Assert.Equal("manager", package.Supervisor);
+        var item = Assert.Single(package.Items);
+        await Assert.ThrowsAsync<UnauthorizedAccessException>(() => workflow.DecideDrawingReviewTargetAsync(
+            package.Id, item.Id, new DecideDrawingReviewTargetCommand(DrawingReviewTarget.Drawing2D, DrawingReviewDecision.Approve, "越权审核"),
+            "outsider", UserRole.ProcessReviewer, default));
+
+        package = await workflow.DecideDrawingReviewTargetAsync(
+            package.Id, item.Id, new DecideDrawingReviewTargetCommand(DrawingReviewTarget.Drawing2D, DrawingReviewDecision.Approve, "审图员乙通过"),
+            "reviewer-b", UserRole.ProcessReviewer, default);
+
+        var reviewed = Assert.Single(package.Items);
+        Assert.Equal(DrawingReviewTargetState.Approved, reviewed.DrawingState);
+        Assert.Equal("reviewer-b", reviewed.DrawingReviewer);
+        Assert.Equal(DrawingReviewPackageState.PendingSupervisorApproval, package.State);
+    }
+
+    [Fact]
+    public async Task ApprovedItemCanBeRevokedBackToPendingReview()
+    {
+        var (repository, workflow, _, _) = await PrepareReviewAsync();
+        await repository.CreateUserAsync(new UserAccount(Guid.NewGuid(), "reviewer-a", "审图员甲", "unused", UserRole.ProcessReviewer, true), default);
+
+        var package = await workflow.CreateDrawingReviewPackageAsync(
+            ProjectId, null, ["reviewer-a"], "submitter", UserRole.Administrator, default);
+        var item = Assert.Single(package.Items);
+        package = await workflow.DecideDrawingReviewTargetAsync(package.Id, item.Id,
+            new DecideDrawingReviewTargetCommand(DrawingReviewTarget.Drawing2D, DrawingReviewDecision.Approve, "通过"),
+            "reviewer-a", UserRole.ProcessReviewer, default);
+        Assert.Equal(DrawingReviewTargetState.Approved, Assert.Single(package.Items).DrawingState);
+        Assert.Equal(DrawingReviewPackageState.PendingSupervisorApproval, package.State);
+
+        await Assert.ThrowsAsync<UnauthorizedAccessException>(() => workflow.DecideDrawingReviewTargetAsync(
+            package.Id, item.Id, new DecideDrawingReviewTargetCommand(DrawingReviewTarget.Drawing2D, DrawingReviewDecision.Revoke, null),
+            "outsider", UserRole.ProcessReviewer, default));
+
+        package = await workflow.DecideDrawingReviewTargetAsync(package.Id, item.Id,
+            new DecideDrawingReviewTargetCommand(DrawingReviewTarget.Drawing2D, DrawingReviewDecision.Revoke, "撤销重审"),
+            "reviewer-a", UserRole.ProcessReviewer, default);
+        var revoked = Assert.Single(package.Items);
+        Assert.Equal(DrawingReviewTargetState.Pending, revoked.DrawingState);
+        Assert.Null(revoked.DrawingReviewer);
+        Assert.Equal(DrawingReviewPackageState.InReview, package.State);
+        Assert.Null(package.SupervisorReviewedAt);
+    }
+
+    [Fact]
+    public async Task RequestingChangesOnOneDrawingKeepsTheReviewOpenAndCanBeUndone()
+    {
+        var (repository, workflow, _, _) = await PrepareReviewAsync();
+        await repository.CreateUserAsync(new UserAccount(Guid.NewGuid(), "reviewer-a", "审图员甲", "unused", UserRole.ProcessReviewer, true), default);
+
+        var package = await workflow.CreateDrawingReviewPackageAsync(
+            ProjectId, null, ["reviewer-a"], "submitter", UserRole.Administrator, default);
+        var item = Assert.Single(package.Items);
+        package = await workflow.DecideDrawingReviewTargetAsync(package.Id, item.Id,
+            new DecideDrawingReviewTargetCommand(DrawingReviewTarget.Drawing2D, DrawingReviewDecision.RequestChanges, "尺寸标注需修改"),
+            "reviewer-a", UserRole.ProcessReviewer, default);
+
+        // 单张退改只影响该图纸，审核单保持审图人审核，其余图纸可以继续审核。
+        Assert.Equal(DrawingReviewTargetState.ChangesRequested, Assert.Single(package.Items).DrawingState);
+        Assert.Equal(DrawingReviewPackageState.InReview, package.State);
+
+        package = await workflow.DecideDrawingReviewTargetAsync(package.Id, item.Id,
+            new DecideDrawingReviewTargetCommand(DrawingReviewTarget.Drawing2D, DrawingReviewDecision.Revoke, "撤销退改"),
+            "reviewer-a", UserRole.ProcessReviewer, default);
+        var reset = Assert.Single(package.Items);
+        Assert.Equal(DrawingReviewTargetState.Pending, reset.DrawingState);
+        Assert.Null(reset.DrawingComment);
+        Assert.Equal(DrawingReviewPackageState.InReview, package.State);
+    }
+
+    [Fact]
+    public async Task UnassignedReviewerNodeAcceptsAnyDrawingReviewerThenRequiresMechanicalSupervisor()
+    {
+        var (_, workflow, _, _) = await PrepareReviewAsync();
+        var package = await workflow.CreateDrawingReviewPackageAsync(ProjectId, "submitter", UserRole.Administrator, default);
+        Assert.Empty(package.AssignedReviewers);
+        Assert.Equal("manager", package.Supervisor);
+
+        var item = Assert.Single(package.Items);
+        package = await workflow.DecideDrawingReviewTargetAsync(
+            package.Id, item.Id, new DecideDrawingReviewTargetCommand(DrawingReviewTarget.Drawing2D, DrawingReviewDecision.Approve, "审图员通过"),
+            "reviewer", UserRole.ProcessReviewer, default);
+        Assert.Equal(DrawingReviewPackageState.PendingSupervisorApproval, package.State);
+
+        package = await ApproveAsMechanicalSupervisorAsync(workflow, package);
+
+        Assert.Equal(DrawingReviewPackageState.WritingProperties, package.State);
+        Assert.Equal("manager", package.SupervisorReviewedBy);
+    }
+
+    [Fact]
+    public async Task AssignedReviewerReceivesDrawingReviewNotification()
+    {
+        var (repository, workflow, _, _) = await PrepareReviewAsync();
+        await repository.CreateUserAsync(new UserAccount(Guid.NewGuid(), "reviewer-a", "审图员甲", "unused", UserRole.ProcessReviewer, true), default);
+        await repository.CreateUserAsync(new UserAccount(Guid.NewGuid(), "reviewer-b", "审图员乙", "unused", UserRole.ProcessReviewer, true), default);
+
+        var package = await workflow.CreateDrawingReviewPackageAsync(ProjectId, null, ["reviewer-a"], "submitter", UserRole.Administrator, default);
+
+        var notification = Assert.Single(await repository.ListUserNotificationsAsync("reviewer-a", 50, default));
+        Assert.Equal("DrawingReviewAssigned", notification.Category);
+        Assert.Equal("待审图纸", notification.Title);
+        Assert.Contains(package.Number, notification.Content);
+        Assert.Empty(await repository.ListUserNotificationsAsync("reviewer-b", 50, default));
+    }
+
+    [Fact]
+    public async Task DrawingReviewNotifiesOpenReviewersSupervisorAndSubmitter()
+    {
+        var (repository, workflow, _, _) = await PrepareReviewAsync();
+        await repository.CreateUserAsync(new UserAccount(Guid.NewGuid(), "reviewer", "审图员", "unused", UserRole.ProcessReviewer, true), default);
+
+        var package = await workflow.CreateDrawingReviewPackageAsync(ProjectId, "submitter", UserRole.Administrator, default);
+        Assert.Single(await repository.ListUserNotificationsAsync("reviewer", 50, default));
+        Assert.Empty(await repository.ListUserNotificationsAsync("submitter", 50, default));
+
+        var item = Assert.Single(package.Items);
+        package = await workflow.DecideDrawingReviewTargetAsync(package.Id, item.Id,
+            new DecideDrawingReviewTargetCommand(DrawingReviewTarget.Drawing2D, DrawingReviewDecision.Approve, "通过"),
+            "reviewer", UserRole.ProcessReviewer, default);
+        Assert.Contains(await repository.ListUserNotificationsAsync("manager", 50, default),
+            notification => notification.Category == "DrawingReviewSupervisorApproval");
+
+        await workflow.DecideDrawingReviewSupervisorAsync(package.Id,
+            new DecideDrawingReviewSupervisorCommand(DrawingReviewDecision.RequestChanges, "尺寸链需复核"), "manager", UserRole.Administrator, default);
+        Assert.Contains(await repository.ListUserNotificationsAsync("submitter", 50, default),
+            notification => notification.Category == "DrawingReviewChangesRequested");
+    }
+
+    [Fact]
+    public async Task LegacyInFlightReviewWithoutSupervisorCompletesInSingleStage()
+    {
+        var (repository, workflow, model, drawing) = await PrepareReviewAsync();
+        var modelVersion = (await repository.ListDocumentVersionsAsync(model.Id, default)).First();
+        var drawingVersion = (await repository.ListDocumentVersionsAsync(drawing.Id, default)).First();
+        var bomItem = Assert.Single(await repository.GetBomAsync(ProjectId, BomKind.NonStandard, default));
+        var packageId = Guid.NewGuid();
+        var package = await repository.CreateDrawingReviewPackageAsync(new DrawingReviewPackage
+        {
+            Id = packageId,
+            ProjectId = ProjectId,
+            Number = $"DR-LEGACY-{packageId:N}",
+            State = DrawingReviewPackageState.InReview,
+            CreatedBy = "submitter",
+            CreatedAt = DateTimeOffset.UtcNow,
+            Items = [new DrawingReviewItem
+            {
+                Id = Guid.NewGuid(), PackageId = packageId, BomItemId = bomItem.Id,
+                DrawingNumber = drawing.DrawingNumber, Name = drawing.Name,
+                ModelDocumentId = model.Id, ModelVersionId = modelVersion.Id, ModelRevision = modelVersion.Revision.Display,
+                ModelSha256 = modelVersion.Sha256, ModelCreatedBy = modelVersion.CreatedBy, ModelState = DrawingReviewTargetState.NotRequired,
+                DrawingDocumentId = drawing.Id, DrawingVersionId = drawingVersion.Id, DrawingRevision = drawingVersion.Revision.Display,
+                DrawingSha256 = drawingVersion.Sha256, DrawingCreatedBy = drawingVersion.CreatedBy, DrawingState = DrawingReviewTargetState.Pending
+            }]
+        }, default);
+
+        package = await workflow.DecideDrawingReviewTargetAsync(package.Id, package.Items[0].Id,
+            new DecideDrawingReviewTargetCommand(DrawingReviewTarget.Drawing2D, DrawingReviewDecision.Approve, "升级前审核单通过"),
+            "reviewer", UserRole.ProcessReviewer, default);
+
+        Assert.Equal(DrawingReviewPackageState.WritingProperties, package.State);
+    }
+
+    [Fact]
+    public async Task DrawingReviewSubmissionRequiresConfiguredMechanicalSupervisor()
+    {
+        var (_, workflow, _, _) = await PrepareReviewAsync();
+
+        var blocked = await Assert.ThrowsAsync<PdmRuleException>(() =>
+            workflow.CreateDrawingReviewPackageAsync(ProjectId, "no-department", UserRole.Administrator, default));
+
+        Assert.Contains("尚未配置机械主管", blocked.Message);
     }
 
     [Fact]
@@ -219,6 +405,8 @@ public sealed class DrawingReviewWorkflowTests
         review = await workflow.DecideDrawingReviewTargetAsync(review.Id, item.Id,
             new DecideDrawingReviewTargetCommand(DrawingReviewTarget.Drawing2D, DrawingReviewDecision.Approve, "2D通过"),
             "drawing-reviewer", UserRole.Administrator, default);
+        Assert.Equal(DrawingReviewPackageState.PendingSupervisorApproval, review.State);
+        review = await ApproveAsMechanicalSupervisorAsync(workflow, review);
         Assert.Equal(DrawingReviewPackageState.WritingProperties, review.State);
 
         var lockedIds = await repository.ListActiveDrawingReviewDocumentIdsAsync(ProjectId, default);
@@ -275,6 +463,7 @@ public sealed class DrawingReviewWorkflowTests
         review = await workflow.DecideDrawingReviewTargetAsync(
             review.Id, item.Id, new DecideDrawingReviewTargetCommand(DrawingReviewTarget.Drawing2D, DrawingReviewDecision.Approve, "2D通过"),
             "drawing-reviewer", UserRole.Administrator, default);
+        review = await ApproveAsMechanicalSupervisorAsync(workflow, review);
         Assert.Equal(DrawingReviewPackageState.WritingProperties, review.State);
 
         var release = await CreateLegacyReleasePackageAsync(repository);
@@ -342,6 +531,8 @@ public sealed class DrawingReviewWorkflowTests
         await workflow.DecideDrawingReviewTargetAsync(review.Id, item.Id,
             new DecideDrawingReviewTargetCommand(DrawingReviewTarget.Drawing2D, DrawingReviewDecision.Approve, "2D通过"),
             "drawing-reviewer", UserRole.Administrator, default);
+        review = await repository.FindDrawingReviewPackageAsync(review.Id, default) ?? throw new InvalidOperationException();
+        await ApproveAsMechanicalSupervisorAsync(workflow, review);
         var writeback = Assert.Single(await repository.ListCadPropertyWritebacksAsync(ProjectId, default));
         await workflow.StartCadPropertyWritebackAsync(writeback.Id, "cad-client", UserRole.Administrator, default);
         var marked = await CheckInAsync(repository, drawing.Id, "cad-client", writeback.Properties, 'D', drawingReviewWritebackId: writeback.Id);
@@ -591,6 +782,11 @@ public sealed class DrawingReviewWorkflowTests
     private static async Task<(InMemoryPdmRepository Repository, PdmWorkflowService Workflow, PdmDocument Model, PdmDocument Drawing)> PrepareReviewAsync()
     {
         var repository = new InMemoryPdmRepository(TimeProvider.System);
+        await repository.CreateUserAsync(new UserAccount(Guid.NewGuid(), "manager", "机械主管", "unused", UserRole.Approver, true), default);
+        var reviewUnit = await repository.SaveOrganizationUnitAsync(
+            new SaveOrganizationUnitCommand(null, Guid.Parse("70000000-0000-0000-0000-000000000001"), null, "DR-REVIEW", "图纸审核测试部门", OrganizationUnitKind.Department, true, 0), default);
+        await repository.SetOrganizationMembershipsAsync("submitter", [reviewUnit.Id], reviewUnit.Id, default);
+        await repository.SetOrganizationUnitManagersAsync(reviewUnit.Id, "manager", [], default);
         foreach (var document in await repository.ListCheckedOutDocumentsAsync(default))
             await repository.ForceReleaseCheckoutAsync(document.Id, "admin", "测试准备", default);
         var documents = await repository.ListDocumentsAsync(ProjectId, default);
@@ -620,6 +816,11 @@ public sealed class DrawingReviewWorkflowTests
         ], default);
         return (repository, new PdmWorkflowService(repository, new UnusedFileStorage(), new RecordingPublisher(), TimeProvider.System), model, drawing);
     }
+
+    /// <summary>审图节点通过后固定流转到机械主管，测试统一由「manager」批准并进入属性写回。</summary>
+    private static Task<DrawingReviewPackage> ApproveAsMechanicalSupervisorAsync(PdmWorkflowService workflow, DrawingReviewPackage package) =>
+        workflow.DecideDrawingReviewSupervisorAsync(package.Id,
+            new DecideDrawingReviewSupervisorCommand(DrawingReviewDecision.Approve, "机械主管批准"), "manager", UserRole.Administrator, default);
 
     private static async Task<DocumentCheckInResult> CheckInAsync(
         InMemoryPdmRepository repository,

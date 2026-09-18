@@ -123,7 +123,11 @@ public sealed record UpdateSystemSettingsRequest(
 
 public sealed record SetBomEmptyDeclarationRequest(bool DeclaredEmpty);
 
-public sealed record CreateDrawingReviewRequest(IReadOnlyList<Guid>? ModelDocumentIds, string AssignedReviewer);
+/// <summary>
+/// <paramref name="AssignedReviewers"/> 为空表示不指定审核人，由全部具备审图权限的人员并行处理；
+/// <paramref name="AssignedReviewer"/> 兼容旧客户端提交的单值指定审核人。
+/// </summary>
+public sealed record CreateDrawingReviewRequest(IReadOnlyList<Guid>? ModelDocumentIds, IReadOnlyList<string>? AssignedReviewers, string? AssignedReviewer = null);
 
 public sealed record WithdrawDrawingReviewRequest(string Reason);
 

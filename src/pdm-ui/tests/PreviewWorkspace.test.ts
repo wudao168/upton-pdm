@@ -34,6 +34,21 @@ const bomItem: BomItem = {
 }
 
 describe('PreviewWorkspace', () => {
+  it('图档属性以预览区顶部一行横向常驻显示，且不提供折叠', () => {
+    const wrapper = mount(PreviewWorkspace, {
+      props: { selected, related: [], bomItem },
+    })
+
+    const bar = wrapper.get('.pdm-preview-properties-bar')
+    expect(bar.find('.pdm-preview-properties').exists()).toBe(true)
+    expect(bar.findAll('.pdm-preview-properties > div')).toHaveLength(8)
+    expect(wrapper.find('.pdm-preview-properties-toggle').exists()).toBe(false)
+    expect(wrapper.find('button[aria-label="折叠图档属性"]').exists()).toBe(false)
+    expect(wrapper.find('button[aria-label="折叠图档信息卡"]').exists()).toBe(false)
+    expect(wrapper.get('.pdm-preview-properties-bar__title').text()).toBe('图档属性')
+    expect(wrapper.get('.pdm-preview-properties').attributes('style') ?? '').not.toContain('display: none')
+  })
+
   it('shows the matched BOM material code instead of the document drawing name', () => {
     const wrapper = mount(PreviewWorkspace, {
       props: { selected, related: [], bomItem },
@@ -64,7 +79,7 @@ describe('PreviewWorkspace', () => {
       '引线批注', '云线批注', '框选批注', '手绘批注',
     ])
     expect(wrapper.findAll('.pdm-preview-command').map(button => button.attributes('aria-label'))).toEqual([
-      '保存批注', '打开最新', '编辑打开',
+      '打开最新', '编辑打开', '保存批注',
     ])
     expect(wrapper.find('button[aria-label="使用位置"]').exists()).toBe(false)
     expect(wrapper.find('button[aria-label="作废图档"]').exists()).toBe(false)
@@ -114,5 +129,63 @@ describe('PreviewWorkspace', () => {
     expect(interactionButton).toBeTruthy()
     await interactionButton!.trigger('click')
     expect(wrapper.emitted('preview')?.[0]?.[0]).toMatchObject({ documentId: 'document-2' })
+  })
+
+  it('keeps loading the following documents after the first interactive load in the client', async () => {
+    const postMessage = vi.fn()
+    Object.defineProperty(window, 'chrome', {
+      configurable: true,
+      value: { webview: { postMessage } },
+    })
+    const wrapper = mount(PreviewWorkspace, {
+      props: { selected, related: [], bomItem, desktopAvailable: true },
+    })
+
+    await wrapper.findAll('button').find(button => button.text() === '加载交互预览')!.trigger('click')
+    expect(wrapper.emitted('preview')?.[0]?.[0]).toMatchObject({ documentId: 'document-1' })
+
+    await wrapper.setProps({ selected: { ...selected, id: 'node-2', documentId: 'document-2', fileName: 'SECOND.SLDPRT' } })
+    await wrapper.vm.$nextTick()
+    expect(wrapper.emitted('preview')?.[1]?.[0]).toMatchObject({ documentId: 'document-2' })
+    expect(wrapper.findAll('button').some(button => button.text() === '加载交互预览')).toBe(false)
+
+    wrapper.unmount()
+  })
+
+  it('suspends the client preview instead of releasing it when the tab is left', async () => {
+    const postMessage = vi.fn()
+    Object.defineProperty(window, 'chrome', {
+      configurable: true,
+      value: { webview: { postMessage } },
+    })
+    const wrapper = mount(PreviewWorkspace, {
+      props: { selected, related: [], bomItem, desktopAvailable: true, active: true },
+    })
+    postMessage.mockClear()
+
+    await wrapper.setProps({ active: false })
+    await wrapper.vm.$nextTick()
+    expect(postMessage).toHaveBeenCalledWith({ type: 'preview-host-suspend', payload: undefined })
+    expect(postMessage).not.toHaveBeenCalledWith({ type: 'preview-host-hide', payload: undefined })
+
+    wrapper.unmount()
+  })
+
+  it('图档属性在顶栏常驻并允许折行，审批与批注工具在第二行', () => {
+    const wrapper = mount(PreviewWorkspace, {
+      props: { selected, related: [], bomItem },
+    })
+
+    const toolbar = wrapper.get('.pdm-preview-toolbar')
+    const bar = toolbar.get('.pdm-preview-properties-bar')
+    expect(bar.find('.pdm-preview-properties').exists()).toBe(true)
+    expect(toolbar.element.firstElementChild).toBe(bar.element)
+    expect(wrapper.find('.pdm-preview-document-switcher').exists()).toBe(false)
+    expect(wrapper.find('.pdm-related-documents').exists()).toBe(false)
+    expect(wrapper.find('.pdm-preview-markup-row #drawing-review-decision-host').exists()).toBe(true)
+    expect(wrapper.find('.pdm-preview-markup-row [aria-label="图形批注工具"]').exists()).toBe(true)
+    expect(wrapper.find('.pdm-preview-markup-row button[aria-label="保存批注"]').exists()).toBe(true)
+
+    wrapper.unmount()
   })
 })

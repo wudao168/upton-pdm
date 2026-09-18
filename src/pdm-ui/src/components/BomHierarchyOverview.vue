@@ -4,7 +4,7 @@ import { ElMessage } from '../statusMessage'
 import { ElMessageBox } from 'element-plus'
 import U9BomSyncPreview from './U9BomSyncPreview.vue'
 import { executeProjectBomU9Sync, listBom, listBomVersions, listProjectBomHeaders, listReleasePackages, previewProjectBomU9Sync, retryProjectBomHeaderAutomatic } from '../api'
-import type { BomHeaderKind, BomItem, BomKind, BomVersion, ProjectBomHeader, ProjectSummary, ReleasePackageSummary } from '../types'
+import type { BomHeaderKind, BomItem, BomKind, BomVersion, ProjectBomHeader, ProjectSummary, ReleasePackageSummary, ReleaseScope } from '../types'
 import { useUserDisplayName } from '../userDisplay'
 
 const displayUserName = useUserDisplayName()
@@ -30,6 +30,11 @@ const categoryLabels: Record<VisibleBomKind, string> = {
   Standard: '标准件BOM',
   NonStandard: '非标件BOM',
   Electrical: '电气BOM',
+}
+const longLeadScopes: Record<VisibleBomKind, ReleaseScope> = {
+  Standard: 'StandardLongLead',
+  NonStandard: 'NonStandardLongLead',
+  Electrical: 'ElectricalLongLead',
 }
 const detailCache = ref<Record<string, ProjectDetail>>({})
 const expandedProjects = ref<Record<string, boolean>>({})
@@ -143,6 +148,15 @@ function latestReleased(detail: ProjectDetail | undefined, kind: VisibleBomKind)
     .sort((left, right) => right.versionNumber - left.versionNumber)[0]
 }
 
+function publishedLongLeadPackages(detail: ProjectDetail | undefined, kind: VisibleBomKind) {
+  return (detail?.releases ?? []).filter(pack => pack.scope === longLeadScopes[kind] && pack.state === '已发布')
+}
+
+function releaseStatusLabel(released: BomVersion | undefined, longLeadPublished: boolean) {
+  if (released) return '正式发布'
+  return longLeadPublished ? '长交期发布' : '未发布'
+}
+
 function unresolvedItems(detail: ProjectDetail | undefined, kind: VisibleBomKind) {
   return (detail?.current[kind] ?? []).filter(item => !item.manuallyExcluded
     && (item.pendingRemoval || item.pendingClassification || item.manualUnmatched || !item.complete))
@@ -161,6 +175,7 @@ const overviewRows = computed(() => orderedProjects.value.flatMap(({ project, de
   const masterHeader = detail?.headers.find(header => header.kind === 'Master')
   const categoryRows = categoryOrder.map(kind => {
     const released = latestReleased(detail, kind)
+    const longLeadPublished = publishedLongLeadPackages(detail, kind).length > 0
     const currentItems = includedRows(detail?.current[kind] ?? [])
     const unresolvedCount = unresolvedItems(detail, kind).length
     const header = detail?.headers.find(item => item.kind === kind)
@@ -175,10 +190,8 @@ const overviewRows = computed(() => orderedProjects.value.flatMap(({ project, de
       itemCount: currentItems.length,
       unresolvedCount,
       version: released?.label || '工作区',
-      releaseStatus: released ? '已发布' : currentItems.length ? '未发布' : '空BOM',
-      releasedAt: [released?.releasedAt, ...(kind === 'Standard' ? (detail?.releases ?? [])
-        .filter(pack => pack.scope === 'StandardLongLead' && pack.state === '已发布')
-        .map(pack => pack.publishedAt) : [])]
+      releaseStatus: releaseStatusLabel(released, longLeadPublished),
+      releasedAt: [released?.releasedAt, ...publishedLongLeadPackages(detail, kind).map(pack => pack.publishedAt)]
         .filter((value): value is string => !!value && Number.isFinite(Date.parse(value)))
         .sort((left, right) => Date.parse(right) - Date.parse(left))[0],
       header,
@@ -191,8 +204,10 @@ const overviewRows = computed(() => orderedProjects.value.flatMap(({ project, de
   const masterItemCount = activeCategoryRows.length + directChildren.length
   const masterUnresolvedCount = activeCategoryRows.filter(row => !row.header?.materialCode).length
     + directChildren.filter(child => !detailCache.value[child.id]?.headers.find(header => header.kind === 'Master')?.materialCode).length
-  const allCategoriesReleased = categoryRows.every(row => row.releaseStatus === '已发布')
-  const hasBomData = categoryRows.some(row => row.releaseStatus !== '空BOM')
+  const allCategoriesFormallyReleased = activeCategoryRows.length > 0
+    && activeCategoryRows.every(row => row.releaseStatus === '正式发布')
+  const allCategoriesReleased = activeCategoryRows.length > 0
+    && activeCategoryRows.every(row => row.releaseStatus !== '未发布')
   return [{
     key: `${project.id}-Master`,
     project,
@@ -204,7 +219,7 @@ const overviewRows = computed(() => orderedProjects.value.flatMap(({ project, de
     itemCount: masterItemCount,
     unresolvedCount: masterUnresolvedCount,
     version: '三类汇总',
-    releaseStatus: allCategoriesReleased ? '已发布' : hasBomData ? '部分/未发布' : '空BOM',
+    releaseStatus: allCategoriesFormallyReleased ? '正式发布' : allCategoriesReleased ? '长交期发布' : '未发布',
     releasedAt: releasedDates.sort((left, right) => new Date(right).getTime() - new Date(left).getTime())[0],
     header: masterHeader,
     parentHeader: undefined,
@@ -231,7 +246,7 @@ function u9BomStateText(row: (typeof overviewRows.value)[number]) {
   if (state === 'create-pending') return '待自动创建'
   if (state === 'modify-pending') return '待同步子件'
   if (state === 'failed') return '检查失败'
-  return props.editable ? (row.releaseStatus === '已发布' ? '检查同步' : '检查BOM状态') : '未检查'
+  return props.editable ? (row.releaseStatus === '正式发布' ? '检查同步' : '检查BOM状态') : '未检查'
 }
 
 function viewStateFromPreview(preview: Awaited<ReturnType<typeof previewProjectBomU9Sync>>): U9BomViewState {
@@ -401,7 +416,7 @@ watch([rootProjectId, hierarchySignature, () => props.token], () => {
             <td><span :class="row.parentHeader?.materialCode ? '' : row.parentHeader?.materialId ? 'is-warning' : 'is-muted'">{{ row.parentHeader ? headerCodeText(row.parentHeader) : '—' }}</span></td>
             <td>{{ row.itemCount }}</td>
             <td>{{ row.version }}</td>
-            <td><span :class="row.releaseStatus === '已发布' ? 'is-success' : row.releaseStatus.includes('未发布') ? 'is-warning' : 'is-muted'">{{ row.releaseStatus }}</span></td>
+            <td><span :class="row.releaseStatus === '正式发布' ? 'is-success' : row.releaseStatus === '未发布' ? 'is-warning' : 'is-muted'">{{ row.releaseStatus }}</span></td>
             <td><span :class="row.unresolvedCount ? 'is-warning' : 'is-success'">{{ row.unresolvedCount ? `${row.unresolvedCount} 项` : '正常' }}</span></td>
             <td :title="formatDate(row.releasedAt)">{{ formatDate(row.releasedAt) }}</td>
             <td :title="isHeaderEligible(row) ? headerCodeTitle(row.header) : '主项目已有子项目，本级三类BOM不生成料号'">

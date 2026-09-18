@@ -702,11 +702,11 @@ export function usePdmWorkspace() {
     drawingReviewReviewers.value = reviewers
   }
 
-  async function createDrawingReview(modelDocumentIds: string[] | null, assignedReviewer: string) {
+  async function createDrawingReview(modelDocumentIds: string[] | null, assignedReviewers: string[]) {
     operationPending.value = true
     operationError.value = ''
     try {
-      replaceDrawingReview(await createDrawingReviewRequest(project.value.id, modelDocumentIds, assignedReviewer, accessToken))
+      replaceDrawingReview(await createDrawingReviewRequest(project.value.id, modelDocumentIds, assignedReviewers, accessToken))
       drawingReviewCandidates.value = await listDrawingReviewCandidates(project.value.id, accessToken)
     } catch (error) {
       operationError.value = messageFrom(error)
@@ -753,6 +753,7 @@ export function usePdmWorkspace() {
     operationError.value = ''
     try {
       replaceDrawingReview(await decideDrawingReviewTargetRequest(packageId, itemId, target, decision, comment, accessToken))
+      drawingReviewCandidates.value = await listDrawingReviewCandidates(project.value.id, accessToken)
     } catch (error) {
       operationError.value = messageFrom(error)
       throw error

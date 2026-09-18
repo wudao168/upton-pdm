@@ -1007,8 +1007,11 @@ public static class PdmEndpointExtensions
         api.MapPost("/projects/{projectId:guid}/drawing-reviews", async (Guid projectId, CreateDrawingReviewRequest? request, HttpContext context, PdmWorkflowService workflow, CancellationToken cancellationToken) =>
         {
             var (actor, role) = CurrentUser(context.User);
-            if (request is null || string.IsNullOrWhiteSpace(request.AssignedReviewer)) return Results.BadRequest(new { message = "请选择指定审核人。" });
-            return Results.Ok(await workflow.CreateDrawingReviewPackageAsync(projectId, request.ModelDocumentIds, request.AssignedReviewer, actor, role, cancellationToken));
+            if (request is null) return Results.BadRequest(new { message = "请求内容不完整。" });
+            IReadOnlyList<string>? assignedReviewers = request.AssignedReviewers is { Count: > 0 }
+                ? request.AssignedReviewers
+                : string.IsNullOrWhiteSpace(request.AssignedReviewer) ? null : [request.AssignedReviewer];
+            return Results.Ok(await workflow.CreateDrawingReviewPackageAsync(projectId, request.ModelDocumentIds, assignedReviewers, actor, role, cancellationToken));
         });
 
         api.MapPost("/drawing-reviews/{packageId:guid}/withdraw", async (Guid packageId, WithdrawDrawingReviewRequest request, HttpContext context, PdmWorkflowService workflow, CancellationToken cancellationToken) =>

@@ -405,9 +405,11 @@ describe('PLM client workspace', () => {
 
     await projectTabByText(wrapper, '图档').trigger('click')
     await flushPromises()
-    await wrapper.get('button[aria-label="图纸审核"]').trigger('click')
 
     expect(wrapper.find('[aria-label="图纸审核面板"]').exists()).toBe(true)
+    expect(wrapper.get('[aria-label="图纸审核面板"]').classes()).toContain('is-collapsed')
+    await wrapper.get('.drawing-review-panel__header .drawing-review-collapse').trigger('click')
+    await flushPromises()
     expect(buttonByText(wrapper, '选择范围并发起审核').exists()).toBe(true)
     wrapper.unmount()
   })
@@ -473,7 +475,6 @@ describe('PLM client workspace', () => {
     await login(wrapper)
     const previewCallsBeforeOpen = postMessage.mock.calls.filter(([message]) => message.type === 'preview-document').length
 
-    await wrapper.get('button[aria-label="图纸审核"]').trigger('click')
     await flushPromises()
 
     expect(wrapper.find('[aria-label="图纸审核面板"]').exists()).toBe(false)
@@ -507,7 +508,7 @@ describe('PLM client workspace', () => {
     await wrapper.findAll('.pdm-tree-row').find(row => row.text().includes('真实总装工程图'))!.trigger('click')
     await flushPromises()
 
-    await buttonByText(wrapper, '打开审核版（只读）').trigger('click')
+    await buttonByText(wrapper, '打开审核版').trigger('click')
     expect(postMessage).toHaveBeenCalledWith({
       type: 'open-document',
       payload: expect.objectContaining({
@@ -891,9 +892,9 @@ describe('PLM client workspace', () => {
     await flushPromises()
     expect(wrapper.get('.pdm-project-workspace').classes()).not.toContain('is-document-view')
     expect(wrapper.text()).toContain('REAL-ASM-001')
-    expect(wrapper.get('[aria-label="工作版本 W2"]').text()).toBe('W2')
-    expect(wrapper.text()).toContain('可编辑')
-    expect(wrapper.text()).not.toContain('engineer编辑')
+    // 顶部工具栏不再显示图档切换区（版本、占用状态改为只在左侧属性卡与设计树中呈现）。
+    expect(wrapper.get('.pdm-preview-toolbar').find('.pdm-preview-document-switcher').exists()).toBe(false)
+    expect(wrapper.get('.pdm-preview-properties-bar').find('[aria-label="图档属性"]').exists()).toBe(true)
     const projectSidebar = wrapper.get('[aria-label="项目基本信息与全部项目号"]')
     expect(projectSidebar.find('[aria-label="BOM完整性"]').exists()).toBe(false)
     expect(projectSidebar.find('[aria-label="当前发布包"]').exists()).toBe(false)
@@ -1120,7 +1121,7 @@ describe('PLM client workspace', () => {
     expect(wrapper.text()).toContain('没有匹配的图档')
   })
 
-  it('filters real 3D and 2D documents and switches the related preview object', async () => {
+  it('filters real 3D and 2D documents and keeps the preview panel minimal', async () => {
     nonStandardBomResponse = [{
       id: 'non-standard-root', kind: 'NonStandard', sequence: 1, drawingNumber: 'REAL-ASM-001', name: '真实总装配', quantity: 1,
       unit: '件', material: 'Q235B', revision: 'W2', isComplete: true, source: 'Auto', sourceDocumentId: 'doc-root',
@@ -1149,15 +1150,14 @@ describe('PLM client workspace', () => {
     expect(unarchivedDrawing?.text()).not.toContain('未发起')
     await unarchivedDrawing!.trigger('click')
     await flushPromises()
-    expect(wrapper.get('button[aria-label="图纸审核"] small').text()).toBe('未存档')
-    expect(wrapper.get('[aria-label="图档预览"]').text()).toContain('2D工程图')
-    expect(wrapper.get('[aria-label="图档预览"]').text()).toContain('关联模型')
-
-    const relatedModel = wrapper.findAll('.pdm-related-documents button').find(button => button.text().includes('REAL-ASM-001'))
-    expect(relatedModel).toBeTruthy()
-    await relatedModel!.trigger('click')
-    await flushPromises()
-    expect(wrapper.get('[aria-label="图档预览"]').text()).toContain('3D模型')
+    // 顶部工具栏不再显示图档切换区，图档信息只保留在左侧属性卡里。
+    const preview = wrapper.get('[aria-label="图档预览"]')
+    expect(preview.find('.pdm-preview-document-switcher').exists()).toBe(false)
+    expect(preview.find('.pdm-related-documents').exists()).toBe(false)
+    const properties = preview.get('.pdm-preview-properties-bar').find('.pdm-preview-properties')
+    expect(properties.exists()).toBe(true)
+    expect(properties.text()).toContain('物料编码')
+    expect(preview.find('#drawing-review-decision-host').exists()).toBe(true)
   })
 
   it('switches the workbench and document pages and makes navigation buttons respond', async () => {
@@ -1251,7 +1251,7 @@ describe('PLM client workspace', () => {
     expect(tree.get('.pdm-tree-row.is-selected').text()).toContain('REAL-PRT-001')
   })
 
-  it('shows lightweight previews on selection and keeps interactive previews explicit', async () => {
+  it('shows lightweight previews on selection and keeps the interactive preview loaded', async () => {
     const postMessage = vi.fn()
     Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'visible' })
     Object.defineProperty(window, 'chrome', {
@@ -1290,14 +1290,18 @@ describe('PLM client workspace', () => {
     })
     expect(wrapper.text()).not.toContain('在客户端内预览')
     const previewToolbar = wrapper.get('.pdm-preview-toolbar')
-    expect(previewToolbar.get('.pdm-preview-document-name').text()).toBe('真实总装配')
+    expect(previewToolbar.find('.pdm-preview-document-switcher').exists()).toBe(false)
+    expect(wrapper.find('.pdm-preview-markup-row #drawing-review-decision-host').exists()).toBe(true)
     expect(previewToolbar.find('.pdm-selected-file').exists()).toBe(false)
-    const markupToolbar = previewToolbar.get('[aria-label="图形批注工具"]')
+    const markupToolbar = wrapper.get('.pdm-preview-markup-row [aria-label="图形批注工具"]')
     expect(markupToolbar.findAll('button').map(button => button.attributes('aria-label'))).toEqual([
       '引线批注', '云线批注', '框选批注', '手绘批注',
     ])
     expect(previewToolbar.findAll('.pdm-preview-command').map(button => button.attributes('aria-label'))).toEqual([
-      '保存批注', '打开最新', '编辑打开',
+      '打开最新', '编辑打开',
+    ])
+    expect(wrapper.findAll('.pdm-preview-markup-row .pdm-preview-command').map(button => button.attributes('aria-label'))).toEqual([
+      '保存批注',
     ])
     expect(previewToolbar.find('button[aria-label="使用位置"]').exists()).toBe(false)
     expect(previewToolbar.find('button[aria-label="作废图档"]').exists()).toBe(false)
@@ -1354,7 +1358,6 @@ describe('PLM client workspace', () => {
     expect(postMessage.mock.calls.filter(([message]) => message.type === 'preview-host-bounds').length).toBeGreaterThan(boundsCallsBeforeProjectBrowser)
 
     const previewDocumentCallsBeforeReview = postMessage.mock.calls.filter(([message]) => message.type === 'preview-document').length
-    await wrapper.get('button[aria-label="图纸审核"]').trigger('click')
     await flushPromises()
     expect(wrapper.find('[aria-label="图纸审核面板"]').exists()).toBe(false)
     window.dispatchEvent(new Event('resize'))
@@ -1366,7 +1369,7 @@ describe('PLM client workspace', () => {
     }))
     expect(postMessage).toHaveBeenCalledWith(expect.objectContaining({
       type: 'review-overlay-bounds',
-      payload: expect.objectContaining({ left: 600, width: 360, height: 520, visible: true }),
+      payload: expect.objectContaining({ left: 926, width: 34, height: 520, visible: true }),
     }))
     expect(postMessage).toHaveBeenCalledWith(expect.objectContaining({
       type: 'review-overlay-state',
@@ -1376,25 +1379,25 @@ describe('PLM client workspace', () => {
 
     const reviewMessageListener = vi.mocked(window.chrome!.webview!.addEventListener).mock.calls.find(([type]) => type === 'message')?.[1]
     expect(reviewMessageListener).toBeTruthy()
-    reviewMessageListener!(new MessageEvent('message', { data: { type: 'review-overlay-action', payload: { action: 'close' } } }))
+    reviewMessageListener!(new MessageEvent('message', { data: { type: 'review-overlay-action', payload: { action: 'collapse', collapsed: false } } }))
+    await flushPromises()
+    window.dispatchEvent(new Event('resize'))
+    await new Promise<void>(resolve => window.requestAnimationFrame(() => resolve()))
     await flushPromises()
     expect(postMessage).toHaveBeenCalledWith(expect.objectContaining({
+      type: 'review-overlay-bounds',
+      payload: expect.objectContaining({ left: 660, width: 300, height: 520, visible: true }),
+    }))
+    expect(postMessage).toHaveBeenCalledWith(expect.objectContaining({
       type: 'review-overlay-state',
-      payload: expect.objectContaining({ visible: false }),
+      payload: expect.objectContaining({ visible: true, collapsed: false }),
     }))
 
     const drawingFilter = wrapper.findAll('button[role="tab"]').find(button => button.text().includes('2D'))
     expect(drawingFilter).toBeTruthy()
     await drawingFilter!.trigger('click')
     await flushPromises()
-    expect(postMessage).toHaveBeenCalledWith({ type: 'preview-host-hide', payload: undefined })
-    expect(postMessage).toHaveBeenCalledWith({
-      type: 'lightweight-preview-request',
-      payload: { documentId: 'doc-drawing' },
-    })
-    expect(postMessage.mock.calls.filter(([message]) => message.type === 'preview-document')).toHaveLength(previewDocumentCalls)
-    await buttonByText(wrapper, '加载交互预览').trigger('click')
-    await flushPromises()
+    // 交互预览已加载过，切换图档直接续用会话：不再清空预览，也不需要重新点击加载按钮。
     expect(postMessage).toHaveBeenCalledWith({
       type: 'preview-document',
       payload: {
@@ -1402,28 +1405,38 @@ describe('PLM client workspace', () => {
         drawingNumber: 'REAL-ASM-001', name: '真实总装工程图', specification: '', material: '', brand: '', surfaceTreatment: '', status: '工作中',
       },
     })
+    expect(postMessage.mock.calls.filter(([message]) => message.type === 'preview-document')).toHaveLength(previewDocumentCalls + 1)
+    expect(postMessage).not.toHaveBeenCalledWith({
+      type: 'lightweight-preview-request',
+      payload: { documentId: 'doc-drawing' },
+    })
     window.dispatchEvent(new CustomEvent('pdm-preview-status', { detail: { state: 'ready', fileName: 'REAL-ASM-001.SLDDRW' } }))
     await flushPromises()
     expect(wrapper.find('[aria-label="eDrawings快捷操作"]').exists()).toBe(false)
     expect(wrapper.find('[aria-label="图纸页切换"]').exists()).toBe(false)
 
-    await wrapper.get('.pdm-related-documents button').trigger('click')
+    const modelFilter = wrapper.findAll('button[role="tab"]').find(button => button.text().includes('3D'))
+    expect(modelFilter).toBeTruthy()
+    await modelFilter!.trigger('click')
     await flushPromises()
-    expect(postMessage.mock.calls.filter(([message]) => message.type === 'preview-document')).toHaveLength(2)
-    await buttonByText(wrapper, '加载交互预览').trigger('click')
+    expect(postMessage.mock.calls.filter(([message]) => message.type === 'preview-document')).toHaveLength(previewDocumentCalls + 2)
+    window.dispatchEvent(new CustomEvent('pdm-preview-status', { detail: { state: 'ready', fileName: 'REAL-ASM-001.SLDASM' } }))
     await flushPromises()
-    expect(postMessage.mock.calls.filter(([message]) => message.type === 'preview-document')).toHaveLength(3)
+    expect(postMessage.mock.calls.filter(([message]) => message.type === 'preview-document')).toHaveLength(previewDocumentCalls + 2)
 
     const hideCallsBeforeTabChange = postMessage.mock.calls.filter(([message]) => message.type === 'preview-host-hide').length
+    const suspendCallsBeforeTabChange = postMessage.mock.calls.filter(([message]) => message.type === 'preview-host-suspend').length
     const bomTab = wrapper.findAll('.pdm-project-tabs button').find(button => button.text().includes('BOM'))
     expect(bomTab).toBeTruthy()
     await bomTab!.trigger('click')
-    expect(postMessage.mock.calls.filter(([message]) => message.type === 'preview-host-hide').length).toBeGreaterThan(hideCallsBeforeTabChange)
+    // 离开图档页只挂起已加载的预览，不释放 eDrawings 文档。
+    expect(postMessage.mock.calls.filter(([message]) => message.type === 'preview-host-suspend').length).toBeGreaterThan(suspendCallsBeforeTabChange)
+    expect(postMessage.mock.calls.filter(([message]) => message.type === 'preview-host-hide').length).toBe(hideCallsBeforeTabChange)
 
     const previewCallsBeforeReturn = postMessage.mock.calls.filter(([message]) => message.type === 'preview-document').length
     await projectTabByText(wrapper, '图档').trigger('click')
     await flushPromises()
-    expect(wrapper.get('[aria-label="客户端内嵌eDrawings预览区"]').attributes('data-preview-state')).toBe('idle')
+    expect(wrapper.get('[aria-label="客户端内嵌eDrawings预览区"]').attributes('data-preview-state')).toBe('ready')
     expect(postMessage.mock.calls.filter(([message]) => message.type === 'preview-document')).toHaveLength(previewCallsBeforeReturn)
   })
 
@@ -1439,8 +1452,8 @@ describe('PLM client workspace', () => {
     expect(preview.attributes('data-preview-state')).toBe('unavailable')
     expect(preview.text()).toContain('该历史版本尚未生成STP/PDF预览')
     expect(preview.text()).not.toContain('正在加载 eDrawings')
-    expect(preview.get('[aria-label="图档属性"]').text()).toContain('物料编码REAL-ASM-001')
-    expect(preview.get('[aria-label="图档属性"]').text()).toContain('名称真实总装配')
+    expect(wrapper.get('[aria-label="图档属性"]').text()).toContain('物料编码REAL-ASM-001')
+    expect(wrapper.get('[aria-label="图档属性"]').text()).toContain('名称真实总装配')
 
     await buttonByText(wrapper, '查看并下载版本').trigger('click')
     await flushPromises()

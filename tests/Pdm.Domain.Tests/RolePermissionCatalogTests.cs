@@ -26,13 +26,21 @@ public sealed class RolePermissionCatalogTests
     [Fact]
     public void InitialRoles_ContainConfirmedBusinessRolesWithLeastPrivilegeDefaults()
     {
-        Assert.Equal(26, RolePermissionCatalog.Roles.Count);
+        Assert.Equal(27, RolePermissionCatalog.Roles.Count);
         Assert.Equal(RolePermissionCatalog.Roles.Count, RolePermissionCatalog.Roles.Select(role => role.RoleCode).Distinct(StringComparer.OrdinalIgnoreCase).Count());
         Assert.Contains(RolePermissionCatalog.Roles, role => role.Name == "机械工程师" && role.IsSystem);
         Assert.Contains(RolePermissionCatalog.Roles, role => role.Name == "标准化主管" && role.IsSystem);
         Assert.Contains(RolePermissionCatalog.Roles, role => role.Name == "生产物料员" && role.IsSystem);
         Assert.Contains(RolePermissionCatalog.Roles, role => role.RoleCode == "platform_admin" && role.Name == "平台管理员" && role.IsSystem);
         Assert.Contains(RolePermissionCatalog.Roles, role => role.RoleCode == "developer" && role.Name == "开发者" && role.IsSystemAdministrator);
+        Assert.Contains(RolePermissionCatalog.Roles, role => role.RoleCode == "DrawingReviewer" && role.Name == "审图员" && role.IsSystem);
+
+        var drawingReviewer = RolePermissionCatalog.InitialPermissions("DrawingReviewer", UserRole.ProcessReviewer);
+        Assert.Contains(PermissionCodes.DrawingReviewDecide, drawingReviewer);
+        Assert.Contains(PermissionCodes.DrawingReviewAnnotate, drawingReviewer);
+        Assert.Contains(PermissionCodes.ProjectContentView, drawingReviewer);
+        Assert.DoesNotContain(PermissionCodes.DrawingReviewSubmit, drawingReviewer);
+        Assert.DoesNotContain(PermissionCodes.ApprovalDecide, drawingReviewer);
 
         var mechanical = RolePermissionCatalog.InitialPermissions(UserRole.Engineer.ToString(), UserRole.Engineer);
         Assert.Contains(PermissionCodes.DrawingReviewSubmit, mechanical);

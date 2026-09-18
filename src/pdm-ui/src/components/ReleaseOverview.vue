@@ -32,8 +32,8 @@ const streams = [
 
 function scopeLabel(scope: ReleaseScope) {
   return ({
-    StandardLongLead: '前期BOM', StandardFormal: '正式', StandardSupplement: '增补/变更',
-    ElectricalLongLead: '前期BOM', ElectricalFormal: '正式', ElectricalSupplement: '增补/变更', NonStandardLongLead: '前期BOM', NonStandardWithDrawing: 'BOM+图纸', NonStandardSupplement: '增补/变更', LegacyCombined: '历史组合',
+    StandardLongLead: '长交期BOM', StandardFormal: '正式', StandardSupplement: '增补/变更',
+    ElectricalLongLead: '长交期BOM', ElectricalFormal: '正式', ElectricalSupplement: '增补/变更', NonStandardLongLead: '长交期BOM', NonStandardWithDrawing: 'BOM+图纸', NonStandardSupplement: '增补/变更', LegacyCombined: '历史组合',
   } as Record<ReleaseScope, string>)[scope]
 }
 

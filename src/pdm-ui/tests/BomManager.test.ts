@@ -932,7 +932,7 @@ describe('BomManager', () => {
     expect(wrapper.text()).not.toContain('缺少物料编码')
     expect(wrapper.get('.pdm-bom-data-status').text()).toBe('已完善')
     const reviewStatus = wrapper.get('.pdm-bom-drawing-review-status')
-    expect(reviewStatus.text()).toBe('未审核')
+    expect(reviewStatus.text()).toBe('待提交')
     expect(reviewStatus.attributes('title')).toBe('当前工程图尚未发起审核')
   })
 
@@ -1224,7 +1224,7 @@ describe('BomManager', () => {
 
     expect(wrapper.get('.pdm-bom-drawing-audit-header').text()).toBe('图纸')
     expect(wrapper.findAll('.pdm-bom-drawing-link').map(item => item.text())).toEqual(['2D', '3D'])
-    expect(wrapper.findAll('.pdm-bom-drawing-audit-cell').map(item => item.text())).toEqual(['2D3D未审核', '未审核', '未审核'])
+    expect(wrapper.findAll('.pdm-bom-drawing-audit-cell').map(item => item.text())).toEqual(['2D3D待提交', '待提交', '待提交'])
 
     materialApi.listDocumentVersions.mockResolvedValueOnce([{
       id: 'drawing-version-1', documentId: 'drawing-1', revision: { display: 'W2' }, status: 'Released', fileLength: 12, sha256: 'drawing', createdBy: 'developer', createdAt: '2026-09-16T00:00:00Z', changeNote: '',

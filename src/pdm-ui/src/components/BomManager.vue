@@ -1654,10 +1654,10 @@ function drawingReviewCandidate(row: BomItem) {
 function drawingReviewStatus(row: BomItem) {
   if (rowKind(row) !== 'NonStandard') return undefined
   const candidate = drawingReviewCandidate(row)
-  if (candidate?.state === 'ApprovedCurrent') return { label: '已审核', tone: 'is-approved', title: '当前工程图版本已完成审核，可以发布。' }
-  if (candidate?.state === 'InReview') return { label: '审核中', tone: 'is-reviewing', title: candidate.reason || '当前工程图正在审核，审核完成前不可发布。' }
+  if (candidate?.state === 'ApprovedCurrent') return { label: '已批准', tone: 'is-approved', title: '当前工程图已批准，可以发布。' }
+  if (candidate?.state === 'InReview') return { label: '待审核', tone: 'is-pending', title: candidate.reason || '当前工程图待审核，审核完成前不可发布。' }
   if (candidate?.state === 'Unavailable') return { label: '不可审核', tone: 'is-blocked', title: candidate.reason || '当前物料缺少可审核的工程图，不能发布。' }
-  return { label: '未审核', tone: 'is-pending', title: candidate?.reason || '当前工程图尚未完成审核，不能发布。' }
+  return { label: '待提交', tone: 'is-neutral', title: candidate?.reason || '当前工程图尚未提交审核，不能发布。' }
 }
 
 function normalizedPreviewFormat(value: 'Step' | 'Pdf' | 0 | 1) {

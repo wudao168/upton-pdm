@@ -2083,6 +2083,13 @@ public sealed class Phase1ReleaseWorkflowTests
 
     private static async Task PrepareApprovedNonStandardDrawingReviewAsync(InMemoryPdmRepository repository, PdmWorkflowService workflow)
     {
+        if (await repository.FindUserAsync("mechanical-supervisor", default) is null)
+            await repository.CreateUserAsync(new UserAccount(Guid.NewGuid(), "mechanical-supervisor", "机械主管", "unused", UserRole.Approver, true), default);
+        var reviewDepartment = (await repository.GetOrganizationDirectoryAsync(default)).Units.FirstOrDefault(unit => unit.Code == "APPROVAL-DEPT")
+            ?? await repository.SaveOrganizationUnitAsync(
+                new SaveOrganizationUnitCommand(null, Guid.Parse("70000000-0000-0000-0000-000000000001"), null, "APPROVAL-DEPT", "审批测试部门", OrganizationUnitKind.Department, true, 0), default);
+        await repository.SetOrganizationMembershipsAsync("submitter", [reviewDepartment.Id], reviewDepartment.Id, default);
+        await repository.SetOrganizationUnitManagersAsync(reviewDepartment.Id, "mechanical-supervisor", [], default);
         var documents = await repository.ListDocumentsAsync(ProjectId, default);
         var model = documents.Single(document => document.DrawingNumber == "A01-100" && document.Kind == DocumentKind.Assembly);
         var drawing = documents.Single(document => document.DrawingNumber == "A01-100" && document.Kind == DocumentKind.Drawing);
@@ -2103,6 +2110,9 @@ public sealed class Phase1ReleaseWorkflowTests
         review = await workflow.DecideDrawingReviewTargetAsync(review.Id, item.Id,
             new DecideDrawingReviewTargetCommand(DrawingReviewTarget.Drawing2D, DrawingReviewDecision.Approve, "2D通过"),
             "drawing-reviewer", UserRole.Administrator, default);
+        review = await workflow.DecideDrawingReviewSupervisorAsync(review.Id,
+            new DecideDrawingReviewSupervisorCommand(DrawingReviewDecision.Approve, "机械主管批准"),
+            "mechanical-supervisor", UserRole.Administrator, default);
 
         var request = Assert.Single(await repository.ListCadPropertyWritebacksAsync(ProjectId, default));
         Assert.Equal(drawing.Id, request.SourceDocumentId);

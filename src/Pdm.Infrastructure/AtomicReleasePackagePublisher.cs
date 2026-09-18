@@ -75,7 +75,7 @@ public sealed class AtomicReleasePackagePublisher : IReleasePackagePublisher
                 var electricalHistory = repository is null ? [] : await repository.ListReleasePackagesAsync(package.ProjectId, cancellationToken);
                 if (electricalHistory.Any(previous => previous.Scope == ReleaseScope.ElectricalLongLead
                     && previous.State is not (ReleasePackageState.Published or ReleasePackageState.Rejected)))
-                    throw new PdmRuleException("存在尚未完成的电气件前期发布，请完成或撤销后再进行正式发布。");
+                    throw new PdmRuleException("存在尚未完成的电气件长交期发布，请完成或撤销后再进行正式发布。");
                 var priorElectrical = BomReleaseAggregation.PriorQuantities(BomReleaseAggregation.PriorLongLeadItems(package, electricalHistory), electrical);
                 await File.WriteAllBytesAsync(Path.Combine(stagingDirectory, "electrical-bom.xlsx"), BomWorkbook.WriteStandardRelease(electrical, priorElectrical), cancellationToken);
                 break;
@@ -252,7 +252,7 @@ public sealed class AtomicReleasePackagePublisher : IReleasePackagePublisher
         if (scope == ReleaseScope.NonStandardLongLead)
             RequireFile(sourceFiles, path => string.Equals(Path.GetFileName(path), "long-lead-nonstandard-parts-bom.xlsx", StringComparison.OrdinalIgnoreCase), "长交期非标件BOM XLSX");
         if (scope == ReleaseScope.ElectricalLongLead)
-            RequireFile(sourceFiles, path => string.Equals(Path.GetFileName(path), "long-lead-electrical-bom.xlsx", StringComparison.OrdinalIgnoreCase), "前期电气BOM XLSX");
+            RequireFile(sourceFiles, path => string.Equals(Path.GetFileName(path), "long-lead-electrical-bom.xlsx", StringComparison.OrdinalIgnoreCase), "长交期电气BOM XLSX");
         if (scope is ReleaseScope.LegacyCombined or ReleaseScope.StandardFormal or ReleaseScope.StandardSupplement)
             RequireFile(sourceFiles, path => string.Equals(Path.GetFileName(path), "standard-parts-bom.xlsx", StringComparison.OrdinalIgnoreCase), "标准件BOM XLSX");
         if (scope is ReleaseScope.LegacyCombined or ReleaseScope.NonStandardWithDrawing or ReleaseScope.NonStandardSupplement)

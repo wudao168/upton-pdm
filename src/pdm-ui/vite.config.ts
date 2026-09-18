@@ -24,6 +24,7 @@ export default defineConfig({
       input: {
         main: `${projectRoot}index.html`,
         reviewOverlay: `${projectRoot}review-overlay.html`,
+        reviewAnnotation: `${projectRoot}review-annotation.html`,
       },
     },
   },

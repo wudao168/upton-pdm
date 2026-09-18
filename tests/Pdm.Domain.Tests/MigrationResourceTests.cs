@@ -515,4 +515,23 @@ public sealed class MigrationResourceTests
 
         Assert.Contains("DROP INDEX ux_program_template_parameter_name", sql, StringComparison.Ordinal);
     }
+
+    [Fact]
+    public async Task DrawingReviewReviewerPoolMigration_AddsParallelReviewersAndDrawingReviewerRole()
+    {
+        var assembly = typeof(MySqlMigrationRunner).Assembly;
+        var resourceName = assembly.GetManifestResourceNames()
+            .Single(name => name.EndsWith(".Migrations.115_drawing_review_reviewer_pool.sql", StringComparison.Ordinal));
+
+        await using var stream = assembly.GetManifestResourceStream(resourceName);
+        Assert.NotNull(stream);
+        using var reader = new StreamReader(stream!);
+        var sql = await reader.ReadToEndAsync();
+
+        Assert.Contains("ADD COLUMN assigned_reviewers VARCHAR(2000) NULL", sql, StringComparison.Ordinal);
+        Assert.Contains("ADD COLUMN assigned_reviewer_names VARCHAR(4000) NULL", sql, StringComparison.Ordinal);
+        Assert.Contains("SET assigned_reviewers = JSON_ARRAY(assigned_reviewer)", sql, StringComparison.Ordinal);
+        Assert.Contains("('DrawingReviewer','审图员'", sql, StringComparison.Ordinal);
+        Assert.Contains("('DrawingReviewer','drawing-review.decide'", sql, StringComparison.Ordinal);
+    }
 }

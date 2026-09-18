@@ -318,6 +318,20 @@ internal static class ClientPackageUpdater
                 try { File.Delete(launchMarker); } catch { return false; }
             }
 
+            // 上一次更换已经失败（例如目录仍被占用）时先正常启动客户端，避免每次打开都被更新流程立即关闭。
+            var previousErrorPath = pendingPath + ".error.txt";
+            try
+            {
+                if (File.Exists(previousErrorPath)
+                    && File.GetLastWriteTimeUtc(previousErrorPath) > File.GetLastWriteTimeUtc(pendingPath))
+                {
+                    return false;
+                }
+            }
+            catch
+            {
+            }
+
             try
             {
                 if (!TryReadPendingUpdate(pendingPath, out var pending, out _)
@@ -488,16 +502,33 @@ function Copy-DirectoryWithRetry([string]$Source,[string]$Destination) {
 }
 function Move-DirectoryWithRetry([string]$Source,[string]$Destination) {
   $lastError = $null
-  for ($attempt = 1; $attempt -le 30; $attempt++) {
+  for ($attempt = 1; $attempt -le 90; $attempt++) {
     try {
       Move-Item -LiteralPath $Source -Destination $Destination -ErrorAction Stop
       return
     } catch {
       $lastError = $_
-      Start-Sleep -Seconds 1
+      # WebView2 子进程会在客户端退出后短暂占用客户端目录，先结束它们再重试，避免整次更新失败。
+      Stop-LeftoverWebViewProcesses $Source
+      Start-Sleep -Seconds 2
     }
   }
   throw $lastError
+}
+function Stop-LeftoverWebViewProcesses([string]$TargetDirectory) {
+  $prefix = [IO.Path]::GetFullPath($TargetDirectory).TrimEnd([IO.Path]::DirectorySeparatorChar) + [IO.Path]::DirectorySeparatorChar
+  $processes = @(Get-Process -Name 'msedgewebview2' -ErrorAction SilentlyContinue)
+  foreach ($process in $processes) {
+    try {
+      $path = $process.Path
+      if (-not [string]::IsNullOrWhiteSpace($path) -and $path.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)) {
+        Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+      }
+    } catch {
+    } finally {
+      $process.Dispose()
+    }
+  }
 }
 function Wait-ForSolidWorksExit {
   for ($attempt = 1; $attempt -le 600; $attempt++) {
@@ -520,8 +551,11 @@ try {
   if ([string]$pending.Component -eq 'solidworks-addin') { Wait-ForSolidWorksExit }
   $backupRoot = Split-Path -Parent $PendingPath
   $component = [string]$pending.Component
-  $backup = Join-Path $backupRoot ('backup-' + $component + '-' + [DateTimeOffset]::Now.ToString('yyyyMMdd-HHmmss-fff'))
   $targetParent = Split-Path -Parent $target
+  # 备份必须与客户端目录同盘：跨盘移动会退化为复制，WebView2 缓存被占用时会直接失败。
+  $backupRoot = Join-Path $targetParent ('.uplm-backup-' + $component)
+  New-Item -ItemType Directory -Path $backupRoot -Force | Out-Null
+  $backup = Join-Path $backupRoot ('backup-' + $component + '-' + [DateTimeOffset]::Now.ToString('yyyyMMdd-HHmmss-fff'))
   $candidate = Join-Path $targetParent ('.uplm-update-' + $component + '-' + [Guid]::NewGuid().ToString('N'))
   Copy-DirectoryWithRetry $payload $candidate
   $candidateVersionPath = Join-Path $candidate '.uplm-version'

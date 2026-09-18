@@ -89,7 +89,7 @@ describe('BomHierarchyOverview', () => {
     ['审批中', '2026-09-08T08:21:00Z', undefined, undefined],
     ['发布失败', '2026-09-08T08:21:00Z', undefined, undefined],
     ['已发布', undefined, undefined, undefined],
-  ])('includes only completed long-lead release dates without changing formal status (%s, %s)', async (state, publishedAt, formalAt, expectedAt) => {
+  ])('shows 未发布/长交期发布/正式发布 and only completed long-lead release dates (%s, %s)', async (state, publishedAt, formalAt, expectedAt) => {
     const root = project({ id: 'root', code: 'P-ROOT', name: '设备' })
     api.listBom.mockResolvedValue([item('A', '测试物料')])
     api.listProjectBomHeaders.mockResolvedValue([])
@@ -101,9 +101,52 @@ describe('BomHierarchyOverview', () => {
     const date = expectedAt ? new Date(expectedAt).toLocaleString('zh-CN', { hour12: false }) : '—'
     expect(rows[0].findAll('td')[8].text()).toBe(date)
     expect(rows[1].findAll('td')[8].text()).toBe(date)
-    expect(rows[1].findAll('td')[6].text()).toBe(formalAt ? '已发布' : '未发布')
+    expect(rows[0].findAll('td')[6].text()).toBe('未发布')
+    expect(rows[1].findAll('td')[6].text()).toBe(formalAt ? '正式发布' : state === '已发布' ? '长交期发布' : '未发布')
     expect(rows[2].findAll('td')[8].text()).toBe('—')
     expect(rows[3].findAll('td')[8].text()).toBe('—')
+    wrapper.unmount()
+  })
+
+  it('aggregates 长交期发布 and 正式发布 across the three category BOMs for the master row', async () => {
+    const root = project({ id: 'root', code: 'P-ROOT', name: '设备' })
+    api.listBom.mockResolvedValue([item('A', '测试物料')])
+    api.listProjectBomHeaders.mockResolvedValue([])
+    api.listBomVersions.mockResolvedValue([])
+    api.listReleasePackages.mockResolvedValue([
+      { scope: 'StandardLongLead', state: '已发布', publishedAt: '2026-09-08T08:21:00Z' },
+      { scope: 'NonStandardLongLead', state: '已发布', publishedAt: '2026-09-08T09:21:00Z' },
+      { scope: 'ElectricalLongLead', state: '审批中', publishedAt: '2026-09-08T10:21:00Z' },
+    ])
+    const wrapper = mount(BomHierarchyOverview, { props: { project: root, projects: [root], token: 'token' } })
+    await flushPromises()
+    let rows = wrapper.findAll('tbody tr')
+    expect(rows[1].findAll('td')[6].text()).toBe('长交期发布')
+    expect(rows[1].findAll('td')[8].text()).toBe(new Date('2026-09-08T08:21:00Z').toLocaleString('zh-CN', { hour12: false }))
+    expect(rows[2].findAll('td')[6].text()).toBe('长交期发布')
+    expect(rows[3].findAll('td')[6].text()).toBe('未发布')
+    expect(rows[0].findAll('td')[6].text()).toBe('未发布')
+
+    api.listReleasePackages.mockResolvedValue([
+      { scope: 'StandardLongLead', state: '已发布', publishedAt: '2026-09-08T08:21:00Z' },
+      { scope: 'NonStandardLongLead', state: '已发布', publishedAt: '2026-09-08T09:21:00Z' },
+      { scope: 'ElectricalLongLead', state: '已发布', publishedAt: '2026-09-08T10:21:00Z' },
+    ])
+    await wrapper.get('[aria-label="刷新多级BOM"]').trigger('click')
+    await flushPromises()
+    rows = wrapper.findAll('tbody tr')
+    expect(rows[0].findAll('td')[6].text()).toBe('长交期发布')
+
+    api.listBomVersions.mockResolvedValue([
+      { kind: 'Standard', state: 'Released', versionNumber: 1, label: 'S-V01' },
+      { kind: 'NonStandard', state: 'Released', versionNumber: 1, label: 'N-V01' },
+      { kind: 'Electrical', state: 'Released', versionNumber: 1, label: 'E-V01' },
+    ])
+    await wrapper.get('[aria-label="刷新多级BOM"]').trigger('click')
+    await flushPromises()
+    rows = wrapper.findAll('tbody tr')
+    expect(rows[0].findAll('td')[6].text()).toBe('正式发布')
+    expect(rows[3].findAll('td')[6].text()).toBe('正式发布')
     wrapper.unmount()
   })
 
@@ -162,7 +205,7 @@ describe('BomHierarchyOverview', () => {
     expect(rootStandard?.text()).toContain('ROOT-S')
     expect(rootStandard?.text()).toContain('ROOT-M')
     expect(rootStandard?.text()).toContain('S-V02')
-    expect(rootStandard?.text()).toContain('已发布')
+    expect(rootStandard?.text()).toContain('正式发布')
     const childStandard = wrapper.findAll('tbody tr').find(row => row.text().includes('标准件BOM') && row.text().includes('工作区'))
     expect(childStandard?.text()).toContain('工作区')
     expect(childStandard?.text()).toContain('未发布')

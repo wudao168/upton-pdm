@@ -1398,9 +1398,10 @@ export function listDrawingReviewers(projectId: string, token: string): Promise<
   })
 }
 
-export async function createDrawingReview(projectId: string, modelDocumentIds: string[] | null, assignedReviewer: string, token: string): Promise<DrawingReviewPackage> {
+export async function createDrawingReview(projectId: string, modelDocumentIds: string[] | null, assignedReviewers: string[], token: string): Promise<DrawingReviewPackage> {
   return mapDrawingReviewPackage(await requestJson<ApiDrawingReviewPackage>(`/api/projects/${projectId}/drawing-reviews`, {
-    method: 'POST', body: JSON.stringify({ modelDocumentIds, assignedReviewer }),
+    // assignedReviewer 是旧版服务端的单值字段，保留它以便前端在服务端尚未升级时仍能发起审核。
+    method: 'POST', body: JSON.stringify({ modelDocumentIds, assignedReviewers, assignedReviewer: assignedReviewers[0] ?? null }),
   }, token))
 }
 

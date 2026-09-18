@@ -992,7 +992,7 @@ export type DrawingReviewPackageState = 'InReview' | 'PendingSupervisorApproval'
 export type DrawingReviewCandidateState = 'Ready' | 'InReview' | 'ApprovedCurrent' | 'Unavailable'
 export type DrawingReviewTarget = 'Model3D' | 'Drawing2D'
 export type DrawingReviewTargetState = 'Pending' | 'ChangesRequested' | 'Approved' | 'Marked' | 'NotRequired'
-export type DrawingReviewDecision = 'Approve' | 'RequestChanges'
+export type DrawingReviewDecision = 'Approve' | 'RequestChanges' | 'Revoke'
 export type DrawingReviewMarkupSeverity = 'Note' | 'Blocking'
 export type DrawingReviewMarkupState = 'Open' | 'Resolved'
 
@@ -1064,6 +1064,8 @@ export interface DrawingReviewPackage {
   createdAt: string
   assignedReviewer?: string | null
   assignedReviewerName?: string | null
+  assignedReviewers?: string[] | null
+  assignedReviewerNames?: string[] | null
   supervisor?: string | null
   supervisorName?: string | null
   supervisorReviewedBy?: string | null

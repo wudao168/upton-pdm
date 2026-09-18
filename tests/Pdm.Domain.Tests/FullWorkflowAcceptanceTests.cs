@@ -39,6 +39,10 @@ public sealed class FullWorkflowAcceptanceTests
         foreach (var username in new[] { "qa_bu_manager", "qa_pm", "qa_lead", "qa_engineer", "qa_reviewer", "qa_approver", "qa_viewer" })
             await workflow.SetOrganizationMembershipsAsync(username, [division.Id], division.Id, "admin", UserRole.Administrator, default);
         await workflow.SetOrganizationUnitManagersAsync(division.Id, "qa_bu_manager", [], "admin", UserRole.Administrator, default);
+        // 事业部经理同时是本部门的机械主管，需要具备审图权限才能处理图纸审核的批准节点。
+        await workflow.UpdateRolePermissionsAsync("BusinessUnitManager",
+            [.. RolePermissionCatalog.InitialPermissions("BusinessUnitManager", UserRole.Approver), PermissionCodes.DrawingReviewAnnotate, PermissionCodes.DrawingReviewDecide],
+            "admin", UserRole.Administrator, default);
 
         var root = await workflow.CreateNumberedProjectAsync(new(
             organizationId, projectType, equipmentType, customer.Id, "QA全流程主项目", "隔离验收",
@@ -119,10 +123,13 @@ public sealed class FullWorkflowAcceptanceTests
         review = await workflow.DecideDrawingReviewTargetAsync(review.Id, reviewItem.Id,
             new(DrawingReviewTarget.Drawing2D, DrawingReviewDecision.Approve, "复核通过"),
             "qa_reviewer", UserRole.ProcessReviewer, default);
+        Assert.Equal(DrawingReviewPackageState.PendingSupervisorApproval, review.State);
+        review = await workflow.DecideDrawingReviewSupervisorAsync(review.Id,
+            new(DrawingReviewDecision.Approve, "机械主管批准"), "qa_bu_manager", UserRole.BusinessUnitManager, default);
         Assert.Equal(DrawingReviewPackageState.WritingProperties, review.State);
 
         var writeback = Assert.Single(await repository.ListCadPropertyWritebacksAsync(child.Id, default),
-            item => item.SourceDocumentId == drawing.Id && item.RequestedBy == "qa_reviewer");
+            item => item.SourceDocumentId == drawing.Id && item.RequestedBy == "qa_bu_manager");
         await workflow.StartCadPropertyWritebackAsync(writeback.Id, "qa_engineer", UserRole.Engineer, default);
         var writebackResult = await CheckInAsync(workflow, drawing, "qa_engineer", time.GetUtcNow(), 'C', false, writeback.Id);
         await workflow.CompleteCadPropertyWritebackAsync(writeback.Id, Assert.IsType<DocumentVersion>(writebackResult.Version).Id,

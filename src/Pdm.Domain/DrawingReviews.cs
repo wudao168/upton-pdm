@@ -37,7 +37,8 @@ public enum DrawingReviewTargetState
 public enum DrawingReviewDecision
 {
     Approve,
-    RequestChanges
+    RequestChanges,
+    Revoke
 }
 
 public enum DrawingReviewMarkupSeverity
@@ -66,9 +67,13 @@ public sealed record DrawingReviewPackage
 
     public required DateTimeOffset CreatedAt { get; init; }
 
-    public string? AssignedReviewer { get; init; }
+    public IReadOnlyList<string> AssignedReviewers { get; init; } = [];
 
-    public string? AssignedReviewerName { get; init; }
+    public IReadOnlyList<string> AssignedReviewerNames { get; init; } = [];
+
+    public string? AssignedReviewer => AssignedReviewers.FirstOrDefault();
+
+    public string? AssignedReviewerName => AssignedReviewerNames.FirstOrDefault();
 
     public string? Supervisor { get; init; }
 
@@ -93,6 +98,13 @@ public sealed record DrawingReviewPackage
     public IReadOnlyList<DrawingReviewItem> Items { get; init; } = [];
 
     public IReadOnlyList<DrawingReviewMarkup> Markups { get; init; } = [];
+
+    /// <summary>
+    /// 第一级图纸审核为并行节点：未指定审核人时由全部具备审图权限的人员处理，指定后由指定人员并行处理，任意一人通过即可。
+    /// </summary>
+    public bool AllowsReviewer(string username) =>
+        AssignedReviewers.Count == 0
+        || AssignedReviewers.Contains(username, StringComparer.OrdinalIgnoreCase);
 }
 
 public sealed record DrawingReviewCandidate

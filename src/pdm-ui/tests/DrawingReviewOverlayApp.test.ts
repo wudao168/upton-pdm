@@ -38,6 +38,7 @@ describe('DrawingReviewOverlayApp', () => {
           canAnnotate: true,
           canDecide: true,
           allowSelfReview: true,
+          collapsed: false,
           theme: 'a',
         },
       },
@@ -45,8 +46,13 @@ describe('DrawingReviewOverlayApp', () => {
     await flushPromises()
 
     expect(wrapper.find('[aria-label="图纸审核面板"]').exists()).toBe(true)
-    await wrapper.get('[aria-label="关闭图纸审核面板"]').trigger('click')
-    expect(postMessage).toHaveBeenCalledWith({ type: 'review-overlay-action', payload: { action: 'close' } })
+    expect(wrapper.find('[aria-label="关闭图纸审核面板"]').exists()).toBe(false)
+    await wrapper.get('[aria-label="折叠图纸审核栏"]').trigger('click')
+    expect(postMessage).toHaveBeenCalledWith({ type: 'review-overlay-action', payload: { action: 'collapse', collapsed: true } })
+
+    messageListener?.(new MessageEvent('message', { data: { type: 'review-overlay-state', payload: { collapsed: true } } }))
+    await flushPromises()
+    expect(wrapper.find('[aria-label="展开图纸审核栏"]').exists()).toBe(true)
 
     wrapper.unmount()
   })

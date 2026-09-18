@@ -59,10 +59,15 @@ public partial class MainWindow : Window
     private ReviewOverlayWindow? reviewOverlay;
     private bool reviewOverlayVisible;
     private bool reviewOverlaySuspended;
+    private PreviewHostBounds? reviewAnnotationBounds;
+    private ReviewAnnotationOverlayWindow? reviewAnnotationOverlay;
+    private bool reviewAnnotationVisible;
+    private bool reviewAnnotationSuspended;
     private bool previewDocumentReady;
     private int previewRequestGeneration;
     private Guid? previewDocumentId;
     private Guid? previewVersionId;
+    private Guid? previewRequestedDocumentId;
     private string previewMarkupDirectory = string.Empty;
     private int previewMarkupSaveActive;
     private HwndSource? windowSource;
@@ -285,6 +290,9 @@ public partial class MainWindow : Window
         reviewOverlay = new ReviewOverlayWindow(this, WorkspaceView.CoreWebView2.Environment, uiFolder, uiVersion);
         reviewOverlay.MessageReceived += OnReviewOverlayMessageReceived;
         reviewOverlay.ActivityChanged += ApplyPreviewSurfaces;
+        reviewAnnotationOverlay = new ReviewAnnotationOverlayWindow(this, WorkspaceView.CoreWebView2.Environment, uiFolder, uiVersion);
+        reviewAnnotationOverlay.MessageReceived += OnReviewOverlayMessageReceived;
+        reviewAnnotationOverlay.ActivityChanged += ApplyPreviewSurfaces;
         usingServerUi = Uri.TryCreate(bootstrapConfiguration.UiBaseUrl, UriKind.Absolute, out var serverUiUrl)
             && (serverUiUrl.Scheme == Uri.UriSchemeHttp || serverUiUrl.Scheme == Uri.UriSchemeHttps);
         WorkspaceView.Source = usingServerUi
@@ -307,20 +315,8 @@ public partial class MainWindow : Window
                     latest.Desktop,
                     AppDomain.CurrentDomain.BaseDirectory,
                     bootstrapLifetime.Token);
-                var executablePath = Process.GetCurrentProcess().MainModule?.FileName ?? string.Empty;
-                var desktopUpdaterStarted = ClientPackageUpdater.TryLaunchPendingUpdate(
-                    "desktop",
-                    Process.GetCurrentProcess().Id,
-                    executablePath);
-                if (desktopUpdaterStarted)
-                {
-                    await Dispatcher.BeginInvoke(new Action(() =>
-                    {
-                        allowClose = true;
-                        System.Windows.Application.Current.Shutdown();
-                    }));
-                    return;
-                }
+                // 运行中只下载新版本，不在这里替换自身目录：本进程仍占用客户端目录会让替换失败，用户看到的就是刚打开就关闭。
+                // 已下载的版本会在下次启动时安装。
                 await MaintainSolidWorksAddinUpdateAsync(latest, bootstrapLifetime.Token);
 
                 if (!string.Equals(observedConfigurationVersion, latest.ConfigurationVersion, StringComparison.Ordinal)
@@ -558,6 +554,14 @@ public partial class MainWindow : Window
 
         if (type == "document-selected")
         {
+            // 同一图档重复选中时保留已加载的预览，避免预览区被清空后必须重新加载。
+            if (TryReadPayloadString(message, "documentId", out var selectedDocumentIdValue)
+                && Guid.TryParse(selectedDocumentIdValue, out var selectedDocumentId)
+                && previewRequestedDocumentId == selectedDocumentId)
+            {
+                return;
+            }
+
             HideEmbeddedPreview(true);
             return;
         }
@@ -582,20 +586,25 @@ public partial class MainWindow : Window
         {
             PreviewFrame.Visibility = Visibility.Collapsed;
             reviewOverlaySuspended = true;
+            reviewAnnotationSuspended = true;
             HideReviewOverlay();
+            HideReviewAnnotationOverlay();
             return;
         }
 
         if (type == "review-overlay-hide")
         {
             HideReviewOverlay();
+            HideReviewAnnotationOverlay();
             return;
         }
 
         if (type == "review-overlay-suspend")
         {
             reviewOverlaySuspended = true;
+            reviewAnnotationSuspended = true;
             HideReviewOverlay();
+            HideReviewAnnotationOverlay();
             return;
         }
 
@@ -612,6 +621,22 @@ public partial class MainWindow : Window
             && reviewBoundsPayloadValue is Dictionary<string, object> reviewBoundsPayload)
         {
             UpdateReviewOverlayBounds(reviewBoundsPayload);
+            return;
+        }
+
+        if (type == "review-annotation-state"
+            && message.TryGetValue("payload", out var annotationStatePayloadValue)
+            && annotationStatePayloadValue is Dictionary<string, object> annotationStatePayload)
+        {
+            UpdateReviewAnnotationState(e.WebMessageAsJson, annotationStatePayload);
+            return;
+        }
+
+        if (type == "review-annotation-bounds"
+            && message.TryGetValue("payload", out var annotationBoundsPayloadValue)
+            && annotationBoundsPayloadValue is Dictionary<string, object> annotationBoundsPayload)
+        {
+            UpdateReviewAnnotationBounds(annotationBoundsPayload);
             return;
         }
 
@@ -1260,6 +1285,7 @@ public partial class MainWindow : Window
         previewDocumentReady = false;
         previewDocumentId = null;
         previewVersionId = null;
+        previewRequestedDocumentId = null;
         previewMarkupDirectory = string.Empty;
         PreviewFrame.Visibility = Visibility.Collapsed;
         UpdatePreviewProperties(payload);
@@ -1277,6 +1303,7 @@ public partial class MainWindow : Window
                 throw new InvalidOperationException("图档标识无效，不能预览。");
             }
 
+            previewRequestedDocumentId = documentId;
             var fileName = payload.TryGetValue("fileName", out var fileNameValue) ? Path.GetFileName(fileNameValue as string) : string.Empty;
             using var versionsRequest = CreateApiRequest(HttpMethod.Get, $"/api/documents/{documentId}/versions");
             using var versionsResponse = await apiClient.SendAsync(versionsRequest);
@@ -1322,7 +1349,12 @@ public partial class MainWindow : Window
                     File.Delete(temporaryFile);
                     throw new InvalidDataException("预览文件SHA-256校验失败。");
                 }
-                if (File.Exists(cachedFile)) File.Delete(cachedFile);
+                if (File.Exists(cachedFile))
+                {
+                    // 只读缓存需要先解除只读属性，否则更换版本时会因访问被拒绝而无法重新加载。
+                    File.SetAttributes(cachedFile, File.GetAttributes(cachedFile) & ~FileAttributes.ReadOnly);
+                    File.Delete(cachedFile);
+                }
                 File.Move(temporaryFile, cachedFile);
                 File.SetAttributes(cachedFile, File.GetAttributes(cachedFile) | FileAttributes.ReadOnly);
             }
@@ -1370,6 +1402,7 @@ public partial class MainWindow : Window
             previewDocumentReady = false;
             previewDocumentId = null;
             previewVersionId = null;
+            previewRequestedDocumentId = null;
             previewMarkupDirectory = string.Empty;
             PreviewFrame.Visibility = Visibility.Collapsed;
             embeddedPreview?.CloseDocument();
@@ -1547,6 +1580,31 @@ public partial class MainWindow : Window
         ApplyReviewOverlayBounds();
     }
 
+    private void UpdateReviewAnnotationBounds(IReadOnlyDictionary<string, object> payload)
+    {
+        if (!TryReadNumber(payload, "left", out var left)
+            || !TryReadNumber(payload, "top", out var top)
+            || !TryReadNumber(payload, "width", out var width)
+            || !TryReadNumber(payload, "height", out var height))
+        {
+            return;
+        }
+
+        TryReadNumber(payload, "viewportWidth", out var viewportWidth);
+        TryReadNumber(payload, "viewportHeight", out var viewportHeight);
+        var visible = !payload.TryGetValue("visible", out var visibleValue) || Convert.ToBoolean(visibleValue);
+        reviewAnnotationBounds = new PreviewHostBounds(left, top, width, height, viewportWidth, viewportHeight, visible);
+        reviewAnnotationSuspended = false;
+        ApplyReviewAnnotationBounds();
+    }
+
+    private void UpdateReviewAnnotationState(string stateJson, IReadOnlyDictionary<string, object> payload)
+    {
+        reviewAnnotationVisible = payload.TryGetValue("visible", out var visibleValue) && Convert.ToBoolean(visibleValue);
+        _ = reviewAnnotationOverlay?.PublishStateAsync(stateJson);
+        ApplyReviewAnnotationBounds();
+    }
+
     private void OnReviewOverlayMessageReceived(string messageJson)
     {
         var serializer = new JavaScriptSerializer();
@@ -1565,12 +1623,13 @@ public partial class MainWindow : Window
         }
     }
 
-    private bool IsPreviewSurfaceActive => IsActive || reviewOverlay?.IsActive == true;
+    private bool IsPreviewSurfaceActive => IsActive || reviewOverlay?.IsActive == true || reviewAnnotationOverlay?.IsActive == true;
 
     private void ApplyPreviewSurfaces()
     {
         ApplyPreviewBounds();
         ApplyReviewOverlayBounds();
+        ApplyReviewAnnotationBounds();
     }
 
     private void ApplyPreviewBounds()
@@ -1656,12 +1715,62 @@ public partial class MainWindow : Window
         reviewOverlay.ShowAt(screenPoint.X, screenPoint.Y, width, height);
     }
 
-    private void HideReviewOverlay() => reviewOverlay?.HideOverlay();
+    private void ApplyReviewAnnotationBounds()
+    {
+        if (reviewAnnotationOverlay == null
+            || !IsPreviewSurfaceActive || !IsVisible || WindowState == WindowState.Minimized
+            || reviewAnnotationSuspended || !reviewAnnotationVisible
+            || reviewAnnotationBounds is not { Visible: true } bounds
+            || bounds.Width < 80 || bounds.Height < 80
+            || WorkspaceView.ActualWidth <= 0 || WorkspaceView.ActualHeight <= 0)
+        {
+            HideReviewAnnotationOverlay();
+            return;
+        }
+
+        var scaleX = bounds.ViewportWidth > 0 ? WorkspaceView.ActualWidth / bounds.ViewportWidth : 1d;
+        var scaleY = bounds.ViewportHeight > 0 ? WorkspaceView.ActualHeight / bounds.ViewportHeight : 1d;
+        var origin = WorkspaceView.TranslatePoint(new System.Windows.Point(0, 0), RootGrid);
+        var viewportLeft = Math.Max(0, origin.X);
+        var viewportTop = Math.Max(0, origin.Y);
+        var viewportRight = Math.Min(RootGrid.ActualWidth, origin.X + WorkspaceView.ActualWidth);
+        var viewportBottom = Math.Min(RootGrid.ActualHeight, origin.Y + WorkspaceView.ActualHeight);
+        var requestedLeft = origin.X + bounds.Left * scaleX;
+        var requestedTop = origin.Y + bounds.Top * scaleY;
+        var left = Math.Max(viewportLeft, requestedLeft);
+        var top = Math.Max(viewportTop, requestedTop);
+        var right = Math.Min(viewportRight, requestedLeft + bounds.Width * scaleX);
+        var bottom = Math.Min(viewportBottom, requestedTop + bounds.Height * scaleY);
+        var width = Math.Max(0, right - left);
+        var height = Math.Max(0, bottom - top);
+        if (width < 80 || height < 80)
+        {
+            HideReviewAnnotationOverlay();
+            return;
+        }
+
+        var screenPoint = RootGrid.PointToScreen(new System.Windows.Point(left, top));
+        var presentationSource = PresentationSource.FromVisual(this);
+        if (presentationSource?.CompositionTarget != null)
+        {
+            screenPoint = presentationSource.CompositionTarget.TransformFromDevice.Transform(screenPoint);
+        }
+        reviewAnnotationOverlay.ShowAt(screenPoint.X, screenPoint.Y, width, height);
+    }
+
+    private void HideReviewOverlay()
+    {
+        reviewOverlay?.HideOverlay();
+        HideReviewAnnotationOverlay();
+    }
+
+    private void HideReviewAnnotationOverlay() => reviewAnnotationOverlay?.HideOverlay();
 
     private void HideEmbeddedPreview(bool closeDocument)
     {
         Interlocked.Increment(ref previewRequestGeneration);
         previewDocumentReady = false;
+        previewRequestedDocumentId = null;
         PreviewFrame.Visibility = Visibility.Collapsed;
         if (closeDocument)
         {
@@ -1798,6 +1907,13 @@ public partial class MainWindow : Window
             reviewOverlay.ActivityChanged -= ApplyPreviewSurfaces;
             reviewOverlay.Shutdown();
             reviewOverlay = null;
+        }
+        if (reviewAnnotationOverlay != null)
+        {
+            reviewAnnotationOverlay.MessageReceived -= OnReviewOverlayMessageReceived;
+            reviewAnnotationOverlay.ActivityChanged -= ApplyPreviewSurfaces;
+            reviewAnnotationOverlay.Shutdown();
+            reviewAnnotationOverlay = null;
         }
         HideEmbeddedPreview(false);
         EmbeddedPreviewHost.Child = null;

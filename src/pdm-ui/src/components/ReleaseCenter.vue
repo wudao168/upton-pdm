@@ -41,13 +41,13 @@ const emit = defineEmits<{
 }>()
 
 const releaseTypes: { value: Exclude<ReleaseScope, 'LegacyCombined'>; label: string }[] = [
-  { value: 'StandardLongLead', label: '标准件 · 前期BOM发布' },
+  { value: 'StandardLongLead', label: '标准件 · 长交期BOM发布' },
   { value: 'StandardFormal', label: '标准件 · 正式发布' },
   { value: 'StandardSupplement', label: '标准件 · 增补/变更' },
   { value: 'ElectricalFormal', label: '电气BOM · 正式发布' },
   { value: 'ElectricalSupplement', label: '电气BOM · 增补/变更' },
-  { value: 'ElectricalLongLead', label: '电气件 · 前期BOM发布' },
-  { value: 'NonStandardLongLead', label: '非标件 · 前期BOM发布' },
+  { value: 'ElectricalLongLead', label: '电气件 · 长交期BOM发布' },
+  { value: 'NonStandardLongLead', label: '非标件 · 长交期BOM发布' },
   { value: 'NonStandardWithDrawing', label: '非标件BOM + 图纸 · 正式发布' },
   { value: 'NonStandardSupplement', label: '非标件 · 增补/变更' },
 ]
@@ -111,7 +111,7 @@ const releaseBomRevisionLabel = computed(() => {
     return `标准件：不适用 · 非标件：长交期批次 ${releasePackage.nonStandardBomRevision || '未生成'} · 电气件：不适用`
   }
   if (releasePackage.scope === 'ElectricalLongLead') {
-    return `标准件：不适用 · 非标件：不适用 · 电气件：前期批次 ${releasePackage.electricalBomRevision || '未生成'}`
+    return `标准件：不适用 · 非标件：不适用 · 电气件：长交期批次 ${releasePackage.electricalBomRevision || '未生成'}`
   }
   return `标准件：${releasePackage.standardBomRevision || '未发布'} · 非标件：${releasePackage.nonStandardBomRevision || '未发布'} · 电气件：${releasePackage.electricalBomRevision || '未发布'}`
 })
@@ -180,14 +180,14 @@ const itemDrawingReviewReady = (item: BomItem) => item.kind !== 'NonStandard' ||
 const releaseRowDrawingReviewReady = (row: { sourceItems: BomItem[] }) => row.sourceItems.length > 0 && row.sourceItems.every(itemDrawingReviewReady)
 const drawingReviewStatusForItem = (item: BomItem) => {
   const candidate = drawingReviewCandidateFor(item)
-  if (candidate?.state === 'ApprovedCurrent') return '图纸已审核'
-  if (candidate?.state === 'InReview') return '图纸审核中'
+  if (candidate?.state === 'ApprovedCurrent') return '图纸已批准'
+  if (candidate?.state === 'InReview') return '图纸待审核'
   if (candidate?.state === 'Unavailable') return candidate.reason || '图纸不可审核'
-  return candidate?.reason || '图纸未审核'
+  return candidate?.reason || '图纸待提交'
 }
 const releaseRowDrawingReviewStatus = (row: { sourceItems: BomItem[] }) => {
-  if (releaseRowDrawingReviewReady(row)) return '图纸已审核'
-  return [...new Set(row.sourceItems.map(drawingReviewStatusForItem))].join('；') || '图纸未审核'
+  if (releaseRowDrawingReviewReady(row)) return '图纸已批准'
+  return [...new Set(row.sourceItems.map(drawingReviewStatusForItem))].join('；') || '图纸待提交'
 }
 const currentReleaseKeysByTrackingId = computed(() => new Map(
   availableReleaseItems.value
@@ -346,7 +346,7 @@ const releaseDetailPageCount = computed(() => {
   return supplementPageCount.value
 })
 const releaseDetailLegend = computed(() => {
-  if (isLongLeadRelease.value) return `选择前期${scope.value === 'NonStandardLongLead' ? '非标件' : scope.value === 'ElectricalLongLead' ? '电气件' : '标准件'}（已选 ${selectedLongLeadKeys.value.length} 项）`
+  if (isLongLeadRelease.value) return `选择长交期${scope.value === 'NonStandardLongLead' ? '非标件' : scope.value === 'ElectricalLongLead' ? '电气件' : '标准件'}（已选 ${selectedLongLeadKeys.value.length} 项）`
   if (scope.value === 'StandardFormal') return `正式发布内容（已选 ${selectedFormalKeys.value.length} / 共 ${formalReleaseRows.value.length} 项 · 默认全选 · 整套倍率 ×${wholeSetMultiplier.value}${fullyPublishedFormalRowCount.value ? ` · ${fullyPublishedFormalRowCount.value} 项已发布不再重复下发` : ''}）`
   if (isFormalRelease.value) return `正式发布内容（共 ${formalReleaseRows.value.length} 项 · 整套倍率 ×${wholeSetMultiplier.value}）`
   return `增补/变更内容（共 ${supplementRows.value.length} 项 · 整套倍率 ×${wholeSetMultiplier.value}）`
@@ -780,7 +780,7 @@ async function saveItemComment() {
           <label v-if="isSupplement">变更单号<input value="创建草稿后自动生成" readonly aria-label="变更单号由系统自动生成"></label>
         </div>
         <div class="pdm-release-parameter-slot">
-          <p v-if="isLongLeadRelease" class="pdm-inline-info">前期BOM发布允许在尚无引用树时使用，仅冻结本次BOM清单，不发布图纸或制造结构；正式发布将自动扣除已经发布的数量。</p>
+          <p v-if="isLongLeadRelease" class="pdm-inline-info">长交期BOM发布允许在尚无引用树时使用，仅冻结本次BOM清单，不发布图纸或制造结构；正式发布将自动扣除已经发布的数量。</p>
           <p v-if="drawingReviewBlockMessage" class="pdm-inline-warning" role="status">{{ drawingReviewBlockMessage }}</p>
           <label v-if="!isSupplement" class="pdm-release-reason">备注<textarea v-model.trim="releaseNote" rows="3" maxlength="500" placeholder="可填写本次发布备注（选填）"></textarea></label>
           <fieldset v-else class="release-change-reason-picker">
@@ -909,7 +909,7 @@ async function saveItemComment() {
         <div><small>整套倍率</small><strong>× {{ releasePackage.wholeSetMultiplier ?? 1 }}</strong></div>
         <div v-if="releasePackage.changeNumber && releasePackage.changeNumber !== releasePackage.number"><small>变更单号</small><strong>{{ releasePackage.changeNumber }}</strong></div>
         <div><small>BOM版本</small><strong>{{ releaseBomRevisionLabel }}</strong></div>
-        <div><small>制造基线</small><strong>{{ releasePackage.createsManufacturingBaseline ? '发布后生成新基线' : isLongLeadScope(releasePackage.scope) ? '不更新（前期BOM输出）' : '三条正式流齐备后生成' }}</strong></div>
+        <div><small>制造基线</small><strong>{{ releasePackage.createsManufacturingBaseline ? '发布后生成新基线' : isLongLeadScope(releasePackage.scope) ? '不更新（长交期BOM输出）' : '三条正式流齐备后生成' }}</strong></div>
         <div><small>发布目录</small><strong>{{ releasePackage.publishedPath || '审批通过后自动投放' }}</strong></div>
       </div>
       <p v-if="releasePackage.changeReason" class="pdm-release-change-reason"><strong>{{ isSupplementScope(releasePackage.scope) ? '变更原因' : '备注' }}：</strong>{{ releasePackage.changeReason }}</p>
@@ -959,7 +959,7 @@ async function saveItemComment() {
           <strong>{{ frozenPage }} / {{ frozenPageCount }}</strong>
           <button type="button" :disabled="frozenPage >= frozenPageCount" aria-label="固化快照下一页" @click="frozenPage++">›</button>
         </nav>
-        <p v-if="isLongLeadScope(releasePackage.scope)" class="pdm-release-integration-note">发布后输出前期BOM，并写入U9C待同步集成事件；不更新制造基线，也不发布图纸。</p>
+        <p v-if="isLongLeadScope(releasePackage.scope)" class="pdm-release-integration-note">发布后输出长交期BOM，并写入U9C待同步集成事件；不更新制造基线，也不发布图纸。</p>
         <p v-if="['StandardFormal', 'NonStandardWithDrawing', 'ElectricalFormal'].includes(releasePackage.scope)" class="pdm-release-integration-note">完整BOM保留总量；按稳定物料身份和单位扣除前期已发布量，仅下发剩余需求。按结构查看完整BOM，按汇总查看新增下发数量。</p>
       </section>
 

@@ -156,9 +156,37 @@ public sealed partial class InMemoryPdmRepository
             package = package with
             {
                 Items = items,
-                State = items.Any(item => item.ModelState == DrawingReviewTargetState.ChangesRequested || item.DrawingState == DrawingReviewTargetState.ChangesRequested)
-                    ? DrawingReviewPackageState.ChangesRequested
-                    : DrawingReviewPackageState.InReview
+                // 单张图纸退改只影响该图纸，审核单其余图纸继续并行审核。
+                State = DrawingReviewPackageState.InReview
+            };
+            drawingReviewPackages[package.Id] = package;
+            return Task.FromResult(package);
+        }
+    }
+
+    public Task<DrawingReviewPackage> RevokeDrawingReviewTargetAsync(Guid itemId, DrawingReviewTarget target, CancellationToken cancellationToken)
+    {
+        lock (gate)
+        {
+            var package = drawingReviewPackages.Values.FirstOrDefault(candidate => candidate.Items.Any(item => item.Id == itemId))
+                ?? throw new PdmNotFoundException("图纸审核项不存在。");
+            if (package.State is not (DrawingReviewPackageState.InReview or DrawingReviewPackageState.PendingSupervisorApproval))
+                throw new PdmConflictException("当前图纸审核单不允许撤销审核通过。");
+            var currentItem = package.Items.Single(item => item.Id == itemId);
+            var current = target == DrawingReviewTarget.Model3D ? currentItem.ModelState : currentItem.DrawingState;
+            if (current is not (DrawingReviewTargetState.Approved or DrawingReviewTargetState.Marked or DrawingReviewTargetState.ChangesRequested))
+                throw new PdmConflictException("该图档没有可撤销的审核结论。");
+            var items = package.Items.Select(item => item.Id != itemId ? item : target == DrawingReviewTarget.Model3D
+                ? item with { ModelState = DrawingReviewTargetState.Pending, ModelReviewer = null, ModelReviewerName = null, ModelReviewedAt = null, ModelComment = null }
+                : item with { DrawingState = DrawingReviewTargetState.Pending, DrawingReviewer = null, DrawingReviewerName = null, DrawingReviewedAt = null, DrawingComment = null }).ToArray();
+            package = package with
+            {
+                Items = items,
+                State = DrawingReviewPackageState.InReview,
+                SupervisorReviewedBy = null,
+                SupervisorReviewedByName = null,
+                SupervisorReviewedAt = null,
+                SupervisorComment = null
             };
             drawingReviewPackages[package.Id] = package;
             return Task.FromResult(package);
@@ -199,9 +227,9 @@ public sealed partial class InMemoryPdmRepository
         lock (gate)
         {
             if (!drawingReviewPackages.TryGetValue(packageId, out var package)) throw new PdmNotFoundException("图纸审核单不存在。");
-            if (package.State != DrawingReviewPackageState.InReview || string.IsNullOrWhiteSpace(package.AssignedReviewer)
+            if (package.State != DrawingReviewPackageState.InReview
                 || string.IsNullOrWhiteSpace(package.Supervisor) || package.Items.Any(item => item.DrawingState != DrawingReviewTargetState.Approved))
-                throw new PdmConflictException("图纸尚未全部通过指定审核人审核，不能提交机械主管批准。");
+                throw new PdmConflictException("图纸尚未全部通过审图节点，不能提交机械主管批准。");
             package = package with { State = DrawingReviewPackageState.PendingSupervisorApproval };
             drawingReviewPackages[package.Id] = package;
             return Task.FromResult(package);

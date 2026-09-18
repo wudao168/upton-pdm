@@ -51,9 +51,10 @@ const canManageSystem = computed(() => desktopAvailable || ['settings.customer.m
 const projectTab = ref<ProjectTab>('overview')
 watch([activeView, projectTab, () => workspace.project.value.id], clearGlobalStatus, { flush: 'sync' })
 const mountedBomProjectId = ref('')
+const mountedDocumentsProjectId = ref('')
 const materialRequestedTab = ref('materials')
 const requestedProgramTemplateId = ref('')
-const drawingReviewPanelOpen = ref(false)
+const drawingReviewPanelCollapsed = ref(true)
 const drawingReviewPackageId = ref('')
 const requestedReleasePackageId = ref('')
 const requestedValidationPlanProjectId = ref('')
@@ -211,11 +212,11 @@ const selectedDrawingReviewRevision = computed(() => {
 function reviewBadge(review: DrawingReviewPackage, state: DrawingReviewTargetState): DrawingReviewBadge {
   if (review.state === 'Stale') return { label: '版本冲突', tone: 'danger' }
   if (review.state === 'Withdrawn') return { label: '已撤销', tone: 'neutral' }
-  if (review.state === 'WritingProperties') return { label: '写入标记', tone: 'pending' }
-  if (review.state === 'PendingSupervisorApproval') return { label: '待主管批准', tone: 'warning' }
-  if (state === 'ChangesRequested') return { label: '已退改', tone: 'danger' }
-  if (state === 'Marked') return { label: '已审核', tone: 'success' }
-  if (state === 'Approved') return { label: '待写标记', tone: 'pending' }
+  if (review.state === 'WritingProperties' || review.state === 'Approved') return { label: '已批准', tone: 'success' }
+  if (review.state === 'PendingSupervisorApproval') return { label: '待批准', tone: 'warning' }
+  if (state === 'ChangesRequested') return { label: '已退回（待修改）', tone: 'danger' }
+  if (state === 'Marked') return { label: '已批准', tone: 'success' }
+  if (state === 'Approved') return { label: '待批准', tone: 'warning' }
   return { label: '待审核', tone: 'warning' }
 }
 
@@ -225,7 +226,7 @@ const drawingReviewStates = computed<Record<string, DrawingReviewBadge>>(() => {
     .filter(document => document.storedVersionCount !== 0)
     .map(document => document.id))
   const initialReviewBadge = (documentId: string): DrawingReviewBadge => archivedDocumentIds.has(documentId)
-    ? { label: '未发起', tone: 'neutral' }
+    ? { label: '待提交', tone: 'neutral' }
     : { label: '未存档', tone: 'neutral' }
   const nonStandardModelIds = new Set(workspace.nonStandardBom.value
     .filter(item => !item.manuallyExcluded && !item.pendingClassification && item.sourceDocumentId)
@@ -242,11 +243,6 @@ const drawingReviewStates = computed<Record<string, DrawingReviewBadge>>(() => {
   }
   return states
 })
-const selectedDrawingReviewStatus = computed(() => {
-  const documentId = workspace.selectedNode.value.documentId
-  if (!documentId) return { label: '未纳入审核', tone: 'neutral' as const }
-  return drawingReviewStates.value[documentId] ?? { label: '未纳入审核', tone: 'neutral' as const }
-})
 const canWritebackSelectedDrawingReview = computed(() => {
   if (selectedDrawingReviewPackage.value?.state !== 'WritingProperties' || !selectedDrawingReviewItem.value) return false
   return selectedDrawingReviewItem.value.drawingState === 'Approved'
@@ -260,7 +256,8 @@ const drawingReviewReviewerOptions = computed(() => {
     .sort((left, right) => left.label.localeCompare(right.label, 'zh-CN'))
 })
 const drawingReviewOverlayState = computed(() => ({
-  visible: desktopAvailable && activeView.value === 'workspace' && projectTab.value === 'documents' && drawingReviewPanelOpen.value,
+  visible: desktopAvailable && activeView.value === 'workspace' && projectTab.value === 'documents',
+  collapsed: drawingReviewPanelCollapsed.value,
   packageId: drawingReviewPackageId.value,
   packages: workspace.drawingReviews.value,
   candidates: workspace.drawingReviewCandidates.value,
@@ -287,6 +284,22 @@ watch([() => workspace.drawingReviews.value, () => workspace.selectedNode.value.
 }, { immediate: true, deep: true })
 watch(drawingReviewOverlayState, state => {
   if (desktopAvailable) postDesktopMessage('review-overlay-state', state)
+}, { immediate: true, deep: true, flush: 'post' })
+
+const drawingReviewAnnotationState = computed(() => ({
+  visible: drawingReviewOverlayState.value.visible && Boolean(selectedDrawingReviewItem.value),
+  packageId: drawingReviewPackageId.value,
+  packages: workspace.drawingReviews.value,
+  selectedDocumentId: workspace.selectedNode.value.documentId,
+  currentUsername: workspace.currentUsername.value,
+  pending: workspace.operationPending.value,
+  canAnnotate: workspace.hasPermission('drawing-review.annotate'),
+  canDecide: workspace.hasPermission('drawing-review.decide'),
+  allowSelfReview: workspace.hasRole('developer'),
+  theme: theme.value,
+}))
+watch(drawingReviewAnnotationState, state => {
+  if (desktopAvailable) postDesktopMessage('review-annotation-state', state)
 }, { immediate: true, deep: true, flush: 'post' })
 
 function setSystemOrganizationId(organizationId: string) {
@@ -371,6 +384,7 @@ async function openProjectTab(tab: ProjectTab) {
   }
   if (!workspace.project.value.canReadContent && tab !== 'overview' && tab !== 'records') tab = 'overview'
   if (tab === 'bom') mountedBomProjectId.value = workspace.project.value.id
+  if (tab === 'documents') mountedDocumentsProjectId.value = workspace.project.value.id
   projectTab.value = tab
   if (workspace.project.value.id) rememberProjectTab(workspace.project.value.id, tab)
   if (tab === 'versions') await workspace.loadProjectVersions()
@@ -493,6 +507,10 @@ async function openNotification(notification: UserNotification) {
   }
   if ((notification.category === 'project-plan' || notification.category === 'project-plan-approval') && notification.projectId) {
     await openManagedProject(notification.projectId, 'project-plan')
+    return
+  }
+  if (notification.category.startsWith('DrawingReview') && notification.projectId) {
+    if (await openManagedProject(notification.projectId, 'documents')) drawingReviewPanelCollapsed.value = false
     return
   }
   if (notification.projectId && notification.releasePackageId) {
@@ -718,18 +736,14 @@ async function obsoleteSelectedDocument() {
   }
 }
 
-function toggleDrawingReviewPanel() {
-  drawingReviewPanelOpen.value = !drawingReviewPanelOpen.value
-}
-
 function selectDrawingReviewDocument(documentId: string) {
   const document = workspace.managedDocuments.value.find(item => item.id === documentId)
   if (document) workspace.setDocumentFilter(document.kind === 'Drawing' ? 'drawing' : 'model')
   if (!workspace.selectDocument(documentId)) ElMessage.warning('审核图档不在当前项目设计树中')
 }
 
-async function createDrawingReviewFromDocuments(modelDocumentIds: string[] | null, assignedReviewer: string) {
-  await workspace.createDrawingReview(modelDocumentIds, assignedReviewer)
+async function createDrawingReviewFromDocuments(modelDocumentIds: string[] | null, assignedReviewers: string[]) {
+  await workspace.createDrawingReview(modelDocumentIds, assignedReviewers)
   drawingReviewPackageId.value = workspace.drawingReviews.value[0]?.id ?? ''
   const firstDrawingId = workspace.drawingReviews.value[0]?.items[0]?.drawingDocumentId
   if (firstDrawingId) selectDrawingReviewDocument(firstDrawingId)
@@ -750,7 +764,8 @@ function handleReviewOverlayAction(event: MessageEvent) {
       comment?: string
       reason?: string
       modelDocumentIds?: string[] | null
-      assignedReviewer?: string
+      assignedReviewers?: string[]
+      collapsed?: boolean
     }
   } | undefined
   if (message?.type !== 'review-overlay-action' || !message.payload?.action) return
@@ -759,11 +774,11 @@ function handleReviewOverlayAction(event: MessageEvent) {
     case 'update-package':
       drawingReviewPackageId.value = payload.packageId ?? ''
       break
-    case 'close':
-      drawingReviewPanelOpen.value = false
+    case 'collapse':
+      drawingReviewPanelCollapsed.value = payload.collapsed ?? true
       break
     case 'create':
-      if (payload.assignedReviewer && (payload.modelDocumentIds === null || payload.modelDocumentIds?.length)) void runOperation(() => createDrawingReviewFromDocuments(payload.modelDocumentIds ?? null, payload.assignedReviewer!), '图纸审核单已创建，已转指定人员审核')
+      if (payload.modelDocumentIds === null || payload.modelDocumentIds?.length) void runOperation(() => createDrawingReviewFromDocuments(payload.modelDocumentIds ?? null, payload.assignedReviewers ?? []), '图纸审核单已创建，等待审核')
       break
     case 'refresh':
       void runOperation(workspace.refreshDrawingReviews, '图纸审核状态已刷新')
@@ -794,15 +809,14 @@ function handleReviewOverlayAction(event: MessageEvent) {
     case 'decide-supervisor':
       if (payload.packageId && payload.decision) void runOperation(
         () => workspace.decideDrawingReviewSupervisor(payload.packageId!, payload.decision!, payload.comment ?? ''),
-        payload.decision === 'Approve' ? '机械主管已批准' : '图纸已退回修改',
+        payload.decision === 'Approve' ? '已批准' : '图纸已退回修改',
       )
       break
   }
 }
 
-watch(projectTab, (tab, previousTab) => {
-  if (previousTab === 'documents' && tab !== 'documents') postDesktopMessage('preview-host-hide')
-  if (tab !== 'documents') drawingReviewPanelOpen.value = false
+watch(projectTab, tab => {
+  if (tab !== 'documents') drawingReviewPanelCollapsed.value = true
 }, { flush: 'sync' })
 
 watch(activeView, (view, previousView) => {
@@ -1039,19 +1053,20 @@ async function openWhereUsedParent(projectId: string, parentDocumentId: string) 
             <ProjectFileLibrary v-else-if="projectTab === 'files'" :project-id="workspace.project.value.id" :token="workspace.getAccessToken()" :folders="workspace.projectFolders.value" :documents="workspace.managedDocuments.value" :users="workspace.users.value" :roles="workspace.rolePermissionDirectory.value.roles" :administrator="workspace.hasPermission('settings.folder.manage')" :can-recycle-documents="workspace.hasPermission('document.recycle')" :pending="workspace.operationPending.value" :on-update-permissions="workspace.updateProjectFolderPermissions" :on-reload="() => workspace.reload(workspace.project.value.id)" />
             <ProjectPlanManager v-else-if="projectTab === 'project-plan'" :project="workspace.project.value" :projects="workspace.projects.value" :token="workspace.getAccessToken()" :current-username="workspace.currentUsername.value" :current-role="workspace.currentRole.value" :developer="workspace.hasRole('developer')" :can-edit="canManageProjectPlan" :can-manage-system-templates="canManageProjectPlanTemplates" @switch-project="projectId => openManagedProject(projectId, 'project-plan')" />
             <ValidationPlanManager v-else-if="projectTab === 'validation-plan'" :project-id="workspace.project.value.id" :project-code="workspace.project.value.code" :project-name="workspace.project.value.name" :projects="workspace.projects.value" :token="workspace.getAccessToken()" :current-username="workspace.currentUsername.value" :current-display-name="workspace.currentUser.value" :can-edit="workspace.hasPermission('validation-plan.edit')" :can-manage-catalog="workspace.hasPermission('validation-catalog.manage')" :can-decide-approval="workspace.hasPermission('approval.decide') || workspace.hasPermission('validation-plan.edit')" :requested-project-id="requestedValidationPlanProjectId" @request-handled="requestedValidationPlanProjectId = ''" />
-            <section v-else-if="projectTab === 'documents'" class="pdm-document-workspace">
+            <section v-if="mountedDocumentsProjectId === workspace.project.value.id" v-show="projectTab === 'documents'" class="pdm-document-workspace">
               <section v-if="!workspace.hasDocuments.value" class="pdm-panel pdm-workspace-state">
                 <h1>项目尚未关联CAD图纸</h1><p>请在SolidWorks插件中选择“{{ workspace.project.value.code }} · {{ workspace.project.value.name }}”，再提交整套装配存档。</p>
               </section>
               <template v-else>
               <WorkspaceExplorerBar :project="workspace.project.value" :selected="workspace.selectedNode.value" :local-state="selectedWorkspaceLocalState" :desktop-available="desktopAvailable" @open-folder="openWorkspaceFolder" />
-              <div class="pdm-workspace" :class="{ 'has-drawing-review': drawingReviewPanelOpen }">
+              <div class="pdm-workspace">
                 <DocumentTree v-model:query="workspace.searchQuery.value" :filter="workspace.documentFilter.value" :root="workspace.filteredTree.value" :drawings="workspace.filteredDrawings.value" :selected-id="workspace.selectedNode.value.id" :all-count="workspace.documentFilterCounts.value.all" :model-count="workspace.documentFilterCounts.value.model" :drawing-count="workspace.documentFilterCounts.value.drawing" :warning-count="workspace.warningCount.value" :can-edit="workspace.hasPermission('document.edit')" :review-states="drawingReviewStates" :local-states="workspaceLocalStates" :refreshing="workspace.loading.value || workspaceLocalRefreshing" @update:filter="workspace.setDocumentFilter" @select="workspace.selectNode" @refresh="refreshDocumentTree" @open="workspace.openDocument" @open-folder="openWorkspaceFolder" />
                 <section class="pdm-stage">
                   <div class="pdm-preview-layout" :class="{ 'is-desktop-preview': desktopAvailable }">
-                    <PreviewWorkspace :selected="workspace.selectedNode.value" :related="workspace.relatedNodes.value" :bom-item="workspace.selectedBomItem.value" :current-username="workspace.currentUsername.value" :can-manage-lifecycle="workspace.hasPermission('release.manage')" :can-edit-documents="workspace.hasPermission('document.edit')" :desktop-available="desktopAvailable" :access-token="workspace.getAccessToken()" :project-id="workspace.project.value.id" :obscured="workspace.versionDrawerOpen.value || workspace.whereUsedDrawerOpen.value" :review-panel-open="drawingReviewPanelOpen" :review-status="selectedDrawingReviewStatus.label" :review-status-tone="selectedDrawingReviewStatus.tone" :review-version-id="selectedDrawingReviewVersionId" :review-revision="selectedDrawingReviewRevision" :can-writeback-review-properties="canWritebackSelectedDrawingReview" @open="workspace.openDocument" @preview="workspace.previewDocument" @related="workspace.selectRelatedNode" @review="toggleDrawingReviewPanel" @more="workspace.openVersionDrawer()" @where-used="workspace.openWhereUsed" @obsolete="obsoleteSelectedDocument">
+                    <PreviewWorkspace :selected="workspace.selectedNode.value" :related="workspace.relatedNodes.value" :bom-item="workspace.selectedBomItem.value" :current-username="workspace.currentUsername.value" :can-manage-lifecycle="workspace.hasPermission('release.manage')" :can-edit-documents="workspace.hasPermission('document.edit')" :desktop-available="desktopAvailable" :access-token="workspace.getAccessToken()" :project-id="workspace.project.value.id" :active="projectTab === 'documents'" :obscured="workspace.versionDrawerOpen.value || workspace.whereUsedDrawerOpen.value" :review-panel-collapsed="drawingReviewPanelCollapsed" :review-version-id="selectedDrawingReviewVersionId" :review-revision="selectedDrawingReviewRevision" :can-writeback-review-properties="canWritebackSelectedDrawingReview" @open="workspace.openDocument" @preview="workspace.previewDocument" @related="workspace.selectRelatedNode" @more="workspace.openVersionDrawer()" @where-used="workspace.openWhereUsed" @obsolete="obsoleteSelectedDocument">
                       <DrawingReviewPanel
-                        v-if="drawingReviewPanelOpen && !desktopAvailable"
+                        v-if="!desktopAvailable"
+                        v-model:collapsed="drawingReviewPanelCollapsed"
                         v-model:package-id="drawingReviewPackageId"
                         :packages="workspace.drawingReviews.value"
                         :candidates="workspace.drawingReviewCandidates.value"
@@ -1065,8 +1080,7 @@ async function openWhereUsedParent(projectId: string, parentDocumentId: string) 
                         :can-decide="workspace.hasPermission('drawing-review.decide')"
                         :allow-self-review="workspace.hasRole('developer')"
                         :desktop-available="desktopAvailable"
-                        @close="drawingReviewPanelOpen = false"
-                        @create="(modelDocumentIds, assignedReviewer) => runOperation(() => createDrawingReviewFromDocuments(modelDocumentIds, assignedReviewer), '图纸审核单已创建，已转指定人员审核')"
+                        @create="(modelDocumentIds, assignedReviewers) => runOperation(() => createDrawingReviewFromDocuments(modelDocumentIds, assignedReviewers), '图纸审核单已创建，等待审核')"
                         @refresh="runOperation(workspace.refreshDrawingReviews, '图纸审核状态已刷新')"
                         @refresh-candidates="runOperation(workspace.refreshDrawingReviews, '审核范围已刷新')"
                         @withdraw="(packageId, reason) => runOperation(() => workspace.withdrawDrawingReview(packageId, reason), '图纸审核已撤销，编辑锁已释放')"
@@ -1074,7 +1088,7 @@ async function openWhereUsedParent(projectId: string, parentDocumentId: string) 
                         @add-markup="(packageId, input) => runOperation(() => workspace.addDrawingReviewMarkup(packageId, input), '图纸批注已保存')"
                         @resolve-markup="(packageId, markupId) => runOperation(() => workspace.resolveDrawingReviewMarkup(packageId, markupId), '图纸批注已关闭')"
                         @decide="(packageId, itemId, target, decision, comment) => runOperation(() => workspace.decideDrawingReviewTarget(packageId, itemId, target, decision, comment), decision === 'Approve' ? '审核结果已记录' : '图纸已退回修改')"
-                        @decide-supervisor="(packageId, decision, comment) => runOperation(() => workspace.decideDrawingReviewSupervisor(packageId, decision, comment), decision === 'Approve' ? '机械主管已批准' : '图纸已退回修改')"
+                        @decide-supervisor="(packageId, decision, comment) => runOperation(() => workspace.decideDrawingReviewSupervisor(packageId, decision, comment), decision === 'Approve' ? '已批准' : '图纸已退回修改')"
                       />
                     </PreviewWorkspace>
                   </div>
@@ -1082,7 +1096,7 @@ async function openWhereUsedParent(projectId: string, parentDocumentId: string) 
               </div>
               </template>
             </section>
-            <ProjectVersions v-else-if="projectTab === 'versions'" :versions="workspace.projectVersions.value" :pending="workspace.operationPending.value" @refresh="runOperation(workspace.loadProjectVersions, '项目版本已刷新')" @open="openVersionDocument" />
+            <ProjectVersions v-if="projectTab === 'versions'" :versions="workspace.projectVersions.value" :pending="workspace.operationPending.value" @refresh="runOperation(workspace.loadProjectVersions, '项目版本已刷新')" @open="openVersionDocument" />
             <ReleaseOverview v-else-if="projectTab === 'release'" :release-packages="workspace.releasePackages.value" :versions="workspace.bomVersions.value" :baselines="workspace.bomBaselines.value" @open="releasePackageId => openReleasePackage(workspace.project.value.id, releasePackageId)" />
             <ProcurementTracking v-else-if="projectTab === 'procurement'" :project-id="workspace.project.value.id" :token="workspace.getAccessToken()" :username="workspace.currentUsername.value" />
             <AuditLog v-else-if="projectTab === 'records'" :entries="workspace.projectAuditEntries.value" hide-heading @refresh="runOperation(workspace.loadProjectAuditEntries, '项目记录已刷新')" />

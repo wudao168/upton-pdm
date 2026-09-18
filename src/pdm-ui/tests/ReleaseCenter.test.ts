@@ -305,9 +305,9 @@ describe('ReleaseCenter', () => {
     })
 
     expect(wrapper.findAll('option').map(option => option.text())).toEqual([
-      '非标件 · 前期BOM发布', '非标件BOM + 图纸 · 正式发布', '非标件 · 增补/变更',
+      '非标件 · 长交期BOM发布', '非标件BOM + 图纸 · 正式发布', '非标件 · 增补/变更',
     ])
-    expect(wrapper.get('.release-detail-picker legend').text()).toContain('选择前期非标件')
+    expect(wrapper.get('.release-detail-picker legend').text()).toContain('选择长交期非标件')
     await wrapper.get('input[aria-label="选择长交期物料 NS-001"]').setValue(true)
     await wrapper.get('form').trigger('submit')
     const created = wrapper.emitted<CreateReleasePackageInput[]>('create')![0]![0]!

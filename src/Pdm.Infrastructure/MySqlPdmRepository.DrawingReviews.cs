@@ -80,8 +80,8 @@ public sealed partial class MySqlPdmRepository
         if (activeReviewCount > 0)
             throw new PdmConflictException("待审核图档已经处于图纸审核中，请刷新后重试。");
         await connection.ExecuteAsync(new CommandDefinition(
-            "INSERT INTO drawing_review_package(id,project_id,review_number,state,created_by,created_at,assigned_reviewer,assigned_reviewer_name,supervisor,supervisor_name,approved_at) VALUES(@Id,@ProjectId,@Number,@State,@CreatedBy,@CreatedAt,@AssignedReviewer,@AssignedReviewerName,@Supervisor,@SupervisorName,@ApprovedAt)",
-            new { package.Id, package.ProjectId, package.Number, State = package.State.ToString(), package.CreatedBy, CreatedAt = package.CreatedAt.UtcDateTime, package.AssignedReviewer, package.AssignedReviewerName, package.Supervisor, package.SupervisorName, ApprovedAt = package.ApprovedAt?.UtcDateTime },
+            "INSERT INTO drawing_review_package(id,project_id,review_number,state,created_by,created_at,assigned_reviewer,assigned_reviewer_name,assigned_reviewers,assigned_reviewer_names,supervisor,supervisor_name,approved_at) VALUES(@Id,@ProjectId,@Number,@State,@CreatedBy,@CreatedAt,@AssignedReviewer,@AssignedReviewerName,@AssignedReviewers,@AssignedReviewerNames,@Supervisor,@SupervisorName,@ApprovedAt)",
+            new { package.Id, package.ProjectId, package.Number, State = package.State.ToString(), package.CreatedBy, CreatedAt = package.CreatedAt.UtcDateTime, package.AssignedReviewer, package.AssignedReviewerName, AssignedReviewers = System.Text.Json.JsonSerializer.Serialize(package.AssignedReviewers, jsonOptions), AssignedReviewerNames = System.Text.Json.JsonSerializer.Serialize(package.AssignedReviewerNames, jsonOptions), package.Supervisor, package.SupervisorName, ApprovedAt = package.ApprovedAt?.UtcDateTime },
             transaction, cancellationToken: cancellationToken));
         foreach (var item in package.Items)
         {
@@ -256,12 +256,31 @@ public sealed partial class MySqlPdmRepository
             new { ItemId = itemId, State = state.ToString(), Reviewer = reviewer, ReviewerName = reviewerName, ReviewedAt = reviewedAt.UtcDateTime, Comment = comment },
             transaction, cancellationToken: cancellationToken));
         if (affected != 1) throw new PdmConflictException("该3D或2D图档已经完成审核，请刷新后重试。");
-        if (state == DrawingReviewTargetState.ChangesRequested)
-        {
-            await connection.ExecuteAsync(new CommandDefinition(
-                "UPDATE drawing_review_package SET state='ChangesRequested' WHERE id=@PackageId",
-                new { link.PackageId }, transaction, cancellationToken: cancellationToken));
-        }
+        // 单张图纸退改只影响该图纸，审核单其余图纸继续并行审核，不整单退回。
+        await transaction.CommitAsync(cancellationToken);
+        return await FindDrawingReviewPackageAsync(link.PackageId, cancellationToken)
+            ?? throw new PdmNotFoundException("图纸审核单不存在。");
+    }
+
+    public async Task<DrawingReviewPackage> RevokeDrawingReviewTargetAsync(Guid itemId, DrawingReviewTarget target, CancellationToken cancellationToken)
+    {
+        await using var connection = await OpenAsync(cancellationToken);
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+        var link = await connection.QuerySingleOrDefaultAsync<DrawingReviewItemLinkRow>(new CommandDefinition(
+            "SELECT item.package_id,package.state package_state FROM drawing_review_item item JOIN drawing_review_package package ON package.id=item.package_id WHERE item.id=@ItemId FOR UPDATE",
+            new { ItemId = itemId }, transaction, cancellationToken: cancellationToken));
+        if (link is null) throw new PdmNotFoundException("图纸审核项不存在。");
+        if (link.PackageState != DrawingReviewPackageState.InReview.ToString()
+            && link.PackageState != DrawingReviewPackageState.PendingSupervisorApproval.ToString())
+            throw new PdmConflictException("当前图纸审核单不允许撤销审核通过。");
+        var sql = target == DrawingReviewTarget.Model3D
+            ? "UPDATE drawing_review_item SET model_state='Pending',model_reviewer=NULL,model_reviewer_name=NULL,model_reviewed_at=NULL,model_comment=NULL WHERE id=@ItemId AND model_state IN ('Approved','Marked','ChangesRequested')"
+            : "UPDATE drawing_review_item SET drawing_state='Pending',drawing_reviewer=NULL,drawing_reviewer_name=NULL,drawing_reviewed_at=NULL,drawing_comment=NULL WHERE id=@ItemId AND drawing_state IN ('Approved','Marked','ChangesRequested')";
+        var affected = await connection.ExecuteAsync(new CommandDefinition(sql, new { ItemId = itemId }, transaction, cancellationToken: cancellationToken));
+        if (affected != 1) throw new PdmConflictException("该图档没有可撤销的审核结论。");
+        await connection.ExecuteAsync(new CommandDefinition(
+            "UPDATE drawing_review_package SET state='InReview',supervisor_reviewed_by=NULL,supervisor_reviewed_by_name=NULL,supervisor_reviewed_at=NULL,supervisor_comment=NULL WHERE id=@PackageId AND state='PendingSupervisorApproval'",
+            new { link.PackageId }, transaction, cancellationToken: cancellationToken));
         await transaction.CommitAsync(cancellationToken);
         return await FindDrawingReviewPackageAsync(link.PackageId, cancellationToken)
             ?? throw new PdmNotFoundException("图纸审核单不存在。");
@@ -275,13 +294,13 @@ public sealed partial class MySqlPdmRepository
             UPDATE drawing_review_package package
             SET package.state='PendingSupervisorApproval'
             WHERE package.id=@PackageId AND package.state='InReview'
-              AND package.assigned_reviewer IS NOT NULL AND package.supervisor IS NOT NULL
+              AND package.supervisor IS NOT NULL
               AND NOT EXISTS (
                   SELECT 1 FROM drawing_review_item item
                   WHERE item.package_id=package.id AND item.drawing_state<>'Approved')
             """,
             new { PackageId = packageId }, cancellationToken: cancellationToken));
-        if (affected != 1) throw new PdmConflictException("图纸尚未全部通过指定审核人审核，不能提交机械主管批准。");
+        if (affected != 1) throw new PdmConflictException("图纸尚未全部通过审图节点，不能提交机械主管批准。");
         return await FindDrawingReviewPackageAsync(packageId, cancellationToken)
             ?? throw new PdmNotFoundException("图纸审核单不存在。");
     }
@@ -410,7 +429,7 @@ public sealed partial class MySqlPdmRepository
     private async Task<DrawingReviewPackage?> LoadDrawingReviewPackageAsync(System.Data.Common.DbConnection connection, System.Data.Common.DbTransaction? transaction, Guid packageId, CancellationToken cancellationToken)
     {
         var package = await connection.QuerySingleOrDefaultAsync<DrawingReviewPackageRow>(new CommandDefinition(
-            "SELECT id,project_id,review_number,state,created_by,created_at,assigned_reviewer,assigned_reviewer_name,supervisor,supervisor_name,supervisor_reviewed_by,supervisor_reviewed_by_name,supervisor_reviewed_at,supervisor_comment,approved_at,withdrawn_by,withdrawn_at,withdrawal_reason FROM drawing_review_package WHERE id=@PackageId",
+            "SELECT id,project_id,review_number,state,created_by,created_at,assigned_reviewer,assigned_reviewer_name,assigned_reviewers,assigned_reviewer_names,supervisor,supervisor_name,supervisor_reviewed_by,supervisor_reviewed_by_name,supervisor_reviewed_at,supervisor_comment,approved_at,withdrawn_by,withdrawn_at,withdrawal_reason FROM drawing_review_package WHERE id=@PackageId",
             new { PackageId = packageId }, transaction, cancellationToken: cancellationToken));
         if (package is null) return null;
         var items = await connection.QueryAsync<DrawingReviewItemRow>(new CommandDefinition(
@@ -438,8 +457,8 @@ public sealed partial class MySqlPdmRepository
             State = Enum.Parse<DrawingReviewPackageState>(package.State),
             CreatedBy = package.CreatedBy,
             CreatedAt = AsUtc(package.CreatedAt),
-            AssignedReviewer = package.AssignedReviewer,
-            AssignedReviewerName = package.AssignedReviewerName,
+            AssignedReviewers = ReadAssignedReviewers(package.AssignedReviewers, package.AssignedReviewer),
+            AssignedReviewerNames = ReadAssignedReviewers(package.AssignedReviewerNames, package.AssignedReviewerName),
             Supervisor = package.Supervisor,
             SupervisorName = package.SupervisorName,
             SupervisorReviewedBy = package.SupervisorReviewedBy,
@@ -454,6 +473,11 @@ public sealed partial class MySqlPdmRepository
             Markups = markups.Select(MapDrawingReviewMarkup).ToArray()
         };
     }
+
+    private IReadOnlyList<string> ReadAssignedReviewers(string? serialized, string? legacy) =>
+        string.IsNullOrWhiteSpace(serialized)
+            ? string.IsNullOrWhiteSpace(legacy) ? [] : [legacy]
+            : System.Text.Json.JsonSerializer.Deserialize<string[]>(serialized, jsonOptions) ?? [];
 
     private static DrawingReviewItem MapDrawingReviewItem(DrawingReviewItemRow row) => new()
     {
@@ -517,6 +541,8 @@ public sealed partial class MySqlPdmRepository
         public DateTime CreatedAt { get; init; }
         public string? AssignedReviewer { get; init; }
         public string? AssignedReviewerName { get; init; }
+        public string? AssignedReviewers { get; init; }
+        public string? AssignedReviewerNames { get; init; }
         public string? Supervisor { get; init; }
         public string? SupervisorName { get; init; }
         public string? SupervisorReviewedBy { get; init; }
