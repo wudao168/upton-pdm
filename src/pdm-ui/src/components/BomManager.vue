@@ -20,7 +20,8 @@ type PendingMaterialLink = { kind: BomKind; materialId: string; materialCode: st
 type MaterialMatchResult = { candidates: PdmMaterial[]; duplicateDetected: boolean }
 type BomComparisonChange = { field: string; label: string; previous: string; current: string }
 type BomComparisonEntry = { status: BomComparisonStatus; current: EditableBomRow; previous?: BomItem; changes: BomComparisonChange[] }
-type BomIssueComparison = { field: string; sourceLabel: string; source: string; currentLabel: string; current: string }
+type BomIssueBasis = 'source' | 'drawingName' | 'materialMaster' | 'unknown'
+type BomIssueComparison = { field: string; basis: BomIssueBasis; basisLabel: string; sourceLabel: string; source: string; currentLabel: string; current: string }
 type ReconciliationChangeType = 'Added' | 'Quantity' | 'Attribute' | 'Classification' | 'Manual' | 'Removed'
 type ReconciliationDetail = { key: string; groupKey: string; type: ReconciliationChangeType; item: string; field: string; current: string; source: string; proposed: string; action: string; instances: number }
 type SummaryQuantityAllocation = Record<string, number>
@@ -974,11 +975,23 @@ function reconciliationIssueTone(row: BomItem) {
 
 function reconciliationDescription(row: BomItem) {
   const fields = mismatchFields(row)
-  return isClassificationOnlyMismatch(row)
-    ? 'BOM分类已确认；其余图档属性与源数据一致。'
-    : row.reconciliationStatus === 'ManualOverrideMismatch' && fields.length
-      ? `BOM维护值与最新图档源数据不一致：${fields.join('、')}。`
-    : row.reconciliationNote
+  if (isClassificationOnlyMismatch(row)) return 'BOM分类已确认；其余图档属性与源数据一致。'
+  if (row.reconciliationStatus === 'ManualOverrideMismatch' && fields.length) {
+    const summary = issueBasisSummary(row)
+    const parts: string[] = []
+    if (summary.drawingNameFields.length) parts.push('设计树图纸名称与BOM型号不一致（型号）')
+    if (summary.sourceFields.length) parts.push(`与最新图档源数据不一致：${summary.sourceFields.join('、')}`)
+    if (summary.masterFields.length) {
+      parts.push(summary.master.issues.length
+        ? `料品主档${summary.master.issues.join('、')}，未核对：${summary.masterFields.join('、')}`
+        : `与料品主档不一致：${summary.masterFields.join('、')}`)
+    }
+    if (parts.length) return `BOM维护值${parts.join('；')}。`
+    return summary.master.known
+      ? `当前值已与图档源数据一致；${fields.join('、')}的提示为历史记录，可重新执行“对比源数据”刷新。`
+      : `BOM维护值与最新图档源数据不一致：${fields.join('、')}。`
+  }
+  return row.reconciliationNote
     ?? (row.pendingClassification ? '图档源数据未填写有效物料分类。'
       : row.pendingRemoval ? '最新图档源数据中已不存在，等待确认处理。'
         : row.manualUnmatched ? 'BOM中存在，但最新图档源数据中无对应项。'
@@ -1018,24 +1031,82 @@ function issueCurrentRow(row: EditableBomRow) {
   return maintainedMechanicalById.value.get(row.id) ?? row
 }
 
+function materialMasterState(row: BomItem) {
+  const resolution = materialResolution(row)
+  const material = resolution?.material ?? null
+  return {
+    known: Boolean(resolution),
+    material,
+    issues: resolution?.issues ?? [],
+    missing: Boolean(resolution) && row.kind === 'Standard' && (!material || material.approvalStatus !== 'Approved'),
+  }
+}
+
+function issueFieldValue(row: BomItem, field: string) {
+  const value = field === '物料分类' ? rowKindLabel(row)
+    : field === '物料编码' ? row.drawingNumber
+      : field === '型号' ? row.specification
+        : field === '品牌' ? row.brand
+          : field === '材质' ? row.material
+            : field === '表面处理' ? row.surfaceTreatment
+              : ''
+  return value?.trim() ?? ''
+}
+
 function issueComparisons(row: EditableBomRow): BomIssueComparison[] {
   const current = issueCurrentRow(row)
-  const source = rawSourceRowFor(current) ?? row
-  const fields = mismatchFields(current)
-  const fieldValues: Record<string, { sourceLabel: string; source: string | undefined; currentLabel: string; current: string | undefined }> = {
-    物料分类: { sourceLabel: '图档源分类', source: rowKindLabel(source), currentLabel: 'BOM分类', current: rowKindLabel(current) },
-    物料编码: { sourceLabel: '图档源物料编码', source: source.drawingNumber, currentLabel: 'BOM物料编码', current: current.drawingNumber },
-    型号: hasDrawingNameModelMismatch(current)
-      ? { sourceLabel: '设计树图纸名称', source: drawingNameFor(current), currentLabel: 'BOM型号', current: current.specification }
-      : { sourceLabel: '图档源型号', source: source.specification, currentLabel: 'BOM型号', current: current.specification },
-    品牌: { sourceLabel: '图档源品牌', source: source.brand, currentLabel: 'BOM品牌', current: current.brand },
-    材质: { sourceLabel: '图档源材质', source: source.material, currentLabel: 'BOM材质', current: current.material },
-    表面处理: { sourceLabel: '图档源表面处理', source: source.surfaceTreatment, currentLabel: 'BOM表面处理', current: current.surfaceTreatment },
+  const source = rawSourceRowFor(current)
+  const master = materialMasterState(current)
+  const comparisons: BomIssueComparison[] = []
+  const push = (comparison: BomIssueComparison) => {
+    if (!comparisons.some(item => item.field === comparison.field && item.basis === comparison.basis)) comparisons.push(comparison)
   }
-  return fields.flatMap(field => {
-    const values = fieldValues[field]
-    return values ? [{ field, sourceLabel: values.sourceLabel, source: values.source?.trim() || '未填写', currentLabel: values.currentLabel, current: values.current?.trim() || '未填写' }] : []
-  })
+  for (const field of mismatchFields(current)) {
+    const currentValue = issueFieldValue(current, field)
+    const sourceValue = source ? issueFieldValue(source, field) : ''
+    if (field === '型号' && hasDrawingNameModelMismatch(current)) {
+      push({
+        field, basis: 'drawingName', basisLabel: '设计树图纸名称', sourceLabel: '设计树图纸名称',
+        source: drawingNameFor(current) || '未获取', currentLabel: 'BOM型号', current: currentValue || '未填写',
+      })
+    } else if (sourceValue && normalizedComparisonValue(sourceValue) !== normalizedComparisonValue(currentValue)) {
+      push({
+        field, basis: 'source', basisLabel: '图档源数据', sourceLabel: `图档源${field}`,
+        source: sourceValue, currentLabel: `BOM${field}`, current: currentValue || '未填写',
+      })
+    }
+    if (field !== '物料编码' && field !== '型号' && field !== '品牌') continue
+    if (master.missing) {
+      push({
+        field, basis: 'materialMaster', basisLabel: '料品主档', sourceLabel: '料品主档',
+        source: master.issues.join('、') || '未维护该料号', currentLabel: `BOM${field}`, current: currentValue || '未填写',
+      })
+      continue
+    }
+    const masterValue = field === '型号' ? master.material?.specification?.trim() ?? ''
+      : field === '品牌' ? master.material?.brand?.trim() ?? ''
+        : master.material?.materialCode?.trim() ?? ''
+    if (masterValue && normalizedComparisonValue(masterValue) !== normalizedComparisonValue(currentValue)) {
+      push({
+        field, basis: 'materialMaster', basisLabel: '料品主档', sourceLabel: `料品主档${field}`,
+        source: masterValue, currentLabel: `BOM${field}`, current: currentValue || '未填写',
+      })
+    }
+  }
+  return comparisons
+}
+
+function issueBasisSummary(row: BomItem) {
+  const comparisons = issueComparisons(row as EditableBomRow)
+  const fieldsOf = (basis: BomIssueBasis) => [...new Set(comparisons.filter(item => item.basis === basis).map(item => item.field))]
+  const master = materialMasterState(row)
+  const fields = mismatchFields(row)
+  const drawingNameFields = fieldsOf('drawingName')
+  const sourceFields = fieldsOf('source')
+  const masterFields = fieldsOf('materialMaster')
+  return {
+    comparisons, fields, drawingNameFields, sourceFields, masterFields, master,
+  }
 }
 
 function openIssueDetails(row: EditableBomRow) {
@@ -3425,11 +3496,12 @@ async function submitBatchUpdate() {
         <div class="pdm-bom-issue-body">
           <div class="pdm-bom-issue-summary"><span :class="reconciliationIssueTone(issueDetailRow)">{{ reconciliationIssueLabel(issueDetailRow) }}</span><p>{{ reconciliationDescription(issueDetailRow) }}</p></div>
           <div v-if="issueComparisons(issueDetailRow).length" class="pdm-bom-issue-comparisons">
-            <div v-for="comparison in issueComparisons(issueDetailRow)" :key="comparison.field" class="pdm-bom-issue-comparison">
-              <strong>{{ comparison.field }}</strong>
+            <div v-for="comparison in issueComparisons(issueDetailRow)" :key="`${comparison.basis}-${comparison.field}`" class="pdm-bom-issue-comparison">
+              <strong>{{ comparison.field }}<small class="pdm-bom-issue-basis">{{ comparison.basisLabel }}</small></strong>
               <dl><div><dt>{{ comparison.sourceLabel }}</dt><dd>{{ comparison.source }}</dd></div><div><dt>{{ comparison.currentLabel }}</dt><dd>{{ comparison.current }}</dd></div></dl>
             </div>
           </div>
+          <p v-if="mismatchFields(issueDetailRow).length && !issueComparisons(issueDetailRow).length" class="pdm-bom-issue-stale">当前值与图档源数据一致，该提示可能为历史记录；可重新执行“对比源数据”刷新。</p>
           <div class="pdm-bom-issue-notice">仅用于提醒，不限制保存、审批及后续操作。</div>
         </div>
         <footer><button type="button" class="pdm-primary-action" @click="issueDetailRow = null">知道了</button></footer>
@@ -3778,5 +3850,6 @@ async function submitBatchUpdate() {
 .pdm-material-relation-group-button{box-sizing:border-box;width:80px!important;min-width:80px!important;max-width:80px!important;height:30px!important;min-height:30px!important;max-height:30px!important;justify-content:center;padding:0 6px;white-space:nowrap}.pdm-material-relation-none-button{border:1px solid var(--pdm-danger);border-radius:5px;background:var(--pdm-danger);color:#fff;line-height:28px;cursor:pointer}.pdm-material-relation-none-button:hover,.pdm-material-relation-none-button:focus-visible{filter:brightness(.92);outline:2px solid color-mix(in srgb,var(--pdm-danger) 25%,transparent);outline-offset:1px}.pdm-material-relation-none-button:disabled{filter:none;opacity:.45;cursor:not-allowed}.pdm-material-relation-no-accessory{display:flex;min-width:0;align-items:center;gap:5px;color:#475569}.pdm-material-relation-no-accessory>span{flex:0 0 auto}.pdm-material-relation-no-accessory input{box-sizing:border-box;width:110px;min-width:70px;height:30px;padding:3px 7px;border:1px solid var(--pdm-border);border-radius:5px;background:#fff;color:var(--pdm-text)}.pdm-material-relation-no-accessory input:disabled{background:#f8fafc;color:var(--pdm-muted)}
 .pdm-material-relation-footer{display:flex;align-items:center;justify-content:flex-end;gap:8px;padding:10px 12px}.pdm-material-relation-footer>span{margin-right:auto;color:var(--pdm-muted)}
 @media(max-width:900px){.pdm-material-relation-workspace{grid-template-columns:1fr;grid-template-rows:minmax(180px,.8fr) minmax(240px,1.2fr)}}
+.pdm-bom-issue-comparison>strong{display:flex;align-items:center;gap:7px}.pdm-bom-issue-basis{padding:1px 6px;border-radius:999px;background:#fff;color:#b45309;font-size:10px;font-weight:700}.pdm-bom-issue-stale{margin:0;padding:9px 11px;border-radius:6px;background:#f1f5f9;color:#475569;line-height:1.5}
 .pdm-bom-kit-chip{display:inline-block;margin-right:4px;padding:1px 4px;border-radius:4px;background:#ccfbf1;color:#0f766e;font-size:9px;font-weight:700;vertical-align:middle}.pdm-kit-reference-dialog{width:min(980px,calc(100vw - 32px));height:min(680px,calc(100vh - 32px))}.pdm-reference-kind-switch{display:flex;gap:8px;padding:12px 18px 0}.pdm-reference-kind-switch .pdm-secondary-action.is-active{border-color:var(--pdm-theme-accent);background:var(--pdm-theme-accent-soft);color:var(--pdm-theme-accent)}.pdm-kit-reference-dialog .pdm-material-reference-search{justify-content:space-between}.pdm-kit-quantity{display:flex;align-items:center;gap:7px;color:var(--pdm-muted)}.pdm-kit-quantity input{width:100px}.pdm-kit-reference-body{display:grid;min-height:0;flex:1;grid-template-columns:minmax(0,1.2fr) minmax(320px,.8fr);gap:12px;padding:0 18px 16px}.pdm-kit-reference-list{min-height:0;border:1px solid var(--pdm-border);border-radius:7px}.pdm-kit-reference-list tr{cursor:pointer}.pdm-kit-reference-list tr.is-selected td{background:var(--pdm-theme-accent-soft);color:var(--pdm-theme-accent)}.pdm-kit-component-options{min-height:0;overflow:auto;padding:12px;border:1px solid var(--pdm-border);border-radius:7px;background:#f8fafc}.pdm-kit-component-options h4,.pdm-kit-component-options p{margin:0}.pdm-kit-component-options p{margin-top:4px;color:var(--pdm-muted)}.pdm-kit-component-options>label{display:flex;margin-top:9px;padding:9px;border:1px solid var(--pdm-border);border-radius:6px;background:#fff;align-items:flex-start;gap:9px}.pdm-kit-component-options>label.is-required{border-color:#86efac;background:#f0fdf4}.pdm-kit-component-options>label span{display:grid;min-width:0;gap:3px}.pdm-kit-component-options>label small{color:var(--pdm-muted)}@media(max-width:760px){.pdm-kit-reference-body{grid-template-columns:1fr}.pdm-kit-reference-dialog{height:calc(100vh - 24px)}}
 </style>

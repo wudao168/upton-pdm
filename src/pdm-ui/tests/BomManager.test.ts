@@ -991,6 +991,68 @@ describe('BomManager', () => {
     expect(wrapper.find('.pdm-bom-issue-dialog').exists()).toBe(false)
   })
 
+  it('attributes issue fields to the data source that actually differs', async () => {
+    materialApi.resolveBomMaterialCodes.mockResolvedValue([{
+      bomItemId: 'standard-01020070208', status: 'NoMatch', material: null, candidates: [], application: null,
+      issues: ['料号不存在于料品主档'],
+    }])
+    const source: BomItem = {
+      id: 'standard-01020070208', kind: 'Standard', sequence: 1, drawingNumber: '01020070208', name: '接头',
+      specification: 'SDBT-MSB-1L-PU-K-0.3-M8', brand: 'FESTO', quantity: 1, unit: '001', revision: 'W1', complete: true,
+      source: 'Auto', sourceDocumentId: 'document-1',
+      reconciliationStatus: 'ManualOverrideMismatch', reconciliationNote: 'BOM维护值与最新图档源数据不一致：物料编码、型号、品牌。',
+    }
+    const wrapper = mount(BomManager, {
+      props: {
+        sourceData: [source], standard: [source], nonStandard: [], electrical: [], declarations: [], pending: false,
+        editable: true, token: 'token', projectId: 'project-1',
+        documents: [{ id: 'document-1', projectId: 'project-1', drawingNumber: '01020070208', name: '接头', fileName: 'SDBT-MSB-1L-PU-K-0.3-M8-20211029105700974 (1).SLDPRT', kind: 'Part', state: 'Working', revision: 'W1' }],
+      },
+    })
+
+    await wrapper.findAll('button[role="tab"]')[1].trigger('click')
+    await flushPromises()
+    await wrapper.get('button[aria-label="查看问题详情：物料编码等3项不一致"]').trigger('click')
+
+    const dialog = wrapper.get('.pdm-bom-issue-dialog')
+    expect(dialog.text()).toContain('设计树图纸名称与BOM型号不一致（型号）')
+    expect(dialog.text()).toContain('料品主档料号不存在于料品主档，未核对：物料编码、型号、品牌')
+    expect(dialog.text()).not.toContain('与最新图档源数据不一致')
+    expect(dialog.text()).not.toContain('图档源物料编码')
+    expect(dialog.text()).not.toContain('图档源品牌')
+    expect(dialog.findAll('.pdm-bom-issue-comparison').map(item => item.get('.pdm-bom-issue-basis').text()))
+      .toEqual(['料品主档', '设计树图纸名称', '料品主档', '料品主档'])
+  })
+
+  it('keeps the source-data basis when the drawing source really differs', async () => {
+    const source: BomItem = {
+      id: 'source-1', kind: 'Standard', sequence: 1, drawingNumber: 'P-100', name: '源物料', specification: 'SRC-M', brand: 'SRC-B',
+      quantity: 1, unit: '件', revision: 'W1', complete: true, source: 'Auto', sourceDocumentId: 'document-1',
+    }
+    const maintained: BomItem = {
+      ...source, specification: 'BOM-M', brand: 'BOM-B', manuallyOverridden: true,
+      reconciliationStatus: 'ManualOverrideMismatch', reconciliationNote: 'BOM维护值与最新图档源数据不一致：型号、品牌。',
+    }
+    const wrapper = mount(BomManager, {
+      props: {
+        sourceData: [source], standard: [maintained], nonStandard: [], electrical: [], declarations: [], pending: false,
+        editable: true, token: 'token', projectId: 'project-1',
+        documents: [{ id: 'document-1', projectId: 'project-1', drawingNumber: 'P-100', name: '源物料', fileName: 'P-100.SLDPRT', kind: 'Part', state: 'Working', revision: 'W1' }],
+      },
+    })
+
+    await wrapper.findAll('button[role="tab"]')[1].trigger('click')
+    await flushPromises()
+    await wrapper.get('button[aria-label="查看问题详情：型号、品牌不一致"]').trigger('click')
+    const dialog = wrapper.get('.pdm-bom-issue-dialog')
+    expect(dialog.text()).toContain('与最新图档源数据不一致：品牌')
+    expect(dialog.text()).toContain('设计树图纸名称与BOM型号不一致（型号）')
+    expect(dialog.text()).toContain('SRC-B')
+    expect(dialog.text()).toContain('BOM-B')
+    expect(dialog.findAll('.pdm-bom-issue-comparison').map(item => item.get('.pdm-bom-issue-basis').text()))
+      .toEqual(['设计树图纸名称', '图档源数据'])
+  })
+
   it('hides benign auto-added reconciliation messages but keeps exception details in the cell', () => {
     const autoAdded: BomItem = {
       id: 'bom-auto-added', kind: 'Standard', sequence: 1, drawingNumber: 'S-001', name: '正常物料', quantity: 1, unit: '件', revision: 'W1', complete: true,
