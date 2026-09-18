@@ -61,6 +61,10 @@ export function updateProgramTemplateDraft(revisionId: string, input: ProgramTem
   }, token)
 }
 
+export function deleteProgramTemplateDraft(revisionId: string, expectedRowVersion: number, token: string): Promise<void> {
+  return requestJson<void>(`/api/program-templates/revisions/${revisionId}?expectedRowVersion=${expectedRowVersion}`, { method: 'DELETE' }, token)
+}
+
 export function createProgramTemplateRevision(templateId: string, bump: ProgramTemplateVersionBump, token: string): Promise<ProgramTemplateRevision> {
   return requestJson<ProgramTemplateRevision>(`/api/program-templates/${templateId}/revisions`, {
     method: 'POST', body: JSON.stringify({ bump }),
@@ -1387,9 +1391,16 @@ export async function listDrawingReviewCandidates(projectId: string, token: stri
   }))
 }
 
-export async function createDrawingReview(projectId: string, modelDocumentIds: string[], token: string): Promise<DrawingReviewPackage> {
+export function listDrawingReviewers(projectId: string, token: string): Promise<ApprovalTransferCandidate[]> {
+  return requestJson<ApprovalTransferCandidate[]>(`/api/projects/${projectId}/drawing-reviewers`, {}, token).catch(error => {
+    if (error instanceof PdmApiError && error.status === 404) return []
+    throw error
+  })
+}
+
+export async function createDrawingReview(projectId: string, modelDocumentIds: string[] | null, assignedReviewer: string, token: string): Promise<DrawingReviewPackage> {
   return mapDrawingReviewPackage(await requestJson<ApiDrawingReviewPackage>(`/api/projects/${projectId}/drawing-reviews`, {
-    method: 'POST', body: JSON.stringify({ modelDocumentIds }),
+    method: 'POST', body: JSON.stringify({ modelDocumentIds, assignedReviewer }),
   }, token))
 }
 
@@ -1412,6 +1423,12 @@ export async function resolveDrawingReviewMarkup(packageId: string, markupId: st
 export async function decideDrawingReviewTarget(packageId: string, itemId: string, target: DrawingReviewTarget, decision: DrawingReviewDecision, comment: string, token: string): Promise<DrawingReviewPackage> {
   return mapDrawingReviewPackage(await requestJson<ApiDrawingReviewPackage>(`/api/drawing-reviews/${packageId}/items/${itemId}/decision`, {
     method: 'POST', body: JSON.stringify({ target, decision, comment }),
+  }, token))
+}
+
+export async function decideDrawingReviewSupervisor(packageId: string, decision: DrawingReviewDecision, comment: string, token: string): Promise<DrawingReviewPackage> {
+  return mapDrawingReviewPackage(await requestJson<ApiDrawingReviewPackage>(`/api/drawing-reviews/${packageId}/supervisor-decision`, {
+    method: 'POST', body: JSON.stringify({ decision, comment }),
   }, token))
 }
 
@@ -2167,7 +2184,7 @@ function drawingReviewEnum<T extends string>(value: string | number, values: rea
 }
 
 function mapDrawingReviewPackage(review: ApiDrawingReviewPackage): DrawingReviewPackage {
-  const packageStates = ['InReview', 'ChangesRequested', 'WritingProperties', 'Approved', 'Stale', 'Withdrawn'] as const
+  const packageStates = ['InReview', 'PendingSupervisorApproval', 'ChangesRequested', 'WritingProperties', 'Approved', 'Stale', 'Withdrawn'] as const
   const targetStates = ['Pending', 'ChangesRequested', 'Approved', 'Marked', 'NotRequired'] as const
   const targets = ['Model3D', 'Drawing2D'] as const
   const severities = ['Note', 'Blocking'] as const

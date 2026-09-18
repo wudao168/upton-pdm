@@ -135,6 +135,32 @@ describe('ProcurementTracking', () => {
     wrapper.unmount()
   })
 
+  it('品牌后可按标准件、非标件、电气件筛选，兼容中英文类别值且重置生效', async () => {
+    const result = await api.getProjectProcurementTracking()
+    const first = result.items[0]
+    api.getProjectProcurementTracking.mockResolvedValue({ ...result, items: [
+      { ...first, sequence: 1, materialCode: 'STD-CN', bomKind: '标准件' },
+      { ...first, sequence: 2, materialCode: 'NONSTD-EN', bomKind: 'NonStandard' },
+      { ...first, sequence: 3, materialCode: 'ELEC-CN', bomKind: '电气件' },
+      { ...first, sequence: 4, materialCode: 'MIXED', bomKind: '标准件、Electrical' },
+    ] })
+    const wrapper = mount(ProcurementTracking, { props: { projectId: 'project-1', token: 'token', username: 'engineer' }, global: { plugins: [ElementPlus] } })
+    await flushPromises()
+    const codes = () => wrapper.findAll('.el-table__body tbody tr').map(row => row.findAll('td')[3].text())
+    const kind = wrapper.get('[aria-label="筛选物料分类"]')
+    expect(kind.element.previousElementSibling?.tagName).toBe('DATALIST')
+    await kind.setValue('标准件')
+    expect(codes()).toEqual(['STD-CN', 'MIXED'])
+    await kind.setValue('非标件')
+    expect(codes()).toEqual(['NONSTD-EN'])
+    await kind.setValue('电气件')
+    expect(codes()).toEqual(['ELEC-CN', 'MIXED'])
+    await wrapper.findAll('button').find(button => button.text() === '重置筛选')!.trigger('click')
+    expect((kind.element as HTMLSelectElement).value).toBe('')
+    expect(codes()).toEqual(['STD-CN', 'NONSTD-EN', 'ELEC-CN', 'MIXED'])
+    wrapper.unmount()
+  })
+
   it('材料出库和杂发共用两列、独立两行，保留日期数量来源且导出不重复采购数量', async () => {
     const result = await api.getProjectProcurementTracking()
     const first = result.items[0]
@@ -332,6 +358,7 @@ describe('ProcurementTracking', () => {
     expect(wrapper.get('[aria-label="采购跟踪筛选"]').element.nextElementSibling).toBe(wrapper.get('.procurement-tracking__actions').element)
     expect(wrapper.findAll('.procurement-tracking__delay-filter').map(label => label.text())).toEqual(['交期不符', '未入库', '未出库', '关键'])
     expect(wrapper.get('[aria-label="筛选品牌"]').attributes('list')).toBe('procurement-brands-project-1')
+    expect(wrapper.get('[aria-label="筛选物料分类"]').findAll('option').map(option => option.text())).toEqual(['全部分类', '标准件', '非标件', '电气件'])
     expect(wrapper.get('datalist option').attributes('value')).toBe('UPTON')
     expect(wrapper.find('.procurement-tracking__heading h2').exists()).toBe(false)
     expect(wrapper.find('.procurement-tracking__heading p').exists()).toBe(false)

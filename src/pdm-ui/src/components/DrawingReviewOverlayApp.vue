@@ -10,6 +10,7 @@ interface ReviewOverlayState {
   packageId: string
   packages: DrawingReviewPackage[]
   candidates: DrawingReviewCandidate[]
+  reviewerOptions: Array<{ username: string; label: string }>
   selectedDocumentId?: string
   currentUsername: string
   pending: boolean
@@ -26,6 +27,7 @@ const state = reactive<ReviewOverlayState>({
   packageId: '',
   packages: [],
   candidates: [],
+  reviewerOptions: [],
   selectedDocumentId: undefined,
   currentUsername: '',
   pending: false,
@@ -66,6 +68,7 @@ onBeforeUnmount(() => window.chrome?.webview?.removeEventListener?.('message', u
       :package-id="state.packageId"
       :packages="state.packages"
       :candidates="state.candidates"
+      :reviewer-options="state.reviewerOptions"
       :selected-document-id="state.selectedDocumentId"
       :current-username="state.currentUsername"
       :pending="state.pending"
@@ -78,7 +81,7 @@ onBeforeUnmount(() => window.chrome?.webview?.removeEventListener?.('message', u
       overlay-hosted
       @update:package-id="packageId => send('update-package', { packageId })"
       @close="send('close')"
-      @create="modelDocumentIds => send('create', { modelDocumentIds })"
+      @create="(modelDocumentIds, assignedReviewer) => send('create', { modelDocumentIds, assignedReviewer })"
       @refresh="send('refresh')"
       @refresh-candidates="send('refresh-candidates')"
       @withdraw="(packageId, reason) => send('withdraw', { packageId, reason })"
@@ -86,6 +89,7 @@ onBeforeUnmount(() => window.chrome?.webview?.removeEventListener?.('message', u
       @add-markup="addMarkup"
       @resolve-markup="(packageId, markupId) => send('resolve-markup', { packageId, markupId })"
       @decide="decide"
+      @decide-supervisor="(packageId, decision, comment) => send('decide-supervisor', { packageId, decision, comment })"
     />
   </main>
 </template>

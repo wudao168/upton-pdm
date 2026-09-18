@@ -78,6 +78,22 @@ public sealed class InMemoryProgramTemplateRepository(TimeProvider timeProvider)
         }
     }
 
+    public Task DeleteDraftAsync(Guid revisionId, long expectedRowVersion, CancellationToken cancellationToken)
+    {
+        lock (gate)
+        {
+            var current = RequireRevision(revisionId);
+            RequireRowVersion(current.RowVersion, expectedRowVersion);
+            if (current.State != ProgramTemplateRevisionState.Draft) throw new PdmConflictException("只有草稿版本可以删除。");
+            var template = RequireTemplate(current.TemplateId);
+            var revisions = template.Revisions.Where(item => item.Id != revisionId).ToArray();
+            foreach (var taskId in tasks.Values.Where(item => item.RevisionId == revisionId).Select(item => item.Id).ToArray()) tasks.Remove(taskId);
+            if (revisions.Length == 0 && template.CurrentPublishedRevisionId is null) templates.Remove(template.Id);
+            else templates[template.Id] = template with { Revisions = revisions };
+            return Task.CompletedTask;
+        }
+    }
+
     public Task<ProgramTemplateRevision> AttachFileAsync(Guid revisionId, StoredProgramTemplateFile file, long expectedRowVersion, CancellationToken cancellationToken)
     {
         lock (gate)

@@ -9,6 +9,67 @@ public sealed class DrawingReviewWorkflowTests
     private static readonly Guid ProjectId = Guid.Parse("11111111-1111-1111-1111-111111111111");
 
     [Fact]
+    public async Task SubmitterCanListEligibleAssignedReviewersWithoutRoleAdministrationPermission()
+    {
+        var (repository, workflow, _, _) = await PrepareReviewAsync();
+        await repository.CreateUserAsync(new UserAccount(Guid.NewGuid(), "submitter", "主设", "unused", UserRole.Engineer, true), default);
+        await repository.CreateUserAsync(new UserAccount(Guid.NewGuid(), "reviewer", "指定审核员", "unused", UserRole.ProcessReviewer, true), default);
+        await repository.CreateUserAsync(new UserAccount(Guid.NewGuid(), "viewer", "只读人员", "unused", UserRole.ProductionViewer, true), default);
+
+        var reviewers = await workflow.ListDrawingReviewersAsync(ProjectId, "submitter", UserRole.Engineer, default);
+
+        Assert.Contains(reviewers, reviewer => reviewer.Username == "reviewer");
+        Assert.DoesNotContain(reviewers, reviewer => reviewer.Username == "submitter");
+        Assert.DoesNotContain(reviewers, reviewer => reviewer.Username == "viewer");
+    }
+
+    [Fact]
+    public async Task AssignedReviewerCompletesItemsBeforeMechanicalSupervisorFinalApproval()
+    {
+        var (repository, workflow, model, drawing) = await PrepareReviewAsync();
+        var modelVersion = (await repository.ListDocumentVersionsAsync(model.Id, default)).First();
+        var drawingVersion = (await repository.ListDocumentVersionsAsync(drawing.Id, default)).First();
+        var bomItem = Assert.Single(await repository.GetBomAsync(ProjectId, BomKind.NonStandard, default));
+        var packageId = Guid.NewGuid();
+        var package = await repository.CreateDrawingReviewPackageAsync(new DrawingReviewPackage
+        {
+            Id = packageId,
+            ProjectId = ProjectId,
+            Number = $"DR-TWO-STAGE-{packageId:N}",
+            State = DrawingReviewPackageState.InReview,
+            CreatedBy = "submitter",
+            CreatedAt = DateTimeOffset.UtcNow,
+            AssignedReviewer = "reviewer",
+            AssignedReviewerName = "指定审核员",
+            Supervisor = "manager",
+            SupervisorName = "机械主管",
+            Items = [new DrawingReviewItem
+            {
+                Id = Guid.NewGuid(), PackageId = packageId, BomItemId = bomItem.Id,
+                DrawingNumber = drawing.DrawingNumber, Name = drawing.Name,
+                ModelDocumentId = model.Id, ModelVersionId = modelVersion.Id, ModelRevision = modelVersion.Revision.Display,
+                ModelSha256 = modelVersion.Sha256, ModelCreatedBy = modelVersion.CreatedBy, ModelState = DrawingReviewTargetState.NotRequired,
+                DrawingDocumentId = drawing.Id, DrawingVersionId = drawingVersion.Id, DrawingRevision = drawingVersion.Revision.Display,
+                DrawingSha256 = drawingVersion.Sha256, DrawingCreatedBy = drawingVersion.CreatedBy, DrawingState = DrawingReviewTargetState.Pending
+            }]
+        }, default);
+
+        await Assert.ThrowsAsync<UnauthorizedAccessException>(() => workflow.DecideDrawingReviewTargetAsync(
+            package.Id, package.Items[0].Id, new DecideDrawingReviewTargetCommand(DrawingReviewTarget.Drawing2D, DrawingReviewDecision.Approve, null),
+            "other-reviewer", UserRole.Administrator, default));
+        package = await workflow.DecideDrawingReviewTargetAsync(
+            package.Id, package.Items[0].Id, new DecideDrawingReviewTargetCommand(DrawingReviewTarget.Drawing2D, DrawingReviewDecision.Approve, "审核通过"),
+            "reviewer", UserRole.Administrator, default);
+        Assert.Equal(DrawingReviewPackageState.PendingSupervisorApproval, package.State);
+
+        package = await workflow.DecideDrawingReviewSupervisorAsync(package.Id,
+            new DecideDrawingReviewSupervisorCommand(DrawingReviewDecision.Approve, "批准"), "manager", UserRole.Administrator, default);
+        Assert.Equal(DrawingReviewPackageState.WritingProperties, package.State);
+        Assert.Equal("manager", package.SupervisorReviewedBy);
+        Assert.NotNull(package.SupervisorReviewedAt);
+    }
+
+    [Fact]
     public async Task DesignerCannotReviewOwnDrawingAndBlockingMarkupMustBeResolved()
     {
         var (repository, workflow, _, _) = await PrepareReviewAsync();
@@ -186,6 +247,26 @@ public sealed class DrawingReviewWorkflowTests
     }
 
     [Fact]
+    public async Task DrawingReviewCandidateUsesLinkedDrawingNumberInsteadOfBomMaterialCode()
+    {
+        var (repository, workflow, model, drawing) = await PrepareReviewAsync();
+        await repository.ReplaceBomAsync(ProjectId, BomKind.NonStandard,
+        [
+            new BomItem(Guid.NewGuid(), ProjectId, BomKind.NonStandard, 1, "02041000000", "机架组件", 1, "件", "Q235B", null, "W1", true)
+            {
+                SourceDocumentId = model.Id,
+                SourceConfiguration = "默认",
+                Source = "Auto"
+            }
+        ], default);
+
+        var candidate = Assert.Single(await workflow.ListDrawingReviewCandidatesAsync(ProjectId, "submitter", UserRole.Administrator, default));
+
+        Assert.Equal(drawing.DrawingNumber, candidate.DrawingNumber);
+        Assert.NotEqual("02041000000", candidate.DrawingNumber);
+    }
+
+    [Fact]
     public async Task FormalNonStandardReleaseWaitsForLatest2DReviewAndPropertyWriteback()
     {
         var (repository, workflow, model, drawing) = await PrepareReviewAsync();
@@ -223,6 +304,33 @@ public sealed class DrawingReviewWorkflowTests
 
         var submitted = await workflow.SubmitReleasePackageAsync(release.Id, "admin", UserRole.Administrator, default);
         Assert.Equal(ReleasePackageState.ProcessReview, submitted.State);
+    }
+
+    [Fact]
+    public async Task NonStandardLongLeadReleaseRequiresCompletedDrawingReviewBeforeSubmission()
+    {
+        var (repository, workflow, _, _) = await PrepareReviewAsync();
+        var release = await CreateNonStandardLongLeadReleasePackageAsync(repository, ReleasePackageState.Draft);
+
+        var blocked = await Assert.ThrowsAsync<PdmRuleException>(() =>
+            workflow.SubmitReleasePackageAsync(release.Id, "admin", UserRole.Administrator, default));
+
+        Assert.Contains("尚无已完成", blocked.Message);
+        Assert.Equal(ReleasePackageState.Draft, (await repository.FindReleasePackageAsync(release.Id, default))!.State);
+    }
+
+    [Fact]
+    public async Task NonStandardLongLeadApprovalRechecksCompletedDrawingReview()
+    {
+        var (repository, workflow, _, _) = await PrepareReviewAsync();
+        var release = await CreateNonStandardLongLeadReleasePackageAsync(repository, ReleasePackageState.ProcessReview);
+        var task = Assert.Single(release.ApprovalTasks);
+
+        var blocked = await Assert.ThrowsAsync<PdmRuleException>(() =>
+            workflow.DecideAsync(task.Id, "admin", UserRole.Administrator, ApprovalDecision.Approved, "同意", default));
+
+        Assert.Contains("尚无已完成", blocked.Message);
+        Assert.Null((await repository.FindReleasePackageAsync(release.Id, default))!.ApprovalTasks.Single().Decision);
     }
 
     [Fact]
@@ -586,6 +694,35 @@ public sealed class DrawingReviewWorkflowTests
             ChangeNumber = $"ECN-{now:yyyyMMddHHmmss}",
             ChangeReason = "图纸审核门禁测试",
             EffectiveSerialFrom = "未指定"
+        };
+        return await repository.CreateReleasePackageAsync(package, default);
+    }
+
+    private static async Task<ReleasePackage> CreateNonStandardLongLeadReleasePackageAsync(
+        InMemoryPdmRepository repository,
+        ReleasePackageState state)
+    {
+        var now = DateTimeOffset.UtcNow;
+        var id = Guid.NewGuid();
+        var item = Assert.Single(await repository.GetBomAsync(ProjectId, BomKind.NonStandard, default));
+        var package = new ReleasePackage(
+            id,
+            ProjectId,
+            $"RP-DRAWING-LL-{id:N}",
+            state,
+            null,
+            string.Empty,
+            string.Empty,
+            [new ApprovalTask(Guid.NewGuid(), id, ApprovalStage.ProcessReview, "admin", null, null, null, null)],
+            now,
+            state == ReleasePackageState.Draft ? null : now,
+            null)
+        {
+            Scope = ReleaseScope.NonStandardLongLead,
+            ChangeReason = "非标件前期BOM图纸审核门禁测试",
+            EffectiveSerialFrom = "未指定",
+            SelectedBomItemIds = [item.Id],
+            NonStandardBomSnapshot = [item with { Quantity = 0.5m }]
         };
         return await repository.CreateReleasePackageAsync(package, default);
     }

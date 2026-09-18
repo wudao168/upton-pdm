@@ -50,6 +50,13 @@ public static class ProgramTemplateEndpointExtensions
                 (request.Parameters ?? []).Select(MapParameter).ToArray(), request.ExpectedRowVersion), actor, role, cancellationToken)));
         });
 
+        api.MapDelete("/revisions/{revisionId:guid}", async (Guid revisionId, long expectedRowVersion, HttpContext context, ProgramTemplateService service, CancellationToken cancellationToken) =>
+        {
+            var (actor, role) = CurrentUser(context.User);
+            await service.DeleteDraftAsync(revisionId, expectedRowVersion, actor, role, cancellationToken);
+            return Results.NoContent();
+        });
+
         api.MapPost("/revisions/{revisionId:guid}/uploads", async (Guid revisionId, StartProgramTemplateUploadRequest request, HttpContext context, ProgramTemplateService service, CancellationToken cancellationToken) =>
         {
             var (actor, role) = CurrentUser(context.User);

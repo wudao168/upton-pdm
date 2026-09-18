@@ -162,6 +162,48 @@ public sealed class Phase1ReleaseWorkflowTests
     }
 
     [Fact]
+    public async Task MechanicalBomPublishing_IsLimitedToMechanicalEngineerAdministratorAndDeveloper()
+    {
+        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(), new RecordingPublisher(), TimeProvider.System);
+        var missingProjectId = Guid.NewGuid();
+
+        try
+        {
+            TenantContext.Set(new CurrentTenant(Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid(), "project-manager", "ProjectManager", false,
+                new HashSet<string> { PermissionCodes.ReleaseManage }, ["ProjectManager"]));
+            var blocked = await Assert.ThrowsAsync<UnauthorizedAccessException>(() => workflow.CreateScopedReleasePackageAsync(
+                missingProjectId, null, string.Empty, string.Empty, string.Empty, "未指定", null,
+                ReleaseScope.StandardLongLead, [], "project-manager", UserRole.Engineer, default));
+            Assert.Contains("仅允许机械工程师、系统管理员或开发者", blocked.Message);
+
+            var electricalContinuesToExistingValidation = await Assert.ThrowsAsync<PdmNotFoundException>(() => workflow.CreateScopedReleasePackageAsync(
+                missingProjectId, null, string.Empty, string.Empty, string.Empty, "未指定", null,
+                ReleaseScope.ElectricalLongLead, [], "project-manager", UserRole.Engineer, default));
+            Assert.Contains("项目不存在", electricalContinuesToExistingValidation.Message);
+
+            foreach (var allowed in new[]
+                     {
+                         (Username: "engineer", RoleCode: nameof(UserRole.Engineer), Role: UserRole.Engineer),
+                         (Username: "admin", RoleCode: nameof(UserRole.Administrator), Role: UserRole.Administrator),
+                         (Username: "developer", RoleCode: "developer", Role: UserRole.Administrator)
+                     })
+            {
+                TenantContext.Set(new CurrentTenant(Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid(), allowed.Username, allowed.RoleCode, false,
+                    new HashSet<string> { PermissionCodes.ReleaseManage }, [allowed.RoleCode]));
+                var continuesToExistingValidation = await Assert.ThrowsAsync<PdmNotFoundException>(() => workflow.CreateScopedReleasePackageAsync(
+                    missingProjectId, null, string.Empty, string.Empty, string.Empty, "未指定", null,
+                    ReleaseScope.NonStandardLongLead, [], allowed.Username, allowed.Role, default));
+                Assert.Contains("项目不存在", continuesToExistingValidation.Message);
+            }
+        }
+        finally
+        {
+            TenantContext.Clear();
+        }
+    }
+
+    [Fact]
     public async Task ReleasePackage_RejectsUnclassifiedSourceItems()
     {
         var repository = new InMemoryPdmRepository(TimeProvider.System);

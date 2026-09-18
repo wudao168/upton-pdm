@@ -1,4 +1,5 @@
 import { flushPromises, mount } from '@vue/test-utils'
+import { ElMessageBox } from 'element-plus'
 import { ElMessage } from '../src/statusMessage'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import ProgramTemplateLibrary from '../src/components/ProgramTemplateLibrary.vue'
@@ -9,6 +10,7 @@ const api = vi.hoisted(() => ({
   createProgramTemplate: vi.fn(),
   createProgramTemplateRevision: vi.fn(),
   decideProgramTemplateTask: vi.fn(),
+  deleteProgramTemplateDraft: vi.fn(),
   downloadProgramTemplate: vi.fn(),
   getProgramTemplate: vi.fn(),
   submitProgramTemplateRevision: vi.fn(),
@@ -108,5 +110,40 @@ describe('ProgramTemplateLibrary', () => {
 
     expect(api.createProgramTemplate).toHaveBeenCalledOnce()
     expect(api.createProgramTemplate.mock.calls[0]![0]).toMatchObject({ name: '', vendor: '', platform: '', softwareVersion: '' })
+  })
+
+  it('本人草稿可确认删除并刷新列表', async () => {
+    vi.spyOn(ElMessageBox, 'confirm').mockResolvedValue('confirm' as Awaited<ReturnType<typeof ElMessageBox.confirm>>)
+    const draft = {
+      id: 'revision-1', version: 'v1.0.0', attemptNumber: 1, state: 'Draft', name: '草稿模板', category: '', description: '',
+      vendor: '', platform: '', softwareVersion: '', applicableSeries: '', tags: [], changeNote: '', createdBy: 'developer',
+      createdAt: '2026-09-17T00:00:00Z', submittedAt: null, publishedAt: null, rowVersion: 3, parameters: [],
+      packageFileName: 'draft.rar', packageFileLength: 12, packageSha256: 'A', evidenceFileName: null, evidenceFileLength: null, evidenceSha256: null,
+    }
+    const template = { id: 'template-1', code: 'PT-PLC-0001', assetType: 'PlcProgram', currentPublishedRevisionId: null, isArchived: false, createdBy: 'developer', createdAt: '2026-09-17T00:00:00Z', revisions: [draft] }
+    api.getProgramTemplate.mockResolvedValue(template)
+    api.deleteProgramTemplateDraft.mockResolvedValue(undefined)
+    api.listProgramTemplates.mockResolvedValueOnce([]).mockResolvedValueOnce([])
+    const wrapper = mount(ProgramTemplateLibrary, {
+      props: { token: 'token', username: 'developer', permissions: ['program-template.view', 'program-template.submit'] },
+      global: {
+        stubs: {
+          ElButton: { template: '<button type="button"><slot /></button>' },
+          ElDrawer: { props: ['modelValue'], template: '<section v-if="modelValue"><slot /><slot name="footer" /></section>' },
+          ElTable: { template: '<div><slot /></div>' }, ElTableColumn: true, ElSelect: true, ElOption: true, ElDialog: true,
+          ElForm: true, ElFormItem: true, ElInput: true, ElTag: true, ElEmpty: true, ElProgress: true, ElButtonGroup: true,
+          ElCheckbox: true, ElCheckboxGroup: true, ElRadioButton: true, ElRadioGroup: true,
+        },
+      },
+    })
+    await flushPromises()
+    await (wrapper.vm as unknown as { openDetail: (id: string) => Promise<void> }).openDetail('template-1')
+    await flushPromises()
+    await wrapper.findAll('button').find(button => button.text().includes('删除草稿'))!.trigger('click')
+    await flushPromises()
+
+    expect(api.deleteProgramTemplateDraft).toHaveBeenCalledWith('revision-1', 3, 'token')
+    expect(ElMessageBox.confirm).toHaveBeenCalledWith(expect.stringContaining('无法恢复'), '删除程序模板草稿', expect.objectContaining({ confirmButtonText: '确认删除' }))
+    expect(wrapper.text()).not.toContain('删除草稿')
   })
 })

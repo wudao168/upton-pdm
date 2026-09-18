@@ -2,7 +2,7 @@
 import { ArrowLeft, Check, Cloud, History, MessageSquareText, PencilLine, RefreshCw, RotateCcw, Search, Send, Square, X } from '@lucide/vue'
 import { ElMessage } from '../statusMessage'
 import { ElMessageBox } from 'element-plus'
-import { computed, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import { postDesktopMessage } from '../api'
 import type { AddDrawingReviewMarkupInput, DrawingReviewCandidate, DrawingReviewDecision, DrawingReviewPackage, DrawingReviewTarget } from '../types'
 import { useUserDisplayName } from '../userDisplay'
@@ -13,6 +13,7 @@ const props = withDefaults(defineProps<{
   packageId: string
   packages: DrawingReviewPackage[]
   candidates?: DrawingReviewCandidate[]
+  reviewerOptions?: Array<{ username: string; label: string }>
   selectedDocumentId?: string
   currentUsername: string
   pending: boolean
@@ -25,6 +26,7 @@ const props = withDefaults(defineProps<{
   overlayHosted?: boolean
 }>(), {
   candidates: () => [],
+  reviewerOptions: () => [],
   canManageWithdraw: false,
   allowSelfReview: false,
   overlayHosted: false,
@@ -33,7 +35,7 @@ const props = withDefaults(defineProps<{
 const emit = defineEmits<{
   'update:packageId': [packageId: string]
   close: []
-  create: [modelDocumentIds: string[]]
+  create: [modelDocumentIds: string[] | null, assignedReviewer: string]
   refresh: []
   refreshCandidates: []
   withdraw: [packageId: string, reason: string]
@@ -41,6 +43,7 @@ const emit = defineEmits<{
   addMarkup: [packageId: string, input: AddDrawingReviewMarkupInput]
   resolveMarkup: [packageId: string, markupId: string]
   decide: [packageId: string, itemId: string, target: DrawingReviewTarget, decision: DrawingReviewDecision, comment: string]
+  decideSupervisor: [packageId: string, decision: DrawingReviewDecision, comment: string]
 }>()
 
 const markupText = ref('')
@@ -50,7 +53,10 @@ const decisionComment = ref('')
 const scopeOpen = ref(false)
 const scopeMode = ref<'all' | 'manual'>('all')
 const scopeSearch = ref('')
+const overviewState = ref<'All' | DrawingReviewCandidate['state']>('All')
 const selectedCandidateIds = ref<string[]>([])
+const assignedReviewer = ref('')
+const annotationHostAvailable = ref(false)
 const panelOpacityStorageKey = 'upton-pdm-drawing-review-opacity'
 const savedPanelOpacity = window.localStorage.getItem(panelOpacityStorageKey)
 const parsedPanelOpacity = savedPanelOpacity === null ? 72 : Number(savedPanelOpacity)
@@ -72,14 +78,18 @@ const selfReviewBlocked = computed(() => selfReview.value && !props.allowSelfRev
 const canActOnTarget = computed(() => props.canDecide
   && activePackage.value?.state === 'InReview'
   && activeTargetState.value === 'Pending'
+  && (!activePackage.value.assignedReviewer || activePackage.value.assignedReviewer === props.currentUsername || props.allowSelfReview)
   && !selfReviewBlocked.value)
+const canActAsSupervisor = computed(() => props.canDecide
+  && activePackage.value?.state === 'PendingSupervisorApproval'
+  && (activePackage.value.supervisor === props.currentUsername || props.allowSelfReview))
 const activeMarkups = computed(() => (activePackage.value?.markups ?? [])
   .filter(markup => markup.itemId === activeItem.value?.id && markup.target === target)
   .sort((left, right) => right.createdAt.localeCompare(left.createdAt)))
-const markedTargetCount = computed(() => activePackage.value?.items.reduce((count, item) => count + Number(item.drawingState === 'Marked'), 0) ?? 0)
+const markedTargetCount = computed(() => activePackage.value?.items.reduce((count, item) => count + Number(item.drawingState === 'Approved' || item.drawingState === 'Marked'), 0) ?? 0)
 const totalTargetCount = computed(() => activePackage.value?.items.length ?? 0)
 const canWithdrawActive = computed(() => Boolean(activePackage.value
-  && activePackage.value.state === 'InReview'
+  && (activePackage.value.state === 'InReview' || activePackage.value.state === 'PendingSupervisorApproval')
   && props.canSubmit
   && (props.canManageWithdraw || activePackage.value.createdBy.localeCompare(props.currentUsername, undefined, { sensitivity: 'accent' }) === 0)))
 const filteredCandidates = computed(() => {
@@ -88,6 +98,14 @@ const filteredCandidates = computed(() => {
     return !keyword || `${candidate.drawingNumber} ${candidate.name}`.toLocaleLowerCase().includes(keyword)
   })
 })
+const overviewCandidates = computed(() => props.candidates.filter(candidate => overviewState.value === 'All' || candidate.state === overviewState.value))
+const overviewStateOptions = computed(() => ([
+  { value: 'All', label: '全部', count: props.candidates.length },
+  { value: 'Ready', label: '待审核', count: props.candidates.filter(candidate => candidate.state === 'Ready').length },
+  { value: 'InReview', label: '审核中', count: props.candidates.filter(candidate => candidate.state === 'InReview').length },
+  { value: 'ApprovedCurrent', label: '已审核', count: props.candidates.filter(candidate => candidate.state === 'ApprovedCurrent').length },
+  { value: 'Unavailable', label: '不可发起', count: props.candidates.filter(candidate => candidate.state === 'Unavailable').length },
+] as const))
 const selectedCandidateCount = computed(() => selectedCandidateIds.value.length)
 const candidateEmptyMessage = computed(() => props.candidates.length === 0
   ? '当前没有有效非标件BOM候选；请先将3D模型归入非标件BOM，并保持唯一关联的2D工程图。'
@@ -96,6 +114,8 @@ const candidateEmptyMessage = computed(() => props.candidates.length === 0
 watch(() => props.candidates, () => {
   if (scopeOpen.value && scopeMode.value !== 'manual') applyScopeMode(scopeMode.value)
 }, { deep: true })
+
+onMounted(() => nextTick(() => { annotationHostAvailable.value = Boolean(document.getElementById('drawing-review-annotation-host')) }))
 
 function savePanelOpacity() {
   window.localStorage.setItem(panelOpacityStorageKey, String(panelOpacity.value))
@@ -112,6 +132,7 @@ function applyScopeMode(mode: 'all' | 'manual') {
 function openScopeSelection() {
   scopeOpen.value = true
   scopeSearch.value = ''
+  assignedReviewer.value = props.reviewerOptions.length === 1 ? props.reviewerOptions[0]!.username : ''
   emit('refreshCandidates')
   applyScopeMode('all')
 }
@@ -124,12 +145,25 @@ function toggleCandidate(candidate: DrawingReviewCandidate) {
     : [...selectedCandidateIds.value, candidate.modelDocumentId]
 }
 
+function selectOverviewCandidate(candidate: DrawingReviewCandidate) {
+  const matchingPackages = props.packages.filter(review => review.items.some(item => item.drawingDocumentId === candidate.drawingDocumentId))
+  const matchingPackage = matchingPackages.find(review => review.state === 'InReview' || review.state === 'WritingProperties') ?? matchingPackages[0]
+  if (matchingPackage) emit('update:packageId', matchingPackage.id)
+  if (candidate.drawingDocumentId) emit('selectDocument', candidate.drawingDocumentId)
+  else if (candidate.modelDocumentId) emit('selectDocument', candidate.modelDocumentId)
+}
+
 function submitScope() {
-  if (!selectedCandidateIds.value.length) {
+  const modelDocumentIds = scopeMode.value === 'all' ? null : selectedCandidateIds.value
+  if (modelDocumentIds !== null && !modelDocumentIds.length) {
     ElMessage.warning('请至少选择一张2D工程图。')
     return
   }
-  emit('create', selectedCandidateIds.value)
+  if (!assignedReviewer.value) {
+    ElMessage.warning('请选择指定审核人。')
+    return
+  }
+  emit('create', modelDocumentIds, assignedReviewer.value)
   scopeOpen.value = false
 }
 
@@ -198,8 +232,22 @@ async function decide(decision: DrawingReviewDecision) {
   decisionComment.value = ''
 }
 
+async function decideSupervisor(decision: DrawingReviewDecision) {
+  const packageValue = activePackage.value
+  if (!packageValue || !canActAsSupervisor.value) return
+  if (decision === 'RequestChanges' && !decisionComment.value.trim()) {
+    ElMessage.warning('退改必须填写说明。')
+    return
+  }
+  await ElMessageBox.confirm(decision === 'Approve' ? '确认机械主管最终批准？' : '确认退回设计修改？', '机械主管批准', {
+    confirmButtonText: '确认', cancelButtonText: '取消', type: decision === 'Approve' ? 'success' : 'warning',
+  })
+  emit('decideSupervisor', packageValue.id, decision, decisionComment.value.trim())
+  decisionComment.value = ''
+}
+
 function packageStateLabel(state: DrawingReviewPackage['state']) {
-  return ({ InReview: '审核中', ChangesRequested: '已退改', WritingProperties: '写入审核标记', Approved: '审核完成', Stale: '版本冲突', Withdrawn: '已撤销' } as const)[state]
+  return ({ InReview: '指定人员审核', PendingSupervisorApproval: '待机械主管批准', ChangesRequested: '已退改', WritingProperties: '写入审核标记', Approved: '审核完成', Stale: '版本冲突', Withdrawn: '已撤销' } as const)[state]
 }
 
 function targetStateLabel(state: DrawingReviewPackage['items'][number]['modelState']) {
@@ -223,6 +271,7 @@ function targetStateLabel(state: DrawingReviewPackage['items'][number]['modelSta
           <button type="button" :class="{ 'is-active': scopeMode === 'manual' }" @click="applyScopeMode('manual')">手工选择</button>
         </div>
         <label class="drawing-review-scope__search"><Search :size="14" /><input v-model="scopeSearch" placeholder="搜索图号或名称" /></label>
+        <label class="drawing-review-scope__reviewer"><span>指定审核人</span><select v-model="assignedReviewer" aria-label="指定图纸审核人"><option value="" disabled>请选择</option><option v-for="reviewer in reviewerOptions" :key="reviewer.username" :value="reviewer.username">{{ reviewer.label }}</option></select></label>
         <p class="drawing-review-scope__hint">只显示有效非标 BOM 中唯一关联的2D工程图；已审核当前版本默认不选。</p>
       </section>
       <section class="drawing-review-candidate-list" aria-label="图纸审核候选范围">
@@ -233,23 +282,44 @@ function targetStateLabel(state: DrawingReviewPackage['items'][number]['modelSta
           class="drawing-review-candidate"
           :class="[`is-${candidate.state.toLowerCase()}`, { 'is-selected': !!candidate.modelDocumentId && selectedCandidateIds.includes(candidate.modelDocumentId) }]"
           :disabled="!candidate.selectable"
+          :title="candidate.reason || candidate.name"
           @click="toggleCandidate(candidate)"
         >
           <span class="drawing-review-candidate__check">{{ candidate.modelDocumentId && selectedCandidateIds.includes(candidate.modelDocumentId) ? '✓' : '' }}</span>
-          <span class="drawing-review-candidate__copy"><strong>{{ candidate.drawingNumber }}</strong><small>{{ candidate.name }}</small><em>非标件</em></span>
-          <span class="drawing-review-candidate__versions"><strong>2D {{ candidate.drawingRevision || '—' }}</strong><em>{{ candidateStateLabel(candidate) }}</em></span>
-          <span v-if="candidate.reason" class="drawing-review-candidate__reason">{{ candidate.reason }}</span>
+          <strong class="drawing-review-candidate__number">{{ candidate.drawingNumber }}</strong>
+          <em class="drawing-review-candidate__state">{{ candidateStateLabel(candidate) }}</em>
         </button>
         <p v-if="!filteredCandidates.length" class="drawing-review-no-candidate">{{ candidateEmptyMessage }}</p>
       </section>
-      <footer class="drawing-review-scope__footer"><span>已选择 {{ selectedCandidateCount }} 张</span><button type="button" class="is-primary" :disabled="pending || !selectedCandidateCount" @click="submitScope"><Send :size="14" />发起审核</button></footer>
+      <footer class="drawing-review-scope__footer"><span>{{ scopeMode === 'all' ? `全部待审（当前${selectedCandidateCount}张）` : `已选择 ${selectedCandidateCount} 张` }}</span><button type="button" class="is-primary" :disabled="pending || !selectedCandidateCount || !assignedReviewer" @click="submitScope"><Send :size="14" />发起审核</button></footer>
     </template>
 
     <template v-else>
     <div class="drawing-review-panel__toolbar">
-      <label v-if="packages.length"><History :size="14" /><span class="pdm-sr-only">审核历史</span><select v-model="selectedPackageId" aria-label="选择图纸审核单"><option v-for="review in packages" :key="review.id" :value="review.id">{{ review.number }} · {{ packageStateLabel(review.state) }}</option></select></label>
+      <label><span>状态</span><select v-model="overviewState" aria-label="筛选图纸审核状态"><option v-for="option in overviewStateOptions" :key="option.value" :value="option.value">{{ option.label }}（{{ option.count }}）</option></select></label>
       <button type="button" title="刷新审核状态" :disabled="pending" @click="emit('refresh')"><RefreshCw :size="14" />刷新</button>
     </div>
+
+    <section class="drawing-review-overview" aria-label="图纸审核状态表">
+      <header><strong>图纸型号</strong><span>审核状态</span></header>
+      <button
+        v-for="candidate in overviewCandidates"
+        :key="candidate.candidateId"
+        type="button"
+        class="drawing-review-overview__row"
+        :class="[`is-${candidate.state.toLowerCase()}`, { 'is-active': selectedDocumentId === candidate.drawingDocumentId || selectedDocumentId === candidate.modelDocumentId }]"
+        :title="candidate.reason || candidate.drawingNumber"
+        @click="selectOverviewCandidate(candidate)"
+      >
+        <strong>{{ candidate.drawingNumber }}</strong><em>{{ candidateStateLabel(candidate) }}</em>
+      </button>
+      <p v-if="!overviewCandidates.length">当前筛选状态下没有图纸</p>
+    </section>
+
+    <details v-if="packages.length" class="drawing-review-history">
+      <summary><History :size="13" />审核历史</summary>
+      <select v-model="selectedPackageId" aria-label="选择图纸审核单"><option v-for="review in packages" :key="review.id" :value="review.id">{{ review.number }} · {{ packageStateLabel(review.state) }}</option></select>
+    </details>
 
     <section v-if="!activePackage" class="drawing-review-panel__empty">
       <MessageSquareText :size="34" />
@@ -262,6 +332,7 @@ function targetStateLabel(state: DrawingReviewPackage['items'][number]['modelSta
       <section class="drawing-review-package-summary">
         <div><strong>{{ activePackage.number }}</strong><span :class="`is-${activePackage.state.toLowerCase()}`">{{ packageStateLabel(activePackage.state) }}</span></div>
         <p>{{ activePackage.items.length }}张2D图纸 · {{ markedTargetCount }}/{{ totalTargetCount }}项完成 · 发起人 {{ displayUserName(activePackage.createdBy) }}</p>
+        <p v-if="activePackage.assignedReviewer" class="drawing-review-route">指定审核人 {{ activePackage.assignedReviewerName || displayUserName(activePackage.assignedReviewer) }} → 机械主管 {{ activePackage.supervisorName || displayUserName(activePackage.supervisor) }}</p>
         <p v-if="activePackage.state === 'Withdrawn'" class="drawing-review-withdrawn">{{ activePackage.withdrawnBy }} 撤销：{{ activePackage.withdrawalReason }}</p>
         <div class="drawing-review-package-actions"><button v-if="canWithdrawActive" type="button" class="is-danger" :disabled="pending" @click="withdrawActiveReview"><X :size="14" />撤销审核</button><button v-if="canSubmit" type="button" :disabled="pending" @click="openScopeSelection"><Send :size="14" />发起其他图档</button></div>
       </section>
@@ -271,12 +342,17 @@ function targetStateLabel(state: DrawingReviewPackage['items'][number]['modelSta
         <p>请在左侧设计树选择本审核单中的2D工程图；也可切换上方历史审核单。</p>
       </section>
 
-      <template v-else>
+      <Teleport to="#drawing-review-annotation-host" :disabled="overlayHosted || !annotationHostAvailable">
+      <details v-if="activeItem" open class="drawing-review-annotation-card">
+        <summary><MessageSquareText :size="14" /><strong>审核批注</strong><span>{{ packageStateLabel(activePackage.state) }}</span></summary>
         <section class="drawing-review-panel__section drawing-review-decision">
-          <div class="drawing-review-section-title"><Check :size="15" /><strong>审核结论</strong></div>
+          <div class="drawing-review-section-title"><Check :size="15" /><strong>{{ activePackage.state === 'PendingSupervisorApproval' ? '机械主管批准' : '指定人员审核' }}</strong></div>
           <textarea v-model="decisionComment" rows="2" placeholder="审核意见；退改时必填" />
           <p v-if="selfReviewBlocked" class="drawing-review-self-warning">当前版本由你生成，系统禁止审核自己的图。</p>
-          <div class="drawing-review-decision-buttons"><button type="button" class="is-reject" :disabled="pending || !canActOnTarget" @click="decide('RequestChanges')"><X :size="14" />退改</button><button type="button" class="is-approve" :disabled="pending || !canActOnTarget" @click="decide('Approve')"><Check :size="14" />通过</button></div>
+          <p v-if="activePackage.state === 'InReview' && activePackage.assignedReviewer" class="drawing-review-assignee">当前审核人：{{ activePackage.assignedReviewerName || displayUserName(activePackage.assignedReviewer) }}</p>
+          <p v-if="activePackage.state === 'PendingSupervisorApproval'" class="drawing-review-assignee">当前批准人：{{ activePackage.supervisorName || displayUserName(activePackage.supervisor) }}</p>
+          <div v-if="activePackage.state === 'PendingSupervisorApproval'" class="drawing-review-decision-buttons"><button type="button" class="is-reject" :disabled="pending || !canActAsSupervisor" @click="decideSupervisor('RequestChanges')"><X :size="14" />退改</button><button type="button" class="is-approve" :disabled="pending || !canActAsSupervisor" @click="decideSupervisor('Approve')"><Check :size="14" />批准</button></div>
+          <div v-else class="drawing-review-decision-buttons"><button type="button" class="is-reject" :disabled="pending || !canActOnTarget" @click="decide('RequestChanges')"><X :size="14" />退改</button><button type="button" class="is-approve" :disabled="pending || !canActOnTarget" @click="decide('Approve')"><Check :size="14" />通过</button></div>
         </section>
 
         <section class="drawing-review-current">
@@ -311,7 +387,8 @@ function targetStateLabel(state: DrawingReviewPackage['items'][number]['modelSta
             <p v-if="!activeMarkups.length" class="drawing-review-no-markup">当前图档暂无批注</p>
           </div>
         </section>
-      </template>
+      </details>
+      </Teleport>
     </template>
     </template>
   </aside>
@@ -323,7 +400,10 @@ function targetStateLabel(state: DrawingReviewPackage['items'][number]['modelSta
 .drawing-review-panel__header{display:flex;align-items:center;gap:8px;padding:12px 13px 9px;border-bottom:1px solid var(--pdm-border-soft)}
 .drawing-review-panel__title{flex:0 0 auto}.drawing-review-panel__title span{color:var(--pdm-blue);font-size:9px;font-weight:700;letter-spacing:.12em}.drawing-review-panel__header h2{margin:2px 0 0;font-size:15px;font-weight:600}.drawing-review-opacity{min-width:0;display:grid;grid-template-columns:auto minmax(52px,1fr) 30px;align-items:center;gap:4px;margin-left:auto;color:var(--pdm-muted);font-size:9px;white-space:nowrap}.drawing-review-opacity input{width:100%;margin:0;accent-color:var(--pdm-blue);cursor:pointer}.drawing-review-opacity output{text-align:right}.drawing-review-close{width:28px;height:28px;flex:0 0 28px;border:0;border-radius:5px;background:transparent;color:var(--pdm-muted);font-size:20px}.drawing-review-close:hover{background:var(--pdm-surface-muted);color:var(--pdm-text)}
 .drawing-review-back{width:28px;flex:0 0 28px;padding:0!important;border:0!important;background:transparent!important}.drawing-review-scope{display:flex;flex-direction:column;gap:7px;padding:10px;border-bottom:1px solid var(--pdm-border-soft)}.drawing-review-scope__modes{display:grid;grid-template-columns:repeat(3,1fr);gap:4px}.drawing-review-scope__modes.is-two-column{grid-template-columns:repeat(2,1fr)}.drawing-review-scope__modes button{padding:4px}.drawing-review-scope__modes button.is-active{border-color:var(--pdm-blue);background:var(--pdm-blue-soft);color:var(--pdm-blue)}.drawing-review-scope>select{width:100%}.drawing-review-scope__search{display:flex;align-items:center;gap:5px;padding:0 7px;border:1px solid var(--pdm-border);border-radius:5px;background:var(--pdm-surface)}.drawing-review-scope__search input{min-width:0;width:100%;height:30px;border:0;outline:0;background:transparent;color:var(--pdm-text);font-size:10px}.drawing-review-scope__hint{margin:0;color:var(--pdm-muted);font-size:9px;line-height:1.45}.drawing-review-candidate-list{min-height:0;flex:1;overflow:auto;padding:6px}.drawing-review-candidate{position:relative;width:100%;min-height:62px!important;display:grid!important;grid-template-columns:20px minmax(0,1fr) 66px;align-items:center!important;justify-content:stretch!important;gap:6px;margin-bottom:5px;padding:7px!important;text-align:left;border-color:var(--pdm-border-soft)!important}.drawing-review-candidate.is-selected{border-color:var(--pdm-blue)!important;background:var(--pdm-blue-soft)!important}.drawing-review-candidate:disabled{opacity:.68}.drawing-review-candidate__check{width:17px;height:17px;display:flex;align-items:center;justify-content:center;border:1px solid var(--pdm-border);border-radius:3px;background:var(--pdm-surface);color:var(--pdm-blue);font-weight:700}.drawing-review-candidate.is-selected .drawing-review-candidate__check{border-color:var(--pdm-blue)}.drawing-review-candidate__copy,.drawing-review-candidate__versions{min-width:0;display:flex;flex-direction:column;gap:2px}.drawing-review-candidate__copy strong,.drawing-review-candidate__copy small{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.drawing-review-candidate__copy strong{font-size:10px}.drawing-review-candidate__copy small,.drawing-review-candidate__copy em,.drawing-review-candidate__versions small,.drawing-review-candidate__versions em{color:var(--pdm-muted);font-size:8px;font-style:normal}.drawing-review-candidate__versions{align-items:flex-end}.drawing-review-candidate__versions strong{font-size:9px}.drawing-review-candidate.is-approvedcurrent .drawing-review-candidate__versions em{color:var(--pdm-green)}.drawing-review-candidate.is-inreview .drawing-review-candidate__versions em,.drawing-review-candidate.is-unavailable .drawing-review-candidate__versions em{color:var(--pdm-orange)}.drawing-review-candidate__reason{grid-column:2/4;color:var(--pdm-muted);font-size:8px}.drawing-review-no-candidate{padding:28px 8px;color:var(--pdm-muted);text-align:center;font-size:10px}.drawing-review-scope__footer{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:9px 10px;border-top:1px solid var(--pdm-border-soft);font-size:10px}.drawing-review-scope__footer button{min-width:100px}.drawing-review-package-actions{display:grid!important;grid-template-columns:1fr 1fr;gap:5px}.drawing-review-package-actions button{width:100%}.drawing-review-package-actions .is-danger{border-color:#f2b8b5;background:#fff0ef;color:var(--pdm-danger)}.drawing-review-withdrawn{padding:5px 6px;border-radius:4px;background:#fff0ef;color:var(--pdm-danger)!important}
+.drawing-review-scope__reviewer{display:grid;grid-template-columns:70px minmax(0,1fr);align-items:center;gap:6px;font-size:10px}.drawing-review-scope__reviewer select{width:100%}.drawing-review-route,.drawing-review-assignee{color:var(--pdm-blue)!important}.drawing-review-annotation-card{box-sizing:border-box;width:100%;max-height:calc(100vh - 330px);overflow:auto;border:1px solid rgba(148,163,184,.55);border-radius:6px;background:rgba(255,255,255,.95);box-shadow:0 4px 14px rgba(15,23,42,.12);color:var(--pdm-text);font-size:10px}.drawing-review-annotation-card>summary{height:34px;display:flex;align-items:center;gap:6px;padding:0 10px;cursor:pointer;list-style:none}.drawing-review-annotation-card>summary::-webkit-details-marker{display:none}.drawing-review-annotation-card>summary>span{margin-left:auto;color:var(--pdm-blue);font-size:9px}.drawing-review-annotation-card .drawing-review-panel__section,.drawing-review-annotation-card .drawing-review-current{padding:8px}.drawing-review-annotation-card button,.drawing-review-annotation-card select{min-height:30px;border:1px solid var(--pdm-border);border-radius:5px;background:var(--pdm-surface);color:var(--pdm-text);font:inherit}.drawing-review-annotation-card button{display:inline-flex;align-items:center;justify-content:center;gap:5px;padding:5px 8px}.drawing-review-annotation-card button:disabled{opacity:.45}.drawing-review-annotation-card textarea,.drawing-review-annotation-card input{font:inherit;font-size:10px}
+.drawing-review-candidate{height:30px!important;min-height:30px!important;grid-template-columns:20px minmax(0,1fr) 52px;gap:6px;margin-bottom:3px;padding:0 7px!important;overflow:hidden}.drawing-review-candidate__number{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:10px}.drawing-review-candidate__state{color:var(--pdm-muted);font-size:9px;font-style:normal;text-align:right;white-space:nowrap}.drawing-review-candidate.is-approvedcurrent .drawing-review-candidate__state{color:var(--pdm-green)}.drawing-review-candidate.is-inreview .drawing-review-candidate__state,.drawing-review-candidate.is-unavailable .drawing-review-candidate__state{color:var(--pdm-orange)}
 .drawing-review-panel__toolbar{display:flex;gap:5px;padding:8px 10px;border-bottom:1px solid var(--pdm-border-soft)}.drawing-review-panel__toolbar label{min-width:0;display:flex;flex:1;align-items:center;gap:5px}.drawing-review-panel__toolbar select{min-width:0;width:100%}.drawing-review-panel button,.drawing-review-panel select,.drawing-review-panel input,.drawing-review-panel textarea{font:inherit;font-size:10px}.drawing-review-panel button,.drawing-review-panel select{min-height:30px;border:1px solid var(--pdm-border);border-radius:5px;background:var(--pdm-surface);color:var(--pdm-text)}.drawing-review-panel button{display:inline-flex;align-items:center;justify-content:center;gap:5px;padding:5px 8px}.drawing-review-panel button:disabled{opacity:.45;cursor:not-allowed}.drawing-review-panel .is-primary{border-color:var(--pdm-blue);background:var(--pdm-blue);color:white}
+.drawing-review-overview{flex:0 0 auto;padding:0 10px 7px;border-bottom:1px solid var(--pdm-border-soft)}.drawing-review-overview>header,.drawing-review-overview__row{box-sizing:border-box;width:100%;display:grid!important;grid-template-columns:minmax(0,1fr) 58px;align-items:center;gap:6px}.drawing-review-overview>header{height:25px;padding:0 8px;color:var(--pdm-muted);font-size:9px}.drawing-review-overview>header span{text-align:right}.drawing-review-overview__row{height:30px!important;min-height:30px!important;margin:0 0 3px;padding:0 8px!important;overflow:hidden;text-align:left}.drawing-review-overview__row strong{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.drawing-review-overview__row em{color:var(--pdm-muted);font-style:normal;text-align:right;white-space:nowrap}.drawing-review-overview__row.is-active{border-color:var(--pdm-blue);background:var(--pdm-blue-soft)}.drawing-review-overview__row.is-approvedcurrent em{color:var(--pdm-green)}.drawing-review-overview__row.is-inreview em,.drawing-review-overview__row.is-unavailable em{color:var(--pdm-orange)}.drawing-review-overview>p{margin:0;padding:14px 8px;color:var(--pdm-muted);text-align:center;font-size:9px}.drawing-review-history{padding:6px 10px;border-bottom:1px solid var(--pdm-border-soft)}.drawing-review-history summary{display:flex;align-items:center;gap:5px;color:var(--pdm-muted);font-size:9px;cursor:pointer}.drawing-review-history select{width:100%;margin-top:5px}
 .drawing-review-panel__empty,.drawing-review-panel__selection-empty{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:8px;padding:28px 18px;color:var(--pdm-muted);text-align:center}.drawing-review-panel__empty{flex:1}.drawing-review-panel__empty strong,.drawing-review-panel__selection-empty strong{color:var(--pdm-text);font-size:12px}.drawing-review-panel__empty p,.drawing-review-panel__selection-empty p{margin:0;line-height:1.6;font-size:10px}
 .drawing-review-package-summary{padding:10px;border-bottom:1px solid var(--pdm-border-soft)}.drawing-review-package-summary>div{display:flex;align-items:center;justify-content:space-between;gap:6px}.drawing-review-package-summary>div>strong{font-size:11px}.drawing-review-package-summary>div>span{padding:3px 6px;border-radius:8px;background:var(--pdm-blue-soft);color:var(--pdm-blue);font-size:9px}.drawing-review-package-summary>div>.is-approved{background:var(--pdm-green-soft);color:var(--pdm-green)}.drawing-review-package-summary>div>.is-changesrequested,.drawing-review-package-summary>div>.is-stale{background:#fff0ef;color:var(--pdm-danger)}.drawing-review-package-summary p{margin:5px 0 8px;color:var(--pdm-muted);font-size:9px}.drawing-review-package-summary>button{width:100%}
 .drawing-review-current{padding:10px;border-bottom:1px solid var(--pdm-border-soft)}.drawing-review-target-switch{display:grid;grid-template-columns:1fr 1fr;gap:5px}.drawing-review-target-switch.is-single{grid-template-columns:1fr}.drawing-review-target-switch button{height:auto;display:flex;flex-direction:column;align-items:flex-start}.drawing-review-target-switch button.is-active{border-color:var(--pdm-blue);background:var(--pdm-blue-soft);color:var(--pdm-blue)}.drawing-review-target-switch span{font-size:9px;color:var(--pdm-muted)}.drawing-review-target-switch .is-marked{color:var(--pdm-green)}.drawing-review-target-switch .is-changesrequested{color:var(--pdm-danger)}

@@ -10,6 +10,7 @@ import {
   createProgramTemplate,
   createProgramTemplateRevision,
   decideProgramTemplateTask,
+  deleteProgramTemplateDraft,
   downloadProgramTemplate,
   getProgramTemplate,
   listProgramTemplateTasks,
@@ -48,6 +49,7 @@ type ProgramTemplateListRow = { template: ProgramTemplate; revision: ProgramTemp
 const mode = ref<ListMode>('published')
 const loading = ref(false)
 const saving = ref(false)
+const deletingDraft = ref(false)
 const uploadingKind = ref<ProgramTemplateAttachmentKind | null>(null)
 const uploadProgress = ref(0)
 const templates = ref<ProgramTemplate[]>([])
@@ -84,6 +86,9 @@ const form = reactive<DraftForm>({
 })
 
 const canSubmit = computed(() => props.permissions.includes('program-template.submit'))
+const canDeleteActiveDraft = computed(() => activeRevision.value?.state === 'Draft'
+  && (activeRevision.value.createdBy.toLocaleLowerCase() === props.username.toLocaleLowerCase()
+    || props.permissions.includes('program-template.manage')))
 const assetLabels: Record<ProgramTemplateAssetType, string> = {
   PlcFunctionBlock: 'PLC功能块', PlcProgram: 'PLC整包模板', HmiTemplate: 'HMI模板',
 }
@@ -203,6 +208,39 @@ function editActiveDraft() {
   copyRevisionToForm(selected.value, activeRevision.value)
   detailOpen.value = false
   editorOpen.value = true
+}
+
+async function deleteActiveDraft() {
+  const revision = activeRevision.value
+  const templateId = selected.value?.id
+  if (!revision || revision.state !== 'Draft' || !templateId) return
+  try {
+    await ElMessageBox.confirm('删除后草稿及已上传的受控文件将无法恢复，确认删除吗？', '删除程序模板草稿', {
+      type: 'warning', confirmButtonText: '确认删除', cancelButtonText: '取消',
+    })
+  } catch (error) {
+    if (error === 'cancel' || error === 'close') return
+    throw error
+  }
+  deletingDraft.value = true
+  try {
+    await deleteProgramTemplateDraft(revision.id, revision.rowVersion, props.token)
+    await load()
+    const refreshed = templates.value.find(item => item.id === templateId)
+    if (refreshed) {
+      selected.value = refreshed
+      activeRevisionId.value = refreshed.currentPublishedRevisionId || latestRevision(refreshed)?.id || ''
+    } else {
+      detailOpen.value = false
+      selected.value = null
+      activeRevisionId.value = ''
+    }
+    ElMessage.success('程序模板草稿已删除')
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '程序模板草稿删除失败')
+  } finally {
+    deletingDraft.value = false
+  }
 }
 
 function addParameter(direction: ProgramTemplateParameterDirection) {
@@ -422,6 +460,7 @@ onMounted(async () => {
       </template>
       <template #footer>
         <div class="program-template-detail-actions">
+          <el-button v-if="canDeleteActiveDraft" type="danger" plain :loading="deletingDraft" @click="deleteActiveDraft">删除草稿</el-button>
           <el-button v-if="activeRevision?.state === 'Draft' && activeRevision.createdBy === username" @click="editActiveDraft">编辑草稿</el-button>
           <el-button v-if="activeRevision?.state === 'Rejected' && activeRevision.createdBy === username && canSubmit && !selected?.revisions.some(item => ['Draft','PendingReview','PendingApproval'].includes(item.state))" @click="createNextVersion">根据退回意见修改</el-button>
           <el-button v-if="selected?.currentPublishedRevisionId && canSubmit && !selected.revisions.some(item => ['Draft','PendingReview','PendingApproval'].includes(item.state))" @click="versionDialogOpen = true">创建新版本</el-button>

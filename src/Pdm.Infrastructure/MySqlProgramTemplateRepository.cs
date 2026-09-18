@@ -125,6 +125,40 @@ public sealed class MySqlProgramTemplateRepository(IOptions<PdmDatabaseOptions> 
             ?? throw new InvalidOperationException("程序模板草稿更新后无法读取。");
     }
 
+    public async Task DeleteDraftAsync(Guid revisionId, long expectedRowVersion, CancellationToken cancellationToken)
+    {
+        await using var connection = await OpenAsync(cancellationToken);
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+        var revision = await connection.QuerySingleOrDefaultAsync<DeleteDraftRow>(new CommandDefinition(
+            "SELECT template_id TemplateId,state,row_version RowVersion FROM program_template_revision WHERE id=@RevisionId FOR UPDATE",
+            new { RevisionId = revisionId }, transaction, cancellationToken: cancellationToken));
+        if (revision is null) throw new PdmNotFoundException("程序模板候选版本不存在。");
+        if (revision.RowVersion != expectedRowVersion) throw new PdmConflictException("数据已被其他用户更新，请刷新后重试。");
+        if (!string.Equals(revision.State, ProgramTemplateRevisionState.Draft.ToString(), StringComparison.Ordinal))
+            throw new PdmConflictException("只有草稿版本可以删除。");
+
+        var currentPublishedRevisionId = await connection.ExecuteScalarAsync<Guid?>(new CommandDefinition(
+            "SELECT current_published_revision_id FROM program_template WHERE id=@TemplateId FOR UPDATE",
+            new { revision.TemplateId }, transaction, cancellationToken: cancellationToken));
+        await connection.ExecuteAsync(new CommandDefinition(
+            "DELETE FROM program_template_approval_task WHERE revision_id=@RevisionId",
+            new { RevisionId = revisionId }, transaction, cancellationToken: cancellationToken));
+        await connection.ExecuteAsync(new CommandDefinition(
+            "DELETE FROM program_template_parameter WHERE revision_id=@RevisionId",
+            new { RevisionId = revisionId }, transaction, cancellationToken: cancellationToken));
+        await connection.ExecuteAsync(new CommandDefinition(
+            "DELETE FROM program_template_revision WHERE id=@RevisionId AND state='Draft' AND row_version=@ExpectedRowVersion",
+            new { RevisionId = revisionId, ExpectedRowVersion = expectedRowVersion }, transaction, cancellationToken: cancellationToken));
+        var remaining = await connection.ExecuteScalarAsync<int>(new CommandDefinition(
+            "SELECT COUNT(*) FROM program_template_revision WHERE template_id=@TemplateId",
+            new { revision.TemplateId }, transaction, cancellationToken: cancellationToken));
+        if (remaining == 0 && currentPublishedRevisionId is null)
+            await connection.ExecuteAsync(new CommandDefinition(
+                "DELETE FROM program_template WHERE id=@TemplateId",
+                new { revision.TemplateId }, transaction, cancellationToken: cancellationToken));
+        await transaction.CommitAsync(cancellationToken);
+    }
+
     public async Task<ProgramTemplateRevision> AttachFileAsync(Guid revisionId, StoredProgramTemplateFile file, long expectedRowVersion, CancellationToken cancellationToken)
     {
         await using var connection = await OpenAsync(cancellationToken);
@@ -443,6 +477,8 @@ public sealed class MySqlProgramTemplateRepository(IOptions<PdmDatabaseOptions> 
     private sealed record ParameterRow(
         Guid Id, Guid RevisionId, string Direction, int SortOrder, string Name, string DataType,
         string? DefaultValue, string? Unit, string? Description);
+
+    private sealed record DeleteDraftRow(Guid TemplateId, string State, long RowVersion);
 
     private sealed record TaskRow(
         Guid Id, Guid RevisionId, string Stage, string? Assignee, string? AssigneeRoleCode, string? Decision,

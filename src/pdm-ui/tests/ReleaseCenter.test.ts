@@ -299,6 +299,7 @@ describe('ReleaseCenter', () => {
       props: {
         releasePackage: null, allowedScopes: ['NonStandardLongLead', 'NonStandardWithDrawing', 'NonStandardSupplement'],
         preferredScope: 'NonStandardLongLead', releaseItems: [item], username: 'engineer',
+        drawingReviewCandidates: [{ candidateId: 'review-ns-1', bomItemId: 'ns-1', drawingNumber: 'NS-001', name: '非标长交期件', bomKinds: ['NonStandard'], modelRevision: 'W1', drawingRevision: 'W1', state: 'ApprovedCurrent', selectable: false }],
         pending: false, progress: 0, error: '', canManage: true, canDecide: true,
       },
     })
@@ -313,6 +314,26 @@ describe('ReleaseCenter', () => {
     expect(created.scope).toBe('NonStandardLongLead')
     expect(created.selectedBomItemIds).toEqual(['ns-1'])
     expect(created.selectedBomItemQuantities).toEqual({ 'ns-1': 2 })
+  })
+
+  it('disables non-standard release selection until the current drawing version is approved', async () => {
+    const item: BomItem = { id: 'ns-unreviewed', kind: 'NonStandard', sequence: 1, drawingNumber: '',
+      name: '待审图非标件', quantity: 1, unit: '个', revision: 'W1', complete: true, sourceDocumentId: 'model-unreviewed' }
+    const wrapper = mount(ReleaseCenter, {
+      props: {
+        releasePackage: null, allowedScopes: ['NonStandardLongLead'], preferredScope: 'NonStandardLongLead',
+        releaseItems: [item], username: 'engineer', pending: false, progress: 0, error: '', canManage: true, canDecide: true,
+        drawingReviewCandidates: [{ candidateId: 'review-unreviewed', bomItemId: 'ns-unreviewed', modelDocumentId: 'model-unreviewed', drawingNumber: '', name: '待审图非标件', bomKinds: ['NonStandard'], modelRevision: 'W1', drawingRevision: 'W1', state: 'Ready', reason: '当前工程图尚未发起审核', selectable: true }],
+      },
+    })
+
+    const checkbox = wrapper.get('input[aria-label="选择长交期物料 "]')
+    expect(checkbox.attributes()).toHaveProperty('disabled')
+    expect(wrapper.text()).toContain('当前工程图尚未发起审核')
+    expect(wrapper.text()).toContain('不能勾选发布')
+    expect(wrapper.get('.pdm-release-draft-actions .pdm-primary-action').attributes()).toHaveProperty('disabled')
+    await checkbox.setValue(true)
+    expect(wrapper.emitted('create')).toBeUndefined()
   })
 
   it('lets the current assignee decide or transfer without showing the withdraw action', () => {

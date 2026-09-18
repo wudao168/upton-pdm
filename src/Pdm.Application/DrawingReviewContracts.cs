@@ -15,3 +15,7 @@ public sealed record DecideDrawingReviewTargetCommand(
     DrawingReviewTarget Target,
     DrawingReviewDecision Decision,
     string? Comment);
+
+public sealed record DecideDrawingReviewSupervisorCommand(
+    DrawingReviewDecision Decision,
+    string? Comment);

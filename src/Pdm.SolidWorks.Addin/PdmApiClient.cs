@@ -231,6 +231,35 @@ internal sealed class PdmApiClient : IDisposable
             },
             cancellationToken);
 
+    public async Task PreflightCheckInAsync(
+        Guid documentId,
+        Guid projectId,
+        CadTreeNode root,
+        IReadOnlyDictionary<string, string> modelProperties,
+        Guid checkoutSessionId,
+        bool isProjectRoot,
+        string drawingNumber,
+        string name,
+        CancellationToken cancellationToken,
+        Guid? drawingReviewWritebackId = null)
+    {
+        _ = await PostJsonAsync<object>(
+            string.Concat("api/documents/", documentId, "/checkin/preflight"),
+            new
+            {
+                projectId,
+                root = ToRequestNode(root, true),
+                properties = modelProperties ?? new Dictionary<string, string>(),
+                checkoutSessionId,
+                isProjectRoot,
+                drawingNumber,
+                name,
+                fileName = root.FileName,
+                drawingReviewWritebackId
+            },
+            cancellationToken).ConfigureAwait(false);
+    }
+
     private static Dictionary<string, string> MergeProperties(IReadOnlyDictionary<string, string> fileProperties, IReadOnlyDictionary<string, string> modelProperties)
     {
         var result = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);

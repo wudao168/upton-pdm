@@ -523,12 +523,15 @@ onBeforeUnmount(() => {
         :data-preview-state="previewState"
         :aria-label="desktopAvailable ? '客户端内嵌eDrawings预览区' : '网页端图档预览状态'"
       >
-        <dl v-if="!desktopAvailable" class="pdm-preview-properties" aria-label="图档属性">
-          <div v-for="property in previewProperties" :key="property.label">
-            <dt>{{ property.label }}</dt>
-            <dd :title="property.value">{{ property.value }}</dd>
-          </div>
-        </dl>
+        <div v-if="!desktopAvailable" class="pdm-preview-left-stack">
+          <dl class="pdm-preview-properties" aria-label="图档属性">
+            <div v-for="property in previewProperties" :key="property.label">
+              <dt>{{ property.label }}</dt>
+              <dd :title="property.value">{{ property.value }}</dd>
+            </div>
+          </dl>
+          <div id="drawing-review-annotation-host" class="pdm-review-annotation-host" />
+        </div>
         <iframe
           v-if="!desktopAvailable && previewState === 'ready' && webPreviewFormat === 'Pdf' && webPreviewUrl"
           class="pdm-web-preview-frame"

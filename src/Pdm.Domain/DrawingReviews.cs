@@ -3,6 +3,7 @@ namespace Upton.Pdm.Domain;
 public enum DrawingReviewPackageState
 {
     InReview,
+    PendingSupervisorApproval,
     ChangesRequested,
     WritingProperties,
     Approved,
@@ -64,6 +65,22 @@ public sealed record DrawingReviewPackage
     public required string CreatedBy { get; init; }
 
     public required DateTimeOffset CreatedAt { get; init; }
+
+    public string? AssignedReviewer { get; init; }
+
+    public string? AssignedReviewerName { get; init; }
+
+    public string? Supervisor { get; init; }
+
+    public string? SupervisorName { get; init; }
+
+    public string? SupervisorReviewedBy { get; init; }
+
+    public string? SupervisorReviewedByName { get; init; }
+
+    public DateTimeOffset? SupervisorReviewedAt { get; init; }
+
+    public string? SupervisorComment { get; init; }
 
     public DateTimeOffset? ApprovedAt { get; init; }
 

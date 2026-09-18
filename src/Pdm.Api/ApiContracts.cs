@@ -123,7 +123,7 @@ public sealed record UpdateSystemSettingsRequest(
 
 public sealed record SetBomEmptyDeclarationRequest(bool DeclaredEmpty);
 
-public sealed record CreateDrawingReviewRequest(IReadOnlyList<Guid>? ModelDocumentIds = null);
+public sealed record CreateDrawingReviewRequest(IReadOnlyList<Guid>? ModelDocumentIds, string AssignedReviewer);
 
 public sealed record WithdrawDrawingReviewRequest(string Reason);
 
@@ -138,6 +138,10 @@ public sealed record AddDrawingReviewMarkupRequest(
 
 public sealed record DecideDrawingReviewTargetRequest(
     [property: JsonConverter(typeof(JsonStringEnumConverter))] DrawingReviewTarget Target,
+    [property: JsonConverter(typeof(JsonStringEnumConverter))] DrawingReviewDecision Decision,
+    string? Comment);
+
+public sealed record DecideDrawingReviewSupervisorRequest(
     [property: JsonConverter(typeof(JsonStringEnumConverter))] DrawingReviewDecision Decision,
     string? Comment);
 
@@ -225,6 +229,17 @@ public sealed record CheckInRequest(
     Guid CheckoutSessionId,
     bool IsProjectRoot = false,
     bool ForceVersion = false,
+    string? DrawingNumber = null,
+    string? Name = null,
+    string? FileName = null,
+    Guid? DrawingReviewWritebackId = null);
+
+public sealed record CheckInPreflightRequest(
+    Guid ProjectId,
+    DocumentReferenceNode Root,
+    IReadOnlyDictionary<string, string?>? Properties,
+    Guid CheckoutSessionId,
+    bool IsProjectRoot = false,
     string? DrawingNumber = null,
     string? Name = null,
     string? FileName = null,

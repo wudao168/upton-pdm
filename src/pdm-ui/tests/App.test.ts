@@ -9,6 +9,7 @@ let materialRequestsUnauthorized = false
 let resumeRequestsUnauthorized = false
 let passwordResetRequestsForbidden = false
 let drawingReviewsResponse: Array<Record<string, unknown>> = []
+let nonStandardBomResponse: Array<Record<string, unknown>> = []
 
 function json(value: unknown, status = 200) {
   return new Response(JSON.stringify(value), { status, headers: { 'Content-Type': 'application/json' } })
@@ -166,11 +167,11 @@ function installApiMock(projectsBeforeDefault: Array<Record<string, unknown>> = 
     ])
     if (url.endsWith('/documents') || url.endsWith('/folder-documents')) {
       return json([
-        { id: 'doc-root', projectId, drawingNumber: 'REAL-ASM-001', name: '真实总装配', fileName: 'REAL-ASM-001.SLDASM', kind: 0, revision: { display: 'W2' }, checkedOutBy: 'engineer' },
-        { id: 'doc-part', projectId, drawingNumber: 'REAL-PRT-001', name: '真实底板', fileName: 'REAL-PRT-001.SLDPRT', kind: 1, revision: { display: 'A' }, checkedOutBy: null },
-        { id: 'doc-stale', projectId, drawingNumber: 'STALE-PRT-001', name: '历史版本子件', fileName: 'STALE-PRT-001.SLDPRT', kind: 1, revision: { display: 'W4' }, checkedOutBy: null },
-        { id: 'doc-drawing', projectId, drawingNumber: 'REAL-ASM-001', name: '真实总装工程图', fileName: 'REAL-ASM-001.SLDDRW', kind: 2, revision: { display: 'W2' }, checkedOutBy: null },
-        { id: 'doc-drawing-missing', projectId, drawingNumber: 'REAL-PRT-001', name: '遗漏工程图', fileName: 'REAL-PRT-001.SLDDRW', kind: 2, revision: { display: 'W1' }, checkedOutBy: null },
+        { id: 'doc-root', projectId, drawingNumber: 'REAL-ASM-001', name: '真实总装配', fileName: 'REAL-ASM-001.SLDASM', kind: 0, revision: { display: 'W2' }, storedVersionCount: 2, checkedOutBy: 'engineer' },
+        { id: 'doc-part', projectId, drawingNumber: 'REAL-PRT-001', name: '真实底板', fileName: 'REAL-PRT-001.SLDPRT', kind: 1, revision: { display: 'A' }, storedVersionCount: 1, checkedOutBy: null },
+        { id: 'doc-stale', projectId, drawingNumber: 'STALE-PRT-001', name: '历史版本子件', fileName: 'STALE-PRT-001.SLDPRT', kind: 1, revision: { display: 'W4' }, storedVersionCount: 4, checkedOutBy: null },
+        { id: 'doc-drawing', projectId, drawingNumber: 'REAL-ASM-001', name: '真实总装工程图', fileName: 'REAL-ASM-001.SLDDRW', kind: 2, revision: { display: 'W2' }, storedVersionCount: 2, checkedOutBy: null },
+        { id: 'doc-drawing-missing', projectId, drawingNumber: 'REAL-PRT-001', name: '遗漏工程图', fileName: 'REAL-PRT-001.SLDDRW', kind: 2, revision: { display: 'W1' }, storedVersionCount: 0, checkedOutBy: null },
       ])
     }
     if (url.endsWith('/reference-tree')) {
@@ -190,7 +191,7 @@ function installApiMock(projectsBeforeDefault: Array<Record<string, unknown>> = 
     if (url.endsWith('/boms/Standard')) {
       return json([{ sequence: 1, drawingNumber: 'REAL-PRT-001', name: '真实底板', quantity: 2, unit: '件', material: 'Q235B', specification: '10mm', revision: 'A', isComplete: true }])
     }
-    if (url.endsWith('/boms/NonStandard')) return json([])
+    if (url.endsWith('/boms/NonStandard')) return json(nonStandardBomResponse)
     if (url.endsWith('/boms/Unclassified')) return json([])
     if (url.endsWith('/boms/Electrical')) {
       return json([{ sequence: 1, drawingNumber: 'REAL-EL-001', name: '真实传感器', quantity: 1, unit: '件', material: null, specification: 'PNP', revision: 'A', isComplete: false }])
@@ -285,6 +286,7 @@ describe('PLM client workspace', () => {
     resumeRequestsUnauthorized = false
     passwordResetRequestsForbidden = false
     drawingReviewsResponse = []
+    nonStandardBomResponse = []
     window.sessionStorage.clear()
     window.localStorage.clear()
     Object.defineProperty(window, 'chrome', { configurable: true, value: undefined })
@@ -1119,6 +1121,11 @@ describe('PLM client workspace', () => {
   })
 
   it('filters real 3D and 2D documents and switches the related preview object', async () => {
+    nonStandardBomResponse = [{
+      id: 'non-standard-root', kind: 'NonStandard', sequence: 1, drawingNumber: 'REAL-ASM-001', name: '真实总装配', quantity: 1,
+      unit: '件', material: 'Q235B', revision: 'W2', isComplete: true, source: 'Auto', sourceDocumentId: 'doc-root',
+      isManuallyExcluded: false, isPendingClassification: false,
+    }]
     const wrapper = mount(App, { attachTo: document.body, global: { plugins: [ElementPlus] } })
     await login(wrapper)
     await projectTabByText(wrapper, '图档').trigger('click')
@@ -1137,6 +1144,12 @@ describe('PLM client workspace', () => {
     await flushPromises()
     expect((structure.get('input[type="search"]').element as HTMLInputElement).value).toBe('')
     expect(structure.text()).toContain('真实总装工程图')
+    const unarchivedDrawing = structure.findAll('button.pdm-tree-row').find(row => row.text().includes('遗漏工程图'))
+    expect(unarchivedDrawing?.text()).toContain('未存档')
+    expect(unarchivedDrawing?.text()).not.toContain('未发起')
+    await unarchivedDrawing!.trigger('click')
+    await flushPromises()
+    expect(wrapper.get('button[aria-label="图纸审核"] small').text()).toBe('未存档')
     expect(wrapper.get('[aria-label="图档预览"]').text()).toContain('2D工程图')
     expect(wrapper.get('[aria-label="图档预览"]').text()).toContain('关联模型')
 

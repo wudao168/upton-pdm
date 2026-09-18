@@ -35,7 +35,7 @@ const review: DrawingReviewPackage = {
   markups: [],
 }
 
-const permissions = { pending: false, canSubmit: true, canAnnotate: true, canDecide: true, desktopAvailable: false }
+const permissions = { pending: false, canSubmit: true, canAnnotate: true, canDecide: true, desktopAvailable: false, reviewerOptions: [{ username: 'reviewer', label: '审核员（reviewer）' }] }
 const candidate: DrawingReviewCandidate = {
   candidateId: 'candidate-1',
   modelDocumentId: 'model-1',
@@ -140,9 +140,42 @@ describe('DrawingReviewPanel', () => {
     await wrapper.get('.drawing-review-panel__empty button').trigger('click')
     expect(wrapper.text()).toContain('选择审核范围')
     expect(wrapper.text()).toContain('全部待审')
-    expect(wrapper.get('.drawing-review-candidate').classes()).toContain('is-selected')
+    const candidateRow = wrapper.get('.drawing-review-candidate')
+    expect(candidateRow.classes()).toContain('is-selected')
+    expect(candidateRow.text()).toBe('✓A01-100待审核')
+    expect(candidateRow.text()).not.toContain('机架组件')
+    expect(candidateRow.text()).not.toContain('2D W1')
+    expect(candidateRow.attributes('title')).toBe('机架组件')
     await wrapper.get('.drawing-review-scope__footer button').trigger('click')
-    expect(wrapper.emitted('create')).toEqual([[['model-1']]])
+    expect(wrapper.emitted('create')).toEqual([[null, 'reviewer']])
+  })
+
+  it('在同一张状态表中显示全部图纸并按状态筛选和定位', async () => {
+    const candidates: DrawingReviewCandidate[] = [
+      candidate,
+      { ...candidate, candidateId: 'in-review', modelDocumentId: 'model-2', drawingDocumentId: 'drawing-2', drawingNumber: 'A01-200', state: 'InReview', selectable: false },
+      { ...candidate, candidateId: 'approved', modelDocumentId: 'model-3', drawingDocumentId: 'drawing-3', drawingNumber: 'A01-300', state: 'ApprovedCurrent' },
+      { ...candidate, candidateId: 'unavailable', modelDocumentId: 'model-4', drawingDocumentId: 'drawing-4', drawingNumber: 'A01-400', state: 'Unavailable', selectable: false },
+    ]
+    const reviewWithSecondDrawing: DrawingReviewPackage = {
+      ...review,
+      items: [{ ...review.items[0]!, modelDocumentId: 'model-2', drawingDocumentId: 'drawing-2', drawingNumber: 'A01-200' }],
+    }
+    const wrapper = mount(DrawingReviewPanel, {
+      props: { packageId: review.id, packages: [reviewWithSecondDrawing], candidates, selectedDocumentId: 'model-1', currentUsername: 'reviewer', ...permissions },
+    })
+
+    expect(wrapper.findAll('.drawing-review-overview__row')).toHaveLength(4)
+    expect(wrapper.get('[aria-label="图纸审核状态表"]').text()).toContain('A01-100待审核')
+    expect(wrapper.get('[aria-label="图纸审核状态表"]').text()).toContain('A01-200审核中')
+    expect(wrapper.get('[aria-label="图纸审核状态表"]').text()).toContain('A01-300已审核')
+    expect(wrapper.get('[aria-label="图纸审核状态表"]').text()).toContain('A01-400不可发起')
+
+    await wrapper.get('select[aria-label="筛选图纸审核状态"]').setValue('InReview')
+    expect(wrapper.findAll('.drawing-review-overview__row')).toHaveLength(1)
+    await wrapper.get('.drawing-review-overview__row').trigger('click')
+    expect(wrapper.emitted('update:packageId')).toContainEqual(['review-1'])
+    expect(wrapper.emitted('selectDocument')).toContainEqual(['drawing-2'])
   })
 
   it('没有有效非标BOM候选时显示可操作的门禁说明', async () => {
@@ -173,7 +206,7 @@ describe('DrawingReviewPanel', () => {
     expect(createButton.attributes('disabled')).toBeUndefined()
     await createButton.trigger('click')
     await wrapper.get('.drawing-review-scope__footer button').trigger('click')
-    expect(wrapper.emitted('create')).toEqual([[['model-1']]])
+    expect(wrapper.emitted('create')).toEqual([[null, 'reviewer']])
   })
 
   it('shows source-less non-standard BOM rows as disabled blockers', async () => {
@@ -199,8 +232,33 @@ describe('DrawingReviewPanel', () => {
     const blockedRow = wrapper.get('.drawing-review-candidate.is-unavailable')
     expect(blockedRow.attributes('disabled')).toBeDefined()
     expect(blockedRow.text()).toContain('02040000005')
-    expect(blockedRow.text()).toContain('没有来源模型')
-    expect(wrapper.get('.drawing-review-scope__footer').text()).toContain('已选择 1 张')
+    expect(blockedRow.text()).toContain('不可发起')
+    expect(blockedRow.text()).not.toContain('没有来源模型')
+    expect(blockedRow.attributes('title')).toContain('没有来源模型')
+    expect(wrapper.get('.drawing-review-scope__footer').text()).toContain('全部待审（当前1张）')
+  })
+
+  it('显示指定审核人到机械主管的两级节点并限制当前处理人', async () => {
+    const routedReview: DrawingReviewPackage = {
+      ...review,
+      assignedReviewer: 'reviewer',
+      assignedReviewerName: '指定审核员',
+      supervisor: 'manager',
+      supervisorName: '机械主管',
+    }
+    const wrapper = mount(DrawingReviewPanel, {
+      props: { packageId: routedReview.id, packages: [routedReview], candidates: [candidate], selectedDocumentId: 'drawing-1', currentUsername: 'other', ...permissions },
+    })
+
+    expect(wrapper.text()).toContain('指定审核人 指定审核员 → 机械主管 机械主管')
+    expect(wrapper.text()).toContain('当前审核人：指定审核员')
+    expect(wrapper.findAll('.drawing-review-decision-buttons button').every(button => button.attributes('disabled') !== undefined)).toBe(true)
+    await wrapper.setProps({ currentUsername: 'reviewer' })
+    expect(wrapper.findAll('.drawing-review-decision-buttons button').every(button => button.attributes('disabled') === undefined)).toBe(true)
+
+    await wrapper.setProps({ packages: [{ ...routedReview, state: 'PendingSupervisorApproval' }], currentUsername: 'manager' })
+    expect(wrapper.text()).toContain('当前批准人：机械主管')
+    expect(wrapper.findAll('.drawing-review-decision-buttons button').every(button => button.attributes('disabled') === undefined)).toBe(true)
   })
 
   it('默认只选待审图纸，并允许手工重新选择已审核版本', async () => {

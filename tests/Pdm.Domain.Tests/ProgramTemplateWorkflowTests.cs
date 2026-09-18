@@ -176,6 +176,95 @@ public sealed class ProgramTemplateWorkflowTests
         Assert.Null(retry.EvidenceStoragePath);
     }
 
+    [Fact]
+    public async Task OwnerCanDeleteDraftAndItsControlledFiles()
+    {
+        var clock = TimeProvider.System;
+        var pdmRepository = new InMemoryPdmRepository(clock);
+        var templateRepository = new InMemoryProgramTemplateRepository(clock);
+        var storage = new TrackingProgramTemplateStorage();
+        var service = new ProgramTemplateService(templateRepository, pdmRepository, storage, clock);
+        await ConfigureElectricalApprovalChainAsync(pdmRepository);
+        var created = await service.CreateAsync(new CreateProgramTemplateCommand(
+            ProgramTemplateAssetType.PlcProgram, "待删除草稿", "", "", "", "", "", "", [], "", []),
+            "uploader", UserRole.Engineer, default);
+        var revision = created.Revisions.Single();
+        revision = await templateRepository.AttachFileAsync(revision.Id,
+            new(revision.Id, ProgramTemplateAttachmentKind.Package, "draft.rar", "draft/package.rar", 128, new string('A', 64), clock.GetUtcNow()),
+            revision.RowVersion, default);
+        revision = await templateRepository.AttachFileAsync(revision.Id,
+            new(revision.Id, ProgramTemplateAttachmentKind.TestEvidence, "test.docx", "draft/test.docx", 64, new string('B', 64), clock.GetUtcNow()),
+            revision.RowVersion, default);
+
+        await service.DeleteDraftAsync(revision.Id, revision.RowVersion, "uploader", UserRole.Engineer, default);
+
+        Assert.Null(await templateRepository.FindAsync(created.Id, default));
+        Assert.Equal(2, storage.Discarded.Count);
+        Assert.Contains(storage.Discarded, item => item.Kind == ProgramTemplateAttachmentKind.Package);
+        Assert.Contains(storage.Discarded, item => item.Kind == ProgramTemplateAttachmentKind.TestEvidence);
+    }
+
+    [Fact]
+    public async Task SubmittedRevisionCannotBeDeleted()
+    {
+        var clock = TimeProvider.System;
+        var pdmRepository = new InMemoryPdmRepository(clock);
+        var templateRepository = new InMemoryProgramTemplateRepository(clock);
+        var service = new ProgramTemplateService(templateRepository, pdmRepository, new UnusedProgramTemplateStorage(), clock);
+        await ConfigureElectricalApprovalChainAsync(pdmRepository);
+        var created = await service.CreateAsync(new CreateProgramTemplateCommand(
+            ProgramTemplateAssetType.PlcProgram, "已提交模板", "控制", "功能说明", "Siemens", "TIA Portal", "V19", "S7-1500", [], "首版", []),
+            "uploader", UserRole.Engineer, default);
+        var revision = created.Revisions.Single();
+        revision = await templateRepository.AttachFileAsync(revision.Id,
+            new(revision.Id, ProgramTemplateAttachmentKind.Package, "template.zip", "submitted/template.zip", 128, new string('A', 64), clock.GetUtcNow()),
+            revision.RowVersion, default);
+        revision = await templateRepository.AttachFileAsync(revision.Id,
+            new(revision.Id, ProgramTemplateAttachmentKind.TestEvidence, "test.pdf", "submitted/test.pdf", 64, new string('B', 64), clock.GetUtcNow()),
+            revision.RowVersion, default);
+        revision = await service.SubmitAsync(revision.Id, revision.RowVersion, "uploader", UserRole.Engineer, default);
+
+        var exception = await Assert.ThrowsAsync<PdmConflictException>(() =>
+            service.DeleteDraftAsync(revision.Id, revision.RowVersion, "uploader", UserRole.Engineer, default));
+
+        Assert.Equal("只有草稿版本可以修改、上传文件或删除。", exception.Message);
+    }
+
+    [Fact]
+    public async Task DeletingNewDraftPreservesPublishedTemplate()
+    {
+        var clock = TimeProvider.System;
+        var pdmRepository = new InMemoryPdmRepository(clock);
+        var templateRepository = new InMemoryProgramTemplateRepository(clock);
+        var service = new ProgramTemplateService(templateRepository, pdmRepository, new TrackingProgramTemplateStorage(), clock);
+        await ConfigureElectricalApprovalChainAsync(pdmRepository);
+        var templateId = Guid.NewGuid();
+        var publishedId = Guid.NewGuid();
+        var draftId = Guid.NewGuid();
+        var published = new ProgramTemplateRevision(
+            publishedId, templateId, 1, 0, 0, 1, ProgramTemplateRevisionState.Published,
+            "已发布模板", "控制", "功能说明", "Siemens", "TIA Portal", "V19", "S7-1500", [], "首版",
+            "template.zip", "published/template.zip", 128, new string('A', 64), "test.pdf", "published/test.pdf", 64, new string('B', 64),
+            "uploader", clock.GetUtcNow(), clock.GetUtcNow(), clock.GetUtcNow(), 1, []);
+        var draft = published with
+        {
+            Id = draftId, VersionMinor = 1, State = ProgramTemplateRevisionState.Draft,
+            PackageFileName = null, PackageStoragePath = null, PackageFileLength = null, PackageSha256 = null,
+            EvidenceFileName = null, EvidenceStoragePath = null, EvidenceFileLength = null, EvidenceSha256 = null,
+            SubmittedAt = null, PublishedAt = null
+        };
+        await templateRepository.CreateAsync(new(
+            templateId, "PT-PLC-0001", ProgramTemplateAssetType.PlcProgram, null, null, publishedId, false,
+            "uploader", clock.GetUtcNow(), [published, draft]), default);
+
+        await service.DeleteDraftAsync(draft.Id, draft.RowVersion, "uploader", UserRole.Engineer, default);
+
+        var remaining = await templateRepository.FindAsync(templateId, default);
+        Assert.NotNull(remaining);
+        Assert.Equal(publishedId, remaining.CurrentPublishedRevisionId);
+        Assert.Equal(publishedId, Assert.Single(remaining.Revisions).Id);
+    }
+
     private static async Task ConfigureElectricalApprovalChainAsync(InMemoryPdmRepository repository)
     {
         await repository.CreateUserAsync(new(Guid.NewGuid(), "uploader", "上传人", "unused", UserRole.Engineer, true, RoleCode: "ElectricalEngineer"), default);
@@ -196,5 +285,20 @@ public sealed class ProgramTemplateWorkflowTests
         public Task VerifyAsync(string relativePath, long length, string sha256, CancellationToken cancellationToken) => throw new NotSupportedException();
         public Task<Stream> OpenReadAsync(string relativePath, CancellationToken cancellationToken) => throw new NotSupportedException();
         public Task DiscardAsync(StoredProgramTemplateFile file, CancellationToken cancellationToken) => throw new NotSupportedException();
+    }
+
+    private sealed class TrackingProgramTemplateStorage : IProgramTemplateStorage
+    {
+        public List<StoredProgramTemplateFile> Discarded { get; } = [];
+        public Task<ProgramTemplateUploadSession> StartUploadAsync(Guid revisionId, string templateCode, ProgramTemplateAttachmentKind kind, string fileName, long totalLength, string expectedSha256, string owner, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<ProgramTemplateUploadSession> WriteChunkAsync(Guid sessionId, int chunkIndex, Stream content, string actor, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<StoredProgramTemplateFile> CompleteUploadAsync(Guid sessionId, string actor, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task VerifyAsync(string relativePath, long length, string sha256, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<Stream> OpenReadAsync(string relativePath, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task DiscardAsync(StoredProgramTemplateFile file, CancellationToken cancellationToken)
+        {
+            Discarded.Add(file);
+            return Task.CompletedTask;
+        }
     }
 }

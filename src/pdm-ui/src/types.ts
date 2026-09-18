@@ -988,7 +988,7 @@ export interface ReleaseChangeReasonSelection {
   detail?: string | null
 }
 
-export type DrawingReviewPackageState = 'InReview' | 'ChangesRequested' | 'WritingProperties' | 'Approved' | 'Stale' | 'Withdrawn'
+export type DrawingReviewPackageState = 'InReview' | 'PendingSupervisorApproval' | 'ChangesRequested' | 'WritingProperties' | 'Approved' | 'Stale' | 'Withdrawn'
 export type DrawingReviewCandidateState = 'Ready' | 'InReview' | 'ApprovedCurrent' | 'Unavailable'
 export type DrawingReviewTarget = 'Model3D' | 'Drawing2D'
 export type DrawingReviewTargetState = 'Pending' | 'ChangesRequested' | 'Approved' | 'Marked' | 'NotRequired'
@@ -1062,6 +1062,14 @@ export interface DrawingReviewPackage {
   state: DrawingReviewPackageState
   createdBy: string
   createdAt: string
+  assignedReviewer?: string | null
+  assignedReviewerName?: string | null
+  supervisor?: string | null
+  supervisorName?: string | null
+  supervisorReviewedBy?: string | null
+  supervisorReviewedByName?: string | null
+  supervisorReviewedAt?: string | null
+  supervisorComment?: string | null
   approvedAt?: string | null
   withdrawnBy?: string | null
   withdrawnAt?: string | null

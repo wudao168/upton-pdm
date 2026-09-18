@@ -46,7 +46,7 @@ public sealed class MySqlProjectContentResetStore : IProjectContentResetStore
             blockers.Add("存在已发布的BOM，项目内容不能重置。");
         if (await ExistsAsync(connection, "SELECT EXISTS(SELECT 1 FROM release_package WHERE project_id IN @Ids AND state IN ('ProcessReview','Approval','Publishing'))", ids, cancellationToken))
             blockers.Add("存在正在审批或发布的发布包，请先撤回或结束流程。");
-        if (await ExistsAsync(connection, "SELECT EXISTS(SELECT 1 FROM drawing_review_package WHERE project_id IN @Ids AND state IN ('InReview','WritingProperties'))", ids, cancellationToken))
+        if (await ExistsAsync(connection, "SELECT EXISTS(SELECT 1 FROM drawing_review_package WHERE project_id IN @Ids AND state IN ('InReview','PendingSupervisorApproval','WritingProperties'))", ids, cancellationToken))
             blockers.Add("存在正在进行的图纸审核或属性写回。");
         if (await ExistsAsync(connection, "SELECT EXISTS(SELECT 1 FROM document WHERE project_id IN @Ids AND checked_out_by IS NOT NULL)", ids, cancellationToken))
             blockers.Add("存在已签出的图档，请先存档或释放编辑权限。");
@@ -168,7 +168,7 @@ public sealed class MySqlProjectContentResetStore : IProjectContentResetStore
         var blockers = new List<string>();
         if (await ExistsAsync(connection, transaction, PublishedBomBlockerSql, ids, cancellationToken)) blockers.Add("存在已发布的BOM，项目内容不能重置");
         if (await ExistsAsync(connection, transaction, "SELECT EXISTS(SELECT 1 FROM release_package WHERE project_id IN @Ids AND state IN ('ProcessReview','Approval','Publishing'))", ids, cancellationToken)) blockers.Add("存在正在审批或发布的发布包");
-        if (await ExistsAsync(connection, transaction, "SELECT EXISTS(SELECT 1 FROM drawing_review_package WHERE project_id IN @Ids AND state IN ('InReview','WritingProperties'))", ids, cancellationToken)) blockers.Add("存在正在进行的图纸审核或属性写回");
+        if (await ExistsAsync(connection, transaction, "SELECT EXISTS(SELECT 1 FROM drawing_review_package WHERE project_id IN @Ids AND state IN ('InReview','PendingSupervisorApproval','WritingProperties'))", ids, cancellationToken)) blockers.Add("存在正在进行的图纸审核或属性写回");
         if (await ExistsAsync(connection, transaction, "SELECT EXISTS(SELECT 1 FROM document WHERE project_id IN @Ids AND checked_out_by IS NOT NULL)", ids, cancellationToken)) blockers.Add("存在已签出的图档");
         if (await ExistsAsync(connection, transaction, "SELECT EXISTS(SELECT 1 FROM cad_property_writeback w INNER JOIN bom_item b ON b.id=w.bom_item_id WHERE b.project_id IN @Ids AND w.status IN ('Pending','InProgress'))", ids, cancellationToken)) blockers.Add("存在正在执行的CAD属性写回任务");
         if (await HasPendingProjectOutboxAsync(connection, transaction, ids, cancellationToken)) blockers.Add("存在尚未处理完成的外部集成事件");

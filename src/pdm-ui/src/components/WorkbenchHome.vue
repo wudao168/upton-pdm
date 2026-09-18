@@ -192,6 +192,7 @@ const drawingReviewSummary = computed(() => {
   if (!review) return '图纸审核：未发起'
   const stateLabels = {
     InReview: '审核中',
+    PendingSupervisorApproval: '待机械主管批准',
     ChangesRequested: '已退改',
     WritingProperties: '写入标记',
     Approved: '已完成',

@@ -503,6 +503,8 @@ public interface IPdmRepository
     Task<DrawingReviewPackage> AddDrawingReviewMarkupAsync(DrawingReviewMarkup markup, CancellationToken cancellationToken);
     Task<DrawingReviewPackage> ResolveDrawingReviewMarkupAsync(Guid markupId, string actor, DateTimeOffset resolvedAt, CancellationToken cancellationToken);
     Task<DrawingReviewPackage> DecideDrawingReviewTargetAsync(Guid itemId, DrawingReviewTarget target, DrawingReviewTargetState state, string reviewer, string reviewerName, DateTimeOffset reviewedAt, string? comment, CancellationToken cancellationToken);
+    Task<DrawingReviewPackage> AdvanceDrawingReviewToSupervisorAsync(Guid packageId, CancellationToken cancellationToken);
+    Task<DrawingReviewPackage> DecideDrawingReviewSupervisorAsync(Guid packageId, DrawingReviewDecision decision, string reviewer, string reviewerName, DateTimeOffset reviewedAt, string? comment, CancellationToken cancellationToken);
     Task<DrawingReviewPackage> QueueDrawingReviewWritebacksAsync(Guid packageId, IReadOnlyList<DrawingReviewWritebackRequest> requests, CancellationToken cancellationToken);
     Task<DrawingReviewPackage?> RecordDrawingReviewWritebackResultAsync(Guid writebackId, Guid? resultVersionId, bool succeeded, CancellationToken cancellationToken);
     Task<IReadOnlyList<BomEmptyDeclaration>> GetBomEmptyDeclarationsAsync(Guid projectId, CancellationToken cancellationToken);

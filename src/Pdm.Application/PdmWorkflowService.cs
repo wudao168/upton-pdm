@@ -1010,53 +1010,25 @@ public sealed class PdmWorkflowService(
         string? fileName = null,
         Guid? drawingReviewWritebackId = null)
     {
-        await RequirePermissionAsync(actor, role, PermissionCodes.DocumentEdit, cancellationToken);
-        await RequireDocumentAccessAsync(documentId, actor, role, FolderAccess.View | FolderAccess.Edit, cancellationToken);
-        var document = await repository.FindDocumentAsync(documentId, cancellationToken)
-            ?? throw new PdmNotFoundException("图档不存在。 ");
-        await RequireProjectSubmissionAccessAsync(document.ProjectId, actor, role, "提交存档", cancellationToken);
-
-        if (snapshot.ProjectId != document.ProjectId || snapshot.RootDocumentId != documentId)
-        {
-            throw new PdmRuleException("引用树快照必须属于当前项目和当前图档。");
-        }
-
-        if (!string.Equals(document.CheckedOutBy, actor, StringComparison.OrdinalIgnoreCase) || document.CheckoutSessionId != checkoutSessionId)
-        {
-            throw new PdmConflictException("编辑会话已经失效，不能提交存档。请另存本地修改或重新获取权限。 ");
-        }
-        await EnsureDrawingReviewEditAllowedAsync(documentId, drawingReviewWritebackId, "提交存档", cancellationToken);
-
+        var validation = await ValidateCheckInRequestAsync(
+            documentId,
+            actor,
+            role,
+            checkoutSessionId,
+            properties,
+            snapshot,
+            isProjectRoot,
+            cancellationToken,
+            drawingNumber,
+            name,
+            fileName,
+            drawingReviewWritebackId);
+        var document = validation.Document;
+        var project = validation.Project;
         var normalizedChangeNote = changeNote?.Trim() ?? string.Empty;
-        var normalizedDrawingNumber = drawingNumber?.Trim();
-        var normalizedName = name?.Trim();
-        var normalizedFileName = fileName?.Trim();
-        if (drawingNumber is not null && string.IsNullOrWhiteSpace(normalizedDrawingNumber))
-        {
-            throw new PdmRuleException("图号不能为空。");
-        }
-        if (name is not null && string.IsNullOrWhiteSpace(normalizedName))
-        {
-            throw new PdmRuleException("图档名称不能为空。");
-        }
-        if (normalizedDrawingNumber?.Length > 160 || normalizedName?.Length > 300)
-        {
-            throw new PdmRuleException("图号或图档名称超过允许长度。");
-        }
-        if (fileName is not null
-            && (string.IsNullOrWhiteSpace(normalizedFileName)
-                || normalizedFileName.Length > 260
-                || !string.Equals(Path.GetFileName(normalizedFileName), normalizedFileName, StringComparison.Ordinal)))
-        {
-            throw new PdmRuleException("文件名无效。");
-        }
-
-        if (snapshot.Root.HasBlockingIssue)
-        {
-            throw new PdmRuleException("设计树存在缺失引用，不能提交存档。 ");
-        }
-
-        await ValidateDrawingQrCodeAsync(document, properties, cancellationToken);
+        var normalizedDrawingNumber = validation.DrawingNumber;
+        var normalizedName = validation.Name;
+        var normalizedFileName = validation.FileName;
 
         var latestVersion = (await repository.ListDocumentVersionsAsync(documentId, cancellationToken)).FirstOrDefault();
         var authoritativeProperties = new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
@@ -1095,16 +1067,6 @@ public sealed class PdmWorkflowService(
             normalizedName = null;
         }
 
-        var project = await repository.FindProjectAsync(document.ProjectId, cancellationToken)
-            ?? throw new PdmNotFoundException("项目不存在。");
-        if (isProjectRoot)
-        {
-            var currentProjectRoot = await repository.GetLatestReferenceSnapshotAsync(document.ProjectId, cancellationToken);
-            if (currentProjectRoot is not null && currentProjectRoot.RootDocumentId != documentId)
-            {
-                throw new PdmRuleException("所选图档不是项目根装配体，普通存档不能替换项目完整结构。");
-            }
-        }
         await fileStorage.VerifyStoredFileAsync(project, file, cancellationToken);
         var standard = await repository.GetBomAsync(document.ProjectId, BomKind.Standard, cancellationToken);
         var nonStandard = await repository.GetBomAsync(document.ProjectId, BomKind.NonStandard, cancellationToken);
@@ -1189,55 +1151,96 @@ public sealed class PdmWorkflowService(
         return result;
     }
 
-    private async Task ValidateDrawingQrCodeAsync(
-        PdmDocument document,
-        IReadOnlyDictionary<string, string?>? properties,
-        CancellationToken cancellationToken)
+    public async Task PreflightCheckInAsync(
+        Guid documentId,
+        string actor,
+        UserRole role,
+        Guid checkoutSessionId,
+        IReadOnlyDictionary<string, string?> properties,
+        CadReferenceSnapshot snapshot,
+        bool isProjectRoot,
+        CancellationToken cancellationToken,
+        string? drawingNumber = null,
+        string? name = null,
+        string? fileName = null,
+        Guid? drawingReviewWritebackId = null)
     {
-        if (document.Kind != DocumentKind.Drawing) return;
-        var policy = (await repository.GetSystemSettingsAsync(cancellationToken)).DrawingQrPolicy;
-        if (!policy.Enabled) return;
-
-        var expected = ReadCadProperty(properties, policy.SourceProperty);
-        if (string.IsNullOrWhiteSpace(expected))
-        {
-            var relations = (await repository.ListDocumentRelationsAsync(document.ProjectId, cancellationToken))
-                .Where(item => item.DrawingDocumentId == document.Id)
-                .ToArray();
-            if (relations.Length != 1)
-                throw new PdmRuleException("工程图未维护型号，且没有唯一关联模型，无法生成二维码。");
-            var modelVersion = (await repository.ListDocumentVersionsAsync(relations[0].ModelDocumentId, cancellationToken)).FirstOrDefault();
-            expected = ReadCadProperty(modelVersion?.PropertySnapshot, policy.SourceProperty);
-        }
-
-        if (string.IsNullOrWhiteSpace(expected))
-            throw new PdmRuleException($"工程图及唯一关联模型均未维护“{policy.SourceProperty}”，无法生成二维码。");
-
-        var actual = ReadCadProperty(properties, "UPLM_QR_CONTENT");
-        var ruleVersion = ReadCadProperty(properties, "UPLM_QR_RULE_VERSION");
-        var sourceProperty = ReadCadProperty(properties, "UPLM_QR_SOURCE_PROPERTY");
-        if (!string.Equals(actual, expected, StringComparison.Ordinal)
-            || !string.Equals(ruleVersion, policy.RuleVersion, StringComparison.Ordinal)
-            || !string.Equals(sourceProperty, policy.SourceProperty, StringComparison.Ordinal))
-        {
-            throw new PdmRuleException($"工程图二维码与“{policy.SourceProperty}”不一致，请在SolidWorks插件中更新二维码后重试。");
-        }
+        _ = await ValidateCheckInRequestAsync(
+            documentId,
+            actor,
+            role,
+            checkoutSessionId,
+            properties,
+            snapshot,
+            isProjectRoot,
+            cancellationToken,
+            drawingNumber,
+            name,
+            fileName,
+            drawingReviewWritebackId);
     }
 
-    private static string ReadCadProperty(IReadOnlyDictionary<string, string?>? properties, string propertyName)
+    private async Task<CheckInValidationContext> ValidateCheckInRequestAsync(
+        Guid documentId,
+        string actor,
+        UserRole role,
+        Guid checkoutSessionId,
+        IReadOnlyDictionary<string, string?> properties,
+        CadReferenceSnapshot snapshot,
+        bool isProjectRoot,
+        CancellationToken cancellationToken,
+        string? drawingNumber,
+        string? name,
+        string? fileName,
+        Guid? drawingReviewWritebackId)
     {
-        if (properties == null || string.IsNullOrWhiteSpace(propertyName)) return string.Empty;
-        var normalized = propertyName.Trim();
-        foreach (var key in new[] { string.Concat("全局/", normalized), normalized })
-            if (properties.TryGetValue(key, out var exact) && !string.IsNullOrWhiteSpace(exact))
-                return exact.Trim();
-        return properties
-            .Where(item => item.Key.EndsWith(string.Concat("/", normalized), StringComparison.OrdinalIgnoreCase)
-                && !string.IsNullOrWhiteSpace(item.Value))
-            .OrderBy(item => item.Key, StringComparer.OrdinalIgnoreCase)
-            .Select(item => item.Value?.Trim() ?? string.Empty)
-            .FirstOrDefault() ?? string.Empty;
+        await RequirePermissionAsync(actor, role, PermissionCodes.DocumentEdit, cancellationToken);
+        await RequireDocumentAccessAsync(documentId, actor, role, FolderAccess.View | FolderAccess.Edit, cancellationToken);
+        var document = await repository.FindDocumentAsync(documentId, cancellationToken)
+            ?? throw new PdmNotFoundException("图档不存在。 ");
+        await RequireProjectSubmissionAccessAsync(document.ProjectId, actor, role, "提交存档", cancellationToken);
+
+        if (snapshot.ProjectId != document.ProjectId || snapshot.RootDocumentId != documentId)
+            throw new PdmRuleException("引用树快照必须属于当前项目和当前图档。");
+        if (!string.Equals(document.CheckedOutBy, actor, StringComparison.OrdinalIgnoreCase) || document.CheckoutSessionId != checkoutSessionId)
+            throw new PdmConflictException("编辑会话已经失效，不能提交存档。请另存本地修改或重新获取权限。 ");
+        await EnsureDrawingReviewEditAllowedAsync(documentId, drawingReviewWritebackId, "提交存档", cancellationToken);
+
+        var normalizedDrawingNumber = drawingNumber?.Trim();
+        var normalizedName = name?.Trim();
+        var normalizedFileName = fileName?.Trim();
+        if (drawingNumber is not null && string.IsNullOrWhiteSpace(normalizedDrawingNumber))
+            throw new PdmRuleException("图号不能为空。");
+        if (name is not null && string.IsNullOrWhiteSpace(normalizedName))
+            throw new PdmRuleException("图档名称不能为空。");
+        if (normalizedDrawingNumber?.Length > 160 || normalizedName?.Length > 300)
+            throw new PdmRuleException("图号或图档名称超过允许长度。");
+        if (fileName is not null
+            && (string.IsNullOrWhiteSpace(normalizedFileName)
+                || normalizedFileName.Length > 260
+                || !string.Equals(Path.GetFileName(normalizedFileName), normalizedFileName, StringComparison.Ordinal)))
+            throw new PdmRuleException("文件名无效。");
+        if (snapshot.Root.HasBlockingIssue)
+            throw new PdmRuleException("设计树存在缺失引用，不能提交存档。 ");
+
+        var project = await repository.FindProjectAsync(document.ProjectId, cancellationToken)
+            ?? throw new PdmNotFoundException("项目不存在。");
+        if (isProjectRoot)
+        {
+            var currentProjectRoot = await repository.GetLatestReferenceSnapshotAsync(document.ProjectId, cancellationToken);
+            if (currentProjectRoot is not null && currentProjectRoot.RootDocumentId != documentId)
+                throw new PdmRuleException("所选图档不是项目根装配体，普通存档不能替换项目完整结构。");
+        }
+
+        return new CheckInValidationContext(document, project, normalizedDrawingNumber, normalizedName, normalizedFileName);
     }
+
+    private sealed record CheckInValidationContext(
+        PdmDocument Document,
+        Project Project,
+        string? DrawingNumber,
+        string? Name,
+        string? FileName);
 
     private static bool IsDrawingQrMarkerProperty(string propertyKey)
     {
@@ -1807,6 +1810,7 @@ public sealed class PdmWorkflowService(
         CancellationToken cancellationToken)
     {
         await RequirePermissionAsync(actor, role, PermissionCodes.ReleaseManage, cancellationToken);
+        RequireMechanicalReleaseRole(ReleaseScope.LegacyCombined, role);
         var project = await repository.FindProjectAsync(projectId, cancellationToken)
             ?? throw new PdmNotFoundException("项目不存在。 ");
 
@@ -1922,6 +1926,7 @@ public sealed class PdmWorkflowService(
         await RequirePermissionAsync(actor, role, PermissionCodes.ReleaseManage, cancellationToken);
         if (scope == ReleaseScope.LegacyCombined)
             throw new PdmRuleException("新发布流程必须指定标准件、电气或非标件发布类型。");
+        RequireMechanicalReleaseRole(scope, role);
         wholeSetMultiplier = NormalizeWholeSetMultiplier(scope, wholeSetMultiplier);
         var project = await repository.FindProjectAsync(projectId, cancellationToken)
             ?? throw new PdmNotFoundException("项目不存在。");
@@ -2046,6 +2051,7 @@ public sealed class PdmWorkflowService(
         await RequirePermissionAsync(actor, role, PermissionCodes.ReleaseManage, cancellationToken);
         var package = await repository.FindReleasePackageAsync(releasePackageId, cancellationToken)
             ?? throw new PdmNotFoundException("发布包不存在。");
+        RequireMechanicalReleaseRole(package.Scope, role);
         if (package.State != ReleasePackageState.Draft)
             throw new PdmConflictException("只有草稿发布包可以编辑，请刷新后重试。");
         var project = await repository.FindProjectAsync(package.ProjectId, cancellationToken)
@@ -2152,6 +2158,7 @@ public sealed class PdmWorkflowService(
         await RequirePermissionAsync(actor, role, PermissionCodes.ReleaseManage, cancellationToken);
         var package = await repository.FindReleasePackageAsync(releasePackageId, cancellationToken)
             ?? throw new PdmNotFoundException("发布包不存在。");
+        RequireMechanicalReleaseRole(package.Scope, role);
         if (package.State != ReleasePackageState.Draft)
             throw new PdmConflictException("只有草稿发布包可以删除，请刷新后重试。");
         var project = await repository.FindProjectAsync(package.ProjectId, cancellationToken)
@@ -2179,6 +2186,7 @@ public sealed class PdmWorkflowService(
         await RequirePermissionAsync(actor, role, PermissionCodes.ReleaseManage, cancellationToken);
         var package = await repository.FindReleasePackageAsync(releasePackageId, cancellationToken)
             ?? throw new PdmNotFoundException("发布包不存在。");
+        RequireMechanicalReleaseRole(package.Scope, role);
         if (!await repository.HasProjectContentReadAccessAsync(package.ProjectId, actor, role, cancellationToken))
             throw new UnauthorizedAccessException("当前用户没有该项目的操作权限。");
         if (!IsLongLeadScope(package.Scope) || package.State != ReleasePackageState.Published)
@@ -3207,10 +3215,31 @@ public sealed class PdmWorkflowService(
             .ToArray();
     }
 
-    public Task<DrawingReviewPackage> CreateDrawingReviewPackageAsync(Guid projectId, string actor, UserRole role, CancellationToken cancellationToken) =>
-        CreateDrawingReviewPackageAsync(projectId, null, actor, role, cancellationToken);
+    public async Task<IReadOnlyList<ApprovalTransferCandidate>> ListDrawingReviewersAsync(Guid projectId, string actor, UserRole role, CancellationToken cancellationToken)
+    {
+        await RequirePermissionAsync(actor, role, PermissionCodes.DrawingReviewSubmit, cancellationToken);
+        if (!await repository.HasProjectContentReadAccessAsync(projectId, actor, role, cancellationToken))
+            throw new UnauthorizedAccessException("当前用户没有该项目的读取权限。");
 
-    public async Task<DrawingReviewPackage> CreateDrawingReviewPackageAsync(Guid projectId, IReadOnlyCollection<Guid>? modelDocumentIds, string actor, UserRole role, CancellationToken cancellationToken)
+        var candidates = new List<ApprovalTransferCandidate>();
+        foreach (var user in await repository.ListUsersAsync(cancellationToken))
+        {
+            if (!user.IsActive || string.Equals(user.Username, actor, StringComparison.OrdinalIgnoreCase)) continue;
+            if (!await repository.HasUserPermissionAsync(user.Username, user.Role, PermissionCodes.DrawingReviewDecide, cancellationToken)) continue;
+            if (!await repository.HasProjectContentReadAccessAsync(projectId, user.Username, user.Role, cancellationToken)) continue;
+            candidates.Add(new ApprovalTransferCandidate(user.Username, user.DisplayName));
+        }
+
+        return candidates.OrderBy(item => item.DisplayName, StringComparer.OrdinalIgnoreCase).ToArray();
+    }
+
+    public Task<DrawingReviewPackage> CreateDrawingReviewPackageAsync(Guid projectId, string actor, UserRole role, CancellationToken cancellationToken) =>
+        CreateDrawingReviewPackageAsync(projectId, null, null, actor, role, cancellationToken);
+
+    public Task<DrawingReviewPackage> CreateDrawingReviewPackageAsync(Guid projectId, IReadOnlyCollection<Guid>? modelDocumentIds, string actor, UserRole role, CancellationToken cancellationToken) =>
+        CreateDrawingReviewPackageAsync(projectId, modelDocumentIds, null, actor, role, cancellationToken);
+
+    public async Task<DrawingReviewPackage> CreateDrawingReviewPackageAsync(Guid projectId, IReadOnlyCollection<Guid>? modelDocumentIds, string? assignedReviewer, string actor, UserRole role, CancellationToken cancellationToken)
     {
         await RequirePermissionAsync(actor, role, PermissionCodes.DrawingReviewSubmit, cancellationToken);
         if (!await repository.HasProjectContentReadAccessAsync(projectId, actor, role, cancellationToken))
@@ -3221,7 +3250,7 @@ public sealed class PdmWorkflowService(
         DrawingReviewCandidateBuild[] selected;
         if (modelDocumentIds is null)
         {
-            selected = candidates.Where(candidate => candidate.Candidate.Selectable).ToArray();
+            selected = candidates.Where(candidate => candidate.Candidate.State == DrawingReviewCandidateState.Ready).ToArray();
         }
         else
         {
@@ -3243,6 +3272,37 @@ public sealed class PdmWorkflowService(
             if (candidates.Count > 0 && candidates.All(candidate => candidate.Candidate.State == DrawingReviewCandidateState.InReview))
                 throw new PdmConflictException("当前项目图档均已在审核中，请勿重复发起。");
             throw new PdmRuleException("当前项目没有可发起审核的非标件2D工程图。");
+        }
+
+        UserAccount? reviewer = null;
+        UserAccount? supervisor = null;
+        if (!string.IsNullOrWhiteSpace(assignedReviewer))
+        {
+            reviewer = await repository.FindUserAsync(assignedReviewer.Trim(), cancellationToken)
+                ?? throw new PdmRuleException("指定审核人不存在。");
+            if (!reviewer.IsActive) throw new PdmRuleException("指定审核人已停用。");
+            if (string.Equals(reviewer.Username, actor, StringComparison.OrdinalIgnoreCase))
+                throw new PdmRuleException("发起人不能同时作为指定审核人。");
+            if (!await repository.HasUserPermissionAsync(reviewer.Username, reviewer.Role, PermissionCodes.DrawingReviewDecide, cancellationToken))
+                throw new PdmRuleException("指定审核人没有2D图纸审核权限，请先调整角色权限。");
+            if (selected.Any(candidate => string.Equals(candidate.DrawingVersion?.CreatedBy, reviewer.Username, StringComparison.OrdinalIgnoreCase)))
+                throw new PdmRuleException("指定审核人不能审核自己生成的图档版本，请选择其他人员。");
+
+            var directory = await repository.GetOrganizationDirectoryAsync(cancellationToken);
+            var primaryUnitId = directory.Memberships.FirstOrDefault(item => item.IsPrimary
+                && string.Equals(item.Username, actor, StringComparison.OrdinalIgnoreCase))?.UnitId;
+            var supervisorUsername = primaryUnitId.HasValue
+                ? directory.Managers.FirstOrDefault(item => item.UnitId == primaryUnitId.Value)?.PrimaryManager
+                : null;
+            if (string.IsNullOrWhiteSpace(supervisorUsername))
+                throw new PdmRuleException("发起人的主部门尚未配置机械主管（主负责人），不能发起两级图纸审核。");
+            supervisor = await repository.FindUserAsync(supervisorUsername, cancellationToken)
+                ?? throw new PdmRuleException("已配置的机械主管账号不存在。");
+            if (!supervisor.IsActive) throw new PdmRuleException("已配置的机械主管账号已停用。");
+            if (string.Equals(supervisor.Username, reviewer.Username, StringComparison.OrdinalIgnoreCase))
+                throw new PdmRuleException("指定审核人与机械主管必须是不同人员。");
+            if (!await repository.HasUserPermissionAsync(supervisor.Username, supervisor.Role, PermissionCodes.DrawingReviewDecide, cancellationToken))
+                throw new PdmRuleException("机械主管没有2D图纸批准权限，请先调整角色权限。");
         }
 
         var packageId = Guid.NewGuid();
@@ -3276,10 +3336,15 @@ public sealed class PdmWorkflowService(
             State = DrawingReviewPackageState.InReview,
             CreatedBy = actor,
             CreatedAt = now,
+            AssignedReviewer = reviewer?.Username,
+            AssignedReviewerName = reviewer?.DisplayName,
+            Supervisor = supervisor?.Username,
+            SupervisorName = supervisor?.DisplayName,
             Items = items
         };
         package = await repository.CreateDrawingReviewPackageAsync(package, cancellationToken);
-        await AuditAsync(actor, "drawing-review.create", nameof(DrawingReviewPackage), package.Id.ToString(), $"{package.Number}；选择2D工程图 {package.Items.Count}张", cancellationToken);
+        await AuditAsync(actor, "drawing-review.create", nameof(DrawingReviewPackage), package.Id.ToString(),
+            $"{package.Number}；选择2D工程图 {package.Items.Count}张{(reviewer is null ? string.Empty : $"；指定审核人 {reviewer.DisplayName}；机械主管 {supervisor!.DisplayName}")}", cancellationToken);
         return package;
     }
 
@@ -3306,7 +3371,7 @@ public sealed class PdmWorkflowService(
     private async Task<IReadOnlyList<DrawingReviewCandidateBuild>> BuildDrawingReviewCandidatesAsync(Guid projectId, CancellationToken cancellationToken)
     {
         var packages = await repository.ListDrawingReviewPackagesAsync(projectId, cancellationToken);
-        var activePackages = packages.Where(package => package.State is DrawingReviewPackageState.InReview or DrawingReviewPackageState.WritingProperties).ToArray();
+        var activePackages = packages.Where(package => package.State is DrawingReviewPackageState.InReview or DrawingReviewPackageState.PendingSupervisorApproval or DrawingReviewPackageState.WritingProperties).ToArray();
         var activeDocumentIds = activePackages.SelectMany(package => package.Items)
             .Where(item => item.DrawingDocumentId.HasValue)
             .Select(item => item.DrawingDocumentId!.Value)
@@ -3421,7 +3486,7 @@ public sealed class PdmWorkflowService(
                 BomItemId = source.BomKinds.Count > 0 ? source.ReviewSourceId : null,
                 ModelDocumentId = model.Id,
                 DrawingDocumentId = drawing?.Id,
-                DrawingNumber = source.DrawingNumber,
+                DrawingNumber = drawing?.DrawingNumber ?? model.DrawingNumber,
                 Name = source.Name,
                 Configuration = source.Configuration,
                 BomKinds = source.BomKinds,
@@ -3511,6 +3576,10 @@ public sealed class PdmWorkflowService(
         var targetState = item.DrawingState;
         if (targetState != DrawingReviewTargetState.Pending)
             throw new PdmConflictException("该2D工程图已经完成审核，请刷新后重试。");
+        if (!string.IsNullOrWhiteSpace(package.AssignedReviewer)
+            && !string.Equals(package.AssignedReviewer, actor, StringComparison.OrdinalIgnoreCase)
+            && TenantContext.Current?.HasRole("developer") != true)
+            throw new UnauthorizedAccessException($"当前节点由指定审核人{package.AssignedReviewerName ?? package.AssignedReviewer}处理。");
         var createdBy = item.DrawingCreatedBy;
         var developerSelfReviewAllowed = TenantContext.Current?.HasRole("developer") == true;
         if (!developerSelfReviewAllowed && string.Equals(createdBy, actor, StringComparison.OrdinalIgnoreCase))
@@ -3532,19 +3601,54 @@ public sealed class PdmWorkflowService(
             || package.Items.Any(candidate => candidate.DrawingState != DrawingReviewTargetState.Approved))
             return package;
 
-        var writebacks = package.Items.Select(candidate =>
+        if (!string.IsNullOrWhiteSpace(package.AssignedReviewer))
         {
-            var drawingId = Guid.NewGuid();
-            var drawingProperties = DrawingReviewProperties(package, DrawingReviewTarget.Drawing2D, candidate.DrawingReviewer!, candidate.DrawingReviewerName!, candidate.DrawingReviewedAt!.Value, candidate.DrawingRevision!);
-            var drawingWriteback = new CadPropertyWriteback(drawingId, package.ProjectId, drawingId, candidate.DrawingDocumentId!.Value, null, candidate.DrawingVersionId!.Value, candidate.DrawingRevision!, drawingProperties, CadPropertyWritebackStatus.Pending, candidate.DrawingReviewer!, now);
-            return new DrawingReviewWritebackRequest(
-                candidate.Id,
-                drawingWriteback);
-        }).ToArray();
+            package = await repository.AdvanceDrawingReviewToSupervisorAsync(package.Id, cancellationToken);
+            await AuditAsync(actor, "drawing-review.supervisor.submit", nameof(DrawingReviewPackage), package.Id.ToString(),
+                $"指定审核完成；转机械主管 {package.SupervisorName ?? package.Supervisor}", cancellationToken);
+            return package;
+        }
+
+        var writebacks = BuildDrawingReviewWritebacks(package, actor, reviewerName, now);
         package = await repository.QueueDrawingReviewWritebacksAsync(package.Id, writebacks, cancellationToken);
         await AuditAsync(actor, "drawing-review.writeback.queue", nameof(DrawingReviewPackage), package.Id.ToString(), $"2D图纸审核属性写回{writebacks.Length}项", cancellationToken);
         return package;
     }
+
+    public async Task<DrawingReviewPackage> DecideDrawingReviewSupervisorAsync(Guid packageId, DecideDrawingReviewSupervisorCommand command, string actor, UserRole role, CancellationToken cancellationToken)
+    {
+        await RequirePermissionAsync(actor, role, PermissionCodes.DrawingReviewDecide, cancellationToken);
+        var package = await repository.FindDrawingReviewPackageAsync(packageId, cancellationToken)
+            ?? throw new PdmNotFoundException("图纸审核单不存在。");
+        if (!await repository.HasProjectContentReadAccessAsync(package.ProjectId, actor, role, cancellationToken))
+            throw new UnauthorizedAccessException("当前用户没有该项目的操作权限。");
+        if (package.State != DrawingReviewPackageState.PendingSupervisorApproval)
+            throw new PdmConflictException("当前图纸审核单尚未进入机械主管批准节点。");
+        if (!string.Equals(package.Supervisor, actor, StringComparison.OrdinalIgnoreCase)
+            && TenantContext.Current?.HasRole("developer") != true)
+            throw new UnauthorizedAccessException($"当前节点由机械主管{package.SupervisorName ?? package.Supervisor}处理。");
+        var comment = string.IsNullOrWhiteSpace(command.Comment) ? null : command.Comment.Trim();
+        if (command.Decision == DrawingReviewDecision.RequestChanges)
+            comment = RequiredComment(comment ?? string.Empty, "退改说明");
+        var reviewerName = (await repository.FindUserAsync(actor, cancellationToken))?.DisplayName ?? actor;
+        var now = timeProvider.GetUtcNow();
+        package = await repository.DecideDrawingReviewSupervisorAsync(packageId, command.Decision, actor, reviewerName, now, comment, cancellationToken);
+        await AuditAsync(actor, "drawing-review.supervisor.decide", nameof(DrawingReviewPackage), package.Id.ToString(), $"{command.Decision}；{comment}", cancellationToken);
+        if (command.Decision == DrawingReviewDecision.RequestChanges) return package;
+        var writebacks = BuildDrawingReviewWritebacks(package, actor, reviewerName, now);
+        package = await repository.QueueDrawingReviewWritebacksAsync(package.Id, writebacks, cancellationToken);
+        await AuditAsync(actor, "drawing-review.writeback.queue", nameof(DrawingReviewPackage), package.Id.ToString(), $"机械主管批准；2D图纸审核属性写回{writebacks.Length}项", cancellationToken);
+        return package;
+    }
+
+    private static DrawingReviewWritebackRequest[] BuildDrawingReviewWritebacks(DrawingReviewPackage package, string actor, string reviewerName, DateTimeOffset now) =>
+        package.Items.Select(candidate =>
+        {
+            var drawingId = Guid.NewGuid();
+            var drawingProperties = DrawingReviewProperties(package, DrawingReviewTarget.Drawing2D, actor, reviewerName, now, candidate.DrawingRevision!);
+            var drawingWriteback = new CadPropertyWriteback(drawingId, package.ProjectId, drawingId, candidate.DrawingDocumentId!.Value, null, candidate.DrawingVersionId!.Value, candidate.DrawingRevision!, drawingProperties, CadPropertyWritebackStatus.Pending, actor, now);
+            return new DrawingReviewWritebackRequest(candidate.Id, drawingWriteback);
+        }).ToArray();
 
     public async Task<CadPropertyWriteback> StartCadPropertyWritebackAsync(Guid id, string actor, UserRole role, CancellationToken cancellationToken)
     {
@@ -3609,6 +3713,7 @@ public sealed class PdmWorkflowService(
         await RequirePermissionAsync(actor, role, PermissionCodes.ReleaseManage, cancellationToken);
         var package = await repository.FindReleasePackageAsync(releasePackageId, cancellationToken)
             ?? throw new PdmNotFoundException("发布包不存在。");
+        RequireMechanicalReleaseRole(package.Scope, role);
         if (IsLongLeadScope(package.Scope))
         {
             var formalScope = FormalScopeForKind(ReleaseScopeBomKind(package.Scope));
@@ -3709,7 +3814,7 @@ public sealed class PdmWorkflowService(
                 throw new PdmConflictException($"{BomKindLabel(targetKind)}BOM在发布包创建后已变化，请撤销该草稿并重新创建。");
             versionsForReview.Add(targetVersion);
         }
-        if (package.Scope == ReleaseScope.LegacyCombined || IsNonStandardScope(package.Scope) && !IsLongLeadScope(package.Scope))
+        if (package.Scope == ReleaseScope.LegacyCombined || IsNonStandardScope(package.Scope))
             await EnsureNonStandardDrawingReviewReadyAsync(package.ProjectId, package.NonStandardBomSnapshot, cancellationToken, package.Scope != ReleaseScope.NonStandardLongLead);
         if (materialRelationReleaseGuard is not null)
             await materialRelationReleaseGuard.EnsureCompleteAsync(package.ProjectId, cancellationToken);
@@ -3868,7 +3973,7 @@ public sealed class PdmWorkflowService(
             ?? throw new PdmNotFoundException("审批任务不存在。");
         if (decision == ApprovalDecision.Approved
             && (pendingPackage.Scope == ReleaseScope.LegacyCombined
-                || IsNonStandardScope(pendingPackage.Scope) && !IsLongLeadScope(pendingPackage.Scope)))
+                || IsNonStandardScope(pendingPackage.Scope)))
             await EnsureNonStandardDrawingReviewReadyAsync(pendingPackage.ProjectId, pendingPackage.NonStandardBomSnapshot, cancellationToken, pendingPackage.Scope != ReleaseScope.NonStandardLongLead);
         var package = await repository.DecideApprovalAsync(taskId, actor, decision, comment, emergencySubstitute, emergencyReason, cancellationToken);
         await AuditAsync(actor, emergencySubstitute ? "approval.emergency-substitute" : "approval.decide", nameof(ApprovalTask), taskId.ToString(), emergencySubstitute ? $"{decision}；原因：{emergencyReason}" : decision.ToString(), cancellationToken);
@@ -4931,6 +5036,19 @@ public sealed class PdmWorkflowService(
 
     private static bool IsNonStandardScope(ReleaseScope scope) =>
         scope is ReleaseScope.NonStandardWithDrawing or ReleaseScope.NonStandardLongLead or ReleaseScope.NonStandardSupplement;
+
+    private static void RequireMechanicalReleaseRole(ReleaseScope scope, UserRole role)
+    {
+        if (scope != ReleaseScope.LegacyCombined && ReleaseScopeBomKind(scope) == BomKind.Electrical) return;
+        var tenant = TenantContext.Current;
+        var allowed = tenant is null
+            ? role is UserRole.Engineer or UserRole.Administrator
+            : tenant.HasRole(nameof(UserRole.Engineer))
+              || tenant.HasRole(nameof(UserRole.Administrator))
+              || tenant.HasRole("developer");
+        if (!allowed)
+            throw new UnauthorizedAccessException("标准件和非标件BOM仅允许机械工程师、系统管理员或开发者执行发布操作。");
+    }
 
     private static bool IsPublishableBomItem(BomItem item) =>
         !item.IsManuallyExcluded && !item.IsReleaseExcluded;

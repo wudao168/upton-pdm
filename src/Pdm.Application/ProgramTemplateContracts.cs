@@ -110,6 +110,7 @@ public interface IProgramTemplateRepository
     Task<ProgramTemplate> CreateAsync(ProgramTemplate template, CancellationToken cancellationToken);
     Task<ProgramTemplateRevision> CreateRevisionAsync(ProgramTemplateRevision revision, CancellationToken cancellationToken);
     Task<ProgramTemplateRevision> UpdateDraftAsync(ProgramTemplateRevision revision, long expectedRowVersion, CancellationToken cancellationToken);
+    Task DeleteDraftAsync(Guid revisionId, long expectedRowVersion, CancellationToken cancellationToken);
     Task<ProgramTemplateRevision> AttachFileAsync(Guid revisionId, StoredProgramTemplateFile file, long expectedRowVersion, CancellationToken cancellationToken);
     Task<ProgramTemplateRevision> SubmitAsync(
         Guid revisionId,

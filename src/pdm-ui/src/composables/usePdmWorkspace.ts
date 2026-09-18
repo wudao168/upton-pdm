@@ -4,11 +4,11 @@ import { getBomSourceData } from '../api'
 import { copyProjectContent as copyProjectContentRequest, previewProjectCopy as previewProjectCopyRequest } from '../api'
 import { transferApproval } from '../api'
 import { listUserNotifications, markAllUserNotificationsRead as markAllUserNotificationsReadRequest, markUserNotificationRead as markUserNotificationReadRequest } from '../api'
-import { addDrawingReviewMarkup as addDrawingReviewMarkupRequest, createDrawingReview as createDrawingReviewRequest, decideDrawingReviewTarget as decideDrawingReviewTargetRequest, listDrawingReviewCandidates, listDrawingReviews, resolveDrawingReviewMarkup as resolveDrawingReviewMarkupRequest, withdrawDrawingReview as withdrawDrawingReviewRequest } from '../api'
+import { addDrawingReviewMarkup as addDrawingReviewMarkupRequest, createDrawingReview as createDrawingReviewRequest, decideDrawingReviewSupervisor as decideDrawingReviewSupervisorRequest, decideDrawingReviewTarget as decideDrawingReviewTargetRequest, listDrawingReviewCandidates, listDrawingReviewers, listDrawingReviews, resolveDrawingReviewMarkup as resolveDrawingReviewMarkupRequest, withdrawDrawingReview as withdrawDrawingReviewRequest } from '../api'
 import { batchUpdateBomItems as batchUpdateBomItemsRequest, changeMyPassword as changeMyPasswordRequest, checkHealth, compareDocumentVersions, createProject as createProjectRequest, createRole as createRoleRequest, createSubproject as createSubprojectRequest, createReleasePackage, createUser as createUserRequest, decideApproval, deleteProject as deleteProjectRequest, deleteReleasePackageDraft as deleteReleasePackageDraftRequest, deleteRole as deleteRoleRequest, emergencyDecideApproval, exportBom, exportWearPartBom, forceReleaseEditLock as forceReleaseEditLockRequest, generateMechanicalBom, getBomValidationRules, getCrmIntegrationSettings, getMyProfile, getOrganizationDirectory, getProjectNumberingOptions, getRolePermissionDirectory, getStorageStatus, getSystemSettings, importBom, listAudit, listBomBaselines, listBomVersions, listCustomers, listDocumentVersions, listDocumentWhereUsed, listEditLocks, listEquipmentTypes, listFolderTemplate, listMaterialCodeApplications, listMaterialSyncTasks, listMyApprovalTasks, listPasswordResetTasks, listProgramTemplateTasks, listProjectAudit, listProjects, listProjectVersions, loadProjectDocumentWorkspace, loadProjectWorkspace, login as apiLogin, obsoleteDocument as obsoleteDocumentRequest, PdmApiError, postDesktopMessage, readDocumentVersionFile, requestEditLockRelease as requestEditLockReleaseRequest, resetRequestedPassword as resetRequestedPasswordRequest, resetUserPassword as resetUserPasswordRequest, resolveBomItem as resolveBomItemRequest, restoreDocumentVersion, resumeSession as apiResumeSession, retryLongLeadU9 as retryLongLeadU9Request, saveBom, saveEquipmentType as saveEquipmentTypeRequest, saveFolderTemplate as saveFolderTemplateRequest, saveOrganizationUnit as saveOrganizationUnitRequest, saveProjectOrganization as saveProjectOrganizationRequest, setBomEmptyDeclaration as setBomEmptyDeclarationRequest, submitReleasePackage, syncCrmCustomers as syncCrmCustomersRequest, testCrmIntegration as testCrmIntegrationRequest, updateChildProjectDesigners as updateChildProjectDesignersRequest, updateChildProjectManager as updateChildProjectManagerRequest, updateCrmIntegrationSettings as updateCrmIntegrationSettingsRequest, updateMainProjectStaffing as updateMainProjectStaffingRequest, updateMyProfile as updateMyProfileRequest, updateOrganizationCounters as updateOrganizationCountersRequest, updateOrganizationMemberships as updateOrganizationMembershipsRequest, updateOrganizationUnitManagers as updateOrganizationUnitManagersRequest, updateProject as updateProjectRequest, updateProjectExecutionUnit as updateProjectExecutionUnitRequest, updateProjectFolderPermissions as updateProjectFolderPermissionsRequest, updateReleasePackageDraft as updateReleasePackageDraftRequest, updateRolePermissions as updateRolePermissionsRequest, updateSystemSettings as updateSystemSettingsRequest, updateUser as updateUserRequest, uploadReleaseFile, withdrawReleasePackage } from '../api'
 import type { AuthSession } from '../api'
 import type { AuditEntry, BatchUpdateBomItemsInput, BomEmptyDeclaration, BomExportMode, BomGenerationResult, BomItem, BomKind, BomVersion, CreateProjectInput, CreateReleasePackageInput, CreateRoleInput, CreateSubprojectInput, CrmConnectionTestResult, CrmCustomerSyncResult, CrmIntegrationSettings, DocumentFilter, DocumentModelDrawingRelation, DocumentNode, DocumentVersionComparison, DocumentVersionSummary, DocumentWhereUsed, EditLockSummary, EquipmentTypeDefinition, FolderPermissionRule, MainProjectStaffingInput, ManagedDocument, ManufacturingBomBaseline, MaterialCodeApplication, MaterialSyncTask, MyApprovalTask, OrganizationDirectory, PasswordResetTask, PdmCustomer, PdmSystemSettings, PdmUser, PdmUserProfile, ProgramTemplateTask, ProjectFolder, ProjectFolderTemplateNode, ProjectNumberingOptions, ProjectSummary, ProjectVersionItem, ReleasePackageSummary, RolePermissionDirectory, SaveOrganizationUnitInput, SavePdmUserInput, SaveProjectOrganizationInput, SolidWorksOpenMode, UpdateCrmIntegrationInput, UpdateProjectInput, UpdateReleasePackageDraftInput } from '../types'
-import type { AddDrawingReviewMarkupInput, DrawingReviewCandidate, DrawingReviewDecision, DrawingReviewPackage, DrawingReviewTarget } from '../types'
+import type { AddDrawingReviewMarkupInput, ApprovalTransferCandidate, DrawingReviewCandidate, DrawingReviewDecision, DrawingReviewPackage, DrawingReviewTarget } from '../types'
 import type { UserNotification } from '../types'
 import type { ProjectCopyOptionsInput } from '../types'
 
@@ -237,6 +237,7 @@ export function usePdmWorkspace() {
   const bomBaselines = ref<ManufacturingBomBaseline[]>([])
   const drawingReviews = ref<DrawingReviewPackage[]>([])
   const drawingReviewCandidates = ref<DrawingReviewCandidate[]>([])
+  const drawingReviewReviewers = ref<ApprovalTransferCandidate[]>([])
   const materialCodeApplications = ref<MaterialCodeApplication[]>([])
   const releasePackages = ref<ReleasePackageSummary[]>([])
   const releasePackage = computed(() => releasePackages.value[0] ?? null)
@@ -397,6 +398,7 @@ export function usePdmWorkspace() {
     bomVersions.value = []
     bomBaselines.value = []
     drawingReviews.value = []
+    drawingReviewReviewers.value = []
     materialCodeApplications.value = []
     releasePackages.value = []
     selectedId.value = ''
@@ -690,19 +692,21 @@ export function usePdmWorkspace() {
 
   async function refreshDrawingReviews() {
     if (!project.value.id) return
-    const [reviews, candidates] = await Promise.all([
+    const [reviews, candidates, reviewers] = await Promise.all([
       listDrawingReviews(project.value.id, accessToken),
       listDrawingReviewCandidates(project.value.id, accessToken),
+      listDrawingReviewers(project.value.id, accessToken),
     ])
     drawingReviews.value = reviews
     drawingReviewCandidates.value = candidates
+    drawingReviewReviewers.value = reviewers
   }
 
-  async function createDrawingReview(modelDocumentIds: string[]) {
+  async function createDrawingReview(modelDocumentIds: string[] | null, assignedReviewer: string) {
     operationPending.value = true
     operationError.value = ''
     try {
-      replaceDrawingReview(await createDrawingReviewRequest(project.value.id, modelDocumentIds, accessToken))
+      replaceDrawingReview(await createDrawingReviewRequest(project.value.id, modelDocumentIds, assignedReviewer, accessToken))
       drawingReviewCandidates.value = await listDrawingReviewCandidates(project.value.id, accessToken)
     } catch (error) {
       operationError.value = messageFrom(error)
@@ -749,6 +753,17 @@ export function usePdmWorkspace() {
     operationError.value = ''
     try {
       replaceDrawingReview(await decideDrawingReviewTargetRequest(packageId, itemId, target, decision, comment, accessToken))
+    } catch (error) {
+      operationError.value = messageFrom(error)
+      throw error
+    } finally { operationPending.value = false }
+  }
+
+  async function decideDrawingReviewSupervisor(packageId: string, decision: DrawingReviewDecision, comment: string) {
+    operationPending.value = true
+    operationError.value = ''
+    try {
+      replaceDrawingReview(await decideDrawingReviewSupervisorRequest(packageId, decision, comment, accessToken))
     } catch (error) {
       operationError.value = messageFrom(error)
       throw error
@@ -1765,6 +1780,7 @@ export function usePdmWorkspace() {
     bomBaselines,
     drawingReviews,
     drawingReviewCandidates,
+    drawingReviewReviewers,
     materialCodeApplications,
     selectedNode,
     selectedBomItem,
@@ -1884,6 +1900,7 @@ export function usePdmWorkspace() {
     addDrawingReviewMarkup,
     resolveDrawingReviewMarkup,
     decideDrawingReviewTarget,
+    decideDrawingReviewSupervisor,
     createPackage,
     updatePackageDraft,
     deletePackageDraft,

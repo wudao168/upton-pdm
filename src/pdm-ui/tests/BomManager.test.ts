@@ -18,6 +18,7 @@ const materialApi = vi.hoisted(() => ({
   listEngineeringKits: vi.fn(),
   expandEngineeringKit: vi.fn(),
   listDocumentVersions: vi.fn(),
+  listDrawingReviewCandidates: vi.fn(),
   downloadDocumentPreviewFile: vi.fn(),
 }))
 
@@ -60,6 +61,7 @@ describe('BomManager', () => {
     materialApi.listEngineeringKits.mockReset().mockResolvedValue([])
     materialApi.expandEngineeringKit.mockReset()
     materialApi.listDocumentVersions.mockReset().mockResolvedValue([])
+    materialApi.listDrawingReviewCandidates.mockReset().mockResolvedValue([])
     materialApi.downloadDocumentPreviewFile.mockReset().mockResolvedValue(undefined)
   })
 
@@ -682,7 +684,7 @@ describe('BomManager', () => {
     }
     const wrapper = mount(BomManager, {
       props: {
-        standard: [], nonStandard: [], electrical: [], declarations: [], releasePackages: [releasePackage], pending: false, editable: true, canManageRelease: true,
+        standard: [], nonStandard: [], electrical: [], declarations: [], releasePackages: [releasePackage], pending: false, editable: true, canManageRelease: true, canManageMechanicalRelease: true,
         versions: [{ id: 'standard-draft', projectId: 'project', kind: 'Standard', versionNumber: 1, label: 'S-B01', state: 'Draft', items: [], createdBy: 'admin', createdAt: '2026-08-21', updatedBy: 'admin', updatedAt: '2026-08-21' }],
       },
       global: { stubs: { ElDrawer: { template: '<div><slot /></div>' } } },
@@ -716,6 +718,24 @@ describe('BomManager', () => {
     expect(wrapper.findAll('.pdm-bom-release-strip-actions button').map(button => button.text())).toEqual(['导入XLSX', '导出XLSX', '对比源数据', '发布记录', '保存BOM', '发起发布'])
   })
 
+  it('limits standard and non-standard BOM publishing without restricting electrical publishing', async () => {
+    const wrapper = mount(BomManager, {
+      props: {
+        standard: [], nonStandard: [], electrical: [], declarations: [], pending: false,
+        editable: true, canManageRelease: true, canManageMechanicalRelease: false,
+      },
+    })
+
+    await wrapper.findAll('button[role="tab"]')[1].trigger('click')
+    expect(wrapper.findAll('button').some(button => button.text() === '发起发布')).toBe(false)
+
+    await wrapper.findAll('button[role="tab"]')[2].trigger('click')
+    expect(wrapper.findAll('button').some(button => button.text() === '发起发布')).toBe(false)
+
+    await wrapper.findAll('button[role="tab"]')[3].trigger('click')
+    expect(wrapper.findAll('button').some(button => button.text() === '发起发布')).toBe(true)
+  })
+
   it('defaults Excel export to summary and allows structure export', async () => {
     const wrapper = mount(BomManager, {
       props: { standard: [], nonStandard: [], electrical: [], declarations: [], pending: false },
@@ -747,7 +767,7 @@ describe('BomManager', () => {
     }
     const wrapper = mount(BomManager, {
       props: {
-        standard: [], nonStandard: [], electrical: [], declarations: [], releasePackages: [longLead], pending: false, editable: true, canManageRelease: true,
+        standard: [], nonStandard: [], electrical: [], declarations: [], releasePackages: [longLead], pending: false, editable: true, canManageRelease: true, canManageMechanicalRelease: true,
       },
       global: { stubs: { ElDrawer: { template: '<div><slot /></div>' } } },
     })
@@ -890,6 +910,30 @@ describe('BomManager', () => {
     expect(warning.attributes('title')).toBe('设计树图纸名称：CQ-WS-ISO63-PT2-20250520113101861；BOM型号：MODEL-002')
     expect(wrapper.get('.pdm-bom-reconciliation-cell').text()).toBe('—')
     expect(wrapper.find('.pdm-bom-reconciliation').exists()).toBe(false)
+  })
+
+  it('does not require a material code for non-standard items and warns when the drawing is not reviewed', async () => {
+    const wrapper = mount(BomManager, {
+      props: {
+        standard: [], electrical: [], declarations: [], pending: false, editable: true,
+        nonStandard: [{ id: 'non-standard-unreviewed', kind: 'NonStandard', sequence: 1, drawingNumber: '', name: '待发布非标件', material: '6061', quantity: 1, unit: '件', revision: 'W1', complete: true, sourceDocumentId: 'model-unreviewed' }],
+        validationRules: {
+          standard: ['drawingNumber', 'name', 'unit', 'quantity', 'revision'],
+          nonStandard: ['drawingNumber', 'name', 'unit', 'material', 'quantity', 'revision'],
+          electrical: ['drawingNumber', 'name', 'unit', 'quantity', 'revision'],
+        },
+        drawingReviewCandidates: [{ candidateId: 'review-unreviewed', bomItemId: 'non-standard-unreviewed', modelDocumentId: 'model-unreviewed', drawingNumber: '', name: '待发布非标件', bomKinds: ['NonStandard'], modelRevision: 'W1', drawingRevision: 'W1', state: 'Ready', reason: '当前工程图尚未发起审核', selectable: true }],
+      },
+    })
+
+    const nonStandardTab = wrapper.findAll('button[role="tab"]').find(tab => tab.text().includes('非标件BOM'))
+    expect(nonStandardTab).toBeDefined()
+    await nonStandardTab!.trigger('click')
+    expect(wrapper.text()).not.toContain('缺少物料编码')
+    expect(wrapper.get('.pdm-bom-data-status').text()).toBe('已完善')
+    const reviewStatus = wrapper.get('.pdm-bom-drawing-review-status')
+    expect(reviewStatus.text()).toBe('未审核')
+    expect(reviewStatus.attributes('title')).toBe('当前工程图尚未发起审核')
   })
 
   it('edits one impact stage on formal BOMs and hides the field from wear parts', async () => {
@@ -1118,7 +1162,7 @@ describe('BomManager', () => {
 
     expect(wrapper.get('.pdm-bom-drawing-audit-header').text()).toBe('图纸')
     expect(wrapper.findAll('.pdm-bom-drawing-link').map(item => item.text())).toEqual(['2D', '3D'])
-    expect(wrapper.findAll('.pdm-bom-drawing-audit-cell').map(item => item.text())).toEqual(['2D3D', '—', '—'])
+    expect(wrapper.findAll('.pdm-bom-drawing-audit-cell').map(item => item.text())).toEqual(['2D3D未审核', '未审核', '未审核'])
 
     materialApi.listDocumentVersions.mockResolvedValueOnce([{
       id: 'drawing-version-1', documentId: 'drawing-1', revision: { display: 'W2' }, status: 'Released', fileLength: 12, sha256: 'drawing', createdBy: 'developer', createdAt: '2026-09-16T00:00:00Z', changeNote: '',
@@ -3112,7 +3156,7 @@ describe('BomManager', () => {
     const wrapper = mount(BomManager, {
       props: {
         standard: [], nonStandard: [], electrical: [], declarations: [], pending: false, editable: true,
-        projectId: 'project', token: 'token', canManageRelease: true, releasePackages: [releasePackage], requestedReleasePackageId: 'release-draft',
+        projectId: 'project', token: 'token', canManageRelease: true, canManageMechanicalRelease: true, releasePackages: [releasePackage], requestedReleasePackageId: 'release-draft',
       },
     })
     await flushPromises()

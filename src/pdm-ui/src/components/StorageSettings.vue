@@ -272,7 +272,7 @@ async function saveCounters(row: { id: string; project: number; serial: number }
       </el-tab-pane>
       <el-tab-pane label="工程图二维码" name="drawing-qr">
         <section class="pdm-panel pdm-manager-panel">
-          <header class="pdm-manager-heading"><div><h2>工程图二维码规则</h2><p>插件按此规则把型号二维码嵌入工程图；提交存档时服务端再次核对内容和规则版本。</p></div></header>
+          <header class="pdm-manager-heading"><div><h2>工程图二维码规则</h2><p>插件按此规则把型号二维码嵌入工程图；二维码为独立附加功能，生成或更新异常不会影响存档。</p></div></header>
           <div class="pdm-settings-form">
             <label class="pdm-checkbox-field"><input v-model="storageDraft.drawingQrPolicy!.enabled" type="checkbox">启用工程图二维码</label>
             <label>来源属性<input v-model="storageDraft.drawingQrPolicy!.sourceProperty" maxlength="100"><small>工程图为空时读取唯一关联模型；当前使用“型号”。</small></label>

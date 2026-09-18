@@ -2,8 +2,8 @@
 import { clearGlobalStatus, ElMessage } from '../statusMessage'
 import { ElMessageBox } from 'element-plus'
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { applyForBomMaterialCodes, applyMaterialRelations, downloadDocumentPreviewFile, expandEngineeringKit, getMaterialRelationCompleteness, linkBomMaterial, listDocumentVersions, listEngineeringKits, listMaterials, previewBomSourceReclassification, reclassifyBomItemsFromSource, resolveBomMaterialCodes } from '../api'
-import type { BatchUpdateBomItemsInput, BomClassification, BomEmptyDeclaration, BomExportMode, BomGenerationResult, BomItem, BomKind, BomSourceReclassificationPreview, BomValidationField, BomValidationRules, BomVersion, CreateReleasePackageInput, DocumentModelDrawingRelation, DocumentNode, EngineeringKit, FormalSupplementPolicies, ManagedDocument, ManufacturingBomBaseline, MaterialCodeResolution, MaterialRelationCompleteness, MaterialRelationGroupCheck, PdmMaterial, ProjectSummary, ReleasePackageSummary, ReleaseScope, UpdateReleasePackageDraftInput } from '../types'
+import { applyForBomMaterialCodes, applyMaterialRelations, downloadDocumentPreviewFile, expandEngineeringKit, getMaterialRelationCompleteness, linkBomMaterial, listDocumentVersions, listDrawingReviewCandidates, listEngineeringKits, listMaterials, previewBomSourceReclassification, reclassifyBomItemsFromSource, resolveBomMaterialCodes } from '../api'
+import type { BatchUpdateBomItemsInput, BomClassification, BomEmptyDeclaration, BomExportMode, BomGenerationResult, BomItem, BomKind, BomSourceReclassificationPreview, BomValidationField, BomValidationRules, BomVersion, CreateReleasePackageInput, DocumentModelDrawingRelation, DocumentNode, DrawingReviewCandidate, EngineeringKit, FormalSupplementPolicies, ManagedDocument, ManufacturingBomBaseline, MaterialCodeResolution, MaterialRelationCompleteness, MaterialRelationGroupCheck, PdmMaterial, ProjectSummary, ReleasePackageSummary, ReleaseScope, UpdateReleasePackageDraftInput } from '../types'
 import { u9UnitName, u9UnitOptions } from '../u9Units'
 import BomHierarchyOverview from './BomHierarchyOverview.vue'
 import ReleaseCenter from './ReleaseCenter.vue'
@@ -48,6 +48,7 @@ const props = withDefaults(defineProps<{
   referenceRoot?: DocumentNode
   documents?: ManagedDocument[]
   documentRelations?: DocumentModelDrawingRelation[]
+  drawingReviewCandidates?: DrawingReviewCandidate[]
   validationRules?: BomValidationRules
   releaseChangeReasonTypes?: string[]
   formalSupplementPolicies?: FormalSupplementPolicies
@@ -65,6 +66,7 @@ const props = withDefaults(defineProps<{
   uploadProgress?: number
   operationError?: string
   canManageRelease?: boolean
+  canManageMechanicalRelease?: boolean
   canDecideApproval?: boolean
   canEmergencyDecide?: boolean
   requestedReleasePackageId?: string
@@ -76,6 +78,7 @@ const props = withDefaults(defineProps<{
   unclassified: () => [],
   documents: () => [],
   documentRelations: () => [],
+  drawingReviewCandidates: () => [],
   versions: () => [],
   baselines: () => [],
   token: '',
@@ -86,6 +89,7 @@ const props = withDefaults(defineProps<{
   uploadProgress: 0,
   operationError: '',
   canManageRelease: false,
+  canManageMechanicalRelease: false,
   canDecideApproval: false,
   canEmergencyDecide: false,
   requestedReleasePackageId: '',
@@ -128,7 +132,26 @@ const emit = defineEmits<{
   dirtyChange: [dirty: boolean]
 }>()
 const kind = ref<BomView>('Source')
-watch(kind, clearGlobalStatus, { flush: 'sync' })
+const canManageCurrentRelease = computed(() => kind.value === 'Standard' || kind.value === 'NonStandard'
+  ? props.canManageMechanicalRelease
+  : props.canManageRelease)
+const currentDrawingReviewCandidates = ref<DrawingReviewCandidate[]>([])
+watch(() => props.drawingReviewCandidates, candidates => { currentDrawingReviewCandidates.value = [...candidates] }, { immediate: true })
+async function refreshCurrentDrawingReviewCandidates() {
+  const projectId = props.projectId
+  const token = props.token
+  if (!projectId || !token) return
+  try {
+    currentDrawingReviewCandidates.value = await listDrawingReviewCandidates(projectId, token)
+  } catch {
+    // Keep the last known status; release submission still has a server-side drawing-review gate.
+  }
+}
+watch([() => props.projectId, () => props.token], () => { void refreshCurrentDrawingReviewCandidates() }, { immediate: true })
+watch(kind, value => {
+  clearGlobalStatus()
+  if (value === 'NonStandard') void refreshCurrentDrawingReviewCandidates()
+}, { flush: 'sync' })
 const displayMode = ref<BomDisplayMode>('Summary')
 const exportDialogOpen = ref(false)
 const exportMode = ref<BomExportMode>('Summary')
@@ -658,7 +681,8 @@ const previousReleaseVersionItems = computed(() => {
   return categoryVersions.value.find(version => version.state === 'Released' && version.versionNumber < selected.versionNumber)?.items ?? []
 })
 
-function openReleaseDrawer(releasePackageId = '') {
+async function openReleaseDrawer(releasePackageId = '') {
+  if (kind.value === 'NonStandard') await refreshCurrentDrawingReviewCandidates()
   selectedReleasePackageId.value = releasePackageId
   releaseDrawerOpen.value = true
 }
@@ -1074,7 +1098,10 @@ function missingRequiredFields(row: BomItem) {
         : effectiveKind === 'NonStandard'
           ? props.validationRules.nonStandard
           : props.validationRules.electrical
-  return requiredFields.filter(field => !hasValidationValue(row, field)).map(validationFieldLabel)
+  return requiredFields
+    .filter(field => effectiveKind !== 'NonStandard' || field !== 'drawingNumber')
+    .filter(field => !hasValidationValue(row, field))
+    .map(validationFieldLabel)
 }
 
 function materialMasterIssues(row: BomItem) {
@@ -1545,6 +1572,21 @@ function drawingLinks(row: BomItem): BomDrawingLink[] {
   if (drawing) links.push({ kind: '2D', document: drawing })
   if (model) links.push({ kind: '3D', document: model })
   return links
+}
+
+function drawingReviewCandidate(row: BomItem) {
+  if (rowKind(row) !== 'NonStandard') return undefined
+  return currentDrawingReviewCandidates.value.find(candidate => candidate.bomItemId === row.id)
+    ?? currentDrawingReviewCandidates.value.find(candidate => Boolean(row.sourceDocumentId) && candidate.modelDocumentId === row.sourceDocumentId)
+}
+
+function drawingReviewStatus(row: BomItem) {
+  if (rowKind(row) !== 'NonStandard') return undefined
+  const candidate = drawingReviewCandidate(row)
+  if (candidate?.state === 'ApprovedCurrent') return { label: '已审核', tone: 'is-approved', title: '当前工程图版本已完成审核，可以发布。' }
+  if (candidate?.state === 'InReview') return { label: '审核中', tone: 'is-reviewing', title: candidate.reason || '当前工程图正在审核，审核完成前不可发布。' }
+  if (candidate?.state === 'Unavailable') return { label: '不可审核', tone: 'is-blocked', title: candidate.reason || '当前物料缺少可审核的工程图，不能发布。' }
+  return { label: '未审核', tone: 'is-pending', title: candidate?.reason || '当前工程图尚未完成审核，不能发布。' }
 }
 
 function normalizedPreviewFormat(value: 'Step' | 'Pdf' | 0 | 1) {
@@ -3153,7 +3195,7 @@ async function submitBatchUpdate() {
         <span v-if="hasStagedEdits" class="pdm-bom-unsaved-count" role="status" aria-live="polite">未保存 {{ stagedEditCount }} 项</span>
         <button v-if="canEditCurrentView && hasStagedEdits" type="button" class="pdm-secondary-action pdm-bom-discard-action" :disabled="pending" @click="discardStagedEdits">撤销修改</button>
         <button v-if="canEditCurrentView" type="button" class="pdm-primary-action pdm-bom-save-action" :disabled="pending" @click="saveCurrentBom">{{ pending ? '保存中…' : hasStagedEdits ? `保存BOM（${stagedEditCount}）` : '保存BOM' }}</button>
-        <button v-if="canManageRelease" type="button" class="pdm-primary-action" @click="openReleaseDrawer()">发起发布</button>
+        <button v-if="canManageCurrentRelease" type="button" class="pdm-primary-action" @click="openReleaseDrawer()">发起发布</button>
       </div>
     </section>
     <div v-if="!isSourceView && !isWearPartView && baselines.length" class="pdm-bom-version-toolbar">
@@ -3341,8 +3383,11 @@ async function submitBatchUpdate() {
               </div>
             </td>
             <td v-if="isBomColumnVisible('drawing')" class="pdm-bom-drawing-audit-cell">
-              <div v-if="!row._quickEntry && drawingLinks(row).length" class="pdm-bom-drawing-links">
-                <button v-for="link in drawingLinks(row)" :key="link.kind" type="button" class="pdm-bom-drawing-link" :aria-label="`下载${link.kind}图纸 ${link.document.drawingNumber}`" :title="`下载${link.document.drawingNumber}的${link.kind}发布图纸`" :disabled="downloadingDrawingIds.has(link.document.id)" @click="downloadDrawing(link)">{{ downloadingDrawingIds.has(link.document.id) ? '…' : link.kind }}</button>
+              <div v-if="!row._quickEntry && (drawingLinks(row).length || drawingReviewStatus(row))" class="pdm-bom-drawing-audit-content">
+                <div v-if="drawingLinks(row).length" class="pdm-bom-drawing-links">
+                  <button v-for="link in drawingLinks(row)" :key="link.kind" type="button" class="pdm-bom-drawing-link" :aria-label="`下载${link.kind}图纸 ${link.document.drawingNumber}`" :title="`下载${link.document.drawingNumber}的${link.kind}发布图纸`" :disabled="downloadingDrawingIds.has(link.document.id)" @click="downloadDrawing(link)">{{ downloadingDrawingIds.has(link.document.id) ? '…' : link.kind }}</button>
+                </div>
+                <span v-if="drawingReviewStatus(row)" class="pdm-bom-drawing-review-status" :class="drawingReviewStatus(row)?.tone" :title="drawingReviewStatus(row)?.title">{{ drawingReviewStatus(row)?.label }}</span>
               </div>
               <span v-else-if="!row._quickEntry" class="pdm-bom-cell-value">—</span>
             </td>
@@ -3624,7 +3669,7 @@ async function submitBatchUpdate() {
     <el-drawer v-model="releaseDrawerOpen" class="pdm-bom-release-drawer" :title="kind === 'Standard' ? '标准件BOM审批发布' : kind === 'NonStandard' ? '非标件BOM与图纸发布' : '电气BOM审批发布'" size="min(1360px, 96vw)" destroy-on-close>
       <div class="pdm-bom-release-workspace">
         <aside class="pdm-bom-release-history" aria-label="发布包记录">
-          <header><strong>发布记录</strong><button v-if="canManageRelease" type="button" class="pdm-secondary-action pdm-release-new-button" @click="selectReleasePackage('')">新建发布包</button></header>
+          <header><strong>发布记录</strong><button v-if="canManageCurrentRelease" type="button" class="pdm-secondary-action pdm-release-new-button" @click="selectReleasePackage('')">新建发布包</button></header>
           <button v-for="release in categoryReleasePackages" :key="release.id" type="button" :class="{ 'is-active': release.id === selectedReleasePackageId }" @click="selectReleasePackage(release.id)">
             <span><strong>{{ release.number }}</strong><small>{{ release.changeNumber && release.changeNumber !== release.number ? release.changeNumber : '—' }}</small></span>
             <em>{{ release.state }}</em>
@@ -3640,7 +3685,7 @@ async function submitBatchUpdate() {
           :pending="pending"
           :progress="uploadProgress"
           :error="operationError"
-          :can-manage="canManageRelease"
+          :can-manage="canManageCurrentRelease"
           :can-decide="canDecideApproval"
           :can-emergency-decide="canEmergencyDecide"
           :allowed-scopes="createReleaseScopes"
@@ -3650,6 +3695,7 @@ async function submitBatchUpdate() {
           :release-packages="releasePackages"
           :long-lead-published-items="publishedLongLeadItems"
           :previous-version-items="previousReleaseVersionItems"
+          :drawing-review-candidates="currentDrawingReviewCandidates"
           @create="emit('releaseCreate', $event)"
           @update-draft="(releasePackageId, input) => emit('releaseUpdateDraft', releasePackageId, input)"
           @delete-draft="releasePackageId => emit('releaseDeleteDraft', releasePackageId)"
@@ -3705,6 +3751,7 @@ async function submitBatchUpdate() {
 <style scoped>
 .pdm-bom-column-settings-note{margin:0 0 12px;color:var(--pdm-muted);line-height:1.6}.pdm-bom-column-settings-list{display:grid;max-height:460px;grid-template-columns:repeat(2,minmax(0,1fr));gap:0;overflow:auto;border:1px solid var(--pdm-border);border-radius:8px}.pdm-bom-column-settings-list :deep(.el-checkbox){box-sizing:border-box;width:100%;min-height:36px;margin:0;padding:7px 12px;border-bottom:1px solid #eef2f7}.pdm-bom-column-settings-list :deep(.el-checkbox:nth-child(odd)){border-right:1px solid #eef2f7}
 .pdm-bom-drawing-links{display:flex;align-items:center;justify-content:center;gap:3px}.pdm-bom-drawing-link{min-width:25px;height:22px;padding:0 4px;border:1px solid var(--pdm-theme-accent-border);border-radius:4px;background:var(--pdm-theme-accent-soft);color:var(--pdm-theme-accent);font-size:10px;font-weight:700;line-height:20px;cursor:pointer}.pdm-bom-drawing-link:hover:not(:disabled){border-color:var(--pdm-theme-accent);background:#fff}.pdm-bom-drawing-link:disabled{cursor:wait;opacity:.65}
+.pdm-bom-drawing-audit-content{display:flex;align-items:center;justify-content:center;gap:4px}.pdm-bom-drawing-review-status{display:inline-flex;align-items:center;justify-content:center;min-height:20px;padding:1px 5px;border-radius:4px;font-size:10px;font-weight:700;line-height:18px;white-space:nowrap}.pdm-bom-drawing-review-status.is-approved{background:#dcfce7;color:#15803d}.pdm-bom-drawing-review-status.is-reviewing{background:#eff6ff;color:#1d4ed8}.pdm-bom-drawing-review-status.is-pending,.pdm-bom-drawing-review-status.is-blocked{background:#fff7ed;color:#b45309}
 .pdm-material-code-action{height:22px;padding:0 7px;border:1px solid var(--shell-accent-border);border-radius:5px;background:var(--pdm-blue-soft);color:var(--pdm-blue);font-size:11px;line-height:20px;white-space:nowrap;cursor:pointer}.pdm-material-code-action.is-review{border-color:#f59e0b;background:#fffbeb;color:#b45309}.pdm-material-code-state{color:#64748b;font-size:11px;white-space:nowrap}.pdm-material-code-state.is-pending{color:#b45309}
 .pdm-duplicate-material-dialog .pdm-material-reference-table table{width:100%;min-width:0;table-layout:fixed}.pdm-duplicate-material-dialog .pdm-material-reference-table :is(th,td){min-width:0;overflow:hidden;text-overflow:ellipsis}.pdm-duplicate-material-dialog .pdm-material-reference-table :is(th,td):nth-child(1){width:140px}.pdm-duplicate-material-dialog .pdm-material-reference-table :is(th,td):nth-child(2){width:160px}.pdm-duplicate-material-dialog .pdm-material-reference-table :is(th,td):nth-child(3){width:90px}.pdm-duplicate-material-dialog .pdm-material-reference-table :is(th,td):nth-child(4){width:150px}.pdm-duplicate-material-dialog .pdm-material-reference-table :is(th,td):nth-child(5){width:120px}.pdm-duplicate-material-dialog .pdm-material-reference-table :is(th,td):last-child{width:110px;min-width:110px}
 .pdm-summary-quantity-backdrop{align-items:center;justify-content:center!important;padding:16px}.pdm-summary-quantity-dialog{width:min(900px,calc(100vw - 32px));height:auto;max-height:calc(100vh - 32px);border-radius:9px;animation:none}.pdm-summary-quantity-material{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;margin:0;padding:12px 18px;border-bottom:1px solid var(--pdm-border);background:#f8fafc}.pdm-summary-quantity-material>div{min-width:0}.pdm-summary-quantity-material dt{color:var(--pdm-muted);font-size:10px}.pdm-summary-quantity-material dd{margin:4px 0 0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--pdm-text);font-weight:700}.pdm-summary-quantity-dialog .pdm-table-scroll{max-height:min(460px,calc(100vh - 300px))}.pdm-summary-quantity-dialog table{width:100%;table-layout:fixed}.pdm-summary-quantity-dialog th:first-child{width:38%}.pdm-summary-quantity-dialog th:nth-child(2){width:24%}.pdm-summary-quantity-dialog th:nth-child(3){width:14%}.pdm-summary-quantity-dialog th:nth-child(4){width:24%}.pdm-summary-quantity-dialog td{overflow:hidden;text-overflow:ellipsis}.pdm-summary-quantity-input{display:flex;min-width:0;align-items:center;gap:7px}.pdm-summary-quantity-input input{box-sizing:border-box;width:100px;height:30px;padding:4px 8px;border:1px solid var(--pdm-border);border-radius:5px;color:var(--pdm-text);text-align:right}.pdm-summary-quantity-input input:focus{border-color:var(--pdm-theme-accent);outline:2px solid var(--pdm-theme-accent-soft)}.pdm-summary-quantity-input small{color:var(--pdm-danger);font-weight:700;white-space:nowrap}.pdm-summary-quantity-dialog tr.is-summary-quantity-changed td{background:#eff6ff}.pdm-summary-quantity-dialog tr.is-summary-quantity-removed td{background:#fef2f2}.pdm-summary-quantity-dialog>footer{align-items:flex-end;flex-wrap:wrap}.pdm-summary-quantity-status{display:flex;min-width:360px;flex:1;align-items:center;gap:8px;flex-wrap:wrap}.pdm-summary-quantity-dialog>footer .pdm-summary-quantity-status span{min-width:auto;flex:0 0 auto;padding:5px 8px;border-radius:5px;background:#f8fafc;color:var(--pdm-muted);font-size:10px}.pdm-summary-quantity-status span.is-invalid{background:#fff7ed;color:#b45309}.pdm-summary-quantity-status strong{color:var(--pdm-text)}.pdm-summary-quantity-status em{width:100%;color:var(--pdm-danger);font-size:10px;font-style:normal;font-weight:700}@media(max-width:760px){.pdm-summary-quantity-material{grid-template-columns:repeat(2,minmax(0,1fr))}.pdm-summary-quantity-status{min-width:100%}}

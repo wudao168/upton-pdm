@@ -71,7 +71,7 @@ public sealed partial class InMemoryPdmRepository
         {
             if (!drawingReviewPackages.TryGetValue(packageId, out var package))
                 throw new PdmNotFoundException("图纸审核单不存在。");
-            if (package.State != DrawingReviewPackageState.InReview)
+            if (package.State is not (DrawingReviewPackageState.InReview or DrawingReviewPackageState.PendingSupervisorApproval))
                 throw new PdmConflictException("只有审核中的图纸审核单可以撤销。");
             package = package with
             {
@@ -86,7 +86,7 @@ public sealed partial class InMemoryPdmRepository
     }
 
     private static bool IsActiveDrawingReview(DrawingReviewPackage package) =>
-        package.State is DrawingReviewPackageState.InReview or DrawingReviewPackageState.WritingProperties;
+        package.State is DrawingReviewPackageState.InReview or DrawingReviewPackageState.PendingSupervisorApproval or DrawingReviewPackageState.WritingProperties;
 
     private bool IsDocumentUnderActiveDrawingReview(Guid documentId) => drawingReviewPackages.Values.Any(package =>
         IsActiveDrawingReview(package)
@@ -188,6 +188,40 @@ public sealed partial class InMemoryPdmRepository
                         throw new PdmRuleException("图纸审核属性写回与审核目标不一致。");
                     return item with { DrawingWritebackId = request.Drawing.Id };
                 }).ToArray()
+            };
+            drawingReviewPackages[package.Id] = package;
+            return Task.FromResult(package);
+        }
+    }
+
+    public Task<DrawingReviewPackage> AdvanceDrawingReviewToSupervisorAsync(Guid packageId, CancellationToken cancellationToken)
+    {
+        lock (gate)
+        {
+            if (!drawingReviewPackages.TryGetValue(packageId, out var package)) throw new PdmNotFoundException("图纸审核单不存在。");
+            if (package.State != DrawingReviewPackageState.InReview || string.IsNullOrWhiteSpace(package.AssignedReviewer)
+                || string.IsNullOrWhiteSpace(package.Supervisor) || package.Items.Any(item => item.DrawingState != DrawingReviewTargetState.Approved))
+                throw new PdmConflictException("图纸尚未全部通过指定审核人审核，不能提交机械主管批准。");
+            package = package with { State = DrawingReviewPackageState.PendingSupervisorApproval };
+            drawingReviewPackages[package.Id] = package;
+            return Task.FromResult(package);
+        }
+    }
+
+    public Task<DrawingReviewPackage> DecideDrawingReviewSupervisorAsync(Guid packageId, DrawingReviewDecision decision, string reviewer, string reviewerName, DateTimeOffset reviewedAt, string? comment, CancellationToken cancellationToken)
+    {
+        lock (gate)
+        {
+            if (!drawingReviewPackages.TryGetValue(packageId, out var package)) throw new PdmNotFoundException("图纸审核单不存在。");
+            if (package.State != DrawingReviewPackageState.PendingSupervisorApproval || package.SupervisorReviewedAt.HasValue)
+                throw new PdmConflictException("机械主管批准任务已处理或当前状态已变化，请刷新后重试。");
+            package = package with
+            {
+                State = decision == DrawingReviewDecision.Approve ? DrawingReviewPackageState.PendingSupervisorApproval : DrawingReviewPackageState.ChangesRequested,
+                SupervisorReviewedBy = reviewer,
+                SupervisorReviewedByName = reviewerName,
+                SupervisorReviewedAt = reviewedAt,
+                SupervisorComment = comment
             };
             drawingReviewPackages[package.Id] = package;
             return Task.FromResult(package);

@@ -172,6 +172,60 @@ test.beforeEach(async ({ page }) => {
   })
 })
 
+test('program template owner can delete a saved draft after confirmation', async ({ page }, testInfo) => {
+  let drafts = [{
+    id: 'template-draft-1', code: 'PT-PLC-0001', assetType: 'PlcProgram', originCompanyId: 'org-ks', originCompanyName: '昆山阿普顿自动化系统有限公司',
+    currentPublishedRevisionId: null, isArchived: false, createdBy: 'engineer', createdAt: '2026-09-17T01:00:00Z',
+    revisions: [{
+      id: 'revision-draft-1', version: 'v1.0.0', attemptNumber: 1, state: 'Draft', name: '待删除程序草稿', category: '控制', description: '浏览器删除验证',
+      vendor: 'Siemens', platform: 'TIA Portal', softwareVersion: 'V19', applicableSeries: 'S7-1500', tags: [], changeNote: '',
+      packageFileName: 'draft.rar', packageFileLength: 128, packageSha256: 'A'.repeat(64), evidenceFileName: null, evidenceFileLength: null, evidenceSha256: null,
+      createdBy: 'engineer', createdAt: '2026-09-17T01:00:00Z', submittedAt: null, publishedAt: null, rowVersion: 3, parameters: [],
+    }],
+  }]
+  await page.route('**/api/auth/login', route => route.fulfill({ json: {
+    accessToken: 'e2e-token', expiresAt: '2099-01-01T00:00:00Z', resumeToken: 'e2e-resume-token', username: 'engineer', displayName: '真实工程师', role: 'Engineer',
+    permissions: ['project.view', 'project.create', 'project.child.create', 'project.content.view', 'document.edit', 'bom.edit', 'material.view', 'release.manage', 'program-template.view', 'program-template.submit'],
+    primaryCompanyId: 'org-ks', activeCompanyId: 'org-ks', activeCompanyName: '昆山阿普顿自动化系统有限公司', crossCompanyView: false,
+    accessibleCompanies: [{ id: 'org-ks', name: '昆山阿普顿自动化系统有限公司', code: '7' }],
+  } }))
+  await page.route(/^http:\/\/127\.0\.0\.1:(?:5080|5173|519[3-5])\/api\/program-templates(?:\/.*)?(?:\?.*)?$/, route => {
+    const url = new URL(route.request().url())
+    if (url.pathname === '/api/program-templates/tasks/mine') return route.fulfill({ json: [] })
+    if (url.pathname === '/api/program-templates' && route.request().method() === 'GET')
+      return route.fulfill({ json: url.searchParams.get('mine') === 'true' ? drafts : [] })
+    if (url.pathname === '/api/program-templates/template-draft-1') return route.fulfill({ json: drafts[0] })
+    if (url.pathname === '/api/program-templates/revisions/revision-draft-1' && route.request().method() === 'DELETE') {
+      expect(url.searchParams.get('expectedRowVersion')).toBe('3')
+      drafts = []
+      return route.fulfill({ status: 204 })
+    }
+    return route.fulfill({ status: 404, json: { title: `Unexpected program template route: ${url.pathname}` } })
+  })
+  const errors: string[] = []
+  page.on('pageerror', error => errors.push(error.message))
+  page.on('console', message => { if (message.type() === 'error') errors.push(message.text()) })
+  await page.addInitScript(() => { window.setInterval = (() => 0) as unknown as typeof window.setInterval })
+  await page.goto('/')
+  const login = page.getByLabel('登录PLM')
+  await login.getByRole('textbox', { name: '账号' }).fill('engineer')
+  await login.getByRole('textbox', { name: '密码' }).fill('correct-password')
+  await login.getByRole('button', { name: '登录', exact: true }).click()
+  await page.getByRole('button', { name: '程序模板', exact: true }).click()
+  const library = page.getByLabel('程序模板库')
+  await library.getByRole('tab', { name: '我的提交' }).click()
+  await expect(library).toContainText('待删除程序草稿')
+  await library.getByRole('button', { name: '查看' }).click()
+  await expect(page.getByRole('button', { name: '删除草稿' })).toBeVisible()
+  await page.getByRole('button', { name: '删除草稿' }).click()
+  const confirmation = page.getByRole('dialog', { name: '删除程序模板草稿' })
+  await expect(confirmation).toContainText('无法恢复')
+  await page.screenshot({ path: testInfo.outputPath('program-template-delete-confirmation.png') })
+  await confirmation.getByRole('button', { name: '确认删除' }).click()
+  await expect(library).not.toContainText('待删除程序草稿')
+  expect(errors).toEqual([])
+})
+
 test('project overview prioritizes current status, actions, tasks, team and locations', async ({ page }, testInfo) => {
   const overviewProject = { id: projectId, code: 'PRJ-REAL-001', name: '真实装配项目', owner: 'engineer', stage: 'Design', vaultLocation: 'D:\\PDM\\PRJ-REAL-001', releaseLocation: 'D:\\Release\\PRJ-REAL-001', isActive: true, quantity: 1, serialNumbers: ['70000001'], executionUnitName: '自动化事业部', primaryProjectManager: 'engineer', collaborativeProjectManagers: [], designLead: 'engineer', designers: ['engineer'] }
   await page.route('**/api/projects', route => route.fulfill({ json: [overviewProject] }))
@@ -225,6 +279,56 @@ test('project overview prioritizes current status, actions, tasks, team and loca
   expect(errors).toEqual([])
 })
 
+test('procurement BOM kind filter stays on one line and filters all three kinds', async ({ page }, testInfo) => {
+  await page.route(`**/api/projects/${projectId}/procurement-tracking`, route => route.fulfill({ json: {
+    projectId, projectCode: 'PRJ-REAL-001', hasPublishedBom: true, lastSuccessfulRefreshAt: '2026-09-17T12:00:00Z', items: [
+      { sequence: 1, projectCode: 'PRJ-REAL-001', materialCode: 'STD-01', materialName: '标准紧固件', brand: 'UPTON', quantity: 1, bomKind: 'Standard', purchaseRequisitionNumbers: [], purchaseRequisitionStatus: '未请购', purchaseOrderNumbers: [], purchaseOrderStatus: '未采购', purchaseQuantity: 0, arrivedQuantity: 0, details: [] },
+      { sequence: 2, projectCode: 'PRJ-REAL-001', materialCode: 'NONSTD-01', materialName: '非标底板', brand: 'UPTON', quantity: 1, bomKind: 'NonStandard', purchaseRequisitionNumbers: [], purchaseRequisitionStatus: '未请购', purchaseOrderNumbers: [], purchaseOrderStatus: '未采购', purchaseQuantity: 0, arrivedQuantity: 0, details: [] },
+      { sequence: 3, projectCode: 'PRJ-REAL-001', materialCode: 'ELEC-01', materialName: '电气传感器', brand: 'UPTON', quantity: 1, bomKind: 'Electrical', purchaseRequisitionNumbers: [], purchaseRequisitionStatus: '未请购', purchaseOrderNumbers: [], purchaseOrderStatus: '未采购', purchaseQuantity: 0, arrivedQuantity: 0, details: [] },
+    ],
+  } }))
+  const errors: string[] = []
+  page.on('pageerror', error => errors.push(error.message))
+  page.on('console', message => { if (message.type() === 'error') errors.push(message.text()) })
+  await page.addInitScript(() => { window.setInterval = (() => 0) as unknown as typeof window.setInterval })
+  await page.setViewportSize({ width: 1920, height: 1080 })
+  await page.goto('/')
+  const login = page.getByLabel('登录PLM')
+  await login.getByRole('textbox', { name: '账号' }).fill('engineer')
+  await login.getByRole('textbox', { name: '密码' }).fill('correct-password')
+  await login.getByRole('button', { name: '登录', exact: true }).click()
+  await enterProject(page)
+  await page.getByRole('button', { name: '备料', exact: true }).click()
+
+  const kindFilter = page.getByLabel('筛选物料分类')
+  await expect(kindFilter.locator('option')).toHaveText(['全部分类', '标准件', '非标件', '电气件'])
+  const layout = await page.locator('.procurement-tracking__heading').evaluate(heading => {
+    const filters = heading.querySelector<HTMLElement>('.procurement-tracking__filters')!
+    const controls = [...heading.querySelectorAll<HTMLElement>('.procurement-tracking__filters > :not(datalist), .procurement-tracking__actions > *, .procurement-tracking__updated')]
+      .filter(element => element.getBoundingClientRect().width > 0)
+    const centers = controls.map(element => {
+      const rect = element.getBoundingClientRect()
+      return Math.round(rect.top + rect.height / 2)
+    })
+    return {
+      filterWrap: getComputedStyle(filters).flexWrap,
+      headingOverflow: heading.scrollWidth - heading.clientWidth,
+      centerSpread: Math.max(...centers) - Math.min(...centers),
+    }
+  })
+  expect(layout.filterWrap).toBe('nowrap')
+  expect(layout.headingOverflow).toBeLessThanOrEqual(1)
+  expect(layout.centerSpread).toBeLessThanOrEqual(1)
+
+  await kindFilter.selectOption('非标件')
+  await expect(page.getByText('NONSTD-01', { exact: true })).toBeVisible()
+  await expect(page.getByText('STD-01', { exact: true })).toHaveCount(0)
+  await expect(page.getByText('ELEC-01', { exact: true })).toHaveCount(0)
+  await page.screenshot({ path: testInfo.outputPath('procurement-kind-filter-one-line.png'), fullPage: false })
+  await expect(page.locator('vite-error-overlay')).toHaveCount(0)
+  expect(errors).toEqual([])
+})
+
 test('wear-part BOM aggregates categories and stays outside release', async ({ page }, testInfo) => {
   const errors: string[] = []
   page.on('pageerror', error => errors.push(error.message))
@@ -253,7 +357,7 @@ test('wear-part BOM aggregates categories and stays outside release', async ({ p
   expect(errors).toEqual([])
 })
 
-test('released BOM rows expose linked 2D and 3D preview downloads', async ({ page }) => {
+test('released BOM rows expose linked 2D and 3D preview downloads', async ({ page }, testInfo) => {
   const releasedDocuments = [
     { id: 'doc-root', projectId, folderId: 'folder-main-mechanical', drawingNumber: 'REAL-ASM-001', name: '真实总装配', fileName: 'REAL-ASM-001.SLDASM', kind: 0, lifecycleState: 2, revision: { display: 'W2' }, storedVersionCount: 2, checkedOutBy: null },
     { id: 'doc-drawing', projectId, folderId: 'folder-main-mechanical', drawingNumber: 'REAL-ASM-001', name: '真实总装工程图', fileName: 'REAL-ASM-001.SLDDRW', kind: 2, lifecycleState: 2, revision: { display: 'W2' }, storedVersionCount: 2, checkedOutBy: null },
@@ -264,6 +368,9 @@ test('released BOM rows expose linked 2D and 3D preview downloads', async ({ pag
   }] }))
   await page.route(`**/api/projects/${projectId}/boms/NonStandard`, route => route.fulfill({ json: [{
     id: 'bom-non-standard-1', kind: 'NonStandard', sequence: 1, drawingNumber: 'REAL-ASM-001', name: '真实总装配', quantity: 1, unit: '件', material: 'Q235B', specification: '总装', heatTreatment: '淬火', revision: 'W2', isComplete: true, source: 'Auto', sourceDocumentId: 'doc-root', isWearPart: false, isManuallyOverridden: false, isPendingRemoval: false,
+  }] }))
+  await page.route(`**/api/projects/${projectId}/drawing-review-candidates`, route => route.fulfill({ json: [{
+    candidateId: 'review-bom-non-standard-1', bomItemId: 'bom-non-standard-1', modelDocumentId: 'doc-root', drawingDocumentId: 'doc-drawing', drawingNumber: 'REAL-ASM-001', name: '真实总装配', bomKinds: ['NonStandard'], modelRevision: 'W2', drawingRevision: 'W2', state: 'Ready', reason: '当前工程图尚未发起审核', selectable: true,
   }] }))
   await page.route('**/api/documents/doc-drawing/versions', route => route.fulfill({ json: [{
     id: 'drawing-release-w2', documentId: 'doc-drawing', revision: { display: 'W2' }, status: 1, fileLength: 100, sha256: 'D'.repeat(64), createdBy: 'engineer', createdAt: '2026-09-16T01:00:00Z', changeNote: '发布',
@@ -299,7 +406,9 @@ test('released BOM rows expose linked 2D and 3D preview downloads', async ({ pag
   await expect(table.getByRole('button', { name: '编辑热处理' })).toHaveText('淬火')
   await expect(table.getByRole('button', { name: '下载2D图纸 REAL-ASM-001' })).toBeVisible()
   await expect(table.getByRole('button', { name: '下载3D图纸 REAL-ASM-001' })).toBeVisible()
+  await expect(table.getByText('未审核', { exact: true })).toHaveAttribute('title', '当前工程图尚未发起审核')
   expect(await table.locator('tbody tr').first().evaluate(element => getComputedStyle(element).height)).toBe('30px')
+  await page.screenshot({ path: testInfo.outputPath('non-standard-drawing-review-warning.png'), fullPage: false })
 
   const downloadPromise = page.waitForEvent('download')
   await table.getByRole('button', { name: '下载2D图纸 REAL-ASM-001' }).click()

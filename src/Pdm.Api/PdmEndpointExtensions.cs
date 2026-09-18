@@ -997,10 +997,18 @@ public static class PdmEndpointExtensions
             return Results.Ok(await workflow.ListDrawingReviewCandidatesAsync(projectId, actor, role, cancellationToken));
         });
 
+        api.MapGet("/projects/{projectId:guid}/drawing-reviewers", async (Guid projectId, HttpContext context, PdmWorkflowService workflow, CancellationToken cancellationToken) =>
+        {
+            var (actor, role) = CurrentUser(context.User);
+            var candidates = await workflow.ListDrawingReviewersAsync(projectId, actor, role, cancellationToken);
+            return Results.Ok(candidates.Select(item => new ApprovalTransferCandidateResponse(item.Username, item.DisplayName)));
+        });
+
         api.MapPost("/projects/{projectId:guid}/drawing-reviews", async (Guid projectId, CreateDrawingReviewRequest? request, HttpContext context, PdmWorkflowService workflow, CancellationToken cancellationToken) =>
         {
             var (actor, role) = CurrentUser(context.User);
-            return Results.Ok(await workflow.CreateDrawingReviewPackageAsync(projectId, request?.ModelDocumentIds, actor, role, cancellationToken));
+            if (request is null || string.IsNullOrWhiteSpace(request.AssignedReviewer)) return Results.BadRequest(new { message = "请选择指定审核人。" });
+            return Results.Ok(await workflow.CreateDrawingReviewPackageAsync(projectId, request.ModelDocumentIds, request.AssignedReviewer, actor, role, cancellationToken));
         });
 
         api.MapPost("/drawing-reviews/{packageId:guid}/withdraw", async (Guid packageId, WithdrawDrawingReviewRequest request, HttpContext context, PdmWorkflowService workflow, CancellationToken cancellationToken) =>
@@ -1123,6 +1131,40 @@ public static class PdmEndpointExtensions
         {
             var (actor, role) = CurrentUser(context.User);
             return Results.Ok(await workflow.ObsoleteDocumentAsync(documentId, actor, role, request.Comment, cancellationToken));
+        });
+
+        api.MapPost("/documents/{documentId:guid}/checkin/preflight", async (Guid documentId, CheckInPreflightRequest request, HttpContext context, PdmWorkflowService workflow, TimeProvider timeProvider, CancellationToken cancellationToken) =>
+        {
+            var (actor, role) = CurrentUser(context.User);
+            var rootJson = JsonSerializer.Serialize(request.Root, new JsonSerializerOptions(JsonSerializerDefaults.Web));
+            var snapshot = new CadReferenceSnapshot(
+                Guid.NewGuid(),
+                request.ProjectId,
+                documentId,
+                timeProvider.GetUtcNow(),
+                actor,
+                request.Root,
+                Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(rootJson))));
+            await workflow.PreflightCheckInAsync(
+                documentId,
+                actor,
+                role,
+                request.CheckoutSessionId,
+                request.Properties ?? new Dictionary<string, string?>(),
+                snapshot,
+                request.IsProjectRoot,
+                cancellationToken,
+                request.DrawingNumber,
+                request.Name,
+                request.FileName,
+                request.DrawingReviewWritebackId);
+            return Results.Ok(new { valid = true });
+        });
+
+        api.MapPost("/drawing-reviews/{packageId:guid}/supervisor-decision", async (Guid packageId, DecideDrawingReviewSupervisorRequest request, HttpContext context, PdmWorkflowService workflow, CancellationToken cancellationToken) =>
+        {
+            var (actor, role) = CurrentUser(context.User);
+            return Results.Ok(await workflow.DecideDrawingReviewSupervisorAsync(packageId, new DecideDrawingReviewSupervisorCommand(request.Decision, request.Comment), actor, role, cancellationToken));
         });
 
         api.MapPost("/documents/{documentId:guid}/checkin", async (Guid documentId, CheckInRequest request, HttpContext context, PdmWorkflowService workflow, TimeProvider timeProvider, CancellationToken cancellationToken) =>

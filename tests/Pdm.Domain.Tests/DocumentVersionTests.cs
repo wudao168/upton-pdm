@@ -1469,7 +1469,7 @@ public sealed class DocumentVersionTests
     }
 
     [Fact]
-    public async Task DrawingCheckIn_RequiresQrCodeToMatchUniqueRelatedModelSpecification()
+    public async Task DrawingCheckIn_DoesNotBlockWhenQrCodeDoesNotMatchModelSpecification()
     {
         var repository = new Infrastructure.InMemoryPdmRepository(TimeProvider.System);
         var settings = await repository.GetSystemSettingsAsync(CancellationToken.None);
@@ -1507,21 +1507,18 @@ public sealed class DocumentVersionTests
             ["全局/UPLM_QR_SOURCE_PROPERTY"] = "型号"
         };
 
-        var exception = await Assert.ThrowsAsync<Application.PdmRuleException>(() => workflow.CheckInAsync(
-            drawing.Id, "engineer", UserRole.Administrator, sessionId, file, "drawing", invalid, snapshot, false, false,
-            CancellationToken.None));
-        Assert.Contains("二维码", exception.Message);
+        await workflow.PreflightCheckInAsync(
+            drawing.Id, "engineer", UserRole.Administrator, sessionId, invalid, snapshot, false,
+            CancellationToken.None);
+        Assert.Empty(await repository.ListDocumentVersionsAsync(drawing.Id, CancellationToken.None));
+        Assert.Equal("engineer", (await repository.FindDocumentAsync(drawing.Id, CancellationToken.None))?.CheckedOutBy);
 
-        var valid = new Dictionary<string, string?>(invalid, StringComparer.OrdinalIgnoreCase)
-        {
-            ["全局/UPLM_QR_CONTENT"] = "MODEL-QR-001"
-        };
         var result = await workflow.CheckInAsync(
-            drawing.Id, "engineer", UserRole.Administrator, sessionId, file, "drawing", valid, snapshot, false, false,
+            drawing.Id, "engineer", UserRole.Administrator, sessionId, file, "drawing", invalid, snapshot, false, false,
             CancellationToken.None);
 
         Assert.True(result.VersionCreated);
-        Assert.Equal("MODEL-QR-001", Assert.IsType<DocumentVersion>(result.Version).PropertySnapshot["全局/UPLM_QR_CONTENT"]);
+        Assert.Equal("WRONG", Assert.IsType<DocumentVersion>(result.Version).PropertySnapshot["全局/UPLM_QR_CONTENT"]);
     }
 
     private static async Task<PdmDocument> RegisterAndCheckInAsync(Infrastructure.InMemoryPdmRepository repository, Project project, string drawingNumber, string sha256)

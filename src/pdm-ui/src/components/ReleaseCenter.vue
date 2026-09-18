@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
 import { addReleaseItemComment, listApprovalTransferCandidates, listReleaseItemComments } from '../api'
-import type { ApprovalTransferCandidate, BomItem, CreateReleasePackageInput, FormalSupplementPolicies, ReleaseItemComment, ReleasePackageSummary, ReleaseScope, UpdateReleasePackageDraftInput } from '../types'
+import type { ApprovalTransferCandidate, BomItem, CreateReleasePackageInput, DrawingReviewCandidate, FormalSupplementPolicies, ReleaseItemComment, ReleasePackageSummary, ReleaseScope, UpdateReleasePackageDraftInput } from '../types'
 import { useUserDisplayName } from '../userDisplay'
 
 const displayUserName = useUserDisplayName()
@@ -25,7 +25,8 @@ const props = withDefaults(defineProps<{
   releasePackages?: ReleasePackageSummary[]
   longLeadPublishedItems?: BomItem[]
   previousVersionItems?: BomItem[]
-}>(), { standardItems: () => [], releaseItems: () => [], canEmergencyDecide: false, allowedScopes: () => [], changeReasonTypes: () => [], formalSupplementPolicies: () => ({ standard: { maximumCount: 2, validDays: null }, electrical: { maximumCount: 2, validDays: null } }), releasePackages: () => [], longLeadPublishedItems: () => [], previousVersionItems: () => [] })
+  drawingReviewCandidates?: DrawingReviewCandidate[]
+}>(), { standardItems: () => [], releaseItems: () => [], canEmergencyDecide: false, allowedScopes: () => [], changeReasonTypes: () => [], formalSupplementPolicies: () => ({ standard: { maximumCount: 2, validDays: null }, electrical: { maximumCount: 2, validDays: null } }), releasePackages: () => [], longLeadPublishedItems: () => [], previousVersionItems: () => [], drawingReviewCandidates: () => [] })
 const emit = defineEmits<{
   create: [input: CreateReleasePackageInput]
   updateDraft: [releasePackageId: string, input: UpdateReleasePackageDraftInput]
@@ -172,6 +173,21 @@ const releaseItemGroupKey = (item: BomItem, index: number) => {
         item.specification, item.brand, item.material, item.surfaceTreatment, item.heatTreatment,
         item.weight, item.remark, item.revision, item.id || index,
       ].map(value => String(value ?? '').trim().toLocaleLowerCase()).join('|')
+}
+const drawingReviewCandidateFor = (item: BomItem) => props.drawingReviewCandidates.find(candidate => candidate.bomItemId === item.id)
+  ?? props.drawingReviewCandidates.find(candidate => Boolean(item.sourceDocumentId) && candidate.modelDocumentId === item.sourceDocumentId)
+const itemDrawingReviewReady = (item: BomItem) => item.kind !== 'NonStandard' || drawingReviewCandidateFor(item)?.state === 'ApprovedCurrent'
+const releaseRowDrawingReviewReady = (row: { sourceItems: BomItem[] }) => row.sourceItems.length > 0 && row.sourceItems.every(itemDrawingReviewReady)
+const drawingReviewStatusForItem = (item: BomItem) => {
+  const candidate = drawingReviewCandidateFor(item)
+  if (candidate?.state === 'ApprovedCurrent') return '图纸已审核'
+  if (candidate?.state === 'InReview') return '图纸审核中'
+  if (candidate?.state === 'Unavailable') return candidate.reason || '图纸不可审核'
+  return candidate?.reason || '图纸未审核'
+}
+const releaseRowDrawingReviewStatus = (row: { sourceItems: BomItem[] }) => {
+  if (releaseRowDrawingReviewReady(row)) return '图纸已审核'
+  return [...new Set(row.sourceItems.map(drawingReviewStatusForItem))].join('；') || '图纸未审核'
 }
 const currentReleaseKeysByTrackingId = computed(() => new Map(
   availableReleaseItems.value
@@ -336,6 +352,25 @@ const hasInvalidLongLeadQuantity = computed(() => selectedLongLeadKeys.value.som
 }))
 const hasInvalidWholeSetMultiplier = computed(() => !isLongLeadRelease.value
   && (!Number.isInteger(Number(wholeSetMultiplier.value)) || Number(wholeSetMultiplier.value) < 1 || Number(wholeSetMultiplier.value) > 1000))
+const hasBlockedNonStandardDrawingReview = computed(() => {
+  if (!isNonStandardScope(scope.value)) return false
+  if (scope.value === 'NonStandardLongLead') {
+    return selectedLongLeadKeys.value.some(key => {
+      const row = longLeadReleaseRows.value.find(candidate => candidate.key === key)
+      return !row || !releaseRowDrawingReviewReady(row)
+    })
+  }
+  if (scope.value === 'NonStandardSupplement') {
+    return supplementRows.value.some(row => row.change !== '删除' && !itemDrawingReviewReady(row.item))
+  }
+  return formalReleaseRows.value.some(row => !releaseRowDrawingReviewReady(row))
+})
+const drawingReviewBlockMessage = computed(() => {
+  if (!isNonStandardScope(scope.value)) return ''
+  if (scope.value === 'NonStandardLongLead') return longLeadReleaseRows.value.some(row => !releaseRowDrawingReviewReady(row))
+    ? '未完成当前版本图纸审核的非标件已禁用，不能勾选发布。' : ''
+  return hasBlockedNonStandardDrawingReview.value ? '当前发布范围包含未完成当前版本图纸审核的非标件，完成审核后才可创建发布草稿。' : ''
+})
 const createDisabled = computed(() => props.pending
   || isLongLeadRelease.value && selectedBomItemIds.value.length === 0
   || isLongLeadRelease.value && hasInvalidLongLeadQuantity.value
@@ -343,7 +378,8 @@ const createDisabled = computed(() => props.pending
   || hasInvalidWholeSetMultiplier.value
   || isSupplement.value && selectedChangeReasons.value.length === 0
   || isSupplement.value && selectedChangeReasons.value.includes('其他') && !otherChangeReason.value.trim()
-  || isSupplement.value && selectedChangeReasons.value.includes('正式补充') && !formalSupplementAvailability.value.allowed)
+  || isSupplement.value && selectedChangeReasons.value.includes('正式补充') && !formalSupplementAvailability.value.allowed
+  || hasBlockedNonStandardDrawingReview.value)
 const requiresDrawingFiles = computed(() => props.releasePackage?.locksDocuments ?? (isNonStandardScope(scope.value) && !isLongLeadScope(scope.value)))
 const isCurrentTaskAssignee = computed(() => Boolean(currentTask.value
   && currentTask.value.assignee.toLowerCase() === props.username.toLowerCase()))
@@ -474,9 +510,12 @@ watch([() => availableReleaseItems.value.length, () => supplementRows.value.leng
   formalPage.value = Math.min(formalPage.value, formalPageCount.value)
   supplementPage.value = Math.min(supplementPage.value, supplementPageCount.value)
 })
-watch(() => longLeadReleaseRows.value.map(row => row.key).join('\n'), () => {
+watch([() => longLeadReleaseRows.value.map(row => row.key).join('\n'), () => props.drawingReviewCandidates.map(candidate => `${candidate.candidateId}:${candidate.state}`).join('\n')], () => {
   const availableKeys = new Set(longLeadReleaseRows.value.map(row => row.key))
-  selectedLongLeadKeys.value = selectedLongLeadKeys.value.filter(key => availableKeys.has(key))
+  selectedLongLeadKeys.value = selectedLongLeadKeys.value.filter(key => {
+    const row = longLeadReleaseRows.value.find(candidate => candidate.key === key)
+    return availableKeys.has(key) && Boolean(row && releaseRowDrawingReviewReady(row))
+  })
   longLeadRequestedQuantities.value = Object.fromEntries(Object.entries(longLeadRequestedQuantities.value).filter(([key]) => availableKeys.has(key)))
 })
 watch([scope, () => formalReleaseRows.value.map(row => row.key).join('\n')], () => {
@@ -508,6 +547,8 @@ function create() {
 }
 
 function toggleLongLeadSelection(key: string, checked: boolean, maximum: number) {
+  const row = longLeadReleaseRows.value.find(candidate => candidate.key === key)
+  if (checked && (!row || !releaseRowDrawingReviewReady(row))) return
   if (checked) {
     if (!selectedLongLeadKeys.value.includes(key)) selectedLongLeadKeys.value = [...selectedLongLeadKeys.value, key]
     if (!(Number(longLeadRequestedQuantities.value[key]) > 0)) longLeadRequestedQuantities.value[key] = maximum
@@ -726,6 +767,7 @@ async function saveItemComment() {
         </div>
         <div class="pdm-release-parameter-slot">
           <p v-if="isLongLeadRelease" class="pdm-inline-info">前期BOM发布允许在尚无引用树时使用，仅冻结本次BOM清单，不发布图纸或制造结构；正式发布将自动扣除已经发布的数量。</p>
+          <p v-if="drawingReviewBlockMessage" class="pdm-inline-warning" role="status">{{ drawingReviewBlockMessage }}</p>
           <label v-if="!isSupplement" class="pdm-release-reason">备注<textarea v-model.trim="releaseNote" rows="3" maxlength="500" placeholder="可填写本次发布备注（选填）"></textarea></label>
           <fieldset v-else class="release-change-reason-picker">
             <legend>变更原因（可跨分类多选，必须选择具体原因，已选 {{ selectedChangeReasons.length }} 项）</legend>
@@ -755,19 +797,19 @@ async function saveItemComment() {
             <tbody>
               <template v-if="isLongLeadRelease">
                 <tr v-for="(row, index) in pagedLongLeadItems" :key="row.key">
-                  <td class="is-release-centered"><input :checked="selectedLongLeadKeys.includes(row.key)" type="checkbox" :aria-label="`选择长交期物料 ${row.item.drawingNumber}`" @change="toggleLongLeadSelection(row.key, ($event.target as HTMLInputElement).checked, Number(row.item.quantity))"></td>
-                  <td class="is-release-centered">{{ (longLeadPage - 1) * releasePageSize + index + 1 }}</td><td>{{ row.item.drawingNumber || '—' }}</td><td>{{ row.item.name || '—' }}</td><td>{{ row.item.specification || '—' }}</td><td class="is-release-centered">{{ row.item.brand || '—' }}</td><td class="is-release-centered">{{ row.item.quantity }}</td><td class="is-release-centered"><input v-if="selectedLongLeadKeys.includes(row.key)" v-model.number="longLeadRequestedQuantities[row.key]" class="long-lead-quantity-input" type="number" min="0.000001" :max="row.item.quantity" step="any" :aria-label="`本次发布数量 ${row.item.drawingNumber}`"><span v-else>—</span></td><td>{{ row.item.remark || '—' }}</td><td class="is-release-centered"><span class="release-status-tag">剩余可发布</span></td>
+                  <td class="is-release-centered"><input :checked="selectedLongLeadKeys.includes(row.key)" type="checkbox" :aria-label="`选择长交期物料 ${row.item.drawingNumber}`" :disabled="scope === 'NonStandardLongLead' && !releaseRowDrawingReviewReady(row)" :title="scope === 'NonStandardLongLead' && !releaseRowDrawingReviewReady(row) ? releaseRowDrawingReviewStatus(row) : undefined" @change="toggleLongLeadSelection(row.key, ($event.target as HTMLInputElement).checked, Number(row.item.quantity))"></td>
+                  <td class="is-release-centered">{{ (longLeadPage - 1) * releasePageSize + index + 1 }}</td><td>{{ row.item.drawingNumber || '—' }}</td><td>{{ row.item.name || '—' }}</td><td>{{ row.item.specification || '—' }}</td><td class="is-release-centered">{{ row.item.brand || '—' }}</td><td class="is-release-centered">{{ row.item.quantity }}</td><td class="is-release-centered"><input v-if="selectedLongLeadKeys.includes(row.key)" v-model.number="longLeadRequestedQuantities[row.key]" class="long-lead-quantity-input" type="number" min="0.000001" :max="row.item.quantity" step="any" :aria-label="`本次发布数量 ${row.item.drawingNumber}`"><span v-else>—</span></td><td>{{ row.item.remark || '—' }}</td><td class="is-release-centered"><span class="release-status-tag" :class="{ 'is-blocked': scope === 'NonStandardLongLead' && !releaseRowDrawingReviewReady(row) }">{{ scope === 'NonStandardLongLead' ? releaseRowDrawingReviewStatus(row) : '剩余可发布' }}</span></td>
                 </tr>
               </template>
               <template v-else-if="isFormalRelease">
                 <tr v-for="(row, index) in pagedFormalReleaseRows" :key="row.key" :class="{ 'is-release-unselected': scope === 'StandardFormal' && !selectedFormalKeys.includes(row.key) }">
                   <td class="is-release-centered"><input v-if="scope === 'StandardFormal'" :checked="selectedFormalKeys.includes(row.key)" type="checkbox" :aria-label="`本次发布物料 ${row.item.drawingNumber}`" @change="toggleFormalSelection(row.key, ($event.target as HTMLInputElement).checked)"><span v-else class="release-inclusion-tag">全量</span></td><td class="is-release-centered">{{ (formalPage - 1) * releasePageSize + index + 1 }}</td><td>{{ row.item.drawingNumber || '—' }}</td><td>{{ row.item.name || '—' }}</td><td>{{ row.item.specification || '—' }}</td><td class="is-release-centered">{{ row.item.brand || '—' }}</td><td class="is-release-centered">{{ row.item.quantity }}</td><td class="is-release-centered" :class="{ 'is-release-multiplied': Number(wholeSetMultiplier) !== 1 && !(scope === 'StandardFormal' && !selectedFormalKeys.includes(row.key)) }">{{ scope === 'StandardFormal' && !selectedFormalKeys.includes(row.key) ? '—' : Number(row.item.quantity) * Number(wholeSetMultiplier) }}</td><td>{{ row.item.remark || '—' }}</td>
-                  <td class="is-release-centered"><span v-if="scope === 'StandardFormal' && !selectedFormalKeys.includes(row.key)" class="release-status-tag">本次不发布</span><span v-else-if="row.longLeadPublishedQuantity > 0" class="long-lead-tag">已提前发布 {{ row.longLeadPublishedQuantity }}/{{ row.item.quantity }}</span><span v-else-if="scope === 'StandardFormal'" class="release-status-tag">本次发布</span><span v-else>—</span></td>
+                  <td class="is-release-centered"><span v-if="scope === 'NonStandardWithDrawing'" class="release-status-tag" :class="{ 'is-blocked': !releaseRowDrawingReviewReady(row) }">{{ releaseRowDrawingReviewStatus(row) }}</span><span v-else-if="scope === 'StandardFormal' && !selectedFormalKeys.includes(row.key)" class="release-status-tag">本次不发布</span><span v-else-if="row.longLeadPublishedQuantity > 0" class="long-lead-tag">已提前发布 {{ row.longLeadPublishedQuantity }}/{{ row.item.quantity }}</span><span v-else-if="scope === 'StandardFormal'" class="release-status-tag">本次发布</span><span v-else>—</span></td>
                 </tr>
               </template>
               <template v-else>
                 <tr v-for="(row, index) in pagedSupplementRows" :key="`${row.change}-${row.item.id}-${index}`">
-                  <td class="is-release-centered"><span :class="`release-change-tag is-${row.change}`">{{ row.change }}</span></td><td class="is-release-centered">{{ (supplementPage - 1) * releasePageSize + index + 1 }}</td><td>{{ row.item.drawingNumber || '—' }}</td><td>{{ row.item.name || '—' }}</td><td>{{ row.item.specification || '—' }}</td><td class="is-release-centered">{{ row.item.brand || '—' }}</td><td class="is-release-centered">{{ row.item.quantity }}</td><td class="is-release-centered" :class="{ 'is-release-multiplied': row.change !== '删除' && Number(wholeSetMultiplier) !== 1 }">{{ row.change === '删除' ? '—' : Number(row.item.quantity) * Number(wholeSetMultiplier) }}</td><td>{{ row.item.remark || '—' }}</td><td class="is-release-centered"><span class="release-status-tag">待纳入变更</span></td>
+                  <td class="is-release-centered"><span :class="`release-change-tag is-${row.change}`">{{ row.change }}</span></td><td class="is-release-centered">{{ (supplementPage - 1) * releasePageSize + index + 1 }}</td><td>{{ row.item.drawingNumber || '—' }}</td><td>{{ row.item.name || '—' }}</td><td>{{ row.item.specification || '—' }}</td><td class="is-release-centered">{{ row.item.brand || '—' }}</td><td class="is-release-centered">{{ row.item.quantity }}</td><td class="is-release-centered" :class="{ 'is-release-multiplied': row.change !== '删除' && Number(wholeSetMultiplier) !== 1 }">{{ row.change === '删除' ? '—' : Number(row.item.quantity) * Number(wholeSetMultiplier) }}</td><td>{{ row.item.remark || '—' }}</td><td class="is-release-centered"><span class="release-status-tag" :class="{ 'is-blocked': scope === 'NonStandardSupplement' && row.change !== '删除' && !itemDrawingReviewReady(row.item) }">{{ scope === 'NonStandardSupplement' && row.change !== '删除' ? drawingReviewStatusForItem(row.item) : '待纳入变更' }}</span></td>
                   <td class="release-change-details"><div v-for="detail in row.details" :key="detail">{{ detail }}</div></td>
                 </tr>
               </template>
@@ -995,4 +1037,6 @@ async function saveItemComment() {
 .pdm-frozen-view-actions{flex-wrap:wrap}
 .pdm-frozen-change-details>div+div{margin-top:3px}
 .pdm-release-frozen-table.is-change-view .release-change-tag{padding:0 3px;white-space:nowrap}
+.release-status-tag.is-blocked{background:#fff7ed;color:#b45309;font-weight:700}
+.pdm-release-parameter-slot>.pdm-inline-warning{margin:0 0 6px;padding:6px 8px;border-radius:5px;background:#fff7ed;color:#b45309}
 </style>

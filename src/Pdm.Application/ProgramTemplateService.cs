@@ -141,6 +141,22 @@ public sealed class ProgramTemplateService(
         return saved;
     }
 
+    public async Task DeleteDraftAsync(
+        Guid revisionId,
+        long expectedRowVersion,
+        string actor,
+        UserRole role,
+        CancellationToken cancellationToken)
+    {
+        await RequirePermissionAsync(actor, role, PermissionCodes.ProgramTemplateSubmit, cancellationToken);
+        var revision = await RequireEditableDraftAsync(revisionId, actor, role, cancellationToken);
+        var template = await templates.FindAsync(revision.TemplateId, cancellationToken)
+            ?? throw new PdmNotFoundException("程序模板不存在。");
+        await templates.DeleteDraftAsync(revisionId, expectedRowVersion, cancellationToken);
+        foreach (var file in StoredFiles(revision)) await storage.DiscardAsync(file, cancellationToken);
+        await AuditAsync(actor, "program-template.draft.delete", nameof(ProgramTemplateRevision), revisionId, $"{template.Code} {revision.VersionLabel}", cancellationToken);
+    }
+
     public async Task<ProgramTemplateUploadSession> StartUploadAsync(
         Guid revisionId,
         ProgramTemplateAttachmentKind kind,
@@ -311,11 +327,19 @@ public sealed class ProgramTemplateService(
     {
         var revision = await templates.FindRevisionAsync(revisionId, cancellationToken)
             ?? throw new PdmNotFoundException("程序模板候选版本不存在。");
-        if (revision.State != ProgramTemplateRevisionState.Draft) throw new PdmConflictException("只有草稿版本可以修改或上传文件。");
+        if (revision.State != ProgramTemplateRevisionState.Draft) throw new PdmConflictException("只有草稿版本可以修改、上传文件或删除。");
         if (!string.Equals(revision.CreatedBy, actor, StringComparison.OrdinalIgnoreCase)
             && !await HasPermissionAsync(actor, role, PermissionCodes.ProgramTemplateManage, cancellationToken))
             throw new UnauthorizedAccessException("只能维护本人创建的程序模板草稿。");
         return revision;
+    }
+
+    private static IEnumerable<StoredProgramTemplateFile> StoredFiles(ProgramTemplateRevision revision)
+    {
+        if (revision.PackageFileName is not null && revision.PackageStoragePath is not null && revision.PackageFileLength is long packageLength && revision.PackageSha256 is not null)
+            yield return new StoredProgramTemplateFile(revision.Id, ProgramTemplateAttachmentKind.Package, revision.PackageFileName, revision.PackageStoragePath, packageLength, revision.PackageSha256, revision.CreatedAt);
+        if (revision.EvidenceFileName is not null && revision.EvidenceStoragePath is not null && revision.EvidenceFileLength is long evidenceLength && revision.EvidenceSha256 is not null)
+            yield return new StoredProgramTemplateFile(revision.Id, ProgramTemplateAttachmentKind.TestEvidence, revision.EvidenceFileName, revision.EvidenceStoragePath, evidenceLength, revision.EvidenceSha256, revision.CreatedAt);
     }
 
     private static ProgramTemplateRevision BuildRevision(

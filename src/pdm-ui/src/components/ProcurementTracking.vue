@@ -172,9 +172,9 @@ const filterFields = [
 ] as const
 type FilterKey = typeof filterFields[number]['key']
 const multiFilterFields = filterFields.filter((field): field is Exclude<typeof filterFields[number], { key: 'brand' }> => field.key !== 'brand')
-const filters = reactive({ keyword: '', brand: '', purchaseRequisitionStatus: [] as string[], purchaseOrderStatus: [] as string[], buyerName: [] as string[], impactedOnly: false, delayedOnly: false, unreceivedOnly: false, unissuedOnly: false })
+const filters = reactive({ keyword: '', brand: '', bomKind: '', purchaseRequisitionStatus: [] as string[], purchaseOrderStatus: [] as string[], buyerName: [] as string[], impactedOnly: false, delayedOnly: false, unreceivedOnly: false, unissuedOnly: false })
 function resetFilters() {
-  Object.assign(filters, { keyword: '', brand: '', purchaseRequisitionStatus: [], purchaseOrderStatus: [], buyerName: [], impactedOnly: false, delayedOnly: false, unreceivedOnly: false, unissuedOnly: false })
+  Object.assign(filters, { keyword: '', brand: '', bomKind: '', purchaseRequisitionStatus: [], purchaseOrderStatus: [], buyerName: [], impactedOnly: false, delayedOnly: false, unreceivedOnly: false, unissuedOnly: false })
 }
 function filterValues(row: ProjectProcurementTrackingItem, key: FilterKey) {
   const value = row[key]?.trim() ?? ''
@@ -189,6 +189,11 @@ const multiFilterOptions = computed(() => ({
   purchaseOrderStatus: filterOptions('purchaseOrderStatus'),
   buyerName: filterOptions('buyerName'),
 }))
+const bomKindLabels: Record<string, string> = { Standard: '标准件', NonStandard: '非标件', Electrical: '电气件' }
+function matchesBomKind(row: ProjectProcurementTrackingItem) {
+  if (!filters.bomKind) return true
+  return (row.bomKind ?? '').split(/[、，,;；]/).some(kind => (bomKindLabels[kind.trim()] ?? kind.trim()) === filters.bomKind)
+}
 function multiFilterSummary(field: typeof multiFilterFields[number]) {
   const selected = filters[field.key]
   return !selected.length ? `全部${field.label}` : selected.length === 1 ? selected[0] : `${selected[0]} +${selected.length - 1}`
@@ -198,6 +203,7 @@ const filteredItems = computed(() => {
   return (result.value?.items ?? []).filter(row =>
     (!keyword || [row.materialCode, row.materialName, row.specification].some(value => value?.toLocaleLowerCase().includes(keyword)))
     && (!filters.brand || filterValues(row, 'brand').some(value => value.toLocaleLowerCase().includes(filters.brand.trim().toLocaleLowerCase())))
+    && matchesBomKind(row)
     && multiFilterFields.every(({ key }) => !filters[key].length || filterValues(row, key).some(value => filters[key].includes(value)))
     && (!filters.impactedOnly || !!row.impactStage)
     && (!filters.delayedOnly || hasDeliveryDelay(row))
@@ -517,6 +523,12 @@ onBeforeUnmount(() => {
       <input v-model="filters.keyword" type="search" aria-label="搜索料号、名称、型号" placeholder="搜索料号、名称、型号" class="procurement-tracking__search">
       <input v-model="filters.brand" type="search" :list="`procurement-brands-${projectId}`" placeholder="全部品牌" aria-label="筛选品牌" class="procurement-tracking__brand-filter">
       <datalist :id="`procurement-brands-${projectId}`"><option v-for="brand in brandOptions" :key="brand" :value="brand" /></datalist>
+      <select v-model="filters.bomKind" aria-label="筛选物料分类" class="procurement-tracking__kind-filter">
+        <option value="">全部分类</option>
+        <option value="标准件">标准件</option>
+        <option value="非标件">非标件</option>
+        <option value="电气件">电气件</option>
+      </select>
       <el-popover v-for="field in multiFilterFields" :key="field.key" placement="bottom-start" trigger="click" :width="190">
         <template #reference>
           <button type="button" class="procurement-tracking__multi-filter" :class="{ 'has-value': filters[field.key].length }" :aria-label="`筛选${field.label}`">
@@ -625,22 +637,23 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
-.procurement-tracking__filters{display:flex;flex-wrap:nowrap;align-items:center;gap:8px;flex:0 0 auto;margin:0}
-.procurement-tracking__brand-filter{width:118px;flex:0 0 118px}
-.procurement-tracking__brand-filter{height:30px;box-sizing:border-box;border:1px solid var(--pdm-border);border-radius:4px;background:var(--pdm-panel,#fff);color:var(--pdm-text);font:inherit;font-size:12px;padding:0 8px;min-width:0}
+.procurement-tracking__filters{display:flex;flex-wrap:nowrap;align-items:center;gap:5px;flex:0 0 auto;margin:0;white-space:nowrap}
+.procurement-tracking__brand-filter{width:90px;flex:0 0 90px}
+.procurement-tracking__brand-filter,.procurement-tracking__kind-filter{height:30px;box-sizing:border-box;border:1px solid var(--pdm-border);border-radius:4px;background:var(--pdm-panel,#fff);color:var(--pdm-text);font:inherit;font-size:12px;padding:0 8px;min-width:0}
+.procurement-tracking__kind-filter{width:90px;flex:0 0 90px;padding-right:20px}
 .procurement-tracking__movement{white-space:pre-line;line-height:18px;display:block}
 .procurement-tracking__movement.is-transfer{color:var(--pdm-orange)}
 .procurement-tracking__movement.is-stockin{color:var(--pdm-blue)}
 .procurement-tracking__search{height:30px;box-sizing:border-box;border:1px solid var(--pdm-border);border-radius:4px;background:var(--pdm-panel,#fff);color:var(--pdm-text);font:inherit;font-size:12px;padding:0 8px;min-width:0}
-.procurement-tracking__multi-filter{display:flex;width:118px;max-width:100%;height:30px;box-sizing:border-box;flex:0 0 118px;align-items:center;justify-content:space-between;gap:5px;padding:0 8px;border:1px solid var(--pdm-border);border-radius:4px;background:var(--pdm-panel,#fff);color:var(--pdm-text);font:inherit;font-size:12px;cursor:pointer}.procurement-tracking__multi-filter>span:first-child{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.procurement-tracking__multi-filter.has-value{border-color:var(--pdm-blue);color:var(--pdm-blue)}.procurement-tracking__search{width:220px;max-width:100%}
+.procurement-tracking__multi-filter{display:flex;width:100px;max-width:100%;height:30px;box-sizing:border-box;flex:0 0 100px;align-items:center;justify-content:space-between;gap:5px;padding:0 7px;border:1px solid var(--pdm-border);border-radius:4px;background:var(--pdm-panel,#fff);color:var(--pdm-text);font:inherit;font-size:12px;cursor:pointer}.procurement-tracking__multi-filter>span:first-child{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.procurement-tracking__multi-filter.has-value{border-color:var(--pdm-blue);color:var(--pdm-blue)}.procurement-tracking__search{width:168px;max-width:100%;flex:0 0 168px}
 .procurement-tracking__multi-options{display:grid;gap:7px;max-height:260px;overflow:auto}.procurement-tracking__multi-options label{display:flex;align-items:center;gap:7px;color:var(--pdm-text);font-size:12px}.procurement-tracking__multi-options>span{color:var(--pdm-muted);font-size:12px}.procurement-tracking__multi-options>button{justify-self:end;border:0;background:transparent;color:var(--pdm-blue);font-size:12px;cursor:pointer}
 .procurement-tracking__delay-filter{display:flex;align-items:center;gap:4px;font-size:12px;color:var(--pdm-text);white-space:nowrap}
-.procurement-tracking__filters .el-button{height:30px;margin:0}
+.procurement-tracking__filters .el-button{height:30px;margin:0;white-space:nowrap}
 .procurement-tracking__warehouse-list{display:flex;flex-direction:column;max-height:60vh;overflow:auto}
 .procurement-tracking__pagination{display:flex;flex:0 0 auto;align-items:center;justify-content:flex-end;gap:8px;padding:8px 10px;color:var(--pdm-muted);font-size:11px}
 .procurement-tracking__pagination select{height:28px;padding:0 24px 0 8px;border:1px solid var(--pdm-border);border-radius:5px;background:#fff;color:var(--pdm-text)}
 .procurement-tracking__pagination .pdm-secondary-action{width:28px;min-width:28px;height:28px;min-height:28px;padding:0}
-.procurement-tracking{display:flex;flex-direction:column;min-width:0;min-height:0;height:100%;padding:8px 18px 18px}.procurement-tracking__heading{display:flex;overflow-x:auto;align-items:center;justify-content:space-between;gap:8px;min-height:30px;flex-shrink:0;margin-bottom:6px}.procurement-tracking__actions{display:flex;align-items:center;gap:8px;flex-shrink:0}.procurement-tracking__actions :deep(.el-button){box-sizing:border-box;width:80px;min-width:80px;height:30px;min-height:30px;flex:0 0 80px;margin:0;padding:0 8px}.procurement-tracking__updated{margin-left:auto;flex-shrink:0;white-space:nowrap;color:#64748b;font-size:12px}.procurement-tracking__table{min-height:0;flex:1 1 auto;margin-top:0}.procurement-tracking__settings-note{margin:0 0 12px;color:#64748b;line-height:1.6}.procurement-tracking__column-list{display:grid;max-height:calc(100vh - 190px);grid-template-columns:repeat(2,minmax(0,1fr));gap:0;overflow:auto;border:1px solid #e2e8f0;border-radius:8px}.procurement-tracking__column-list :deep(.el-checkbox){box-sizing:border-box;width:100%;min-height:36px;margin:0;padding:7px 12px;border-bottom:1px solid #eef2f7}.procurement-tracking__column-list :deep(.el-checkbox:nth-child(odd)){border-right:1px solid #eef2f7}.procurement-tracking :deep(.is-procurement-late td.el-table__cell){background:#fff7ed!important}@media(max-width:1000px){.procurement-tracking__heading{flex-wrap:nowrap}}
+.procurement-tracking{display:flex;flex-direction:column;min-width:0;min-height:0;height:100%;padding:8px 18px 18px}.procurement-tracking__heading{display:flex;overflow-x:auto;overflow-y:hidden;align-items:center;justify-content:flex-start;gap:5px;min-height:30px;flex-shrink:0;margin-bottom:6px;white-space:nowrap}.procurement-tracking__actions{display:flex;align-items:center;gap:5px;flex-shrink:0;white-space:nowrap}.procurement-tracking__actions :deep(.el-button){box-sizing:border-box;width:66px;min-width:66px;height:30px;min-height:30px;flex:0 0 66px;margin:0;padding:0 5px;white-space:nowrap}.procurement-tracking__updated{margin-left:auto;flex-shrink:0;white-space:nowrap;color:#64748b;font-size:12px}.procurement-tracking__table{min-height:0;flex:1 1 auto;margin-top:0}.procurement-tracking__settings-note{margin:0 0 12px;color:#64748b;line-height:1.6}.procurement-tracking__column-list{display:grid;max-height:calc(100vh - 190px);grid-template-columns:repeat(2,minmax(0,1fr));gap:0;overflow:auto;border:1px solid #e2e8f0;border-radius:8px}.procurement-tracking__column-list :deep(.el-checkbox){box-sizing:border-box;width:100%;min-height:36px;margin:0;padding:7px 12px;border-bottom:1px solid #eef2f7}.procurement-tracking__column-list :deep(.el-checkbox:nth-child(odd)){border-right:1px solid #eef2f7}.procurement-tracking :deep(.is-procurement-late td.el-table__cell){background:#fff7ed!important}@media(max-width:1000px){.procurement-tracking__heading{flex-wrap:nowrap}}
 </style>
 
 <style scoped>
