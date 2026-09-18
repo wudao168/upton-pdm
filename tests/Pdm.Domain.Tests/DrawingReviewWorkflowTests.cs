@@ -128,7 +128,7 @@ public sealed class DrawingReviewWorkflowTests
     [Fact]
     public async Task RequestingChangesOnOneDrawingKeepsTheReviewOpenAndCanBeUndone()
     {
-        var (repository, workflow, _, _) = await PrepareReviewAsync();
+        var (repository, workflow, _, drawing) = await PrepareReviewAsync();
         await repository.CreateUserAsync(new UserAccount(Guid.NewGuid(), "reviewer-a", "审图员甲", "unused", UserRole.ProcessReviewer, true), default);
 
         var package = await workflow.CreateDrawingReviewPackageAsync(
@@ -141,6 +141,9 @@ public sealed class DrawingReviewWorkflowTests
         // 单张退改只影响该图纸，审核单保持审图人审核，其余图纸可以继续审核。
         Assert.Equal(DrawingReviewTargetState.ChangesRequested, Assert.Single(package.Items).DrawingState);
         Assert.Equal(DrawingReviewPackageState.InReview, package.State);
+        // 退改后立即释放该图档的编辑锁，设计者可以直接改图。
+        Assert.DoesNotContain(drawing.Id, await repository.ListActiveDrawingReviewDocumentIdsAsync(ProjectId, default));
+        Assert.False(await repository.IsDocumentUnderActiveDrawingReviewAsync(drawing.Id, default));
 
         package = await workflow.DecideDrawingReviewTargetAsync(package.Id, item.Id,
             new DecideDrawingReviewTargetCommand(DrawingReviewTarget.Drawing2D, DrawingReviewDecision.Revoke, "撤销退改"),
@@ -149,6 +152,9 @@ public sealed class DrawingReviewWorkflowTests
         Assert.Equal(DrawingReviewTargetState.Pending, reset.DrawingState);
         Assert.Null(reset.DrawingComment);
         Assert.Equal(DrawingReviewPackageState.InReview, package.State);
+        // 撤销退改回到待审核后重新锁定。
+        Assert.Contains(drawing.Id, await repository.ListActiveDrawingReviewDocumentIdsAsync(ProjectId, default));
+        Assert.True(await repository.IsDocumentUnderActiveDrawingReviewAsync(drawing.Id, default));
     }
 
     [Fact]

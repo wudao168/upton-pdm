@@ -20,7 +20,10 @@ public sealed partial class InMemoryPdmRepository
         {
             return Task.FromResult<IReadOnlySet<Guid>>(drawingReviewPackages.Values
                 .Where(package => package.ProjectId == projectId && IsActiveDrawingReview(package))
-                .SelectMany(package => package.Items.Where(item => item.DrawingDocumentId.HasValue).Select(item => item.DrawingDocumentId!.Value))
+                .SelectMany(package => package.Items
+                    // 已退改的图档立即释放编辑锁，该审核单其余图档仍保持锁定。
+                    .Where(item => item.DrawingDocumentId.HasValue && !IsChangesRequested(item))
+                    .Select(item => item.DrawingDocumentId!.Value))
                 .ToHashSet());
         }
     }
@@ -90,7 +93,10 @@ public sealed partial class InMemoryPdmRepository
 
     private bool IsDocumentUnderActiveDrawingReview(Guid documentId) => drawingReviewPackages.Values.Any(package =>
         IsActiveDrawingReview(package)
-        && package.Items.Any(item => item.DrawingDocumentId == documentId));
+        && package.Items.Any(item => item.DrawingDocumentId == documentId && !IsChangesRequested(item)));
+
+    private static bool IsChangesRequested(DrawingReviewItem item) =>
+        item.DrawingState == DrawingReviewTargetState.ChangesRequested;
 
     private bool IsActiveDrawingReviewWriteback(Guid documentId, Guid writebackId) =>
         cadPropertyWritebacks.TryGetValue(writebackId, out var writeback)

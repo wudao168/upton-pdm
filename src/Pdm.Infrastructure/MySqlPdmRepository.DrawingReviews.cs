@@ -29,6 +29,8 @@ public sealed partial class MySqlPdmRepository
             FROM drawing_review_item item
             JOIN drawing_review_package package ON package.id=item.package_id
             WHERE package.project_id=@ProjectId AND package.state IN ('InReview','PendingSupervisorApproval','WritingProperties') AND item.drawing_document_id IS NOT NULL
+              -- 已退改的图档立即释放编辑锁，设计者可直接改图；该审核单其余图档仍保持锁定。
+              AND item.drawing_state <> 'ChangesRequested'
             """,
             new { ProjectId = projectId }, cancellationToken: cancellationToken));
         return ids.ToHashSet();
@@ -156,6 +158,8 @@ public sealed partial class MySqlPdmRepository
             JOIN drawing_review_package package ON package.id=item.package_id
             WHERE package.state IN ('InReview','PendingSupervisorApproval','WritingProperties')
               AND item.drawing_document_id=@DocumentId
+              -- 已退改的图档不再锁定，允许设计者获取编辑权限。
+              AND item.drawing_state <> 'ChangesRequested'
             """,
             new { DocumentId = documentId }, transaction, cancellationToken: cancellationToken));
         return count > 0;
