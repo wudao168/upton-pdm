@@ -48,18 +48,21 @@ public sealed class BomU9AutomationRetryHostedService(
 
     private async Task SeedPendingAsync(AsyncServiceScope scope, CancellationToken cancellationToken)
     {
+        var repository = scope.ServiceProvider.GetRequiredService<IPdmRepository>();
         var materials = scope.ServiceProvider.GetRequiredService<IMaterialRepository>();
-        var applications = (await materials.ListMaterialCodeApplicationsAsync(null, MaterialCodeApplicationStatus.Approved, cancellationToken))
-            .Where(application => application.BomHeaderKind is not null && application.MaterialId is not null)
-            .ToArray();
         var scheduled = 0;
-        foreach (var group in applications.GroupBy(application => (application.ProjectId, application.BomHeaderKind!.Value)))
+        var projects = await repository.ListProjectsAsync(cancellationToken);
+        foreach (var project in projects)
         {
-            var material = await materials.FindMaterialAsync(group.First().MaterialId!.Value, cancellationToken);
-            if (material?.U9SyncConfirmed != true) continue;
-            BomU9AutomationRetryQueue.Schedule(group.Key.ProjectId, group.Key.Item2, "启动自检：重新评估U9C BOM自动创建",
-                timeProvider.GetUtcNow().AddSeconds(scheduled * 5), immediate: true);
-            scheduled++;
+            var bindings = await repository.ListProjectBomHeaderBindingsAsync(project.Id, cancellationToken);
+            foreach (var binding in bindings)
+            {
+                var material = await materials.FindMaterialAsync(binding.MaterialId, cancellationToken);
+                if (material?.U9SyncConfirmed != true) continue;
+                BomU9AutomationRetryQueue.Schedule(project.Id, binding.Kind, "启动自检：重新评估U9C BOM自动创建",
+                    timeProvider.GetUtcNow().AddSeconds(scheduled * 5), immediate: true);
+                scheduled++;
+            }
         }
         if (scheduled > 0) logger.LogInformation("U9C BOM automatic retry queue seeded with {Count} header(s).", scheduled);
     }

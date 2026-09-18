@@ -118,24 +118,25 @@ public sealed class ApprovalU9AutomationService(
         var hasPendingHeaders = false;
         foreach (var (project, masterOnly) in targets)
         {
-            var approvedApplications = await materials.ListMaterialCodeApplicationsAsync(
-                project.Id, MaterialCodeApplicationStatus.Approved, cancellationToken);
             hasPendingHeaders |= (await materials.ListMaterialCodeApplicationsAsync(
                 project.Id, MaterialCodeApplicationStatus.Pending, cancellationToken)).Any(application => application.BomHeaderKind is not null);
-            var approvedHeaders = approvedApplications
-                .Where(application => application.BomHeaderKind is not null && application.MaterialId is not null)
-                .Select(application => (application.BomHeaderKind!.Value, application.MaterialId!.Value))
-                .ToHashSet();
             var bindings = await repository.ListProjectBomHeaderBindingsAsync(project.Id, cancellationToken);
 
             foreach (var kind in SyncOrder.Where(kind => !masterOnly || kind == ProjectBomHeaderKind.Master))
             {
                 var binding = bindings.SingleOrDefault(item => item.Kind == kind);
-                if (binding is null
-                    || !approvedHeaders.Contains((kind, binding.MaterialId)))
+                if (binding is null)
                 {
-                    // 表头料号尚未批准或绑定缺失：登记重试，避免依赖晚于触发时点就绪后不再自动创建。
-                    BomU9AutomationRetryQueue.Schedule(project.Id, kind, "BOM表头料号尚未完成自动审批", timeProvider.GetUtcNow());
+                    // 尚未申请本级BOM料号：登记重试，等料号就绪后自动续跑。
+                    BomU9AutomationRetryQueue.Schedule(project.Id, kind, "尚未申请本级BOM料号", timeProvider.GetUtcNow());
+                    continue;
+                }
+                // 只要本级BOM料号已取得U9C正式料号就可以自动串联，不再依赖申请单的中间状态，
+                // 避免"料号已回写但BOM仍停在待自动创建"。
+                var headerMaterial = await materials.FindMaterialAsync(binding.MaterialId, cancellationToken);
+                if (headerMaterial?.U9SyncConfirmed != true || string.IsNullOrWhiteSpace(headerMaterial.U9ItemCode))
+                {
+                    BomU9AutomationRetryQueue.Schedule(project.Id, kind, "本级BOM料号尚未取得U9C正式料号", timeProvider.GetUtcNow());
                     continue;
                 }
 
