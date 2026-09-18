@@ -582,7 +582,7 @@ describe('ReleaseCenter', () => {
     expect(wrapper.text()).toContain('正式发布内容（已选 2 / 共 2 项 · 默认全选 · 整套倍率 ×1）')
     const rows = wrapper.findAll('.release-detail-picker tbody tr')
     expect(rows).toHaveLength(2)
-    expect(rows.at(0)!.findAll('td').map(cell => cell.text())).toEqual(['', '1', 'STD-001', '提前采购件', 'M12', 'SMC', '3', '3', '—', '已提前发布 1/4'])
+    expect(rows.at(0)!.findAll('td').map(cell => cell.text())).toEqual(['', '1', 'STD-001', '提前采购件', 'M12', 'SMC', '3', '3', '—', '已发布 1/4'])
     expect(rows.at(1)!.text()).toContain('本次发布')
     expect(wrapper.findAll('input[aria-label^="本次发布物料"]').every(input => (input.element as HTMLInputElement).checked)).toBe(true)
 
@@ -618,9 +618,9 @@ describe('ReleaseCenter', () => {
     })
 
     expect(wrapper.get('.release-detail-picker legend').text()).toContain('已选 2 / 共 2 项')
-    expect(wrapper.get('.release-detail-picker legend').text()).toContain('1 项已提前发布不再重复下发')
+    expect(wrapper.get('.release-detail-picker legend').text()).toContain('1 项已发布不再重复下发')
     const rows = wrapper.findAll('.release-detail-picker tbody tr')
-    expect(rows.at(0)!.findAll('td').map(cell => cell.text())).toEqual(['', '1', 'STD-001', '已提前发布件', '12X14', 'UPTON', '0', '0', '—', '已提前发布 1/1 · 不再重复下发'])
+    expect(rows.at(0)!.findAll('td').map(cell => cell.text())).toEqual(['', '1', 'STD-001', '已提前发布件', '12X14', 'UPTON', '0', '0', '—', '已发布 1/1'])
 
     const published = wrapper.get('input[aria-label="本次发布物料 STD-001"]')
     expect((published.element as HTMLInputElement).checked).toBe(true)
