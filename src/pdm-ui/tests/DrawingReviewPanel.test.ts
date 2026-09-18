@@ -178,6 +178,49 @@ describe('DrawingReviewPanel', () => {
     expect(wrapper.emitted('selectDocument')).toContainEqual(['drawing-2'])
   })
 
+  it('在状态表中显示审核中图纸的当前审核人或机械主管', async () => {
+    const candidates: DrawingReviewCandidate[] = [
+      { ...candidate, candidateId: 'ready', drawingNumber: 'A01-100', state: 'Ready' },
+      { ...candidate, candidateId: 'in-review', modelDocumentId: 'model-2', drawingDocumentId: 'drawing-2', drawingNumber: 'A01-200', state: 'InReview', selectable: false },
+      { ...candidate, candidateId: 'pending-supervisor', modelDocumentId: 'model-3', drawingDocumentId: 'drawing-3', drawingNumber: 'A01-300', state: 'InReview', selectable: false },
+    ]
+    const item = (modelDocumentId: string, drawingDocumentId: string, drawingNumber: string) =>
+      ({ ...review.items[0]!, modelDocumentId, drawingDocumentId, drawingNumber })
+    const reviewerPackage: DrawingReviewPackage = {
+      ...review,
+      assignedReviewer: 'wangguifeng',
+      assignedReviewerName: '王贵锋',
+      items: [item('model-2', 'drawing-2', 'A01-200')],
+    }
+    const supervisorPackage: DrawingReviewPackage = {
+      ...review,
+      id: 'review-2',
+      state: 'PendingSupervisorApproval',
+      assignedReviewer: 'wangguifeng',
+      assignedReviewerName: '王贵锋',
+      supervisor: 'lizhuguan',
+      supervisorName: '李主管',
+      items: [item('model-3', 'drawing-3', 'A01-300')],
+    }
+    const wrapper = mount(DrawingReviewPanel, {
+      props: {
+        packageId: reviewerPackage.id,
+        packages: [reviewerPackage, supervisorPackage],
+        candidates,
+        selectedDocumentId: 'drawing-1',
+        currentUsername: 'reviewer',
+        ...permissions,
+      },
+    })
+
+    const rows = wrapper.findAll('.drawing-review-overview__row')
+    expect(rows).toHaveLength(3)
+    expect(rows[0]!.find('em').text()).toBe('待审核')
+    expect(rows[0]!.find('.drawing-review-overview__reviewer').exists()).toBe(false)
+    expect(rows[1]!.find('em').text()).toBe('王贵锋审核中')
+    expect(rows[2]!.find('em').text()).toBe('李主管审核中')
+  })
+
   it('没有有效非标BOM候选时显示可操作的门禁说明', async () => {
     const wrapper = mount(DrawingReviewPanel, {
       props: { packageId: '', packages: [], candidates: [], selectedDocumentId: 'drawing-1', currentUsername: 'designer', ...permissions },
