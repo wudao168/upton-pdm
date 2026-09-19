@@ -54,6 +54,7 @@ watch(() => props.collapsed, value => { collapsed.value = value })
 const scopeSearch = ref('')
 // 明细固定分两页：待操作（还没有结论）与已操作（已通过/已退回）。
 const overviewTab = ref<'Todo' | 'Done'>('Todo')
+const overviewState = ref<'All' | DrawingReviewCandidate['state']>('All')
 const selectedCandidateIds = ref<string[]>([])
 const assignedReviewers = ref<string[]>([])
 
@@ -75,8 +76,16 @@ const filteredCandidates = computed(() => {
     return !keyword || `${candidate.drawingNumber} ${candidate.name}`.toLocaleLowerCase().includes(keyword)
   })
 })
-const overviewTodoCandidates = computed(() => props.candidates.filter(candidate => !candidateConcluded(candidate)))
-const overviewDoneCandidates = computed(() => props.candidates.filter(candidate => candidateConcluded(candidate)))
+const overviewStateOptions = computed(() => ([
+  { value: 'All', label: '全部', count: props.candidates.length },
+  { value: 'Ready', label: '待提交', count: props.candidates.filter(candidate => candidate.state === 'Ready').length },
+  { value: 'InReview', label: '待审核', count: props.candidates.filter(candidate => candidate.state === 'InReview').length },
+  { value: 'ApprovedCurrent', label: '已批准', count: props.candidates.filter(candidate => candidate.state === 'ApprovedCurrent').length },
+  { value: 'Unavailable', label: '不可发起', count: props.candidates.filter(candidate => candidate.state === 'Unavailable').length },
+] as const))
+const overviewStateCandidates = computed(() => props.candidates.filter(candidate => overviewState.value === 'All' || candidate.state === overviewState.value))
+const overviewTodoCandidates = computed(() => overviewStateCandidates.value.filter(candidate => !candidateConcluded(candidate)))
+const overviewDoneCandidates = computed(() => overviewStateCandidates.value.filter(candidate => candidateConcluded(candidate)))
 const overviewCandidates = computed(() => overviewTab.value === 'Todo' ? overviewTodoCandidates.value : overviewDoneCandidates.value)
 const overviewEmptyMessage = computed(() => overviewTab.value === 'Todo'
   ? '当前没有需要操作的图纸。'
@@ -264,6 +273,12 @@ const packageStateTone = computed(() => activePackage.value ? drawingReviewPacka
 
     <template v-else>
     <div class="drawing-review-panel__toolbar">
+      <label><span>状态</span><select v-model="overviewState" aria-label="筛选图纸审核状态"><option v-for="option in overviewStateOptions" :key="option.value" :value="option.value">{{ option.label }}（{{ option.count }}）</option></select></label>
+      <button type="button" title="刷新审核状态" :disabled="pending" @click="emit('refresh')"><RefreshCw :size="14" />刷新</button>
+      <button v-if="canSubmit" type="button" class="drawing-review-toolbar__create" title="发起图纸审核" :disabled="pending" @click="openScopeSelection"><Send :size="14" />发起审核</button>
+    </div>
+
+    <section class="drawing-review-overview" aria-label="图纸审核状态表">
       <div class="drawing-review-panel__tabs" role="tablist" aria-label="审核明细分页">
         <button
           type="button"
@@ -280,11 +295,6 @@ const packageStateTone = computed(() => activePackage.value ? drawingReviewPacka
           @click="overviewTab = 'Done'"
         >已操作（{{ overviewDoneCandidates.length }}）</button>
       </div>
-      <button type="button" title="刷新审核状态" :disabled="pending" @click="emit('refresh')"><RefreshCw :size="14" />刷新</button>
-      <button v-if="canSubmit" type="button" class="drawing-review-toolbar__create" title="发起图纸审核" :disabled="pending" @click="openScopeSelection"><Send :size="14" />发起审核</button>
-    </div>
-
-    <section class="drawing-review-overview" aria-label="图纸审核状态表">
       <header><strong>图纸型号</strong><span>审核状态</span></header>
       <button
         v-for="candidate in overviewCandidates"
@@ -365,7 +375,8 @@ const packageStateTone = computed(() => activePackage.value ? drawingReviewPacka
 .drawing-review-package-summary>div>span.is-success{background:var(--pdm-green-soft);color:var(--pdm-green)}
 .drawing-review-package-summary>div>span.is-danger{background:#fff0ef;color:var(--pdm-danger)}
 .drawing-review-package-summary>div>span.is-neutral{background:var(--pdm-surface-muted);color:var(--pdm-muted)}
-.drawing-review-panel__tabs{flex:1;min-width:0;display:flex;gap:4px}
-.drawing-review-panel__tabs button{flex:1 1 0;min-width:0;padding:5px 4px;white-space:nowrap}
+.drawing-review-overview>.drawing-review-panel__tabs{margin-bottom:6px}
+.drawing-review-panel__tabs{min-width:0;display:flex;gap:4px}
+.drawing-review-panel__tabs button{flex:1 1 0;min-width:0;min-height:26px;padding:3px 4px;white-space:nowrap}
 .drawing-review-panel__tabs button.is-active{border-color:var(--pdm-blue);background:var(--pdm-blue-soft);color:var(--pdm-blue);font-weight:600}
 </style>

@@ -113,10 +113,10 @@ describe('DrawingReviewPanel', () => {
     })
 
     const toolbarButtons = wrapper.findAll('.drawing-review-panel__toolbar button')
-    expect(toolbarButtons.map(button => button.text())).toEqual(['待操作（1）', '已操作（0）', '刷新', '发起审核'])
+    expect(toolbarButtons.map(button => button.text())).toEqual(['刷新', '发起审核'])
     expect(wrapper.findAll('.drawing-review-package-actions button').map(button => button.text())).toEqual(['撤销审核'])
 
-    await toolbarButtons[3]!.trigger('click')
+    await toolbarButtons[1]!.trigger('click')
     expect(wrapper.text()).toContain('选择审核范围')
   })
 
@@ -159,6 +159,10 @@ describe('DrawingReviewPanel', () => {
     expect(doneRows[0]!.text()).toContain('A01-300')
     expect(doneRows[0]!.text()).toContain('已批准')
     expect(doneRows[0]!.classes()).toContain('is-success')
+
+    // 状态下拉与选项卡叠加生效：只看待审核时，已操作页为空。
+    await wrapper.get('select[aria-label="筛选图纸审核状态"]').setValue('InReview')
+    expect(wrapper.findAll('[role="tab"]').map(tab => tab.text())).toEqual(['待操作（1）', '已操作（0）'])
   })
 
   it('状态表只显示状态，审核人或批准人放在悬停提示', async () => {
@@ -426,7 +430,9 @@ describe('DrawingReviewPanel', () => {
 
     const tabs = wrapper.findAll('[role="tab"]').map(tab => tab.text())
     expect(tabs).toEqual(['待操作（1）', '已操作（0）'])
-    expect(wrapper.find('select[aria-label="筛选图纸审核状态"]').exists()).toBe(false)
+    // 原状态下拉保留，选项卡只是加在列表上方。
+    expect(wrapper.find('select[aria-label="筛选图纸审核状态"]').exists()).toBe(true)
+    expect(wrapper.find('.drawing-review-overview > .drawing-review-panel__tabs').exists()).toBe(true)
 
     await wrapper.findAll('[role="tab"]')[1]!.trigger('click')
     expect(wrapper.get('[aria-label="图纸审核状态表"]').text()).toContain('还没有已处理（通过或退回）的图纸。')
