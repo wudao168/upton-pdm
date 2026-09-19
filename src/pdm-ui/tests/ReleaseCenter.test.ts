@@ -14,6 +14,12 @@ describe('ReleaseCenter', () => {
     electricalBomSnapshot: scope === 'ElectricalSupplement' ? items : [],
   })
   const frozenProps = { username: 'reviewer', pending: false, progress: 0, error: '', canManage: true, canDecide: false }
+  // 增补/变更仅在对应BOM完成首次正式发布后可选，需要该已发布正式单作为前置。
+  const publishedFormal = (scope: ReleasePackageSummary['scope']): ReleasePackageSummary => ({
+    id: `published-${scope}`, number: `RP-${scope}`, state: '已发布', scope, workflowVersion: 1, selectedBomItemIds: [],
+    createsManufacturingBaseline: false, locksDocuments: false, publishedAt: '2026-09-01T00:00:00Z',
+    standardBomSnapshot: [], nonStandardBomSnapshot: [], electricalBomSnapshot: [], steps: [],
+  })
 
   it.each(['StandardSupplement', 'ElectricalSupplement', 'NonStandardSupplement'] as const)('defaults %s to two additions and preserves the full snapshot toggle', async scope => {
     const previous = Array.from({ length: 28 }, (_, index) => frozenItem(`old-${index}`))
@@ -158,6 +164,7 @@ describe('ReleaseCenter', () => {
         error: '',
         canManage: true,
         canDecide: true,
+        releasePackages: [publishedFormal('StandardFormal')],
       },
     })
 
@@ -165,7 +172,6 @@ describe('ReleaseCenter', () => {
     expect(wrapper.text()).not.toContain('发布包编号')
     expect(wrapper.text()).not.toContain('生效起始序列号')
     expect(wrapper.text()).not.toContain('生效截止序列号')
-    expect(wrapper.find('input[aria-label="变更单号由系统自动生成"]').exists()).toBe(false)
     await wrapper.get('select').setValue('StandardSupplement')
     const changeNumber = wrapper.get('input[aria-label="变更单号由系统自动生成"]')
     expect(changeNumber.element.closest('.pdm-release-type-row')).toBe(wrapper.get('.pdm-release-type-row').element)
@@ -305,7 +311,7 @@ describe('ReleaseCenter', () => {
     })
 
     expect(wrapper.findAll('option').map(option => option.text())).toEqual([
-      '非标件 · 长交期BOM发布', '非标件BOM + 图纸 · 正式发布', '非标件 · 增补/变更',
+      '非标件 · 长交期BOM发布', '非标件BOM + 图纸 · 正式发布',
     ])
     expect(wrapper.get('.release-detail-picker legend').text()).toContain('选择长交期非标件')
     await wrapper.get('input[aria-label="选择长交期物料 NS-001"]').setValue(true)
@@ -314,6 +320,34 @@ describe('ReleaseCenter', () => {
     expect(created.scope).toBe('NonStandardLongLead')
     expect(created.selectedBomItemIds).toEqual(['ns-1'])
     expect(created.selectedBomItemQuantities).toEqual({ 'ns-1': 2 })
+  })
+
+  it('lets a non-standard formal release defer an item whose drawing is not approved yet', async () => {
+    const approved: BomItem = { id: 'ns-ok', kind: 'NonStandard', sequence: 1, drawingNumber: 'NS-200',
+      name: '已批准件', quantity: 1, unit: '个', revision: 'W1', complete: true, sourceDocumentId: 'model-ok' }
+    const pending: BomItem = { id: 'ns-pending', kind: 'NonStandard', sequence: 2, drawingNumber: 'NS-201',
+      name: '待审图件', quantity: 1, unit: '个', revision: 'W1', complete: true, sourceDocumentId: 'model-pending' }
+    const wrapper = mount(ReleaseCenter, {
+      props: {
+        releasePackage: null, allowedScopes: ['NonStandardWithDrawing'], preferredScope: 'NonStandardWithDrawing',
+        releaseItems: [approved, pending], username: 'engineer', pending: false, progress: 0, error: '', canManage: true, canDecide: true,
+        drawingReviewCandidates: [
+          { candidateId: 'review-ok', bomItemId: 'ns-ok', modelDocumentId: 'model-ok', drawingNumber: 'NS-200', name: '已批准件', bomKinds: ['NonStandard'], modelRevision: 'W1', drawingRevision: 'W1', state: 'ApprovedCurrent', selectable: false },
+          { candidateId: 'review-pending', bomItemId: 'ns-pending', modelDocumentId: 'model-pending', drawingNumber: 'NS-201', name: '待审图件', bomKinds: ['NonStandard'], modelRevision: 'W1', drawingRevision: 'W1', state: 'Ready', reason: '当前工程图尚未发起审核', selectable: true },
+        ],
+      },
+    })
+
+    expect(wrapper.get('.pdm-release-draft-actions .pdm-primary-action').attributes()).toHaveProperty('disabled')
+    expect(wrapper.text()).toContain('当前发布范围包含未完成当前版本图纸审核的非标件')
+    await wrapper.get('input[aria-label="本次发布物料 NS-201"]').setValue(false)
+    expect(wrapper.get('.pdm-release-draft-actions .pdm-primary-action').attributes('disabled')).toBeUndefined()
+    await wrapper.get('.pdm-release-draft-actions .pdm-primary-action').trigger('submit')
+    expect(wrapper.emitted('create')?.at(0)?.at(0)).toMatchObject({
+      scope: 'NonStandardWithDrawing',
+      selectedBomItemIds: ['ns-ok'],
+    })
+    wrapper.unmount()
   })
 
   it('disables non-standard release selection until the current drawing version is approved', async () => {
@@ -410,9 +444,35 @@ describe('ReleaseCenter', () => {
     })
 
     expect((wrapper.get('.pdm-release-type-row select').element as HTMLSelectElement).value).toBe('StandardFormal')
-    await wrapper.setProps({ allowedScopes: ['StandardSupplement'], preferredScope: 'StandardSupplement' })
+    await wrapper.setProps({ allowedScopes: ['StandardSupplement'], preferredScope: 'StandardSupplement', releasePackages: [publishedFormal('StandardFormal')] })
     expect(wrapper.findAll('.pdm-release-type-row option').map(option => option.text())).toEqual(['标准件 · 增补/变更'])
     expect((wrapper.get('.pdm-release-type-row select').element as HTMLSelectElement).value).toBe('StandardSupplement')
+  })
+
+  it('只允许在对应BOM首次正式发布后选择增补/变更，正式发布后不再提供长交期与正式发布', async () => {
+    const wrapper = mount(ReleaseCenter, {
+      props: {
+        releasePackage: null,
+        allowedScopes: ['StandardLongLead', 'StandardFormal', 'StandardSupplement'],
+        preferredScope: 'StandardLongLead',
+        username: 'engineer', pending: false, progress: 0, error: '', canManage: true, canDecide: true,
+      },
+    })
+
+    // 尚未首次正式发布：只有长交期与正式发布。
+    expect(wrapper.findAll('.pdm-release-type-row option').map(option => option.text()))
+      .toEqual(['标准件 · 长交期BOM发布', '标准件 · 正式发布'])
+
+    // 首次正式发布完成后：只剩增补/变更，长交期不再可选。
+    await wrapper.setProps({
+      releasePackages: [{
+        id: 'release-formal', number: 'RP-S-001', state: '已发布', scope: 'StandardFormal', workflowVersion: 1,
+        selectedBomItemIds: [], createsManufacturingBaseline: false, locksDocuments: false, publishedAt: '2026-09-01T00:00:00Z',
+        standardBomSnapshot: [], nonStandardBomSnapshot: [], electricalBomSnapshot: [], steps: [],
+      }],
+    })
+    expect(wrapper.findAll('.pdm-release-type-row option').map(option => option.text()))
+      .toEqual(['标准件 · 增补/变更'])
   })
 
   it('keeps one fixed header and detail table while switching standard release types', async () => {
@@ -420,6 +480,7 @@ describe('ReleaseCenter', () => {
       props: {
         releasePackage: null,
         allowedScopes: ['StandardLongLead', 'StandardFormal', 'StandardSupplement'],
+        preferredScope: 'StandardLongLead',
         standardItems: [
           { id: 'item-current', kind: 'Standard', sequence: 1, drawingNumber: 'STD-001', name: '当前件', specification: 'M12', brand: 'SMC', quantity: 2, unit: '个', revision: 'W2', complete: true },
         ],
@@ -447,6 +508,8 @@ describe('ReleaseCenter', () => {
     expect(wrapper.get('.release-detail-picker legend').text()).toContain('正式发布内容')
     expect(wrapper.findAll('.release-detail-picker tbody tr').at(0)!.findAll('td.is-release-centered')).toHaveLength(6)
 
+    // 正式发布完成后增补/变更才可选，切换后仍是同一套固定表头与明细表。
+    await wrapper.setProps({ releasePackages: [publishedFormal('StandardFormal')] })
     await wrapper.get('.pdm-release-type-row select').setValue('StandardSupplement')
     expect(wrapper.get('.pdm-release-create-header').element).toBe(header)
     expect(wrapper.get('.pdm-release-parameter-slot').element).toBe(parameterSlot)
@@ -709,6 +772,7 @@ describe('ReleaseCenter', () => {
         releasePackage: null,
         allowedScopes: ['StandardSupplement'],
         preferredScope: 'StandardSupplement',
+        releasePackages: [publishedFormal('StandardFormal')],
         standardItems: [
           { id: 'item-current-1', kind: 'Standard', sequence: 1, drawingNumber: 'STD-001', name: '修改件', specification: 'M12', brand: 'SMC', quantity: 2, unit: '个', revision: 'W2', complete: true },
           { id: 'item-current-3', kind: 'Standard', sequence: 3, drawingNumber: 'STD-003', name: '新增件', specification: 'M6', brand: 'SMC', quantity: 1, unit: '个', revision: 'W1', complete: true },
@@ -721,13 +785,74 @@ describe('ReleaseCenter', () => {
       },
     })
 
-    expect(wrapper.text()).toContain('增补/变更内容（共 3 项 · 整套倍率 ×1）')
+    expect(wrapper.text()).toContain('增补/变更内容（共 3 项变更 · 新增项已选 1 / 1 项')
     expect(wrapper.findAll('.release-change-tag').map(tag => tag.text()).sort()).toEqual(['修改', '删除', '新增'])
     expect(wrapper.text()).toContain('STD-001')
     expect(wrapper.text()).toContain('STD-002')
     expect(wrapper.text()).toContain('STD-003')
     expect(wrapper.text()).toContain('数量：1 → 2')
     expect(wrapper.text()).toContain('版本：W1 → W2')
+  })
+
+  it('lets electrical formal releases select the parts published this time', async () => {
+    const wrapper = mount(ReleaseCenter, {
+      props: {
+        releasePackage: null, allowedScopes: ['ElectricalFormal'], releaseItems: [
+          { id: 'el-1', kind: 'Electrical', sequence: 1, drawingNumber: 'EL-001', name: '电气一', quantity: 1, unit: '个', revision: 'W1', complete: true },
+          { id: 'el-2', kind: 'Electrical', sequence: 2, drawingNumber: 'EL-002', name: '电气二', quantity: 2, unit: '个', revision: 'W1', complete: true },
+        ],
+        username: 'engineer', pending: false, progress: 0, error: '', canManage: true, canDecide: true,
+      },
+    })
+
+    expect(wrapper.get('.release-detail-picker legend').text()).toContain('正式发布内容（已选 2 / 共 2 项')
+    expect(wrapper.findAll('input[aria-label^="本次发布物料"]').every(input => (input.element as HTMLInputElement).checked)).toBe(true)
+    await wrapper.get('input[aria-label="本次发布物料 EL-001"]').setValue(false)
+    expect(wrapper.findAll('.release-detail-picker tbody tr').at(0)!.text()).toContain('本次不发布')
+    await wrapper.get('.pdm-release-draft-actions .pdm-primary-action').trigger('submit')
+
+    expect(wrapper.emitted('create')?.at(0)?.at(0)).toMatchObject({
+      scope: 'ElectricalFormal',
+      selectedBomItemIds: ['el-2'],
+    })
+    wrapper.unmount()
+  })
+
+  it('keeps the whole supplement scope by default and defers unchecked additions', async () => {
+    const wrapper = mount(ReleaseCenter, {
+      props: {
+        releasePackage: null, allowedScopes: ['StandardSupplement'], preferredScope: 'StandardSupplement',
+        releasePackages: [publishedFormal('StandardFormal')],
+        standardItems: [
+          { id: 'new-1', kind: 'Standard', sequence: 1, drawingNumber: 'NEW-001', name: '新增件', specification: 'M6', brand: 'SMC', quantity: 1, unit: '个', revision: 'W1', complete: true },
+          { id: 'keep-1', kind: 'Standard', sequence: 2, drawingNumber: 'KEEP-001', name: '保持件', specification: 'M8', brand: 'SMC', quantity: 1, unit: '个', revision: 'W1', complete: true },
+          { id: 'mod-1', kind: 'Standard', sequence: 3, drawingNumber: 'MOD-001', name: '修改件', specification: 'M10', brand: 'SMC', quantity: 2, unit: '个', revision: 'W2', complete: true },
+        ],
+        previousVersionItems: [
+          { id: 'keep-1', kind: 'Standard', sequence: 1, drawingNumber: 'KEEP-001', name: '保持件', specification: 'M8', brand: 'SMC', quantity: 1, unit: '个', revision: 'W1', complete: true },
+          { id: 'mod-1', kind: 'Standard', sequence: 2, drawingNumber: 'MOD-001', name: '修改件', specification: 'M10', brand: 'SMC', quantity: 1, unit: '个', revision: 'W1', complete: true },
+        ],
+        username: 'engineer', pending: false, progress: 0, error: '', canManage: true, canDecide: true,
+      },
+    })
+
+    const rows = wrapper.findAll('.release-detail-picker tbody tr')
+    expect(rows.map(row => row.findAll('.release-change-tag')[0]!.text())).toEqual(['新增', '修改'])
+    expect(wrapper.get('.release-detail-picker legend').text()).toContain('未勾选的新增项顺延到下一次变更')
+    const modifierCheckbox = rows.at(1)!.get('input[type="checkbox"]').element as HTMLInputElement
+    expect(modifierCheckbox.disabled).toBe(true)
+    await wrapper.get('input[aria-label="变更原因 物料问题 / 交期不满足"]').setValue(true)
+    await wrapper.get('.pdm-release-draft-actions .pdm-primary-action').trigger('submit')
+    expect(wrapper.emitted('create')?.at(0)?.at(0)).toMatchObject({ scope: 'StandardSupplement', selectedBomItemIds: [] })
+
+    await wrapper.get('input[aria-label="本次纳入 NEW-001"]').setValue(false)
+    expect(rows.at(0)!.text()).toContain('本次不发布')
+    await wrapper.get('.pdm-release-draft-actions .pdm-primary-action').trigger('submit')
+    expect(wrapper.emitted('create')?.at(1)?.at(0)).toMatchObject({
+      scope: 'StandardSupplement',
+      selectedBomItemIds: ['keep-1', 'mod-1'],
+    })
+    wrapper.unmount()
   })
 
   it('matches repeated material instances one to one and shows only real field changes', async () => {
@@ -737,6 +862,7 @@ describe('ReleaseCenter', () => {
     }))
     const wrapper = mount(ReleaseCenter, { props: {
       releasePackage: null, allowedScopes: ['StandardSupplement'], preferredScope: 'StandardSupplement',
+      releasePackages: [publishedFormal('StandardFormal')],
       standardItems: previous.map(item => ({ ...item, sequence: item.sequence + 2 })), previousVersionItems: previous,
       username: 'engineer', pending: false, progress: 0, error: '', canManage: true, canDecide: true,
     } })

@@ -774,6 +774,9 @@ describe('BomManager', () => {
 
     await wrapper.findAll('button[role="tab"]')[1].trigger('click')
     expect((wrapper.get('.pdm-release-type-row select').element as HTMLSelectElement).value).toBe('StandardFormal')
+    // 首次正式发布前不提供增补/变更。
+    expect(wrapper.findAll('.pdm-release-type-row option').map(option => option.text()))
+      .toEqual(['标准件 · 长交期BOM发布', '标准件 · 正式发布'])
 
     await wrapper.setProps({ releasePackages: [longLead, formal] })
     expect(wrapper.findAll('.pdm-release-type-row option').map(option => option.text())).toEqual(['标准件 · 增补/变更'])

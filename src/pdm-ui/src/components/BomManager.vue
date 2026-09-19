@@ -621,10 +621,18 @@ const formalScopeForCurrentKind = computed<ReleaseScope>(() => kind.value === 'N
   ? 'NonStandardWithDrawing'
   : kind.value === 'Electrical' ? 'ElectricalFormal' : 'StandardFormal')
 const hasPublishedFormal = computed(() => props.releasePackages.some(item => item.scope === formalScopeForCurrentKind.value && item.state === '已发布'))
-const createReleaseScopes = computed<Array<Exclude<ReleaseScope, 'LegacyCombined'>>>(() =>
-  (kind.value === 'Standard' || kind.value === 'NonStandard' || kind.value === 'Electrical') && hasPublishedFormal.value
-    ? [kind.value === 'NonStandard' ? 'NonStandardSupplement' : kind.value === 'Electrical' ? 'ElectricalSupplement' : 'StandardSupplement']
-    : allowedReleaseScopes.value)
+const supplementScopeForCurrentKind = computed<Exclude<ReleaseScope, 'LegacyCombined'> | undefined>(() => {
+  if (kind.value === 'Standard') return 'StandardSupplement'
+  if (kind.value === 'NonStandard') return 'NonStandardSupplement'
+  if (kind.value === 'Electrical') return 'ElectricalSupplement'
+  return undefined
+})
+// 与后端一致：首次正式发布前只能长交期/正式发布；正式发布后只能增补/变更。
+const createReleaseScopes = computed<Array<Exclude<ReleaseScope, 'LegacyCombined'>>>(() => {
+  const supplement = supplementScopeForCurrentKind.value
+  if (!supplement) return []
+  return hasPublishedFormal.value ? [supplement] : allowedReleaseScopes.value.filter(scope => scope !== supplement)
+})
 const preferredReleaseScope = computed<Exclude<ReleaseScope, 'LegacyCombined'> | undefined>(() => {
   if (kind.value === 'Standard') {
     if (hasPublishedFormal.value) return 'StandardSupplement'
