@@ -3,8 +3,8 @@ import { ArrowLeft, ChevronLeft, ChevronRight, History, MessageSquareText, Refre
 import { ElMessage } from '../statusMessage'
 import { ElMessageBox } from 'element-plus'
 import { computed, ref, watch } from 'vue'
-import { drawingReviewAssignedReviewerLabel, drawingReviewCandidateStateTone, drawingReviewPackageStateLabel, drawingReviewPackageStateTone, drawingReviewTargetStateLabel, drawingReviewTargetStateTone } from '../drawingReviewLabels'
-import type { AddDrawingReviewMarkupInput, DrawingReviewCandidate, DrawingReviewDecision, DrawingReviewPackage, DrawingReviewTarget } from '../types'
+import { drawingReviewAssignedReviewerLabel, drawingReviewAssignedReviewerPool, drawingReviewCandidateStateTone, drawingReviewPackageStateLabel, drawingReviewPackageStateTone, drawingReviewTargetStateLabel, drawingReviewTargetStateTone } from '../drawingReviewLabels'
+import type { AddDrawingReviewMarkupInput, DrawingReviewBatchEntry, DrawingReviewCandidate, DrawingReviewDecision, DrawingReviewPackage, DrawingReviewTarget } from '../types'
 import { useUserDisplayName } from '../userDisplay'
 
 const displayUserName = useUserDisplayName()
@@ -46,6 +46,7 @@ const emit = defineEmits<{
   resolveMarkup: [packageId: string, markupId: string]
   decide: [packageId: string, itemId: string, target: DrawingReviewTarget, decision: DrawingReviewDecision, comment: string]
   decideSupervisor: [packageId: string, decision: DrawingReviewDecision, comment: string]
+  decideBatch: [entries: DrawingReviewBatchEntry[]]
 }>()
 
 const scopeOpen = ref(false)
@@ -90,6 +91,64 @@ const overviewCandidates = computed(() => overviewTab.value === 'Todo' ? overvie
 const overviewEmptyMessage = computed(() => overviewTab.value === 'Todo'
   ? '当前没有需要操作的图纸。'
   : '还没有已处理（通过或退回）的图纸。')
+
+// 批量审批：只允许勾选当前用户此刻能处理的图纸，全选仅作用于这些行。
+const selectedOverviewIds = ref<string[]>([])
+const overviewTargets = computed(() => overviewCandidates.value.map(candidate => ({ candidate, action: overviewRowAction(candidate) })))
+const overviewSelectableIds = computed(() => overviewTargets.value.filter(entry => entry.action).map(entry => entry.candidate.candidateId))
+const overviewAllSelected = computed(() => overviewSelectableIds.value.length > 0
+  && overviewSelectableIds.value.every(id => selectedOverviewIds.value.includes(id)))
+const selectedOverviewEntries = computed(() => overviewTargets.value.filter(entry => entry.action && selectedOverviewIds.value.includes(entry.candidate.candidateId)))
+const batchApproveLabel = computed(() => selectedOverviewEntries.value.length > 0
+  && selectedOverviewEntries.value.every(entry => entry.action!.kind === 'supervisor') ? '批量批准' : '批量通过')
+
+function overviewRowAction(candidate: DrawingReviewCandidate) {
+  const packageValue = activeReviewPackageFor(candidate)
+  const item = reviewItemFor(candidate)
+  if (!packageValue || !item || !props.canDecide) return null
+  if (packageValue.state === 'PendingSupervisorApproval') {
+    return packageValue.supervisor === props.currentUsername || props.allowSelfReview
+      ? { kind: 'supervisor' as const, packageId: packageValue.id, itemId: item.id }
+      : null
+  }
+  if (packageValue.state !== 'InReview' || item.drawingState !== 'Pending') return null
+  const pool = drawingReviewAssignedReviewerPool(packageValue)
+  const assigned = pool.length === 0 || pool.includes(props.currentUsername) || props.allowSelfReview
+  const selfReview = Boolean(item.drawingCreatedBy)
+    && item.drawingCreatedBy!.localeCompare(props.currentUsername, undefined, { sensitivity: 'accent' }) === 0
+    && !props.allowSelfReview
+  return assigned && !selfReview ? { kind: 'target' as const, packageId: packageValue.id, itemId: item.id } : null
+}
+
+function toggleOverviewRow(candidateId: string) {
+  selectedOverviewIds.value = selectedOverviewIds.value.includes(candidateId)
+    ? selectedOverviewIds.value.filter(id => id !== candidateId)
+    : [...selectedOverviewIds.value, candidateId]
+}
+
+function toggleOverviewAll() {
+  selectedOverviewIds.value = overviewAllSelected.value ? [] : [...overviewSelectableIds.value]
+}
+
+async function batchDecide(decision: DrawingReviewDecision) {
+  const entries = selectedOverviewEntries.value
+  if (!entries.length) return
+  let comment = ''
+  if (decision === 'RequestChanges') {
+    const result = await ElMessageBox.prompt('请填写退改说明（批量退改会应用到所选图纸）', '批量退改', {
+      confirmButtonText: '确认退改', cancelButtonText: '取消', inputPlaceholder: '退改说明', inputValidator: (value: string) => Boolean(value?.trim()) || '退改必须填写说明。',
+    })
+    comment = (result.value ?? '').trim()
+  }
+  emit('decideBatch', entries.map(entry => ({
+    kind: entry.action!.kind,
+    packageId: entry.action!.packageId,
+    itemId: entry.action!.itemId,
+    decision,
+    comment,
+  })))
+  selectedOverviewIds.value = []
+}
 const selectedCandidateCount = computed(() => selectedCandidateIds.value.length)
 const candidateEmptyMessage = computed(() => props.candidates.length === 0
   ? '当前没有有效非标件BOM候选；请先将3D模型归入非标件BOM，并保持唯一关联的2D工程图。'
@@ -159,12 +218,13 @@ function overviewStateTone(candidate: DrawingReviewCandidate) {
   return item ? drawingReviewTargetStateTone(item.drawingState) : drawingReviewCandidateStateTone(candidate.state)
 }
 
-// 明细分页口径：已通过（含待批准）或已退回算“已操作”，其余（待提交/待审核/不可发起）算“待操作”。
+// 明细分页口径：仅“已批准（Marked）”或“已退回”算“已操作”；
+// 待批准（逐张已通过、等待主管批准）仍算“待操作”，它还需要主管点批准。
 function candidateConcluded(candidate: DrawingReviewCandidate) {
   if (candidate.state === 'ApprovedCurrent') return true
   if (candidate.state !== 'InReview') return false
   const state = reviewItemFor(candidate)?.drawingState
-  return state === 'Approved' || state === 'Marked' || state === 'ChangesRequested'
+  return state === 'Marked' || state === 'ChangesRequested'
 }
 
 function reviewItemFor(candidate: DrawingReviewCandidate) {
@@ -273,8 +333,8 @@ const packageStateTone = computed(() => activePackage.value ? drawingReviewPacka
 
     <template v-else>
     <div class="drawing-review-panel__toolbar">
-      <label><span>状态</span><select v-model="overviewState" aria-label="筛选图纸审核状态"><option v-for="option in overviewStateOptions" :key="option.value" :value="option.value">{{ option.label }}（{{ option.count }}）</option></select></label>
-      <button type="button" title="刷新审核状态" :disabled="pending" @click="emit('refresh')"><RefreshCw :size="14" />刷新</button>
+      <label><select v-model="overviewState" aria-label="筛选图纸审核状态"><option v-for="option in overviewStateOptions" :key="option.value" :value="option.value">{{ option.label }}（{{ option.count }}）</option></select></label>
+      <button type="button" class="drawing-review-toolbar__refresh" title="刷新审核状态" :disabled="pending" @click="emit('refresh')"><RefreshCw :size="14" />刷新</button>
       <button v-if="canSubmit" type="button" class="drawing-review-toolbar__create" title="发起图纸审核" :disabled="pending" @click="openScopeSelection"><Send :size="14" />发起审核</button>
     </div>
 
@@ -295,19 +355,38 @@ const packageStateTone = computed(() => activePackage.value ? drawingReviewPacka
           @click="overviewTab = 'Done'"
         >已操作（{{ overviewDoneCandidates.length }}）</button>
       </div>
-      <header><strong>图纸型号</strong><span>审核状态</span></header>
-      <button
-        v-for="candidate in overviewCandidates"
-        :key="candidate.candidateId"
-        type="button"
+      <header>
+        <label class="drawing-review-overview__check"><input type="checkbox" aria-label="全选可操作图纸" :checked="overviewAllSelected" :disabled="!overviewSelectableIds.length" @change="toggleOverviewAll" /></label>
+        <strong>图纸型号</strong><span>审核状态</span>
+      </header>
+      <div
+        v-for="entry in overviewTargets"
+        :key="entry.candidate.candidateId"
         class="drawing-review-overview__row"
-        :class="[`is-${overviewStateTone(candidate)}`, { 'is-active': selectedDocumentId === candidate.drawingDocumentId || selectedDocumentId === candidate.modelDocumentId }]"
-        :title="candidate.reason || candidate.drawingNumber"
-        @click="selectOverviewCandidate(candidate)"
+        role="button"
+        tabindex="0"
+        :class="[`is-${overviewStateTone(entry.candidate)}`, { 'is-active': selectedDocumentId === entry.candidate.drawingDocumentId || selectedDocumentId === entry.candidate.modelDocumentId }]"
+        :title="entry.candidate.reason || entry.candidate.drawingNumber"
+        @click="selectOverviewCandidate(entry.candidate)"
+        @keydown.enter.prevent="selectOverviewCandidate(entry.candidate)"
       >
-        <strong>{{ candidate.drawingNumber }}</strong><em :title="candidateReviewerLabel(candidate) || undefined">{{ overviewStateLabel(candidate) }}</em>
-      </button>
+        <label class="drawing-review-overview__check" @click.stop>
+          <input
+            type="checkbox"
+            :aria-label="`选择图纸 ${entry.candidate.drawingNumber}`"
+            :checked="selectedOverviewIds.includes(entry.candidate.candidateId)"
+            :disabled="!entry.action"
+            @change="toggleOverviewRow(entry.candidate.candidateId)"
+          />
+        </label>
+        <strong>{{ entry.candidate.drawingNumber }}</strong><em :title="candidateReviewerLabel(entry.candidate) || undefined">{{ overviewStateLabel(entry.candidate) }}</em>
+      </div>
       <p v-if="!overviewCandidates.length">{{ overviewEmptyMessage }}</p>
+      <div v-if="overviewSelectableIds.length" class="drawing-review-overview__batch">
+        <span>已选 {{ selectedOverviewEntries.length }} 张</span>
+        <button type="button" class="is-approve" :disabled="pending || !selectedOverviewEntries.length" @click="batchDecide('Approve')">{{ batchApproveLabel }}</button>
+        <button type="button" class="is-reject" :disabled="pending || !selectedOverviewEntries.length" @click="batchDecide('RequestChanges')">批量退改</button>
+      </div>
     </section>
 
     <details v-if="packages.length" class="drawing-review-history">
@@ -350,8 +429,8 @@ const packageStateTone = computed(() => activePackage.value ? drawingReviewPacka
 .drawing-review-back{width:28px;flex:0 0 28px;padding:0!important;border:0!important;background:transparent!important}.drawing-review-panel.is-collapsed{width:34px;min-width:34px}.drawing-review-panel.is-collapsed>.drawing-review-panel__header{padding:8px 4px;justify-content:center;border-bottom:0}.drawing-review-panel__header .drawing-review-submit{margin-left:auto;width:80px;min-width:80px;padding:5px 4px}.drawing-review-panel__header .drawing-review-submit:disabled{border-color:var(--pdm-border);background:var(--pdm-surface-muted);color:var(--pdm-muted);opacity:1}.drawing-review-panel__header .drawing-review-collapse{width:24px;min-width:24px;height:24px;min-height:24px;flex:0 0 24px;padding:0;border:0;background:transparent;color:var(--pdm-muted)}.drawing-review-panel__header .drawing-review-collapse:hover{background:var(--pdm-surface-muted);color:var(--pdm-text)}.drawing-review-scope{display:flex;flex-direction:column;gap:7px;padding:10px;border-bottom:1px solid var(--pdm-border-soft)}.drawing-review-scope>select{width:100%}.drawing-review-scope__search{display:flex;align-items:center;gap:5px;padding:0 7px;border:1px solid var(--pdm-border);border-radius:5px;background:var(--pdm-surface)}.drawing-review-scope__search input{min-width:0;width:100%;height:30px;border:0;outline:0;background:transparent;color:var(--pdm-text);font-size:12px}.drawing-review-candidate-list{min-height:0;flex:1;overflow:auto;padding:6px}.drawing-review-candidate{position:relative;width:100%;min-height:62px!important;display:grid!important;grid-template-columns:20px minmax(0,1fr) 66px;align-items:center!important;justify-content:stretch!important;gap:6px;margin-bottom:5px;padding:7px!important;text-align:left;border-color:var(--pdm-border-soft)!important}.drawing-review-candidate.is-selected{border-color:var(--pdm-blue)!important;background:var(--pdm-blue-soft)!important}.drawing-review-candidate:disabled{opacity:.68}.drawing-review-candidate__check{width:17px;height:17px;display:flex;align-items:center;justify-content:center;border:1px solid var(--pdm-border);border-radius:3px;background:var(--pdm-surface);color:var(--pdm-blue);font-weight:700}.drawing-review-candidate.is-selected .drawing-review-candidate__check{border-color:var(--pdm-blue)}.drawing-review-candidate__copy,.drawing-review-candidate__versions{min-width:0;display:flex;flex-direction:column;gap:2px}.drawing-review-candidate__copy strong,.drawing-review-candidate__copy small{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.drawing-review-candidate__copy strong{font-size:12px}.drawing-review-candidate__copy small,.drawing-review-candidate__copy em,.drawing-review-candidate__versions small,.drawing-review-candidate__versions em{color:var(--pdm-muted);font-size:12px;font-style:normal}.drawing-review-candidate__versions{align-items:flex-end}.drawing-review-candidate__versions strong{font-size:12px}.drawing-review-candidate.is-approvedcurrent .drawing-review-candidate__versions em{color:var(--pdm-green)}.drawing-review-candidate.is-inreview .drawing-review-candidate__versions em,.drawing-review-candidate.is-unavailable .drawing-review-candidate__versions em{color:var(--pdm-orange)}.drawing-review-candidate__reason{grid-column:2/4;color:var(--pdm-muted);font-size:12px}.drawing-review-no-candidate{padding:28px 8px;color:var(--pdm-muted);text-align:center;font-size:12px}.drawing-review-scope__footer{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:9px 10px;border-top:1px solid var(--pdm-border-soft);font-size:12px}.drawing-review-package-actions{display:grid!important;grid-template-columns:1fr;gap:5px}.drawing-review-package-actions button{width:100%}.drawing-review-package-actions .is-danger{border-color:#f2b8b5;background:#fff0ef;color:var(--pdm-danger)}.drawing-review-withdrawn{padding:5px 6px;border-radius:4px;background:#fff0ef;color:var(--pdm-danger)!important}
 .drawing-review-scope__reviewer{display:grid;grid-template-columns:70px minmax(0,1fr);align-items:center;gap:6px;font-size:12px}.drawing-review-scope__reviewer select{width:100%}.drawing-review-reviewer-select{width:100%;min-width:0}.drawing-review-scope__reviewer :deep(.el-select__wrapper){min-height:30px;padding:2px 8px;border-radius:5px;font-size:12px}.drawing-review-scope__reviewer :deep(.el-select__selection){gap:2px;flex-wrap:wrap}.drawing-review-scope__reviewer :deep(.el-tag){height:18px;padding:0 5px;font-size:12px}.drawing-review-scope__empty-hint{margin:0;color:var(--pdm-muted);font-size:12px;line-height:1.45}.drawing-review-route{color:var(--pdm-blue)!important}
 .drawing-review-candidate{height:30px!important;min-height:30px!important;grid-template-columns:20px minmax(0,1fr) 52px;gap:6px;margin-bottom:3px;padding:0 7px!important;overflow:hidden}.drawing-review-candidate__number{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px}.drawing-review-candidate__state{color:var(--pdm-muted);font-size:12px;font-style:normal;text-align:right;white-space:nowrap}.drawing-review-candidate.is-approvedcurrent .drawing-review-candidate__state{color:var(--pdm-green)}.drawing-review-candidate.is-inreview .drawing-review-candidate__state,.drawing-review-candidate.is-unavailable .drawing-review-candidate__state{color:var(--pdm-orange)}
-.drawing-review-panel__toolbar{display:flex;gap:5px;padding:8px 10px;border-bottom:1px solid var(--pdm-border-soft)}.drawing-review-panel__toolbar label{min-width:0;display:flex;flex:1;align-items:center;gap:5px}.drawing-review-panel__toolbar label>span{flex:0 0 auto;white-space:nowrap}.drawing-review-panel__toolbar select{min-width:0;width:100%}.drawing-review-panel__toolbar .drawing-review-toolbar__create{width:80px;min-width:80px;padding:5px 4px}.drawing-review-panel button,.drawing-review-panel select,.drawing-review-panel input,.drawing-review-panel textarea{font:inherit;font-size:12px}.drawing-review-panel button,.drawing-review-panel select{min-height:30px;border:1px solid var(--pdm-border);border-radius:5px;background:var(--pdm-surface);color:var(--pdm-text)}.drawing-review-panel button{display:inline-flex;align-items:center;justify-content:center;gap:5px;padding:5px 8px}.drawing-review-panel button:disabled{opacity:.45;cursor:not-allowed}.drawing-review-panel .is-primary{border-color:var(--pdm-blue);background:var(--pdm-blue);color:white}
-.drawing-review-overview{flex:0 0 auto;padding:0 10px 7px;border-bottom:1px solid var(--pdm-border-soft)}.drawing-review-overview>header,.drawing-review-overview__row{box-sizing:border-box;width:100%;display:grid!important;grid-template-columns:minmax(0,1fr) 96px;align-items:center;gap:6px}.drawing-review-overview>header{height:25px;padding:0 8px;color:var(--pdm-muted);font-size:12px}.drawing-review-overview>header span{text-align:right}.drawing-review-overview__row{height:30px!important;min-height:30px!important;margin:0 0 3px;padding:0 8px!important;overflow:hidden;text-align:left}.drawing-review-overview__row strong{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.drawing-review-overview__row em{overflow:hidden;color:var(--pdm-muted);font-style:normal;text-align:right;text-overflow:ellipsis;white-space:nowrap}.drawing-review-overview__reviewer{margin-right:4px;color:var(--pdm-text)}.drawing-review-overview__row.is-active{border-color:var(--pdm-blue);background:var(--pdm-blue-soft)}.drawing-review-overview__row.is-approvedcurrent em{color:var(--pdm-green)}.drawing-review-overview__row.is-inreview em,.drawing-review-overview__row.is-unavailable em{color:var(--pdm-orange)}.drawing-review-overview>p{margin:0;padding:14px 8px;color:var(--pdm-muted);text-align:center;font-size:12px}.drawing-review-history{padding:6px 10px;border-bottom:1px solid var(--pdm-border-soft)}.drawing-review-history summary{display:flex;align-items:center;gap:5px;color:var(--pdm-muted);font-size:12px;cursor:pointer}.drawing-review-history select{width:100%;margin-top:5px}
+.drawing-review-panel__toolbar{display:flex;gap:5px;padding:8px 10px;border-bottom:1px solid var(--pdm-border-soft)}.drawing-review-panel__toolbar label{min-width:0;display:flex;flex:1;align-items:center;gap:5px}.drawing-review-panel__toolbar select{min-width:0;width:100%}.drawing-review-panel__toolbar .drawing-review-toolbar__refresh,.drawing-review-panel__toolbar .drawing-review-toolbar__create{width:80px;min-width:80px;height:30px;min-height:30px;padding:5px 4px}.drawing-review-panel button,.drawing-review-panel select,.drawing-review-panel input,.drawing-review-panel textarea{font:inherit;font-size:12px}.drawing-review-panel button,.drawing-review-panel select{min-height:30px;border:1px solid var(--pdm-border);border-radius:5px;background:var(--pdm-surface);color:var(--pdm-text)}.drawing-review-panel button{display:inline-flex;align-items:center;justify-content:center;gap:5px;padding:5px 8px}.drawing-review-panel button:disabled{opacity:.45;cursor:not-allowed}.drawing-review-panel .is-primary{border-color:var(--pdm-blue);background:var(--pdm-blue);color:white}
+.drawing-review-overview{flex:0 0 auto;padding:0 10px 7px;border-bottom:1px solid var(--pdm-border-soft)}.drawing-review-overview>header,.drawing-review-overview__row{box-sizing:border-box;width:100%;display:grid!important;grid-template-columns:18px minmax(0,1fr) 96px;align-items:center;gap:6px}.drawing-review-overview>header{height:25px;padding:0 8px;color:var(--pdm-muted);font-size:12px}.drawing-review-overview>header span{text-align:right}.drawing-review-overview__row{height:30px!important;min-height:30px!important;margin:0 0 3px;padding:0 8px!important;overflow:hidden;text-align:left}.drawing-review-overview__row strong{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.drawing-review-overview__row em{overflow:hidden;color:var(--pdm-muted);font-style:normal;text-align:right;text-overflow:ellipsis;white-space:nowrap}.drawing-review-overview__reviewer{margin-right:4px;color:var(--pdm-text)}.drawing-review-overview__row.is-active{border-color:var(--pdm-blue);background:var(--pdm-blue-soft)}.drawing-review-overview__row{border:1px solid var(--pdm-border);border-radius:5px;background:var(--pdm-surface);color:var(--pdm-text);cursor:pointer}.drawing-review-overview__check{display:flex;align-items:center;justify-content:center;margin:0}.drawing-review-overview__check input{width:14px;height:14px;margin:0;accent-color:var(--pdm-blue);cursor:pointer}.drawing-review-overview__check input:disabled{cursor:not-allowed}.drawing-review-overview__batch{display:flex;align-items:center;gap:6px;margin-top:6px}.drawing-review-overview__batch>span{flex:0 0 auto;color:var(--pdm-muted);font-size:12px;white-space:nowrap}.drawing-review-overview__batch>button{flex:1 1 0;min-width:0}.drawing-review-overview__batch>.is-approve{border-color:var(--pdm-green);background:var(--pdm-green);color:white}.drawing-review-overview__batch>.is-reject{border-color:#f2b8b5;background:#fff0ef;color:var(--pdm-danger)}.drawing-review-overview__row.is-approvedcurrent em{color:var(--pdm-green)}.drawing-review-overview__row.is-inreview em,.drawing-review-overview__row.is-unavailable em{color:var(--pdm-orange)}.drawing-review-overview>p{margin:0;padding:14px 8px;color:var(--pdm-muted);text-align:center;font-size:12px}.drawing-review-history{padding:6px 10px;border-bottom:1px solid var(--pdm-border-soft)}.drawing-review-history summary{display:flex;align-items:center;gap:5px;color:var(--pdm-muted);font-size:12px;cursor:pointer}.drawing-review-history select{width:100%;margin-top:5px}
 .drawing-review-panel__empty,.drawing-review-panel__selection-empty{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:8px;padding:28px 18px;color:var(--pdm-muted);text-align:center}.drawing-review-panel__empty{flex:1}.drawing-review-panel__empty strong,.drawing-review-panel__selection-empty strong{color:var(--pdm-text);font-size:12px}.drawing-review-panel__empty p,.drawing-review-panel__selection-empty p{margin:0;line-height:1.6;font-size:12px}
 .drawing-review-package-summary{padding:10px;border-bottom:1px solid var(--pdm-border-soft)}.drawing-review-package-summary>div{display:flex;align-items:center;justify-content:space-between;gap:6px}.drawing-review-package-summary>div>strong{font-size:12px}.drawing-review-package-summary>div>span{padding:3px 6px;border-radius:8px;background:var(--pdm-blue-soft);color:var(--pdm-blue);font-size:12px}.drawing-review-package-summary>div>.is-approved{background:var(--pdm-green-soft);color:var(--pdm-green)}.drawing-review-package-summary>div>.is-changesrequested,.drawing-review-package-summary>div>.is-stale{background:#fff0ef;color:var(--pdm-danger)}.drawing-review-package-summary p{margin:5px 0 8px;color:var(--pdm-muted);font-size:12px}.drawing-review-package-summary>button{width:100%}
 @media(max-width:600px){.drawing-review-panel{inset:6px 6px 6px auto;width:calc(100% - 12px);height:calc(100% - 12px);max-height:none}}

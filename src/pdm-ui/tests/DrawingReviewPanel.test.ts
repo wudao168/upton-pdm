@@ -114,6 +114,9 @@ describe('DrawingReviewPanel', () => {
 
     const toolbarButtons = wrapper.findAll('.drawing-review-panel__toolbar button')
     expect(toolbarButtons.map(button => button.text())).toEqual(['刷新', '发起审核'])
+    // 工具栏去掉"状态"文字标签，刷新按钮固定 80x30（与发起审核同尺寸）。
+    expect(wrapper.find('.drawing-review-panel__toolbar label > span').exists()).toBe(false)
+    expect(wrapper.get('.drawing-review-toolbar__refresh').classes()).toContain('drawing-review-toolbar__refresh')
     expect(wrapper.findAll('.drawing-review-package-actions button').map(button => button.text())).toEqual(['撤销审核'])
 
     await toolbarButtons[1]!.trigger('click')
@@ -230,16 +233,16 @@ describe('DrawingReviewPanel', () => {
       props: { packageId: passedPackage.id, packages: [passedPackage], candidates, selectedDocumentId: 'drawing-1', currentUsername: 'reviewer', ...permissions },
     })
 
-    // 已通过（待批准）与已退回都归入「已操作」页，默认待操作页为空并给出提示。
-    expect(wrapper.findAll('.drawing-review-overview__row')).toHaveLength(0)
-    expect(wrapper.get('[aria-label="图纸审核状态表"]').text()).toContain('当前没有需要操作的图纸')
+    // 待批准（逐张已通过、等主管批准）仍属「待操作」；已退回归「已操作」。
+    const todoRows = wrapper.findAll('.drawing-review-overview__row')
+    expect(todoRows).toHaveLength(1)
+    expect(todoRows[0]!.find('em').text()).toContain('待批准')
+    expect(todoRows[0]!.classes()).toContain('is-pending')
     await wrapper.findAll('[role="tab"]').find(tab => tab.text().startsWith('已操作'))!.trigger('click')
-    const rows = wrapper.findAll('.drawing-review-overview__row')
-    expect(rows).toHaveLength(2)
-    expect(rows[0]!.find('em').text()).toContain('待批准')
-    expect(rows[0]!.classes()).toContain('is-pending')
-    expect(rows[1]!.find('em').text()).toContain('已退回（待修改）')
-    expect(rows[1]!.classes()).toContain('is-danger')
+    const doneRows = wrapper.findAll('.drawing-review-overview__row')
+    expect(doneRows).toHaveLength(1)
+    expect(doneRows[0]!.find('em').text()).toContain('已退回（待修改）')
+    expect(doneRows[0]!.classes()).toContain('is-danger')
     expect(wrapper.text()).toContain('1/2项完成')
   })
 
@@ -436,6 +439,44 @@ describe('DrawingReviewPanel', () => {
 
     await wrapper.findAll('[role="tab"]')[1]!.trigger('click')
     expect(wrapper.get('[aria-label="图纸审核状态表"]').text()).toContain('还没有已处理（通过或退回）的图纸。')
+  })
+
+  it('明细支持勾选与全选，并可批量批准', async () => {
+    const candidates: DrawingReviewCandidate[] = [
+      { ...candidate, candidateId: 'c1', modelDocumentId: 'model-2', drawingDocumentId: 'drawing-2', drawingNumber: 'A01-200', state: 'InReview', selectable: false },
+      { ...candidate, candidateId: 'c2', modelDocumentId: 'model-3', drawingDocumentId: 'drawing-3', drawingNumber: 'A01-300', state: 'InReview', selectable: false },
+    ]
+    const pendingPackage: DrawingReviewPackage = {
+      ...review,
+      id: 'review-9',
+      state: 'PendingSupervisorApproval',
+      supervisor: 'manager',
+      supervisorName: '机械主管',
+      items: [
+        { ...review.items[0]!, id: 'item-2', modelDocumentId: 'model-2', drawingDocumentId: 'drawing-2', drawingNumber: 'A01-200', drawingState: 'Approved' },
+        { ...review.items[0]!, id: 'item-3', modelDocumentId: 'model-3', drawingDocumentId: 'drawing-3', drawingNumber: 'A01-300', drawingState: 'Approved' },
+      ],
+    }
+    const wrapper = mount(DrawingReviewPanel, {
+      global: { plugins: [ElementPlus] },
+      props: { packageId: pendingPackage.id, packages: [pendingPackage], candidates, selectedDocumentId: 'drawing-2', currentUsername: 'manager', ...permissions },
+    })
+
+    // 待批准仍属待操作，主管可勾选并全选。
+    expect(wrapper.get('[role="tab"][aria-selected="true"]').text()).toBe('待操作（2）')
+    const boxes = wrapper.findAll('.drawing-review-overview__row input[type="checkbox"]')
+    expect(boxes).toHaveLength(2)
+    expect(boxes.every(box => box.attributes('disabled') === undefined)).toBe(true)
+
+    await wrapper.get('input[aria-label="全选可操作图纸"]').setValue(true)
+    expect(wrapper.text()).toContain('已选 2 张')
+    expect(wrapper.get('.drawing-review-overview__batch .is-approve').text()).toBe('批量批准')
+
+    await wrapper.get('.drawing-review-overview__batch .is-approve').trigger('click')
+    expect(wrapper.emitted('decideBatch')).toEqual([[[
+      { kind: 'supervisor', packageId: 'review-9', itemId: 'item-2', decision: 'Approve', comment: '' },
+      { kind: 'supervisor', packageId: 'review-9', itemId: 'item-3', decision: 'Approve', comment: '' },
+    ]]])
   })
 
   it('审核明细栏内不再渲染审核结论条（结论条在预览工具条里）', () => {

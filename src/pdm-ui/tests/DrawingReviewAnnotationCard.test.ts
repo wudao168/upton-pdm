@@ -135,6 +135,25 @@ describe('DrawingReviewAnnotationCard', () => {
     confirm.mockRestore()
   })
 
+  it('待批准阶段：主管看到批准按钮，审图人看到撤销按钮', () => {
+    const pending: DrawingReviewPackage = {
+      ...review,
+      state: 'PendingSupervisorApproval',
+      supervisor: 'manager',
+      supervisorName: '机械主管',
+      items: [{ ...review.items[0]!, drawingState: 'Approved' }],
+    }
+
+    const supervisor = mountCard(pending, 'manager')
+    expect(supervisor.get('.is-approve').text()).toContain('批准')
+    expect(supervisor.find('.is-revoke').exists()).toBe(false)
+    expect(supervisor.text()).toContain('该2D工程图已通过审核，等待批准')
+
+    const reviewer = mountCard(pending, 'reviewer')
+    expect(reviewer.find('.is-approve').exists()).toBe(false)
+    expect(reviewer.get('.is-revoke').text()).toBe('撤销')
+  })
+
   it('已退改的图纸可撤销退改', async () => {
     const confirm = vi.spyOn(ElMessageBox, 'confirm').mockResolvedValue({ action: 'confirm' } as never)
     const changes: DrawingReviewPackage = { ...review, items: [{ ...review.items[0]!, drawingState: 'ChangesRequested', drawingComment: '尺寸标注需修改' }] }
@@ -149,6 +168,25 @@ describe('DrawingReviewAnnotationCard', () => {
     await Promise.resolve()
     await Promise.resolve()
     expect(wrapper.emitted('decide')).toEqual([['review-1', 'item-1', 'Drawing2D', 'Revoke', '']])
+    confirm.mockRestore()
+  })
+
+  it('退改图档的设计者可按最新存档版本重新提交审核并显示退改说明', async () => {
+    const confirm = vi.spyOn(ElMessageBox, 'confirm').mockResolvedValue({ action: 'confirm' } as never)
+    const changes: DrawingReviewPackage = { ...review, items: [{ ...review.items[0]!, drawingState: 'ChangesRequested', drawingComment: '尺寸标注需修改' }] }
+    const wrapper = mountCard(changes, 'drawing-designer', { canResubmit: true })
+
+    expect(wrapper.text()).toContain('退改说明：尺寸标注需修改')
+    expect(wrapper.text()).toContain('然后点“重新提交”')
+    expect(wrapper.findAll('.drawing-review-decision-buttons button').map(button => button.text())).toEqual(['重新提交'])
+    expect(wrapper.find('.is-reject').exists()).toBe(false)
+    expect(wrapper.find('.is-revoke').exists()).toBe(false)
+
+    await wrapper.get('.is-approve').trigger('click')
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(confirm).toHaveBeenCalled()
+    expect(wrapper.emitted('resubmit')).toEqual([['review-1', 'item-1']])
     confirm.mockRestore()
   })
 

@@ -32,7 +32,7 @@ import WorkbenchHome from './components/WorkbenchHome.vue'
 import WorkspaceExplorerBar from './components/WorkspaceExplorerBar.vue'
 import { postDesktopMessage } from './api'
 import { usePdmWorkspace } from './composables/usePdmWorkspace'
-import type { AddDrawingReviewMarkupInput, DocumentNode, DrawingReviewBadge, DrawingReviewDecision, DrawingReviewPackage, DrawingReviewTarget, DrawingReviewTargetState, UserNotification, WorkspaceLocalFileState, WorkspaceLocalStateSnapshot } from './types'
+import type { AddDrawingReviewMarkupInput, DocumentNode, DrawingReviewBadge, DrawingReviewBatchEntry, DrawingReviewDecision, DrawingReviewPackage, DrawingReviewTarget, DrawingReviewTargetState, UserNotification, WorkspaceLocalFileState, WorkspaceLocalStateSnapshot } from './types'
 import { resolveUserDisplayName, userDisplayNameKey } from './userDisplay'
 
 const workspace = usePdmWorkspace()
@@ -197,6 +197,17 @@ function packageContainsDocument(review: DrawingReviewPackage, documentId: strin
   return Boolean(documentId && review.items.some(item => item.drawingDocumentId === documentId))
 }
 
+/** 批量审批：逐张按同一结论处理，退改共用同一份说明。 */
+async function decideDrawingReviewBatch(entries: DrawingReviewBatchEntry[]) {
+  for (const entry of entries) {
+    if (entry.kind === 'supervisor') {
+      await workspace.decideDrawingReviewSupervisor(entry.packageId, entry.decision, entry.comment)
+    } else {
+      await workspace.decideDrawingReviewTarget(entry.packageId, entry.itemId, 'Drawing2D', entry.decision, entry.comment)
+    }
+  }
+}
+
 const selectedDrawingReviewPackage = computed(() => workspace.drawingReviews.value.find(item => item.id === drawingReviewPackageId.value)
   ?? workspace.drawingReviews.value.find(item => packageContainsDocument(item, workspace.selectedNode.value.documentId))
   ?? workspace.drawingReviews.value[0])
@@ -249,6 +260,12 @@ const canWritebackSelectedDrawingReview = computed(() => {
   if (selectedDrawingReviewPackage.value?.state !== 'WritingProperties' || !selectedDrawingReviewItem.value) return false
   return selectedDrawingReviewItem.value.drawingState === 'Approved'
 })
+// 退改后由发起人或该图档设计者按最新存档版本重新提交审核（后端同样校验）。
+const canResubmitSelectedDrawingReview = computed(() => workspace.hasPermission('drawing-review.submit')
+  && selectedDrawingReviewItem.value?.drawingState === 'ChangesRequested'
+  && (selectedDrawingReviewPackage.value?.createdBy === workspace.currentUsername.value
+    || selectedDrawingReviewItem.value?.drawingCreatedBy === workspace.currentUsername.value
+    || canManageDrawingReviewWithdrawal.value))
 const canManageDrawingReviewWithdrawal = computed(() => workspace.hasRole('Administrator')
   || workspace.project.value.primaryProjectManager === workspace.currentUsername.value
   || (workspace.project.value.collaborativeProjectManagers ?? []).includes(workspace.currentUsername.value))
@@ -1049,7 +1066,7 @@ async function openWhereUsedParent(projectId: string, parentDocumentId: string) 
                 <DocumentTree v-model:query="workspace.searchQuery.value" :filter="workspace.documentFilter.value" :root="workspace.filteredTree.value" :drawings="workspace.filteredDrawings.value" :selected-id="workspace.selectedNode.value.id" :all-count="workspace.documentFilterCounts.value.all" :model-count="workspace.documentFilterCounts.value.model" :drawing-count="workspace.documentFilterCounts.value.drawing" :warning-count="workspace.warningCount.value" :can-edit="workspace.hasPermission('document.edit')" :review-states="drawingReviewStates" :local-states="workspaceLocalStates" :refreshing="workspace.loading.value || workspaceLocalRefreshing" @update:filter="workspace.setDocumentFilter" @select="workspace.selectNode" @refresh="refreshDocumentTree" @open="workspace.openDocument" @open-folder="openWorkspaceFolder" />
                 <section class="pdm-stage">
                   <div class="pdm-preview-layout" :class="{ 'is-desktop-preview': desktopAvailable }">
-                    <PreviewWorkspace :selected="workspace.selectedNode.value" :related="workspace.relatedNodes.value" :bom-item="workspace.selectedBomItem.value" :current-username="workspace.currentUsername.value" :can-manage-lifecycle="workspace.hasPermission('release.manage')" :can-edit-documents="workspace.hasPermission('document.edit')" :desktop-available="desktopAvailable" :access-token="workspace.getAccessToken()" :project-id="workspace.project.value.id" :active="projectTab === 'documents'" :obscured="workspace.versionDrawerOpen.value || workspace.whereUsedDrawerOpen.value" :review-panel-collapsed="drawingReviewPanelCollapsed" :review-version-id="selectedDrawingReviewVersionId" :review-revision="selectedDrawingReviewRevision" :can-writeback-review-properties="canWritebackSelectedDrawingReview" @open="workspace.openDocument" @preview="workspace.previewDocument" @related="workspace.selectRelatedNode" @more="workspace.openVersionDrawer()" @where-used="workspace.openWhereUsed" @obsolete="obsoleteSelectedDocument">
+                    <PreviewWorkspace :selected="workspace.selectedNode.value" :related="workspace.relatedNodes.value" :bom-item="workspace.selectedBomItem.value" :current-username="workspace.currentUsername.value" :can-manage-lifecycle="workspace.hasPermission('release.manage')" :can-edit-documents="workspace.hasPermission('document.edit')" :desktop-available="desktopAvailable" :access-token="workspace.getAccessToken()" :project-id="workspace.project.value.id" :active="projectTab === 'documents'" :obscured="workspace.versionDrawerOpen.value || workspace.whereUsedDrawerOpen.value" :review-panel-collapsed="drawingReviewPanelCollapsed" :review-version-id="selectedDrawingReviewVersionId" :review-revision="selectedDrawingReviewRevision" :review-editable="selectedDrawingReviewItem?.drawingState === 'ChangesRequested'" :can-writeback-review-properties="canWritebackSelectedDrawingReview" @open="workspace.openDocument" @preview="workspace.previewDocument" @related="workspace.selectRelatedNode" @more="workspace.openVersionDrawer()" @where-used="workspace.openWhereUsed" @obsolete="obsoleteSelectedDocument">
                       <DrawingReviewPanel
                         v-if="!desktopAvailable"
                         v-model:collapsed="drawingReviewPanelCollapsed"
@@ -1075,6 +1092,7 @@ async function openWhereUsedParent(projectId: string, parentDocumentId: string) 
                         @resolve-markup="(packageId, markupId) => runOperation(() => workspace.resolveDrawingReviewMarkup(packageId, markupId), '图纸批注已关闭')"
                         @decide="(packageId, itemId, target, decision, comment) => runOperation(() => workspace.decideDrawingReviewTarget(packageId, itemId, target, decision, comment), decision === 'Approve' ? '审核结果已记录' : '图纸已退回修改')"
                         @decide-supervisor="(packageId, decision, comment) => runOperation(() => workspace.decideDrawingReviewSupervisor(packageId, decision, comment), decision === 'Approve' ? '已批准' : '图纸已退回修改')"
+                        @decide-batch="entries => runOperation(() => decideDrawingReviewBatch(entries), `批量审批已提交（${entries.length} 张）`)"
                       />
                       <!-- 审核结论栏由页面直接渲染进预览工具条的结论栏容器（网页端与客户端同一份 DOM），
                            常驻显示；不可操作时由结论栏自身禁用输入与按钮。 -->
@@ -1086,12 +1104,14 @@ async function openWhereUsedParent(projectId: string, parentDocumentId: string) 
                           :pending="workspace.operationPending.value"
                           :can-annotate="workspace.hasPermission('drawing-review.annotate')"
                           :can-decide="workspace.hasPermission('drawing-review.decide')"
+                          :can-resubmit="canResubmitSelectedDrawingReview"
                           :allow-self-review="workspace.hasRole('developer')"
                           :desktop-available="desktopAvailable"
                           @add-markup="(packageId, input) => runOperation(() => workspace.addDrawingReviewMarkup(packageId, input), '图纸批注已保存')"
                           @resolve-markup="(packageId, markupId) => runOperation(() => workspace.resolveDrawingReviewMarkup(packageId, markupId), '图纸批注已关闭')"
                           @decide="(packageId, itemId, target, decision, comment) => runOperation(() => workspace.decideDrawingReviewTarget(packageId, itemId, target, decision, comment), decision === 'Approve' ? '审核结果已记录' : '图纸已退回修改')"
                           @decide-supervisor="(packageId, decision, comment) => runOperation(() => workspace.decideDrawingReviewSupervisor(packageId, decision, comment), decision === 'Approve' ? '已批准' : '图纸已退回修改')"
+                          @resubmit="(packageId, itemId) => runOperation(() => workspace.resubmitDrawingReviewItem(packageId, itemId), '已按最新版本重新提交审核')"
                         />
                       </template>
                     </PreviewWorkspace>

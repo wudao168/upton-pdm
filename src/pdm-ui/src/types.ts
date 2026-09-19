@@ -993,6 +993,15 @@ export type DrawingReviewCandidateState = 'Ready' | 'InReview' | 'ApprovedCurren
 export type DrawingReviewTarget = 'Model3D' | 'Drawing2D'
 export type DrawingReviewTargetState = 'Pending' | 'ChangesRequested' | 'Approved' | 'Marked' | 'NotRequired'
 export type DrawingReviewDecision = 'Approve' | 'RequestChanges' | 'Revoke'
+
+/** 批量审批条目：kind=target 走逐张审核结论，kind=supervisor 走主管批准/退回。 */
+export interface DrawingReviewBatchEntry {
+  kind: 'target' | 'supervisor'
+  packageId: string
+  itemId: string
+  decision: DrawingReviewDecision
+  comment: string
+}
 export type DrawingReviewMarkupSeverity = 'Note' | 'Blocking'
 export type DrawingReviewMarkupState = 'Open' | 'Resolved'
 
@@ -2076,6 +2085,8 @@ export interface ProjectProcurementTrackingItem {
   materialCode: string
   materialName: string
   impactStage?: 'Assembly' | 'Commissioning' | null
+  assemblyStartDate?: string | null
+  commissioningStartDate?: string | null
   specification?: string | null
   remark?: string | null
   brand?: string | null

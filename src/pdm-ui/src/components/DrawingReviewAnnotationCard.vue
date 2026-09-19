@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { Check, RotateCcw, X } from '@lucide/vue'
+import { Check, RotateCcw, Send, X } from '@lucide/vue'
 import { ElMessage } from '../statusMessage'
 import { ElMessageBox } from 'element-plus'
 import { computed, ref } from 'vue'
@@ -16,9 +16,11 @@ const props = withDefaults(defineProps<{
   pending: boolean
   canAnnotate: boolean
   canDecide: boolean
+  canResubmit?: boolean
   allowSelfReview?: boolean
   desktopAvailable: boolean
 }>(), {
+  canResubmit: false,
   allowSelfReview: false,
 })
 
@@ -27,6 +29,7 @@ const emit = defineEmits<{
   resolveMarkup: [packageId: string, markupId: string]
   decide: [packageId: string, itemId: string, target: DrawingReviewTarget, decision: DrawingReviewDecision, comment: string]
   decideSupervisor: [packageId: string, decision: DrawingReviewDecision, comment: string]
+  resubmit: [packageId: string, itemId: string]
 }>()
 
 const decisionComment = ref('')
@@ -66,10 +69,13 @@ const routeLabel = computed(() => supervisorApproval.value
   ? `当前批准人：${activePackage.value?.supervisorName || displayUserName(activePackage.value?.supervisor)}`
   : `当前审核人：${assignedReviewerPool.value.length ? assignedReviewerLabel(activePackage.value) : '具备审核权限的人员均可处理，任一通过即可'}`)
 const itemDecided = computed(() => itemApproved.value || itemChangesRequested.value)
+const canResubmit = computed(() => props.canResubmit && itemChangesRequested.value)
 const decisionRouteLabel = computed(() => {
   if (!activePackage.value || !activeItem.value) return '当前图档未纳入审核单'
   if (itemApproved.value) return '该2D工程图已通过审核，等待批准'
-  if (itemChangesRequested.value) return '该2D工程图已退回修改，其余图纸可继续审核'
+  if (itemChangesRequested.value) return canResubmit.value
+    ? '该2D工程图已退回修改：请获取编辑权限修改并提交存档，然后点“重新提交”'
+    : '该2D工程图已退回修改，其余图纸可继续审核'
   if (!reviewActive.value) return drawingReviewPackageStateLabel(activePackage.value.state)
   return routeLabel.value
 })
@@ -129,6 +135,18 @@ async function revoke() {
   emit('decide', packageValue.id, item.id, target, 'Revoke', decisionComment.value.trim())
   decisionComment.value = ''
 }
+
+async function resubmit() {
+  const packageValue = activePackage.value
+  const item = activeItem.value
+  if (!packageValue || !item || !canResubmit.value) return
+  await ElMessageBox.confirm(
+    '确认按该图档的最新存档版本重新提交审核？只影响这一张图纸，同一审核单其他图纸不受影响。',
+    '重新提交图纸审核',
+    { confirmButtonText: '确认提交', cancelButtonText: '取消', type: 'info' },
+  )
+  emit('resubmit', packageValue.id, item.id)
+}
 </script>
 
 <template>
@@ -137,17 +155,23 @@ async function revoke() {
     <span class="drawing-review-decision-bar__node" :class="supervisorApproval ? 'is-pending' : 'is-warning'">{{ supervisorApproval ? '批准' : '审核' }}</span>
     <textarea v-model="decisionComment" rows="1" placeholder="审核意见；退改时必填" aria-label="审核意见" :disabled="!canAct" />
     <span class="drawing-review-decision-bar__route">{{ decisionRouteLabel }}</span>
+    <span v-if="itemChangesRequested && activeItem?.drawingComment" class="drawing-review-decision-bar__comment" :title="activeItem.drawingComment">退改说明：{{ activeItem.drawingComment }}</span>
     <div class="drawing-review-decision-buttons">
-      <button type="button" class="is-reject" :disabled="pending || !canAct" @click="submit('RequestChanges')"><X :size="14" />退改</button>
-      <button
-        v-if="itemDecided"
-        type="button"
-        class="is-revoke"
-        :title="itemApproved ? '撤销审核通过' : '撤销退改结论'"
-        :disabled="!canRevoke"
-        @click="revoke()"
-      ><RotateCcw :size="14" />撤销</button>
-      <button v-else type="button" class="is-approve" :disabled="pending || !canAct" @click="submit('Approve')"><Check :size="14" />{{ supervisorApproval ? '批准' : '通过' }}</button>
+      <template v-if="canResubmit">
+        <button type="button" class="is-approve" :disabled="pending" @click="resubmit()"><Send :size="14" />重新提交</button>
+      </template>
+      <template v-else>
+        <button type="button" class="is-reject" :disabled="pending || !canAct" @click="submit('RequestChanges')"><X :size="14" />退改</button>
+        <button
+          v-if="itemDecided && !canActAsSupervisor"
+          type="button"
+          class="is-revoke"
+          :title="itemApproved ? '撤销审核通过' : '撤销退改结论'"
+          :disabled="!canRevoke"
+          @click="revoke()"
+        ><RotateCcw :size="14" />撤销</button>
+        <button v-else type="button" class="is-approve" :disabled="pending || !canAct" @click="submit('Approve')"><Check :size="14" />{{ supervisorApproval ? '批准' : '通过' }}</button>
+      </template>
     </div>
   </section>
 </template>
@@ -159,6 +183,7 @@ async function revoke() {
 .drawing-review-decision-bar__node.is-pending{background:#e8f0fe;color:#2563eb}
 .drawing-review-decision-bar textarea{flex:1 1 160px;min-width:110px;height:28px;box-sizing:border-box;padding:5px 7px;border:1px solid var(--pdm-border);border-radius:5px;background:var(--pdm-surface);color:var(--pdm-text);font:inherit;font-size:12px;resize:vertical}
 .drawing-review-decision-bar__route{flex:0 1 auto;min-width:0;overflow:hidden;color:var(--pdm-blue);font-size:12px;text-overflow:ellipsis;white-space:nowrap}
+.drawing-review-decision-bar__comment{flex:0 0 auto;max-width:220px;overflow:hidden;color:var(--pdm-danger);font-size:12px;text-overflow:ellipsis;white-space:nowrap}
 .drawing-review-decision-bar .drawing-review-decision-buttons{flex:0 0 auto;display:flex;gap:5px;margin-left:auto}
 .drawing-review-decision-bar .drawing-review-decision-buttons button{display:inline-flex;align-items:center;justify-content:center;gap:5px;width:72px;min-width:72px;min-height:28px;padding:4px 6px;border:1px solid var(--pdm-border);border-radius:5px;background:var(--pdm-surface);color:var(--pdm-text);font:inherit;font-size:12px;cursor:pointer}
 .drawing-review-decision-bar .drawing-review-decision-buttons button:disabled{opacity:.45;cursor:not-allowed}
