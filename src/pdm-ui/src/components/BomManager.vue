@@ -3,7 +3,7 @@ import { clearGlobalStatus, ElMessage } from '../statusMessage'
 import { ElMessageBox } from 'element-plus'
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { applyForBomMaterialCodes, applyMaterialRelations, downloadDocumentPreviewFile, expandEngineeringKit, getMaterialRelationCompleteness, linkBomMaterial, listDocumentVersions, listDrawingReviewCandidates, listEngineeringKits, listMaterials, previewBomSourceReclassification, reclassifyBomItemsFromSource, resolveBomMaterialCodes } from '../api'
-import type { BatchUpdateBomItemsInput, BomClassification, BomEmptyDeclaration, BomExportMode, BomGenerationResult, BomItem, BomKind, BomSourceReclassificationPreview, BomValidationField, BomValidationRules, BomVersion, CreateReleasePackageInput, DocumentModelDrawingRelation, DocumentNode, DrawingReviewCandidate, EngineeringKit, FormalSupplementPolicies, ManagedDocument, ManufacturingBomBaseline, MaterialCodeResolution, MaterialRelationCompleteness, MaterialRelationGroupCheck, PdmMaterial, ProjectSummary, ReleasePackageSummary, ReleaseScope, UpdateReleasePackageDraftInput } from '../types'
+import type { BatchUpdateBomItemsInput, BomClassification, BomEmptyDeclaration, BomExportMode, BomGenerationResult, BomItem, BomKind, BomSourceReclassificationPreview, BomValidationField, BomValidationRules, BomVersion, CreateReleasePackageInput, DocumentModelDrawingRelation, DocumentNode, DrawingReviewCandidate, DrawingReviewPackage, EngineeringKit, FormalSupplementPolicies, ManagedDocument, ManufacturingBomBaseline, MaterialCodeResolution, MaterialRelationCompleteness, MaterialRelationGroupCheck, PdmMaterial, ProjectSummary, ReleasePackageSummary, ReleaseScope, UpdateReleasePackageDraftInput } from '../types'
 import { u9UnitName, u9UnitOptions } from '../u9Units'
 import BomHierarchyOverview from './BomHierarchyOverview.vue'
 import ReleaseCenter from './ReleaseCenter.vue'
@@ -50,6 +50,7 @@ const props = withDefaults(defineProps<{
   documents?: ManagedDocument[]
   documentRelations?: DocumentModelDrawingRelation[]
   drawingReviewCandidates?: DrawingReviewCandidate[]
+  drawingReviews?: DrawingReviewPackage[]
   validationRules?: BomValidationRules
   releaseChangeReasonTypes?: string[]
   formalSupplementPolicies?: FormalSupplementPolicies
@@ -80,6 +81,7 @@ const props = withDefaults(defineProps<{
   documents: () => [],
   documentRelations: () => [],
   drawingReviewCandidates: () => [],
+  drawingReviews: () => [],
   versions: () => [],
   baselines: () => [],
   token: '',
@@ -1655,9 +1657,19 @@ function drawingReviewStatus(row: BomItem) {
   if (rowKind(row) !== 'NonStandard') return undefined
   const candidate = drawingReviewCandidate(row)
   if (candidate?.state === 'ApprovedCurrent') return { label: '已批准', tone: 'is-approved', title: '当前工程图已批准，可以发布。' }
+  // 主管批准后审核单进入“已批准/回写属性”，逐张图纸记录可能仍是“已通过（待批准）”，这里统一按已批准显示。
+  if (candidate && drawingReviewApprovedByPackage(candidate)) return { label: '已批准', tone: 'is-approved', title: '当前工程图已批准，可以发布。' }
   if (candidate?.state === 'InReview') return { label: '待审核', tone: 'is-pending', title: candidate.reason || '当前工程图待审核，审核完成前不可发布。' }
   if (candidate?.state === 'Unavailable') return { label: '不可审核', tone: 'is-blocked', title: candidate.reason || '当前物料缺少可审核的工程图，不能发布。' }
   return { label: '待提交', tone: 'is-neutral', title: candidate?.reason || '当前工程图尚未提交审核，不能发布。' }
+}
+
+function drawingReviewApprovedByPackage(candidate: DrawingReviewCandidate) {
+  return props.drawingReviews.some(packageValue =>
+    (packageValue.state === 'Approved' || packageValue.state === 'WritingProperties')
+    && packageValue.items.some(item =>
+      (Boolean(candidate.drawingDocumentId) && item.drawingDocumentId === candidate.drawingDocumentId)
+      || (Boolean(candidate.modelDocumentId) && item.modelDocumentId === candidate.modelDocumentId)))
 }
 
 function normalizedPreviewFormat(value: 'Step' | 'Pdf' | 0 | 1) {

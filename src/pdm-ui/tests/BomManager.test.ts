@@ -936,6 +936,36 @@ describe('BomManager', () => {
     expect(reviewStatus.attributes('title')).toBe('当前工程图尚未发起审核')
   })
 
+  it('主管已批准（已批准/回写属性阶段）时，BOM 图纸列与设计树一致显示已批准', async () => {
+    const wrapper = mount(BomManager, {
+      props: {
+        standard: [], electrical: [], declarations: [], pending: false, editable: true,
+        nonStandard: [{ id: 'non-standard-approved', kind: 'NonStandard', sequence: 1, drawingNumber: '01020014733', name: '导向轴支座', material: '6061', quantity: 1, unit: '件', revision: 'W1', complete: true, sourceDocumentId: 'model-approved' }],
+        drawingReviewCandidates: [{
+          candidateId: 'review-approved', bomItemId: 'non-standard-approved', modelDocumentId: 'model-approved', drawingDocumentId: 'drawing-approved',
+          drawingNumber: '01020014733', name: '导向轴支座', bomKinds: ['NonStandard'], modelRevision: 'W1', drawingRevision: 'W1',
+          state: 'InReview', reason: '已在其他审核单中', selectable: false,
+        }],
+        // 审核单已到已批准/回写属性阶段，但逐张图纸记录仍是“已通过（待批准）”。
+        drawingReviews: [{
+          id: 'review-approved', projectId: 'project-1', number: 'DR-1', state: 'WritingProperties', createdBy: 'submitter', createdAt: '2026-09-19T00:00:00Z', markups: [],
+          items: [{
+            id: 'item-approved', packageId: 'review-approved', bomItemId: 'non-standard-approved', drawingNumber: '01020014733', name: '导向轴支座',
+            modelDocumentId: 'model-approved', modelVersionId: 'v1', modelRevision: 'W1', modelSha256: 'A'.repeat(64), modelCreatedBy: 'designer',
+            drawingDocumentId: 'drawing-approved', drawingVersionId: 'v1', drawingRevision: 'W1', drawingSha256: 'B'.repeat(64), drawingCreatedBy: 'designer',
+            modelState: 'NotRequired', drawingState: 'Approved', effectiveModelVersionId: 'v1', effectiveDrawingVersionId: 'v1',
+          }],
+        }],
+      },
+    })
+
+    const nonStandardTab = wrapper.findAll('button[role="tab"]').find(tab => tab.text().includes('非标件BOM'))
+    await nonStandardTab!.trigger('click')
+    const reviewStatus = wrapper.get('.pdm-bom-drawing-review-status')
+    expect(reviewStatus.text()).toBe('已批准')
+    expect(reviewStatus.classes()).toContain('is-approved')
+  })
+
   it('edits one impact stage on formal BOMs and hides the field from wear parts', async () => {
     const wrapper = mount(BomManager, { props: {
       standard: [{ id: 'bom-impact', sequence: 1, drawingNumber: 'S-001', name: '关键件', quantity: 1, unit: '001', revision: 'W1', complete: true, source: 'Manual', isWearPart: true }],
