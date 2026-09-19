@@ -1396,20 +1396,11 @@ describe('PLM client workspace', () => {
     // 客户端与网页端一致：图档属性行在客户端同样常驻显示。
     expect(wrapper.get('.pdm-preview-properties-bar').find('[aria-label="图档属性"]').exists()).toBe(true)
 
-    // 审核结论栏取网页端同一格（批注工具左侧）的实际矩形，避免被裁成一条窄横条。
-    const decisionHost = document.getElementById('drawing-review-decision-host')
-    expect(decisionHost).toBeTruthy()
-    vi.spyOn(decisionHost as HTMLElement, 'getBoundingClientRect').mockReturnValue({
-      x: 268, y: 136, left: 268, top: 136, right: 668, bottom: 166,
-      width: 400, height: 30, toJSON: () => ({}),
-    })
-    window.dispatchEvent(new Event('resize'))
-    await new Promise<void>(resolve => window.requestAnimationFrame(() => resolve()))
-    await flushPromises()
-    expect(postMessage).toHaveBeenCalledWith(expect.objectContaining({
-      type: 'review-annotation-bounds',
-      payload: expect.objectContaining({ left: 268, top: 136, width: 400, height: 30, visible: true }),
-    }))
+    // 客户端审核结论栏直接渲染在批注容器内（与网页端同一份 DOM），不再使用独立浮层窗口。
+    const actions = wrapper.get('.pdm-preview-markup-row > .pdm-preview-actions')
+    const decisionHost = actions.get('#drawing-review-decision-host')
+    expect(decisionHost.element.previousElementSibling).toBeNull()
+    expect(postMessage.mock.calls.filter(([message]) => message.type === 'review-annotation-bounds')).toHaveLength(0)
 
     reviewMessageListener!(new MessageEvent('message', { data: { type: 'review-overlay-action', payload: { action: 'collapse', collapsed: true } } }))
     await flushPromises()
@@ -1420,10 +1411,8 @@ describe('PLM client workspace', () => {
       type: 'review-overlay-bounds',
       payload: expect.objectContaining({ left: 926, width: 34, visible: true }),
     }))
-    expect(postMessage).toHaveBeenCalledWith(expect.objectContaining({
-      type: 'review-annotation-bounds',
-      payload: expect.objectContaining({ visible: false }),
-    }))
+    // 审核栏收起时与网页端一致不渲染结论卡。
+    expect(wrapper.find('#drawing-review-decision-host [aria-label="图纸审核结论"]').exists()).toBe(false)
 
     const drawingFilter = wrapper.findAll('button[role="tab"]').find(button => button.text().includes('2D'))
     expect(drawingFilter).toBeTruthy()

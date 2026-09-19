@@ -177,21 +177,6 @@ function reportPreviewBounds() {
     viewportHeight: window.innerHeight,
     visible: true,
   })
-  // 审核结论栏与网页端一致：占据工具条行内审核栏左侧的同一格，尺寸取网页端该格的实际矩形；
-  // 审核栏收起时网页端不渲染该卡，客户端同样隐藏。
-  const decisionHostBounds = document.getElementById('drawing-review-decision-host')?.getBoundingClientRect()
-  const decisionVisible = !props.reviewPanelCollapsed
-    && Boolean(decisionHostBounds)
-    && decisionHostBounds!.width > 60
-  postDesktopMessage('review-annotation-bounds', {
-    left: decisionVisible ? decisionHostBounds!.left : left,
-    top: decisionVisible ? decisionHostBounds!.top : top,
-    width: decisionVisible ? decisionHostBounds!.width : Math.min(320, Math.max(220, width - 28)),
-    height: decisionVisible ? Math.max(30, decisionHostBounds!.height) : Math.min(Math.max(240, height - 28), 560),
-    viewportWidth: window.innerWidth,
-    viewportHeight: window.innerHeight,
-    visible: decisionVisible,
-  })
 }
 
 function isPreviewObscured(slotBounds: DOMRect) {
@@ -500,8 +485,9 @@ onBeforeUnmount(() => {
         </div>
       </header>
       <div class="pdm-preview-toolbar pdm-preview-markup-row">
-        <div id="drawing-review-decision-host" class="pdm-review-decision-host" aria-label="图纸审核结论" />
         <div class="pdm-preview-actions">
+          <!-- 网页端由审核栏 Teleport 注入结论栏；客户端直接把结论栏放进同一容器，保证位置与样式一致。 -->
+          <div id="drawing-review-decision-host" class="pdm-review-decision-host" aria-label="图纸审核结论"><slot name="decision-bar" /></div>
           <div class="pdm-markup-toolbar" aria-label="图形批注工具">
             <span>批注</span>
             <button type="button" aria-label="引线批注" title="带引线文字" :disabled="!selected.documentId" @click="activateMarkup('markup-text-leader')"><PencilLine :size="14" /></button>

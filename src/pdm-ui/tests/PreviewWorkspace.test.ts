@@ -64,6 +64,19 @@ describe('PreviewWorkspace', () => {
     expect(wrapper.get('.pdm-preview-state-content').text()).toContain('加载预览')
   })
 
+  it('把审核结论栏渲染在批注容器的第一格，与网页端同一容器同一行', () => {
+    const wrapper = mount(PreviewWorkspace, {
+      props: { selected, related: [], bomItem, desktopAvailable: true },
+      slots: { 'decision-bar': '<div class="stub-decision">审核结论</div>' },
+    })
+
+    const actions = wrapper.get('.pdm-preview-markup-row > .pdm-preview-actions')
+    const host = actions.get('#drawing-review-decision-host')
+    expect(host.element.previousElementSibling).toBeNull()
+    expect(host.get('.stub-decision').text()).toBe('审核结论')
+    expect(actions.find('[aria-label="图形批注工具"]').exists()).toBe(true)
+  })
+
   it('shows only the active markup actions and hides reference and obsolete actions', async () => {
     const postMessage = vi.fn()
     Object.defineProperty(window, 'chrome', {

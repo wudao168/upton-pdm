@@ -7,6 +7,7 @@ import AuditLog from './components/AuditLog.vue'
 import BomManager from './components/BomManager.vue'
 import DocumentTree from './components/DocumentTree.vue'
 import DrawingReviewPanel from './components/DrawingReviewPanel.vue'
+import DrawingReviewAnnotationCard from './components/DrawingReviewAnnotationCard.vue'
 import ProjectFileLibrary from './components/ProjectFileLibrary.vue'
 import ValidationPlanManager from './components/ValidationPlanManager.vue'
 import LoginView from './components/LoginView.vue'
@@ -285,22 +286,6 @@ watch([() => workspace.drawingReviews.value, () => workspace.selectedNode.value.
 }, { immediate: true, deep: true })
 watch(drawingReviewOverlayState, state => {
   if (desktopAvailable) postDesktopMessage('review-overlay-state', state)
-}, { immediate: true, deep: true, flush: 'post' })
-
-const drawingReviewAnnotationState = computed(() => ({
-  visible: drawingReviewOverlayState.value.visible && Boolean(selectedDrawingReviewItem.value),
-  packageId: drawingReviewPackageId.value,
-  packages: workspace.drawingReviews.value,
-  selectedDocumentId: workspace.selectedNode.value.documentId,
-  currentUsername: workspace.currentUsername.value,
-  pending: workspace.operationPending.value,
-  canAnnotate: workspace.hasPermission('drawing-review.annotate'),
-  canDecide: workspace.hasPermission('drawing-review.decide'),
-  allowSelfReview: workspace.hasRole('developer'),
-  theme: theme.value,
-}))
-watch(drawingReviewAnnotationState, state => {
-  if (desktopAvailable) postDesktopMessage('review-annotation-state', state)
 }, { immediate: true, deep: true, flush: 'post' })
 
 function setSystemOrganizationId(organizationId: string) {
@@ -1091,6 +1076,24 @@ async function openWhereUsedParent(projectId: string, parentDocumentId: string) 
                         @decide="(packageId, itemId, target, decision, comment) => runOperation(() => workspace.decideDrawingReviewTarget(packageId, itemId, target, decision, comment), decision === 'Approve' ? '审核结果已记录' : '图纸已退回修改')"
                         @decide-supervisor="(packageId, decision, comment) => runOperation(() => workspace.decideDrawingReviewSupervisor(packageId, decision, comment), decision === 'Approve' ? '已批准' : '图纸已退回修改')"
                       />
+                      <!-- 客户端：审核结论栏与网页端用同一份组件、同一容器（批注容器的第一格），
+                           审核栏收起时网页端不渲染该卡，客户端同样隐藏。 -->
+                      <template v-if="desktopAvailable && !drawingReviewPanelCollapsed" #decision-bar>
+                        <DrawingReviewAnnotationCard
+                          :package="selectedDrawingReviewPackage"
+                          :selected-document-id="workspace.selectedNode.value.documentId"
+                          :current-username="workspace.currentUsername.value"
+                          :pending="workspace.operationPending.value"
+                          :can-annotate="workspace.hasPermission('drawing-review.annotate')"
+                          :can-decide="workspace.hasPermission('drawing-review.decide')"
+                          :allow-self-review="workspace.hasRole('developer')"
+                          :desktop-available="desktopAvailable"
+                          @add-markup="(packageId, input) => runOperation(() => workspace.addDrawingReviewMarkup(packageId, input), '图纸批注已保存')"
+                          @resolve-markup="(packageId, markupId) => runOperation(() => workspace.resolveDrawingReviewMarkup(packageId, markupId), '图纸批注已关闭')"
+                          @decide="(packageId, itemId, target, decision, comment) => runOperation(() => workspace.decideDrawingReviewTarget(packageId, itemId, target, decision, comment), decision === 'Approve' ? '审核结果已记录' : '图纸已退回修改')"
+                          @decide-supervisor="(packageId, decision, comment) => runOperation(() => workspace.decideDrawingReviewSupervisor(packageId, decision, comment), decision === 'Approve' ? '已批准' : '图纸已退回修改')"
+                        />
+                      </template>
                     </PreviewWorkspace>
                   </div>
                 </section>
