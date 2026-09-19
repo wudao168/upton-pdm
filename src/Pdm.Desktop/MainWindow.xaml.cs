@@ -303,43 +303,48 @@ public partial class MainWindow : Window
 
     private async Task MonitorBootstrapAsync()
     {
-        var observedConfigurationVersion = bootstrapConfiguration.ConfigurationVersion;
-        var observedUiBaseUrl = bootstrapConfiguration.UiBaseUrl;
+        var appliedConfigurationVersion = bootstrapConfiguration.ConfigurationVersion;
+        var appliedUiBaseUrl = bootstrapConfiguration.UiBaseUrl;
         while (!bootstrapLifetime.IsCancellationRequested)
         {
             try
             {
-                await Task.Delay(TimeSpan.FromSeconds(bootstrapConfiguration.PollSeconds), bootstrapLifetime.Token);
+                await Task.Delay(TimeSpan.FromSeconds(Math.Max(5, bootstrapConfiguration.PollSeconds)), bootstrapLifetime.Token);
                 var latest = await ClientBootstrapLoader.LoadAsync(bootstrapLifetime.Token);
-                await ClientPackageUpdater.StageAsync(
-                    "desktop",
-                    latest.Desktop,
-                    AppDomain.CurrentDomain.BaseDirectory,
-                    bootstrapLifetime.Token);
-                // 运行中只下载新版本，不在这里替换自身目录：本进程仍占用客户端目录会让替换失败，用户看到的就是刚打开就关闭。
-                // 已下载的版本会在下次启动时安装。
-                await MaintainSolidWorksAddinUpdateAsync(latest, bootstrapLifetime.Token);
+                bootstrapConfiguration = latest;
 
-                if (!string.Equals(observedConfigurationVersion, latest.ConfigurationVersion, StringComparison.Ordinal)
-                    || !string.Equals(observedUiBaseUrl, latest.UiBaseUrl, StringComparison.OrdinalIgnoreCase))
+                // 客户端界面必须与网页端一致：先按服务器版本刷新界面，再处理程序自更新。
+                // 自更新包下载/暂存失败不能挡住界面切换，否则客户端会一直停在旧版界面。
+                if (!string.Equals(appliedConfigurationVersion, latest.ConfigurationVersion, StringComparison.Ordinal)
+                    || !string.Equals(appliedUiBaseUrl, latest.UiBaseUrl, StringComparison.OrdinalIgnoreCase))
                 {
-                    observedConfigurationVersion = latest.ConfigurationVersion;
-                    observedUiBaseUrl = latest.UiBaseUrl;
-                    bootstrapConfiguration = latest;
-                    await Dispatcher.BeginInvoke(new Action(() =>
+                    var applied = await Dispatcher.InvokeAsync(() => ApplyServerUiConfiguration(latest));
+                    if (applied)
                     {
-                        if (WorkspaceView.CoreWebView2 == null || !Uri.TryCreate(latest.UiBaseUrl, UriKind.Absolute, out var uiUrl)) return;
-                        usingServerUi = true;
-                        attemptedLocalUiFallback = false;
-                        WorkspaceView.Source = new Uri(uiUrl, $"?configuration={Uri.EscapeDataString(latest.ConfigurationVersion)}");
-                        // 审核浮层同样跟随服务器版本刷新，避免客户端停留在旧审核界面。
-                        reviewOverlay?.UseConfiguration(latest.UiBaseUrl, latest.ConfigurationVersion);
-                        reviewAnnotationOverlay?.UseConfiguration(latest.UiBaseUrl, latest.ConfigurationVersion);
-                    }));
+                        appliedConfigurationVersion = latest.ConfigurationVersion;
+                        appliedUiBaseUrl = latest.UiBaseUrl;
+                        AppendClientDiagnostic($"界面已随服务器刷新：configuration={latest.ConfigurationVersion} ui={latest.UiBaseUrl}");
+                    }
                 }
-                else
+
+                try
                 {
-                    bootstrapConfiguration = latest;
+                    // 运行中只下载新版本，不在这里替换自身目录：本进程仍占用客户端目录会让替换失败，用户看到的就是刚打开就关闭。
+                    // 已下载的版本会在下次启动时安装。
+                    await ClientPackageUpdater.StageAsync(
+                        "desktop",
+                        latest.Desktop,
+                        AppDomain.CurrentDomain.BaseDirectory,
+                        bootstrapLifetime.Token);
+                    await MaintainSolidWorksAddinUpdateAsync(latest, bootstrapLifetime.Token);
+                }
+                catch (OperationCanceledException)
+                {
+                    return;
+                }
+                catch (Exception exception)
+                {
+                    AppendClientDiagnostic($"自更新包处理失败（不影响界面刷新）：{exception.GetType().Name}: {exception.Message}");
                 }
             }
             catch (OperationCanceledException)
@@ -350,6 +355,44 @@ public partial class MainWindow : Window
             {
                 // Keep the current cached configuration and retry on the next interval.
             }
+        }
+    }
+
+    private bool ApplyServerUiConfiguration(ClientBootstrapConfiguration latest)
+    {
+        if (WorkspaceView.CoreWebView2 == null || !Uri.TryCreate(latest.UiBaseUrl, UriKind.Absolute, out var uiUrl))
+        {
+            // 界面还没准备好时不要记录为已应用，下一次轮询继续尝试，避免客户端永久停在旧界面。
+            return false;
+        }
+
+        usingServerUi = true;
+        attemptedLocalUiFallback = false;
+        WorkspaceView.Source = new Uri(uiUrl, $"?configuration={Uri.EscapeDataString(latest.ConfigurationVersion)}");
+        // 审核浮层同样跟随服务器版本刷新，避免客户端停留在旧审核界面。
+        reviewOverlay?.UseConfiguration(latest.UiBaseUrl, latest.ConfigurationVersion);
+        reviewAnnotationOverlay?.UseConfiguration(latest.UiBaseUrl, latest.ConfigurationVersion);
+        return true;
+    }
+
+    private static void AppendClientDiagnostic(string message)
+    {
+        try
+        {
+            var directory = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                "UPTON",
+                "PLM",
+                "Logs");
+            Directory.CreateDirectory(directory);
+            File.AppendAllText(
+                Path.Combine(directory, "client-bootstrap.log"),
+                $"{DateTimeOffset.Now:O} | {message}{Environment.NewLine}",
+                Encoding.UTF8);
+        }
+        catch
+        {
+            // Diagnostics must never prevent client startup or the UI refresh.
         }
     }
 
