@@ -3,7 +3,7 @@ import { Check, RotateCcw, X } from '@lucide/vue'
 import { ElMessage } from '../statusMessage'
 import { ElMessageBox } from 'element-plus'
 import { computed, ref } from 'vue'
-import { drawingReviewAssignedReviewerLabel, drawingReviewAssignedReviewerPool } from '../drawingReviewLabels'
+import { drawingReviewAssignedReviewerLabel, drawingReviewAssignedReviewerPool, drawingReviewPackageStateLabel } from '../drawingReviewLabels'
 import type { AddDrawingReviewMarkupInput, DrawingReviewDecision, DrawingReviewPackage, DrawingReviewTarget } from '../types'
 import { useUserDisplayName } from '../userDisplay'
 
@@ -34,7 +34,7 @@ const target: DrawingReviewTarget = 'Drawing2D'
 
 const activePackage = computed(() => props.package)
 const activeItem = computed(() => activePackage.value?.items.find(item => item.drawingDocumentId === props.selectedDocumentId))
-// 仅在审核进行中（待审核或待批准）显示审核标注；已撤销/已退回/已批准等状态不再显示。
+// 审核进行中（待审核或待批准）时可以操作；其它状态结论栏常驻显示但不可操作。
 const reviewActive = computed(() => activePackage.value?.state === 'InReview' || activePackage.value?.state === 'PendingSupervisorApproval')
 const activeCreator = computed(() => activeItem.value?.drawingCreatedBy)
 const assignedReviewerPool = computed(() => drawingReviewAssignedReviewerPool(activePackage.value))
@@ -65,6 +65,14 @@ const canRevoke = computed(() => props.canDecide
 const routeLabel = computed(() => supervisorApproval.value
   ? `当前批准人：${activePackage.value?.supervisorName || displayUserName(activePackage.value?.supervisor)}`
   : `当前审核人：${assignedReviewerPool.value.length ? assignedReviewerLabel(activePackage.value) : '具备审核权限的人员均可处理，任一通过即可'}`)
+const itemDecided = computed(() => itemApproved.value || itemChangesRequested.value)
+const decisionRouteLabel = computed(() => {
+  if (!activePackage.value || !activeItem.value) return '当前图档未纳入审核单'
+  if (itemApproved.value) return '该2D工程图已通过审核，等待批准'
+  if (itemChangesRequested.value) return '该2D工程图已退回修改，其余图纸可继续审核'
+  if (!reviewActive.value) return drawingReviewPackageStateLabel(activePackage.value.state)
+  return routeLabel.value
+})
 
 function assignedReviewerLabel(packageValue: DrawingReviewPackage | undefined) {
   return drawingReviewAssignedReviewerLabel(packageValue, displayUserName)
@@ -120,33 +128,24 @@ async function revoke() {
 </script>
 
 <template>
-  <section
-    v-if="activePackage && activeItem && reviewActive"
-    class="drawing-review-decision-bar"
-    aria-label="图纸审核结论"
-  >
+  <!-- 审核结论栏常驻显示：不可操作时输入与按钮一起禁用，通过后“通过”按钮就地变成“撤销”。 -->
+  <section class="drawing-review-decision-bar" aria-label="图纸审核结论">
     <span class="drawing-review-decision-bar__node" :class="supervisorApproval ? 'is-pending' : 'is-warning'">{{ supervisorApproval ? '批准' : '审核' }}</span>
-    <template v-if="itemApproved">
-      <span class="drawing-review-decision-bar__route">该2D工程图已通过审核，等待批准</span>
-      <div class="drawing-review-decision-buttons">
-        <button type="button" class="is-revoke" title="撤销审核通过" :disabled="!canRevoke" @click="revoke()"><RotateCcw :size="14" />撤销</button>
-      </div>
-    </template>
-    <template v-else-if="itemChangesRequested">
-      <span class="drawing-review-decision-bar__route">该2D工程图已退回修改，其余图纸可继续审核</span>
-      <div class="drawing-review-decision-buttons">
-        <button type="button" class="is-revoke" title="撤销退改结论" :disabled="!canRevoke" @click="revoke()"><RotateCcw :size="14" />撤销</button>
-      </div>
-    </template>
-    <template v-else>
-      <textarea v-model="decisionComment" rows="1" placeholder="审核意见；退改时必填" aria-label="审核意见" />
-      <p v-if="selfReviewBlocked" class="drawing-review-self-warning">当前版本由你生成，系统禁止审核自己的图。</p>
-      <span v-else class="drawing-review-decision-bar__route">{{ routeLabel }}</span>
-      <div class="drawing-review-decision-buttons">
-        <button type="button" class="is-reject" :disabled="pending || !canAct" @click="submit('RequestChanges')"><X :size="14" />退改</button>
-        <button type="button" class="is-approve" :disabled="pending || !canAct" @click="submit('Approve')"><Check :size="14" />{{ supervisorApproval ? '批准' : '通过' }}</button>
-      </div>
-    </template>
+    <textarea v-model="decisionComment" rows="1" placeholder="审核意见；退改时必填" aria-label="审核意见" :disabled="!canAct" />
+    <p v-if="selfReviewBlocked && reviewActive" class="drawing-review-self-warning">当前版本由你生成，系统禁止审核自己的图。</p>
+    <span v-else class="drawing-review-decision-bar__route">{{ decisionRouteLabel }}</span>
+    <div class="drawing-review-decision-buttons">
+      <button type="button" class="is-reject" :disabled="pending || !canAct" @click="submit('RequestChanges')"><X :size="14" />退改</button>
+      <button
+        v-if="itemDecided"
+        type="button"
+        class="is-revoke"
+        :title="itemApproved ? '撤销审核通过' : '撤销退改结论'"
+        :disabled="!canRevoke"
+        @click="revoke()"
+      ><RotateCcw :size="14" />撤销</button>
+      <button v-else type="button" class="is-approve" :disabled="pending || !canAct" @click="submit('Approve')"><Check :size="14" />{{ supervisorApproval ? '批准' : '通过' }}</button>
+    </div>
   </section>
 </template>
 

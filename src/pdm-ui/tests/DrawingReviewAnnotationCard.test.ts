@@ -100,6 +100,20 @@ describe('DrawingReviewAnnotationCard', () => {
     confirm.mockRestore()
   })
 
+  it('通过后就地变成撤销按钮，退改不可再点', async () => {
+    const wrapper = mountCard(review)
+
+    expect(wrapper.get('.is-approve').text()).toContain('通过')
+    expect(wrapper.find('.is-revoke').exists()).toBe(false)
+
+    await wrapper.setProps({ package: { ...review, items: [{ ...review.items[0]!, drawingState: 'Approved' }] } })
+
+    expect(wrapper.find('.is-approve').exists()).toBe(false)
+    expect(wrapper.get('.is-revoke').text()).toBe('撤销')
+    expect(wrapper.get('.is-reject').attributes('disabled')).toBeDefined()
+    expect(wrapper.get('textarea[aria-label="审核意见"]').attributes('disabled')).toBeDefined()
+  })
+
   it('已退改的图纸可撤销退改', async () => {
     const confirm = vi.spyOn(ElMessageBox, 'confirm').mockResolvedValue({ action: 'confirm' } as never)
     const changes: DrawingReviewPackage = { ...review, items: [{ ...review.items[0]!, drawingState: 'ChangesRequested', drawingComment: '尺寸标注需修改' }] }
@@ -117,18 +131,30 @@ describe('DrawingReviewAnnotationCard', () => {
     confirm.mockRestore()
   })
 
-  it('只在审核进行中显示结论条', async () => {
+  it('结论条常驻显示：审核进行中可操作，其它状态只读', async () => {
     const wrapper = mountCard(review)
     expect(wrapper.find('.drawing-review-decision-bar').exists()).toBe(true)
+    expect(wrapper.get('textarea[aria-label="审核意见"]').attributes('disabled')).toBeUndefined()
+    expect(wrapper.get('.is-approve').attributes('disabled')).toBeUndefined()
 
     await wrapper.setProps({ package: { ...review, state: 'Withdrawn' } })
-    expect(wrapper.find('.drawing-review-decision-bar').exists()).toBe(false)
-
-    await wrapper.setProps({ package: { ...review, state: 'ChangesRequested' } })
-    expect(wrapper.find('.drawing-review-decision-bar').exists()).toBe(false)
+    expect(wrapper.find('.drawing-review-decision-bar').exists()).toBe(true)
+    expect(wrapper.get('textarea[aria-label="审核意见"]').attributes('disabled')).toBeDefined()
+    expect(wrapper.get('.is-approve').attributes('disabled')).toBeDefined()
+    expect(wrapper.get('.is-reject').attributes('disabled')).toBeDefined()
 
     await wrapper.setProps({ package: { ...review, state: 'PendingSupervisorApproval' } })
+    expect(wrapper.get('textarea[aria-label="审核意见"]').attributes('disabled')).toBeDefined()
+    expect(wrapper.get('.is-approve').text()).toContain('批准')
+  })
+
+  it('没有审核单时结论条常驻且全部不可操作', () => {
+    const wrapper = mountCard(undefined)
+
     expect(wrapper.find('.drawing-review-decision-bar').exists()).toBe(true)
+    expect(wrapper.text()).toContain('当前图档未纳入审核单')
+    expect(wrapper.get('textarea[aria-label="审核意见"]').attributes('disabled')).toBeDefined()
+    expect(wrapper.findAll('.drawing-review-decision-buttons button').every(button => button.attributes('disabled') !== undefined)).toBe(true)
   })
 
   it('按指定审核人 / 机械主管显示当前处理人并限制操作权限', async () => {

@@ -1404,8 +1404,10 @@ describe('PLM client workspace', () => {
       type: 'review-overlay-bounds',
       payload: expect.objectContaining({ left: 926, width: 34, visible: true }),
     }))
-    // 审核栏收起时与网页端一致不渲染结论卡。
-    expect(wrapper.find('#drawing-review-decision-host [aria-label="图纸审核结论"]').exists()).toBe(false)
+    // 结论栏常驻：审核栏收起后结论栏仍在工具条里（只是不可操作）。
+    const barAfterCollapse = wrapper.find('#drawing-review-decision-host [aria-label="图纸审核结论"]')
+    expect(barAfterCollapse.exists()).toBe(true)
+    expect(barAfterCollapse.get('textarea[aria-label="审核意见"]').attributes('disabled')).toBeDefined()
 
     const drawingFilter = wrapper.findAll('button[role="tab"]').find(button => button.text().includes('2D'))
     expect(drawingFilter).toBeTruthy()
