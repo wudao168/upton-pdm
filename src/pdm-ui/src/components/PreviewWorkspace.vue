@@ -461,7 +461,7 @@ onBeforeUnmount(() => {
   <section class="pdm-preview-panel" aria-label="图档预览">
     <section class="pdm-panel pdm-preview-control-panel" aria-label="图档查看与操作">
       <header class="pdm-preview-toolbar">
-        <section v-if="!desktopAvailable" class="pdm-preview-properties-bar" aria-label="图档信息">
+        <section class="pdm-preview-properties-bar" aria-label="图档信息">
           <span class="pdm-preview-properties-bar__title">图档属性</span>
           <dl class="pdm-preview-properties" aria-label="图档属性">
             <div v-for="property in previewProperties" :key="property.label">

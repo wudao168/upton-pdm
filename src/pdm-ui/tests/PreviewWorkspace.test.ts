@@ -83,7 +83,8 @@ describe('PreviewWorkspace', () => {
     ])
     expect(wrapper.find('button[aria-label="使用位置"]').exists()).toBe(false)
     expect(wrapper.find('button[aria-label="作废图档"]').exists()).toBe(false)
-    expect(wrapper.find('[aria-label="图档属性"]').exists()).toBe(false)
+    // 客户端与网页端一致：图档属性行始终常驻显示，不随桌面预览而隐藏。
+    expect(wrapper.get('.pdm-preview-properties-bar').find('[aria-label="图档属性"]').exists()).toBe(true)
 
     window.dispatchEvent(new CustomEvent('pdm-preview-markup-status', { detail: { state: 'dirty' } }))
     await wrapper.vm.$nextTick()

@@ -1393,6 +1393,23 @@ describe('PLM client workspace', () => {
       payload: expect.objectContaining({ visible: true, collapsed: false }),
     }))
 
+    // 客户端与网页端一致：图档属性行在客户端同样常驻显示。
+    expect(wrapper.get('.pdm-preview-properties-bar').find('[aria-label="图档属性"]').exists()).toBe(true)
+
+    reviewMessageListener!(new MessageEvent('message', { data: { type: 'review-overlay-action', payload: { action: 'collapse', collapsed: true } } }))
+    await flushPromises()
+    await new Promise<void>(resolve => window.requestAnimationFrame(() => resolve()))
+    await flushPromises()
+    // 收起后仍保留 34px 窄条（客户端不再整块隐藏），结论卡随收起隐藏。
+    expect(postMessage).toHaveBeenCalledWith(expect.objectContaining({
+      type: 'review-overlay-bounds',
+      payload: expect.objectContaining({ left: 926, width: 34, visible: true }),
+    }))
+    expect(postMessage).toHaveBeenCalledWith(expect.objectContaining({
+      type: 'review-annotation-bounds',
+      payload: expect.objectContaining({ visible: false }),
+    }))
+
     const drawingFilter = wrapper.findAll('button[role="tab"]').find(button => button.text().includes('2D'))
     expect(drawingFilter).toBeTruthy()
     await drawingFilter!.trigger('click')

@@ -1680,10 +1680,10 @@ public partial class MainWindow : Window
     private void ApplyReviewOverlayBounds()
     {
         if (reviewOverlay == null
-            || !IsPreviewSurfaceActive || !IsVisible || WindowState == WindowState.Minimized
+            || !IsVisible || WindowState == WindowState.Minimized
             || reviewOverlaySuspended || !reviewOverlayVisible
             || reviewOverlayBounds is not { Visible: true } bounds
-            || bounds.Width < 80 || bounds.Height < 80
+            || bounds.Width < 8 || bounds.Height < 8
             || WorkspaceView.ActualWidth <= 0 || WorkspaceView.ActualHeight <= 0)
         {
             HideReviewOverlay();
@@ -1705,7 +1705,7 @@ public partial class MainWindow : Window
         var bottom = Math.Min(viewportBottom, requestedTop + bounds.Height * scaleY);
         var width = Math.Max(0, right - left);
         var height = Math.Max(0, bottom - top);
-        if (width < 80 || height < 80)
+        if (width < 8 || height < 8)
         {
             HideReviewOverlay();
             return;
@@ -1723,10 +1723,10 @@ public partial class MainWindow : Window
     private void ApplyReviewAnnotationBounds()
     {
         if (reviewAnnotationOverlay == null
-            || !IsPreviewSurfaceActive || !IsVisible || WindowState == WindowState.Minimized
+            || !IsVisible || WindowState == WindowState.Minimized
             || reviewAnnotationSuspended || !reviewAnnotationVisible
             || reviewAnnotationBounds is not { Visible: true } bounds
-            || bounds.Width < 80 || bounds.Height < 80
+            || bounds.Width < 8 || bounds.Height < 8
             || WorkspaceView.ActualWidth <= 0 || WorkspaceView.ActualHeight <= 0)
         {
             HideReviewAnnotationOverlay();
@@ -1748,7 +1748,7 @@ public partial class MainWindow : Window
         var bottom = Math.Min(viewportBottom, requestedTop + bounds.Height * scaleY);
         var width = Math.Max(0, right - left);
         var height = Math.Max(0, bottom - top);
-        if (width < 80 || height < 80)
+        if (width < 8 || height < 8)
         {
             HideReviewAnnotationOverlay();
             return;
