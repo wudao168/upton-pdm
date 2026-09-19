@@ -183,13 +183,23 @@ function openScopeSelection() {
   selectAllReadyCandidates()
 }
 
-/** 从明细批量发起审核：把勾选的图纸带入选择审核范围页。 */
-function openScopeSelectionWith(modelDocumentIds: string[]) {
-  openScopeSelection()
-  const allowed = props.candidates
-    .filter(candidate => candidate.selectable && candidate.modelDocumentId && modelDocumentIds.includes(candidate.modelDocumentId))
-    .map(candidate => candidate.modelDocumentId!)
-  if (allowed.length) selectedCandidateIds.value = allowed
+/** 批量发起时直接沿用上一单的审核人；只有一个人选时自动选用，其余情况表示任一有权限的审核人均可处理。 */
+const batchReviewers = computed(() => {
+  const current = props.packages.find(item => item.id === props.packageId) ?? props.packages[0]
+  if (current?.assignedReviewers?.length) return [...current.assignedReviewers]
+  if (current?.assignedReviewer) return [current.assignedReviewer]
+  return props.reviewerOptions.length === 1 ? [props.reviewerOptions[0]!.username] : []
+})
+const batchReviewerHint = computed(() => batchReviewers.value.length
+  ? `审核人：${batchReviewers.value.map(username => props.reviewerOptions.find(option => option.username === username)?.label ?? username).join('、')}`
+  : '审核人：具备审核权限的人员均可处理')
+
+/** 点击即批量发起：直接提交所选图纸发起审核，不再进入二次选择页。 */
+function batchSubmit() {
+  const ids = selectedSubmittableIds.value
+  if (!ids.length) return
+  emit('create', ids, batchReviewers.value)
+  selectedOverviewIds.value = []
 }
 
 function toggleCandidate(candidate: DrawingReviewCandidate) {
@@ -401,7 +411,7 @@ const packageStateTone = computed(() => activePackage.value ? drawingReviewPacka
         <span>已选 {{ selectedOverviewEntries.length }} 张</span>
         <button type="button" class="is-approve" :disabled="pending || !selectedOverviewEntries.length" @click="batchDecide('Approve')">{{ batchApproveLabel }}</button>
         <button type="button" class="is-reject" :disabled="pending || !selectedOverviewEntries.length" @click="batchDecide('RequestChanges')">批量退改</button>
-        <button v-if="canSubmit" type="button" class="is-submit" :disabled="pending || !selectedSubmittableIds.length" @click="openScopeSelectionWith(selectedSubmittableIds)">批量发起</button>
+        <button v-if="canSubmit" type="button" class="is-submit" :title="batchReviewerHint" :disabled="pending || !selectedSubmittableIds.length" @click="batchSubmit()">批量发起</button>
       </div>
     </section>
 

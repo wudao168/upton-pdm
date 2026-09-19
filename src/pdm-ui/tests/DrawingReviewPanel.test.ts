@@ -489,7 +489,7 @@ describe('DrawingReviewPanel', () => {
     ]]])
   })
 
-  it('待提交阶段同样有勾选框，可全选后批量发起审核', async () => {
+  it('待提交阶段同样有勾选框，点击批量发起即直接提交审核', async () => {
     const candidates: DrawingReviewCandidate[] = [
       { ...candidate, candidateId: 'r1', modelDocumentId: 'model-2', drawingDocumentId: 'drawing-2', drawingNumber: 'A01-200', state: 'Ready' },
       { ...candidate, candidateId: 'r2', modelDocumentId: 'model-3', drawingDocumentId: 'drawing-3', drawingNumber: 'A01-300', state: 'Ready' },
@@ -506,8 +506,10 @@ describe('DrawingReviewPanel', () => {
 
     await wrapper.get('input[aria-label="全选可操作图纸"]').setValue(true)
     await wrapper.get('.drawing-review-overview__batch .is-submit').trigger('click')
-    expect(wrapper.text()).toContain('选择审核范围')
-    expect(wrapper.findAll('.drawing-review-candidate.is-selected')).toHaveLength(2)
+
+    // 不再进入二次选择页，直接发出 create（沿用上一单审核人，本用例只有一个可选审核人）。
+    expect(wrapper.text()).not.toContain('选择审核范围')
+    expect(wrapper.emitted('create')).toEqual([[['model-2', 'model-3'], ['reviewer']]])
   })
 
   it('审核明细栏内不再渲染审核结论条（结论条在预览工具条里）', () => {
