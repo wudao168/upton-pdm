@@ -336,6 +336,32 @@ describe('ReleaseCenter', () => {
     expect(wrapper.emitted('create')).toBeUndefined()
   })
 
+  it('treats a drawing as approved once its review package is approved even if the item record lags', async () => {
+    const item: BomItem = { id: 'ns-approved', kind: 'NonStandard', sequence: 1, drawingNumber: 'NS-100',
+      name: '已批准非标件', quantity: 1, unit: '个', revision: 'W1', complete: true, sourceDocumentId: 'model-approved' }
+    const wrapper = mount(ReleaseCenter, {
+      props: {
+        releasePackage: null, allowedScopes: ['NonStandardLongLead'], preferredScope: 'NonStandardLongLead',
+        releaseItems: [item], username: 'engineer', pending: false, progress: 0, error: '', canManage: true, canDecide: true,
+        drawingReviewCandidates: [{ candidateId: 'review-approved', bomItemId: 'ns-approved', modelDocumentId: 'model-approved', drawingDocumentId: 'drawing-approved', drawingNumber: 'NS-100', name: '已批准非标件', bomKinds: ['NonStandard'], modelRevision: 'W1', drawingRevision: 'W1', state: 'InReview', reason: '已在其他审核单中', selectable: false }],
+        drawingReviews: [{
+          id: 'review-approved', projectId: 'project-1', number: 'DR-1', state: 'WritingProperties', createdBy: 'submitter', createdAt: '2026-09-19T00:00:00Z', markups: [],
+          items: [{
+            id: 'item-approved', packageId: 'review-approved', bomItemId: 'ns-approved', drawingNumber: 'NS-100', name: '已批准非标件',
+            modelDocumentId: 'model-approved', modelVersionId: 'v1', modelRevision: 'W1', modelSha256: 'A'.repeat(64), modelCreatedBy: 'designer',
+            drawingDocumentId: 'drawing-approved', drawingVersionId: 'v1', drawingRevision: 'W1', drawingSha256: 'B'.repeat(64), drawingCreatedBy: 'designer',
+            modelState: 'NotRequired', drawingState: 'Approved', effectiveModelVersionId: 'v1', effectiveDrawingVersionId: 'v1',
+          }],
+        }],
+      },
+    })
+
+    const checkbox = wrapper.get('input[aria-label="选择长交期物料 NS-100"]')
+    expect(checkbox.attributes('disabled')).toBeUndefined()
+    expect(wrapper.text()).toContain('图纸已批准')
+    expect(wrapper.text()).not.toContain('图纸待审核')
+  })
+
   it('lets the current assignee decide or transfer without showing the withdraw action', () => {
     const releasePackage: ReleasePackageSummary = {
       id: 'release-main-designer', number: 'RP-M-001', state: '审批中', scope: 'StandardFormal',

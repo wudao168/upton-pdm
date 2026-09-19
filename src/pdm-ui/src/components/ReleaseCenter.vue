@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
 import { addReleaseItemComment, listApprovalTransferCandidates, listReleaseItemComments } from '../api'
-import type { ApprovalTransferCandidate, BomItem, CreateReleasePackageInput, DrawingReviewCandidate, FormalSupplementPolicies, ReleaseItemComment, ReleasePackageSummary, ReleaseScope, UpdateReleasePackageDraftInput } from '../types'
+import type { ApprovalTransferCandidate, BomItem, CreateReleasePackageInput, DrawingReviewCandidate, DrawingReviewPackage, FormalSupplementPolicies, ReleaseItemComment, ReleasePackageSummary, ReleaseScope, UpdateReleasePackageDraftInput } from '../types'
 import { useUserDisplayName } from '../userDisplay'
 
 const displayUserName = useUserDisplayName()
@@ -26,6 +26,7 @@ const props = withDefaults(defineProps<{
   longLeadPublishedItems?: BomItem[]
   previousVersionItems?: BomItem[]
   drawingReviewCandidates?: DrawingReviewCandidate[]
+  drawingReviews?: DrawingReviewPackage[]
 }>(), { standardItems: () => [], releaseItems: () => [], canEmergencyDecide: false, allowedScopes: () => [], changeReasonTypes: () => [], formalSupplementPolicies: () => ({ standard: { maximumCount: 2, validDays: null }, electrical: { maximumCount: 2, validDays: null } }), releasePackages: () => [], longLeadPublishedItems: () => [], previousVersionItems: () => [], drawingReviewCandidates: () => [] })
 const emit = defineEmits<{
   create: [input: CreateReleasePackageInput]
@@ -176,11 +177,24 @@ const releaseItemGroupKey = (item: BomItem, index: number) => {
 }
 const drawingReviewCandidateFor = (item: BomItem) => props.drawingReviewCandidates.find(candidate => candidate.bomItemId === item.id)
   ?? props.drawingReviewCandidates.find(candidate => Boolean(item.sourceDocumentId) && candidate.modelDocumentId === item.sourceDocumentId)
-const itemDrawingReviewReady = (item: BomItem) => item.kind !== 'NonStandard' || drawingReviewCandidateFor(item)?.state === 'ApprovedCurrent'
+// 主管批准后审核单进入“已批准/回写属性”，逐张图纸记录可能仍是“已通过（待批准）”，这里同样按已批准处理。
+const drawingReviewApprovedByPackage = (item: BomItem) => {
+  const candidate = drawingReviewCandidateFor(item)
+  if (!candidate) return false
+  return (props.drawingReviews ?? []).some(packageValue =>
+    (packageValue.state === 'Approved' || packageValue.state === 'WritingProperties')
+    && packageValue.items.some(value =>
+      (Boolean(candidate.drawingDocumentId) && value.drawingDocumentId === candidate.drawingDocumentId)
+      || (Boolean(candidate.modelDocumentId) && value.modelDocumentId === candidate.modelDocumentId)))
+}
+const itemDrawingReviewReady = (item: BomItem) => item.kind !== 'NonStandard'
+  || drawingReviewCandidateFor(item)?.state === 'ApprovedCurrent'
+  || drawingReviewApprovedByPackage(item)
 const releaseRowDrawingReviewReady = (row: { sourceItems: BomItem[] }) => row.sourceItems.length > 0 && row.sourceItems.every(itemDrawingReviewReady)
 const drawingReviewStatusForItem = (item: BomItem) => {
   const candidate = drawingReviewCandidateFor(item)
   if (candidate?.state === 'ApprovedCurrent') return '图纸已批准'
+  if (drawingReviewApprovedByPackage(item)) return '图纸已批准'
   if (candidate?.state === 'InReview') return '图纸待审核'
   if (candidate?.state === 'Unavailable') return candidate.reason || '图纸不可审核'
   return candidate?.reason || '图纸待提交'

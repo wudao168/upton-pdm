@@ -3780,6 +3780,7 @@ async function submitBatchUpdate() {
           :long-lead-published-items="publishedLongLeadItems"
           :previous-version-items="previousReleaseVersionItems"
           :drawing-review-candidates="currentDrawingReviewCandidates"
+          :drawing-reviews="drawingReviews"
           @create="emit('releaseCreate', $event)"
           @update-draft="(releasePackageId, input) => emit('releaseUpdateDraft', releasePackageId, input)"
           @delete-draft="releasePackageId => emit('releaseDeleteDraft', releasePackageId)"
