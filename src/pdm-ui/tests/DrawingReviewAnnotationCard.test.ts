@@ -117,6 +117,24 @@ describe('DrawingReviewAnnotationCard', () => {
     expect(wrapper.get('textarea[aria-label="审核意见"]').attributes('disabled')).toBeDefined()
   })
 
+  it('点击通过不需要二次确认，退改仍要确认', async () => {
+    const confirm = vi.spyOn(ElMessageBox, 'confirm').mockResolvedValue({ action: 'confirm' } as never)
+    const wrapper = mountCard(review)
+
+    await wrapper.get('.is-approve').trigger('click')
+    await Promise.resolve()
+    expect(confirm).not.toHaveBeenCalled()
+    expect(wrapper.emitted('decide')).toEqual([['review-1', 'item-1', 'Drawing2D', 'Approve', '']])
+
+    await wrapper.get('textarea[aria-label="审核意见"]').setValue('尺寸需确认')
+    await wrapper.get('.is-reject').trigger('click')
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(confirm).toHaveBeenCalled()
+    expect(wrapper.emitted('decide')![1]).toEqual(['review-1', 'item-1', 'Drawing2D', 'RequestChanges', '尺寸需确认'])
+    confirm.mockRestore()
+  })
+
   it('已退改的图纸可撤销退改', async () => {
     const confirm = vi.spyOn(ElMessageBox, 'confirm').mockResolvedValue({ action: 'confirm' } as never)
     const changes: DrawingReviewPackage = { ...review, items: [{ ...review.items[0]!, drawingState: 'ChangesRequested', drawingComment: '尺寸标注需修改' }] }

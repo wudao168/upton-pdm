@@ -86,11 +86,12 @@ async function decide(decision: DrawingReviewDecision) {
     ElMessage.warning('退改必须填写说明。')
     return
   }
-  await ElMessageBox.confirm(
-    decision === 'Approve' ? '确认通过2D工程图审核？' : '确认退回设计修改？',
-    '图纸审核确认',
-    { confirmButtonText: '确认', cancelButtonText: '取消', type: decision === 'Approve' ? 'success' : 'warning' },
-  )
+  // 通过/批准不再二次确认；退改仍需确认。
+  if (decision !== 'Approve') {
+    await ElMessageBox.confirm('确认退回设计修改？', '图纸审核确认', {
+      confirmButtonText: '确认', cancelButtonText: '取消', type: 'warning',
+    })
+  }
   emit('decide', packageValue.id, item.id, target, decision, decisionComment.value.trim())
   decisionComment.value = ''
 }
@@ -102,9 +103,12 @@ async function decideSupervisor(decision: DrawingReviewDecision) {
     ElMessage.warning('退改必须填写说明。')
     return
   }
-  await ElMessageBox.confirm(decision === 'Approve' ? '确认批准该审核单？' : '确认退回设计修改？', '批准', {
-    confirmButtonText: '确认', cancelButtonText: '取消', type: decision === 'Approve' ? 'success' : 'warning',
-  })
+  // 通过/批准不再二次确认；退改仍需确认。
+  if (decision !== 'Approve') {
+    await ElMessageBox.confirm('确认退回设计修改？', '图纸审核确认', {
+      confirmButtonText: '确认', cancelButtonText: '取消', type: 'warning',
+    })
+  }
   emit('decideSupervisor', packageValue.id, decision, decisionComment.value.trim())
   decisionComment.value = ''
 }
