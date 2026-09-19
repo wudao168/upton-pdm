@@ -56,6 +56,24 @@ describe('ProcurementTracking', () => {
     wrapper.unmount()
   })
 
+  it('库存右侧显示项目计划主任务的装配、调试日期', async () => {
+    const result = await api.getProjectProcurementTracking()
+    api.getProjectProcurementTracking.mockResolvedValue({
+      ...result,
+      items: [{ ...result.items[0], assemblyStartDate: '2026-09-20', commissioningStartDate: null }],
+    })
+    const wrapper = mount(ProcurementTracking, { props: { projectId: 'project-1', token: 'token', username: 'engineer' }, global: { plugins: [ElementPlus] } })
+    await flushPromises()
+
+    const headers = wrapper.findAll('.el-table__header th').map(header => header.text())
+    expect(headers.indexOf('装配日期')).toBe(headers.indexOf('库存') + 1)
+    expect(headers.indexOf('调试日期')).toBe(headers.indexOf('库存') + 2)
+    const cells = wrapper.get('.el-table__body tbody tr').findAll('td')
+    expect(cells[headers.indexOf('装配日期')].text()).toBe(new Date('2026-09-20').toLocaleDateString('zh-CN'))
+    expect(cells[headers.indexOf('调试日期')].text()).toBe('—')
+    wrapper.unmount()
+  })
+
   it('导出文件优先用子项目号，日期按中国时区且流水刷新保留、次日重置', async () => {
     const date = vi.spyOn(Date.prototype, 'toLocaleDateString').mockReturnValue('2026-09-09')
     const options = { props: { projectId: 'project-1', token: 'token', username: 'engineer' }, global: { plugins: [ElementPlus] } }
@@ -342,6 +360,7 @@ describe('ProcurementTracking', () => {
     const headers = wrapper.find('.el-table__header-wrapper').findAll('th .cell').map(item => item.text().trim()).filter(Boolean)
     expect(headers).toEqual([
       '序号', '项目号', '子项目号', '物料编码', '物料名称', '关键', '型号', '备注', '品牌', '数量', '库存',
+      '装配日期', '调试日期',
       '请购状态', '请购日期', '需求日期', 'PO编号', '采购状态', '采购员', '购买数',
       '到货数', '采购备注', '预计交期', '最新交期',
       '入库日期', '入库数', '出库日期', '出库数',
@@ -391,7 +410,7 @@ describe('ProcurementTracking', () => {
     result.items = Array.from({ length: 61 }, (_, i) => ({ ...result.items[0], sequence: i + 1, materialCode: `0102000${i.toString().padStart(4, '0')}`, latestDeliveryDate: i === 60 ? '2026-01-01' : '2026-02-01' }))
     api.getProjectProcurementTracking.mockResolvedValue(result)
     const keys = ['materialCode', 'inventoryQuantity', 'quantity', 'latestDeliveryDate', 'purchaseRequisitionCreatedAt', 'buyerName']
-    localStorage.setItem('upton-pdm:procurement-columns:engineer', JSON.stringify({ version: 2, order: keys, visible: keys }))
+    localStorage.setItem('upton-pdm:procurement-columns:engineer', JSON.stringify({ version: 3, order: keys, visible: keys }))
     const wrapper = mount(ProcurementTracking, { props: { projectId: 'project-1', token: 'token', username: 'engineer' }, global: { plugins: [ElementPlus] } })
     await flushPromises()
     expect(api.listMaterialInventory).toHaveBeenCalledTimes(50)
@@ -453,8 +472,8 @@ describe('ProcurementTracking', () => {
     expect(rows).toHaveLength(2)
     expect(rows[0].findAll('td')[9].text()).toBe('4')
     expect(rows[1].findAll('td')[9].text()).toBe('—')
-    expect(rows[1].findAll('td')[14].text()).toBe('PO2')
-    expect(rows[1].findAll('td')[20].classes()).not.toContain('is-delivery-delay')
+    expect(rows[1].findAll('td')[16].text()).toBe('PO2')
+    expect(rows[1].findAll('td')[22].classes()).not.toContain('is-delivery-delay')
     wrapper.unmount()
   })
 
@@ -530,7 +549,7 @@ describe('ProcurementTracking', () => {
     expect(wrapper.find('.el-table__header-wrapper').text()).toContain('PR编号')
     const savedColumns = JSON.parse(window.localStorage.getItem('upton-pdm:procurement-columns:engineer')!)
     expect(savedColumns.visible).toContain('purchaseRequisitionNumbers')
-    expect(savedColumns).toEqual(expect.objectContaining({ version: 2 }))
+    expect(savedColumns).toEqual(expect.objectContaining({ version: 3 }))
     expect(savedColumns).not.toHaveProperty('order')
     wrapper.unmount()
     wrapper = mount(ProcurementTracking, options)
@@ -589,7 +608,7 @@ describe('ProcurementTracking', () => {
     })
     await flushPromises()
     const cells = wrapper.findAll('.el-table__body tbody tr:first-child td')
-    expect(cells[20].classes().includes('is-delivery-delay')).toBe(delayed)
+    expect(cells[22].classes().includes('is-delivery-delay')).toBe(delayed)
     expect(wrapper.findAll('td.is-delivery-delay')).toHaveLength(delayed ? 1 : 0)
     wrapper.unmount()
   })
@@ -613,8 +632,8 @@ describe('ProcurementTracking', () => {
     const wrapper = mount(ProcurementTracking, { props: { projectId: 'project-1', token: 'token', username: 'engineer' }, global: { plugins: [ElementPlus] } })
     await flushPromises()
     const cells = wrapper.findAll('.el-table__body tbody tr:first-child td')
-    expect(cells[20].classes().includes('is-delivery-delay')).toBe(expectedRed)
-    expect(cells[21].classes().includes('is-delivery-delay')).toBe(latestRed)
+    expect(cells[22].classes().includes('is-delivery-delay')).toBe(expectedRed)
+    expect(cells[23].classes().includes('is-delivery-delay')).toBe(latestRed)
     expect(wrapper.findAll('th').some(cell => cell.text() === '需求日期')).toBe(true)
     wrapper.unmount()
   })
@@ -696,9 +715,9 @@ describe('ProcurementTracking', () => {
     let wrapper = mount(ProcurementTracking, options)
     await flushPromises()
     const headers = () => wrapper.findAll('th .cell').map(cell => cell.text().trim())
-    expect(headers()).toEqual(['物料编码', '关键', '品牌', '数量', '库存', '请购日期', '采购员', '入库日期', '入库数', '出库日期', '出库数'])
+    expect(headers()).toEqual(['物料编码', '关键', '品牌', '数量', '库存', '装配日期', '调试日期', '请购日期', '采购员', '入库日期', '入库数', '出库日期', '出库数'])
     wrapper.unmount()
-    window.localStorage.setItem(key, JSON.stringify({ order: ['materialCode', 'quantity', 'inventoryQuantity', 'brand', 'impactStage', 'purchaseRequisitionCreatedAt', 'buyerName', 'receiptDate', 'receiptQuantity', 'issueDate', 'issueQuantity'], visible: ['materialCode', 'quantity', 'brand'] }))
+    window.localStorage.setItem(key, JSON.stringify({ version: 3, order: ['materialCode', 'quantity', 'inventoryQuantity', 'brand', 'impactStage', 'assemblyStartDate', 'commissioningStartDate', 'purchaseRequisitionCreatedAt', 'buyerName', 'receiptDate', 'receiptQuantity', 'issueDate', 'issueQuantity'], visible: ['materialCode', 'quantity', 'brand'] }))
     wrapper = mount(ProcurementTracking, options)
     await flushPromises()
     expect(headers()).toEqual(['物料编码', '品牌', '数量'])

@@ -74,8 +74,10 @@ public sealed partial class InMemoryPdmRepository
         {
             if (!drawingReviewPackages.TryGetValue(packageId, out var package))
                 throw new PdmNotFoundException("图纸审核单不存在。");
-            if (package.State is not (DrawingReviewPackageState.InReview or DrawingReviewPackageState.PendingSupervisorApproval))
-                throw new PdmConflictException("只有审核中的图纸审核单可以撤销。");
+            if (package.State is not (DrawingReviewPackageState.InReview
+                or DrawingReviewPackageState.PendingSupervisorApproval
+                or DrawingReviewPackageState.ChangesRequested))
+                throw new PdmConflictException("只有审核中或已退回的图纸审核单可以撤销。");
             package = package with
             {
                 State = DrawingReviewPackageState.Withdrawn,
@@ -156,14 +158,22 @@ public sealed partial class InMemoryPdmRepository
         {
             var package = drawingReviewPackages.Values.FirstOrDefault(candidate => candidate.Items.Any(item => item.Id == itemId))
                 ?? throw new PdmNotFoundException("图纸审核项不存在。");
+            var supervisorNode = package.State == DrawingReviewPackageState.PendingSupervisorApproval;
+            if (!supervisorNode && package.State != DrawingReviewPackageState.InReview)
+                throw new PdmConflictException("当前图纸审核单不允许继续审核。");
             var items = package.Items.Select(item => item.Id != itemId ? item : target == DrawingReviewTarget.Model3D
                 ? item with { ModelState = state, ModelReviewer = reviewer, ModelReviewerName = reviewerName, ModelReviewedAt = reviewedAt, ModelComment = comment }
                 : item with { DrawingState = state, DrawingReviewer = reviewer, DrawingReviewerName = reviewerName, DrawingReviewedAt = reviewedAt, DrawingComment = comment }).ToArray();
             package = package with
             {
                 Items = items,
-                // 单张图纸退改只影响该图纸，审核单其余图纸继续并行审核。
-                State = DrawingReviewPackageState.InReview
+                // 单张图纸退改只影响该图纸，审核单其余图纸继续并行审核；
+                // 机械主管按图退回后审核单回到审图节点重新审核。
+                State = DrawingReviewPackageState.InReview,
+                SupervisorReviewedBy = supervisorNode ? null : package.SupervisorReviewedBy,
+                SupervisorReviewedByName = supervisorNode ? null : package.SupervisorReviewedByName,
+                SupervisorReviewedAt = supervisorNode ? null : package.SupervisorReviewedAt,
+                SupervisorComment = supervisorNode ? null : package.SupervisorComment
             };
             drawingReviewPackages[package.Id] = package;
             return Task.FromResult(package);
@@ -185,6 +195,50 @@ public sealed partial class InMemoryPdmRepository
             var items = package.Items.Select(item => item.Id != itemId ? item : target == DrawingReviewTarget.Model3D
                 ? item with { ModelState = DrawingReviewTargetState.Pending, ModelReviewer = null, ModelReviewerName = null, ModelReviewedAt = null, ModelComment = null }
                 : item with { DrawingState = DrawingReviewTargetState.Pending, DrawingReviewer = null, DrawingReviewerName = null, DrawingReviewedAt = null, DrawingComment = null }).ToArray();
+            package = package with
+            {
+                Items = items,
+                State = DrawingReviewPackageState.InReview,
+                SupervisorReviewedBy = null,
+                SupervisorReviewedByName = null,
+                SupervisorReviewedAt = null,
+                SupervisorComment = null
+            };
+            drawingReviewPackages[package.Id] = package;
+            return Task.FromResult(package);
+        }
+    }
+
+    public Task<DrawingReviewPackage> ResubmitDrawingReviewItemAsync(
+        Guid itemId,
+        Guid drawingVersionId,
+        string drawingRevision,
+        string drawingSha256,
+        string drawingCreatedBy,
+        CancellationToken cancellationToken)
+    {
+        lock (gate)
+        {
+            var package = drawingReviewPackages.Values.FirstOrDefault(candidate => candidate.Items.Any(item => item.Id == itemId))
+                ?? throw new PdmNotFoundException("图纸审核项不存在。");
+            if (package.State is not (DrawingReviewPackageState.InReview or DrawingReviewPackageState.PendingSupervisorApproval))
+                throw new PdmConflictException("当前图纸审核单不允许重新提交审核。");
+            if (package.Items.Single(item => item.Id == itemId).DrawingState != DrawingReviewTargetState.ChangesRequested)
+                throw new PdmConflictException("只有已退回（待修改）的图档可以重新提交审核。");
+            var items = package.Items.Select(item => item.Id != itemId ? item : item with
+            {
+                DrawingState = DrawingReviewTargetState.Pending,
+                DrawingVersionId = drawingVersionId,
+                DrawingRevision = drawingRevision,
+                DrawingSha256 = drawingSha256,
+                DrawingCreatedBy = drawingCreatedBy,
+                DrawingReviewer = null,
+                DrawingReviewerName = null,
+                DrawingReviewedAt = null,
+                DrawingComment = null,
+                DrawingResultVersionId = null,
+                DrawingWritebackId = null
+            }).ToArray();
             package = package with
             {
                 Items = items,
@@ -255,7 +309,13 @@ public sealed partial class InMemoryPdmRepository
                 SupervisorReviewedBy = reviewer,
                 SupervisorReviewedByName = reviewerName,
                 SupervisorReviewedAt = reviewedAt,
-                SupervisorComment = comment
+                SupervisorComment = comment,
+                // 机械主管整单退回：单内仍为已通过的图纸一并置为待修改，设计者可直接改图后重新提交。
+                Items = decision == DrawingReviewDecision.RequestChanges
+                    ? package.Items.Select(item => item.DrawingState is DrawingReviewTargetState.Approved or DrawingReviewTargetState.Marked
+                        ? item with { DrawingState = DrawingReviewTargetState.ChangesRequested, DrawingReviewer = reviewer, DrawingReviewerName = reviewerName, DrawingReviewedAt = reviewedAt, DrawingComment = comment }
+                        : item).ToArray()
+                    : package.Items
             };
             drawingReviewPackages[package.Id] = package;
             return Task.FromResult(package);

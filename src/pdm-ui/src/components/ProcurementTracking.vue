@@ -13,7 +13,8 @@ type ColumnKey = keyof Pick<ProjectProcurementTrackingItem,
   'sequence' | 'projectCode' | 'subprojectCode' | 'materialCode' | 'materialName' | 'impactStage' | 'specification' | 'remark' | 'brand' |
   'quantity' | 'purchaseRequisitionNumbers' | 'purchaseRequisitionStatus' | 'purchaseRequisitionCreatedAt' | 'purchaseRequisitionDeliveryDate' |
   'purchaseOrderNumbers' | 'purchaseOrderStatus' | 'buyerName' | 'purchaseQuantity' | 'arrivedQuantity' | 'purchaseRemark' |
-  'purchaseDeliveryDate' | 'latestDeliveryDate' | 'bomKind' | 'releasePackageNumber' | 'requestedQuantity' | 'approvedQuantity'> | 'inventoryQuantity' | MovementColumn
+  'purchaseDeliveryDate' | 'latestDeliveryDate' | 'bomKind' | 'releasePackageNumber' | 'requestedQuantity' | 'approvedQuantity' |
+  'assemblyStartDate' | 'commissioningStartDate'> | 'inventoryQuantity' | MovementColumn
 
 type MovementColumn = 'receiptDate' | 'receiptQuantity' | 'issueDate' | 'issueQuantity'
 const movementColumns: MovementColumn[] = ['receiptDate', 'receiptQuantity', 'issueDate', 'issueQuantity']
@@ -33,6 +34,8 @@ const columnDefinitions: ColumnDefinition[] = [
   { key: 'brand', label: '品牌', width: 110, defaultVisible: true },
   { key: 'quantity', label: '数量', width: 88, fixedWidth: 40, defaultVisible: true, align: 'right' },
   { key: 'inventoryQuantity', label: '库存', width: 100, fixedWidth: 40, defaultVisible: true, align: 'right' },
+  { key: 'assemblyStartDate', label: '装配日期', width: 132, fixedWidth: 70, defaultVisible: true },
+  { key: 'commissioningStartDate', label: '调试日期', width: 132, fixedWidth: 70, defaultVisible: true },
   { key: 'purchaseRequisitionNumbers', label: 'PR编号', width: 170, defaultVisible: false },
   { key: 'purchaseRequisitionStatus', label: '请购状态', width: 132, fixedWidth: 60, defaultVisible: true },
   { key: 'purchaseRequisitionCreatedAt', label: '请购日期', width: 132, fixedWidth: 70, defaultVisible: true },
@@ -247,7 +250,8 @@ function restoreColumns() {
     const savedOrder = (saved?.order ?? []).filter((key, index, array) => allowed.has(key) && array.indexOf(key) === index)
     const savedVisible = (saved?.visible ?? []).filter(key => allowed.has(key))
     if (savedVisible.length) visibleKeys.value = savedVisible
-    if (saved && saved.version !== 2 && !savedOrder.includes('inventoryQuantity')) {
+    const savedVersion = saved?.version ?? 0
+    if (saved && savedVersion < 2 && !savedOrder.includes('inventoryQuantity')) {
       if (!visibleKeys.value.includes('inventoryQuantity')) visibleKeys.value.push('inventoryQuantity')
     }
     for (const key of [
@@ -259,9 +263,12 @@ function restoreColumns() {
       'issueDate',
       'issueQuantity',
     ] as const) {
-      if (saved && saved.version !== 2 && !savedOrder.includes(key)) {
+      if (saved && savedVersion < 2 && !savedOrder.includes(key)) {
         if (!visibleKeys.value.includes(key)) visibleKeys.value.push(key)
       }
+    }
+    for (const key of ['assemblyStartDate', 'commissioningStartDate'] as const) {
+      if (saved && savedVersion < 3 && !visibleKeys.value.includes(key)) visibleKeys.value.push(key)
     }
   } catch {
     // 无法读取个人浏览器设置时使用系统默认列。
@@ -273,7 +280,7 @@ function saveColumns() {
     ElMessage.warning('请至少保留一列')
     return
   }
-  window.localStorage.setItem(storageKey.value, JSON.stringify({ version: 2, visible: visibleKeys.value }))
+  window.localStorage.setItem(storageKey.value, JSON.stringify({ version: 3, visible: visibleKeys.value }))
   settingsVisible.value = false
   ElMessage.success('采购跟踪列设置已保存到当前账号')
 }
@@ -432,7 +439,8 @@ function cellText(row: ProjectProcurementTrackingItem, key: ColumnKey) {
   }
   const value = row[key]
   if (Array.isArray(value)) return value.length ? value.join('、') : '—'
-  if (key === 'purchaseRequisitionCreatedAt' || key === 'purchaseRequisitionDeliveryDate' || key === 'purchaseDeliveryDate' || key === 'latestDeliveryDate') return formatDate(value as string | null)
+  if (key === 'purchaseRequisitionCreatedAt' || key === 'purchaseRequisitionDeliveryDate' || key === 'purchaseDeliveryDate' || key === 'latestDeliveryDate'
+    || key === 'assemblyStartDate' || key === 'commissioningStartDate') return formatDate(value as string | null)
   if (key === 'quantity' || key === 'purchaseQuantity' || key === 'arrivedQuantity' || key === 'requestedQuantity' || key === 'approvedQuantity') return formatNumber(value as number)
   return value === null || value === undefined || value === '' ? '—' : String(value)
 }

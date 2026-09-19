@@ -4,6 +4,7 @@ import { ElMessage } from '../statusMessage'
 import { onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import { postDesktopMessage, requestPasswordReset } from '../api'
 import companyLogo from '../assets/company-logo-white.png'
+import PdmLoginIndustrial from './PdmLoginIndustrial.vue'
 import PdmLoginCharacters from './PdmLoginCharacters.vue'
 
 const props = withDefaults(defineProps<{ pending: boolean; error: string; online: boolean; compact?: boolean }>(), { compact: false })
@@ -63,6 +64,9 @@ async function submitPasswordReset() {
 <template>
   <main class="pdm-login-shell" :class="{ 'is-compact': props.compact }">
     <section class="pdm-login-layout">
+      <div v-if="props.compact" class="pdm-login-industrial-layer">
+        <PdmLoginIndustrial />
+      </div>
       <aside v-if="!props.compact" class="pdm-login-visual" aria-label="PLM产品生命周期管理系统登录插画">
         <div class="pdm-login-brand">
           <img class="pdm-login-brand__logo" :src="companyLogo" alt="UPTON 阿普顿">
@@ -77,6 +81,10 @@ async function submitPasswordReset() {
       </aside>
 
       <section class="pdm-login-content">
+        <div v-if="props.compact" class="pdm-login-compact-brand">
+          <img class="pdm-login-brand__logo" :src="companyLogo" alt="UPTON 阿普顿">
+          <span class="pdm-login-compact-brand__tagline">产品生命周期管理 · 机械设计协同</span>
+        </div>
         <form class="pdm-login-form" aria-label="登录PLM" autocomplete="off" @submit.prevent="submit">
           <div v-if="!props.compact" class="pdm-login-mobile-brand" aria-hidden="true">
             <img class="pdm-login-brand__logo" :src="companyLogo" alt="">

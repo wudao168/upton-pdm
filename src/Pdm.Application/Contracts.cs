@@ -504,6 +504,8 @@ public interface IPdmRepository
     Task<DrawingReviewPackage> ResolveDrawingReviewMarkupAsync(Guid markupId, string actor, DateTimeOffset resolvedAt, CancellationToken cancellationToken);
     Task<DrawingReviewPackage> DecideDrawingReviewTargetAsync(Guid itemId, DrawingReviewTarget target, DrawingReviewTargetState state, string reviewer, string reviewerName, DateTimeOffset reviewedAt, string? comment, CancellationToken cancellationToken);
     Task<DrawingReviewPackage> RevokeDrawingReviewTargetAsync(Guid itemId, DrawingReviewTarget target, CancellationToken cancellationToken);
+    /// <summary>退改后设计者提交了新版本：把该2D图档的审核项按最新存档版本恢复为待审核，重新进入审图节点，同单其他图档不受影响。</summary>
+    Task<DrawingReviewPackage> ResubmitDrawingReviewItemAsync(Guid itemId, Guid drawingVersionId, string drawingRevision, string drawingSha256, string drawingCreatedBy, CancellationToken cancellationToken);
     Task<DrawingReviewPackage> AdvanceDrawingReviewToSupervisorAsync(Guid packageId, CancellationToken cancellationToken);
     Task<DrawingReviewPackage> DecideDrawingReviewSupervisorAsync(Guid packageId, DrawingReviewDecision decision, string reviewer, string reviewerName, DateTimeOffset reviewedAt, string? comment, CancellationToken cancellationToken);
     Task<DrawingReviewPackage> QueueDrawingReviewWritebacksAsync(Guid packageId, IReadOnlyList<DrawingReviewWritebackRequest> requests, CancellationToken cancellationToken);

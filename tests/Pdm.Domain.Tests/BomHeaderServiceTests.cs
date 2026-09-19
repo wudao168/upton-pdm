@@ -1038,10 +1038,11 @@ public sealed class BomHeaderServiceTests
         await materials.SaveIntegrationConfigurationAsync(new(
             "http://u9.example.test/U9", "01", "7", "pdm", "PDM", "protected:test-secret",
             U9MaterialContract.CreatePath, U9MaterialContract.QueryPath, true, "admin", time.GetUtcNow()), default);
+        var materialSyncedAt = DateTimeOffset.Parse("2026-08-15T09:00:00+08:00");
         var master = await AddMaterial(materials, MaterialKind.Product, MaterialApprovalStatus.Approved,
-            "0302", "03020000009", "03020000009", true);
+            "0302", "03020000009", "03020000009", true, materialSyncedAt);
         var standard = await AddMaterial(materials, MaterialKind.Product, MaterialApprovalStatus.Approved,
-            "0201", "02010000101", "02010000101", true);
+            "0201", "02010000101", "02010000101", true, materialSyncedAt);
         await repository.SaveProjectBomHeaderBindingAsync(
             ProjectId, ProjectBomHeaderKind.Master, master.Id, 0, "admin", default);
         await repository.SaveProjectBomHeaderBindingAsync(
@@ -1056,7 +1057,8 @@ public sealed class BomHeaderServiceTests
         await repository.SetBomVersionStateAsync([releasedStandard.Id], BomVersionState.Released, "reviewer", time.GetUtcNow(), default);
         var client = new ApprovalAutomationClient();
         var service = new ProjectBomU9SyncService(repository, materials,
-            new U9BomWriteService(materials, repository, client, client, new TestProtector(), time), time);
+            new U9BomWriteService(materials, repository, client, client, new TestProtector(), time),
+            new FixedTimeProvider(DateTimeOffset.Parse("2026-05-01T09:00:00+08:00")));
 
         var preview = await service.PreviewAsync(
             ProjectId, ProjectBomHeaderKind.Master, "admin", UserRole.Administrator, default);
@@ -1066,7 +1068,7 @@ public sealed class BomHeaderServiceTests
         using var payload = JsonDocument.Parse(preview.WritePreview!.RequestPreview);
         var row = payload.RootElement[0];
         Assert.Equal("02010000101", row.GetProperty("BOMComponents")[0].GetProperty("ItemMaster").GetProperty("Code").GetString());
-        var expectedEffectiveDate = "2019-01-01";
+        var expectedEffectiveDate = "2026-08-15";
         Assert.Equal(expectedEffectiveDate, row.GetProperty("EffectiveDate").GetString());
         Assert.Equal(expectedEffectiveDate, row.GetProperty("BOMComponents")[0].GetProperty("EffectiveDate").GetString());
         Assert.Equal(0, client.BomWriteCount);
@@ -1194,7 +1196,8 @@ public sealed class BomHeaderServiceTests
         Assert.Equal(ApprovalU9AutomationStage.Completed, afterBomApproval.Stage);
         Assert.Equal(ProjectBomU9AutomaticState.Created, Assert.Single(afterBomApproval.Boms).State);
         Assert.Equal(1, client.BomWriteCount);
-        var expectedEffectiveDate = "2019-01-01";
+        // 料品生效日期不早于当天时取当天：头部料品在本次自动同步中取号（同步时间≈当前），子件料品同样不早于当天。
+        var expectedEffectiveDate = DateOnly.FromDateTime(DateTimeOffset.Now.DateTime).ToString("yyyy-MM-dd");
         Assert.Equal(expectedEffectiveDate, client.LastBomEffectiveDate);
         Assert.All(client.LastComponentEffectiveDates, value => Assert.Equal(expectedEffectiveDate, value));
     }
@@ -1249,7 +1252,7 @@ public sealed class BomHeaderServiceTests
         await repository.SetBomVersionStateAsync([version.Id], BomVersionState.Released, "reviewer", time.GetUtcNow(), default);
     }
 
-    private static async Task<PdmMaterial> AddMaterial(InMemoryMaterialRepository repository, MaterialKind kind, MaterialApprovalStatus approval, string categoryCode, string code, string? u9ItemCode = null, bool u9SyncConfirmed = false)
+    private static async Task<PdmMaterial> AddMaterial(InMemoryMaterialRepository repository, MaterialKind kind, MaterialApprovalStatus approval, string categoryCode, string code, string? u9ItemCode = null, bool u9SyncConfirmed = false, DateTimeOffset? lastU9SyncedAt = null)
     {
         var category = await repository.FindCategoryAsync(categoryCode, default) ?? throw new InvalidOperationException();
         var now = DateTimeOffset.UtcNow;
@@ -1257,7 +1260,7 @@ public sealed class BomHeaderServiceTests
             Guid.NewGuid(), code, $"料品{code}", kind, MaterialSupplyMode.Manufacture, "001", null, null, null, null, null,
             null, null, null, approval, approval == MaterialApprovalStatus.Approved ? "admin" : null,
             approval == MaterialApprovalStatus.Approved ? now : null, categoryCode, null, u9ItemCode, MaterialSyncStatus.NotQueued,
-            "admin", now, "admin", now, 1, categoryCode, U9SyncConfirmed: u9SyncConfirmed);
+            "admin", now, "admin", now, 1, categoryCode, U9SyncConfirmed: u9SyncConfirmed, LastU9SyncedAt: lastU9SyncedAt);
         return await repository.CreateMaterialAsync(material, category, default);
     }
 

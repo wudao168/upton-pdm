@@ -126,6 +126,31 @@ public sealed class DrawingReviewWorkflowTests
     }
 
     [Fact]
+    public async Task CreatorCanWithdrawAChangesRequestedPackageSoItCanBeRestarted()
+    {
+        var (repository, workflow, _, _) = await PrepareReviewAsync();
+        await repository.CreateUserAsync(new UserAccount(Guid.NewGuid(), "reviewer-a", "审图员甲", "unused", UserRole.ProcessReviewer, true), default);
+
+        var package = await workflow.CreateDrawingReviewPackageAsync(
+            ProjectId, null, ["reviewer-a"], "submitter", UserRole.Administrator, default);
+        var item = Assert.Single(package.Items);
+        package = await workflow.DecideDrawingReviewTargetAsync(package.Id, item.Id,
+            new DecideDrawingReviewTargetCommand(DrawingReviewTarget.Drawing2D, DrawingReviewDecision.Approve, "审图通过"),
+            "reviewer-a", UserRole.ProcessReviewer, default);
+        Assert.Equal(DrawingReviewPackageState.PendingSupervisorApproval, package.State);
+
+        // 机械主管整单退回（升级前的旧路径，历史数据里仍可能存在）。
+        package = await workflow.DecideDrawingReviewSupervisorAsync(package.Id,
+            new DecideDrawingReviewSupervisorCommand(DrawingReviewDecision.RequestChanges, "整单退回"), "manager", UserRole.Administrator, default);
+        Assert.Equal(DrawingReviewPackageState.ChangesRequested, package.State);
+
+        // 这种已退回的审核单此前既不能批准也不能撤销，会卡死；现在发起人可以撤回重新发起。
+        package = await workflow.WithdrawDrawingReviewPackageAsync(package.Id, "改不动，撤回重新发起", "submitter", UserRole.Administrator, default);
+        Assert.Equal(DrawingReviewPackageState.Withdrawn, package.State);
+        Assert.Equal("submitter", package.WithdrawnBy);
+    }
+
+    [Fact]
     public async Task RequestingChangesOnOneDrawingKeepsTheReviewOpenAndCanBeUndone()
     {
         var (repository, workflow, _, drawing) = await PrepareReviewAsync();
@@ -155,6 +180,84 @@ public sealed class DrawingReviewWorkflowTests
         // 撤销退改回到待审核后重新锁定。
         Assert.Contains(drawing.Id, await repository.ListActiveDrawingReviewDocumentIdsAsync(ProjectId, default));
         Assert.True(await repository.IsDocumentUnderActiveDrawingReviewAsync(drawing.Id, default));
+    }
+
+    [Fact]
+    public async Task ResubmittingARejectedDrawingNeedsANewVersionAndReopensTheReview()
+    {
+        var (repository, workflow, _, drawing) = await PrepareReviewAsync();
+        await repository.CreateUserAsync(new UserAccount(Guid.NewGuid(), "reviewer-a", "审图员甲", "unused", UserRole.ProcessReviewer, true), default);
+
+        var package = await workflow.CreateDrawingReviewPackageAsync(
+            ProjectId, null, ["reviewer-a"], "submitter", UserRole.Administrator, default);
+        var item = Assert.Single(package.Items);
+        package = await workflow.DecideDrawingReviewTargetAsync(package.Id, item.Id,
+            new DecideDrawingReviewTargetCommand(DrawingReviewTarget.Drawing2D, DrawingReviewDecision.RequestChanges, "尺寸标注需修改"),
+            "reviewer-a", UserRole.ProcessReviewer, default);
+        item = Assert.Single(package.Items);
+        Assert.Equal(DrawingReviewTargetState.ChangesRequested, item.DrawingState);
+
+        // 还没有新版本时不能重新提交，提示先改图存档。
+        var blocked = await Assert.ThrowsAsync<PdmRuleException>(() => workflow.ResubmitDrawingReviewItemAsync(
+            package.Id, item.Id, "submitter", UserRole.Administrator, default));
+        Assert.Contains("新的存档版本", blocked.Message);
+
+        // 设计者获取编辑权限、修改并提交新版本。
+        var checkIn = await CheckInAsync(repository, drawing.Id, "designer", new Dictionary<string, string?>(), 'D');
+        Assert.True(checkIn.VersionCreated);
+
+        // 非发起人且非该图档设计者不能代替提交。
+        await repository.CreateUserAsync(new UserAccount(Guid.NewGuid(), "other-engineer", "其他工程师", "unused", UserRole.Engineer, true), default);
+        await Assert.ThrowsAsync<UnauthorizedAccessException>(() => workflow.ResubmitDrawingReviewItemAsync(
+            package.Id, item.Id, "other-engineer", UserRole.Engineer, default));
+
+        package = await workflow.ResubmitDrawingReviewItemAsync(package.Id, item.Id, "submitter", UserRole.Administrator, default);
+        var resubmitted = Assert.Single(package.Items);
+        Assert.Equal(DrawingReviewTargetState.Pending, resubmitted.DrawingState);
+        Assert.Equal(checkIn.Version!.Id, resubmitted.DrawingVersionId);
+        Assert.Equal(checkIn.Version.Revision.Display, resubmitted.DrawingRevision);
+        Assert.Equal(checkIn.Version.Sha256, resubmitted.DrawingSha256);
+        Assert.Null(resubmitted.DrawingReviewer);
+        Assert.Null(resubmitted.DrawingComment);
+        Assert.Equal(DrawingReviewPackageState.InReview, package.State);
+        // 重新提交后该图档重新回到审核锁定状态。
+        Assert.Contains(drawing.Id, await repository.ListActiveDrawingReviewDocumentIdsAsync(ProjectId, default));
+        Assert.True(await repository.IsDocumentUnderActiveDrawingReviewAsync(drawing.Id, default));
+    }
+
+    [Fact]
+    public async Task MechanicalSupervisorReturnsOnlyTheSelectedDrawingInsteadOfTheWholePackage()
+    {
+        var (repository, workflow, _, _) = await PrepareReviewAsync();
+        await repository.CreateUserAsync(new UserAccount(Guid.NewGuid(), "reviewer-a", "审图员甲", "unused", UserRole.ProcessReviewer, true), default);
+
+        var package = await workflow.CreateDrawingReviewPackageAsync(
+            ProjectId, null, ["reviewer-a"], "submitter", UserRole.Administrator, default);
+        var item = Assert.Single(package.Items);
+        package = await workflow.DecideDrawingReviewTargetAsync(package.Id, item.Id,
+            new DecideDrawingReviewTargetCommand(DrawingReviewTarget.Drawing2D, DrawingReviewDecision.Approve, "审图通过"),
+            "reviewer-a", UserRole.ProcessReviewer, default);
+        Assert.Equal(DrawingReviewPackageState.PendingSupervisorApproval, package.State);
+
+        // 机械主管节点不能按图"通过"（批准是整单操作），也不能由非主管退回。
+        var wrongDecision = await Assert.ThrowsAsync<PdmRuleException>(() => workflow.DecideDrawingReviewTargetAsync(package.Id, item.Id,
+            new DecideDrawingReviewTargetCommand(DrawingReviewTarget.Drawing2D, DrawingReviewDecision.Approve, null),
+            "manager", UserRole.Administrator, default));
+        Assert.Contains("整单批准", wrongDecision.Message);
+        await Assert.ThrowsAsync<UnauthorizedAccessException>(() => workflow.DecideDrawingReviewTargetAsync(package.Id, item.Id,
+            new DecideDrawingReviewTargetCommand(DrawingReviewTarget.Drawing2D, DrawingReviewDecision.RequestChanges, "尺寸链需复核"),
+            "reviewer-a", UserRole.ProcessReviewer, default));
+
+        // 主管退回：只退回这一张，审核单回到审图节点，等设计者改完重新提交后再审。
+        package = await workflow.DecideDrawingReviewTargetAsync(package.Id, item.Id,
+            new DecideDrawingReviewTargetCommand(DrawingReviewTarget.Drawing2D, DrawingReviewDecision.RequestChanges, "尺寸链需复核"),
+            "manager", UserRole.Administrator, default);
+        var returned = Assert.Single(package.Items);
+        Assert.Equal(DrawingReviewTargetState.ChangesRequested, returned.DrawingState);
+        Assert.Equal("尺寸链需复核", returned.DrawingComment);
+        Assert.Equal("manager", returned.DrawingReviewer);
+        Assert.Equal(DrawingReviewPackageState.InReview, package.State);
+        Assert.Null(package.SupervisorReviewedAt);
     }
 
     [Fact]

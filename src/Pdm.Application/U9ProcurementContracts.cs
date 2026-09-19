@@ -183,6 +183,8 @@ public sealed record ProjectProcurementTrackingItem(
     public bool IsWarehouseMovementRow { get; init; }
     public bool IsFullyReceived { get; init; }
     public string? ImpactStage { get; init; }
+    public DateOnly? AssemblyStartDate { get; init; }
+    public DateOnly? CommissioningStartDate { get; init; }
 }
 
 public sealed record ProjectProcurementTrackingResult(

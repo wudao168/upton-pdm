@@ -182,12 +182,11 @@ public sealed class ProjectBomU9SyncService(
             ? await BuildMasterComponentsAsync(project, bindings, cancellationToken)
             : await BuildCategoryComponentsAsync(projectId, kind, cancellationToken);
         var components = approved.Components;
-        _ = timeProvider; // 保留现有构造函数契约；新建生效日期不再依赖当前时间。
-        var effectiveDate = new DateOnly(2019, 1, 1);
+        var effectiveDate = ResolveU9EffectiveDate(headerMaterial);
         var disableDate = new DateOnly(9999, 12, 31);
         components = components.Select(component => component with
         {
-            EffectiveDate = effectiveDate,
+            EffectiveDate = component.EffectiveDate is { } componentDate && componentDate > effectiveDate ? componentDate : effectiveDate,
             DisableDate = disableDate
         }).ToArray();
         var command = new U9BomWriteCommand(
@@ -250,7 +249,7 @@ public sealed class ProjectBomU9SyncService(
                 if (!bindings.TryGetValue(kind, out var binding))
                     throw new PdmRuleException($"{KindLabel(kind)}已有物料，但尚未申请独立BOM料号。");
                 var material = await RequireOfficialMaterialAsync(binding.MaterialId, KindLabel(kind), cancellationToken);
-                result.Add(Component((result.Count + 1) * 10, material, 1, $"{project.Code} · {KindLabel(kind)}"));
+                result.Add(Component((result.Count + 1) * 10, material, 1, $"{project.Code} · {KindLabel(kind)}", ResolveU9EffectiveDate(material)));
             }
         }
         else
@@ -264,7 +263,7 @@ public sealed class ProjectBomU9SyncService(
                     .SingleOrDefault(item => item.Kind == ProjectBomHeaderKind.Master)
                     ?? throw new PdmRuleException($"子项目 {child.Code} 尚未申请项目主BOM料号。");
                 var material = await RequireOfficialMaterialAsync(childMaster.MaterialId, $"子项目 {child.Code} 主BOM", cancellationToken);
-                result.Add(Component((result.Count + 1) * 10, material, Math.Max(child.Quantity, 1), $"子项目 {child.Code} · {child.Name}"));
+                result.Add(Component((result.Count + 1) * 10, material, Math.Max(child.Quantity, 1), $"子项目 {child.Code} · {child.Name}", ResolveU9EffectiveDate(material)));
             }
         }
         return new(approved, result);
@@ -297,7 +296,8 @@ public sealed class ProjectBomU9SyncService(
                 OfficialCode(material),
                 item.Quantity,
                 U9UnitCatalog.NormalizeBomUnit(item.Unit),
-                Remark: item.Remark));
+                Remark: item.Remark,
+                EffectiveDate: ResolveU9EffectiveDate(material)));
         }
         return new(true, result);
     }
@@ -421,8 +421,20 @@ public sealed class ProjectBomU9SyncService(
     private static IEnumerable<BomItem> EffectiveItems(IEnumerable<BomItem> items) =>
         items.Where(item => !item.IsManuallyExcluded && !item.IsReleaseExcluded && !item.IsPendingRemoval);
 
-    private static U9BomComponentCommand Component(int sequence, PdmMaterial material, decimal quantity, string remark) =>
-        new(sequence, OfficialCode(material), quantity, U9UnitCatalog.NormalizeBomUnit(material.UnitCode), Remark: remark);
+    private static U9BomComponentCommand Component(int sequence, PdmMaterial material, decimal quantity, string remark, DateOnly effectiveDate) =>
+        new(sequence, OfficialCode(material), quantity, U9UnitCatalog.NormalizeBomUnit(material.UnitCode), Remark: remark, EffectiveDate: effectiveDate);
+
+    /// <summary>
+    /// 料品在 U9C 的生效起始日期：U9C 以料品建档日期为准，PLM 建档的料品即推送到 U9C 的那一刻（LastU9SyncedAt）。
+    /// BOM 生效日期不得早于母项/子件料品的生效日期，否则 U9C 会拒绝写入；U9C 返回的料品资料不含生效日期，
+    /// 且我们的同步时间可能比 U9C 实际生效日期早一天，因此再取"当天"作为下界。
+    /// </summary>
+    private DateOnly ResolveU9EffectiveDate(PdmMaterial material)
+    {
+        var materialDate = DateOnly.FromDateTime((material.LastU9SyncedAt ?? material.CreatedAt).ToLocalTime().DateTime);
+        var today = DateOnly.FromDateTime(timeProvider.GetLocalNow().DateTime);
+        return materialDate > today ? materialDate : today;
+    }
 
     private static string OfficialCode(PdmMaterial material) => material.U9ItemCode!.Trim();
 

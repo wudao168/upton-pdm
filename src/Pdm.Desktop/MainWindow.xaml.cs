@@ -69,6 +69,7 @@ public partial class MainWindow : Window
     private IntPtr systemMenu;
     private bool startWithWindows;
     private bool allowClose;
+    private bool trayHintShown;
     private bool interactiveSurfacesSuspended;
     private WinForms.NotifyIcon? trayIcon;
     private string[]? pendingExternalRequestArgs;
@@ -1052,8 +1053,7 @@ public partial class MainWindow : Window
         var command = wParam.ToInt32();
         if (command == MenuExit)
         {
-            allowClose = true;
-            Close();
+            HideToNotificationArea();
             handled = true;
         }
 
@@ -1092,7 +1092,7 @@ public partial class MainWindow : Window
 
     private void OnCloseButtonClick(object sender, RoutedEventArgs eventArgs)
     {
-        ExitApplication();
+        HideToNotificationArea();
     }
 
     private void OnWindowActivated(object? sender, EventArgs eventArgs) => ApplyPreviewSurfaces();
@@ -1144,6 +1144,13 @@ public partial class MainWindow : Window
         SuspendInteractiveSurfaces();
         ShowInTaskbar = false;
         Hide();
+        if (!trayHintShown && trayIcon != null)
+        {
+            trayHintShown = true;
+            trayIcon.BalloonTipTitle = "UPLM 仍在后台运行";
+            trayIcon.BalloonTipText = "点击关闭仅最小化到托盘；需要退出请在托盘图标上右键选择“退出 UPLM”。";
+            trayIcon.ShowBalloonTip(6000);
+        }
     }
 
     private void RestoreFromNotificationArea()

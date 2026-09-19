@@ -134,8 +134,11 @@ public sealed partial class MySqlPdmRepository
             "SELECT state FROM drawing_review_package WHERE id=@PackageId FOR UPDATE",
             new { PackageId = packageId }, transaction, cancellationToken: cancellationToken));
         if (state is null) throw new PdmNotFoundException("图纸审核单不存在。");
-        if (state is not (nameof(DrawingReviewPackageState.InReview) or nameof(DrawingReviewPackageState.PendingSupervisorApproval)))
-            throw new PdmConflictException("只有审核中的图纸审核单可以撤销。");
+        // 已退回（待修改）的审核单也允许撤销：退改过的图档改不动时，发起人可以撤回整单重新发起。
+        if (state is not (nameof(DrawingReviewPackageState.InReview)
+            or nameof(DrawingReviewPackageState.PendingSupervisorApproval)
+            or nameof(DrawingReviewPackageState.ChangesRequested)))
+            throw new PdmConflictException("只有审核中或已退回的图纸审核单可以撤销。");
         await connection.ExecuteAsync(new CommandDefinition(
             "UPDATE drawing_review_package SET state='Withdrawn',withdrawn_by=@Actor,withdrawn_at=@WithdrawnAt,withdrawal_reason=@Reason WHERE id=@PackageId",
             new { PackageId = packageId, Actor = actor, WithdrawnAt = withdrawnAt.UtcDateTime, Reason = reason },
@@ -251,15 +254,24 @@ public sealed partial class MySqlPdmRepository
             "SELECT item.package_id,package.state package_state FROM drawing_review_item item JOIN drawing_review_package package ON package.id=item.package_id WHERE item.id=@ItemId FOR UPDATE",
             new { ItemId = itemId }, transaction, cancellationToken: cancellationToken));
         if (link is null) throw new PdmNotFoundException("图纸审核项不存在。");
-        if (link.PackageState != DrawingReviewPackageState.InReview.ToString())
+        // 机械主管节点可按图退改（只退回这一张），其余情况仍要求审图节点。
+        var supervisorNode = link.PackageState == DrawingReviewPackageState.PendingSupervisorApproval.ToString();
+        if (!supervisorNode && link.PackageState != DrawingReviewPackageState.InReview.ToString())
             throw new PdmConflictException("当前图纸审核单不允许继续审核。");
         var sql = target == DrawingReviewTarget.Model3D
             ? "UPDATE drawing_review_item SET model_state=@State,model_reviewer=@Reviewer,model_reviewer_name=@ReviewerName,model_reviewed_at=@ReviewedAt,model_comment=@Comment WHERE id=@ItemId AND model_state='Pending'"
-            : "UPDATE drawing_review_item SET drawing_state=@State,drawing_reviewer=@Reviewer,drawing_reviewer_name=@ReviewerName,drawing_reviewed_at=@ReviewedAt,drawing_comment=@Comment WHERE id=@ItemId AND drawing_state='Pending'";
+            : supervisorNode
+                ? "UPDATE drawing_review_item SET drawing_state=@State,drawing_reviewer=@Reviewer,drawing_reviewer_name=@ReviewerName,drawing_reviewed_at=@ReviewedAt,drawing_comment=@Comment WHERE id=@ItemId AND drawing_state IN ('Approved','Marked','Pending')"
+                : "UPDATE drawing_review_item SET drawing_state=@State,drawing_reviewer=@Reviewer,drawing_reviewer_name=@ReviewerName,drawing_reviewed_at=@ReviewedAt,drawing_comment=@Comment WHERE id=@ItemId AND drawing_state='Pending'";
         var affected = await connection.ExecuteAsync(new CommandDefinition(sql,
             new { ItemId = itemId, State = state.ToString(), Reviewer = reviewer, ReviewerName = reviewerName, ReviewedAt = reviewedAt.UtcDateTime, Comment = comment },
             transaction, cancellationToken: cancellationToken));
         if (affected != 1) throw new PdmConflictException("该3D或2D图档已经完成审核，请刷新后重试。");
+        // 机械主管退回单张图纸后，审核单回到审图节点重新审核（其余已通过的图纸保持通过）。
+        if (supervisorNode)
+            await connection.ExecuteAsync(new CommandDefinition(
+                "UPDATE drawing_review_package SET state='InReview',supervisor_reviewed_by=NULL,supervisor_reviewed_by_name=NULL,supervisor_reviewed_at=NULL,supervisor_comment=NULL WHERE id=@PackageId AND state='PendingSupervisorApproval'",
+                new { link.PackageId }, transaction, cancellationToken: cancellationToken));
         // 单张图纸退改只影响该图纸，审核单其余图纸继续并行审核，不整单退回。
         await transaction.CommitAsync(cancellationToken);
         return await FindDrawingReviewPackageAsync(link.PackageId, cancellationToken)
@@ -282,6 +294,51 @@ public sealed partial class MySqlPdmRepository
             : "UPDATE drawing_review_item SET drawing_state='Pending',drawing_reviewer=NULL,drawing_reviewer_name=NULL,drawing_reviewed_at=NULL,drawing_comment=NULL WHERE id=@ItemId AND drawing_state IN ('Approved','Marked','ChangesRequested')";
         var affected = await connection.ExecuteAsync(new CommandDefinition(sql, new { ItemId = itemId }, transaction, cancellationToken: cancellationToken));
         if (affected != 1) throw new PdmConflictException("该图档没有可撤销的审核结论。");
+        await connection.ExecuteAsync(new CommandDefinition(
+            "UPDATE drawing_review_package SET state='InReview',supervisor_reviewed_by=NULL,supervisor_reviewed_by_name=NULL,supervisor_reviewed_at=NULL,supervisor_comment=NULL WHERE id=@PackageId AND state='PendingSupervisorApproval'",
+            new { link.PackageId }, transaction, cancellationToken: cancellationToken));
+        await transaction.CommitAsync(cancellationToken);
+        return await FindDrawingReviewPackageAsync(link.PackageId, cancellationToken)
+            ?? throw new PdmNotFoundException("图纸审核单不存在。");
+    }
+
+    public async Task<DrawingReviewPackage> ResubmitDrawingReviewItemAsync(
+        Guid itemId,
+        Guid drawingVersionId,
+        string drawingRevision,
+        string drawingSha256,
+        string drawingCreatedBy,
+        CancellationToken cancellationToken)
+    {
+        await using var connection = await OpenAsync(cancellationToken);
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+        var link = await connection.QuerySingleOrDefaultAsync<DrawingReviewResubmitRow>(new CommandDefinition(
+            "SELECT item.package_id,package.state package_state,item.drawing_state FROM drawing_review_item item JOIN drawing_review_package package ON package.id=item.package_id WHERE item.id=@ItemId FOR UPDATE",
+            new { ItemId = itemId }, transaction, cancellationToken: cancellationToken));
+        if (link is null) throw new PdmNotFoundException("图纸审核项不存在。");
+        if (link.PackageState is not (nameof(DrawingReviewPackageState.InReview) or nameof(DrawingReviewPackageState.PendingSupervisorApproval)))
+            throw new PdmConflictException("当前图纸审核单不允许重新提交审核。");
+        if (link.DrawingState != DrawingReviewTargetState.ChangesRequested.ToString())
+            throw new PdmConflictException("只有已退回（待修改）的图档可以重新提交审核。");
+        var affected = await connection.ExecuteAsync(new CommandDefinition(
+            """
+            UPDATE drawing_review_item
+            SET drawing_state='Pending',drawing_version_id=@DrawingVersionId,drawing_revision=@DrawingRevision,
+                drawing_sha256=@DrawingSha256,drawing_created_by=@DrawingCreatedBy,
+                drawing_reviewer=NULL,drawing_reviewer_name=NULL,drawing_reviewed_at=NULL,drawing_comment=NULL,
+                drawing_result_version_id=NULL,drawing_writeback_id=NULL
+            WHERE id=@ItemId AND drawing_state='ChangesRequested'
+            """,
+            new
+            {
+                ItemId = itemId,
+                DrawingVersionId = drawingVersionId,
+                DrawingRevision = drawingRevision,
+                DrawingSha256 = drawingSha256,
+                DrawingCreatedBy = drawingCreatedBy
+            }, transaction, cancellationToken: cancellationToken));
+        if (affected != 1) throw new PdmConflictException("该图档已经重新提交或审核结论已变化，请刷新后重试。");
+        // 已提交机械主管的审核单：单张退改图修改后重新提交，审核单退回审图节点重新审核。
         await connection.ExecuteAsync(new CommandDefinition(
             "UPDATE drawing_review_package SET state='InReview',supervisor_reviewed_by=NULL,supervisor_reviewed_by_name=NULL,supervisor_reviewed_at=NULL,supervisor_comment=NULL WHERE id=@PackageId AND state='PendingSupervisorApproval'",
             new { link.PackageId }, transaction, cancellationToken: cancellationToken));
@@ -322,6 +379,16 @@ public sealed partial class MySqlPdmRepository
             """,
             new { PackageId = packageId, State = state, Reviewer = reviewer, ReviewerName = reviewerName, ReviewedAt = reviewedAt.UtcDateTime, Comment = comment }, cancellationToken: cancellationToken));
         if (affected != 1) throw new PdmConflictException("机械主管批准任务已处理或当前状态已变化，请刷新后重试。");
+        // 机械主管整单退回：把该单内仍为已通过的图纸一并置为待修改，设计者可直接改图后重新提交。
+        if (decision == DrawingReviewDecision.RequestChanges)
+            await connection.ExecuteAsync(new CommandDefinition(
+                """
+                UPDATE drawing_review_item
+                SET drawing_state='ChangesRequested',drawing_reviewer=@Reviewer,drawing_reviewer_name=@ReviewerName,
+                    drawing_reviewed_at=@ReviewedAt,drawing_comment=@Comment
+                WHERE package_id=@PackageId AND drawing_state IN ('Approved','Marked')
+                """,
+                new { PackageId = packageId, Reviewer = reviewer, ReviewerName = reviewerName, ReviewedAt = reviewedAt.UtcDateTime, Comment = comment }, cancellationToken: cancellationToken));
         return await FindDrawingReviewPackageAsync(packageId, cancellationToken)
             ?? throw new PdmNotFoundException("图纸审核单不存在。");
     }
@@ -620,6 +687,13 @@ public sealed partial class MySqlPdmRepository
     {
         public Guid PackageId { get; init; }
         public string PackageState { get; init; } = string.Empty;
+    }
+
+    private sealed class DrawingReviewResubmitRow
+    {
+        public Guid PackageId { get; init; }
+        public string PackageState { get; init; } = string.Empty;
+        public string DrawingState { get; init; } = string.Empty;
     }
 
     private sealed class DrawingReviewWritebackLinkRow

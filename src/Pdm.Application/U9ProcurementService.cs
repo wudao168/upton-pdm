@@ -6,6 +6,7 @@ public sealed class U9ProcurementService(
     IU9ProcurementRepository procurement,
     IMaterialRepository materials,
     IPdmRepository repository,
+    IProjectPlanningRepository plans,
     IU9SecretProtector secretProtector,
     IU9OpenApiClient authenticationClient,
     IU9ProcurementClient procurementClient,
@@ -29,6 +30,10 @@ public sealed class U9ProcurementService(
         var subprojectCode = project.ParentProjectId is null ? null : project.Code;
         var sourceRows = await procurement.ListForProjectAsync(root.Code, subprojectCode, cancellationToken);
         var published = await ListPublishedBomAsync(projectId, cancellationToken);
+        // 装配、调试起始日期取自项目计划对应阶段的主任务计划开始日期。
+        var plan = await plans.FindPlanAsync(projectId, cancellationToken);
+        var assemblyStartDate = StageStartDate(plan, ProjectPlanStage.Assembly);
+        var commissioningStartDate = StageStartDate(plan, ProjectPlanStage.Commissioning);
         var latestRun = await procurement.GetLatestRunAsync(cancellationToken);
 
         var output = new List<ProjectProcurementTrackingItem>(published.Count);
@@ -83,7 +88,9 @@ public sealed class U9ProcurementService(
                 activeRequisitions.Sum(row => row.ApprovedQuantity),
                 details)
             {
-                ImpactStage = line.Item.ImpactStage
+                ImpactStage = line.Item.ImpactStage,
+                AssemblyStartDate = assemblyStartDate,
+                CommissioningStartDate = commissioningStartDate
             });
         }
 
@@ -95,6 +102,13 @@ public sealed class U9ProcurementService(
             latestRun?.Status == U9InventorySyncStatus.Succeeded ? latestRun.CompletedAt : null,
             latestRun?.Status == U9InventorySyncStatus.Failed ? latestRun.LastError : null,
             published.Count > 0);
+    }
+
+    private static DateOnly? StageStartDate(ProjectPlan? plan, string stage)
+    {
+        var effective = plan?.ChangeDraftSource ?? plan;
+        var starts = effective?.Tasks.Where(task => task.Stage == stage).Select(task => task.PlannedStart).ToArray() ?? [];
+        return starts.Length == 0 ? null : starts.Min();
     }
 
     public async Task<U9ProcurementSyncSettings> GetSettingsAsync(

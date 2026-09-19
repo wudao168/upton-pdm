@@ -1427,6 +1427,13 @@ export async function decideDrawingReviewTarget(packageId: string, itemId: strin
   }, token))
 }
 
+/** 退改后设计者已按新版本存档：把该图档重新提交给审图人（只影响这一张图）。 */
+export async function resubmitDrawingReviewItem(packageId: string, itemId: string, token: string): Promise<DrawingReviewPackage> {
+  return mapDrawingReviewPackage(await requestJson<ApiDrawingReviewPackage>(`/api/drawing-reviews/${packageId}/items/${itemId}/resubmit`, {
+    method: 'POST',
+  }, token))
+}
+
 export async function decideDrawingReviewSupervisor(packageId: string, decision: DrawingReviewDecision, comment: string, token: string): Promise<DrawingReviewPackage> {
   return mapDrawingReviewPackage(await requestJson<ApiDrawingReviewPackage>(`/api/drawing-reviews/${packageId}/supervisor-decision`, {
     method: 'POST', body: JSON.stringify({ decision, comment }),

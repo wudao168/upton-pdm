@@ -243,4 +243,45 @@ describe('DrawingReviewAnnotationCard', () => {
     expect(wrapper.text()).toContain('当前审核人：具备审核权限的人员均可处理，任一通过即可')
     expect(wrapper.findAll('.drawing-review-decision-buttons button').every(button => button.attributes('disabled') === undefined)).toBe(true)
   })
+
+  it('机械主管节点退改只退回当前选中的图纸，批准仍是整单操作', async () => {
+    const confirm = vi.spyOn(ElMessageBox, 'confirm').mockResolvedValue({ action: 'confirm' } as never)
+    const supervisorNode: DrawingReviewPackage = {
+      ...review,
+      state: 'PendingSupervisorApproval',
+      supervisor: 'manager',
+      supervisorName: '机械主管',
+      items: [{ ...review.items[0]!, drawingState: 'Approved' }],
+    }
+    const wrapper = mountCard(supervisorNode, 'manager')
+
+    expect(wrapper.text()).toContain('批准为整单操作，退改只退回当前选中的图纸')
+    expect(wrapper.findAll('.drawing-review-decision-buttons button').map(button => button.text())).toEqual(['退改', '批准'])
+
+    // 批准：整单操作，走机械主管结论。
+    await wrapper.get('.is-approve').trigger('click')
+    await Promise.resolve()
+    expect(wrapper.emitted('decideSupervisor')).toEqual([['review-1', 'Approve', '']])
+    expect(wrapper.emitted('decide')).toBeUndefined()
+
+    // 退改：必须二次确认，且明确只退回当前这一张，结论落到该图纸而不是整单。
+    await wrapper.get('textarea[aria-label="审核意见"]').setValue('尺寸链需复核')
+    await wrapper.get('.is-reject').trigger('click')
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(confirm).toHaveBeenCalled()
+    expect(String(confirm.mock.calls.at(-1)![0])).toContain('确认退回图纸 A01-100')
+    expect(String(confirm.mock.calls.at(-1)![0])).toContain('同一审核单其他图纸不受影响')
+    expect(wrapper.emitted('decide')!.at(-1)).toEqual(['review-1', 'item-1', 'Drawing2D', 'RequestChanges', '尺寸链需复核'])
+    confirm.mockRestore()
+  })
+
+  it('整单退回的历史审核单给出可执行的下一步说明', () => {
+    const wholeReturned: DrawingReviewPackage = { ...review, state: 'ChangesRequested', items: [{ ...review.items[0]!, drawingState: 'Approved' }] }
+    const wrapper = mountCard(wholeReturned, 'reviewer')
+
+    expect(wrapper.text()).toContain('本审核单已整单退回（待修改）')
+    expect(wrapper.text()).toContain('可重新发起审核')
+    expect(wrapper.findAll('.drawing-review-decision-buttons button').every(button => button.attributes('disabled') !== undefined)).toBe(true)
+  })
 })

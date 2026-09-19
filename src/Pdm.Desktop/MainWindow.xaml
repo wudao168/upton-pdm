@@ -87,7 +87,7 @@
                     </Button>
                     <Button Click="OnCloseButtonClick"
                             Style="{StaticResource CaptionButtonStyle}"
-                            ToolTip="关闭"
+                            ToolTip="最小化到托盘（退出请右键托盘图标）"
                             shell:WindowChrome.IsHitTestVisibleInChrome="True">
                         <TextBlock FontFamily="Segoe MDL2 Assets" FontSize="10" Text="&#xE8BB;" />
                     </Button>
@@ -110,10 +110,88 @@
         </Canvas>
 
         <Border x:Name="LoadingPanel" Grid.Row="1" Panel.ZIndex="100" Background="#FFFFFF">
-            <StackPanel HorizontalAlignment="Center"
-                        VerticalAlignment="Center"
-                        SnapsToDevicePixels="True">
-                <Grid Width="136" Height="136">
+            <Grid>
+                <!-- 工业风底纹：蓝图网格 + 齿轮轮廓，与网页端登录页保持一致的视觉语言 -->
+                <Rectangle Opacity="0.55">
+                    <Rectangle.Fill>
+                        <DrawingBrush TileMode="Tile" Viewport="0,0,40,40" ViewportUnits="Absolute" Stretch="None">
+                            <DrawingBrush.Drawing>
+                                <GeometryDrawing>
+                                    <GeometryDrawing.Pen>
+                                        <Pen Brush="#D7E3EF" Thickness="1" />
+                                    </GeometryDrawing.Pen>
+                                    <GeometryDrawing.Geometry>
+                                        <GeometryGroup>
+                                            <LineGeometry StartPoint="0,0" EndPoint="0,40" />
+                                            <LineGeometry StartPoint="0,0" EndPoint="40,0" />
+                                        </GeometryGroup>
+                                    </GeometryDrawing.Geometry>
+                                </GeometryDrawing>
+                            </DrawingBrush.Drawing>
+                        </DrawingBrush>
+                    </Rectangle.Fill>
+                </Rectangle>
+                <Path HorizontalAlignment="Left"
+                      VerticalAlignment="Top"
+                      Margin="72,86,0,0"
+                      Data="M0,44 A44,44 0 1 1 88,44 A44,44 0 1 1 0,44 M30,44 A14,14 0 1 1 58,44 A14,14 0 1 1 30,44 M44,-6 V6 M44,82 V94 M-6,44 H6 M82,44 H94"
+                      Stroke="#C3D5E6"
+                      StrokeThickness="3"
+                      StrokeStartLineCap="Round"
+                      StrokeEndLineCap="Round"
+                      RenderTransformOrigin="0.5,0.5">
+                    <Path.RenderTransform>
+                        <RotateTransform x:Name="LoadingGearRotation" CenterX="44" CenterY="44" />
+                    </Path.RenderTransform>
+                    <Path.Triggers>
+                        <EventTrigger RoutedEvent="Loaded">
+                            <BeginStoryboard>
+                                <Storyboard RepeatBehavior="Forever">
+                                    <DoubleAnimation Storyboard.TargetName="LoadingGearRotation"
+                                                     Storyboard.TargetProperty="Angle"
+                                                     From="0"
+                                                     To="360"
+                                                     Duration="0:0:24" />
+                                </Storyboard>
+                            </BeginStoryboard>
+                        </EventTrigger>
+                    </Path.Triggers>
+                </Path>
+                <Path HorizontalAlignment="Right"
+                      VerticalAlignment="Bottom"
+                      Margin="0,0,86,104"
+                      Data="M0,28 A28,28 0 1 1 56,28 A28,28 0 1 1 0,28 M20,28 A8,8 0 1 1 36,28 A8,8 0 1 1 20,28 M28,0 V6 M28,50 V56 M0,28 H6 M50,28 H56"
+                      Stroke="#CFDFEE"
+                      StrokeThickness="3"
+                      StrokeStartLineCap="Round"
+                      StrokeEndLineCap="Round"
+                      RenderTransformOrigin="0.5,0.5">
+                    <Path.RenderTransform>
+                        <RotateTransform x:Name="LoadingGearRotationSecondary" CenterX="28" CenterY="28" />
+                    </Path.RenderTransform>
+                    <Path.Triggers>
+                        <EventTrigger RoutedEvent="Loaded">
+                            <BeginStoryboard>
+                                <Storyboard RepeatBehavior="Forever">
+                                    <DoubleAnimation Storyboard.TargetName="LoadingGearRotationSecondary"
+                                                     Storyboard.TargetProperty="Angle"
+                                                     From="360"
+                                                     To="0"
+                                                     Duration="0:0:32" />
+                                </Storyboard>
+                            </BeginStoryboard>
+                        </EventTrigger>
+                    </Path.Triggers>
+                </Path>
+                <StackPanel HorizontalAlignment="Center"
+                            VerticalAlignment="Center"
+                            SnapsToDevicePixels="True">
+                    <Image Width="132"
+                           Height="132"
+                           HorizontalAlignment="Center"
+                           Source="Assets/PdmClient.ico"
+                           Stretch="Uniform" />
+                    <Grid Width="112" Height="112" Margin="0,14,0,0">
                     <Viewport3D x:Name="LoadingCubeViewport"
                                 Width="112"
                                 Height="112"
@@ -128,14 +206,20 @@
                         </Viewport3D.Camera>
                         <ModelVisual3D x:Name="LoadingCubeVisual" />
                     </Viewport3D>
-                </Grid>
-                <TextBlock Margin="0,10,0,0"
-                           HorizontalAlignment="Center"
-                           Foreground="#27364A"
-                           FontSize="14"
-                           FontWeight="SemiBold"
-                           Text="UPLM 产品生命周期管理" />
-            </StackPanel>
+                    </Grid>
+                    <TextBlock Margin="0,12,0,0"
+                               HorizontalAlignment="Center"
+                               Foreground="#27364A"
+                               FontSize="16"
+                               FontWeight="SemiBold"
+                               Text="UPLM 产品生命周期管理" />
+                    <TextBlock Margin="0,6,0,0"
+                               HorizontalAlignment="Center"
+                               Foreground="#6B7C91"
+                               FontSize="12"
+                               Text="正在加载设计协同工作台…" />
+                </StackPanel>
+            </Grid>
         </Border>
     </Grid>
 </Window>

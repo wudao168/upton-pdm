@@ -3591,13 +3591,28 @@ public sealed class PdmWorkflowService(
             throw new PdmRuleException("该非标件没有唯一关联的2D工程图。");
         if (command.Decision == DrawingReviewDecision.Revoke)
             return await RevokeDrawingReviewTargetAsync(package, item, actor, command, cancellationToken);
-        if (package.State != DrawingReviewPackageState.InReview)
+        // 机械主管节点也可以按图退改：只退回当前这一张，其余已通过的图纸保持通过，
+        // 审核单退回审图节点，改完重新提交后再走一遍审图。
+        var supervisorNode = package.State == DrawingReviewPackageState.PendingSupervisorApproval;
+        if (!supervisorNode && package.State != DrawingReviewPackageState.InReview)
             throw new PdmConflictException("当前图纸审核单不允许继续审核。");
         var targetState = item.DrawingState;
-        if (targetState != DrawingReviewTargetState.Pending)
+        if (supervisorNode)
+        {
+            if (command.Decision != DrawingReviewDecision.RequestChanges)
+                throw new PdmRuleException("机械主管节点请用“批准”整单批准；如需退回请对当前选中的图纸点“退改”。");
+            if (targetState is not (DrawingReviewTargetState.Approved or DrawingReviewTargetState.Marked or DrawingReviewTargetState.Pending))
+                throw new PdmConflictException("该2D工程图当前状态不允许退回，请刷新后重试。");
+        }
+        else if (targetState != DrawingReviewTargetState.Pending)
             throw new PdmConflictException("该2D工程图已经完成审核，请刷新后重试。");
         var developerSelfReviewAllowed = TenantContext.Current?.HasRole("developer") == true;
-        if (!package.AllowsReviewer(actor) && !developerSelfReviewAllowed)
+        if (supervisorNode)
+        {
+            if (!string.Equals(package.Supervisor, actor, StringComparison.OrdinalIgnoreCase) && !developerSelfReviewAllowed)
+                throw new UnauthorizedAccessException($"当前节点由机械主管{package.SupervisorName ?? package.Supervisor}处理。");
+        }
+        else if (!package.AllowsReviewer(actor) && !developerSelfReviewAllowed)
         {
             var assigned = package.AssignedReviewerNames.Count > 0
                 ? string.Join("、", package.AssignedReviewerNames)
@@ -3605,7 +3620,7 @@ public sealed class PdmWorkflowService(
             throw new UnauthorizedAccessException($"当前节点由指定审核人 {assigned} 并行处理。");
         }
         var createdBy = item.DrawingCreatedBy;
-        if (!developerSelfReviewAllowed && string.Equals(createdBy, actor, StringComparison.OrdinalIgnoreCase))
+        if (!supervisorNode && !developerSelfReviewAllowed && string.Equals(createdBy, actor, StringComparison.OrdinalIgnoreCase))
             throw new PdmRuleException("设计者不能审核自己生成的图档版本，请由其他审核人处理。");
         var comment = string.IsNullOrWhiteSpace(command.Comment) ? null : command.Comment.Trim();
         if (command.Decision == DrawingReviewDecision.RequestChanges)
@@ -3669,6 +3684,43 @@ public sealed class PdmWorkflowService(
         var updated = await repository.RevokeDrawingReviewTargetAsync(item.Id, command.Target, cancellationToken);
         await AuditAsync(actor, "drawing-review.revoke", nameof(DrawingReviewItem), item.Id.ToString(),
             $"{command.Target}；撤销审核结论；{comment}", cancellationToken);
+        return updated;
+    }
+
+    /// <summary>
+    /// 退改后设计者已按新版本存档：把该2D图档按最新版本恢复为待审核，重新进入审图节点，同单其他图档不受影响。
+    /// </summary>
+    public async Task<DrawingReviewPackage> ResubmitDrawingReviewItemAsync(Guid packageId, Guid itemId, string actor, UserRole role, CancellationToken cancellationToken)
+    {
+        await RequirePermissionAsync(actor, role, PermissionCodes.DrawingReviewSubmit, cancellationToken);
+        var package = await repository.FindDrawingReviewPackageAsync(packageId, cancellationToken)
+            ?? throw new PdmNotFoundException("图纸审核单不存在。");
+        if (!await repository.HasProjectContentReadAccessAsync(package.ProjectId, actor, role, cancellationToken))
+            throw new UnauthorizedAccessException("当前用户没有该项目的操作权限。");
+        var item = package.Items.FirstOrDefault(candidate => candidate.Id == itemId)
+            ?? throw new PdmNotFoundException("图纸审核项不存在。");
+        if (item.DrawingState != DrawingReviewTargetState.ChangesRequested)
+            throw new PdmRuleException("只有已退回（待修改）的图档可以重新提交审核。");
+        if (role != UserRole.Administrator
+            && !string.Equals(package.CreatedBy, actor, StringComparison.OrdinalIgnoreCase)
+            && !string.Equals(item.DrawingCreatedBy, actor, StringComparison.OrdinalIgnoreCase))
+            throw new UnauthorizedAccessException("只有审核发起人或该图档的设计者可以重新提交审核。");
+        if (item.DrawingDocumentId is not Guid drawingDocumentId)
+            throw new PdmRuleException("该审核项没有2D工程图，不能重新提交审核。");
+        var latest = (await repository.ListDocumentVersionsAsync(drawingDocumentId, cancellationToken))
+            .OrderByDescending(version => version.CreatedAt).FirstOrDefault()
+            ?? throw new PdmRuleException("该图档尚无已存档版本，请先获取编辑权限、修改并提交存档。");
+        if (latest.Id == item.EffectiveDrawingVersionId)
+            throw new PdmRuleException("该图档还没有新的存档版本：请先在客户端获取编辑权限、修改并提交存档，再重新提交审核。");
+        var updated = await repository.ResubmitDrawingReviewItemAsync(itemId, latest.Id, latest.Revision.Display, latest.Sha256, latest.CreatedBy, cancellationToken);
+        await AuditAsync(actor, "drawing-review.resubmit", nameof(DrawingReviewItem), itemId.ToString(),
+            $"{item.DrawingNumber}；重新提交审核版本{latest.Revision.Display}", cancellationToken);
+        var reviewers = updated.AssignedReviewers.Count > 0
+            ? updated.AssignedReviewers
+            : (await ListDrawingReviewCandidateUsersAsync(package.ProjectId, actor, cancellationToken)).Select(user => user.Username).ToArray();
+        await CreateDrawingReviewNotificationsAsync(updated.ProjectId, $"drawing-review:{updated.Id:N}:resubmit:{itemId:N}:{latest.Id:N}", "DrawingReviewResubmitted", "图纸已修改重新提交审核",
+            project => $"{project.Code} · {item.DrawingNumber} 已按修改后的版本 {latest.Revision.Display} 重新提交审核，请重新审图。",
+            reviewers, cancellationToken);
         return updated;
     }
 

@@ -366,21 +366,22 @@ $shortcutPath = Join-Path $desktopDirectory 'UPLM.lnk'
 $previousShortcutPath = Join-Path $desktopDirectory 'UPTON PLM.lnk'
 $legacyShortcutPath = Join-Path $desktopDirectory 'UPTON PDM.lnk'
 $clientPath = Join-Path $localRoot 'client\Upton.Pdm.Desktop.exe'
-$clientIconPath = Join-Path $localRoot 'client\UPTON-PLM.ico'
-if (-not (Test-Path -LiteralPath $clientIconPath)) {
-    throw "UPLM desktop icon was not found: $clientIconPath"
+# 客户端自更新会整体替换 client 目录，快捷方式图标只能引用随包分发的 UPTON-PLM.ico。
+$shortcutIconPath = Join-Path $localRoot 'client\UPTON-PLM.ico'
+if (-not (Test-Path -LiteralPath $shortcutIconPath)) {
+    throw "UPLM desktop icon was not found: $shortcutIconPath"
 }
-$clientIconHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $clientIconPath).Hash.Substring(0, 12)
-$shortcutIconPath = Join-Path $localRoot "client\UPTON-PLM-$clientIconHash.ico"
-Copy-Item -LiteralPath $clientIconPath -Destination $shortcutIconPath -Force
-if (-not $isUpgrade) {
-    $shell = New-Object -ComObject WScript.Shell
-    $shortcut = $shell.CreateShortcut($shortcutPath)
+$shell = New-Object -ComObject WScript.Shell
+$isNewShortcut = -not (Test-Path -LiteralPath $shortcutPath)
+$shortcut = $shell.CreateShortcut($shortcutPath)
+if (-not $isUpgrade -or $isNewShortcut) {
     $shortcut.TargetPath = $clientPath
     $shortcut.WorkingDirectory = Join-Path $localRoot 'client'
-    $shortcut.IconLocation = "$shortcutIconPath,0"
     $shortcut.Description = 'UPLM engineering client'
-    $shortcut.Save()
+}
+$shortcut.IconLocation = "$shortcutIconPath,0"
+$shortcut.Save()
+if (-not $isUpgrade) {
     if (Test-Path -LiteralPath $previousShortcutPath) { Remove-Item -LiteralPath $previousShortcutPath -Force }
     if (Test-Path -LiteralPath $legacyShortcutPath) { Remove-Item -LiteralPath $legacyShortcutPath -Force }
 }
@@ -394,7 +395,7 @@ $receipt = [ordered]@{
     localRoot = $localRoot
     apiPath = Join-Path $localRoot 'api\Pdm.Api.dll'
     clientPath = $clientPath
-    clientIconPath = $clientIconPath
+    clientIconPath = $shortcutIconPath
     shortcutIconPath = $shortcutIconPath
     addinPath = Join-Path $localRoot 'solidworks-addin\Upton.Pdm.SolidWorks.Addin.dll'
     previewWorkerPath = Join-Path $localRoot 'preview-worker\Upton.Pdm.SolidWorks.PreviewWorker.exe'

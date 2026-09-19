@@ -124,6 +124,21 @@ describe('PreviewWorkspace', () => {
     expect(postMessage).toHaveBeenCalledWith({ type: 'preview-host-save-markup', payload: undefined })
   })
 
+  it('审核冻结版本默认只读，已退回待修改的图档可以编辑打开', async () => {
+    const wrapper = mount(PreviewWorkspace, {
+      props: { selected, related: [], bomItem, desktopAvailable: true, canEditDocuments: true, reviewVersionId: 'review-version-1', reviewRevision: 'W1' },
+    })
+    window.dispatchEvent(new CustomEvent('pdm-solidworks-capability', { detail: { available: true } }))
+    await wrapper.vm.$nextTick()
+
+    expect(wrapper.findAll('.pdm-preview-command').map(button => button.attributes('aria-label'))).toEqual(['打开审核版', '保存批注'])
+
+    await wrapper.setProps({ reviewEditable: true })
+
+    expect(wrapper.findAll('.pdm-preview-command').map(button => button.attributes('aria-label'))).toEqual(['打开审核版', '编辑打开', '保存批注'])
+    expect(wrapper.get('button[aria-label="编辑打开"]').attributes('title')).toContain('该图已退回待修改')
+  })
+
   it('shows a local lightweight image and keeps eDrawings behind an explicit action', async () => {
     const postMessage = vi.fn()
     Object.defineProperty(window, 'chrome', {

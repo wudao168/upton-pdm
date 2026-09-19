@@ -1038,6 +1038,12 @@ public static class PdmEndpointExtensions
             return Results.Ok(await workflow.DecideDrawingReviewTargetAsync(packageId, itemId, new DecideDrawingReviewTargetCommand(request.Target, request.Decision, request.Comment), actor, role, cancellationToken));
         });
 
+        api.MapPost("/drawing-reviews/{packageId:guid}/items/{itemId:guid}/resubmit", async (Guid packageId, Guid itemId, HttpContext context, PdmWorkflowService workflow, CancellationToken cancellationToken) =>
+        {
+            var (actor, role) = CurrentUser(context.User);
+            return Results.Ok(await workflow.ResubmitDrawingReviewItemAsync(packageId, itemId, actor, role, cancellationToken));
+        });
+
         api.MapGet("/projects/{projectId:guid}/boms/empty-declarations", async (Guid projectId, HttpContext context, IPdmRepository repository, CancellationToken cancellationToken) =>
         {
             var (actor, role) = CurrentUser(context.User);
