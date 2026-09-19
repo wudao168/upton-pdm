@@ -171,16 +171,19 @@ async function resubmit() {
         <button type="button" class="is-approve" :disabled="pending" @click="resubmit()"><Send :size="14" />重新提交</button>
       </template>
       <template v-else>
-        <button type="button" class="is-reject" :disabled="pending || !canAct" @click="submit('RequestChanges')"><X :size="14" />退改</button>
-        <button
-          v-if="itemDecided && !canActAsSupervisor"
-          type="button"
-          class="is-revoke"
-          :title="itemApproved ? '撤销审核通过' : '撤销退改结论'"
-          :disabled="!canRevoke"
-          @click="revoke()"
-        ><RotateCcw :size="14" />撤销</button>
-        <button v-else type="button" class="is-approve" :disabled="pending || !canAct" @click="submit('Approve')"><Check :size="14" />{{ supervisorApproval ? '批准' : '通过' }}</button>
+        <span v-if="canActAsSupervisor" class="drawing-review-decision-bar__hint">请在下方明细中勾选图纸后批量批准</span>
+        <template v-else>
+          <button type="button" class="is-reject" :disabled="pending || !canAct" @click="submit('RequestChanges')"><X :size="14" />退改</button>
+          <button
+            v-if="itemDecided"
+            type="button"
+            class="is-revoke"
+            :title="itemApproved ? '撤销审核通过' : '撤销退改结论'"
+            :disabled="!canRevoke"
+            @click="revoke()"
+          ><RotateCcw :size="14" />撤销</button>
+          <button v-else type="button" class="is-approve" :disabled="pending || !canAct" @click="submit('Approve')"><Check :size="14" />通过</button>
+        </template>
       </template>
     </div>
   </section>
@@ -193,7 +196,7 @@ async function resubmit() {
 .drawing-review-decision-bar__node.is-pending{background:#e8f0fe;color:#2563eb}
 .drawing-review-decision-bar textarea{flex:1 1 160px;min-width:110px;height:28px;box-sizing:border-box;padding:5px 7px;border:1px solid var(--pdm-border);border-radius:5px;background:var(--pdm-surface);color:var(--pdm-text);font:inherit;font-size:12px;resize:vertical}
 .drawing-review-decision-bar__route{flex:0 1 auto;min-width:0;overflow:hidden;color:var(--pdm-blue);font-size:12px;text-overflow:ellipsis;white-space:nowrap}
-.drawing-review-decision-bar__comment{flex:0 0 auto;max-width:220px;overflow:hidden;color:var(--pdm-danger);font-size:12px;text-overflow:ellipsis;white-space:nowrap}
+.drawing-review-decision-bar__comment{flex:0 0 auto;max-width:220px;overflow:hidden;color:var(--pdm-danger);font-size:12px;text-overflow:ellipsis;white-space:nowrap}.drawing-review-decision-bar__hint{flex:0 0 auto;color:var(--pdm-muted);font-size:12px;white-space:nowrap}
 .drawing-review-decision-bar .drawing-review-decision-buttons{flex:0 0 auto;display:flex;gap:5px;margin-left:auto}
 .drawing-review-decision-bar .drawing-review-decision-buttons button{display:inline-flex;align-items:center;justify-content:center;gap:5px;width:72px;min-width:72px;min-height:28px;padding:4px 6px;border:1px solid var(--pdm-border);border-radius:5px;background:var(--pdm-surface);color:var(--pdm-text);font:inherit;font-size:12px;cursor:pointer}
 .drawing-review-decision-bar .drawing-review-decision-buttons button:disabled{opacity:.45;cursor:not-allowed}

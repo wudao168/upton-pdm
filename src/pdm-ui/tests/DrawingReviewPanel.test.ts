@@ -452,6 +452,7 @@ describe('DrawingReviewPanel', () => {
   })
 
   it('明细支持勾选与全选，并可批量批准', async () => {
+    const confirm = vi.spyOn(ElMessageBox, 'confirm').mockResolvedValue({ action: 'confirm' } as never)
     const candidates: DrawingReviewCandidate[] = [
       { ...candidate, candidateId: 'c1', modelDocumentId: 'model-2', drawingDocumentId: 'drawing-2', drawingNumber: 'A01-200', state: 'InReview', selectable: false },
       { ...candidate, candidateId: 'c2', modelDocumentId: 'model-3', drawingDocumentId: 'drawing-3', drawingNumber: 'A01-300', state: 'InReview', selectable: false },
@@ -483,10 +484,14 @@ describe('DrawingReviewPanel', () => {
     expect(wrapper.get('.drawing-review-overview__batch .is-approve').text()).toBe('批量批准')
 
     await wrapper.get('.drawing-review-overview__batch .is-approve').trigger('click')
+    await Promise.resolve()
+    expect(confirm).toHaveBeenCalled()
+    expect(String(confirm.mock.calls.at(-1)![0])).toContain('确认批准所选 2 张图纸')
     expect(wrapper.emitted('decideBatch')).toEqual([[[
       { kind: 'supervisor', packageId: 'review-9', itemId: 'item-2', decision: 'Approve', comment: '' },
       { kind: 'supervisor', packageId: 'review-9', itemId: 'item-3', decision: 'Approve', comment: '' },
     ]]])
+    confirm.mockRestore()
   })
 
   it('待提交阶段同样有勾选框，点击批量发起即直接提交审核', async () => {

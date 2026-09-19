@@ -107,6 +107,24 @@ const selectedSubmittableIds = computed(() => selectedOverviewCandidates.value
   .map(candidate => candidate.modelDocumentId!))
 const batchApproveLabel = computed(() => selectedOverviewEntries.value.length > 0
   && selectedOverviewEntries.value.every(entry => entry.action!.kind === 'supervisor') ? '批量批准' : '批量通过')
+// 主按钮按阶段复用：能审批时是“批量通过/批准”，否则是“批量发起”。
+const batchPrimaryMode = computed<'approve' | 'submit' | null>(() => {
+  const decided = selectedOverviewEntries.value.length
+  const selected = selectedOverviewCandidates.value.length
+  if (decided > 0 && decided === selected) return 'approve'
+  if (selectedSubmittableIds.value.length > 0) return 'submit'
+  return decided > 0 ? 'approve' : null
+})
+const batchPrimaryLabel = computed(() => batchPrimaryMode.value === 'approve' ? batchApproveLabel.value : '批量发起')
+const batchPrimaryDisabled = computed(() => props.pending || !batchPrimaryMode.value)
+
+function runBatchPrimary() {
+  if (batchPrimaryMode.value === 'approve') {
+    void batchDecide('Approve')
+    return
+  }
+  if (batchPrimaryMode.value === 'submit') batchSubmit()
+}
 
 function overviewRowAction(candidate: DrawingReviewCandidate) {
   const packageValue = activeReviewPackageFor(candidate)
@@ -140,6 +158,12 @@ async function batchDecide(decision: DrawingReviewDecision) {
   const entries = selectedOverviewEntries.value
   if (!entries.length) return
   let comment = ''
+  // 主管批准必须“先勾选、再确认”，避免点一次就把整单全部批准。
+  if (decision === 'Approve' && entries.every(entry => entry.action!.kind === 'supervisor')) {
+    await ElMessageBox.confirm(`确认批准所选 ${entries.length} 张图纸？`, '批量批准', {
+      confirmButtonText: '确认批准', cancelButtonText: '取消', type: 'warning',
+    })
+  }
   if (decision === 'RequestChanges') {
     const result = await ElMessageBox.prompt('请填写退改说明（批量退改会应用到所选图纸）', '批量退改', {
       confirmButtonText: '确认退改', cancelButtonText: '取消', inputPlaceholder: '退改说明', inputValidator: (value: string) => Boolean(value?.trim()) || '退改必须填写说明。',
@@ -233,14 +257,14 @@ function candidateStateLabel(candidate: DrawingReviewCandidate) {
 function overviewStateLabel(candidate: DrawingReviewCandidate) {
   // 状态表按“下一步等谁”显示：待审核 → 待批准 → 已批准。
   if (candidate.state !== 'InReview') return candidateStateLabel(candidate)
-  const item = reviewItemFor(candidate)
-  return item ? drawingReviewTargetStateLabel(item.drawingState) : candidateStateLabel(candidate)
+  const state = reviewItemStateFor(candidate)
+  return state ? drawingReviewTargetStateLabel(state) : candidateStateLabel(candidate)
 }
 
 function overviewStateTone(candidate: DrawingReviewCandidate) {
   if (candidate.state !== 'InReview') return drawingReviewCandidateStateTone(candidate.state)
-  const item = reviewItemFor(candidate)
-  return item ? drawingReviewTargetStateTone(item.drawingState) : drawingReviewCandidateStateTone(candidate.state)
+  const state = reviewItemStateFor(candidate)
+  return state ? drawingReviewTargetStateTone(state) : drawingReviewCandidateStateTone(candidate.state)
 }
 
 // 明细分页口径：仅“已批准（Marked）”或“已退回”算“已操作”；
@@ -248,8 +272,17 @@ function overviewStateTone(candidate: DrawingReviewCandidate) {
 function candidateConcluded(candidate: DrawingReviewCandidate) {
   if (candidate.state === 'ApprovedCurrent') return true
   if (candidate.state !== 'InReview') return false
-  const state = reviewItemFor(candidate)?.drawingState
+  const state = reviewItemStateFor(candidate)
   return state === 'Marked' || state === 'ChangesRequested'
+}
+
+// 主管批准后审核单进入“已批准/WritingProperties”，此时逐张图纸都应视为已批准。
+function reviewItemStateFor(candidate: DrawingReviewCandidate) {
+  const item = reviewItemFor(candidate)
+  if (!item) return null
+  const packageValue = activeReviewPackageFor(candidate)
+  if (packageValue?.state === 'WritingProperties' || packageValue?.state === 'Approved') return 'Marked' as const
+  return item.drawingState
 }
 
 function reviewItemFor(candidate: DrawingReviewCandidate) {
@@ -261,7 +294,8 @@ function reviewItemFor(candidate: DrawingReviewCandidate) {
 
 function activeReviewPackageFor(candidate: DrawingReviewCandidate) {
   return props.packages.find(packageValue =>
-    (packageValue.state === 'InReview' || packageValue.state === 'PendingSupervisorApproval' || packageValue.state === 'WritingProperties')
+    (packageValue.state === 'InReview' || packageValue.state === 'PendingSupervisorApproval'
+      || packageValue.state === 'WritingProperties' || packageValue.state === 'Approved')
     && packageValue.items.some(item =>
       Boolean(candidate.drawingDocumentId) && item.drawingDocumentId === candidate.drawingDocumentId
       || Boolean(candidate.modelDocumentId) && item.modelDocumentId === candidate.modelDocumentId))
@@ -409,9 +443,14 @@ const packageStateTone = computed(() => activePackage.value ? drawingReviewPacka
       <p v-if="!overviewCandidates.length">{{ overviewEmptyMessage }}</p>
       <div v-if="overviewSelectableIds.length" class="drawing-review-overview__batch">
         <span>已选 {{ selectedOverviewEntries.length }} 张</span>
-        <button type="button" class="is-approve" :disabled="pending || !selectedOverviewEntries.length" @click="batchDecide('Approve')">{{ batchApproveLabel }}</button>
+        <button
+          type="button"
+          :class="batchPrimaryMode === 'approve' ? 'is-approve' : 'is-submit'"
+          :title="batchPrimaryMode === 'submit' ? batchReviewerHint : undefined"
+          :disabled="batchPrimaryDisabled"
+          @click="runBatchPrimary()"
+        >{{ batchPrimaryLabel }}</button>
         <button type="button" class="is-reject" :disabled="pending || !selectedOverviewEntries.length" @click="batchDecide('RequestChanges')">批量退改</button>
-        <button v-if="canSubmit" type="button" class="is-submit" :title="batchReviewerHint" :disabled="pending || !selectedSubmittableIds.length" @click="batchSubmit()">批量发起</button>
       </div>
     </section>
 

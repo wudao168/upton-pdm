@@ -135,7 +135,7 @@ describe('DrawingReviewAnnotationCard', () => {
     confirm.mockRestore()
   })
 
-  it('待批准阶段：主管看到批准按钮，审图人看到撤销按钮', () => {
+  it('待批准阶段：主管只能去明细勾选后批量批准，审图人看到撤销按钮', () => {
     const pending: DrawingReviewPackage = {
       ...review,
       state: 'PendingSupervisorApproval',
@@ -145,9 +145,10 @@ describe('DrawingReviewAnnotationCard', () => {
     }
 
     const supervisor = mountCard(pending, 'manager')
-    expect(supervisor.get('.is-approve').text()).toContain('批准')
+    expect(supervisor.get('.drawing-review-decision-bar__hint').text()).toContain('请在下方明细中勾选图纸后批量批准')
+    expect(supervisor.find('.is-approve').exists()).toBe(false)
     expect(supervisor.find('.is-revoke').exists()).toBe(false)
-    expect(supervisor.text()).toContain('该2D工程图已通过审核，等待批准')
+    expect(supervisor.find('.is-reject').exists()).toBe(false)
 
     const reviewer = mountCard(pending, 'reviewer')
     expect(reviewer.find('.is-approve').exists()).toBe(false)
@@ -204,7 +205,9 @@ describe('DrawingReviewAnnotationCard', () => {
 
     await wrapper.setProps({ package: { ...review, state: 'PendingSupervisorApproval' } })
     expect(wrapper.get('textarea[aria-label="审核意见"]').attributes('disabled')).toBeDefined()
-    expect(wrapper.get('.is-approve').text()).toContain('批准')
+    // 当前用户不是该单主管时只读：按钮仍在但不可点（主管本人会看到“请勾选后批量批准”提示）。
+    expect(wrapper.get('.is-approve').attributes('disabled')).toBeDefined()
+    expect(wrapper.find('.drawing-review-decision-bar__hint').exists()).toBe(false)
   })
 
   it('没有审核单时结论条常驻且全部不可操作', () => {
@@ -244,8 +247,7 @@ describe('DrawingReviewAnnotationCard', () => {
     expect(wrapper.findAll('.drawing-review-decision-buttons button').every(button => button.attributes('disabled') === undefined)).toBe(true)
   })
 
-  it('机械主管节点退改只退回当前选中的图纸，批准仍是整单操作', async () => {
-    const confirm = vi.spyOn(ElMessageBox, 'confirm').mockResolvedValue({ action: 'confirm' } as never)
+  it('机械主管节点不在结论条上直接批准，避免一次点击批准整单', async () => {
     const supervisorNode: DrawingReviewPackage = {
       ...review,
       state: 'PendingSupervisorApproval',
@@ -255,25 +257,10 @@ describe('DrawingReviewAnnotationCard', () => {
     }
     const wrapper = mountCard(supervisorNode, 'manager')
 
-    expect(wrapper.text()).toContain('批准为整单操作，退改只退回当前选中的图纸')
-    expect(wrapper.findAll('.drawing-review-decision-buttons button').map(button => button.text())).toEqual(['退改', '批准'])
-
-    // 批准：整单操作，走机械主管结论。
-    await wrapper.get('.is-approve').trigger('click')
-    await Promise.resolve()
-    expect(wrapper.emitted('decideSupervisor')).toEqual([['review-1', 'Approve', '']])
-    expect(wrapper.emitted('decide')).toBeUndefined()
-
-    // 退改：必须二次确认，且明确只退回当前这一张，结论落到该图纸而不是整单。
-    await wrapper.get('textarea[aria-label="审核意见"]').setValue('尺寸链需复核')
-    await wrapper.get('.is-reject').trigger('click')
-    await Promise.resolve()
-    await Promise.resolve()
-    expect(confirm).toHaveBeenCalled()
-    expect(String(confirm.mock.calls.at(-1)![0])).toContain('确认退回图纸 A01-100')
-    expect(String(confirm.mock.calls.at(-1)![0])).toContain('同一审核单其他图纸不受影响')
-    expect(wrapper.emitted('decide')!.at(-1)).toEqual(['review-1', 'item-1', 'Drawing2D', 'RequestChanges', '尺寸链需复核'])
-    confirm.mockRestore()
+    // 结论条不再提供整单批准按钮，批准只能由明细勾选后批量完成。
+    expect(wrapper.find('.drawing-review-decision-buttons .is-approve').exists()).toBe(false)
+    expect(wrapper.emitted('decideSupervisor')).toBeUndefined()
+    expect(wrapper.get('.drawing-review-decision-bar__hint').text()).toContain('批量批准')
   })
 
   it('整单退回的历史审核单给出可执行的下一步说明', () => {
