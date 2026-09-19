@@ -72,7 +72,8 @@ describe('PreviewWorkspace', () => {
 
     const actions = wrapper.get('.pdm-preview-markup-row > .pdm-preview-actions')
     const host = actions.get('#drawing-review-decision-host')
-    expect(host.element.previousElementSibling).toBeNull()
+    // 批注功能在审核结论栏左侧，两者同容器同一行。
+    expect(host.element.previousElementSibling?.getAttribute('aria-label')).toBe('图形批注工具')
     expect(host.get('.stub-decision').text()).toBe('审核结论')
     expect(actions.find('[aria-label="图形批注工具"]').exists()).toBe(true)
   })

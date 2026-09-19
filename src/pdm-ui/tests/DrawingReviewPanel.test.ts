@@ -464,7 +464,8 @@ describe('DrawingReviewPanel', () => {
     expect(bar.text()).toContain('该2D工程图已通过审核，等待批准')
     expect(bar.find('.is-approve').exists()).toBe(false)
     const revokeButton = bar.get('.drawing-review-decision-buttons .is-revoke')
-    expect(revokeButton.text()).toBe('撤销通过')
+    expect(revokeButton.text()).toBe('撤销')
+    expect(revokeButton.attributes('title')).toBe('撤销审核通过')
 
     await revokeButton.trigger('click')
     await Promise.resolve()
@@ -488,7 +489,8 @@ describe('DrawingReviewPanel', () => {
     const bar = wrapper.get('.drawing-review-decision-bar')
     expect(bar.text()).toContain('该2D工程图已退回修改，其余图纸可继续审核')
     const revokeButton = bar.get('.drawing-review-decision-buttons .is-revoke')
-    expect(revokeButton.text()).toBe('撤销退改')
+    expect(revokeButton.text()).toBe('撤销')
+    expect(revokeButton.attributes('title')).toBe('撤销退改结论')
 
     await revokeButton.trigger('click')
     await Promise.resolve()
@@ -526,21 +528,24 @@ describe('DrawingReviewPanel', () => {
     expect(wrapper.text()).toContain('当前图档未纳入此审核单')
   })
 
-  it('可以调节并保存审核栏透明度', async () => {
-    window.localStorage.removeItem('upton-pdm-drawing-review-opacity')
+  it('审核栏不再提供透明度调节，默认完全不透明', () => {
     const wrapper = mount(DrawingReviewPanel, {
       global: { plugins: [ElementPlus] },
       props: { packageId: '', packages: [], selectedDocumentId: 'model-1', currentUsername: 'designer', ...permissions },
     })
 
-    const opacity = wrapper.get<HTMLInputElement>('input[aria-label="调整审核栏透明度"]')
-    expect(opacity.element.value).toBe('72')
-    expect(opacity.attributes('min')).toBe('5')
-    await opacity.setValue('5')
-    await opacity.trigger('change')
+    expect(wrapper.find('input[aria-label="调整审核栏透明度"]').exists()).toBe(false)
+    expect(wrapper.get('.drawing-review-panel').attributes('style') ?? '').not.toContain('--drawing-review-opacity')
+  })
 
-    expect(wrapper.get('.drawing-review-panel').attributes('style')).toContain('--drawing-review-opacity: 5%')
-    expect(window.localStorage.getItem('upton-pdm-drawing-review-opacity')).toBe('5')
+  it('状态筛选标签不换行', () => {
+    const wrapper = mount(DrawingReviewPanel, {
+      global: { plugins: [ElementPlus] },
+      props: { packageId: '', packages: [], selectedDocumentId: 'model-1', currentUsername: 'designer', ...permissions },
+    })
+
+    const label = wrapper.get('.drawing-review-panel__toolbar label > span')
+    expect(label.text()).toBe('状态')
   })
 
   it('只在审核进行中显示审核结论条', async () => {

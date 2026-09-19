@@ -129,13 +129,13 @@ async function revoke() {
     <template v-if="itemApproved">
       <span class="drawing-review-decision-bar__route">该2D工程图已通过审核，等待批准</span>
       <div class="drawing-review-decision-buttons">
-        <button type="button" class="is-revoke" :disabled="!canRevoke" @click="revoke()"><RotateCcw :size="14" />撤销通过</button>
+        <button type="button" class="is-revoke" title="撤销审核通过" :disabled="!canRevoke" @click="revoke()"><RotateCcw :size="14" />撤销</button>
       </div>
     </template>
     <template v-else-if="itemChangesRequested">
       <span class="drawing-review-decision-bar__route">该2D工程图已退回修改，其余图纸可继续审核</span>
       <div class="drawing-review-decision-buttons">
-        <button type="button" class="is-revoke" :disabled="!canRevoke" @click="revoke()"><RotateCcw :size="14" />撤销退改</button>
+        <button type="button" class="is-revoke" title="撤销退改结论" :disabled="!canRevoke" @click="revoke()"><RotateCcw :size="14" />撤销</button>
       </div>
     </template>
     <template v-else>
@@ -158,8 +158,8 @@ async function revoke() {
 .drawing-review-decision-bar textarea{flex:1 1 160px;min-width:110px;height:28px;box-sizing:border-box;padding:5px 7px;border:1px solid var(--pdm-border);border-radius:5px;background:var(--pdm-surface);color:var(--pdm-text);font:inherit;font-size:10px;resize:vertical}
 .drawing-review-decision-bar__route{flex:0 1 auto;min-width:0;overflow:hidden;color:var(--pdm-blue);font-size:9px;text-overflow:ellipsis;white-space:nowrap}
 .drawing-review-decision-bar .drawing-review-self-warning{flex:0 0 auto;margin:0;color:var(--pdm-orange);font-size:9px}
-.drawing-review-decision-bar .drawing-review-decision-buttons{flex:0 0 auto;display:flex;gap:5px}
-.drawing-review-decision-bar .drawing-review-decision-buttons button{display:inline-flex;align-items:center;justify-content:center;gap:5px;min-width:62px;min-height:28px;padding:4px 9px;border:1px solid var(--pdm-border);border-radius:5px;background:var(--pdm-surface);color:var(--pdm-text);font:inherit;font-size:10px;cursor:pointer}
+.drawing-review-decision-bar .drawing-review-decision-buttons{flex:0 0 auto;display:flex;gap:5px;margin-left:auto}
+.drawing-review-decision-bar .drawing-review-decision-buttons button{display:inline-flex;align-items:center;justify-content:center;gap:5px;width:68px;min-width:68px;min-height:28px;padding:4px 6px;border:1px solid var(--pdm-border);border-radius:5px;background:var(--pdm-surface);color:var(--pdm-text);font:inherit;font-size:10px;cursor:pointer}
 .drawing-review-decision-bar .drawing-review-decision-buttons button:disabled{opacity:.45;cursor:not-allowed}
 .drawing-review-decision-bar .drawing-review-decision-buttons .is-reject{border-color:#f2b8b5;background:#fff0ef;color:var(--pdm-danger)}
 .drawing-review-decision-bar .drawing-review-decision-buttons .is-approve{border-color:var(--pdm-green);background:var(--pdm-green);color:white}

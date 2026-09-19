@@ -1399,7 +1399,7 @@ describe('PLM client workspace', () => {
     // 客户端审核结论栏直接渲染在批注容器内（与网页端同一份 DOM），不再使用独立浮层窗口。
     const actions = wrapper.get('.pdm-preview-markup-row > .pdm-preview-actions')
     const decisionHost = actions.get('#drawing-review-decision-host')
-    expect(decisionHost.element.previousElementSibling).toBeNull()
+    expect(decisionHost.element.previousElementSibling?.getAttribute('aria-label')).toBe('图形批注工具')
     expect(postMessage.mock.calls.filter(([message]) => message.type === 'review-annotation-bounds')).toHaveLength(0)
 
     reviewMessageListener!(new MessageEvent('message', { data: { type: 'review-overlay-action', payload: { action: 'collapse', collapsed: true } } }))

@@ -486,8 +486,7 @@ onBeforeUnmount(() => {
       </header>
       <div class="pdm-preview-toolbar pdm-preview-markup-row">
         <div class="pdm-preview-actions">
-          <!-- 网页端由审核栏 Teleport 注入结论栏；客户端直接把结论栏放进同一容器，保证位置与样式一致。 -->
-          <div id="drawing-review-decision-host" class="pdm-review-decision-host" aria-label="图纸审核结论"><slot name="decision-bar" /></div>
+          <!-- 批注工具在左、审核结论栏紧随其后；网页端由审核栏 Teleport 注入结论栏，客户端直接把结论栏放进同一容器。 -->
           <div class="pdm-markup-toolbar" aria-label="图形批注工具">
             <span>批注</span>
             <button type="button" aria-label="引线批注" title="带引线文字" :disabled="!selected.documentId" @click="activateMarkup('markup-text-leader')"><PencilLine :size="14" /></button>
@@ -495,6 +494,7 @@ onBeforeUnmount(() => {
             <button type="button" aria-label="框选批注" title="矩形框" :disabled="!selected.documentId" @click="activateMarkup('markup-rectangle')"><Square :size="14" /></button>
             <button type="button" aria-label="手绘批注" title="自由曲线" :disabled="!selected.documentId" @click="activateMarkup('markup-spline')"><RotateCcw :size="14" /></button>
           </div>
+          <div id="drawing-review-decision-host" class="pdm-review-decision-host" aria-label="图纸审核结论"><slot name="decision-bar" /></div>
           <button type="button" aria-label="更多操作" title="查看更多图档操作" @click="emit('more')"><MoreHorizontal :size="17" /><span>更多</span></button>
         </div>
         <button
