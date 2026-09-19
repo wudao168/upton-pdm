@@ -56,7 +56,10 @@ describe('DrawingReviewAnnotationCard', () => {
   it('禁止自审，并在指定审图人时就绪', async () => {
     const wrapper = mountCard(review, 'drawing-designer')
 
-    expect(wrapper.text()).toContain('当前版本由你生成，系统禁止审核自己的图。')
+    // 不再提示自审拦截文案，只体现为不可操作（输入框与按钮置灰）。
+    expect(wrapper.text()).not.toContain('系统禁止审核自己的图')
+    expect(wrapper.text()).toContain('当前审核人')
+    expect(wrapper.get('textarea[aria-label="审核意见"]').attributes('disabled')).toBeDefined()
     expect(wrapper.findAll('.drawing-review-decision-buttons button').every(button => button.attributes('disabled') !== undefined)).toBe(true)
 
     await wrapper.setProps({ currentUsername: 'reviewer' })
@@ -78,7 +81,7 @@ describe('DrawingReviewAnnotationCard', () => {
   it('开发者模式允许审核本人设计的图档', () => {
     const wrapper = mountCard(review, 'drawing-designer', { allowSelfReview: true })
 
-    expect(wrapper.text()).not.toContain('当前版本由你生成，系统禁止审核自己的图。')
+    expect(wrapper.get('textarea[aria-label="审核意见"]').attributes('disabled')).toBeUndefined()
     expect(wrapper.findAll('.drawing-review-decision-buttons button').every(button => button.attributes('disabled') === undefined)).toBe(true)
   })
 

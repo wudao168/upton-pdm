@@ -132,8 +132,7 @@ async function revoke() {
   <section class="drawing-review-decision-bar" aria-label="图纸审核结论">
     <span class="drawing-review-decision-bar__node" :class="supervisorApproval ? 'is-pending' : 'is-warning'">{{ supervisorApproval ? '批准' : '审核' }}</span>
     <textarea v-model="decisionComment" rows="1" placeholder="审核意见；退改时必填" aria-label="审核意见" :disabled="!canAct" />
-    <p v-if="selfReviewBlocked && reviewActive" class="drawing-review-self-warning">当前版本由你生成，系统禁止审核自己的图。</p>
-    <span v-else class="drawing-review-decision-bar__route">{{ decisionRouteLabel }}</span>
+    <span class="drawing-review-decision-bar__route">{{ decisionRouteLabel }}</span>
     <div class="drawing-review-decision-buttons">
       <button type="button" class="is-reject" :disabled="pending || !canAct" @click="submit('RequestChanges')"><X :size="14" />退改</button>
       <button
@@ -150,15 +149,14 @@ async function revoke() {
 </template>
 
 <style scoped>
-.drawing-review-decision-bar{display:flex;flex:1 1 auto;min-width:0;align-items:center;gap:8px;color:var(--pdm-text);font-size:10px}
-.drawing-review-decision-bar__node{flex:0 0 auto;padding:4px 7px;border-radius:5px;background:var(--pdm-blue-soft);color:var(--pdm-blue);font-size:10px;font-weight:500;white-space:nowrap}
+.drawing-review-decision-bar{display:flex;flex:1 1 auto;min-width:0;align-items:center;gap:8px;color:var(--pdm-text);font-size:12px}
+.drawing-review-decision-bar__node{flex:0 0 auto;padding:4px 7px;border-radius:5px;background:var(--pdm-blue-soft);color:var(--pdm-blue);font-size:12px;font-weight:500;white-space:nowrap}
 .drawing-review-decision-bar__node.is-warning{background:#fff4dc;color:#d77a17}
 .drawing-review-decision-bar__node.is-pending{background:#e8f0fe;color:#2563eb}
-.drawing-review-decision-bar textarea{flex:1 1 160px;min-width:110px;height:28px;box-sizing:border-box;padding:5px 7px;border:1px solid var(--pdm-border);border-radius:5px;background:var(--pdm-surface);color:var(--pdm-text);font:inherit;font-size:10px;resize:vertical}
-.drawing-review-decision-bar__route{flex:0 1 auto;min-width:0;overflow:hidden;color:var(--pdm-blue);font-size:9px;text-overflow:ellipsis;white-space:nowrap}
-.drawing-review-decision-bar .drawing-review-self-warning{flex:0 0 auto;margin:0;color:var(--pdm-orange);font-size:9px}
+.drawing-review-decision-bar textarea{flex:1 1 160px;min-width:110px;height:28px;box-sizing:border-box;padding:5px 7px;border:1px solid var(--pdm-border);border-radius:5px;background:var(--pdm-surface);color:var(--pdm-text);font:inherit;font-size:12px;resize:vertical}
+.drawing-review-decision-bar__route{flex:0 1 auto;min-width:0;overflow:hidden;color:var(--pdm-blue);font-size:12px;text-overflow:ellipsis;white-space:nowrap}
 .drawing-review-decision-bar .drawing-review-decision-buttons{flex:0 0 auto;display:flex;gap:5px;margin-left:auto}
-.drawing-review-decision-bar .drawing-review-decision-buttons button{display:inline-flex;align-items:center;justify-content:center;gap:5px;width:68px;min-width:68px;min-height:28px;padding:4px 6px;border:1px solid var(--pdm-border);border-radius:5px;background:var(--pdm-surface);color:var(--pdm-text);font:inherit;font-size:10px;cursor:pointer}
+.drawing-review-decision-bar .drawing-review-decision-buttons button{display:inline-flex;align-items:center;justify-content:center;gap:5px;width:72px;min-width:72px;min-height:28px;padding:4px 6px;border:1px solid var(--pdm-border);border-radius:5px;background:var(--pdm-surface);color:var(--pdm-text);font:inherit;font-size:12px;cursor:pointer}
 .drawing-review-decision-bar .drawing-review-decision-buttons button:disabled{opacity:.45;cursor:not-allowed}
 .drawing-review-decision-bar .drawing-review-decision-buttons .is-reject{border-color:#f2b8b5;background:#fff0ef;color:var(--pdm-danger)}
 .drawing-review-decision-bar .drawing-review-decision-buttons .is-approve{border-color:var(--pdm-green);background:var(--pdm-green);color:white}
