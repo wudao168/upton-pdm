@@ -68,7 +68,7 @@ const activeItem = computed(() => activePackage.value?.items.find(item => item.d
 const markedTargetCount = computed(() => activePackage.value?.items.reduce((count, item) => count + Number(item.drawingState === 'Approved' || item.drawingState === 'Marked'), 0) ?? 0)
 const totalTargetCount = computed(() => activePackage.value?.items.length ?? 0)
 const canWithdrawActive = computed(() => Boolean(activePackage.value
-  && (activePackage.value.state === 'InReview' || activePackage.value.state === 'PendingSupervisorApproval')
+  && (activePackage.value.state === 'InReview' || activePackage.value.state === 'PendingSupervisorApproval' || activePackage.value.state === 'ChangesRequested')
   && props.canSubmit
   && (props.canManageWithdraw || activePackage.value.createdBy.localeCompare(props.currentUsername, undefined, { sensitivity: 'accent' }) === 0)))
 const filteredCandidates = computed(() => {
@@ -92,13 +92,19 @@ const overviewEmptyMessage = computed(() => overviewTab.value === 'Todo'
   ? '当前没有需要操作的图纸。'
   : '还没有已处理（通过或退回）的图纸。')
 
-// 批量审批：只允许勾选当前用户此刻能处理的图纸，全选仅作用于这些行。
+// 批量操作：所有审核阶段都能勾选（待提交/已批准可批量发起新一轮审核，审核中可批量通过或退改）。
 const selectedOverviewIds = ref<string[]>([])
 const overviewTargets = computed(() => overviewCandidates.value.map(candidate => ({ candidate, action: overviewRowAction(candidate) })))
-const overviewSelectableIds = computed(() => overviewTargets.value.filter(entry => entry.action).map(entry => entry.candidate.candidateId))
+const overviewSelectableIds = computed(() => props.canDecide || props.canSubmit
+  ? overviewCandidates.value.map(candidate => candidate.candidateId)
+  : [])
 const overviewAllSelected = computed(() => overviewSelectableIds.value.length > 0
   && overviewSelectableIds.value.every(id => selectedOverviewIds.value.includes(id)))
+const selectedOverviewCandidates = computed(() => overviewCandidates.value.filter(candidate => selectedOverviewIds.value.includes(candidate.candidateId)))
 const selectedOverviewEntries = computed(() => overviewTargets.value.filter(entry => entry.action && selectedOverviewIds.value.includes(entry.candidate.candidateId)))
+const selectedSubmittableIds = computed(() => selectedOverviewCandidates.value
+  .filter(candidate => candidate.selectable && candidate.modelDocumentId)
+  .map(candidate => candidate.modelDocumentId!))
 const batchApproveLabel = computed(() => selectedOverviewEntries.value.length > 0
   && selectedOverviewEntries.value.every(entry => entry.action!.kind === 'supervisor') ? '批量批准' : '批量通过')
 
@@ -175,6 +181,15 @@ function openScopeSelection() {
   assignedReviewers.value = props.reviewerOptions.length === 1 ? [props.reviewerOptions[0]!.username] : []
   emit('refreshCandidates')
   selectAllReadyCandidates()
+}
+
+/** 从明细批量发起审核：把勾选的图纸带入选择审核范围页。 */
+function openScopeSelectionWith(modelDocumentIds: string[]) {
+  openScopeSelection()
+  const allowed = props.candidates
+    .filter(candidate => candidate.selectable && candidate.modelDocumentId && modelDocumentIds.includes(candidate.modelDocumentId))
+    .map(candidate => candidate.modelDocumentId!)
+  if (allowed.length) selectedCandidateIds.value = allowed
 }
 
 function toggleCandidate(candidate: DrawingReviewCandidate) {
@@ -375,7 +390,7 @@ const packageStateTone = computed(() => activePackage.value ? drawingReviewPacka
             type="checkbox"
             :aria-label="`选择图纸 ${entry.candidate.drawingNumber}`"
             :checked="selectedOverviewIds.includes(entry.candidate.candidateId)"
-            :disabled="!entry.action"
+            :disabled="!overviewSelectableIds.includes(entry.candidate.candidateId)"
             @change="toggleOverviewRow(entry.candidate.candidateId)"
           />
         </label>
@@ -386,6 +401,7 @@ const packageStateTone = computed(() => activePackage.value ? drawingReviewPacka
         <span>已选 {{ selectedOverviewEntries.length }} 张</span>
         <button type="button" class="is-approve" :disabled="pending || !selectedOverviewEntries.length" @click="batchDecide('Approve')">{{ batchApproveLabel }}</button>
         <button type="button" class="is-reject" :disabled="pending || !selectedOverviewEntries.length" @click="batchDecide('RequestChanges')">批量退改</button>
+        <button v-if="canSubmit" type="button" class="is-submit" :disabled="pending || !selectedSubmittableIds.length" @click="openScopeSelectionWith(selectedSubmittableIds)">批量发起</button>
       </div>
     </section>
 
@@ -430,7 +446,7 @@ const packageStateTone = computed(() => activePackage.value ? drawingReviewPacka
 .drawing-review-scope__reviewer{display:grid;grid-template-columns:70px minmax(0,1fr);align-items:center;gap:6px;font-size:12px}.drawing-review-scope__reviewer select{width:100%}.drawing-review-reviewer-select{width:100%;min-width:0}.drawing-review-scope__reviewer :deep(.el-select__wrapper){min-height:30px;padding:2px 8px;border-radius:5px;font-size:12px}.drawing-review-scope__reviewer :deep(.el-select__selection){gap:2px;flex-wrap:wrap}.drawing-review-scope__reviewer :deep(.el-tag){height:18px;padding:0 5px;font-size:12px}.drawing-review-scope__empty-hint{margin:0;color:var(--pdm-muted);font-size:12px;line-height:1.45}.drawing-review-route{color:var(--pdm-blue)!important}
 .drawing-review-candidate{height:30px!important;min-height:30px!important;grid-template-columns:20px minmax(0,1fr) 52px;gap:6px;margin-bottom:3px;padding:0 7px!important;overflow:hidden}.drawing-review-candidate__number{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px}.drawing-review-candidate__state{color:var(--pdm-muted);font-size:12px;font-style:normal;text-align:right;white-space:nowrap}.drawing-review-candidate.is-approvedcurrent .drawing-review-candidate__state{color:var(--pdm-green)}.drawing-review-candidate.is-inreview .drawing-review-candidate__state,.drawing-review-candidate.is-unavailable .drawing-review-candidate__state{color:var(--pdm-orange)}
 .drawing-review-panel__toolbar{display:flex;gap:5px;padding:8px 10px;border-bottom:1px solid var(--pdm-border-soft)}.drawing-review-panel__toolbar label{min-width:0;display:flex;flex:1;align-items:center;gap:5px}.drawing-review-panel__toolbar select{min-width:0;width:100%}.drawing-review-panel__toolbar .drawing-review-toolbar__refresh,.drawing-review-panel__toolbar .drawing-review-toolbar__create{width:80px;min-width:80px;height:30px;min-height:30px;padding:5px 4px}.drawing-review-panel button,.drawing-review-panel select,.drawing-review-panel input,.drawing-review-panel textarea{font:inherit;font-size:12px}.drawing-review-panel button,.drawing-review-panel select{min-height:30px;border:1px solid var(--pdm-border);border-radius:5px;background:var(--pdm-surface);color:var(--pdm-text)}.drawing-review-panel button{display:inline-flex;align-items:center;justify-content:center;gap:5px;padding:5px 8px}.drawing-review-panel button:disabled{opacity:.45;cursor:not-allowed}.drawing-review-panel .is-primary{border-color:var(--pdm-blue);background:var(--pdm-blue);color:white}
-.drawing-review-overview{flex:0 0 auto;padding:0 10px 7px;border-bottom:1px solid var(--pdm-border-soft)}.drawing-review-overview>header,.drawing-review-overview__row{box-sizing:border-box;width:100%;display:grid!important;grid-template-columns:18px minmax(0,1fr) 96px;align-items:center;gap:6px}.drawing-review-overview>header{height:25px;padding:0 8px;color:var(--pdm-muted);font-size:12px}.drawing-review-overview>header span{text-align:right}.drawing-review-overview__row{height:30px!important;min-height:30px!important;margin:0 0 3px;padding:0 8px!important;overflow:hidden;text-align:left}.drawing-review-overview__row strong{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.drawing-review-overview__row em{overflow:hidden;color:var(--pdm-muted);font-style:normal;text-align:right;text-overflow:ellipsis;white-space:nowrap}.drawing-review-overview__reviewer{margin-right:4px;color:var(--pdm-text)}.drawing-review-overview__row.is-active{border-color:var(--pdm-blue);background:var(--pdm-blue-soft)}.drawing-review-overview__row{border:1px solid var(--pdm-border);border-radius:5px;background:var(--pdm-surface);color:var(--pdm-text);cursor:pointer}.drawing-review-overview__check{display:flex;align-items:center;justify-content:center;margin:0}.drawing-review-overview__check input{width:14px;height:14px;margin:0;accent-color:var(--pdm-blue);cursor:pointer}.drawing-review-overview__check input:disabled{cursor:not-allowed}.drawing-review-overview__batch{display:flex;align-items:center;gap:6px;margin-top:6px}.drawing-review-overview__batch>span{flex:0 0 auto;color:var(--pdm-muted);font-size:12px;white-space:nowrap}.drawing-review-overview__batch>button{flex:1 1 0;min-width:0}.drawing-review-overview__batch>.is-approve{border-color:var(--pdm-green);background:var(--pdm-green);color:white}.drawing-review-overview__batch>.is-reject{border-color:#f2b8b5;background:#fff0ef;color:var(--pdm-danger)}.drawing-review-overview__row.is-approvedcurrent em{color:var(--pdm-green)}.drawing-review-overview__row.is-inreview em,.drawing-review-overview__row.is-unavailable em{color:var(--pdm-orange)}.drawing-review-overview>p{margin:0;padding:14px 8px;color:var(--pdm-muted);text-align:center;font-size:12px}.drawing-review-history{padding:6px 10px;border-bottom:1px solid var(--pdm-border-soft)}.drawing-review-history summary{display:flex;align-items:center;gap:5px;color:var(--pdm-muted);font-size:12px;cursor:pointer}.drawing-review-history select{width:100%;margin-top:5px}
+.drawing-review-overview{flex:0 0 auto;padding:0 10px 7px;border-bottom:1px solid var(--pdm-border-soft)}.drawing-review-overview>header,.drawing-review-overview__row{box-sizing:border-box;width:100%;display:grid!important;grid-template-columns:18px minmax(0,1fr) 96px;align-items:center;gap:6px}.drawing-review-overview>header{height:25px;padding:0 8px;color:var(--pdm-muted);font-size:12px}.drawing-review-overview>header span{text-align:right}.drawing-review-overview__row{height:30px!important;min-height:30px!important;margin:0 0 3px;padding:0 8px!important;overflow:hidden;text-align:left}.drawing-review-overview__row strong{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.drawing-review-overview__row em{overflow:hidden;color:var(--pdm-muted);font-style:normal;text-align:right;text-overflow:ellipsis;white-space:nowrap}.drawing-review-overview__reviewer{margin-right:4px;color:var(--pdm-text)}.drawing-review-overview__row.is-active{border-color:var(--pdm-blue);background:var(--pdm-blue-soft)}.drawing-review-overview__row{border:1px solid var(--pdm-border);border-radius:5px;background:var(--pdm-surface);color:var(--pdm-text);cursor:pointer}.drawing-review-overview__check{display:flex;align-items:center;justify-content:center;margin:0}.drawing-review-overview__check input{width:14px;height:14px;margin:0;accent-color:var(--pdm-blue);cursor:pointer}.drawing-review-overview__check input:disabled{cursor:not-allowed}.drawing-review-overview__batch{display:flex;align-items:center;gap:6px;margin-top:6px}.drawing-review-overview__batch>span{flex:0 0 auto;color:var(--pdm-muted);font-size:12px;white-space:nowrap}.drawing-review-overview__batch>button{flex:1 1 0;min-width:0}.drawing-review-overview__batch>.is-approve{border-color:var(--pdm-green);background:var(--pdm-green);color:white}.drawing-review-overview__batch>.is-reject{border-color:#f2b8b5;background:#fff0ef;color:var(--pdm-danger)}.drawing-review-overview__batch>.is-submit{border-color:var(--pdm-blue);background:var(--pdm-blue);color:white}.drawing-review-overview__row.is-approvedcurrent em{color:var(--pdm-green)}.drawing-review-overview__row.is-inreview em,.drawing-review-overview__row.is-unavailable em{color:var(--pdm-orange)}.drawing-review-overview>p{margin:0;padding:14px 8px;color:var(--pdm-muted);text-align:center;font-size:12px}.drawing-review-history{padding:6px 10px;border-bottom:1px solid var(--pdm-border-soft)}.drawing-review-history summary{display:flex;align-items:center;gap:5px;color:var(--pdm-muted);font-size:12px;cursor:pointer}.drawing-review-history select{width:100%;margin-top:5px}
 .drawing-review-panel__empty,.drawing-review-panel__selection-empty{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:8px;padding:28px 18px;color:var(--pdm-muted);text-align:center}.drawing-review-panel__empty{flex:1}.drawing-review-panel__empty strong,.drawing-review-panel__selection-empty strong{color:var(--pdm-text);font-size:12px}.drawing-review-panel__empty p,.drawing-review-panel__selection-empty p{margin:0;line-height:1.6;font-size:12px}
 .drawing-review-package-summary{padding:10px;border-bottom:1px solid var(--pdm-border-soft)}.drawing-review-package-summary>div{display:flex;align-items:center;justify-content:space-between;gap:6px}.drawing-review-package-summary>div>strong{font-size:12px}.drawing-review-package-summary>div>span{padding:3px 6px;border-radius:8px;background:var(--pdm-blue-soft);color:var(--pdm-blue);font-size:12px}.drawing-review-package-summary>div>.is-approved{background:var(--pdm-green-soft);color:var(--pdm-green)}.drawing-review-package-summary>div>.is-changesrequested,.drawing-review-package-summary>div>.is-stale{background:#fff0ef;color:var(--pdm-danger)}.drawing-review-package-summary p{margin:5px 0 8px;color:var(--pdm-muted);font-size:12px}.drawing-review-package-summary>button{width:100%}
 @media(max-width:600px){.drawing-review-panel{inset:6px 6px 6px auto;width:calc(100% - 12px);height:calc(100% - 12px);max-height:none}}

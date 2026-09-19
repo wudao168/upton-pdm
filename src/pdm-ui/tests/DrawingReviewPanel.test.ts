@@ -386,6 +386,16 @@ describe('DrawingReviewPanel', () => {
     prompt.mockRestore()
   })
 
+  it('已退回（待修改）的审核单仍可由发起人撤销以便重新发起', () => {
+    const returned: DrawingReviewPackage = { ...review, state: 'ChangesRequested' }
+    const wrapper = mount(DrawingReviewPanel, {
+      global: { plugins: [ElementPlus] },
+      props: { packageId: returned.id, packages: [returned], candidates: [candidate], selectedDocumentId: 'model-1', currentUsername: 'submitter', ...permissions },
+    })
+
+    expect(wrapper.findAll('.drawing-review-package-actions button').map(button => button.text())).toEqual(['撤销审核'])
+  })
+
   it('历史无工程图审核项不再进入2D审核面板', () => {
     const modelOnlyReview: DrawingReviewPackage = {
       ...review,
@@ -477,6 +487,27 @@ describe('DrawingReviewPanel', () => {
       { kind: 'supervisor', packageId: 'review-9', itemId: 'item-2', decision: 'Approve', comment: '' },
       { kind: 'supervisor', packageId: 'review-9', itemId: 'item-3', decision: 'Approve', comment: '' },
     ]]])
+  })
+
+  it('待提交阶段同样有勾选框，可全选后批量发起审核', async () => {
+    const candidates: DrawingReviewCandidate[] = [
+      { ...candidate, candidateId: 'r1', modelDocumentId: 'model-2', drawingDocumentId: 'drawing-2', drawingNumber: 'A01-200', state: 'Ready' },
+      { ...candidate, candidateId: 'r2', modelDocumentId: 'model-3', drawingDocumentId: 'drawing-3', drawingNumber: 'A01-300', state: 'Ready' },
+    ]
+    const wrapper = mount(DrawingReviewPanel, {
+      global: { plugins: [ElementPlus] },
+      props: { packageId: review.id, packages: [{ ...review, state: 'Withdrawn' }], candidates, selectedDocumentId: 'model-1', currentUsername: 'designer', ...permissions },
+    })
+
+    const boxes = wrapper.findAll('.drawing-review-overview__row input[type="checkbox"]')
+    expect(boxes).toHaveLength(2)
+    expect(boxes.every(box => box.attributes('disabled') === undefined)).toBe(true)
+    expect(wrapper.get('.drawing-review-overview__batch .is-submit').attributes('disabled')).toBeDefined()
+
+    await wrapper.get('input[aria-label="全选可操作图纸"]').setValue(true)
+    await wrapper.get('.drawing-review-overview__batch .is-submit').trigger('click')
+    expect(wrapper.text()).toContain('选择审核范围')
+    expect(wrapper.findAll('.drawing-review-candidate.is-selected')).toHaveLength(2)
   })
 
   it('审核明细栏内不再渲染审核结论条（结论条在预览工具条里）', () => {
