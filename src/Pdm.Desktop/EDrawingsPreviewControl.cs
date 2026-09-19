@@ -11,8 +11,6 @@ namespace Upton.Pdm.Desktop;
 
 internal sealed class EDrawingsPreviewControl : Forms.UserControl
 {
-    private static readonly Color PrimaryText = Color.FromArgb(15, 23, 42);
-    private static readonly Color SecondaryText = Color.FromArgb(71, 85, 105);
     private static readonly Color PreviewBackground = Color.FromArgb(151, 166, 184);
     private static readonly object DiagnosticLogSync = new();
     private static readonly string DiagnosticLogPath = Path.Combine(
@@ -24,12 +22,9 @@ internal sealed class EDrawingsPreviewControl : Forms.UserControl
 
     private readonly EDrawingsAxHost viewer = new();
     private readonly Forms.ToolStrip toolbar = new();
-    private readonly Forms.TableLayoutPanel propertiesPanel = new();
     private readonly Forms.Timer repaintTimer = new();
     private readonly Forms.Timer markupDisplayTimer = new();
     private readonly Forms.Timer markupStateTimer = new();
-    private readonly Font propertyLabelFont = new("Microsoft YaHei UI", 14F, FontStyle.Regular, GraphicsUnit.Pixel);
-    private readonly Font propertyValueFont = new("Microsoft YaHei UI", 14F, FontStyle.Bold, GraphicsUnit.Pixel);
     private readonly Dictionary<string, Forms.ToolStripButton> modeButtons = new(StringComparer.OrdinalIgnoreCase);
     private readonly Forms.ToolStripButton measureButton;
     private object? markupControl;
@@ -90,12 +85,9 @@ internal sealed class EDrawingsPreviewControl : Forms.UserControl
         AddToolbarSpacer();
         measureButton = AddModeButton("measure", "测量");
 
-        ConfigurePropertiesPanel();
-        Controls.Add(propertiesPanel);
         Controls.Add(toolbar);
         viewer.SendToBack();
         toolbar.BringToFront();
-        propertiesPanel.BringToFront();
 
         repaintTimer.Interval = 220;
         repaintTimer.Tick += OnRepaintTimerTick;
@@ -408,57 +400,6 @@ internal sealed class EDrawingsPreviewControl : Forms.UserControl
         return markupOperator >= 0;
     }
 
-    internal void UpdateProperties(IReadOnlyList<KeyValuePair<string, string>> values)
-    {
-        if (disposed)
-        {
-            return;
-        }
-
-        propertiesPanel.SuspendLayout();
-        while (propertiesPanel.Controls.Count > 0)
-        {
-            var previousControl = propertiesPanel.Controls[0];
-            propertiesPanel.Controls.RemoveAt(0);
-            previousControl.Dispose();
-        }
-        propertiesPanel.RowStyles.Clear();
-        propertiesPanel.RowCount = 0;
-
-        foreach (var item in values)
-        {
-            var row = propertiesPanel.RowCount++;
-            propertiesPanel.RowStyles.Add(new Forms.RowStyle(Forms.SizeType.AutoSize));
-
-            var label = new Forms.Label
-            {
-                AutoSize = true,
-                Font = propertyLabelFont,
-                ForeColor = SecondaryText,
-                Margin = new Forms.Padding(0, 0, 10, 5),
-                Text = item.Key,
-            };
-            var value = new Forms.Label
-            {
-                AutoEllipsis = false,
-                AutoSize = true,
-                Font = propertyValueFont,
-                ForeColor = PrimaryText,
-                Margin = new Forms.Padding(0, 0, 0, 5),
-                MaximumSize = new Size(420, 0),
-                MinimumSize = new Size(70, 20),
-                Text = item.Value,
-                TextAlign = ContentAlignment.MiddleLeft,
-            };
-            propertiesPanel.Controls.Add(label, 0, row);
-            propertiesPanel.Controls.Add(value, 1, row);
-        }
-
-        propertiesPanel.Visible = values.Count > 0;
-        propertiesPanel.ResumeLayout(true);
-        LayoutOverlays();
-    }
-
     internal void RefreshPreview()
     {
         ScheduleRefresh(3);
@@ -511,15 +452,7 @@ internal sealed class EDrawingsPreviewControl : Forms.UserControl
             markupStateTimer.Dispose();
             viewer.Dispose();
             disposed = true;
-            try
-            {
-                base.Dispose(true);
-            }
-            finally
-            {
-                propertyLabelFont.Dispose();
-                propertyValueFont.Dispose();
-            }
+            base.Dispose(true);
             return;
         }
 
@@ -538,20 +471,6 @@ internal sealed class EDrawingsPreviewControl : Forms.UserControl
         toolbar.Renderer = new TransparentToolStripRenderer(buttonTheme);
         toolbar.ShowItemToolTips = true;
         toolbar.TabStop = false;
-    }
-
-    private void ConfigurePropertiesPanel()
-    {
-        propertiesPanel.AutoSize = true;
-        propertiesPanel.AutoSizeMode = Forms.AutoSizeMode.GrowAndShrink;
-        propertiesPanel.BackColor = PreviewBackground;
-        propertiesPanel.ColumnCount = 2;
-        propertiesPanel.ColumnStyles.Add(new Forms.ColumnStyle(Forms.SizeType.AutoSize));
-        propertiesPanel.ColumnStyles.Add(new Forms.ColumnStyle(Forms.SizeType.AutoSize));
-        propertiesPanel.Margin = Forms.Padding.Empty;
-        propertiesPanel.MaximumSize = new Size(520, 0);
-        propertiesPanel.Padding = new Forms.Padding(2, 2, 2, 0);
-        propertiesPanel.Visible = false;
     }
 
     private Forms.ToolStripButton AddModeButton(string command, string toolTip)
@@ -763,20 +682,7 @@ internal sealed class EDrawingsPreviewControl : Forms.UserControl
 
         toolbar.PerformLayout();
         toolbar.Location = new Point(Math.Max(8, (ClientSize.Width - toolbar.Width) / 2), 10);
-        var propertiesWidth = Math.Max(220, Math.Min(520, ClientSize.Width - 28));
-        var valueWidth = Math.Max(120, propertiesWidth - 100);
-        propertiesPanel.MaximumSize = new Size(propertiesWidth, 0);
-        for (var row = 0; row < propertiesPanel.RowCount; row++)
-        {
-            if (propertiesPanel.GetControlFromPosition(1, row) is Forms.Label value)
-            {
-                value.MaximumSize = new Size(valueWidth, 0);
-            }
-        }
-        propertiesPanel.PerformLayout();
-        propertiesPanel.Location = new Point(14, 14);
         toolbar.BringToFront();
-        propertiesPanel.BringToFront();
     }
 
     private void ScheduleRefresh(int attempts)

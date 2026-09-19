@@ -67,7 +67,6 @@ onBeforeUnmount(() => window.chrome?.webview?.removeEventListener?.('message', u
       :can-decide="state.canDecide"
       :allow-self-review="state.allowSelfReview"
       desktop-available
-      overlay-hosted
       @add-markup="addMarkup"
       @resolve-markup="(packageId, markupId) => send('resolve-markup', { packageId, markupId })"
       @decide="decide"

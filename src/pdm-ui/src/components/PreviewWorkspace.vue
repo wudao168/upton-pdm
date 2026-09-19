@@ -177,16 +177,17 @@ function reportPreviewBounds() {
     viewportHeight: window.innerHeight,
     visible: true,
   })
-  // 审核结论卡与网页端一致：位于审核栏左侧、工具条上方一行；审核栏收起时网页端不显示该卡，客户端同样隐藏。
+  // 审核结论栏与网页端一致：占据工具条行内审核栏左侧的同一格，尺寸取网页端该格的实际矩形；
+  // 审核栏收起时网页端不渲染该卡，客户端同样隐藏。
   const decisionHostBounds = document.getElementById('drawing-review-decision-host')?.getBoundingClientRect()
   const decisionVisible = !props.reviewPanelCollapsed
     && Boolean(decisionHostBounds)
     && decisionHostBounds!.width > 60
   postDesktopMessage('review-annotation-bounds', {
-    left: decisionVisible ? Math.max(left, decisionHostBounds!.left) : left,
-    top: decisionVisible ? Math.max(top, decisionHostBounds!.top) : top,
+    left: decisionVisible ? decisionHostBounds!.left : left,
+    top: decisionVisible ? decisionHostBounds!.top : top,
     width: decisionVisible ? decisionHostBounds!.width : Math.min(320, Math.max(220, width - 28)),
-    height: decisionVisible ? Math.max(28, decisionHostBounds!.height) : Math.min(Math.max(240, height - 28), 560),
+    height: decisionVisible ? Math.max(30, decisionHostBounds!.height) : Math.min(Math.max(240, height - 28), 560),
     viewportWidth: window.innerWidth,
     viewportHeight: window.innerHeight,
     visible: decisionVisible,

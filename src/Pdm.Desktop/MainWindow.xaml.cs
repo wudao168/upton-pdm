@@ -53,7 +53,6 @@ public partial class MainWindow : Window
     private string activeCompanyId = string.Empty;
     private string currentTheme = "a";
     private EDrawingsPreviewControl? embeddedPreview;
-    private IReadOnlyList<KeyValuePair<string, string>> previewProperties = Array.Empty<KeyValuePair<string, string>>();
     private PreviewHostBounds? previewBounds;
     private PreviewHostBounds? reviewOverlayBounds;
     private ReviewOverlayWindow? reviewOverlay;
@@ -1293,7 +1292,6 @@ public partial class MainWindow : Window
         previewRequestedDocumentId = null;
         previewMarkupDirectory = string.Empty;
         PreviewFrame.Visibility = Visibility.Collapsed;
-        UpdatePreviewProperties(payload);
         try
         {
             await PublishPreviewStatusAsync("loading", string.Empty, string.Empty);
@@ -1538,7 +1536,6 @@ public partial class MainWindow : Window
             WpfMessageBox.Show(this, message, "UPLM", MessageBoxButton.OK, MessageBoxImage.Information)));
         embeddedPreview.MarkupModifiedChanged += modified => Dispatcher.BeginInvoke(new Action(() =>
             _ = PublishMarkupStatusAsync(modified ? "dirty" : "clean", modified ? "批注尚未保存。" : string.Empty)));
-        embeddedPreview.UpdateProperties(previewProperties);
         EmbeddedPreviewHost.Child = embeddedPreview;
     }
 
@@ -1784,35 +1781,6 @@ public partial class MainWindow : Window
             previewVersionId = null;
             previewMarkupDirectory = string.Empty;
         }
-    }
-
-    private void UpdatePreviewProperties(IReadOnlyDictionary<string, object> payload)
-    {
-        var fields = new[]
-        {
-            (Label: "物料编码", Key: "drawingNumber"),
-            (Label: "名称", Key: "name"),
-            (Label: "规格/型号", Key: "specification"),
-            (Label: "材质", Key: "material"),
-            (Label: "品牌", Key: "brand"),
-            (Label: "表面处理", Key: "surfaceTreatment"),
-            (Label: "版本", Key: "revision"),
-            (Label: "状态", Key: "status"),
-        };
-
-        var values = new List<KeyValuePair<string, string>>();
-        foreach (var field in fields)
-        {
-            var value = payload.TryGetValue(field.Key, out var raw) && raw is string text
-                ? text.Trim()
-                : string.Empty;
-            values.Add(new KeyValuePair<string, string>(
-                field.Label,
-                string.IsNullOrWhiteSpace(value) ? "—" : value));
-        }
-
-        previewProperties = values;
-        embeddedPreview?.UpdateProperties(previewProperties);
     }
 
     private async Task PublishPreviewStatusAsync(string state, string fileName, string message)

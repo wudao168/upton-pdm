@@ -18,10 +18,8 @@ const props = withDefaults(defineProps<{
   canDecide: boolean
   allowSelfReview?: boolean
   desktopAvailable: boolean
-  overlayHosted?: boolean
 }>(), {
   allowSelfReview: false,
-  overlayHosted: false,
 })
 
 const emit = defineEmits<{
@@ -125,7 +123,6 @@ async function revoke() {
   <section
     v-if="activePackage && activeItem && reviewActive"
     class="drawing-review-decision-bar"
-    :class="{ 'is-overlay-hosted': overlayHosted }"
     aria-label="图纸审核结论"
   >
     <span class="drawing-review-decision-bar__node" :class="supervisorApproval ? 'is-pending' : 'is-warning'">{{ supervisorApproval ? '批准' : '审核' }}</span>
@@ -155,7 +152,6 @@ async function revoke() {
 
 <style scoped>
 .drawing-review-decision-bar{display:flex;flex:1 1 auto;min-width:0;align-items:center;gap:8px;color:var(--pdm-text);font-size:10px}
-.drawing-review-decision-bar.is-overlay-hosted{flex-direction:column;align-items:stretch;gap:6px;padding:8px;border:1px solid rgba(148,163,184,.55);border-radius:6px;background:rgba(255,255,255,.95);box-shadow:0 4px 14px rgba(15,23,42,.12)}
 .drawing-review-decision-bar__node{flex:0 0 auto;padding:4px 7px;border-radius:5px;background:var(--pdm-blue-soft);color:var(--pdm-blue);font-size:10px;font-weight:500;white-space:nowrap}
 .drawing-review-decision-bar__node.is-warning{background:#fff4dc;color:#d77a17}
 .drawing-review-decision-bar__node.is-pending{background:#e8f0fe;color:#2563eb}

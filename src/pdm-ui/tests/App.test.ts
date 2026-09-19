@@ -1396,6 +1396,21 @@ describe('PLM client workspace', () => {
     // 客户端与网页端一致：图档属性行在客户端同样常驻显示。
     expect(wrapper.get('.pdm-preview-properties-bar').find('[aria-label="图档属性"]').exists()).toBe(true)
 
+    // 审核结论栏取网页端同一格（批注工具左侧）的实际矩形，避免被裁成一条窄横条。
+    const decisionHost = document.getElementById('drawing-review-decision-host')
+    expect(decisionHost).toBeTruthy()
+    vi.spyOn(decisionHost as HTMLElement, 'getBoundingClientRect').mockReturnValue({
+      x: 268, y: 136, left: 268, top: 136, right: 668, bottom: 166,
+      width: 400, height: 30, toJSON: () => ({}),
+    })
+    window.dispatchEvent(new Event('resize'))
+    await new Promise<void>(resolve => window.requestAnimationFrame(() => resolve()))
+    await flushPromises()
+    expect(postMessage).toHaveBeenCalledWith(expect.objectContaining({
+      type: 'review-annotation-bounds',
+      payload: expect.objectContaining({ left: 268, top: 136, width: 400, height: 30, visible: true }),
+    }))
+
     reviewMessageListener!(new MessageEvent('message', { data: { type: 'review-overlay-action', payload: { action: 'collapse', collapsed: true } } }))
     await flushPromises()
     await new Promise<void>(resolve => window.requestAnimationFrame(() => resolve()))
