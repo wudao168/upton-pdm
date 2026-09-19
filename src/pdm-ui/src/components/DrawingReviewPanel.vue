@@ -52,7 +52,8 @@ const scopeOpen = ref(false)
 const collapsed = ref(props.collapsed)
 watch(() => props.collapsed, value => { collapsed.value = value })
 const scopeSearch = ref('')
-const overviewState = ref<'All' | DrawingReviewCandidate['state']>('All')
+// 明细固定分两页：待操作（还没有结论）与已操作（已通过/已退回）。
+const overviewTab = ref<'Todo' | 'Done'>('Todo')
 const selectedCandidateIds = ref<string[]>([])
 const assignedReviewers = ref<string[]>([])
 
@@ -74,14 +75,12 @@ const filteredCandidates = computed(() => {
     return !keyword || `${candidate.drawingNumber} ${candidate.name}`.toLocaleLowerCase().includes(keyword)
   })
 })
-const overviewCandidates = computed(() => props.candidates.filter(candidate => overviewState.value === 'All' || candidate.state === overviewState.value))
-const overviewStateOptions = computed(() => ([
-  { value: 'All', label: '全部', count: props.candidates.length },
-  { value: 'Ready', label: '待提交', count: props.candidates.filter(candidate => candidate.state === 'Ready').length },
-  { value: 'InReview', label: '待审核', count: props.candidates.filter(candidate => candidate.state === 'InReview').length },
-  { value: 'ApprovedCurrent', label: '已批准', count: props.candidates.filter(candidate => candidate.state === 'ApprovedCurrent').length },
-  { value: 'Unavailable', label: '不可发起', count: props.candidates.filter(candidate => candidate.state === 'Unavailable').length },
-] as const))
+const overviewTodoCandidates = computed(() => props.candidates.filter(candidate => !candidateConcluded(candidate)))
+const overviewDoneCandidates = computed(() => props.candidates.filter(candidate => candidateConcluded(candidate)))
+const overviewCandidates = computed(() => overviewTab.value === 'Todo' ? overviewTodoCandidates.value : overviewDoneCandidates.value)
+const overviewEmptyMessage = computed(() => overviewTab.value === 'Todo'
+  ? '当前没有需要操作的图纸。'
+  : '还没有已处理（通过或退回）的图纸。')
 const selectedCandidateCount = computed(() => selectedCandidateIds.value.length)
 const candidateEmptyMessage = computed(() => props.candidates.length === 0
   ? '当前没有有效非标件BOM候选；请先将3D模型归入非标件BOM，并保持唯一关联的2D工程图。'
@@ -141,20 +140,29 @@ function candidateStateLabel(candidate: DrawingReviewCandidate) {
 function overviewStateLabel(candidate: DrawingReviewCandidate) {
   // 状态表按“下一步等谁”显示：待审核 → 待批准 → 已批准。
   if (candidate.state !== 'InReview') return candidateStateLabel(candidate)
-  const packageValue = activeReviewPackageFor(candidate)
-  const item = packageValue?.items.find(value =>
-    Boolean(candidate.drawingDocumentId) && value.drawingDocumentId === candidate.drawingDocumentId
-    || Boolean(candidate.modelDocumentId) && value.modelDocumentId === candidate.modelDocumentId)
+  const item = reviewItemFor(candidate)
   return item ? drawingReviewTargetStateLabel(item.drawingState) : candidateStateLabel(candidate)
 }
 
 function overviewStateTone(candidate: DrawingReviewCandidate) {
   if (candidate.state !== 'InReview') return drawingReviewCandidateStateTone(candidate.state)
+  const item = reviewItemFor(candidate)
+  return item ? drawingReviewTargetStateTone(item.drawingState) : drawingReviewCandidateStateTone(candidate.state)
+}
+
+// 明细分页口径：已通过（含待批准）或已退回算“已操作”，其余（待提交/待审核/不可发起）算“待操作”。
+function candidateConcluded(candidate: DrawingReviewCandidate) {
+  if (candidate.state === 'ApprovedCurrent') return true
+  if (candidate.state !== 'InReview') return false
+  const state = reviewItemFor(candidate)?.drawingState
+  return state === 'Approved' || state === 'Marked' || state === 'ChangesRequested'
+}
+
+function reviewItemFor(candidate: DrawingReviewCandidate) {
   const packageValue = activeReviewPackageFor(candidate)
-  const item = packageValue?.items.find(value =>
+  return packageValue?.items.find(value =>
     Boolean(candidate.drawingDocumentId) && value.drawingDocumentId === candidate.drawingDocumentId
     || Boolean(candidate.modelDocumentId) && value.modelDocumentId === candidate.modelDocumentId)
-  return item ? drawingReviewTargetStateTone(item.drawingState) : drawingReviewCandidateStateTone(candidate.state)
 }
 
 function activeReviewPackageFor(candidate: DrawingReviewCandidate) {
@@ -256,7 +264,22 @@ const packageStateTone = computed(() => activePackage.value ? drawingReviewPacka
 
     <template v-else>
     <div class="drawing-review-panel__toolbar">
-      <label><span>状态</span><select v-model="overviewState" aria-label="筛选图纸审核状态"><option v-for="option in overviewStateOptions" :key="option.value" :value="option.value">{{ option.label }}（{{ option.count }}）</option></select></label>
+      <div class="drawing-review-panel__tabs" role="tablist" aria-label="审核明细分页">
+        <button
+          type="button"
+          role="tab"
+          :aria-selected="overviewTab === 'Todo'"
+          :class="{ 'is-active': overviewTab === 'Todo' }"
+          @click="overviewTab = 'Todo'"
+        >待操作（{{ overviewTodoCandidates.length }}）</button>
+        <button
+          type="button"
+          role="tab"
+          :aria-selected="overviewTab === 'Done'"
+          :class="{ 'is-active': overviewTab === 'Done' }"
+          @click="overviewTab = 'Done'"
+        >已操作（{{ overviewDoneCandidates.length }}）</button>
+      </div>
       <button type="button" title="刷新审核状态" :disabled="pending" @click="emit('refresh')"><RefreshCw :size="14" />刷新</button>
       <button v-if="canSubmit" type="button" class="drawing-review-toolbar__create" title="发起图纸审核" :disabled="pending" @click="openScopeSelection"><Send :size="14" />发起审核</button>
     </div>
@@ -274,7 +297,7 @@ const packageStateTone = computed(() => activePackage.value ? drawingReviewPacka
       >
         <strong>{{ candidate.drawingNumber }}</strong><em :title="candidateReviewerLabel(candidate) || undefined">{{ overviewStateLabel(candidate) }}</em>
       </button>
-      <p v-if="!overviewCandidates.length">当前筛选状态下没有图纸</p>
+      <p v-if="!overviewCandidates.length">{{ overviewEmptyMessage }}</p>
     </section>
 
     <details v-if="packages.length" class="drawing-review-history">
@@ -342,4 +365,7 @@ const packageStateTone = computed(() => activePackage.value ? drawingReviewPacka
 .drawing-review-package-summary>div>span.is-success{background:var(--pdm-green-soft);color:var(--pdm-green)}
 .drawing-review-package-summary>div>span.is-danger{background:#fff0ef;color:var(--pdm-danger)}
 .drawing-review-package-summary>div>span.is-neutral{background:var(--pdm-surface-muted);color:var(--pdm-muted)}
+.drawing-review-panel__tabs{flex:1;min-width:0;display:flex;gap:4px}
+.drawing-review-panel__tabs button{flex:1 1 0;min-width:0;padding:5px 4px;white-space:nowrap}
+.drawing-review-panel__tabs button.is-active{border-color:var(--pdm-blue);background:var(--pdm-blue-soft);color:var(--pdm-blue);font-weight:600}
 </style>
