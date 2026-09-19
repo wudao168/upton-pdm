@@ -2,11 +2,10 @@
 import { ArrowLeft, ChevronLeft, ChevronRight, History, MessageSquareText, RefreshCw, Search, Send, X } from '@lucide/vue'
 import { ElMessage } from '../statusMessage'
 import { ElMessageBox } from 'element-plus'
-import { computed, nextTick, onMounted, ref, watch } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { drawingReviewAssignedReviewerLabel, drawingReviewCandidateStateTone, drawingReviewPackageStateLabel, drawingReviewPackageStateTone, drawingReviewTargetStateLabel, drawingReviewTargetStateTone } from '../drawingReviewLabels'
 import type { AddDrawingReviewMarkupInput, DrawingReviewCandidate, DrawingReviewDecision, DrawingReviewPackage, DrawingReviewTarget } from '../types'
 import { useUserDisplayName } from '../userDisplay'
-import DrawingReviewAnnotationCard from './DrawingReviewAnnotationCard.vue'
 
 const displayUserName = useUserDisplayName()
 
@@ -56,7 +55,6 @@ const scopeSearch = ref('')
 const overviewState = ref<'All' | DrawingReviewCandidate['state']>('All')
 const selectedCandidateIds = ref<string[]>([])
 const assignedReviewers = ref<string[]>([])
-const decisionHostAvailable = ref(false)
 
 const selectedPackageId = computed({
   get: () => props.packageId || props.packages[0]?.id || '',
@@ -92,8 +90,6 @@ const candidateEmptyMessage = computed(() => props.candidates.length === 0
 watch(() => props.candidates, () => {
   if (scopeOpen.value) selectAllReadyCandidates()
 }, { deep: true })
-
-onMounted(() => nextTick(() => { decisionHostAvailable.value = Boolean(document.getElementById('drawing-review-decision-host')) }))
 
 function toggleCollapsed() {
   collapsed.value = !collapsed.value
@@ -211,7 +207,7 @@ const packageStateTone = computed(() => activePackage.value ? drawingReviewPacka
       <button v-if="collapsed" type="button" class="drawing-review-collapse" aria-label="展开图纸审核栏" title="展开图纸审核栏" @click="toggleCollapsed"><ChevronLeft :size="16" /></button>
       <template v-else>
         <button v-if="scopeOpen" type="button" class="drawing-review-back" aria-label="返回图纸审核" @click="scopeOpen = false"><ArrowLeft :size="16" /></button>
-        <div class="drawing-review-panel__title"><span>非标 BOM · 2D</span><h2>{{ scopeOpen ? '选择审核范围' : '2D图纸审核' }}</h2></div>
+        <div class="drawing-review-panel__title"><h2>{{ scopeOpen ? '选择审核范围' : '2D图纸审核' }}</h2></div>
         <button v-if="scopeOpen" type="button" class="is-primary drawing-review-submit" title="发起图纸审核" :disabled="pending || !selectedCandidateCount || !assignedReviewers.length" @click="submitScope"><Send :size="14" />发起审核</button>
         <button type="button" class="drawing-review-collapse" aria-label="折叠图纸审核栏" title="折叠图纸审核栏" @click="toggleCollapsed"><ChevronRight :size="16" /></button>
       </template>
@@ -307,22 +303,6 @@ const packageStateTone = computed(() => activePackage.value ? drawingReviewPacka
         <p>请在左侧设计树选择本审核单中的2D工程图；也可切换上方历史审核单。</p>
       </section>
 
-      <Teleport v-if="!overlayHosted" to="#drawing-review-decision-host" :disabled="!decisionHostAvailable">
-        <DrawingReviewAnnotationCard
-          :package="activePackage"
-          :selected-document-id="selectedDocumentId"
-          :current-username="currentUsername"
-          :pending="pending"
-          :can-annotate="canAnnotate"
-          :can-decide="canDecide"
-          :allow-self-review="allowSelfReview"
-          :desktop-available="desktopAvailable"
-          @add-markup="(packageId, input) => emit('addMarkup', packageId, input)"
-          @resolve-markup="(packageId, markupId) => emit('resolveMarkup', packageId, markupId)"
-          @decide="(packageId, itemId, target, decision, comment) => emit('decide', packageId, itemId, target, decision, comment)"
-          @decide-supervisor="(packageId, decision, comment) => emit('decideSupervisor', packageId, decision, comment)"
-        />
-      </Teleport>
     </template>
     </template>
     </template>

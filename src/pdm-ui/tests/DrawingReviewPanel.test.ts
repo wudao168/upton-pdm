@@ -52,80 +52,6 @@ const candidate: DrawingReviewCandidate = {
 }
 
 describe('DrawingReviewPanel', () => {
-  it('审核结论条禁止自审，并在指定审图人时就绪', async () => {
-    const wrapper = mount(DrawingReviewPanel, {
-      global: { plugins: [ElementPlus] },
-      props: {
-        packageId: review.id,
-        packages: [review],
-        selectedDocumentId: 'drawing-1',
-        currentUsername: 'drawing-designer',
-        ...permissions,
-      },
-    })
-
-    expect(wrapper.text()).toContain('当前版本由你生成，系统禁止审核自己的图。')
-    expect(wrapper.findAll('.drawing-review-decision-buttons button').every(button => button.attributes('disabled') !== undefined)).toBe(true)
-
-    await wrapper.setProps({ currentUsername: 'reviewer' })
-    expect(wrapper.findAll('.drawing-review-decision-buttons button').every(button => button.attributes('disabled') === undefined)).toBe(true)
-    const bar = wrapper.get('.drawing-review-decision-bar')
-    expect(bar.find('textarea[aria-label="审核意见"]').exists()).toBe(true)
-    expect(bar.findAll('.drawing-review-decision-buttons button').map(button => button.text())).toEqual(['退改', '通过'])
-  })
-
-  it('审核结论条只保留审核意见与通过/退改', () => {
-    const reviewWithMarkups: DrawingReviewPackage = {
-      ...review,
-      markups: [{
-        id: 'markup-1',
-        packageId: review.id,
-        itemId: review.items[0]!.id,
-        target: 'Drawing2D',
-        text: '检查孔位',
-        severity: 'Blocking',
-        state: 'Open',
-        createdBy: 'reviewer',
-        createdAt: '2026-08-24T00:00:00Z',
-      }],
-    }
-    const wrapper = mount(DrawingReviewPanel, {
-      global: { plugins: [ElementPlus] },
-      props: {
-        packageId: reviewWithMarkups.id,
-        packages: [reviewWithMarkups],
-        selectedDocumentId: 'drawing-1',
-        currentUsername: 'reviewer',
-        ...permissions,
-      },
-    })
-
-    const bar = wrapper.get('.drawing-review-decision-bar')
-    expect(bar.text()).toContain('审核')
-    expect(bar.findAll('.drawing-review-decision-buttons button').map(button => button.text())).toEqual(['退改', '通过'])
-    expect(wrapper.find('.drawing-review-target-switch').exists()).toBe(false)
-    expect(wrapper.find('.drawing-review-markup-tools').exists()).toBe(false)
-    expect(wrapper.find('.drawing-review-markup-list').exists()).toBe(false)
-  })
-
-  it('开发者模式允许审核本人设计的图档', () => {
-    const wrapper = mount(DrawingReviewPanel, {
-      global: { plugins: [ElementPlus] },
-      props: {
-        packageId: review.id,
-        packages: [review],
-        selectedDocumentId: 'drawing-1',
-        currentUsername: 'drawing-designer',
-        allowSelfReview: true,
-        ...permissions,
-      },
-    })
-
-    expect(wrapper.text()).not.toContain('本人设计，禁止自审')
-    expect(wrapper.text()).not.toContain('当前版本由你生成，系统禁止审核自己的图。')
-    expect(wrapper.findAll('.drawing-review-decision-buttons button').every(button => button.attributes('disabled') === undefined)).toBe(true)
-  })
-
   it('没有审核单时从图档侧栏选择非标2D范围后发起审核', async () => {
     const wrapper = mount(DrawingReviewPanel, {
       global: { plugins: [ElementPlus] },
@@ -376,14 +302,7 @@ describe('DrawingReviewPanel', () => {
     })
 
     expect(wrapper.text()).toContain('审核：指定审核员 → 批准：机械主管')
-    expect(wrapper.text()).toContain('当前审核人：指定审核员')
-    expect(wrapper.findAll('.drawing-review-decision-buttons button').every(button => button.attributes('disabled') !== undefined)).toBe(true)
-    await wrapper.setProps({ currentUsername: 'reviewer' })
-    expect(wrapper.findAll('.drawing-review-decision-buttons button').every(button => button.attributes('disabled') === undefined)).toBe(true)
-
-    await wrapper.setProps({ packages: [{ ...routedReview, state: 'PendingSupervisorApproval' }], currentUsername: 'manager' })
-    expect(wrapper.text()).toContain('当前批准人：机械主管')
-    expect(wrapper.findAll('.drawing-review-decision-buttons button').every(button => button.attributes('disabled') === undefined)).toBe(true)
+    expect(wrapper.find('.drawing-review-decision-bar').exists()).toBe(false)
   })
 
   it('未选择审核人时发起按钮置灰，选择多人后按并行提交', async () => {
@@ -399,9 +318,6 @@ describe('DrawingReviewPanel', () => {
       global: { plugins: [ElementPlus] },
       props: { packageId: openReview.id, packages: [openReview], candidates: [candidate], selectedDocumentId: 'drawing-1', currentUsername: 'reviewer-b', ...twoReviewers },
     })
-
-    expect(wrapper.text()).toContain('当前审核人：具备审核权限的人员均可处理，任一通过即可')
-    expect(wrapper.findAll('.drawing-review-decision-buttons button').every(button => button.attributes('disabled') === undefined)).toBe(true)
 
     await wrapper.get('.drawing-review-toolbar__create').trigger('click')
     expect(wrapper.get('.drawing-review-panel__header .drawing-review-submit').attributes('disabled')).toBeDefined()
@@ -447,56 +363,6 @@ describe('DrawingReviewPanel', () => {
     await Promise.resolve()
     expect(wrapper.emitted('withdraw')).toEqual([['review-1', '范围选择错误']])
     prompt.mockRestore()
-  })
-
-  it('已通过的图纸可在结论条上撤销通过', async () => {
-    const confirm = vi.spyOn(ElMessageBox, 'confirm').mockResolvedValue({ action: 'confirm' } as never)
-    const approvedPackage: DrawingReviewPackage = {
-      ...review,
-      items: [{ ...review.items[0]!, drawingState: 'Approved' }],
-    }
-    const wrapper = mount(DrawingReviewPanel, {
-      global: { plugins: [ElementPlus] },
-      props: { packageId: approvedPackage.id, packages: [approvedPackage], candidates: [candidate], selectedDocumentId: 'drawing-1', currentUsername: 'reviewer', ...permissions },
-    })
-
-    const bar = wrapper.get('.drawing-review-decision-bar')
-    expect(bar.text()).toContain('该2D工程图已通过审核，等待批准')
-    expect(bar.find('.is-approve').exists()).toBe(false)
-    const revokeButton = bar.get('.drawing-review-decision-buttons .is-revoke')
-    expect(revokeButton.text()).toBe('撤销')
-    expect(revokeButton.attributes('title')).toBe('撤销审核通过')
-
-    await revokeButton.trigger('click')
-    await Promise.resolve()
-    await Promise.resolve()
-    expect(wrapper.emitted('decide')).toEqual([['review-1', 'item-1', 'Drawing2D', 'Revoke', '']])
-    confirm.mockRestore()
-  })
-
-  it('已退改的图纸可在结论条上撤销退改，且其余图纸继续审核', async () => {
-    const confirm = vi.spyOn(ElMessageBox, 'confirm').mockResolvedValue({ action: 'confirm' } as never)
-    const changesPackage: DrawingReviewPackage = {
-      ...review,
-      items: [{ ...review.items[0]!, drawingState: 'ChangesRequested', drawingComment: '尺寸标注需修改' }],
-    }
-    const wrapper = mount(DrawingReviewPanel, {
-      global: { plugins: [ElementPlus] },
-      props: { packageId: changesPackage.id, packages: [changesPackage], candidates: [candidate], selectedDocumentId: 'drawing-1', currentUsername: 'reviewer', ...permissions },
-    })
-
-    expect(wrapper.get('.drawing-review-package-summary span').text()).toBe('待审核')
-    const bar = wrapper.get('.drawing-review-decision-bar')
-    expect(bar.text()).toContain('该2D工程图已退回修改，其余图纸可继续审核')
-    const revokeButton = bar.get('.drawing-review-decision-buttons .is-revoke')
-    expect(revokeButton.text()).toBe('撤销')
-    expect(revokeButton.attributes('title')).toBe('撤销退改结论')
-
-    await revokeButton.trigger('click')
-    await Promise.resolve()
-    await Promise.resolve()
-    expect(wrapper.emitted('decide')).toEqual([['review-1', 'item-1', 'Drawing2D', 'Revoke', '']])
-    confirm.mockRestore()
   })
 
   it('历史无工程图审核项不再进入2D审核面板', () => {
@@ -548,20 +414,13 @@ describe('DrawingReviewPanel', () => {
     expect(label.text()).toBe('状态')
   })
 
-  it('只在审核进行中显示审核结论条', async () => {
+  it('审核明细栏内不再渲染审核结论条（结论条在预览工具条里）', () => {
     const wrapper = mount(DrawingReviewPanel, {
       global: { plugins: [ElementPlus] },
       props: { packageId: review.id, packages: [review], candidates: [candidate], selectedDocumentId: 'drawing-1', currentUsername: 'reviewer', ...permissions },
     })
-    expect(wrapper.find('.drawing-review-decision-bar').exists()).toBe(true)
 
-    await wrapper.setProps({ packages: [{ ...review, state: 'Withdrawn' }] })
     expect(wrapper.find('.drawing-review-decision-bar').exists()).toBe(false)
-
-    await wrapper.setProps({ packages: [{ ...review, state: 'ChangesRequested' }] })
-    expect(wrapper.find('.drawing-review-decision-bar').exists()).toBe(false)
-
-    await wrapper.setProps({ packages: [{ ...review, state: 'PendingSupervisorApproval' }] })
-    expect(wrapper.find('.drawing-review-decision-bar').exists()).toBe(true)
+    expect(wrapper.text()).not.toContain('非标 BOM · 2D')
   })
 })

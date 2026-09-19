@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { Cloud, FileSearch, MoreHorizontal, PencilLine, Rotate3D, RotateCcw, Save, Square } from '@lucide/vue'
+import { Cloud, FileSearch, PencilLine, Rotate3D, RotateCcw, Square } from '@lucide/vue'
 import { ElMessage } from '../statusMessage'
 import { computed, defineAsyncComponent, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { listDocumentVersions, postDesktopMessage, readDocumentPreviewFile } from '../api'
@@ -494,8 +494,6 @@ onBeforeUnmount(() => {
             <button type="button" aria-label="框选批注" title="矩形框" :disabled="!selected.documentId" @click="activateMarkup('markup-rectangle')"><Square :size="14" /></button>
             <button type="button" aria-label="手绘批注" title="自由曲线" :disabled="!selected.documentId" @click="activateMarkup('markup-spline')"><RotateCcw :size="14" /></button>
           </div>
-          <div id="drawing-review-decision-host" class="pdm-review-decision-host" aria-label="图纸审核结论"><slot name="decision-bar" /></div>
-          <button type="button" aria-label="更多操作" title="查看更多图档操作" @click="emit('more')"><MoreHorizontal :size="17" /><span>更多</span></button>
         </div>
         <button
           type="button"
@@ -505,7 +503,9 @@ onBeforeUnmount(() => {
           title="保存当前版本批注"
           :disabled="!selected.documentId || markupSaving"
           @click="saveMarkup"
-        ><Save :size="15" />{{ markupSaving ? '保存中…' : '保存批注' }}</button>
+        >{{ markupSaving ? '保存中…' : '保存批注' }}</button>
+        <!-- 审核结论栏位于保存批注右侧；网页端与客户端都由页面把结论栏渲染进这个容器。 -->
+        <div id="drawing-review-decision-host" class="pdm-review-decision-host" aria-label="图纸审核结论"><slot name="decision-bar" /></div>
       </div>
       <p v-if="solidWorksMessage" class="pdm-solidworks-feedback" :class="{ 'is-error': solidWorksError }" role="status">{{ solidWorksMessage }}</p>
     </section>

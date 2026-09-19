@@ -1076,9 +1076,9 @@ async function openWhereUsedParent(projectId: string, parentDocumentId: string) 
                         @decide="(packageId, itemId, target, decision, comment) => runOperation(() => workspace.decideDrawingReviewTarget(packageId, itemId, target, decision, comment), decision === 'Approve' ? '审核结果已记录' : '图纸已退回修改')"
                         @decide-supervisor="(packageId, decision, comment) => runOperation(() => workspace.decideDrawingReviewSupervisor(packageId, decision, comment), decision === 'Approve' ? '已批准' : '图纸已退回修改')"
                       />
-                      <!-- 客户端：审核结论栏与网页端用同一份组件、同一容器（批注容器的第一格），
-                           审核栏收起时网页端不渲染该卡，客户端同样隐藏。 -->
-                      <template v-if="desktopAvailable && !drawingReviewPanelCollapsed" #decision-bar>
+                      <!-- 审核结论栏由页面直接渲染进预览工具条的结论栏容器（网页端与客户端同一份 DOM），
+                           审核栏收起时不渲染，与旧行为一致。 -->
+                      <template v-if="!drawingReviewPanelCollapsed" #decision-bar>
                         <DrawingReviewAnnotationCard
                           :package="selectedDrawingReviewPackage"
                           :selected-document-id="workspace.selectedNode.value.documentId"

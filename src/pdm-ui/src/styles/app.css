@@ -250,7 +250,7 @@
 .pdm-view-tabs { display: flex; flex-wrap: wrap; gap: 4px; }
 .pdm-view-tabs button { padding: 5px 6px; border: 0; border-radius: 5px; background: transparent; color: var(--pdm-muted); font-size: 10px; }
 .pdm-view-tabs button[aria-selected="true"] { background: var(--pdm-blue-soft); color: var(--pdm-blue); font-weight: 500; }
-.pdm-preview-actions { flex: 1 1 auto; min-width: 0; display: flex; color: var(--pdm-muted); }
+.pdm-preview-actions { flex: 0 0 auto; display: flex; color: var(--pdm-muted); }
 .pdm-preview-actions button { width: auto; min-width: 30px; gap: 3px; padding-inline: 5px; font-size: 10px; font-weight: 400; line-height: 1; white-space: nowrap; }
 .pdm-markup-toolbar { display: inline-flex; align-items: center; gap: 2px; margin-right: 4px; padding-right: 4px; border-right: 1px solid var(--pdm-border-soft); }
 .pdm-markup-toolbar > span { padding-inline: 3px; color: var(--pdm-muted); font-size: 9px; white-space: nowrap; }

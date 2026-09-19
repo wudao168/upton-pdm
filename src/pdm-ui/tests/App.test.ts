@@ -1314,17 +1314,9 @@ describe('PLM client workspace', () => {
     expect(wrapper.find('[aria-label="eDrawings快捷操作"]').exists()).toBe(false)
 
     const previewDocumentCalls = postMessage.mock.calls.filter(([message]) => message.type === 'preview-document').length
-    await wrapper.get('button[aria-label="更多操作"]').trigger('click')
-    await flushPromises()
-    expect(document.body.textContent).toContain('图档历史版本对比')
-    expect(postMessage).toHaveBeenCalledWith({ type: 'preview-host-suspend', payload: undefined })
-
-    wrapper.findAllComponents({ name: 'ElDrawer' })
-      .find(drawer => drawer.props('title') === '图档历史版本对比')!
-      .vm.$emit('update:modelValue', false)
-    await flushPromises()
-    await new Promise(resolve => window.setTimeout(resolve, 400))
-    expect(postMessage.mock.calls.filter(([message]) => message.type === 'preview-host-bounds').length).toBeGreaterThan(1)
+    // 图档工具条已按需求去掉“更多”入口，预览保持不重新加载。
+    expect(wrapper.find('button[aria-label="更多操作"]').exists()).toBe(false)
+    expect(postMessage.mock.calls.filter(([message]) => message.type === 'preview-host-bounds').length).toBeGreaterThan(0)
 
     const overlay = document.createElement('div')
     overlay.className = 'el-overlay'
@@ -1396,10 +1388,11 @@ describe('PLM client workspace', () => {
     // 客户端与网页端一致：图档属性行在客户端同样常驻显示。
     expect(wrapper.get('.pdm-preview-properties-bar').find('[aria-label="图档属性"]').exists()).toBe(true)
 
-    // 客户端审核结论栏直接渲染在批注容器内（与网页端同一份 DOM），不再使用独立浮层窗口。
-    const actions = wrapper.get('.pdm-preview-markup-row > .pdm-preview-actions')
-    const decisionHost = actions.get('#drawing-review-decision-host')
-    expect(decisionHost.element.previousElementSibling?.getAttribute('aria-label')).toBe('图形批注工具')
+    // 审核结论栏与网页端同一份 DOM：位于批注工具行内、保存批注右侧，不再使用独立浮层窗口。
+    const row = wrapper.get('.pdm-preview-markup-row')
+    const decisionHost = row.get('#drawing-review-decision-host')
+    expect(decisionHost.element.previousElementSibling?.getAttribute('aria-label')).toBe('保存批注')
+    expect(row.find('.pdm-markup-toolbar').exists()).toBe(true)
     expect(postMessage.mock.calls.filter(([message]) => message.type === 'review-annotation-bounds')).toHaveLength(0)
 
     reviewMessageListener!(new MessageEvent('message', { data: { type: 'review-overlay-action', payload: { action: 'collapse', collapsed: true } } }))

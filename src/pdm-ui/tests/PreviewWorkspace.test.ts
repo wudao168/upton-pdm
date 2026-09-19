@@ -1,4 +1,5 @@
 import { mount } from '@vue/test-utils'
+import { nextTick } from 'vue'
 import { describe, expect, it, vi } from 'vitest'
 import PreviewWorkspace from '../src/components/PreviewWorkspace.vue'
 import type { BomItem, DocumentNode } from '../src/types'
@@ -64,18 +65,33 @@ describe('PreviewWorkspace', () => {
     expect(wrapper.get('.pdm-preview-state-content').text()).toContain('加载预览')
   })
 
-  it('把审核结论栏渲染在批注容器的第一格，与网页端同一容器同一行', () => {
+  it('审核结论栏容器位于保存批注右侧，页面通过 decision-bar 插槽注入结论栏', () => {
     const wrapper = mount(PreviewWorkspace, {
       props: { selected, related: [], bomItem, desktopAvailable: true },
       slots: { 'decision-bar': '<div class="stub-decision">审核结论</div>' },
     })
 
-    const actions = wrapper.get('.pdm-preview-markup-row > .pdm-preview-actions')
-    const host = actions.get('#drawing-review-decision-host')
-    // 批注功能在审核结论栏左侧，两者同容器同一行。
-    expect(host.element.previousElementSibling?.getAttribute('aria-label')).toBe('图形批注工具')
+    const row = wrapper.get('.pdm-preview-markup-row')
+    const host = row.get('#drawing-review-decision-host')
+    // 行内顺序：批注工具 → 保存批注 → 审核结论栏。
+    expect(row.find('.pdm-markup-toolbar').exists()).toBe(true)
+    expect(host.element.previousElementSibling?.getAttribute('aria-label')).toBe('保存批注')
     expect(host.get('.stub-decision').text()).toBe('审核结论')
-    expect(actions.find('[aria-label="图形批注工具"]').exists()).toBe(true)
+    expect(row.find('button[aria-label="更多"]').exists()).toBe(false)
+  })
+
+  it('结论栏容器在预览工具条内，页面通过 decision-bar 插槽把结论栏渲染进去', async () => {
+    const wrapper = mount(PreviewWorkspace, {
+      attachTo: document.body,
+      props: { selected, related: [], bomItem, desktopAvailable: false },
+      slots: { 'decision-bar': '<div class="stub-decision">审核结论</div>' },
+    })
+    await nextTick()
+
+    const host = document.getElementById('drawing-review-decision-host')
+    expect(host?.closest('.pdm-preview-markup-row')).toBeTruthy()
+    expect(host?.querySelector('.stub-decision')?.textContent).toBe('审核结论')
+    wrapper.unmount()
   })
 
   it('shows only the active markup actions and hides reference and obsolete actions', async () => {
