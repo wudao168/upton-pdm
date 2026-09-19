@@ -162,25 +162,34 @@ function reportPreviewBounds() {
     viewportHeight: window.innerHeight,
     visible: true,
   })
-  // 客户端审核浮窗宽度与网页端审核栏保持一致：收起时只留窄条，展开时固定 300px（预览区更窄时按可用宽度收窄）。
-  const reviewWidth = props.reviewPanelCollapsed ? 34 : Math.min(width, 300)
+  // 客户端审核栏与网页端保持同一位置与尺寸：右对齐、上沿与工具条底边齐平、下沿与预览区底边齐平。
+  const actionsBounds = document.querySelector('.pdm-preview-actions')?.getBoundingClientRect()
+  const actionsBottom = actionsBounds && actionsBounds.height > 0 ? actionsBounds.bottom : top
+  const reviewTop = Math.max(top, Math.min(bottom, actionsBottom))
+  // 收起时只留窄条，展开时固定 300px（预览区更窄时按可用宽度收窄）。
+  const reviewWidth = props.reviewPanelCollapsed ? 34 : Math.min(Math.max(0, right - left), 300)
   postDesktopMessage('review-overlay-bounds', {
     left: right - reviewWidth,
-    top,
+    top: reviewTop,
     width: reviewWidth,
-    height,
+    height: Math.max(0, bottom - reviewTop),
     viewportWidth: window.innerWidth,
     viewportHeight: window.innerHeight,
     visible: true,
   })
+  // 审核结论卡与网页端一致：位于审核栏左侧、工具条上方一行；审核栏收起时网页端不显示该卡，客户端同样隐藏。
+  const decisionHostBounds = document.getElementById('drawing-review-decision-host')?.getBoundingClientRect()
+  const decisionVisible = !props.reviewPanelCollapsed
+    && Boolean(decisionHostBounds)
+    && decisionHostBounds!.width > 60
   postDesktopMessage('review-annotation-bounds', {
-    left: left + 14,
-    top: top + 14,
-    width: Math.min(320, Math.max(220, width - 28)),
-    height: Math.min(Math.max(240, height - 28), 560),
+    left: decisionVisible ? Math.max(left, decisionHostBounds!.left) : left,
+    top: decisionVisible ? Math.max(top, decisionHostBounds!.top) : top,
+    width: decisionVisible ? decisionHostBounds!.width : Math.min(320, Math.max(220, width - 28)),
+    height: decisionVisible ? Math.max(28, decisionHostBounds!.height) : Math.min(Math.max(240, height - 28), 560),
     viewportWidth: window.innerWidth,
     viewportHeight: window.innerHeight,
-    visible: true,
+    visible: decisionVisible,
   })
 }
 

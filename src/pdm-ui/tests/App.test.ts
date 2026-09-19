@@ -407,8 +407,8 @@ describe('PLM client workspace', () => {
     await flushPromises()
 
     expect(wrapper.find('[aria-label="图纸审核面板"]').exists()).toBe(true)
-    expect(wrapper.get('[aria-label="图纸审核面板"]').classes()).toContain('is-collapsed')
-    await wrapper.get('.drawing-review-panel__header .drawing-review-collapse').trigger('click')
+    // 默认展开审核栏，与网页端/客户端保持一致。
+    expect(wrapper.get('[aria-label="图纸审核面板"]').classes()).not.toContain('is-collapsed')
     await flushPromises()
     expect(buttonByText(wrapper, '选择范围并发起审核').exists()).toBe(true)
     wrapper.unmount()
@@ -1369,7 +1369,7 @@ describe('PLM client workspace', () => {
     }))
     expect(postMessage).toHaveBeenCalledWith(expect.objectContaining({
       type: 'review-overlay-bounds',
-      payload: expect.objectContaining({ left: 926, width: 34, height: 520, visible: true }),
+      payload: expect.objectContaining({ left: 660, width: 300, height: 520, visible: true }),
     }))
     expect(postMessage).toHaveBeenCalledWith(expect.objectContaining({
       type: 'review-overlay-state',
