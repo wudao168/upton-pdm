@@ -20,6 +20,45 @@ public sealed class ProgramTemplateService(
         return await templates.ListMineAsync(actor, cancellationToken);
     }
 
+    /// <summary>程序模板维护选项（分类、厂商、平台）：有查看权限即可读取，用于上传/编辑时选择。</summary>
+    public async Task<ProgramTemplateOptionCatalog> GetOptionCatalogAsync(string actor, UserRole role, CancellationToken cancellationToken)
+    {
+        await RequirePermissionAsync(actor, role, PermissionCodes.ProgramTemplateView, cancellationToken);
+        var settings = await pdmRepository.GetSystemSettingsAsync(cancellationToken);
+        return settings.ProgramTemplateOptions;
+    }
+
+    /// <summary>维护程序模板选项：只有管理权限可以修改，保存后供上传与编辑草稿时选择。</summary>
+    public async Task<ProgramTemplateOptionCatalog> SaveOptionCatalogAsync(ProgramTemplateOptionCatalog catalog, string actor, UserRole role, CancellationToken cancellationToken)
+    {
+        await RequirePermissionAsync(actor, role, PermissionCodes.ProgramTemplateManage, cancellationToken);
+        var normalized = NormalizeOptionCatalog(catalog);
+        var settings = await pdmRepository.GetSystemSettingsAsync(cancellationToken);
+        await pdmRepository.UpdateSystemSettingsAsync(settings with { ProgramTemplateOptions = normalized }, cancellationToken);
+        await AuditAsync(actor, "program-template.options.update", nameof(ProgramTemplateOptionCatalog), Guid.Empty,
+            $"分类{normalized.Categories.Count}项、厂商{normalized.Vendors.Count}项、平台{normalized.Platforms.Count}项", cancellationToken);
+        return normalized;
+    }
+
+    private static ProgramTemplateOptionCatalog NormalizeOptionCatalog(ProgramTemplateOptionCatalog? catalog) => new(
+        NormalizeOptionValues(catalog?.Categories, "分类"),
+        NormalizeOptionValues(catalog?.Vendors, "厂商"),
+        NormalizeOptionValues(catalog?.Platforms, "平台"));
+
+    private static IReadOnlyList<string> NormalizeOptionValues(IReadOnlyList<string>? values, string label)
+    {
+        var normalized = new List<string>();
+        foreach (var value in values ?? [])
+        {
+            var trimmed = value?.Trim();
+            if (string.IsNullOrWhiteSpace(trimmed)) continue;
+            if (trimmed.Length > 60) throw new PdmRuleException($"{label}选项不能超过60个字符。");
+            if (!normalized.Contains(trimmed, StringComparer.OrdinalIgnoreCase)) normalized.Add(trimmed);
+        }
+        if (normalized.Count > 200) throw new PdmRuleException($"{label}选项最多维护200项。");
+        return normalized;
+    }
+
     public async Task<ProgramTemplate> FindAsync(Guid templateId, string actor, UserRole role, CancellationToken cancellationToken)
     {
         await RequirePermissionAsync(actor, role, PermissionCodes.ProgramTemplateView, cancellationToken);

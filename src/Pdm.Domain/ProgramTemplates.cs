@@ -115,6 +115,17 @@ public sealed record ProgramTemplateApprovalTask(
     DateTimeOffset? DecidedAt,
     long RowVersion);
 
+/// <summary>
+/// 程序模板维护选项：分类、厂商、平台由管理员在程序模板页面统一维护，上传/编辑时只能从维护好的值中选择。
+/// </summary>
+public sealed record ProgramTemplateOptionCatalog(
+    IReadOnlyList<string> Categories,
+    IReadOnlyList<string> Vendors,
+    IReadOnlyList<string> Platforms)
+{
+    public static ProgramTemplateOptionCatalog Empty { get; } = new([], [], []);
+}
+
 public static class ProgramTemplateChecklist
 {
     public static IReadOnlyList<string> For(ProgramTemplateAssetType type) => type switch

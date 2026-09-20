@@ -29,6 +29,18 @@ public static class ProgramTemplateEndpointExtensions
             return Results.Ok(MapTemplate(template, tasksByRevision));
         });
 
+        api.MapGet("/options", async (HttpContext context, ProgramTemplateService service, CancellationToken cancellationToken) =>
+        {
+            var (actor, role) = CurrentUser(context.User);
+            return Results.Ok(await service.GetOptionCatalogAsync(actor, role, cancellationToken));
+        });
+
+        api.MapPut("/options", async (ProgramTemplateOptionCatalog request, HttpContext context, ProgramTemplateService service, CancellationToken cancellationToken) =>
+        {
+            var (actor, role) = CurrentUser(context.User);
+            return Results.Ok(await service.SaveOptionCatalogAsync(request, actor, role, cancellationToken));
+        });
+
         api.MapPost("", async (CreateProgramTemplateRequest request, HttpContext context, ProgramTemplateService service, CancellationToken cancellationToken) =>
         {
             var (actor, role) = CurrentUser(context.User);

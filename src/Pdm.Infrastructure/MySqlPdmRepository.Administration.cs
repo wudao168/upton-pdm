@@ -193,7 +193,8 @@ public sealed partial class MySqlPdmRepository
             ReleaseChangeReasonTypes = ReadStringList(values, "release_change_reason_types", PdmSystemSettings.DefaultReleaseChangeReasonTypes),
             FormalSupplementPolicies = ReadFormalSupplementPolicies(values),
             DrawingQrPolicy = ReadDrawingQrPolicy(values),
-            PreviewConversion = ReadPreviewConversion(values)
+            PreviewConversion = ReadPreviewConversion(values),
+            ProgramTemplateOptions = ReadProgramTemplateOptions(values)
         };
         return BomPropertyMappingCatalog.Apply(settings);
     }
@@ -233,7 +234,8 @@ public sealed partial class MySqlPdmRepository
             new { Key = "release_change_reason_types", Value = JsonSerializer.Serialize(settings.ReleaseChangeReasonTypes, jsonOptions) },
             new { Key = "formal_supplement_policies", Value = JsonSerializer.Serialize(settings.FormalSupplementPolicies, jsonOptions) },
             new { Key = "drawing_qr_policy", Value = JsonSerializer.Serialize(settings.DrawingQrPolicy, jsonOptions) },
-            new { Key = "preview_conversion", Value = JsonSerializer.Serialize(settings.PreviewConversion, jsonOptions) }
+            new { Key = "preview_conversion", Value = JsonSerializer.Serialize(settings.PreviewConversion, jsonOptions) },
+            new { Key = "program_template_options", Value = JsonSerializer.Serialize(settings.ProgramTemplateOptions, jsonOptions) }
         })
         {
             await connection.ExecuteAsync(new CommandDefinition(
@@ -278,6 +280,20 @@ public sealed partial class MySqlPdmRepository
         catch (JsonException)
         {
             return PreviewConversionSettings.Default;
+        }
+    }
+
+    private ProgramTemplateOptionCatalog ReadProgramTemplateOptions(IReadOnlyDictionary<string, string> values)
+    {
+        if (!values.TryGetValue("program_template_options", out var json) || string.IsNullOrWhiteSpace(json))
+            return ProgramTemplateOptionCatalog.Empty;
+        try
+        {
+            return JsonSerializer.Deserialize<ProgramTemplateOptionCatalog>(json, jsonOptions) ?? ProgramTemplateOptionCatalog.Empty;
+        }
+        catch (JsonException)
+        {
+            return ProgramTemplateOptionCatalog.Empty;
         }
     }
 

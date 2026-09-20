@@ -186,6 +186,8 @@ public sealed record PdmSystemSettings(string VaultRoot, string ReleaseRoot)
 
     public IReadOnlyList<string> ReleaseChangeReasonTypes { get; init; } = DefaultReleaseChangeReasonTypes;
 
+    public ProgramTemplateOptionCatalog ProgramTemplateOptions { get; init; } = ProgramTemplateOptionCatalog.Empty;
+
     public FormalSupplementPolicies FormalSupplementPolicies { get; init; } = FormalSupplementPolicies.Default;
 
     public DrawingQrPolicy DrawingQrPolicy { get; init; } = DrawingQrPolicy.Default;

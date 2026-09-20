@@ -1,5 +1,6 @@
 import type { AddDrawingReviewMarkupInput, ApprovalStep, ApprovalU9AutomationResult, AuditEntry, BatchUpdateBomItemsInput, BomClassification, BomEmptyDeclaration, BomExportMode, BomGenerationResult, BomHeaderKind, BomItem, BomKind, BomValidationRules, BomVersion, BomVersionState, CreateProjectInput, CreateReleasePackageInput, CreateRoleInput, CreateSubprojectInput, CrmConnectionTestResult, CrmCustomerSyncResult, CrmIntegrationSettings, DocumentKind, DocumentModelDrawingRelation, DocumentNode, DocumentVersionComparison, DocumentVersionSummary, DocumentWhereUsed, DrawingReviewCandidate, DrawingReviewDecision, DrawingReviewPackage, DrawingReviewTarget, EditLockSummary, EngineeringKit, EngineeringKitExpansion, EquipmentTypeDefinition, FolderPermissionRule, MainProjectStaffingInput, ManagedDocument, ManufacturingBomBaseline, MaterialAttachment, MaterialAttachmentKind, MaterialCategory, MaterialCategoryRule, MaterialCodeApplication, MaterialCodeApplicationStatus, MaterialCodeDecisionResult, MaterialCodeResolution, MaterialDuplicateRule, MaterialImportPreview, MaterialImportResult, MaterialKind, MaterialNumberingSettings, MaterialPage, MaterialRemovalReadiness, MaterialRemovalResult, MaterialSyncExecutionResult, MaterialSyncTask, MyApprovalTask, OrganizationDirectory, OrganizationUnit, PasswordResetTask, PdmCustomer, PdmMaterial, PdmSystemSettings, PdmUser, PdmUserProfile, ProgramTemplate, ProgramTemplateApprovalDecision, ProgramTemplateAttachmentKind, ProgramTemplateDraftInput, ProgramTemplateRevision, ProgramTemplateTask, ProgramTemplateVersionBump, ProjectBomHeader, ProjectBomU9SyncExecution, ProjectBomU9SyncPreview, ProjectFile, ProjectFileVersion, ProjectFolder, ProjectFolderTemplateNode, ProjectNumberingOptions, ProjectOrganization, ProjectProcurementTrackingResult, ProjectSummary, ProjectVersionItem, ReferenceStatus, ReleaseItemComment, ReleasePackageSummary, ReleaseScope, RolePermissionDirectory, SaveMaterialInput, SaveOrganizationUnitInput, SavePdmUserInput, SaveProjectOrganizationInput, StandardLibraryCategory, StandardLibraryMaterialPage, U9BomQueryExecution, U9BomQueryInput, U9BomWriteExecution, U9BomWriteInput, U9BomWritePreview, U9ConnectionTestResult, U9InventoryFilters, U9InventoryPage, U9InventorySyncSettings, U9InventorySyncStatusResponse, U9ItemQueryResult, U9MaterialFullSyncStatusResponse, U9MaterialIntegrationSettings, U9MaterialSampleImportResult, U9MaterialSamplePreview, U9ProcurementSyncSettings, U9ProcurementSyncStatusResponse, UpdateCrmIntegrationInput, UpdateProjectInput, UpdateReleasePackageDraftInput, UpdateU9MaterialIntegrationInput } from './types'
 import type { MaterialSyncBatch } from './types'
+import type { ProgramTemplateOptionCatalog } from './types'
 import type { ControlledDocumentRecycleReadiness } from './types'
 import type { ApprovalTransferCandidate, UserNotification } from './types'
 import type { ProjectCopyOptionsInput, ProjectCopyPreview, ProjectCopyResult } from './types'
@@ -49,6 +50,14 @@ export function listProgramTemplates(token: string, mine = false): Promise<Progr
 
 export function getProgramTemplate(templateId: string, token: string): Promise<ProgramTemplate> {
   return requestJson<ProgramTemplate>(`/api/program-templates/${templateId}`, {}, token)
+}
+
+export function getProgramTemplateOptions(token: string): Promise<ProgramTemplateOptionCatalog> {
+  return requestJson<ProgramTemplateOptionCatalog>('/api/program-templates/options', {}, token)
+}
+
+export function saveProgramTemplateOptions(catalog: ProgramTemplateOptionCatalog, token: string): Promise<ProgramTemplateOptionCatalog> {
+  return requestJson<ProgramTemplateOptionCatalog>('/api/program-templates/options', { method: 'PUT', body: JSON.stringify(catalog) }, token)
 }
 
 export function createProgramTemplate(input: ProgramTemplateDraftInput, token: string): Promise<ProgramTemplate> {
@@ -328,6 +337,10 @@ interface ApiReleasePackage {
   publishedAt?: string | null
   publishedPath?: string | null
   publishError?: string | null
+  previewState?: string | null
+  previewError?: string | null
+  previewAttempts?: number
+  previewUpdatedAt?: string | null
   changeNumber?: string | null
   changeReason?: string | null
   effectiveSerialFrom?: string | null
@@ -2273,6 +2286,8 @@ function mapReleasePackage(releasePackage: ApiReleasePackage): ReleasePackageSum
   return {
     id: releasePackage.id, number: releasePackage.number, state, steps,
     publishedPath: releasePackage.publishedPath ?? undefined, publishError: releasePackage.publishError ?? undefined,
+    previewState: releasePackage.previewState ?? undefined, previewError: releasePackage.previewError ?? undefined,
+    previewAttempts: releasePackage.previewAttempts ?? 0, previewUpdatedAt: releasePackage.previewUpdatedAt ?? undefined,
     changeNumber: releasePackage.changeNumber ?? undefined, changeReason: releasePackage.changeReason ?? undefined,
     effectiveSerialFrom: releasePackage.effectiveSerialFrom ?? undefined, effectiveSerialTo: releasePackage.effectiveSerialTo ?? undefined,
     standardBomRevision: releasePackage.standardBomRevision ?? undefined, nonStandardBomRevision: releasePackage.nonStandardBomRevision ?? undefined,

@@ -2268,6 +2268,12 @@ export interface ProgramTemplateTask {
   rowVersion: number
 }
 
+export interface ProgramTemplateOptionCatalog {
+  categories: string[]
+  vendors: string[]
+  platforms: string[]
+}
+
 export interface ProgramTemplateParameterInput {
   direction: ProgramTemplateParameterDirection
   sortOrder: number

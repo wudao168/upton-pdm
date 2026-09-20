@@ -13,6 +13,8 @@ const api = vi.hoisted(() => ({
   deleteProgramTemplateDraft: vi.fn(),
   downloadProgramTemplate: vi.fn(),
   getProgramTemplate: vi.fn(),
+  getProgramTemplateOptions: vi.fn(),
+  saveProgramTemplateOptions: vi.fn(),
   submitProgramTemplateRevision: vi.fn(),
   updateProgramTemplateDraft: vi.fn(),
   uploadProgramTemplateFile: vi.fn(),
@@ -25,6 +27,7 @@ describe('ProgramTemplateLibrary', () => {
     vi.clearAllMocks()
     api.listProgramTemplates.mockResolvedValue([])
     api.listProgramTemplateTasks.mockResolvedValue([])
+    api.getProgramTemplateOptions.mockResolvedValue({ categories: [], vendors: [], platforms: [] })
   })
 
   afterEach(() => vi.unstubAllGlobals())
@@ -104,7 +107,8 @@ describe('ProgramTemplateLibrary', () => {
 
     expect(wrapper.find('input[accept=".zip,.rar"]').exists()).toBe(true)
     expect(wrapper.find('input[accept=".pdf,.doc,.docx,.xls,.xlsx,.png,.jpg,.jpeg"]').exists()).toBe(true)
-    expect(wrapper.findAll('.select-stub[data-allow-create]').length).toBe(3)
+    // 分类、厂商、平台改为选择维护好的选项，不再允许在下拉框里直接新建。
+    expect(wrapper.findAll('.select-stub[data-allow-create]').length).toBe(0)
     await wrapper.findAll('button').find(button => button.text().includes('保存草稿'))!.trigger('click')
     await flushPromises()
 
@@ -123,7 +127,7 @@ describe('ProgramTemplateLibrary', () => {
     const template = { id: 'template-1', code: 'PT-PLC-0001', assetType: 'PlcProgram', currentPublishedRevisionId: null, isArchived: false, createdBy: 'developer', createdAt: '2026-09-17T00:00:00Z', revisions: [draft] }
     api.getProgramTemplate.mockResolvedValue(template)
     api.deleteProgramTemplateDraft.mockResolvedValue(undefined)
-    api.listProgramTemplates.mockResolvedValueOnce([]).mockResolvedValueOnce([])
+    api.listProgramTemplates.mockResolvedValue([])
     const wrapper = mount(ProgramTemplateLibrary, {
       props: { token: 'token', username: 'developer', permissions: ['program-template.view', 'program-template.submit'] },
       global: {
@@ -191,5 +195,52 @@ describe('ProgramTemplateLibrary', () => {
     expect(steps[1]!.classes()).toContain('is-active')
     expect(steps[2]!.classes()).toContain('is-todo')
     expect(wrapper.get('.program-template-detail-title p').text()).toContain('当前 电气组织审核：wangyonghuang')
+  })
+
+  it('列表合并显示提交人，分类厂商平台只提供维护好的选项', async () => {
+    api.getProgramTemplateOptions.mockResolvedValue({ categories: ['控制'], vendors: ['Siemens'], platforms: ['TIA Portal'] })
+    const draft = {
+      id: 'revision-draft', version: 'v1.0.0', attemptNumber: 1, state: 'Draft', name: '草稿模板', category: '控制', description: '',
+      vendor: 'Siemens', platform: 'TIA Portal', softwareVersion: 'V19', applicableSeries: '', tags: [], changeNote: '',
+      createdBy: 'engineer', createdAt: '2026-09-20T06:12:00Z', submittedAt: null, publishedAt: null, rowVersion: 1, parameters: [],
+    }
+    const template = { id: 'template-1', code: 'PT-FB-0001', assetType: 'PlcFunctionBlock', currentPublishedRevisionId: null, isArchived: false, createdBy: 'engineer', createdAt: '2026-09-20T06:12:00Z', revisions: [draft] }
+    api.listProgramTemplates.mockImplementation((_token: string, mine?: boolean) => Promise.resolve(mine ? [template] : []))
+    const wrapper = mount(ProgramTemplateLibrary, {
+      props: { token: 'token', username: 'engineer', permissions: ['program-template.view', 'program-template.submit', 'program-template.manage'] },
+      global: {
+        stubs: {
+          ElButton: { template: '<button type="button"><slot /></button>' },
+          ElDrawer: { props: ['modelValue'], template: '<section v-if="modelValue"><slot /><slot name="footer" /></section>' },
+          ElTable: { template: '<div><slot /></div>' },
+          ElTableColumn: { props: ['label'], template: '<span class="table-column-label">{{ label }}</span>' },
+          ElSelect: true, ElOption: true, ElDialog: true, ElForm: true, ElFormItem: true, ElInput: true, ElTag: true,
+          ElEmpty: true, ElProgress: true, ElButtonGroup: true, ElCheckbox: true, ElCheckboxGroup: true, ElRadioButton: true, ElRadioGroup: true,
+        },
+      },
+    })
+    await flushPromises()
+
+    expect(api.listProgramTemplates).toHaveBeenCalledWith('token')
+    expect(api.listProgramTemplates).toHaveBeenCalledWith('token', true)
+    expect(wrapper.findAll('.table-column-label').map(column => column.text())).toContain('提交人')
+    expect((wrapper.vm as unknown as { categoryOptions: string[] }).categoryOptions).toEqual(['控制'])
+
+    api.saveProgramTemplateOptions.mockResolvedValue({ categories: ['控制', '新分类'], vendors: ['Siemens'], platforms: ['TIA Portal'] })
+    const vm = wrapper.vm as unknown as {
+      openOptionMaintenance: () => void
+      saveOptionMaintenance: () => Promise<void>
+      optionDraft: { categories: string[] }
+      optionDialogOpen: boolean
+      categoryOptions: string[]
+    }
+    vm.openOptionMaintenance()
+    expect(vm.optionDialogOpen).toBe(true)
+    vm.optionDraft.categories.push('新分类')
+    await vm.saveOptionMaintenance()
+
+    expect(api.saveProgramTemplateOptions).toHaveBeenCalledWith({ categories: ['控制', '新分类'], vendors: ['Siemens'], platforms: ['TIA Portal'] }, 'token')
+    expect(vm.categoryOptions).toEqual(['控制', '新分类'])
+    expect(vm.optionDialogOpen).toBe(false)
   })
 })

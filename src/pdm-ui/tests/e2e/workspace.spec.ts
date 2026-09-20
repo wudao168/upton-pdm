@@ -192,6 +192,7 @@ test('program template owner can delete a saved draft after confirmation', async
   await page.route(/^http:\/\/127\.0\.0\.1:(?:5080|5173|519[3-5])\/api\/program-templates(?:\/.*)?(?:\?.*)?$/, route => {
     const url = new URL(route.request().url())
     if (url.pathname === '/api/program-templates/tasks/mine') return route.fulfill({ json: [] })
+    if (url.pathname === '/api/program-templates/options') return route.fulfill({ json: { categories: [], vendors: [], platforms: [] } })
     if (url.pathname === '/api/program-templates' && route.request().method() === 'GET')
       return route.fulfill({ json: url.searchParams.get('mine') === 'true' ? drafts : [] })
     if (url.pathname === '/api/program-templates/template-draft-1') return route.fulfill({ json: drafts[0] })
@@ -213,7 +214,6 @@ test('program template owner can delete a saved draft after confirmation', async
   await login.getByRole('button', { name: '登录', exact: true }).click()
   await page.getByRole('button', { name: '程序模板', exact: true }).click()
   const library = page.getByLabel('程序模板库')
-  await library.getByRole('tab', { name: '我的提交' }).click()
   await expect(library).toContainText('待删除程序草稿')
   await library.getByRole('button', { name: '查看' }).click()
   await expect(page.getByRole('button', { name: '删除草稿' })).toBeVisible()
