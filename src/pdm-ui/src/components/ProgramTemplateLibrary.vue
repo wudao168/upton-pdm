@@ -156,7 +156,13 @@ const platforms = computed(() => mergeOptions(optionCatalog.value.platforms, use
 const categoryOptions = computed(() => mergeOptions(optionCatalog.value.categories, usedValues(item => item.category), form.category))
 const vendorOptions = computed(() => mergeOptions(optionCatalog.value.vendors, usedValues(item => item.vendor), form.vendor))
 const platformOptions = computed(() => mergeOptions(optionCatalog.value.platforms, usedValues(item => item.platform), form.platform))
-const maintainedTypes = computed(() => optionCatalog.value.types ?? [])
+// 服务器尚未升级到带选项维护接口的版本时，退回内置三种模板类型，避免类型下拉为空。
+const builtinTypes: ProgramTemplateTypeOption[] = [
+  { key: 'PlcFunctionBlock', name: 'PLC功能块', codePrefix: 'PT-FB', checklistKind: 'PlcFunctionBlock' },
+  { key: 'PlcProgram', name: 'PLC整包模板', codePrefix: 'PT-PLC', checklistKind: 'PlcProgram' },
+  { key: 'HmiTemplate', name: 'HMI模板', codePrefix: 'PT-HMI', checklistKind: 'HmiTemplate' },
+]
+const maintainedTypes = computed(() => (optionCatalog.value.types?.length ? optionCatalog.value.types : builtinTypes))
 const assetTypeOptions = computed(() => {
   const options = [...maintainedTypes.value]
   if (form.assetType && !options.some(item => item.key === form.assetType))
