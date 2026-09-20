@@ -49,6 +49,9 @@ public partial class MainWindow : Window
     private readonly SolidWorksOpenBridge solidWorksBridge = new();
     private readonly LightweightPreviewProvider lightweightPreviewProvider = new(20);
     private readonly SemaphoreSlim lightweightPreviewGate = new(1, 1);
+    // 设计树缩略图：同一份本地只读缓存缩略图，按小尺寸生成并缓存，限制并发避免一次刷 50 行卡顿。
+    private readonly LightweightPreviewProvider treeThumbnailProvider = new(512);
+    private readonly SemaphoreSlim treeThumbnailGate = new(2, 2);
     private string accessToken = string.Empty;
     private string activeCompanyId = string.Empty;
     private string currentTheme = "a";
@@ -611,6 +614,14 @@ public partial class MainWindow : Window
         {
             selectedDocumentId = lightweightDocumentId;
             _ = PublishLightweightPreviewAsync(lightweightDocumentId);
+            return;
+        }
+
+        if (type == "tree-thumbnail-request"
+            && TryReadPayloadString(message, "documentId", out var thumbnailDocumentIdValue)
+            && Guid.TryParse(thumbnailDocumentIdValue, out var thumbnailDocumentId))
+        {
+            _ = PublishTreeThumbnailAsync(thumbnailDocumentId);
             return;
         }
 
@@ -1798,6 +1809,42 @@ public partial class MainWindow : Window
         }
     }
 
+    /// <summary>设计树缩略图：直接复用本地只读缓存文件的系统缩略图，供树行快速识别零件。</summary>
+    private async Task PublishTreeThumbnailAsync(Guid documentId)
+    {
+        await treeThumbnailGate.WaitAsync();
+        try
+        {
+            var localFile = workspaceStateSnapshot?.Items.FirstOrDefault(item =>
+                item.DocumentId == documentId
+                && string.Equals(item.LocalState, "ReadOnlyCache", StringComparison.Ordinal)
+                && File.Exists(item.FullPath));
+            var dataUrl = localFile == null
+                ? null
+                : await Task.Run(() => treeThumbnailProvider.TryCreateDataUrl(localFile.FullPath, 56, 40));
+            await PublishTreeThumbnailStatusAsync(documentId, dataUrl);
+        }
+        finally
+        {
+            treeThumbnailGate.Release();
+        }
+    }
+
+    private async Task PublishTreeThumbnailStatusAsync(Guid documentId, string? dataUrl)
+    {
+        if (WorkspaceView.CoreWebView2 == null) return;
+        var detail = new { documentId, dataUrl = dataUrl ?? string.Empty };
+        var script = $"window.dispatchEvent(new CustomEvent('pdm-tree-thumbnail-status', {{ detail: {Serialize(detail)} }}));";
+        try
+        {
+            await WorkspaceView.CoreWebView2.ExecuteScriptAsync(script);
+        }
+        catch (InvalidOperationException)
+        {
+            // The WebView is closing with the client window.
+        }
+    }
+
     private async Task PublishMarkupStatusAsync(string state, string message)
     {
         if (WorkspaceView.CoreWebView2 == null)
@@ -1833,6 +1880,7 @@ public partial class MainWindow : Window
         embeddedPreview = null;
         apiClient.Dispose();
         lightweightPreviewGate.Dispose();
+        treeThumbnailGate.Dispose();
         bootstrapLifetime.Dispose();
     }
 

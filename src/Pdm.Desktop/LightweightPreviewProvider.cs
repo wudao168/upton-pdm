@@ -24,11 +24,13 @@ internal sealed class LightweightPreviewProvider
         this.capacity = capacity;
     }
 
-    public string? TryCreateDataUrl(string filePath)
+    public string? TryCreateDataUrl(string filePath) => TryCreateDataUrl(filePath, PreviewWidth, PreviewHeight);
+
+    public string? TryCreateDataUrl(string filePath, int width, int height)
     {
         if (string.IsNullOrWhiteSpace(filePath) || !File.Exists(filePath)) return null;
         var info = new FileInfo(filePath);
-        var key = string.Concat(info.FullName, "|", info.Length, "|", info.LastWriteTimeUtc.Ticks);
+        var key = string.Concat(info.FullName, "|", info.Length, "|", info.LastWriteTimeUtc.Ticks, "|", width, "x", height);
         lock (syncRoot)
         {
             if (entries.TryGetValue(key, out var cached))
@@ -39,7 +41,7 @@ internal sealed class LightweightPreviewProvider
             }
         }
 
-        var dataUrl = ReadShellThumbnail(filePath);
+        var dataUrl = ReadShellThumbnail(filePath, width, height);
         if (string.IsNullOrWhiteSpace(dataUrl)) return null;
         lock (syncRoot)
         {
@@ -57,7 +59,7 @@ internal sealed class LightweightPreviewProvider
         return dataUrl;
     }
 
-    private static string? ReadShellThumbnail(string filePath)
+    private static string? ReadShellThumbnail(string filePath, int width, int height)
     {
         IShellItemImageFactory? imageFactory = null;
         IntPtr bitmapHandle = IntPtr.Zero;
@@ -67,23 +69,23 @@ internal sealed class LightweightPreviewProvider
             var result = SHCreateItemFromParsingName(filePath, IntPtr.Zero, ref interfaceId, out imageFactory);
             if (result != 0 || imageFactory == null) return null;
             result = imageFactory.GetImage(
-                new NativeSize { Width = PreviewWidth, Height = PreviewHeight },
+                new NativeSize { Width = width, Height = height },
                 ShellItemImageFlags.ThumbnailOnly | ShellItemImageFlags.BiggerSizeOk,
                 out bitmapHandle);
             if (result != 0 || bitmapHandle == IntPtr.Zero) return null;
 
             using var source = Image.FromHbitmap(bitmapHandle);
-            using var canvas = new Bitmap(PreviewWidth, PreviewHeight, PixelFormat.Format24bppRgb);
+            using var canvas = new Bitmap(width, height, PixelFormat.Format24bppRgb);
             using (var graphics = Graphics.FromImage(canvas))
             {
                 graphics.Clear(Color.FromArgb(237, 243, 248));
                 graphics.CompositingQuality = CompositingQuality.HighQuality;
                 graphics.InterpolationMode = InterpolationMode.HighQualityBicubic;
                 graphics.SmoothingMode = SmoothingMode.HighQuality;
-                var scale = Math.Min((double)PreviewWidth / source.Width, (double)PreviewHeight / source.Height);
-                var width = Math.Max(1, (int)Math.Round(source.Width * scale));
-                var height = Math.Max(1, (int)Math.Round(source.Height * scale));
-                graphics.DrawImage(source, (PreviewWidth - width) / 2, (PreviewHeight - height) / 2, width, height);
+                var scale = Math.Min((double)width / source.Width, (double)height / source.Height);
+                var scaledWidth = Math.Max(1, (int)Math.Round(source.Width * scale));
+                var scaledHeight = Math.Max(1, (int)Math.Round(source.Height * scale));
+                graphics.DrawImage(source, (width - scaledWidth) / 2, (height - scaledHeight) / 2, scaledWidth, scaledHeight);
             }
 
             using var output = new MemoryStream();

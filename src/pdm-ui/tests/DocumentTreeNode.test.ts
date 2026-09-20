@@ -21,6 +21,23 @@ function node(id: string, name: string, children: DocumentNode[] = []): Document
 }
 
 describe('DocumentTreeNode', () => {
+  it('收到客户端本地轻量预览缩略图后在图标前显示小图，未返回时只显示原图标', async () => {
+    const root = node('thumb-1', '切料机构')
+    const wrapper = mount(DocumentTreeNode, { props: { node: root, selectedId: '' } })
+
+    expect(wrapper.find('.pdm-tree-row__thumb').exists()).toBe(false)
+
+    window.dispatchEvent(new CustomEvent('pdm-tree-thumbnail-status', {
+      detail: { documentId: 'thumb-1', dataUrl: 'data:image/jpeg;base64,thumb' },
+    }))
+    await wrapper.vm.$nextTick()
+
+    const thumb = wrapper.get('.pdm-tree-row__thumb')
+    expect(thumb.attributes('src')).toBe('data:image/jpeg;base64,thumb')
+    // 缩略图仍在 CAD 图标之前。
+    expect(thumb.element.nextElementSibling?.getAttribute('class') ?? '').toContain('pdm-cad-icon')
+  })
+
   it('initially expands only the root level and allows deeper levels to be opened manually', async () => {
     const grandchild = node('grandchild', '第二级')
     const child = node('child', '第一级', [grandchild])

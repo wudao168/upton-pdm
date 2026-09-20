@@ -1,8 +1,9 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { ChevronDown, ChevronRight, Minus } from '@lucide/vue'
 import type { DocumentNode, DrawingReviewBadge, WorkspaceLocalFileState } from '../types'
 import CadDocumentIcon from './CadDocumentIcon.vue'
+import { documentThumbnail, requestDocumentThumbnail } from '../documentThumbnails'
 
 const props = defineProps<{
   node: DocumentNode
@@ -17,6 +18,8 @@ const expanded = ref((props.level ?? 0) === 0)
 const hasChildren = computed(() => props.node.children.length > 0)
 const reviewState = computed(() => props.node.documentId ? props.reviewStates?.[props.node.documentId] : undefined)
 const localState = computed(() => props.node.documentId ? props.localStates?.[props.node.documentId] : undefined)
+const thumbnail = computed(() => documentThumbnail(props.node.documentId))
+onMounted(() => requestDocumentThumbnail(props.node.documentId))
 const versionText = computed(() => props.node.snapshotVersion === undefined
   ? props.node.version
   : `${props.node.snapshotVersion} / ${props.node.version}`)
@@ -61,6 +64,7 @@ function openContext(event: MouseEvent) {
         <span class="pdm-tree-row__toggle" @click.stop="hasChildren && (expanded = !expanded)">
           <component :is="hasChildren ? (expanded ? ChevronDown : ChevronRight) : Minus" :size="14" aria-hidden="true" />
         </span>
+        <img v-if="thumbnail" class="pdm-tree-row__thumb" :src="thumbnail" alt="" loading="lazy" />
         <CadDocumentIcon :kind="node.kind" :status="node.status" :size="17" />
         <span class="pdm-tree-row__label">
           <strong>{{ node.drawingNumber }}</strong>

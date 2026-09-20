@@ -203,7 +203,7 @@
 .pdm-tree-row__content { min-width: 0; display: flex; align-items: center; gap: 4px; }
 .pdm-cad-icon { flex: 0 0 auto; overflow: visible; shape-rendering: geometricPrecision; }
 .pdm-tree-row__toggle { display: inline-flex; flex: 0 0 auto; }
-.pdm-tree-row__label { min-width: 0; display: flex; flex-direction: column; }
+.pdm-tree-row__thumb{width:28px;height:20px;flex:0 0 auto;object-fit:contain;border:1px solid var(--pdm-border-soft);border-radius:3px;background:var(--pdm-surface)}.pdm-tree-row__label { min-width: 0; display: flex; flex-direction: column; }
 .pdm-tree-row__label strong, .pdm-tree-row__label small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .pdm-tree-row__label strong { font-size: 11px; font-weight: 500; }
 .pdm-tree-row__label small { color: var(--pdm-muted); font-size: 10px; }
