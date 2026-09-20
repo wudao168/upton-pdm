@@ -9494,6 +9494,10 @@ public sealed class PdmAddin : ISwAddin
         try
         {
             var preparationFailures = new List<string>();
+            // 本次一同提交的文件在同一轮里先入库，校验阶段不要求其引用版本已解析。
+            var submissionPaths = new HashSet<string>(
+                orderedItems.Select(item => item.Node?.FullPath).Where(path => !string.IsNullOrWhiteSpace(path)),
+                StringComparer.OrdinalIgnoreCase);
             for (var index = 0; index < orderedItems.Length; index++)
             {
                 cancellationToken.ThrowIfCancellationRequested();
@@ -9501,7 +9505,7 @@ public sealed class PdmAddin : ISwAddin
                 var node = item.Node;
                 try
                 {
-                    PdmApiClient.ValidateCheckInReferences(node);
+                    PdmApiClient.ValidateCheckInReferences(node, submissionPaths);
                     reportProgress?.Invoke(index, orderedItems.Length, node?.FileName, "阶段2/4：正在准备文件权限…");
                     if (await PrepareBatchCheckInPermissionAsync(item, projectId, cancellationToken, registrationDecisions))
                         result.PreparedPermissions++;

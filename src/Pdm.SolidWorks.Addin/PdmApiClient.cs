@@ -521,9 +521,14 @@ internal sealed class PdmApiClient : IDisposable
     internal static bool HasResolvedReferenceVersion(CadTreeNode node) =>
         ToRevisionRequest(node.CurrentRevision?.TrimEnd('*').Trim()) != null;
 
-    internal static void ValidateCheckInReferences(CadTreeNode node) => ToRequestNode(node, true);
+    /// <summary>
+    /// 提交前校验引用版本。plannedPaths 传入本次一同提交的文件，
+    /// 这些引用会在执行阶段先被提交并回填版本，因此校验阶段不做要求。
+    /// </summary>
+    internal static void ValidateCheckInReferences(CadTreeNode node, ICollection<string> plannedPaths = null) =>
+        ToRequestNode(node, true, plannedPaths);
 
-    private static object ToRequestNode(CadTreeNode node, bool isRoot)
+    private static object ToRequestNode(CadTreeNode node, bool isRoot, ICollection<string> plannedPaths = null)
     {
         var children = new List<object>();
         foreach (var child in node.Children)
@@ -533,7 +538,23 @@ internal sealed class PdmApiClient : IDisposable
                 continue;
             }
 
-            children.Add(ToRequestNode(child, false));
+            if (plannedPaths != null
+                && !string.IsNullOrWhiteSpace(child.FullPath)
+                && plannedPaths.Contains(child.FullPath))
+            {
+                // 本次一起提交：执行阶段该子件会先入库并回填版本，这里不要求已解析。
+                try
+                {
+                    children.Add(ToRequestNode(child, false));
+                }
+                catch (InvalidOperationException)
+                {
+                    // 版本尚未解析（本地修改）属于预期状态，交由执行阶段处理。
+                }
+                continue;
+            }
+
+            children.Add(ToRequestNode(child, false, plannedPaths));
         }
 
         var displayedRevisionText = isRoot ? node.Revision : node.CurrentRevision;
