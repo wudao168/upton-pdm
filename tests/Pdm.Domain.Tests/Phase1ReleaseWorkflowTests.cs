@@ -108,6 +108,62 @@ public sealed class Phase1ReleaseWorkflowTests
         }
     }
 
+    /// <summary>转图失败不再阻断发布：发布照常完成，转图转为后台单独事项并可补挂到正式版本。</summary>
+    [Fact]
+    public async Task PublishSucceedsWhenPreviewConversionFailsAndQueuesPreviewRetry()
+    {
+        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var publisher = new RecordingPublisher { PreviewError = "Access to the path '170837DFM-16-50-P-A-GF-111.SLDPRT' is denied." };
+        var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(), publisher, TimeProvider.System);
+        foreach (var document in await repository.ListCheckedOutDocumentsAsync(default))
+            await repository.ForceReleaseCheckoutAsync(document.Id, "admin", "测试准备", default);
+        await PrepareApprovedNonStandardDrawingReviewAsync(repository, workflow);
+        await workflow.ReplaceBomAsync(ProjectId, BomKind.Electrical,
+            [new BomItemInput(1, "EL-001", "光电传感器", 4, "件", null, "M18 PNP", "A", true)], "admin", UserRole.Administrator, default);
+
+        var package = await workflow.CreateReleasePackageAsync(
+            ProjectId, null, $"RP-TEST-{Guid.NewGuid():N}", "admin", "admin", "admin", UserRole.Administrator, default);
+        package = await workflow.SubmitReleasePackageAsync(package.Id, "admin", UserRole.Administrator, default);
+        var processTask = package.ApprovalTasks.Single(task => task.Stage == ApprovalStage.ProcessReview);
+        package = await workflow.DecideAsync(processTask.Id, "admin", UserRole.Administrator, ApprovalDecision.Approved, "工艺可行", default);
+        var approvalTask = package.ApprovalTasks.Single(task => task.Stage == ApprovalStage.Approval);
+        package = await workflow.DecideAsync(approvalTask.Id, "admin", UserRole.Administrator, ApprovalDecision.Approved, "批准发布", default);
+
+        // 发布没有被转图失败卡住，转图单独排队并记录原因。
+        Assert.Equal(ReleasePackageState.Published, package.State);
+        Assert.Equal(ReleasePreviewState.Pending, package.PreviewState);
+        Assert.Contains("is denied", package.PreviewError);
+        Assert.Equal(0, package.PreviewAttempts);
+        Assert.Contains(await repository.ListReleasePackagesAwaitingPreviewAsync(ReleasePreviewService.MaxAttempts, 10, default),
+            item => item.Id == package.Id);
+        foreach (var source in publisher.PreviewSources)
+        {
+            var released = (await repository.ListDocumentVersionsAsync(source.DocumentId, default))
+                .Single(version => version.Status == DocumentVersionStatus.Released);
+            Assert.Null(released.Preview);
+        }
+
+        // 后台转图完成后把 STEP/PDF 补挂到正式版本，并结束排队状态。
+        var artifacts = publisher.PreviewSources.ToDictionary(
+            source => source.DocumentId,
+            source => new DocumentPreviewArtifact(
+                source.Kind == DocumentKind.Drawing ? DocumentPreviewFormat.Pdf : DocumentPreviewFormat.Step,
+                $".release-previews/{source.DocumentId:N}.{(source.Kind == DocumentKind.Drawing ? "pdf" : "step")}",
+                1,
+                new string('B', 64),
+                source.SourceSha256));
+        var attached = await repository.AttachReleasePreviewArtifactsAsync(package.Id, artifacts, default);
+        Assert.Equal(artifacts.Count, attached.Count);
+        await repository.MarkReleasePreviewStateAsync(package.Id, ReleasePreviewState.Succeeded, null, 1, TimeProvider.System.GetUtcNow(), default);
+        Assert.Empty(await repository.ListReleasePackagesAwaitingPreviewAsync(ReleasePreviewService.MaxAttempts, 10, default));
+        foreach (var source in publisher.PreviewSources)
+        {
+            var released = (await repository.ListDocumentVersionsAsync(source.DocumentId, default))
+                .Single(version => version.Status == DocumentVersionStatus.Released);
+            Assert.Equal(source.SourceSha256, released.Preview?.SourceSha256);
+        }
+    }
+
     [Fact]
     public async Task CurrentApprovalAssignee_CanRejectWithoutApprovalRolePermission()
     {
@@ -895,6 +951,39 @@ public sealed class Phase1ReleaseWorkflowTests
         Assert.Contains(generated.ElectricalItems, item => item.Id == electrical.Id);
         Assert.Contains(await repository.GetBomAsync(ProjectId, BomKind.Electrical, default), item => item.Id == electrical.Id);
         Assert.DoesNotContain(sourceData, item => item.Kind == BomKind.Electrical || item.Id == electrical.Id);
+    }
+
+    [Fact]
+    public async Task BomSourceView_ReportsQuantityDifferenceAgainstReferenceTree()
+    {
+        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(), new RecordingPublisher(), TimeProvider.System);
+        var generated = await workflow.GenerateMechanicalBomAsync(ProjectId, true, "admin", UserRole.Administrator, default);
+        var pending = generated.UnclassifiedItems.First(item => item.IsPendingClassification && item.SourceDocumentId.HasValue);
+        var sourceItem = Assert.Single(await workflow.BatchUpdateBomItemsAsync(
+            ProjectId,
+            new BatchUpdateBomItemsCommand([pending.Id], ["kind"], BomKind.NonStandard),
+            "admin", UserRole.Administrator, default));
+
+        var inflated = sourceItem with { Quantity = sourceItem.Quantity + 1 };
+        await repository.ReplaceBomAsync(
+            ProjectId,
+            BomKind.NonStandard,
+            (await repository.GetBomAsync(ProjectId, BomKind.NonStandard, default))
+                .Select(item => item.Id == inflated.Id ? inflated : item)
+                .ToArray(),
+            default);
+
+        var sourceView = await workflow.GetBomSourceDataAsync(ProjectId, "admin", UserRole.Administrator, default);
+        var reported = Assert.Single(sourceView, item => item.Id == inflated.Id);
+        Assert.Equal("ManualOverrideMismatch", reported.ReconciliationStatus);
+        Assert.Contains("数量", reported.ReconciliationNote);
+
+        var restored = Assert.Single(await workflow.RestoreBomItemsFromSourceAsync(
+            ProjectId, new RestoreBomItemsFromSourceCommand([inflated.Id]), "admin", UserRole.Administrator, default));
+        Assert.Equal(sourceItem.Quantity, restored.Quantity);
+        Assert.Equal("SourceMatched", restored.ReconciliationStatus);
+        Assert.DoesNotContain("数量", restored.ReconciliationNote);
     }
 
     [Fact]
@@ -1741,6 +1830,37 @@ public sealed class Phase1ReleaseWorkflowTests
     }
 
     [Fact]
+    public async Task NonStandardFormalRelease_AsksToRefreshDraftWhenBomChangedAfterDraftCreation()
+    {
+        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(), new RecordingPublisher(), TimeProvider.System);
+        foreach (var document in await repository.ListCheckedOutDocumentsAsync(default))
+            await repository.ForceReleaseCheckoutAsync(document.Id, "admin", "测试准备", default);
+        await ConfigureApprovalWorkflowsAsync(repository);
+        await PrepareApprovedNonStandardDrawingReviewAsync(repository, workflow, completePropertyWriteback: true);
+
+        // 先按错误数量（2）创建草稿，让发布快照固化下来。
+        var inflated = (await repository.GetBomAsync(ProjectId, BomKind.NonStandard, default))
+            .Select(item => item with { Quantity = 2 })
+            .ToArray();
+        await repository.ReplaceBomAsync(ProjectId, BomKind.NonStandard, inflated, default);
+        var package = await workflow.CreateScopedReleasePackageAsync(
+            ProjectId, null, string.Empty, string.Empty, string.Empty, "未指定", null,
+            ReleaseScope.NonStandardWithDrawing, [], "admin", UserRole.Administrator, default);
+
+        // 修正当前BOM数量后提交：应提示刷新草稿，而不是继续报“数量与设计树不一致”。
+        var corrected = inflated.Select(item => item with { Quantity = 1 }).ToArray();
+        await repository.ReplaceBomAsync(ProjectId, BomKind.NonStandard, corrected, default);
+        // 保存BOM会刷新草稿版本，但发布包里固化的快照仍是创建时的数量。
+        await repository.SaveBomDraftAsync(ProjectId, BomKind.NonStandard, corrected, "admin", default);
+
+        var blocked = await Assert.ThrowsAsync<PdmConflictException>(() =>
+            workflow.SubmitReleasePackageAsync(package.Id, "admin", UserRole.Administrator, default));
+
+        Assert.Contains("发布草稿创建后已变化", blocked.Message);
+    }
+
+    [Fact]
     public async Task NonStandardFormalRelease_SubmitsWhileDrawingPropertiesAreStillWritingBack()
     {
         var repository = new InMemoryPdmRepository(TimeProvider.System);
@@ -2254,6 +2374,8 @@ public sealed class Phase1ReleaseWorkflowTests
         public int ValidateCalls { get; private set; }
         public int PublishCalls { get; private set; }
         public IReadOnlyList<ReleasePreviewSource> PreviewSources { get; private set; } = [];
+        /// <summary>模拟转图失败：发布照常完成，转图转为后台单独事项。</summary>
+        public string? PreviewError { get; init; }
         public Task PrepareAsync(ReleasePackage package, Project project, CancellationToken cancellationToken) { PrepareCalls++; return Task.CompletedTask; }
         public Task DiscardDraftAsync(ReleasePackage package, Project project, CancellationToken cancellationToken) { DiscardCalls++; return Task.CompletedTask; }
         public Task ValidateAsync(ReleasePackage package, Project project, CancellationToken cancellationToken) { ValidateCalls++; return Task.CompletedTask; }
@@ -2269,7 +2391,7 @@ public sealed class Phase1ReleaseWorkflowTests
                     1,
                     new string('A', 64),
                     source.SourceSha256));
-            return Task.FromResult(new ReleasePublication("C:\\PDM\\Release\\package", previews));
+            return Task.FromResult(new ReleasePublication("C:\\PDM\\Release\\package", PreviewError is null ? previews : new Dictionary<Guid, DocumentPreviewArtifact>(), PreviewError));
         }
     }
 

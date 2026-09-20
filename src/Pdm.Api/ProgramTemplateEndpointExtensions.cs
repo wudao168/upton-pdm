@@ -16,13 +16,17 @@ public static class ProgramTemplateEndpointExtensions
             var values = mine == true
                 ? await service.ListMineAsync(actor, role, cancellationToken)
                 : await service.ListPublishedAsync(actor, role, cancellationToken);
-            return Results.Ok(values.Select(MapTemplate));
+            return Results.Ok(values.Select(template => MapTemplate(template)));
         });
 
-        api.MapGet("/{templateId:guid}", async (Guid templateId, HttpContext context, ProgramTemplateService service, CancellationToken cancellationToken) =>
+        api.MapGet("/{templateId:guid}", async (Guid templateId, HttpContext context, ProgramTemplateService service, IProgramTemplateRepository repository, CancellationToken cancellationToken) =>
         {
             var (actor, role) = CurrentUser(context.User);
-            return Results.Ok(MapTemplate(await service.FindAsync(templateId, actor, role, cancellationToken)));
+            var template = await service.FindAsync(templateId, actor, role, cancellationToken);
+            var tasksByRevision = new Dictionary<Guid, IReadOnlyList<ProgramTemplateApprovalTask>>();
+            foreach (var revision in template.Revisions)
+                tasksByRevision[revision.Id] = await repository.ListRevisionTasksAsync(revision.Id, cancellationToken);
+            return Results.Ok(MapTemplate(template, tasksByRevision));
         });
 
         api.MapPost("", async (CreateProgramTemplateRequest request, HttpContext context, ProgramTemplateService service, CancellationToken cancellationToken) =>
@@ -127,19 +131,31 @@ public static class ProgramTemplateEndpointExtensions
     private static ProgramTemplateParameterInput MapParameter(ProgramTemplateParameterRequest item) =>
         new(item.Direction, item.SortOrder, item.Name, item.DataType, item.DefaultValue, item.Unit, item.Description);
 
-    private static ProgramTemplateResponse MapTemplate(ProgramTemplate template) => new(
+    private static ProgramTemplateResponse MapTemplate(
+        ProgramTemplate template,
+        IReadOnlyDictionary<Guid, IReadOnlyList<ProgramTemplateApprovalTask>>? tasksByRevision = null) => new(
         template.Id, template.Code, template.AssetType.ToString(), template.OriginCompanyId, template.OriginCompanyName,
         template.CurrentPublishedRevisionId, template.IsArchived, template.CreatedBy, template.CreatedAt,
-        template.Revisions.Select(MapRevision).ToArray());
+        template.Revisions
+            .Select(revision => MapRevision(revision, tasksByRevision?.GetValueOrDefault(revision.Id)))
+            .ToArray());
 
-    private static ProgramTemplateRevisionResponse MapRevision(ProgramTemplateRevision revision) => new(
+    private static ProgramTemplateRevisionResponse MapRevision(
+        ProgramTemplateRevision revision,
+        IReadOnlyList<ProgramTemplateApprovalTask>? approvalTasks = null) => new(
         revision.Id, revision.VersionLabel, revision.AttemptNumber, revision.State.ToString(), revision.Name, revision.Category,
         revision.Description, revision.Vendor, revision.Platform, revision.SoftwareVersion, revision.ApplicableSeries,
         revision.Tags, revision.ChangeNote, revision.PackageFileName, revision.PackageFileLength, revision.PackageSha256,
         revision.EvidenceFileName, revision.EvidenceFileLength, revision.EvidenceSha256, revision.CreatedBy,
         revision.CreatedAt, revision.SubmittedAt, revision.PublishedAt, revision.RowVersion,
         revision.Parameters.OrderBy(item => item.SortOrder).Select(item => new ProgramTemplateParameterResponse(
-            item.Id, item.Direction.ToString(), item.SortOrder, item.Name, item.DataType, item.DefaultValue, item.Unit, item.Description)).ToArray());
+            item.Id, item.Direction.ToString(), item.SortOrder, item.Name, item.DataType, item.DefaultValue, item.Unit, item.Description)).ToArray(),
+        (approvalTasks ?? [])
+            .OrderBy(item => item.Stage)
+            .Select(item => new ProgramTemplateApprovalTaskResponse(
+                item.Stage.ToString(), item.Assignee, item.AssigneeRoleCode, item.Decision?.ToString(), item.DecisionBy,
+                item.Comment, item.CreatedAt, item.DecidedAt))
+            .ToArray());
 
     private static (string Actor, UserRole Role) CurrentUser(ClaimsPrincipal principal)
     {

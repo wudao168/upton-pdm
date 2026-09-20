@@ -47,19 +47,56 @@ function ConvertFrom-UplmMojibake {
 
     if ([string]::IsNullOrWhiteSpace($Value)) { return $Value }
     $current = $Value
-    $strictUtf8 = New-Object Text.UTF8Encoding($false, $true)
-    $windows1252 = [Text.Encoding]::GetEncoding(1252)
-    for ($attempt = 0; $attempt -lt 3; $attempt++) {
+    $windows1252Bytes = @{
+        0x20AC = 0x80; 0x201A = 0x82; 0x0192 = 0x83; 0x201E = 0x84; 0x2026 = 0x85; 0x2020 = 0x86; 0x2021 = 0x87
+        0x02C6 = 0x88; 0x2030 = 0x89; 0x0160 = 0x8A; 0x2039 = 0x8B; 0x0152 = 0x8C; 0x017D = 0x8E; 0x2018 = 0x91
+        0x2019 = 0x92; 0x201C = 0x93; 0x201D = 0x94; 0x2022 = 0x95; 0x2013 = 0x96; 0x2014 = 0x97; 0x02DC = 0x98
+        0x2122 = 0x99; 0x0161 = 0x9A; 0x203A = 0x9B; 0x0153 = 0x9C; 0x017E = 0x9E; 0x0178 = 0x9F
+    }
+    for ($attempt = 0; $attempt -lt 6; $attempt++) {
         if ($current -match '[\u3400-\u9fff]') { break }
-        try {
-            $bytes = $windows1252.GetBytes($current)
-            $decoded = $strictUtf8.GetString($bytes)
+        $bytes = New-Object 'System.Collections.Generic.List[byte]'
+        $mappable = $true
+        foreach ($character in $current.ToCharArray()) {
+            $codePoint = [int][char]$character
+            if ($codePoint -le 0xFF) { $bytes.Add([byte]$codePoint) }
+            elseif ($windows1252Bytes.ContainsKey($codePoint)) { $bytes.Add([byte]$windows1252Bytes[$codePoint]) }
+            else { $mappable = $false; break }
         }
-        catch { break }
-        if ($decoded -eq $current -or $decoded -notmatch '[\u3400-\u9fff]') { break }
+        if (-not $mappable) { break }
+        $decoded = ConvertFrom-UplmUtf8Tolerant -Bytes $bytes.ToArray()
+        if ($decoded -eq $current) { break }
         $current = $decoded
     }
     return $current
+}
+
+function ConvertFrom-UplmUtf8Tolerant {
+    param([byte[]]$Bytes)
+
+    $strictUtf8 = New-Object Text.UTF8Encoding($false, $true)
+    $builder = New-Object Text.StringBuilder
+    $index = 0
+    while ($index -lt $Bytes.Length) {
+        $lead = $Bytes[$index]
+        $length = 1
+        if ($lead -ge 0xC2 -and $lead -le 0xDF) { $length = 2 }
+        elseif ($lead -ge 0xE0 -and $lead -le 0xEF) { $length = 3 }
+        elseif ($lead -ge 0xF0 -and $lead -le 0xF4) { $length = 4 }
+        if ($length -gt 1 -and ($index + $length) -le $Bytes.Length) {
+            try {
+                [void]$builder.Append($strictUtf8.GetString($Bytes, $index, $length))
+                $index += $length
+                continue
+            }
+            catch {
+                # 该位置不是完整的 UTF-8 序列，按单字节保留。
+            }
+        }
+        [void]$builder.Append([char]$lead)
+        $index++
+    }
+    return $builder.ToString()
 }
 
 function Get-UplmJsonUtf8 {
@@ -125,7 +162,7 @@ function Get-UplmReleaseHistory {
     foreach ($candidate in $candidates) {
         $version = [string](Get-UplmPropertyValue -InputObject $candidate -Name 'Version')
         if ([string]::IsNullOrWhiteSpace($version)) { continue }
-        $version = $version.Trim()
+        $version = (ConvertFrom-UplmMojibake $version.Trim()).Trim()
         $key = $version.ToLowerInvariant()
         if ($seen.ContainsKey($key)) { continue }
         $seen[$key] = $true

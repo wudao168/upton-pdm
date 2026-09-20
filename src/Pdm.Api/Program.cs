@@ -135,8 +135,9 @@ builder.Services.AddScoped<IMaterialAttachmentStorage, LocalMaterialAttachmentSt
 builder.Services.AddScoped<IProgramTemplateStorage, LocalProgramTemplateStorage>();
 builder.Services.AddScoped<IProjectFileStorage, LocalProjectFileStorage>();
 builder.Services.AddSingleton<IValidationPlanTextRecognitionService, WindowsValidationPlanTextRecognitionService>();
-builder.Services.AddSingleton<IServerPreviewConverter, SolidWorksServerPreviewConverter>();
-builder.Services.AddSingleton<IReleasePackagePublisher, AtomicReleasePackagePublisher>();
+// 图纸转换位置（本机/远程转图服务器）来自系统设置，转换器和发布器都按请求作用域解析。
+builder.Services.AddScoped<IServerPreviewConverter, SolidWorksServerPreviewConverter>();
+builder.Services.AddScoped<IReleasePackagePublisher, AtomicReleasePackagePublisher>();
 builder.Services.AddSingleton<ICrmCredentialProtector, DataProtectionCrmCredentialProtector>();
 builder.Services.AddSingleton<IU9SecretProtector, DataProtectionU9SecretProtector>();
 builder.Services.AddHttpClient<ICrmCustomerClient, CrmCustomerClient>(client => client.Timeout = TimeSpan.FromSeconds(20));
@@ -172,6 +173,8 @@ builder.Services.AddSingleton<U9MaterialFullSyncCoordinator>();
 builder.Services.AddScoped<U9InventoryService>();
 builder.Services.AddSingleton<U9InventorySyncCoordinator>();
 builder.Services.AddScoped<U9ProcurementService>();
+builder.Services.AddScoped<ReleasePreviewService>();
+builder.Services.AddSingleton<ReleasePreviewCoordinator>();
 builder.Services.AddSingleton<U9ProcurementSyncCoordinator>();
 builder.Services.AddScoped<U9BomQueryService>();
 builder.Services.AddScoped<U9BomWriteService>();
@@ -189,6 +192,8 @@ builder.Services.AddHostedService<BomHeaderAutomaticHostedService>();
 builder.Services.AddHostedService<BomU9AutomationRetryHostedService>();
 builder.Services.AddHostedService<ProjectFileRecycleCleanupService>();
 builder.Services.AddHostedService<ControlledDocumentRecycleCleanupService>();
+builder.Services.AddHostedService<ReleasePreviewRetryHostedService>();
+builder.Services.AddHostedService<PublishRecoveryHostedService>();
 builder.Services.AddHostedService<ProjectContentResetCleanupService>();
 builder.Services.AddHostedService<ProjectPlanningReminderHostedService>();
 
@@ -266,7 +271,8 @@ if (Directory.Exists(deployedWebRoot))
         FileProvider = deployedFiles,
         ContentTypeProvider = new Microsoft.AspNetCore.StaticFiles.FileExtensionContentTypeProvider
         {
-            Mappings = { [".zip"] = "application/zip" }
+            // Windows PowerShell 5.1 Invoke-RestMethod decodes JSON without a charset as ISO-8859-1 and mangles Chinese text.
+            Mappings = { [".zip"] = "application/zip", [".json"] = "application/json; charset=utf-8" }
         }
     });
 }

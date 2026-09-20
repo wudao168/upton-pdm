@@ -126,6 +126,40 @@ const activeRevision = computed(() => selected.value?.revisions.find(item => ite
   ?? selected.value?.revisions.find(item => item.id === selected.value?.currentPublishedRevisionId)
   ?? (selected.value ? latestRevision(selected.value) : undefined))
 const activeTask = computed(() => tasks.value.find(item => item.templateId === selected.value?.id && item.revisionId === activeRevision.value?.id))
+type ApprovalFlowStep = { key: string; title: string; person: string; result: string; note: string; tone: 'done' | 'active' | 'rejected' }
+const approvalFlow = computed<ApprovalFlowStep[]>(() => {
+  const revision = activeRevision.value
+  if (!revision) return []
+  const steps: ApprovalFlowStep[] = [{
+    key: 'Submit',
+    title: '提交',
+    person: displayUserName(revision.createdBy),
+    result: dateLabel(revision.submittedAt || revision.createdAt),
+    note: '',
+    tone: revision.state === 'Draft' ? 'active' : 'done',
+  }]
+  for (const task of revision.approvalTasks ?? []) {
+    const isReview = task.stage === 'Review'
+    const decided = Boolean(task.decision)
+    steps.push({
+      key: task.stage,
+      title: isReview ? '电气组织审核' : '集团标准化批准',
+      person: task.decisionBy
+        ? displayUserName(task.decisionBy)
+        : task.assignee ? displayUserName(task.assignee) : '具“批准程序模板”权限的负责人',
+      result: decided
+        ? `${task.decision === 'Approved' ? (isReview ? '审核通过' : '批准发布') : '已退回'}${task.decidedAt ? ` · ${dateLabel(task.decidedAt)}` : ''}`
+        : '进行中',
+      note: task.comment || '',
+      tone: task.decision === 'Rejected' ? 'rejected' : decided ? 'done' : 'active',
+    })
+  }
+  return steps
+})
+const currentReviewer = computed(() => {
+  const active = approvalFlow.value.find(step => step.key !== 'Submit' && step.tone === 'active')
+  return active ? `${active.title}：${active.person}` : ''
+})
 const previewParameters = computed<ProgramTemplateParameter[]>(() => form.parameters.map((item, index) => ({ ...item, id: item.id || `draft-${index}`, sortOrder: index })))
 const groupedParameters = computed(() => ({
   Input: activeRevision.value?.parameters.filter(item => item.direction === 'Input') ?? [],
@@ -434,7 +468,7 @@ onMounted(async () => {
 
     <el-drawer v-model="detailOpen" class="program-template-detail" size="min(1120px, 94vw)" destroy-on-close>
       <template #header>
-        <div v-if="selected && activeRevision" class="program-template-detail-title"><Blocks :size="28" /><div><h2>{{ activeRevision.name }}</h2><p>{{ selected.code }} · {{ assetLabels[selected.assetType] }} · {{ activeRevision.version }}</p></div><el-tag :type="stateTagType(activeRevision.state)">{{ stateLabels[activeRevision.state] }}</el-tag></div>
+        <div v-if="selected && activeRevision" class="program-template-detail-title"><Blocks :size="28" /><div><h2>{{ activeRevision.name }}</h2><p>{{ selected.code }} · {{ assetLabels[selected.assetType] }} · {{ activeRevision.version }}<template v-if="currentReviewer"> · 当前 {{ currentReviewer }}</template></p></div><el-tag :type="stateTagType(activeRevision.state)">{{ stateLabels[activeRevision.state] }}</el-tag></div>
       </template>
       <template v-if="selected && activeRevision">
         <section class="program-template-section is-description"><h3>功能说明</h3><p>{{ activeRevision.description }}</p></section>
@@ -455,6 +489,8 @@ onMounted(async () => {
         <section class="program-template-section is-properties"><h3>属性与受控文件</h3><dl class="program-template-properties"><div><dt>厂商</dt><dd>{{ activeRevision.vendor }}</dd></div><div><dt>平台</dt><dd>{{ activeRevision.platform }}</dd></div><div><dt>软件版本</dt><dd>{{ activeRevision.softwareVersion }}</dd></div><div><dt>适用系列</dt><dd>{{ activeRevision.applicableSeries || '—' }}</dd></div><div><dt>来源公司</dt><dd>{{ selected.originCompanyName || '集团共享' }}</dd></div><div><dt>上传人</dt><dd>{{ displayUserName(activeRevision.createdBy) }}</dd></div><div><dt>ZIP/RAR程序包</dt><dd>{{ activeRevision.packageFileName || '未上传' }} · {{ fileSize(activeRevision.packageFileLength) }}</dd></div><div><dt>离线测试证据</dt><dd>{{ activeRevision.evidenceFileName || '未上传' }}</dd></div><div class="is-wide"><dt>程序包 SHA-256</dt><dd><code>{{ activeRevision.packageSha256 || '—' }}</code></dd></div><div class="is-wide"><dt>版本说明</dt><dd>{{ activeRevision.changeNote }}</dd></div></dl></section>
 
         <section v-if="activeTask" class="program-template-section program-template-decision is-decision"><h3>{{ activeTask.stage === 'Review' ? '电气组织审核' : '集团标准化批准' }}</h3><el-checkbox-group v-if="activeTask.requiredChecklist.length" v-model="checkedItems"><el-checkbox v-for="item in activeTask.requiredChecklist" :key="item" :label="item">{{ item }}</el-checkbox></el-checkbox-group><el-input v-model="decisionComment" type="textarea" :rows="3" placeholder="审批意见（退回时必填）" /></section>
+
+        <section class="program-template-section is-flow"><h3>审核流程</h3><ol class="program-template-flow"><li v-for="step in approvalFlow" :key="step.key" :class="`is-${step.tone}`"><strong>{{ step.title }}</strong><span>{{ step.person }}</span><small>{{ step.result }}</small><em v-if="step.note">{{ step.note }}</em></li></ol></section>
 
         <section class="program-template-section is-history"><h3>版本历史</h3><div class="program-template-history"><button v-for="revision in selected.revisions" :key="revision.id" type="button" :class="{ 'is-active': revision.id === activeRevision.id }" @click="activeRevisionId = revision.id"><code>{{ revision.version }}</code><span>第{{ revision.attemptNumber }}次提交</span><el-tag size="small" :type="stateTagType(revision.state)">{{ stateLabels[revision.state] }}</el-tag><small>{{ dateLabel(revision.publishedAt || revision.submittedAt || revision.createdAt) }}</small></button></div></section>
       </template>
@@ -498,6 +534,14 @@ onMounted(async () => {
 .program-template-decision :deep(.el-checkbox-group) { display: grid; gap: 8px; margin-bottom: 12px; }.program-template-decision :deep(.el-checkbox) { height: auto; white-space: normal; }
 .program-template-history { display: grid; gap: 6px; }.program-template-history button { display: grid; grid-template-columns: 75px 90px 90px 1fr; align-items: center; gap: 8px; min-height: 38px; border: 1px solid var(--pdm-border); border-radius: 6px; padding: 5px 9px; background: white; text-align: left; cursor: pointer; }.program-template-history button.is-active,.program-template-history button:hover { border-color: var(--pdm-blue); background: var(--pdm-blue-soft); }.program-template-history small { color: var(--pdm-muted); text-align: right; }
 .program-template-detail-actions { width: 100%; display: flex; justify-content: flex-end; gap: 8px; }
+.program-template-flow { display: grid; grid-auto-flow: column; grid-auto-columns: minmax(0,1fr); gap: 8px; margin: 0; padding: 0; list-style: none; }
+.program-template-flow li { min-width: 0; display: grid; gap: 2px; border: 1px solid var(--pdm-border); border-left: 3px solid var(--pdm-border); border-radius: 6px; padding: 6px 9px; }
+.program-template-flow li.is-done { border-left-color: var(--pdm-green); }
+.program-template-flow li.is-active { border-left-color: var(--pdm-blue); background: var(--pdm-blue-soft); }
+.program-template-flow li.is-rejected { border-left-color: var(--pdm-orange); }
+.program-template-flow strong,.program-template-flow span,.program-template-flow small,.program-template-flow em { min-width: 0; overflow: hidden; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.program-template-flow span,.program-template-flow small { color: var(--pdm-muted); }
+.program-template-flow em { color: var(--pdm-orange); font-style: normal; }
 :global(.program-template-detail) { font-size: 12px; }
 :global(.program-template-detail .el-drawer__header) { min-height: 52px; margin-bottom: 0; padding: 0 14px; }
 :global(.program-template-detail .el-drawer__body) { min-height: 0; display: grid; grid-template-columns: minmax(0,.86fr) minmax(0,1.14fr); grid-template-rows: auto auto auto auto; align-content: start; gap: 8px 14px; overflow: hidden; padding: 8px 12px; }
@@ -509,8 +553,9 @@ onMounted(async () => {
 :global(.program-template-detail .is-properties) { grid-column: 2; grid-row: 1; }
 :global(.program-template-detail .is-interface) { grid-column: 1; grid-row: 2; }
 :global(.program-template-detail .is-diagram) { grid-column: 2; grid-row: 2; align-self: start; }
-:global(.program-template-detail .is-history) { grid-column: 1/-1; grid-row: 3; }
-:global(.program-template-detail .is-decision) { grid-column: 1/-1; grid-row: 4; }
+:global(.program-template-detail .is-flow) { grid-column: 1/-1; grid-row: 3; }
+:global(.program-template-detail .is-history) { grid-column: 1/-1; grid-row: 4; }
+:global(.program-template-detail .is-decision) { grid-column: 1/-1; grid-row: 5; }
 :global(.program-template-detail .program-parameter-groups) { gap: 6px; }
 :global(.program-template-detail .program-parameter-groups article header) { padding: 6px 8px; font-size: 12px; }
 :global(.program-template-detail .program-parameter-groups article > div) { min-height: 28px; padding: 3px 8px; }

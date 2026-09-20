@@ -256,29 +256,34 @@ public sealed class MaterialServiceTests
     }
 
     [Theory]
-    [InlineData(MaterialSupplyMode.Purchase, 9)]
-    [InlineData(MaterialSupplyMode.Manufacture, 10)]
-    [InlineData(MaterialSupplyMode.Outsource, 4)]
+    [InlineData(MaterialKind.Electrical, "0101", MaterialSupplyMode.Purchase, 9)]
+    [InlineData(MaterialKind.Product, "0301", MaterialSupplyMode.Manufacture, 10)]
+    [InlineData(MaterialKind.Product, "0301", MaterialSupplyMode.Outsource, 4)]
+    // 非标件（非标机加件）在U9C同样按“采购件”建立，并勾选可采购/可生产/可委外等。
+    [InlineData(MaterialKind.NonStandard, "0204", MaterialSupplyMode.Manufacture, 9)]
+    [InlineData(MaterialKind.NonStandard, "0204", MaterialSupplyMode.Outsource, 9)]
+    [InlineData(MaterialKind.NonStandard, "0204", MaterialSupplyMode.Purchase, 9)]
     public async Task Approval_MapsSupplyModeToRequiredU9ItemFormAttribute(
+        MaterialKind kind,
+        string categoryCode,
         MaterialSupplyMode supplyMode,
         int expectedAttribute)
     {
         var service = CreateService(out _);
-        var isPurchase = supplyMode == MaterialSupplyMode.Purchase;
         var material = await service.CreateAsync(new(
             null,
             $"供给方式{expectedAttribute}",
-            isPurchase ? MaterialKind.Electrical : MaterialKind.NonStandard,
+            kind,
             supplyMode,
             "001",
             "TEST",
-            isPurchase ? null : "Q235",
+            kind == MaterialKind.NonStandard ? "Q235" : null,
             null,
             null,
             null,
             null,
             null,
-            CategoryCode: isPurchase ? "0101" : "0204"),
+            CategoryCode: categoryCode),
             "admin", UserRole.Administrator, default);
 
         var approved = await service.ApproveAsync(
@@ -287,11 +292,19 @@ public sealed class MaterialServiceTests
         using var payload = JsonDocument.Parse(approved.Task.PayloadJson);
         var row = payload.RootElement[0];
         Assert.Equal(expectedAttribute, row.GetProperty("ItemFormAttribute").GetInt32());
-        if (isPurchase)
+        Assert.False(row.TryGetProperty("Description", out _));
+        Assert.False(row.TryGetProperty("Weight", out _));
+        Assert.False(row.TryGetProperty("WeightUom", out _));
+        if (expectedAttribute == 9)
         {
-            Assert.False(row.TryGetProperty("Description", out _));
-            Assert.False(row.TryGetProperty("Weight", out _));
-            Assert.False(row.TryGetProperty("WeightUom", out _));
+            // 组织7的采购件模板：可采购/可生产/可委外/可MRP/可BOM等全部勾选。
+            Assert.True(row.GetProperty("IsPurchaseEnable").GetBoolean());
+            Assert.True(row.GetProperty("IsBuildEnable").GetBoolean());
+            Assert.True(row.GetProperty("IsOutsideOperationEnable").GetBoolean());
+            Assert.True(row.GetProperty("IsInventoryEnable").GetBoolean());
+            Assert.True(row.GetProperty("IsSalesEnable").GetBoolean());
+            Assert.True(row.GetProperty("IsMRPEnable").GetBoolean());
+            Assert.True(row.GetProperty("IsBOMEnable").GetBoolean());
         }
     }
 
@@ -1199,6 +1212,31 @@ public sealed class MaterialServiceTests
         var resolved = await service.ResolveStandardBomMaterialsAsync(
             new(ProjectId, [bom[1].Id]), "admin", UserRole.Administrator, default);
         Assert.Equal(applied[0].Application?.Id, Assert.Single(resolved).Application?.Id);
+    }
+
+    [Fact]
+    public async Task StandardBomMaterialCode_AppliesForCodesMissingFromMaterialMaster()
+    {
+        var service = CreateService(out var materials, out var repository, out _);
+        var workflow = new PdmWorkflowService(repository, null!, null!, TimeProvider.System);
+        var bom = await workflow.ReplaceBomAsync(ProjectId, BomKind.Standard,
+        [
+            new BomItemInput(1, "01020070208", "磁性开关", 1, "001", null, "D-A93L", "W1", true, Brand: "SMC")
+        ], "admin", UserRole.Administrator, default);
+        var item = Assert.Single(bom);
+
+        var resolved = await service.ResolveStandardBomMaterialsAsync(
+            new(ProjectId, [item.Id]), "admin", UserRole.Administrator, default);
+        var missing = Assert.Single(resolved);
+        Assert.Equal(MaterialCodeResolutionStatus.CodeNotFound, missing.Status);
+        Assert.Contains("料号不存在于料品主档", missing.Issues);
+
+        var applied = await service.ApplyForMaterialCodesAsync(
+            new(ProjectId, [item.Id]), "admin", UserRole.Administrator, default);
+        var pending = Assert.Single(applied);
+        Assert.Equal(MaterialCodeResolutionStatus.ApplicationPending, pending.Status);
+        Assert.NotNull(pending.Application);
+        Assert.Single(await materials.ListMaterialCodeApplicationsAsync(ProjectId, MaterialCodeApplicationStatus.Pending, default));
     }
 
     [Fact]

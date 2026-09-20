@@ -958,6 +958,11 @@ export interface ReleasePackageSummary {
   steps: ApprovalStep[]
   publishedPath?: string
   publishError?: string
+  /** 转图（发布预览生成）状态：与发布解耦，后台单独重试。 */
+  previewState?: string | null
+  previewError?: string | null
+  previewAttempts?: number
+  previewUpdatedAt?: string | null
   changeNumber?: string
   changeReason?: string
   effectiveSerialFrom?: string
@@ -2222,6 +2227,18 @@ export interface ProgramTemplateRevision {
   publishedAt?: string | null
   rowVersion: number
   parameters: ProgramTemplateParameter[]
+  approvalTasks?: ProgramTemplateApprovalTask[] | null
+}
+
+export interface ProgramTemplateApprovalTask {
+  stage: ProgramTemplateApprovalStage
+  assignee?: string | null
+  assigneeRoleCode?: string | null
+  decision?: ProgramTemplateApprovalDecision | null
+  decisionBy?: string | null
+  comment?: string | null
+  createdAt: string
+  decidedAt?: string | null
 }
 
 export interface ProgramTemplate {

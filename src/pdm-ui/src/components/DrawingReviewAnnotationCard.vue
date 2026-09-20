@@ -70,14 +70,23 @@ const routeLabel = computed(() => supervisorApproval.value
   : `当前审核人：${assignedReviewerPool.value.length ? assignedReviewerLabel(activePackage.value) : '具备审核权限的人员均可处理，任一通过即可'}`)
 const itemDecided = computed(() => itemApproved.value || itemChangesRequested.value)
 const canResubmit = computed(() => props.canResubmit && itemChangesRequested.value)
+// 审核已经走完（主管已批准/写标记/版本冲突/撤销）后，结论栏要反映审核单的真实状态，而不是继续显示"等待批准"。
+const finishedPackageLabels: Partial<Record<DrawingReviewPackage['state'], string>> = {
+  Approved: '审核单已完成',
+  WritingProperties: '正在写入审核标记',
+  Stale: '但审核单版本冲突，需要重新发起审核',
+  Withdrawn: '审核单已撤销',
+}
 const decisionRouteLabel = computed(() => {
   if (!activePackage.value || !activeItem.value) return '当前图档未纳入审核单'
   // 整单退回（历史路径）：图纸仍显示"已通过"，这里说明整单已退回与可用的下一步。
   if (activePackage.value.state === 'ChangesRequested' && !itemChangesRequested.value)
     return '本审核单已整单退回（待修改）：各图纸已解锁，可重新发起审核；或由发起人/项目经理撤销本单'
-  if (itemApproved.value) return supervisorApproval.value
-    ? '该2D工程图已通过审核，等待批准；批准为整单操作，退改只退回当前选中的图纸'
-    : '该2D工程图已通过审核，等待批准'
+  if (itemApproved.value) {
+    if (supervisorApproval.value) return '该2D工程图已通过审核，等待批准；批准为整单操作，退改只退回当前选中的图纸'
+    if (reviewActive.value) return '该2D工程图已通过审核，等待批准'
+    return `该2D工程图已通过审核，${finishedPackageLabels[activePackage.value.state] ?? drawingReviewPackageStateLabel(activePackage.value.state)}`
+  }
   if (itemChangesRequested.value) return canResubmit.value
     ? '该2D工程图已退回修改：请获取编辑权限修改并提交存档，然后点“重新提交”'
     : '该2D工程图已退回修改，其余图纸可继续审核'

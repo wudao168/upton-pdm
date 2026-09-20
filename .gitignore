@@ -22,3 +22,5 @@ artifacts/
 *.suo
 *.cache
 *.log
+# 转图代理安装程序的构建载荷（由 .local/Build-PreviewAgentSetup-20260920.ps1 生成）
+src/Pdm.PreviewAgent.Setup/payload.generated/

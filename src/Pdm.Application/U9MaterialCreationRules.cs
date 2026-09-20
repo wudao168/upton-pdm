@@ -39,11 +39,14 @@ public static class U9MaterialCreationRules
             && material.SupplyMode == MaterialSupplyMode.Manufacture;
         var virtualBom = category == "0201"
             && headerKind is ProjectBomHeaderKind.Standard or ProjectBomHeaderKind.NonStandard or ProjectBomHeaderKind.Electrical;
-        if (!purchased && !master && !virtualBom) return false;
+        // 非标件（非标机加件等）在U9C同样按“采购件”建立，并勾选可库存交易/可采购/可销售/可生产/可委外/可MRP/可BOM。
+        var nonStandardPurchase = material.Kind == MaterialKind.NonStandard
+            && headerKind is null or ProjectBomHeaderKind.NonStandard;
+        if (!purchased && !master && !virtualBom && !nonStandardPurchase) return false;
         if (organizationCode.Trim() != "7")
             throw new PdmRuleException("该料品创建模板仅核准用于U9C组织7；切换组织后请先核对模板及币种档案。");
 
-        data["ItemFormAttribute"] = virtualBom ? 6 : purchased ? 9 : 10;
+        data["ItemFormAttribute"] = virtualBom ? 6 : purchased || nonStandardPurchase ? 9 : 10;
         data["IsPurchaseEnable"] = true;
         data["IsBuildEnable"] = true;
         // Organization-7 virtual BOM items are persisted by U9C with outsourcing disabled.

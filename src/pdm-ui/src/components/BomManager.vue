@@ -124,6 +124,7 @@ const emit = defineEmits<{
   releaseSubmit: [releasePackageId: string]
   releaseWithdraw: [releasePackageId: string]
   releaseRetryU9: [releasePackageId: string]
+  releaseRetryPreview: [releasePackageId: string]
   releaseDecide: [taskId: string, decision: 'Approved' | 'Rejected', comment: string]
   releaseTransfer: [taskId: string, targetUsername: string, comment: string]
   releaseEmergencyDecide: [taskId: string, decision: 'Approved' | 'Rejected', reason: string]
@@ -292,8 +293,9 @@ function confirmExport() {
 const sourceDataRows = computed(() => props.sourceData)
 const sourceDisplayRows = computed(() => aggregateSourceRows(sourceDataRows.value))
 function distinctMaterialCount(items: BomItem[]) {
+  const codedAttributeKeys = buildCodedAttributeKeys(items)
   return new Set(items.map((row, index) => {
-    const aggregationKey = summaryAggregationKey(row)
+    const aggregationKey = summaryAggregationKey(row, codedAttributeKeys)
     if (aggregationKey) return aggregationKey
     return row.id ? `id:${row.id.toLocaleLowerCase()}` : `row:${index}`
   })).size
@@ -543,14 +545,15 @@ const selectedRows = computed(() => rows.value.filter(item => {
   const key = rowSelectionKey(item)
   return !!key && selectedIds.value.includes(key)
 }))
-function quantityTotalKey(row: BomItem) {
-  return summaryAggregationKey(row) || comparisonMaterialKey(row, 'Summary')
+function quantityTotalKey(row: BomItem, codedAttributeKeys?: Map<string, string>) {
+  return summaryAggregationKey(row, codedAttributeKeys) || comparisonMaterialKey(row, 'Summary')
 }
 
 function buildQuantityTotals(items: BomItem[]) {
   const totals = new Map<string, number>()
+  const codedAttributeKeys = buildCodedAttributeKeys(items)
   items.forEach(row => {
-    const key = quantityTotalKey(row)
+    const key = quantityTotalKey(row, codedAttributeKeys)
     if (!key) return
     totals.set(key, (totals.get(key) ?? 0) + Number(row.quantity))
   })
@@ -568,6 +571,11 @@ const publishedQuantityItems = computed(() => {
 const publishedQuantityTotals = computed(() => buildQuantityTotals(
   publishedQuantityItems.value.filter(item => !item.manuallyExcluded && !item.pendingClassification),
 ))
+const bomQuantityKeys = computed(() => buildCodedAttributeKeys(rows.value.filter(row => !row._quickEntry)))
+const sourceQuantityKeys = computed(() => buildCodedAttributeKeys(sourceDataRows.value))
+const publishedQuantityKeys = computed(() => buildCodedAttributeKeys(
+  publishedQuantityItems.value.filter(item => !item.manuallyExcluded && !item.pendingClassification),
+))
 function operationItemIds(row: EditableBomRow) {
   if (displayMode.value === 'Structure') return row.id ? [row.id] : []
   if (row._sourceItemIds?.length) return row._sourceItemIds
@@ -578,10 +586,15 @@ function operationItemIds(row: EditableBomRow) {
     .flatMap(item => item.id ? [item.id] : [])
 }
 const selectedPersistedIds = computed(() => [...new Set(selectedRows.value.flatMap(operationItemIds))])
-const selectedStandardItemsWithoutCode = computed(() => kind.value === 'Standard'
+// 需要申请正式料号的行：没有料号、料号不在料品主档里，或主档记录已归档/未批准（型号品牌不一致应改用“引用物料”）。
+const selectedStandardItemsNeedingMaterialCode = computed(() => kind.value === 'Standard'
   ? selectedRows.value.filter(item => {
-      const status = materialResolution(item)?.status
-      return item.id && !item.drawingNumber.trim() && status !== 'ApplicationPending' && status !== 'ApplicationApproved'
+      const resolution = materialResolution(item)
+      const status = resolution?.status
+      if (status === 'ApplicationPending' || status === 'ApplicationApproved') return false
+      const masterStateIssue = Boolean(resolution?.issues?.length)
+        && (resolution!.issues ?? []).every(issue => issue === '料品主档已归档' || issue === '料品主档尚未批准')
+      return Boolean(item.id) && (!item.drawingNumber.trim() || status === 'CodeNotFound' || (status === 'ValidationFailed' && masterStateIssue))
     })
   : [])
 const hasSelectedDraftRows = computed(() => selectedRows.value.some(item => !item.id))
@@ -722,7 +735,10 @@ async function resolveMissingStandardMaterialCodes(force = false) {
     const signature = `${row.drawingNumber?.trim().toLocaleLowerCase() ?? ''}|${row.brand?.trim().toLocaleLowerCase() ?? ''}|${row.specification?.trim().toLocaleLowerCase() ?? ''}`
     return force || resolvedMaterialSignatures.get(row.id!) !== signature
   })
-  if (targets.length === 0) return
+  if (targets.length === 0) {
+    if (force) ElMessage.info('标准件料号已核对：没有需要重新核对的行')
+    return
+  }
   targets.forEach(row => resolvedMaterialSignatures.set(row.id!, `${row.drawingNumber?.trim().toLocaleLowerCase() ?? ''}|${row.brand?.trim().toLocaleLowerCase() ?? ''}|${row.specification?.trim().toLocaleLowerCase() ?? ''}`))
   materialCodeResolving.value = true
   try {
@@ -737,11 +753,39 @@ async function resolveMissingStandardMaterialCodes(force = false) {
       }
     }
     if (linked) emit('materialCodeChanged')
+    if (force) reportMaterialCodeResolution(resolutions)
   } catch (error) {
     ElMessage.error(error instanceof Error ? error.message : '自动核对标准件料号失败')
   } finally {
     materialCodeResolving.value = false
   }
+}
+
+/** 核对料号后给出可见结论：通过多少、哪几类需要人工维护，并自动勾选需要处理的行。 */
+function reportMaterialCodeResolution(resolutions: MaterialCodeResolution[]) {
+  if (resolutions.length === 0) {
+    ElMessage.info('标准件料号已核对：没有需要处理的行')
+    return
+  }
+  const problems = resolutions.filter(item => item.status !== 'Verified' && item.status !== 'Matched'
+    && item.status !== 'ApplicationPending' && item.status !== 'ApplicationApproved')
+  if (problems.length === 0) {
+    ElMessage.success(`已核对 ${resolutions.length} 行标准件料号，全部通过料品主档型号、品牌校验。`)
+    return
+  }
+  const reasons = new Map<string, number>()
+  for (const item of problems) {
+    const label = item.status === 'CodeNotFound' ? '料号不存在于料品主档'
+      : item.status === 'Ambiguous' ? '存在多个同品牌同型号料号'
+        : item.status === 'NoMatch' ? '未匹配到料品主档'
+          : item.issues?.length ? item.issues.join('、') : '料品主档校验失败'
+    reasons.set(label, (reasons.get(label) ?? 0) + 1)
+  }
+  const summary = [...reasons.entries()].map(([label, count]) => `${label} ${count} 项`).join('；')
+  ElMessage.warning(`已核对 ${resolutions.length} 行：通过 ${resolutions.length - problems.length} 项，需人工维护 ${problems.length} 项（${summary}）。`
+    + '已自动勾选这些行：料号不存在或主档已归档/未批准可点“申请料号”，存在多个候选可点“引用物料”，型号/品牌不一致请修改BOM属性或引用正确料号。')
+  const problemIds = [...new Set(problems.map(item => item.bomItemId).filter((id): id is string => Boolean(id)))]
+  if (problemIds.length) selectedIds.value = problemIds
 }
 
 async function applyForMaterialCodes(itemIds: string[]) {
@@ -949,9 +993,9 @@ function rawMismatchFields(row: BomItem) {
 function mismatchFields(row: BomItem) {
   const fields = rawMismatchFields(row)
   const comparedFields = row.kind === 'Standard'
-    ? new Set(['物料分类', '物料编码', '型号', '品牌'])
+    ? new Set(['物料分类', '物料编码', '型号', '品牌', '数量'])
     : row.kind === 'NonStandard'
-      ? new Set(['物料分类', '型号', '材质', '表面处理'])
+      ? new Set(['物料分类', '型号', '材质', '表面处理', '数量'])
       : null
   return comparedFields ? fields.filter(field => comparedFields.has(field)) : fields
 }
@@ -1059,7 +1103,8 @@ function issueFieldValue(row: BomItem, field: string) {
         : field === '品牌' ? row.brand
           : field === '材质' ? row.material
             : field === '表面处理' ? row.surfaceTreatment
-              : ''
+              : field === '数量' ? quantityDisplay(row)
+                : ''
   return value?.trim() ?? ''
 }
 
@@ -1245,9 +1290,8 @@ function normalizedAggregationValue(value: string | null | undefined) {
   return value?.trim().toLocaleLowerCase() ?? ''
 }
 
-function summaryAggregationKey(row: BomItem) {
-  const materialKey = quantityAggregationKey(row)
-  if (materialKey) return `material:${materialKey}`
+// 同一来源文档、同配置、属性完全一致的实例，即使某一行还没填物料编码，也应归入同一料号。
+function partAttributeKey(row: BomItem) {
   if (!row.sourceDocumentId) return ''
   return [
     'document', row.sourceDocumentId, row.sourceConfiguration,
@@ -1256,10 +1300,30 @@ function summaryAggregationKey(row: BomItem) {
   ].map(value => normalizedAggregationValue(value)).join('|')
 }
 
+function buildCodedAttributeKeys(items: BomItem[]) {
+  const keys = new Map<string, string>()
+  items.forEach(item => {
+    const materialKey = quantityAggregationKey(item)
+    if (!materialKey) return
+    const attributeKey = partAttributeKey(item)
+    if (attributeKey && !keys.has(attributeKey)) keys.set(attributeKey, `material:${materialKey}`)
+  })
+  return keys
+}
+
+function summaryAggregationKey(row: BomItem, codedAttributeKeys?: Map<string, string>) {
+  const materialKey = quantityAggregationKey(row)
+  if (materialKey) return `material:${materialKey}`
+  const attributeKey = partAttributeKey(row)
+  if (!attributeKey) return ''
+  return codedAttributeKeys?.get(attributeKey) ?? attributeKey
+}
+
 function aggregateSourceRows(items: BomItem[]): EditableBomRow[] {
   const grouped = new Map<string, EditableBomRow>()
+  const codedAttributeKeys = buildCodedAttributeKeys(items)
   items.forEach((item, index) => {
-    const aggregationKey = summaryAggregationKey(item)
+    const aggregationKey = summaryAggregationKey(item, codedAttributeKeys)
     const key = aggregationKey || (item.id ? `id:${item.id.toLocaleLowerCase()}` : `row:${index}`)
     const existing = grouped.get(key)
     if (!existing) {
@@ -1272,6 +1336,7 @@ function aggregateSourceRows(items: BomItem[]): EditableBomRow[] {
       return
     }
     existing.quantity = Number(existing.quantity) + Number(item.quantity)
+    if (!existing.drawingNumber?.trim() && item.drawingNumber?.trim()) existing.drawingNumber = item.drawingNumber
     if (item.id && !existing._sourceItemIds?.includes(item.id)) existing._sourceItemIds = [...(existing._sourceItemIds ?? []), item.id]
     if (item.kind && !existing._sourceKinds?.includes(item.kind)) existing._sourceKinds = [...(existing._sourceKinds ?? []), item.kind]
     if (!existing._sourceTypes?.includes(item.source ?? 'Manual')) existing._sourceTypes = [...(existing._sourceTypes ?? []), item.source ?? 'Manual']
@@ -1600,23 +1665,23 @@ function sourceRowFor(row: BomItem) {
   const source = rawSourceRowFor(row)
   if (!source || displayMode.value !== 'Summary') return source
   // Match through source identity first: the maintained BOM may use a different official material code.
-  const key = summaryAggregationKey(source)
-  return key ? sourceDisplayRows.value.find(item => summaryAggregationKey(item) === key) : source
+  const key = summaryAggregationKey(source, sourceQuantityKeys.value)
+  return key ? sourceDisplayRows.value.find(item => summaryAggregationKey(item, sourceQuantityKeys.value) === key) : source
 }
 
 function bomQuantityTotal(row: BomItem) {
   if (isSourceView.value) return undefined
-  return bomQuantityTotals.value.get(quantityTotalKey(row)) ?? Number(row.quantity)
+  return bomQuantityTotals.value.get(quantityTotalKey(row, bomQuantityKeys.value)) ?? Number(row.quantity)
 }
 
 function publishedQuantityTotal(row: BomItem) {
-  return publishedQuantityTotals.value.get(quantityTotalKey(row))
+  return publishedQuantityTotals.value.get(quantityTotalKey(row, publishedQuantityKeys.value))
 }
 
 function sourceQuantityTotal(row: BomItem) {
   const source = rawSourceRowFor(row)
   if (!source) return undefined
-  return sourceQuantityTotals.value.get(quantityTotalKey(source)) ?? Number(source.quantity)
+  return sourceQuantityTotals.value.get(quantityTotalKey(source, sourceQuantityKeys.value)) ?? Number(source.quantity)
 }
 
 function quantityReferenceDisplay(value: number | undefined) {
@@ -1659,6 +1724,11 @@ function drawingReviewCandidate(row: BomItem) {
   if (rowKind(row) !== 'NonStandard') return undefined
   return currentDrawingReviewCandidates.value.find(candidate => candidate.bomItemId === row.id)
     ?? currentDrawingReviewCandidates.value.find(candidate => Boolean(row.sourceDocumentId) && candidate.modelDocumentId === row.sourceDocumentId)
+}
+
+// 已发布的物料在“图纸”列只显示 2D/3D 链接，不再显示“已批准”状态。
+function isPublishedDrawingRow(row: BomItem) {
+  return (publishedQuantityTotal(row) ?? 0) > 0
 }
 
 function drawingReviewStatus(row: BomItem) {
@@ -3322,7 +3392,7 @@ async function submitBatchUpdate() {
           <button v-if="!isSourceView" type="button" class="pdm-secondary-action pdm-bom-material-code-toolbar-action" :disabled="pending || selectedIds.length > 1 || !token || !projectId" @click="openMaterialReference">引用物料</button>
           <button v-if="kind === 'Standard' || kind === 'Electrical'" type="button" class="pdm-secondary-action pdm-bom-relation-action pdm-bom-material-code-toolbar-action" :class="{ 'is-warning': !relationReviewComplete, 'is-complete': relationReviewComplete }" :title="relationReviewTitle" :disabled="pending || !token || !projectId || selectedVersionId !== 'current'" @click="openMaterialRelations">关联物料</button>
           <button v-if="kind === 'Standard'" type="button" class="pdm-primary-action pdm-bom-material-code-toolbar-action pdm-bom-code-check-action" :disabled="pending || materialCodeResolving || !token || !projectId" @click="resolveMissingStandardMaterialCodes(true)">核对料号</button>
-          <button v-if="kind === 'Standard'" type="button" class="pdm-secondary-action pdm-bom-material-code-toolbar-action" :disabled="pending || selectedStandardItemsWithoutCode.length === 0" @click="applyForMaterialCodes([...new Set(selectedStandardItemsWithoutCode.flatMap(operationItemIds))])">申请料号</button>
+          <button v-if="kind === 'Standard'" type="button" class="pdm-secondary-action pdm-bom-material-code-toolbar-action" :disabled="pending || selectedStandardItemsNeedingMaterialCode.length === 0" :title="selectedStandardItemsNeedingMaterialCode.length ? '为没有料号、或料号不存在于料品主档的行申请正式料号' : '请先选择需要申请料号的行（没有料号或料号不存在于料品主档）'" @click="applyForMaterialCodes([...new Set(selectedStandardItemsNeedingMaterialCode.flatMap(operationItemIds))])">申请料号</button>
           <button v-if="hasRetainableSelection" type="button" class="pdm-secondary-action" :disabled="pending || !canRetainSelected" :title="!canRetainSelected ? '仅支持同时保留人工待确认或待确认删除的物料' : ''" @click="retainSelected">{{ selectedIds.length > 1 ? '批量确认保留' : '确认保留' }}</button>
           <button type="button" class="pdm-secondary-action pdm-bom-no-publish-action" :disabled="pending || !canSetNoPublish" title="物料保留在BOM中，但不进入发布文件和U9C发布汇总" @click="setSelectedReleaseExclusion(true)">不发布</button>
           <button type="button" class="pdm-secondary-action" :disabled="pending || !canRestorePublish" title="恢复参与后续发布" @click="setSelectedReleaseExclusion(false)">恢复发布</button>
@@ -3478,7 +3548,8 @@ async function submitBatchUpdate() {
                 <div v-if="drawingLinks(row).length" class="pdm-bom-drawing-links">
                   <button v-for="link in drawingLinks(row)" :key="link.kind" type="button" class="pdm-bom-drawing-link" :aria-label="`下载${link.kind}图纸 ${link.document.drawingNumber}`" :title="`下载${link.document.drawingNumber}的${link.kind}发布图纸`" :disabled="downloadingDrawingIds.has(link.document.id)" @click="downloadDrawing(link)">{{ downloadingDrawingIds.has(link.document.id) ? '…' : link.kind }}</button>
                 </div>
-                <span v-if="drawingReviewStatus(row)" class="pdm-bom-drawing-review-status" :class="drawingReviewStatus(row)?.tone" :title="drawingReviewStatus(row)?.title">{{ drawingReviewStatus(row)?.label }}</span>
+                <!-- 已发布的物料不再重复显示“已批准”，只保留 2D/3D 图纸链接。 -->
+                <span v-if="drawingReviewStatus(row) && !isPublishedDrawingRow(row)" class="pdm-bom-drawing-review-status" :class="drawingReviewStatus(row)?.tone" :title="drawingReviewStatus(row)?.title">{{ drawingReviewStatus(row)?.label }}</span>
               </div>
               <span v-else-if="!row._quickEntry" class="pdm-bom-cell-value">—</span>
             </td>
@@ -3796,6 +3867,7 @@ async function submitBatchUpdate() {
           @submit="submitReleaseWithRelationReminder"
           @withdraw="releasePackageId => emit('releaseWithdraw', releasePackageId)"
           @retry-u9="releasePackageId => emit('releaseRetryU9', releasePackageId)"
+          @retry-preview="releasePackageId => emit('releaseRetryPreview', releasePackageId)"
           @decide="(taskId, decision, comment) => emit('releaseDecide', taskId, decision, comment)"
           @transfer="(taskId, targetUsername, comment) => emit('releaseTransfer', taskId, targetUsername, comment)"
           @emergency-decide="(taskId, decision, reason) => emit('releaseEmergencyDecide', taskId, decision, reason)"

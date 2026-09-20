@@ -140,6 +140,77 @@ public sealed class ProgramTemplateWorkflowTests
     }
 
     [Fact]
+    public async Task ApproverPoolAcceptsApprovePermissionInsteadOfExactApproverRoleCode()
+    {
+        var clock = TimeProvider.System;
+        var pdmRepository = new InMemoryPdmRepository(clock);
+        var templateRepository = new InMemoryProgramTemplateRepository(clock);
+        var service = new ProgramTemplateService(templateRepository, pdmRepository, new UnusedProgramTemplateStorage(), clock);
+        // 批准人角色代码不是 Approver（“生产经理”），但默认带有“批准程序模板”权限：应能进入批准池并完成最终批准。
+        await pdmRepository.CreateUserAsync(new(Guid.NewGuid(), "uploader", "上传人", "unused", UserRole.Engineer, true, RoleCode: "ElectricalEngineer"), default);
+        await pdmRepository.CreateUserAsync(new(Guid.NewGuid(), "reviewer", "电气负责人", "unused", UserRole.BusinessUnitManager, true), default);
+        await pdmRepository.CreateUserAsync(new(Guid.NewGuid(), "prod-manager", "生产经理", "unused", UserRole.ProductionViewer, true, RoleCode: "ProductionManager"), default);
+        var organization = (await pdmRepository.GetOrganizationDirectoryAsync(default)).Organizations.First();
+        var unit = await pdmRepository.SaveOrganizationUnitAsync(new(null, organization.Id, null, "ELEC", "电气部", OrganizationUnitKind.Department, true, 1), default);
+        await pdmRepository.SetOrganizationMembershipsAsync("uploader", [unit.Id], unit.Id, default);
+        await pdmRepository.SetOrganizationUnitManagersAsync(unit.Id, "reviewer", [], default);
+
+        var created = await service.CreateAsync(new CreateProgramTemplateCommand(
+            ProgramTemplateAssetType.PlcFunctionBlock, "权限批准池", "逻辑运算", "批准池按权限判定。", "Siemens", "TIA Portal", "V19", "S7-1200",
+            [], "首版", [new(ProgramTemplateParameterDirection.Input, 0, "Enable", "BOOL", null, null, null)]),
+            "uploader", UserRole.Engineer, default);
+        var revision = created.Revisions.Single();
+        revision = await templateRepository.AttachFileAsync(revision.Id,
+            new(revision.Id, ProgramTemplateAttachmentKind.Package, "permission.zip", "PT-FB-0009/1/package/permission.zip", 128, new string('A', 64), clock.GetUtcNow()),
+            revision.RowVersion, default);
+        revision = await templateRepository.AttachFileAsync(revision.Id,
+            new(revision.Id, ProgramTemplateAttachmentKind.TestEvidence, "evidence.pdf", "PT-FB-0009/1/evidence/evidence.pdf", 64, new string('B', 64), clock.GetUtcNow()),
+            revision.RowVersion, default);
+
+        revision = await service.SubmitAsync(revision.Id, revision.RowVersion, "uploader", UserRole.Engineer, default);
+        Assert.Equal(ProgramTemplateRevisionState.PendingReview, revision.State);
+        var reviewTask = Assert.Single(await service.ListMyTasksAsync("reviewer", UserRole.BusinessUnitManager, default));
+        await service.DecideAsync(reviewTask.Id,
+            new(ProgramTemplateApprovalDecision.Approved, null, ProgramTemplateChecklist.For(created.AssetType), reviewTask.RowVersion),
+            "reviewer", UserRole.BusinessUnitManager, default);
+
+        var approvalTask = Assert.Single(await service.ListMyTasksAsync("prod-manager", UserRole.ProductionViewer, default));
+        var approved = await service.DecideAsync(approvalTask.Id,
+            new(ProgramTemplateApprovalDecision.Approved, "批准发布", [], approvalTask.RowVersion),
+            "prod-manager", UserRole.ProductionViewer, default);
+        Assert.Equal(ProgramTemplateRevisionState.Published, approved.Revision.State);
+    }
+
+    [Fact]
+    public async Task SubmitExplainsHowToConfigureAnApproverWhenNoneIsAvailable()
+    {
+        var clock = TimeProvider.System;
+        var pdmRepository = new InMemoryPdmRepository(clock);
+        var templateRepository = new InMemoryProgramTemplateRepository(clock);
+        var service = new ProgramTemplateService(templateRepository, pdmRepository, new UnusedProgramTemplateStorage(), clock);
+        await ConfigureElectricalApprovalChainAsync(pdmRepository);
+        // 把唯一带“标准化主管”角色的账号停用，批准池应为空，并给出可执行的配置说明。
+        await pdmRepository.UpdateUserAsync("approver", "标准化主管", UserRole.Approver, UserRole.Approver.ToString(), [UserRole.Approver.ToString()], false, default);
+
+        var created = await service.CreateAsync(new CreateProgramTemplateCommand(
+            ProgramTemplateAssetType.PlcFunctionBlock, "无批准人", "逻辑运算", "批准池为空时的提示。", "Siemens", "TIA Portal", "V19", "S7-1200",
+            [], "首版", [new(ProgramTemplateParameterDirection.Input, 0, "Enable", "BOOL", null, null, null)]),
+            "uploader", UserRole.Engineer, default);
+        var revision = created.Revisions.Single();
+        revision = await templateRepository.AttachFileAsync(revision.Id,
+            new(revision.Id, ProgramTemplateAttachmentKind.Package, "none.zip", "PT-FB-0010/1/package/none.zip", 128, new string('A', 64), clock.GetUtcNow()),
+            revision.RowVersion, default);
+        revision = await templateRepository.AttachFileAsync(revision.Id,
+            new(revision.Id, ProgramTemplateAttachmentKind.TestEvidence, "evidence.pdf", "PT-FB-0010/1/evidence/evidence.pdf", 64, new string('B', 64), clock.GetUtcNow()),
+            revision.RowVersion, default);
+
+        var blocked = await Assert.ThrowsAsync<PdmRuleException>(() =>
+            service.SubmitAsync(revision.Id, revision.RowVersion, "uploader", UserRole.Engineer, default));
+        Assert.Contains("角色权限设置", blocked.Message);
+        Assert.Contains("批准程序模板", blocked.Message);
+    }
+
+    [Fact]
     public async Task ReviewCannotApproveWithoutCompletingChecklist()
     {
         var clock = TimeProvider.System;

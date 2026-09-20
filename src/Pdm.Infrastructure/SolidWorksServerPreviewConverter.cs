@@ -1,4 +1,7 @@
 using System.Diagnostics;
+using System.IO.Compression;
+using System.Net.Http;
+using System.Net.Http.Headers;
 using System.Security.Cryptography;
 using System.Text.Json;
 using Microsoft.Extensions.Options;
@@ -19,10 +22,22 @@ public sealed class PdmPreviewWorkerOptions
     public int TimeoutMinutes { get; set; } = 30;
 }
 
-public sealed class SolidWorksServerPreviewConverter(IOptions<PdmPreviewWorkerOptions> options) : IServerPreviewConverter
+public sealed class SolidWorksServerPreviewConverter : IServerPreviewConverter
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web) { WriteIndented = true };
-    private readonly PdmPreviewWorkerOptions settings = options.Value;
+    private readonly PdmPreviewWorkerOptions settings;
+    private readonly IPdmRepository? repository;
+    private readonly HttpClient httpClient;
+
+    public SolidWorksServerPreviewConverter(IOptions<PdmPreviewWorkerOptions> options, IPdmRepository? repository = null, HttpClient? httpClient = null)
+    {
+        settings = options.Value;
+        this.repository = repository;
+        this.httpClient = httpClient ?? new HttpClient(new SocketsHttpHandler { ConnectTimeout = TimeSpan.FromSeconds(15) })
+        {
+            Timeout = Timeout.InfiniteTimeSpan
+        };
+    }
 
     public async Task<IReadOnlyDictionary<Guid, DocumentPreviewArtifact>> GenerateAsync(
         ReleasePackage package,
@@ -31,16 +46,21 @@ public sealed class SolidWorksServerPreviewConverter(IOptions<PdmPreviewWorkerOp
         string stagingDirectory,
         CancellationToken cancellationToken)
     {
-        if (!OperatingSystem.IsWindows()) throw new PdmRuleException("SolidWorks服务器转换只能在Windows服务器运行。");
-        if (settings.TimeoutMinutes is < 1 or > 120) throw new PdmRuleException("服务器预览转换超时必须设置为1到120分钟。");
-        var workerPath = Path.GetFullPath(settings.WorkerPath);
-        if (!File.Exists(workerPath)) throw new PdmRuleException($"服务器SolidWorks转换程序不存在：{workerPath}");
+        var conversionSettings = repository is null
+            ? PreviewConversionSettings.Default
+            : (await repository.GetSystemSettingsAsync(cancellationToken)).PreviewConversion ?? PreviewConversionSettings.Default;
+        if (conversionSettings.TimeoutMinutes is < 1 or > 120) throw new PdmRuleException("图纸转换超时必须设置为1到120分钟。");
+        var remote = conversionSettings.Mode == PreviewConversionMode.Remote;
+        if (remote && !Uri.TryCreate(conversionSettings.NormalizedAgentUrl, UriKind.Absolute, out _))
+            throw new PdmRuleException("远程转图服务器地址未配置，请在系统设置中填写转图电脑地址（例如 http://192.168.2.50:5199）。");
+        if (!remote && !OperatingSystem.IsWindows())
+            throw new PdmRuleException("本机SolidWorks转换只能在Windows服务器运行；如需在其他电脑转图，请在系统设置中选择远程转图服务器。");
 
         var duplicateFileName = sources
             .GroupBy(source => source.FileName, StringComparer.OrdinalIgnoreCase)
             .FirstOrDefault(group => group.Count() > 1);
         if (duplicateFileName is not null)
-            throw new PdmRuleException($"发布引用树包含重名源文件{duplicateFileName.Key}，服务器无法安全重建SolidWorks引用关系。");
+            throw new PdmRuleException($"发布引用树包含重名源文件{duplicateFileName.Key}，无法安全重建SolidWorks引用关系。");
 
         var vaultRoot = StorageLocationPolicy.Normalize(project.VaultLocation);
         var previewRelativeRoot = Path.Combine(".release-previews", package.Id.ToString("N"));
@@ -56,39 +76,37 @@ public sealed class SolidWorksServerPreviewConverter(IOptions<PdmPreviewWorkerOp
 
         try
         {
-            var jobs = new List<PreviewWorkerJob>();
+            var jobs = new List<PreviewJob>();
             foreach (var source in sources)
             {
                 cancellationToken.ThrowIfCancellationRequested();
                 var sourcePath = StorageLocationPolicy.ResolveUnder(vaultRoot, source.StorageRelativePath);
                 await VerifySourceAsync(source, sourcePath, cancellationToken);
-                var workspaceSourcePath = Path.Combine(sourceRoot, source.FileName);
-                File.Copy(sourcePath, workspaceSourcePath, false);
                 var extension = source.Kind == DocumentKind.Drawing ? ".pdf" : ".step";
                 var outputFileName = $"{source.DocumentId:N}_{Path.GetFileNameWithoutExtension(source.FileName)}{extension}";
-                jobs.Add(new PreviewWorkerJob(
+                jobs.Add(new PreviewJob(
                     source.DocumentId,
-                    workspaceSourcePath,
-                    Path.Combine(outputRoot, outputFileName),
-                    source.Kind.ToString()));
+                    source.Kind,
+                    source.FileName,
+                    sourcePath,
+                    Path.Combine(outputRoot, outputFileName)));
             }
 
-            var manifestPath = Path.Combine(workRoot, "manifest.json");
-            var resultPath = Path.Combine(workRoot, "result.json");
-            await File.WriteAllTextAsync(manifestPath, JsonSerializer.Serialize(new PreviewWorkerManifest(jobs), JsonOptions), cancellationToken);
-            await RunWorkerAsync(workerPath, manifestPath, resultPath, cancellationToken);
-
-            var result = JsonSerializer.Deserialize<PreviewWorkerResult>(await File.ReadAllTextAsync(resultPath, cancellationToken), JsonOptions)
-                ?? throw new PdmRuleException("服务器转换程序没有返回有效结果。");
-            if (!result.Success)
-                throw new PdmRuleException(string.IsNullOrWhiteSpace(result.Error) ? "服务器生成STEP/PDF失败。" : result.Error);
+            if (remote)
+                await RunRemoteAgentAsync(conversionSettings, jobs, workRoot, outputRoot, cancellationToken);
+            else
+                await RunLocalWorkerAsync(conversionSettings, jobs, sourceRoot, workRoot, outputRoot, cancellationToken);
 
             var artifacts = new Dictionary<Guid, DocumentPreviewArtifact>();
             foreach (var source in sources)
             {
                 var job = jobs.Single(item => item.DocumentId == source.DocumentId);
                 if (!File.Exists(job.OutputPath) || new FileInfo(job.OutputPath).Length == 0)
-                    throw new PdmRuleException($"服务器未生成图档{source.DrawingNumber}的预览文件。");
+                {
+                    throw new PdmRuleException(remote
+                        ? $"转图服务器未生成图档{source.DrawingNumber}的预览文件。"
+                        : $"服务器未生成图档{source.DrawingNumber}的预览文件。");
+                }
                 var outputName = Path.GetFileName(job.OutputPath);
                 var vaultPreviewPath = Path.Combine(previewRoot, outputName);
                 var stagingPreviewPath = Path.Combine(stagingPreviewRoot, outputName);
@@ -116,7 +134,117 @@ public sealed class SolidWorksServerPreviewConverter(IOptions<PdmPreviewWorkerOp
         }
     }
 
-    private async Task RunWorkerAsync(string workerPath, string manifestPath, string resultPath, CancellationToken cancellationToken)
+    /// <summary>本机转换：把源文件复制到临时工作目录后调用SolidWorks转换程序。</summary>
+    private async Task RunLocalWorkerAsync(
+        PreviewConversionSettings conversion,
+        IReadOnlyList<PreviewJob> jobs,
+        string sourceRoot,
+        string workRoot,
+        string outputRoot,
+        CancellationToken cancellationToken)
+    {
+        _ = outputRoot;
+        var workerPath = Path.GetFullPath(settings.WorkerPath);
+        if (!File.Exists(workerPath)) throw new PdmRuleException($"服务器SolidWorks转换程序不存在：{workerPath}");
+        var workerJobs = new List<PreviewWorkerJob>();
+        foreach (var job in jobs)
+        {
+            var workspaceSourcePath = Path.Combine(sourceRoot, job.FileName);
+            File.Copy(job.SourcePath, workspaceSourcePath, false);
+            workerJobs.Add(new PreviewWorkerJob(job.DocumentId, workspaceSourcePath, job.OutputPath, job.Kind.ToString()));
+        }
+        var manifestPath = Path.Combine(workRoot, "manifest.json");
+        var resultPath = Path.Combine(workRoot, "result.json");
+        await File.WriteAllTextAsync(manifestPath, JsonSerializer.Serialize(new PreviewWorkerManifest(workerJobs), JsonOptions), cancellationToken);
+        await RunWorkerAsync(workerPath, conversion.TimeoutMinutes, manifestPath, resultPath, cancellationToken);
+        var result = JsonSerializer.Deserialize<PreviewWorkerResult>(await File.ReadAllTextAsync(resultPath, cancellationToken), JsonOptions)
+            ?? throw new PdmRuleException("服务器转换程序没有返回有效结果。");
+        if (!result.Success)
+            throw new PdmRuleException(string.IsNullOrWhiteSpace(result.Error) ? "服务器生成STEP/PDF失败。" : result.Error);
+    }
+
+    /// <summary>远程转换：把源文件打包发给转图电脑上的转图代理，取回转换结果。</summary>
+    private async Task RunRemoteAgentAsync(
+        PreviewConversionSettings conversion,
+        IReadOnlyList<PreviewJob> jobs,
+        string workRoot,
+        string outputRoot,
+        CancellationToken cancellationToken)
+    {
+        var requestPath = Path.Combine(workRoot, "request.zip");
+        var manifest = new PreviewAgentManifest(jobs
+            .Select(job => new PreviewAgentJob(job.DocumentId, job.Kind.ToString(), job.FileName, Path.GetFileName(job.OutputPath)))
+            .ToArray());
+        using (var archive = ZipFile.Open(requestPath, ZipArchiveMode.Create))
+        {
+            var manifestEntry = archive.CreateEntry("manifest.json", CompressionLevel.Fastest);
+            await using (var stream = manifestEntry.Open())
+                await JsonSerializer.SerializeAsync(stream, manifest, JsonOptions, cancellationToken);
+            foreach (var job in jobs)
+            {
+                var fileEntry = archive.CreateEntry($"sources/{job.FileName}", CompressionLevel.Fastest);
+                await using var target = fileEntry.Open();
+                await using var source = File.OpenRead(job.SourcePath);
+                await source.CopyToAsync(target, cancellationToken);
+            }
+        }
+
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        timeout.CancelAfter(TimeSpan.FromMinutes(conversion.TimeoutMinutes));
+        using var request = new HttpRequestMessage(HttpMethod.Post, $"{conversion.NormalizedAgentUrl}/convert")
+        {
+            Content = new StreamContent(File.OpenRead(requestPath))
+        };
+        request.Content.Headers.ContentType = new MediaTypeHeaderValue("application/zip");
+        if (!string.IsNullOrWhiteSpace(conversion.AgentToken)) request.Headers.Add(PreviewAgentProtocol.TokenHeader, conversion.AgentToken);
+
+        HttpResponseMessage response;
+        try
+        {
+            response = await httpClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, timeout.Token);
+        }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        {
+            throw new PdmRuleException($"调用转图服务器超过{conversion.TimeoutMinutes}分钟，已终止本次发布转换。");
+        }
+        catch (HttpRequestException exception)
+        {
+            throw new PdmRuleException($"无法连接转图服务器{conversion.NormalizedAgentUrl}：{exception.Message}");
+        }
+
+        using (response)
+        {
+            if (!response.IsSuccessStatusCode)
+            {
+                var detail = await response.Content.ReadAsStringAsync(timeout.Token);
+                throw new PdmRuleException($"转图服务器返回错误({(int)response.StatusCode})：{PreviewAgentProtocol.DescribeError(detail)}");
+            }
+            var responsePath = Path.Combine(workRoot, "response.zip");
+            await using (var content = await response.Content.ReadAsStreamAsync(timeout.Token))
+            await using (var file = File.Create(responsePath))
+                await content.CopyToAsync(file, timeout.Token);
+            using var archive = ZipFile.OpenRead(responsePath);
+            var resultEntry = archive.GetEntry("result.json") ?? throw new PdmRuleException("转图服务器没有返回结果文件。");
+            PreviewWorkerResult result;
+            await using (var stream = resultEntry.Open())
+            {
+                result = await JsonSerializer.DeserializeAsync<PreviewWorkerResult>(stream, JsonOptions, cancellationToken)
+                    ?? throw new PdmRuleException("转图服务器结果文件无效。");
+            }
+            if (!result.Success)
+                throw new PdmRuleException(string.IsNullOrWhiteSpace(result.Error) ? "转图服务器生成STEP/PDF失败。" : result.Error);
+            foreach (var job in jobs)
+            {
+                var outputName = Path.GetFileName(job.OutputPath);
+                var outputEntry = archive.GetEntry($"outputs/{outputName}")
+                    ?? throw new PdmRuleException($"转图服务器未返回预览文件{outputName}。");
+                outputEntry.ExtractToFile(job.OutputPath, true);
+            }
+        }
+        _ = outputRoot;
+    }
+
+    private async Task RunWorkerAsync(string workerPath, int timeoutMinutes, string manifestPath, string resultPath, CancellationToken cancellationToken)
     {
         var startInfo = new ProcessStartInfo(workerPath)
         {
@@ -130,7 +258,7 @@ public sealed class SolidWorksServerPreviewConverter(IOptions<PdmPreviewWorkerOp
         startInfo.ArgumentList.Add(resultPath);
         using var process = Process.Start(startInfo) ?? throw new PdmRuleException("服务器SolidWorks转换进程无法启动。");
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        timeout.CancelAfter(TimeSpan.FromMinutes(settings.TimeoutMinutes));
+        timeout.CancelAfter(TimeSpan.FromMinutes(timeoutMinutes));
         try
         {
             await process.WaitForExitAsync(timeout.Token);
@@ -138,7 +266,7 @@ public sealed class SolidWorksServerPreviewConverter(IOptions<PdmPreviewWorkerOp
         catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
         {
             process.Kill(entireProcessTree: true);
-            throw new PdmRuleException($"服务器生成STEP/PDF超过{settings.TimeoutMinutes}分钟，已终止本次发布转换。");
+            throw new PdmRuleException($"服务器生成STEP/PDF超过{timeoutMinutes}分钟，已终止本次发布转换。");
         }
         var standardOutput = await process.StandardOutput.ReadToEndAsync(cancellationToken);
         var errorOutput = await process.StandardError.ReadToEndAsync(cancellationToken);
@@ -180,4 +308,39 @@ public sealed class SolidWorksServerPreviewConverter(IOptions<PdmPreviewWorkerOp
     private sealed record PreviewWorkerManifest(IReadOnlyList<PreviewWorkerJob> Jobs);
     private sealed record PreviewWorkerJob(Guid DocumentId, string SourcePath, string OutputPath, string Kind);
     private sealed record PreviewWorkerResult(bool Success, string? Error);
+
+    private sealed record PreviewJob(Guid DocumentId, DocumentKind Kind, string FileName, string SourcePath, string OutputPath);
+    private sealed record PreviewAgentManifest(IReadOnlyList<PreviewAgentJob> Jobs);
+    private sealed record PreviewAgentJob(Guid DocumentId, string Kind, string FileName, string OutputName);
+}
+
+/// <summary>API服务器与转图电脑上“转图代理”之间的约定（zip 包结构：manifest.json + sources/**；返回 result.json + outputs/**）。</summary>
+public static class PreviewAgentProtocol
+{
+    public const string TokenHeader = "X-Pdm-Agent-Token";
+    public const string HealthPath = "/health";
+    public const string ConvertPath = "/convert";
+
+    public static string DescribeError(string? body)
+    {
+        if (string.IsNullOrWhiteSpace(body)) return "无错误详情";
+        try
+        {
+            using var document = JsonDocument.Parse(body);
+            if (document.RootElement.ValueKind == JsonValueKind.Object
+                && document.RootElement.TryGetProperty("error", out var error)
+                && error.ValueKind == JsonValueKind.String)
+                return Truncate(error.GetString());
+        }
+        catch (JsonException)
+        {
+        }
+        return Truncate(body);
+    }
+
+    private static string Truncate(string? value)
+    {
+        var text = (value ?? string.Empty).Trim();
+        return text.Length <= 500 ? text : text[..500];
+    }
 }

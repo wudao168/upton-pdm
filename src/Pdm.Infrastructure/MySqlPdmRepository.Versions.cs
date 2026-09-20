@@ -271,9 +271,9 @@ public sealed partial class MySqlPdmRepository
             if (!string.Equals(source.Revision.Display, locked.RevisionLabel, StringComparison.OrdinalIgnoreCase))
                 throw new PdmConflictException($"图档{documentId}最新工作版本已变化，发布包不能继续发布。");
             DocumentPreviewArtifact? preview = null;
-            if (Enum.Parse<DocumentKind>(locked.Kind) is DocumentKind.Assembly or DocumentKind.Part or DocumentKind.Drawing
-                && !previews.TryGetValue(documentId, out preview))
-                throw new PdmConflictException($"图档{documentId}缺少服务器生成的发布预览文件。");
+            // 转图与发布解耦：发布时缺预览不再阻断正式版本生成，预览由后台转图任务补齐。
+            if (Enum.Parse<DocumentKind>(locked.Kind) is DocumentKind.Assembly or DocumentKind.Part or DocumentKind.Drawing)
+                previews.TryGetValue(documentId, out preview);
             var revision = source.Revision.Release();
             var released = source with
             {
@@ -303,6 +303,96 @@ public sealed partial class MySqlPdmRepository
         if (node.DocumentId.HasValue) yield return node.DocumentId.Value;
         foreach (var child in node.Children)
             foreach (var id in EnumerateDocumentIds(child)) yield return id;
+    }
+
+    /// <summary>记录发布包的转图状态：转图是发布之后的独立事项，失败不影响发布结果。</summary>
+    public async Task<ReleasePackage> MarkReleasePreviewStateAsync(Guid releasePackageId, string state, string? error, int attempts, DateTimeOffset updatedAt, CancellationToken cancellationToken)
+    {
+        await using var connection = await OpenAsync(cancellationToken);
+        var affected = await connection.ExecuteAsync(new CommandDefinition(
+            "UPDATE release_package SET preview_state=@State,preview_error=@Error,preview_attempts=@Attempts,preview_updated_at=@UpdatedAt,row_version=row_version+1 WHERE id=@PackageId",
+            new { PackageId = releasePackageId, State = state, Error = error, Attempts = attempts, UpdatedAt = updatedAt.UtcDateTime },
+            cancellationToken: cancellationToken));
+        if (affected != 1) throw new PdmNotFoundException("发布包不存在。");
+        return await FindReleasePackageAsync(releasePackageId, cancellationToken)
+            ?? throw new PdmNotFoundException("发布包不存在。");
+    }
+
+    /// <summary>列出需要继续转图的已发布包（待处理，或失败但未超过重试上限）。</summary>
+    public async Task<IReadOnlyList<ReleasePackage>> ListReleasePackagesAwaitingPreviewAsync(int maxAttempts, int limit, CancellationToken cancellationToken)
+    {
+        await using var connection = await OpenAsync(cancellationToken);
+        var ids = await connection.QueryAsync<Guid>(new CommandDefinition(
+            """
+            SELECT id FROM release_package
+            WHERE state='Published'
+              AND preview_state IN ('Pending','Failed')
+              AND preview_attempts < @MaxAttempts
+            ORDER BY preview_updated_at IS NULL DESC, preview_updated_at, created_at
+            LIMIT @Limit
+            """,
+            new { MaxAttempts = maxAttempts, Limit = limit }, cancellationToken: cancellationToken));
+        var packages = new List<ReleasePackage>();
+        foreach (var id in ids)
+        {
+            var package = await FindReleasePackageAsync(id, cancellationToken);
+            if (package is not null) packages.Add(package);
+        }
+        return packages;
+    }
+
+    /// <summary>服务重启/崩溃后恢复：把停留在"发布中"的发布包标记为发布失败，避免整单卡死、BOM 一直锁定。</summary>
+    public async Task<int> RecoverInterruptedPublishesAsync(string reason, CancellationToken cancellationToken)
+    {
+        await using var connection = await OpenAsync(cancellationToken);
+        return await connection.ExecuteAsync(new CommandDefinition(
+            "UPDATE release_package SET state='PublishFailed',publish_error=@Reason,row_version=row_version+1 WHERE state='Publishing'",
+            new { Reason = reason }, cancellationToken: cancellationToken));
+    }
+
+    /// <summary>把转图结果补挂到发布包对应的正式版本（发布时缺预览的正式版本后补 STEP/PDF）。</summary>
+    /// <summary>列出停留在“发布中”的发布包（服务重启后用于自动续跑发布）。</summary>
+    public async Task<IReadOnlyList<Guid>> ListPublishingReleasePackageIdsAsync(int limit, CancellationToken cancellationToken)
+    {
+        await using var connection = await OpenAsync(cancellationToken);
+        return (await connection.QueryAsync<Guid>(new CommandDefinition(
+            "SELECT id FROM release_package WHERE state='Publishing' ORDER BY created_at LIMIT @Limit",
+            new { Limit = limit }, cancellationToken: cancellationToken))).ToArray();
+    }
+
+    /// <summary>把转图结果补挂到发布包对应的正式版本（发布时缺预览的正式版本后补 STEP/PDF）。</summary>
+    public async Task<IReadOnlyList<DocumentVersion>> AttachReleasePreviewArtifactsAsync(Guid releasePackageId, IReadOnlyDictionary<Guid, DocumentPreviewArtifact> previews, CancellationToken cancellationToken)
+    {
+        if (previews.Count == 0) return [];
+        await using var connection = await OpenAsync(cancellationToken);
+        var rows = await connection.QueryAsync<DocumentVersionRow>(new CommandDefinition(
+            VersionSelect + " WHERE release_package_id=@PackageId ORDER BY created_at",
+            new { PackageId = releasePackageId }, cancellationToken: cancellationToken));
+        var updated = new List<DocumentVersion>();
+        foreach (var row in rows)
+        {
+            var version = MapDocumentVersion(row);
+            if (!previews.TryGetValue(version.DocumentId, out var preview)) continue;
+            await connection.ExecuteAsync(new CommandDefinition(
+                """
+                UPDATE document_version
+                SET preview_format=@Format,preview_storage_relative_path=@Path,preview_file_length=@Length,
+                    preview_sha256=@Sha256,preview_source_sha256=@SourceSha256
+                WHERE id=@VersionId AND release_package_id=@PackageId
+                """,
+                new
+                {
+                    VersionId = version.Id,
+                    PackageId = releasePackageId,
+                    Format = preview.Format.ToString(),
+                    Path = preview.StorageRelativePath,
+                    Length = preview.FileLength,
+                    Sha256 = preview.Sha256,
+                    SourceSha256 = preview.SourceSha256
+                }, cancellationToken: cancellationToken));
+            updated.Add(version with { Preview = preview });
+        }
+        return updated;
     }
 
     private static async Task<RevisionLabel> NextWorkRevisionAsync(DbConnection connection, DbTransaction transaction, LockedDocumentRow document, CancellationToken cancellationToken)

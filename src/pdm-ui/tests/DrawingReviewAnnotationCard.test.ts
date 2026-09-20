@@ -53,6 +53,23 @@ function mountCard(packageValue: DrawingReviewPackage | undefined, currentUserna
 }
 
 describe('DrawingReviewAnnotationCard', () => {
+  it('审核单已完成或正在写标记时不再显示等待批准', () => {
+    const approvedItem = { ...review.items[0]!, drawingState: 'Approved' as const }
+    const writing = mountCard({ ...review, state: 'WritingProperties', items: [approvedItem] })
+    expect(writing.text()).toContain('该2D工程图已通过审核，正在写入审核标记')
+    expect(writing.text()).not.toContain('等待批准')
+    writing.unmount()
+
+    const finished = mountCard({ ...review, state: 'Approved', items: [approvedItem] })
+    expect(finished.text()).toContain('该2D工程图已通过审核，审核单已完成')
+    expect(finished.text()).not.toContain('等待批准')
+    finished.unmount()
+
+    const supervised = mountCard({ ...review, state: 'PendingSupervisorApproval', items: [approvedItem] })
+    expect(supervised.text()).toContain('该2D工程图已通过审核，等待批准')
+    supervised.unmount()
+  })
+
   it('禁止自审，并在指定审图人时就绪', async () => {
     const wrapper = mountCard(review, 'drawing-designer')
 

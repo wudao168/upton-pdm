@@ -155,7 +155,8 @@ public sealed class PdmWorkflowService(
             MaterialCodeApproval = NormalizeMaterialCodeApproval(input.MaterialCodeApproval),
             ReleaseChangeReasonTypes = NormalizeReleaseChangeReasonTypes(input.ReleaseChangeReasonTypes),
             FormalSupplementPolicies = NormalizeFormalSupplementPolicies(input.FormalSupplementPolicies),
-            DrawingQrPolicy = NormalizeDrawingQrPolicy(input.DrawingQrPolicy)
+            DrawingQrPolicy = NormalizeDrawingQrPolicy(input.DrawingQrPolicy),
+            PreviewConversion = NormalizePreviewConversion(input.PreviewConversion)
         });
         ValidateCheckoutSettings(settingsInput);
         ValidateBomPropertyMappings(settingsInput);
@@ -169,6 +170,7 @@ public sealed class PdmWorkflowService(
         await AuditAsync(actor, "system.release-change-reasons.update", nameof(PdmSystemSettings), "release-change-reasons", string.Join('、', settings.ReleaseChangeReasonTypes), cancellationToken);
         await AuditAsync(actor, "system.formal-supplement-policies.update", nameof(PdmSystemSettings), "formal-supplement-policies", $"标准件：{FormalSupplementPolicySummary(settings.FormalSupplementPolicies.Standard)}；电气：{FormalSupplementPolicySummary(settings.FormalSupplementPolicies.Electrical)}", cancellationToken);
         await AuditAsync(actor, "system.drawing-qr-policy.update", nameof(PdmSystemSettings), "drawing-qr-policy", $"{(settings.DrawingQrPolicy.Enabled ? "启用" : "停用")}；来源属性{settings.DrawingQrPolicy.SourceProperty}；规则v{settings.DrawingQrPolicy.RuleVersion}；{settings.DrawingQrPolicy.SizeMillimeters}mm", cancellationToken);
+        await AuditAsync(actor, "system.preview-conversion.update", nameof(PdmSystemSettings), "preview-conversion", $"{PreviewConversionSummary(settings.PreviewConversion)}", cancellationToken);
         return settings;
     }
 
@@ -186,6 +188,68 @@ public sealed class PdmWorkflowService(
         if (input.MarginMillimeters is < 0 or > 100)
             throw new PdmRuleException("工程图二维码边距必须为0到100毫米。");
         return input with { SourceProperty = sourceProperty, RuleVersion = ruleVersion };
+    }
+
+    /// <summary>
+    /// 图纸转换设置：本机转换时不需要地址；远程转换时必须配置合法的转图代理地址。
+    /// </summary>
+    private static PreviewConversionSettings NormalizePreviewConversion(PreviewConversionSettings? input)
+    {
+        input ??= PreviewConversionSettings.Default;
+        if (input.TimeoutMinutes is < 1 or > 120)
+            throw new PdmRuleException("图纸转换超时必须设置为1到120分钟。");
+        var agentUrl = (input.AgentUrl ?? string.Empty).Trim().TrimEnd('/');
+        var agentToken = (input.AgentToken ?? string.Empty).Trim();
+        if (input.Mode == PreviewConversionMode.Remote)
+        {
+            if (!Uri.TryCreate(agentUrl, UriKind.Absolute, out var uri) || uri.Scheme is not ("http" or "https"))
+                throw new PdmRuleException("远程转图服务器地址必须是 http:// 或 https:// 开头的完整地址，例如 http://192.168.2.50:5199。");
+            if (agentToken.Length > 200)
+                throw new PdmRuleException("转图服务器访问令牌不能超过200个字符。");
+        }
+        if (agentUrl.Length > 500)
+            throw new PdmRuleException("转图服务器地址不能超过500个字符。");
+        return input with { AgentUrl = agentUrl, AgentToken = agentToken };
+    }
+
+    private static string PreviewConversionSummary(PreviewConversionSettings settings) =>
+        settings.Mode == PreviewConversionMode.Remote
+            ? $"远程转图服务器{settings.NormalizedAgentUrl}；超时{settings.TimeoutMinutes}分钟"
+            : $"本机转换（API服务器调用SolidWorks转换程序）；超时{settings.TimeoutMinutes}分钟";
+
+    /// <summary>
+    /// 转图电脑上的安装程序调用：把本机登记为系统的转图服务器（自动切换为远程转换并保存地址、令牌与超时）。
+    /// </summary>
+    public async Task<PdmSystemSettings> RegisterPreviewAgentAsync(string agentUrl, string agentToken, int timeoutMinutes, string actor, UserRole role, CancellationToken cancellationToken)
+    {
+        var current = await repository.GetSystemSettingsAsync(cancellationToken);
+        var saved = await UpdateSystemSettingsAsync(current with
+        {
+            PreviewConversion = new PreviewConversionSettings
+            {
+                Mode = PreviewConversionMode.Remote,
+                AgentUrl = agentUrl,
+                AgentToken = agentToken,
+                TimeoutMinutes = timeoutMinutes
+            }
+        }, actor, role, cancellationToken);
+        await AuditAsync(actor, "system.preview-agent.register", nameof(PdmSystemSettings), "preview-conversion",
+            $"转图电脑登记：{saved.PreviewConversion.NormalizedAgentUrl}", cancellationToken);
+        return saved;
+    }
+
+    /// <summary>转图代理卸载时调用：转换位置恢复为API服务器本机。</summary>
+    public async Task<PdmSystemSettings> ClearPreviewAgentAsync(string actor, UserRole role, CancellationToken cancellationToken)
+    {
+        var current = await repository.GetSystemSettingsAsync(cancellationToken);
+        if (current.PreviewConversion.Mode == PreviewConversionMode.Local) return current;
+        var saved = await UpdateSystemSettingsAsync(current with
+        {
+            PreviewConversion = current.PreviewConversion with { Mode = PreviewConversionMode.Local }
+        }, actor, role, cancellationToken);
+        await AuditAsync(actor, "system.preview-agent.unregister", nameof(PdmSystemSettings), "preview-conversion",
+            $"转图代理已卸载，恢复为API服务器本机转换（{saved.PreviewConversion.NormalizedAgentUrl}）", cancellationToken);
+        return saved;
     }
 
     private static IReadOnlyList<string> NormalizeReleaseChangeReasonTypes(IReadOnlyList<string>? input)
@@ -3939,7 +4003,12 @@ public sealed class PdmWorkflowService(
             versionsForReview.Add(targetVersion);
         }
         if (package.Scope == ReleaseScope.LegacyCombined || IsNonStandardScope(package.Scope))
-            await EnsureNonStandardDrawingReviewReadyAsync(package.ProjectId, package.NonStandardBomSnapshot, cancellationToken, package.Scope != ReleaseScope.NonStandardLongLead);
+            await EnsureNonStandardDrawingReviewReadyAsync(
+                package.ProjectId,
+                package.NonStandardBomSnapshot,
+                cancellationToken,
+                package.Scope != ReleaseScope.NonStandardLongLead,
+                await CurrentNonStandardReleaseItemsAsync(package, cancellationToken));
         if (materialRelationReleaseGuard is not null)
             await materialRelationReleaseGuard.EnsureCompleteAsync(package.ProjectId, cancellationToken);
         await publisher.PrepareAsync(package, project, cancellationToken);
@@ -4098,7 +4167,12 @@ public sealed class PdmWorkflowService(
         if (decision == ApprovalDecision.Approved
             && (pendingPackage.Scope == ReleaseScope.LegacyCombined
                 || IsNonStandardScope(pendingPackage.Scope)))
-            await EnsureNonStandardDrawingReviewReadyAsync(pendingPackage.ProjectId, pendingPackage.NonStandardBomSnapshot, cancellationToken, pendingPackage.Scope != ReleaseScope.NonStandardLongLead);
+            await EnsureNonStandardDrawingReviewReadyAsync(
+                pendingPackage.ProjectId,
+                pendingPackage.NonStandardBomSnapshot,
+                cancellationToken,
+                pendingPackage.Scope != ReleaseScope.NonStandardLongLead,
+                await CurrentNonStandardReleaseItemsAsync(pendingPackage, cancellationToken));
         var package = await repository.DecideApprovalAsync(taskId, actor, decision, comment, emergencySubstitute, emergencyReason, cancellationToken);
         await AuditAsync(actor, emergencySubstitute ? "approval.emergency-substitute" : "approval.decide", nameof(ApprovalTask), taskId.ToString(), emergencySubstitute ? $"{decision}；原因：{emergencyReason}" : decision.ToString(), cancellationToken);
 
@@ -4112,12 +4186,20 @@ public sealed class PdmWorkflowService(
             return package;
         }
 
+        return await PublishApprovedPackageAsync(package, actor, cancellationToken);
+
+    }
+
+    /// <summary>审批通过后的发布动作（可重入）：发布目录幂等、正式版本为单个数据库事务，服务重启后可续跑。</summary>
+    private async Task<ReleasePackage> PublishApprovedPackageAsync(ReleasePackage package, string actor, CancellationToken cancellationToken)
+    {
         var project = await repository.FindProjectAsync(package.ProjectId, cancellationToken)
             ?? throw new PdmNotFoundException("发布包对应的项目不存在。 ");
         ReleasePublication publication;
+        IReadOnlyList<ReleasePreviewSource> previewSources = [];
         try
         {
-            var previewSources = package.LocksDocuments
+            previewSources = package.LocksDocuments
                 ? await repository.ListReleasePreviewSourcesAsync(package.Id, cancellationToken)
                 : [];
             publication = await publisher.PublishAsync(package, project, previewSources, cancellationToken);
@@ -4157,6 +4239,23 @@ public sealed class PdmWorkflowService(
                 await AuditAsync(actor, "release-package.long-lead-output", nameof(ReleasePackage), package.Id.ToString(), $"{package.Number}；标准件{package.StandardBomSnapshot.Count}项；待U9C接口消费", cancellationToken);
         }
         await AuditAsync(actor, "release-package.publish", nameof(ReleasePackage), package.Id.ToString(), publishedPath, cancellationToken);
+        // 转图与发布解耦：转图未完成时发布照常生效，转图转为后台单独事项，结果单独反馈。
+        if (package.LocksDocuments && previewSources.Count > 0)
+        {
+            var previewFailed = publication.PreviewError is not null;
+            await repository.MarkReleasePreviewStateAsync(package.Id,
+                previewFailed ? ReleasePreviewState.Pending : ReleasePreviewState.Succeeded,
+                publication.PreviewError, 0, publishedAt, cancellationToken);
+            if (previewFailed)
+            {
+                await AuditAsync(actor, "release-package.preview-pending", nameof(ReleasePackage), package.Id.ToString(),
+                    $"{package.Number}；发布已完成，转图转为后台单独重试：{publication.PreviewError}", cancellationToken);
+                await CreateReleasePreviewNotificationsAsync(package, project, actor,
+                    "发布已完成，图纸转换转为后台重试",
+                    $"发布不受影响；STEP/PDF 生成失败已转为后台单独事项，成功或最终失败后会再通知。原因：{publication.PreviewError}",
+                    cancellationToken);
+            }
+        }
         if (projectPlanningService is not null)
         {
             try { await projectPlanningService.SyncReleasedBomProgressAsync(project.Id, cancellationToken); }
@@ -4207,6 +4306,16 @@ public sealed class PdmWorkflowService(
             }
         }
         return (await repository.FindReleasePackageAsync(package.Id, cancellationToken))!;
+    }
+
+    /// <summary>服务重启后自动续跑被中断的发布：把停留在“发布中”的发布包按同一发布动作跑完。</summary>
+    public async Task<ReleasePackage> ResumePublishAsync(Guid releasePackageId, CancellationToken cancellationToken)
+    {
+        var package = await repository.FindReleasePackageAsync(releasePackageId, cancellationToken)
+            ?? throw new PdmNotFoundException("发布包不存在。");
+        if (package.State != ReleasePackageState.Publishing) return package;
+        var approver = package.ApprovalTasks.OrderBy(task => task.StepOrder).LastOrDefault(task => task.Decision == ApprovalDecision.Approved)?.DecisionBy ?? "system";
+        return await PublishApprovedPackageAsync(package, approver, cancellationToken);
     }
 
     private static IReadOnlyList<ProjectBomHeaderKind> ApprovedBomHeaderKinds(ReleaseScope scope) => scope switch
@@ -4390,7 +4499,10 @@ public sealed class PdmWorkflowService(
                 };
                 if (preserveManualOverrides && previous?.IsManuallyOverridden == true)
                 {
-                    var differences = SourceDataDifferences(previous, candidate).ToList();
+                    // 合并时数量一律取图档源数据，因此这里不把数量记为人工维护差异。
+                    var differences = SourceDataDifferences(previous, candidate)
+                        .Where(difference => !string.Equals(difference, "数量", StringComparison.Ordinal))
+                        .ToList();
                     var sourceKind = kind ?? BomKind.Unclassified;
                     if (previous.Kind != sourceKind && !differences.Contains("物料分类", StringComparer.Ordinal))
                         differences.Insert(0, "物料分类");
@@ -4573,6 +4685,7 @@ public sealed class PdmWorkflowService(
             !string.IsNullOrWhiteSpace(sourceValue)
             && !string.Equals(maintainedValue?.Trim() ?? string.Empty, sourceValue.Trim(), StringComparison.OrdinalIgnoreCase);
         if (source.Kind != BomKind.Unclassified && maintained.Kind != source.Kind) differences.Add("物料分类");
+        if (maintained.Kind is BomKind.Standard or BomKind.NonStandard && maintained.Quantity != source.Quantity) differences.Add("数量");
         if (maintained.Kind == BomKind.Standard)
         {
             if (DifferentWhenSourcePresent(maintained.Specification, source.Specification)) differences.Add("型号");
@@ -4792,6 +4905,57 @@ public sealed class PdmWorkflowService(
             null)).ToArray(), cancellationToken);
     }
 
+    /// <summary>转图结果反馈：发给发布包提交人、审批人和项目经理（转图是发布后的独立事项）。</summary>
+    /// <summary>手动重试转图：把发布包的转图事项重新排队（不影响已完成的发布）。</summary>
+    public async Task<ReleasePackage> DemandReleasePreviewRetryAsync(Guid releasePackageId, string actor, UserRole role, CancellationToken cancellationToken)
+    {
+        await RequirePermissionAsync(actor, role, PermissionCodes.ReleaseManage, cancellationToken);
+        var package = await repository.FindReleasePackageAsync(releasePackageId, cancellationToken)
+            ?? throw new PdmNotFoundException("发布包不存在。");
+        if (!await repository.HasProjectContentReadAccessAsync(package.ProjectId, actor, role, cancellationToken))
+            throw new UnauthorizedAccessException("当前用户没有该项目的操作权限。");
+        if (package.State != ReleasePackageState.Published)
+            throw new PdmRuleException("只有已发布的发布包可以重试转图。");
+        var saved = await repository.MarkReleasePreviewStateAsync(releasePackageId, ReleasePreviewState.Pending, null, 0, timeProvider.GetUtcNow(), cancellationToken);
+        await AuditAsync(actor, "release-package.preview.retry", nameof(ReleasePackage), releasePackageId.ToString(),
+            $"{package.Number}；重新排队转图", cancellationToken);
+        return saved;
+    }
+
+    private async Task CreateReleasePreviewNotificationsAsync(
+        ReleasePackage package,
+        Project project,
+        string actor,
+        string title,
+        string detail,
+        CancellationToken cancellationToken,
+        string kind = "pending")
+    {
+        var recipients = package.ApprovalTasks
+            .Where(task => task.DecisionBy is not null)
+            .Select(task => task.DecisionBy!)
+            .Append(package.ApprovalTasks.OrderBy(task => task.StepOrder).FirstOrDefault()?.Assignee)
+            .Append(project.PrimaryProjectManager)
+            .Append(actor)
+            .Where(username => !string.IsNullOrWhiteSpace(username))
+            .Select(username => username!.Trim())
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+        var createdAt = timeProvider.GetUtcNow();
+        var sourceKey = $"release-package:{package.Id:N}:preview:{kind}";
+        await repository.CreateUserNotificationsAsync(recipients.Select(recipient => new UserNotification(
+            Guid.NewGuid(),
+            recipient,
+            kind == "pending" ? "ReleasePreviewPending" : "ReleasePreviewResult",
+            title,
+            $"{project.Code} · {package.Number} {detail}",
+            project.Id,
+            package.Id,
+            sourceKey,
+            createdAt,
+            null)).ToArray(), cancellationToken);
+    }
+
     private async Task CreateReleaseRejectedNotificationsAsync(
         ReleasePackage package,
         Guid rejectedTaskId,
@@ -4867,7 +5031,8 @@ public sealed class PdmWorkflowService(
         var detail = string.Join("；", invalid.Take(12).Select(result =>
             $"{(string.IsNullOrWhiteSpace(result.Item.DrawingNumber) ? result.Item.Name : result.Item.DrawingNumber)}（{string.Join('、', result.Issues)}）"));
         if (invalid.Length > 12) detail += $"等{invalid.Length}项";
-        throw new PdmRuleException($"图纸上传的标准件料号尚未通过料品主档型号、品牌校验，需人工维护：{detail}。");
+        throw new PdmRuleException($"图纸上传的标准件料号尚未通过料品主档型号、品牌校验，需人工维护：{detail}。"
+            + "请在标准件BOM勾选这些行后点“申请料号”申请正式料号，或用“引用物料”选用已有料号；料号批准通过后再创建发布包。");
     }
 
     private static string? MissingBomSummary(BomKind kind, IReadOnlyList<BomItem> items, BomValidationRules validationRules)
@@ -5061,8 +5226,28 @@ public sealed class PdmWorkflowService(
             ["PLM_原审版本"] = reviewedRevision
         };
 
-    private async Task EnsureNonStandardDrawingReviewReadyAsync(Guid projectId, IReadOnlyList<BomItem> snapshot, CancellationToken cancellationToken, bool requireExactQuantities = true)
+    /// <summary>
+    /// 正式/增补等非长交期范围下，发布快照必须与当前非标件BOM一致；长交期清单允许按需填写数量，因此不做快照比对。
+    /// </summary>
+    private async Task<IReadOnlyList<BomItem>?> CurrentNonStandardReleaseItemsAsync(ReleasePackage package, CancellationToken cancellationToken)
     {
+        if (package.Scope == ReleaseScope.NonStandardLongLead) return null;
+        var items = (await repository.GetBomAsync(package.ProjectId, BomKind.NonStandard, cancellationToken))
+            .Where(IsPublishableBomItem)
+            .ToArray();
+        return SelectScopedReleaseItems(BomKind.NonStandard, items, package.SelectedBomItemIds);
+    }
+
+    private async Task EnsureNonStandardDrawingReviewReadyAsync(
+        Guid projectId,
+        IReadOnlyList<BomItem> snapshot,
+        CancellationToken cancellationToken,
+        bool requireExactQuantities = true,
+        IReadOnlyList<BomItem>? currentItems = null)
+    {
+        // 草稿固化的快照与当前BOM不一致时，先提示刷新草稿：否则会误报成“BOM数量与设计树不一致”。
+        if (currentItems is not null && !BomSnapshotsEqual(snapshot, currentItems))
+            throw new PdmConflictException("非标件BOM在发布草稿创建后已变化，请删除该草稿并重新发起发布。");
         var effectiveItems = snapshot
             .Where(item => !item.IsManuallyExcluded && !item.IsPendingRemoval && !item.DeletedAt.HasValue)
             .ToArray();

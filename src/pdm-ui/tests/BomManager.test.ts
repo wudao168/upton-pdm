@@ -610,6 +610,36 @@ describe('BomManager', () => {
     expect(wrapper.emitted('save')).toBeUndefined()
   })
 
+  it('merges instances that miss the material code into the same part in the summary view', async () => {
+    const shared = {
+      kind: 'NonStandard' as const, name: '导杆立柱', specification: '7080113.00-05', brand: 'UPTON', material: 'GCr15',
+      surfaceTreatment: '镀硬铬', weight: '552.8', unit: '个', revision: 'W1', complete: true, source: 'Auto' as const,
+      sourceDocumentId: 'document-05', sourceConfiguration: '默认',
+    }
+    const rows: BomItem[] = [
+      { ...shared, id: 'post-1', sequence: 4, drawingNumber: '02041000004', quantity: 1, sourceInstancePath: '7080113.00/7080113.00-05-1' },
+      { ...shared, id: 'post-2', sequence: 5, drawingNumber: '', quantity: 1, sourceInstancePath: '7080113.00/7080113.00-05-2' },
+    ]
+    const wrapper = mount(BomManager, {
+      props: {
+        projectId: 'project-summary-code', sourceData: rows, nonStandard: rows, standard: [], electrical: [],
+        declarations: [], pending: false, editable: true,
+      },
+    })
+
+    await wrapper.findAll('button[role="tab"]')[2].trigger('click')
+    expect(wrapper.get('[aria-label="BOM显示方式"] small').text()).toBe('实例 2 · 汇总 1')
+    expect(wrapper.findAll('.pdm-bom-table tbody tr:not(.is-quick-entry)')).toHaveLength(1)
+    const merged = wrapper.get('.pdm-bom-table tbody tr:not(.is-quick-entry)')
+    expect(merged.get('button[aria-label="编辑物料编码"]').text()).toBe('02041000004')
+    expect(merged.get('button[aria-label="编辑数量"]').text()).toBe('2')
+    expect(merged.get('td.pdm-bom-quantity-reference').text()).toContain('2/2')
+
+    await wrapper.get('[aria-label="BOM显示方式"] button:nth-of-type(2)').trigger('click')
+    expect(wrapper.findAll('.pdm-bom-table tbody tr:not(.is-quick-entry)')).toHaveLength(2)
+    wrapper.unmount()
+  })
+
   it('shows the actual parent assembly drawing number when the stored parent code is empty', async () => {
     const row: BomItem = {
       id: 'part-with-parent', kind: 'Standard', sequence: 1, drawingNumber: 'PART-001', name: '零件', quantity: 1,
@@ -1084,6 +1114,37 @@ describe('BomManager', () => {
     expect(dialog.text()).toContain('BOM-B')
     expect(dialog.findAll('.pdm-bom-issue-comparison').map(item => item.get('.pdm-bom-issue-basis').text()))
       .toEqual(['设计树图纸名称', '图档源数据'])
+  })
+
+  it('reports a quantity difference against the design tree as a source mismatch', async () => {
+    const source: BomItem = {
+      id: 'source-quantity', kind: 'NonStandard', sequence: 1, drawingNumber: 'NS-100', name: '导杆立柱', specification: '7080113.00-05',
+      quantity: 1, unit: '件', revision: 'W1', complete: true, source: 'Auto', sourceDocumentId: 'document-9',
+      sourceInstancePath: '7080113.00/7080113.00-05-1',
+    }
+    const maintained: BomItem = {
+      ...source, quantity: 2, manuallyOverridden: true,
+      reconciliationStatus: 'ManualOverrideMismatch', reconciliationNote: 'BOM维护值与最新图档源数据不一致：数量。',
+    }
+    const wrapper = mount(BomManager, {
+      props: {
+        sourceData: [source], standard: [], nonStandard: [maintained], electrical: [], declarations: [], pending: false,
+        editable: true, token: 'token', projectId: 'project-1',
+        documents: [{ id: 'document-9', projectId: 'project-1', drawingNumber: 'NS-100', name: '导杆立柱', fileName: 'NS-100.SLDPRT', kind: 'Part', state: 'Working', revision: 'W1' }],
+      },
+    })
+
+    await wrapper.findAll('button[role="tab"]')[2].trigger('click')
+    await flushPromises()
+    await wrapper.get('button[aria-label="查看问题详情：数量不一致"]').trigger('click')
+
+    const dialog = wrapper.get('.pdm-bom-issue-dialog')
+    expect(dialog.text()).toContain('与最新图档源数据不一致：数量')
+    expect(dialog.text()).toContain('图档源数量')
+    expect(dialog.text()).toContain('BOM数量')
+    expect(dialog.text()).toContain('1')
+    expect(dialog.text()).toContain('2')
+    wrapper.unmount()
   })
 
   it('hides benign auto-added reconciliation messages but keeps exception details in the cell', () => {
@@ -2729,6 +2790,37 @@ describe('BomManager', () => {
 
     expect(wrapper.emitted('save')).toBeUndefined()
     expect(error).toHaveBeenCalledWith('非标件BOM保存前必须补全材质；第 1 行缺少材质')
+  })
+
+  it('reports material code verification results and selects the rows needing manual work', async () => {
+    const warning = vi.spyOn(ElMessage, 'warning').mockImplementation(() => undefined as never)
+    materialApi.resolveBomMaterialCodes.mockResolvedValue([
+      { bomItemId: 'code-missing', status: 'CodeNotFound', material: null, candidates: [], application: null, issues: ['料号不存在于料品主档'] },
+      { bomItemId: 'code-verified', status: 'Verified', material: null, candidates: [], application: null, issues: [] },
+    ])
+    const wrapper = mount(BomManager, {
+      props: {
+        standard: [
+          { id: 'code-missing', sequence: 1, drawingNumber: '01020070208', name: '磁性开关', specification: 'D-A93L', brand: 'SMC', quantity: 1, unit: '001', revision: 'W1', complete: true, source: 'Auto', sourceDocumentId: 'document-1' },
+          { id: 'code-verified', sequence: 2, drawingNumber: '01020000056', name: '平垫', specification: 'Φ3', brand: '国优', quantity: 1, unit: '001', revision: 'W1', complete: true, source: 'Auto', sourceDocumentId: 'document-2' },
+        ],
+        nonStandard: [], electrical: [], declarations: [], pending: false, editable: true, token: 'token', projectId: 'project-1',
+      },
+    })
+
+    await wrapper.findAll('button[role="tab"]')[1].trigger('click')
+    await flushPromises()
+    warning.mockClear()
+    await wrapper.findAll('button').find(button => button.text() === '核对料号')!.trigger('click')
+    await flushPromises()
+
+    expect(warning).toHaveBeenCalledWith(expect.stringContaining('料号不存在于料品主档 1 项'))
+    const applyButton = wrapper.findAll('button').find(button => button.text() === '申请料号')!
+    expect(applyButton.attributes('disabled')).toBeUndefined()
+    await applyButton.trigger('click')
+    await flushPromises()
+    expect(materialApi.applyForBomMaterialCodes).toHaveBeenCalledWith('project-1', ['code-missing'], 'token')
+    warning.mockRestore()
   })
 
   it('validates drawing material codes against model and brand without rewriting the code', async () => {

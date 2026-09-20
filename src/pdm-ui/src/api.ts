@@ -1491,6 +1491,11 @@ export function retryLongLeadU9(releasePackageId: string, token: string): Promis
   return requestJson(`/api/release-packages/${releasePackageId}/u9-retry`, { method: 'POST' }, token)
 }
 
+/** 转图（发布预览生成）与发布解耦：手动把该发布包的转图事项重新排队到后台。 */
+export function retryReleasePreview(releasePackageId: string, token: string): Promise<{ message: string }> {
+  return requestJson(`/api/release-packages/${releasePackageId}/preview/retry`, { method: 'POST' }, token)
+}
+
 export function listReleaseItemComments(releasePackageId: string, token: string): Promise<ReleaseItemComment[]> {
   return requestJson(`/api/release-packages/${releasePackageId}/item-comments`, {}, token)
 }

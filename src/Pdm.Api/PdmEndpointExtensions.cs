@@ -1327,6 +1327,15 @@ public static class PdmEndpointExtensions
             return Results.Ok(await workflow.RetryLongLeadU9Async(releasePackageId, actor, role, cancellationToken));
         });
 
+        api.MapPost("/release-packages/{releasePackageId:guid}/preview/retry", async (Guid releasePackageId, HttpContext context, PdmWorkflowService workflow, ReleasePreviewCoordinator coordinator, CancellationToken cancellationToken) =>
+        {
+            var (actor, role) = CurrentUser(context.User);
+            var package = await workflow.DemandReleasePreviewRetryAsync(releasePackageId, actor, role, cancellationToken);
+            if (!coordinator.TryStart("Manual"))
+                return Results.Ok(new { Message = "转图任务已在后台运行，本次重试已排队。", Package = package.Number });
+            return Results.Accepted($"/api/projects/{package.ProjectId}/release-packages", new { Message = "转图任务已在后台启动。" });
+        });
+
         api.MapPost("/release-packages/{releasePackageId:guid}/submit", async (Guid releasePackageId, HttpContext context, PdmWorkflowService workflow, CancellationToken cancellationToken) =>
         {
             var (actor, role) = CurrentUser(context.User);

@@ -95,7 +95,18 @@ public sealed record ProgramTemplateRevisionResponse(
     DateTimeOffset? SubmittedAt,
     DateTimeOffset? PublishedAt,
     long RowVersion,
-    IReadOnlyList<ProgramTemplateParameterResponse> Parameters);
+    IReadOnlyList<ProgramTemplateParameterResponse> Parameters,
+    IReadOnlyList<ProgramTemplateApprovalTaskResponse> ApprovalTasks);
+
+public sealed record ProgramTemplateApprovalTaskResponse(
+    string Stage,
+    string? Assignee,
+    string? AssigneeRoleCode,
+    string? Decision,
+    string? DecisionBy,
+    string? Comment,
+    DateTimeOffset CreatedAt,
+    DateTimeOffset? DecidedAt);
 
 public sealed record ProgramTemplateResponse(
     Guid Id,

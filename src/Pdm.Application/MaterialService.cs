@@ -270,7 +270,12 @@ public sealed class MaterialService(
         var duplicateRule = await GetEffectiveDuplicateRuleAsync(standardCategory, cancellationToken);
         foreach (var resolution in resolutions)
         {
-            if (resolution.Status != MaterialCodeResolutionStatus.NoMatch)
+            // 没有料号（未匹配到料品主档）、图档带来的料号不在料品主档里，或主档记录已归档/未批准，
+            // 都需要申请正式料号；型号、品牌不一致属于选错料号，应改用“引用物料”或修改BOM属性。
+            var needsMaterialCode = resolution.Status is MaterialCodeResolutionStatus.NoMatch or MaterialCodeResolutionStatus.CodeNotFound
+                || resolution.Status == MaterialCodeResolutionStatus.ValidationFailed
+                   && resolution.Issues.All(issue => issue is "料品主档已归档" or "料品主档尚未批准");
+            if (!needsMaterialCode)
             {
                 results.Add(resolution);
                 continue;
@@ -1808,8 +1813,7 @@ public sealed class MaterialService(
     {
         if ((material.Kind is MaterialKind.Electrical or MaterialKind.Standard) && material.SupplyMode != MaterialSupplyMode.Purchase)
             throw new PdmRuleException($"{rule.U9CategoryName}的默认供给方式必须是采购。");
-        if (material.Kind == MaterialKind.NonStandard && material.SupplyMode == MaterialSupplyMode.Purchase)
-            throw new PdmRuleException("非标机加件的供给方式必须是自制或委外。");
+        // 非标件（非标机加件）在U9C按“采购件”建立，因此允许采购；自制/委外仍可用于部分自制或外协机加件。
     }
 
     private async Task<MaterialCategoryRule> RequireEnabledCategoryRuleAsync(MaterialKind kind, CancellationToken cancellationToken)

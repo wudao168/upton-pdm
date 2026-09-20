@@ -114,7 +114,8 @@ public sealed record ReleasePreviewSource(
 
 public sealed record ReleasePublication(
     string PublishedPath,
-    IReadOnlyDictionary<Guid, DocumentPreviewArtifact> Previews);
+    IReadOnlyDictionary<Guid, DocumentPreviewArtifact> Previews,
+    string? PreviewError = null);
 
 public sealed record DocumentCheckInResult(
     PdmDocument Document,
@@ -552,6 +553,16 @@ public interface IPdmRepository
         IReadOnlyDictionary<Guid, DocumentPreviewArtifact> previews,
         CancellationToken cancellationToken);
     Task<ReleasePackage> CreateReleasePackageAsync(ReleasePackage package, CancellationToken cancellationToken);
+    /// <summary>记录发布包的转图状态：转图与发布解耦，由后台单独重试并把结果反馈给相关人。</summary>
+    Task<ReleasePackage> MarkReleasePreviewStateAsync(Guid releasePackageId, string state, string? error, int attempts, DateTimeOffset updatedAt, CancellationToken cancellationToken);
+    /// <summary>列出需要继续转图的已发布包（待处理或失败且未超过重试上限）。</summary>
+    Task<IReadOnlyList<ReleasePackage>> ListReleasePackagesAwaitingPreviewAsync(int maxAttempts, int limit, CancellationToken cancellationToken);
+    /// <summary>恢复被服务重启/崩溃打断的发布：把停留在“发布中”的发布包标记为发布失败，让相关人员可以重新提交发布。</summary>
+    Task<int> RecoverInterruptedPublishesAsync(string reason, CancellationToken cancellationToken);
+    /// <summary>列出停留在“发布中”的发布包（服务重启后用于自动续跑发布）。</summary>
+    Task<IReadOnlyList<Guid>> ListPublishingReleasePackageIdsAsync(int limit, CancellationToken cancellationToken);
+    /// <summary>把转图结果补挂到发布包对应的正式版本上（发布时缺预览的版本后补 STEP/PDF）。</summary>
+    Task<IReadOnlyList<DocumentVersion>> AttachReleasePreviewArtifactsAsync(Guid releasePackageId, IReadOnlyDictionary<Guid, DocumentPreviewArtifact> previews, CancellationToken cancellationToken);
     Task<ReleasePackage> UpdateDraftReleasePackageAsync(ReleasePackage package, CancellationToken cancellationToken);
     Task DeleteDraftReleasePackageAsync(Guid releasePackageId, CancellationToken cancellationToken);
     Task<ReleasePackage> UpdateReleasePackageBomVersionsAsync(Guid releasePackageId, BomVersion standard, BomVersion nonStandard, BomVersion electrical, CancellationToken cancellationToken);

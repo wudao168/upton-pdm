@@ -1794,9 +1794,9 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
                 var source = versions.Values.Where(version => version.DocumentId == documentId).OrderByDescending(version => version.CreatedAt).FirstOrDefault();
                 if (source is null || source.Status != DocumentVersionStatus.Work || !string.Equals(source.Revision.Display, document.Revision.Display, StringComparison.OrdinalIgnoreCase)) continue;
                 DocumentPreviewArtifact? preview = null;
-                if (document.Kind is DocumentKind.Assembly or DocumentKind.Part or DocumentKind.Drawing
-                    && !previews.TryGetValue(documentId, out preview))
-                    throw new PdmConflictException($"图档{document.DrawingNumber}缺少服务器生成的发布预览文件。");
+                // 转图与发布解耦：发布时缺预览不再阻断正式版本生成，预览由后台转图任务补齐。
+                if (document.Kind is DocumentKind.Assembly or DocumentKind.Part or DocumentKind.Drawing)
+                    previews.TryGetValue(documentId, out preview);
                 var revision = source.Revision.Release();
                 var version = source with { Id = Guid.NewGuid(), Revision = revision, Status = DocumentVersionStatus.Released, CreatedBy = actor, CreatedAt = DateTimeOffset.UtcNow, ChangeNote = $"审批发布{revision.Display}", SourceVersionId = source.Id, SourceDescription = $"由{source.Revision.Display}审批发布", ApprovalTaskId = approvalTaskId, ReleasePackageId = releasePackageId, Preview = preview };
                 versions[version.Id] = version;
@@ -2046,6 +2046,67 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
             var obsolete = document with { State = DocumentLifecycleState.Obsolete, UpdatedAt = timeProvider.GetUtcNow() };
             documents[documentId] = obsolete;
             return Task.FromResult(obsolete);
+        }
+    }
+
+    /// <summary>记录发布包的转图状态：转图是发布之后的独立事项，失败不影响发布结果。</summary>
+    public Task<ReleasePackage> MarkReleasePreviewStateAsync(Guid releasePackageId, string state, string? error, int attempts, DateTimeOffset updatedAt, CancellationToken cancellationToken)
+    {
+        lock (gate)
+        {
+            if (!packages.TryGetValue(releasePackageId, out var package)) throw new PdmNotFoundException("发布包不存在。");
+            var updated = package with { PreviewState = state, PreviewError = error, PreviewAttempts = attempts, PreviewUpdatedAt = updatedAt };
+            packages[releasePackageId] = updated;
+            return Task.FromResult(updated);
+        }
+    }
+
+    /// <summary>列出需要继续转图的已发布包（待处理，或失败但未超过重试上限）。</summary>
+    public Task<IReadOnlyList<Guid>> ListPublishingReleasePackageIdsAsync(int limit, CancellationToken cancellationToken) =>
+        Task.FromResult<IReadOnlyList<Guid>>(packages.Values
+            .Where(package => package.State == ReleasePackageState.Publishing)
+            .OrderBy(package => package.CreatedAt)
+            .Take(limit)
+            .Select(package => package.Id)
+            .ToArray());
+
+    /// <summary>列出需要继续转图的已发布包（待处理，或失败但未超过重试上限）。</summary>
+    public Task<int> RecoverInterruptedPublishesAsync(string reason, CancellationToken cancellationToken)
+    {
+        lock (gate)
+        {
+            var stuck = packages.Values.Where(package => package.State == ReleasePackageState.Publishing).ToArray();
+            foreach (var package in stuck)
+                packages[package.Id] = package with { State = ReleasePackageState.PublishFailed, PublishError = reason };
+            return Task.FromResult(stuck.Length);
+        }
+    }
+
+    /// <summary>列出需要继续转图的已发布包（待处理，或失败但未超过重试上限）。</summary>
+    public Task<IReadOnlyList<ReleasePackage>> ListReleasePackagesAwaitingPreviewAsync(int maxAttempts, int limit, CancellationToken cancellationToken) =>
+        Task.FromResult<IReadOnlyList<ReleasePackage>>(packages.Values
+            .Where(package => package.State == ReleasePackageState.Published
+                && package.PreviewState is ReleasePreviewState.Pending or ReleasePreviewState.Failed
+                && package.PreviewAttempts < maxAttempts)
+            .OrderBy(package => package.PreviewUpdatedAt ?? DateTimeOffset.MinValue)
+            .ThenBy(package => package.CreatedAt)
+            .Take(limit)
+            .ToArray());
+
+    /// <summary>把转图结果补挂到发布包对应的正式版本（发布时缺预览的正式版本后补 STEP/PDF）。</summary>
+    public Task<IReadOnlyList<DocumentVersion>> AttachReleasePreviewArtifactsAsync(Guid releasePackageId, IReadOnlyDictionary<Guid, DocumentPreviewArtifact> previews, CancellationToken cancellationToken)
+    {
+        lock (gate)
+        {
+            var updated = new List<DocumentVersion>();
+            foreach (var version in versions.Values.Where(item => item.ReleasePackageId == releasePackageId).ToArray())
+            {
+                if (!previews.TryGetValue(version.DocumentId, out var preview)) continue;
+                var saved = version with { Preview = preview };
+                versions[version.Id] = saved;
+                updated.Add(saved);
+            }
+            return Task.FromResult<IReadOnlyList<DocumentVersion>>(updated);
         }
     }
 

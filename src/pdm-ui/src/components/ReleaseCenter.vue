@@ -39,6 +39,7 @@ const emit = defineEmits<{
   transfer: [taskId: string, targetUsername: string, comment: string]
   emergencyDecide: [taskId: string, decision: 'Approved' | 'Rejected', reason: string]
   retryU9: [releasePackageId: string]
+  retryPreview: [releasePackageId: string]
 }>()
 
 const releaseTypes: { value: Exclude<ReleaseScope, 'LegacyCombined'>; label: string }[] = [
@@ -127,6 +128,16 @@ const releaseBomRevisionLabel = computed(() => {
 })
 const canPrepare = computed(() => !props.releasePackage || ['草稿', '已驳回', '发布失败'].includes(props.releasePackage.state))
 const isSupplement = computed(() => isSupplementScope(scope.value))
+function previewStateLabel(releasePackage: ReleasePackageSummary) {
+  return ({
+    None: '未开始',
+    Pending: '待转图（后台自动重试）',
+    Running: '转换中',
+    Succeeded: '已完成',
+    Failed: `转换失败（已重试 ${releasePackage.previewAttempts ?? 0} 次）`,
+  } as Record<string, string>)[releasePackage.previewState ?? 'None'] ?? String(releasePackage.previewState)
+}
+
 const isFormalSupplementReason = (releasePackage: ReleasePackageSummary) =>
   Boolean(releasePackage.changeReasonSelections?.some(item => item.categoryCode === 'FormalSupplement'))
   || (releasePackage.changeReason || '').split('；').some(reason => reason.trim() === '正式补充')
@@ -1053,12 +1064,20 @@ async function saveItemComment() {
         </section>
       </div>
       <p v-if="releasePackage.publishError" class="pdm-inline-error">发布失败：{{ releasePackage.publishError }}</p>
+      <!-- 转图与发布解耦：发布已完成时转图单独显示状态，失败由后台自动重试，也可手动重试。 -->
+      <p v-if="releasePackage.previewState && releasePackage.previewState !== 'None'" class="pdm-release-preview-state">
+        <span>图纸转换（STEP/PDF）：{{ previewStateLabel(releasePackage) }}</span>
+        <span v-if="releasePackage.previewError" class="is-error">{{ releasePackage.previewError }}</span>
+        <button v-if="releasePackage.previewState !== 'Succeeded'" type="button" class="pdm-secondary-action" :disabled="pending" @click="emit('retryPreview', releasePackage.id)">重试转图</button>
+      </p>
     </template>
   </section>
 </template>
 
 <style scoped>
 .pdm-inline-info{margin:0 0 8px;padding:7px 10px;border:1px solid #99f6e4;border-radius:6px;background:#f0fdfa;color:var(--pdm-green);white-space:normal}
+.pdm-release-preview-state{margin:0 0 8px;display:flex;flex-wrap:wrap;align-items:center;gap:8px;padding:6px 10px;border:1px solid var(--pdm-border);border-radius:6px;background:var(--pdm-surface-muted);color:var(--pdm-text-soft);font-size:12px;white-space:normal}
+.pdm-release-preview-state .is-error{color:var(--pdm-danger)}
 .release-detail-picker .pdm-edit-table td.release-change-details{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .release-detail-picker .pdm-edit-table td.release-change-details>div{display:inline}
 .release-detail-picker .pdm-edit-table td.release-change-details>div+div::before{content:'；'}

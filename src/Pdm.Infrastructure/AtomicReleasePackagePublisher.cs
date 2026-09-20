@@ -133,11 +133,22 @@ public sealed class AtomicReleasePackagePublisher : IReleasePackagePublisher
         if (package.Scope is ReleaseScope.StandardFormal or ReleaseScope.NonStandardWithDrawing or ReleaseScope.ElectricalFormal)
             await PrepareAsync(package, project, cancellationToken);
 
-        var previews = previewSources.Count == 0
-            ? new Dictionary<Guid, DocumentPreviewArtifact>()
-            : new Dictionary<Guid, DocumentPreviewArtifact>(await previewConverter.GenerateAsync(package, project, previewSources, stagingDirectory, cancellationToken));
+        // 转图与发布解耦：转图失败不阻断发布，发布照常生成；转图作为单独事项由后台重试并把结果反馈给相关人。
+        string? previewError = null;
+        IReadOnlyDictionary<Guid, DocumentPreviewArtifact> previews;
+        try
+        {
+            previews = previewSources.Count == 0
+                ? new Dictionary<Guid, DocumentPreviewArtifact>()
+                : new Dictionary<Guid, DocumentPreviewArtifact>(await previewConverter.GenerateAsync(package, project, previewSources, stagingDirectory, cancellationToken));
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            previewError = exception.Message;
+            previews = new Dictionary<Guid, DocumentPreviewArtifact>();
+        }
         var sourceFiles = Directory.GetFiles(stagingDirectory, "*", SearchOption.AllDirectories);
-        ValidateFiles(package.Scope, sourceFiles, previewSources, previews);
+        ValidateFiles(package.Scope, sourceFiles, previewSources, previews, requirePreviews: previewError is null);
 
         Directory.CreateDirectory(releaseRoot);
         var finalDirectory = StorageLocationPolicy.ResolveUnder(releaseRoot, package.Number);
@@ -204,7 +215,7 @@ public sealed class AtomicReleasePackagePublisher : IReleasePackagePublisher
 
             await File.WriteAllLinesAsync(Path.Combine(temporaryDirectory, "checksums.sha256"), checksums, cancellationToken);
             Directory.Move(temporaryDirectory, finalDirectory);
-            return new ReleasePublication(finalDirectory, previews);
+            return new ReleasePublication(finalDirectory, previews, previewError);
         }
         catch
         {
@@ -229,7 +240,8 @@ public sealed class AtomicReleasePackagePublisher : IReleasePackagePublisher
         ReleaseScope scope,
         IReadOnlyList<string> sourceFiles,
         IReadOnlyList<ReleasePreviewSource> previewSources,
-        IReadOnlyDictionary<Guid, DocumentPreviewArtifact> previews)
+        IReadOnlyDictionary<Guid, DocumentPreviewArtifact> previews,
+        bool requirePreviews = true)
     {
         if (sourceFiles.Any(path => NativeExtensions.Contains(Path.GetExtension(path))))
             throw new PdmRuleException("生产发布包不能包含SolidWorks源文件。 ");
@@ -238,7 +250,11 @@ public sealed class AtomicReleasePackagePublisher : IReleasePackagePublisher
         foreach (var source in previewSources)
         {
             if (!previews.TryGetValue(source.DocumentId, out var preview))
-                throw new PdmRuleException($"图档{source.DrawingNumber}缺少服务器生成的发布预览。");
+            {
+                // 转图失败时允许先发布：预览留待后台转图任务补齐，不阻塞发布流程。
+                if (requirePreviews) throw new PdmRuleException($"图档{source.DrawingNumber}缺少服务器生成的发布预览。");
+                continue;
+            }
             var requiredFormat = source.Kind == DocumentKind.Drawing ? DocumentPreviewFormat.Pdf : DocumentPreviewFormat.Step;
             if (preview.Format != requiredFormat)
                 throw new PdmRuleException($"图档{source.DrawingNumber}的服务器预览格式不正确。");

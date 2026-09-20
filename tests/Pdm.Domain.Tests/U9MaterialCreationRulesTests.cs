@@ -14,6 +14,9 @@ public sealed class U9MaterialCreationRulesTests
     [InlineData("0201", MaterialKind.Product, MaterialSupplyMode.Manufacture, ProjectBomHeaderKind.Standard, 6, 0, true, false)]
     [InlineData("0201", MaterialKind.Product, MaterialSupplyMode.Manufacture, ProjectBomHeaderKind.Electrical, 6, 0, true, false)]
     [InlineData("0201", MaterialKind.Product, MaterialSupplyMode.Manufacture, ProjectBomHeaderKind.NonStandard, 6, 0, true, false)]
+    // 非标件（非标机加件）按采购件建立：料品形态属性=采购件，且可采购/可生产/可委外等全部勾选。
+    [InlineData("0204", MaterialKind.NonStandard, MaterialSupplyMode.Manufacture, ProjectBomHeaderKind.NonStandard, 9, 1, true, true)]
+    [InlineData("0204", MaterialKind.NonStandard, MaterialSupplyMode.Manufacture, null, 9, 1, true, true)]
     public void Templates_DistinguishPurchasedMasterAndVirtualBom(string category, MaterialKind kind,
         MaterialSupplyMode supply, ProjectBomHeaderKind? header, int form, int planning, bool request, bool outsource)
     {

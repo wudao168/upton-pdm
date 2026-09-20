@@ -153,7 +153,7 @@ public sealed class InMemoryProgramTemplateRepository(TimeProvider timeProvider)
         lock (gate) return Task.FromResult<IReadOnlyList<ProgramTemplateApprovalTask>>(tasks.Values.Where(item => item.RevisionId == revisionId).OrderBy(item => item.Stage).ToArray());
     }
 
-    public Task<IReadOnlyList<ProgramTemplateApprovalTask>> ListTasksAsync(string actor, string roleCode, CancellationToken cancellationToken)
+    public Task<IReadOnlyList<ProgramTemplateApprovalTask>> ListTasksAsync(string actor, string roleCode, bool canApprove, CancellationToken cancellationToken)
     {
         lock (gate)
         {
@@ -163,7 +163,8 @@ public sealed class InMemoryProgramTemplateRepository(TimeProvider timeProvider)
                 var revision = RequireRevision(task.RevisionId);
                 return task.Stage == ProgramTemplateApprovalStage.Review
                     ? revision.State == ProgramTemplateRevisionState.PendingReview && string.Equals(task.Assignee, actor, StringComparison.OrdinalIgnoreCase)
-                    : revision.State == ProgramTemplateRevisionState.PendingApproval && string.Equals(task.AssigneeRoleCode, roleCode, StringComparison.OrdinalIgnoreCase);
+                    : revision.State == ProgramTemplateRevisionState.PendingApproval
+                        && (canApprove || string.Equals(task.AssigneeRoleCode, roleCode, StringComparison.OrdinalIgnoreCase));
             }).OrderBy(item => item.CreatedAt).ToArray();
             return Task.FromResult<IReadOnlyList<ProgramTemplateApprovalTask>>(visible);
         }

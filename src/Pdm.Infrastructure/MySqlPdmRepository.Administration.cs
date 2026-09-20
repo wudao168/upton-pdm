@@ -192,7 +192,8 @@ public sealed partial class MySqlPdmRepository
             MaterialCodeApproval = ReadMaterialCodeApproval(values),
             ReleaseChangeReasonTypes = ReadStringList(values, "release_change_reason_types", PdmSystemSettings.DefaultReleaseChangeReasonTypes),
             FormalSupplementPolicies = ReadFormalSupplementPolicies(values),
-            DrawingQrPolicy = ReadDrawingQrPolicy(values)
+            DrawingQrPolicy = ReadDrawingQrPolicy(values),
+            PreviewConversion = ReadPreviewConversion(values)
         };
         return BomPropertyMappingCatalog.Apply(settings);
     }
@@ -231,7 +232,8 @@ public sealed partial class MySqlPdmRepository
             new { Key = "material_code_approval", Value = JsonSerializer.Serialize(settings.MaterialCodeApproval, jsonOptions) },
             new { Key = "release_change_reason_types", Value = JsonSerializer.Serialize(settings.ReleaseChangeReasonTypes, jsonOptions) },
             new { Key = "formal_supplement_policies", Value = JsonSerializer.Serialize(settings.FormalSupplementPolicies, jsonOptions) },
-            new { Key = "drawing_qr_policy", Value = JsonSerializer.Serialize(settings.DrawingQrPolicy, jsonOptions) }
+            new { Key = "drawing_qr_policy", Value = JsonSerializer.Serialize(settings.DrawingQrPolicy, jsonOptions) },
+            new { Key = "preview_conversion", Value = JsonSerializer.Serialize(settings.PreviewConversion, jsonOptions) }
         })
         {
             await connection.ExecuteAsync(new CommandDefinition(
@@ -262,6 +264,20 @@ public sealed partial class MySqlPdmRepository
         catch (JsonException)
         {
             return DrawingQrPolicy.Default;
+        }
+    }
+
+    private PreviewConversionSettings ReadPreviewConversion(IReadOnlyDictionary<string, string> values)
+    {
+        if (!values.TryGetValue("preview_conversion", out var json) || string.IsNullOrWhiteSpace(json))
+            return PreviewConversionSettings.Default;
+        try
+        {
+            return JsonSerializer.Deserialize<PreviewConversionSettings>(json, jsonOptions) ?? PreviewConversionSettings.Default;
+        }
+        catch (JsonException)
+        {
+            return PreviewConversionSettings.Default;
         }
     }
 

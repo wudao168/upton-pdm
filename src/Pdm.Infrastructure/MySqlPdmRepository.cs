@@ -927,7 +927,7 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
                    standard_bom_version_id, non_standard_bom_version_id, electrical_bom_version_id, standard_bom_revision, non_standard_bom_revision,
                    standard_bom_snapshot_json, non_standard_bom_snapshot_json, change_number, change_reason, change_reason_selections_json,
                    formal_supplement_policy_snapshotted, formal_supplement_maximum_count, formal_supplement_valid_days, effective_serial_from, effective_serial_to,
-                   published_at, published_path, publish_error, created_at
+                   published_at, published_path, publish_error, preview_state, preview_error, preview_attempts, preview_updated_at, created_at
             FROM release_package
             WHERE project_id = @ProjectId
             """,
@@ -1202,7 +1202,7 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
                    standard_bom_version_id, non_standard_bom_version_id, electrical_bom_version_id, standard_bom_revision, non_standard_bom_revision,
                    standard_bom_snapshot_json, non_standard_bom_snapshot_json, change_number, change_reason, change_reason_selections_json,
                    formal_supplement_policy_snapshotted, formal_supplement_maximum_count, formal_supplement_valid_days, effective_serial_from, effective_serial_to,
-                   published_at, published_path, publish_error, created_at
+                   published_at, published_path, publish_error, preview_state, preview_error, preview_attempts, preview_updated_at, created_at
             FROM release_package WHERE id = @PackageId
             """,
             new { PackageId = packageId },
@@ -1686,6 +1686,10 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
             MechanicalBomSnapshot = JsonSerializer.Deserialize<List<BomItem>>(row.MechanicalBomSnapshotJson, new JsonSerializerOptions(JsonSerializerDefaults.Web)) ?? [],
             ElectricalBomSnapshot = JsonSerializer.Deserialize<List<BomItem>>(row.ElectricalBomSnapshotJson, new JsonSerializerOptions(JsonSerializerDefaults.Web)) ?? [],
             PublishError = row.PublishError,
+            PreviewState = string.IsNullOrWhiteSpace(row.PreviewState) ? "None" : row.PreviewState,
+            PreviewError = row.PreviewError,
+            PreviewAttempts = row.PreviewAttempts,
+            PreviewUpdatedAt = row.PreviewUpdatedAt.HasValue ? new DateTimeOffset(DateTime.SpecifyKind(row.PreviewUpdatedAt.Value, DateTimeKind.Utc)) : null,
             Scope = Enum.Parse<ReleaseScope>(row.ReleaseScope),
             WorkflowCode = row.WorkflowCode,
             WorkflowVersion = row.WorkflowVersion,
@@ -1958,6 +1962,10 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
         public DateTime? PublishedAt { get; init; }
         public string? PublishedPath { get; init; }
         public string? PublishError { get; init; }
+        public string PreviewState { get; init; } = "None";
+        public string? PreviewError { get; init; }
+        public int PreviewAttempts { get; init; }
+        public DateTime? PreviewUpdatedAt { get; init; }
         public DateTime CreatedAt { get; init; }
     }
 

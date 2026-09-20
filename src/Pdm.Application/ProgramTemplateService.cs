@@ -30,8 +30,9 @@ public sealed class ProgramTemplateService(
             && !await HasPermissionAsync(actor, role, PermissionCodes.ProgramTemplateManage, cancellationToken))
         {
             var visibleTaskRevisionIds = new HashSet<Guid>();
+            var canApproveDraft = await HasPermissionAsync(actor, role, PermissionCodes.ProgramTemplateApprove, cancellationToken);
             foreach (var roleCode in CurrentRoleCodes(role))
-                foreach (var task in await templates.ListTasksAsync(actor, roleCode, cancellationToken)) visibleTaskRevisionIds.Add(task.RevisionId);
+                foreach (var task in await templates.ListTasksAsync(actor, roleCode, canApproveDraft, cancellationToken)) visibleTaskRevisionIds.Add(task.RevisionId);
             if (!template.Revisions.Any(item => visibleTaskRevisionIds.Contains(item.Id)))
                 throw new UnauthorizedAccessException("无权查看尚未发布的程序模板。");
         }
@@ -227,11 +228,14 @@ public sealed class ProgramTemplateService(
         var eligibleApprovers = new List<UserAccount>();
         foreach (var user in await pdmRepository.ListUsersAsync(cancellationToken))
         {
-            if (!user.IsActive || !user.HasRole(UserRole.Approver.ToString())) continue;
+            if (!user.IsActive) continue;
             if (string.Equals(user.Username, actor, StringComparison.OrdinalIgnoreCase) || string.Equals(user.Username, reviewer, StringComparison.OrdinalIgnoreCase)) continue;
+            // 批准池按“批准程序模板”权限判定：基础角色为标准化主管的自定义角色、被单独授权的人员都可进入，
+            // 不再要求角色代码恰好等于 Approver（否则集团内只有极少数账号可用，容易整池为空）。
             if (await HasPermissionAsync(user.Username, user.Role, PermissionCodes.ProgramTemplateApprove, cancellationToken)) eligibleApprovers.Add(user);
         }
-        if (eligibleApprovers.Count == 0) throw new PdmRuleException("集团内没有可用的标准化主管批准人。");
+        if (eligibleApprovers.Count == 0)
+            throw new PdmRuleException("集团内没有可用的标准化主管批准人：请在“角色权限设置”为至少一个启用账号授予“批准程序模板”权限，并确保该账号不是提交人本人、也不是提交人所属部门的主负责人。");
 
         var now = timeProvider.GetUtcNow();
         var reviewTask = new ProgramTemplateApprovalTask(
@@ -246,8 +250,9 @@ public sealed class ProgramTemplateService(
     public async Task<IReadOnlyList<ProgramTemplateApprovalTask>> ListMyTasksAsync(string actor, UserRole role, CancellationToken cancellationToken)
     {
         var tasks = new Dictionary<Guid, ProgramTemplateApprovalTask>();
+        var canApprove = await HasPermissionAsync(actor, role, PermissionCodes.ProgramTemplateApprove, cancellationToken);
         foreach (var roleCode in CurrentRoleCodes(role))
-            foreach (var task in await templates.ListTasksAsync(actor, roleCode, cancellationToken)) tasks[task.Id] = task;
+            foreach (var task in await templates.ListTasksAsync(actor, roleCode, canApprove, cancellationToken)) tasks[task.Id] = task;
         return tasks.Values.OrderBy(task => task.CreatedAt).ToArray();
     }
 
@@ -281,7 +286,6 @@ public sealed class ProgramTemplateService(
         else
         {
             await RequirePermissionAsync(actor, role, PermissionCodes.ProgramTemplateApprove, cancellationToken);
-            if (!CurrentRoleCodes(role).Contains(task.AssigneeRoleCode ?? string.Empty, StringComparer.OrdinalIgnoreCase)) throw new UnauthorizedAccessException("当前角色不在集团标准化主管批准池中。");
             var review = (await templates.ListRevisionTasksAsync(revision.Id, cancellationToken)).FirstOrDefault(item => item.Stage == ProgramTemplateApprovalStage.Review);
             if (review?.Decision != ProgramTemplateApprovalDecision.Approved) throw new PdmConflictException("程序模板尚未通过电气组织审核。");
             if (string.Equals(review.DecisionBy, actor, StringComparison.OrdinalIgnoreCase)) throw new UnauthorizedAccessException("审核人不能同时执行最终批准。");

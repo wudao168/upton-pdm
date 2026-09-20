@@ -534,4 +534,20 @@ public sealed class MigrationResourceTests
         Assert.Contains("('DrawingReviewer','审图员'", sql, StringComparison.Ordinal);
         Assert.Contains("('DrawingReviewer','drawing-review.decide'", sql, StringComparison.Ordinal);
     }
+
+    [Fact]
+    public async Task SystemSettingValueMigration_WidensValueColumnSoJsonSettingsFit()
+    {
+        var assembly = typeof(MySqlMigrationRunner).Assembly;
+        var resourceName = assembly.GetManifestResourceNames()
+            .Single(name => name.EndsWith(".Migrations.117_system_setting_value_medium_text.sql", StringComparison.Ordinal));
+
+        await using var stream = assembly.GetManifestResourceStream(resourceName);
+        Assert.NotNull(stream);
+        using var reader = new StreamReader(stream!);
+        var sql = await reader.ReadToEndAsync();
+
+        Assert.Contains("ALTER TABLE pdm_system_setting MODIFY COLUMN setting_value MEDIUMTEXT NOT NULL", sql, StringComparison.Ordinal);
+        Assert.Contains("table_name='pdm_system_setting'", sql, StringComparison.Ordinal);
+    }
 }

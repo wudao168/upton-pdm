@@ -1,10 +1,12 @@
 <script setup lang="ts">
 import { ElMessage } from '../statusMessage'
 import { reactive, ref, watch } from 'vue'
+import { testPreviewAgent } from '../api'
 import type { BomPropertyMapping, BomValidationField, EquipmentTypeDefinition, PdmSystemSettings, ProjectNumberingOptions } from '../types'
 
 const props = defineProps<{
   settings: PdmSystemSettings
+  token?: string
   equipmentTypes: EquipmentTypeDefinition[]
   numberingOptions: ProjectNumberingOptions
   pending: boolean
@@ -15,6 +17,9 @@ const props = defineProps<{
 
 const activeTab = ref('storage')
 const storageDraft = reactive<PdmSystemSettings>({ vaultRoot: '', releaseRoot: '', materialAttachmentRoot: '', checkoutHeartbeatSeconds: 180, checkoutLeaseMinutes: 15, checkoutOfflineGraceMinutes: 60, checkoutReminderHours: 4, checkoutStrongReminderHours: 8, checkoutOverdueHours: 24, checkoutForceReleaseHours: 48, bomDrawingNumberProperty: '物料编码', bomNameProperty: '物料名称', bomDescriptionProperty: '备注信息', bomMaterialProperty: '材质', bomSpecificationProperty: '型号', bomUnitProperty: '单位', bomBrandProperty: '品牌', bomSurfaceTreatmentProperty: '表面处理', bomWeightProperty: '重量', bomPropertyMappings: [], validationRules: { standard: [], nonStandard: [], electrical: [] }, drawingQrPolicy: { enabled: true, sourceProperty: '型号', ruleVersion: '1', sizeMillimeters: 20, marginMillimeters: 5, everySheet: true } })
+const previewConversionDraft = reactive({ mode: 'Local' as 'Local' | 'Remote', agentUrl: '', agentToken: '', timeoutMinutes: 30 })
+const previewAgentProbe = ref('')
+const previewAgentTesting = ref(false)
 const equipmentDialogOpen = ref(false)
 const equipmentDraft = reactive<EquipmentTypeDefinition>({ code: 0, name: '', isActive: true })
 const counterDrafts = ref<Array<{ id: string; name: string; project: number; serial: number }>>([])
@@ -52,6 +57,50 @@ watch(() => props.settings, settings => Object.assign(storageDraft, {
   },
   drawingQrPolicy: { enabled: true, sourceProperty: '型号', ruleVersion: '1', sizeMillimeters: 20, marginMillimeters: 5, everySheet: true, ...settings.drawingQrPolicy },
 }), { immediate: true, deep: true })
+watch(() => props.settings.previewConversion, conversion => {
+  previewConversionDraft.mode = conversion?.mode === 'Remote' ? 'Remote' : 'Local'
+  previewConversionDraft.agentUrl = conversion?.agentUrl ?? ''
+  previewConversionDraft.agentToken = conversion?.agentToken ?? ''
+  previewConversionDraft.timeoutMinutes = conversion?.timeoutMinutes ?? 30
+}, { immediate: true, deep: true })
+
+const previewConversionPayload = () => ({
+  mode: previewConversionDraft.mode,
+  agentUrl: previewConversionDraft.agentUrl.trim().replace(/\/+$/, ''),
+  agentToken: previewConversionDraft.agentToken.trim(),
+  timeoutMinutes: Number(previewConversionDraft.timeoutMinutes) || 30,
+})
+
+async function testPreviewAgentConnection() {
+  if (!props.token) { ElMessage.warning('登录状态已失效，请重新登录后再测试'); return }
+  previewAgentTesting.value = true
+  previewAgentProbe.value = ''
+  try {
+    const result = await testPreviewAgent(previewConversionPayload(), props.token)
+    previewAgentProbe.value = result.message
+    if (result.ok) ElMessage.success(result.message)
+    else ElMessage.warning(result.message)
+  } catch (error) {
+    const message = error instanceof Error ? error.message : '转图服务器测试失败'
+    previewAgentProbe.value = message
+    ElMessage.error(message)
+  } finally {
+    previewAgentTesting.value = false
+  }
+}
+
+async function savePreviewConversion() {
+  if (previewConversionDraft.mode === 'Remote' && !/^https?:\/\/.+/i.test(previewConversionPayload().agentUrl)) {
+    ElMessage.warning('请填写转图服务器地址，例如 http://192.168.2.50:5199')
+    return
+  }
+  try {
+    await props.onSaveSettings({ ...storageDraft, previewConversion: previewConversionPayload() })
+    ElMessage.success('图纸转换设置已保存')
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '图纸转换设置保存失败')
+  }
+}
 watch(() => props.numberingOptions.organizations, organizations => {
   counterDrafts.value = organizations.map(item => ({ id: item.id, name: item.name, project: item.currentProjectSequence, serial: item.currentSerialSequence }))
 }, { immediate: true, deep: true })
@@ -197,6 +246,37 @@ async function saveCounters(row: { id: string; project: number; serial: number }
           <header class="pdm-manager-heading"><div><h2>项目文件夹规则</h2><p>创建项目时不再填写路径，系统自动使用“根目录\项目号”。</p></div></header>
           <div class="pdm-settings-form"><label>图档存档根目录<input v-model="storageDraft.vaultRoot" placeholder="例如 D:\PLM\Vault"><small>示例：{{ storageDraft.vaultRoot || '未设置' }}\P700001</small></label><label>生产发包根目录<input v-model="storageDraft.releaseRoot" placeholder="例如 D:\PLM\Release"><small>示例：{{ storageDraft.releaseRoot || '未设置' }}\P700001</small></label><label>料品资料存档根目录<input v-model="storageDraft.materialAttachmentRoot" placeholder="例如 D:\PLM\MaterialAttachments"><small>目录变更只影响新上传附件，历史附件仍从原位置下载。</small></label></div>
           <div class="pdm-settings-actions"><button type="button" class="pdm-primary-action" :disabled="pending" @click="saveStorage">保存存储设置</button></div>
+        </section>
+      </el-tab-pane>
+      <el-tab-pane label="图纸转换" name="preview-conversion">
+        <section class="pdm-panel pdm-manager-panel">
+          <header class="pdm-manager-heading"><div><h2>PDF / STEP 转图位置</h2><p>正式发布（非标件BOM+图纸、增补/变更）审批通过后，系统自动把2D工程图转PDF、零件与装配转STEP。可选用API服务器本机转换，或交给独立的转图电脑。</p></div></header>
+          <div class="pdm-settings-form">
+            <label>转换方式
+              <select v-model="previewConversionDraft.mode">
+                <option value="Local">本机（API服务器上的SolidWorks）</option>
+                <option value="Remote">远程转图服务器（推荐）</option>
+              </select>
+              <small>远程方式需在转图电脑上运行转图代理 Upton.Pdm.PreviewAgent.exe，并安装SolidWorks。</small>
+            </label>
+            <label>转图服务器地址
+              <input v-model="previewConversionDraft.agentUrl" :disabled="previewConversionDraft.mode !== 'Remote'" placeholder="例如 http://192.168.2.50:5199" aria-label="转图服务器地址">
+              <small>填写转图电脑的IP与代理端口；地址不要带结尾的斜杠。</small>
+            </label>
+            <label>访问令牌
+              <input v-model="previewConversionDraft.agentToken" :disabled="previewConversionDraft.mode !== 'Remote'" placeholder="与转图代理配置一致（可留空）" aria-label="转图服务器访问令牌">
+              <small>用于限制只有本PLM服务器可以调用转图代理。</small>
+            </label>
+            <label>转换超时（分钟）
+              <input v-model.number="previewConversionDraft.timeoutMinutes" type="number" min="1" max="120">
+              <small>按图档数量设置，建议30分钟；超时后本次发布中止并标记发布失败。</small>
+            </label>
+          </div>
+          <p v-if="previewAgentProbe" class="pdm-inline-info" role="status">{{ previewAgentProbe }}</p>
+          <div class="pdm-settings-actions">
+            <button type="button" class="pdm-secondary-action" :disabled="pending || previewAgentTesting" @click="testPreviewAgentConnection">{{ previewAgentTesting ? '正在测试…' : '测试连接' }}</button>
+            <button type="button" class="pdm-primary-action" :disabled="pending" @click="savePreviewConversion">保存图纸转换设置</button>
+          </div>
         </section>
       </el-tab-pane>
       <el-tab-pane label="编辑权限" name="checkout-policy">

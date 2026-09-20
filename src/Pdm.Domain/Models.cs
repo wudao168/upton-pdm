@@ -102,6 +102,34 @@ public sealed record PdmCustomer(
     string SourceSystem = "legacy",
     DateTimeOffset? LastSyncedAt = null);
 
+/// <summary>
+/// 图纸转换（2D工程图转PDF、3D零件/装配转STEP）的执行位置。
+/// Local：由API服务器本机进程调用SolidWorks转换程序；Remote：调用独立转图电脑上的转图代理。
+/// </summary>
+[JsonConverter(typeof(JsonStringEnumConverter))]
+public enum PreviewConversionMode
+{
+    Local,
+    Remote
+}
+
+public sealed record PreviewConversionSettings
+{
+    public static PreviewConversionSettings Default { get; } = new();
+
+    public PreviewConversionMode Mode { get; init; } = PreviewConversionMode.Local;
+
+    /// <summary>转图代理地址，例如 http://192.168.2.50:5199。</summary>
+    public string AgentUrl { get; init; } = string.Empty;
+
+    /// <summary>转图代理访问令牌；两侧配置一致即可。</summary>
+    public string AgentToken { get; init; } = string.Empty;
+
+    public int TimeoutMinutes { get; init; } = 30;
+
+    public string NormalizedAgentUrl => AgentUrl.Trim().TrimEnd('/');
+}
+
 public sealed record PdmSystemSettings(string VaultRoot, string ReleaseRoot)
 {
     public static IReadOnlyList<string> DefaultReleaseChangeReasonTypes { get; } =
@@ -161,6 +189,8 @@ public sealed record PdmSystemSettings(string VaultRoot, string ReleaseRoot)
     public FormalSupplementPolicies FormalSupplementPolicies { get; init; } = FormalSupplementPolicies.Default;
 
     public DrawingQrPolicy DrawingQrPolicy { get; init; } = DrawingQrPolicy.Default;
+
+    public PreviewConversionSettings PreviewConversion { get; init; } = PreviewConversionSettings.Default;
 }
 
 public sealed record DrawingQrPolicy(
@@ -678,6 +708,16 @@ public sealed record PendingApprovalTask(
     string Assignee,
     DateTimeOffset CreatedAt);
 
+/// <summary>发布预览（转图）状态：转图是发布之后的独立事项，失败不影响发布结果。</summary>
+public static class ReleasePreviewState
+{
+    public const string None = "None";
+    public const string Pending = "Pending";
+    public const string Running = "Running";
+    public const string Succeeded = "Succeeded";
+    public const string Failed = "Failed";
+}
+
 public sealed record ReleasePackage(
     Guid Id,
     Guid ProjectId,
@@ -718,6 +758,17 @@ public sealed record ReleasePackage(
     public IReadOnlyList<BomItem> ElectricalBomSnapshot { get; init; } = [];
 
     public string? PublishError { get; init; }
+
+    /// <summary>
+    /// 转图（发布预览 STEP/PDF 生成）状态：与发布解耦，转图失败不影响发布结果，由后台单独重试并把结果反馈给相关人。
+    /// </summary>
+    public string PreviewState { get; init; } = ReleasePreviewState.None;
+
+    public string? PreviewError { get; init; }
+
+    public int PreviewAttempts { get; init; }
+
+    public DateTimeOffset? PreviewUpdatedAt { get; init; }
 
     public ReleaseScope Scope { get; init; } = ReleaseScope.LegacyCombined;
 
