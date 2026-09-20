@@ -126,7 +126,7 @@ const activeRevision = computed(() => selected.value?.revisions.find(item => ite
   ?? selected.value?.revisions.find(item => item.id === selected.value?.currentPublishedRevisionId)
   ?? (selected.value ? latestRevision(selected.value) : undefined))
 const activeTask = computed(() => tasks.value.find(item => item.templateId === selected.value?.id && item.revisionId === activeRevision.value?.id))
-type ApprovalFlowStep = { key: string; title: string; person: string; result: string; note: string; tone: 'done' | 'active' | 'rejected' }
+type ApprovalFlowStep = { key: string; title: string; person: string; result: string; note: string; tone: 'done' | 'active' | 'todo' | 'rejected' }
 const approvalFlow = computed<ApprovalFlowStep[]>(() => {
   const revision = activeRevision.value
   if (!revision) return []
@@ -141,6 +141,8 @@ const approvalFlow = computed<ApprovalFlowStep[]>(() => {
   for (const task of revision.approvalTasks ?? []) {
     const isReview = task.stage === 'Review'
     const decided = Boolean(task.decision)
+    const current = !decided
+      && ((isReview && revision.state === 'PendingReview') || (!isReview && revision.state === 'PendingApproval'))
     steps.push({
       key: task.stage,
       title: isReview ? '电气组织审核' : '集团标准化批准',
@@ -151,7 +153,7 @@ const approvalFlow = computed<ApprovalFlowStep[]>(() => {
         ? `${task.decision === 'Approved' ? (isReview ? '审核通过' : '批准发布') : '已退回'}${task.decidedAt ? ` · ${dateLabel(task.decidedAt)}` : ''}`
         : '进行中',
       note: task.comment || '',
-      tone: task.decision === 'Rejected' ? 'rejected' : decided ? 'done' : 'active',
+      tone: task.decision === 'Rejected' ? 'rejected' : decided ? 'done' : current ? 'active' : 'todo',
     })
   }
   return steps
