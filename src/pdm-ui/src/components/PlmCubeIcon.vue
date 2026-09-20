@@ -95,10 +95,10 @@ const faces = [
   place-items: center;
   background: transparent;
   color: #fff;
-  font-family: "Microsoft YaHei UI", "Microsoft YaHei", sans-serif;
+  font-family: var(--pdm-font-ui);
   font-size: calc(var(--plm-cube-size) * .54);
   font-synthesis: none;
-  font-weight: 800;
+  font-weight: 600;
   line-height: 1;
   text-rendering: geometricPrecision;
   text-shadow: 0 0 1px rgba(5,23,54,.9);

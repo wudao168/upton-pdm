@@ -1,8 +1,11 @@
 :root {
   color-scheme: light;
-  font-family: "Microsoft YaHei", "微软雅黑", "Segoe UI", sans-serif;
+  font-family: var(--pdm-font-ui);
   font-synthesis: none;
   text-rendering: optimizeLegibility;
+  /* 全局统一：1 套界面字体 + 1 套等宽字体（料号/图号/代码） */
+  --pdm-font-ui: "Microsoft YaHei", "微软雅黑", "Segoe UI", sans-serif;
+  --pdm-font-mono: Consolas, monospace;
   --pdm-bg: #f4f7fb;
   --pdm-surface: #ffffff;
   --pdm-surface-muted: #f8fafc;
@@ -12,22 +15,26 @@
   --pdm-sidebar: #3a475c;
   --pdm-sidebar-active: #203347;
   --pdm-sidebar-text: rgba(255, 255, 255, .95);
-  --pdm-text: #27364a;
-  --pdm-muted: #6f8095;
+  /* 文字色只保留三档中性色 + 语义色 */
+  --pdm-text: #0f172a;
+  --pdm-text-soft: #334155;
+  --pdm-muted: #64748b;
+  --pdm-text-muted: var(--pdm-muted);
   --pdm-border: #dbe3ef;
   --pdm-border-soft: #e8eef5;
   --pdm-blue: #2f6de0;
   --pdm-blue-soft: #eaf2ff;
-  --pdm-green: #148252;
+  --pdm-green: #15803d;
   --pdm-green-soft: #e6f6ee;
-  --pdm-orange: #d77a17;
+  --pdm-orange: #b45309;
   --pdm-orange-soft: #fff3e3;
-  --pdm-danger: #c54a44;
+  --pdm-danger: #dc2626;
+  --pdm-purple: #7c3aed;
   --pdm-shadow: rgba(29, 52, 83, 0.13);
 }
 
 * { box-sizing: border-box; }
 html, body, #app { width: 100%; height: 100%; min-width: 320px; min-height: 0; margin: 0; overflow: hidden; }
-body { background: var(--pdm-bg); color: var(--pdm-text); font-size: 14px; }
+body { background: var(--pdm-bg); color: var(--pdm-text); font-size: 14px; line-height: 1.4; }
 button, input { font: inherit; }
 button { cursor: pointer; }

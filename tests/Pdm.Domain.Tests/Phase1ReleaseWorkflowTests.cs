@@ -273,7 +273,14 @@ public sealed class Phase1ReleaseWorkflowTests
         Assert.Equal(ReleasePackageState.Rejected, package.State);
         Assert.All(await repository.ListDocumentsAsync(ProjectId, default), document => Assert.Equal(DocumentLifecycleState.Work, document.State));
 
-        package = await workflow.SubmitReleasePackageAsync(package.Id, "admin", UserRole.Administrator, default);
+        // 退回后BOM可能已被修改，此时允许直接从“已驳回”撤回为草稿：重新绑定当前BOM后再提交或删除重建。
+        var reopened = await workflow.WithdrawReleasePackageAsync(package.Id, "admin", UserRole.Administrator, "退回后重新编辑", default);
+        Assert.Equal(ReleasePackageState.Draft, reopened.State);
+        Assert.All(reopened.ApprovalTasks, task => Assert.Null(task.Decision));
+        Assert.DoesNotContain(await repository.ListBomVersionsAsync(ProjectId, null, default), version => version.State == BomVersionState.InReview);
+        Assert.All(await repository.ListDocumentsAsync(ProjectId, default), document => Assert.Equal(DocumentLifecycleState.Work, document.State));
+
+        package = await workflow.SubmitReleasePackageAsync(reopened.Id, "admin", UserRole.Administrator, default);
         package = await workflow.WithdrawReleasePackageAsync(package.Id, "admin", UserRole.Administrator, "补充材料", default);
         Assert.Equal(ReleasePackageState.Draft, package.State);
         Assert.All(await repository.ListDocumentsAsync(ProjectId, default), document => Assert.Equal(DocumentLifecycleState.Work, document.State));
@@ -1734,6 +1741,55 @@ public sealed class Phase1ReleaseWorkflowTests
     }
 
     [Fact]
+    public async Task NonStandardFormalRelease_SubmitsWhileDrawingPropertiesAreStillWritingBack()
+    {
+        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(), new RecordingPublisher(), TimeProvider.System);
+        foreach (var document in await repository.ListCheckedOutDocumentsAsync(default))
+            await repository.ForceReleaseCheckoutAsync(document.Id, "admin", "测试准备", default);
+        await ConfigureApprovalWorkflowsAsync(repository);
+        await PrepareApprovedNonStandardDrawingReviewAsync(repository, workflow, completePropertyWriteback: false);
+
+        var package = await workflow.CreateScopedReleasePackageAsync(
+            ProjectId, null, string.Empty, string.Empty, string.Empty, "未指定", null,
+            ReleaseScope.NonStandardWithDrawing, [], "admin", UserRole.Administrator, default);
+        package = await workflow.SubmitReleasePackageAsync(package.Id, "admin", UserRole.Administrator, default);
+
+        Assert.Equal(ReleasePackageState.ProcessReview, package.State);
+    }
+
+    [Fact]
+    public async Task ScopedRelease_AppliesSelectionToElectricalFormalAndSupplement()
+    {
+        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        await ConfigureApprovalWorkflowsAsync(repository);
+        var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(), new RecordingPublisher(), TimeProvider.System);
+        await workflow.ReplaceBomAsync(ProjectId, BomKind.Electrical,
+        [
+            new BomItemInput(1, "EL-SCOPE-A", "电气发布A", 1, "个", null, "M1", "W1", true),
+            new BomItemInput(2, "EL-SCOPE-B", "电气发布B", 1, "个", null, "M2", "W1", true)
+        ], "admin", UserRole.Administrator, default);
+        var electrical = await repository.GetBomAsync(ProjectId, BomKind.Electrical, default);
+        var itemA = electrical.Single(item => item.DrawingNumber == "EL-SCOPE-A");
+        var itemB = electrical.Single(item => item.DrawingNumber == "EL-SCOPE-B");
+
+        var package = await workflow.CreateScopedReleasePackageAsync(
+            ProjectId, null, string.Empty, string.Empty, string.Empty, "未指定", null,
+            ReleaseScope.ElectricalFormal, [itemA.Id], "admin", UserRole.Administrator, default);
+        Assert.Equal([itemA.Id], package.SelectedBomItemIds);
+        Assert.Equal(itemA.Id, Assert.Single(package.ElectricalBomSnapshot).Id);
+        Assert.Equal(2, (await repository.GetBomAsync(ProjectId, BomKind.Electrical, default)).Count);
+        package = await PublishThroughAllStepsAsync(workflow, package);
+        Assert.Equal(ReleasePackageState.Published, package.State);
+
+        var supplement = await workflow.CreateScopedReleasePackageAsync(
+            ProjectId, null, string.Empty, string.Empty, "物料问题 / 交期不满足", "未指定", null,
+            ReleaseScope.ElectricalSupplement, [itemB.Id], "admin", UserRole.Administrator, default);
+        Assert.Equal([itemB.Id], supplement.SelectedBomItemIds);
+        Assert.Equal(itemB.Id, Assert.Single(supplement.ElectricalBomSnapshot).Id);
+    }
+
+    [Fact]
     public async Task ElectricalReview_ResolvesDepartmentAndParentManagersWhenDraftIsCreated()
     {
         var repository = new InMemoryPdmRepository(TimeProvider.System);
@@ -2081,7 +2137,7 @@ public sealed class Phase1ReleaseWorkflowTests
             U9MaterialContract.CreatePath, U9MaterialContract.QueryPath, false, "admin", time.GetUtcNow(),
             UnitCodeMappings: new Dictionary<string, string>()), default);
 
-    private static async Task PrepareApprovedNonStandardDrawingReviewAsync(InMemoryPdmRepository repository, PdmWorkflowService workflow)
+    private static async Task PrepareApprovedNonStandardDrawingReviewAsync(InMemoryPdmRepository repository, PdmWorkflowService workflow, bool completePropertyWriteback = true)
     {
         if (await repository.FindUserAsync("mechanical-supervisor", default) is null)
             await repository.CreateUserAsync(new UserAccount(Guid.NewGuid(), "mechanical-supervisor", "机械主管", "unused", UserRole.Approver, true), default);
@@ -2113,6 +2169,14 @@ public sealed class Phase1ReleaseWorkflowTests
         review = await workflow.DecideDrawingReviewSupervisorAsync(review.Id,
             new DecideDrawingReviewSupervisorCommand(DrawingReviewDecision.Approve, "机械主管批准"),
             "mechanical-supervisor", UserRole.Administrator, default);
+
+        if (!completePropertyWriteback)
+        {
+            // 主管批准后进入属性写回阶段；写回由CAD客户端异步完成，此时审核结论已经成立。
+            Assert.Equal(DrawingReviewPackageState.WritingProperties,
+                (await repository.FindDrawingReviewPackageAsync(review.Id, default))?.State);
+            return;
+        }
 
         var request = Assert.Single(await repository.ListCadPropertyWritebacksAsync(ProjectId, default));
         Assert.Equal(drawing.Id, request.SourceDocumentId);

@@ -53,9 +53,9 @@ const delta = (value: number) => `${value > 0 ? '+' : ''}${quantity(value)}`
 .u9-sync-preview { width: 100%; color: var(--el-text-color-regular); }
 .u9-sync-preview__summary { display: flex; flex-wrap: wrap; gap: 8px 24px; padding: 12px; background: var(--el-fill-color-light); border-radius: 4px; }
 h3 { margin: 16px 0 10px; font-size: 14px; }
-small { margin-left: 12px; font-weight: normal; color: var(--el-text-color-secondary); }
+small { margin-left: 12px; font-weight: 400; color: var(--el-text-color-secondary); }
 .u9-sync-preview__table-wrap { max-height: 320px; overflow: auto; border: 1px solid var(--el-border-color-lighter); }
-table { width: 100%; min-width: 640px; border-collapse: separate; border-spacing: 0; text-align: center; font-size: 13px; }
+table { width: 100%; min-width: 640px; border-collapse: separate; border-spacing: 0; text-align: center; font-size: 12px; }
 th, td { padding: 9px 10px; border-bottom: 1px solid var(--el-border-color-lighter); white-space: nowrap; }
 th { position: sticky; top: 0; z-index: 1; background: var(--el-fill-color-light); font-weight: 600; }
 tbody tr:last-child td { border-bottom: 0; }
@@ -64,7 +64,7 @@ tbody tr:last-child td { border-bottom: 0; }
 .u9-sync-preview__change.is-delete { color: var(--el-color-danger); }
 .u9-sync-preview__reconciliation { margin-top: 16px; }
 summary { cursor: pointer; padding: 8px 0; color: var(--el-color-primary); }
-.u9-sync-preview__notes { margin: 16px 0 0; padding-left: 20px; font-size: 12px; line-height: 1.7; }
+.u9-sync-preview__notes { margin: 16px 0 0; padding-left: 20px; font-size: 12px; line-height: 1.4; }
 </style>
 
 <style>

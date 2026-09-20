@@ -160,13 +160,23 @@ public sealed class MaterialRelationService(
         static List<BomItem> Resequence(List<BomItem> items) => items.OrderBy(item => item.IsManuallyExcluded).ThenBy(item => item.Sequence)
             .Select((item, index) => item with { Sequence = index + 1 }).ToList();
         foreach (var kind in byKind.Keys.ToArray()) byKind[kind] = Resequence(byKind[kind]);
-        var bomFingerprint = CalculateBomFingerprint(byKind.Values.SelectMany(items => items));
+        var finalItems = byKind.Values.SelectMany(items => items).Where(IsActive).ToDictionary(item => item.Id);
+        foreach (var entry in reviewsToSave.Where(entry => entry.Value.Count > 0).ToArray())
+        {
+            var accessories = selectionsToSave[entry.Key]
+                .Select(selection => finalItems.GetValueOrDefault(selection.AccessoryBomItemId))
+                .Where(item => item is not null)
+                .Select(item => item!)
+                .ToArray();
+            var fingerprint = CalculateRelationFingerprint(finalItems[entry.Key], accessories, entry.Value[0].RevisionId);
+            reviewsToSave[entry.Key] = entry.Value.Select(review => review with { BomFingerprint = fingerprint }).ToArray();
+        }
         var audit = new AuditEntry(Guid.NewGuid(), timeProvider.GetUtcNow(), actor, "material-relation.apply", nameof(BomItem), projectId.ToString(), $"主物料{commands.Count}项");
         await repository.ApplyBomBatchAsync(projectId, byKind[BomKind.Standard], byKind[BomKind.NonStandard], byKind[BomKind.Unclassified], byKind[BomKind.Electrical], byKind[BomKind.Virtual], [], [audit], cancellationToken);
         foreach (var entry in selectionsToSave)
             await relations.ReplaceSelectionsAsync(projectId, entry.Key, entry.Value, cancellationToken);
         foreach (var entry in reviewsToSave)
-            await relations.ReplaceReviewsAsync(projectId, entry.Key, entry.Value.Select(review => review with { BomFingerprint = bomFingerprint }).ToArray(), cancellationToken);
+            await relations.ReplaceReviewsAsync(projectId, entry.Key, entry.Value, cancellationToken);
         foreach (var kind in new[] { BomKind.Standard, BomKind.NonStandard, BomKind.Electrical })
         {
             var publishable = byKind[kind].Where(item => !item.IsManuallyExcluded && !item.IsReleaseExcluded).ToArray();
@@ -184,7 +194,6 @@ public sealed class MaterialRelationService(
     private async Task<MaterialRelationCompleteness> CalculateCompletenessAsync(Guid projectId, CancellationToken cancellationToken)
     {
         var byKind = await LoadBomByKindAsync(projectId, cancellationToken);
-        var bomFingerprint = CalculateBomFingerprint(byKind.Values.SelectMany(items => items));
         var all = byKind.Values.SelectMany(item => item).Where(IsActive).ToArray();
         var itemById = all.ToDictionary(item => item.Id);
         var templates = (await relations.ListTemplatesAsync(false, cancellationToken))
@@ -197,6 +206,11 @@ public sealed class MaterialRelationService(
         {
             var template = templates[main.DrawingNumber.Trim()];
             var revision = template.PublishedRevision!;
+            var linkedSelections = selections.Where(item => item.MainBomItemId == main.Id && item.RevisionId == revision.Id).ToArray();
+            var relationFingerprint = CalculateRelationFingerprint(main,
+                linkedSelections.Select(item => itemById.GetValueOrDefault(item.AccessoryBomItemId))
+                    .Where(item => item is not null).Select(item => item!).ToArray(),
+                revision.Id);
             var groupChecks = new List<MaterialRelationGroupCheck>();
             foreach (var group in revision.Groups)
             {
@@ -221,7 +235,7 @@ public sealed class MaterialRelationService(
                     }
                 }
                 var isComplete = status is "已选配" or "已确认无需" or "可选未选择";
-                if (isComplete && review?.BomFingerprint != bomFingerprint)
+                if (isComplete && IsRelationFingerprintStale(review?.BomFingerprint, relationFingerprint))
                 {
                     isComplete = false;
                     status = "BOM已变化或尚未核对，请重新核对";
@@ -242,22 +256,36 @@ public sealed class MaterialRelationService(
             checks.Sum(item => item.Groups.Count(group => !group.IsComplete)), checks);
     }
 
-    private static string CalculateBomFingerprint(IEnumerable<BomItem> items)
+    /// <summary>
+    /// 核对指纹只覆盖该主物料行及其关联配件行：其它物料的新增、删除或修改不会让工程师重新核对。
+    /// 带前缀的是当前算法；历史数据保存的是整个项目BOM的指纹（无前缀），按兼容处理不再据此判为待核对。
+    /// </summary>
+    private const string RelationFingerprintPrefix = "R2-";
+
+    private static string CalculateRelationFingerprint(BomItem main, IReadOnlyList<BomItem> accessories, Guid revisionId)
     {
-        // Only BOM content participates; loading, reconciliation timestamps and release status do not invalidate a review.
-        var content = items.OrderBy(item => item.Id).Select(item => new
-        {
-            item.Id, item.Kind, item.Sequence, item.DrawingNumber, item.Name,
-            Quantity = item.Quantity.ToString("G29", CultureInfo.InvariantCulture), item.Unit,
-            Material = item.Material ?? "", Specification = item.Specification ?? "", item.Revision,
-            Remark = item.Remark ?? "", Brand = item.Brand ?? "", SurfaceTreatment = item.SurfaceTreatment ?? "",
-            HeatTreatment = item.HeatTreatment ?? "", Weight = item.Weight ?? "",
-            item.SourceDocumentId, SourceConfiguration = item.SourceConfiguration ?? "", SourceInstancePath = item.SourceInstancePath ?? "",
-            ParentDrawingNumber = item.ParentDrawingNumber ?? "",
-            item.IsManuallyExcluded, item.IsReleaseExcluded
-        });
-        return Convert.ToHexString(SHA256.HashData(JsonSerializer.SerializeToUtf8Bytes(content)));
+        // Only the main row, its accessory rows and the published revision participate; remark, sequence and
+        // reconciliation timestamps do not invalidate a review.
+        var content = new List<object> { revisionId, RelationContent(main) };
+        content.AddRange(accessories.OrderBy(item => item.Id).Select(item => (object)RelationContent(item)));
+        var hash = Convert.ToHexString(SHA256.HashData(JsonSerializer.SerializeToUtf8Bytes(content))).ToLowerInvariant();
+        return RelationFingerprintPrefix + hash[..40];
     }
+
+    private static object RelationContent(BomItem item) => new
+    {
+        item.Id, item.Kind, item.DrawingNumber, item.Name,
+        Quantity = item.Quantity.ToString("G29", CultureInfo.InvariantCulture), item.Unit,
+        Material = item.Material ?? "", Specification = item.Specification ?? "", item.Revision,
+        Brand = item.Brand ?? "", SurfaceTreatment = item.SurfaceTreatment ?? "",
+        HeatTreatment = item.HeatTreatment ?? "", Weight = item.Weight ?? "",
+        item.IsManuallyExcluded, item.IsReleaseExcluded
+    };
+
+    private static bool IsRelationFingerprintStale(string? stored, string current) =>
+        !string.IsNullOrEmpty(stored)
+        && stored.StartsWith(RelationFingerprintPrefix, StringComparison.Ordinal)
+        && !string.Equals(stored, current, StringComparison.Ordinal);
 
     private async Task<Dictionary<BomKind, List<BomItem>>> LoadBomByKindAsync(Guid projectId, CancellationToken cancellationToken)
     {

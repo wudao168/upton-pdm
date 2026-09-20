@@ -414,6 +414,27 @@ describe('ReleaseCenter', () => {
     expect(wrapper.findAll('button').some(button => button.text() === '撤回审批')).toBe(false)
   })
 
+  it('lets a rejected package be withdrawn back to draft so the BOM can be re-bound', async () => {
+    const releasePackage: ReleasePackageSummary = {
+      id: 'release-rejected-withdraw', number: 'RP-R-002', state: '已驳回', scope: 'NonStandardWithDrawing',
+      workflowVersion: 1, selectedBomItemIds: [], createsManufacturingBaseline: false, locksDocuments: true,
+      standardBomSnapshot: [], nonStandardBomSnapshot: [], electricalBomSnapshot: [],
+      steps: [{ id: 'task-supervisor', stage: '机械主管批准', assignee: 'supervisor', status: 'rejected', detail: '已退回' }],
+    }
+    const wrapper = mount(ReleaseCenter, {
+      props: {
+        releasePackage, username: 'initiator', pending: false, progress: 0, error: '',
+        canManage: true, canDecide: false,
+      },
+    })
+
+    const withdraw = wrapper.get('.pdm-withdraw-decision')
+    expect(withdraw.text()).toContain('退回后撤回：发布包恢复为草稿')
+    await withdraw.findAll('button').find(button => button.text() === '撤回为草稿')!.trigger('click')
+    expect(wrapper.emitted('withdraw')).toEqual([['release-rejected-withdraw']])
+    wrapper.unmount()
+  })
+
   it('places the withdraw action in the top workflow area used by approval decisions', () => {
     const releasePackage: ReleasePackageSummary = {
       id: 'release-withdraw', number: 'RP-W-001', state: '待批准', scope: 'StandardFormal',

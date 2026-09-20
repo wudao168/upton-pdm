@@ -1931,8 +1931,8 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
         lock (gate)
         {
             if (!packages.TryGetValue(releasePackageId, out var package)) throw new PdmNotFoundException("发布包不存在。");
-            if (package.State is not (ReleasePackageState.ProcessReview or ReleasePackageState.Approval))
-                throw new PdmConflictException("只有审批中的发布包可以撤回。");
+            if (package.State is not (ReleasePackageState.ProcessReview or ReleasePackageState.Approval or ReleasePackageState.Rejected))
+                throw new PdmConflictException("只有审批中或已驳回的发布包可以撤回。");
             var now = timeProvider.GetUtcNow();
             if (package.LocksDocuments)
             {

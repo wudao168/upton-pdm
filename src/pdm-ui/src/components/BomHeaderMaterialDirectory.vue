@@ -63,7 +63,7 @@ onMounted(load)
 .bom-header-directory__toolbar{display:flex;align-items:center;gap:10px;min-width:0}
 .bom-header-directory__toolbar p{flex:1;min-width:0;margin:0;color:var(--pdm-text-muted,#64748b);font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .bom-header-directory__toolbar .el-input{flex:0 1 260px;min-width:0}
-.bom-header-directory__table{flex:1;min-height:180px;width:100%;font-size:13px}
+.bom-header-directory__table{flex:1;min-height:180px;width:100%;font-size:12px}
 .bom-header-directory__table :deep(.cell){white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .bom-header-directory :deep(.el-pagination){justify-content:flex-end}
 </style>

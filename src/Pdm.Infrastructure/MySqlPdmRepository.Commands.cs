@@ -495,8 +495,8 @@ public sealed partial class MySqlPdmRepository
             """,
             new { PackageId = releasePackageId }, transaction, cancellationToken: cancellationToken))
             ?? throw new PdmNotFoundException("发布包不存在。");
-        if (packageState.State is not ("ProcessReview" or "Approval"))
-            throw new PdmConflictException("只有审批中的发布包可以撤回。");
+        if (packageState.State is not ("ProcessReview" or "Approval" or "Rejected"))
+            throw new PdmConflictException("只有审批中或已驳回的发布包可以撤回。");
         var documentIds = string.IsNullOrWhiteSpace(packageState.RootJson) ? [] : DeserializeDocumentIds(packageState.RootJson);
         await connection.ExecuteAsync(new CommandDefinition(
             "UPDATE approval_task SET decision_by=NULL,decision_value=NULL,decision_comment=NULL,decided_at=NULL,is_emergency_substitute=0,emergency_reason=NULL WHERE release_package_id=@PackageId",

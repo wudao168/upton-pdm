@@ -152,5 +152,5 @@ function refresh() {
 </template>
 
 <style scoped>
-.material-relation-directory{display:flex;height:100%;min-height:0;flex-direction:column}.material-relation-directory__toolbar{display:flex;flex:0 0 auto;align-items:center;gap:10px;margin-bottom:10px}.material-relation-directory__brand{width:150px}.material-relation-directory__toolbar .el-input{width:min(430px,42vw)}.material-relation-directory__toolbar span{color:#64748b;font-size:12px}.material-relation-directory>:deep(.el-table){min-height:0;flex:1}
+.material-relation-directory{display:flex;height:100%;min-height:0;flex-direction:column}.material-relation-directory__toolbar{display:flex;flex:0 0 auto;align-items:center;gap:10px;margin-bottom:10px}.material-relation-directory__brand{width:150px}.material-relation-directory__toolbar .el-input{width:min(430px,42vw)}.material-relation-directory__toolbar span{color:var(--pdm-muted);font-size:12px}.material-relation-directory>:deep(.el-table){min-height:0;flex:1}
 </style>

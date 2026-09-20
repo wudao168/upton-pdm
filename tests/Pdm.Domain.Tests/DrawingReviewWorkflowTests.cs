@@ -564,7 +564,7 @@ public sealed class DrawingReviewWorkflowTests
     }
 
     [Fact]
-    public async Task FormalNonStandardReleaseWaitsForLatest2DReviewAndPropertyWriteback()
+    public async Task FormalNonStandardReleaseAcceptsSupervisorApprovalBeforePropertyWriteback()
     {
         var (repository, workflow, model, drawing) = await PrepareReviewAsync();
         var review = await workflow.CreateDrawingReviewPackageAsync(ProjectId, "submitter", UserRole.Administrator, default);
@@ -575,9 +575,10 @@ public sealed class DrawingReviewWorkflowTests
         review = await ApproveAsMechanicalSupervisorAsync(workflow, review);
         Assert.Equal(DrawingReviewPackageState.WritingProperties, review.State);
 
+        // 主管批准即代表2D审核结论成立；属性写回由CAD客户端异步执行，不再阻塞发布提交。
         var release = await CreateLegacyReleasePackageAsync(repository);
-        var blocked = await Assert.ThrowsAsync<PdmRuleException>(() => workflow.SubmitReleasePackageAsync(release.Id, "admin", UserRole.Administrator, default));
-        Assert.Contains("尚无已完成", blocked.Message);
+        var submitted = await workflow.SubmitReleasePackageAsync(release.Id, "admin", UserRole.Administrator, default);
+        Assert.Equal(ReleasePackageState.ProcessReview, submitted.State);
 
         var writebacks = await repository.ListCadPropertyWritebacksAsync(ProjectId, default);
         var request = Assert.Single(writebacks);
@@ -597,11 +598,6 @@ public sealed class DrawingReviewWorkflowTests
             Assert.Null(current.ModelResultVersionId);
             Assert.NotNull(current.DrawingResultVersionId);
         });
-
-        await CheckInAsync(repository, model.Id, "designer", new Dictionary<string, string?>(), 'E');
-
-        var submitted = await workflow.SubmitReleasePackageAsync(release.Id, "admin", UserRole.Administrator, default);
-        Assert.Equal(ReleasePackageState.ProcessReview, submitted.State);
     }
 
     [Fact]

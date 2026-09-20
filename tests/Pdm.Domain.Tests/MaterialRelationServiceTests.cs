@@ -64,12 +64,13 @@ public sealed class MaterialRelationServiceTests
         Assert.Equal(2, (await relations.ListSelectionsAsync(project.Id, default)).Count);
         await service.EnsureCompleteAsync(project.Id, default);
 
-        // A same-quantity attribute change must invalidate every main row, including rows sharing an accessory.
-        await pdm.ReplaceBomAsync(project.Id, BomKind.Standard, [mainA with { Remark = "设计备注变更" }, mainB], default);
+        // 只有主物料自身的内容变化才要求重新核对，且只影响该行。
+        await pdm.ReplaceBomAsync(project.Id, BomKind.Standard, [mainA with { Brand = "UPTON" }, mainB], default);
         var stale = await service.GetCompletenessAsync(project.Id, "admin", UserRole.Administrator, default);
         Assert.False(stale.IsComplete);
-        Assert.All(stale.MainMaterials, item => Assert.False(item.IsComplete));
-        Assert.All(stale.MainMaterials.SelectMany(item => item.Groups), item => Assert.Contains("重新核对", item.Status));
+        Assert.False(stale.MainMaterials.Single(item => item.MainBomItemId == mainA.Id).IsComplete);
+        Assert.Contains("重新核对", stale.MainMaterials.Single(item => item.MainBomItemId == mainA.Id).Groups.Single().Status);
+        Assert.True(stale.MainMaterials.Single(item => item.MainBomItemId == mainB.Id).IsComplete);
         await service.EnsureCompleteAsync(project.Id, default);
         var rechecked = await service.ApplyAsync(project.Id,
         [
@@ -80,14 +81,51 @@ public sealed class MaterialRelationServiceTests
         Assert.True((await service.GetCompletenessAsync(project.Id, "admin", UserRole.Administrator, default)).IsComplete);
         Assert.Equal(2, (await pdm.GetBomAsync(project.Id, BomKind.Electrical, default)).Count);
 
-        await pdm.ReplaceBomAsync(project.Id, BomKind.Standard, [mainA with { Remark = "设计备注变更", Quantity = 2.0000m, ReconciliationUpdatedAt = DateTimeOffset.UtcNow }, mainB], default);
+        await pdm.ReplaceBomAsync(project.Id, BomKind.Standard, [mainA with { Brand = "UPTON", Quantity = 2.0000m, ReconciliationUpdatedAt = DateTimeOffset.UtcNow }, mainB], default);
         Assert.True((await service.GetCompletenessAsync(project.Id, "admin", UserRole.Administrator, default)).IsComplete);
-        await pdm.ReplaceBomAsync(project.Id, BomKind.Standard, [mainA with { Remark = "设计备注变更" }], default);
-        Assert.False((await service.GetCompletenessAsync(project.Id, "admin", UserRole.Administrator, default)).IsComplete);
+        // 备注变化与无关物料的新增/删除都不属于关联配置内容，不应要求重新核对。
+        await pdm.ReplaceBomAsync(project.Id, BomKind.Standard, [mainA with { Brand = "UPTON", Remark = "设计备注变更" }], default);
+        Assert.True((await service.GetCompletenessAsync(project.Id, "admin", UserRole.Administrator, default)).IsComplete);
 
         var extra = mainB with { Id = Guid.NewGuid(), DrawingNumber = "UNRELATED", Sequence = 3 };
-        await pdm.ReplaceBomAsync(project.Id, BomKind.Standard, [mainA with { Remark = "设计备注变更" }, mainB, extra], default);
-        Assert.False((await service.GetCompletenessAsync(project.Id, "admin", UserRole.Administrator, default)).IsComplete);
+        await pdm.ReplaceBomAsync(project.Id, BomKind.Standard, [mainA with { Brand = "UPTON", Remark = "设计备注变更" }, mainB, extra], default);
+        Assert.True((await service.GetCompletenessAsync(project.Id, "admin", UserRole.Administrator, default)).IsComplete);
+
+        // 主物料数量变化会让已选配件的数量失效，必须重新核对。
+        await pdm.ReplaceBomAsync(project.Id, BomKind.Standard, [mainA with { Brand = "UPTON", Remark = "设计备注变更", Quantity = 3.0000m }, mainB, extra], default);
+        var quantityChanged = await service.GetCompletenessAsync(project.Id, "admin", UserRole.Administrator, default);
+        Assert.False(quantityChanged.IsComplete);
+        Assert.Contains("数量不匹配", quantityChanged.MainMaterials.Single(item => item.MainBomItemId == mainA.Id).Groups.Single().Status);
+    }
+
+    [Fact]
+    public async Task LegacyProjectWideFingerprintReview_IsNotTreatedAsPending()
+    {
+        var clock = TimeProvider.System;
+        var pdm = new InMemoryPdmRepository(clock);
+        var materials = new InMemoryMaterialRepository(clock);
+        var relations = new InMemoryMaterialRelationRepository();
+        var service = new MaterialRelationService(relations, materials, pdm, clock);
+        var project = await pdm.CreateProjectAsync(new(
+            $"REL-{Guid.NewGuid():N}", "旧指纹兼容测试", "admin", @"D:\PDM\RelationTest", @"D:\PDM\RelationRelease"), "admin", default);
+        var motor = await AddApprovedMaterialAsync(materials, MaterialKind.Standard, "0102", "MOTOR-A", "电机A");
+        var controller = await AddApprovedMaterialAsync(materials, MaterialKind.Electrical, "0101", "CTRL-01", "控制器");
+        var published = await SaveAndPublishAsync(service, motor, controller);
+        var main = new BomItem(Guid.NewGuid(), project.Id, BomKind.Standard, 1, motor.MaterialCode, motor.Name, 2, "001", null, null, "W1", true);
+        await pdm.ReplaceBomAsync(project.Id, BomKind.Standard, [main], default);
+        var group = published.PublishedRevision!.Groups.Single();
+
+        var applied = await service.ApplyAsync(project.Id,
+            [new ApplyMaterialRelationsCommand(main.Id, [new MaterialRelationChoice(group.Id, [group.Options.Single().Id])])],
+            "admin", UserRole.Administrator, default);
+        Assert.True(applied.IsComplete);
+        Assert.StartsWith("R2-", Assert.Single(await relations.ListReviewsAsync(project.Id, default)).BomFingerprint);
+
+        // 历史review保存的是整个项目BOM的指纹（无前缀），升级后不应被判定为待核对。
+        var legacy = (await relations.ListReviewsAsync(project.Id, default))
+            .Select(review => review with { BomFingerprint = new string('A', 64) }).ToArray();
+        await relations.ReplaceReviewsAsync(project.Id, main.Id, legacy, default);
+        Assert.True((await service.GetCompletenessAsync(project.Id, "admin", UserRole.Administrator, default)).IsComplete);
     }
 
     [Fact]
