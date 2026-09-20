@@ -446,12 +446,31 @@ internal sealed class BatchOperationDialog : Form
         try
         {
             var directItems = new HashSet<BatchOperationItem>();
+            // 记录“没能自动勾选”的原因，避免用户只看到一句“未检测到变更”。
+            var reviewLockedCount = 0;
+            var notSelectableCount = 0;
+            var noCachedHashCount = 0;
             foreach (var item in operationItems)
             {
-                if (CanSelectForChangedSubmission(item.Node, username)
-                    && await Task.Run(() => HasDirectChange(item.Node, username)))
+                if (item.Node.DrawingReviewLocked)
+                {
+                    reviewLockedCount++;
+                    continue;
+                }
+                if (!CanSelectForChangedSubmission(item.Node, username))
+                {
+                    notSelectableCount++;
+                    continue;
+                }
+                if (await Task.Run(() => HasDirectChange(item.Node, username)))
                 {
                     directItems.Add(item);
+                    continue;
+                }
+                if (string.IsNullOrWhiteSpace(item.Node.LatestVersionSha256)
+                    && string.IsNullOrWhiteSpace(item.Node.LatestStoredSha256))
+                {
+                    noCachedHashCount++;
                 }
             }
 
@@ -477,12 +496,17 @@ internal sealed class BatchOperationDialog : Form
             }
             RefreshFileTreePresentation();
 
+            var reasons = new List<string>();
+            if (reviewLockedCount > 0) reasons.Add(string.Concat(reviewLockedCount, " 项正在图纸审核，不能提交"));
+            if (notSelectableCount > 0) reasons.Add(string.Concat(notSelectableCount, " 项当前不可提交（他人编辑或缺少本地文件）"));
+            if (noCachedHashCount > 0) reasons.Add(string.Concat(noCachedHashCount, " 项缺少已存档版本哈希，无法判定变更"));
             selectionSummary.Text = directItems.Count == 0
-                ? "未检测到需要提交的变更"
+                ? string.Concat("未检测到需要提交的变更", reasons.Count > 0 ? string.Concat("（", string.Join("；", reasons), "）") : string.Empty)
                 : string.Concat(
                     "已勾选", directItems.Count + relatedItems.Count,
                     "项（直接变更", directItems.Count,
-                    "，关联装配体", relatedItems.Count, "）");
+                    "，关联装配体", relatedItems.Count, "）",
+                    reasons.Count > 0 ? string.Concat("；未勾选：", string.Join("；", reasons)) : string.Empty);
         }
         catch (Exception exception)
         {

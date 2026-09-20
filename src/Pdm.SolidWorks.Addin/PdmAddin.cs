@@ -9131,6 +9131,8 @@ public sealed class PdmAddin : ISwAddin
         var checkInItems = new List<BatchOperationItem>();
         var preflights = new Dictionary<string, BatchCheckInPreflight>(StringComparer.OrdinalIgnoreCase);
         var outdatedFiles = new List<string>();
+        // 正在图纸审核中的图纸会被跳过而不是中断整套提交：它只需要只读打开，不影响其它图档提交。
+        var reviewLockedFiles = new List<string>();
         var skippedFiles = 0;
 
         for (var index = 0; index < items.Count; index++)
@@ -9140,6 +9142,12 @@ public sealed class PdmAddin : ISwAddin
             var node = item.Node;
             reportStage?.Invoke(string.Concat("阶段1/4：正在分析变更 ", index + 1, " / ", items.Count, "：", node.FileName));
             LogOperation(string.Concat("Batch preflight start path=", node.FullPath));
+            if (node.DrawingReviewLocked)
+            {
+                reviewLockedFiles.Add(node.FileName);
+                LogOperation(string.Concat("Batch preflight skip review-locked path=", node.FullPath));
+                continue;
+            }
             ValidateAcquireNode(node);
 
             if (string.IsNullOrWhiteSpace(node.FullPath) || !File.Exists(node.FullPath))
@@ -9226,6 +9234,13 @@ public sealed class PdmAddin : ISwAddin
                 string.Join("\r\n", outdatedFiles.Take(8)),
                 outdatedFiles.Count > 8 ? "\r\n……" : string.Empty,
                 "\r\n请先执行“整体获取最新文件及权限”，确认装配引用更新并保存后，再重新提交存档。"));
+        }
+
+        if (reviewLockedFiles.Count > 0)
+        {
+            LogOperation(string.Concat(
+                "Batch preflight skipped review-locked count=", reviewLockedFiles.Count,
+                " files=", string.Join("、", reviewLockedFiles.Take(8))));
         }
 
         // The plan is built before any child is checked in. A parent assembly that is unchanged
