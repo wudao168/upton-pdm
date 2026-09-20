@@ -111,7 +111,7 @@ public static class ProgramTemplateEndpointExtensions
                 results.Add(new ProgramTemplateTaskResponse(
                     task.Id, template.Id, template.Code, revision.Id, revision.Name, revision.VersionLabel,
                     task.Stage.ToString(), revision.State.ToString(),
-                    task.Stage == ProgramTemplateApprovalStage.Review ? ProgramTemplateChecklist.For(template.AssetType) : [],
+                    task.Stage == ProgramTemplateApprovalStage.Review ? await service.GetChecklistAsync(template.AssetType, cancellationToken) : [],
                     task.CreatedAt, task.RowVersion));
             }
             return Results.Ok(results);
@@ -146,7 +146,7 @@ public static class ProgramTemplateEndpointExtensions
     private static ProgramTemplateResponse MapTemplate(
         ProgramTemplate template,
         IReadOnlyDictionary<Guid, IReadOnlyList<ProgramTemplateApprovalTask>>? tasksByRevision = null) => new(
-        template.Id, template.Code, template.AssetType.ToString(), template.OriginCompanyId, template.OriginCompanyName,
+        template.Id, template.Code, template.AssetType, template.OriginCompanyId, template.OriginCompanyName,
         template.CurrentPublishedRevisionId, template.IsArchived, template.CreatedBy, template.CreatedAt,
         template.Revisions
             .Select(revision => MapRevision(revision, tasksByRevision?.GetValueOrDefault(revision.Id)))

@@ -2182,7 +2182,8 @@ export interface UpdateU9MaterialIntegrationInput {
   writeEnabled: boolean
 }
 
-export type ProgramTemplateAssetType = 'PlcFunctionBlock' | 'PlcProgram' | 'HmiTemplate'
+export type ProgramTemplateChecklistKind = 'PlcFunctionBlock' | 'PlcProgram' | 'HmiTemplate'
+export type ProgramTemplateAssetType = string
 export type ProgramTemplateRevisionState = 'Draft' | 'PendingReview' | 'PendingApproval' | 'Rejected' | 'Published' | 'Superseded' | 'Archived'
 export type ProgramTemplateParameterDirection = 'Input' | 'Output' | 'InOut'
 export type ProgramTemplateAttachmentKind = 'Package' | 'TestEvidence'
@@ -2244,7 +2245,7 @@ export interface ProgramTemplateApprovalTask {
 export interface ProgramTemplate {
   id: string
   code: string
-  assetType: ProgramTemplateAssetType
+  assetType: string
   originCompanyId?: string | null
   originCompanyName?: string | null
   currentPublishedRevisionId?: string | null
@@ -2268,11 +2269,18 @@ export interface ProgramTemplateTask {
   rowVersion: number
 }
 
+export interface ProgramTemplateTypeOption {
+  key: string
+  name: string
+  codePrefix: string
+  checklistKind: ProgramTemplateChecklistKind
+}
+
 export interface ProgramTemplateOptionCatalog {
   categories: string[]
   vendors: string[]
   platforms: string[]
-  disabledAssetTypes?: string[] | null
+  types?: ProgramTemplateTypeOption[] | null
 }
 
 export interface ProgramTemplateParameterInput {
@@ -2286,7 +2294,7 @@ export interface ProgramTemplateParameterInput {
 }
 
 export interface ProgramTemplateDraftInput {
-  assetType: ProgramTemplateAssetType
+  assetType: string
   name: string
   category: string
   description: string

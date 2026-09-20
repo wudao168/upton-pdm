@@ -8,15 +8,15 @@ public sealed class InMemoryProgramTemplateRepository(TimeProvider timeProvider)
     private readonly object gate = new();
     private readonly Dictionary<Guid, ProgramTemplate> templates = [];
     private readonly Dictionary<Guid, ProgramTemplateApprovalTask> tasks = [];
-    private readonly Dictionary<ProgramTemplateAssetType, int> counters = [];
+    private readonly Dictionary<string, int> counters = [];
 
-    public Task<string> ReserveCodeAsync(ProgramTemplateAssetType assetType, CancellationToken cancellationToken)
+    public Task<string> ReserveCodeAsync(string assetTypeKey, string codePrefix, CancellationToken cancellationToken)
     {
         lock (gate)
         {
-            var next = counters.GetValueOrDefault(assetType) + 1;
-            counters[assetType] = next;
-            return Task.FromResult($"{Prefix(assetType)}-{next:D4}");
+            var next = counters.GetValueOrDefault(assetTypeKey) + 1;
+            counters[assetTypeKey] = next;
+            return Task.FromResult($"{codePrefix}-{next:D4}");
         }
     }
 
@@ -251,10 +251,4 @@ public sealed class InMemoryProgramTemplateRepository(TimeProvider timeProvider)
         if (current != expected) throw new PdmConflictException("数据已被其他用户更新，请刷新后重试。");
     }
 
-    private static string Prefix(ProgramTemplateAssetType type) => type switch
-    {
-        ProgramTemplateAssetType.PlcFunctionBlock => "PT-FB",
-        ProgramTemplateAssetType.PlcProgram => "PT-PLC",
-        _ => "PT-HMI"
-    };
 }

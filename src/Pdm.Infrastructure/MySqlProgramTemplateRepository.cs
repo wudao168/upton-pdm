@@ -12,11 +12,11 @@ public sealed class MySqlProgramTemplateRepository(IOptions<PdmDatabaseOptions> 
     private readonly PdmDatabaseOptions settings = options.Value;
     private readonly JsonSerializerOptions jsonOptions = new(JsonSerializerDefaults.Web);
 
-    public async Task<string> ReserveCodeAsync(ProgramTemplateAssetType assetType, CancellationToken cancellationToken)
+    public async Task<string> ReserveCodeAsync(string assetTypeKey, string codePrefix, CancellationToken cancellationToken)
     {
         await using var connection = await OpenAsync(cancellationToken);
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
-        var type = assetType.ToString();
+        var type = assetTypeKey;
         await connection.ExecuteAsync(new CommandDefinition(
             "INSERT IGNORE INTO program_template_counter(asset_type,current_value) VALUES(@Type,0)",
             new { Type = type }, transaction, cancellationToken: cancellationToken));
@@ -28,7 +28,7 @@ public sealed class MySqlProgramTemplateRepository(IOptions<PdmDatabaseOptions> 
             "UPDATE program_template_counter SET current_value=@Next WHERE asset_type=@Type",
             new { Type = type, Next = next }, transaction, cancellationToken: cancellationToken));
         await transaction.CommitAsync(cancellationToken);
-        return $"{Prefix(assetType)}-{next:D4}";
+        return $"{codePrefix}-{next:D4}";
     }
 
     public async Task<IReadOnlyList<ProgramTemplate>> ListPublishedAsync(CancellationToken cancellationToken)
@@ -79,7 +79,7 @@ public sealed class MySqlProgramTemplateRepository(IOptions<PdmDatabaseOptions> 
             VALUES(@Id,@Code,@AssetType,@OriginCompanyId,NULL,0,@CreatedBy,@CreatedAt)
             """, new
             {
-                template.Id, template.Code, AssetType = template.AssetType.ToString(), template.OriginCompanyId,
+                template.Id, template.Code, AssetType = template.AssetType, template.OriginCompanyId,
                 template.CreatedBy, CreatedAt = template.CreatedAt.UtcDateTime
             }, transaction, cancellationToken: cancellationToken));
         foreach (var revision in template.Revisions) await InsertRevisionAsync(connection, transaction, revision, cancellationToken);
@@ -342,7 +342,7 @@ public sealed class MySqlProgramTemplateRepository(IOptions<PdmDatabaseOptions> 
             new { TemplateId = templateId }, transaction, cancellationToken: cancellationToken))).ToArray();
         var parameters = await LoadParametersAsync(connection, transaction, revisionRows.Select(item => item.Id).ToArray(), cancellationToken);
         return new ProgramTemplate(
-            template.Id, template.Code, Enum.Parse<ProgramTemplateAssetType>(template.AssetType), template.OriginCompanyId,
+            template.Id, template.Code, template.AssetType, template.OriginCompanyId,
             template.OriginCompanyName, template.CurrentPublishedRevisionId, template.IsArchived, template.CreatedBy,
             template.CreatedAt, revisionRows.Select(row => MapRevision(row, parameters.GetValueOrDefault(row.Id) ?? [])).ToArray());
     }
@@ -433,13 +433,6 @@ public sealed class MySqlProgramTemplateRepository(IOptions<PdmDatabaseOptions> 
         string.IsNullOrWhiteSpace(row.Decision) ? null : Enum.Parse<ProgramTemplateApprovalDecision>(row.Decision),
         row.DecisionBy, row.Comment, JsonSerializer.Deserialize<string[]>(row.ChecklistJson, jsonOptions) ?? [],
         row.CreatedAt, row.DecidedAt, row.RowVersion);
-
-    private static string Prefix(ProgramTemplateAssetType type) => type switch
-    {
-        ProgramTemplateAssetType.PlcFunctionBlock => "PT-FB",
-        ProgramTemplateAssetType.PlcProgram => "PT-PLC",
-        _ => "PT-HMI"
-    };
 
     private const string RevisionSelect = """
         SELECT revision.id,revision.template_id TemplateId,revision.version_major VersionMajor,

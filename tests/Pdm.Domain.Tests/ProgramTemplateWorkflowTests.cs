@@ -16,7 +16,7 @@ public sealed class ProgramTemplateWorkflowTests
         await ConfigureElectricalApprovalChainAsync(pdmRepository);
 
         var created = await service.CreateAsync(new CreateProgramTemplateCommand(
-            ProgramTemplateAssetType.PlcFunctionBlock,
+            nameof(ProgramTemplateAssetType.PlcFunctionBlock),
             string.Empty,
             string.Empty,
             string.Empty,
@@ -61,7 +61,7 @@ public sealed class ProgramTemplateWorkflowTests
         await ConfigureElectricalApprovalChainAsync(pdmRepository);
 
         var created = await service.CreateAsync(new CreateProgramTemplateCommand(
-            ProgramTemplateAssetType.PlcFunctionBlock,
+            nameof(ProgramTemplateAssetType.PlcFunctionBlock),
             "缺少受控文件测试",
             "逻辑运算",
             "验证提交前的受控文件校验。",
@@ -97,7 +97,7 @@ public sealed class ProgramTemplateWorkflowTests
         await ConfigureElectricalApprovalChainAsync(pdmRepository);
 
         var created = await service.CreateAsync(new CreateProgramTemplateCommand(
-            ProgramTemplateAssetType.PlcFunctionBlock,
+            nameof(ProgramTemplateAssetType.PlcFunctionBlock),
             "电机正反转控制",
             "逻辑运算",
             "带互锁和切换延时的电机正反转控制。",
@@ -125,7 +125,7 @@ public sealed class ProgramTemplateWorkflowTests
 
         var reviewTask = Assert.Single(await service.ListMyTasksAsync("reviewer", UserRole.BusinessUnitManager, default));
         var reviewed = await service.DecideAsync(reviewTask.Id,
-            new(ProgramTemplateApprovalDecision.Approved, null, ProgramTemplateChecklist.For(created.AssetType), reviewTask.RowVersion),
+            new(ProgramTemplateApprovalDecision.Approved, null, ProgramTemplateChecklist.For(ProgramTemplateTypeCatalog.ChecklistKind(null, created.AssetType)), reviewTask.RowVersion),
             "reviewer", UserRole.BusinessUnitManager, default);
         Assert.Equal(ProgramTemplateRevisionState.PendingApproval, reviewed.Revision.State);
 
@@ -156,7 +156,7 @@ public sealed class ProgramTemplateWorkflowTests
         await pdmRepository.SetOrganizationUnitManagersAsync(unit.Id, "reviewer", [], default);
 
         var created = await service.CreateAsync(new CreateProgramTemplateCommand(
-            ProgramTemplateAssetType.PlcFunctionBlock, "权限批准池", "逻辑运算", "批准池按权限判定。", "Siemens", "TIA Portal", "V19", "S7-1200",
+            nameof(ProgramTemplateAssetType.PlcFunctionBlock), "权限批准池", "逻辑运算", "批准池按权限判定。", "Siemens", "TIA Portal", "V19", "S7-1200",
             [], "首版", [new(ProgramTemplateParameterDirection.Input, 0, "Enable", "BOOL", null, null, null)]),
             "uploader", UserRole.Engineer, default);
         var revision = created.Revisions.Single();
@@ -171,7 +171,7 @@ public sealed class ProgramTemplateWorkflowTests
         Assert.Equal(ProgramTemplateRevisionState.PendingReview, revision.State);
         var reviewTask = Assert.Single(await service.ListMyTasksAsync("reviewer", UserRole.BusinessUnitManager, default));
         await service.DecideAsync(reviewTask.Id,
-            new(ProgramTemplateApprovalDecision.Approved, null, ProgramTemplateChecklist.For(created.AssetType), reviewTask.RowVersion),
+            new(ProgramTemplateApprovalDecision.Approved, null, ProgramTemplateChecklist.For(ProgramTemplateTypeCatalog.ChecklistKind(null, created.AssetType)), reviewTask.RowVersion),
             "reviewer", UserRole.BusinessUnitManager, default);
 
         var approvalTask = Assert.Single(await service.ListMyTasksAsync("prod-manager", UserRole.ProductionViewer, default));
@@ -193,7 +193,7 @@ public sealed class ProgramTemplateWorkflowTests
         await pdmRepository.UpdateUserAsync("approver", "标准化主管", UserRole.Approver, UserRole.Approver.ToString(), [UserRole.Approver.ToString()], false, default);
 
         var created = await service.CreateAsync(new CreateProgramTemplateCommand(
-            ProgramTemplateAssetType.PlcFunctionBlock, "无批准人", "逻辑运算", "批准池为空时的提示。", "Siemens", "TIA Portal", "V19", "S7-1200",
+            nameof(ProgramTemplateAssetType.PlcFunctionBlock), "无批准人", "逻辑运算", "批准池为空时的提示。", "Siemens", "TIA Portal", "V19", "S7-1200",
             [], "首版", [new(ProgramTemplateParameterDirection.Input, 0, "Enable", "BOOL", null, null, null)]),
             "uploader", UserRole.Engineer, default);
         var revision = created.Revisions.Single();
@@ -226,7 +226,7 @@ public sealed class ProgramTemplateWorkflowTests
             "alarm.zip", "package/alarm.zip", 10, new string('A', 64), "test.pdf", "evidence/test.pdf", 10, new string('B', 64),
             "uploader", clock.GetUtcNow(), null, null, 1,
             [new(Guid.NewGuid(), revisionId, ProgramTemplateParameterDirection.Input, 0, "Alarm", "BOOL", null, null, null)]);
-        await templateRepository.CreateAsync(new(templateId, "PT-FB-0001", ProgramTemplateAssetType.PlcFunctionBlock, null, null, null, false, "uploader", clock.GetUtcNow(), [revision]), default);
+        await templateRepository.CreateAsync(new(templateId, "PT-FB-0001", nameof(ProgramTemplateAssetType.PlcFunctionBlock), null, null, null, false, "uploader", clock.GetUtcNow(), [revision]), default);
         revision = await service.SubmitAsync(revision.Id, revision.RowVersion, "uploader", UserRole.Engineer, default);
         var reviewTask = Assert.Single(await service.ListMyTasksAsync("reviewer", UserRole.BusinessUnitManager, default));
 
@@ -257,7 +257,7 @@ public sealed class ProgramTemplateWorkflowTests
         var service = new ProgramTemplateService(templateRepository, pdmRepository, storage, clock);
         await ConfigureElectricalApprovalChainAsync(pdmRepository);
         var created = await service.CreateAsync(new CreateProgramTemplateCommand(
-            ProgramTemplateAssetType.PlcProgram, "待删除草稿", "", "", "", "", "", "", [], "", []),
+            nameof(ProgramTemplateAssetType.PlcProgram), "待删除草稿", "", "", "", "", "", "", [], "", []),
             "uploader", UserRole.Engineer, default);
         var revision = created.Revisions.Single();
         revision = await templateRepository.AttachFileAsync(revision.Id,
@@ -284,7 +284,7 @@ public sealed class ProgramTemplateWorkflowTests
         var service = new ProgramTemplateService(templateRepository, pdmRepository, new UnusedProgramTemplateStorage(), clock);
         await ConfigureElectricalApprovalChainAsync(pdmRepository);
         var created = await service.CreateAsync(new CreateProgramTemplateCommand(
-            ProgramTemplateAssetType.PlcProgram, "已提交模板", "控制", "功能说明", "Siemens", "TIA Portal", "V19", "S7-1500", [], "首版", []),
+            nameof(ProgramTemplateAssetType.PlcProgram), "已提交模板", "控制", "功能说明", "Siemens", "TIA Portal", "V19", "S7-1500", [], "首版", []),
             "uploader", UserRole.Engineer, default);
         var revision = created.Revisions.Single();
         revision = await templateRepository.AttachFileAsync(revision.Id,
@@ -325,7 +325,7 @@ public sealed class ProgramTemplateWorkflowTests
             SubmittedAt = null, PublishedAt = null
         };
         await templateRepository.CreateAsync(new(
-            templateId, "PT-PLC-0001", ProgramTemplateAssetType.PlcProgram, null, null, publishedId, false,
+            templateId, "PT-PLC-0001", nameof(ProgramTemplateAssetType.PlcProgram), null, null, publishedId, false,
             "uploader", clock.GetUtcNow(), [published, draft]), default);
 
         await service.DeleteDraftAsync(draft.Id, draft.RowVersion, "uploader", UserRole.Engineer, default);

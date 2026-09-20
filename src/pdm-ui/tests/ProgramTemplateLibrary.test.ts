@@ -27,7 +27,13 @@ describe('ProgramTemplateLibrary', () => {
     vi.clearAllMocks()
     api.listProgramTemplates.mockResolvedValue([])
     api.listProgramTemplateTasks.mockResolvedValue([])
-    api.getProgramTemplateOptions.mockResolvedValue({ categories: [], vendors: [], platforms: [] })
+    api.getProgramTemplateOptions.mockResolvedValue({
+      categories: [], vendors: [], platforms: [],
+      types: [
+        { key: 'PlcFunctionBlock', name: 'PLC功能块', codePrefix: 'PT-FB', checklistKind: 'PlcFunctionBlock' },
+        { key: 'PlcProgram', name: 'PLC整包模板', codePrefix: 'PT-PLC', checklistKind: 'PlcProgram' },
+      ],
+    })
   })
 
   afterEach(() => vi.unstubAllGlobals())
@@ -198,7 +204,10 @@ describe('ProgramTemplateLibrary', () => {
   })
 
   it('列表合并显示提交人，分类厂商平台只提供维护好的选项', async () => {
-    api.getProgramTemplateOptions.mockResolvedValue({ categories: ['控制'], vendors: ['Siemens'], platforms: ['TIA Portal'] })
+    api.getProgramTemplateOptions.mockResolvedValue({
+      categories: ['控制'], vendors: ['Siemens'], platforms: ['TIA Portal'],
+      types: [{ key: 'PlcFunctionBlock', name: 'PLC功能块', codePrefix: 'PT-FB', checklistKind: 'PlcFunctionBlock' }],
+    })
     const draft = {
       id: 'revision-draft', version: 'v1.0.0', attemptNumber: 1, state: 'Draft', name: '草稿模板', category: '控制', description: '',
       vendor: 'Siemens', platform: 'TIA Portal', softwareVersion: 'V19', applicableSeries: '', tags: [], changeNote: '',
@@ -226,17 +235,20 @@ describe('ProgramTemplateLibrary', () => {
     expect(wrapper.findAll('.table-column-label').map(column => column.text())).toContain('提交人')
     expect((wrapper.vm as unknown as { categoryOptions: string[] }).categoryOptions).toEqual(['控制'])
 
-    api.saveProgramTemplateOptions.mockResolvedValue({ categories: ['控制', '新分类'], vendors: ['Siemens'], platforms: ['TIA Portal'], disabledAssetTypes: [] })
+    api.saveProgramTemplateOptions.mockResolvedValue({ categories: ['新分类', '控制'], vendors: ['Siemens'], platforms: ['TIA Portal'], types: [ { key: 'PlcFunctionBlock', name: 'PLC功能块', codePrefix: 'PT-FB', checklistKind: 'PlcFunctionBlock' }, { key: 't000000000001', name: 'SCADA画面', codePrefix: 'PT-SCADA', checklistKind: 'HmiTemplate' } ] })
     const vm = wrapper.vm as unknown as {
       openOptionMaintenance: () => void
       saveOptionMaintenance: () => Promise<void>
-      optionDraft: { categories: string[]; disabledAssetTypes: string[] }
+      optionDraft: { categories: string[]; types: { key: string; name: string; codePrefix: string; checklistKind: string }[] }
       optionDialogOpen: boolean
       categoryOptions: string[]
       optionSection: string
       optionNewValue: string
       addOption: () => void
       removeOption: (index: number) => void
+      startAddType: () => void
+      commitTypeEdit: () => void
+      optionTypeForm: { name: string; codePrefix: string; checklistKind: string }
     }
     vm.openOptionMaintenance()
     expect(vm.optionDialogOpen).toBe(true)
@@ -249,9 +261,21 @@ describe('ProgramTemplateLibrary', () => {
     expect(vm.optionDraft.categories).toEqual(['新分类'])
     vm.optionNewValue = '控制'
     vm.addOption()
+    // 模板类型和其他三项一样用维护列表：新增时可指定名称、编号前缀与检查清单组。
+    vm.optionSection = 'AssetType'
+    vm.startAddType()
+    vm.optionTypeForm.name = 'SCADA画面'
+    vm.optionTypeForm.codePrefix = 'pt-scada'
+    vm.optionTypeForm.checklistKind = 'HmiTemplate'
+    vm.commitTypeEdit()
+    expect(vm.optionDraft.types.map(item => item.name)).toEqual(['PLC功能块', 'SCADA画面'])
+    expect(vm.optionDraft.types[1]).toMatchObject({ name: 'SCADA画面', codePrefix: 'PT-SCADA', checklistKind: 'HmiTemplate' })
     await vm.saveOptionMaintenance()
 
-    expect(api.saveProgramTemplateOptions).toHaveBeenCalledWith({ categories: ['新分类', '控制'], vendors: ['Siemens'], platforms: ['TIA Portal'], disabledAssetTypes: [] }, 'token')
+    expect(api.saveProgramTemplateOptions).toHaveBeenCalledWith({
+      categories: ['新分类', '控制'], vendors: ['Siemens'], platforms: ['TIA Portal'],
+      types: [ expect.objectContaining({ key: 'PlcFunctionBlock', name: 'PLC功能块', codePrefix: 'PT-FB' }), expect.objectContaining({ name: 'SCADA画面', codePrefix: 'PT-SCADA', checklistKind: 'HmiTemplate' }) ],
+    }, 'token')
     expect(vm.categoryOptions).toEqual(['控制', '新分类'])
     expect(vm.optionDialogOpen).toBe(false)
   })

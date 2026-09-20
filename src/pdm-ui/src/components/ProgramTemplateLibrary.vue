@@ -23,14 +23,15 @@ import {
 } from '../api'
 import type {
   ProgramTemplate,
-  ProgramTemplateAssetType,
   ProgramTemplateAttachmentKind,
+  ProgramTemplateChecklistKind,
   ProgramTemplateDraftInput,
   ProgramTemplateParameter,
   ProgramTemplateParameterDirection,
   ProgramTemplateOptionCatalog,
   ProgramTemplateRevision,
   ProgramTemplateTask,
+  ProgramTemplateTypeOption,
   ProgramTemplateVersionBump,
 } from '../types'
 
@@ -56,7 +57,7 @@ const uploadProgress = ref(0)
 const templates = ref<ProgramTemplate[]>([])
 const tasks = ref<ProgramTemplateTask[]>([])
 const search = ref('')
-const typeFilter = ref<ProgramTemplateAssetType | ''>('')
+const typeFilter = ref('')
 const categoryFilter = ref('')
 const platformFilter = ref('')
 const vendorFilter = ref('')
@@ -73,8 +74,8 @@ const decisionComment = ref('')
 const checkedItems = ref<string[]>([])
 const optionDialogOpen = ref(false)
 const optionSaving = ref(false)
-const optionCatalog = ref<ProgramTemplateOptionCatalog>({ categories: [], vendors: [], platforms: [] })
-const optionDraft = ref<ProgramTemplateOptionCatalog>({ categories: [], vendors: [], platforms: [] })
+const optionCatalog = ref<ProgramTemplateOptionCatalog>({ categories: [], vendors: [], platforms: [], types: [] })
+const optionDraft = ref<ProgramTemplateOptionCatalog>({ categories: [], vendors: [], platforms: [], types: [] })
 type OptionSection = 'AssetType' | 'Category' | 'Vendor' | 'Platform'
 const optionSections: { value: OptionSection; label: string }[] = [
   { value: 'AssetType', label: '模板类型' },
@@ -108,8 +109,8 @@ const canManageOptions = computed(() => props.permissions.includes('program-temp
 const canDeleteActiveDraft = computed(() => activeRevision.value?.state === 'Draft'
   && (activeRevision.value.createdBy.toLocaleLowerCase() === props.username.toLocaleLowerCase()
     || props.permissions.includes('program-template.manage')))
-const assetLabels: Record<ProgramTemplateAssetType, string> = {
-  PlcFunctionBlock: 'PLC功能块', PlcProgram: 'PLC整包模板', HmiTemplate: 'HMI模板',
+const checklistKindLabels: Record<ProgramTemplateChecklistKind, string> = {
+  PlcFunctionBlock: '功能块检查清单', PlcProgram: '整包程序检查清单', HmiTemplate: 'HMI检查清单',
 }
 const stateLabels: Record<ProgramTemplateRevision['state'], string> = {
   Draft: '草稿', PendingReview: '待审核', PendingApproval: '待批准', Rejected: '已退回',
@@ -155,18 +156,23 @@ const platforms = computed(() => mergeOptions(optionCatalog.value.platforms, use
 const categoryOptions = computed(() => mergeOptions(optionCatalog.value.categories, usedValues(item => item.category), form.category))
 const vendorOptions = computed(() => mergeOptions(optionCatalog.value.vendors, usedValues(item => item.vendor), form.vendor))
 const platformOptions = computed(() => mergeOptions(optionCatalog.value.platforms, usedValues(item => item.platform), form.platform))
+const maintainedTypes = computed(() => optionCatalog.value.types ?? [])
 const assetTypeOptions = computed(() => {
-  const disabled = optionCatalog.value.disabledAssetTypes ?? []
-  return (Object.keys(assetLabels) as ProgramTemplateAssetType[])
-    .filter(value => !disabled.includes(value) || value === form.assetType)
+  const options = [...maintainedTypes.value]
+  if (form.assetType && !options.some(item => item.key === form.assetType))
+    options.push({ key: form.assetType, name: form.assetType, codePrefix: '', checklistKind: 'PlcProgram' })
+  return options
 })
+const assetTypeLabel = (key: string) => maintainedTypes.value.find(item => item.key === key)?.name ?? key
+const maintainedTypeKeys = computed(() => new Set(maintainedTypes.value.map(item => item.key)))
+const historicalTypeKeys = computed(() => [...new Set(templates.value.map(template => template.assetType))]
+  .filter(key => key && !maintainedTypeKeys.value.has(key)))
 const optionPlaceholders: Record<Exclude<OptionSection, 'AssetType'>, string> = {
   Category: '输入分类名称',
   Vendor: '输入厂商名称',
   Platform: '输入平台名称',
 }
 const optionPlaceholder = computed(() => optionPlaceholders[optionSection.value as Exclude<OptionSection, 'AssetType'>] ?? '输入名称')
-const disabledAssetTypes = computed(() => optionDraft.value.disabledAssetTypes ?? [])
 const currentOptionValues = computed(() => {
   if (optionSection.value === 'Category') return optionDraft.value.categories
   if (optionSection.value === 'Vendor') return optionDraft.value.vendors
@@ -256,11 +262,12 @@ async function openOptionMaintenance() {
     categories: [...optionCatalog.value.categories],
     vendors: [...optionCatalog.value.vendors],
     platforms: [...optionCatalog.value.platforms],
-    disabledAssetTypes: [...(optionCatalog.value.disabledAssetTypes ?? [])],
+    types: maintainedTypes.value.map(item => ({ ...item })),
   }
   optionSection.value = 'AssetType'
   optionNewValue.value = ''
   cancelOptionEdit()
+  cancelTypeEdit()
   optionDialogOpen.value = true
 }
 
@@ -304,11 +311,57 @@ function cancelOptionEdit() {
   optionEditingValue.value = ''
 }
 
-function toggleAssetType(value: ProgramTemplateAssetType) {
-  const disabled = optionDraft.value.disabledAssetTypes ?? []
-  optionDraft.value.disabledAssetTypes = disabled.includes(value)
-    ? disabled.filter(item => item !== value)
-    : [...disabled, value]
+const optionTypes = computed(() => optionDraft.value.types ?? [])
+const optionTypeEditingKey = ref('')
+const optionTypeForm = reactive<{ name: string; codePrefix: string; checklistKind: ProgramTemplateChecklistKind }>({
+  name: '', codePrefix: '', checklistKind: 'PlcFunctionBlock',
+})
+const optionTypeChecklistKinds: ProgramTemplateChecklistKind[] = ['PlcFunctionBlock', 'PlcProgram', 'HmiTemplate']
+
+function startAddType() {
+  optionTypeEditingKey.value = '__new__'
+  Object.assign(optionTypeForm, { name: '', codePrefix: '', checklistKind: 'PlcFunctionBlock' })
+}
+
+function startEditType(option: ProgramTemplateTypeOption) {
+  optionTypeEditingKey.value = option.key
+  Object.assign(optionTypeForm, { name: option.name, codePrefix: option.codePrefix, checklistKind: option.checklistKind })
+}
+
+function cancelTypeEdit() {
+  optionTypeEditingKey.value = ''
+  Object.assign(optionTypeForm, { name: '', codePrefix: '', checklistKind: 'PlcFunctionBlock' })
+}
+
+function commitTypeEdit() {
+  const name = optionTypeForm.name.trim()
+  const codePrefix = optionTypeForm.codePrefix.trim().toUpperCase()
+  if (!name || !codePrefix) {
+    ElMessage.warning('模板类型名称和编号前缀都不能为空')
+    return
+  }
+  const editing = optionTypeEditingKey.value
+  if (editing === '__new__') {
+    optionTypes.value.push({ key: '', name, codePrefix, checklistKind: optionTypeForm.checklistKind })
+  } else {
+    const index = optionTypes.value.findIndex(item => item.key === editing)
+    if (index >= 0) optionTypes.value.splice(index, 1, { key: editing, name, codePrefix, checklistKind: optionTypeForm.checklistKind })
+  }
+  cancelTypeEdit()
+}
+
+function removeType(key: string) {
+  const index = optionTypes.value.findIndex(item => item.key === key)
+  if (index >= 0) optionTypes.value.splice(index, 1)
+  cancelTypeEdit()
+}
+
+function moveType(index: number, direction: -1 | 1) {
+  const target = index + direction
+  if (target < 0 || target >= optionTypes.value.length) return
+  const [moved] = optionTypes.value.splice(index, 1)
+  optionTypes.value.splice(target, 0, moved!)
+  cancelTypeEdit()
 }
 
 async function saveOptionMaintenance() {
@@ -560,7 +613,7 @@ function ioSummary(revision: ProgramTemplateRevision) {
   return `输入 ${counts.Input} · 输出 ${counts.Output} · 双向 ${counts.InOut}`
 }
 function handleRowClick(row: ProgramTemplateListRow) { void openDetail(row.template.id, row.revision.id) }
-function assetLabel(assetType: ProgramTemplateAssetType) { return assetLabels[assetType] }
+
 function stateLabel(state: ProgramTemplateRevision['state']) { return stateLabels[state] }
 
 watch(() => form.assetType, value => {
@@ -577,7 +630,7 @@ onMounted(async () => {
   <section class="program-template-library" aria-label="程序模板库">
     <section class="pdm-panel program-template-panel">
       <div class="program-template-toolbar">
-        <el-select v-model="typeFilter" clearable filterable placeholder="全部类型" aria-label="模板类型"><el-option v-for="(label, value) in assetLabels" :key="value" :label="label" :value="value" /></el-select>
+        <el-select v-model="typeFilter" clearable filterable placeholder="全部类型" aria-label="模板类型"><el-option v-for="item in maintainedTypes" :key="item.key" :label="item.name" :value="item.key" /></el-select>
         <el-select v-model="categoryFilter" clearable filterable placeholder="全部分类" aria-label="模板分类"><el-option v-for="item in categories" :key="item" :label="item" :value="item" /></el-select>
         <el-select v-model="platformFilter" clearable filterable placeholder="全部平台" aria-label="模板平台"><el-option v-for="item in platforms" :key="item" :label="item" :value="item" /></el-select>
         <el-select v-model="vendorFilter" clearable filterable placeholder="全部厂商" aria-label="模板厂商"><el-option v-for="vendor in vendors" :key="vendor" :label="vendor" :value="vendor" /></el-select>
@@ -592,7 +645,7 @@ onMounted(async () => {
         <el-table-column label="编号" width="108"><template #default="{ row }"><code>{{ row.template.code }}</code></template></el-table-column>
         <el-table-column label="程序名称" min-width="140"><template #default="{ row }"><strong class="program-template-name">{{ row.revision.name }}</strong></template></el-table-column>
         <el-table-column label="功能说明" min-width="220"><template #default="{ row }"><span class="program-template-description">{{ row.revision.description || '—' }}</span></template></el-table-column>
-        <el-table-column label="类型" width="100"><template #default="{ row }"><el-tag effect="plain">{{ assetLabel(row.template.assetType) }}</el-tag></template></el-table-column>
+        <el-table-column label="类型" width="100"><template #default="{ row }"><el-tag effect="plain">{{ assetTypeLabel(row.template.assetType) }}</el-tag></template></el-table-column>
         <el-table-column label="厂商 / 平台" min-width="150"><template #default="{ row }"><span class="program-template-vendor"><strong>{{ row.revision.vendor }}</strong><span class="program-template-cell-note">{{ row.revision.platform }} · {{ row.revision.softwareVersion }}</span></span></template></el-table-column>
         <el-table-column label="接口 / 适用范围" min-width="170"><template #default="{ row }"><span>{{ row.revision.parameters.length ? ioSummary(row.revision) : row.revision.applicableSeries || '—' }}</span></template></el-table-column>
         <el-table-column label="版本" width="80"><template #default="{ row }"><code>{{ row.revision.version }}</code></template></el-table-column>
@@ -605,7 +658,7 @@ onMounted(async () => {
 
     <el-drawer v-model="detailOpen" class="program-template-detail" size="min(1120px, 94vw)" destroy-on-close>
       <template #header>
-        <div v-if="selected && activeRevision" class="program-template-detail-title"><Blocks :size="28" /><div><h2>{{ activeRevision.name }}</h2><p>{{ selected.code }} · {{ assetLabels[selected.assetType] }} · {{ activeRevision.version }}<template v-if="currentReviewer"> · 当前 {{ currentReviewer }}</template></p></div><el-tag :type="stateTagType(activeRevision.state)">{{ stateLabels[activeRevision.state] }}</el-tag></div>
+        <div v-if="selected && activeRevision" class="program-template-detail-title"><Blocks :size="28" /><div><h2>{{ activeRevision.name }}</h2><p>{{ selected.code }} · {{ assetTypeLabel(selected.assetType) }} · {{ activeRevision.version }}<template v-if="currentReviewer"> · 当前 {{ currentReviewer }}</template></p></div><el-tag :type="stateTagType(activeRevision.state)">{{ stateLabels[activeRevision.state] }}</el-tag></div>
       </template>
       <template v-if="selected && activeRevision">
         <section class="program-template-section is-description"><h3>功能说明</h3><p>{{ activeRevision.description }}</p></section>
@@ -651,11 +704,32 @@ onMounted(async () => {
       </el-radio-group>
       <div class="program-template-option-list">
         <template v-if="optionSection === 'AssetType'">
-          <div v-for="(label, value) in assetLabels" :key="value" class="program-template-option-row">
-            <strong>{{ label }}</strong>
-            <small class="program-template-option-used">系统内置类型 · {{ value }}</small>
-            <el-switch :model-value="!disabledAssetTypes.includes(value)" active-text="可选" inactive-text="停用" @change="toggleAssetType(value)" />
+          <div v-for="(option, index) in optionTypes" :key="option.key || index" class="program-template-option-row" :class="{ 'is-type-edit': optionTypeEditingKey === option.key }">
+            <template v-if="optionTypeEditingKey === option.key">
+              <el-input v-model="optionTypeForm.name" size="small" placeholder="类型名称" />
+              <el-input v-model="optionTypeForm.codePrefix" size="small" placeholder="编号前缀，如 PT-FB" />
+              <el-select v-model="optionTypeForm.checklistKind" size="small"><el-option v-for="value in optionTypeChecklistKinds" :key="value" :label="checklistKindLabels[value]" :value="value" /></el-select>
+              <div class="program-template-option-actions"><el-button link type="primary" @click="commitTypeEdit">确定</el-button><el-button link @click="cancelTypeEdit">取消</el-button></div>
+            </template>
+            <template v-else>
+              <strong>{{ option.name }}</strong>
+              <small class="program-template-option-used">编号前缀 {{ option.codePrefix }} · {{ checklistKindLabels[option.checklistKind] }} · 存储标识 {{ option.key || '保存时自动生成' }}</small>
+              <div class="program-template-option-actions">
+                <el-button link :disabled="index === 0" @click="moveType(index, -1)">上移</el-button>
+                <el-button link :disabled="index === optionTypes.length - 1" @click="moveType(index, 1)">下移</el-button>
+                <el-button link @click="startEditType(option)">编辑</el-button>
+                <el-button link type="danger" @click="removeType(option.key)">删除</el-button>
+              </div>
+            </template>
           </div>
+          <div v-if="optionTypeEditingKey === '__new__'" class="program-template-option-row is-new is-type-edit">
+            <el-input v-model="optionTypeForm.name" size="small" placeholder="类型名称" />
+            <el-input v-model="optionTypeForm.codePrefix" size="small" placeholder="编号前缀，如 PT-SCADA" />
+            <el-select v-model="optionTypeForm.checklistKind" size="small"><el-option v-for="value in optionTypeChecklistKinds" :key="value" :label="checklistKindLabels[value]" :value="value" /></el-select>
+            <div class="program-template-option-actions"><el-button type="primary" size="small" @click="commitTypeEdit">确认新增</el-button><el-button size="small" @click="cancelTypeEdit">取消</el-button></div>
+          </div>
+          <div v-else class="program-template-option-row is-new"><el-button type="primary" size="small" @click="startAddType">新增模板类型</el-button></div>
+          <small class="program-template-option-used">编号前缀决定新模板编号（如 PT-FB-0001）；检查清单组决定该类模板审核时需要勾选的检查项。历史模板类型未维护：{{ historicalTypeKeys.join('、') || '—' }}</small>
         </template>
         <template v-else>
           <div v-if="!currentOptionValues.length" class="program-template-option-empty">暂无维护项，请在下方新增。</div>
@@ -685,7 +759,7 @@ onMounted(async () => {
     </el-dialog>
     <el-drawer v-model="editorOpen" class="program-template-editor" :title="editingRevision ? `编辑 ${editingRevision.version} 草稿` : '上传程序模板'" size="min(1040px, 96vw)" destroy-on-close>
       <el-form label-position="top" class="program-template-form">
-        <section><h3>1. 基本信息</h3><div class="program-template-form-grid"><el-form-item label="模板类型"><el-select v-model="form.assetType" :disabled="!!editingRevision"><el-option v-for="value in assetTypeOptions" :key="value" :label="assetLabels[value]" :value="value" /></el-select></el-form-item><el-form-item label="模板名称"><el-input v-model="form.name" /></el-form-item><el-form-item label="分类"><el-select v-model="form.category" filterable clearable placeholder="从维护好的分类中选择"><el-option v-for="item in categoryOptions" :key="item" :label="item" :value="item" /></el-select></el-form-item><el-form-item label="厂商"><el-select v-model="form.vendor" filterable clearable placeholder="从维护好的厂商中选择"><el-option v-for="item in vendorOptions" :key="item" :label="item" :value="item" /></el-select></el-form-item><el-form-item label="平台"><el-select v-model="form.platform" filterable clearable placeholder="从维护好的平台中选择"><el-option v-for="item in platformOptions" :key="item" :label="item" :value="item" /></el-select></el-form-item><el-form-item label="软件版本"><el-input v-model="form.softwareVersion" /></el-form-item><el-form-item label="适用系列"><el-input v-model="form.applicableSeries" /></el-form-item><el-form-item label="标签"><el-input v-model="tagText" placeholder="多个标签使用逗号分隔" /></el-form-item><el-form-item class="is-half" label="功能说明"><el-input v-model="form.description" type="textarea" :rows="2" /></el-form-item><el-form-item class="is-half" label="版本说明"><el-input v-model="form.changeNote" type="textarea" :rows="2" /></el-form-item></div></section>
+        <section><h3>1. 基本信息</h3><div class="program-template-form-grid"><el-form-item label="模板类型"><el-select v-model="form.assetType" :disabled="!!editingRevision"><el-option v-for="item in assetTypeOptions" :key="item.key" :label="item.name" :value="item.key" /></el-select></el-form-item><el-form-item label="模板名称"><el-input v-model="form.name" /></el-form-item><el-form-item label="分类"><el-select v-model="form.category" filterable clearable placeholder="从维护好的分类中选择"><el-option v-for="item in categoryOptions" :key="item" :label="item" :value="item" /></el-select></el-form-item><el-form-item label="厂商"><el-select v-model="form.vendor" filterable clearable placeholder="从维护好的厂商中选择"><el-option v-for="item in vendorOptions" :key="item" :label="item" :value="item" /></el-select></el-form-item><el-form-item label="平台"><el-select v-model="form.platform" filterable clearable placeholder="从维护好的平台中选择"><el-option v-for="item in platformOptions" :key="item" :label="item" :value="item" /></el-select></el-form-item><el-form-item label="软件版本"><el-input v-model="form.softwareVersion" /></el-form-item><el-form-item label="适用系列"><el-input v-model="form.applicableSeries" /></el-form-item><el-form-item label="标签"><el-input v-model="tagText" placeholder="多个标签使用逗号分隔" /></el-form-item><el-form-item class="is-half" label="功能说明"><el-input v-model="form.description" type="textarea" :rows="2" /></el-form-item><el-form-item class="is-half" label="版本说明"><el-input v-model="form.changeNote" type="textarea" :rows="2" /></el-form-item></div></section>
 
         <section><h3>2. 受控文件</h3><div class="program-template-upload-grid"><article><input ref="packageInput" type="file" accept=".zip,.rar" hidden @change="handleFile('Package', $event)" /><Upload :size="22" /><strong>ZIP/RAR程序包</strong><span>{{ editingRevision?.packageFileName || '支持 ZIP、RAR' }}</span><el-button :loading="uploadingKind === 'Package'" :disabled="uploadingKind !== null" @click="packageInput?.click()">{{ editingRevision?.packageFileName ? '重新上传' : '选择程序包' }}</el-button></article><article><input ref="evidenceInput" type="file" accept=".pdf,.doc,.docx,.xls,.xlsx,.png,.jpg,.jpeg" hidden @change="handleFile('TestEvidence', $event)" /><Upload :size="22" /><strong>离线测试证据</strong><span>{{ editingRevision?.evidenceFileName || 'PDF、Word、Excel、PNG或JPG' }}</span><el-button :loading="uploadingKind === 'TestEvidence'" :disabled="uploadingKind !== null" @click="evidenceInput?.click()">{{ editingRevision?.evidenceFileName ? '重新上传' : '选择测试证据' }}</el-button></article></div><el-progress v-if="uploadingKind" :percentage="uploadProgress" /></section>
 
@@ -720,6 +794,7 @@ onMounted(async () => {
 .program-template-option-row .program-template-option-used { grid-column: 1; margin: 0; }
 .program-template-option-actions { display: flex; align-items: center; gap: 4px; }
 .program-template-option-empty { padding: 12px; color: var(--pdm-muted); font-size: 12px; text-align: center; }
+.program-template-option-row.is-type-edit { grid-template-columns: minmax(0,1.2fr) minmax(0,1fr) minmax(0,1fr) auto; }
 .program-template-flow { display: grid; grid-auto-flow: column; grid-auto-columns: minmax(0,1fr); gap: 8px; margin: 0; padding: 0; list-style: none; }
 .program-template-flow li { min-width: 0; display: grid; gap: 2px; border: 1px solid var(--pdm-border); border-left: 3px solid var(--pdm-border); border-radius: 6px; padding: 6px 9px; }
 .program-template-flow li.is-done { border-left-color: var(--pdm-green); }

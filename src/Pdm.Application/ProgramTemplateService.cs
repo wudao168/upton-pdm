@@ -20,7 +20,7 @@ public sealed class ProgramTemplateService(
         return await templates.ListMineAsync(actor, cancellationToken);
     }
 
-    /// <summary>程序模板维护选项（分类、厂商、平台）：有查看权限即可读取，用于上传/编辑时选择。</summary>
+    /// <summary>程序模板维护选项（模板类型、分类、厂商、平台）：有查看权限即可读取，用于上传/编辑时选择。</summary>
     public async Task<ProgramTemplateOptionCatalog> GetOptionCatalogAsync(string actor, UserRole role, CancellationToken cancellationToken)
     {
         await RequirePermissionAsync(actor, role, PermissionCodes.ProgramTemplateView, cancellationToken);
@@ -36,19 +36,48 @@ public sealed class ProgramTemplateService(
         var settings = await pdmRepository.GetSystemSettingsAsync(cancellationToken);
         await pdmRepository.UpdateSystemSettingsAsync(settings with { ProgramTemplateOptions = normalized }, cancellationToken);
         await AuditAsync(actor, "program-template.options.update", nameof(ProgramTemplateOptionCatalog), Guid.Empty,
-            $"分类{normalized.Categories.Count}项、厂商{normalized.Vendors.Count}项、平台{normalized.Platforms.Count}项", cancellationToken);
+            $"模板类型{normalized.Types?.Count ?? 0}项、分类{normalized.Categories.Count}项、厂商{normalized.Vendors.Count}项、平台{normalized.Platforms.Count}项", cancellationToken);
         return normalized;
+    }
+
+    /// <summary>审核检查清单：按维护的模板类型解析其检查清单组。</summary>
+    public async Task<IReadOnlyList<string>> GetChecklistAsync(string? assetTypeKey, CancellationToken cancellationToken)
+    {
+        var settings = await pdmRepository.GetSystemSettingsAsync(cancellationToken);
+        return ProgramTemplateChecklist.For(ProgramTemplateTypeCatalog.ChecklistKind(settings.ProgramTemplateOptions.Types, assetTypeKey));
     }
 
     private static ProgramTemplateOptionCatalog NormalizeOptionCatalog(ProgramTemplateOptionCatalog? catalog) => new(
         NormalizeOptionValues(catalog?.Categories, "分类"),
         NormalizeOptionValues(catalog?.Vendors, "厂商"),
         NormalizeOptionValues(catalog?.Platforms, "平台"),
-        (catalog?.DisabledAssetTypes ?? [])
-            .Where(value => Enum.TryParse<ProgramTemplateAssetType>(value?.Trim(), out _))
-            .Select(value => value.Trim())
-            .Distinct(StringComparer.OrdinalIgnoreCase)
-            .ToArray());
+        NormalizeOptionTypes(catalog?.Types));
+
+    private static IReadOnlyList<ProgramTemplateTypeOption> NormalizeOptionTypes(IReadOnlyList<ProgramTemplateTypeOption>? types)
+    {
+        var source = types is { Count: > 0 } ? types : ProgramTemplateTypeCatalog.Default;
+        var normalized = new List<ProgramTemplateTypeOption>();
+        var keys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var item in source)
+        {
+            var name = (item?.Name ?? string.Empty).Trim();
+            if (name.Length == 0) continue;
+            if (name.Length > 60) throw new PdmRuleException("模板类型名称不能超过60个字符。");
+            var prefix = (item!.CodePrefix ?? string.Empty).Trim().ToUpperInvariant();
+            if (prefix.Length == 0) throw new PdmRuleException($"模板类型“{name}”必须填写编号前缀。");
+            if (prefix.Length > 12 || !prefix.All(character => char.IsLetterOrDigit(character) || character == '-'))
+                throw new PdmRuleException($"模板类型“{name}”的编号前缀只能是字母、数字或短横线，长度不超过12。");
+            if (!Enum.IsDefined(item.ChecklistKind)) throw new PdmRuleException($"模板类型“{name}”的审核检查清单无效。");
+            var key = (item.Key ?? string.Empty).Trim();
+            if (key.Length > 40 || key.Any(character => !char.IsLetterOrDigit(character) && character != '-' && character != '_'))
+                throw new PdmRuleException($"模板类型“{name}”的存储标识无效。");
+            while (string.IsNullOrEmpty(key) || !keys.Add(key)) key = $"t{Guid.NewGuid():N}"[..12];
+            normalized.Add(new ProgramTemplateTypeOption(key, name, prefix, item.ChecklistKind));
+        }
+        if (normalized.Count == 0) throw new PdmRuleException("至少需要保留一个模板类型。");
+        if (normalized.Count > 50) throw new PdmRuleException("模板类型最多维护50项。");
+        return normalized;
+    }
 
     private static IReadOnlyList<string> NormalizeOptionValues(IReadOnlyList<string>? values, string label)
     {
@@ -86,14 +115,17 @@ public sealed class ProgramTemplateService(
     public async Task<ProgramTemplate> CreateAsync(CreateProgramTemplateCommand command, string actor, UserRole role, CancellationToken cancellationToken)
     {
         await RequirePermissionAsync(actor, role, PermissionCodes.ProgramTemplateSubmit, cancellationToken);
+        var settings = await pdmRepository.GetSystemSettingsAsync(cancellationToken);
+        var assetType = ProgramTemplateTypeCatalog.Find(settings.ProgramTemplateOptions.Types, command.AssetType)
+            ?? throw new PdmRuleException("模板类型不存在，请先在“选项维护”里添加该类型。");
         var now = timeProvider.GetUtcNow();
         var templateId = Guid.NewGuid();
         var revisionId = Guid.NewGuid();
         var revision = BuildRevision(templateId, revisionId, 1, 0, 0, 1, command, actor, now);
         var template = new ProgramTemplate(
             templateId,
-            await templates.ReserveCodeAsync(command.AssetType, cancellationToken),
-            command.AssetType,
+            await templates.ReserveCodeAsync(assetType.Key, assetType.CodePrefix, cancellationToken),
+            assetType.Key,
             TenantContext.CompanyId,
             null,
             null,
@@ -256,7 +288,8 @@ public sealed class ProgramTemplateService(
         var revision = await RequireEditableDraftAsync(revisionId, actor, role, cancellationToken);
         var template = await templates.FindAsync(revision.TemplateId, cancellationToken)
             ?? throw new PdmNotFoundException("程序模板不存在。");
-        ValidateSubmission(template.AssetType, revision);
+        var submissionSettings = await pdmRepository.GetSystemSettingsAsync(cancellationToken);
+        ValidateSubmission(ProgramTemplateTypeCatalog.ChecklistKind(submissionSettings.ProgramTemplateOptions.Types, template.AssetType), revision);
 
         var directory = await pdmRepository.GetOrganizationDirectoryAsync(cancellationToken);
         var primaryMembership = directory.Memberships.FirstOrDefault(item => item.IsPrimary && string.Equals(item.Username, actor, StringComparison.OrdinalIgnoreCase))
@@ -323,7 +356,8 @@ public sealed class ProgramTemplateService(
             if (!string.Equals(task.Assignee, actor, StringComparison.OrdinalIgnoreCase)) throw new UnauthorizedAccessException("该审核任务未分配给当前用户。");
             if (command.Decision == ProgramTemplateApprovalDecision.Approved)
             {
-                var required = ProgramTemplateChecklist.For(template.AssetType);
+                var decisionSettings = await pdmRepository.GetSystemSettingsAsync(cancellationToken);
+                var required = ProgramTemplateChecklist.For(ProgramTemplateTypeCatalog.ChecklistKind(decisionSettings.ProgramTemplateOptions.Types, template.AssetType));
                 if (required.Except(command.ChecklistItems, StringComparer.Ordinal).Any()) throw new PdmRuleException("必须完成全部标准化检查项后才能通过审核。");
             }
         }

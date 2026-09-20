@@ -19,7 +19,7 @@ public sealed record ProgramTemplateParameterInput(
     string? Description);
 
 public sealed record CreateProgramTemplateCommand(
-    ProgramTemplateAssetType AssetType,
+    string AssetType,
     string Name,
     string Category,
     string Description,
@@ -102,7 +102,7 @@ public interface IProgramTemplateStorage
 
 public interface IProgramTemplateRepository
 {
-    Task<string> ReserveCodeAsync(ProgramTemplateAssetType assetType, CancellationToken cancellationToken);
+    Task<string> ReserveCodeAsync(string assetTypeKey, string codePrefix, CancellationToken cancellationToken);
     Task<IReadOnlyList<ProgramTemplate>> ListPublishedAsync(CancellationToken cancellationToken);
     Task<IReadOnlyList<ProgramTemplate>> ListMineAsync(string actor, CancellationToken cancellationToken);
     Task<ProgramTemplate?> FindAsync(Guid templateId, CancellationToken cancellationToken);

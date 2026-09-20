@@ -92,7 +92,7 @@ public sealed record ProgramTemplateRevision(
 public sealed record ProgramTemplate(
     Guid Id,
     string Code,
-    ProgramTemplateAssetType AssetType,
+    string AssetType,
     Guid? OriginCompanyId,
     string? OriginCompanyName,
     Guid? CurrentPublishedRevisionId,
@@ -100,6 +100,37 @@ public sealed record ProgramTemplate(
     string CreatedBy,
     DateTimeOffset CreatedAt,
     IReadOnlyList<ProgramTemplateRevision> Revisions);
+
+/// <summary>
+/// 程序模板类型：管理员在“选项维护”里新增/改名/排序，Key 为图档存储值，编号前缀决定模板编号，检查清单组决定审核检查项。
+/// </summary>
+public sealed record ProgramTemplateTypeOption(
+    string Key,
+    string Name,
+    string CodePrefix,
+    ProgramTemplateAssetType ChecklistKind);
+
+public static class ProgramTemplateTypeCatalog
+{
+    public static IReadOnlyList<ProgramTemplateTypeOption> Default { get; } =
+    [
+        new("PlcFunctionBlock", "PLC功能块", "PT-FB", ProgramTemplateAssetType.PlcFunctionBlock),
+        new("PlcProgram", "PLC整包模板", "PT-PLC", ProgramTemplateAssetType.PlcProgram),
+        new("HmiTemplate", "HMI模板", "PT-HMI", ProgramTemplateAssetType.HmiTemplate)
+    ];
+
+    public static ProgramTemplateTypeOption? Find(IReadOnlyList<ProgramTemplateTypeOption>? types, string? key)
+    {
+        var normalized = key?.Trim();
+        if (string.IsNullOrEmpty(normalized)) return null;
+        return (types is { Count: > 0 } ? types : Default)
+            .FirstOrDefault(item => string.Equals(item.Key?.Trim(), normalized, StringComparison.OrdinalIgnoreCase));
+    }
+
+    /// <summary>审核检查清单组：未知类型（历史数据或已删除类型）按 PLC 整包模板处理。</summary>
+    public static ProgramTemplateAssetType ChecklistKind(IReadOnlyList<ProgramTemplateTypeOption>? types, string? key) =>
+        Find(types, key)?.ChecklistKind ?? ProgramTemplateAssetType.PlcProgram;
+}
 
 public sealed record ProgramTemplateApprovalTask(
     Guid Id,
@@ -122,9 +153,9 @@ public sealed record ProgramTemplateOptionCatalog(
     IReadOnlyList<string> Categories,
     IReadOnlyList<string> Vendors,
     IReadOnlyList<string> Platforms,
-    IReadOnlyList<string>? DisabledAssetTypes = null)
+    IReadOnlyList<ProgramTemplateTypeOption>? Types = null)
 {
-    public static ProgramTemplateOptionCatalog Empty { get; } = new([], [], [], []);
+    public static ProgramTemplateOptionCatalog Empty { get; } = new([], [], [], ProgramTemplateTypeCatalog.Default);
 }
 
 public static class ProgramTemplateChecklist

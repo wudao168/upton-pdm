@@ -14,7 +14,7 @@ public sealed record ProgramTemplateParameterRequest(
     string? Description);
 
 public sealed record CreateProgramTemplateRequest(
-    [property: JsonConverter(typeof(JsonStringEnumConverter))] ProgramTemplateAssetType AssetType,
+    string AssetType,
     string Name,
     string Category,
     string Description,
