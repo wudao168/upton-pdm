@@ -121,9 +121,10 @@ public sealed record ProgramTemplateApprovalTask(
 public sealed record ProgramTemplateOptionCatalog(
     IReadOnlyList<string> Categories,
     IReadOnlyList<string> Vendors,
-    IReadOnlyList<string> Platforms)
+    IReadOnlyList<string> Platforms,
+    IReadOnlyList<string>? DisabledAssetTypes = null)
 {
-    public static ProgramTemplateOptionCatalog Empty { get; } = new([], [], []);
+    public static ProgramTemplateOptionCatalog Empty { get; } = new([], [], [], []);
 }
 
 public static class ProgramTemplateChecklist

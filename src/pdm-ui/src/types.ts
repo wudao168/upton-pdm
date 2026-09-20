@@ -2272,6 +2272,7 @@ export interface ProgramTemplateOptionCatalog {
   categories: string[]
   vendors: string[]
   platforms: string[]
+  disabledAssetTypes?: string[] | null
 }
 
 export interface ProgramTemplateParameterInput {

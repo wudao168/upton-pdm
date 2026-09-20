@@ -57,6 +57,8 @@ const templates = ref<ProgramTemplate[]>([])
 const tasks = ref<ProgramTemplateTask[]>([])
 const search = ref('')
 const typeFilter = ref<ProgramTemplateAssetType | ''>('')
+const categoryFilter = ref('')
+const platformFilter = ref('')
 const vendorFilter = ref('')
 const detailOpen = ref(false)
 const editorOpen = ref(false)
@@ -73,6 +75,17 @@ const optionDialogOpen = ref(false)
 const optionSaving = ref(false)
 const optionCatalog = ref<ProgramTemplateOptionCatalog>({ categories: [], vendors: [], platforms: [] })
 const optionDraft = ref<ProgramTemplateOptionCatalog>({ categories: [], vendors: [], platforms: [] })
+type OptionSection = 'AssetType' | 'Category' | 'Vendor' | 'Platform'
+const optionSections: { value: OptionSection; label: string }[] = [
+  { value: 'AssetType', label: '模板类型' },
+  { value: 'Category', label: '分类' },
+  { value: 'Vendor', label: '厂商' },
+  { value: 'Platform', label: '平台' },
+]
+const optionSection = ref<OptionSection>('AssetType')
+const optionNewValue = ref('')
+const optionEditingIndex = ref(-1)
+const optionEditingValue = ref('')
 const packageInput = ref<HTMLInputElement | null>(null)
 const evidenceInput = ref<HTMLInputElement | null>(null)
 
@@ -125,6 +138,8 @@ const rows = computed<ProgramTemplateListRow[]>(() => templates.value.map(templa
   const text = `${row.template.code} ${row.revision!.name} ${row.revision!.description} ${row.revision!.vendor} ${row.revision!.platform} ${row.revision!.tags.join(' ')}`.toLocaleLowerCase('zh-CN')
   return (!search.value.trim() || text.includes(search.value.trim().toLocaleLowerCase('zh-CN')))
     && (!typeFilter.value || row.template.assetType === typeFilter.value)
+    && (!categoryFilter.value || row.revision!.category === categoryFilter.value)
+    && (!platformFilter.value || row.revision!.platform === platformFilter.value)
     && (!vendorFilter.value || row.revision!.vendor === vendorFilter.value)
 }))
 // 选项来源：管理员在“选项维护”里维护的值 + 历史版本已使用的值（保证老数据仍可选）。
@@ -140,6 +155,30 @@ const platforms = computed(() => mergeOptions(optionCatalog.value.platforms, use
 const categoryOptions = computed(() => mergeOptions(optionCatalog.value.categories, usedValues(item => item.category), form.category))
 const vendorOptions = computed(() => mergeOptions(optionCatalog.value.vendors, usedValues(item => item.vendor), form.vendor))
 const platformOptions = computed(() => mergeOptions(optionCatalog.value.platforms, usedValues(item => item.platform), form.platform))
+const assetTypeOptions = computed(() => {
+  const disabled = optionCatalog.value.disabledAssetTypes ?? []
+  return (Object.keys(assetLabels) as ProgramTemplateAssetType[])
+    .filter(value => !disabled.includes(value) || value === form.assetType)
+})
+const optionPlaceholders: Record<Exclude<OptionSection, 'AssetType'>, string> = {
+  Category: '输入分类名称',
+  Vendor: '输入厂商名称',
+  Platform: '输入平台名称',
+}
+const optionPlaceholder = computed(() => optionPlaceholders[optionSection.value as Exclude<OptionSection, 'AssetType'>] ?? '输入名称')
+const disabledAssetTypes = computed(() => optionDraft.value.disabledAssetTypes ?? [])
+const currentOptionValues = computed(() => {
+  if (optionSection.value === 'Category') return optionDraft.value.categories
+  if (optionSection.value === 'Vendor') return optionDraft.value.vendors
+  if (optionSection.value === 'Platform') return optionDraft.value.platforms
+  return []
+})
+const currentUsedValues = computed(() => {
+  if (optionSection.value === 'Category') return categories.value
+  if (optionSection.value === 'Vendor') return vendors.value
+  if (optionSection.value === 'Platform') return platforms.value
+  return []
+})
 const activeRevision = computed(() => selected.value?.revisions.find(item => item.id === activeRevisionId.value)
   ?? selected.value?.revisions.find(item => item.id === selected.value?.currentPublishedRevisionId)
   ?? (selected.value ? latestRevision(selected.value) : undefined))
@@ -217,8 +256,59 @@ async function openOptionMaintenance() {
     categories: [...optionCatalog.value.categories],
     vendors: [...optionCatalog.value.vendors],
     platforms: [...optionCatalog.value.platforms],
+    disabledAssetTypes: [...(optionCatalog.value.disabledAssetTypes ?? [])],
   }
+  optionSection.value = 'AssetType'
+  optionNewValue.value = ''
+  cancelOptionEdit()
   optionDialogOpen.value = true
+}
+
+function addOption() {
+  const value = optionNewValue.value.trim()
+  if (!value || currentOptionValues.value.includes(value)) return
+  currentOptionValues.value.push(value)
+  optionNewValue.value = ''
+}
+
+function removeOption(index: number) {
+  currentOptionValues.value.splice(index, 1)
+  cancelOptionEdit()
+}
+
+function moveOption(index: number, direction: -1 | 1) {
+  const values = currentOptionValues.value
+  const target = index + direction
+  if (target < 0 || target >= values.length) return
+  const [moved] = values.splice(index, 1)
+  values.splice(target, 0, moved!)
+  cancelOptionEdit()
+}
+
+function startOptionEdit(index: number) {
+  optionEditingIndex.value = index
+  optionEditingValue.value = currentOptionValues.value[index] ?? ''
+}
+
+function commitOptionEdit() {
+  const index = optionEditingIndex.value
+  const value = optionEditingValue.value.trim()
+  if (index < 0) return
+  if (!value) { cancelOptionEdit(); return }
+  currentOptionValues.value.splice(index, 1, value)
+  cancelOptionEdit()
+}
+
+function cancelOptionEdit() {
+  optionEditingIndex.value = -1
+  optionEditingValue.value = ''
+}
+
+function toggleAssetType(value: ProgramTemplateAssetType) {
+  const disabled = optionDraft.value.disabledAssetTypes ?? []
+  optionDraft.value.disabledAssetTypes = disabled.includes(value)
+    ? disabled.filter(item => item !== value)
+    : [...disabled, value]
 }
 
 async function saveOptionMaintenance() {
@@ -487,10 +577,12 @@ onMounted(async () => {
   <section class="program-template-library" aria-label="程序模板库">
     <section class="pdm-panel program-template-panel">
       <div class="program-template-toolbar">
-        <el-select v-model="typeFilter" clearable placeholder="全部类型" aria-label="模板类型"><el-option v-for="(label, value) in assetLabels" :key="value" :label="label" :value="value" /></el-select>
+        <el-select v-model="typeFilter" clearable filterable placeholder="全部类型" aria-label="模板类型"><el-option v-for="(label, value) in assetLabels" :key="value" :label="label" :value="value" /></el-select>
+        <el-select v-model="categoryFilter" clearable filterable placeholder="全部分类" aria-label="模板分类"><el-option v-for="item in categories" :key="item" :label="item" :value="item" /></el-select>
+        <el-select v-model="platformFilter" clearable filterable placeholder="全部平台" aria-label="模板平台"><el-option v-for="item in platforms" :key="item" :label="item" :value="item" /></el-select>
         <el-select v-model="vendorFilter" clearable filterable placeholder="全部厂商" aria-label="模板厂商"><el-option v-for="vendor in vendors" :key="vendor" :label="vendor" :value="vendor" /></el-select>
         <el-input v-model="search" clearable placeholder="搜索编号、名称、平台或标签" aria-label="搜索程序模板" />
-        <el-button v-if="canSubmit" type="primary" :icon="Plus" @click="openCreate">上传程序模板</el-button>
+        <el-button v-if="canSubmit" class="program-template-upload" type="primary" :icon="Plus" @click="openCreate">上传程序模板</el-button>
         <el-button v-if="canManageOptions" @click="openOptionMaintenance">选项维护</el-button>
         <el-button :icon="RefreshCw" :loading="loading" @click="load">刷新</el-button>
         <span>共 {{ rows.length }} 项</span>
@@ -552,28 +644,48 @@ onMounted(async () => {
       </template>
     </el-drawer>
 
-    <el-dialog v-model="optionDialogOpen" title="程序模板选项维护" width="640px">
-      <p class="program-template-option-hint">分类、厂商、平台在这里维护好后，上传与编辑草稿时从这些值中选择，不再允许临时输入。</p>
-      <el-form label-position="top">
-        <el-form-item label="分类">
-          <el-select v-model="optionDraft.categories" multiple filterable allow-create default-first-option placeholder="输入后回车添加分类"><el-option v-for="item in optionDraft.categories" :key="item" :label="item" :value="item" /></el-select>
-          <small class="program-template-option-used">历史版本已使用：{{ categories.join('、') || '—' }}</small>
-        </el-form-item>
-        <el-form-item label="厂商">
-          <el-select v-model="optionDraft.vendors" multiple filterable allow-create default-first-option placeholder="输入后回车添加厂商"><el-option v-for="item in optionDraft.vendors" :key="item" :label="item" :value="item" /></el-select>
-          <small class="program-template-option-used">历史版本已使用：{{ vendors.join('、') || '—' }}</small>
-        </el-form-item>
-        <el-form-item label="平台">
-          <el-select v-model="optionDraft.platforms" multiple filterable allow-create default-first-option placeholder="输入后回车添加平台"><el-option v-for="item in optionDraft.platforms" :key="item" :label="item" :value="item" /></el-select>
-          <small class="program-template-option-used">历史版本已使用：{{ platforms.join('、') || '—' }}</small>
-        </el-form-item>
-      </el-form>
+    <el-dialog v-model="optionDialogOpen" title="程序模板选项维护" width="min(720px, calc(100vw - 32px))">
+      <p class="program-template-option-hint">模板类型、分类、厂商、平台在这里维护好后，上传与编辑草稿时从这些值中选择，不再允许临时输入。</p>
+      <el-radio-group v-model="optionSection" class="program-template-option-tabs">
+        <el-radio-button v-for="section in optionSections" :key="section.value" :label="section.value">{{ section.label }}</el-radio-button>
+      </el-radio-group>
+      <div class="program-template-option-list">
+        <template v-if="optionSection === 'AssetType'">
+          <div v-for="(label, value) in assetLabels" :key="value" class="program-template-option-row">
+            <strong>{{ label }}</strong>
+            <small class="program-template-option-used">系统内置类型 · {{ value }}</small>
+            <el-switch :model-value="!disabledAssetTypes.includes(value)" active-text="可选" inactive-text="停用" @change="toggleAssetType(value)" />
+          </div>
+        </template>
+        <template v-else>
+          <div v-if="!currentOptionValues.length" class="program-template-option-empty">暂无维护项，请在下方新增。</div>
+          <div v-for="(item, index) in currentOptionValues" :key="item" class="program-template-option-row">
+            <template v-if="optionEditingIndex === index">
+              <el-input v-model="optionEditingValue" size="small" :placeholder="optionPlaceholder" @keyup.enter="commitOptionEdit" />
+              <div class="program-template-option-actions"><el-button link type="primary" @click="commitOptionEdit">确定</el-button><el-button link @click="cancelOptionEdit">取消</el-button></div>
+            </template>
+            <template v-else>
+              <strong>{{ item }}</strong>
+              <div class="program-template-option-actions">
+                <el-button link :disabled="index === 0" @click="moveOption(index, -1)">上移</el-button>
+                <el-button link :disabled="index === currentOptionValues.length - 1" @click="moveOption(index, 1)">下移</el-button>
+                <el-button link @click="startOptionEdit(index)">编辑</el-button>
+                <el-button link type="danger" @click="removeOption(index)">删除</el-button>
+              </div>
+            </template>
+          </div>
+          <div class="program-template-option-row is-new">
+            <el-input v-model="optionNewValue" size="small" :placeholder="optionPlaceholder" @keyup.enter="addOption" />
+            <div class="program-template-option-actions"><el-button type="primary" size="small" :disabled="!optionNewValue.trim()" @click="addOption">新增</el-button></div>
+          </div>
+          <small class="program-template-option-used">历史版本已使用：{{ currentUsedValues.join('、') || '—' }}</small>
+        </template>
+      </div>
       <template #footer><el-button @click="optionDialogOpen = false">取消</el-button><el-button type="primary" :loading="optionSaving" @click="saveOptionMaintenance">保存</el-button></template>
     </el-dialog>
-
     <el-drawer v-model="editorOpen" class="program-template-editor" :title="editingRevision ? `编辑 ${editingRevision.version} 草稿` : '上传程序模板'" size="min(1040px, 96vw)" destroy-on-close>
       <el-form label-position="top" class="program-template-form">
-        <section><h3>1. 基本信息</h3><div class="program-template-form-grid"><el-form-item label="模板类型"><el-select v-model="form.assetType" :disabled="!!editingRevision"><el-option v-for="(label, value) in assetLabels" :key="value" :label="label" :value="value" /></el-select></el-form-item><el-form-item label="模板名称"><el-input v-model="form.name" /></el-form-item><el-form-item label="分类"><el-select v-model="form.category" filterable clearable placeholder="从维护好的分类中选择"><el-option v-for="item in categoryOptions" :key="item" :label="item" :value="item" /></el-select></el-form-item><el-form-item label="厂商"><el-select v-model="form.vendor" filterable clearable placeholder="从维护好的厂商中选择"><el-option v-for="item in vendorOptions" :key="item" :label="item" :value="item" /></el-select></el-form-item><el-form-item label="平台"><el-select v-model="form.platform" filterable clearable placeholder="从维护好的平台中选择"><el-option v-for="item in platformOptions" :key="item" :label="item" :value="item" /></el-select></el-form-item><el-form-item label="软件版本"><el-input v-model="form.softwareVersion" /></el-form-item><el-form-item label="适用系列"><el-input v-model="form.applicableSeries" /></el-form-item><el-form-item label="标签"><el-input v-model="tagText" placeholder="多个标签使用逗号分隔" /></el-form-item><el-form-item class="is-half" label="功能说明"><el-input v-model="form.description" type="textarea" :rows="2" /></el-form-item><el-form-item class="is-half" label="版本说明"><el-input v-model="form.changeNote" type="textarea" :rows="2" /></el-form-item></div></section>
+        <section><h3>1. 基本信息</h3><div class="program-template-form-grid"><el-form-item label="模板类型"><el-select v-model="form.assetType" :disabled="!!editingRevision"><el-option v-for="value in assetTypeOptions" :key="value" :label="assetLabels[value]" :value="value" /></el-select></el-form-item><el-form-item label="模板名称"><el-input v-model="form.name" /></el-form-item><el-form-item label="分类"><el-select v-model="form.category" filterable clearable placeholder="从维护好的分类中选择"><el-option v-for="item in categoryOptions" :key="item" :label="item" :value="item" /></el-select></el-form-item><el-form-item label="厂商"><el-select v-model="form.vendor" filterable clearable placeholder="从维护好的厂商中选择"><el-option v-for="item in vendorOptions" :key="item" :label="item" :value="item" /></el-select></el-form-item><el-form-item label="平台"><el-select v-model="form.platform" filterable clearable placeholder="从维护好的平台中选择"><el-option v-for="item in platformOptions" :key="item" :label="item" :value="item" /></el-select></el-form-item><el-form-item label="软件版本"><el-input v-model="form.softwareVersion" /></el-form-item><el-form-item label="适用系列"><el-input v-model="form.applicableSeries" /></el-form-item><el-form-item label="标签"><el-input v-model="tagText" placeholder="多个标签使用逗号分隔" /></el-form-item><el-form-item class="is-half" label="功能说明"><el-input v-model="form.description" type="textarea" :rows="2" /></el-form-item><el-form-item class="is-half" label="版本说明"><el-input v-model="form.changeNote" type="textarea" :rows="2" /></el-form-item></div></section>
 
         <section><h3>2. 受控文件</h3><div class="program-template-upload-grid"><article><input ref="packageInput" type="file" accept=".zip,.rar" hidden @change="handleFile('Package', $event)" /><Upload :size="22" /><strong>ZIP/RAR程序包</strong><span>{{ editingRevision?.packageFileName || '支持 ZIP、RAR' }}</span><el-button :loading="uploadingKind === 'Package'" :disabled="uploadingKind !== null" @click="packageInput?.click()">{{ editingRevision?.packageFileName ? '重新上传' : '选择程序包' }}</el-button></article><article><input ref="evidenceInput" type="file" accept=".pdf,.doc,.docx,.xls,.xlsx,.png,.jpg,.jpeg" hidden @change="handleFile('TestEvidence', $event)" /><Upload :size="22" /><strong>离线测试证据</strong><span>{{ editingRevision?.evidenceFileName || 'PDF、Word、Excel、PNG或JPG' }}</span><el-button :loading="uploadingKind === 'TestEvidence'" :disabled="uploadingKind !== null" @click="evidenceInput?.click()">{{ editingRevision?.evidenceFileName ? '重新上传' : '选择测试证据' }}</el-button></article></div><el-progress v-if="uploadingKind" :percentage="uploadProgress" /></section>
 
@@ -588,7 +700,7 @@ onMounted(async () => {
 
 <style scoped>
 .program-template-library { min-height: 0; height: 100%; display: flex; flex-direction: column; gap: 12px; }
-.program-template-panel { min-height: 0; flex: 1; display: flex; flex-direction: column; overflow: hidden; padding: 0; }.program-template-toolbar { min-height: 50px; display: grid; grid-template-columns: auto 140px 150px minmax(220px,1fr) auto auto auto; align-items: center; gap: 9px; padding: 8px 12px; border-bottom: 1px solid var(--pdm-border); }.program-template-toolbar > span { color: var(--pdm-muted); font-size: 10px; white-space: nowrap; }
+.program-template-panel { min-height: 0; flex: 1; display: flex; flex-direction: column; overflow: hidden; padding: 0; }.program-template-toolbar { min-height: 50px; display: grid; grid-template-columns: 128px 128px 128px 128px minmax(160px,1fr) 150px auto auto auto; align-items: center; gap: 9px; padding: 8px 12px; border-bottom: 1px solid var(--pdm-border); }.program-template-toolbar > span { color: var(--pdm-muted); font-size: 10px; white-space: nowrap; }.program-template-toolbar .program-template-upload { width: 150px; }
 .program-template-panel :deep(.el-table__body),.program-template-panel :deep(.el-table__body .cell),.program-template-panel :deep(.el-table__body code),.program-template-panel :deep(.el-table__body .el-tag),.program-template-panel :deep(.el-table__body .el-button) { font-size: 12px; }.program-template-name,.program-template-description,.program-template-cell-note { min-width: 0; display: block; overflow: hidden; font-size: 12px; line-height: 20px; text-overflow: ellipsis; white-space: nowrap; }.program-template-description,.program-template-cell-note { color: var(--pdm-muted); }.program-template-vendor { min-width: 0; display: flex; align-items: center; gap: 5px; overflow: hidden; white-space: nowrap; }.program-template-vendor strong { flex: 0 0 auto; font-size: 12px; }.program-template-vendor .program-template-cell-note { display: inline; }
 .program-template-detail-title { min-width: 0; display: flex; align-items: center; gap: 10px; }.program-template-detail-title div { min-width: 0; flex: 1; }.program-template-detail-title h2 { margin: 0; overflow: hidden; font-size: 16px; text-overflow: ellipsis; white-space: nowrap; }.program-template-detail-title p { margin: 3px 0 0; color: var(--pdm-muted); font-size: 10px; }
 .program-template-section { padding: 2px 0 18px; }.program-template-section + .program-template-section { border-top: 1px solid var(--pdm-border-soft); padding-top: 16px; }.program-template-section h3 { display: flex; align-items: center; gap: 8px; margin: 0 0 10px; color: var(--pdm-muted); font-size: 11px; font-weight: 600; }.program-template-section h3::after { height: 1px; flex: 1; background: var(--pdm-border-soft); content: ''; }.program-template-section > p { margin: 0; color: var(--pdm-text-soft); line-height: 1.4; }
@@ -600,6 +712,14 @@ onMounted(async () => {
 .program-template-detail-actions { width: 100%; display: flex; justify-content: flex-end; gap: 8px; }
 .program-template-option-hint { margin: 0 0 10px; color: var(--pdm-muted); font-size: 12px; }
 .program-template-option-used { display: block; margin-top: 4px; color: var(--pdm-muted); font-size: 11px; }
+.program-template-option-tabs { margin-bottom: 10px; }
+.program-template-option-list { display: grid; gap: 6px; max-height: 52vh; overflow: auto; }
+.program-template-option-row { min-height: 34px; display: grid; grid-template-columns: minmax(0,1fr) auto; align-items: center; gap: 8px; border: 1px solid var(--pdm-border); border-radius: 6px; padding: 5px 9px; }
+.program-template-option-row strong { min-width: 0; overflow: hidden; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.program-template-option-row.is-new { border-style: dashed; }
+.program-template-option-row .program-template-option-used { grid-column: 1; margin: 0; }
+.program-template-option-actions { display: flex; align-items: center; gap: 4px; }
+.program-template-option-empty { padding: 12px; color: var(--pdm-muted); font-size: 12px; text-align: center; }
 .program-template-flow { display: grid; grid-auto-flow: column; grid-auto-columns: minmax(0,1fr); gap: 8px; margin: 0; padding: 0; list-style: none; }
 .program-template-flow li { min-width: 0; display: grid; gap: 2px; border: 1px solid var(--pdm-border); border-left: 3px solid var(--pdm-border); border-radius: 6px; padding: 6px 9px; }
 .program-template-flow li.is-done { border-left-color: var(--pdm-green); }
@@ -638,6 +758,6 @@ onMounted(async () => {
 .program-template-form :deep(.el-input__inner),.program-template-form :deep(.el-select__selected-item),.program-template-form :deep(.el-button) { font-size: 12px; }
 .program-template-upload-grid { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 8px; }.program-template-upload-grid article { min-height: 70px; display: grid; grid-template-columns: auto 1fr auto; grid-template-rows: auto auto; align-items: center; gap: 3px 8px; padding: 7px 10px; border: 1px dashed #adc2dc; border-radius: 8px; background: #f8fbff; }.program-template-upload-grid article svg { grid-row: 1/3; color: var(--pdm-blue); }.program-template-upload-grid article span { color: var(--pdm-muted); font-size: 12px; }.program-template-upload-grid article .el-button { grid-column: 3; grid-row: 1/3; }
 .program-template-interface-heading { display: flex; align-items: center; justify-content: space-between; gap: 10px; }.program-template-interface-heading h3 { margin-bottom: 2px; }.program-template-interface-heading p { margin: 0; color: var(--pdm-muted); font-size: 12px; }.program-template-interface-layout { display: grid; grid-template-columns: minmax(570px,1.15fr) minmax(360px,.85fr); gap: 10px; margin-top: 7px; }.program-template-parameter-editor { min-width: 0; display: grid; align-content: start; gap: 5px; }.program-template-parameter-row { display: grid; grid-template-columns: 76px minmax(90px,1fr) 90px 76px minmax(110px,1fr) 86px; grid-template-areas: "direction name type default description actions"; gap: 4px; padding: 4px; border: 1px solid var(--pdm-border-soft); border-radius: 7px; background: #fbfdff; }.program-template-parameter-row>*:nth-child(1){grid-area:direction}.program-template-parameter-row>*:nth-child(2){grid-area:name}.program-template-parameter-row>*:nth-child(3){grid-area:type}.program-template-parameter-row>*:nth-child(4){grid-area:default}.program-template-parameter-row>*:nth-child(5){grid-area:description}.program-template-parameter-row>*:nth-child(6){grid-area:actions;align-self:center}.program-template-parameter-row :deep(.el-button-group){display:flex;flex-wrap:nowrap}.program-template-parameter-row :deep(.el-button-group .el-button){width:28px;float:none;margin-left:0;padding:0}.program-template-live-preview { align-self: start; overflow: hidden; border: 1px solid var(--pdm-border); border-radius: 8px; background: #fbfdff; padding: 4px; }.program-template-live-preview :deep(.program-block-diagram){min-width:0}.program-template-version-hint { margin: 0; color: var(--pdm-muted); font-size: 10px; }
-@media(max-width:1000px){.program-template-toolbar{grid-template-columns:repeat(2,minmax(0,1fr))}.program-template-toolbar .el-input{grid-column:1/-1}.program-template-interface-layout{grid-template-columns:1fr}.program-template-form-grid{grid-template-columns:repeat(4,minmax(0,1fr))}.program-template-form-grid>*{grid-column:span 2}.program-template-form-grid .is-half{grid-column:span 2}.program-template-form-grid .is-wide{grid-column:1/-1}}
+@media(max-width:1000px){.program-template-toolbar{grid-template-columns:repeat(2,minmax(0,1fr))}.program-template-toolbar .el-select{width:100%}.program-template-toolbar .el-input{grid-column:1/-1}.program-template-interface-layout{grid-template-columns:1fr}.program-template-form-grid{grid-template-columns:repeat(4,minmax(0,1fr))}.program-template-form-grid>*{grid-column:span 2}.program-template-form-grid .is-half{grid-column:span 2}.program-template-form-grid .is-wide{grid-column:1/-1}}
 @media(max-width:680px){.program-parameter-groups,.program-template-upload-grid,.program-template-form-grid{grid-template-columns:1fr}.program-template-form-grid>*,.program-template-form-grid .is-half,.program-template-form-grid .is-wide{grid-column:auto}.program-template-properties{grid-template-columns:1fr}.program-template-properties .is-wide{grid-column:auto}.program-template-parameter-row{grid-template-columns:84px minmax(120px,1fr) 90px auto;grid-template-areas:"direction name type actions" "default description description actions"}.program-template-history button{grid-template-columns:65px 75px 80px}.program-template-history small{display:none}}
 </style>

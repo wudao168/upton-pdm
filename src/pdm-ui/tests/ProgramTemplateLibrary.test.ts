@@ -226,20 +226,32 @@ describe('ProgramTemplateLibrary', () => {
     expect(wrapper.findAll('.table-column-label').map(column => column.text())).toContain('提交人')
     expect((wrapper.vm as unknown as { categoryOptions: string[] }).categoryOptions).toEqual(['控制'])
 
-    api.saveProgramTemplateOptions.mockResolvedValue({ categories: ['控制', '新分类'], vendors: ['Siemens'], platforms: ['TIA Portal'] })
+    api.saveProgramTemplateOptions.mockResolvedValue({ categories: ['控制', '新分类'], vendors: ['Siemens'], platforms: ['TIA Portal'], disabledAssetTypes: [] })
     const vm = wrapper.vm as unknown as {
       openOptionMaintenance: () => void
       saveOptionMaintenance: () => Promise<void>
-      optionDraft: { categories: string[] }
+      optionDraft: { categories: string[]; disabledAssetTypes: string[] }
       optionDialogOpen: boolean
       categoryOptions: string[]
+      optionSection: string
+      optionNewValue: string
+      addOption: () => void
+      removeOption: (index: number) => void
     }
     vm.openOptionMaintenance()
     expect(vm.optionDialogOpen).toBe(true)
-    vm.optionDraft.categories.push('新分类')
+    expect(vm.optionSection).toBe('AssetType')
+    vm.optionSection = 'Category'
+    vm.optionNewValue = '新分类'
+    vm.addOption()
+    expect(vm.optionDraft.categories).toEqual(['控制', '新分类'])
+    vm.removeOption(0)
+    expect(vm.optionDraft.categories).toEqual(['新分类'])
+    vm.optionNewValue = '控制'
+    vm.addOption()
     await vm.saveOptionMaintenance()
 
-    expect(api.saveProgramTemplateOptions).toHaveBeenCalledWith({ categories: ['控制', '新分类'], vendors: ['Siemens'], platforms: ['TIA Portal'] }, 'token')
+    expect(api.saveProgramTemplateOptions).toHaveBeenCalledWith({ categories: ['新分类', '控制'], vendors: ['Siemens'], platforms: ['TIA Portal'], disabledAssetTypes: [] }, 'token')
     expect(vm.categoryOptions).toEqual(['控制', '新分类'])
     expect(vm.optionDialogOpen).toBe(false)
   })

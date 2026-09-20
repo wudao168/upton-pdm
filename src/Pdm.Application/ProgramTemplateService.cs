@@ -43,7 +43,12 @@ public sealed class ProgramTemplateService(
     private static ProgramTemplateOptionCatalog NormalizeOptionCatalog(ProgramTemplateOptionCatalog? catalog) => new(
         NormalizeOptionValues(catalog?.Categories, "分类"),
         NormalizeOptionValues(catalog?.Vendors, "厂商"),
-        NormalizeOptionValues(catalog?.Platforms, "平台"));
+        NormalizeOptionValues(catalog?.Platforms, "平台"),
+        (catalog?.DisabledAssetTypes ?? [])
+            .Where(value => Enum.TryParse<ProgramTemplateAssetType>(value?.Trim(), out _))
+            .Select(value => value.Trim())
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray());
 
     private static IReadOnlyList<string> NormalizeOptionValues(IReadOnlyList<string>? values, string label)
     {
