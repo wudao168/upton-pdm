@@ -308,7 +308,7 @@ describe('PLM client workspace', () => {
     const wrapper = mount(App, { attachTo: document.body, global: { plugins: [ElementPlus] } })
     try {
       await login(wrapper, false, 'admin')
-      await buttonByText(wrapper, '系统管理').trigger('click')
+      await buttonByText(wrapper, '系统设置').trigger('click')
       await flushPromises()
       const tabs = wrapper.get('.pdm-admin-tabs').text()
       expect(tabs).not.toContain('项目计划模板')
@@ -814,7 +814,7 @@ describe('PLM client workspace', () => {
     wrapper.unmount()
   })
 
-  it('moves Windows client startup and workspace settings under system management', async () => {
+  it('把 Windows 客户端启动与工作区设置归入个人设置（系统设置里不再有客户端设置）', async () => {
     const postMessage = vi.fn()
     Object.defineProperty(window, 'chrome', {
       configurable: true,
@@ -823,14 +823,29 @@ describe('PLM client workspace', () => {
     const wrapper = mount(App, { attachTo: document.body, global: { plugins: [ElementPlus] } })
     await login(wrapper, false)
 
-    expect(wrapper.findAll('.pdm-sidebar__footer button').map(button => button.text())).toEqual(['V2026.09.12.1234', '系统管理'])
+    expect(wrapper.findAll('.pdm-sidebar__footer button').map(button => button.text())).toEqual(['V2026.09.12.1234', '系统设置'])
     expect(wrapper.get('.pdm-sidebar__version').text()).toBe('V2026.09.12.1234')
     window.dispatchEvent(new CustomEvent('pdm-client-version', { detail: { version: '2026.09.12.1200-desktop-client' } }))
     await wrapper.vm.$nextTick()
     expect(wrapper.get('.pdm-sidebar__version').text()).toBe('V2026.09.12.1234')
     expect(wrapper.get('.pdm-sidebar__version').attributes('title')).toBe('版本 2026.09.12.1234-version-display，点击查看详情')
-    await buttonByText(wrapper, '系统管理').trigger('click')
-    expect(buttonByText(wrapper, '客户端设置')).toBeDefined()
+    await buttonByText(wrapper, '系统设置').trigger('click')
+    expect(wrapper.findAll('button').some(button => button.text().includes('客户端设置'))).toBe(false)
+
+    // 个人设置（右上角用户名）里的“客户端设置”页签承载这些本机项。
+    await wrapper.get('.pdm-user-profile-trigger').trigger('click')
+    await flushPromises()
+    // 个人设置对话框 append-to-body，页签要查 document。
+    expect([...document.querySelectorAll('.el-tabs__item')].map(item => item.textContent ?? '')).toContain('客户端设置')
+    const clickDocumentButton = async (label: string) => {
+      const button = [...document.querySelectorAll<HTMLButtonElement>('button')].find(item => item.textContent?.includes(label))
+      if (!button) throw new Error(`Button not found in document: ${label}`)
+      button.click()
+      await flushPromises()
+    }
+    ;[...document.querySelectorAll<HTMLElement>('.el-tabs__item')]
+      .find(item => item.textContent?.includes('客户端设置'))!.click()
+    await flushPromises()
     expect(postMessage).toHaveBeenCalledWith({ type: 'desktop-settings-request', payload: undefined })
     expect(postMessage).toHaveBeenCalledWith({ type: 'workspace-maintenance-request', payload: undefined })
 
@@ -843,28 +858,50 @@ describe('PLM client workspace', () => {
       },
     }))
     await flushPromises()
-    expect((wrapper.get('input[aria-label="PLM受控工作区"]').element as HTMLInputElement).value).toContain('UPTON PDM\\Workspace')
+    expect(document.querySelector<HTMLInputElement>('input[aria-label="PLM受控工作区"]')!.value).toContain('UPTON PDM\\Workspace')
     window.dispatchEvent(new CustomEvent('pdm-workspace-maintenance', {
       detail: { available: true, workingFiles: 41, workingBytes: 2_048, snapshotFiles: 82, snapshotBytes: 3_145_728, recoveryFiles: 0, recoveryBytes: 0 },
     }))
     await flushPromises()
-    expect(wrapper.get('[aria-label="工作区用量"]').text()).toContain('项目工作文件41 个 · 2.0 KB不自动清理')
-    expect(wrapper.get('[aria-label="工作区用量"]').text()).toContain('可重建只读缓存82 个 · 3.0 MB可安全清理')
+    expect(document.querySelector('[aria-label="工作区用量"]')!.textContent).toContain('项目工作文件41 个 · 2.0 KB不自动清理')
+    expect(document.querySelector('[aria-label="工作区用量"]')!.textContent).toContain('可重建只读缓存82 个 · 3.0 MB可安全清理')
     const confirmClean = vi.spyOn(ElMessageBox, 'confirm').mockResolvedValue('confirm' as never)
-    await buttonByText(wrapper, '清理只读缓存').trigger('click')
-    await flushPromises()
+    await clickDocumentButton('清理只读缓存')
     expect(confirmClean).toHaveBeenCalled()
     expect(postMessage).toHaveBeenCalledWith({ type: 'workspace-cache-clean', payload: undefined })
     confirmClean.mockRestore()
-    await buttonByText(wrapper, '已开启').trigger('click')
+    await clickDocumentButton('已开启')
     expect(postMessage).toHaveBeenCalledWith({ type: 'desktop-settings-save', payload: { startWithWindows: false } })
 
     window.dispatchEvent(new CustomEvent('pdm-workspace-folder-selected', { detail: { workspaceRoot: 'D:\\PDM-Cache' } }))
     await flushPromises()
-    expect((wrapper.get('input[aria-label="PLM受控工作区"]').element as HTMLInputElement).value).toBe('D:\\PDM-Cache')
+    expect(document.querySelector<HTMLInputElement>('input[aria-label="PLM受控工作区"]')!.value).toBe('D:\\PDM-Cache')
 
-    await buttonByText(wrapper, '保存工作区').trigger('click')
+    await clickDocumentButton('保存工作区')
     expect(postMessage).toHaveBeenCalledWith({ type: 'desktop-settings-save', payload: { workspaceRoot: 'D:\\PDM-Cache' } })
+  })
+
+  it('个人设置里切换主题会写入个人资料，实现跨设备同步', async () => {
+    const wrapper = mount(App, { attachTo: document.body, global: { plugins: [ElementPlus] } })
+    await login(wrapper, false)
+
+    await wrapper.get('.pdm-user-profile-trigger').trigger('click')
+    await flushPromises()
+    const themeTab = [...document.querySelectorAll<HTMLElement>('.el-tabs__item')]
+      .find(item => item.textContent?.includes('界面主题'))!
+    themeTab.click()
+    await flushPromises()
+    const orange = [...document.querySelectorAll<HTMLElement>('.personal-theme-group .el-radio')]
+      .find(item => item.textContent?.includes('暖橙活力'))!
+    orange.querySelector<HTMLInputElement>('input')!.click()
+    await flushPromises()
+
+    const profileCall = vi.mocked(fetch).mock.calls
+      .find(([input, init]) => String(input).endsWith('/api/auth/profile') && (init?.method ?? 'GET') === 'PUT')
+    expect(profileCall).toBeTruthy()
+    expect(String(profileCall![1]?.body)).toContain('"theme":"o"')
+    expect(document.documentElement.dataset.pdmTheme).toBe('o')
+    wrapper.unmount()
   })
 
   it('logs in and renders project, tree, BOM and release data returned by the API', async () => {
@@ -1025,7 +1062,7 @@ describe('PLM client workspace', () => {
     expect(wrapper.find('input[name="vaultLocation"]').exists()).toBe(false)
     await buttonByText(wrapper, '取消').trigger('click')
 
-    await buttonByText(wrapper, '系统管理').trigger('click')
+    await buttonByText(wrapper, '系统设置').trigger('click')
     await buttonByText(wrapper, 'U9C接口').trigger('click')
     await flushPromises()
     expect(wrapper.find('.u9-integration-page > .pdm-pagebar').exists()).toBe(false)
@@ -1059,7 +1096,7 @@ describe('PLM client workspace', () => {
     const maintainButton = wrapper.findAll('button').find(button => button.text().trim() === '维护')
     expect(maintainButton).toBeUndefined()
 
-    await buttonByText(wrapper, '系统管理').trigger('click')
+    await buttonByText(wrapper, '系统设置').trigger('click')
     await buttonByText(wrapper, '用户设置').trigger('click')
     expect(wrapper.find('.pdm-pagebar').exists()).toBe(false)
     await buttonByText(wrapper, '角色权限').trigger('click')

@@ -2,6 +2,7 @@
 import { Bell, ChevronDown, ChevronLeft, ChevronRight, LogIn, LogOut } from '@lucide/vue'
 import { ElMessage } from '../statusMessage'
 import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
+import ClientSettings from './ClientSettings.vue'
 import type { PdmUserProfile } from '../types'
 import GlobalStatusBar from './GlobalStatusBar.vue'
 
@@ -22,6 +23,7 @@ const props = withDefaults(defineProps<{
   sidebarCollapsed?: boolean
   onSaveProfile?: (profile: Pick<PdmUserProfile, 'landline' | 'mobilePhone' | 'email' | 'gender' | 'nickname'>) => Promise<PdmUserProfile>
   onChangePassword?: (currentPassword: string, password: string) => Promise<void>
+  desktopAvailable?: boolean
 }>(), {
   userName: '',
   username: '',
@@ -33,6 +35,7 @@ const props = withDefaults(defineProps<{
   notificationCount: 0,
   theme: 'a',
   sidebarCollapsed: false,
+  desktopAvailable: false,
 })
 
 const emit = defineEmits<{ login: []; logout: []; notifications: []; theme: [theme: PdmTheme]; company: [companyId: string]; toggleSidebar: [] }>()
@@ -207,7 +210,7 @@ onUnmounted(() => {
       </button>
     </div>
 
-    <el-dialog v-model="personalInfoVisible" class="personal-settings-dialog" title="个人设置" width="560px" append-to-body>
+    <el-dialog v-model="personalInfoVisible" class="personal-settings-dialog" title="个人设置" width="760px" append-to-body>
       <el-tabs v-model="personalSettingsTab">
         <el-tab-pane label="个人资料" name="profile">
           <el-form label-width="82px" class="personal-settings-form">
@@ -234,6 +237,17 @@ onUnmounted(() => {
             <el-form-item label="确认新密码" required><el-input v-model="passwordForm.confirmPassword" type="password" show-password autocomplete="new-password" /></el-form-item>
           </el-form>
           <div class="personal-settings-actions"><el-button type="primary" :loading="personalSettingsPending" @click="submitPassword">修改密码</el-button></div>
+        </el-tab-pane>
+        <el-tab-pane label="界面主题" name="theme">
+          <el-radio-group :model-value="props.theme" class="personal-theme-group" @change="(value: string | number | boolean | undefined) => emit('theme', value as PdmTheme)">
+            <el-radio value="a">青蓝平衡</el-radio>
+            <el-radio value="c">石墨青绿</el-radio>
+            <el-radio value="o">暖橙活力</el-radio>
+          </el-radio-group>
+          <p class="personal-settings-hint">主题与账号同步，换电脑登录后同样是这个主题；顶栏「主题」按钮仍可快速切换。</p>
+        </el-tab-pane>
+        <el-tab-pane v-if="props.desktopAvailable" label="客户端设置" name="client">
+          <ClientSettings />
         </el-tab-pane>
       </el-tabs>
     </el-dialog>

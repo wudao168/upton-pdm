@@ -1667,7 +1667,7 @@ export function usePdmWorkspace() {
     }
   }
 
-  async function saveMyProfile(profile: Pick<PdmUserProfile, 'landline' | 'mobilePhone' | 'email' | 'gender' | 'nickname'>) {
+  async function saveMyProfile(profile: Pick<PdmUserProfile, 'landline' | 'mobilePhone' | 'email' | 'gender' | 'nickname'> & { theme?: string }) {
     currentProfile.value = await updateMyProfileRequest(profile, accessToken)
     return currentProfile.value
   }

@@ -996,17 +996,17 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
     {
         await using var connection = await OpenAsync(cancellationToken);
         var row = await connection.QuerySingleOrDefaultAsync<UserProfileRow>(new CommandDefinition(
-            "SELECT username,display_name DisplayName,nickname,gender,landline,mobile_phone MobilePhone,email FROM pdm_user WHERE username=@Username LIMIT 1",
+            "SELECT username,display_name DisplayName,nickname,gender,landline,mobile_phone MobilePhone,email,theme FROM pdm_user WHERE username=@Username LIMIT 1",
             new { Username = username }, cancellationToken: cancellationToken));
         return row is null ? null : MapUserProfile(row);
     }
 
-    public async Task<UserProfile> UpdateUserProfileAsync(string username, string? nickname, string gender, string? landline, string? mobilePhone, string? email, CancellationToken cancellationToken)
+    public async Task<UserProfile> UpdateUserProfileAsync(string username, string? nickname, string gender, string? landline, string? mobilePhone, string? email, string? theme, CancellationToken cancellationToken)
     {
         await using var connection = await OpenAsync(cancellationToken);
         var affected = await connection.ExecuteAsync(new CommandDefinition(
-            "UPDATE pdm_user SET nickname=@Nickname,gender=@Gender,landline=@Landline,mobile_phone=@MobilePhone,email=@Email,row_version=row_version+1 WHERE username=@Username",
-            new { Username = username, Nickname = nickname, Gender = gender, Landline = landline, MobilePhone = mobilePhone, Email = email }, cancellationToken: cancellationToken));
+            "UPDATE pdm_user SET nickname=@Nickname,gender=@Gender,landline=@Landline,mobile_phone=@MobilePhone,email=@Email,theme=COALESCE(@Theme,theme),row_version=row_version+1 WHERE username=@Username",
+            new { Username = username, Nickname = nickname, Gender = gender, Landline = landline, MobilePhone = mobilePhone, Email = email, Theme = theme }, cancellationToken: cancellationToken));
         if (affected != 1) throw new PdmNotFoundException("用户不存在。");
         return await FindUserProfileAsync(username, cancellationToken) ?? throw new PdmNotFoundException("用户不存在。");
     }
@@ -1065,7 +1065,7 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
         return await connection.ExecuteScalarAsync<int>(new CommandDefinition("SELECT COUNT(*) FROM pdm_user", cancellationToken: cancellationToken));
     }
 
-    private static UserProfile MapUserProfile(UserProfileRow row) => new(row.Username, row.DisplayName, row.Nickname, row.Gender, row.Landline, row.MobilePhone, row.Email);
+    private static UserProfile MapUserProfile(UserProfileRow row) => new(row.Username, row.DisplayName, row.Nickname, row.Gender, row.Landline, row.MobilePhone, row.Email, string.IsNullOrWhiteSpace(row.Theme) ? "a" : row.Theme);
 
     private sealed class UserProfileRow
     {
@@ -1076,6 +1076,7 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
         public string? Landline { get; init; }
         public string? MobilePhone { get; init; }
         public string? Email { get; init; }
+        public string? Theme { get; init; }
     }
 
     private sealed class PasswordResetTaskRow

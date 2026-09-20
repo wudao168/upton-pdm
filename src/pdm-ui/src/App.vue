@@ -312,7 +312,26 @@ function setSystemOrganizationId(organizationId: string) {
 function selectTheme(value: PdmTheme) {
   theme.value = value
   window.localStorage.setItem('pdm_theme', value)
+  // 主题跟账号同步：写入个人资料，换电脑登录后沿用同一主题。
+  const profile = workspace.currentProfile.value
+  if (workspace.authenticated.value && profile) {
+    void workspace.saveMyProfile({
+      nickname: profile.nickname ?? '',
+      gender: profile.gender,
+      landline: profile.landline ?? '',
+      mobilePhone: profile.mobilePhone ?? '',
+      email: profile.email ?? '',
+      theme: value,
+    }).catch(() => undefined)
+  }
 }
+
+watch(() => workspace.currentProfile.value?.theme, value => {
+  if (value !== 'a' && value !== 'c' && value !== 'o') return
+  if (value === theme.value) return
+  theme.value = value
+  window.localStorage.setItem('pdm_theme', value)
+}, { immediate: true })
 
 watch(theme, value => {
   document.documentElement.dataset.pdmTheme = value
@@ -884,6 +903,7 @@ async function openWhereUsedParent(projectId: string, parentDocumentId: string) 
           :profile="workspace.currentProfile.value"
           :on-save-profile="workspace.saveMyProfile"
           :on-change-password="workspace.changeMyPassword"
+          :desktop-available="desktopAvailable"
           @logout="workspace.logout"
           @notifications="handleNavigation('tasks')"
         @company="workspace.switchCompany"
@@ -978,7 +998,6 @@ async function openWhereUsedParent(projectId: string, parentDocumentId: string) 
         </section>
         <SystemManagement
           v-else-if="activeView === 'admin'"
-          :desktop-available="desktopAvailable"
           :token="workspace.getAccessToken()"
           :customers="workspace.customers.value"
           :crm-integration-settings="workspace.crmIntegrationSettings.value"

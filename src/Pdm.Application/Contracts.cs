@@ -61,7 +61,8 @@ public sealed record UserProfile(
     string Gender,
     string? Landline,
     string? MobilePhone,
-    string? Email);
+    string? Email,
+    string Theme = "a");
 
 public sealed record PasswordResetTask(
     Guid Id,
@@ -569,7 +570,7 @@ public interface IPdmRepository
     Task MarkPublishFailedAsync(Guid releasePackageId, string error, CancellationToken cancellationToken);
     Task<UserAccount?> FindUserAsync(string username, CancellationToken cancellationToken);
     Task<UserProfile?> FindUserProfileAsync(string username, CancellationToken cancellationToken);
-    Task<UserProfile> UpdateUserProfileAsync(string username, string? nickname, string gender, string? landline, string? mobilePhone, string? email, CancellationToken cancellationToken);
+    Task<UserProfile> UpdateUserProfileAsync(string username, string? nickname, string gender, string? landline, string? mobilePhone, string? email, string? theme, CancellationToken cancellationToken);
     Task<UserAccount> UpdateUserPasswordAsync(string username, string passwordHash, CancellationToken cancellationToken);
     Task CreatePasswordResetRequestAsync(UserAccount user, DateTimeOffset requestedAt, CancellationToken cancellationToken);
     Task<IReadOnlyList<PasswordResetTask>> ListPasswordResetTasksAsync(CancellationToken cancellationToken);

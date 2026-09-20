@@ -1,7 +1,6 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
 import AuditLog from './AuditLog.vue'
-import ClientSettings from './ClientSettings.vue'
 import U9IntegrationManagement from './U9IntegrationManagement.vue'
 import StorageSettings from './StorageSettings.vue'
 import ApprovalWorkflowSettings from './ApprovalWorkflowSettings.vue'
@@ -10,7 +9,6 @@ import UserSettings from './UserSettings.vue'
 import type { AuditEntry, CreateRoleInput, CrmConnectionTestResult, CrmCustomerSyncResult, CrmIntegrationSettings, EquipmentTypeDefinition, OrganizationDirectory, OrganizationUnit, PdmCustomer, PdmSystemSettings, PdmUser, ProjectFolderTemplateNode, ProjectNumberingOptions, ProjectOrganization, RolePermissionDirectory, SaveOrganizationUnitInput, SavePdmUserInput, SaveProjectOrganizationInput, UpdateCrmIntegrationInput } from '../types'
 
 const props = defineProps<{
-  desktopAvailable: boolean
   token: string
   customers: PdmCustomer[]
   crmIntegrationSettings: CrmIntegrationSettings
@@ -46,7 +44,7 @@ const props = defineProps<{
 }>()
 defineEmits<{ refreshAudit: []; updateActiveOrganizationId: [organizationId: string] }>()
 
-type AdminTab = 'u9' | 'users' | 'folders' | 'settings' | 'approval' | 'audit' | 'client'
+type AdminTab = 'u9' | 'users' | 'folders' | 'settings' | 'approval' | 'audit'
 const activeTab = ref<AdminTab>('u9')
 const hasPermission = (code: string) => props.permissions.includes(code)
 const availableTabs = computed<AdminTab[]>(() => [
@@ -56,7 +54,6 @@ const availableTabs = computed<AdminTab[]>(() => [
   hasPermission('settings.storage.manage') && 'settings',
   hasPermission('settings.storage.manage') && 'approval',
   hasPermission('audit.view') && 'audit',
-  props.desktopAvailable && 'client',
 ].filter((tab): tab is AdminTab => Boolean(tab)))
 watch(availableTabs, tabs => { if (!tabs.includes(activeTab.value)) activeTab.value = tabs[0] ?? 'users' }, { immediate: true })
 </script>
@@ -70,7 +67,6 @@ watch(availableTabs, tabs => { if (!tabs.includes(activeTab.value)) activeTab.va
       <button v-if="availableTabs.includes('settings')" type="button" :class="{ 'is-active': activeTab === 'settings' }" @click="activeTab='settings'">编号与存储</button>
       <button v-if="availableTabs.includes('approval')" type="button" :class="{ 'is-active': activeTab === 'approval' }" @click="activeTab='approval'">审批流程</button>
       <button v-if="availableTabs.includes('audit')" type="button" :class="{ 'is-active': activeTab === 'audit' }" @click="activeTab='audit'">全局审计</button>
-      <button v-if="availableTabs.includes('client')" type="button" :class="{ 'is-active': activeTab === 'client' }" @click="activeTab='client'">客户端设置</button>
     </nav>
     <U9IntegrationManagement
       v-if="activeTab === 'u9'"
@@ -86,9 +82,8 @@ watch(availableTabs, tabs => { if (!tabs.includes(activeTab.value)) activeTab.va
     />
     <UserSettings v-else-if="activeTab === 'users'" :directory="organizationDirectory" :role-directory="rolePermissionDirectory" :active-organization-id="activeOrganizationId" :permissions="permissions" :current-username="currentUsername" :platform-administrator="platformAdministrator" :pending="pending" :on-save-user="onSaveUser" :on-reset-password="onResetUserPassword" :on-save-role-permissions="onUpdateRolePermissions" :on-create-role="onCreateRole" :on-delete-role="onDeleteRole" :on-save-organization="onSaveOrganization" :on-save-unit="onSaveUnit" :on-update-memberships="onUpdateMemberships" :on-update-managers="onUpdateManagers" @update-active-organization-id="$emit('updateActiveOrganizationId', $event)" />
     <FolderTemplateSettings v-else-if="activeTab === 'folders'" :nodes="folderTemplate" :users="organizationDirectory.users" :roles="rolePermissionDirectory.roles" :pending="pending" :on-save="onSaveFolderTemplate" />
-    <StorageSettings v-else-if="activeTab === 'settings'" :settings="settings" :equipment-types="equipmentTypes" :numbering-options="numberingOptions" :pending="pending" :on-save-settings="onSaveSettings" :on-save-equipment-type="onSaveEquipmentType" :on-update-counters="onUpdateCounters" />
+    <StorageSettings v-else-if="activeTab === 'settings'" :settings="settings" :token="token" :equipment-types="equipmentTypes" :numbering-options="numberingOptions" :pending="pending" :on-save-settings="onSaveSettings" :on-save-equipment-type="onSaveEquipmentType" :on-update-counters="onUpdateCounters" />
     <ApprovalWorkflowSettings v-else-if="activeTab === 'approval'" :settings="settings" :pending="pending" :on-save="onSaveSettings" />
     <section v-else-if="activeTab === 'audit'" class="pdm-project-manager"><AuditLog :entries="auditEntries" title="全局操作记录" description="查看所有项目的存档、审批、发布和系统管理操作。" @refresh="$emit('refreshAudit')" /></section>
-    <ClientSettings v-else-if="activeTab === 'client'" />
   </section>
 </template>

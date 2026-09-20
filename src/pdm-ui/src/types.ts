@@ -346,6 +346,7 @@ export interface PdmUserProfile {
   landline?: string | null
   mobilePhone?: string | null
   email?: string | null
+  theme?: string | null
 }
 export interface PasswordResetTask { id: string; username: string; displayName: string; requestedAt: string }
 export interface BomPropertyMapping {
@@ -390,7 +391,12 @@ export interface PdmSystemSettings {
   releaseChangeReasonTypes?: string[]
   formalSupplementPolicies?: FormalSupplementPolicies
   drawingQrPolicy?: DrawingQrPolicy
+  previewConversion?: PreviewConversionSettings
 }
+/** 图纸转换（2D转PDF、3D转STEP）的执行位置：Local=API服务器本机，Remote=独立转图电脑上的转图代理。 */
+export type PreviewConversionMode = 'Local' | 'Remote'
+export interface PreviewConversionSettings { mode: PreviewConversionMode; agentUrl: string; agentToken: string; timeoutMinutes: number }
+export interface PreviewAgentProbeResult { ok: boolean; message: string; machine?: string | null; workerExists?: boolean | null; workerPath?: string | null }
 export interface MaterialCodeApprovalSettings { version: number; approverRoleCodes: string[] }
 export interface FormalSupplementPolicy { maximumCount?: number | null; validDays?: number | null }
 export interface FormalSupplementPolicies { standard: FormalSupplementPolicy; electrical: FormalSupplementPolicy }

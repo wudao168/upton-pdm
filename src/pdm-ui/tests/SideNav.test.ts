@@ -76,7 +76,7 @@ describe('SideNav', () => {
 
     expect(wrapper.get('.pdm-sidebar').classes()).toContain('is-collapsed')
     expect(wrapper.get('.pdm-nav-item[aria-label="料品管理"]').attributes('title')).toBe('料品管理')
-    expect(wrapper.get('.pdm-sidebar__settings').attributes('title')).toBe('系统管理')
+    expect(wrapper.get('.pdm-sidebar__settings').attributes('title')).toBe('系统设置')
   })
 
   it('opens detailed runtime information when the version is clicked', async () => {

@@ -2121,11 +2121,12 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
         return Task.FromResult<UserProfile?>(user is null ? null : CreateDefaultProfile(user));
     }
 
-    public Task<UserProfile> UpdateUserProfileAsync(string username, string? nickname, string gender, string? landline, string? mobilePhone, string? email, CancellationToken cancellationToken)
+    public Task<UserProfile> UpdateUserProfileAsync(string username, string? nickname, string gender, string? landline, string? mobilePhone, string? email, string? theme, CancellationToken cancellationToken)
     {
         var user = users.Values.FirstOrDefault(item => string.Equals(item.Username, username, StringComparison.OrdinalIgnoreCase))
             ?? throw new PdmNotFoundException("用户不存在。");
-        var profile = new UserProfile(user.Username, user.DisplayName, nickname, gender, landline, mobilePhone, email);
+        var existingTheme = userProfiles.TryGetValue(user.Username, out var previous) ? previous.Theme : null;
+        var profile = new UserProfile(user.Username, user.DisplayName, nickname, gender, landline, mobilePhone, email, theme ?? existingTheme ?? "a");
         userProfiles[user.Username] = profile;
         return Task.FromResult(profile);
     }

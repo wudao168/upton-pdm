@@ -6,6 +6,7 @@ import type { ProjectCopyOptionsInput, ProjectCopyPreview, ProjectCopyResult } f
 
 import type { BomSourceReclassificationPreview } from './types'
 import type { MaterialRelationCompleteness, MaterialRelationTemplate, SaveMaterialRelationTemplateInput } from './types'
+import type { PreviewAgentProbeResult, PreviewConversionSettings } from './types'
 import type { AppendProjectValidationPlanItemsInput, ConfirmValidationPlanExecutionInput, ProjectValidationPlan, SaveProjectValidationPlanInput, SaveValidationCheckCategoryInput, SaveValidationCheckItemInput, ValidationCheckCatalog, ValidationCheckCategory, ValidationCheckItem, ValidationPlanAttachment, ValidationPlanApprovalTaskSummary, ValidationPlanExecutionRecord, ValidationPlanRecognitionDraft } from './types'
 import { sha256Hex } from './fileHash'
 
@@ -1058,7 +1059,7 @@ export function getMyProfile(token: string): Promise<PdmUserProfile> {
   return requestJson('/api/auth/me', {}, token)
 }
 
-export function updateMyProfile(profile: Pick<PdmUserProfile, 'landline' | 'mobilePhone' | 'email' | 'gender' | 'nickname'>, token: string): Promise<PdmUserProfile> {
+export function updateMyProfile(profile: Pick<PdmUserProfile, 'landline' | 'mobilePhone' | 'email' | 'gender' | 'nickname'> & { theme?: string }, token: string): Promise<PdmUserProfile> {
   return requestJson('/api/auth/profile', { method: 'PUT', body: JSON.stringify(profile) }, token)
 }
 
@@ -1206,6 +1207,13 @@ export function getBomValidationRules(token: string): Promise<BomValidationRules
 
 export function updateSystemSettings(settings: PdmSystemSettings, token: string): Promise<PdmSystemSettings> {
   return requestJson('/api/system-settings', { method: 'PUT', body: JSON.stringify(settings) }, token)
+}
+
+export function testPreviewAgent(conversion: PreviewConversionSettings, token: string): Promise<PreviewAgentProbeResult> {
+  return requestJson('/api/system-settings/preview-agent/test', {
+    method: 'POST',
+    body: JSON.stringify({ mode: conversion.mode, agentUrl: conversion.agentUrl, agentToken: conversion.agentToken, timeoutMinutes: conversion.timeoutMinutes }),
+  }, token)
 }
 
 export function listEquipmentTypes(token: string): Promise<EquipmentTypeDefinition[]> {

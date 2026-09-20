@@ -29,7 +29,7 @@ public sealed record PasswordResetRequest(string Username, string DisplayName);
 
 public sealed record ChangePasswordRequest(string CurrentPassword, string Password);
 
-public sealed record UpdateProfileRequest(string? Landline, string? MobilePhone, string? Email, string? Gender, string? Nickname);
+public sealed record UpdateProfileRequest(string? Landline, string? MobilePhone, string? Email, string? Gender, string? Nickname, string? Theme);
 
 public sealed record CreateManagedUserRequest(
     string Username,
@@ -119,9 +119,24 @@ public sealed record UpdateSystemSettingsRequest(
     MaterialCodeApprovalSettings? MaterialCodeApproval = null,
     IReadOnlyList<string>? ReleaseChangeReasonTypes = null,
     FormalSupplementPolicies? FormalSupplementPolicies = null,
-    DrawingQrPolicy? DrawingQrPolicy = null);
+    DrawingQrPolicy? DrawingQrPolicy = null,
+    PreviewConversionSettings? PreviewConversion = null);
 
 public sealed record SetBomEmptyDeclarationRequest(bool DeclaredEmpty);
+
+public sealed record PreviewAgentProbeResult(bool Ok, string Message, string? Machine, bool? WorkerExists, string? WorkerPath);
+
+/// <summary>测试转图服务器时使用页面上当前填写的值（未保存也可以测试）。</summary>
+public sealed record PreviewAgentProbeRequest(
+    [property: JsonConverter(typeof(JsonStringEnumConverter))] PreviewConversionMode? Mode = null,
+    string? AgentUrl = null,
+    string? AgentToken = null,
+    int? TimeoutMinutes = null);
+
+/// <summary>转图电脑上的安装程序登记自己时提交的信息。</summary>
+public sealed record PreviewAgentRegisterRequest(string AgentUrl, string AgentToken, int TimeoutMinutes);
+
+public sealed record PreviewAgentRegisterResult(bool Ok, string AgentUrl, int TimeoutMinutes, string Message);
 
 /// <summary>
 /// <paramref name="AssignedReviewers"/> 为空表示不指定审核人，由全部具备审图权限的人员并行处理；

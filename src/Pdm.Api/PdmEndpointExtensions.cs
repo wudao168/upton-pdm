@@ -124,7 +124,9 @@ public static class PdmEndpointExtensions
             var gender = string.IsNullOrWhiteSpace(request.Gender) ? "unspecified" : request.Gender.Trim();
             if (gender is not ("male" or "female" or "unspecified")) throw new PdmRuleException("性别选项无效。");
             if (email is not null && !MailAddress.TryCreate(email, out _)) throw new PdmRuleException("邮箱格式不正确。");
-            var profile = await repository.UpdateUserProfileAsync(actor, nickname, gender, landline, mobilePhone, email, cancellationToken);
+            var theme = string.IsNullOrWhiteSpace(request.Theme) ? null : request.Theme.Trim();
+            if (theme is not null && theme is not ("a" or "c" or "o")) throw new PdmRuleException("主题选项无效。");
+            var profile = await repository.UpdateUserProfileAsync(actor, nickname, gender, landline, mobilePhone, email, theme, cancellationToken);
             await repository.AppendAuditAsync(new AuditEntry(Guid.NewGuid(), timeProvider.GetUtcNow(), actor, "user.profile.update", nameof(UserProfile), actor, "更新个人资料"), cancellationToken);
             return Results.Ok(profile);
         });
@@ -395,9 +397,71 @@ public static class PdmEndpointExtensions
                 MaterialCodeApproval = request.MaterialCodeApproval ?? currentSettings.MaterialCodeApproval,
                 ReleaseChangeReasonTypes = request.ReleaseChangeReasonTypes ?? currentSettings.ReleaseChangeReasonTypes,
                 FormalSupplementPolicies = request.FormalSupplementPolicies ?? currentSettings.FormalSupplementPolicies,
-                DrawingQrPolicy = request.DrawingQrPolicy ?? currentSettings.DrawingQrPolicy
+                DrawingQrPolicy = request.DrawingQrPolicy ?? currentSettings.DrawingQrPolicy,
+                PreviewConversion = request.PreviewConversion ?? currentSettings.PreviewConversion
             };
             return Results.Ok(await workflow.UpdateSystemSettingsAsync(settings, actor, role, cancellationToken));
+        });
+
+        api.MapPost("/system-settings/preview-agent/register", async (PreviewAgentRegisterRequest request, HttpContext context, PdmWorkflowService workflow, CancellationToken cancellationToken) =>
+        {
+            var (actor, role) = CurrentUser(context.User);
+            var settings = await workflow.RegisterPreviewAgentAsync(request.AgentUrl, request.AgentToken, request.TimeoutMinutes, actor, role, cancellationToken);
+            return Results.Ok(new PreviewAgentRegisterResult(true, settings.PreviewConversion.NormalizedAgentUrl, settings.PreviewConversion.TimeoutMinutes,
+                $"已登记为转图服务器：{settings.PreviewConversion.NormalizedAgentUrl}"));
+        });
+
+        api.MapPost("/system-settings/preview-agent/unregister", async (HttpContext context, PdmWorkflowService workflow, CancellationToken cancellationToken) =>
+        {
+            var (actor, role) = CurrentUser(context.User);
+            await workflow.ClearPreviewAgentAsync(actor, role, cancellationToken);
+            return Results.Ok(new PreviewAgentRegisterResult(true, string.Empty, 0, "已恢复为API服务器本机转换。"));
+        });
+
+        api.MapPost("/system-settings/preview-agent/test", async (PreviewAgentProbeRequest? request, HttpContext context, IPdmRepository repository, IHttpClientFactory httpClientFactory, CancellationToken cancellationToken) =>
+        {
+            var (actor, role) = CurrentUser(context.User);
+            if (!await repository.HasUserPermissionAsync(actor, role, PermissionCodes.StorageSettingsManage, cancellationToken)) return Results.Forbid();
+            var saved = (await repository.GetSystemSettingsAsync(cancellationToken)).PreviewConversion;
+            // 前端可能只提交地址/令牌；填了地址就按"远程"测试，未填地址则沿用已保存的方式。
+            var requestedMode = request?.Mode
+                ?? (string.IsNullOrWhiteSpace(request?.AgentUrl) ? saved.Mode : PreviewConversionMode.Remote);
+            var conversion = request is null ? saved : saved with
+            {
+                Mode = requestedMode,
+                AgentUrl = string.IsNullOrWhiteSpace(request.AgentUrl) ? saved.AgentUrl : request.AgentUrl.Trim(),
+                AgentToken = request.AgentToken ?? saved.AgentToken,
+                TimeoutMinutes = request.TimeoutMinutes is > 0 ? request.TimeoutMinutes.Value : saved.TimeoutMinutes
+            };
+            if (conversion.Mode != PreviewConversionMode.Remote)
+                return Results.Ok(new PreviewAgentProbeResult(true, "当前为本机转换（API服务器调用SolidWorks），无需转图服务器。", null, null, null));
+            var url = conversion.NormalizedAgentUrl;
+            if (!Uri.TryCreate(url, UriKind.Absolute, out _))
+                return Results.Ok(new PreviewAgentProbeResult(false, "转图服务器地址未配置或格式不正确，请填写如 http://192.168.2.50:5199 的地址。", null, null, null));
+            try
+            {
+                using var client = httpClientFactory.CreateClient();
+                client.Timeout = TimeSpan.FromSeconds(20);
+                using var probeRequest = new HttpRequestMessage(HttpMethod.Get, url + PreviewAgentProtocol.HealthPath);
+                if (!string.IsNullOrWhiteSpace(conversion.AgentToken))
+                    probeRequest.Headers.Add(PreviewAgentProtocol.TokenHeader, conversion.AgentToken);
+                using var response = await client.SendAsync(probeRequest, cancellationToken);
+                var body = await response.Content.ReadAsStringAsync(cancellationToken);
+                if (!response.IsSuccessStatusCode)
+                    return Results.Ok(new PreviewAgentProbeResult(false, $"转图服务器返回{(int)response.StatusCode}：{PreviewAgentProtocol.DescribeError(body)}", null, null, null));
+                var payload = JsonSerializer.Deserialize<JsonElement>(body);
+                var machine = payload.TryGetProperty("machine", out var machineElement) ? machineElement.GetString() : null;
+                var workerPath = payload.TryGetProperty("workerPath", out var workerElement) ? workerElement.GetString() : null;
+                var workerExists = payload.TryGetProperty("workerExists", out var existsElement) && existsElement.ValueKind == JsonValueKind.True;
+                var message = workerExists
+                    ? $"已连接转图服务器{machine}，SolidWorks转换程序就绪。"
+                    : $"已连接{machine}，但该电脑上未找到SolidWorks转换程序，请检查转图代理配置。";
+                return Results.Ok(new PreviewAgentProbeResult(workerExists, message, machine, workerExists, workerPath));
+            }
+            catch (Exception exception) when (exception is not OperationCanceledException)
+            {
+                return Results.Ok(new PreviewAgentProbeResult(false, $"无法连接转图服务器{url}：{exception.Message}", null, null, null));
+            }
         });
 
         api.MapGet("/bom-validation-rules", async (IPdmRepository repository, CancellationToken cancellationToken) =>
