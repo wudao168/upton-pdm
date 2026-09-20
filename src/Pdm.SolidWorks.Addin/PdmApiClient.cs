@@ -241,14 +241,16 @@ internal sealed class PdmApiClient : IDisposable
         string drawingNumber,
         string name,
         CancellationToken cancellationToken,
-        Guid? drawingReviewWritebackId = null)
+        Guid? drawingReviewWritebackId = null,
+        ICollection<string> plannedPaths = null)
     {
         _ = await PostJsonAsync<object>(
             string.Concat("api/documents/", documentId, "/checkin/preflight"),
             new
             {
                 projectId,
-                root = ToRequestNode(root, true),
+                // 与准备阶段同一口径：本次一同提交的引用不要求已解析PLM版本。
+                root = ToRequestNode(root, true, plannedPaths),
                 properties = modelProperties ?? new Dictionary<string, string>(),
                 checkoutSessionId,
                 isProjectRoot,

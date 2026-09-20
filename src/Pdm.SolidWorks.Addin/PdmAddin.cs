@@ -9534,6 +9534,7 @@ public sealed class PdmAddin : ISwAddin
                 projectRootDocumentId,
                 identities,
                 drawingReviewWritebackIds,
+                submissionPaths,
                 reportProgress,
                 cancellationToken);
 
@@ -9640,6 +9641,7 @@ public sealed class PdmAddin : ISwAddin
         Guid? projectRootDocumentId,
         IReadOnlyDictionary<string, BatchDocumentIdentity> identities,
         IReadOnlyDictionary<Guid, Guid> drawingReviewWritebackIds,
+        ICollection<string> plannedPaths,
         Action<int, int, string, string> reportProgress,
         CancellationToken cancellationToken)
     {
@@ -9673,7 +9675,8 @@ public sealed class PdmAddin : ISwAddin
                     identity?.DrawingNumber,
                     identity?.Name,
                     cancellationToken,
-                    drawingReviewWritebackId);
+                    drawingReviewWritebackId,
+                    plannedPaths);
                 LogOperation(string.Concat("Batch check-in preflight passed path=", node.FullPath));
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
