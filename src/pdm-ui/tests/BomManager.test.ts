@@ -47,6 +47,54 @@ describe('BomManager', () => {
     expect(wrapper.get('[role="tab"][aria-selected="true"]').text()).toContain('非标件BOM')
     wrapper.unmount()
   })
+  it('源数据视图也不显示图纸列', async () => {
+    const source = { id: 'source-1', sequence: 1, drawingNumber: 'STD-001', name: '源物料', quantity: 1, unit: '个', revision: 'W1', complete: true, source: 'Auto', sourceDocumentId: 'document-1', sourceInstancePath: 'root/1' }
+    const wrapper = mount(BomManager, {
+      props: {
+        standard: [], nonStandard: [], electrical: [], sourceData: [source], declarations: [], pending: false, editable: true,
+      },
+      global: { stubs: { BomHierarchyOverview: true } },
+    } as never)
+    await flushPromises()
+    await wrapper.findAll('button[role="tab"]')[0].trigger('click')
+    await flushPromises()
+    expect(wrapper.findAll('.pdm-bom-table thead th').map(th => th.text())).not.toContain('图纸')
+    expect(wrapper.find('.pdm-bom-drawing-audit-header').exists()).toBe(false)
+    expect(wrapper.find('.pdm-bom-drawing-link').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('标准件与电气件BOM不显示图纸列，也不出现2D/3D链接；非标件保留图纸列', async () => {
+    const row = (id: string, kind: string, drawingNumber: string, name: string) => ({
+      id, kind, sequence: 1, drawingNumber, name, quantity: 1, unit: '个', revision: 'W1', complete: true, source: 'Auto',
+      sourceDocumentId: 'document-1', sourceInstancePath: 'root/1',
+    })
+    const wrapper = mount(BomManager, {
+      props: {
+        standard: [row('standard-1', 'Standard', 'STD-001', '标准件一')],
+        nonStandard: [row('non-standard-1', 'NonStandard', 'NST-001', '非标件一')],
+        electrical: [row('electrical-1', 'Electrical', 'ELE-001', '电气件一')],
+        declarations: [], pending: false, editable: true, requestedBomKind: 'Standard',
+      },
+      global: { stubs: { BomHierarchyOverview: true } },
+    } as never)
+    await flushPromises()
+    const headers = () => wrapper.findAll('.pdm-bom-table thead th').map(th => th.text())
+    expect(headers()).not.toContain('图纸')
+    expect(wrapper.find('.pdm-bom-drawing-audit-cell').exists()).toBe(false)
+    expect(wrapper.find('.pdm-bom-drawing-link').exists()).toBe(false)
+
+    await wrapper.setProps({ requestedBomKind: 'Electrical' })
+    await flushPromises()
+    expect(headers()).not.toContain('图纸')
+    expect(wrapper.find('.pdm-bom-drawing-link').exists()).toBe(false)
+
+    await wrapper.setProps({ requestedBomKind: 'NonStandard' })
+    await flushPromises()
+    expect(headers()).toContain('图纸')
+    wrapper.unmount()
+  })
+
   beforeEach(() => {
     vi.restoreAllMocks()
     window.localStorage.clear()
@@ -842,7 +890,7 @@ describe('BomManager', () => {
     await wrapper.findAll('button[role="tab"]')[1].trigger('click')
 
     expect(wrapper.findAll('thead th').map(header => header.text())).toEqual([
-      '', '', '序号', '物料分类', '易损件', '关键', '单位', '物料编码', '物料名称', '上级物料编码', '型号', '备注信息', '品牌', '材质', '表面处理', '重量', '数量', '发布  总/源', '图纸', '版本', '问题', '资料状态',
+      '', '', '序号', '物料分类', '易损件', '关键', '单位', '物料编码', '物料名称', '上级物料编码', '型号', '备注信息', '品牌', '材质', '表面处理', '重量', '数量', '发布  总/源', '版本', '问题', '资料状态',
     ])
   })
 
@@ -910,7 +958,8 @@ describe('BomManager', () => {
     expect(quickEntry.classes()).toContain('is-quick-entry')
     expect(quickEntry.text()).toContain('标准件')
     expect(quickEntry.text()).toContain('个')
-    expect(quickEntry.findAll('td')[19].text()).toBe('W1')
+    // 标准件BOM不显示图纸列，版本列在原基础上前移一列。
+    expect(quickEntry.findAll('td')[18].text()).toBe('W1')
     expect(quickEntry.text()).toContain('待录入')
     expect(quickEntry.text()).not.toContain('缺3D图')
     expect(quickEntry.text()).not.toContain('—')
@@ -1338,8 +1387,14 @@ describe('BomManager', () => {
     await wrapper.findAll('button[role="tab"]')[2].trigger('click')
 
     expect(wrapper.get('.pdm-bom-drawing-audit-header').text()).toBe('图纸')
-    expect(wrapper.findAll('.pdm-bom-drawing-link').map(item => item.text())).toEqual(['2D', '3D'])
-    expect(wrapper.findAll('.pdm-bom-drawing-audit-cell').map(item => item.text())).toEqual(['2D3D待提交', '待提交', '待提交'])
+    // 有已发布图纸的行正常显示可下载；未关联或未发布的置灰显示，方便一眼看出“没有图”。
+    expect(wrapper.findAll('.pdm-bom-drawing-link').map(item => item.text())).toEqual(['2D', '3D', '2D', '3D', '2D', '3D'])
+    expect(wrapper.findAll('button.pdm-bom-drawing-link')).toHaveLength(2)
+    const missingSlots = wrapper.findAll('.pdm-bom-drawing-link.is-missing')
+    expect(missingSlots).toHaveLength(4)
+    expect(missingSlots[0].attributes('title')).toBe('尚未关联2D工程图')
+    expect(missingSlots[1].attributes('title')).toBe('N-002 尚未发布，暂不能下载')
+    expect(wrapper.findAll('.pdm-bom-drawing-audit-cell').map(item => item.text())).toEqual(['2D3D待提交', '2D3D待提交', '2D3D待提交'])
 
     materialApi.listDocumentVersions.mockResolvedValueOnce([{
       id: 'drawing-version-1', documentId: 'drawing-1', revision: { display: 'W2' }, status: 'Released', fileLength: 12, sha256: 'drawing', createdBy: 'developer', createdAt: '2026-09-16T00:00:00Z', changeNote: '',
@@ -1761,7 +1816,6 @@ describe('BomManager', () => {
       ['pdm-bom-wear-part-cell'],
       ['pdm-bom-impact-cell'],
       ['pdm-bom-model-cell'],
-      ['pdm-bom-drawing-audit-cell'],
       ['pdm-bom-reconciliation-cell'],
       ['pdm-bom-data-status-cell', 'is-complete'],
     ])
@@ -3079,6 +3133,43 @@ describe('BomManager', () => {
     await flushPromises()
     expect(confirm).toHaveBeenCalledWith(expect.stringContaining('不会改动已发布版本'), '已发布基线物料', expect.any(Object))
     expect(wrapper.find('input[aria-label="内联编辑物料名称"]').exists()).toBe(true)
+  })
+
+  it('classifies revision-only differences as version updates instead of modifications', async () => {
+    const releasedRows: BomItem[] = [
+      { id: 'part-e', sequence: 1, drawingNumber: 'STD-E', name: '仅版本变化件', quantity: 1, unit: '个', revision: 'A-W1', complete: true, source: 'Manual' },
+      { id: 'part-f', sequence: 2, drawingNumber: 'STD-F', name: '内容也变化件', quantity: 1, unit: '个', revision: 'A-W1', complete: true, source: 'Manual' },
+    ]
+    const currentRows: BomItem[] = [
+      { ...releasedRows[0], revision: 'B' },
+      { ...releasedRows[1], revision: 'B', quantity: 3 },
+    ]
+    const wrapper = mount(BomManager, {
+      props: {
+        standard: currentRows, nonStandard: [], electrical: [], declarations: [], pending: false, editable: true,
+        versions: [{
+          id: 'standard-released', projectId: 'project', kind: 'Standard', versionNumber: 1, label: 'S-B01', state: 'Released',
+          items: releasedRows, createdBy: 'admin', createdAt: '2026-08-18', updatedBy: 'admin', updatedAt: '2026-08-18', releasedAt: '2026-08-18',
+        }],
+      },
+    })
+
+    await wrapper.findAll('button[role="tab"]')[1].trigger('click')
+    const summary = wrapper.get('.pdm-bom-comparison-summary').text()
+    expect(summary).toContain('版本更新 1')
+    expect(summary).toContain('修改 1')
+
+    const rows = wrapper.findAll('.pdm-bom-table tbody tr').filter(row => !row.classes().includes('is-quick-entry'))
+    const versionRow = rows.find(row => row.text().includes('STD-E'))!
+    const modifiedRow = rows.find(row => row.text().includes('STD-F'))!
+    expect(versionRow.classes()).toContain('is-release-version-updated')
+    expect(versionRow.attributes('title')).toContain('版本更新（内容未变）：版本 A-W1 → B')
+    expect(modifiedRow.classes()).toContain('is-release-modified')
+
+    await wrapper.findAll('.pdm-bom-comparison-filters button').find(button => button.text() === '版本更新 1')!.trigger('click')
+    const filtered = wrapper.findAll('.pdm-bom-table tbody tr').filter(row => !row.classes().includes('is-quick-entry'))
+    expect(filtered).toHaveLength(1)
+    expect(filtered[0]!.text()).toContain('STD-E')
   })
 
   it('uses the latest published package snapshot when a long-lead release has no released BOM version', async () => {
