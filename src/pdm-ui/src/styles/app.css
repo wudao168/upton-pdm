@@ -617,3 +617,7 @@
 .pdm-preview-markup-row .pdm-markup-save:hover:not(:disabled) { border-color: var(--shell-accent-hover); background: var(--shell-accent-hover); }
 .pdm-preview-markup-row .pdm-markup-save.is-markup-dirty { box-shadow: 0 0 0 3px var(--pdm-theme-accent-focus); }
 .pdm-preview-markup-row .pdm-markup-save.is-markup-dirty:hover:not(:disabled) { box-shadow: 0 0 0 3px var(--pdm-theme-accent-focus); }
+/* 全局横向拖动条（表格与滚动容器底部）统一加高到 20px，便于鼠标抓取；纵向滚动条保持原尺寸。 */
+.el-scrollbar__bar.is-horizontal { height: 20px; }
+.el-scrollbar__bar.is-horizontal > div { height: 100%; }
+::-webkit-scrollbar:horizontal { height: 20px; }
