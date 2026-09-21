@@ -154,7 +154,8 @@ const brandFilter = ref('')
 const showArchived = ref(false)
 const pageSize = ref(50)
 const currentPage = ref(1)
-const createdAtOrder = ref<'asc' | 'desc'>()
+// 默认按创建时间由近到远（新→旧）排列，用户点击表头可切换或取消排序。
+const createdAtOrder = ref<'asc' | 'desc' | undefined>('desc')
 const editorOpen = ref(false)
 const editorError = ref('')
 const editingId = ref<string | null>(null)
@@ -855,7 +856,7 @@ function showApprovalResult(
   failures: string[],
   automationWarnings: string[],
 ) {
-  const action = approved ? '批准' : '退回'
+  const action = approved ? '批准' : '驳回'
   const summary = `共 ${total} 项，已${action} ${succeeded} 项，失败 ${failures.length} 项${automationWarnings.length ? `，后续待处理 ${automationWarnings.length} 项` : ''}。`
   const level: WorkflowResultLevel = failures.length > 0
     ? succeeded > 0 ? 'warning' : 'error'
@@ -880,13 +881,13 @@ async function decideCodeApplication(application: MaterialCodeApprovalRow, appro
   if (!approved) {
     try {
       const result = await ElMessageBox.prompt(
-        targets.length > 1 ? `将退回该项目的 ${targets.length} 项BOM料号申请，请填写统一原因。` : '请填写退回原因。',
-        '退回料号申请',
+        targets.length > 1 ? `将驳回该项目的 ${targets.length} 项BOM料号申请，请填写统一原因。` : '请填写驳回原因。',
+        '驳回料号申请',
         {
-          inputType: 'textarea', confirmButtonText: '退回', cancelButtonText: '取消',
+          inputType: 'textarea', confirmButtonText: '驳回', cancelButtonText: '取消',
           inputValidator: value => {
-            if (!value.trim()) return '请填写退回原因'
-            return value.trim().length <= 1000 || '退回原因不能超过1000个字符'
+            if (!value.trim()) return '请填写驳回原因'
+            return value.trim().length <= 1000 || '驳回原因不能超过1000个字符'
           },
         },
       )
@@ -902,7 +903,7 @@ async function decideCodeApplication(application: MaterialCodeApprovalRow, appro
       try {
         approvalProgressText.value = approved
           ? `正在处理第 ${index + 1}/${targets.length} 项：按PLM基线分配料号，并自动排队同步到U9C。`
-          : `正在退回第 ${index + 1}/${targets.length} 项料号申请。`
+          : `正在驳回第 ${index + 1}/${targets.length} 项料号申请。`
         const result = await processApprovalRow(target, approved, comment)
         succeeded++
         if (approved && (result.automation?.stage === 'ItemSyncFailed' || result.automation?.stage === 'BomSyncFailed'))
@@ -961,13 +962,13 @@ async function decideSelectedCodeApplications(approved: boolean) {
       )
     } else {
       const result = await ElMessageBox.prompt(
-        `将批量退回已选择的 ${targets.length} 项料号申请，请填写统一退回原因。`,
-        '批量退回料号申请',
+        `将批量驳回已选择的 ${targets.length} 项料号申请，请填写统一驳回原因。`,
+        '批量驳回料号申请',
         {
-          inputType: 'textarea', confirmButtonText: '批量退回', cancelButtonText: '取消',
+          inputType: 'textarea', confirmButtonText: '批量驳回', cancelButtonText: '取消',
           inputValidator: value => {
-            if (!value.trim()) return '请填写退回原因'
-            return value.trim().length <= 1000 || '退回原因不能超过1000个字符'
+            if (!value.trim()) return '请填写驳回原因'
+            return value.trim().length <= 1000 || '驳回原因不能超过1000个字符'
           },
         },
       )
@@ -984,7 +985,7 @@ async function decideSelectedCodeApplications(approved: boolean) {
       try {
         approvalProgressText.value = approved
           ? `正在批量处理第 ${index + 1}/${targets.length} 项：按PLM基线分配料号，并自动排队同步到U9C。`
-          : `正在批量退回第 ${index + 1}/${targets.length} 项料号申请。`
+          : `正在批量驳回第 ${index + 1}/${targets.length} 项料号申请。`
         const result = await processApprovalRow(application, approved, comment)
         succeeded++
         if (approved && (result.automation?.stage === 'ItemSyncFailed' || result.automation?.stage === 'BomSyncFailed'))
@@ -1086,7 +1087,7 @@ async function saveMaterial() {
       Object.assign(form, materialInput(saved))
       editorAttachments.value = []
       locatingNewMaterial = true
-      createdAtOrder.value = undefined
+      createdAtOrder.value = 'desc'
       materialTable.value?.clearSort()
       ++materialLoadVersion
       if (materialQueryTimer) clearTimeout(materialQueryTimer)
@@ -1525,7 +1526,7 @@ onMounted(() => {
             </div>
             <div class="material-table-shell pdm-loading-host">
               <SquareLoader v-if="materialPageLoading" overlay label="正在查询料品主档" />
-              <el-table ref="materialTable" class="material-table" :data="pagedMaterials" :row-class-name="materialRowClass" height="100%" stripe row-key="id" table-layout="fixed" :fit="true" empty-text="尚未创建PLM料品" @sort-change="sortMaterials" @selection-change="selectedMaterials = $event">
+              <el-table ref="materialTable" class="material-table" :data="pagedMaterials" :row-class-name="materialRowClass" height="100%" stripe row-key="id" table-layout="fixed" :fit="true" empty-text="尚未创建PLM料品" :default-sort="{ prop: 'createdAt', order: 'descending' }" @sort-change="sortMaterials" @selection-change="selectedMaterials = $event">
           <el-table-column type="selection" width="38" />
           <el-table-column prop="materialCode" label="物料编码" min-width="100" show-overflow-tooltip />
           <el-table-column prop="name" label="名称" min-width="112" show-overflow-tooltip><template #default="{ row }"><el-tag v-if="row.isRecommended" size="small" type="warning">推荐</el-tag> {{ row.name }}</template></el-table-column>
@@ -1594,14 +1595,14 @@ onMounted(() => {
                   <div class="material-step-feedback__status" role="status" aria-live="polite"><strong>运行状态</strong><span :class="{ 'is-running': approvalProgressText }">{{ approvalProgressText || '空闲' }}</span></div>
                   <div class="material-step-feedback__result" role="status" aria-live="polite">
                     <header><strong>处理结果</strong><span>{{ approvalResult ? approvalResult.title : '暂无结果' }}</span></header>
-                    <p>{{ approvalResult ? approvalResult.summary : '完成料号批准或退回后，结果将在此固定显示。' }}</p>
+                    <p>{{ approvalResult ? approvalResult.summary : '完成料号批准或驳回后，结果将在此固定显示。' }}</p>
                     <ul v-if="approvalResult?.details.length"><li v-for="detail in approvalResult.details" :key="detail">{{ detail }}</li></ul>
                   </div>
                 </section>
                 <div v-if="canDecideMaterialCode || canApprove" class="material-code-approval-toolbar">
                   <div class="material-code-approval-toolbar__actions">
                     <el-button type="primary" :disabled="selectedCodeApplications.length === 0 || decidingApplicationId !== null" :loading="batchDecidingApplications" @click="decideSelectedCodeApplications(true)">批量批准</el-button>
-                    <el-button v-if="canDecideMaterialCode || canApprove" type="danger" plain :disabled="selectedCodeApplications.length === 0 || batchDecidingApplications || decidingApplicationId !== null" @click="decideSelectedCodeApplications(false)">批量退回</el-button>
+                    <el-button v-if="canDecideMaterialCode || canApprove" type="danger" plain :disabled="selectedCodeApplications.length === 0 || batchDecidingApplications || decidingApplicationId !== null" @click="decideSelectedCodeApplications(false)">批量驳回</el-button>
                   </div>
                   <span>已选择 {{ selectedCodeApplications.length }} 项待审批申请</span>
                 </div>
@@ -1620,7 +1621,7 @@ onMounted(() => {
                     <el-table-column label="申请人" width="70" show-overflow-tooltip><template #default="{ row }">{{ displayUserName(row.requestedBy) }}</template></el-table-column>
                     <el-table-column label="申请时间" width="116" show-overflow-tooltip><template #default="{ row }">{{ dateTimeLabel(row.requestedAt) }}</template></el-table-column>
                     <el-table-column label="状态" width="72"><template #default><el-tag type="warning">待审批</el-tag></template></el-table-column>
-                    <el-table-column label="操作" width="92"><template #default="{ row }"><el-button v-if="row.masterMaterial ? canApprove : canDecideMaterialCode" link type="primary" :loading="decidingApplicationId === row.id" :disabled="batchDecidingApplications" @click="decideCodeApplication(row, true)">批准</el-button><el-button v-if="canRejectCodeApplication(row)" link type="danger" :disabled="decidingApplicationId === row.id || batchDecidingApplications" @click="decideCodeApplication(row, false)">退回</el-button><span v-if="row.masterMaterial ? !canApprove : !canDecideMaterialCode">—</span></template></el-table-column>
+                    <el-table-column label="操作" width="92"><template #default="{ row }"><el-button v-if="row.masterMaterial ? canApprove : canDecideMaterialCode" link type="primary" :loading="decidingApplicationId === row.id" :disabled="batchDecidingApplications" @click="decideCodeApplication(row, true)">批准</el-button><el-button v-if="canRejectCodeApplication(row)" link type="danger" :disabled="decidingApplicationId === row.id || batchDecidingApplications" @click="decideCodeApplication(row, false)">驳回</el-button><span v-if="row.masterMaterial ? !canApprove : !canDecideMaterialCode">—</span></template></el-table-column>
                   </el-table>
                 </div>
                 <el-pagination v-model:current-page="pendingApprovalPage" class="material-workflow-pagination material-pending-approval-pagination" :page-size="workflowPageSize" :total="pendingCodeApplicationRows.length" layout="total, prev, pager, next" size="small" @current-change="changePendingApprovalPage" />
@@ -1662,17 +1663,17 @@ onMounted(() => {
             <template #label><span class="material-code-approval-subtab-label">审批/同步历史 <em>{{ historyWorkCount }}</em></span></template>
             <div class="material-code-workflow-columns material-code-history-columns">
               <section class="material-code-workflow-stage" aria-label="第一步料号审批历史">
-                <div class="material-code-workflow-stage__title"><strong>第一步：审批历史</strong><span>已批准或已退回记录，只读。</span></div>
+                <div class="material-code-workflow-stage__title"><strong>第一步：审批历史</strong><span>已批准或已驳回记录，只读。</span></div>
                 <div class="material-code-approval-table-shell">
                   <el-table class="material-code-approval-table material-code-approval-table--history" :data="pagedApprovalHistoryRows" row-key="id" stripe table-layout="fixed" :fit="true" empty-text="尚无审批历史">
                     <el-table-column label="申请类型" width="64"><template #default="{ row }">{{ applicationTypeLabel(row) }}</template></el-table-column>
                     <el-table-column label="来源项目" width="116" show-overflow-tooltip><template #default="{ row }">{{ row.projectCode ? `${row.projectCode} · ${row.projectName || '未命名项目'}` : row.projectId }}</template></el-table-column>
                     <el-table-column label="申请人" width="70" show-overflow-tooltip><template #default="{ row }">{{ displayUserName(row.requestedBy) }}</template></el-table-column>
                     <el-table-column label="申请时间" width="116" show-overflow-tooltip><template #default="{ row }">{{ dateTimeLabel(row.requestedAt) }}</template></el-table-column>
-                    <el-table-column label="状态" width="72"><template #default="{ row }"><el-tag :type="row.status === 'Approved' ? 'success' : 'danger'">{{ row.status === 'Approved' ? '已批准' : '已退回' }}</el-tag></template></el-table-column>
+                    <el-table-column label="状态" width="72"><template #default="{ row }"><el-tag :type="row.status === 'Approved' ? 'success' : 'danger'">{{ row.status === 'Approved' ? '已批准' : '已驳回' }}</el-tag></template></el-table-column>
                     <el-table-column prop="materialCode" label="审批料号" width="98" show-overflow-tooltip><template #default="{ row }">{{ applicationMaterialCodeLabel(row) }}</template></el-table-column>
                     <el-table-column label="审批人" width="92" show-overflow-tooltip><template #default="{ row }">{{ displayUserName(row.decidedBy) }}</template></el-table-column>
-                    <el-table-column label="退回原因" min-width="150" show-overflow-tooltip><template #default="{ row }">{{ row.status === 'Rejected' ? row.decisionComment || '—' : '—' }}</template></el-table-column>
+                    <el-table-column label="驳回原因" min-width="150" show-overflow-tooltip><template #default="{ row }">{{ row.status === 'Rejected' ? row.decisionComment || '—' : '—' }}</template></el-table-column>
                   </el-table>
                 </div>
                 <el-pagination v-model:current-page="approvalHistoryPage" v-model:page-size="approvalHistoryPageSize" class="material-history-pagination material-approval-history-pagination" :page-sizes="[10, 20, 50]" :total="historyCodeApplicationRows.length" layout="total, sizes, prev, pager, next" size="small" />
