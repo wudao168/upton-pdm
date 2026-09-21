@@ -749,7 +749,9 @@ export function saveEngineeringKit(input: {
   changeNote?: string
   modelMode?: 'Auto' | 'Manual'
   model?: string
+  standardName?: string
   standardCode?: string
+  categoryName?: string
   categoryCode?: string
   components: Array<{ materialId: string; quantity: number; isOptional: boolean; sortOrder: number }>
   expectedRowVersion?: number

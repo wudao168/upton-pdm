@@ -41,15 +41,20 @@ public sealed class EngineeringKitService(
         return normalized;
     }
 
-    private static IReadOnlyList<string> NormalizeCodes(IReadOnlyList<string>? values, string label)
+    private static IReadOnlyList<EngineeringKitOptionEntry> NormalizeCodes(IReadOnlyList<EngineeringKitOptionEntry>? entries, string label)
     {
-        var normalized = new List<string>();
-        foreach (var value in values ?? [])
+        var normalized = new List<EngineeringKitOptionEntry>();
+        foreach (var entry in entries ?? [])
         {
-            var trimmed = value?.Trim();
-            if (string.IsNullOrWhiteSpace(trimmed)) continue;
-            if (trimmed.Length > 32) throw new PdmRuleException($"{label}不能超过32个字符。");
-            if (!normalized.Contains(trimmed, StringComparer.OrdinalIgnoreCase)) normalized.Add(trimmed);
+            var name = entry?.Name?.Trim();
+            var code = entry?.Code?.Trim();
+            if (string.IsNullOrWhiteSpace(name) && string.IsNullOrWhiteSpace(code)) continue;
+            if (string.IsNullOrWhiteSpace(name)) throw new PdmRuleException($"{label}的分类名称不能为空。");
+            if (string.IsNullOrWhiteSpace(code)) throw new PdmRuleException($"{label}“{name}”的代码不能为空。");
+            if (name.Length > 60) throw new PdmRuleException($"{label}名称不能超过60个字符。");
+            if (code.Length > 32) throw new PdmRuleException($"{label}代码不能超过32个字符。");
+            if (normalized.Any(item => string.Equals(item.Name, name, StringComparison.OrdinalIgnoreCase))) continue;
+            normalized.Add(new EngineeringKitOptionEntry(name, code));
         }
         if (normalized.Count > 200) throw new PdmRuleException($"{label}最多维护200项。");
         return normalized;
@@ -68,14 +73,23 @@ public sealed class EngineeringKitService(
             : Optional(command.Model, 160, "套件型号");
         var standardCode = Optional(command.StandardCode, 32, "标准代码");
         var categoryCode = Optional(command.CategoryCode, 32, "分类代码");
+        var standardName = Optional(command.StandardName, 60, "标准名称");
+        var categoryName = Optional(command.CategoryName, 60, "分类名称");
         if (command.ModelMode == EngineeringKitModelMode.Auto && manualModel is null)
         {
             // 已经生成过型号的套件（存量数据）允许不带代码继续维护；尚未生成型号的必须选好标准代码与分类代码。
             var existingModel = kitId is null ? null : (await kits.FindAsync(kitId.Value, cancellationToken))?.Model;
             if (string.IsNullOrWhiteSpace(existingModel))
             {
-                if (standardCode is null) throw new PdmRuleException("选择自动生成型号时必须填写标准代码。");
-                if (categoryCode is null) throw new PdmRuleException("选择自动生成型号时必须填写分类代码。");
+                if (standardName is null) throw new PdmRuleException("选择自动生成型号时必须先选择标准名称。");
+                if (categoryName is null) throw new PdmRuleException("选择自动生成型号时必须先选择分类名称。");
+                var options = (await repository.GetSystemSettingsAsync(cancellationToken)).EngineeringKitOptions;
+                var standard = options.FindStandard(standardName)
+                    ?? throw new PdmRuleException($"标准“{standardName}”未在代码维护中登记，请先维护对应代码。");
+                var category = options.FindCategory(categoryName)
+                    ?? throw new PdmRuleException($"分类“{categoryName}”未在代码维护中登记，请先维护对应代码。");
+                standardCode = standard.Code;
+                categoryCode = category.Code;
             }
         }
         var normalized = command.Components.OrderBy(item => item.SortOrder).ToArray();
@@ -104,7 +118,7 @@ public sealed class EngineeringKitService(
             revision = new(revisionId, id, 1, EngineeringKitRevisionState.Draft, changeNote,
                 Components(revisionId, normalized, materialRows), actor, now, null, null);
             kit = new(id, null, manualModel, name, brand, description, null, [revision], actor, now, actor, now, 1,
-                command.ModelMode, standardCode, categoryCode);
+                command.ModelMode, standardName, standardCode, categoryName, categoryCode);
         }
         else
         {
@@ -119,7 +133,9 @@ public sealed class EngineeringKitService(
             {
                 Model = manualModel,
                 ModelMode = command.ModelMode,
+                StandardName = standardName,
                 StandardCode = standardCode,
+                CategoryName = categoryName,
                 CategoryCode = categoryCode,
                 Name = name,
                 Brand = brand,

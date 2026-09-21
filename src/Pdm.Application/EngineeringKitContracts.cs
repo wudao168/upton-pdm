@@ -17,7 +17,9 @@ public sealed record SaveEngineeringKitDraftCommand(
     long? ExpectedRowVersion = null,
     EngineeringKitModelMode ModelMode = EngineeringKitModelMode.Auto,
     string? Model = null,
+    string? StandardName = null,
     string? StandardCode = null,
+    string? CategoryName = null,
     string? CategoryCode = null);
 
 public sealed record ExpandEngineeringKitCommand(

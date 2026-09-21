@@ -30,7 +30,7 @@ describe('EngineeringKitLibrary', () => {
     vi.restoreAllMocks()
     api.listEngineeringKits.mockReset().mockResolvedValue([kit])
     api.listMaterials.mockReset().mockResolvedValue([])
-    api.getEngineeringKitOptions.mockReset().mockResolvedValue({ standardCodes: ['GB'], categoryCodes: ['0102'] })
+    api.getEngineeringKitOptions.mockReset().mockResolvedValue({ standardCodes: [{ name: '国家标准', code: 'GB' }], categoryCodes: [{ name: '结构件', code: '0102' }] })
     api.saveEngineeringKitOptions.mockReset()
     api.saveEngineeringKit.mockReset()
     api.publishEngineeringKit.mockReset().mockResolvedValue({ ...kit, rowVersion: 4 })

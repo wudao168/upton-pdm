@@ -2,7 +2,7 @@
 import { computed, onMounted, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { getEngineeringKitOptions, listEngineeringKits, listMaterials, publishEngineeringKit, saveEngineeringKit, saveEngineeringKitOptions } from '../api'
-import type { EngineeringKit, EngineeringKitOptionCatalog, PdmMaterial } from '../types'
+import type { EngineeringKit, EngineeringKitOptionCatalog, EngineeringKitOptionEntry, PdmMaterial } from '../types'
 
 const props = defineProps<{ token: string; canManage: boolean }>()
 const loading = ref(false)
@@ -19,12 +19,14 @@ const optionSaving = ref(false)
 const optionDraft = ref<EngineeringKitOptionCatalog>({ standardCodes: [], categoryCodes: [] })
 type OptionListKey = 'standardCodes' | 'categoryCodes'
 const optionSection = ref<OptionListKey>('standardCodes')
-const optionNewValue = ref('')
+const optionNewName = ref('')
+const optionNewCode = ref('')
 const optionEditingIndex = ref(-1)
-const optionEditingValue = ref('')
+const optionEditingName = ref('')
+const optionEditingCode = ref('')
 const form = ref({
   name: '', brand: '', description: '', changeNote: '',
-  modelMode: 'Auto' as 'Auto' | 'Manual', model: '', standardCode: '', categoryCode: '',
+  modelMode: 'Auto' as 'Auto' | 'Manual', model: '', standardName: '', categoryName: '',
   components: [] as Array<{ materialId: string; quantity: number; isOptional: false }>,
 })
 
@@ -35,7 +37,14 @@ const filteredKits = computed(() => {
   return kits.value.filter(item => [item.code, item.model, item.name, item.brand].some(value => value?.toLowerCase().includes(keyword)))
 })
 const optionLists = computed(() => optionDraft.value[optionSection.value])
-const autoModelHint = computed(() => `${form.value.standardCode.trim() || '标准代码'}-${form.value.categoryCode.trim() || '分类代码'}-序列号`)
+function codeForName(entries: EngineeringKitOptionEntry[], name: string) {
+  const normalized = name.trim()
+  if (!normalized) return ''
+  return entries.find(item => item.name.trim().toLowerCase() === normalized.toLowerCase())?.code ?? ''
+}
+const selectedStandardCode = computed(() => codeForName(kitOptions.value.standardCodes, form.value.standardName))
+const selectedCategoryCode = computed(() => codeForName(kitOptions.value.categoryCodes, form.value.categoryName))
+const autoModelHint = computed(() => `${selectedStandardCode.value || '标准代码'}-${selectedCategoryCode.value || '分类代码'}-序列号`)
 
 function draftRevision(kit?: EngineeringKit | null) {
   return kit ? [...kit.revisions].filter(item => item.state === 'Draft').sort((a, b) => b.versionNumber - a.versionNumber)[0] : undefined
@@ -81,8 +90,8 @@ function openEditor(kit?: EngineeringKit) {
     changeNote: draftRevision(kit)?.changeNote ?? '',
     modelMode: kit?.modelMode === 'Manual' ? 'Manual' : 'Auto',
     model: kit?.modelMode === 'Manual' ? kit?.model ?? '' : '',
-    standardCode: kit?.standardCode ?? '',
-    categoryCode: kit?.categoryCode ?? '',
+    standardName: kit?.standardName ?? '',
+    categoryName: kit?.categoryName ?? '',
     components: revision?.components.map(item => ({ materialId: item.materialId, quantity: item.quantity, isOptional: false })) ?? [],
   }
   editorOpen.value = true
@@ -102,8 +111,8 @@ async function save() {
   if (!form.value.name.trim()) return ElMessage.warning('请填写套件名称')
   if (!form.value.brand.trim()) return ElMessage.warning('请填写套件品牌')
   if (form.value.modelMode === 'Manual' && !form.value.model.trim()) return ElMessage.warning('请填写套件型号，或改为自动生成')
-  if (form.value.modelMode === 'Auto' && (!form.value.standardCode.trim() || !form.value.categoryCode.trim()))
-    return ElMessage.warning('自动生成型号需要先选择标准代码和分类代码')
+  if (form.value.modelMode === 'Auto' && (!form.value.standardName.trim() || !form.value.categoryName.trim()))
+    return ElMessage.warning('自动生成型号需要先选择标准名称和分类名称')
   if (form.value.components.length === 0) return ElMessage.warning('套件至少需要一个明细物料')
   if (form.value.components.some(item => !item.materialId || item.quantity <= 0)) return ElMessage.warning('请完整填写物料和每套数量')
   if (new Set(form.value.components.map(item => item.materialId)).size !== form.value.components.length) return ElMessage.warning('同一真实物料只能出现一次')
@@ -116,8 +125,10 @@ async function save() {
       changeNote: form.value.changeNote.trim(),
       modelMode: form.value.modelMode,
       model: form.value.model.trim(),
-      standardCode: form.value.standardCode.trim(),
-      categoryCode: form.value.categoryCode.trim(),
+      standardName: form.value.standardName.trim(),
+      standardCode: selectedStandardCode.value,
+      categoryName: form.value.categoryName.trim(),
+      categoryCode: selectedCategoryCode.value,
       components: form.value.components.map((item, index) => ({ ...item, isOptional: false, sortOrder: index + 1 })),
       expectedRowVersion: editing.value?.rowVersion,
     }, props.token, editing.value?.id)
@@ -133,20 +144,24 @@ async function save() {
 
 function openOptionMaintenance() {
   optionDraft.value = {
-    standardCodes: [...kitOptions.value.standardCodes],
-    categoryCodes: [...kitOptions.value.categoryCodes],
+    standardCodes: kitOptions.value.standardCodes.map(item => ({ ...item })),
+    categoryCodes: kitOptions.value.categoryCodes.map(item => ({ ...item })),
   }
   optionSection.value = 'standardCodes'
-  optionNewValue.value = ''
+  optionNewName.value = ''
+  optionNewCode.value = ''
   cancelOptionEdit()
   optionDialogOpen.value = true
 }
 
 function addOption() {
-  const value = optionNewValue.value.trim()
-  if (!value || optionLists.value.includes(value)) return
-  optionLists.value.push(value)
-  optionNewValue.value = ''
+  const name = optionNewName.value.trim()
+  const code = optionNewCode.value.trim()
+  if (!name || !code) return
+  if (optionLists.value.some(item => item.name.trim().toLowerCase() === name.toLowerCase())) return
+  optionLists.value.push({ name, code })
+  optionNewName.value = ''
+  optionNewCode.value = ''
 }
 
 function removeOption(index: number) {
@@ -165,21 +180,24 @@ function moveOption(index: number, direction: -1 | 1) {
 
 function startOptionEdit(index: number) {
   optionEditingIndex.value = index
-  optionEditingValue.value = optionLists.value[index] ?? ''
+  optionEditingName.value = optionLists.value[index]?.name ?? ''
+  optionEditingCode.value = optionLists.value[index]?.code ?? ''
 }
 
 function commitOptionEdit() {
   const index = optionEditingIndex.value
-  const value = optionEditingValue.value.trim()
+  const name = optionEditingName.value.trim()
+  const code = optionEditingCode.value.trim()
   if (index < 0) return
-  if (!value) return cancelOptionEdit()
-  optionLists.value.splice(index, 1, value)
+  if (!name || !code) return cancelOptionEdit()
+  optionLists.value.splice(index, 1, { name, code })
   cancelOptionEdit()
 }
 
 function cancelOptionEdit() {
   optionEditingIndex.value = -1
-  optionEditingValue.value = ''
+  optionEditingName.value = ''
+  optionEditingCode.value = ''
 }
 
 async function saveOptionMaintenance() {
@@ -266,8 +284,8 @@ onMounted(load)
             <el-input v-if="form.modelMode === 'Manual'" v-model="form.model" maxlength="160" placeholder="请输入套件型号" />
             <template v-else>
               <div class="engineering-kit-model-codes">
-                <el-select v-model="form.standardCode" filterable clearable placeholder="标准代码"><el-option v-for="item in kitOptions.standardCodes" :key="item" :label="item" :value="item" /></el-select>
-                <el-select v-model="form.categoryCode" filterable clearable placeholder="分类代码"><el-option v-for="item in kitOptions.categoryCodes" :key="item" :label="item" :value="item" /></el-select>
+                <el-select v-model="form.standardName" filterable clearable placeholder="标准名称"><el-option v-for="item in kitOptions.standardCodes" :key="item.name" :label="`${item.name}（${item.code}）`" :value="item.name" /></el-select>
+                <el-select v-model="form.categoryName" filterable clearable placeholder="分类名称"><el-option v-for="item in kitOptions.categoryCodes" :key="item.name" :label="`${item.name}（${item.code}）`" :value="item.name" /></el-select>
               </div>
               <small class="engineering-kit-model-hint">首次发布时生成：{{ autoModelHint }}（当前 {{ editing?.model || '未生成' }}）</small>
             </template>
@@ -303,20 +321,22 @@ onMounted(load)
     </template>
 
     <el-dialog v-model="optionDialogOpen" title="套件代码维护" width="min(640px, calc(100vw - 32px))">
-      <p class="engineering-kit-option-hint">标准代码、分类代码在这里维护好后，套件按「标准代码-分类代码-序列号」自动生成型号时从这些值中选择。</p>
+      <p class="engineering-kit-option-hint">按“分类名称 + 代码”维护标准代码与分类代码；套件里选择分类名称，型号按「标准代码-分类代码-序列号」生成。</p>
       <el-radio-group v-model="optionSection" class="engineering-kit-option-tabs">
         <el-radio-button label="standardCodes">标准代码</el-radio-button>
         <el-radio-button label="categoryCodes">分类代码</el-radio-button>
       </el-radio-group>
       <div class="engineering-kit-option-list">
         <div v-if="!optionLists.length" class="engineering-kit-option-empty">暂无维护项，请在下方新增。</div>
-        <div v-for="(item, index) in optionLists" :key="item" class="engineering-kit-option-row">
+        <div v-for="(item, index) in optionLists" :key="`${item.name}-${item.code}`" class="engineering-kit-option-row">
           <template v-if="optionEditingIndex === index">
-            <el-input v-model="optionEditingValue" size="small" placeholder="输入代码" @keyup.enter="commitOptionEdit" />
+            <el-input v-model="optionEditingName" size="small" placeholder="分类名称" @keyup.enter="commitOptionEdit" />
+            <el-input v-model="optionEditingCode" size="small" placeholder="代码" @keyup.enter="commitOptionEdit" />
             <div class="engineering-kit-option-actions"><el-button link type="primary" @click="commitOptionEdit">确定</el-button><el-button link @click="cancelOptionEdit">取消</el-button></div>
           </template>
           <template v-else>
-            <strong>{{ item }}</strong>
+            <strong>{{ item.name }}</strong>
+            <code>{{ item.code }}</code>
             <div class="engineering-kit-option-actions">
               <el-button link :disabled="index === 0" @click="moveOption(index, -1)">上移</el-button>
               <el-button link :disabled="index === optionLists.length - 1" @click="moveOption(index, 1)">下移</el-button>
@@ -326,8 +346,9 @@ onMounted(load)
           </template>
         </div>
         <div class="engineering-kit-option-row is-new">
-          <el-input v-model="optionNewValue" size="small" placeholder="输入代码" @keyup.enter="addOption" />
-          <div class="engineering-kit-option-actions"><el-button type="primary" size="small" :disabled="!optionNewValue.trim()" @click="addOption">新增</el-button></div>
+          <el-input v-model="optionNewName" size="small" placeholder="分类名称" @keyup.enter="addOption" />
+          <el-input v-model="optionNewCode" size="small" placeholder="代码" @keyup.enter="addOption" />
+          <div class="engineering-kit-option-actions"><el-button type="primary" size="small" :disabled="!optionNewName.trim() || !optionNewCode.trim()" @click="addOption">新增</el-button></div>
         </div>
       </div>
       <template #footer><el-button @click="optionDialogOpen = false">取消</el-button><el-button type="primary" :loading="optionSaving" @click="saveOptionMaintenance">保存</el-button></template>
@@ -336,5 +357,5 @@ onMounted(load)
 </template>
 
 <style scoped>
-.engineering-kit-library{display:flex;height:100%;min-height:0;flex-direction:column;overflow:hidden}.engineering-kit-library__header,.engineering-kit-editor__title{display:flex;padding:10px 16px;border-bottom:1px solid #e5eaf1;align-items:center;justify-content:space-between}.engineering-kit-library__header h1,.engineering-kit-editor__title h1{margin:0;font-size:18px}.engineering-kit-library__header p,.engineering-kit-editor__title>span{margin:4px 0 0;color:var(--pdm-muted);font-size:12px}.engineering-kit-library__toolbar{display:flex;padding:10px 16px;align-items:center;gap:12px}.engineering-kit-library__toolbar .el-input{max-width:420px}.engineering-kit-library__toolbar span{color:var(--pdm-muted);font-size:12px}.engineering-kit-library>:deep(.el-table){min-height:0;flex:1}.kit-code{color:var(--pdm-green)}.engineering-kit-editor__title>div{display:flex;align-items:center;gap:12px}.engineering-kit-editor{padding:12px 16px;overflow:auto}.engineering-kit-summary{display:grid;overflow:hidden;border:1px solid #dfe6ef;border-radius:8px;grid-template-columns:1.05fr 1.25fr 1.5fr 1.1fr 1.2fr .85fr .9fr}.engineering-kit-library__actions{display:flex;gap:8px}.engineering-kit-summary .is-model{gap:6px}.engineering-kit-model-codes{display:grid;gap:6px;grid-template-columns:1fr 1fr}.engineering-kit-model-hint{color:var(--pdm-muted);font-size:11px}.engineering-kit-option-hint{margin:0 0 10px;color:var(--pdm-muted);font-size:12px}.engineering-kit-option-tabs{margin-bottom:10px}.engineering-kit-option-list{display:grid;gap:6px;max-height:52vh;overflow:auto}.engineering-kit-option-row{min-height:34px;display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:center;gap:8px;border:1px solid var(--pdm-border);border-radius:6px;padding:5px 9px}.engineering-kit-option-row strong{min-width:0;overflow:hidden;font-size:12px;text-overflow:ellipsis;white-space:nowrap}.engineering-kit-option-row.is-new{border-style:dashed}.engineering-kit-option-actions{display:flex;align-items:center;gap:4px}.engineering-kit-option-empty{padding:12px;color:var(--pdm-muted);font-size:12px;text-align:center}.engineering-kit-summary>div{display:flex;min-height:68px;padding:9px 12px;border-right:1px solid #dfe6ef;flex-direction:column;justify-content:center;gap:8px}.engineering-kit-summary>div:last-child{border-right:0}.engineering-kit-summary label,.engineering-kit-change-note>span,.engineering-kit-group__header label>span{color:var(--pdm-text-soft);font-size:12px;font-weight:600}.engineering-kit-summary strong{display:flex;min-height:32px;align-items:center}.engineering-kit-change-note{display:grid;margin:12px 0;align-items:center;grid-template-columns:82px 1fr}.engineering-kit-group{padding:12px;border:1px solid #cbdced;border-radius:8px;background:#f7fbff}.engineering-kit-group__header{display:flex;margin-bottom:10px;align-items:center;gap:12px}.engineering-kit-group__header label{display:flex;align-items:center;gap:10px}.engineering-kit-group-name{width:200px}.engineering-kit-group__count{color:var(--pdm-muted);font-size:12px}.engineering-kit-group__header>.el-button{margin-left:auto}.engineering-kit-editor__footer{display:flex;margin-top:14px;justify-content:flex-end;gap:8px}@media(max-width:1000px){.engineering-kit-summary{grid-template-columns:repeat(2,1fr)}.engineering-kit-summary>div{border-bottom:1px solid #dfe6ef}.engineering-kit-editor__title{align-items:flex-start;flex-direction:column;gap:6px}}
+.engineering-kit-library{display:flex;height:100%;min-height:0;flex-direction:column;overflow:hidden}.engineering-kit-library__header,.engineering-kit-editor__title{display:flex;padding:10px 16px;border-bottom:1px solid #e5eaf1;align-items:center;justify-content:space-between}.engineering-kit-library__header h1,.engineering-kit-editor__title h1{margin:0;font-size:18px}.engineering-kit-library__header p,.engineering-kit-editor__title>span{margin:4px 0 0;color:var(--pdm-muted);font-size:12px}.engineering-kit-library__toolbar{display:flex;padding:10px 16px;align-items:center;gap:12px}.engineering-kit-library__toolbar .el-input{max-width:420px}.engineering-kit-library__toolbar span{color:var(--pdm-muted);font-size:12px}.engineering-kit-library>:deep(.el-table){min-height:0;flex:1}.kit-code{color:var(--pdm-green)}.engineering-kit-editor__title>div{display:flex;align-items:center;gap:12px}.engineering-kit-editor{padding:12px 16px;overflow:auto}.engineering-kit-summary{display:grid;overflow:hidden;border:1px solid #dfe6ef;border-radius:8px;grid-template-columns:1.05fr 1.25fr 1.5fr 1.1fr 1.2fr .85fr .9fr}.engineering-kit-library__actions{display:flex;gap:8px}.engineering-kit-summary .is-model{gap:6px}.engineering-kit-model-codes{display:grid;gap:6px;grid-template-columns:1fr 1fr}.engineering-kit-model-hint{color:var(--pdm-muted);font-size:11px}.engineering-kit-option-hint{margin:0 0 10px;color:var(--pdm-muted);font-size:12px}.engineering-kit-option-tabs{margin-bottom:10px}.engineering-kit-option-list{display:grid;gap:6px;max-height:52vh;overflow:auto}.engineering-kit-option-row{min-height:34px;display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr) auto;align-items:center;gap:8px;border:1px solid var(--pdm-border);border-radius:6px;padding:5px 9px}.engineering-kit-option-row code{color:var(--pdm-muted);font-size:12px}.engineering-kit-option-row strong{min-width:0;overflow:hidden;font-size:12px;text-overflow:ellipsis;white-space:nowrap}.engineering-kit-option-row.is-new{border-style:dashed}.engineering-kit-option-actions{display:flex;align-items:center;gap:4px}.engineering-kit-option-empty{padding:12px;color:var(--pdm-muted);font-size:12px;text-align:center}.engineering-kit-summary>div{display:flex;min-height:68px;padding:9px 12px;border-right:1px solid #dfe6ef;flex-direction:column;justify-content:center;gap:8px}.engineering-kit-summary>div:last-child{border-right:0}.engineering-kit-summary label,.engineering-kit-change-note>span,.engineering-kit-group__header label>span{color:var(--pdm-text-soft);font-size:12px;font-weight:600}.engineering-kit-summary strong{display:flex;min-height:32px;align-items:center}.engineering-kit-change-note{display:grid;margin:12px 0;align-items:center;grid-template-columns:82px 1fr}.engineering-kit-group{padding:12px;border:1px solid #cbdced;border-radius:8px;background:#f7fbff}.engineering-kit-group__header{display:flex;margin-bottom:10px;align-items:center;gap:12px}.engineering-kit-group__header label{display:flex;align-items:center;gap:10px}.engineering-kit-group-name{width:200px}.engineering-kit-group__count{color:var(--pdm-muted);font-size:12px}.engineering-kit-group__header>.el-button{margin-left:auto}.engineering-kit-editor__footer{display:flex;margin-top:14px;justify-content:flex-end;gap:8px}@media(max-width:1000px){.engineering-kit-summary{grid-template-columns:repeat(2,1fr)}.engineering-kit-summary>div{border-bottom:1px solid #dfe6ef}.engineering-kit-editor__title{align-items:flex-start;flex-direction:column;gap:6px}}
 </style>

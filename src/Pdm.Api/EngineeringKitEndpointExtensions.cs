@@ -80,7 +80,9 @@ public sealed record SaveEngineeringKitRequest(
     IReadOnlyList<SaveEngineeringKitComponentRequest> Components,
     string? ModelMode = null,
     string? Model = null,
+    string? StandardName = null,
     string? StandardCode = null,
+    string? CategoryName = null,
     string? CategoryCode = null,
     long? ExpectedRowVersion = null)
 {
@@ -90,7 +92,7 @@ public sealed record SaveEngineeringKitRequest(
         string.Equals(ModelMode, nameof(EngineeringKitModelMode.Manual), StringComparison.OrdinalIgnoreCase)
             ? EngineeringKitModelMode.Manual
             : EngineeringKitModelMode.Auto,
-        Model, StandardCode, CategoryCode);
+        Model, StandardName, StandardCode, CategoryName, CategoryCode);
 }
 
 public sealed record PublishEngineeringKitRequest(long ExpectedRowVersion);

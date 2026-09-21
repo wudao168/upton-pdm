@@ -766,13 +766,20 @@ export interface EngineeringKit {
   updatedAt: string
   rowVersion: number
   modelMode?: 'Auto' | 'Manual'
+  standardName?: string | null
   standardCode?: string | null
+  categoryName?: string | null
   categoryCode?: string | null
 }
 
+export interface EngineeringKitOptionEntry {
+  name: string
+  code: string
+}
+
 export interface EngineeringKitOptionCatalog {
-  standardCodes: string[]
-  categoryCodes: string[]
+  standardCodes: EngineeringKitOptionEntry[]
+  categoryCodes: EngineeringKitOptionEntry[]
 }
 
 export interface EngineeringKitExpansionLine {

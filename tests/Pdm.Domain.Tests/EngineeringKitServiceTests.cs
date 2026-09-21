@@ -16,12 +16,13 @@ public sealed class EngineeringKitServiceTests
         var service = new EngineeringKitService(kits, materials, pdm, time);
         var required = Material("0102000001", "必选螺栓");
         await materials.UpsertU9MaterialAsync(required, CancellationToken.None);
+        await SeedOptionsAsync(service);
 
         // 自动生成：型号 = 标准代码-分类代码-序列号
         var autoDraft = await service.SaveDraftAsync(null, new(
             "自动型号套件", "UPTON", "备注信息", "首次建立",
             [new(required.Id, 1, false, 1)],
-            ModelMode: EngineeringKitModelMode.Auto, StandardCode: "GB", CategoryCode: "0102"),
+            ModelMode: EngineeringKitModelMode.Auto, StandardName: "国家标准", CategoryName: "结构件"),
             "developer", UserRole.Administrator, CancellationToken.None);
         Assert.Equal("备注信息", autoDraft.Description);
         Assert.Null(autoDraft.Model);
@@ -53,6 +54,7 @@ public sealed class EngineeringKitServiceTests
         var materials = new InMemoryMaterialRepository(time);
         var pdm = new InMemoryPdmRepository(time);
         var service = new EngineeringKitService(kits, materials, pdm, time);
+        await SeedOptionsAsync(service);
         var required = Material("0102000001", "必选螺栓");
         var second = Material("0102000002", "配套垫圈");
         await materials.UpsertU9MaterialAsync(required, CancellationToken.None);
@@ -61,7 +63,7 @@ public sealed class EngineeringKitServiceTests
         var draft = await service.SaveDraftAsync(null, new(
             "安装附件套件", "UPTON", null, "首次建立",
             [new(required.Id, 5, false, 1), new(second.Id, 2, false, 2)],
-            StandardCode: "GB", CategoryCode: "0102"),
+            StandardName: "国家标准", CategoryName: "结构件"),
             "developer", UserRole.Administrator, CancellationToken.None);
 
         Assert.Null(draft.Code);
@@ -88,9 +90,10 @@ public sealed class EngineeringKitServiceTests
         var materials = new InMemoryMaterialRepository(time);
         var pdm = new InMemoryPdmRepository(time);
         var service = new EngineeringKitService(kits, materials, pdm, time);
+        await SeedOptionsAsync(service);
         var material = Material("0102000003", "定位销");
         await materials.UpsertU9MaterialAsync(material, CancellationToken.None);
-        var draft = await service.SaveDraftAsync(null, new("定位套件", "UPTON", null, null, [new(material.Id, 1, false, 1)], StandardCode: "GB", CategoryCode: "0102"), "developer", UserRole.Administrator, CancellationToken.None);
+        var draft = await service.SaveDraftAsync(null, new("定位套件", "UPTON", null, null, [new(material.Id, 1, false, 1)], StandardName: "国家标准", CategoryName: "结构件"), "developer", UserRole.Administrator, CancellationToken.None);
         var released = await service.PublishAsync(draft.Id, draft.RowVersion, "developer", UserRole.Administrator, CancellationToken.None);
 
         var changed = await service.SaveDraftAsync(released.Id,
@@ -109,17 +112,24 @@ public sealed class EngineeringKitServiceTests
     {
         var time = TimeProvider.System;
         var service = new EngineeringKitService(new InMemoryEngineeringKitRepository(), new InMemoryMaterialRepository(time), new InMemoryPdmRepository(time), time);
+        await SeedOptionsAsync(service);
 
         var allOptional = await Assert.ThrowsAsync<PdmRuleException>(() => service.SaveDraftAsync(null,
-            new("不允许可选件", "UPTON", null, null, [new(Guid.NewGuid(), 1, true, 1)], StandardCode: "GB", CategoryCode: "0102"),
+            new("不允许可选件", "UPTON", null, null, [new(Guid.NewGuid(), 1, true, 1)], StandardName: "国家标准", CategoryName: "结构件"),
             "developer", UserRole.Administrator, CancellationToken.None));
         Assert.Contains("不支持可选子料", allOptional.Message);
 
         var unknown = await Assert.ThrowsAsync<PdmRuleException>(() => service.SaveDraftAsync(null,
-            new("嵌套尝试", "UPTON", null, null, [new(Guid.NewGuid(), 1, false, 1)], StandardCode: "GB", CategoryCode: "0102"),
+            new("嵌套尝试", "UPTON", null, null, [new(Guid.NewGuid(), 1, false, 1)], StandardName: "国家标准", CategoryName: "结构件"),
             "developer", UserRole.Administrator, CancellationToken.None));
         Assert.Contains("不能引用另一个套件", unknown.Message);
     }
+
+    private static async Task SeedOptionsAsync(EngineeringKitService service) =>
+        await service.SaveOptionCatalogAsync(new(
+            [new EngineeringKitOptionEntry("国家标准", "GB")],
+            [new EngineeringKitOptionEntry("结构件", "0102")]),
+            "developer", UserRole.Administrator, CancellationToken.None);
 
     private static PdmMaterial Material(string code, string name)
     {

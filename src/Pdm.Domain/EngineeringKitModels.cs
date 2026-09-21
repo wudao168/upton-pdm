@@ -15,13 +15,32 @@ public enum EngineeringKitModelMode
 }
 
 /// <summary>
-/// 套件型号自动生成用的可维护代码：型号 = 标准代码-分类代码-序列号（序列号取套件流水号）。
+/// 套件型号生成用的可维护代码项：维护“分类名称 + 代码”，型号里使用代码，界面上按名称选择。
+/// </summary>
+public sealed record EngineeringKitOptionEntry(
+    string Name,
+    string Code);
+
+/// <summary>
+/// 套件型号自动生成用的可维护选项：型号 = 标准代码-分类代码-序列号（序列号取套件流水号）。
+/// 标准代码、分类代码都按“分类名称 + 代码”维护，选择时按名称匹配对应代码。
 /// </summary>
 public sealed record EngineeringKitOptionCatalog(
-    IReadOnlyList<string> StandardCodes,
-    IReadOnlyList<string> CategoryCodes)
+    IReadOnlyList<EngineeringKitOptionEntry> StandardCodes,
+    IReadOnlyList<EngineeringKitOptionEntry> CategoryCodes)
 {
     public static EngineeringKitOptionCatalog Empty { get; } = new([], []);
+
+    public EngineeringKitOptionEntry? FindStandard(string? name) => Find(StandardCodes, name);
+
+    public EngineeringKitOptionEntry? FindCategory(string? name) => Find(CategoryCodes, name);
+
+    private static EngineeringKitOptionEntry? Find(IReadOnlyList<EngineeringKitOptionEntry> entries, string? name)
+    {
+        var normalized = name?.Trim();
+        if (string.IsNullOrEmpty(normalized)) return null;
+        return entries.FirstOrDefault(item => string.Equals(item.Name?.Trim(), normalized, StringComparison.OrdinalIgnoreCase));
+    }
 }
 
 public sealed record EngineeringKitComponent(
@@ -62,7 +81,9 @@ public sealed record EngineeringKit(
     DateTimeOffset UpdatedAt,
     long RowVersion,
     EngineeringKitModelMode ModelMode = EngineeringKitModelMode.Auto,
+    string? StandardName = null,
     string? StandardCode = null,
+    string? CategoryName = null,
     string? CategoryCode = null)
 {
     public EngineeringKitRevision? DraftRevision => Revisions
