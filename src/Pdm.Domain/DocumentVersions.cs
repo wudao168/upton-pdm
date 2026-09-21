@@ -99,30 +99,35 @@ public static class DocumentVersionDiff
 
     private static IEnumerable<BomSnapshotChange> CompareBom(IReadOnlyList<BomItem> previous, IReadOnlyList<BomItem> current, BomKind kind)
     {
-        var before = previous.ToDictionary(item => item.DrawingNumber, StringComparer.OrdinalIgnoreCase);
-        var after = current.ToDictionary(item => item.DrawingNumber, StringComparer.OrdinalIgnoreCase);
+        // 同一图号可能在BOM里出现多行（不同父级/不同规格），按图号分组比较，避免重复键直接抛异常。
+        var before = previous.GroupBy(item => item.DrawingNumber, StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(group => group.Key, group => group.ToArray(), StringComparer.OrdinalIgnoreCase);
+        var after = current.GroupBy(item => item.DrawingNumber, StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(group => group.Key, group => group.ToArray(), StringComparer.OrdinalIgnoreCase);
         foreach (var drawingNumber in before.Keys.Concat(after.Keys).Distinct(StringComparer.OrdinalIgnoreCase).OrderBy(value => value, StringComparer.OrdinalIgnoreCase))
         {
             if (!before.TryGetValue(drawingNumber, out var oldItem))
             {
-                yield return new BomSnapshotChange(kind, BomChangeKind.Added, drawingNumber, "物料", null, after[drawingNumber].Name);
+                yield return new BomSnapshotChange(kind, BomChangeKind.Added, drawingNumber, "物料", null, after[drawingNumber][0].Name);
                 continue;
             }
 
             if (!after.TryGetValue(drawingNumber, out var newItem))
             {
-                yield return new BomSnapshotChange(kind, BomChangeKind.Removed, drawingNumber, "物料", oldItem.Name, null);
+                yield return new BomSnapshotChange(kind, BomChangeKind.Removed, drawingNumber, "物料", oldItem[0].Name, null);
                 continue;
             }
 
-            if (oldItem.Quantity != newItem.Quantity)
-                yield return Change(kind, BomChangeKind.QuantityChanged, drawingNumber, "数量", oldItem.Quantity, newItem.Quantity);
-            if (!string.Equals(oldItem.Material, newItem.Material, StringComparison.Ordinal))
-                yield return Change(kind, BomChangeKind.MaterialChanged, drawingNumber, "材料", oldItem.Material, newItem.Material);
-            if (!string.Equals(oldItem.Specification, newItem.Specification, StringComparison.Ordinal))
-                yield return Change(kind, BomChangeKind.SpecificationChanged, drawingNumber, "规格", oldItem.Specification, newItem.Specification);
-            if (!string.Equals(oldItem.Revision, newItem.Revision, StringComparison.Ordinal))
-                yield return Change(kind, BomChangeKind.RevisionChanged, drawingNumber, "版本", oldItem.Revision, newItem.Revision);
+            var previousQuantity = oldItem.Sum(item => item.Quantity);
+            var currentQuantity = newItem.Sum(item => item.Quantity);
+            if (previousQuantity != currentQuantity)
+                yield return Change(kind, BomChangeKind.QuantityChanged, drawingNumber, "数量", previousQuantity, currentQuantity);
+            if (!string.Equals(oldItem[0].Material, newItem[0].Material, StringComparison.Ordinal))
+                yield return Change(kind, BomChangeKind.MaterialChanged, drawingNumber, "材料", oldItem[0].Material, newItem[0].Material);
+            if (!string.Equals(oldItem[0].Specification, newItem[0].Specification, StringComparison.Ordinal))
+                yield return Change(kind, BomChangeKind.SpecificationChanged, drawingNumber, "规格", oldItem[0].Specification, newItem[0].Specification);
+            if (!string.Equals(oldItem[0].Revision, newItem[0].Revision, StringComparison.Ordinal))
+                yield return Change(kind, BomChangeKind.RevisionChanged, drawingNumber, "版本", oldItem[0].Revision, newItem[0].Revision);
         }
     }
 

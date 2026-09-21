@@ -555,6 +555,31 @@ public sealed class DocumentVersionTests
     }
 
     [Fact]
+    public void Compare_ToleratesDuplicateDrawingNumbersInBomSnapshot()
+    {
+        var documentId = Guid.NewGuid();
+        var leftBom = new[]
+        {
+            new BomItem(Guid.NewGuid(), Guid.NewGuid(), BomKind.Mechanical, 1, "P-001", "Part", 2, "件", "Q235", "10", "A", true),
+            new BomItem(Guid.NewGuid(), Guid.NewGuid(), BomKind.Mechanical, 2, "P-001", "Part", 3, "件", "Q235", "10", "A", true),
+        };
+        var rightBom = new[]
+        {
+            new BomItem(Guid.NewGuid(), Guid.NewGuid(), BomKind.Mechanical, 1, "P-001", "Part", 4, "件", "Q235", "10", "A", true),
+            new BomItem(Guid.NewGuid(), Guid.NewGuid(), BomKind.Mechanical, 2, "P-001", "Part", 3, "件", "Q235", "10", "A", true),
+        };
+        var left = Version(documentId, "A-W1", "Q235", 1, 2, "Q235", "A") with { MechanicalBomSnapshot = leftBom };
+        var right = Version(documentId, "B", "Q235", 1, 4, "Q235", "A") with { MechanicalBomSnapshot = rightBom };
+
+        var result = DocumentVersionDiff.Compare(left, right);
+
+        var quantityChange = Assert.Single(result.BomChanges, change => change.Kind == BomChangeKind.QuantityChanged);
+        Assert.Equal("P-001", quantityChange.DrawingNumber);
+        Assert.Equal("5", quantityChange.PreviousValue);
+        Assert.Equal("7", quantityChange.CurrentValue);
+    }
+
+    [Fact]
     public async Task CheckInWithSameFileHash_ForceVersionCreatesNextWorkVersion()
     {
         var repository = new Infrastructure.InMemoryPdmRepository(TimeProvider.System);
