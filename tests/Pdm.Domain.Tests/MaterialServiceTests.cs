@@ -39,13 +39,13 @@ public sealed class MaterialServiceTests
     {
         var service = CreateService(out _, out var repository, out _);
         var created = await service.CreateAsync(new(
-            null, "待退回普通料品", MaterialKind.Standard, MaterialSupplyMode.Purchase, "001",
+            null, "待驳回普通料品", MaterialKind.Standard, MaterialSupplyMode.Purchase, "001",
             "MODEL-REJECT", null, null, "UPTON", null, null, null, CategoryCode: "0102"),
             "engineer", UserRole.Engineer, default);
 
         var missingReason = await Assert.ThrowsAsync<PdmRuleException>(() =>
             service.RejectAsync(created.Id, created.RowVersion, "   ", "standardizer", UserRole.ProcessReviewer, default));
-        Assert.Equal("退回料品申请时必须填写原因。", missingReason.Message);
+        Assert.Equal("驳回料品申请时必须填写原因。", missingReason.Message);
 
         var rejected = await service.RejectAsync(
             created.Id, created.RowVersion, "  型号资料不完整  ", "standardizer", UserRole.ProcessReviewer, default);
@@ -55,7 +55,7 @@ public sealed class MaterialServiceTests
         Assert.Empty(await service.ListPendingMasterMaterialsAsync("standardizer", UserRole.ProcessReviewer, default));
         var notification = Assert.Single(await repository.ListUserNotificationsAsync("engineer", 20, default));
         Assert.Equal("MaterialMasterRejected", notification.Category);
-        Assert.Equal("料品申请已退回", notification.Title);
+        Assert.Equal("料品申请已驳回", notification.Title);
         Assert.Contains("型号资料不完整", notification.Content);
     }
 

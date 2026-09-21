@@ -54,6 +54,7 @@ const previewError = ref('')
 const webPreviewFormat = ref<'Step' | 'Pdf'>()
 const webPreviewUrl = ref('')
 const webStepBuffer = ref<ArrayBuffer>()
+const webPreviewNotice = ref('')
 const previewSessionActivated = ref(false)
 const lightweightPreviewState = ref<'loading' | 'ready' | 'unavailable'>('loading')
 const lightweightPreviewUrl = ref('')
@@ -228,6 +229,7 @@ function clearWebPreview() {
   webPreviewUrl.value = ''
   webStepBuffer.value = undefined
   webPreviewFormat.value = undefined
+  webPreviewNotice.value = ''
 }
 
 function normalizedPreviewFormat(value: string | number): 'Step' | 'Pdf' {
@@ -251,14 +253,22 @@ async function startPreview() {
       const versions = await listDocumentVersions(props.selected.documentId, props.accessToken)
       if (request !== webPreviewRequest) return
       const expectedRevision = props.reviewRevision || props.selected.snapshotVersion || props.selected.version
-      const version = props.reviewVersionId
+      const requested = props.reviewVersionId
         ? versions.find(item => item.id === props.reviewVersionId)
-        : versions.find(item => item.revision.display === expectedRevision) ?? versions[0]
+        : versions.find(item => item.revision.display === expectedRevision)
+      // 工作版本签入时不生成预览：这里回退到已生成预览的版本（通常是正式版本），并提示实际展示的版本；
+      // 审核冻结版本（reviewVersionId）仍然只看它自己，不做回退。
+      const fallback = !props.reviewVersionId && !requested?.preview
+        ? versions.find(item => item.preview)
+        : undefined
+      const version = fallback ?? requested ?? versions[0]
       if (!version?.preview) {
         previewState.value = 'unavailable'
-        previewError.value = version ? '该历史版本尚未生成STP/PDF预览。' : '该图档尚无可预览版本。'
+        previewError.value = version ? '该图档还没有生成STP/PDF预览。' : '该图档尚无可预览版本。'
         return
       }
+      if (requested && version !== requested)
+        webPreviewNotice.value = `当前 ${expectedRevision} 版本还没有预览，以下是 ${version.revision.display} 版本的预览。`
       const format = normalizedPreviewFormat(version.preview.format)
       const blob = await readDocumentPreviewFile(props.selected.documentId, version.id, props.accessToken)
       if (request !== webPreviewRequest) return
@@ -473,7 +483,7 @@ onBeforeUnmount(() => {
             class="pdm-solidworks-edit pdm-preview-command"
             aria-label="编辑打开"
             :disabled="!selected.documentId || !solidWorksAvailable || solidWorksPending"
-            :title="solidWorksAvailable ? reviewEditable ? '该图已退回待修改：由客户端获取最新受控文件和编辑权限并打开，改完提交存档后回到审核栏点“重新提交”' : '由客户端获取PLM最新受控文件和编辑权限，并交给SolidWorks打开' : '当前电脑未安装SolidWorks或UPLM插件'"
+            :title="solidWorksAvailable ? reviewEditable ? '该图已驳回待修改：由客户端获取最新受控文件和编辑权限并打开，改完提交存档后回到审核栏点“重新提交”' : '由客户端获取PLM最新受控文件和编辑权限，并交给SolidWorks打开' : '当前电脑未安装SolidWorks或UPLM插件'"
             @click="openInSolidWorks('LatestEdit')"
           ><Rotate3D :size="15" />编辑打开</button>
           <button
@@ -520,6 +530,7 @@ onBeforeUnmount(() => {
         :data-preview-state="previewState"
         :aria-label="desktopAvailable ? '客户端内嵌eDrawings预览区' : '网页端图档预览状态'"
       >
+        <p v-if="!desktopAvailable && webPreviewNotice" class="pdm-preview-notice">{{ webPreviewNotice }}</p>
         <iframe
           v-if="!desktopAvailable && previewState === 'ready' && webPreviewFormat === 'Pdf' && webPreviewUrl"
           class="pdm-web-preview-frame"

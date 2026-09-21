@@ -9,7 +9,8 @@ namespace Upton.Pdm.Application;
 public sealed class ReleasePreviewService(
     IPdmRepository repository,
     IServerPreviewConverter previewConverter,
-    TimeProvider timeProvider)
+    TimeProvider timeProvider,
+    ReleaseDeliveryArchiveService? releaseDeliveryArchive = null)
 {
     public const int MaxAttempts = 5;
     private const int BatchSize = 5;
@@ -49,6 +50,17 @@ public sealed class ReleasePreviewService(
             var previews = await previewConverter.GenerateAsync(package, project, sources, stagingDirectory, cancellationToken);
             var releasedVersions = await repository.AttachReleasePreviewArtifactsAsync(package.Id, previews, cancellationToken);
             CopyPreviewsIntoPublishedPath(package, vaultRoot, releasedVersions);
+            // 转图补齐后发布目录多了 STEP/PDF，这里顺带把新增成品登记到"机械发布/电气发布"目录。
+            if (releaseDeliveryArchive is not null)
+            {
+                var archiveActor = package.ApprovalTasks
+                    .Where(task => task.DecisionBy is not null)
+                    .OrderBy(task => task.StepOrder)
+                    .LastOrDefault()?.DecisionBy
+                    ?? project.PrimaryProjectManager
+                    ?? "system";
+                await releaseDeliveryArchive.ArchiveAsync(package.Id, archiveActor, cancellationToken);
+            }
             await repository.MarkReleasePreviewStateAsync(package.Id, ReleasePreviewState.Succeeded, null, attempts, timeProvider.GetUtcNow(), cancellationToken);
             await NotifyAsync(package, project, "图纸转换已完成", $"STEP/PDF 已生成并绑定正式版本（第{attempts}次处理）", "result", cancellationToken);
             return true;
@@ -62,6 +74,15 @@ public sealed class ReleasePreviewService(
                 await NotifyAsync(package, project, "图纸转换多次失败",
                     $"已重试{attempts}次仍未生成 STEP/PDF：{exception.Message}；发布已完成，可在发布面板手动重试转图", "result", cancellationToken);
             return false;
+        }
+        catch (OperationCanceledException exception)
+        {
+            // 服务重启或整批运行超时会打断转图；必须落回可重排队的状态，否则发布面板会一直停在"转换中"并显示上一次的旧错误。
+            // 打断不是转换本身失败，因此不消耗重试次数。
+            await repository.MarkReleasePreviewStateAsync(package.Id, ReleasePreviewState.Pending,
+                $"转图处理被中断（服务停止或整批运行超时），已重新排队：{(string.IsNullOrWhiteSpace(exception.Message) ? "未返回原因" : exception.Message)}",
+                package.PreviewAttempts, timeProvider.GetUtcNow(), CancellationToken.None);
+            throw;
         }
     }
 

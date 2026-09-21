@@ -160,7 +160,7 @@ public sealed class ProgramTemplateService(
             throw new PdmRuleException("模板尚无已发布版本，请继续维护首版草稿。");
         if (rejectedInitial is not null && !string.Equals(rejectedInitial.CreatedBy, actor, StringComparison.OrdinalIgnoreCase)
             && !await HasPermissionAsync(actor, role, PermissionCodes.ProgramTemplateManage, cancellationToken))
-            throw new UnauthorizedAccessException("只能由原上传人根据退回意见创建修改稿。");
+            throw new UnauthorizedAccessException("只能由原上传人根据驳回意见创建修改稿。");
 
         var (major, minor, patch) = rejectedInitial is not null
             ? (rejectedInitial.VersionMajor, rejectedInitial.VersionMinor, rejectedInitial.VersionPatch)
@@ -370,7 +370,7 @@ public sealed class ProgramTemplateService(
         }
 
         if (command.Decision == ProgramTemplateApprovalDecision.Rejected && string.IsNullOrWhiteSpace(command.Comment))
-            throw new PdmRuleException("退回程序模板必须填写意见。");
+            throw new PdmRuleException("驳回程序模板必须填写意见。");
         var result = await templates.DecideAsync(task.Id, actor, command.Decision, Optional(command.Comment, 1000), command.ChecklistItems, command.ExpectedRowVersion, cancellationToken);
         await AuditAsync(actor, "program-template.decision", nameof(ProgramTemplateApprovalTask), task.Id, $"{task.Stage} {command.Decision} {result.Revision.VersionLabel}", cancellationToken);
         return result;

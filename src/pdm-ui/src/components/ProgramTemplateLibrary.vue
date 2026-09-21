@@ -113,7 +113,7 @@ const checklistKindLabels: Record<ProgramTemplateChecklistKind, string> = {
   PlcFunctionBlock: '功能块检查清单', PlcProgram: '整包程序检查清单', HmiTemplate: 'HMI检查清单',
 }
 const stateLabels: Record<ProgramTemplateRevision['state'], string> = {
-  Draft: '草稿', PendingReview: '待审核', PendingApproval: '待批准', Rejected: '已退回',
+  Draft: '草稿', PendingReview: '待审核', PendingApproval: '待批准', Rejected: '已驳回',
   Published: '已发布', Superseded: '已替代', Archived: '已停用',
 }
 const directionLabels: Record<ProgramTemplateParameterDirection, string> = { Input: '输入', Output: '输出', InOut: '双向' }
@@ -127,7 +127,7 @@ function revisionSort(left: ProgramTemplateRevision, right: ProgramTemplateRevis
 function latestRevision(template: ProgramTemplate) { return [...template.revisions].sort(revisionSort)[0] }
 
 function listRevision(template: ProgramTemplate) {
-  // 该模板我这边还有在处理中的版本（草稿/在审/被退回）时优先显示，否则显示已发布版本。
+  // 该模板我这边还有在处理中的版本（草稿/在审/被驳回）时优先显示，否则显示已发布版本。
   const inFlight = template.revisions
     .filter(item => item.createdBy.toLocaleLowerCase() === props.username.toLocaleLowerCase()
       && ['Draft', 'PendingReview', 'PendingApproval', 'Rejected'].includes(item.state))
@@ -219,7 +219,7 @@ const approvalFlow = computed<ApprovalFlowStep[]>(() => {
         ? displayUserName(task.decisionBy)
         : task.assignee ? displayUserName(task.assignee) : '具“批准程序模板”权限的负责人',
       result: decided
-        ? `${task.decision === 'Approved' ? (isReview ? '审核通过' : '批准发布') : '已退回'}${task.decidedAt ? ` · ${dateLabel(task.decidedAt)}` : ''}`
+        ? `${task.decision === 'Approved' ? (isReview ? '审核通过' : '批准发布') : '已驳回'}${task.decidedAt ? ` · ${dateLabel(task.decidedAt)}` : ''}`
         : '进行中',
       note: task.comment || '',
       tone: task.decision === 'Rejected' ? 'rejected' : decided ? 'done' : current ? 'active' : 'todo',
@@ -582,7 +582,7 @@ async function decide(decision: 'Approved' | 'Rejected') {
   let comment = decisionComment.value.trim()
   if (decision === 'Rejected' && !comment) {
     try {
-      const result = await ElMessageBox.prompt('请填写需要修改的内容。', '退回程序模板', { inputValidator: value => value.trim().length > 0 || '退回意见不能为空' })
+      const result = await ElMessageBox.prompt('请填写需要修改的内容。', '驳回程序模板', { inputValidator: value => value.trim().length > 0 || '驳回意见不能为空' })
       comment = result.value.trim()
     } catch (error) {
       if (error === 'cancel' || error === 'close') return
@@ -591,7 +591,7 @@ async function decide(decision: 'Approved' | 'Rejected') {
   }
   try {
     await decideProgramTemplateTask(task.id, decision, comment, checkedItems.value, task.rowVersion, props.token)
-    ElMessage.success(decision === 'Approved' ? (task.stage === 'Review' ? '审核已通过，进入批准' : '程序模板已批准发布') : '程序模板已退回')
+    ElMessage.success(decision === 'Approved' ? (task.stage === 'Review' ? '审核已通过，进入批准' : '程序模板已批准发布') : '程序模板已驳回')
     detailOpen.value = false
     await load()
     emit('tasksChanged')
@@ -684,7 +684,7 @@ onMounted(async () => {
 
         <section class="program-template-section is-properties"><h3>属性与受控文件</h3><dl class="program-template-properties"><div><dt>厂商</dt><dd>{{ activeRevision.vendor }}</dd></div><div><dt>平台</dt><dd>{{ activeRevision.platform }}</dd></div><div><dt>软件版本</dt><dd>{{ activeRevision.softwareVersion }}</dd></div><div><dt>适用系列</dt><dd>{{ activeRevision.applicableSeries || '—' }}</dd></div><div><dt>来源公司</dt><dd>{{ selected.originCompanyName || '集团共享' }}</dd></div><div><dt>上传人</dt><dd>{{ displayUserName(activeRevision.createdBy) }}</dd></div><div><dt>ZIP/RAR程序包</dt><dd>{{ activeRevision.packageFileName || '未上传' }} · {{ fileSize(activeRevision.packageFileLength) }}</dd></div><div><dt>离线测试证据</dt><dd>{{ activeRevision.evidenceFileName || '未上传' }}</dd></div><div class="is-wide"><dt>程序包 SHA-256</dt><dd><code>{{ activeRevision.packageSha256 || '—' }}</code></dd></div><div class="is-wide"><dt>版本说明</dt><dd>{{ activeRevision.changeNote }}</dd></div></dl></section>
 
-        <section v-if="activeTask" class="program-template-section program-template-decision is-decision"><h3>{{ activeTask.stage === 'Review' ? '电气组织审核' : '集团标准化批准' }}</h3><el-checkbox-group v-if="activeTask.requiredChecklist.length" v-model="checkedItems"><el-checkbox v-for="item in activeTask.requiredChecklist" :key="item" :label="item">{{ item }}</el-checkbox></el-checkbox-group><el-input v-model="decisionComment" type="textarea" :rows="3" placeholder="审批意见（退回时必填）" /></section>
+        <section v-if="activeTask" class="program-template-section program-template-decision is-decision"><h3>{{ activeTask.stage === 'Review' ? '电气组织审核' : '集团标准化批准' }}</h3><el-checkbox-group v-if="activeTask.requiredChecklist.length" v-model="checkedItems"><el-checkbox v-for="item in activeTask.requiredChecklist" :key="item" :label="item">{{ item }}</el-checkbox></el-checkbox-group><el-input v-model="decisionComment" type="textarea" :rows="3" placeholder="审批意见（驳回时必填）" /></section>
 
         <section class="program-template-section is-flow"><h3>审核流程</h3><ol class="program-template-flow"><li v-for="step in approvalFlow" :key="step.key" :class="`is-${step.tone}`"><strong>{{ step.title }}</strong><span>{{ step.person }}</span><small>{{ step.result }}</small><em v-if="step.note">{{ step.note }}</em></li></ol></section>
 
@@ -694,9 +694,9 @@ onMounted(async () => {
         <div class="program-template-detail-actions">
           <el-button v-if="canDeleteActiveDraft" type="danger" plain :loading="deletingDraft" @click="deleteActiveDraft">删除草稿</el-button>
           <el-button v-if="activeRevision?.state === 'Draft' && activeRevision.createdBy === username" @click="editActiveDraft">编辑草稿</el-button>
-          <el-button v-if="activeRevision?.state === 'Rejected' && activeRevision.createdBy === username && canSubmit && !selected?.revisions.some(item => ['Draft','PendingReview','PendingApproval'].includes(item.state))" @click="createNextVersion">根据退回意见修改</el-button>
+          <el-button v-if="activeRevision?.state === 'Rejected' && activeRevision.createdBy === username && canSubmit && !selected?.revisions.some(item => ['Draft','PendingReview','PendingApproval'].includes(item.state))" @click="createNextVersion">根据驳回意见修改</el-button>
           <el-button v-if="selected?.currentPublishedRevisionId && canSubmit && !selected.revisions.some(item => ['Draft','PendingReview','PendingApproval'].includes(item.state))" @click="versionDialogOpen = true">创建新版本</el-button>
-          <el-button v-if="activeTask" type="danger" plain @click="decide('Rejected')">退回</el-button>
+          <el-button v-if="activeTask" type="danger" plain @click="decide('Rejected')">驳回</el-button>
           <el-button v-if="activeTask" type="primary" @click="decide('Approved')">{{ activeTask.stage === 'Review' ? '审核通过' : '批准发布' }}</el-button>
           <el-button v-if="selected?.currentPublishedRevisionId && !selected.isArchived" type="primary" :icon="Download" @click="downloadCurrent">下载批准版本</el-button>
         </div>

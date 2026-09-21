@@ -44,6 +44,9 @@ public sealed record ProjectBomU9AutomaticResult(
     string Message,
     U9BomWriteExecution? Execution = null);
 
+/// <summary>发布前提醒项：某个BOM子件发布后无法自动同步到U9C的原因。</summary>
+public sealed record U9SyncBlocker(int Sequence, string Category, string MaterialCode, string Name, string Reason);
+
 public sealed class ProjectBomU9SyncService(
     IPdmRepository repository,
     IMaterialRepository materials,
@@ -282,15 +285,17 @@ public sealed class ProjectBomU9SyncService(
             .ToArray();
         var invalid = items.FirstOrDefault(item => item.IsPendingClassification || item.IsManualUnmatched || !item.IsComplete);
         if (invalid is not null)
-            throw new PdmRuleException($"BOM子件 {invalid.Name} 尚未完成分类或料号确认，不能同步到U9C。");
+            throw new PdmRuleException($"BOM子件 序号{invalid.Sequence} {invalid.Name} 尚未完成分类或料号确认，不能同步到U9C。");
 
         var result = new List<U9BomComponentCommand>(items.Length);
         foreach (var item in items)
         {
             var material = await materials.FindMaterialBySourceBomItemAsync(item.Id, cancellationToken)
                 ?? await materials.FindMaterialByCodeAsync(item.DrawingNumber.Trim(), cancellationToken);
-            if (material is null || !material.U9SyncConfirmed || string.IsNullOrWhiteSpace(material.U9ItemCode))
-                throw new PdmRuleException($"BOM子件 {item.Name}（{item.DrawingNumber}）尚未取得U9C正式料号。");
+            if (material is null || string.IsNullOrWhiteSpace(material.MaterialCode))
+                throw new PdmRuleException($"BOM子件 序号{item.Sequence} {item.Name} 尚未生成料品料号（缺料号），不能同步到U9C。");
+            if (!material.U9SyncConfirmed || string.IsNullOrWhiteSpace(material.U9ItemCode))
+                throw new PdmRuleException($"BOM子件 序号{item.Sequence} {item.Name}（{item.DrawingNumber}）尚未取得U9C正式料号。");
             result.Add(new(
                 result.Count == 0 ? 10 : result[^1].Sequence + 10,
                 OfficialCode(material),
@@ -301,6 +306,42 @@ public sealed class ProjectBomU9SyncService(
         }
         return new(true, result);
     }
+
+    /// <summary>
+    /// 发布前提醒（不拦截发布）：列出发布后无法自动同步到U9C的BOM子件——尚未完成分类/料号确认，或尚未取得U9C正式料号。
+    /// </summary>
+    public async Task<IReadOnlyList<U9SyncBlocker>> ListU9SyncBlockersAsync(Guid projectId, CancellationToken cancellationToken)
+    {
+        var blockers = new List<U9SyncBlocker>();
+        foreach (var kind in new[] { ProjectBomHeaderKind.Standard, ProjectBomHeaderKind.NonStandard, ProjectBomHeaderKind.Electrical })
+        {
+            var category = await ApprovedCategoryItemsAsync(projectId, kind, cancellationToken);
+            if (!category.Approved) continue;
+            var label = CategoryLabel(kind);
+            foreach (var item in category.Items.OrderBy(item => item.Sequence).ThenBy(item => item.Id))
+            {
+                if (item.IsPendingClassification || item.IsManualUnmatched || !item.IsComplete)
+                {
+                    blockers.Add(new(item.Sequence, label, item.DrawingNumber, item.Name, "尚未完成分类或料号确认"));
+                    continue;
+                }
+                var material = await materials.FindMaterialBySourceBomItemAsync(item.Id, cancellationToken)
+                    ?? await materials.FindMaterialByCodeAsync(item.DrawingNumber.Trim(), cancellationToken);
+                if (material is null || string.IsNullOrWhiteSpace(material.MaterialCode))
+                    blockers.Add(new(item.Sequence, label, item.DrawingNumber, item.Name, "尚未生成料品料号（缺料号）"));
+                else if (!material.U9SyncConfirmed || string.IsNullOrWhiteSpace(material.U9ItemCode))
+                    blockers.Add(new(item.Sequence, label, item.DrawingNumber, item.Name, "尚未取得U9C正式料号"));
+            }
+        }
+        return blockers;
+    }
+
+    private static string CategoryLabel(ProjectBomHeaderKind kind) => kind switch
+    {
+        ProjectBomHeaderKind.Standard => "标准件",
+        ProjectBomHeaderKind.NonStandard => "非标件",
+        _ => "电气件"
+    };
 
     private async Task<(bool Approved, IReadOnlyList<BomItem> Items)> ApprovedCategoryItemsAsync(
         Guid projectId,

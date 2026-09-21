@@ -133,7 +133,7 @@ const stagesDraft = ref<ProjectPlanStageDefinition[]>([])
 const stageConfigurationPlan = ref<ProjectPlan | null>(null)
 const selectedOwnerPlan = computed(() => timelineRows.value.find(row => row.task?.id === selectedTask.value?.id)?.plan)
 const isEffective = (value?: ProjectPlan | null) => value?.approvalStatus === 'Approved'
-const approvalLabel = (value?: ProjectPlan | null) => !value ? '未排程' : ({ Draft: '草稿', Pending: '待审批', Rejected: '已退回', Approved: '已生效' }[value.approvalStatus ?? 'Draft'])
+const approvalLabel = (value?: ProjectPlan | null) => !value ? '未排程' : ({ Draft: '草稿', Pending: '待审批', Rejected: '已驳回', Approved: '已生效' }[value.approvalStatus ?? 'Draft'])
 const canApprove = computed(() => !inheritedParentPlan.value && plan.value?.approvalStatus === 'Pending' && plan.value.approvalAssignee?.toLowerCase() === props.currentUsername.toLowerCase())
 
 const rootProject = computed(() => props.project.parentProjectId
@@ -1121,11 +1121,11 @@ async function decideChange(approve: boolean) {
   if (!plan.value || !canApproveChange.value) return
   saving.value = true
   try {
-    const result = await ElMessageBox.prompt(approve ? '批准后申请人获得一次变更权限并从现行计划创建草稿；草稿完成前原计划继续生效。' : '请填写退回原因；原计划不受影响。', approve ? '批准变更权限' : '退回变更权限', { confirmButtonText: approve ? '批准权限' : '退回', cancelButtonText: '取消', ...(approve ? {} : { inputPattern: /\S+/, inputErrorMessage: '请输入退回原因' }) })
+    const result = await ElMessageBox.prompt(approve ? '批准后申请人获得一次变更权限并从现行计划创建草稿；草稿完成前原计划继续生效。' : '请填写驳回原因；原计划不受影响。', approve ? '批准变更权限' : '驳回变更权限', { confirmButtonText: approve ? '批准权限' : '驳回', cancelButtonText: '取消', ...(approve ? {} : { inputPattern: /\S+/, inputErrorMessage: '请输入驳回原因' }) })
     await decideProjectPlan(props.project.id, { expectedRowVersion: plan.value.rowVersion, approve, comment: result.value }, props.token)
     changeReviewOpen.value = false
     await load()
-    ElMessage.success(approve ? '变更权限已批准，已创建可编辑草稿' : '变更权限已退回，原计划不变')
+    ElMessage.success(approve ? '变更权限已批准，已创建可编辑草稿' : '变更权限已驳回，原计划不变')
   } catch (reason) { if (reason !== 'cancel' && reason !== 'close') ElMessage.error(reason instanceof Error ? reason.message : '审批失败') }
   finally { saving.value = false }
 }
@@ -1159,9 +1159,9 @@ async function decideApproval(approve: boolean) {
   if (!plan.value) return
   saving.value = true
   try {
-    const result = await ElMessageBox.prompt(approve ? '批准后首版计划正式生效，并自动冻结基线V1。' : '请填写退回原因，项目经理可修改后重新提交。', approve ? '批准首版计划' : '退回首版计划', { confirmButtonText: approve ? '批准生效' : '退回', cancelButtonText: '取消', ...(approve ? {} : { inputPattern: /\S+/, inputErrorMessage: '请输入退回原因' }) })
+    const result = await ElMessageBox.prompt(approve ? '批准后首版计划正式生效，并自动冻结基线V1。' : '请填写驳回原因，项目经理可修改后重新提交。', approve ? '批准首版计划' : '驳回首版计划', { confirmButtonText: approve ? '批准生效' : '驳回', cancelButtonText: '取消', ...(approve ? {} : { inputPattern: /\S+/, inputErrorMessage: '请输入驳回原因' }) })
     plan.value = await decideProjectPlan(props.project.id, { expectedRowVersion: plan.value.rowVersion, approve, comment: result.value }, props.token)
-    ElMessage.success(approve ? '首版计划已批准生效，基线V1已冻结' : '计划已退回')
+    ElMessage.success(approve ? '首版计划已批准生效，基线V1已冻结' : '计划已驳回')
     await load()
   } catch (reason) { if (reason !== 'cancel' && reason !== 'close') ElMessage.error(reason instanceof Error ? reason.message : '审批失败') }
   finally { saving.value = false }
@@ -1290,7 +1290,7 @@ watch(() => props.project.id, () => { masterPlanMode.value = false; return load(
         <article><span>计划风险</span><strong>{{ portfolioMode ? `${portfolio?.laggingProjectCount ?? 0} 滞后 / ${portfolio?.riskProjectCount ?? 0} 风险` : !isEffective(plan) ? '待审批生效' : `${plan?.tasks.filter(item => item.status !== 'Completed' && item.plannedFinish < isoDate(new Date())).length ?? 0} 项逾期` }}</strong><small>生效后提醒：7天、3天、到期日、逾期每日</small></article>
         <article><span>计划基线</span><strong>{{ plan?.baselineVersion ? `V${plan.baselineVersion}` : '未设置' }}</strong><small>{{ plan?.baselineVersion ? '灰色细条为冻结基线' : '设置后可比较计划与实际' }}</small></article>
         <article><button type="button" class="pdm-plan-summary-action" aria-label="查看阶段进度详情" @click="stageProgressDialogOpen = true"><span>阶段进度</span><strong>{{ stageCount ? `${completedStageCount} / ${stageCount}` : '暂无计划' }}</strong><small>已完成阶段 · 点击查看详情</small></button></article>
-        <article><span>生效信息</span><strong>{{ approvalLabel(plan) }}</strong><small v-if="isEffective(plan)">{{ displayUserName(plan?.approvedBy) }} 批准{{ plan?.approvedAt ? ` · ${new Date(plan.approvedAt).toLocaleString()}` : '' }}</small><small v-else-if="plan?.approvalStatus === 'Pending'">审批人：{{ displayUserName(plan.approvalAssignee) }} · 等待处理</small><small v-else-if="plan?.approvalStatus === 'Rejected'">{{ plan.approvalComment ? `退回原因：${plan.approvalComment}` : '计划已退回修改' }}</small><small v-else>{{ plan ? '经执行事业部总经理批准后生效' : '尚未建立计划' }}</small></article>
+        <article><span>生效信息</span><strong>{{ approvalLabel(plan) }}</strong><small v-if="isEffective(plan)">{{ displayUserName(plan?.approvedBy) }} 批准{{ plan?.approvedAt ? ` · ${new Date(plan.approvedAt).toLocaleString()}` : '' }}</small><small v-else-if="plan?.approvalStatus === 'Pending'">审批人：{{ displayUserName(plan.approvalAssignee) }} · 等待处理</small><small v-else-if="plan?.approvalStatus === 'Rejected'">{{ plan.approvalComment ? `驳回原因：${plan.approvalComment}` : '计划已驳回，可修改后重新提交' }}</small><small v-else>{{ plan ? '经执行事业部总经理批准后生效' : '尚未建立计划' }}</small></article>
       </section>
 
       <section class="pdm-plan-panel">
@@ -1298,7 +1298,7 @@ watch(() => props.project.id, () => { masterPlanMode.value = false; return load(
           <div class="pdm-plan-view-tabs"><strong class="pdm-plan-view-label">{{ portfolioMode ? `全部子项目（${timelineRows.length}）` : '任务甘特图' }}</strong><span v-if="!portfolioMode">{{ timelineRows.length }} 行</span></div>
           <div class="pdm-plan-toolbar__actions">
             <button type="button" class="pdm-plan-delete-action" :disabled="saving || !canDeleteDisplayedPlan" :title="deleteDisabledReason || (isEffective(plan) ? '删除现行计划和变更草稿' : '删除未审批计划')" @click="openToolbarDelete">删除计划</button>
-            <template v-if="canApprove"><button type="button" class="pdm-primary-action" :disabled="saving" @click="decideApproval(true)">批准生效</button><button type="button" class="pdm-secondary-action" :disabled="saving" @click="decideApproval(false)">退回修改</button></template>
+            <template v-if="canApprove"><button type="button" class="pdm-primary-action" :disabled="saving" @click="decideApproval(true)">批准生效</button><button type="button" class="pdm-secondary-action" :disabled="saving" @click="decideApproval(false)">驳回</button></template>
             <button v-if="!portfolioMode && ownsDisplayedPlan && isEffective(plan) && canEdit && !pendingChange && !editingChangeDraft" type="button" class="pdm-secondary-action" :disabled="saving" @click="openChangeRequest">申请变更权限</button>
             <button v-if="!portfolioMode && ownsDisplayedPlan && plan?.changeRequest" type="button" class="pdm-secondary-action" @click="changeReviewOpen = true">{{ pendingChange ? '权限待审批' : '变更申请记录' }}</button>
             <button v-if="!portfolioMode && ownsDisplayedPlan && editingChangeDraft && canEditSchedule(plan)" type="button" class="pdm-primary-action" :disabled="saving" @click="completeChangeDraft">完成变更并生效</button>
@@ -1463,7 +1463,7 @@ watch(() => props.project.id, () => { masterPlanMode.value = false; return load(
 
     <el-dialog v-model="changeReviewOpen" title="计划变更申请与差异" width="760px" destroy-on-close>
       <div v-if="plan?.changeRequest" class="pdm-plan-form">
-        <p>{{ plan.changeRequest.status === 'Pending' ? '变更权限待审批，原计划继续生效' : plan.changeDraftSource ? '变更权限已批准，草稿编辑中，原计划继续生效' : plan.changeRequest.status === 'Approved' ? '本次变更已结束' : '变更权限已退回，原计划不变' }}；审批人：{{ displayUserName(plan.changeRequest.approvalAssignee) }}</p>
+        <p>{{ plan.changeRequest.status === 'Pending' ? '变更权限待审批，原计划继续生效' : plan.changeDraftSource ? '变更权限已批准，草稿编辑中，原计划继续生效' : plan.changeRequest.status === 'Approved' ? '本次变更已结束' : '变更权限已驳回，原计划不变' }}；审批人：{{ displayUserName(plan.changeRequest.approvalAssignee) }}</p>
         <p>申请人：{{ displayUserName(plan.changeRequest.submittedBy) }}；原因：{{ plan.changeRequest.reason }}<br v-if="plan.changeRequest.comment" />{{ plan.changeRequest.comment ? `审批意见：${plan.changeRequest.comment}` : '' }}</p>
         <div v-if="plan.changeRequest.tasks.length" class="pdm-plan-change-review">
           <article v-for="change in plan.changeRequest.tasks" :key="change.taskId">
@@ -1474,7 +1474,7 @@ watch(() => props.project.id, () => { masterPlanMode.value = false; return load(
         </div>
         <p v-else>此申请仅申请变更权限，未预先提交任务排期修改。</p>
       </div>
-      <template #footer><button type="button" class="pdm-secondary-action" @click="changeReviewOpen = false">关闭</button><template v-if="canApproveChange"><button type="button" class="pdm-secondary-action" :disabled="saving" @click="decideChange(false)">退回权限</button><button type="button" class="pdm-primary-action" :disabled="saving" @click="decideChange(true)">批准权限</button></template></template>
+      <template #footer><button type="button" class="pdm-secondary-action" @click="changeReviewOpen = false">关闭</button><template v-if="canApproveChange"><button type="button" class="pdm-secondary-action" :disabled="saving" @click="decideChange(false)">驳回权限</button><button type="button" class="pdm-primary-action" :disabled="saving" @click="decideChange(true)">批准权限</button></template></template>
     </el-dialog>
 
     <el-dialog v-model="taskDialogOpen" title="任务详情与实际进度" width="620px" destroy-on-close>

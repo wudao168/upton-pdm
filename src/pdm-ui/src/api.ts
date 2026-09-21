@@ -1448,7 +1448,7 @@ export async function decideDrawingReviewTarget(packageId: string, itemId: strin
   }, token))
 }
 
-/** 退改后设计者已按新版本存档：把该图档重新提交给审图人（只影响这一张图）。 */
+/** 驳回后设计者已按新版本存档：把该图档重新提交给审图人（只影响这一张图）。 */
 export async function resubmitDrawingReviewItem(packageId: string, itemId: string, token: string): Promise<DrawingReviewPackage> {
   return mapDrawingReviewPackage(await requestJson<ApiDrawingReviewPackage>(`/api/drawing-reviews/${packageId}/items/${itemId}/resubmit`, {
     method: 'POST',
@@ -1507,6 +1507,12 @@ export function retryLongLeadU9(releasePackageId: string, token: string): Promis
 /** 转图（发布预览生成）与发布解耦：手动把该发布包的转图事项重新排队到后台。 */
 export function retryReleasePreview(releasePackageId: string, token: string): Promise<{ message: string }> {
   return requestJson(`/api/release-packages/${releasePackageId}/preview/retry`, { method: 'POST' }, token)
+}
+
+/** 发布前提醒：列出发布后无法自动同步到U9C的BOM子件（不拦截发布）。 */
+export interface U9SyncBlocker { sequence: number; category: string; materialCode: string; name: string; reason: string }
+export function listU9SyncBlockers(projectId: string, token: string): Promise<U9SyncBlocker[]> {
+  return requestJson(`/api/projects/${projectId}/u9-sync-blockers`, {}, token)
 }
 
 export function listReleaseItemComments(releasePackageId: string, token: string): Promise<ReleaseItemComment[]> {
@@ -2264,7 +2270,7 @@ function mapReleasePackage(releasePackage: ApiReleasePackage): ReleasePackageSum
       assignee: task.assignee,
       status,
       detail: decision === 'Approved' ? `已同意${decisionTime ? ` · ${decisionTime}` : ''}`
-        : decision === 'Rejected' ? `已退回${decisionTime ? ` · ${decisionTime}` : ''}`
+        : decision === 'Rejected' ? `已驳回${decisionTime ? ` · ${decisionTime}` : ''}`
           : skipped ? '本轮未到达' : '待处理',
       decision: task.decision ?? undefined,
       decisionBy: task.decisionBy ?? undefined,

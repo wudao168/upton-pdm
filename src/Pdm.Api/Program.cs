@@ -136,7 +136,11 @@ builder.Services.AddScoped<IProgramTemplateStorage, LocalProgramTemplateStorage>
 builder.Services.AddScoped<IProjectFileStorage, LocalProjectFileStorage>();
 builder.Services.AddSingleton<IValidationPlanTextRecognitionService, WindowsValidationPlanTextRecognitionService>();
 // 图纸转换位置（本机/远程转图服务器）来自系统设置，转换器和发布器都按请求作用域解析。
-builder.Services.AddScoped<IServerPreviewConverter, SolidWorksServerPreviewConverter>();
+// 显式构造转图转换器：只使用它自带的 HttpClient（超时由"转图超时"设置控制），避免容器注入默认 100 秒超时的
+// HttpClient 把一次 100 秒的失败误报成"超过60分钟"。
+builder.Services.AddScoped<IServerPreviewConverter>(provider => new SolidWorksServerPreviewConverter(
+    provider.GetRequiredService<IOptions<PdmPreviewWorkerOptions>>(),
+    provider.GetRequiredService<IPdmRepository>()));
 builder.Services.AddScoped<IReleasePackagePublisher, AtomicReleasePackagePublisher>();
 builder.Services.AddSingleton<ICrmCredentialProtector, DataProtectionCrmCredentialProtector>();
 builder.Services.AddSingleton<IU9SecretProtector, DataProtectionU9SecretProtector>();
@@ -174,6 +178,7 @@ builder.Services.AddScoped<U9InventoryService>();
 builder.Services.AddSingleton<U9InventorySyncCoordinator>();
 builder.Services.AddScoped<U9ProcurementService>();
 builder.Services.AddScoped<ReleasePreviewService>();
+builder.Services.AddScoped<ReleaseDeliveryArchiveService>();
 builder.Services.AddSingleton<ReleasePreviewCoordinator>();
 builder.Services.AddSingleton<U9ProcurementSyncCoordinator>();
 builder.Services.AddScoped<U9BomQueryService>();

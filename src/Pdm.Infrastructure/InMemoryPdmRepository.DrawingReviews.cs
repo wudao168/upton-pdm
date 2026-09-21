@@ -21,7 +21,7 @@ public sealed partial class InMemoryPdmRepository
             return Task.FromResult<IReadOnlySet<Guid>>(drawingReviewPackages.Values
                 .Where(package => package.ProjectId == projectId && IsActiveDrawingReview(package))
                 .SelectMany(package => package.Items
-                    // 已退改的图档立即释放编辑锁，该审核单其余图档仍保持锁定。
+                    // 已驳回的图档立即释放编辑锁，该审核单其余图档仍保持锁定。
                     .Where(item => item.DrawingDocumentId.HasValue && !IsChangesRequested(item))
                     .Select(item => item.DrawingDocumentId!.Value))
                 .ToHashSet());
@@ -77,7 +77,7 @@ public sealed partial class InMemoryPdmRepository
             if (package.State is not (DrawingReviewPackageState.InReview
                 or DrawingReviewPackageState.PendingSupervisorApproval
                 or DrawingReviewPackageState.ChangesRequested))
-                throw new PdmConflictException("只有审核中或已退回的图纸审核单可以撤销。");
+                throw new PdmConflictException("只有审核中或已驳回的图纸审核单可以撤销。");
             package = package with
             {
                 State = DrawingReviewPackageState.Withdrawn,
@@ -167,8 +167,8 @@ public sealed partial class InMemoryPdmRepository
             package = package with
             {
                 Items = items,
-                // 单张图纸退改只影响该图纸，审核单其余图纸继续并行审核；
-                // 机械主管按图退回后审核单回到审图节点重新审核。
+                // 单张图纸驳回只影响该图纸，审核单其余图纸继续并行审核；
+                // 机械主管按图驳回后审核单回到审图节点重新审核。
                 State = DrawingReviewPackageState.InReview,
                 SupervisorReviewedBy = supervisorNode ? null : package.SupervisorReviewedBy,
                 SupervisorReviewedByName = supervisorNode ? null : package.SupervisorReviewedByName,
@@ -224,7 +224,7 @@ public sealed partial class InMemoryPdmRepository
             if (package.State is not (DrawingReviewPackageState.InReview or DrawingReviewPackageState.PendingSupervisorApproval))
                 throw new PdmConflictException("当前图纸审核单不允许重新提交审核。");
             if (package.Items.Single(item => item.Id == itemId).DrawingState != DrawingReviewTargetState.ChangesRequested)
-                throw new PdmConflictException("只有已退回（待修改）的图档可以重新提交审核。");
+                throw new PdmConflictException("只有已驳回（待修改）的图档可以重新提交审核。");
             var items = package.Items.Select(item => item.Id != itemId ? item : item with
             {
                 DrawingState = DrawingReviewTargetState.Pending,
@@ -310,7 +310,7 @@ public sealed partial class InMemoryPdmRepository
                 SupervisorReviewedByName = reviewerName,
                 SupervisorReviewedAt = reviewedAt,
                 SupervisorComment = comment,
-                // 机械主管整单退回：单内仍为已通过的图纸一并置为待修改，设计者可直接改图后重新提交。
+                // 机械主管整单驳回：单内仍为已通过的图纸一并置为待修改，设计者可直接改图后重新提交。
                 Items = decision == DrawingReviewDecision.RequestChanges
                     ? package.Items.Select(item => item.DrawingState is DrawingReviewTargetState.Approved or DrawingReviewTargetState.Marked
                         ? item with { DrawingState = DrawingReviewTargetState.ChangesRequested, DrawingReviewer = reviewer, DrawingReviewerName = reviewerName, DrawingReviewedAt = reviewedAt, DrawingComment = comment }

@@ -194,6 +194,31 @@ public sealed class LocalFileStorage(IOptions<PdmStorageOptions> options, IPdmRe
         }
     }
 
+    /// <summary>
+    /// 校验转图生成的发布预览文件：预览存放在 .release-previews 只读目录（不是 .versions），
+    /// 这里同样按长度和 SHA-256 校验，避免把发布预览当成历史版本文件拒绝掉。
+    /// </summary>
+    public async Task VerifyPreviewFileAsync(Project project, DocumentPreviewArtifact preview, CancellationToken cancellationToken)
+    {
+        if (preview.Format is not (DocumentPreviewFormat.Step or DocumentPreviewFormat.Pdf))
+            throw new PdmRuleException("发布预览文件格式无效。");
+        var relativeSegments = preview.StorageRelativePath.Split(new[] { Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar }, StringSplitOptions.RemoveEmptyEntries);
+        if (relativeSegments.Length == 0
+            || (!string.Equals(relativeSegments[0], ".release-previews", StringComparison.OrdinalIgnoreCase)
+                && !string.Equals(relativeSegments[0], ".versions", StringComparison.OrdinalIgnoreCase)))
+        {
+            throw new PdmRuleException("发布预览文件必须存放在独立的.release-previews只读目录中。");
+        }
+        var path = StorageLocationPolicy.ResolveUnder(project.VaultLocation, preview.StorageRelativePath);
+        if (!File.Exists(path)) throw new PdmNotFoundException("发布预览文件不存在。");
+        var info = new FileInfo(path);
+        if (info.Length != preview.FileLength) throw new PdmConflictException("发布预览文件大小与转换记录不一致。");
+        await using var input = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, 256 * 1024, FileOptions.Asynchronous | FileOptions.SequentialScan);
+        var actual = Convert.ToHexString(await SHA256.HashDataAsync(input, cancellationToken));
+        if (!string.Equals(actual, preview.Sha256, StringComparison.OrdinalIgnoreCase))
+            throw new PdmConflictException("发布预览文件SHA-256校验失败。");
+    }
+
     private static string ValidateStoredFileMetadata(Project project, StoredFile file)
     {
         var relativeSegments = file.RelativePath.Split(new[] { Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar }, StringSplitOptions.RemoveEmptyEntries);

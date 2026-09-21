@@ -3,7 +3,9 @@ import { computed, h, onMounted, onUnmounted, ref, watch } from 'vue'
 import { ElMessage } from '../statusMessage'
 import { ElMessageBox } from 'element-plus'
 import U9BomSyncPreview from './U9BomSyncPreview.vue'
-import { executeProjectBomU9Sync, listBom, listBomVersions, listProjectBomHeaders, listReleasePackages, previewProjectBomU9Sync, retryProjectBomHeaderAutomatic } from '../api'
+import U9SyncBlockerDrawer from './U9SyncBlockerDrawer.vue'
+import { executeProjectBomU9Sync, listBom, listBomVersions, listProjectBomHeaders, listReleasePackages, listU9SyncBlockers, previewProjectBomU9Sync, retryProjectBomHeaderAutomatic } from '../api'
+import type { U9SyncBlocker } from '../api'
 import type { BomHeaderKind, BomItem, BomKind, BomVersion, ProjectBomHeader, ProjectSummary, ReleasePackageSummary, ReleaseScope } from '../types'
 import { useUserDisplayName } from '../userDisplay'
 
@@ -44,7 +46,7 @@ const syncingRowKey = ref('')
 const retryingApplicationId = ref('')
 
 function automaticText(header?: ProjectBomHeader) {
-  if (header?.automaticStatus) return ({ NotRequested: '待BOM发布', ApprovalQueued: '自动审批排队', Running: '自动处理中', Rejected: '申请已退回', Completed: '已自动批准', Failed: '失败待重试', WaitingRetry: '待重试', Queued: '已批准待同步' })[header.automaticStatus]
+  if (header?.automaticStatus) return ({ NotRequested: '待BOM发布', ApprovalQueued: '自动审批排队', Running: '自动处理中', Rejected: '申请已驳回', Completed: '已自动批准', Failed: '失败待重试', WaitingRetry: '待重试', Queued: '已批准待同步' })[header.automaticStatus]
   return header?.applicationStatus === 'Approved' ? '已自动批准' : header?.applicationStatus === 'Rejected' ? '自动处理失败' : header?.applicationId ? '待确认状态' : '待BOM发布'
 }
 
@@ -67,8 +69,13 @@ async function retryAutomatic(header: ProjectBomHeader) {
     }
   } finally { retryingApplicationId.value = '' }
 }
-type U9BomViewState = 'checking' | 'synced' | 'empty' | 'approval-pending' | 'waiting-components' | 'create-pending' | 'modify-pending' | 'failed'
+type U9BomViewState = 'checking' | 'synced' | 'empty' | 'approval-pending' | 'waiting-components' | 'create-pending' | 'modify-pending' | 'blocked' | 'failed'
 const u9BomStates = ref<Record<string, U9BomViewState>>({})
+/** 各BOM流被 U9C 拦下的子件（取自"已发布版本"，与U9C同步使用的口径一致）。 */
+const u9Blockers = ref<Record<string, U9SyncBlocker[]>>({})
+const u9BlockerDrawerOpen = ref(false)
+const u9BlockerDrawerBlockers = ref<U9SyncBlocker[]>([])
+const blockerCategoryByKind: Record<VisibleBomKind, string> = { Standard: '标准件', NonStandard: '非标件', Electrical: '电气件' }
 let automaticPoll: ReturnType<typeof setInterval> | undefined
 let pollingAutomatic = false
 onMounted(() => {
@@ -238,6 +245,7 @@ function u9BomStateText(row: (typeof overviewRows.value)[number]) {
   if (!isHeaderEligible(row)) return '不纳入'
   if (!row.header?.materialCode) return '待料品回写'
   const state = u9BomStates.value[row.key]
+  if (state === 'blocked') return `待补料号（${u9Blockers.value[row.key]?.length ?? 0}）`
   if (state === 'checking') return '检查中…'
   if (state === 'synced') return '已同步'
   if (state === 'empty') return '空BOM'
@@ -247,6 +255,18 @@ function u9BomStateText(row: (typeof overviewRows.value)[number]) {
   if (state === 'modify-pending') return '待同步子件'
   if (state === 'failed') return '检查失败'
   return props.editable ? (row.releaseStatus === '正式发布' ? '检查同步' : '检查BOM状态') : '未检查'
+}
+
+/** 查到该BOM流在"已发布版本"里缺 U9C 正式料号的子件；查不到就按普通失败处理。 */
+async function findU9Blockers(projectId: string, kind: BomHeaderKind) {
+  const blockers = await listU9SyncBlockers(projectId, props.token).catch(() => [] as U9SyncBlocker[])
+  return blockers.filter(item => item.category === blockerCategoryByKind[kind as VisibleBomKind])
+}
+
+/** 提醒用右侧抽屉 + 表格清单展示，不再用弹窗塞一大段文字。 */
+function showU9Blockers(blockers: U9SyncBlocker[]) {
+  u9BlockerDrawerBlockers.value = blockers
+  u9BlockerDrawerOpen.value = true
 }
 
 function viewStateFromPreview(preview: Awaited<ReturnType<typeof previewProjectBomU9Sync>>): U9BomViewState {
@@ -265,6 +285,11 @@ async function refreshU9BomStates() {
       const preview = await previewProjectBomU9Sync(row.project.id, row.headerKind, props.token)
       return [row.key, viewStateFromPreview(preview)] as const
     } catch {
+      const blockers = await findU9Blockers(row.project.id, row.headerKind)
+      if (blockers.length) {
+        u9Blockers.value = { ...u9Blockers.value, [row.key]: blockers }
+        return [row.key, 'blocked'] as const
+      }
       return [row.key, 'failed'] as const
     }
   }))
@@ -273,9 +298,12 @@ async function refreshU9BomStates() {
 
 async function syncU9Bom(row: (typeof overviewRows.value)[number]) {
   if (!props.editable || !isHeaderEligible(row) || !row.header?.materialCode || syncingRowKey.value) return
+  const known = u9Blockers.value[row.key] ?? []
+  if (known.length) { showU9Blockers(known); return }
   syncingRowKey.value = row.key
   try {
     const preview = await previewProjectBomU9Sync(row.project.id, row.headerKind, props.token)
+    u9Blockers.value = { ...u9Blockers.value, [row.key]: [] }
     if (preview.state === 'Empty') {
       u9BomStates.value = { ...u9BomStates.value, [row.key]: 'empty' }
       ElMessage.info('当前BOM没有正式子件，无需在U9C创建空BOM')
@@ -319,6 +347,13 @@ async function syncU9Bom(row: (typeof overviewRows.value)[number]) {
     u9BomStates.value = { ...u9BomStates.value, [row.key]: 'synced' }
     ElMessage.success(`U9C BOM${operation}成功，自动回查通过`)
   } catch (reason) {
+    const blockers = await findU9Blockers(row.project.id, row.headerKind)
+    if (blockers.length) {
+      u9Blockers.value = { ...u9Blockers.value, [row.key]: blockers }
+      u9BomStates.value = { ...u9BomStates.value, [row.key]: 'blocked' }
+      showU9Blockers(blockers)
+      return
+    }
     u9BomStates.value = { ...u9BomStates.value, [row.key]: 'failed' }
     ElMessage.error(reason instanceof Error ? reason.message : 'U9C BOM同步失败')
   } finally {
@@ -425,7 +460,7 @@ watch([rootProjectId, hierarchySignature, () => props.token], () => {
             </td>
             <td :title="headerCodeTitle(row.header)"><span :class="row.header?.materialCode ? 'is-success' : row.header?.materialId ? 'is-warning' : 'is-muted'">{{ !isHeaderEligible(row) && !row.header?.materialId ? '不生成' : row.header?.materialCode ? '已回写' : row.header?.automaticStatus === 'Failed' || row.header?.automaticStatus === 'WaitingRetry' ? '未同步' : row.header?.materialId ? '待同步' : '待生成' }}</span></td>
             <td>
-              <button v-if="editable && isHeaderEligible(row) && row.header?.materialCode" type="button" class="bom-overview__sync" :disabled="!!syncingRowKey" @click="syncU9Bom(row)">{{ syncingRowKey === row.key ? '检查中…' : u9BomStateText(row) }}</button>
+              <button v-if="editable && isHeaderEligible(row) && row.header?.materialCode" type="button" class="bom-overview__sync" :class="{ 'is-warning': u9BomStates[row.key] === 'blocked' }" :disabled="!!syncingRowKey" @click="syncU9Bom(row)">{{ syncingRowKey === row.key ? '检查中…' : u9BomStateText(row) }}</button>
               <span v-else :class="row.header?.materialCode ? 'is-muted' : 'is-warning'">{{ u9BomStateText(row) }}</span>
             </td>
           </tr>
@@ -434,6 +469,7 @@ watch([rootProjectId, hierarchySignature, () => props.token], () => {
         </tbody>
       </table>
     </div>
+    <U9SyncBlockerDrawer v-model="u9BlockerDrawerOpen" :blockers="u9BlockerDrawerBlockers" />
   </section>
 </template>
 

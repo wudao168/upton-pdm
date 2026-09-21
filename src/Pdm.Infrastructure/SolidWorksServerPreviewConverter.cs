@@ -198,37 +198,72 @@ public sealed class SolidWorksServerPreviewConverter : IServerPreviewConverter
         request.Content.Headers.ContentType = new MediaTypeHeaderValue("application/zip");
         if (!string.IsNullOrWhiteSpace(conversion.AgentToken)) request.Headers.Add(PreviewAgentProtocol.TokenHeader, conversion.AgentToken);
 
+        // 只有本方法自己的计时器到点才算“超过N分钟”；HttpClient 自身超时、连接中断等取消按真实耗时和原因反馈，
+        // 否则 15 秒的连接超时或 HttpClient 默认 100 秒超时都会被误报成“超过60分钟”。
+        var stopwatch = Stopwatch.StartNew();
         HttpResponseMessage response;
         try
         {
             response = await httpClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, timeout.Token);
         }
-        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
-            throw new PdmRuleException($"调用转图服务器超过{conversion.TimeoutMinutes}分钟，已终止本次发布转换。");
+            throw;
+        }
+        catch (OperationCanceledException) when (timeout.IsCancellationRequested)
+        {
+            throw RemoteTimeout(conversion);
+        }
+        catch (OperationCanceledException exception)
+        {
+            throw new PdmRuleException($"调用转图服务器在{DescribeElapsed(stopwatch.Elapsed)}后被中断（等不到转图电脑响应）：{DescribeReason(exception)}");
         }
         catch (HttpRequestException exception)
         {
-            throw new PdmRuleException($"无法连接转图服务器{conversion.NormalizedAgentUrl}：{exception.Message}");
+            throw new PdmRuleException($"无法连接转图服务器{conversion.NormalizedAgentUrl}（等待{DescribeElapsed(stopwatch.Elapsed)}）：{DescribeReason(exception)}");
         }
 
         using (response)
         {
-            if (!response.IsSuccessStatusCode)
+            try
             {
-                var detail = await response.Content.ReadAsStringAsync(timeout.Token);
-                throw new PdmRuleException($"转图服务器返回错误({(int)response.StatusCode})：{PreviewAgentProtocol.DescribeError(detail)}");
+                if (!response.IsSuccessStatusCode)
+                {
+                    var detail = await response.Content.ReadAsStringAsync(timeout.Token);
+                    throw new PdmRuleException($"转图服务器返回错误({(int)response.StatusCode})：{PreviewAgentProtocol.DescribeError(detail)}");
+                }
+                var responsePath = Path.Combine(workRoot, "response.zip");
+                await using (var content = await response.Content.ReadAsStreamAsync(timeout.Token))
+                await using (var file = File.Create(responsePath))
+                    await content.CopyToAsync(file, timeout.Token);
+                await MaterializeAgentResponseAsync(responsePath, jobs);
             }
-            var responsePath = Path.Combine(workRoot, "response.zip");
-            await using (var content = await response.Content.ReadAsStreamAsync(timeout.Token))
-            await using (var file = File.Create(responsePath))
-                await content.CopyToAsync(file, timeout.Token);
-            using var archive = ZipFile.OpenRead(responsePath);
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (OperationCanceledException) when (timeout.IsCancellationRequested)
+            {
+                throw RemoteTimeout(conversion);
+            }
+            catch (OperationCanceledException exception)
+            {
+                throw new PdmRuleException($"读取转图服务器结果在{DescribeElapsed(stopwatch.Elapsed)}后被中断：{DescribeReason(exception)}");
+            }
+        }
+        _ = outputRoot;
+    }
+
+    /// <summary>解析转图代理返回的压缩包：校验 result.json 并把每个图档的 STEP/PDF 落到输出路径。</summary>
+    private static async Task MaterializeAgentResponseAsync(string responsePath, IReadOnlyList<PreviewJob> jobs)
+    {
+        using (var archive = ZipFile.OpenRead(responsePath))
+        {
             var resultEntry = archive.GetEntry("result.json") ?? throw new PdmRuleException("转图服务器没有返回结果文件。");
             PreviewWorkerResult result;
             await using (var stream = resultEntry.Open())
             {
-                result = await JsonSerializer.DeserializeAsync<PreviewWorkerResult>(stream, JsonOptions, cancellationToken)
+                result = await JsonSerializer.DeserializeAsync<PreviewWorkerResult>(stream, JsonOptions)
                     ?? throw new PdmRuleException("转图服务器结果文件无效。");
             }
             if (!result.Success)
@@ -241,8 +276,18 @@ public sealed class SolidWorksServerPreviewConverter : IServerPreviewConverter
                 outputEntry.ExtractToFile(job.OutputPath, true);
             }
         }
-        _ = outputRoot;
     }
+
+    private static PdmRuleException RemoteTimeout(PreviewConversionSettings conversion) =>
+        new($"调用转图服务器超过{conversion.TimeoutMinutes}分钟，已终止本次发布转换。");
+
+    private static string DescribeElapsed(TimeSpan elapsed) =>
+        elapsed.TotalMinutes >= 1 ? $"{elapsed.TotalMinutes:0.#}分钟" : $"{elapsed.TotalSeconds:0.#}秒";
+
+    private static string DescribeReason(Exception exception) =>
+        exception.InnerException is null || exception.InnerException.Message == exception.Message
+            ? exception.Message
+            : $"{exception.Message}（{exception.InnerException.Message}）";
 
     private async Task RunWorkerAsync(string workerPath, int timeoutMinutes, string manifestPath, string resultPath, CancellationToken cancellationToken)
     {

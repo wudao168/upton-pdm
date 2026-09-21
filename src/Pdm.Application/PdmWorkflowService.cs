@@ -20,7 +20,8 @@ public sealed class PdmWorkflowService(
     BomHeaderService? bomHeaderService = null,
     IMaterialRepository? materialRepository = null,
     IMaterialRelationReleaseGuard? materialRelationReleaseGuard = null,
-    ProjectPlanningService? projectPlanningService = null)
+    ProjectPlanningService? projectPlanningService = null,
+    ReleaseDeliveryArchiveService? releaseDeliveryArchive = null)
 {
     private const string ReconcileAutoAdded = "AutoAdded";
     private const string ReconcileClassificationChanged = "ClassificationChanged";
@@ -3663,8 +3664,8 @@ public sealed class PdmWorkflowService(
             throw new PdmRuleException("该非标件没有唯一关联的2D工程图。");
         if (command.Decision == DrawingReviewDecision.Revoke)
             return await RevokeDrawingReviewTargetAsync(package, item, actor, command, cancellationToken);
-        // 机械主管节点也可以按图退改：只退回当前这一张，其余已通过的图纸保持通过，
-        // 审核单退回审图节点，改完重新提交后再走一遍审图。
+        // 机械主管节点也可以按图驳回：只驳回当前这一张，其余已通过的图纸保持通过，
+        // 审核单驳回审图节点，改完重新提交后再走一遍审图。
         var supervisorNode = package.State == DrawingReviewPackageState.PendingSupervisorApproval;
         if (!supervisorNode && package.State != DrawingReviewPackageState.InReview)
             throw new PdmConflictException("当前图纸审核单不允许继续审核。");
@@ -3672,9 +3673,9 @@ public sealed class PdmWorkflowService(
         if (supervisorNode)
         {
             if (command.Decision != DrawingReviewDecision.RequestChanges)
-                throw new PdmRuleException("机械主管节点请用“批准”整单批准；如需退回请对当前选中的图纸点“退改”。");
+                throw new PdmRuleException("机械主管节点请用“批准”整单批准；如需驳回单张图纸，请先选中该图纸再点“驳回”。");
             if (targetState is not (DrawingReviewTargetState.Approved or DrawingReviewTargetState.Marked or DrawingReviewTargetState.Pending))
-                throw new PdmConflictException("该2D工程图当前状态不允许退回，请刷新后重试。");
+                throw new PdmConflictException("该2D工程图当前状态不允许驳回，请刷新后重试。");
         }
         else if (targetState != DrawingReviewTargetState.Pending)
             throw new PdmConflictException("该2D工程图已经完成审核，请刷新后重试。");
@@ -3696,7 +3697,7 @@ public sealed class PdmWorkflowService(
             throw new PdmRuleException("设计者不能审核自己生成的图档版本，请由其他审核人处理。");
         var comment = string.IsNullOrWhiteSpace(command.Comment) ? null : command.Comment.Trim();
         if (command.Decision == DrawingReviewDecision.RequestChanges)
-            comment = RequiredComment(comment ?? string.Empty, "退改说明");
+            comment = RequiredComment(comment ?? string.Empty, "驳回说明");
         if (command.Decision == DrawingReviewDecision.Approve && package.Markups.Any(markup => markup.ItemId == itemId
                 && markup.Target == command.Target
                 && markup.Severity == DrawingReviewMarkupSeverity.Blocking
@@ -3709,8 +3710,8 @@ public sealed class PdmWorkflowService(
         await AuditAsync(actor, "drawing-review.decide", nameof(DrawingReviewItem), itemId.ToString(), $"{command.Target}；{command.Decision}；{comment}", cancellationToken);
         if (command.Decision == DrawingReviewDecision.RequestChanges)
         {
-            await CreateDrawingReviewNotificationsAsync(package.ProjectId, $"drawing-review:{package.Id:N}:changes:reviewer", "DrawingReviewChangesRequested", "图纸审核被退回",
-                project => $"{project.Code} · {package.Number} 的 {item.DrawingNumber} 被 {reviewerName} 退回：{comment}",
+            await CreateDrawingReviewNotificationsAsync(package.ProjectId, $"drawing-review:{package.Id:N}:changes:reviewer", "DrawingReviewChangesRequested", "图纸审核被驳回",
+                project => $"{project.Code} · {package.Number} 的 {item.DrawingNumber} 被 {reviewerName} 驳回：{comment}",
                 [package.CreatedBy], cancellationToken);
             return package;
         }
@@ -3760,7 +3761,7 @@ public sealed class PdmWorkflowService(
     }
 
     /// <summary>
-    /// 退改后设计者已按新版本存档：把该2D图档按最新版本恢复为待审核，重新进入审图节点，同单其他图档不受影响。
+    /// 驳回后设计者已按新版本存档：把该2D图档按最新版本恢复为待审核，重新进入审图节点，同单其他图档不受影响。
     /// </summary>
     public async Task<DrawingReviewPackage> ResubmitDrawingReviewItemAsync(Guid packageId, Guid itemId, string actor, UserRole role, CancellationToken cancellationToken)
     {
@@ -3772,7 +3773,7 @@ public sealed class PdmWorkflowService(
         var item = package.Items.FirstOrDefault(candidate => candidate.Id == itemId)
             ?? throw new PdmNotFoundException("图纸审核项不存在。");
         if (item.DrawingState != DrawingReviewTargetState.ChangesRequested)
-            throw new PdmRuleException("只有已退回（待修改）的图档可以重新提交审核。");
+            throw new PdmRuleException("只有已驳回（待修改）的图档可以重新提交审核。");
         if (role != UserRole.Administrator
             && !string.Equals(package.CreatedBy, actor, StringComparison.OrdinalIgnoreCase)
             && !string.Equals(item.DrawingCreatedBy, actor, StringComparison.OrdinalIgnoreCase))
@@ -3810,15 +3811,15 @@ public sealed class PdmWorkflowService(
             throw new UnauthorizedAccessException($"当前节点由机械主管{package.SupervisorName ?? package.Supervisor}处理。");
         var comment = string.IsNullOrWhiteSpace(command.Comment) ? null : command.Comment.Trim();
         if (command.Decision == DrawingReviewDecision.RequestChanges)
-            comment = RequiredComment(comment ?? string.Empty, "退改说明");
+            comment = RequiredComment(comment ?? string.Empty, "驳回说明");
         var reviewerName = (await repository.FindUserAsync(actor, cancellationToken))?.DisplayName ?? actor;
         var now = timeProvider.GetUtcNow();
         package = await repository.DecideDrawingReviewSupervisorAsync(packageId, command.Decision, actor, reviewerName, now, comment, cancellationToken);
         await AuditAsync(actor, "drawing-review.supervisor.decide", nameof(DrawingReviewPackage), package.Id.ToString(), $"{command.Decision}；{comment}", cancellationToken);
         if (command.Decision == DrawingReviewDecision.RequestChanges)
         {
-            await CreateDrawingReviewNotificationsAsync(package.ProjectId, $"drawing-review:{package.Id:N}:changes:supervisor", "DrawingReviewChangesRequested", "图纸审核被退回",
-                project => $"{project.Code} · {package.Number} 被机械主管 {reviewerName} 退回：{comment}",
+            await CreateDrawingReviewNotificationsAsync(package.ProjectId, $"drawing-review:{package.Id:N}:changes:supervisor", "DrawingReviewChangesRequested", "图纸审核被驳回",
+                project => $"{project.Code} · {package.Number} 被机械主管 {reviewerName} 驳回：{comment}",
                 [package.CreatedBy], cancellationToken);
             return package;
         }
@@ -3985,7 +3986,8 @@ public sealed class PdmWorkflowService(
         {
             var targetKind = ReleaseScopeBomKind(package.Scope);
             var targetItems = (await repository.GetBomAsync(package.ProjectId, targetKind, cancellationToken)).Where(IsPublishableBomItem).ToArray();
-            targetItems = SelectScopedReleaseItems(targetKind, targetItems, package.SelectedBomItemIds);
+            targetItems = WithCurrentCompleteness(
+                SelectScopedReleaseItems(targetKind, targetItems, package.SelectedBomItemIds), targetKind, validationRules);
             if (targetKind == BomKind.Standard) await EnsureStandardMaterialMasterReadyAsync(targetItems, cancellationToken);
             if (!BomReady(targetKind, targetItems, validationRules))
                 throw new PdmRuleException($"{BomKindLabel(targetKind)}BOM仍有资料不完整的物料，不能提交审批。");
@@ -4160,7 +4162,7 @@ public sealed class PdmWorkflowService(
         CancellationToken cancellationToken)
     {
         comment = decision == ApprovalDecision.Rejected
-            ? RequiredComment(comment, "退回原因")
+            ? RequiredComment(comment, "驳回原因")
             : string.IsNullOrWhiteSpace(comment) ? "同意" : comment.Trim();
         var pendingPackage = await repository.FindReleasePackageByApprovalTaskAsync(taskId, cancellationToken)
             ?? throw new PdmNotFoundException("审批任务不存在。");
@@ -4303,6 +4305,26 @@ public sealed class PdmWorkflowService(
             {
                 await AuditAsync(actor, "u9.bom-approval-automation-failed", nameof(ReleasePackage), package.Id.ToString(),
                     $"BOM已审核发布，但U9C子件自动同步失败：{exception.Message}", cancellationToken);
+            }
+        }
+        // 发布成品归档到项目的"机械发布/电气发布"目录：失败不影响发布结果，可在转图重试或下次发布时补登记。
+        if (releaseDeliveryArchive is not null)
+        {
+            try
+            {
+                var archived = await releaseDeliveryArchive.ArchiveAsync(package.Id, actor, cancellationToken);
+                if (archived > 0)
+                    await AuditAsync(actor, "release-package.delivery-archive", nameof(ReleasePackage), package.Id.ToString(),
+                        $"{package.Number}；发布成品归档{archived}个文件", cancellationToken);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception exception)
+            {
+                await AuditAsync(actor, "release-package.delivery-archive-failed", nameof(ReleasePackage), package.Id.ToString(),
+                    $"{package.Number}；发布成品归档失败，可在转图重试时补登记：{exception.Message}", cancellationToken);
             }
         }
         return (await repository.FindReleasePackageAsync(package.Id, cancellationToken))!;
@@ -4776,13 +4798,10 @@ public sealed class PdmWorkflowService(
         => CadPropertyCardSnapshot.Read(properties, configuration, propertyName);
 
     private static bool HasRequiredBomValues(BomItem item, BomKind kind, BomValidationRules validationRules) =>
-        kind is BomKind.Standard or BomKind.NonStandard or BomKind.Electrical
-        && BomValidationFieldCatalog.MissingFields(item, ReleaseRequiredFields(kind, validationRules)).Count == 0;
+        BomValidationFieldCatalog.IsComplete(item, kind, validationRules);
 
     private static IReadOnlyList<string> ReleaseRequiredFields(BomKind kind, BomValidationRules validationRules) =>
-        kind == BomKind.NonStandard
-            ? validationRules.RequiredFields(kind).Where(field => !field.Equals(BomValidationFieldCatalog.DrawingNumber, StringComparison.OrdinalIgnoreCase)).ToArray()
-            : validationRules.RequiredFields(kind);
+        BomValidationFieldCatalog.ReleaseRequiredFields(kind, validationRules);
 
     private static string BomKindLabel(BomKind kind) => kind switch
     {
@@ -4981,8 +5000,8 @@ public sealed class PdmWorkflowService(
             Guid.NewGuid(),
             recipient,
             "ReleaseApprovalRejected",
-            "BOM发布审批已退回",
-            $"{project.Code} · {package.Number} 被 {actor} 退回：{comment}",
+            "BOM发布审批已驳回",
+            $"{project.Code} · {package.Number} 被 {actor} 驳回：{comment}",
             project.Id,
             package.Id,
             sourceKey,
@@ -5235,8 +5254,19 @@ public sealed class PdmWorkflowService(
         var items = (await repository.GetBomAsync(package.ProjectId, BomKind.NonStandard, cancellationToken))
             .Where(IsPublishableBomItem)
             .ToArray();
-        return SelectScopedReleaseItems(BomKind.NonStandard, items, package.SelectedBomItemIds);
+        var validationRules = (await repository.GetSystemSettingsAsync(cancellationToken)).ValidationRules;
+        return WithCurrentCompleteness(
+            SelectScopedReleaseItems(BomKind.NonStandard, items, package.SelectedBomItemIds),
+            BomKind.NonStandard,
+            validationRules);
     }
+
+    /// <summary>
+    /// 工作区里存的 is_complete 可能是旧口径算出的旧值；与发布快照比对/落快照前统一按当前口径重算，
+    /// 否则会出现"BOM已补齐，但提交发布时提示BOM已变化/发布快照仍记着未完成"。
+    /// </summary>
+    private static BomItem[] WithCurrentCompleteness(IReadOnlyList<BomItem> items, BomKind kind, BomValidationRules validationRules) =>
+        items.Select(item => item with { IsComplete = BomValidationFieldCatalog.IsComplete(item, kind, validationRules) }).ToArray();
 
     private async Task EnsureNonStandardDrawingReviewReadyAsync(
         Guid projectId,
@@ -5652,18 +5682,21 @@ public sealed class PdmWorkflowService(
         var versions = await repository.ListBomVersionsAsync(projectId, kind, cancellationToken);
         var draft = versions.FirstOrDefault(version => version.State == BomVersionState.Draft);
         var latestReleased = versions.FirstOrDefault(version => version.State == BomVersionState.Released);
+        // 发布快照必须带当前口径的资料完整性：仓库里存的 is_complete 是旧值，
+        // 直接落快照会让U9C同步把已补齐的子件仍然判成"未完成分类或料号确认"。
+        var releaseItems = WithCurrentCompleteness(currentItems, kind, validationRules);
         BomVersion selected;
         if (draft is not null)
         {
-            selected = await repository.SaveBomDraftAsync(projectId, kind, currentItems, actor, cancellationToken);
+            selected = await repository.SaveBomDraftAsync(projectId, kind, releaseItems, actor, cancellationToken);
         }
-        else if (latestReleased is not null && BomSnapshotsEqual(latestReleased.Items, currentItems))
+        else if (latestReleased is not null && BomSnapshotsEqual(latestReleased.Items, releaseItems))
         {
             return latestReleased;
         }
         else
         {
-            selected = await repository.SaveBomDraftAsync(projectId, kind, currentItems, actor, cancellationToken);
+            selected = await repository.SaveBomDraftAsync(projectId, kind, releaseItems, actor, cancellationToken);
         }
         return await repository.UpdateBomVersionReleaseInfoAsync(
             selected.Id,

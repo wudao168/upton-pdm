@@ -193,7 +193,7 @@ const drawingReviewSummary = computed(() => {
   const stateLabels = {
     InReview: '待审核',
     PendingSupervisorApproval: '待批准',
-    ChangesRequested: '已退回（待修改）',
+    ChangesRequested: '已驳回（待修改）',
     WritingProperties: '已批准',
     Approved: '已批准',
     Stale: '版本冲突',
@@ -215,7 +215,7 @@ function drawingTargetSummary(target: DrawingReviewTarget) {
   const completed = states.filter(state => state === 'Approved' || state === 'Marked').length
   const changesRequested = states.filter(state => state === 'ChangesRequested').length
   if (states.length > 0 && completed === states.length) return '已批准'
-  if (changesRequested > 0) return `已退回 ${changesRequested}`
+  if (changesRequested > 0) return `已驳回 ${changesRequested}`
   if (review.state === 'WritingProperties') return `已批准 ${completed}/${states.length}`
   return `待审核 ${completed}/${states.length}`
 }

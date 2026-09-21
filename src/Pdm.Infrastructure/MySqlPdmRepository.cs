@@ -1304,7 +1304,7 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
         if (!string.IsNullOrWhiteSpace(activity.RootDocumentCheckedOutBy)) statuses.Add("编辑中");
         if (activity.HasDraft) statuses.Add("待提交");
         if (activity.HasPendingApproval) statuses.Add("待审批");
-        if (activity.HasRejectedApproval) statuses.Add("审批退回");
+        if (activity.HasRejectedApproval) statuses.Add("审批驳回");
         if (activity.IsPublishing) statuses.Add("发布中");
         if (activity.HasPublishFailure) statuses.Add("发布失败");
         return statuses.Count == 0 ? "正常" : string.Join("、", statuses);

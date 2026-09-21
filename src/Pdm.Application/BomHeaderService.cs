@@ -371,7 +371,7 @@ public sealed partial class BomHeaderService(
         if (RunningApplications.ContainsKey(application.Id)) return ("Running", "正在自动批准并准备同步任务", false);
         if (IsQueued(application)) return ("ApprovalQueued", "已加入自动审批后台队列，可离开页面；失败原因将在此保留", false);
         if (application.Status == MaterialCodeApplicationStatus.Rejected)
-            return ("Rejected", application.DecisionComment ?? "申请已退回", false);
+            return ("Rejected", application.DecisionComment ?? "申请已驳回", false);
         if (material?.U9SyncConfirmed == true) return ("Completed", "U9C正式料号已回查确认", false);
         if (application.SyncStatus is MaterialSyncStatus.Failed or MaterialSyncStatus.NeedsReview)
             return ("Failed", application.SyncError ?? "U9C料品同步失败，请核对后重试", true);

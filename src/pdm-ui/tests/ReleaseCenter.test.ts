@@ -147,8 +147,8 @@ describe('ReleaseCenter', () => {
       },
     })
 
-    await wrapper.findAll('.pdm-decision-box button').find(button => button.text() === '退回')!.trigger('click')
-    expect(wrapper.text()).toContain('请填写退回原因')
+    await wrapper.findAll('.pdm-decision-box button').find(button => button.text() === '驳回')!.trigger('click')
+    expect(wrapper.text()).toContain('请填写驳回原因')
     expect(wrapper.emitted('decide')).toBeUndefined()
     await wrapper.findAll('.pdm-decision-box button').find(button => button.text() === '通过')!.trigger('click')
     expect(wrapper.emitted('decide')).toEqual([['task-current', 'Approved', '同意']])
@@ -410,7 +410,7 @@ describe('ReleaseCenter', () => {
       },
     })
 
-    expect(wrapper.findAll('.pdm-decision-box .pdm-manager-actions button').map(button => button.text())).toEqual(['退回', '转交', '通过'])
+    expect(wrapper.findAll('.pdm-decision-box .pdm-manager-actions button').map(button => button.text())).toEqual(['驳回', '转交', '通过'])
     expect(wrapper.findAll('button').some(button => button.text() === '撤回审批')).toBe(false)
   })
 
@@ -419,7 +419,7 @@ describe('ReleaseCenter', () => {
       id: 'release-rejected-withdraw', number: 'RP-R-002', state: '已驳回', scope: 'NonStandardWithDrawing',
       workflowVersion: 1, selectedBomItemIds: [], createsManufacturingBaseline: false, locksDocuments: true,
       standardBomSnapshot: [], nonStandardBomSnapshot: [], electricalBomSnapshot: [],
-      steps: [{ id: 'task-supervisor', stage: '机械主管批准', assignee: 'supervisor', status: 'rejected', detail: '已退回' }],
+      steps: [{ id: 'task-supervisor', stage: '机械主管批准', assignee: 'supervisor', status: 'rejected', detail: '已驳回' }],
     }
     const wrapper = mount(ReleaseCenter, {
       props: {
@@ -429,7 +429,7 @@ describe('ReleaseCenter', () => {
     })
 
     const withdraw = wrapper.get('.pdm-withdraw-decision')
-    expect(withdraw.text()).toContain('退回后撤回：发布包恢复为草稿')
+    expect(withdraw.text()).toContain('驳回后撤回：发布包恢复为草稿')
     await withdraw.findAll('button').find(button => button.text() === '撤回为草稿')!.trigger('click')
     expect(wrapper.emitted('withdraw')).toEqual([['release-rejected-withdraw']])
     wrapper.unmount()

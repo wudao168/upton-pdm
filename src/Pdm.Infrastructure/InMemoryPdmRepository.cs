@@ -691,6 +691,20 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
     public Task<IReadOnlyList<ProjectFolderTemplateNode>> ListFolderTemplateAsync(CancellationToken cancellationToken) =>
         Task.FromResult<IReadOnlyList<ProjectFolderTemplateNode>>(folderTemplate.Values.OrderBy(item => item.ParentKey).ThenBy(item => item.SortOrder).ThenBy(item => item.FolderKey).ToArray());
 
+    /// <summary>按目录键读取项目下的系统目录（如"机械发布/电气发布"），不做账号权限过滤。</summary>
+    public Task<ProjectFolder?> FindProjectFolderByKeyAsync(Guid projectId, string folderKey, CancellationToken cancellationToken)
+    {
+        lock (gate)
+        {
+            EnsureProjectFolderTree(projectId);
+            if (!projects.TryGetValue(projectId, out var project)) throw new PdmNotFoundException("项目不存在。");
+            var rootId = project.RootProjectId ?? project.Id;
+            var folder = projectFolders.Values.FirstOrDefault(item => item.RootProjectId == rootId
+                && string.Equals(item.FolderKey, folderKey, StringComparison.OrdinalIgnoreCase));
+            return Task.FromResult(folder);
+        }
+    }
+
     public Task<IReadOnlyList<ProjectFolderTemplateNode>> SaveFolderTemplateAsync(IReadOnlyList<SaveFolderTemplateNodeCommand> nodes, CancellationToken cancellationToken)
     {
         lock (gate)
@@ -1746,10 +1760,16 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
     {
         lock (gate)
         {
-            if (!packages.TryGetValue(releasePackageId, out var package) || package.State != ReleasePackageState.Publishing)
+            // 转图与发布解耦：首次发布时包处于"发布中"，后台重试转图时包已经是"已发布"。
+            if (!packages.TryGetValue(releasePackageId, out var package)
+                || package.State is not (ReleasePackageState.Publishing or ReleasePackageState.Published))
                 throw new PdmConflictException("发布包尚未进入服务器转换状态。");
+            // 转图范围：只转非标件BOM中的物料（模型出STEP、其关联2D工程图出PDF）以及这些物料的上级装配体。
+            var nonStandardModels = NonStandardModels(package);
+            var scope = PreviewScope(ReferenceTree(package.ProjectId), nonStandardModels);
+            if (scope.Count == 0) return Task.FromResult<IReadOnlyList<ReleasePreviewSource>>([]);
             var sources = new List<ReleasePreviewSource>();
-            foreach (var documentId in EnumerateDocumentIds(ReferenceTree(package.ProjectId)).Distinct())
+            foreach (var documentId in scope)
             {
                 if (!documents.TryGetValue(documentId, out var document)
                     || document.Kind is not (DocumentKind.Assembly or DocumentKind.Part or DocumentKind.Drawing)) continue;
@@ -1788,7 +1808,11 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
             if (!package.ApprovalTasks.Any(task => task.Id == approvalTaskId && task.Decision == ApprovalDecision.Approved))
                 throw new PdmConflictException("最终批准记录无效。");
             var released = new List<DocumentVersion>();
-            foreach (var documentId in EnumerateDocumentIds(ReferenceTree(package.ProjectId)).Distinct())
+            // 非标件BOM中物料关联的2D工程图随发布一起转正式版本（转图时生成PDF）。
+            var documentIds = EnumerateDocumentIds(ReferenceTree(package.ProjectId)).Distinct().ToList();
+            documentIds.AddRange(PreviewScope(ReferenceTree(package.ProjectId), NonStandardModels(package))
+                .Where(id => documents.TryGetValue(id, out var document) && document.Kind == DocumentKind.Drawing));
+            foreach (var documentId in documentIds.Distinct())
             {
                 if (!documents.TryGetValue(documentId, out var document)) continue;
                 var source = versions.Values.Where(version => version.DocumentId == documentId).OrderByDescending(version => version.CreatedAt).FirstOrDefault();
@@ -2081,6 +2105,29 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
             return Task.FromResult(stuck.Length);
         }
     }
+
+    /// <summary>服务重启/崩溃后恢复：把停留在"转换中"的转图任务重新排队。</summary>
+    public Task<int> RecoverInterruptedPreviewRunsAsync(string reason, CancellationToken cancellationToken)
+    {
+        lock (gate)
+        {
+            var stuck = packages.Values
+                .Where(package => package.State == ReleasePackageState.Published && package.PreviewState == ReleasePreviewState.Running)
+                .ToArray();
+            foreach (var package in stuck)
+                packages[package.Id] = package with { PreviewState = ReleasePreviewState.Pending, PreviewError = reason, PreviewUpdatedAt = timeProvider.GetUtcNow() };
+            return Task.FromResult(stuck.Length);
+        }
+    }
+
+    /// <summary>列出最近发布的发布包（服务重启后用于补登记发布成品归档）。</summary>
+    public Task<IReadOnlyList<Guid>> ListRecentPublishedReleasePackageIdsAsync(int limit, CancellationToken cancellationToken) =>
+        Task.FromResult<IReadOnlyList<Guid>>(packages.Values
+            .Where(package => package.State == ReleasePackageState.Published && !string.IsNullOrWhiteSpace(package.PublishedPath))
+            .OrderByDescending(package => package.PublishedAt ?? package.CreatedAt)
+            .Take(limit)
+            .Select(package => package.Id)
+            .ToArray());
 
     /// <summary>列出需要继续转图的已发布包（待处理，或失败但未超过重试上限）。</summary>
     public Task<IReadOnlyList<ReleasePackage>> ListReleasePackagesAwaitingPreviewAsync(int maxAttempts, int limit, CancellationToken cancellationToken) =>
@@ -2456,10 +2503,36 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
         var projectPackages = packages.Values.Where(item => item.ProjectId == projectId).ToArray();
         if (projectPackages.Any(item => item.State == ReleasePackageState.Draft)) statuses.Add("待提交");
         if (projectPackages.Any(item => item.State is ReleasePackageState.ProcessReview or ReleasePackageState.Approval)) statuses.Add("待审批");
-        if (projectPackages.Any(item => item.State == ReleasePackageState.Rejected)) statuses.Add("审批退回");
+        if (projectPackages.Any(item => item.State == ReleasePackageState.Rejected)) statuses.Add("审批驳回");
         if (projectPackages.Any(item => item.State == ReleasePackageState.Publishing)) statuses.Add("发布中");
         if (projectPackages.Any(item => item.State == ReleasePackageState.PublishFailed)) statuses.Add("发布失败");
         return statuses.Count == 0 ? "正常" : string.Join("、", statuses);
+    }
+
+    /// <summary>转图范围：非标件BOM物料 + 它们的上级装配体 + 物料关联的2D工程图（转PDF）。</summary>
+    private static HashSet<Guid> NonStandardModels(ReleasePackage package) =>
+        package.NonStandardBomSnapshot
+            .Where(item => item.SourceDocumentId.HasValue)
+            .Select(item => item.SourceDocumentId!.Value)
+            .ToHashSet();
+
+    private HashSet<Guid> PreviewScope(DocumentReferenceNode root, HashSet<Guid> nonStandardModels)
+    {
+        var scope = new HashSet<Guid>();
+        var matchedModels = new HashSet<Guid>();
+        bool Visit(DocumentReferenceNode node)
+        {
+            var isTarget = node.DocumentId is Guid own && nonStandardModels.Contains(own);
+            if (isTarget && node.DocumentId is Guid target) matchedModels.Add(target);
+            foreach (var child in node.Children) isTarget |= Visit(child);
+            if (isTarget && node.DocumentId is Guid id) scope.Add(id);
+            return isTarget;
+        }
+        Visit(root);
+        if (scope.Count == 0) return scope;
+        foreach (var relation in documentRelations.Values.Where(item => matchedModels.Contains(item.ModelDocumentId)))
+            scope.Add(relation.DrawingDocumentId);
+        return scope;
     }
 
     private DocumentReferenceNode ReferenceTree(Guid projectId) =>

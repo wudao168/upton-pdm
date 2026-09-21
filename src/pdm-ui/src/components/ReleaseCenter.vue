@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
 import { addReleaseItemComment, listApprovalTransferCandidates, listReleaseItemComments } from '../api'
+import { releasePreviewStateLabel } from '../releasePreviewState'
 import type { ApprovalTransferCandidate, BomItem, CreateReleasePackageInput, DrawingReviewCandidate, DrawingReviewPackage, FormalSupplementPolicies, ReleaseItemComment, ReleasePackageSummary, ReleaseScope, UpdateReleasePackageDraftInput } from '../types'
 import { useUserDisplayName } from '../userDisplay'
 
@@ -128,16 +129,6 @@ const releaseBomRevisionLabel = computed(() => {
 })
 const canPrepare = computed(() => !props.releasePackage || ['草稿', '已驳回', '发布失败'].includes(props.releasePackage.state))
 const isSupplement = computed(() => isSupplementScope(scope.value))
-function previewStateLabel(releasePackage: ReleasePackageSummary) {
-  return ({
-    None: '未开始',
-    Pending: '待转图（后台自动重试）',
-    Running: '转换中',
-    Succeeded: '已完成',
-    Failed: `转换失败（已重试 ${releasePackage.previewAttempts ?? 0} 次）`,
-  } as Record<string, string>)[releasePackage.previewState ?? 'None'] ?? String(releasePackage.previewState)
-}
-
 const isFormalSupplementReason = (releasePackage: ReleasePackageSummary) =>
   Boolean(releasePackage.changeReasonSelections?.some(item => item.categoryCode === 'FormalSupplement'))
   || (releasePackage.changeReason || '').split('；').some(reason => reason.trim() === '正式补充')
@@ -729,7 +720,7 @@ function submitDecision(decision: 'Approved' | 'Rejected') {
   if (!currentTask.value) return
   const value = comment.value.trim()
   if (decision === 'Rejected' && !value) {
-    approvalCommentError.value = '请填写退回原因。'
+    approvalCommentError.value = '请填写驳回原因。'
     return
   }
   approvalCommentError.value = ''
@@ -942,15 +933,15 @@ async function saveItemComment() {
         </div>
 
         <div v-if="canHandleCurrentTask && currentTask" class="pdm-decision-box">
-          <label>审批意见<textarea v-model="comment" rows="3" maxlength="1000" placeholder="通过可不填；退回必须填写原因" @input="approvalCommentError = ''" /><small v-if="approvalCommentError" class="pdm-inline-error">{{ approvalCommentError }}</small></label>
+          <label>审批意见<textarea v-model="comment" rows="3" maxlength="1000" placeholder="通过可不填；驳回必须填写原因" @input="approvalCommentError = ''" /><small v-if="approvalCommentError" class="pdm-inline-error">{{ approvalCommentError }}</small></label>
           <div class="pdm-manager-actions">
-            <button type="button" class="pdm-secondary-action is-danger" :disabled="pending" @click="submitDecision('Rejected')">退回</button>
+            <button type="button" class="pdm-secondary-action is-danger" :disabled="pending" @click="submitDecision('Rejected')">驳回</button>
             <button type="button" class="pdm-secondary-action" :disabled="pending" @click="openTransfer">转交</button>
             <button type="button" class="pdm-primary-action" :disabled="pending" @click="submitDecision('Approved')">通过</button>
           </div>
         </div>
         <div v-else-if="canManage && ['审批中', '工艺审核', '待批准', '已驳回'].includes(releasePackage.state)" class="pdm-decision-box pdm-withdraw-decision">
-          <small>{{ releasePackage.state === '已驳回' ? '退回后撤回：发布包恢复为草稿，可编辑草稿重新绑定当前BOM，或删除后重新创建。' : releasePackage.locksDocuments ? '撤回后图档与非标件BOM恢复为工作中。' : '撤回后当前BOM版本恢复为草稿。' }}</small>
+          <small>{{ releasePackage.state === '已驳回' ? '驳回后撤回：发布包恢复为草稿，可编辑草稿重新绑定当前BOM，或删除后重新创建。' : releasePackage.locksDocuments ? '撤回后图档与非标件BOM恢复为工作中。' : '撤回后当前BOM版本恢复为草稿。' }}</small>
           <div class="pdm-manager-actions">
             <button type="button" class="pdm-secondary-action is-danger" :disabled="pending" @click="emit('withdraw', releasePackage.id)">{{ releasePackage.state === '已驳回' ? '撤回为草稿' : '撤回审批' }}</button>
           </div>
@@ -1066,8 +1057,8 @@ async function saveItemComment() {
       <p v-if="releasePackage.publishError" class="pdm-inline-error">发布失败：{{ releasePackage.publishError }}</p>
       <!-- 转图与发布解耦：发布已完成时转图单独显示状态，失败由后台自动重试，也可手动重试。 -->
       <p v-if="releasePackage.previewState && releasePackage.previewState !== 'None'" class="pdm-release-preview-state">
-        <span>图纸转换（STEP/PDF）：{{ previewStateLabel(releasePackage) }}</span>
-        <span v-if="releasePackage.previewError" class="is-error">{{ releasePackage.previewError }}</span>
+        <span>图纸转换（STEP/PDF）：{{ releasePreviewStateLabel(releasePackage) }}</span>
+        <span v-if="releasePackage.previewError && releasePackage.previewState !== 'Running'" class="is-error">{{ releasePackage.previewError }}</span>
         <button v-if="releasePackage.previewState !== 'Succeeded'" type="button" class="pdm-secondary-action" :disabled="pending" @click="emit('retryPreview', releasePackage.id)">重试转图</button>
       </p>
     </template>

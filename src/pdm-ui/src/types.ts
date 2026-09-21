@@ -1005,7 +1005,7 @@ export type DrawingReviewTarget = 'Model3D' | 'Drawing2D'
 export type DrawingReviewTargetState = 'Pending' | 'ChangesRequested' | 'Approved' | 'Marked' | 'NotRequired'
 export type DrawingReviewDecision = 'Approve' | 'RequestChanges' | 'Revoke'
 
-/** 批量审批条目：kind=target 走逐张审核结论，kind=supervisor 走主管批准/退回。 */
+/** 批量审批条目：kind=target 走逐张审核结论，kind=supervisor 走主管批准/驳回。 */
 export interface DrawingReviewBatchEntry {
   kind: 'target' | 'supervisor'
   packageId: string

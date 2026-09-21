@@ -44,6 +44,23 @@ describe('ProjectFileLibrary', () => {
     expect(wrapper.text()).toContain('受控图档由SolidWorks存档')
   })
 
+  it('发布目录只读汇总审批发布流程生成的成品文件', async () => {
+    const releaseFolder = { ...businessFolder, id: 'folder-release', folderKey: 'mechanical.release', templateKey: 'mechanical.release', name: '机械发布', purpose: 'Release', sortOrder: 30, effectiveAccess: 3 } satisfies ProjectFolder
+    const stepFile = { ...file, id: 'file-step', folderId: 'folder-release', fileName: '7080113.00-01.step', currentVersion: { ...file.currentVersion, id: 'version-step', projectFileId: 'file-step', fileName: '7080113.00-01.step', fileLength: 301975 } }
+    api.listProjectFiles.mockResolvedValue([file, stepFile])
+    const wrapper = mountLibrary([releaseFolder])
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('按发布范围自动汇总的发布成品')
+    expect(wrapper.text()).toContain('7080113.00-01.step')
+    expect(wrapper.text()).not.toContain('会议纪要.pdf')
+    expect(wrapper.text()).not.toContain('上传文件')
+    expect(wrapper.text()).not.toContain('新建文件夹')
+    expect(wrapper.find('button[title="下载"]').exists()).toBe(true)
+    expect(wrapper.find('button[title="重命名"]').exists()).toBe(false)
+    expect(wrapper.find('button[title="删除"]').exists()).toBe(false)
+  })
+
   it('管理员删除受控图档前显示影响检查和双重确认', async () => {
     const document = { id: 'document-1', projectId: 'project-1', folderId: 'folder-2', drawingNumber: 'A-001', name: '测试零件', fileName: 'A-001.SLDPRT', kind: 'Part', state: 'Work', revision: 'W1', rowVersion: 3, storedVersionCount: 2 }
     api.getControlledDocumentRecycleReadiness.mockResolvedValue({ document, canRecycle: true, blockers: [], storedVersionCount: 2, whereUsedCount: 0 })

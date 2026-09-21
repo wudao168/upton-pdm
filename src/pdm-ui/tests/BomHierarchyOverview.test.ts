@@ -8,7 +8,7 @@ import type { BomItem, ProjectSummary } from '../src/types'
 const api = vi.hoisted(() => ({
   listBom: vi.fn(), listBomVersions: vi.fn(), listProjectBomHeaders: vi.fn(), listReleasePackages: vi.fn(),
   previewProjectBomU9Sync: vi.fn(), executeProjectBomU9Sync: vi.fn(),
-  retryProjectBomHeaderAutomatic: vi.fn(),
+  retryProjectBomHeaderAutomatic: vi.fn(), listU9SyncBlockers: vi.fn(),
 }))
 
 vi.mock('../src/api', () => api)
@@ -29,6 +29,7 @@ describe('BomHierarchyOverview', () => {
   beforeEach(() => {
     Object.values(api).forEach(mock => mock.mockReset())
     api.listReleasePackages.mockResolvedValue([])
+    api.listU9SyncBlockers.mockResolvedValue([])
     api.previewProjectBomU9Sync.mockImplementation(async (projectId: string, kind: string) => ({
       projectId, kind, itemCode: 'U9-CODE', componentCount: 0, state: 'UpToDate', writePreview: null,
     }))
@@ -467,5 +468,40 @@ describe('BomHierarchyOverview', () => {
     expect(readonly.text()).toContain('失败待重试')
     expect(readonly.find('[aria-label="重试 P700005-4 Master 料号自动处理"]').exists()).toBe(false)
     readonly.unmount()
+  })
+
+  it('已发布版本缺料号时把U9C BOM状态显示为待补料号清单，不把原文报错挂成失败', async () => {
+    const root = project({ id: 'root', code: 'P700010', name: '项目', rootProjectId: 'root' })
+    const header = { projectId: 'root', kind: 'Standard', materialId: 'material', materialCode: '02011000003', rowVersion: 1 }
+    api.listBom.mockResolvedValue([item('A', '测试物料')])
+    api.listBomVersions.mockResolvedValue([])
+    api.listProjectBomHeaders.mockResolvedValue([header])
+    api.previewProjectBomU9Sync.mockRejectedValue(new Error('BOM子件 序号75 气缸 尚未完成分类或料号确认，不能同步到U9C。'))
+    api.listU9SyncBlockers.mockResolvedValue([
+      { sequence: 75, category: '标准件', materialCode: '01021000019', name: '气缸', reason: '尚未完成分类或料号确认' },
+      { sequence: 1, category: '非标件', materialCode: '', name: '导杆立柱', reason: '尚未生成料品料号（缺料号）' },
+    ])
+    const wrapper = mount(BomHierarchyOverview, { props: { project: root, projects: [root], token: 'token', editable: true }, global: { plugins: [ElementPlus] } })
+    await flushPromises()
+    // 只统计该BOM流（标准件）的子件，非标件的缺料号不混进标准件行。
+    const cell = wrapper.get('button.bom-overview__sync')
+    expect(cell.text()).toBe('待补料号（1）')
+    expect(cell.classes()).toContain('is-warning')
+    await cell.trigger('click')
+    await flushPromises()
+    // 提醒以右侧抽屉 + 表格清单展示，不再用弹窗塞一大段文字。
+   expect(api.executeProjectBomU9Sync).not.toHaveBeenCalled()
+    const drawer = wrapper.get('.pdm-u9-blocker-drawer')
+    const rows = drawer.findAll('tbody tr')
+    expect(rows).toHaveLength(1)
+    expect(rows[0].text()).toContain('75')
+    expect(rows[0].text()).toContain('标准件')
+    expect(rows[0].text()).toContain('01021000019')
+    expect(rows[0].text()).toContain('气缸')
+    expect(rows[0].text()).toContain('尚未完成分类或料号确认')
+    expect(drawer.text()).not.toContain('导杆立柱')
+    expect(drawer.text()).toContain('处理路径')
+    expect(drawer.text()).toContain('重新发布这张')
+    wrapper.unmount()
   })
 })

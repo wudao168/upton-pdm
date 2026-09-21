@@ -738,10 +738,7 @@ public static class PdmEndpointExtensions
             var project = await repository.FindProjectAsync(document.ProjectId, cancellationToken);
             if (project is null) return Results.NotFound();
             await workflow.AuditVersionReadAsync(documentId, versionId, actor, role, "document.preview.read", cancellationToken);
-            await storage.VerifyStoredFileAsync(
-                project,
-                new StoredFile(version.Preview.StorageRelativePath, version.Preview.FileLength, version.Preview.Sha256, version.CreatedAt),
-                cancellationToken);
+            await storage.VerifyPreviewFileAsync(project, version.Preview, cancellationToken);
             var path = StorageLocationPolicy.ResolveUnder(project.VaultLocation, version.Preview.StorageRelativePath);
             var stream = await storage.OpenReadAsync(path, cancellationToken);
             var contentType = version.Preview.Format == DocumentPreviewFormat.Pdf ? "application/pdf" : "model/step";
@@ -1325,6 +1322,13 @@ public static class PdmEndpointExtensions
         {
             var (actor, role) = CurrentUser(context.User);
             return Results.Ok(await workflow.RetryLongLeadU9Async(releasePackageId, actor, role, cancellationToken));
+        });
+
+        api.MapGet("/projects/{projectId:guid}/u9-sync-blockers", async (Guid projectId, HttpContext context, IPdmRepository repository, ProjectBomU9SyncService service, CancellationToken cancellationToken) =>
+        {
+            var (actor, role) = CurrentUser(context.User);
+            if (!await repository.HasProjectContentReadAccessAsync(projectId, actor, role, cancellationToken)) return Results.Forbid();
+            return Results.Ok(await service.ListU9SyncBlockersAsync(projectId, cancellationToken));
         });
 
         api.MapPost("/release-packages/{releasePackageId:guid}/preview/retry", async (Guid releasePackageId, HttpContext context, PdmWorkflowService workflow, ReleasePreviewCoordinator coordinator, CancellationToken cancellationToken) =>

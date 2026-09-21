@@ -233,7 +233,7 @@ describe('DrawingReviewPanel', () => {
       props: { packageId: passedPackage.id, packages: [passedPackage], candidates, selectedDocumentId: 'drawing-1', currentUsername: 'reviewer', ...permissions },
     })
 
-    // 待批准（逐张已通过、等主管批准）仍属「待操作」；已退回归「已操作」。
+    // 待批准（逐张已通过、等主管批准）仍属「待操作」；已驳回归「已操作」。
     const todoRows = wrapper.findAll('.drawing-review-overview__row')
     expect(todoRows).toHaveLength(1)
     expect(todoRows[0]!.find('em').text()).toContain('待批准')
@@ -241,7 +241,7 @@ describe('DrawingReviewPanel', () => {
     await wrapper.findAll('[role="tab"]').find(tab => tab.text().startsWith('已操作'))!.trigger('click')
     const doneRows = wrapper.findAll('.drawing-review-overview__row')
     expect(doneRows).toHaveLength(1)
-    expect(doneRows[0]!.find('em').text()).toContain('已退回（待修改）')
+    expect(doneRows[0]!.find('em').text()).toContain('已驳回（待修改）')
     expect(doneRows[0]!.classes()).toContain('is-danger')
     expect(wrapper.text()).toContain('1/2项完成')
   })
@@ -386,7 +386,7 @@ describe('DrawingReviewPanel', () => {
     prompt.mockRestore()
   })
 
-  it('已退回（待修改）的审核单仍可由发起人撤销以便重新发起', () => {
+  it('已驳回（待修改）的审核单仍可由发起人撤销以便重新发起', () => {
     const returned: DrawingReviewPackage = { ...review, state: 'ChangesRequested' }
     const wrapper = mount(DrawingReviewPanel, {
       global: { plugins: [ElementPlus] },
@@ -448,7 +448,7 @@ describe('DrawingReviewPanel', () => {
     expect(wrapper.find('.drawing-review-overview > .drawing-review-panel__tabs').exists()).toBe(true)
 
     await wrapper.findAll('[role="tab"]')[1]!.trigger('click')
-    expect(wrapper.get('[aria-label="图纸审核状态表"]').text()).toContain('还没有已处理（通过或退回）的图纸。')
+    expect(wrapper.get('[aria-label="图纸审核状态表"]').text()).toContain('还没有已处理（通过或驳回）的图纸。')
   })
 
   it('明细支持勾选与全选，并可批量批准', async () => {

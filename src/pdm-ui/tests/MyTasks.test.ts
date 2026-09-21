@@ -7,7 +7,7 @@ describe('MyTasks', () => {
     const onMarkAllNotificationsRead = vi.fn().mockResolvedValue(undefined)
     const notification = {
       id: 'notification-1', recipient: 'designer', category: 'ReleaseApprovalRejected',
-      title: 'BOM发布审批已退回', content: 'P700005-3 · RP-001 被退回：结构需修改',
+      title: 'BOM发布审批已驳回', content: 'P700005-3 · RP-001 被驳回：结构需修改',
       projectId: 'project-1', releasePackageId: 'release-1', sourceKey: 'release-package:release-1:rejected:task-1',
       createdAt: '2026-09-03T08:11:56Z',
     }
@@ -18,7 +18,7 @@ describe('MyTasks', () => {
       },
     })
 
-    expect(wrapper.text()).toContain('BOM发布审批已退回')
+    expect(wrapper.text()).toContain('BOM发布审批已驳回')
     expect(wrapper.text()).toContain('结构需修改')
     await wrapper.findAll('button').find(button => button.text() === '查看发布包')!.trigger('click')
     expect(wrapper.emitted('openNotification')).toEqual([[notification]])
@@ -29,7 +29,7 @@ describe('MyTasks', () => {
   it('shows a material rejection message with a material action', async () => {
     const notification = {
       id: 'notification-material', recipient: 'engineer', category: 'MaterialMasterRejected',
-      title: '料品申请已退回', content: '01021000055 · RFID读写头 被 standardizer 退回：型号资料不完整',
+      title: '料品申请已驳回', content: '01021000055 · RFID读写头 被 standardizer 驳回：型号资料不完整',
       sourceKey: 'material-master:material-1:rejected:v7', createdAt: '2026-09-17T07:00:00Z',
     }
     const wrapper = mount(MyTasks, {
@@ -39,7 +39,7 @@ describe('MyTasks', () => {
       },
     })
 
-    expect(wrapper.text()).toContain('料品申请已退回')
+    expect(wrapper.text()).toContain('料品申请已驳回')
     expect(wrapper.text()).toContain('型号资料不完整')
     await wrapper.findAll('button').find(button => button.text() === '查看料品')!.trigger('click')
     expect(wrapper.emitted('openNotification')).toEqual([[notification]])

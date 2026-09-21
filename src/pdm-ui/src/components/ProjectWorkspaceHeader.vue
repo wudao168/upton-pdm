@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { Boxes, Calendar, ClipboardCheck, ClipboardList, FileClock, FolderOpen, FolderTree, LayoutDashboard, PackageCheck, Search, Settings, ShoppingCart } from '@lucide/vue'
+import { Boxes, Calendar, ClipboardCheck, ClipboardList, FileClock, FolderOpen, FolderTree, LayoutDashboard, Search, Settings, ShoppingCart } from '@lucide/vue'
 import { ElMessageBox } from 'element-plus'
 import { computed, ref, watch } from 'vue'
 import type { ProjectCopyOptionsInput, ProjectCopyPreview, ProjectCopyResult, ProjectSummary } from '../types'
@@ -39,7 +39,6 @@ const tabs = [
   { key: 'documents', label: '图档', icon: FolderTree },
   { key: 'bom', label: 'BOM', icon: Boxes },
   { key: 'procurement', label: '备料', icon: ShoppingCart },
-  { key: 'release', label: '发布', icon: PackageCheck },
   { key: 'versions', label: '版本', icon: FileClock },
   { key: 'records', label: '记录', icon: ClipboardList },
 ] satisfies Array<{ key: ProjectTab; label: string; icon: typeof LayoutDashboard }>
@@ -148,7 +147,7 @@ async function selectBrowsedProject(projectId: string) {
 }
 
 function statusTone(status?: string) {
-  if (status?.includes('失败') || status?.includes('退回')) return 'is-alert'
+  if (status?.includes('失败') || status?.includes('驳回')) return 'is-alert'
   if (status?.includes('待') || status?.includes('编辑中') || status?.includes('检出') || status?.includes('发布中')) return 'is-remind'
   return 'is-ok'
 }

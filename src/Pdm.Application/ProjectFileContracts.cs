@@ -28,6 +28,9 @@ public sealed record StoredProjectFileUpload(
 
 public sealed record ProjectFileDownload(ProjectFile File, ProjectFileVersion Version, Stream Content);
 
+/// <summary>发布成品归档项：文件已经存在于发布目录，这里只登记它的名称、位置、长度和指纹。</summary>
+public sealed record ReleaseArchiveFile(string FileName, string StorageRelativePath, long FileLength, string Sha256);
+
 public interface IProjectFileRepository
 {
     Task<IReadOnlyList<ProjectFile>> ListAsync(Guid rootProjectId, Guid? folderId, bool includeDeleted, CancellationToken cancellationToken);
@@ -40,6 +43,18 @@ public interface IProjectFileRepository
     Task<ProjectFile> SetDeletedAsync(Guid fileId, bool deleted, string actor, CancellationToken cancellationToken);
     Task<bool> FolderHasFilesAsync(Guid folderId, CancellationToken cancellationToken);
     Task<IReadOnlyList<ProjectFileVersion>> PurgeDeletedBeforeAsync(DateTimeOffset cutoff, CancellationToken cancellationToken);
+    /// <summary>
+    /// 发布成品归档：把发布目录里的成品登记成发布目录下的只读项目文件（同名文件按指纹去重，重复执行不会生成重复版本）。
+    /// </summary>
+    Task<int> ArchiveReleaseAsync(
+        Guid rootProjectId,
+        Guid folderId,
+        string storageRoot,
+        string releaseNumber,
+        IReadOnlyList<ReleaseArchiveFile> files,
+        string actor,
+        DateTimeOffset releasedAt,
+        CancellationToken cancellationToken);
 }
 
 public interface IProjectFileStorage

@@ -79,17 +79,17 @@ const finishedPackageLabels: Partial<Record<DrawingReviewPackage['state'], strin
 }
 const decisionRouteLabel = computed(() => {
   if (!activePackage.value || !activeItem.value) return '当前图档未纳入审核单'
-  // 整单退回（历史路径）：图纸仍显示"已通过"，这里说明整单已退回与可用的下一步。
+  // 整单驳回（历史路径）：图纸仍显示"已通过"，这里说明整单已驳回与可用的下一步。
   if (activePackage.value.state === 'ChangesRequested' && !itemChangesRequested.value)
-    return '本审核单已整单退回（待修改）：各图纸已解锁，可重新发起审核；或由发起人/项目经理撤销本单'
+    return '本审核单已整单驳回（待修改）：各图纸已解锁，可重新发起审核；或由发起人/项目经理撤销本单'
   if (itemApproved.value) {
-    if (supervisorApproval.value) return '该2D工程图已通过审核，等待批准；批准为整单操作，退改只退回当前选中的图纸'
+    if (supervisorApproval.value) return '该2D工程图已通过审核，等待批准；批准为整单操作，驳回只作用于当前选中的图纸'
     if (reviewActive.value) return '该2D工程图已通过审核，等待批准'
     return `该2D工程图已通过审核，${finishedPackageLabels[activePackage.value.state] ?? drawingReviewPackageStateLabel(activePackage.value.state)}`
   }
   if (itemChangesRequested.value) return canResubmit.value
-    ? '该2D工程图已退回修改：请获取编辑权限修改并提交存档，然后点“重新提交”'
-    : '该2D工程图已退回修改，其余图纸可继续审核'
+    ? '该2D工程图已驳回（待修改）：请获取编辑权限修改并提交存档，然后点“重新提交”'
+    : '该2D工程图已驳回（待修改），其余图纸可继续审核'
   if (!reviewActive.value) return drawingReviewPackageStateLabel(activePackage.value.state)
   return routeLabel.value
 })
@@ -103,16 +103,16 @@ async function decide(decision: DrawingReviewDecision) {
   const item = activeItem.value
   if (!packageValue || !item || !canAct.value) return
   if (decision === 'RequestChanges' && !decisionComment.value.trim()) {
-    ElMessage.warning('退改必须填写说明。')
+    ElMessage.warning('驳回必须填写说明。')
     return
   }
-  // 通过/批准不再二次确认；退改必须确认，并写明只退回当前这一张。
+  // 通过/批准不再二次确认；驳回必须确认，并写明只驳回当前这一张。
   if (decision !== 'Approve') {
     const scope = supervisorApproval.value
-      ? '退回后该图纸需设计者修改并提交存档，再重新提交审核；同一审核单其他图纸不受影响。'
-      : '本次只退回这一张图纸，同一审核单其他图纸可继续审核。'
-    await ElMessageBox.confirm(`确认退回图纸 ${item.drawingNumber}？${scope}`, '只退回当前选中的图纸', {
-      confirmButtonText: '确认退回这一张', cancelButtonText: '取消', type: 'warning',
+      ? '驳回后该图纸需设计者修改并提交存档，再重新提交审核；同一审核单其他图纸不受影响。'
+      : '本次只驳回这一张图纸，同一审核单其他图纸可继续审核。'
+    await ElMessageBox.confirm(`确认驳回图纸 ${item.drawingNumber}？${scope}`, '只驳回当前选中的图纸', {
+      confirmButtonText: '确认驳回这一张', cancelButtonText: '取消', type: 'warning',
     })
   }
   emit('decide', packageValue.id, item.id, target, decision, decisionComment.value.trim())
@@ -123,12 +123,12 @@ async function decideSupervisor(decision: DrawingReviewDecision) {
   const packageValue = activePackage.value
   if (!packageValue || !canActAsSupervisor.value) return
   if (decision === 'RequestChanges' && !decisionComment.value.trim()) {
-    ElMessage.warning('退改必须填写说明。')
+    ElMessage.warning('驳回必须填写说明。')
     return
   }
-  // 通过/批准不再二次确认；退改仍需确认。
+  // 通过/批准不再二次确认；驳回仍需确认。
   if (decision !== 'Approve') {
-    await ElMessageBox.confirm('确认退回设计修改？', '图纸审核确认', {
+    await ElMessageBox.confirm('确认驳回设计修改？', '图纸审核确认', {
       confirmButtonText: '确认', cancelButtonText: '取消', type: 'warning',
     })
   }
@@ -137,7 +137,7 @@ async function decideSupervisor(decision: DrawingReviewDecision) {
 }
 
 function submit(decision: DrawingReviewDecision) {
-  // 退改一律按当前选中的图纸处理；机械主管节点只有“批准”是整单操作。
+  // 驳回一律按当前选中的图纸处理；机械主管节点只有“批准”是整单操作。
   if (decision === 'RequestChanges') return decide(decision)
   return supervisorApproval.value ? decideSupervisor(decision) : decide(decision)
 }
@@ -147,8 +147,8 @@ async function revoke() {
   const item = activeItem.value
   if (!packageValue || !item || !canRevoke.value) return
   await ElMessageBox.confirm(
-    '撤销后该2D工程图将回到待审核状态，需要重新审核；如已提交批准，将退回审核节点。',
-    itemApproved.value ? '撤销审核通过' : '撤销退改',
+    '撤销后该2D工程图将回到待审核状态，需要重新审核；如已提交批准，将回到审核节点。',
+    itemApproved.value ? '撤销审核通过' : '撤销驳回',
     { confirmButtonText: '确认撤销', cancelButtonText: '取消', type: 'warning' },
   )
   emit('decide', packageValue.id, item.id, target, 'Revoke', decisionComment.value.trim())
@@ -172,9 +172,9 @@ async function resubmit() {
   <!-- 审核结论栏常驻显示：不可操作时输入与按钮一起禁用，通过后“通过”按钮就地变成“撤销”。 -->
   <section class="drawing-review-decision-bar" aria-label="图纸审核结论">
     <span class="drawing-review-decision-bar__node" :class="supervisorApproval ? 'is-pending' : 'is-warning'">{{ supervisorApproval ? '批准' : '审核' }}</span>
-    <textarea v-model="decisionComment" rows="1" placeholder="审核意见；退改时必填" aria-label="审核意见" :disabled="!canAct" />
+    <textarea v-model="decisionComment" rows="1" placeholder="审核意见；驳回时必填" aria-label="审核意见" :disabled="!canAct" />
     <span class="drawing-review-decision-bar__route">{{ decisionRouteLabel }}</span>
-    <span v-if="itemChangesRequested && activeItem?.drawingComment" class="drawing-review-decision-bar__comment" :title="activeItem.drawingComment">退改说明：{{ activeItem.drawingComment }}</span>
+    <span v-if="itemChangesRequested && activeItem?.drawingComment" class="drawing-review-decision-bar__comment" :title="activeItem.drawingComment">驳回说明：{{ activeItem.drawingComment }}</span>
     <div class="drawing-review-decision-buttons">
       <template v-if="canResubmit">
         <button type="button" class="is-approve" :disabled="pending" @click="resubmit()"><Send :size="14" />重新提交</button>
@@ -182,12 +182,12 @@ async function resubmit() {
       <template v-else>
         <span v-if="canActAsSupervisor" class="drawing-review-decision-bar__hint">请在下方明细中勾选图纸后批量批准</span>
         <template v-else>
-          <button type="button" class="is-reject" :disabled="pending || !canAct" @click="submit('RequestChanges')"><X :size="14" />退改</button>
+          <button type="button" class="is-reject" :disabled="pending || !canAct" @click="submit('RequestChanges')"><X :size="14" />驳回</button>
           <button
             v-if="itemDecided"
             type="button"
             class="is-revoke"
-            :title="itemApproved ? '撤销审核通过' : '撤销退改结论'"
+            :title="itemApproved ? '撤销审核通过' : '撤销驳回结论'"
             :disabled="!canRevoke"
             @click="revoke()"
           ><RotateCcw :size="14" />撤销</button>

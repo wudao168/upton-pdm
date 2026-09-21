@@ -353,6 +353,20 @@ public sealed partial class MySqlPdmRepository
     private static ProjectFolder MapFolder(ProjectFolderRow row) => new(row.Id, row.RootProjectId, row.ParentFolderId, row.TargetProjectId,
         row.FolderKey, row.TemplateKey, row.Name, row.Purpose, row.SortOrder, row.IsSystem, row.InheritPermissions);
 
+    /// <summary>按目录键读取项目下的系统目录（如"机械发布/电气发布"），不做账号权限过滤。</summary>
+    public async Task<ProjectFolder?> FindProjectFolderByKeyAsync(Guid projectId, string folderKey, CancellationToken cancellationToken)
+    {
+        await EnsureProjectFolderTreeAsync(projectId, cancellationToken);
+        await using var connection = await OpenAsync(cancellationToken);
+        var rootId = await connection.ExecuteScalarAsync<Guid>(new CommandDefinition(
+            "SELECT COALESCE(root_project_id,id) FROM project WHERE id=@ProjectId",
+            new { ProjectId = projectId }, cancellationToken: cancellationToken));
+        var row = await connection.QuerySingleOrDefaultAsync<ProjectFolderRow>(new CommandDefinition(
+            "SELECT id,root_project_id,parent_folder_id,target_project_id,folder_key,template_key,name,purpose,sort_order,is_system,inherit_permissions FROM project_folder WHERE root_project_id=@RootId AND folder_key=@FolderKey",
+            new { RootId = rootId, FolderKey = folderKey }, cancellationToken: cancellationToken));
+        return row is null ? null : MapFolder(row);
+    }
+
     private sealed class FolderProjectRow { public Guid Id { get; init; } public string Code { get; init; } = string.Empty; public Guid? ParentProjectId { get; init; } public Guid? RootProjectId { get; init; } public int? ChildSequence { get; init; } }
     private sealed class FolderTemplateRow { public string FolderKey { get; init; } = string.Empty; public string? ParentKey { get; init; } public string Name { get; init; } = string.Empty; public ProjectFolderPurpose Purpose { get; init; } public int SortOrder { get; init; } public bool IsSystem { get; init; } public bool InheritPermissions { get; init; } }
     private sealed class ProjectFolderRow { public Guid Id { get; init; } public Guid RootProjectId { get; init; } public Guid? ParentFolderId { get; init; } public Guid? TargetProjectId { get; init; } public string FolderKey { get; init; } = string.Empty; public string TemplateKey { get; init; } = string.Empty; public string Name { get; init; } = string.Empty; public ProjectFolderPurpose Purpose { get; init; } public int SortOrder { get; init; } public bool IsSystem { get; init; } public bool InheritPermissions { get; init; } }

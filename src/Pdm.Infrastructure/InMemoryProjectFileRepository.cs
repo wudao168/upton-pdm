@@ -32,6 +32,34 @@ public sealed class InMemoryProjectFileRepository(TimeProvider timeProvider) : I
     public Task<ProjectFile> MoveAsync(Guid fileId, Guid folderId, string actor, CancellationToken cancellationToken) => Update(fileId, item => item with { FolderId = folderId, UpdatedBy = actor, UpdatedAt = timeProvider.GetUtcNow() });
     public Task<ProjectFile> SetDeletedAsync(Guid fileId, bool deleted, string actor, CancellationToken cancellationToken) => Update(fileId, item => item with { DeletedAt = deleted ? timeProvider.GetUtcNow() : null, DeletedBy = deleted ? actor : null, UpdatedBy = actor, UpdatedAt = timeProvider.GetUtcNow() });
     public Task<bool> FolderHasFilesAsync(Guid folderId, CancellationToken cancellationToken) => Task.FromResult(files.Values.Any(item => item.FolderId == folderId));
+    public Task<int> ArchiveReleaseAsync(
+        Guid rootProjectId,
+        Guid folderId,
+        string storageRoot,
+        string releaseNumber,
+        IReadOnlyList<ReleaseArchiveFile> archiveFiles,
+        string actor,
+        DateTimeOffset releasedAt,
+        CancellationToken cancellationToken)
+    {
+        lock (files)
+        {
+            var archived = 0;
+            foreach (var entry in archiveFiles)
+            {
+                var file = files.Values.FirstOrDefault(item => item.FolderId == folderId && item.DeletedAt is null && item.FileName.Equals(entry.FileName, StringComparison.OrdinalIgnoreCase));
+                if (file is not null && versions.Values.Any(item => item.ProjectFileId == file.Id && item.Sha256.Equals(entry.Sha256, StringComparison.OrdinalIgnoreCase))) continue;
+                var now = timeProvider.GetUtcNow();
+                file ??= new ProjectFile(Guid.NewGuid(), rootProjectId, folderId, entry.FileName, actor, now, actor, now, null, null);
+                var number = versions.Values.Where(item => item.ProjectFileId == file.Id).Select(item => item.VersionNumber).DefaultIfEmpty().Max() + 1;
+                var version = new ProjectFileVersion(Guid.NewGuid(), file.Id, number, entry.FileName, storageRoot, entry.StorageRelativePath, entry.FileLength, entry.Sha256, actor, releasedAt, $"发布成品 · {releaseNumber}");
+                versions[version.Id] = version;
+                files[file.Id] = file with { UpdatedBy = actor, UpdatedAt = now, CurrentVersion = version };
+                archived++;
+            }
+            return Task.FromResult(archived);
+        }
+    }
     public Task<IReadOnlyList<ProjectFileVersion>> PurgeDeletedBeforeAsync(DateTimeOffset cutoff, CancellationToken cancellationToken)
     {
         lock (files)

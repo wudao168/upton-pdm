@@ -63,7 +63,7 @@ export function loadGlobalStatusContent(): Promise<GlobalStatusContentLibrary> {
     if (!response.ok) throw new Error(`顶部内容库加载失败：${response.status}`)
     const library = await response.json() as GlobalStatusContentLibrary
     const total = Object.values(library.counts).reduce((sum, value) => sum + value, 0)
-    if (library.schemaVersion !== 1 || total !== 11100 || library.items.length !== 11100) {
+    if (library.schemaVersion !== 1 || total !== library.items.length) {
       throw new Error('顶部内容库结构或数量不正确')
     }
     return library
@@ -78,16 +78,67 @@ function localDateKey(date: Date) {
   return `${year}-${month}-${day}`
 }
 
+function nextDay(date: Date) {
+  const next = new Date(date)
+  next.setDate(next.getDate() + 1)
+  return next
+}
+
+const solarFestivals: Record<string, string> = {
+  '01-01': '元旦',
+  '03-08': '妇女节',
+  '03-12': '植树节',
+  '05-01': '劳动节',
+  '05-04': '青年节',
+  '06-01': '儿童节',
+  '07-01': '建党节',
+  '08-01': '建军节',
+  '09-10': '教师节',
+  '10-01': '国庆节',
+}
+
+const lunarFestivals: Record<string, string> = {
+  '正月1': '春节',
+  '正月15': '元宵节',
+  '五月5': '端午节',
+  '七月7': '七夕节',
+  '八月15': '中秋节',
+  '九月9': '重阳节',
+  '腊月8': '腊八节',
+}
+
+let chineseCalendarFormat: Intl.DateTimeFormat | undefined
+
+function lunarDayKey(date: Date) {
+  try {
+    chineseCalendarFormat ??= new Intl.DateTimeFormat('zh-CN-u-ca-chinese', { month: 'long', day: 'numeric' })
+    const parts = chineseCalendarFormat.formatToParts(date)
+    const month = parts.find(part => part.type === 'month')?.value
+    const day = parts.find(part => part.type === 'day')?.value
+    return month && day ? `${month}${day}` : undefined
+  } catch {
+    return undefined
+  }
+}
+
+export function festivalForDate(date: Date) {
+  const lunar = lunarDayKey(date)
+  if (lunar && lunarFestivals[lunar]) return lunarFestivals[lunar]
+  if (lunarDayKey(nextDay(date)) === '正月1') return '除夕'
+  return solarFestivals[localDateKey(date).slice(5)]
+}
+
 export function holidayForDate(library: GlobalStatusContentLibrary, now: Date) {
   const days = library.holidayCalendars.flatMap(calendar => calendar.days)
   const today = localDateKey(now)
   const offDay = days.find(day => day.date === today && day.isOffDay)
   if (offDay) return offDay.name
+  const festival = festivalForDate(now)
+  if (festival) return festival
   if (now.getHours() < 15) return undefined
-  const tomorrow = new Date(now)
-  tomorrow.setDate(tomorrow.getDate() + 1)
+  const tomorrow = nextDay(now)
   const tomorrowKey = localDateKey(tomorrow)
-  return days.find(day => day.date === tomorrowKey && day.isOffDay)?.name
+  return days.find(day => day.date === tomorrowKey && day.isOffDay)?.name || festivalForDate(tomorrow)
 }
 
 function attribution(item: GlobalStatusContentItem) {

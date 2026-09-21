@@ -139,12 +139,12 @@ public sealed class DrawingReviewWorkflowTests
             "reviewer-a", UserRole.ProcessReviewer, default);
         Assert.Equal(DrawingReviewPackageState.PendingSupervisorApproval, package.State);
 
-        // 机械主管整单退回（升级前的旧路径，历史数据里仍可能存在）。
+        // 机械主管整单驳回（升级前的旧路径，历史数据里仍可能存在）。
         package = await workflow.DecideDrawingReviewSupervisorAsync(package.Id,
-            new DecideDrawingReviewSupervisorCommand(DrawingReviewDecision.RequestChanges, "整单退回"), "manager", UserRole.Administrator, default);
+            new DecideDrawingReviewSupervisorCommand(DrawingReviewDecision.RequestChanges, "整单驳回"), "manager", UserRole.Administrator, default);
         Assert.Equal(DrawingReviewPackageState.ChangesRequested, package.State);
 
-        // 这种已退回的审核单此前既不能批准也不能撤销，会卡死；现在发起人可以撤回重新发起。
+        // 这种已驳回的审核单此前既不能批准也不能撤销，会卡死；现在发起人可以撤回重新发起。
         package = await workflow.WithdrawDrawingReviewPackageAsync(package.Id, "改不动，撤回重新发起", "submitter", UserRole.Administrator, default);
         Assert.Equal(DrawingReviewPackageState.Withdrawn, package.State);
         Assert.Equal("submitter", package.WithdrawnBy);
@@ -163,21 +163,21 @@ public sealed class DrawingReviewWorkflowTests
             new DecideDrawingReviewTargetCommand(DrawingReviewTarget.Drawing2D, DrawingReviewDecision.RequestChanges, "尺寸标注需修改"),
             "reviewer-a", UserRole.ProcessReviewer, default);
 
-        // 单张退改只影响该图纸，审核单保持审图人审核，其余图纸可以继续审核。
+        // 单张驳回只影响该图纸，审核单保持审图人审核，其余图纸可以继续审核。
         Assert.Equal(DrawingReviewTargetState.ChangesRequested, Assert.Single(package.Items).DrawingState);
         Assert.Equal(DrawingReviewPackageState.InReview, package.State);
-        // 退改后立即释放该图档的编辑锁，设计者可以直接改图。
+        // 驳回后立即释放该图档的编辑锁，设计者可以直接改图。
         Assert.DoesNotContain(drawing.Id, await repository.ListActiveDrawingReviewDocumentIdsAsync(ProjectId, default));
         Assert.False(await repository.IsDocumentUnderActiveDrawingReviewAsync(drawing.Id, default));
 
         package = await workflow.DecideDrawingReviewTargetAsync(package.Id, item.Id,
-            new DecideDrawingReviewTargetCommand(DrawingReviewTarget.Drawing2D, DrawingReviewDecision.Revoke, "撤销退改"),
+            new DecideDrawingReviewTargetCommand(DrawingReviewTarget.Drawing2D, DrawingReviewDecision.Revoke, "撤销驳回"),
             "reviewer-a", UserRole.ProcessReviewer, default);
         var reset = Assert.Single(package.Items);
         Assert.Equal(DrawingReviewTargetState.Pending, reset.DrawingState);
         Assert.Null(reset.DrawingComment);
         Assert.Equal(DrawingReviewPackageState.InReview, package.State);
-        // 撤销退改回到待审核后重新锁定。
+        // 撤销驳回回到待审核后重新锁定。
         Assert.Contains(drawing.Id, await repository.ListActiveDrawingReviewDocumentIdsAsync(ProjectId, default));
         Assert.True(await repository.IsDocumentUnderActiveDrawingReviewAsync(drawing.Id, default));
     }
@@ -239,7 +239,7 @@ public sealed class DrawingReviewWorkflowTests
             "reviewer-a", UserRole.ProcessReviewer, default);
         Assert.Equal(DrawingReviewPackageState.PendingSupervisorApproval, package.State);
 
-        // 机械主管节点不能按图"通过"（批准是整单操作），也不能由非主管退回。
+        // 机械主管节点不能按图"通过"（批准是整单操作），也不能由非主管驳回。
         var wrongDecision = await Assert.ThrowsAsync<PdmRuleException>(() => workflow.DecideDrawingReviewTargetAsync(package.Id, item.Id,
             new DecideDrawingReviewTargetCommand(DrawingReviewTarget.Drawing2D, DrawingReviewDecision.Approve, null),
             "manager", UserRole.Administrator, default));
@@ -248,7 +248,7 @@ public sealed class DrawingReviewWorkflowTests
             new DecideDrawingReviewTargetCommand(DrawingReviewTarget.Drawing2D, DrawingReviewDecision.RequestChanges, "尺寸链需复核"),
             "reviewer-a", UserRole.ProcessReviewer, default));
 
-        // 主管退回：只退回这一张，审核单回到审图节点，等设计者改完重新提交后再审。
+        // 主管驳回：只驳回这一张，审核单回到审图节点，等设计者改完重新提交后再审。
         package = await workflow.DecideDrawingReviewTargetAsync(package.Id, item.Id,
             new DecideDrawingReviewTargetCommand(DrawingReviewTarget.Drawing2D, DrawingReviewDecision.RequestChanges, "尺寸链需复核"),
             "manager", UserRole.Administrator, default);

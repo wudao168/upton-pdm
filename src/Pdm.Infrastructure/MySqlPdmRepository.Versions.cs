@@ -1,6 +1,7 @@
 using System.Data.Common;
 using System.Text.Json;
 using Dapper;
+using MySqlConnector;
 using Upton.Pdm.Application;
 using Upton.Pdm.Domain;
 
@@ -183,10 +184,11 @@ public sealed partial class MySqlPdmRepository
     {
         await using var connection = await OpenAsync(cancellationToken);
         var package = await connection.QuerySingleOrDefaultAsync<PackagePublishRow>(new CommandDefinition(
-            "SELECT project_id,reference_snapshot_id,state FROM release_package WHERE id=@PackageId",
+            "SELECT project_id,reference_snapshot_id,state,non_standard_bom_snapshot_json FROM release_package WHERE id=@PackageId",
             new { PackageId = releasePackageId }, cancellationToken: cancellationToken))
             ?? throw new PdmNotFoundException("发布包不存在。");
-        if (package.State != ReleasePackageState.Publishing.ToString())
+        // 转图与发布解耦：首次发布时包处于"发布中"，后台重试转图时包已经是"已发布"。
+        if (package.State is not (nameof(ReleasePackageState.Publishing) or nameof(ReleasePackageState.Published)))
             throw new PdmConflictException("发布包尚未进入服务器转换状态。");
         if (!package.ReferenceSnapshotId.HasValue)
             return [];
@@ -196,8 +198,14 @@ public sealed partial class MySqlPdmRepository
             ?? throw new PdmConflictException("发布包引用树快照不存在。");
         var root = JsonSerializer.Deserialize<DocumentReferenceNode>(rootJson, jsonOptions)
             ?? throw new InvalidDataException("发布包引用树快照损坏。");
+        // 转图范围：只转非标件BOM中的物料（模型出STEP、其关联2D工程图出PDF）以及这些物料在引用树上的上级装配体，
+        // 标准件/外购件等其他零件不转图。
+        var nonStandardModels = ParseNonStandardModels(package.NonStandardBomSnapshotJson);
+        IReadOnlyList<Guid> previewScope = nonStandardModels.Count == 0
+            ? []
+            : await ResolvePreviewScopeAsync(connection, root, nonStandardModels, null, cancellationToken);
         var sources = new List<ReleasePreviewSource>();
-        foreach (var documentId in EnumerateDocumentIds(root).Distinct())
+        foreach (var documentId in previewScope)
         {
             var row = await connection.QuerySingleOrDefaultAsync<ReleasePreviewSourceRow>(new CommandDefinition(
                 """
@@ -227,6 +235,53 @@ public sealed partial class MySqlPdmRepository
         return sources;
     }
 
+    /// <summary>
+    /// 解析转图范围：非标件BOM物料在引用树上的节点 + 这些节点的上级装配体 + 物料关联的2D工程图（转PDF）。
+    /// </summary>
+    private static async Task<IReadOnlyList<Guid>> ResolvePreviewScopeAsync(
+        MySqlConnection connection,
+        DocumentReferenceNode root,
+        HashSet<Guid> nonStandardModels,
+        DbTransaction? transaction,
+        CancellationToken cancellationToken)
+    {
+        var scope = new HashSet<Guid>();
+
+        bool Visit(DocumentReferenceNode node)
+        {
+            var isTarget = node.DocumentId is Guid own && nonStandardModels.Contains(own);
+            foreach (var child in node.Children) isTarget |= Visit(child);
+            if (isTarget && node.DocumentId is Guid id) scope.Add(id);
+            return isTarget;
+        }
+
+        Visit(root);
+        if (scope.Count == 0) return [];
+        foreach (var drawing in await ResolveNonStandardDrawingIdsAsync(connection, scope, transaction, cancellationToken)) scope.Add(drawing);
+        return [.. scope];
+    }
+
+    /// <summary>非标件BOM中物料对应的2D工程图（模型→图纸关系）：转图出PDF，发布时随物料一起转正式版本。</summary>
+    private static async Task<IReadOnlyList<Guid>> ResolveNonStandardDrawingIdsAsync(
+        MySqlConnection connection,
+        IEnumerable<Guid> candidateModels,
+        DbTransaction? transaction,
+        CancellationToken cancellationToken)
+    {
+        var modelIds = candidateModels.Distinct().ToArray();
+        if (modelIds.Length == 0) return [];
+        return (await connection.QueryAsync<Guid>(new CommandDefinition(
+            "SELECT drawing_document_id FROM document_model_drawing_relation WHERE model_document_id IN @ModelIds",
+            new { ModelIds = modelIds }, transaction, cancellationToken: cancellationToken))).ToArray();
+    }
+
+    /// <summary>非标件BOM快照里的来源模型（转图与发布的图纸范围都以它为准）。</summary>
+    private HashSet<Guid> ParseNonStandardModels(string snapshotJson) =>
+        (JsonSerializer.Deserialize<List<BomItem>>(snapshotJson, jsonOptions) ?? [])
+            .Where(item => item.SourceDocumentId.HasValue)
+            .Select(item => item.SourceDocumentId!.Value)
+            .ToHashSet();
+
     public async Task<IReadOnlyList<DocumentVersion>> PublishReleasePackageVersionsAsync(
         Guid releasePackageId,
         Guid approvalTaskId,
@@ -237,7 +292,7 @@ public sealed partial class MySqlPdmRepository
         await using var connection = await OpenAsync(cancellationToken);
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
         var package = await connection.QuerySingleOrDefaultAsync<PackagePublishRow>(new CommandDefinition(
-            "SELECT project_id,reference_snapshot_id,state FROM release_package WHERE id=@PackageId FOR UPDATE",
+            "SELECT project_id,reference_snapshot_id,state,non_standard_bom_snapshot_json FROM release_package WHERE id=@PackageId FOR UPDATE",
             new { PackageId = releasePackageId }, transaction, cancellationToken: cancellationToken))
             ?? throw new PdmNotFoundException("发布包不存在。");
         if (package.State != ReleasePackageState.Publishing.ToString()) throw new PdmConflictException("发布包尚未进入发布状态。");
@@ -257,9 +312,14 @@ public sealed partial class MySqlPdmRepository
         var root = JsonSerializer.Deserialize<DocumentReferenceNode>(rootJson, jsonOptions)
             ?? throw new InvalidDataException("发布包引用树快照损坏。");
 
-        var documentIds = EnumerateDocumentIds(root).Distinct().ToArray();
+        var documentIds = EnumerateDocumentIds(root).Distinct().ToList();
+        // 非标件BOM中物料关联的2D工程图随发布一起转正式版本：转图时生成PDF，交付包与"机械发布"目录才有图纸。
+        var nonStandardModels = ParseNonStandardModels(package.NonStandardBomSnapshotJson);
+        documentIds.AddRange(await ResolveNonStandardDrawingIdsAsync(connection,
+            EnumerateDocumentIds(root).Distinct().Where(nonStandardModels.Contains), transaction, cancellationToken));
+        var distinctDocumentIds = documentIds.Distinct().ToArray();
         var releasedVersions = new List<DocumentVersion>();
-        foreach (var documentId in documentIds)
+        foreach (var documentId in distinctDocumentIds)
         {
             var locked = await LockDocumentAsync(connection, transaction, documentId, cancellationToken);
             var sourceRow = await connection.QuerySingleOrDefaultAsync<DocumentVersionRow>(new CommandDefinition(
@@ -348,6 +408,29 @@ public sealed partial class MySqlPdmRepository
         return await connection.ExecuteAsync(new CommandDefinition(
             "UPDATE release_package SET state='PublishFailed',publish_error=@Reason,row_version=row_version+1 WHERE state='Publishing'",
             new { Reason = reason }, cancellationToken: cancellationToken));
+    }
+
+    /// <summary>服务重启/崩溃后恢复：把停留在"转换中"的转图任务重新排队（转图本身可重入）。</summary>
+    public async Task<int> RecoverInterruptedPreviewRunsAsync(string reason, CancellationToken cancellationToken)
+    {
+        await using var connection = await OpenAsync(cancellationToken);
+        return await connection.ExecuteAsync(new CommandDefinition(
+            "UPDATE release_package SET preview_state='Pending',preview_error=@Reason,preview_updated_at=@UpdatedAt,row_version=row_version+1 WHERE state='Published' AND preview_state='Running'",
+            new { Reason = reason, UpdatedAt = timeProvider.GetUtcNow().UtcDateTime }, cancellationToken: cancellationToken));
+    }
+
+    /// <summary>列出最近发布的发布包（服务重启后用于补登记发布成品归档）。</summary>
+    public async Task<IReadOnlyList<Guid>> ListRecentPublishedReleasePackageIdsAsync(int limit, CancellationToken cancellationToken)
+    {
+        await using var connection = await OpenAsync(cancellationToken);
+        return (await connection.QueryAsync<Guid>(new CommandDefinition(
+            """
+            SELECT id FROM release_package
+            WHERE state='Published' AND published_path IS NOT NULL
+            ORDER BY COALESCE(published_at, created_at) DESC
+            LIMIT @Limit
+            """,
+            new { Limit = limit }, cancellationToken: cancellationToken))).ToArray();
     }
 
     /// <summary>把转图结果补挂到发布包对应的正式版本（发布时缺预览的正式版本后补 STEP/PDF）。</summary>
@@ -474,7 +557,13 @@ public sealed partial class MySqlPdmRepository
 
     private sealed class LockedDocumentRow { public Guid Id { get; init; } public string Kind { get; init; } = string.Empty; public string RevisionLabel { get; init; } = string.Empty; public string? CheckedOutBy { get; init; } public Guid? CheckoutSessionId { get; init; } public long RowVersion { get; init; } }
     private sealed class LatestVersionFingerprintRow { public string Sha256 { get; init; } = string.Empty; public string? SourceFileSha256 { get; init; } }
-    private sealed class PackagePublishRow { public Guid ProjectId { get; init; } public Guid? ReferenceSnapshotId { get; init; } public string State { get; init; } = string.Empty; }
+    private sealed class PackagePublishRow
+    {
+        public Guid ProjectId { get; init; }
+        public Guid? ReferenceSnapshotId { get; init; }
+        public string State { get; init; } = string.Empty;
+        public string NonStandardBomSnapshotJson { get; init; } = "[]";
+    }
     private sealed class ReleasePreviewSourceRow
     {
         public Guid DocumentId { get; init; }

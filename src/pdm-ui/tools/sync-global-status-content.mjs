@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url'
 const toolRoot = dirname(fileURLToPath(import.meta.url))
 const outputPath = resolve(toolRoot, '../src/data/globalStatusContent.json')
 const cachePath = join(tmpdir(), 'upton-pdm-global-status-content')
-const targets = { tang: 5000, songci: 5000, quote: 800, holiday: 100, slogan: 200 }
+const targets = { tang: 5000, songci: 5000, quote: 800, holiday: 220, slogan: 200 }
 const upstream = 'https://github.com/chinese-poetry/chinese-poetry'
 const apiRoot = 'https://api.github.com/repos/chinese-poetry/chinese-poetry'
 const holidayUpstream = 'https://github.com/NateScarlet/holiday-cn'
@@ -250,6 +250,66 @@ const holidayTemplates = {
     count: 14,
     openings: ['山河锦绣', '盛世华章', '金秋国庆', '家国同庆', '华夏欢歌', '江山如画', '举国欢庆'],
     endings: ['家国同庆。', '繁荣安康。'],
+  },
+  除夕: {
+    count: 10,
+    openings: ['除夕团圆', '辞旧迎新', '围炉守岁', '岁末纳福', '除夕守岁'],
+    endings: ['阖家安康。', '团圆喜乐。', '辞岁迎新。'],
+  },
+  元宵节: {
+    count: 10,
+    openings: ['元宵灯暖', '花灯映月', '元宵团圆', '灯火可亲', '元宵纳福'],
+    endings: ['事事圆满。', '喜乐安康。', '团圆和美。'],
+  },
+  七夕节: {
+    count: 10,
+    openings: ['七夕相守', '星河共渡', '七夕寄情', '鹊桥相望', '七夕如愿'],
+    endings: ['情意绵长。', '心意相通。', '美好常伴。'],
+  },
+  重阳节: {
+    count: 10,
+    openings: ['重阳登高', '重阳敬老', '菊香满庭', '秋高气爽', '重阳思亲'],
+    endings: ['安康长寿。', '岁月安好。', '如意常伴。'],
+  },
+  腊八节: {
+    count: 10,
+    openings: ['腊八粥香', '腊八纳福', '粥暖人心', '腊八添暖', '腊八迎新'],
+    endings: ['温暖常伴。', '安康顺遂。', '年味渐浓。'],
+  },
+  妇女节: {
+    count: 10,
+    openings: ['致敬女性', '芳华自在', '春风如你', '巾帼芳华', '温柔有力'],
+    endings: ['自信从容。', '喜乐常伴。', '绽放光芒。'],
+  },
+  植树节: {
+    count: 10,
+    openings: ['植树添绿', '春山可望', '植绿护绿', '共育新绿', '绿化家园'],
+    endings: ['生生不息。', '绿水青山。', '家园更美。'],
+  },
+  青年节: {
+    count: 10,
+    openings: ['青春正好', '青年有为', '风华正茂', '逐梦青春', '青春无畏'],
+    endings: ['向阳而行。', '不负韶华。', '一路向前。'],
+  },
+  儿童节: {
+    count: 10,
+    openings: ['童心未泯', '童趣盎然', '童年快乐', '童心飞扬', '阳光正好'],
+    endings: ['笑容常在。', '快乐成长。', '天真烂漫。'],
+  },
+  建党节: {
+    count: 10,
+    openings: ['初心如磐', '砥砺前行', '七一礼赞', '红心向党', '接续奋斗'],
+    endings: ['不忘使命。', '奋勇向前。', '行稳致远。'],
+  },
+  建军节: {
+    count: 10,
+    openings: ['致敬军人', '钢铁长城', '八一礼赞', '戎光闪耀', '致敬守护'],
+    endings: ['山河无恙。', '国泰民安。', '守护常在。'],
+  },
+  教师节: {
+    count: 10,
+    openings: ['桃李芬芳', '致敬师者', '师恩难忘', '春风化雨', '园丁礼赞'],
+    endings: ['感念师恩。', '桃李满园。', '薪火相传。'],
   },
 }
 

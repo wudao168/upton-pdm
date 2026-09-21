@@ -77,6 +77,56 @@ public sealed class PreviewConversionTests
         }
     }
 
+    /// <summary>
+    /// 转图设置是 60 分钟时，HttpClient 自身超时（默认 100 秒）先触发也必须按真实耗时反馈，
+    /// 不能报成"调用转图服务器超过60分钟"（线上就出现过"才过 1 分钟就提示超过 60 分钟"）。
+    /// </summary>
+    [Fact]
+    public async Task RemotePreviewConversion_ReportsHttpClientTimeoutWithRealElapsedTime()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "pdm-preview-agent-timeout-test", Guid.NewGuid().ToString("N"));
+        try
+        {
+            var (repository, project, sources, package, staging) = await PrepareAsync(root,
+                new PreviewConversionSettings { Mode = PreviewConversionMode.Remote, AgentUrl = "http://192.168.2.50:5199", TimeoutMinutes = 60 });
+            using var agent = new HttpClient(new HangingAgentHandler()) { Timeout = TimeSpan.FromMilliseconds(150) };
+            var converter = new SolidWorksServerPreviewConverter(Options.Create(new PdmPreviewWorkerOptions()), repository, agent);
+
+            var exception = await Assert.ThrowsAsync<PdmRuleException>(() => converter.GenerateAsync(package, project, sources, staging, default));
+
+            Assert.Contains("被中断", exception.Message);
+            Assert.DoesNotContain("超过60分钟", exception.Message);
+        }
+        finally
+        {
+            if (Directory.Exists(root)) Directory.Delete(root, true);
+        }
+    }
+
+    /// <summary>转图电脑不可达时要报真实原因和等待时长，不能笼统报成"超过N分钟"。</summary>
+    [Fact]
+    public async Task RemotePreviewConversion_ReportsUnreachableAgentWithElapsedTime()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "pdm-preview-agent-unreachable-test", Guid.NewGuid().ToString("N"));
+        try
+        {
+            var (repository, project, sources, package, staging) = await PrepareAsync(root,
+                new PreviewConversionSettings { Mode = PreviewConversionMode.Remote, AgentUrl = "http://192.168.2.50:5199", TimeoutMinutes = 60 });
+            var agent = new HttpClient(new UnreachableAgentHandler());
+            var converter = new SolidWorksServerPreviewConverter(Options.Create(new PdmPreviewWorkerOptions()), repository, agent);
+
+            var exception = await Assert.ThrowsAsync<PdmRuleException>(() => converter.GenerateAsync(package, project, sources, staging, default));
+
+            Assert.Contains("无法连接转图服务器", exception.Message);
+            Assert.Contains("由于目标计算机积极拒绝", exception.Message);
+            Assert.DoesNotContain("超过60分钟", exception.Message);
+        }
+        finally
+        {
+            if (Directory.Exists(root)) Directory.Delete(root, true);
+        }
+    }
+
     [Fact]
     public async Task PreviewAgentRegistration_SwitchesToRemoteAndBackToLocal()
     {
@@ -183,6 +233,23 @@ public sealed class PreviewConversionTests
         public Task ValidateAsync(ReleasePackage package, Project project, CancellationToken cancellationToken) => Task.CompletedTask;
         public Task<ReleasePublication> PublishAsync(ReleasePackage package, Project project, IReadOnlyList<ReleasePreviewSource> sources, CancellationToken cancellationToken) =>
             throw new NotSupportedException();
+    }
+
+    /// <summary>模拟"转图电脑一直不返回响应"：由 HttpClient 自身超时取消请求。</summary>
+    private sealed class HangingAgentHandler : HttpMessageHandler
+    {
+        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+            throw new NotSupportedException();
+        }
+    }
+
+    /// <summary>模拟"转图电脑端口没有监听"：连接被立即拒绝，等待时长不到 1 分钟。</summary>
+    private sealed class UnreachableAgentHandler : HttpMessageHandler
+    {
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken) =>
+            throw new HttpRequestException("由于目标计算机积极拒绝，无法连接。");
     }
 
     private sealed class StubAgentHandler : HttpMessageHandler

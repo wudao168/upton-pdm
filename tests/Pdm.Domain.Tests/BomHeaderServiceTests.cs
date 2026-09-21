@@ -412,7 +412,7 @@ public sealed class BomHeaderServiceTests
         var manual = new MaterialService(materials, repository, new TestProtector(), client, TimeProvider.System);
         var error = await Assert.ThrowsAsync<PdmRuleException>(() => manual.DecideMaterialCodeApplicationAsync(
             application.Id, application.RowVersion, approved, "test", "admin", UserRole.Administrator, default));
-        Assert.Contains("不能人工批准或退回", error.Message);
+        Assert.Contains("不能人工批准或驳回", error.Message);
         Assert.Empty(await materials.ListSyncTasksAsync(default));
     }
 

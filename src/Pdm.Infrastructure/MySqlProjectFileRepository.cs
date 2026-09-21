@@ -107,6 +107,62 @@ public sealed class MySqlProjectFileRepository : IProjectFileRepository
         return await connection.ExecuteScalarAsync<int>(new CommandDefinition("SELECT EXISTS(SELECT 1 FROM project_file WHERE folder_id=@FolderId)", new { FolderId = folderId }, cancellationToken: cancellationToken)) == 1;
     }
 
+    public async Task<int> ArchiveReleaseAsync(
+        Guid rootProjectId,
+        Guid folderId,
+        string storageRoot,
+        string releaseNumber,
+        IReadOnlyList<ReleaseArchiveFile> files,
+        string actor,
+        DateTimeOffset releasedAt,
+        CancellationToken cancellationToken)
+    {
+        if (files.Count == 0) return 0;
+        await using var connection = await OpenAsync(cancellationToken);
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+        var now = timeProvider.GetUtcNow().UtcDateTime;
+        var comment = $"发布成品 · {releaseNumber}";
+        var archived = 0;
+        foreach (var entry in files)
+        {
+            var fileId = await connection.ExecuteScalarAsync<Guid?>(new CommandDefinition(
+                "SELECT id FROM project_file WHERE folder_id=@FolderId AND deleted_at IS NULL AND LOWER(file_name)=LOWER(@FileName) FOR UPDATE",
+                new { FolderId = folderId, entry.FileName }, transaction, cancellationToken: cancellationToken));
+            if (fileId is not null)
+            {
+                // 同一内容（指纹相同）已经在发布目录里登记过，重复发布或重启补登记都不再生成新版本。
+                var duplicate = await connection.ExecuteScalarAsync<int>(new CommandDefinition(
+                    "SELECT COUNT(*) FROM project_file_version WHERE project_file_id=@FileId AND LOWER(sha256)=LOWER(@Sha256)",
+                    new { FileId = fileId, entry.Sha256 }, transaction, cancellationToken: cancellationToken));
+                if (duplicate > 0) continue;
+            }
+            else
+            {
+                fileId = Guid.NewGuid();
+                await connection.ExecuteAsync(new CommandDefinition(
+                    "INSERT INTO project_file(id,root_project_id,folder_id,file_name,created_by,created_at,updated_by,updated_at) VALUES(@Id,@RootProjectId,@FolderId,@FileName,@Actor,@Now,@Actor,@Now)",
+                    new { Id = fileId, RootProjectId = rootProjectId, FolderId = folderId, entry.FileName, Actor = actor, Now = now }, transaction, cancellationToken: cancellationToken));
+            }
+            var versionNumber = await connection.ExecuteScalarAsync<int>(new CommandDefinition(
+                "SELECT COALESCE(MAX(version_number),0)+1 FROM project_file_version WHERE project_file_id=@FileId",
+                new { FileId = fileId }, transaction, cancellationToken: cancellationToken));
+            await connection.ExecuteAsync(new CommandDefinition(
+                "INSERT INTO project_file_version(id,project_file_id,version_number,file_name,storage_root,storage_relative_path,file_length,sha256,uploaded_by,uploaded_at,comment) VALUES(@Id,@FileId,@VersionNumber,@FileName,@StorageRoot,@RelativePath,@Length,@Sha256,@Actor,@StoredAt,@Comment)",
+                new
+                {
+                    Id = Guid.NewGuid(), FileId = fileId, VersionNumber = versionNumber, FileName = entry.FileName,
+                    StorageRoot = storageRoot, RelativePath = entry.StorageRelativePath, Length = entry.FileLength,
+                    Sha256 = entry.Sha256, Actor = actor, StoredAt = releasedAt.UtcDateTime, Comment = comment
+                }, transaction, cancellationToken: cancellationToken));
+            await connection.ExecuteAsync(new CommandDefinition(
+                "UPDATE project_file SET updated_by=@Actor,updated_at=@Now WHERE id=@FileId",
+                new { Actor = actor, Now = now, FileId = fileId }, transaction, cancellationToken: cancellationToken));
+            archived++;
+        }
+        await transaction.CommitAsync(cancellationToken);
+        return archived;
+    }
+
     public async Task<IReadOnlyList<ProjectFileVersion>> PurgeDeletedBeforeAsync(DateTimeOffset cutoff, CancellationToken cancellationToken)
     {
         await using var connection = await OpenAsync(cancellationToken);

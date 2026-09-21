@@ -128,7 +128,7 @@ describe('BomManager', () => {
     })
 
     const tabs = wrapper.findAll('button[role="tab"]')
-    expect(tabs.map(tab => tab.text())).toEqual(['源数据（2）', '标准件BOM（2）', '非标件BOM（1）', '电气BOM（1）', '易损件BOM（0）'])
+    expect(tabs.map(tab => tab.text())).toEqual(['源数据（2）', '标准件BOM（2）', '非标件BOM（1）', '电气BOM（1）', '易损件BOM（0）', '发布（0）'])
     expect(wrapper.findAll('.pdm-bom-table tbody tr')).toHaveLength(2)
     expect(wrapper.findAll('.pdm-bom-quantity-audit')[0].text()).toBe('2')
     expect(wrapper.findAll('.pdm-bom-quantity-reference')[0].text()).toBe('0—/2')
@@ -148,7 +148,7 @@ describe('BomManager', () => {
       },
     })
 
-    await wrapper.findAll('button[role="tab"]').at(-1)!.trigger('click')
+    await wrapper.findAll('button[role="tab"]').find(tab => tab.text().startsWith('易损件BOM'))!.trigger('click')
 
     expect(wrapper.get('[role="tab"][aria-selected="true"]').text()).toBe('易损件BOM（1）')
     expect(wrapper.get('[aria-label="易损件BOM统计说明"]').text()).toContain('统计物料1 种')
@@ -608,6 +608,28 @@ describe('BomManager', () => {
     }
     expect(window.localStorage.getItem('pdm:bom-display:project-structure')).toBe('Structure')
     expect(wrapper.emitted('save')).toBeUndefined()
+  })
+
+  it('keeps the release overview as the last BOM page tab', async () => {
+    const release = {
+      id: 'release-tab-1', number: 'RP-P1-1', scope: 'NonStandardWithDrawing', state: '草稿',
+      createdAt: '2026-09-20T00:00:00Z', changeNumber: 'RP-P1-1',
+    } as unknown as ReleasePackageSummary
+    const wrapper = mount(BomManager, {
+      props: {
+        projectId: 'project-release-tab', sourceData: [], standard: [], nonStandard: [], electrical: [],
+        declarations: [], pending: false, releasePackages: [release], versions: [], baselines: [],
+      },
+    })
+
+    const tabs = wrapper.findAll('button[role="tab"]')
+    const releaseTab = tabs.at(-1)!
+    expect(releaseTab.text()).toBe('发布（1）')
+
+    await releaseTab.trigger('click')
+    expect(wrapper.get('button[role="tab"].pdm-release-tab').attributes('aria-selected')).toBe('true')
+    expect(wrapper.find('.pdm-bom-release-overview').exists()).toBe(true)
+    wrapper.unmount()
   })
 
   it('merges instances that miss the material code into the same part in the summary view', async () => {

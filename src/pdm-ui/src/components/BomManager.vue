@@ -7,8 +7,9 @@ import type { BatchUpdateBomItemsInput, BomClassification, BomEmptyDeclaration, 
 import { u9UnitName, u9UnitOptions } from '../u9Units'
 import BomHierarchyOverview from './BomHierarchyOverview.vue'
 import ReleaseCenter from './ReleaseCenter.vue'
+import ReleaseOverview from './ReleaseOverview.vue'
 
-type BomView = 'Overview' | 'Source' | 'WearPart' | BomKind
+type BomView = 'Overview' | 'Source' | 'WearPart' | 'Release' | BomKind
 type BomDisplayMode = 'Summary' | 'Structure'
 type BomKindFilter = 'All' | BomClassification
 type BomComparisonFilter = 'All' | 'Released' | 'Added' | 'Modified' | 'Removed'
@@ -72,7 +73,7 @@ const props = withDefaults(defineProps<{
   canDecideApproval?: boolean
   canEmergencyDecide?: boolean
   requestedReleasePackageId?: string
-  requestedBomKind?: Exclude<BomKind, 'Unclassified'>
+  requestedBomKind?: 'Release' | Exclude<BomKind, 'Unclassified'>
   previewReconciliation?: () => Promise<BomGenerationResult>
 }>(), {
   editable: false,
@@ -351,6 +352,7 @@ const sourceRows = computed(() => displayMode.value === 'Summary' ? aggregateSou
 const isSourceView = computed(() => kind.value === 'Source')
 const isOverviewView = computed(() => kind.value === 'Overview')
 const isWearPartView = computed(() => kind.value === 'WearPart')
+const isReleaseView = computed(() => kind.value === 'Release')
 const canClassifySourceView = computed(() => props.editable && isSourceView.value)
 const canEditCurrentView = computed(() => props.editable && !isSourceView.value && !isOverviewView.value && !isWearPartView.value && selectedVersionId.value === 'current')
 const canShowQuickEntry = computed(() => canEditCurrentView.value && !!props.projectId && comparisonFilter.value === 'All')
@@ -707,6 +709,26 @@ const previousReleaseVersionItems = computed(() => {
 
 async function openReleaseDrawer(releasePackageId = '') {
   if (kind.value === 'NonStandard') await refreshCurrentDrawingReviewCandidates()
+  selectedReleasePackageId.value = releasePackageId
+  releaseDrawerOpen.value = true
+}
+
+function bomKindForReleaseScope(scope: string) {
+  if (scope.startsWith('Standard')) return 'Standard' as const
+  if (scope.startsWith('NonStandard')) return 'NonStandard' as const
+  if (scope.startsWith('Electrical')) return 'Electrical' as const
+  return undefined
+}
+
+// 发布页里打开某个发布包时，先切到该包对应的BOM分类，再打开原有的发布抽屉。
+async function openReleaseFromOverview(releasePackageId: string) {
+  const release = props.releasePackages.find(item => item.id === releasePackageId)
+  const targetKind = release ? bomKindForReleaseScope(release.scope) : undefined
+  if (targetKind) {
+    if (kind.value !== targetKind) await requestKind(targetKind)
+    // 用户取消了“放弃未保存修改”时不打开抽屉，避免用错分类的明细。
+    if (kind.value !== targetKind) return
+  }
   selectedReleasePackageId.value = releasePackageId
   releaseDrawerOpen.value = true
 }
@@ -3304,9 +3326,10 @@ async function submitBatchUpdate() {
         <button type="button" role="tab" :aria-selected="kind === 'NonStandard'" @click="requestKind('NonStandard')">非标件BOM（{{ nonStandardSummaryRows.length }}）</button>
         <button type="button" role="tab" :aria-selected="kind === 'Electrical'" @click="requestKind('Electrical')">电气BOM（{{ electricalSummaryRows.length }}）</button>
         <button type="button" role="tab" class="pdm-wear-part-tab" :aria-selected="kind === 'WearPart'" @click="requestKind('WearPart')">易损件BOM（{{ wearPartSummaryRows.length }}）</button>
+        <button type="button" role="tab" class="pdm-release-tab" :aria-selected="kind === 'Release'" @click="requestKind('Release')">发布（{{ releasePackages.length }}）</button>
         <span v-if="unresolvedCount" class="pdm-bom-unresolved-count">待处理 {{ unresolvedCount }}</span>
       </div>
-      <div v-if="!isOverviewView" class="pdm-bom-display-control" role="group" aria-label="BOM显示方式">
+      <div v-if="!isOverviewView && !isReleaseView" class="pdm-bom-display-control" role="group" aria-label="BOM显示方式">
         <small>实例 {{ rawSourceRows.length }} · 汇总 {{ summaryRowCount }}</small>
         <button type="button" :class="{ 'is-active': displayMode === 'Summary' }" :aria-pressed="displayMode === 'Summary'" @click="requestDisplayMode('Summary')">按汇总</button>
         <button type="button" :class="{ 'is-active': displayMode === 'Structure' }" :aria-pressed="displayMode === 'Structure'" @click="requestDisplayMode('Structure')">按结构</button>
@@ -3319,7 +3342,17 @@ async function submitBatchUpdate() {
       </div>
     </div>
     <BomHierarchyOverview v-if="project" v-show="isOverviewView" :project="project" :projects="projects" :token="token" :editable="editable" @open-bom="openHierarchyBom" />
-    <template v-if="!isOverviewView">
+    <section v-if="isReleaseView" class="pdm-bom-release-overview" aria-label="发布管理">
+      <ReleaseOverview
+        :release-packages="releasePackages"
+        :versions="versions"
+        :baselines="baselines"
+        :pending="pending"
+        @open="openReleaseFromOverview"
+        @retry-preview="releasePackageId => emit('releaseRetryPreview', releasePackageId)"
+      />
+    </section>
+    <template v-if="!isOverviewView && !isReleaseView">
     <section v-if="isWearPartView" class="pdm-bom-release-strip pdm-wear-part-summary" aria-label="易损件BOM统计说明">
       <div><small>统计物料</small><strong>{{ wearPartSummaryRows.length }} 种</strong></div>
       <div><small>结构实例</small><strong>{{ wearPartRows.length }} 条</strong></div>

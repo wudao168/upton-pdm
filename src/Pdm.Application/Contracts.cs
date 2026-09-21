@@ -506,7 +506,7 @@ public interface IPdmRepository
     Task<DrawingReviewPackage> ResolveDrawingReviewMarkupAsync(Guid markupId, string actor, DateTimeOffset resolvedAt, CancellationToken cancellationToken);
     Task<DrawingReviewPackage> DecideDrawingReviewTargetAsync(Guid itemId, DrawingReviewTarget target, DrawingReviewTargetState state, string reviewer, string reviewerName, DateTimeOffset reviewedAt, string? comment, CancellationToken cancellationToken);
     Task<DrawingReviewPackage> RevokeDrawingReviewTargetAsync(Guid itemId, DrawingReviewTarget target, CancellationToken cancellationToken);
-    /// <summary>退改后设计者提交了新版本：把该2D图档的审核项按最新存档版本恢复为待审核，重新进入审图节点，同单其他图档不受影响。</summary>
+    /// <summary>驳回后设计者提交了新版本：把该2D图档的审核项按最新存档版本恢复为待审核，重新进入审图节点，同单其他图档不受影响。</summary>
     Task<DrawingReviewPackage> ResubmitDrawingReviewItemAsync(Guid itemId, Guid drawingVersionId, string drawingRevision, string drawingSha256, string drawingCreatedBy, CancellationToken cancellationToken);
     Task<DrawingReviewPackage> AdvanceDrawingReviewToSupervisorAsync(Guid packageId, CancellationToken cancellationToken);
     Task<DrawingReviewPackage> DecideDrawingReviewSupervisorAsync(Guid packageId, DrawingReviewDecision decision, string reviewer, string reviewerName, DateTimeOffset reviewedAt, string? comment, CancellationToken cancellationToken);
@@ -529,6 +529,10 @@ public interface IPdmRepository
     Task<ReleasePackage?> FindReleasePackageByApprovalTaskAsync(Guid taskId, CancellationToken cancellationToken);
     Task<IReadOnlyList<ReleaseItemComment>> ListReleaseItemCommentsAsync(Guid releasePackageId, CancellationToken cancellationToken);
     Task<ReleaseItemComment> AddReleaseItemCommentAsync(ReleaseItemComment comment, CancellationToken cancellationToken);
+    /// <summary>
+    /// 转图源清单：只包含非标件BOM中的物料（模型出STEP、其关联2D工程图出PDF）以及这些物料在引用树上的上级装配体，
+    /// 标准件/外购件等其他零件不转图。
+    /// </summary>
     Task<IReadOnlyList<ReleasePreviewSource>> ListReleasePreviewSourcesAsync(Guid releasePackageId, CancellationToken cancellationToken);
     Task<IReadOnlyList<PdmDocument>> ListCheckedOutDocumentsAsync(CancellationToken cancellationToken);
     Task<PdmDocument> CheckoutAsync(Guid documentId, string actor, CancellationToken cancellationToken);
@@ -559,6 +563,12 @@ public interface IPdmRepository
     Task<IReadOnlyList<ReleasePackage>> ListReleasePackagesAwaitingPreviewAsync(int maxAttempts, int limit, CancellationToken cancellationToken);
     /// <summary>恢复被服务重启/崩溃打断的发布：把停留在“发布中”的发布包标记为发布失败，让相关人员可以重新提交发布。</summary>
     Task<int> RecoverInterruptedPublishesAsync(string reason, CancellationToken cancellationToken);
+    /// <summary>恢复被服务重启/崩溃打断的转图：把停留在“转换中”的转图任务重新排队，避免发布面板一直显示“转换中”。</summary>
+    Task<int> RecoverInterruptedPreviewRunsAsync(string reason, CancellationToken cancellationToken);
+    /// <summary>按目录键读取项目下的系统目录（不受当前账号权限过滤，供发布成品归档等系统流程使用）。</summary>
+    Task<ProjectFolder?> FindProjectFolderByKeyAsync(Guid projectId, string folderKey, CancellationToken cancellationToken);
+    /// <summary>列出最近发布的发布包（服务重启后用于补登记发布成品归档）。</summary>
+    Task<IReadOnlyList<Guid>> ListRecentPublishedReleasePackageIdsAsync(int limit, CancellationToken cancellationToken);
     /// <summary>列出停留在“发布中”的发布包（服务重启后用于自动续跑发布）。</summary>
     Task<IReadOnlyList<Guid>> ListPublishingReleasePackageIdsAsync(int limit, CancellationToken cancellationToken);
     /// <summary>把转图结果补挂到发布包对应的正式版本上（发布时缺预览的版本后补 STEP/PDF）。</summary>
@@ -608,6 +618,11 @@ public interface IFileStorage
     Task<StoredFile> CopyVersionAsync(Project project, StoredFile source, string relativeTargetPath, CancellationToken cancellationToken);
     Task<StoredFile> CopyVersionAsync(Project sourceProject, Project targetProject, StoredFile source, string relativeTargetPath, CancellationToken cancellationToken) =>
         throw new NotSupportedException("当前文件存储不支持跨项目复制版本。");
+    /// <summary>
+    /// 校验发布预览文件（转图生成的 STEP/PDF，存放在 .release-previews 只读目录）：按长度和 SHA-256 校验。
+    /// </summary>
+    Task VerifyPreviewFileAsync(Project project, DocumentPreviewArtifact preview, CancellationToken cancellationToken) =>
+        throw new NotSupportedException("当前文件存储不支持校验发布预览文件。");
 }
 
 public interface IReleasePackagePublisher

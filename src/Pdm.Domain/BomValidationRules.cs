@@ -59,6 +59,20 @@ public static class BomValidationFieldCatalog
     public static IReadOnlyList<string> MissingFields(BomItem item, IReadOnlyList<string> requiredFields) =>
         requiredFields.Where(field => !HasValue(item, field)).ToArray();
 
+    /// <summary>发布口径的必填字段：非标件允许先缺料号（料号由料品主档回写）。</summary>
+    public static IReadOnlyList<string> ReleaseRequiredFields(BomKind kind, BomValidationRules rules) =>
+        kind == BomKind.NonStandard
+            ? rules.RequiredFields(kind).Where(field => !field.Equals(DrawingNumber, StringComparison.OrdinalIgnoreCase)).ToArray()
+            : rules.RequiredFields(kind);
+
+    /// <summary>
+    /// 按当前校验口径判断"资料是否完整"：工作区行与已发布快照必须用同一口径，
+    /// 否则会出现"BOM已补齐、已发布快照里仍记着旧的未完成"的情况。
+    /// </summary>
+    public static bool IsComplete(BomItem item, BomKind kind, BomValidationRules rules) =>
+        kind is BomKind.Standard or BomKind.NonStandard or BomKind.Electrical
+        && MissingFields(item, ReleaseRequiredFields(kind, rules)).Count == 0;
+
     public static string Label(string field) => field switch
     {
         DrawingNumber => "物料编码",
