@@ -207,7 +207,7 @@ async function resubmit() {
 .drawing-review-decision-bar__route{flex:0 1 auto;min-width:0;overflow:hidden;color:var(--pdm-blue);font-size:12px;text-overflow:ellipsis;white-space:nowrap}
 .drawing-review-decision-bar__comment{flex:0 0 auto;max-width:220px;overflow:hidden;color:var(--pdm-danger);font-size:12px;text-overflow:ellipsis;white-space:nowrap}.drawing-review-decision-bar__hint{flex:0 0 auto;color:var(--pdm-muted);font-size:12px;white-space:nowrap}
 .drawing-review-decision-bar .drawing-review-decision-buttons{flex:0 0 auto;display:flex;gap:5px;margin-left:auto}
-.drawing-review-decision-bar .drawing-review-decision-buttons button{display:inline-flex;align-items:center;justify-content:center;gap:5px;width:72px;min-width:72px;min-height:28px;padding:4px 6px;border:1px solid var(--pdm-border);border-radius:5px;background:var(--pdm-surface);color:var(--pdm-text);font:inherit;font-size:12px;cursor:pointer}
+.drawing-review-decision-bar .drawing-review-decision-buttons button{display:inline-flex;align-items:center;justify-content:center;gap:5px;width:100px;min-width:100px;height:28px;min-height:28px;padding:0 6px;border:1px solid var(--pdm-border);border-radius:5px;background:var(--pdm-surface);color:var(--pdm-text);font:inherit;font-size:12px;cursor:pointer}
 .drawing-review-decision-bar .drawing-review-decision-buttons button:disabled{opacity:.45;cursor:not-allowed}
 .drawing-review-decision-bar .drawing-review-decision-buttons .is-reject{border-color:#f2b8b5;background:#fff0ef;color:var(--pdm-danger)}
 .drawing-review-decision-bar .drawing-review-decision-buttons .is-approve{border-color:var(--pdm-green);background:var(--pdm-green);color:#fff}
