@@ -991,7 +991,8 @@ public sealed class InMemoryMaterialRepository : IMaterialRepository
         lock (gate)
         {
             if (!tasks.TryGetValue(taskId, out var task)) throw new PdmNotFoundException("U9C同步任务不存在。");
-            if (task.Status != MaterialSyncStatus.Pending) throw new PdmRuleException("只有执行中的U9C同步任务才能记录失败。");
+            if (task.Status is not (MaterialSyncStatus.Pending or MaterialSyncStatus.PreviewReady))
+                throw new PdmRuleException("只有待执行或执行中的U9C同步任务才能记录失败。");
             if (!materials.TryGetValue(task.MaterialId, out var material)) throw new PdmNotFoundException("同步任务对应的物料主档不存在。");
             var failed = task with
             {

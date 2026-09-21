@@ -1486,7 +1486,7 @@ public sealed class MySqlMaterialRepository : IMaterialRepository
                 """
                 UPDATE u9_material_sync_task
                 SET status=@Status,last_error=@Error,response_preview=@ResponsePreview,updated_at=@OccurredAt
-                WHERE id=@TaskId AND status='Pending'
+                WHERE id=@TaskId AND status IN ('Pending','PreviewReady')
                 """, new
                 {
                     TaskId = taskId,

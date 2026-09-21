@@ -34,12 +34,13 @@ public sealed class MaterialCodeSynchronizationService(
             throw new UnauthorizedAccessException("当前角色无权执行料号同步。");
 
         var session = executionSession ??= await integration.CreateExecutionSessionAsync(cancellationToken);
-        return await SynchronizeTaskCoreAsync(taskId, actor, session, cancellationToken);
+        return await SynchronizeTaskCoreAsync(taskId, actor, role, session, cancellationToken);
     }
 
     private async Task<MaterialCodeSynchronizationResult> SynchronizeTaskCoreAsync(
         Guid taskId,
         string actor,
+        UserRole role,
         U9MaterialExecutionSession session,
         CancellationToken cancellationToken)
     {
@@ -59,6 +60,7 @@ public sealed class MaterialCodeSynchronizationService(
             MaterialSyncExecutionResult? itemSync = null;
             if (!material.U9SyncConfirmed || task.Status != MaterialSyncStatus.Succeeded)
             {
+                var previewRefreshes = 0;
                 for (var conflictAttempt = 0; ; conflictAttempt++)
                 {
                     try
@@ -67,6 +69,15 @@ public sealed class MaterialCodeSynchronizationService(
                         material = itemSync.Material;
                         task = itemSync.Task;
                         break;
+                    }
+                    catch (PdmRuleException exception) when (previewRefreshes < 1 && IsStaleSyncPreview(exception))
+                    {
+                        // 请求预览是在旧规则/旧单位编码下生成的：按当前规则重新生成预览与SHA-256后自动重试，
+                        // 不再要求人工先点“重试”。仍失败时按普通失败暴露给第二步列表。
+                        previewRefreshes++;
+                        task = await materialService.RetrySyncTaskAsync(task.Id, actor, role, cancellationToken);
+                        material = await materials.FindMaterialAsync(task.MaterialId, cancellationToken)
+                            ?? throw new PdmNotFoundException("同步任务对应的料品主档不存在。");
                     }
                     catch (U9MaterialCodeConflictException)
                     {
@@ -162,4 +173,11 @@ public sealed class MaterialCodeSynchronizationService(
             throw;
         }
     }
+
+    /// <summary>
+    /// 判断“请求预览已过期”类失败：此时需要按当前规则重新生成预览与SHA-256，而不是把任务判死。
+    /// </summary>
+    private static bool IsStaleSyncPreview(PdmRuleException exception) =>
+        exception.Message.Contains("料品创建规则已更新", StringComparison.Ordinal)
+        || exception.Message.Contains("重新生成请求预览和SHA-256", StringComparison.Ordinal);
 }
