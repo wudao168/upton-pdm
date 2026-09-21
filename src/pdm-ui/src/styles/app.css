@@ -624,3 +624,6 @@
 .el-scrollbar__bar.is-vertical > div { width: 100%; }
 ::-webkit-scrollbar:horizontal { height: 15px; }
 ::-webkit-scrollbar:vertical { width: 15px; }
+/* 系统版本信息：版本说明与版本记录按条列举时使用有序列表。 */
+.pdm-system-version-note { margin: 0; padding-left: 20px; color: var(--pdm-text-soft); line-height: 1.5; }
+.pdm-system-version-note li + li { margin-top: 4px; }

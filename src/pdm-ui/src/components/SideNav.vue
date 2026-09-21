@@ -73,10 +73,18 @@ function releaseNoteFromVersion(version: string) {
   if (tag === 'version-information') return '增加网页端、Windows 客户端及 SolidWorks 插件端版本信息。'
   return tag
 }
+// 发布说明按条填写（换行或分号分隔），详情里按 1./2./3. 逐条列举。
+function releaseNoteItems(note: string) {
+  const normalized = repairMojibake(note.trim())
+  if (!normalized) return []
+  const items = normalized.split(/\r?\n|；|;/).map(item => item.trim()).filter(Boolean)
+  return items.length > 1 ? items : [normalized]
+}
 const releaseTime = computed(() => formatReleaseTime(props.releasedAt, fullVersion.value))
 const releaseNote = computed(() => {
   return repairMojibake(props.releaseNote.trim()) || releaseNoteFromVersion(fullVersion.value) || '本次发布未填写版本说明。'
 })
+const releaseNoteList = computed(() => releaseNoteItems(releaseNote.value))
 const releaseHistory = computed(() => {
   const entries = [...props.releaseHistory]
   if (fullVersion.value && !entries.some(entry => entry.Version?.trim() === fullVersion.value)) {
@@ -88,11 +96,15 @@ const releaseHistory = computed(() => {
       SolidWorksAddinVersion: props.solidWorksAddinVersion,
     })
   }
-  return entries.filter(entry => entry.Version?.trim()).map(entry => ({
-    version: entry.Version!.trim(),
-    releasedAt: formatReleaseTime(entry.ReleasedAt, entry.Version!.trim()),
-    note: repairMojibake(entry.ReleaseNote?.trim() ?? '') || releaseNoteFromVersion(entry.Version!.trim()) || '历史发布未填写说明。',
-  }))
+  return entries.filter(entry => entry.Version?.trim()).map(entry => {
+    const note = repairMojibake(entry.ReleaseNote?.trim() ?? '') || releaseNoteFromVersion(entry.Version!.trim()) || '历史发布未填写说明。'
+    return {
+      version: entry.Version!.trim(),
+      releasedAt: formatReleaseTime(entry.ReleasedAt, entry.Version!.trim()),
+      note,
+      items: releaseNoteItems(note),
+    }
+  })
 })
 
 async function openVersionInfo() {
@@ -178,7 +190,13 @@ const items = [
           <div><dt>SolidWorks插件</dt><dd>{{ props.solidWorksAddinVersion ? displayReleaseVersion(props.solidWorksAddinVersion) : '—' }}</dd></div>
           <div><dt>数据库</dt><dd>{{ runtimeDatabase }}</dd></div>
         </dl>
-        <section><h3>版本说明</h3><p>{{ releaseNote }}</p></section>
+        <section>
+          <h3>版本说明</h3>
+          <ol v-if="releaseNoteList.length > 1" class="pdm-system-version-note">
+            <li v-for="item in releaseNoteList" :key="item">{{ item }}</li>
+          </ol>
+          <p v-else>{{ releaseNote }}</p>
+        </section>
         <button
           type="button"
           class="pdm-system-version-history__toggle"
@@ -196,7 +214,10 @@ const items = [
         >
           <article v-for="entry in releaseHistory" :key="entry.version" class="pdm-system-version-history__item">
             <header><strong>{{ displayReleaseVersion(entry.version) }}</strong><time>{{ entry.releasedAt }}</time></header>
-            <p>{{ entry.note }}</p>
+            <ol v-if="entry.items.length > 1" class="pdm-system-version-note">
+              <li v-for="item in entry.items" :key="item">{{ item }}</li>
+            </ol>
+            <p v-else>{{ entry.note }}</p>
           </article>
         </section>
         <p class="pdm-system-version-detail__note">版本说明与历史记录来自服务器发布清单；数据库状态在打开详情时实时读取。</p>

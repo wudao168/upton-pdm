@@ -164,4 +164,37 @@ describe('SideNav', () => {
     expect(document.body.textContent).not.toContain('å®Œå–„')
     wrapper.unmount()
   })
+
+  it('lists a multi-item release note as numbered items', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({ database: 'MySql' }), { status: 200 })))
+    const wrapper = mount(SideNav, {
+      attachTo: document.body,
+      props: {
+        active: 'projects',
+        version: '2026.09.21.1840',
+        releaseNote: '全局拖动条横向、纵向统一为 15px。\n版本说明按条列举。',
+        releaseHistory: [
+          { Version: '2026.09.21.1835', ReleasedAt: '2026-09-21T18:35:00+08:00', ReleaseNote: '横向拖动条加高到 20px；纵向滚动条保持原尺寸。' },
+        ],
+      },
+      global: { plugins: [ElementPlus] },
+    })
+
+    await wrapper.get('.pdm-sidebar__version').trigger('click')
+    await flushPromises()
+
+    const note = document.body.querySelector('.pdm-system-version-detail > section .pdm-system-version-note')
+    expect(note?.tagName).toBe('OL')
+    expect(Array.from(note?.querySelectorAll('li') ?? []).map(item => item.textContent?.trim()))
+      .toEqual(['全局拖动条横向、纵向统一为 15px。', '版本说明按条列举。'])
+
+    const historyButton = Array.from(document.body.querySelectorAll<HTMLButtonElement>('button')).find(button => button.textContent?.trim() === '版本记录')
+    historyButton?.click()
+    await wrapper.vm.$nextTick()
+
+    const historyNote = document.body.querySelector('[aria-label="版本记录"] article:last-child .pdm-system-version-note')
+    expect(Array.from(historyNote?.querySelectorAll('li') ?? []).map(item => item.textContent?.trim()))
+      .toEqual(['横向拖动条加高到 20px', '纵向滚动条保持原尺寸。'])
+    wrapper.unmount()
+  })
 })
