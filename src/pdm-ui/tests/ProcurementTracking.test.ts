@@ -56,6 +56,40 @@ describe('ProcurementTracking', () => {
     wrapper.unmount()
   })
 
+  it('列表上方按整个项目显示到货率、超期、交期不符、缺料风险、关键物料与未下单统计卡', async () => {
+    const base = await api.getProjectProcurementTracking()
+    api.getProjectProcurementTracking.mockResolvedValue({
+      ...base,
+      items: [
+        base.items[0],
+        {
+          ...base.items[0], sequence: 2, materialCode: '01021000019', materialName: '气缸',
+          impactStage: 'Assembly', assemblyStartDate: '2026-01-10T00:00:00Z',
+          purchaseQuantity: 2, arrivedQuantity: 2, isFullyReceived: true, latestDeliveryDate: '2026-01-30T00:00:00Z',
+        },
+      ],
+    })
+    const wrapper = mount(ProcurementTracking, { props: { projectId: 'project-1', token: 'token', username: 'engineer' }, global: { plugins: [ElementPlus] } })
+    await flushPromises()
+
+    const cards = wrapper.findAll('.procurement-stats-card')
+    expect(cards).toHaveLength(6)
+    expect(cards[0].text()).toContain('到货率')
+    // 数量口径 (2+2)/(4+2)=66.7%；行口径 1/2 行已到齐。
+    expect(cards[0].text()).toContain('66.7%')
+    expect(cards[0].text()).toContain('1/2')
+    expect(cards[1].text()).toContain('超期物料')
+    expect(cards[1].text()).toContain('1')
+    expect(cards[2].text()).toContain('交期不符')
+    expect(cards[2].text()).toContain('2')
+    expect(cards[3].text()).toContain('缺料风险')
+    expect(cards[4].text()).toContain('关键物料')
+    expect(cards[4].text()).toContain('100%')
+    expect(cards[5].text()).toContain('未下单')
+    expect(cards[5].text()).toContain('0 / 0')
+    wrapper.unmount()
+  })
+
   it('库存右侧显示项目计划主任务的装配、调试日期', async () => {
     const result = await api.getProjectProcurementTracking()
     api.getProjectProcurementTracking.mockResolvedValue({

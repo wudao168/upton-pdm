@@ -239,6 +239,7 @@ public sealed class MaterialServiceTests
         Assert.Equal(0, row.GetProperty("ConverRatioRule").GetInt32());
         Assert.Equal("001", row.GetProperty("InventorySecondUOM").GetProperty("Code").GetString());
         Assert.Equal("true", row.GetProperty("Effective").GetProperty("IsEffective").GetString());
+        Assert.Equal("2020-01-01", row.GetProperty("Effective").GetProperty("EffectiveDate").GetString());
         Assert.Equal(4, row.GetProperty("InventoryInfo").GetProperty("InventoryPlanningMethod").GetInt32());
         Assert.Equal(1, row.GetProperty("InventoryInfo").GetProperty("PurchaseControlMode").GetInt32());
         Assert.Equal(0, row.GetProperty("InventoryInfo").GetProperty("TurnOverRate").GetInt32());

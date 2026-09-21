@@ -2,6 +2,7 @@ import type { AddDrawingReviewMarkupInput, ApprovalStep, ApprovalU9AutomationRes
 import type { MaterialSyncBatch } from './types'
 import type { ProgramTemplateOptionCatalog } from './types'
 import type { EngineeringKitOptionCatalog } from './types'
+import type { ReleasePreviewItemResult } from './types'
 import type { ControlledDocumentRecycleReadiness } from './types'
 import type { ApprovalTransferCandidate, UserNotification } from './types'
 import type { ProjectCopyOptionsInput, ProjectCopyPreview, ProjectCopyResult } from './types'
@@ -1447,6 +1448,12 @@ export async function withdrawDrawingReview(packageId: string, reason: string, t
   }, token))
 }
 
+export async function abandonDrawingReviewWritebacks(packageId: string, reason: string, token: string): Promise<DrawingReviewPackage> {
+  return mapDrawingReviewPackage(await requestJson<ApiDrawingReviewPackage>(`/api/drawing-reviews/${packageId}/abandon-writebacks`, {
+    method: 'POST', body: JSON.stringify({ reason }),
+  }, token))
+}
+
 export async function addDrawingReviewMarkup(packageId: string, input: AddDrawingReviewMarkupInput, token: string): Promise<DrawingReviewPackage> {
   return mapDrawingReviewPackage(await requestJson<ApiDrawingReviewPackage>(`/api/drawing-reviews/${packageId}/markups`, {
     method: 'POST', body: JSON.stringify(input),
@@ -1522,6 +1529,37 @@ export function retryLongLeadU9(releasePackageId: string, token: string): Promis
 /** 转图（发布预览生成）与发布解耦：手动把该发布包的转图事项重新排队到后台。 */
 export function retryReleasePreview(releasePackageId: string, token: string): Promise<{ message: string }> {
   return requestJson(`/api/release-packages/${releasePackageId}/preview/retry`, { method: 'POST' }, token)
+}
+
+/** 图纸转出明细：可按发布包筛选（不传则返回该项目所有有转图记录的发布包明细）。 */
+export function listReleasePreviewItems(projectId: string, releasePackageId: string | undefined, token: string): Promise<ReleasePreviewItemResult[]> {
+  const query = releasePackageId ? `?releasePackageId=${encodeURIComponent(releasePackageId)}` : ''
+  return requestJson<ReleasePreviewItemResult[]>(`/api/projects/${projectId}/release-preview-items${query}`, {}, token)
+}
+
+/** 单项转图重试：只重新转出指定图档，不影响同包其它已转好的文件。 */
+export function retryReleasePreviewItem(releasePackageId: string, documentId: string, token: string): Promise<{ ok: boolean; item: ReleasePreviewItemResult; message: string }> {
+  return requestJson(`/api/release-packages/${releasePackageId}/preview-items/${documentId}/retry`, { method: 'POST' }, token)
+}
+
+/** 图纸转出打包下载：把选中的（或全部）STEP/PDF 打成 zip 下载。 */
+export async function downloadReleasePreviewArchive(projectId: string, releasePackageId: string | undefined, documentIds: string[], token: string): Promise<void> {
+  const response = await fetch(`${apiBase}/api/projects/${projectId}/release-preview-items/archive`, {
+    method: 'POST',
+    headers: { ...authenticatedHeaders(token), 'Content-Type': 'application/json' },
+    body: JSON.stringify({ releasePackageId: releasePackageId ?? null, documentIds }),
+  })
+  if (!response.ok) throw new PdmApiError('图纸转出文件打包下载失败。', response.status)
+  const blob = await response.blob()
+  const disposition = response.headers.get('Content-Disposition') ?? ''
+  const matched = /filename\*?=(?:UTF-8'')?"?([^";]+)"?/i.exec(disposition)
+  const fileName = matched ? decodeURIComponent(matched[1]) : '图纸转出.zip'
+  const url = URL.createObjectURL(blob)
+  const anchor = document.createElement('a')
+  anchor.href = url
+  anchor.download = fileName
+  anchor.click()
+  URL.revokeObjectURL(url)
 }
 
 /** 发布前提醒：列出发布后无法自动同步到U9C的BOM子件（不拦截发布）。 */

@@ -429,6 +429,96 @@ function hasDeliveryDelay(row: ProjectProcurementTrackingItem) {
   return row.hasDeliveryDelay ?? (deliveryDay(row.purchaseDeliveryDate) > deliveryDay(row.purchaseRequisitionDeliveryDate))
 }
 
+/** 统计卡按整个项目计算（不跟列表筛选），只统计物料行本身，不含仓库出入库明细行。 */
+const statsItems = computed(() => (result.value?.items ?? []).filter(row => !row.isWarehouseMovementRow))
+
+const procurementStats = computed(() => {
+  const items = statsItems.value
+  const ordered = items.filter(row => row.purchaseQuantity > 0)
+  const today = deliveryDay(new Date().toISOString())
+  const orderedQuantity = ordered.reduce((sum, row) => sum + row.purchaseQuantity, 0)
+  const arrivedQuantity = ordered.reduce((sum, row) => sum + Math.min(row.arrivedQuantity, row.purchaseQuantity), 0)
+  const arrivedLines = ordered.filter(row => isFullyReceived(row)).length
+  const effectiveDelivery = (row: ProjectProcurementTrackingItem) => row.latestDeliveryDate || row.purchaseDeliveryDate
+
+  const overdueLines = ordered.filter(row => {
+    if (isFullyReceived(row)) return false
+    const due = deliveryDay(effectiveDelivery(row))
+    return Number.isFinite(due) && due < today
+  }).length
+  const deliveryMismatchLines = items.filter(row => {
+    const required = deliveryDay(row.purchaseRequisitionDeliveryDate)
+    const due = deliveryDay(effectiveDelivery(row))
+    return Number.isFinite(required) && Number.isFinite(due) && due > required
+  }).length
+  const criticalItems = items.filter(row => row.impactStage === 'Assembly' || row.impactStage === 'Commissioning')
+  const criticalOrdered = criticalItems.filter(row => row.purchaseQuantity > 0)
+  const criticalOrderedQuantity = criticalOrdered.reduce((sum, row) => sum + row.purchaseQuantity, 0)
+  const criticalArrivedQuantity = criticalOrdered.reduce((sum, row) => sum + Math.min(row.arrivedQuantity, row.purchaseQuantity), 0)
+  const shortageRiskItems = criticalItems.filter(row => {
+    if (isFullyReceived(row)) return false
+    const stage = row.impactStage === 'Assembly' ? row.assemblyStartDate : row.commissioningStartDate
+    const stageDay = deliveryDay(stage ?? undefined)
+    const due = deliveryDay(effectiveDelivery(row))
+    return Number.isFinite(stageDay) && Number.isFinite(due) && due > stageDay
+  })
+  return {
+    orderedLineCount: ordered.length,
+    arrivalQuantityRate: orderedQuantity ? arrivedQuantity / orderedQuantity : null,
+    arrivalLineRate: ordered.length ? arrivedLines / ordered.length : null,
+    arrivedLines,
+    overdueLines,
+    overdueRate: ordered.length ? overdueLines / ordered.length : null,
+    deliveryMismatchLines,
+    criticalLines: criticalItems.length,
+    criticalArrivalRate: criticalOrderedQuantity ? criticalArrivedQuantity / criticalOrderedQuantity : null,
+    shortageRiskLines: shortageRiskItems.length,
+    noRequisitionLines: items.filter(row => !row.purchaseRequisitionNumbers.length).length,
+    noOrderLines: items.filter(row => !row.purchaseOrderNumbers.length).length,
+  }
+})
+
+function percentText(rate: number | null) {
+  return rate === null ? '—' : `${Math.round(rate * 1000) / 10}%`
+}
+
+const statsCards = computed(() => {
+  const stats = procurementStats.value
+  const tone = (value: number) => value > 0 ? 'is-danger' : 'is-success'
+  return [
+    {
+      key: 'arrival', label: '到货率', value: percentText(stats.arrivalQuantityRate), tone: (stats.arrivalQuantityRate ?? 0) >= 1 ? 'is-success' : 'is-warning',
+      sub: `行口径 ${percentText(stats.arrivalLineRate)}（${stats.arrivedLines}/${stats.orderedLineCount} 行）`,
+      title: '数量口径＝Σ到货数÷Σ购买数；行口径＝已到齐行数÷已下单行数。分母只统计已下PO（购买数>0）的物料行。',
+    },
+    {
+      key: 'overdue', label: '超期物料', value: `${stats.overdueLines}`, tone: tone(stats.overdueLines),
+      sub: `占已下单 ${percentText(stats.overdueRate)}`,
+      title: '最新交期（无则取预计交期）已过今天、且到货数<购买数的物料行数；已到齐不计。',
+    },
+    {
+      key: 'mismatch', label: '交期不符', value: `${stats.deliveryMismatchLines}`, tone: tone(stats.deliveryMismatchLines),
+      sub: '晚于需求日期',
+      title: '最新交期（无则取预计交期）晚于需求日期的物料行数。',
+    },
+    {
+      key: 'shortage', label: '缺料风险', value: `${stats.shortageRiskLines}`, tone: tone(stats.shortageRiskLines),
+      sub: '影响装配/调试',
+      title: '影响阶段为装配或调试、尚未到齐，且最新交期晚于该阶段计划开始日期的物料行数；未维护阶段日期的不计入。',
+    },
+    {
+      key: 'critical', label: '关键物料', value: `${stats.criticalLines}`, tone: stats.criticalLines ? 'is-warning' : 'is-success',
+      sub: `到货率 ${percentText(stats.criticalArrivalRate)}`,
+      title: '影响阶段为装配或调试的物料行数，及其数量口径到货率。',
+    },
+    {
+      key: 'unordered', label: '未下单', value: `${stats.noRequisitionLines} / ${stats.noOrderLines}`, tone: tone(stats.noRequisitionLines + stats.noOrderLines),
+      sub: '未请购 / 无PO', compactValue: true,
+      title: '未请购＝没有请购单的物料行数；无PO＝没有采购订单的物料行数。',
+    },
+  ]
+})
+
 function cellText(row: ProjectProcurementTrackingItem, key: ColumnKey) {
   if (isMovementColumn(key)) return movementText(row, key)
   if (key === 'impactStage') return row.impactStage === 'Assembly' ? '装配' : row.impactStage === 'Commissioning' ? '调试' : '—'
@@ -569,6 +659,16 @@ onBeforeUnmount(() => {
 
     <el-alert v-if="result?.lastRefreshError" :title="`最近一次刷新失败，当前继续显示上次完整快照：${result.lastRefreshError}`" type="warning" :closable="false" show-icon />
 
+    <div class="procurement-tracking__stats" role="group" aria-label="采购跟踪统计">
+      <article v-for="card in statsCards" :key="card.key" class="procurement-stats-card" :class="card.tone" :title="card.title" :aria-label="`${card.label}：${card.value}，${card.sub}`">
+        <span class="procurement-stats-card__text">
+          <span class="procurement-stats-card__label">{{ card.label }}</span>
+          <span class="procurement-stats-card__sub">{{ card.sub }}</span>
+        </span>
+        <strong class="procurement-stats-card__value" :class="{ 'is-compact': 'compactValue' in card && card.compactValue }">{{ card.value }}</strong>
+      </article>
+    </div>
+
     <el-table
       :data="pagedItems"
       @sort-change="changeDeliverySort"
@@ -685,4 +785,18 @@ onBeforeUnmount(() => {
 @media (prefers-reduced-motion: reduce) {
   .procurement-tracking :deep(td.el-table__cell.is-delivery-delay) { animation: none; }
 }
+/* 统计卡：单行自适应铺满，高度控制在约 52px（≈1.7 行明细）。 */
+.procurement-tracking__stats { display: flex; flex-shrink: 0; align-items: stretch; gap: 6px; margin: 0 0 6px; overflow-x: auto; overflow-y: hidden; scrollbar-width: thin; }
+.procurement-stats-card { display: flex; min-width: 96px; flex: 1 1 0; align-items: center; justify-content: space-between; gap: 8px; height: 54px; padding: 4px 8px; border: 1px solid var(--pdm-border-soft); border-left: 3px solid var(--pdm-muted); border-radius: 6px; background: var(--pdm-surface-muted); line-height: 1.25; }
+.procurement-stats-card__text { display: flex; min-width: 0; flex-direction: column; gap: 1px; }
+.procurement-stats-card__label { overflow: hidden; color: var(--pdm-muted); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.procurement-stats-card__sub { overflow: hidden; color: var(--pdm-muted); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.procurement-stats-card__value { flex: 0 0 auto; color: var(--pdm-text); font-size: 24px; line-height: 1.1; white-space: nowrap; }
+.procurement-stats-card__value.is-compact { font-size: 18px; }
+.procurement-stats-card.is-success { border-left-color: var(--pdm-green); }
+.procurement-stats-card.is-success .procurement-stats-card__value { color: var(--pdm-green); }
+.procurement-stats-card.is-warning { border-left-color: var(--pdm-orange); }
+.procurement-stats-card.is-warning .procurement-stats-card__value { color: var(--pdm-orange); }
+.procurement-stats-card.is-danger { border-left-color: var(--pdm-danger); }
+.procurement-stats-card.is-danger .procurement-stats-card__value { color: var(--pdm-danger); }
 </style>

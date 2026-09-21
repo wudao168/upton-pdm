@@ -2,6 +2,7 @@ using System.Security.Claims;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using System.IO.Compression;
 using System.Net.Mail;
 using Microsoft.Extensions.Options;
 using MySqlConnector;
@@ -1081,6 +1082,12 @@ public static class PdmEndpointExtensions
             return Results.Ok(await workflow.WithdrawDrawingReviewPackageAsync(packageId, request.Reason, actor, role, cancellationToken));
         });
 
+        api.MapPost("/drawing-reviews/{packageId:guid}/abandon-writebacks", async (Guid packageId, AbandonDrawingReviewWritebacksRequest request, HttpContext context, PdmWorkflowService workflow, CancellationToken cancellationToken) =>
+        {
+            var (actor, role) = CurrentUser(context.User);
+            return Results.Ok(await workflow.AbandonDrawingReviewWritebacksAsync(packageId, request.Reason, actor, role, cancellationToken));
+        });
+
         api.MapPost("/drawing-reviews/{packageId:guid}/markups", async (Guid packageId, AddDrawingReviewMarkupRequest request, HttpContext context, PdmWorkflowService workflow, CancellationToken cancellationToken) =>
         {
             var (actor, role) = CurrentUser(context.User);
@@ -1340,6 +1347,66 @@ public static class PdmEndpointExtensions
             return Results.Accepted($"/api/projects/{package.ProjectId}/release-packages", new { Message = "转图任务已在后台启动。" });
         });
 
+        api.MapGet("/projects/{projectId:guid}/release-preview-items", async (Guid projectId, Guid? releasePackageId, HttpContext context, IPdmRepository repository, ReleasePreviewService previewService, CancellationToken cancellationToken) =>
+        {
+            var (actor, role) = CurrentUser(context.User);
+            if (!await repository.HasProjectContentReadAccessAsync(projectId, actor, role, cancellationToken)) return Results.Forbid();
+            var items = await previewService.ListProjectItemsAsync(projectId, releasePackageId, cancellationToken);
+            return Results.Ok(items.Select(MapReleasePreviewItem).ToArray());
+        });
+
+        api.MapPost("/release-packages/{releasePackageId:guid}/preview-items/{documentId:guid}/retry", async (Guid releasePackageId, Guid documentId, HttpContext context, IPdmRepository repository, ReleasePreviewService previewService, CancellationToken cancellationToken) =>
+        {
+            var (actor, role) = CurrentUser(context.User);
+            var package = await repository.FindReleasePackageAsync(releasePackageId, cancellationToken);
+            if (package is null) return Results.NotFound();
+            if (!await repository.HasProjectContentReadAccessAsync(package.ProjectId, actor, role, cancellationToken)) return Results.Forbid();
+            if (!await repository.HasUserPermissionAsync(actor, role, PermissionCodes.ReleaseManage, cancellationToken)) return Results.Forbid();
+            var item = await previewService.RetryItemAsync(releasePackageId, documentId, actor, cancellationToken);
+            return Results.Ok(new ReleasePreviewItemRetryResult(true, MapReleasePreviewItem(item), "已重新转出该图档。"));
+        });
+
+        api.MapPost("/projects/{projectId:guid}/release-preview-items/archive", async (Guid projectId, ReleasePreviewArchiveRequest request, HttpContext context, IPdmRepository repository, IFileStorage storage, ReleasePreviewService previewService, IOptions<PdmStorageOptions> storageOptions, TimeProvider timeProvider, CancellationToken cancellationToken) =>
+        {
+            var (actor, role) = CurrentUser(context.User);
+            if (!await repository.HasProjectContentReadAccessAsync(projectId, actor, role, cancellationToken)) return Results.Forbid();
+            var project = await repository.FindProjectAsync(projectId, cancellationToken);
+            if (project is null) return Results.NotFound();
+            var items = (await previewService.ListProjectItemsAsync(projectId, request.ReleasePackageId, cancellationToken))
+                .Where(item => item.Succeeded && !string.IsNullOrWhiteSpace(item.PreviewRelativePath))
+                .Where(item => request.DocumentIds is not { Count: > 0 } || request.DocumentIds.Contains(item.DocumentId))
+                .ToArray();
+            if (items.Length == 0) return Results.BadRequest(new { detail = "所选图档还没有可下载的STEP/PDF文件。" });
+
+            var vaultRoot = StorageLocationPolicy.Normalize(project.VaultLocation);
+            var tempRoot = StorageLocationPolicy.Normalize(storageOptions.Value.UploadTempRoot);
+            Directory.CreateDirectory(tempRoot);
+            var archivePath = Path.Combine(tempRoot, $"release-preview-{Guid.NewGuid():N}.zip");
+            var stream = new FileStream(archivePath, FileMode.Create, FileAccess.ReadWrite, FileShare.None, 128 * 1024, FileOptions.DeleteOnClose);
+            try
+            {
+                using (var archive = new ZipArchive(stream, ZipArchiveMode.Create, leaveOpen: true))
+                {
+                    foreach (var item in items)
+                    {
+                        await storage.VerifyPreviewFileAsync(project, new DocumentPreviewArtifact(item.Format, item.PreviewRelativePath, item.FileLength, item.Sha256, item.Sha256), cancellationToken);
+                        var extension = item.Format == DocumentPreviewFormat.Pdf ? ".pdf" : ".step";
+                        var entry = archive.CreateEntry($"{item.ReleasePackageNumber}/{item.DrawingNumber}{extension}", CompressionLevel.Fastest);
+                        await using var target = entry.Open();
+                        await using var source = await storage.OpenReadAsync(StorageLocationPolicy.ResolveUnder(vaultRoot, item.PreviewRelativePath), cancellationToken);
+                        await source.CopyToAsync(target, cancellationToken);
+                    }
+                }
+            }
+            catch
+            {
+                await stream.DisposeAsync();
+                throw;
+            }
+            stream.Position = 0;
+            return Results.Stream(stream, "application/zip", $"图纸转出-{timeProvider.GetLocalNow():yyyyMMdd-HHmmss}.zip");
+        });
+
         api.MapPost("/release-packages/{releasePackageId:guid}/submit", async (Guid releasePackageId, HttpContext context, PdmWorkflowService workflow, CancellationToken cancellationToken) =>
         {
             var (actor, role) = CurrentUser(context.User);
@@ -1561,6 +1628,10 @@ public static class PdmEndpointExtensions
             directory.Managers.Where(item => unitIds.Contains(item.UnitId)).ToArray(),
             directory.Users.Where(item => item.CompanyId == tenant.CompanyId).ToArray());
     }
+
+    private static ReleasePreviewItemResult MapReleasePreviewItem(ReleasePreviewItem item) =>
+        new(item.ReleasePackageId, item.ReleasePackageNumber, item.DocumentId, item.DrawingNumber, item.FileName,
+            item.Kind.ToString(), item.Format.ToString(), item.Succeeded, item.FileLength, item.Error);
 
     private static object MapManagedUser(UserAccount user, UserCompanyScope? scope = null) => new
     {

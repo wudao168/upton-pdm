@@ -44,7 +44,16 @@ public sealed class SolidWorksServerPreviewConverter : IServerPreviewConverter
         Project project,
         IReadOnlyList<ReleasePreviewSource> sources,
         string stagingDirectory,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken) =>
+        await GenerateAsync(package, project, sources, stagingDirectory, cancellationToken, keepExistingPreviews: false);
+
+    public async Task<IReadOnlyDictionary<Guid, DocumentPreviewArtifact>> GenerateAsync(
+        ReleasePackage package,
+        Project project,
+        IReadOnlyList<ReleasePreviewSource> sources,
+        string stagingDirectory,
+        CancellationToken cancellationToken,
+        bool keepExistingPreviews)
     {
         var conversionSettings = repository is null
             ? PreviewConversionSettings.Default
@@ -56,12 +65,6 @@ public sealed class SolidWorksServerPreviewConverter : IServerPreviewConverter
         if (!remote && !OperatingSystem.IsWindows())
             throw new PdmRuleException("本机SolidWorks转换只能在Windows服务器运行；如需在其他电脑转图，请在系统设置中选择远程转图服务器。");
 
-        var duplicateFileName = sources
-            .GroupBy(source => source.FileName, StringComparer.OrdinalIgnoreCase)
-            .FirstOrDefault(group => group.Count() > 1);
-        if (duplicateFileName is not null)
-            throw new PdmRuleException($"发布引用树包含重名源文件{duplicateFileName.Key}，无法安全重建SolidWorks引用关系。");
-
         var vaultRoot = StorageLocationPolicy.Normalize(project.VaultLocation);
         var previewRelativeRoot = Path.Combine(".release-previews", package.Id.ToString("N"));
         var previewRoot = StorageLocationPolicy.ResolveUnder(vaultRoot, previewRelativeRoot);
@@ -71,8 +74,17 @@ public sealed class SolidWorksServerPreviewConverter : IServerPreviewConverter
         var outputRoot = Path.Combine(workRoot, "outputs");
         Directory.CreateDirectory(sourceRoot);
         Directory.CreateDirectory(outputRoot);
-        ResetDirectory(previewRoot);
-        ResetDirectory(stagingPreviewRoot);
+        // 单项重试（keepExistingPreviews）时不能清空整个发布包的预览目录，否则会删掉其它已转好的文件。
+        if (keepExistingPreviews)
+        {
+            Directory.CreateDirectory(previewRoot);
+            Directory.CreateDirectory(stagingPreviewRoot);
+        }
+        else
+        {
+            ResetDirectory(previewRoot);
+            ResetDirectory(stagingPreviewRoot);
+        }
 
         try
         {
@@ -92,10 +104,20 @@ public sealed class SolidWorksServerPreviewConverter : IServerPreviewConverter
                     Path.Combine(outputRoot, outputFileName)));
             }
 
+            // 转图范围可能只含部分图档（例如仅非标件BOM物料），但 SolidWorks 打开装配体时必须能解析被引用的其它零件，
+            // 而转图代理只解压 manifest 里列出的文件，因此这些图档也要作为任务下发（只下载、转换，不回收结果）。
+            var referenceJobs = await ResolveReferenceJobsAsync(package, vaultRoot, jobs, outputRoot, cancellationToken);
+            var conversionJobs = jobs.Concat(referenceJobs).ToArray();
+            var duplicateFileName = conversionJobs
+                .GroupBy(job => job.FileName, StringComparer.OrdinalIgnoreCase)
+                .FirstOrDefault(group => group.Count() > 1);
+            if (duplicateFileName is not null)
+                throw new PdmRuleException($"发布引用树包含重名源文件{duplicateFileName.Key}，无法安全重建SolidWorks引用关系。");
+
             if (remote)
-                await RunRemoteAgentAsync(conversionSettings, jobs, workRoot, outputRoot, cancellationToken);
+                await RunRemoteAgentAsync(conversionSettings, conversionJobs, workRoot, outputRoot, cancellationToken);
             else
-                await RunLocalWorkerAsync(conversionSettings, jobs, sourceRoot, workRoot, outputRoot, cancellationToken);
+                await RunLocalWorkerAsync(conversionSettings, conversionJobs, sourceRoot, workRoot, outputRoot, cancellationToken);
 
             var artifacts = new Dictionary<Guid, DocumentPreviewArtifact>();
             foreach (var source in sources)
@@ -124,8 +146,11 @@ public sealed class SolidWorksServerPreviewConverter : IServerPreviewConverter
         }
         catch
         {
-            DeleteDirectory(previewRoot);
-            DeleteDirectory(stagingPreviewRoot);
+            if (!keepExistingPreviews)
+            {
+                DeleteDirectory(previewRoot);
+                DeleteDirectory(stagingPreviewRoot);
+            }
             throw;
         }
         finally
@@ -252,6 +277,39 @@ public sealed class SolidWorksServerPreviewConverter : IServerPreviewConverter
             }
         }
         _ = outputRoot;
+    }
+
+    /// <summary>
+    /// 收集引用树上的其余图档（不转出、只作为 SolidWorks 解析引用的参考文件）：文件缺失或指纹不符时跳过，
+    /// 避免因为与本次转图无关的文件阻断转换。
+    /// </summary>
+    private async Task<IReadOnlyList<PreviewJob>> ResolveReferenceJobsAsync(
+        ReleasePackage package,
+        string vaultRoot,
+        IReadOnlyList<PreviewJob> jobs,
+        string outputRoot,
+        CancellationToken cancellationToken)
+    {
+        if (repository is null) return [];
+        var referenceSources = await repository.ListReleaseReferenceSourcesAsync(package.Id, cancellationToken);
+        if (referenceSources.Count == 0) return [];
+        var jobNames = jobs.Select(job => job.FileName).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var referenceJobs = new List<PreviewJob>();
+        foreach (var source in referenceSources)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (jobNames.Contains(source.FileName)) continue;
+            var path = StorageLocationPolicy.ResolveUnder(vaultRoot, source.StorageRelativePath);
+            if (!File.Exists(path)) continue;
+            var info = new FileInfo(path);
+            if (info.Length != source.FileLength) continue;
+            var sha256 = await ComputeSha256Async(path, cancellationToken);
+            if (!string.Equals(sha256, source.Sha256, StringComparison.OrdinalIgnoreCase)) continue;
+            var extension = source.Kind == DocumentKind.Drawing ? ".pdf" : ".step";
+            referenceJobs.Add(new PreviewJob(source.DocumentId, source.Kind, source.FileName, path,
+                Path.Combine(outputRoot, $"reference_{source.DocumentId:N}{extension}")));
+        }
+        return referenceJobs;
     }
 
     /// <summary>解析转图代理返回的压缩包：校验 result.json 并把每个图档的 STEP/PDF 落到输出路径。</summary>

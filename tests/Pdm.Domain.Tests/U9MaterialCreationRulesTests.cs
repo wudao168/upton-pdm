@@ -38,6 +38,7 @@ public sealed class U9MaterialCreationRulesTests
         foreach (var attribute in new[] { "IsPurchaseEnable", "IsSalesEnable", "IsBuildEnable", "IsMRPEnable", "IsBOMEnable", "IsInventoryEnable", "IsVarRatio" })
             Assert.True(row.GetProperty(attribute).GetBoolean());
         Assert.Equal("true", row.GetProperty("Effective").GetProperty("IsEffective").GetString());
+        Assert.Equal("2020-01-01", row.GetProperty("Effective").GetProperty("EffectiveDate").GetString());
         Assert.True(row.GetProperty("InventoryInfo").GetProperty("IsInvCalculateBySeiban").GetBoolean());
         Assert.True(row.GetProperty("PurchaseInfo").GetProperty("ReceiptModeAllowModify").GetBoolean());
         Assert.True(row.GetProperty("SaleInfo").GetProperty("IsReturnable").GetBoolean());
@@ -46,6 +47,8 @@ public sealed class U9MaterialCreationRulesTests
         Assert.Equal(1, row.GetProperty("MfgInfo").GetProperty("BuildShrinkageRate").GetInt32());
         Assert.True(row.GetProperty("PurchaseInfo").GetProperty("IsPUTradePathModify").GetBoolean());
         Assert.True(row.GetProperty("PurchaseInfo").GetProperty("IsPURtnTradePathModify").GetBoolean());
+        // 公司要求：PLM建档料品的“预算控制方式”统一为手工执行（U9C: PurchaseInfo.BudgetControlType=1）。
+        Assert.Equal(1, row.GetProperty("PurchaseInfo").GetProperty("BudgetControlType").GetInt32());
         Assert.True(row.GetProperty("SaleInfo").GetProperty("IsSDTradePathModify").GetBoolean());
         Assert.True(row.GetProperty("SaleInfo").GetProperty("IsSDRtnTradePathModify").GetBoolean());
     }

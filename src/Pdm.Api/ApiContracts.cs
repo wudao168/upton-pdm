@@ -138,6 +138,25 @@ public sealed record PreviewAgentRegisterRequest(string AgentUrl, string AgentTo
 
 public sealed record PreviewAgentRegisterResult(bool Ok, string AgentUrl, int TimeoutMinutes, string Message);
 
+/// <summary>图纸转出打包下载：可按发布包筛选，并只下载选中的图档（都不传表示全部已转出文件）。</summary>
+public sealed record ReleasePreviewArchiveRequest(Guid? ReleasePackageId = null, IReadOnlyList<Guid>? DocumentIds = null);
+
+/// <summary>图纸转出明细：单个图档的目标格式、成功/失败与失败原因。</summary>
+public sealed record ReleasePreviewItemResult(
+    Guid ReleasePackageId,
+    string ReleasePackageNumber,
+    Guid DocumentId,
+    string DrawingNumber,
+    string FileName,
+    string Kind,
+    string Format,
+    bool Succeeded,
+    long FileLength,
+    string? Error);
+
+/// <summary>单项转图重试结果。</summary>
+public sealed record ReleasePreviewItemRetryResult(bool Ok, ReleasePreviewItemResult Item, string Message);
+
 /// <summary>
 /// <paramref name="AssignedReviewers"/> 为空表示不指定审核人，由全部具备审图权限的人员并行处理；
 /// <paramref name="AssignedReviewer"/> 兼容旧客户端提交的单值指定审核人。
@@ -145,6 +164,8 @@ public sealed record PreviewAgentRegisterResult(bool Ok, string AgentUrl, int Ti
 public sealed record CreateDrawingReviewRequest(IReadOnlyList<Guid>? ModelDocumentIds, IReadOnlyList<string>? AssignedReviewers, string? AssignedReviewer = null);
 
 public sealed record WithdrawDrawingReviewRequest(string Reason);
+
+public sealed record AbandonDrawingReviewWritebacksRequest(string Reason);
 
 public sealed record AddDrawingReviewMarkupRequest(
     Guid ItemId,

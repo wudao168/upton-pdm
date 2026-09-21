@@ -236,6 +236,57 @@ public sealed partial class MySqlPdmRepository
     }
 
     /// <summary>
+    /// 发布包引用树上的全部图档（含不参与转图的标准件/外购件）：转图时作为参考文件一起送到转图电脑，
+    /// SolidWorks 打开装配体时才能解析被引用的其它零件。
+    /// </summary>
+    public async Task<IReadOnlyList<ReleasePreviewSource>> ListReleaseReferenceSourcesAsync(Guid releasePackageId, CancellationToken cancellationToken)
+    {
+        await using var connection = await OpenAsync(cancellationToken);
+        var package = await connection.QuerySingleOrDefaultAsync<PackagePublishRow>(new CommandDefinition(
+            "SELECT project_id,reference_snapshot_id,state,non_standard_bom_snapshot_json FROM release_package WHERE id=@PackageId",
+            new { PackageId = releasePackageId }, cancellationToken: cancellationToken));
+        if (package is null || !package.ReferenceSnapshotId.HasValue) return [];
+        var rootJson = await connection.QuerySingleOrDefaultAsync<string>(new CommandDefinition(
+            "SELECT root_json FROM reference_snapshot WHERE id=@SnapshotId AND project_id=@ProjectId",
+            new { SnapshotId = package.ReferenceSnapshotId.Value, package.ProjectId }, cancellationToken: cancellationToken));
+        if (string.IsNullOrWhiteSpace(rootJson)) return [];
+        var root = JsonSerializer.Deserialize<DocumentReferenceNode>(rootJson, jsonOptions);
+        if (root is null) return [];
+        var documentIds = EnumerateDocumentIds(root).Distinct().ToArray();
+        if (documentIds.Length == 0) return [];
+        var sources = new List<ReleasePreviewSource>();
+        // 逐个图档取最新版本：与转图源清单同样的写法，避免一次性大排序把 MySQL 排序内存打爆。
+        foreach (var documentId in documentIds)
+        {
+            var row = await connection.QuerySingleOrDefaultAsync<ReleasePreviewSourceRow>(new CommandDefinition(
+                """
+                SELECT d.id document_id,d.drawing_number,d.file_name,d.kind,
+                       v.id source_version_id,v.storage_relative_path,v.file_length,v.sha256,v.property_snapshot_json
+                FROM document d
+                INNER JOIN document_version v ON v.document_id=d.id
+                WHERE d.id=@DocumentId AND d.kind IN ('Assembly','Part','Drawing')
+                ORDER BY v.created_at DESC
+                LIMIT 1
+                """,
+                new { DocumentId = documentId }, cancellationToken: cancellationToken));
+            if (row is null) continue;
+            var properties = JsonSerializer.Deserialize<Dictionary<string, string?>>(row.PropertySnapshotJson, jsonOptions) ?? [];
+            properties.TryGetValue("SourceFileSha256", out var sourceSha256);
+            sources.Add(new ReleasePreviewSource(
+                row.DocumentId,
+                row.SourceVersionId,
+                row.DrawingNumber,
+                row.FileName,
+                Enum.Parse<DocumentKind>(row.Kind),
+                row.StorageRelativePath,
+                row.FileLength,
+                row.Sha256,
+                string.IsNullOrWhiteSpace(sourceSha256) ? row.Sha256 : sourceSha256));
+        }
+        return sources;
+    }
+
+    /// <summary>
     /// 解析转图范围：非标件BOM物料在引用树上的节点 + 这些节点的上级装配体 + 物料关联的2D工程图（转PDF）。
     /// </summary>
     private static async Task<IReadOnlyList<Guid>> ResolvePreviewScopeAsync(
@@ -449,7 +500,9 @@ public sealed partial class MySqlPdmRepository
         if (previews.Count == 0) return [];
         await using var connection = await OpenAsync(cancellationToken);
         var rows = await connection.QueryAsync<DocumentVersionRow>(new CommandDefinition(
-            VersionSelect + " WHERE release_package_id=@PackageId ORDER BY created_at",
+            // 不按 created_at 排序：document_version 行含多个大 JSON 快照，排序会超出 MySQL 排序内存（Out of sort memory），
+            // 而这里的调用方按图档匹配预览，顺序无关。
+            VersionSelect + " WHERE release_package_id=@PackageId",
             new { PackageId = releasePackageId }, cancellationToken: cancellationToken));
         var updated = new List<DocumentVersion>();
         foreach (var row in rows)

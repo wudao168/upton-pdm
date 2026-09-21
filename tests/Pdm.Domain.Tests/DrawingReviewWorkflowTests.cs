@@ -506,6 +506,58 @@ public sealed class DrawingReviewWorkflowTests
     }
 
     [Fact]
+    public async Task AbandoningPendingWritebacksCompletesReviewAndReleasesEditLock()
+    {
+        var (repository, workflow, _, drawing) = await PrepareReviewAsync();
+        var review = await workflow.CreateDrawingReviewPackageAsync(ProjectId, "submitter", UserRole.Administrator, default);
+        var item = Assert.Single(review.Items);
+        review = await workflow.DecideDrawingReviewTargetAsync(review.Id, item.Id,
+            new DecideDrawingReviewTargetCommand(DrawingReviewTarget.Drawing2D, DrawingReviewDecision.Approve, "2D通过"),
+            "drawing-reviewer", UserRole.Administrator, default);
+        review = await ApproveAsMechanicalSupervisorAsync(workflow, review);
+        Assert.Equal(DrawingReviewPackageState.WritingProperties, review.State);
+        var writeback = Assert.Single(await repository.ListCadPropertyWritebacksAsync(ProjectId, default));
+        Assert.Equal(CadPropertyWritebackStatus.Pending, writeback.Status);
+        Assert.True(await repository.IsDocumentUnderActiveDrawingReviewAsync(drawing.Id, default));
+
+        // 只有审核发起人、项目经理或系统管理员可以放弃写入。
+        await Assert.ThrowsAsync<UnauthorizedAccessException>(() =>
+            workflow.AbandonDrawingReviewWritebacksAsync(review.Id, "客户端一直没回写", "other-engineer", UserRole.Engineer, default));
+
+        var completed = await workflow.AbandonDrawingReviewWritebacksAsync(review.Id, "客户端一直没回写", "submitter", UserRole.Administrator, default);
+
+        Assert.Equal(DrawingReviewPackageState.Approved, completed.State);
+        Assert.NotNull(completed.ApprovedAt);
+        Assert.False(await repository.IsDocumentUnderActiveDrawingReviewAsync(drawing.Id, default));
+        Assert.Empty(await repository.ListActiveDrawingReviewDocumentIdsAsync(ProjectId, default));
+        Assert.Equal(CadPropertyWritebackStatus.Superseded, Assert.Single(await repository.ListCadPropertyWritebacksAsync(ProjectId, default)).Status);
+        var notification = Assert.Single(await repository.ListUserNotificationsAsync("submitter", 50, default), candidate => candidate.Category == "DrawingReviewWritebackAbandoned");
+        Assert.Contains("未写入审核标记", notification.Title);
+    }
+
+    [Fact]
+    public async Task TimedOutReviewWritebacksAreCompletedAutomatically()
+    {
+        var (repository, workflow, _, drawing) = await PrepareReviewAsync();
+        var review = await workflow.CreateDrawingReviewPackageAsync(ProjectId, "submitter", UserRole.Administrator, default);
+        var item = Assert.Single(review.Items);
+        review = await workflow.DecideDrawingReviewTargetAsync(review.Id, item.Id,
+            new DecideDrawingReviewTargetCommand(DrawingReviewTarget.Drawing2D, DrawingReviewDecision.Approve, "2D通过"),
+            "drawing-reviewer", UserRole.Administrator, default);
+        review = await ApproveAsMechanicalSupervisorAsync(workflow, review);
+
+        Assert.Empty(await repository.ListTimedOutDrawingReviewWritebackPackageIdsAsync(DateTimeOffset.UtcNow.AddHours(-24), default));
+        Assert.Equal([review.Id], await repository.ListTimedOutDrawingReviewWritebackPackageIdsAsync(DateTimeOffset.UtcNow.AddHours(24), default));
+
+        // 负的超时阈值等价于“所有待回写都已超时”，用于验证后台兜底会自动完成审核并释放编辑锁。
+        var completed = await workflow.CompleteTimedOutDrawingReviewWritebacksAsync(TimeSpan.FromHours(-24), default);
+
+        Assert.Equal(1, completed);
+        Assert.Equal(DrawingReviewPackageState.Approved, (await repository.FindDrawingReviewPackageAsync(review.Id, default))!.State);
+        Assert.False(await repository.IsDocumentUnderActiveDrawingReviewAsync(drawing.Id, default));
+    }
+
+    [Fact]
     public async Task PropertyWritingRejectsOrdinaryCheckInWithoutControlledWriteback()
     {
         var (repository, workflow, model, drawing) = await PrepareReviewAsync();

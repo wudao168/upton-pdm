@@ -382,6 +382,7 @@ public sealed class U9MaterialIntegrationServiceTests
         Assert.Equal("PBT", attributes[$"DescFlexField.{U9MaterialContract.MaterialPrivateSegment}"].GetProperty("AttributeValue").GetString());
         Assert.Equal("无", attributes[$"DescFlexField.{U9MaterialContract.SurfaceTreatmentPrivateSegment}"].GetProperty("AttributeValue").GetString());
         Assert.Equal("进口传感器", attributes["Description"].GetProperty("AttributeValue").GetString());
+        Assert.Equal("2020-01-01", attributes["Effective.EffectiveDate"].GetProperty("AttributeValue").GetString());
     }
 
     private static async Task<ExecutionFixture> CreateApprovedTaskAsync(bool writeEnabled)
@@ -498,7 +499,8 @@ public sealed class U9MaterialIntegrationServiceTests
                 ["MrpInfo.ForecastContorlType"] = "1", ["MrpInfo.IsTraceRequirement"] = "true",
                 ["MrpInfo.IsControlByDC"] = "true", ["MrpInfo.DemandRule"] = "0",
                 ["MfgInfo.IsInheritBomMasterNo"] = "true", ["MfgInfo.DesignationRule"] = "1",
-                ["PurchaseInfo.IsNeedRequest"] = "true", ["PurchaseInfo.ReceiptModeAllowModify"] = "true"
+                ["PurchaseInfo.IsNeedRequest"] = "true", ["PurchaseInfo.ReceiptModeAllowModify"] = "true",
+                ["PurchaseInfo.BudgetControlType"] = "1"
             }
         }]);
 

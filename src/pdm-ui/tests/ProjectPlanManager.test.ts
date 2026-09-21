@@ -494,7 +494,8 @@ describe('项目计划审批和配置', () => {
   })
 
   it('已生效任务行内填写完成日期即完成，阶段完成日期汇总，生效信息替代资源冲突卡片', async () => {
-    const approved = { ...structuredClone(draft), approvalStatus: 'Approved', approvedBy: 'approver', approvedAt: '2026-09-10T10:00:00Z' }
+    const approved = { ...structuredClone(draft), approvalStatus: 'Approved', approvedBy: 'approver', approvedAt: '2026-09-10T10:00:00Z',
+      tasks: draft.tasks.map(task => ({ ...task, actualStart: '2026-09-10', actualFinish: '2026-09-14' })) }
     api.readProjectPlan.mockResolvedValue(approved)
     api.updateProjectPlanTaskProgress.mockResolvedValue(approved)
     const wrapper = render()
@@ -519,19 +520,35 @@ describe('项目计划审批和配置', () => {
     expect(wrapper.find('.pdm-gantt-info-row.is-stage [aria-label$="完成日期"]').exists()).toBe(false)
   })
 
-  it('完成日期仅生效计划的责任人或管理人员可填报，取消不保存', async () => {
+  it('完成日期仅生效计划的责任人或管理人员可填报，未填报时显示“完成”按钮', async () => {
     api.readProjectPlan.mockResolvedValue({ ...structuredClone(draft), approvalStatus: 'Approved', tasks: draft.tasks.map(task => ({...task, assignee: 'worker'})) })
     const wrapper = render()
     await wrapper.setProps({ canEdit: false, currentUsername: 'outsider', currentRole: 'Engineer' })
     await flushPromises()
-    expect(wrapper.find('[aria-label="编辑方案检查完成日期"]').exists()).toBe(false)
+    expect(wrapper.find('[aria-label="完成方案检查"]').exists()).toBe(false)
     await wrapper.setProps({ currentUsername: 'worker' })
-    await wrapper.find('[aria-label="编辑方案检查完成日期"]').trigger('click')
-    await clickText('取消')
-    expect(api.updateProjectPlanTaskProgress).not.toHaveBeenCalled()
-    api.readProjectPlan.mockResolvedValue(structuredClone(draft))
+    expect(wrapper.find('[aria-label="完成方案检查"]').exists()).toBe(true)
+    // 已填写过完成日期后，“完成”入口变成可编辑的日期入口。
+    api.readProjectPlan.mockResolvedValue({ ...structuredClone(draft), approvalStatus: 'Approved', tasks: draft.tasks.map(task => ({...task, assignee: 'worker', actualFinish: '2026-09-14'})) })
     await clickText('刷新')
-    expect(wrapper.find('[aria-label="编辑方案检查完成日期"]').exists()).toBe(false)
+    expect(wrapper.find('[aria-label="编辑方案检查完成日期"]').exists()).toBe(true)
+    expect(wrapper.find('[aria-label="完成方案检查"]').exists()).toBe(false)
+    expect(api.updateProjectPlanTaskProgress).not.toHaveBeenCalled()
+  })
+
+  it('完成日期未填写时点“完成”按当天记录并标记100%完成', async () => {
+    const approved = { ...structuredClone(draft), approvalStatus: 'Approved', approvedBy: 'approver' }
+    api.readProjectPlan.mockResolvedValue(approved)
+    api.updateProjectPlanTaskProgress.mockResolvedValue(approved)
+    const wrapper = render()
+    await flushPromises()
+    const button = wrapper.find('[aria-label="完成方案检查"]')
+    expect(button.text()).toBe('完成')
+    await button.trigger('click')
+    await flushPromises()
+    const today = new Date()
+    const expected = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`
+    expect(api.updateProjectPlanTaskProgress).toHaveBeenCalledWith('child', 'task', { completionPercent: 100, actualStart: expected, actualFinish: expected, expectedRowVersion: 1 }, 'test')
   })
 
   it('删除计划始终显示，确认前不删除，已生效或无权限时灰显', async () => {
@@ -1023,20 +1040,21 @@ describe('项目计划审批和配置', () => {
     expect(wrapper.find('[aria-label="编辑方案检查责任人"]').exists()).toBe(false)
     expect(wrapper.find('[aria-label="编辑方案检查计划日期"]').exists()).toBe(false)
     expect(wrapper.find('[aria-label="编辑方案检查工期"]').exists()).toBe(false)
-    expect(wrapper.find('[aria-label="编辑方案检查完成日期"]').exists()).toBe(true)
+    expect(wrapper.find('[aria-label="完成方案检查"]').exists()).toBe(true)
     await clickText('申请变更权限')
     const input = document.querySelector<HTMLTextAreaElement>('textarea[aria-label="计划变更原因"]')!
     input.value = '客户调整交期'
     input.dispatchEvent(new Event('input', { bubbles: true }))
-    api.readProjectPlan.mockResolvedValue({ ...approved, changeRequest: { id: 'request', tasks: [], reason: '客户调整交期', submittedBy: 'pm', submittedAt: '', approvalAssignee: 'approver', status: 'Pending' } })
-    await clickText('提交权限申请')
+    api.readProjectPlan.mockResolvedValue({ ...approved, changeDraftSource: structuredClone(approved), changeRequest: { id: 'request', tasks: [], reason: '客户调整交期', submittedBy: 'pm', submittedAt: '', approvalAssignee: 'approver', status: 'Approved' } })
+    await clickText('提交并取得变更权限')
     expect(api.submitProjectPlanChange).toHaveBeenCalledWith('child', { tasks: [], reason: '客户调整交期', expectedRowVersion: 1 }, 'test')
     expect(wrapper.find('.pdm-gantt-info-row.is-task').text()).toContain('2026-09-10 ~ 2026-09-15')
-    await clickText('权限待审批')
+    await clickText('变更申请记录')
+    expect(document.body.textContent).toContain('已取得变更权限，草稿编辑中')
     expect(document.body.textContent).toContain('未预先提交任务排期修改')
     expect([...document.querySelectorAll('button')].some(item => item.textContent === '批准权限')).toBe(false)
     await wrapper.setProps({ currentUsername: 'approver' })
-    expect([...document.querySelectorAll('button')].some(item => item.textContent === '批准权限')).toBe(true)
+    expect([...document.querySelectorAll('button')].some(item => item.textContent === '批准权限')).toBe(false)
     expect(api.saveProjectPlan).not.toHaveBeenCalled()
   })
 
@@ -1109,7 +1127,7 @@ describe('项目计划审批和配置', () => {
     await flushPromises()
     await clickText('申请变更权限')
     expect(document.querySelector('.pdm-plan-required')?.textContent).toBe('*')
-    await clickText('提交权限申请')
+    await clickText('提交并取得变更权限')
     const dialog = [...document.querySelectorAll('.el-dialog')].find(item => item.textContent?.includes('申请计划变更'))!
     expect(dialog.querySelector('[role="alert"]')?.textContent).toContain('表单校验失败')
     expect(dialog.querySelector('[role="alert"]')?.textContent).toContain('请填写变更原因')
@@ -1125,7 +1143,7 @@ describe('项目计划审批和配置', () => {
     const input = document.querySelector<HTMLTextAreaElement>('textarea[aria-label="计划变更原因"]')!
     input.value = '客户调整交期'
     input.dispatchEvent(new Event('input', { bubbles: true }))
-    await clickText('提交权限申请')
+    await clickText('提交并取得变更权限')
     const dialog = [...document.querySelectorAll('.el-dialog')].find(item => item.textContent?.includes('申请计划变更'))!
     expect(dialog.querySelector('[role="alert"]')?.textContent).toContain('变更申请提交失败')
     expect(dialog.querySelector('[role="alert"]')?.textContent).toContain('计划数据已更新，请重新确认后操作。')

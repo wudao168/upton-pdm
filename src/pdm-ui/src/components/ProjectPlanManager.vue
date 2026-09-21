@@ -346,6 +346,25 @@ function beginInlineEdit(row: TimelineRow, field: 'assignee' | 'dates' | 'durati
   inlineEdit.value = { row, field, assignee: row.task.assignee ?? '', dates: [row.task.plannedStart, row.task.plannedFinish], duration: rowDuration(row) ?? 1, actualStart: row.task.actualStart ?? '', actualFinish: row.task.actualFinish ?? '' }
 }
 
+/** 完成日期还没填时，一键按“今天”记录并标记 100% 完成。 */
+async function completeTaskToday(row: TimelineRow) {
+  const owner = row.plan
+  const task = row.task
+  if (!owner || !task || saving.value || !canReportProgress(row)) return
+  const today = todayDate.value
+  saving.value = true
+  try {
+    await updateProjectPlanTaskProgress(owner.projectId, task.id, {
+      completionPercent: 100, actualStart: task.actualStart || today, actualFinish: today, expectedRowVersion: owner.rowVersion,
+    }, props.token)
+    inlineEdit.value = null
+    await load()
+    ElMessage.success(`已完成：完成日期记录为 ${today}，任务标记为100%完成`)
+  } catch (reason) {
+    ElMessage.error(reason instanceof Error ? reason.message : '完成日期保存失败')
+  } finally { saving.value = false }
+}
+
 async function saveInlineEdit() {
   const edit = inlineEdit.value
   const owner = edit?.row.plan
@@ -1111,7 +1130,7 @@ async function submitChangeRequest() {
     await submitProjectPlanChange(props.project.id, { tasks: [], reason: changeReason.value.trim(), expectedRowVersion: changeVersion.value }, props.token)
     changeDialogOpen.value = false
     await load()
-    ElMessage.success('变更权限申请已提交，原计划继续生效')
+    ElMessage.success('已取得变更权限：可直接编辑变更草稿，完成并生效后会通知各阶段负责人')
   } catch (reason) {
     changeSubmitError.value = { type: '变更申请提交失败', message: reason instanceof Error ? reason.message : '请稍后重试' }
   }
@@ -1138,7 +1157,7 @@ async function completeChangeDraft() {
     const activated = await completeProjectPlanChange(props.project.id, plan.value.rowVersion, props.token)
     plan.value = activated
     await load()
-    ElMessage.success(`变更已完成并生效，已自动形成基线V${activated.baselineVersion}`)
+    ElMessage.success(`变更已完成并生效，已自动形成基线V${activated.baselineVersion}，并已通知各阶段负责人`)
   } catch (reason) { if (reason !== 'cancel' && reason !== 'close') ElMessage.error(reason instanceof Error ? reason.message : '完成变更失败') }
   finally { saving.value = false }
 }
@@ -1379,7 +1398,8 @@ watch(() => props.project.id, () => { masterPlanMode.value = false; return load(
                   </div>
                 </span>
                 <span v-if="!infoColumnsCollapsed" @click.stop>
-                  <button v-if="canReportProgress(row)" type="button" class="pdm-gantt-cell-edit" :aria-label="`编辑${row.name}完成日期`" :disabled="saving" @click="beginInlineEdit(row, 'actualFinish')">{{ row.actualFinish || '—' }}</button>
+                  <button v-if="canReportProgress(row) && row.actualFinish" type="button" class="pdm-gantt-cell-edit" :aria-label="`编辑${row.name}完成日期`" :disabled="saving" @click="beginInlineEdit(row, 'actualFinish')">{{ row.actualFinish }}</button>
+                  <button v-else-if="canReportProgress(row)" type="button" class="pdm-gantt-cell-edit is-complete" :aria-label="`完成${row.name}`" :title="`完成日期未填写：点击按今天（${todayDate}）记录并标记100%完成`" :disabled="saving" @click="completeTaskToday(row)">完成</button>
                   <span v-else :title="row.isStage ? '全部子任务完成后，显示最晚的实际完成日期' : ''">{{ row.actualFinish || '—' }}</span>
                   <div v-if="inlineEdit?.row.key === row.key && inlineEdit.field === 'actualFinish'" class="pdm-gantt-inline-editor is-actual-finish" @keydown.stop>
                     <label>实际开始<el-date-picker v-model="inlineEdit.actualStart" :disabled-date="futureActualDate" aria-label="行内实际开始日期" type="date" value-format="YYYY-MM-DD" /></label>
@@ -1454,17 +1474,17 @@ watch(() => props.project.id, () => { masterPlanMode.value = false; return load(
 
     <el-dialog v-model="changeDialogOpen" title="申请计划变更权限" width="560px" destroy-on-close>
       <div class="pdm-plan-form">
-        <p>本次申请只获取一次编辑权限，不预先修改排期。由 {{ displayUserName(plan?.approvedBy) }} 批准后，系统从现行计划创建变更草稿；草稿完成前原计划继续生效。</p>
+        <p>变更权限不再需要审批：请填写变更原因，提交后立即从现行计划创建变更草稿，草稿完成前原计划继续生效；完成变更并生效后系统会自动通知各阶段负责人。</p>
         <label><span>变更原因<span class="pdm-plan-required" aria-hidden="true">*</span></span><el-input v-model="changeReason" aria-label="计划变更原因" type="textarea" :maxlength="300" @input="changeSubmitError = null" /></label>
         <div v-if="changeSubmitError" class="pdm-plan-dialog-error" role="alert"><strong>{{ changeSubmitError.type }}</strong><span>{{ changeSubmitError.message }}</span></div>
       </div>
-      <template #footer><button type="button" class="pdm-secondary-action" :disabled="saving" @click="changeDialogOpen = false">取消</button><button type="button" class="pdm-primary-action" :disabled="saving" @click="submitChangeRequest">提交权限申请</button></template>
+      <template #footer><button type="button" class="pdm-secondary-action" :disabled="saving" @click="changeDialogOpen = false">取消</button><button type="button" class="pdm-primary-action" :disabled="saving" @click="submitChangeRequest">提交并取得变更权限</button></template>
     </el-dialog>
 
     <el-dialog v-model="changeReviewOpen" title="计划变更申请与差异" width="760px" destroy-on-close>
       <div v-if="plan?.changeRequest" class="pdm-plan-form">
-        <p>{{ plan.changeRequest.status === 'Pending' ? '变更权限待审批，原计划继续生效' : plan.changeDraftSource ? '变更权限已批准，草稿编辑中，原计划继续生效' : plan.changeRequest.status === 'Approved' ? '本次变更已结束' : '变更权限已驳回，原计划不变' }}；审批人：{{ displayUserName(plan.changeRequest.approvalAssignee) }}</p>
-        <p>申请人：{{ displayUserName(plan.changeRequest.submittedBy) }}；原因：{{ plan.changeRequest.reason }}<br v-if="plan.changeRequest.comment" />{{ plan.changeRequest.comment ? `审批意见：${plan.changeRequest.comment}` : '' }}</p>
+        <p>{{ plan.changeRequest.status === 'Pending' ? '变更权限待审批（历史申请），原计划继续生效' : plan.changeDraftSource ? '已取得变更权限，草稿编辑中，原计划继续生效' : plan.changeRequest.status === 'Approved' ? '本次变更已结束' : '变更权限已驳回，原计划不变' }}<template v-if="plan.changeRequest.status === 'Pending'">；审批人：{{ displayUserName(plan.changeRequest.approvalAssignee) }}</template></p>
+        <p>申请人：{{ displayUserName(plan.changeRequest.submittedBy) }}；原因：{{ plan.changeRequest.reason }}<br v-if="plan.changeRequest.comment" />{{ plan.changeRequest.comment ? `说明：${plan.changeRequest.comment}` : '' }}</p>
         <div v-if="plan.changeRequest.tasks.length" class="pdm-plan-change-review">
           <article v-for="change in plan.changeRequest.tasks" :key="change.taskId">
             <strong>{{ plan.tasks.find(task => task.id === change.taskId)?.name }}</strong>
@@ -1667,6 +1687,7 @@ watch(() => props.project.id, () => { masterPlanMode.value = false; return load(
 .pdm-gantt-tick.is-week{justify-content:center}.pdm-gantt-tick__week{color:var(--pdm-text);font-size:10px;font-weight:600;white-space:nowrap}.pdm-gantt-tick__week-start{position:absolute;left:0;top:50%;z-index:4;transform:translate(-50%,-50%);padding:0 2px;background:var(--pdm-surface-muted);color:var(--pdm-muted);font-size:10px;line-height:16px;white-space:nowrap}.pdm-gantt-tick.is-first .pdm-gantt-tick__week-start{transform:translateY(-50%)}
 .pdm-gantt-info-row{cursor:pointer}.pdm-gantt-info-row:has(.pdm-gantt-inline-editor){z-index:9}
 .pdm-gantt-cell-edit{display:block;width:100%;padding:4px 0;overflow:hidden;text-overflow:ellipsis;border:0;background:transparent;color:inherit;text-align:left;font:inherit;cursor:pointer}.pdm-gantt-cell-edit:hover{text-decoration:underline}
+.pdm-gantt-cell-edit.is-complete{margin:0 auto;width:auto;padding:2px 10px;border:1px solid var(--pdm-blue);border-radius:10px;background:var(--pdm-blue-soft);color:var(--pdm-blue);font-size:11px;font-weight:600;text-align:center}.pdm-gantt-cell-edit.is-complete:hover{background:var(--pdm-blue);color:#fff;text-decoration:none}
 .pdm-gantt-inline-editor{position:absolute;top:100%;left:236px;width:260px;padding:10px;background:var(--pdm-surface);border:1px solid var(--pdm-border);border-radius:6px;box-shadow:0 4px 14px #0002;cursor:default}.pdm-gantt-inline-editor.is-dates{left:216px;width:350px}.pdm-gantt-inline-editor>div:last-child{display:flex;justify-content:flex-end;gap:8px;margin-top:8px}.pdm-gantt-inline-editor button{border:1px solid var(--pdm-border);border-radius:4px;background:var(--pdm-surface);color:var(--pdm-text);padding:5px 9px;cursor:pointer}
 .pdm-plan-date-range.el-date-editor,.pdm-gantt-inline-editor .el-date-editor{width:100%;min-width:0;box-sizing:border-box}
 .pdm-plan-stage-dot.is-neutral{background:var(--pdm-muted);box-shadow:none}.pdm-gantt-bar.is-neutral{border-color:var(--pdm-muted);background:color-mix(in srgb,var(--pdm-muted) 24%,var(--pdm-surface));box-shadow:none}.pdm-gantt-bar.is-neutral i{background:var(--pdm-muted)}.pdm-gantt-bar.is-neutral.is-milestone{background:var(--pdm-muted)}

@@ -386,6 +386,41 @@ describe('DrawingReviewPanel', () => {
     prompt.mockRestore()
   })
 
+  it('审核标记未回写时提示待回写数量，发起人可放弃写入并完成审核', async () => {
+    const prompt = vi.spyOn(ElMessageBox, 'prompt').mockResolvedValue({ value: '客户端一直没回写', action: 'confirm' } as never)
+    const writingProperties: DrawingReviewPackage = {
+      ...review,
+      state: 'WritingProperties',
+      items: review.items.map(item => ({ ...item, drawingState: 'Approved' as const, drawingWritebackId: 'writeback-1' })),
+    }
+    const wrapper = mount(DrawingReviewPanel, {
+      global: { plugins: [ElementPlus] },
+      props: { packageId: writingProperties.id, packages: [writingProperties], candidates: [candidate], selectedDocumentId: 'model-1', currentUsername: 'submitter', ...permissions },
+    })
+
+    expect(wrapper.get('.drawing-review-writeback').text()).toContain('还有 1 张待写入')
+    expect(wrapper.findAll('.drawing-review-package-actions button').map(button => button.text())).toEqual(['放弃写入并完成审核'])
+
+    await wrapper.get('.drawing-review-package-actions button').trigger('click')
+    await Promise.resolve()
+    expect(wrapper.emitted('abandonWritebacks')).toEqual([['review-1', '客户端一直没回写']])
+    prompt.mockRestore()
+  })
+
+  it('非发起人且无管理权限时不显示放弃写入按钮', async () => {
+    const writingProperties: DrawingReviewPackage = {
+      ...review,
+      state: 'WritingProperties',
+      items: review.items.map(item => ({ ...item, drawingState: 'Approved' as const, drawingWritebackId: 'writeback-1' })),
+    }
+    const wrapper = mount(DrawingReviewPanel, {
+      global: { plugins: [ElementPlus] },
+      props: { packageId: writingProperties.id, packages: [writingProperties], candidates: [candidate], selectedDocumentId: 'model-1', currentUsername: 'designer', ...permissions },
+    })
+
+    expect(wrapper.find('.drawing-review-package-actions button').exists()).toBe(false)
+  })
+
   it('已驳回（待修改）的审核单仍可由发起人撤销以便重新发起', () => {
     const returned: DrawingReviewPackage = { ...review, state: 'ChangesRequested' }
     const wrapper = mount(DrawingReviewPanel, {

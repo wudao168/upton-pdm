@@ -3465,6 +3465,53 @@ public sealed class PdmWorkflowService(
         return withdrawn;
     }
 
+    /// <summary>放弃写入审核标记：审核结论保留，直接完成审核并释放图档编辑锁（属性回写长期未完成的兜底出口）。</summary>
+    public async Task<DrawingReviewPackage> AbandonDrawingReviewWritebacksAsync(Guid packageId, string reason, string actor, UserRole role, CancellationToken cancellationToken)
+    {
+        await RequirePermissionAsync(actor, role, PermissionCodes.DrawingReviewSubmit, cancellationToken);
+        var package = await repository.FindDrawingReviewPackageAsync(packageId, cancellationToken)
+            ?? throw new PdmNotFoundException("图纸审核单不存在。");
+        if (!await repository.HasProjectContentReadAccessAsync(package.ProjectId, actor, role, cancellationToken))
+            throw new UnauthorizedAccessException("当前用户没有该项目的操作权限。");
+        var project = await repository.FindProjectAsync(package.ProjectId, cancellationToken)
+            ?? throw new PdmNotFoundException("项目不存在。");
+        var canManage = role == UserRole.Administrator
+            || string.Equals(package.CreatedBy, actor, StringComparison.OrdinalIgnoreCase)
+            || string.Equals(project.PrimaryProjectManager, actor, StringComparison.OrdinalIgnoreCase)
+            || project.CollaborativeProjectManagers.Contains(actor, StringComparer.OrdinalIgnoreCase);
+        if (!canManage) throw new UnauthorizedAccessException("只有审核发起人、项目经理或系统管理员可以放弃写入审核标记。");
+        reason = RequiredComment(reason, "放弃写入原因");
+        var completed = await repository.AbandonDrawingReviewWritebacksAsync(packageId, actor, reason, timeProvider.GetUtcNow(), cancellationToken);
+        await AuditAsync(actor, "drawing-review.writeback.abandon", nameof(DrawingReviewPackage), packageId.ToString(), $"{completed.Number}；{reason}", cancellationToken);
+        await CreateDrawingReviewNotificationsAsync(completed.ProjectId, $"drawing-review:{completed.Id:N}:writeback:abandoned", "DrawingReviewWritebackAbandoned", "图纸审核已完成（未写入审核标记）",
+            value => $"{value.Code} · {completed.Number} 已放弃写入审核标记并完成审核，图档编辑锁已释放：{reason}", [completed.CreatedBy], cancellationToken);
+        return completed;
+    }
+
+    /// <summary>后台兜底：审核标记属性回写长期未完成时自动放弃回写并完成审核，避免图档被无限期锁住无法编辑。</summary>
+    public async Task<int> CompleteTimedOutDrawingReviewWritebacksAsync(TimeSpan timeout, CancellationToken cancellationToken)
+    {
+        var packageIds = await repository.ListTimedOutDrawingReviewWritebackPackageIdsAsync(timeProvider.GetUtcNow().Subtract(timeout), cancellationToken);
+        var completed = 0;
+        foreach (var packageId in packageIds)
+        {
+            var reason = $"超过{timeout.TotalHours:0}小时未完成审核标记属性回写，系统自动完成审核。";
+            try
+            {
+                var package = await repository.AbandonDrawingReviewWritebacksAsync(packageId, "system", reason, timeProvider.GetUtcNow(), cancellationToken);
+                await AuditAsync("system", "drawing-review.writeback.timeout", nameof(DrawingReviewPackage), packageId.ToString(), $"{package.Number}；{reason}", cancellationToken);
+                await CreateDrawingReviewNotificationsAsync(package.ProjectId, $"drawing-review:{package.Id:N}:writeback:timeout", "DrawingReviewWritebackTimedOut", "图纸审核已完成（审核标记未写入）",
+                    value => $"{value.Code} · {package.Number} 长时间未完成审核标记属性回写，系统已自动完成审核并释放图档编辑锁：{reason}", [package.CreatedBy], cancellationToken);
+                completed += 1;
+            }
+            catch (PdmConflictException)
+            {
+                // 状态已被其他操作推进，跳过即可。
+            }
+        }
+        return completed;
+    }
+
     private async Task<IReadOnlyList<DrawingReviewCandidateBuild>> BuildDrawingReviewCandidatesAsync(Guid projectId, CancellationToken cancellationToken)
     {
         var packages = await repository.ListDrawingReviewPackagesAsync(projectId, cancellationToken);

@@ -627,12 +627,13 @@ public sealed class ProjectPlanningService(
             throw new PdmRuleException("变更申请包含无效或重复的计划任务。");
         var assignee = current.ApprovedBy ?? await ResolveApprovalAssigneeAsync(project, cancellationToken);
         var now = timeProvider.GetUtcNow();
-        var request = new ProjectPlanChangeRequest(Guid.NewGuid(), command.Tasks, reason, actor, now, assignee, ProjectPlanApprovalStatus.Pending);
-        var saved = await plans.SavePlanAsync(current with { ChangeRequest = request, UpdatedBy = actor, UpdatedAt = now },
-            current.RowVersion, null, cancellationToken);
-        await repository.CreateUserNotificationsAsync([new UserNotification(Guid.NewGuid(), assignee, "project-plan-approval", "项目计划变更权限待审批",
-            $"{project.Code} · {reason}；批准后申请人可基于现行计划编辑草稿，原计划继续生效。", projectId, null, $"project-plan-change:{request.Id:N}", now, null)], cancellationToken);
-        await AuditAsync(actor, "project-plan.change.submit", nameof(ProjectPlan), saved.Id, reason, cancellationToken);
+        // 变更权限不再走审批：提交即生效（必须填写原因），系统直接基于现行计划创建变更草稿；草稿完成前原计划继续生效。
+        var request = new ProjectPlanChangeRequest(Guid.NewGuid(), command.Tasks, reason, actor, now, assignee,
+            ProjectPlanApprovalStatus.Approved, actor, now, "免审批：提交即取得变更权限");
+        var source = current with { ChangeRequest = request, ChangeDraftSource = null };
+        var saved = await plans.SavePlanAsync(current with { ChangeRequest = request, ChangeDraftSource = source, UpdatedBy = actor, UpdatedAt = now },
+            current.RowVersion, NewVersion(source, $"授予计划变更权限（免审批）：{reason}", actor, now), cancellationToken);
+        await AuditAsync(actor, "project-plan.change.grant", nameof(ProjectPlan), saved.Id, reason, cancellationToken);
         return saved;
     }
 
@@ -699,11 +700,38 @@ public sealed class ProjectPlanningService(
         };
         var saved = await SaveWithChildrenAsync(project, activated, expectedRowVersion,
             NewVersion(source, $"变更计划生效并形成基线V{nextBaseline}：{request.Reason}", actor, now), actor, role, cancellationToken);
-        await repository.CreateUserNotificationsAsync([new UserNotification(Guid.NewGuid(), request.ApprovalAssignee, "project-plan-approval",
-            "计划变更已完成并生效", $"{project.Code} · 基线V{nextBaseline} · {request.Reason}", project.Id, null,
-            $"project-plan-change-complete:{request.Id:N}", now, null)], cancellationToken);
+        var notifications = new List<UserNotification>
+        {
+            new(Guid.NewGuid(), request.ApprovalAssignee, "project-plan-approval", "计划变更已完成并生效",
+                $"{project.Code} · 基线V{nextBaseline} · {request.Reason}", project.Id, null,
+                $"project-plan-change-complete:{request.Id:N}", now, null)
+        };
+        // 变更生效后自动通知各阶段负责人（阶段内任务负责人去重），让他们知道排期与责任人已调整。
+        notifications.AddRange(BuildStageOwnerChangeNotifications(project, saved, request, nextBaseline, now));
+        await repository.CreateUserNotificationsAsync(notifications, cancellationToken);
         await AuditAsync(actor, "project-plan.change.complete", nameof(ProjectPlan), saved.Id, $"基线V{nextBaseline}；{request.Reason}", cancellationToken);
         return saved;
+    }
+
+    private static IEnumerable<UserNotification> BuildStageOwnerChangeNotifications(Project project, ProjectPlan plan,
+        ProjectPlanChangeRequest request, int baselineVersion, DateTimeOffset now)
+    {
+        var stageNames = plan.Stages
+            .GroupBy(stage => stage.Code, StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(group => group.Key, group => group.First().Name, StringComparer.OrdinalIgnoreCase);
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var stage in plan.Tasks.Where(task => !string.IsNullOrWhiteSpace(task.Assignee))
+            .GroupBy(task => task.Stage, StringComparer.OrdinalIgnoreCase))
+        {
+            var stageName = stageNames.TryGetValue(stage.Key, out var name) ? name : stage.Key;
+            foreach (var assignee in stage.Select(task => task.Assignee!.Trim()).Distinct(StringComparer.OrdinalIgnoreCase))
+            {
+                if (!seen.Add($"{stage.Key}:{assignee}")) continue;
+                yield return new UserNotification(Guid.NewGuid(), assignee, "project-plan", $"{stageName}阶段计划已变更",
+                    $"{project.Code} · 变更原因：{request.Reason}；计划变更已生效并形成基线V{baselineVersion}，请核对该阶段任务的排期与责任人。",
+                    plan.ProjectId, null, $"project-plan-change-stage:{request.Id:N}:{stage.Key}:{assignee.ToLowerInvariant()}", now, null);
+            }
+        }
     }
 
     public async Task<ProjectPlan> AbandonChangeAsync(Guid projectId, long expectedRowVersion, string actor, UserRole role, CancellationToken cancellationToken)

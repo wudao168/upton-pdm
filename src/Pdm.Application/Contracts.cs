@@ -508,6 +508,13 @@ public interface IPdmRepository
     Task<DrawingReviewPackage> RevokeDrawingReviewTargetAsync(Guid itemId, DrawingReviewTarget target, CancellationToken cancellationToken);
     /// <summary>驳回后设计者提交了新版本：把该2D图档的审核项按最新存档版本恢复为待审核，重新进入审图节点，同单其他图档不受影响。</summary>
     Task<DrawingReviewPackage> ResubmitDrawingReviewItemAsync(Guid itemId, Guid drawingVersionId, string drawingRevision, string drawingSha256, string drawingCreatedBy, CancellationToken cancellationToken);
+    /// <summary>
+    /// 放弃写入审核标记：把该审核单内仍在等待或进行中的属性回写置为已作废，并把审核单直接置为已完成，
+    /// 立即释放图档编辑锁（审核结论保留，只是图档属性里不再记录审核标记）。
+    /// </summary>
+    Task<DrawingReviewPackage> AbandonDrawingReviewWritebacksAsync(Guid packageId, string actor, string reason, DateTimeOffset completedAt, CancellationToken cancellationToken);
+    /// <summary>筛选“写入审核标记”超时仍未完成的审核单，供后台自动完成。</summary>
+    Task<IReadOnlyList<Guid>> ListTimedOutDrawingReviewWritebackPackageIdsAsync(DateTimeOffset requestedBefore, CancellationToken cancellationToken);
     Task<DrawingReviewPackage> AdvanceDrawingReviewToSupervisorAsync(Guid packageId, CancellationToken cancellationToken);
     Task<DrawingReviewPackage> DecideDrawingReviewSupervisorAsync(Guid packageId, DrawingReviewDecision decision, string reviewer, string reviewerName, DateTimeOffset reviewedAt, string? comment, CancellationToken cancellationToken);
     Task<DrawingReviewPackage> QueueDrawingReviewWritebacksAsync(Guid packageId, IReadOnlyList<DrawingReviewWritebackRequest> requests, CancellationToken cancellationToken);
@@ -534,6 +541,10 @@ public interface IPdmRepository
     /// 标准件/外购件等其他零件不转图。
     /// </summary>
     Task<IReadOnlyList<ReleasePreviewSource>> ListReleasePreviewSourcesAsync(Guid releasePackageId, CancellationToken cancellationToken);
+    /// <summary>
+    /// 发布包引用树上的全部图档（含不参与转图的标准件/外购件）：转图时作为参考文件一起送到转图电脑，SolidWorks 才能解析装配体引用。
+    /// </summary>
+    Task<IReadOnlyList<ReleasePreviewSource>> ListReleaseReferenceSourcesAsync(Guid releasePackageId, CancellationToken cancellationToken);
     Task<IReadOnlyList<PdmDocument>> ListCheckedOutDocumentsAsync(CancellationToken cancellationToken);
     Task<PdmDocument> CheckoutAsync(Guid documentId, string actor, CancellationToken cancellationToken);
     Task<PdmDocument> CheckoutAsync(Guid documentId, string actor, Guid sessionId, string machineName, DateTimeOffset leaseExpiresAt, CancellationToken cancellationToken);
@@ -645,6 +656,18 @@ public interface IServerPreviewConverter
         IReadOnlyList<ReleasePreviewSource> sources,
         string stagingDirectory,
         CancellationToken cancellationToken);
+    /// <summary>
+    /// 转图：<paramref name="keepExistingPreviews"/> 为 true 时保留该发布包已有的预览文件（单项重试用），
+    /// 否则按整批转换先清空旧预览。
+    /// </summary>
+    Task<IReadOnlyDictionary<Guid, DocumentPreviewArtifact>> GenerateAsync(
+        ReleasePackage package,
+        Project project,
+        IReadOnlyList<ReleasePreviewSource> sources,
+        string stagingDirectory,
+        CancellationToken cancellationToken,
+        bool keepExistingPreviews) =>
+        GenerateAsync(package, project, sources, stagingDirectory, cancellationToken);
 }
 
 public interface IPasswordService

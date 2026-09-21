@@ -466,9 +466,10 @@ public sealed class ProjectBomU9SyncService(
         new(sequence, OfficialCode(material), quantity, U9UnitCatalog.NormalizeBomUnit(material.UnitCode), Remark: remark, EffectiveDate: effectiveDate);
 
     /// <summary>
-    /// 料品在 U9C 的生效起始日期：U9C 以料品建档日期为准，PLM 建档的料品即推送到 U9C 的那一刻（LastU9SyncedAt）。
-    /// BOM 生效日期不得早于母项/子件料品的生效日期，否则 U9C 会拒绝写入；U9C 返回的料品资料不含生效日期，
-    /// 且我们的同步时间可能比 U9C 实际生效日期早一天，因此再取"当天"作为下界。
+    /// BOM 生效起始日期：U9C 要求 BOM 生效日期不得早于母项/子件料品的生效日期，否则会拒绝写入。
+    /// PLM 建档的料品已统一按 2020-01-01 生效（U9MaterialPayloadFactory.MaterialEffectiveDate），
+    /// 但旧料品的生效日期仍是其 U9C 建档日（料品资料不回传生效日期，只能用同步时间估算），因此这里取
+    /// “料品生效估算日”与“当天”中的较晚者，保证 BOM 日期不早于料品。
     /// </summary>
     private DateOnly ResolveU9EffectiveDate(PdmMaterial material)
     {

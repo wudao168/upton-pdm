@@ -202,6 +202,7 @@ builder.Services.AddHostedService<ReleasePreviewRetryHostedService>();
 builder.Services.AddHostedService<PublishRecoveryHostedService>();
 builder.Services.AddHostedService<ProjectContentResetCleanupService>();
 builder.Services.AddHostedService<ProjectPlanningReminderHostedService>();
+builder.Services.AddHostedService<DrawingReviewWritebackTimeoutHostedService>();
 
 builder.Services.AddCors(options => options.AddPolicy("PdmClients", policy => policy
     .WithOrigins("http://127.0.0.1:5173", "http://localhost:5173", "http://127.0.0.1:5175", "http://localhost:5175", "https://appassets.pdm.local")

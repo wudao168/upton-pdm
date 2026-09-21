@@ -2509,6 +2509,38 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
         return statuses.Count == 0 ? "正常" : string.Join("、", statuses);
     }
 
+    /// <summary>发布包引用树上的全部图档（含不参与转图的标准件/外购件）：转图时作为参考文件一起送转图电脑。</summary>
+    public Task<IReadOnlyList<ReleasePreviewSource>> ListReleaseReferenceSourcesAsync(Guid releasePackageId, CancellationToken cancellationToken)
+    {
+        lock (gate)
+        {
+            if (!packages.TryGetValue(releasePackageId, out var package)) return Task.FromResult<IReadOnlyList<ReleasePreviewSource>>([]);
+            var sources = new List<ReleasePreviewSource>();
+            foreach (var documentId in EnumerateDocumentIds(ReferenceTree(package.ProjectId)).Distinct())
+            {
+                if (!documents.TryGetValue(documentId, out var document)
+                    || document.Kind is not (DocumentKind.Assembly or DocumentKind.Part or DocumentKind.Drawing)) continue;
+                var source = versions.Values
+                    .Where(version => version.DocumentId == documentId)
+                    .OrderByDescending(version => version.CreatedAt)
+                    .FirstOrDefault();
+                if (source is null) continue;
+                source.PropertySnapshot.TryGetValue("SourceFileSha256", out var sourceSha256);
+                sources.Add(new ReleasePreviewSource(
+                    document.Id,
+                    source.Id,
+                    document.DrawingNumber,
+                    document.FileName,
+                    document.Kind,
+                    source.StorageRelativePath,
+                    source.FileLength,
+                    source.Sha256,
+                    string.IsNullOrWhiteSpace(sourceSha256) ? source.Sha256 : sourceSha256));
+            }
+            return Task.FromResult<IReadOnlyList<ReleasePreviewSource>>(sources);
+        }
+    }
+
     /// <summary>转图范围：非标件BOM物料 + 它们的上级装配体 + 物料关联的2D工程图（转PDF）。</summary>
     private static HashSet<Guid> NonStandardModels(ReleasePackage package) =>
         package.NonStandardBomSnapshot

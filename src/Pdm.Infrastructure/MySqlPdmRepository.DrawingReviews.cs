@@ -468,6 +468,50 @@ public sealed partial class MySqlPdmRepository
         return await FindDrawingReviewPackageAsync(link.PackageId, cancellationToken);
     }
 
+    public async Task<DrawingReviewPackage> AbandonDrawingReviewWritebacksAsync(Guid packageId, string actor, string reason, DateTimeOffset completedAt, CancellationToken cancellationToken)
+    {
+        await using var connection = await OpenAsync(cancellationToken);
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+        var state = await connection.QuerySingleOrDefaultAsync<string>(new CommandDefinition(
+            "SELECT state FROM drawing_review_package WHERE id=@PackageId FOR UPDATE",
+            new { PackageId = packageId }, transaction, cancellationToken: cancellationToken));
+        if (state is null) throw new PdmNotFoundException("图纸审核单不存在。");
+        if (!string.Equals(state, DrawingReviewPackageState.WritingProperties.ToString(), StringComparison.Ordinal))
+            throw new PdmConflictException("只有正在写入审核标记的图纸审核单可以放弃写入。");
+        // 仍然等待或进行中的回写任务全部作废，图档不再需要为了审核标记保持锁定。
+        await connection.ExecuteAsync(new CommandDefinition(
+            """
+            UPDATE cad_property_writeback writeback
+            JOIN drawing_review_item item ON item.drawing_writeback_id=writeback.id
+            SET writeback.status='Superseded',writeback.completed_at=@CompletedAt,writeback.last_error=@Reason
+            WHERE item.package_id=@PackageId AND writeback.status IN ('Pending','InProgress')
+            """,
+            new { PackageId = packageId, CompletedAt = completedAt.UtcDateTime, Reason = reason }, transaction, cancellationToken: cancellationToken));
+        await connection.ExecuteAsync(new CommandDefinition(
+            "UPDATE drawing_review_package SET state='Approved',approved_at=@CompletedAt WHERE id=@PackageId",
+            new { PackageId = packageId, CompletedAt = completedAt.UtcDateTime }, transaction, cancellationToken: cancellationToken));
+        await transaction.CommitAsync(cancellationToken);
+        return await FindDrawingReviewPackageAsync(packageId, cancellationToken)
+            ?? throw new PdmNotFoundException("图纸审核单不存在。");
+    }
+
+    public async Task<IReadOnlyList<Guid>> ListTimedOutDrawingReviewWritebackPackageIdsAsync(DateTimeOffset requestedBefore, CancellationToken cancellationToken)
+    {
+        await using var connection = await OpenAsync(cancellationToken);
+        var ids = await connection.QueryAsync<Guid>(new CommandDefinition(
+            """
+            SELECT package.id
+            FROM drawing_review_package package
+            JOIN drawing_review_item item ON item.package_id=package.id
+            JOIN cad_property_writeback writeback ON writeback.id=item.drawing_writeback_id
+            WHERE package.state='WritingProperties'
+            GROUP BY package.id
+            HAVING MAX(writeback.requested_at) < @RequestedBefore AND SUM(writeback.status IN ('Pending','InProgress')) > 0
+            """,
+            new { RequestedBefore = requestedBefore.UtcDateTime }, cancellationToken: cancellationToken));
+        return ids.ToArray();
+    }
+
     public async Task<ReleasePackage?> FindReleasePackageByApprovalTaskAsync(Guid taskId, CancellationToken cancellationToken)
     {
         await using var connection = await OpenAsync(cancellationToken);

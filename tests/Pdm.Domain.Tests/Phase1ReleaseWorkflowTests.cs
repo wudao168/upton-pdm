@@ -204,6 +204,90 @@ public sealed class Phase1ReleaseWorkflowTests
             item => item.Id == package.Id);
     }
 
+    /// <summary>图纸转出明细：逐项给出成功/失败与失败原因，失败项可单项重试且不影响同包其它文件。</summary>
+    [Fact]
+    public async Task PreviewItemsExposePerItemStatusAndSingleItemRetry()
+    {
+        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var publisher = new RecordingPublisher { PreviewOnlyDrawings = true, PreviewError = "SolidWorks转换进程失败：SolidWorks打开A01-100.SLDASM失败。" };
+        var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(), publisher, TimeProvider.System);
+        foreach (var document in await repository.ListCheckedOutDocumentsAsync(default))
+            await repository.ForceReleaseCheckoutAsync(document.Id, "admin", "测试准备", default);
+        await PrepareApprovedNonStandardDrawingReviewAsync(repository, workflow);
+        await workflow.ReplaceBomAsync(ProjectId, BomKind.Electrical,
+            [new BomItemInput(1, "EL-001", "光电传感器", 4, "件", null, "M18 PNP", "A", true)], "admin", UserRole.Administrator, default);
+
+        var package = await workflow.CreateReleasePackageAsync(
+            ProjectId, null, $"RP-TEST-{Guid.NewGuid():N}", "admin", "admin", "admin", UserRole.Administrator, default);
+        package = await workflow.SubmitReleasePackageAsync(package.Id, "admin", UserRole.Administrator, default);
+        package = await workflow.DecideAsync(package.ApprovalTasks.Single(task => task.Stage == ApprovalStage.ProcessReview).Id,
+            "admin", UserRole.Administrator, ApprovalDecision.Approved, "工艺可行", default);
+        package = await workflow.DecideAsync(package.ApprovalTasks.Single(task => task.Stage == ApprovalStage.Approval).Id,
+            "admin", UserRole.Administrator, ApprovalDecision.Approved, "批准发布", default);
+
+        var converter = new RecordingPreviewConverter(TimeProvider.System);
+        var service = new ReleasePreviewService(repository, converter, TimeProvider.System);
+        var items = await service.ListItemsAsync(package.Id, default);
+
+        // 工程图转成功(PDF)，模型转失败(STEP)，失败原因逐项可见。
+        var drawingItem = items.Single(item => item.Kind == DocumentKind.Drawing);
+        var modelItem = items.Single(item => item.Kind == DocumentKind.Assembly);
+        Assert.True(drawingItem.Succeeded);
+        Assert.Equal(DocumentPreviewFormat.Pdf, drawingItem.Format);
+        Assert.False(modelItem.Succeeded);
+        Assert.Equal(DocumentPreviewFormat.Step, modelItem.Format);
+        Assert.Contains("SolidWorks打开A01-100.SLDASM失败", modelItem.Error);
+
+        // 转换中不能把上一次的失败原因当成本次结果展示。
+        await repository.MarkReleasePreviewStateAsync(package.Id, ReleasePreviewState.Running, package.PreviewError, 1, TimeProvider.System.GetUtcNow(), default);
+        Assert.Equal("正在转换…", (await service.ListItemsAsync(package.Id, default)).Single(item => !item.Succeeded).Error);
+
+        // 单项重试：只转该图档，必须保留同包其它已转好的预览。
+        await repository.MarkReleasePreviewStateAsync(package.Id, ReleasePreviewState.Failed, "SolidWorks转换进程失败。", 1, TimeProvider.System.GetUtcNow(), default);
+        var retried = await service.RetryItemAsync(package.Id, modelItem.DocumentId, "admin", default);
+        Assert.True(retried.Succeeded);
+        Assert.True(converter.LastKeepExistingPreviews);
+        Assert.Equal([modelItem.DocumentId], converter.LastDocumentIds);
+        Assert.Equal(ReleasePreviewState.Succeeded, (await repository.FindReleasePackageAsync(package.Id, default))!.PreviewState);
+        Assert.All(await service.ListItemsAsync(package.Id, default), item => Assert.True(item.Succeeded));
+
+        // 不在本次转图范围内的图档不能单项重试。
+        var outside = await Assert.ThrowsAsync<PdmRuleException>(() => service.RetryItemAsync(package.Id, Guid.NewGuid(), "admin", default));
+        Assert.Contains("不在本次转图范围内", outside.Message);
+    }
+
+    /// <summary>转出明细可按发布包筛选：只返回指定发布包的明细。</summary>
+    [Fact]
+    public async Task PreviewItemsCanBeFilteredByReleasePackage()
+    {
+        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var publisher = new RecordingPublisher { PreviewOnlyDrawings = true, PreviewError = "转图失败。" };
+        var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(), publisher, TimeProvider.System);
+        foreach (var document in await repository.ListCheckedOutDocumentsAsync(default))
+            await repository.ForceReleaseCheckoutAsync(document.Id, "admin", "测试准备", default);
+        await PrepareApprovedNonStandardDrawingReviewAsync(repository, workflow);
+        await workflow.ReplaceBomAsync(ProjectId, BomKind.Electrical,
+            [new BomItemInput(1, "EL-001", "光电传感器", 4, "件", null, "M18 PNP", "A", true)], "admin", UserRole.Administrator, default);
+        var package = await workflow.CreateReleasePackageAsync(
+            ProjectId, null, $"RP-TEST-{Guid.NewGuid():N}", "admin", "admin", "admin", UserRole.Administrator, default);
+        package = await workflow.SubmitReleasePackageAsync(package.Id, "admin", UserRole.Administrator, default);
+        package = await workflow.DecideAsync(package.ApprovalTasks.Single(task => task.Stage == ApprovalStage.ProcessReview).Id,
+            "admin", UserRole.Administrator, ApprovalDecision.Approved, "工艺可行", default);
+        package = await workflow.DecideAsync(package.ApprovalTasks.Single(task => task.Stage == ApprovalStage.Approval).Id,
+            "admin", UserRole.Administrator, ApprovalDecision.Approved, "批准发布", default);
+
+        var service = new ReleasePreviewService(repository, new RecordingPreviewConverter(TimeProvider.System), TimeProvider.System);
+        var all = await service.ListProjectItemsAsync(ProjectId, null, default);
+        Assert.NotEmpty(all);
+        Assert.All(all, item => Assert.Equal(package.Id, item.ReleasePackageId));
+
+        var filtered = await service.ListProjectItemsAsync(ProjectId, package.Id, default);
+        Assert.Equal(all.Count, filtered.Count);
+
+        var other = Guid.NewGuid();
+        Assert.Empty(await service.ListProjectItemsAsync(ProjectId, other, default));
+    }
+
     /// <summary>服务重启后要把停在"转换中"的转图任务重新排队，避免永久卡住。</summary>
     [Fact]
     public async Task PreviewScope_CoversOnlyNonStandardBomItemsAndTheirAssemblies()
@@ -236,6 +320,15 @@ public sealed class Phase1ReleaseWorkflowTests
         var drawing = (await repository.ListDocumentsAsync(ProjectId, default))
             .Single(document => document.DrawingNumber == "A01-100" && document.Kind == DocumentKind.Drawing);
         Assert.Equal(DocumentLifecycleState.Released, drawing.State);
+
+        // 引用树上的其它零件（不在转图范围内）要作为参考文件一起送转图电脑，否则 SolidWorks 解析不到引用、打不开装配体。
+        var outsideDocument = (await repository.ListDocumentsAsync(ProjectId, default))
+            .Single(document => document.DrawingNumber == "A01-101");
+        await CheckInAsync(repository, outsideDocument.Id, "designer", new Dictionary<string, string?>(), 'B');
+        Assert.Contains(await repository.ListReleaseReferenceSourcesAsync(package.Id, default),
+            source => source.DocumentId == outsideDocument.Id);
+        Assert.DoesNotContain(await repository.ListReleasePreviewSourcesAsync(package.Id, default),
+            source => source.DocumentId == outsideDocument.Id);
     }
 
     /// <summary>服务重启后要把停在"转换中"的转图任务重新排队，避免永久卡住。</summary>
@@ -2536,6 +2629,45 @@ public sealed class Phase1ReleaseWorkflowTests
             "admin", UserRole.Administrator, ApprovalDecision.Approved, "批准发布", default);
     }
 
+    /// <summary>测试用转图器：为传入的图档生成预览，并记录是否要求保留已有预览。</summary>
+    private sealed class RecordingPreviewConverter(TimeProvider timeProvider) : IServerPreviewConverter
+    {
+        public bool LastKeepExistingPreviews { get; private set; }
+        public IReadOnlyList<Guid> LastDocumentIds { get; private set; } = [];
+
+        public Task<IReadOnlyDictionary<Guid, DocumentPreviewArtifact>> GenerateAsync(
+            ReleasePackage package,
+            Project project,
+            IReadOnlyList<ReleasePreviewSource> sources,
+            string stagingDirectory,
+            CancellationToken cancellationToken) =>
+            GenerateAsync(package, project, sources, stagingDirectory, cancellationToken, false);
+
+        public Task<IReadOnlyDictionary<Guid, DocumentPreviewArtifact>> GenerateAsync(
+            ReleasePackage package,
+            Project project,
+            IReadOnlyList<ReleasePreviewSource> sources,
+            string stagingDirectory,
+            CancellationToken cancellationToken,
+            bool keepExistingPreviews)
+        {
+            LastKeepExistingPreviews = keepExistingPreviews;
+            LastDocumentIds = sources.Select(source => source.DocumentId).ToArray();
+            var convertedAt = timeProvider.GetUtcNow();
+            IReadOnlyDictionary<Guid, DocumentPreviewArtifact> artifacts = sources.ToDictionary(
+                source => source.DocumentId,
+                source => new DocumentPreviewArtifact(
+                    source.Kind == DocumentKind.Drawing ? DocumentPreviewFormat.Pdf : DocumentPreviewFormat.Step,
+                    Path.Combine(".release-previews", package.Id.ToString("N"), $"{source.DocumentId:N}{(source.Kind == DocumentKind.Drawing ? ".pdf" : ".step")}"),
+                    16,
+                    new string('C', 64),
+                    source.SourceSha256));
+            _ = stagingDirectory;
+            _ = convertedAt;
+            return Task.FromResult(artifacts);
+        }
+    }
+
     /// <summary>模拟被服务重启打断的转图：转换过程中抛出取消异常。</summary>
     private sealed class CanceledPreviewConverter : IServerPreviewConverter
     {
@@ -2558,6 +2690,8 @@ public sealed class Phase1ReleaseWorkflowTests
         /// <summary>模拟转图失败：发布照常完成，转图转为后台单独事项。</summary>
         public string? PreviewError { get; init; }
         public string PublishedPath { get; init; } = "C:\\PDM\\Release\\package";
+        /// <summary>模拟只有工程图转成功、模型转失败：预览只返回工程图。</summary>
+        public bool PreviewOnlyDrawings { get; init; }
         public Task PrepareAsync(ReleasePackage package, Project project, CancellationToken cancellationToken) { PrepareCalls++; return Task.CompletedTask; }
         public Task DiscardDraftAsync(ReleasePackage package, Project project, CancellationToken cancellationToken) { DiscardCalls++; return Task.CompletedTask; }
         public Task ValidateAsync(ReleasePackage package, Project project, CancellationToken cancellationToken) { ValidateCalls++; return Task.CompletedTask; }
@@ -2573,7 +2707,9 @@ public sealed class Phase1ReleaseWorkflowTests
                     1,
                     new string('A', 64),
                     source.SourceSha256));
-            return Task.FromResult(new ReleasePublication(PublishedPath, PreviewError is null ? previews : new Dictionary<Guid, DocumentPreviewArtifact>(), PreviewError));
+            if (PreviewOnlyDrawings) previews = previews.Where(pair => sources.Single(source => source.DocumentId == pair.Key).Kind == DocumentKind.Drawing).ToDictionary(pair => pair.Key, pair => pair.Value);
+            var published = PreviewError is null || PreviewOnlyDrawings ? previews : new Dictionary<Guid, DocumentPreviewArtifact>();
+            return Task.FromResult(new ReleasePublication(PublishedPath, published, PreviewError));
         }
     }
 

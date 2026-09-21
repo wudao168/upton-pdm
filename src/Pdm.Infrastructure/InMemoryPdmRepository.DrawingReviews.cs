@@ -348,6 +348,46 @@ public sealed partial class InMemoryPdmRepository
         }
     }
 
+    public Task<DrawingReviewPackage> AbandonDrawingReviewWritebacksAsync(Guid packageId, string actor, string reason, DateTimeOffset completedAt, CancellationToken cancellationToken)
+    {
+        lock (gate)
+        {
+            if (!drawingReviewPackages.TryGetValue(packageId, out var package)) throw new PdmNotFoundException("图纸审核单不存在。");
+            if (package.State != DrawingReviewPackageState.WritingProperties)
+                throw new PdmConflictException("只有正在写入审核标记的图纸审核单可以放弃写入。");
+            foreach (var item in package.Items)
+            {
+                if (item.DrawingWritebackId is not Guid writebackId || !cadPropertyWritebacks.TryGetValue(writebackId, out var writeback)) continue;
+                if (writeback.Status is not (CadPropertyWritebackStatus.Pending or CadPropertyWritebackStatus.InProgress)) continue;
+                cadPropertyWritebacks[writebackId] = writeback with { Status = CadPropertyWritebackStatus.Superseded, CompletedAt = completedAt, LastError = reason };
+            }
+            package = package with { State = DrawingReviewPackageState.Approved, ApprovedAt = completedAt };
+            drawingReviewPackages[package.Id] = package;
+            return Task.FromResult(package);
+        }
+    }
+
+    public Task<IReadOnlyList<Guid>> ListTimedOutDrawingReviewWritebackPackageIdsAsync(DateTimeOffset requestedBefore, CancellationToken cancellationToken)
+    {
+        lock (gate)
+        {
+            var result = new List<Guid>();
+            foreach (var package in drawingReviewPackages.Values)
+            {
+                if (package.State != DrawingReviewPackageState.WritingProperties) continue;
+                var writebacks = package.Items
+                    .Where(item => item.DrawingWritebackId.HasValue)
+                    .Select(item => cadPropertyWritebacks.TryGetValue(item.DrawingWritebackId!.Value, out var writeback) ? writeback : null)
+                    .ToArray();
+                if (writebacks.Length == 0 || writebacks.Any(writeback => writeback is null)) continue;
+                if (writebacks.All(writeback => writeback!.Status is CadPropertyWritebackStatus.Pending or CadPropertyWritebackStatus.InProgress)
+                    && writebacks.Max(writeback => writeback!.RequestedAt) < requestedBefore)
+                    result.Add(package.Id);
+            }
+            return Task.FromResult<IReadOnlyList<Guid>>(result);
+        }
+    }
+
     public Task<ReleasePackage?> FindReleasePackageByApprovalTaskAsync(Guid taskId, CancellationToken cancellationToken) =>
         Task.FromResult(packages.Values.FirstOrDefault(package => package.ApprovalTasks.Any(task => task.Id == taskId)));
 }

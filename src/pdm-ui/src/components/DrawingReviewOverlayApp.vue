@@ -88,6 +88,7 @@ onBeforeUnmount(() => window.chrome?.webview?.removeEventListener?.('message', u
       @refresh="send('refresh')"
       @refresh-candidates="send('refresh-candidates')"
       @withdraw="(packageId, reason) => send('withdraw', { packageId, reason })"
+      @abandon-writebacks="(packageId, reason) => send('abandon-writebacks', { packageId, reason })"
       @select-document="documentId => send('select-document', { documentId })"
       @add-markup="addMarkup"
       @resolve-markup="(packageId, markupId) => send('resolve-markup', { packageId, markupId })"

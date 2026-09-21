@@ -12,6 +12,7 @@
 
   <ItemGroup>
     <Resource Include="Assets\PdmClient.ico" />
+    <Resource Include="..\pdm-ui\src\assets\pdm-client-icon.png" Link="Assets\PdmClientSplash.png" />
     <Content Include="Assets\UPTON-PLM.ico" Link="UPTON-PLM.ico" CopyToOutputDirectory="PreserveNewest" />
     <Reference Include="System.Security" />
     <Reference Include="Microsoft.CSharp" />

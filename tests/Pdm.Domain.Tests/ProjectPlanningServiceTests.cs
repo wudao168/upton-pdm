@@ -86,7 +86,7 @@ public sealed class ProjectPlanningServiceTests
 
         await Assert.ThrowsAsync<PdmRuleException>(() => service.DeleteDraftAsync(project.Id, approved.RowVersion, "admin", UserRole.Administrator, default));
         var requested = await service.SubmitChangeAsync(project.Id, new([], "重新规划", approved.RowVersion), "admin", UserRole.Administrator, default);
-        var editable = await service.DecideApprovalAsync(project.Id, requested.RowVersion, true, null, "division-gm", UserRole.BusinessUnitManager, default);
+        var editable = requested;
         await Assert.ThrowsAsync<UnauthorizedAccessException>(() => service.DeleteDraftAsync(project.Id, editable.RowVersion, "division-gm", UserRole.BusinessUnitManager, default));
 
         await service.DeleteDraftAsync(project.Id, editable.RowVersion, "admin", UserRole.Administrator, default, includeIndependentChildren: true);
@@ -99,7 +99,7 @@ public sealed class ProjectPlanningServiceTests
     }
 
     [Fact]
-    public async Task Approved_schedule_changes_wait_for_original_approver_and_preserve_live_progress()
+    public async Task Approved_schedule_changes_take_effect_without_approval_and_preserve_live_progress()
     {
         var clock = new FixedTimeProvider(new DateTimeOffset(2026, 9, 10, 1, 0, 0, TimeSpan.Zero));
         var pdm = new InMemoryPdmRepository(clock);
@@ -123,11 +123,12 @@ public sealed class ProjectPlanningServiceTests
         Assert.Equal(ProjectPlanApprovalStatus.Approved, requested.ApprovalStatus);
         Assert.Equal(approved.Tasks, requested.Tasks);
         Assert.Equal("division-gm", requested.ChangeRequest!.ApprovalAssignee);
+        // 变更权限免审批：提交即创建变更草稿，原计划继续生效。
+        Assert.Equal(ProjectPlanApprovalStatus.Approved, requested.ChangeRequest.Status);
+        Assert.NotNull(requested.ChangeDraftSource);
         await Assert.ThrowsAsync<PdmRuleException>(() => service.SubmitChangeAsync(project.Id, command with { ExpectedRowVersion = requested.RowVersion }, "admin", UserRole.Administrator, default));
-        await Assert.ThrowsAsync<UnauthorizedAccessException>(() => service.DecideApprovalAsync(project.Id, requested.RowVersion, true, null, "admin", UserRole.Administrator, default));
         var progressed = await service.UpdateProgressAsync(project.Id, task.Id, new(30, new(2026, 9, 10), null, requested.RowVersion), "admin", UserRole.Administrator, default);
-        await Assert.ThrowsAsync<PdmConflictException>(() => service.DecideApprovalAsync(project.Id, requested.RowVersion, true, null, "division-gm", UserRole.BusinessUnitManager, default));
-        var editable = await service.DecideApprovalAsync(project.Id, progressed.RowVersion, true, null, "division-gm", UserRole.BusinessUnitManager, default);
+        var editable = progressed;
         Assert.NotNull(editable.ChangeDraftSource);
         Assert.Equal(progressed.Tasks, editable.ChangeDraftSource.Tasks);
         var draftTasks = editable.Tasks.Select(item => item.Id == task.Id
@@ -144,12 +145,8 @@ public sealed class ProjectPlanningServiceTests
         Assert.Equal(draftTasks[0].PlannedFinish, activated.Tasks[0].BaselineFinish);
         Assert.Equal(approved.BaselineVersion + 1, activated.BaselineVersion);
         var again = await service.SubmitChangeAsync(project.Id, command with { ExpectedRowVersion = activated.RowVersion }, "admin", UserRole.Administrator, default);
-        var rejected = await service.DecideApprovalAsync(project.Id, again.RowVersion, false, "原排期继续执行", "division-gm", UserRole.BusinessUnitManager, default);
-        Assert.Equal(activated.Tasks, rejected.Tasks);
-        Assert.Equal(ProjectPlanApprovalStatus.Rejected, rejected.ChangeRequest!.Status);
-        Assert.Equal(ProjectPlanApprovalStatus.Approved, rejected.ApprovalStatus);
-        var third = await service.SubmitChangeAsync(project.Id, command with { ExpectedRowVersion = rejected.RowVersion }, "admin", UserRole.Administrator, default);
-        var secondDraft = await service.DecideApprovalAsync(project.Id, third.RowVersion, true, null, "division-gm", UserRole.BusinessUnitManager, default);
+        Assert.NotNull(again.ChangeDraftSource);
+        var secondDraft = again;
         var completed = await service.UpdateProgressAsync(project.Id, task.Id, new(100, new(2026, 9, 10), new(2026, 9, 10), secondDraft.RowVersion), "admin", UserRole.Administrator, default);
         var illegal = completed.Tasks.Select(item => item.Id == task.Id ? item with
             { PlannedStart = item.PlannedStart.AddDays(1), PlannedFinish = item.PlannedFinish.AddDays(1) } : item).ToArray();
@@ -204,12 +201,57 @@ public sealed class ProjectPlanningServiceTests
         ], "前置任务延期", approved.RowVersion), "admin", UserRole.Administrator, default);
         Assert.Equal(approved.Tasks, requested.Tasks);
         Assert.Single(requested.ChangeRequest!.Tasks);
+        Assert.NotNull(requested.ChangeDraftSource);
 
-        var changed = await service.DecideApprovalAsync(project.Id, requested.RowVersion, true, null, "division-gm", UserRole.BusinessUnitManager, default);
+        // 免审批后旧版申请携带的排期改动不再自动套用：申请人直接在变更草稿里调整，保存草稿时照常联动后续任务。
+        var requestedA = requested.Tasks.Single(task => task.Name == "任务A");
+        var draftTasks = requested.Tasks.Select(task => task.Id == requestedA.Id
+            ? task with { PlannedStart = new DateOnly(2026, 9, 20), PlannedFinish = new DateOnly(2026, 9, 22) }
+            : task).ToArray();
+        var changed = await service.SaveAsync(project.Id, new(draftTasks, "前置任务延期", requested.RowVersion), "admin", UserRole.Administrator, default);
         Assert.NotNull(changed.ChangeDraftSource);
         Assert.Equal(new DateOnly(2026, 9, 23), changed.Tasks.Single(task => task.Name == "任务B").PlannedStart);
         Assert.Equal(new DateOnly(2026, 9, 25), changed.Tasks.Single(task => task.Name == "任务D").PlannedStart);
-        Assert.Equal(approved.Tasks, changed.ChangeDraftSource.Tasks);
+        Assert.Equal(approved.Tasks, changed.ChangeDraftSource!.Tasks);
+    }
+
+    [Fact]
+    public async Task Change_permission_needs_reason_only_and_activation_notifies_stage_owners()
+    {
+        var clock = new FixedTimeProvider(new DateTimeOffset(2026, 9, 10, 1, 0, 0, TimeSpan.Zero));
+        var pdm = new InMemoryPdmRepository(clock);
+        var plans = new InMemoryProjectPlanningRepository();
+        var service = new ProjectPlanningService(plans, pdm, clock);
+        var project = await AssignProjectManager(pdm, Assert.Single(await pdm.ListProjectsAsync(default)));
+        var template = Assert.Single(await service.ListTemplatesAsync(false, "admin", UserRole.Administrator, default));
+        var initial = await service.GenerateAsync(project.Id, new(template.Id, new DateOnly(2026, 9, 10), 60, false, null), "admin", UserRole.Administrator, default);
+        await ConfigureApprover(pdm, project.Id);
+        var pending = await service.SubmitApprovalAsync(project.Id, initial.RowVersion, "admin", UserRole.Administrator, default);
+        var approved = await service.DecideApprovalAsync(project.Id, pending.RowVersion, true, null, "division-gm", UserRole.BusinessUnitManager, default);
+
+        // 变更原因必填，但提交后不需要任何审批即取得权限。
+        await Assert.ThrowsAsync<PdmRuleException>(() => service.SubmitChangeAsync(project.Id, new([], "   ", approved.RowVersion), "admin", UserRole.Administrator, default));
+        var requested = await service.SubmitChangeAsync(project.Id, new([], "客户调整交期", approved.RowVersion), "admin", UserRole.Administrator, default);
+        Assert.Equal(ProjectPlanApprovalStatus.Approved, requested.ChangeRequest!.Status);
+        Assert.Equal("客户调整交期", requested.ChangeRequest.Reason);
+        Assert.NotNull(requested.ChangeDraftSource);
+
+        // 变更生效后自动通知各阶段负责人。
+        var stageOwners = requested.Tasks.Where(task => !string.IsNullOrWhiteSpace(task.Assignee))
+            .Select(task => task.Assignee!.Trim()).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+        Assert.NotEmpty(stageOwners);
+        var draftTasks = requested.Tasks.Select(task => task with
+        {
+            PlannedStart = task.PlannedStart.AddDays(1), PlannedFinish = task.PlannedFinish.AddDays(1)
+        }).ToArray();
+        var changed = await service.SaveAsync(project.Id, new(draftTasks, "整体顺延一天", requested.RowVersion), "admin", UserRole.Administrator, default);
+        var activated = await service.CompleteChangeAsync(project.Id, changed.RowVersion, "admin", UserRole.Administrator, default);
+        Assert.Null(activated.ChangeDraftSource);
+        foreach (var owner in stageOwners)
+        {
+            var notifications = await pdm.ListUserNotificationsAsync(owner, 100, default);
+            Assert.Contains(notifications, item => item.Category == "project-plan" && item.Title.EndsWith("阶段计划已变更"));
+        }
     }
 
     [Fact]

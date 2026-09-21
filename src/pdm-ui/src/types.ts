@@ -886,6 +886,20 @@ export interface BomVersion {
   validationRequiredFields?: BomValidationField[]
 }
 
+/** 图纸转出明细：发布包内每个待转出图档的目标格式与结果。 */
+export interface ReleasePreviewItemResult {
+  releasePackageId: string
+  releasePackageNumber: string
+  documentId: string
+  drawingNumber: string
+  fileName: string
+  kind: DocumentKind
+  format: 'Step' | 'Pdf'
+  succeeded: boolean
+  fileLength: number
+  error?: string | null
+}
+
 export interface ManufacturingBomBaseline {
   id: string
   projectId: string

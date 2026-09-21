@@ -67,7 +67,7 @@ async function submitPasswordReset() {
       <div v-if="props.compact" class="pdm-login-industrial-layer">
         <PdmLoginIndustrial />
       </div>
-      <aside v-if="!props.compact" class="pdm-login-visual" aria-label="PLM产品生命周期管理系统登录插画">
+      <aside v-if="!props.compact" class="pdm-login-visual" aria-label="产品生命周期管理系统登录插画">
         <div class="pdm-login-brand">
           <img class="pdm-login-brand__logo" :src="companyLogo" alt="UPTON 阿普顿">
         </div>
@@ -83,14 +83,13 @@ async function submitPasswordReset() {
       <section class="pdm-login-content">
         <div v-if="props.compact" class="pdm-login-compact-brand">
           <img class="pdm-login-brand__logo" :src="companyLogo" alt="UPTON 阿普顿">
-          <span class="pdm-login-compact-brand__tagline">产品生命周期管理 · 机械设计协同</span>
         </div>
         <form class="pdm-login-form" aria-label="登录PLM" autocomplete="off" @submit.prevent="submit">
           <div v-if="!props.compact" class="pdm-login-mobile-brand" aria-hidden="true">
             <img class="pdm-login-brand__logo" :src="companyLogo" alt="">
           </div>
           <header class="pdm-login-heading">
-            <h1>PLM产品生命周期管理系统</h1>
+            <h1>产品生命周期管理系统</h1>
             <p>请输入账号与密码</p>
           </header>
 

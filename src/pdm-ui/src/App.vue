@@ -864,6 +864,9 @@ function handleReviewOverlayAction(event: MessageEvent) {
     case 'withdraw':
       if (payload.packageId && payload.reason) void runOperation(() => workspace.withdrawDrawingReview(payload.packageId!, payload.reason!), '图纸审核已撤销，编辑锁已释放')
       break
+    case 'abandon-writebacks':
+      if (payload.packageId && payload.reason) void runOperation(() => workspace.abandonDrawingReviewWritebacks(payload.packageId!, payload.reason!), '已放弃写入审核标记，审核单完成、图档编辑锁已释放')
+      break
     case 'select-document':
       if (payload.documentId) selectDrawingReviewDocument(payload.documentId)
       break
@@ -1159,6 +1162,7 @@ async function openWhereUsedParent(projectId: string, parentDocumentId: string) 
                         @refresh="runOperation(workspace.refreshDrawingReviews, '图纸审核状态已刷新')"
                         @refresh-candidates="runOperation(workspace.refreshDrawingReviews, '审核范围已刷新')"
                         @withdraw="(packageId, reason) => runOperation(() => workspace.withdrawDrawingReview(packageId, reason), '图纸审核已撤销，编辑锁已释放')"
+                        @abandon-writebacks="(packageId, reason) => runOperation(() => workspace.abandonDrawingReviewWritebacks(packageId, reason), '已放弃写入审核标记，审核单完成、图档编辑锁已释放')"
                         @select-document="selectDrawingReviewDocument"
                         @add-markup="(packageId, input) => runOperation(() => workspace.addDrawingReviewMarkup(packageId, input), '图纸批注已保存')"
                         @resolve-markup="(packageId, markupId) => runOperation(() => workspace.resolveDrawingReviewMarkup(packageId, markupId), '图纸批注已关闭')"

@@ -186,10 +186,12 @@
                 <StackPanel HorizontalAlignment="Center"
                             VerticalAlignment="Center"
                             SnapsToDevicePixels="True">
+                    <!-- 启动页图标使用 1024px PNG：WPF 解码 .ico 时只取 16x16 帧，放大到 132 会糊 -->
                     <Image Width="132"
                            Height="132"
                            HorizontalAlignment="Center"
-                           Source="Assets/PdmClient.ico"
+                           RenderOptions.BitmapScalingMode="HighQuality"
+                           Source="Assets/PdmClientSplash.png"
                            Stretch="Uniform" />
                     <Grid Width="112" Height="112" Margin="0,14,0,0">
                     <Viewport3D x:Name="LoadingCubeViewport"

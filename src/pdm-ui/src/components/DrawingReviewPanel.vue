@@ -41,6 +41,7 @@ const emit = defineEmits<{
   refresh: []
   refreshCandidates: []
   withdraw: [packageId: string, reason: string]
+  abandonWritebacks: [packageId: string, reason: string]
   selectDocument: [documentId: string]
   addMarkup: [packageId: string, input: AddDrawingReviewMarkupInput]
   resolveMarkup: [packageId: string, markupId: string]
@@ -69,6 +70,12 @@ const markedTargetCount = computed(() => activePackage.value?.items.reduce((coun
 const totalTargetCount = computed(() => activePackage.value?.items.length ?? 0)
 const canWithdrawActive = computed(() => Boolean(activePackage.value
   && (activePackage.value.state === 'InReview' || activePackage.value.state === 'PendingSupervisorApproval' || activePackage.value.state === 'ChangesRequested')
+  && props.canSubmit
+  && (props.canManageWithdraw || activePackage.value.createdBy.localeCompare(props.currentUsername, undefined, { sensitivity: 'accent' }) === 0)))
+// 审核标记属性回写由客户端逐张完成；长期未完成时允许发起人/项目经理/管理员放弃写入并直接完成审核，避免图档被无限期锁住。
+const pendingWritebackCount = computed(() => activePackage.value?.items.filter(item => item.drawingWritebackId && !item.drawingResultVersionId).length ?? 0)
+const canAbandonWritebacks = computed(() => Boolean(activePackage.value
+  && activePackage.value.state === 'WritingProperties'
   && props.canSubmit
   && (props.canManageWithdraw || activePackage.value.createdBy.localeCompare(props.currentUsername, undefined, { sensitivity: 'accent' }) === 0)))
 const filteredCandidates = computed(() => {
@@ -333,6 +340,27 @@ async function withdrawActiveReview() {
   }
 }
 
+async function abandonReviewWritebacks() {
+  const packageValue = activePackage.value
+  if (!packageValue || !canAbandonWritebacks.value) return
+  try {
+    const result = await ElMessageBox.prompt(
+      `还有 ${pendingWritebackCount.value} 张图纸未写入审核标记。放弃后审核单立即完成、图档编辑锁释放，但图档属性里不会写入本次审核标记。`,
+      '放弃写入审核标记',
+      {
+        confirmButtonText: '放弃并完成审核',
+        cancelButtonText: '取消',
+        inputPlaceholder: '请填写放弃写入的原因',
+        inputValidator: value => Boolean(value?.trim()) || '请填写放弃写入的原因',
+        type: 'warning',
+      },
+    )
+    emit('abandonWritebacks', packageValue.id, result.value.trim())
+  } catch (error) {
+    if (error !== 'cancel' && error !== 'close') throw error
+  }
+}
+
 const packageStateLabel = drawingReviewPackageStateLabel
 const packageStateTone = computed(() => activePackage.value ? drawingReviewPackageStateTone(activePackage.value.state) : 'neutral')
 </script>
@@ -472,7 +500,11 @@ const packageStateTone = computed(() => activePackage.value ? drawingReviewPacka
         <p>{{ activePackage.items.length }}张2D图纸 · {{ markedTargetCount }}/{{ totalTargetCount }}项完成 · 发起人 {{ displayUserName(activePackage.createdBy) }}</p>
         <p class="drawing-review-route">审核：{{ assignedReviewerLabel(activePackage) }} → 批准：{{ activePackage.supervisorName || displayUserName(activePackage.supervisor) }}</p>
         <p v-if="activePackage.state === 'Withdrawn'" class="drawing-review-withdrawn">{{ activePackage.withdrawnBy }} 撤销：{{ activePackage.withdrawalReason }}</p>
-        <div class="drawing-review-package-actions"><button v-if="canWithdrawActive" type="button" class="is-danger" :disabled="pending" @click="withdrawActiveReview"><X :size="14" />撤销审核</button></div>
+        <p v-if="activePackage.state === 'WritingProperties'" class="drawing-review-writeback">审核标记属性回写：还有 {{ pendingWritebackCount }} 张待写入（到图档页选中该图纸后点“回写审核标记”）。未写完前这些图纸保持编辑锁定。</p>
+        <div class="drawing-review-package-actions">
+          <button v-if="canAbandonWritebacks" type="button" :disabled="pending" @click="abandonReviewWritebacks">放弃写入并完成审核</button>
+          <button v-if="canWithdrawActive" type="button" class="is-danger" :disabled="pending" @click="withdrawActiveReview"><X :size="14" />撤销审核</button>
+        </div>
       </section>
 
       <section v-if="!activeItem" class="drawing-review-panel__selection-empty">

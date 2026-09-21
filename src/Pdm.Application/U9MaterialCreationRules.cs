@@ -7,6 +7,13 @@ namespace Upton.Pdm.Application;
 // Approved organization-7 templates. Other categories retain their existing behavior.
 public static class U9MaterialCreationRules
 {
+    /// <summary>U9C 料品“预算控制方式”取值（PurchaseInfo.BudgetControlType）。</summary>
+    private static class U9BudgetControlType
+    {
+        /// <summary>手工执行：PLM建档的料品统一使用该值。</summary>
+        public const int ManualExecution = 1;
+    }
+
     private static readonly string[] AttributePaths =
     [
         "ItemFormAttribute", "IsPurchaseEnable", "IsBuildEnable", "IsOutsideOperationEnable",
@@ -17,6 +24,7 @@ public static class U9MaterialCreationRules
         "MrpInfo.IsControlByDC", "MrpInfo.DemandRule",
         "MfgInfo.IsInheritBomMasterNo", "MfgInfo.DesignationRule", "MfgInfo.IsExpandByOrder", "MfgInfo.BuildShrinkageRate",
         "PurchaseInfo.IsNeedRequest", "PurchaseInfo.ReceiptModeAllowModify",
+        "PurchaseInfo.BudgetControlType",
         "SaleInfo.IsReturnable", "SaleInfo.IsRMAAllowModify",
         "PurchaseInfo.IsPUTradePathModify", "PurchaseInfo.IsPURtnTradePathModify",
         "SaleInfo.IsSDTradePathModify", "SaleInfo.IsSDRtnTradePathModify",
@@ -74,7 +82,10 @@ public static class U9MaterialCreationRules
         data["PurchaseInfo"] = new Dictionary<string, object?>
         {
             ["IsNeedRequest"] = !master, ["ReceiptModeAllowModify"] = true,
-            ["IsPUTradePathModify"] = true, ["IsPURtnTradePathModify"] = true
+            ["IsPUTradePathModify"] = true, ["IsPURtnTradePathModify"] = true,
+            // U9C 料品采购页签的“预算控制方式”：-1=自动控制（U9默认），1=手工执行。
+            // 公司要求PLM建档料品统一为手工执行，避免采购单被预算自动卡控。
+            ["BudgetControlType"] = U9BudgetControlType.ManualExecution
         };
         data["SaleInfo"] = new Dictionary<string, object?>
         {

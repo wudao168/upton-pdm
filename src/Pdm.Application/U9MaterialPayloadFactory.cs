@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using Upton.Pdm.Domain;
@@ -6,6 +7,12 @@ namespace Upton.Pdm.Application;
 
 public static class U9MaterialPayloadFactory
 {
+    /// <summary>
+    /// PLM 建档的料品在 U9C 统一按 2020-01-01 生效：U9C 要求 BOM 生效日期不得早于单内料品的生效日期，
+    /// 固定一个足够早的日期即可保证 BOM 内所有物料生效日期都早于 BOM 生效日期。
+    /// </summary>
+    public static readonly DateOnly MaterialEffectiveDate = new(2020, 1, 1);
+
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
         DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
@@ -75,7 +82,11 @@ public static class U9MaterialPayloadFactory
                 ["MRPPlanningType"] = 1
             },
             ["IsBOMEnable"] = true,
-            ["Effective"] = new Dictionary<string, object?> { ["IsEffective"] = "true" }
+            ["Effective"] = new Dictionary<string, object?>
+            {
+                ["IsEffective"] = "true",
+                ["EffectiveDate"] = MaterialEffectiveDate.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture)
+            }
         };
         U9MaterialCreationRules.Apply(data, material, rule.U9CategoryCode, organizationCode, bomHeaderKind);
         var nonNullData = data
@@ -140,7 +151,9 @@ public static class U9MaterialPayloadFactory
             Attribute($"DescFlexField.{U9MaterialContract.PurchaseLinkPublicSegment}", Clean(material.PurchaseLink) ?? string.Empty),
             Attribute($"DescFlexField.{U9MaterialContract.BrandPublicSegment}", Clean(material.Brand) ?? string.Empty),
             Attribute($"DescFlexField.{U9MaterialContract.MaterialPrivateSegment}", Clean(material.Material) ?? string.Empty),
-            Attribute($"DescFlexField.{U9MaterialContract.SurfaceTreatmentPrivateSegment}", Clean(material.SurfaceTreatment) ?? string.Empty)
+            Attribute($"DescFlexField.{U9MaterialContract.SurfaceTreatmentPrivateSegment}", Clean(material.SurfaceTreatment) ?? string.Empty),
+            // 已存在的料品同步时一并把生效日期拉平到 2020-01-01，保证 BOM 内所有物料都早于 BOM 生效日期。
+            Attribute("Effective.EffectiveDate", MaterialEffectiveDate.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture))
         };
         if (material.Weight is not null) attributes.Add(Attribute("Weight", material.Weight.Value.ToString(System.Globalization.CultureInfo.InvariantCulture)));
         return JsonSerializer.Serialize(new[]
