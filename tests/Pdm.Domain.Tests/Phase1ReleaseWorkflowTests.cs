@@ -254,6 +254,15 @@ public sealed class Phase1ReleaseWorkflowTests
         // 不在本次转图范围内的图档不能单项重试。
         var outside = await Assert.ThrowsAsync<PdmRuleException>(() => service.RetryItemAsync(package.Id, Guid.NewGuid(), "admin", default));
         Assert.Contains("不在本次转图范围内", outside.Message);
+
+        // 批量重试：多个图档合成一次转换请求（引用树只下发、只解析一次）。
+        var batchIds = (await service.ListItemsAsync(package.Id, default)).Select(item => item.DocumentId).ToArray();
+        var batch = await service.RetryItemsAsync(package.Id, batchIds, "admin", default);
+        Assert.Equal(batchIds.OrderBy(id => id), converter.LastDocumentIds.OrderBy(id => id));
+        Assert.True(converter.LastKeepExistingPreviews);
+        Assert.All(batch, item => Assert.True(item.Succeeded));
+        var emptyBatch = await Assert.ThrowsAsync<PdmRuleException>(() => service.RetryItemsAsync(package.Id, [Guid.NewGuid()], "admin", default));
+        Assert.Contains("不在本次转图范围内", emptyBatch.Message);
     }
 
     /// <summary>转出明细可按发布包筛选：只返回指定发布包的明细。</summary>

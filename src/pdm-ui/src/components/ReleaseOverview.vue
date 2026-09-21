@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
 import { ElMessage } from '../statusMessage'
-import { downloadReleasePreviewArchive, listReleasePreviewItems, PdmApiError, retryReleasePreviewItem } from '../api'
+import { downloadReleasePreviewArchive, listReleasePreviewItems, PdmApiError, retryReleasePreviewItem, retryReleasePreviewItems } from '../api'
 import { releasePreviewStateTag } from '../releasePreviewState'
 import type { BomVersion, ManufacturingBomBaseline, ReleasePackageSummary, ReleasePreviewItemResult, ReleaseScope } from '../types'
 
@@ -124,7 +124,7 @@ async function retryPreviewItem(item: ReleasePreviewItemResult) {
   }
 }
 
-/** 批量重试：对勾选的失败项逐个重转（每个图档独立重试，互不影响）。 */
+/** 批量重试：同一发布包里的勾选失败项合成一次转换请求（引用树只下发一次），比逐条重试快得多。 */
 async function retrySelectedPreviewItems() {
   const targets = selectedFailedItems.value
   if (!props.token || targets.length === 0) return
@@ -132,13 +132,16 @@ async function retrySelectedPreviewItems() {
   let succeededCount = 0
   const failures: string[] = []
   try {
-    for (const item of targets) {
+    const byPackage = new Map<string, ReleasePreviewItemResult[]>()
+    for (const item of targets) byPackage.set(item.releasePackageId, [...(byPackage.get(item.releasePackageId) ?? []), item])
+    for (const [releasePackageId, items] of byPackage) {
       try {
-        await retryReleasePreviewItem(item.releasePackageId, item.documentId, props.token)
-        succeededCount += 1
+        const result = await retryReleasePreviewItems(releasePackageId, items.map(item => item.documentId), props.token)
+        succeededCount += result.items.filter(item => item.succeeded).length
+        failures.push(...result.items.filter(item => !item.succeeded).map(item => `${item.drawingNumber}：${item.error ?? '仍未转出'}`))
       }
       catch (error) {
-        failures.push(`${item.drawingNumber}：${retryErrorMessage(error)}`)
+        failures.push(`${items[0].releasePackageNumber}：${retryErrorMessage(error)}`)
       }
     }
   }

@@ -3,6 +3,7 @@ using System.IO.Compression;
 using System.Net.Http;
 using System.Net.Http.Headers;
 using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using Microsoft.Extensions.Options;
 using Upton.Pdm.Application;
@@ -101,11 +102,12 @@ public sealed class SolidWorksServerPreviewConverter : IServerPreviewConverter
                     source.Kind,
                     source.FileName,
                     sourcePath,
-                    Path.Combine(outputRoot, outputFileName)));
+                    Path.Combine(outputRoot, outputFileName),
+                    source.Sha256));
             }
 
             // 转图范围可能只含部分图档（例如仅非标件BOM物料），但 SolidWorks 打开装配体时必须能解析被引用的其它零件，
-            // 而转图代理只解压 manifest 里列出的文件，因此这些图档也要作为任务下发（只下载、转换，不回收结果）。
+            // 而转图代理只解压 manifest 里列出的文件，因此这些图档也要作为任务下发（只提供文件、不转出、不回收结果）。
             var referenceJobs = await ResolveReferenceJobsAsync(package, vaultRoot, jobs, outputRoot, cancellationToken);
             var conversionJobs = jobs.Concat(referenceJobs).ToArray();
             var duplicateFileName = conversionJobs
@@ -114,10 +116,28 @@ public sealed class SolidWorksServerPreviewConverter : IServerPreviewConverter
             if (duplicateFileName is not null)
                 throw new PdmRuleException($"发布引用树包含重名源文件{duplicateFileName.Key}，无法安全重建SolidWorks引用关系。");
 
-            if (remote)
-                await RunRemoteAgentAsync(conversionSettings, conversionJobs, workRoot, outputRoot, cancellationToken);
-            else
-                await RunLocalWorkerAsync(conversionSettings, conversionJobs, sourceRoot, workRoot, outputRoot, cancellationToken);
+            // 转图结果缓存：同一套源文件（含引用树）指纹相同则直接复用上次生成的 STEP/PDF，
+            // 重新发布同一套BOM、或对已转好的图档再点一次重试时不再调用转图电脑。
+            var cacheRoot = ResolvePreviewCacheRoot(vaultRoot);
+            var cacheFingerprint = ComputeConversionFingerprint(conversionJobs);
+            var pendingJobs = new List<PreviewJob>();
+            foreach (var job in jobs)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                if (await TryRestoreFromCacheAsync(cacheRoot, cacheFingerprint, job, cancellationToken)) continue;
+                pendingJobs.Add(job);
+            }
+
+            if (pendingJobs.Count > 0)
+            {
+                var runJobs = pendingJobs.Concat(referenceJobs).ToArray();
+                if (remote)
+                    await RunRemoteAgentAsync(conversionSettings, runJobs, workRoot, outputRoot, cancellationToken);
+                else
+                    await RunLocalWorkerAsync(conversionSettings, runJobs, sourceRoot, workRoot, outputRoot, cancellationToken);
+                foreach (var job in pendingJobs) await StoreToCacheAsync(cacheRoot, cacheFingerprint, job, cancellationToken);
+                PrunePreviewCache(cacheRoot);
+            }
 
             var artifacts = new Dictionary<Guid, DocumentPreviewArtifact>();
             foreach (var source in sources)
@@ -176,7 +196,7 @@ public sealed class SolidWorksServerPreviewConverter : IServerPreviewConverter
         {
             var workspaceSourcePath = Path.Combine(sourceRoot, job.FileName);
             File.Copy(job.SourcePath, workspaceSourcePath, false);
-            workerJobs.Add(new PreviewWorkerJob(job.DocumentId, workspaceSourcePath, job.OutputPath, job.Kind.ToString()));
+            workerJobs.Add(new PreviewWorkerJob(job.DocumentId, workspaceSourcePath, job.OutputPath, job.Kind.ToString(), job.Convert));
         }
         var manifestPath = Path.Combine(workRoot, "manifest.json");
         var resultPath = Path.Combine(workRoot, "result.json");
@@ -198,7 +218,7 @@ public sealed class SolidWorksServerPreviewConverter : IServerPreviewConverter
     {
         var requestPath = Path.Combine(workRoot, "request.zip");
         var manifest = new PreviewAgentManifest(jobs
-            .Select(job => new PreviewAgentJob(job.DocumentId, job.Kind.ToString(), job.FileName, Path.GetFileName(job.OutputPath)))
+            .Select(job => new PreviewAgentJob(job.DocumentId, job.Kind.ToString(), job.FileName, Path.GetFileName(job.OutputPath), job.Convert))
             .ToArray());
         using (var archive = ZipFile.Open(requestPath, ZipArchiveMode.Create))
         {
@@ -307,7 +327,7 @@ public sealed class SolidWorksServerPreviewConverter : IServerPreviewConverter
             if (!string.Equals(sha256, source.Sha256, StringComparison.OrdinalIgnoreCase)) continue;
             var extension = source.Kind == DocumentKind.Drawing ? ".pdf" : ".step";
             referenceJobs.Add(new PreviewJob(source.DocumentId, source.Kind, source.FileName, path,
-                Path.Combine(outputRoot, $"reference_{source.DocumentId:N}{extension}")));
+                Path.Combine(outputRoot, $"reference_{source.DocumentId:N}{extension}"), sha256, Convert: false));
         }
         return referenceJobs;
     }
@@ -333,6 +353,75 @@ public sealed class SolidWorksServerPreviewConverter : IServerPreviewConverter
                     ?? throw new PdmRuleException($"转图服务器未返回预览文件{outputName}。");
                 outputEntry.ExtractToFile(job.OutputPath, true);
             }
+        }
+    }
+
+    /// <summary>转图结果缓存目录（与发布包预览目录同级）。</summary>
+    private static string ResolvePreviewCacheRoot(string vaultRoot) =>
+        StorageLocationPolicy.ResolveUnder(vaultRoot, Path.Combine(".release-previews", "_cache"));
+
+    /// <summary>
+    /// 把本次转换的全部输入（需要转出的图档 + 引用文件）折叠成一个指纹：指纹相同说明输入完全一致，
+    /// 可以直接复用上次生成的 STEP/PDF，不必再调用转图电脑。
+    /// </summary>
+    private static string ComputeConversionFingerprint(IReadOnlyList<PreviewJob> jobs)
+    {
+        var builder = new StringBuilder();
+        foreach (var job in jobs.OrderBy(item => item.DocumentId))
+        {
+            builder.Append(job.DocumentId.ToString("N")).Append('|')
+                .Append(job.FileName).Append('|')
+                .Append(job.SourceSha256).Append('\n');
+        }
+        return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(builder.ToString()))).ToLowerInvariant();
+    }
+
+    private static string CacheFilePath(string cacheRoot, string fingerprint, PreviewJob job) =>
+        Path.Combine(cacheRoot, $"{fingerprint}_{job.DocumentId:N}{Path.GetExtension(job.OutputPath)}");
+
+    private static async Task<bool> TryRestoreFromCacheAsync(string cacheRoot, string fingerprint, PreviewJob job, CancellationToken cancellationToken)
+    {
+        var cached = CacheFilePath(cacheRoot, fingerprint, job);
+        if (!File.Exists(cached) || new FileInfo(cached).Length == 0) return false;
+        Directory.CreateDirectory(Path.GetDirectoryName(job.OutputPath)!);
+        await using var source = File.OpenRead(cached);
+        await using var target = File.Create(job.OutputPath);
+        await source.CopyToAsync(target, cancellationToken);
+        return true;
+    }
+
+    /// <summary>缓存写失败不影响本次转图（最多下次再转一遍）。</summary>
+    private static async Task StoreToCacheAsync(string cacheRoot, string fingerprint, PreviewJob job, CancellationToken cancellationToken)
+    {
+        try
+        {
+            if (!File.Exists(job.OutputPath) || new FileInfo(job.OutputPath).Length == 0) return;
+            Directory.CreateDirectory(cacheRoot);
+            var cached = CacheFilePath(cacheRoot, fingerprint, job);
+            await using var source = File.OpenRead(job.OutputPath);
+            await using var target = File.Create(cached);
+            await source.CopyToAsync(target, cancellationToken);
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+        }
+    }
+
+    private const int PreviewCacheMaxFiles = 2000;
+
+    private static void PrunePreviewCache(string cacheRoot)
+    {
+        try
+        {
+            var files = new DirectoryInfo(cacheRoot).GetFiles();
+            if (files.Length <= PreviewCacheMaxFiles) return;
+            foreach (var file in files.OrderBy(item => item.LastWriteTimeUtc).Take(files.Length - PreviewCacheMaxFiles))
+            {
+                try { file.Delete(); } catch (IOException) { }
+            }
+        }
+        catch (Exception)
+        {
         }
     }
 
@@ -409,12 +498,12 @@ public sealed class SolidWorksServerPreviewConverter : IServerPreviewConverter
     }
 
     private sealed record PreviewWorkerManifest(IReadOnlyList<PreviewWorkerJob> Jobs);
-    private sealed record PreviewWorkerJob(Guid DocumentId, string SourcePath, string OutputPath, string Kind);
+    private sealed record PreviewWorkerJob(Guid DocumentId, string SourcePath, string OutputPath, string Kind, bool Convert = true);
     private sealed record PreviewWorkerResult(bool Success, string? Error);
 
-    private sealed record PreviewJob(Guid DocumentId, DocumentKind Kind, string FileName, string SourcePath, string OutputPath);
+    private sealed record PreviewJob(Guid DocumentId, DocumentKind Kind, string FileName, string SourcePath, string OutputPath, string SourceSha256, bool Convert = true);
     private sealed record PreviewAgentManifest(IReadOnlyList<PreviewAgentJob> Jobs);
-    private sealed record PreviewAgentJob(Guid DocumentId, string Kind, string FileName, string OutputName);
+    private sealed record PreviewAgentJob(Guid DocumentId, string Kind, string FileName, string OutputName, bool Convert = true);
 }
 
 /// <summary>API服务器与转图电脑上“转图代理”之间的约定（zip 包结构：manifest.json + sources/**；返回 result.json + outputs/**）。</summary>

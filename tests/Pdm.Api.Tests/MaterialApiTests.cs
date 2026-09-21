@@ -545,6 +545,7 @@ public sealed class MaterialApiTests : IClassFixture<PdmApiFactory>
                     ["MfgInfo.IsExpandByOrder"] = "true", ["MfgInfo.BuildShrinkageRate"] = "1",
                     ["PurchaseInfo.IsNeedRequest"] = "true", ["PurchaseInfo.ReceiptModeAllowModify"] = "true",
                     ["PurchaseInfo.IsPUTradePathModify"] = "true", ["PurchaseInfo.IsPURtnTradePathModify"] = "true",
+                    ["PurchaseInfo.BudgetControlType"] = "1",
                     ["SaleInfo.IsReturnable"] = "true", ["SaleInfo.IsRMAAllowModify"] = "true",
                     ["SaleInfo.IsSDTradePathModify"] = "true", ["SaleInfo.IsSDRtnTradePathModify"] = "true",
                     ["SaleInfo.SupplySource"] = "4", ["SaleInfo.DemandTransType"] = "4", ["SaleInfo.SupplyOrg.Code"] = "7"

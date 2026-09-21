@@ -1366,6 +1366,23 @@ public static class PdmEndpointExtensions
             return Results.Ok(new ReleasePreviewItemRetryResult(true, MapReleasePreviewItem(item), "已重新转出该图档。"));
         });
 
+        // 批量重试：多个图档合成一次转换请求（引用树只下发一次），比逐条重试快得多。
+        api.MapPost("/release-packages/{releasePackageId:guid}/preview-items/retry", async (Guid releasePackageId, ReleasePreviewRetryRequest request, HttpContext context, IPdmRepository repository, ReleasePreviewService previewService, CancellationToken cancellationToken) =>
+        {
+            var (actor, role) = CurrentUser(context.User);
+            var package = await repository.FindReleasePackageAsync(releasePackageId, cancellationToken);
+            if (package is null) return Results.NotFound();
+            if (!await repository.HasProjectContentReadAccessAsync(package.ProjectId, actor, role, cancellationToken)) return Results.Forbid();
+            if (!await repository.HasUserPermissionAsync(actor, role, PermissionCodes.ReleaseManage, cancellationToken)) return Results.Forbid();
+            var documentIds = request.DocumentIds?.Where(id => id != Guid.Empty).Distinct().ToArray() ?? [];
+            if (documentIds.Length == 0) return Results.BadRequest(new { detail = "请先选择要重试的图档。" });
+            var items = await previewService.RetryItemsAsync(releasePackageId, documentIds, actor, cancellationToken);
+            var retried = items.Where(item => documentIds.Contains(item.DocumentId)).Select(MapReleasePreviewItem).ToArray();
+            var failed = retried.Count(item => !item.Succeeded);
+            return Results.Ok(new ReleasePreviewItemsRetryResult(true, retried,
+                failed == 0 ? $"已重新转出 {retried.Length} 项。" : $"重试完成：成功 {retried.Length - failed} 项，失败 {failed} 项。"));
+        });
+
         api.MapPost("/projects/{projectId:guid}/release-preview-items/archive", async (Guid projectId, ReleasePreviewArchiveRequest request, HttpContext context, IPdmRepository repository, IFileStorage storage, ReleasePreviewService previewService, IOptions<PdmStorageOptions> storageOptions, TimeProvider timeProvider, CancellationToken cancellationToken) =>
         {
             var (actor, role) = CurrentUser(context.User);

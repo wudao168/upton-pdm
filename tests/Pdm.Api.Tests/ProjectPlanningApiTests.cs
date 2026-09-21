@@ -152,7 +152,7 @@ public sealed class ProjectPlanningApiTests : IClassFixture<PdmApiFactory>
     }
 
     [Fact]
-    public async Task Approved_plan_change_request_keeps_schedule_until_decision()
+    public async Task Approved_plan_change_request_grants_draft_without_approval_step()
     {
         using var scope = factory.Services.CreateScope();
         var repository = scope.ServiceProvider.GetRequiredService<IPdmRepository>();
@@ -174,11 +174,15 @@ public sealed class ProjectPlanningApiTests : IClassFixture<PdmApiFactory>
         Assert.False((await client.PutAsJsonAsync(url, new { tasks = plan.Tasks, changeReason = "直接修改", expectedRowVersion = plan.RowVersion })).IsSuccessStatusCode);
         (await client.PostAsJsonAsync($"{url}/change-request", change)).EnsureSuccessStatusCode();
         var pending = (await planning.FindPlanAsync(project.Id, default))!;
+        // 变更权限提交即生效：申请直接为已批准并同时生成变更草稿，原计划在草稿完成前继续生效。
         Assert.Equal(plan.Tasks, pending.Tasks);
-        Assert.Equal(ProjectPlanApprovalStatus.Pending, pending.ChangeRequest!.Status);
-        (await client.PostAsJsonAsync($"{url}/decision", new { expectedRowVersion = pending.RowVersion, approve = true, comment = "同意" })).EnsureSuccessStatusCode();
-        var editable = (await planning.FindPlanAsync(project.Id, default))!;
-        Assert.NotNull(editable.ChangeDraftSource);
+        Assert.Equal(ProjectPlanApprovalStatus.Approved, pending.ChangeRequest!.Status);
+        Assert.Equal("admin", pending.ChangeRequest.DecidedBy);
+        Assert.NotNull(pending.ChangeDraftSource);
+        Assert.Equal(plan.Tasks, pending.ChangeDraftSource!.Tasks);
+        // 免审批后不再有决策步骤：对已批准的变更申请再次决策会被拒绝。
+        Assert.False((await client.PostAsJsonAsync($"{url}/decision", new { expectedRowVersion = pending.RowVersion, approve = true, comment = "同意" })).IsSuccessStatusCode);
+        var editable = pending;
         Assert.Equal(plan.Tasks, editable.Tasks);
         var tasks = editable.Tasks.Select((task, index) => index == 0
             ? task with { PlannedStart = new(2026, 9, 12), PlannedFinish = new(2026, 9, 14), DurationDays = 3 }

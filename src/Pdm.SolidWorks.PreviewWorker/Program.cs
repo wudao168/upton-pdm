@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Web.Script.Serialization;
@@ -11,23 +12,36 @@ namespace Upton.Pdm.SolidWorks.PreviewWorker;
 
 internal static class Program
 {
+    private const int OpenOptionsCommon = (int)swOpenDocOptions_e.swOpenDocOptions_Silent | (int)swOpenDocOptions_e.swOpenDocOptions_ReadOnly;
+    // 装配体按轻化方式打开：引用件不立即全部载入内存，总装打开时间可大幅下降；需要几何导出时 SolidWorks 会自行载入。
+    private const int OpenOptionsLightweight = (int)swOpenDocOptions_e.swOpenDocOptions_LoadLightweight;
+
     [STAThread]
     private static int Main(string[] args)
     {
-        if (args.Length != 2)
+        var flags = args.Where(argument => argument.StartsWith("--", StringComparison.Ordinal))
+            .Select(argument => argument.ToLowerInvariant())
+            .ToArray();
+        var paths = args.Where(argument => !argument.StartsWith("--", StringComparison.Ordinal)).ToArray();
+        var useLightweight = !flags.Contains("--no-lightweight");
+        if (flags.Contains("--serve")) return Serve(useLightweight);
+        if (paths.Length != 2)
         {
-            Console.Error.WriteLine("Usage: Upton.Pdm.SolidWorks.PreviewWorker <manifest.json> <result.json>");
+            Console.Error.WriteLine("Usage: Upton.Pdm.SolidWorks.PreviewWorker <manifest.json> <result.json> [--no-lightweight] | --serve [--no-lightweight]");
             return 2;
         }
 
         try
         {
             var serializer = new JavaScriptSerializer { MaxJsonLength = int.MaxValue };
-            var manifest = serializer.Deserialize<PreviewWorkerManifest>(File.ReadAllText(args[0], Encoding.UTF8));
+            var manifest = serializer.Deserialize<PreviewWorkerManifest>(File.ReadAllText(paths[0], Encoding.UTF8));
             if (manifest?.Jobs == null || manifest.Jobs.Count == 0)
                 throw new InvalidDataException("发布转换清单为空。");
-            Convert(manifest.Jobs);
-            File.WriteAllText(args[1], serializer.Serialize(new PreviewWorkerResult { Success = true }), new UTF8Encoding(false));
+            using (var session = new ConversionSession(useLightweight))
+            {
+                session.Convert(manifest.Jobs);
+            }
+            File.WriteAllText(paths[1], serializer.Serialize(new PreviewWorkerResult { Success = true }), new UTF8Encoding(false));
             return 0;
         }
         catch (Exception exception)
@@ -35,7 +49,7 @@ internal static class Program
             try
             {
                 var serializer = new JavaScriptSerializer();
-                File.WriteAllText(args[1], serializer.Serialize(new PreviewWorkerResult { Success = false, Error = exception.Message }), new UTF8Encoding(false));
+                File.WriteAllText(paths[1], serializer.Serialize(new PreviewWorkerResult { Success = false, Error = exception.Message }), new UTF8Encoding(false));
             }
             catch
             {
@@ -45,36 +59,107 @@ internal static class Program
         }
     }
 
-    private static void Convert(IReadOnlyList<PreviewWorkerJob> jobs)
+    /// <summary>
+    /// 常驻模式：SolidWorks 只启动一次并跨请求复用（启动一次约十几秒），代理通过标准输入输出逐次下发转换请求。
+    /// </summary>
+    private static int Serve(bool lightweightAssemblies = true)
     {
-        SldWorks application = null;
+        var serializer = new JavaScriptSerializer { MaxJsonLength = int.MaxValue };
+        var session = new ConversionSession(lightweightAssemblies);
         try
         {
-            application = new SldWorks
+            Console.Out.WriteLine("{\"ready\":true}");
+            Console.Out.Flush();
+            string line;
+            while ((line = Console.In.ReadLine()) != null)
             {
-                Visible = false,
-                UserControl = false,
-                CommandInProgress = true
-            };
-            foreach (var job in jobs)
-            {
-                ConvertOne(application, job);
+                if (string.IsNullOrWhiteSpace(line)) continue;
+                var request = serializer.Deserialize<ServeRequest>(line);
+                PreviewWorkerResult result;
+                try
+                {
+                    if (request == null || string.IsNullOrWhiteSpace(request.Manifest) || string.IsNullOrWhiteSpace(request.Result))
+                        throw new InvalidDataException("常驻转换请求字段不完整。");
+                    var manifest = serializer.Deserialize<PreviewWorkerManifest>(File.ReadAllText(request.Manifest, Encoding.UTF8));
+                    if (manifest?.Jobs == null || manifest.Jobs.Count == 0)
+                        throw new InvalidDataException("发布转换清单为空。");
+                    session.Convert(manifest.Jobs);
+                    result = new PreviewWorkerResult { Success = true };
+                }
+                catch (Exception exception)
+                {
+                    // 一次失败可能让 SolidWorks 处于异常状态，直接重启实例，下一次请求会重新创建。
+                    result = new PreviewWorkerResult { Success = false, Error = exception.Message };
+                    session.Reset();
+                    Console.Error.WriteLine(exception.Message);
+                }
+                if (!string.IsNullOrWhiteSpace(request?.Result))
+                    File.WriteAllText(request.Result, serializer.Serialize(result), new UTF8Encoding(false));
+                Console.Out.WriteLine(serializer.Serialize(new { result.Success, result.Error }));
+                Console.Out.Flush();
             }
+            return 0;
+        }
+        catch (Exception exception)
+        {
+            Console.Error.WriteLine(exception.Message);
+            return 1;
         }
         finally
         {
-            if (application != null)
-            {
-                try { application.CommandInProgress = false; } catch { }
-                try { application.ExitApp(); } catch { }
-                try { Marshal.FinalReleaseComObject(application); } catch { }
-            }
-            GC.Collect();
-            GC.WaitForPendingFinalizers();
+            session.Dispose();
         }
     }
 
-    private static void ConvertOne(ISldWorks application, PreviewWorkerJob job)
+    /// <summary>一次转换会话：持有一个 SolidWorks 实例，串行转换清单里所有需要转出的任务。</summary>
+    private sealed class ConversionSession : IDisposable
+    {
+        private readonly bool lightweightAssemblies;
+        private SldWorks application;
+
+        public ConversionSession(bool lightweightAssemblies) => this.lightweightAssemblies = lightweightAssemblies;
+
+        public void Convert(IReadOnlyList<PreviewWorkerJob> jobs)
+        {
+            var current = EnsureApplication();
+            foreach (var job in jobs)
+            {
+                // Convert=false 的任务只作为引用文件下发（SolidWorks 解析装配体引用时需要），不需要转出。
+                if (!job.Convert) continue;
+                ConvertOne(current, job, lightweightAssemblies);
+            }
+            try { current.CloseAllDocuments(true); } catch (Exception) { }
+        }
+
+        private SldWorks EnsureApplication()
+        {
+            if (application == null)
+            {
+                application = new SldWorks
+                {
+                    Visible = false,
+                    UserControl = false,
+                    CommandInProgress = true
+                };
+            }
+            return application;
+        }
+
+        public void Reset()
+        {
+            if (application == null) return;
+            try { application.CommandInProgress = false; } catch { }
+            try { application.ExitApp(); } catch { }
+            try { Marshal.FinalReleaseComObject(application); } catch { }
+            application = null;
+            GC.Collect();
+            GC.WaitForPendingFinalizers();
+        }
+
+        public void Dispose() => Reset();
+    }
+
+    private static void ConvertOne(ISldWorks application, PreviewWorkerJob job, bool lightweightAssemblies)
     {
         if (job == null || string.IsNullOrWhiteSpace(job.SourcePath) || string.IsNullOrWhiteSpace(job.OutputPath))
             throw new InvalidDataException("发布转换任务字段不完整。");
@@ -88,10 +173,11 @@ internal static class Program
         IModelDoc2 document = null;
         try
         {
+            var openOptions = OpenOptionsCommon | (lightweightAssemblies && documentType == (int)swDocumentTypes_e.swDocASSEMBLY ? OpenOptionsLightweight : 0);
             document = application.OpenDoc6(
                 job.SourcePath,
                 documentType,
-                (int)(swOpenDocOptions_e.swOpenDocOptions_Silent | swOpenDocOptions_e.swOpenDocOptions_ReadOnly),
+                openOptions,
                 string.Empty,
                 ref openErrors,
                 ref openWarnings) as IModelDoc2;
@@ -133,12 +219,20 @@ internal static class Program
         public List<PreviewWorkerJob> Jobs { get; set; }
     }
 
+    private sealed class ServeRequest
+    {
+        public string Manifest { get; set; }
+        public string Result { get; set; }
+    }
+
     private sealed class PreviewWorkerJob
     {
         public Guid DocumentId { get; set; }
         public string SourcePath { get; set; }
         public string OutputPath { get; set; }
         public string Kind { get; set; }
+        // 老版本服务端不带该字段，缺省按“需要转出”处理。
+        public bool Convert { get; set; } = true;
     }
 
     private sealed class PreviewWorkerResult

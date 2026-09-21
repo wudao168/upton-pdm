@@ -20,6 +20,7 @@ namespace Upton.Pdm.PreviewAgent;
 internal static class Program
 {
     private static readonly JavaScriptSerializer Serializer = new JavaScriptSerializer { MaxJsonLength = int.MaxValue };
+    private static readonly PersistentWorker Worker = new PersistentWorker();
 
     private static int Main(string[] args)
     {
@@ -81,7 +82,8 @@ internal static class Program
                     workerPath = options.WorkerPath,
                     workerExists = File.Exists(options.WorkerPath),
                     timeoutMinutes = options.TimeoutMinutes,
-                    workRoot = options.WorkRoot
+                    workRoot = options.WorkRoot,
+                    workerSession = Worker.IsRunning ? $"常驻SolidWorks会话运行中（PID {Worker.ProcessId}）" : "常驻SolidWorks会话未启动"
                 });
                 return;
             }
@@ -117,10 +119,11 @@ internal static class Program
 
                 var manifest = ReadManifest(requestPath, sourceRoot);
                 if (manifest.Jobs.Count == 0) throw new InvalidOperationException("转换请求中没有任务。");
-                Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] 收到转换任务 {manifest.Jobs.Count} 项，来源 {client.Client?.RemoteEndPoint}");
+                var convertJobs = manifest.Jobs.Where(job => job.Convert).ToList();
+                Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] 收到转换任务 {convertJobs.Count} 项（含只作引用的文件共 {manifest.Jobs.Count} 个），来源 {client.Client?.RemoteEndPoint}");
                 RunWorker(options, jobRoot, sourceRoot, outputRoot, manifest);
 
-                var missing = manifest.Jobs
+                var missing = convertJobs
                     .Where(job => !File.Exists(Path.Combine(outputRoot, job.OutputName)))
                     .Select(job => job.OutputName)
                     .ToArray();
@@ -137,7 +140,8 @@ internal static class Program
                         var payload = Encoding.UTF8.GetBytes(Serializer.Serialize(new { Success = true, Error = (string)null }));
                         resultStream.Write(payload, 0, payload.Length);
                     }
-                    foreach (var job in manifest.Jobs)
+                    // 只回传需要转出的结果；引用文件的结果服务端不会使用，回传只是浪费带宽和时间。
+                    foreach (var job in convertJobs)
                     {
                         archive.CreateEntryFromFile(Path.Combine(outputRoot, job.OutputName), "outputs/" + job.OutputName, CompressionLevel.Fastest);
                     }
@@ -146,7 +150,7 @@ internal static class Program
                 {
                     await AgentHttpRequest.WriteResponseAsync(stream, 200, "application/zip", responseFile.Length, responseFile);
                 }
-                Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] 转换完成 {manifest.Jobs.Count} 项");
+                Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] 转换完成 {convertJobs.Count} 项");
             }
             finally
             {
@@ -193,9 +197,12 @@ internal static class Program
 
     private static void RunWorker(AgentOptions options, string jobRoot, string sourceRoot, string outputRoot, AgentManifest manifest)
     {
+        var jobs = manifest.Jobs.Where(job => job.Convert).ToList();
+        // 本次只需要引用文件时（例如整批都已经转好，只是重发引用树）不必启动 SolidWorks。
+        if (jobs.Count == 0) return;
         var workerManifest = new WorkerManifest
         {
-            Jobs = manifest.Jobs.Select(job => new WorkerJob
+            Jobs = jobs.Select(job => new WorkerJob
             {
                 DocumentId = job.DocumentId,
                 SourcePath = Path.Combine(sourceRoot, job.FileName),
@@ -207,6 +214,16 @@ internal static class Program
         var resultPath = Path.Combine(jobRoot, "worker-result.json");
         File.WriteAllText(manifestPath, Serializer.Serialize(workerManifest), new UTF8Encoding(false));
 
+        var outcome = Worker.TryRun(options, manifestPath, resultPath);
+        if (outcome == PersistentOutcome.Success) return;
+        if (outcome == PersistentOutcome.ConversionFailed) { VerifyWorkerResult(resultPath); return; }
+        // 常驻会话不可用（首次启动失败、进程已退出等）时回落到一次性调用，保证转图不受影响。
+        RunWorkerOnce(options, manifestPath, resultPath);
+        VerifyWorkerResult(resultPath);
+    }
+
+    private static void RunWorkerOnce(AgentOptions options, string manifestPath, string resultPath)
+    {
         var startInfo = new ProcessStartInfo(options.WorkerPath)
         {
             WorkingDirectory = Path.GetDirectoryName(options.WorkerPath),
@@ -232,10 +249,118 @@ internal static class Program
             if (process.ExitCode != 0)
                 throw new InvalidOperationException($"SolidWorks转换进程失败：{(string.IsNullOrWhiteSpace(error) ? output : error).Trim()}");
         }
+    }
+
+    private static void VerifyWorkerResult(string resultPath)
+    {
         if (!File.Exists(resultPath)) throw new InvalidOperationException("SolidWorks转换未生成结果文件。");
         var result = Serializer.Deserialize<WorkerResult>(File.ReadAllText(resultPath, Encoding.UTF8));
         if (result == null) throw new InvalidOperationException("SolidWorks转换结果文件无效。");
         if (!result.Success) throw new InvalidOperationException(string.IsNullOrWhiteSpace(result.Error) ? "SolidWorks转换失败。" : result.Error);
+    }
+
+    private enum PersistentOutcome
+    {
+        Success,
+        ConversionFailed,
+        Unavailable
+    }
+
+    /// <summary>
+    /// 常驻 SolidWorks 会话：转图程序以 --serve 模式启动一次并跨请求复用 SolidWorks 实例，
+    /// 避免每次请求都重新启动 SolidWorks（启动一次约十几秒）。
+    /// </summary>
+    private sealed class PersistentWorker
+    {
+        private readonly object gate = new object();
+        private Process process;
+        private StreamWriter input;
+        private StreamReader output;
+
+        public bool IsRunning => process != null && !process.HasExited;
+
+        public int ProcessId => process?.Id ?? 0;
+
+        public PersistentOutcome TryRun(AgentOptions options, string manifestPath, string resultPath)
+        {
+            lock (gate)
+            {
+                try
+                {
+                    if (!EnsureStarted(options)) return PersistentOutcome.Unavailable;
+                    input.WriteLine(Serializer.Serialize(new { Manifest = manifestPath, Result = resultPath }));
+                    input.Flush();
+                    var responseTask = output.ReadLineAsync();
+                    if (!responseTask.Wait(TimeSpan.FromMinutes(options.TimeoutMinutes)))
+                    {
+                        Stop();
+                        throw new TimeoutException($"SolidWorks转换超过{options.TimeoutMinutes}分钟，已终止。");
+                    }
+                    var line = responseTask.Result;
+                    if (string.IsNullOrWhiteSpace(line)) return PersistentOutcome.Unavailable;
+                    var payload = Serializer.Deserialize<WorkerResult>(line);
+                    if (payload == null) return PersistentOutcome.Unavailable;
+                    return payload.Success ? PersistentOutcome.Success : PersistentOutcome.ConversionFailed;
+                }
+                catch (TimeoutException)
+                {
+                    throw;
+                }
+                catch (Exception exception)
+                {
+                    Console.Error.WriteLine($"[{DateTime.Now:HH:mm:ss}] 常驻SolidWorks会话不可用：{exception.Message}");
+                    Stop();
+                    return PersistentOutcome.Unavailable;
+                }
+            }
+        }
+
+        private bool EnsureStarted(AgentOptions options)
+        {
+            if (process != null && !process.HasExited) return true;
+            Stop();
+            var startInfo = new ProcessStartInfo(options.WorkerPath)
+            {
+                WorkingDirectory = Path.GetDirectoryName(options.WorkerPath),
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                RedirectStandardInput = true,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                Arguments = string.Join(" ", new[] { "--serve" }
+                    .Concat(options.WorkerArguments)
+                    .Select(argument => "\"" + (argument ?? string.Empty).Replace("\"", "\\\"") + "\""))
+            };
+            var started = Process.Start(startInfo);
+            if (started == null) return false;
+            process = started;
+            input = started.StandardInput;
+            output = started.StandardOutput;
+            input.AutoFlush = true;
+            started.ErrorDataReceived += (_, eventArgs) =>
+            {
+                if (!string.IsNullOrWhiteSpace(eventArgs.Data)) Console.Error.WriteLine(eventArgs.Data);
+            };
+            started.BeginErrorReadLine();
+            var readyTask = output.ReadLineAsync();
+            if (!readyTask.Wait(TimeSpan.FromMinutes(1)) || string.IsNullOrWhiteSpace(readyTask.Result))
+            {
+                Stop();
+                return false;
+            }
+            Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] 已启动常驻SolidWorks会话（PID {process.Id}）");
+            return true;
+        }
+
+        private void Stop()
+        {
+            try { input?.Dispose(); } catch (Exception) { }
+            try { if (process != null && !process.HasExited) process.Kill(); } catch (Exception) { }
+            try { process?.Dispose(); } catch (Exception) { }
+            input = null;
+            output = null;
+            process = null;
+        }
     }
 
     private static async Task WriteJsonAsync(Stream stream, int statusCode, object payload)
@@ -269,6 +394,8 @@ internal static class Program
         public string Kind { get; set; }
         public string FileName { get; set; }
         public string OutputName { get; set; }
+        // 老版本服务端不带该字段，缺省按“需要转出”处理（引用文件只作参考、不转出时明确传 false）。
+        public bool Convert { get; set; } = true;
     }
 
     private sealed class WorkerManifest

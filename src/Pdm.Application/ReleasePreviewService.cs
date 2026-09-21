@@ -163,21 +163,32 @@ public sealed class ReleasePreviewService(
     /// </summary>
     public async Task<ReleasePreviewItem> RetryItemAsync(Guid releasePackageId, Guid documentId, string actor, CancellationToken cancellationToken)
     {
+        var items = await RetryItemsAsync(releasePackageId, [documentId], actor, cancellationToken);
+        return items.First(item => item.DocumentId == documentId);
+    }
+
+    /// <summary>
+    /// 批量重试：多个图档在同一个转换请求里一次性转出（引用树只下发、只解析一次），
+    /// 比逐条重试快一个数量级；同样保留同包其它已转好的预览。
+    /// </summary>
+    public async Task<IReadOnlyList<ReleasePreviewItem>> RetryItemsAsync(Guid releasePackageId, IReadOnlyList<Guid> documentIds, string actor, CancellationToken cancellationToken)
+    {
         var package = await repository.FindReleasePackageAsync(releasePackageId, cancellationToken)
             ?? throw new PdmNotFoundException("发布包不存在。");
         if (package.State != ReleasePackageState.Published) throw new PdmRuleException("只有已发布的发布包可以重试转图。");
         var project = await repository.FindProjectAsync(package.ProjectId, cancellationToken)
             ?? throw new PdmNotFoundException("发布包对应的项目不存在。");
         var sources = await repository.ListReleasePreviewSourcesAsync(releasePackageId, cancellationToken);
-        var source = sources.FirstOrDefault(item => item.DocumentId == documentId)
-            ?? throw new PdmRuleException("该图档不在本次转图范围内。");
+        var wanted = documentIds.ToHashSet();
+        var targets = sources.Where(item => wanted.Contains(item.DocumentId)).ToArray();
+        if (targets.Length == 0) throw new PdmRuleException("所选图档不在本次转图范围内。");
         var vaultRoot = StorageLocationPolicy.Normalize(project.VaultLocation);
         var stagingDirectory = StorageLocationPolicy.ResolveUnder(vaultRoot, Path.Combine(".release-staging", package.Number));
         Directory.CreateDirectory(stagingDirectory);
         await repository.MarkReleasePreviewStateAsync(package.Id, ReleasePreviewState.Running, package.PreviewError, package.PreviewAttempts, timeProvider.GetUtcNow(), cancellationToken);
         try
         {
-            var previews = await previewConverter.GenerateAsync(package, project, [source], stagingDirectory, cancellationToken, keepExistingPreviews: true);
+            var previews = await previewConverter.GenerateAsync(package, project, targets, stagingDirectory, cancellationToken, keepExistingPreviews: true);
             var releasedVersions = await repository.AttachReleasePreviewArtifactsAsync(package.Id, previews, cancellationToken);
             if (releasedVersions.Count == 0)
                 throw new PdmRuleException("该图档还没有正式版本，无法挂接预览；请重新发布后再转图。");
@@ -197,7 +208,7 @@ public sealed class ReleasePreviewService(
             pending.Length == 0 ? null : package.PreviewError,
             pending.Length == 0 ? 0 : package.PreviewAttempts,
             timeProvider.GetUtcNow(), cancellationToken);
-        return items.First(item => item.DocumentId == documentId);
+        return items;
     }
 
     /// <summary>转出目标格式：三维零件/装配体出STEP，2D工程图出PDF。</summary>

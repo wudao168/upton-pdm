@@ -1542,6 +1542,11 @@ export function retryReleasePreviewItem(releasePackageId: string, documentId: st
   return requestJson(`/api/release-packages/${releasePackageId}/preview-items/${documentId}/retry`, { method: 'POST' }, token)
 }
 
+/** 图纸转出批量重试：多个图档合成一次转换请求（引用树只下发一次），比逐条重试快得多。 */
+export function retryReleasePreviewItems(releasePackageId: string, documentIds: string[], token: string): Promise<{ ok: boolean; items: ReleasePreviewItemResult[]; message: string }> {
+  return requestJson(`/api/release-packages/${releasePackageId}/preview-items/retry`, { method: 'POST', body: JSON.stringify({ documentIds }) }, token)
+}
+
 /** 图纸转出打包下载：把选中的（或全部）STEP/PDF 打成 zip 下载。 */
 export async function downloadReleasePreviewArchive(projectId: string, releasePackageId: string | undefined, documentIds: string[], token: string): Promise<void> {
   const response = await fetch(`${apiBase}/api/projects/${projectId}/release-preview-items/archive`, {

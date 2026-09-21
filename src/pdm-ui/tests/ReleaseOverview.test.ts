@@ -6,6 +6,7 @@ import type { ManufacturingBomBaseline, ReleasePackageSummary, ReleasePreviewIte
 const api = vi.hoisted(() => ({
   listReleasePreviewItems: vi.fn(),
   retryReleasePreviewItem: vi.fn(),
+  retryReleasePreviewItems: vi.fn(),
   downloadReleasePreviewArchive: vi.fn(),
 }))
 vi.mock('../src/api', () => api)
@@ -85,14 +86,14 @@ describe('ReleaseOverview', () => {
     await flushPromises()
     expect(api.retryReleasePreviewItem).toHaveBeenCalledWith('release-published', 'doc-2', 'token')
 
-    // 勾选失败项后可以批量重试
-    api.retryReleasePreviewItem.mockClear()
+    // 勾选失败项后批量重试：同一发布包的多个图档只发一次请求（引用树只下发一次）
+    api.retryReleasePreviewItems.mockResolvedValue({ ok: true, items: [previewItem({ documentId: 'doc-2', succeeded: true, error: null })], message: '已重新转出 1 项。' })
     await table.find('input[aria-label="选择 7080113.00-02"]').setValue(true)
     await flushPromises()
     await wrapper.findAll('button').find(button => button.text().includes('重试选中'))!.trigger('click')
     await flushPromises()
-    expect(api.retryReleasePreviewItem).toHaveBeenCalledTimes(1)
-    expect(api.retryReleasePreviewItem).toHaveBeenCalledWith('release-published', 'doc-2', 'token')
+    expect(api.retryReleasePreviewItems).toHaveBeenCalledTimes(1)
+    expect(api.retryReleasePreviewItems).toHaveBeenCalledWith('release-published', ['doc-2'], 'token')
 
     // 多选后“下载选中”，或“全部下载”，都以压缩包形式下载
     await table.find('input[aria-label="选择 7080113.00-01"]').setValue(true)
