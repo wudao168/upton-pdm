@@ -36,17 +36,18 @@ public sealed class MySqlEngineeringKitRepository : IEngineeringKitRepository
         if (expectedRowVersion is null)
         {
             await connection.ExecuteAsync(new CommandDefinition("""
-                INSERT INTO engineering_kit(id,kit_code,kit_model,name,brand,description,current_released_revision_id,created_by,created_at,updated_by,updated_at,row_version)
-                VALUES(@Id,NULL,NULL,@Name,@Brand,@Description,NULL,@CreatedBy,@CreatedAt,@UpdatedBy,@UpdatedAt,1)
-                """, new { kit.Id, kit.Name, kit.Brand, kit.Description, kit.CreatedBy, CreatedAt = kit.CreatedAt.UtcDateTime, kit.UpdatedBy, UpdatedAt = kit.UpdatedAt.UtcDateTime }, transaction, cancellationToken: cancellationToken));
+                INSERT INTO engineering_kit(id,kit_code,kit_model,model_mode,standard_code,category_code,name,brand,description,current_released_revision_id,created_by,created_at,updated_by,updated_at,row_version)
+                VALUES(@Id,NULL,@KitModel,@ModelMode,@StandardCode,@CategoryCode,@Name,@Brand,@Description,NULL,@CreatedBy,@CreatedAt,@UpdatedBy,@UpdatedAt,1)
+                """, new { kit.Id, KitModel = kit.ModelMode == EngineeringKitModelMode.Auto ? null : kit.Model, ModelMode = kit.ModelMode.ToString(), kit.StandardCode, kit.CategoryCode, kit.Name, kit.Brand, kit.Description, kit.CreatedBy, CreatedAt = kit.CreatedAt.UtcDateTime, kit.UpdatedBy, UpdatedAt = kit.UpdatedAt.UtcDateTime }, transaction, cancellationToken: cancellationToken));
         }
         else
         {
             var affected = await connection.ExecuteAsync(new CommandDefinition("""
                 UPDATE engineering_kit
-                SET name=@Name,brand=@Brand,description=@Description,updated_by=@UpdatedBy,updated_at=@UpdatedAt,row_version=row_version+1
+                SET kit_model=@KitModel,model_mode=@ModelMode,standard_code=@StandardCode,category_code=@CategoryCode,
+                    name=@Name,brand=@Brand,description=@Description,updated_by=@UpdatedBy,updated_at=@UpdatedAt,row_version=row_version+1
                 WHERE id=@Id AND row_version=@ExpectedRowVersion
-                """, new { kit.Id, kit.Name, kit.Brand, kit.Description, kit.UpdatedBy, UpdatedAt = kit.UpdatedAt.UtcDateTime, ExpectedRowVersion = expectedRowVersion.Value }, transaction, cancellationToken: cancellationToken));
+                """, new { kit.Id, KitModel = kit.ModelMode == EngineeringKitModelMode.Auto ? null : kit.Model, ModelMode = kit.ModelMode.ToString(), kit.StandardCode, kit.CategoryCode, kit.Name, kit.Brand, kit.Description, kit.UpdatedBy, UpdatedAt = kit.UpdatedAt.UtcDateTime, ExpectedRowVersion = expectedRowVersion.Value }, transaction, cancellationToken: cancellationToken));
             if (affected == 0) throw new PdmConflictException("套件已被其他用户修改，请刷新后重试。");
         }
 
@@ -90,6 +91,7 @@ public sealed class MySqlEngineeringKitRepository : IEngineeringKitRepository
             new { KitId = kitId }, transaction, cancellationToken: cancellationToken)) ?? throw new PdmRuleException("套件没有待发布草稿。");
 
         var code = kit.KitCode;
+        long? sequence = null;
         if (string.IsNullOrWhiteSpace(code))
         {
             await connection.ExecuteAsync(new CommandDefinition(
@@ -99,16 +101,23 @@ public sealed class MySqlEngineeringKitRepository : IEngineeringKitRepository
             var next = checked(current + 1);
             await connection.ExecuteAsync(new CommandDefinition(
                 "UPDATE engineering_kit_counter SET current_sequence=@Next WHERE counter_id=1", new { Next = next }, transaction, cancellationToken: cancellationToken));
+            sequence = next;
             code = $"UKIT-{next:D6}";
         }
+        // 型号：手动填写的直接用；自动生成时按“标准代码-分类代码-序列号”，未维护代码则退回套件料号。
+        var model = !string.IsNullOrWhiteSpace(kit.KitModel)
+            ? kit.KitModel.Trim()
+            : sequence.HasValue && !string.IsNullOrWhiteSpace(kit.StandardCode) && !string.IsNullOrWhiteSpace(kit.CategoryCode)
+                ? $"{kit.StandardCode.Trim()}-{kit.CategoryCode.Trim()}-{sequence.Value:D6}"
+                : code;
 
         await connection.ExecuteAsync(new CommandDefinition("""
             UPDATE engineering_kit_revision SET revision_state='Released',published_by=@Actor,published_at=@PublishedAt WHERE id=@RevisionId
             """, new { Actor = actor, PublishedAt = publishedAt.UtcDateTime, RevisionId = draft.Id }, transaction, cancellationToken: cancellationToken));
         await connection.ExecuteAsync(new CommandDefinition("""
-            UPDATE engineering_kit SET kit_code=@Code,kit_model=@Code,current_released_revision_id=@RevisionId,updated_by=@Actor,updated_at=@PublishedAt,row_version=row_version+1
+            UPDATE engineering_kit SET kit_code=@Code,kit_model=@Model,current_released_revision_id=@RevisionId,updated_by=@Actor,updated_at=@PublishedAt,row_version=row_version+1
             WHERE id=@KitId
-            """, new { Code = code, RevisionId = draft.Id, Actor = actor, PublishedAt = publishedAt.UtcDateTime, KitId = kitId }, transaction, cancellationToken: cancellationToken));
+            """, new { Code = code, Model = model, RevisionId = draft.Id, Actor = actor, PublishedAt = publishedAt.UtcDateTime, KitId = kitId }, transaction, cancellationToken: cancellationToken));
         await transaction.CommitAsync(cancellationToken);
         return (await FindAsync(kitId, cancellationToken))!;
     }
@@ -143,7 +152,9 @@ public sealed class MySqlEngineeringKitRepository : IEngineeringKitRepository
 
     private static EngineeringKit MapKit(KitRow row, IReadOnlyList<EngineeringKitRevision> revisions) =>
         new(row.Id, row.KitCode, row.KitModel, row.Name, row.Brand, row.Description, row.CurrentReleasedRevisionId, revisions,
-            row.CreatedBy, Utc(row.CreatedAt), row.UpdatedBy, Utc(row.UpdatedAt), row.RowVersion);
+            row.CreatedBy, Utc(row.CreatedAt), row.UpdatedBy, Utc(row.UpdatedAt), row.RowVersion,
+            Enum.TryParse<EngineeringKitModelMode>(row.ModelMode, true, out var mode) ? mode : EngineeringKitModelMode.Auto,
+            row.StandardCode, row.CategoryCode);
 
     private static EngineeringKitRevision MapRevision(RevisionRow row, IReadOnlyList<EngineeringKitComponent> components) =>
         new(row.Id, row.KitId, row.VersionNo, Enum.Parse<EngineeringKitRevisionState>(row.RevisionState), row.ChangeNote,
@@ -155,7 +166,7 @@ public sealed class MySqlEngineeringKitRepository : IEngineeringKitRepository
     private static DateTimeOffset Utc(DateTime value) => new(DateTime.SpecifyKind(value, DateTimeKind.Utc));
 
     private const string KitSelect = """
-        SELECT k.id,k.kit_code,k.kit_model,k.name,k.brand,k.description,k.current_released_revision_id,k.created_by,k.created_at,k.updated_by,k.updated_at,k.row_version
+        SELECT k.id,k.kit_code,k.kit_model,k.model_mode,k.standard_code,k.category_code,k.name,k.brand,k.description,k.current_released_revision_id,k.created_by,k.created_at,k.updated_by,k.updated_at,k.row_version
         FROM engineering_kit k
         """;
 
@@ -169,6 +180,9 @@ public sealed class MySqlEngineeringKitRepository : IEngineeringKitRepository
         public Guid Id { get; init; }
         public string? KitCode { get; init; }
         public string? KitModel { get; init; }
+        public string? ModelMode { get; init; }
+        public string? StandardCode { get; init; }
+        public string? CategoryCode { get; init; }
         public string Name { get; init; } = string.Empty;
         public string Brand { get; init; } = string.Empty;
         public string? Description { get; init; }

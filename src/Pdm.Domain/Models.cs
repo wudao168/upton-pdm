@@ -188,6 +188,8 @@ public sealed record PdmSystemSettings(string VaultRoot, string ReleaseRoot)
 
     public ProgramTemplateOptionCatalog ProgramTemplateOptions { get; init; } = ProgramTemplateOptionCatalog.Empty;
 
+    public EngineeringKitOptionCatalog EngineeringKitOptions { get; init; } = EngineeringKitOptionCatalog.Empty;
+
     public FormalSupplementPolicies FormalSupplementPolicies { get; init; } = FormalSupplementPolicies.Default;
 
     public DrawingQrPolicy DrawingQrPolicy { get; init; } = DrawingQrPolicy.Default;

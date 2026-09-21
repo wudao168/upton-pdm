@@ -765,6 +765,14 @@ export interface EngineeringKit {
   updatedBy: string
   updatedAt: string
   rowVersion: number
+  modelMode?: 'Auto' | 'Manual'
+  standardCode?: string | null
+  categoryCode?: string | null
+}
+
+export interface EngineeringKitOptionCatalog {
+  standardCodes: string[]
+  categoryCodes: string[]
 }
 
 export interface EngineeringKitExpansionLine {

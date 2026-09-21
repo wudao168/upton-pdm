@@ -194,7 +194,8 @@ public sealed partial class MySqlPdmRepository
             FormalSupplementPolicies = ReadFormalSupplementPolicies(values),
             DrawingQrPolicy = ReadDrawingQrPolicy(values),
             PreviewConversion = ReadPreviewConversion(values),
-            ProgramTemplateOptions = ReadProgramTemplateOptions(values)
+            ProgramTemplateOptions = ReadProgramTemplateOptions(values),
+            EngineeringKitOptions = ReadEngineeringKitOptions(values)
         };
         return BomPropertyMappingCatalog.Apply(settings);
     }
@@ -235,7 +236,8 @@ public sealed partial class MySqlPdmRepository
             new { Key = "formal_supplement_policies", Value = JsonSerializer.Serialize(settings.FormalSupplementPolicies, jsonOptions) },
             new { Key = "drawing_qr_policy", Value = JsonSerializer.Serialize(settings.DrawingQrPolicy, jsonOptions) },
             new { Key = "preview_conversion", Value = JsonSerializer.Serialize(settings.PreviewConversion, jsonOptions) },
-            new { Key = "program_template_options", Value = JsonSerializer.Serialize(settings.ProgramTemplateOptions, jsonOptions) }
+            new { Key = "program_template_options", Value = JsonSerializer.Serialize(settings.ProgramTemplateOptions, jsonOptions) },
+            new { Key = "engineering_kit_options", Value = JsonSerializer.Serialize(settings.EngineeringKitOptions, jsonOptions) }
         })
         {
             await connection.ExecuteAsync(new CommandDefinition(
@@ -283,6 +285,19 @@ public sealed partial class MySqlPdmRepository
         }
     }
 
+    private EngineeringKitOptionCatalog ReadEngineeringKitOptions(IReadOnlyDictionary<string, string> values)
+    {
+        if (!values.TryGetValue("engineering_kit_options", out var json) || string.IsNullOrWhiteSpace(json))
+            return EngineeringKitOptionCatalog.Empty;
+        try
+        {
+            return JsonSerializer.Deserialize<EngineeringKitOptionCatalog>(json, jsonOptions) ?? EngineeringKitOptionCatalog.Empty;
+        }
+        catch (JsonException)
+        {
+            return EngineeringKitOptionCatalog.Empty;
+        }
+    }
     private ProgramTemplateOptionCatalog ReadProgramTemplateOptions(IReadOnlyDictionary<string, string> values)
     {
         if (!values.TryGetValue("program_template_options", out var json) || string.IsNullOrWhiteSpace(json))

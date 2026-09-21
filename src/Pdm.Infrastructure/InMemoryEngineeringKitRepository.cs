@@ -49,10 +49,16 @@ public sealed class InMemoryEngineeringKitRepository : IEngineeringKitRepository
             var released = draft with { State = EngineeringKitRevisionState.Released, PublishedBy = actor, PublishedAt = publishedAt };
             var revisions = current.Revisions.Select(item => item.Id == draft.Id ? released : item).ToArray();
             var code = current.Code ?? $"UKIT-{++currentSequence:D6}";
+            var sequence = currentSequence;
+            var model = !string.IsNullOrWhiteSpace(current.Model)
+                ? current.Model.Trim()
+                : string.IsNullOrWhiteSpace(current.StandardCode) || string.IsNullOrWhiteSpace(current.CategoryCode)
+                    ? code
+                    : $"{current.StandardCode.Trim()}-{current.CategoryCode.Trim()}-{sequence:D6}";
             var saved = current with
             {
                 Code = code,
-                Model = code,
+                Model = model,
                 CurrentReleasedRevisionId = released.Id,
                 Revisions = revisions,
                 UpdatedBy = actor,

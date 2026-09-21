@@ -22,6 +22,18 @@ public static class EngineeringKitEndpointExtensions
             return Results.Ok(await service.GetAsync(kitId, actor, role, cancellationToken));
         });
 
+        api.MapGet("/options", async (HttpContext context, EngineeringKitService service, CancellationToken cancellationToken) =>
+        {
+            var (actor, role) = CurrentUser(context.User);
+            return Results.Ok(await service.GetOptionCatalogAsync(actor, role, cancellationToken));
+        });
+
+        api.MapPut("/options", async (EngineeringKitOptionCatalog request, HttpContext context, EngineeringKitService service, CancellationToken cancellationToken) =>
+        {
+            var (actor, role) = CurrentUser(context.User);
+            return Results.Ok(await service.SaveOptionCatalogAsync(request, actor, role, cancellationToken));
+        });
+
         api.MapPost("/", async (SaveEngineeringKitRequest request, HttpContext context, EngineeringKitService service, CancellationToken cancellationToken) =>
         {
             var (actor, role) = CurrentUser(context.User);
@@ -66,9 +78,19 @@ public sealed record SaveEngineeringKitRequest(
     string? Description,
     string? ChangeNote,
     IReadOnlyList<SaveEngineeringKitComponentRequest> Components,
+    string? ModelMode = null,
+    string? Model = null,
+    string? StandardCode = null,
+    string? CategoryCode = null,
     long? ExpectedRowVersion = null)
 {
-    public SaveEngineeringKitDraftCommand ToCommand() => new(Name, Brand, Description, ChangeNote, Components.Select(item => item.ToCommand()).ToArray(), ExpectedRowVersion);
+    public SaveEngineeringKitDraftCommand ToCommand() => new(Name, Brand, Description, ChangeNote,
+        Components.Select(item => item.ToCommand()).ToArray(),
+        ExpectedRowVersion,
+        string.Equals(ModelMode, nameof(EngineeringKitModelMode.Manual), StringComparison.OrdinalIgnoreCase)
+            ? EngineeringKitModelMode.Manual
+            : EngineeringKitModelMode.Auto,
+        Model, StandardCode, CategoryCode);
 }
 
 public sealed record PublishEngineeringKitRequest(long ExpectedRowVersion);

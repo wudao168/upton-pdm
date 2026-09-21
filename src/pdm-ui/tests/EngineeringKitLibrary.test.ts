@@ -8,6 +8,8 @@ const api = vi.hoisted(() => ({
   listMaterials: vi.fn(),
   saveEngineeringKit: vi.fn(),
   publishEngineeringKit: vi.fn(),
+  getEngineeringKitOptions: vi.fn(),
+  saveEngineeringKitOptions: vi.fn(),
 }))
 vi.mock('../src/api', () => api)
 
@@ -28,6 +30,8 @@ describe('EngineeringKitLibrary', () => {
     vi.restoreAllMocks()
     api.listEngineeringKits.mockReset().mockResolvedValue([kit])
     api.listMaterials.mockReset().mockResolvedValue([])
+    api.getEngineeringKitOptions.mockReset().mockResolvedValue({ standardCodes: ['GB'], categoryCodes: ['0102'] })
+    api.saveEngineeringKitOptions.mockReset()
     api.saveEngineeringKit.mockReset()
     api.publishEngineeringKit.mockReset().mockResolvedValue({ ...kit, rowVersion: 4 })
   })
@@ -53,6 +57,10 @@ describe('EngineeringKitLibrary', () => {
 
     expect(wrapper.text()).toContain('套件主项为虚拟对象')
     expect(wrapper.text()).toContain('发布时生成')
+    expect(wrapper.text()).toContain('备注信息')
+    expect(wrapper.text()).toContain('标准代码')
+    expect(wrapper.text()).toContain('分类代码')
+    expect(wrapper.findAll('th').map(cell => cell.text())).toContain('备注')
     expect(wrapper.find('.engineering-kit-group-name').exists()).toBe(true)
     expect((wrapper.find('.engineering-kit-group-name input').element as HTMLInputElement).value).toBe('套件明细')
     expect(wrapper.text()).not.toContain('添加明细组')

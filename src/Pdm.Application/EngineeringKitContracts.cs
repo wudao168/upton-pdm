@@ -14,7 +14,11 @@ public sealed record SaveEngineeringKitDraftCommand(
     string? Description,
     string? ChangeNote,
     IReadOnlyList<SaveEngineeringKitComponentCommand> Components,
-    long? ExpectedRowVersion = null);
+    long? ExpectedRowVersion = null,
+    EngineeringKitModelMode ModelMode = EngineeringKitModelMode.Auto,
+    string? Model = null,
+    string? StandardCode = null,
+    string? CategoryCode = null);
 
 public sealed record ExpandEngineeringKitCommand(
     Guid? RevisionId,

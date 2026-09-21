@@ -20,6 +20,41 @@ public sealed class EngineeringKitService(
         return await kits.FindAsync(kitId, cancellationToken) ?? throw new PdmNotFoundException("套件不存在。");
     }
 
+    /// <summary>套件型号自动生成用的标准代码/分类代码选项：查看权限即可读取。</summary>
+    public async Task<EngineeringKitOptionCatalog> GetOptionCatalogAsync(string actor, UserRole role, CancellationToken cancellationToken)
+    {
+        await RequireAsync(actor, role, PermissionCodes.StandardLibraryView, cancellationToken);
+        var settings = await repository.GetSystemSettingsAsync(cancellationToken);
+        return settings.EngineeringKitOptions;
+    }
+
+    /// <summary>维护标准代码/分类代码选项：需要标准库管理权限。</summary>
+    public async Task<EngineeringKitOptionCatalog> SaveOptionCatalogAsync(EngineeringKitOptionCatalog catalog, string actor, UserRole role, CancellationToken cancellationToken)
+    {
+        await RequireAsync(actor, role, PermissionCodes.StandardLibraryManage, cancellationToken);
+        var normalized = new EngineeringKitOptionCatalog(
+            NormalizeCodes(catalog?.StandardCodes, "标准代码"),
+            NormalizeCodes(catalog?.CategoryCodes, "分类代码"));
+        var settings = await repository.GetSystemSettingsAsync(cancellationToken);
+        await repository.UpdateSystemSettingsAsync(settings with { EngineeringKitOptions = normalized }, cancellationToken);
+        await AuditAsync(actor, "engineering-kit.options.update", Guid.Empty, $"标准代码{normalized.StandardCodes.Count}项、分类代码{normalized.CategoryCodes.Count}项", cancellationToken);
+        return normalized;
+    }
+
+    private static IReadOnlyList<string> NormalizeCodes(IReadOnlyList<string>? values, string label)
+    {
+        var normalized = new List<string>();
+        foreach (var value in values ?? [])
+        {
+            var trimmed = value?.Trim();
+            if (string.IsNullOrWhiteSpace(trimmed)) continue;
+            if (trimmed.Length > 32) throw new PdmRuleException($"{label}不能超过32个字符。");
+            if (!normalized.Contains(trimmed, StringComparer.OrdinalIgnoreCase)) normalized.Add(trimmed);
+        }
+        if (normalized.Count > 200) throw new PdmRuleException($"{label}最多维护200项。");
+        return normalized;
+    }
+
     public async Task<EngineeringKit> SaveDraftAsync(Guid? kitId, SaveEngineeringKitDraftCommand command, string actor, UserRole role, CancellationToken cancellationToken)
     {
         await RequireAsync(actor, role, PermissionCodes.StandardLibraryManage, cancellationToken);
@@ -27,6 +62,22 @@ public sealed class EngineeringKitService(
         var brand = Required(command.Brand, 160, "套件品牌");
         var description = Optional(command.Description, 500, "套件说明");
         var changeNote = Optional(command.ChangeNote, 500, "变更说明");
+        // 型号可手动填写，也可按“标准代码-分类代码-序列号”在首次发布时自动生成。
+        var manualModel = command.ModelMode == EngineeringKitModelMode.Manual
+            ? Required(command.Model ?? string.Empty, 160, "套件型号")
+            : Optional(command.Model, 160, "套件型号");
+        var standardCode = Optional(command.StandardCode, 32, "标准代码");
+        var categoryCode = Optional(command.CategoryCode, 32, "分类代码");
+        if (command.ModelMode == EngineeringKitModelMode.Auto && manualModel is null)
+        {
+            // 已经生成过型号的套件（存量数据）允许不带代码继续维护；尚未生成型号的必须选好标准代码与分类代码。
+            var existingModel = kitId is null ? null : (await kits.FindAsync(kitId.Value, cancellationToken))?.Model;
+            if (string.IsNullOrWhiteSpace(existingModel))
+            {
+                if (standardCode is null) throw new PdmRuleException("选择自动生成型号时必须填写标准代码。");
+                if (categoryCode is null) throw new PdmRuleException("选择自动生成型号时必须填写分类代码。");
+            }
+        }
         var normalized = command.Components.OrderBy(item => item.SortOrder).ToArray();
         if (normalized.Length == 0) throw new PdmRuleException("套件至少需要一个明细物料。");
         if (normalized.Any(item => item.IsOptional)) throw new PdmRuleException("套件明细全部为固定组成物料，不支持可选子料。");
@@ -52,7 +103,8 @@ public sealed class EngineeringKitService(
             var revisionId = Guid.NewGuid();
             revision = new(revisionId, id, 1, EngineeringKitRevisionState.Draft, changeNote,
                 Components(revisionId, normalized, materialRows), actor, now, null, null);
-            kit = new(id, null, null, name, brand, description, null, [revision], actor, now, actor, now, 1);
+            kit = new(id, null, manualModel, name, brand, description, null, [revision], actor, now, actor, now, 1,
+                command.ModelMode, standardCode, categoryCode);
         }
         else
         {
@@ -63,7 +115,18 @@ public sealed class EngineeringKitService(
             var revisionId = draft?.Id ?? Guid.NewGuid();
             revision = new(revisionId, current.Id, versionNumber, EngineeringKitRevisionState.Draft, changeNote,
                 Components(revisionId, normalized, materialRows), draft?.CreatedBy ?? actor, draft?.CreatedAt ?? now, null, null);
-            kit = current with { Name = name, Brand = brand, Description = description, UpdatedBy = actor, UpdatedAt = now };
+            kit = current with
+            {
+                Model = manualModel,
+                ModelMode = command.ModelMode,
+                StandardCode = standardCode,
+                CategoryCode = categoryCode,
+                Name = name,
+                Brand = brand,
+                Description = description,
+                UpdatedBy = actor,
+                UpdatedAt = now
+            };
         }
 
         var saved = await kits.SaveDraftAsync(kit, revision, command.ExpectedRowVersion, cancellationToken);
