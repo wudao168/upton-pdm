@@ -29,6 +29,7 @@ public sealed class FullWorkflowAcceptanceTests
         await CreateUserAsync(workflow, "qa_pm", "QA项目经理", "ProjectManager", organizationId);
         await CreateUserAsync(workflow, "qa_lead", "QA主设", "MechanicalManager", organizationId);
         await CreateUserAsync(workflow, "qa_engineer", "QA工程师", "Engineer", organizationId);
+        await CreateUserAsync(workflow, "qa_electrical", "QA电气工程师", "HardwareEngineer", organizationId);
         await CreateUserAsync(workflow, "qa_reviewer", "QA图纸审核人", "ProcessReviewer", organizationId);
         await CreateUserAsync(workflow, "qa_approver", "QA批准人", "Approver", organizationId);
         await CreateUserAsync(workflow, "qa_viewer", "QA只读人员", "ProductionViewer", organizationId);
@@ -36,7 +37,7 @@ public sealed class FullWorkflowAcceptanceTests
         var division = await workflow.SaveOrganizationUnitAsync(
             new(null, organizationId, null, $"QA-DIV-{Guid.NewGuid():N}"[..24], "QA隔离测试事业部", OrganizationUnitKind.BusinessDivision, true, 9000, true),
             "admin", UserRole.Administrator, default);
-        foreach (var username in new[] { "qa_bu_manager", "qa_pm", "qa_lead", "qa_engineer", "qa_reviewer", "qa_approver", "qa_viewer" })
+        foreach (var username in new[] { "qa_bu_manager", "qa_pm", "qa_lead", "qa_engineer", "qa_electrical", "qa_reviewer", "qa_approver", "qa_viewer" })
             await workflow.SetOrganizationMembershipsAsync(username, [division.Id], division.Id, "admin", UserRole.Administrator, default);
         await workflow.SetOrganizationUnitManagersAsync(division.Id, "qa_bu_manager", [], "admin", UserRole.Administrator, default);
         // 事业部经理同时是本部门的机械主管，需要具备审图权限才能处理图纸审核的批准节点。
@@ -138,9 +139,12 @@ public sealed class FullWorkflowAcceptanceTests
             (await repository.FindDrawingReviewPackageAsync(review.Id, default))!.State);
 
         var standardBom = await workflow.ReplaceBomAsync(child.Id, BomKind.Standard, [], "qa_engineer", UserRole.Engineer, default);
+        // 三类BOM编辑权限按专业拆分：电气BOM由电气/硬件工程师维护，机械工程师只维护标准件与非标件。
         var electricalBom = await workflow.ReplaceBomAsync(child.Id, BomKind.Electrical,
             [new(1, "QA-EL-001", "QA电气件", 1, "件", null, "24VDC", "W1", true)],
-            "qa_engineer", UserRole.Engineer, default);
+            "qa_electrical", UserRole.Engineer, default);
+        await Assert.ThrowsAsync<UnauthorizedAccessException>(() => workflow.ReplaceBomAsync(
+            child.Id, BomKind.Electrical, [], "qa_engineer", UserRole.Engineer, default));
         var nonStandardBom = await workflow.ReplaceBomAsync(child.Id, BomKind.NonStandard,
             [new(1, "QA-PART-001", "QA测试零件", 1, "件", "Q235B", null, "W1", true, model.Id, "默认",
                 SourceInstancePath: "QA-ASM-ROOT/QA-PART-001")],

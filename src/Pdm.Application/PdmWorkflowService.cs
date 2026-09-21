@@ -2343,7 +2343,7 @@ public sealed class PdmWorkflowService(
         UserRole role,
         CancellationToken cancellationToken)
     {
-        await RequirePermissionAsync(actor, role, PermissionCodes.BomEdit, cancellationToken);
+        await RequireBomEditPermissionAsync(actor, role, kind, cancellationToken);
         if (kind is not (BomKind.Standard or BomKind.NonStandard or BomKind.Electrical))
             throw new PdmRuleException("BOM类型必须是标准件、非标件或电气。");
         _ = await repository.FindProjectAsync(projectId, cancellationToken)
@@ -2549,7 +2549,7 @@ public sealed class PdmWorkflowService(
 
     public async Task<BomGenerationResult> GenerateMechanicalBomAsync(Guid projectId, bool apply, string actor, UserRole role, CancellationToken cancellationToken)
     {
-        await RequirePermissionAsync(actor, role, PermissionCodes.BomEdit, cancellationToken);
+        await RequireBomEditPermissionAsync(actor, role, BomKind.Standard, cancellationToken);
         if (!await repository.HasProjectContentReadAccessAsync(projectId, actor, role, cancellationToken))
             throw new UnauthorizedAccessException("当前用户没有该项目的操作权限。");
         await EnsureBomChangeAllowedAsync(projectId, cancellationToken, BomKind.Standard, BomKind.NonStandard);
@@ -2632,7 +2632,7 @@ public sealed class PdmWorkflowService(
 
     public async Task<IReadOnlyList<BomItem>> ResolveBomItemAsync(Guid projectId, Guid itemId, ResolveBomItemCommand command, string actor, UserRole role, CancellationToken cancellationToken)
     {
-        await RequirePermissionAsync(actor, role, PermissionCodes.BomEdit, cancellationToken);
+        await RequireAnyBomEditPermissionAsync(actor, role, cancellationToken);
         if (!await repository.HasProjectContentReadAccessAsync(projectId, actor, role, cancellationToken))
             throw new UnauthorizedAccessException("当前用户没有该项目的操作权限。");
         var standard = (await repository.GetBomAsync(projectId, BomKind.Standard, cancellationToken)).ToList();
@@ -2642,6 +2642,7 @@ public sealed class PdmWorkflowService(
         var validationRules = (await repository.GetSystemSettingsAsync(cancellationToken)).ValidationRules;
         var item = standard.Concat(nonStandard).Concat(unclassified).Concat(electrical).FirstOrDefault(candidate => candidate.Id == itemId)
             ?? throw new PdmNotFoundException("BOM物料不存在。");
+        await RequireBomEditPermissionAsync(actor, role, new[] { item.Kind, command.TargetKind ?? item.Kind }, cancellationToken);
         await EnsureBomChangeAllowedAsync(projectId, cancellationToken, item.Kind, command.TargetKind ?? item.Kind);
         var now = timeProvider.GetUtcNow();
         standard.RemoveAll(candidate => candidate.Id == itemId);
@@ -2714,7 +2715,7 @@ public sealed class PdmWorkflowService(
 
     public async Task<IReadOnlyList<BomItem>> BatchUpdateBomItemsAsync(Guid projectId, BatchUpdateBomItemsCommand command, string actor, UserRole role, CancellationToken cancellationToken)
     {
-        await RequirePermissionAsync(actor, role, PermissionCodes.BomEdit, cancellationToken);
+        await RequireAnyBomEditPermissionAsync(actor, role, cancellationToken);
         if (!await repository.HasProjectContentReadAccessAsync(projectId, actor, role, cancellationToken))
             throw new UnauthorizedAccessException("当前用户没有该项目的操作权限。");
         var itemIds = command.ItemIds.Distinct().ToArray();
@@ -2756,6 +2757,7 @@ public sealed class PdmWorkflowService(
         var validationRules = (await repository.GetSystemSettingsAsync(cancellationToken)).ValidationRules;
         var originals = standard.Concat(nonStandard).Concat(unclassified).Concat(electrical).Concat(virtualItems).Where(item => itemIds.Contains(item.Id)).ToDictionary(item => item.Id);
         if (originals.Count != itemIds.Length) throw new PdmNotFoundException("选中的BOM物料已变化，请刷新后重新选择。");
+        await RequireBomEditPermissionAsync(actor, role, originals.Values.Select(item => item.Kind).Append(command.TargetKind ?? originals.Values.First().Kind), cancellationToken);
         await EnsureBomChangeAllowedAsync(projectId, cancellationToken, originals.Values.Select(item => item.Kind).Append(command.TargetKind ?? originals.Values.First().Kind).ToArray());
         if (originals.Values.Any(item => item.IsManuallyExcluded))
             throw new PdmRuleException("回收站中的物料不能直接编辑，请先执行恢复。");
@@ -2868,7 +2870,7 @@ public sealed class PdmWorkflowService(
 
     public async Task<IReadOnlyList<BomItem>> RestoreBomItemsFromSourceAsync(Guid projectId, RestoreBomItemsFromSourceCommand command, string actor, UserRole role, CancellationToken cancellationToken)
     {
-        await RequirePermissionAsync(actor, role, PermissionCodes.BomEdit, cancellationToken);
+        await RequireAnyBomEditPermissionAsync(actor, role, cancellationToken);
         if (!await repository.HasProjectContentReadAccessAsync(projectId, actor, role, cancellationToken))
             throw new UnauthorizedAccessException("当前用户没有该项目的操作权限。");
         var itemIds = command.ItemIds.Distinct().ToArray();
@@ -2881,6 +2883,7 @@ public sealed class PdmWorkflowService(
         var virtualItems = (await repository.GetBomAsync(projectId, BomKind.Virtual, cancellationToken)).ToArray();
         var originals = standard.Concat(nonStandard).Where(item => itemIds.Contains(item.Id)).ToDictionary(item => item.Id);
         if (originals.Count != itemIds.Length) throw new PdmRuleException("只能恢复标准件BOM或非标件BOM中的物料。");
+        await RequireBomEditPermissionAsync(actor, role, originals.Values.Select(item => item.Kind), cancellationToken);
         await EnsureBomChangeAllowedAsync(projectId, cancellationToken, originals.Values.Select(item => item.Kind).ToArray());
         if (originals.Values.Any(item => !item.SourceDocumentId.HasValue))
             throw new PdmRuleException("人工新增物料没有图档源数据，不能执行恢复源数据。");
@@ -2981,7 +2984,7 @@ public sealed class PdmWorkflowService(
 
     private async Task<BomSourceReclassificationPlan> PrepareBomSourceReclassificationAsync(Guid projectId, ReclassifyBomItemsFromSourceCommand command, string actor, UserRole role, CancellationToken cancellationToken)
     {
-        await RequirePermissionAsync(actor, role, PermissionCodes.BomEdit, cancellationToken);
+        await RequireBomEditPermissionAsync(actor, role, BomKind.Standard, cancellationToken);
         if (!await repository.HasProjectContentReadAccessAsync(projectId, actor, role, cancellationToken))
             throw new UnauthorizedAccessException("当前用户没有该项目的操作权限。");
         if (command.TargetKind is not (BomKind.Standard or BomKind.NonStandard))
@@ -3079,7 +3082,7 @@ public sealed class PdmWorkflowService(
         UserRole role,
         CancellationToken cancellationToken)
     {
-        await RequirePermissionAsync(actor, role, PermissionCodes.BomEdit, cancellationToken);
+        await RequireAnyBomEditPermissionAsync(actor, role, cancellationToken);
         if (!await repository.HasProjectContentReadAccessAsync(projectId, actor, role, cancellationToken))
             throw new UnauthorizedAccessException("当前用户没有该项目的操作权限。");
         var itemIds = command.ItemIds.Distinct().ToHashSet();
@@ -3097,6 +3100,7 @@ public sealed class PdmWorkflowService(
         var all = standard.Concat(nonStandard).Concat(electrical).ToArray();
         var selected = all.Where(item => itemIds.Contains(item.Id)).ToArray();
         if (selected.Length != itemIds.Count) throw new PdmNotFoundException("选中的BOM物料已变化，请刷新后重新选择。");
+        await RequireBomEditPermissionAsync(actor, role, selected.Select(item => item.Kind), cancellationToken);
         if (selected.Any(item => item.IsManuallyExcluded)) throw new PdmRuleException("回收站物料不能设置发布状态，请先恢复物料。");
         if (command.Excluded && selected.Any(item => item.IsReleaseExcluded))
             throw new PdmRuleException("选中的物料中包含已设置为不发布的物料，请分开处理。");
@@ -3129,7 +3133,7 @@ public sealed class PdmWorkflowService(
 
     public async Task<IReadOnlyList<BomItem>> BatchDeleteBomItemsAsync(Guid projectId, BatchDeleteBomItemsCommand command, string actor, UserRole role, CancellationToken cancellationToken)
     {
-        await RequirePermissionAsync(actor, role, PermissionCodes.BomEdit, cancellationToken);
+        await RequireAnyBomEditPermissionAsync(actor, role, cancellationToken);
         if (!await repository.HasProjectContentReadAccessAsync(projectId, actor, role, cancellationToken))
             throw new UnauthorizedAccessException("当前用户没有该项目的操作权限。");
         var itemIds = command.ItemIds.Distinct().ToHashSet();
@@ -3145,6 +3149,7 @@ public sealed class PdmWorkflowService(
         var all = standard.Concat(nonStandard).Concat(unclassified).Concat(electrical).ToArray();
         var selected = all.Where(item => itemIds.Contains(item.Id)).ToArray();
         if (selected.Length != itemIds.Count) throw new PdmNotFoundException("选中的BOM物料已变化，请刷新后重新选择。");
+        await RequireBomEditPermissionAsync(actor, role, selected.Select(item => item.Kind), cancellationToken);
         await EnsureBomChangeAllowedAsync(projectId, cancellationToken, selected.Select(item => item.Kind).ToArray());
         if (selected.Any(item => item.IsManuallyExcluded)) throw new PdmRuleException("选中的BOM物料已在回收站中，请刷新后重试。");
 
@@ -3186,7 +3191,7 @@ public sealed class PdmWorkflowService(
 
     public async Task<IReadOnlyList<BomItem>> BatchRestoreBomItemsAsync(Guid projectId, BatchRestoreBomItemsCommand command, string actor, UserRole role, CancellationToken cancellationToken)
     {
-        await RequirePermissionAsync(actor, role, PermissionCodes.BomEdit, cancellationToken);
+        await RequireAnyBomEditPermissionAsync(actor, role, cancellationToken);
         if (!await repository.HasProjectContentReadAccessAsync(projectId, actor, role, cancellationToken))
             throw new UnauthorizedAccessException("当前用户没有该项目的操作权限。");
         var itemIds = command.ItemIds.Distinct().ToHashSet();
@@ -3203,6 +3208,7 @@ public sealed class PdmWorkflowService(
         var all = standard.Concat(nonStandard).Concat(unclassified).Concat(electrical).ToArray();
         var selected = all.Where(item => itemIds.Contains(item.Id)).ToArray();
         if (selected.Length != itemIds.Count) throw new PdmNotFoundException("选中的回收站物料已变化，请刷新后重新选择。");
+        await RequireBomEditPermissionAsync(actor, role, selected.Select(item => item.Kind), cancellationToken);
         await EnsureBomChangeAllowedAsync(projectId, cancellationToken, selected.Select(item => item.Kind).ToArray());
         if (selected.Any(item => !item.IsManuallyExcluded)) throw new PdmRuleException("选中的物料不在回收站中，请刷新后重试。");
         if (mode == "AsManual" && selected.Any(item => !item.SourceDocumentId.HasValue))
@@ -3883,7 +3889,7 @@ public sealed class PdmWorkflowService(
 
     public async Task<BomEmptyDeclaration> SetBomEmptyDeclarationAsync(Guid projectId, BomKind kind, bool declaredEmpty, string actor, UserRole role, CancellationToken cancellationToken)
     {
-        await RequirePermissionAsync(actor, role, PermissionCodes.BomEdit, cancellationToken);
+        await RequireBomEditPermissionAsync(actor, role, kind, cancellationToken);
         await EnsureBomChangeAllowedAsync(projectId, cancellationToken, kind);
         if (kind is not (BomKind.Standard or BomKind.NonStandard or BomKind.Electrical))
             throw new PdmRuleException("BOM类型必须是标准件、非标件或电气。");
@@ -5175,6 +5181,27 @@ public sealed class PdmWorkflowService(
     {
         if (!await repository.HasUserPermissionAsync(actor, role, permissionCode, cancellationToken))
             throw new UnauthorizedAccessException("当前角色未配置执行此操作的权限。");
+    }
+
+    /// <summary>三类BOM明细的编辑权限按专业拆分（可在角色权限页面配置）：电气BOM用电气权限，其余用机械权限。</summary>
+    private static string BomEditPermission(BomKind kind) =>
+        kind == BomKind.Electrical ? PermissionCodes.BomElectricalEdit : PermissionCodes.BomMechanicalEdit;
+
+    private async Task RequireBomEditPermissionAsync(string actor, UserRole role, BomKind kind, CancellationToken cancellationToken) =>
+        await RequirePermissionAsync(actor, role, BomEditPermission(kind), cancellationToken);
+
+    private async Task RequireBomEditPermissionAsync(string actor, UserRole role, IEnumerable<BomKind> kinds, CancellationToken cancellationToken)
+    {
+        foreach (var kind in kinds.Distinct())
+            await RequireBomEditPermissionAsync(actor, role, kind, cancellationToken);
+    }
+
+    /// <summary>BOM编辑入口先要求至少具备一类BOM明细编辑权限，具体分类权限在定位到物料后校验。</summary>
+    private async Task RequireAnyBomEditPermissionAsync(string actor, UserRole role, CancellationToken cancellationToken)
+    {
+        if (!await repository.HasUserPermissionAsync(actor, role, PermissionCodes.BomMechanicalEdit, cancellationToken)
+            && !await repository.HasUserPermissionAsync(actor, role, PermissionCodes.BomElectricalEdit, cancellationToken))
+            throw new UnauthorizedAccessException("当前角色未配置维护BOM明细的权限。");
     }
 
     private async Task<PdmDocument> RequireDocumentAsync(Guid documentId, CancellationToken cancellationToken) =>

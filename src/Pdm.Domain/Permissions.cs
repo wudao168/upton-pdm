@@ -17,6 +17,8 @@ public static class PermissionCodes
     public const string DocumentLockRequestRelease = "document.lock.request-release";
     public const string DocumentLockForceRelease = "document.lock.force-release";
     public const string BomEdit = "bom.edit";
+    public const string BomMechanicalEdit = "bom.mechanical.edit";
+    public const string BomElectricalEdit = "bom.electrical.edit";
     public const string ValidationPlanEdit = "validation-plan.edit";
     public const string ValidationCatalogManage = "validation-catalog.manage";
     public const string MaterialView = "material.view";
@@ -65,7 +67,9 @@ public static class RolePermissionCatalog
         new(PermissionCodes.DocumentRecycle, "管理受控图档回收站", "项目内容", "将未发布且无受控引用的图档移入回收站，并可在30天内恢复；已发布图档只能作废。", Sensitive: true),
         new(PermissionCodes.DocumentLockRequestRelease, "催办并申请释放编辑权限", "项目内容"),
         new(PermissionCodes.DocumentLockForceRelease, "强制释放超时编辑权限", "项目内容", "仅限本人负责项目，系统管理员不受项目岗位限制。", Sensitive: true),
-        new(PermissionCodes.BomEdit, "维护项目BOM", "项目内容"),
+        new(PermissionCodes.BomEdit, "维护BOM相关数据", "项目内容", "料品、BOM表头料号与关联配置维护；三类BOM明细的编辑权限见下面两个分类权限。"),
+        new(PermissionCodes.BomMechanicalEdit, "维护标准件与非标件BOM", "项目内容", "维护项目标准件BOM和非标件BOM明细（默认给机械工程师、机械经理、技术助理、调试工程师）。", Sensitive: true),
+        new(PermissionCodes.BomElectricalEdit, "维护电气BOM", "项目内容", "维护项目电气BOM明细（默认给电气工程师、硬件工程师）。", Sensitive: true),
         new(PermissionCodes.ValidationPlanEdit, "维护项目验证计划", "项目内容"),
         new(PermissionCodes.ValidationCatalogManage, "管理验证检查项库", "标准库", "维护全局验证分类和检查项；已被项目引用的内容只能停用，不能删除。", Sensitive: true),
         new(PermissionCodes.MaterialView, "查看料品管理", "料品管理", "查看料品主档、审批状态和U9C同步结果。"),
@@ -111,6 +115,7 @@ public static class RolePermissionCatalog
                 PermissionCodes.DocumentLockRequestRelease,
                 PermissionCodes.DocumentLockForceRelease,
                 PermissionCodes.BomEdit,
+                PermissionCodes.BomMechanicalEdit,
                 PermissionCodes.ValidationPlanEdit,
                 PermissionCodes.MaterialView,
                 PermissionCodes.MaterialApply,
@@ -170,13 +175,13 @@ public static class RolePermissionCatalog
     private static IReadOnlyDictionary<string, IReadOnlySet<string>> InitialRoleDefaults { get; } =
         new Dictionary<string, IReadOnlySet<string>>(StringComparer.OrdinalIgnoreCase)
         {
-            [UserRole.Engineer.ToString()] = Set(PermissionCodes.ProjectView, PermissionCodes.ProjectDesignerAssign, PermissionCodes.ProjectContentView, PermissionCodes.DocumentEdit, PermissionCodes.DocumentLockRequestRelease, PermissionCodes.BomEdit, PermissionCodes.ValidationPlanEdit, PermissionCodes.MaterialView, PermissionCodes.MaterialApply, PermissionCodes.DrawingReviewSubmit, PermissionCodes.DrawingReviewAnnotate, PermissionCodes.ReleaseManage, PermissionCodes.ProgramTemplateView, PermissionCodes.StandardLibraryView, PermissionCodes.MaterialRelationView),
-            ["ElectricalEngineer"] = Set(PermissionCodes.ProjectView, PermissionCodes.ProjectContentView, PermissionCodes.DocumentEdit, PermissionCodes.DocumentLockRequestRelease, PermissionCodes.BomEdit, PermissionCodes.ValidationPlanEdit, PermissionCodes.MaterialView, PermissionCodes.MaterialApply, PermissionCodes.ReleaseManage, PermissionCodes.ProgramTemplateView, PermissionCodes.ProgramTemplateSubmit, PermissionCodes.StandardLibraryView, PermissionCodes.MaterialRelationView),
-            ["CommissioningEngineer"] = Set(PermissionCodes.ProjectView, PermissionCodes.ProjectContentView, PermissionCodes.DocumentEdit, PermissionCodes.DocumentLockRequestRelease, PermissionCodes.BomEdit, PermissionCodes.ValidationPlanEdit, PermissionCodes.MaterialView, PermissionCodes.MaterialApply, PermissionCodes.ProgramTemplateView, PermissionCodes.ProgramTemplateSubmit, PermissionCodes.StandardLibraryView, PermissionCodes.MaterialRelationView),
-            ["HardwareEngineer"] = Set(PermissionCodes.ProjectView, PermissionCodes.ProjectContentView, PermissionCodes.DocumentEdit, PermissionCodes.DocumentLockRequestRelease, PermissionCodes.BomEdit, PermissionCodes.ValidationPlanEdit, PermissionCodes.MaterialView, PermissionCodes.MaterialApply, PermissionCodes.ReleaseManage, PermissionCodes.ProgramTemplateView, PermissionCodes.ProgramTemplateSubmit, PermissionCodes.StandardLibraryView, PermissionCodes.MaterialRelationView),
-            ["MechanicalManager"] = Set(PermissionCodes.ProjectView, PermissionCodes.ProjectDesignerAssign, PermissionCodes.ProjectContentView, PermissionCodes.DocumentEdit, PermissionCodes.DocumentLockRequestRelease, PermissionCodes.DocumentLockForceRelease, PermissionCodes.BomEdit, PermissionCodes.ValidationPlanEdit, PermissionCodes.DrawingReviewAnnotate, PermissionCodes.DrawingReviewDecide, PermissionCodes.ReleaseManage, PermissionCodes.ApprovalDecide, PermissionCodes.ProgramTemplateView, PermissionCodes.StandardLibraryView, PermissionCodes.MaterialRelationView),
+            [UserRole.Engineer.ToString()] = Set(PermissionCodes.ProjectView, PermissionCodes.ProjectDesignerAssign, PermissionCodes.ProjectContentView, PermissionCodes.DocumentEdit, PermissionCodes.DocumentLockRequestRelease, PermissionCodes.BomEdit, PermissionCodes.BomMechanicalEdit, PermissionCodes.ValidationPlanEdit, PermissionCodes.MaterialView, PermissionCodes.MaterialApply, PermissionCodes.DrawingReviewSubmit, PermissionCodes.DrawingReviewAnnotate, PermissionCodes.ReleaseManage, PermissionCodes.ProgramTemplateView, PermissionCodes.StandardLibraryView, PermissionCodes.MaterialRelationView),
+            ["ElectricalEngineer"] = Set(PermissionCodes.ProjectView, PermissionCodes.ProjectContentView, PermissionCodes.DocumentEdit, PermissionCodes.DocumentLockRequestRelease, PermissionCodes.BomEdit, PermissionCodes.BomElectricalEdit, PermissionCodes.ValidationPlanEdit, PermissionCodes.MaterialView, PermissionCodes.MaterialApply, PermissionCodes.ReleaseManage, PermissionCodes.ProgramTemplateView, PermissionCodes.ProgramTemplateSubmit, PermissionCodes.StandardLibraryView, PermissionCodes.MaterialRelationView),
+            ["CommissioningEngineer"] = Set(PermissionCodes.ProjectView, PermissionCodes.ProjectContentView, PermissionCodes.DocumentEdit, PermissionCodes.DocumentLockRequestRelease, PermissionCodes.BomEdit, PermissionCodes.BomMechanicalEdit, PermissionCodes.ValidationPlanEdit, PermissionCodes.MaterialView, PermissionCodes.MaterialApply, PermissionCodes.ProgramTemplateView, PermissionCodes.ProgramTemplateSubmit, PermissionCodes.StandardLibraryView, PermissionCodes.MaterialRelationView),
+            ["HardwareEngineer"] = Set(PermissionCodes.ProjectView, PermissionCodes.ProjectContentView, PermissionCodes.DocumentEdit, PermissionCodes.DocumentLockRequestRelease, PermissionCodes.BomEdit, PermissionCodes.BomElectricalEdit, PermissionCodes.ValidationPlanEdit, PermissionCodes.MaterialView, PermissionCodes.MaterialApply, PermissionCodes.ReleaseManage, PermissionCodes.ProgramTemplateView, PermissionCodes.ProgramTemplateSubmit, PermissionCodes.StandardLibraryView, PermissionCodes.MaterialRelationView),
+            ["MechanicalManager"] = Set(PermissionCodes.ProjectView, PermissionCodes.ProjectDesignerAssign, PermissionCodes.ProjectContentView, PermissionCodes.DocumentEdit, PermissionCodes.DocumentLockRequestRelease, PermissionCodes.DocumentLockForceRelease, PermissionCodes.BomEdit, PermissionCodes.BomMechanicalEdit, PermissionCodes.ValidationPlanEdit, PermissionCodes.DrawingReviewAnnotate, PermissionCodes.DrawingReviewDecide, PermissionCodes.ReleaseManage, PermissionCodes.ApprovalDecide, PermissionCodes.ProgramTemplateView, PermissionCodes.StandardLibraryView, PermissionCodes.MaterialRelationView),
             ["DrawingReviewer"] = Set(PermissionCodes.ProjectView, PermissionCodes.ProjectContentView, PermissionCodes.DrawingReviewAnnotate, PermissionCodes.DrawingReviewDecide),
-            ["TechnicalAssistant"] = Set(PermissionCodes.ProjectView, PermissionCodes.ProjectContentView, PermissionCodes.DocumentEdit, PermissionCodes.DocumentLockRequestRelease, PermissionCodes.BomEdit, PermissionCodes.ValidationPlanEdit, PermissionCodes.MaterialView, PermissionCodes.MaterialApply, PermissionCodes.ProgramTemplateView, PermissionCodes.StandardLibraryView, PermissionCodes.MaterialRelationView),
+            ["TechnicalAssistant"] = Set(PermissionCodes.ProjectView, PermissionCodes.ProjectContentView, PermissionCodes.DocumentEdit, PermissionCodes.DocumentLockRequestRelease, PermissionCodes.BomEdit, PermissionCodes.BomMechanicalEdit, PermissionCodes.ValidationPlanEdit, PermissionCodes.MaterialView, PermissionCodes.MaterialApply, PermissionCodes.ProgramTemplateView, PermissionCodes.StandardLibraryView, PermissionCodes.MaterialRelationView),
             [UserRole.BusinessUnitManager.ToString()] = Set(PermissionCodes.ProjectView, PermissionCodes.ProjectStaffingManage, PermissionCodes.ProjectDesignerAssign, PermissionCodes.ProjectContentView, PermissionCodes.ValidationPlanEdit, PermissionCodes.ApprovalDecide, PermissionCodes.ApprovalEmergencySubstitute, PermissionCodes.ProgramTemplateView, PermissionCodes.ProgramTemplateReview),
             [UserRole.ProcessReviewer.ToString()] = Defaults[UserRole.ProcessReviewer],
             ["ProjectManager"] = Set(PermissionCodes.ProjectView, PermissionCodes.ProjectCreate, PermissionCodes.ProjectEdit, PermissionCodes.ProjectChildCreate, PermissionCodes.ProjectStaffingManage, PermissionCodes.ProjectDesignerAssign, PermissionCodes.ProjectContentView, PermissionCodes.ValidationPlanEdit, PermissionCodes.MaterialView, PermissionCodes.ReleaseManage, PermissionCodes.ProgramTemplateView),
@@ -210,10 +215,12 @@ public static class RolePermissionCatalog
         if (role == UserRole.PlatformAdministrator) return Defaults[UserRole.PlatformAdministrator];
         var normalized = codes.Where(IsKnown).ToHashSet(StringComparer.Ordinal);
         if (normalized.Any(code => code.StartsWith("project.", StringComparison.Ordinal)
-                || code is PermissionCodes.DocumentEdit or PermissionCodes.DocumentLockRequestRelease or PermissionCodes.DocumentLockForceRelease or PermissionCodes.BomEdit or PermissionCodes.ValidationPlanEdit
+                || code is PermissionCodes.DocumentEdit or PermissionCodes.DocumentLockRequestRelease or PermissionCodes.DocumentLockForceRelease
+                    or PermissionCodes.BomEdit or PermissionCodes.BomMechanicalEdit or PermissionCodes.BomElectricalEdit or PermissionCodes.ValidationPlanEdit
                     or PermissionCodes.DrawingReviewSubmit or PermissionCodes.DrawingReviewAnnotate or PermissionCodes.DrawingReviewDecide or PermissionCodes.ReleaseManage or PermissionCodes.ApprovalDecide))
             normalized.Add(PermissionCodes.ProjectView);
-        if (normalized.Any(code => code is PermissionCodes.DocumentEdit or PermissionCodes.DocumentLockRequestRelease or PermissionCodes.DocumentLockForceRelease or PermissionCodes.BomEdit or PermissionCodes.ValidationPlanEdit
+        if (normalized.Any(code => code is PermissionCodes.DocumentEdit or PermissionCodes.DocumentLockRequestRelease or PermissionCodes.DocumentLockForceRelease
+                or PermissionCodes.BomEdit or PermissionCodes.BomMechanicalEdit or PermissionCodes.BomElectricalEdit or PermissionCodes.ValidationPlanEdit
                 or PermissionCodes.DrawingReviewSubmit or PermissionCodes.DrawingReviewAnnotate or PermissionCodes.DrawingReviewDecide or PermissionCodes.ReleaseManage or PermissionCodes.ApprovalDecide))
             normalized.Add(PermissionCodes.ProjectContentView);
         if (normalized.Any(code => code is PermissionCodes.ProgramTemplateSubmit or PermissionCodes.ProgramTemplateReview or PermissionCodes.ProgramTemplateApprove or PermissionCodes.ProgramTemplateManage))
