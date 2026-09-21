@@ -901,7 +901,7 @@ async function decideCodeApplication(application: MaterialCodeApprovalRow, appro
     for (const [index, target] of targets.entries()) {
       try {
         approvalProgressText.value = approved
-          ? `正在处理第 ${index + 1}/${targets.length} 项：按PLM基线分配料号，批准后请在本页选择对应记录完成U9C同步。`
+          ? `正在处理第 ${index + 1}/${targets.length} 项：按PLM基线分配料号，并自动排队同步到U9C。`
           : `正在退回第 ${index + 1}/${targets.length} 项料号申请。`
         const result = await processApprovalRow(target, approved, comment)
         succeeded++
@@ -955,7 +955,7 @@ async function decideSelectedCodeApplications(approved: boolean) {
   try {
     if (approved) {
       await ElMessageBox.confirm(
-        `确认批量批准已选择的 ${targets.length} 项料号申请？批准后系统分配PLM料号，对应记录将留在本页等待勾选同步到U9C。`,
+        `确认批量批准已选择的 ${targets.length} 项料号申请？批准后系统分配PLM料号并自动排队同步到U9C，失败项仍留在本页可人工重试。`,
         '批量批准料号申请',
         { type: 'warning', confirmButtonText: '批量批准', cancelButtonText: '取消' },
       )
@@ -983,7 +983,7 @@ async function decideSelectedCodeApplications(approved: boolean) {
     for (const [index, application] of targets.entries()) {
       try {
         approvalProgressText.value = approved
-          ? `正在批量处理第 ${index + 1}/${targets.length} 项：按PLM基线分配料号，随后在本页执行第二步U9C同步。`
+          ? `正在批量处理第 ${index + 1}/${targets.length} 项：按PLM基线分配料号，并自动排队同步到U9C。`
           : `正在批量退回第 ${index + 1}/${targets.length} 项料号申请。`
         const result = await processApprovalRow(application, approved, comment)
         succeeded++
@@ -1583,7 +1583,7 @@ onMounted(() => {
         <template #label><span class="material-tab-label">料号审批<em v-if="currentWorkCount">{{ currentWorkCount }}</em></span></template>
         <div class="material-code-approval-workflow">
           <div class="material-code-refresh-toolbar"><el-button :loading="codeApplicationsLoading" :disabled="batchDecidingApplications || decidingApplicationId !== null || !!syncProgressText" @click="loadCodeApplications">刷新</el-button></div>
-          <div class="material-code-approval-note">项目多级BOM表头料号由系统自动批准并同步U9C，进度、失败原因和重试请到项目BOM多级总览查看，无需人工审核。本页仅处理人工料号审批及普通料品同步；失败任务可在第二步重试。</div>
+          <div class="material-code-approval-note">项目多级BOM表头料号与普通料品批准后均由系统自动排队同步U9C：表头料号的进度与失败原因见项目BOM多级总览，普通料品的进度见本页第二步列表；失败任务可在第二步勾选重试。</div>
           <el-tabs v-model="codeApprovalView" class="material-code-approval-subtabs">
           <el-tab-pane name="pending">
             <template #label><span class="material-code-approval-subtab-label">当前处理 <em>{{ currentWorkCount }}</em></span></template>

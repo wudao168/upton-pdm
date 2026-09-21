@@ -188,6 +188,7 @@ builder.Services.AddHostedService<MaterialU9SyncHostedService>();
 builder.Services.AddHostedService<U9InventorySyncHostedService>();
 builder.Services.AddHostedService<U9ProcurementSyncHostedService>();
 builder.Services.AddHostedService<MaterialU9SyncBatchHostedService>();
+builder.Services.AddHostedService<MaterialU9PendingSyncSeederHostedService>();
 builder.Services.AddHostedService<BomHeaderAutomaticHostedService>();
 builder.Services.AddHostedService<BomU9AutomationRetryHostedService>();
 builder.Services.AddHostedService<ProjectFileRecycleCleanupService>();

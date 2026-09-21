@@ -208,11 +208,24 @@ public static class MaterialEndpointExtensions
             }
             else if (request.Approved)
             {
-                automationResult = new ApprovalU9AutomationResult(
-                    ApprovalU9AutomationStage.NotRequested,
-                    "PLM料号已批准；请在当前页面勾选对应记录并执行批量同步到U9C。",
-                    null,
-                    []);
+                // 普通料品：批准后同样自动排队同步U9C，失败项仍留在第二步列表可人工重试。
+                if (result.Task is not null)
+                {
+                    automaticBatch = await syncBatches.CreateAutomaticAsync([result.Task.Id], actor, cancellationToken);
+                    automationResult = new ApprovalU9AutomationResult(
+                        ApprovalU9AutomationStage.NotRequested,
+                        "PLM料号已批准，U9C料品同步已自动排队；进度与失败原因见第二步列表。",
+                        null,
+                        []);
+                }
+                else
+                {
+                    automationResult = new ApprovalU9AutomationResult(
+                        ApprovalU9AutomationStage.NotRequested,
+                        "PLM料号已批准，但未找到可执行的U9C同步任务；请刷新后核对。",
+                        null,
+                        []);
+                }
             }
             return Results.Ok(new
             {
@@ -232,11 +245,20 @@ public static class MaterialEndpointExtensions
             return Results.Ok(await automation.ContinueAfterMaterialSyncAsync(projectId, actor, cancellationToken));
         });
 
-        api.MapPost("/materials/{materialId:guid}/approve", async (Guid materialId, long expectedRowVersion, HttpContext context, MaterialService service, CancellationToken cancellationToken) =>
+        api.MapPost("/materials/{materialId:guid}/approve", async (Guid materialId, long expectedRowVersion, HttpContext context, MaterialService service, MaterialSyncBatchService syncBatches, CancellationToken cancellationToken) =>
         {
             var (actor, role) = CurrentUser(context.User);
             var approved = await service.ApproveAsync(materialId, expectedRowVersion, actor, role, cancellationToken);
-            return Results.Ok(new { Material = MapMaterial(approved.Material), Task = MapTask(approved.Task) });
+            MaterialSyncBatch? automaticBatch = null;
+            if (approved.Task is not null
+                && approved.Task.Status is MaterialSyncStatus.PreviewReady or MaterialSyncStatus.Failed or MaterialSyncStatus.NeedsReview)
+                automaticBatch = await syncBatches.CreateAutomaticAsync([approved.Task.Id], actor, cancellationToken);
+            return Results.Ok(new
+            {
+                Material = MapMaterial(approved.Material),
+                Task = approved.Task is null ? null : MapTask(approved.Task),
+                AutomaticBatch = automaticBatch is null ? null : MapSyncBatch(automaticBatch)
+            });
         });
 
         api.MapPost("/materials/{materialId:guid}/reject", async (Guid materialId, RejectMaterialRequest request, HttpContext context, MaterialService service, CancellationToken cancellationToken) =>

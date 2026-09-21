@@ -991,7 +991,7 @@ describe('MaterialManagement', () => {
     await flushPromises()
     expect(wrapper.get('.material-sync-toolbar').text()).toContain('已选择 0 个可执行任务')
     expect(wrapper.get('.material-sync-table').text()).not.toContain('03021000002')
-    expect(wrapper.get('.material-code-approval-note').text()).toContain('进度、失败原因和重试请到项目BOM多级总览查看')
+    expect(wrapper.get('.material-code-approval-note').text()).toContain('表头料号的进度与失败原因见项目BOM多级总览')
     expect(api.executeMaterialSyncTask).not.toHaveBeenCalled()
     wrapper.unmount()
   })
@@ -1092,7 +1092,7 @@ describe('MaterialManagement', () => {
     await table.findAll('.el-table__body-wrapper tbody tr')[0].findAll('button').find(button => button.text() === '批准')!.trigger('click')
     await flushPromises()
 
-    expect(wrapper.get('.material-approval-feedback .material-step-feedback__status').text()).toContain('按PLM基线分配料号，批准后请在本页选择对应记录完成U9C同步')
+    expect(wrapper.get('.material-approval-feedback .material-step-feedback__status').text()).toContain('按PLM基线分配料号，并自动排队同步到U9C')
     finishDecision({ application: { ...application, status: 'Approved' } })
     await flushPromises()
     expect(wrapper.get('.material-approval-feedback .material-step-feedback__status').text()).toContain('空闲')
@@ -1728,7 +1728,7 @@ describe('MaterialManagement', () => {
     })
     await flushPromises()
     expect(wrapper.findAll('[role="tab"]').some(tab => tab.text().includes('同步任务'))).toBe(false)
-    expect(wrapper.get('.material-code-approval-note').text()).toContain('项目多级BOM表头料号由系统自动批准')
+    expect(wrapper.get('.material-code-approval-note').text()).toContain('表头料号与普通料品批准后均由系统自动排队同步U9C')
     expect(wrapper.find('.material-sync-table').text()).not.toContain('已废止')
   })
 
