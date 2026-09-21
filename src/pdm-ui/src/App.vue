@@ -61,7 +61,9 @@ const drawingReviewPanelCollapsed = ref(false)
 const drawingReviewPackageId = ref('')
 const requestedReleasePackageId = ref('')
 const requestedValidationPlanProjectId = ref('')
-const requestedBomKind = ref<'Release' | Exclude<import('./types').BomKind, 'Unclassified'>>()
+const requestedBomKind = ref<'Overview' | 'Source' | 'WearPart' | 'Release' | import('./types').BomKind>()
+// 记录BOM面板当前视图，用于让顶部“BOM / 发布”页签与实际内容保持一致。
+const activeBomKind = ref<string>()
 const restoreNote = ref('从历史版本恢复生成新的工作版本')
 const bomHasUnsavedChanges = ref(false)
 const projectCenterOpening = ref(false)
@@ -431,22 +433,24 @@ function rememberNavigation(key: NavKey) {
 }
 
 async function openProjectTab(tab: ProjectTab) {
-  // 发布已并入BOM页（作为右侧视图），历史入口统一转到BOM页的发布视图。
+  // 发布页与BOM页共用同一个面板：发布页签让面板切到发布视图，BOM页签切回普通BOM视图。
   const releaseRequested = tab === 'release'
-  if (releaseRequested) tab = 'bom'
-  if (projectTab.value === 'bom' && tab !== 'bom' && bomHasUnsavedChanges.value) {
+  let panelTab: ProjectTab = releaseRequested ? 'bom' : tab
+  if (projectTab.value === 'bom' && panelTab !== 'bom' && bomHasUnsavedChanges.value) {
     ElMessage.warning('当前BOM有未保存修改，请先保存或撤销修改后再离开。')
     return
   }
-  if (!workspace.project.value.canReadContent && tab !== 'overview' && tab !== 'records') tab = 'overview'
-  if (tab === 'bom') mountedBomProjectId.value = workspace.project.value.id
-  if (tab === 'documents') mountedDocumentsProjectId.value = workspace.project.value.id
-  projectTab.value = tab
-  if (releaseRequested) requestedBomKind.value = 'Release'
-  if (workspace.project.value.id) rememberProjectTab(workspace.project.value.id, tab)
-  if (tab === 'versions') await workspace.loadProjectVersions()
-  if (tab === 'documents') await workspace.refreshDrawingReviews()
-  if (tab === 'records') await workspace.loadProjectAuditEntries()
+  if (!workspace.project.value.canReadContent && panelTab !== 'overview' && panelTab !== 'records') panelTab = 'overview'
+  const nextTab: ProjectTab = releaseRequested && panelTab === 'bom' ? 'release' : panelTab
+  if (panelTab === 'bom') mountedBomProjectId.value = workspace.project.value.id
+  if (panelTab === 'documents') mountedDocumentsProjectId.value = workspace.project.value.id
+  projectTab.value = nextTab
+  if (releaseRequested && nextTab === 'release') requestedBomKind.value = 'Release'
+  else if (panelTab === 'bom' && activeBomKind.value === 'Release') requestedBomKind.value = 'Source'
+  if (workspace.project.value.id) rememberProjectTab(workspace.project.value.id, nextTab)
+  if (panelTab === 'versions') await workspace.loadProjectVersions()
+  if (panelTab === 'documents') await workspace.refreshDrawingReviews()
+  if (panelTab === 'records') await workspace.loadProjectAuditEntries()
 }
 
 async function openProjectTabFromHeader(tab: ProjectTab) {
@@ -457,6 +461,16 @@ async function openProjectTabFromHeader(tab: ProjectTab) {
     return
   }
   await openProjectTab(tab)
+}
+
+// BOM面板切换视图时同步顶部页签：发布视图高亮“发布”，切回其它视图高亮“BOM”。
+function handleBomKindChange(kind: string) {
+  activeBomKind.value = kind
+  if (kind === 'Release') {
+    if (projectTab.value === 'bom') projectTab.value = 'release'
+    return
+  }
+  if (projectTab.value === 'release') projectTab.value = 'bom'
 }
 
 function openProjectList() {
@@ -1071,7 +1085,7 @@ async function openWhereUsedParent(projectId: string, parentDocumentId: string) 
         <section v-else-if="activeView === 'workspace'" class="pdm-project-workspace">
           <ProjectWorkspaceHeader :project="workspace.project.value" :projects="workspace.projects.value" :active-tab="projectTab" :active-project-document-status="activeProjectDocumentStatus" :active-document-counts="workspace.documentFilterCounts.value" :current-username="workspace.currentUsername.value" :switching-project-id="switchingProjectId" :token="workspace.getAccessToken()" :can-copy-content="workspace.hasPermission('project.create')" :can-reset-content="workspace.hasPermission('project.content.reset')" :pending="workspace.operationPending.value" :on-preview-project-copy="workspace.previewProjectCopy" :on-copy-project-content="workspace.copyProjectContent" :on-content-reset-complete="() => workspace.reload(workspace.project.value!.id)" @back="openProjectList" @switch="switchProject" @tab="openProjectTabFromHeader">
             <div class="pdm-project-tab-content">
-            <BomManager :drawing-reviews="workspace.drawingReviews.value" :drawing-review-candidates="workspace.drawingReviewCandidates.value" :requested-bom-kind="requestedBomKind" @open-bom="openHierarchyBom" @bom-request-handled="requestedBomKind = undefined" v-if="mountedBomProjectId === workspace.project.value.id" v-show="projectTab === 'bom'" :source-data="workspace.bomSourceData.value" :standard="workspace.standardBom.value" :non-standard="workspace.nonStandardBom.value" :unclassified="workspace.unclassifiedBom.value" :electrical="workspace.electricalBom.value" :reference-root="workspace.root.value" :documents="workspace.managedDocuments.value" :document-relations="workspace.documentRelations.value" :validation-rules="workspace.systemSettings.value.validationRules" :release-change-reason-types="workspace.systemSettings.value.releaseChangeReasonTypes" :formal-supplement-policies="workspace.systemSettings.value.formalSupplementPolicies" :declarations="workspace.bomEmptyDeclarations.value" :versions="workspace.bomVersions.value" :baselines="workspace.bomBaselines.value" :release-packages="workspace.releasePackages.value" :username="workspace.currentUsername.value" :upload-progress="workspace.uploadProgress.value" :operation-error="workspace.operationError.value" :can-manage-release="workspace.hasPermission('release.manage')" :can-manage-mechanical-release="workspace.hasPermission('release.manage') && ['Engineer', 'Administrator', 'developer'].some(workspace.hasRole)" :can-decide-approval="workspace.hasPermission('approval.decide')" :can-emergency-decide="workspace.hasPermission('approval.emergency-substitute')" :requested-release-package-id="requestedReleasePackageId" :pending="workspace.operationPending.value" :editable="workspace.hasPermission('bom.edit')" :token="workspace.getAccessToken()" :project-id="workspace.project.value.id" :project="workspace.project.value" :projects="workspace.projects.value" :preview-reconciliation="workspace.previewBomFromDrawings" @dirty-change="bomHasUnsavedChanges = $event" @save="(kind, items) => runOperation(() => workspace.saveBomItems(kind, items), 'BOM已保存；CAD来源物料的变更已进入SolidWorks待写回队列')" @import="(kind, file) => runOperation(() => workspace.importBomFile(kind, file), 'BOM已导入并保存')" @export="(kind, mode) => runOperation(() => workspace.exportBomFile(kind, mode), 'BOM已导出')" @export-wear-parts="mode => runOperation(() => workspace.exportWearPartBomFile(mode), '易损件BOM已导出')" @resolve="(itemId, action, targetKind) => runOperation(() => workspace.resolveBomItem(itemId, action, targetKind), '待处理项已更新，保存BOM后再写回SolidWorks')" @batch-retain="itemIds => runOperation(() => workspace.retainBomItems(itemIds), '所选待处理BOM项已确认保留')" @batch-update="(input) => runOperation(() => workspace.batchUpdateBomItems(input), 'BOM属性已更新，保存BOM后再写回SolidWorks')" @batch-delete="(itemIds, reason) => runOperation(() => workspace.batchDeleteBomItems(itemIds, reason), '所选BOM物料已移入回收站')" @batch-restore="(itemIds, mode) => runOperation(() => workspace.batchRestoreBomItems(itemIds, mode), mode === 'AsManual' ? '所选物料已转为人工物料并恢复' : '所选BOM物料已恢复')" @release-exclusion="(itemIds, excluded, reason) => runOperation(() => workspace.setBomReleaseExclusion(itemIds, excluded, reason), excluded ? '所选物料已设为不发布' : '所选物料已恢复发布')" @restore-source="(itemIds) => runOperation(() => workspace.restoreBomItemsFromSource(itemIds), '所选BOM属性已恢复为最新图档源数据；分类与排序保持不变')" @release-create="(input) => runOperation(() => workspace.createPackage(input), '发布草稿已创建，范围与审批模板已固化')" @release-update-draft="(releasePackageId, input) => runOperation(() => workspace.updatePackageDraft(releasePackageId, input), '发布草稿已更新')" @release-delete-draft="releasePackageId => runOperation(() => workspace.deletePackageDraft(releasePackageId), '发布草稿已删除')" @release-upload="(releasePackageId, file) => runOperation(() => workspace.uploadPackageFile(releasePackageId, file), '发包文件已上传并通过SHA-256校验')" @release-submit="releasePackageId => submitReleasePackage(releasePackageId)" @release-withdraw="withdrawCurrentPackage" @release-retry-u9="releasePackageId => runOperation(() => workspace.retryLongLeadU9(releasePackageId), 'BOM料号申请已补建，正式料号齐全后将自动续传U9C')" @release-retry-preview="releasePackageId => runOperation(() => workspace.retryReleasePreview(releasePackageId), '转图已重新排队，完成后会在站内消息里反馈结果')" @release-decide="(taskId, decision, comment) => runOperation(() => workspace.decideApprovalTask(taskId, decision, comment), decision === 'Approved' ? '审批已流转' : '发布包已驳回')" @release-transfer="(taskId, targetUsername, comment) => runOperation(() => workspace.transferApprovalTask(taskId, targetUsername, comment), '审批已转交')" @release-emergency-decide="(taskId, decision, reason) => runOperation(() => workspace.emergencyDecideApprovalTask(taskId, decision, reason), decision === 'Approved' ? '当前节点已紧急代批并继续流转' : '当前节点已紧急代驳回')" @release-request-handled="requestedReleasePackageId = ''" @material-code-changed="workspace.reload(workspace.project.value.id)" />
+            <BomManager :drawing-reviews="workspace.drawingReviews.value" :drawing-review-candidates="workspace.drawingReviewCandidates.value" :requested-bom-kind="requestedBomKind" @open-bom="openHierarchyBom" @kind-change="handleBomKindChange" @bom-request-handled="requestedBomKind = undefined" v-if="mountedBomProjectId === workspace.project.value.id" v-show="projectTab === 'bom' || projectTab === 'release'" :source-data="workspace.bomSourceData.value" :standard="workspace.standardBom.value" :non-standard="workspace.nonStandardBom.value" :unclassified="workspace.unclassifiedBom.value" :electrical="workspace.electricalBom.value" :reference-root="workspace.root.value" :documents="workspace.managedDocuments.value" :document-relations="workspace.documentRelations.value" :validation-rules="workspace.systemSettings.value.validationRules" :release-change-reason-types="workspace.systemSettings.value.releaseChangeReasonTypes" :formal-supplement-policies="workspace.systemSettings.value.formalSupplementPolicies" :declarations="workspace.bomEmptyDeclarations.value" :versions="workspace.bomVersions.value" :baselines="workspace.bomBaselines.value" :release-packages="workspace.releasePackages.value" :username="workspace.currentUsername.value" :upload-progress="workspace.uploadProgress.value" :operation-error="workspace.operationError.value" :can-manage-release="workspace.hasPermission('release.manage')" :can-manage-mechanical-release="workspace.hasPermission('release.manage') && ['Engineer', 'Administrator', 'developer'].some(workspace.hasRole)" :can-decide-approval="workspace.hasPermission('approval.decide')" :can-emergency-decide="workspace.hasPermission('approval.emergency-substitute')" :requested-release-package-id="requestedReleasePackageId" :pending="workspace.operationPending.value" :editable="workspace.hasPermission('bom.edit')" :token="workspace.getAccessToken()" :project-id="workspace.project.value.id" :project="workspace.project.value" :projects="workspace.projects.value" :preview-reconciliation="workspace.previewBomFromDrawings" @dirty-change="bomHasUnsavedChanges = $event" @save="(kind, items) => runOperation(() => workspace.saveBomItems(kind, items), 'BOM已保存；CAD来源物料的变更已进入SolidWorks待写回队列')" @import="(kind, file) => runOperation(() => workspace.importBomFile(kind, file), 'BOM已导入并保存')" @export="(kind, mode) => runOperation(() => workspace.exportBomFile(kind, mode), 'BOM已导出')" @export-wear-parts="mode => runOperation(() => workspace.exportWearPartBomFile(mode), '易损件BOM已导出')" @resolve="(itemId, action, targetKind) => runOperation(() => workspace.resolveBomItem(itemId, action, targetKind), '待处理项已更新，保存BOM后再写回SolidWorks')" @batch-retain="itemIds => runOperation(() => workspace.retainBomItems(itemIds), '所选待处理BOM项已确认保留')" @batch-update="(input) => runOperation(() => workspace.batchUpdateBomItems(input), 'BOM属性已更新，保存BOM后再写回SolidWorks')" @batch-delete="(itemIds, reason) => runOperation(() => workspace.batchDeleteBomItems(itemIds, reason), '所选BOM物料已移入回收站')" @batch-restore="(itemIds, mode) => runOperation(() => workspace.batchRestoreBomItems(itemIds, mode), mode === 'AsManual' ? '所选物料已转为人工物料并恢复' : '所选BOM物料已恢复')" @release-exclusion="(itemIds, excluded, reason) => runOperation(() => workspace.setBomReleaseExclusion(itemIds, excluded, reason), excluded ? '所选物料已设为不发布' : '所选物料已恢复发布')" @restore-source="(itemIds) => runOperation(() => workspace.restoreBomItemsFromSource(itemIds), '所选BOM属性已恢复为最新图档源数据；分类与排序保持不变')" @release-create="(input) => runOperation(() => workspace.createPackage(input), '发布草稿已创建，范围与审批模板已固化')" @release-update-draft="(releasePackageId, input) => runOperation(() => workspace.updatePackageDraft(releasePackageId, input), '发布草稿已更新')" @release-delete-draft="releasePackageId => runOperation(() => workspace.deletePackageDraft(releasePackageId), '发布草稿已删除')" @release-upload="(releasePackageId, file) => runOperation(() => workspace.uploadPackageFile(releasePackageId, file), '发包文件已上传并通过SHA-256校验')" @release-submit="releasePackageId => submitReleasePackage(releasePackageId)" @release-withdraw="withdrawCurrentPackage" @release-retry-u9="releasePackageId => runOperation(() => workspace.retryLongLeadU9(releasePackageId), 'BOM料号申请已补建，正式料号齐全后将自动续传U9C')" @release-retry-preview="releasePackageId => runOperation(() => workspace.retryReleasePreview(releasePackageId), '转图已重新排队，完成后会在站内消息里反馈结果')" @release-decide="(taskId, decision, comment) => runOperation(() => workspace.decideApprovalTask(taskId, decision, comment), decision === 'Approved' ? '审批已流转' : '发布包已驳回')" @release-transfer="(taskId, targetUsername, comment) => runOperation(() => workspace.transferApprovalTask(taskId, targetUsername, comment), '审批已转交')" @release-emergency-decide="(taskId, decision, reason) => runOperation(() => workspace.emergencyDecideApprovalTask(taskId, decision, reason), decision === 'Approved' ? '当前节点已紧急代批并继续流转' : '当前节点已紧急代驳回')" @release-request-handled="requestedReleasePackageId = ''" @material-code-changed="workspace.reload(workspace.project.value.id)" />
             <WorkbenchHome
               v-if="projectTab === 'overview'"
               :project="workspace.project.value"

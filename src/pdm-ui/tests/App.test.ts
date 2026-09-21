@@ -942,9 +942,9 @@ describe('PLM client workspace', () => {
     expect(wrapper.find('[aria-label="BOM维护"] h2').exists()).toBe(false)
     expect(wrapper.text()).toContain('标准件BOM（1）')
 
-    const releaseViewTab = wrapper.findAll('button[role="tab"]').find(tab => tab.text().startsWith('发布'))
-    expect(releaseViewTab).toBeTruthy()
-    await releaseViewTab!.trigger('click')
+    // 发布已从BOM面板的子页签改为工作区顶部页签（BOM与备料之间）。
+    const releaseViewTab = projectTabByText(wrapper, '发布')
+    await releaseViewTab.trigger('click')
     await flushPromises()
     expect(wrapper.text()).toContain('RP-REAL-001')
     expect(wrapper.text()).not.toContain('PRJ-2026-018')
@@ -1242,7 +1242,7 @@ describe('PLM client workspace', () => {
     await buttonByText(wrapper, '项目列表').trigger('click')
     await runProjectAction(wrapper, 'open')
     await flushPromises()
-    await wrapper.findAll('button[role="tab"]').find(tab => tab.text().startsWith('发布'))!.trigger('click')
+    await projectTabByText(wrapper, '发布').trigger('click')
     await flushPromises()
     expect(document.body.textContent).toContain('RP-REAL-001')
     expect(document.body.textContent).not.toContain('审批与生产发包')

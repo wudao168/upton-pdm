@@ -128,7 +128,7 @@ describe('BomManager', () => {
     })
 
     const tabs = wrapper.findAll('button[role="tab"]')
-    expect(tabs.map(tab => tab.text())).toEqual(['源数据（2）', '标准件BOM（2）', '非标件BOM（1）', '电气BOM（1）', '易损件BOM（0）', '发布（0）'])
+    expect(tabs.map(tab => tab.text())).toEqual(['源数据（2）', '标准件BOM（2）', '非标件BOM（1）', '电气BOM（1）', '易损件BOM（0）'])
     expect(wrapper.findAll('.pdm-bom-table tbody tr')).toHaveLength(2)
     expect(wrapper.findAll('.pdm-bom-quantity-audit')[0].text()).toBe('2')
     expect(wrapper.findAll('.pdm-bom-quantity-reference')[0].text()).toBe('0—/2')
@@ -610,7 +610,7 @@ describe('BomManager', () => {
     expect(wrapper.emitted('save')).toBeUndefined()
   })
 
-  it('keeps the release overview as the last BOM page tab', async () => {
+  it('opens the release overview when the workspace asks for the release view', async () => {
     const release = {
       id: 'release-tab-1', number: 'RP-P1-1', scope: 'NonStandardWithDrawing', state: '草稿',
       createdAt: '2026-09-20T00:00:00Z', changeNumber: 'RP-P1-1',
@@ -618,17 +618,16 @@ describe('BomManager', () => {
     const wrapper = mount(BomManager, {
       props: {
         projectId: 'project-release-tab', sourceData: [], standard: [], nonStandard: [], electrical: [],
-        declarations: [], pending: false, releasePackages: [release], versions: [], baselines: [],
+        declarations: [], pending: false, releasePackages: [release], versions: [], baselines: [], requestedBomKind: 'Release',
       },
     })
+    await flushPromises()
 
-    const tabs = wrapper.findAll('button[role="tab"]')
-    const releaseTab = tabs.at(-1)!
-    expect(releaseTab.text()).toBe('发布（1）')
-
-    await releaseTab.trigger('click')
-    expect(wrapper.get('button[role="tab"].pdm-release-tab').attributes('aria-selected')).toBe('true')
+    // 发布页已移到工作区顶部页签（BOM和备料之间），BOM面板内不再有发布子页签。
+    expect(wrapper.findAll('.pdm-release-tab')).toHaveLength(0)
     expect(wrapper.find('.pdm-bom-release-overview').exists()).toBe(true)
+    expect(wrapper.emitted('kindChange')).toEqual([['Release']])
+    expect(wrapper.emitted('bomRequestHandled')).toHaveLength(1)
     wrapper.unmount()
   })
 

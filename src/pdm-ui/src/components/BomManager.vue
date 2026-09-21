@@ -73,7 +73,7 @@ const props = withDefaults(defineProps<{
   canDecideApproval?: boolean
   canEmergencyDecide?: boolean
   requestedReleasePackageId?: string
-  requestedBomKind?: 'Release' | Exclude<BomKind, 'Unclassified'>
+  requestedBomKind?: BomView
   previewReconciliation?: () => Promise<BomGenerationResult>
 }>(), {
   editable: false,
@@ -131,6 +131,7 @@ const emit = defineEmits<{
   releaseEmergencyDecide: [taskId: string, decision: 'Approved' | 'Rejected', reason: string]
   releaseRequestHandled: []
   openBom: [projectId: string, kind: Exclude<BomKind, 'Unclassified'>]
+  kindChange: [kind: BomView]
   bomRequestHandled: []
   materialCodeChanged: []
   materialRelationsApplied: []
@@ -1887,6 +1888,7 @@ async function requestKind(nextKind: BomView) {
     refreshRows(false)
   }
   kind.value = nextKind
+  emit('kindChange', nextKind)
 }
 
 async function openHierarchyBom(projectId: string, targetKind: Exclude<BomKind, 'Unclassified'>) {
@@ -2586,12 +2588,14 @@ watch(() => props.requestedReleasePackageId, releasePackageId => {
   if (!release) return
   kind.value = release.scope.startsWith('Electrical') ? 'Electrical'
     : release.scope.startsWith('NonStandard') ? 'NonStandard' : 'Standard'
+  emit('kindChange', kind.value)
   openReleaseDrawer(release.id)
   emit('releaseRequestHandled')
 }, { immediate: true })
 watch([() => props.projectId, () => props.projects.length], ([projectId, projectCount], previous) => {
   if (projectId && projectCount > 0 && (!previous || previous[0] !== projectId)) {
     kind.value = 'Overview'
+    emit('kindChange', 'Overview')
     relationCompleteness.value = null
     relationChoices.value = {}
     relationNoAccessoryConfirmed.value = {}
@@ -3326,7 +3330,6 @@ async function submitBatchUpdate() {
         <button type="button" role="tab" :aria-selected="kind === 'NonStandard'" @click="requestKind('NonStandard')">非标件BOM（{{ nonStandardSummaryRows.length }}）</button>
         <button type="button" role="tab" :aria-selected="kind === 'Electrical'" @click="requestKind('Electrical')">电气BOM（{{ electricalSummaryRows.length }}）</button>
         <button type="button" role="tab" class="pdm-wear-part-tab" :aria-selected="kind === 'WearPart'" @click="requestKind('WearPart')">易损件BOM（{{ wearPartSummaryRows.length }}）</button>
-        <button type="button" role="tab" class="pdm-release-tab" :aria-selected="kind === 'Release'" @click="requestKind('Release')">发布（{{ releasePackages.length }}）</button>
         <span v-if="unresolvedCount" class="pdm-bom-unresolved-count">待处理 {{ unresolvedCount }}</span>
       </div>
       <div v-if="!isOverviewView && !isReleaseView" class="pdm-bom-display-control" role="group" aria-label="BOM显示方式">
