@@ -22,7 +22,7 @@ withDefaults(defineProps<{
 
 const query = defineModel<string>('query', { required: true })
 const filter = defineModel<DocumentFilter>('filter', { required: true })
-const emit = defineEmits<{ select: [node: DocumentNode]; refresh: []; open: [node: DocumentNode, mode: SolidWorksOpenMode]; openFolder: [node: DocumentNode] }>()
+const emit = defineEmits<{ select: [node: DocumentNode]; refresh: []; open: [node: DocumentNode, mode: SolidWorksOpenMode]; openFolder: [node: DocumentNode]; versions: [node: DocumentNode] }>()
 const contextNode = ref<DocumentNode>()
 const contextLeft = ref(0)
 const contextTop = ref(0)
@@ -135,6 +135,7 @@ onBeforeUnmount(() => {
       <button type="button" role="menuitem" :disabled="!solidWorksAvailable || !contextNode.documentId" @click="open('LatestReadOnly')">在SolidWorks中打开最新受控版</button>
       <button type="button" role="menuitem" :disabled="!canEdit || !solidWorksAvailable || !contextNode.documentId" @click="open('LatestEdit')">获取编辑权限并打开</button>
       <button type="button" role="menuitem" :disabled="!solidWorksAvailable || !contextNode.documentId" @click="open('LatestReleased')">打开最新正式发布版（只读）</button>
+      <button type="button" role="menuitem" :disabled="!contextNode.documentId" @click="emit('versions', contextNode); closeContext()">选择版本（对比/只读打开/预览/下载）</button>
       <button type="button" role="menuitem" @click="emit('openFolder', contextNode); closeContext()">打开所在文件夹</button>
       <small v-if="!contextNode.documentId">该引用尚未入库，请先在SolidWorks插件中提交整套存档</small>
       <small v-if="!solidWorksAvailable">当前电脑未安装SolidWorks或UPLM插件</small>

@@ -56,4 +56,15 @@ describe('DocumentTree', () => {
     await folder!.trigger('click')
     expect(wrapper.emitted('openFolder')).toEqual([[root]])
   })
+
+  it('offers version selection from the design tree context menu', async () => {
+    const root: DocumentNode = { id: 'node-1', documentId: 'document-1', drawingNumber: 'ASM-001', name: '总装配', fileName: 'ASM-001.SLDASM', kind: 'Assembly', configuration: 'Default', quantity: 1, version: 'B', status: 'Normal', children: [] }
+    const wrapper = mount(DocumentTree, { props: { query: '', filter: 'all', root, drawings: [], selectedId: root.id, allCount: 1, modelCount: 1, drawingCount: 0, warningCount: 0 } })
+
+    await wrapper.get('[role="treeitem"]').trigger('contextmenu')
+    const versions = wrapper.findAll('[role="menuitem"]').find(item => item.text().includes('选择版本'))
+    expect(versions).toBeTruthy()
+    await versions!.trigger('click')
+    expect(wrapper.emitted('versions')).toEqual([[root]])
+  })
 })
