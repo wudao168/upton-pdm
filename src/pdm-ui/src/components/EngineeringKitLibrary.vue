@@ -83,6 +83,9 @@ async function load() {
 function openEditor(kit?: EngineeringKit) {
   editing.value = kit ?? null
   const revision = kit ? displayRevision(kit) : undefined
+  // 新建套件时默认选中维护好的第一项标准/分类，减少手工选择。
+  const defaultStandard = kitOptions.value.standardCodes[0]?.name ?? ''
+  const defaultCategory = kitOptions.value.categoryCodes[0]?.name ?? ''
   form.value = {
     name: kit?.name ?? '',
     brand: kit?.brand ?? '',
@@ -90,8 +93,8 @@ function openEditor(kit?: EngineeringKit) {
     changeNote: draftRevision(kit)?.changeNote ?? '',
     modelMode: kit?.modelMode === 'Manual' ? 'Manual' : 'Auto',
     model: kit?.modelMode === 'Manual' ? kit?.model ?? '' : '',
-    standardName: kit?.standardName ?? '',
-    categoryName: kit?.categoryName ?? '',
+    standardName: kit ? kit.standardName ?? '' : defaultStandard,
+    categoryName: kit ? kit.categoryName ?? '' : defaultCategory,
     components: revision?.components.map(item => ({ materialId: item.materialId, quantity: item.quantity, isOptional: false })) ?? [],
   }
   editorOpen.value = true
