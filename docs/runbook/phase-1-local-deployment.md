@@ -20,7 +20,7 @@ PLM 与现有 CRM 完全独立：
 本机采用独立的 Windows 服务部署，不依赖 CRM 的 MySQL，也不需要 Docker：
 
 ```powershell
-Set-Location 'F:\codex file\pdm'
+Set-Location 'D:\codex file\pdm'
 
 # 普通 PowerShell：准备 MySQL、构建并发布一期产物
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\deploy\Prepare-LocalDeployment.ps1
@@ -47,7 +47,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\deploy\Get-LocalStatus
 ## 构建一期产物
 
 ```powershell
-Set-Location 'F:\codex file\pdm'
+Set-Location 'D:\codex file\pdm'
 powershell.exe -ExecutionPolicy Bypass -File .\deploy\Build-Phase1.ps1 -Configuration Release
 ```
 
@@ -68,8 +68,8 @@ $env:ASPNETCORE_ENVIRONMENT = 'Production'
 $env:PDM_DB_PASSWORD = '<PLM专用数据库密码>'
 $env:PDM_BOOTSTRAP_ADMIN_PASSWORD = '<首次管理员密码>'
 $env:PDM_JWT_SIGNING_KEY = '<至少32字符的随机密钥>'
-Set-Location 'F:\codex file\pdm\src\Pdm.Api\bin\Release\net10.0'
-& 'F:\codex file\pdm\.dotnet\dotnet.exe' .\Pdm.Api.dll
+Set-Location 'D:\codex file\pdm\src\Pdm.Api\bin\Release\net10.0'
+& 'D:\codex file\pdm\.dotnet\dotnet.exe' .\Pdm.Api.dll
 ```
 
 验收：
@@ -85,7 +85,7 @@ Invoke-RestMethod -Uri 'http://127.0.0.1:5080/health'
 关闭所有 SolidWorks 进程，以管理员 PowerShell 执行：
 
 ```powershell
-Set-Location 'F:\codex file\pdm'
+Set-Location 'D:\codex file\pdm'
 powershell.exe -ExecutionPolicy Bypass -File .\deploy\Register-SolidWorksAddin.ps1 -Configuration Release
 ```
 
@@ -94,7 +94,7 @@ powershell.exe -ExecutionPolicy Bypass -File .\deploy\Register-SolidWorksAddin.p
 ## 启动 Windows 客户端
 
 ```powershell
-& 'F:\codex file\pdm\src\Pdm.Desktop\bin\Release\net48\Upton.Pdm.Desktop.exe'
+& 'D:\codex file\pdm\src\Pdm.Desktop\bin\Release\net48\Upton.Pdm.Desktop.exe'
 ```
 
 客户端通过 WebView2 访问内置静态资源，并只连接 `http://127.0.0.1:5080`。目标电脑需安装 Microsoft Edge WebView2 Runtime 和 eDrawings Professional。选择图档并点击“在客户端内预览”后，eDrawings ActiveX 直接显示在主页面图纸预览区，不会打开独立预览窗口。
@@ -122,7 +122,7 @@ powershell.exe -ExecutionPolicy Bypass -File .\deploy\Register-SolidWorksAddin.p
 备份包含 `pdm` 数据库、vault、release、表数量和逐文件 SHA-256 清单，只允许写入 `.local\backup`：
 
 ```powershell
-Set-Location 'F:\codex file\pdm'
+Set-Location 'D:\codex file\pdm'
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\deploy\Backup-LocalPdm.ps1
 ```
 

@@ -3,7 +3,7 @@
 正式发布（非标件BOM+图纸、标准件/电气/非标件正式发布与增补）审批通过后，系统会把 2D 工程图转 PDF、零件与装配转 STEP。
 转换位置由 **系统管理 → 设置 → 图纸转换** 决定：可以用 API 服务器本机，也可以交给一台独立的“转图电脑”。改完立即生效，不需要重启服务。
 
-下文里的“服务器”指**运行 UPLM API 的那台机器**（本机部署时就是有这个仓库目录 `F:\codex file\pdm` 的电脑）；“转图电脑”指装着 SolidWorks、专门做转换的另一台电脑。
+下文里的“服务器”指**运行 UPLM API 的那台机器**（本机部署时就是有这个仓库目录 `D:\codex file\pdm` 的电脑）；“转图电脑”指装着 SolidWorks、专门做转换的另一台电脑。
 
 ## 0. 原理（先看一遍再动手）
 
@@ -59,7 +59,7 @@ UplmPreviewAgentSetup.exe /uninstall /silent /server http://192.168.2.8:5080 /us
 
 ### 步骤 1：在 API 服务器上准备代理包
 
-代理包已经在服务器上打好了：`F:\codex file\pdm\.local\preview-agent\`（12 个文件，约 3.2 MB）：
+代理包已经在服务器上打好了：`D:\codex file\pdm\.local\preview-agent\`（12 个文件，约 3.2 MB）：
 
 | 文件 | 作用 |
 | --- | --- |
@@ -72,7 +72,7 @@ UplmPreviewAgentSetup.exe /uninstall /silent /server http://192.168.2.8:5080 /us
 需要重新生成（改了代理代码后）：
 
 ```powershell
-cd 'F:\codex file\pdm'
+cd 'D:\codex file\pdm'
 & .\.dotnet\dotnet.exe build src\Pdm.PreviewAgent\Pdm.PreviewAgent.csproj -c Release --no-restore
 & .\.local\Build-PreviewAgentPackage-20260920.ps1
 ```
@@ -82,7 +82,7 @@ cd 'F:\codex file\pdm'
 在**服务器**上执行（把 `192.168.2.50` 换成转图电脑的 IP / 主机名；`D$` 表示该机的 D 盘共享，需有管理员权限）：
 
 ```powershell
-robocopy 'F:\codex file\pdm\.local\preview-agent' '\\192.168.2.50\D$\UPLM\preview-agent' /E /R:1 /W:1
+robocopy 'D:\codex file\pdm\.local\preview-agent' '\\192.168.2.50\D$\UPLM\preview-agent' /E /R:1 /W:1
 ```
 
 或者远程桌面到转图电脑，直接从服务器共享/移动硬盘复制整个 `preview-agent` 文件夹到 `D:\UPLM\preview-agent`。
