@@ -870,6 +870,20 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
         return row is null ? null : MapCadPropertyWriteback(row);
     }
 
+    public async Task<IReadOnlyList<CadPropertyWritebackVersion>> ListCadPropertyWritebackVersionsAsync(Guid projectId, CancellationToken cancellationToken)
+    {
+        await using var connection = await OpenAsync(cancellationToken);
+        var rows = await connection.QueryAsync<CadPropertyWritebackVersion>(new CommandDefinition(
+            """
+            SELECT w.source_document_id AS DocumentId, v.id AS VersionId, v.revision_label AS Revision
+            FROM cad_property_writeback w
+            INNER JOIN document_version v ON v.id = w.result_version_id
+            WHERE w.project_id=@ProjectId AND w.status='Succeeded' AND w.result_version_id IS NOT NULL
+            """,
+            new { ProjectId = projectId }, cancellationToken: cancellationToken));
+        return rows.ToArray();
+    }
+
     public async Task<CadPropertyWriteback> UpdateCadPropertyWritebackAsync(Guid id, CadPropertyWritebackStatus status, Guid? resultVersionId, string? error, CancellationToken cancellationToken)
     {
         await using var connection = await OpenAsync(cancellationToken);

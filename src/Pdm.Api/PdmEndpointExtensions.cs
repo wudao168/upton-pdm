@@ -1029,6 +1029,12 @@ public static class PdmEndpointExtensions
             return Results.Ok(await workflow.ListCadPropertyWritebacksAsync(projectId, activeOnly ?? false, actor, role, cancellationToken));
         });
 
+        api.MapGet("/projects/{projectId:guid}/cad-property-writeback-versions", async (Guid projectId, HttpContext context, PdmWorkflowService workflow, CancellationToken cancellationToken) =>
+        {
+            var (actor, role) = CurrentUser(context.User);
+            return Results.Ok(await workflow.ListCadPropertyWritebackVersionsAsync(projectId, actor, role, cancellationToken));
+        });
+
         api.MapPost("/cad-property-writebacks/{id:guid}/start", async (Guid id, HttpContext context, PdmWorkflowService workflow, CancellationToken cancellationToken) =>
         {
             var (actor, role) = CurrentUser(context.User);

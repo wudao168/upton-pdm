@@ -2,7 +2,8 @@
 import { clearGlobalStatus, ElMessage } from '../statusMessage'
 import { ElMessageBox } from 'element-plus'
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { applyForBomMaterialCodes, applyMaterialRelations, downloadDocumentPreviewFile, expandEngineeringKit, getMaterialRelationCompleteness, linkBomMaterial, listDocumentVersions, listDrawingReviewCandidates, listEngineeringKits, listMaterials, previewBomSourceReclassification, reclassifyBomItemsFromSource, resolveBomMaterialCodes } from '../api'
+import { applyForBomMaterialCodes, applyMaterialRelations, downloadDocumentPreviewFile, expandEngineeringKit, getMaterialRelationCompleteness, linkBomMaterial, listCadPropertyWritebackVersions, listDocumentVersions, listDrawingReviewCandidates, listEngineeringKits, listMaterials, previewBomSourceReclassification, reclassifyBomItemsFromSource, resolveBomMaterialCodes } from '../api'
+import type { CadPropertyWritebackVersion } from '../types'
 import type { BatchUpdateBomItemsInput, BomClassification, BomEmptyDeclaration, BomExportMode, BomGenerationResult, BomItem, BomKind, BomSourceReclassificationPreview, BomValidationField, BomValidationRules, BomVersion, CreateReleasePackageInput, DocumentModelDrawingRelation, DocumentNode, DrawingReviewCandidate, DrawingReviewPackage, EngineeringKit, FormalSupplementPolicies, ManagedDocument, ManufacturingBomBaseline, MaterialCodeResolution, MaterialRelationCompleteness, MaterialRelationGroupCheck, PdmMaterial, ProjectSummary, ReleasePackageSummary, ReleaseScope, UpdateReleasePackageDraftInput } from '../types'
 import { u9UnitName, u9UnitOptions } from '../u9Units'
 import BomHierarchyOverview from './BomHierarchyOverview.vue'
@@ -12,7 +13,7 @@ import ReleaseOverview from './ReleaseOverview.vue'
 type BomView = 'Overview' | 'Source' | 'WearPart' | 'Release' | BomKind
 type BomDisplayMode = 'Summary' | 'Structure'
 type BomKindFilter = 'All' | BomClassification
-type BomComparisonFilter = 'All' | 'Released' | 'Added' | 'VersionUpdated' | 'Modified' | 'Removed'
+type BomComparisonFilter = 'All' | 'Released' | 'Added' | 'VersionUpdated' | 'PropertyUpdated' | 'Modified' | 'Removed'
 type BomComparisonStatus = Exclude<BomComparisonFilter, 'All' | 'Removed'>
 type EditableBomField = 'kind' | 'drawingNumber' | 'name' | 'parentDrawingNumber' | 'specification' | 'remark' | 'brand' | 'material' | 'surfaceTreatment' | 'heatTreatment' | 'quantity'
 type EditableBomRow = BomItem & { _clientKey?: string; _quickEntry?: boolean; _sourceItemIds?: string[]; _sourceKinds?: BomClassification[]; _sourceTypes?: NonNullable<BomItem['source']>[] }
@@ -155,6 +156,21 @@ async function refreshCurrentDrawingReviewCandidates() {
   }
 }
 watch([() => props.projectId, () => props.token], () => { void refreshCurrentDrawingReviewCandidates() }, { immediate: true })
+// 属性回写产生的版本只写入属性、零件几何未变，对比发布时据此把它与真实修改区分开。
+const propertyWritebackVersions = ref<CadPropertyWritebackVersion[]>([])
+const propertyWritebackRevisions = computed(() => new Set(propertyWritebackVersions.value
+  .map(item => `${item.documentId}|${item.revision}`.toLocaleLowerCase())))
+async function refreshPropertyWritebackVersions() {
+  const projectId = props.projectId
+  const token = props.token
+  if (!projectId || !token) return
+  try {
+    propertyWritebackVersions.value = await listCadPropertyWritebackVersions(projectId, token)
+  } catch {
+    propertyWritebackVersions.value = []
+  }
+}
+watch([() => props.projectId, () => props.token], () => { void refreshPropertyWritebackVersions() }, { immediate: true })
 watch(kind, value => {
   clearGlobalStatus()
   if (value === 'NonStandard') void refreshCurrentDrawingReviewCandidates()
@@ -950,6 +966,7 @@ function compareBomRows(current: EditableBomRow[], previous: BomItem[], mode: Bo
   const entries = new Map<string, BomComparisonEntry>()
   const added: EditableBomRow[] = []
   const versionUpdated: EditableBomRow[] = []
+  const propertyUpdated: EditableBomRow[] = []
   const modified: EditableBomRow[] = []
   const released: EditableBomRow[] = []
   currentRows.forEach(({ item, key }) => {
@@ -969,6 +986,10 @@ function compareBomRows(current: EditableBomRow[], previous: BomItem[], mode: Bo
       if (changes.every(change => change.field === 'revision')) {
         versionUpdated.push(item)
         entries.set(comparisonRowReference(item), { status: 'VersionUpdated', current: item, previous: old, changes })
+      } else if (isPropertyWritebackRow(item, changes)) {
+        // 该版本由属性回写产生（只写属性、几何未变），属性值差异不算真实修改。
+        propertyUpdated.push(item)
+        entries.set(comparisonRowReference(item), { status: 'PropertyUpdated', current: item, previous: old, changes })
       } else {
         modified.push(item)
         entries.set(comparisonRowReference(item), { status: 'Modified', current: item, previous: old, changes })
@@ -979,7 +1000,14 @@ function compareBomRows(current: EditableBomRow[], previous: BomItem[], mode: Bo
     }
   })
   const removed = previousRows.filter(entry => !currentKeys.has(entry.key)).map(entry => entry.item)
-  return { added, removed, versionUpdated, modified, released, entries }
+  return { added, removed, versionUpdated, propertyUpdated, modified, released, entries }
+}
+
+/** 该行当前版本是否由属性回写产生；数量或物料分类变化仍按真实修改处理。 */
+function isPropertyWritebackRow(row: EditableBomRow, changes: BomComparisonChange[]) {
+  if (!row.sourceDocumentId || !row.revision) return false
+  if (changes.some(change => change.field === 'quantity' || change.field === 'kind')) return false
+  return propertyWritebackRevisions.value.has(`${row.sourceDocumentId}|${row.revision}`.toLocaleLowerCase())
 }
 
 function comparisonEntry(row: EditableBomRow) {
@@ -991,11 +1019,17 @@ function comparisonRowStatus(row: EditableBomRow) {
   return comparisonEntry(row)?.status
 }
 
+/** 该行在最近发布版里存在（含只升版、只更新属性的行），删除或重生成时需要提示来自发布版。 */
+function isFromReleasedBaseline(row: EditableBomRow) {
+  return ['Released', 'VersionUpdated', 'PropertyUpdated', 'Modified'].includes(comparisonRowStatus(row) ?? '')
+}
+
 function comparisonStatusLabel(status: BomComparisonStatus | undefined) {
   return status === 'Released' ? '已发布'
     : status === 'Added' ? '新增'
       : status === 'VersionUpdated' ? '版本更新'
-        : status === 'Modified' ? '已修改' : ''
+        : status === 'PropertyUpdated' ? '属性更新'
+          : status === 'Modified' ? '已修改' : ''
 }
 
 function comparisonRowTitle(row: EditableBomRow) {
@@ -1004,7 +1038,9 @@ function comparisonRowTitle(row: EditableBomRow) {
   if (entry.status === 'Released') return '已发布基线：与最近发布版一致'
   if (entry.status === 'Added') return '新增：最近发布版中不存在该物料'
   const detail = entry.changes.map(change => `${change.label} ${change.previous} → ${change.current}`).join('；')
-  return entry.status === 'VersionUpdated' ? `版本更新（内容未变）：${detail}` : `已修改：${detail}`
+  if (entry.status === 'VersionUpdated') return `版本更新（内容未变）：${detail}`
+  if (entry.status === 'PropertyUpdated') return `属性更新（属性回写产生，几何未变）：${detail}`
+  return `已修改：${detail}`
 }
 
 function releasePackageMatchesKind(releasePackage: ReleasePackageSummary, bomKind: BomView) {
@@ -2783,7 +2819,7 @@ async function deleteItems(itemIds: string[]) {
     const deletingRows = rows.value.filter(row => row.id && itemIds.includes(row.id))
     const sourceCount = deletingRows.filter(row => row.sourceDocumentId).length
     const manualCount = deletingRows.length - sourceCount
-    const publishedCount = deletingRows.filter(row => ['Released', 'Modified'].includes(comparisonRowStatus(row) ?? '')).length
+    const publishedCount = deletingRows.filter(row => isFromReleasedBaseline(row)).length
     const response = await ElMessageBox.prompt(
       `共 ${itemIds.length} 条：有源 ${sourceCount} 条、人工 ${manualCount} 条${publishedCount ? `，其中 ${publishedCount} 条来自最近发布版` : ''}。删除后统一移入回收站，可恢复且不会改动已发布版本。`,
       '移入BOM回收站',
@@ -2973,7 +3009,7 @@ function toggleAllRows(event: Event) {
 }
 
 async function ensurePublishedRowsAcknowledged(targetRows: EditableBomRow[], action: string) {
-  const publishedRows = targetRows.filter(row => ['Released', 'Modified'].includes(comparisonRowStatus(row) ?? ''))
+  const publishedRows = targetRows.filter(row => isFromReleasedBaseline(row))
   const pendingRows = publishedRows.filter(row => !acknowledgedPublishedRows.has(comparisonRowReference(row)))
   if (!pendingRows.length) return true
   try {
@@ -3441,10 +3477,11 @@ async function submitBatchUpdate() {
     <div v-if="comparisonOpen && comparisonBaseline" class="pdm-bom-comparison-summary">
       <strong>{{ selectedVersionId === 'current' ? '当前工作区' : selectedVersion ? displayVersionLabel(selectedVersion.label) : '当前工作区' }} 对比已发布基线 {{ comparisonBaseline.label }}</strong>
       <div class="pdm-bom-comparison-filters" role="group" aria-label="筛选发布版差异">
-        <button type="button" :class="{ 'is-active': comparisonFilter === 'All' }" @click="comparisonFilter = 'All'">全部 {{ comparison.released.length + comparison.added.length + comparison.versionUpdated.length + comparison.modified.length }}</button>
+        <button type="button" :class="{ 'is-active': comparisonFilter === 'All' }" @click="comparisonFilter = 'All'">全部 {{ comparison.released.length + comparison.added.length + comparison.versionUpdated.length + comparison.propertyUpdated.length + comparison.modified.length }}</button>
         <button type="button" class="is-released" :class="{ 'is-active': comparisonFilter === 'Released' }" @click="comparisonFilter = 'Released'">已发布 {{ comparison.released.length }}</button>
         <button type="button" class="is-added" :class="{ 'is-active': comparisonFilter === 'Added' }" @click="comparisonFilter = 'Added'">新增 {{ comparison.added.length }}</button>
         <button type="button" class="is-version-updated" :class="{ 'is-active': comparisonFilter === 'VersionUpdated' }" @click="comparisonFilter = 'VersionUpdated'">版本更新 {{ comparison.versionUpdated.length }}</button>
+        <button type="button" class="is-property-updated" :class="{ 'is-active': comparisonFilter === 'PropertyUpdated' }" @click="comparisonFilter = 'PropertyUpdated'" title="该版本由属性回写产生：只写入属性，零件几何未变更">属性更新 {{ comparison.propertyUpdated.length }}</button>
         <button type="button" class="is-modified" :class="{ 'is-active': comparisonFilter === 'Modified' }" @click="comparisonFilter = 'Modified'">修改 {{ comparison.modified.length }}</button>
         <button type="button" class="is-removed" :class="{ 'is-active': comparisonFilter === 'Removed' }" @click="comparisonFilter = 'Removed'">已移除 {{ comparison.removed.length }}</button>
       </div>
@@ -3503,7 +3540,7 @@ async function submitBatchUpdate() {
         </colgroup>
           <thead><tr><th><input type="checkbox" :aria-label="isSourceView ? '选择全部源数据物料' : '选择当前分类全部物料'" :checked="allRowsSelected" :disabled="!canSelectCurrentView || selectableIds.length === 0" @change="toggleAllRows"></th><th aria-label="行排序与插入操作"></th><th>序号</th><th v-if="isBomColumnVisible('kind')">物料分类</th><th v-if="isBomColumnVisible('wearPart')" title="在正式BOM中明确选择是或否；图档来源行保存后会生成属性写回任务">易损件</th><th v-if="isBomColumnVisible('impact') && !isSourceView && !isWearPartView">关键</th><th v-if="isBomColumnVisible('unit')">单位</th><th v-if="isBomColumnVisible('drawingNumber')">物料编码</th><th v-if="isBomColumnVisible('name')">物料名称</th><th v-if="isBomColumnVisible('parentDrawingNumber')">上级物料编码</th><th v-if="isBomColumnVisible('specification')">型号</th><th v-if="isBomColumnVisible('remark')">备注信息</th><th v-if="isBomColumnVisible('brand')">品牌</th><th v-if="isBomColumnVisible('material')">材质</th><th v-if="isBomColumnVisible('surfaceTreatment')">表面处理</th><th v-if="isBomColumnVisible('heatTreatment')">热处理</th><th v-if="isBomColumnVisible('weight')">重量</th><th v-if="isBomColumnVisible('quantity')">数量</th><th v-if="isBomColumnVisible('quantityReference')" :title="isWearPartView ? '易损件统计视图不参与发布' : '已发布总数量 / 当前BOM总数量 / 源总数量'">{{ isWearPartView ? '发布状态' : '发布  总/源' }}</th><th v-if="isBomColumnVisible('drawing')" class="pdm-bom-drawing-audit-header">图纸</th><th v-if="isBomColumnVisible('revision')">版本</th><th v-if="isBomColumnVisible('issue')" class="pdm-bom-reconciliation-header">{{ isWearPartView ? '数据来源' : '问题' }}</th><th v-if="isBomColumnVisible('dataStatus')">资料状态</th></tr></thead>
         <tbody>
-          <tr v-for="{ row, index, depth, hasChildren, expanded, structureKey } in pagedRows" :key="row.id || row._clientKey" :data-row-index="index" :title="comparisonRowTitle(row)" :class="{ 'is-quick-entry': row._quickEntry, 'is-pending-removal': row.pendingRemoval, 'is-release-excluded': row.releaseExcluded, 'is-bom-unresolved': !row._quickEntry && (rowNeedsClassification(row) || row.manualUnmatched), 'is-data-exception': !row._quickEntry && dataStatusIssues(row).length > 0, 'is-reconciliation-issue': !row._quickEntry && shouldShowReconciliation(row), 'is-release-unchanged': comparisonRowStatus(row) === 'Released', 'is-release-added': comparisonRowStatus(row) === 'Added', 'is-release-version-updated': comparisonRowStatus(row) === 'VersionUpdated', 'is-release-modified': comparisonRowStatus(row) === 'Modified', 'is-row-dragging': draggedRowIndex === index, 'is-drag-over-before': dragOverRowIndex === index && dragOverPosition === 'before', 'is-drag-over-after': dragOverRowIndex === index && dragOverPosition === 'after' }">
+          <tr v-for="{ row, index, depth, hasChildren, expanded, structureKey } in pagedRows" :key="row.id || row._clientKey" :data-row-index="index" :title="comparisonRowTitle(row)" :class="{ 'is-quick-entry': row._quickEntry, 'is-pending-removal': row.pendingRemoval, 'is-release-excluded': row.releaseExcluded, 'is-bom-unresolved': !row._quickEntry && (rowNeedsClassification(row) || row.manualUnmatched), 'is-data-exception': !row._quickEntry && dataStatusIssues(row).length > 0, 'is-reconciliation-issue': !row._quickEntry && shouldShowReconciliation(row), 'is-release-unchanged': comparisonRowStatus(row) === 'Released', 'is-release-added': comparisonRowStatus(row) === 'Added', 'is-release-version-updated': comparisonRowStatus(row) === 'VersionUpdated', 'is-release-property-updated': comparisonRowStatus(row) === 'PropertyUpdated', 'is-release-modified': comparisonRowStatus(row) === 'Modified', 'is-row-dragging': draggedRowIndex === index, 'is-drag-over-before': dragOverRowIndex === index && dragOverPosition === 'before', 'is-drag-over-after': dragOverRowIndex === index && dragOverPosition === 'after' }">
             <td><input v-if="!row._quickEntry" type="checkbox" aria-label="选择物料" :checked="selectedIds.includes(rowSelectionKey(row) ?? '')" :disabled="!canSelectCurrentView || !rowSelectionKey(row)" @change="toggleRow(rowSelectionKey(row), $event)"></td>
             <td>
               <span v-if="isSourceView" class="pdm-bom-classification-indicator" :class="rowIsClassified(row) ? 'is-classified' : 'is-unclassified'" :aria-label="rowIsClassified(row) ? '已归类' : '未归类'" :title="rowIsClassified(row) ? '已归类' : '未归类'">{{ rowIsClassified(row) ? '✓' : '!' }}</span>
@@ -3984,6 +4021,10 @@ async function submitBatchUpdate() {
 .pdm-bom-selection-toolbar .pdm-bom-relation-action.is-warning,.pdm-bom-selection-toolbar .pdm-bom-relation-action.is-warning:hover:not(:disabled){background:#f59e0b;border-color:#f59e0b;color:var(--pdm-text)}
 .pdm-bom-selection-toolbar .pdm-bom-code-check-action{background:#2563eb;border-color:#2563eb;color:#fff}
 .pdm-bom-selection-toolbar .pdm-bom-code-check-action:hover:not(:disabled){background:#1d4ed8;border-color:#1d4ed8}
+/* 属性更新：版本由属性回写产生（只写属性、几何未变），与版本更新同色系区分。 */
+.pdm-bom-comparison-filters button.is-property-updated{background:#f0f9ff;color:#0c7fb0}
+.pdm-bom-manager-panel :deep(.pdm-bom-table tbody tr.is-release-property-updated>td){background:#f0f9ff}
+.pdm-bom-manager-panel :deep(.pdm-bom-table tbody tr.is-release-property-updated:hover>td){background:#e0f2fe}
 </style>
 <style scoped>
 .pdm-bom-column-settings-note{margin:0 0 12px;color:var(--pdm-muted);line-height:1.4}.pdm-bom-column-settings-list{display:grid;max-height:460px;grid-template-columns:repeat(2,minmax(0,1fr));gap:0;overflow:auto;border:1px solid var(--pdm-border);border-radius:8px}.pdm-bom-column-settings-list :deep(.el-checkbox){box-sizing:border-box;width:100%;min-height:36px;margin:0;padding:7px 12px;border-bottom:1px solid #eef2f7}.pdm-bom-column-settings-list :deep(.el-checkbox:nth-child(odd)){border-right:1px solid #eef2f7}

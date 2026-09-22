@@ -639,7 +639,15 @@ public sealed class DrawingReviewWorkflowTests
         Assert.Equal("drawing-reviewer", request.Properties["校对"]);
         await workflow.StartCadPropertyWritebackAsync(request.Id, "cad-client", UserRole.Administrator, default);
         var result = await CheckInAsync(repository, request.SourceDocumentId, "cad-client", request.Properties, 'D', drawingReviewWritebackId: request.Id);
-        await workflow.CompleteCadPropertyWritebackAsync(request.Id, Assert.IsType<DocumentVersion>(result.Version).Id, "cad-client", UserRole.Administrator, default);
+        var writebackVersion = Assert.IsType<DocumentVersion>(result.Version);
+        Assert.Equal(DocumentVersionChangeKind.PropertyWriteback, writebackVersion.ChangeKind);
+        Assert.Empty(await repository.ListCadPropertyWritebackVersionsAsync(ProjectId, default));
+        await workflow.CompleteCadPropertyWritebackAsync(request.Id, writebackVersion.Id, "cad-client", UserRole.Administrator, default);
+
+        var writebackRevision = Assert.Single(await repository.ListCadPropertyWritebackVersionsAsync(ProjectId, default));
+        Assert.Equal(request.SourceDocumentId, writebackRevision.DocumentId);
+        Assert.Equal(writebackVersion.Id, writebackRevision.VersionId);
+        Assert.Equal(writebackVersion.Revision.Display, writebackRevision.Revision);
 
         review = await repository.FindDrawingReviewPackageAsync(review.Id, default) ?? throw new InvalidOperationException();
         Assert.Equal(DrawingReviewPackageState.Approved, review.State);

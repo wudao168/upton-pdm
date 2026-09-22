@@ -684,6 +684,12 @@ public sealed record CadPropertyWriteback(
     public string? LastError { get; init; }
 }
 
+/// <summary>属性回写产生的版本：用于把"仅属性写入"的版本变化与真实内容修改区分开。</summary>
+public sealed record CadPropertyWritebackVersion(
+    Guid DocumentId,
+    Guid VersionId,
+    string Revision);
+
 public sealed record ApprovalTask(
     Guid Id,
     Guid ReleasePackageId,

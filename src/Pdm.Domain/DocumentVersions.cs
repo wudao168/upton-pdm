@@ -26,7 +26,11 @@ public sealed record DocumentVersion(
     string? SourceDescription,
     Guid? ApprovalTaskId,
     Guid? ReleasePackageId,
-    DocumentPreviewArtifact? Preview = null);
+    DocumentPreviewArtifact? Preview = null)
+{
+    /// <summary>该版本是"仅属性写入"产生还是内容变更产生；仅属性版本不改变零件几何。</summary>
+    public DocumentVersionChangeKind ChangeKind { get; init; } = DocumentVersionChangeKind.Content;
+}
 
 public sealed record PropertySnapshotChange(
     SnapshotChangeKind Kind,

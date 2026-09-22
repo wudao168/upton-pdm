@@ -187,6 +187,13 @@ public enum CadPropertyWritebackStatus
     PendingSave = 6
 }
 
+/// <summary>版本产生的原因：内容变更（默认）或受控属性回写（只写属性，不修改几何）。</summary>
+public enum DocumentVersionChangeKind
+{
+    Content = 0,
+    PropertyWriteback = 1
+}
+
 public enum ApprovalStage
 {
     ProcessReview = 1,

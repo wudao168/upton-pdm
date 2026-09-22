@@ -3278,6 +3278,13 @@ public sealed class PdmWorkflowService(
         return activeOnly ? items.Where(item => item.Status is CadPropertyWritebackStatus.Pending or CadPropertyWritebackStatus.InProgress).ToArray() : items;
     }
 
+    public async Task<IReadOnlyList<CadPropertyWritebackVersion>> ListCadPropertyWritebackVersionsAsync(Guid projectId, string actor, UserRole role, CancellationToken cancellationToken)
+    {
+        if (!await repository.HasProjectContentReadAccessAsync(projectId, actor, role, cancellationToken))
+            throw new UnauthorizedAccessException("当前用户没有该项目的读取权限。");
+        return await repository.ListCadPropertyWritebackVersionsAsync(projectId, cancellationToken);
+    }
+
     public async Task<IReadOnlyList<DrawingReviewPackage>> ListDrawingReviewPackagesAsync(Guid projectId, string actor, UserRole role, CancellationToken cancellationToken)
     {
         if (!await repository.HasProjectContentReadAccessAsync(projectId, actor, role, cancellationToken))

@@ -99,7 +99,11 @@ public sealed record DocumentVersionCommit(
     bool ForceVersion = false,
     string? DrawingNumber = null,
     string? Name = null,
-    string? FileName = null);
+    string? FileName = null)
+{
+    /// <summary>该次提交的性质；受控属性回写会强制记为 PropertyWriteback。</summary>
+    public DocumentVersionChangeKind ChangeKind { get; init; } = DocumentVersionChangeKind.Content;
+}
 
 public sealed record ReleasePreviewSource(
     Guid DocumentId,
@@ -493,6 +497,7 @@ public interface IPdmRepository
     Task<BomItem> UpdateBomReconciliationAsync(Guid projectId, Guid itemId, string? status, string? note, string? updatedBy, DateTimeOffset? updatedAt, CancellationToken cancellationToken);
     Task<CadPropertyWriteback> EnqueueCadPropertyWritebackAsync(CadPropertyWriteback request, CancellationToken cancellationToken);
     Task<IReadOnlyList<CadPropertyWriteback>> ListCadPropertyWritebacksAsync(Guid projectId, CancellationToken cancellationToken);
+    Task<IReadOnlyList<CadPropertyWritebackVersion>> ListCadPropertyWritebackVersionsAsync(Guid projectId, CancellationToken cancellationToken);
     Task<CadPropertyWriteback?> FindCadPropertyWritebackAsync(Guid id, CancellationToken cancellationToken);
     Task<CadPropertyWriteback> UpdateCadPropertyWritebackAsync(Guid id, CadPropertyWritebackStatus status, Guid? resultVersionId, string? error, CancellationToken cancellationToken);
     Task<IReadOnlyList<DrawingReviewPackage>> ListDrawingReviewPackagesAsync(Guid projectId, CancellationToken cancellationToken);

@@ -1334,6 +1334,22 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
         }
     }
 
+    public Task<IReadOnlyList<CadPropertyWritebackVersion>> ListCadPropertyWritebackVersionsAsync(Guid projectId, CancellationToken cancellationToken)
+    {
+        lock (gate)
+        {
+            var result = cadPropertyWritebacks.Values
+                .Where(item => item.ProjectId == projectId
+                    && item.Status == CadPropertyWritebackStatus.Succeeded
+                    && item.ResultVersionId.HasValue
+                    && versions.TryGetValue(item.ResultVersionId.Value, out var _))
+                .Select(item => new CadPropertyWritebackVersion(item.SourceDocumentId, item.ResultVersionId!.Value, versions[item.ResultVersionId.Value].Revision.Display))
+                .Distinct()
+                .ToArray();
+            return Task.FromResult<IReadOnlyList<CadPropertyWritebackVersion>>(result);
+        }
+    }
+
     public Task<CadPropertyWriteback> UpdateCadPropertyWritebackAsync(Guid id, CadPropertyWritebackStatus status, Guid? resultVersionId, string? error, CancellationToken cancellationToken)
     {
         lock (gate)
@@ -1658,8 +1674,9 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
         {
             if (!documents.TryGetValue(documentId, out var document)) throw new PdmNotFoundException("图档不存在。");
             EnsureSessionOwner(document, actor, sessionId, "提交存档");
-            if (IsDocumentUnderActiveDrawingReview(documentId)
-                && (!drawingReviewWritebackId.HasValue || !IsActiveDrawingReviewWriteback(documentId, drawingReviewWritebackId.Value)))
+            var controlledWriteback = drawingReviewWritebackId.HasValue
+                && IsActiveDrawingReviewWriteback(documentId, drawingReviewWritebackId.Value);
+            if (IsDocumentUnderActiveDrawingReview(documentId) && !controlledWriteback)
             {
                 throw new PdmConflictException("图档正在进行图纸审核，不能提交存档。");
             }
@@ -1692,7 +1709,11 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
                 return Task.FromResult(new DocumentCheckInResult(unchanged, null, false));
             }
             var revision = versions.Values.Any(version => version.DocumentId == documentId) || document.Revision.IsReleased ? document.Revision.NextWork() : RevisionLabel.InitialWork();
-            var version = new DocumentVersion(Guid.NewGuid(), documentId, revision, DocumentVersionStatus.Work, commit.File.RelativePath, commit.File.Length, commit.File.Sha256, actor, DateTimeOffset.UtcNow, commit.ChangeNote, commit.Properties, commit.ReferenceSnapshot.Root, commit.MechanicalBomSnapshot, commit.ElectricalBomSnapshot, commit.SourceVersionId, commit.SourceDescription, null, null);
+            var version = new DocumentVersion(Guid.NewGuid(), documentId, revision, DocumentVersionStatus.Work, commit.File.RelativePath, commit.File.Length, commit.File.Sha256, actor, DateTimeOffset.UtcNow, commit.ChangeNote, commit.Properties, commit.ReferenceSnapshot.Root, commit.MechanicalBomSnapshot, commit.ElectricalBomSnapshot, commit.SourceVersionId, commit.SourceDescription, null, null)
+            {
+                // 受控属性回写只写入属性、不修改几何。
+                ChangeKind = controlledWriteback ? DocumentVersionChangeKind.PropertyWriteback : commit.ChangeKind
+            };
             versions[version.Id] = version;
             var updated = ClearEditLock(renamedDocument with { Revision = revision, State = DocumentLifecycleState.Work }, version.CreatedAt);
             documents[documentId] = updated;

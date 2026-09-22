@@ -865,6 +865,13 @@ export interface BomGenerationResult {
 }
 
 export type BomVersionState = 'Draft' | 'InReview' | 'Released' | 'Obsolete'
+/** 属性回写产生的版本：只写入属性，零件几何未变更，用于把版本变化与真实修改区分开。 */
+export interface CadPropertyWritebackVersion {
+  documentId: string
+  versionId: string
+  revision: string
+}
+
 export interface BomVersion {
   id: string
   projectId: string

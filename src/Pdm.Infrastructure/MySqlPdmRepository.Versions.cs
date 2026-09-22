@@ -96,7 +96,9 @@ public sealed partial class MySqlPdmRepository
         }
 
         var nextRevision = await NextWorkRevisionAsync(connection, transaction, locked, cancellationToken);
-        var version = CreateVersion(documentId, nextRevision, actor, commit, timeProvider.GetUtcNow(), DocumentVersionStatus.Work);
+        // 受控属性回写只写入属性、不修改几何；下游据此把版本变化与真实内容修改区分开。
+        var changeKind = controlledWriteback ? DocumentVersionChangeKind.PropertyWriteback : commit.ChangeKind;
+        var version = CreateVersion(documentId, nextRevision, actor, commit with { ChangeKind = changeKind }, timeProvider.GetUtcNow(), DocumentVersionStatus.Work);
         await InsertVersionAsync(connection, transaction, version, cancellationToken);
         await InsertReferenceSnapshotAsync(connection, transaction, commit.ReferenceSnapshot, cancellationToken);
         if (commit.IsProjectRoot)
@@ -541,7 +543,8 @@ public sealed partial class MySqlPdmRepository
     private static DocumentVersion CreateVersion(Guid documentId, RevisionLabel revision, string actor, DocumentVersionCommit commit, DateTimeOffset now, DocumentVersionStatus status) =>
         new(Guid.NewGuid(), documentId, revision, status, commit.File.RelativePath, commit.File.Length, commit.File.Sha256, actor, now, commit.ChangeNote,
             commit.Properties, commit.ReferenceSnapshot.Root, commit.MechanicalBomSnapshot, commit.ElectricalBomSnapshot,
-            commit.SourceVersionId, commit.SourceDescription, null, null);
+            commit.SourceVersionId, commit.SourceDescription, null, null)
+        { ChangeKind = commit.ChangeKind };
 
     private async Task InsertReferenceSnapshotAsync(DbConnection connection, DbTransaction transaction, CadReferenceSnapshot snapshot, CancellationToken cancellationToken) =>
         await connection.ExecuteAsync(new CommandDefinition(
@@ -569,10 +572,10 @@ public sealed partial class MySqlPdmRepository
     private async Task InsertVersionAsync(DbConnection connection, DbTransaction transaction, DocumentVersion version, CancellationToken cancellationToken) =>
         await connection.ExecuteAsync(new CommandDefinition(
             """
-            INSERT INTO document_version(id,document_id,revision_label,version_status,storage_relative_path,file_length,sha256,comment,property_snapshot_json,reference_snapshot_json,mechanical_bom_snapshot_json,electrical_bom_snapshot_json,source_version_id,source_description,approval_task_id,release_package_id,preview_format,preview_storage_relative_path,preview_file_length,preview_sha256,preview_source_sha256,created_by,created_at)
-            VALUES(@Id,@DocumentId,@Revision,@Status,@Path,@Length,@Sha256,@Comment,@Properties,@Reference,@Mechanical,@Electrical,@SourceVersionId,@SourceDescription,@ApprovalTaskId,@ReleasePackageId,@PreviewFormat,@PreviewPath,@PreviewLength,@PreviewSha256,@PreviewSourceSha256,@CreatedBy,@CreatedAt)
+            INSERT INTO document_version(id,document_id,revision_label,version_status,change_kind,storage_relative_path,file_length,sha256,comment,property_snapshot_json,reference_snapshot_json,mechanical_bom_snapshot_json,electrical_bom_snapshot_json,source_version_id,source_description,approval_task_id,release_package_id,preview_format,preview_storage_relative_path,preview_file_length,preview_sha256,preview_source_sha256,created_by,created_at)
+            VALUES(@Id,@DocumentId,@Revision,@Status,@ChangeKind,@Path,@Length,@Sha256,@Comment,@Properties,@Reference,@Mechanical,@Electrical,@SourceVersionId,@SourceDescription,@ApprovalTaskId,@ReleasePackageId,@PreviewFormat,@PreviewPath,@PreviewLength,@PreviewSha256,@PreviewSourceSha256,@CreatedBy,@CreatedAt)
             """,
-            new { version.Id, version.DocumentId, Revision = version.Revision.Display, Status = version.Status.ToString(), Path = version.StorageRelativePath, Length = version.FileLength, version.Sha256, Comment = version.ChangeNote,
+            new { version.Id, version.DocumentId, Revision = version.Revision.Display, Status = version.Status.ToString(), ChangeKind = version.ChangeKind.ToString(), Path = version.StorageRelativePath, Length = version.FileLength, version.Sha256, Comment = version.ChangeNote,
                 Properties = JsonSerializer.Serialize(version.PropertySnapshot, jsonOptions), Reference = JsonSerializer.Serialize(version.ReferenceSnapshot, jsonOptions), Mechanical = JsonSerializer.Serialize(version.MechanicalBomSnapshot, jsonOptions), Electrical = JsonSerializer.Serialize(version.ElectricalBomSnapshot, jsonOptions),
                 version.SourceVersionId, version.SourceDescription, version.ApprovalTaskId, version.ReleasePackageId,
                 PreviewFormat = version.Preview?.Format.ToString(), PreviewPath = version.Preview?.StorageRelativePath,
@@ -604,9 +607,15 @@ public sealed partial class MySqlPdmRepository
                 row.PreviewStorageRelativePath ?? throw new InvalidDataException("版本预览路径缺失。"),
                 row.PreviewFileLength ?? throw new InvalidDataException("版本预览大小缺失。"),
                 row.PreviewSha256 ?? throw new InvalidDataException("版本预览SHA-256缺失。"),
-                row.PreviewSourceSha256 ?? throw new InvalidDataException("版本预览源SHA-256缺失。")));
+                row.PreviewSourceSha256 ?? throw new InvalidDataException("版本预览源SHA-256缺失。")))
+    { ChangeKind = ParseChangeKind(row.ChangeKind) };
 
-    private const string VersionSelect = "SELECT id,document_id,revision_label,version_status,storage_relative_path,file_length,sha256,comment,property_snapshot_json,reference_snapshot_json,mechanical_bom_snapshot_json,electrical_bom_snapshot_json,source_version_id,source_description,approval_task_id,release_package_id,preview_format,preview_storage_relative_path,preview_file_length,preview_sha256,preview_source_sha256,created_by,created_at FROM document_version";
+    private static DocumentVersionChangeKind ParseChangeKind(string? value) =>
+        !string.IsNullOrWhiteSpace(value) && Enum.TryParse<DocumentVersionChangeKind>(value, true, out var parsed)
+            ? parsed
+            : DocumentVersionChangeKind.Content;
+
+    private const string VersionSelect = "SELECT id,document_id,revision_label,version_status,change_kind,storage_relative_path,file_length,sha256,comment,property_snapshot_json,reference_snapshot_json,mechanical_bom_snapshot_json,electrical_bom_snapshot_json,source_version_id,source_description,approval_task_id,release_package_id,preview_format,preview_storage_relative_path,preview_file_length,preview_sha256,preview_source_sha256,created_by,created_at FROM document_version";
 
     private sealed class LockedDocumentRow { public Guid Id { get; init; } public string Kind { get; init; } = string.Empty; public string RevisionLabel { get; init; } = string.Empty; public string? CheckedOutBy { get; init; } public Guid? CheckoutSessionId { get; init; } public long RowVersion { get; init; } }
     private sealed class LatestVersionFingerprintRow { public string Sha256 { get; init; } = string.Empty; public string? SourceFileSha256 { get; init; } }
@@ -631,7 +640,7 @@ public sealed partial class MySqlPdmRepository
     }
     private sealed class DocumentVersionRow
     {
-        public Guid Id { get; init; } public Guid DocumentId { get; init; } public string RevisionLabel { get; init; } = string.Empty; public string VersionStatus { get; init; } = string.Empty;
+        public Guid Id { get; init; } public Guid DocumentId { get; init; } public string RevisionLabel { get; init; } = string.Empty; public string VersionStatus { get; init; } = string.Empty; public string? ChangeKind { get; init; }
         public string StorageRelativePath { get; init; } = string.Empty; public long FileLength { get; init; } public string Sha256 { get; init; } = string.Empty; public string? Comment { get; init; }
         public string PropertySnapshotJson { get; init; } = "{}"; public string ReferenceSnapshotJson { get; init; } = "{}"; public string MechanicalBomSnapshotJson { get; init; } = "[]"; public string ElectricalBomSnapshotJson { get; init; } = "[]";
         public Guid? SourceVersionId { get; init; } public string? SourceDescription { get; init; } public Guid? ApprovalTaskId { get; init; } public Guid? ReleasePackageId { get; init; }

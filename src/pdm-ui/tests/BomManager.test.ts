@@ -19,6 +19,7 @@ const materialApi = vi.hoisted(() => ({
   expandEngineeringKit: vi.fn(),
   listDocumentVersions: vi.fn(),
   listDrawingReviewCandidates: vi.fn(),
+  listCadPropertyWritebackVersions: vi.fn(),
   downloadDocumentPreviewFile: vi.fn(),
 }))
 
@@ -110,6 +111,7 @@ describe('BomManager', () => {
     materialApi.expandEngineeringKit.mockReset()
     materialApi.listDocumentVersions.mockReset().mockResolvedValue([])
     materialApi.listDrawingReviewCandidates.mockReset().mockResolvedValue([])
+    materialApi.listCadPropertyWritebackVersions.mockReset().mockResolvedValue([])
     materialApi.downloadDocumentPreviewFile.mockReset().mockResolvedValue(undefined)
   })
 
@@ -3170,6 +3172,48 @@ describe('BomManager', () => {
     const filtered = wrapper.findAll('.pdm-bom-table tbody tr').filter(row => !row.classes().includes('is-quick-entry'))
     expect(filtered).toHaveLength(1)
     expect(filtered[0]!.text()).toContain('STD-E')
+  })
+
+  it('classifies property-writeback versions as property updates instead of modifications', async () => {
+    materialApi.listCadPropertyWritebackVersions.mockResolvedValue([{ documentId: 'document-1', versionId: 'version-b', revision: 'B' }])
+    const releasedRows: BomItem[] = [
+      { id: 'part-g', sequence: 1, drawingNumber: 'STD-G', name: '回写件', quantity: 1, unit: '个', revision: 'A-W1', complete: true, source: 'Auto', sourceDocumentId: 'document-1' },
+      { id: 'part-h', sequence: 2, drawingNumber: 'STD-H', name: '真改件', quantity: 1, unit: '个', revision: 'A-W1', complete: true, source: 'Auto', sourceDocumentId: 'document-2' },
+    ]
+    const currentRows: BomItem[] = [
+      { ...releasedRows[0], revision: 'B', remark: 'PLM回写值' },
+      { ...releasedRows[1], revision: 'B', remark: 'PLM回写值' },
+    ]
+    const wrapper = mount(BomManager, {
+      props: {
+        standard: currentRows, nonStandard: [], electrical: [], declarations: [], pending: false, editable: true,
+        projectId: 'project', token: 'token',
+        versions: [{
+          id: 'standard-released', projectId: 'project', kind: 'Standard', versionNumber: 1, label: 'S-B01', state: 'Released',
+          items: releasedRows, createdBy: 'admin', createdAt: '2026-08-18', updatedBy: 'admin', updatedAt: '2026-08-18', releasedAt: '2026-08-18',
+        }],
+      },
+    })
+
+    await flushPromises()
+    await wrapper.findAll('button[role="tab"]')[1].trigger('click')
+    await flushPromises()
+
+    const summary = wrapper.get('.pdm-bom-comparison-summary').text()
+    expect(summary).toContain('属性更新 1')
+    expect(summary).toContain('修改 1')
+
+    const rows = wrapper.findAll('.pdm-bom-table tbody tr').filter(row => !row.classes().includes('is-quick-entry'))
+    const writebackRow = rows.find(row => row.text().includes('STD-G'))!
+    const modifiedRow = rows.find(row => row.text().includes('STD-H'))!
+    expect(writebackRow.classes()).toContain('is-release-property-updated')
+    expect(writebackRow.attributes('title')).toContain('属性更新（属性回写产生，几何未变）')
+    expect(modifiedRow.classes()).toContain('is-release-modified')
+
+    await wrapper.findAll('.pdm-bom-comparison-filters button').find(button => button.text() === '属性更新 1')!.trigger('click')
+    const filtered = wrapper.findAll('.pdm-bom-table tbody tr').filter(row => !row.classes().includes('is-quick-entry'))
+    expect(filtered).toHaveLength(1)
+    expect(filtered[0]!.text()).toContain('STD-G')
   })
 
   it('uses the latest published package snapshot when a long-lead release has no released BOM version', async () => {
