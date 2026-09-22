@@ -991,7 +991,7 @@ async function saveItemComment() {
         <div class="pdm-table-scroll">
           <table class="pdm-edit-table pdm-release-frozen-table" :class="{ 'is-formal-issue-view': showFormalIssueQuantities, 'is-change-view': showFrozenChanges }">
             <colgroup><col><col><col><col><col><col><col><template v-if="showFormalIssueQuantities"><col><col></template><col><col><template v-if="showFrozenChanges"><col><col></template></colgroup>
-            <thead><tr><th>序号</th><th>物料编码</th><th>{{ frozenViewMode === 'Structure' ? '物料名称 / 结构位置' : '物料名称' }}</th><th>型号</th><th>品牌</th><th>备注</th><th>{{ showFormalIssueQuantities ? 'BOM总量' : '数量' }}</th><template v-if="showFormalIssueQuantities"><th>前期已发布</th><th>本次新增下发</th></template><th>版本</th><th>批注</th><template v-if="showFrozenChanges"><th>变更</th><th>变更字段（原值 → 新值）</th></template></tr></thead>
+            <thead><tr><th>序号</th><th>物料编码</th><th>{{ frozenViewMode === 'Structure' ? '物料名称 / 结构位置' : '物料名称' }}</th><th>型号</th><th>版本</th><th>品牌</th><th>备注</th><th>{{ showFormalIssueQuantities ? 'BOM总量' : '数量' }}</th><template v-if="showFormalIssueQuantities"><th>前期已发布</th><th>本次新增下发</th></template><th>批注</th><template v-if="showFrozenChanges"><th>变更</th><th>变更字段（原值 → 新值）</th></template></tr></thead>
             <tbody>
               <tr v-for="(row, index) in pagedFrozenRows" :key="row.key">
                 <td class="is-release-centered">{{ (frozenPage - 1) * releasePageSize + index + 1 }}</td>
@@ -1001,11 +1001,11 @@ async function saveItemComment() {
                   <small v-if="frozenViewMode === 'Structure' && structureLocation(row.item)">{{ structureLocation(row.item) }}</small>
                 </td>
                 <td>{{ row.item.specification || '—' }}</td>
+                <td class="is-release-centered">{{ row.item.revision || '—' }}</td>
                 <td class="is-release-centered">{{ row.item.brand || '—' }}</td>
                 <td>{{ row.item.remark || '—' }}</td>
                 <td class="is-release-centered">{{ row.item.quantity }}</td>
                 <template v-if="showFormalIssueQuantities"><td class="is-release-centered">{{ priorQuantityForRow(row) }}</td><td class="is-release-centered is-new-issue-quantity">{{ newIssueQuantityForRow(row) }}</td></template>
-                <td class="is-release-centered">{{ row.item.revision || '—' }}</td>
                 <td class="is-release-centered"><span v-if="row.change === '删除'">—</span><button v-else type="button" class="pdm-item-comment-action" :class="{ 'has-comments': commentsForRow(row).length > 0 }" :aria-label="`查看或添加物料批注 ${row.item.drawingNumber || row.item.name}`" @click="openItemComment(row)">批注<span v-if="commentsForRow(row).length">（{{ commentsForRow(row).length }}）</span></button></td>
                 <template v-if="showFrozenChanges"><td class="is-release-centered"><span class="release-change-tag" :class="`is-${row.change}`">{{ row.change }}</span></td><td class="pdm-frozen-change-details"><div v-for="detail in row.details" :key="detail">{{ detail }}</div></td></template>
               </tr>

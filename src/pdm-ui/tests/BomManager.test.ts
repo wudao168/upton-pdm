@@ -892,7 +892,7 @@ describe('BomManager', () => {
     await wrapper.findAll('button[role="tab"]')[1].trigger('click')
 
     expect(wrapper.findAll('thead th').map(header => header.text())).toEqual([
-      '', '', '序号', '物料分类', '易损件', '关键', '单位', '物料编码', '物料名称', '上级物料编码', '型号', '备注信息', '品牌', '材质', '表面处理', '重量', '数量', '发布  总/源', '版本', '问题', '资料状态',
+      '', '', '序号', '物料分类', '易损件', '关键', '单位', '物料编码', '物料名称', '上级物料编码', '型号', '版本', '备注信息', '品牌', '材质', '表面处理', '重量', '数量', '发布  总/源', '问题', '资料状态',
     ])
   })
 
@@ -960,8 +960,8 @@ describe('BomManager', () => {
     expect(quickEntry.classes()).toContain('is-quick-entry')
     expect(quickEntry.text()).toContain('标准件')
     expect(quickEntry.text()).toContain('个')
-    // 标准件BOM不显示图纸列，版本列在原基础上前移一列。
-    expect(quickEntry.findAll('td')[18].text()).toBe('W1')
+    // 版本列紧跟型号列，标准件BOM又不显示图纸列，因此这里是第 12 个单元格。
+    expect(quickEntry.findAll('td')[11].text()).toBe('W1')
     expect(quickEntry.text()).toContain('待录入')
     expect(quickEntry.text()).not.toContain('缺3D图')
     expect(quickEntry.text()).not.toContain('—')
@@ -1017,7 +1017,7 @@ describe('BomManager', () => {
     expect(wrapper.find('.pdm-bom-reconciliation').exists()).toBe(false)
   })
 
-  it('does not require a material code for non-standard items and warns when the drawing is not reviewed', async () => {
+  it('does not require a material code for non-standard items and keeps the drawing column free of review status', async () => {
     const wrapper = mount(BomManager, {
       props: {
         standard: [], electrical: [], declarations: [], pending: false, editable: true,
@@ -1036,39 +1036,8 @@ describe('BomManager', () => {
     await nonStandardTab!.trigger('click')
     expect(wrapper.text()).not.toContain('缺少物料编码')
     expect(wrapper.get('.pdm-bom-data-status').text()).toBe('已完善')
-    const reviewStatus = wrapper.get('.pdm-bom-drawing-review-status')
-    expect(reviewStatus.text()).toBe('待提交')
-    expect(reviewStatus.attributes('title')).toBe('当前工程图尚未发起审核')
-  })
-
-  it('主管已批准（已批准/回写属性阶段）时，BOM 图纸列与设计树一致显示已批准', async () => {
-    const wrapper = mount(BomManager, {
-      props: {
-        standard: [], electrical: [], declarations: [], pending: false, editable: true,
-        nonStandard: [{ id: 'non-standard-approved', kind: 'NonStandard', sequence: 1, drawingNumber: '01020014733', name: '导向轴支座', material: '6061', quantity: 1, unit: '件', revision: 'W1', complete: true, sourceDocumentId: 'model-approved' }],
-        drawingReviewCandidates: [{
-          candidateId: 'review-approved', bomItemId: 'non-standard-approved', modelDocumentId: 'model-approved', drawingDocumentId: 'drawing-approved',
-          drawingNumber: '01020014733', name: '导向轴支座', bomKinds: ['NonStandard'], modelRevision: 'W1', drawingRevision: 'W1',
-          state: 'InReview', reason: '已在其他审核单中', selectable: false,
-        }],
-        // 审核单已到已批准/回写属性阶段，但逐张图纸记录仍是“已通过（待批准）”。
-        drawingReviews: [{
-          id: 'review-approved', projectId: 'project-1', number: 'DR-1', state: 'WritingProperties', createdBy: 'submitter', createdAt: '2026-09-19T00:00:00Z', markups: [],
-          items: [{
-            id: 'item-approved', packageId: 'review-approved', bomItemId: 'non-standard-approved', drawingNumber: '01020014733', name: '导向轴支座',
-            modelDocumentId: 'model-approved', modelVersionId: 'v1', modelRevision: 'W1', modelSha256: 'A'.repeat(64), modelCreatedBy: 'designer',
-            drawingDocumentId: 'drawing-approved', drawingVersionId: 'v1', drawingRevision: 'W1', drawingSha256: 'B'.repeat(64), drawingCreatedBy: 'designer',
-            modelState: 'NotRequired', drawingState: 'Approved', effectiveModelVersionId: 'v1', effectiveDrawingVersionId: 'v1',
-          }],
-        }],
-      },
-    })
-
-    const nonStandardTab = wrapper.findAll('button[role="tab"]').find(tab => tab.text().includes('非标件BOM'))
-    await nonStandardTab!.trigger('click')
-    const reviewStatus = wrapper.get('.pdm-bom-drawing-review-status')
-    expect(reviewStatus.text()).toBe('已批准')
-    expect(reviewStatus.classes()).toContain('is-approved')
+    expect(wrapper.find('.pdm-bom-drawing-review-status').exists()).toBe(false)
+    expect(wrapper.get('.pdm-bom-drawing-audit-cell').text()).toBe('2D3D')
   })
 
   it('edits one impact stage on formal BOMs and hides the field from wear parts', async () => {
@@ -1396,7 +1365,8 @@ describe('BomManager', () => {
     expect(missingSlots).toHaveLength(4)
     expect(missingSlots[0].attributes('title')).toBe('尚未关联2D工程图')
     expect(missingSlots[1].attributes('title')).toBe('N-002 尚未发布，暂不能下载')
-    expect(wrapper.findAll('.pdm-bom-drawing-audit-cell').map(item => item.text())).toEqual(['2D3D待提交', '2D3D待提交', '2D3D待提交'])
+    // 图纸列只保留 2D/3D 链接，不再附带审核状态文字。
+    expect(wrapper.findAll('.pdm-bom-drawing-audit-cell').map(item => item.text())).toEqual(['2D3D', '2D3D', '2D3D'])
 
     materialApi.listDocumentVersions.mockResolvedValueOnce([{
       id: 'drawing-version-1', documentId: 'drawing-1', revision: { display: 'W2' }, status: 'Released', fileLength: 12, sha256: 'drawing', createdBy: 'developer', createdAt: '2026-09-16T00:00:00Z', changeNote: '',

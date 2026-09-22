@@ -37,9 +37,9 @@ type BomColumnDefinition = { key: BomColumnKey; label: string }
 
 const bomColumnDefinitions: BomColumnDefinition[] = [
   { key: 'kind', label: '物料分类' }, { key: 'wearPart', label: '易损件' }, { key: 'impact', label: '关键' }, { key: 'unit', label: '单位' },
-  { key: 'drawingNumber', label: '物料编码' }, { key: 'name', label: '物料名称' }, { key: 'parentDrawingNumber', label: '上级物料编码' }, { key: 'specification', label: '型号' },
+  { key: 'drawingNumber', label: '物料编码' }, { key: 'name', label: '物料名称' }, { key: 'parentDrawingNumber', label: '上级物料编码' }, { key: 'specification', label: '型号' }, { key: 'revision', label: '版本' },
   { key: 'remark', label: '备注信息' }, { key: 'brand', label: '品牌' }, { key: 'material', label: '材质' }, { key: 'surfaceTreatment', label: '表面处理' }, { key: 'heatTreatment', label: '热处理' },
-  { key: 'weight', label: '重量' }, { key: 'quantity', label: '数量' }, { key: 'quantityReference', label: '发布  总/源' }, { key: 'drawing', label: '图纸' }, { key: 'revision', label: '版本' },
+  { key: 'weight', label: '重量' }, { key: 'quantity', label: '数量' }, { key: 'quantityReference', label: '发布  总/源' }, { key: 'drawing', label: '图纸' },
   { key: 'issue', label: '问题' }, { key: 'dataStatus', label: '资料状态' },
 ]
 
@@ -1805,36 +1805,6 @@ function drawingLinks(row: BomItem): BomDrawingLink[] {
     .map(slot => ({ kind: slot.kind, document: slot.document }))
 }
 
-function drawingReviewCandidate(row: BomItem) {
-  if (rowKind(row) !== 'NonStandard') return undefined
-  return currentDrawingReviewCandidates.value.find(candidate => candidate.bomItemId === row.id)
-    ?? currentDrawingReviewCandidates.value.find(candidate => Boolean(row.sourceDocumentId) && candidate.modelDocumentId === row.sourceDocumentId)
-}
-
-// 已发布的物料在“图纸”列只显示 2D/3D 链接，不再显示“已批准”状态。
-function isPublishedDrawingRow(row: BomItem) {
-  return (publishedQuantityTotal(row) ?? 0) > 0
-}
-
-function drawingReviewStatus(row: BomItem) {
-  if (rowKind(row) !== 'NonStandard') return undefined
-  const candidate = drawingReviewCandidate(row)
-  if (candidate?.state === 'ApprovedCurrent') return { label: '已批准', tone: 'is-approved', title: '当前工程图已批准，可以发布。' }
-  // 主管批准后审核单进入“已批准/回写属性”，逐张图纸记录可能仍是“已通过（待批准）”，这里统一按已批准显示。
-  if (candidate && drawingReviewApprovedByPackage(candidate)) return { label: '已批准', tone: 'is-approved', title: '当前工程图已批准，可以发布。' }
-  if (candidate?.state === 'InReview') return { label: '待审核', tone: 'is-pending', title: candidate.reason || '当前工程图待审核，审核完成前不可发布。' }
-  if (candidate?.state === 'Unavailable') return { label: '不可审核', tone: 'is-blocked', title: candidate.reason || '当前物料缺少可审核的工程图，不能发布。' }
-  return { label: '待提交', tone: 'is-neutral', title: candidate?.reason || '当前工程图尚未提交审核，不能发布。' }
-}
-
-function drawingReviewApprovedByPackage(candidate: DrawingReviewCandidate) {
-  return props.drawingReviews.some(packageValue =>
-    (packageValue.state === 'Approved' || packageValue.state === 'WritingProperties')
-    && packageValue.items.some(item =>
-      (Boolean(candidate.drawingDocumentId) && item.drawingDocumentId === candidate.drawingDocumentId)
-      || (Boolean(candidate.modelDocumentId) && item.modelDocumentId === candidate.modelDocumentId)))
-}
-
 function normalizedPreviewFormat(value: 'Step' | 'Pdf' | 0 | 1) {
   return value === 'Pdf' || value === 1 ? 'Pdf' : 'Step'
 }
@@ -3534,11 +3504,11 @@ async function submitBatchUpdate() {
       <table class="pdm-edit-table pdm-bom-table">
         <colgroup>
           <col class="is-select"><col class="is-row-actions"><col class="is-sequence"><col v-if="isBomColumnVisible('kind')" class="is-kind"><col v-if="isBomColumnVisible('wearPart')" class="is-wear-part"><col v-if="isBomColumnVisible('impact') && !isSourceView && !isWearPartView" class="is-impact"><col v-if="isBomColumnVisible('unit')" class="is-unit"><col v-if="isBomColumnVisible('drawingNumber')" class="is-code">
-          <col v-if="isBomColumnVisible('name')" class="is-name"><col v-if="isBomColumnVisible('parentDrawingNumber')" class="is-parent-code"><col v-if="isBomColumnVisible('specification')" class="is-model"><col v-if="isBomColumnVisible('remark')" class="is-remark"><col v-if="isBomColumnVisible('brand')" class="is-brand">
+          <col v-if="isBomColumnVisible('name')" class="is-name"><col v-if="isBomColumnVisible('parentDrawingNumber')" class="is-parent-code"><col v-if="isBomColumnVisible('specification')" class="is-model"><col v-if="isBomColumnVisible('revision')" class="is-revision"><col v-if="isBomColumnVisible('remark')" class="is-remark"><col v-if="isBomColumnVisible('brand')" class="is-brand">
           <col v-if="isBomColumnVisible('material')" class="is-material"><col v-if="isBomColumnVisible('surfaceTreatment')" class="is-surface"><col v-if="isBomColumnVisible('heatTreatment')" class="is-heat"><col v-if="isBomColumnVisible('weight')" class="is-weight"><col v-if="isBomColumnVisible('quantity')" class="is-quantity"><col v-if="isBomColumnVisible('quantityReference')" class="is-quantity-reference"><col v-if="isBomColumnVisible('drawing')" class="is-drawing-audit">
-          <col v-if="isBomColumnVisible('revision')" class="is-revision"><col v-if="isBomColumnVisible('issue')" class="is-source"><col v-if="isBomColumnVisible('dataStatus')" class="is-data-status">
+          <col v-if="isBomColumnVisible('issue')" class="is-source"><col v-if="isBomColumnVisible('dataStatus')" class="is-data-status">
         </colgroup>
-          <thead><tr><th><input type="checkbox" :aria-label="isSourceView ? '选择全部源数据物料' : '选择当前分类全部物料'" :checked="allRowsSelected" :disabled="!canSelectCurrentView || selectableIds.length === 0" @change="toggleAllRows"></th><th aria-label="行排序与插入操作"></th><th>序号</th><th v-if="isBomColumnVisible('kind')">物料分类</th><th v-if="isBomColumnVisible('wearPart')" title="在正式BOM中明确选择是或否；图档来源行保存后会生成属性写回任务">易损件</th><th v-if="isBomColumnVisible('impact') && !isSourceView && !isWearPartView">关键</th><th v-if="isBomColumnVisible('unit')">单位</th><th v-if="isBomColumnVisible('drawingNumber')">物料编码</th><th v-if="isBomColumnVisible('name')">物料名称</th><th v-if="isBomColumnVisible('parentDrawingNumber')">上级物料编码</th><th v-if="isBomColumnVisible('specification')">型号</th><th v-if="isBomColumnVisible('remark')">备注信息</th><th v-if="isBomColumnVisible('brand')">品牌</th><th v-if="isBomColumnVisible('material')">材质</th><th v-if="isBomColumnVisible('surfaceTreatment')">表面处理</th><th v-if="isBomColumnVisible('heatTreatment')">热处理</th><th v-if="isBomColumnVisible('weight')">重量</th><th v-if="isBomColumnVisible('quantity')">数量</th><th v-if="isBomColumnVisible('quantityReference')" :title="isWearPartView ? '易损件统计视图不参与发布' : '已发布总数量 / 当前BOM总数量 / 源总数量'">{{ isWearPartView ? '发布状态' : '发布  总/源' }}</th><th v-if="isBomColumnVisible('drawing')" class="pdm-bom-drawing-audit-header">图纸</th><th v-if="isBomColumnVisible('revision')">版本</th><th v-if="isBomColumnVisible('issue')" class="pdm-bom-reconciliation-header">{{ isWearPartView ? '数据来源' : '问题' }}</th><th v-if="isBomColumnVisible('dataStatus')">资料状态</th></tr></thead>
+          <thead><tr><th><input type="checkbox" :aria-label="isSourceView ? '选择全部源数据物料' : '选择当前分类全部物料'" :checked="allRowsSelected" :disabled="!canSelectCurrentView || selectableIds.length === 0" @change="toggleAllRows"></th><th aria-label="行排序与插入操作"></th><th>序号</th><th v-if="isBomColumnVisible('kind')">物料分类</th><th v-if="isBomColumnVisible('wearPart')" title="在正式BOM中明确选择是或否；图档来源行保存后会生成属性写回任务">易损件</th><th v-if="isBomColumnVisible('impact') && !isSourceView && !isWearPartView">关键</th><th v-if="isBomColumnVisible('unit')">单位</th><th v-if="isBomColumnVisible('drawingNumber')">物料编码</th><th v-if="isBomColumnVisible('name')">物料名称</th><th v-if="isBomColumnVisible('parentDrawingNumber')">上级物料编码</th><th v-if="isBomColumnVisible('specification')">型号</th><th v-if="isBomColumnVisible('revision')">版本</th><th v-if="isBomColumnVisible('remark')">备注信息</th><th v-if="isBomColumnVisible('brand')">品牌</th><th v-if="isBomColumnVisible('material')">材质</th><th v-if="isBomColumnVisible('surfaceTreatment')">表面处理</th><th v-if="isBomColumnVisible('heatTreatment')">热处理</th><th v-if="isBomColumnVisible('weight')">重量</th><th v-if="isBomColumnVisible('quantity')">数量</th><th v-if="isBomColumnVisible('quantityReference')" :title="isWearPartView ? '易损件统计视图不参与发布' : '已发布总数量 / 当前BOM总数量 / 源总数量'">{{ isWearPartView ? '发布状态' : '发布  总/源' }}</th><th v-if="isBomColumnVisible('drawing')" class="pdm-bom-drawing-audit-header">图纸</th><th v-if="isBomColumnVisible('issue')" class="pdm-bom-reconciliation-header">{{ isWearPartView ? '数据来源' : '问题' }}</th><th v-if="isBomColumnVisible('dataStatus')">资料状态</th></tr></thead>
         <tbody>
           <tr v-for="{ row, index, depth, hasChildren, expanded, structureKey } in pagedRows" :key="row.id || row._clientKey" :data-row-index="index" :title="comparisonRowTitle(row)" :class="{ 'is-quick-entry': row._quickEntry, 'is-pending-removal': row.pendingRemoval, 'is-release-excluded': row.releaseExcluded, 'is-bom-unresolved': !row._quickEntry && (rowNeedsClassification(row) || row.manualUnmatched), 'is-data-exception': !row._quickEntry && dataStatusIssues(row).length > 0, 'is-reconciliation-issue': !row._quickEntry && shouldShowReconciliation(row), 'is-release-unchanged': comparisonRowStatus(row) === 'Released', 'is-release-added': comparisonRowStatus(row) === 'Added', 'is-release-version-updated': comparisonRowStatus(row) === 'VersionUpdated', 'is-release-property-updated': comparisonRowStatus(row) === 'PropertyUpdated', 'is-release-modified': comparisonRowStatus(row) === 'Modified', 'is-row-dragging': draggedRowIndex === index, 'is-drag-over-before': dragOverRowIndex === index && dragOverPosition === 'before', 'is-drag-over-after': dragOverRowIndex === index && dragOverPosition === 'after' }">
             <td><input v-if="!row._quickEntry" type="checkbox" aria-label="选择物料" :checked="selectedIds.includes(rowSelectionKey(row) ?? '')" :disabled="!canSelectCurrentView || !rowSelectionKey(row)" @change="toggleRow(rowSelectionKey(row), $event)"></td>
@@ -3602,6 +3572,11 @@ async function submitBatchUpdate() {
                 <span v-if="hasDrawingNameModelMismatch(row)" class="pdm-bom-drawing-name-warning" aria-label="图纸名称与BOM型号不一致" :title="drawingNameMismatchTitle(row)">⚠</span>
               </div>
             </td>
+            <td v-if="isBomColumnVisible('revision')">
+              <span v-if="row._quickEntry" class="pdm-bom-cell-value">{{ displayValue(row.revision) }}</span>
+              <input v-else-if="!row.id && canEditCurrentView && !isSourceView" v-model.trim="row.revision" required aria-label="版本">
+              <span v-else class="pdm-bom-cell-value">{{ displayValue(row.revision) }}</span>
+            </td>
             <td v-if="isBomColumnVisible('remark')">
               <input v-if="isInlineEditing(row, 'remark')" v-model="inlineValue" class="pdm-bom-inline-editor" aria-label="内联编辑备注信息" autofocus @blur="commitInlineEdit(row)" @keydown.enter.prevent="commitInlineEdit(row)" @keydown.esc.prevent="cancelInlineEdit">
               <button v-else-if="row.id && canEditCurrentView" type="button" class="pdm-bom-cell-edit" :title="row.remark || '点击编辑备注信息'" aria-label="编辑备注信息" @click="beginInlineEdit(row, 'remark')">{{ displayValue(row.remark) }}</button>
@@ -3658,14 +3633,7 @@ async function submitBatchUpdate() {
                     <span v-else class="pdm-bom-drawing-link is-missing" :aria-label="`${slot.kind}图纸缺失`" :title="slot.title">{{ slot.kind }}</span>
                   </template>
                 </div>
-                <!-- 已发布的物料不再重复显示“已批准”，只保留 2D/3D 图纸链接。 -->
-                <span v-if="drawingReviewStatus(row) && !isPublishedDrawingRow(row)" class="pdm-bom-drawing-review-status" :class="drawingReviewStatus(row)?.tone" :title="drawingReviewStatus(row)?.title">{{ drawingReviewStatus(row)?.label }}</span>
               </div>
-            </td>
-            <td v-if="isBomColumnVisible('revision')">
-              <span v-if="row._quickEntry" class="pdm-bom-cell-value">{{ displayValue(row.revision) }}</span>
-              <input v-else-if="!row.id && canEditCurrentView && !isSourceView" v-model.trim="row.revision" required aria-label="版本">
-              <span v-else class="pdm-bom-cell-value">{{ displayValue(row.revision) }}</span>
             </td>
             <td v-if="isBomColumnVisible('issue')" class="pdm-bom-reconciliation-cell">
               <span v-if="isWearPartView" class="pdm-bom-cell-value">{{ bomSourceLabel(row) }}</span>
@@ -4030,7 +3998,7 @@ async function submitBatchUpdate() {
 .pdm-bom-column-settings-note{margin:0 0 12px;color:var(--pdm-muted);line-height:1.4}.pdm-bom-column-settings-list{display:grid;max-height:460px;grid-template-columns:repeat(2,minmax(0,1fr));gap:0;overflow:auto;border:1px solid var(--pdm-border);border-radius:8px}.pdm-bom-column-settings-list :deep(.el-checkbox){box-sizing:border-box;width:100%;min-height:36px;margin:0;padding:7px 12px;border-bottom:1px solid #eef2f7}.pdm-bom-column-settings-list :deep(.el-checkbox:nth-child(odd)){border-right:1px solid #eef2f7}
 .pdm-bom-drawing-links{display:flex;align-items:center;justify-content:center;gap:3px}.pdm-bom-drawing-link{min-width:25px;height:22px;padding:0 4px;border:1px solid var(--pdm-theme-accent-border);border-radius:4px;background:var(--pdm-theme-accent-soft);color:var(--pdm-theme-accent);font-size:10px;font-weight:600;line-height:20px;cursor:pointer}.pdm-bom-drawing-link:hover:not(:disabled){border-color:var(--pdm-theme-accent);background:#fff}.pdm-bom-drawing-link:disabled{cursor:wait;opacity:.65}
 .pdm-bom-drawing-link.is-missing{display:inline-block;border-color:var(--pdm-border);background:#f1f5f9;color:var(--pdm-muted);cursor:default}
-.pdm-bom-drawing-audit-content{display:flex;align-items:center;justify-content:center;gap:4px}.pdm-bom-drawing-review-status{display:inline-flex;align-items:center;justify-content:center;min-height:20px;padding:1px 5px;border-radius:4px;font-size:10px;font-weight:600;line-height:18px;white-space:nowrap}.pdm-bom-drawing-review-status.is-approved{background:#dcfce7;color:var(--pdm-green)}.pdm-bom-drawing-review-status.is-reviewing{background:#eff6ff;color:var(--pdm-blue)}.pdm-bom-drawing-review-status.is-pending,.pdm-bom-drawing-review-status.is-blocked{background:#fff7ed;color:var(--pdm-orange)}
+.pdm-bom-drawing-audit-content{display:flex;align-items:center;justify-content:center;gap:4px}
 .pdm-material-code-action{height:22px;padding:0 7px;border:1px solid var(--shell-accent-border);border-radius:5px;background:var(--pdm-blue-soft);color:var(--pdm-blue);font-size:11px;line-height:20px;white-space:nowrap;cursor:pointer}.pdm-material-code-action.is-review{border-color:#f59e0b;background:#fffbeb;color:var(--pdm-orange)}.pdm-material-code-state{color:var(--pdm-muted);font-size:11px;white-space:nowrap}.pdm-material-code-state.is-pending{color:var(--pdm-orange)}
 .pdm-duplicate-material-dialog .pdm-material-reference-table table{width:100%;min-width:0;table-layout:fixed}.pdm-duplicate-material-dialog .pdm-material-reference-table :is(th,td){min-width:0;overflow:hidden;text-overflow:ellipsis}.pdm-duplicate-material-dialog .pdm-material-reference-table :is(th,td):nth-child(1){width:140px}.pdm-duplicate-material-dialog .pdm-material-reference-table :is(th,td):nth-child(2){width:160px}.pdm-duplicate-material-dialog .pdm-material-reference-table :is(th,td):nth-child(3){width:90px}.pdm-duplicate-material-dialog .pdm-material-reference-table :is(th,td):nth-child(4){width:150px}.pdm-duplicate-material-dialog .pdm-material-reference-table :is(th,td):nth-child(5){width:120px}.pdm-duplicate-material-dialog .pdm-material-reference-table :is(th,td):last-child{width:110px;min-width:110px}
 .pdm-summary-quantity-backdrop{align-items:center;justify-content:center!important;padding:16px}.pdm-summary-quantity-dialog{width:min(900px,calc(100vw - 32px));height:auto;max-height:calc(100vh - 32px);border-radius:9px;animation:none}.pdm-summary-quantity-material{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;margin:0;padding:12px 18px;border-bottom:1px solid var(--pdm-border);background:#f8fafc}.pdm-summary-quantity-material>div{min-width:0}.pdm-summary-quantity-material dt{color:var(--pdm-muted);font-size:10px}.pdm-summary-quantity-material dd{margin:4px 0 0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--pdm-text);font-weight:600}.pdm-summary-quantity-dialog .pdm-table-scroll{max-height:min(460px,calc(100vh - 300px))}.pdm-summary-quantity-dialog table{width:100%;table-layout:fixed}.pdm-summary-quantity-dialog th:first-child{width:38%}.pdm-summary-quantity-dialog th:nth-child(2){width:24%}.pdm-summary-quantity-dialog th:nth-child(3){width:14%}.pdm-summary-quantity-dialog th:nth-child(4){width:24%}.pdm-summary-quantity-dialog td{overflow:hidden;text-overflow:ellipsis}.pdm-summary-quantity-input{display:flex;min-width:0;align-items:center;gap:7px}.pdm-summary-quantity-input input{box-sizing:border-box;width:100px;height:30px;padding:4px 8px;border:1px solid var(--pdm-border);border-radius:5px;color:var(--pdm-text);text-align:right}.pdm-summary-quantity-input input:focus{border-color:var(--pdm-theme-accent);outline:2px solid var(--pdm-theme-accent-soft)}.pdm-summary-quantity-input small{color:var(--pdm-danger);font-weight:600;white-space:nowrap}.pdm-summary-quantity-dialog tr.is-summary-quantity-changed td{background:#eff6ff}.pdm-summary-quantity-dialog tr.is-summary-quantity-removed td{background:#fef2f2}.pdm-summary-quantity-dialog>footer{align-items:flex-end;flex-wrap:wrap}.pdm-summary-quantity-status{display:flex;min-width:360px;flex:1;align-items:center;gap:8px;flex-wrap:wrap}.pdm-summary-quantity-dialog>footer .pdm-summary-quantity-status span{min-width:auto;flex:0 0 auto;padding:5px 8px;border-radius:5px;background:#f8fafc;color:var(--pdm-muted);font-size:10px}.pdm-summary-quantity-status span.is-invalid{background:#fff7ed;color:var(--pdm-orange)}.pdm-summary-quantity-status strong{color:var(--pdm-text)}.pdm-summary-quantity-status em{width:100%;color:var(--pdm-danger);font-size:10px;font-style:normal;font-weight:600}@media(max-width:760px){.pdm-summary-quantity-material{grid-template-columns:repeat(2,minmax(0,1fr))}.pdm-summary-quantity-status{min-width:100%}}

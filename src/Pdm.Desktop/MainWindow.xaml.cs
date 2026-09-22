@@ -395,6 +395,14 @@ public partial class MainWindow : Window
         ClientBootstrapConfiguration configuration,
         CancellationToken cancellationToken)
     {
+        // 插件目录未必在 %LOCALAPPDATA%（开发机用 RegAsm /codebase 指向仓库目录），
+        // 所以已下载的待安装包按它自己记录的目标目录处理：只要 SolidWorks 没在运行就交给安装脚本。
+        if (ClientPackageUpdater.TryGetPendingUpdate("solidworks-addin", out _, out _))
+        {
+            if (!IsSolidWorksRunning()) ClientPackageUpdater.TryLaunchPendingUpdate("solidworks-addin", 0, string.Empty);
+            return;
+        }
+
         var addinDirectory = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
             "UPLM",
@@ -407,17 +415,20 @@ public partial class MainWindow : Window
             addinDirectory,
             cancellationToken);
 
+        if (!IsSolidWorksRunning()) ClientPackageUpdater.TryLaunchPendingUpdate("solidworks-addin", 0, string.Empty);
+    }
+
+    private static bool IsSolidWorksRunning()
+    {
         var solidWorksProcesses = Process.GetProcessesByName("SLDWORKS");
         try
         {
-            if (solidWorksProcesses.Any(process => !process.HasExited)) return;
+            return solidWorksProcesses.Any(process => !process.HasExited);
         }
         finally
         {
             foreach (var process in solidWorksProcesses) process.Dispose();
         }
-
-        ClientPackageUpdater.TryLaunchPendingUpdate("solidworks-addin", 0, string.Empty);
     }
 
     private static string Serialize(object value) => new JavaScriptSerializer().Serialize(value);

@@ -862,7 +862,7 @@ public sealed class ProjectPlanningServiceTests
     }
 
     [Fact]
-    public async Task Due_and_overdue_tasks_create_idempotent_in_app_notifications()
+    public async Task Due_tasks_create_idempotent_message_center_notifications_but_overdue_stays_out()
     {
         var clock = new FixedTimeProvider(new DateTimeOffset(2026, 9, 10, 1, 0, 0, TimeSpan.Zero));
         var pdm = new InMemoryPdmRepository(clock);
@@ -891,6 +891,35 @@ public sealed class ProjectPlanningServiceTests
         Assert.Equal(notifications.Length, notifications.Select(item => item.SourceKey).Distinct().Count());
         Assert.All(notifications, item => Assert.Equal("project-plan", item.Category));
         Assert.Contains(notifications, item => item.Content.Contains("STD-IMPACT") && item.Content.Contains("备料页"));
+
+        // 计划逾期只在项目计划与工作台体现，不再进入消息中心。
+        var overdueClock = new FixedTimeProvider(new DateTimeOffset(assemblyTask.PlannedFinish.AddDays(2).ToDateTime(TimeOnly.MinValue), TimeSpan.Zero));
+        service = new ProjectPlanningService(planning, pdm, overdueClock);
+        await service.SendDueRemindersAsync(default);
+        var afterOverdue = (await pdm.ListUserNotificationsAsync(owner, 200, default)).Where(item => item.Category == "project-plan").ToArray();
+        Assert.DoesNotContain(afterOverdue, item => item.Title.Contains("逾期"));
+    }
+
+    [Fact]
+    public async Task Legacy_plan_overdue_notification_is_hidden_from_message_center()
+    {
+        var pdm = new InMemoryPdmRepository(TimeProvider.System);
+        var taskId = Guid.NewGuid();
+        var overdue = new UserNotification(Guid.NewGuid(), "engineer", "project-plan", "项目计划任务已逾期6天",
+            "P700010 · 内部终审，计划完成日期 2026-09-16。", null, null,
+            $"project-plan:{taskId:N}:overdue:20260922", TimeProvider.System.GetUtcNow(), null);
+        var dueToday = overdue with
+        {
+            Id = Guid.NewGuid(),
+            Title = "项目计划任务今天到期",
+            SourceKey = $"project-plan:{taskId:N}:d0:20260922"
+        };
+        await pdm.CreateUserNotificationsAsync([overdue, dueToday], default);
+
+        var visible = await pdm.ListUserNotificationsAsync("engineer", 50, default);
+
+        Assert.DoesNotContain(visible, item => item.IsPlanOverdueReminder);
+        Assert.Contains(visible, item => item.SourceKey == dueToday.SourceKey);
     }
 
     [Fact]

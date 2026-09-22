@@ -29,6 +29,19 @@ public sealed class ProjectFolderTreeTests
     }
 
     [Fact]
+    public async Task DefaultFolderTemplateDoesNotContainNameplateFolder()
+    {
+        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var main = await repository.CreateNumberedProjectAsync(Command("默认目录模板"), CancellationToken.None);
+
+        var template = await repository.ListFolderTemplateAsync(CancellationToken.None);
+        var folders = await repository.ListProjectFoldersAsync(main.Id, "engineer", UserRole.Administrator, CancellationToken.None);
+
+        Assert.DoesNotContain(template, item => item.FolderKey == "mechanical.nameplate");
+        Assert.DoesNotContain(folders, item => item.TemplateKey == "mechanical.nameplate" || item.Name == "铭牌");
+    }
+
+    [Fact]
     public async Task RegistrationDefaultsToMechanicalAndRejectsAnotherProjectsFolder()
     {
         var repository = new InMemoryPdmRepository(TimeProvider.System);

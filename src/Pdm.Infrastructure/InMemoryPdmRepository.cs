@@ -2470,7 +2470,6 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
             Node("minutes", null, "会议纪要", ProjectFolderPurpose.Standard, 100),
             Node("mechanical.project", "mechanical", "项目目录（自动生成）", ProjectFolderPurpose.ProjectContainer, 10),
             Node("mechanical.air-sequence", "mechanical", "气路时序", ProjectFolderPurpose.Standard, 100),
-            Node("mechanical.nameplate", "mechanical", "铭牌", ProjectFolderPurpose.Standard, 110),
             Node("mechanical.other", "mechanical", "其他图纸", ProjectFolderPurpose.Standard, 120),
             Node("mechanical.release", "mechanical", "机械发布", ProjectFolderPurpose.Release, 130),
             Node("electrical.project", "electrical", "项目目录（自动生成）", ProjectFolderPurpose.ProjectContainer, 10),

@@ -1071,13 +1071,13 @@ internal sealed class PdmTaskPaneControl : UserControl
         contextOpenWorkingFile.Text = "打开此图档";
         contextUpdateLatest.Text = "更新到最新版本";
         contextVersionInfo.Enabled = false;
-        contextCheckout.Text = "获取权限";
+        contextCheckout.Text = "获取编辑权限";
         contextCheckIn.Text = "提交存档";
         contextDiscardCheckout.Text = "放弃编辑";
         contextGenerateDrawing.Text = "生成工程图...";
         contextOpenDrawing.Text = "打开关联工程图";
         contextDrawingVersions.Text = "关联工程图版本...";
-        contextVersions.Text = "选择历史版本...";
+        contextVersions.Text = "查看/对比历史版本...";
         contextRefresh.Text = "刷新设计树";
         contextWhereUsed.Text = "使用位置...";
         contextRequestRelease.Text = "申请释放编辑权限...";
@@ -1576,14 +1576,16 @@ internal sealed class PdmTaskPaneControl : UserControl
         actions.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
         actions.RowStyles.Add(new RowStyle(SizeType.Percent, 50));
         actions.RowStyles.Add(new RowStyle(SizeType.Percent, 50));
-        openCurrentButton.Text = "打开最新受控版";
+        openCurrentButton.Text = "只读打开最新受控版";
         openCurrentButton.Dock = DockStyle.Fill;
+        openCurrentButton.AutoEllipsis = true;
         openCurrentButton.Click += (_, _) => RaiseSelected(OpenRequested);
         openHistoryButton.Text = "切换为所选版本";
         openHistoryButton.Dock = DockStyle.Fill;
         openHistoryButton.Click += (_, _) => RaiseOpenHistory();
-        editHistoryButton.Text = "基于所选版本获取编辑";
+        editHistoryButton.Text = "基于所选版本获取权限";
         editHistoryButton.Dock = DockStyle.Fill;
+        editHistoryButton.AutoEllipsis = true;
         editHistoryButton.Click += (_, _) => RaiseEditHistoricalVersion();
         compareVersionsButton.Text = "发起版本对比";
         compareVersionsButton.Dock = DockStyle.Fill;
@@ -1600,6 +1602,7 @@ internal sealed class PdmTaskPaneControl : UserControl
     private void UpdateVersionActions()
     {
         openCurrentButton.Enabled = IsDisplayedDocumentSelected();
+        actionToolTip.SetToolTip(openCurrentButton, "只读打开最新受控版，不获取编辑权限");
         var canSwitchVersion = CanSwitchDisplayedVersion(out var switchReason);
         openHistoryButton.Enabled = canSwitchVersion && versionList.SelectedItems.Count == 1;
         actionToolTip.SetToolTip(openHistoryButton, canSwitchVersion ? "将本地工作文件切换为所选版本，并在设计树显示当前/最新版本" : switchReason);
@@ -1612,9 +1615,9 @@ internal sealed class PdmTaskPaneControl : UserControl
     private void BuildVersionContextMenu()
     {
         versionContextGetSelected.Text = "切换到所选版本";
-        versionContextEditSelected.Text = "基于所选版本获取编辑";
+        versionContextEditSelected.Text = "基于所选版本获取权限";
         versionContextGetLatest.Text = "切换到最新版本";
-        versionContextOpenCurrent.Text = "打开最新受控版";
+        versionContextOpenCurrent.Text = "只读打开最新受控版";
         versionContextCompare.Text = "版本对比";
         versionContextRefresh.Text = "刷新版本列表";
         versionContextGetSelected.Click += (_, _) => RaiseOpenHistory();

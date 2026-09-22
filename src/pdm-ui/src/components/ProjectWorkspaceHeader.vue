@@ -1,12 +1,12 @@
 <script setup lang="ts">
-import { Boxes, Calendar, ClipboardCheck, ClipboardList, FileClock, FolderOpen, FolderTree, LayoutDashboard, Rocket, Search, Settings, ShoppingCart } from '@lucide/vue'
+import { Boxes, Calendar, ClipboardCheck, ClipboardList, FolderOpen, FolderTree, LayoutDashboard, Rocket, Search, Settings, ShoppingCart } from '@lucide/vue'
 import { ElMessageBox } from 'element-plus'
 import { computed, ref, watch } from 'vue'
 import type { ProjectCopyOptionsInput, ProjectCopyPreview, ProjectCopyResult, ProjectSummary } from '../types'
 import { useUserDisplayName } from '../userDisplay'
 import ProjectSettingsDrawer from './ProjectSettingsDrawer.vue'
 
-export type ProjectTab = 'overview' | 'project-plan' | 'files' | 'validation-plan' | 'documents' | 'bom' | 'versions' | 'release' | 'procurement' | 'records'
+export type ProjectTab = 'overview' | 'project-plan' | 'files' | 'validation-plan' | 'documents' | 'bom' | 'release' | 'procurement' | 'records'
 
 const props = defineProps<{
   project: ProjectSummary
@@ -40,7 +40,6 @@ const tabs = [
   { key: 'bom', label: 'BOM', icon: Boxes },
   { key: 'release', label: '发布', icon: Rocket },
   { key: 'procurement', label: '备料', icon: ShoppingCart },
-  { key: 'versions', label: '版本', icon: FileClock },
   { key: 'records', label: '记录', icon: ClipboardList },
 ] satisfies Array<{ key: ProjectTab; label: string; icon: typeof LayoutDashboard }>
 

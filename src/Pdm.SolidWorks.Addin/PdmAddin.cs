@@ -152,6 +152,8 @@ public sealed class PdmAddin : ISwAddin
             RefreshTree(false);
             _ = LoginRememberedCredentialsAsync();
             SetInitialUpdateSnapshot();
+            // 插件自己无法在运行中替换 DLL：每次启动就把已下载的更新挂上安装脚本，关闭 SolidWorks 即完成安装。
+            ClientPackageUpdater.TryLaunchPendingUpdate("solidworks-addin", Process.GetCurrentProcess().Id, string.Empty);
             _ = MonitorClientUpdatesAsync();
             LogOperation("ConnectToSW success");
             return true;
@@ -1944,6 +1946,8 @@ public sealed class PdmAddin : ISwAddin
                 repairFailedUpdate = !string.IsNullOrWhiteSpace(pendingError);
                 if (!repairFailedUpdate)
                 {
+                    // 安装脚本可能被重启打断，这里每次检查都补挂一次；SolidWorks 运行中由脚本等退出后执行。
+                    ClientPackageUpdater.TryLaunchPendingUpdate("solidworks-addin", Process.GetCurrentProcess().Id, string.Empty);
                     var pendingSnapshot = new PluginUpdateSnapshot
                     {
                         InstalledVersion = installedVersion,

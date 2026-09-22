@@ -57,7 +57,7 @@ describe('ReleaseCenter', () => {
     expect(wrapper.get('.pdm-frozen-change-details').text()).toContain('品牌：国优 → 新品牌')
     const deleted = wrapper.findAll('.pdm-release-frozen-table tbody tr')[1]!
     expect(deleted.text()).toContain('当前发布范围已移除此项')
-    expect(deleted.findAll('td')[6]!.text()).toBe('0')
+    expect(deleted.findAll('td')[7]!.text()).toBe('0')
     expect(deleted.find('button').exists()).toBe(false)
     await wrapper.setProps({ releasePackage: frozenPackage(previous) })
     expect(wrapper.get('.pdm-empty-info').text()).toContain('本次没有增补或变更内容')
@@ -99,17 +99,17 @@ describe('ReleaseCenter', () => {
       username: 'reviewer', pending: false, progress: 0, error: '', canManage: false, canDecide: false } })
     try {
       await flushPromises()
-      expect(wrapper.findAll('.pdm-release-frozen-table th').map(cell => cell.text())).toEqual(['序号', '物料编码', '物料名称', '型号', '品牌', '备注', 'BOM总量', '前期已发布', '本次新增下发', '版本', '批注'])
-      expect(wrapper.findAll('.pdm-release-frozen-table tbody td').slice(6, 9).map(cell => cell.text())).toEqual(['4', '4', '0'])
+      expect(wrapper.findAll('.pdm-release-frozen-table th').map(cell => cell.text())).toEqual(['序号', '物料编码', '物料名称', '型号', '版本', '品牌', '备注', 'BOM总量', '前期已发布', '本次新增下发', '批注'])
+      expect(wrapper.findAll('.pdm-release-frozen-table tbody td').slice(7, 10).map(cell => cell.text())).toEqual(['4', '4', '0'])
       expect(wrapper.get('.pdm-item-comment-action').classes()).toContain('has-comments')
       expect(wrapper.get('.pdm-item-comment-action').text()).toBe('批注（1）')
       await wrapper.setProps({ releasePackage: { ...formal, wholeSetMultiplier: 3 } })
-      expect(wrapper.findAll('.pdm-release-frozen-table tbody td').slice(6, 9).map(cell => cell.text())).toEqual(['12', '4', '8'])
+      expect(wrapper.findAll('.pdm-release-frozen-table tbody td').slice(7, 10).map(cell => cell.text())).toEqual(['12', '4', '8'])
       await wrapper.setProps({ releasePackages: [history[0]!] })
-      expect(wrapper.findAll('.pdm-release-frozen-table tbody td').slice(6, 9).map(cell => cell.text())).toEqual(['12', '1', '11'])
+      expect(wrapper.findAll('.pdm-release-frozen-table tbody td').slice(7, 10).map(cell => cell.text())).toEqual(['12', '1', '11'])
       await wrapper.findAll('.pdm-view-switch button').find(button => button.text() === '按结构')!.trigger('click')
       expect(wrapper.findAll('.pdm-release-frozen-table th')).toHaveLength(9)
-      expect(wrapper.findAll('.pdm-release-frozen-table tbody td')[6]!.text()).toBe('12')
+      expect(wrapper.findAll('.pdm-release-frozen-table tbody td')[7]!.text()).toBe('12')
     } finally { wrapper.unmount(); comments.mockRestore() }
   })
 
@@ -247,8 +247,8 @@ describe('ReleaseCenter', () => {
     expect(wrapper.text()).not.toContain('生效序列号')
     expect(wrapper.text()).toContain('EL-001')
     expect(wrapper.text()).toContain('修改 1')
-    expect(wrapper.findAll('.pdm-release-frozen-table th').map(cell => cell.text())).toEqual(['序号', '物料编码', '物料名称', '型号', '品牌', '备注', 'BOM总量', '前期已发布', '本次新增下发', '版本', '批注'])
-    expect(wrapper.findAll('.pdm-release-frozen-table tbody tr').at(0)!.findAll('td').map(cell => cell.text())).toEqual(['1', 'EL-001', '电气元件', 'M18', 'SMC', '安装备注', '2', '0', '2', 'W2', '批注'])
+    expect(wrapper.findAll('.pdm-release-frozen-table th').map(cell => cell.text())).toEqual(['序号', '物料编码', '物料名称', '型号', '版本', '品牌', '备注', 'BOM总量', '前期已发布', '本次新增下发', '批注'])
+    expect(wrapper.findAll('.pdm-release-frozen-table tbody tr').at(0)!.findAll('td').map(cell => cell.text())).toEqual(['1', 'EL-001', '电气元件', 'M18', 'W2', 'SMC', '安装备注', '2', '0', '2', '批注'])
     expect(wrapper.findAll('.pdm-release-frozen-table tbody tr').at(0)!.findAll('td.is-release-centered')).toHaveLength(8)
     expect(wrapper.findAll('.pdm-release-frozen-table col')).toHaveLength(11)
     const topWorkflow = wrapper.get('.pdm-release-top-workflow')
@@ -918,7 +918,7 @@ describe('ReleaseCenter', () => {
 
     expect(wrapper.get('button[aria-pressed="true"]').text()).toBe('按汇总')
     expect(wrapper.findAll('.pdm-release-frozen-table tbody tr')).toHaveLength(2)
-    expect(wrapper.findAll('.pdm-release-frozen-table tbody tr').at(0)!.findAll('td').at(6)!.text()).toBe('4')
+    expect(wrapper.findAll('.pdm-release-frozen-table tbody tr').at(0)!.findAll('td').at(7)!.text()).toBe('4')
     expect(wrapper.get('.release-list-pagination').text()).toContain('共 2 条 · 50 条/页')
 
     await wrapper.findAll('.pdm-view-switch button').find(button => button.text() === '按结构')!.trigger('click')

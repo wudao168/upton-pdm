@@ -13,6 +13,7 @@ public sealed partial class MySqlPdmRepository
             SELECT id,recipient_username,category,title,content,project_id,release_package_id,source_key,created_at,read_at
             FROM user_notification
             WHERE recipient_username=@Recipient
+              AND NOT (category='project-plan' AND source_key LIKE '%:overdue:%')
             ORDER BY created_at DESC,id DESC
             LIMIT @Take
             """,

@@ -343,7 +343,9 @@ internal static class ClientPackageUpdater
                 }
 
                 var scriptPath = Path.Combine(Path.GetDirectoryName(pendingPath), "apply-pending-update.ps1");
-                WriteAllTextAtomically(scriptPath, ApplyScript);
+                // 安装脚本必须带 UTF-8 BOM：Windows PowerShell 5.1 对无 BOM 的 .ps1 按 ANSI(GBK) 解码，
+                // 脚本里的中文注释会被解坏并导致解析失败——脚本根本没执行，更新却一直显示“已下载待安装”。
+                WriteAllTextAtomically(scriptPath, ApplyScript, withBom: true);
                 var updater = Process.Start(new ProcessStartInfo
                 {
                     FileName = "powershell.exe",
@@ -459,12 +461,12 @@ internal static class ClientPackageUpdater
         }
     }
 
-    private static void WriteAllTextAtomically(string path, string content)
+    private static void WriteAllTextAtomically(string path, string content, bool withBom = false)
     {
         var temporaryPath = string.Concat(path, ".", Guid.NewGuid().ToString("N"), ".tmp");
         try
         {
-            File.WriteAllText(temporaryPath, content, new UTF8Encoding(false));
+            File.WriteAllText(temporaryPath, content, new UTF8Encoding(withBom));
             if (File.Exists(path)) File.Replace(temporaryPath, path, null);
             else File.Move(temporaryPath, path);
         }
@@ -530,17 +532,17 @@ function Stop-LeftoverWebViewProcesses([string]$TargetDirectory) {
     }
   }
 }
-function Wait-ForSolidWorksExit {
-  for ($attempt = 1; $attempt -le 600; $attempt++) {
+function Wait-ForSolidWorksExit([int]$TimeoutSeconds) {
+  for ($attempt = 1; $attempt -le $TimeoutSeconds; $attempt++) {
     $running = @(Get-Process -Name 'SLDWORKS' -ErrorAction SilentlyContinue)
     try {
-      if ($running.Count -eq 0) { return }
+      if ($running.Count -eq 0) { return $true }
     } finally {
       foreach ($process in $running) { $process.Dispose() }
     }
     Start-Sleep -Seconds 1
   }
-  throw 'SolidWorks is still running after 10 minutes.'
+  return $false
 }
 try {
   if ($ProcessId -gt 0) { Wait-Process -Id $ProcessId -ErrorAction SilentlyContinue }
@@ -548,7 +550,13 @@ try {
   $target = [IO.Path]::GetFullPath([string]$pending.TargetDirectory)
   $payload = [IO.Path]::GetFullPath([string]$pending.PayloadDirectory)
   if (-not (Test-Path -LiteralPath $payload)) { throw 'Update payload is missing.' }
-  if ([string]$pending.Component -eq 'solidworks-addin') { Wait-ForSolidWorksExit }
+  if ([string]$pending.Component -eq 'solidworks-addin') {
+    # SolidWorks 还开着就先不动目录：保留待安装状态（不写 error.txt），等客户端轮询或插件下次检查时重试。
+    if (-not (Wait-ForSolidWorksExit 1800)) {
+      Remove-Item -LiteralPath $LaunchMarker -Force -ErrorAction SilentlyContinue
+      exit 0
+    }
+  }
   $backupRoot = Split-Path -Parent $PendingPath
   $component = [string]$pending.Component
   $targetParent = Split-Path -Parent $target

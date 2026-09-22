@@ -301,11 +301,11 @@ internal sealed class ProjectDocumentsControl : UserControl
 
     private void BuildContextMenu()
     {
-        menu.Items.Add("在SolidWorks中打开最新受控版", null, (_, _) => Raise(ControlledOpenMode.LatestReadOnly));
-        menu.Items.Add("获取编辑权限并在SolidWorks中打开", null, (_, _) => Raise(ControlledOpenMode.LatestEdit));
-        menu.Items.Add("打开最新正式发布版（只读）", null, (_, _) => Raise(ControlledOpenMode.LatestReleased));
+        menu.Items.Add("只读打开最新受控版", null, (_, _) => Raise(ControlledOpenMode.LatestReadOnly));
+        menu.Items.Add("获取权限并编辑最新受控版", null, (_, _) => Raise(ControlledOpenMode.LatestEdit));
+        menu.Items.Add("只读打开最近正式发布版", null, (_, _) => Raise(ControlledOpenMode.LatestReleased));
         menu.Items.Add(new ToolStripSeparator());
-        menu.Items.Add("打开指定历史版本...", null, (_, _) => Raise(ControlledOpenMode.Versions));
+        menu.Items.Add("查看/对比历史版本...", null, (_, _) => Raise(ControlledOpenMode.Versions));
         menu.Opening += (_, args) =>
         {
             if (!(tree.SelectedNode?.Tag is CadTreeNode selected) || !selected.DocumentId.HasValue)

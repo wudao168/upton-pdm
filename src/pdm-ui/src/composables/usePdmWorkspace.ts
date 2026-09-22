@@ -5,7 +5,7 @@ import { copyProjectContent as copyProjectContentRequest, previewProjectCopy as 
 import { transferApproval } from '../api'
 import { listUserNotifications, markAllUserNotificationsRead as markAllUserNotificationsReadRequest, markUserNotificationRead as markUserNotificationReadRequest } from '../api'
 import { abandonDrawingReviewWritebacks as abandonDrawingReviewWritebacksRequest, addDrawingReviewMarkup as addDrawingReviewMarkupRequest, createDrawingReview as createDrawingReviewRequest, decideDrawingReviewSupervisor as decideDrawingReviewSupervisorRequest, decideDrawingReviewTarget as decideDrawingReviewTargetRequest, listDrawingReviewCandidates, listDrawingReviewers, listDrawingReviews, resolveDrawingReviewMarkup as resolveDrawingReviewMarkupRequest, resubmitDrawingReviewItem as resubmitDrawingReviewItemRequest, withdrawDrawingReview as withdrawDrawingReviewRequest } from '../api'
-import { batchUpdateBomItems as batchUpdateBomItemsRequest, changeMyPassword as changeMyPasswordRequest, checkHealth, compareDocumentVersions, createProject as createProjectRequest, createRole as createRoleRequest, createSubproject as createSubprojectRequest, createReleasePackage, createUser as createUserRequest, decideApproval, deleteProject as deleteProjectRequest, deleteReleasePackageDraft as deleteReleasePackageDraftRequest, deleteRole as deleteRoleRequest, emergencyDecideApproval, exportBom, exportWearPartBom, forceReleaseEditLock as forceReleaseEditLockRequest, generateMechanicalBom, getBomValidationRules, getCrmIntegrationSettings, getMyProfile, getOrganizationDirectory, getProjectNumberingOptions, getRolePermissionDirectory, getStorageStatus, getSystemSettings, importBom, listAudit, listBomBaselines, listBomVersions, listCustomers, listDocumentVersions, listDocumentWhereUsed, listEditLocks, listEquipmentTypes, listFolderTemplate, listMaterialCodeApplications, listMaterialSyncTasks, listMyApprovalTasks, listPasswordResetTasks, listProgramTemplateTasks, listProjectAudit, listProjects, listProjectVersions, loadProjectDocumentWorkspace, loadProjectWorkspace, login as apiLogin, obsoleteDocument as obsoleteDocumentRequest, PdmApiError, postDesktopMessage, readDocumentVersionFile, requestEditLockRelease as requestEditLockReleaseRequest, resetRequestedPassword as resetRequestedPasswordRequest, resetUserPassword as resetUserPasswordRequest, resolveBomItem as resolveBomItemRequest, restoreDocumentVersion, resumeSession as apiResumeSession, retryLongLeadU9 as retryLongLeadU9Request, listU9SyncBlockers as listU9SyncBlockersRequest, retryReleasePreview as retryReleasePreviewRequest, saveBom, saveEquipmentType as saveEquipmentTypeRequest, saveFolderTemplate as saveFolderTemplateRequest, saveOrganizationUnit as saveOrganizationUnitRequest, saveProjectOrganization as saveProjectOrganizationRequest, setBomEmptyDeclaration as setBomEmptyDeclarationRequest, submitReleasePackage, syncCrmCustomers as syncCrmCustomersRequest, testCrmIntegration as testCrmIntegrationRequest, updateChildProjectDesigners as updateChildProjectDesignersRequest, updateChildProjectManager as updateChildProjectManagerRequest, updateCrmIntegrationSettings as updateCrmIntegrationSettingsRequest, updateMainProjectStaffing as updateMainProjectStaffingRequest, updateMyProfile as updateMyProfileRequest, updateOrganizationCounters as updateOrganizationCountersRequest, updateOrganizationMemberships as updateOrganizationMembershipsRequest, updateOrganizationUnitManagers as updateOrganizationUnitManagersRequest, updateProject as updateProjectRequest, updateProjectExecutionUnit as updateProjectExecutionUnitRequest, updateProjectFolderPermissions as updateProjectFolderPermissionsRequest, updateReleasePackageDraft as updateReleasePackageDraftRequest, updateRolePermissions as updateRolePermissionsRequest, updateSystemSettings as updateSystemSettingsRequest, updateUser as updateUserRequest, uploadReleaseFile, withdrawReleasePackage } from '../api'
+import { batchUpdateBomItems as batchUpdateBomItemsRequest, changeMyPassword as changeMyPasswordRequest, checkHealth, compareDocumentVersions, createProject as createProjectRequest, createRole as createRoleRequest, createSubproject as createSubprojectRequest, createReleasePackage, createUser as createUserRequest, decideApproval, deleteProject as deleteProjectRequest, deleteReleasePackageDraft as deleteReleasePackageDraftRequest, deleteRole as deleteRoleRequest, emergencyDecideApproval, exportBom, exportWearPartBom, forceReleaseEditLock as forceReleaseEditLockRequest, generateMechanicalBom, getBomValidationRules, getCrmIntegrationSettings, getMyProfile, getOrganizationDirectory, getProjectNumberingOptions, getRolePermissionDirectory, getStorageStatus, getSystemSettings, importBom, listAudit, listBomBaselines, listBomVersions, listCustomers, listDocumentVersions, listDocumentWhereUsed, listEditLocks, listEquipmentTypes, listFolderTemplate, listMaterialCodeApplications, listMaterialSyncTasks, listMyApprovalTasks, listPasswordResetTasks, listProgramTemplateTasks, listProjectAudit, listProjects, loadProjectDocumentWorkspace, loadProjectWorkspace, login as apiLogin, obsoleteDocument as obsoleteDocumentRequest, PdmApiError, postDesktopMessage, readDocumentVersionFile, requestEditLockRelease as requestEditLockReleaseRequest, resetRequestedPassword as resetRequestedPasswordRequest, resetUserPassword as resetUserPasswordRequest, resolveBomItem as resolveBomItemRequest, restoreDocumentVersion, resumeSession as apiResumeSession, retryLongLeadU9 as retryLongLeadU9Request, listU9SyncBlockers as listU9SyncBlockersRequest, retryReleasePreview as retryReleasePreviewRequest, saveBom, saveEquipmentType as saveEquipmentTypeRequest, saveFolderTemplate as saveFolderTemplateRequest, saveOrganizationUnit as saveOrganizationUnitRequest, saveProjectOrganization as saveProjectOrganizationRequest, setBomEmptyDeclaration as setBomEmptyDeclarationRequest, submitReleasePackage, syncCrmCustomers as syncCrmCustomersRequest, testCrmIntegration as testCrmIntegrationRequest, updateChildProjectDesigners as updateChildProjectDesignersRequest, updateChildProjectManager as updateChildProjectManagerRequest, updateCrmIntegrationSettings as updateCrmIntegrationSettingsRequest, updateMainProjectStaffing as updateMainProjectStaffingRequest, updateMyProfile as updateMyProfileRequest, updateOrganizationCounters as updateOrganizationCountersRequest, updateOrganizationMemberships as updateOrganizationMembershipsRequest, updateOrganizationUnitManagers as updateOrganizationUnitManagersRequest, updateProject as updateProjectRequest, updateProjectExecutionUnit as updateProjectExecutionUnitRequest, updateProjectFolderPermissions as updateProjectFolderPermissionsRequest, updateReleasePackageDraft as updateReleasePackageDraftRequest, updateRolePermissions as updateRolePermissionsRequest, updateSystemSettings as updateSystemSettingsRequest, updateUser as updateUserRequest, uploadReleaseFile, withdrawReleasePackage } from '../api'
 import type { AuthSession } from '../api'
 import type { AuditEntry, BatchUpdateBomItemsInput, BomEmptyDeclaration, BomExportMode, BomGenerationResult, BomItem, BomKind, BomVersion, CreateProjectInput, CreateReleasePackageInput, CreateRoleInput, CreateSubprojectInput, CrmConnectionTestResult, CrmCustomerSyncResult, CrmIntegrationSettings, DocumentFilter, DocumentModelDrawingRelation, DocumentNode, DocumentVersionComparison, DocumentVersionSummary, DocumentWhereUsed, EditLockSummary, EquipmentTypeDefinition, FolderPermissionRule, MainProjectStaffingInput, ManagedDocument, ManufacturingBomBaseline, MaterialCodeApplication, MaterialSyncTask, MyApprovalTask, OrganizationDirectory, PasswordResetTask, PdmCustomer, PdmSystemSettings, PdmUser, PdmUserProfile, ProgramTemplateTask, ProjectFolder, ProjectFolderTemplateNode, ProjectNumberingOptions, ProjectSummary, ProjectVersionItem, ReleasePackageSummary, RolePermissionDirectory, SaveOrganizationUnitInput, SavePdmUserInput, SaveProjectOrganizationInput, SolidWorksOpenMode, UpdateCrmIntegrationInput, UpdateProjectInput, UpdateReleasePackageDraftInput } from '../types'
 import type { AddDrawingReviewMarkupInput, ApprovalTransferCandidate, DrawingReviewCandidate, DrawingReviewDecision, DrawingReviewPackage, DrawingReviewTarget } from '../types'
@@ -287,7 +287,6 @@ export function usePdmWorkspace() {
   const programTemplateTasks = ref<ProgramTemplateTask[]>([])
   const editLocks = ref<EditLockSummary[]>([])
   const passwordResetTasks = ref<PasswordResetTask[]>([])
-  const projectVersions = ref<ProjectVersionItem[]>([])
   const projectAuditEntries = ref<AuditEntry[]>([])
   const storageStatus = ref<{ vaultAvailable: boolean; releaseAvailable: boolean } | null>(null)
   let accessToken = ''
@@ -404,7 +403,6 @@ export function usePdmWorkspace() {
     selectedId.value = ''
     searchQuery.value = ''
     documentFilter.value = 'all'
-    projectVersions.value = []
     projectAuditEntries.value = []
   }
 
@@ -455,19 +453,17 @@ export function usePdmWorkspace() {
     }
   }
 
-  async function openVersionFile(versionId: string, download: boolean) {
+  async function downloadVersionFile(versionId: string) {
+    // 历史版本原始文件是SolidWorks二进制，浏览器无法渲染，因此这里只提供带原文件名的下载；
+    // 真正的只读预览走 /versions/{versionId}/preview（仅已生成STP/PDF的版本可用）。
     const documentId = selectedDocumentId.value
     if (!documentId) throw new Error('该引用尚未登记到PLM。')
-    const blob = await readDocumentVersionFile(documentId, versionId, accessToken, download)
+    const blob = await readDocumentVersionFile(documentId, versionId, accessToken, true)
     const url = URL.createObjectURL(blob)
-    if (download) {
-      const anchor = document.createElement('a')
-      anchor.href = url
-      anchor.download = `${selectedNode.value.drawingNumber}-${versions.value.find(version => version.id === versionId)?.revision.display ?? 'history'}-${selectedNode.value.fileName}`
-      anchor.click()
-    } else {
-      window.open(url, '_blank', 'noopener')
-    }
+    const anchor = document.createElement('a')
+    anchor.href = url
+    anchor.download = `${selectedNode.value.drawingNumber}-${versions.value.find(version => version.id === versionId)?.revision.display ?? 'history'}-${selectedNode.value.fileName}`
+    anchor.click()
     window.setTimeout(() => URL.revokeObjectURL(url), 60_000)
   }
 
@@ -1077,19 +1073,6 @@ export function usePdmWorkspace() {
     operationPending.value = true
     try { await forceReleaseEditLockRequest(documentId, reason, accessToken); editLocks.value = await requestEditLocks() }
     finally { operationPending.value = false }
-  }
-
-  async function loadProjectVersions() {
-    if (!project.value.id) return
-    try {
-      projectVersions.value = await listProjectVersions(project.value.id, accessToken)
-    } catch (error) {
-      if (error instanceof PdmApiError && error.status === 404) {
-        projectVersions.value = []
-        return
-      }
-      throw error
-    }
   }
 
   async function loadProjectAuditEntries() {
@@ -1884,7 +1867,6 @@ export function usePdmWorkspace() {
     programTemplateTasks,
     editLocks,
     passwordResetTasks,
-    projectVersions,
     projectAuditEntries,
     storageStatus,
     createProject,
@@ -1924,7 +1906,7 @@ export function usePdmWorkspace() {
     previewDocument,
     openVersionDrawer,
     compareVersions,
-    openVersionFile,
+    downloadVersionFile,
     restoreVersion,
     submitApproval,
     saveBomItems,
@@ -1970,7 +1952,6 @@ export function usePdmWorkspace() {
     requestEditLockRelease,
     forceReleaseEditLock,
     resetRequestedPassword,
-    loadProjectVersions,
     loadProjectAuditEntries,
     loadStorageStatus,
     login,

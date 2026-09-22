@@ -595,9 +595,9 @@ public sealed class ProjectPlanningService(
             foreach (var task in EffectivePlan(plan).Tasks.Where(item => item.Status != ProjectPlanTaskStatus.Completed && !string.IsNullOrWhiteSpace(item.Assignee)))
             {
                 var days = task.PlannedFinish.DayNumber - today.DayNumber;
-                if (days is not (7 or 3 or 0) && days >= 0) continue;
-                var kind = days < 0 ? "overdue" : $"d{days}";
-                var title = days < 0 ? $"项目计划任务已逾期{-days}天" : days == 0 ? "项目计划任务今天到期" : $"项目计划任务还有{days}天到期";
+                // 计划逾期只在项目计划与工作台体现，不再进入消息中心；这里只产生 7/3/0 天到期提醒。
+                if (days is not (7 or 3 or 0)) continue;
+                var title = days == 0 ? "项目计划任务今天到期" : $"项目计划任务还有{days}天到期";
                 var impacted = impactedItems.Where(item => item.ImpactStage == task.Stage)
                     .GroupBy(item => string.IsNullOrWhiteSpace(item.DrawingNumber) ? item.Name : item.DrawingNumber)
                     .Select(group => group.First()).ToArray();
@@ -605,7 +605,7 @@ public sealed class ProjectPlanningService(
                     : $" 本阶段影响物料 {impacted.Length} 项：{string.Join("、", impacted.Take(3).Select(item => string.IsNullOrWhiteSpace(item.DrawingNumber) ? item.Name : item.DrawingNumber))}{(impacted.Length > 3 ? "等" : string.Empty)}；请在备料页核对到货和出库状态。";
                 var notification = new UserNotification(Guid.NewGuid(), task.Assignee!, "project-plan", title,
                     $"{project.Code} · {task.Name}，计划完成日期 {task.PlannedFinish:yyyy-MM-dd}。{impactReminder}", project.Id, null,
-                    $"project-plan:{task.Id:N}:{kind}:{today:yyyyMMdd}", now, null);
+                    $"project-plan:{task.Id:N}:d{days}:{today:yyyyMMdd}", now, null);
                 await repository.CreateUserNotificationsAsync([notification], cancellationToken);
             }
         }

@@ -62,7 +62,7 @@ describe('DocumentTree', () => {
     const wrapper = mount(DocumentTree, { props: { query: '', filter: 'all', root, drawings: [], selectedId: root.id, allCount: 1, modelCount: 1, drawingCount: 0, warningCount: 0 } })
 
     await wrapper.get('[role="treeitem"]').trigger('contextmenu')
-    const versions = wrapper.findAll('[role="menuitem"]').find(item => item.text().includes('选择版本'))
+    const versions = wrapper.findAll('[role="menuitem"]').find(item => item.text().includes('查看/对比历史版本'))
     expect(versions).toBeTruthy()
     await versions!.trigger('click')
     expect(wrapper.emitted('versions')).toEqual([[root]])

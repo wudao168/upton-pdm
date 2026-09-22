@@ -979,9 +979,9 @@ describe('PLM client workspace', () => {
     expect(wrapper.get('[aria-label="项目中心"]').text()).toContain('PRJ-REAL-001')
     await runProjectAction(wrapper, 'open')
     await flushPromises()
-    await projectTabByText(wrapper, '版本').trigger('click')
+    await projectTabByText(wrapper, '记录').trigger('click')
     await flushPromises()
-    expect(wrapper.text()).toContain('当前项目还没有版本记录')
+    expect(wrapper.text()).toContain('暂无可见审计记录。')
   })
 
   it('creates and manages projects before SolidWorks drawings are associated', async () => {
@@ -1513,7 +1513,7 @@ describe('PLM client workspace', () => {
     await buttonByText(wrapper, '查看并下载版本').trigger('click')
     await flushPromises()
     expect(document.body.textContent).toContain('图档历史版本对比')
-    expect(document.body.textContent).toContain('下载左侧')
+    expect(document.body.textContent).toContain('下载左版原始文件')
 
     const partRow = wrapper.get('[aria-label="项目设计树"]').findAll('.pdm-tree-row').find(row => row.text().includes('REAL-PRT-001'))
     expect(partRow).toBeTruthy()
@@ -1555,17 +1555,19 @@ describe('PLM client workspace', () => {
     await flushPromises()
     await wrapper.get('.pdm-tree-row.is-selected').trigger('contextmenu', { clientX: 320, clientY: 220 })
     expect(document.body.textContent).not.toContain('获取最新版本并编辑')
-    await buttonByText(wrapper, '打开最新正式发布版（只读）').trigger('click')
+    expect(document.body.textContent).toContain('只读打开最新受控版')
+    expect(document.body.textContent).toContain('获取权限并编辑最新受控版')
+    expect(document.body.textContent).toContain('不占用编辑权限')
+    await buttonByText(wrapper, '只读打开最近正式发布版').trigger('click')
     expect(postMessage).toHaveBeenCalledWith({
       type: 'open-document',
       payload: expect.objectContaining({ projectId, documentId: 'doc-root', mode: 'LatestReleased' }),
     })
 
-    await projectTabByText(wrapper, '版本').trigger('click')
+    await wrapper.get('.pdm-tree-row.is-selected').trigger('contextmenu', { clientX: 320, clientY: 220 })
+    await buttonByText(wrapper, '查看/对比历史版本').trigger('click')
     await flushPromises()
-    await buttonByText(wrapper, '查看与对比').trigger('click')
-    await flushPromises()
-    await buttonByText(wrapper, 'SolidWorks只读打开左侧').trigger('click')
+    await buttonByText(wrapper, '只读打开左版').trigger('click')
     expect(postMessage).toHaveBeenCalledWith({
       type: 'open-document',
       payload: expect.objectContaining({
@@ -1580,9 +1582,8 @@ describe('PLM client workspace', () => {
   it('loads real version choices and renders property, reference and BOM differences', async () => {
     const wrapper = mount(App, { attachTo: document.body, global: { plugins: [ElementPlus] } })
     await login(wrapper)
-    await projectTabByText(wrapper, '版本').trigger('click')
-    await flushPromises()
-    await buttonByText(wrapper, '查看与对比').trigger('click')
+    await wrapper.get('.pdm-tree-row.is-selected').trigger('contextmenu', { clientX: 320, clientY: 220 })
+    await buttonByText(wrapper, '查看/对比历史版本').trigger('click')
     await flushPromises()
 
     expect(document.body.textContent).toContain('W1')

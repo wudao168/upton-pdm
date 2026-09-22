@@ -13,6 +13,7 @@ public sealed partial class InMemoryPdmRepository
         {
             return Task.FromResult<IReadOnlyList<UserNotification>>(userNotifications.Values
                 .Where(item => string.Equals(item.Recipient, recipient, StringComparison.OrdinalIgnoreCase))
+                .Where(item => !item.IsPlanOverdueReminder)
                 .OrderByDescending(item => item.CreatedAt)
                 .ThenByDescending(item => item.Id)
                 .Take(Math.Clamp(take, 1, 200))

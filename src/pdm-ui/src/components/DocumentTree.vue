@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { RotateCw, Search } from '@lucide/vue'
 import { postDesktopMessage } from '../api'
 import type { DocumentFilter, DocumentNode, DrawingReviewBadge, SolidWorksOpenMode, WorkspaceLocalFileState } from '../types'
@@ -37,12 +37,14 @@ const filters: Array<{ value: DocumentFilter; label: string }> = [
 function showContext(node: DocumentNode, event: MouseEvent) {
   contextNode.value = node
   contextLeft.value = Math.max(8, Math.min(event.clientX, window.innerWidth - 310))
-  contextTop.value = Math.max(8, Math.min(event.clientY, window.innerHeight - 210))
+  contextTop.value = Math.max(8, Math.min(event.clientY, window.innerHeight - 340))
 }
 
 function closeContext() {
   contextNode.value = undefined
 }
+
+const contextRevision = computed(() => contextNode.value && contextNode.value.version !== '—' ? contextNode.value.version : '')
 
 function open(mode: SolidWorksOpenMode) {
   if (!contextNode.value?.documentId || !solidWorksAvailable.value) return
@@ -132,10 +134,10 @@ onBeforeUnmount(() => {
       @click.stop
     >
       <strong>{{ contextNode.drawingNumber }} · <template v-if="contextNode.snapshotVersion !== undefined">{{ contextNode.snapshotVersion }} / </template>{{ contextNode.version }}</strong>
-      <button type="button" role="menuitem" :disabled="!solidWorksAvailable || !contextNode.documentId" @click="open('LatestReadOnly')">在SolidWorks中打开最新受控版</button>
-      <button type="button" role="menuitem" :disabled="!canEdit || !solidWorksAvailable || !contextNode.documentId" @click="open('LatestEdit')">获取编辑权限并打开</button>
-      <button type="button" role="menuitem" :disabled="!solidWorksAvailable || !contextNode.documentId" @click="open('LatestReleased')">打开最新正式发布版（只读）</button>
-      <button type="button" role="menuitem" :disabled="!contextNode.documentId" @click="emit('versions', contextNode); closeContext()">选择版本（对比/只读打开/预览/下载）</button>
+      <button type="button" role="menuitem" :disabled="!solidWorksAvailable || !contextNode.documentId" @click="open('LatestReadOnly')"><span>只读打开最新受控版</span><small v-if="contextRevision">当前 {{ contextRevision }}，不占用编辑权限</small></button>
+      <button type="button" role="menuitem" :disabled="!canEdit || !solidWorksAvailable || !contextNode.documentId" @click="open('LatestEdit')"><span>获取权限并编辑最新受控版</span><small v-if="contextRevision">将锁定当前 {{ contextRevision }}，提交后生成新工作版</small></button>
+      <button type="button" role="menuitem" :disabled="!solidWorksAvailable || !contextNode.documentId" @click="open('LatestReleased')"><span>只读打开最近正式发布版</span><small v-if="contextRevision">最近一次正式发布基线，永久不可变</small></button>
+      <button type="button" role="menuitem" :disabled="!contextNode.documentId" @click="emit('versions', contextNode); closeContext()">查看/对比历史版本…</button>
       <button type="button" role="menuitem" @click="emit('openFolder', contextNode); closeContext()">打开所在文件夹</button>
       <small v-if="!contextNode.documentId">该引用尚未入库，请先在SolidWorks插件中提交整套存档</small>
       <small v-if="!solidWorksAvailable">当前电脑未安装SolidWorks或UPLM插件</small>

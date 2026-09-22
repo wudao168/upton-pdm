@@ -20,7 +20,6 @@ import ProgramTemplateLibrary from './components/ProgramTemplateLibrary.vue'
 import ProjectManager from './components/ProjectManager.vue'
 import ProjectWorkbench from './components/ProjectWorkbench.vue'
 import ProjectPlanManager from './components/ProjectPlanManager.vue'
-import ProjectVersions from './components/ProjectVersions.vue'
 import ProjectWorkspaceHeader from './components/ProjectWorkspaceHeader.vue'
 import type { ProjectTab } from './components/ProjectWorkspaceHeader.vue'
 import ProcurementTracking from './components/ProcurementTracking.vue'
@@ -452,7 +451,6 @@ async function openProjectTab(tab: ProjectTab) {
   if (releaseRequested && nextTab === 'release') requestedBomKind.value = 'Release'
   else if (panelTab === 'bom' && activeBomKind.value === 'Release') requestedBomKind.value = 'Source'
   if (workspace.project.value.id) rememberProjectTab(workspace.project.value.id, nextTab)
-  if (panelTab === 'versions') await workspace.loadProjectVersions()
   if (panelTab === 'documents') await workspace.refreshDrawingReviews()
   if (panelTab === 'records') await workspace.loadProjectAuditEntries()
 }
@@ -600,7 +598,7 @@ function openProgramTemplate(templateId: string) {
 }
 
 type ProjectNavigationRequest = { projectId: string; tab: ProjectTab }
-const supportedProjectTabs: ProjectTab[] = ['overview', 'project-plan', 'files', 'validation-plan', 'documents', 'bom', 'release', 'procurement', 'versions', 'records']
+const supportedProjectTabs: ProjectTab[] = ['overview', 'project-plan', 'files', 'validation-plan', 'documents', 'bom', 'release', 'procurement', 'records']
 let pendingProjectNavigation: ProjectNavigationRequest | null = null
 let projectNavigationInProgress = false
 let initialPageRestored = false
@@ -1196,8 +1194,7 @@ async function openWhereUsedParent(projectId: string, parentDocumentId: string) 
               </div>
               </template>
             </section>
-            <ProjectVersions v-if="projectTab === 'versions'" :versions="workspace.projectVersions.value" :pending="workspace.operationPending.value" @refresh="runOperation(workspace.loadProjectVersions, '项目版本已刷新')" @open="openVersionDocument" />
-            <ProcurementTracking v-else-if="projectTab === 'procurement'" :project-id="workspace.project.value.id" :token="workspace.getAccessToken()" :username="workspace.currentUsername.value" />
+            <ProcurementTracking v-if="projectTab === 'procurement'" :project-id="workspace.project.value.id" :token="workspace.getAccessToken()" :username="workspace.currentUsername.value" />
             <AuditLog v-else-if="projectTab === 'records'" :entries="workspace.projectAuditEntries.value" hide-heading @refresh="runOperation(workspace.loadProjectAuditEntries, '项目记录已刷新')" />
             </div>
           </ProjectWorkspaceHeader>
@@ -1220,14 +1217,14 @@ async function openWhereUsedParent(projectId: string, parentDocumentId: string) 
           <label>左侧版本<el-select v-model="workspace.leftVersionId.value" @change="workspace.compareVersions"><el-option v-for="version in workspace.versions.value" :key="version.id" :label="`${version.revision.display} · ${displayUserName(version.createdBy)} · ${new Date(version.createdAt).toLocaleString()}`" :value="version.id" /></el-select></label>
           <label>右侧版本<el-select v-model="workspace.rightVersionId.value" @change="workspace.compareVersions"><el-option v-for="version in workspace.versions.value" :key="version.id" :label="`${version.revision.display} · ${displayUserName(version.createdBy)} · ${new Date(version.createdAt).toLocaleString()}`" :value="version.id" /></el-select></label>
         </div>
-        <div class="pdm-version-actions"><button v-if="desktopAvailable" type="button" class="pdm-secondary-action" :disabled="!workspace.leftVersionId.value" @click="workspace.openDocument(workspace.selectedNode.value, 'SpecificReadOnly', workspace.leftVersionId.value)">SolidWorks只读打开左侧</button><button v-if="desktopAvailable" type="button" class="pdm-secondary-action" @click="workspace.openVersionFile(workspace.leftVersionId.value, false)">只读预览左侧</button><button type="button" class="pdm-secondary-action" @click="workspace.openVersionFile(workspace.leftVersionId.value, true)">下载左侧</button></div>
+        <div class="pdm-version-actions"><button v-if="desktopAvailable" type="button" class="pdm-secondary-action" :disabled="!workspace.leftVersionId.value" @click="workspace.openDocument(workspace.selectedNode.value, 'SpecificReadOnly', workspace.leftVersionId.value)">只读打开左版</button><button type="button" class="pdm-secondary-action" @click="workspace.downloadVersionFile(workspace.leftVersionId.value)">下载左版原始文件</button></div>
         <div v-if="workspace.versionComparison.value" class="pdm-diff-sections">
           <section><h3>版本信息</h3><p>左：{{ workspace.versionComparison.value.left.revision.display }} · {{ versionStatus(workspace.versionComparison.value.left.status) }} · {{ displayUserName(workspace.versionComparison.value.left.createdBy) }} · {{ new Date(workspace.versionComparison.value.left.createdAt).toLocaleString() }} · {{ workspace.versionComparison.value.left.changeNote }}</p><p>右：{{ workspace.versionComparison.value.right.revision.display }} · {{ versionStatus(workspace.versionComparison.value.right.status) }} · {{ displayUserName(workspace.versionComparison.value.right.createdBy) }} · {{ new Date(workspace.versionComparison.value.right.createdAt).toLocaleString() }} · {{ workspace.versionComparison.value.right.changeNote }}</p></section>
           <section><h3>属性差异（{{ workspace.versionComparison.value.propertyChanges.length }}）</h3><ul><li v-for="(change, index) in workspace.versionComparison.value.propertyChanges" :key="`p-${index}`">【{{ propertyChangeKind(change.kind) }}】{{ change.name }}：{{ change.previousValue ?? '无' }} → {{ change.currentValue ?? '无' }}</li></ul><p v-if="!workspace.versionComparison.value.propertyChanges.length">无变化</p></section>
           <section><h3>引用树差异（{{ workspace.versionComparison.value.referenceChanges.length }}）</h3><ul><li v-for="(change, index) in workspace.versionComparison.value.referenceChanges" :key="`r-${index}`">【{{ referenceChangeKind(change.kind) }}】{{ change.instancePath }}：{{ change.previousValue ?? '无' }} → {{ change.currentValue ?? '无' }}</li></ul><p v-if="!workspace.versionComparison.value.referenceChanges.length">无变化</p></section>
           <section><h3>BOM差异（{{ workspace.versionComparison.value.bomChanges.length }}）</h3><ul><li v-for="(change, index) in workspace.versionComparison.value.bomChanges" :key="`b-${index}`">【{{ bomChangeKind(change.kind) }}】{{ change.drawingNumber }} · {{ change.field }}：{{ change.previousValue ?? '无' }} → {{ change.currentValue ?? '无' }}</li></ul><p v-if="!workspace.versionComparison.value.bomChanges.length">无变化</p></section>
         </div>
-        <div class="pdm-version-restore"><el-input v-model="restoreNote" maxlength="500" placeholder="填写恢复说明" /><button type="button" class="pdm-primary-action" @click="restoreSelectedVersion">从左侧版本创建新工作版本</button><small>不会覆盖当前文件，也不会修改历史版本。</small></div>
+        <div class="pdm-version-restore"><el-input v-model="restoreNote" maxlength="500" placeholder="填写恢复说明" /><button type="button" class="pdm-primary-action" @click="restoreSelectedVersion">以左版为基线创建新工作版</button><small>不会覆盖当前文件，也不会修改历史版本。</small></div>
       </template>
     </el-drawer>
 
