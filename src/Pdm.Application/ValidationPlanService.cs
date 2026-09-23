@@ -160,7 +160,7 @@ public sealed class ValidationPlanService(
                 items.Add(new(Guid.NewGuid(), null, null, "人工项", Required(input.ValidationContent, 1500, "验证内容"),
                     NormalizeInformationSource(input.InformationSource), input.ValidationDate,
                     Optional(input.Result, 1500, "验证结果"), Optional(input.Reviewer, 100, "审核人"), Optional(input.ResponsiblePerson, 100, "责任人"),
-                    Optional(input.Remark, 1000, "备注"), input.SortOrder));
+                    Optional(input.Remark, 1000, "备注"), input.SortOrder, Optional(input.ValidationStandard, 1000, "验证标准")));
                 continue;
             }
             if (!itemById.TryGetValue(input.CatalogItemId.Value, out var catalogItem)) throw new PdmNotFoundException("所选检查项不存在。");
@@ -174,7 +174,7 @@ public sealed class ValidationPlanService(
                 snapshot?.ValidationContent ?? catalogItem.Content,
                 NormalizeInformationSource(input.InformationSource), input.ValidationDate,
                 Optional(input.Result, 1500, "验证结果"), Optional(input.Reviewer, 100, "审核人"), Optional(input.ResponsiblePerson, 100, "责任人"),
-                Optional(input.Remark, 1000, "备注"), input.SortOrder));
+                Optional(input.Remark, 1000, "备注"), input.SortOrder, Optional(input.ValidationStandard, 1000, "验证标准")));
         }
 
         var now = timeProvider.GetUtcNow();
@@ -223,7 +223,7 @@ public sealed class ValidationPlanService(
                 items.Add(new(Guid.NewGuid(), null, null, "人工项", Required(input.ValidationContent, 1500, "验证内容"),
                     NormalizeInformationSource(input.InformationSource), input.ValidationDate,
                     Optional(input.Result, 1500, "验证结果"), Optional(input.Reviewer, 100, "审核人"), Optional(input.ResponsiblePerson, 100, "责任人"),
-                    Optional(input.Remark, 1000, "备注"), nextSortOrder++));
+                    Optional(input.Remark, 1000, "备注"), nextSortOrder++, Optional(input.ValidationStandard, 1000, "验证标准")));
                 continue;
             }
 
@@ -233,7 +233,7 @@ public sealed class ValidationPlanService(
             items.Add(new(Guid.NewGuid(), category.Id, catalogItem.Id, category.Name, catalogItem.Content,
                 NormalizeInformationSource(input.InformationSource), input.ValidationDate,
                 Optional(input.Result, 1500, "验证结果"), Optional(input.Reviewer, 100, "审核人"), Optional(input.ResponsiblePerson, 100, "责任人"),
-                Optional(input.Remark, 1000, "备注"), nextSortOrder++));
+                Optional(input.Remark, 1000, "备注"), nextSortOrder++, Optional(input.ValidationStandard, 1000, "验证标准")));
         }
 
         var now = timeProvider.GetUtcNow();

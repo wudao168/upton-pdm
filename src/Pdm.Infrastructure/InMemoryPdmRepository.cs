@@ -552,11 +552,11 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
             project = project with
             {
                 ExecutionUnitId = unit.Id, ExecutionUnitName = unit.Name, PrimaryProjectManager = null,
-                CollaborativeProjectManagers = [], DesignLead = null, DesignLeads = [], Designers = []
+                CollaborativeProjectManagers = [], DesignLead = null, DesignLeads = [], Designers = [], PhaseOwners = new Dictionary<string, string>()
             };
             projects[projectId] = project;
             foreach (var child in projects.Values.Where(item => item.RootProjectId == projectId && item.Id != projectId).ToArray())
-                projects[child.Id] = child with { ExecutionUnitId = unit.Id, ExecutionUnitName = unit.Name, PrimaryProjectManager = null, CollaborativeProjectManagers = [], DesignLead = null, DesignLeads = [], Designers = [] };
+                projects[child.Id] = child with { ExecutionUnitId = unit.Id, ExecutionUnitName = unit.Name, PrimaryProjectManager = null, CollaborativeProjectManagers = [], DesignLead = null, DesignLeads = [], Designers = [], PhaseOwners = new Dictionary<string, string>() };
             return Task.FromResult(project);
         }
     }
@@ -581,6 +581,17 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
         {
             if (!projects.TryGetValue(projectId, out var project)) throw new PdmNotFoundException("项目不存在。");
             project = project with { Designers = designers.ToArray() };
+            projects[projectId] = project;
+            return Task.FromResult(project);
+        }
+    }
+
+    public Task<Project> SetProjectPhaseOwnersAsync(Guid projectId, IReadOnlyDictionary<string, string> phaseOwners, string actor, CancellationToken cancellationToken)
+    {
+        lock (gate)
+        {
+            if (!projects.TryGetValue(projectId, out var project)) throw new PdmNotFoundException("项目不存在。");
+            project = project with { PhaseOwners = phaseOwners.ToDictionary(item => item.Key, item => item.Value, StringComparer.OrdinalIgnoreCase) };
             projects[projectId] = project;
             return Task.FromResult(project);
         }
@@ -1195,6 +1206,32 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
         }
     }
 
+    public Task<IReadOnlyList<ProductionDrawingProject>> ListProductionDrawingProjectsAsync(string actor, UserRole role, CancellationToken cancellationToken)
+    {
+        lock (gate)
+        {
+            if (!HasUserPermission(actor, role, PermissionCodes.ProjectView)
+                || !HasUserPermission(actor, role, PermissionCodes.ProjectContentView))
+                return Task.FromResult<IReadOnlyList<ProductionDrawingProject>>([]);
+            var publishedPackages = packages.Values
+                .Where(package => package.State == ReleasePackageState.Published
+                    && package.Scope is (ReleaseScope.NonStandardWithDrawing or ReleaseScope.NonStandardSupplement or ReleaseScope.LegacyCombined))
+                .Select(package => package.Id).ToHashSet();
+            var drawingIds = documents.Values.Where(document => document.Kind == DocumentKind.Drawing
+                && document.DeletedAt is null && document.PurgedAt is null).ToDictionary(document => document.Id);
+            var projectIds = versions.Values
+                .Where(version => version.Status == DocumentVersionStatus.Released
+                    && version.ReleasePackageId.HasValue && publishedPackages.Contains(version.ReleasePackageId.Value)
+                    && drawingIds.ContainsKey(version.DocumentId))
+                .Select(version => drawingIds[version.DocumentId].ProjectId).ToHashSet();
+            IReadOnlyList<ProductionDrawingProject> result = projects.Values
+                .Where(project => projectIds.Contains(project.Id) && IsInActiveCompany(project))
+                .Select(project => new ProductionDrawingProject(project.Id, project.Code, project.Name)
+                { Division = project.ExecutionUnitName, ProjectManager = project.PrimaryProjectManager }).ToArray();
+            return Task.FromResult(result);
+        }
+    }
+
     public Task<DocumentVersion?> FindDocumentVersionAsync(Guid documentId, Guid versionId, CancellationToken cancellationToken)
     {
         versions.TryGetValue(versionId, out var version);
@@ -1787,7 +1824,9 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
                 throw new PdmConflictException("发布包尚未进入服务器转换状态。");
             // 转图范围：只转非标件BOM中的物料（模型出STEP、其关联2D工程图出PDF）以及这些物料的上级装配体。
             var nonStandardModels = NonStandardModels(package);
-            var scope = PreviewScope(ReferenceTree(package.ProjectId), nonStandardModels);
+            var root = ReferenceTree(package.ProjectId);
+            var scope = PreviewScope(root, nonStandardModels);
+            scope.UnionWith(EnumerateDocumentIds(root).Where(id => documents.TryGetValue(id, out var candidate) && candidate.Kind == DocumentKind.Drawing));
             if (scope.Count == 0) return Task.FromResult<IReadOnlyList<ReleasePreviewSource>>([]);
             var sources = new List<ReleasePreviewSource>();
             foreach (var documentId in scope)
@@ -1795,7 +1834,10 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
                 if (!documents.TryGetValue(documentId, out var document)
                     || document.Kind is not (DocumentKind.Assembly or DocumentKind.Part or DocumentKind.Drawing)) continue;
                 var source = versions.Values
-                    .Where(version => version.DocumentId == documentId)
+                    .Where(version => version.DocumentId == documentId
+                        && (package.State == ReleasePackageState.Published
+                            ? version.ReleasePackageId == releasePackageId && version.Status == DocumentVersionStatus.Released
+                            : version.Status == DocumentVersionStatus.Work))
                     .OrderByDescending(version => version.CreatedAt)
                     .FirstOrDefault();
                 if (source is null) continue;
@@ -1809,7 +1851,9 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
                     source.StorageRelativePath,
                     source.FileLength,
                     source.Sha256,
-                    string.IsNullOrWhiteSpace(sourceSha256) ? source.Sha256 : sourceSha256));
+                    package.State == ReleasePackageState.Published || string.IsNullOrWhiteSpace(sourceSha256)
+                        ? source.Sha256 : sourceSha256,
+                    package.State == ReleasePackageState.Published ? source.Revision.Display : source.Revision.Release().Display));
             }
             return Task.FromResult<IReadOnlyList<ReleasePreviewSource>>(sources);
         }
@@ -1820,6 +1864,7 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
         Guid approvalTaskId,
         string actor,
         IReadOnlyDictionary<Guid, DocumentPreviewArtifact> previews,
+        IReadOnlyDictionary<Guid, FormalDrawingSource> formalDrawings,
         CancellationToken cancellationToken)
     {
         lock (gate)
@@ -1833,6 +1878,21 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
             var documentIds = EnumerateDocumentIds(ReferenceTree(package.ProjectId)).Distinct().ToList();
             documentIds.AddRange(PreviewScope(ReferenceTree(package.ProjectId), NonStandardModels(package))
                 .Where(id => documents.TryGetValue(id, out var document) && document.Kind == DocumentKind.Drawing));
+            // 内存仓库也先校验整批，再写入版本，保持与 MySQL 事务相同的失败原子性。
+            foreach (var documentId in documentIds.Distinct())
+            {
+                if (!documents.TryGetValue(documentId, out var candidate) || candidate.Kind != DocumentKind.Drawing) continue;
+                var work = versions.Values.Where(version => version.DocumentId == documentId)
+                    .OrderByDescending(version => version.CreatedAt).FirstOrDefault();
+                if (work is null || work.Status != DocumentVersionStatus.Work) continue;
+                if (!formalDrawings.TryGetValue(documentId, out var formal)
+                    || formal.SourceVersionId != work.Id
+                    || !string.Equals(formal.Revision, work.Revision.Release().Display, StringComparison.OrdinalIgnoreCase))
+                    throw new PdmConflictException($"工程图{candidate.DrawingNumber}的正式源图与审批版本不匹配，发布已停止。");
+                if (previews.TryGetValue(documentId, out var drawingPreview)
+                    && !string.Equals(drawingPreview.SourceSha256, formal.Sha256, StringComparison.OrdinalIgnoreCase))
+                    throw new PdmConflictException($"工程图{candidate.DrawingNumber}的PDF不是从正式源图转换的，发布已停止。");
+            }
             foreach (var documentId in documentIds.Distinct())
             {
                 if (!documents.TryGetValue(documentId, out var document)) continue;
@@ -1843,7 +1903,16 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
                 if (document.Kind is DocumentKind.Assembly or DocumentKind.Part or DocumentKind.Drawing)
                     previews.TryGetValue(documentId, out preview);
                 var revision = source.Revision.Release();
-                var version = source with { Id = Guid.NewGuid(), Revision = revision, Status = DocumentVersionStatus.Released, CreatedBy = actor, CreatedAt = DateTimeOffset.UtcNow, ChangeNote = $"审批发布{revision.Display}", SourceVersionId = source.Id, SourceDescription = $"由{source.Revision.Display}审批发布", ApprovalTaskId = approvalTaskId, ReleasePackageId = releasePackageId, Preview = preview };
+                FormalDrawingSource? formal = null;
+                if (document.Kind == DocumentKind.Drawing
+                    && (!formalDrawings.TryGetValue(documentId, out formal)
+                        || formal.SourceVersionId != source.Id
+                        || !string.Equals(formal.Revision, revision.Display, StringComparison.OrdinalIgnoreCase)))
+                    throw new PdmConflictException($"工程图{document.DrawingNumber}的正式源图与审批版本不匹配，发布已停止。");
+                if (document.Kind == DocumentKind.Drawing && preview is not null
+                    && !string.Equals(preview.SourceSha256, formal!.Sha256, StringComparison.OrdinalIgnoreCase))
+                    throw new PdmConflictException($"工程图{document.DrawingNumber}的PDF不是从正式源图转换的，发布已停止。");
+                var version = source with { Id = Guid.NewGuid(), Revision = revision, Status = DocumentVersionStatus.Released, StorageRelativePath = formal?.StorageRelativePath ?? source.StorageRelativePath, FileLength = formal?.FileLength ?? source.FileLength, Sha256 = formal?.Sha256 ?? source.Sha256, CreatedBy = actor, CreatedAt = DateTimeOffset.UtcNow, ChangeNote = $"审批发布{revision.Display}", SourceVersionId = source.Id, SourceDescription = $"由{source.Revision.Display}审批发布", ApprovalTaskId = approvalTaskId, ReleasePackageId = releasePackageId, Preview = preview };
                 versions[version.Id] = version;
                 documents[documentId] = ClearEditLock(document with { Revision = revision, State = DocumentLifecycleState.Released }, version.CreatedAt);
                 released.Add(version);
@@ -1873,6 +1942,30 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
         }
 
         return Task.FromResult(package);
+    }
+
+    public Task<ReleasePackage> UpdatePublishedDrawingDeliveryAsync(
+        Guid releasePackageId, Guid documentId, DrawingDeliveryOverride delivery, string actor, CancellationToken cancellationToken)
+    {
+        lock (gate)
+        {
+            if (!packages.TryGetValue(releasePackageId, out var package)) throw new PdmNotFoundException("发布包不存在。");
+            if (package.State != ReleasePackageState.Published) throw new PdmConflictException("只有已发布图纸可以调整发图信息。");
+            if (!versions.Values.Any(version => version.ReleasePackageId == releasePackageId && version.DocumentId == documentId
+                && version.Status == DocumentVersionStatus.Released)
+                || !documents.TryGetValue(documentId, out var document) || document.Kind != DocumentKind.Drawing)
+                throw new PdmNotFoundException("该图纸不在发布包中。");
+            var overrides = new Dictionary<Guid, DrawingDeliveryOverride>(package.DrawingDeliveryOverrides)
+            {
+                [documentId] = delivery
+            };
+            var updated = package with { DrawingDeliveryOverrides = overrides };
+            packages[releasePackageId] = updated;
+            audits.Enqueue(new AuditEntry(Guid.NewGuid(), timeProvider.GetUtcNow(), actor,
+                "production-drawing.delivery.update", nameof(DocumentVersion), documentId.ToString(),
+                $"{package.Number}；{delivery.Priority}；需求日期{delivery.RequiredOn:yyyy-MM-dd}"));
+            return Task.FromResult(updated);
+        }
     }
 
     public Task<ReleasePackage> UpdateDraftReleasePackageAsync(ReleasePackage package, CancellationToken cancellationToken)
@@ -2170,6 +2263,11 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
             foreach (var version in versions.Values.Where(item => item.ReleasePackageId == releasePackageId).ToArray())
             {
                 if (!previews.TryGetValue(version.DocumentId, out var preview)) continue;
+                if (preview.Format == DocumentPreviewFormat.Pdf && version.SourceVersionId.HasValue
+                    && versions.TryGetValue(version.SourceVersionId.Value, out var original)
+                    && !string.Equals(original.StorageRelativePath, version.StorageRelativePath, StringComparison.OrdinalIgnoreCase)
+                    && !string.Equals(preview.SourceSha256, version.Sha256, StringComparison.OrdinalIgnoreCase))
+                    throw new PdmConflictException($"工程图{version.DocumentId}的PDF来源不是该正式源图。");
                 var saved = version with { Preview = preview };
                 versions[version.Id] = saved;
                 updated.Add(saved);
@@ -2541,8 +2639,12 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
                 if (!documents.TryGetValue(documentId, out var document)
                     || document.Kind is not (DocumentKind.Assembly or DocumentKind.Part or DocumentKind.Drawing)) continue;
                 var source = versions.Values
-                    .Where(version => version.DocumentId == documentId)
-                    .OrderByDescending(version => version.CreatedAt)
+                    .Where(version => version.DocumentId == documentId
+                        && (package.State == ReleasePackageState.Published
+                            ? version.ReleasePackageId == releasePackageId || version.CreatedAt <= package.CreatedAt
+                            : version.Status == DocumentVersionStatus.Work))
+                    .OrderByDescending(version => version.ReleasePackageId == releasePackageId)
+                    .ThenByDescending(version => version.CreatedAt)
                     .FirstOrDefault();
                 if (source is null) continue;
                 source.PropertySnapshot.TryGetValue("SourceFileSha256", out var sourceSha256);

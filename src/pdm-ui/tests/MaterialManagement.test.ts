@@ -47,6 +47,8 @@ const api = vi.hoisted(() => ({
   updateU9MaterialIntegration: vi.fn(),
   getMaterialNumberingSettings: vi.fn(),
   updateMaterialNumberingSettings: vi.fn(),
+  getMaterialApprovalRules: vi.fn(),
+  updateMaterialApprovalRules: vi.fn(),
   getMaterialDuplicateRules: vi.fn(),
   updateMaterialDuplicateRules: vi.fn(),
   previewMaterialImport: vi.fn(),
@@ -79,6 +81,12 @@ describe('MaterialManagement', () => {
     })
     api.getMaterialNumberingSettings.mockResolvedValue({ startSequence: 1000000, sequenceLength: 7 })
     api.updateMaterialNumberingSettings.mockResolvedValue({ startSequence: 1000000, sequenceLength: 7 })
+    api.getMaterialApprovalRules.mockResolvedValue([
+      { categoryCode: '0101', requiresApproval: true },
+      { categoryCode: '0102', requiresApproval: true },
+      { categoryCode: '0204', requiresApproval: false },
+    ])
+    api.updateMaterialApprovalRules.mockImplementation(async rules => rules)
     api.getMaterialDuplicateRules.mockResolvedValue([
       { categoryCode: '0101', fields: ['Specification', 'Brand'] },
       { categoryCode: '0102', fields: ['Specification', 'Brand'] },
@@ -124,7 +132,7 @@ describe('MaterialManagement', () => {
     }))
   })
 
-  it('上传Excel后先预检，确认后仅导入料品草稿', async () => {
+  it('上传Excel后先预检，确认后按分类审核规则导入', async () => {
     const confirm = vi.spyOn(ElMessageBox, 'confirm').mockResolvedValue('confirm' as never)
     const wrapper = mount(MaterialManagement, {
       attachTo: document.body,
@@ -145,9 +153,9 @@ describe('MaterialManagement', () => {
     expect(api.previewMaterialImport).toHaveBeenCalledWith(file, 'token')
     expect(document.body.textContent).toContain('可导入 1 行')
 
-    await wrapper.findAll('button').find(button => button.text() === '确认导入草稿')!.trigger('click')
+    await wrapper.findAll('button').find(button => button.text() === '确认导入')!.trigger('click')
     await flushPromises()
-    expect(confirm).toHaveBeenCalledWith(expect.stringContaining('不会自动批准或写入U9C'), '确认批量导入', expect.any(Object))
+    expect(confirm).toHaveBeenCalledWith(expect.stringContaining('按取号设置中的分类审核规则处理'), '确认批量导入', expect.any(Object))
     expect(api.importMaterials).toHaveBeenCalledWith(file, 'token')
     wrapper.unmount()
     confirm.mockRestore()
@@ -769,7 +777,7 @@ describe('MaterialManagement', () => {
     expect(api.getU9MaterialIntegration).not.toHaveBeenCalled()
   })
 
-  it('取号设置可按料品分类维护并保存查重字段', async () => {
+  it('取号设置可按料品分类维护审核和查重规则', async () => {
     const wrapper = mount(MaterialManagement, {
       props: { token: 'token', canEdit: true, canApprove: true, canManageIntegration: true },
       global: { plugins: [ElementPlus] },
@@ -780,22 +788,38 @@ describe('MaterialManagement', () => {
     await settingsTab.trigger('click')
     await flushPromises()
 
-    const rules = wrapper.get('.material-duplicate-settings')
-    expect(rules.text()).toContain('分类查重规则')
-    expect(rules.text()).toContain('0101 电气外购件')
-    expect(rules.text()).toContain('0102 机械外购件')
-    expect(rules.text()).toContain('0204 非标机加件')
-    expect(rules.text()).toContain('名称')
-    expect(rules.text()).toContain('型号')
-    expect(rules.text()).toContain('品牌')
+    const duplicateRules = wrapper.get('.material-duplicate-settings')
+    const settingsSections = wrapper.get('.material-numbering-settings-scroll').findAll('section')
+    expect(settingsSections.map(section => section.attributes('aria-label'))).toEqual([
+      'PLM料号基线设置',
+      '料品查重与审核规则设置',
+    ])
+    expect(duplicateRules.text()).toContain('全局查重规则（按分类配置字段）')
+    expect(duplicateRules.text()).toContain('分类不参与查重')
+    expect(duplicateRules.text()).toContain('0101 电气外购件')
+    expect(duplicateRules.text()).toContain('0102 机械外购件')
+    expect(duplicateRules.text()).toContain('0204 非标机加件')
+    expect(duplicateRules.text()).toContain('名称')
+    expect(duplicateRules.text()).toContain('型号')
+    expect(duplicateRules.text()).toContain('品牌')
+    expect(duplicateRules.text()).toContain('需要审核')
+    expect(duplicateRules.text()).toContain('免审核')
+    expect(duplicateRules.findAll('.material-duplicate-rule-row')).toHaveLength(3)
+    expect(duplicateRules.findAll('.material-approval-rule-control')).toHaveLength(3)
+    expect(wrapper.find('.material-approval-settings').exists()).toBe(false)
 
-    await rules.findAll('button').find(button => button.text().includes('保存查重规则'))!.trigger('click')
+    await duplicateRules.findAll('button').find(button => button.text().includes('保存规则'))!.trigger('click')
     await flushPromises()
 
     expect(api.updateMaterialDuplicateRules).toHaveBeenCalledWith([
       { categoryCode: '0101', fields: ['Specification', 'Brand'] },
       { categoryCode: '0102', fields: ['Specification', 'Brand'] },
       { categoryCode: '0204', fields: ['Name', 'Specification'] },
+    ], 'token')
+    expect(api.updateMaterialApprovalRules).toHaveBeenCalledWith([
+      { categoryCode: '0101', requiresApproval: true },
+      { categoryCode: '0102', requiresApproval: true },
+      { categoryCode: '0204', requiresApproval: false },
     ], 'token')
   })
 

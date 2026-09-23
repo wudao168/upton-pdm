@@ -340,6 +340,7 @@ describe('ReleaseCenter', () => {
 
     expect(wrapper.get('.pdm-release-draft-actions .pdm-primary-action').attributes()).toHaveProperty('disabled')
     expect(wrapper.text()).toContain('当前发布范围包含未完成当前版本图纸审核的非标件')
+    await wrapper.get('input[aria-label="整包需求日期"]').setValue('2026-10-01')
     await wrapper.get('input[aria-label="本次发布物料 NS-201"]').setValue(false)
     expect(wrapper.get('.pdm-release-draft-actions .pdm-primary-action').attributes('disabled')).toBeUndefined()
     await wrapper.get('.pdm-release-draft-actions .pdm-primary-action').trigger('submit')

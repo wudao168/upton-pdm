@@ -98,7 +98,9 @@ describe('ValidationPlanManager', () => {
     const uploadActions = wrapper.findAll<HTMLButtonElement>('.validation-plan__upload-action')
     expect(uploadActions).toHaveLength(2)
     expect(uploadActions.every(button => button.element.disabled)).toBe(true)
-    await wrapper.findAll('button').find(button => button.text().includes('选取内容'))!.trigger('click')
+    const emptySelectButton = wrapper.get('.validation-plan__empty .pdm-primary-action')
+    expect(emptySelectButton.text()).toBe('选取内容')
+    await emptySelectButton.trigger('click')
     await flushPromises()
 
     const checkbox = document.querySelector<HTMLInputElement>('.validation-selector__items input[type="checkbox"]')!
@@ -153,13 +155,14 @@ describe('ValidationPlanManager', () => {
     await flushPromises()
 
     expect(wrapper.findAll('.validation-plan__table th').map(cell => cell.text())).toEqual([
-      '序号', '分类', '验证内容', '信息来源', '验证日期', '责任人', '结果', '审核人', '备注', '操作',
+      '序号', '分类', '验证内容', '验证标准', '信息来源', '验证日期', '责任人', '结果', '审核人', '备注', '操作',
     ])
+    await wrapper.find<HTMLInputElement>('input[placeholder="填写验证标准"]').setValue('安全门关闭后方可启动')
     await wrapper.find<HTMLInputElement>('input[placeholder="审核人"]').setValue('李审核')
     await wrapper.findAll('button').find(button => button.text().includes('保存'))!.trigger('click')
     await flushPromises()
     expect(api.saveProjectValidationPlan).toHaveBeenCalledWith('project-1', expect.objectContaining({
-      items: [expect.objectContaining({ reviewer: '李审核' })],
+      items: [expect.objectContaining({ validationStandard: '安全门关闭后方可启动', reviewer: '李审核' })],
     }), 'token')
     wrapper.unmount()
   })

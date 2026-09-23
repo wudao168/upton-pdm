@@ -427,6 +427,23 @@ public sealed partial class MySqlPdmRepository
         return await FindProjectAsync(projectId, cancellationToken) ?? throw new PdmNotFoundException("项目不存在。");
     }
 
+    public async Task<Project> SetProjectPhaseOwnersAsync(Guid projectId, IReadOnlyDictionary<string, string> phaseOwners, string actor, CancellationToken cancellationToken)
+    {
+        var now = timeProvider.GetUtcNow().UtcDateTime;
+        await using var connection = await OpenAsync(cancellationToken);
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+        var exists = await connection.ExecuteScalarAsync<int>(new CommandDefinition(
+            "SELECT COUNT(*) FROM project WHERE id=@ProjectId FOR UPDATE", new { ProjectId = projectId }, transaction, cancellationToken: cancellationToken));
+        if (exists == 0) throw new PdmNotFoundException("项目不存在。");
+        await connection.ExecuteAsync(new CommandDefinition(
+            "DELETE FROM project_assignment WHERE project_id=@ProjectId AND assignment_type LIKE 'PhaseOwner:%'", new { ProjectId = projectId }, transaction, cancellationToken: cancellationToken));
+        await connection.ExecuteAsync(new CommandDefinition(
+            "INSERT INTO project_assignment(project_id,username,assignment_type,assigned_by,assigned_at) VALUES(@ProjectId,@Username,@Type,@Actor,@Now)",
+            phaseOwners.Select(item => new { ProjectId = projectId, Username = item.Value, Type = $"PhaseOwner:{item.Key}", Actor = actor, Now = now }), transaction, cancellationToken: cancellationToken));
+        await transaction.CommitAsync(cancellationToken);
+        return await FindProjectAsync(projectId, cancellationToken) ?? throw new PdmNotFoundException("项目不存在。");
+    }
+
     public async Task<Project> SetChildProjectManagerAsync(Guid projectId, string projectManager, string actor, CancellationToken cancellationToken)
     {
         var now = timeProvider.GetUtcNow().UtcDateTime;

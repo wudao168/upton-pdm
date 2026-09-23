@@ -28,6 +28,7 @@ public static class PermissionCodes
     public const string DrawingReviewAnnotate = "drawing-review.annotate";
     public const string DrawingReviewDecide = "drawing-review.decide";
     public const string ReleaseManage = "release.manage";
+    public const string ProductionDrawingManage = "production.drawing.manage";
     public const string ApprovalDecide = "approval.decide";
     public const string ApprovalEmergencySubstitute = "approval.emergency-substitute";
     public const string ProgramTemplateView = "program-template.view";
@@ -79,6 +80,7 @@ public static class RolePermissionCatalog
         new(PermissionCodes.DrawingReviewAnnotate, "添加和处理图纸批注", "图纸审核"),
         new(PermissionCodes.DrawingReviewDecide, "审核2D图纸", "图纸审核", "设计者不能审核自己生成的2D图纸版本。", Sensitive: true),
         new(PermissionCodes.ReleaseManage, "创建并提交发布包", "审批发布", Sensitive: true),
+        new(PermissionCodes.ProductionDrawingManage, "调整生产图纸发图信息", "审批发布", "仅调整紧急程度和需求日期，不改变图纸版本。", Sensitive: true),
         new(PermissionCodes.ApprovalDecide, "处理发布审批", "审批发布", Sensitive: true),
         new(PermissionCodes.ApprovalEmergencySubstitute, "紧急代批当前节点", "审批发布", "仅在紧急情况下替代当前审批人，必须填写原因，后续节点仍正常流转。", Sensitive: true),
         new(PermissionCodes.ProgramTemplateView, "查看和下载程序模板", "程序模板", "查看集团已发布的PLC、HMI程序模板。"),
@@ -188,8 +190,8 @@ public static class RolePermissionCatalog
             ["SupplyChain"] = Defaults[UserRole.ProductionViewer],
             ["ProcurementSpecialist"] = Defaults[UserRole.ProductionViewer],
             ["ProcurementManager"] = Set(PermissionCodes.ProjectView, PermissionCodes.ProjectContentView, PermissionCodes.DrawingReviewAnnotate, PermissionCodes.DrawingReviewDecide, PermissionCodes.ApprovalDecide, PermissionCodes.ProgramTemplateView, PermissionCodes.ProgramTemplateApprove, PermissionCodes.StandardLibraryView),
-            ["ProductionManager"] = Set(PermissionCodes.ProjectView, PermissionCodes.ProjectContentView, PermissionCodes.DrawingReviewAnnotate, PermissionCodes.DrawingReviewDecide, PermissionCodes.ApprovalDecide, PermissionCodes.ProgramTemplateView, PermissionCodes.ProgramTemplateApprove, PermissionCodes.StandardLibraryView),
-            ["ProductionAssistant"] = Defaults[UserRole.ProductionViewer],
+            ["ProductionManager"] = Set(PermissionCodes.ProjectView, PermissionCodes.ProjectContentView, PermissionCodes.DrawingReviewAnnotate, PermissionCodes.DrawingReviewDecide, PermissionCodes.ApprovalDecide, PermissionCodes.ProductionDrawingManage, PermissionCodes.ProgramTemplateView, PermissionCodes.ProgramTemplateApprove, PermissionCodes.StandardLibraryView),
+            ["ProductionAssistant"] = Set(PermissionCodes.ProjectView, PermissionCodes.ProjectContentView, PermissionCodes.ProductionDrawingManage, PermissionCodes.ProgramTemplateView),
             ["MachiningSupervisor"] = Defaults[UserRole.ProductionViewer],
             ["MachiningOperator"] = Defaults[UserRole.ProductionViewer],
             ["AssemblySupervisor"] = Defaults[UserRole.ProductionViewer],

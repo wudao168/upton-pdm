@@ -4,6 +4,8 @@ export type DocumentFilter = 'all' | 'model' | 'drawing' | 'issue'
 export type VersionAlignmentStatus = 'Synced' | 'StructureStale' | 'VersionConflict' | 'NotSnapshotted'
 export type PreviewMode = 'model' | 'drawing'
 export type SolidWorksOpenMode = 'LatestReadOnly' | 'LatestReleased' | 'LatestEdit' | 'SpecificReadOnly' | 'PropertyWriteback'
+export type ProjectPhaseOwnerKey = 'StandardProcurement' | 'NonStandardProcurement' | 'NonStandardProduction' | 'MechanicalAssembly' | 'ElectricalAssembly' | 'ElectricalCommissioning' | 'Acceptance'
+export type ProjectPhaseOwners = Partial<Record<ProjectPhaseOwnerKey, string>>
 
 export interface ProjectSummary {
   id: string
@@ -38,6 +40,7 @@ export interface ProjectSummary {
   designLead?: string
   designLeads?: string[]
   designers: string[]
+  phaseOwners?: ProjectPhaseOwners
   documentCount?: number
   modelDocumentCount?: number
   drawingDocumentCount?: number
@@ -971,6 +974,17 @@ export interface ReleaseItemComment {
 }
 
 export type ReleaseScope = 'LegacyCombined' | 'StandardLongLead' | 'StandardFormal' | 'StandardSupplement' | 'ElectricalFormal' | 'ElectricalSupplement' | 'NonStandardWithDrawing' | 'NonStandardLongLead' | 'NonStandardSupplement' | 'ElectricalLongLead'
+export type DrawingPriority = 'Normal' | 'Priority' | 'Urgent'
+export interface DrawingDeliveryOverride { priority: DrawingPriority; requiredOn: string }
+export interface ProductionDrawingItem {
+  projectId: string; projectCode: string; projectName: string
+  publishedBy?: string | null; division?: string | null; projectManager?: string | null
+  documentId: string; versionId: string; releasePackageId: string; releasePackageNumber: string
+  drawingNumber: string; model: string; name: string; revision: string; publishedAt: string
+  priority: DrawingPriority; requiredOn?: string | null; isCurrent: boolean; pdfReady: boolean
+  legacyUnverified: boolean; supersededAt?: string | null
+  bomItems?: BomItem[]
+}
 
 export interface CreateReleasePackageInput {
   changeReason: string
@@ -978,6 +992,9 @@ export interface CreateReleasePackageInput {
   selectedBomItemIds: string[]
   selectedBomItemQuantities?: Record<string, number>
   wholeSetMultiplier: number
+  drawingPriority?: DrawingPriority
+  drawingRequiredOn?: string | null
+  drawingDeliveryOverrides?: Record<string, DrawingDeliveryOverride>
 }
 
 export interface UpdateReleasePackageDraftInput {
@@ -985,6 +1002,9 @@ export interface UpdateReleasePackageDraftInput {
   selectedBomItemIds: string[]
   selectedBomItemQuantities?: Record<string, number>
   wholeSetMultiplier?: number
+  drawingPriority?: DrawingPriority
+  drawingRequiredOn?: string | null
+  drawingDeliveryOverrides?: Record<string, DrawingDeliveryOverride>
 }
 
 export interface ReleasePackageSummary {
@@ -1021,6 +1041,9 @@ export interface ReleasePackageSummary {
   createsManufacturingBaseline: boolean
   locksDocuments: boolean
   wholeSetMultiplier?: number
+  drawingPriority?: DrawingPriority
+  drawingRequiredOn?: string | null
+  drawingDeliveryOverrides?: Record<string, DrawingDeliveryOverride>
   changeReasonSelections?: ReleaseChangeReasonSelection[]
   formalSupplementPolicySnapshotted?: boolean
   formalSupplementMaximumCount?: number | null
@@ -1638,6 +1661,11 @@ export interface MaterialCategory {
 export interface MaterialNumberingSettings {
   startSequence: number
   sequenceLength: number
+}
+
+export interface MaterialApprovalRule {
+  categoryCode: string
+  requiresApproval: boolean
 }
 
 export interface MaterialRemovalResult {
@@ -2385,6 +2413,7 @@ export interface ProjectValidationPlanItem {
   catalogItemId?: string | null
   categoryName: string
   validationContent: string
+  validationStandard?: string | null
   informationSource?: string | null
   validationDate?: string | null
   result?: string | null
@@ -2547,6 +2576,7 @@ export interface SaveProjectValidationPlanInput {
   items: Array<{
     catalogItemId?: string | null
     validationContent?: string | null
+    validationStandard?: string | null
     informationSource?: string | null
     validationDate?: string | null
     result?: string | null

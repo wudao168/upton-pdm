@@ -2,7 +2,7 @@
 import { computed, ref, watch } from 'vue'
 import { addReleaseItemComment, listApprovalTransferCandidates, listReleaseItemComments } from '../api'
 import { releasePreviewStateLabel } from '../releasePreviewState'
-import type { ApprovalTransferCandidate, BomItem, CreateReleasePackageInput, DrawingReviewCandidate, DrawingReviewPackage, FormalSupplementPolicies, ReleaseItemComment, ReleasePackageSummary, ReleaseScope, UpdateReleasePackageDraftInput } from '../types'
+import type { ApprovalTransferCandidate, BomItem, CreateReleasePackageInput, DrawingDeliveryOverride, DrawingPriority, DrawingReviewCandidate, DrawingReviewPackage, FormalSupplementPolicies, ReleaseItemComment, ReleasePackageSummary, ReleaseScope, UpdateReleasePackageDraftInput } from '../types'
 import { useUserDisplayName } from '../userDisplay'
 
 const displayUserName = useUserDisplayName()
@@ -90,6 +90,19 @@ const changeReasonGroups = [
   { category: '其他', reasons: [{ label: '其他', value: '其他' }] },
 ]
 const scope = ref<Exclude<ReleaseScope, 'LegacyCombined'>>('StandardLongLead')
+const drawingPriority = ref<DrawingPriority>('Normal')
+const drawingRequiredOn = ref('')
+const drawingOverrides = ref<Record<string, DrawingDeliveryOverride>>({})
+const drawingScope = computed(() => scope.value === 'NonStandardWithDrawing' || scope.value === 'NonStandardSupplement')
+const selectedDrawingCandidates = computed(() => {
+  const selected = new Set(selectedScopedBomItemIds.value ?? [])
+  return props.drawingReviewCandidates.filter(candidate => candidate.drawingDocumentId
+    && candidate.bomItemId && selected.has(candidate.bomItemId))
+    .filter((candidate, index, all) => all.findIndex(item => item.drawingDocumentId === candidate.drawingDocumentId) === index)
+})
+function setDrawingOverride(id: string, priority: DrawingPriority, requiredOn: string) {
+  drawingOverrides.value = { ...drawingOverrides.value, [id]: { priority, requiredOn } }
+}
 const wholeSetMultiplier = ref(1)
 const selectedLongLeadKeys = ref<string[]>([])
 const selectedFormalKeys = ref<string[]>([])
@@ -430,6 +443,7 @@ const drawingReviewBlockMessage = computed(() => {
   return hasBlockedNonStandardDrawingReview.value ? '当前发布范围包含未完成当前版本图纸审核的非标件，完成审核后才可创建发布草稿。' : ''
 })
 const createDisabled = computed(() => props.pending
+  || drawingScope.value && !drawingRequiredOn.value
   || isLongLeadRelease.value && selectedBomItemIds.value.length === 0
   || isLongLeadRelease.value && hasInvalidLongLeadQuantity.value
   || isFormalRelease.value && selectedFormalBomItemIds.value.length === 0
@@ -594,6 +608,12 @@ function create() {
     selectedBomItemIds: selectedScopedBomItemIds.value ?? [],
     selectedBomItemQuantities: isLongLeadRelease.value ? selectedBomItemQuantities.value : undefined,
     wholeSetMultiplier: isLongLeadRelease.value ? 1 : Number(wholeSetMultiplier.value),
+    ...(drawingScope.value ? {
+      drawingPriority: drawingPriority.value,
+      drawingRequiredOn: drawingRequiredOn.value,
+      drawingDeliveryOverrides: Object.fromEntries(Object.entries(drawingOverrides.value)
+        .filter(([id]) => selectedDrawingCandidates.value.some(candidate => candidate.drawingDocumentId === id))),
+    } : {}),
   }
   if (editingDraft.value && props.releasePackage) {
     emit('updateDraft', props.releasePackage.id, {
@@ -601,6 +621,11 @@ function create() {
       selectedBomItemIds: input.selectedBomItemIds,
       selectedBomItemQuantities: input.selectedBomItemQuantities,
       wholeSetMultiplier: input.wholeSetMultiplier,
+      ...(drawingScope.value ? {
+        drawingPriority: input.drawingPriority,
+        drawingRequiredOn: input.drawingRequiredOn,
+        drawingDeliveryOverrides: input.drawingDeliveryOverrides,
+      } : {}),
     })
     editingDraft.value = false
     return
@@ -644,6 +669,9 @@ function startDraftEdit() {
   const releasePackage = props.releasePackage
   if (!releasePackage || releasePackage.state !== '草稿' || releasePackage.scope === 'LegacyCombined') return
   scope.value = releasePackage.scope
+  drawingPriority.value = releasePackage.drawingPriority ?? 'Normal'
+  drawingRequiredOn.value = releasePackage.drawingRequiredOn ?? ''
+  drawingOverrides.value = { ...releasePackage.drawingDeliveryOverrides }
   releaseNote.value = isSupplementScope(releasePackage.scope) ? '' : releasePackage.changeReason || ''
   selectedChangeReasons.value = []
   otherChangeReason.value = ''
@@ -826,7 +854,7 @@ async function saveItemComment() {
   <section class="pdm-panel pdm-manager-panel release-center" aria-label="审批与生产发包">
     <p v-if="error" class="pdm-inline-error" role="alert">{{ error }}</p>
     <form v-if="canManage && (!releasePackage || editingDraft)" class="pdm-form-grid pdm-release-create-form" @submit.prevent="create">
-      <section class="pdm-release-create-header" aria-label="发布参数">
+      <section class="pdm-release-create-header" :class="{ 'has-drawing-delivery': drawingScope }" aria-label="发布参数">
         <div class="pdm-release-type-row">
           <label>发布类型
             <select v-model="scope" :disabled="editingDraft" aria-label="发布类型">
@@ -835,6 +863,12 @@ async function saveItemComment() {
           </label>
           <label v-if="!isLongLeadRelease" title="仅影响本发布包的输出数量，与项目及子项目数量无关">整套倍率
             <input v-model.number="wholeSetMultiplier" type="number" min="1" max="1000" step="1" aria-label="整套倍率">
+          </label>
+          <label v-if="drawingScope">整包紧急程度
+            <select v-model="drawingPriority" aria-label="整包紧急程度"><option value="Normal">普通</option><option value="Priority">优先</option><option value="Urgent">紧急</option></select>
+          </label>
+          <label v-if="drawingScope">整包需求日期
+            <input v-model="drawingRequiredOn" type="date" required aria-label="整包需求日期">
           </label>
           <div class="pdm-release-draft-actions">
             <button v-if="editingDraft" type="button" class="pdm-secondary-action" :disabled="pending" @click="editingDraft = false">取消编辑</button>
@@ -863,6 +897,16 @@ async function saveItemComment() {
             </div>
             <p v-if="selectedChangeReasons.length" class="release-change-reason-summary"><strong>已选：</strong>{{ changeReasonSummary }}</p>
           </fieldset>
+        </div>
+      </section>
+      <section v-if="drawingScope && selectedDrawingCandidates.length" class="pdm-drawing-delivery-overrides" aria-label="逐张图发图信息">
+        <strong>逐张图调整（不填则沿用整包设置）</strong>
+        <div v-for="candidate in selectedDrawingCandidates" :key="candidate.drawingDocumentId!" class="pdm-drawing-delivery-row">
+          <span>{{ candidate.drawingNumber }} · {{ candidate.name }}</span>
+          <select :value="drawingOverrides[candidate.drawingDocumentId!]?.priority ?? drawingPriority" :aria-label="`${candidate.drawingNumber}紧急程度`" @change="setDrawingOverride(candidate.drawingDocumentId!, ($event.target as HTMLSelectElement).value as DrawingPriority, drawingOverrides[candidate.drawingDocumentId!]?.requiredOn ?? drawingRequiredOn)">
+            <option value="Normal">普通</option><option value="Priority">优先</option><option value="Urgent">紧急</option>
+          </select>
+          <input type="date" :value="drawingOverrides[candidate.drawingDocumentId!]?.requiredOn ?? drawingRequiredOn" :aria-label="`${candidate.drawingNumber}需求日期`" @change="setDrawingOverride(candidate.drawingDocumentId!, drawingOverrides[candidate.drawingDocumentId!]?.priority ?? drawingPriority, ($event.target as HTMLInputElement).value)">
         </div>
       </section>
       <fieldset class="release-detail-picker">
@@ -1123,4 +1167,8 @@ async function saveItemComment() {
 .pdm-release-frozen-table.is-change-view .release-change-tag{padding:0 3px;white-space:nowrap}
 .release-status-tag.is-blocked{background:#fff7ed;color:var(--pdm-orange);font-weight:600}
 .pdm-release-parameter-slot>.pdm-inline-warning{margin:0 0 6px;padding:6px 8px;border-radius:5px;background:#fff7ed;color:var(--pdm-orange)}
+.pdm-drawing-delivery-overrides{grid-column:1/-1;display:grid;gap:6px;padding:10px;border:1px solid var(--pdm-border);border-radius:7px;background:var(--pdm-surface-soft)}
+.pdm-release-create-header.has-drawing-delivery{grid-template-rows:auto minmax(82px,auto);min-height:210px}.pdm-release-create-header.has-drawing-delivery .pdm-release-type-row{row-gap:8px}
+.pdm-drawing-delivery-row{display:grid;grid-template-columns:minmax(160px,1fr) 110px 145px;gap:8px;align-items:center}.pdm-drawing-delivery-row span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.pdm-drawing-delivery-row input,.pdm-drawing-delivery-row select{width:100%;box-sizing:border-box}
+@media(max-width:700px){.pdm-drawing-delivery-row{grid-template-columns:1fr 1fr}.pdm-drawing-delivery-row span{grid-column:1/-1}}
 </style>

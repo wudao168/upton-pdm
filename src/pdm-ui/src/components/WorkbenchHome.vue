@@ -3,7 +3,7 @@ import { Boxes, CalendarRange, CheckCircle2, ChevronRight, ClipboardCopy, Folder
 import { getMaterialRelationCompleteness, getProjectProcurementTracking, readProjectPlanPortfolio, readProjectValidationPlan } from '../api'
 import { ElMessage } from '../statusMessage'
 import { computed, reactive, ref, watch } from 'vue'
-import type { DocumentNode, DrawingReviewPackage, DrawingReviewTarget, MainProjectStaffingInput, MaterialCodeApplication, MaterialRelationCompleteness, OrganizationDirectory, PdmUser, ProjectPlanPortfolio, ProjectPlanTask, ProjectProcurementTrackingResult, ProjectSummary, ProjectValidationPlan, ReleasePackageSummary, ReleaseScope } from '../types'
+import type { DocumentNode, DrawingReviewPackage, DrawingReviewTarget, MainProjectStaffingInput, MaterialCodeApplication, MaterialRelationCompleteness, OrganizationDirectory, PdmUser, ProjectPhaseOwnerKey, ProjectPhaseOwners, ProjectPlanPortfolio, ProjectPlanTask, ProjectProcurementTrackingResult, ProjectSummary, ProjectValidationPlan, ReleasePackageSummary, ReleaseScope } from '../types'
 
 const props = defineProps<{
   project: ProjectSummary
@@ -31,7 +31,7 @@ const props = defineProps<{
   pending: boolean
   token: string
   onUpdateMainStaffing: (projectId: string, input: MainProjectStaffingInput) => Promise<ProjectSummary>
-  onUpdateDesigners: (projectId: string, designers: string[]) => Promise<ProjectSummary>
+  onUpdatePhaseOwners: (projectId: string, phaseOwners: ProjectPhaseOwners) => Promise<ProjectSummary>
 }>()
 
 const emit = defineEmits<{ documents: []; bom: []; projectPlan: []; validationPlan: []; procurement: []; release: [] }>()
@@ -43,14 +43,24 @@ const rootProject = computed(() => {
 })
 
 const staffingDialogOpen = ref(false)
-const designerDialogOpen = ref(false)
+const phaseOwnerDrawerOpen = ref(false)
 const planPortfolio = ref<ProjectPlanPortfolio | null>(null)
 const validationPlan = ref<ProjectValidationPlan | null>(null)
 const relationCompleteness = ref<MaterialRelationCompleteness | null>(null)
 const procurementTracking = ref<ProjectProcurementTrackingResult | null>(null)
 let overviewRequestId = 0
 const staffingForm = reactive<MainProjectStaffingInput>({ primaryProjectManager: '', collaborativeProjectManagers: [], designLeads: [] })
-const designerDraft = ref<string[]>([])
+const phaseOwnerDraft = reactive<ProjectPhaseOwners>({})
+
+const phaseOwnerDefinitions: Array<{ key: ProjectPhaseOwnerKey; label: string; detail: string; preferredRoles: string[] }> = [
+  { key: 'StandardProcurement', label: '标准件采购', detail: '标准件询价、下单与到货协调', preferredRoles: ['ProcurementSpecialist', 'ProcurementManager', 'SupplyChain'] },
+  { key: 'NonStandardProcurement', label: '非标件采购', detail: '非标件外协采购与交付跟进', preferredRoles: ['ProcurementSpecialist', 'ProcurementManager', 'SupplyChain'] },
+  { key: 'NonStandardProduction', label: '非标件生产', detail: '机加、自制与外协生产协调', preferredRoles: ['ProductionManager', 'ProductionAssistant', 'MachiningSupervisor'] },
+  { key: 'MechanicalAssembly', label: '机械装配', detail: '机械装配排程与现场协调', preferredRoles: ['AssemblySupervisor', 'AssemblyFitter', 'MechanicalManager'] },
+  { key: 'ElectricalAssembly', label: '电气装配', detail: '电气接线与装配协调', preferredRoles: ['ElectricalSupervisor', 'AssemblyElectrician', 'ElectricalEngineer'] },
+  { key: 'ElectricalCommissioning', label: '电气调试', detail: '电气调试与问题闭环', preferredRoles: ['CommissioningEngineer', 'ElectricalEngineer'] },
+  { key: 'Acceptance', label: '验收', detail: '客户验收、整改与交付协调', preferredRoles: ['ProjectManager', 'ProductionManager', 'BusinessUnitManager'] },
+]
 
 function projectDesignLeads(project: ProjectSummary) {
   return project.designLeads?.length ? project.designLeads : project.designLead ? [project.designLead] : []
@@ -87,31 +97,28 @@ function usersInExecutionUnit(role: string) {
 
 const projectManagerCandidates = computed(() => usersInExecutionUnit('ProjectManager'))
 const designLeadCandidates = computed(() => usersInExecutionUnit('Engineer'))
-const designerCandidates = computed(() => {
+const phaseOwnerCandidates = computed(() => {
   const organizationId = props.project.organizationId ?? rootProject.value.organizationId
   if (!organizationId) return []
-  const ownDivisionId = divisionOfUser(props.currentUsername ?? '')?.id
   const companyUnitIds = new Set(props.organizationDirectory.units.filter(unit => unit.organizationId === organizationId && unit.isActive).map(unit => unit.id))
   const usernames = new Set(props.organizationDirectory.memberships.filter(item => companyUnitIds.has(item.unitId)).map(item => item.username))
-  const technicalRoles = new Set(['Engineer', 'ElectricalEngineer', 'CommissioningEngineer', 'HardwareEngineer', 'MechanicalManager', 'TechnicalAssistant', 'ProcessReviewer', 'Approver'])
-  const isTechnicalUser = (user: PdmUser) => {
-    const roles = [user.role, ...(user.roles ?? [])]
-    if (!roles.some(role => technicalRoles.has(role))) return false
-    return props.organizationDirectory.memberships.filter(item => item.username === user.username).some(item => {
-      const unit = props.organizationDirectory.units.find(candidate => candidate.id === item.unitId)
-      const name = unit?.name ?? ''
-      return /机械|电气|硬件|标准化|技术|设计|研发/.test(name) || unit?.kind === 'BusinessDivision' && !/采购|供应链|生产|装配|机加|财务|行政|人事部|销售|计划|质量|仓储|物流/.test(name)
-    })
-  }
   return props.organizationDirectory.users
-    .filter(user => user.isActive && usernames.has(user.username) && isTechnicalUser(user))
+    .filter(user => user.isActive && usernames.has(user.username))
     .map(user => {
       const division = divisionOfUser(user.username)
-      return { ...user, divisionName: division?.name ?? '未归属事业部', ownDivision: division?.id === ownDivisionId }
+      return { ...user, divisionName: division?.name ?? '未归属事业部' }
     })
-    .sort((left, right) => Number(right.ownDivision) - Number(left.ownDivision) || left.divisionName.localeCompare(right.divisionName, 'zh-CN') || left.displayName.localeCompare(right.displayName, 'zh-CN'))
+    .sort((left, right) => left.divisionName.localeCompare(right.divisionName, 'zh-CN') || left.displayName.localeCompare(right.displayName, 'zh-CN'))
 })
-const hasCrossDivisionSelection = computed(() => designerCandidates.value.some(user => designerDraft.value.includes(user.username) && !user.ownDivision))
+
+function preferredPhaseCandidates(preferredRoles: string[]) {
+  return phaseOwnerCandidates.value.filter(user => [user.role, ...(user.roles ?? [])].some(role => preferredRoles.includes(role)))
+}
+
+function otherPhaseCandidates(preferredRoles: string[]) {
+  const preferred = new Set(preferredPhaseCandidates(preferredRoles).map(user => user.username))
+  return phaseOwnerCandidates.value.filter(user => !preferred.has(user.username))
+}
 
 async function loadOperationalSummary() {
   const requestId = ++overviewRequestId
@@ -145,9 +152,9 @@ function openStaffingDialog() {
   staffingDialogOpen.value = true
 }
 
-function openDesignerDialog() {
-  designerDraft.value = [...activeProject.value.designers]
-  designerDialogOpen.value = true
+function openPhaseOwnerDrawer() {
+  for (const phase of phaseOwnerDefinitions) phaseOwnerDraft[phase.key] = activeProject.value.phaseOwners?.[phase.key] ?? ''
+  phaseOwnerDrawerOpen.value = true
 }
 
 async function saveMainStaffing() {
@@ -163,12 +170,12 @@ async function saveMainStaffing() {
   } catch (error) { ElMessage.error(error instanceof Error ? error.message : '主项目分工保存失败') }
 }
 
-async function saveDesigners() {
+async function savePhaseOwners() {
   try {
-    await props.onUpdateDesigners(activeProject.value.id, [...designerDraft.value])
-    designerDialogOpen.value = false
-    ElMessage.success(designerDraft.value.length ? '执行工程师已保存' : '执行工程师已清空')
-  } catch (error) { ElMessage.error(error instanceof Error ? error.message : '执行工程师保存失败') }
+    await props.onUpdatePhaseOwners(activeProject.value.id, { ...phaseOwnerDraft })
+    phaseOwnerDrawerOpen.value = false
+    ElMessage.success('阶段负责人已保存')
+  } catch (error) { ElMessage.error(error instanceof Error ? error.message : '阶段负责人保存失败') }
 }
 
 function assignedPeople(usernames: Array<string | undefined>) {
@@ -321,7 +328,11 @@ function taskState(task: ProjectPlanTask) {
   return { label: '未开始', tone: 'neutral' }
 }
 
-const teamRows = computed(() => staffingRows.value.filter(row => ['manager', 'design-lead', 'engineers'].includes(row.key)))
+const teamRows = computed(() => [
+  ...staffingRows.value.filter(row => ['manager', 'design-lead', 'engineers'].includes(row.key)),
+  ...phaseOwnerDefinitions.map(phase => ({ key: phase.key, role: phase.label, people: assignedPeople([activeProject.value.phaseOwners?.[phase.key]]) })),
+])
+const teamRowPairs = computed(() => Array.from({ length: Math.ceil(teamRows.value.length / 2) }, (_, index) => teamRows.value.slice(index * 2, index * 2 + 2)))
 const latestReleasePackage = computed(() => props.releasePackage ?? [...props.releasePackages]
   .sort((left, right) => (right.createdAt ?? '').localeCompare(left.createdAt ?? ''))[0] ?? null)
 const releaseApprovalText = computed(() => {
@@ -419,8 +430,8 @@ async function copyLocation(label: string, value: string) {
 
         <aside class="pdm-overview-support">
           <article class="pdm-panel pdm-overview-team" aria-label="项目团队">
-            <header><span><UsersRound :size="18" /></span><h2>项目团队</h2><span class="pdm-overview-team__actions"><button v-if="rootProject.canManageMainStaffing" type="button" class="pdm-text-action" @click="openStaffingDialog">配置分工</button><button v-if="activeProject.canAssignDesigners" type="button" class="pdm-text-action" @click="openDesignerDialog">配置工程师</button></span></header>
-            <dl><div v-for="row in teamRows" :key="row.key"><dt>{{ row.role }}</dt><dd :class="{ 'is-pending': !row.people.length }">{{ row.people.map(person => person.name).join('、') || '待分配' }}<small v-if="row.key === 'manager' && rootProject.executionUnitName">{{ rootProject.executionUnitName }}</small></dd></div></dl>
+            <header><span><UsersRound :size="18" /></span><h2>项目团队</h2><span class="pdm-overview-team__actions"><button v-if="rootProject.canManageMainStaffing" type="button" class="pdm-text-action" @click="openStaffingDialog">配置分工</button><button v-if="activeProject.canAssignDesigners" type="button" class="pdm-text-action" @click="openPhaseOwnerDrawer">配置负责人</button></span></header>
+            <div class="pdm-overview-team__table-wrap"><table class="pdm-overview-team__table"><thead><tr><th>职责</th><th>负责人</th><th>职责</th><th>负责人</th></tr></thead><tbody><tr v-for="pair in teamRowPairs" :key="pair[0]?.key"><template v-for="row in pair" :key="row.key"><td class="is-role">{{ row.role }}</td><td :class="{ 'is-pending': !row.people.length }">{{ row.people.map(person => person.name).join('、') || '待分配' }}</td></template></tr></tbody></table></div>
           </article>
 
           <article class="pdm-panel pdm-overview-locations" aria-label="项目位置">
@@ -440,11 +451,23 @@ async function copyLocation(label: string, value: string) {
       <template #footer><el-button @click="staffingDialogOpen=false">取消</el-button><el-button type="primary" :loading="pending" @click="saveMainStaffing">保存分工</el-button></template>
     </el-dialog>
 
-    <el-dialog v-model="designerDialogOpen" :title="`配置执行工程师 · ${project.code}`" width="500px" append-to-body>
-      <label class="pdm-dialog-field">工程师（可多选）<el-select v-model="designerDraft" class="pdm-project-person-select" multiple filterable placeholder="输入姓名筛选" style="width:100%"><el-option-group label="本事业部（优先）"><el-option v-for="user in designerCandidates.filter(item => item.ownDivision)" :key="user.username" :label="user.displayName" :value="user.username" /></el-option-group><el-option-group label="其他事业部"><el-option v-for="user in designerCandidates.filter(item => !item.ownDivision)" :key="user.username" :label="`${user.displayName} · ${user.divisionName}`" :value="user.username" /></el-option-group></el-select></label>
-      <p v-if="hasCrossDivisionSelection" class="pdm-dialog-note is-warning">已选择其他事业部人员，请确认跨事业部协作安排。</p>
-      <p class="pdm-dialog-note">工程师可保持为空；由具备“分配执行工程师”权限的事业部负责人、机械主管、当前项目经理或主设配置。</p>
-      <template #footer><el-button @click="designerDialogOpen=false">取消</el-button><el-button type="primary" :loading="pending" @click="saveDesigners">保存工程师</el-button></template>
-    </el-dialog>
+    <el-drawer v-model="phaseOwnerDrawerOpen" class="pdm-phase-owner-drawer" :title="`配置项目阶段负责人 · ${project.code}`" size="560px" append-to-body>
+      <div class="pdm-phase-owner-intro"><strong>按交付阶段明确单一负责人</strong><span>未分配的阶段可暂时留空，后续在此统一补充。</span></div>
+      <div class="pdm-phase-owner-list" aria-label="项目阶段负责人">
+        <label v-for="(phase, index) in phaseOwnerDefinitions" :key="phase.key" class="pdm-phase-owner-row">
+          <span class="pdm-phase-owner-row__index">{{ index + 1 }}</span>
+          <span class="pdm-phase-owner-row__copy"><strong>{{ phase.label }}</strong><small>{{ phase.detail }}</small></span>
+          <el-select v-model="phaseOwnerDraft[phase.key]" filterable clearable placeholder="选择负责人" :aria-label="`${phase.label}负责人`">
+            <el-option-group v-if="preferredPhaseCandidates(phase.preferredRoles).length" label="推荐岗位">
+              <el-option v-for="user in preferredPhaseCandidates(phase.preferredRoles)" :key="user.username" :label="`${user.displayName} · ${user.divisionName}`" :value="user.username" />
+            </el-option-group>
+            <el-option-group v-if="otherPhaseCandidates(phase.preferredRoles).length" label="其他人员">
+              <el-option v-for="user in otherPhaseCandidates(phase.preferredRoles)" :key="user.username" :label="`${user.displayName} · ${user.divisionName}`" :value="user.username" />
+            </el-option-group>
+          </el-select>
+        </label>
+      </div>
+      <template #footer><el-button @click="phaseOwnerDrawerOpen=false">取消</el-button><el-button type="primary" :loading="pending" @click="savePhaseOwners">保存负责人</el-button></template>
+    </el-drawer>
   </section>
 </template>

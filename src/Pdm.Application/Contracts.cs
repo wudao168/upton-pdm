@@ -114,12 +114,16 @@ public sealed record ReleasePreviewSource(
     string StorageRelativePath,
     long FileLength,
     string Sha256,
-    string SourceSha256);
+    string SourceSha256,
+    string ExpectedFormalRevision = "");
 
 public sealed record ReleasePublication(
     string PublishedPath,
     IReadOnlyDictionary<Guid, DocumentPreviewArtifact> Previews,
-    string? PreviewError = null);
+    string? PreviewError = null,
+    IReadOnlyDictionary<Guid, FormalDrawingSource>? FormalDrawings = null);
+
+public sealed record FormalDrawingSource(Guid SourceVersionId, string StorageRelativePath, long FileLength, string Sha256, string Revision, string QrContent);
 
 public sealed record DocumentCheckInResult(
     PdmDocument Document,
@@ -258,6 +262,8 @@ public sealed record SetMainProjectStaffingCommand(
     string PrimaryProjectManager,
     IReadOnlyList<string> CollaborativeProjectManagers,
     IReadOnlyList<string> DesignLeads);
+
+public sealed record SetProjectPhaseOwnersCommand(IReadOnlyDictionary<string, string> PhaseOwners);
 
 public sealed record BomItemInput(
     int Sequence,
@@ -460,6 +466,7 @@ public interface IPdmRepository
     Task<Project> SetMainProjectStaffingAsync(Guid projectId, SetMainProjectStaffingCommand command, string actor, CancellationToken cancellationToken);
     Task<Project> SetChildProjectManagerAsync(Guid projectId, string projectManager, string actor, CancellationToken cancellationToken);
     Task<Project> SetChildProjectDesignersAsync(Guid projectId, IReadOnlyList<string> designers, string actor, CancellationToken cancellationToken);
+    Task<Project> SetProjectPhaseOwnersAsync(Guid projectId, IReadOnlyDictionary<string, string> phaseOwners, string actor, CancellationToken cancellationToken);
     Task<Project> CreateNumberedProjectAsync(CreateNumberedProjectCommand command, CancellationToken cancellationToken);
     Task<Project> CreateSubprojectAsync(CreateSubprojectCommand command, CancellationToken cancellationToken);
     Task EnsureProjectFolderTreeAsync(Guid projectId, CancellationToken cancellationToken);
@@ -486,6 +493,8 @@ public interface IPdmRepository
     Task<bool> HasDocumentAccessAsync(Guid documentId, string actor, UserRole role, FolderAccess requiredAccess, CancellationToken cancellationToken);
     Task<IReadOnlyList<DocumentVersion>> ListDocumentVersionsAsync(Guid documentId, CancellationToken cancellationToken);
     Task<IReadOnlyList<DocumentVersion>> ListProjectDocumentVersionsAsync(Guid projectId, CancellationToken cancellationToken);
+    Task<IReadOnlyList<ProductionDrawingProject>> ListProductionDrawingProjectsAsync(string actor, UserRole role, CancellationToken cancellationToken);
+    Task<ReleasePackage> UpdatePublishedDrawingDeliveryAsync(Guid releasePackageId, Guid documentId, DrawingDeliveryOverride delivery, string actor, CancellationToken cancellationToken);
     Task<DocumentVersion?> FindDocumentVersionAsync(Guid documentId, Guid versionId, CancellationToken cancellationToken);
     Task<DocumentReferenceNode?> GetReferenceTreeAsync(Guid projectId, CancellationToken cancellationToken);
     Task<CadReferenceSnapshot?> GetLatestReferenceSnapshotAsync(Guid projectId, CancellationToken cancellationToken);
@@ -571,6 +580,7 @@ public interface IPdmRepository
         Guid approvalTaskId,
         string actor,
         IReadOnlyDictionary<Guid, DocumentPreviewArtifact> previews,
+        IReadOnlyDictionary<Guid, FormalDrawingSource> formalDrawings,
         CancellationToken cancellationToken);
     Task<ReleasePackage> CreateReleasePackageAsync(ReleasePackage package, CancellationToken cancellationToken);
     /// <summary>记录发布包的转图状态：转图与发布解耦，由后台单独重试并把结果反馈给相关人。</summary>
@@ -655,6 +665,12 @@ public interface IReleasePackagePublisher
 
 public interface IServerPreviewConverter
 {
+    Task<IReadOnlyDictionary<Guid, FormalDrawingSource>> FinalizeDrawingsAsync(
+        ReleasePackage package, Project project, IReadOnlyList<ReleasePreviewSource> sources,
+        string stagingDirectory, CancellationToken cancellationToken) =>
+        sources.Any(source => source.Kind == DocumentKind.Drawing)
+            ? throw new PdmRuleException("正式图纸生成器不可用，已停止图纸发布。")
+            : Task.FromResult<IReadOnlyDictionary<Guid, FormalDrawingSource>>(new Dictionary<Guid, FormalDrawingSource>());
     Task<IReadOnlyDictionary<Guid, DocumentPreviewArtifact>> GenerateAsync(
         ReleasePackage package,
         Project project,

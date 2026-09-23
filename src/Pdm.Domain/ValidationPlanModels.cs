@@ -60,7 +60,8 @@ public sealed record ProjectValidationPlanItem(
     string? Reviewer,
     string? ResponsiblePerson,
     string? Remark,
-    int SortOrder);
+    int SortOrder,
+    string? ValidationStandard = null);
 
 public sealed record ProjectValidationPlan(
     Guid Id,

@@ -608,6 +608,12 @@ public static class PdmEndpointExtensions
             return Results.Ok(await workflow.SetChildProjectDesignersAsync(projectId, request.Designers, actor, role, cancellationToken));
         });
 
+        api.MapPut("/projects/{projectId:guid}/phase-owners", async (Guid projectId, UpdateProjectPhaseOwnersRequest request, HttpContext context, PdmWorkflowService workflow, CancellationToken cancellationToken) =>
+        {
+            var (actor, role) = CurrentUser(context.User);
+            return Results.Ok(await workflow.SetProjectPhaseOwnersAsync(projectId, new(request.PhaseOwners), actor, role, cancellationToken));
+        });
+
         api.MapPut("/projects/{projectId:guid}/manager", async (Guid projectId, UpdateChildProjectManagerRequest request, HttpContext context, PdmWorkflowService workflow, CancellationToken cancellationToken) =>
         {
             var (actor, role) = CurrentUser(context.User);
@@ -736,6 +742,14 @@ public static class PdmEndpointExtensions
             var document = await repository.FindDocumentAsync(documentId, cancellationToken);
             var version = await repository.FindDocumentVersionAsync(documentId, versionId, cancellationToken);
             if (document is null || version?.Preview is null) return Results.NotFound();
+            if (document.Kind == DocumentKind.Drawing && version.Status == DocumentVersionStatus.Released
+                && version.SourceVersionId.HasValue)
+            {
+                var source = await repository.FindDocumentVersionAsync(documentId, version.SourceVersionId.Value, cancellationToken);
+                var legacy = source is null || string.Equals(source.StorageRelativePath, version.StorageRelativePath, StringComparison.OrdinalIgnoreCase);
+                if (!legacy && !string.Equals(version.Preview.SourceSha256, version.Sha256, StringComparison.OrdinalIgnoreCase))
+                    return Results.NotFound();
+            }
             var project = await repository.FindProjectAsync(document.ProjectId, cancellationToken);
             if (project is null) return Results.NotFound();
             await workflow.AuditVersionReadAsync(documentId, versionId, actor, role, "document.preview.read", cancellationToken);
@@ -744,6 +758,86 @@ public static class PdmEndpointExtensions
             var stream = await storage.OpenReadAsync(path, cancellationToken);
             var contentType = version.Preview.Format == DocumentPreviewFormat.Pdf ? "application/pdf" : "model/step";
             return Results.File(stream, contentType, enableRangeProcessing: true);
+        });
+
+        api.MapGet("/production-drawings", async (bool includeHistory, Guid? projectId, HttpContext context, ProductionDrawingService drawings, CancellationToken cancellationToken) =>
+        {
+            var (actor, role) = CurrentUser(context.User);
+            return Results.Ok(await drawings.ListAsync(actor, role, includeHistory, projectId, cancellationToken));
+        });
+
+        api.MapGet("/production-drawings/{versionId:guid}", async (Guid versionId, HttpContext context, ProductionDrawingService drawings, CancellationToken cancellationToken) =>
+        {
+            var (actor, role) = CurrentUser(context.User);
+            var item = (await drawings.ListAsync(actor, role, true, null, cancellationToken)).FirstOrDefault(value => value.VersionId == versionId);
+            return item is null ? Results.NotFound() : Results.Ok(item);
+        });
+
+        api.MapPost("/projects/{projectId:guid}/production-drawings/archive", async (
+            Guid projectId, ProductionDrawingArchiveRequest request, HttpContext context, ProductionDrawingService drawings,
+            IPdmRepository repository, IFileStorage storage, PdmWorkflowService workflow,
+            IOptions<PdmStorageOptions> storageOptions, TimeProvider timeProvider, CancellationToken cancellationToken) =>
+        {
+            var (actor, role) = CurrentUser(context.User);
+            var project = await repository.FindProjectAsync(projectId, cancellationToken);
+            if (project is null) return Results.NotFound();
+            if (!await repository.HasProjectContentReadAccessAsync(projectId, actor, role, cancellationToken)) return Results.Forbid();
+            var ids = (request.VersionIds ?? []).Where(id => id != Guid.Empty).Distinct().ToArray();
+            if (ids.Length == 0 || ids.Length > 200) return Results.BadRequest(new { detail = "请选择 1–200 张正式图纸。" });
+            if (request.Format is not ("Pdf" or "Source")) return Results.BadRequest(new { detail = "下载格式只能是 PDF 或正式源图。" });
+            var available = (await drawings.ListAsync(actor, role, true, projectId, cancellationToken))
+                .ToDictionary(item => item.VersionId);
+            if (ids.Any(id => !available.ContainsKey(id))) return Results.BadRequest(new { detail = "所选图纸包含不存在或无权访问的正式版本。" });
+            var items = ids.Select(id => available[id]).ToArray();
+            if (request.Format == "Pdf" && items.Any(item => !item.PdfReady))
+                return Results.BadRequest(new { detail = "所选图纸中有 PDF 待转换，不能用旧版替代。" });
+
+            var tempRoot = StorageLocationPolicy.Normalize(storageOptions.Value.UploadTempRoot);
+            Directory.CreateDirectory(tempRoot);
+            var archivePath = Path.Combine(tempRoot, $"production-drawings-{Guid.NewGuid():N}.zip");
+            var stream = new FileStream(archivePath, FileMode.Create, FileAccess.ReadWrite, FileShare.None, 128 * 1024, FileOptions.DeleteOnClose);
+            try
+            {
+                using (var archive = new ZipArchive(stream, ZipArchiveMode.Create, leaveOpen: true))
+                {
+                    foreach (var item in items)
+                    {
+                        var version = await repository.FindDocumentVersionAsync(item.DocumentId, item.VersionId, cancellationToken)
+                            ?? throw new PdmNotFoundException("正式图纸版本不存在。");
+                        var preview = request.Format == "Pdf" ? version.Preview : null;
+                        if (request.Format == "Pdf" && preview?.Format != DocumentPreviewFormat.Pdf)
+                            throw new PdmRuleException("所选图纸中有 PDF 待转换，不能用旧版替代。");
+                        await workflow.AuditVersionReadAsync(item.DocumentId, item.VersionId, actor, role,
+                            request.Format == "Pdf" ? "document.preview.read" : "document.version.download", cancellationToken);
+                        if (preview is not null) await storage.VerifyPreviewFileAsync(project, preview, cancellationToken);
+                        else await storage.VerifyStoredFileAsync(project,
+                            new StoredFile(version.StorageRelativePath, version.FileLength, version.Sha256, version.CreatedAt), cancellationToken);
+                        var relativePath = preview?.StorageRelativePath ?? version.StorageRelativePath;
+                        var extension = request.Format == "Pdf" ? ".pdf" : ".slddrw";
+                        var entryName = $"{SafeArchiveSegment(item.ReleasePackageNumber)}/{SafeArchiveSegment(item.DrawingNumber)}_{SafeArchiveSegment(item.Revision)}_{item.VersionId:N}{extension}";
+                        var entry = archive.CreateEntry(entryName, CompressionLevel.Fastest);
+                        await using var target = entry.Open();
+                        await using var source = await storage.OpenReadAsync(StorageLocationPolicy.ResolveUnder(project.VaultLocation, relativePath), cancellationToken);
+                        await source.CopyToAsync(target, cancellationToken);
+                    }
+                }
+            }
+            catch
+            {
+                await stream.DisposeAsync();
+                throw;
+            }
+            stream.Position = 0;
+            return Results.Stream(stream, "application/zip", $"生产图纸-{SafeArchiveSegment(project.Code)}-{timeProvider.GetLocalNow():yyyyMMdd-HHmmss}.zip");
+        });
+
+        api.MapPut("/production-drawings/{releasePackageId:guid}/{documentId:guid}/delivery", async (
+            Guid releasePackageId, Guid documentId, UpdateDrawingDeliveryRequest request,
+            HttpContext context, ProductionDrawingService drawings, CancellationToken cancellationToken) =>
+        {
+            var (actor, role) = CurrentUser(context.User);
+            return Results.Ok(await drawings.UpdateDeliveryAsync(releasePackageId, documentId,
+                new DrawingDeliveryOverride(request.Priority, request.RequiredOn), actor, role, cancellationToken));
         });
 
         api.MapGet("/documents/{documentId:guid}/versions/{versionId:guid}/markup", async (Guid documentId, Guid versionId, HttpContext context, IPdmRepository repository, PdmWorkflowService workflow, CancellationToken cancellationToken) =>
@@ -1293,6 +1387,8 @@ public static class PdmEndpointExtensions
         {
             var (actor, role) = CurrentUser(context.User);
             if (!await repository.HasProjectContentReadAccessAsync(request.ProjectId, actor, role, cancellationToken)) return Results.Forbid();
+            if (request.Scope is (ReleaseScope.NonStandardWithDrawing or ReleaseScope.NonStandardSupplement) && request.DrawingRequiredOn is null)
+                return Results.BadRequest(new { detail = "图纸发布必须填写生产需求日期。" });
             return Results.Ok(request.Scope == ReleaseScope.LegacyCombined
                 ? await workflow.CreateReleasePackageAsync(
                     request.ProjectId, request.ReferenceSnapshotId, request.Number ?? string.Empty,
@@ -1307,12 +1403,18 @@ public static class PdmEndpointExtensions
                     request.ChangeReason ?? string.Empty,
                     "未指定", null,
                     request.Scope, request.SelectedBomItemIds,
-                    actor, role, cancellationToken, request.SelectedBomItemQuantities, request.WholeSetMultiplier));
+                    actor, role, cancellationToken, request.SelectedBomItemQuantities, request.WholeSetMultiplier,
+                    request.DrawingPriority, request.DrawingRequiredOn, request.DrawingDeliveryOverrides));
         });
 
-        api.MapPut("/release-packages/{releasePackageId:guid}/draft", async (Guid releasePackageId, UpdateReleasePackageDraftRequest request, HttpContext context, PdmWorkflowService workflow, CancellationToken cancellationToken) =>
+        api.MapPut("/release-packages/{releasePackageId:guid}/draft", async (Guid releasePackageId, UpdateReleasePackageDraftRequest request, HttpContext context, IPdmRepository repository, PdmWorkflowService workflow, CancellationToken cancellationToken) =>
         {
             var (actor, role) = CurrentUser(context.User);
+            var package = await repository.FindReleasePackageAsync(releasePackageId, cancellationToken);
+            if (package is null) return Results.NotFound();
+            if (package.Scope is (ReleaseScope.NonStandardWithDrawing or ReleaseScope.NonStandardSupplement)
+                && (request.DrawingRequiredOn ?? package.DrawingRequiredOn) is null)
+                return Results.BadRequest(new { detail = "图纸发布必须填写生产需求日期。" });
             return Results.Ok(await workflow.UpdateReleasePackageDraftAsync(
                 releasePackageId,
                 request.ChangeReason,
@@ -1321,7 +1423,10 @@ public static class PdmEndpointExtensions
                 actor,
                 role,
                 cancellationToken,
-                request.WholeSetMultiplier));
+                request.WholeSetMultiplier,
+                request.DrawingPriority,
+                request.DrawingRequiredOn ?? package.DrawingRequiredOn,
+                request.DrawingDeliveryOverrides));
         });
 
         api.MapDelete("/release-packages/{releasePackageId:guid}/draft", async (Guid releasePackageId, HttpContext context, PdmWorkflowService workflow, CancellationToken cancellationToken) =>
@@ -1690,6 +1795,13 @@ public static class PdmEndpointExtensions
         if (string.IsNullOrEmpty(normalized)) return null;
         if (normalized.Length > maxLength) throw new PdmRuleException($"{fieldName}不能超过{maxLength}个字符。");
         return normalized;
+    }
+
+    private static string SafeArchiveSegment(string value)
+    {
+        var invalid = Path.GetInvalidFileNameChars();
+        var name = new string(value.Select(character => invalid.Contains(character) || character is '/' or '\\' ? '_' : character).ToArray());
+        return name is "." or ".." ? "_" : name;
     }
 
     private static string BomExportName(BomKind kind) => kind switch

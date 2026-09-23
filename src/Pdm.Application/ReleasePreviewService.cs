@@ -18,7 +18,7 @@ public sealed record ReleasePreviewItem(
     string? Error);
 
 /// <summary>
-/// 发布预览（转图）的独立处理：发布不再因转图失败而失败，转图作为单独事项由后台重试，
+/// 发布预览（PDF/STEP 转换）的独立处理：正式源图生成是发布前置条件，PDF/STEP 失败不阻断发布，
 /// 生成成功后补挂到正式版本并写入发布目录，结果通过站内消息反馈给相关人。
 /// </summary>
 public sealed class ReleasePreviewService(

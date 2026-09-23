@@ -277,7 +277,7 @@ public sealed partial class MySqlPdmRepository
                 standard_bom_revision, non_standard_bom_revision, standard_bom_snapshot_json, non_standard_bom_snapshot_json,
                 change_number, change_reason, change_reason_selections_json,
                 formal_supplement_policy_snapshotted, formal_supplement_maximum_count, formal_supplement_valid_days,
-                effective_serial_from, effective_serial_to,
+                effective_serial_from, effective_serial_to, drawing_priority, drawing_required_on, drawing_delivery_overrides_json,
                 published_at, published_path, publish_error, row_version, created_at)
             VALUES (
                 @Id, @ProjectId, @PackageNumber, @State, @Scope, @WorkflowCode, @WorkflowVersion,
@@ -288,7 +288,7 @@ public sealed partial class MySqlPdmRepository
                 @StandardBomRevision, @NonStandardBomRevision, @StandardBomSnapshot, @NonStandardBomSnapshot,
                 @ChangeNumber, @ChangeReason, @ChangeReasonSelections,
                 @FormalSupplementPolicySnapshotted, @FormalSupplementMaximumCount, @FormalSupplementValidDays,
-                @EffectiveSerialFrom, @EffectiveSerialTo,
+                @EffectiveSerialFrom, @EffectiveSerialTo, @DrawingPriority, @DrawingRequiredOn, @DrawingDeliveryOverrides,
                 NULL, NULL, NULL, 1, @CreatedAt)
             """,
             new
@@ -324,6 +324,9 @@ public sealed partial class MySqlPdmRepository
                 package.FormalSupplementValidDays,
                 package.EffectiveSerialFrom,
                 package.EffectiveSerialTo,
+                package.DrawingPriority,
+                DrawingRequiredOn = package.DrawingRequiredOn?.ToString("yyyy-MM-dd"),
+                DrawingDeliveryOverrides = JsonSerializer.Serialize(package.DrawingDeliveryOverrides, jsonOptions),
                 CreatedAt = package.CreatedAt.UtcDateTime
             },
             transaction,
@@ -366,6 +369,9 @@ public sealed partial class MySqlPdmRepository
                 formal_supplement_policy_snapshotted=@FormalSupplementPolicySnapshotted,
                 formal_supplement_maximum_count=@FormalSupplementMaximumCount,
                 formal_supplement_valid_days=@FormalSupplementValidDays,
+                drawing_priority=@DrawingPriority,
+                drawing_required_on=@DrawingRequiredOn,
+                drawing_delivery_overrides_json=@DrawingDeliveryOverrides,
                 whole_set_multiplier=@WholeSetMultiplier,
                 row_version=row_version+1
             WHERE id=@Id AND state='Draft'
@@ -388,6 +394,9 @@ public sealed partial class MySqlPdmRepository
                 package.FormalSupplementPolicySnapshotted,
                 package.FormalSupplementMaximumCount,
                 package.FormalSupplementValidDays,
+                package.DrawingPriority,
+                DrawingRequiredOn = package.DrawingRequiredOn?.ToString("yyyy-MM-dd"),
+                DrawingDeliveryOverrides = JsonSerializer.Serialize(package.DrawingDeliveryOverrides, jsonOptions),
                 package.WholeSetMultiplier
             },
             cancellationToken: cancellationToken));

@@ -130,6 +130,33 @@ public sealed class MySqlMaterialRepository : IMaterialRepository
         return rows.Select(MapMaterial).ToArray();
     }
 
+    public async Task<IReadOnlyList<PdmMaterial>> FindMaterialsByDuplicateFieldsAsync(
+        string? name,
+        string? specification,
+        string? brand,
+        IReadOnlyList<string> fields,
+        CancellationToken cancellationToken)
+    {
+        if (fields.Count == 0) return [];
+        var clauses = new List<string>(fields.Count);
+        foreach (var field in fields)
+        {
+            clauses.Add(field.ToUpperInvariant() switch
+            {
+                "NAME" => "UPPER(TRIM(name))=UPPER(TRIM(@Name))",
+                "SPECIFICATION" => "UPPER(TRIM(specification))=UPPER(TRIM(@Specification))",
+                "BRAND" => "UPPER(TRIM(brand))=UPPER(TRIM(@Brand))",
+                _ => throw new PdmRuleException("查重字段只支持名称、型号和品牌。")
+            });
+        }
+        await using var connection = await OpenAsync(cancellationToken);
+        var rows = await connection.QueryAsync<MaterialRow>(new CommandDefinition(
+            MaterialSelect + " WHERE " + string.Join(" AND ", clauses) + " ORDER BY material_code",
+            new { Name = name?.Trim(), Specification = specification?.Trim(), Brand = brand?.Trim() },
+            cancellationToken: cancellationToken));
+        return rows.Select(MapMaterial).ToArray();
+    }
+
     public async Task<PdmMaterial?> FindMaterialBySourceBomItemAsync(Guid bomItemId, CancellationToken cancellationToken)
     {
         await using var connection = await OpenAsync(cancellationToken);
@@ -375,6 +402,37 @@ public sealed class MySqlMaterialRepository : IMaterialRepository
             new { Value = startSequence.ToString(System.Globalization.CultureInfo.InvariantCulture), UpdatedAt = updatedAt.UtcDateTime },
             cancellationToken: cancellationToken));
         return startSequence;
+    }
+
+    public async Task<IReadOnlyList<MaterialApprovalRule>> GetMaterialApprovalRulesAsync(CancellationToken cancellationToken)
+    {
+        await using var connection = await OpenAsync(cancellationToken);
+        var value = await connection.QuerySingleOrDefaultAsync<string>(new CommandDefinition(
+            "SELECT setting_value FROM pdm_system_setting WHERE setting_key='material_approval_rules'",
+            cancellationToken: cancellationToken));
+        if (string.IsNullOrWhiteSpace(value)) return [];
+        try
+        {
+            return JsonSerializer.Deserialize<MaterialApprovalRule[]>(value, jsonOptions) ?? [];
+        }
+        catch (JsonException)
+        {
+            return [];
+        }
+    }
+
+    public async Task<IReadOnlyList<MaterialApprovalRule>> SaveMaterialApprovalRulesAsync(IReadOnlyList<MaterialApprovalRule> rules, DateTimeOffset updatedAt, CancellationToken cancellationToken)
+    {
+        await using var connection = await OpenAsync(cancellationToken);
+        await connection.ExecuteAsync(new CommandDefinition(
+            """
+            INSERT INTO pdm_system_setting(setting_key,setting_value,updated_at)
+            VALUES('material_approval_rules',@Value,@UpdatedAt)
+            ON DUPLICATE KEY UPDATE setting_value=VALUES(setting_value),updated_at=VALUES(updated_at)
+            """,
+            new { Value = JsonSerializer.Serialize(rules, jsonOptions), UpdatedAt = updatedAt.UtcDateTime },
+            cancellationToken: cancellationToken));
+        return rules;
     }
 
     public async Task<IReadOnlyList<MaterialDuplicateRule>> GetMaterialDuplicateRulesAsync(CancellationToken cancellationToken)

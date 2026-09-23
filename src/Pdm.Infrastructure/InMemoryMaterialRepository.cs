@@ -19,6 +19,7 @@ public sealed class InMemoryMaterialRepository : IMaterialRepository
     private readonly ConcurrentDictionary<string, MaterialCategory> categories = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, long> materialCodeCounters = new(StringComparer.OrdinalIgnoreCase);
     private long materialCodeStartSequence = 1_000_000;
+    private IReadOnlyList<MaterialApprovalRule> materialApprovalRules = [];
     private IReadOnlyList<MaterialDuplicateRule> materialDuplicateRules = [];
     private U9MaterialFullSyncRun? latestFullSyncRun;
     private U9MaterialIntegrationConfiguration configuration = new(
@@ -147,6 +148,32 @@ public sealed class InMemoryMaterialRepository : IMaterialRepository
     {
         var requested = materialCodes.Where(code => !string.IsNullOrWhiteSpace(code)).Select(code => code.Trim()).ToHashSet(StringComparer.OrdinalIgnoreCase);
         return Task.FromResult<IReadOnlyList<PdmMaterial>>(materials.Values.Where(item => requested.Contains(item.MaterialCode)).ToArray());
+    }
+
+    public Task<IReadOnlyList<PdmMaterial>> FindMaterialsByDuplicateFieldsAsync(
+        string? name,
+        string? specification,
+        string? brand,
+        IReadOnlyList<string> fields,
+        CancellationToken cancellationToken)
+    {
+        var result = materials.Values
+            .Where(item => fields.All(field => field.ToUpperInvariant() switch
+            {
+                "NAME" => SameDuplicateValue(item.Name, name),
+                "SPECIFICATION" => SameDuplicateValue(item.Specification, specification),
+                "BRAND" => SameDuplicateValue(item.Brand, brand),
+                _ => false
+            }))
+            .OrderBy(item => item.MaterialCode, StringComparer.OrdinalIgnoreCase)
+            .Select(WithCounts)
+            .ToArray();
+        return Task.FromResult<IReadOnlyList<PdmMaterial>>(result);
+
+        static bool SameDuplicateValue(string? left, string? right) =>
+            !string.IsNullOrWhiteSpace(left)
+            && !string.IsNullOrWhiteSpace(right)
+            && string.Equals(left.Trim(), right.Trim(), StringComparison.OrdinalIgnoreCase);
     }
 
     public Task<PdmMaterial?> FindMaterialBySourceBomItemAsync(Guid bomItemId, CancellationToken cancellationToken) =>
@@ -299,6 +326,20 @@ public sealed class InMemoryMaterialRepository : IMaterialRepository
         {
             materialCodeStartSequence = startSequence;
             return Task.FromResult(materialCodeStartSequence);
+        }
+    }
+
+    public Task<IReadOnlyList<MaterialApprovalRule>> GetMaterialApprovalRulesAsync(CancellationToken cancellationToken)
+    {
+        lock (gate) return Task.FromResult(materialApprovalRules);
+    }
+
+    public Task<IReadOnlyList<MaterialApprovalRule>> SaveMaterialApprovalRulesAsync(IReadOnlyList<MaterialApprovalRule> rules, DateTimeOffset updatedAt, CancellationToken cancellationToken)
+    {
+        lock (gate)
+        {
+            materialApprovalRules = rules.ToArray();
+            return Task.FromResult(materialApprovalRules);
         }
     }
 

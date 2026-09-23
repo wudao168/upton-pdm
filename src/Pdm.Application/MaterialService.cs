@@ -81,6 +81,47 @@ public sealed class MaterialService(
         return new(saved);
     }
 
+    public async Task<IReadOnlyList<MaterialApprovalRule>> GetApprovalRulesAsync(
+        string actor,
+        UserRole role,
+        CancellationToken cancellationToken)
+    {
+        await RequirePermissionAsync(actor, role, PermissionCodes.StorageSettingsManage, cancellationToken);
+        var saved = (await materials.GetMaterialApprovalRulesAsync(cancellationToken))
+            .ToDictionary(rule => rule.CategoryCode, StringComparer.OrdinalIgnoreCase);
+        return (await materials.ListCategoriesAsync(true, cancellationToken))
+            .Where(category => category.AllowCreate && category.IsActive && category.IsVisible && category.PdmKind is not null)
+            .OrderBy(category => category.SortOrder)
+            .ThenBy(category => category.Code, StringComparer.OrdinalIgnoreCase)
+            .Select(category => saved.TryGetValue(category.Code, out var rule)
+                ? rule with { CategoryCode = category.Code }
+                : DefaultApprovalRule(category.Code))
+            .ToArray();
+    }
+
+    public async Task<IReadOnlyList<MaterialApprovalRule>> UpdateApprovalRulesAsync(
+        IReadOnlyList<MaterialApprovalRule> rules,
+        string actor,
+        UserRole role,
+        CancellationToken cancellationToken)
+    {
+        await RequirePermissionAsync(actor, role, PermissionCodes.StorageSettingsManage, cancellationToken);
+        var creatableCategories = (await materials.ListCategoriesAsync(true, cancellationToken))
+            .Where(category => category.AllowCreate && category.IsActive && category.IsVisible && category.PdmKind is not null)
+            .ToDictionary(category => category.Code, StringComparer.OrdinalIgnoreCase);
+        var normalized = rules
+            .Select(rule => rule with { CategoryCode = Required(rule.CategoryCode, "料品分类编码") })
+            .ToArray();
+        if (normalized.Select(rule => rule.CategoryCode).Distinct(StringComparer.OrdinalIgnoreCase).Count() != normalized.Length)
+            throw new PdmRuleException("同一料品分类只能配置一条审核规则。");
+        if (normalized.Any(rule => !creatableCategories.ContainsKey(rule.CategoryCode)))
+            throw new PdmRuleException("审核规则只能配置在允许创建、启用且可见的料品分类上。");
+        var saved = await materials.SaveMaterialApprovalRulesAsync(normalized, timeProvider.GetUtcNow(), cancellationToken);
+        await AuditAsync(actor, "material.approval-rules.update", "global",
+            $"更新新增料品审核规则：{string.Join("；", saved.Select(rule => $"{rule.CategoryCode}={(rule.RequiresApproval ? "需审核" : "免审核")}"))}", cancellationToken);
+        return saved;
+    }
+
     public async Task<IReadOnlyList<MaterialDuplicateRule>> GetDuplicateRulesAsync(
         string actor,
         UserRole role,
@@ -227,13 +268,15 @@ public sealed class MaterialService(
                 results.Add(new(item.Id, MaterialCodeResolutionStatus.NoMatch, null, [], null));
                 continue;
             }
-            var candidates = await FindDuplicateMaterialsAsync(standardCategory, item.Name, item.Specification, item.Brand, duplicateRule, true, false, cancellationToken);
-            if (candidates.Count == 0 && MaterialRequestSignature(item, duplicateRule.Fields) is string signature && pendingBySignature.TryGetValue(signature, out var matchingPending))
+            var candidates = (await FindDuplicateMaterialsAsync(item.Name, item.Specification, item.Brand, duplicateRule, null, cancellationToken))
+                .Where(candidate => candidate.ApprovalStatus == MaterialApprovalStatus.Approved && !candidate.IsArchived)
+                .ToArray();
+            if (candidates.Length == 0 && MaterialRequestSignature(item, duplicateRule.Fields) is string signature && pendingBySignature.TryGetValue(signature, out var matchingPending))
             {
                 results.Add(new(item.Id, MaterialCodeResolutionStatus.ApplicationPending, null, [], matchingPending));
                 continue;
             }
-            if (candidates.Count == 1)
+            if (candidates.Length == 1)
             {
                 var candidate = candidates[0];
                 var issues = StandardBomMaterialMasterIssues(item, candidate);
@@ -244,7 +287,7 @@ public sealed class MaterialService(
                     candidate, candidates, null) { Issues = issues });
                 continue;
             }
-            results.Add(candidates.Count == 0
+            results.Add(candidates.Length == 0
                 ? new(item.Id, MaterialCodeResolutionStatus.NoMatch, null, [], null)
                 : new(item.Id, MaterialCodeResolutionStatus.Ambiguous, null, candidates, null));
         }
@@ -281,6 +324,8 @@ public sealed class MaterialService(
                 continue;
             }
             var item = applicationItems[resolution.BomItemId];
+            var duplicates = await FindDuplicateMaterialsAsync(item.Name, item.Specification, item.Brand, duplicateRule, null, cancellationToken);
+            if (duplicates.Count > 0) throw DuplicateConflict(duplicateRule, duplicates);
             var signature = MaterialRequestSignature(item, duplicateRule.Fields);
             if (signature is not null && createdBySignature.TryGetValue(signature, out var existingApplication))
             {
@@ -356,9 +401,12 @@ public sealed class MaterialService(
 
     private static MaterialDuplicateRule DefaultDuplicateRule(MaterialCategory category) => new(
         category.Code,
-        category.PdmKind is MaterialKind.Standard or MaterialKind.Electrical
-            ? ["Specification", "Brand"]
-            : ["Name", "Specification"]);
+        category.PdmKind switch
+        {
+            MaterialKind.Standard or MaterialKind.Electrical => ["Specification", "Brand"],
+            MaterialKind.Product => ["Name"],
+            _ => ["Name", "Specification"]
+        });
 
     private static MaterialDuplicateRule NormalizeDuplicateRule(MaterialDuplicateRule rule)
     {
@@ -383,13 +431,11 @@ public sealed class MaterialService(
     }
 
     private async Task<IReadOnlyList<PdmMaterial>> FindDuplicateMaterialsAsync(
-        MaterialCategory category,
         string? name,
         string? specification,
         string? brand,
         MaterialDuplicateRule rule,
-        bool approvedOnly,
-        bool requireAllFields,
+        Guid? excludeMaterialId,
         CancellationToken cancellationToken)
     {
         if (rule.Fields.Count == 0) return [];
@@ -397,24 +443,40 @@ public sealed class MaterialService(
             field => field,
             field => DuplicateFieldValue(field, name, specification, brand)?.Trim(),
             StringComparer.OrdinalIgnoreCase);
-        if (requireAllFields && values.Values.Any(string.IsNullOrWhiteSpace)) return [];
-        var comparableFields = rule.Fields.Where(field => !string.IsNullOrWhiteSpace(values[field])).ToArray();
-        if (comparableFields.Length == 0) return [];
-        var anchor = new[] { "Specification", "Brand", "Name" }
-            .Where(field => comparableFields.Contains(field, StringComparer.OrdinalIgnoreCase))
-            .Select(field => values[field])
-            .FirstOrDefault(value => !string.IsNullOrWhiteSpace(value));
-        if (anchor is null) return [];
-        var page = await materials.ListMaterialPageAsync(anchor, category.Code, null, false, 1, 200, cancellationToken);
-        return page.Items
-            .Where(candidate => string.Equals(candidate.CategoryCode, category.Code, StringComparison.OrdinalIgnoreCase))
-            .Where(candidate => !approvedOnly || candidate.ApprovalStatus == MaterialApprovalStatus.Approved)
-            .Where(candidate => comparableFields.All(field => string.Equals(
-                DuplicateFieldValue(field, candidate.Name, candidate.Specification, candidate.Brand)?.Trim(),
-                values[field],
-                StringComparison.OrdinalIgnoreCase)))
+        if (values.Values.Any(string.IsNullOrWhiteSpace)) return [];
+        return (await materials.FindMaterialsByDuplicateFieldsAsync(name, specification, brand, rule.Fields, cancellationToken))
+            .Where(candidate => excludeMaterialId is null || candidate.Id != excludeMaterialId.Value)
             .ToArray();
     }
+
+    private static void ValidateDuplicateRuleValues(MaterialDuplicateRule rule, string? name, string? specification, string? brand)
+    {
+        var missing = rule.Fields
+            .Where(field => string.IsNullOrWhiteSpace(DuplicateFieldValue(field, name, specification, brand)))
+            .Select(DuplicateRuleFieldLabel)
+            .ToArray();
+        if (missing.Length > 0)
+            throw new PdmRuleException($"当前分类查重字段不能为空：{string.Join('、', missing)}。");
+    }
+
+    private static PdmConflictException DuplicateConflict(MaterialDuplicateRule rule, IReadOnlyList<PdmMaterial> duplicates) =>
+        new($"按全局查重规则（{DuplicateRuleDescription(rule)}）已存在料品：{string.Join("、", duplicates.Take(5).Select(DuplicateCandidateDescription))}。请直接复用现有料品；已停用料品请先启用后复用。");
+
+    private static string DuplicateCandidateDescription(PdmMaterial material)
+    {
+        var status = material.IsArchived
+            ? "已停用"
+            : material.ApprovalStatus == MaterialApprovalStatus.Approved ? "已批准" : "待审核";
+        return $"{material.MaterialCode}（分类 {material.CategoryCode ?? material.U9CategoryCode ?? "未分类"}，{status}）";
+    }
+
+    private static bool DuplicateRuleMatches(MaterialDuplicateRule rule, PdmMaterial left, PdmMaterial right) =>
+        rule.Fields.Count > 0 && rule.Fields.All(field =>
+            !string.IsNullOrWhiteSpace(DuplicateFieldValue(field, left.Name, left.Specification, left.Brand))
+            && string.Equals(
+                DuplicateFieldValue(field, left.Name, left.Specification, left.Brand)?.Trim(),
+                DuplicateFieldValue(field, right.Name, right.Specification, right.Brand)?.Trim(),
+                StringComparison.OrdinalIgnoreCase));
 
     private static string CanonicalDuplicateRuleField(string field) => field.ToUpperInvariant() switch
     {
@@ -431,6 +493,14 @@ public sealed class MaterialService(
         "Brand" => "品牌",
         _ => field
     }));
+
+    private static string DuplicateRuleFieldLabel(string field) => field switch
+    {
+        "Name" => "名称",
+        "Specification" => "型号",
+        "Brand" => "品牌",
+        _ => field
+    };
 
     private static string? DuplicateFieldValue(string field, string? name, string? specification, string? brand) => field switch
     {
@@ -599,14 +669,32 @@ public sealed class MaterialService(
 
     public async Task<PdmMaterial> CreateAsync(SaveMaterialCommand command, string actor, UserRole role, CancellationToken cancellationToken)
     {
+        var created = await CreateWithApprovalPolicyAsync(command, actor, role, cancellationToken);
+        return created.Material;
+    }
+
+    public async Task<(PdmMaterial Material, MaterialSyncTask? Task)> CreateWithApprovalPolicyAsync(
+        SaveMaterialCommand command,
+        string actor,
+        UserRole role,
+        CancellationToken cancellationToken)
+    {
         await RequireAnyPermissionAsync(actor, role, [PermissionCodes.MaterialApply, PermissionCodes.MaterialManage], cancellationToken);
         var category = await RequireCreatableCategoryAsync(command.CategoryCode, command.Kind, cancellationToken);
         var now = timeProvider.GetUtcNow();
         var normalized = Normalize(Guid.NewGuid(), command, null, actor, now, category.Code);
         var duplicateRule = await GetEffectiveDuplicateRuleAsync(category, cancellationToken);
-        var duplicates = await FindDuplicateMaterialsAsync(category, normalized.Name, normalized.Specification, normalized.Brand, duplicateRule, false, true, cancellationToken);
-        if (duplicates.Count > 0)
-            throw new PdmConflictException($"按分类查重规则（{DuplicateRuleDescription(duplicateRule)}）已存在料品：{string.Join("、", duplicates.Take(5).Select(item => item.MaterialCode))}，请直接复用现有料品或调整查重规则。");
+        ValidateDuplicateRuleValues(duplicateRule, normalized.Name, normalized.Specification, normalized.Brand);
+        var duplicates = await FindDuplicateMaterialsAsync(normalized.Name, normalized.Specification, normalized.Brand, duplicateRule, null, cancellationToken);
+        if (duplicates.Count > 0) throw DuplicateConflict(duplicateRule, duplicates);
+        var requiresApproval = await RequiresApprovalAsync(category.Code, cancellationToken);
+        if (!requiresApproval)
+        {
+            ValidateForApproval(normalized with { MaterialCode = "PDM-AUTO-APPROVAL" });
+            ValidateSupplyMode(normalized, new MaterialCategoryRule(
+                normalized.Kind, category.Code, category.Name, category.DefaultSupplyMode,
+                category.AllowCreate, category.UpdatedBy, category.UpdatedAt));
+        }
         var reservation = await ReserveAvailableMaterialCodeAsync(category, normalized.UnitCode, cancellationToken);
         var material = normalized with { MaterialCode = reservation.Code };
         var saved = await materials.CreateMaterialAsync(material, category, cancellationToken);
@@ -615,7 +703,9 @@ public sealed class MaterialService(
             : $"按PLM分类流水 {reservation.BaselineMaterialCode ?? "无"} 向后生成";
         await AuditAsync(actor, "material.create", saved.Id,
             $"创建物料主档：{saved.MaterialCode} · {saved.Name}；{numberingBasis}。", cancellationToken);
-        return saved;
+        if (requiresApproval) return (saved, null);
+        var approved = await ApproveCoreAsync(saved.Id, saved.RowVersion, actor, cancellationToken, automaticApproval: true);
+        return (approved.Material, approved.Task);
     }
 
     public async Task<PdmMaterial> CreateApplicationDraftAsync(SaveMaterialCommand command, string actor, UserRole role, CancellationToken cancellationToken)
@@ -639,6 +729,10 @@ public sealed class MaterialService(
         var now = timeProvider.GetUtcNow();
         var materialId = Guid.NewGuid();
         var normalized = Normalize(materialId, command, null, actor, now, category.Code);
+        var duplicateRule = await GetEffectiveDuplicateRuleAsync(category, cancellationToken);
+        ValidateDuplicateRuleValues(duplicateRule, normalized.Name, normalized.Specification, normalized.Brand);
+        var duplicates = await FindDuplicateMaterialsAsync(normalized.Name, normalized.Specification, normalized.Brand, duplicateRule, null, cancellationToken);
+        if (duplicates.Count > 0) throw DuplicateConflict(duplicateRule, duplicates);
         var material = normalized with { MaterialCode = $"{PendingApplicationCodePrefix}{materialId:N}" };
         var saved = await materials.CreateMaterialAsync(material, category, cancellationToken);
         await AuditAsync(actor, "material.application-draft.create", saved.Id,
@@ -655,6 +749,10 @@ public sealed class MaterialService(
         if (command.ExpectedRowVersion is null) throw new PdmRuleException("更新物料必须提供数据版本。");
         var category = await RequireCreatableCategoryAsync(command.CategoryCode ?? existing.CategoryCode, command.Kind, cancellationToken);
         var updated = Normalize(materialId, command, existing, actor, timeProvider.GetUtcNow(), category.Code);
+        var duplicateRule = await GetEffectiveDuplicateRuleAsync(category, cancellationToken);
+        ValidateDuplicateRuleValues(duplicateRule, updated.Name, updated.Specification, updated.Brand);
+        var duplicates = await FindDuplicateMaterialsAsync(updated.Name, updated.Specification, updated.Brand, duplicateRule, materialId, cancellationToken);
+        if (duplicates.Count > 0) throw DuplicateConflict(duplicateRule, duplicates);
         var saved = await materials.UpdateMaterialAsync(updated, command.ExpectedRowVersion.Value, cancellationToken);
         await AuditAsync(actor, "material.update", saved.Id, $"更新物料主档：{saved.MaterialCode} · {saved.Name}", cancellationToken);
         return saved;
@@ -709,16 +807,17 @@ public sealed class MaterialService(
             weight is null ? null : "kg",
             CategoryCode: category.Code), null, actor, now, category.Code) with { SourceBomItemId = item.Id };
         var duplicateRule = await GetEffectiveDuplicateRuleAsync(category, cancellationToken);
-        var duplicates = await FindDuplicateMaterialsAsync(category, normalized.Name, normalized.Specification, normalized.Brand, duplicateRule, true, true, cancellationToken);
-        if (duplicates.Count == 1)
+        ValidateDuplicateRuleValues(duplicateRule, normalized.Name, normalized.Specification, normalized.Brand);
+        var duplicates = await FindDuplicateMaterialsAsync(normalized.Name, normalized.Specification, normalized.Brand, duplicateRule, null, cancellationToken);
+        var reusable = duplicates.Where(candidate => candidate.ApprovalStatus == MaterialApprovalStatus.Approved && !candidate.IsArchived).ToArray();
+        if (duplicates.Count == 1 && reusable.Length == 1)
         {
-            await materials.LinkBomItemAsync(item.Id, duplicates[0].Id, actor, now, cancellationToken);
-            await AuditAsync(actor, "material.reuse-from-bom", duplicates[0].Id,
-                $"按分类查重规则复用料品：{item.Id} → {duplicates[0].MaterialCode}", cancellationToken);
-            return duplicates[0];
+            await materials.LinkBomItemAsync(item.Id, reusable[0].Id, actor, now, cancellationToken);
+            await AuditAsync(actor, "material.reuse-from-bom", reusable[0].Id,
+                $"按全局查重规则复用料品：{item.Id} → {reusable[0].MaterialCode}", cancellationToken);
+            return reusable[0];
         }
-        if (duplicates.Count > 1)
-            throw new PdmConflictException($"按分类查重规则（{DuplicateRuleDescription(duplicateRule)}）匹配到多个料品：{string.Join("、", duplicates.Take(5).Select(candidate => candidate.MaterialCode))}，请先在BOM中选择应引用的料品。");
+        if (duplicates.Count > 0) throw DuplicateConflict(duplicateRule, duplicates);
         var reservation = await ReserveAvailableMaterialCodeAsync(category, normalized.UnitCode, cancellationToken);
         var material = normalized with { MaterialCode = reservation.Code };
         var saved = await materials.CreateMaterialAsync(material, category, cancellationToken);
@@ -760,8 +859,18 @@ public sealed class MaterialService(
             creations.Add(new(item.Material with { MaterialCode = reservation.Code }, item.Category!));
         }
         var saved = await materials.CreateMaterialsAsync(creations, cancellationToken);
-        await AuditAsync(actor, "material.batch-import", Guid.NewGuid(), $"Excel批量新增料品草稿：{saved.Count} 项；未批准、未写入U9C。", cancellationToken);
-        return new(saved.Count, saved);
+        var results = saved.ToArray();
+        var tasks = new List<MaterialSyncTask>();
+        for (var index = 0; index < results.Length; index++)
+        {
+            if (validated[index].RequiresApproval) continue;
+            var approved = await ApproveCoreAsync(results[index].Id, results[index].RowVersion, actor, cancellationToken, automaticApproval: true);
+            results[index] = approved.Material;
+            tasks.Add(approved.Task);
+        }
+        await AuditAsync(actor, "material.batch-import", Guid.NewGuid(),
+            $"Excel批量新增料品：{results.Length} 项；免审自动生效 {tasks.Count} 项，待人工审核 {results.Length - tasks.Count} 项。", cancellationToken);
+        return new(results.Length, results, tasks);
     }
 
     private async Task<IReadOnlyList<ValidatedImportRow>> ValidateImportRowsAsync(
@@ -772,14 +881,16 @@ public sealed class MaterialService(
         if (rows.Count == 0) throw new PdmRuleException("Excel没有可导入的数据行。");
         if (rows.Count > 1000) throw new PdmRuleException("单次最多导入1000行料品。");
         var now = timeProvider.GetUtcNow();
+        var savedApprovalRules = (await materials.GetMaterialApprovalRulesAsync(cancellationToken))
+            .ToDictionary(rule => rule.CategoryCode, StringComparer.OrdinalIgnoreCase);
         var validated = new List<ValidatedImportRow>(rows.Count);
-        var keys = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
         foreach (var command in rows)
         {
             var errors = new List<string>();
             MaterialCategory? category = null;
             PdmMaterial? material = null;
-            IReadOnlyList<string> duplicateFields = [];
+            MaterialDuplicateRule? duplicateRule = null;
+            var requiresApproval = true;
             try
             {
                 if (string.IsNullOrWhiteSpace(command.Specification)) errors.Add("规格型号不能为空");
@@ -792,46 +903,44 @@ public sealed class MaterialService(
                     SelectionAdvice: command.SelectionAdvice, ReferencePrice: command.ReferencePrice, Model3DLink: command.Model3DLink,
                     DocumentLink: command.DocumentLink, IsRecommended: command.IsRecommended);
                 material = Normalize(Guid.NewGuid(), save, null, actor, now, category.Code);
-                var duplicateRule = await GetEffectiveDuplicateRuleAsync(category, cancellationToken);
-                duplicateFields = duplicateRule.Fields;
-                var duplicates = await FindDuplicateMaterialsAsync(category, material.Name, material.Specification, material.Brand, duplicateRule, false, true, cancellationToken);
-                if (duplicates.Count > 0) errors.Add($"已存在重复料品：{string.Join("、", duplicates.Take(5).Select(item => item.MaterialCode))}");
+                requiresApproval = savedApprovalRules.TryGetValue(category.Code, out var approvalRule)
+                    ? approvalRule.RequiresApproval
+                    : DefaultApprovalRule(category.Code).RequiresApproval;
+                if (!requiresApproval)
+                {
+                    ValidateForApproval(material with { MaterialCode = "PDM-AUTO-APPROVAL" });
+                    ValidateSupplyMode(material, new MaterialCategoryRule(
+                        material.Kind, category.Code, category.Name, category.DefaultSupplyMode,
+                        category.AllowCreate, category.UpdatedBy, category.UpdatedAt));
+                }
+                duplicateRule = await GetEffectiveDuplicateRuleAsync(category, cancellationToken);
+                ValidateDuplicateRuleValues(duplicateRule, material.Name, material.Specification, material.Brand);
+                var duplicates = await FindDuplicateMaterialsAsync(material.Name, material.Specification, material.Brand, duplicateRule, null, cancellationToken);
+                if (duplicates.Count > 0) errors.Add(DuplicateConflict(duplicateRule, duplicates).Message);
             }
             catch (InvalidOperationException error) { errors.Add(error.Message); }
 
-            if (category is not null && material is not null && errors.Count == 0)
+            if (material is not null && duplicateRule is not null && errors.Count == 0)
             {
-                var key = ImportDuplicateKey(category.Code, material, duplicateFields);
-                if (key is not null)
-                {
-                    if (keys.TryGetValue(key, out var firstRow)) errors.Add($"与Excel第{firstRow}行重复");
-                    else keys[key] = command.RowNumber;
-                }
+                var matching = validated.FirstOrDefault(previous => previous.Errors.Count == 0
+                    && previous.Material is not null
+                    && previous.DuplicateRule is not null
+                    && (DuplicateRuleMatches(duplicateRule, material, previous.Material)
+                        || DuplicateRuleMatches(previous.DuplicateRule, previous.Material, material)));
+                if (matching is not null) errors.Add($"与Excel第{matching.Command.RowNumber}行全局重复");
             }
-            validated.Add(new(command, category, material, errors));
+            validated.Add(new(command, category, material, duplicateRule, errors, requiresApproval));
         }
         return validated;
-    }
-
-    private static string? ImportDuplicateKey(string categoryCode, PdmMaterial material, IReadOnlyList<string> fields)
-    {
-        var values = fields.Select(field => field.ToUpperInvariant() switch
-        {
-            "NAME" => material.Name,
-            "SPECIFICATION" => material.Specification ?? string.Empty,
-            "BRAND" => material.Brand ?? string.Empty,
-            _ => string.Empty
-        }).ToArray();
-        return values.Length == 0 || values.Any(string.IsNullOrWhiteSpace)
-            ? null
-            : string.Join('|', new[] { categoryCode }.Concat(values).Select(value => value.Trim().ToUpperInvariant()));
     }
 
     private sealed record ValidatedImportRow(
         MaterialImportRowCommand Command,
         MaterialCategory? Category,
         PdmMaterial? Material,
-        IReadOnlyList<string> Errors);
+        MaterialDuplicateRule? DuplicateRule,
+        IReadOnlyList<string> Errors,
+        bool RequiresApproval);
 
     private static void EnsureMaterialCodeRequiredFields(BomItem item)
     {
@@ -1012,6 +1121,10 @@ public sealed class MaterialService(
             var reservation = await ReserveAvailableMaterialCodeAsync(category, material.UnitCode, cancellationToken);
             materialForApproval = material with { MaterialCode = reservation.Code };
         }
+        var duplicateRule = await GetEffectiveDuplicateRuleAsync(category, cancellationToken);
+        ValidateDuplicateRuleValues(duplicateRule, materialForApproval.Name, materialForApproval.Specification, materialForApproval.Brand);
+        var duplicates = await FindDuplicateMaterialsAsync(materialForApproval.Name, materialForApproval.Specification, materialForApproval.Brand, duplicateRule, materialId, cancellationToken);
+        if (duplicates.Count > 0) throw DuplicateConflict(duplicateRule, duplicates);
         ValidateForApproval(materialForApproval);
         var rule = new MaterialCategoryRule(material.Kind, category.Code, category.Name, category.DefaultSupplyMode, category.AllowCreate, category.UpdatedBy, category.UpdatedAt);
         ValidateSupplyMode(materialForApproval, rule);
@@ -1057,10 +1170,20 @@ public sealed class MaterialService(
             nameof(PdmMaterial),
             material.Id.ToString(),
             automaticApproval
-                ? $"多级BOM表头料号自动批准并生成U9C请求预览：{materialForApproval.MaterialCode} · {rule.U9CategoryCode}"
+                ? $"按系统自动审批规则批准并生成U9C请求预览：{materialForApproval.MaterialCode} · {rule.U9CategoryCode}"
                 : $"批准物料并生成U9C请求预览：{materialForApproval.MaterialCode} · {rule.U9CategoryCode}");
         return await materials.ApproveAndEnqueueAsync(materialForApproval, expectedRowVersion, rule.U9CategoryCode, task, audit, cancellationToken);
     }
+
+    private async Task<bool> RequiresApprovalAsync(string categoryCode, CancellationToken cancellationToken)
+    {
+        var configured = (await materials.GetMaterialApprovalRulesAsync(cancellationToken))
+            .FirstOrDefault(rule => string.Equals(rule.CategoryCode, categoryCode, StringComparison.OrdinalIgnoreCase));
+        return configured?.RequiresApproval ?? DefaultApprovalRule(categoryCode).RequiresApproval;
+    }
+
+    private static MaterialApprovalRule DefaultApprovalRule(string categoryCode) =>
+        new(categoryCode, !string.Equals(categoryCode, "0204", StringComparison.OrdinalIgnoreCase));
 
     public async Task<(PdmMaterial Material, MaterialSyncTask? Task)> ChangeApprovedAsync(
         Guid materialId,
@@ -1080,6 +1203,10 @@ public sealed class MaterialService(
         var currentCategory = await materials.FindCategoryAsync(categoryCode, cancellationToken)
             ?? throw new PdmRuleException("料品分类不存在或尚未从U9C同步。");
         var updated = Normalize(materialId, command, existing, actor, timeProvider.GetUtcNow(), currentCategory.Code);
+        var duplicateRule = await GetEffectiveDuplicateRuleAsync(currentCategory, cancellationToken);
+        ValidateDuplicateRuleValues(duplicateRule, updated.Name, updated.Specification, updated.Brand);
+        var duplicates = await FindDuplicateMaterialsAsync(updated.Name, updated.Specification, updated.Brand, duplicateRule, materialId, cancellationToken);
+        if (duplicates.Count > 0) throw DuplicateConflict(duplicateRule, duplicates);
 
         var u9FieldsChanged = HasU9MasterChanges(existing, updated);
         if (!u9FieldsChanged)

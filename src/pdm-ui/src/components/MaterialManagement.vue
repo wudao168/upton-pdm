@@ -20,6 +20,7 @@ import {
   getMaterialSyncBatch,
   getMaterialRemovalReadiness,
   getMaterialNumberingSettings,
+  getMaterialApprovalRules,
   getMaterialDuplicateRules,
   listMaterialCategories,
   listMaterialAttachments,
@@ -41,6 +42,7 @@ import {
   saveMaterialCategory,
   setMaterialCover,
   updateMaterial,
+  updateMaterialApprovalRules,
   updateMaterialDuplicateRules,
   updateMaterialNumberingSettings,
   uploadMaterialAttachment,
@@ -48,6 +50,7 @@ import {
 import type {
   MaterialAttachment,
   MaterialAttachmentKind,
+  MaterialApprovalRule,
   MaterialCategory,
   MaterialCodeApplication,
   MaterialKind,
@@ -221,11 +224,12 @@ async function selectImportFile(event: Event) {
 async function confirmMaterialImport() {
   if (!importFile.value || !importPreview.value || importPreview.value.errorCount > 0) return
   try {
-    await ElMessageBox.confirm(`确认导入 ${importPreview.value.validCount} 项料品？导入后均为草稿，不会自动批准或写入U9C。`, '确认批量导入', { type: 'warning', confirmButtonText: '确认导入', cancelButtonText: '取消' })
+    await ElMessageBox.confirm(`确认导入 ${importPreview.value.validCount} 项料品？系统将按取号设置中的分类审核规则处理，免审核项会直接生效并进入U9C后台同步。`, '确认批量导入', { type: 'warning', confirmButtonText: '确认导入', cancelButtonText: '取消' })
     importingMaterials.value = true
     const result = await importMaterials(importFile.value, props.token)
     importDialogOpen.value = false
-    ElMessage.success(`已导入 ${result.importedCount} 项料品草稿`)
+    const approvedCount = result.materials.filter(material => material.approvalStatus === 'Approved').length
+    ElMessage.success(`已导入 ${result.importedCount} 项料品：免审核生效 ${approvedCount} 项，待审核 ${result.importedCount - approvedCount} 项`)
     await load()
   } catch (error) {
     if (error === 'cancel' || error === 'close') return
@@ -239,8 +243,9 @@ const selectedCategoryCode = ref<string | null>(null)
 const categoryCreating = ref(false)
 const numberingStartSequence = ref(1000000)
 const savingNumberingSettings = ref(false)
+const approvalRules = ref<MaterialApprovalRule[]>([])
 const duplicateRules = ref<MaterialDuplicateRule[]>([])
-const savingDuplicateRules = ref(false)
+const savingMaterialRules = ref(false)
 const duplicateFieldOptions: Array<{ value: MaterialDuplicateField; label: string }> = [
   { value: 'Name', label: '名称' },
   { value: 'Specification', label: '型号' },
@@ -735,10 +740,11 @@ async function load() {
   const loadVersion = ++materialLoadVersion
   loading.value = true
   try {
-    const [materialPage, loadedCategories, loadedTasks, loadedCodeApplications, numberingSettings, loadedDuplicateRules, loadedRelations, loadedPendingMasters] = await Promise.all([
+    const [materialPage, loadedCategories, loadedTasks, loadedCodeApplications, numberingSettings, loadedApprovalRules, loadedDuplicateRules, loadedRelations, loadedPendingMasters] = await Promise.all([
       listMaterialPage(props.token, { ordinaryOnly: true, query: query.value, categoryCode: selectedMaterialCategoryCode.value, brand: brandFilter.value, includeArchived: showArchived.value, page: currentPage.value, pageSize: pageSize.value, createdAtOrder: createdAtOrder.value }),
       listMaterialCategories(props.token, props.canManageIntegration), listMaterialSyncTasks(props.token, true), listMaterialCodeApplications(props.token),
       props.canManageIntegration ? getMaterialNumberingSettings(props.token) : Promise.resolve(null),
+      props.canManageIntegration ? getMaterialApprovalRules(props.token) : Promise.resolve([]),
       props.canManageIntegration ? getMaterialDuplicateRules(props.token) : Promise.resolve([]),
       props.canViewRelations ? listMaterialRelationTemplates(props.token, props.canManageRelations || props.canPublishRelations) : Promise.resolve([]),
       listPendingMasterMaterials(props.token),
@@ -755,6 +761,7 @@ async function load() {
     pendingMasterMaterials.value = loadedPendingMasters
     selectedCodeApplications.value = []
     if (numberingSettings) numberingStartSequence.value = numberingSettings.startSequence
+    approvalRules.value = loadedApprovalRules
     duplicateRules.value = loadedDuplicateRules
     materialRelations.value = loadedRelations
   } catch (error) {
@@ -1117,7 +1124,9 @@ async function saveMaterial() {
         ? '料品已更新，并生成U9C修改预览'
         : '料品已更新，旧请求已废止并生成新的U9C创建预览'
       : wasCreating
-        ? props.canEdit ? '料品草稿已创建，可以继续上传3D和资料' : '料品申请草稿已创建，待标准化审批后生效'
+        ? saved.approvalStatus === 'Approved'
+          ? '料品已按分类免审规则生效，并已进入U9C后台同步'
+          : props.canEdit ? '料品草稿已创建，可以继续上传3D和资料' : '料品申请草稿已创建，待标准化审批后生效'
         : changeResult ? 'PLM专属字段已更新，不生成U9C任务' : '料品已更新')
   } catch (error) {
     editorError.value = error instanceof Error ? error.message : '料品保存失败'
@@ -1197,16 +1206,26 @@ async function saveNumberingSettings() {
   }
 }
 
-async function saveDuplicateRules() {
-  savingDuplicateRules.value = true
+function updateApprovalRequirement(categoryCode: string, value: boolean | string | number) {
+  const rule = approvalRules.value.find(item => item.categoryCode === categoryCode)
+  if (rule) rule.requiresApproval = value === true
+}
+
+async function saveMaterialRules() {
+  savingMaterialRules.value = true
   try {
     if (duplicateRules.value.some(rule => rule.fields.length === 0)) throw new Error('每个料品分类至少选择一个查重字段')
-    duplicateRules.value = await updateMaterialDuplicateRules(duplicateRules.value, props.token)
-    ElMessage.success('各分类料品查重规则已保存')
+    const [savedDuplicateRules, savedApprovalRules] = await Promise.all([
+      updateMaterialDuplicateRules(duplicateRules.value, props.token),
+      updateMaterialApprovalRules(approvalRules.value, props.token),
+    ])
+    duplicateRules.value = savedDuplicateRules
+    approvalRules.value = savedApprovalRules
+    ElMessage.success('各分类查重与新增审核规则已保存')
   } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : '料品查重规则保存失败')
+    ElMessage.error(error instanceof Error ? error.message : '料品查重与新增审核规则保存失败')
   } finally {
-    savingDuplicateRules.value = false
+    savingMaterialRules.value = false
   }
 }
 
@@ -1697,23 +1716,32 @@ onMounted(() => {
       </el-tab-pane>
 
       <el-tab-pane v-if="canManageIntegration" label="取号设置" name="numbering-settings">
-        <section class="material-numbering-settings" aria-label="PLM料号基线设置">
-          <div>
-            <strong>PLM全局料号基线</strong>
-            <p>所有开放创建分类统一使用7位流水；新料号只按PLM主档与本地计数器向后生成，不在审批或同步时扫描U9C。</p>
-          </div>
-          <el-input-number v-model="numberingStartSequence" :min="1000000" :max="9999999" :step="1" :precision="0" />
-          <el-button type="primary" :loading="savingNumberingSettings" @click="saveNumberingSettings">保存基线设置</el-button>
-        </section>
-        <section class="material-duplicate-settings" aria-label="料品查重规则设置">
-          <header><div><strong>分类查重规则</strong><p>申请或创建料号前只查询PLM料品主档；每类至少选择一个字段，所选字段全部相同时复用现有料品。</p></div><el-button type="primary" :loading="savingDuplicateRules" @click="saveDuplicateRules">保存查重规则</el-button></header>
-          <div class="material-duplicate-rule-list">
-            <div v-for="rule in duplicateRules" :key="rule.categoryCode" class="material-duplicate-rule-row">
-              <span>{{ rule.categoryCode }} {{ categories.find(category => category.code === rule.categoryCode)?.name || '' }}</span>
-              <el-checkbox-group v-model="rule.fields"><el-checkbox v-for="field in duplicateFieldOptions" :key="field.value" :value="field.value">{{ field.label }}</el-checkbox></el-checkbox-group>
+        <div class="material-numbering-settings-scroll">
+          <section class="material-numbering-settings" aria-label="PLM料号基线设置">
+            <div>
+              <strong>PLM全局料号基线</strong>
+              <p>所有开放创建分类统一使用7位流水；新料号只按PLM主档与本地计数器向后生成，不在审批或同步时扫描U9C。</p>
             </div>
-          </div>
-        </section>
+            <el-input-number v-model="numberingStartSequence" :min="1000000" :max="9999999" :step="1" :precision="0" />
+            <el-button type="primary" :loading="savingNumberingSettings" @click="saveNumberingSettings">保存基线设置</el-button>
+          </section>
+          <section class="material-duplicate-settings" aria-label="料品查重与审核规则设置">
+            <header><div><strong>全局查重规则（按分类配置字段）</strong><p>全局查询PLM料品主档，分类不参与查重；按待保存料品所属分类取规则。所选字段必填，忽略首尾空格和大小写，全部相同即判重；右侧设置该分类新增料品是否需要审核。</p></div><el-button type="primary" :loading="savingMaterialRules" @click="saveMaterialRules">保存规则</el-button></header>
+            <div class="material-duplicate-rule-list">
+              <div v-for="rule in duplicateRules" :key="rule.categoryCode" class="material-duplicate-rule-row">
+                <span>{{ rule.categoryCode }} {{ categories.find(category => category.code === rule.categoryCode)?.name || '' }}</span>
+                <el-checkbox-group v-model="rule.fields"><el-checkbox v-for="field in duplicateFieldOptions" :key="field.value" :value="field.value">{{ field.label }}</el-checkbox></el-checkbox-group>
+                <el-switch
+                  class="material-approval-rule-control"
+                  :model-value="approvalRules.find(item => item.categoryCode === rule.categoryCode)?.requiresApproval ?? true"
+                  active-text="需要审核"
+                  inactive-text="免审核"
+                  @update:model-value="updateApprovalRequirement(rule.categoryCode, $event)"
+                />
+              </div>
+            </div>
+          </section>
+        </div>
       </el-tab-pane>
 
       <el-tab-pane label="分类维护" name="rules">
@@ -1812,7 +1840,7 @@ onMounted(() => {
         <el-button type="primary" :loading="importPreviewing" @click="importFileInput?.click()">{{ importFile ? '重新选择Excel' : '上传Excel' }}</el-button>
         <span>{{ importFile?.name || '请先下载模板并填写；单次最多1000行、10MB。' }}</span>
       </div>
-      <el-alert title="必填：U9C分类编码、物料名称、计量单位、规格型号。计量单位默认“个”；分类和单位均可在Excel中下拉选择。" type="info" :closable="false" show-icon />
+      <el-alert title="必填：U9C分类编码、物料名称、计量单位、规格型号；免审核分类还须满足生效校验（0204须填写材质）。计量单位默认“个”；分类和单位均可在Excel中下拉选择。" type="info" :closable="false" show-icon />
       <div v-if="importPreview" class="material-import-summary" :class="{ 'has-errors': importPreview.errorCount > 0 }">
         <strong>预检结果</strong><span>共 {{ importPreview.totalCount }} 行</span><span>可导入 {{ importPreview.validCount }} 行</span><span>错误 {{ importPreview.errorCount }} 行</span>
       </div>
@@ -1824,7 +1852,7 @@ onMounted(() => {
         <el-table-column prop="specification" label="规格型号" min-width="150" show-overflow-tooltip />
         <el-table-column label="校验结果" min-width="230"><template #default="{ row }"><el-tag v-if="!row.errors.length" type="success">可导入</el-tag><span v-else class="material-import-errors">{{ row.errors.join('；') }}</span></template></el-table-column>
       </el-table>
-      <template #footer><el-button @click="importDialogOpen=false">取消</el-button><el-button type="primary" :loading="importingMaterials" :disabled="!importPreview || importPreview.errorCount > 0 || importPreview.validCount === 0" @click="confirmMaterialImport">确认导入草稿</el-button></template>
+      <template #footer><el-button @click="importDialogOpen=false">取消</el-button><el-button type="primary" :loading="importingMaterials" :disabled="!importPreview || importPreview.errorCount > 0 || importPreview.validCount === 0" @click="confirmMaterialImport">确认导入</el-button></template>
     </el-dialog>
 
     <el-dialog v-model="previewOpen" title="U9C请求预览" width="760px"><div v-if="previewTask" class="preview-meta"><span>关联号：{{ previewTask.correlationId }}</span><span>SHA-256：{{ previewTask.payloadSha256 }}</span></div><pre v-if="previewTask" class="payload-preview">{{ previewTask.payloadJson }}</pre></el-dialog>
@@ -1840,7 +1868,7 @@ onMounted(() => {
 .material-table :deep(.el-table__body tr.is-pending-material:hover > td.el-table__cell){background-color:#fff0b3}
 .material-master-layout{display:grid;grid-template-columns:190px minmax(0,1fr);gap:var(--pdm-container-gap);min-width:0;background:var(--shell-content-bg)}.material-master-layout.is-category-collapsed{grid-template-columns:34px minmax(0,1fr)}.material-category-nav,.material-master-content{min-width:0;padding:10px;border:1px solid #e2e8f0;border-radius:8px;background:#fff}.material-category-nav{overflow:auto;font-size:11px}.material-category-nav__title{display:flex;align-items:center;justify-content:space-between;gap:4px;margin:0 4px 8px;color:var(--pdm-text-soft);font-weight:600;white-space:nowrap}.material-category-nav__toggle{width:22px;height:22px;display:inline-flex;flex:0 0 22px;align-items:center;justify-content:center;padding:0;border:1px solid var(--shell-accent-border);border-radius:5px;background:var(--pdm-blue-soft);color:var(--pdm-blue);font-size:16px;line-height:1;cursor:pointer}.material-category-nav__toggle:hover,.material-category-nav__toggle:focus-visible{border-color:var(--pdm-blue);background:var(--pdm-blue-soft);outline:none}.material-master-layout.is-category-collapsed .material-category-nav{padding:5px}.material-master-layout.is-category-collapsed .material-category-nav__title{justify-content:center;margin:0}.material-category-all{width:100%;height:28px;margin-bottom:4px;padding:0 8px;border:0;border-radius:5px;background:transparent;color:var(--pdm-text-soft);font:inherit;text-align:left;cursor:pointer}.material-category-all:hover,.material-category-all.is-active{background:var(--pdm-blue-soft);color:var(--pdm-blue)}.material-category-nav :deep(.el-tree){background:#fff;color:var(--pdm-text-soft);font-size:11px}.material-category-nav :deep(.el-tree-node__content){height:28px;border-radius:5px}.material-category-node{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.material-master-content{overflow:hidden}
 .material-page{min-width:0;min-height:calc(100vh - 112px);overflow:hidden;padding:5px 28px 28px}.material-tabs{min-width:0;max-width:100%}.material-tabs :deep(.el-tabs__content),.material-tabs :deep(.el-tab-pane){min-width:0;max-width:100%;overflow:hidden}.material-toolbar{display:flex;min-width:0;align-items:center;justify-content:flex-start;flex-wrap:nowrap;gap:5px;margin-bottom:14px;font-size:11px}.material-toolbar__actions,.material-toolbar__filters{display:flex;min-width:0;align-items:center;flex-wrap:nowrap;gap:5px}.material-toolbar__actions{flex:0 1 auto}.material-toolbar__filters{flex:1 1 260px}.material-toolbar :deep(.el-button),.material-toolbar :deep(.el-checkbox__label),.material-toolbar :deep(.el-input__inner),.material-toolbar :deep(.el-select__placeholder),.material-toolbar :deep(.el-select__selected-item){font-size:11px}.material-toolbar__actions :deep(.el-button){width:clamp(60px,5vw,80px);height:30px;flex:1 1 60px;margin-left:0;padding:0}.material-toolbar__filters :deep(.el-checkbox){flex:0 0 auto}.material-brand-filter{width:110px;min-width:80px;flex:0 1 110px}.material-toolbar .el-input{width:auto;min-width:80px;flex:1 1 180px}.material-table{width:100%;min-width:0;max-width:100%;box-sizing:border-box}.material-table :deep(.el-table__inner-wrapper),.material-table :deep(.el-scrollbar),.material-table :deep(.el-scrollbar__wrap){max-width:100%}.material-table :deep(.el-scrollbar__wrap){overflow-x:auto}.material-table :deep(.el-table__cell){font-size:11px;text-align:center}.material-table :deep(.cell){overflow:hidden;padding:0 6px;text-overflow:ellipsis;white-space:nowrap}.material-table :deep(.el-button),.material-table :deep(.el-tag){font-size:11px}.u9-validation{display:flex;align-items:center;justify-content:center;white-space:nowrap}.u9-unchecked{color:var(--pdm-muted);font-size:11px}.batch-editor-note{margin:0 0 14px;color:var(--pdm-muted);font-size:11px}.batch-editor-form :deep(.el-checkbox){margin-right:0}.material-numbering-settings{display:flex;align-items:center;gap:12px;margin-bottom:12px;padding:12px 16px;border:1px solid #bfdbfe;border-radius:10px;background:#eff6ff}.material-numbering-settings>div{min-width:0;flex:1}.material-numbering-settings strong{color:var(--pdm-text);font-size:12px}.material-numbering-settings p{margin:3px 0 0;color:var(--pdm-text-soft);line-height:1.4}.material-numbering-settings :deep(.el-input-number){width:150px}.category-layout{display:grid;grid-template-columns:minmax(280px,35%) 1fr;gap:18px;min-height:520px}.category-tree-panel,.category-editor{padding:18px;border:1px solid #e2e8f0;border-radius:14px;background:#f8fafc}.category-actions{display:flex;gap:8px;margin-bottom:14px}.category-node{display:flex;align-items:center;justify-content:space-between;gap:12px;width:100%;padding-right:8px}.category-empty{display:grid;min-height:420px;place-items:center;color:var(--pdm-muted)}.category-switches{display:flex;flex-wrap:wrap;gap:24px;margin:2px 0 14px}.form-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));column-gap:18px}.field-help{width:100%;margin:6px 0 0;color:var(--pdm-muted);font-size:11px;line-height:1.4}.weight-unit{width:76px;margin-left:8px}.preview-meta{display:grid;gap:6px;margin-bottom:12px;color:var(--pdm-muted);font-size:12px;word-break:break-all}.payload-preview{max-height:480px;overflow:auto;padding:18px;border-radius:10px;background:#0f172a;color:#fff;font:12px/1.4 var(--pdm-font-mono);white-space:pre-wrap;word-break:break-all}.material-tabs :deep(.el-tabs__content),.material-tabs :deep(.el-tabs__content *){font-size:11px}:global(.material-editor-dialog),:global(.material-editor-dialog *){font-size:11px}:global(.material-editor-dialog .el-dialog__title){font-size:11px!important}@media(max-width:1000px){.material-page{padding:5px 18px 18px}.material-toolbar__actions :deep(.el-button){width:48px;min-width:48px!important;flex:0 0 48px}.material-brand-filter{width:70px;min-width:70px;flex-basis:70px}.material-toolbar .el-input{min-width:70px;flex-basis:70px}.material-numbering-settings{align-items:stretch;flex-direction:column}.category-layout{grid-template-columns:1fr}.form-grid{grid-template-columns:1fr}}
-.material-duplicate-settings{padding:14px 16px;border:1px solid #e2e8f0;border-radius:10px;background:#fff}.material-duplicate-settings>header{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;margin-bottom:10px}.material-duplicate-settings>header p{margin:3px 0 0;color:var(--pdm-muted);line-height:1.4}.material-duplicate-rule-list{display:grid;gap:6px}.material-duplicate-rule-row{display:grid;grid-template-columns:minmax(180px,240px) 1fr;align-items:center;gap:12px;padding:8px 10px;border-radius:6px;background:#f8fafc}.material-duplicate-rule-row>span{font-weight:600}.material-duplicate-rule-row :deep(.el-checkbox){margin-right:18px}@media(max-width:800px){.material-duplicate-rule-row{grid-template-columns:1fr}}
+.material-numbering-settings-scroll{height:100%;box-sizing:border-box;overflow-y:auto;padding-right:4px}.material-duplicate-settings{padding:14px 16px;border:1px solid #e2e8f0;border-radius:10px;background:#fff}.material-duplicate-settings>header{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;margin-bottom:10px}.material-duplicate-settings>header p{margin:3px 0 0;color:var(--pdm-muted);line-height:1.4}.material-duplicate-rule-list{display:grid;gap:6px}.material-duplicate-rule-row{display:grid;grid-template-columns:minmax(180px,240px) minmax(260px,1fr) 170px;align-items:center;gap:12px;padding:8px 10px;border-radius:6px;background:#f8fafc}.material-duplicate-rule-row>span{font-weight:600}.material-duplicate-rule-row :deep(.el-checkbox){margin-right:18px}.material-approval-rule-control{justify-self:end}@media(max-width:800px){.material-duplicate-rule-row{grid-template-columns:1fr}.material-approval-rule-control{justify-self:start}}
 .material-page{height:100%;min-height:0;display:flex;flex-direction:column}.material-tabs{min-height:0;flex:1 1 auto;display:flex;flex-direction:column}.material-tabs :deep(.el-tabs__header .el-tabs__item){font-size:12px;font-weight:600}.material-tabs :deep(.el-tabs__content){min-height:0;flex:1 1 auto}.material-tabs :deep(.el-tab-pane){height:100%;min-height:0}.material-master-layout{height:100%;min-height:0}.material-master-content{display:flex;flex-direction:column}.material-toolbar{flex:0 0 auto;margin-bottom:5px}.material-table-shell{min-height:0;flex:1 1 auto}.material-table{height:100%}.material-pagination{flex:0 0 auto;justify-content:flex-end;margin-top:5px}.material-pagination :deep(.el-pagination__total),.material-pagination :deep(.el-select__selected-item),.material-pagination :deep(button),.material-pagination :deep(.number){font-size:11px}
 .material-tab-label{display:inline-flex;align-items:center;gap:5px}.material-tab-label em{min-width:18px;height:18px;padding:0 5px;border-radius:9px;background:var(--pdm-blue);color:#fff;font-size:10px;font-style:normal;font-weight:600;line-height:18px;text-align:center}
 .material-table :deep(.el-table__body tr.el-table__row){height:30px}.material-table :deep(.el-table__body td.el-table__cell){height:30px;padding:0}.material-table :deep(.el-table__body .el-tag){height:20px;padding-top:0;padding-bottom:0;line-height:18px}

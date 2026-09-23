@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { mapApiReleasePackage, readProjectValidationPlan } from '../src/api'
+import { downloadProductionDrawingArchive, downloadReleasePreviewArchive, mapApiReleasePackage, readProjectValidationPlan } from '../src/api'
 
 describe('API JSON response handling', () => {
   afterEach(() => {
@@ -24,5 +24,21 @@ describe('API JSON response handling', () => {
     expect(mapped.previewError).toBe('发布包尚未进入服务器转换状态。')
     expect(mapped.previewAttempts).toBe(5)
     expect(mapped.previewUpdatedAt).toBe('2026-09-20T15:00:00Z')
+  })
+
+  it.each([
+    ['生产图纸', () => downloadProductionDrawingArchive('project-1', ['version-1'], 'Pdf', 'test-token')],
+    ['发布转图', () => downloadReleasePreviewArchive('project-1', 'package-1', ['document-1'], 'test-token')],
+  ])('%s批量下载携带登录令牌和企业范围', async (_label, download) => {
+    window.localStorage.setItem('pdm_active_organization', 'company-1')
+    const fetchMock = vi.fn().mockResolvedValue(new Response(null, { status: 401 }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    await expect(download()).rejects.toThrow()
+
+    const headers = new Headers((fetchMock.mock.calls[0][1] as RequestInit).headers)
+    expect(headers.get('Authorization')).toBe('Bearer test-token')
+    expect(headers.get('X-Company-Id')).toBe('company-1')
+    expect(headers.get('Content-Type')).toBe('application/json')
   })
 })

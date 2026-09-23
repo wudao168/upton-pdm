@@ -83,21 +83,36 @@ describe('设置页项目计划模板', () => {
       expect.objectContaining({ id: 'second', stage: 'design', sortOrder: 30, predecessorSortOrders: [20] }),
     ]))
   })
-  it('新任务归属当前父阶段，跨阶段移动保留任务依赖', async () => {
+  it('任务表格不显示所属阶段和偏移天数，新任务仍归属当前父阶段', async () => {
     api.listProjectPlanTemplates.mockResolvedValue([groupedTemplate()])
     const wrapper = render()
     await flushPromises()
-    const stageSelect = wrapper.find('[data-task-id="task"]').findAllComponents({ name: 'ElSelect' })[0]!
-    stageSelect.vm.$emit('update:modelValue', 'deliver')
-    await flushPromises()
-    expect(wrapper.find('[data-stage="deliver"] .pdm-template-children').text()).toContain('设计评审')
+    expect(wrapper.find('.pdm-template-head').text()).not.toContain('所属阶段')
+    expect(wrapper.find('.pdm-template-head').text()).not.toContain('偏移天数')
+    expect(wrapper.find('[aria-label="所属阶段"]').exists()).toBe(false)
+    expect(wrapper.find('[aria-label="开始偏移天数"]').exists()).toBe(false)
+    await wrapper.find('[aria-label="选择阶段：交付"]').trigger('click')
     await wrapper.findAll('button').find(button => button.text() === '增加子任务')!.trigger('click')
-    expect(wrapper.findAll('.pdm-template-row')).toHaveLength(3)
+    expect(wrapper.findAll('.pdm-template-row')).toHaveLength(2)
     await wrapper.find('footer .pdm-primary-action').trigger('click')
     await flushPromises()
     expect(api.saveProjectPlanTemplate.mock.calls[0]![1].tasks).toEqual(expect.arrayContaining([
-      expect.objectContaining({ id: 'second', stage: 'design', sortOrder: 10, predecessorSortOrders: [30] }),
       expect.objectContaining({ name: '新任务', stage: 'deliver', sortOrder: 40, predecessorSortOrders: [] }),
+    ]))
+  })
+
+  it('前置任务仅允许单选并继续按数组格式保存', async () => {
+    api.listProjectPlanTemplates.mockResolvedValue([groupedTemplate()])
+    const wrapper = render()
+    await flushPromises()
+    const predecessor = wrapper.find('.pdm-template-row').findAllComponents({ name: 'ElSelect' })[1]!
+    expect(predecessor.props('multiple')).toBeFalsy()
+    predecessor.vm.$emit('update:modelValue', 20)
+    await flushPromises()
+    await wrapper.find('footer .pdm-primary-action').trigger('click')
+    await flushPromises()
+    expect(api.saveProjectPlanTemplate.mock.calls[0]![1].tasks).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: 'task', predecessorSortOrders: [20] }),
     ]))
   })
 
@@ -165,7 +180,7 @@ describe('设置页项目计划模板', () => {
     const wrapper = render()
     await flushPromises()
     const row = wrapper.find('.pdm-template-row')
-    row.findAllComponents({ name: 'ElSelect' })[1]!.vm.$emit('update:modelValue', 'fixed')
+    row.findAllComponents({ name: 'ElSelect' })[0]!.vm.$emit('update:modelValue', 'fixed')
     await flushPromises()
     row.findAllComponents({ name: 'ElInputNumber' })[0]!.vm.$emit('update:modelValue', 2)
     await flushPromises()

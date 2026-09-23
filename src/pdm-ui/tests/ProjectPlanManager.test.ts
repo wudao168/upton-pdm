@@ -3,6 +3,7 @@ import { mount, flushPromises } from '@vue/test-utils'
 import { beforeEach, afterEach, describe, it, expect, vi } from 'vitest'
 import ProjectPlanManager from '../src/components/ProjectPlanManager.vue'
 import type { ProjectPlan, ProjectPlanTemplate, ProjectSummary } from '../src/types'
+import { userDisplayNameKey } from '../src/userDisplay'
 
 const api = vi.hoisted(() => ({
   generateProjectPlan: vi.fn(), deleteProjectPlan: vi.fn(), supplementProjectPlanStageSchedule: vi.fn(), submitProjectPlan: vi.fn(), submitProjectPlanChange: vi.fn(), completeProjectPlanChange: vi.fn(), abandonProjectPlanChange: vi.fn(), decideProjectPlan: vi.fn(),
@@ -17,7 +18,7 @@ const planExport = vi.hoisted(() => ({ exportProjectPlansExcel: vi.fn(), exportP
 vi.mock('../src/projectPlanExport', () => planExport)
 
 const base = { owner: 'pm', primaryProjectManager: 'pm', collaborativeProjectManagers: [], designLeads: [], designers: [], quantity: 1, serialNumbers: [], responsibleUsers: [] }
-const root = { ...base, id: 'root', name: '主项目', code: 'P1' } as unknown as ProjectSummary
+const root = { ...base, id: 'root', name: '主项目', code: 'P1', customerName: '测试客户', projectTypeCode: '自动化设备', deviceModel: 'AK-1', serialNumbers: ['70000032'], executionUnitName: 'T3事业部', designLead: 'designer', designers: ['designer'] } as unknown as ProjectSummary
 const child = { ...base, id: 'child', name: '设备一', code: 'P1-1', parentProjectId: 'root' } as unknown as ProjectSummary
 const target = { ...child, id: 'target', name: '设备二', code: 'P1-2' }
 const approvedTarget = { ...child, id: 'approved', name: '设备三', code: 'P1-3' }
@@ -32,7 +33,8 @@ const draft = {
 const template = { ...metadata, id: 'template', name: '设备模板', isActive: true, createdBy: 'admin', rowVersion: 1, stages, tasks: [{ id: 'tt', name: '方案检查', stage: 'custom-review', durationRatio: .5, predecessorSortOrders: [], weight: 1, isRequired: true, isMilestone: false, defaultAssigneeRole: 'ProjectManager', sortOrder: 10 }] } as ProjectPlanTemplate
 const wrappers: ReturnType<typeof mount>[] = []
 function render(project = child) {
-  const wrapper = mount(ProjectPlanManager, { attachTo: document.body, props: { project, projects: [root, child, target, approvedTarget], token: 'test', currentUsername: 'pm', currentRole: 'ProjectManager', developer: false, canEdit: true, canManageSystemTemplates: false }, global: { plugins: [ElementPlus] } })
+  const names: Record<string, string> = { pm: '刘鹏搏', designer: '马文豪' }
+  const wrapper = mount(ProjectPlanManager, { attachTo: document.body, props: { project, projects: [root, child, target, approvedTarget], companyName: '昆山阿普顿自动化系统有限公司', token: 'test', currentUsername: 'pm', currentRole: 'ProjectManager', developer: false, canEdit: true, canManageSystemTemplates: false }, global: { plugins: [ElementPlus], provide: { [userDisplayNameKey as symbol]: (username?: string | null, emptyText = '—') => username ? names[username] ?? username : emptyText } } })
   wrappers.push(wrapper)
   return wrapper
 }
@@ -63,7 +65,7 @@ afterEach(() => { wrappers.splice(0).forEach(item => item.unmount()); document.b
 
 describe('项目计划审批和配置', () => {
   it('可按主项目或多个子项目导出 Excel 和 PDF', async () => {
-    const rootPlan = { ...structuredClone(draft), id: 'root-plan', projectId: 'root' }
+    const rootPlan = { ...structuredClone(draft), id: 'root-plan', projectId: 'root', tasks: [{ ...structuredClone(draft.tasks[0]!), assignee: 'pm' }] }
     api.readProjectPlan.mockResolvedValue(rootPlan)
     api.readProjectPlanPortfolio.mockResolvedValue({ rootProjectId: 'root', currentStage: 'Design', completionPercent: 0, laggingProjectCount: 0, riskProjectCount: 0, projects: [
       { projectId: 'root', projectCode: 'P1', projectName: '主项目', isRoot: true, hasPlan: true, plan: rootPlan },
@@ -75,7 +77,12 @@ describe('项目计划审批和配置', () => {
     await clickText('导出计划')
     expect(document.body.textContent).toContain('请选择导出主项目计划')
     await clickText('导出 Excel')
-    expect(planExport.exportProjectPlansExcel).toHaveBeenCalledWith('P1', [expect.objectContaining({ projectCode: 'P1', plan: expect.objectContaining({ projectId: 'root' }) })])
+    expect(planExport.exportProjectPlansExcel).toHaveBeenCalledWith('P1', [expect.objectContaining({
+      projectCode: 'P1',
+      plan: expect.objectContaining({ projectId: 'root' }),
+      assigneeDisplayNames: { pm: '刘鹏搏' },
+      metadata: expect.objectContaining({ companyName: '昆山阿普顿自动化系统有限公司', customerName: '测试客户', projectManager: '刘鹏搏', designLead: '马文豪', engineers: ['马文豪'] }),
+    })])
 
     await clickText('导出计划')
     await wrapper.get('.pdm-plan-export__scope input[value="children"]').setValue(true)
@@ -309,11 +316,21 @@ describe('项目计划审批和配置', () => {
     expect(editable.changeDraftSource.tasks[0]!.plannedFinish).toBe('2026-09-14')
   })
 
-  it('周视图第三行居中显示ISO周号并在线上显示周一起始日，其他视图仍按日期自适应', async () => {
+  it('默认日视图在计划首尾各留两天空白，周视图仍显示ISO周号和周一起始日', async () => {
     vi.spyOn(HTMLElement.prototype, 'clientWidth', 'get').mockReturnValue(1181)
     api.readProjectPlan.mockResolvedValue({ ...structuredClone(draft), tasks: [{ ...structuredClone(draft.tasks[0]!), plannedStart: '2026-09-10', plannedFinish: '2026-11-08' }] })
     const wrapper = render()
     await flushPromises()
+    const dayButton = wrapper.findAll('.pdm-plan-zoom button').find(button => button.text() === '日')!
+    expect(dayButton.classes()).toContain('is-active')
+    expect(wrapper.find('.pdm-gantt-tick time').attributes('datetime')).toBe('2026-09-08')
+    const timelineWidth = Number.parseFloat((wrapper.find('.pdm-gantt-timeline-head').element as HTMLElement).style.width)
+    const barStyle = (wrapper.find('.pdm-gantt-timeline-row .pdm-gantt-bar').element as HTMLElement).style
+    expect(Number.parseFloat(barStyle.left)).toBeCloseTo((timelineWidth / 64) * 2)
+    expect(Number.parseFloat(barStyle.left) + Number.parseFloat(barStyle.width)).toBeLessThan(timelineWidth)
+    expect(timelineWidth).toBe(473)
+    const weekButton = wrapper.findAll('.pdm-plan-zoom button').find(button => button.text() === '周')!
+    await weekButton.trigger('click')
     const nonWorkingDays = wrapper.find<HTMLInputElement>('input[aria-label="显示节假日和周日背景色"]')
     expect(nonWorkingDays.element.checked).toBe(false)
     expect(nonWorkingDays.element.parentElement?.textContent).toContain('休息日')
@@ -465,7 +482,11 @@ describe('项目计划审批和配置', () => {
     expect(api.deleteProjectPlan).toHaveBeenCalledWith('root', 1, true, 'test')
   })
 
-  it('父阶段按子任务统计而不显示分配窗口，重新生成仍沿用原始60天', async () => {
+  it('父阶段按子任务统计，重新生成沿用原始总工期并实时预览阶段分配', async () => {
+    api.listProjectPlanTemplates.mockResolvedValue([{ ...structuredClone(template), stages: [
+      { code: 'custom-review', name: '设计', participatesInDelivery: true, durationRatio: .3, progressRatio: .3 },
+      { code: 'custom-handover', name: '交付', participatesInDelivery: true, durationRatio: .7, progressRatio: .7 },
+    ] }])
     api.readProjectPlan.mockResolvedValue({ ...structuredClone(draft), stages: [
       { code: 'custom-review', name: '设计', participatesInDelivery: true, durationRatio: .3, progressRatio: .3 },
       { code: 'custom-handover', name: '交付', participatesInDelivery: true, durationRatio: .7, progressRatio: .7 },
@@ -478,6 +499,15 @@ describe('项目计划审批和配置', () => {
     expect(wrapper.text()).not.toContain('补充阶段排期')
     await clickText('重新生成')
     expect(document.querySelector<HTMLInputElement>('input[aria-label="交付总工期"]')!.value).toBe('60')
+    expect(document.querySelector('[aria-label="交付阶段工期预览"]')?.textContent).toContain('设计18 天')
+    expect(document.querySelector('[aria-label="交付阶段工期预览"]')?.textContent).toContain('交付42 天')
+    const durationInput = document.querySelector<HTMLInputElement>('input[aria-label="交付总工期"]')!
+    durationInput.value = '61'
+    durationInput.dispatchEvent(new Event('input', { bubbles: true }))
+    durationInput.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushPromises()
+    expect(document.querySelector('[aria-label="交付阶段工期预览"]')?.textContent).toContain('设计18 天')
+    expect(document.querySelector('[aria-label="交付阶段工期预览"]')?.textContent).toContain('交付43 天')
   })
 
   it('旧计划直接按子任务显示，不再提供补充阶段区间入口或修改任务', async () => {
@@ -493,14 +523,14 @@ describe('项目计划审批和配置', () => {
     expect(api.generateProjectPlan).not.toHaveBeenCalled()
   })
 
-  it('已生效任务行内填写完成日期即完成，阶段完成日期汇总，生效信息替代资源冲突卡片', async () => {
+  it('已生效任务行内填写完成日期即完成，阶段完成日期汇总并显示项目发货日期', async () => {
     const approved = { ...structuredClone(draft), approvalStatus: 'Approved', approvedBy: 'approver', approvedAt: '2026-09-10T10:00:00Z',
       tasks: draft.tasks.map(task => ({ ...task, actualStart: '2026-09-10', actualFinish: '2026-09-14' })) }
     api.readProjectPlan.mockResolvedValue(approved)
     api.updateProjectPlanTaskProgress.mockResolvedValue(approved)
     const wrapper = render()
     await flushPromises()
-    expect(wrapper.find('.pdm-plan-summary').text()).toContain('生效信息已生效approver 批准')
+    expect(wrapper.find('.pdm-plan-summary').text()).toContain('项目发货日期2026-09-15')
     expect(wrapper.find('.pdm-plan-summary').text()).not.toContain('资源冲突')
     expect(wrapper.find('.pdm-plan-approval-strip').exists()).toBe(false)
     expect(wrapper.find('.pdm-gantt-bar').classes()).not.toContain('is-neutral')
@@ -518,6 +548,22 @@ describe('项目计划审批和配置', () => {
     expect(api.saveProjectPlan).not.toHaveBeenCalled()
     expect(wrapper.find('.pdm-gantt-info-row.is-stage').text()).toContain('2026-09-15')
     expect(wrapper.find('.pdm-gantt-info-row.is-stage [aria-label$="完成日期"]').exists()).toBe(false)
+  })
+
+  it('项目发货日期卡片按自然日显示倒计时', async () => {
+    const date = new Date()
+    date.setDate(date.getDate() + 7)
+    const shippingDate = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`
+    api.readProjectPlan.mockResolvedValue({ ...structuredClone(draft), plannedFinish: shippingDate, tasks: [
+      { ...structuredClone(draft.tasks[0]!), plannedFinish: shippingDate },
+    ] })
+    const wrapper = render()
+    await flushPromises()
+    const countdown = wrapper.find('.pdm-plan-shipping-countdown')
+    expect(countdown.attributes('aria-label')).toBe('距发货 7 天')
+    expect(countdown.find('strong').text()).toBe('7')
+    expect(countdown.find('span').text()).toBe('距发货（天）')
+    expect(countdown.classes()).not.toContain('is-overdue')
   })
 
   it('完成日期仅生效计划的责任人或管理人员可填报，未填报时显示“完成”按钮', async () => {
@@ -735,12 +781,12 @@ describe('项目计划审批和配置', () => {
   })
 
   it('新计划交付进度与独立阶段分别显示，同责任人并行只提示不改变日期', async () => {
-    const allocated = { ...structuredClone(draft), approvalStatus: 'Approved', stages: [
+    const allocated = { ...structuredClone(draft), approvalStatus: 'Approved', plannedFinish: '2026-09-30', stages: [
       { code: 'custom-review', name: '方案确认', participatesInDelivery: true, durationRatio: 1, progressRatio: 1 },
       { code: 'client', name: '客户端调试', participatesInDelivery: false, independentDurationDays: 10 },
     ], tasks: [
       { ...draft.tasks[0]!, assignee: 'pm', completionPercent: 50 },
-      { ...draft.tasks[0]!, id: 'other', name: '现场调试', stage: 'client', assignee: 'pm', completionPercent: 0 },
+      { ...draft.tasks[0]!, id: 'other', name: '现场调试', stage: 'client', assignee: 'pm', completionPercent: 0, plannedStart: '2026-09-16', plannedFinish: '2026-09-30' },
     ] }
     api.readProjectPlan.mockResolvedValue(allocated)
     const wrapper = render()
@@ -752,7 +798,11 @@ describe('项目计划审批和配置', () => {
     await flushPromises()
     expect(document.querySelector('.pdm-plan-stage-details')!.textContent).toContain('客户端调试（交付后）：0%')
     await clickText('关闭')
-    expect(wrapper.find('.pdm-plan-summary').text()).toContain('生效信息已生效')
+    expect(wrapper.find('.pdm-plan-summary').text()).toContain('项目发货日期2026-09-15')
+    expect(wrapper.find('.pdm-plan-summary').text()).not.toContain('2026-09-30')
+    expect(wrapper.find('.pdm-gantt-shipping.is-header').attributes('title')).toBe('项目发货日期：2026-09-15')
+    expect(Number.parseFloat((wrapper.find('.pdm-gantt-shipping.is-header').element as HTMLElement).style.left)).toBeGreaterThan(0)
+    expect(wrapper.find('.pdm-plan-legend').text()).toContain('发货日')
     expect(wrapper.find('.pdm-plan-summary').text()).not.toContain('资源冲突')
     expect(api.saveProjectPlan).not.toHaveBeenCalled()
   })
@@ -783,11 +833,11 @@ describe('项目计划审批和配置', () => {
     try {
       const wrapper = render()
       await flushPromises()
-      expect((wrapper.find('.pdm-gantt-timeline-head').element as HTMLElement).style.width).toBe('390px')
+      expect((wrapper.find('.pdm-gantt-timeline-head').element as HTMLElement).style.width).toBe('272px')
       width = 1400
       resized()
       await flushPromises()
-      expect((wrapper.find('.pdm-gantt-timeline-head').element as HTMLElement).style.width).toBe('810px')
+      expect((wrapper.find('.pdm-gantt-timeline-head').element as HTMLElement).style.width).toBe('692px')
       expect(wrapper.find('.pdm-gantt-bar').classes()).toContain('is-neutral')
       expect(wrapper.find('.pdm-stage-badge').exists()).toBe(false)
     } finally {
@@ -944,7 +994,7 @@ describe('项目计划审批和配置', () => {
     await wrapper.find('[aria-label="展开全部阶段"]').trigger('click')
     expect(wrapper.findAll('.pdm-gantt-info-row')).toHaveLength(wrapper.findAll('.pdm-gantt-timeline-row').length)
     expect(wrapper.findAll('.pdm-plan-toolbar__actions > button').slice(0, 4).map(item => item.text())).toEqual(['删除计划', '提交审批', '计划模板', '刷新'])
-    expect(wrapper.find('.pdm-plan-summary').text()).toContain('生效信息草稿')
+    expect(wrapper.find('.pdm-plan-summary').text()).toContain('项目发货日期2026-09-15')
   })
 
   it('阶段列紧邻任务显示所属阶段，折叠信息列后释放时间轴空间', async () => {
@@ -956,12 +1006,12 @@ describe('项目计划审批和配置', () => {
     expect(wrapper.find('[aria-label="折叠信息列"]').exists()).toBe(true)
     expect(wrapper.find('.pdm-gantt-info-row.is-stage .pdm-gantt-stage-cell').text()).toBe('方案确认')
     expect(wrapper.find('.pdm-gantt-info-row.is-task .pdm-gantt-stage-cell').text()).toBe('方案确认')
-    expect((wrapper.find('.pdm-gantt-timeline-head').element as HTMLElement).style.width).toBe('800px')
+    expect((wrapper.find('.pdm-gantt-timeline-head').element as HTMLElement).style.width).toBe('682px')
     await wrapper.find('[aria-label="折叠信息列"]').trigger('click')
     expect(wrapper.find('.pdm-gantt-table').classes()).toContain('is-info-collapsed')
     expect(wrapper.find('.pdm-gantt-info-head').text()).toBe('项目 / 任务计划日期工期')
     expect(wrapper.find('.pdm-gantt-stage-cell').exists()).toBe(false)
-    expect((wrapper.find('.pdm-gantt-timeline-head').element as HTMLElement).style.width).toBe('1040px')
+    expect((wrapper.find('.pdm-gantt-timeline-head').element as HTMLElement).style.width).toBe('1008px')
     await wrapper.find('[aria-label="展开信息列"]').trigger('click')
     expect(wrapper.find('.pdm-gantt-table').classes()).not.toContain('is-info-collapsed')
     expect(wrapper.find('.pdm-gantt-info-head').text()).toBe('项目 / 任务阶段责任人进度计划日期工期完成日期')
@@ -1158,7 +1208,7 @@ describe('项目计划审批和配置', () => {
     expect(wrapper.find('[aria-label="编辑方案检查计划日期"]').exists()).toBe(true)
     expect(wrapper.find('[aria-label="编辑方案检查工期"]').exists()).toBe(true)
     expect(wrapper.text()).toContain('重新生成')
-    expect(wrapper.find('.pdm-plan-summary').text()).toContain('生效信息待审批')
+    expect(wrapper.find('.pdm-plan-summary').text()).toContain('项目发货日期2026-09-15')
     expect(wrapper.text()).not.toContain('修改计划会自动撤回本次审批')
     expect(wrapper.text()).toContain('删除计划')
   })

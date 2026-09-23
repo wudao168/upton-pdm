@@ -260,6 +260,7 @@ function appendSelectedItems() {
       catalogItemId: item.id,
       categoryName: category.name,
       validationContent: item.content,
+      validationStandard: null,
       informationSource: item.defaultInformationSource,
       validationDate: null,
       result: null,
@@ -278,7 +279,7 @@ function addManualRow(afterIndex: number) {
   const insertAt = canAppend.value ? rows.value.length : afterIndex + 1
   rows.value.splice(insertAt, 0, {
     id: createClientId(), catalogCategoryId: null, catalogItemId: null, categoryName: '人工项', validationContent: '',
-    informationSource: '内部评审', validationDate: null, result: null, reviewer: null, responsiblePerson: null, remark: null, sortOrder: rows.value.length + 1,
+    validationStandard: null, informationSource: '内部评审', validationDate: null, result: null, reviewer: null, responsiblePerson: null, remark: null, sortOrder: rows.value.length + 1,
   })
   normalizeRowOrder()
 }
@@ -375,6 +376,7 @@ function serializePlanItem(item: ProjectValidationPlanItem, index: number) {
   return {
     catalogItemId: item.catalogItemId,
     validationContent: item.catalogItemId ? null : item.validationContent,
+    validationStandard: item.validationStandard || null,
     informationSource: item.informationSource || null,
     validationDate: item.validationDate || null,
     result: item.result || null,
@@ -813,12 +815,13 @@ function approvalTaskStatus(task: ProjectValidationPlan['approvalTasks'][number]
     <div v-if="loading" class="validation-plan__empty">正在加载验证计划…</div>
     <div v-else-if="rows.length" class="validation-plan__table-scroll">
       <table class="validation-plan__table">
-        <thead><tr><th>序号</th><th>分类</th><th>验证内容</th><th>信息来源</th><th>验证日期</th><th>责任人</th><th>结果</th><th>审核人</th><th>备注</th><th>操作</th></tr></thead>
+        <thead><tr><th>序号</th><th>分类</th><th>验证内容</th><th>验证标准</th><th>信息来源</th><th>验证日期</th><th>责任人</th><th>结果</th><th>审核人</th><th>备注</th><th>操作</th></tr></thead>
         <tbody>
           <tr v-for="(row, index) in rows" :key="row.id" :data-row-index="index" :class="{ 'is-row-dragging': draggedRowIndex === index, 'is-drag-over-before': dragOverRowIndex === index && dragOverPosition === 'before', 'is-drag-over-after': dragOverRowIndex === index && dragOverPosition === 'after' }">
             <td class="is-sequence">{{ index + 1 }}</td>
             <td><span class="validation-plan__category">{{ row.categoryName }}</span></td>
             <td class="is-content"><input v-if="!row.catalogItemId" v-model="row.validationContent" :disabled="!isRowEditable(row)" maxlength="1500" placeholder="请输入验证内容"><span v-else :title="row.validationContent">{{ row.validationContent }}</span></td>
+            <td class="is-standard"><input v-model="row.validationStandard" :disabled="!isRowEditable(row)" maxlength="1000" placeholder="填写验证标准" :aria-label="`第 ${index + 1} 行验证标准`" :title="row.validationStandard || ''"></td>
             <td><select v-model="row.informationSource" :disabled="!isRowEditable(row)"><option value="">—</option><option v-for="source in informationSources" :key="source" :value="source">{{ source }}</option></select></td>
             <td class="validation-plan__date-cell"><input v-model="row.validationDate" :disabled="!isRowEditable(row)" type="date" tabindex="-1" aria-hidden="true"><button type="button" :disabled="!isRowEditable(row)" title="选择验证日期" aria-label="选择验证日期" @click="openDatePicker($event)"><CalendarDays :size="14" /></button></td>
             <td><input v-model="row.responsiblePerson" :disabled="!isRowEditable(row)" maxlength="100" placeholder="责任人"></td>
@@ -830,7 +833,7 @@ function approvalTaskStatus(task: ProjectValidationPlan['approvalTasks'][number]
         </tbody>
       </table>
     </div>
-    <div v-else class="validation-plan__empty"><ListChecks :size="42" /><h3>当前项目还没有验证检查项</h3><p>按分类从全局检查项库选取，或直接添加人工项。</p><div v-if="canAdd" class="validation-plan__actions"><button type="button" class="pdm-primary-action" @click="openSelection">选择检查项</button><button type="button" class="pdm-secondary-action" @click="addManualRow(-1)"><Plus :size="14" />添加人工项</button></div></div>
+    <div v-else class="validation-plan__empty"><ListChecks :size="42" /><h3>当前项目还没有验证检查项</h3><p>按分类从全局检查项库选取，或直接添加人工项。</p><div v-if="canAdd" class="validation-plan__actions"><button type="button" class="pdm-primary-action" @click="openSelection">选取内容</button><button type="button" class="pdm-secondary-action" @click="addManualRow(-1)"><Plus :size="14" />添加人工项</button></div></div>
     <section v-if="plan?.approvalTasks?.length || plan?.attachments?.length || executionRecords.length" class="validation-plan__records">
       <div v-if="plan?.approvalTasks?.length"><strong>审批记录</strong><span v-for="task in plan.approvalTasks" :key="task.id">{{ task.stepOrder }}. {{ task.stepName }} · {{ displayUserName(task.assignee, task.assignee) }} · {{ approvalTaskStatus(task) }}</span></div>
       <div v-if="plan?.attachments?.length"><strong>归档文件（验收资料 / 验证计划）</strong><div v-for="file in plan.attachments" :key="file.id" class="validation-plan__attachment-row"><button type="button" class="validation-plan__attachment" :title="`SHA-256 ${file.sha256}`" @click="downloadAttachment(file.id, file.originalFileName)">{{ file.kind === 'PlanDocument' || file.kind === 0 ? '验证计划' : '佐证附件' }} · {{ file.originalFileName }} · V{{ file.fileVersion }} · {{ fileSize(file.fileLength) }} · {{ displayUserName(file.uploadedBy, file.uploadedBy) }}</button><button v-if="normalizedState === 'Effective' && isRecognizableAttachment(file)" type="button" class="pdm-text-action" :disabled="recognizing" @click="recognizeAttachment(file)">{{ recognizing ? '识别中…' : '识别结果' }}</button></div></div>
@@ -896,7 +899,7 @@ function approvalTaskStatus(task: ProjectValidationPlan['approvalTasks'][number]
 .validation-plan__meta input { width:190px; height:30px; padding:0 9px; border:1px solid var(--pdm-border); border-radius:5px; background:var(--pdm-surface); color:var(--pdm-text); }
 .validation-plan__dirty { margin-left:auto; color:var(--pdm-orange); font-size:12px; }
 .validation-plan__table-scroll { min-height:0; flex:1 1 auto; overflow:auto; border:1px solid var(--pdm-border); border-radius:7px; }
-.validation-plan__table { width:100%; min-width:1430px; border-collapse:collapse; table-layout:fixed; font-size:12px; }
+.validation-plan__table { width:100%; min-width:1500px; border-collapse:collapse; table-layout:fixed; font-size:12px; }
 .validation-plan-summary__table { width:100%; min-width:1240px; border-collapse:collapse; table-layout:fixed; font-size:12px; }
 .validation-plan-summary__table th { position:sticky; top:0; z-index:1; padding:9px 6px; border:0; background:#f3f6f9; color:var(--pdm-muted); font-weight:500; text-align:center; vertical-align:middle; }
 .validation-plan-summary__table tbody tr { background:var(--pdm-surface); cursor:pointer; }
@@ -913,9 +916,10 @@ function approvalTaskStatus(task: ProjectValidationPlan['approvalTasks'][number]
 .validation-plan__table th { position:sticky; top:0; z-index:1; padding:9px 3px; border:0; background:#f3f6f9; color:var(--pdm-muted); font-weight:500; text-align:center; vertical-align:middle; }
 .validation-plan__table tbody tr { background:var(--pdm-surface); }
 .validation-plan__table td { padding:0 3px; border:0; border-top:1px solid var(--pdm-border-soft); color:var(--pdm-text); text-align:center; vertical-align:middle; }
-.validation-plan__table th:nth-child(1){width:50px}.validation-plan__table th:nth-child(2){width:105px}.validation-plan__table th:nth-child(3){width:320px}.validation-plan__table th:nth-child(4){width:110px}.validation-plan__table th:nth-child(5){width:125px}.validation-plan__table th:nth-child(6){width:145px}.validation-plan__table th:nth-child(7){width:110px}.validation-plan__table th:nth-child(8){width:110px}.validation-plan__table th:nth-child(9){width:145px}.validation-plan__table th:nth-child(10){width:94px}
+.validation-plan__table th:nth-child(1){width:50px}.validation-plan__table th:nth-child(2){width:105px}.validation-plan__table th:nth-child(3){width:320px}.validation-plan__table th:nth-child(4){width:180px}.validation-plan__table th:nth-child(5){width:110px}.validation-plan__table th:nth-child(6){width:125px}.validation-plan__table th:nth-child(7){width:145px}.validation-plan__table th:nth-child(8){width:110px}.validation-plan__table th:nth-child(9){width:110px}.validation-plan__table th:nth-child(10){width:145px}.validation-plan__table th:nth-child(11){width:94px}
 .validation-plan__table input,.validation-plan__table select { box-sizing:border-box; width:100%; min-width:0; height:24px; padding:3px 2px; border:1px solid transparent; border-radius:4px; background:transparent; color:var(--pdm-text); font:inherit; text-align:center; }
 .validation-plan__table input:focus,.validation-plan__table select:focus { border-color:var(--pdm-blue); background:var(--pdm-surface); outline:2px solid var(--pdm-theme-accent-focus); }
+.validation-plan__table .is-standard,.validation-plan__table th:nth-child(4),.validation-plan__table .is-standard input { text-align:center; }
 .validation-plan__table input:disabled,.validation-plan__table select:disabled { border-color:transparent; background:transparent; color:inherit; opacity:1; }
 .validation-plan__date-cell { position:relative; }.validation-plan__date-cell input[type="date"] { position:absolute; width:1px; height:1px; opacity:0; pointer-events:none; }.validation-plan__date-cell button { display:inline-grid; place-items:center; width:24px; height:24px; padding:0; border:1px solid var(--pdm-theme-accent-border); border-radius:4px; background:var(--pdm-theme-accent-soft); color:var(--pdm-primary); }.validation-plan__date-cell button:disabled { opacity:.55; }.validation-plan__table .is-sequence { color:var(--pdm-muted); white-space:nowrap; }.validation-plan__drag-handle { display:inline-block; margin-right:4px; color:var(--pdm-primary); cursor:grab; touch-action:none; user-select:none; }.validation-plan__drag-handle:focus-visible { outline:2px solid var(--pdm-theme-accent-focus); outline-offset:2px; border-radius:2px; }.validation-plan__table tbody tr.is-row-dragging { opacity:.5; }.validation-plan__table tbody tr.is-drag-over-before { box-shadow:inset 0 2px 0 var(--pdm-primary); }.validation-plan__table tbody tr.is-drag-over-after { box-shadow:inset 0 -2px 0 var(--pdm-primary); }.validation-plan__table th:nth-child(3),.validation-plan__table .is-content { text-align:left; }.validation-plan__table .is-content { line-height:1.4; white-space:normal; }.validation-plan__table .is-content input { text-align:left; }
 .validation-plan__category { display:inline-block; padding:3px 7px; border-radius:999px; background:#e8f7f3; color:var(--pdm-green); }

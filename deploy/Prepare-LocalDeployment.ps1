@@ -82,6 +82,16 @@ function Protect-SecretFile([string]$path) {
     }
 }
 
+function Copy-WebUi([string]$destinationRoot) {
+    $sourceRoot = Join-Path $projectRoot 'src\pdm-ui\dist'
+    Get-ChildItem -LiteralPath $sourceRoot -Recurse -File | ForEach-Object {
+        $relativePath = $_.FullName.Substring($sourceRoot.Length + 1)
+        $destination = Join-Path $destinationRoot $relativePath
+        New-Item -ItemType Directory -Path (Split-Path -Parent $destination) -Force | Out-Null
+        Copy-Item -LiteralPath $_.FullName -Destination $destination -Force
+    }
+}
+
 foreach ($directory in @(
     $runtimeRoot,
     $downloadRoot,
@@ -263,9 +273,7 @@ finally {
 if ($ServerOnly) {
     $webRoot = Join-Path $apiOutput 'wwwroot'
     New-Item -ItemType Directory -Path $webRoot -Force | Out-Null
-    Get-ChildItem -LiteralPath (Join-Path $projectRoot 'src\pdm-ui\dist') -Force | ForEach-Object {
-        Copy-Item -LiteralPath $_.FullName -Destination (Join-Path $webRoot $_.Name) -Recurse -Force
-    }
+    Copy-WebUi $webRoot
     $desktopPackage = if ($null -ne $existingBootstrap -and $null -ne $existingBootstrap.Desktop) { $existingBootstrap.Desktop } else { [ordered]@{ Version = ''; PackageUrl = ''; Sha256 = '' } }
     $addinPackage = if ($null -ne $existingBootstrap -and $null -ne $existingBootstrap.SolidWorksAddin) { $existingBootstrap.SolidWorksAddin } else { [ordered]@{ Version = ''; PackageUrl = ''; Sha256 = '' } }
     $releaseHistory = Get-UplmReleaseHistory `
@@ -312,8 +320,14 @@ $clientBuildOutput = Join-Path $projectRoot 'src\Pdm.Desktop\bin\Release\net48'
 Get-ChildItem -LiteralPath $clientBuildOutput |
     Where-Object { $_.Name -ne 'Upton.Pdm.Desktop.exe.WebView2' } |
     Copy-Item -Destination $clientOutput -Recurse -Force
+Copy-WebUi (Join-Path $clientOutput 'ui')
 Copy-Item -Path (Join-Path $projectRoot 'src\Pdm.SolidWorks.Addin\bin\Release\net48\*') -Destination $addinOutput -Recurse -Force
 Copy-Item -Path (Join-Path $projectRoot 'src\Pdm.SolidWorks.PreviewWorker\bin\Release\net48\*') -Destination $previewWorkerOutput -Recurse -Force
+$apiWorkerOutput = Join-Path $apiOutput 'preview-worker'
+New-Item -ItemType Directory -Path $apiWorkerOutput -Force | Out-Null
+Get-ChildItem -LiteralPath $previewWorkerOutput -File | ForEach-Object {
+    Copy-Item -LiteralPath $_.FullName -Destination $apiWorkerOutput -Force
+}
 
 $bootstrapUrl = "$lanBase/client-bootstrap.json"
 $locator = [ordered]@{ BootstrapUrl = $bootstrapUrl }
@@ -325,9 +339,7 @@ foreach ($output in @($clientOutput, $addinOutput)) {
 $webRoot = Join-Path $apiOutput 'wwwroot'
 $updatesRoot = Join-Path $webRoot 'updates'
 New-Item -ItemType Directory -Path $updatesRoot -Force | Out-Null
-Get-ChildItem -LiteralPath (Join-Path $projectRoot 'src\pdm-ui\dist') -Force | ForEach-Object {
-    Copy-Item -LiteralPath $_.FullName -Destination (Join-Path $webRoot $_.Name) -Recurse -Force
-}
+Copy-WebUi $webRoot
 $desktopArchive = Join-Path $updatesRoot "uplm-desktop-$ReleaseVersion.zip"
 $addinArchive = Join-Path $updatesRoot "uplm-solidworks-addin-$ReleaseVersion.zip"
 Compress-Archive -Path (Join-Path $clientOutput '*') -DestinationPath $desktopArchive -CompressionLevel Optimal -Force

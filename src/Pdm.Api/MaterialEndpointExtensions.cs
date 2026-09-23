@@ -81,10 +81,13 @@ public static class MaterialEndpointExtensions
             return Results.Ok(MapMaterial(await service.SetCoverAsync(materialId, request.AttachmentId, request.ExpectedRowVersion, actor, role, cancellationToken)));
         });
 
-        api.MapPost("/materials", async (SaveMaterialRequest request, HttpContext context, MaterialService service, CancellationToken cancellationToken) =>
+        api.MapPost("/materials", async (SaveMaterialRequest request, HttpContext context, MaterialService service, MaterialSyncBatchService syncBatches, CancellationToken cancellationToken) =>
         {
             var (actor, role) = CurrentUser(context.User);
-            return Results.Ok(MapMaterial(await service.CreateAsync(ToCommand(request), actor, role, cancellationToken)));
+            var created = await service.CreateWithApprovalPolicyAsync(ToCommand(request), actor, role, cancellationToken);
+            if (created.Task?.Status is MaterialSyncStatus.PreviewReady or MaterialSyncStatus.Failed or MaterialSyncStatus.NeedsReview)
+                await syncBatches.CreateAutomaticAsync([created.Task.Id], actor, cancellationToken);
+            return Results.Ok(MapMaterial(created.Material));
         });
 
         api.MapPost("/materials/import/preview", async (IFormFile file, HttpContext context, MaterialService service, CancellationToken cancellationToken) =>
@@ -96,13 +99,15 @@ public static class MaterialEndpointExtensions
             return Results.Ok(await service.PreviewImportAsync(rows, actor, role, cancellationToken));
         }).DisableAntiforgery();
 
-        api.MapPost("/materials/import", async (IFormFile file, HttpContext context, MaterialService service, CancellationToken cancellationToken) =>
+        api.MapPost("/materials/import", async (IFormFile file, HttpContext context, MaterialService service, MaterialSyncBatchService syncBatches, CancellationToken cancellationToken) =>
         {
             ValidateMaterialImportFile(file);
             var (actor, role) = CurrentUser(context.User);
             await using var input = file.OpenReadStream();
             var rows = ReadMaterialImportWorkbook(input);
             var result = await service.ImportAsync(rows, actor, role, cancellationToken);
+            if (result.Tasks.Count > 0)
+                await syncBatches.CreateAutomaticAsync(result.Tasks.Select(task => task.Id).ToArray(), actor, cancellationToken);
             return Results.Ok(new { result.ImportedCount, Materials = result.Materials.Select(MapMaterial) });
         }).DisableAntiforgery();
 
@@ -289,6 +294,20 @@ public static class MaterialEndpointExtensions
         {
             var (actor, role) = CurrentUser(context.User);
             return Results.Ok(await service.UpdateNumberingSettingsAsync(request.StartSequence, actor, role, cancellationToken));
+        });
+
+        api.MapGet("/material-approval-rules", async (HttpContext context, MaterialService service, CancellationToken cancellationToken) =>
+        {
+            var (actor, role) = CurrentUser(context.User);
+            return Results.Ok(await service.GetApprovalRulesAsync(actor, role, cancellationToken));
+        });
+
+        api.MapPut("/material-approval-rules", async (UpdateMaterialApprovalRulesRequest request, HttpContext context, MaterialService service, CancellationToken cancellationToken) =>
+        {
+            var (actor, role) = CurrentUser(context.User);
+            return Results.Ok(await service.UpdateApprovalRulesAsync(
+                request.Rules.Select(rule => new MaterialApprovalRule(rule.CategoryCode, rule.RequiresApproval)).ToArray(),
+                actor, role, cancellationToken));
         });
 
         api.MapGet("/material-duplicate-rules", async (HttpContext context, MaterialService service, CancellationToken cancellationToken) =>

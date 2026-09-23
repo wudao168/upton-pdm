@@ -27,7 +27,8 @@ public sealed record SaveProjectValidationPlanItemCommand(
     string? Reviewer,
     string? ResponsiblePerson,
     string? Remark,
-    int SortOrder);
+    int SortOrder,
+    string? ValidationStandard = null);
 
 public sealed record SaveProjectValidationPlanCommand(
     string? PreparedBy,

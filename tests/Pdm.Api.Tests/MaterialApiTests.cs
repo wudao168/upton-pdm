@@ -313,7 +313,8 @@ public sealed class MaterialApiTests : IClassFixture<PdmApiFactory>
             kind = "Electrical",
             supplyMode = "Purchase",
             unitCode = "001",
-            specification = "M12"
+            specification = "M12",
+            brand = "API-CREATE"
         });
         Assert.Equal(HttpStatusCode.OK, createdResponse.StatusCode);
         using var created = JsonDocument.Parse(await createdResponse.Content.ReadAsStringAsync());
@@ -348,7 +349,8 @@ public sealed class MaterialApiTests : IClassFixture<PdmApiFactory>
             kind = "Electrical",
             supplyMode = "Purchase",
             unitCode = "001",
-            specification = "M12"
+            specification = "M12",
+            brand = "API-READINESS"
         });
         Assert.Equal(HttpStatusCode.OK, createdResponse.StatusCode);
         using var created = JsonDocument.Parse(await createdResponse.Content.ReadAsStringAsync());
@@ -376,7 +378,8 @@ public sealed class MaterialApiTests : IClassFixture<PdmApiFactory>
             categoryCode = "0102",
             supplyMode = "Purchase",
             unitCode = "001",
-            specification = "CDQ2B32"
+            specification = "CDQ2B32",
+            brand = "API-CHANGE"
         });
         using var created = JsonDocument.Parse(await createdResponse.Content.ReadAsStringAsync());
         var materialId = created.RootElement.GetProperty("id").GetGuid();
@@ -396,6 +399,7 @@ public sealed class MaterialApiTests : IClassFixture<PdmApiFactory>
             supplyMode = "Purchase",
             unitCode = "001",
             specification = "CDQ2B32-100",
+            brand = "API-CHANGE",
             expectedRowVersion = approvedVersion
         });
 
@@ -418,7 +422,9 @@ public sealed class MaterialApiTests : IClassFixture<PdmApiFactory>
             name = "API待删除料品",
             kind = "Electrical",
             supplyMode = "Purchase",
-            unitCode = "001"
+            unitCode = "001",
+            specification = "DELETE-01",
+            brand = "API-LOCAL-DELETE"
         });
         using var created = JsonDocument.Parse(await createdResponse.Content.ReadAsStringAsync());
         var materialId = created.RootElement.GetProperty("id").GetGuid();
@@ -466,7 +472,8 @@ public sealed class MaterialApiTests : IClassFixture<PdmApiFactory>
             kind = "Electrical",
             supplyMode = "Purchase",
             unitCode = "001",
-            specification = "M18"
+            specification = "M18",
+            brand = "API-U9-DELETE"
         });
         Assert.True(createdResponse.IsSuccessStatusCode, await createdResponse.Content.ReadAsStringAsync());
         using var created = JsonDocument.Parse(await createdResponse.Content.ReadAsStringAsync());
@@ -514,7 +521,8 @@ public sealed class MaterialApiTests : IClassFixture<PdmApiFactory>
             kind = "Electrical",
             supplyMode = "Purchase",
             unitCode = "001",
-            specification = "M12"
+            specification = "M12",
+            brand = "API-SYNC"
         });
         using var created = JsonDocument.Parse(await createdResponse.Content.ReadAsStringAsync());
         var materialId = created.RootElement.GetProperty("id").GetGuid();
@@ -530,6 +538,7 @@ public sealed class MaterialApiTests : IClassFixture<PdmApiFactory>
         fake.QueryResults.Enqueue(new U9ItemQueryResult(0, null,
             [new U9ItemReference("u9-1001", materialCode, "API同步测试电气件", "M12", "0101", null, "001")
             {
+                U9Brand = "API-SYNC",
                 CreationAttributes = new Dictionary<string, string?>
                 {
                     ["ItemFormAttribute"] = "9", ["IsPurchaseEnable"] = "true", ["IsBuildEnable"] = "true",
@@ -596,7 +605,9 @@ public sealed class MaterialApiTests : IClassFixture<PdmApiFactory>
             kind = "Electrical",
             categoryCode = "010401",
             supplyMode = "Purchase",
-            unitCode = "001"
+            unitCode = "001",
+            specification = "GLOVE-01",
+            brand = "API-GLOVE"
         });
         Assert.True(materialResponse.IsSuccessStatusCode, await materialResponse.Content.ReadAsStringAsync());
         using var material = JsonDocument.Parse(await materialResponse.Content.ReadAsStringAsync());

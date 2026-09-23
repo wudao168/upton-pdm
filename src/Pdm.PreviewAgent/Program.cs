@@ -207,7 +207,9 @@ internal static class Program
                 DocumentId = job.DocumentId,
                 SourcePath = Path.Combine(sourceRoot, job.FileName),
                 OutputPath = Path.Combine(outputRoot, job.OutputName),
-                Kind = job.Kind
+                Kind = job.Kind,
+                ReleaseRevision = job.ReleaseRevision,
+                QrContent = job.QrContent
             }).ToList()
         };
         var manifestPath = Path.Combine(jobRoot, "worker-manifest.json");
@@ -396,6 +398,8 @@ internal static class Program
         public string OutputName { get; set; }
         // 老版本服务端不带该字段，缺省按“需要转出”处理（引用文件只作参考、不转出时明确传 false）。
         public bool Convert { get; set; } = true;
+        public string ReleaseRevision { get; set; }
+        public string QrContent { get; set; }
     }
 
     private sealed class WorkerManifest
@@ -409,6 +413,8 @@ internal static class Program
         public string SourcePath { get; set; }
         public string OutputPath { get; set; }
         public string Kind { get; set; }
+        public string ReleaseRevision { get; set; }
+        public string QrContent { get; set; }
     }
 
     private sealed class WorkerResult

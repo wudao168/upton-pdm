@@ -14,13 +14,14 @@ public sealed class ValidationPlanServiceTests
         var (service, _, _, _, project) = await CreateFixtureAsync();
 
         var saved = await service.SavePlanAsync(project.Id,
-            new("管理员", new DateOnly(2026, 9, 10), [new(null, "人工确认安全门互锁", "内部评审", null, null, null, null, null, 1)], null),
+            new("管理员", new DateOnly(2026, 9, 10), [new(null, "人工确认安全门互锁", "内部评审", null, null, null, null, null, 1, "门关闭后方可启动")], null),
             "admin", UserRole.Administrator, default);
 
         var item = Assert.Single(saved.Items);
         Assert.Null(item.CatalogItemId);
         Assert.Equal("人工项", item.CategoryName);
         Assert.Equal("人工确认安全门互锁", item.ValidationContent);
+        Assert.Equal("门关闭后方可启动", item.ValidationStandard);
     }
 
     [Fact]
@@ -29,14 +30,15 @@ public sealed class ValidationPlanServiceTests
         var (service, _, _, _, project) = await CreateFixtureAsync();
         var category = await service.SaveCategoryAsync(null, new("安全相关", 10, true, null), "developer", UserRole.Administrator, CancellationToken.None);
         var item = await service.SaveItemAsync(null, new(category.Id, "急停按钮便于触及", "内部评审", 10, true, null), "developer", UserRole.Administrator, CancellationToken.None);
-        var saved = await service.SavePlanAsync(project.Id, new("测试员", null, [new(item.Id, null, "内部评审", null, null, null, null, null, 1)]), "developer", UserRole.Administrator, CancellationToken.None);
+        var saved = await service.SavePlanAsync(project.Id, new("测试员", null, [new(item.Id, null, "内部评审", null, null, null, null, null, 1, "一秒内触及")]), "developer", UserRole.Administrator, CancellationToken.None);
 
         await service.SaveItemAsync(item.Id, new(category.Id, "急停按钮可在一秒内触及", "内部评审", 10, true, null, item.RowVersion), "developer", UserRole.Administrator, CancellationToken.None);
-        var resaved = await service.SavePlanAsync(project.Id, new("测试员", null, [new(item.Id, null, "内部评审", null, "通过", "李四", "张三", null, 1)], saved.RowVersion), "developer", UserRole.Administrator, CancellationToken.None);
+        var resaved = await service.SavePlanAsync(project.Id, new("测试员", null, [new(item.Id, null, "内部评审", null, "通过", "李四", "张三", null, 1, "一秒内触及")], saved.RowVersion), "developer", UserRole.Administrator, CancellationToken.None);
 
         Assert.Equal("急停按钮便于触及", Assert.Single(resaved.Items).ValidationContent);
         Assert.Equal("通过", resaved.Items[0].Result);
         Assert.Equal("李四", resaved.Items[0].Reviewer);
+        Assert.Equal("一秒内触及", resaved.Items[0].ValidationStandard);
     }
 
     [Fact]
@@ -65,7 +67,7 @@ public sealed class ValidationPlanServiceTests
         var item = await service.SaveItemAsync(null, new(category.Id, "保压时间满足技术协议", "技术协议", 10, true, null), "developer", UserRole.Administrator, CancellationToken.None);
         await repository.CreateUserAsync(new UserAccount(Guid.NewGuid(), "designer", "马文豪", "unused", UserRole.Engineer, true), default);
         await repository.CreateUserAsync(new UserAccount(Guid.NewGuid(), "manager", "王袁杰", "unused", UserRole.BusinessUnitManager, true), default);
-        var saved = await service.SavePlanAsync(project.Id, new("李四", new DateOnly(2026, 9, 9), [new(item.Id, null, "技术协议", new DateOnly(2026, 9, 10), "合格", "赵六", "王五", "已复核", 1)]), "developer", UserRole.Administrator, CancellationToken.None);
+        var saved = await service.SavePlanAsync(project.Id, new("李四", new DateOnly(2026, 9, 9), [new(item.Id, null, "技术协议", new DateOnly(2026, 9, 10), "合格", "赵六", "王五", "已复核", 1, "保压30分钟无泄漏")]), "developer", UserRole.Administrator, CancellationToken.None);
         var now = DateTimeOffset.UtcNow;
         await plans.SubmitAsync(saved.Id, saved.RowVersion, "validation-plan", 1,
         [
@@ -83,6 +85,8 @@ public sealed class ValidationPlanServiceTests
         using var reader = new StreamReader(sheet!.Open());
         var xml = await reader.ReadToEndAsync();
         Assert.Contains("保压时间满足技术协议", xml);
+        Assert.Contains("验证标准", xml);
+        Assert.Contains("保压30分钟无泄漏", xml);
         Assert.Contains(project.Code, xml);
 
         var document = XDocument.Parse(xml);
@@ -109,7 +113,7 @@ public sealed class ValidationPlanServiceTests
         Assert.All(manualRows, row =>
         {
             var rowNumber = row.Attribute("r")?.Value;
-            Assert.Contains($"B{rowNumber}:E{rowNumber}", mergeReferences);
+            Assert.Contains($"B{rowNumber}:D{rowNumber}", mergeReferences);
         });
     }
 

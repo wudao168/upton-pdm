@@ -251,8 +251,14 @@ public sealed class FullWorkflowAcceptanceTests
             var previews = sources.ToDictionary(source => source.DocumentId, source => new DocumentPreviewArtifact(
                 source.Kind == DocumentKind.Drawing ? DocumentPreviewFormat.Pdf : DocumentPreviewFormat.Step,
                 $".qa-release/{source.DocumentId:N}.{(source.Kind == DocumentKind.Drawing ? "pdf" : "step")}",
-                128, new string('E', 64), source.SourceSha256));
-            return Task.FromResult(new ReleasePublication(@"C:\PDM\QA\release", previews));
+                128, new string('E', 64), source.Kind == DocumentKind.Drawing ? new string('F', 64) : source.SourceSha256));
+            var formal = sources.Where(source => source.Kind == DocumentKind.Drawing).ToDictionary(
+                source => source.DocumentId,
+                source => new FormalDrawingSource(source.SourceVersionId,
+                    $".release-formal/{package.Id:N}/{source.DocumentId:N}.slddrw",
+                    source.FileLength, new string('F', 64), source.ExpectedFormalRevision,
+                    $"UPLM-DRAWING|{source.DrawingNumber}|{source.ExpectedFormalRevision}|{source.DocumentId:N}"));
+            return Task.FromResult(new ReleasePublication(@"C:\PDM\QA\release", previews, null, formal));
         }
     }
 

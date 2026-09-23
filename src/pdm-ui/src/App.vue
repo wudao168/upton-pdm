@@ -23,6 +23,7 @@ import ProjectPlanManager from './components/ProjectPlanManager.vue'
 import ProjectWorkspaceHeader from './components/ProjectWorkspaceHeader.vue'
 import type { ProjectTab } from './components/ProjectWorkspaceHeader.vue'
 import ProcurementTracking from './components/ProcurementTracking.vue'
+import ProductionDrawingCenter from './components/ProductionDrawingCenter.vue'
 import SideNav from './components/SideNav.vue'
 import SquareLoader from './components/SquareLoader.vue'
 import SystemManagement from './components/SystemManagement.vue'
@@ -39,7 +40,7 @@ const workspace = usePdmWorkspace()
 const displayUserName = (username?: string | null, emptyText = '—') => resolveUserDisplayName(workspace.users.value, username, emptyText)
 provide(userDisplayNameKey, displayUserName)
 type PdmTheme = 'a' | 'c' | 'o'
-type NavKey = 'project-center' | 'project-workbench' | 'projects' | 'materials' | 'standard-library' | 'standard-structure' | 'program-templates' | 'tasks' | 'admin'
+type NavKey = 'project-center' | 'project-workbench' | 'projects' | 'production-drawings' | 'materials' | 'standard-library' | 'standard-structure' | 'program-templates' | 'tasks' | 'admin'
 type ActiveView = NavKey | 'workspace'
 const activeView = ref<ActiveView>('project-center')
 const activeNav = computed<NavKey>(() => activeView.value === 'workspace' ? 'project-center' : activeView.value)
@@ -495,6 +496,10 @@ async function handleNavigation(key: NavKey) {
     rememberNavigation(key)
   }
   if (key === 'projects') openProjectList()
+  if (key === 'production-drawings') {
+    activeView.value = key
+    rememberNavigation(key)
+  }
   if (key === 'materials') {
     materialRequestedTab.value = 'materials'
     activeView.value = 'materials'
@@ -1017,6 +1022,7 @@ async function openWhereUsedParent(projectId: string, parentDocumentId: string) 
           :can-view-all="workspace.hasRole('Administrator') || workspace.hasRole('platform_admin') || workspace.hasRole('developer')"
           @open="openManagedProject"
         />
+        <ProductionDrawingCenter v-else-if="activeView === 'production-drawings'" :token="workspace.getAccessToken()" :username="workspace.currentUsername.value" :can-manage="workspace.hasPermission('production.drawing.manage')" />
         <MyTasks v-else-if="activeView === 'tasks'" :tasks="workspace.myApprovalTasks.value" :notifications="workspace.notifications.value" :material-code-tasks="workspace.materialCodeApprovalTasks.value" :program-template-tasks="workspace.programTemplateTasks.value" :locks="workspace.editLocks.value" :password-reset-tasks="workspace.passwordResetTasks.value" :pending="workspace.operationPending.value" :on-request-release="workspace.requestEditLockRelease" :on-force-release="workspace.forceReleaseEditLock" :on-reset-password="workspace.resetRequestedPassword" :on-mark-all-notifications-read="workspace.markAllNotificationsRead" @refresh="runOperation(workspace.loadMyApprovalTasks, '待办任务已刷新')" @open="openReleasePackage" @open-validation-plan="openValidationPlan" @open-notification="openNotification" @open-material-approvals="openMaterialApprovals" @open-program-template="openProgramTemplate" />
         <ProgramTemplateLibrary
           v-else-if="activeView === 'program-templates'"
@@ -1118,7 +1124,7 @@ async function openWhereUsedParent(projectId: string, parentDocumentId: string) 
               :pending="workspace.operationPending.value"
               :token="workspace.getAccessToken()"
               :on-update-main-staffing="workspace.updateMainProjectStaffing"
-              :on-update-designers="workspace.updateChildProjectDesigners"
+              :on-update-phase-owners="workspace.updateProjectPhaseOwners"
               @documents="openProjectTab('documents')"
               @bom="openProjectTab('bom')"
               @project-plan="openProjectTab('project-plan')"
@@ -1127,7 +1133,7 @@ async function openWhereUsedParent(projectId: string, parentDocumentId: string) 
               @release="openProjectTab('release')"
             />
             <ProjectFileLibrary v-else-if="projectTab === 'files'" :project-id="workspace.project.value.id" :token="workspace.getAccessToken()" :folders="workspace.projectFolders.value" :documents="workspace.managedDocuments.value" :users="workspace.users.value" :roles="workspace.rolePermissionDirectory.value.roles" :administrator="workspace.hasPermission('settings.folder.manage')" :can-recycle-documents="workspace.hasPermission('document.recycle')" :pending="workspace.operationPending.value" :on-update-permissions="workspace.updateProjectFolderPermissions" :on-reload="() => workspace.reload(workspace.project.value.id)" />
-            <ProjectPlanManager v-else-if="projectTab === 'project-plan'" :project="workspace.project.value" :projects="workspace.projects.value" :token="workspace.getAccessToken()" :current-username="workspace.currentUsername.value" :current-role="workspace.currentRole.value" :developer="workspace.hasRole('developer')" :can-edit="canManageProjectPlan" :can-manage-system-templates="canManageProjectPlanTemplates" @switch-project="projectId => openManagedProject(projectId, 'project-plan')" />
+            <ProjectPlanManager v-else-if="projectTab === 'project-plan'" :project="workspace.project.value" :projects="workspace.projects.value" :company-name="companyName" :token="workspace.getAccessToken()" :current-username="workspace.currentUsername.value" :current-role="workspace.currentRole.value" :developer="workspace.hasRole('developer')" :can-edit="canManageProjectPlan" :can-manage-system-templates="canManageProjectPlanTemplates" @switch-project="projectId => openManagedProject(projectId, 'project-plan')" />
             <ValidationPlanManager v-else-if="projectTab === 'validation-plan'" :project-id="workspace.project.value.id" :project-code="workspace.project.value.code" :project-name="workspace.project.value.name" :projects="workspace.projects.value" :token="workspace.getAccessToken()" :current-username="workspace.currentUsername.value" :current-display-name="workspace.currentUser.value" :can-edit="workspace.hasPermission('validation-plan.edit')" :can-manage-catalog="workspace.hasPermission('validation-catalog.manage')" :can-decide-approval="workspace.hasPermission('approval.decide') || workspace.hasPermission('validation-plan.edit')" :requested-project-id="requestedValidationPlanProjectId" @request-handled="requestedValidationPlanProjectId = ''" />
             <section v-if="mountedDocumentsProjectId === workspace.project.value.id" v-show="projectTab === 'documents'" class="pdm-document-workspace">
               <section v-if="!workspace.hasDocuments.value" class="pdm-panel pdm-workspace-state">

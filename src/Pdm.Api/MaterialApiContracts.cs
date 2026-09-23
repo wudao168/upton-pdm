@@ -59,6 +59,10 @@ public sealed record CalibrateMaterialCategoryCounterRequest(string LastMaterial
 
 public sealed record UpdateMaterialNumberingSettingsRequest(long StartSequence);
 
+public sealed record MaterialApprovalRuleRequest(string CategoryCode, bool RequiresApproval);
+
+public sealed record UpdateMaterialApprovalRulesRequest(IReadOnlyList<MaterialApprovalRuleRequest> Rules);
+
 public sealed record MaterialDuplicateRuleRequest(string CategoryCode, IReadOnlyList<string> Fields);
 
 public sealed record UpdateMaterialDuplicateRulesRequest(IReadOnlyList<MaterialDuplicateRuleRequest> Rules);

@@ -854,14 +854,22 @@ internal sealed class BatchPropertyEditDialog : Form
         RefreshFillPropertyOptions();
         var fill = new Button { Text = "填入勾选行", AutoSize = false, Size = new Size(StandardControlWidth, StandardControlHeight), Margin = Padding.Empty };
         fill.Click += (_, _) => FillSelectedRows();
-        var autoFillNameOrModel = new Button
+        var fillMaterialName = new Button
         {
-            Text = "自动填充",
+            Text = "填充名称",
             AutoSize = false,
             Size = new Size(StandardControlWidth, StandardControlHeight),
             Margin = Padding.Empty
         };
-        autoFillNameOrModel.Click += (_, _) => AutoFillNameOrModelForSelectedRows();
+        fillMaterialName.Click += (_, _) => FillDocumentNameForSelectedRows("物料名称");
+        var fillModel = new Button
+        {
+            Text = "填充型号",
+            AutoSize = false,
+            Size = new Size(StandardControlWidth, StandardControlHeight),
+            Margin = Padding.Empty
+        };
+        fillModel.Click += (_, _) => FillDocumentNameForSelectedRows("型号");
         var sync = new Button
         {
             Text = "从PLM同步",
@@ -876,16 +884,17 @@ internal sealed class BatchPropertyEditDialog : Form
         toolbar.Controls.Add(fillProperty, 1, 0);
         toolbar.Controls.Add(fillValueHost, 2, 0);
         toolbar.Controls.Add(fill, 3, 0);
-        toolbar.Controls.Add(autoFillNameOrModel, 4, 0);
+        toolbar.Controls.Add(fillMaterialName, 4, 0);
+        toolbar.Controls.Add(fillModel, 5, 0);
         summary.Dock = DockStyle.Fill;
         summary.TextAlign = ContentAlignment.MiddleLeft;
-        toolbar.Controls.Add(sync, 5, 0);
+        toolbar.Controls.Add(sync, 6, 0);
         plmSyncStatus.Dock = DockStyle.Fill;
-        toolbar.Controls.Add(plmSyncStatus, 6, 0);
+        toolbar.Controls.Add(plmSyncStatus, 7, 0);
         selectionSummary.Dock = DockStyle.Fill;
         selectionSummary.Margin = new Padding(0, 0, StandardControlGap, 0);
         selectionSummary.TextAlign = ContentAlignment.MiddleCenter;
-        toolbar.Controls.Add(selectionSummary, 7, 0);
+        toolbar.Controls.Add(selectionSummary, 8, 0);
 
         page.Controls.Add(BuildItemFilters(), 0, 0);
         page.Controls.Add(BuildPropertyCardSelectors(), 0, 1);
@@ -2143,20 +2152,25 @@ internal sealed class BatchPropertyEditDialog : Form
             : Color.FromArgb(31, 132, 92);
     }
 
-    private void AutoFillNameOrModelForSelectedRows()
+    private void FillDocumentNameForSelectedRows(string targetProperty)
     {
         grid.EndEdit();
         var selectedItems = rows.Where(candidate => candidate.Selected).ToArray();
         if (selectedItems.Length == 0)
         {
-            CancelValidation("请先勾选需要自动填充名称或型号的图档。");
+            CancelValidation(string.Concat("请先勾选需要填充“", targetProperty, "”的图档。"));
             return;
         }
 
         var confirmation = MessageBox.Show(
             this,
-            "自动填充规则：\r\n1. 名称只有中文时，填入空白“物料名称”。\r\n2. 名称只有英文或数字时，填入空白“型号”。\r\n3. 名称同时包含中文和英文/数字时，同时填入空白“物料名称”和“型号”。\r\n4. 已有内容不会覆盖。\r\n\r\n确认按此规则刷新所选图档属性吗？",
-            "确认自动填充名称型号",
+            string.Concat(
+                "零件和装配体：将“文档名称”填入空白“",
+                targetProperty,
+                "”，已有内容不覆盖。\r\n工程图：从关联模型复制“",
+                targetProperty,
+                "”，并纠正不一致的现有值。\r\n\r\n是否继续？"),
+            string.Concat("确认填充", targetProperty),
             MessageBoxButtons.YesNo,
             MessageBoxIcon.Information,
             MessageBoxDefaultButton.Button2);
@@ -2166,30 +2180,35 @@ internal sealed class BatchPropertyEditDialog : Form
         }
 
         var changedCount = 0;
-        foreach (var item in selectedItems)
+        foreach (var item in selectedItems.OrderBy(item =>
+                     item.OperationItem.Node.Kind == CadDocumentKind.Drawing ? 1 : 0))
         {
-            var drawingName = item.Name?.Trim() ?? string.Empty;
-            if (string.IsNullOrWhiteSpace(drawingName))
+            var isDrawing = item.OperationItem.Node.Kind == CadDocumentKind.Drawing;
+            var sourceValue = isDrawing
+                ? RelatedModelItems(item)
+                    .Select(model => model.PropertyValue(targetProperty))
+                    .FirstOrDefault(value => !string.IsNullOrWhiteSpace(value))
+                : item.PropertyValue("文档名称");
+            if (!item.IsPropertyApplicable(targetProperty)
+                || !BatchPropertyNameModelAutoFillRule.TryResolveValue(
+                    sourceValue,
+                    item.PropertyValue(targetProperty),
+                    overwriteMismatch: isDrawing,
+                    out var value))
             {
                 continue;
             }
 
-            foreach (var targetProperty in BatchPropertyNameModelAutoFillRule.TargetPropertyNames(drawingName))
-            {
-                if (!item.IsPropertyApplicable(targetProperty)
-                    || !string.IsNullOrWhiteSpace(item.PropertyValue(targetProperty)))
-                {
-                    continue;
-                }
-
-                item.SetPropertyValue(targetProperty, drawingName);
-                changedCount++;
-            }
+            item.SetPropertyValue(targetProperty, value);
+            changedCount++;
         }
 
         if (changedCount == 0)
         {
-            CancelValidation("所选图档没有可自动填充的空白“物料名称”或“型号”字段，现有内容未改变。");
+            CancelValidation(string.Concat(
+                "所选图档没有可用的文档/关联模型值，或“",
+                targetProperty,
+                "”已经正确，现有内容未改变。"));
             return;
         }
 

@@ -60,6 +60,33 @@ public sealed class MaterialServiceTests
     }
 
     [Fact]
+    public async Task ApprovalRules_Default0204ToAutomaticApprovalAndRemainConfigurable()
+    {
+        var service = CreateService(out _);
+        var defaults = await service.GetApprovalRulesAsync("admin", UserRole.Administrator, default);
+        Assert.False(Assert.Single(defaults, rule => rule.CategoryCode == "0204").RequiresApproval);
+        Assert.True(Assert.Single(defaults, rule => rule.CategoryCode == "0102").RequiresApproval);
+
+        var automaticallyApproved = await service.CreateAsync(new(
+            null, "免审安装板", MaterialKind.NonStandard, MaterialSupplyMode.Manufacture, "001",
+            "AUTO-0204", "Q235", null, null, null, null, null, CategoryCode: "0204"),
+            "engineer", UserRole.Engineer, default);
+
+        Assert.Equal(MaterialApprovalStatus.Approved, automaticallyApproved.ApprovalStatus);
+        Assert.Single(await service.ListSyncTasksAsync(default));
+
+        await service.UpdateApprovalRulesAsync(defaults
+            .Select(rule => rule.CategoryCode == "0204" ? rule with { RequiresApproval = true } : rule)
+            .ToArray(), "admin", UserRole.Administrator, default);
+        var draft = await service.CreateAsync(new(
+            null, "待审安装板", MaterialKind.NonStandard, MaterialSupplyMode.Manufacture, "001",
+            "REVIEW-0204", "Q235", null, null, null, null, null, CategoryCode: "0204"),
+            "engineer", UserRole.Engineer, default);
+
+        Assert.Equal(MaterialApprovalStatus.Draft, draft.ApprovalStatus);
+    }
+
+    [Fact]
     public async Task DuplicateRules_AreConfigurablePerCategoryAndBlockMatchingMaterials()
     {
         var service = CreateService(out _);
@@ -75,7 +102,7 @@ public sealed class MaterialServiceTests
         var saved = await service.UpdateDuplicateRulesAsync(nameAndModelRules, "admin", UserRole.Administrator, default);
         Assert.Equal(["Name", "Specification"], Assert.Single(saved, rule => rule.CategoryCode == "0102").Fields);
 
-        _ = await service.CreateAsync(new(
+        var existing = await service.CreateAsync(new(
             null, "接头", MaterialKind.Standard, MaterialSupplyMode.Purchase, "001",
             "PH602", null, null, "AIRTAC", null, null, null, CategoryCode: "0102"),
             "admin", UserRole.Administrator, default);
@@ -96,6 +123,14 @@ public sealed class MaterialServiceTests
             "PH602", null, null, "AIRTAC", null, null, null, CategoryCode: "0102"),
             "admin", UserRole.Administrator, default));
         Assert.Contains("查重规则（型号+品牌）", sameModelAndBrand.Message);
+
+        var crossCategory = await Assert.ThrowsAsync<PdmConflictException>(() => service.CreateAsync(new(
+            null, "电气接头", MaterialKind.Electrical, MaterialSupplyMode.Purchase, "001",
+            " ph602 ", null, null, "airtac", null, null, null, CategoryCode: "0101"),
+            "admin", UserRole.Administrator, default));
+        Assert.Contains("全局查重规则（型号+品牌）", crossCategory.Message);
+        Assert.Contains(existing.MaterialCode, crossCategory.Message);
+        Assert.Contains("分类 0102", crossCategory.Message);
     }
 
     [Fact]
@@ -271,6 +306,13 @@ public sealed class MaterialServiceTests
         int expectedAttribute)
     {
         var service = CreateService(out _);
+        if (kind == MaterialKind.NonStandard)
+        {
+            var rules = await service.GetApprovalRulesAsync("admin", UserRole.Administrator, default);
+            await service.UpdateApprovalRulesAsync(rules
+                .Select(rule => rule.CategoryCode == categoryCode ? rule with { RequiresApproval = true } : rule)
+                .ToArray(), "admin", UserRole.Administrator, default);
+        }
         var material = await service.CreateAsync(new(
             null,
             $"供给方式{expectedAttribute}",
@@ -280,7 +322,7 @@ public sealed class MaterialServiceTests
             "TEST",
             kind == MaterialKind.NonStandard ? "Q235" : null,
             null,
-            null,
+            "TEST",
             null,
             null,
             null,
@@ -315,7 +357,7 @@ public sealed class MaterialServiceTests
         var service = CreateService(out _);
         var created = await Task.WhenAll(Enumerable.Range(0, 20).Select(index => service.CreateAsync(new(
             $"IGNORED-{index}", $"电气件{index}", MaterialKind.Electrical, MaterialSupplyMode.Purchase, "001",
-            null, null, null, null, null, null, null), "admin", UserRole.Administrator, default)));
+            $"MODEL-{index}", null, null, "TEST", null, null, null), "admin", UserRole.Administrator, default)));
 
         Assert.Equal(20, created.Select(item => item.MaterialCode).Distinct().Count());
         Assert.Equal("01011000000", created.MinBy(item => item.MaterialCode)!.MaterialCode);
@@ -323,7 +365,7 @@ public sealed class MaterialServiceTests
 
         var standard = await service.CreateAsync(new(
             null, "标准件", MaterialKind.Standard, MaterialSupplyMode.Purchase, "001",
-            "M8", null, null, null, null, null, null), "admin", UserRole.Administrator, default);
+            "M8", null, null, "TEST", null, null, null), "admin", UserRole.Administrator, default);
         Assert.Equal("01021000000", standard.MaterialCode);
 
         var original = created[0];
@@ -365,7 +407,7 @@ public sealed class MaterialServiceTests
         var service = CreateService(out var materials);
         var material = await service.CreateAsync(new(
             null, "带资料传感器", MaterialKind.Electrical, MaterialSupplyMode.Purchase, "001",
-            "M18", null, null, null, null, null, null, CategoryCode: "0101"),
+            "M18", null, null, "TEST", null, null, null, CategoryCode: "0101"),
             "admin", UserRole.Administrator, default);
         var attachment = new MaterialAttachment(
             Guid.NewGuid(), material.Id, MaterialAttachmentKind.Document, "manual.pdf", @"D:\PDM\MaterialAttachments",
@@ -389,7 +431,7 @@ public sealed class MaterialServiceTests
 
         var material = await service.CreateAsync(new(
             null, "气缸", MaterialKind.Standard, MaterialSupplyMode.Purchase, "001",
-            "CDQ2B32", null, null, null, null, null, null, CategoryCode: "0102"),
+            "CDQ2B32", null, null, "TEST", null, null, null, CategoryCode: "0102"),
             "admin", UserRole.Administrator, default);
 
         Assert.Equal("01021000000", material.MaterialCode);
@@ -406,11 +448,11 @@ public sealed class MaterialServiceTests
 
         var first = await service.CreateAsync(new(
             null, "气缸一", MaterialKind.Standard, MaterialSupplyMode.Purchase, "001",
-            "CYL-1", null, null, null, null, null, null, CategoryCode: "0102"),
+            "CYL-1", null, null, "TEST", null, null, null, CategoryCode: "0102"),
             "admin", UserRole.Administrator, default);
         var second = await service.CreateAsync(new(
             null, "气缸二", MaterialKind.Standard, MaterialSupplyMode.Purchase, "001",
-            "CYL-2", null, null, null, null, null, null, CategoryCode: "0102"),
+            "CYL-2", null, null, "TEST", null, null, null, CategoryCode: "0102"),
             "admin", UserRole.Administrator, default);
 
         Assert.Equal("01021000000", first.MaterialCode);
@@ -430,7 +472,7 @@ public sealed class MaterialServiceTests
 
         var material = await service.CreateAsync(new(
             null, "气缸二", MaterialKind.Standard, MaterialSupplyMode.Purchase, "001",
-            "CYL-2", null, null, null, null, null, null, CategoryCode: "0102"),
+            "CYL-2", null, null, "TEST", null, null, null, CategoryCode: "0102"),
             "admin", UserRole.Administrator, default);
 
         Assert.Equal("01021000000", material.MaterialCode);
@@ -447,7 +489,7 @@ public sealed class MaterialServiceTests
 
         var created = await service.CreateAsync(new(
             null, "待校验传感器", MaterialKind.Electrical, MaterialSupplyMode.Purchase, "001",
-            "M18", null, null, null, null, null, null, CategoryCode: "0101"),
+            "M18", null, null, "TEST", null, null, null, CategoryCode: "0101"),
             "admin", UserRole.Administrator, default);
 
         Assert.Equal("01011000000", created.MaterialCode);
@@ -464,7 +506,7 @@ public sealed class MaterialServiceTests
         var saved = await service.UpdateNumberingSettingsAsync(2_000_000, "admin", UserRole.Administrator, default);
         var material = await service.CreateAsync(new(
             null, "新基线标准件", MaterialKind.Standard, MaterialSupplyMode.Purchase, "001",
-            "BASE-2M", null, null, null, null, null, null, CategoryCode: "0102"),
+            "BASE-2M", null, null, "TEST", null, null, null, CategoryCode: "0102"),
             "admin", UserRole.Administrator, default);
 
         Assert.Equal(1_000_000, defaults.StartSequence);
@@ -498,6 +540,10 @@ public sealed class MaterialServiceTests
     public async Task Approval_BlocksNonStandardMaterialWithoutMaterialGrade()
     {
         var service = CreateService(out _);
+        var rules = await service.GetApprovalRulesAsync("admin", UserRole.Administrator, default);
+        await service.UpdateApprovalRulesAsync(rules
+            .Select(rule => rule.CategoryCode == "0204" ? rule with { RequiresApproval = true } : rule)
+            .ToArray(), "admin", UserRole.Administrator, default);
         var material = await service.CreateAsync(new(
             $"NS-{Guid.NewGuid():N}", "安装板", MaterialKind.NonStandard, MaterialSupplyMode.Manufacture, "001",
             "300x200", null, null, null, "喷粉", 1.2m, "kg"), "admin", UserRole.Administrator, default);
@@ -544,7 +590,7 @@ public sealed class MaterialServiceTests
 
         var material = await service.CreateAsync(new(
             null, "防护手套", MaterialKind.Electrical, MaterialSupplyMode.Purchase, "001",
-            null, null, null, null, null, null, null, CategoryCode: category.Code),
+            "GLOVE-01", null, null, "TEST", null, null, null, CategoryCode: category.Code),
             "admin", UserRole.Administrator, default);
 
         Assert.Equal("LB-1000000", material.MaterialCode);
@@ -568,7 +614,7 @@ public sealed class MaterialServiceTests
         var service = CreateService(out var materials);
         var material = await service.CreateAsync(new(
             null, "待删除料品", MaterialKind.Electrical, MaterialSupplyMode.Purchase, "001",
-            null, null, null, null, null, null, null, CategoryCode: "0101"),
+            "DELETE-01", null, null, "TEST", null, null, null, CategoryCode: "0101"),
             "admin", UserRole.Administrator, default);
         var approved = await service.ApproveAsync(material.Id, material.RowVersion, "admin", UserRole.Administrator, default);
 
@@ -587,7 +633,7 @@ public sealed class MaterialServiceTests
         var service = CreateService(out var materials);
         var material = await service.CreateAsync(new(
             null, "误归档待删除料品", MaterialKind.Standard, MaterialSupplyMode.Purchase, "001",
-            "CDQ2B32", null, null, null, null, null, null, CategoryCode: "0102"),
+            "CDQ2B32", null, null, "TEST", null, null, null, CategoryCode: "0102"),
             "admin", UserRole.Administrator, default);
         var archived = await materials.ArchiveMaterialAsync(
             material.Id, material.RowVersion, "admin", DateTimeOffset.UtcNow, default);
@@ -608,7 +654,7 @@ public sealed class MaterialServiceTests
         var service = CreateService(out var materials);
         var material = await service.CreateAsync(new(
             null, "已同步料品", MaterialKind.Electrical, MaterialSupplyMode.Purchase, "001",
-            null, null, null, null, null, null, null, CategoryCode: "0101"),
+            "SYNC-01", null, null, "TEST", null, null, null, CategoryCode: "0101"),
             "admin", UserRole.Administrator, default);
         var approved = await service.ApproveAsync(material.Id, material.RowVersion, "admin", UserRole.Administrator, default);
         await materials.BeginSyncTaskAsync(approved.Task.Id, DateTimeOffset.UtcNow, default);
@@ -682,7 +728,7 @@ public sealed class MaterialServiceTests
         var service = CreateService(out var materials);
         var material = await service.CreateAsync(new(
             null, "BOM引用料品", MaterialKind.Standard, MaterialSupplyMode.Purchase, "001",
-            "CDQ2B32", null, null, null, null, null, null, CategoryCode: "0102"),
+            "CDQ2B32", null, null, "TEST", null, null, null, CategoryCode: "0102"),
             "admin", UserRole.Administrator, default);
         await materials.LinkBomItemAsync(Guid.NewGuid(), material.Id, "admin", DateTimeOffset.UtcNow, default);
 
@@ -699,7 +745,7 @@ public sealed class MaterialServiceTests
         var service = CreateService(out var materials, out var u9Client);
         var material = await service.CreateAsync(new(
             null, "U9C已有料品", MaterialKind.Electrical, MaterialSupplyMode.Purchase, "001",
-            "M18", null, null, null, null, null, null, CategoryCode: "0101"),
+            "M18", null, null, "TEST", null, null, null, CategoryCode: "0101"),
             "admin", UserRole.Administrator, default);
         u9Client.ItemsByCode[material.MaterialCode] = new("u9-existing", material.MaterialCode, material.Name, material.Specification);
 
@@ -717,7 +763,7 @@ public sealed class MaterialServiceTests
         await EnableU9WritesAsync(materials);
         var material = await service.CreateAsync(new(
             null, "U9C同步删除料品", MaterialKind.Electrical, MaterialSupplyMode.Purchase, "001",
-            "M18", null, null, null, null, null, null, CategoryCode: "0101"),
+            "M18", null, null, "TEST", null, null, null, CategoryCode: "0101"),
             "admin", UserRole.Administrator, default);
         u9Client.ItemsByCode[material.MaterialCode] = new("12345", material.MaterialCode, material.Name, material.Specification);
 
@@ -742,7 +788,7 @@ public sealed class MaterialServiceTests
         await EnableU9WritesAsync(materials);
         var material = await service.CreateAsync(new(
             null, "U9C被引用料品", MaterialKind.Electrical, MaterialSupplyMode.Purchase, "001",
-            "M18", null, null, null, null, null, null, CategoryCode: "0101"),
+            "M18", null, null, "TEST", null, null, null, CategoryCode: "0101"),
             "admin", UserRole.Administrator, default);
         u9Client.ItemsByCode[material.MaterialCode] = new("12346", material.MaterialCode, material.Name, material.Specification);
         u9Client.DeleteResult = new(0, null, [new(false, "料品已被采购订单引用", "12346", material.MaterialCode)]);
@@ -763,7 +809,7 @@ public sealed class MaterialServiceTests
         await EnableU9WritesAsync(materials);
         var material = await service.CreateAsync(new(
             null, "U9C回查仍存在料品", MaterialKind.Electrical, MaterialSupplyMode.Purchase, "001",
-            "M18", null, null, null, null, null, null, CategoryCode: "0101"),
+            "M18", null, null, "TEST", null, null, null, CategoryCode: "0101"),
             "admin", UserRole.Administrator, default);
         u9Client.ItemsByCode[material.MaterialCode] = new("12347", material.MaterialCode, material.Name, material.Specification);
         u9Client.DeleteRemovesItem = false;
@@ -781,7 +827,7 @@ public sealed class MaterialServiceTests
         var service = CreateService(out var materials);
         var material = await service.CreateAsync(new(
             null, "引用检查料品", MaterialKind.Standard, MaterialSupplyMode.Purchase, "001",
-            "CDQ2B32", null, null, null, null, null, null, CategoryCode: "0102"),
+            "CDQ2B32", null, null, "TEST", null, null, null, CategoryCode: "0102"),
             "admin", UserRole.Administrator, default);
         await materials.LinkBomItemAsync(Guid.NewGuid(), material.Id, "admin", DateTimeOffset.UtcNow, default);
         await materials.LinkBomItemAsync(Guid.NewGuid(), material.Id, "admin", DateTimeOffset.UtcNow, default);
@@ -803,7 +849,7 @@ public sealed class MaterialServiceTests
         await EnableU9WritesAsync(materials);
         var material = await service.CreateAsync(new(
             null, "同步删除预检料品", MaterialKind.Electrical, MaterialSupplyMode.Purchase, "001",
-            "M18", null, null, null, null, null, null, CategoryCode: "0101"),
+            "M18", null, null, "TEST", null, null, null, CategoryCode: "0101"),
             "admin", UserRole.Administrator, default);
 
         var readiness = await service.InspectRemovalAsync(material.Id, "admin", UserRole.Administrator, default);
@@ -820,7 +866,7 @@ public sealed class MaterialServiceTests
         var service = CreateService(out var materials);
         var material = await service.CreateAsync(new(
             null, "U9C主控料品", MaterialKind.Electrical, MaterialSupplyMode.Purchase, "001",
-            "M18", null, null, null, null, null, null, CategoryCode: "0101"),
+            "M18", null, null, "TEST", null, null, null, CategoryCode: "0101"),
             "admin", UserRole.Administrator, default);
         var u9Owned = await materials.UpdateMaterialAsync(material with
         {
@@ -844,7 +890,7 @@ public sealed class MaterialServiceTests
         var service = CreateService(out var materials);
         var material = await service.CreateAsync(new(
             null, "U9C已缺失料品", MaterialKind.Electrical, MaterialSupplyMode.Purchase, "001",
-            "M18", null, null, null, null, null, null, CategoryCode: "0101"),
+            "M18", null, null, "TEST", null, null, null, CategoryCode: "0101"),
             "admin", UserRole.Administrator, default);
         var approved = await service.ApproveAsync(material.Id, material.RowVersion, "admin", UserRole.Administrator, default);
         await materials.BeginSyncTaskAsync(approved.Task.Id, DateTimeOffset.UtcNow, default);
@@ -870,7 +916,7 @@ public sealed class MaterialServiceTests
             "0102", new("01020000123"), "admin", UserRole.Administrator, default);
         var material = await service.CreateAsync(new(
             null, "校准后的标准件", MaterialKind.Standard, MaterialSupplyMode.Purchase, "001",
-            "M8", null, null, null, null, null, null, CategoryCode: "0102"),
+            "M8", null, null, "TEST", null, null, null, CategoryCode: "0102"),
             "admin", UserRole.Administrator, default);
 
         Assert.Equal(123, category.CurrentSequence);
@@ -887,7 +933,7 @@ public sealed class MaterialServiceTests
             "0102", new("01020000003"), "admin", UserRole.Administrator, default);
         var draft = await service.CreateAsync(new(
             null, "待换号标准件", MaterialKind.Standard, MaterialSupplyMode.Purchase, "001",
-            "CYL-4", null, null, null, "UPTON", null, null, CategoryCode: "0102"),
+            "CYL-4", null, null, "UPTON", null, null, null, CategoryCode: "0102"),
             "admin", UserRole.Administrator, default);
         var approved = await service.ApproveAsync(draft.Id, draft.RowVersion, "admin", UserRole.Administrator, default);
         _ = await materials.BeginSyncTaskAsync(approved.Task.Id, DateTimeOffset.UtcNow, default);
@@ -927,7 +973,7 @@ public sealed class MaterialServiceTests
             "0102", new("01020000003"), "admin", UserRole.Administrator, default);
         var draft = await service.CreateAsync(new(
             null, "自动换号标准件", MaterialKind.Standard, MaterialSupplyMode.Purchase, "001",
-            "CYL-10", null, null, null, "UPTON", null, null, CategoryCode: "0102"),
+            "CYL-10", null, null, "UPTON", null, null, null, CategoryCode: "0102"),
             "admin", UserRole.Administrator, default);
         var approved = await service.ApproveAsync(draft.Id, draft.RowVersion, "admin", UserRole.Administrator, default);
         _ = await materials.BeginSyncTaskAsync(approved.Task.Id, DateTimeOffset.UtcNow, default);
@@ -953,7 +999,7 @@ public sealed class MaterialServiceTests
             "0102", new("01020000003"), "admin", UserRole.Administrator, default);
         var draft = await service.CreateAsync(new(
             null, "令牌续签标准件", MaterialKind.Standard, MaterialSupplyMode.Purchase, "001",
-            "CYL-11", null, null, null, "UPTON", null, null, CategoryCode: "0102"),
+            "CYL-11", null, null, "UPTON", null, null, null, CategoryCode: "0102"),
             "admin", UserRole.Administrator, default);
         var approved = await service.ApproveAsync(draft.Id, draft.RowVersion, "admin", UserRole.Administrator, default);
         _ = await materials.BeginSyncTaskAsync(approved.Task.Id, DateTimeOffset.UtcNow, default);
@@ -978,7 +1024,7 @@ public sealed class MaterialServiceTests
         var service = CreateService(out var materials);
         var material = await service.CreateAsync(new(
             null, "同步料品", MaterialKind.Electrical, MaterialSupplyMode.Purchase, "001",
-            "M12", null, null, null, null, null, null, CategoryCode: "0101"),
+            "M12", null, null, "TEST", null, null, null, CategoryCode: "0101"),
             "admin", UserRole.Administrator, default);
         var approved = await service.ApproveAsync(material.Id, material.RowVersion, "admin", UserRole.Administrator, default);
         await materials.BeginSyncTaskAsync(approved.Task.Id, DateTimeOffset.UtcNow, default);
@@ -1034,7 +1080,7 @@ public sealed class MaterialServiceTests
         var service = CreateService(out var materials);
         var material = await service.CreateAsync(new(
             null, "待同步气缸", MaterialKind.Standard, MaterialSupplyMode.Purchase, "001",
-            "CDQ2B32", null, null, null, null, null, null, CategoryCode: "0102"),
+            "CDQ2B32", null, null, "TEST", null, null, null, CategoryCode: "0102"),
             "admin", UserRole.Administrator, default);
         var approved = await service.ApproveAsync(material.Id, material.RowVersion, "admin", UserRole.Administrator, default);
 
@@ -1064,7 +1110,7 @@ public sealed class MaterialServiceTests
         var service = CreateService(out var materials);
         var material = await service.CreateAsync(new(
             null, "同步中料品", MaterialKind.Electrical, MaterialSupplyMode.Purchase, "001",
-            "M18", null, null, null, null, null, null, CategoryCode: "0101"),
+            "M18", null, null, "TEST", null, null, null, CategoryCode: "0101"),
             "admin", UserRole.Administrator, default);
         var approved = await service.ApproveAsync(material.Id, material.RowVersion, "admin", UserRole.Administrator, default);
         await materials.BeginSyncTaskAsync(approved.Task.Id, DateTimeOffset.UtcNow, default);
@@ -1084,7 +1130,7 @@ public sealed class MaterialServiceTests
         var service = CreateService(out _);
         var material = await service.CreateAsync(new(
             null, "权限测试料品", MaterialKind.Electrical, MaterialSupplyMode.Purchase, "001",
-            "M18", null, null, null, null, null, null, CategoryCode: "0101"),
+            "M18", null, null, "TEST", null, null, null, CategoryCode: "0101"),
             "admin", UserRole.Administrator, default);
         var approved = await service.ApproveAsync(material.Id, material.RowVersion, "admin", UserRole.Administrator, default);
 
@@ -1101,7 +1147,7 @@ public sealed class MaterialServiceTests
         var service = CreateService(out var materials);
         var material = await service.CreateAsync(new(
             null, "待重试传感器", MaterialKind.Electrical, MaterialSupplyMode.Purchase, "001",
-            "M18", null, null, null, null, null, null, CategoryCode: "0101"),
+            "M18", null, null, "TEST", null, null, null, CategoryCode: "0101"),
             "admin", UserRole.Administrator, default);
         var approved = await service.ApproveAsync(material.Id, material.RowVersion, "admin", UserRole.Administrator, default);
         Assert.Contains("\"Code\": \"001\"", approved.Task.PayloadJson);
@@ -1139,7 +1185,7 @@ public sealed class MaterialServiceTests
         var service = CreateService(out var materials);
         var material = await service.CreateAsync(new(
             null, "BOM引用计数料品", MaterialKind.Electrical, MaterialSupplyMode.Purchase, "001",
-            "M12", null, null, null, null, null, null), "admin", UserRole.Administrator, default);
+            "M12", null, null, "TEST", null, null, null), "admin", UserRole.Administrator, default);
 
         await materials.LinkBomItemAsync(Guid.NewGuid(), material.Id, "admin", DateTimeOffset.UtcNow, default);
 
@@ -1332,7 +1378,7 @@ public sealed class MaterialServiceTests
             "0102", new("01020000003"), "admin", UserRole.Administrator, default);
         var material = await service.CreateAsync(new(
             null, "气密设备标准件BOM", MaterialKind.Standard, MaterialSupplyMode.Purchase, "001",
-            "VIRTUAL-BOM", null, null, null, null, null, null, CategoryCode: "0102"),
+            "VIRTUAL-BOM", null, null, "TEST", null, null, null, CategoryCode: "0102"),
             "engineer", UserRole.Administrator, default);
         Assert.Equal("01021000000", material.MaterialCode);
         var requestedAt = DateTimeOffset.UtcNow;
@@ -1368,7 +1414,7 @@ public sealed class MaterialServiceTests
         var service = CreateService(out var materials);
         var material = await service.CreateAsync(new(
             null, "已回写项目主BOM", MaterialKind.Product, MaterialSupplyMode.Manufacture, "001",
-            null, null, "安全重置复批", null, null, null, null, CategoryCode: "0302"),
+            "HEADER-01", null, "安全重置复批", null, null, null, null, CategoryCode: "0302"),
             "developer", UserRole.Administrator, default);
         var approved = await service.ApproveAsync(
             material.Id, material.RowVersion, "standardizer", UserRole.Administrator, default);
@@ -1413,7 +1459,7 @@ public sealed class MaterialServiceTests
         var resolved = await service.ResolveStandardBomMaterialsAsync(
             new(ProjectId, bom.Select(item => item.Id).ToArray()), "admin", UserRole.Administrator, default);
 
-        Assert.Equal(MaterialCodeResolutionStatus.Ambiguous, Assert.Single(resolved, item => item.BomItemId == bom[0].Id).Status);
+        Assert.Equal(MaterialCodeResolutionStatus.NoMatch, Assert.Single(resolved, item => item.BomItemId == bom[0].Id).Status);
         var matched = Assert.Single(resolved, item => item.BomItemId == bom[1].Id);
         Assert.Equal(MaterialCodeResolutionStatus.Matched, matched.Status);
         Assert.Equal("FESTO", matched.Material?.Brand);
@@ -1442,9 +1488,8 @@ public sealed class MaterialServiceTests
         var resolution = Assert.Single(await service.ResolveStandardBomMaterialsAsync(
             new(ProjectId, [bomItem.Id]), "admin", UserRole.Administrator, default));
 
-        Assert.Equal(MaterialCodeResolutionStatus.Matched, resolution.Status);
-        Assert.Equal(material.MaterialCode, resolution.Material?.MaterialCode);
-        Assert.Contains("图档品牌缺失", resolution.Issues);
+        Assert.Equal(MaterialCodeResolutionStatus.NoMatch, resolution.Status);
+        Assert.Null(resolution.Material);
         await Assert.ThrowsAsync<PdmRuleException>(() => workflow.ApplyMaterialCodeToBomAsync(
             ProjectId, bomItem.Id, material.MaterialCode, "admin", default));
 
@@ -1693,6 +1738,28 @@ public sealed class MaterialServiceTests
     }
 
     [Fact]
+    public async Task MaterialImport_AutoApproves0204AndCreatesSyncPreview()
+    {
+        var service = CreateService(out var materials, out _);
+        var missingMaterial = new[]
+        {
+            new MaterialImportRowCommand(2, "0204", "缺材质安装板", "个", "NS-MISSING")
+        };
+        var invalidPreview = await service.PreviewImportAsync(missingMaterial, "engineer", UserRole.Engineer, default);
+        Assert.Contains("材质", Assert.Single(invalidPreview.Rows).Errors.Single());
+
+        var rows = new[]
+        {
+            new MaterialImportRowCommand(2, "0204", "批量安装板", "个", "NS-AUTO", Material: "Q235")
+        };
+        var result = await service.ImportAsync(rows, "engineer", UserRole.Engineer, default);
+
+        Assert.Equal(MaterialApprovalStatus.Approved, Assert.Single(result.Materials).ApprovalStatus);
+        Assert.Equal(MaterialSyncStatus.PreviewReady, Assert.Single(result.Tasks).Status);
+        Assert.Single(await materials.ListSyncTasksAsync(default));
+    }
+
+    [Fact]
     public async Task MaterialImport_BlocksWholeBatchWhenRowsDuplicate()
     {
         var service = CreateService(out var materials, out _);
@@ -1704,10 +1771,29 @@ public sealed class MaterialServiceTests
 
         var preview = await service.PreviewImportAsync(rows, "standardizer", UserRole.ProcessReviewer, default);
         Assert.Equal(1, preview.ErrorCount);
-        Assert.Contains("与Excel第2行重复", preview.Rows.Single(row => row.RowNumber == 3).Errors);
+        Assert.Contains("与Excel第2行全局重复", preview.Rows.Single(row => row.RowNumber == 3).Errors);
         await Assert.ThrowsAsync<PdmRuleException>(() =>
             service.ImportAsync(rows, "standardizer", UserRole.ProcessReviewer, default));
         Assert.Empty(await materials.ListMaterialsAsync("重复", null, false, 20, default));
+    }
+
+    [Fact]
+    public async Task MaterialImport_BlocksDuplicatesAcrossCategories()
+    {
+        var service = CreateService(out var materials, out _);
+        var rows = new[]
+        {
+            new MaterialImportRowCommand(2, "0102", "跨分类机械件", "个", "GLOBAL-01", Brand: "UPTON"),
+            new MaterialImportRowCommand(3, "0101", "跨分类电气件", "个", " global-01 ", Brand: "upton")
+        };
+
+        var preview = await service.PreviewImportAsync(rows, "standardizer", UserRole.ProcessReviewer, default);
+
+        Assert.Equal(1, preview.ErrorCount);
+        Assert.Contains("与Excel第2行全局重复", preview.Rows.Single(row => row.RowNumber == 3).Errors);
+        await Assert.ThrowsAsync<PdmRuleException>(() =>
+            service.ImportAsync(rows, "standardizer", UserRole.ProcessReviewer, default));
+        Assert.Empty(await materials.ListMaterialsAsync("跨分类", null, false, 20, default));
     }
 
     [Theory]

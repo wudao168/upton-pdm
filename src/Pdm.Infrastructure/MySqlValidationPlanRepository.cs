@@ -126,8 +126,8 @@ public sealed class MySqlValidationPlanRepository : IValidationPlanRepository
         if (plan.Items.Count > 0)
         {
             await connection.ExecuteAsync(new CommandDefinition(
-                "INSERT INTO project_validation_plan_item(id,plan_id,catalog_category_id,catalog_item_id,category_name,validation_content,information_source,validation_date,result,reviewer,responsible_person,remark,sort_order) VALUES(@Id,@PlanId,@CatalogCategoryId,@CatalogItemId,@CategoryName,@ValidationContent,@InformationSource,@ValidationDate,@Result,@Reviewer,@ResponsiblePerson,@Remark,@SortOrder)",
-                plan.Items.Select(item => new { item.Id, PlanId = plan.Id, item.CatalogCategoryId, item.CatalogItemId, item.CategoryName, item.ValidationContent, item.InformationSource, ValidationDate = ToDateTime(item.ValidationDate), item.Result, item.Reviewer, item.ResponsiblePerson, item.Remark, item.SortOrder }),
+                "INSERT INTO project_validation_plan_item(id,plan_id,catalog_category_id,catalog_item_id,category_name,validation_content,validation_standard,information_source,validation_date,result,reviewer,responsible_person,remark,sort_order) VALUES(@Id,@PlanId,@CatalogCategoryId,@CatalogItemId,@CategoryName,@ValidationContent,@ValidationStandard,@InformationSource,@ValidationDate,@Result,@Reviewer,@ResponsiblePerson,@Remark,@SortOrder)",
+                plan.Items.Select(item => new { item.Id, PlanId = plan.Id, item.CatalogCategoryId, item.CatalogItemId, item.CategoryName, item.ValidationContent, item.ValidationStandard, item.InformationSource, ValidationDate = ToDateTime(item.ValidationDate), item.Result, item.Reviewer, item.ResponsiblePerson, item.Remark, item.SortOrder }),
                 transaction, cancellationToken: cancellationToken));
         }
 
@@ -146,8 +146,8 @@ public sealed class MySqlValidationPlanRepository : IValidationPlanRepository
         if (items.Count > 0)
         {
             await connection.ExecuteAsync(new CommandDefinition(
-                "INSERT INTO project_validation_plan_item(id,plan_id,catalog_category_id,catalog_item_id,category_name,validation_content,information_source,validation_date,result,reviewer,responsible_person,remark,sort_order) VALUES(@Id,@PlanId,@CatalogCategoryId,@CatalogItemId,@CategoryName,@ValidationContent,@InformationSource,@ValidationDate,@Result,@Reviewer,@ResponsiblePerson,@Remark,@SortOrder)",
-                items.Select(item => new { item.Id, PlanId = planId, item.CatalogCategoryId, item.CatalogItemId, item.CategoryName, item.ValidationContent, item.InformationSource, ValidationDate = ToDateTime(item.ValidationDate), item.Result, item.Reviewer, item.ResponsiblePerson, item.Remark, item.SortOrder }),
+                "INSERT INTO project_validation_plan_item(id,plan_id,catalog_category_id,catalog_item_id,category_name,validation_content,validation_standard,information_source,validation_date,result,reviewer,responsible_person,remark,sort_order) VALUES(@Id,@PlanId,@CatalogCategoryId,@CatalogItemId,@CategoryName,@ValidationContent,@ValidationStandard,@InformationSource,@ValidationDate,@Result,@Reviewer,@ResponsiblePerson,@Remark,@SortOrder)",
+                items.Select(item => new { item.Id, PlanId = planId, item.CatalogCategoryId, item.CatalogItemId, item.CategoryName, item.ValidationContent, item.ValidationStandard, item.InformationSource, ValidationDate = ToDateTime(item.ValidationDate), item.Result, item.Reviewer, item.ResponsiblePerson, item.Remark, item.SortOrder }),
                 transaction, cancellationToken: cancellationToken));
         }
         await transaction.CommitAsync(cancellationToken);
@@ -295,7 +295,7 @@ public sealed class MySqlValidationPlanRepository : IValidationPlanRepository
             new { PlanId = planId }, transaction, cancellationToken: cancellationToken));
         if (row is null) return null;
         var itemRows = await connection.QueryAsync<PlanItemRow>(new CommandDefinition(
-            "SELECT id,catalog_category_id,catalog_item_id,category_name,validation_content,information_source,validation_date,result,reviewer,responsible_person,remark,sort_order FROM project_validation_plan_item WHERE plan_id=@PlanId ORDER BY sort_order,id",
+            "SELECT id,catalog_category_id,catalog_item_id,category_name,validation_content,validation_standard,information_source,validation_date,result,reviewer,responsible_person,remark,sort_order FROM project_validation_plan_item WHERE plan_id=@PlanId ORDER BY sort_order,id",
             new { PlanId = row.Id }, transaction, cancellationToken: cancellationToken));
         var taskRows = await connection.QueryAsync<ApprovalTaskRow>(new CommandDefinition(
             "SELECT id,plan_id,step_order,stage,step_name,assignee,decision,decision_by,decision_comment,created_at,decided_at FROM validation_plan_approval_task WHERE plan_id=@PlanId ORDER BY step_order",
@@ -322,15 +322,15 @@ public sealed class MySqlValidationPlanRepository : IValidationPlanRepository
 
     private static Task InsertItemsAsync(MySqlConnection connection, MySqlTransaction transaction, ProjectValidationPlan plan, CancellationToken cancellationToken) =>
         plan.Items.Count == 0 ? Task.CompletedTask : connection.ExecuteAsync(new CommandDefinition(
-            "INSERT INTO project_validation_plan_item(id,plan_id,catalog_category_id,catalog_item_id,category_name,validation_content,information_source,validation_date,result,reviewer,responsible_person,remark,sort_order) VALUES(@Id,@PlanId,@CatalogCategoryId,@CatalogItemId,@CategoryName,@ValidationContent,@InformationSource,@ValidationDate,@Result,@Reviewer,@ResponsiblePerson,@Remark,@SortOrder)",
-            plan.Items.Select(item => new { item.Id, PlanId = plan.Id, item.CatalogCategoryId, item.CatalogItemId, item.CategoryName, item.ValidationContent, item.InformationSource, ValidationDate = ToDateTime(item.ValidationDate), item.Result, item.Reviewer, item.ResponsiblePerson, item.Remark, item.SortOrder }),
+            "INSERT INTO project_validation_plan_item(id,plan_id,catalog_category_id,catalog_item_id,category_name,validation_content,validation_standard,information_source,validation_date,result,reviewer,responsible_person,remark,sort_order) VALUES(@Id,@PlanId,@CatalogCategoryId,@CatalogItemId,@CategoryName,@ValidationContent,@ValidationStandard,@InformationSource,@ValidationDate,@Result,@Reviewer,@ResponsiblePerson,@Remark,@SortOrder)",
+            plan.Items.Select(item => new { item.Id, PlanId = plan.Id, item.CatalogCategoryId, item.CatalogItemId, item.CategoryName, item.ValidationContent, item.ValidationStandard, item.InformationSource, ValidationDate = ToDateTime(item.ValidationDate), item.Result, item.Reviewer, item.ResponsiblePerson, item.Remark, item.SortOrder }),
             transaction, cancellationToken: cancellationToken));
 
     private static object ToCategoryParameters(ValidationCheckCategory category) => new { category.Id, category.Name, category.SortOrder, category.IsActive, category.Note, category.CreatedBy, CreatedAt = category.CreatedAt.UtcDateTime, category.UpdatedBy, UpdatedAt = category.UpdatedAt.UtcDateTime };
     private static object ToItemParameters(ValidationCheckItem item) => new { item.Id, item.CategoryId, item.Content, item.DefaultInformationSource, item.SortOrder, item.IsActive, item.Note, item.CreatedBy, CreatedAt = item.CreatedAt.UtcDateTime, item.UpdatedBy, UpdatedAt = item.UpdatedAt.UtcDateTime };
     private static ValidationCheckCategory? MapCategory(CategoryRow? row) => row is null ? null : new(row.Id, row.Name, row.SortOrder, row.IsActive, row.Note, row.ItemCount, row.ReferenceCount, row.CreatedBy, Utc(row.CreatedAt), row.UpdatedBy, Utc(row.UpdatedAt), row.RowVersion);
     private static ValidationCheckItem? MapItem(ItemRow? row) => row is null ? null : new(row.Id, row.CategoryId, row.Content, row.DefaultInformationSource, row.SortOrder, row.IsActive, row.Note, row.ReferenceCount, row.CreatedBy, Utc(row.CreatedAt), row.UpdatedBy, Utc(row.UpdatedAt), row.RowVersion);
-    private static ProjectValidationPlanItem MapPlanItem(PlanItemRow row) => new(row.Id, row.CatalogCategoryId, row.CatalogItemId, row.CategoryName, row.ValidationContent, row.InformationSource, ToDateOnly(row.ValidationDate), row.Result, row.Reviewer, row.ResponsiblePerson, row.Remark, row.SortOrder);
+    private static ProjectValidationPlanItem MapPlanItem(PlanItemRow row) => new(row.Id, row.CatalogCategoryId, row.CatalogItemId, row.CategoryName, row.ValidationContent, row.InformationSource, ToDateOnly(row.ValidationDate), row.Result, row.Reviewer, row.ResponsiblePerson, row.Remark, row.SortOrder, row.ValidationStandard);
     private static ValidationPlanApprovalTask MapApprovalTask(ApprovalTaskRow row) => new(row.Id, row.PlanId, row.StepOrder, Enum.Parse<ApprovalStage>(row.Stage), row.StepName, row.Assignee,
         row.Decision is null ? null : Enum.Parse<ApprovalDecision>(row.Decision), row.DecisionBy, row.DecisionComment, Utc(row.CreatedAt), row.DecidedAt is null ? null : Utc(row.DecidedAt.Value));
     private static ValidationPlanAttachment MapAttachment(AttachmentRow row) => new(row.Id, row.PlanId, Enum.Parse<ValidationPlanAttachmentKind>(row.AttachmentKind), row.OriginalFileName, row.FileVersion, row.StorageRelativePath, row.FileLength, row.Sha256, row.UploadedBy, Utc(row.UploadedAt));
@@ -410,6 +410,7 @@ public sealed class MySqlValidationPlanRepository : IValidationPlanRepository
         public Guid? CatalogItemId { get; init; }
         public string CategoryName { get; init; } = string.Empty;
         public string ValidationContent { get; init; } = string.Empty;
+        public string? ValidationStandard { get; init; }
         public string? InformationSource { get; init; }
         public DateTime? ValidationDate { get; init; }
         public string? Result { get; init; }

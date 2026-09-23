@@ -32,7 +32,7 @@ public sealed class MaterialSyncBatchService(
             "u9.material-sync.batch.auto-create",
             nameof(MaterialSyncBatch),
             batch.Id.ToString(),
-            $"多级BOM表头料号自动同步批次：{batch.TotalCount}项。"), cancellationToken);
+            $"系统自动创建料品同步批次：{batch.TotalCount}项。"), cancellationToken);
         return batch;
     }
 

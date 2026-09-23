@@ -219,6 +219,8 @@ public sealed record UpdateMainProjectStaffingRequest(
 
 public sealed record UpdateChildProjectDesignersRequest(IReadOnlyList<string> Designers);
 
+public sealed record UpdateProjectPhaseOwnersRequest(IReadOnlyDictionary<string, string> PhaseOwners);
+
 public sealed record UpdateChildProjectManagerRequest(string ProjectManager);
 
 public sealed record RegisterDocumentRequest(
@@ -312,13 +314,23 @@ public sealed record CreateReleasePackageRequest(
     [property: JsonConverter(typeof(JsonStringEnumConverter))] ReleaseScope Scope = ReleaseScope.LegacyCombined,
     IReadOnlyList<Guid>? SelectedBomItemIds = null,
     IReadOnlyDictionary<Guid, decimal>? SelectedBomItemQuantities = null,
-    int WholeSetMultiplier = 1);
+    int WholeSetMultiplier = 1,
+    string DrawingPriority = "Normal",
+    DateOnly? DrawingRequiredOn = null,
+    IReadOnlyDictionary<Guid, DrawingDeliveryOverride>? DrawingDeliveryOverrides = null);
 
 public sealed record UpdateReleasePackageDraftRequest(
     string? ChangeReason = null,
     IReadOnlyList<Guid>? SelectedBomItemIds = null,
     IReadOnlyDictionary<Guid, decimal>? SelectedBomItemQuantities = null,
-    int WholeSetMultiplier = 1);
+    int WholeSetMultiplier = 1,
+    string? DrawingPriority = null,
+    DateOnly? DrawingRequiredOn = null,
+    IReadOnlyDictionary<Guid, DrawingDeliveryOverride>? DrawingDeliveryOverrides = null);
+
+public sealed record UpdateDrawingDeliveryRequest(string Priority, DateOnly RequiredOn);
+
+public sealed record ProductionDrawingArchiveRequest(IReadOnlyList<Guid> VersionIds, string Format);
 
 public sealed record EmergencyApprovalRequest(
     [property: JsonConverter(typeof(JsonStringEnumConverter))] ApprovalDecision Decision,

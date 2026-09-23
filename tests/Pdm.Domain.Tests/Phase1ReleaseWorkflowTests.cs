@@ -103,7 +103,8 @@ public sealed class Phase1ReleaseWorkflowTests
         {
             var released = (await repository.ListDocumentVersionsAsync(source.DocumentId, default))
                 .Single(version => version.Status == DocumentVersionStatus.Released);
-            Assert.Equal(source.SourceSha256, released.Preview?.SourceSha256);
+            Assert.Equal(source.Kind == DocumentKind.Drawing ? new string('F', 64) : source.SourceSha256,
+                released.Preview?.SourceSha256);
             Assert.Equal(source.Kind == DocumentKind.Drawing ? DocumentPreviewFormat.Pdf : DocumentPreviewFormat.Step, released.Preview?.Format);
         }
     }
@@ -154,7 +155,7 @@ public sealed class Phase1ReleaseWorkflowTests
                 $".release-previews/{source.DocumentId:N}.{(source.Kind == DocumentKind.Drawing ? "pdf" : "step")}",
                 1,
                 new string('B', 64),
-                source.SourceSha256));
+                source.Kind == DocumentKind.Drawing ? new string('F', 64) : source.SourceSha256));
         var attached = await repository.AttachReleasePreviewArtifactsAsync(package.Id, artifacts, default);
         Assert.Equal(artifacts.Count, attached.Count);
         await repository.MarkReleasePreviewStateAsync(package.Id, ReleasePreviewState.Succeeded, null, 1, TimeProvider.System.GetUtcNow(), default);
@@ -163,7 +164,8 @@ public sealed class Phase1ReleaseWorkflowTests
         {
             var released = (await repository.ListDocumentVersionsAsync(source.DocumentId, default))
                 .Single(version => version.Status == DocumentVersionStatus.Released);
-            Assert.Equal(source.SourceSha256, released.Preview?.SourceSha256);
+            Assert.Equal(source.Kind == DocumentKind.Drawing ? new string('F', 64) : source.SourceSha256,
+                released.Preview?.SourceSha256);
         }
     }
 
@@ -330,11 +332,11 @@ public sealed class Phase1ReleaseWorkflowTests
             .Single(document => document.DrawingNumber == "A01-100" && document.Kind == DocumentKind.Drawing);
         Assert.Equal(DocumentLifecycleState.Released, drawing.State);
 
-        // 引用树上的其它零件（不在转图范围内）要作为参考文件一起送转图电脑，否则 SolidWorks 解析不到引用、打不开装配体。
+        // 发布后新签入的工作文件不能混入该发布包的后台重试输入。
         var outsideDocument = (await repository.ListDocumentsAsync(ProjectId, default))
             .Single(document => document.DrawingNumber == "A01-101");
         await CheckInAsync(repository, outsideDocument.Id, "designer", new Dictionary<string, string?>(), 'B');
-        Assert.Contains(await repository.ListReleaseReferenceSourcesAsync(package.Id, default),
+        Assert.DoesNotContain(await repository.ListReleaseReferenceSourcesAsync(package.Id, default),
             source => source.DocumentId == outsideDocument.Id);
         Assert.DoesNotContain(await repository.ListReleasePreviewSourcesAsync(package.Id, default),
             source => source.DocumentId == outsideDocument.Id);
@@ -2670,11 +2672,71 @@ public sealed class Phase1ReleaseWorkflowTests
                     Path.Combine(".release-previews", package.Id.ToString("N"), $"{source.DocumentId:N}{(source.Kind == DocumentKind.Drawing ? ".pdf" : ".step")}"),
                     16,
                     new string('C', 64),
-                    source.SourceSha256));
+                    source.Kind == DocumentKind.Drawing ? new string('F', 64) : source.SourceSha256));
             _ = stagingDirectory;
             _ = convertedAt;
             return Task.FromResult(artifacts);
         }
+    }
+
+    [Fact]
+    public async Task ProductionDrawings_ListOnlyReleasedCurrentAndKeepDeliverySeparateFromVersion()
+    {
+        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(), new RecordingPublisher(), TimeProvider.System);
+        foreach (var document in await repository.ListCheckedOutDocumentsAsync(default))
+            await repository.ForceReleaseCheckoutAsync(document.Id, "admin", "测试准备", default);
+        await PrepareApprovedNonStandardDrawingReviewAsync(repository, workflow);
+        var package = await workflow.CreateReleasePackageAsync(
+            ProjectId, null, $"RP-PRODUCTION-{Guid.NewGuid():N}", "admin", "admin", "admin", UserRole.Administrator, default);
+        await PublishAsync(workflow, package);
+
+        var service = new ProductionDrawingService(repository);
+        var before = await service.ListAsync("admin", UserRole.Administrator, false, ProjectId, default);
+        var drawing = Assert.Single(before, item => item.DrawingNumber == "A01-100");
+        Assert.True(drawing.IsCurrent);
+        Assert.Equal("admin", drawing.PublishedBy);
+        Assert.False(drawing.LegacyUnverified);
+        var publishedPackage = await repository.FindReleasePackageAsync(drawing.ReleasePackageId, default);
+        Assert.NotNull(publishedPackage);
+        Assert.NotEmpty(drawing.BomItems);
+        Assert.All(drawing.BomItems, item => Assert.Contains(item, publishedPackage.NonStandardBomSnapshot));
+        var version = await repository.FindDocumentVersionAsync(drawing.DocumentId, drawing.VersionId, default);
+        Assert.NotNull(version);
+        Assert.NotEqual(version.SourceVersionId, version.Id);
+
+        await CheckInAsync(repository, drawing.DocumentId, "designer", new Dictionary<string, string?>(), '9');
+        var afterWork = Assert.Single(await service.ListAsync("admin", UserRole.Administrator, false, ProjectId, default),
+            item => item.DocumentId == drawing.DocumentId);
+        Assert.Equal(drawing.VersionId, afterWork.VersionId);
+
+        await service.UpdateDeliveryAsync(drawing.ReleasePackageId, drawing.DocumentId,
+            new DrawingDeliveryOverride("Urgent", new DateOnly(2026, 10, 1)), "admin", UserRole.Administrator, default);
+        var after = Assert.Single(await service.ListAsync("admin", UserRole.Administrator, false, ProjectId, default),
+            item => item.DocumentId == drawing.DocumentId);
+        Assert.Equal(drawing.VersionId, after.VersionId);
+        Assert.Equal("Urgent", after.Priority);
+        Assert.Equal(new DateOnly(2026, 10, 1), after.RequiredOn);
+        Assert.Contains(await repository.ListAuditAsync("admin", UserRole.Administrator, 50, default),
+            entry => entry.Action == "production-drawing.delivery.update" && entry.EntityId == drawing.DocumentId.ToString());
+    }
+
+    [Fact]
+    public async Task DrawingPublication_StopsWithoutAFormalSourceAndDoesNotCreatePartialVersions()
+    {
+        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(),
+            new RecordingPublisher { OmitFormalDrawings = true }, TimeProvider.System);
+        foreach (var document in await repository.ListCheckedOutDocumentsAsync(default))
+            await repository.ForceReleaseCheckoutAsync(document.Id, "admin", "测试准备", default);
+        await PrepareApprovedNonStandardDrawingReviewAsync(repository, workflow);
+        var package = await workflow.CreateReleasePackageAsync(
+            ProjectId, null, $"RP-SOURCE-FAIL-{Guid.NewGuid():N}", "admin", "admin", "admin", UserRole.Administrator, default);
+        await Assert.ThrowsAsync<PdmConflictException>(() => PublishAsync(workflow, package));
+        var failed = await repository.FindReleasePackageAsync(package.Id, default);
+        Assert.Equal(ReleasePackageState.PublishFailed, failed!.State);
+        Assert.DoesNotContain(await repository.ListProjectDocumentVersionsAsync(ProjectId, default),
+            version => version.ReleasePackageId == package.Id);
     }
 
     /// <summary>模拟被服务重启打断的转图：转换过程中抛出取消异常。</summary>
@@ -2701,6 +2763,7 @@ public sealed class Phase1ReleaseWorkflowTests
         public string PublishedPath { get; init; } = "C:\\PDM\\Release\\package";
         /// <summary>模拟只有工程图转成功、模型转失败：预览只返回工程图。</summary>
         public bool PreviewOnlyDrawings { get; init; }
+        public bool OmitFormalDrawings { get; init; }
         public Task PrepareAsync(ReleasePackage package, Project project, CancellationToken cancellationToken) { PrepareCalls++; return Task.CompletedTask; }
         public Task DiscardDraftAsync(ReleasePackage package, Project project, CancellationToken cancellationToken) { DiscardCalls++; return Task.CompletedTask; }
         public Task ValidateAsync(ReleasePackage package, Project project, CancellationToken cancellationToken) { ValidateCalls++; return Task.CompletedTask; }
@@ -2715,10 +2778,17 @@ public sealed class Phase1ReleaseWorkflowTests
                     $".release-previews/{source.DocumentId:N}.{(source.Kind == DocumentKind.Drawing ? "pdf" : "step")}",
                     1,
                     new string('A', 64),
-                    source.SourceSha256));
+                    source.Kind == DocumentKind.Drawing ? new string('F', 64) : source.SourceSha256));
             if (PreviewOnlyDrawings) previews = previews.Where(pair => sources.Single(source => source.DocumentId == pair.Key).Kind == DocumentKind.Drawing).ToDictionary(pair => pair.Key, pair => pair.Value);
             var published = PreviewError is null || PreviewOnlyDrawings ? previews : new Dictionary<Guid, DocumentPreviewArtifact>();
-            return Task.FromResult(new ReleasePublication(PublishedPath, published, PreviewError));
+            var formal = sources.Where(source => source.Kind == DocumentKind.Drawing).ToDictionary(
+                source => source.DocumentId,
+                source => new FormalDrawingSource(source.SourceVersionId,
+                    $".release-formal/{package.Id:N}/{source.DocumentId:N}.slddrw",
+                    source.FileLength, new string('F', 64), source.ExpectedFormalRevision,
+                    $"UPLM-DRAWING|{source.DrawingNumber}|{source.ExpectedFormalRevision}|{source.DocumentId:N}"));
+            return Task.FromResult(new ReleasePublication(PublishedPath, published, PreviewError,
+                OmitFormalDrawings ? new Dictionary<Guid, FormalDrawingSource>() : formal));
         }
     }
 

@@ -31,6 +31,7 @@ import ProjectPlanTemplateSettings from './ProjectPlanTemplateSettings.vue'
 const props = defineProps<{
   project: ProjectSummary
   projects: ProjectSummary[]
+  companyName?: string
   token: string
   currentUsername: string
   currentRole: string
@@ -73,12 +74,12 @@ const inheritedParentPlan = ref(false)
 const portfolio = ref<ProjectPlanPortfolio | null>(null)
 const templates = ref<ProjectPlanTemplate[]>([])
 const versions = ref<ProjectPlanVersion[]>([])
-const zoom = ref<Zoom>('week')
+const zoom = ref<Zoom>('day')
 const ganttShell = ref<HTMLElement | null>(null)
 const timelineWidth = ref(720)
 const infoColumnsCollapsed = ref(false)
-const expandedInfoWidth = 590
-const collapsedInfoWidth = 350
+const expandedInfoWidth = 708
+const collapsedInfoWidth = 382
 const updateTimelineWidth = () => {
   if (ganttShell.value) timelineWidth.value = Math.max(1, ganttShell.value.clientWidth - (infoColumnsCollapsed.value ? collapsedInfoWidth : expandedInfoWidth))
 }
@@ -265,6 +266,19 @@ async function confirmDelete() {
 
 const generateForm = reactive({ templateId: '', startDate: isoDate(new Date()), totalDurationDays: 60, replaceExisting: false, changeReason: '' })
 const generationTemplate = computed(() => templates.value.find(item => item.id === generateForm.templateId))
+const deliveryStageDurationPreview = computed(() => {
+  const deliveryStages = (generationTemplate.value?.stages ?? []).filter(stage => stage.participatesInDelivery === true)
+  if (!deliveryStages.length || !hasStageAllocation(generationTemplate.value?.stages) || generateForm.totalDurationDays < 1) return []
+  let cumulative = 0
+  let allocated = 0
+  return deliveryStages.map(stage => {
+    cumulative += stage.durationRatio ?? 0
+    const boundary = Math.round(generateForm.totalDurationDays * cumulative)
+    const durationDays = boundary - allocated
+    allocated = boundary
+    return { code: stage.code, name: stage.name, durationDays }
+  })
+})
 const independentSchedules = ref<Array<{ stage: string; name: string; durationDays: number; deferred: boolean }>>([])
 const postDeliveryStartOverride = ref('')
 const earliestPostDeliveryStart = computed(() => generateForm.startDate && generateForm.totalDurationDays > 0 ? addDays(generateForm.startDate, generateForm.totalDurationDays) : '')
@@ -413,12 +427,33 @@ const displayedPlans = computed(() => portfolioMode.value ? (portfolio.value?.pr
 const hasVisibleBaseline = computed(() => displayedPlans.value.some(item => item.baselineVersion > 0))
 const rootPortfolioItem = computed(() => portfolio.value?.projects.find(item => item.isRoot))
 const rootExportPlan = computed(() => rootPortfolioItem.value?.plan ?? (plan.value?.projectId === rootProject.value.id ? plan.value : null))
+function planExportItem(project: ProjectSummary, owner: ProjectPlan, inherited = false): ProjectPlanExportItem {
+  return {
+    projectCode: project.code,
+    projectName: project.name,
+    plan: owner,
+    inherited,
+    assigneeDisplayNames: Object.fromEntries(owner.tasks.flatMap(task => task.assignee ? [[task.assignee, displayUserName(task.assignee)]] : [])),
+    metadata: {
+      companyName: props.companyName || project.organizationName,
+      customerName: project.customerName,
+      projectType: project.projectTypeCode,
+      deviceModel: project.deviceModel,
+      serialNumbers: project.serialNumbers,
+      executionUnitName: project.executionUnitName,
+      projectManager: displayUserName(project.primaryProjectManager),
+      designLead: displayUserName(project.designLead ?? project.designLeads?.[0]),
+      engineers: project.designers.map(username => displayUserName(username)),
+    },
+  }
+}
 const childExportOptions = computed<ProjectPlanExportItem[]>(() => (portfolio.value?.projects ?? []).filter(item => !item.isRoot).flatMap(item => {
   const owner = item.plan ?? rootExportPlan.value
-  return owner ? [{ projectCode: item.projectCode, projectName: item.projectName, plan: owner, inherited: !item.plan }] : []
+  const project = props.projects.find(projectItem => projectItem.id === item.projectId)
+  return owner && project ? [planExportItem(project, owner, !item.plan)] : []
 }))
 const selectedExportItems = computed<ProjectPlanExportItem[]>(() => {
-  if (exportScope.value === 'root') return rootExportPlan.value ? [{ projectCode: rootProject.value.code, projectName: rootProject.value.name, plan: rootExportPlan.value }] : []
+  if (exportScope.value === 'root') return rootExportPlan.value ? [planExportItem(rootProject.value, rootExportPlan.value)] : []
   const selected = new Set(exportChildIds.value)
   return childExportOptions.value.filter(item => selected.has(item.projectCode))
 })
@@ -602,8 +637,12 @@ const timelineBounds = computed(() => {
     const end = addDays(isoWeekStart(addDays(today, 28)), 6)
     return { start, end, days: dayDiff(start, end) + 1 }
   }
-  const start = isoWeekStart(addDays(values.sort()[0], -3))
-  const end = addDays(isoWeekStart(addDays(values.sort().at(-1)!, 5)), 6)
+  const first = values.sort()[0]!
+  const last = values.sort().at(-1)!
+  const paddedStart = addDays(first, -2)
+  const paddedEnd = addDays(last, 2)
+  const start = zoom.value === 'day' ? paddedStart : isoWeekStart(paddedStart)
+  const end = zoom.value === 'day' ? paddedEnd : addDays(isoWeekStart(paddedEnd), 6)
   return { start, end, days: dayDiff(start, end) + 1 }
 })
 const dayWidth = computed(() => timelineWidth.value / timelineBounds.value.days)
@@ -668,6 +707,24 @@ const ticks = computed(() => {
 const todayDate = computed(() => isoDate(new Date()))
 const todayLeft = computed(() => dayDiff(timelineBounds.value.start, todayDate.value) * dayWidth.value)
 const todayLabel = computed(() => '今天')
+function deliveryFinish(owner: ProjectPlan) {
+  const deliveryStages = new Set((owner.stages ?? []).filter(stage => stage.participatesInDelivery !== false).map(stage => stage.code))
+  const finishes = owner.tasks
+    .filter(task => !owner.stages?.length || deliveryStages.has(task.stage))
+    .map(task => task.plannedFinish)
+    .filter(Boolean)
+    .sort()
+  return finishes.at(-1) ?? owner.plannedFinish ?? ''
+}
+const shippingDate = computed(() => displayedPlans.value.map(deliveryFinish).filter(Boolean).sort().at(-1) ?? '')
+const shippingDateLeft = computed(() => shippingDate.value ? dayDiff(timelineBounds.value.start, shippingDate.value) * dayWidth.value : -1)
+const shippingCountdownDays = computed(() => shippingDate.value ? dayDiff(todayDate.value, shippingDate.value) : null)
+const shippingCountdown = computed(() => {
+  if (shippingCountdownDays.value === null) return ''
+  if (shippingCountdownDays.value > 0) return `距发货 ${shippingCountdownDays.value} 天`
+  if (shippingCountdownDays.value === 0) return '今日发货'
+  return `已超期 ${Math.abs(shippingCountdownDays.value)} 天`
+})
 const overallProgress = computed(() => portfolioMode.value ? portfolio.value?.completionPercent ?? 0 : isEffective(plan.value) ? planProgress(plan.value?.tasks ?? [], plan.value?.stages) : 0)
 const progressLabel = computed(() => {
   const visiblePlans = portfolioMode.value ? (portfolio.value?.projects ?? []).flatMap(item => item.plan ? [item.plan] : []) : plan.value ? [plan.value] : []
@@ -1309,7 +1366,17 @@ watch(() => props.project.id, () => { masterPlanMode.value = false; return load(
         <article><span>计划风险</span><strong>{{ portfolioMode ? `${portfolio?.laggingProjectCount ?? 0} 滞后 / ${portfolio?.riskProjectCount ?? 0} 风险` : !isEffective(plan) ? '待审批生效' : `${plan?.tasks.filter(item => item.status !== 'Completed' && item.plannedFinish < isoDate(new Date())).length ?? 0} 项逾期` }}</strong><small>生效后提醒：7天、3天、到期日、逾期每日</small></article>
         <article><span>计划基线</span><strong>{{ plan?.baselineVersion ? `V${plan.baselineVersion}` : '未设置' }}</strong><small>{{ plan?.baselineVersion ? '灰色细条为冻结基线' : '设置后可比较计划与实际' }}</small></article>
         <article><button type="button" class="pdm-plan-summary-action" aria-label="查看阶段进度详情" @click="stageProgressDialogOpen = true"><span>阶段进度</span><strong>{{ stageCount ? `${completedStageCount} / ${stageCount}` : '暂无计划' }}</strong><small>已完成阶段 · 点击查看详情</small></button></article>
-        <article><span>生效信息</span><strong>{{ approvalLabel(plan) }}</strong><small v-if="isEffective(plan)">{{ displayUserName(plan?.approvedBy) }} 批准{{ plan?.approvedAt ? ` · ${new Date(plan.approvedAt).toLocaleString()}` : '' }}</small><small v-else-if="plan?.approvalStatus === 'Pending'">审批人：{{ displayUserName(plan.approvalAssignee) }} · 等待处理</small><small v-else-if="plan?.approvalStatus === 'Rejected'">{{ plan.approvalComment ? `驳回原因：${plan.approvalComment}` : '计划已驳回，可修改后重新提交' }}</small><small v-else>{{ plan ? '经执行事业部总经理批准后生效' : '尚未建立计划' }}</small></article>
+        <article class="pdm-plan-shipping-card">
+          <div class="pdm-plan-shipping-card__date">
+            <span>项目发货日期</span>
+            <strong>{{ shippingDate || '未排程' }}</strong>
+            <small>{{ shippingDate ? (portfolioMode ? '按各项目交付阶段最晚完成日' : '按交付阶段计划完成日') : '尚未建立计划' }}</small>
+          </div>
+          <div v-if="shippingCountdown" class="pdm-plan-shipping-countdown" :class="{ 'is-today': shippingCountdownDays === 0, 'is-overdue': (shippingCountdownDays ?? 0) < 0 }" :aria-label="shippingCountdown">
+            <strong>{{ Math.abs(shippingCountdownDays ?? 0) }}</strong>
+            <span>{{ (shippingCountdownDays ?? 0) > 0 ? '距发货（天）' : shippingCountdownDays === 0 ? '今日发货' : '已超期（天）' }}</span>
+          </div>
+        </article>
       </section>
 
       <section class="pdm-plan-panel">
@@ -1361,6 +1428,7 @@ watch(() => props.project.id, () => { masterPlanMode.value = false; return load(
                 <time v-else class="pdm-gantt-tick__date" :datetime="tick.date">{{ formatDayNumber(tick.date) }}</time>
               </span>
               <span v-if="todayLeft >= 0 && todayLeft <= timelineWidth" class="pdm-gantt-today is-header" :title="todayDate" :style="{ left: `${todayLeft}px` }"><b class="pdm-gantt-today__label">{{ todayLabel }}</b></span>
+              <span v-if="shippingDateLeft >= 0 && shippingDateLeft <= timelineWidth" class="pdm-gantt-shipping is-header" :title="`项目发货日期：${shippingDate}`" :style="{ left: `${shippingDateLeft}px` }"><b class="pdm-gantt-shipping__label">发货</b></span>
             </div>
             <template v-for="row in timelineRows" :key="row.key">
               <div role="button" tabindex="0" class="pdm-gantt-info-row" :class="{ 'is-project': !row.task && !row.isStage, 'is-stage': row.isStage, 'is-task': Boolean(row.task), 'is-child': row.level > 0, 'is-inherited-plan': row.isInherited }" :style="{ '--gantt-indent': `${10 + row.level * 16}px` }" :title="row.isInherited ? '默认跟随主计划' : undefined" :aria-expanded="row.isStage ? !collapsedStages.has(row.key) : !row.task && row.plan ? expanded.has(row.projectId) : undefined" @keydown.enter.self.prevent="row.isStage ? toggleStage(row.key) : row.task ? openTask(row) : toggleExpanded(row.projectId)" @keydown.space.self.prevent="row.isStage ? toggleStage(row.key) : row.task ? openTask(row) : toggleExpanded(row.projectId)" @click="row.isStage ? toggleStage(row.key) : row.task ? openTask(row) : toggleExpanded(row.projectId)">
@@ -1414,6 +1482,7 @@ watch(() => props.project.id, () => { masterPlanMode.value = false; return load(
                 <span v-for="marker in showNonWorkingDays ? calendarMarkers : []" :key="`${row.key}-calendar-${marker.date}`" aria-hidden="true" class="pdm-gantt-calendar-shade" :class="`is-${marker.tone}`" :style="{ left: `${marker.left}px`, width: `${Math.max(marker.width, 1)}px` }" />
                 <span v-for="tick in ticks" :key="`${row.key}-${tick.date}`" class="pdm-gantt-gridline" :style="{ left: `${tick.left}px` }" />
                 <span v-if="todayLeft >= 0 && todayLeft <= timelineWidth" class="pdm-gantt-today" :style="{ left: `${todayLeft}px` }" />
+                <span v-if="shippingDateLeft >= 0 && shippingDateLeft <= timelineWidth" class="pdm-gantt-shipping" :title="`项目发货日期：${shippingDate}`" :style="{ left: `${shippingDateLeft}px` }" />
                 <span v-if="showBaseline" class="pdm-gantt-baseline" :style="baselineStyle(row)" />
                 <span class="pdm-gantt-bar" :class="{ 'is-draggable': row.task && canEditSchedule(row.plan) && !saving, 'is-stage-adjustable': row.isStage && canResizeStage(row.plan) && !saving, 'is-dragging': barDrag?.row.key === row.key, 'is-project': !row.task && !row.isStage, 'is-milestone': row.isMilestone, 'is-lagging': row.isLagging, 'is-neutral': !isEffective(row.plan) }" :style="rowBarStyle(row)" @pointerdown.stop="startBarDrag($event, row)" @pointermove="moveBarDrag" @pointerup="finishBarDrag" @pointercancel="cancelBarDrag" @lostpointercapture="cancelBarDrag">
                   <button v-if="row.isStage ? canResizeStageEdge(row, 'resize-start') && !saving : row.task && !row.isMilestone && canEditSchedule(row.plan) && !saving" type="button" class="pdm-gantt-resize-handle is-start" :class="{ 'is-stage-handle': row.isStage }" :aria-label="row.isStage ? `拖动调整${row.name}阶段开始边界` : `拖动调整${row.name}开始日期`" @pointerdown.stop="startBarDrag($event, row, 'resize-start')" @dblclick.stop />
@@ -1431,7 +1500,7 @@ watch(() => props.project.id, () => { masterPlanMode.value = false; return load(
           <p>{{ project.parentProjectId ? '子项目不单独创建初始计划，请返回主项目建立计划；建立后本页默认只读使用主项目计划。' : portfolioMode ? '请先编辑并建立主项目计划；子项目默认跟随主计划，特殊子项目可在“子项目计划”中单独设置。' : '按模板比例和前置关系生成初始计划，之后可持续调整并保留版本。' }}</p>
           <button v-if="!portfolioMode && !project.parentProjectId && canEdit" type="button" class="pdm-primary-action" @click="openGenerate()">生成初始计划</button>
         </div>
-        <footer class="pdm-plan-legend"><span><i class="is-plan" />当前计划</span><span><i class="is-baseline" />冻结基线</span><span><i class="is-progress" />实际完成</span><span><i class="is-today" />今天</span><small>工期按自然日计算；初始阶段连续，后续调整允许阶段交叉，仅显式前置关系联动。</small></footer>
+        <footer class="pdm-plan-legend"><span><i class="is-plan" />当前计划</span><span><i class="is-baseline" />冻结基线</span><span><i class="is-progress" />实际完成</span><span><i class="is-today" />今天</span><span><i class="is-shipping" />发货日</span><small>工期按自然日计算；初始阶段连续，后续调整允许阶段交叉，仅显式前置关系联动。</small></footer>
       </section>
     </template>
 
@@ -1442,6 +1511,10 @@ watch(() => props.project.id, () => { masterPlanMode.value = false; return load(
         <p>任务按固定天数或初始阶段比例及前置关系生成；首次生成时各阶段在主项目计划范围内首尾连续。生成后可独立平移或调整各阶段，允许交叉，仅显式前置关系联动。</p>
         <div class="pdm-plan-form__grid"><label>交付计划开始<el-date-picker v-model="generateForm.startDate" value-format="YYYY-MM-DD" type="date" /></label><label>交付总工期（自然日）<el-input-number v-model="generateForm.totalDurationDays" aria-label="交付总工期" :min="1" :max="3650" :precision="0" /></label></div>
         <p v-if="!hasStageAllocation(generationTemplate?.stages)">此模板尚未配置两级分配，请管理员在“项目计划 → 计划模板”中补齐阶段比例。</p>
+        <section v-else-if="deliveryStageDurationPreview.length" class="pdm-plan-stage-duration-preview" aria-label="交付阶段工期预览">
+          <header><strong>主阶段工期预览</strong><small>按模板比例自动分配</small></header>
+          <div><span v-for="stage in deliveryStageDurationPreview" :key="stage.code"><strong>{{ stage.name }}</strong><b>{{ stage.durationDays }} 天</b></span></div>
+        </section>
         <p v-if="earliestPostDeliveryStart && scheduledPostDeliveryStages.length">交付计划完成：{{ addDays(earliestPostDeliveryStart, -1) }}</p>
         <section v-if="scheduledPostDeliveryStages.length" class="pdm-offsite-plan" aria-label="厂外调试计划">
           <header><strong>厂外调试计划</strong><el-checkbox :model-value="allPostDeliveryDeferred" :indeterminate="somePostDeliveryDeferred && !allPostDeliveryDeferred" aria-label="厂外调试计划暂不建立" @update:model-value="deferOffsitePlan(Boolean($event))">暂不建立</el-checkbox></header>
@@ -1661,6 +1734,7 @@ watch(() => props.project.id, () => { masterPlanMode.value = false; return load(
 .pdm-plan-summary-action{width:100%;min-width:0;display:flex;flex:1;flex-direction:column;justify-content:center;align-items:flex-start;padding:0;border:0;background:transparent;color:var(--pdm-text);text-align:left;cursor:pointer}.pdm-plan-summary-action>span{color:var(--pdm-muted);font-size:11px}.pdm-plan-summary-action:hover>span{color:var(--plan-accent)}.pdm-plan-summary-action:focus-visible{outline:2px solid var(--plan-accent);outline-offset:5px}.pdm-plan-summary-action .is-risk{color:var(--pdm-orange)}
 .pdm-plan-summary article { min-height: 86px; display: flex; flex-direction: column; justify-content: center; padding: 12px 15px; border: 1px solid var(--pdm-border); border-radius: 8px; background: var(--pdm-surface); box-shadow: var(--pdm-shadow-sm); }
 .pdm-plan-summary article>span { color: var(--pdm-muted); font-size: 11px; }.pdm-plan-summary strong { display: flex; align-items: center; gap: 7px; margin-top: 5px; font-size: 16px; }.pdm-plan-summary small { margin-top: 4px; color: var(--pdm-muted); font-size: 10px; }
+.pdm-plan-summary article.pdm-plan-shipping-card{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:center;gap:10px}.pdm-plan-shipping-card__date{min-width:0;display:flex;flex-direction:column;justify-content:center}.pdm-plan-shipping-card__date>span{color:var(--pdm-muted);font-size:11px}.pdm-plan-shipping-card__date>strong{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.pdm-plan-shipping-card__date>small{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.pdm-plan-summary .pdm-plan-shipping-countdown{min-width:58px;display:flex;flex-direction:column;align-items:center;justify-content:center;padding-left:11px;border-left:1px solid var(--pdm-border);color:var(--pdm-green);font-weight:600}.pdm-plan-summary .pdm-plan-shipping-countdown>strong{margin:0;font-size:28px;line-height:1;font-variant-numeric:tabular-nums}.pdm-plan-summary .pdm-plan-shipping-countdown>span{margin-top:4px;font-size:10px;line-height:1;white-space:nowrap}.pdm-plan-summary .pdm-plan-shipping-countdown.is-today{color:var(--plan-accent)}.pdm-plan-summary .pdm-plan-shipping-countdown.is-overdue{color:var(--pdm-danger)}
 .pdm-plan-stage-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--plan-accent); box-shadow: 0 0 0 4px var(--plan-accent-soft); }.pdm-plan-stage-dot.is-warning{background:var(--pdm-orange)}.pdm-plan-stage-dot.is-danger{background:var(--pdm-danger)}.pdm-plan-stage-dot.is-complete{background:var(--pdm-green)}
 .pdm-plan-progress { height: 5px; margin-top: 8px; overflow: hidden; border-radius: 5px; background: var(--pdm-surface-muted); }.pdm-plan-progress i { display: block; height: 100%; border-radius: inherit; background: var(--plan-accent); }
 .pdm-plan-panel { min-height: 420px; display: flex; flex: 1; flex-direction: column; overflow: hidden; border: 1px solid var(--pdm-border); border-radius: 8px; background: var(--pdm-surface); box-shadow: var(--pdm-shadow-sm); }
@@ -1670,14 +1744,14 @@ watch(() => props.project.id, () => { masterPlanMode.value = false; return load(
 .pdm-gantt-shell { min-height: 0; flex: 1; overflow: auto; }.pdm-gantt-table { min-width: 0; width: 100%; display: grid; grid-template-columns: 708px minmax(0,1fr); align-content: start; }.pdm-gantt-table.is-info-collapsed{grid-template-columns:382px minmax(0,1fr)}
 .pdm-gantt-head { position: sticky; top: 0; z-index: 6; height: 60px; border-bottom: 1px solid var(--pdm-border); background: var(--pdm-surface-muted); }.pdm-gantt-info-head { left: 0; z-index: 8; display: grid; grid-template-columns: 150px 86px 80px 80px 120px 60px 100px 32px; align-items:center;padding:0;color:var(--pdm-muted);font-size:10px;font-weight:600}.pdm-gantt-timeline-head { position: sticky; overflow:hidden; }.pdm-gantt-tick { position:absolute;top:40px;height:20px;display:flex;align-items:center;color:var(--pdm-muted);font-size:10px; }
 .pdm-gantt-info-row { position: sticky; left: 0; z-index: 3; height: 40px; display:grid;grid-template-columns:150px 86px 80px 80px 120px 60px 100px 32px;align-items:center;padding:0;border:0;border-bottom:1px solid var(--pdm-border);color:var(--pdm-text);background:var(--pdm-surface);text-align:left;font-size:11px}.pdm-gantt-info-row:hover{background:var(--plan-accent-soft)}.pdm-gantt-info-row.is-project{height:40px;background:var(--pdm-surface-muted)}.pdm-gantt-info-row.is-child .pdm-gantt-name{padding-left:26px}.pdm-gantt-name{min-width:0;padding:0 10px;display:flex;align-items:center;gap:5px}.pdm-gantt-name>span{min-width:0;display:flex;flex-direction:column}.pdm-gantt-name strong,.pdm-gantt-name small{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.pdm-gantt-name strong{font-size:11px}.pdm-gantt-name small{margin-top:2px;color:var(--pdm-muted);font-size:10px}.pdm-gantt-indent{width:13px}.pdm-gantt-info-row span.is-lagging{color:var(--pdm-danger);font-weight:600}.pdm-gantt-info-row span.is-risk{color:var(--pdm-orange);font-weight:600}.pdm-gantt-stage-cell{display:inline-flex;max-width:78px;overflow:hidden;padding:2px 7px;border-radius:9px;color:var(--pdm-muted);background:var(--pdm-surface-muted);font-size:10px;line-height:16px;text-overflow:ellipsis;white-space:nowrap}.pdm-gantt-stage-cell.is-current{color:var(--plan-accent);background:var(--plan-accent-soft);font-weight:600}.pdm-gantt-row-control{height:100%}
-.pdm-gantt-timeline-row{position:relative;height:40px;overflow:hidden;border-bottom:1px solid var(--pdm-border);background:var(--pdm-surface)}.pdm-gantt-timeline-row.is-project{height:40px;background:color-mix(in srgb,var(--pdm-surface-muted) 65%,var(--pdm-surface))}.pdm-gantt-gridline{position:absolute;z-index:1;top:0;bottom:0;border-left:1px solid color-mix(in srgb,var(--pdm-border) 70%,transparent)}.pdm-gantt-calendar-shade{position:absolute;z-index:0;top:0;bottom:0;pointer-events:none}.pdm-gantt-calendar-shade.is-sunday{background:color-mix(in srgb,#9db7d5 18%,transparent)}.pdm-gantt-calendar-shade.is-holiday{background:color-mix(in srgb,#f2a65a 22%,transparent)}.pdm-gantt-calendar-shade.is-workday{background:transparent}.pdm-gantt-calendar-shade.is-header{z-index:1;top:40px;pointer-events:auto}.pdm-gantt-calendar-band{position:absolute;z-index:2;height:20px;display:flex;align-items:center;justify-content:center;overflow:hidden;border-right:1px solid var(--pdm-border);border-bottom:1px solid var(--pdm-border);color:var(--pdm-text);font-size:10px;font-weight:600;white-space:nowrap}.pdm-gantt-calendar-band.is-year{top:0}.pdm-gantt-calendar-band.is-month{top:20px;color:var(--pdm-muted);font-weight:600}.pdm-gantt-today{position:absolute;z-index:2;top:0;bottom:0;border-left:1px solid var(--pdm-danger)}.pdm-gantt-today.is-header{z-index:9;top:40px}.pdm-gantt-today.is-header::before{content:'';position:absolute;top:0;left:-3px;border:3px solid transparent;border-top-color:var(--pdm-danger)}.pdm-gantt-today__label{position:absolute;left:0;bottom:2px;transform:translateX(-50%);padding:0 4px;border:1px solid color-mix(in srgb,var(--pdm-danger) 40%,var(--pdm-border));border-radius:4px;background:var(--pdm-surface);color:var(--pdm-danger);font-size:10px;font-weight:600;line-height:14px;white-space:nowrap}
+.pdm-gantt-timeline-row{position:relative;height:40px;overflow:hidden;border-bottom:1px solid var(--pdm-border);background:var(--pdm-surface)}.pdm-gantt-timeline-row.is-project{height:40px;background:color-mix(in srgb,var(--pdm-surface-muted) 65%,var(--pdm-surface))}.pdm-gantt-gridline{position:absolute;z-index:1;top:0;bottom:0;border-left:1px solid color-mix(in srgb,var(--pdm-border) 70%,transparent)}.pdm-gantt-calendar-shade{position:absolute;z-index:0;top:0;bottom:0;pointer-events:none}.pdm-gantt-calendar-shade.is-sunday{background:color-mix(in srgb,#9db7d5 18%,transparent)}.pdm-gantt-calendar-shade.is-holiday{background:color-mix(in srgb,#f2a65a 22%,transparent)}.pdm-gantt-calendar-shade.is-workday{background:transparent}.pdm-gantt-calendar-shade.is-header{z-index:1;top:40px;pointer-events:auto}.pdm-gantt-calendar-band{position:absolute;z-index:2;height:20px;display:flex;align-items:center;justify-content:center;overflow:hidden;border-right:1px solid var(--pdm-border);border-bottom:1px solid var(--pdm-border);color:var(--pdm-text);font-size:10px;font-weight:600;white-space:nowrap}.pdm-gantt-calendar-band.is-year{top:0}.pdm-gantt-calendar-band.is-month{top:20px;color:var(--pdm-muted);font-weight:600}.pdm-gantt-today,.pdm-gantt-shipping{position:absolute;z-index:2;top:0;bottom:0;border-left:1px solid var(--pdm-danger)}.pdm-gantt-shipping{border-left:2px solid var(--pdm-green)}.pdm-gantt-today.is-header,.pdm-gantt-shipping.is-header{z-index:9;top:40px}.pdm-gantt-today.is-header::before,.pdm-gantt-shipping.is-header::before{content:'';position:absolute;top:0;left:-3px;border:3px solid transparent;border-top-color:var(--pdm-danger)}.pdm-gantt-shipping.is-header::before{left:-4px;border-width:4px;border-top-color:var(--pdm-green)}.pdm-gantt-today__label,.pdm-gantt-shipping__label{position:absolute;left:0;bottom:2px;transform:translateX(-50%);padding:0 4px;border:1px solid color-mix(in srgb,var(--pdm-danger) 40%,var(--pdm-border));border-radius:4px;background:var(--pdm-surface);color:var(--pdm-danger);font-size:10px;font-weight:600;line-height:14px;white-space:nowrap}.pdm-gantt-shipping__label{border-color:color-mix(in srgb,var(--pdm-green) 45%,var(--pdm-border));color:var(--pdm-green)}
 .pdm-gantt-baseline{position:absolute;z-index:1;bottom:5px;height:4px;border-radius:3px;background:var(--pdm-muted);opacity:.58}.pdm-gantt-bar{--progress:0%;position:absolute;z-index:3;top:9px;height:20px;overflow:hidden;border:1px solid var(--plan-accent);border-radius:4px;background:color-mix(in srgb,var(--plan-accent) 17%,var(--pdm-surface));box-shadow:0 1px 3px color-mix(in srgb,var(--plan-accent) 15%,transparent)}.pdm-gantt-bar i{position:absolute;inset:0 auto 0 0;width:var(--progress);background:var(--plan-accent)}.pdm-gantt-bar b{position:absolute;z-index:2;inset:0;display:grid;place-items:center;color:var(--pdm-text);font-size:10px;font-weight:600;text-shadow:0 1px var(--pdm-surface)}.pdm-gantt-bar.is-project{top:9px;height:22px;border-radius:11px}.pdm-gantt-bar.is-project i{opacity:.86}.pdm-gantt-bar.is-lagging{border-color:var(--pdm-danger)}.pdm-gantt-bar.is-milestone{width:12px!important;height:12px;top:14px;border-radius:2px;background:var(--plan-accent);transform:rotate(45deg)}
 .pdm-gantt-bar-label{position:absolute;z-index:4;top:10px;max-width:150px;overflow:hidden;color:var(--pdm-text);font-size:11px;line-height:18px;text-overflow:ellipsis;white-space:nowrap;pointer-events:none}.pdm-gantt-bar-label.is-stage{font-weight:600}
-.pdm-plan-legend{min-height:38px;display:flex;align-items:center;gap:16px;padding:7px 12px;border-top:1px solid var(--pdm-border);color:var(--pdm-muted);font-size:11px}.pdm-plan-legend span{display:flex;align-items:center;gap:5px}.pdm-plan-legend i{width:18px;height:5px;border-radius:3px;background:var(--plan-accent)}.pdm-plan-legend i.is-baseline{height:3px;background:var(--pdm-muted)}.pdm-plan-legend i.is-progress{background:linear-gradient(90deg,var(--plan-accent) 55%,var(--plan-accent-soft) 55%)}.pdm-plan-legend i.is-today{width:1px;height:12px;background:var(--pdm-danger)}.pdm-plan-legend small{margin-left:auto;font-size:11px}
+.pdm-plan-legend{min-height:38px;display:flex;align-items:center;gap:16px;padding:7px 12px;border-top:1px solid var(--pdm-border);color:var(--pdm-muted);font-size:11px}.pdm-plan-legend span{display:flex;align-items:center;gap:5px}.pdm-plan-legend i{width:18px;height:5px;border-radius:3px;background:var(--plan-accent)}.pdm-plan-legend i.is-baseline{height:3px;background:var(--pdm-muted)}.pdm-plan-legend i.is-progress{background:linear-gradient(90deg,var(--plan-accent) 55%,var(--plan-accent-soft) 55%)}.pdm-plan-legend i.is-today{width:1px;height:12px;background:var(--pdm-danger)}.pdm-plan-legend i.is-shipping{width:2px;height:12px;background:var(--pdm-green)}.pdm-plan-legend small{margin-left:auto;font-size:11px}
 .pdm-plan-empty,.pdm-plan-state{min-height:310px;display:flex;flex:1;flex-direction:column;align-items:center;justify-content:center;gap:10px;color:var(--pdm-muted);text-align:center}.pdm-plan-empty svg{color:var(--plan-accent)}.pdm-plan-empty h2{margin:0;color:var(--pdm-text);font-size:16px}.pdm-plan-empty p{max-width:540px;margin:0;font-size:12px;line-height:1.4}.pdm-plan-state.is-error{color:var(--pdm-danger)}.pdm-plan-loading{width:20px;height:20px;border:2px solid var(--plan-accent-soft);border-top-color:var(--plan-accent);border-radius:50%;animation:pdm-plan-spin .8s linear infinite}@keyframes pdm-plan-spin{to{transform:rotate(360deg)}}
-.pdm-plan-form{display:flex;flex-direction:column;gap:14px}.pdm-plan-form label{display:flex;flex-direction:column;gap:6px;color:var(--pdm-text);font-size:12px}.pdm-plan-form__grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}.pdm-plan-form p{margin:0;padding:9px;border-radius:6px;color:var(--pdm-muted);background:var(--pdm-surface-muted);font-size:11px;line-height:1.4}.pdm-plan-progress-input{padding:0 8px}.pdm-plan-checkbox{justify-content:flex-end}.pdm-plan-version-list{display:flex;flex-direction:column;gap:8px}.pdm-plan-version-list article{display:grid;grid-template-columns:1fr auto;gap:4px 14px;padding:11px;border:1px solid var(--pdm-border);border-radius:6px}.pdm-plan-version-list span,.pdm-plan-version-list small{color:var(--pdm-muted);font-size:10px}.pdm-plan-version-list small{grid-column:1/-1}
+.pdm-plan-form{display:flex;flex-direction:column;gap:14px}.pdm-plan-form label{display:flex;flex-direction:column;gap:6px;color:var(--pdm-text);font-size:12px}.pdm-plan-form__grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}.pdm-plan-form p{margin:0;padding:9px;border-radius:6px;color:var(--pdm-muted);background:var(--pdm-surface-muted);font-size:11px;line-height:1.4}.pdm-plan-stage-duration-preview{display:flex;flex-direction:column;gap:8px;padding:10px 12px;border:1px solid var(--pdm-border);border-radius:6px;background:var(--pdm-surface-muted);font-size:11px}.pdm-plan-stage-duration-preview>header{display:flex;align-items:center;justify-content:space-between;gap:12px}.pdm-plan-stage-duration-preview>header small{color:var(--pdm-muted)}.pdm-plan-stage-duration-preview>div{display:flex;flex-wrap:wrap;gap:6px}.pdm-plan-stage-duration-preview>div>span{display:inline-flex;align-items:center;gap:5px;padding:4px 8px;border:1px solid var(--pdm-border);border-radius:4px;background:var(--pdm-surface)}.pdm-plan-stage-duration-preview b{color:var(--plan-accent);font-weight:600}.pdm-plan-progress-input{padding:0 8px}.pdm-plan-checkbox{justify-content:flex-end}.pdm-plan-version-list{display:flex;flex-direction:column;gap:8px}.pdm-plan-version-list article{display:grid;grid-template-columns:1fr auto;gap:4px 14px;padding:11px;border:1px solid var(--pdm-border);border-radius:6px}.pdm-plan-version-list span,.pdm-plan-version-list small{color:var(--pdm-muted);font-size:10px}.pdm-plan-version-list small{grid-column:1/-1}
 @media (max-width:1400px){.pdm-plan-summary{grid-template-columns:repeat(3,minmax(0,1fr))}}@media (max-width:760px){.pdm-plan-summary{grid-template-columns:repeat(2,minmax(0,1fr))}}
-.pdm-gantt-info-row.is-project,.pdm-gantt-timeline-row.is-project{background:color-mix(in srgb,var(--pdm-border) 32%,var(--pdm-surface))}.pdm-gantt-info-row.is-stage,.pdm-gantt-timeline-row.is-stage{background:color-mix(in srgb,var(--plan-accent-soft) 58%,var(--pdm-surface))}.pdm-gantt-info-row.is-inherited-plan,.pdm-gantt-timeline-row.is-inherited-plan{background:color-mix(in srgb,var(--pdm-surface-muted) 72%,var(--pdm-surface))}.pdm-gantt-info-row .pdm-gantt-name{padding-left:var(--gantt-indent,10px)}
+.pdm-gantt-info-row.is-project,.pdm-gantt-timeline-row.is-project{background:color-mix(in srgb,var(--pdm-border) 32%,var(--pdm-surface))}.pdm-gantt-info-row.is-stage,.pdm-gantt-timeline-row.is-stage{background:color-mix(in srgb,var(--plan-accent-soft) 82%,var(--pdm-surface))}.pdm-gantt-info-row.is-inherited-plan,.pdm-gantt-timeline-row.is-inherited-plan{background:color-mix(in srgb,var(--pdm-surface-muted) 72%,var(--pdm-surface))}.pdm-gantt-info-row .pdm-gantt-name{padding-left:var(--gantt-indent,10px)}
 .pdm-gantt-info-head,.pdm-gantt-info-row{grid-template-columns:150px 86px 80px 80px 120px 60px 100px 32px}.pdm-gantt-table.is-info-collapsed .pdm-gantt-info-head,.pdm-gantt-table.is-info-collapsed .pdm-gantt-info-row{grid-template-columns:170px 120px 60px 32px}
 .pdm-gantt-date-lines{display:block;font-size:0!important;line-height:0}.pdm-gantt-date-lines time{display:block;font-size:10px;line-height:16px}.pdm-gantt-inline-editor.is-duration{left:396px;width:250px}
 .pdm-gantt-info-row>span{text-align:center}.pdm-gantt-info-row>span:not(.pdm-gantt-name){padding-left:0!important}.pdm-gantt-info-row .pdm-gantt-name{position:relative;justify-content:center;padding:0 18px}.pdm-gantt-name>svg{position:absolute;left:6px}.pdm-gantt-name>.pdm-gantt-indent{display:none}

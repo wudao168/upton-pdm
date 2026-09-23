@@ -59,6 +59,8 @@ public sealed record Project(
 
     public IReadOnlyList<string> Designers { get; init; } = [];
 
+    public IReadOnlyDictionary<string, string> PhaseOwners { get; init; } = new Dictionary<string, string>();
+
     public bool CanAssignExecutionUnit { get; init; }
 
     public bool CanManageMainStaffing { get; init; }
@@ -801,7 +803,17 @@ public sealed record ReleasePackage(
     public int? FormalSupplementMaximumCount { get; init; }
 
     public int? FormalSupplementValidDays { get; init; }
+
+    /// <summary>发图提示信息，不属于不可变的图档内容或生产排产状态。</summary>
+    public string DrawingPriority { get; init; } = "Normal";
+
+    public DateOnly? DrawingRequiredOn { get; init; }
+
+    public IReadOnlyDictionary<Guid, DrawingDeliveryOverride> DrawingDeliveryOverrides { get; init; } =
+        new Dictionary<Guid, DrawingDeliveryOverride>();
 }
+
+public sealed record DrawingDeliveryOverride(string Priority, DateOnly RequiredOn);
 
 public sealed record AuditEntry(
     Guid Id,

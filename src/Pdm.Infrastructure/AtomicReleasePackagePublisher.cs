@@ -133,14 +133,21 @@ public sealed class AtomicReleasePackagePublisher : IReleasePackagePublisher
         if (package.Scope is ReleaseScope.StandardFormal or ReleaseScope.NonStandardWithDrawing or ReleaseScope.ElectricalFormal)
             await PrepareAsync(package, project, cancellationToken);
 
-        // 转图与发布解耦：转图失败不阻断发布，发布照常生成；转图作为单独事项由后台重试并把结果反馈给相关人。
+        // 正式源图是交付的前提；PDF/STEP 转换仍可在发布后重试。
+        var formalDrawings = previewSources.Count == 0
+            ? new Dictionary<Guid, FormalDrawingSource>()
+            : new Dictionary<Guid, FormalDrawingSource>(await previewConverter.FinalizeDrawingsAsync(
+                package, project, previewSources, stagingDirectory, cancellationToken));
+        var conversionSources = previewSources.Select(source => formalDrawings.TryGetValue(source.DocumentId, out var formal)
+            ? source with { StorageRelativePath = formal.StorageRelativePath, FileLength = formal.FileLength, Sha256 = formal.Sha256, SourceSha256 = formal.Sha256 }
+            : source).ToArray();
         string? previewError = null;
         IReadOnlyDictionary<Guid, DocumentPreviewArtifact> previews;
         try
         {
-            previews = previewSources.Count == 0
+            previews = conversionSources.Length == 0
                 ? new Dictionary<Guid, DocumentPreviewArtifact>()
-                : new Dictionary<Guid, DocumentPreviewArtifact>(await previewConverter.GenerateAsync(package, project, previewSources, stagingDirectory, cancellationToken));
+                : new Dictionary<Guid, DocumentPreviewArtifact>(await previewConverter.GenerateAsync(package, project, conversionSources, stagingDirectory, cancellationToken));
         }
         catch (Exception exception) when (exception is not OperationCanceledException)
         {
@@ -157,7 +164,7 @@ public sealed class AtomicReleasePackagePublisher : IReleasePackagePublisher
             var existingManifest = Path.Combine(finalDirectory, "manifest.json");
             if (File.Exists(existingManifest) && (await File.ReadAllTextAsync(existingManifest, cancellationToken)).Contains(package.Id.ToString(), StringComparison.OrdinalIgnoreCase))
             {
-                return new ReleasePublication(finalDirectory, previews);
+                return new ReleasePublication(finalDirectory, previews, previewError, formalDrawings);
             }
 
             throw new PdmConflictException("生产目录已存在同名但内容不同的发布包。 ");
@@ -215,7 +222,7 @@ public sealed class AtomicReleasePackagePublisher : IReleasePackagePublisher
 
             await File.WriteAllLinesAsync(Path.Combine(temporaryDirectory, "checksums.sha256"), checksums, cancellationToken);
             Directory.Move(temporaryDirectory, finalDirectory);
-            return new ReleasePublication(finalDirectory, previews, previewError);
+            return new ReleasePublication(finalDirectory, previews, previewError, formalDrawings);
         }
         catch
         {

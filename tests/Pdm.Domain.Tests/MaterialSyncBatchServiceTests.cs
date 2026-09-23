@@ -19,12 +19,12 @@ public sealed class MaterialSyncBatchServiceTests
         var materialService = new MaterialService(materials, repository, new TestProtector(), new NoOpClient(), timeProvider);
         var firstDraft = await materialService.CreateAsync(new(
             null, "标准件一", MaterialKind.Standard, MaterialSupplyMode.Purchase, "001",
-            "ONE", null, null, null, "UPTON", null, null, CategoryCode: "0102"),
+            "ONE", null, null, "UPTON", null, null, null, CategoryCode: "0102"),
             "admin", UserRole.Administrator, default);
         var first = await materialService.ApproveAsync(firstDraft.Id, firstDraft.RowVersion, "admin", UserRole.Administrator, default);
         var secondDraft = await materialService.CreateAsync(new(
             null, "标准件二", MaterialKind.Standard, MaterialSupplyMode.Purchase, "001",
-            "TWO", null, null, null, "UPTON", null, null, CategoryCode: "0102"),
+            "TWO", null, null, "UPTON", null, null, null, CategoryCode: "0102"),
             "admin", UserRole.Administrator, default);
         var second = await materialService.ApproveAsync(secondDraft.Id, secondDraft.RowVersion, "admin", UserRole.Administrator, default);
 

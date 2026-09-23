@@ -1,11 +1,11 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
-import { Blocks, Boxes, ClipboardCheck, FolderKanban, LayoutDashboard, Library, ListTree, Network, Settings } from '@lucide/vue'
+import { Blocks, Boxes, ClipboardCheck, FileText, FolderKanban, LayoutDashboard, Library, ListTree, Network, Settings } from '@lucide/vue'
 import uptonLogo from '../assets/upton-logo-white.png'
 import { repairMojibake } from '../mojibake'
 import PlmCubeIcon from './PlmCubeIcon.vue'
 
-type NavKey = 'project-center' | 'project-workbench' | 'projects' | 'materials' | 'standard-library' | 'standard-structure' | 'program-templates' | 'tasks' | 'admin'
+type NavKey = 'project-center' | 'project-workbench' | 'projects' | 'production-drawings' | 'materials' | 'standard-library' | 'standard-structure' | 'program-templates' | 'tasks' | 'admin'
 
 type SystemReleaseHistoryEntry = {
   Version?: string
@@ -132,6 +132,7 @@ const items = [
   { key: 'materials', label: '料品管理', icon: Boxes },
   { key: 'program-templates', label: '程序模板', icon: Blocks },
   { key: 'tasks', label: '我的待办', icon: ClipboardCheck },
+  { key: 'production-drawings', label: '生产图纸', icon: FileText },
 ] satisfies Array<{ key: NavKey; label: string; icon: typeof FolderKanban }>
 </script>
 

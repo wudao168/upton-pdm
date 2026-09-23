@@ -49,6 +49,24 @@ public sealed class ApiSmokeTests : IClassFixture<PdmApiFactory>
     }
 
     [Fact]
+    public async Task ProductionDrawingArchive_RejectsUnknownOrInvalidSelection()
+    {
+        var repository = factory.Services.GetRequiredService<IPdmRepository>();
+        var project = await repository.CreateProjectAsync(
+            new CreateProjectCommand($"DRAW-ZIP-{Guid.NewGuid():N}", "生产图纸打包权限验证", "admin", Path.GetTempPath(), Path.GetTempPath()),
+            "admin", CancellationToken.None);
+        var path = $"/api/projects/{project.Id}/production-drawings/archive";
+        var anonymous = await client.PostAsJsonAsync(path, new { versionIds = new[] { Guid.NewGuid() }, format = "Pdf" });
+        Assert.Equal(HttpStatusCode.Unauthorized, anonymous.StatusCode);
+
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", CreateToken("admin", "Administrator"));
+        var unknown = await client.PostAsJsonAsync(path, new { versionIds = new[] { Guid.NewGuid() }, format = "Pdf" });
+        Assert.Equal(HttpStatusCode.BadRequest, unknown.StatusCode);
+        var empty = await client.PostAsJsonAsync(path, new { versionIds = Array.Empty<Guid>(), format = "Source" });
+        Assert.Equal(HttpStatusCode.BadRequest, empty.StatusCode);
+    }
+
+    [Fact]
     public async Task ProjectWithoutReferenceTree_ReturnsNoContentInsteadOfNotFound()
     {
         var repository = factory.Services.GetRequiredService<IPdmRepository>();

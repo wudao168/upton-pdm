@@ -26,6 +26,37 @@ public sealed partial class MySqlPdmRepository
         return rows.Select(MapDocumentVersion).ToArray();
     }
 
+    public async Task<IReadOnlyList<ProductionDrawingProject>> ListProductionDrawingProjectsAsync(string actor, UserRole role, CancellationToken cancellationToken)
+    {
+        if (!await HasUserPermissionAsync(actor, role, PermissionCodes.ProjectView, cancellationToken)
+            || !await HasUserPermissionAsync(actor, role, PermissionCodes.ProjectContentView, cancellationToken)) return [];
+        await using var connection = await OpenAsync(cancellationToken);
+        var projects = await connection.QueryAsync<ProductionDrawingProject>(new CommandDefinition(
+            """
+            SELECT project.id,project.code,project.name,
+                   unit.name AS Division,
+                   COALESCE(
+                     (SELECT assignment.username FROM project_assignment assignment
+                      WHERE assignment.project_id=project.id AND assignment.assignment_type='PrimaryProjectManager' LIMIT 1),
+                     (SELECT assignment.username FROM project_assignment assignment
+                      WHERE assignment.project_id=COALESCE(project.root_project_id,project.id)
+                        AND assignment.assignment_type='PrimaryProjectManager' LIMIT 1)) AS ProjectManager
+            FROM project
+            LEFT JOIN project root ON root.id=COALESCE(project.root_project_id,project.id)
+            LEFT JOIN organization_unit unit ON unit.id=COALESCE(project.execution_unit_id,root.execution_unit_id)
+            WHERE (@CompanyId IS NULL OR project.organization_id=@CompanyId)
+              AND EXISTS (
+                SELECT 1 FROM document d
+                JOIN document_version v ON v.document_id=d.id
+                JOIN release_package p ON p.id=v.release_package_id
+                WHERE d.project_id=project.id AND d.kind='Drawing' AND d.deleted_at IS NULL AND d.purged_at IS NULL
+                  AND v.status='Released' AND p.state='Published'
+                  AND p.release_scope IN ('NonStandardWithDrawing','NonStandardSupplement','LegacyCombined'))
+            """,
+            new { CompanyId = TenantContext.CompanyId }, cancellationToken: cancellationToken));
+        return projects.ToArray();
+    }
+
     public async Task<DocumentVersion?> FindDocumentVersionAsync(Guid documentId, Guid versionId, CancellationToken cancellationToken)
     {
         await using var connection = await OpenAsync(cancellationToken);
@@ -206,20 +237,32 @@ public sealed partial class MySqlPdmRepository
         IReadOnlyList<Guid> previewScope = nonStandardModels.Count == 0
             ? []
             : await ResolvePreviewScopeAsync(connection, root, nonStandardModels, null, cancellationToken);
+        var rootDocumentIds = EnumerateDocumentIds(root).Distinct().ToArray();
+        if (rootDocumentIds.Length > 0)
+        {
+            var rootDrawings = await connection.QueryAsync<Guid>(new CommandDefinition(
+                "SELECT id FROM document WHERE id IN @Ids AND kind='Drawing'",
+                new { Ids = rootDocumentIds }, cancellationToken: cancellationToken));
+            previewScope = previewScope.Concat(rootDrawings).Distinct().ToArray();
+        }
         var sources = new List<ReleasePreviewSource>();
         foreach (var documentId in previewScope)
         {
+            var versionFilter = package.State == nameof(ReleasePackageState.Published)
+                ? " AND v.release_package_id=@PackageId AND v.version_status='Released' "
+                : " AND v.version_status='Work' ";
             var row = await connection.QuerySingleOrDefaultAsync<ReleasePreviewSourceRow>(new CommandDefinition(
                 """
                 SELECT d.id document_id,d.drawing_number,d.file_name,d.kind,
-                       v.id source_version_id,v.storage_relative_path,v.file_length,v.sha256,v.property_snapshot_json
+                       v.id source_version_id,v.revision_label,v.storage_relative_path,v.file_length,v.sha256,v.property_snapshot_json
                 FROM document d
                 INNER JOIN document_version v ON v.document_id=d.id
                 WHERE d.id=@DocumentId AND d.kind IN ('Assembly','Part','Drawing')
+                """ + versionFilter + """
                 ORDER BY v.created_at DESC
                 LIMIT 1
                 """,
-                new { DocumentId = documentId }, cancellationToken: cancellationToken));
+                new { DocumentId = documentId, PackageId = releasePackageId }, cancellationToken: cancellationToken));
             if (row is null) continue;
             var properties = JsonSerializer.Deserialize<Dictionary<string, string?>>(row.PropertySnapshotJson, jsonOptions) ?? [];
             properties.TryGetValue("SourceFileSha256", out var sourceSha256);
@@ -232,7 +275,10 @@ public sealed partial class MySqlPdmRepository
                 row.StorageRelativePath,
                 row.FileLength,
                 row.Sha256,
-                string.IsNullOrWhiteSpace(sourceSha256) ? row.Sha256 : sourceSha256));
+                package.State == nameof(ReleasePackageState.Published) || string.IsNullOrWhiteSpace(sourceSha256)
+                    ? row.Sha256 : sourceSha256,
+                package.State == nameof(ReleasePackageState.Published)
+                    ? row.RevisionLabel : RevisionLabel.Parse(row.RevisionLabel).Release().Display));
         }
         return sources;
     }
@@ -260,6 +306,9 @@ public sealed partial class MySqlPdmRepository
         // 逐个图档取最新版本：与转图源清单同样的写法，避免一次性大排序把 MySQL 排序内存打爆。
         foreach (var documentId in documentIds)
         {
+            var versionFilter = package.State == nameof(ReleasePackageState.Published)
+                ? " AND (v.release_package_id=@PackageId OR v.created_at <= (SELECT created_at FROM release_package WHERE id=@PackageId)) "
+                : " AND v.version_status='Work' ";
             var row = await connection.QuerySingleOrDefaultAsync<ReleasePreviewSourceRow>(new CommandDefinition(
                 """
                 SELECT d.id document_id,d.drawing_number,d.file_name,d.kind,
@@ -267,10 +316,11 @@ public sealed partial class MySqlPdmRepository
                 FROM document d
                 INNER JOIN document_version v ON v.document_id=d.id
                 WHERE d.id=@DocumentId AND d.kind IN ('Assembly','Part','Drawing')
-                ORDER BY v.created_at DESC
+                """ + versionFilter + """
+                ORDER BY (v.release_package_id=@PackageId) DESC,v.created_at DESC
                 LIMIT 1
                 """,
-                new { DocumentId = documentId }, cancellationToken: cancellationToken));
+                new { DocumentId = documentId, PackageId = releasePackageId }, cancellationToken: cancellationToken));
             if (row is null) continue;
             var properties = JsonSerializer.Deserialize<Dictionary<string, string?>>(row.PropertySnapshotJson, jsonOptions) ?? [];
             properties.TryGetValue("SourceFileSha256", out var sourceSha256);
@@ -340,6 +390,7 @@ public sealed partial class MySqlPdmRepository
         Guid approvalTaskId,
         string actor,
         IReadOnlyDictionary<Guid, DocumentPreviewArtifact> previews,
+        IReadOnlyDictionary<Guid, FormalDrawingSource> formalDrawings,
         CancellationToken cancellationToken)
     {
         await using var connection = await OpenAsync(cancellationToken);
@@ -388,9 +439,23 @@ public sealed partial class MySqlPdmRepository
             if (Enum.Parse<DocumentKind>(locked.Kind) is DocumentKind.Assembly or DocumentKind.Part or DocumentKind.Drawing)
                 previews.TryGetValue(documentId, out preview);
             var revision = source.Revision.Release();
+            FormalDrawingSource? formal = null;
+            if (Enum.Parse<DocumentKind>(locked.Kind) == DocumentKind.Drawing)
+            {
+                if (!formalDrawings.TryGetValue(documentId, out formal)
+                    || formal.SourceVersionId != source.Id
+                    || !string.Equals(formal.Revision, revision.Display, StringComparison.OrdinalIgnoreCase)
+                    || formal.FileLength <= 0 || string.IsNullOrWhiteSpace(formal.Sha256))
+                    throw new PdmConflictException($"工程图{documentId}的正式源图与审批版本不匹配，发布已停止。");
+                if (preview is not null && !string.Equals(preview.SourceSha256, formal.Sha256, StringComparison.OrdinalIgnoreCase))
+                    throw new PdmConflictException($"工程图{documentId}的PDF不是从正式源图转换的，发布已停止。");
+            }
             var released = source with
             {
                 Id = Guid.NewGuid(), Revision = revision, Status = DocumentVersionStatus.Released,
+                StorageRelativePath = formal?.StorageRelativePath ?? source.StorageRelativePath,
+                FileLength = formal?.FileLength ?? source.FileLength,
+                Sha256 = formal?.Sha256 ?? source.Sha256,
                 CreatedBy = actor, CreatedAt = timeProvider.GetUtcNow(), ChangeNote = $"审批发布{revision.Display}",
                 SourceVersionId = source.Id, SourceDescription = $"由{source.Revision.Display}审批发布",
                 ApprovalTaskId = approvalTaskId, ReleasePackageId = releasePackageId, Preview = preview
@@ -511,6 +576,15 @@ public sealed partial class MySqlPdmRepository
         {
             var version = MapDocumentVersion(row);
             if (!previews.TryGetValue(version.DocumentId, out var preview)) continue;
+            if (preview.Format == DocumentPreviewFormat.Pdf && version.SourceVersionId.HasValue)
+            {
+                var originalPath = await connection.ExecuteScalarAsync<string?>(new CommandDefinition(
+                    "SELECT storage_relative_path FROM document_version WHERE id=@SourceId",
+                    new { SourceId = version.SourceVersionId.Value }, cancellationToken: cancellationToken));
+                if (!string.Equals(originalPath, version.StorageRelativePath, StringComparison.OrdinalIgnoreCase)
+                    && !string.Equals(preview.SourceSha256, version.Sha256, StringComparison.OrdinalIgnoreCase))
+                    throw new PdmConflictException($"工程图{version.DocumentId}的PDF来源不是该正式源图。");
+            }
             await connection.ExecuteAsync(new CommandDefinition(
                 """
                 UPDATE document_version
@@ -630,6 +704,7 @@ public sealed partial class MySqlPdmRepository
     {
         public Guid DocumentId { get; init; }
         public Guid SourceVersionId { get; init; }
+        public string RevisionLabel { get; init; } = string.Empty;
         public string DrawingNumber { get; init; } = string.Empty;
         public string FileName { get; init; } = string.Empty;
         public string Kind { get; init; } = string.Empty;

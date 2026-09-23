@@ -782,6 +782,39 @@ public sealed class PdmWorkflowService(
         return saved;
     }
 
+    public async Task<Project> SetProjectPhaseOwnersAsync(Guid projectId, SetProjectPhaseOwnersCommand command, string actor, UserRole role, CancellationToken cancellationToken)
+    {
+        await RequirePermissionAsync(actor, role, PermissionCodes.ProjectDesignerAssign, cancellationToken);
+        var project = await repository.FindProjectAsync(projectId, cancellationToken) ?? throw new PdmNotFoundException("项目不存在。");
+        var root = project.ParentProjectId is null
+            ? project
+            : await repository.FindProjectAsync(project.RootProjectId ?? project.ParentProjectId.Value, cancellationToken) ?? throw new PdmNotFoundException("主项目不存在。");
+        if (root.ExecutionUnitId is null || root.OrganizationId is null) throw new PdmRuleException("请先为主项目分配执行事业部。");
+        var directory = await repository.GetOrganizationDirectoryAsync(cancellationToken);
+        var managesExecutionUnit = directory.Managers.Any(item => item.UnitId == root.ExecutionUnitId
+            && (string.Equals(item.PrimaryManager, actor, StringComparison.OrdinalIgnoreCase) || item.CollaborativeManagers.Contains(actor, StringComparer.OrdinalIgnoreCase)));
+        var user = directory.Users.FirstOrDefault(item => string.Equals(item.Username, actor, StringComparison.OrdinalIgnoreCase));
+        var isMechanicalSupervisor = user is not null
+            && user.EffectiveRoleCodes.Contains("MechanicalManager", StringComparer.OrdinalIgnoreCase)
+            && IsActiveMemberOfDivision(directory, actor, root.ExecutionUnitId.Value);
+        var belongsToProjectStaffing = string.Equals(project.PrimaryProjectManager, actor, StringComparison.OrdinalIgnoreCase)
+            || project.DesignLeads.Contains(actor, StringComparer.OrdinalIgnoreCase)
+            || string.Equals(project.DesignLead, actor, StringComparison.OrdinalIgnoreCase);
+        if (role != UserRole.Administrator && !managesExecutionUnit && !isMechanicalSupervisor && !belongsToProjectStaffing)
+            throw new UnauthorizedAccessException("只有执行事业部负责人、机械主管、当前项目经理或主设可以配置阶段负责人。");
+
+        var allowedKeys = new HashSet<string>(["StandardProcurement", "NonStandardProcurement", "NonStandardProduction", "MechanicalAssembly", "ElectricalAssembly", "ElectricalCommissioning", "Acceptance"], StringComparer.OrdinalIgnoreCase);
+        var normalized = command.PhaseOwners
+            .Where(item => !string.IsNullOrWhiteSpace(item.Value))
+            .ToDictionary(item => item.Key.Trim(), item => item.Value.Trim(), StringComparer.OrdinalIgnoreCase);
+        if (normalized.Keys.Any(key => !allowedKeys.Contains(key))) throw new PdmRuleException("包含未知的项目阶段。");
+        if (normalized.Values.Any(username => !IsActiveMemberOfOrganization(directory, username, root.OrganizationId.Value)))
+            throw new PdmRuleException("阶段负责人必须是项目公司内的启用账号。");
+        var saved = await repository.SetProjectPhaseOwnersAsync(projectId, normalized, actor, cancellationToken);
+        await AuditAsync(actor, "project.phase-owners.update", nameof(Project), project.Id.ToString(), $"{project.Code} · {string.Join('；', normalized.Select(item => $"{item.Key}:{item.Value}"))}", cancellationToken);
+        return saved;
+    }
+
     public async Task<Project> SetChildProjectManagerAsync(Guid projectId, string projectManager, string actor, UserRole role, CancellationToken cancellationToken)
     {
         await RequirePermissionAsync(actor, role, PermissionCodes.ProjectDesignerAssign, cancellationToken);
@@ -1986,7 +2019,10 @@ public sealed class PdmWorkflowService(
         UserRole role,
         CancellationToken cancellationToken,
         IReadOnlyDictionary<Guid, decimal>? selectedBomItemQuantities = null,
-        int wholeSetMultiplier = 1)
+        int wholeSetMultiplier = 1,
+        string drawingPriority = "Normal",
+        DateOnly? drawingRequiredOn = null,
+        IReadOnlyDictionary<Guid, DrawingDeliveryOverride>? drawingDeliveryOverrides = null)
     {
         await RequirePermissionAsync(actor, role, PermissionCodes.ReleaseManage, cancellationToken);
         if (scope == ReleaseScope.LegacyCombined)
@@ -2093,7 +2129,10 @@ public sealed class PdmWorkflowService(
             FormalSupplementValidDays = formalSupplementPolicy?.ValidDays,
             EffectiveSerialFrom = effectiveSerialFrom,
             EffectiveSerialTo = effectiveSerialTo,
-            WholeSetMultiplier = wholeSetMultiplier
+            WholeSetMultiplier = wholeSetMultiplier,
+            DrawingPriority = NormalizeDrawingPriority(drawingPriority),
+            DrawingRequiredOn = drawingRequiredOn,
+            DrawingDeliveryOverrides = NormalizeDrawingDeliveryOverrides(drawingDeliveryOverrides)
         };
         var created = await repository.CreateReleasePackageAsync(package, cancellationToken);
         await publisher.PrepareAsync(created, project, cancellationToken);
@@ -2109,7 +2148,10 @@ public sealed class PdmWorkflowService(
         string actor,
         UserRole role,
         CancellationToken cancellationToken,
-        int wholeSetMultiplier = 1)
+        int wholeSetMultiplier = 1,
+        string? drawingPriority = null,
+        DateOnly? drawingRequiredOn = null,
+        IReadOnlyDictionary<Guid, DrawingDeliveryOverride>? drawingDeliveryOverrides = null)
     {
         await RequirePermissionAsync(actor, role, PermissionCodes.ReleaseManage, cancellationToken);
         var package = await repository.FindReleasePackageAsync(releasePackageId, cancellationToken)
@@ -2136,6 +2178,9 @@ public sealed class PdmWorkflowService(
             ChangeReason = normalizedReason,
             ChangeReasonSelections = normalizedDescription.Selections,
             WholeSetMultiplier = wholeSetMultiplier,
+            DrawingPriority = NormalizeDrawingPriority(drawingPriority ?? package.DrawingPriority),
+            DrawingRequiredOn = drawingRequiredOn ?? package.DrawingRequiredOn,
+            DrawingDeliveryOverrides = NormalizeDrawingDeliveryOverrides(drawingDeliveryOverrides ?? package.DrawingDeliveryOverrides),
             FormalSupplementPolicySnapshotted = formalSupplementPolicy is not null,
             FormalSupplementMaximumCount = formalSupplementPolicy?.MaximumCount,
             FormalSupplementValidDays = formalSupplementPolicy?.ValidDays
@@ -4276,9 +4321,20 @@ public sealed class PdmWorkflowService(
         var publishedAt = timeProvider.GetUtcNow();
         var publishedPath = publication.PublishedPath;
         var finalApprovalTask = package.ApprovalTasks.OrderBy(task => task.StepOrder).Last(task => task.Decision == ApprovalDecision.Approved);
-        var releasedVersions = package.LocksDocuments
-            ? await repository.PublishReleasePackageVersionsAsync(package.Id, finalApprovalTask.Id, actor, publication.Previews, cancellationToken)
-            : [];
+        IReadOnlyList<DocumentVersion> releasedVersions;
+        try
+        {
+            releasedVersions = package.LocksDocuments
+                ? await repository.PublishReleasePackageVersionsAsync(package.Id, finalApprovalTask.Id, actor, publication.Previews,
+                    publication.FormalDrawings ?? new Dictionary<Guid, FormalDrawingSource>(), cancellationToken)
+                : [];
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            await repository.MarkPublishFailedAsync(package.Id, exception.Message, cancellationToken);
+            await AuditAsync(actor, "release-package.publish-failed", nameof(ReleasePackage), package.Id.ToString(), exception.Message, cancellationToken);
+            throw;
+        }
         foreach (var version in releasedVersions)
         {
             await AuditAsync(actor, "document.version.publish", nameof(DocumentVersion), version.Id.ToString(), version.Revision.Display, cancellationToken);
@@ -5464,8 +5520,8 @@ public sealed class PdmWorkflowService(
     {
         if (latest.Id == reviewedVersionId) return true;
         if (latest.Status != DocumentVersionStatus.Released || latest.SourceVersionId != reviewedVersionId) return false;
-        var reviewed = versions.FirstOrDefault(version => version.Id == reviewedVersionId);
-        return reviewed is not null && string.Equals(latest.Sha256, reviewed.Sha256, StringComparison.OrdinalIgnoreCase);
+        // 正式源图会写入版次与二维码，字节指纹必然不同；来源版本关系才是审核继承依据。
+        return latest.ReleasePackageId.HasValue && versions.Any(version => version.Id == reviewedVersionId);
     }
 
     private static BomKind ReleaseScopeBomKind(ReleaseScope scope) => scope switch
@@ -5516,6 +5572,26 @@ public sealed class PdmWorkflowService(
 
     private static bool IsPublishableBomItem(BomItem item) =>
         !item.IsManuallyExcluded && !item.IsReleaseExcluded;
+
+    private static string NormalizeDrawingPriority(string? value)
+    {
+        var normalized = value?.Trim() ?? "Normal";
+        if (normalized is not ("Normal" or "Priority" or "Urgent"))
+            throw new PdmRuleException("图纸紧急程度只能是普通、优先或紧急。");
+        return normalized;
+    }
+
+    private static IReadOnlyDictionary<Guid, DrawingDeliveryOverride> NormalizeDrawingDeliveryOverrides(
+        IReadOnlyDictionary<Guid, DrawingDeliveryOverride>? overrides)
+    {
+        var result = new Dictionary<Guid, DrawingDeliveryOverride>();
+        foreach (var (documentId, item) in overrides ?? new Dictionary<Guid, DrawingDeliveryOverride>())
+        {
+            if (documentId == Guid.Empty) throw new PdmRuleException("逐图发图信息缺少图档标识。");
+            result[documentId] = item with { Priority = NormalizeDrawingPriority(item.Priority) };
+        }
+        return result;
+    }
 
     private static int NormalizeWholeSetMultiplier(ReleaseScope scope, int multiplier)
     {

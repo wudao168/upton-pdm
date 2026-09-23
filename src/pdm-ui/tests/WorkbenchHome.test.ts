@@ -141,7 +141,7 @@ describe('WorkbenchHome', () => {
         pending: false,
         token: 'token',
         onUpdateMainStaffing: async () => project,
-        onUpdateDesigners: async () => childProject,
+        onUpdatePhaseOwners: async () => project,
       },
       global: { plugins: [ElementPlus] },
     })
@@ -170,13 +170,33 @@ describe('WorkbenchHome', () => {
     expect(wrapper.get('[aria-label="项目团队"]').text()).toContain('主设丙')
     expect(wrapper.get('[aria-label="项目团队"]').text()).toContain('工程师丁')
     expect(wrapper.get('[aria-label="项目团队"]').text()).toContain('配置分工')
-    expect(wrapper.get('[aria-label="项目团队"]').text()).toContain('配置工程师')
+    expect(wrapper.get('[aria-label="项目团队"]').text()).toContain('配置负责人')
+    for (const phase of ['标准件采购', '非标件采购', '非标件生产', '机械装配', '电气装配', '电气调试', '验收']) {
+      expect(wrapper.get('[aria-label="项目团队"]').text()).toContain(phase)
+    }
+    expect(wrapper.findAll('.pdm-overview-team__table thead th').map(cell => cell.text())).toEqual(['职责', '负责人', '职责', '负责人'])
+    expect(wrapper.findAll('.pdm-overview-team__table tbody tr')).toHaveLength(5)
+    const assignedProject = { ...project, phaseOwners: { StandardProcurement: 'manager', Acceptance: 'coordinator' } }
+    await wrapper.setProps({ projects: [assignedProject, childProject] })
+    const standardOwnerRow = wrapper.findAll('.pdm-overview-team__table tbody tr').find(row => row.text().includes('标准件采购'))!
+    expect(standardOwnerRow.text()).toContain('项目经理甲')
+    expect(wrapper.get('[aria-label="项目团队"]').text()).toContain('验收协同经理乙')
+    await wrapper.setProps({ projects: [{ ...assignedProject, phaseOwners: { ...assignedProject.phaseOwners, StandardProcurement: 'engineer' } }, childProject] })
+    expect(standardOwnerRow.text()).toContain('工程师丁')
+    expect(standardOwnerRow.text()).not.toContain('项目经理甲')
     expect(wrapper.get('[aria-label="项目位置"]').text()).toContain('D:\\PDM\\Vault\\P700001')
+
+    await wrapper.findAll('button').find(button => button.text().includes('配置负责人'))!.trigger('click')
+    await flushPromises()
+    expect(document.body.textContent).toContain('配置项目阶段负责人 · P700001')
+    for (const phase of ['标准件采购', '非标件采购', '非标件生产', '机械装配', '电气装配', '电气调试', '验收']) {
+      expect(document.body.textContent).toContain(phase)
+    }
 
     await wrapper.setProps({ projects: [{ ...project, collaborativeProjectManagers: [] }, childProject] })
     await wrapper.setProps({ project: { ...childProject, canAssignDesigners: false }, projects: [project, { ...childProject, canAssignDesigners: false }] })
     expect(wrapper.get('[aria-label="项目团队"]').text()).toContain('执行工程师')
-    expect(wrapper.get('[aria-label="项目团队"]').text()).not.toContain('配置工程师')
+    expect(wrapper.get('[aria-label="项目团队"]').text()).not.toContain('配置负责人')
 
     await wrapper.get('button[aria-label="进入项目图档"]').trigger('click')
     await wrapper.get('button[aria-label="进入BOM数据"]').trigger('click')

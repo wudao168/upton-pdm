@@ -461,6 +461,7 @@ onBeforeUnmount(() => {
       <header class="pdm-preview-toolbar">
         <section class="pdm-preview-properties-bar" aria-label="图档信息">
           <span class="pdm-preview-properties-bar__title">图档属性</span>
+          <span v-if="selected.kind === 'Drawing' && /(?:^|-)W\d+$/i.test(displayedRevision)" class="pdm-preview-work-badge">设计工作版 · 不供生产</span>
           <dl class="pdm-preview-properties" aria-label="图档属性">
             <div v-for="property in previewProperties" :key="property.label">
               <dt>{{ property.label }}</dt>
@@ -590,3 +591,7 @@ onBeforeUnmount(() => {
     </div>
   </section>
 </template>
+
+<style scoped>
+.pdm-preview-work-badge{display:inline-flex;align-items:center;padding:2px 8px;border-radius:4px;background:#fff7ed;color:#9a3412;font-size:12px;font-weight:600;white-space:nowrap}
+</style>

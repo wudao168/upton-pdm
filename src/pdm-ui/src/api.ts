@@ -1,5 +1,6 @@
-import type { AddDrawingReviewMarkupInput, ApprovalStep, ApprovalU9AutomationResult, AuditEntry, BatchUpdateBomItemsInput, BomClassification, BomEmptyDeclaration, BomExportMode, BomGenerationResult, BomHeaderKind, BomItem, BomKind, BomValidationRules, BomVersion, BomVersionState, CreateProjectInput, CreateReleasePackageInput, CreateRoleInput, CreateSubprojectInput, CrmConnectionTestResult, CrmCustomerSyncResult, CrmIntegrationSettings, DocumentKind, DocumentModelDrawingRelation, DocumentNode, DocumentVersionComparison, DocumentVersionSummary, DocumentWhereUsed, DrawingReviewCandidate, DrawingReviewDecision, DrawingReviewPackage, DrawingReviewTarget, EditLockSummary, EngineeringKit, EngineeringKitExpansion, EquipmentTypeDefinition, FolderPermissionRule, MainProjectStaffingInput, ManagedDocument, ManufacturingBomBaseline, MaterialAttachment, MaterialAttachmentKind, MaterialCategory, MaterialCategoryRule, MaterialCodeApplication, MaterialCodeApplicationStatus, MaterialCodeDecisionResult, MaterialCodeResolution, MaterialDuplicateRule, MaterialImportPreview, MaterialImportResult, MaterialKind, MaterialNumberingSettings, MaterialPage, MaterialRemovalReadiness, MaterialRemovalResult, MaterialSyncExecutionResult, MaterialSyncTask, MyApprovalTask, OrganizationDirectory, OrganizationUnit, PasswordResetTask, PdmCustomer, PdmMaterial, PdmSystemSettings, PdmUser, PdmUserProfile, ProgramTemplate, ProgramTemplateApprovalDecision, ProgramTemplateAttachmentKind, ProgramTemplateDraftInput, ProgramTemplateRevision, ProgramTemplateTask, ProgramTemplateVersionBump, ProjectBomHeader, ProjectBomU9SyncExecution, ProjectBomU9SyncPreview, ProjectFile, ProjectFileVersion, ProjectFolder, ProjectFolderTemplateNode, ProjectNumberingOptions, ProjectOrganization, ProjectProcurementTrackingResult, ProjectSummary, ProjectVersionItem, ReferenceStatus, ReleaseItemComment, ReleasePackageSummary, ReleaseScope, RolePermissionDirectory, SaveMaterialInput, SaveOrganizationUnitInput, SavePdmUserInput, SaveProjectOrganizationInput, StandardLibraryCategory, StandardLibraryMaterialPage, U9BomQueryExecution, U9BomQueryInput, U9BomWriteExecution, U9BomWriteInput, U9BomWritePreview, U9ConnectionTestResult, U9InventoryFilters, U9InventoryPage, U9InventorySyncSettings, U9InventorySyncStatusResponse, U9ItemQueryResult, U9MaterialFullSyncStatusResponse, U9MaterialIntegrationSettings, U9MaterialSampleImportResult, U9MaterialSamplePreview, U9ProcurementSyncSettings, U9ProcurementSyncStatusResponse, UpdateCrmIntegrationInput, UpdateProjectInput, UpdateReleasePackageDraftInput, UpdateU9MaterialIntegrationInput } from './types'
+import type { AddDrawingReviewMarkupInput, ApprovalStep, ApprovalU9AutomationResult, AuditEntry, BatchUpdateBomItemsInput, BomClassification, BomEmptyDeclaration, BomExportMode, BomGenerationResult, BomHeaderKind, BomItem, BomKind, BomValidationRules, BomVersion, BomVersionState, CreateProjectInput, CreateReleasePackageInput, CreateRoleInput, CreateSubprojectInput, CrmConnectionTestResult, CrmCustomerSyncResult, CrmIntegrationSettings, DocumentKind, DocumentModelDrawingRelation, DocumentNode, DocumentVersionComparison, DocumentVersionSummary, DocumentWhereUsed, DrawingReviewCandidate, DrawingReviewDecision, DrawingReviewPackage, DrawingReviewTarget, EditLockSummary, EngineeringKit, EngineeringKitExpansion, EquipmentTypeDefinition, FolderPermissionRule, MainProjectStaffingInput, ManagedDocument, ManufacturingBomBaseline, MaterialApprovalRule, MaterialAttachment, MaterialAttachmentKind, MaterialCategory, MaterialCategoryRule, MaterialCodeApplication, MaterialCodeApplicationStatus, MaterialCodeDecisionResult, MaterialCodeResolution, MaterialDuplicateRule, MaterialImportPreview, MaterialImportResult, MaterialKind, MaterialNumberingSettings, MaterialPage, MaterialRemovalReadiness, MaterialRemovalResult, MaterialSyncExecutionResult, MaterialSyncTask, MyApprovalTask, OrganizationDirectory, OrganizationUnit, PasswordResetTask, PdmCustomer, PdmMaterial, PdmSystemSettings, PdmUser, PdmUserProfile, ProgramTemplate, ProgramTemplateApprovalDecision, ProgramTemplateAttachmentKind, ProgramTemplateDraftInput, ProgramTemplateRevision, ProgramTemplateTask, ProgramTemplateVersionBump, ProjectBomHeader, ProjectBomU9SyncExecution, ProjectBomU9SyncPreview, ProjectFile, ProjectFileVersion, ProjectFolder, ProjectFolderTemplateNode, ProjectNumberingOptions, ProjectOrganization, ProjectProcurementTrackingResult, ProjectSummary, ProjectVersionItem, ReferenceStatus, ReleaseItemComment, ReleasePackageSummary, ReleaseScope, RolePermissionDirectory, SaveMaterialInput, SaveOrganizationUnitInput, SavePdmUserInput, SaveProjectOrganizationInput, StandardLibraryCategory, StandardLibraryMaterialPage, U9BomQueryExecution, U9BomQueryInput, U9BomWriteExecution, U9BomWriteInput, U9BomWritePreview, U9ConnectionTestResult, U9InventoryFilters, U9InventoryPage, U9InventorySyncSettings, U9InventorySyncStatusResponse, U9ItemQueryResult, U9MaterialFullSyncStatusResponse, U9MaterialIntegrationSettings, U9MaterialSampleImportResult, U9MaterialSamplePreview, U9ProcurementSyncSettings, U9ProcurementSyncStatusResponse, UpdateCrmIntegrationInput, UpdateProjectInput, UpdateReleasePackageDraftInput, UpdateU9MaterialIntegrationInput } from './types'
 import type { CadPropertyWritebackVersion } from './types'
+import type { DrawingDeliveryOverride, ProductionDrawingItem } from './types'
 import type { MaterialSyncBatch } from './types'
 import type { ProgramTemplateOptionCatalog } from './types'
 import type { EngineeringKitOptionCatalog } from './types'
@@ -211,6 +212,7 @@ interface ApiProject {
   designLead?: string | null
   designLeads?: string[]
   designers?: string[]
+  phaseOwners?: import('./types').ProjectPhaseOwners
   documentCount?: number | null
   modelDocumentCount?: number | null
   drawingDocumentCount?: number | null
@@ -358,6 +360,9 @@ interface ApiReleasePackage {
   createsManufacturingBaseline?: boolean
   locksDocuments?: boolean
   wholeSetMultiplier?: number
+  drawingPriority?: ReleasePackageSummary['drawingPriority']
+  drawingRequiredOn?: string | null
+  drawingDeliveryOverrides?: ReleasePackageSummary['drawingDeliveryOverrides']
   changeReasonSelections?: ReleasePackageSummary['changeReasonSelections']
   formalSupplementPolicySnapshotted?: boolean
   formalSupplementMaximumCount?: number | null
@@ -865,6 +870,16 @@ export function updateMaterialNumberingSettings(startSequence: number, token: st
   }, token)
 }
 
+export function getMaterialApprovalRules(token: string): Promise<MaterialApprovalRule[]> {
+  return requestJson<MaterialApprovalRule[]>('/api/material-approval-rules', {}, token)
+}
+
+export function updateMaterialApprovalRules(rules: MaterialApprovalRule[], token: string): Promise<MaterialApprovalRule[]> {
+  return requestJson<MaterialApprovalRule[]>('/api/material-approval-rules', {
+    method: 'PUT', body: JSON.stringify({ rules }),
+  }, token)
+}
+
 export function saveMaterialCategory(category: MaterialCategory, token: string, creating = false): Promise<MaterialCategory> {
   const method = creating ? 'POST' : 'PUT'
   const path = creating ? '/api/material-categories' : `/api/material-categories/${encodeURIComponent(category.code)}`
@@ -1223,6 +1238,10 @@ export async function updateChildProjectDesigners(projectId: string, designers: 
   return mapProject(await requestJson<ApiProject>(`/api/projects/${projectId}/designers`, { method: 'PUT', body: JSON.stringify({ designers }) }, token))
 }
 
+export async function updateProjectPhaseOwners(projectId: string, phaseOwners: import('./types').ProjectPhaseOwners, token: string): Promise<ProjectSummary> {
+  return mapProject(await requestJson<ApiProject>(`/api/projects/${projectId}/phase-owners`, { method: 'PUT', body: JSON.stringify({ phaseOwners }) }, token))
+}
+
 export async function updateChildProjectManager(projectId: string, projectManager: string, token: string): Promise<ProjectSummary> {
   return mapProject(await requestJson<ApiProject>(`/api/projects/${projectId}/manager`, { method: 'PUT', body: JSON.stringify({ projectManager }) }, token))
 }
@@ -1488,6 +1507,40 @@ export async function listReleasePackages(projectId: string, token: string): Pro
   return (await requestJson<ApiReleasePackage[]>(`/api/projects/${projectId}/release-packages`, {}, token)).map(mapReleasePackage)
 }
 
+export function listProductionDrawings(token: string, includeHistory = false): Promise<ProductionDrawingItem[]> {
+  return requestJson(`/api/production-drawings?includeHistory=${includeHistory}`, {}, token)
+}
+
+export async function downloadProductionDrawingArchive(projectId: string, versionIds: string[], format: 'Pdf' | 'Source', token: string): Promise<void> {
+  const headers = authenticatedHeaders(token)
+  headers.set('Content-Type', 'application/json')
+  const response = await fetch(`${apiBase}/api/projects/${projectId}/production-drawings/archive`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({ versionIds, format }),
+  })
+  if (!response.ok) {
+    const body = await response.json().catch(() => null)
+    throw new PdmApiError(body?.detail || `生产图纸批量下载失败（${response.status}）。`, response.status)
+  }
+  const blob = await response.blob()
+  const url = URL.createObjectURL(blob)
+  const link = document.createElement('a')
+  link.href = url
+  link.download = `生产图纸-${format === 'Pdf' ? 'PDF' : '源图'}.zip`
+  link.click()
+  window.setTimeout(() => URL.revokeObjectURL(url), 60000)
+}
+
+export function getProductionDrawing(versionId: string, token: string): Promise<ProductionDrawingItem> {
+  return requestJson(`/api/production-drawings/${versionId}`, {}, token)
+}
+
+export function updateProductionDrawingDelivery(item: ProductionDrawingItem, delivery: DrawingDeliveryOverride, token: string): Promise<unknown> {
+  return requestJson(`/api/production-drawings/${item.releasePackageId}/${item.documentId}/delivery`,
+    { method: 'PUT', body: JSON.stringify(delivery) }, token)
+}
+
 export function createReleasePackage(projectId: string, input: CreateReleasePackageInput, token: string): Promise<ApiReleasePackage> {
   return requestJson('/api/release-packages', { method: 'POST', body: JSON.stringify({ projectId, referenceSnapshotId: null, ...input }) }, token)
 }
@@ -1558,9 +1611,11 @@ export function retryReleasePreviewItems(releasePackageId: string, documentIds: 
 
 /** 图纸转出打包下载：把选中的（或全部）STEP/PDF 打成 zip 下载。 */
 export async function downloadReleasePreviewArchive(projectId: string, releasePackageId: string | undefined, documentIds: string[], token: string): Promise<void> {
+  const headers = authenticatedHeaders(token)
+  headers.set('Content-Type', 'application/json')
   const response = await fetch(`${apiBase}/api/projects/${projectId}/release-preview-items/archive`, {
     method: 'POST',
-    headers: { ...authenticatedHeaders(token), 'Content-Type': 'application/json' },
+    headers,
     body: JSON.stringify({ releasePackageId: releasePackageId ?? null, documentIds }),
   })
   if (!response.ok) throw new PdmApiError('图纸转出文件打包下载失败。', response.status)
@@ -2057,6 +2112,7 @@ function mapProject(project: ApiProject): ProjectSummary {
     designLead: project.designLead ?? undefined,
     designLeads: project.designLeads?.length ? project.designLeads : project.designLead ? [project.designLead] : [],
     designers: project.designers ?? [],
+    phaseOwners: project.phaseOwners ?? {},
     documentCount: project.documentCount ?? undefined,
     modelDocumentCount: project.modelDocumentCount ?? undefined,
     drawingDocumentCount: project.drawingDocumentCount ?? undefined,
@@ -2372,6 +2428,9 @@ function mapReleasePackage(releasePackage: ApiReleasePackage): ReleasePackageSum
     createsManufacturingBaseline: releasePackage.createsManufacturingBaseline ?? true,
     locksDocuments: releasePackage.locksDocuments ?? true,
     wholeSetMultiplier: releasePackage.wholeSetMultiplier ?? 1,
+    drawingPriority: releasePackage.drawingPriority ?? 'Normal',
+    drawingRequiredOn: releasePackage.drawingRequiredOn ?? null,
+    drawingDeliveryOverrides: releasePackage.drawingDeliveryOverrides ?? {},
     changeReasonSelections: releasePackage.changeReasonSelections ?? [],
     formalSupplementPolicySnapshotted: releasePackage.formalSupplementPolicySnapshotted ?? false,
     formalSupplementMaximumCount: releasePackage.formalSupplementMaximumCount ?? null,

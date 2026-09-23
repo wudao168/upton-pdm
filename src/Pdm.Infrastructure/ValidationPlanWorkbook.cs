@@ -58,7 +58,7 @@ public static class ValidationPlanWorkbook
         var entry = archive.CreateEntry("xl/worksheets/sheet1.xml", CompressionLevel.Optimal);
         using var stream = entry.Open();
         using var writer = XmlWriter.Create(stream, new XmlWriterSettings { Encoding = new UTF8Encoding(false), Indent = true });
-        var merges = new List<string> { "A1:K1", "A2:K2", "B3:D3", "F3:H3", "J3:K3", "B4:D4", "F4:H4", "J4:K4", "B5:E5" };
+        var merges = new List<string> { "A1:K1", "A2:K2", "B3:D3", "F3:H3", "J3:K3", "B4:D4", "F4:H4", "J4:K4", "B5:D5" };
 
         writer.WriteStartDocument(true);
         writer.WriteStartElement("worksheet", SpreadsheetNamespace);
@@ -89,7 +89,7 @@ public static class ValidationPlanWorkbook
         WriteRow(writer, 2, 48, 2, ["说明：本计划由项目成员线上维护；需要数据支撑的验证项应填写实际数据。导出文件中的评审与会签栏用于打印签字。"]);
         WriteRow(writer, 3, 28, 3, ["编制", export.Plan.PreparedBy ?? export.Plan.UpdatedBy, null, null, "审核", export.ReviewPerson, null, null, "批准", export.ApprovalPerson, null]);
         WriteRow(writer, 4, 28, 3, ["项目号", export.Project.Code, null, null, "项目名称", export.Project.Name, null, null, "验证日期", Date(export.Plan.ValidationDate), null]);
-        WriteRow(writer, 5, 34, 4, ["序号", "验证内容", null, null, null, "信息来源", "验证日期", "结果（如有数据需填入）", "审核人", "责任人", "备注"]);
+        WriteRow(writer, 5, 34, 4, ["序号", "验证内容", null, null, "验证标准", "信息来源", "验证日期", "结果（如有数据需填入）", "审核人", "责任人", "备注"]);
 
         var rowNumber = 6;
         var sequence = 1;
@@ -102,10 +102,10 @@ public static class ValidationPlanWorkbook
             {
                 WriteRow(writer, rowNumber, 36, 5,
                 [
-                    sequence++, item.ValidationContent, null, null, null, item.InformationSource,
+                    sequence++, item.ValidationContent, null, null, item.ValidationStandard, item.InformationSource,
                     Date(item.ValidationDate), item.Result, item.Reviewer, item.ResponsiblePerson, item.Remark
                 ]);
-                merges.Add($"B{rowNumber}:E{rowNumber}");
+                merges.Add($"B{rowNumber}:D{rowNumber}");
                 rowNumber++;
             }
         }
@@ -113,7 +113,7 @@ public static class ValidationPlanWorkbook
         for (var index = 0; index < 5; index++)
         {
             WriteRow(writer, rowNumber, 36, 5, [sequence++, "", "", "", "", "", "", "", "", "", ""]);
-            merges.Add($"B{rowNumber}:E{rowNumber}");
+            merges.Add($"B{rowNumber}:D{rowNumber}");
             rowNumber++;
         }
 

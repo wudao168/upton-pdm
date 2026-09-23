@@ -178,6 +178,7 @@ builder.Services.AddScoped<U9InventoryService>();
 builder.Services.AddSingleton<U9InventorySyncCoordinator>();
 builder.Services.AddScoped<U9ProcurementService>();
 builder.Services.AddScoped<ReleasePreviewService>();
+builder.Services.AddScoped<ProductionDrawingService>();
 builder.Services.AddScoped<ReleaseDeliveryArchiveService>();
 builder.Services.AddSingleton<ReleasePreviewCoordinator>();
 builder.Services.AddSingleton<U9ProcurementSyncCoordinator>();

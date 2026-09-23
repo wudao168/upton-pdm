@@ -173,7 +173,13 @@ internal static class Program
         IModelDoc2 document = null;
         try
         {
-            var openOptions = OpenOptionsCommon | (lightweightAssemblies && documentType == (int)swDocumentTypes_e.swDocASSEMBLY ? OpenOptionsLightweight : 0);
+            var formalDrawing = !string.IsNullOrWhiteSpace(job.ReleaseRevision);
+            if (formalDrawing && (documentType != (int)swDocumentTypes_e.swDocDRAWING
+                || string.IsNullOrWhiteSpace(job.QrContent)
+                || !string.Equals(Path.GetExtension(job.OutputPath), ".slddrw", StringComparison.OrdinalIgnoreCase)))
+                throw new InvalidDataException("正式图纸任务缺少版次、二维码内容或输出格式不正确。");
+            var openOptions = (formalDrawing ? (int)swOpenDocOptions_e.swOpenDocOptions_Silent : OpenOptionsCommon)
+                | (lightweightAssemblies && documentType == (int)swDocumentTypes_e.swDocASSEMBLY ? OpenOptionsLightweight : 0);
             document = application.OpenDoc6(
                 job.SourcePath,
                 documentType,
@@ -183,6 +189,8 @@ internal static class Program
                 ref openWarnings) as IModelDoc2;
             if (document == null || openErrors != 0)
                 throw new InvalidOperationException($"SolidWorks打开{Path.GetFileName(job.SourcePath)}失败，错误码{openErrors}，警告码{openWarnings}。");
+
+            if (formalDrawing) FormalDrawingStamp.Apply(application, document, job.ReleaseRevision, job.QrContent);
 
             var saveErrors = 0;
             var saveWarnings = 0;
@@ -233,6 +241,8 @@ internal static class Program
         public string Kind { get; set; }
         // 老版本服务端不带该字段，缺省按“需要转出”处理。
         public bool Convert { get; set; } = true;
+        public string ReleaseRevision { get; set; }
+        public string QrContent { get; set; }
     }
 
     private sealed class PreviewWorkerResult
