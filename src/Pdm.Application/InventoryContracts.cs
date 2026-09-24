@@ -83,6 +83,7 @@ public sealed record U9InventorySnapshotRow(
     DateTimeOffset RefreshedAt)
 {
     public decimal? SimilarityPercent { get; init; }
+    public string? SimilarityReason { get; init; }
 }
 
 public sealed record U9InventorySubprojectOption(

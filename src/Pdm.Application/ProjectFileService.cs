@@ -119,6 +119,16 @@ public sealed class ProjectFileService(
         return saved;
     }
 
+    public async Task<ProjectFile> UpdateDescriptionAsync(Guid projectId, Guid fileId, string? description, string actor, UserRole role, CancellationToken cancellationToken)
+    {
+        var file = await RequireFileAsync(projectId, fileId, actor, role, FolderAccess.Edit, cancellationToken);
+        var value = description?.Trim();
+        if (value?.Length > 500) throw new PdmRuleException("文件说明不能超过500个字符。");
+        var saved = await files.UpdateDescriptionAsync(fileId, string.IsNullOrWhiteSpace(value) ? null : value, actor, cancellationToken);
+        await AuditAsync(actor, "project.file.description.update", nameof(ProjectFile), fileId, $"更新项目文件说明：{file.FileName}", cancellationToken);
+        return saved;
+    }
+
     public async Task<ProjectFile> MoveAsync(Guid projectId, Guid fileId, Guid folderId, string actor, UserRole role, CancellationToken cancellationToken)
     {
         var file = await RequireFileAsync(projectId, fileId, actor, role, FolderAccess.Edit, cancellationToken);

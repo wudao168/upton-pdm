@@ -88,7 +88,16 @@ try {
     (Get-Service -Name $serviceName).WaitForStatus('Stopped', [TimeSpan]::FromSeconds(30))
     $deploymentStarted = $true
 
-    Copy-Item -Path (Join-Path $apiSource '*') -Destination $apiTarget -Recurse -Force
+    for ($attempt = 1; $attempt -le 10; $attempt++) {
+        try {
+            Copy-Item -Path (Join-Path $apiSource '*') -Destination $apiTarget -Recurse -Force
+            break
+        }
+        catch {
+            if ($attempt -eq 10) { throw }
+            Start-Sleep -Seconds 1
+        }
+    }
     Copy-Item -Path (Join-Path $clientSource '*') -Destination $clientTarget -Recurse -Force
     Copy-Item -Path (Join-Path $previewSource '*') -Destination $previewTarget -Recurse -Force
 

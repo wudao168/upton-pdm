@@ -3,6 +3,7 @@ import { ElMessageBox } from 'element-plus'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import ProjectSettingsDrawer from '../src/components/ProjectSettingsDrawer.vue'
 import type { ProjectSummary } from '../src/types'
+import { userDisplayNameKey } from '../src/userDisplay'
 
 const api = vi.hoisted(() => ({
   getProjectContentResetReadiness: vi.fn(), resetProjectContent: vi.fn(), restoreProjectContent: vi.fn(),
@@ -84,7 +85,7 @@ describe('ProjectSettingsDrawer', () => {
     })
     const wrapper = mount(ProjectSettingsDrawer, {
       props: { modelValue: true, project: target, projects: [target, source], token: 'token', canCopyContent: true, canResetContent: true, pending: false, onContentResetComplete: vi.fn() },
-      global: { stubs: {
+      global: { provide: { [userDisplayNameKey as symbol]: (username?: string | null) => username === 'admin' ? '系统管理员' : username ?? '—' }, stubs: {
         ElDrawer: { props: ['modelValue', 'title'], emits: ['update:modelValue'], template: '<section role="dialog"><h2>{{ title }}</h2><slot /><footer><slot name="footer" /></footer></section>' },
         ElInput: { props: ['modelValue'], template: '<input :value="modelValue">' }, ElAlert: { props: ['title', 'description'], template: '<div>{{ title }} {{ description }}<slot /></div>' },
         ElCheckbox: { props: ['modelValue'], emits: ['update:modelValue', 'change'], template: '<label><slot /></label>' },
@@ -107,5 +108,7 @@ describe('ProjectSettingsDrawer', () => {
     expect(wrapper.text()).toContain('存在已发布的BOM，项目内容不能重置')
     expect(wrapper.text()).toContain('30天内可恢复的快照')
     expect(wrapper.text()).toContain('误导入')
+    expect(wrapper.text()).toContain('系统管理员')
+    expect(wrapper.text()).not.toContain('admin')
   })
 })

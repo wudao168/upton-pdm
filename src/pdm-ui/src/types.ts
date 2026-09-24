@@ -641,6 +641,7 @@ export interface ProjectFile {
   rootProjectId: string
   folderId: string
   fileName: string
+  description?: string | null
   createdBy: string
   createdAt: string
   updatedBy: string
@@ -2056,6 +2057,7 @@ export interface U9MaterialFullSyncStatusResponse {
 
 export interface U9InventoryRow {
   similarityPercent?: number | null
+  similarityReason?: string | null
   organizationCode: string
   warehouseCode: string
   warehouseName: string

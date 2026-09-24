@@ -155,9 +155,14 @@ const syncResult = ref<WorkflowResult | null>(null)
 const query = ref('')
 const brandFilter = ref('')
 const showArchived = ref(false)
+const appliedQuery = ref('')
+const appliedBrandFilter = ref('')
+const appliedShowArchived = ref(false)
 const pageSize = ref(50)
 const currentPage = ref(1)
 // 默认按创建时间由近到远（新→旧）排列，用户点击表头可切换或取消排序。
+type MaterialSortBy = 'materialCode' | 'name' | 'specification' | 'brand' | 'createdBy' | 'createdAt'
+const materialSortBy = ref<MaterialSortBy | undefined>('createdAt')
 const createdAtOrder = ref<'asc' | 'desc' | undefined>('desc')
 const editorOpen = ref(false)
 const editorError = ref('')
@@ -329,8 +334,14 @@ function selectPageDrafts() {
 }
 const materialRowClass = ({ row }: { row: PdmMaterial }) => isPendingMaterial(row) ? 'is-pending-material' : ''
 function compareMaterials(left: PdmMaterial, right: PdmMaterial) {
-  if (createdAtOrder.value) return (Date.parse(left.createdAt) - Date.parse(right.createdAt)) * (createdAtOrder.value === 'asc' ? 1 : -1)
-    || left.materialCode.localeCompare(right.materialCode)
+  const sortBy = materialSortBy.value
+  if (sortBy && createdAtOrder.value) {
+    const value = (item: PdmMaterial) => sortBy === 'createdAt' ? Date.parse(item.createdAt) : item[sortBy] ?? ''
+    const comparison = typeof value(left) === 'number'
+      ? Number(value(left)) - Number(value(right))
+      : String(value(left)).localeCompare(String(value(right)), 'zh-CN')
+    return comparison * (createdAtOrder.value === 'asc' ? 1 : -1) || left.materialCode.localeCompare(right.materialCode)
+  }
   return Number(isPendingMaterial(right)) - Number(isPendingMaterial(left))
     || (isPendingMaterial(left) && isPendingMaterial(right) ? Date.parse(right.createdAt) - Date.parse(left.createdAt) : 0)
     || Number(Boolean(right.isRecommended)) - Number(Boolean(left.isRecommended))
@@ -741,7 +752,7 @@ async function load() {
   loading.value = true
   try {
     const [materialPage, loadedCategories, loadedTasks, loadedCodeApplications, numberingSettings, loadedApprovalRules, loadedDuplicateRules, loadedRelations, loadedPendingMasters] = await Promise.all([
-      listMaterialPage(props.token, { ordinaryOnly: true, query: query.value, categoryCode: selectedMaterialCategoryCode.value, brand: brandFilter.value, includeArchived: showArchived.value, page: currentPage.value, pageSize: pageSize.value, createdAtOrder: createdAtOrder.value }),
+      listMaterialPage(props.token, { ordinaryOnly: true, query: appliedQuery.value, categoryCode: selectedMaterialCategoryCode.value, brand: appliedBrandFilter.value, includeArchived: appliedShowArchived.value, page: currentPage.value, pageSize: pageSize.value, sortBy: materialSortBy.value, sortOrder: createdAtOrder.value }),
       listMaterialCategories(props.token, props.canManageIntegration), listMaterialSyncTasks(props.token, true), listMaterialCodeApplications(props.token),
       props.canManageIntegration ? getMaterialNumberingSettings(props.token) : Promise.resolve(null),
       props.canManageIntegration ? getMaterialApprovalRules(props.token) : Promise.resolve([]),
@@ -779,13 +790,14 @@ async function loadMaterialPage() {
   try {
     const result = await listMaterialPage(props.token, {
       ordinaryOnly: true,
-      query: query.value,
+      query: appliedQuery.value,
       categoryCode: selectedMaterialCategoryCode.value,
-      brand: brandFilter.value,
-      includeArchived: showArchived.value,
+      brand: appliedBrandFilter.value,
+      includeArchived: appliedShowArchived.value,
       page: currentPage.value,
       pageSize: pageSize.value,
-      createdAtOrder: createdAtOrder.value,
+      sortBy: materialSortBy.value,
+      sortOrder: createdAtOrder.value,
     })
     if (loadVersion !== materialLoadVersion) return
     materials.value = result.items
@@ -804,18 +816,21 @@ function resetAndLoadMaterialPage() {
   else void loadMaterialPage()
 }
 
-function sortMaterials({ prop, order }: { prop?: string; order: 'ascending' | 'descending' | null }) {
-  createdAtOrder.value = prop === 'createdAt' && order ? order === 'ascending' ? 'asc' : 'desc' : undefined
+function searchMaterials() {
+  appliedQuery.value = query.value
+  appliedBrandFilter.value = brandFilter.value
+  appliedShowArchived.value = showArchived.value
   resetAndLoadMaterialPage()
 }
 
-let materialQueryTimer: ReturnType<typeof setTimeout> | undefined
-watch(query, () => {
-  if (materialQueryTimer) clearTimeout(materialQueryTimer)
-  if (locatingNewMaterial) return
-  materialQueryTimer = setTimeout(resetAndLoadMaterialPage, 250)
-})
-watch([brandFilter, selectedMaterialCategoryCode, showArchived], resetAndLoadMaterialPage)
+function sortMaterials({ prop, order }: { prop?: string; order: 'ascending' | 'descending' | null }) {
+  const sortableColumns: MaterialSortBy[] = ['materialCode', 'name', 'specification', 'brand', 'createdBy', 'createdAt']
+  materialSortBy.value = prop && sortableColumns.includes(prop as MaterialSortBy) && order ? prop as MaterialSortBy : undefined
+  createdAtOrder.value = order ? order === 'ascending' ? 'asc' : 'desc' : undefined
+  resetAndLoadMaterialPage()
+}
+
+watch(selectedMaterialCategoryCode, resetAndLoadMaterialPage)
 watch(currentPage, () => { void loadMaterialPage() })
 watch(pageSize, resetAndLoadMaterialPage)
 
@@ -1094,18 +1109,20 @@ async function saveMaterial() {
       Object.assign(form, materialInput(saved))
       editorAttachments.value = []
       locatingNewMaterial = true
+      materialSortBy.value = 'createdAt'
       createdAtOrder.value = 'desc'
       materialTable.value?.clearSort()
       ++materialLoadVersion
-      if (materialQueryTimer) clearTimeout(materialQueryTimer)
-      const search = query.value.trim().toLocaleLowerCase()
+      const search = appliedQuery.value.trim().toLocaleLowerCase()
       const hiddenByFilters = (selectedMaterialCategoryCode.value && !saved.categoryCode?.startsWith(selectedMaterialCategoryCode.value))
-        || (brandFilter.value && saved.brand !== brandFilter.value)
+        || (appliedBrandFilter.value && saved.brand !== appliedBrandFilter.value)
         || (search && ![saved.materialCode, saved.name, saved.specification, saved.material, saved.brand, saved.categoryCode,
           saved.u9CategoryCode, saved.surfaceTreatment, saved.purchaseLink, saved.remark].some(value => value?.toLocaleLowerCase().includes(search)))
       if (hiddenByFilters) {
         query.value = ''
         brandFilter.value = ''
+        appliedQuery.value = ''
+        appliedBrandFilter.value = ''
         selectedMaterialCategoryCode.value = ''
         ElMessage.info('已清除筛选条件，以显示新建料品')
       }
@@ -1540,20 +1557,22 @@ onMounted(() => {
           </aside>
           <section class="material-master-content" aria-label="料品列表">
             <div class="material-toolbar">
+              <div class="material-toolbar__filters"><el-checkbox v-model="showArchived" @change="searchMaterials">显示已停用</el-checkbox><el-select v-model="brandFilter" class="material-brand-filter" clearable filterable placeholder="筛选品牌"><el-option v-for="brand in brandOptions" :key="brand" :label="brand" :value="brand" /></el-select></div>
+              <el-input v-model="query" class="material-toolbar__search" clearable placeholder="搜索编码、名称、规格、品牌或分类" @keyup.enter="searchMaterials" />
+              <el-button type="primary" class="material-toolbar__search-button" @click="searchMaterials">搜索</el-button>
               <div class="material-toolbar__actions"><el-button @click="load">刷新</el-button><el-button class="material-select-drafts" aria-label="勾选本页草稿" :disabled="!pageDrafts.length || loading || materialPageLoading || queryingInventory" @click="selectPageDrafts">勾选本页草稿</el-button><el-button v-if="canCreateMaterial" type="primary" @click="openCreate">新增料品</el-button><el-button v-if="canCreateMaterial" @click="openMaterialImport">批量导入</el-button><el-button v-if="canEdit" :disabled="selectedMaterials.length > 1 ? !canBatchEditSelected : !canEditSelected" @click="selectedMaterials.length > 1 ? openBatchEdit() : openSelectedEdit()">{{ selectedMaterials.length > 1 ? '批量编辑' : '编辑' }}</el-button><el-button v-if="canApprove" :disabled="!canApproveSelected" @click="approveSelected">批准</el-button><el-button :disabled="selectedMaterials.length === 0" :loading="queryingU9" @click="querySelected">查询U9C</el-button><el-button :loading="queryingInventory" :disabled="Object.values(rowInventoryLoading).some(Boolean)" @click="querySelectedInventory">库存查询</el-button><el-button v-if="canEdit" :disabled="!canArchiveSelected" @click="archiveSelected">停用</el-button><el-button v-if="canEdit" :disabled="!canReactivateSelected" @click="reactivateSelected">启用</el-button><el-button v-if="canEdit" type="danger" :disabled="!canDeleteSelected" @click="deleteSelected">删除</el-button></div>
-              <div class="material-toolbar__filters"><el-checkbox v-model="showArchived">显示已停用</el-checkbox><el-select v-model="brandFilter" class="material-brand-filter" clearable filterable placeholder="筛选品牌"><el-option v-for="brand in brandOptions" :key="brand" :label="brand" :value="brand" /></el-select><el-input v-model="query" clearable placeholder="搜索编码、名称、规格、品牌或分类" /></div>
             </div>
             <div class="material-table-shell pdm-loading-host">
               <SquareLoader v-if="materialPageLoading" overlay label="正在查询料品主档" />
               <el-table ref="materialTable" class="material-table" :data="pagedMaterials" :row-class-name="materialRowClass" height="100%" stripe row-key="id" table-layout="fixed" :fit="true" empty-text="尚未创建PLM料品" :default-sort="{ prop: 'createdAt', order: 'descending' }" @sort-change="sortMaterials" @selection-change="selectedMaterials = $event">
           <el-table-column type="selection" width="38" />
-          <el-table-column prop="materialCode" label="物料编码" min-width="100" show-overflow-tooltip />
-          <el-table-column prop="name" label="名称" min-width="112" show-overflow-tooltip><template #default="{ row }"><el-tag v-if="row.isRecommended" size="small" type="warning">推荐</el-tag> {{ row.name }}</template></el-table-column>
+          <el-table-column prop="materialCode" label="物料编码" sortable="custom" :sort-orders="['ascending', 'descending', null]" min-width="100" show-overflow-tooltip />
+          <el-table-column prop="name" label="名称" sortable="custom" :sort-orders="['ascending', 'descending', null]" min-width="112" show-overflow-tooltip><template #default="{ row }"><el-tag v-if="row.isRecommended" size="small" type="warning">推荐</el-tag> {{ row.name }}</template></el-table-column>
           <el-table-column v-if="canViewRelations" label="关联配置" min-width="88"><template #default="{ row }"><el-button link :type="relationStatus(row).type" :aria-label="`查看 ${row.materialCode} 的关联物料`" @click.stop="openRelationDetail(row)">{{ relationStatus(row).label }}</el-button></template></el-table-column>
           <el-table-column label="引用" min-width="48"><template #default="{ row }">{{ row.referenceCount ?? 0 }}</template></el-table-column>
           <el-table-column label="库存" min-width="72"><template #default="{ row }"><el-tooltip :content="rowInventoryTooltip(row)" placement="top"><el-button link :type="rowInventoryErrors[row.id] ? 'danger' : 'primary'" :disabled="!row.materialCode || queryingInventory" :loading="rowInventoryLoading[row.id]" :aria-label="`查询 ${row.materialCode} 的库存`" @click.stop="queryRowInventory(row)">{{ rowInventoryErrors[row.id] ? '查询失败' : rowInventoryResults[row.id] ? formatInventoryQuantity(rowInventoryResults[row.id].quantity) : '查询' }}</el-button></el-tooltip></template></el-table-column>
-          <el-table-column label="规格" min-width="220" show-overflow-tooltip><template #default="{ row }">{{ row.specification || '—' }}</template></el-table-column>
-          <el-table-column label="品牌" min-width="56" show-overflow-tooltip><template #default="{ row }">{{ row.brand || '—' }}</template></el-table-column>
+          <el-table-column prop="specification" label="规格" sortable="custom" :sort-orders="['ascending', 'descending', null]" min-width="220" show-overflow-tooltip><template #default="{ row }">{{ row.specification || '—' }}</template></el-table-column>
+          <el-table-column prop="brand" label="品牌" sortable="custom" :sort-orders="['ascending', 'descending', null]" min-width="56" show-overflow-tooltip><template #default="{ row }">{{ row.brand || '—' }}</template></el-table-column>
           <el-table-column label="材质" min-width="52" show-overflow-tooltip><template #default="{ row }">{{ row.material || '—' }}</template></el-table-column>
           <el-table-column label="表面处理" min-width="64" show-overflow-tooltip><template #default="{ row }">{{ row.surfaceTreatment || '—' }}</template></el-table-column>
           <el-table-column label="重量" min-width="54" show-overflow-tooltip><template #default="{ row }">{{ weightLabel(row) }}</template></el-table-column>
@@ -1562,7 +1581,7 @@ onMounted(() => {
           <el-table-column label="参考价格" min-width="72" show-overflow-tooltip><template #default="{ row }">{{ referencePriceLabel(row) }}</template></el-table-column>
           <el-table-column label="3D" min-width="48"><template #default="{ row }"><el-button link type="primary" :disabled="attachmentCount(row, 'Model3D') === 0" @click.stop="openAttachmentViewer(row, 'Model3D')">{{ attachmentCount(row, 'Model3D') || '—' }}</el-button></template></el-table-column>
           <el-table-column label="资料" min-width="48"><template #default="{ row }"><el-button link type="primary" :disabled="attachmentCount(row, 'Document') === 0" @click.stop="openAttachmentViewer(row, 'Document')">{{ attachmentCount(row, 'Document') || '—' }}</el-button></template></el-table-column>
-          <el-table-column label="创建人" min-width="70" show-overflow-tooltip><template #default="{ row }">{{ displayUserName(row.createdBy) }}</template></el-table-column>
+          <el-table-column prop="createdBy" label="创建人" sortable="custom" :sort-orders="['ascending', 'descending', null]" min-width="70" show-overflow-tooltip><template #default="{ row }">{{ displayUserName(row.createdBy) }}</template></el-table-column>
           <el-table-column prop="createdAt" label="创建时间" sortable="custom" :sort-orders="['descending', 'ascending', null]" min-width="130" show-overflow-tooltip><template #default="{ row }">{{ dateTimeLabel(row.createdAt) }}</template></el-table-column>
           <el-table-column label="计量单位" min-width="76"><template #default="{ row }">{{ u9UnitLabel(row.unitCode) }}</template></el-table-column>
           <el-table-column label="来源/主控" min-width="76"><template #default="{ row }">{{ row.sourceSystem === 'U9C' ? 'U9C/U9C' : 'PLM/PLM' }}</template></el-table-column>
@@ -1580,10 +1599,6 @@ onMounted(() => {
         <MaterialInventory :token="token" :requested-material-code="inventoryRequestedMaterialCode" :request-key="inventoryRequestKey" />
       </el-tab-pane>
 
-      <el-tab-pane label="BOM表头料号" name="bom-headers">
-        <BomHeaderMaterialDirectory v-if="activeTab === 'bom-headers'" :token="token" />
-      </el-tab-pane>
-
       <el-tab-pane v-if="canViewRelations" label="关联配置" name="relations">
         <MaterialRelationDirectory
           v-if="activeTab === 'relations'"
@@ -1597,6 +1612,10 @@ onMounted(() => {
 
       <el-tab-pane label="料品套件" name="kits">
         <EngineeringKitLibrary v-if="activeTab === 'kits'" :token="token" :can-manage="canManageKits" />
+      </el-tab-pane>
+
+      <el-tab-pane label="BOM料号" name="bom-headers">
+        <BomHeaderMaterialDirectory v-if="activeTab === 'bom-headers'" :token="token" />
       </el-tab-pane>
 
       <el-tab-pane name="code-approvals">
@@ -1718,11 +1737,11 @@ onMounted(() => {
       <el-tab-pane v-if="canManageIntegration" label="取号设置" name="numbering-settings">
         <div class="material-numbering-settings-scroll">
           <section class="material-numbering-settings" aria-label="PLM料号基线设置">
-            <div>
+            <div class="material-numbering-settings__description">
               <strong>PLM全局料号基线</strong>
               <p>所有开放创建分类统一使用7位流水；新料号只按PLM主档与本地计数器向后生成，不在审批或同步时扫描U9C。</p>
             </div>
-            <el-input-number v-model="numberingStartSequence" :min="1000000" :max="9999999" :step="1" :precision="0" />
+            <el-input-number class="material-numbering-settings__input" v-model="numberingStartSequence" :min="1000000" :max="9999999" :step="1" :precision="0" />
             <el-button type="primary" :loading="savingNumberingSettings" @click="saveNumberingSettings">保存基线设置</el-button>
           </section>
           <section class="material-duplicate-settings" aria-label="料品查重与审核规则设置">
@@ -1861,13 +1880,14 @@ onMounted(() => {
 
 <style scoped>
 .material-toolbar__actions :deep(.el-button.material-select-drafts){min-width:88px!important;flex:0 0 88px}
+.material-toolbar__search{width:clamp(220px,20vw,340px)!important;min-width:160px!important;flex:0 1 340px!important}
 .material-import-actions{display:flex;align-items:center;gap:8px;margin-bottom:12px}.material-import-actions>span{min-width:0;overflow:hidden;color:var(--pdm-muted);text-overflow:ellipsis;white-space:nowrap}.material-import-summary{display:flex;align-items:center;gap:18px;margin:12px 0 8px;padding:9px 12px;border:1px solid #bbf7d0;border-radius:6px;background:#f0fdf4;color:var(--pdm-green)}.material-import-summary.has-errors{border-color:#fecaca;background:#fef2f2;color:var(--pdm-danger)}.material-import-errors{color:var(--pdm-danger);line-height:1.4}.material-import-dialog :deep(.el-alert){margin-bottom:10px}
 @media(max-width:1000px){.material-page .material-toolbar{flex-wrap:wrap}.material-page .material-toolbar__actions{flex:0 0 auto;max-width:100%;flex-wrap:wrap}}
 .material-code-refresh-toolbar{display:flex;justify-content:flex-end;margin-bottom:8px}
 .material-table :deep(.el-table__body tr.is-pending-material > td.el-table__cell){background-color:#fff8d6}
 .material-table :deep(.el-table__body tr.is-pending-material:hover > td.el-table__cell){background-color:#fff0b3}
 .material-master-layout{display:grid;grid-template-columns:190px minmax(0,1fr);gap:var(--pdm-container-gap);min-width:0;background:var(--shell-content-bg)}.material-master-layout.is-category-collapsed{grid-template-columns:34px minmax(0,1fr)}.material-category-nav,.material-master-content{min-width:0;padding:10px;border:1px solid #e2e8f0;border-radius:8px;background:#fff}.material-category-nav{overflow:auto;font-size:11px}.material-category-nav__title{display:flex;align-items:center;justify-content:space-between;gap:4px;margin:0 4px 8px;color:var(--pdm-text-soft);font-weight:600;white-space:nowrap}.material-category-nav__toggle{width:22px;height:22px;display:inline-flex;flex:0 0 22px;align-items:center;justify-content:center;padding:0;border:1px solid var(--shell-accent-border);border-radius:5px;background:var(--pdm-blue-soft);color:var(--pdm-blue);font-size:16px;line-height:1;cursor:pointer}.material-category-nav__toggle:hover,.material-category-nav__toggle:focus-visible{border-color:var(--pdm-blue);background:var(--pdm-blue-soft);outline:none}.material-master-layout.is-category-collapsed .material-category-nav{padding:5px}.material-master-layout.is-category-collapsed .material-category-nav__title{justify-content:center;margin:0}.material-category-all{width:100%;height:28px;margin-bottom:4px;padding:0 8px;border:0;border-radius:5px;background:transparent;color:var(--pdm-text-soft);font:inherit;text-align:left;cursor:pointer}.material-category-all:hover,.material-category-all.is-active{background:var(--pdm-blue-soft);color:var(--pdm-blue)}.material-category-nav :deep(.el-tree){background:#fff;color:var(--pdm-text-soft);font-size:11px}.material-category-nav :deep(.el-tree-node__content){height:28px;border-radius:5px}.material-category-node{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.material-master-content{overflow:hidden}
-.material-page{min-width:0;min-height:calc(100vh - 112px);overflow:hidden;padding:5px 28px 28px}.material-tabs{min-width:0;max-width:100%}.material-tabs :deep(.el-tabs__content),.material-tabs :deep(.el-tab-pane){min-width:0;max-width:100%;overflow:hidden}.material-toolbar{display:flex;min-width:0;align-items:center;justify-content:flex-start;flex-wrap:nowrap;gap:5px;margin-bottom:14px;font-size:11px}.material-toolbar__actions,.material-toolbar__filters{display:flex;min-width:0;align-items:center;flex-wrap:nowrap;gap:5px}.material-toolbar__actions{flex:0 1 auto}.material-toolbar__filters{flex:1 1 260px}.material-toolbar :deep(.el-button),.material-toolbar :deep(.el-checkbox__label),.material-toolbar :deep(.el-input__inner),.material-toolbar :deep(.el-select__placeholder),.material-toolbar :deep(.el-select__selected-item){font-size:11px}.material-toolbar__actions :deep(.el-button){width:clamp(60px,5vw,80px);height:30px;flex:1 1 60px;margin-left:0;padding:0}.material-toolbar__filters :deep(.el-checkbox){flex:0 0 auto}.material-brand-filter{width:110px;min-width:80px;flex:0 1 110px}.material-toolbar .el-input{width:auto;min-width:80px;flex:1 1 180px}.material-table{width:100%;min-width:0;max-width:100%;box-sizing:border-box}.material-table :deep(.el-table__inner-wrapper),.material-table :deep(.el-scrollbar),.material-table :deep(.el-scrollbar__wrap){max-width:100%}.material-table :deep(.el-scrollbar__wrap){overflow-x:auto}.material-table :deep(.el-table__cell){font-size:11px;text-align:center}.material-table :deep(.cell){overflow:hidden;padding:0 6px;text-overflow:ellipsis;white-space:nowrap}.material-table :deep(.el-button),.material-table :deep(.el-tag){font-size:11px}.u9-validation{display:flex;align-items:center;justify-content:center;white-space:nowrap}.u9-unchecked{color:var(--pdm-muted);font-size:11px}.batch-editor-note{margin:0 0 14px;color:var(--pdm-muted);font-size:11px}.batch-editor-form :deep(.el-checkbox){margin-right:0}.material-numbering-settings{display:flex;align-items:center;gap:12px;margin-bottom:12px;padding:12px 16px;border:1px solid #bfdbfe;border-radius:10px;background:#eff6ff}.material-numbering-settings>div{min-width:0;flex:1}.material-numbering-settings strong{color:var(--pdm-text);font-size:12px}.material-numbering-settings p{margin:3px 0 0;color:var(--pdm-text-soft);line-height:1.4}.material-numbering-settings :deep(.el-input-number){width:150px}.category-layout{display:grid;grid-template-columns:minmax(280px,35%) 1fr;gap:18px;min-height:520px}.category-tree-panel,.category-editor{padding:18px;border:1px solid #e2e8f0;border-radius:14px;background:#f8fafc}.category-actions{display:flex;gap:8px;margin-bottom:14px}.category-node{display:flex;align-items:center;justify-content:space-between;gap:12px;width:100%;padding-right:8px}.category-empty{display:grid;min-height:420px;place-items:center;color:var(--pdm-muted)}.category-switches{display:flex;flex-wrap:wrap;gap:24px;margin:2px 0 14px}.form-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));column-gap:18px}.field-help{width:100%;margin:6px 0 0;color:var(--pdm-muted);font-size:11px;line-height:1.4}.weight-unit{width:76px;margin-left:8px}.preview-meta{display:grid;gap:6px;margin-bottom:12px;color:var(--pdm-muted);font-size:12px;word-break:break-all}.payload-preview{max-height:480px;overflow:auto;padding:18px;border-radius:10px;background:#0f172a;color:#fff;font:12px/1.4 var(--pdm-font-mono);white-space:pre-wrap;word-break:break-all}.material-tabs :deep(.el-tabs__content),.material-tabs :deep(.el-tabs__content *){font-size:11px}:global(.material-editor-dialog),:global(.material-editor-dialog *){font-size:11px}:global(.material-editor-dialog .el-dialog__title){font-size:11px!important}@media(max-width:1000px){.material-page{padding:5px 18px 18px}.material-toolbar__actions :deep(.el-button){width:48px;min-width:48px!important;flex:0 0 48px}.material-brand-filter{width:70px;min-width:70px;flex-basis:70px}.material-toolbar .el-input{min-width:70px;flex-basis:70px}.material-numbering-settings{align-items:stretch;flex-direction:column}.category-layout{grid-template-columns:1fr}.form-grid{grid-template-columns:1fr}}
+.material-page{min-width:0;min-height:calc(100vh - 112px);overflow:hidden;padding:5px 28px 28px}.material-tabs{min-width:0;max-width:100%}.material-tabs :deep(.el-tabs__content),.material-tabs :deep(.el-tab-pane){min-width:0;max-width:100%;overflow:hidden}.material-toolbar{display:flex;min-width:0;align-items:center;justify-content:flex-start;flex-wrap:nowrap;gap:5px;margin-bottom:14px;font-size:11px}.material-toolbar__actions,.material-toolbar__filters{display:flex;min-width:0;align-items:center;flex-wrap:nowrap;gap:5px}.material-toolbar__actions{flex:0 1 auto}.material-toolbar__filters{flex:1 1 260px}.material-toolbar :deep(.el-button),.material-toolbar :deep(.el-checkbox__label),.material-toolbar :deep(.el-input__inner),.material-toolbar :deep(.el-select__placeholder),.material-toolbar :deep(.el-select__selected-item){font-size:11px}.material-toolbar__actions :deep(.el-button){width:clamp(60px,5vw,80px);height:30px;flex:1 1 60px;margin-left:0;padding:0}.material-toolbar__filters :deep(.el-checkbox){flex:0 0 auto}.material-brand-filter{width:110px;min-width:80px;flex:0 1 110px}.material-toolbar .el-input{width:auto;min-width:80px;flex:1 1 180px}.material-table{width:100%;min-width:0;max-width:100%;box-sizing:border-box}.material-table :deep(.el-table__inner-wrapper),.material-table :deep(.el-scrollbar),.material-table :deep(.el-scrollbar__wrap){max-width:100%}.material-table :deep(.el-scrollbar__wrap){overflow-x:auto}.material-table :deep(.el-table__cell){font-size:11px;text-align:center}.material-table :deep(.cell){overflow:hidden;padding:0 6px;text-overflow:ellipsis;white-space:nowrap}.material-table :deep(.el-button),.material-table :deep(.el-tag){font-size:11px}.u9-validation{display:flex;align-items:center;justify-content:center;white-space:nowrap}.u9-unchecked{color:var(--pdm-muted);font-size:11px}.batch-editor-note{margin:0 0 14px;color:var(--pdm-muted);font-size:11px}.batch-editor-form :deep(.el-checkbox){margin-right:0}.material-numbering-settings{display:flex;align-items:center;gap:12px;margin-bottom:12px;padding:12px 16px;border:1px solid #bfdbfe;border-radius:10px;background:#eff6ff}.material-numbering-settings__description{min-width:0;flex:1}.material-numbering-settings strong{color:var(--pdm-text);font-size:12px}.material-numbering-settings p{margin:3px 0 0;color:var(--pdm-text-soft);line-height:1.4}.material-numbering-settings__input{width:284px;flex:0 0 284px}.category-layout{display:grid;grid-template-columns:minmax(280px,35%) 1fr;gap:18px;min-height:520px}.category-tree-panel,.category-editor{padding:18px;border:1px solid #e2e8f0;border-radius:14px;background:#f8fafc}.category-actions{display:flex;gap:8px;margin-bottom:14px}.category-node{display:flex;align-items:center;justify-content:space-between;gap:12px;width:100%;padding-right:8px}.category-empty{display:grid;min-height:420px;place-items:center;color:var(--pdm-muted)}.category-switches{display:flex;flex-wrap:wrap;gap:24px;margin:2px 0 14px}.form-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));column-gap:18px}.field-help{width:100%;margin:6px 0 0;color:var(--pdm-muted);font-size:11px;line-height:1.4}.weight-unit{width:76px;margin-left:8px}.preview-meta{display:grid;gap:6px;margin-bottom:12px;color:var(--pdm-muted);font-size:12px;word-break:break-all}.payload-preview{max-height:480px;overflow:auto;padding:18px;border-radius:10px;background:#0f172a;color:#fff;font:12px/1.4 var(--pdm-font-mono);white-space:pre-wrap;word-break:break-all}.material-tabs :deep(.el-tabs__content),.material-tabs :deep(.el-tabs__content *){font-size:11px}:global(.material-editor-dialog),:global(.material-editor-dialog *){font-size:11px}:global(.material-editor-dialog .el-dialog__title){font-size:11px!important}@media(max-width:1000px){.material-page{padding:5px 18px 18px}.material-toolbar__actions :deep(.el-button){width:48px;min-width:48px!important;flex:0 0 48px}.material-brand-filter{width:70px;min-width:70px;flex-basis:70px}.material-toolbar .el-input{min-width:70px;flex-basis:70px}.material-numbering-settings{align-items:stretch;flex-direction:column}.category-layout{grid-template-columns:1fr}.form-grid{grid-template-columns:1fr}}
 .material-numbering-settings-scroll{height:100%;box-sizing:border-box;overflow-y:auto;padding-right:4px}.material-duplicate-settings{padding:14px 16px;border:1px solid #e2e8f0;border-radius:10px;background:#fff}.material-duplicate-settings>header{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;margin-bottom:10px}.material-duplicate-settings>header p{margin:3px 0 0;color:var(--pdm-muted);line-height:1.4}.material-duplicate-rule-list{display:grid;gap:6px}.material-duplicate-rule-row{display:grid;grid-template-columns:minmax(180px,240px) minmax(260px,1fr) 170px;align-items:center;gap:12px;padding:8px 10px;border-radius:6px;background:#f8fafc}.material-duplicate-rule-row>span{font-weight:600}.material-duplicate-rule-row :deep(.el-checkbox){margin-right:18px}.material-approval-rule-control{justify-self:end}@media(max-width:800px){.material-duplicate-rule-row{grid-template-columns:1fr}.material-approval-rule-control{justify-self:start}}
 .material-page{height:100%;min-height:0;display:flex;flex-direction:column}.material-tabs{min-height:0;flex:1 1 auto;display:flex;flex-direction:column}.material-tabs :deep(.el-tabs__header .el-tabs__item){font-size:12px;font-weight:600}.material-tabs :deep(.el-tabs__content){min-height:0;flex:1 1 auto}.material-tabs :deep(.el-tab-pane){height:100%;min-height:0}.material-master-layout{height:100%;min-height:0}.material-master-content{display:flex;flex-direction:column}.material-toolbar{flex:0 0 auto;margin-bottom:5px}.material-table-shell{min-height:0;flex:1 1 auto}.material-table{height:100%}.material-pagination{flex:0 0 auto;justify-content:flex-end;margin-top:5px}.material-pagination :deep(.el-pagination__total),.material-pagination :deep(.el-select__selected-item),.material-pagination :deep(button),.material-pagination :deep(.number){font-size:11px}
 .material-tab-label{display:inline-flex;align-items:center;gap:5px}.material-tab-label em{min-width:18px;height:18px;padding:0 5px;border-radius:9px;background:var(--pdm-blue);color:#fff;font-size:10px;font-style:normal;font-weight:600;line-height:18px;text-align:center}
@@ -1888,4 +1908,5 @@ onMounted(() => {
 @media(max-width:1000px){.material-editor-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
 @media(max-width:1000px){.material-toolbar__actions :deep(.el-button:not(.is-link):not(.is-circle):not(.el-button--text):not([aria-label])){min-width:48px!important}}
 @media(max-width:760px){.material-editor-grid{grid-template-columns:1fr}.material-editor-grid__wide{grid-column:auto}}
+.material-toolbar__filters{flex:0 1 auto}.material-toolbar__search{width:200px!important;min-width:0!important;flex:0 1 200px!important}.material-toolbar__search-button{width:clamp(60px,5vw,80px);height:30px;flex:0 0 auto;margin-left:0;padding:0}
 </style>

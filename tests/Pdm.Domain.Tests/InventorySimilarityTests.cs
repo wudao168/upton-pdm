@@ -10,8 +10,8 @@ public sealed class InventorySimilarityTests
     [InlineData(" abcd ", "ＡＢＣＤ", 100)]
     [InlineData("ABCD", "ABCE", 75)]
     [InlineData("ABCD", "ABEF", 50)]
-    [InlineData("M4-18", "M4-16", 80)]
-    [InlineData("AB-CD", "ABCD", 80)]
+    [InlineData("M4-18", "M4-16", 75)]
+    [InlineData("AB-CD", "ABCD", 100)]
     [InlineData("", "ABCD", 0)]
     public void Score_UsesNormalizedEditDistanceAndPreservesDigitsAndSymbols(string left, string right, int score)
         => Assert.Equal(score, InventorySimilarity.Score(left, right));
@@ -43,11 +43,11 @@ public sealed class InventorySimilarityTests
     }
 
     [Fact]
-    public async Task Repository_MatchesBeforePagination_AndIncludes75PercentAcrossWarehouses()
+    public async Task Repository_MatchesBeforePagination_AndIncludes80PercentAcrossWarehouses()
     {
         var repository = new InMemoryU9InventoryRepository();
         var rows = Enumerable.Range(0, 205).Select(i => Row($"A{i:D4}", "ZZZZ")).ToList();
-        rows.Add(Row("Z001", "ABCE"));
+        rows.Add(Row("Z001", "ABCDD"));
         rows.Add(Row("Z002", "ＡＢＣＤ") with { WarehouseName = "2号仓", ProjectCode = "P2" });
         rows.Add(Row("Z003", "ABCD") with { StockQuantity = 0 });
         rows.Add(Row("Z004", "ABEF"));
@@ -59,9 +59,9 @@ public sealed class InventorySimilarityTests
         Assert.Equal(100m, first.Items[0].SimilarityPercent);
         var second = await repository.ListAsync(Filters("ABCD") with { Page = 2, PageSize = 1 }, default);
         Assert.Equal("Z001", Assert.Single(second.Items).MaterialCode);
-        Assert.Equal(75m, second.Items[0].SimilarityPercent);
+        Assert.Equal(80m, second.Items[0].SimilarityPercent);
         Assert.Equal(3, (await repository.ListAsync(Filters("ABCD") with { PositiveStockOnly = false }, default)).Total);
-        Assert.Empty((await repository.ListAsync(Filters("ABCD") with { Brand = "FESTO" }, default)).Items);
+        Assert.Equal(2, (await repository.ListAsync(Filters("ABCD") with { Brand = "FESTO" }, default)).Total);
         var normal = await repository.ListAsync(Filters(null) with { Specification = "ZZZZ" }, default);
         Assert.Equal(205, normal.Total);
         Assert.All(normal.Items, row => Assert.Null(row.SimilarityPercent));
@@ -76,7 +76,25 @@ public sealed class InventorySimilarityTests
         Assert.Throws<OperationCanceledException>(() => InventorySimilarity.Match([row], "ABCD", new CancellationToken(true)));
     }
 
+    [Fact]
+    public void Match_PrioritizesPreferredBrand_OnlyAfterModelMatches()
+    {
+        var preferred = Snapshot("A", "CDQ2B32-100", "SMC");
+        var otherBrand = Snapshot("B", "CDQ2B32-100", "FESTO");
+        var unrelated = Snapshot("C", "XXXX-100", "SMC");
+
+        var matches = InventorySimilarity.Match([otherBrand, preferred, unrelated], "CDQ2B32-50", default, "SMC");
+
+        Assert.Equal(["A", "B"], matches.Select(row => row.MaterialCode));
+        Assert.Equal(87m, matches[0].SimilarityPercent);
+        Assert.Equal("主型号一致，末段数字不同；品牌一致", matches[0].SimilarityReason);
+        Assert.Equal(85m, matches[1].SimilarityPercent);
+        Assert.Equal("主型号一致，末段数字不同", matches[1].SimilarityReason);
+    }
+
     private static U9InventoryFilters Filters(string? specification) => new(null, null, null, null, null, null, null, true, 1, 50, specification);
     private static U9InventorySourceRow Row(string code, string? specification) => new("7", code, "物料", specification,
         "01", "1号仓", null, null, null, "P1", "项目", null, 1, 1, 0, 0);
+    private static U9InventorySnapshotRow Snapshot(string code, string specification, string brand) => new(Guid.NewGuid(), "7", "01", "仓库", code,
+        "物料", brand, specification, "P1", null, null, 1, 1, 0, 0, null, null, null, DateTimeOffset.UtcNow);
 }

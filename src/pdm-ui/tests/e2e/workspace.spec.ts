@@ -1529,6 +1529,54 @@ for (const scale of [
   })
 }
 
+test('project file list provides a direct preview link and editable description', async ({ page }, testInfo) => {
+  let savedDescription = ''
+  await page.route(`**/api/projects/${projectId}/folders`, route => route.fulfill({ json: [
+    { id: 'folder-root', rootProjectId: projectId, parentFolderId: null, targetProjectId: projectId, folderKey: 'root', templateKey: 'root', name: 'PRJ-REAL-001', purpose: 0, sortOrder: 0, isSystem: true, inheritPermissions: true, effectiveAccess: 127, permissions: [] },
+    { id: 'folder-project-files', rootProjectId: projectId, parentFolderId: 'folder-root', targetProjectId: projectId, folderKey: 'project-files', templateKey: 'project-files', name: '项目资料', purpose: 5, sortOrder: 10, isSystem: true, inheritPermissions: true, effectiveAccess: 31, permissions: [] },
+  ] }))
+  await page.route(`**/api/projects/${projectId}/files?*`, route => route.fulfill({ json: [{
+    id: 'project-file-pdf', rootProjectId: projectId, folderId: 'folder-project-files', fileName: '项目交付清单.pdf', description: savedDescription,
+    createdBy: 'engineer', createdAt: '2026-09-23T12:00:00Z', updatedBy: 'engineer', updatedAt: '2026-09-23T12:00:00Z',
+    currentVersion: { id: 'project-file-pdf-v1', projectFileId: 'project-file-pdf', versionNumber: 1, fileName: '项目交付清单.pdf', fileLength: 1024, sha256: 'A'.repeat(64), uploadedBy: 'engineer', uploadedAt: '2026-09-23T12:00:00Z' },
+  }] }))
+  await page.route(`**/api/projects/${projectId}/files/project-file-pdf/description`, async route => {
+    savedDescription = (route.request().postDataJSON() as { description: string }).description
+    await route.fulfill({ json: { id: 'project-file-pdf', rootProjectId: projectId, folderId: 'folder-project-files', fileName: '项目交付清单.pdf', description: savedDescription } })
+  })
+  await page.route(`**/api/projects/${projectId}/files/project-file-pdf/content?*`, route => route.fulfill({ status: 200, contentType: 'application/pdf', body: '%PDF-1.4' }))
+  await page.addInitScript(() => {
+    ;(window as unknown as { previewUrls: string[] }).previewUrls = []
+    window.open = ((url?: string | URL) => { (window as unknown as { previewUrls: string[] }).previewUrls.push(String(url)); return null }) as typeof window.open
+    window.setInterval = (() => 0) as unknown as typeof window.setInterval
+  })
+  await page.setViewportSize({ width: 1925, height: 1114 })
+  await page.goto('/')
+  const login = page.getByLabel('登录PLM')
+  await login.getByRole('textbox', { name: '账号' }).fill('engineer')
+  await login.getByRole('textbox', { name: '密码' }).fill('correct-password')
+  await login.getByRole('button', { name: '登录', exact: true }).click()
+  await enterProject(page)
+  await page.getByRole('button', { name: '文件', exact: true }).click()
+  await page.getByText('项目资料', { exact: true }).click()
+
+  const table = page.getByRole('table', { name: '项目资料文件' })
+  await expect(table).toBeVisible()
+  await expect(table.getByRole('columnheader')).toHaveText(['', '文件名', '说明', '版本', '大小', '上传人', '更新时间', '操作'])
+  await table.getByRole('button', { name: '项目交付清单.pdf', exact: true }).click()
+  await expect.poll(() => page.evaluate(() => (window as unknown as { previewUrls: string[] }).previewUrls.length)).toBe(1)
+  await table.getByRole('button', { name: '编辑 项目交付清单.pdf 的说明' }).click()
+  const descriptionInput = table.getByRole('textbox', { name: '编辑 项目交付清单.pdf 的说明' })
+  await expect(descriptionInput).toBeVisible()
+  await expect(page.getByRole('dialog', { name: '编辑文件说明' })).toHaveCount(0)
+  await descriptionInput.fill('供现场验收使用')
+  await descriptionInput.press('Enter')
+  await expect.poll(() => savedDescription).toBe('供现场验收使用')
+  await expect(table).toContainText('供现场验收使用')
+  await page.screenshot({ path: testInfo.outputPath('project-file-preview-and-description.png'), fullPage: false })
+  await expect(page.locator('vite-error-overlay')).toHaveCount(0)
+})
+
 test('administrator can select one archived material and open the reactivate confirmation', async ({ page }, testInfo) => {
   const consoleErrors: string[] = []
   const failedResponses: string[] = []
@@ -1841,20 +1889,20 @@ test('production drawings open by project and package, then download selected ve
     versionId: '11111111-aaaa-aaaa-aaaa-aaaaaaaaaaaa', releasePackageId: '11111111-bbbb-bbbb-bbbb-bbbbbbbbbbbb',
     releasePackageNumber: 'RP-001', drawingNumber: 'D-100', model: 'M-100', name: '装配图', revision: 'B',
     publishedAt: '2026-09-22T00:00:00Z', priority: 'Urgent', requiredOn: '2026-10-01',
-    publishedBy: '张三', division: '机械事业部', projectManager: '经理甲',
+    publishedBy: 'engineer', division: '机械事业部', projectManager: 'admin',
     isCurrent: true, pdfReady: true, legacyUnverified: false,
     bomItems: [{ sequence: 1, drawingNumber: 'MAT-100', name: '冻结机架', specification: 'MODEL-X', revision: 'B', remark: '先加工', material: '铝', surfaceTreatment: '阳极', heatTreatment: '无', quantity: 2, unit: '001', complete: true, brand: '自制' }],
   }
   const second = {
     ...first, documentId: 'cccccccc-cccc-cccc-cccc-cccccccccccc', versionId: '22222222-aaaa-aaaa-aaaa-aaaaaaaaaaaa',
     releasePackageId: '22222222-bbbb-bbbb-bbbb-bbbbbbbbbbbb', releasePackageNumber: 'RP-002',
-    drawingNumber: 'D-200', model: 'M-200', name: '机架图', publishedAt: '2026-09-23T00:00:00Z', pdfReady: false, bomItems: [], publishedBy: '李四',
+    drawingNumber: 'D-200', model: 'M-200', name: '机架图', publishedAt: '2026-09-23T00:00:00Z', pdfReady: false, bomItems: [], publishedBy: 'admin',
   }
   const anotherProject = {
     ...first, projectId: '33333333-3333-3333-3333-333333333333', projectCode: 'P-002', projectName: '电气项目',
     documentId: 'dddddddd-dddd-dddd-dddd-dddddddddddd', versionId: '33333333-aaaa-aaaa-aaaa-aaaaaaaaaaaa',
     releasePackageId: '33333333-bbbb-bbbb-bbbb-bbbbbbbbbbbb', releasePackageNumber: 'RP-003', drawingNumber: 'E-100',
-    publishedBy: '李四', division: '电气事业部', projectManager: '经理乙',
+    publishedBy: 'admin', division: '电气事业部', projectManager: 'new-user',
   }
   let archiveRequest: { versionIds: string[]; format: string } | null = null
   await page.route('**/api/production-drawings?*', route => route.fulfill({ json: [first, second, anotherProject] }))
@@ -1877,12 +1925,14 @@ test('production drawings open by project and package, then download selected ve
   await login.getByRole('textbox', { name: '密码' }).fill('correct-password')
   await login.getByRole('button', { name: '登录', exact: true }).click()
   await page.getByRole('button', { name: '生产图纸', exact: true }).click()
-  await expect(page.getByRole('region', { name: '生产图纸中心' })).toBeVisible()
+  await expect(page.getByLabel('生产图纸中心')).toBeVisible()
   await expect(page.locator('.production-drawings__header')).toHaveCount(0)
   await expect(page.locator('.production-drawings__project')).toHaveCount(2)
   await expect(page.locator('.production-drawings__project').first()).toContainText('P-001')
   await expect(page.locator('.production-drawings__project').first()).toHaveCSS('height', '40px')
   await expect(page.locator('.production-drawings__packages')).toHaveCount(0)
+  await expect(page.getByLabel('按发布人筛选').locator('option[value="admin"]')).toHaveText('系统管理员')
+  await expect(page.getByLabel('按项目经理筛选').locator('option[value="admin"]')).toHaveText('系统管理员')
   await page.locator('.production-drawings__project').filter({ hasText: 'P-001' }).click()
   await expect(page.locator('.production-drawings__package')).toHaveCount(2)
   await expect(page.locator('.production-drawings__package').first()).toContainText('RP-002')
@@ -1914,9 +1964,9 @@ test('production drawings open by project and package, then download selected ve
   expect((await download).suggestedFilename()).toContain('生产图纸')
   expect(archiveRequest).toEqual({ versionIds: [first.versionId], format: 'Pdf' })
   await page.screenshot({ path: join(tmpdir(), 'production-drawings-bom-columns-desktop.png'), fullPage: false })
-  await page.getByLabel('按发布人筛选').selectOption('李四')
+  await page.getByLabel('按发布人筛选').selectOption('admin')
   await page.getByLabel('按事业部筛选').selectOption('机械事业部')
-  await page.getByLabel('按项目经理筛选').selectOption('经理甲')
+  await page.getByLabel('按项目经理筛选').selectOption('admin')
   await expect(page.locator('.production-drawings__project')).toHaveCount(1)
   await expect(page.locator('.production-drawings__package')).toHaveCount(1)
   await expect(page.locator('.production-drawings__package')).toContainText('RP-002')

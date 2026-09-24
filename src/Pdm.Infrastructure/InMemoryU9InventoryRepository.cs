@@ -111,14 +111,14 @@ public sealed class InMemoryU9InventoryRepository(IMaterialRepository? materials
             if (!string.IsNullOrWhiteSpace(filters.MaterialCode)) query = query.Where(row => string.Equals(row.MaterialCode, filters.MaterialCode.Trim(), StringComparison.OrdinalIgnoreCase));
             if (!string.IsNullOrWhiteSpace(filters.ItemName)) query = query.Where(row => row.ItemName.Contains(filters.ItemName.Trim(), StringComparison.OrdinalIgnoreCase));
             if (!string.IsNullOrWhiteSpace(filters.Specification)) query = query.Where(row => row.Specification?.Contains(filters.Specification.Trim(), StringComparison.OrdinalIgnoreCase) == true);
-            if (!string.IsNullOrWhiteSpace(filters.Brand)) query = query.Where(row => string.Equals(row.Brand, filters.Brand.Trim(), StringComparison.OrdinalIgnoreCase));
+            if (filters.SimilarSpecification is null && !string.IsNullOrWhiteSpace(filters.Brand)) query = query.Where(row => string.Equals(row.Brand, filters.Brand.Trim(), StringComparison.OrdinalIgnoreCase));
             if (!string.IsNullOrWhiteSpace(filters.Warehouse)) query = query.Where(row => row.WarehouseCode.Contains(filters.Warehouse.Trim(), StringComparison.OrdinalIgnoreCase) || row.WarehouseName.Contains(filters.Warehouse.Trim(), StringComparison.OrdinalIgnoreCase));
             if (!string.IsNullOrWhiteSpace(filters.ProjectCode)) query = query.Where(row => row.ProjectCode?.Contains(filters.ProjectCode.Trim(), StringComparison.OrdinalIgnoreCase) == true);
             if (!string.IsNullOrWhiteSpace(filters.Subproject)) query = query.Where(row => row.Subproject?.Contains(filters.Subproject.Trim(), StringComparison.OrdinalIgnoreCase) == true);
             if (filters.PositiveStockOnly) query = query.Where(row => row.StockQuantity > 0);
             var filtered = query.OrderBy(row => row.WarehouseName).ThenBy(row => row.MaterialCode).ToArray();
             if (filters.SimilarSpecification is not null)
-                filtered = InventorySimilarity.Match(filtered, filters.SimilarSpecification, cancellationToken);
+                filtered = InventorySimilarity.Match(filtered, filters.SimilarSpecification, cancellationToken, filters.Brand);
             var page = Math.Max(1, filters.Page);
             var pageSize = Math.Clamp(filters.PageSize, 1, 200);
             var items = filtered.Skip((page - 1) * pageSize).Take(pageSize).ToArray();

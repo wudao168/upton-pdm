@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import ProductionDrawingCenter from '../src/components/ProductionDrawingCenter.vue'
 import * as api from '../src/api'
 import type { ProductionDrawingItem } from '../src/types'
+import { userDisplayNameKey } from '../src/userDisplay'
 
 const current: ProductionDrawingItem = {
   projectId: 'project', projectCode: 'P-001', projectName: '测试项目', documentId: 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa',
@@ -49,9 +50,14 @@ describe('ProductionDrawingCenter', () => {
       { ...current, publishedBy: 'wang', division: '机械事业部', projectManager: 'manager-a' },
       { ...old, publishedBy: 'li', division: '机械事业部', projectManager: 'manager-a' }, other,
     ])
-    const wrapper = mount(ProductionDrawingCenter, { props: { token: 'token', canManage: false } })
+    const wrapper = mount(ProductionDrawingCenter, {
+      props: { token: 'token', canManage: false },
+      global: { provide: { [userDisplayNameKey as symbol]: (username?: string | null) => ({ wang: '王工', li: '李工', 'manager-a': '张经理', 'manager-b': '赵经理' }[username ?? ''] ?? username ?? '—') } },
+    })
     await flushPromises()
     expect(wrapper.findAll('.production-drawings__project')).toHaveLength(2)
+    expect(wrapper.get('select[aria-label="按发布人筛选"] option[value="wang"]').text()).toBe('王工')
+    expect(wrapper.get('select[aria-label="按项目经理筛选"] option[value="manager-a"]').text()).toBe('张经理')
     await wrapper.get('select[aria-label="按事业部筛选"]').setValue('机械事业部')
     expect(wrapper.findAll('.production-drawings__project')).toHaveLength(1)
     await wrapper.get('.production-drawings__project').trigger('click')

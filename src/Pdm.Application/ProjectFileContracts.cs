@@ -39,6 +39,7 @@ public interface IProjectFileRepository
     Task<ProjectFileVersion?> FindVersionAsync(Guid fileId, Guid versionId, CancellationToken cancellationToken);
     Task<ProjectFile> AddVersionAsync(StoredProjectFileUpload upload, string actor, string? comment, CancellationToken cancellationToken);
     Task<ProjectFile> RenameAsync(Guid fileId, string fileName, string actor, CancellationToken cancellationToken);
+    Task<ProjectFile> UpdateDescriptionAsync(Guid fileId, string? description, string actor, CancellationToken cancellationToken);
     Task<ProjectFile> MoveAsync(Guid fileId, Guid folderId, string actor, CancellationToken cancellationToken);
     Task<ProjectFile> SetDeletedAsync(Guid fileId, bool deleted, string actor, CancellationToken cancellationToken);
     Task<bool> FolderHasFilesAsync(Guid folderId, CancellationToken cancellationToken);

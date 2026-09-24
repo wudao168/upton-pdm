@@ -215,7 +215,7 @@ onMounted(() => {
           <h3>相似库存查询</h3>
           <div class="material-inventory__filters">
             <el-input v-model.trim="similarFilters.specification" maxlength="256" clearable placeholder="规格/型号（至少4个有效字符）" aria-label="相似库存规格" @keyup.enter="applySimilarFilters" />
-            <el-select v-model="similarFilters.brand" clearable filterable placeholder="品牌（可选）" aria-label="相似库存品牌">
+            <el-select v-model="similarFilters.brand" clearable filterable placeholder="品牌（可选，优先）" aria-label="相似库存品牌">
               <el-option v-for="brand in brandOptions" :key="brand" :label="brand" :value="brand" />
             </el-select>
           </div>
@@ -224,7 +224,7 @@ onMounted(() => {
             <el-button type="primary" :disabled="loading || refreshing" @click="applySimilarFilters">查询相似</el-button>
             <el-button :disabled="!similarMode || loading || refreshing" @click="returnToNormal">普通查询</el-button>
           </div>
-          <p>显示相似度≥75%的型号。仅供查找，替代前需人工核对。</p>
+          <p>标准化型号后分层匹配，相似度≥80%；品牌一致仅提升排序，不单独命中。仅供查找，替代前需人工核对。</p>
         </section>
       </aside>
       <div class="material-inventory__results">
@@ -233,7 +233,7 @@ onMounted(() => {
           <span>最近全量刷新：{{ formatTime(lastSuccessfulRefreshAt) }}</span>
         </div>
         <el-alert v-if="errorMessage" :title="errorMessage" type="error" :closable="false" show-icon />
-        <el-alert v-if="similarMode" :title="`相似查询中：${appliedSimilarFilters.specification}；品牌：${appliedSimilarFilters.brand || '不限'}；相似度≥75%，由高到低排序。仅供查找，替代前需人工核对。`" type="info" :closable="false" show-icon />
+        <el-alert v-if="similarMode" :title="`相似查询中：${appliedSimilarFilters.specification}；品牌：${appliedSimilarFilters.brand || '不限'}${appliedSimilarFilters.brand ? '（一致品牌优先）' : ''}；相似度≥80%，由高到低排序。仅供查找，替代前需人工核对。`" type="info" :closable="false" show-icon />
         <div class="material-inventory__table">
           <el-table :data="rows" height="100%" border stripe show-summary :summary-method="inventorySummary" empty-text="尚无符合条件的库存记录">
             <el-table-column align="center" prop="warehouseName" label="存储地点名称" min-width="150" show-overflow-tooltip />
@@ -242,6 +242,7 @@ onMounted(() => {
             <el-table-column align="center" label="品牌" min-width="110" show-overflow-tooltip><template #default="{ row }">{{ row.brand || '—' }}</template></el-table-column>
             <el-table-column align="center" label="规格" min-width="190" show-overflow-tooltip><template #default="{ row }">{{ row.specification || '—' }}</template></el-table-column>
             <el-table-column v-if="similarMode" align="center" label="相似度" min-width="90"><template #default="{ row }">{{ row.similarityPercent == null ? '—' : `${Number(row.similarityPercent).toFixed(1)}%` }}</template></el-table-column>
+            <el-table-column v-if="similarMode" align="center" label="匹配依据" min-width="170" show-overflow-tooltip><template #default="{ row }">{{ row.similarityReason || '—' }}</template></el-table-column>
             <el-table-column align="center" label="项目号" min-width="120" show-overflow-tooltip><template #default="{ row }">{{ row.projectCode || '—' }}</template></el-table-column>
             <el-table-column align="center" label="项目名称" min-width="150" show-overflow-tooltip><template #default="{ row }">{{ row.projectName || '—' }}</template></el-table-column>
             <el-table-column align="center" label="子项目" min-width="110" show-overflow-tooltip><template #default="{ row }">{{ row.subproject || '—' }}</template></el-table-column>

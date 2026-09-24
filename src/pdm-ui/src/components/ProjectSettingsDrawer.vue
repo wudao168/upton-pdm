@@ -4,6 +4,7 @@ import { ElMessageBox } from 'element-plus'
 import { computed, reactive, ref, watch } from 'vue'
 import type { ProjectContentResetReadiness, ProjectContentResetSnapshotSummary, ProjectCopyOptionsInput, ProjectCopyPreview, ProjectCopyResult, ProjectSummary } from '../types'
 import { getProjectContentResetReadiness, resetProjectContent, restoreProjectContent } from '../api'
+import { useUserDisplayName } from '../userDisplay'
 
 const props = defineProps<{
   modelValue: boolean
@@ -19,6 +20,7 @@ const props = defineProps<{
 }>()
 
 const emit = defineEmits<{ 'update:modelValue': [value: boolean] }>()
+const displayUserName = useUserDisplayName()
 const copyPreview = ref<ProjectCopyPreview | null>(null)
 const copyPreviewPending = ref(false)
 const copyInput = reactive<ProjectCopyOptionsInput>({
@@ -221,7 +223,7 @@ async function executeSnapshotRestore(snapshot: ProjectContentResetSnapshotSumma
           <p class="pdm-counter-note">重置范围：{{ resetReadiness.includedProjects.map(item => item.code).join('、') }}</p>
           <div class="pdm-reset-counts"><span v-for="(count, label) in resetReadiness.counts" :key="label"><strong>{{ count }}</strong>{{ label }}</span></div>
           <el-alert v-if="resetReadiness.blockers.length" title="当前不能重置" type="error" :closable="false"><ul><li v-for="blocker in resetReadiness.blockers" :key="blocker">{{ blocker }}</li></ul></el-alert>
-          <div v-if="resetReadiness.restorableSnapshots.length" class="pdm-reset-snapshots"><strong>30天内可恢复的快照</strong><div v-for="snapshot in resetReadiness.restorableSnapshots" :key="snapshot.id"><span>{{ formatResetDate(snapshot.createdAt) }} · {{ snapshot.createdBy }} · {{ snapshot.reason }}</span><button type="button" class="pdm-secondary-action" :disabled="resetPending" @click="executeSnapshotRestore(snapshot)">恢复</button></div></div>
+          <div v-if="resetReadiness.restorableSnapshots.length" class="pdm-reset-snapshots"><strong>30天内可恢复的快照</strong><div v-for="snapshot in resetReadiness.restorableSnapshots" :key="snapshot.id"><span>{{ formatResetDate(snapshot.createdAt) }} · {{ displayUserName(snapshot.createdBy) }} · {{ snapshot.reason }}</span><button type="button" class="pdm-secondary-action" :disabled="resetPending" @click="executeSnapshotRestore(snapshot)">恢复</button></div></div>
           <template v-if="resetReadiness.canReset && Object.values(resetReadiness.counts).some(count => count > 0)">
             <label class="pdm-dialog-field">重置原因 <b>*</b><el-input v-model="resetReason" type="textarea" :rows="3" maxlength="500" show-word-limit placeholder="请填写可审计的重置原因" /></label>
             <label class="pdm-dialog-field">输入项目号确认 <b>*</b><el-input v-model="resetConfirmation" :placeholder="`请输入 ${project.code}`" /></label>

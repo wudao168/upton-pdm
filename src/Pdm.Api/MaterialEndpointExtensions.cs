@@ -17,10 +17,10 @@ public static class MaterialEndpointExtensions
             return Results.Ok((await service.ListMaterialsAsync(query, categoryCode, includeArchived ?? false, limit ?? 100, actor, role, cancellationToken)).Select(MapMaterial));
         });
 
-        api.MapGet("/materials/page", async (string? query, string? categoryCode, string? brand, bool? includeArchived, int? page, int? pageSize, string? createdAtOrder, bool? ordinaryOnly, HttpContext context, MaterialService service, CancellationToken cancellationToken) =>
+        api.MapGet("/materials/page", async (string? query, string? categoryCode, string? brand, bool? includeArchived, int? page, int? pageSize, string? createdAtOrder, bool? ordinaryOnly, string? sortBy, string? sortOrder, HttpContext context, MaterialService service, CancellationToken cancellationToken) =>
         {
             var (actor, role) = CurrentUser(context.User);
-            var result = await service.ListMaterialPageAsync(query, categoryCode, brand, includeArchived ?? false, page ?? 1, pageSize ?? 50, actor, role, cancellationToken, createdAtOrder, ordinaryOnly ?? false);
+            var result = await service.ListMaterialPageAsync(query, categoryCode, brand, includeArchived ?? false, page ?? 1, pageSize ?? 50, actor, role, cancellationToken, createdAtOrder, ordinaryOnly ?? false, sortBy, sortOrder);
             return Results.Ok(new
             {
                 Items = result.Items.Select(MapMaterial),

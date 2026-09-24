@@ -161,6 +161,7 @@ public sealed class MySqlU9InventoryRepository : IU9InventoryRepository
             ProjectCode = Like(filters.ProjectCode),
             Subproject = Like(filters.Subproject),
             PositiveStockOnly = filters.PositiveStockOnly,
+            SimilarSpecification = filters.SimilarSpecification,
             Offset = (page - 1) * pageSize,
             PageSize = pageSize
         };
@@ -173,7 +174,7 @@ public sealed class MySqlU9InventoryRepository : IU9InventoryRepository
             WHERE (@MaterialCode IS NULL OR inventory.material_code=@MaterialCode)
               AND (@ItemName IS NULL OR inventory.item_name LIKE @ItemName)
               AND (@Specification IS NULL OR COALESCE(inventory.specification,material.specification,'') LIKE @Specification)
-              AND (@Brand IS NULL OR COALESCE(material.brand,'')=@Brand)
+              AND (@SimilarSpecification IS NOT NULL OR @Brand IS NULL OR COALESCE(material.brand,'')=@Brand)
               AND (@Warehouse IS NULL OR inventory.warehouse_code LIKE @Warehouse OR inventory.warehouse_name LIKE @Warehouse)
               AND (@ProjectCode IS NULL OR COALESCE(inventory.project_code,'') LIKE @ProjectCode)
               AND (@Subproject IS NULL OR COALESCE(inventory.subproject,'') LIKE @Subproject)
@@ -195,7 +196,7 @@ public sealed class MySqlU9InventoryRepository : IU9InventoryRepository
         var items = rows.Select(MapSnapshot).ToArray();
         if (filters.SimilarSpecification is not null)
         {
-            var matches = InventorySimilarity.Match(items, filters.SimilarSpecification, cancellationToken);
+            var matches = InventorySimilarity.Match(items, filters.SimilarSpecification, cancellationToken, filters.Brand);
             total = matches.Length;
             items = matches.Skip((page - 1) * pageSize).Take(pageSize).ToArray();
         }

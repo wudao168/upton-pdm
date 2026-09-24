@@ -4,7 +4,8 @@ param(
     [string]$LanBaseUrl = 'http://192.168.2.8:5173',
     [string]$ReleaseVersion = '',
     [string]$ReleaseNote = '',
-    [switch]$ServerOnly
+    [switch]$ServerOnly,
+    [switch]$SkipTests
 )
 
 $ErrorActionPreference = 'Stop'
@@ -255,9 +256,14 @@ try {
             throw 'Release build failed.'
         }
 
-        & $dotnetPath test Pdm.slnx --configuration Release --no-build --no-restore --nologo --disable-build-servers
-        if ($LASTEXITCODE -ne 0) {
-            throw 'Release tests failed.'
+        if ($SkipTests) {
+            Write-Warning 'Release test stage skipped by request.'
+        }
+        else {
+            & $dotnetPath test Pdm.slnx --configuration Release --no-build --no-restore --nologo --disable-build-servers
+            if ($LASTEXITCODE -ne 0) {
+                throw 'Release tests failed.'
+            }
         }
     }
 
@@ -324,6 +330,9 @@ Copy-WebUi (Join-Path $clientOutput 'ui')
 Copy-Item -Path (Join-Path $projectRoot 'src\Pdm.SolidWorks.Addin\bin\Release\net48\*') -Destination $addinOutput -Recurse -Force
 Copy-Item -Path (Join-Path $projectRoot 'src\Pdm.SolidWorks.PreviewWorker\bin\Release\net48\*') -Destination $previewWorkerOutput -Recurse -Force
 $apiWorkerOutput = Join-Path $apiOutput 'preview-worker'
+if (Test-Path -LiteralPath $apiWorkerOutput -PathType Leaf) {
+    Remove-Item -LiteralPath $apiWorkerOutput -Force
+}
 New-Item -ItemType Directory -Path $apiWorkerOutput -Force | Out-Null
 Get-ChildItem -LiteralPath $previewWorkerOutput -File | ForEach-Object {
     Copy-Item -LiteralPath $_.FullName -Destination $apiWorkerOutput -Force

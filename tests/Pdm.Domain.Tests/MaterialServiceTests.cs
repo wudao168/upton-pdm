@@ -204,9 +204,12 @@ public sealed class MaterialServiceTests
             var second = await service.ListMaterialPageAsync("日期排序", null, "DATE", false, 2, 2, "admin", UserRole.Administrator, default, direction);
             Assert.Equal((direction == "asc" ? rows : rows.AsEnumerable().Reverse()).Select(r => r.Id), first.Items.Concat(second.Items).Select(r => r.Id));
         }
+        var specificationDescending = await service.ListMaterialPageAsync("日期排序", null, "DATE", false, 1, 50, "admin", UserRole.Administrator, default, sortBy: "specification", sortOrder: "desc");
+        Assert.Equal(rows.AsEnumerable().Reverse().Select(row => row.Id), specificationDescending.Items.Select(row => row.Id));
         var reset = await service.ListMaterialPageAsync("日期排序", null, null, false, 1, 2, "admin", UserRole.Administrator, default);
         Assert.Equal(rows[1].Id, reset.Items[0].Id);
         await Assert.ThrowsAsync<PdmRuleException>(() => service.ListMaterialPageAsync(null, null, null, false, 1, 50, "admin", UserRole.Administrator, default, "DROP TABLE"));
+        await Assert.ThrowsAsync<PdmRuleException>(() => service.ListMaterialPageAsync(null, null, null, false, 1, 50, "admin", UserRole.Administrator, default, sortBy: "unknown", sortOrder: "asc"));
     }
 
     [Fact]

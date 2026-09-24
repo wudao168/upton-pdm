@@ -19,6 +19,7 @@ if (!string.IsNullOrWhiteSpace(httpUrlOverride))
 builder.Host.UseWindowsService(options => options.ServiceName = "UPLM API");
 builder.Logging.ClearProviders();
 builder.Logging.AddConsole();
+if (OperatingSystem.IsWindows()) builder.Logging.AddEventLog();
 var timeProvider = TimeProvider.System;
 builder.Services.AddSingleton(timeProvider);
 
@@ -251,9 +252,12 @@ builder.Services.AddProblemDetails();
 
 var app = builder.Build();
 var deployedWebRoot = Path.Combine(AppContext.BaseDirectory, "wwwroot");
+var requestErrorLogger = app.Services.GetRequiredService<ILoggerFactory>().CreateLogger("UnhandledRequest");
 app.UseExceptionHandler(exceptionHandler => exceptionHandler.Run(async context =>
 {
     var exception = context.Features.Get<IExceptionHandlerFeature>()?.Error;
+    if (exception is not null)
+        requestErrorLogger.LogError(exception, "Unhandled request {Method} {Path} (trace {TraceIdentifier})", context.Request.Method, context.Request.Path, context.TraceIdentifier);
     var status = exception switch
     {
         PdmNotFoundException => StatusCodes.Status404NotFound,

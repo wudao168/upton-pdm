@@ -1361,11 +1361,6 @@ watch(() => props.project.id, () => { masterPlanMode.value = false; return load(
     <div v-else-if="loading" class="pdm-plan-state"><span class="pdm-plan-loading" />正在加载项目计划…</div>
     <template v-else>
       <section class="pdm-plan-summary">
-        <article><span>{{ portfolioMode ? '当前阶段' : '当前活动阶段' }}</span><strong><i class="pdm-plan-stage-dot" :class="hasEffectivePlans ? stageTone(activeStage) : 'is-neutral'" />{{ activeStageSummary }}</strong><small>{{ plan?.manualStage ? '人工例外状态' : portfolioMode ? '按配置的阶段顺序及必需任务判断' : '依据实际排期，允许多阶段并行' }}</small></article>
-        <article><span>{{ progressLabel }}</span><strong>{{ overallProgress }}%</strong><div class="pdm-plan-progress"><i :style="{ width: `${overallProgress}%` }" /></div></article>
-        <article><span>计划风险</span><strong>{{ portfolioMode ? `${portfolio?.laggingProjectCount ?? 0} 滞后 / ${portfolio?.riskProjectCount ?? 0} 风险` : !isEffective(plan) ? '待审批生效' : `${plan?.tasks.filter(item => item.status !== 'Completed' && item.plannedFinish < isoDate(new Date())).length ?? 0} 项逾期` }}</strong><small>生效后提醒：7天、3天、到期日、逾期每日</small></article>
-        <article><span>计划基线</span><strong>{{ plan?.baselineVersion ? `V${plan.baselineVersion}` : '未设置' }}</strong><small>{{ plan?.baselineVersion ? '灰色细条为冻结基线' : '设置后可比较计划与实际' }}</small></article>
-        <article><button type="button" class="pdm-plan-summary-action" aria-label="查看阶段进度详情" @click="stageProgressDialogOpen = true"><span>阶段进度</span><strong>{{ stageCount ? `${completedStageCount} / ${stageCount}` : '暂无计划' }}</strong><small>已完成阶段 · 点击查看详情</small></button></article>
         <article class="pdm-plan-shipping-card">
           <div class="pdm-plan-shipping-card__date">
             <span>项目发货日期</span>
@@ -1377,6 +1372,11 @@ watch(() => props.project.id, () => { masterPlanMode.value = false; return load(
             <span>{{ (shippingCountdownDays ?? 0) > 0 ? '距发货（天）' : shippingCountdownDays === 0 ? '今日发货' : '已超期（天）' }}</span>
           </div>
         </article>
+        <article><span>{{ portfolioMode ? '当前阶段' : '当前活动阶段' }}</span><strong><i class="pdm-plan-stage-dot" :class="hasEffectivePlans ? stageTone(activeStage) : 'is-neutral'" />{{ activeStageSummary }}</strong><small>{{ plan?.manualStage ? '人工例外状态' : portfolioMode ? '按配置的阶段顺序及必需任务判断' : '依据实际排期，允许多阶段并行' }}</small></article>
+        <article><span>{{ progressLabel }}</span><strong>{{ overallProgress }}%</strong><div class="pdm-plan-progress"><i :style="{ width: `${overallProgress}%` }" /></div></article>
+        <article><span>计划风险</span><strong>{{ portfolioMode ? `${portfolio?.laggingProjectCount ?? 0} 滞后 / ${portfolio?.riskProjectCount ?? 0} 风险` : !isEffective(plan) ? '待审批生效' : `${plan?.tasks.filter(item => item.status !== 'Completed' && item.plannedFinish < isoDate(new Date())).length ?? 0} 项逾期` }}</strong><small>生效后提醒：7天、3天、到期日、逾期每日</small></article>
+        <article><span>计划基线</span><strong>{{ plan?.baselineVersion ? `V${plan.baselineVersion}` : '未设置' }}</strong><small>{{ plan?.baselineVersion ? '灰色细条为冻结基线' : '设置后可比较计划与实际' }}</small></article>
+        <article><button type="button" class="pdm-plan-summary-action" aria-label="查看阶段进度详情" @click="stageProgressDialogOpen = true"><span>阶段进度</span><strong>{{ stageCount ? `${completedStageCount} / ${stageCount}` : '暂无计划' }}</strong><small>已完成阶段 · 点击查看详情</small></button></article>
       </section>
 
       <section class="pdm-plan-panel">

@@ -29,6 +29,7 @@ public sealed class InMemoryProjectFileRepository(TimeProvider timeProvider) : I
         }
     }
     public Task<ProjectFile> RenameAsync(Guid fileId, string fileName, string actor, CancellationToken cancellationToken) => Update(fileId, item => item with { FileName = fileName, UpdatedBy = actor, UpdatedAt = timeProvider.GetUtcNow() });
+    public Task<ProjectFile> UpdateDescriptionAsync(Guid fileId, string? description, string actor, CancellationToken cancellationToken) => Update(fileId, item => item with { Description = description, UpdatedBy = actor, UpdatedAt = timeProvider.GetUtcNow() });
     public Task<ProjectFile> MoveAsync(Guid fileId, Guid folderId, string actor, CancellationToken cancellationToken) => Update(fileId, item => item with { FolderId = folderId, UpdatedBy = actor, UpdatedAt = timeProvider.GetUtcNow() });
     public Task<ProjectFile> SetDeletedAsync(Guid fileId, bool deleted, string actor, CancellationToken cancellationToken) => Update(fileId, item => item with { DeletedAt = deleted ? timeProvider.GetUtcNow() : null, DeletedBy = deleted ? actor : null, UpdatedBy = actor, UpdatedAt = timeProvider.GetUtcNow() });
     public Task<bool> FolderHasFilesAsync(Guid folderId, CancellationToken cancellationToken) => Task.FromResult(files.Values.Any(item => item.FolderId == folderId));

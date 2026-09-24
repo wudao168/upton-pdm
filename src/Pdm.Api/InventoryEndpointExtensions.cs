@@ -105,6 +105,7 @@ public static class InventoryEndpointExtensions
             row.Brand,
             row.Specification,
             row.SimilarityPercent,
+            row.SimilarityReason,
             row.ProjectCode,
             row.ProjectName,
             row.Subproject,

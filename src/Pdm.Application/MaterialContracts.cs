@@ -301,7 +301,7 @@ public interface IMaterialRepository
 {
     Task<IReadOnlyList<BomHeaderMaterialLink>> ListBomHeaderMaterialLinksAsync(CancellationToken cancellationToken);
     Task<IReadOnlyList<PdmMaterial>> ListMaterialsAsync(string? query, string? categoryCode, bool includeArchived, int limit, CancellationToken cancellationToken);
-    Task<MaterialPage> ListMaterialPageAsync(string? query, string? categoryCode, string? brand, bool includeArchived, int page, int pageSize, CancellationToken cancellationToken, string? createdAtOrder = null, bool ordinaryOnly = false);
+    Task<MaterialPage> ListMaterialPageAsync(string? query, string? categoryCode, string? brand, bool includeArchived, int page, int pageSize, CancellationToken cancellationToken, string? createdAtOrder = null, bool ordinaryOnly = false, string? sortBy = null, string? sortOrder = null);
     Task<IReadOnlyList<PdmMaterial>> ListPendingMasterMaterialsAsync(CancellationToken cancellationToken);
     Task<PdmMaterial?> FindMaterialAsync(Guid materialId, CancellationToken cancellationToken);
     Task<PdmMaterial?> FindMaterialByCodeAsync(string materialCode, CancellationToken cancellationToken);

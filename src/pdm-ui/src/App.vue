@@ -308,7 +308,7 @@ const canManageDrawingReviewWithdrawal = computed(() => workspace.hasRole('Admin
   || (workspace.project.value.collaborativeProjectManagers ?? []).includes(workspace.currentUsername.value))
 const drawingReviewReviewerOptions = computed(() => {
   return workspace.drawingReviewReviewers.value
-    .map(user => ({ username: user.username, label: `${user.displayName}（${user.username}）` }))
+    .map(user => ({ username: user.username, label: user.displayName }))
     .sort((left, right) => left.label.localeCompare(right.label, 'zh-CN'))
 })
 const drawingReviewOverlayState = computed(() => ({

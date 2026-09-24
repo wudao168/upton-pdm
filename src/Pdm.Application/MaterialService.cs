@@ -40,11 +40,13 @@ public sealed class MaterialService(
         string actor,
         UserRole role,
         CancellationToken cancellationToken,
-        string? createdAtOrder = null, bool ordinaryOnly = false)
+        string? createdAtOrder = null, bool ordinaryOnly = false, string? sortBy = null, string? sortOrder = null)
     {
         await RequireAnyPermissionAsync(actor, role, [PermissionCodes.MaterialView, PermissionCodes.BomEdit, PermissionCodes.StandardLibraryView], cancellationToken);
         if (createdAtOrder is not (null or "" or "asc" or "desc")) throw new PdmRuleException("创建时间排序仅支持asc或desc。");
-        return await materials.ListMaterialPageAsync(query, categoryCode, brand, includeArchived, page, pageSize, cancellationToken, createdAtOrder, ordinaryOnly);
+        if (sortBy is not (null or "" or "materialCode" or "name" or "specification" or "brand" or "createdBy" or "createdAt")) throw new PdmRuleException("料品排序字段不受支持。");
+        if (sortOrder is not (null or "" or "asc" or "desc")) throw new PdmRuleException("料品排序方向仅支持asc或desc。");
+        return await materials.ListMaterialPageAsync(query, categoryCode, brand, includeArchived, page, pageSize, cancellationToken, createdAtOrder, ordinaryOnly, sortBy, sortOrder);
     }
 
     public async Task<IReadOnlyList<PdmMaterial>> ListPendingMasterMaterialsAsync(string actor, UserRole role, CancellationToken cancellationToken)

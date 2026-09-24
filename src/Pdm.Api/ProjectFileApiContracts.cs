@@ -4,4 +4,5 @@ public sealed record StartProjectFileUploadRequest(string FileName, long TotalLe
 public sealed record CompleteProjectFileUploadRequest(string? Comment);
 public sealed record CreateProjectFolderRequest(string Name);
 public sealed record RenameProjectEntryRequest(string Name);
+public sealed record UpdateProjectFileDescriptionRequest(string? Description);
 public sealed record MoveProjectEntryRequest(Guid FolderId);

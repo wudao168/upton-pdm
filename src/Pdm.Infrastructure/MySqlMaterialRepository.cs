@@ -54,7 +54,7 @@ public sealed class MySqlMaterialRepository : IMaterialRepository
         int page,
         int pageSize,
         CancellationToken cancellationToken,
-        string? createdAtOrder = null, bool ordinaryOnly = false)
+        string? createdAtOrder = null, bool ordinaryOnly = false, string? sortBy = null, string? sortOrder = null)
     {
         await using var connection = await OpenAsync(cancellationToken);
         var normalizedQuery = string.IsNullOrWhiteSpace(query) ? null : $"%{query.Trim()}%";
@@ -81,10 +81,22 @@ public sealed class MySqlMaterialRepository : IMaterialRepository
             "SELECT COUNT(*) FROM material_master" + filters,
             parameters,
             cancellationToken: cancellationToken));
-        var orderBy = createdAtOrder switch
+        var effectiveSortBy = string.IsNullOrWhiteSpace(sortBy) ? (string.IsNullOrWhiteSpace(createdAtOrder) ? null : "createdAt") : sortBy;
+        var effectiveSortOrder = string.IsNullOrWhiteSpace(sortOrder) ? createdAtOrder : sortOrder;
+        var orderBy = (effectiveSortBy, effectiveSortOrder) switch
         {
-            "asc" => " ORDER BY created_at ASC,material_code,id",
-            "desc" => " ORDER BY created_at DESC,material_code,id",
+            ("materialCode", "asc") => " ORDER BY material_code ASC,id",
+            ("materialCode", "desc") => " ORDER BY material_code DESC,id",
+            ("name", "asc") => " ORDER BY name ASC,material_code,id",
+            ("name", "desc") => " ORDER BY name DESC,material_code,id",
+            ("specification", "asc") => " ORDER BY specification ASC,material_code,id",
+            ("specification", "desc") => " ORDER BY specification DESC,material_code,id",
+            ("brand", "asc") => " ORDER BY brand ASC,material_code,id",
+            ("brand", "desc") => " ORDER BY brand DESC,material_code,id",
+            ("createdBy", "asc") => " ORDER BY created_by ASC,material_code,id",
+            ("createdBy", "desc") => " ORDER BY created_by DESC,material_code,id",
+            ("createdAt", "asc") => " ORDER BY created_at ASC,material_code,id",
+            ("createdAt", "desc") => " ORDER BY created_at DESC,material_code,id",
             _ => " ORDER BY (approval_status='Draft' AND is_archived=0) DESC," +
             " CASE WHEN approval_status='Draft' AND is_archived=0 THEN created_at END DESC," +
             " is_recommended DESC,reference_count DESC,material_code"

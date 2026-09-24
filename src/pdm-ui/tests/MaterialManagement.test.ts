@@ -206,7 +206,7 @@ describe('MaterialManagement', () => {
     await flushPromises()
 
     expect(wrapper.findAll('.material-tabs > .el-tabs__header [role="tab"]').map(tab => tab.text().replace(/\d+/g, '').trim())).toEqual([
-      '料品主档', '料品库存', 'BOM表头料号', '关联配置', '料品套件', '料号审批', '取号设置', '分类维护',
+      '料品主档', '料品库存', '关联配置', '料品套件', 'BOM料号', '料号审批', '取号设置', '分类维护',
     ])
     await wrapper.findAll('.el-tabs__item').find(tab => tab.text() === '关联配置')!.trigger('click')
     await flushPromises()
@@ -264,7 +264,7 @@ describe('MaterialManagement', () => {
     const wrapper = mount(MaterialManagement, { props: { token: 'token', canEdit: true, canApprove: true, canManageIntegration: false }, global: { plugins: [ElementPlus] } })
     await flushPromises()
     await wrapper.get('.material-toolbar .el-input input').setValue(search)
-    await new Promise(resolve => setTimeout(resolve, 280))
+    await wrapper.get('.material-toolbar__search-button').trigger('click')
     await flushPromises()
     wrapper.findComponent({ name: 'ElPagination' }).vm.$emit('update:current-page', 2)
     await flushPromises()
@@ -286,6 +286,27 @@ describe('MaterialManagement', () => {
     expect(wrapper.findComponent({ name: 'ElPagination' }).props('total')).toBe(52)
     wrapper.unmount()
   }, 15000)
+
+  it('仅在点击搜索或按回车时应用主档搜索与工具栏筛选', async () => {
+    const wrapper = mount(MaterialManagement, { props: { token: 'token', canEdit: true, canApprove: true, canManageIntegration: false }, global: { plugins: [ElementPlus] } })
+    await flushPromises()
+    const initialCalls = api.listMaterialPage.mock.calls.length
+    const search = wrapper.get('input[placeholder="搜索编码、名称、规格、品牌或分类"]')
+
+    await search.setValue('EL-001')
+    await flushPromises()
+    expect(api.listMaterialPage).toHaveBeenCalledTimes(initialCalls)
+
+    await wrapper.get('.material-toolbar__search-button').trigger('click')
+    await flushPromises()
+    expect(api.listMaterialPage).toHaveBeenLastCalledWith('token', expect.objectContaining({ query: 'EL-001', page: 1 }))
+
+    await search.setValue('M18')
+    await search.trigger('keyup.enter')
+    await flushPromises()
+    expect(api.listMaterialPage).toHaveBeenLastCalledWith('token', expect.objectContaining({ query: 'M18', page: 1 }))
+    wrapper.unmount()
+  })
 
   it('保存冲突在弹窗内显示且保留输入，重试及重新打开清除旧错误', async () => {
     const conflict = '按分类查重规则（型号+品牌）已存在相同料品 EL-001，请核对后重试'
@@ -337,7 +358,7 @@ describe('MaterialManagement', () => {
     wrapper.unmount()
   })
 
-  it('创建时间排序传给后端，翻页保留排序，取消后恢复默认', async () => {
+  it('主档指定列排序传给后端，翻页保留排序，取消后恢复默认', async () => {
     const base = (await api.listMaterials())[0]
     api.listMaterials.mockResolvedValue(Array.from({ length: 3 }, (_, index) => ({ ...base, id: `sort-${index}`, materialCode: `SORT-${index}` })))
     const wrapper = mount(MaterialManagement, { props: { token: 'token', canEdit: true, canApprove: true, canManageIntegration: false }, global: { plugins: [ElementPlus] } })
@@ -346,23 +367,26 @@ describe('MaterialManagement', () => {
     const dateColumn = table.findAllComponents({ name: 'ElTableColumn' }).find(column => column.props('prop') === 'createdAt')!
     expect(dateColumn.props('sortable')).toBe('custom')
     // 默认按创建时间由近到远。
-    expect(api.listMaterialPage).toHaveBeenCalledWith('token', expect.objectContaining({ createdAtOrder: 'desc', page: 1 }))
+    expect(api.listMaterialPage).toHaveBeenCalledWith('token', expect.objectContaining({ sortBy: 'createdAt', sortOrder: 'desc', page: 1 }))
     expect(table.props('defaultSort')).toEqual({ prop: 'createdAt', order: 'descending' })
     const pagination = wrapper.findComponent({ name: 'ElPagination' })
     pagination.vm.$emit('update:pageSize', 2)
     await flushPromises()
     table.vm.$emit('sort-change', { prop: 'createdAt', order: 'descending' })
     await flushPromises()
-    expect(api.listMaterialPage).toHaveBeenLastCalledWith('token', expect.objectContaining({ createdAtOrder: 'desc', page: 1 }))
+    expect(api.listMaterialPage).toHaveBeenLastCalledWith('token', expect.objectContaining({ sortBy: 'createdAt', sortOrder: 'desc', page: 1 }))
     pagination.vm.$emit('update:currentPage', 2)
     await flushPromises()
-    expect(api.listMaterialPage).toHaveBeenLastCalledWith('token', expect.objectContaining({ createdAtOrder: 'desc', page: 2 }))
+    expect(api.listMaterialPage).toHaveBeenLastCalledWith('token', expect.objectContaining({ sortBy: 'createdAt', sortOrder: 'desc', page: 2 }))
     table.vm.$emit('sort-change', { prop: 'createdAt', order: 'ascending' })
     await flushPromises()
-    expect(api.listMaterialPage).toHaveBeenLastCalledWith('token', expect.objectContaining({ createdAtOrder: 'asc', page: 1 }))
+    expect(api.listMaterialPage).toHaveBeenLastCalledWith('token', expect.objectContaining({ sortBy: 'createdAt', sortOrder: 'asc', page: 1 }))
+    table.vm.$emit('sort-change', { prop: 'brand', order: 'descending' })
+    await flushPromises()
+    expect(api.listMaterialPage).toHaveBeenLastCalledWith('token', expect.objectContaining({ sortBy: 'brand', sortOrder: 'desc', page: 1 }))
     table.vm.$emit('sort-change', { prop: undefined, order: null })
     await flushPromises()
-    expect(api.listMaterialPage).toHaveBeenLastCalledWith('token', expect.objectContaining({ createdAtOrder: undefined, page: 1 }))
+    expect(api.listMaterialPage).toHaveBeenLastCalledWith('token', expect.objectContaining({ sortBy: undefined, sortOrder: undefined, page: 1 }))
     wrapper.unmount()
   })
 
@@ -564,7 +588,7 @@ describe('MaterialManagement', () => {
 
     expect(wrapper.find('.el-alert').exists()).toBe(false)
     expect(wrapper.find('.material-header').exists()).toBe(false)
-    expect(wrapper.findAll('.material-tabs > .el-tabs__header [role="tab"]').map(tab => tab.text().trim())).toEqual(['料品主档', '料品库存', 'BOM表头料号', '料品套件', '料号审批', '分类维护'])
+    expect(wrapper.findAll('.material-tabs > .el-tabs__header [role="tab"]').map(tab => tab.text().trim())).toEqual(['料品主档', '料品库存', '料品套件', 'BOM料号', '料号审批', '分类维护'])
     expect(api.listMaterialPage).toHaveBeenCalledWith('token', expect.objectContaining({ ordinaryOnly: true }))
     const toolbar = wrapper.get('.material-toolbar')
     expect(toolbar.findAll('button').some(button => button.text() === '刷新')).toBe(true)
@@ -687,6 +711,8 @@ describe('MaterialManagement', () => {
     const brandSelect = wrapper.findComponent({ name: 'ElSelect' })
     expect(brandSelect.exists()).toBe(true)
     brandSelect.vm.$emit('update:modelValue', '欧姆龙')
+    await flushPromises()
+    await wrapper.get('.material-toolbar__search-button').trigger('click')
     await flushPromises()
 
     const rows = wrapper.findAll('.el-table__body-wrapper tbody tr')

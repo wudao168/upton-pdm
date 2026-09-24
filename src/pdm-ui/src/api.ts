@@ -560,7 +560,7 @@ export function listBomHeaderMaterialDirectory(token: string): Promise<import('.
   return requestJson('/api/materials/bom-headers', {}, token)
 }
 
-export function listMaterialPage(token: string, input: { query?: string; categoryCode?: string; brand?: string; includeArchived?: boolean; page?: number; pageSize?: number; createdAtOrder?: 'asc' | 'desc'; ordinaryOnly?: boolean }): Promise<MaterialPage> {
+export function listMaterialPage(token: string, input: { query?: string; categoryCode?: string; brand?: string; includeArchived?: boolean; page?: number; pageSize?: number; createdAtOrder?: 'asc' | 'desc'; sortBy?: 'materialCode' | 'name' | 'specification' | 'brand' | 'createdBy' | 'createdAt'; sortOrder?: 'asc' | 'desc'; ordinaryOnly?: boolean }): Promise<MaterialPage> {
   const parameters = new URLSearchParams()
   if (input.query?.trim()) parameters.set('query', input.query.trim())
   if (input.categoryCode?.trim()) parameters.set('categoryCode', input.categoryCode.trim())
@@ -569,6 +569,8 @@ export function listMaterialPage(token: string, input: { query?: string; categor
   if (input.page && input.page !== 1) parameters.set('page', String(input.page))
   if (input.pageSize && input.pageSize !== 50) parameters.set('pageSize', String(input.pageSize))
   if (input.createdAtOrder) parameters.set('createdAtOrder', input.createdAtOrder)
+  if (input.sortBy) parameters.set('sortBy', input.sortBy)
+  if (input.sortOrder) parameters.set('sortOrder', input.sortOrder)
   if (input.ordinaryOnly) parameters.set('ordinaryOnly', 'true')
   const suffix = parameters.size ? `?${parameters}` : ''
   return requestJson<MaterialPage>(`/api/materials/page${suffix}`, {}, token)
@@ -1916,6 +1918,9 @@ export function deleteProjectFolder(projectId: string, folderId: string, token: 
 export function renameProjectFile(projectId: string, fileId: string, name: string, token: string): Promise<ProjectFile> {
   return requestJson(`/api/projects/${projectId}/files/${fileId}`, { method: 'PATCH', body: JSON.stringify({ name }) }, token)
 }
+export function updateProjectFileDescription(projectId: string, fileId: string, description: string, token: string): Promise<ProjectFile> {
+  return requestJson(`/api/projects/${projectId}/files/${fileId}/description`, { method: 'PUT', body: JSON.stringify({ description }) }, token)
+}
 export function moveProjectFile(projectId: string, fileId: string, folderId: string, token: string): Promise<ProjectFile> {
   return requestJson(`/api/projects/${projectId}/files/${fileId}/move`, { method: 'POST', body: JSON.stringify({ folderId }) }, token)
 }
@@ -1927,6 +1932,11 @@ export function restoreProjectFile(projectId: string, fileId: string, token: str
 }
 export function listProjectFileVersions(projectId: string, fileId: string, token: string): Promise<ProjectFileVersion[]> {
   return requestJson(`/api/projects/${projectId}/files/${fileId}/versions`, {}, token)
+}
+export async function readProjectFileContent(projectId: string, fileId: string, token: string): Promise<Blob> {
+  const response = await fetch(`${apiBase}/api/projects/${projectId}/files/${fileId}/content?download=false`, { headers: authenticatedHeaders(token) })
+  if (!response.ok) throw new PdmApiError(`项目文件读取失败（${response.status}）`, response.status)
+  return response.blob()
 }
 export async function downloadProjectFile(projectId: string, file: ProjectFile, token: string, versionId?: string, preview = false): Promise<void> {
   const query = new URLSearchParams({ download: preview ? 'false' : 'true' })

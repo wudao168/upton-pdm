@@ -76,7 +76,7 @@ public sealed class InMemoryMaterialRepository : IMaterialRepository
         int page,
         int pageSize,
         CancellationToken cancellationToken,
-        string? createdAtOrder = null, bool ordinaryOnly = false)
+        string? createdAtOrder = null, bool ordinaryOnly = false, string? sortBy = null, string? sortOrder = null)
     {
         var normalizedQuery = query?.Trim();
         var normalizedCategory = categoryCode?.Trim();
@@ -94,10 +94,22 @@ public sealed class InMemoryMaterialRepository : IMaterialRepository
                 item.MaterialCode, item.Name, item.Specification, item.Material, item.Brand,
                 item.CategoryCode, item.U9CategoryCode, item.SurfaceTreatment, item.PurchaseLink, item.Remark
             }.Any(value => value?.Contains(normalizedQuery, StringComparison.OrdinalIgnoreCase) == true));
-        var ordered = createdAtOrder switch
+        var effectiveSortBy = string.IsNullOrWhiteSpace(sortBy) ? (string.IsNullOrWhiteSpace(createdAtOrder) ? null : "createdAt") : sortBy;
+        var effectiveSortOrder = string.IsNullOrWhiteSpace(sortOrder) ? createdAtOrder : sortOrder;
+        var ordered = (effectiveSortBy, effectiveSortOrder) switch
         {
-            "asc" => filtered.OrderBy(item => item.CreatedAt).ThenBy(item => item.MaterialCode, StringComparer.OrdinalIgnoreCase).ThenBy(item => item.Id),
-            "desc" => filtered.OrderByDescending(item => item.CreatedAt).ThenBy(item => item.MaterialCode, StringComparer.OrdinalIgnoreCase).ThenBy(item => item.Id),
+            ("materialCode", "asc") => filtered.OrderBy(item => item.MaterialCode, StringComparer.OrdinalIgnoreCase).ThenBy(item => item.Id),
+            ("materialCode", "desc") => filtered.OrderByDescending(item => item.MaterialCode, StringComparer.OrdinalIgnoreCase).ThenBy(item => item.Id),
+            ("name", "asc") => filtered.OrderBy(item => item.Name, StringComparer.OrdinalIgnoreCase).ThenBy(item => item.MaterialCode, StringComparer.OrdinalIgnoreCase).ThenBy(item => item.Id),
+            ("name", "desc") => filtered.OrderByDescending(item => item.Name, StringComparer.OrdinalIgnoreCase).ThenBy(item => item.MaterialCode, StringComparer.OrdinalIgnoreCase).ThenBy(item => item.Id),
+            ("specification", "asc") => filtered.OrderBy(item => item.Specification, StringComparer.OrdinalIgnoreCase).ThenBy(item => item.MaterialCode, StringComparer.OrdinalIgnoreCase).ThenBy(item => item.Id),
+            ("specification", "desc") => filtered.OrderByDescending(item => item.Specification, StringComparer.OrdinalIgnoreCase).ThenBy(item => item.MaterialCode, StringComparer.OrdinalIgnoreCase).ThenBy(item => item.Id),
+            ("brand", "asc") => filtered.OrderBy(item => item.Brand, StringComparer.OrdinalIgnoreCase).ThenBy(item => item.MaterialCode, StringComparer.OrdinalIgnoreCase).ThenBy(item => item.Id),
+            ("brand", "desc") => filtered.OrderByDescending(item => item.Brand, StringComparer.OrdinalIgnoreCase).ThenBy(item => item.MaterialCode, StringComparer.OrdinalIgnoreCase).ThenBy(item => item.Id),
+            ("createdBy", "asc") => filtered.OrderBy(item => item.CreatedBy, StringComparer.OrdinalIgnoreCase).ThenBy(item => item.MaterialCode, StringComparer.OrdinalIgnoreCase).ThenBy(item => item.Id),
+            ("createdBy", "desc") => filtered.OrderByDescending(item => item.CreatedBy, StringComparer.OrdinalIgnoreCase).ThenBy(item => item.MaterialCode, StringComparer.OrdinalIgnoreCase).ThenBy(item => item.Id),
+            ("createdAt", "asc") => filtered.OrderBy(item => item.CreatedAt).ThenBy(item => item.MaterialCode, StringComparer.OrdinalIgnoreCase).ThenBy(item => item.Id),
+            ("createdAt", "desc") => filtered.OrderByDescending(item => item.CreatedAt).ThenBy(item => item.MaterialCode, StringComparer.OrdinalIgnoreCase).ThenBy(item => item.Id),
             _ => filtered.OrderByDescending(item => item.ApprovalStatus == MaterialApprovalStatus.Draft && !item.IsArchived)
             .ThenByDescending(item => item.ApprovalStatus == MaterialApprovalStatus.Draft && !item.IsArchived ? item.CreatedAt : (DateTimeOffset?)null)
             .ThenByDescending(item => item.IsRecommended)

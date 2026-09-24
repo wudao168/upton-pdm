@@ -6,8 +6,8 @@ import type { ProjectFolder } from '../src/types'
 
 const api = vi.hoisted(() => ({
   listProjectFiles: vi.fn(), uploadProjectFile: vi.fn(), createProjectFolder: vi.fn(), deleteProjectFolder: vi.fn(),
-  renameProjectFolder: vi.fn(), moveProjectFolder: vi.fn(), renameProjectFile: vi.fn(), moveProjectFile: vi.fn(),
-  deleteProjectFile: vi.fn(), restoreProjectFile: vi.fn(), listProjectFileVersions: vi.fn(), downloadProjectFile: vi.fn(),
+  renameProjectFolder: vi.fn(), moveProjectFolder: vi.fn(), renameProjectFile: vi.fn(), updateProjectFileDescription: vi.fn(), moveProjectFile: vi.fn(),
+  deleteProjectFile: vi.fn(), restoreProjectFile: vi.fn(), listProjectFileVersions: vi.fn(), downloadProjectFile: vi.fn(), readProjectFileContent: vi.fn(),
   listControlledDocumentRecycleBin: vi.fn(), getControlledDocumentRecycleReadiness: vi.fn(), recycleControlledDocument: vi.fn(), recycleControlledDocumentsBatch: vi.fn(), restoreControlledDocument: vi.fn(),
 }))
 vi.mock('../src/api', () => api)
@@ -21,7 +21,7 @@ function mountLibrary(folders: ProjectFolder[] = [businessFolder], documents: an
 }
 
 describe('ProjectFileLibrary', () => {
-  beforeEach(() => { vi.clearAllMocks(); api.listProjectFiles.mockResolvedValue([file]); api.listControlledDocumentRecycleBin.mockResolvedValue([]) })
+  beforeEach(() => { vi.clearAllMocks(); api.listProjectFiles.mockResolvedValue([file]); api.listControlledDocumentRecycleBin.mockResolvedValue([]); api.readProjectFileContent.mockResolvedValue(new Blob(['media'])) })
 
   it('在普通业务目录按目录权限显示文件操作并使用人名', async () => {
     const wrapper = mountLibrary()
@@ -31,8 +31,63 @@ describe('ProjectFileLibrary', () => {
     expect(wrapper.text()).toContain('新建文件夹')
     expect(wrapper.text()).toContain('会议纪要.pdf')
     expect(wrapper.text()).toContain('工程师甲')
+    expect(wrapper.text()).toContain('说明')
+    const descriptionButton = wrapper.find('button[aria-label="编辑 会议纪要.pdf 的说明"]')
+    expect(descriptionButton.exists()).toBe(true)
+    expect(descriptionButton.find('svg').exists()).toBe(false)
     expect(wrapper.find('button[title="下载"]').exists()).toBe(true)
     expect(wrapper.find('button[title="删除"]').exists()).toBe(true)
+  })
+
+  it('可预览文件可直接点击文件名打开预览', async () => {
+    const wrapper = mountLibrary()
+    await flushPromises()
+
+    await wrapper.find('button[title="预览 会议纪要.pdf"]').trigger('click')
+
+    expect(api.downloadProjectFile).toHaveBeenCalledWith('project-1', file, 'token', undefined, true)
+  })
+
+  it('项目文件列表支持选择全部并按目录权限显示批量操作', async () => {
+    const wrapper = mountLibrary()
+    await flushPromises()
+
+    await wrapper.get('input[aria-label="选择当前列表全部项目文件"]').setValue(true)
+
+    expect(wrapper.text()).toContain('已选 1 项')
+    expect(wrapper.text()).toContain('批量下载')
+    expect(wrapper.text()).toContain('批量移动')
+    expect(wrapper.text()).toContain('批量删除')
+  })
+
+  it('图片和视频在页面内打开预览播放窗口', async () => {
+    const video = { ...file, id: 'file-video', fileName: 'normal_video.mp4', currentVersion: { ...file.currentVersion, id: 'version-video', projectFileId: 'file-video', fileName: 'normal_video.mp4' } }
+    api.listProjectFiles.mockResolvedValue([video])
+    const wrapper = mountLibrary()
+    await flushPromises()
+
+    await wrapper.get('button[title="预览播放 normal_video.mp4"]').trigger('click')
+    await flushPromises()
+
+    expect(api.readProjectFileContent).toHaveBeenCalledWith('project-1', 'file-video', 'token')
+    expect(wrapper.find('video').exists()).toBe(true)
+  })
+
+  it('文件说明在单元格内编辑并保存，不打开弹窗', async () => {
+    const wrapper = mountLibrary()
+    await flushPromises()
+
+    await wrapper.find('button[aria-label="编辑 会议纪要.pdf 的说明"]').trigger('click')
+    const input = wrapper.find('input[aria-label="编辑 会议纪要.pdf 的说明"]')
+    expect(input.exists()).toBe(true)
+    expect(wrapper.find('.el-message-box').exists()).toBe(false)
+
+    await input.setValue('会议结论')
+    await input.trigger('keydown.enter')
+    await flushPromises()
+
+    expect(api.updateProjectFileDescription).toHaveBeenCalledWith('project-1', 'file-1', '会议结论', 'token')
+    expect(wrapper.text()).toContain('会议结论')
   })
 
   it('受控项目图档目录不显示普通文件上传和新建文件夹', async () => {
@@ -101,6 +156,20 @@ describe('ProjectFileLibrary', () => {
     const empty = nodes.find(node => node.text().includes('空目录'))!
     expect(populated.get('.pdm-folder-node__icon').classes()).toContain('is-populated')
     expect(empty.get('.pdm-folder-node__icon').classes()).not.toContain('is-populated')
+  })
+
+  it('业务目录在内容区显示直接子文件夹并可进入', async () => {
+    const childFolder = { ...businessFolder, id: 'folder-child', folderKey: 'acceptance-items', templateKey: 'acceptance-items', parentFolderId: businessFolder.id, name: '验收记录', sortOrder: 20 } satisfies ProjectFolder
+    api.listProjectFiles.mockResolvedValue([])
+    const wrapper = mountLibrary([businessFolder, childFolder])
+    await flushPromises()
+
+    expect(wrapper.get('[aria-label="当前目录的子文件夹"]').text()).toContain('验收记录')
+    expect(wrapper.text()).not.toContain('此目录暂无文件')
+    await wrapper.get('button[aria-label="进入文件夹 验收记录"]').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.get('.pdm-folder-toolbar h2').text()).toBe('验收记录')
   })
 
   it('缺少上传编辑删除权限时只显示查看提示', async () => {

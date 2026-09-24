@@ -21,9 +21,14 @@ const selectedMainMaterial = ref<PdmMaterial | null>(null)
 const openingMaterialId = ref('')
 const directoryMaterials = ref<PdmMaterial[]>([])
 const directoryLoading = ref(false)
+const createDialogOpen = ref(false)
+const createMaterialId = ref('')
+const createCandidates = ref<PdmMaterial[]>([])
+const createLoading = ref(false)
 
 const materialById = computed(() => new Map(directoryMaterials.value.map(item => [item.id, item])))
 const brandOptions = computed(() => [...new Set(directoryMaterials.value.map(item => item.brand?.trim()).filter((value): value is string => Boolean(value)))].sort((a, b) => a.localeCompare(b, 'zh-CN')))
+const configuredMaterialIds = computed(() => new Set(props.relations.map(item => item.mainMaterialId)))
 
 const filteredRelations = computed(() => {
   const value = query.value.trim().toLocaleLowerCase()
@@ -101,6 +106,33 @@ async function openEditor(relation: MaterialRelationTemplate) {
   }
 }
 
+async function searchCreateCandidates(query = '') {
+  createLoading.value = true
+  try {
+    const rows = await listMaterials(props.token, query, false, 100)
+    createCandidates.value = rows.filter(item => item.approvalStatus === 'Approved' && !item.isArchived && !configuredMaterialIds.value.has(item.id))
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '可配置料品加载失败')
+  } finally {
+    createLoading.value = false
+  }
+}
+
+function openCreate() {
+  createMaterialId.value = ''
+  createDialogOpen.value = true
+  void searchCreateCandidates()
+}
+
+function startNewConfiguration() {
+  const material = createCandidates.value.find(item => item.id === createMaterialId.value)
+  if (!material) return ElMessage.warning('请选择已批准且尚未配置的料品')
+  selectedRelation.value = null
+  selectedMainMaterial.value = material
+  createDialogOpen.value = false
+  editorOpen.value = true
+}
+
 function handleChanged() {
   emit('refresh')
 }
@@ -119,6 +151,7 @@ function refresh() {
         <el-option v-for="brand in brandOptions" :key="brand" :label="brand" :value="brand" />
       </el-select>
       <el-input v-model="query" clearable placeholder="搜索编码、名称、规格、品牌、分类或配置名称" />
+      <el-button v-if="canManage" type="primary" @click="openCreate">新增配置</el-button>
       <span>共 {{ filteredRelations.length }} 个已配置物料</span>
     </div>
     <el-table v-loading="directoryLoading" :data="filteredRelations" row-key="id" height="100%" stripe empty-text="暂无已配置关联物料">
@@ -147,6 +180,10 @@ function refresh() {
         :can-publish="canPublish"
         @changed="handleChanged"
       />
+    </el-dialog>
+    <el-dialog v-model="createDialogOpen" title="新增关联配置" width="480px" destroy-on-close>
+      <el-form label-position="top"><el-form-item label="主料品"><el-select v-model="createMaterialId" clearable filterable remote reserve-keyword :remote-method="searchCreateCandidates" :loading="createLoading" placeholder="搜索已批准料品"><el-option v-for="material in createCandidates" :key="material.id" :label="`${material.materialCode} · ${material.name}${material.specification ? ` · ${material.specification}` : ''}`" :value="material.id" /></el-select></el-form-item></el-form>
+      <template #footer><el-button @click="createDialogOpen = false">取消</el-button><el-button type="primary" :disabled="!createMaterialId" @click="startNewConfiguration">开始配置</el-button></template>
     </el-dialog>
   </section>
 </template>

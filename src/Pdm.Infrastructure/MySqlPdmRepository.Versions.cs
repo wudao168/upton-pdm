@@ -31,7 +31,7 @@ public sealed partial class MySqlPdmRepository
         if (!await HasUserPermissionAsync(actor, role, PermissionCodes.ProjectView, cancellationToken)
             || !await HasUserPermissionAsync(actor, role, PermissionCodes.ProjectContentView, cancellationToken)) return [];
         await using var connection = await OpenAsync(cancellationToken);
-        var projects = await connection.QueryAsync<ProductionDrawingProject>(new CommandDefinition(
+        var projects = await connection.QueryAsync<ProductionDrawingProjectRow>(new CommandDefinition(
             """
             SELECT project.id,project.code,project.name,
                    unit.name AS Division,
@@ -50,11 +50,12 @@ public sealed partial class MySqlPdmRepository
                 JOIN document_version v ON v.document_id=d.id
                 JOIN release_package p ON p.id=v.release_package_id
                 WHERE d.project_id=project.id AND d.kind='Drawing' AND d.deleted_at IS NULL AND d.purged_at IS NULL
-                  AND v.status='Released' AND p.state='Published'
+                  AND v.version_status='Released' AND p.state='Published'
                   AND p.release_scope IN ('NonStandardWithDrawing','NonStandardSupplement','LegacyCombined'))
             """,
             new { CompanyId = TenantContext.CompanyId }, cancellationToken: cancellationToken));
-        return projects.ToArray();
+        return projects.Select(project => new ProductionDrawingProject(project.Id, project.Code, project.Name)
+        { Division = project.Division, ProjectManager = project.ProjectManager }).ToArray();
     }
 
     public async Task<DocumentVersion?> FindDocumentVersionAsync(Guid documentId, Guid versionId, CancellationToken cancellationToken)
@@ -721,5 +722,13 @@ public sealed partial class MySqlPdmRepository
         public Guid? SourceVersionId { get; init; } public string? SourceDescription { get; init; } public Guid? ApprovalTaskId { get; init; } public Guid? ReleasePackageId { get; init; }
         public string? PreviewFormat { get; init; } public string? PreviewStorageRelativePath { get; init; } public long? PreviewFileLength { get; init; } public string? PreviewSha256 { get; init; } public string? PreviewSourceSha256 { get; init; }
         public string CreatedBy { get; init; } = string.Empty; public DateTime CreatedAt { get; init; }
+    }
+    private sealed class ProductionDrawingProjectRow
+    {
+        public Guid Id { get; init; }
+        public string Code { get; init; } = string.Empty;
+        public string Name { get; init; } = string.Empty;
+        public string? Division { get; init; }
+        public string? ProjectManager { get; init; }
     }
 }

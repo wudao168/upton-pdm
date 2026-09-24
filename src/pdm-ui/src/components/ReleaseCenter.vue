@@ -1089,7 +1089,7 @@ async function saveItemComment() {
           <header><strong id="pdm-approval-transfer-title">转交审批</strong><button type="button" class="pdm-icon-button" aria-label="关闭转交审批" @click="transferOpen = false">×</button></header>
           <label>选择人员<input v-model.trim="transferQuery" type="search" placeholder="输入姓名或账号筛选" aria-label="筛选审批转交人员"></label>
           <div class="pdm-approval-transfer-list" role="listbox" aria-label="审批转交人员">
-            <button v-for="candidate in filteredTransferCandidates" :key="candidate.username" type="button" :class="{ 'is-selected': transferTarget === candidate.username }" role="option" :aria-selected="transferTarget === candidate.username" @click="transferTarget = candidate.username"><strong>{{ candidate.displayName }}</strong><small>{{ candidate.username }}</small></button>
+            <button v-for="candidate in filteredTransferCandidates" :key="candidate.username" type="button" :class="{ 'is-selected': transferTarget === candidate.username }" role="option" :aria-selected="transferTarget === candidate.username" @click="transferTarget = candidate.username"><strong>{{ candidate.displayName }}</strong></button>
             <p v-if="transferCandidatesLoading">正在加载可转交人员…</p>
             <p v-else-if="transferError" class="pdm-inline-error">{{ transferError }}</p>
             <p v-else-if="!filteredTransferCandidates.length">没有符合条件的可转交人员。</p>

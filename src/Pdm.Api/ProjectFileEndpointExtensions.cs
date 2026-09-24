@@ -72,6 +72,11 @@ public static class ProjectFileEndpointExtensions
             var (actor, role) = CurrentUser(context.User);
             return Results.Ok(MapFile(await service.RenameAsync(projectId, fileId, request.Name, actor, role, cancellationToken)));
         });
+        api.MapPut("/projects/{projectId:guid}/files/{fileId:guid}/description", async (Guid projectId, Guid fileId, UpdateProjectFileDescriptionRequest request, HttpContext context, ProjectFileService service, CancellationToken cancellationToken) =>
+        {
+            var (actor, role) = CurrentUser(context.User);
+            return Results.Ok(MapFile(await service.UpdateDescriptionAsync(projectId, fileId, request.Description, actor, role, cancellationToken)));
+        });
         api.MapPost("/projects/{projectId:guid}/files/{fileId:guid}/move", async (Guid projectId, Guid fileId, MoveProjectEntryRequest request, HttpContext context, ProjectFileService service, CancellationToken cancellationToken) =>
         {
             var (actor, role) = CurrentUser(context.User);
@@ -89,7 +94,7 @@ public static class ProjectFileEndpointExtensions
         });
     }
 
-    private static object MapFile(ProjectFile file) => new { file.Id, file.RootProjectId, file.FolderId, file.FileName, file.CreatedBy, file.CreatedAt, file.UpdatedBy, file.UpdatedAt, file.DeletedAt, file.DeletedBy, CurrentVersion = file.CurrentVersion is null ? null : MapVersion(file.CurrentVersion) };
+    private static object MapFile(ProjectFile file) => new { file.Id, file.RootProjectId, file.FolderId, file.FileName, file.Description, file.CreatedBy, file.CreatedAt, file.UpdatedBy, file.UpdatedAt, file.DeletedAt, file.DeletedBy, CurrentVersion = file.CurrentVersion is null ? null : MapVersion(file.CurrentVersion) };
     private static object MapVersion(ProjectFileVersion version) => new { version.Id, version.ProjectFileId, version.VersionNumber, version.FileName, version.FileLength, version.Sha256, version.UploadedBy, version.UploadedAt, version.Comment };
     private static object MapFolder(ProjectFolder folder) => new { folder.Id, folder.RootProjectId, folder.ParentFolderId, folder.TargetProjectId, folder.FolderKey, folder.TemplateKey, folder.Name, Purpose = folder.Purpose.ToString(), folder.SortOrder, folder.IsSystem, folder.InheritPermissions };
     private static string ContentType(string fileName) => Path.GetExtension(fileName).ToLowerInvariant() switch { ".pdf" => "application/pdf", ".png" => "image/png", ".jpg" or ".jpeg" => "image/jpeg", ".gif" => "image/gif", ".webp" => "image/webp", ".txt" or ".csv" or ".md" => "text/plain; charset=utf-8", ".mp4" => "video/mp4", _ => "application/octet-stream" };

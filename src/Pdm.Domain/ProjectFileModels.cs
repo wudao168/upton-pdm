@@ -25,5 +25,6 @@ public sealed record ProjectFile(
     DateTimeOffset? DeletedAt,
     string? DeletedBy)
 {
+    public string? Description { get; init; }
     public ProjectFileVersion? CurrentVersion { get; init; }
 }

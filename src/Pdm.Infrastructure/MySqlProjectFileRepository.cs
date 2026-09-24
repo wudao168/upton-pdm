@@ -81,6 +81,9 @@ public sealed class MySqlProjectFileRepository : IProjectFileRepository
     public Task<ProjectFile> RenameAsync(Guid fileId, string fileName, string actor, CancellationToken cancellationToken) => UpdateAsync(fileId,
         "UPDATE project_file SET file_name=@Value,updated_by=@Actor,updated_at=@Now WHERE id=@FileId", fileName, actor, cancellationToken);
 
+    public Task<ProjectFile> UpdateDescriptionAsync(Guid fileId, string? description, string actor, CancellationToken cancellationToken) => UpdateAsync(fileId,
+        "UPDATE project_file SET description=@Value,updated_by=@Actor,updated_at=@Now WHERE id=@FileId", description, actor, cancellationToken);
+
     public Task<ProjectFile> MoveAsync(Guid fileId, Guid folderId, string actor, CancellationToken cancellationToken) => UpdateAsync(fileId,
         "UPDATE project_file f INNER JOIN project_folder d ON d.id=@Value AND d.root_project_id=f.root_project_id SET f.folder_id=d.id,f.updated_by=@Actor,f.updated_at=@Now WHERE f.id=@FileId", folderId, actor, cancellationToken);
 
@@ -178,7 +181,7 @@ public sealed class MySqlProjectFileRepository : IProjectFileRepository
         return rows.Select(row => MapVersion(row)!).ToArray();
     }
 
-    private async Task<ProjectFile> UpdateAsync(Guid fileId, string sql, object value, string actor, CancellationToken cancellationToken)
+    private async Task<ProjectFile> UpdateAsync(Guid fileId, string sql, object? value, string actor, CancellationToken cancellationToken)
     {
         await using var connection = await OpenAsync(cancellationToken);
         try
@@ -204,18 +207,19 @@ public sealed class MySqlProjectFileRepository : IProjectFileRepository
         new DateTimeOffset(row.CreatedAt, TimeSpan.Zero), row.UpdatedBy, new DateTimeOffset(row.UpdatedAt, TimeSpan.Zero),
         row.DeletedAt is null ? null : new DateTimeOffset(row.DeletedAt.Value, TimeSpan.Zero), row.DeletedBy)
     {
+        Description = row.Description,
         CurrentVersion = row.VersionId is null ? null : new ProjectFileVersion(row.VersionId.Value, row.Id, row.VersionNumber!.Value, row.VersionFileName!, row.StorageRoot!, row.StorageRelativePath!, row.FileLength!.Value, row.Sha256!, row.UploadedBy!, new DateTimeOffset(row.UploadedAt!.Value, TimeSpan.Zero), row.Comment)
     };
 
     private static ProjectFileVersion? MapVersion(ProjectFileVersionRow? row) => row is null ? null : new(row.Id, row.ProjectFileId, row.VersionNumber, row.FileName, row.StorageRoot, row.StorageRelativePath, row.FileLength, row.Sha256, row.UploadedBy, new DateTimeOffset(row.UploadedAt, TimeSpan.Zero), row.Comment);
 
     private const string Select = """
-        SELECT f.id,f.root_project_id,f.folder_id,f.file_name,f.created_by,f.created_at,f.updated_by,f.updated_at,f.deleted_at,f.deleted_by,
+        SELECT f.id,f.root_project_id,f.folder_id,f.file_name,f.description,f.created_by,f.created_at,f.updated_by,f.updated_at,f.deleted_at,f.deleted_by,
                v.id version_id,v.version_number,v.file_name version_file_name,v.storage_root,v.storage_relative_path,v.file_length,v.sha256,v.uploaded_by,v.uploaded_at,v.comment
           FROM project_file f
           LEFT JOIN project_file_version v ON v.project_file_id=f.id AND v.version_number=(SELECT MAX(v2.version_number) FROM project_file_version v2 WHERE v2.project_file_id=f.id)
         """;
     private const string VersionSelect = "SELECT id,project_file_id,version_number,file_name,storage_root,storage_relative_path,file_length,sha256,uploaded_by,uploaded_at,comment FROM project_file_version";
-    private sealed class ProjectFileRow { public Guid Id { get; init; } public Guid RootProjectId { get; init; } public Guid FolderId { get; init; } public string FileName { get; init; } = string.Empty; public string CreatedBy { get; init; } = string.Empty; public DateTime CreatedAt { get; init; } public string UpdatedBy { get; init; } = string.Empty; public DateTime UpdatedAt { get; init; } public DateTime? DeletedAt { get; init; } public string? DeletedBy { get; init; } public Guid? VersionId { get; init; } public int? VersionNumber { get; init; } public string? VersionFileName { get; init; } public string? StorageRoot { get; init; } public string? StorageRelativePath { get; init; } public long? FileLength { get; init; } public string? Sha256 { get; init; } public string? UploadedBy { get; init; } public DateTime? UploadedAt { get; init; } public string? Comment { get; init; } }
+    private sealed class ProjectFileRow { public Guid Id { get; init; } public Guid RootProjectId { get; init; } public Guid FolderId { get; init; } public string FileName { get; init; } = string.Empty; public string? Description { get; init; } public string CreatedBy { get; init; } = string.Empty; public DateTime CreatedAt { get; init; } public string UpdatedBy { get; init; } = string.Empty; public DateTime UpdatedAt { get; init; } public DateTime? DeletedAt { get; init; } public string? DeletedBy { get; init; } public Guid? VersionId { get; init; } public int? VersionNumber { get; init; } public string? VersionFileName { get; init; } public string? StorageRoot { get; init; } public string? StorageRelativePath { get; init; } public long? FileLength { get; init; } public string? Sha256 { get; init; } public string? UploadedBy { get; init; } public DateTime? UploadedAt { get; init; } public string? Comment { get; init; } }
     private sealed class ProjectFileVersionRow { public Guid Id { get; init; } public Guid ProjectFileId { get; init; } public int VersionNumber { get; init; } public string FileName { get; init; } = string.Empty; public string StorageRoot { get; init; } = string.Empty; public string StorageRelativePath { get; init; } = string.Empty; public long FileLength { get; init; } public string Sha256 { get; init; } = string.Empty; public string UploadedBy { get; init; } = string.Empty; public DateTime UploadedAt { get; init; } public string? Comment { get; init; } }
 }

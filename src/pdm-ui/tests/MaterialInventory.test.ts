@@ -171,7 +171,7 @@ describe('MaterialInventory', () => {
     await wrapper.get('input[aria-label="库存料号"]').setValue('OLD')
     await wrapper.findAll('button').find(button => button.text() === '查询')!.trigger('click')
     await flushPromises()
-    const result = { ...(await api.listMaterialInventory()), items: [{ ...inventoryRow, similarityPercent: 75 }], total: 60 }
+    const result = { ...(await api.listMaterialInventory()), items: [{ ...inventoryRow, similarityPercent: 82, similarityReason: '型号近似；品牌一致' }], total: 60 }
     api.listMaterialInventory.mockResolvedValue(result)
     await wrapper.get('input[aria-label="相似库存规格"]').setValue('60W5')
     wrapper.get('[aria-label="相似库存查询"]').findComponent({ name: 'ElSelect' }).vm.$emit('update:modelValue', '国优')
@@ -179,7 +179,9 @@ describe('MaterialInventory', () => {
     await flushPromises()
     expect(api.listMaterialInventory).toHaveBeenLastCalledWith({ similarSpecification: '60W5', brand: '国优', positiveStockOnly: true, page: 1, pageSize: 50 }, 'token')
     expect(wrapper.text()).toContain('相似查询中')
-    expect(wrapper.text()).toContain('75.0%')
+    expect(wrapper.text()).toContain('82.0%')
+    expect(wrapper.text()).toContain('匹配依据')
+    expect(wrapper.text()).toContain('型号近似；品牌一致')
     await wrapper.get('input[aria-label="相似库存规格"]').setValue('OTHER')
     const pagination = wrapper.findComponent({ name: 'ElPagination' })
     pagination.vm.$emit('update:current-page', 2)

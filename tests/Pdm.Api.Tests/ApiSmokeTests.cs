@@ -1127,6 +1127,10 @@ public sealed class ApiSmokeTests : IClassFixture<PdmApiFactory>
 
             var rename = await client.PatchAsJsonAsync($"/api/projects/{project.Id}/files/{fileId}", new { name = "验收项目资料-已归档.txt" });
             Assert.Equal(HttpStatusCode.OK, rename.StatusCode);
+            var description = await client.PutAsJsonAsync($"/api/projects/{project.Id}/files/{fileId}/description", new { description = "项目验收资料，供调试和交付查阅" });
+            Assert.Equal(HttpStatusCode.OK, description.StatusCode);
+            using var descriptionJson = JsonDocument.Parse(await description.Content.ReadAsStringAsync());
+            Assert.Equal("项目验收资料，供调试和交付查阅", descriptionJson.RootElement.GetProperty("description").GetString());
             var invalidRename = await client.PatchAsJsonAsync($"/api/projects/{project.Id}/files/{fileId}", new { name = "验收项目资料-非法改扩展名.pdf" });
             Assert.Equal(HttpStatusCode.BadRequest, invalidRename.StatusCode);
             var move = await client.PostAsJsonAsync($"/api/projects/{project.Id}/files/{fileId}/move", new { folderId = projectFiles.Id });
@@ -1141,6 +1145,7 @@ public sealed class ApiSmokeTests : IClassFixture<PdmApiFactory>
 
             var audit = await repository.ListAuditAsync("admin", UserRole.Administrator, 200, CancellationToken.None);
             Assert.Contains(audit, item => item.Action == "project.file.upload" && item.EntityId == fileId.ToString());
+            Assert.Contains(audit, item => item.Action == "project.file.description.update" && item.EntityId == fileId.ToString());
             Assert.Contains(audit, item => item.Action == "project.file.restore" && item.EntityId == fileId.ToString());
         }
         finally
