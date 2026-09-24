@@ -236,6 +236,8 @@ internal sealed class BatchPropertyEditItem
     {
         var normalized = NormalizePropertyName(propertyName);
         return IsAlwaysManuallyEditableProperty(normalized)
+            || OperationItem.Node.Kind == CadDocumentKind.Drawing
+                && EditablePropertyNames.Contains(normalized, StringComparer.OrdinalIgnoreCase)
             || EffectivePropertyCardFields.Any(field => string.Equals(
                 NormalizePropertyName(field.EditorPropertyName),
                 normalized,
@@ -684,7 +686,7 @@ internal sealed class BatchPropertyEditDialog : Form
     }
 
     public IReadOnlyList<BatchPropertyEditItem> ChangedItems =>
-        rows.Where(item => item.Selected && item.HasChanges).ToArray();
+        items.Where(item => item.Selected && item.HasChanges).ToArray();
 
     public IReadOnlyList<Guid> SelectedWritebackIds =>
         writebackItems.Where(item => item.Selected).Select(item => item.Id).ToArray();
@@ -929,6 +931,7 @@ internal sealed class BatchPropertyEditDialog : Form
                 throw new InvalidOperationException("请先勾选需要从PLM同步属性的图档。");
             }
             var synchronizedCount = await synchronizePlmProperties(selectedItems);
+            SynchronizeRelatedDrawingsForChangedModels(selectedItems);
             RefreshGridComboBoxValues();
             grid.Refresh();
             propertyCardGrid.Refresh();
@@ -1391,6 +1394,61 @@ internal sealed class BatchPropertyEditDialog : Form
                         StringComparison.OrdinalIgnoreCase));
     }
 
+    private IEnumerable<BatchPropertyEditItem> RelatedDrawingItems(BatchPropertyEditItem modelItem)
+    {
+        if (modelItem?.OperationItem?.Node?.Kind is not (CadDocumentKind.Assembly or CadDocumentKind.Part))
+        {
+            return Array.Empty<BatchPropertyEditItem>();
+        }
+
+        var model = modelItem.OperationItem.Node;
+        var modelStem = Path.GetFileNameWithoutExtension(model.FileName ?? string.Empty);
+        return items.Where(candidate => candidate.OperationItem.Node.Kind == CadDocumentKind.Drawing)
+            .Where(candidate =>
+                model.DocumentId.HasValue
+                    && candidate.OperationItem.Node.RelatedModelDocumentId == model.DocumentId
+                || !string.IsNullOrWhiteSpace(modelStem)
+                    && string.Equals(
+                        Path.GetFileNameWithoutExtension(candidate.FileName),
+                        modelStem,
+                        StringComparison.OrdinalIgnoreCase));
+    }
+
+    private void SynchronizeRelatedDrawings(BatchPropertyEditItem modelItem, string propertyName)
+    {
+        if (modelItem?.OperationItem?.Node?.Kind is not (CadDocumentKind.Assembly or CadDocumentKind.Part))
+        {
+            return;
+        }
+
+        var value = modelItem.PropertyValue(propertyName);
+        foreach (var drawing in RelatedDrawingItems(modelItem))
+        {
+            if (string.Equals(drawing.PropertyValue(propertyName), value, StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            drawing.SetPropertyValue(propertyName, value);
+            if (modelItem.Selected)
+            {
+                drawing.Selected = true;
+            }
+        }
+    }
+
+    private void SynchronizeRelatedDrawingsForChangedModels(IEnumerable<BatchPropertyEditItem> modelItems)
+    {
+        foreach (var model in (modelItems ?? Array.Empty<BatchPropertyEditItem>())
+            .Where(item => item.OperationItem.Node.Kind is CadDocumentKind.Assembly or CadDocumentKind.Part))
+        {
+            foreach (var propertyName in model.ChangedProperties().Select(property => property.Key).ToArray())
+            {
+                SynchronizeRelatedDrawings(model, propertyName);
+            }
+        }
+    }
+
     private void SelectModelsForCheckedDrawings()
     {
         foreach (var drawing in rows.Where(item =>
@@ -1565,6 +1623,7 @@ internal sealed class BatchPropertyEditDialog : Form
                 item.SetPropertyValue(
                     propertyName,
                     grid.Rows[eventArgs.RowIndex].Cells[eventArgs.ColumnIndex].Value?.ToString() ?? string.Empty);
+                SynchronizeRelatedDrawings(item, propertyName);
             }
             UpdateSummary();
         };
@@ -2164,6 +2223,7 @@ internal sealed class BatchPropertyEditDialog : Form
         foreach (var item in applicableRows)
         {
             item.SetPropertyValue(property, value);
+            SynchronizeRelatedDrawings(item, property);
         }
         grid.Refresh();
         UpdateSummary();
@@ -2244,6 +2304,7 @@ internal sealed class BatchPropertyEditDialog : Form
         foreach (var pending in pendingValues)
         {
             pending.Key.SetPropertyValue(targetProperty, pending.Value);
+            SynchronizeRelatedDrawings(pending.Key, targetProperty);
         }
 
         grid.Refresh();
@@ -2398,6 +2459,7 @@ internal sealed class BatchPropertyEditDialog : Form
         }
 
         item.SetPropertyValue(propertyName, normalized);
+        SynchronizeRelatedDrawings(item, propertyName);
         cell.Value = normalized;
         return true;
     }
