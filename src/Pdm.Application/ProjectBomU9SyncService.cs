@@ -32,8 +32,7 @@ public enum ProjectBomU9AutomaticState
     Empty,
     UpToDate,
     Created,
-    Modified,
-    AwaitingConfirmation
+    Modified
 }
 
 public sealed record ProjectBomU9AutomaticResult(
@@ -141,10 +140,10 @@ public sealed class ProjectBomU9SyncService(
             if (!build.ComponentsApproved && preview.Operation == U9BomWriteOperation.Modify)
                 return new(projectId, kind, ProjectBomU9AutomaticState.AwaitingApproval, command.ItemCode,
                     "U9C A1 BOM档案已存在；未写入工作区子件，等待BOM审核发布后再同步。");
-            if (preview.ModifiedComponentCount > 0 || preview.DeletedComponentCount > 0)
-                return new(projectId, kind, ProjectBomU9AutomaticState.AwaitingConfirmation, command.ItemCode,
-                    $"U9C BOM包含修改{preview.ModifiedComponentCount}行、删除{preview.DeletedComponentCount}行，请在BOM总览核对明细后人工确认同步；未执行写入。");
-            if (preview.Operation == U9BomWriteOperation.Modify && preview.AddedComponentCount == 0)
+            if (preview.Operation == U9BomWriteOperation.Modify
+                && preview.AddedComponentCount == 0
+                && preview.ModifiedComponentCount == 0
+                && preview.DeletedComponentCount == 0)
                 return new(projectId, kind, ProjectBomU9AutomaticState.UpToDate, command.ItemCode, "U9C A1 BOM已与PLM一致。");
 
             command = command with { Operation = preview.Operation };
@@ -157,7 +156,7 @@ public sealed class ProjectBomU9SyncService(
                     ? build.ComponentsApproved
                         ? "U9C A1 BOM已按审核发布版本创建并回查确认。"
                         : "U9C A1 BOM档案已创建并回查确认；未写入工作区子件，等待BOM审核发布。"
-                    : $"U9C A1 BOM已追加{preview.AddedComponentCount}项并回查确认。",
+                    : $"U9C A1 BOM已自动同步新增{preview.AddedComponentCount}项、修改{preview.ModifiedComponentCount}项、删除{preview.DeletedComponentCount}项并回查确认。",
                 execution);
         }
         finally

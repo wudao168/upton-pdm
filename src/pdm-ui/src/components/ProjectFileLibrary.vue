@@ -163,21 +163,52 @@ async function loadFiles() {
 }
 
 function chooseFiles() { uploadInput.value?.click() }
+function normalizedFileName(fileName: string) { return fileName.trim().toLocaleLowerCase('zh-CN') }
+function dateTimeSuffix(now = new Date()) {
+  const part = (value: number) => String(value).padStart(2, '0')
+  return `${now.getFullYear()}${part(now.getMonth() + 1)}${part(now.getDate())}-${part(now.getHours())}${part(now.getMinutes())}${part(now.getSeconds())}`
+}
+function fileWithDateSuffix(file: File, usedNames: Set<string>) {
+  const extensionIndex = file.name.lastIndexOf('.')
+  const baseName = extensionIndex > 0 ? file.name.slice(0, extensionIndex) : file.name
+  const extension = extensionIndex > 0 ? file.name.slice(extensionIndex) : ''
+  const suffix = dateTimeSuffix()
+  let sequence = 1
+  let fileName = `${baseName}_${suffix}${extension}`
+  while (usedNames.has(normalizedFileName(fileName))) {
+    sequence += 1
+    fileName = `${baseName}_${suffix}-${sequence}${extension}`
+  }
+  return new globalThis.File([file], fileName, { type: file.type, lastModified: file.lastModified })
+}
 async function handleFiles(event: Event) {
   const input = event.target as HTMLInputElement
   const selected = [...(input.files ?? [])]
   input.value = ''
-  for (const file of selected) {
-    if (projectFiles.value.some(item => !item.deletedAt && item.fileName.localeCompare(file.name, undefined, { sensitivity: 'accent' }) === 0)) {
-      try { await ElMessageBox.confirm(`“${file.name}”已存在，继续上传将创建不可变的新版本。`, '确认创建新版本', { confirmButtonText: '创建新版本', cancelButtonText: '跳过' }) }
+  const usedNames = new Set(projectFiles.value
+    .filter(item => !item.deletedAt && item.folderId === selectedFolderId.value)
+    .map(item => normalizedFileName(item.fileName)))
+  for (const originalFile of selected) {
+    let file = originalFile
+    if (usedNames.has(normalizedFileName(file.name))) {
+      const renamedFile = fileWithDateSuffix(file, usedNames)
+      try { await ElMessageBox.confirm(`“${file.name}”已存在，将保存为“${renamedFile.name}”，原文件不会被覆盖。`, '检测到同名文件', { confirmButtonText: '按新名称上传', cancelButtonText: '跳过' }) }
       catch { continue }
+      file = renamedFile
     }
+    const reservedName = normalizedFileName(file.name)
+    usedNames.add(reservedName)
     uploadController = new AbortController(); uploadingName.value = file.name; uploadProgress.value = 0
+    let uploaded = false
     try {
       await uploadProjectFile(props.projectId, selectedFolderId.value, file, props.token, '', value => { uploadProgress.value = value }, uploadController.signal)
+      uploaded = true
       ElMessage.success(`${file.name} 已上传`); await loadFiles()
     } catch (error) { if ((error as Error).name !== 'AbortError') ElMessage.error(error instanceof Error ? error.message : '文件上传失败') }
-    finally { uploadController = null; uploadingName.value = ''; uploadProgress.value = 0 }
+    finally {
+      if (!uploaded) usedNames.delete(reservedName)
+      uploadController = null; uploadingName.value = ''; uploadProgress.value = 0
+    }
   }
 }
 function cancelUpload() { uploadController?.abort(); ElMessage.info('正在取消上传') }

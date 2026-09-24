@@ -9494,6 +9494,12 @@ public sealed class PdmAddin : ISwAddin
             .ThenBy(candidate => candidate.Node.Kind == CadDocumentKind.Assembly ? 1 : 0)
             .ThenBy(candidate => candidate.Node.FileName, StringComparer.OrdinalIgnoreCase)
             .ToArray();
+        // A new drawing needs its related model's PLM id during registration. Register every
+        // model first, while preserving the child-first order for the later check-in phase.
+        var registrationItems = orderedItems
+            .OrderBy(candidate => BatchCheckInRegistrationOrderRule.Priority(
+                candidate.Node.Kind == CadDocumentKind.Drawing))
+            .ToArray();
 
         try
         {
@@ -9502,15 +9508,15 @@ public sealed class PdmAddin : ISwAddin
             var submissionPaths = new HashSet<string>(
                 orderedItems.Select(item => item.Node?.FullPath).Where(path => !string.IsNullOrWhiteSpace(path)),
                 StringComparer.OrdinalIgnoreCase);
-            for (var index = 0; index < orderedItems.Length; index++)
+            for (var index = 0; index < registrationItems.Length; index++)
             {
                 cancellationToken.ThrowIfCancellationRequested();
-                var item = orderedItems[index];
+                var item = registrationItems[index];
                 var node = item.Node;
                 try
                 {
                     PdmApiClient.ValidateCheckInReferences(node, submissionPaths);
-                    reportProgress?.Invoke(index, orderedItems.Length, node?.FileName, "阶段2/4：正在准备文件权限…");
+                    reportProgress?.Invoke(index, registrationItems.Length, node?.FileName, "阶段2/4：正在准备文件权限…");
                     if (await PrepareBatchCheckInPermissionAsync(item, projectId, cancellationToken, registrationDecisions))
                         result.PreparedPermissions++;
                     ValidateBatchCheckInNode(node);

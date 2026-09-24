@@ -512,7 +512,7 @@ public sealed class MaterialService(
         _ => null
     };
 
-    public async Task<(MaterialCodeApplication Application, PdmMaterial? Material, MaterialSyncTask? Task)> DecideMaterialCodeApplicationAsync(Guid applicationId, long expectedRowVersion, bool approved, string? comment, string actor, UserRole role, CancellationToken cancellationToken)
+    public async Task<(MaterialCodeApplication Application, PdmMaterial? Material, MaterialSyncTask? Task)> DecideMaterialCodeApplicationAsync(Guid applicationId, long expectedRowVersion, bool approved, string? comment, string actor, UserRole role, CancellationToken cancellationToken, string? categoryCode = null)
     {
         var approvalSettings = (await repository.GetSystemSettingsAsync(cancellationToken)).MaterialCodeApproval;
         if (role != UserRole.Administrator && !approvalSettings.ApproverRoleCodes.Contains(role.ToString(), StringComparer.OrdinalIgnoreCase))
@@ -522,7 +522,7 @@ public sealed class MaterialService(
         if (application.BomHeaderKind is not null && application.BomItemId is null)
             throw new PdmRuleException("BOM表头料号由系统自动审批，请在BOM多级总览查看进度或重试，不能人工批准或驳回。");
         return await DecideMaterialCodeApplicationCoreAsync(
-            application, expectedRowVersion, approved, comment, actor, false, cancellationToken);
+            application, expectedRowVersion, approved, comment, actor, false, cancellationToken, categoryCode);
     }
 
     public async Task<IReadOnlyList<(MaterialCodeApplication Application, PdmMaterial? Material, MaterialSyncTask? Task)>>
@@ -587,7 +587,8 @@ public sealed class MaterialService(
         string? comment,
         string actor,
         bool automaticBomHeaderApproval,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        string? categoryCode = null)
     {
         var normalizedComment = comment?.Trim();
         if (!approved && string.IsNullOrWhiteSpace(normalizedComment))
@@ -639,7 +640,7 @@ public sealed class MaterialService(
         var item = await repository.FindBomItemAsync(application.ProjectId, bomItemId, cancellationToken)
             ?? throw new PdmNotFoundException("申请对应的BOM物料不存在。");
         if (item.Kind != BomKind.Standard) throw new PdmRuleException("只有标准件使用料号申请审批。");
-        var material = await CreateFromBomCoreAsync(new(application.ProjectId, bomItemId), actor, cancellationToken);
+        var material = await CreateFromBomCoreAsync(new(application.ProjectId, bomItemId), actor, cancellationToken, categoryCode);
         MaterialSyncTask? materialSyncTask = null;
         if (material.ApprovalStatus == MaterialApprovalStatus.Draft)
             (material, materialSyncTask) = await ApproveCoreAsync(material.Id, material.RowVersion, actor, cancellationToken);
@@ -766,7 +767,7 @@ public sealed class MaterialService(
         return await CreateFromBomCoreAsync(command, actor, cancellationToken);
     }
 
-    private async Task<PdmMaterial> CreateFromBomCoreAsync(CreateMaterialFromBomCommand command, string actor, CancellationToken cancellationToken)
+    private async Task<PdmMaterial> CreateFromBomCoreAsync(CreateMaterialFromBomCommand command, string actor, CancellationToken cancellationToken, string? categoryCode = null)
     {
         var item = await repository.FindBomItemAsync(command.ProjectId, command.BomItemId, cancellationToken)
             ?? throw new PdmNotFoundException("BOM物料不存在。");
@@ -789,7 +790,7 @@ public sealed class MaterialService(
             _ => throw new PdmRuleException("机械BOM物料必须先明确分类为标准件、非标件或电气件。")
         };
         var rule = await RequireEnabledCategoryRuleAsync(kind, cancellationToken);
-        var category = await RequireCreatableCategoryAsync(rule.U9CategoryCode, kind, cancellationToken);
+        var category = await RequireCreatableCategoryAsync(categoryCode ?? rule.U9CategoryCode, kind, cancellationToken);
         decimal? weight = decimal.TryParse(item.Weight, NumberStyles.Number, CultureInfo.InvariantCulture, out var parsedWeight)
             ? parsedWeight
             : null;

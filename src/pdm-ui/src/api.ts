@@ -838,8 +838,8 @@ export async function listMaterialCodeApplications(token: string, projectId?: st
   })
 }
 
-export function decideMaterialCodeApplication(applicationId: string, expectedRowVersion: number, approved: boolean, comment: string, token: string): Promise<MaterialCodeDecisionResult> {
-  return requestJson(`/api/material-code/applications/${applicationId}/decision`, { method: 'POST', body: JSON.stringify({ expectedRowVersion, approved, comment }) }, token)
+export function decideMaterialCodeApplication(applicationId: string, expectedRowVersion: number, approved: boolean, comment: string, token: string, categoryCode?: string): Promise<MaterialCodeDecisionResult> {
+  return requestJson(`/api/material-code/applications/${applicationId}/decision`, { method: 'POST', body: JSON.stringify({ expectedRowVersion, approved, comment, categoryCode }) }, token)
 }
 
 export function approveMaterial(materialId: string, expectedRowVersion: number, token: string): Promise<{ material: PdmMaterial; task: MaterialSyncTask }> {
@@ -1373,7 +1373,7 @@ export async function getBomSourceData(projectId: string, token: string): Promis
   return items.map(mapBomItem)
 }
 
-export function resolveBomItem(projectId: string, itemId: string, action: 'classify' | 'retain' | 'remove', targetKind: BomKind | undefined, token: string): Promise<BomItem[]> {
+export function resolveBomItem(projectId: string, itemId: string, action: 'classify' | 'retain' | 'remove' | 'merge-source', targetKind: BomKind | undefined, token: string): Promise<BomItem[]> {
   return requestJson(`/api/projects/${projectId}/boms/items/${itemId}/resolve`, {
     method: 'POST', body: JSON.stringify({ action, targetKind }),
   }, token)

@@ -5,7 +5,8 @@ param(
     [string]$ReleaseVersion = '',
     [string]$ReleaseNote = '',
     [switch]$ServerOnly,
-    [switch]$SkipTests
+    [switch]$SkipTests,
+    [switch]$SkipUiBuild
 )
 
 $ErrorActionPreference = 'Stop'
@@ -239,9 +240,13 @@ try {
     if ($LASTEXITCODE -ne 0) {
         throw 'Frontend dependency restore failed.'
     }
-    pnpm.cmd ui:build
-    if ($LASTEXITCODE -ne 0) {
-        throw 'Frontend production build failed.'
+    if ($SkipUiBuild) {
+        Write-Warning 'Frontend build skipped; reusing the existing verified production UI bundle.'
+    } else {
+        pnpm.cmd ui:build
+        if ($LASTEXITCODE -ne 0) {
+            throw 'Frontend production build failed.'
+        }
     }
     # Local deployments use the locked dependency graph and may run on an isolated factory network.
     # NuGet vulnerability auditing is a separate online gate; do not let its network call block deployment.
@@ -251,15 +256,14 @@ try {
         throw 'Solution restore failed.'
     }
     if (-not $ServerOnly) {
-        & $dotnetPath build Pdm.slnx --configuration Release --no-restore --nologo --disable-build-servers -m:1
+        & $dotnetPath build Pdm.slnx --configuration Release --no-restore --nologo --disable-build-servers -m:1 -p:NuGetAudit=false
         if ($LASTEXITCODE -ne 0) {
             throw 'Release build failed.'
         }
 
         if ($SkipTests) {
             Write-Warning 'Release test stage skipped by request.'
-        }
-        else {
+        } else {
             & $dotnetPath test Pdm.slnx --configuration Release --no-build --no-restore --nologo --disable-build-servers
             if ($LASTEXITCODE -ne 0) {
                 throw 'Release tests failed.'
@@ -392,19 +396,24 @@ $shortcutIconPath = Join-Path $localRoot 'client\UPTON-PLM.ico'
 if (-not (Test-Path -LiteralPath $shortcutIconPath)) {
     throw "UPLM desktop icon was not found: $shortcutIconPath"
 }
-$shell = New-Object -ComObject WScript.Shell
-$isNewShortcut = -not (Test-Path -LiteralPath $shortcutPath)
-$shortcut = $shell.CreateShortcut($shortcutPath)
-if (-not $isUpgrade -or $isNewShortcut) {
-    $shortcut.TargetPath = $clientPath
-    $shortcut.WorkingDirectory = Join-Path $localRoot 'client'
-    $shortcut.Description = 'UPLM engineering client'
+try {
+    $shell = New-Object -ComObject WScript.Shell
+    $isNewShortcut = -not (Test-Path -LiteralPath $shortcutPath)
+    $shortcut = $shell.CreateShortcut($shortcutPath)
+    if (-not $isUpgrade -or $isNewShortcut) {
+        $shortcut.TargetPath = $clientPath
+        $shortcut.WorkingDirectory = Join-Path $localRoot 'client'
+        $shortcut.Description = 'UPLM engineering client'
+    }
+    $shortcut.IconLocation = "$shortcutIconPath,0"
+    $shortcut.Save()
+    if (-not $isUpgrade) {
+        if (Test-Path -LiteralPath $previousShortcutPath) { Remove-Item -LiteralPath $previousShortcutPath -Force }
+        if (Test-Path -LiteralPath $legacyShortcutPath) { Remove-Item -LiteralPath $legacyShortcutPath -Force }
+    }
 }
-$shortcut.IconLocation = "$shortcutIconPath,0"
-$shortcut.Save()
-if (-not $isUpgrade) {
-    if (Test-Path -LiteralPath $previousShortcutPath) { Remove-Item -LiteralPath $previousShortcutPath -Force }
-    if (Test-Path -LiteralPath $legacyShortcutPath) { Remove-Item -LiteralPath $legacyShortcutPath -Force }
+catch {
+    Write-Warning "Desktop shortcut was not updated: $($_.Exception.Message)"
 }
 
 $receipt = [ordered]@{

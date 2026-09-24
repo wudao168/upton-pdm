@@ -31,6 +31,7 @@ const props = defineProps<{
   pending: boolean
   token: string
   onUpdateMainStaffing: (projectId: string, input: MainProjectStaffingInput) => Promise<ProjectSummary>
+  onUpdateDesigners: (projectId: string, designers: string[]) => Promise<ProjectSummary>
   onUpdatePhaseOwners: (projectId: string, phaseOwners: ProjectPhaseOwners) => Promise<ProjectSummary>
 }>()
 
@@ -51,6 +52,7 @@ const procurementTracking = ref<ProjectProcurementTrackingResult | null>(null)
 let overviewRequestId = 0
 const staffingForm = reactive<MainProjectStaffingInput>({ primaryProjectManager: '', collaborativeProjectManagers: [], designLeads: [] })
 const phaseOwnerDraft = reactive<ProjectPhaseOwners>({})
+const designerDraft = ref<string[]>([])
 
 const phaseOwnerDefinitions: Array<{ key: ProjectPhaseOwnerKey; label: string; detail: string; preferredRoles: string[] }> = [
   { key: 'StandardProcurement', label: '标准件采购', detail: '标准件询价、下单与到货协调', preferredRoles: ['ProcurementSpecialist', 'ProcurementManager', 'SupplyChain'] },
@@ -110,6 +112,7 @@ const phaseOwnerCandidates = computed(() => {
     })
     .sort((left, right) => left.divisionName.localeCompare(right.divisionName, 'zh-CN') || left.displayName.localeCompare(right.displayName, 'zh-CN'))
 })
+const executionEngineerCandidates = computed(() => phaseOwnerCandidates.value.filter(user => [user.role, ...(user.roles ?? [])].some(role => ['Engineer', 'ElectricalEngineer', 'CommissioningEngineer', 'HardwareEngineer', 'MechanicalManager', 'TechnicalAssistant', 'ProcessReviewer', 'Approver'].includes(role))))
 
 function preferredPhaseCandidates(preferredRoles: string[]) {
   return phaseOwnerCandidates.value.filter(user => [user.role, ...(user.roles ?? [])].some(role => preferredRoles.includes(role)))
@@ -154,6 +157,7 @@ function openStaffingDialog() {
 
 function openPhaseOwnerDrawer() {
   for (const phase of phaseOwnerDefinitions) phaseOwnerDraft[phase.key] = activeProject.value.phaseOwners?.[phase.key] ?? ''
+  designerDraft.value = [...activeProject.value.designers]
   phaseOwnerDrawerOpen.value = true
 }
 
@@ -172,9 +176,10 @@ async function saveMainStaffing() {
 
 async function savePhaseOwners() {
   try {
+    await props.onUpdateDesigners(activeProject.value.id, [...designerDraft.value])
     await props.onUpdatePhaseOwners(activeProject.value.id, { ...phaseOwnerDraft })
     phaseOwnerDrawerOpen.value = false
-    ElMessage.success('阶段负责人已保存')
+    ElMessage.success('执行工程师和阶段负责人已保存')
   } catch (error) { ElMessage.error(error instanceof Error ? error.message : '阶段负责人保存失败') }
 }
 
@@ -452,8 +457,15 @@ async function copyLocation(label: string, value: string) {
     </el-dialog>
 
     <el-drawer v-model="phaseOwnerDrawerOpen" class="pdm-phase-owner-drawer" :title="`配置项目阶段负责人 · ${project.code}`" size="560px" append-to-body>
-      <div class="pdm-phase-owner-intro"><strong>按交付阶段明确单一负责人</strong><span>未分配的阶段可暂时留空，后续在此统一补充。</span></div>
+      <div class="pdm-phase-owner-intro"><strong>配置执行工程师与各交付阶段负责人</strong><span>执行工程师可多选；未分配的阶段可暂时留空，后续在此统一补充。</span></div>
       <div class="pdm-phase-owner-list" aria-label="项目阶段负责人">
+        <label class="pdm-phase-owner-row pdm-phase-owner-row--engineers">
+          <span class="pdm-phase-owner-row__index">0</span>
+          <span class="pdm-phase-owner-row__copy"><strong>执行工程师</strong><small>负责项目设计执行，可多选</small></span>
+          <el-select v-model="designerDraft" multiple filterable clearable placeholder="选择执行工程师" aria-label="执行工程师">
+            <el-option v-for="user in executionEngineerCandidates" :key="user.username" :label="`${user.displayName} · ${user.divisionName}`" :value="user.username" />
+          </el-select>
+        </label>
         <label v-for="(phase, index) in phaseOwnerDefinitions" :key="phase.key" class="pdm-phase-owner-row">
           <span class="pdm-phase-owner-row__index">{{ index + 1 }}</span>
           <span class="pdm-phase-owner-row__copy"><strong>{{ phase.label }}</strong><small>{{ phase.detail }}</small></span>

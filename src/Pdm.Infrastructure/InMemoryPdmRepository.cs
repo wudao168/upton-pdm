@@ -494,12 +494,15 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
                 : oldProjectSequence;
             if (organizationChanged) ReleaseNumber(releasedProjectNumbers, oldOrganization.Id, oldProjectSequence);
 
+            var existingCustomerSequence = project.CustomerProjectSequence
+                ?? TryRecoverCustomerProjectSequence(project.DeviceModel, project.CustomerCode);
             var oldCustomerKey = (oldOrganization.Id, project.CustomerCode!.ToUpperInvariant());
             var newCustomerKey = (organization.Id, customer.Code.ToUpperInvariant());
             var customerSequence = customerChanged
                 ? ReserveNumber(customerCounters, releasedCustomerNumbers, newCustomerKey, 999)
-                : project.CustomerProjectSequence!.Value;
-            if (customerChanged) ReleaseNumber(releasedCustomerNumbers, oldCustomerKey, project.CustomerProjectSequence!.Value);
+                : existingCustomerSequence ?? throw new PdmRuleException("项目缺少客户流水号，且无法从设备型号恢复。请重新选择客户后保存。");
+            if (customerChanged && existingCustomerSequence is not null)
+                ReleaseNumber(releasedCustomerNumbers, oldCustomerKey, existingCustomerSequence.Value);
 
             var rootCode = codeChanged ? $"{projectTypeCode}{organization.ProjectCompanyCode}{projectSequence:D5}" : project.Code;
             var tree = projects.Values.Where(item => item.Id == project.Id || item.RootProjectId == project.Id).ToArray();
@@ -891,6 +894,18 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
         return segments.Length == 0
             ? "00"
             : string.Join('-', segments.Select(segment => int.TryParse(segment, out var value) ? value.ToString("D2") : segment));
+    }
+
+    private static int? TryRecoverCustomerProjectSequence(string? deviceModel, string? customerCode)
+    {
+        if (string.IsNullOrWhiteSpace(deviceModel) || string.IsNullOrWhiteSpace(customerCode)) return null;
+        var marker = $"-{customerCode}-";
+        var start = deviceModel.IndexOf(marker, StringComparison.OrdinalIgnoreCase);
+        if (start < 0) return null;
+        start += marker.Length;
+        var end = deviceModel.IndexOf('-', start);
+        if (end < 0 || !int.TryParse(deviceModel[start..end], out var sequence) || sequence is < 1 or > 999) return null;
+        return sequence;
     }
 
     private IReadOnlyList<string> ResizeSerialNumbers(Project project, ProjectOrganization organization, int quantity)

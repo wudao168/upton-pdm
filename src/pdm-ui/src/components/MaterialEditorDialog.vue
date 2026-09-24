@@ -10,6 +10,7 @@ const props = withDefaults(defineProps<{
   editingId?: string | null
   form: SaveMaterialInput
   categories: MaterialCategory[]
+  brands?: string[]
   materialCodePlaceholder: string
   attachments: MaterialAttachment[]
   saving: boolean
@@ -84,7 +85,7 @@ function chooseAttachment(kind: MaterialAttachmentKind) {
         <el-form-item label="计量单位" required><el-select v-model="form.unitCode" :disabled="u9FieldsLocked" filterable placeholder="请选择U9C计量单位"><el-option v-for="unit in u9UnitOptions" :key="unit.code" :label="`${unit.code} ${unit.name}`" :value="unit.code" /></el-select></el-form-item>
         <el-form-item label="规格/型号"><el-input v-model="form.specification" :disabled="u9FieldsLocked" /></el-form-item>
         <el-form-item label="材质"><el-input v-model="form.material" :disabled="u9FieldsLocked" /></el-form-item>
-        <el-form-item label="品牌"><el-input v-model="form.brand" :disabled="u9FieldsLocked" /></el-form-item>
+        <el-form-item label="品牌"><el-select v-model="form.brand" :disabled="u9FieldsLocked" filterable allow-create default-first-option clearable placeholder="可输入或选择品牌"><el-option v-for="brand in brands" :key="brand" :label="brand" :value="brand" /></el-select></el-form-item>
         <el-form-item label="表面处理"><el-input v-model="form.surfaceTreatment" :disabled="u9FieldsLocked" /></el-form-item>
         <el-form-item label="重量"><el-input-number v-model="form.weight" :disabled="u9FieldsLocked" :min="0" :precision="6" /></el-form-item>
         <el-form-item label="参考价格"><el-input-number v-model="form.referencePrice" :min="0" :precision="2" :step="10" controls-position="right" /></el-form-item>

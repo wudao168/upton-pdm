@@ -26,6 +26,7 @@ const emit = defineEmits<{ requestHandled: [] }>()
 const displayUserName = useUserDisplayName()
 
 const informationSources = ['技术协议', '技术方案', '内部评审', '客户评审']
+const customCategoryName = '自定义'
 const emptyCatalog = (): ValidationCheckCatalog => ({ categories: [], items: [] })
 const loading = ref(false)
 const view = ref<'summary' | 'detail'>('summary')
@@ -223,7 +224,11 @@ function hydratePlan(nextPlan: ProjectValidationPlan | null) {
     ? (props.currentDisplayName || displayUserName(props.currentUsername, props.currentUsername))
     : displayUserName(preparedByUsername, '')
   planDate.value = nextPlan?.effectiveAt?.slice(0, 10) || nextPlan?.validationDate || currentShanghaiDate()
-  rows.value = (nextPlan?.items ?? []).map(item => ({ ...item })).sort((left, right) => left.sortOrder - right.sortOrder)
+  rows.value = (nextPlan?.items ?? []).map(item => ({
+    ...item,
+    categoryName: item.catalogItemId == null ? customCategoryName : item.categoryName,
+  })).sort((left, right) => left.sortOrder - right.sortOrder)
+  moveCustomRowsToTop()
   persistedItemIds.value = new Set(nextPlan?.items.map(item => item.id) ?? [])
 }
 
@@ -270,15 +275,14 @@ function appendSelectedItems() {
       sortOrder: rows.value.length + 1,
     })
   }
-  normalizeRowOrder()
+  moveCustomRowsToTop()
   selectionOpen.value = false
 }
 
-function addManualRow(afterIndex: number) {
+function addCustomRow() {
   if (!canAdd.value) return
-  const insertAt = canAppend.value ? rows.value.length : afterIndex + 1
-  rows.value.splice(insertAt, 0, {
-    id: createClientId(), catalogCategoryId: null, catalogItemId: null, categoryName: '人工项', validationContent: '',
+  rows.value.unshift({
+    id: createClientId(), catalogCategoryId: null, catalogItemId: null, categoryName: customCategoryName, validationContent: '',
     validationStandard: null, informationSource: '内部评审', validationDate: null, result: null, reviewer: null, responsiblePerson: null, remark: null, sortOrder: rows.value.length + 1,
   })
   normalizeRowOrder()
@@ -389,6 +393,11 @@ function serializePlanItem(item: ProjectValidationPlanItem, index: number) {
 
 function normalizeRowOrder() {
   rows.value.forEach((item, index) => { item.sortOrder = index + 1 })
+}
+
+function moveCustomRowsToTop() {
+  rows.value.sort((left, right) => Number(right.catalogItemId == null) - Number(left.catalogItemId == null) || left.sortOrder - right.sortOrder)
+  normalizeRowOrder()
 }
 
 async function savePlan() {
@@ -793,6 +802,7 @@ function approvalTaskStatus(task: ProjectValidationPlan['approvalTasks'][number]
         <button type="button" class="pdm-secondary-action validation-plan__upload-action" :disabled="!plan || normalizedState !== 'Effective' || uploading" title="验证计划审批完成并生效后可上传" @click="planFileInput?.click()"><FileUp :size="14" />上传计划</button>
         <button type="button" class="pdm-secondary-action validation-plan__upload-action" :disabled="!plan || normalizedState !== 'Effective' || uploading" title="验证计划审批完成并生效后可上传" @click="evidenceFileInput?.click()"><Paperclip :size="14" />上传附件</button>
         <button type="button" class="pdm-secondary-action" :disabled="!canAdd" @click="openSelection"><Plus :size="14" />选取内容</button>
+        <button type="button" class="pdm-secondary-action" :disabled="!canAdd" aria-label="添加自定义项" @click="addCustomRow"><Plus :size="14" />添加自定义</button>
         <button type="button" class="pdm-secondary-action" :disabled="!plan || dirty || exporting" @click="exportPlan"><Download :size="14" />{{ exporting ? '导出中…' : '导出Excel' }}</button>
         <button v-if="normalizedState === 'Effective'" type="button" class="pdm-secondary-action" :disabled="!canEdit" @click="createRevision"><RotateCcw :size="14" />创建新版本</button>
         <button v-if="editable || canAppend" type="button" class="pdm-primary-action" :disabled="saving || loading || (canAppend && !appendedRows.length)" @click="savePlan"><Save :size="14" />{{ saving ? '保存中…' : canAppend ? '保存新增' : '保存' }}</button>
@@ -828,12 +838,12 @@ function approvalTaskStatus(task: ProjectValidationPlan['approvalTasks'][number]
             <td><input v-model="row.result" :disabled="!isRowEditable(row)" maxlength="1500" placeholder="填写结果"></td>
             <td><input v-model="row.reviewer" :disabled="!isRowEditable(row)" maxlength="100" placeholder="审核人"></td>
             <td><input v-model="row.remark" :disabled="!isRowEditable(row)" maxlength="1000" placeholder="备注"></td>
-            <td><div class="validation-plan__row-actions"><span v-if="editable" class="validation-plan__drag-handle" role="button" tabindex="0" :aria-label="`拖动第 ${index + 1} 行排序`" :title="`按住拖动第 ${index + 1} 行排序`" @pointerdown="startRowPointerDrag(index, $event)">⠿</span><button type="button" :disabled="!canAdd" title="添加人工项" aria-label="添加人工项" @click="addManualRow(index)"><Plus :size="14" /></button><button type="button" :disabled="!canRemoveRow(row)" title="移除" @click="removeRow(index)"><Trash2 :size="14" /></button></div></td>
+            <td><div class="validation-plan__row-actions"><span v-if="editable" class="validation-plan__drag-handle" role="button" tabindex="0" :aria-label="`拖动第 ${index + 1} 行排序`" :title="`按住拖动第 ${index + 1} 行排序`" @pointerdown="startRowPointerDrag(index, $event)">⠿</span><button type="button" :disabled="!canAdd" title="添加自定义项" aria-label="添加自定义项" @click="addCustomRow"><Plus :size="14" /></button><button type="button" :disabled="!canRemoveRow(row)" title="移除" @click="removeRow(index)"><Trash2 :size="14" /></button></div></td>
           </tr>
         </tbody>
       </table>
     </div>
-    <div v-else class="validation-plan__empty"><ListChecks :size="42" /><h3>当前项目还没有验证检查项</h3><p>按分类从全局检查项库选取，或直接添加人工项。</p><div v-if="canAdd" class="validation-plan__actions"><button type="button" class="pdm-primary-action" @click="openSelection">选取内容</button><button type="button" class="pdm-secondary-action" @click="addManualRow(-1)"><Plus :size="14" />添加人工项</button></div></div>
+    <div v-else class="validation-plan__empty"><ListChecks :size="42" /><h3>当前项目还没有验证检查项</h3><p>按分类从全局检查项库选取，或直接添加自定义项。</p><div v-if="canAdd" class="validation-plan__actions"><button type="button" class="pdm-primary-action" @click="openSelection">选取内容</button><button type="button" class="pdm-secondary-action" aria-label="添加自定义项" @click="addCustomRow"><Plus :size="14" />添加自定义</button></div></div>
     <section v-if="plan?.approvalTasks?.length || plan?.attachments?.length || executionRecords.length" class="validation-plan__records">
       <div v-if="plan?.approvalTasks?.length"><strong>审批记录</strong><span v-for="task in plan.approvalTasks" :key="task.id">{{ task.stepOrder }}. {{ task.stepName }} · {{ displayUserName(task.assignee, task.assignee) }} · {{ approvalTaskStatus(task) }}</span></div>
       <div v-if="plan?.attachments?.length"><strong>归档文件（验收资料 / 验证计划）</strong><div v-for="file in plan.attachments" :key="file.id" class="validation-plan__attachment-row"><button type="button" class="validation-plan__attachment" :title="`SHA-256 ${file.sha256}`" @click="downloadAttachment(file.id, file.originalFileName)">{{ file.kind === 'PlanDocument' || file.kind === 0 ? '验证计划' : '佐证附件' }} · {{ file.originalFileName }} · V{{ file.fileVersion }} · {{ fileSize(file.fileLength) }} · {{ displayUserName(file.uploadedBy, file.uploadedBy) }}</button><button v-if="normalizedState === 'Effective' && isRecognizableAttachment(file)" type="button" class="pdm-text-action" :disabled="recognizing" @click="recognizeAttachment(file)">{{ recognizing ? '识别中…' : '识别结果' }}</button></div></div>

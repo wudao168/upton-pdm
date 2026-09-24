@@ -358,6 +358,51 @@ describe('MaterialManagement', () => {
     wrapper.unmount()
   })
 
+  it('标准化审批料号时默认0102分类并将选择的分类提交给后端', async () => {
+    const confirm = vi.spyOn(ElMessageBox, 'confirm').mockResolvedValue('confirm' as never)
+    const standardCategory = {
+      code: '0103', name: '机械外购件（标准化调整）', parentCode: '01', pdmKind: 'Standard', defaultSupplyMode: 'Purchase',
+      allowCreate: true, isVisible: true, isActive: true, numberPrefix: '0103', sequenceLength: 7, counterScope: '0103', sortOrder: 5, updatedBy: 'system', updatedAt: '2026-08-17T00:00:00Z', rowVersion: 1,
+    }
+    api.listMaterialCategories.mockImplementation(async () => [
+      ...(await Promise.resolve([{ code: '0102', name: '机械外购件', parentCode: '01', pdmKind: 'Standard', defaultSupplyMode: 'Purchase', allowCreate: true, isVisible: true, isActive: true, numberPrefix: '0102', sequenceLength: 7, counterScope: '0102', sortOrder: 3, updatedBy: 'system', updatedAt: '2026-08-17T00:00:00Z', rowVersion: 1 }])),
+      standardCategory,
+    ])
+    api.listMaterialCodeApplications.mockResolvedValue([{
+      id: 'application-1', projectId: 'project-1', applicationType: 'StandardBomItem', status: 'Pending', requestedBy: 'engineer', requestedAt: '2026-09-24T00:00:00Z', rowVersion: 3,
+      bomItemId: 'bom-1', bomItemName: '标准化调整分类的接头', specification: 'PTL6M5A', brand: 'AIRTAC', workflowState: 'PendingApproval',
+    }])
+    api.decideMaterialCodeApplication.mockResolvedValue({ application: { id: 'application-1' }, material: null, task: null })
+    const wrapper = mount(MaterialManagement, { attachTo: document.body, props: { token: 'token', canEdit: true, canApprove: false, canDecideMaterialCode: true, canManageIntegration: false }, global: { plugins: [ElementPlus] } })
+    await flushPromises()
+    await wrapper.get('#tab-code-approvals').trigger('click')
+    await flushPromises()
+
+    const categorySelect = wrapper.findAllComponents({ name: 'ElSelect' }).find(select => select.classes().includes('material-code-approval-category'))!
+    expect(categorySelect.props('modelValue')).toBe('0102')
+    expect(categorySelect.props('filterable')).toBe(true)
+    categorySelect.vm.$emit('update:modelValue', '0103')
+    await flushPromises()
+    await wrapper.get('.material-code-approval-table--pending').findAll('button').find(button => button.text() === '批准')!.trigger('click')
+    await flushPromises()
+    expect(api.decideMaterialCodeApplication).toHaveBeenCalledWith('application-1', 3, true, '', 'token', '0103')
+    wrapper.unmount()
+    confirm.mockRestore()
+  })
+
+  it('新增料品的品牌提供可筛选下拉选项并允许录入新品牌', async () => {
+    const wrapper = mount(MaterialManagement, { props: { token: 'token', canEdit: true, canApprove: true, canManageIntegration: false }, global: { plugins: [ElementPlus] } })
+    await flushPromises()
+    await wrapper.findAll('button').find(button => button.text() === '新增料品')!.trigger('click')
+    const editor = wrapper.findComponent({ name: 'MaterialEditorDialog' })
+    const brand = editor.findAllComponents({ name: 'ElSelect' }).find(select => select.props('placeholder') === '可输入或选择品牌')!
+    expect(brand.props('filterable')).toBe(true)
+    expect(brand.props('allowCreate')).toBe(true)
+    expect(brand.props('modelValue')).toBe('')
+    expect(editor.props('brands')).toContain('欧姆龙')
+    wrapper.unmount()
+  })
+
   it('主档指定列排序传给后端，翻页保留排序，取消后恢复默认', async () => {
     const base = (await api.listMaterials())[0]
     api.listMaterials.mockResolvedValue(Array.from({ length: 3 }, (_, index) => ({ ...base, id: `sort-${index}`, materialCode: `SORT-${index}` })))

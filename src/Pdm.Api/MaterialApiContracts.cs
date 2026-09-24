@@ -79,7 +79,7 @@ public sealed record ResolveMaterialCodesRequest(Guid ProjectId, IReadOnlyList<G
 
 public sealed record ApplyMaterialCodesRequest(Guid ProjectId, IReadOnlyList<Guid> BomItemIds);
 
-public sealed record DecideMaterialCodeApplicationRequest(long ExpectedRowVersion, bool Approved, string? Comment);
+public sealed record DecideMaterialCodeApplicationRequest(long ExpectedRowVersion, bool Approved, string? Comment, string? CategoryCode = null);
 
 public sealed record RejectMaterialRequest(long ExpectedRowVersion, string? Comment);
 

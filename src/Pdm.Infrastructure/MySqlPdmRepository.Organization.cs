@@ -242,14 +242,16 @@ public sealed partial class MySqlPdmRepository
                     "INSERT IGNORE INTO released_project_number(organization_id,sequence_value,released_at) VALUES(@OrganizationId,@Sequence,@Now)",
                     new { OrganizationId = oldOrganization.Id, Sequence = oldProjectSequence, Now = now }, transaction, cancellationToken: cancellationToken));
 
+            var existingCustomerSequence = project.CustomerProjectSequence
+                ?? TryRecoverCustomerProjectSequence(project.DeviceModel, project.CustomerCode);
             var customerChanged = organizationChanged || !string.Equals(project.CustomerCode, customer.Code, StringComparison.OrdinalIgnoreCase);
             var customerSequence = customerChanged
                 ? await ReserveCustomerProjectNumberAsync(connection, transaction, organization.Id, customer.Code, cancellationToken)
-                : project.CustomerProjectSequence ?? throw new PdmRuleException("项目缺少客户流水号，不能修改编号资料。");
-            if (customerChanged && project.CustomerProjectSequence is not null && !string.IsNullOrWhiteSpace(project.CustomerCode))
+                : existingCustomerSequence ?? throw new PdmRuleException("项目缺少客户流水号，且无法从设备型号恢复。请重新选择客户后保存。");
+            if (customerChanged && existingCustomerSequence is not null && !string.IsNullOrWhiteSpace(project.CustomerCode))
                 await connection.ExecuteAsync(new CommandDefinition(
                     "INSERT IGNORE INTO released_customer_project_number(organization_id,customer_code,sequence_value,released_at) VALUES(@OrganizationId,@CustomerCode,@Sequence,@Now)",
-                    new { OrganizationId = oldOrganization.Id, CustomerCode = project.CustomerCode, Sequence = project.CustomerProjectSequence.Value, Now = now }, transaction, cancellationToken: cancellationToken));
+                    new { OrganizationId = oldOrganization.Id, CustomerCode = project.CustomerCode, Sequence = existingCustomerSequence.Value, Now = now }, transaction, cancellationToken: cancellationToken));
 
             var treeIds = (await connection.QueryAsync<Guid>(new CommandDefinition(
                 "SELECT id FROM project WHERE id=@ProjectId OR root_project_id=@ProjectId ORDER BY code FOR UPDATE",

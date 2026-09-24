@@ -195,7 +195,7 @@ public static class MaterialEndpointExtensions
         api.MapPost("/material-code/applications/{applicationId:guid}/decision", async (Guid applicationId, DecideMaterialCodeApplicationRequest request, HttpContext context, MaterialService service, MaterialSyncBatchService syncBatches, ApprovalU9AutomationService automation, CancellationToken cancellationToken) =>
         {
             var (actor, role) = CurrentUser(context.User);
-            var result = await service.DecideMaterialCodeApplicationAsync(applicationId, request.ExpectedRowVersion, request.Approved, request.Comment, actor, role, cancellationToken);
+            var result = await service.DecideMaterialCodeApplicationAsync(applicationId, request.ExpectedRowVersion, request.Approved, request.Comment, actor, role, cancellationToken, request.CategoryCode);
             MaterialSyncBatch? automaticBatch = null;
             ApprovalU9AutomationResult? automationResult = null;
             if (request.Approved && result.Application.BomHeaderKind is not null && result.Task is not null)

@@ -28,6 +28,9 @@ public sealed class PdmWorkflowService(
     private const string ReconcilePendingClassification = "PendingClassification";
     private const string ReconcilePendingRemoval = "PendingRemoval";
     private const string ReconcileManualUnmatched = "ManualUnmatched";
+    private const string ReconcileDuplicateSourcePending = "DuplicateSourcePending";
+    private const string ReconcileDuplicateSourceRetained = "DuplicateSourceRetained";
+    private const string ReconcileDuplicateSourceMerged = "DuplicateSourceMerged";
     private const string ReconcileManuallyClassified = "ManuallyClassified";
     private const string ReconcileManuallyRetained = "ManuallyRetained";
     private const string ReconcileManuallyExcluded = "ManuallyExcluded";
@@ -2370,7 +2373,9 @@ public sealed class PdmWorkflowService(
         await EnsureStandardMaterialIdentityAsync(current, materialCode, allowMissingDrawingIdentity, cancellationToken);
         var item = await repository.UpdateBomMaterialCodeAsync(projectId, itemId, materialCode, cancellationToken);
         item = await RefreshBomItemReconciliationAsync(item, actor, cancellationToken);
-        if (item.SourceDocumentId.HasValue && item.Kind != BomKind.Electrical)
+        await RefreshManualSourceDuplicateFlagsAsync(projectId, actor, cancellationToken);
+        item = await repository.FindBomItemAsync(projectId, itemId, cancellationToken) ?? item;
+        if (!item.IsManuallyExcluded && item.SourceDocumentId.HasValue && item.Kind != BomKind.Electrical)
         {
             await EnqueueCadPropertyWritebackAsync(item, actor, cancellationToken);
             await EnqueueLinkedDrawingMaterialCodeWritebacksAsync(item, actor, cancellationToken);
@@ -2570,6 +2575,17 @@ public sealed class PdmWorkflowService(
             .Select((item, index) => item with { Sequence = index + 1 })
             .ToArray();
 
+        var latestSnapshot = await repository.GetLatestReferenceSnapshotAsync(projectId, cancellationToken);
+        if (latestSnapshot is not null && kind is (BomKind.Standard or BomKind.NonStandard or BomKind.Unclassified))
+        {
+            var latestSource = await GenerateMechanicalBomFromSnapshotAsync(projectId, latestSnapshot, actor, cancellationToken, false, false);
+            items = MarkManualSourceDuplicates(
+                items,
+                latestSource.StandardItems.Concat(latestSource.NonStandardItems).Concat(latestSource.UnclassifiedItems).ToArray(),
+                actor,
+                timeProvider.GetUtcNow());
+        }
+
         var writebackIds = kind == BomKind.Electrical
             ? new HashSet<Guid>()
             : items.Where(item => !item.IsManuallyExcluded && item.SourceDocumentId.HasValue
@@ -2629,6 +2645,10 @@ public sealed class PdmWorkflowService(
                 var current = maintained.FirstOrDefault(candidate => SameBomSource(candidate, item));
                 if (current is null)
                 {
+                    if (IsDuplicateSourceStatus(item))
+                    {
+                        return item with { Sequence = index + 1 };
+                    }
                     if (item.Kind == BomKind.Virtual)
                     {
                         return item with
@@ -2690,6 +2710,9 @@ public sealed class PdmWorkflowService(
         await RequireBomEditPermissionAsync(actor, role, new[] { item.Kind, command.TargetKind ?? item.Kind }, cancellationToken);
         await EnsureBomChangeAllowedAsync(projectId, cancellationToken, item.Kind, command.TargetKind ?? item.Kind);
         var now = timeProvider.GetUtcNow();
+        if (string.Equals(command.Action, "merge-source", StringComparison.OrdinalIgnoreCase))
+            return await MergeManualDuplicateIntoSourceAsync(projectId, item, standard, nonStandard, unclassified, electrical, actor, validationRules, now, cancellationToken);
+
         standard.RemoveAll(candidate => candidate.Id == itemId);
         nonStandard.RemoveAll(candidate => candidate.Id == itemId);
         unclassified.RemoveAll(candidate => candidate.Id == itemId);
@@ -2706,8 +2729,13 @@ public sealed class PdmWorkflowService(
                     IsPendingRemoval = false,
                     IsManualUnmatched = false,
                     IsManuallyRetained = true,
-                    ReconciliationStatus = ReconcileManuallyRetained,
-                    ReconciliationNote = $"最新图档源数据中无对应项，已由{actor}确认保留。",
+                    IsComplete = HasRequiredBomValues(item, item.Kind, validationRules),
+                    ReconciliationStatus = item.ReconciliationStatus == ReconcileDuplicateSourcePending
+                        ? ReconcileDuplicateSourceRetained
+                        : ReconcileManuallyRetained,
+                    ReconciliationNote = item.ReconciliationStatus == ReconcileDuplicateSourcePending
+                        ? $"同编码的图档源数据已由{actor}确认保留人工维护项；重复源数据将自动排除。"
+                        : $"最新图档源数据中无对应项，已由{actor}确认保留。",
                     ReconciliationUpdatedBy = actor,
                     ReconciliationUpdatedAt = now
                 };
@@ -2856,10 +2884,12 @@ public sealed class PdmWorkflowService(
         }
 
         var snapshot = await repository.GetLatestReferenceSnapshotAsync(projectId, cancellationToken);
+        BomItem[] duplicateCheckSourceItems = [];
         if (snapshot is not null)
         {
             var raw = await GenerateMechanicalBomFromSnapshotAsync(projectId, snapshot, actor, cancellationToken, false, false);
             var rawItems = raw.StandardItems.Concat(raw.NonStandardItems).Concat(raw.ElectricalItems).Concat(raw.UnclassifiedItems).Concat(raw.VirtualItems).ToArray();
+            duplicateCheckSourceItems = rawItems;
             foreach (var (id, maintained) in updatedById.ToArray())
             {
                 if (!maintained.SourceDocumentId.HasValue) continue;
@@ -2897,6 +2927,12 @@ public sealed class PdmWorkflowService(
         var updatedUnclassified = affectsRelease ? Resequence(unclassified) : PreserveSequence(unclassified);
         var updatedElectrical = affectsRelease ? Resequence(electrical) : PreserveSequence(electrical);
         var updatedVirtual = affectsRelease ? Resequence(virtualItems) : PreserveSequence(virtualItems);
+        if (snapshot is not null)
+        {
+            updatedStandard = MarkManualSourceDuplicates(updatedStandard, duplicateCheckSourceItems, actor, reconciliationTime);
+            updatedNonStandard = MarkManualSourceDuplicates(updatedNonStandard, duplicateCheckSourceItems, actor, reconciliationTime);
+            updatedUnclassified = MarkManualSourceDuplicates(updatedUnclassified, duplicateCheckSourceItems, actor, reconciliationTime);
+        }
         var now = timeProvider.GetUtcNow();
         var audits = new[]
         {
@@ -4730,7 +4766,7 @@ public sealed class PdmWorkflowService(
                     ReconciliationUpdatedBy = actor,
                     ReconciliationUpdatedAt = reconciliationTime
                 }
-                : item.IsManuallyRetained ? item : item with
+                : item.IsManuallyExcluded || item.IsManuallyRetained ? item : item with
                 {
                     IsManualUnmatched = true,
                     IsComplete = false,
@@ -4739,6 +4775,7 @@ public sealed class PdmWorkflowService(
                     ReconciliationUpdatedBy = actor,
                     ReconciliationUpdatedAt = reconciliationTime
                 }));
+        merged = MarkManualSourceDuplicates(merged, generated, actor, reconciliationTime).ToList();
         var unclassifiedCount = merged.Count(item => item.IsPendingClassification && !item.IsManuallyExcluded);
 
         static BomItem[] PrepareKind(IEnumerable<BomItem> items, BomKind kind) => items
@@ -4814,6 +4851,244 @@ public sealed class PdmWorkflowService(
             await AuditAsync(actor, "bom.generate", nameof(BomItem), projectId.ToString(), $"标准件{standard.Length}；非标件{nonStandard.Length}；电气BOM独立维护；虚拟件{virtualCount}；待分类{unclassifiedCount}；待移除{pendingRemovalCount}；人工待确认{manualUnmatchedCount}", cancellationToken);
         }
         return new BomGenerationResult(standard, nonStandard, electrical, unclassified, virtualItems, virtualCount, unclassifiedCount, pendingRemovalCount, manualUnmatchedCount, apply);
+    }
+
+    private static bool IsDuplicateSourceStatus(BomItem item) =>
+        item.ReconciliationStatus is ReconcileDuplicateSourcePending or ReconcileDuplicateSourceRetained;
+
+    private static string BomMaterialIdentityKey(BomItem item) => item.DrawingNumber.Trim().ToUpperInvariant();
+
+    private static BomItem[] MarkManualSourceDuplicates(
+        IEnumerable<BomItem> bomItems,
+        IEnumerable<BomItem> sourceItems,
+        string actor,
+        DateTimeOffset now)
+    {
+        var rows = bomItems.ToArray();
+        var sourceKeys = sourceItems
+            .Concat(rows.Where(item => item.SourceDocumentId.HasValue && !item.IsManuallyExcluded && !item.IsPendingRemoval))
+            .Where(item => item.SourceDocumentId.HasValue
+                && item.Kind is (BomKind.Standard or BomKind.NonStandard or BomKind.Unclassified)
+                && !string.IsNullOrWhiteSpace(item.DrawingNumber))
+            .Select(BomMaterialIdentityKey)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var manualDuplicates = rows
+            .Where(item => item.Source == "Manual"
+                && !item.SourceDocumentId.HasValue
+                && !item.EngineeringKitReferenceId.HasValue
+                && !item.IsManuallyExcluded
+                && item.Kind is (BomKind.Standard or BomKind.NonStandard or BomKind.Unclassified)
+                && !string.IsNullOrWhiteSpace(item.DrawingNumber)
+                && sourceKeys.Contains(BomMaterialIdentityKey(item)))
+            .ToArray();
+        var duplicateKeys = manualDuplicates.Select(BomMaterialIdentityKey).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var retainedKeys = manualDuplicates
+            .Where(item => item.IsManuallyRetained || item.ReconciliationStatus == ReconcileDuplicateSourceRetained)
+            .Select(BomMaterialIdentityKey)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+        return rows.Select(item =>
+        {
+            var key = string.IsNullOrWhiteSpace(item.DrawingNumber) ? string.Empty : BomMaterialIdentityKey(item);
+            var isDuplicate = key.Length > 0 && duplicateKeys.Contains(key);
+            if (isDuplicate && item.SourceDocumentId.HasValue)
+            {
+                var retained = retainedKeys.Contains(key);
+                return item with
+                {
+                    IsManuallyExcluded = true,
+                    IsPendingRemoval = false,
+                    IsManualUnmatched = false,
+                    IsComplete = false,
+                    ReconciliationStatus = retained ? ReconcileDuplicateSourceRetained : ReconcileDuplicateSourcePending,
+                    ReconciliationNote = retained
+                        ? $"同编码人工项已由{actor}确认保留；该源数据重复行已排除。"
+                        : "与人工维护BOM项的物料编码相同，源数据行已暂时排除；请在人工项上确认合并到源数据或保留人工维护。",
+                    ReconciliationUpdatedBy = actor,
+                    ReconciliationUpdatedAt = now
+                };
+            }
+
+            if (item.SourceDocumentId.HasValue && IsDuplicateSourceStatus(item))
+            {
+                return item with
+                {
+                    IsManuallyExcluded = false,
+                    ReconciliationStatus = "SourceMatched",
+                    ReconciliationNote = "最新源数据中已无同编码人工重复项，源数据行已恢复。",
+                    ReconciliationUpdatedBy = actor,
+                    ReconciliationUpdatedAt = now
+                };
+            }
+
+            if (item.Source == "Manual" && isDuplicate)
+            {
+                var retained = item.IsManuallyRetained || item.ReconciliationStatus == ReconcileDuplicateSourceRetained;
+                return item with
+                {
+                    IsManualUnmatched = !retained,
+                    ReconciliationStatus = retained ? ReconcileDuplicateSourceRetained : ReconcileDuplicateSourcePending,
+                    ReconciliationNote = retained
+                        ? $"同编码图档源数据已由{actor}确认保留人工维护项；源数据重复行已排除。"
+                        : "与最新图档源数据存在相同物料编码；请确认合并到源数据或保留人工维护。",
+                    ReconciliationUpdatedBy = actor,
+                    ReconciliationUpdatedAt = now
+                };
+            }
+
+            if (item.Source == "Manual" && IsDuplicateSourceStatus(item))
+            {
+                var retained = item.IsManuallyRetained;
+                return item with
+                {
+                    IsManualUnmatched = !retained,
+                    ReconciliationStatus = retained ? ReconcileManuallyRetained : ReconcileManualUnmatched,
+                    ReconciliationNote = retained
+                        ? "重复源数据已不存在，人工维护项仍按已确认状态保留。"
+                        : "最新图档源数据中已无同编码物料，等待确认删除或人工保留。",
+                    ReconciliationUpdatedBy = actor,
+                    ReconciliationUpdatedAt = now
+                };
+            }
+
+            return item;
+        }).ToArray();
+    }
+
+    private async Task RefreshManualSourceDuplicateFlagsAsync(Guid projectId, string actor, CancellationToken cancellationToken)
+    {
+        var snapshot = await repository.GetLatestReferenceSnapshotAsync(projectId, cancellationToken);
+        if (snapshot is null) return;
+        var generated = await GenerateMechanicalBomFromSnapshotAsync(projectId, snapshot, actor, cancellationToken, false, false);
+        var sourceItems = generated.StandardItems.Concat(generated.NonStandardItems).Concat(generated.UnclassifiedItems).ToArray();
+        var standard = (await repository.GetBomAsync(projectId, BomKind.Standard, cancellationToken)).ToArray();
+        var nonStandard = (await repository.GetBomAsync(projectId, BomKind.NonStandard, cancellationToken)).ToArray();
+        var unclassified = (await repository.GetBomAsync(projectId, BomKind.Unclassified, cancellationToken)).ToArray();
+        var electrical = await repository.GetBomAsync(projectId, BomKind.Electrical, cancellationToken);
+        var virtualItems = await repository.GetBomAsync(projectId, BomKind.Virtual, cancellationToken);
+        var now = timeProvider.GetUtcNow();
+        var updatedStandard = MarkManualSourceDuplicates(standard, sourceItems, actor, now);
+        var updatedNonStandard = MarkManualSourceDuplicates(nonStandard, sourceItems, actor, now);
+        var updatedUnclassified = MarkManualSourceDuplicates(unclassified, sourceItems, actor, now);
+        var standardChanged = !standard.SequenceEqual(updatedStandard);
+        var nonStandardChanged = !nonStandard.SequenceEqual(updatedNonStandard);
+        var unclassifiedChanged = !unclassified.SequenceEqual(updatedUnclassified);
+        if (!standardChanged && !nonStandardChanged && !unclassifiedChanged) return;
+
+        await repository.ApplyBomBatchAsync(projectId, updatedStandard, updatedNonStandard, updatedUnclassified, electrical, virtualItems, [], [], cancellationToken);
+        if (standardChanged) await SyncBomDraftAsync(projectId, BomKind.Standard, actor, cancellationToken);
+        if (nonStandardChanged) await SyncBomDraftAsync(projectId, BomKind.NonStandard, actor, cancellationToken);
+        await AuditAsync(actor, "bom.duplicate-source.detect", nameof(BomItem), projectId.ToString(),
+            $"自动识别同编码人工/源数据项；标准件变更{standardChanged}，非标件变更{nonStandardChanged}，待分类变更{unclassifiedChanged}", cancellationToken);
+    }
+
+    private async Task<IReadOnlyList<BomItem>> MergeManualDuplicateIntoSourceAsync(
+        Guid projectId,
+        BomItem manualItem,
+        List<BomItem> standard,
+        List<BomItem> nonStandard,
+        List<BomItem> unclassified,
+        List<BomItem> electrical,
+        string actor,
+        BomValidationRules validationRules,
+        DateTimeOffset now,
+        CancellationToken cancellationToken)
+    {
+        if (manualItem.Source != "Manual" || manualItem.SourceDocumentId.HasValue
+            || manualItem.ReconciliationStatus != ReconcileDuplicateSourcePending
+            || manualItem.IsManuallyExcluded)
+            throw new PdmRuleException("只有待确认的同编码人工项可以合并到图档源数据。");
+
+        var snapshot = await repository.GetLatestReferenceSnapshotAsync(projectId, cancellationToken)
+            ?? throw new PdmRuleException("项目尚无已存档的设计树，无法合并图档源数据。");
+        var source = await GenerateMechanicalBomFromSnapshotAsync(projectId, snapshot, actor, cancellationToken, false, false);
+        var sourceItems = source.StandardItems.Concat(source.NonStandardItems).Concat(source.UnclassifiedItems)
+            .Where(item => item.SourceDocumentId.HasValue
+                && string.Equals(item.DrawingNumber.Trim(), manualItem.DrawingNumber.Trim(), StringComparison.OrdinalIgnoreCase))
+            .ToArray();
+        if (sourceItems.Length == 0)
+            throw new PdmConflictException("最新图档源数据中已找不到该物料编码，请刷新BOM后重新处理。");
+
+        var target = manualItem.Kind switch
+        {
+            BomKind.Standard => standard,
+            BomKind.NonStandard => nonStandard,
+            BomKind.Unclassified => unclassified,
+            _ => throw new PdmRuleException("该BOM类型不支持合并图档源数据。")
+        };
+        target.RemoveAll(item => item.Id == manualItem.Id);
+        foreach (var sourceItem in sourceItems)
+        {
+            var previous = standard.Concat(nonStandard).Concat(unclassified).FirstOrDefault(item => SameBomSource(sourceItem, item));
+            if (previous is not null)
+            {
+                standard.RemoveAll(item => item.Id == previous.Id);
+                nonStandard.RemoveAll(item => item.Id == previous.Id);
+                unclassified.RemoveAll(item => item.Id == previous.Id);
+            }
+            var categoryChanged = sourceItem.Kind != manualItem.Kind;
+            var merged = sourceItem with
+            {
+                Kind = manualItem.Kind,
+                Id = previous?.Id ?? sourceItem.Id,
+                Sequence = previous?.Sequence ?? sourceItem.Sequence,
+                Remark = NullIfWhiteSpace(manualItem.Remark) ?? sourceItem.Remark,
+                ImpactStage = manualItem.ImpactStage ?? sourceItem.ImpactStage,
+                IsWearPart = manualItem.IsWearPart || sourceItem.IsWearPart,
+                IsManuallyOverridden = categoryChanged || manualItem.Remark is not null || manualItem.ImpactStage is not null || manualItem.IsWearPart,
+                IsManuallyExcluded = previous?.IsManuallyExcluded == true && !IsDuplicateSourceStatus(previous),
+                IsReleaseExcluded = previous?.IsReleaseExcluded == true,
+                ReleaseExclusionReason = previous?.ReleaseExclusionReason,
+                IsPendingRemoval = false,
+                IsManualUnmatched = false,
+                IsManuallyRetained = false,
+                DeletedAt = null,
+                DeletedBy = null,
+                DeleteReason = null,
+                IsPendingClassification = !categoryChanged && sourceItem.IsPendingClassification,
+                IsComplete = HasRequiredBomValues(sourceItem with { Kind = manualItem.Kind }, manualItem.Kind, validationRules),
+                ReconciliationStatus = categoryChanged ? ReconcileManuallyClassified : "SourceMatched",
+                ReconciliationNote = categoryChanged
+                    ? $"图档未提供分类，已保留人工确认的{BomKindLabel(manualItem.Kind)}分类并合并最新源数据。"
+                    : $"已由{actor}将同编码人工项合并到最新图档源数据；数量及源属性以图档为准。",
+                ReconciliationUpdatedBy = actor,
+                ReconciliationUpdatedAt = now
+            };
+            target.Add(merged);
+        }
+
+        target.Add(manualItem with
+        {
+            IsManuallyExcluded = true,
+            IsPendingRemoval = false,
+            IsManualUnmatched = false,
+            IsManuallyRetained = false,
+            IsComplete = false,
+            ReconciliationStatus = ReconcileDuplicateSourceMerged,
+            ReconciliationNote = $"已由{actor}合并到图档源数据，人工行已移入回收站；源数量及属性已同步。",
+            ReconciliationUpdatedBy = actor,
+            ReconciliationUpdatedAt = now,
+            DeletedAt = now,
+            DeletedBy = actor,
+            DeleteReason = "与图档源数据同编码，已合并到源数据"
+        });
+
+        static BomItem[] Resequence(IEnumerable<BomItem> items) => items
+            .OrderBy(item => item.IsManuallyExcluded)
+            .ThenBy(item => item.Sequence)
+            .Select((item, index) => item with { Sequence = index + 1 })
+            .ToArray();
+
+        var updatedStandard = Resequence(standard);
+        var updatedNonStandard = Resequence(nonStandard);
+        var updatedUnclassified = Resequence(unclassified);
+        var updatedElectrical = Resequence(electrical);
+        var virtualItems = await repository.GetBomAsync(projectId, BomKind.Virtual, cancellationToken);
+        await repository.ApplyBomBatchAsync(projectId, updatedStandard, updatedNonStandard, updatedUnclassified, updatedElectrical, virtualItems, [], [], cancellationToken);
+        await SyncBomDraftAsync(projectId, manualItem.Kind, actor, cancellationToken);
+        await AuditAsync(actor, "bom.duplicate-source.merge", nameof(BomItem), manualItem.Id.ToString(),
+            $"{manualItem.DrawingNumber}；源实例{sourceItems.Length}；人工备注/影响/易损标记保留，数量以最新源数据为准", cancellationToken);
+        return await repository.GetBomAsync(projectId, manualItem.Kind, cancellationToken);
     }
 
     private static IReadOnlyList<string> SourceDataDifferences(BomItem maintained, BomItem source)

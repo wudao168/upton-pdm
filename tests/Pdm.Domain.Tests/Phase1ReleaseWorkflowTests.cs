@@ -1072,6 +1072,72 @@ public sealed class Phase1ReleaseWorkflowTests
     }
 
     [Fact]
+    public async Task SavingSameCodeManualBomItem_AutomaticallyFlagsConflictAndMergesToLatestSource()
+    {
+        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(), new RecordingPublisher(), TimeProvider.System);
+        var sourceDocument = await repository.FindDocumentAsync(Guid.Parse("22222222-2222-2222-2222-222222222223"), default)
+            ?? throw new InvalidOperationException();
+        var snapshot = await repository.GetLatestReferenceSnapshotAsync(ProjectId, default) ?? throw new InvalidOperationException();
+        await repository.CheckoutAsync(sourceDocument.Id, "admin", default);
+        var sourceProperties = StandardMaterialProperties("DUP-MATERIAL-01", "M20", "测试品牌");
+        sourceProperties[CadPropertyCardSnapshot.ScopePrefix + "物料名称"] = "Global";
+        sourceProperties["全局/物料名称"] = "同编码源物料";
+        await repository.CheckInVersionAsync(sourceDocument.Id, "admin", new DocumentVersionCommit(
+            new StoredFile("versions/duplicate-source.sldprt", 10, new string('D', 64), DateTimeOffset.UtcNow),
+            "重复编码对账测试", sourceProperties, snapshot, [], [], ForceVersion: true), default);
+        var generated = await workflow.GenerateMechanicalBomAsync(ProjectId, true, "admin", UserRole.Administrator, default);
+        var source = generated.StandardItems.Concat(generated.NonStandardItems)
+            .Where(item => item.SourceDocumentId.HasValue && !item.IsPendingClassification && !string.IsNullOrWhiteSpace(item.DrawingNumber))
+            .GroupBy(item => item.DrawingNumber, StringComparer.OrdinalIgnoreCase)
+            .OrderByDescending(group => group.Count())
+            .First()
+            .First();
+        var existing = await repository.GetBomAsync(ProjectId, source.Kind, default);
+        var inputs = existing.Select(item => new BomItemInput(
+            item.Sequence, item.DrawingNumber, item.Name, item.Quantity, item.Unit, item.Material, item.Specification, item.Revision, item.IsComplete,
+            SourceDocumentId: item.SourceDocumentId, SourceConfiguration: item.SourceConfiguration, Remark: item.Remark, Brand: item.Brand,
+            SurfaceTreatment: item.SurfaceTreatment, Weight: item.Weight, IsPendingClassification: item.IsPendingClassification,
+            IsManualUnmatched: item.IsManualUnmatched, IsManuallyRetained: item.IsManuallyRetained, Id: item.Id,
+            SourceInstancePath: item.SourceInstancePath, ParentDrawingNumber: item.ParentDrawingNumber, HeatTreatment: item.HeatTreatment,
+            EngineeringKitReferenceId: item.EngineeringKitReferenceId, EngineeringKitId: item.EngineeringKitId,
+            EngineeringKitRevisionId: item.EngineeringKitRevisionId, EngineeringKitCode: item.EngineeringKitCode,
+            EngineeringKitVersionNumber: item.EngineeringKitVersionNumber, EngineeringKitComponentId: item.EngineeringKitComponentId,
+            EngineeringKitComponentOptional: item.EngineeringKitComponentOptional, IsWearPart: item.IsWearPart, ImpactStage: item.ImpactStage))
+            .Append(new BomItemInput(
+                existing.Count + 1, source.DrawingNumber, "人工维护名称", 999, source.Unit, source.Material ?? "Q235B",
+                source.Specification ?? "人工型号", source.Revision, true, Remark: "人工备注保留", IsWearPart: true,
+                ImpactStage: ProjectPlanStage.Assembly))
+            .ToArray();
+
+        var saved = await workflow.ReplaceBomAsync(ProjectId, source.Kind, inputs, "admin", UserRole.Administrator, default);
+        var duplicate = Assert.Single(saved, item => item.Source == "Manual" && item.DrawingNumber == source.DrawingNumber);
+        Assert.Equal("DuplicateSourcePending", duplicate.ReconciliationStatus);
+        Assert.True(duplicate.IsManualUnmatched);
+        Assert.Contains(saved, item => item.SourceDocumentId == source.SourceDocumentId && item.IsManuallyExcluded
+            && item.ReconciliationStatus == "DuplicateSourcePending");
+
+        var resolved = await workflow.ResolveBomItemAsync(ProjectId, duplicate.Id,
+            new ResolveBomItemCommand("merge-source"), "admin", UserRole.Administrator, default);
+        var activeSources = resolved.Where(item => item.SourceDocumentId.HasValue && !item.IsManuallyExcluded
+            && string.Equals(item.DrawingNumber, source.DrawingNumber, StringComparison.OrdinalIgnoreCase)).ToArray();
+        var expectedSourceQuantity = generated.StandardItems.Concat(generated.NonStandardItems)
+            .Where(item => item.SourceDocumentId.HasValue && string.Equals(item.DrawingNumber, source.DrawingNumber, StringComparison.OrdinalIgnoreCase))
+            .Sum(item => item.Quantity);
+
+        Assert.NotEmpty(activeSources);
+        Assert.Equal(expectedSourceQuantity, activeSources.Sum(item => item.Quantity));
+        Assert.All(activeSources, item =>
+        {
+            Assert.Equal("人工备注保留", item.Remark);
+            Assert.Equal(ProjectPlanStage.Assembly, item.ImpactStage);
+            Assert.True(item.IsWearPart);
+        });
+        Assert.Contains(resolved, item => item.Id == duplicate.Id && item.IsManuallyExcluded
+            && item.ReconciliationStatus == "DuplicateSourceMerged");
+    }
+
+    [Fact]
     public async Task MechanicalBomSource_PreservesEmptyCardFieldsWithoutLegacyNamesOrConfigurationFallback()
     {
         var repository = new InMemoryPdmRepository(TimeProvider.System);

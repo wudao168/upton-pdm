@@ -1,6 +1,8 @@
 using Upton.Pdm.Application;
 using Upton.Pdm.Domain;
 using Upton.Pdm.Infrastructure;
+using System.Collections.Concurrent;
+using System.Reflection;
 
 namespace Upton.Pdm.Domain.Tests;
 
@@ -112,6 +114,23 @@ public sealed class ProjectNumberingTests
         Assert.Equal(parent.Code, saved.Code);
         Assert.Equal(parent.DeviceModel, saved.DeviceModel);
         Assert.Equal(parent.SerialNumbers, saved.SerialNumbers);
+    }
+
+    [Fact]
+    public async Task UpdatingLegacyProjectRecoversMissingCustomerSequenceFromDeviceModel()
+    {
+        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var parent = await repository.CreateNumberedProjectAsync(Command("历史项目", quantity: 1), CancellationToken.None);
+        var projects = (ConcurrentDictionary<Guid, Project>)typeof(InMemoryPdmRepository)
+            .GetField("projects", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .GetValue(repository)!;
+        projects[parent.Id] = parent with { CustomerProjectSequence = null };
+
+        var saved = await repository.UpdateProjectDetailsAsync(parent.Id, new(
+            KunshanId, "P", 2, null, "历史项目已编辑", null, new DateOnly(2026, 8, 16), 1), CancellationToken.None);
+
+        Assert.Equal(1, saved.CustomerProjectSequence);
+        Assert.Equal(parent.DeviceModel, saved.DeviceModel);
     }
 
     [Fact]

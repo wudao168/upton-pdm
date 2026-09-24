@@ -157,7 +157,7 @@ public sealed class ValidationPlanService(
         {
             if (!input.CatalogItemId.HasValue)
             {
-                items.Add(new(Guid.NewGuid(), null, null, "人工项", Required(input.ValidationContent, 1500, "验证内容"),
+                items.Add(new(Guid.NewGuid(), null, null, "自定义", Required(input.ValidationContent, 1500, "验证内容"),
                     NormalizeInformationSource(input.InformationSource), input.ValidationDate,
                     Optional(input.Result, 1500, "验证结果"), Optional(input.Reviewer, 100, "审核人"), Optional(input.ResponsiblePerson, 100, "责任人"),
                     Optional(input.Remark, 1000, "备注"), input.SortOrder, Optional(input.ValidationStandard, 1000, "验证标准")));
@@ -220,7 +220,7 @@ public sealed class ValidationPlanService(
         {
             if (!input.CatalogItemId.HasValue)
             {
-                items.Add(new(Guid.NewGuid(), null, null, "人工项", Required(input.ValidationContent, 1500, "验证内容"),
+                items.Add(new(Guid.NewGuid(), null, null, "自定义", Required(input.ValidationContent, 1500, "验证内容"),
                     NormalizeInformationSource(input.InformationSource), input.ValidationDate,
                     Optional(input.Result, 1500, "验证结果"), Optional(input.Reviewer, 100, "审核人"), Optional(input.ResponsiblePerson, 100, "责任人"),
                     Optional(input.Remark, 1000, "备注"), nextSortOrder++, Optional(input.ValidationStandard, 1000, "验证标准")));

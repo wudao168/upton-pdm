@@ -141,6 +141,7 @@ describe('WorkbenchHome', () => {
         pending: false,
         token: 'token',
         onUpdateMainStaffing: async () => project,
+        onUpdateDesigners: async () => project,
         onUpdatePhaseOwners: async () => project,
       },
       global: { plugins: [ElementPlus] },
@@ -171,6 +172,10 @@ describe('WorkbenchHome', () => {
     expect(wrapper.get('[aria-label="项目团队"]').text()).toContain('工程师丁')
     expect(wrapper.get('[aria-label="项目团队"]').text()).toContain('配置分工')
     expect(wrapper.get('[aria-label="项目团队"]').text()).toContain('配置负责人')
+    const configureOwners = wrapper.get('[aria-label="项目团队"]').findAll('button').find(button => button.text() === '配置负责人')!
+    await configureOwners.trigger('click')
+    await flushPromises()
+    expect(document.body.querySelector('[aria-label="执行工程师"]')).not.toBeNull()
     for (const phase of ['标准件采购', '非标件采购', '非标件生产', '机械装配', '电气装配', '电气调试', '验收']) {
       expect(wrapper.get('[aria-label="项目团队"]').text()).toContain(phase)
     }

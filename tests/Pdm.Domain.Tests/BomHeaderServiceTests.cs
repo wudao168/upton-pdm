@@ -799,8 +799,10 @@ public sealed class BomHeaderServiceTests
         desired == 0 ? [] : [new(10, "01021000007", desired, "001")], ReconcileComponentTotals: true)
         { PreviousApprovedComponents = [new(10, "01021000007", 12, "001")] };
 
-    [Fact]
-    public async Task ProjectBomU9Sync_ReductionAndDeletionRequireConfirmationButManualExecutionWorks()
+    [Theory]
+    [InlineData(8)]
+    [InlineData(0)]
+    public async Task ProjectBomU9Sync_ReductionAndDeletionAreSynchronizedAutomatically(int releasedQuantity)
     {
         var time = TimeProvider.System;
         var (writer, state, repository) = await ControlledService();
@@ -809,19 +811,20 @@ public sealed class BomHeaderServiceTests
         await AddMaterial(materials, MaterialKind.Standard, MaterialApprovalStatus.Approved, "0102", "01021000007", "01021000007", true);
         await repository.SaveProjectBomHeaderBindingAsync(ProjectId, ProjectBomHeaderKind.Standard, header.Id, 0, "admin", default);
         var item = new BomItem(Guid.NewGuid(), ProjectId, BomKind.Standard, 1, "01021000007", "平垫", 12, "001", null, null, "W1", true);
-        foreach (var (quantity, scope, age) in new[] { (12, ReleaseScope.StandardFormal, -2), (8, ReleaseScope.StandardSupplement, -1) })
-            await repository.CreateReleasePackageAsync(new ReleasePackage(Guid.NewGuid(), ProjectId, $"RP-{quantity}", ReleasePackageState.Published,
-                Guid.NewGuid(), "BOM", "BOM", [], time.GetUtcNow().AddHours(age), time.GetUtcNow().AddHours(age), "C:\\PDM\\Release")
-                { Scope = scope, StandardBomSnapshot = [item with { Quantity = quantity }] }, default);
+        await repository.CreateReleasePackageAsync(new ReleasePackage(Guid.NewGuid(), ProjectId, "RP-12", ReleasePackageState.Published,
+            Guid.NewGuid(), "BOM", "BOM", [], time.GetUtcNow().AddHours(-2), time.GetUtcNow().AddHours(-2), "C:\\PDM\\Release")
+            { Scope = ReleaseScope.StandardFormal, StandardBomSnapshot = [item] }, default);
+        await repository.CreateReleasePackageAsync(new ReleasePackage(Guid.NewGuid(), ProjectId, $"RP-{releasedQuantity}", ReleasePackageState.Published,
+            Guid.NewGuid(), "BOM", "BOM", [], time.GetUtcNow().AddHours(-1), time.GetUtcNow().AddHours(-1), "C:\\PDM\\Release")
+            { Scope = ReleaseScope.StandardSupplement, StandardBomSnapshot = releasedQuantity == 0 ? [] : [item with { Quantity = releasedQuantity }] }, default);
         var service = new ProjectBomU9SyncService(repository, materials, writer, time);
         var automatic = await service.SynchronizeApprovedAsync(ProjectId, ProjectBomHeaderKind.Standard, "admin", default);
-        Assert.Equal(ProjectBomU9AutomaticState.AwaitingConfirmation, automatic.State);
-        Assert.Equal(0, state.WriteCount);
-        var preview = await service.PreviewAsync(ProjectId, ProjectBomHeaderKind.Standard, "admin", UserRole.Administrator, default);
-        Assert.Equal(ProjectBomU9SyncState.ModifyRequired, preview.State);
-        Assert.Equal(1, preview.WritePreview!.ModifiedComponentCount);
-        await service.ExecuteAsync(ProjectId, ProjectBomHeaderKind.Standard, preview.WritePreview.RequestSha256, preview.WritePreview.RequiredConfirmation, "admin", UserRole.Administrator, default);
-        Assert.Equal(8, state.Components.Single(row => row.ItemCode == "01021000007").UsageQty);
+        Assert.Equal(ProjectBomU9AutomaticState.Modified, automatic.State);
+        Assert.Equal(1, state.WriteCount);
+        if (releasedQuantity == 0)
+            Assert.DoesNotContain(state.Components, row => row.ItemCode == "01021000007");
+        else
+            Assert.Equal(releasedQuantity, state.Components.Single(row => row.ItemCode == "01021000007").UsageQty);
         Assert.Equal(ProjectBomU9SyncState.UpToDate, (await service.PreviewAsync(ProjectId, ProjectBomHeaderKind.Standard, "admin", UserRole.Administrator, default)).State);
     }
 

@@ -32,6 +32,19 @@ public sealed class BatchPropertyNameModelAutoFillRuleTests
     }
 
     [Fact]
+    public void ExistingTarget_IsOverwrittenWhenConfirmed()
+    {
+        var canFill = BatchPropertyNameModelAutoFillRule.TryResolveValue(
+            "新文档名称",
+            "现有值",
+            overwriteMismatch: true,
+            out var value);
+
+        Assert.True(canFill);
+        Assert.Equal("新文档名称", value);
+    }
+
+    [Fact]
     public void EmptyDocumentName_IsNotFilled()
     {
         Assert.False(BatchPropertyNameModelAutoFillRule.TryResolveValue(

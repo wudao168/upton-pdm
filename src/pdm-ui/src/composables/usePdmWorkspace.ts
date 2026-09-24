@@ -568,7 +568,7 @@ export function usePdmWorkspace() {
     }
   }
 
-  async function resolveBomItem(itemId: string, action: 'classify' | 'retain' | 'remove', targetKind?: BomKind) {
+  async function resolveBomItem(itemId: string, action: 'classify' | 'retain' | 'remove' | 'merge-source', targetKind?: BomKind) {
     operationPending.value = true
     try {
       await resolveBomItemRequest(project.value.id, itemId, action, targetKind, accessToken)

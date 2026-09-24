@@ -235,10 +235,11 @@ internal sealed class BatchPropertyEditItem
     internal bool IsPropertyApplicable(string propertyName)
     {
         var normalized = NormalizePropertyName(propertyName);
-        return EffectivePropertyCardFields.Any(field => string.Equals(
-            NormalizePropertyName(field.EditorPropertyName),
-            normalized,
-            StringComparison.OrdinalIgnoreCase));
+        return IsAlwaysManuallyEditableProperty(normalized)
+            || EffectivePropertyCardFields.Any(field => string.Equals(
+                NormalizePropertyName(field.EditorPropertyName),
+                normalized,
+                StringComparison.OrdinalIgnoreCase));
     }
 
     internal string OriginalValue(string propertyName) => Value(originalValues, propertyName);
@@ -461,6 +462,11 @@ internal sealed class BatchPropertyEditItem
         if (string.Equals(normalized, "物料分类", StringComparison.OrdinalIgnoreCase)) return "分类";
         return normalized;
     }
+
+    private static bool IsAlwaysManuallyEditableProperty(string propertyName) =>
+        string.Equals(propertyName, "物料名称", StringComparison.OrdinalIgnoreCase)
+        || string.Equals(propertyName, "零件名称", StringComparison.OrdinalIgnoreCase)
+        || string.Equals(propertyName, "型号", StringComparison.OrdinalIgnoreCase);
 
     private static bool IsIdentityProperty(string propertyName) =>
         string.Equals(propertyName, "项目号", StringComparison.OrdinalIgnoreCase)
@@ -1564,6 +1570,7 @@ internal sealed class BatchPropertyEditDialog : Form
         };
         grid.CellFormatting += OnGridCellFormatting;
         grid.CellClick += OnThumbnailCellClick;
+        grid.CellDoubleClick += OnGridCellDoubleClick;
         grid.KeyDown += OnGridKeyDown;
         grid.DataError += OnGridDataError;
 
@@ -1753,6 +1760,23 @@ internal sealed class BatchPropertyEditDialog : Form
         }
         eventArgs.Value = value;
         eventArgs.FormattingApplied = true;
+    }
+
+    private void OnGridCellDoubleClick(object sender, DataGridViewCellEventArgs eventArgs)
+    {
+        if (eventArgs.RowIndex < 0
+            || eventArgs.ColumnIndex < 0
+            || !(grid.Columns[eventArgs.ColumnIndex].Tag is string propertyName)
+            || !(grid.Rows[eventArgs.RowIndex].DataBoundItem is BatchPropertyEditItem item)
+            || !item.IsPropertyApplicable(propertyName))
+        {
+            return;
+        }
+
+        var cell = grid.Rows[eventArgs.RowIndex].Cells[eventArgs.ColumnIndex];
+        cell.ReadOnly = false;
+        grid.CurrentCell = cell;
+        grid.BeginEdit(true);
     }
 
     private void BuildPropertyCardGrid()
@@ -2162,24 +2186,8 @@ internal sealed class BatchPropertyEditDialog : Form
             return;
         }
 
-        var confirmation = MessageBox.Show(
-            this,
-            string.Concat(
-                "零件和装配体：将“文档名称”填入空白“",
-                targetProperty,
-                "”，已有内容不覆盖。\r\n工程图：从关联模型复制“",
-                targetProperty,
-                "”，并纠正不一致的现有值。\r\n\r\n是否继续？"),
-            string.Concat("确认填充", targetProperty),
-            MessageBoxButtons.YesNo,
-            MessageBoxIcon.Information,
-            MessageBoxDefaultButton.Button2);
-        if (confirmation != DialogResult.Yes)
-        {
-            return;
-        }
-
-        var changedCount = 0;
+        var pendingValues = new List<KeyValuePair<BatchPropertyEditItem, string>>();
+        var overwriteCount = 0;
         foreach (var item in selectedItems.OrderBy(item =>
                      item.OperationItem.Node.Kind == CadDocumentKind.Drawing ? 1 : 0))
         {
@@ -2189,27 +2197,53 @@ internal sealed class BatchPropertyEditDialog : Form
                     .Select(model => model.PropertyValue(targetProperty))
                     .FirstOrDefault(value => !string.IsNullOrWhiteSpace(value))
                 : item.PropertyValue("文档名称");
+            var currentValue = item.PropertyValue(targetProperty);
             if (!item.IsPropertyApplicable(targetProperty)
                 || !BatchPropertyNameModelAutoFillRule.TryResolveValue(
                     sourceValue,
-                    item.PropertyValue(targetProperty),
-                    overwriteMismatch: isDrawing,
+                    currentValue,
+                    overwriteMismatch: true,
                     out var value))
             {
                 continue;
             }
 
-            item.SetPropertyValue(targetProperty, value);
-            changedCount++;
+            pendingValues.Add(new KeyValuePair<BatchPropertyEditItem, string>(item, value));
+            if (!string.IsNullOrWhiteSpace(currentValue))
+            {
+                overwriteCount++;
+            }
         }
 
-        if (changedCount == 0)
+        if (pendingValues.Count == 0)
         {
             CancelValidation(string.Concat(
-                "所选图档没有可用的文档/关联模型值，或“",
-                targetProperty,
-                "”已经正确，现有内容未改变。"));
+                "所选图档没有可用的文档/关联模型值，或“", targetProperty, "”已经正确。"));
             return;
+        }
+
+        if (overwriteCount > 0)
+        {
+            var confirmation = MessageBox.Show(
+                this,
+                string.Concat(
+                    "即将把文档名称填充到“", targetProperty, "”。\r\n",
+                    "其中 ", overwriteCount, " 个已有值将被覆盖，",
+                    pendingValues.Count - overwriteCount, " 个空白值将被填充。\r\n\r\n",
+                    "确认覆盖吗？"),
+                string.Concat("确认覆盖", targetProperty),
+                MessageBoxButtons.YesNo,
+                MessageBoxIcon.Warning,
+                MessageBoxDefaultButton.Button2);
+            if (confirmation != DialogResult.Yes)
+            {
+                return;
+            }
+        }
+
+        foreach (var pending in pendingValues)
+        {
+            pending.Key.SetPropertyValue(targetProperty, pending.Value);
         }
 
         grid.Refresh();

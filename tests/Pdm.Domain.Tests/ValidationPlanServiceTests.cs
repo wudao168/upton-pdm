@@ -19,7 +19,7 @@ public sealed class ValidationPlanServiceTests
 
         var item = Assert.Single(saved.Items);
         Assert.Null(item.CatalogItemId);
-        Assert.Equal("人工项", item.CategoryName);
+        Assert.Equal("自定义", item.CategoryName);
         Assert.Equal("人工确认安全门互锁", item.ValidationContent);
         Assert.Equal("门关闭后方可启动", item.ValidationStandard);
     }

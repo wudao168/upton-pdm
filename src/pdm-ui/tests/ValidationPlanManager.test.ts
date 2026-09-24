@@ -193,7 +193,12 @@ describe('ValidationPlanManager', () => {
     wrapper.unmount()
   })
 
-  it('可添加并保存人工验证行', async () => {
+  it('添加自定义项后置顶并保存', async () => {
+    const planWithCatalogRow = {
+      ...childPlan,
+      items: [{ id: 'row-catalog', catalogCategoryId: category.id, catalogItemId: item.id, categoryName: category.name, validationContent: item.content, informationSource: '内部评审', validationDate: null, result: null, responsiblePerson: null, remark: null, sortOrder: 1 }],
+    }
+    api.readProjectValidationPlan.mockImplementation(async (projectId: string) => projectId === childProject.id ? planWithCatalogRow : null)
     const wrapper = mount(ValidationPlanManager, {
       attachTo: document.body,
       props: { projectId: 'project-1', projectCode: 'P700005-3', projectName: '切料机构', projects: [rootProject, childProject], token: 'token', currentUsername: 'engineer', currentDisplayName: '工程师', canEdit: true, canManageCatalog: true },
@@ -202,16 +207,20 @@ describe('ValidationPlanManager', () => {
     await flushPromises()
     await wrapper.findAll('tbody tr').find(row => row.text().includes('P700005-3'))!.trigger('click')
     await flushPromises()
-    await wrapper.findAll('button').find(button => button.text().includes('添加人工项'))!.trigger('click')
+    await wrapper.get('button[aria-label="添加自定义项"]').trigger('click')
     await flushPromises()
 
+    expect(wrapper.findAll('.validation-plan__table tbody tr')[0]!.text()).toContain('自定义')
     const content = wrapper.find<HTMLInputElement>('input[placeholder="请输入验证内容"]')
-    await content.setValue('人工确认安全门互锁')
+    await content.setValue('自定义确认安全门互锁')
     await wrapper.findAll('button').find(button => button.text().includes('保存'))!.trigger('click')
     await flushPromises()
 
     expect(api.saveProjectValidationPlan).toHaveBeenCalledWith('project-1', expect.objectContaining({
-      items: [expect.objectContaining({ catalogItemId: null, validationContent: '人工确认安全门互锁', sortOrder: 1 })],
+      items: [
+        expect.objectContaining({ catalogItemId: null, validationContent: '自定义确认安全门互锁', sortOrder: 1 }),
+        expect.objectContaining({ catalogItemId: item.id, sortOrder: 2 }),
+      ],
     }), 'token')
     wrapper.unmount()
   })

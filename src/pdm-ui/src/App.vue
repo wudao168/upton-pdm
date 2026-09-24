@@ -37,6 +37,10 @@ import type { AddDrawingReviewMarkupInput, DocumentNode, DrawingReviewBadge, Dra
 import { resolveUserDisplayName, userDisplayNameKey } from './userDisplay'
 
 const workspace = usePdmWorkspace()
+function refreshCurrentBom() {
+  const projectId = workspace.project.value?.id
+  if (projectId) void runOperation(() => workspace.reload(projectId), '当前BOM已刷新')
+}
 const displayUserName = (username?: string | null, emptyText = '—') => resolveUserDisplayName(workspace.users.value, username, emptyText)
 provide(userDisplayNameKey, displayUserName)
 type PdmTheme = 'a' | 'c' | 'o'
@@ -713,6 +717,7 @@ async function refreshDocumentTree() {
 }
 watch([() => workspace.project.value.id, () => workspace.root.value], () => requestWorkspaceLocalState(), { flush: 'post' })
 onMounted(() => {
+  window.addEventListener('pdm-refresh-current-bom', refreshCurrentBom)
   window.addEventListener('pdm-open-project', handleProjectNavigation)
   window.addEventListener('pdm-workspace-local-state', handleWorkspaceLocalState)
   window.addEventListener('pdm-solidworks-status', handleWorkspaceSolidWorksStatus)
@@ -723,6 +728,7 @@ onMounted(() => {
   requestWorkspaceLocalState()
 })
 onBeforeUnmount(() => {
+  window.removeEventListener('pdm-refresh-current-bom', refreshCurrentBom)
   window.removeEventListener('pdm-open-project', handleProjectNavigation)
   window.removeEventListener('pdm-workspace-local-state', handleWorkspaceLocalState)
   window.removeEventListener('pdm-solidworks-status', handleWorkspaceSolidWorksStatus)
@@ -1124,6 +1130,7 @@ async function openWhereUsedParent(projectId: string, parentDocumentId: string) 
               :pending="workspace.operationPending.value"
               :token="workspace.getAccessToken()"
               :on-update-main-staffing="workspace.updateMainProjectStaffing"
+              :on-update-designers="workspace.updateChildProjectDesigners"
               :on-update-phase-owners="workspace.updateProjectPhaseOwners"
               @documents="openProjectTab('documents')"
               @bom="openProjectTab('bom')"

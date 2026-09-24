@@ -1441,6 +1441,18 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
         return segments.Length == 0 ? "00" : string.Join('-', segments);
     }
 
+    private static int? TryRecoverCustomerProjectSequence(string? deviceModel, string? customerCode)
+    {
+        if (string.IsNullOrWhiteSpace(deviceModel) || string.IsNullOrWhiteSpace(customerCode)) return null;
+        var marker = $"-{customerCode}-";
+        var start = deviceModel.IndexOf(marker, StringComparison.OrdinalIgnoreCase);
+        if (start < 0) return null;
+        start += marker.Length;
+        var end = deviceModel.IndexOf('-', start);
+        if (end < 0 || !int.TryParse(deviceModel[start..end], out var sequence) || sequence is < 1 or > 999) return null;
+        return sequence;
+    }
+
     private static async Task InsertNumberedProjectAsync(MySqlConnection connection, DbTransaction transaction, Project project, DateTime now, CancellationToken cancellationToken)
     {
         await connection.ExecuteAsync(new CommandDefinition(

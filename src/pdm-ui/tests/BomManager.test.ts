@@ -1666,6 +1666,29 @@ describe('BomManager', () => {
     expect(wrapper.emitted('batchDelete')).toEqual([[['manual-unmatched'], '确认删除无来源人工项']])
   })
 
+  it('offers merge or retain for a manual row matching a source material code', async () => {
+    const confirm = vi.spyOn(ElMessageBox, 'confirm').mockResolvedValue('confirm' as never)
+    const wrapper = mount(BomManager, {
+      props: {
+        standard: [{
+          id: 'duplicate-manual', kind: 'Standard', sequence: 1, drawingNumber: 'S-DUPLICATE', name: '人工维护项', quantity: 1, unit: '件', revision: 'W1', complete: false,
+          source: 'Manual', manualUnmatched: true, reconciliationStatus: 'DuplicateSourcePending',
+          reconciliationNote: '与图档源数据同编码，待处理。',
+        }],
+        nonStandard: [], electrical: [], declarations: [], pending: false, editable: true,
+      },
+    })
+
+    await wrapper.findAll('button[role="tab"]')[1].trigger('click')
+    const actions = wrapper.get('.pdm-bom-reconciliation-actions')
+    expect(actions.findAll('button').map(button => button.text())).toEqual(['合并到源数据', '保留人工维护'])
+    expect(wrapper.get('.pdm-bom-issue-button').text()).toBe('源数据重复待处理')
+
+    await actions.get('button[aria-label="合并人工BOM项到源数据 S-DUPLICATE"]').trigger('click')
+    expect(confirm).toHaveBeenCalledOnce()
+    expect(wrapper.emitted('resolve')).toEqual([['duplicate-manual', 'merge-source']])
+  })
+
   it('batch confirms retainable rows while rejecting a mixed ordinary selection', async () => {
     const confirm = vi.spyOn(ElMessageBox, 'confirm').mockResolvedValue('confirm' as never)
     const wrapper = mount(BomManager, {

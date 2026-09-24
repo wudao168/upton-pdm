@@ -372,6 +372,11 @@ const materialCategoryTree = computed<CategoryTreeNode[]>(() => {
   return prune(buildCategoryTree(categories.value.filter(category => category.isVisible && category.isActive)))
 })
 const creatableCategories = computed(() => categories.value.filter(category => category.allowCreate && category.isVisible && category.isActive && category.pdmKind))
+const standardApprovalCategories = computed(() => creatableCategories.value.filter(category => category.pdmKind === 'Standard'))
+const defaultStandardApprovalCategoryCode = computed(() => standardApprovalCategories.value.some(category => category.code === '0102')
+  ? '0102'
+  : standardApprovalCategories.value[0]?.code ?? '')
+const codeApplicationCategoryOverrides = reactive<Record<string, string>>({})
 
 const kindLabels: Record<MaterialKind, string> = { Electrical: '电气外购件', Standard: '机械外购件', NonStandard: '非标机加件', Product: '产品/组件' }
 const supplyLabels: Record<MaterialSupplyMode, string> = { Purchase: '采购', Manufacture: '自制', Outsource: '委外' }
@@ -403,6 +408,12 @@ watch(() => currentSynchronizationTasks.value.length, total => {
   pendingSyncPage.value = Math.min(pendingSyncPage.value, Math.max(1, Math.ceil(total / workflowPageSize)))
 })
 const applicationsForApprovalRow = (application: MaterialCodeApprovalRow): MaterialCodeApprovalRow[] => application.groupedApplications ?? [application]
+function approvalCategoryCode(application: MaterialCodeApprovalRow) {
+  return codeApplicationCategoryOverrides[application.id] || application.categoryCode || defaultStandardApprovalCategoryCode.value
+}
+function setApprovalCategoryCode(application: MaterialCodeApprovalRow, categoryCode: string) {
+  codeApplicationCategoryOverrides[application.id] = categoryCode
+}
 const applicationTypeLabel = (application: MaterialCodeApprovalRow) => application.groupedApplications
   ? `BOM料号（${application.groupedApplications.length}项）`
   : application.applicationType === 'MaterialMaster' ? '普通料品' : application.applicationType === 'BomHeader' ? 'BOM料号' : '标准件料号'
@@ -953,7 +964,7 @@ function canRejectCodeApplication(application: MaterialCodeApprovalRow) {
 }
 
 async function processApprovalRow(application: MaterialCodeApprovalRow, approved: boolean, comment: string) {
-  if (!application.masterMaterial) return decideMaterialCodeApplication(application.id, application.rowVersion, approved, comment, props.token)
+  if (!application.masterMaterial) return decideMaterialCodeApplication(application.id, application.rowVersion, approved, comment, props.token, approved ? approvalCategoryCode(application) : undefined)
   if (!props.canApprove) throw new Error('当前账号没有普通料品审批权限。')
   if (!approved) {
     const rejected = await rejectMaterial(application.masterMaterial.id, application.rowVersion, comment, props.token)
@@ -1650,7 +1661,7 @@ onMounted(() => {
                     <el-table-column label="申请类型" width="64"><template #default="{ row }">{{ applicationTypeLabel(row) }}</template></el-table-column>
                     <el-table-column label="来源" width="116" show-overflow-tooltip><template #default="{ row }">{{ row.masterMaterial ? '料品主档' : row.projectCode ? `${row.projectCode} · ${row.projectName || '未命名项目'}` : row.projectId }}</template></el-table-column>
                     <el-table-column label="BOM层级" width="82" show-overflow-tooltip><template #default="{ row }">{{ applicationTargetLabel(row) }}</template></el-table-column>
-                    <el-table-column prop="categoryCode" label="料号分类" width="64"><template #default="{ row }">{{ row.categoryCode || '—' }}</template></el-table-column>
+                    <el-table-column prop="categoryCode" label="料号分类" width="148"><template #default="{ row }"><el-select v-if="!row.masterMaterial && canDecideMaterialCode" class="material-code-approval-category" :model-value="approvalCategoryCode(row)" filterable :disabled="decidingApplicationId === row.id || batchDecidingApplications" @update:model-value="setApprovalCategoryCode(row, String($event))"><el-option v-for="category in standardApprovalCategories" :key="category.code" :label="`${category.code} ${category.name}`" :value="category.code" /></el-select><span v-else>{{ row.categoryCode || defaultStandardApprovalCategoryCode || '—' }}</span></template></el-table-column>
                     <el-table-column prop="materialCode" label="PLM料号" width="110" show-overflow-tooltip><template #default="{ row }">{{ applicationMaterialCodeLabel(row) }}</template></el-table-column>
                     <el-table-column prop="applicationName" label="名称" width="110" show-overflow-tooltip><template #default="{ row }">{{ row.applicationName || row.bomItemName || '—' }}</template></el-table-column>
                     <el-table-column prop="specification" label="型号" width="78" show-overflow-tooltip><template #default="{ row }">{{ row.specification || '—' }}</template></el-table-column>
@@ -1809,6 +1820,7 @@ onMounted(() => {
       :can-publish-relations="canPublishRelations"
       :form="form"
       :categories="creatableCategories"
+      :brands="brandOptions"
       :material-code-placeholder="materialCodePlaceholder"
       :attachments="editorAttachments"
       :saving="saving"

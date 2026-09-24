@@ -166,9 +166,6 @@ public sealed class ApprovalU9AutomationService(
                 "U9C料品已同步，但至少一张BOM创建或追加失败；可在项目BOM总览中检查并重试。",
                 null,
                 outcomes);
-        if (outcomes.Any(outcome => outcome.State == ProjectBomU9AutomaticState.AwaitingConfirmation))
-            return new(ApprovalU9AutomationStage.WaitingForDependencies,
-                "BOM包含减量或删除变更，请在项目BOM总览核对后人工确认同步；后台未执行这些变更。", null, outcomes);
         if (hasPendingHeaders)
             return new(ApprovalU9AutomationStage.WaitingForDependencies,
                 "BOM表头料号尚未完成自动审批；请在多级总览查看后台进度或失败原因，无需人工审批。", null, outcomes);
