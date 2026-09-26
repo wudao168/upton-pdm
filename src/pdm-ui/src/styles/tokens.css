@@ -6,30 +6,31 @@
   /* 全局统一：1 套界面字体 + 1 套等宽字体（料号/图号/代码） */
   --pdm-font-ui: "Microsoft YaHei", "微软雅黑", "Segoe UI", sans-serif;
   --pdm-font-mono: Consolas, monospace;
-  --pdm-bg: #f4f7fb;
+  --pdm-bg: #f8fafc;
   --pdm-surface: #ffffff;
-  --pdm-surface-muted: #f8fafc;
+  --pdm-surface-muted: #f1f5f9;
   --pdm-detail-row: #ffffff;
-  --pdm-detail-row-alt: #f0f2f5;
+  --pdm-detail-row-alt: #f1f5f9;
   --pdm-detail-row-height: 30px;
   --pdm-sidebar: #3a475c;
   --pdm-sidebar-active: #203347;
   --pdm-sidebar-text: rgba(255, 255, 255, .95);
-  /* 文字色只保留三档中性色 + 语义色 */
+  /* 文字色收敛为主文字与高对比度辅助文字两档。 */
   --pdm-text: #0f172a;
   --pdm-text-soft: #334155;
-  --pdm-muted: #64748b;
+  --pdm-muted: #334155;
   --pdm-text-muted: var(--pdm-muted);
-  --pdm-border: #dbe3ef;
-  --pdm-border-soft: #e8eef5;
-  --pdm-blue: #2f6de0;
-  --pdm-blue-soft: #eaf2ff;
+  --pdm-border: #cbd5e1;
+  --pdm-border-soft: #cbd5e1;
+  --pdm-blue: #1d4ed8;
+  --pdm-blue-soft: #eff6ff;
   --pdm-green: #15803d;
-  --pdm-green-soft: #e6f6ee;
+  --pdm-green-soft: #f0fdf4;
   --pdm-orange: #b45309;
-  --pdm-orange-soft: #fff3e3;
-  --pdm-danger: #dc2626;
-  --pdm-purple: #7c3aed;
+  --pdm-orange-soft: #fff7ed;
+  --pdm-danger: #b91c1c;
+  --pdm-danger-soft: #fef2f2;
+  --pdm-purple: var(--pdm-blue);
   --pdm-shadow: rgba(29, 52, 83, 0.13);
 }
 

@@ -121,6 +121,7 @@ public sealed record ProjectPlanTask(
     public Guid? TemplateTaskId { get; init; }
     public Guid? SourceTaskId { get; init; }
     public string? WorkflowKey { get; init; }
+    public bool IsCustom { get; init; }
 }
 
 public sealed record ProjectPlanSyncResult(Guid ProjectId, string ProjectCode, string Result, IReadOnlyList<string> Differences);

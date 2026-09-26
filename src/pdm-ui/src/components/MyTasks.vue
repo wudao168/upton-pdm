@@ -383,7 +383,7 @@ async function resetPassword(task: PasswordResetTask) {
           </tbody>
         </table>
       </div>
-      <div v-else class="pdm-project-empty pdm-task-empty"><ClipboardCheck :size="42" /><h2>当前没有待办或消息</h2><p>新的审批、驳回消息、编辑权限或密码重置任务会显示在这里。</p></div>
+      <div v-else class="pdm-project-empty pdm-task-empty"><ClipboardCheck :size="42" /><h2>当前没有待办或消息</h2><p>新的审批、退回消息、编辑权限或密码重置任务会显示在这里。</p></div>
 
       <footer class="pdm-task-pagination">
         <span>共 {{ filteredRows.length }} 条</span>

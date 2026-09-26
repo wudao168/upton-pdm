@@ -1503,7 +1503,7 @@ export async function decideDrawingReviewTarget(packageId: string, itemId: strin
   }, token))
 }
 
-/** 驳回后设计者已按新版本存档：把该图档重新提交给审图人（只影响这一张图）。 */
+/** 退回后设计者已按新版本存档：把该图档重新提交给审图人（只影响这一张图）。 */
 export async function resubmitDrawingReviewItem(packageId: string, itemId: string, token: string): Promise<DrawingReviewPackage> {
   return mapDrawingReviewPackage(await requestJson<ApiDrawingReviewPackage>(`/api/drawing-reviews/${packageId}/items/${itemId}/resubmit`, {
     method: 'POST',
@@ -2422,7 +2422,7 @@ function mapReleasePackage(releasePackage: ApiReleasePackage): ReleasePackageSum
       assignee: task.assignee,
       status,
       detail: decision === 'Approved' ? `已同意${decisionTime ? ` · ${decisionTime}` : ''}`
-        : decision === 'Rejected' ? `已驳回${decisionTime ? ` · ${decisionTime}` : ''}`
+        : decision === 'Rejected' ? `已退回${decisionTime ? ` · ${decisionTime}` : ''}`
           : skipped ? '本轮未到达' : '待处理',
       decision: task.decision ?? undefined,
       decisionBy: task.decisionBy ?? undefined,
@@ -2437,8 +2437,8 @@ function mapReleasePackage(releasePackage: ApiReleasePackage): ReleasePackageSum
     id: 'production-release',
     stage: '生产发包',
     assignee: '生产部',
-    status: state === '已发布' ? 'done' : state === '发布中' ? 'current' : state === '已驳回' ? 'skipped' : 'waiting',
-    detail: state === '已驳回' ? '本轮未到达' : releasePackage.publishedAt ? formatDate(releasePackage.publishedAt) : '审批后自动推送',
+    status: state === '已发布' ? 'done' : state === '发布中' ? 'current' : state === '已退回' ? 'skipped' : 'waiting',
+    detail: state === '已退回' ? '本轮未到达' : releasePackage.publishedAt ? formatDate(releasePackage.publishedAt) : '审批后自动推送',
   })
 
   return {
@@ -2548,8 +2548,8 @@ function approvalStage(value: number | string): string {
 
 function releaseState(value: number | string): string {
   const name = typeof value === 'number'
-    ? ['草稿', '工艺审核', '待批准', '已驳回', '发布中', '已发布', '发布失败'][value]
-    : ({ Draft: '草稿', ProcessReview: '审批中', Approval: '待批准', Rejected: '已驳回', Publishing: '发布中', Published: '已发布', PublishFailed: '发布失败' } as Record<string, string>)[value]
+    ? ['草稿', '工艺审核', '待批准', '已退回', '发布中', '已发布', '发布失败'][value]
+    : ({ Draft: '草稿', ProcessReview: '审批中', Approval: '待批准', Rejected: '已退回', Publishing: '发布中', Published: '已发布', PublishFailed: '发布失败' } as Record<string, string>)[value]
   return name ?? String(value)
 }
 

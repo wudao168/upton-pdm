@@ -3,7 +3,7 @@ import type { DrawingReviewPackage } from './types'
 const packageStateLabels: Record<DrawingReviewPackage['state'], string> = {
   InReview: '待审核',
   PendingSupervisorApproval: '待批准',
-  ChangesRequested: '已驳回（待修改）',
+  ChangesRequested: '已退回（待修改）',
   WritingProperties: '已批准',
   Approved: '已批准',
   Stale: '版本冲突',
@@ -12,7 +12,7 @@ const packageStateLabels: Record<DrawingReviewPackage['state'], string> = {
 
 const targetStateLabels: Record<DrawingReviewPackage['items'][number]['drawingState'], string> = {
   Pending: '待审核',
-  ChangesRequested: '已驳回（待修改）',
+  ChangesRequested: '已退回（待修改）',
   Approved: '待批准',
   Marked: '已批准',
   NotRequired: '无需审核',
@@ -32,7 +32,7 @@ export function drawingReviewAssignedReviewerPool(packageValue: DrawingReviewPac
 
 export type DrawingReviewTone = 'neutral' | 'pending' | 'warning' | 'success' | 'danger'
 
-/** 阶段配色：待提交=灰、待审核=橙、待批准=蓝、已批准=绿、已驳回=红。 */
+/** 阶段配色：待发起审核=灰、待审核=橙、待批准=蓝、已批准=绿、已退回=红。 */
 export function drawingReviewTargetStateTone(state: DrawingReviewPackage['items'][number]['drawingState']): DrawingReviewTone {
   return ({ Pending: 'warning', ChangesRequested: 'danger', Approved: 'pending', Marked: 'success', NotRequired: 'neutral' } as const)[state]
 }

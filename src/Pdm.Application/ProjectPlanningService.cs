@@ -190,15 +190,28 @@ public sealed class ProjectPlanningService(
         var reason = editingChangeDraft ? "保存计划变更草稿" : "修改未批准计划";
         current = current with { Tasks = current.Tasks.Select(NormalizeLegacyWorkflowTask).ToArray() };
         var tasks = NormalizeTasks(command.Tasks);
-        if (tasks.Any(task => !current.Tasks.Any(old => old.Id == task.Id)))
-            throw new PdmRuleException("不能通过任务编辑新增或替换模板任务。");
+        var addedTasks = tasks.Where(task => current.Tasks.All(old => old.Id != task.Id)).ToArray();
+        if (addedTasks.Any(task => !task.IsCustom))
+            throw new PdmRuleException("只能通过任务编辑新增自定义任务。");
+        tasks = tasks.Select(task => current.Tasks.FirstOrDefault(old => old.Id == task.Id) is { } existing
+            ? task with { IsCustom = existing.IsCustom }
+            : task with
+            {
+                TemplateTaskId = null,
+                SourceTaskId = null,
+                WorkflowKey = null,
+                IsCustom = true,
+                ActualStart = null,
+                ActualFinish = null,
+                CompletionPercent = 0,
+                Status = ProjectPlanTaskStatus.NotStarted,
+            }).ToArray();
         var removedTasks = current.Tasks.Where(old => tasks.All(task => task.Id != old.Id)).ToArray();
-        if (removedTasks.Any(IsWorkflowTask)) throw new PdmRuleException("流程必需任务不能从项目计划中删除。");
         if (removedTasks.Any(task => task.Status != ProjectPlanTaskStatus.NotStarted || task.ActualStart is not null || task.ActualFinish is not null || task.CompletionPercent != 0))
             throw new PdmRuleException("已有实际进度的任务不能删除。");
         tasks = RewireRemovedDependencies(current.Tasks, tasks);
         ValidatePlanTasks(tasks);
-        if (tasks.Any(task => current.Tasks.Any(old => old.Id == task.Id && (old.Name != task.Name || old.Stage != task.Stage || old.Weight != task.Weight))))
+        if (tasks.Any(task => current.Tasks.Any(old => old.Id == task.Id && !old.IsCustom && (old.Name != task.Name || old.Stage != task.Stage || old.Weight != task.Weight))))
             throw new PdmRuleException("任务名称、所属阶段和进度权重采用生成计划时的模板配置，不能在项目计划中修改。");
         if (editingChangeDraft && tasks.Any(task => current.Tasks.Any(old => old.Id == task.Id && old.Status == ProjectPlanTaskStatus.Completed
             && (task.PlannedStart != old.PlannedStart || task.PlannedFinish != old.PlannedFinish || task.Assignee != old.Assignee))))
@@ -217,22 +230,27 @@ public sealed class ProjectPlanningService(
             || item.ActualStart != current.Tasks.FirstOrDefault(old => old.Id == item.Id)?.ActualStart
             || item.ActualFinish != current.Tasks.FirstOrDefault(old => old.Id == item.Id)?.ActualFinish))
             throw new PdmRuleException("首版计划批准生效后才能填报实际进度。");
-        tasks = tasks.Select(item => item with
-        {
-            TemplateTaskId = current.Tasks.First(old => old.Id == item.Id).TemplateTaskId,
-            SourceTaskId = current.Tasks.First(old => old.Id == item.Id).SourceTaskId,
-            WorkflowKey = current.Tasks.First(old => old.Id == item.Id).WorkflowKey,
-            BaselineStart = current.Tasks.FirstOrDefault(old => old.Id == item.Id)?.BaselineStart,
-            BaselineFinish = current.Tasks.FirstOrDefault(old => old.Id == item.Id)?.BaselineFinish
-        }).ToArray();
+        tasks = tasks.Select(item => current.Tasks.FirstOrDefault(old => old.Id == item.Id) is { } existing
+            ? item with
+            {
+                TemplateTaskId = existing.TemplateTaskId,
+                SourceTaskId = existing.SourceTaskId,
+                WorkflowKey = existing.WorkflowKey,
+                IsCustom = existing.IsCustom,
+                BaselineStart = existing.BaselineStart,
+                BaselineFinish = existing.BaselineFinish
+            }
+            : item).ToArray();
         tasks = CascadeDependentTasks(tasks);
-        var shiftDays = tasks[0].PlannedStart.DayNumber - current.Tasks.First(old => old.Id == tasks[0].Id).PlannedStart.DayNumber;
+        var shiftDays = addedTasks.Length == 0 ? tasks[0].PlannedStart.DayNumber - current.Tasks.First(old => old.Id == tasks[0].Id).PlannedStart.DayNumber : 0;
         var shiftedTogether = shiftDays != 0 && tasks.All(task => current.Tasks.Any(old => old.Id == task.Id
             && task.PlannedStart == old.PlannedStart.AddDays(shiftDays) && task.PlannedFinish == old.PlannedFinish.AddDays(shiftDays)));
         var now = timeProvider.GetUtcNow();
         var planningChanged = tasks.Count != current.Tasks.Count || tasks.Any(task => current.Tasks.Any(old => old.Id == task.Id
             && (task.PlannedStart != old.PlannedStart || task.PlannedFinish != old.PlannedFinish
                 || task.IsRequired != old.IsRequired || task.IsMilestone != old.IsMilestone
+                || task.SortOrder != old.SortOrder
+                || (old.IsCustom && (task.Name != old.Name || task.Stage != old.Stage || task.Weight != old.Weight))
                 || !task.PredecessorTaskIds.SequenceEqual(old.PredecessorTaskIds)))) || !stages.SequenceEqual(current.Stages);
         var next = current with
         {
@@ -649,12 +667,12 @@ public sealed class ProjectPlanningService(
     {
         var request = current.ChangeRequest!;
         if (!string.Equals(actor, request.ApprovalAssignee, StringComparison.OrdinalIgnoreCase)) throw new UnauthorizedAccessException("仅原计划审批负责人可审批此变更。");
-        var reason = approve ? Optional(comment, 280) ?? "同意授予计划变更权限" : Required(comment, 280, "驳回原因");
+        var reason = approve ? Optional(comment, 280) ?? "同意授予计划变更权限" : Required(comment, 280, "退回原因");
         var tasks = approve ? CascadeDependentTasks(ApplyScheduleChanges(current.Tasks, request.Tasks)) : current.Tasks;
         ValidatePlanTasks(tasks);
         if (approve && tasks.Any(task => current.Tasks.Any(old => old.Id == task.Id && old.Status == ProjectPlanTaskStatus.Completed
             && (task.PlannedStart != old.PlannedStart || task.PlannedFinish != old.PlannedFinish || task.Assignee != old.Assignee))))
-            throw new PdmRuleException("旧版申请包含已完成任务的排期变更，请先驳回该申请，再重新提交变更权限申请。");
+            throw new PdmRuleException("旧版申请包含已完成任务的排期变更，请先退回该申请，再重新提交变更权限申请。");
         var now = timeProvider.GetUtcNow();
         var decided = request with { Status = approve ? ProjectPlanApprovalStatus.Approved : ProjectPlanApprovalStatus.Rejected,
             DecidedBy = actor, DecidedAt = now, Comment = reason };
@@ -665,7 +683,7 @@ public sealed class ProjectPlanningService(
         var saved = await plans.SavePlanAsync(next, current.RowVersion,
             approve ? NewVersion(source, $"批准变更权限并保留原计划：{request.Reason}", actor, now) : null, cancellationToken);
         await repository.CreateUserNotificationsAsync([new UserNotification(Guid.NewGuid(), request.SubmittedBy, "project-plan-approval",
-            approve ? "计划变更权限已批准" : "计划变更权限已驳回", approve ? $"{project.Code} · {reason}；请进入变更草稿编辑，完成前原计划继续生效。" : $"{project.Code} · {reason}", project.Id, null,
+            approve ? "计划变更权限已批准" : "计划变更权限已退回", approve ? $"{project.Code} · {reason}；请进入变更草稿编辑，完成前原计划继续生效。" : $"{project.Code} · {reason}", project.Id, null,
             $"project-plan-change-decision:{request.Id:N}", now, null)], cancellationToken);
         await AuditAsync(actor, approve ? "project-plan.change.approve" : "project-plan.change.reject", nameof(ProjectPlan), saved.Id, reason, cancellationToken);
         return saved;
@@ -756,7 +774,7 @@ public sealed class ProjectPlanningService(
         var project = await RequireManageAsync(projectId, actor, role, cancellationToken);
         var current = await plans.FindPlanAsync(projectId, cancellationToken) ?? throw new PdmNotFoundException("项目计划不存在。");
         if (current.RowVersion != expectedRowVersion) throw new PdmConflictException("计划已被修改，请刷新后重新提交。");
-        if (current.ApprovalStatus is ProjectPlanApprovalStatus.Approved or ProjectPlanApprovalStatus.Pending) throw new PdmRuleException("仅草稿或已驳回的首版计划可以提交审批。");
+        if (current.ApprovalStatus is ProjectPlanApprovalStatus.Approved or ProjectPlanApprovalStatus.Pending) throw new PdmRuleException("仅草稿或已退回的首版计划可以提交审批。");
         ValidatePlanTasks(current.Tasks);
         var assignee = await ResolveApprovalAssigneeAsync(project, cancellationToken);
         var now = timeProvider.GetUtcNow();
@@ -766,7 +784,7 @@ public sealed class ProjectPlanningService(
             SubmittedBy = actor, SubmittedAt = now, ApprovalComment = null, UpdatedBy = actor, UpdatedAt = now
         }, expectedRowVersion, null, cancellationToken);
         await repository.CreateUserNotificationsAsync([new UserNotification(Guid.NewGuid(), assignee, "project-plan-approval", "首版项目计划待审批",
-            $"{project.Code} · {project.Name}，请进入项目计划审阅并批准或驳回。", project.Id, null, $"project-plan-approval:{saved.Id:N}:{saved.RowVersion}", now, null)], cancellationToken);
+            $"{project.Code} · {project.Name}，请进入项目计划审阅并批准或退回。", project.Id, null, $"project-plan-approval:{saved.Id:N}:{saved.RowVersion}", now, null)], cancellationToken);
         await AuditAsync(actor, "project-plan.approval.submit", nameof(ProjectPlan), saved.Id, $"{project.Code}；审批人{assignee}", cancellationToken);
         return saved;
     }
@@ -783,7 +801,7 @@ public sealed class ProjectPlanningService(
         if (!string.Equals(actor, assignee, StringComparison.OrdinalIgnoreCase)
             || !string.Equals(actor, current.ApprovalAssignee, StringComparison.OrdinalIgnoreCase))
             throw new UnauthorizedAccessException("仅当前项目执行事业部的主负责人可以审批首版计划。负责人变更后请修改草稿并重新提交。");
-        var reason = approve ? Optional(comment, 280) ?? "批准首版计划" : Required(comment, 280, "驳回原因");
+        var reason = approve ? Optional(comment, 280) ?? "批准首版计划" : Required(comment, 280, "退回原因");
         var now = timeProvider.GetUtcNow();
         var saved = await plans.SavePlanAsync(current with
         {
@@ -792,9 +810,9 @@ public sealed class ProjectPlanningService(
             BaselineVersion = approve ? 1 : current.BaselineVersion,
             Tasks = approve ? current.Tasks.Select(item => item with { BaselineStart = item.PlannedStart, BaselineFinish = item.PlannedFinish }).ToArray() : current.Tasks,
             UpdatedBy = actor, UpdatedAt = now
-        }, expectedRowVersion, NewVersion(current, approve ? "批准首版计划并冻结基线V1" : $"驳回首版计划：{reason}", actor, now), cancellationToken);
+        }, expectedRowVersion, NewVersion(current, approve ? "批准首版计划并冻结基线V1" : $"退回首版计划：{reason}", actor, now), cancellationToken);
         await repository.CreateUserNotificationsAsync([new UserNotification(Guid.NewGuid(), current.SubmittedBy!, "project-plan-approval",
-            approve ? "首版项目计划已生效" : "首版项目计划已驳回", $"{project.Code} · {reason}", project.Id, null,
+            approve ? "首版项目计划已生效" : "首版项目计划已退回", $"{project.Code} · {reason}", project.Id, null,
             $"project-plan-decision:{saved.Id:N}:{saved.RowVersion}", now, null)], cancellationToken);
         await AuditAsync(actor, approve ? "project-plan.approval.approve" : "project-plan.approval.reject", nameof(ProjectPlan), saved.Id, $"{project.Code}；{reason}", cancellationToken);
         if (approve)

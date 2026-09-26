@@ -1,4 +1,4 @@
-﻿[CmdletBinding()]
+[CmdletBinding()]
 param(
     [string]$Database = 'pdm_phase1_qa',
     [int]$ApiPort = 5180,
@@ -235,8 +235,8 @@ try {
     $retryPackage = Invoke-PdmJson 'Post' '/api/release-packages' @{ projectId = $project.id; referenceSnapshotId = $null; number = $retryNumber; processReviewer = 'qa_admin'; approver = 'qa_admin' } $headers
     $retryPackage = Invoke-PdmJson 'Post' "/api/release-packages/$($retryPackage.id)/submit" $null $headers
     $retryProcessTask = @($retryPackage.approvalTasks) | Where-Object { $_.stage -eq 1 } | Select-Object -First 1
-    $retryPackage = Invoke-PdmJson 'Post' "/api/approval-tasks/$($retryProcessTask.id)/decision" @{ decision = 1; comment = '验收驳回' } $headers
-    Assert-Phase1 ($retryPackage.state -eq 3) '驳回后发布包未进入已驳回状态。'
+    $retryPackage = Invoke-PdmJson 'Post' "/api/approval-tasks/$($retryProcessTask.id)/decision" @{ decision = 1; comment = '验收退回' } $headers
+    Assert-Phase1 ($retryPackage.state -eq 3) '退回后发布包未进入已退回状态。'
     $retryPackage = Invoke-PdmJson 'Post' "/api/release-packages/$($retryPackage.id)/submit" $null $headers
     Assert-Phase1 ($retryPackage.state -eq 1 -and @($retryPackage.approvalTasks | Where-Object { $null -ne $_.decision }).Count -eq 0) '重新提交未清空旧审批并回到工艺审核。'
     $retryProcessTask = @($retryPackage.approvalTasks) | Where-Object { $_.stage -eq 1 } | Select-Object -First 1

@@ -73,7 +73,7 @@ describe('MaterialManagement', () => {
       const filtered = source
         .filter(item => !input.categoryCode || item.categoryCode?.startsWith(input.categoryCode))
         .filter(item => !input.brand || item.brand === input.brand)
-        .filter(item => !normalizedQuery || [item.materialCode, item.name, item.specification, item.brand, item.categoryCode]
+        .filter(item => !normalizedQuery || [item.materialCode, item.name, item.specification, item.categoryCode]
           .some(value => value?.toLocaleLowerCase().includes(normalizedQuery)))
       const page = input.page || 1
       const pageSize = input.pageSize || 50
@@ -291,7 +291,7 @@ describe('MaterialManagement', () => {
     const wrapper = mount(MaterialManagement, { props: { token: 'token', canEdit: true, canApprove: true, canManageIntegration: false }, global: { plugins: [ElementPlus] } })
     await flushPromises()
     const initialCalls = api.listMaterialPage.mock.calls.length
-    const search = wrapper.get('input[placeholder="搜索编码、名称、规格、品牌或分类"]')
+    const search = wrapper.get('input[placeholder="搜索编码、名称、规格或分类"]')
 
     await search.setValue('EL-001')
     await flushPromises()
@@ -305,6 +305,11 @@ describe('MaterialManagement', () => {
     await search.trigger('keyup.enter')
     await flushPromises()
     expect(api.listMaterialPage).toHaveBeenLastCalledWith('token', expect.objectContaining({ query: 'M18', page: 1 }))
+
+    await search.setValue('欧姆龙')
+    await wrapper.get('.material-toolbar__search-button').trigger('click')
+    await flushPromises()
+    expect(wrapper.find('.material-table').text()).not.toContain('EL-001')
     wrapper.unmount()
   })
 
@@ -464,7 +469,7 @@ describe('MaterialManagement', () => {
     expect(approvalTable.text()).toContain(material.specification)
     expect(approvalTable.text()).toContain(material.brand)
     expect(approvalTable.text()).toContain('料品主档')
-    expect(approvalTable.findAll('button').some(button => button.text() === '驳回')).toBe(true)
+    expect(approvalTable.findAll('button').some(button => button.text() === '退回')).toBe(true)
     await approvalTable.findAll('button').find(button => button.text() === '批准')!.trigger('click')
     await flushPromises()
     expect(confirm).toHaveBeenCalled()
@@ -644,7 +649,7 @@ describe('MaterialManagement', () => {
     expect(toolbar.findAll('button').some(button => button.text() === '刷新')).toBe(true)
     expect(toolbar.findAll('button').some(button => button.text() === '新增料品')).toBe(true)
     expect(toolbar.text()).toContain('显示已停用')
-    expect(toolbar.get('input[placeholder="搜索编码、名称、规格、品牌或分类"]')).toBeTruthy()
+    expect(toolbar.get('input[placeholder="搜索编码、名称、规格或分类"]')).toBeTruthy()
     expect(wrapper.text()).toContain('EL-001')
     expect(wrapper.text()).toContain('光电传感器')
     expect(wrapper.find('.material-table').text()).not.toContain('PLM业务类型')
@@ -920,7 +925,7 @@ describe('MaterialManagement', () => {
     expect(table.text()).toContain('PLM料号')
     expect(table.text()).toContain('操作')
     expect(table.text()).toContain('批准')
-    expect(table.text()).toContain('驳回')
+    expect(table.text()).toContain('退回')
     expect(table.findAllComponents({ name: 'ElTableColumn' }).some(column => column.props('type') === 'selection')).toBe(true)
     expect(wrapper.get('.material-code-approval-toolbar').text()).toContain('已选择 0 项待审批申请')
   })
@@ -978,7 +983,7 @@ describe('MaterialManagement', () => {
       },
       {
         id: 'rejected-1', applicationType: 'StandardBomItem' as const, bomItemId: 'rejected-item', bomHeaderKind: 'Standard' as const,
-        projectId: 'project-2', projectCode: 'P700004', projectName: '氦检设备', categoryCode: '0201', applicationName: '已驳回电气BOM',
+        projectId: 'project-2', projectCode: 'P700004', projectName: '氦检设备', categoryCode: '0201', applicationName: '已退回电气BOM',
         status: 'Rejected' as const, workflowState: 'Rejected' as const, requestedBy: 'developer', requestedAt: '2026-08-26T11:01:00Z', decidedBy: 'standardizer', rowVersion: 3,
       },
     ]
@@ -1000,7 +1005,7 @@ describe('MaterialManagement', () => {
     expect(pendingTable.text()).not.toContain('已批准主BOM')
     expect(pendingTable.findAllComponents({ name: 'ElTableColumn' }).some((column: { props: (name: string) => unknown }) => column.props('type') === 'selection')).toBe(true)
     expect(historyTable.text()).toContain('03020005424')
-    expect(historyTable.text()).toContain('已驳回')
+    expect(historyTable.text()).toContain('已退回')
     expect(historyTable.findAllComponents({ name: 'ElTableColumn' }).map((column: { props: (name: string) => unknown }) => column.props('label')))
       .toEqual(['申请类型', '来源', 'BOM层级', '料号分类', 'PLM料号', '名称', '型号', '品牌', '申请人', '申请时间', '状态', '说明', '操作'])
     for (const label of ['BOM层级', '料号分类', '名称']) {
@@ -1018,7 +1023,7 @@ describe('MaterialManagement', () => {
     expect(nestedTabs.map(tab => tab.text().trim())).toEqual(['当前处理 1', '审批/同步历史 3'])
     expect(wrapper.find('.material-workflow-result').exists()).toBe(false)
     expect(wrapper.get('.material-approval-feedback').text()).toContain('运行状态空闲')
-    expect(wrapper.get('.material-approval-feedback').text()).toContain('完成料号批准或驳回后，结果将在此固定显示')
+    expect(wrapper.get('.material-approval-feedback').text()).toContain('完成料号批准或退回后，结果将在此固定显示')
     expect(wrapper.get('.material-sync-feedback').text()).toContain('运行状态空闲')
     expect(wrapper.get('.material-sync-feedback').text()).toContain('完成U9C同步后，结果将在此固定显示')
     expect(wrapper.get('.material-approval-feedback').findAll('strong').map(item => item.text())).toEqual(['运行状态', '处理结果'])
@@ -1243,7 +1248,7 @@ describe('MaterialManagement', () => {
     confirm.mockRestore()
   })
 
-  it('批量驳回只填写一次统一原因并逐项提交', async () => {
+  it('批量退回只填写一次统一原因并逐项提交', async () => {
     const applications = [
       {
         id: 'application-1', applicationType: 'StandardBomItem' as const, bomItemId: 'item-1', bomHeaderKind: 'Standard' as const,
@@ -1270,22 +1275,22 @@ describe('MaterialManagement', () => {
     const table = wrapper.findAllComponents({ name: 'ElTable' }).find(component => component.classes().includes('material-code-approval-table'))!
     table.vm.$emit('selection-change', applications)
     await flushPromises()
-    await wrapper.get('.material-code-approval-toolbar').findAll('button').find(button => button.text() === '批量驳回')!.trigger('click')
+    await wrapper.get('.material-code-approval-toolbar').findAll('button').find(button => button.text() === '批量退回')!.trigger('click')
     await flushPromises()
 
     expect(prompt).toHaveBeenCalledOnce()
     const inputValidator = prompt.mock.calls[0]?.[2]?.inputValidator as (value: string) => true | string
-    expect(inputValidator('   ')).toBe('请填写驳回原因')
-    expect(inputValidator('x'.repeat(1001))).toBe('驳回原因不能超过1000个字符')
+    expect(inputValidator('   ')).toBe('请填写退回原因')
+    expect(inputValidator('x'.repeat(1001))).toBe('退回原因不能超过1000个字符')
     expect(inputValidator('资料不完整')).toBe(true)
     expect(api.decideMaterialCodeApplication).toHaveBeenNthCalledWith(1, 'application-1', 7, false, '资料不完整', 'token')
     expect(api.decideMaterialCodeApplication).toHaveBeenNthCalledWith(2, 'application-2', 9, false, '资料不完整', 'token')
     expect(wrapper.get('.material-approval-feedback').text()).toContain('审批完成')
-    expect(wrapper.get('.material-approval-feedback').text()).toContain('共 2 项，已驳回 2 项，失败 0 项')
+    expect(wrapper.get('.material-approval-feedback').text()).toContain('共 2 项，已退回 2 项，失败 0 项')
     prompt.mockRestore()
   })
 
-  it('普通料品申请选中后可批量驳回', async () => {
+  it('普通料品申请选中后可批量退回', async () => {
     const material = {
       ...(await api.listMaterials())[0], id: 'master-pending', materialCode: '01021000055', name: 'RFID读写头',
       kind: 'Standard' as const, categoryCode: '0102', approvalStatus: 'Draft' as const, rowVersion: 6,
@@ -1303,18 +1308,18 @@ describe('MaterialManagement', () => {
     const approvalRow = (table.props('data') as Array<{ masterMaterial?: PdmMaterial }>)[0]
     table.vm.$emit('selection-change', [approvalRow])
     await flushPromises()
-    const rejectButton = wrapper.get('.material-code-approval-toolbar').findAll('button').find(button => button.text() === '批量驳回')!
+    const rejectButton = wrapper.get('.material-code-approval-toolbar').findAll('button').find(button => button.text() === '批量退回')!
     expect(rejectButton.attributes('disabled')).toBeUndefined()
 
     await rejectButton.trigger('click')
     await flushPromises()
 
     expect(api.rejectMaterial).toHaveBeenCalledWith('master-pending', 6, '型号资料不完整', 'token')
-    expect(wrapper.get('.material-approval-feedback').text()).toContain('共 1 项，已驳回 1 项，失败 0 项')
+    expect(wrapper.get('.material-approval-feedback').text()).toContain('共 1 项，已退回 1 项，失败 0 项')
     prompt.mockRestore()
   })
 
-  it('单项驳回要求填写原因并在审批历史中供只读用户查看', async () => {
+  it('单项退回要求填写原因并在审批历史中供只读用户查看', async () => {
     const application = {
       id: 'application-rejected', applicationType: 'StandardBomItem' as const, bomItemId: 'item-rejected', bomHeaderKind: 'Standard' as const,
       projectId: 'project-1', projectCode: 'P700003', projectName: '氮检设备', categoryCode: '0102',
@@ -1331,14 +1336,14 @@ describe('MaterialManagement', () => {
     await flushPromises()
 
     const pendingTable = wrapper.get('.material-code-approval-table--pending')
-    await pendingTable.findAll('button').find(button => button.text() === '驳回')!.trigger('click')
+    await pendingTable.findAll('button').find(button => button.text() === '退回')!.trigger('click')
     await flushPromises()
 
     const inputValidator = prompt.mock.calls[0]?.[2]?.inputValidator as (value: string) => true | string
-    expect(inputValidator('  ')).toBe('请填写驳回原因')
+    expect(inputValidator('  ')).toBe('请填写退回原因')
     expect(inputValidator('原因明确')).toBe(true)
     expect(api.decideMaterialCodeApplication).toHaveBeenCalledWith('application-rejected', 3, false, '型号资料不完整', 'token')
-    expect(wrapper.get('.material-code-approval-table--history').text()).toContain('驳回原因')
+    expect(wrapper.get('.material-code-approval-table--history').text()).toContain('退回原因')
     expect(wrapper.get('.material-code-approval-table--history').text()).toContain('型号资料不完整')
     prompt.mockRestore()
   })

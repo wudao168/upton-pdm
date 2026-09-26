@@ -225,11 +225,11 @@ const staffingRows = computed(() => [
 
 const drawingReviewSummary = computed(() => {
   const review = [...props.drawingReviews].sort((left, right) => right.createdAt.localeCompare(left.createdAt))[0]
-  if (!review) return '图纸审核：待提交'
+  if (!review) return '图纸审核：待发起审核'
   const stateLabels = {
     InReview: '待审核',
     PendingSupervisorApproval: '待批准',
-    ChangesRequested: '已驳回（待修改）',
+    ChangesRequested: '已退回（待修改）',
     WritingProperties: '已批准',
     Approved: '已批准',
     Stale: '版本冲突',
@@ -245,13 +245,13 @@ function drawingTargetSummary(target: DrawingReviewTarget) {
   const count = target === 'Model3D' ? props.modelCount : props.drawingCount
   if (count === 0) return '无图档'
   const review = [...props.drawingReviews].sort((left, right) => right.createdAt.localeCompare(left.createdAt))[0]
-  if (!review) return '待提交'
+  if (!review) return '待发起审核'
   if (review.state === 'Stale') return '版本冲突'
   const states = review.items.map(item => target === 'Model3D' ? item.modelState : item.drawingState)
   const completed = states.filter(state => state === 'Approved' || state === 'Marked').length
   const changesRequested = states.filter(state => state === 'ChangesRequested').length
   if (states.length > 0 && completed === states.length) return '已批准'
-  if (changesRequested > 0) return `已驳回 ${changesRequested}`
+  if (changesRequested > 0) return `已退回 ${changesRequested}`
   if (review.state === 'WritingProperties') return `已批准 ${completed}/${states.length}`
   return `待审核 ${completed}/${states.length}`
 }
@@ -276,7 +276,7 @@ function materialApplicationStatus(itemIds: string[]) {
   const pending = applications.filter(item => item.status === 'Pending').length
   const approved = applications.filter(item => item.status === 'Approved').length
   const rejected = applications.filter(item => item.status === 'Rejected').length
-  return [`待审${pending}`, `已批${approved}`, `驳回${rejected}`].filter((_, index) => [pending, approved, rejected][index] > 0).join(' · ')
+  return [`待审${pending}`, `已批${approved}`, `退回${rejected}`].filter((_, index) => [pending, approved, rejected][index] > 0).join(' · ')
 }
 
 const documentRows = computed(() => [
@@ -301,7 +301,7 @@ const materialApplicationSummary = computed(() => {
   const pending = props.materialApplications.filter(item => item.status === 'Pending').length
   const approved = props.materialApplications.filter(item => item.status === 'Approved').length
   const rejected = props.materialApplications.filter(item => item.status === 'Rejected').length
-  return `物料申请：待审 ${pending} · 已批 ${approved} · 驳回 ${rejected}`
+  return `物料申请：待审 ${pending} · 已批 ${approved} · 退回 ${rejected}`
 })
 
 const stageNames: Record<string, string> = {
@@ -434,23 +434,31 @@ function currentStageFinish(item: NonNullable<ProjectPlanPortfolio['projects'][n
     .at(-1) ?? ''
 }
 
-function scheduleState(item: NonNullable<ProjectPlanPortfolio['projects'][number]>) {
-  if (!item.hasPlan) return { label: '未排程', tone: 'neutral', basis: '评估依据：项目计划未建立' }
-  const activeTasks = (item.plan?.tasks ?? []).filter(task => task.status !== 'Completed')
-  if (!activeTasks.length) return { label: '暂无未完成节点', tone: 'neutral', basis: '评估依据：当前没有未完成计划节点' }
-  const targetTask = activeTasks
-    .filter(task => Boolean(task.plannedFinish))
-    .sort((left, right) => left.plannedFinish.localeCompare(right.plannedFinish)
-      || Number(right.status === 'InProgress') - Number(left.status === 'InProgress')
-      || left.sortOrder - right.sortOrder)[0]
-  if (!targetTask) return { label: '当前节点未排期', tone: 'neutral', basis: '评估依据：当前未完成节点尚未设置计划完成日期' }
-  const target = targetTask.plannedFinish
-  const remainingDays = dayDifference(new Date().toISOString().slice(0, 10), target)
-  const basis = `评估依据：当前未完成节点“${targetTask.name}”计划完成 ${displayDate(target)}`
-  if (remainingDays < 0) return { label: `已逾期 ${Math.abs(remainingDays)} 天`, tone: 'danger', basis }
-  if (remainingDays <= 3) return { label: `距节点 ${remainingDays} 天`, tone: 'danger', basis }
-  if (remainingDays <= 7) return { label: `距节点 ${remainingDays} 天`, tone: 'warning', basis }
-  return { label: `距节点 ${remainingDays} 天`, tone: 'success', basis }
+function remainingWorkPeriod(item: NonNullable<ProjectPlanPortfolio['projects'][number]>) {
+  if (!item.hasPlan) return { label: '未排程', tone: 'neutral', basis: '当前阶段尚未建立计划' }
+  const finish = currentStageFinish(item)
+  if (!finish) return { label: '未排期', tone: 'neutral', basis: '当前阶段未设置计划完成日期' }
+  const days = dayDifference(new Date().toISOString().slice(0, 10), finish)
+  const basis = `当前阶段计划完成 ${displayDate(finish)}`
+  if (days < 0) return { label: `逾期 ${Math.abs(days)} 天`, tone: 'danger', basis }
+  if (days <= 7) return { label: `剩余 ${days} 天`, tone: 'warning', basis }
+  return { label: `剩余 ${days} 天`, tone: 'success', basis }
+}
+
+function overdueTaskSummary(item: NonNullable<ProjectPlanPortfolio['projects'][number]>) {
+  if (!item.hasPlan) return { lines: ['未排程'], tone: 'neutral', basis: '项目计划未建立' }
+  const today = new Date().toISOString().slice(0, 10)
+  const overdueTasks = (item.plan?.tasks ?? [])
+    .filter(task => task.status !== 'Completed' && Boolean(task.plannedFinish) && dayDifference(task.plannedFinish, today) > 0)
+    .sort((left, right) => right.plannedFinish.localeCompare(left.plannedFinish) || left.sortOrder - right.sortOrder)
+  if (!overdueTasks.length) return { lines: ['正常'], tone: 'success', basis: '全部已到期子任务均已完成，或尚未到期' }
+  const lines = overdueTasks.slice(0, 2).map(task => `${task.name} 延期 ${dayDifference(task.plannedFinish, today)} 天`)
+  if (overdueTasks.length > 2) lines[1] = `${lines[1]}…`
+  return {
+    lines,
+    tone: 'danger',
+    basis: overdueTasks.map(task => `${task.name}：计划完成 ${displayDate(task.plannedFinish)}，延期 ${dayDifference(task.plannedFinish, today)} 天`).join('\n'),
+  }
 }
 
 const portfolioRows = computed(() => (planPortfolio.value?.projects ?? []).map(item => {
@@ -469,7 +477,8 @@ const portfolioRows = computed(() => (planPortfolio.value?.projects ?? []).map(i
     stageLabel: stageNames[stage ?? ''] ?? stage ?? '未排程',
     engineers: engineers.length ? engineers.join('、') : '待分配',
     owner: project ? phaseOwnerText(project, stage) : '待分配',
-    schedule: scheduleState(item),
+    remainingWorkPeriod: remainingWorkPeriod(item),
+    overdueTaskSummary: overdueTaskSummary(item),
     currentTask,
     currentStageFinish: currentStageFinish(item),
   }
@@ -543,7 +552,7 @@ const todoRecipientCandidates = computed(() => props.users
   .sort((left, right) => left.displayName.localeCompare(right.displayName, 'zh-CN')))
 
 const teamRows = computed(() => [
-  ...staffingRows.value.filter(row => ['manager', 'design-lead', 'engineers'].includes(row.key)),
+  ...staffingRows.value.filter(row => ['manager', 'design-lead'].includes(row.key)),
   ...phaseOwnerDefinitions.map(phase => ({ key: phase.key, role: phase.label, people: assignedPeople([activeProject.value.phaseOwners?.[phase.key]]) })),
 ])
 const teamRowPairs = computed(() => Array.from({ length: Math.ceil(teamRows.value.length / 2) }, (_, index) => teamRows.value.slice(index * 2, index * 2 + 2)))
@@ -589,7 +598,7 @@ const overviewAlerts = computed(() => [
             <div v-for="phase in overviewPhasePlans" :key="phase.code" class="pdm-overview-phase-plan" :class="{ 'is-current': phase.isCurrent }">
               <div><strong>{{ phase.label }}</strong><em v-if="phase.isCurrent">进行中</em></div>
               <small>计划 {{ phase.range }}</small>
-              <span><i><b :style="{ width: `${phase.completion ?? 0}%` }" /></i>{{ phase.completion === null ? '—' : `完成 ${phase.completion}%` }}</span>
+              <span><i><b :style="{ width: `${phase.completion ?? 0}%` }" /></i>{{ phase.completion === null ? '完成 —' : `完成 ${phase.completion}%` }}</span>
             </div>
           </div>
           <div class="pdm-overview-alerts" aria-label="项目待办与风险">
@@ -634,11 +643,11 @@ const overviewAlerts = computed(() => [
         <article class="pdm-panel pdm-project-portfolio" aria-label="项目总览">
           <header><span><FolderTree :size="18" /></span><h2>项目总览</h2><p>当前主项目及全部子项目的阶段、负责人和计划风险</p><button type="button" class="pdm-overview-link" @click="emit('projectPlan')">进入项目计划 <ChevronRight :size="13" /></button></header>
           <div class="pdm-project-portfolio__table-wrap">
-            <table><thead><tr><th>项目</th><th>执行工程师</th><th>当前阶段</th><th>计划完成</th><th>阶段负责人</th><th>当前子任务</th><th>进度</th><th>延期 / 风险</th><th>备注日志</th></tr></thead><tbody>
+            <table><thead><tr><th>项目</th><th>执行工程师</th><th>当前阶段</th><th>计划完成</th><th>剩余工期</th><th>进度</th><th>阶段负责人</th><th>当前子任务</th><th>子任务状态</th><th>备注日志</th></tr></thead><tbody>
               <tr v-for="row in portfolioRows" :key="row.projectId" :class="{ 'is-root': row.isRoot }" tabindex="0" @click="emit('projectPlan')" @keydown.enter="emit('projectPlan')">
-                <td><strong>{{ row.projectCode }}</strong><small>{{ row.projectName }}</small></td><td :class="{ 'is-pending': row.engineers === '待分配' }">{{ row.engineers }}</td><td>{{ row.stageLabel }}</td><td :title="row.currentStageFinish ? `当前主任务“${row.stageLabel}”计划完成 ${displayDate(row.currentStageFinish)}` : '当前主任务未排期'">{{ displayDate(row.currentStageFinish) }}</td><td :class="{ 'is-pending': row.owner === '待分配' }">{{ row.owner }}</td><td class="pdm-project-portfolio__task" :title="row.currentTask?.name"><strong v-if="row.currentTask">{{ row.currentTask.name }}</strong><small v-if="row.currentTask">{{ personName(row.currentTask.assignee) }} · {{ displayDate(row.currentTask.plannedFinish) }}</small><span v-else>暂无待办</span></td><td><span class="pdm-project-portfolio__progress"><i><em :style="{ width: `${row.completionPercent}%` }" /></i>{{ row.hasPlan ? `${row.completionPercent}%` : '—' }}</span></td><td><span :class="`is-${row.schedule.tone}`" :title="row.schedule.basis">{{ row.schedule.label }}</span></td><td class="pdm-project-portfolio__notes" @click.stop><ol><li v-for="note in notesForProject(row.projectId)" :key="note.id"><span :title="note.detail">{{ personName(note.actor) }} · {{ note.occurredAt.replace('T', ' ').slice(5, 16) }} · {{ note.detail }}</span></li><li v-if="!notesForProject(row.projectId).length" class="is-empty">暂无备注</li></ol><button type="button" class="pdm-text-action" :aria-label="`维护 ${row.projectCode} 的记录`" @click="openManagerNote(row.projectId, row.projectCode, row.projectName)">记录</button></td>
+                <td><strong>{{ row.projectCode }}</strong><small>{{ row.projectName }}</small></td><td :class="{ 'is-pending': row.engineers === '待分配' }">{{ row.engineers }}</td><td>{{ row.stageLabel }}</td><td :title="row.currentStageFinish ? `当前主任务“${row.stageLabel}”计划完成 ${displayDate(row.currentStageFinish)}` : '当前主任务未排期'">{{ displayDate(row.currentStageFinish) }}</td><td><span :class="`is-${row.remainingWorkPeriod.tone}`" :title="row.remainingWorkPeriod.basis">{{ row.remainingWorkPeriod.label }}</span></td><td><span class="pdm-project-portfolio__progress"><i><em :style="{ width: `${row.completionPercent}%` }" /></i><em>{{ row.hasPlan ? `${row.completionPercent}%` : '—' }}</em></span></td><td :class="{ 'is-pending': row.owner === '待分配' }">{{ row.owner }}</td><td class="pdm-project-portfolio__task" :title="row.currentTask?.name"><strong v-if="row.currentTask">{{ row.currentTask.name }}</strong><small v-if="row.currentTask">{{ personName(row.currentTask.assignee) }} · {{ displayDate(row.currentTask.plannedFinish) }}</small><span v-else>暂无待办</span></td><td><span class="pdm-project-portfolio__overdue" :class="`is-${row.overdueTaskSummary.tone}`" :title="row.overdueTaskSummary.basis"><i v-for="line in row.overdueTaskSummary.lines" :key="line">{{ line }}</i></span></td><td class="pdm-project-portfolio__notes" @click.stop><ol><li v-for="note in notesForProject(row.projectId)" :key="note.id"><span :title="note.detail">{{ personName(note.actor) }} · {{ note.occurredAt.replace('T', ' ').slice(5, 16) }} · {{ note.detail }}</span></li><li v-if="!notesForProject(row.projectId).length" class="is-empty">暂无备注</li></ol><button type="button" class="pdm-text-action" :aria-label="`维护 ${row.projectCode} 的记录`" @click="openManagerNote(row.projectId, row.projectCode, row.projectName)">记录</button></td>
               </tr>
-              <tr v-if="!portfolioRows.length" class="is-empty"><td colspan="9">尚未加载项目计划总览</td></tr>
+              <tr v-if="!portfolioRows.length" class="is-empty"><td colspan="10">尚未加载项目计划总览</td></tr>
             </tbody></table>
           </div>
         </article>
@@ -655,7 +664,7 @@ const overviewAlerts = computed(() => [
       <template #footer><el-button @click="staffingDialogOpen=false">取消</el-button><el-button type="primary" :loading="pending" @click="saveMainStaffing">保存分工</el-button></template>
     </el-dialog>
 
-    <el-dialog v-model="managerNoteDialogOpen" :title="managerNoteTarget ? `维护项目记录 · ${managerNoteTarget.code}` : '维护项目记录'" width="520px" append-to-body>
+    <el-dialog v-model="managerNoteDialogOpen" class="pdm-manager-note-dialog" :title="managerNoteTarget ? `维护项目记录 · ${managerNoteTarget.code}` : '维护项目记录'" width="520px" append-to-body>
       <label class="pdm-dialog-field">备注内容<textarea v-model="managerNoteContent" class="pdm-manager-note-dialog__input" maxlength="1000" rows="5" placeholder="记录进度、风险或需要跟进的事项" aria-label="项目备注内容" /></label>
       <section class="pdm-project-todo-settings" aria-label="待办设置">
         <header><strong>待办设置</strong><span>保存记录时将上述内容推送给指定人员</span></header>

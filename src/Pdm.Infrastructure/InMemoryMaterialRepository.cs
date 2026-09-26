@@ -91,7 +91,7 @@ public sealed class InMemoryMaterialRepository : IMaterialRepository
                 || string.Equals(item.Brand, normalizedBrand, StringComparison.OrdinalIgnoreCase))
             .Where(item => string.IsNullOrWhiteSpace(normalizedQuery) || new[]
             {
-                item.MaterialCode, item.Name, item.Specification, item.Material, item.Brand,
+                item.MaterialCode, item.Name, item.Specification, item.Material,
                 item.CategoryCode, item.U9CategoryCode, item.SurfaceTreatment, item.PurchaseLink, item.Remark
             }.Any(value => value?.Contains(normalizedQuery, StringComparison.OrdinalIgnoreCase) == true));
         var effectiveSortBy = string.IsNullOrWhiteSpace(sortBy) ? (string.IsNullOrWhiteSpace(createdAtOrder) ? null : "createdAt") : sortBy;

@@ -427,13 +427,13 @@ public sealed class Phase1ReleaseWorkflowTests
 
         await Assert.ThrowsAsync<PdmRuleException>(() =>
             workflow.DecideAsync(task.Id, "designer", UserRole.Engineer, ApprovalDecision.Rejected, null, default));
-        var rejected = await workflow.DecideAsync(task.Id, "designer", UserRole.Engineer, ApprovalDecision.Rejected, "驳回修改", default);
+        var rejected = await workflow.DecideAsync(task.Id, "designer", UserRole.Engineer, ApprovalDecision.Rejected, "退回修改", default);
 
         Assert.Equal(ReleasePackageState.Rejected, rejected.State);
         Assert.Equal(ApprovalDecision.Rejected, Assert.Single(rejected.ApprovalTasks).Decision);
         var notification = Assert.Single(await repository.ListUserNotificationsAsync("designer", 20, default));
-        Assert.Equal("BOM发布审批已驳回", notification.Title);
-        Assert.Contains("驳回修改", notification.Content);
+        Assert.Equal("BOM发布审批已退回", notification.Title);
+        Assert.Contains("退回修改", notification.Content);
         Assert.Null(notification.ReadAt);
     }
 
@@ -575,8 +575,8 @@ public sealed class Phase1ReleaseWorkflowTests
         Assert.Equal(ReleasePackageState.Rejected, package.State);
         Assert.All(await repository.ListDocumentsAsync(ProjectId, default), document => Assert.Equal(DocumentLifecycleState.Work, document.State));
 
-        // 驳回后BOM可能已被修改，此时允许直接从“已驳回”撤回为草稿：重新绑定当前BOM后再提交或删除重建。
-        var reopened = await workflow.WithdrawReleasePackageAsync(package.Id, "admin", UserRole.Administrator, "驳回后重新编辑", default);
+        // 退回后BOM可能已被修改，此时允许直接从“已退回”撤回为草稿：重新绑定当前BOM后再提交或删除重建。
+        var reopened = await workflow.WithdrawReleasePackageAsync(package.Id, "admin", UserRole.Administrator, "退回后重新编辑", default);
         Assert.Equal(ReleasePackageState.Draft, reopened.State);
         Assert.All(reopened.ApprovalTasks, task => Assert.Null(task.Decision));
         Assert.DoesNotContain(await repository.ListBomVersionsAsync(ProjectId, null, default), version => version.State == BomVersionState.InReview);

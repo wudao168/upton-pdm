@@ -520,7 +520,7 @@ public sealed class MaterialService(
         var application = await materials.FindMaterialCodeApplicationAsync(applicationId, cancellationToken)
             ?? throw new PdmNotFoundException("料号申请不存在。");
         if (application.BomHeaderKind is not null && application.BomItemId is null)
-            throw new PdmRuleException("BOM表头料号由系统自动审批，请在BOM多级总览查看进度或重试，不能人工批准或驳回。");
+            throw new PdmRuleException("BOM表头料号由系统自动审批，请在BOM多级总览查看进度或重试，不能人工批准或退回。");
         return await DecideMaterialCodeApplicationCoreAsync(
             application, expectedRowVersion, approved, comment, actor, false, cancellationToken, categoryCode);
     }
@@ -601,10 +601,10 @@ public sealed class MaterialService(
             var rejected = await materials.DecideMaterialCodeApplicationAsync(application.Id, expectedRowVersion, MaterialCodeApplicationStatus.Rejected,
                 actor, normalizedComment, null, null, decidedAt, cancellationToken);
             await repository.CreateUserNotificationsAsync([new UserNotification(
-                Guid.NewGuid(), application.RequestedBy, "MaterialCodeApplicationRejected", "料号申请已驳回",
-                $"{application.ApplicationName ?? application.BomItemName ?? "料号申请"} 被 {actor} 驳回：{normalizedComment}",
+                Guid.NewGuid(), application.RequestedBy, "MaterialCodeApplicationRejected", "料号申请已退回",
+                $"{application.ApplicationName ?? application.BomItemName ?? "料号申请"} 被 {actor} 退回：{normalizedComment}",
                 application.ProjectId, null, $"material-code-application:{application.Id:N}:rejected:v{rejected.RowVersion}", decidedAt, null)], cancellationToken);
-            await AuditAsync(actor, "material-code.application.reject", rejected.Id, rejected.DecisionComment ?? "驳回", cancellationToken);
+            await AuditAsync(actor, "material-code.application.reject", rejected.Id, rejected.DecisionComment ?? "退回", cancellationToken);
             return (rejected, null, null);
         }
 
@@ -1084,18 +1084,18 @@ public sealed class MaterialService(
     {
         await RequirePermissionAsync(actor, role, PermissionCodes.MaterialManage, cancellationToken);
         var normalizedComment = comment?.Trim();
-        if (string.IsNullOrWhiteSpace(normalizedComment)) throw new PdmRuleException("驳回料品申请时必须填写原因。");
-        if (normalizedComment.Length > 1000) throw new PdmRuleException("驳回原因不能超过1000个字符。");
+        if (string.IsNullOrWhiteSpace(normalizedComment)) throw new PdmRuleException("退回料品申请时必须填写原因。");
+        if (normalizedComment.Length > 1000) throw new PdmRuleException("退回原因不能超过1000个字符。");
         var existing = await materials.FindMaterialAsync(materialId, cancellationToken) ?? throw new PdmNotFoundException("物料主档不存在。");
-        if (existing.IsArchived) throw new PdmRuleException("料品申请已经驳回。");
-        if (existing.ApprovalStatus != MaterialApprovalStatus.Draft) throw new PdmRuleException("只有待审批料品申请可以驳回。");
+        if (existing.IsArchived) throw new PdmRuleException("料品申请已经退回。");
+        if (existing.ApprovalStatus != MaterialApprovalStatus.Draft) throw new PdmRuleException("只有待审批料品申请可以退回。");
         var rejectedAt = timeProvider.GetUtcNow();
         var rejected = await materials.ArchiveMaterialAsync(materialId, expectedRowVersion, actor, rejectedAt, cancellationToken);
         await repository.CreateUserNotificationsAsync([new UserNotification(
-            Guid.NewGuid(), existing.CreatedBy, "MaterialMasterRejected", "料品申请已驳回",
-            $"{existing.MaterialCode} · {existing.Name} 被 {actor} 驳回：{normalizedComment}",
+            Guid.NewGuid(), existing.CreatedBy, "MaterialMasterRejected", "料品申请已退回",
+            $"{existing.MaterialCode} · {existing.Name} 被 {actor} 退回：{normalizedComment}",
             null, null, $"material-master:{existing.Id:N}:rejected:v{rejected.RowVersion}", rejectedAt, null)], cancellationToken);
-        await AuditAsync(actor, "material.reject", rejected.Id, $"驳回料品申请：{rejected.MaterialCode} · {rejected.Name}；原因：{normalizedComment}", cancellationToken);
+        await AuditAsync(actor, "material.reject", rejected.Id, $"退回料品申请：{rejected.MaterialCode} · {rejected.Name}；原因：{normalizedComment}", cancellationToken);
         return rejected;
     }
 

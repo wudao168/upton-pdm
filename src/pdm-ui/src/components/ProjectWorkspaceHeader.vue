@@ -147,7 +147,7 @@ async function selectBrowsedProject(projectId: string) {
 }
 
 function statusTone(status?: string) {
-  if (status?.includes('失败') || status?.includes('驳回')) return 'is-alert'
+  if (status?.includes('失败') || status?.includes('退回')) return 'is-alert'
   if (status?.includes('待') || status?.includes('编辑中') || status?.includes('检出') || status?.includes('发布中')) return 'is-remind'
   return 'is-ok'
 }

@@ -2051,7 +2051,7 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
         {
             if (!packages.TryGetValue(releasePackageId, out var package)) throw new PdmNotFoundException("发布包不存在。");
             if (package.State is not (ReleasePackageState.Draft or ReleasePackageState.Rejected or ReleasePackageState.PublishFailed))
-                throw new PdmConflictException("只有草稿、已驳回或发布失败的发布包可以提交。");
+                throw new PdmConflictException("只有草稿、已退回或发布失败的发布包可以提交。");
             var now = timeProvider.GetUtcNow();
             if (package.LocksDocuments)
             {
@@ -2085,7 +2085,7 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
         {
             if (!packages.TryGetValue(releasePackageId, out var package)) throw new PdmNotFoundException("发布包不存在。");
             if (package.State is not (ReleasePackageState.ProcessReview or ReleasePackageState.Approval or ReleasePackageState.Rejected))
-                throw new PdmConflictException("只有审批中或已驳回的发布包可以撤回。");
+                throw new PdmConflictException("只有审批中或已退回的发布包可以撤回。");
             var now = timeProvider.GetUtcNow();
             if (package.LocksDocuments)
             {
@@ -2636,7 +2636,7 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
         var projectPackages = packages.Values.Where(item => item.ProjectId == projectId).ToArray();
         if (projectPackages.Any(item => item.State == ReleasePackageState.Draft)) statuses.Add("待提交");
         if (projectPackages.Any(item => item.State is ReleasePackageState.ProcessReview or ReleasePackageState.Approval)) statuses.Add("待审批");
-        if (projectPackages.Any(item => item.State == ReleasePackageState.Rejected)) statuses.Add("审批驳回");
+        if (projectPackages.Any(item => item.State == ReleasePackageState.Rejected)) statuses.Add("审批退回");
         if (projectPackages.Any(item => item.State == ReleasePackageState.Publishing)) statuses.Add("发布中");
         if (projectPackages.Any(item => item.State == ReleasePackageState.PublishFailed)) statuses.Add("发布失败");
         return statuses.Count == 0 ? "正常" : string.Join("、", statuses);

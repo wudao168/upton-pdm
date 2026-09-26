@@ -522,7 +522,7 @@ public interface IPdmRepository
     Task<DrawingReviewPackage> ResolveDrawingReviewMarkupAsync(Guid markupId, string actor, DateTimeOffset resolvedAt, CancellationToken cancellationToken);
     Task<DrawingReviewPackage> DecideDrawingReviewTargetAsync(Guid itemId, DrawingReviewTarget target, DrawingReviewTargetState state, string reviewer, string reviewerName, DateTimeOffset reviewedAt, string? comment, CancellationToken cancellationToken);
     Task<DrawingReviewPackage> RevokeDrawingReviewTargetAsync(Guid itemId, DrawingReviewTarget target, CancellationToken cancellationToken);
-    /// <summary>驳回后设计者提交了新版本：把该2D图档的审核项按最新存档版本恢复为待审核，重新进入审图节点，同单其他图档不受影响。</summary>
+    /// <summary>退回后设计者提交了新版本：把该2D图档的审核项按最新存档版本恢复为待审核，重新进入审图节点，同单其他图档不受影响。</summary>
     Task<DrawingReviewPackage> ResubmitDrawingReviewItemAsync(Guid itemId, Guid drawingVersionId, string drawingRevision, string drawingSha256, string drawingCreatedBy, CancellationToken cancellationToken);
     /// <summary>
     /// 放弃写入审核标记：把该审核单内仍在等待或进行中的属性回写置为已作废，并把审核单直接置为已完成，

@@ -46,7 +46,7 @@ const syncingRowKey = ref('')
 const retryingApplicationId = ref('')
 
 function automaticText(header?: ProjectBomHeader) {
-  if (header?.automaticStatus) return ({ NotRequested: '待BOM发布', ApprovalQueued: '自动审批排队', Running: '自动处理中', Rejected: '申请已驳回', Completed: '已自动批准', Failed: '失败待重试', WaitingRetry: '待重试', Queued: '已批准待同步' })[header.automaticStatus]
+  if (header?.automaticStatus) return ({ NotRequested: '待BOM发布', ApprovalQueued: '自动审批排队', Running: '自动处理中', Rejected: '申请已退回', Completed: '已自动批准', Failed: '失败待重试', WaitingRetry: '待重试', Queued: '已批准待同步' })[header.automaticStatus]
   return header?.applicationStatus === 'Approved' ? '已自动批准' : header?.applicationStatus === 'Rejected' ? '自动处理失败' : header?.applicationId ? '待确认状态' : '待BOM发布'
 }
 

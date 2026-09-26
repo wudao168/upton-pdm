@@ -111,7 +111,7 @@ powershell.exe -ExecutionPolicy Bypass -File .\deploy\Register-SolidWorksAddin.p
 ## BOM、审批与生产发包
 
 1. Windows 客户端的机械 BOM 读取结构快照；电气 BOM 可手工维护或导入标准 XLSX，并可导出。
-2. 创建发布包后依次提交工艺审核和批准。驳回后修改并重新提交，历史审批记录保留。
+2. 创建发布包后依次提交工艺审核和批准。退回后修改并重新提交，历史审批记录保留。
 3. 签入阶段只保存 SolidWorks 源文件。最终批准成功后，API 服务器上的预览转换程序才打开批准快照中的源文件，零件/装配生成 STEP、工程图生成 PDF，并把它们与两类 BOM、清单、审批记录和 SHA-256 文件原子投放到项目 `ReleaseLocation`。历史 DWG 文件保留，但新发布不再生成、校验或引用 DWG。
 4. 任一文件准备、哈希、审批或投放失败时，发布包不进入已发布状态，生产目录不会出现半成品。
 

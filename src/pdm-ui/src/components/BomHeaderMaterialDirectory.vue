@@ -12,7 +12,7 @@ const page = ref(1)
 const kindLabels: Record<string, string> = { Master: '项目主BOM', Standard: '标准件BOM', NonStandard: '非标件BOM', Electrical: '电气BOM' }
 const stateLabels: Record<string, string> = {
   NotRequested: '待发布／核对', Running: '自动处理中', ApprovalQueued: '自动审批排队中',
-  WaitingRetry: '待核对／重试', Failed: '自动处理失败', Rejected: '历史申请已驳回',
+  WaitingRetry: '待核对／重试', Failed: '自动处理失败', Rejected: '历史申请已退回',
   Queued: '等待同步／回查', Completed: '已完成',
 }
 const filtered = computed(() => rows.value.filter(row => [row.projectCode, row.subprojectCode, row.projectName,

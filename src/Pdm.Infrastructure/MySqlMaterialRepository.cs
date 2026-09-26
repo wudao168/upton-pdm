@@ -66,7 +66,7 @@ public sealed class MySqlMaterialRepository : IMaterialRepository
             " WHERE (@IncludeArchived=1 OR is_archived=0)" +
             " AND (@CategoryCode IS NULL OR category_code LIKE @CategoryCode)" +
             " AND (@Brand IS NULL OR brand=@Brand)" +
-            " AND (@Query IS NULL OR material_code LIKE @Query OR name LIKE @Query OR specification LIKE @Query OR material LIKE @Query OR brand LIKE @Query OR category_code LIKE @Query OR u9_category_code LIKE @Query OR surface_treatment LIKE @Query OR purchase_link LIKE @Query OR remark LIKE @Query)";
+            " AND (@Query IS NULL OR material_code LIKE @Query OR name LIKE @Query OR specification LIKE @Query OR material LIKE @Query OR category_code LIKE @Query OR u9_category_code LIKE @Query OR surface_treatment LIKE @Query OR purchase_link LIKE @Query OR remark LIKE @Query)";
         var parameters = new
         {
             Query = normalizedQuery,

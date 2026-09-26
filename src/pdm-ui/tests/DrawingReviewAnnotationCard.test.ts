@@ -82,14 +82,14 @@ describe('DrawingReviewAnnotationCard', () => {
     await wrapper.setProps({ currentUsername: 'reviewer' })
     expect(wrapper.findAll('.drawing-review-decision-buttons button').every(button => button.attributes('disabled') === undefined)).toBe(true)
     expect(wrapper.find('textarea[aria-label="审核意见"]').exists()).toBe(true)
-    expect(wrapper.findAll('.drawing-review-decision-buttons button').map(button => button.text())).toEqual(['驳回', '通过'])
+    expect(wrapper.findAll('.drawing-review-decision-buttons button').map(button => button.text())).toEqual(['退回', '通过'])
   })
 
-  it('只保留审核意见与通过/驳回', () => {
+  it('只保留审核意见与通过/退回', () => {
     const wrapper = mountCard(review)
 
     expect(wrapper.text()).toContain('审核')
-    expect(wrapper.findAll('.drawing-review-decision-buttons button').map(button => button.text())).toEqual(['驳回', '通过'])
+    expect(wrapper.findAll('.drawing-review-decision-buttons button').map(button => button.text())).toEqual(['退回', '通过'])
     expect(wrapper.find('.drawing-review-target-switch').exists()).toBe(false)
     expect(wrapper.find('.drawing-review-markup-tools').exists()).toBe(false)
     expect(wrapper.find('.drawing-review-markup-list').exists()).toBe(false)
@@ -120,7 +120,7 @@ describe('DrawingReviewAnnotationCard', () => {
     confirm.mockRestore()
   })
 
-  it('通过后就地变成撤销按钮，驳回不可再点', async () => {
+  it('通过后就地变成撤销按钮，退回不可再点', async () => {
     const wrapper = mountCard(review)
 
     expect(wrapper.get('.is-approve').text()).toContain('通过')
@@ -134,7 +134,7 @@ describe('DrawingReviewAnnotationCard', () => {
     expect(wrapper.get('textarea[aria-label="审核意见"]').attributes('disabled')).toBeDefined()
   })
 
-  it('点击通过不需要二次确认，驳回仍要确认', async () => {
+  it('点击通过不需要二次确认，退回仍要确认', async () => {
     const confirm = vi.spyOn(ElMessageBox, 'confirm').mockResolvedValue({ action: 'confirm' } as never)
     const wrapper = mountCard(review)
 
@@ -172,15 +172,15 @@ describe('DrawingReviewAnnotationCard', () => {
     expect(reviewer.get('.is-revoke').text()).toBe('撤销')
   })
 
-  it('已驳回的图纸可撤销驳回', async () => {
+  it('已退回的图纸可撤销退回', async () => {
     const confirm = vi.spyOn(ElMessageBox, 'confirm').mockResolvedValue({ action: 'confirm' } as never)
     const changes: DrawingReviewPackage = { ...review, items: [{ ...review.items[0]!, drawingState: 'ChangesRequested', drawingComment: '尺寸标注需修改' }] }
     const wrapper = mountCard(changes)
 
-    expect(wrapper.text()).toContain('该2D工程图已驳回（待修改），其余图纸可继续审核')
+    expect(wrapper.text()).toContain('该2D工程图已退回（待修改），其余图纸可继续审核')
     const revokeButton = wrapper.get('.drawing-review-decision-buttons .is-revoke')
     expect(revokeButton.text()).toBe('撤销')
-    expect(revokeButton.attributes('title')).toBe('撤销驳回结论')
+    expect(revokeButton.attributes('title')).toBe('撤销退回结论')
 
     await revokeButton.trigger('click')
     await Promise.resolve()
@@ -189,13 +189,14 @@ describe('DrawingReviewAnnotationCard', () => {
     confirm.mockRestore()
   })
 
-  it('驳回图档的设计者可按最新存档版本重新提交审核并显示驳回说明', async () => {
+  it('退回图档的设计者可直接重新提交审核并显示退回说明', async () => {
     const confirm = vi.spyOn(ElMessageBox, 'confirm').mockResolvedValue({ action: 'confirm' } as never)
     const changes: DrawingReviewPackage = { ...review, items: [{ ...review.items[0]!, drawingState: 'ChangesRequested', drawingComment: '尺寸标注需修改' }] }
     const wrapper = mountCard(changes, 'drawing-designer', { canResubmit: true })
 
-    expect(wrapper.text()).toContain('驳回说明：尺寸标注需修改')
-    expect(wrapper.text()).toContain('然后点“重新提交”')
+    expect(wrapper.text()).toContain('退回说明：尺寸标注需修改')
+    expect(wrapper.text()).toContain('可直接重新提交审核')
+    expect(wrapper.text()).toContain('自动采用最新版本')
     expect(wrapper.findAll('.drawing-review-decision-buttons button').map(button => button.text())).toEqual(['重新提交'])
     expect(wrapper.find('.is-reject').exists()).toBe(false)
     expect(wrapper.find('.is-revoke').exists()).toBe(false)
@@ -280,11 +281,11 @@ describe('DrawingReviewAnnotationCard', () => {
     expect(wrapper.get('.drawing-review-decision-bar__hint').text()).toContain('批量批准')
   })
 
-  it('整单驳回的历史审核单给出可执行的下一步说明', () => {
+  it('整单退回的历史审核单给出可执行的下一步说明', () => {
     const wholeReturned: DrawingReviewPackage = { ...review, state: 'ChangesRequested', items: [{ ...review.items[0]!, drawingState: 'Approved' }] }
     const wrapper = mountCard(wholeReturned, 'reviewer')
 
-    expect(wrapper.text()).toContain('本审核单已整单驳回（待修改）')
+    expect(wrapper.text()).toContain('本审核单已整单退回（待修改）')
     expect(wrapper.text()).toContain('可重新发起审核')
     expect(wrapper.findAll('.drawing-review-decision-buttons button').every(button => button.attributes('disabled') !== undefined)).toBe(true)
   })

@@ -484,7 +484,7 @@ onBeforeUnmount(() => {
             class="pdm-solidworks-edit pdm-preview-command"
             aria-label="编辑打开"
             :disabled="!selected.documentId || !solidWorksAvailable || solidWorksPending"
-            :title="solidWorksAvailable ? reviewEditable ? '该图已驳回待修改：由客户端获取最新受控文件和编辑权限并打开，改完提交存档后回到审核栏点“重新提交”' : '由客户端获取PLM最新受控文件和编辑权限，并交给SolidWorks打开' : '当前电脑未安装SolidWorks或UPLM插件'"
+            :title="solidWorksAvailable ? reviewEditable ? '该图已退回待修改：由客户端获取最新受控文件和编辑权限并打开，改完提交存档后回到审核栏点“重新提交”' : '由客户端获取PLM最新受控文件和编辑权限，并交给SolidWorks打开' : '当前电脑未安装SolidWorks或UPLM插件'"
             @click="openInSolidWorks('LatestEdit')"
           ><Rotate3D :size="15" />编辑打开</button>
           <button

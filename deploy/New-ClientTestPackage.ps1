@@ -4,7 +4,8 @@ param(
     [string]$Version = ([DateTimeOffset]::Now.ToString('yyyy.MM.dd.HHmm')),
     [string]$DesktopVersion = '',
     [string]$SolidWorksAddinVersion = '',
-    [string]$ReleaseNote = ''
+    [string]$ReleaseNote = '',
+    [string]$ClientUiSource = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -28,6 +29,15 @@ $addinOutput = Join-Path $payload 'solidworks-addin'
 $serverPublish = Join-Path $output 'server-publish'
 $updates = Join-Path $serverPublish 'updates'
 $prerequisites = Join-Path $output 'prerequisites'
+$clientUiSourceFull = ''
+if (-not [string]::IsNullOrWhiteSpace($ClientUiSource)) {
+    $clientUiSourceFull = [IO.Path]::GetFullPath((Resolve-Path -LiteralPath $ClientUiSource).Path)
+    foreach ($requiredUiFile in @('index.html', 'review-overlay.html')) {
+        if (-not (Test-Path -LiteralPath (Join-Path $clientUiSourceFull $requiredUiFile) -PathType Leaf)) {
+            throw "指定的客户端 UI 快照不完整：$requiredUiFile"
+        }
+    }
+}
 foreach ($required in @($dotnet, $webViewInstaller, $net48Installer)) {
     if (-not (Test-Path -LiteralPath $required)) { throw "缺少客户端构建依赖：$required" }
 }
@@ -36,10 +46,12 @@ New-Item -ItemType Directory -Path $desktopOutput,$addinOutput,$updates,$prerequ
 
 Push-Location $root
 try {
-    pnpm.cmd install --frozen-lockfile
-    if ($LASTEXITCODE -ne 0) { throw '前端依赖还原失败。' }
-    pnpm.cmd ui:build
-    if ($LASTEXITCODE -ne 0) { throw '前端构建失败。' }
+    if ([string]::IsNullOrWhiteSpace($clientUiSourceFull)) {
+        pnpm.cmd install --frozen-lockfile
+        if ($LASTEXITCODE -ne 0) { throw '前端依赖还原失败。' }
+        pnpm.cmd ui:build
+        if ($LASTEXITCODE -ne 0) { throw '前端构建失败。' }
+    }
     & $dotnet restore 'src\Pdm.Desktop\Pdm.Desktop.csproj' --nologo -p:NuGetAudit=false
     if ($LASTEXITCODE -ne 0) { throw '桌面客户端依赖还原失败。' }
     & $dotnet restore 'src\Pdm.SolidWorks.Addin\Pdm.SolidWorks.Addin.csproj' --nologo -p:NuGetAudit=false
@@ -55,6 +67,17 @@ $desktopBuild = Join-Path $root 'src\Pdm.Desktop\bin\Release\net48'
 $addinBuild = Join-Path $root 'src\Pdm.SolidWorks.Addin\bin\Release\net48'
 Get-ChildItem -LiteralPath $desktopBuild | Where-Object { $_.Name -ne 'Upton.Pdm.Desktop.exe.WebView2' } | ForEach-Object {
     Copy-Item -LiteralPath $_.FullName -Destination (Join-Path $desktopOutput $_.Name) -Recurse -Force
+}
+if (-not [string]::IsNullOrWhiteSpace($clientUiSourceFull)) {
+    $desktopUiOutput = Join-Path $desktopOutput 'ui'
+    if (Test-Path -LiteralPath $desktopUiOutput) { Remove-Item -LiteralPath $desktopUiOutput -Recurse -Force }
+    New-Item -ItemType Directory -Path $desktopUiOutput -Force | Out-Null
+    Get-ChildItem -LiteralPath $clientUiSourceFull -Recurse -File | Where-Object { $_.Extension -ne '.map' } | ForEach-Object {
+        $relativePath = $_.FullName.Substring($clientUiSourceFull.Length + 1)
+        $destination = Join-Path $desktopUiOutput $relativePath
+        New-Item -ItemType Directory -Path (Split-Path -Parent $destination) -Force | Out-Null
+        Copy-Item -LiteralPath $_.FullName -Destination $destination -Force
+    }
 }
 Get-ChildItem -LiteralPath $addinBuild | ForEach-Object {
     Copy-Item -LiteralPath $_.FullName -Destination (Join-Path $addinOutput $_.Name) -Recurse -Force
@@ -101,6 +124,10 @@ $bootstrap = [ordered]@{
         PackageUrl = "/updates/$([IO.Path]::GetFileName($addinArchive))"
         Sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $addinArchive).Hash
     }
+}
+if ($null -ne $existingBootstrap -and
+    [string]::Equals([string]$existingBootstrap.SolidWorksAddin.Version, $SolidWorksAddinVersion, [StringComparison]::OrdinalIgnoreCase)) {
+    $bootstrap['SolidWorksAddin'] = $existingBootstrap.SolidWorksAddin
 }
 [IO.File]::WriteAllText((Join-Path $serverPublish 'client-bootstrap.json'), ($bootstrap | ConvertTo-Json -Depth 8), $encoding)
 

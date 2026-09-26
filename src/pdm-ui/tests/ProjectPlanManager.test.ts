@@ -107,7 +107,8 @@ describe('项目计划审批和配置', () => {
     const wrapper = render()
     await flushPromises()
     expect(wrapper.find('.pdm-gantt-info-head').text()).toBe('项目 / 任务阶段责任人进度计划日期工期完成日期')
-    expect(wrapper.find('.pdm-gantt-info-row.is-stage > span:nth-child(6)').text()).toBe('4天')
+    expect(wrapper.find('[aria-label="在方案确认新增自定义任务"]').exists()).toBe(true)
+    expect(wrapper.find('.pdm-gantt-info-row.is-stage > span:nth-child(7)').text()).toBe('4天')
     expect(wrapper.find('[aria-label="编辑完成节点工期"]').exists()).toBe(false)
     expect(wrapper.find('[aria-label="编辑方案检查计划日期"]').findAll('time').map(item => item.text())).toEqual(['2026-09-28', '2026-09-30'])
     await wrapper.find('[aria-label="编辑方案检查工期"]').trigger('click')
@@ -297,11 +298,13 @@ describe('项目计划审批和配置', () => {
     await flushPromises()
     expect(wrapper.find('.pdm-gantt-bar.is-draggable').exists()).toBe(false)
     expect(wrapper.find('[aria-label="拖动调整方案确认阶段结束边界"]').exists()).toBe(false)
+    expect(wrapper.find('.pdm-gantt-action-head').exists()).toBe(false)
     const editable = { ...source, changeDraftSource: structuredClone(source), changeRequest: { id: 'request', tasks: [], reason: '客户调整交期', submittedBy: 'pm', submittedAt: '', approvalAssignee: 'approver', status: 'Approved' as const } }
     api.readProjectPlan.mockResolvedValue(editable)
     await wrapper.unmount()
     const draftWrapper = render()
     await flushPromises()
+    expect(draftWrapper.find('.pdm-gantt-action-head').exists()).toBe(true)
     const handle = draftWrapper.find('[aria-label="拖动调整方案确认阶段结束边界"]')
     expect(handle.exists()).toBe(true)
     Object.assign(handle.element, { setPointerCapture: vi.fn(), releasePointerCapture: vi.fn() })
@@ -328,7 +331,7 @@ describe('项目计划审批和配置', () => {
     const barStyle = (wrapper.find('.pdm-gantt-timeline-row .pdm-gantt-bar').element as HTMLElement).style
     expect(Number.parseFloat(barStyle.left)).toBeCloseTo((timelineWidth / 64) * 2)
     expect(Number.parseFloat(barStyle.left) + Number.parseFloat(barStyle.width)).toBeLessThan(timelineWidth)
-    expect(timelineWidth).toBe(473)
+    expect(timelineWidth).toBe(437)
     const weekButton = wrapper.findAll('.pdm-plan-zoom button').find(button => button.text() === '周')!
     await weekButton.trigger('click')
     const nonWorkingDays = wrapper.find<HTMLInputElement>('input[aria-label="显示节假日和周日背景色"]')
@@ -853,11 +856,11 @@ describe('项目计划审批和配置', () => {
     try {
       const wrapper = render()
       await flushPromises()
-      expect((wrapper.find('.pdm-gantt-timeline-head').element as HTMLElement).style.width).toBe('272px')
+      expect((wrapper.find('.pdm-gantt-timeline-head').element as HTMLElement).style.width).toBe('236px')
       width = 1400
       resized()
       await flushPromises()
-      expect((wrapper.find('.pdm-gantt-timeline-head').element as HTMLElement).style.width).toBe('692px')
+      expect((wrapper.find('.pdm-gantt-timeline-head').element as HTMLElement).style.width).toBe('656px')
       expect(wrapper.find('.pdm-gantt-bar').classes()).toContain('is-neutral')
       expect(wrapper.find('.pdm-stage-badge').exists()).toBe(false)
     } finally {
@@ -1006,7 +1009,7 @@ describe('项目计划审批和配置', () => {
     expect(wrapper.find('.pdm-gantt-info-row.is-task .pdm-gantt-name').text()).toBe('方案检查')
     expect(wrapper.find('[aria-label="编辑方案检查计划日期"]').text()).toBe('2026-09-10 ~ 2026-09-15')
     expect(wrapper.find('.pdm-gantt-info-head').text()).toContain('完成日期')
-    expect(wrapper.find('.pdm-gantt-info-row.is-task > span:nth-child(7)').text()).toBe('2026-09-16')
+    expect(wrapper.find('.pdm-gantt-info-row.is-task > span:nth-child(8)').text()).toBe('2026-09-16')
     expect(wrapper.find('.pdm-gantt-info-row.is-task').exists()).toBe(true)
     await wrapper.find('.pdm-gantt-info-row.is-stage').trigger('click')
     expect(wrapper.find('.pdm-gantt-info-row.is-task').exists()).toBe(false)
@@ -1026,12 +1029,12 @@ describe('项目计划审批和配置', () => {
     expect(wrapper.find('[aria-label="折叠信息列"]').exists()).toBe(true)
     expect(wrapper.find('.pdm-gantt-info-row.is-stage .pdm-gantt-stage-cell').text()).toBe('方案确认')
     expect(wrapper.find('.pdm-gantt-info-row.is-task .pdm-gantt-stage-cell').text()).toBe('方案确认')
-    expect((wrapper.find('.pdm-gantt-timeline-head').element as HTMLElement).style.width).toBe('682px')
+    expect((wrapper.find('.pdm-gantt-timeline-head').element as HTMLElement).style.width).toBe('646px')
     await wrapper.find('[aria-label="折叠信息列"]').trigger('click')
     expect(wrapper.find('.pdm-gantt-table').classes()).toContain('is-info-collapsed')
     expect(wrapper.find('.pdm-gantt-info-head').text()).toBe('项目 / 任务计划日期工期')
     expect(wrapper.find('.pdm-gantt-stage-cell').exists()).toBe(false)
-    expect((wrapper.find('.pdm-gantt-timeline-head').element as HTMLElement).style.width).toBe('1008px')
+    expect((wrapper.find('.pdm-gantt-timeline-head').element as HTMLElement).style.width).toBe('972px')
     await wrapper.find('[aria-label="展开信息列"]').trigger('click')
     expect(wrapper.find('.pdm-gantt-table').classes()).not.toContain('is-info-collapsed')
     expect(wrapper.find('.pdm-gantt-info-head').text()).toBe('项目 / 任务阶段责任人进度计划日期工期完成日期')
@@ -1243,29 +1246,73 @@ describe('项目计划审批和配置', () => {
     expect(api.listProjectPlanTemplates).toHaveBeenCalledWith('test', true, 'child')
   })
 
-  it('可删除无进度的非流程任务，流程必需任务保持锁定', async () => {
+  it('计划编辑态可删除全部未开始子任务，已有进度的任务保持锁定', async () => {
     vi.spyOn(ElMessageBox, 'confirm').mockResolvedValue('confirm' as never)
     const optionalPlan = { ...structuredClone(draft), tasks: [
       structuredClone(draft.tasks[0]!),
-      { ...structuredClone(draft.tasks[0]!), id: 'keep', name: '保留任务', sortOrder: 20 },
+      { ...structuredClone(draft.tasks[0]!), id: 'custom', name: '自定义任务', sortOrder: 20, isCustom: true, isRequired: false },
     ] }
     api.readProjectPlan.mockResolvedValue(optionalPlan)
     const wrapper = render()
     await flushPromises()
-    await wrapper.find('.pdm-gantt-info-row.is-task').trigger('click')
+    expect(wrapper.findAll('[aria-label^="删除任务"]')).toHaveLength(2)
+    await wrapper.findAll('.pdm-gantt-info-row.is-task')[1]!.trigger('click')
     await clickText('删除任务')
     expect(api.saveProjectPlan).toHaveBeenCalledWith('child', expect.objectContaining({
-      tasks: [expect.objectContaining({ id: 'keep' })], expectedRowVersion: 1, changeReason: '删除非必需任务：方案检查',
+      tasks: [expect.objectContaining({ id: 'task' })], expectedRowVersion: 1, changeReason: '删除任务：自定义任务',
     }), 'test')
 
     api.saveProjectPlan.mockClear()
     wrapper.unmount()
-    api.readProjectPlan.mockResolvedValue({ ...structuredClone(draft), tasks: [{ ...structuredClone(draft.tasks[0]!), workflowKey: 'drawing.review' }] })
+    api.readProjectPlan.mockResolvedValue({ ...structuredClone(draft), tasks: [
+      { ...structuredClone(draft.tasks[0]!), workflowKey: 'drawing.review' },
+      { ...structuredClone(draft.tasks[0]!), id: 'other', sortOrder: 20 },
+    ] })
     const lockedWrapper = render()
     await flushPromises()
     await lockedWrapper.find('.pdm-gantt-info-row.is-task').trigger('click')
-    expect(document.body.textContent).toContain('流程必需任务')
+    expect(document.body.textContent).toContain('流程必需任务沿用模板配置')
     const deleteButton = [...document.querySelectorAll<HTMLButtonElement>('button')].find(button => button.textContent?.trim() === '删除任务')!
-    expect(deleteButton.disabled).toBe(true)
+    expect(deleteButton.disabled).toBe(false)
+  })
+
+  it('计划编辑态可修改自定义任务名称，并可拖动同阶段子任务排序', async () => {
+    const editablePlan = { ...structuredClone(draft), tasks: [
+      { ...structuredClone(draft.tasks[0]!), id: 'first', name: '第一任务', sortOrder: 10 },
+      { ...structuredClone(draft.tasks[0]!), id: 'second', name: '第二任务', sortOrder: 20 },
+      { ...structuredClone(draft.tasks[0]!), id: 'custom', name: '自定义任务', sortOrder: 30, isCustom: true, isRequired: false },
+    ] }
+    api.readProjectPlan.mockResolvedValue(editablePlan)
+    const wrapper = render()
+    await flushPromises()
+
+    await wrapper.findAll('.pdm-gantt-info-row.is-task')[2]!.trigger('click')
+    const nameInput = document.querySelector<HTMLInputElement>('input[aria-label="任务名称"]')!
+    expect(nameInput.readOnly).toBe(false)
+    nameInput.value = '已改名的自定义任务'
+    nameInput.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushPromises()
+    await clickText('保存')
+    expect(api.saveProjectPlan).toHaveBeenCalledWith('child', expect.objectContaining({
+      tasks: expect.arrayContaining([expect.objectContaining({ id: 'custom', name: '已改名的自定义任务' })]),
+    }), 'test')
+
+    api.saveProjectPlan.mockClear()
+    expect(wrapper.find('[aria-label^="上移任务"]').exists()).toBe(false)
+    const taskRows = wrapper.findAll('.pdm-gantt-info-row.is-task')
+    expect(taskRows[1]!.attributes('draggable')).toBe('true')
+    expect(wrapper.find('.pdm-gantt-timeline-row').attributes('draggable')).toBeUndefined()
+    const dataTransfer = { setData: vi.fn(), effectAllowed: '', dropEffect: '' }
+    await taskRows[2]!.trigger('dragstart', { dataTransfer })
+    await taskRows[1]!.trigger('dragover', { dataTransfer, clientY: 0 })
+    expect(taskRows[1]!.classes()).toContain('is-drop-before')
+    await taskRows[1]!.trigger('drop', { dataTransfer, clientY: 0 })
+    expect(api.saveProjectPlan).toHaveBeenCalledWith('child', expect.objectContaining({
+      changeReason: '拖动调整任务排序：自定义任务',
+      tasks: expect.arrayContaining([
+        expect.objectContaining({ id: 'second', sortOrder: 30 }),
+        expect.objectContaining({ id: 'custom', sortOrder: 20 }),
+      ]),
+    }), 'test')
   })
 })

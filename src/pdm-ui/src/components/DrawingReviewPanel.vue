@@ -54,7 +54,7 @@ const scopeOpen = ref(false)
 const collapsed = ref(props.collapsed)
 watch(() => props.collapsed, value => { collapsed.value = value })
 const scopeSearch = ref('')
-// 明细固定分两页：待操作（还没有结论）与已操作（已通过/已驳回）。
+// 明细固定分两页：待操作（还没有结论）与已操作（已通过/已退回）。
 const overviewTab = ref<'Todo' | 'Done'>('Todo')
 const overviewState = ref<'All' | DrawingReviewCandidate['state']>('All')
 const selectedCandidateIds = ref<string[]>([])
@@ -86,7 +86,7 @@ const filteredCandidates = computed(() => {
 })
 const overviewStateOptions = computed(() => ([
   { value: 'All', label: '全部', count: props.candidates.length },
-  { value: 'Ready', label: '待提交', count: props.candidates.filter(candidate => candidate.state === 'Ready').length },
+  { value: 'Ready', label: '待发起审核', count: props.candidates.filter(candidate => candidate.state === 'Ready').length },
   { value: 'InReview', label: '待审核', count: props.candidates.filter(candidate => candidate.state === 'InReview').length },
   { value: 'ApprovedCurrent', label: '已批准', count: props.candidates.filter(candidate => candidate.state === 'ApprovedCurrent').length },
   { value: 'Unavailable', label: '不可发起', count: props.candidates.filter(candidate => candidate.state === 'Unavailable').length },
@@ -97,9 +97,9 @@ const overviewDoneCandidates = computed(() => overviewStateCandidates.value.filt
 const overviewCandidates = computed(() => overviewTab.value === 'Todo' ? overviewTodoCandidates.value : overviewDoneCandidates.value)
 const overviewEmptyMessage = computed(() => overviewTab.value === 'Todo'
   ? '当前没有需要操作的图纸。'
-  : '还没有已处理（通过或驳回）的图纸。')
+  : '还没有已处理（通过或退回）的图纸。')
 
-// 批量操作：所有审核阶段都能勾选（待提交/已批准可批量发起新一轮审核，审核中可批量通过或驳回）。
+// 批量操作：所有审核阶段都能勾选（待发起审核/已批准可批量发起新一轮审核，审核中可批量通过或退回）。
 const selectedOverviewIds = ref<string[]>([])
 const overviewTargets = computed(() => overviewCandidates.value.map(candidate => ({ candidate, action: overviewRowAction(candidate) })))
 const overviewSelectableIds = computed(() => props.canDecide || props.canSubmit
@@ -172,8 +172,8 @@ async function batchDecide(decision: DrawingReviewDecision) {
     })
   }
   if (decision === 'RequestChanges') {
-    const result = await ElMessageBox.prompt('请填写驳回说明（批量驳回会应用到所选图纸）', '批量驳回', {
-      confirmButtonText: '确认驳回', cancelButtonText: '取消', inputPlaceholder: '驳回说明', inputValidator: (value: string) => Boolean(value?.trim()) || '驳回必须填写说明。',
+    const result = await ElMessageBox.prompt('请填写退回说明（批量退回会应用到所选图纸）', '批量退回', {
+      confirmButtonText: '确认退回', cancelButtonText: '取消', inputPlaceholder: '退回说明', inputValidator: (value: string) => Boolean(value?.trim()) || '退回必须填写说明。',
     })
     comment = (result.value ?? '').trim()
   }
@@ -258,7 +258,7 @@ function submitScope() {
 }
 
 function candidateStateLabel(candidate: DrawingReviewCandidate) {
-  return ({ Ready: '待提交', InReview: '待审核', ApprovedCurrent: '已批准', Unavailable: '不可发起' } as const)[candidate.state]
+  return ({ Ready: '待发起审核', InReview: '待审核', ApprovedCurrent: '已批准', Unavailable: '不可发起' } as const)[candidate.state]
 }
 
 function overviewStateLabel(candidate: DrawingReviewCandidate) {
@@ -274,7 +274,7 @@ function overviewStateTone(candidate: DrawingReviewCandidate) {
   return state ? drawingReviewTargetStateTone(state) : drawingReviewCandidateStateTone(candidate.state)
 }
 
-// 明细分页口径：仅“已批准（Marked）”或“已驳回”算“已操作”；
+// 明细分页口径：仅“已批准（Marked）”或“已退回”算“已操作”；
 // 待批准（逐张已通过、等待主管批准）仍算“待操作”，它还需要主管点批准。
 function candidateConcluded(candidate: DrawingReviewCandidate) {
   if (candidate.state === 'ApprovedCurrent') return true
@@ -478,7 +478,7 @@ const packageStateTone = computed(() => activePackage.value ? drawingReviewPacka
           :disabled="batchPrimaryDisabled"
           @click="runBatchPrimary()"
         >{{ batchPrimaryLabel }}</button>
-        <button type="button" class="is-reject" :disabled="pending || !selectedOverviewEntries.length" @click="batchDecide('RequestChanges')">批量驳回</button>
+        <button type="button" class="is-reject" :disabled="pending || !selectedOverviewEntries.length" @click="batchDecide('RequestChanges')">批量退回</button>
       </div>
     </section>
 

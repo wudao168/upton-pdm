@@ -35,7 +35,7 @@ public sealed class ProjectPlanningServiceTests
     }
 
     [Fact]
-    public async Task Project_plan_can_remove_optional_task_and_rewire_dependencies_but_keeps_workflow_task()
+    public async Task Project_plan_can_remove_all_unstarted_tasks_and_rewire_dependencies()
     {
         var pdm = new InMemoryPdmRepository(TimeProvider.System);
         var plans = new InMemoryProjectPlanningRepository();
@@ -58,9 +58,10 @@ public sealed class ProjectPlanningServiceTests
         Assert.Equal(2, saved.Tasks.Count);
         Assert.Equal([prepared.Id], saved.Tasks.Single(task => task.WorkflowKey == ProjectPlanWorkflowTask.StandardBom).PredecessorTaskIds);
         var locked = saved.Tasks.Single(task => task.WorkflowKey == ProjectPlanWorkflowTask.StandardBom);
-        var error = await Assert.ThrowsAsync<PdmRuleException>(() => service.SaveAsync(project.Id,
-            new(saved.Tasks.Where(task => task.Id != locked.Id).ToArray(), "错误删除", saved.RowVersion), "admin", UserRole.Administrator, default));
-        Assert.Contains("流程必需任务", error.Message);
+        var removedWorkflow = await service.SaveAsync(project.Id,
+            new(saved.Tasks.Where(task => task.Id != locked.Id).ToArray(), "删除流程任务", saved.RowVersion), "admin", UserRole.Administrator, default);
+        Assert.Single(removedWorkflow.Tasks);
+        Assert.Equal(prepared.Id, removedWorkflow.Tasks[0].Id);
     }
 
     [Fact]
@@ -1039,6 +1040,40 @@ public sealed class ProjectPlanningServiceTests
         var edited = await service.SaveAsync(project.Id, new(draft.Tasks.Select((task, index) => index == 0 ? task with { Assignee = "调整责任人" } : task).ToArray(), "", draft.RowVersion), "admin", UserRole.Administrator, default);
         Assert.Equal("调整责任人", edited.Tasks[0].Assignee);
         Assert.Equal(ProjectPlanApprovalStatus.Draft, edited.ApprovalStatus);
+    }
+
+    [Fact]
+    public async Task Draft_allows_only_custom_tasks_to_be_added_or_removed()
+    {
+        var pdm = new InMemoryPdmRepository(TimeProvider.System);
+        var planning = new InMemoryProjectPlanningRepository();
+        var service = new ProjectPlanningService(planning, pdm, TimeProvider.System);
+        var project = await AssignProjectManager(pdm, Assert.Single(await pdm.ListProjectsAsync(default)));
+        var template = Assert.Single(await service.ListTemplatesAsync(false, "admin", UserRole.Administrator, default));
+        var draft = await service.GenerateAsync(project.Id, new(template.Id, new DateOnly(2026, 9, 10), 10, false, null), "admin", UserRole.Administrator, default);
+        var custom = draft.Tasks[0] with
+        {
+            Id = Guid.NewGuid(), Name = "现场复核", TemplateTaskId = null, SourceTaskId = null, WorkflowKey = null,
+            IsCustom = true, IsRequired = false, SortOrder = draft.Tasks.Max(task => task.SortOrder) + 10,
+            PredecessorTaskIds = [], ActualStart = null, ActualFinish = null, CompletionPercent = 0, Status = ProjectPlanTaskStatus.NotStarted,
+        };
+
+        var withCustom = await service.SaveAsync(project.Id, new(draft.Tasks.Append(custom).ToArray(), "新增自定义任务", draft.RowVersion), "admin", UserRole.Administrator, default);
+        Assert.Contains(withCustom.Tasks, task => task.Id == custom.Id && task.IsCustom && task.Name == "现场复核");
+
+        var firstTask = withCustom.Tasks.First(task => task.Stage == custom.Stage && task.Id != custom.Id);
+        var reorderedCustom = await service.SaveAsync(project.Id, new(withCustom.Tasks.Select(task => task.Id == custom.Id
+            ? task with { Name = "现场复核（改名）", SortOrder = firstTask.SortOrder }
+            : task.Id == firstTask.Id ? task with { SortOrder = custom.SortOrder } : task).ToArray(), "调整自定义任务", withCustom.RowVersion), "admin", UserRole.Administrator, default);
+        Assert.Contains(reorderedCustom.Tasks, task => task.Id == custom.Id && task.Name == "现场复核（改名）" && task.SortOrder == firstTask.SortOrder);
+
+        var withoutStandard = await service.SaveAsync(project.Id, new(reorderedCustom.Tasks.Where(task => task.Id != firstTask.Id).ToArray(), "删除模板任务", reorderedCustom.RowVersion), "admin", UserRole.Administrator, default);
+        Assert.DoesNotContain(withoutStandard.Tasks, task => task.Id == firstTask.Id);
+        var withoutCustom = await service.SaveAsync(project.Id, new(withoutStandard.Tasks.Where(task => task.Id != custom.Id).ToArray(), "删除自定义任务", withoutStandard.RowVersion), "admin", UserRole.Administrator, default);
+        Assert.DoesNotContain(withoutCustom.Tasks, task => task.Id == custom.Id);
+        var unmarkedAddition = custom with { Id = Guid.NewGuid(), IsCustom = false };
+        await Assert.ThrowsAsync<PdmRuleException>(() => service.SaveAsync(project.Id,
+            new(withoutCustom.Tasks.Append(unmarkedAddition).ToArray(), "新增模板任务", withoutCustom.RowVersion), "admin", UserRole.Administrator, default));
     }
 
     [Fact]

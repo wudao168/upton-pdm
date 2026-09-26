@@ -64,7 +64,7 @@ describe('DrawingReviewPanel', () => {
     expect(wrapper.findAll('.drawing-review-scope__hint')).toHaveLength(0)
     const candidateRow = wrapper.get('.drawing-review-candidate')
     expect(candidateRow.classes()).toContain('is-selected')
-    expect(candidateRow.text()).toBe('✓A01-100待提交')
+    expect(candidateRow.text()).toBe('✓A01-100待发起审核')
     expect(candidateRow.text()).not.toContain('机架组件')
     expect(candidateRow.text()).not.toContain('2D W1')
     expect(candidateRow.attributes('title')).toBe('机架组件')
@@ -139,11 +139,11 @@ describe('DrawingReviewPanel', () => {
       props: { packageId: review.id, packages: [reviewWithSecondDrawing], candidates, selectedDocumentId: 'model-1', currentUsername: 'reviewer', ...permissions },
     })
 
-    // 默认「待操作」：待提交、待审核、不可发起（已批准属于已操作页）。
+    // 默认「待操作」：待发起审核、待审核、不可发起（已批准属于已操作页）。
     expect(wrapper.get('[role="tab"][aria-selected="true"]').text()).toBe('待操作（3）')
     const todoRows = wrapper.findAll('.drawing-review-overview__row')
     expect(todoRows).toHaveLength(3)
-    expect(wrapper.get('[aria-label="图纸审核状态表"]').text()).toContain('A01-100待提交')
+    expect(wrapper.get('[aria-label="图纸审核状态表"]').text()).toContain('A01-100待发起审核')
     expect(wrapper.get('[aria-label="图纸审核状态表"]').text()).toContain('A01-200待审核')
     expect(wrapper.get('[aria-label="图纸审核状态表"]').text()).toContain('A01-400不可发起')
     expect(wrapper.get('[aria-label="图纸审核状态表"]').text()).not.toContain('A01-300')
@@ -206,7 +206,7 @@ describe('DrawingReviewPanel', () => {
 
     const rows = wrapper.findAll('.drawing-review-overview__row')
     expect(rows).toHaveLength(3)
-    expect(rows[0]!.find('em').text()).toBe('待提交')
+    expect(rows[0]!.find('em').text()).toBe('待发起审核')
     expect(rows[0]!.find('.drawing-review-overview__reviewer').exists()).toBe(false)
     // 状态表只显示状态，审核人/批准人放在悬停提示里。
     expect(rows.every(row => row.find('.drawing-review-overview__reviewer').exists())).toBe(false)
@@ -233,7 +233,7 @@ describe('DrawingReviewPanel', () => {
       props: { packageId: passedPackage.id, packages: [passedPackage], candidates, selectedDocumentId: 'drawing-1', currentUsername: 'reviewer', ...permissions },
     })
 
-    // 待批准（逐张已通过、等主管批准）仍属「待操作」；已驳回归「已操作」。
+    // 待批准（逐张已通过、等主管批准）仍属「待操作」；已退回归「已操作」。
     const todoRows = wrapper.findAll('.drawing-review-overview__row')
     expect(todoRows).toHaveLength(1)
     expect(todoRows[0]!.find('em').text()).toContain('待批准')
@@ -241,7 +241,7 @@ describe('DrawingReviewPanel', () => {
     await wrapper.findAll('[role="tab"]').find(tab => tab.text().startsWith('已操作'))!.trigger('click')
     const doneRows = wrapper.findAll('.drawing-review-overview__row')
     expect(doneRows).toHaveLength(1)
-    expect(doneRows[0]!.find('em').text()).toContain('已驳回（待修改）')
+    expect(doneRows[0]!.find('em').text()).toContain('已退回（待修改）')
     expect(doneRows[0]!.classes()).toContain('is-danger')
     expect(wrapper.text()).toContain('1/2项完成')
   })
@@ -421,7 +421,7 @@ describe('DrawingReviewPanel', () => {
     expect(wrapper.find('.drawing-review-package-actions button').exists()).toBe(false)
   })
 
-  it('已驳回（待修改）的审核单仍可由发起人撤销以便重新发起', () => {
+  it('已退回（待修改）的审核单仍可由发起人撤销以便重新发起', () => {
     const returned: DrawingReviewPackage = { ...review, state: 'ChangesRequested' }
     const wrapper = mount(DrawingReviewPanel, {
       global: { plugins: [ElementPlus] },
@@ -483,7 +483,7 @@ describe('DrawingReviewPanel', () => {
     expect(wrapper.find('.drawing-review-overview > .drawing-review-panel__tabs').exists()).toBe(true)
 
     await wrapper.findAll('[role="tab"]')[1]!.trigger('click')
-    expect(wrapper.get('[aria-label="图纸审核状态表"]').text()).toContain('还没有已处理（通过或驳回）的图纸。')
+    expect(wrapper.get('[aria-label="图纸审核状态表"]').text()).toContain('还没有已处理（通过或退回）的图纸。')
   })
 
   it('明细支持勾选与全选，并可批量批准', async () => {
@@ -529,7 +529,7 @@ describe('DrawingReviewPanel', () => {
     confirm.mockRestore()
   })
 
-  it('待提交阶段同样有勾选框，点击批量发起即直接提交审核', async () => {
+  it('待发起审核阶段同样有勾选框，点击批量发起即直接提交审核', async () => {
     const candidates: DrawingReviewCandidate[] = [
       { ...candidate, candidateId: 'r1', modelDocumentId: 'model-2', drawingDocumentId: 'drawing-2', drawingNumber: 'A01-200', state: 'Ready' },
       { ...candidate, candidateId: 'r2', modelDocumentId: 'model-3', drawingDocumentId: 'drawing-3', drawingNumber: 'A01-300', state: 'Ready' },

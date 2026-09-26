@@ -39,13 +39,13 @@ public sealed class MaterialServiceTests
     {
         var service = CreateService(out _, out var repository, out _);
         var created = await service.CreateAsync(new(
-            null, "待驳回普通料品", MaterialKind.Standard, MaterialSupplyMode.Purchase, "001",
+            null, "待退回普通料品", MaterialKind.Standard, MaterialSupplyMode.Purchase, "001",
             "MODEL-REJECT", null, null, "UPTON", null, null, null, CategoryCode: "0102"),
             "engineer", UserRole.Engineer, default);
 
         var missingReason = await Assert.ThrowsAsync<PdmRuleException>(() =>
             service.RejectAsync(created.Id, created.RowVersion, "   ", "standardizer", UserRole.ProcessReviewer, default));
-        Assert.Equal("驳回料品申请时必须填写原因。", missingReason.Message);
+        Assert.Equal("退回料品申请时必须填写原因。", missingReason.Message);
 
         var rejected = await service.RejectAsync(
             created.Id, created.RowVersion, "  型号资料不完整  ", "standardizer", UserRole.ProcessReviewer, default);
@@ -55,7 +55,7 @@ public sealed class MaterialServiceTests
         Assert.Empty(await service.ListPendingMasterMaterialsAsync("standardizer", UserRole.ProcessReviewer, default));
         var notification = Assert.Single(await repository.ListUserNotificationsAsync("engineer", 20, default));
         Assert.Equal("MaterialMasterRejected", notification.Category);
-        Assert.Equal("料品申请已驳回", notification.Title);
+        Assert.Equal("料品申请已退回", notification.Title);
         Assert.Contains("型号资料不完整", notification.Content);
     }
 
@@ -152,6 +152,24 @@ public sealed class MaterialServiceTests
         Assert.Equal(2, page.Page);
         Assert.Equal(2, page.PageSize);
         Assert.Single(page.Items);
+    }
+
+    [Fact]
+    public async Task MaterialPage_KeywordSearchExcludesBrandButBrandFilterMatches()
+    {
+        var service = CreateService(out _);
+        var material = await service.CreateAsync(new(
+            null, "非品牌匹配名称", MaterialKind.Electrical, MaterialSupplyMode.Purchase, "001",
+            "SPEC-NOT-BRAND", null, null, "仅品牌筛选", null, null, null, CategoryCode: "0101"),
+            "admin", UserRole.Administrator, default);
+
+        var keywordPage = await service.ListMaterialPageAsync(
+            "仅品牌筛选", null, null, false, 1, 50, "admin", UserRole.Administrator, default);
+        var brandPage = await service.ListMaterialPageAsync(
+            null, null, "仅品牌筛选", false, 1, 50, "admin", UserRole.Administrator, default);
+
+        Assert.Empty(keywordPage.Items);
+        Assert.Equal(material.Id, Assert.Single(brandPage.Items).Id);
     }
 
     [Fact]

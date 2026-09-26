@@ -470,7 +470,7 @@ function workflowRowTargetLabel(row: MaterialCodeWorkflowRow) {
 function workflowRowStatusLabel(row: MaterialCodeWorkflowRow) {
   if (row.syncTask) return syncTaskStatusLabel(row.syncTask)
   if (row.approval?.status === 'Pending') return '待审批'
-  return row.approval?.status === 'Rejected' ? '已驳回' : '已批准'
+  return row.approval?.status === 'Rejected' ? '已退回' : '已批准'
 }
 function workflowRowStatusType(row: MaterialCodeWorkflowRow) {
   if (row.syncTask) return syncTaskTagType(row.syncTask)
@@ -479,7 +479,7 @@ function workflowRowStatusType(row: MaterialCodeWorkflowRow) {
 function workflowRowDescription(row: MaterialCodeWorkflowRow) {
   if (row.syncTask) return syncTaskError(row.syncTask) || '同步完成。'
   if (row.approval?.status === 'Pending') return '待审批后生成同步任务。'
-  if (row.approval?.status === 'Rejected') return row.approval.decisionComment || '已驳回。'
+  if (row.approval?.status === 'Rejected') return row.approval.decisionComment || '已退回。'
   return '已批准，等待同步任务。'
 }
 function workflowRowHistoryTime(row: MaterialCodeWorkflowRow) {
@@ -971,7 +971,7 @@ function showApprovalResult(
   failures: string[],
   automationWarnings: string[],
 ) {
-  const action = approved ? '批准' : '驳回'
+  const action = approved ? '批准' : '退回'
   const summary = `共 ${total} 项，已${action} ${succeeded} 项，失败 ${failures.length} 项${automationWarnings.length ? `，后续待处理 ${automationWarnings.length} 项` : ''}。`
   const level: WorkflowResultLevel = failures.length > 0
     ? succeeded > 0 ? 'warning' : 'error'
@@ -996,13 +996,13 @@ async function decideCodeApplication(application: MaterialCodeApprovalRow, appro
   if (!approved) {
     try {
       const result = await ElMessageBox.prompt(
-        targets.length > 1 ? `将驳回该项目的 ${targets.length} 项BOM料号申请，请填写统一原因。` : '请填写驳回原因。',
-        '驳回料号申请',
+        targets.length > 1 ? `将退回该项目的 ${targets.length} 项BOM料号申请，请填写统一原因。` : '请填写退回原因。',
+        '退回料号申请',
         {
-          inputType: 'textarea', confirmButtonText: '驳回', cancelButtonText: '取消',
+          inputType: 'textarea', confirmButtonText: '退回', cancelButtonText: '取消',
           inputValidator: value => {
-            if (!value.trim()) return '请填写驳回原因'
-            return value.trim().length <= 1000 || '驳回原因不能超过1000个字符'
+            if (!value.trim()) return '请填写退回原因'
+            return value.trim().length <= 1000 || '退回原因不能超过1000个字符'
           },
         },
       )
@@ -1018,7 +1018,7 @@ async function decideCodeApplication(application: MaterialCodeApprovalRow, appro
       try {
         approvalProgressText.value = approved
           ? `正在处理第 ${index + 1}/${targets.length} 项：按PLM基线分配料号，并自动排队同步到U9C。`
-          : `正在驳回第 ${index + 1}/${targets.length} 项料号申请。`
+          : `正在退回第 ${index + 1}/${targets.length} 项料号申请。`
         const result = await processApprovalRow(target, approved, comment)
         succeeded++
         if (approved && (result.automation?.stage === 'ItemSyncFailed' || result.automation?.stage === 'BomSyncFailed'))
@@ -1077,13 +1077,13 @@ async function decideSelectedCodeApplications(approved: boolean) {
       )
     } else {
       const result = await ElMessageBox.prompt(
-        `将批量驳回已选择的 ${targets.length} 项料号申请，请填写统一驳回原因。`,
-        '批量驳回料号申请',
+        `将批量退回已选择的 ${targets.length} 项料号申请，请填写统一退回原因。`,
+        '批量退回料号申请',
         {
-          inputType: 'textarea', confirmButtonText: '批量驳回', cancelButtonText: '取消',
+          inputType: 'textarea', confirmButtonText: '批量退回', cancelButtonText: '取消',
           inputValidator: value => {
-            if (!value.trim()) return '请填写驳回原因'
-            return value.trim().length <= 1000 || '驳回原因不能超过1000个字符'
+            if (!value.trim()) return '请填写退回原因'
+            return value.trim().length <= 1000 || '退回原因不能超过1000个字符'
           },
         },
       )
@@ -1100,7 +1100,7 @@ async function decideSelectedCodeApplications(approved: boolean) {
       try {
         approvalProgressText.value = approved
           ? `正在批量处理第 ${index + 1}/${targets.length} 项：按PLM基线分配料号，并自动排队同步到U9C。`
-          : `正在批量驳回第 ${index + 1}/${targets.length} 项料号申请。`
+          : `正在批量退回第 ${index + 1}/${targets.length} 项料号申请。`
         const result = await processApprovalRow(application, approved, comment)
         succeeded++
         if (approved && (result.automation?.stage === 'ItemSyncFailed' || result.automation?.stage === 'BomSyncFailed'))
@@ -1651,7 +1651,7 @@ onMounted(() => {
           <section class="material-master-content" aria-label="料品列表">
             <div class="material-toolbar">
               <div class="material-toolbar__filters"><el-checkbox v-model="showArchived" @change="searchMaterials">显示已停用</el-checkbox><el-select v-model="brandFilter" class="material-brand-filter" clearable filterable placeholder="筛选品牌"><el-option v-for="brand in brandOptions" :key="brand" :label="brand" :value="brand" /></el-select></div>
-              <el-input v-model="query" class="material-toolbar__search" clearable placeholder="搜索编码、名称、规格、品牌或分类" @keyup.enter="searchMaterials" />
+              <el-input v-model="query" class="material-toolbar__search" clearable placeholder="搜索编码、名称、规格或分类" @keyup.enter="searchMaterials" />
               <el-button type="primary" class="material-toolbar__search-button" @click="searchMaterials">搜索</el-button>
               <div class="material-toolbar__actions"><el-button @click="load">刷新</el-button><el-button class="material-select-drafts" aria-label="勾选本页草稿" :disabled="!pageDrafts.length || loading || materialPageLoading || queryingInventory" @click="selectPageDrafts">勾选本页草稿</el-button><el-button v-if="canCreateMaterial" type="primary" @click="openCreate">新增料品</el-button><el-button v-if="canCreateMaterial" @click="openMaterialImport">批量导入</el-button><el-button v-if="canEdit" :disabled="selectedMaterials.length > 1 ? !canBatchEditSelected : !canEditSelected" @click="selectedMaterials.length > 1 ? openBatchEdit() : openSelectedEdit()">{{ selectedMaterials.length > 1 ? '批量编辑' : '编辑' }}</el-button><el-button v-if="canApprove" :disabled="!canApproveSelected" @click="approveSelected">批准</el-button><el-button :disabled="selectedMaterials.length === 0" :loading="queryingU9" @click="querySelected">查询U9C</el-button><el-button :loading="queryingInventory" :disabled="Object.values(rowInventoryLoading).some(Boolean)" @click="querySelectedInventory">库存查询</el-button><el-button v-if="canEdit" :disabled="!canArchiveSelected" @click="archiveSelected">停用</el-button><el-button v-if="canEdit" :disabled="!canReactivateSelected" @click="reactivateSelected">启用</el-button><el-button v-if="canEdit" type="danger" :disabled="!canDeleteSelected" @click="deleteSelected">删除</el-button></div>
             </div>
@@ -1722,11 +1722,11 @@ onMounted(() => {
               <div class="material-code-workflow-stage__title"><strong>料号审批与U9C同步</strong><span>每条申请仅显示一次；批准后可在同一行同步或重试。</span></div>
               <section class="material-step-feedback material-code-workflow-feedback material-approval-feedback material-sync-feedback" aria-label="审批与同步状态及结果">
                 <div class="material-step-feedback__status" role="status" aria-live="polite"><strong>运行状态</strong><span :class="{ 'is-running': approvalProgressText || syncProgressText }">{{ approvalProgressText || syncProgressText || '空闲' }}</span></div>
-                <div class="material-step-feedback__result" role="status" aria-live="polite"><header><strong>审批结果</strong><span>{{ approvalResult ? approvalResult.title : '暂无结果' }}</span></header><p>{{ approvalResult ? approvalResult.summary : '批准或驳回后，结果将在此显示。' }}</p><ul v-if="approvalResult?.details.length"><li v-for="detail in approvalResult.details" :key="detail">{{ detail }}</li></ul></div>
+                <div class="material-step-feedback__result" role="status" aria-live="polite"><header><strong>审批结果</strong><span>{{ approvalResult ? approvalResult.title : '暂无结果' }}</span></header><p>{{ approvalResult ? approvalResult.summary : '批准或退回后，结果将在此显示。' }}</p><ul v-if="approvalResult?.details.length"><li v-for="detail in approvalResult.details" :key="detail">{{ detail }}</li></ul></div>
                 <div class="material-step-feedback__result" role="status" aria-live="polite"><header><strong>同步结果</strong><span>{{ syncResult ? syncResult.title : '暂无结果' }}</span></header><p>{{ syncResult ? syncResult.summary : '批准后可在同一行执行U9C同步。' }}</p><ul v-if="syncResult?.details.length"><li v-for="detail in syncResult.details" :key="detail">{{ detail }}</li></ul></div>
               </section>
               <div v-if="canDecideMaterialCode || canApprove" class="material-code-workflow-toolbar material-code-approval-toolbar material-sync-toolbar">
-                <div class="material-code-approval-toolbar__actions"><el-button type="primary" :disabled="selectedCodeApplications.length === 0 || decidingApplicationId !== null" :loading="batchDecidingApplications" @click="decideSelectedCodeApplications(true)">批量批准</el-button><el-button type="danger" plain :disabled="selectedCodeApplications.length === 0 || batchDecidingApplications || decidingApplicationId !== null" @click="decideSelectedCodeApplications(false)">批量驳回</el-button><el-button type="primary" plain :disabled="selectedExecutableSyncTasks.length === 0 || batchSyncingTasks || syncingTaskId !== null" :loading="batchSyncingTasks" @click="executeSelectedTasks">{{ batchSyncActionLabel }}</el-button></div>
+                <div class="material-code-approval-toolbar__actions"><el-button type="primary" :disabled="selectedCodeApplications.length === 0 || decidingApplicationId !== null" :loading="batchDecidingApplications" @click="decideSelectedCodeApplications(true)">批量批准</el-button><el-button type="danger" plain :disabled="selectedCodeApplications.length === 0 || batchDecidingApplications || decidingApplicationId !== null" @click="decideSelectedCodeApplications(false)">批量退回</el-button><el-button type="primary" plain :disabled="selectedExecutableSyncTasks.length === 0 || batchSyncingTasks || syncingTaskId !== null" :loading="batchSyncingTasks" @click="executeSelectedTasks">{{ batchSyncActionLabel }}</el-button></div>
                 <span>已选 {{ selectedCodeApplications.length }} 项待审批、{{ selectedExecutableSyncTasks.length }} 项可同步</span>
               </div>
               <div class="material-code-approval-table-shell">
@@ -1744,7 +1744,7 @@ onMounted(() => {
                   <el-table-column label="申请时间" width="124" show-overflow-tooltip><template #default="{ row }">{{ row.approval?.requestedAt ? dateTimeLabel(row.approval.requestedAt) : row.syncTask?.requestedAt ? dateTimeLabel(row.syncTask.requestedAt) : '—' }}</template></el-table-column>
                   <el-table-column label="状态" width="100"><template #default="{ row }"><el-tag :type="workflowRowStatusType(row)">{{ workflowRowStatusLabel(row) }}</el-tag></template></el-table-column>
                   <el-table-column label="说明" min-width="180" show-overflow-tooltip><template #default="{ row }">{{ workflowRowDescription(row) }}</template></el-table-column>
-                  <el-table-column label="操作" width="150"><template #default="{ row }"><template v-if="row.approval?.status === 'Pending'"><el-button v-if="row.approval.masterMaterial ? canApprove : canDecideMaterialCode" link type="primary" :loading="decidingApplicationId === row.approval.id" :disabled="batchDecidingApplications" @click="decideCodeApplication(row.approval, true)">批准</el-button><el-button v-if="canRejectCodeApplication(row.approval)" link type="danger" :disabled="decidingApplicationId === row.approval.id || batchDecidingApplications" @click="decideCodeApplication(row.approval, false)">驳回</el-button></template><template v-else-if="row.syncTask"><el-button link type="primary" @click="showPreview(row.syncTask)">查看请求</el-button><el-button v-if="canExecuteSyncTask(row.syncTask)" link type="primary" :disabled="batchSyncingTasks" :loading="syncingTaskId === row.syncTask.id" @click="executeTask(row.syncTask)">{{ syncTaskActionLabel(row.syncTask) }}</el-button></template><span v-else>—</span></template></el-table-column>
+                  <el-table-column label="操作" width="150"><template #default="{ row }"><template v-if="row.approval?.status === 'Pending'"><el-button v-if="row.approval.masterMaterial ? canApprove : canDecideMaterialCode" link type="primary" :loading="decidingApplicationId === row.approval.id" :disabled="batchDecidingApplications" @click="decideCodeApplication(row.approval, true)">批准</el-button><el-button v-if="canRejectCodeApplication(row.approval)" link type="danger" :disabled="decidingApplicationId === row.approval.id || batchDecidingApplications" @click="decideCodeApplication(row.approval, false)">退回</el-button></template><template v-else-if="row.syncTask"><el-button link type="primary" @click="showPreview(row.syncTask)">查看请求</el-button><el-button v-if="canExecuteSyncTask(row.syncTask)" link type="primary" :disabled="batchSyncingTasks" :loading="syncingTaskId === row.syncTask.id" @click="executeTask(row.syncTask)">{{ syncTaskActionLabel(row.syncTask) }}</el-button></template><span v-else>—</span></template></el-table-column>
                 </el-table>
               </div>
               <el-pagination v-model:current-page="pendingApprovalPage" class="material-workflow-pagination material-pending-approval-pagination material-code-workflow-pagination" :page-size="workflowPageSize" :total="currentCodeWorkflowRows.length" layout="total, prev, pager, next" size="small" @current-change="changePendingApprovalPage" />

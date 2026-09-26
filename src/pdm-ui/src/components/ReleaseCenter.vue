@@ -140,7 +140,7 @@ const releaseBomRevisionLabel = computed(() => {
   }
   return `标准件：${releasePackage.standardBomRevision || '未发布'} · 非标件：${releasePackage.nonStandardBomRevision || '未发布'} · 电气件：${releasePackage.electricalBomRevision || '未发布'}`
 })
-const canPrepare = computed(() => !props.releasePackage || ['草稿', '已驳回', '发布失败'].includes(props.releasePackage.state))
+const canPrepare = computed(() => !props.releasePackage || ['草稿', '已退回', '发布失败'].includes(props.releasePackage.state))
 const isSupplement = computed(() => isSupplementScope(scope.value))
 const isFormalSupplementReason = (releasePackage: ReleasePackageSummary) =>
   Boolean(releasePackage.changeReasonSelections?.some(item => item.categoryCode === 'FormalSupplement'))
@@ -221,11 +221,11 @@ const drawingReviewStatusForItem = (item: BomItem) => {
   if (drawingReviewApprovedByPackage(item)) return '图纸已批准'
   if (candidate?.state === 'InReview') return '图纸待审核'
   if (candidate?.state === 'Unavailable') return candidate.reason || '图纸不可审核'
-  return candidate?.reason || '图纸待提交'
+  return candidate?.reason || '图纸待发起审核'
 }
 const releaseRowDrawingReviewStatus = (row: { sourceItems: BomItem[] }) => {
   if (releaseRowDrawingReviewReady(row)) return '图纸已批准'
-  return [...new Set(row.sourceItems.map(drawingReviewStatusForItem))].join('；') || '图纸待提交'
+  return [...new Set(row.sourceItems.map(drawingReviewStatusForItem))].join('；') || '图纸待发起审核'
 }
 const currentReleaseKeysByTrackingId = computed(() => new Map(
   availableReleaseItems.value
@@ -748,7 +748,7 @@ function submitDecision(decision: 'Approved' | 'Rejected') {
   if (!currentTask.value) return
   const value = comment.value.trim()
   if (decision === 'Rejected' && !value) {
-    approvalCommentError.value = '请填写驳回原因。'
+    approvalCommentError.value = '请填写退回原因。'
     return
   }
   approvalCommentError.value = ''
@@ -971,29 +971,29 @@ async function saveItemComment() {
           <p v-if="requiresDrawingFiles">非标件BOM已固化为XLSX；图纸发布预览由系统生成，审批通过后与BOM原子发布。</p>
           <p v-else>系统已按本次发布范围生成受控BOM XLSX，无需上传机械图纸。</p>
           <div class="pdm-manager-actions">
-            <button type="button" class="pdm-primary-action" :disabled="pending" @click="emit('submit', releasePackage.id)">{{ releasePackage.state === '已驳回' ? '重新提交审批' : '提交审批' }}</button>
+            <button type="button" class="pdm-primary-action" :disabled="pending" @click="emit('submit', releasePackage.id)">{{ releasePackage.state === '已退回' ? '重新提交审批' : '提交审批' }}</button>
           </div>
           <progress v-if="pending && progress > 0" :value="progress" max="100">{{ progress }}%</progress>
         </div>
 
         <div v-if="canHandleCurrentTask && currentTask" class="pdm-decision-box">
-          <label>审批意见<textarea v-model="comment" rows="3" maxlength="1000" placeholder="通过可不填；驳回必须填写原因" @input="approvalCommentError = ''" /><small v-if="approvalCommentError" class="pdm-inline-error">{{ approvalCommentError }}</small></label>
+          <label>审批意见<textarea v-model="comment" rows="3" maxlength="1000" placeholder="通过可不填；退回必须填写原因" @input="approvalCommentError = ''" /><small v-if="approvalCommentError" class="pdm-inline-error">{{ approvalCommentError }}</small></label>
           <div class="pdm-manager-actions">
-            <button type="button" class="pdm-secondary-action is-danger" :disabled="pending" @click="submitDecision('Rejected')">驳回</button>
+            <button type="button" class="pdm-secondary-action is-danger" :disabled="pending" @click="submitDecision('Rejected')">退回</button>
             <button type="button" class="pdm-secondary-action" :disabled="pending" @click="openTransfer">转交</button>
             <button type="button" class="pdm-primary-action" :disabled="pending" @click="submitDecision('Approved')">通过</button>
           </div>
         </div>
-        <div v-else-if="canManage && ['审批中', '工艺审核', '待批准', '已驳回'].includes(releasePackage.state)" class="pdm-decision-box pdm-withdraw-decision">
-          <small>{{ releasePackage.state === '已驳回' ? '驳回后撤回：发布包恢复为草稿，可编辑草稿重新绑定当前BOM，或删除后重新创建。' : releasePackage.locksDocuments ? '撤回后图档与非标件BOM恢复为工作中。' : '撤回后当前BOM版本恢复为草稿。' }}</small>
+        <div v-else-if="canManage && ['审批中', '工艺审核', '待批准', '已退回'].includes(releasePackage.state)" class="pdm-decision-box pdm-withdraw-decision">
+          <small>{{ releasePackage.state === '已退回' ? '退回后撤回：发布包恢复为草稿，可编辑草稿重新绑定当前BOM，或删除后重新创建。' : releasePackage.locksDocuments ? '撤回后图档与非标件BOM恢复为工作中。' : '撤回后当前BOM版本恢复为草稿。' }}</small>
           <div class="pdm-manager-actions">
-            <button type="button" class="pdm-secondary-action is-danger" :disabled="pending" @click="emit('withdraw', releasePackage.id)">{{ releasePackage.state === '已驳回' ? '撤回为草稿' : '撤回审批' }}</button>
+            <button type="button" class="pdm-secondary-action is-danger" :disabled="pending" @click="emit('withdraw', releasePackage.id)">{{ releasePackage.state === '已退回' ? '撤回为草稿' : '撤回审批' }}</button>
           </div>
         </div>
         <div v-if="canEmergencyDecide && currentTask && !canHandleCurrentTask" class="pdm-decision-box emergency-decision">
           <label>紧急代批原因<textarea v-model.trim="emergencyReason" rows="3" maxlength="1000" required placeholder="说明必须立即处理的业务原因；该内容会进入审计记录" /></label>
           <div class="pdm-manager-actions">
-            <button type="button" class="pdm-secondary-action is-danger" :disabled="pending || !emergencyReason" @click="emit('emergencyDecide', currentTask.id, 'Rejected', emergencyReason)">紧急代驳回</button>
+            <button type="button" class="pdm-secondary-action is-danger" :disabled="pending || !emergencyReason" @click="emit('emergencyDecide', currentTask.id, 'Rejected', emergencyReason)">紧急代退回</button>
             <button type="button" class="pdm-primary-action" :disabled="pending || !emergencyReason" @click="emit('emergencyDecide', currentTask.id, 'Approved', emergencyReason)">紧急代批当前节点</button>
           </div>
         </div>

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { Calendar, ChevronDown, ChevronRight, Download, History, ListCollapse, ListTree, PanelLeftClose, PanelLeftOpen, RefreshCw, Settings } from '@lucide/vue'
+import { Calendar, ChevronDown, ChevronRight, Download, History, ListCollapse, ListTree, PanelLeftClose, PanelLeftOpen, Plus, RefreshCw, Settings, Trash2 } from '@lucide/vue'
 import { ElMessageBox } from 'element-plus'
 import { computed, onBeforeUnmount, reactive, ref, watch } from 'vue'
 import { ElMessage } from '../statusMessage'
@@ -80,8 +80,9 @@ const timelineWidth = ref(720)
 const infoColumnsCollapsed = ref(false)
 const expandedInfoWidth = 708
 const collapsedInfoWidth = 382
+const ganttActionColumnWidth = 36
 const updateTimelineWidth = () => {
-  if (ganttShell.value) timelineWidth.value = Math.max(1, ganttShell.value.clientWidth - (infoColumnsCollapsed.value ? collapsedInfoWidth : expandedInfoWidth))
+  if (ganttShell.value) timelineWidth.value = Math.max(1, ganttShell.value.clientWidth - (infoColumnsCollapsed.value ? collapsedInfoWidth : expandedInfoWidth) - (showGanttTaskActions.value ? ganttActionColumnWidth : 0))
 }
 const resizeObserver = new ResizeObserver(() => {
   updateTimelineWidth()
@@ -109,6 +110,8 @@ const stageProgressDialogOpen = ref(false)
 const resourceConflictsDialogOpen = ref(false)
 const generateDialogOpen = ref(false)
 const taskDialogOpen = ref(false)
+const draggedTaskRow = ref<TimelineRow | null>(null)
+const taskDropTarget = ref<{ key: string; position: 'before' | 'after' } | null>(null)
 const reuseDialogOpen = ref(false)
 const manageDialogOpen = ref(false)
 const deleteDialogOpen = ref(false)
@@ -134,7 +137,7 @@ const stagesDraft = ref<ProjectPlanStageDefinition[]>([])
 const stageConfigurationPlan = ref<ProjectPlan | null>(null)
 const selectedOwnerPlan = computed(() => timelineRows.value.find(row => row.task?.id === selectedTask.value?.id)?.plan)
 const isEffective = (value?: ProjectPlan | null) => value?.approvalStatus === 'Approved'
-const approvalLabel = (value?: ProjectPlan | null) => !value ? '未排程' : ({ Draft: '草稿', Pending: '待审批', Rejected: '已驳回', Approved: '已生效' }[value.approvalStatus ?? 'Draft'])
+const approvalLabel = (value?: ProjectPlan | null) => !value ? '未排程' : ({ Draft: '草稿', Pending: '待审批', Rejected: '已退回', Approved: '已生效' }[value.approvalStatus ?? 'Draft'])
 const canApprove = computed(() => !inheritedParentPlan.value && plan.value?.approvalStatus === 'Pending' && plan.value.approvalAssignee?.toLowerCase() === props.currentUsername.toLowerCase())
 
 const rootProject = computed(() => props.project.parentProjectId
@@ -171,6 +174,8 @@ function canEditSchedule(owner?: ProjectPlan | null) {
   return Boolean(owner && !(inheritedParentPlan.value && owner.id === plan.value?.id)
     && (!isEffective(owner) || approvedDraft) && canManageProject(owner.projectId))
 }
+const showGanttTaskActions = computed(() => Boolean(!portfolioMode.value && plan.value && canEditSchedule(plan.value)))
+watch(showGanttTaskActions, updateTimelineWidth, { flush: 'post' })
 const unapprovedPortfolioPlans = computed(() => portfolioMode.value
   ? (portfolio.value?.projects ?? []).filter(item => !item.isRoot && item.plan && !isEffective(item.plan))
   : [])
@@ -190,7 +195,7 @@ const deleteDisabledReason = computed(() => {
 })
 const canEditSelectedPlan = computed(() => canEditSchedule(selectedOwnerPlan.value))
 const canDeleteSelectedTask = computed(() => Boolean(selectedTask.value && canEditSelectedPlan.value
-  && !selectedTask.value.workflowKey && selectedTask.value.status === 'NotStarted'
+  && selectedTask.value.status === 'NotStarted'
   && !selectedTask.value.actualStart && !selectedTask.value.actualFinish && selectedTask.value.completionPercent === 0
   && (selectedOwnerPlan.value?.tasks.length ?? 0) > 1))
 
@@ -1006,9 +1011,12 @@ async function saveTask() {
   const task = selectedTask.value
   const ownerPlan = timelineRows.value.find(row => row.task?.id === task?.id)?.plan
   if (!task || !ownerPlan) return
+  const taskName = taskForm.name.trim()
+  if (task.isCustom && !taskName) return ElMessage.warning('请输入任务名称')
   if (invalidActualDates(taskForm.actualStart, taskForm.actualFinish)) return ElMessage.warning('实际开始和实际完成不能晚于今天')
   if (!taskForm.plannedStart || !taskForm.plannedFinish || taskForm.plannedFinish < taskForm.plannedStart) return ElMessage.warning('请选择有效的计划日期区间')
-  const scheduleChanged = (task.assignee ?? '') !== taskForm.assignee.trim()
+  const scheduleChanged = (task.isCustom && task.name !== taskName)
+    || (task.assignee ?? '') !== taskForm.assignee.trim()
     || task.plannedStart !== taskForm.plannedStart || task.plannedFinish !== taskForm.plannedFinish || task.isRequired !== taskForm.isRequired
   if (scheduleChanged && !canEditSelectedPlan.value) return ElMessage.error('仅该项目的主项目经理或开发者可以修改计划安排')
   saving.value = true
@@ -1016,7 +1024,7 @@ async function saveTask() {
     let saved: ProjectPlan
     if (scheduleChanged || !isEffective(ownerPlan)) {
       const tasks = ownerPlan.tasks.map(item => item.id === task.id ? {
-        ...item, assignee: taskForm.assignee.trim() || undefined,
+        ...item, name: item.isCustom ? taskName : item.name, assignee: taskForm.assignee.trim() || undefined,
         plannedStart: taskForm.plannedStart, plannedFinish: taskForm.plannedFinish, isRequired: taskForm.isRequired,
       } : item)
       saved = await saveProjectPlan(ownerPlan.projectId, { tasks, changeReason: isEffective(ownerPlan) ? '保存计划安排' : '', expectedRowVersion: ownerPlan.rowVersion }, props.token)
@@ -1045,22 +1053,125 @@ async function deleteSelectedTask() {
   if (!task || !ownerPlan || !canDeleteSelectedTask.value) return
   try {
     await ElMessageBox.confirm(
-      `确认删除非必需任务“${task.name}”？系统会移除该任务，并将后续任务改接到它的前置任务后重新计算排期。`,
+      `确认删除任务“${task.name}”？系统会移除该任务，并将后续任务改接到它的前置任务后重新计算排期。`,
       '删除项目任务',
       { confirmButtonText: '确认删除', cancelButtonText: '取消', type: 'warning' },
     )
     saving.value = true
     await saveProjectPlan(ownerPlan.projectId, {
       tasks: ownerPlan.tasks.filter(item => item.id !== task.id),
-      changeReason: `删除非必需任务：${task.name}`,
+      changeReason: `删除任务：${task.name}`,
       expectedRowVersion: ownerPlan.rowVersion,
     }, props.token)
     taskDialogOpen.value = false
     selectedTask.value = null
     await load()
-    ElMessage.success(isEffective(ownerPlan) ? '任务删减已保存到变更草稿' : '非必需任务已删除，排期已重新计算')
+    ElMessage.success(isEffective(ownerPlan) ? '任务删减已保存到变更草稿' : '任务已删除，排期已重新计算')
   } catch (reason) {
     if (reason !== 'cancel' && reason !== 'close') ElMessage.error(reason instanceof Error ? reason.message : '任务删除失败')
+  } finally { saving.value = false }
+}
+
+function canDeleteTimelineTask(row: TimelineRow) {
+  const task = row.task
+  return Boolean(task && row.plan && canEditSchedule(row.plan)
+    && task.status === 'NotStarted' && !task.actualStart && !task.actualFinish && task.completionPercent === 0
+    && row.plan.tasks.length > 1)
+}
+
+async function addCustomTask(row: TimelineRow) {
+  const owner = row.plan
+  if (!row.isStage || !row.stage || !owner || !canEditSchedule(owner) || !row.start) return
+  try {
+    const { value } = await ElMessageBox.prompt('请输入任务名称。新增任务默认排在当前阶段的开始日期，可在任务详情中调整。', `新增“${row.name}”自定义任务`, {
+      confirmButtonText: '新增', cancelButtonText: '取消', inputPlaceholder: '自定义任务名称', inputPattern: /\S+/, inputErrorMessage: '请输入任务名称',
+    })
+    const nextSortOrder = Math.max(0, ...owner.tasks.map(task => task.sortOrder)) + 10
+    const customTask: ProjectPlanTask = {
+      id: crypto.randomUUID(), name: value.trim(), stage: row.stage, assignee: '', durationDays: 1,
+      plannedStart: row.start, plannedFinish: row.start, completionPercent: 0, status: 'NotStarted', predecessorTaskIds: [],
+      weight: 1, isMilestone: false, isRequired: false, sortOrder: nextSortOrder, isCustom: true,
+    }
+    saving.value = true
+    await saveProjectPlan(owner.projectId, {
+      tasks: [...owner.tasks, customTask], changeReason: `新增自定义任务：${customTask.name}`, expectedRowVersion: owner.rowVersion,
+    }, props.token)
+    await load()
+    ElMessage.success(isEffective(owner) ? '自定义任务已保存到变更草稿' : '自定义任务已新增')
+  } catch (reason) {
+    if (reason !== 'cancel' && reason !== 'close') ElMessage.error(reason instanceof Error ? reason.message : '新增自定义任务失败')
+  } finally { saving.value = false }
+}
+
+async function deleteTimelineTask(row: TimelineRow) {
+  if (!row.task || !row.plan || !canDeleteTimelineTask(row)) return
+  selectedTask.value = row.task
+  await deleteSelectedTask()
+}
+
+function canDragTaskRow(row: TimelineRow) {
+  return Boolean(row.task && row.plan && canEditSchedule(row.plan) && !saving.value)
+}
+
+function canDropTaskRow(row: TimelineRow) {
+  const source = draggedTaskRow.value
+  return Boolean(source?.task && source.plan && row.task && row.plan
+    && source.task.id !== row.task.id && source.plan.id === row.plan.id && source.task.stage === row.task.stage)
+}
+
+function startTaskSortDrag(event: DragEvent, row: TimelineRow) {
+  if (!canDragTaskRow(row)) return event.preventDefault()
+  draggedTaskRow.value = row
+  taskDropTarget.value = null
+  event.dataTransfer?.setData('text/plain', row.task!.id)
+  if (event.dataTransfer) event.dataTransfer.effectAllowed = 'move'
+}
+
+function dragOverTaskRow(event: DragEvent, row: TimelineRow) {
+  if (!canDropTaskRow(row)) {
+    taskDropTarget.value = null
+    return
+  }
+  event.preventDefault()
+  if (event.dataTransfer) event.dataTransfer.dropEffect = 'move'
+  const bounds = (event.currentTarget as HTMLElement).getBoundingClientRect()
+  taskDropTarget.value = { key: row.key, position: event.clientY > bounds.top + bounds.height / 2 ? 'after' : 'before' }
+}
+
+function clearTaskSortDrag() {
+  draggedTaskRow.value = null
+  taskDropTarget.value = null
+}
+
+async function dropTaskRow(event: DragEvent, row: TimelineRow) {
+  const source = draggedTaskRow.value
+  if (!source?.task || !source.plan || !row.task || !canDropTaskRow(row)) {
+    clearTaskSortDrag()
+    return
+  }
+  event.preventDefault()
+  const siblings = source.plan.tasks.filter(task => task.stage === source.task!.stage)
+    .sort((left, right) => left.sortOrder - right.sortOrder)
+  const remaining = siblings.filter(task => task.id !== source.task!.id)
+  const targetIndex = remaining.findIndex(task => task.id === row.task!.id)
+  const bounds = (event.currentTarget as HTMLElement).getBoundingClientRect()
+  const insertAfter = taskDropTarget.value?.key === row.key ? taskDropTarget.value.position === 'after' : event.clientY > bounds.top + bounds.height / 2
+  remaining.splice(targetIndex + (insertAfter ? 1 : 0), 0, source.task)
+  const originalSortOrders = siblings.map(task => task.sortOrder)
+  const reorderedSortOrders = new Map(remaining.map((task, index) => [task.id, originalSortOrders[index]!]))
+  clearTaskSortDrag()
+  saving.value = true
+  try {
+    await saveProjectPlan(source.plan.projectId, {
+      tasks: source.plan.tasks.map(task => reorderedSortOrders.has(task.id)
+        ? { ...task, sortOrder: reorderedSortOrders.get(task.id)! } : task),
+      changeReason: `拖动调整任务排序：${source.task.name}`,
+      expectedRowVersion: source.plan.rowVersion,
+    }, props.token)
+    await load()
+    ElMessage.success(`已调整“${source.task.name}”的排序`)
+  } catch (reason) {
+    ElMessage.error(reason instanceof Error ? reason.message : '调整任务排序失败')
   } finally { saving.value = false }
 }
 
@@ -1208,11 +1319,11 @@ async function decideChange(approve: boolean) {
   if (!plan.value || !canApproveChange.value) return
   saving.value = true
   try {
-    const result = await ElMessageBox.prompt(approve ? '批准后申请人获得一次变更权限并从现行计划创建草稿；草稿完成前原计划继续生效。' : '请填写驳回原因；原计划不受影响。', approve ? '批准变更权限' : '驳回变更权限', { confirmButtonText: approve ? '批准权限' : '驳回', cancelButtonText: '取消', ...(approve ? {} : { inputPattern: /\S+/, inputErrorMessage: '请输入驳回原因' }) })
+    const result = await ElMessageBox.prompt(approve ? '批准后申请人获得一次变更权限并从现行计划创建草稿；草稿完成前原计划继续生效。' : '请填写退回原因；原计划不受影响。', approve ? '批准变更权限' : '退回变更权限', { confirmButtonText: approve ? '批准权限' : '退回', cancelButtonText: '取消', ...(approve ? {} : { inputPattern: /\S+/, inputErrorMessage: '请输入退回原因' }) })
     await decideProjectPlan(props.project.id, { expectedRowVersion: plan.value.rowVersion, approve, comment: result.value }, props.token)
     changeReviewOpen.value = false
     await load()
-    ElMessage.success(approve ? '变更权限已批准，已创建可编辑草稿' : '变更权限已驳回，原计划不变')
+    ElMessage.success(approve ? '变更权限已批准，已创建可编辑草稿' : '变更权限已退回，原计划不变')
   } catch (reason) { if (reason !== 'cancel' && reason !== 'close') ElMessage.error(reason instanceof Error ? reason.message : '审批失败') }
   finally { saving.value = false }
 }
@@ -1246,9 +1357,9 @@ async function decideApproval(approve: boolean) {
   if (!plan.value) return
   saving.value = true
   try {
-    const result = await ElMessageBox.prompt(approve ? '批准后首版计划正式生效，并自动冻结基线V1。' : '请填写驳回原因，项目经理可修改后重新提交。', approve ? '批准首版计划' : '驳回首版计划', { confirmButtonText: approve ? '批准生效' : '驳回', cancelButtonText: '取消', ...(approve ? {} : { inputPattern: /\S+/, inputErrorMessage: '请输入驳回原因' }) })
+    const result = await ElMessageBox.prompt(approve ? '批准后首版计划正式生效，并自动冻结基线V1。' : '请填写退回原因，项目经理可修改后重新提交。', approve ? '批准首版计划' : '退回首版计划', { confirmButtonText: approve ? '批准生效' : '退回', cancelButtonText: '取消', ...(approve ? {} : { inputPattern: /\S+/, inputErrorMessage: '请输入退回原因' }) })
     plan.value = await decideProjectPlan(props.project.id, { expectedRowVersion: plan.value.rowVersion, approve, comment: result.value }, props.token)
-    ElMessage.success(approve ? '首版计划已批准生效，基线V1已冻结' : '计划已驳回')
+    ElMessage.success(approve ? '首版计划已批准生效，基线V1已冻结' : '计划已退回')
     await load()
   } catch (reason) { if (reason !== 'cancel' && reason !== 'close') ElMessage.error(reason instanceof Error ? reason.message : '审批失败') }
   finally { saving.value = false }
@@ -1405,7 +1516,7 @@ watch(() => props.project.id, () => { masterPlanMode.value = false; return load(
           <div class="pdm-plan-view-tabs"><strong class="pdm-plan-view-label">{{ portfolioMode ? `全部子项目（${timelineRows.length}）` : '任务甘特图' }}</strong><span v-if="!portfolioMode">{{ timelineRows.length }} 行</span></div>
           <div class="pdm-plan-toolbar__actions">
             <button type="button" class="pdm-plan-delete-action" :disabled="saving || !canDeleteDisplayedPlan" :title="deleteDisabledReason || (isEffective(plan) ? '删除现行计划和变更草稿' : '删除未审批计划')" @click="openToolbarDelete">删除计划</button>
-            <template v-if="canApprove"><button type="button" class="pdm-primary-action" :disabled="saving" @click="decideApproval(true)">批准生效</button><button type="button" class="pdm-secondary-action" :disabled="saving" @click="decideApproval(false)">驳回</button></template>
+            <template v-if="canApprove"><button type="button" class="pdm-primary-action" :disabled="saving" @click="decideApproval(true)">批准生效</button><button type="button" class="pdm-secondary-action" :disabled="saving" @click="decideApproval(false)">退回</button></template>
             <button v-if="!portfolioMode && ownsDisplayedPlan && isEffective(plan) && canEdit && !pendingChange && !editingChangeDraft" type="button" class="pdm-secondary-action" :disabled="saving" @click="openChangeRequest">申请变更权限</button>
             <button v-if="!portfolioMode && ownsDisplayedPlan && plan?.changeRequest" type="button" class="pdm-secondary-action" @click="changeReviewOpen = true">{{ pendingChange ? '权限待审批' : '变更申请记录' }}</button>
             <button v-if="!portfolioMode && ownsDisplayedPlan && editingChangeDraft && canEditSchedule(plan)" type="button" class="pdm-primary-action" :disabled="saving" @click="completeChangeDraft">完成变更并生效</button>
@@ -1434,8 +1545,9 @@ watch(() => props.project.id, () => { masterPlanMode.value = false; return load(
         <div v-if="project.parentProjectId && plan && !inheritedParentPlan" class="pdm-plan-edit-hint">{{ plan.followsParentPlan ? '跟随主项目计划：单独修改计划日期后转为独立计划；修改责任人不解除跟随。' : '独立计划：主项目调整不会覆盖此计划。' }}</div>
 
         <div v-if="timelineRows.length" ref="ganttShell" class="pdm-gantt-shell">
-          <div class="pdm-gantt-table" :class="{ 'is-info-collapsed': infoColumnsCollapsed }">
+          <div class="pdm-gantt-table" :class="{ 'is-info-collapsed': infoColumnsCollapsed, 'has-task-actions': showGanttTaskActions }">
             <div class="pdm-gantt-head pdm-gantt-info-head">
+              <span v-if="showGanttTaskActions" class="pdm-gantt-action-head" aria-label="任务操作"><Settings :size="14" /></span>
               <span class="pdm-gantt-head-primary"><button v-if="stageKeys.length" type="button" class="pdm-gantt-head-icon" :aria-label="allStagesCollapsed ? '展开全部阶段' : '收起全部阶段'" :title="allStagesCollapsed ? '展开全部阶段' : '收起全部阶段'" @click.stop="toggleAllStages"><component :is="allStagesCollapsed ? ListTree : ListCollapse" :size="15" /></button>项目 / 任务</span>
               <span v-if="!infoColumnsCollapsed">阶段</span><span v-if="!infoColumnsCollapsed">责任人</span><span v-if="!infoColumnsCollapsed">进度</span><span>计划日期</span><span>工期</span><span v-if="!infoColumnsCollapsed">完成日期</span>
               <button type="button" class="pdm-gantt-head-icon" :aria-label="infoColumnsCollapsed ? '展开信息列' : '折叠信息列'" :title="infoColumnsCollapsed ? '展开信息列' : '折叠信息列'" :aria-pressed="infoColumnsCollapsed" @click.stop="infoColumnsCollapsed = !infoColumnsCollapsed"><component :is="infoColumnsCollapsed ? PanelLeftOpen : PanelLeftClose" :size="15" /></button>
@@ -1452,7 +1564,11 @@ watch(() => props.project.id, () => { masterPlanMode.value = false; return load(
               <span v-if="shippingDateLeft >= 0 && shippingDateLeft <= timelineWidth" class="pdm-gantt-shipping is-header" :title="`项目发货日期：${shippingDate}`" :style="{ left: `${shippingDateLeft}px` }"><b class="pdm-gantt-shipping__label">发货</b></span>
             </div>
             <template v-for="row in timelineRows" :key="row.key">
-              <div role="button" tabindex="0" class="pdm-gantt-info-row" :class="{ 'is-project': !row.task && !row.isStage, 'is-stage': row.isStage, 'is-task': Boolean(row.task), 'is-child': row.level > 0, 'is-inherited-plan': row.isInherited }" :style="{ '--gantt-indent': `${10 + row.level * 16}px` }" :title="row.isInherited ? '默认跟随主计划' : undefined" :aria-expanded="row.isStage ? !collapsedStages.has(row.key) : !row.task && row.plan ? expanded.has(row.projectId) : undefined" @keydown.enter.self.prevent="row.isStage ? toggleStage(row.key) : row.task ? openTask(row) : toggleExpanded(row.projectId)" @keydown.space.self.prevent="row.isStage ? toggleStage(row.key) : row.task ? openTask(row) : toggleExpanded(row.projectId)" @click="row.isStage ? toggleStage(row.key) : row.task ? openTask(row) : toggleExpanded(row.projectId)">
+              <div role="button" tabindex="0" class="pdm-gantt-info-row" :class="{ 'is-project': !row.task && !row.isStage, 'is-stage': row.isStage, 'is-task': Boolean(row.task), 'is-sortable': canDragTaskRow(row), 'is-drop-before': taskDropTarget?.key === row.key && taskDropTarget.position === 'before', 'is-drop-after': taskDropTarget?.key === row.key && taskDropTarget.position === 'after', 'is-child': row.level > 0, 'is-inherited-plan': row.isInherited }" :style="{ '--gantt-indent': `${10 + row.level * 16}px` }" :title="row.isInherited ? '默认跟随主计划' : undefined" :aria-expanded="row.isStage ? !collapsedStages.has(row.key) : !row.task && row.plan ? expanded.has(row.projectId) : undefined" :draggable="canDragTaskRow(row)" @dragstart="startTaskSortDrag($event, row)" @dragend="clearTaskSortDrag" @dragover="dragOverTaskRow($event, row)" @drop="dropTaskRow($event, row)" @keydown.enter.self.prevent="row.isStage ? toggleStage(row.key) : row.task ? openTask(row) : toggleExpanded(row.projectId)" @keydown.space.self.prevent="row.isStage ? toggleStage(row.key) : row.task ? openTask(row) : toggleExpanded(row.projectId)" @click="row.isStage ? toggleStage(row.key) : row.task ? openTask(row) : toggleExpanded(row.projectId)">
+                <span v-if="showGanttTaskActions" class="pdm-gantt-action-cell">
+                  <button v-if="row.isStage && canEditSchedule(row.plan)" type="button" :aria-label="`在${row.name}新增自定义任务`" :title="`在${row.name}新增自定义任务`" @click.stop="addCustomTask(row)"><Plus :size="14" /></button>
+                  <button v-else-if="row.task && canEditSchedule(row.plan)" type="button" class="pdm-gantt-delete-task" :aria-label="`删除任务${row.name}`" title="删除任务" :disabled="saving || !canDeleteTimelineTask(row)" @click.stop="deleteTimelineTask(row)"><Trash2 :size="12" /></button>
+                </span>
                 <span class="pdm-gantt-name">
                   <component :is="(row.isStage ? !collapsedStages.has(row.key) : expanded.has(row.projectId)) ? ChevronDown : ChevronRight" v-if="!row.task && row.plan" :size="13" />
                   <i v-else class="pdm-gantt-indent" />
@@ -1499,7 +1615,7 @@ watch(() => props.project.id, () => { masterPlanMode.value = false; return load(
                 </span>
                 <span class="pdm-gantt-row-control" aria-hidden="true" />
               </div>
-              <div class="pdm-gantt-timeline-row" :class="{ 'is-project': !row.task && !row.isStage, 'is-stage': row.isStage, 'is-inherited-plan': row.isInherited }" :title="row.isInherited ? '默认跟随主计划' : undefined" :style="{ width: `${timelineWidth}px` }" @dblclick="row.isStage ? toggleStage(row.key) : openTask(row)">
+              <div class="pdm-gantt-timeline-row" :class="{ 'is-project': !row.task && !row.isStage, 'is-stage': row.isStage, 'is-drop-before': taskDropTarget?.key === row.key && taskDropTarget.position === 'before', 'is-drop-after': taskDropTarget?.key === row.key && taskDropTarget.position === 'after', 'is-inherited-plan': row.isInherited }" :title="row.isInherited ? '默认跟随主计划' : undefined" :style="{ width: `${timelineWidth}px` }" @dragover="dragOverTaskRow($event, row)" @drop="dropTaskRow($event, row)" @dblclick="row.isStage ? toggleStage(row.key) : openTask(row)">
                 <span v-for="marker in showNonWorkingDays ? calendarMarkers : []" :key="`${row.key}-calendar-${marker.date}`" aria-hidden="true" class="pdm-gantt-calendar-shade" :class="`is-${marker.tone}`" :style="{ left: `${marker.left}px`, width: `${Math.max(marker.width, 1)}px` }" />
                 <span v-for="tick in ticks" :key="`${row.key}-${tick.date}`" class="pdm-gantt-gridline" :style="{ left: `${tick.left}px` }" />
                 <span v-if="todayLeft >= 0 && todayLeft <= timelineWidth" class="pdm-gantt-today" :style="{ left: `${todayLeft}px` }" />
@@ -1577,7 +1693,7 @@ watch(() => props.project.id, () => { masterPlanMode.value = false; return load(
 
     <el-dialog v-model="changeReviewOpen" title="计划变更申请与差异" width="760px" destroy-on-close>
       <div v-if="plan?.changeRequest" class="pdm-plan-form">
-        <p>{{ plan.changeRequest.status === 'Pending' ? '变更权限待审批（历史申请），原计划继续生效' : plan.changeDraftSource ? '已取得变更权限，草稿编辑中，原计划继续生效' : plan.changeRequest.status === 'Approved' ? '本次变更已结束' : '变更权限已驳回，原计划不变' }}<template v-if="plan.changeRequest.status === 'Pending'">；审批人：{{ displayUserName(plan.changeRequest.approvalAssignee) }}</template></p>
+        <p>{{ plan.changeRequest.status === 'Pending' ? '变更权限待审批（历史申请），原计划继续生效' : plan.changeDraftSource ? '已取得变更权限，草稿编辑中，原计划继续生效' : plan.changeRequest.status === 'Approved' ? '本次变更已结束' : '变更权限已退回，原计划不变' }}<template v-if="plan.changeRequest.status === 'Pending'">；审批人：{{ displayUserName(plan.changeRequest.approvalAssignee) }}</template></p>
         <p>申请人：{{ displayUserName(plan.changeRequest.submittedBy) }}；原因：{{ plan.changeRequest.reason }}<br v-if="plan.changeRequest.comment" />{{ plan.changeRequest.comment ? `说明：${plan.changeRequest.comment}` : '' }}</p>
         <div v-if="plan.changeRequest.tasks.length" class="pdm-plan-change-review">
           <article v-for="change in plan.changeRequest.tasks" :key="change.taskId">
@@ -1588,22 +1704,22 @@ watch(() => props.project.id, () => { masterPlanMode.value = false; return load(
         </div>
         <p v-else>此申请仅申请变更权限，未预先提交任务排期修改。</p>
       </div>
-      <template #footer><button type="button" class="pdm-secondary-action" @click="changeReviewOpen = false">关闭</button><template v-if="canApproveChange"><button type="button" class="pdm-secondary-action" :disabled="saving" @click="decideChange(false)">驳回权限</button><button type="button" class="pdm-primary-action" :disabled="saving" @click="decideChange(true)">批准权限</button></template></template>
+      <template #footer><button type="button" class="pdm-secondary-action" @click="changeReviewOpen = false">关闭</button><template v-if="canApproveChange"><button type="button" class="pdm-secondary-action" :disabled="saving" @click="decideChange(false)">退回权限</button><button type="button" class="pdm-primary-action" :disabled="saving" @click="decideChange(true)">批准权限</button></template></template>
     </el-dialog>
 
     <el-dialog v-model="taskDialogOpen" title="任务详情与实际进度" width="620px" destroy-on-close>
       <div class="pdm-plan-form">
-        <label>任务名称<el-input :model-value="taskForm.name" aria-label="任务名称" readonly /></label>
-        <p v-if="selectedTask?.workflowKey" class="pdm-plan-workflow-lock">流程必需任务：由系统模板维护，不允许从项目计划中删除。</p>
+        <label>任务名称<el-input v-model="taskForm.name" aria-label="任务名称" :readonly="!selectedTask?.isCustom || !canEditSelectedPlan" /></label>
+        <p v-if="selectedTask?.workflowKey" class="pdm-plan-workflow-lock">流程必需任务沿用模板配置；在计划编辑态删除后，系统会自动重算前置关系和排期。</p>
         <div class="pdm-plan-form__grid"><label>阶段<el-input :model-value="stageLabel(taskForm.stage, selectedOwnerPlan)" aria-label="阶段" readonly /></label><label>责任人<el-select v-model="taskForm.assignee" :disabled="!canEditSelectedPlan" filterable clearable placeholder="选择责任人"><el-option v-for="username in assigneeOptions" :key="username" :label="displayUserName(username)" :value="username" /></el-select></label></div>
         <label>计划日期<el-date-picker v-model="taskDateRange" class="pdm-plan-date-range" aria-label="计划日期区间" value-format="YYYY-MM-DD" type="daterange" range-separator="至" start-placeholder="开始日期" end-placeholder="完成日期" :clearable="false" :disabled="!canEditSelectedPlan" /></label>
         <p v-if="!isEffective(selectedOwnerPlan)">当前为{{ approvalLabel(selectedOwnerPlan) }}，可修改安排并保存草稿；批准生效后才可填报实际进度。</p>
         <label class="pdm-progress-ruler">实际完成比例 <strong>{{ taskForm.completionPercent }}%</strong><el-slider v-model="taskForm.completionPercent" aria-label="实际完成比例" :min="0" :max="100" :step="10" show-stops :marks="completionMarks" :format-tooltip="(value: number) => `${value}%`" :disabled="!isEffective(selectedOwnerPlan)" /></label>
         <div class="pdm-plan-form__grid"><label>实际开始<el-date-picker v-model="taskForm.actualStart" aria-label="实际开始" :disabled-date="futureActualDate" value-format="YYYY-MM-DD" type="date" clearable :disabled="!isEffective(selectedOwnerPlan)" /></label><label>实际完成<el-date-picker v-model="taskForm.actualFinish" aria-label="实际完成" :disabled-date="futureActualDate" value-format="YYYY-MM-DD" type="date" clearable :disabled="!isEffective(selectedOwnerPlan)" /></label></div>
         <div class="pdm-plan-form__grid"><label>进度权重<el-input :model-value="String(taskForm.weight)" aria-label="进度权重" readonly /></label><label v-if="canEditSelectedPlan" class="pdm-plan-checkbox"><el-checkbox v-model="taskForm.isRequired">作为阶段门必需任务</el-checkbox></label></div>
-        <p>任务名称、阶段和权重沿用生成计划时的模板配置；权重由系统自动换算占比，无需人工凑到100。</p>
+        <p>{{ selectedTask?.isCustom ? '自定义任务名称、责任人和日期可在计划编辑态调整；未开始时也可删除。' : '任务名称、阶段和权重沿用生成计划时的模板配置；编辑态可删除未开始任务，权重由系统自动换算占比。' }}</p>
       </div>
-      <template #footer><button v-if="canEditSelectedPlan" type="button" class="pdm-plan-delete-task" :disabled="saving || !canDeleteSelectedTask" :title="selectedTask?.workflowKey ? '流程必需任务不能删除' : selectedTask?.status !== 'NotStarted' ? '已有进度的任务不能删除' : ''" @click="deleteSelectedTask">删除任务</button><span class="pdm-plan-dialog-spacer" /><button type="button" class="pdm-secondary-action" @click="taskDialogOpen = false">取消</button><button type="button" class="pdm-primary-action" :disabled="saving || (!canEditSelectedPlan && !isEffective(selectedOwnerPlan))" @click="saveTask">保存</button></template>
+      <template #footer><button v-if="canEditSelectedPlan" type="button" class="pdm-plan-delete-task" :disabled="saving || !canDeleteSelectedTask" :title="selectedTask?.status !== 'NotStarted' ? '已有进度的任务不能删除' : ''" @click="deleteSelectedTask">删除任务</button><span class="pdm-plan-dialog-spacer" /><button type="button" class="pdm-secondary-action" @click="taskDialogOpen = false">取消</button><button type="button" class="pdm-primary-action" :disabled="saving || (!canEditSelectedPlan && !isEffective(selectedOwnerPlan))" @click="saveTask">保存</button></template>
     </el-dialog>
 
     <el-drawer v-model="templatesDrawerOpen" title="项目计划模板" size="min(1520px, 96vw)" destroy-on-close @closed="load">
@@ -1757,7 +1873,7 @@ watch(() => props.project.id, () => { masterPlanMode.value = false; return load(
 .pdm-plan-summary article>span { color: var(--pdm-muted); font-size: 11px; }.pdm-plan-summary strong { display: flex; align-items: center; gap: 7px; margin-top: 5px; font-size: 16px; }.pdm-plan-summary small { margin-top: 4px; color: var(--pdm-muted); font-size: 11px; }
 .pdm-plan-summary article.pdm-plan-shipping-card,.pdm-plan-summary article.pdm-plan-active-stage-card{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:center;gap:10px}.pdm-plan-shipping-card__date,.pdm-plan-active-stage-card__detail{min-width:0;display:flex;flex-direction:column;justify-content:center}.pdm-plan-shipping-card__date>span,.pdm-plan-active-stage-card__detail>span{color:var(--pdm-muted);font-size:11px}.pdm-plan-shipping-card__date>strong,.pdm-plan-active-stage-card__detail>strong,.pdm-plan-shipping-card__date>small,.pdm-plan-active-stage-card__detail>small{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.pdm-plan-summary .pdm-plan-shipping-countdown{min-width:58px;display:flex;flex-direction:column;align-items:center;justify-content:center;padding-left:11px;border-left:1px solid var(--pdm-border);color:var(--pdm-green);font-weight:600}.pdm-plan-summary .pdm-plan-shipping-countdown>strong{margin:0;font-size:28px;line-height:1;font-variant-numeric:tabular-nums}.pdm-plan-summary .pdm-plan-shipping-countdown>strong>b{font:inherit}.pdm-plan-summary .pdm-plan-shipping-countdown>strong>em{margin-left:2px;font-size:11px;font-style:normal}.pdm-plan-summary .pdm-plan-shipping-countdown>span{margin-top:4px;font-size:11px;line-height:1;white-space:nowrap}.pdm-plan-summary .pdm-plan-shipping-countdown.is-today{color:var(--plan-accent)}.pdm-plan-summary .pdm-plan-shipping-countdown.is-overdue{color:var(--pdm-danger)}
 .pdm-plan-stage-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--plan-accent); box-shadow: 0 0 0 4px var(--plan-accent-soft); }.pdm-plan-stage-dot.is-warning{background:var(--pdm-orange)}.pdm-plan-stage-dot.is-danger{background:var(--pdm-danger)}.pdm-plan-stage-dot.is-complete{background:var(--pdm-green)}
-.pdm-plan-progress { height: 5px; margin-top: 8px; overflow: hidden; border-radius: 5px; background: var(--pdm-surface-muted); }.pdm-plan-progress i { display: block; height: 100%; border-radius: inherit; background: var(--plan-accent); }
+.pdm-plan-progress { height: 10px; margin-top: 8px; overflow: hidden; border-radius: 5px; background: var(--pdm-surface-muted); }.pdm-plan-progress i { display: block; height: 100%; border-radius: inherit; background: var(--plan-accent); }
 .pdm-plan-panel { min-height: 420px; display: flex; flex: 1; flex-direction: column; overflow: hidden; border: 1px solid var(--pdm-border); border-radius: 8px; background: var(--pdm-surface); box-shadow: var(--pdm-shadow-sm); }
 .pdm-plan-toolbar { min-height: 52px; display: flex; align-items: center; justify-content: space-between; gap: 8px; overflow-x: auto; padding: 9px 12px; border-bottom: 1px solid var(--pdm-border); }.pdm-plan-view-tabs { min-width:max-content;display:flex;flex:0 0 auto;align-items:center;gap:8px}.pdm-plan-view-tabs>button{box-sizing:border-box;width:80px;min-width:80px;height:32px;min-height:32px;padding:0 6px;border:0;border-radius:5px;color:var(--plan-accent);background:var(--plan-accent-soft);font-weight:600;white-space:nowrap}.pdm-plan-view-label{color:var(--plan-accent);font-size:12px;font-weight:600;white-space:nowrap}.pdm-plan-view-tabs span{color:var(--pdm-muted);font-size:11px}
 .pdm-plan-switch { display: flex; align-items: center; gap: 5px; color: var(--pdm-muted); font-size: 11px; }.pdm-plan-switch input{accent-color:var(--plan-accent)}
@@ -1774,6 +1890,7 @@ watch(() => props.project.id, () => { masterPlanMode.value = false; return load(
 @media (max-width:1400px){.pdm-plan-summary{grid-template-columns:repeat(3,minmax(0,1fr))}}@media (max-width:760px){.pdm-plan-summary{grid-template-columns:repeat(2,minmax(0,1fr))}}
 .pdm-gantt-info-row.is-project,.pdm-gantt-timeline-row.is-project{background:color-mix(in srgb,var(--pdm-border) 32%,var(--pdm-surface))}.pdm-gantt-info-row.is-stage,.pdm-gantt-timeline-row.is-stage{background:color-mix(in srgb,var(--plan-accent-soft) 82%,var(--pdm-surface))}.pdm-gantt-info-row.is-inherited-plan,.pdm-gantt-timeline-row.is-inherited-plan{background:color-mix(in srgb,var(--pdm-surface-muted) 72%,var(--pdm-surface))}.pdm-gantt-info-row .pdm-gantt-name{padding-left:var(--gantt-indent,10px)}
 .pdm-gantt-info-head,.pdm-gantt-info-row{grid-template-columns:150px 86px 80px 80px 120px 60px 100px 32px}.pdm-gantt-table.is-info-collapsed .pdm-gantt-info-head,.pdm-gantt-table.is-info-collapsed .pdm-gantt-info-row{grid-template-columns:170px 120px 60px 32px}
+.pdm-gantt-table.has-task-actions .pdm-gantt-info-head,.pdm-gantt-table.has-task-actions .pdm-gantt-info-row{grid-template-columns:36px 150px 86px 80px 80px 120px 60px 100px 32px}.pdm-gantt-table.has-task-actions.is-info-collapsed .pdm-gantt-info-head,.pdm-gantt-table.has-task-actions.is-info-collapsed .pdm-gantt-info-row{grid-template-columns:36px 170px 120px 60px 32px}.pdm-gantt-action-head,.pdm-gantt-action-cell{display:grid;place-items:center;height:100%}.pdm-gantt-action-head{color:var(--pdm-muted)}.pdm-gantt-action-cell>button{display:inline-grid;place-items:center;padding:0;border:1px solid var(--pdm-border);border-radius:4px;background:var(--pdm-surface);color:var(--plan-accent);cursor:pointer}.pdm-gantt-action-cell>button{width:24px;height:24px}.pdm-gantt-action-cell>.pdm-gantt-delete-task{width:16px;height:16px}.pdm-gantt-action-cell>button:hover:not(:disabled),.pdm-gantt-action-cell>button:focus-visible{border-color:var(--plan-accent);background:var(--plan-accent-soft);outline:0}.pdm-gantt-action-cell>button:disabled{cursor:not-allowed;color:var(--pdm-muted);opacity:.55}.pdm-gantt-info-row.is-sortable,.pdm-gantt-timeline-row.is-sortable{cursor:grab}.pdm-gantt-info-row.is-sortable:active,.pdm-gantt-timeline-row.is-sortable:active{cursor:grabbing}.pdm-gantt-info-row.is-drop-before::after,.pdm-gantt-info-row.is-drop-after::after,.pdm-gantt-timeline-row.is-drop-before::after,.pdm-gantt-timeline-row.is-drop-after::after{content:'';position:absolute;z-index:10;left:0;right:0;height:3px;background:var(--plan-accent);box-shadow:0 0 0 1px color-mix(in srgb,var(--plan-accent) 28%,transparent);pointer-events:none;animation:pdm-gantt-insert-pulse .55s ease-in-out infinite alternate}.pdm-gantt-info-row.is-drop-before::after,.pdm-gantt-timeline-row.is-drop-before::after{top:0}.pdm-gantt-info-row.is-drop-after::after,.pdm-gantt-timeline-row.is-drop-after::after{bottom:-1px}@keyframes pdm-gantt-insert-pulse{from{opacity:.42}to{opacity:1}}
 .pdm-gantt-date-lines{display:block;font-size:0!important;line-height:0}.pdm-gantt-date-lines time{display:block;font-size:11px;line-height:16px}.pdm-gantt-inline-editor.is-duration{left:396px;width:250px}
 .pdm-gantt-info-row>span{text-align:center}.pdm-gantt-info-row>span:not(.pdm-gantt-name){padding-left:0!important}.pdm-gantt-info-row .pdm-gantt-name{position:relative;justify-content:center;padding:0 18px}.pdm-gantt-name>svg{position:absolute;left:6px}.pdm-gantt-name>.pdm-gantt-indent{display:none}
 .pdm-gantt-cell-edit{text-align:center!important}.pdm-gantt-inline-editor{text-align:left;white-space:normal}.pdm-gantt-inline-editor.is-actual-finish{left:376px;width:290px}.pdm-gantt-inline-editor label{display:block;margin-bottom:8px}.pdm-gantt-inline-editor small{display:block;line-height:1.4}

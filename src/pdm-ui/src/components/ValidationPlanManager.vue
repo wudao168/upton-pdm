@@ -510,14 +510,14 @@ async function decideCurrent(decision: 'Approved' | 'Rejected') {
   const task = currentApprovalTask.value
   if (!task) return
   try {
-    const { value } = await ElMessageBox.prompt(decision === 'Approved' ? '可填写审批意见。' : '请填写驳回原因。', decision === 'Approved' ? '批准验证计划' : '驳回验证计划', {
-      inputValidator: value => decision === 'Approved' || value.trim().length > 0 || '请填写驳回原因',
-      confirmButtonText: decision === 'Approved' ? '批准' : '驳回', cancelButtonText: '取消', type: decision === 'Approved' ? 'success' : 'warning',
+    const { value } = await ElMessageBox.prompt(decision === 'Approved' ? '可填写审批意见。' : '请填写退回原因。', decision === 'Approved' ? '批准验证计划' : '退回验证计划', {
+      inputValidator: value => decision === 'Approved' || value.trim().length > 0 || '请填写退回原因',
+      confirmButtonText: decision === 'Approved' ? '批准' : '退回', cancelButtonText: '取消', type: decision === 'Approved' ? 'success' : 'warning',
     })
     submitting.value = true
     hydratePlan(await decideValidationPlanApproval(task.id, decision, value, props.token))
     dirty.value = false
-    ElMessage.success(decision === 'Approved' ? '审批已流转' : '验证计划已驳回')
+    ElMessage.success(decision === 'Approved' ? '审批已流转' : '验证计划已退回')
   } catch (error) {
     if (error === 'cancel' || error === 'close') return
     ElMessage.error(errorMessage(error))
@@ -733,7 +733,7 @@ function summaryStatus(project: ProjectSummary) {
   const projectPlan = summaryPlans.value[project.id]
   if (!projectPlan) return '未建立'
   const state = typeof projectPlan.state === 'number' ? ['Draft', 'PendingApproval', 'Effective', 'Rejected', 'Superseded'][projectPlan.state] : projectPlan.state
-  return ({ Draft: '草稿', PendingApproval: '审批中', Effective: '已生效', Rejected: '已驳回', Superseded: '已替代' } as Record<string, string>)[state] ?? '草稿'
+  return ({ Draft: '草稿', PendingApproval: '审批中', Effective: '已生效', Rejected: '已退回', Superseded: '已替代' } as Record<string, string>)[state] ?? '草稿'
 }
 
 function attachmentKind(file: ValidationPlanAttachment): 'PlanDocument' | 'Evidence' {
@@ -752,7 +752,7 @@ function openSummaryAttachments(project: ProjectSummary, kind: 'PlanDocument' | 
 }
 
 function stateLabel() {
-  return ({ Draft: '草稿', PendingApproval: '审批中', Effective: '已生效', Rejected: '已驳回', Superseded: '已替代' } as Record<string, string>)[normalizedState.value ?? ''] ?? '未建立'
+  return ({ Draft: '草稿', PendingApproval: '审批中', Effective: '已生效', Rejected: '已退回', Superseded: '已替代' } as Record<string, string>)[normalizedState.value ?? ''] ?? '未建立'
 }
 
 function fileSize(value: number) {
@@ -767,7 +767,7 @@ function formatDateTime(value?: string | null) {
 
 function approvalTaskStatus(task: ProjectValidationPlan['approvalTasks'][number]) {
   if (task.decision == null) return '待处理'
-  if (task.decision === 'Rejected' || task.decision === 1) return '已驳回'
+  if (task.decision === 'Rejected' || task.decision === 1) return '已退回'
   return task.decisionComment?.includes('系统自动通过') || task.decisionComment?.includes('即完成编制人自检') ? '系统自动通过' : '已批准'
 }
 </script>
@@ -838,7 +838,7 @@ function approvalTaskStatus(task: ProjectValidationPlan['approvalTasks'][number]
         <button v-if="editable || canAppend" type="button" class="pdm-primary-action" :disabled="saving || loading || (canAppend && !appendedRows.length)" @click="savePlan"><Save :size="14" />{{ saving ? '保存中…' : canAppend ? '保存新增' : '保存' }}</button>
         <button v-if="canMaintainStandards" type="button" class="pdm-primary-action" :disabled="saving || loading || !standardChanges.length || Boolean(appendedRows.length)" :title="appendedRows.length ? '请先保存新增验证内容，再保存验证标准' : '保存已生效验证计划的验证标准'" @click="saveValidationStandards"><Save :size="14" />{{ saving ? '保存中…' : '保存标准' }}</button>
         <button v-if="plan && editable" type="button" class="pdm-primary-action" :disabled="dirty || submitting" @click="submitForApproval"><Send :size="14" />提交审批</button>
-        <button v-if="canDecideCurrent" type="button" class="pdm-secondary-action" :disabled="submitting" @click="decideCurrent('Rejected')"><XCircle :size="14" />驳回</button>
+        <button v-if="canDecideCurrent" type="button" class="pdm-secondary-action" :disabled="submitting" @click="decideCurrent('Rejected')"><XCircle :size="14" />退回</button>
         <button v-if="canDecideCurrent" type="button" class="pdm-primary-action" :disabled="submitting" @click="decideCurrent('Approved')"><CheckCircle2 :size="14" />批准</button>
       </div>
     </header>
@@ -952,7 +952,7 @@ function approvalTaskStatus(task: ProjectValidationPlan['approvalTasks'][number]
 .validation-plan-summary__status { display:inline-block; min-width:54px; padding:3px 7px; border-radius:999px; background:var(--pdm-soft); color:var(--pdm-muted); }
 .validation-plan-summary__status.is-已生效 { background:#e8f7f3; color:var(--pdm-green); }
 .validation-plan-summary__status.is-审批中 { background:#fff5db; color:var(--pdm-orange); }
-.validation-plan-summary__status.is-已驳回 { background:#fff1f1; color:var(--pdm-danger); }
+.validation-plan-summary__status.is-已退回 { background:#fff1f1; color:var(--pdm-danger); }
 .validation-plan-summary__status.is-加载失败 { background:#fff1f1; color:var(--pdm-danger); }
 .validation-plan__table th { position:sticky; top:0; z-index:1; padding:9px 3px; border:0; background:#f3f6f9; color:var(--pdm-muted); font-weight:500; text-align:center; vertical-align:middle; }
 .validation-plan__table tbody tr { background:var(--pdm-surface); }

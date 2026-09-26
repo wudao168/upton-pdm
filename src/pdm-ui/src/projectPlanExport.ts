@@ -17,7 +17,7 @@ type GanttRow = { kind: 'project' | 'stage' | 'task'; label: string; assignee: s
 type GanttModel = { start: string; finish: string; days: number; rows: GanttRow[]; shippingDate: string; today: string }
 
 const detailHeaders = ['项目编码', '项目名称', '计划来源', '计划模板', '审批状态', '阶段', '任务', '责任人', '进度', '计划开始', '计划完成', '工期（天）', '实际开始', '实际完成', '基线开始', '基线完成']
-const approvalLabels: Record<string, string> = { Draft: '草稿', Pending: '待审批', Rejected: '已驳回', Approved: '已生效' }
+const approvalLabels: Record<string, string> = { Draft: '草稿', Pending: '待审批', Rejected: '已退回', Approved: '已生效' }
 const spreadsheetNamespace = 'http://schemas.openxmlformats.org/spreadsheetml/2006/main'
 
 function isoDate(date: Date) { return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}` }

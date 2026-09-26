@@ -26,6 +26,7 @@ internal sealed class EDrawingsPreviewControl : Forms.UserControl
     private readonly Forms.Timer markupDisplayTimer = new();
     private readonly Forms.Timer markupStateTimer = new();
     private readonly Dictionary<string, Forms.ToolStripButton> modeButtons = new(StringComparer.OrdinalIgnoreCase);
+    private TransparentToolStripRenderer? toolbarRenderer;
     private readonly Forms.ToolStripButton measureButton;
     private object? markupControl;
     private string pendingMarkupPath = string.Empty;
@@ -55,7 +56,10 @@ internal sealed class EDrawingsPreviewControl : Forms.UserControl
             button.Image = CreateCommandIcon(command, buttonTheme.IconColor);
             previousImage?.Dispose();
         }
-        toolbar.Renderer = new TransparentToolStripRenderer(buttonTheme);
+        var previousRenderer = toolbarRenderer;
+        toolbarRenderer = new TransparentToolStripRenderer(buttonTheme);
+        toolbar.Renderer = toolbarRenderer;
+        previousRenderer?.Dispose();
         toolbar.Invalidate();
     }
 
@@ -453,6 +457,8 @@ internal sealed class EDrawingsPreviewControl : Forms.UserControl
             viewer.Dispose();
             disposed = true;
             base.Dispose(true);
+            toolbarRenderer?.Dispose();
+            toolbarRenderer = null;
             return;
         }
 
@@ -468,7 +474,8 @@ internal sealed class EDrawingsPreviewControl : Forms.UserControl
         toolbar.GripStyle = Forms.ToolStripGripStyle.Hidden;
         toolbar.ImageScalingSize = new Size(26, 26);
         toolbar.Padding = Forms.Padding.Empty;
-        toolbar.Renderer = new TransparentToolStripRenderer(buttonTheme);
+        toolbarRenderer = new TransparentToolStripRenderer(buttonTheme);
+        toolbar.Renderer = toolbarRenderer;
         toolbar.ShowItemToolTips = true;
         toolbar.TabStop = false;
     }
@@ -862,7 +869,7 @@ internal sealed class EDrawingsPreviewControl : Forms.UserControl
 
                 File.AppendAllText(
                     DiagnosticLogPath,
-                    $"{DateTimeOffset.Now:O} | thread={Environment.CurrentManagedThreadId} | {action} | {detail}{Environment.NewLine}",
+                    $"{DateTimeOffset.Now:O} | thread={Environment.CurrentManagedThreadId} | gdi={GetGuiResources(GetCurrentProcess(), 0)} | user={GetGuiResources(GetCurrentProcess(), 1)} | {action} | {detail}{Environment.NewLine}",
                     Encoding.UTF8);
             }
         }
@@ -872,13 +879,34 @@ internal sealed class EDrawingsPreviewControl : Forms.UserControl
         }
     }
 
-    private sealed class TransparentToolStripRenderer : Forms.ToolStripProfessionalRenderer
+    [DllImport("kernel32.dll")]
+    private static extern IntPtr GetCurrentProcess();
+
+    [DllImport("user32.dll")]
+    private static extern uint GetGuiResources(IntPtr hProcess, uint uiFlags);
+
+    private sealed class TransparentToolStripRenderer : Forms.ToolStripProfessionalRenderer, IDisposable
     {
         private readonly PreviewButtonTheme theme;
+        private readonly SolidBrush shadowBrush = new(Color.FromArgb(35, 15, 23, 42));
+        private readonly SolidBrush normalBrush = new(Color.White);
+        private readonly SolidBrush hoverBrush;
+        private readonly SolidBrush activeBrush;
+        private readonly Pen normalBorderPen;
+        private readonly Pen activeBorderPen;
+        private GraphicsPath? buttonPath;
+        private GraphicsPath? shadowPath;
+        private Rectangle cachedBounds;
+        private bool pathsCreated;
+        private bool disposed;
 
         internal TransparentToolStripRenderer(PreviewButtonTheme theme)
         {
             this.theme = theme;
+            hoverBrush = new SolidBrush(theme.HoverBackground);
+            activeBrush = new SolidBrush(theme.ActiveBackground);
+            normalBorderPen = new Pen(theme.Border);
+            activeBorderPen = new Pen(theme.ActiveBorder);
         }
 
         protected override void OnRenderToolStripBackground(Forms.ToolStripRenderEventArgs eventArgs)
@@ -898,26 +926,18 @@ internal sealed class EDrawingsPreviewControl : Forms.UserControl
             }
 
             var bounds = new Rectangle(1, 1, Math.Max(1, eventArgs.Item.Width - 3), Math.Max(1, eventArgs.Item.Height - 3));
-            using var path = CreateRoundedRectangle(bounds, 5);
-            var backColor = button.Checked || button.Pressed
-                ? theme.ActiveBackground
+            EnsurePaths(bounds);
+            var isActive = button.Checked || button.Pressed;
+            var backBrush = isActive
+                ? activeBrush
                 : button.Selected
-                    ? theme.HoverBackground
-                    : Color.White;
-            var borderColor = button.Checked || button.Pressed
-                ? theme.ActiveBorder
-                : theme.Border;
-            using var shadowBrush = new SolidBrush(Color.FromArgb(35, 15, 23, 42));
-            using var backBrush = new SolidBrush(backColor);
-            using var borderPen = new Pen(borderColor);
-
-            var shadowBounds = bounds;
-            shadowBounds.Offset(0, 1);
-            using var shadowPath = CreateRoundedRectangle(shadowBounds, 5);
+                    ? hoverBrush
+                    : normalBrush;
+            var borderPen = isActive ? activeBorderPen : normalBorderPen;
             eventArgs.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
-            eventArgs.Graphics.FillPath(shadowBrush, shadowPath);
-            eventArgs.Graphics.FillPath(backBrush, path);
-            eventArgs.Graphics.DrawPath(borderPen, path);
+            eventArgs.Graphics.FillPath(shadowBrush, shadowPath!);
+            eventArgs.Graphics.FillPath(backBrush, buttonPath!);
+            eventArgs.Graphics.DrawPath(borderPen, buttonPath!);
         }
 
         protected override void OnRenderSeparator(Forms.ToolStripSeparatorRenderEventArgs eventArgs)
@@ -934,6 +954,41 @@ internal sealed class EDrawingsPreviewControl : Forms.UserControl
             path.AddArc(bounds.Left, bounds.Bottom - diameter, diameter, diameter, 90, 90);
             path.CloseFigure();
             return path;
+        }
+
+        private void EnsurePaths(Rectangle bounds)
+        {
+            if (pathsCreated && cachedBounds == bounds)
+            {
+                return;
+            }
+
+            buttonPath?.Dispose();
+            shadowPath?.Dispose();
+            buttonPath = CreateRoundedRectangle(bounds, 5);
+            var shadowBounds = bounds;
+            shadowBounds.Offset(0, 1);
+            shadowPath = CreateRoundedRectangle(shadowBounds, 5);
+            cachedBounds = bounds;
+            pathsCreated = true;
+        }
+
+        public void Dispose()
+        {
+            if (disposed)
+            {
+                return;
+            }
+
+            disposed = true;
+            buttonPath?.Dispose();
+            shadowPath?.Dispose();
+            shadowBrush.Dispose();
+            normalBrush.Dispose();
+            hoverBrush.Dispose();
+            activeBrush.Dispose();
+            normalBorderPen.Dispose();
+            activeBorderPen.Dispose();
         }
     }
 

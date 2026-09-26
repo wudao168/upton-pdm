@@ -3846,8 +3846,8 @@ public sealed class PdmWorkflowService(
             throw new PdmRuleException("该非标件没有唯一关联的2D工程图。");
         if (command.Decision == DrawingReviewDecision.Revoke)
             return await RevokeDrawingReviewTargetAsync(package, item, actor, command, cancellationToken);
-        // 机械主管节点也可以按图驳回：只驳回当前这一张，其余已通过的图纸保持通过，
-        // 审核单驳回审图节点，改完重新提交后再走一遍审图。
+        // 机械主管节点也可以按图退回：只退回当前这一张，其余已通过的图纸保持通过，
+        // 审核单退回审图节点，改完重新提交后再走一遍审图。
         var supervisorNode = package.State == DrawingReviewPackageState.PendingSupervisorApproval;
         if (!supervisorNode && package.State != DrawingReviewPackageState.InReview)
             throw new PdmConflictException("当前图纸审核单不允许继续审核。");
@@ -3855,9 +3855,9 @@ public sealed class PdmWorkflowService(
         if (supervisorNode)
         {
             if (command.Decision != DrawingReviewDecision.RequestChanges)
-                throw new PdmRuleException("机械主管节点请用“批准”整单批准；如需驳回单张图纸，请先选中该图纸再点“驳回”。");
+                throw new PdmRuleException("机械主管节点请用“批准”整单批准；如需退回单张图纸，请先选中该图纸再点“退回”。");
             if (targetState is not (DrawingReviewTargetState.Approved or DrawingReviewTargetState.Marked or DrawingReviewTargetState.Pending))
-                throw new PdmConflictException("该2D工程图当前状态不允许驳回，请刷新后重试。");
+                throw new PdmConflictException("该2D工程图当前状态不允许退回，请刷新后重试。");
         }
         else if (targetState != DrawingReviewTargetState.Pending)
             throw new PdmConflictException("该2D工程图已经完成审核，请刷新后重试。");
@@ -3879,7 +3879,7 @@ public sealed class PdmWorkflowService(
             throw new PdmRuleException("设计者不能审核自己生成的图档版本，请由其他审核人处理。");
         var comment = string.IsNullOrWhiteSpace(command.Comment) ? null : command.Comment.Trim();
         if (command.Decision == DrawingReviewDecision.RequestChanges)
-            comment = RequiredComment(comment ?? string.Empty, "驳回说明");
+            comment = RequiredComment(comment ?? string.Empty, "退回说明");
         if (command.Decision == DrawingReviewDecision.Approve && package.Markups.Any(markup => markup.ItemId == itemId
                 && markup.Target == command.Target
                 && markup.Severity == DrawingReviewMarkupSeverity.Blocking
@@ -3892,8 +3892,8 @@ public sealed class PdmWorkflowService(
         await AuditAsync(actor, "drawing-review.decide", nameof(DrawingReviewItem), itemId.ToString(), $"{command.Target}；{command.Decision}；{comment}", cancellationToken);
         if (command.Decision == DrawingReviewDecision.RequestChanges)
         {
-            await CreateDrawingReviewNotificationsAsync(package.ProjectId, $"drawing-review:{package.Id:N}:changes:reviewer", "DrawingReviewChangesRequested", "图纸审核被驳回",
-                project => $"{project.Code} · {package.Number} 的 {item.DrawingNumber} 被 {reviewerName} 驳回：{comment}",
+            await CreateDrawingReviewNotificationsAsync(package.ProjectId, $"drawing-review:{package.Id:N}:changes:reviewer", "DrawingReviewChangesRequested", "图纸审核被退回",
+                project => $"{project.Code} · {package.Number} 的 {item.DrawingNumber} 被 {reviewerName} 退回：{comment}",
                 [package.CreatedBy], cancellationToken);
             return package;
         }
@@ -3943,7 +3943,8 @@ public sealed class PdmWorkflowService(
     }
 
     /// <summary>
-    /// 驳回后设计者已按新版本存档：把该2D图档按最新版本恢复为待审核，重新进入审图节点，同单其他图档不受影响。
+    /// 把退回的2D图档恢复为待审核，重新进入审图节点，同单其他图档不受影响。
+    /// 如设计者已存档新版本则使用新版本；未形成新存档版本时也允许直接重新提交。
     /// </summary>
     public async Task<DrawingReviewPackage> ResubmitDrawingReviewItemAsync(Guid packageId, Guid itemId, string actor, UserRole role, CancellationToken cancellationToken)
     {
@@ -3955,7 +3956,7 @@ public sealed class PdmWorkflowService(
         var item = package.Items.FirstOrDefault(candidate => candidate.Id == itemId)
             ?? throw new PdmNotFoundException("图纸审核项不存在。");
         if (item.DrawingState != DrawingReviewTargetState.ChangesRequested)
-            throw new PdmRuleException("只有已驳回（待修改）的图档可以重新提交审核。");
+            throw new PdmRuleException("只有已退回（待修改）的图档可以重新提交审核。");
         if (role != UserRole.Administrator
             && !string.Equals(package.CreatedBy, actor, StringComparison.OrdinalIgnoreCase)
             && !string.Equals(item.DrawingCreatedBy, actor, StringComparison.OrdinalIgnoreCase))
@@ -3965,8 +3966,6 @@ public sealed class PdmWorkflowService(
         var latest = (await repository.ListDocumentVersionsAsync(drawingDocumentId, cancellationToken))
             .OrderByDescending(version => version.CreatedAt).FirstOrDefault()
             ?? throw new PdmRuleException("该图档尚无已存档版本，请先获取编辑权限、修改并提交存档。");
-        if (latest.Id == item.EffectiveDrawingVersionId)
-            throw new PdmRuleException("该图档还没有新的存档版本：请先在客户端获取编辑权限、修改并提交存档，再重新提交审核。");
         var updated = await repository.ResubmitDrawingReviewItemAsync(itemId, latest.Id, latest.Revision.Display, latest.Sha256, latest.CreatedBy, cancellationToken);
         await AuditAsync(actor, "drawing-review.resubmit", nameof(DrawingReviewItem), itemId.ToString(),
             $"{item.DrawingNumber}；重新提交审核版本{latest.Revision.Display}", cancellationToken);
@@ -3993,15 +3992,15 @@ public sealed class PdmWorkflowService(
             throw new UnauthorizedAccessException($"当前节点由机械主管{package.SupervisorName ?? package.Supervisor}处理。");
         var comment = string.IsNullOrWhiteSpace(command.Comment) ? null : command.Comment.Trim();
         if (command.Decision == DrawingReviewDecision.RequestChanges)
-            comment = RequiredComment(comment ?? string.Empty, "驳回说明");
+            comment = RequiredComment(comment ?? string.Empty, "退回说明");
         var reviewerName = (await repository.FindUserAsync(actor, cancellationToken))?.DisplayName ?? actor;
         var now = timeProvider.GetUtcNow();
         package = await repository.DecideDrawingReviewSupervisorAsync(packageId, command.Decision, actor, reviewerName, now, comment, cancellationToken);
         await AuditAsync(actor, "drawing-review.supervisor.decide", nameof(DrawingReviewPackage), package.Id.ToString(), $"{command.Decision}；{comment}", cancellationToken);
         if (command.Decision == DrawingReviewDecision.RequestChanges)
         {
-            await CreateDrawingReviewNotificationsAsync(package.ProjectId, $"drawing-review:{package.Id:N}:changes:supervisor", "DrawingReviewChangesRequested", "图纸审核被驳回",
-                project => $"{project.Code} · {package.Number} 被机械主管 {reviewerName} 驳回：{comment}",
+            await CreateDrawingReviewNotificationsAsync(package.ProjectId, $"drawing-review:{package.Id:N}:changes:supervisor", "DrawingReviewChangesRequested", "图纸审核被退回",
+                project => $"{project.Code} · {package.Number} 被机械主管 {reviewerName} 退回：{comment}",
                 [package.CreatedBy], cancellationToken);
             return package;
         }
@@ -4344,7 +4343,7 @@ public sealed class PdmWorkflowService(
         CancellationToken cancellationToken)
     {
         comment = decision == ApprovalDecision.Rejected
-            ? RequiredComment(comment, "驳回原因")
+            ? RequiredComment(comment, "退回原因")
             : string.IsNullOrWhiteSpace(comment) ? "同意" : comment.Trim();
         var pendingPackage = await repository.FindReleasePackageByApprovalTaskAsync(taskId, cancellationToken)
             ?? throw new PdmNotFoundException("审批任务不存在。");
@@ -5432,8 +5431,8 @@ public sealed class PdmWorkflowService(
             Guid.NewGuid(),
             recipient,
             "ReleaseApprovalRejected",
-            "BOM发布审批已驳回",
-            $"{project.Code} · {package.Number} 被 {actor} 驳回：{comment}",
+            "BOM发布审批已退回",
+            $"{project.Code} · {package.Number} 被 {actor} 退回：{comment}",
             project.Id,
             package.Id,
             sourceKey,
@@ -6118,7 +6117,7 @@ public sealed class PdmWorkflowService(
         if (active is not null)
         {
             var scopeLabel = active.Scope == ReleaseScope.LegacyCombined ? "三个BOM" : $"{BomKindLabel(ReleaseScopeBomKind(active.Scope))}BOM";
-            throw new PdmConflictException($"发布包{active.ChangeNumber ?? active.Number}正在审批或发布，{scopeLabel}已锁定；请先完成、驳回或撤回。");
+            throw new PdmConflictException($"发布包{active.ChangeNumber ?? active.Number}正在审批或发布，{scopeLabel}已锁定；请先完成、退回或撤回。");
         }
     }
 

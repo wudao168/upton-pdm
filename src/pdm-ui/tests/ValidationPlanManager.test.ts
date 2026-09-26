@@ -190,7 +190,7 @@ describe('ValidationPlanManager', () => {
     expect(wrapper.text()).toContain('当前等待：主设审核 · designer')
     expect(wrapper.text()).toContain('编制人自检 · engineer · 系统自动通过')
     expect(wrapper.findAll('button').some(button => button.text().includes('批准'))).toBe(true)
-    expect(wrapper.findAll('button').some(button => button.text().includes('驳回'))).toBe(true)
+    expect(wrapper.findAll('button').some(button => button.text().includes('退回'))).toBe(true)
     wrapper.unmount()
   })
 
