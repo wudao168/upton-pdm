@@ -223,6 +223,10 @@ public sealed record UpdateProjectPhaseOwnersRequest(IReadOnlyDictionary<string,
 
 public sealed record UpdateChildProjectManagerRequest(string ProjectManager);
 
+public sealed record AddProjectManagerNoteRequest(string Content);
+
+public sealed record CreateProjectTodoRequest(string Content, DateOnly? DueDate, IReadOnlyList<string>? RecipientUsernames);
+
 public sealed record RegisterDocumentRequest(
     string DrawingNumber,
     string Name,
@@ -364,6 +368,8 @@ public sealed record BatchUpdateBomItemsRequest(
 public sealed record BatchDeleteBomItemsRequest(IReadOnlyList<Guid> ItemIds, string Reason);
 
 public sealed record BatchRestoreBomItemsRequest(IReadOnlyList<Guid> ItemIds, string Mode = "Original");
+
+public sealed record PermanentlyDeleteManualBomItemsRequest(IReadOnlyList<Guid> ItemIds);
 
 public sealed record SetBomReleaseExclusionRequest(
     IReadOnlyList<Guid> ItemIds,

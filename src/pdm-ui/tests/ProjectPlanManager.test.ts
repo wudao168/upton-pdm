@@ -562,8 +562,27 @@ describe('项目计划审批和配置', () => {
     expect(wrapper.find('.pdm-plan-summary > article:first-child').classes()).toContain('pdm-plan-shipping-card')
     const countdown = wrapper.find('.pdm-plan-shipping-countdown')
     expect(countdown.attributes('aria-label')).toBe('距发货 7 天')
-    expect(countdown.find('strong').text()).toBe('7')
-    expect(countdown.find('span').text()).toBe('距发货（天）')
+    expect(countdown.find('strong b').text()).toBe('7')
+    expect(countdown.find('strong em').text()).toBe('天')
+    expect(countdown.find('span').text()).toBe('距发货')
+    expect(countdown.classes()).not.toContain('is-overdue')
+  })
+
+  it('当前活动阶段卡片按最晚完成的并行阶段显示倒计时', async () => {
+    const start = new Date()
+    const finish = new Date()
+    finish.setDate(finish.getDate() + 7)
+    const iso = (date: Date) => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`
+    api.readProjectPlan.mockResolvedValue({ ...structuredClone(draft), approvalStatus: 'Approved', tasks: [
+      { ...structuredClone(draft.tasks[0]!), plannedStart: iso(start), plannedFinish: iso(finish) },
+    ] })
+    const wrapper = render()
+    await flushPromises()
+    const countdown = wrapper.find('.pdm-plan-active-stage-card .pdm-plan-shipping-countdown')
+    expect(countdown.attributes('aria-label')).toBe('距当前节点 7 天')
+    expect(countdown.find('strong b').text()).toBe('7')
+    expect(countdown.find('strong em').text()).toBe('天')
+    expect(countdown.find('span').text()).toBe('距当前节点')
     expect(countdown.classes()).not.toContain('is-overdue')
   })
 

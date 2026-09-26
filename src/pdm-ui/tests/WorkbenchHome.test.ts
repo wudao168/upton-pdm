@@ -1,6 +1,6 @@
 import { flushPromises, mount } from '@vue/test-utils'
 import ElementPlus from 'element-plus'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import WorkbenchHome from '../src/components/WorkbenchHome.vue'
 import type { DocumentNode, ProjectSummary } from '../src/types'
 
@@ -9,6 +9,9 @@ const apiMocks = vi.hoisted(() => ({
   readProjectValidationPlan: vi.fn(),
   getMaterialRelationCompleteness: vi.fn(),
   getProjectProcurementTracking: vi.fn(),
+  listProjectAudit: vi.fn(),
+  addProjectManagerNote: vi.fn(),
+  createProjectTodo: vi.fn(),
 }))
 
 vi.mock('../src/api', () => apiMocks)
@@ -68,6 +71,8 @@ const selected = {
 
 describe('WorkbenchHome', () => {
   beforeEach(() => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-09-25T08:00:00+08:00'))
     apiMocks.readProjectPlanPortfolio.mockResolvedValue({
       rootProjectId: 'project-root', currentStage: 'Design', completionPercent: 62, laggingProjectCount: 0, riskProjectCount: 0, plannedFinish: '2026-10-18',
       projects: [{ projectId: 'project-root', projectCode: 'P700001', projectName: '气密设备', isRoot: true, hasPlan: true, currentStage: 'Design', completionPercent: 62, plannedFinish: '2026-10-18', isLagging: false, isAtRisk: false,
@@ -82,6 +87,17 @@ describe('WorkbenchHome', () => {
       { impactStage: 'Assembly', purchaseOrderNumbers: [], purchaseOrderStatus: '未采购' },
       { impactStage: null, purchaseOrderNumbers: [], purchaseOrderStatus: '未采购' },
     ] })
+    apiMocks.listProjectAudit.mockResolvedValue([
+      { id: 'note-2', actor: 'manager', action: 'project.manager-note', entityType: 'Project', entityId: 'project-root', detail: '最新采购风险已同步', occurredAt: '2026-09-25T08:31:00Z' },
+      { id: 'note-1', actor: 'manager', action: 'project.manager-note', entityType: 'Project', entityId: 'project-root', detail: '旧备注', occurredAt: '2026-09-25T08:30:00Z' },
+      { id: 'child-note', actor: 'engineer', action: 'project.manager-note', entityType: 'Project', entityId: 'project-child', detail: '子项目装配准备完成', occurredAt: '2026-09-25T08:29:00Z' },
+    ])
+    apiMocks.addProjectManagerNote.mockResolvedValue({ id: 'note-3', actor: 'manager', action: 'project.manager-note', entityType: 'Project', entityId: 'project-root', detail: '风险已同步', occurredAt: '2026-09-25T08:32:00Z' })
+    apiMocks.createProjectTodo.mockResolvedValue([])
+  })
+
+  afterEach(() => {
+    vi.useRealTimers()
   })
 
   it('以项目状态和下一步为核心，并进入对应业务页面', async () => {
@@ -89,6 +105,7 @@ describe('WorkbenchHome', () => {
       props: {
         project,
         projects: [project, childProject],
+        currentUsername: 'manager',
         users: [
           { username: 'manager', displayName: '项目经理甲', role: 'ProjectManager', isActive: true },
           { username: 'coordinator', displayName: '协同经理乙', role: 'ProjectManager', isActive: true },
@@ -140,6 +157,7 @@ describe('WorkbenchHome', () => {
         },
         pending: false,
         token: 'token',
+        canAddManagerNote: true,
         onUpdateMainStaffing: async () => project,
         onUpdateDesigners: async () => project,
         onUpdatePhaseOwners: async () => project,
@@ -154,9 +172,14 @@ describe('WorkbenchHome', () => {
     expect(wrapper.find('.pdm-current-document').exists()).toBe(false)
     expect(wrapper.find('.pdm-project-link-guide').exists()).toBe(false)
     expect(wrapper.find('.pdm-page-actions').exists()).toBe(false)
-    expect(wrapper.get('[aria-label="项目状态与下一步"]').text()).toContain('设计阶段正常')
+    expect(wrapper.get('[aria-label="项目状态与下一步"]').text()).toContain('设计阶段 · 正常')
     expect(wrapper.get('[aria-label="项目状态与下一步"]').text()).toContain('项目进度 62%')
-    expect(wrapper.get('[aria-label="项目状态与下一步"]').text()).toContain('计划完成2026/10/18')
+    expect(wrapper.get('[aria-label="项目状态与下一步"]').text()).toContain('计划完成 2026/10/18')
+    expect(wrapper.get('[aria-label="五阶段计划"]').text()).toContain('设计')
+    expect(wrapper.get('[aria-label="五阶段计划"]').text()).toContain('计划 2026/09/16 - 2026/09/19')
+    const shippingCountdown = wrapper.get('[aria-label="发货倒计时"]')
+    expect(shippingCountdown.text()).toContain('已超期6天')
+    expect(shippingCountdown.text()).toContain('计划发货 2026/09/19')
     expect(wrapper.get('button[aria-label="查看待处理"]').text()).toContain('5')
     expect(wrapper.get('button[aria-label="查看关键物料"]').text()).toContain('1')
     expect(wrapper.get('[aria-label="图档与审核"]').text()).toContain('3D 30')
@@ -166,7 +189,57 @@ describe('WorkbenchHome', () => {
     expect(wrapper.get('[aria-label="BOM与物料"]').text()).toContain('待核对 2')
     expect(wrapper.get('[aria-label="发布与备料"]').text()).toContain('关键物料1')
     expect(wrapper.get('[aria-label="发布与备料"]').text()).toContain('未采购2')
-    expect(wrapper.get('[aria-label="当前阶段任务"]').text()).toContain('完成图纸审核')
+    expect(wrapper.get('[aria-label="项目总览"]').text()).toContain('P700001')
+    expect(wrapper.get('[aria-label="项目总览"]').text()).toContain('设计')
+    expect(wrapper.get('[aria-label="项目总览"]').text()).toContain('工程师丁')
+    expect(wrapper.get('[aria-label="项目总览"]').findAll('thead th').map(cell => cell.text())).toEqual(['项目', '执行工程师', '当前阶段', '计划完成', '阶段负责人', '当前子任务', '进度', '延期 / 风险', '备注日志'])
+    const scheduleRisk = wrapper.get('[aria-label="项目总览"]').find('td:nth-child(8) span')
+    expect(scheduleRisk.text()).toBe('已逾期 7 天')
+    expect(scheduleRisk.attributes('title')).toContain('完成图纸审核')
+    expect(scheduleRisk.attributes('title')).toContain('2026/09/18')
+    const currentStageFinish = wrapper.get('[aria-label="项目总览"]').find('td:nth-child(4)')
+    expect(currentStageFinish.text()).toBe('2026/09/19')
+    expect(currentStageFinish.attributes('title')).toContain('当前主任务“设计”')
+    expect(wrapper.get('[aria-label="项目总览"]').text()).toContain('备注日志')
+    expect(wrapper.get('[aria-label="项目总览"]').text()).toContain('最新采购风险已同步')
+    expect(wrapper.get('[aria-label="项目总览"]').text()).not.toContain('旧备注')
+    expect(wrapper.get('[aria-label="项目总览"]').text()).toContain('完成图纸审核')
+    await wrapper.get('[aria-label="维护 P700001 的记录"]').trigger('click')
+    await flushPromises()
+    const history = document.body.querySelector('[aria-label="当前项目及子项目历史记录"]')
+    expect(history?.textContent).toContain('P700001 · 气密设备')
+    expect(history?.textContent).toContain('P700001-1 · 机架')
+    expect(history?.textContent).toContain('子项目装配准备完成')
+    const noteInput = document.body.querySelector('[aria-label="项目备注内容"]') as HTMLTextAreaElement
+    expect(noteInput).not.toBeNull()
+    noteInput.value = '风险已同步'
+    noteInput.dispatchEvent(new Event('input'))
+    ;[...document.body.querySelectorAll('button')].find(button => button.textContent === '保存记录')!.click()
+    await flushPromises()
+    expect(apiMocks.addProjectManagerNote).toHaveBeenCalledWith('project-root', '风险已同步', 'token')
+    await wrapper.get('[aria-label="维护 P700001 的记录"]').trigger('click')
+    await flushPromises()
+    const todoContent = document.body.querySelector('[aria-label="项目备注内容"]') as HTMLTextAreaElement
+    todoContent.value = '请确认客户现场准备情况'
+    todoContent.dispatchEvent(new Event('input'))
+    ;(document.body.querySelector('[aria-label="待办接收人"]') as HTMLElement).click()
+    await flushPromises()
+    ;[...document.body.querySelectorAll<HTMLElement>('.el-select-dropdown__item')].find(item => item.textContent?.includes('工程师丁'))!.click()
+    await flushPromises()
+    ;[...document.body.querySelectorAll<HTMLButtonElement>('button')].find(button => button.textContent === '保存记录')!.click()
+    await flushPromises()
+    expect(apiMocks.addProjectManagerNote).toHaveBeenCalledWith('project-root', '请确认客户现场准备情况', 'token')
+    expect(apiMocks.createProjectTodo).toHaveBeenCalledWith('project-root', {
+      content: '请确认客户现场准备情况', dueDate: undefined, recipientUsernames: ['engineer'],
+    }, 'token')
+    expect([...document.body.querySelectorAll<HTMLButtonElement>('button')].some(button => button.textContent === '生成待办')).toBe(false)
+    await wrapper.get('[aria-label="维护 P700001 的记录"]').trigger('click')
+    await flushPromises()
+    expect(document.body.querySelector('[aria-label="当前项目及子项目历史记录"]')?.textContent).toContain('待办推送')
+    expect(document.body.querySelector('[aria-label="当前项目及子项目历史记录"]')?.textContent).toContain('工程师丁')
+    ;[...document.body.querySelectorAll<HTMLButtonElement>('button')].find(button => button.textContent === '取消')!.click()
+    await flushPromises()
+    expect(wrapper.emitted('records')).toBeUndefined()
     expect(wrapper.get('[aria-label="项目团队"]').text()).toContain('项目经理甲')
     expect(wrapper.get('[aria-label="项目团队"]').text()).toContain('主设丙')
     expect(wrapper.get('[aria-label="项目团队"]').text()).toContain('工程师丁')
@@ -189,7 +262,8 @@ describe('WorkbenchHome', () => {
     await wrapper.setProps({ projects: [{ ...assignedProject, phaseOwners: { ...assignedProject.phaseOwners, StandardProcurement: 'engineer' } }, childProject] })
     expect(standardOwnerRow.text()).toContain('工程师丁')
     expect(standardOwnerRow.text()).not.toContain('项目经理甲')
-    expect(wrapper.get('[aria-label="项目位置"]').text()).toContain('D:\\PDM\\Vault\\P700001')
+    expect(wrapper.find('[aria-label="当前阶段任务"]').exists()).toBe(false)
+    expect(wrapper.find('[aria-label="项目位置"]').exists()).toBe(false)
 
     await wrapper.findAll('button').find(button => button.text().includes('配置负责人'))!.trigger('click')
     await flushPromises()

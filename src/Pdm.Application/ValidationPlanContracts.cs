@@ -40,6 +40,14 @@ public sealed record AppendProjectValidationPlanItemsCommand(
     IReadOnlyList<SaveProjectValidationPlanItemCommand> Items,
     long ExpectedRowVersion);
 
+public sealed record UpdateProjectValidationPlanStandardCommand(
+    Guid ItemId,
+    string? ValidationStandard);
+
+public sealed record UpdateProjectValidationPlanStandardsCommand(
+    IReadOnlyList<UpdateProjectValidationPlanStandardCommand> Items,
+    long ExpectedRowVersion);
+
 public sealed record ValidationPlanExportData(
     Project Project,
     ProjectValidationPlan Plan,

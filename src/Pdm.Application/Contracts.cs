@@ -337,6 +337,8 @@ public sealed record BatchDeleteBomItemsCommand(IReadOnlyList<Guid> ItemIds, str
 
 public sealed record BatchRestoreBomItemsCommand(IReadOnlyList<Guid> ItemIds, string Mode = "Original");
 
+public sealed record PermanentlyDeleteManualBomItemsCommand(IReadOnlyList<Guid> ItemIds);
+
 public sealed record SetBomReleaseExclusionCommand(
     IReadOnlyList<Guid> ItemIds,
     bool Excluded,

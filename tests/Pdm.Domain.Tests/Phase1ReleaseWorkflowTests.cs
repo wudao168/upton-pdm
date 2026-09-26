@@ -863,6 +863,45 @@ public sealed class Phase1ReleaseWorkflowTests
     }
 
     [Fact]
+    public async Task BomRecycleBin_PermanentlyDeletesOnlyRecycledManualItemsAndAuditsTheAction()
+    {
+        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(), new RecordingPublisher(), TimeProvider.System);
+        var manual = new BomItem(Guid.NewGuid(), ProjectId, BomKind.Electrical, 1, "MANUAL-DELETE", "人工删除项", 1, "件", null, null, "W1", true)
+        {
+            Source = "Manual",
+            IsManuallyExcluded = true,
+            DeletedBy = "admin",
+            DeleteReason = "测试"
+        };
+        var source = new BomItem(Guid.NewGuid(), ProjectId, BomKind.Electrical, 2, "SOURCE-KEEP", "有源保留项", 1, "件", null, null, "W1", true)
+        {
+            Source = "Auto",
+            SourceDocumentId = Guid.NewGuid(),
+            IsManuallyExcluded = true
+        };
+        var activeManual = new BomItem(Guid.NewGuid(), ProjectId, BomKind.Electrical, 3, "MANUAL-ACTIVE", "未删除项", 1, "件", null, null, "W1", true)
+        {
+            Source = "Manual"
+        };
+        await repository.ReplaceBomAsync(ProjectId, BomKind.Electrical, [manual, source, activeManual], default);
+
+        await Assert.ThrowsAsync<PdmRuleException>(() => workflow.PermanentlyDeleteManualBomItemsAsync(
+            ProjectId, new([source.Id]), "admin", UserRole.Administrator, default));
+        await Assert.ThrowsAsync<PdmRuleException>(() => workflow.PermanentlyDeleteManualBomItemsAsync(
+            ProjectId, new([activeManual.Id]), "admin", UserRole.Administrator, default));
+
+        var remaining = await workflow.PermanentlyDeleteManualBomItemsAsync(
+            ProjectId, new([manual.Id]), "admin", UserRole.Administrator, default);
+
+        Assert.DoesNotContain(remaining, item => item.Id == manual.Id);
+        Assert.Contains(remaining, item => item.Id == source.Id);
+        Assert.Contains(remaining, item => item.Id == activeManual.Id);
+        Assert.Contains(await repository.ListAuditAsync("admin", UserRole.Administrator, 100, default),
+            entry => entry.Action == "bom.permanent-delete-manual" && entry.Detail.Contains("MANUAL-DELETE", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public async Task BomRecycleBin_AllowsEmptyReasonAndDuplicateMaterialCodeRestore()
     {
         var repository = new InMemoryPdmRepository(TimeProvider.System);

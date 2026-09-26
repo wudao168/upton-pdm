@@ -953,6 +953,7 @@ export interface UserNotification {
   sourceKey: string
   createdAt: string
   readAt?: string
+  dueDate?: string
 }
 
 export interface ApprovalTransferCandidate {
@@ -1194,6 +1195,8 @@ export interface AuditEntry {
   entityType: string
   entityId: string
   detail: string
+  /** 记录页聚合主项目与子项目审计时使用的归属项目。 */
+  projectId?: string
 }
 
 export interface MyApprovalTask {
@@ -2592,5 +2595,10 @@ export interface SaveProjectValidationPlanInput {
 
 export interface AppendProjectValidationPlanItemsInput {
   items: SaveProjectValidationPlanInput['items']
+  expectedRowVersion: number
+}
+
+export interface UpdateProjectValidationPlanStandardsInput {
+  items: Array<{ itemId: string; validationStandard?: string | null }>
   expectedRowVersion: number
 }

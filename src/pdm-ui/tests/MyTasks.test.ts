@@ -45,6 +45,24 @@ describe('MyTasks', () => {
     expect(wrapper.emitted('openNotification')).toEqual([[notification]])
   })
 
+  it('shows a project todo separately with its deadline and project link', async () => {
+    const notification = {
+      id: 'todo-1', recipient: 'engineer', category: 'ProjectTodo', title: 'P700001 待办事项', content: '确认客户现场准备情况',
+      projectId: 'project-1', sourceKey: 'project-todo:project-1:todo-1', createdAt: '2026-09-25T08:00:00Z', dueDate: '2026-10-01',
+    }
+    const wrapper = mount(MyTasks, {
+      props: {
+        tasks: [], notifications: [notification], locks: [], materialCodeTasks: [], passwordResetTasks: [], pending: false,
+        onRequestRelease: vi.fn(), onForceRelease: vi.fn(), onResetPassword: vi.fn(),
+      },
+    })
+
+    expect(wrapper.text()).toContain('项目待办（1）')
+    expect(wrapper.text()).toContain('截止 2026-10-01 · 确认客户现场准备情况')
+    await wrapper.findAll('button').find(button => button.text() === '查看项目')!.trigger('click')
+    expect(wrapper.emitted('openNotification')).toEqual([[notification]])
+  })
+
   it('deep-links an approval task to its exact release package', async () => {
     const wrapper = mount(MyTasks, {
       props: {

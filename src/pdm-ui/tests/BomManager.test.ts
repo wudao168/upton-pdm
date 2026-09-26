@@ -1983,9 +1983,38 @@ describe('BomManager', () => {
     expect(wrapper.text()).toContain('恢复后保持删除前的数据来源')
     expect(wrapper.text()).toContain('有源数据仍关联原图档')
     expect(wrapper.text()).toContain('人工添加数据仍保持人工')
-    expect(wrapper.findAll('.pdm-bom-recycle-dialog footer button')).toHaveLength(1)
+    expect(wrapper.findAll('.pdm-bom-recycle-dialog footer button')).toHaveLength(2)
     await wrapper.findAll('.pdm-bom-recycle-dialog footer button').find(button => button.text() === '恢复选中')!.trigger('click')
     expect(wrapper.emitted('batchRestore')).toEqual([[['deleted-source', 'deleted-manual'], 'Original']])
+  })
+
+  it('permanently deletes only selected manual recycle-bin rows after explicit confirmation', async () => {
+    const confirm = vi.spyOn(ElMessageBox, 'confirm').mockRejectedValueOnce('cancel').mockResolvedValueOnce('confirm' as never)
+    const wrapper = mount(BomManager, {
+      props: {
+        standard: [{ id: 'deleted-source', kind: 'Standard', sequence: 1, drawingNumber: 'S-DEL', name: '有源删除项', quantity: 1, unit: '001', revision: 'W1', complete: true, source: 'Auto', sourceDocumentId: 'document-s', manuallyExcluded: true }],
+        electrical: [{ id: 'deleted-manual', kind: 'Electrical', sequence: 1, drawingNumber: 'E-DEL', name: '人工删除项', quantity: 1, unit: '001', revision: 'W1', complete: true, source: 'Manual', manuallyExcluded: true }],
+        nonStandard: [], declarations: [], pending: false, editable: true,
+      },
+    })
+
+    await wrapper.findAll('.pdm-bom-selection-actions button').find(button => button.text() === '回收站（2）')!.trigger('click')
+    const permanentDelete = wrapper.findAll('.pdm-bom-recycle-dialog footer button').find(button => button.text().includes('彻底删除人工项'))!
+    expect((permanentDelete.element as HTMLButtonElement).disabled).toBe(true)
+    await wrapper.get('input[aria-label="选择回收站全部物料"]').setValue(true)
+    expect(permanentDelete.text()).toContain('（1）')
+    expect((permanentDelete.element as HTMLButtonElement).disabled).toBe(false)
+    await permanentDelete.trigger('click')
+    expect(wrapper.emitted('batchPermanentlyDeleteManual')).toBeUndefined()
+    await permanentDelete.trigger('click')
+
+    expect(confirm).toHaveBeenLastCalledWith(
+      expect.stringContaining('所选有图档来源的物料不会删除'),
+      '确认彻底删除',
+      expect.objectContaining({ confirmButtonText: '彻底删除', closeOnClickModal: false }),
+    )
+    expect(wrapper.emitted('batchPermanentlyDeleteManual')).toEqual([[['deleted-manual']]])
+    expect(wrapper.emitted('batchRestore')).toBeUndefined()
   })
 
   it('drags whole rows from the left handle and removes arrow ordering controls', async () => {

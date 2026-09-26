@@ -243,6 +243,33 @@ public sealed class ValidationPlanService(
         return saved;
     }
 
+    public async Task<ProjectValidationPlan> UpdatePlanStandardsAsync(Guid projectId, UpdateProjectValidationPlanStandardsCommand command, string actor, UserRole role, CancellationToken cancellationToken)
+    {
+        await RequireProjectReadAsync(projectId, actor, role, cancellationToken);
+        await RequirePermissionAsync(actor, role, PermissionCodes.ValidationPlanEdit, cancellationToken);
+        var project = await repository.FindProjectAsync(projectId, cancellationToken) ?? throw new PdmNotFoundException("项目不存在。");
+        var current = await validationPlans.FindPlanAsync(projectId, cancellationToken) ?? throw new PdmNotFoundException("项目尚未建立验证计划。");
+        if (current.State != ProjectValidationPlanState.Effective) throw new PdmConflictException("只有已生效验证计划可以维护验证标准。");
+        if (command.Items.Count == 0) throw new PdmRuleException("请至少维护一条验证标准。");
+
+        if (command.Items.Select(item => item.ItemId).Distinct().Count() != command.Items.Count)
+            throw new PdmConflictException("同一验证计划项不能重复维护验证标准。");
+        var standardsByItemId = command.Items.ToDictionary(item => item.ItemId, item => Optional(item.ValidationStandard, 1000, "验证标准"));
+        var currentItemIds = current.Items.Select(item => item.Id).ToHashSet();
+        if (standardsByItemId.Keys.Any(itemId => !currentItemIds.Contains(itemId))) throw new PdmNotFoundException("验证计划项不存在。");
+
+        var now = timeProvider.GetUtcNow();
+        var saved = await validationPlans.SavePlanAsync(current with
+        {
+            Items = current.Items.Select(item => standardsByItemId.TryGetValue(item.Id, out var standard) ? item with { ValidationStandard = standard } : item).ToArray(),
+            UpdatedBy = actor,
+            UpdatedAt = now,
+        }, command.ExpectedRowVersion, cancellationToken);
+        await EnsureArchivedAsync(project, saved, cancellationToken);
+        await AuditAsync(actor, "project.validation-plan.standards.update", nameof(ProjectValidationPlan), saved.Id, $"维护已生效验证计划验证标准：{project.Code} · {command.Items.Count}项", cancellationToken);
+        return saved;
+    }
+
     public async Task<ProjectValidationPlan> CreateRevisionAsync(Guid projectId, long expectedRowVersion, string actor, UserRole role, CancellationToken cancellationToken)
     {
         await RequireProjectReadAsync(projectId, actor, role, cancellationToken);

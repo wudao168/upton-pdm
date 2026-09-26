@@ -27,7 +27,7 @@ const props = withDefaults(defineProps<{
 })
 defineEmits<{ open: [projectId: string, releasePackageId: string]; openValidationPlan: [projectId: string]; openNotification: [notification: UserNotification]; openMaterialApprovals: []; openProgramTemplate: [templateId: string]; refresh: [] }>()
 
-type TaskFilter = 'all' | 'notification' | 'approval' | 'material' | 'program' | 'lock' | 'password'
+type TaskFilter = 'all' | 'todo' | 'notification' | 'approval' | 'material' | 'program' | 'lock' | 'password'
 type TaskCenterRow = {
   key: string
   kind: Exclude<TaskFilter, 'all'>
@@ -128,6 +128,7 @@ function stageLabel(stage: string | number) {
 }
 
 function notificationActionLabel(notification: UserNotification) {
+  if (notification.category === 'ProjectTodo') return '查看项目'
   return notification.category === 'MaterialMasterRejected' || notification.category === 'MaterialCodeApplicationRejected'
     ? '查看料品'
     : '查看发布包'
@@ -161,7 +162,17 @@ function formatDateTime(value: string) {
 }
 
 const rows = computed<TaskCenterRow[]>(() => [
-  ...props.notifications.map(notification => ({
+  ...props.notifications.filter(notification => notification.category === 'ProjectTodo').map(notification => ({
+    key: `notification-${notification.id}`,
+    kind: 'todo' as const,
+    status: notification.dueDate && notification.dueDate < new Date().toISOString().slice(0, 10) ? '已逾期' : '待处理',
+    statusClass: notification.dueDate && notification.dueDate < new Date().toISOString().slice(0, 10) ? 'is-alert' : 'is-remind',
+    title: notification.title,
+    content: `${notification.dueDate ? `截止 ${notification.dueDate} · ` : ''}${notification.content}`,
+    createdAt: notification.createdAt,
+    notification,
+  })),
+  ...props.notifications.filter(notification => notification.category !== 'ProjectTodo').map(notification => ({
     key: `notification-${notification.id}`,
     kind: 'notification' as const,
     status: notification.readAt ? '已读' : '未读',
@@ -224,7 +235,8 @@ const rows = computed<TaskCenterRow[]>(() => [
 
 const filterCounts = computed(() => ({
   all: rows.value.length,
-  notification: props.notifications.length,
+  todo: props.notifications.filter(item => item.category === 'ProjectTodo').length,
+  notification: props.notifications.filter(item => item.category !== 'ProjectTodo').length,
   approval: props.tasks.length,
   material: materialTaskRows.value.length,
   program: props.programTemplateTasks.length,
@@ -335,6 +347,7 @@ async function resetPassword(task: PasswordResetTask) {
         <button v-if="notifications.some(item => !item.readAt)" type="button" class="pdm-secondary-action" :disabled="pending" @click="onMarkAllNotificationsRead">全部已读</button>
         <div class="pdm-task-filters" role="tablist" aria-label="待办类型">
           <button type="button" role="tab" :aria-selected="taskFilter === 'all'" @click="setTaskFilter('all')">全部待办（{{ filterCounts.all }}）</button>
+          <button v-if="filterCounts.todo" type="button" role="tab" :aria-selected="taskFilter === 'todo'" @click="setTaskFilter('todo')">项目待办（{{ filterCounts.todo }}）</button>
           <button type="button" role="tab" :aria-selected="taskFilter === 'approval'" @click="setTaskFilter('approval')">审批任务（{{ filterCounts.approval }}）</button>
           <button type="button" role="tab" :aria-selected="taskFilter === 'material'" @click="setTaskFilter('material')">料号审批（{{ filterCounts.material }}）</button>
           <button v-if="programTemplateTasks.length" type="button" role="tab" :aria-selected="taskFilter === 'program'" @click="setTaskFilter('program')">程序模板（{{ filterCounts.program }}）</button>
@@ -348,7 +361,7 @@ async function resetPassword(task: PasswordResetTask) {
         <table class="pdm-project-table pdm-task-table">
           <thead><tr><th>状态</th><th>标题</th><th>内容</th><th>创建时间</th><th>操作</th></tr></thead>
           <tbody>
-            <tr v-for="row in pagedRows" :key="row.key" :class="{ 'is-task-actionable': row.kind === 'notification' || row.kind === 'approval' || row.kind === 'material' || row.kind === 'program' }" @click="row.notification ? $emit('openNotification', row.notification) : row.approval?.kind === 'validationPlan' ? $emit('openValidationPlan', row.approval.projectId) : row.approval ? $emit('open', row.approval.projectId, row.approval.releasePackageId!) : row.material ? $emit('openMaterialApprovals') : row.program ? $emit('openProgramTemplate', row.program.templateId) : undefined">
+            <tr v-for="row in pagedRows" :key="row.key" :class="{ 'is-task-actionable': row.kind === 'todo' || row.kind === 'notification' || row.kind === 'approval' || row.kind === 'material' || row.kind === 'program' }" @click="row.notification ? $emit('openNotification', row.notification) : row.approval?.kind === 'validationPlan' ? $emit('openValidationPlan', row.approval.projectId) : row.approval ? $emit('open', row.approval.projectId, row.approval.releasePackageId!) : row.material ? $emit('openMaterialApprovals') : row.program ? $emit('openProgramTemplate', row.program.templateId) : undefined">
               <td><span class="pdm-status" :class="row.statusClass">{{ row.status }}</span></td>
               <td><strong>{{ row.title }}</strong></td>
               <td :title="row.content">{{ row.content }}</td>

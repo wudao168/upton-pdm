@@ -14,7 +14,7 @@ const api = vi.hoisted(() => ({
 vi.mock('../src/api', () => api)
 
 const kit = {
-  id: 'kit-1', code: 'UKIT-000001', model: 'UKIT-000001', name: '安装附件套件', brand: 'UPTON', currentReleasedRevisionId: 'revision-1',
+  id: 'kit-1', code: 'UKIT-000001', model: 'UKIT-000001', name: '安装附件套件', brand: 'UPTON', description: '用于现场安装', currentReleasedRevisionId: 'revision-1',
   revisions: [
     { id: 'revision-1', kitId: 'kit-1', versionNumber: 1, state: 'Released', changeNote: '首次发布', createdBy: 'admin', createdAt: '2026-09-08T00:00:00Z', publishedBy: 'admin', publishedAt: '2026-09-08T00:00:00Z', components: [{ id: 'component-1', revisionId: 'revision-1', materialId: 'material-1', materialCode: '0102000001', materialName: '螺栓', quantity: 5, unit: '001', isOptional: false, sortOrder: 1 }] },
     { id: 'revision-2', kitId: 'kit-1', versionNumber: 2, state: 'Draft', changeNote: '增加垫圈', createdBy: 'admin', createdAt: '2026-09-08T01:00:00Z', components: [
@@ -36,7 +36,7 @@ describe('EngineeringKitLibrary', () => {
     api.publishEngineeringKit.mockReset().mockResolvedValue({ ...kit, rowVersion: 4 })
   })
 
-  it('shows the virtual kit fields and component count without a category column', async () => {
+  it('shows the virtual kit fields, remark and component count without a category column', async () => {
     const wrapper = mount(EngineeringKitLibrary, { props: { token: 'token', canManage: true }, global: { plugins: [ElementPlus] } })
     await flushPromises()
 
@@ -45,6 +45,7 @@ describe('EngineeringKitLibrary', () => {
     expect(wrapper.text()).toContain('套件内物料数量')
     expect(wrapper.text()).toContain('UKIT-000001')
     expect(wrapper.text()).toContain('UPTON')
+    expect(wrapper.text()).toContain('用于现场安装')
     expect(wrapper.text()).toContain('V02 草稿')
     expect(wrapper.text()).not.toContain('分类')
     expect(wrapper.text()).not.toContain('可选')

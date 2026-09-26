@@ -79,6 +79,9 @@ const businessFolder = computed(() => selectedFolder.value?.purpose === 'Standar
 const releaseFolder = computed(() => selectedFolder.value?.purpose === 'Release')
 const documentFolder = computed(() => Boolean(selectedFolder.value) && !businessFolder.value && !releaseFolder.value)
 const fileFolder = computed(() => businessFolder.value || releaseFolder.value)
+function newestFirst(left: { id: string; updatedAt?: string }, right: { id: string; updatedAt?: string }) {
+  return (Date.parse(right.updatedAt ?? '') || 0) - (Date.parse(left.updatedAt ?? '') || 0) || left.id.localeCompare(right.id)
+}
 const folderDocuments = computed(() => [...props.documents, ...(includeDeleted.value ? recycledDocuments.value : [])].filter(document => document.folderId === selectedFolderId.value))
 const modelDocumentCount = computed(() => folderDocuments.value.filter(document => document.kind !== 'Drawing').length)
 const drawingDocumentCount = computed(() => folderDocuments.value.filter(document => document.kind === 'Drawing').length)
@@ -87,12 +90,12 @@ const displayedDocuments = computed(() => {
   return folderDocuments.value.filter(document => {
     const matchesKind = kindFilter.value === 'all' || (kindFilter.value === 'model' && document.kind !== 'Drawing') || (kindFilter.value === 'drawing' && document.kind === 'Drawing')
     return matchesKind && (!keyword || `${document.drawingNumber} ${document.name} ${document.fileName}`.toLocaleLowerCase('zh-CN').includes(keyword))
-  })
+  }).sort(newestFirst)
 })
 const displayedFiles = computed(() => {
   const keyword = query.value.trim().toLocaleLowerCase('zh-CN')
   return projectFiles.value.filter(file => file.folderId === selectedFolderId.value
-    && (!keyword || `${file.fileName} ${file.currentVersion?.uploadedBy ?? ''}`.toLocaleLowerCase('zh-CN').includes(keyword)))
+    && (!keyword || `${file.fileName} ${file.currentVersion?.uploadedBy ?? ''}`.toLocaleLowerCase('zh-CN').includes(keyword))).sort(newestFirst)
 })
 const displayedChildFolders = computed(() => {
   const keyword = query.value.trim().toLocaleLowerCase('zh-CN')

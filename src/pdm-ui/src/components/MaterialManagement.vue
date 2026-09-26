@@ -121,6 +121,11 @@ type MaterialCodeApprovalRow = Omit<MaterialCodeApplication, 'applicationType'> 
   groupedApplications?: MaterialCodeApplication[]
   masterMaterial?: PdmMaterial
 }
+type MaterialCodeWorkflowRow = {
+  id: string
+  approval?: MaterialCodeApprovalRow
+  syncTask?: MaterialSyncTask
+}
 const codeApplications = ref<MaterialCodeApplication[]>([])
 const codeApplicationsLoading = ref(false)
 const pendingMasterMaterials = ref<PdmMaterial[]>([])
@@ -134,12 +139,10 @@ watch([activeTab, codeApprovalView], clearGlobalStatus, { flush: 'sync' })
 const workflowPageSize = 50
 const pendingApprovalPage = ref(1)
 const pendingSyncPage = ref(1)
-const approvalHistoryPage = ref(1)
-const approvalHistoryPageSize = ref(20)
-const syncHistoryPage = ref(1)
-const syncHistoryPageSize = ref(20)
+const historyWorkflowPage = ref(1)
 const decidingApplicationId = ref<string | null>(null)
 const selectedCodeApplications = ref<MaterialCodeApprovalRow[]>([])
+const selectedCodeWorkflowRows = ref<MaterialCodeWorkflowRow[]>([])
 const batchDecidingApplications = ref(false)
 const approvalProgressText = ref('')
 const syncProgressText = ref('')
@@ -299,19 +302,28 @@ const codeApprovalNoticeCount = computed(() => (props.canDecideMaterialCode
   ? codeApplications.value.filter(application => application.status === 'Pending' && application.applicationType !== 'BomHeader').length
   : 0) + (props.canApprove ? masterApprovalMaterials.value.length : 0))
 const pendingCodeApplicationCount = computed(() => codeApplications.value.filter(application => application.status === 'Pending' && application.applicationType !== 'BomHeader').length + masterApprovalMaterials.value.length)
-const currentWorkCount = computed(() => pendingCodeApplicationCount.value + currentSynchronizationTasks.value.length)
+const currentWorkCount = computed(() => currentCodeWorkflowRows.value.length)
 const historyCodeApplicationRows = computed(() => codeApplications.value.filter(application => application.applicationType !== 'BomHeader' && applicationWorkflowCompleted(application)))
 const synchronizationHistoryTasks = computed(() => tasks.value
   .filter(task => task.status === 'Succeeded' && applicationsForSyncTask(task).length === 0)
   .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt)))
-const historyWorkCount = computed(() => historyCodeApplicationRows.value.length + synchronizationHistoryTasks.value.length)
-const pagedApprovalHistoryRows = computed(() => historyCodeApplicationRows.value.slice(
-  (approvalHistoryPage.value - 1) * approvalHistoryPageSize.value,
-  approvalHistoryPage.value * approvalHistoryPageSize.value,
-))
-const pagedSynchronizationHistoryTasks = computed(() => synchronizationHistoryTasks.value.slice(
-  (syncHistoryPage.value - 1) * syncHistoryPageSize.value,
-  syncHistoryPage.value * syncHistoryPageSize.value,
+const historyCodeWorkflowRows = computed<MaterialCodeWorkflowRow[]>(() => {
+  const syncTasksByMaterial = new Map(synchronizationHistoryTasks.value.map(task => [task.materialId, task]))
+  const rows: MaterialCodeWorkflowRow[] = [...historyCodeApplicationRows.value]
+    .sort((left, right) => (right.decidedAt || right.requestedAt).localeCompare(left.decidedAt || left.requestedAt))
+    .map(approval => {
+      const materialId = approval.materialId || ''
+      const syncTask = approval.status === 'Approved' && materialId ? syncTasksByMaterial.get(materialId) : undefined
+      if (syncTask) syncTasksByMaterial.delete(materialId)
+      return { id: `approval:${approval.id}`, approval, syncTask }
+    })
+  for (const task of syncTasksByMaterial.values()) rows.push({ id: `sync:${task.id}`, syncTask: task })
+  return rows.sort((left, right) => workflowRowHistoryTime(right).localeCompare(workflowRowHistoryTime(left)))
+})
+const historyWorkCount = computed(() => historyCodeWorkflowRows.value.length)
+const pagedHistoryCodeWorkflowRows = computed(() => historyCodeWorkflowRows.value.slice(
+  (historyWorkflowPage.value - 1) * workflowPageSize,
+  historyWorkflowPage.value * workflowPageSize,
 ))
 watch([syncTaskNoticeCount, codeApprovalNoticeCount], ([syncTasks, codeApprovals]) => {
   emit('noticeCountsChange', { syncTasks, codeApprovals })
@@ -372,10 +384,9 @@ const materialCategoryTree = computed<CategoryTreeNode[]>(() => {
   return prune(buildCategoryTree(categories.value.filter(category => category.isVisible && category.isActive)))
 })
 const creatableCategories = computed(() => categories.value.filter(category => category.allowCreate && category.isVisible && category.isActive && category.pdmKind))
-const standardApprovalCategories = computed(() => creatableCategories.value.filter(category => category.pdmKind === 'Standard'))
-const defaultStandardApprovalCategoryCode = computed(() => standardApprovalCategories.value.some(category => category.code === '0102')
+const defaultStandardApprovalCategoryCode = computed(() => creatableCategories.value.some(category => category.code === '0102')
   ? '0102'
-  : standardApprovalCategories.value[0]?.code ?? '')
+  : creatableCategories.value[0]?.code ?? '')
 const codeApplicationCategoryOverrides = reactive<Record<string, string>>({})
 
 const kindLabels: Record<MaterialKind, string> = { Electrical: '电气外购件', Standard: '机械外购件', NonStandard: '非标机加件', Product: '产品/组件' }
@@ -401,8 +412,32 @@ const pagedPendingCodeApplicationRows = computed(() => pendingCodeApplicationRow
   (pendingApprovalPage.value - 1) * workflowPageSize,
   pendingApprovalPage.value * workflowPageSize,
 ))
+const currentCodeWorkflowRows = computed<MaterialCodeWorkflowRow[]>(() => {
+  const pendingRows = pendingCodeApplicationRows.value.map(approval => ({ id: `approval:${approval.id}`, approval }))
+  const pendingMaterialIds = new Set(pendingCodeApplicationRows.value.map(approval => approval.materialId))
+  const approvedByMaterial = new Map(approvedApplicationsAwaitingSync.value.map(approval => [approval.materialId, approval]))
+  const syncRows = currentSynchronizationTasks.value
+    .filter(task => !pendingMaterialIds.has(task.materialId))
+    .map(task => ({ id: `sync:${task.id}`, approval: approvedByMaterial.get(task.materialId), syncTask: task }))
+  return [...pendingRows, ...syncRows].sort((left, right) => {
+    const leftPending = left.approval?.status === 'Pending' ? 0 : 1
+    const rightPending = right.approval?.status === 'Pending' ? 0 : 1
+    if (leftPending !== rightPending) return leftPending - rightPending
+    return workflowRowMaterialCode(left).localeCompare(workflowRowMaterialCode(right), undefined, { numeric: true })
+  })
+})
+const pagedCurrentCodeWorkflowRows = computed(() => currentCodeWorkflowRows.value.slice(
+  (pendingApprovalPage.value - 1) * workflowPageSize,
+  pendingApprovalPage.value * workflowPageSize,
+))
 watch(() => pendingCodeApplicationRows.value.length, total => {
   pendingApprovalPage.value = Math.min(pendingApprovalPage.value, Math.max(1, Math.ceil(total / workflowPageSize)))
+})
+watch(() => currentCodeWorkflowRows.value.length, total => {
+  pendingApprovalPage.value = Math.min(pendingApprovalPage.value, Math.max(1, Math.ceil(total / workflowPageSize)))
+})
+watch(() => historyCodeWorkflowRows.value.length, total => {
+  historyWorkflowPage.value = Math.min(historyWorkflowPage.value, Math.max(1, Math.ceil(total / workflowPageSize)))
 })
 watch(() => currentSynchronizationTasks.value.length, total => {
   pendingSyncPage.value = Math.min(pendingSyncPage.value, Math.max(1, Math.ceil(total / workflowPageSize)))
@@ -413,6 +448,52 @@ function approvalCategoryCode(application: MaterialCodeApprovalRow) {
 }
 function setApprovalCategoryCode(application: MaterialCodeApprovalRow, categoryCode: string) {
   codeApplicationCategoryOverrides[application.id] = categoryCode
+}
+function workflowRowMaterialCode(row: MaterialCodeWorkflowRow) {
+  return row.approval ? applicationMaterialCodeLabel(row.approval) : row.syncTask?.materialCode || ''
+}
+function workflowRowTypeLabel(row: MaterialCodeWorkflowRow) {
+  if (row.approval) return applicationTypeLabel(row.approval)
+  return row.syncTask?.bomHeaderKind ? 'BOM料号' : '普通料品'
+}
+function workflowRowSourceLabel(row: MaterialCodeWorkflowRow) {
+  const approval = row.approval
+  const task = row.syncTask
+  if (approval?.masterMaterial) return '料品主档'
+  const projectCode = approval?.projectCode || task?.projectCode
+  const projectName = approval?.projectName || task?.projectName
+  return projectCode ? `${projectCode} · ${projectName || '未命名项目'}` : task ? '料品主档' : approval?.projectId || '—'
+}
+function workflowRowTargetLabel(row: MaterialCodeWorkflowRow) {
+  return row.approval ? applicationTargetLabel(row.approval) : row.syncTask?.bomHeaderKind ? bomHeaderLabels[row.syncTask.bomHeaderKind] : '—'
+}
+function workflowRowStatusLabel(row: MaterialCodeWorkflowRow) {
+  if (row.syncTask) return syncTaskStatusLabel(row.syncTask)
+  if (row.approval?.status === 'Pending') return '待审批'
+  return row.approval?.status === 'Rejected' ? '已驳回' : '已批准'
+}
+function workflowRowStatusType(row: MaterialCodeWorkflowRow) {
+  if (row.syncTask) return syncTaskTagType(row.syncTask)
+  return row.approval?.status === 'Pending' ? 'warning' : row.approval?.status === 'Rejected' ? 'danger' : 'success'
+}
+function workflowRowDescription(row: MaterialCodeWorkflowRow) {
+  if (row.syncTask) return syncTaskError(row.syncTask) || '同步完成。'
+  if (row.approval?.status === 'Pending') return '待审批后生成同步任务。'
+  if (row.approval?.status === 'Rejected') return row.approval.decisionComment || '已驳回。'
+  return '已批准，等待同步任务。'
+}
+function workflowRowHistoryTime(row: MaterialCodeWorkflowRow) {
+  return row.syncTask?.updatedAt || row.approval?.decidedAt || row.approval?.requestedAt || ''
+}
+function setWorkflowSelection(rows: MaterialCodeWorkflowRow[]) {
+  selectedCodeWorkflowRows.value = rows
+  selectedCodeApplications.value = rows.flatMap(row => row.approval && canSelectCodeApplication(row.approval) ? applicationsForApprovalRow(row.approval) : [])
+  selectedSyncTasks.value = rows.flatMap(row => row.syncTask && canSelectSyncTask(row.syncTask) ? [row.syncTask] : [])
+}
+function canSelectCodeWorkflowRow(row: MaterialCodeWorkflowRow) {
+  return row.approval?.status === 'Pending'
+    ? canSelectCodeApplication(row.approval)
+    : !!row.syncTask && canSelectSyncTask(row.syncTask)
 }
 const applicationTypeLabel = (application: MaterialCodeApprovalRow) => application.groupedApplications
   ? `BOM料号（${application.groupedApplications.length}项）`
@@ -782,6 +863,7 @@ async function load() {
     codeApplications.value = loadedCodeApplications
     pendingMasterMaterials.value = loadedPendingMasters
     selectedCodeApplications.value = []
+    selectedCodeWorkflowRows.value = []
     if (numberingSettings) numberingStartSequence.value = numberingSettings.startSequence
     approvalRules.value = loadedApprovalRules
     duplicateRules.value = loadedDuplicateRules
@@ -1633,113 +1715,64 @@ onMounted(() => {
         <template #label><span class="material-tab-label">料号审批<em v-if="currentWorkCount">{{ currentWorkCount }}</em></span></template>
         <div class="material-code-approval-workflow">
           <div class="material-code-refresh-toolbar"><el-button :loading="codeApplicationsLoading" :disabled="batchDecidingApplications || decidingApplicationId !== null || !!syncProgressText" @click="loadCodeApplications">刷新</el-button></div>
-          <div class="material-code-approval-note">项目多级BOM表头料号与普通料品批准后均由系统自动排队同步U9C：表头料号的进度与失败原因见项目BOM多级总览，普通料品的进度见本页第二步列表；失败任务可在第二步勾选重试。</div>
           <el-tabs v-model="codeApprovalView" class="material-code-approval-subtabs">
           <el-tab-pane name="pending">
             <template #label><span class="material-code-approval-subtab-label">当前处理 <em>{{ currentWorkCount }}</em></span></template>
-            <div class="material-code-workflow-columns">
-              <section class="material-code-workflow-stage" aria-label="第一步料号审批">
-                <div class="material-code-workflow-stage__title"><strong>第一步：料号审批</strong><span>普通料品草稿及BOM料号申请；批准后转入右侧，手动同步U9C。</span></div>
-                <section class="material-step-feedback material-approval-feedback" :class="approvalResult ? `is-${approvalResult.level}` : 'is-empty'" aria-label="料号审批状态与结果">
-                  <div class="material-step-feedback__status" role="status" aria-live="polite"><strong>运行状态</strong><span :class="{ 'is-running': approvalProgressText }">{{ approvalProgressText || '空闲' }}</span></div>
-                  <div class="material-step-feedback__result" role="status" aria-live="polite">
-                    <header><strong>处理结果</strong><span>{{ approvalResult ? approvalResult.title : '暂无结果' }}</span></header>
-                    <p>{{ approvalResult ? approvalResult.summary : '完成料号批准或驳回后，结果将在此固定显示。' }}</p>
-                    <ul v-if="approvalResult?.details.length"><li v-for="detail in approvalResult.details" :key="detail">{{ detail }}</li></ul>
-                  </div>
-                </section>
-                <div v-if="canDecideMaterialCode || canApprove" class="material-code-approval-toolbar">
-                  <div class="material-code-approval-toolbar__actions">
-                    <el-button type="primary" :disabled="selectedCodeApplications.length === 0 || decidingApplicationId !== null" :loading="batchDecidingApplications" @click="decideSelectedCodeApplications(true)">批量批准</el-button>
-                    <el-button v-if="canDecideMaterialCode || canApprove" type="danger" plain :disabled="selectedCodeApplications.length === 0 || batchDecidingApplications || decidingApplicationId !== null" @click="decideSelectedCodeApplications(false)">批量驳回</el-button>
-                  </div>
-                  <span>已选择 {{ selectedCodeApplications.length }} 项待审批申请</span>
-                </div>
-                <div class="material-code-approval-table-shell">
-                  <el-table class="material-code-approval-table material-code-approval-table--pending" :data="pagedPendingCodeApplicationRows" row-key="id" stripe table-layout="fixed" :fit="true" empty-text="当前没有待审批申请" @selection-change="selectedCodeApplications = $event">
-                    <el-table-column v-if="canDecideMaterialCode || canApprove" type="selection" width="38" :selectable="canSelectCodeApplication" />
-                    <el-table-column label="申请类型" width="64"><template #default="{ row }">{{ applicationTypeLabel(row) }}</template></el-table-column>
-                    <el-table-column label="来源" width="116" show-overflow-tooltip><template #default="{ row }">{{ row.masterMaterial ? '料品主档' : row.projectCode ? `${row.projectCode} · ${row.projectName || '未命名项目'}` : row.projectId }}</template></el-table-column>
-                    <el-table-column label="BOM层级" width="82" show-overflow-tooltip><template #default="{ row }">{{ applicationTargetLabel(row) }}</template></el-table-column>
-                    <el-table-column prop="categoryCode" label="料号分类" width="148"><template #default="{ row }"><el-select v-if="!row.masterMaterial && canDecideMaterialCode" class="material-code-approval-category" :model-value="approvalCategoryCode(row)" filterable :disabled="decidingApplicationId === row.id || batchDecidingApplications" @update:model-value="setApprovalCategoryCode(row, String($event))"><el-option v-for="category in standardApprovalCategories" :key="category.code" :label="`${category.code} ${category.name}`" :value="category.code" /></el-select><span v-else>{{ row.categoryCode || defaultStandardApprovalCategoryCode || '—' }}</span></template></el-table-column>
-                    <el-table-column prop="materialCode" label="PLM料号" width="110" show-overflow-tooltip><template #default="{ row }">{{ applicationMaterialCodeLabel(row) }}</template></el-table-column>
-                    <el-table-column prop="applicationName" label="名称" width="110" show-overflow-tooltip><template #default="{ row }">{{ row.applicationName || row.bomItemName || '—' }}</template></el-table-column>
-                    <el-table-column prop="specification" label="型号" width="78" show-overflow-tooltip><template #default="{ row }">{{ row.specification || '—' }}</template></el-table-column>
-                    <el-table-column prop="brand" label="品牌" width="62" show-overflow-tooltip><template #default="{ row }">{{ row.brand || '—' }}</template></el-table-column>
-                    <el-table-column prop="remark" label="备注" width="72" show-overflow-tooltip><template #default="{ row }">{{ row.remark || '—' }}</template></el-table-column>
-                    <el-table-column label="申请人" width="70" show-overflow-tooltip><template #default="{ row }">{{ displayUserName(row.requestedBy) }}</template></el-table-column>
-                    <el-table-column label="申请时间" width="116" show-overflow-tooltip><template #default="{ row }">{{ dateTimeLabel(row.requestedAt) }}</template></el-table-column>
-                    <el-table-column label="状态" width="72"><template #default><el-tag type="warning">待审批</el-tag></template></el-table-column>
-                    <el-table-column label="操作" width="92"><template #default="{ row }"><el-button v-if="row.masterMaterial ? canApprove : canDecideMaterialCode" link type="primary" :loading="decidingApplicationId === row.id" :disabled="batchDecidingApplications" @click="decideCodeApplication(row, true)">批准</el-button><el-button v-if="canRejectCodeApplication(row)" link type="danger" :disabled="decidingApplicationId === row.id || batchDecidingApplications" @click="decideCodeApplication(row, false)">驳回</el-button><span v-if="row.masterMaterial ? !canApprove : !canDecideMaterialCode">—</span></template></el-table-column>
-                  </el-table>
-                </div>
-                <el-pagination v-model:current-page="pendingApprovalPage" class="material-workflow-pagination material-pending-approval-pagination" :page-size="workflowPageSize" :total="pendingCodeApplicationRows.length" layout="total, prev, pager, next" size="small" @current-change="changePendingApprovalPage" />
+            <section class="material-code-workflow-stage material-code-workflow-stage--unified" aria-label="料号审批与U9C同步">
+              <div class="material-code-workflow-stage__title"><strong>料号审批与U9C同步</strong><span>每条申请仅显示一次；批准后可在同一行同步或重试。</span></div>
+              <section class="material-step-feedback material-code-workflow-feedback material-approval-feedback material-sync-feedback" aria-label="审批与同步状态及结果">
+                <div class="material-step-feedback__status" role="status" aria-live="polite"><strong>运行状态</strong><span :class="{ 'is-running': approvalProgressText || syncProgressText }">{{ approvalProgressText || syncProgressText || '空闲' }}</span></div>
+                <div class="material-step-feedback__result" role="status" aria-live="polite"><header><strong>审批结果</strong><span>{{ approvalResult ? approvalResult.title : '暂无结果' }}</span></header><p>{{ approvalResult ? approvalResult.summary : '批准或驳回后，结果将在此显示。' }}</p><ul v-if="approvalResult?.details.length"><li v-for="detail in approvalResult.details" :key="detail">{{ detail }}</li></ul></div>
+                <div class="material-step-feedback__result" role="status" aria-live="polite"><header><strong>同步结果</strong><span>{{ syncResult ? syncResult.title : '暂无结果' }}</span></header><p>{{ syncResult ? syncResult.summary : '批准后可在同一行执行U9C同步。' }}</p><ul v-if="syncResult?.details.length"><li v-for="detail in syncResult.details" :key="detail">{{ detail }}</li></ul></div>
               </section>
-              <section class="material-code-workflow-stage material-code-sync-stage" aria-label="第二步同步到U9C">
-                <div class="material-code-workflow-stage__title"><strong>第二步：同步到U9C</strong><span>失败记录保留在此，可选择后再次同步。</span></div>
-                <section class="material-step-feedback material-sync-feedback" :class="syncResult ? `is-${syncResult.level}` : 'is-empty'" aria-label="U9C同步状态与结果">
-                  <div class="material-step-feedback__status" role="status" aria-live="polite"><strong>运行状态</strong><span :class="{ 'is-running': syncProgressText }">{{ syncProgressText || '空闲' }}</span></div>
-                  <div class="material-step-feedback__result" role="status" aria-live="polite">
-                    <header><strong>处理结果</strong><span>{{ syncResult ? syncResult.title : '暂无结果' }}</span></header>
-                    <p>{{ syncResult ? syncResult.summary : '完成U9C同步后，结果将在此固定显示。' }}</p>
-                    <ul v-if="syncResult?.details.length"><li v-for="detail in syncResult.details" :key="detail">{{ detail }}</li></ul>
-                  </div>
-                </section>
-                <div v-if="canApprove || canDecideMaterialCode" class="material-sync-toolbar">
-                  <el-button type="primary" :disabled="selectedExecutableSyncTasks.length === 0 || batchSyncingTasks || syncingTaskId !== null" :loading="batchSyncingTasks" @click="executeSelectedTasks">{{ batchSyncActionLabel }}</el-button>
-                  <span>已选择 {{ selectedExecutableSyncTasks.length }} 个可执行任务</span>
-                </div>
-                <el-table ref="syncTaskSelectionTable" class="material-sync-table material-code-sync-table--pending" :data="pagedCurrentSynchronizationTasks" row-key="id" stripe table-layout="fixed" :fit="true" empty-text="当前没有待同步记录" @selection-change="selectedSyncTasks = $event">
-                  <el-table-column v-if="canApprove || canDecideMaterialCode" type="selection" width="38" :selectable="canSelectSyncTask" />
-                  <el-table-column label="来源" width="150" show-overflow-tooltip><template #default="{ row }">{{ row.projectCode ? `${row.projectCode} · ${row.projectName || '未命名项目'}` : '料品主档' }}</template></el-table-column>
-                  <el-table-column prop="categoryCode" label="料号分类" width="64"><template #default="{ row }">{{ row.categoryCode || '—' }}</template></el-table-column>
-                  <el-table-column prop="materialCode" label="PLM料号" width="110"><template #default="{ row }">{{ row.materialCode || '—' }}</template></el-table-column>
-                  <el-table-column prop="materialName" label="名称" width="110" show-overflow-tooltip><template #default="{ row }">{{ row.materialName || '—' }}</template></el-table-column>
-                  <el-table-column prop="specification" label="型号" width="78" show-overflow-tooltip><template #default="{ row }">{{ row.specification || '—' }}</template></el-table-column>
-                  <el-table-column prop="brand" label="品牌" width="62" show-overflow-tooltip><template #default="{ row }">{{ row.brand || '—' }}</template></el-table-column>
-                  <el-table-column prop="remark" label="备注" width="72" show-overflow-tooltip><template #default="{ row }">{{ row.remark || '—' }}</template></el-table-column>
-                  <el-table-column label="申请人" width="74"><template #default="{ row }">{{ displayUserName(row.requestedBy) }}</template></el-table-column>
-                  <el-table-column label="申请时间" width="124"><template #default="{ row }">{{ row.requestedAt ? dateTimeLabel(row.requestedAt) : '—' }}</template></el-table-column>
-                  <el-table-column label="流程状态" width="112"><template #default="{ row }"><el-tag :type="syncTaskTagType(row)">{{ syncTaskStatusLabel(row) }}</el-tag></template></el-table-column>
-                  <el-table-column label="说明" min-width="210" show-overflow-tooltip><template #default="{ row }">{{ syncTaskError(row) }}</template></el-table-column>
-                  <el-table-column label="操作" width="172"><template #default="{ row }"><el-button link type="primary" @click="showPreview(row)">查看请求</el-button><el-button v-if="canExecuteSyncTask(row)" link type="primary" :disabled="batchSyncingTasks" :loading="syncingTaskId === row.id" @click="executeTask(row)">{{ syncTaskActionLabel(row) }}</el-button></template></el-table-column>
+              <div v-if="canDecideMaterialCode || canApprove" class="material-code-workflow-toolbar material-code-approval-toolbar material-sync-toolbar">
+                <div class="material-code-approval-toolbar__actions"><el-button type="primary" :disabled="selectedCodeApplications.length === 0 || decidingApplicationId !== null" :loading="batchDecidingApplications" @click="decideSelectedCodeApplications(true)">批量批准</el-button><el-button type="danger" plain :disabled="selectedCodeApplications.length === 0 || batchDecidingApplications || decidingApplicationId !== null" @click="decideSelectedCodeApplications(false)">批量驳回</el-button><el-button type="primary" plain :disabled="selectedExecutableSyncTasks.length === 0 || batchSyncingTasks || syncingTaskId !== null" :loading="batchSyncingTasks" @click="executeSelectedTasks">{{ batchSyncActionLabel }}</el-button></div>
+                <span>已选 {{ selectedCodeApplications.length }} 项待审批、{{ selectedExecutableSyncTasks.length }} 项可同步</span>
+              </div>
+              <div class="material-code-approval-table-shell">
+                <el-table ref="syncTaskSelectionTable" class="material-code-approval-table material-code-approval-table--pending material-sync-table material-code-sync-table--pending material-code-workflow-table" :data="pagedCurrentCodeWorkflowRows" row-key="id" stripe table-layout="fixed" :fit="true" empty-text="当前没有待处理记录" @selection-change="setWorkflowSelection">
+                  <el-table-column v-if="canDecideMaterialCode || canApprove" type="selection" width="38" :selectable="canSelectCodeWorkflowRow" />
+                  <el-table-column label="申请类型" width="76"><template #default="{ row }">{{ workflowRowTypeLabel(row) }}</template></el-table-column>
+                  <el-table-column label="来源" width="150" show-overflow-tooltip><template #default="{ row }">{{ workflowRowSourceLabel(row) }}</template></el-table-column>
+                  <el-table-column label="BOM层级" width="88" show-overflow-tooltip><template #default="{ row }">{{ workflowRowTargetLabel(row) }}</template></el-table-column>
+                  <el-table-column label="料号分类" width="148"><template #default="{ row }"><el-select v-if="row.approval?.status === 'Pending' && !row.approval.masterMaterial && canDecideMaterialCode" class="material-code-approval-category" :model-value="approvalCategoryCode(row.approval)" filterable :disabled="decidingApplicationId === row.approval.id || batchDecidingApplications" @update:model-value="setApprovalCategoryCode(row.approval, String($event))"><el-option v-for="category in creatableCategories" :key="category.code" :label="`${category.code} ${category.name}`" :value="category.code" /></el-select><span v-else>{{ row.approval?.categoryCode || row.syncTask?.categoryCode || defaultStandardApprovalCategoryCode || '—' }}</span></template></el-table-column>
+                  <el-table-column label="PLM料号" width="110" show-overflow-tooltip><template #default="{ row }">{{ workflowRowMaterialCode(row) || '—' }}</template></el-table-column>
+                  <el-table-column label="名称" width="110" show-overflow-tooltip><template #default="{ row }">{{ row.approval?.applicationName || row.approval?.bomItemName || row.syncTask?.materialName || '—' }}</template></el-table-column>
+                  <el-table-column label="型号" width="90" show-overflow-tooltip><template #default="{ row }">{{ row.approval?.specification || row.syncTask?.specification || '—' }}</template></el-table-column>
+                  <el-table-column label="品牌" width="72" show-overflow-tooltip><template #default="{ row }">{{ row.approval?.brand || row.syncTask?.brand || '—' }}</template></el-table-column>
+                  <el-table-column label="申请人" width="82" show-overflow-tooltip><template #default="{ row }">{{ displayUserName(row.approval?.requestedBy || row.syncTask?.requestedBy || '') }}</template></el-table-column>
+                  <el-table-column label="申请时间" width="124" show-overflow-tooltip><template #default="{ row }">{{ row.approval?.requestedAt ? dateTimeLabel(row.approval.requestedAt) : row.syncTask?.requestedAt ? dateTimeLabel(row.syncTask.requestedAt) : '—' }}</template></el-table-column>
+                  <el-table-column label="状态" width="100"><template #default="{ row }"><el-tag :type="workflowRowStatusType(row)">{{ workflowRowStatusLabel(row) }}</el-tag></template></el-table-column>
+                  <el-table-column label="说明" min-width="180" show-overflow-tooltip><template #default="{ row }">{{ workflowRowDescription(row) }}</template></el-table-column>
+                  <el-table-column label="操作" width="150"><template #default="{ row }"><template v-if="row.approval?.status === 'Pending'"><el-button v-if="row.approval.masterMaterial ? canApprove : canDecideMaterialCode" link type="primary" :loading="decidingApplicationId === row.approval.id" :disabled="batchDecidingApplications" @click="decideCodeApplication(row.approval, true)">批准</el-button><el-button v-if="canRejectCodeApplication(row.approval)" link type="danger" :disabled="decidingApplicationId === row.approval.id || batchDecidingApplications" @click="decideCodeApplication(row.approval, false)">驳回</el-button></template><template v-else-if="row.syncTask"><el-button link type="primary" @click="showPreview(row.syncTask)">查看请求</el-button><el-button v-if="canExecuteSyncTask(row.syncTask)" link type="primary" :disabled="batchSyncingTasks" :loading="syncingTaskId === row.syncTask.id" @click="executeTask(row.syncTask)">{{ syncTaskActionLabel(row.syncTask) }}</el-button></template><span v-else>—</span></template></el-table-column>
                 </el-table>
-                <el-pagination v-model:current-page="pendingSyncPage" class="material-workflow-pagination material-pending-sync-pagination" :page-size="workflowPageSize" :total="currentSynchronizationTasks.length" layout="total, prev, pager, next" size="small" @current-change="changePendingSyncPage" />
-              </section>
-            </div>
+              </div>
+              <el-pagination v-model:current-page="pendingApprovalPage" class="material-workflow-pagination material-pending-approval-pagination material-code-workflow-pagination" :page-size="workflowPageSize" :total="currentCodeWorkflowRows.length" layout="total, prev, pager, next" size="small" @current-change="changePendingApprovalPage" />
+            </section>
           </el-tab-pane>
           <el-tab-pane name="history">
             <template #label><span class="material-code-approval-subtab-label">审批/同步历史 <em>{{ historyWorkCount }}</em></span></template>
-            <div class="material-code-workflow-columns material-code-history-columns">
-              <section class="material-code-workflow-stage" aria-label="第一步料号审批历史">
-                <div class="material-code-workflow-stage__title"><strong>第一步：审批历史</strong><span>已批准或已驳回记录，只读。</span></div>
-                <div class="material-code-approval-table-shell">
-                  <el-table class="material-code-approval-table material-code-approval-table--history" :data="pagedApprovalHistoryRows" row-key="id" stripe table-layout="fixed" :fit="true" empty-text="尚无审批历史">
-                    <el-table-column label="申请类型" width="64"><template #default="{ row }">{{ applicationTypeLabel(row) }}</template></el-table-column>
-                    <el-table-column label="来源项目" width="116" show-overflow-tooltip><template #default="{ row }">{{ row.projectCode ? `${row.projectCode} · ${row.projectName || '未命名项目'}` : row.projectId }}</template></el-table-column>
-                    <el-table-column label="申请人" width="70" show-overflow-tooltip><template #default="{ row }">{{ displayUserName(row.requestedBy) }}</template></el-table-column>
-                    <el-table-column label="申请时间" width="116" show-overflow-tooltip><template #default="{ row }">{{ dateTimeLabel(row.requestedAt) }}</template></el-table-column>
-                    <el-table-column label="状态" width="72"><template #default="{ row }"><el-tag :type="row.status === 'Approved' ? 'success' : 'danger'">{{ row.status === 'Approved' ? '已批准' : '已驳回' }}</el-tag></template></el-table-column>
-                    <el-table-column prop="materialCode" label="审批料号" width="98" show-overflow-tooltip><template #default="{ row }">{{ applicationMaterialCodeLabel(row) }}</template></el-table-column>
-                    <el-table-column label="审批人" width="92" show-overflow-tooltip><template #default="{ row }">{{ displayUserName(row.decidedBy) }}</template></el-table-column>
-                    <el-table-column label="驳回原因" min-width="150" show-overflow-tooltip><template #default="{ row }">{{ row.status === 'Rejected' ? row.decisionComment || '—' : '—' }}</template></el-table-column>
-                  </el-table>
-                </div>
-                <el-pagination v-model:current-page="approvalHistoryPage" v-model:page-size="approvalHistoryPageSize" class="material-history-pagination material-approval-history-pagination" :page-sizes="[10, 20, 50]" :total="historyCodeApplicationRows.length" layout="total, sizes, prev, pager, next" size="small" />
-              </section>
-              <section class="material-code-workflow-stage" aria-label="第二步U9C同步历史">
-                <div class="material-code-workflow-stage__title"><strong>第二步：同步历史</strong><span>仅显示已完成U9C同步的记录，只读。</span></div>
-                <el-table class="material-sync-table material-sync-table--history" :data="pagedSynchronizationHistoryTasks" row-key="id" stripe table-layout="fixed" :fit="true" empty-text="尚无同步历史">
-                  <el-table-column label="来源" width="150" show-overflow-tooltip><template #default="{ row }">{{ row.projectCode ? `${row.projectCode} · ${row.projectName || '未命名项目'}` : '料品主档' }}</template></el-table-column>
-                  <el-table-column label="同步对象" width="130" show-overflow-tooltip><template #default="{ row }">{{ row.bomHeaderKind ? bomHeaderLabels[row.bomHeaderKind] : row.materialName || '普通料品' }}</template></el-table-column>
-                  <el-table-column prop="materialCode" label="PLM料号" width="110"><template #default="{ row }">{{ row.materialCode || '—' }}</template></el-table-column>
-                  <el-table-column label="申请人" width="74"><template #default="{ row }">{{ displayUserName(row.requestedBy) }}</template></el-table-column>
-                  <el-table-column label="完成时间" width="124"><template #default="{ row }">{{ dateTimeLabel(row.updatedAt) }}</template></el-table-column>
-                  <el-table-column label="同步结果" width="90"><template #default><el-tag type="success">已同步</el-tag></template></el-table-column>
+            <section class="material-code-workflow-stage material-code-workflow-stage--unified" aria-label="料号审批与U9C同步历史">
+              <div class="material-code-workflow-stage__title"><strong>审批与同步历史</strong><span>已完成记录按当前处理的字段统一展示，只读。</span></div>
+              <div class="material-code-approval-table-shell">
+                <el-table class="material-code-approval-table material-code-approval-table--history material-code-workflow-table" :data="pagedHistoryCodeWorkflowRows" row-key="id" stripe table-layout="fixed" :fit="true" empty-text="尚无审批或同步历史">
+                  <el-table-column label="申请类型" width="76"><template #default="{ row }">{{ workflowRowTypeLabel(row) }}</template></el-table-column>
+                  <el-table-column label="来源" width="150" show-overflow-tooltip><template #default="{ row }">{{ workflowRowSourceLabel(row) }}</template></el-table-column>
+                  <el-table-column label="BOM层级" width="88" show-overflow-tooltip><template #default="{ row }">{{ workflowRowTargetLabel(row) }}</template></el-table-column>
+                  <el-table-column label="料号分类" width="148"><template #default="{ row }">{{ row.approval?.categoryCode || row.syncTask?.categoryCode || defaultStandardApprovalCategoryCode || '—' }}</template></el-table-column>
+                  <el-table-column label="PLM料号" width="110" show-overflow-tooltip><template #default="{ row }">{{ workflowRowMaterialCode(row) || '—' }}</template></el-table-column>
+                  <el-table-column label="名称" width="110" show-overflow-tooltip><template #default="{ row }">{{ row.approval?.applicationName || row.approval?.bomItemName || row.syncTask?.materialName || '—' }}</template></el-table-column>
+                  <el-table-column label="型号" width="90" show-overflow-tooltip><template #default="{ row }">{{ row.approval?.specification || row.syncTask?.specification || '—' }}</template></el-table-column>
+                  <el-table-column label="品牌" width="72" show-overflow-tooltip><template #default="{ row }">{{ row.approval?.brand || row.syncTask?.brand || '—' }}</template></el-table-column>
+                  <el-table-column label="申请人" width="82" show-overflow-tooltip><template #default="{ row }">{{ displayUserName(row.approval?.requestedBy || row.syncTask?.requestedBy || '') }}</template></el-table-column>
+                  <el-table-column label="申请时间" width="124" show-overflow-tooltip><template #default="{ row }">{{ row.approval?.requestedAt ? dateTimeLabel(row.approval.requestedAt) : row.syncTask?.requestedAt ? dateTimeLabel(row.syncTask.requestedAt) : '—' }}</template></el-table-column>
+                  <el-table-column label="状态" width="100"><template #default="{ row }"><el-tag :type="workflowRowStatusType(row)">{{ workflowRowStatusLabel(row) }}</el-tag></template></el-table-column>
+                  <el-table-column label="说明" min-width="180" show-overflow-tooltip><template #default="{ row }">{{ workflowRowDescription(row) }}</template></el-table-column>
+                  <el-table-column label="操作" width="150"><template #default>—</template></el-table-column>
                 </el-table>
-                <el-pagination v-model:current-page="syncHistoryPage" v-model:page-size="syncHistoryPageSize" class="material-history-pagination material-sync-history-pagination" :page-sizes="[10, 20, 50]" :total="synchronizationHistoryTasks.length" layout="total, sizes, prev, pager, next" size="small" />
-              </section>
-            </div>
+              </div>
+              <el-pagination v-model:current-page="historyWorkflowPage" class="material-workflow-pagination material-history-workflow-pagination" :page-size="workflowPageSize" :total="historyCodeWorkflowRows.length" layout="total, prev, pager, next" size="small" />
+            </section>
           </el-tab-pane>
           </el-tabs>
         </div>
@@ -1895,26 +1928,26 @@ onMounted(() => {
 .material-toolbar__search{width:clamp(220px,20vw,340px)!important;min-width:160px!important;flex:0 1 340px!important}
 .material-import-actions{display:flex;align-items:center;gap:8px;margin-bottom:12px}.material-import-actions>span{min-width:0;overflow:hidden;color:var(--pdm-muted);text-overflow:ellipsis;white-space:nowrap}.material-import-summary{display:flex;align-items:center;gap:18px;margin:12px 0 8px;padding:9px 12px;border:1px solid #bbf7d0;border-radius:6px;background:#f0fdf4;color:var(--pdm-green)}.material-import-summary.has-errors{border-color:#fecaca;background:#fef2f2;color:var(--pdm-danger)}.material-import-errors{color:var(--pdm-danger);line-height:1.4}.material-import-dialog :deep(.el-alert){margin-bottom:10px}
 @media(max-width:1000px){.material-page .material-toolbar{flex-wrap:wrap}.material-page .material-toolbar__actions{flex:0 0 auto;max-width:100%;flex-wrap:wrap}}
-.material-code-refresh-toolbar{display:flex;justify-content:flex-end;margin-bottom:8px}
+.material-code-refresh-toolbar{display:flex;justify-content:flex-start;margin-bottom:8px}
 .material-table :deep(.el-table__body tr.is-pending-material > td.el-table__cell){background-color:#fff8d6}
 .material-table :deep(.el-table__body tr.is-pending-material:hover > td.el-table__cell){background-color:#fff0b3}
 .material-master-layout{display:grid;grid-template-columns:190px minmax(0,1fr);gap:var(--pdm-container-gap);min-width:0;background:var(--shell-content-bg)}.material-master-layout.is-category-collapsed{grid-template-columns:34px minmax(0,1fr)}.material-category-nav,.material-master-content{min-width:0;padding:10px;border:1px solid #e2e8f0;border-radius:8px;background:#fff}.material-category-nav{overflow:auto;font-size:11px}.material-category-nav__title{display:flex;align-items:center;justify-content:space-between;gap:4px;margin:0 4px 8px;color:var(--pdm-text-soft);font-weight:600;white-space:nowrap}.material-category-nav__toggle{width:22px;height:22px;display:inline-flex;flex:0 0 22px;align-items:center;justify-content:center;padding:0;border:1px solid var(--shell-accent-border);border-radius:5px;background:var(--pdm-blue-soft);color:var(--pdm-blue);font-size:16px;line-height:1;cursor:pointer}.material-category-nav__toggle:hover,.material-category-nav__toggle:focus-visible{border-color:var(--pdm-blue);background:var(--pdm-blue-soft);outline:none}.material-master-layout.is-category-collapsed .material-category-nav{padding:5px}.material-master-layout.is-category-collapsed .material-category-nav__title{justify-content:center;margin:0}.material-category-all{width:100%;height:28px;margin-bottom:4px;padding:0 8px;border:0;border-radius:5px;background:transparent;color:var(--pdm-text-soft);font:inherit;text-align:left;cursor:pointer}.material-category-all:hover,.material-category-all.is-active{background:var(--pdm-blue-soft);color:var(--pdm-blue)}.material-category-nav :deep(.el-tree){background:#fff;color:var(--pdm-text-soft);font-size:11px}.material-category-nav :deep(.el-tree-node__content){height:28px;border-radius:5px}.material-category-node{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.material-master-content{overflow:hidden}
 .material-page{min-width:0;min-height:calc(100vh - 112px);overflow:hidden;padding:5px 28px 28px}.material-tabs{min-width:0;max-width:100%}.material-tabs :deep(.el-tabs__content),.material-tabs :deep(.el-tab-pane){min-width:0;max-width:100%;overflow:hidden}.material-toolbar{display:flex;min-width:0;align-items:center;justify-content:flex-start;flex-wrap:nowrap;gap:5px;margin-bottom:14px;font-size:11px}.material-toolbar__actions,.material-toolbar__filters{display:flex;min-width:0;align-items:center;flex-wrap:nowrap;gap:5px}.material-toolbar__actions{flex:0 1 auto}.material-toolbar__filters{flex:1 1 260px}.material-toolbar :deep(.el-button),.material-toolbar :deep(.el-checkbox__label),.material-toolbar :deep(.el-input__inner),.material-toolbar :deep(.el-select__placeholder),.material-toolbar :deep(.el-select__selected-item){font-size:11px}.material-toolbar__actions :deep(.el-button){width:clamp(60px,5vw,80px);height:30px;flex:1 1 60px;margin-left:0;padding:0}.material-toolbar__filters :deep(.el-checkbox){flex:0 0 auto}.material-brand-filter{width:110px;min-width:80px;flex:0 1 110px}.material-toolbar .el-input{width:auto;min-width:80px;flex:1 1 180px}.material-table{width:100%;min-width:0;max-width:100%;box-sizing:border-box}.material-table :deep(.el-table__inner-wrapper),.material-table :deep(.el-scrollbar),.material-table :deep(.el-scrollbar__wrap){max-width:100%}.material-table :deep(.el-scrollbar__wrap){overflow-x:auto}.material-table :deep(.el-table__cell){font-size:11px;text-align:center}.material-table :deep(.cell){overflow:hidden;padding:0 6px;text-overflow:ellipsis;white-space:nowrap}.material-table :deep(.el-button),.material-table :deep(.el-tag){font-size:11px}.u9-validation{display:flex;align-items:center;justify-content:center;white-space:nowrap}.u9-unchecked{color:var(--pdm-muted);font-size:11px}.batch-editor-note{margin:0 0 14px;color:var(--pdm-muted);font-size:11px}.batch-editor-form :deep(.el-checkbox){margin-right:0}.material-numbering-settings{display:flex;align-items:center;gap:12px;margin-bottom:12px;padding:12px 16px;border:1px solid #bfdbfe;border-radius:10px;background:#eff6ff}.material-numbering-settings__description{min-width:0;flex:1}.material-numbering-settings strong{color:var(--pdm-text);font-size:12px}.material-numbering-settings p{margin:3px 0 0;color:var(--pdm-text-soft);line-height:1.4}.material-numbering-settings__input{width:284px;flex:0 0 284px}.category-layout{display:grid;grid-template-columns:minmax(280px,35%) 1fr;gap:18px;min-height:520px}.category-tree-panel,.category-editor{padding:18px;border:1px solid #e2e8f0;border-radius:14px;background:#f8fafc}.category-actions{display:flex;gap:8px;margin-bottom:14px}.category-node{display:flex;align-items:center;justify-content:space-between;gap:12px;width:100%;padding-right:8px}.category-empty{display:grid;min-height:420px;place-items:center;color:var(--pdm-muted)}.category-switches{display:flex;flex-wrap:wrap;gap:24px;margin:2px 0 14px}.form-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));column-gap:18px}.field-help{width:100%;margin:6px 0 0;color:var(--pdm-muted);font-size:11px;line-height:1.4}.weight-unit{width:76px;margin-left:8px}.preview-meta{display:grid;gap:6px;margin-bottom:12px;color:var(--pdm-muted);font-size:12px;word-break:break-all}.payload-preview{max-height:480px;overflow:auto;padding:18px;border-radius:10px;background:#0f172a;color:#fff;font:12px/1.4 var(--pdm-font-mono);white-space:pre-wrap;word-break:break-all}.material-tabs :deep(.el-tabs__content),.material-tabs :deep(.el-tabs__content *){font-size:11px}:global(.material-editor-dialog),:global(.material-editor-dialog *){font-size:11px}:global(.material-editor-dialog .el-dialog__title){font-size:11px!important}@media(max-width:1000px){.material-page{padding:5px 18px 18px}.material-toolbar__actions :deep(.el-button){width:48px;min-width:48px!important;flex:0 0 48px}.material-brand-filter{width:70px;min-width:70px;flex-basis:70px}.material-toolbar .el-input{min-width:70px;flex-basis:70px}.material-numbering-settings{align-items:stretch;flex-direction:column}.category-layout{grid-template-columns:1fr}.form-grid{grid-template-columns:1fr}}
 .material-numbering-settings-scroll{height:100%;box-sizing:border-box;overflow-y:auto;padding-right:4px}.material-duplicate-settings{padding:14px 16px;border:1px solid #e2e8f0;border-radius:10px;background:#fff}.material-duplicate-settings>header{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;margin-bottom:10px}.material-duplicate-settings>header p{margin:3px 0 0;color:var(--pdm-muted);line-height:1.4}.material-duplicate-rule-list{display:grid;gap:6px}.material-duplicate-rule-row{display:grid;grid-template-columns:minmax(180px,240px) minmax(260px,1fr) 170px;align-items:center;gap:12px;padding:8px 10px;border-radius:6px;background:#f8fafc}.material-duplicate-rule-row>span{font-weight:600}.material-duplicate-rule-row :deep(.el-checkbox){margin-right:18px}.material-approval-rule-control{justify-self:end}@media(max-width:800px){.material-duplicate-rule-row{grid-template-columns:1fr}.material-approval-rule-control{justify-self:start}}
 .material-page{height:100%;min-height:0;display:flex;flex-direction:column}.material-tabs{min-height:0;flex:1 1 auto;display:flex;flex-direction:column}.material-tabs :deep(.el-tabs__header .el-tabs__item){font-size:12px;font-weight:600}.material-tabs :deep(.el-tabs__content){min-height:0;flex:1 1 auto}.material-tabs :deep(.el-tab-pane){height:100%;min-height:0}.material-master-layout{height:100%;min-height:0}.material-master-content{display:flex;flex-direction:column}.material-toolbar{flex:0 0 auto;margin-bottom:5px}.material-table-shell{min-height:0;flex:1 1 auto}.material-table{height:100%}.material-pagination{flex:0 0 auto;justify-content:flex-end;margin-top:5px}.material-pagination :deep(.el-pagination__total),.material-pagination :deep(.el-select__selected-item),.material-pagination :deep(button),.material-pagination :deep(.number){font-size:11px}
-.material-tab-label{display:inline-flex;align-items:center;gap:5px}.material-tab-label em{min-width:18px;height:18px;padding:0 5px;border-radius:9px;background:var(--pdm-blue);color:#fff;font-size:10px;font-style:normal;font-weight:600;line-height:18px;text-align:center}
+.material-tab-label{display:inline-flex;align-items:center;gap:5px}.material-tab-label em{min-width:18px;height:18px;padding:0 5px;border-radius:9px;background:var(--pdm-blue);color:#fff;font-size:11px;font-style:normal;font-weight:600;line-height:18px;text-align:center}
 .material-table :deep(.el-table__body tr.el-table__row){height:30px}.material-table :deep(.el-table__body td.el-table__cell){height:30px;padding:0}.material-table :deep(.el-table__body .el-tag){height:20px;padding-top:0;padding-bottom:0;line-height:18px}
-.material-code-approval-note{margin-bottom:8px;padding:8px 10px;border:1px solid #dbeafe;border-radius:6px;background:#eff6ff;color:var(--pdm-text-soft);font-size:11px}
-.material-code-approval-workflow{height:100%;min-height:0;overflow:auto;padding-right:2px}.material-code-approval-subtabs{min-height:0}.material-code-approval-subtabs :deep(.el-tabs__content),.material-code-approval-subtabs :deep(.el-tab-pane){height:auto;min-height:0;overflow:visible}.material-code-approval-subtabs :deep(.el-tabs__header){margin:0 0 8px}.material-code-approval-subtabs :deep(.el-tabs__item){height:30px;font-size:11px;font-weight:600}.material-code-approval-subtab-label{display:inline-flex;align-items:center;gap:5px}.material-code-approval-subtab-label em{min-width:18px;height:18px;padding:0 5px;border-radius:9px;background:#e0f2fe;color:var(--pdm-blue);font-size:10px;font-style:normal;line-height:18px;text-align:center}
+.material-code-approval-workflow{height:100%;min-height:0;overflow:auto;padding-right:2px}.material-code-approval-subtabs{min-height:0}.material-code-approval-subtabs :deep(.el-tabs__content),.material-code-approval-subtabs :deep(.el-tab-pane){height:auto;min-height:0;overflow:visible}.material-code-approval-subtabs :deep(.el-tabs__header){margin:0 0 8px}.material-code-approval-subtabs :deep(.el-tabs__item){height:30px;font-size:11px;font-weight:600}.material-code-approval-subtab-label{display:inline-flex;align-items:center;gap:5px}.material-code-approval-subtab-label em{min-width:18px;height:18px;padding:0 5px;border-radius:9px;background:#e0f2fe;color:var(--pdm-blue);font-size:11px;font-style:normal;line-height:18px;text-align:center}
 .material-step-feedback{position:sticky;top:0;z-index:4;min-height:82px;max-height:132px;margin-bottom:8px;overflow:auto;padding:7px 9px;border:1px solid #cbd5e1;border-radius:6px;background:#f8fafc;color:var(--pdm-text-soft);font-size:11px}.material-step-feedback__status,.material-step-feedback__result header{display:flex;align-items:flex-start;gap:8px}.material-step-feedback__status{padding-bottom:5px;border-bottom:1px solid #e2e8f0}.material-step-feedback__status>strong,.material-step-feedback__result header>strong{flex:0 0 auto;color:var(--pdm-text);font-size:11px}.material-step-feedback__status>span,.material-step-feedback__result header>span{min-width:0;font-weight:600;line-height:1.4}.material-step-feedback__status>span.is-running{color:var(--pdm-blue)}.material-step-feedback__result{padding-top:5px}.material-step-feedback__result p{margin:3px 0 0;line-height:1.4}.material-step-feedback__result ul{margin:4px 0 0;padding-left:18px;line-height:1.4}.material-step-feedback.is-success{border-color:#bbf7d0;background:#f0fdf4}.material-step-feedback.is-success .material-step-feedback__result header>span{color:var(--pdm-green)}.material-step-feedback.is-warning{border-color:#fde68a;background:#fffbeb}.material-step-feedback.is-warning .material-step-feedback__result header>span{color:var(--pdm-orange)}.material-step-feedback.is-error{border-color:#fecaca;background:#fef2f2}.material-step-feedback.is-error .material-step-feedback__result header>span{color:var(--pdm-danger)}.material-step-feedback.is-empty .material-step-feedback__result header>span,.material-step-feedback.is-empty .material-step-feedback__result p{color:var(--pdm-muted)}
 .material-code-workflow-columns{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);align-items:start;gap:10px;min-width:0}.material-code-workflow-stage{min-width:0;overflow:hidden;padding:10px;border:1px solid #dbe4ef;border-radius:8px;background:#fff}.material-code-workflow-stage__title{display:flex;align-items:center;gap:8px;margin-bottom:8px;color:var(--pdm-text-soft)}.material-code-workflow-stage__title strong{color:var(--pdm-green);font-size:12px;white-space:nowrap}.material-code-workflow-stage__title span{overflow:hidden;color:var(--pdm-muted);text-overflow:ellipsis;white-space:nowrap}
 .material-sync-toolbar{display:flex;align-items:center;gap:8px;margin-bottom:8px}.material-sync-toolbar :deep(.el-button){min-width:110px;height:28px;margin-left:0;font-size:11px}.material-sync-toolbar>span{color:var(--pdm-muted);font-size:11px}
+.material-code-workflow-stage--unified{width:100%}.material-code-workflow-feedback{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);column-gap:14px}.material-code-workflow-feedback .material-step-feedback__status{grid-column:1 / -1}.material-code-workflow-toolbar{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:8px}.material-code-workflow-toolbar>span{color:var(--pdm-muted);font-size:11px}.material-code-workflow-toolbar :deep(.el-button){min-width:76px;height:28px;margin-left:0;font-size:11px}
 .material-sync-table{width:100%;min-width:0;max-width:100%}.material-sync-table :deep(.el-table__cell){padding-left:0;padding-right:0;text-align:center}.material-sync-table :deep(.cell){overflow:hidden;padding:0 4px;text-overflow:ellipsis;white-space:nowrap}.material-sync-table :deep(.el-button){margin-left:0;padding:2px 3px;font-size:11px}
 .material-code-approval-toolbar{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:8px}.material-code-approval-toolbar__actions{display:flex;align-items:center;gap:6px}.material-code-approval-toolbar :deep(.el-button){min-width:76px;height:28px;margin-left:0;font-size:11px}.material-code-approval-toolbar>span{color:var(--pdm-muted);font-size:11px}
 .material-code-approval-table-shell{width:100%;min-width:0;max-width:100%;overflow:hidden}.material-code-approval-table{width:100%;min-width:0;max-width:100%}.material-code-approval-table :deep(.el-table__inner-wrapper),.material-code-approval-table :deep(.el-scrollbar),.material-code-approval-table :deep(.el-scrollbar__wrap){max-width:100%}.material-code-approval-table :deep(.el-table__cell){padding-left:0;padding-right:0;text-align:center}.material-code-approval-table :deep(.cell){overflow:hidden;padding:0 4px;text-overflow:ellipsis;white-space:nowrap}.material-code-approval-table :deep(.el-button){margin-left:0;padding:2px 3px;font-size:11px}.material-code-approval-table :deep(.el-tag){max-width:100%;padding:0 5px;font-size:11px}
 .material-history-pagination{justify-content:flex-end;margin-top:8px}.material-history-pagination :deep(.el-pagination__total),.material-history-pagination :deep(.el-select__selected-item),.material-history-pagination :deep(button),.material-history-pagination :deep(.number){font-size:11px}
 .material-workflow-pagination{justify-content:flex-end;margin-top:8px}.material-workflow-pagination :deep(.el-pagination__total),.material-workflow-pagination :deep(button),.material-workflow-pagination :deep(.number){font-size:11px}
-.material-editor-grid{grid-template-columns:repeat(3,minmax(0,200px));gap:0 12px}.material-editor-grid :deep(.el-form-item){margin-bottom:10px}.material-editor-grid__wide{grid-column:span 2}.material-weight-input{display:flex;min-width:0}.material-weight-input :deep(.el-input-number){min-width:0;flex:1}.material-recommend-button{width:100%}.material-attachment-field{display:flex;min-width:0;width:100%;align-items:center;flex-wrap:wrap;gap:4px}.material-attachment-input{display:none}.material-attachment-field>.el-button{width:100%;margin-left:0}.material-upload-progress{color:var(--pdm-muted);font-size:10px}.material-attachment-list{display:flex;max-height:44px;min-width:0;width:100%;overflow:auto;align-items:flex-start;flex-direction:column}.material-attachment-list :deep(.el-button){display:block;max-width:100%;height:20px;margin-left:0;overflow:hidden;padding:0;text-overflow:ellipsis;white-space:nowrap}
+.material-editor-grid{grid-template-columns:repeat(3,minmax(0,200px));gap:0 12px}.material-editor-grid :deep(.el-form-item){margin-bottom:10px}.material-editor-grid__wide{grid-column:span 2}.material-weight-input{display:flex;min-width:0}.material-weight-input :deep(.el-input-number){min-width:0;flex:1}.material-recommend-button{width:100%}.material-attachment-field{display:flex;min-width:0;width:100%;align-items:center;flex-wrap:wrap;gap:4px}.material-attachment-input{display:none}.material-attachment-field>.el-button{width:100%;margin-left:0}.material-upload-progress{color:var(--pdm-muted);font-size:11px}.material-attachment-list{display:flex;max-height:44px;min-width:0;width:100%;overflow:auto;align-items:flex-start;flex-direction:column}.material-attachment-list :deep(.el-button){display:block;max-width:100%;height:20px;margin-left:0;overflow:hidden;padding:0;text-overflow:ellipsis;white-space:nowrap}
 @media(max-width:1000px){.material-master-layout{grid-template-columns:1fr}.material-master-layout.is-category-collapsed{grid-template-columns:34px minmax(0,1fr)}.material-category-nav{max-height:220px}}
 @media(max-width:1100px){.material-code-workflow-columns{grid-template-columns:1fr}}
 @media(max-width:1000px){.material-editor-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}

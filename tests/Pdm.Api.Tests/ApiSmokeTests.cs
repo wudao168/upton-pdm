@@ -82,6 +82,52 @@ public sealed class ApiSmokeTests : IClassFixture<PdmApiFactory>
     }
 
     [Fact]
+    public async Task ProjectTodoApi_PushesDueTodoToSelectedActiveUsers()
+    {
+        var repository = factory.Services.GetRequiredService<IPdmRepository>();
+        if (await repository.FindUserAsync("admin", CancellationToken.None) is null)
+            await repository.CreateUserAsync(new UserAccount(Guid.NewGuid(), "admin", "系统管理员", "unused", UserRole.Administrator, true), CancellationToken.None);
+        var project = await repository.CreateProjectAsync(
+            new CreateProjectCommand($"TODO-{Guid.NewGuid():N}", "项目待办接口验收", "admin", @"D:\PDM\QA", @"D:\PDM\QA-Release"),
+            "admin", CancellationToken.None);
+        await repository.SetMainProjectStaffingAsync(project.Id, new SetMainProjectStaffingCommand("admin", [], []), "admin", CancellationToken.None);
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", CreateToken("admin", "Administrator"));
+
+        var response = await client.PostAsJsonAsync($"/api/projects/{project.Id}/todos", new
+        {
+            content = "请确认客户现场准备情况",
+            dueDate = "2026-10-01",
+            recipientUsernames = new[] { "admin" },
+        });
+
+        response.EnsureSuccessStatusCode();
+        var notifications = await response.Content.ReadFromJsonAsync<UserNotification[]>();
+        var notification = Assert.Single(notifications!);
+        Assert.Equal("ProjectTodo", notification.Category);
+        Assert.Equal(new DateOnly(2026, 10, 1), notification.DueDate);
+        Assert.Equal(project.Id, notification.ProjectId);
+        Assert.Contains(await repository.ListProjectAuditAsync(project.Id, 20, CancellationToken.None), item => item.Action == "project.todo.create");
+    }
+
+    [Fact]
+    public async Task ProjectRecordApi_AllowsAnAssignedAdministratorRole()
+    {
+        var repository = factory.Services.GetRequiredService<IPdmRepository>();
+        var username = $"record-admin-{Guid.NewGuid():N}";
+        await repository.CreateUserAsync(new UserAccount(
+            Guid.NewGuid(), username, "记录管理员", "unused", UserRole.Engineer, true,
+            RoleCode: nameof(UserRole.Engineer), RoleCodes: [nameof(UserRole.Engineer), nameof(UserRole.Administrator)]), CancellationToken.None);
+        var project = await repository.CreateProjectAsync(
+            new CreateProjectCommand($"RECORD-{Guid.NewGuid():N}", "项目记录权限验收", "admin", @"D:\PDM\QA", @"D:\PDM\QA-Release"),
+            "admin", CancellationToken.None);
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", CreateToken(username, nameof(UserRole.Engineer)));
+
+        var response = await client.PostAsJsonAsync($"/api/projects/{project.Id}/manager-notes", new { content = "管理员角色可以保存项目记录" });
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+    }
+
+    [Fact]
     public async Task MarkupApi_StoresAndReadsAnnotationSeparatelyFromDocumentVersion()
     {
         var repository = factory.Services.GetRequiredService<IPdmRepository>();

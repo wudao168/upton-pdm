@@ -2,7 +2,7 @@
 import { ArrowLeft, CalendarDays, CheckCircle2, Download, FileUp, LibraryBig, ListChecks, Paperclip, Plus, RotateCcw, Save, Send, Trash2, XCircle } from '@lucide/vue'
 import { ElMessageBox } from 'element-plus'
 import { computed, onBeforeUnmount, reactive, ref, watch } from 'vue'
-import { appendProjectValidationPlanItems, confirmValidationPlanExecution, createProjectValidationPlanRevision, decideValidationPlanApproval, deleteValidationCheckCategory, deleteValidationCheckItem, downloadValidationPlanAttachment, exportProjectValidationPlan, readProjectValidationPlan, readValidationCheckCatalog, readValidationPlanExecutionRecords, recognizeValidationPlanAttachment, saveProjectValidationPlan, saveValidationCheckCategory, saveValidationCheckItem, submitProjectValidationPlan, uploadValidationPlanAttachment } from '../api'
+import { appendProjectValidationPlanItems, confirmValidationPlanExecution, createProjectValidationPlanRevision, decideValidationPlanApproval, deleteValidationCheckCategory, deleteValidationCheckItem, downloadValidationPlanAttachment, exportProjectValidationPlan, readProjectValidationPlan, readValidationCheckCatalog, readValidationPlanExecutionRecords, recognizeValidationPlanAttachment, saveProjectValidationPlan, saveValidationCheckCategory, saveValidationCheckItem, submitProjectValidationPlan, updateProjectValidationPlanStandards, uploadValidationPlanAttachment } from '../api'
 import { createClientId } from '../clientId'
 import { ElMessage } from '../statusMessage'
 import type { ProjectSummary, ProjectValidationPlan, ProjectValidationPlanItem, ValidationCheckCatalog, ValidationCheckCategory, ValidationCheckItem, ValidationPlanAttachment, ValidationPlanExecutionRecord, ValidationPlanRecognitionCandidate, ValidationPlanRecognitionDraft } from '../types'
@@ -43,6 +43,7 @@ const preparedBy = ref('')
 const planDate = ref('')
 const rows = ref<ProjectValidationPlanItem[]>([])
 const persistedItemIds = ref<Set<string>>(new Set())
+const persistedStandards = ref<Record<string, string | null>>({})
 const dirty = ref(false)
 const hydrating = ref(false)
 const planFileInput = ref<HTMLInputElement | null>(null)
@@ -88,8 +89,12 @@ const normalizedState = computed(() => {
 })
 const editable = computed(() => props.canEdit && (!plan.value || normalizedState.value === 'Draft' || normalizedState.value === 'Rejected'))
 const canAppend = computed(() => props.canEdit && normalizedState.value === 'Effective')
+const canMaintainStandards = computed(() => props.canEdit && normalizedState.value === 'Effective')
 const canAdd = computed(() => editable.value || canAppend.value)
 const appendedRows = computed(() => rows.value.filter(item => !persistedItemIds.value.has(item.id)))
+const standardChanges = computed(() => canMaintainStandards.value
+  ? rows.value.filter(item => persistedItemIds.value.has(item.id) && (item.validationStandard || null) !== (persistedStandards.value[item.id] || null))
+  : [])
 const currentApprovalTask = computed(() => plan.value?.approvalTasks?.slice().sort((a, b) => a.stepOrder - b.stepOrder).find(item => item.decision == null) ?? null)
 const canDecideCurrent = computed(() => Boolean(props.canDecideApproval && currentApprovalTask.value
   && (currentApprovalTask.value.assignee.toLocaleLowerCase() === props.currentUsername.toLocaleLowerCase() || props.currentUsername.toLocaleLowerCase() === 'admin')))
@@ -230,6 +235,7 @@ function hydratePlan(nextPlan: ProjectValidationPlan | null) {
   })).sort((left, right) => left.sortOrder - right.sortOrder)
   moveCustomRowsToTop()
   persistedItemIds.value = new Set(nextPlan?.items.map(item => item.id) ?? [])
+  persistedStandards.value = Object.fromEntries((nextPlan?.items ?? []).map(item => [item.id, item.validationStandard || null]))
 }
 
 function currentShanghaiDate() {
@@ -372,6 +378,10 @@ function isRowEditable(row: ProjectValidationPlanItem) {
   return editable.value || canAppend.value && !persistedItemIds.value.has(row.id)
 }
 
+function isStandardEditable(row: ProjectValidationPlanItem) {
+  return isRowEditable(row) || canMaintainStandards.value && persistedItemIds.value.has(row.id)
+}
+
 function canRemoveRow(row: ProjectValidationPlanItem) {
   return editable.value || canAppend.value && !persistedItemIds.value.has(row.id)
 }
@@ -419,6 +429,26 @@ async function savePlan() {
     hydratePlan(saved)
     dirty.value = false
     ElMessage.success(canAppend.value ? '新增验证内容已保存' : '验证计划已保存')
+  } catch (error) {
+    ElMessage.error(errorMessage(error))
+  } finally {
+    hydrating.value = false
+    saving.value = false
+  }
+}
+
+async function saveValidationStandards() {
+  if (!activeDetailProject.value || !plan.value || !standardChanges.value.length || appendedRows.value.length) return
+  saving.value = true
+  try {
+    const saved = await updateProjectValidationPlanStandards(activeDetailProject.value.id, {
+      expectedRowVersion: plan.value.rowVersion,
+      items: standardChanges.value.map(item => ({ itemId: item.id, validationStandard: item.validationStandard || null })),
+    }, props.token)
+    hydrating.value = true
+    hydratePlan(saved)
+    dirty.value = false
+    ElMessage.success('验证标准已保存')
   } catch (error) {
     ElMessage.error(errorMessage(error))
   } finally {
@@ -806,6 +836,7 @@ function approvalTaskStatus(task: ProjectValidationPlan['approvalTasks'][number]
         <button type="button" class="pdm-secondary-action" :disabled="!plan || dirty || exporting" @click="exportPlan"><Download :size="14" />{{ exporting ? '导出中…' : '导出Excel' }}</button>
         <button v-if="normalizedState === 'Effective'" type="button" class="pdm-secondary-action" :disabled="!canEdit" @click="createRevision"><RotateCcw :size="14" />创建新版本</button>
         <button v-if="editable || canAppend" type="button" class="pdm-primary-action" :disabled="saving || loading || (canAppend && !appendedRows.length)" @click="savePlan"><Save :size="14" />{{ saving ? '保存中…' : canAppend ? '保存新增' : '保存' }}</button>
+        <button v-if="canMaintainStandards" type="button" class="pdm-primary-action" :disabled="saving || loading || !standardChanges.length || Boolean(appendedRows.length)" :title="appendedRows.length ? '请先保存新增验证内容，再保存验证标准' : '保存已生效验证计划的验证标准'" @click="saveValidationStandards"><Save :size="14" />{{ saving ? '保存中…' : '保存标准' }}</button>
         <button v-if="plan && editable" type="button" class="pdm-primary-action" :disabled="dirty || submitting" @click="submitForApproval"><Send :size="14" />提交审批</button>
         <button v-if="canDecideCurrent" type="button" class="pdm-secondary-action" :disabled="submitting" @click="decideCurrent('Rejected')"><XCircle :size="14" />驳回</button>
         <button v-if="canDecideCurrent" type="button" class="pdm-primary-action" :disabled="submitting" @click="decideCurrent('Approved')"><CheckCircle2 :size="14" />批准</button>
@@ -831,7 +862,7 @@ function approvalTaskStatus(task: ProjectValidationPlan['approvalTasks'][number]
             <td class="is-sequence">{{ index + 1 }}</td>
             <td><span class="validation-plan__category">{{ row.categoryName }}</span></td>
             <td class="is-content"><input v-if="!row.catalogItemId" v-model="row.validationContent" :disabled="!isRowEditable(row)" maxlength="1500" placeholder="请输入验证内容"><span v-else :title="row.validationContent">{{ row.validationContent }}</span></td>
-            <td class="is-standard"><input v-model="row.validationStandard" :disabled="!isRowEditable(row)" maxlength="1000" placeholder="填写验证标准" :aria-label="`第 ${index + 1} 行验证标准`" :title="row.validationStandard || ''"></td>
+            <td class="is-standard"><input v-model="row.validationStandard" :disabled="!isStandardEditable(row)" maxlength="1000" placeholder="填写验证标准" :aria-label="`第 ${index + 1} 行验证标准`" :title="row.validationStandard || ''"></td>
             <td><select v-model="row.informationSource" :disabled="!isRowEditable(row)"><option value="">—</option><option v-for="source in informationSources" :key="source" :value="source">{{ source }}</option></select></td>
             <td class="validation-plan__date-cell"><input v-model="row.validationDate" :disabled="!isRowEditable(row)" type="date" tabindex="-1" aria-hidden="true"><button type="button" :disabled="!isRowEditable(row)" title="选择验证日期" aria-label="选择验证日期" @click="openDatePicker($event)"><CalendarDays :size="14" /></button></td>
             <td><input v-model="row.responsiblePerson" :disabled="!isRowEditable(row)" maxlength="100" placeholder="责任人"></td>

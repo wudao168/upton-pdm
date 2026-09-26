@@ -790,7 +790,8 @@ public sealed class MaterialService(
             _ => throw new PdmRuleException("机械BOM物料必须先明确分类为标准件、非标件或电气件。")
         };
         var rule = await RequireEnabledCategoryRuleAsync(kind, cancellationToken);
-        var category = await RequireCreatableCategoryAsync(categoryCode ?? rule.U9CategoryCode, kind, cancellationToken);
+        var category = await RequireCreatableCategoryAsync(categoryCode ?? rule.U9CategoryCode, kind, cancellationToken, allowCategoryKindOverride: true);
+        var materialKind = category.PdmKind ?? kind;
         decimal? weight = decimal.TryParse(item.Weight, NumberStyles.Number, CultureInfo.InvariantCulture, out var parsedWeight)
             ? parsedWeight
             : null;
@@ -798,8 +799,8 @@ public sealed class MaterialService(
         var normalized = Normalize(Guid.NewGuid(), new SaveMaterialCommand(
             item.DrawingNumber,
             item.Name,
-            kind,
-            rule.DefaultSupplyMode,
+            materialKind,
+            category.DefaultSupplyMode,
             U9UnitCatalog.NormalizeBomUnit(item.Unit),
             item.Specification,
             item.Material,

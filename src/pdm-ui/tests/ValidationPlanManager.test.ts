@@ -9,6 +9,7 @@ const api = vi.hoisted(() => ({
   readProjectValidationPlan: vi.fn(),
   saveProjectValidationPlan: vi.fn(),
   appendProjectValidationPlanItems: vi.fn(),
+  updateProjectValidationPlanStandards: vi.fn(),
   saveValidationCheckCategory: vi.fn(),
   deleteValidationCheckCategory: vi.fn(),
   saveValidationCheckItem: vi.fn(),
@@ -453,6 +454,37 @@ describe('ValidationPlanManager', () => {
       items: [expect.objectContaining({ catalogItemId: addedItem.id })],
     }, 'token')
     expect(api.saveProjectValidationPlan).not.toHaveBeenCalled()
+    wrapper.unmount()
+  })
+
+  it('已生效计划仍可单独维护验证标准', async () => {
+    const approvedRow = { id: 'row-approved', catalogCategoryId: category.id, catalogItemId: item.id, categoryName: category.name, validationContent: item.content, validationStandard: '初始标准', informationSource: '内部评审', validationDate: null, result: null, reviewer: null, responsiblePerson: null, remark: null, sortOrder: 1 }
+    const effectivePlan = { ...childPlan, state: 'Effective' as const, effectiveAt: '2026-09-10T00:20:00Z', items: [approvedRow] }
+    api.readProjectValidationPlan.mockImplementation(async (projectId: string) => projectId === childProject.id ? effectivePlan : null)
+    api.updateProjectValidationPlanStandards.mockResolvedValue({ ...effectivePlan, rowVersion: 2, items: [{ ...approvedRow, validationStandard: '更新后的标准' }] })
+    const wrapper = mount(ValidationPlanManager, {
+      attachTo: document.body,
+      props: { projectId: childProject.id, projectCode: childProject.code, projectName: childProject.name, projects: [rootProject, childProject], token: 'token', currentUsername: 'engineer', currentDisplayName: '工程师', canEdit: true, canManageCatalog: true },
+      global: { plugins: [ElementPlus] },
+    })
+    await flushPromises()
+    await wrapper.findAll('tbody tr').find(row => row.text().includes('P700005-3'))!.trigger('click')
+    await flushPromises()
+
+    const standard = wrapper.find<HTMLInputElement>('input[placeholder="填写验证标准"]')
+    expect(standard.element.disabled).toBe(false)
+    expect(wrapper.find<HTMLInputElement>('input[placeholder="填写结果"]').element.disabled).toBe(true)
+    await standard.setValue('更新后的标准')
+    const saveButton = wrapper.findAll<HTMLButtonElement>('button').find(button => button.text().includes('保存标准'))!
+    expect(saveButton.element.disabled).toBe(false)
+    await saveButton.trigger('click')
+    await flushPromises()
+
+    expect(api.updateProjectValidationPlanStandards).toHaveBeenCalledWith(childProject.id, {
+      expectedRowVersion: effectivePlan.rowVersion,
+      items: [{ itemId: approvedRow.id, validationStandard: '更新后的标准' }],
+    }, 'token')
+    expect(api.appendProjectValidationPlanItems).not.toHaveBeenCalled()
     wrapper.unmount()
   })
 })

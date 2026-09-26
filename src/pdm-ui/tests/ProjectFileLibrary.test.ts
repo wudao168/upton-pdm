@@ -39,6 +39,15 @@ describe('ProjectFileLibrary', () => {
     expect(wrapper.find('button[title="删除"]').exists()).toBe(true)
   })
 
+  it('项目文件默认按更新时间倒序显示', async () => {
+    const newer = { ...file, id: 'file-newer', fileName: '最新文件.pdf', updatedAt: '2026-08-28T00:00:00Z', currentVersion: { ...file.currentVersion, id: 'version-newer', projectFileId: 'file-newer', fileName: '最新文件.pdf' } }
+    api.listProjectFiles.mockResolvedValue([file, newer])
+    const wrapper = mountLibrary()
+    await flushPromises()
+
+    expect(wrapper.findAll('[aria-label="项目资料文件"] tbody tr td:nth-child(2)').map(cell => cell.text())).toEqual(['最新文件.pdf', '会议纪要.pdf'])
+  })
+
   it('可预览文件可直接点击文件名打开预览', async () => {
     const wrapper = mountLibrary()
     await flushPromises()

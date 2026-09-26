@@ -1088,6 +1088,12 @@ public static class PdmEndpointExtensions
             return Results.Ok(await workflow.BatchRestoreBomItemsAsync(projectId, new BatchRestoreBomItemsCommand(request.ItemIds, request.Mode), actor, role, cancellationToken));
         });
 
+        api.MapPost("/projects/{projectId:guid}/boms/items/permanently-delete-manual", async (Guid projectId, PermanentlyDeleteManualBomItemsRequest request, HttpContext context, PdmWorkflowService workflow, CancellationToken cancellationToken) =>
+        {
+            var (actor, role) = CurrentUser(context.User);
+            return Results.Ok(await workflow.PermanentlyDeleteManualBomItemsAsync(projectId, new PermanentlyDeleteManualBomItemsCommand(request.ItemIds), actor, role, cancellationToken));
+        });
+
         api.MapPost("/projects/{projectId:guid}/boms/items/release-exclusion", async (Guid projectId, SetBomReleaseExclusionRequest request, HttpContext context, PdmWorkflowService workflow, CancellationToken cancellationToken) =>
         {
             var (actor, role) = CurrentUser(context.User);
@@ -1669,6 +1675,56 @@ public static class PdmEndpointExtensions
                 : Results.Ok(await repository.ListProjectAuditAsync(projectId, take ?? 100, cancellationToken));
         });
 
+        api.MapPost("/projects/{projectId:guid}/manager-notes", async (Guid projectId, AddProjectManagerNoteRequest request, HttpContext context, IPdmRepository repository, TimeProvider timeProvider, CancellationToken cancellationToken) =>
+        {
+            var (actor, role) = CurrentUser(context.User);
+            var content = TrimToNull(request.Content, 1000, "备注");
+            if (content is null) return Results.BadRequest(new { message = "请输入备注内容。" });
+            var project = await repository.FindProjectAsync(projectId, cancellationToken);
+            if (project is null) return Results.NotFound();
+            var rootProjectId = project.RootProjectId ?? project.ParentProjectId ?? project.Id;
+            var rootProject = rootProjectId == project.Id ? project : await repository.FindProjectAsync(rootProjectId, cancellationToken) ?? project;
+            if (!CanMaintainProjectRecord(project, rootProject, actor, role)) return Results.Forbid();
+            var note = new AuditEntry(Guid.NewGuid(), timeProvider.GetUtcNow(), actor, "project.manager-note", nameof(Project), projectId.ToString(), content);
+            await repository.AppendAuditAsync(note, cancellationToken);
+            return Results.Ok(note);
+        });
+
+        api.MapPost("/projects/{projectId:guid}/todos", async (Guid projectId, CreateProjectTodoRequest request, HttpContext context, IPdmRepository repository, TimeProvider timeProvider, CancellationToken cancellationToken) =>
+        {
+            var (actor, role) = CurrentUser(context.User);
+            var content = TrimToNull(request.Content, 1000, "待办内容");
+            if (content is null) return Results.BadRequest(new { message = "请输入待办内容。" });
+            var project = await repository.FindProjectAsync(projectId, cancellationToken);
+            if (project is null) return Results.NotFound();
+            var rootProjectId = project.RootProjectId ?? project.ParentProjectId ?? project.Id;
+            var rootProject = rootProjectId == project.Id ? project : await repository.FindProjectAsync(rootProjectId, cancellationToken) ?? project;
+            if (!CanMaintainProjectRecord(project, rootProject, actor, role)) return Results.Forbid();
+
+            var recipients = (request.RecipientUsernames ?? [])
+                .Select(username => username?.Trim())
+                .Where(username => !string.IsNullOrWhiteSpace(username))
+                .Select(username => username!)
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+            if (recipients.Length == 0) return Results.BadRequest(new { message = "请选择至少一名待办接收人。" });
+            var users = (await repository.ListUsersAsync(cancellationToken)).ToDictionary(user => user.Username, StringComparer.OrdinalIgnoreCase);
+            var unavailable = recipients.FirstOrDefault(username => !users.TryGetValue(username, out var user) || !user.IsActive);
+            if (unavailable is not null) return Results.BadRequest(new { message = $"待办接收人不存在或已停用：{unavailable}" });
+
+            var now = timeProvider.GetUtcNow();
+            var sourceKey = $"project-todo:{projectId:N}:{Guid.NewGuid():N}";
+            var title = $"{project.Code} 待办事项";
+            var notifications = recipients.Select(recipient => new UserNotification(
+                Guid.NewGuid(), recipient, "ProjectTodo", title, content, projectId, null, sourceKey, now, null, request.DueDate)).ToArray();
+            await repository.CreateUserNotificationsAsync(notifications, cancellationToken);
+            var recipientNames = recipients.Select(username => users[username].DisplayName).ToArray();
+            var dueDateText = request.DueDate is DateOnly dueDate ? $"；截止 {dueDate:yyyy-MM-dd}" : string.Empty;
+            await repository.AppendAuditAsync(new AuditEntry(Guid.NewGuid(), now, actor, "project.todo.create", nameof(Project), projectId.ToString(),
+                $"创建待办并推送给 {string.Join("、", recipientNames)}{dueDateText}：{content}"), cancellationToken);
+            return Results.Ok(notifications);
+        });
+
         api.MapPost("/uploads/sessions", async (StartUploadRequest request, HttpContext context, PdmWorkflowService workflow, IFileStorage storage, CancellationToken cancellationToken) =>
         {
             var (actor, role) = CurrentUser(context.User);
@@ -1743,6 +1799,20 @@ public static class PdmEndpointExtensions
         || TenantContext.Current?.HasRole(nameof(UserRole.Administrator)) == true
         || TenantContext.Current?.HasRole("platform_admin") == true
         || TenantContext.Current?.HasRole("developer") == true;
+
+    private static bool CanMaintainProjectRecord(Project project, Project rootProject, string actor, UserRole role)
+    {
+        var isProjectManager = new[] { project.PrimaryProjectManager, rootProject.PrimaryProjectManager }
+            .Concat(project.CollaborativeProjectManagers)
+            .Concat(rootProject.CollaborativeProjectManagers)
+            .Any(username => !string.IsNullOrWhiteSpace(username)
+                && string.Equals(username, actor, StringComparison.OrdinalIgnoreCase));
+        return isProjectManager
+            || role is UserRole.Administrator or UserRole.PlatformAdministrator
+            || TenantContext.Current?.HasRole(nameof(UserRole.Administrator)) == true
+            || TenantContext.Current?.HasRole("platform_admin") == true
+            || TenantContext.Current?.HasRole("developer") == true;
+    }
 
     private static OrganizationDirectory ScopeOrganizationDirectory(OrganizationDirectory directory)
     {

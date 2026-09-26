@@ -1242,13 +1242,11 @@ public sealed class MaterialServiceTests
     }
 
     [Fact]
-    public async Task StandardizerCanChooseAnotherStandardCategoryWhenApprovingBomMaterialCode()
+    public async Task StandardizerCanChooseAnyCreatableCategoryWhenApprovingBomMaterialCode()
     {
         var service = CreateService(out var materials, out var repository, out _);
         var workflow = new PdmWorkflowService(repository, null!, null!, TimeProvider.System);
-        var category = await service.SaveCategoryAsync(new(
-            "0103", "机械外购件（标准化调整）", "01", null, MaterialKind.Standard, MaterialSupplyMode.Purchase,
-            true, true, true, "0103", 7, "0103", 4), "admin", UserRole.Administrator, default);
+        var category = (await materials.ListCategoriesAsync(true, default)).Single(item => item.Code == "0101");
         var item = Assert.Single(await workflow.ReplaceBomAsync(ProjectId, BomKind.Standard,
         [
             new BomItemInput(1, string.Empty, "标准化调整分类的接头", 1, "001", null, "PTL6M5A", "W1", true, Brand: "AIRTAC")
@@ -1260,6 +1258,7 @@ public sealed class MaterialServiceTests
             application.Id, application.RowVersion, true, "按标准化分类调整", "standardizer", UserRole.ProcessReviewer, default, category.Code);
 
         Assert.Equal(category.Code, decision.Material?.CategoryCode);
+        Assert.Equal(MaterialKind.Electrical, decision.Material?.Kind);
         Assert.StartsWith(category.Code, decision.Material?.MaterialCode);
     }
 

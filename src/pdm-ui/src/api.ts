@@ -12,7 +12,7 @@ import type { ProjectCopyOptionsInput, ProjectCopyPreview, ProjectCopyResult } f
 import type { BomSourceReclassificationPreview } from './types'
 import type { MaterialRelationCompleteness, MaterialRelationTemplate, SaveMaterialRelationTemplateInput } from './types'
 import type { PreviewAgentProbeResult, PreviewConversionSettings } from './types'
-import type { AppendProjectValidationPlanItemsInput, ConfirmValidationPlanExecutionInput, ProjectValidationPlan, SaveProjectValidationPlanInput, SaveValidationCheckCategoryInput, SaveValidationCheckItemInput, ValidationCheckCatalog, ValidationCheckCategory, ValidationCheckItem, ValidationPlanAttachment, ValidationPlanApprovalTaskSummary, ValidationPlanExecutionRecord, ValidationPlanRecognitionDraft } from './types'
+import type { AppendProjectValidationPlanItemsInput, ConfirmValidationPlanExecutionInput, ProjectValidationPlan, SaveProjectValidationPlanInput, SaveValidationCheckCategoryInput, SaveValidationCheckItemInput, UpdateProjectValidationPlanStandardsInput, ValidationCheckCatalog, ValidationCheckCategory, ValidationCheckItem, ValidationPlanAttachment, ValidationPlanApprovalTaskSummary, ValidationPlanExecutionRecord, ValidationPlanRecognitionDraft } from './types'
 import { sha256Hex } from './fileHash'
 
 const localDesktopOrigin = window.location.hostname === 'appassets.pdm.local'
@@ -466,6 +466,10 @@ export function saveProjectValidationPlan(projectId: string, input: SaveProjectV
 
 export function appendProjectValidationPlanItems(projectId: string, input: AppendProjectValidationPlanItemsInput, token: string): Promise<ProjectValidationPlan> {
   return requestJson<ProjectValidationPlan>(`/api/projects/${projectId}/validation-plan/items`, { method: 'POST', body: JSON.stringify(input) }, token)
+}
+
+export function updateProjectValidationPlanStandards(projectId: string, input: UpdateProjectValidationPlanStandardsInput, token: string): Promise<ProjectValidationPlan> {
+  return requestJson<ProjectValidationPlan>(`/api/projects/${projectId}/validation-plan/standards`, { method: 'PUT', body: JSON.stringify(input) }, token)
 }
 
 export function createProjectValidationPlanRevision(projectId: string, expectedRowVersion: number, token: string): Promise<ProjectValidationPlan> {
@@ -1400,6 +1404,13 @@ export async function batchRestoreBomItems(projectId: string, itemIds: string[],
   return saved.map(mapBomItem)
 }
 
+export async function permanentlyDeleteManualBomItems(projectId: string, itemIds: string[], token: string): Promise<BomItem[]> {
+  const saved = await requestJson<ApiBomItem[]>(`/api/projects/${projectId}/boms/items/permanently-delete-manual`, {
+    method: 'POST', body: JSON.stringify({ itemIds }),
+  }, token)
+  return saved.map(mapBomItem)
+}
+
 export async function setBomReleaseExclusion(projectId: string, itemIds: string[], excluded: boolean, reason: string, token: string): Promise<BomItem[]> {
   const saved = await requestJson<ApiBomItem[]>(`/api/projects/${projectId}/boms/items/release-exclusion`, {
     method: 'POST', body: JSON.stringify({ itemIds, excluded, reason }),
@@ -1823,6 +1834,14 @@ export function listProjectVersions(projectId: string, token: string): Promise<P
 
 export function listProjectAudit(projectId: string, token: string): Promise<AuditEntry[]> {
   return requestJson(`/api/projects/${projectId}/audit?take=200`, {}, token)
+}
+
+export function addProjectManagerNote(projectId: string, content: string, token: string): Promise<AuditEntry> {
+  return requestJson(`/api/projects/${projectId}/manager-notes`, { method: 'POST', body: JSON.stringify({ content }) }, token)
+}
+
+export function createProjectTodo(projectId: string, input: { content: string; dueDate?: string; recipientUsernames: string[] }, token: string): Promise<UserNotification[]> {
+  return requestJson(`/api/projects/${projectId}/todos`, { method: 'POST', body: JSON.stringify(input) }, token)
 }
 
 export function getStorageStatus(projectId: string, token: string): Promise<{ vaultAvailable: boolean; releaseAvailable: boolean }> {

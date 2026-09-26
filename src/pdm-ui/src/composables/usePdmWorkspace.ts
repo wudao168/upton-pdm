@@ -1,5 +1,5 @@
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
-import { batchDeleteBomItems as batchDeleteBomItemsRequest, batchRestoreBomItems as batchRestoreBomItemsRequest, restoreBomItemsFromSource as restoreBomItemsFromSourceRequest, setBomReleaseExclusion as setBomReleaseExclusionRequest } from '../api'
+import { batchDeleteBomItems as batchDeleteBomItemsRequest, batchRestoreBomItems as batchRestoreBomItemsRequest, permanentlyDeleteManualBomItems as permanentlyDeleteManualBomItemsRequest, restoreBomItemsFromSource as restoreBomItemsFromSourceRequest, setBomReleaseExclusion as setBomReleaseExclusionRequest } from '../api'
 import { getBomSourceData } from '../api'
 import { copyProjectContent as copyProjectContentRequest, previewProjectCopy as previewProjectCopyRequest } from '../api'
 import { transferApproval } from '../api'
@@ -288,6 +288,7 @@ export function usePdmWorkspace() {
   const editLocks = ref<EditLockSummary[]>([])
   const passwordResetTasks = ref<PasswordResetTask[]>([])
   const projectAuditEntries = ref<AuditEntry[]>([])
+  const projectAuditProjects = ref<ProjectSummary[]>([])
   const storageStatus = ref<{ vaultAvailable: boolean; releaseAvailable: boolean } | null>(null)
   let accessToken = ''
   let pendingVersionComparison: { documentId: string; leftVersionId?: string; rightVersionId?: string } | null = null
@@ -404,6 +405,7 @@ export function usePdmWorkspace() {
     searchQuery.value = ''
     documentFilter.value = 'all'
     projectAuditEntries.value = []
+    projectAuditProjects.value = []
   }
 
   function selectDocument(documentId: string) {
@@ -622,6 +624,20 @@ export function usePdmWorkspace() {
     operationError.value = ''
     try {
       await batchRestoreBomItemsRequest(project.value.id, itemIds, mode, accessToken)
+      await reload()
+    } catch (error) {
+      operationError.value = messageFrom(error)
+      throw error
+    } finally {
+      operationPending.value = false
+    }
+  }
+
+  async function permanentlyDeleteManualBomItems(itemIds: string[]) {
+    operationPending.value = true
+    operationError.value = ''
+    try {
+      await permanentlyDeleteManualBomItemsRequest(project.value.id, itemIds, accessToken)
       await reload()
     } catch (error) {
       operationError.value = messageFrom(error)
@@ -1078,10 +1094,30 @@ export function usePdmWorkspace() {
   async function loadProjectAuditEntries() {
     if (!project.value.id) return
     try {
-      projectAuditEntries.value = await listProjectAudit(project.value.id, accessToken)
+      const byId = new Map(projects.value.map(item => [item.id, item]))
+      const active = byId.get(project.value.id) ?? project.value
+      const rootProjectId = active.rootProjectId ?? active.parentProjectId ?? active.id
+      const belongsToRoot = (candidate: ProjectSummary) => {
+        if (candidate.id === rootProjectId || candidate.rootProjectId === rootProjectId) return true
+        let parentProjectId = candidate.parentProjectId
+        while (parentProjectId) {
+          if (parentProjectId === rootProjectId) return true
+          parentProjectId = byId.get(parentProjectId)?.parentProjectId
+        }
+        return false
+      }
+      const scopedProjects = projects.value.filter(belongsToRoot)
+      if (!scopedProjects.some(item => item.id === active.id)) scopedProjects.unshift(active)
+      projectAuditProjects.value = scopedProjects
+      const results = await Promise.allSettled(scopedProjects.map(item => listProjectAudit(item.id, accessToken)))
+      projectAuditEntries.value = results.flatMap((result, index) => result.status === 'fulfilled'
+        ? result.value.map(entry => ({ ...entry, projectId: scopedProjects[index].id }))
+        : [])
+        .sort((left, right) => right.occurredAt.localeCompare(left.occurredAt))
     } catch (error) {
       if (error instanceof PdmApiError && error.status === 404) {
         projectAuditEntries.value = []
+        projectAuditProjects.value = []
         return
       }
       throw error
@@ -1877,6 +1913,7 @@ export function usePdmWorkspace() {
     editLocks,
     passwordResetTasks,
     projectAuditEntries,
+    projectAuditProjects,
     storageStatus,
     createProject,
     createSubproject,
@@ -1929,6 +1966,7 @@ export function usePdmWorkspace() {
     batchUpdateBomItems,
     batchDeleteBomItems,
     batchRestoreBomItems,
+    permanentlyDeleteManualBomItems,
     setBomReleaseExclusion,
     restoreBomItemsFromSource,
     setBomCategoryEmpty,

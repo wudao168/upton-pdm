@@ -1,4 +1,4 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param(
     [string]$MySqlVersion = '8.4.11',
     [string]$LanBaseUrl = 'http://192.168.2.8:5173',
@@ -438,7 +438,8 @@ $receipt = [ordered]@{
     solidWorksAddinPackageSha256 = $bootstrap.SolidWorksAddin.Sha256
     shortcutPath = $shortcutPath
 }
-$receipt | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $localRoot 'deployment-receipt.json') -Encoding UTF8
+$receiptPath = Join-Path $localRoot 'deployment-receipt.json'
+$receipt | ConvertTo-Json | Set-Content -LiteralPath $receiptPath -Encoding UTF8
 
 Write-Host 'Local deployment files are prepared.'
-Write-Host "Receipt: $(Join-Path $localRoot 'deployment-receipt.json')"
+Write-Host "Receipt: $receiptPath"

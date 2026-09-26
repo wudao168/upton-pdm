@@ -1,9 +1,9 @@
 <script setup lang="ts">
-import { Boxes, CalendarRange, CheckCircle2, ChevronRight, ClipboardCopy, FolderTree, ListChecks, PackageCheck, UsersRound } from '@lucide/vue'
-import { getMaterialRelationCompleteness, getProjectProcurementTracking, readProjectPlanPortfolio, readProjectValidationPlan } from '../api'
+import { Boxes, CheckCircle2, ChevronRight, FolderTree, PackageCheck, UsersRound } from '@lucide/vue'
+import { addProjectManagerNote, createProjectTodo, getMaterialRelationCompleteness, getProjectProcurementTracking, listProjectAudit, readProjectPlanPortfolio, readProjectValidationPlan } from '../api'
 import { ElMessage } from '../statusMessage'
 import { computed, reactive, ref, watch } from 'vue'
-import type { DocumentNode, DrawingReviewPackage, DrawingReviewTarget, MainProjectStaffingInput, MaterialCodeApplication, MaterialRelationCompleteness, OrganizationDirectory, PdmUser, ProjectPhaseOwnerKey, ProjectPhaseOwners, ProjectPlanPortfolio, ProjectPlanTask, ProjectProcurementTrackingResult, ProjectSummary, ProjectValidationPlan, ReleasePackageSummary, ReleaseScope } from '../types'
+import type { AuditEntry, DocumentNode, DrawingReviewPackage, DrawingReviewTarget, MainProjectStaffingInput, MaterialCodeApplication, MaterialRelationCompleteness, OrganizationDirectory, PdmUser, ProjectPhaseOwnerKey, ProjectPhaseOwners, ProjectPlanPortfolio, ProjectProcurementTrackingResult, ProjectSummary, ProjectValidationPlan, ReleasePackageSummary, ReleaseScope } from '../types'
 
 const props = defineProps<{
   project: ProjectSummary
@@ -30,6 +30,7 @@ const props = defineProps<{
   organizationDirectory: OrganizationDirectory
   pending: boolean
   token: string
+  canAddManagerNote: boolean
   onUpdateMainStaffing: (projectId: string, input: MainProjectStaffingInput) => Promise<ProjectSummary>
   onUpdateDesigners: (projectId: string, designers: string[]) => Promise<ProjectSummary>
   onUpdatePhaseOwners: (projectId: string, phaseOwners: ProjectPhaseOwners) => Promise<ProjectSummary>
@@ -49,6 +50,14 @@ const planPortfolio = ref<ProjectPlanPortfolio | null>(null)
 const validationPlan = ref<ProjectValidationPlan | null>(null)
 const relationCompleteness = ref<MaterialRelationCompleteness | null>(null)
 const procurementTracking = ref<ProjectProcurementTrackingResult | null>(null)
+const managerNotes = ref<AuditEntry[]>([])
+const projectRecordHistory = ref<AuditEntry[]>([])
+const managerNoteDialogOpen = ref(false)
+const managerNoteTarget = ref<{ id: string; code: string; name: string } | null>(null)
+const managerNoteContent = ref('')
+const savingManagerNote = ref(false)
+const todoDueDate = ref<string>()
+const todoRecipients = ref<string[]>([])
 let overviewRequestId = 0
 const staffingForm = reactive<MainProjectStaffingInput>({ primaryProjectManager: '', collaborativeProjectManagers: [], designLeads: [] })
 const phaseOwnerDraft = reactive<ProjectPhaseOwners>({})
@@ -131,6 +140,7 @@ async function loadOperationalSummary() {
     validationPlan.value = null
     relationCompleteness.value = null
     procurementTracking.value = null
+    managerNotes.value = []
     return
   }
   const [planResult, validationResult, relationResult, procurementResult] = await Promise.allSettled([
@@ -144,6 +154,20 @@ async function loadOperationalSummary() {
   validationPlan.value = validationResult.status === 'fulfilled' ? validationResult.value : null
   relationCompleteness.value = relationResult.status === 'fulfilled' ? relationResult.value : null
   procurementTracking.value = procurementResult.status === 'fulfilled' ? procurementResult.value : null
+  if (planResult.status === 'fulfilled') {
+    const noteResults = await Promise.allSettled(planResult.value.projects.map(item => listProjectAudit(item.projectId, token)))
+    if (requestId !== overviewRequestId) return
+    const projectAudits = noteResults.flatMap(result => result.status === 'fulfilled' ? result.value : [])
+    managerNotes.value = projectAudits.filter(entry => entry.action === 'project.manager-note')
+      .sort((left, right) => right.occurredAt.localeCompare(left.occurredAt))
+      .slice(0, 30)
+    projectRecordHistory.value = projectAudits.filter(isProjectRecordHistoryEntry)
+      .sort((left, right) => right.occurredAt.localeCompare(left.occurredAt))
+      .slice(0, 50)
+  } else {
+    managerNotes.value = []
+    projectRecordHistory.value = []
+  }
 }
 
 watch(() => [props.project.id, props.token], loadOperationalSummary, { immediate: true })
@@ -312,11 +336,72 @@ function displayDate(value?: string | null) {
 const projectFinish = computed(() => displayDate(activePlanItem.value?.forecastFinish
   ?? activePlanItem.value?.plannedFinish
   ?? (activeProject.value.id === rootProject.value.id ? planPortfolio.value?.plannedFinish : undefined)))
-const currentStageTasks = computed(() => {
-  const tasks = activePlan.value?.tasks ?? []
-  const current = tasks.filter(task => task.stage === projectStage.value && task.status !== 'Completed')
-  const candidates = current.length ? current : tasks.filter(task => task.status !== 'Completed')
-  return [...candidates].sort((left, right) => left.plannedFinish.localeCompare(right.plannedFinish) || left.sortOrder - right.sortOrder).slice(0, 6)
+
+const overviewPhaseDefinitions = [
+  { code: 'Design', label: '设计', stages: ['Design'] },
+  { code: 'MaterialPreparation', label: '备料', stages: ['MaterialPreparation'] },
+  { code: 'Assembly', label: '装配', stages: ['Assembly'] },
+  { code: 'Commissioning', label: '调试', stages: ['Commissioning', 'ClientCommissioning'] },
+  { code: 'Acceptance', label: '验收', stages: ['AcceptanceProgress', 'FinalAcceptance'] },
+]
+
+function addPlanDays(value: string, days: number) {
+  const [year, month, day] = value.slice(0, 10).split('-').map(Number)
+  const date = new Date(Date.UTC(year, month - 1, day))
+  date.setUTCDate(date.getUTCDate() + days)
+  return date.toISOString().slice(0, 10)
+}
+
+function planRange(start?: string, finish?: string) {
+  if (!start || !finish) return '未排程'
+  return `${displayDate(start)} - ${displayDate(finish)}`
+}
+
+const overviewPhasePlans = computed(() => overviewPhaseDefinitions.map(definition => {
+  const plan = activePlan.value
+  const stageCodes = new Set(definition.stages)
+  const schedules = (plan?.stageSchedules ?? []).filter(item => stageCodes.has(item.stage))
+  const tasks = (plan?.tasks ?? []).filter(item => stageCodes.has(item.stage))
+  const starts = [...schedules.map(item => item.startDate), ...tasks.map(item => item.plannedStart)].filter(Boolean).sort()
+  const finishes = [
+    ...schedules.map(item => addPlanDays(item.startDate, Math.max(1, item.durationDays) - 1)),
+    ...tasks.map(item => item.plannedFinish),
+  ].filter(Boolean).sort()
+  const totalWeight = tasks.reduce((total, item) => total + Math.max(1, item.weight ?? 1), 0)
+  const completion = tasks.length
+    ? Math.round(tasks.reduce((total, item) => total + Math.max(1, item.weight ?? 1) * Math.max(0, Math.min(100, item.completionPercent ?? (item.status === 'Completed' ? 100 : 0))), 0) / totalWeight)
+    : null
+  return {
+    ...definition,
+    range: planRange(starts[0], finishes.at(-1)),
+    completion,
+    isCurrent: stageCodes.has(projectStage.value ?? ''),
+  }
+}))
+
+function dayDifference(start: string, finish: string) {
+  return Math.round((new Date(`${finish}T00:00:00`).getTime() - new Date(`${start}T00:00:00`).getTime()) / 86_400_000)
+}
+
+const shippingDate = computed(() => {
+  const plan = activePlan.value
+  if (!plan) return ''
+  const deliveryStages = new Set((plan.stages ?? []).filter(stage => stage.participatesInDelivery !== false).map(stage => stage.code))
+  const finishes = plan.tasks
+    .filter(task => !plan.stages?.length || deliveryStages.has(task.stage))
+    .map(task => task.plannedFinish)
+    .filter(Boolean)
+    .sort()
+  return finishes.at(-1) ?? plan.plannedFinish ?? ''
+})
+
+const shippingCountdownState = computed(() => {
+  if (!shippingDate.value) return { label: '发货倒计时', value: '—', detail: '未排程', tone: 'neutral' }
+  const days = dayDifference(new Date().toISOString().slice(0, 10), shippingDate.value)
+  const detail = `计划发货 ${displayDate(shippingDate.value)}`
+  if (days > 0) return { label: '距发货', value: String(days), detail, tone: 'info' }
+  if (days === 0) return { label: '今日发货', value: '0', detail, tone: 'danger' }
+  return { label: '已超期', value: String(Math.abs(days)), detail, tone: 'danger' }
 })
 
 function personName(username?: string | null) {
@@ -324,14 +409,138 @@ function personName(username?: string | null) {
   return props.users.find(user => user.username.localeCompare(username, undefined, { sensitivity: 'accent' }) === 0)?.displayName ?? username
 }
 
-function taskState(task: ProjectPlanTask) {
-  if (task.status === 'Completed') return { label: '已完成', tone: 'success' }
-  if (task.plannedFinish < new Date().toISOString().slice(0, 10)) return { label: '已逾期', tone: 'danger' }
-  if (task.status === 'InProgress') return { label: '进行中', tone: 'success' }
-  const days = Math.ceil((new Date(`${task.plannedFinish}T00:00:00`).getTime() - Date.now()) / 86400000)
-  if (days <= 3) return { label: '待处理', tone: 'warning' }
-  return { label: '未开始', tone: 'neutral' }
+function phaseOwnerText(project: ProjectSummary, stage?: string) {
+  const owners = project.phaseOwners ?? {}
+  const usernames = stage === 'Design'
+    ? (project.designers.length ? project.designers : projectDesignLeads(project))
+    : stage === 'MaterialPreparation' ? [owners.StandardProcurement, owners.NonStandardProcurement]
+      : stage === 'Assembly' ? [owners.MechanicalAssembly, owners.ElectricalAssembly]
+        : stage === 'Commissioning' || stage === 'ClientCommissioning' ? [owners.ElectricalCommissioning]
+          : stage === 'AcceptanceProgress' || stage === 'FinalAcceptance' ? [owners.Acceptance]
+            : [project.primaryProjectManager ?? rootProject.value.primaryProjectManager]
+  const names = assignedPeople(usernames).map(person => person.name)
+  return names.length ? names.join('、') : '待分配'
 }
+
+function currentStageFinish(item: NonNullable<ProjectPlanPortfolio['projects'][number]>) {
+  const stage = item.currentStage ?? item.plan?.currentStage
+  if (!stage) return ''
+  const stageSchedule = item.plan?.stageSchedules?.find(schedule => schedule.stage === stage)
+  if (stageSchedule) return addPlanDays(stageSchedule.startDate, Math.max(1, stageSchedule.durationDays) - 1)
+  return item.plan?.tasks
+    .filter(task => task.stage === stage && Boolean(task.plannedFinish))
+    .map(task => task.plannedFinish)
+    .sort()
+    .at(-1) ?? ''
+}
+
+function scheduleState(item: NonNullable<ProjectPlanPortfolio['projects'][number]>) {
+  if (!item.hasPlan) return { label: '未排程', tone: 'neutral', basis: '评估依据：项目计划未建立' }
+  const activeTasks = (item.plan?.tasks ?? []).filter(task => task.status !== 'Completed')
+  if (!activeTasks.length) return { label: '暂无未完成节点', tone: 'neutral', basis: '评估依据：当前没有未完成计划节点' }
+  const targetTask = activeTasks
+    .filter(task => Boolean(task.plannedFinish))
+    .sort((left, right) => left.plannedFinish.localeCompare(right.plannedFinish)
+      || Number(right.status === 'InProgress') - Number(left.status === 'InProgress')
+      || left.sortOrder - right.sortOrder)[0]
+  if (!targetTask) return { label: '当前节点未排期', tone: 'neutral', basis: '评估依据：当前未完成节点尚未设置计划完成日期' }
+  const target = targetTask.plannedFinish
+  const remainingDays = dayDifference(new Date().toISOString().slice(0, 10), target)
+  const basis = `评估依据：当前未完成节点“${targetTask.name}”计划完成 ${displayDate(target)}`
+  if (remainingDays < 0) return { label: `已逾期 ${Math.abs(remainingDays)} 天`, tone: 'danger', basis }
+  if (remainingDays <= 3) return { label: `距节点 ${remainingDays} 天`, tone: 'danger', basis }
+  if (remainingDays <= 7) return { label: `距节点 ${remainingDays} 天`, tone: 'warning', basis }
+  return { label: `距节点 ${remainingDays} 天`, tone: 'success', basis }
+}
+
+const portfolioRows = computed(() => (planPortfolio.value?.projects ?? []).map(item => {
+  const project = props.projects.find(candidate => candidate.id === item.projectId)
+  const stage = item.currentStage ?? project?.stage
+  const currentTask = [...(item.plan?.tasks ?? [])]
+    .filter(task => task.status !== 'Completed')
+    .sort((left, right) => Number(right.status === 'InProgress') - Number(left.status === 'InProgress')
+      || left.plannedFinish.localeCompare(right.plannedFinish)
+      || left.sortOrder - right.sortOrder)[0]
+  const engineers = project ? assignedPeople(project.designers).map(person => person.name) : []
+  return {
+    ...item,
+    project,
+    stage,
+    stageLabel: stageNames[stage ?? ''] ?? stage ?? '未排程',
+    engineers: engineers.length ? engineers.join('、') : '待分配',
+    owner: project ? phaseOwnerText(project, stage) : '待分配',
+    schedule: scheduleState(item),
+    currentTask,
+    currentStageFinish: currentStageFinish(item),
+  }
+}))
+
+function notesForProject(projectId: string) {
+  return managerNotes.value.filter(note => note.entityId === projectId).slice(0, 1)
+}
+
+function isProjectRecordHistoryEntry(entry: AuditEntry) {
+  return entry.action === 'project.manager-note' || entry.action === 'project.todo.create'
+}
+
+function projectRecordHistoryLabel(entry: AuditEntry) {
+  const project = props.projects.find(item => item.id === entry.entityId)
+  return project ? `${project.code} · ${project.name}` : entry.entityId
+}
+
+function projectRecordHistoryType(entry: AuditEntry) {
+  return entry.action === 'project.todo.create' ? '待办推送' : '项目经理备注'
+}
+
+function projectRecordHistoryTime(entry: AuditEntry) {
+  return new Date(entry.occurredAt).toLocaleString('zh-CN', { hour12: false })
+}
+
+function addProjectRecordHistory(entries: AuditEntry[]) {
+  projectRecordHistory.value = [...entries, ...projectRecordHistory.value.filter(existing => !entries.some(entry => entry.id === existing.id))]
+    .sort((left, right) => right.occurredAt.localeCompare(left.occurredAt))
+    .slice(0, 50)
+}
+
+function openManagerNote(projectId: string, projectCode: string, projectName: string) {
+  if (!props.canAddManagerNote) return ElMessage.warning('仅项目经理可以维护项目备注')
+  managerNoteTarget.value = { id: projectId, code: projectCode, name: projectName }
+  managerNoteContent.value = ''
+  todoDueDate.value = undefined
+  todoRecipients.value = []
+  managerNoteDialogOpen.value = true
+}
+
+async function saveManagerNote() {
+  const content = managerNoteContent.value.trim()
+  const target = managerNoteTarget.value
+  if (!target || !content) return ElMessage.warning('请输入项目备注')
+  if (todoDueDate.value && !todoRecipients.value.length) return ElMessage.warning('设置待办截止日期时请选择接收人')
+  savingManagerNote.value = true
+  try {
+    const entry = await addProjectManagerNote(target.id, content, props.token)
+    if (todoRecipients.value.length) {
+      await createProjectTodo(target.id, { content, dueDate: todoDueDate.value, recipientUsernames: todoRecipients.value }, props.token)
+    }
+    managerNotes.value = [entry, ...managerNotes.value.filter(note => note.id !== entry.id)]
+      .sort((left, right) => right.occurredAt.localeCompare(left.occurredAt))
+      .slice(0, 30)
+    const records = [entry]
+    if (todoRecipients.value.length) {
+      const recipients = todoRecipients.value.map(personName).join('、')
+      const dueDate = todoDueDate.value ? `；截止 ${todoDueDate.value}` : ''
+      records.push({ ...entry, id: `${entry.id}:todo`, action: 'project.todo.create', detail: `创建待办并推送给 ${recipients}${dueDate}：${content}` })
+    }
+    addProjectRecordHistory(records)
+    managerNoteDialogOpen.value = false
+    ElMessage.success(todoRecipients.value.length ? `项目记录已保存，待办已推送给 ${todoRecipients.value.length} 人` : '项目备注已记录')
+  } catch (error) { ElMessage.error(error instanceof Error ? error.message : '项目备注保存失败') }
+  finally { savingManagerNote.value = false }
+}
+
+const todoRecipientCandidates = computed(() => props.users
+  .filter(user => user.isActive)
+  .sort((left, right) => left.displayName.localeCompare(right.displayName, 'zh-CN')))
 
 const teamRows = computed(() => [
   ...staffingRows.value.filter(row => ['manager', 'design-lead', 'engineers'].includes(row.key)),
@@ -368,28 +577,23 @@ const overviewAlerts = computed(() => [
   { key: 'approval', label: '审批中', value: approvalCount.value, tone: approvalCount.value ? 'info' : 'neutral', open: () => latestReleasePackage.value ? emit('release') : validationPlan.value?.state === 'PendingApproval' ? emit('validationPlan') : emit('documents') },
 ])
 
-async function copyLocation(label: string, value: string) {
-  try {
-    await navigator.clipboard.writeText(value)
-    ElMessage.success(`${label}已复制`)
-  } catch { ElMessage.error(`${label}复制失败`) }
-}
 </script>
 
 <template>
   <section class="pdm-workbench" aria-label="工作台主页面">
     <div class="pdm-overview-layout">
       <section class="pdm-panel pdm-overview-status" aria-label="项目状态与下一步">
-        <header><span><CheckCircle2 :size="18" /></span><h2>项目状态与下一步</h2></header>
+        <header><span><CheckCircle2 :size="18" /></span><h2>项目状态与下一步</h2><p>{{ projectStageLabel }}阶段 · {{ projectHealth.label }} · 项目进度 {{ projectProgress === null ? '—' : `${projectProgress}%` }} · 计划完成 {{ projectFinish }}</p></header>
         <div class="pdm-overview-status__body">
-          <div class="pdm-overview-phase">
-            <div class="pdm-overview-phase__title"><span><CalendarRange :size="20" /></span><strong>{{ projectStageLabel }}阶段</strong><em :class="`is-${projectHealth.tone}`">{{ projectHealth.label }}</em></div>
-            <div class="pdm-overview-phase__metrics">
-              <div class="pdm-overview-progress"><span>项目进度 <b>{{ projectProgress === null ? '—' : `${projectProgress}%` }}</b></span><i><em :style="{ width: `${projectProgress ?? 0}%` }" /></i></div>
-              <div class="pdm-overview-finish"><span>计划完成</span><strong>{{ projectFinish }}</strong></div>
+          <div class="pdm-overview-phase" aria-label="五阶段计划">
+            <div v-for="phase in overviewPhasePlans" :key="phase.code" class="pdm-overview-phase-plan" :class="{ 'is-current': phase.isCurrent }">
+              <div><strong>{{ phase.label }}</strong><em v-if="phase.isCurrent">进行中</em></div>
+              <small>计划 {{ phase.range }}</small>
+              <span><i><b :style="{ width: `${phase.completion ?? 0}%` }" /></i>{{ phase.completion === null ? '—' : `完成 ${phase.completion}%` }}</span>
             </div>
           </div>
           <div class="pdm-overview-alerts" aria-label="项目待办与风险">
+            <article class="pdm-overview-shipping" :class="`is-${shippingCountdownState.tone}`" aria-label="发货倒计时"><span>{{ shippingCountdownState.label }}</span><strong>{{ shippingCountdownState.value }}<small v-if="shippingDate">天</small></strong><em>{{ shippingCountdownState.detail }}</em></article>
             <button v-for="alert in overviewAlerts" :key="alert.key" type="button" :class="`is-${alert.tone}`" :aria-label="`查看${alert.label}`" @click="alert.open">
               <span>{{ alert.label }}</span><strong>{{ alert.value }}</strong><em>查看{{ alert.label }} <ChevronRight :size="13" /></em>
             </button>
@@ -420,30 +624,25 @@ async function copyLocation(label: string, value: string) {
           <dl><div><dt>发布审批</dt><dd>{{ releaseApprovalText }}</dd></div><div><dt>关键物料</dt><dd :class="{ 'is-danger': criticalMaterialCount }">{{ criticalMaterialCount ?? '—' }}</dd></div><div><dt>未采购</dt><dd :class="{ 'is-warning': unpurchasedCount }">{{ unpurchasedCount ?? '—' }}</dd></div></dl>
           <div class="pdm-overview-card__actions"><button type="button" class="pdm-overview-link" @click="emit('release')">查看发布 <ChevronRight :size="13" /></button><button type="button" class="pdm-overview-link" @click="emit('procurement')">查看备料 <ChevronRight :size="13" /></button></div>
         </article>
+        <article class="pdm-panel pdm-overview-team" aria-label="项目团队">
+          <header><span><UsersRound :size="18" /></span><h2>项目团队</h2><span class="pdm-overview-team__actions"><button v-if="rootProject.canManageMainStaffing" type="button" class="pdm-text-action" @click="openStaffingDialog">配置分工</button><button v-if="activeProject.canAssignDesigners" type="button" class="pdm-text-action" @click="openPhaseOwnerDrawer">配置负责人</button></span></header>
+          <div class="pdm-overview-team__table-wrap"><table class="pdm-overview-team__table"><thead><tr><th>职责</th><th>负责人</th><th>职责</th><th>负责人</th></tr></thead><tbody><tr v-for="pair in teamRowPairs" :key="pair[0]?.key"><template v-for="row in pair" :key="row.key"><td class="is-role">{{ row.role }}</td><td :class="{ 'is-pending': !row.people.length }">{{ row.people.map(person => person.name).join('、') || '待分配' }}</td></template></tr></tbody></table></div>
+        </article>
       </div>
 
       <div class="pdm-overview-bottom">
-        <article class="pdm-panel pdm-overview-tasks" aria-label="当前阶段任务">
-          <header><span><ListChecks :size="18" /></span><h2>当前阶段任务</h2><button type="button" class="pdm-overview-link" @click="emit('projectPlan')">进入项目计划 <ChevronRight :size="13" /></button></header>
-          <div class="pdm-overview-task-table">
-            <table><thead><tr><th>任务名称</th><th>负责人</th><th>计划完成</th><th>状态</th></tr></thead><tbody>
-              <tr v-for="task in currentStageTasks" :key="task.id" tabindex="0" @click="emit('projectPlan')" @keydown.enter="emit('projectPlan')"><td :title="task.name">{{ task.name }}</td><td>{{ personName(task.assignee) }}</td><td>{{ displayDate(task.plannedFinish).slice(5) }}</td><td><span :class="`is-${taskState(task).tone}`">{{ taskState(task).label }}</span></td></tr>
-              <tr v-if="!currentStageTasks.length" class="is-empty"><td colspan="4">{{ activePlanItem?.hasPlan ? '当前阶段没有待处理任务' : '项目计划尚未建立' }}</td></tr>
+        <article class="pdm-panel pdm-project-portfolio" aria-label="项目总览">
+          <header><span><FolderTree :size="18" /></span><h2>项目总览</h2><p>当前主项目及全部子项目的阶段、负责人和计划风险</p><button type="button" class="pdm-overview-link" @click="emit('projectPlan')">进入项目计划 <ChevronRight :size="13" /></button></header>
+          <div class="pdm-project-portfolio__table-wrap">
+            <table><thead><tr><th>项目</th><th>执行工程师</th><th>当前阶段</th><th>计划完成</th><th>阶段负责人</th><th>当前子任务</th><th>进度</th><th>延期 / 风险</th><th>备注日志</th></tr></thead><tbody>
+              <tr v-for="row in portfolioRows" :key="row.projectId" :class="{ 'is-root': row.isRoot }" tabindex="0" @click="emit('projectPlan')" @keydown.enter="emit('projectPlan')">
+                <td><strong>{{ row.projectCode }}</strong><small>{{ row.projectName }}</small></td><td :class="{ 'is-pending': row.engineers === '待分配' }">{{ row.engineers }}</td><td>{{ row.stageLabel }}</td><td :title="row.currentStageFinish ? `当前主任务“${row.stageLabel}”计划完成 ${displayDate(row.currentStageFinish)}` : '当前主任务未排期'">{{ displayDate(row.currentStageFinish) }}</td><td :class="{ 'is-pending': row.owner === '待分配' }">{{ row.owner }}</td><td class="pdm-project-portfolio__task" :title="row.currentTask?.name"><strong v-if="row.currentTask">{{ row.currentTask.name }}</strong><small v-if="row.currentTask">{{ personName(row.currentTask.assignee) }} · {{ displayDate(row.currentTask.plannedFinish) }}</small><span v-else>暂无待办</span></td><td><span class="pdm-project-portfolio__progress"><i><em :style="{ width: `${row.completionPercent}%` }" /></i>{{ row.hasPlan ? `${row.completionPercent}%` : '—' }}</span></td><td><span :class="`is-${row.schedule.tone}`" :title="row.schedule.basis">{{ row.schedule.label }}</span></td><td class="pdm-project-portfolio__notes" @click.stop><ol><li v-for="note in notesForProject(row.projectId)" :key="note.id"><span :title="note.detail">{{ personName(note.actor) }} · {{ note.occurredAt.replace('T', ' ').slice(5, 16) }} · {{ note.detail }}</span></li><li v-if="!notesForProject(row.projectId).length" class="is-empty">暂无备注</li></ol><button type="button" class="pdm-text-action" :aria-label="`维护 ${row.projectCode} 的记录`" @click="openManagerNote(row.projectId, row.projectCode, row.projectName)">记录</button></td>
+              </tr>
+              <tr v-if="!portfolioRows.length" class="is-empty"><td colspan="9">尚未加载项目计划总览</td></tr>
             </tbody></table>
           </div>
         </article>
 
-        <aside class="pdm-overview-support">
-          <article class="pdm-panel pdm-overview-team" aria-label="项目团队">
-            <header><span><UsersRound :size="18" /></span><h2>项目团队</h2><span class="pdm-overview-team__actions"><button v-if="rootProject.canManageMainStaffing" type="button" class="pdm-text-action" @click="openStaffingDialog">配置分工</button><button v-if="activeProject.canAssignDesigners" type="button" class="pdm-text-action" @click="openPhaseOwnerDrawer">配置负责人</button></span></header>
-            <div class="pdm-overview-team__table-wrap"><table class="pdm-overview-team__table"><thead><tr><th>职责</th><th>负责人</th><th>职责</th><th>负责人</th></tr></thead><tbody><tr v-for="pair in teamRowPairs" :key="pair[0]?.key"><template v-for="row in pair" :key="row.key"><td class="is-role">{{ row.role }}</td><td :class="{ 'is-pending': !row.people.length }">{{ row.people.map(person => person.name).join('、') || '待分配' }}</td></template></tr></tbody></table></div>
-          </article>
-
-          <article class="pdm-panel pdm-overview-locations" aria-label="项目位置">
-            <header><span><FolderTree :size="18" /></span><h2>项目位置</h2></header>
-            <dl><div><dt>图档库</dt><dd :title="project.vaultLocation">{{ project.vaultLocation }}</dd><button type="button" aria-label="复制图档库位置" @click="copyLocation('图档库位置', project.vaultLocation)"><ClipboardCopy :size="14" /></button></div><div><dt>发包目录</dt><dd :title="project.releaseLocation">{{ project.releaseLocation }}</dd><button type="button" aria-label="复制发包目录位置" @click="copyLocation('发包目录位置', project.releaseLocation)"><ClipboardCopy :size="14" /></button></div></dl>
-          </article>
-        </aside>
       </div>
     </div>
 
@@ -454,6 +653,29 @@ async function copyLocation(label: string, value: string) {
         <label class="pdm-dialog-field">主设（可多选）<el-select v-model="staffingForm.designLeads" class="pdm-project-person-select" multiple filterable placeholder="输入姓名筛选" style="width:100%"><el-option v-for="user in designLeadCandidates" :key="user.username" :label="user.displayName" :value="user.username" /></el-select></label>
       </div>
       <template #footer><el-button @click="staffingDialogOpen=false">取消</el-button><el-button type="primary" :loading="pending" @click="saveMainStaffing">保存分工</el-button></template>
+    </el-dialog>
+
+    <el-dialog v-model="managerNoteDialogOpen" :title="managerNoteTarget ? `维护项目记录 · ${managerNoteTarget.code}` : '维护项目记录'" width="520px" append-to-body>
+      <label class="pdm-dialog-field">备注内容<textarea v-model="managerNoteContent" class="pdm-manager-note-dialog__input" maxlength="1000" rows="5" placeholder="记录进度、风险或需要跟进的事项" aria-label="项目备注内容" /></label>
+      <section class="pdm-project-todo-settings" aria-label="待办设置">
+        <header><strong>待办设置</strong><span>保存记录时将上述内容推送给指定人员</span></header>
+        <div>
+          <label class="pdm-dialog-field">截止日期（可选）<el-date-picker v-model="todoDueDate" type="date" value-format="YYYY-MM-DD" placeholder="不设截止日期" aria-label="待办截止日期" /></label>
+          <label class="pdm-dialog-field">接收人<el-select v-model="todoRecipients" multiple filterable collapse-tags collapse-tags-tooltip placeholder="选择接收人" aria-label="待办接收人"><el-option v-for="user in todoRecipientCandidates" :key="user.username" :label="user.displayName" :value="user.username" /></el-select></label>
+        </div>
+      </section>
+      <section class="pdm-project-record-history" aria-label="当前项目及子项目历史记录">
+        <header><strong>历史记录</strong><span>当前项目及子项目</span></header>
+        <div v-if="projectRecordHistory.length" class="pdm-project-record-history__list">
+          <article v-for="entry in projectRecordHistory" :key="entry.id">
+            <header><strong>{{ projectRecordHistoryLabel(entry) }}</strong><span>{{ projectRecordHistoryType(entry) }}</span></header>
+            <p><span>{{ personName(entry.actor) }}</span><time>{{ projectRecordHistoryTime(entry) }}</time></p>
+            <small>{{ entry.detail }}</small>
+          </article>
+        </div>
+        <p v-else class="pdm-project-record-history__empty">暂无历史记录</p>
+      </section>
+      <template #footer><el-button @click="managerNoteDialogOpen=false">取消</el-button><el-button type="primary" :loading="savingManagerNote" @click="saveManagerNote">保存记录</el-button></template>
     </el-dialog>
 
     <el-drawer v-model="phaseOwnerDrawerOpen" class="pdm-phase-owner-drawer" :title="`配置项目阶段负责人 · ${project.code}`" size="560px" append-to-body>

@@ -10,7 +10,7 @@ public sealed partial class MySqlPdmRepository
         await using var connection = await OpenAsync(cancellationToken);
         var rows = await connection.QueryAsync<UserNotificationRow>(new CommandDefinition(
             """
-            SELECT id,recipient_username,category,title,content,project_id,release_package_id,source_key,created_at,read_at
+            SELECT id,recipient_username,category,title,content,project_id,release_package_id,source_key,created_at,read_at,due_date
             FROM user_notification
             WHERE recipient_username=@Recipient
               AND NOT (category='project-plan' AND source_key LIKE '%:overdue:%')
@@ -29,9 +29,9 @@ public sealed partial class MySqlPdmRepository
         await connection.ExecuteAsync(new CommandDefinition(
             """
             INSERT IGNORE INTO user_notification(
-                id,recipient_username,category,title,content,project_id,release_package_id,source_key,created_at,read_at)
+                id,recipient_username,category,title,content,project_id,release_package_id,source_key,created_at,read_at,due_date)
             VALUES(
-                @Id,@Recipient,@Category,@Title,@Content,@ProjectId,@ReleasePackageId,@SourceKey,@CreatedAt,NULL)
+                @Id,@Recipient,@Category,@Title,@Content,@ProjectId,@ReleasePackageId,@SourceKey,@CreatedAt,NULL,@DueDate)
             """,
             notifications.Select(item => new
             {
@@ -43,7 +43,8 @@ public sealed partial class MySqlPdmRepository
                 item.ProjectId,
                 item.ReleasePackageId,
                 item.SourceKey,
-                CreatedAt = item.CreatedAt.UtcDateTime
+                CreatedAt = item.CreatedAt.UtcDateTime,
+                DueDate = item.DueDate?.ToDateTime(TimeOnly.MinValue)
             }),
             cancellationToken: cancellationToken));
     }
@@ -76,7 +77,8 @@ public sealed partial class MySqlPdmRepository
         row.ReleasePackageId,
         row.SourceKey,
         AsUtc(row.CreatedAt),
-        row.ReadAt.HasValue ? AsUtc(row.ReadAt.Value) : null);
+        row.ReadAt.HasValue ? AsUtc(row.ReadAt.Value) : null,
+        row.DueDate.HasValue ? DateOnly.FromDateTime(row.DueDate.Value) : null);
 
     private sealed class UserNotificationRow
     {
@@ -90,5 +92,6 @@ public sealed partial class MySqlPdmRepository
         public string SourceKey { get; init; } = string.Empty;
         public DateTime CreatedAt { get; init; }
         public DateTime? ReadAt { get; init; }
+        public DateTime? DueDate { get; init; }
     }
 }

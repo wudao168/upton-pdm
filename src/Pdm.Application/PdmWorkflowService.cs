@@ -3351,6 +3351,47 @@ public sealed class PdmWorkflowService(
         return updatedStandard.Concat(updatedNonStandard).Concat(updatedUnclassified).Concat(updatedElectrical).ToArray();
     }
 
+    public async Task<IReadOnlyList<BomItem>> PermanentlyDeleteManualBomItemsAsync(Guid projectId, PermanentlyDeleteManualBomItemsCommand command, string actor, UserRole role, CancellationToken cancellationToken)
+    {
+        await RequireAnyBomEditPermissionAsync(actor, role, cancellationToken);
+        if (!await repository.HasProjectContentReadAccessAsync(projectId, actor, role, cancellationToken))
+            throw new UnauthorizedAccessException("当前用户没有该项目的操作权限。");
+        var itemIds = command.ItemIds.Distinct().ToHashSet();
+        if (itemIds.Count == 0) throw new PdmRuleException("请至少选择一条人工来源的回收站物料。");
+        if (itemIds.Count > 500) throw new PdmRuleException("单次最多彻底删除500条BOM物料。");
+
+        var standard = (await repository.GetBomAsync(projectId, BomKind.Standard, cancellationToken)).ToList();
+        var nonStandard = (await repository.GetBomAsync(projectId, BomKind.NonStandard, cancellationToken)).ToList();
+        var unclassified = (await repository.GetBomAsync(projectId, BomKind.Unclassified, cancellationToken)).ToList();
+        var electrical = (await repository.GetBomAsync(projectId, BomKind.Electrical, cancellationToken)).ToList();
+        var virtualItems = (await repository.GetBomAsync(projectId, BomKind.Virtual, cancellationToken)).ToArray();
+        var all = standard.Concat(nonStandard).Concat(unclassified).Concat(electrical).ToArray();
+        var selected = all.Where(item => itemIds.Contains(item.Id)).ToArray();
+        if (selected.Length != itemIds.Count) throw new PdmNotFoundException("选中的回收站物料已变化，请刷新后重新选择。");
+        await RequireBomEditPermissionAsync(actor, role, selected.Select(item => item.Kind), cancellationToken);
+        await EnsureBomChangeAllowedAsync(projectId, cancellationToken, selected.Select(item => item.Kind).ToArray());
+        if (selected.Any(item => !item.IsManuallyExcluded)) throw new PdmRuleException("只能彻底删除已在回收站中的物料。");
+        if (selected.Any(item => item.SourceDocumentId.HasValue)) throw new PdmRuleException("有图档来源的物料不能彻底删除，请恢复或保留在回收站中。");
+
+        IReadOnlyList<BomItem> Remove(IEnumerable<BomItem> source) => source
+            .Where(item => !itemIds.Contains(item.Id))
+            .OrderBy(item => item.IsManuallyExcluded)
+            .ThenBy(item => item.Sequence)
+            .Select((item, index) => item with { Sequence = index + 1 })
+            .ToArray();
+
+        var updatedStandard = Remove(standard);
+        var updatedNonStandard = Remove(nonStandard);
+        var updatedUnclassified = Remove(unclassified);
+        var updatedElectrical = Remove(electrical);
+        var deletedAt = timeProvider.GetUtcNow();
+        var audit = new AuditEntry(Guid.NewGuid(), deletedAt, actor, "bom.permanent-delete-manual", nameof(BomItem), projectId.ToString(), $"彻底删除人工来源BOM物料{selected.Length}条；物料：{string.Join('、', selected.Select(item => item.DrawingNumber))}");
+        await repository.ApplyBomBatchAsync(projectId, updatedStandard, updatedNonStandard, updatedUnclassified, updatedElectrical, virtualItems, [], [audit], cancellationToken);
+        foreach (var changedKind in selected.Select(item => item.Kind).Where(candidate => candidate is BomKind.Standard or BomKind.NonStandard or BomKind.Electrical).Distinct())
+            await SyncBomDraftAsync(projectId, changedKind, actor, cancellationToken);
+        return updatedStandard.Concat(updatedNonStandard).Concat(updatedUnclassified).Concat(updatedElectrical).ToArray();
+    }
+
     public async Task<IReadOnlyList<CadPropertyWriteback>> ListCadPropertyWritebacksAsync(Guid projectId, bool activeOnly, string actor, UserRole role, CancellationToken cancellationToken)
     {
         if (!await repository.HasProjectContentReadAccessAsync(projectId, actor, role, cancellationToken))

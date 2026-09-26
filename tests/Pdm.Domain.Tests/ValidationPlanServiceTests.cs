@@ -227,6 +227,30 @@ public sealed class ValidationPlanServiceTests
     }
 
     [Fact]
+    public async Task EffectivePlan_AllowsUpdatingValidationStandardsWithoutChangingApprovedContent()
+    {
+        var (service, plans, _, _, project) = await CreateFixtureAsync();
+        var category = await service.SaveCategoryAsync(null, new("安全相关", 10, true, null), "admin", UserRole.Administrator, default);
+        var catalogItem = await service.SaveItemAsync(null, new(category.Id, "防护门联锁有效", "内部评审", 10, true, null), "admin", UserRole.Administrator, default);
+        var draft = await service.SavePlanAsync(project.Id,
+            new("管理员", new DateOnly(2026, 9, 17), [new(catalogItem.Id, null, "内部评审", null, null, null, null, null, 1, "初始标准")]),
+            "admin", UserRole.Administrator, default);
+        var effective = await MakeEffectiveAsync(plans, draft);
+        var approvedItem = Assert.Single(effective.Items);
+
+        var saved = await service.UpdatePlanStandardsAsync(project.Id,
+            new([new(approvedItem.Id, "更新后的验证标准")], effective.RowVersion),
+            "admin", UserRole.Administrator, default);
+
+        var updatedItem = Assert.Single(saved.Items);
+        Assert.Equal(ProjectValidationPlanState.Effective, saved.State);
+        Assert.Equal(effective.RowVersion + 1, saved.RowVersion);
+        Assert.Equal("更新后的验证标准", updatedItem.ValidationStandard);
+        Assert.Equal(approvedItem.ValidationContent, updatedItem.ValidationContent);
+        Assert.Equal(approvedItem.InformationSource, updatedItem.InformationSource);
+    }
+
+    [Fact]
     public async Task PlanDocumentUpload_AllowsExcel_AndVersionsWithoutOverwriting()
     {
         var (service, plans, _, storage, project) = await CreateFixtureAsync();
