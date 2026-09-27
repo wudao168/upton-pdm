@@ -15,6 +15,7 @@
     "@lucide/vue": "1.31.0",
     "element-plus": "2.14.4",
     "occt-import-js": "^0.0.23",
+    "pdfjs-dist": "^6.3.289",
     "three": "^0.185.1",
     "vue": "3.5.41",
     "vue-router": "4.6.4"

@@ -21,6 +21,7 @@ const materialApi = vi.hoisted(() => ({
   listDrawingReviewCandidates: vi.fn(),
   listCadPropertyWritebackVersions: vi.fn(),
   downloadDocumentPreviewFile: vi.fn(),
+  readDocumentPreviewFile: vi.fn().mockResolvedValue(new Blob(['pdf'], { type: 'application/pdf' })),
 }))
 
 vi.mock('../src/api', () => materialApi)
@@ -1391,10 +1392,16 @@ describe('BomManager', () => {
       id: 'drawing-version-1', documentId: 'drawing-1', revision: { display: 'W2' }, status: 'Released', fileLength: 12, sha256: 'drawing', createdBy: 'developer', createdAt: '2026-09-16T00:00:00Z', changeNote: '',
       preview: { format: 'Pdf', storageRelativePath: 'previews/N-001.pdf', fileLength: 10, sha256: 'pdf', sourceSha256: 'drawing' },
     }])
-    await wrapper.get('button[aria-label="下载2D图纸 N-001"]').trigger('click')
+    const createUrl = vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:preview-test')
+    await wrapper.get('button[aria-label="预览2D图纸 N-001"]').trigger('click')
     await flushPromises()
     expect(materialApi.listDocumentVersions).toHaveBeenCalledWith('drawing-1', 'token-1')
-    expect(materialApi.downloadDocumentPreviewFile).toHaveBeenCalledWith('drawing-1', 'drawing-version-1', 'N-001.pdf', 'token-1')
+    expect(materialApi.readDocumentPreviewFile).toHaveBeenCalledWith('drawing-1', 'drawing-version-1', 'token-1')
+    expect(materialApi.downloadDocumentPreviewFile).not.toHaveBeenCalled()
+    expect(createUrl).toHaveBeenCalled()
+    expect(wrapper.get('a[download="N-001.pdf"]').attributes('href')).toBe('blob:preview-test')
+    expect(wrapper.get('a[download="N-001.pdf"]').text()).toBe('下载 PDF')
+    createUrl.mockRestore()
     expect(wrapper.findAll('.pdm-bom-quantity-audit').map(item => item.text())).toEqual(['2', '1', '1'])
     expect(wrapper.findAll('.pdm-bom-quantity-reference').map(item => item.text())).toEqual(['02/2', '01/1', '01/—'])
   })

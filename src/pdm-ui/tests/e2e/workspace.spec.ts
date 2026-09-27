@@ -275,17 +275,42 @@ test('project overview renders five-stage progress and shipping countdown', asyn
   await expect(overview.getByLabel('五阶段计划')).toContainText('计划 2026/09/16 - 2026/09/19')
   await expect(overview.getByLabel('五阶段计划')).toContainText('完成 20%')
   expect(await overview.getByLabel('五阶段计划').locator('.pdm-overview-phase-plan > span > i').first().evaluate(element => getComputedStyle(element).height)).toBe('10px')
-  await expect(overview.getByLabel('发货倒计时')).toContainText('计划发货')
+  await expect(overview.getByLabel('发货倒计时')).not.toContainText('计划发货')
   await expect(overview.getByLabel('发货倒计时')).toContainText('2026/09/19')
   await expect(overview.getByLabel('发货倒计时').locator('span')).toHaveText(/^(距发货|已超期)$/)
   await expect(overview.getByLabel('发货倒计时').locator('strong')).toHaveText(/\d+天/)
-  expect(await overview.getByLabel('发货倒计时').locator('strong').evaluate(element => getComputedStyle(element).fontSize)).toBe('20px')
-  expect(await overview.getByLabel('发货倒计时').locator('strong small').evaluate(element => getComputedStyle(element).fontSize)).toBe('11px')
+  expect(await overview.getByLabel('发货倒计时').locator('strong').evaluate(element => getComputedStyle(element).fontSize)).toBe('40px')
+  expect(await overview.getByLabel('发货倒计时').locator('strong').evaluate(element => getComputedStyle(element).gridColumnStart)).toBe('2')
+  expect(await overview.getByLabel('发货倒计时').locator('strong small').evaluate(element => getComputedStyle(element).fontSize)).toBe('12px')
   expect(await overview.getByLabel('五阶段计划').locator('.pdm-overview-phase-plan strong').first().evaluate(element => getComputedStyle(element).fontSize)).toBe('14px')
   expect(await overview.getByLabel('项目待办与风险').getByRole('button').first().locator('span').evaluate(element => getComputedStyle(element).fontSize)).toBe('14px')
   expect(await overview.getByLabel('五阶段计划').locator('.pdm-overview-phase-plan').first().evaluate(element => getComputedStyle(element).gridTemplateRows)).toBe('18px 20px 16px')
-  expect(await overview.getByLabel('五阶段计划').locator('.pdm-overview-phase-plan').first().evaluate(element => getComputedStyle(element).rowGap)).toBe('8px')
+  expect(await overview.getByLabel('五阶段计划').locator('.pdm-overview-phase-plan').first().evaluate(element => getComputedStyle(element).rowGap)).toBe('4px')
+  expect(await overview.getByLabel('五阶段计划').locator('.pdm-overview-phase-plan').first().evaluate(element => getComputedStyle(element).justifyItems)).toBe('start')
   expect(await overview.getByLabel('发货倒计时').evaluate(element => getComputedStyle(element).gridTemplateRows)).toBe('18px 20px 16px')
+  expect(await overview.getByLabel('发货倒计时').evaluate(element => getComputedStyle(element).rowGap)).toBe('4px')
+  expect(await overview.getByLabel('发货倒计时').evaluate(element => getComputedStyle(element).paddingLeft)).toBe('9px')
+  expect(await overview.getByLabel('项目待办与风险').getByRole('button').first().evaluate(element => getComputedStyle(element).alignItems)).toBe('flex-start')
+  expect(await overview.getByLabel('项目待办与风险').getByRole('button').first().evaluate(element => getComputedStyle(element).justifyItems)).toBe('start')
+  const [phaseCard, phaseTitle, phaseProgress, shippingCard, shippingTitle, shippingDate, alertCard, alertTitle, alertAction] = await Promise.all([
+    overview.getByLabel('五阶段计划').locator('.pdm-overview-phase-plan').first().boundingBox(),
+    overview.getByLabel('五阶段计划').locator('.pdm-overview-phase-plan > div').first().boundingBox(),
+    overview.getByLabel('五阶段计划').locator('.pdm-overview-phase-plan > span').first().boundingBox(),
+    overview.getByLabel('发货倒计时').boundingBox(),
+    overview.getByLabel('发货倒计时').locator('span').boundingBox(),
+    overview.getByLabel('发货倒计时').locator('em').boundingBox(),
+    overview.getByLabel('项目待办与风险').getByRole('button').first().boundingBox(),
+    overview.getByLabel('项目待办与风险').getByRole('button').first().locator('span').boundingBox(),
+    overview.getByLabel('项目待办与风险').getByRole('button').first().locator('em').boundingBox(),
+  ])
+  expect([phaseCard, phaseTitle, phaseProgress, shippingCard, shippingTitle, shippingDate, alertCard, alertTitle, alertAction].every(Boolean)).toBe(true)
+  expect(Math.abs(phaseTitle!.x - phaseCard!.x - 9)).toBeLessThanOrEqual(1)
+  expect(Math.abs(shippingTitle!.x - shippingCard!.x - 9)).toBeLessThanOrEqual(1)
+  expect(Math.abs(alertTitle!.x - alertCard!.x - 9)).toBeLessThanOrEqual(1)
+  expect(Math.abs(phaseTitle!.y - shippingTitle!.y)).toBeLessThanOrEqual(1)
+  expect(Math.abs(phaseTitle!.y - alertTitle!.y)).toBeLessThanOrEqual(1)
+  expect(Math.abs(phaseProgress!.y - shippingDate!.y)).toBeLessThanOrEqual(1)
+  expect(Math.abs(phaseProgress!.y - alertAction!.y)).toBeLessThanOrEqual(1)
   await expect(overview.getByLabel('图档与审核')).toContainText('3D 41')
   await expect(overview.getByLabel('图档与审核')).toContainText('2D 1')
   await expect(overview.getByLabel('BOM与物料')).toContainText('关联物料待核对 2')
@@ -294,6 +319,11 @@ test('project overview renders five-stage progress and shipping countdown', asyn
   const portfolio = overview.getByLabel('项目总览')
   await expect(portfolio.locator('thead th')).toHaveText(['项目', '执行工程师', '当前阶段', '计划完成', '剩余工期', '进度', '阶段负责人', '当前子任务', '子任务状态', '备注日志'])
   const portfolioRow = portfolio.locator('tbody tr').first()
+  const portfolioProgress = portfolioRow.locator('.pdm-project-portfolio__progress')
+  await expect(portfolioProgress.locator(':scope > em')).toHaveText('62%')
+  expect(await portfolioProgress.evaluate(element => getComputedStyle(element).gridTemplateRows)).toBe('14px 10px')
+  const [progressValue, progressBar] = await Promise.all([portfolioProgress.locator(':scope > em').boundingBox(), portfolioProgress.locator(':scope > i').boundingBox()])
+  expect(progressValue!.y).toBeLessThan(progressBar!.y)
   await expect(portfolioRow.locator('td').nth(1)).toHaveText('真实工程师')
   await expect(portfolioRow.locator('td').nth(3)).toHaveText('2026/09/19')
   await expect(portfolioRow.locator('td').nth(3)).toHaveAttribute('title', /当前主任务“设计”/)
@@ -439,6 +469,9 @@ test('released BOM rows expose linked 2D and 3D preview downloads', async ({ pag
   await page.route(`**/api/projects/${projectId}/boms/NonStandard`, route => route.fulfill({ json: [{
     id: 'bom-non-standard-1', kind: 'NonStandard', sequence: 1, drawingNumber: 'REAL-ASM-001', name: '真实总装配', quantity: 1, unit: '件', material: 'Q235B', specification: '总装', heatTreatment: '淬火', revision: 'W2', isComplete: true, source: 'Auto', sourceDocumentId: 'doc-root', isWearPart: false, isManuallyOverridden: false, isPendingRemoval: false,
   }] }))
+  await page.route(`**/api/projects/${projectId}/release-packages`, route => route.fulfill({ json: [{
+    id: 'package-non-standard-w2', number: 'RP-REAL-001', state: 5, scope: 6, publishedAt: '2026-09-16T01:00:00Z', approvalTasks: [],
+  }] }))
   await page.route(`**/api/projects/${projectId}/drawing-review-candidates`, route => route.fulfill({ json: [{
     candidateId: 'review-bom-non-standard-1', bomItemId: 'bom-non-standard-1', modelDocumentId: 'doc-root', drawingDocumentId: 'doc-drawing', drawingNumber: 'REAL-ASM-001', name: '真实总装配', bomKinds: ['NonStandard'], modelRevision: 'W2', drawingRevision: 'W2', state: 'Ready', reason: '当前工程图尚未发起审核', selectable: true,
   }] }))
@@ -474,15 +507,19 @@ test('released BOM rows expose linked 2D and 3D preview downloads', async ({ pag
   await expect(table.getByRole('columnheader', { name: '图纸', exact: true })).toBeVisible()
   await expect(table.getByRole('columnheader', { name: '热处理', exact: true })).toBeVisible()
   await expect(table.getByRole('button', { name: '编辑热处理' })).toHaveText('淬火')
-  await expect(table.getByRole('button', { name: '下载2D图纸 REAL-ASM-001' })).toBeVisible()
+  await expect(table.getByRole('button', { name: '预览2D图纸 REAL-ASM-001' })).toBeVisible()
   await expect(table.getByRole('button', { name: '下载3D图纸 REAL-ASM-001' })).toBeVisible()
   expect(await table.locator('tbody tr').first().evaluate(element => getComputedStyle(element).height)).toBe('30px')
   await page.screenshot({ path: testInfo.outputPath('non-standard-drawing-review-warning.png'), fullPage: false })
 
-  const downloadPromise = page.waitForEvent('download')
-  await table.getByRole('button', { name: '下载2D图纸 REAL-ASM-001' }).click()
-  const download = await downloadPromise
-  expect(download.suggestedFilename()).toBe('REAL-ASM-001.pdf')
+  let downloaded = false
+  page.on('download', () => { downloaded = true })
+  await table.getByRole('button', { name: '预览2D图纸 REAL-ASM-001' }).click()
+  const preview = page.getByRole('dialog', { name: '2D图纸预览 · REAL-ASM-001' })
+  await expect(preview.getByRole('link', { name: '下载 PDF' })).toHaveAttribute('download', 'REAL-ASM-001.pdf')
+  await expect(preview.getByRole('region', { name: 'PDF图纸预览' })).toBeVisible()
+  expect(downloaded).toBe(false)
+  await preview.getByRole('button', { name: '关闭此对话框' }).click()
 
   await page.getByRole('tab', { name: /标准件BOM/ }).click()
   await expect(table.getByRole('columnheader', { name: '热处理', exact: true })).toHaveCount(0)

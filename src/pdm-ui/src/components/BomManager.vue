@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import { readDocumentPreviewFile } from '../api'
+import PdfDrawingViewer from './PdfDrawingViewer.vue'
 import { clearGlobalStatus, ElMessage } from '../statusMessage'
 import { ElMessageBox } from 'element-plus'
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
@@ -1847,6 +1849,16 @@ function previewFileName(link: BomDrawingLink) {
   return `${baseName}.${link.kind === '2D' ? 'pdf' : 'step'}`
 }
 
+const drawingPreviewUrl = ref('')
+const drawingPreviewTitle = ref('')
+const drawingPreviewFileName = ref('')
+const drawingPreviewOpen = ref(false)
+function clearDrawingPreview() {
+  if (drawingPreviewUrl.value) URL.revokeObjectURL(drawingPreviewUrl.value)
+  drawingPreviewUrl.value = ''
+}
+onBeforeUnmount(clearDrawingPreview)
+
 async function downloadDrawing(link: BomDrawingLink) {
   if (!props.token || downloadingDrawingIds.value.has(link.document.id)) return
   downloadingDrawingIds.value = new Set(downloadingDrawingIds.value).add(link.document.id)
@@ -1860,9 +1872,18 @@ async function downloadDrawing(link: BomDrawingLink) {
       ElMessage.warning(`${link.kind}图纸的发布预览尚未生成，请稍后重试。`)
       return
     }
-    await downloadDocumentPreviewFile(link.document.id, version.id, previewFileName(link), props.token)
+    if (link.kind === '2D') {
+      const blob = await readDocumentPreviewFile(link.document.id, version.id, props.token)
+      clearDrawingPreview()
+      drawingPreviewUrl.value = URL.createObjectURL(new Blob([blob], { type: 'application/pdf' }))
+      drawingPreviewTitle.value = `2D图纸预览 · ${link.document.drawingNumber}`
+      drawingPreviewFileName.value = previewFileName(link)
+      drawingPreviewOpen.value = true
+    } else {
+      await downloadDocumentPreviewFile(link.document.id, version.id, previewFileName(link), props.token)
+    }
   } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : `${link.kind}图纸下载失败。`)
+    ElMessage.error(error instanceof Error ? error.message : `${link.kind}图纸${link.kind === '2D' ? '预览' : '下载'}失败。`)
   } finally {
     const next = new Set(downloadingDrawingIds.value)
     next.delete(link.document.id)
@@ -3692,7 +3713,7 @@ async function submitBatchUpdate() {
                 <span v-if="shouldShowDrawingApprovalStatus" class="pdm-bom-drawing-review-status" :class="`is-${drawingApprovalStatus(row).tone}`" :title="drawingApprovalStatus(row).title">{{ drawingApprovalStatus(row).label }}</span>
                 <div v-else class="pdm-bom-drawing-links">
                   <template v-for="slot in drawingSlots(row)" :key="slot.kind">
-                    <button v-if="slot.document && slot.released" type="button" class="pdm-bom-drawing-link" :aria-label="`下载${slot.kind}图纸 ${slot.document.drawingNumber}`" :title="`下载${slot.document.drawingNumber}的${slot.kind}发布图纸`" :disabled="downloadingDrawingIds.has(slot.document.id)" @click="downloadDrawing({ kind: slot.kind as '2D' | '3D', document: slot.document })">{{ downloadingDrawingIds.has(slot.document.id) ? '…' : slot.kind }}</button>
+                    <button v-if="slot.document && slot.released" type="button" class="pdm-bom-drawing-link" :aria-label="`${slot.kind === '2D' ? '预览' : '下载'}${slot.kind}图纸 ${slot.document.drawingNumber}`" :title="`${slot.kind === '2D' ? '预览' : '下载'}${slot.document.drawingNumber}的${slot.kind}发布图纸`" :disabled="downloadingDrawingIds.has(slot.document.id)" @click="downloadDrawing({ kind: slot.kind as '2D' | '3D', document: slot.document })">{{ downloadingDrawingIds.has(slot.document.id) ? '…' : slot.kind }}</button>
                     <span v-else class="pdm-bom-drawing-link is-missing" :aria-label="`${slot.kind}图纸缺失`" :title="slot.title">{{ slot.kind }}</span>
                   </template>
                 </div>
@@ -3745,6 +3766,10 @@ async function submitBatchUpdate() {
       </section>
     </div>
 
+    <el-dialog v-model="drawingPreviewOpen" :title="drawingPreviewTitle" width="90vw" top="5vh" append-to-body destroy-on-close @closed="clearDrawingPreview">
+      <div style="margin-bottom:12px"><a v-if="drawingPreviewUrl" :href="drawingPreviewUrl" :download="drawingPreviewFileName" class="el-button el-button--primary">下载 PDF</a></div>
+      <PdfDrawingViewer v-if="drawingPreviewOpen && drawingPreviewUrl" :url="drawingPreviewUrl" />
+    </el-dialog>
     <el-dialog v-model="bomColumnSettingsOpen" title="BOM列设置" width="520px" append-to-body>
       <p class="pdm-bom-column-settings-note">可按当前账号和BOM类型选择显示列。非标件、易损件默认显示热处理，标准件、电气件默认隐藏。</p>
       <el-checkbox-group v-model="visibleBomColumnKeys" class="pdm-bom-column-settings-list" aria-label="BOM显示列">

@@ -663,8 +663,22 @@
 .pdm-overview-shipping.is-info>strong { color:var(--pdm-green); }
 .pdm-project-portfolio__table-wrap { max-width:100%; overflow-x:hidden; }
 .pdm-project-portfolio table { min-width:0; width:100%; }
-.pdm-project-portfolio th:nth-child(1) { width:60px; }.pdm-project-portfolio th:nth-child(2) { width:58px; }.pdm-project-portfolio th:nth-child(3) { width:50px; }.pdm-project-portfolio th:nth-child(4) { width:65px; }.pdm-project-portfolio th:nth-child(5) { width:65px; }.pdm-project-portfolio th:nth-child(6) { width:55px; }.pdm-project-portfolio th:nth-child(7) { width:60px; }.pdm-project-portfolio th:nth-child(8) { width:150px; }.pdm-project-portfolio th:nth-child(9) { width:70px; }.pdm-project-portfolio th:nth-child(10) { width:200px; }
+.pdm-project-portfolio th:nth-child(1) { width:100px; }.pdm-project-portfolio th:nth-child(2) { width:58px; }.pdm-project-portfolio th:nth-child(3) { width:50px; }.pdm-project-portfolio th:nth-child(4) { width:65px; }.pdm-project-portfolio th:nth-child(5) { width:65px; }.pdm-project-portfolio th:nth-child(6) { width:55px; }.pdm-project-portfolio th:nth-child(7) { width:60px; }.pdm-project-portfolio th:nth-child(8) { width:120px; }.pdm-project-portfolio th:nth-child(9) { width:70px; }.pdm-project-portfolio th:nth-child(10) { width:200px; }
 .pdm-project-portfolio__notes { min-width:0; max-width:100%; }.pdm-project-portfolio__notes ol,.pdm-project-portfolio__notes li { min-width:0; max-width:100%; }
+.pdm-overview-phase-plan,.pdm-overview-alerts button { justify-content:start; }
+.pdm-overview-phase-plan,.pdm-overview-shipping,.pdm-overview-alerts button { padding:8px 9px; align-items:flex-start; justify-items:start; gap:4px; }
+.pdm-overview-phase-plan>span { width:100%; }
+.pdm-overview-alerts button>span,.pdm-overview-alerts button>strong,.pdm-overview-alerts button>em { width:100%; justify-self:stretch; text-align:left; }
+.pdm-overview-shipping { grid-template-columns:minmax(0,1fr) auto; grid-template-rows:18px 20px 16px; align-content:center; column-gap:8px; row-gap:4px; }
+.pdm-overview-shipping>span { grid-column:1; grid-row:1; }
+.pdm-overview-shipping>em { grid-column:1; grid-row:3; }
+.pdm-overview-shipping>em { align-self:end; }
+.pdm-overview-shipping>strong { grid-column:2; grid-row:1 / -1; align-self:stretch; display:flex; align-items:center; margin:0; font-size:40px; line-height:.9; letter-spacing:-1px; }
+.pdm-overview-shipping>strong>small { align-self:flex-end; margin-bottom:1px; font-size:12px; letter-spacing:0; }
+.pdm-overview-phase-plan,.pdm-overview-alerts button { text-align:left; }
+.pdm-project-portfolio__progress { display:grid; grid-template-rows:14px 10px; align-content:center; justify-items:stretch; gap:2px; }
+.pdm-project-portfolio__progress>em { grid-row:1; justify-self:center; font-style:normal; line-height:14px; }
+.pdm-project-portfolio__progress>i { grid-row:2; width:100%; min-width:0; height:10px; }
 .pdm-message-drawer .el-drawer__body { display:flex; min-height:0; padding:0; overflow:hidden; }.pdm-message-drawer .pdm-task-center { width:100%; min-height:0; padding:12px; }.pdm-message-drawer .pdm-task-message-panel { height:100%; padding:0; }
 .pdm-audit-record-filters { display:flex; align-items:center; gap:8px; margin:0 0 10px; }.pdm-audit-record-filters .el-select { width:190px; }.pdm-audit-record-filters input { width:240px; height:32px; padding:0 10px; border:1px solid var(--pdm-border); border-radius:5px; color:var(--pdm-text); font:inherit; font-size:12px; }.pdm-edit-table td small { display:block; color:var(--pdm-muted); font-size:11px; }.pdm-manager-note-dialog__input { display:block; box-sizing:border-box; width:100%; margin-top:6px; resize:vertical; padding:8px; border:1px solid var(--pdm-border); border-radius:5px; color:var(--pdm-text); font:inherit; }
 .pdm-project-todo-settings { margin-top:14px; padding:10px 12px; border:1px solid var(--pdm-border-soft); border-radius:6px; background:#f8fafc; }.pdm-project-todo-settings>header { display:flex; align-items:baseline; gap:8px; margin-bottom:9px; }.pdm-project-todo-settings strong { color:var(--pdm-text); font-size:12px; }.pdm-project-todo-settings header span { color:var(--pdm-muted); font-size:11px; }.pdm-project-todo-settings>div { display:grid; grid-template-columns:140px minmax(0,1fr); gap:10px; }.pdm-project-todo-settings .pdm-dialog-field { gap:5px; font-size:11px; }.pdm-project-todo-settings .el-date-editor,.pdm-project-todo-settings .el-select { width:100%; }

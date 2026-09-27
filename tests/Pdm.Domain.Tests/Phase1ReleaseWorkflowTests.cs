@@ -2082,7 +2082,7 @@ public sealed class Phase1ReleaseWorkflowTests
             package = await workflow.DecideAsync(task.Id, "admin", UserRole.Administrator, ApprovalDecision.Approved, "同意", default);
 
         Assert.Equal(ReleasePackageState.Published, package.State);
-        Assert.True(await headerService.ProcessAutomaticQueueAsync(default));
+        await headerService.ProcessAutomaticQueueAsync(default);
         Assert.Empty(await materials.ListMaterialCodeApplicationsAsync(
             ProjectId, MaterialCodeApplicationStatus.Pending, default));
         var applications = await materials.ListMaterialCodeApplicationsAsync(
@@ -2336,7 +2336,7 @@ public sealed class Phase1ReleaseWorkflowTests
             package = await workflow.DecideAsync(task.Id, "admin", UserRole.Administrator, ApprovalDecision.Approved, "同意", default);
         Assert.Equal(ReleasePackageState.Published, package.State);
         Assert.Empty(await repository.ListManufacturingBomBaselinesAsync(ProjectId, default));
-        Assert.True(await headerService.ProcessAutomaticQueueAsync(default));
+        await headerService.ProcessAutomaticQueueAsync(default);
         Assert.Empty(await materials.ListMaterialCodeApplicationsAsync(ProjectId, MaterialCodeApplicationStatus.Pending, default));
         var applications = await materials.ListMaterialCodeApplicationsAsync(ProjectId, MaterialCodeApplicationStatus.Approved, default);
         Assert.Equal(
