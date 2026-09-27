@@ -60,7 +60,7 @@ public sealed class Phase1ReleaseWorkflowTests
     }
 
     [Fact]
-    public async Task ApprovalChain_PublishesPreparedImmutablePackage()
+    public async Task ApprovalChain_QueuesPreparedImmutablePackageForBackgroundPublication()
     {
         var repository = new InMemoryPdmRepository(TimeProvider.System);
         var publisher = new RecordingPublisher();
@@ -93,7 +93,11 @@ public sealed class Phase1ReleaseWorkflowTests
         Assert.Equal(0, publisher.PublishCalls);
 
         var approvalTask = package.ApprovalTasks.Single(task => task.Stage == ApprovalStage.Approval);
-        package = await workflow.DecideAsync(approvalTask.Id, "admin", UserRole.Administrator, ApprovalDecision.Approved, "批准发布", default);
+        package = await workflow.DecideAsync(approvalTask.Id, "admin", UserRole.Administrator, ApprovalDecision.Approved, "批准发布", default, publishImmediately: false);
+        Assert.Equal(ReleasePackageState.Publishing, package.State);
+        Assert.Equal(0, publisher.PublishCalls);
+
+        package = await workflow.ResumePublishAsync(package.Id, default);
         Assert.Equal(ReleasePackageState.Published, package.State);
         Assert.Equal(1, publisher.PublishCalls);
         Assert.NotEmpty(publisher.PreviewSources);
@@ -2802,6 +2806,12 @@ public sealed class Phase1ReleaseWorkflowTests
         Assert.True(drawing.IsCurrent);
         Assert.Equal("admin", drawing.PublishedBy);
         Assert.False(drawing.LegacyUnverified);
+        var modelFile = Assert.Single(drawing.ModelFiles);
+        Assert.True(modelFile.StepReady);
+        Assert.NotNull(modelFile.VersionId);
+        var modelVersion = await repository.FindDocumentVersionAsync(modelFile.DocumentId, modelFile.VersionId!.Value, default);
+        Assert.Equal(drawing.ReleasePackageId, modelVersion!.ReleasePackageId);
+        Assert.Equal(DocumentPreviewFormat.Step, modelVersion.Preview!.Format);
         var publishedPackage = await repository.FindReleasePackageAsync(drawing.ReleasePackageId, default);
         Assert.NotNull(publishedPackage);
         Assert.NotEmpty(drawing.BomItems);
@@ -2824,6 +2834,27 @@ public sealed class Phase1ReleaseWorkflowTests
         Assert.Equal(new DateOnly(2026, 10, 1), after.RequiredOn);
         Assert.Contains(await repository.ListAuditAsync("admin", UserRole.Administrator, 50, default),
             entry => entry.Action == "production-drawing.delivery.update" && entry.EntityId == drawing.DocumentId.ToString());
+    }
+
+    [Fact]
+    public async Task ProductionDrawings_MarksModelStepPendingWhenThePackageHasNoStepPreview()
+    {
+        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(),
+            new RecordingPublisher { PreviewOnlyDrawings = true }, TimeProvider.System);
+        foreach (var document in await repository.ListCheckedOutDocumentsAsync(default))
+            await repository.ForceReleaseCheckoutAsync(document.Id, "admin", "测试准备", default);
+        await PrepareApprovedNonStandardDrawingReviewAsync(repository, workflow);
+        var package = await workflow.CreateReleasePackageAsync(
+            ProjectId, null, $"RP-PRODUCTION-STEP-PENDING-{Guid.NewGuid():N}", "admin", "admin", "admin", UserRole.Administrator, default);
+        await PublishAsync(workflow, package);
+
+        var drawing = Assert.Single(await new ProductionDrawingService(repository)
+            .ListAsync("admin", UserRole.Administrator, false, ProjectId, default), item => item.DrawingNumber == "A01-100");
+        var modelFile = Assert.Single(drawing.ModelFiles);
+        Assert.NotNull(modelFile.VersionId);
+        Assert.False(modelFile.StepReady);
+        Assert.True(drawing.PdfReady);
     }
 
     [Fact]

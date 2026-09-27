@@ -277,7 +277,7 @@ public sealed partial class MySqlPdmRepository
                 standard_bom_revision, non_standard_bom_revision, standard_bom_snapshot_json, non_standard_bom_snapshot_json,
                 change_number, change_reason, change_reason_selections_json,
                 formal_supplement_policy_snapshotted, formal_supplement_maximum_count, formal_supplement_valid_days,
-                effective_serial_from, effective_serial_to, drawing_priority, drawing_required_on, drawing_delivery_overrides_json,
+                effective_serial_from, effective_serial_to, drawing_priority, drawing_required_on, drawing_delivery_overrides_json, bom_item_delivery_overrides_json,
                 published_at, published_path, publish_error, row_version, created_at)
             VALUES (
                 @Id, @ProjectId, @PackageNumber, @State, @Scope, @WorkflowCode, @WorkflowVersion,
@@ -288,7 +288,7 @@ public sealed partial class MySqlPdmRepository
                 @StandardBomRevision, @NonStandardBomRevision, @StandardBomSnapshot, @NonStandardBomSnapshot,
                 @ChangeNumber, @ChangeReason, @ChangeReasonSelections,
                 @FormalSupplementPolicySnapshotted, @FormalSupplementMaximumCount, @FormalSupplementValidDays,
-                @EffectiveSerialFrom, @EffectiveSerialTo, @DrawingPriority, @DrawingRequiredOn, @DrawingDeliveryOverrides,
+                @EffectiveSerialFrom, @EffectiveSerialTo, @DrawingPriority, @DrawingRequiredOn, @DrawingDeliveryOverrides, @BomItemDeliveryOverrides,
                 NULL, NULL, NULL, 1, @CreatedAt)
             """,
             new
@@ -327,6 +327,7 @@ public sealed partial class MySqlPdmRepository
                 package.DrawingPriority,
                 DrawingRequiredOn = package.DrawingRequiredOn?.ToString("yyyy-MM-dd"),
                 DrawingDeliveryOverrides = JsonSerializer.Serialize(package.DrawingDeliveryOverrides, jsonOptions),
+                BomItemDeliveryOverrides = JsonSerializer.Serialize(package.BomItemDeliveryOverrides, jsonOptions),
                 CreatedAt = package.CreatedAt.UtcDateTime
             },
             transaction,
@@ -372,6 +373,7 @@ public sealed partial class MySqlPdmRepository
                 drawing_priority=@DrawingPriority,
                 drawing_required_on=@DrawingRequiredOn,
                 drawing_delivery_overrides_json=@DrawingDeliveryOverrides,
+                bom_item_delivery_overrides_json=@BomItemDeliveryOverrides,
                 whole_set_multiplier=@WholeSetMultiplier,
                 row_version=row_version+1
             WHERE id=@Id AND state='Draft'
@@ -397,6 +399,7 @@ public sealed partial class MySqlPdmRepository
                 package.DrawingPriority,
                 DrawingRequiredOn = package.DrawingRequiredOn?.ToString("yyyy-MM-dd"),
                 DrawingDeliveryOverrides = JsonSerializer.Serialize(package.DrawingDeliveryOverrides, jsonOptions),
+                BomItemDeliveryOverrides = JsonSerializer.Serialize(package.BomItemDeliveryOverrides, jsonOptions),
                 package.WholeSetMultiplier
             },
             cancellationToken: cancellationToken));

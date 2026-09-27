@@ -1,14 +1,15 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
-import { addReleaseItemComment, listApprovalTransferCandidates, listReleaseItemComments } from '../api'
+import { addReleaseItemComment, listApprovalTransferCandidates, listReleaseItemComments, readProjectPlan } from '../api'
 import { releasePreviewStateLabel } from '../releasePreviewState'
-import type { ApprovalTransferCandidate, BomItem, CreateReleasePackageInput, DrawingDeliveryOverride, DrawingPriority, DrawingReviewCandidate, DrawingReviewPackage, FormalSupplementPolicies, ReleaseItemComment, ReleasePackageSummary, ReleaseScope, UpdateReleasePackageDraftInput } from '../types'
+import type { ApprovalTransferCandidate, BomItem, CreateReleasePackageInput, DrawingDeliveryOverride, DrawingPriority, DrawingReviewCandidate, DrawingReviewPackage, FormalSupplementPolicies, ProjectPlan, ReleaseItemComment, ReleasePackageSummary, ReleaseScope, UpdateReleasePackageDraftInput } from '../types'
 import { useUserDisplayName } from '../userDisplay'
 
 const displayUserName = useUserDisplayName()
 
 const props = withDefaults(defineProps<{
   releasePackage: ReleasePackageSummary | null
+  projectId?: string
   token?: string
   standardItems?: BomItem[]
   releaseItems?: BomItem[]
@@ -28,7 +29,7 @@ const props = withDefaults(defineProps<{
   previousVersionItems?: BomItem[]
   drawingReviewCandidates?: DrawingReviewCandidate[]
   drawingReviews?: DrawingReviewPackage[]
-}>(), { standardItems: () => [], releaseItems: () => [], canEmergencyDecide: false, allowedScopes: () => [], changeReasonTypes: () => [], formalSupplementPolicies: () => ({ standard: { maximumCount: 2, validDays: null }, electrical: { maximumCount: 2, validDays: null } }), releasePackages: () => [], longLeadPublishedItems: () => [], previousVersionItems: () => [], drawingReviewCandidates: () => [] })
+}>(), { projectId: '', standardItems: () => [], releaseItems: () => [], canEmergencyDecide: false, allowedScopes: () => [], changeReasonTypes: () => [], formalSupplementPolicies: () => ({ standard: { maximumCount: 2, validDays: null }, electrical: { maximumCount: 2, validDays: null } }), releasePackages: () => [], longLeadPublishedItems: () => [], previousVersionItems: () => [], drawingReviewCandidates: () => [] })
 const emit = defineEmits<{
   create: [input: CreateReleasePackageInput]
   updateDraft: [releasePackageId: string, input: UpdateReleasePackageDraftInput]
@@ -92,17 +93,58 @@ const changeReasonGroups = [
 const scope = ref<Exclude<ReleaseScope, 'LegacyCombined'>>('StandardLongLead')
 const drawingPriority = ref<DrawingPriority>('Normal')
 const drawingRequiredOn = ref('')
-const drawingOverrides = ref<Record<string, DrawingDeliveryOverride>>({})
-const drawingScope = computed(() => scope.value === 'NonStandardWithDrawing' || scope.value === 'NonStandardSupplement')
+const bomItemDeliveryOverrides = ref<Record<string, DrawingDeliveryOverride>>({})
+// 三类 BOM 在长交期、正式发布和增补阶段均需记录逐项交付要求。
+const deliveryScope = computed(() => true)
+const projectPlan = ref<ProjectPlan | null>(null)
+const datePlusDays = (days: number) => {
+  const date = new Date()
+  date.setHours(0, 0, 0, 0)
+  date.setDate(date.getDate() + days)
+  const year = date.getFullYear()
+  const month = String(date.getMonth() + 1).padStart(2, '0')
+  const day = String(date.getDate()).padStart(2, '0')
+  return `${year}-${month}-${day}`
+}
+const assemblyStartDate = computed(() => {
+  const taskStartDates = (projectPlan.value?.tasks ?? [])
+    .filter(task => task.stage === 'Assembly' && task.plannedStart)
+    .map(task => task.plannedStart)
+    .sort()
+  return taskStartDates[0]
+    ?? projectPlan.value?.stageSchedules?.find(schedule => schedule.stage === 'Assembly')?.startDate
+    ?? ''
+})
+const defaultDrawingRequiredOn = computed(() =>
+  (scope.value === 'NonStandardWithDrawing' || isLongLeadScope(scope.value)) && assemblyStartDate.value
+    ? assemblyStartDate.value
+    : datePlusDays(10))
+const usesAssemblyStartRequirementDate = computed(() =>
+  deliveryScope.value
+  && (scope.value === 'NonStandardWithDrawing' || isLongLeadScope(scope.value))
+  && Boolean(assemblyStartDate.value)
+  && drawingRequiredOn.value === assemblyStartDate.value)
 const selectedDrawingCandidates = computed(() => {
   const selected = new Set(selectedScopedBomItemIds.value ?? [])
   return props.drawingReviewCandidates.filter(candidate => candidate.drawingDocumentId
     && candidate.bomItemId && selected.has(candidate.bomItemId))
     .filter((candidate, index, all) => all.findIndex(item => item.drawingDocumentId === candidate.drawingDocumentId) === index)
 })
-function setDrawingOverride(id: string, priority: DrawingPriority, requiredOn: string) {
-  drawingOverrides.value = { ...drawingOverrides.value, [id]: { priority, requiredOn } }
+function itemDeliveryOverride(itemId: string) {
+  return bomItemDeliveryOverrides.value[itemId] ?? { priority: drawingPriority.value, requiredOn: drawingRequiredOn.value }
 }
+function setBomItemDeliveryOverride(itemId: string, priority: DrawingPriority, requiredOn: string) {
+  bomItemDeliveryOverrides.value = { ...bomItemDeliveryOverrides.value, [itemId]: { priority, requiredOn } }
+}
+const selectedBomItemDeliveryOverrides = computed(() => {
+  const selected = new Set(selectedScopedBomItemIds.value ?? [])
+  return Object.fromEntries(Object.entries(bomItemDeliveryOverrides.value).filter(([itemId]) => selected.has(itemId)))
+})
+const selectedDrawingDeliveryOverrides = computed(() => Object.fromEntries(selectedDrawingCandidates.value
+  .map(candidate => candidate.drawingDocumentId && candidate.bomItemId
+    ? [candidate.drawingDocumentId, itemDeliveryOverride(candidate.bomItemId)] : null)
+  .filter((item): item is [string, DrawingDeliveryOverride] => item !== null)))
+const deliveryItemLabel = (item: BomItem) => item.drawingNumber || item.name || '当前物料'
 const wholeSetMultiplier = ref(1)
 const selectedLongLeadKeys = ref<string[]>([])
 const selectedFormalKeys = ref<string[]>([])
@@ -126,6 +168,9 @@ const releaseWorkflowLabel = computed(() => {
   const fallbackName = releasePackage.scope.startsWith('Electrical') ? '电气发布审批' : '机械发布审批'
   return `${workflowNames[releasePackage.workflowCode] ?? fallbackName} · 第${releasePackage.workflowVersion || 1}版`
 })
+const releaseStateLabel = computed(() => props.releasePackage?.state === '发布中'
+  ? '审批完成 · 后台发布中'
+  : props.releasePackage?.state ?? '')
 const releaseBomRevisionLabel = computed(() => {
   const releasePackage = props.releasePackage
   if (!releasePackage) return ''
@@ -443,7 +488,7 @@ const drawingReviewBlockMessage = computed(() => {
   return hasBlockedNonStandardDrawingReview.value ? '当前发布范围包含未完成当前版本图纸审核的非标件，完成审核后才可创建发布草稿。' : ''
 })
 const createDisabled = computed(() => props.pending
-  || drawingScope.value && !drawingRequiredOn.value
+  || deliveryScope.value && !drawingRequiredOn.value
   || isLongLeadRelease.value && selectedBomItemIds.value.length === 0
   || isLongLeadRelease.value && hasInvalidLongLeadQuantity.value
   || isFormalRelease.value && selectedFormalBomItemIds.value.length === 0
@@ -559,6 +604,18 @@ watch([visibleReleaseTypes, () => props.preferredScope], ([items, preferred]) =>
   if (preferredItem) scope.value = preferredItem.value
   else if (items.length && !items.some(item => item.value === scope.value)) scope.value = items[0].value
 }, { immediate: true })
+async function loadProjectPlan() {
+  if (!props.projectId || !props.token) {
+    projectPlan.value = null
+    return
+  }
+  try {
+    projectPlan.value = await readProjectPlan(props.projectId, props.token)
+  } catch {
+    projectPlan.value = null
+  }
+}
+watch([() => props.projectId, () => props.token], () => { void loadProjectPlan() }, { immediate: true })
 watch(() => props.releasePackage?.id, () => {
   frozenPage.value = 1
   frozenViewMode.value = 'Summary'
@@ -577,6 +634,15 @@ watch(scope, () => {
   formalPage.value = 1
   supplementPage.value = 1
 })
+watch([scope, defaultDrawingRequiredOn], ([nextScope, nextDefault], [previousScope, previousDefault]) => {
+  if (!deliveryScope.value || props.releasePackage || editingDraft.value) return
+  const isNewScope = nextScope !== previousScope
+  const isUntouchedDefault = !drawingRequiredOn.value || drawingRequiredOn.value === previousDefault
+  if (isNewScope || isUntouchedDefault) {
+    drawingRequiredOn.value = nextDefault
+    if (isNewScope) bomItemDeliveryOverrides.value = {}
+  }
+}, { immediate: true })
 watch([() => availableReleaseItems.value.length, () => supplementRows.value.length], () => {
   if (!isLongLeadRelease.value) longLeadPage.value = 1
   else longLeadPage.value = Math.min(longLeadPage.value, longLeadPageCount.value)
@@ -608,11 +674,11 @@ function create() {
     selectedBomItemIds: selectedScopedBomItemIds.value ?? [],
     selectedBomItemQuantities: isLongLeadRelease.value ? selectedBomItemQuantities.value : undefined,
     wholeSetMultiplier: isLongLeadRelease.value ? 1 : Number(wholeSetMultiplier.value),
-    ...(drawingScope.value ? {
+    ...(deliveryScope.value ? {
       drawingPriority: drawingPriority.value,
       drawingRequiredOn: drawingRequiredOn.value,
-      drawingDeliveryOverrides: Object.fromEntries(Object.entries(drawingOverrides.value)
-        .filter(([id]) => selectedDrawingCandidates.value.some(candidate => candidate.drawingDocumentId === id))),
+      drawingDeliveryOverrides: selectedDrawingDeliveryOverrides.value,
+      bomItemDeliveryOverrides: selectedBomItemDeliveryOverrides.value,
     } : {}),
   }
   if (editingDraft.value && props.releasePackage) {
@@ -621,10 +687,11 @@ function create() {
       selectedBomItemIds: input.selectedBomItemIds,
       selectedBomItemQuantities: input.selectedBomItemQuantities,
       wholeSetMultiplier: input.wholeSetMultiplier,
-      ...(drawingScope.value ? {
+      ...(deliveryScope.value ? {
         drawingPriority: input.drawingPriority,
         drawingRequiredOn: input.drawingRequiredOn,
         drawingDeliveryOverrides: input.drawingDeliveryOverrides,
+        bomItemDeliveryOverrides: input.bomItemDeliveryOverrides,
       } : {}),
     })
     editingDraft.value = false
@@ -670,8 +737,15 @@ function startDraftEdit() {
   if (!releasePackage || releasePackage.state !== '草稿' || releasePackage.scope === 'LegacyCombined') return
   scope.value = releasePackage.scope
   drawingPriority.value = releasePackage.drawingPriority ?? 'Normal'
-  drawingRequiredOn.value = releasePackage.drawingRequiredOn ?? ''
-  drawingOverrides.value = { ...releasePackage.drawingDeliveryOverrides }
+  drawingRequiredOn.value = releasePackage.drawingRequiredOn ?? defaultDrawingRequiredOn.value
+  const savedDeliveryOverrides = { ...releasePackage.bomItemDeliveryOverrides }
+  for (const candidate of props.drawingReviewCandidates) {
+    if (candidate.bomItemId && candidate.drawingDocumentId && !savedDeliveryOverrides[candidate.bomItemId]) {
+      const legacy = releasePackage.drawingDeliveryOverrides?.[candidate.drawingDocumentId]
+      if (legacy) savedDeliveryOverrides[candidate.bomItemId] = legacy
+    }
+  }
+  bomItemDeliveryOverrides.value = savedDeliveryOverrides
   releaseNote.value = isSupplementScope(releasePackage.scope) ? '' : releasePackage.changeReason || ''
   selectedChangeReasons.value = []
   otherChangeReason.value = ''
@@ -854,7 +928,7 @@ async function saveItemComment() {
   <section class="pdm-panel pdm-manager-panel release-center" aria-label="审批与生产发包">
     <p v-if="error" class="pdm-inline-error" role="alert">{{ error }}</p>
     <form v-if="canManage && (!releasePackage || editingDraft)" class="pdm-form-grid pdm-release-create-form" @submit.prevent="create">
-      <section class="pdm-release-create-header" :class="{ 'has-drawing-delivery': drawingScope }" aria-label="发布参数">
+      <section class="pdm-release-create-header" :class="{ 'has-drawing-delivery': deliveryScope }" aria-label="发布参数">
         <div class="pdm-release-type-row">
           <label>发布类型
             <select v-model="scope" :disabled="editingDraft" aria-label="发布类型">
@@ -864,10 +938,10 @@ async function saveItemComment() {
           <label v-if="!isLongLeadRelease" title="仅影响本发布包的输出数量，与项目及子项目数量无关">整套倍率
             <input v-model.number="wholeSetMultiplier" type="number" min="1" max="1000" step="1" aria-label="整套倍率">
           </label>
-          <label v-if="drawingScope">整包紧急程度
+          <label v-if="deliveryScope">整包紧急程度
             <select v-model="drawingPriority" aria-label="整包紧急程度"><option value="Normal">普通</option><option value="Priority">优先</option><option value="Urgent">紧急</option></select>
           </label>
-          <label v-if="drawingScope">整包需求日期
+          <label v-if="deliveryScope"><span>整包需求日期 <small v-if="usesAssemblyStartRequirementDate" class="pdm-release-assembly-note">计划装配节点</small></span>
             <input v-model="drawingRequiredOn" type="date" required aria-label="整包需求日期">
           </label>
           <div class="pdm-release-draft-actions">
@@ -899,42 +973,38 @@ async function saveItemComment() {
           </fieldset>
         </div>
       </section>
-      <section v-if="drawingScope && selectedDrawingCandidates.length" class="pdm-drawing-delivery-overrides" aria-label="逐张图发图信息">
-        <strong>逐张图调整（不填则沿用整包设置）</strong>
-        <div v-for="candidate in selectedDrawingCandidates" :key="candidate.drawingDocumentId!" class="pdm-drawing-delivery-row">
-          <span>{{ candidate.drawingNumber }} · {{ candidate.name }}</span>
-          <select :value="drawingOverrides[candidate.drawingDocumentId!]?.priority ?? drawingPriority" :aria-label="`${candidate.drawingNumber}紧急程度`" @change="setDrawingOverride(candidate.drawingDocumentId!, ($event.target as HTMLSelectElement).value as DrawingPriority, drawingOverrides[candidate.drawingDocumentId!]?.requiredOn ?? drawingRequiredOn)">
-            <option value="Normal">普通</option><option value="Priority">优先</option><option value="Urgent">紧急</option>
-          </select>
-          <input type="date" :value="drawingOverrides[candidate.drawingDocumentId!]?.requiredOn ?? drawingRequiredOn" :aria-label="`${candidate.drawingNumber}需求日期`" @change="setDrawingOverride(candidate.drawingDocumentId!, drawingOverrides[candidate.drawingDocumentId!]?.priority ?? drawingPriority, ($event.target as HTMLInputElement).value)">
-        </div>
-      </section>
       <fieldset class="release-detail-picker">
         <legend>{{ releaseDetailLegend }}</legend>
         <div class="pdm-table-scroll">
-          <table class="pdm-edit-table" :class="{ 'is-supplement': isSupplement }">
-            <colgroup><col><col><col><col><col><col><col><col><col><col><col v-if="isSupplement"></colgroup>
-            <thead><tr><th>标记</th><th>序号</th><th>物料编码</th><th>名称</th><th>型号</th><th>品牌</th><th>可发布数量</th><th>发布总数量</th><th>备注</th><th>发布状态</th><th v-if="isSupplement">变更明细（原值 → 新值）</th></tr></thead>
+          <table class="pdm-edit-table" :class="{ 'is-supplement': isSupplement, 'has-delivery': deliveryScope }">
+            <colgroup><col><col><col><col><col><col><col><col><col><col><col v-if="isSupplement"><col v-if="deliveryScope"><col v-if="deliveryScope"></colgroup>
+            <thead><tr><th>标记</th><th>序号</th><th>物料编码</th><th>名称</th><th>型号</th><th>品牌</th><th>可发布数量</th><th>发布总数量</th><th>备注</th><th>发布状态</th><th v-if="isSupplement">变更明细（原值 → 新值）</th><th v-if="deliveryScope">紧急程度</th><th v-if="deliveryScope">需求时间</th></tr></thead>
             <tbody>
               <template v-if="isLongLeadRelease">
                 <tr v-for="(row, index) in pagedLongLeadItems" :key="row.key">
                   <td class="is-release-centered"><input :checked="selectedLongLeadKeys.includes(row.key)" type="checkbox" :aria-label="`选择长交期物料 ${row.item.drawingNumber}`" :disabled="scope === 'NonStandardLongLead' && !releaseRowDrawingReviewReady(row)" :title="scope === 'NonStandardLongLead' && !releaseRowDrawingReviewReady(row) ? releaseRowDrawingReviewStatus(row) : undefined" @change="toggleLongLeadSelection(row.key, ($event.target as HTMLInputElement).checked, Number(row.item.quantity))"></td>
                   <td class="is-release-centered">{{ (longLeadPage - 1) * releasePageSize + index + 1 }}</td><td>{{ row.item.drawingNumber || '—' }}</td><td>{{ row.item.name || '—' }}</td><td>{{ row.item.specification || '—' }}</td><td class="is-release-centered">{{ row.item.brand || '—' }}</td><td class="is-release-centered">{{ row.item.quantity }}</td><td class="is-release-centered"><input v-if="selectedLongLeadKeys.includes(row.key)" v-model.number="longLeadRequestedQuantities[row.key]" class="long-lead-quantity-input" type="number" min="0.000001" :max="row.item.quantity" step="any" :aria-label="`本次发布数量 ${row.item.drawingNumber}`"><span v-else>—</span></td><td :title="row.item.remark || undefined">{{ row.item.remark || '—' }}</td><td class="is-release-centered"><span class="release-status-tag" :class="{ 'is-blocked': scope === 'NonStandardLongLead' && !releaseRowDrawingReviewReady(row) }">{{ scope === 'NonStandardLongLead' ? releaseRowDrawingReviewStatus(row) : '剩余可发布' }}</span></td>
+                  <td><select :value="itemDeliveryOverride(row.item.id!).priority" :aria-label="`${deliveryItemLabel(row.item)}紧急程度`" @change="setBomItemDeliveryOverride(row.item.id!, ($event.target as HTMLSelectElement).value as DrawingPriority, itemDeliveryOverride(row.item.id!).requiredOn)"><option value="Normal">普通</option><option value="Priority">优先</option><option value="Urgent">紧急</option></select></td>
+                  <td><input type="date" :value="itemDeliveryOverride(row.item.id!).requiredOn" :aria-label="`${deliveryItemLabel(row.item)}需求时间`" @change="setBomItemDeliveryOverride(row.item.id!, itemDeliveryOverride(row.item.id!).priority, ($event.target as HTMLInputElement).value)"></td>
                 </tr>
               </template>
               <template v-else-if="isFormalRelease">
                 <tr v-for="(row, index) in pagedFormalReleaseRows" :key="row.key" :class="{ 'is-release-unselected': !selectedFormalKeys.includes(row.key) }">
                   <td class="is-release-centered"><input :checked="selectedFormalKeys.includes(row.key)" type="checkbox" :disabled="isFormalRowFullyPublished(row)" :title="isFormalRowFullyPublished(row) ? formalRowPublishTitle(row) : undefined" :aria-label="`本次发布物料 ${row.item.drawingNumber}`" @change="toggleFormalSelection(row.key, ($event.target as HTMLInputElement).checked)"></td><td class="is-release-centered">{{ (formalPage - 1) * releasePageSize + index + 1 }}</td><td>{{ row.item.drawingNumber || '—' }}</td><td>{{ row.item.name || '—' }}</td><td>{{ row.item.specification || '—' }}</td><td class="is-release-centered">{{ row.item.brand || '—' }}</td><td class="is-release-centered">{{ row.remainingQuantity }}</td><td class="is-release-centered" :class="{ 'is-release-multiplied': Number(wholeSetMultiplier) !== 1 && selectedFormalKeys.includes(row.key) }">{{ selectedFormalKeys.includes(row.key) ? formalRowPublishQuantity(row) : '—' }}</td><td :title="row.item.remark || undefined">{{ row.item.remark || '—' }}</td>
                   <td class="is-release-centered"><span v-if="!selectedFormalKeys.includes(row.key)" class="release-status-tag">本次不发布</span><span v-else-if="scope === 'NonStandardWithDrawing'" class="release-status-tag" :class="{ 'is-blocked': !releaseRowDrawingReviewReady(row) }">{{ releaseRowDrawingReviewStatus(row) }}</span><span v-else-if="row.longLeadPublishedQuantity > 0" class="long-lead-tag" :title="formalRowPublishTitle(row)">已发布 {{ row.longLeadPublishedQuantity }}/{{ row.item.quantity }}</span><span v-else class="release-status-tag">本次发布</span></td>
+                  <td><select :value="itemDeliveryOverride(row.item.id!).priority" :aria-label="`${deliveryItemLabel(row.item)}紧急程度`" @change="setBomItemDeliveryOverride(row.item.id!, ($event.target as HTMLSelectElement).value as DrawingPriority, itemDeliveryOverride(row.item.id!).requiredOn)"><option value="Normal">普通</option><option value="Priority">优先</option><option value="Urgent">紧急</option></select></td>
+                  <td><input type="date" :value="itemDeliveryOverride(row.item.id!).requiredOn" :aria-label="`${deliveryItemLabel(row.item)}需求时间`" @change="setBomItemDeliveryOverride(row.item.id!, itemDeliveryOverride(row.item.id!).priority, ($event.target as HTMLInputElement).value)"></td>
                 </tr>
               </template>
               <template v-else>
                 <tr v-for="(row, index) in pagedSupplementRows" :key="`${row.change}-${row.item.id}-${index}`" :class="{ 'is-release-unselected': supplementRowSelectable(row) && !selectedSupplementKeys.includes(supplementRowKey(row)) }">
                   <td class="is-release-centered"><input v-if="supplementRowSelectable(row)" :checked="selectedSupplementKeys.includes(supplementRowKey(row))" type="checkbox" :aria-label="`本次纳入 ${row.item.drawingNumber || row.item.name}`" :title="`取消勾选后该项顺延到下一次增补/变更`" @change="toggleSupplementSelection(row, ($event.target as HTMLInputElement).checked)"><input v-else type="checkbox" checked disabled :title="row.change === '修改' ? '已发布物料的修改随本次变更单一起发布，不能单独顺延' : '删除项随本次变更单一起生效'"><span :class="`release-change-tag is-${row.change}`">{{ row.change }}</span></td><td class="is-release-centered">{{ (supplementPage - 1) * releasePageSize + index + 1 }}</td><td>{{ row.item.drawingNumber || '—' }}</td><td>{{ row.item.name || '—' }}</td><td>{{ row.item.specification || '—' }}</td><td class="is-release-centered">{{ row.item.brand || '—' }}</td><td class="is-release-centered">{{ row.item.quantity }}</td><td class="is-release-centered" :class="{ 'is-release-multiplied': row.change !== '删除' && Number(wholeSetMultiplier) !== 1 }">{{ row.change === '删除' ? '—' : Number(row.item.quantity) * Number(wholeSetMultiplier) }}</td><td :title="row.item.remark || undefined">{{ row.item.remark || '—' }}</td><td class="is-release-centered"><span v-if="supplementRowSelectable(row) && !selectedSupplementKeys.includes(supplementRowKey(row))" class="release-status-tag">本次不发布</span><span v-else class="release-status-tag" :class="{ 'is-blocked': scope === 'NonStandardSupplement' && row.change !== '删除' && !itemDrawingReviewReady(row.item) }">{{ scope === 'NonStandardSupplement' && row.change !== '删除' ? drawingReviewStatusForItem(row.item) : '待纳入变更' }}</span></td>
                   <td class="release-change-details" :title="row.details.join('；')"><div v-for="detail in row.details" :key="detail">{{ detail }}</div></td>
+                  <td><select :value="itemDeliveryOverride(row.item.id!).priority" :aria-label="`${deliveryItemLabel(row.item)}紧急程度`" @change="setBomItemDeliveryOverride(row.item.id!, ($event.target as HTMLSelectElement).value as DrawingPriority, itemDeliveryOverride(row.item.id!).requiredOn)"><option value="Normal">普通</option><option value="Priority">优先</option><option value="Urgent">紧急</option></select></td>
+                  <td><input type="date" :value="itemDeliveryOverride(row.item.id!).requiredOn" :aria-label="`${deliveryItemLabel(row.item)}需求时间`" @change="setBomItemDeliveryOverride(row.item.id!, itemDeliveryOverride(row.item.id!).priority, ($event.target as HTMLInputElement).value)"></td>
                 </tr>
               </template>
-              <tr v-if="!releaseDetailRowCount"><td :colspan="isSupplement ? 11 : 10" class="pdm-empty-info">{{ releaseDetailEmptyText }}</td></tr>
+              <tr v-if="!releaseDetailRowCount"><td :colspan="(isSupplement ? 11 : 10) + (deliveryScope ? 2 : 0)" class="pdm-empty-info">{{ releaseDetailEmptyText }}</td></tr>
             </tbody>
           </table>
         </div>
@@ -948,6 +1018,9 @@ async function saveItemComment() {
     </form>
 
     <template v-else-if="releasePackage">
+      <p v-if="releasePackage.state === '发布中'" class="pdm-release-completion-status" role="status">
+        审批已完成，发布资料正在后台生成；完成后状态将自动更新为“已发布”。
+      </p>
       <section class="pdm-release-top-workflow" aria-label="发布审批流程与操作">
         <div class="pdm-approval-chain">
           <article v-for="step in releasePackage.steps" :key="step.id" :class="`is-${step.status}`">
@@ -1008,7 +1081,7 @@ async function saveItemComment() {
       <div class="pdm-release-summary">
         <div><small>发布包</small><strong>{{ releasePackage.number }}</strong></div>
         <div><small>发布范围</small><strong>{{ scopeLabels[releasePackage.scope] || '旧版组合发布' }}</strong></div>
-        <div><small>当前状态</small><strong>{{ releasePackage.state }}</strong></div>
+        <div><small>当前状态</small><strong>{{ releaseStateLabel }}</strong></div>
         <div><small>审批模板</small><strong>{{ releaseWorkflowLabel }}</strong></div>
         <div><small>整套倍率</small><strong>× {{ releasePackage.wholeSetMultiplier ?? 1 }}</strong></div>
         <div v-if="releasePackage.changeNumber && releasePackage.changeNumber !== releasePackage.number"><small>变更单号</small><strong>{{ releasePackage.changeNumber }}</strong></div>
@@ -1125,8 +1198,9 @@ async function saveItemComment() {
 .release-detail-picker table.is-supplement col:nth-child(9){width:8%}
 .release-detail-picker table.is-supplement col:nth-child(11){width:18%}
 .release-detail-picker table.is-supplement th{white-space:normal;overflow-wrap:anywhere}
+.release-detail-picker table.has-delivery:not(.is-supplement) col:nth-child(1){width:5%}.release-detail-picker table.has-delivery:not(.is-supplement) col:nth-child(2){width:4%}.release-detail-picker table.has-delivery:not(.is-supplement) col:nth-child(3){width:9%}.release-detail-picker table.has-delivery:not(.is-supplement) col:nth-child(4){width:10%}.release-detail-picker table.has-delivery:not(.is-supplement) col:nth-child(5){width:10%}.release-detail-picker table.has-delivery:not(.is-supplement) col:nth-child(6){width:6%}.release-detail-picker table.has-delivery:not(.is-supplement) col:nth-child(7){width:7%}.release-detail-picker table.has-delivery:not(.is-supplement) col:nth-child(8){width:8%}.release-detail-picker table.has-delivery:not(.is-supplement) col:nth-child(9){width:9%}.release-detail-picker table.has-delivery:not(.is-supplement) col:nth-child(10){width:9%}.release-detail-picker table.has-delivery:not(.is-supplement) col:nth-child(11),.release-detail-picker table.has-delivery:not(.is-supplement) col:nth-child(12){width:11.5%}.release-detail-picker table.has-delivery.is-supplement col:nth-child(1){width:4%}.release-detail-picker table.has-delivery.is-supplement col:nth-child(2){width:3%}.release-detail-picker table.has-delivery.is-supplement col:nth-child(3){width:8%}.release-detail-picker table.has-delivery.is-supplement col:nth-child(4),.release-detail-picker table.has-delivery.is-supplement col:nth-child(5){width:8%}.release-detail-picker table.has-delivery.is-supplement col:nth-child(6),.release-detail-picker table.has-delivery.is-supplement col:nth-child(7){width:5%}.release-detail-picker table.has-delivery.is-supplement col:nth-child(8),.release-detail-picker table.has-delivery.is-supplement col:nth-child(10){width:6%}.release-detail-picker table.has-delivery.is-supplement col:nth-child(9){width:7%}.release-detail-picker table.has-delivery.is-supplement col:nth-child(11){width:17%}.release-detail-picker table.has-delivery.is-supplement col:nth-child(12),.release-detail-picker table.has-delivery.is-supplement col:nth-child(13){width:11.5%}.release-detail-picker table.has-delivery td>select,.release-detail-picker table.has-delivery td>input[type="date"]{width:100%;height:26px;box-sizing:border-box;padding:0 5px;border:1px solid var(--pdm-border);border-radius:4px;background:#fff;color:var(--pdm-text)}
 .pdm-release-top-workflow{display:grid;gap:6px;margin-bottom:8px}.pdm-release-top-workflow .pdm-approval-chain,.pdm-release-summary{grid-template-columns:repeat(4,minmax(0,1fr));gap:6px}.pdm-release-top-workflow .pdm-approval-chain{margin:0}.pdm-release-top-workflow .pdm-approval-chain article,.pdm-release-summary>div{min-width:0;min-height:46px;box-sizing:border-box;align-content:center;gap:2px;padding:6px 8px;border:1px solid var(--pdm-border);border-radius:7px;background:var(--pdm-surface)}.pdm-release-top-workflow .pdm-approval-chain article{align-items:flex-start;gap:6px}.pdm-release-top-workflow .pdm-approval-chain article div{overflow:hidden}.pdm-release-top-workflow .pdm-approval-chain strong,.pdm-release-top-workflow .pdm-approval-chain small,.pdm-release-top-workflow .pdm-approval-chain em{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.pdm-release-top-workflow .pdm-release-draft-management{margin:0}.pdm-release-top-workflow .pdm-release-preparation{display:grid;grid-template-columns:auto minmax(0,1fr) auto;align-items:center;gap:8px;margin:0;padding:6px 8px}.pdm-release-top-workflow .pdm-release-preparation h3,.pdm-release-top-workflow .pdm-release-preparation p{margin:0}.pdm-release-top-workflow .pdm-release-preparation .pdm-manager-actions{flex-wrap:nowrap}.pdm-release-top-workflow .pdm-release-preparation progress{grid-column:1/-1;margin-top:0}.pdm-release-top-workflow .pdm-decision-box{grid-template-columns:minmax(0,1fr) auto;align-items:end;gap:8px;margin:0;padding:6px 8px}.pdm-release-top-workflow .pdm-decision-box textarea{min-height:30px;height:30px;box-sizing:border-box;resize:vertical}.pdm-release-top-workflow .pdm-withdraw-decision{align-items:center}.pdm-release-summary{grid-auto-rows:minmax(46px,auto);margin-bottom:8px}.pdm-release-summary small{font-size:11px}.pdm-release-summary strong{font-size:11px}@media(max-width:900px){.pdm-release-top-workflow .pdm-approval-chain,.pdm-release-summary{grid-template-columns:repeat(2,minmax(0,1fr))}.pdm-release-top-workflow .pdm-release-preparation,.pdm-release-top-workflow .pdm-decision-box{grid-template-columns:1fr}.pdm-release-top-workflow .pdm-release-preparation .pdm-manager-actions,.pdm-release-top-workflow .pdm-decision-box .pdm-manager-actions{justify-content:flex-end}}@media(max-width:560px){.pdm-release-top-workflow .pdm-approval-chain,.pdm-release-summary{grid-template-columns:1fr}}
-.release-center select{height:34px;border:1px solid var(--pdm-border);border-radius:6px;background:#fff;padding:0 9px;color:var(--pdm-text)}.pdm-release-create-header{grid-column:1/-1;display:grid;grid-template-rows:52px 82px;gap:8px;min-height:162px;padding:10px;box-sizing:border-box;border:1px solid var(--pdm-border);border-radius:7px;background:var(--pdm-surface)}.pdm-release-type-row{display:grid;grid-template-columns:minmax(220px,1fr) minmax(120px,180px) auto minmax(180px,1fr);gap:5px;align-items:end}.pdm-release-type-row label{min-width:0}.pdm-release-type-row select,.pdm-release-type-row input{width:100%;height:34px;box-sizing:border-box}.pdm-release-draft-actions{display:flex;gap:5px}.pdm-release-draft-actions button{height:34px;padding:0 10px;white-space:nowrap}.pdm-release-parameter-slot{min-height:82px;overflow:auto}.pdm-release-parameter-slot>.pdm-release-reason{height:100%;box-sizing:border-box}.pdm-release-parameter-slot>.pdm-release-reason textarea{height:60px;box-sizing:border-box;resize:none}.release-detail-picker,.release-change-reason-picker{grid-column:1/-1;margin:0;padding:10px;border:1px solid var(--pdm-border);border-radius:7px}.release-detail-picker legend,.release-change-reason-picker legend{padding:0 5px;font-weight:600}.release-detail-picker .pdm-table-scroll{border:1px solid var(--pdm-border);border-radius:5px}.release-detail-picker table{width:100%;min-width:0;table-layout:fixed}.release-detail-picker col:nth-child(1){width:6%}.release-detail-picker col:nth-child(2){width:5%}.release-detail-picker col:nth-child(3){width:12%}.release-detail-picker col:nth-child(4){width:13%}.release-detail-picker col:nth-child(5){width:15%}.release-detail-picker col:nth-child(6){width:8%}.release-detail-picker col:nth-child(7){width:9%}.release-detail-picker col:nth-child(8){width:10%}.release-detail-picker col:nth-child(9){width:12%}.release-detail-picker col:nth-child(10){width:10%}.release-detail-picker th,.release-detail-picker td{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;vertical-align:middle}.release-detail-picker td{height:32px}.release-detail-picker th,.release-detail-picker td.is-release-centered{text-align:center}.release-detail-picker th:nth-child(8),.release-detail-picker td:nth-child(8){background:#fffbeb}.release-detail-picker td.is-release-multiplied{font-weight:600}.long-lead-quantity-input{width:100%;min-width:0;height:26px;box-sizing:border-box;text-align:center}.pdm-release-draft-management{justify-content:flex-end;margin-bottom:8px}.release-change-reason-picker{display:flex;height:100%;box-sizing:border-box;flex-wrap:wrap;align-content:flex-start;gap:8px 18px}.release-change-reason-picker label{display:flex;align-items:center;gap:5px}.long-lead-tag,.release-change-tag,.release-inclusion-tag,.release-status-tag{display:inline-flex;align-items:center;min-height:20px;padding:0 6px;border-radius:10px}.long-lead-tag,.release-change-tag{background:#fff7ed;color:var(--pdm-orange)}.release-inclusion-tag{background:#eff6ff;color:var(--pdm-blue)}.release-status-tag{background:var(--pdm-surface-soft);color:var(--pdm-muted)}.release-change-tag.is-新增{background:#ecfdf5;color:var(--pdm-green)}.release-change-tag.is-修改{background:#fff7ed;color:var(--pdm-orange)}.release-change-tag.is-删除{background:#fef2f2;color:var(--pdm-danger)}.pdm-release-create-form .pdm-release-reason{grid-column:1/-1}.emergency-decision{border-color:#f59e0b;background:#fffbeb}.pdm-release-frozen-snapshot{margin:12px 0;border:1px solid var(--pdm-border);border-radius:7px;overflow:hidden}.pdm-release-frozen-snapshot>header{display:flex;justify-content:space-between;gap:12px;align-items:center;padding:9px 11px;background:var(--pdm-surface-soft)}.pdm-release-frozen-snapshot>header>div:first-child{display:grid;gap:2px;min-width:0}.pdm-release-frozen-snapshot>header small{color:var(--pdm-muted)}.pdm-frozen-view-actions{display:flex;align-items:center;justify-content:flex-end;gap:10px;white-space:nowrap}.pdm-view-switch{display:inline-flex;padding:2px;border:1px solid var(--pdm-border);border-radius:6px;background:#fff}.pdm-view-switch button{height:24px;padding:0 9px;border:0;border-radius:4px;background:transparent;color:var(--pdm-muted)}.pdm-view-switch button.is-active{background:#0f9d90;color:#fff}.pdm-release-diff-summary{display:flex;align-items:center;gap:10px;padding:7px 11px;border-top:1px solid var(--pdm-border);border-bottom:1px solid var(--pdm-border)}.pdm-release-diff-summary small{margin-left:auto;color:var(--pdm-muted)}.pdm-release-diff-summary .is-added{color:var(--pdm-green)}.pdm-release-diff-summary .is-modified{color:var(--pdm-orange)}.pdm-release-diff-summary .is-removed{color:var(--pdm-danger)}.pdm-release-frozen-snapshot .pdm-table-scroll{max-height:230px}.pdm-item-comments-load-error{margin:0;padding:7px 11px}.pdm-item-comment-action{border:0;background:transparent;color:var(--pdm-green);white-space:nowrap}.pdm-frozen-item-name{padding-left:7px}.pdm-frozen-item-name small{display:block;margin-top:2px;color:var(--pdm-muted);font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.pdm-structure-marker{margin-right:4px;color:var(--pdm-green)}.pdm-release-integration-note{margin:0;padding:8px 11px;color:var(--pdm-green);background:#f0fdfa;border-top:1px solid #99f6e4}@media(max-width:900px){.pdm-release-type-row{grid-template-columns:repeat(2,minmax(0,1fr))}.pdm-release-frozen-snapshot>header{align-items:flex-start;flex-direction:column}.pdm-release-frozen-view-actions{width:100%;justify-content:space-between}}
+.release-center select{height:34px;border:1px solid var(--pdm-border);border-radius:6px;background:#fff;padding:0 9px;color:var(--pdm-text)}.pdm-release-create-header{grid-column:1/-1;display:grid;grid-template-rows:52px 82px;gap:8px;min-height:162px;padding:10px;box-sizing:border-box;border:1px solid var(--pdm-border);border-radius:7px;background:var(--pdm-surface)}.pdm-release-type-row{display:grid;grid-template-columns:minmax(220px,1fr) minmax(120px,180px) auto minmax(180px,1fr);gap:5px;align-items:end}.pdm-release-type-row label{min-width:0}.pdm-release-type-row select,.pdm-release-type-row input{width:100%;height:34px;box-sizing:border-box}.pdm-release-draft-actions{display:flex;gap:5px}.pdm-release-draft-actions button{height:34px;padding:0 10px;white-space:nowrap}.pdm-release-parameter-slot{min-height:82px;overflow:auto}.pdm-release-parameter-slot>.pdm-release-reason{height:100%;box-sizing:border-box}.pdm-release-parameter-slot>.pdm-release-reason textarea{height:60px;box-sizing:border-box;resize:none}.release-detail-picker,.release-change-reason-picker{grid-column:1/-1;margin:0;padding:10px;border:1px solid var(--pdm-border);border-radius:7px}.release-detail-picker legend,.release-change-reason-picker legend{padding:0 5px;font-weight:600}.release-detail-picker .pdm-table-scroll{border:1px solid var(--pdm-border);border-radius:5px}.release-detail-picker table{width:100%;min-width:0;table-layout:fixed}.release-detail-picker col:nth-child(1){width:6%}.release-detail-picker col:nth-child(2){width:5%}.release-detail-picker col:nth-child(3){width:12%}.release-detail-picker col:nth-child(4){width:13%}.release-detail-picker col:nth-child(5){width:15%}.release-detail-picker col:nth-child(6){width:8%}.release-detail-picker col:nth-child(7){width:9%}.release-detail-picker col:nth-child(8){width:10%}.release-detail-picker col:nth-child(9){width:12%}.release-detail-picker col:nth-child(10){width:10%}.release-detail-picker th,.release-detail-picker td{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;vertical-align:middle}.release-detail-picker td{height:32px}.release-detail-picker th,.release-detail-picker td.is-release-centered{text-align:center}.release-detail-picker th:nth-child(8),.release-detail-picker td:nth-child(8){background:#fffbeb}.release-detail-picker td.is-release-multiplied{font-weight:600}.long-lead-quantity-input{width:100%;min-width:0;height:26px;box-sizing:border-box;text-align:center}.pdm-release-draft-management{justify-content:flex-end;margin-bottom:8px}.release-change-reason-picker{display:flex;height:100%;box-sizing:border-box;flex-wrap:wrap;align-content:flex-start;gap:8px 18px}.release-change-reason-picker label{display:flex;align-items:center;gap:5px}.long-lead-tag,.release-change-tag,.release-inclusion-tag,.release-status-tag{display:inline-flex;align-items:center;min-height:20px;padding:0 6px;border-radius:10px}.long-lead-tag,.release-change-tag{background:#fff7ed;color:var(--pdm-orange)}.release-inclusion-tag{background:#eff6ff;color:var(--pdm-blue)}.release-status-tag{background:var(--pdm-surface-soft);color:var(--pdm-muted)}.release-change-tag.is-新增{background:#ecfdf5;color:var(--pdm-green)}.release-change-tag.is-修改{background:#fff7ed;color:var(--pdm-orange)}.release-change-tag.is-删除{background:#fef2f2;color:var(--pdm-danger)}.pdm-release-create-form .pdm-release-reason{grid-column:1/-1}.emergency-decision{border-color:#f59e0b;background:#fffbeb}.pdm-release-frozen-snapshot{margin:12px 0;border:1px solid var(--pdm-border);border-radius:7px;overflow:hidden}.pdm-release-frozen-snapshot>header{display:flex;justify-content:space-between;gap:12px;align-items:center;padding:9px 11px;background:var(--pdm-surface-soft)}.pdm-release-frozen-snapshot>header>div:first-child{display:grid;gap:2px;min-width:0}.pdm-release-frozen-snapshot>header small{color:var(--pdm-muted)}.pdm-frozen-view-actions{display:flex;align-items:center;justify-content:flex-end;gap:10px;white-space:nowrap}.pdm-view-switch{display:inline-flex;padding:2px;border:1px solid var(--pdm-border);border-radius:6px;background:#fff}.pdm-view-switch button{height:24px;padding:0 9px;border:0;border-radius:4px;background:transparent;color:var(--pdm-muted)}.pdm-view-switch button.is-active{background:#0f9d90;color:#fff}.pdm-release-diff-summary{display:flex;align-items:center;gap:10px;padding:7px 11px;border-top:1px solid var(--pdm-border);border-bottom:1px solid var(--pdm-border)}.pdm-release-diff-summary small{margin-left:auto;color:var(--pdm-muted)}.pdm-release-diff-summary .is-added{color:var(--pdm-green)}.pdm-release-diff-summary .is-modified{color:var(--pdm-orange)}.pdm-release-diff-summary .is-removed{color:var(--pdm-danger)}.pdm-release-frozen-snapshot .pdm-table-scroll{max-height:230px}.pdm-item-comments-load-error{margin:0;padding:7px 11px}.pdm-item-comment-action{border:0;background:transparent;color:var(--pdm-green);white-space:nowrap}.pdm-frozen-item-name{padding-left:7px}.pdm-frozen-item-name small{display:block;margin-top:2px;color:var(--pdm-muted);font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.pdm-structure-marker{margin-right:4px;color:var(--pdm-green)}.pdm-release-integration-note{margin:0;padding:8px 11px;color:var(--pdm-green);background:#f0fdfa;border-top:1px solid #99f6e4}.pdm-release-completion-status{margin:0 0 8px;padding:8px 11px;border:1px solid #86efac;border-radius:7px;background:#f0fdf4;color:var(--pdm-green);font-weight:600}@media(max-width:900px){.pdm-release-type-row{grid-template-columns:repeat(2,minmax(0,1fr))}.pdm-release-frozen-snapshot>header{align-items:flex-start;flex-direction:column}.pdm-frozen-view-actions{width:100%;justify-content:space-between}}
 .release-detail-picker col:nth-child(8){width:11%}.release-detail-picker col:nth-child(9){width:11%}.release-detail-picker th:nth-child(8){white-space:normal;text-overflow:clip}
 .release-detail-picker{display:flex;width:100%;min-width:0;min-height:0;box-sizing:border-box;flex-direction:column}.release-detail-picker .pdm-table-scroll{width:100%;height:clamp(220px,calc(100dvh - 440px),630px);max-width:100%;max-height:none;box-sizing:border-box;overflow-x:hidden;overflow-y:auto}.release-detail-pagination,.release-list-pagination{display:flex;align-items:center;justify-content:flex-end;gap:8px;padding-top:8px;color:var(--pdm-muted)}.release-detail-pagination span,.release-list-pagination span{margin-right:auto}.release-detail-pagination button,.release-list-pagination button{width:28px;height:28px;border:1px solid var(--pdm-border);border-radius:6px;background:var(--pdm-surface);color:var(--pdm-text);cursor:pointer}.release-detail-pagination button:disabled,.release-list-pagination button:disabled{cursor:not-allowed;opacity:.45}.release-detail-pagination strong,.release-list-pagination strong{min-width:54px;text-align:center;color:var(--pdm-text)}
 .pdm-release-frozen-snapshot{display:flex;min-width:0;min-height:0;flex-direction:column}.pdm-release-frozen-snapshot .pdm-table-scroll{width:100%;height:clamp(220px,calc(100dvh - 470px),620px);max-width:100%;max-height:none;box-sizing:border-box;overflow-x:hidden;overflow-y:auto}.pdm-release-frozen-snapshot .release-list-pagination{padding:8px 11px}
@@ -1167,8 +1241,6 @@ async function saveItemComment() {
 .pdm-release-frozen-table.is-change-view .release-change-tag{padding:0 3px;white-space:nowrap}
 .release-status-tag.is-blocked{background:#fff7ed;color:var(--pdm-orange);font-weight:600}
 .pdm-release-parameter-slot>.pdm-inline-warning{margin:0 0 6px;padding:6px 8px;border-radius:5px;background:#fff7ed;color:var(--pdm-orange)}
-.pdm-drawing-delivery-overrides{grid-column:1/-1;display:grid;gap:6px;padding:10px;border:1px solid var(--pdm-border);border-radius:7px;background:var(--pdm-surface-soft)}
-.pdm-release-create-header.has-drawing-delivery{grid-template-rows:auto minmax(82px,auto);min-height:210px}.pdm-release-create-header.has-drawing-delivery .pdm-release-type-row{row-gap:8px}
-.pdm-drawing-delivery-row{display:grid;grid-template-columns:minmax(160px,1fr) 110px 145px;gap:8px;align-items:center}.pdm-drawing-delivery-row span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.pdm-drawing-delivery-row input,.pdm-drawing-delivery-row select{width:100%;box-sizing:border-box}
-@media(max-width:700px){.pdm-drawing-delivery-row{grid-template-columns:1fr 1fr}.pdm-drawing-delivery-row span{grid-column:1/-1}}
+.pdm-release-create-header.has-drawing-delivery{grid-template-rows:auto minmax(82px,auto);min-height:210px}.pdm-release-create-header.has-drawing-delivery .pdm-release-type-row{grid-template-columns:repeat(4,minmax(0,1fr));row-gap:8px}.pdm-release-create-header.has-drawing-delivery .pdm-release-draft-actions{grid-column:1/-1}.pdm-release-assembly-note{margin-left:5px;color:var(--pdm-green);font-size:11px;font-weight:600;line-height:1.2}
+@media(max-width:900px){.pdm-release-create-header.has-drawing-delivery .pdm-release-type-row{grid-template-columns:repeat(2,minmax(0,1fr))}}
 </style>

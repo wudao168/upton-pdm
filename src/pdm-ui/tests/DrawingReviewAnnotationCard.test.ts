@@ -177,7 +177,8 @@ describe('DrawingReviewAnnotationCard', () => {
     const changes: DrawingReviewPackage = { ...review, items: [{ ...review.items[0]!, drawingState: 'ChangesRequested', drawingComment: '尺寸标注需修改' }] }
     const wrapper = mountCard(changes)
 
-    expect(wrapper.text()).toContain('该2D工程图已退回（待修改），其余图纸可继续审核')
+    expect(wrapper.find('.drawing-review-decision-bar__route').exists()).toBe(false)
+    expect(wrapper.get<HTMLTextAreaElement>('textarea').element.value).toBe('尺寸标注需修改')
     const revokeButton = wrapper.get('.drawing-review-decision-buttons .is-revoke')
     expect(revokeButton.text()).toBe('撤销')
     expect(revokeButton.attributes('title')).toBe('撤销退回结论')
@@ -189,23 +190,25 @@ describe('DrawingReviewAnnotationCard', () => {
     confirm.mockRestore()
   })
 
-  it('退回图档的设计者可直接重新提交审核并显示退回说明', async () => {
+  it('退回图档仅由审核发起人重新提交并显示退回说明', async () => {
     const confirm = vi.spyOn(ElMessageBox, 'confirm').mockResolvedValue({ action: 'confirm' } as never)
     const changes: DrawingReviewPackage = { ...review, items: [{ ...review.items[0]!, drawingState: 'ChangesRequested', drawingComment: '尺寸标注需修改' }] }
-    const wrapper = mountCard(changes, 'drawing-designer', { canResubmit: true })
+    const wrapper = mountCard(changes, 'submitter', { canResubmit: true })
 
-    expect(wrapper.text()).toContain('退回说明：尺寸标注需修改')
-    expect(wrapper.text()).toContain('可直接重新提交审核')
-    expect(wrapper.text()).toContain('自动采用最新版本')
-    expect(wrapper.findAll('.drawing-review-decision-buttons button').map(button => button.text())).toEqual(['重新提交'])
+    expect(wrapper.get<HTMLTextAreaElement>('textarea').element.value).toBe('尺寸标注需修改')
+    expect(wrapper.get('textarea').attributes('disabled')).toBeDefined()
+    expect(wrapper.find('.drawing-review-decision-bar__route').exists()).toBe(false)
+    expect(wrapper.find('.drawing-review-decision-bar__comment').exists()).toBe(false)
+    expect(wrapper.findAll('.drawing-review-decision-buttons button')).toHaveLength(0)
+    expect(wrapper.find('.drawing-review-decision-bar__hint').exists()).toBe(false)
     expect(wrapper.find('.is-reject').exists()).toBe(false)
     expect(wrapper.find('.is-revoke').exists()).toBe(false)
 
-    await wrapper.get('.is-approve').trigger('click')
-    await Promise.resolve()
-    await Promise.resolve()
-    expect(confirm).toHaveBeenCalled()
-    expect(wrapper.emitted('resubmit')).toEqual([['review-1', 'item-1']])
+    expect(wrapper.emitted('resubmit')).toBeUndefined()
+    await wrapper.setProps({ selectedDocumentId: 'drawing-2' })
+    expect(wrapper.get<HTMLTextAreaElement>('textarea').element.value).toBe('')
+    await wrapper.setProps({ selectedDocumentId: 'drawing-1' })
+    expect(wrapper.get<HTMLTextAreaElement>('textarea').element.value).toBe('尺寸标注需修改')
     confirm.mockRestore()
   })
 

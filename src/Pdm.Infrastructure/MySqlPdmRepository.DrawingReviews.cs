@@ -316,7 +316,7 @@ public sealed partial class MySqlPdmRepository
             "SELECT item.package_id,package.state package_state,item.drawing_state FROM drawing_review_item item JOIN drawing_review_package package ON package.id=item.package_id WHERE item.id=@ItemId FOR UPDATE",
             new { ItemId = itemId }, transaction, cancellationToken: cancellationToken));
         if (link is null) throw new PdmNotFoundException("图纸审核项不存在。");
-        if (link.PackageState is not (nameof(DrawingReviewPackageState.InReview) or nameof(DrawingReviewPackageState.PendingSupervisorApproval)))
+        if (link.PackageState is not (nameof(DrawingReviewPackageState.InReview) or nameof(DrawingReviewPackageState.PendingSupervisorApproval) or nameof(DrawingReviewPackageState.ChangesRequested)))
             throw new PdmConflictException("当前图纸审核单不允许重新提交审核。");
         if (link.DrawingState != DrawingReviewTargetState.ChangesRequested.ToString())
             throw new PdmConflictException("只有已退回（待修改）的图档可以重新提交审核。");
@@ -340,7 +340,7 @@ public sealed partial class MySqlPdmRepository
         if (affected != 1) throw new PdmConflictException("该图档已经重新提交或审核结论已变化，请刷新后重试。");
         // 已提交机械主管的审核单：单张退回图修改后重新提交，审核单退回审图节点重新审核。
         await connection.ExecuteAsync(new CommandDefinition(
-            "UPDATE drawing_review_package SET state='InReview',supervisor_reviewed_by=NULL,supervisor_reviewed_by_name=NULL,supervisor_reviewed_at=NULL,supervisor_comment=NULL WHERE id=@PackageId AND state='PendingSupervisorApproval'",
+            "UPDATE drawing_review_package SET state='InReview',supervisor_reviewed_by=NULL,supervisor_reviewed_by_name=NULL,supervisor_reviewed_at=NULL,supervisor_comment=NULL WHERE id=@PackageId AND state IN ('PendingSupervisorApproval','ChangesRequested')",
             new { link.PackageId }, transaction, cancellationToken: cancellationToken));
         await transaction.CommitAsync(cancellationToken);
         return await FindDrawingReviewPackageAsync(link.PackageId, cancellationToken)

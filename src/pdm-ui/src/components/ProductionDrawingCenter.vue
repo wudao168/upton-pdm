@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
-import { downloadDocumentPreviewFile, downloadProductionDrawingArchive, listProductionDrawings, readDocumentVersionFile, updateProductionDrawingDelivery } from '../api'
+import { downloadDocumentPreviewFile, downloadProductionDrawingArchive, listProductionDrawings, updateProductionDrawingDelivery } from '../api'
 import type { BomItem, DrawingPriority, ProductionDrawingItem } from '../types'
 import { useUserDisplayName } from '../userDisplay'
 import { u9UnitName } from '../u9Units'
@@ -11,14 +11,16 @@ const columnDefinitions: { key: ColumnKey; label: string }[] = [
   { key: 'drawingNumber', label: '物料编码' }, { key: 'name', label: '名称' }, { key: 'parentDrawingNumber', label: '上级物料编码' }, { key: 'specification', label: '型号' }, { key: 'revision', label: '版本' },
   { key: 'remark', label: '备注' }, { key: 'brand', label: '品牌' }, { key: 'material', label: '材质' }, { key: 'surfaceTreatment', label: '表面处理' }, { key: 'heatTreatment', label: '热处理' },
   { key: 'weight', label: '重量' }, { key: 'quantity', label: '数量' }, { key: 'quantityReference', label: '发布 总/源' }, { key: 'drawing', label: '图纸' },
-  { key: 'issue', label: '问题' }, { key: 'dataStatus', label: '资料状态' }, { key: 'priority', label: '紧急程度' }, { key: 'requiredOn', label: '需求日期' }, { key: 'deliveryStatus', label: '交付状态' },
+  { key: 'issue', label: '问题' }, { key: 'dataStatus', label: '资料状态' }, { key: 'priority', label: '紧急程度' }, { key: 'requiredOn', label: '需求货期' }, { key: 'deliveryStatus', label: '交付状态' },
 ]
-const defaultColumns: ColumnKey[] = ['drawingNumber', 'name', 'specification', 'revision', 'remark', 'material', 'surfaceTreatment', 'heatTreatment', 'quantity', 'drawing']
+const defaultColumns: ColumnKey[] = ['drawingNumber', 'name', 'specification', 'revision', 'remark', 'material', 'surfaceTreatment', 'heatTreatment', 'quantity', 'drawing', 'priority', 'requiredOn']
 const props = defineProps<{ token: string; canManage: boolean; username?: string }>()
 const displayUserName = useUserDisplayName()
 const rows = ref<ProductionDrawingItem[]>([])
 const history = ref(false)
 const query = ref('')
+const projectCodeFilter = ref('')
+const publishedOnFilter = ref('')
 const publisherFilter = ref('')
 const divisionFilter = ref('')
 const managerFilter = ref('')
@@ -55,6 +57,9 @@ function saveColumns() {
   columnSettingsOpen.value = false
 }
 const bomItems = (item: ProductionDrawingItem) => item.bomItems ?? []
+const modelFiles = (item: ProductionDrawingItem) => item.modelFiles ?? []
+const canDownloadStep = (items: ProductionDrawingItem[]) => items.length > 0
+  && items.every(item => modelFiles(item).length > 0 && modelFiles(item).every(file => file.stepReady && !!file.versionId))
 function joinedBomValue(item: ProductionDrawingItem, key: keyof BomItem) {
   const values = bomItems(item).map(bom => bom[key]).filter(value => value !== null && value !== undefined && String(value).trim() !== '')
   return [...new Set(values.map(String))].join('、')
@@ -93,7 +98,9 @@ const publishers = filterOptions('publishedBy')
 const divisions = filterOptions('division')
 const managers = filterOptions('projectManager')
 const filteredRows = computed(() => rows.value.filter(item =>
-  (!publisherFilter.value || item.publishedBy === publisherFilter.value)
+  (!projectCodeFilter.value.trim() || item.projectCode.toLocaleLowerCase().includes(projectCodeFilter.value.trim().toLocaleLowerCase()))
+  && (!publishedOnFilter.value || item.publishedAt.slice(0, 10) === publishedOnFilter.value)
+  && (!publisherFilter.value || item.publishedBy === publisherFilter.value)
   && (!divisionFilter.value || item.division === divisionFilter.value)
   && (!managerFilter.value || item.projectManager === managerFilter.value)))
 
@@ -165,6 +172,8 @@ async function locateScan() {
     && item.revision === parts[2] && item.model === model)
   if (!found) { error.value = '该图纸版本不存在，或当前账号没有查看权限。'; return }
   query.value = ''
+  projectCodeFilter.value = ''
+  publishedOnFilter.value = ''
   publisherFilter.value = ''
   divisionFilter.value = ''
   managerFilter.value = ''
@@ -173,10 +182,14 @@ async function locateScan() {
   choose(found)
   error.value = ''
 }
-async function downloadBatch(items: ProductionDrawingItem[], format: 'Pdf' | 'Source') {
+async function downloadBatch(items: ProductionDrawingItem[], format: 'Pdf' | 'Step') {
   if (!project.value || !items.length || downloading.value) return
   if (format === 'Pdf' && items.some(item => !item.pdfReady)) {
-    error.value = '所选图纸中有 PDF 待转换，不能用旧版替代；可先下载正式源图。'
+    error.value = '所选图纸中有 PDF 待转换，不能用旧版替代；请稍后重试。'
+    return
+  }
+  if (format === 'Step' && !canDownloadStep(items)) {
+    error.value = '所选项目存在未关联同包三维模型或 STEP 待转换项，不能用 SolidWorks 源文件替代。'
     return
   }
   if (items.some(item => !item.isCurrent) && !window.confirm('所选图纸包含已被替代的历史正式版，确定下载？')) return
@@ -192,17 +205,12 @@ async function downloadPdf(item: ProductionDrawingItem) {
   try { await downloadDocumentPreviewFile(item.documentId, item.versionId, `${item.drawingNumber}_${item.revision}.pdf`, props.token) }
   catch (cause) { error.value = cause instanceof Error ? cause.message : 'PDF 下载失败。' }
 }
-async function downloadSource(item: ProductionDrawingItem) {
-  if (!item.isCurrent && !window.confirm(`${item.drawingNumber} ${item.revision} 已被替代，确定下载历史源图？`)) return
+async function downloadStep(item: ProductionDrawingItem, model: NonNullable<ProductionDrawingItem['modelFiles']>[number]) {
+  if (!model.stepReady || !model.versionId) return
+  if (!item.isCurrent && !window.confirm(`${item.drawingNumber} ${item.revision} 已被替代，确定下载历史 STEP？`)) return
   try {
-    const blob = await readDocumentVersionFile(item.documentId, item.versionId, props.token, true)
-    const url = URL.createObjectURL(blob)
-    const link = document.createElement('a')
-    link.href = url
-    link.download = `${item.drawingNumber}_${item.revision}.slddrw`
-    link.click()
-    window.setTimeout(() => URL.revokeObjectURL(url), 60000)
-  } catch (cause) { error.value = cause instanceof Error ? cause.message : '源图下载失败。' }
+    await downloadDocumentPreviewFile(model.documentId, model.versionId, `${model.drawingNumber}_${model.revision}.step`, props.token)
+  } catch (cause) { error.value = cause instanceof Error ? cause.message : 'STEP 下载失败。' }
 }
 async function saveDelivery() {
   const item = selected.value
@@ -219,7 +227,7 @@ async function saveDelivery() {
 }
 watch(() => props.token, refresh)
 watch(history, refresh)
-watch([publisherFilter, divisionFilter, managerFilter], () => {
+watch([projectCodeFilter, publishedOnFilter, publisherFilter, divisionFilter, managerFilter], () => {
   if (!projects.value.some(item => item.id === projectId.value)) { projectId.value = ''; choosePackage(''); return }
   if (!packages.value.some(item => item.id === packageId.value)) choosePackage(packages.value[0]?.id ?? '')
   if (!drawings.value.some(item => item.versionId === versionId.value)) versionId.value = ''
@@ -232,7 +240,9 @@ onMounted(() => { restoreColumns(); void refresh() })
 <template>
   <section class="pdm-panel production-drawings" aria-label="生产图纸中心">
     <div class="production-drawings__filters">
-      <input v-model="query" type="search" placeholder="搜索项目、型号、图号或发布包" aria-label="搜索生产图纸">
+      <input v-model="query" class="production-drawings__query" type="search" placeholder="搜索项目、型号、图号或发布包" aria-label="搜索生产图纸">
+      <input v-model.trim="projectCodeFilter" class="production-drawings__project-code" type="search" placeholder="项目号" aria-label="按项目号筛选">
+      <input v-model="publishedOnFilter" class="production-drawings__published-on" type="date" aria-label="按发布日期筛选">
       <select v-model="publisherFilter" aria-label="按发布人筛选"><option value="">全部发布人</option><option v-for="name in publishers" :key="name" :value="name">{{ displayUserName(name) }}</option></select>
       <select v-model="divisionFilter" aria-label="按事业部筛选"><option value="">全部事业部</option><option v-for="name in divisions" :key="name" :value="name">{{ name }}</option></select>
       <select v-model="managerFilter" aria-label="按项目经理筛选"><option value="">全部项目经理</option><option v-for="name in managers" :key="name" :value="name">{{ displayUserName(name) }}</option></select>
@@ -246,7 +256,10 @@ onMounted(() => { restoreColumns(); void refresh() })
         <button v-for="entry in projects" :key="entry.id" type="button" class="production-drawings__project"
           :class="{ 'is-selected': projectId === entry.id }" @click="chooseProject(entry.id)">
           <span class="production-drawings__project-title"><strong>{{ entry.code }}</strong> · {{ entry.name }}</span>
-          <small>{{ new Set(entry.drawings.map(item => item.releasePackageId)).size }} 个发布包 · {{ entry.drawings.length }} 张正式图纸</small>
+          <small class="production-drawings__project-meta">
+            <span>{{ entry.drawings.length }} 张图纸</span>
+            <span>{{ entry.latestPublishedAt.slice(0, 10) }}</span>
+          </small>
         </button>
         <p v-if="!projects.length">暂无符合条件的正式图纸项目</p>
       </nav>
@@ -255,30 +268,36 @@ onMounted(() => { restoreColumns(); void refresh() })
           <button v-for="entry in packages" :key="entry.id" type="button" class="production-drawings__package"
             :class="{ 'is-selected': packageId === entry.id }" @click="choosePackage(entry.id)">
             <strong>{{ entry.number }}</strong>
-            <small>{{ entry.drawings.length }} 张图纸 · {{ entry.drawings.filter(item => item.pdfReady).length }} 张 PDF 可用 · {{ entry.publishedAt.slice(0, 10) }}</small>
+            <small>{{ entry.drawings.length }} 张图纸 · {{ entry.drawings.filter(item => item.pdfReady).length }} 张 PDF 可用 · {{ entry.drawings.reduce((count, item) => count + modelFiles(item).filter(model => model.stepReady).length, 0) }} 个 STEP 可用 · {{ entry.publishedAt.slice(0, 10) }}</small>
           </button>
         </div>
         <template v-if="selectedPackage">
           <div class="production-drawings__selection">
             <label><input type="checkbox" aria-label="全选本包图纸" :checked="checked.length === drawings.length && drawings.length > 0" @change="checkedIds = ($event.target as HTMLInputElement).checked ? drawings.map(item => item.versionId) : []"> 全选本包</label>
             <span>已选 {{ checked.length }} 张</span>
-            <button type="button" :disabled="!checked.length || downloading" @click="downloadBatch(checked, 'Source')">批量下载源图</button>
+            <button type="button" :disabled="!checked.length || downloading" @click="downloadBatch(checked, 'Step')">批量下载 STEP</button>
             <button type="button" :disabled="!checked.length || downloading" @click="downloadBatch(checked, 'Pdf')">批量下载 PDF</button>
             <div class="production-drawings__toolbar-actions">
               <button type="button" class="pdm-secondary-action" @click="columnDraft = [...visibleColumnKeys]; columnSettingsOpen = true">列设置</button>
-              <button type="button" class="pdm-secondary-action" :disabled="downloading || !drawings.length" @click="downloadBatch(drawings, 'Source')">下载本包源图</button>
+              <button type="button" class="pdm-secondary-action" :disabled="downloading || !drawings.length" @click="downloadBatch(drawings, 'Step')">下载本包 STEP</button>
               <button type="button" class="pdm-secondary-action" :disabled="downloading || !drawings.length" @click="downloadBatch(drawings, 'Pdf')">下载本包 PDF</button>
             </div>
           </div>
           <div class="pdm-table-scroll"><table class="pdm-edit-table">
-            <thead><tr><th>选择</th><th v-for="column in visibleColumns" :key="column.key">{{ column.label }}</th></tr></thead>
+            <thead><tr><th>选择</th><th v-for="column in visibleColumns" :key="column.key" :class="`production-drawings__column--${column.key}`">{{ column.label }}</th></tr></thead>
             <tbody>
               <tr v-for="item in drawings" :key="item.versionId" :class="{ 'is-selected': versionId === item.versionId }" @click="choose(item)">
                 <td><input v-model="checkedIds" type="checkbox" :value="item.versionId" :aria-label="`选择 ${item.drawingNumber} ${item.revision}`" @click.stop></td>
-                <td v-for="column in visibleColumns" :key="column.key" :title="column.key === 'quantityReference' && item.bomItems?.length ? '发布包冻结了BOM数量，但未冻结设计树来源数量。' : columnValue(item, column.key)">
+                <td v-for="column in visibleColumns" :key="column.key" :class="`production-drawings__column--${column.key}`" :title="column.key === 'quantityReference' && item.bomItems?.length ? '发布包冻结了BOM数量，但未冻结设计树来源数量。' : columnValue(item, column.key)">
                   <template v-if="column.key === 'drawing'">
                     <button type="button" class="production-drawings__file-link" :disabled="!item.pdfReady" :aria-label="`下载 ${item.drawingNumber} PDF`" @click.stop="downloadPdf(item)">PDF</button>
-                    <button type="button" class="production-drawings__file-link" :aria-label="`下载 ${item.drawingNumber} 源图`" @click.stop="downloadSource(item)">源图</button>
+                    <template v-if="modelFiles(item).length">
+                      <template v-for="model in modelFiles(item)" :key="`${model.documentId}-${model.versionId ?? 'pending'}`">
+                        <button v-if="model.stepReady && model.versionId" type="button" class="production-drawings__file-link" :aria-label="`下载 ${model.drawingNumber} STEP`" @click.stop="downloadStep(item, model)">STEP</button>
+                        <small v-else :title="model.versionId ? '正式模型版本的 STEP 尚未转换完成' : '该模型没有随此发布包形成正式版本'">{{ model.versionId ? 'STEP待转换' : '未随包发布' }}</small>
+                      </template>
+                    </template>
+                    <small v-else>无关联3D模型</small>
                     <small v-if="item.legacyUnverified">历史图面未校验</small>
                   </template>
                   <template v-else>{{ columnValue(item, column.key) }}<small v-if="column.key === 'revision' && columnValue(item, column.key) !== item.revision">图纸版 {{ item.revision }}</small><small v-if="column.key === 'revision' && !item.isCurrent">已被替代</small></template>
@@ -293,7 +312,11 @@ onMounted(() => { restoreColumns(); void refresh() })
               <p>需求日期：{{ selected.requiredOn || '未设置' }}</p></div>
             <div class="production-drawings__actions">
               <button type="button" class="pdm-primary-action" :disabled="!selected.pdfReady" @click="downloadPdf(selected)">{{ selected.pdfReady ? (selected.isCurrent ? '下载正式 PDF' : '下载历史 PDF') : 'PDF 待转换' }}</button>
-              <button type="button" class="pdm-secondary-action" @click="downloadSource(selected)">{{ selected.isCurrent ? '下载正式源图' : '下载历史源图' }}</button>
+              <template v-for="model in modelFiles(selected)" :key="`${model.documentId}-${model.versionId ?? 'pending'}`">
+                <button v-if="model.stepReady && model.versionId" type="button" class="pdm-secondary-action" @click="downloadStep(selected, model)">下载 {{ model.drawingNumber }} STEP</button>
+                <span v-else class="production-drawings__step-status">{{ model.versionId ? `${model.drawingNumber}：STEP待转换` : `${model.drawingNumber}：未随包发布` }}</span>
+              </template>
+              <span v-if="!modelFiles(selected).length" class="production-drawings__step-status">未关联三维模型</span>
             </div>
             <form v-if="canManage && selected.isCurrent" class="production-drawings__edit" @submit.prevent="saveDelivery">
               <strong>调整发图信息（不改变图纸版本，留审计记录）</strong>
@@ -324,6 +347,7 @@ onMounted(() => { restoreColumns(); void refresh() })
 .production-drawings__project,.production-drawings__package{height:40px;min-height:40px;box-sizing:border-box;gap:0;padding:4px 8px;line-height:15px;overflow:hidden}
 .production-drawings__project-title,.production-drawings__package strong,.production-drawings__project small,.production-drawings__package small{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .production-drawings__project .production-drawings__project-title{color:inherit}
+.production-drawings__project .production-drawings__project-meta{display:flex;justify-content:space-between;gap:8px}.production-drawings__project-meta span:first-child{min-width:0;overflow:hidden;text-overflow:ellipsis}.production-drawings__project-meta span:last-child{flex:0 0 auto;text-align:right}
 .production-drawings__packages{padding:0 0 8px}
 .production-drawings__selection{margin:0 0 6px}
 .production-drawings__selection>label,.production-drawings__selection>span,.production-drawings__selection>button,.production-drawings__selection .pdm-secondary-action{box-sizing:border-box;min-height:34px;height:34px;font-size:12px}
@@ -333,7 +357,9 @@ onMounted(() => { restoreColumns(); void refresh() })
 .production-drawings__selection .production-drawings__toolbar-actions{align-items:center}
 .production-drawings__selection .production-drawings__toolbar-actions{margin-left:auto}
 @media(max-width:950px){.production-drawings__filters>input{flex-basis:190px;width:190px;min-width:190px}.production-drawings__project{min-width:190px}.production-drawings__selection .production-drawings__toolbar-actions{margin-left:0}}
-.production-drawings table{min-width:1100px}.production-drawings th,.production-drawings td{white-space:nowrap}.production-drawings td{max-width:220px;overflow:hidden;text-overflow:ellipsis}.production-drawings__file-link{border:0;background:none;color:var(--pdm-primary);cursor:pointer;padding:0 6px 0 0}.production-drawings__file-link:disabled{color:var(--pdm-muted);cursor:not-allowed}
+.production-drawings__filters>.production-drawings__project-code{flex:0 0 104px;width:104px;min-width:104px}.production-drawings__filters>.production-drawings__published-on{flex:0 0 132px;width:132px;min-width:132px}
+.production-drawings table{min-width:0;table-layout:fixed}.production-drawings th,.production-drawings td{white-space:nowrap}.production-drawings .pdm-edit-table th,.production-drawings .pdm-edit-table td{text-align:center}.production-drawings td{max-width:220px;overflow:hidden;text-overflow:ellipsis}.production-drawings .production-drawings__column--priority{width:64px;max-width:64px}.production-drawings .production-drawings__column--requiredOn{width:92px;max-width:92px}.production-drawings__file-link{border:0;background:none;color:var(--pdm-primary);cursor:pointer;padding:0 3px}.production-drawings__file-link:disabled{color:var(--pdm-muted);cursor:not-allowed}
 .production-drawings__column-backdrop{position:fixed;inset:0;z-index:1000;display:grid;place-items:center;background:#0006;padding:20px}.production-drawings__column-dialog{width:min(520px,100%);max-height:90vh;overflow:auto;background:#fff;border-radius:8px;padding:20px;box-shadow:0 18px 55px #0003}.production-drawings__column-dialog header,.production-drawings__column-dialog footer{display:flex;align-items:center;justify-content:space-between;gap:12px}.production-drawings__column-dialog h2{margin:0;font-size:18px}.production-drawings__column-dialog header button{border:0;background:none;font-size:24px;cursor:pointer}.production-drawings__column-dialog p{color:var(--pdm-muted)}.production-drawings__column-options{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;margin:18px 0}.production-drawings__column-options label{display:flex;align-items:center;gap:6px;white-space:nowrap}.production-drawings__column-dialog footer{justify-content:flex-end}
 @media(max-width:600px){.production-drawings__column-options{grid-template-columns:repeat(2,minmax(0,1fr))}}
+.production-drawings__step-status{color:var(--pdm-muted);font-size:11px}
 </style>

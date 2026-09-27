@@ -37,6 +37,7 @@ public sealed class MaterialU9SyncBatchHostedService(
         await using var scope = serviceProvider.CreateAsyncScope();
         var repository = scope.ServiceProvider.GetRequiredService<IMaterialRepository>();
         var synchronizer = scope.ServiceProvider.GetRequiredService<MaterialCodeSynchronizationService>();
+        var automation = scope.ServiceProvider.GetRequiredService<ApprovalU9AutomationService>();
         var processedAny = false;
         for (var index = 0; index < 50; index++)
         {
@@ -58,6 +59,9 @@ public sealed class MaterialU9SyncBatchHostedService(
                     result.Message,
                     timeProvider.GetUtcNow(),
                     CancellationToken.None);
+                if (result.Completed)
+                    await ContinueHeaderBomSynchronizationAsync(repository, automation, claim.Item.TaskId,
+                        claim.Batch.RequestedBy, cancellationToken);
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
@@ -76,5 +80,30 @@ public sealed class MaterialU9SyncBatchHostedService(
             }
         }
         return processedAny;
+    }
+
+    private async Task ContinueHeaderBomSynchronizationAsync(
+        IMaterialRepository materials,
+        ApprovalU9AutomationService automation,
+        Guid syncTaskId,
+        string actor,
+        CancellationToken cancellationToken)
+    {
+        var application = (await materials.ListMaterialCodeApplicationsAsync(null, null, cancellationToken))
+            .FirstOrDefault(item => item.BomHeaderKind is not null && item.SyncTaskId == syncTaskId);
+        if (application is null) return;
+        try
+        {
+            var result = await automation.ContinueAfterMaterialSyncAsync(application.ProjectId, actor, cancellationToken);
+            logger.LogInformation("BOM表头料号 {ApplicationId} 同步完成后已续跑 U9C BOM：{Stage}。", application.Id, result.Stage);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception exception)
+        {
+            logger.LogWarning(exception, "BOM表头料号 {ApplicationId} 已同步，但自动续跑 U9C BOM 失败。", application.Id);
+        }
     }
 }

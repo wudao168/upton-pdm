@@ -162,8 +162,8 @@ public sealed record ReleasePreviewItemRetryResult(bool Ok, ReleasePreviewItemRe
 public sealed record ReleasePreviewItemsRetryResult(bool Ok, IReadOnlyList<ReleasePreviewItemResult> Items, string Message);
 
 /// <summary>
-/// <paramref name="AssignedReviewers"/> 为空表示不指定审核人，由全部具备审图权限的人员并行处理；
-/// <paramref name="AssignedReviewer"/> 兼容旧客户端提交的单值指定审核人。
+/// <paramref name="AssignedReviewers"/> 必须至少指定一位审核人；审核权限仅用于校验指定人员是否有资格处理该节点。
+/// <paramref name="AssignedReviewer"/> 兼容旧客户端提交的单值指定审核人，仍必须提供其中之一。
 /// </summary>
 public sealed record CreateDrawingReviewRequest(IReadOnlyList<Guid>? ModelDocumentIds, IReadOnlyList<string>? AssignedReviewers, string? AssignedReviewer = null);
 
@@ -321,7 +321,8 @@ public sealed record CreateReleasePackageRequest(
     int WholeSetMultiplier = 1,
     string DrawingPriority = "Normal",
     DateOnly? DrawingRequiredOn = null,
-    IReadOnlyDictionary<Guid, DrawingDeliveryOverride>? DrawingDeliveryOverrides = null);
+    IReadOnlyDictionary<Guid, DrawingDeliveryOverride>? DrawingDeliveryOverrides = null,
+    IReadOnlyDictionary<Guid, DrawingDeliveryOverride>? BomItemDeliveryOverrides = null);
 
 public sealed record UpdateReleasePackageDraftRequest(
     string? ChangeReason = null,
@@ -330,7 +331,8 @@ public sealed record UpdateReleasePackageDraftRequest(
     int WholeSetMultiplier = 1,
     string? DrawingPriority = null,
     DateOnly? DrawingRequiredOn = null,
-    IReadOnlyDictionary<Guid, DrawingDeliveryOverride>? DrawingDeliveryOverrides = null);
+    IReadOnlyDictionary<Guid, DrawingDeliveryOverride>? DrawingDeliveryOverrides = null,
+    IReadOnlyDictionary<Guid, DrawingDeliveryOverride>? BomItemDeliveryOverrides = null);
 
 public sealed record UpdateDrawingDeliveryRequest(string Priority, DateOnly RequiredOn);
 

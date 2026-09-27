@@ -1,8 +1,8 @@
 <script setup lang="ts">
-import { Check, RotateCcw, Send, X } from '@lucide/vue'
+import { Check, RotateCcw, X } from '@lucide/vue'
 import { ElMessage } from '../statusMessage'
 import { ElMessageBox } from 'element-plus'
-import { computed, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { drawingReviewAssignedReviewerLabel, drawingReviewAssignedReviewerPool, drawingReviewPackageStateLabel } from '../drawingReviewLabels'
 import type { AddDrawingReviewMarkupInput, DrawingReviewDecision, DrawingReviewPackage, DrawingReviewTarget } from '../types'
 import { useUserDisplayName } from '../userDisplay'
@@ -29,7 +29,6 @@ const emit = defineEmits<{
   resolveMarkup: [packageId: string, markupId: string]
   decide: [packageId: string, itemId: string, target: DrawingReviewTarget, decision: DrawingReviewDecision, comment: string]
   decideSupervisor: [packageId: string, decision: DrawingReviewDecision, comment: string]
-  resubmit: [packageId: string, itemId: string]
 }>()
 
 const decisionComment = ref('')
@@ -56,6 +55,11 @@ const supervisorApproval = computed(() => activePackage.value?.state === 'Pendin
 const canAct = computed(() => supervisorApproval.value ? canActAsSupervisor.value : canActOnTarget.value)
 const itemApproved = computed(() => activeItem.value?.drawingState === 'Approved' || activeItem.value?.drawingState === 'Marked')
 const itemChangesRequested = computed(() => activeItem.value?.drawingState === 'ChangesRequested')
+const displayedDecisionComment = computed({
+  get: () => itemChangesRequested.value ? activeItem.value?.drawingComment ?? '' : decisionComment.value,
+  set: value => { if (!itemChangesRequested.value) decisionComment.value = value },
+})
+watch(() => props.selectedDocumentId, () => { decisionComment.value = '' })
 const canRevoke = computed(() => props.canDecide
   && !props.pending
   && (itemApproved.value || itemChangesRequested.value)
@@ -88,7 +92,7 @@ const decisionRouteLabel = computed(() => {
     return `该2D工程图已通过审核，${finishedPackageLabels[activePackage.value.state] ?? drawingReviewPackageStateLabel(activePackage.value.state)}`
   }
   if (itemChangesRequested.value) return canResubmit.value
-    ? '该2D工程图已退回（待修改）：可直接重新提交审核；如已修改并提交存档，将自动采用最新版本'
+    ? '该2D工程图已退回（待修改）：仅审核发起人可重新提交；如已修改并提交存档，将自动采用最新版本'
     : '该2D工程图已退回（待修改），其余图纸可继续审核'
   if (!reviewActive.value) return drawingReviewPackageStateLabel(activePackage.value.state)
   return routeLabel.value
@@ -155,31 +159,16 @@ async function revoke() {
   decisionComment.value = ''
 }
 
-async function resubmit() {
-  const packageValue = activePackage.value
-  const item = activeItem.value
-  if (!packageValue || !item || !canResubmit.value) return
-  await ElMessageBox.confirm(
-    '确认按该图档的最新存档版本重新提交审核？只影响这一张图纸，同一审核单其他图纸不受影响。',
-    '重新提交图纸审核',
-    { confirmButtonText: '确认提交', cancelButtonText: '取消', type: 'info' },
-  )
-  emit('resubmit', packageValue.id, item.id)
-}
 </script>
 
 <template>
   <!-- 审核结论栏常驻显示：不可操作时输入与按钮一起禁用，通过后“通过”按钮就地变成“撤销”。 -->
   <section class="drawing-review-decision-bar" aria-label="图纸审核结论">
     <span class="drawing-review-decision-bar__node" :class="supervisorApproval ? 'is-pending' : 'is-warning'">{{ supervisorApproval ? '批准' : '审核' }}</span>
-    <textarea v-model="decisionComment" rows="1" placeholder="审核意见；退回时必填" aria-label="审核意见" :disabled="!canAct" />
-    <span class="drawing-review-decision-bar__route">{{ decisionRouteLabel }}</span>
-    <span v-if="itemChangesRequested && activeItem?.drawingComment" class="drawing-review-decision-bar__comment" :title="activeItem.drawingComment">退回说明：{{ activeItem.drawingComment }}</span>
+    <textarea v-model="displayedDecisionComment" rows="1" placeholder="审核意见；退回时必填" aria-label="审核意见" :disabled="!canAct" />
+    <span v-if="!itemChangesRequested" class="drawing-review-decision-bar__route">{{ decisionRouteLabel }}</span>
     <div class="drawing-review-decision-buttons">
-      <template v-if="canResubmit">
-        <button type="button" class="is-approve" :disabled="pending" @click="resubmit()"><Send :size="14" />重新提交</button>
-      </template>
-      <template v-else>
+      <template v-if="!canResubmit">
         <span v-if="canActAsSupervisor" class="drawing-review-decision-bar__hint">请在下方明细中勾选图纸后批量批准</span>
         <template v-else>
           <button type="button" class="is-reject" :disabled="pending || !canAct" @click="submit('RequestChanges')"><X :size="14" />退回</button>
@@ -205,7 +194,7 @@ async function resubmit() {
 .drawing-review-decision-bar__node.is-pending{background:#e8f0fe;color:#2563eb}
 .drawing-review-decision-bar textarea{flex:1 1 160px;min-width:110px;height:28px;box-sizing:border-box;padding:5px 7px;border:1px solid var(--pdm-border);border-radius:5px;background:var(--pdm-surface);color:var(--pdm-text);font:inherit;font-size:12px;resize:vertical}
 .drawing-review-decision-bar__route{flex:0 1 auto;min-width:0;overflow:hidden;color:var(--pdm-blue);font-size:12px;text-overflow:ellipsis;white-space:nowrap}
-.drawing-review-decision-bar__comment{flex:0 0 auto;max-width:220px;overflow:hidden;color:var(--pdm-danger);font-size:12px;text-overflow:ellipsis;white-space:nowrap}.drawing-review-decision-bar__hint{flex:0 0 auto;color:var(--pdm-muted);font-size:12px;white-space:nowrap}
+.drawing-review-decision-bar__hint{flex:0 0 auto;color:var(--pdm-muted);font-size:12px;white-space:nowrap}
 .drawing-review-decision-bar .drawing-review-decision-buttons{flex:0 0 auto;display:flex;gap:5px;margin-left:auto}
 .drawing-review-decision-bar .drawing-review-decision-buttons button{display:inline-flex;align-items:center;justify-content:center;gap:5px;width:100px;min-width:100px;height:28px;min-height:28px;padding:0 6px;border:1px solid var(--pdm-border);border-radius:5px;background:var(--pdm-surface);color:var(--pdm-text);font:inherit;font-size:12px;cursor:pointer}
 .drawing-review-decision-bar .drawing-review-decision-buttons button:disabled{opacity:.45;cursor:not-allowed}

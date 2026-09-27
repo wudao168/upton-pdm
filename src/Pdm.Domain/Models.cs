@@ -811,6 +811,10 @@ public sealed record ReleasePackage(
 
     public IReadOnlyDictionary<Guid, DrawingDeliveryOverride> DrawingDeliveryOverrides { get; init; } =
         new Dictionary<Guid, DrawingDeliveryOverride>();
+
+    /// <summary>发布明细中按 BOM 物料调整的紧急程度与需求日期。</summary>
+    public IReadOnlyDictionary<Guid, DrawingDeliveryOverride> BomItemDeliveryOverrides { get; init; } =
+        new Dictionary<Guid, DrawingDeliveryOverride>();
 }
 
 public sealed record DrawingDeliveryOverride(string Priority, DateOnly RequiredOn);

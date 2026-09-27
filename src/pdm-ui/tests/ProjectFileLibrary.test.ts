@@ -100,12 +100,15 @@ describe('ProjectFileLibrary', () => {
   })
 
   it('受控项目图档目录不显示普通文件上传和新建文件夹', async () => {
-    const wrapper = mountLibrary([controlledFolder])
+    const document = { id: 'document-1', projectId: 'project-1', folderId: 'folder-2', drawingNumber: 'A-001', name: '测试零件', fileName: 'A-001.SLDPRT', kind: 'Part', state: 'Work', revision: 'W1', rowVersion: 3 }
+    const wrapper = mountLibrary([controlledFolder], [document])
     await flushPromises()
     expect(api.listProjectFiles).toHaveBeenCalledWith('project-1', undefined, false, 'token')
     expect(wrapper.text()).not.toContain('上传文件')
     expect(wrapper.text()).not.toContain('新建文件夹')
-    expect(wrapper.text()).toContain('受控图档由SolidWorks存档')
+    expect(wrapper.find('input[aria-label="选择当前列表全部受控图档"]').exists()).toBe(true)
+    await wrapper.get('input[aria-label="选择当前列表全部受控图档"]').setValue(true)
+    expect((wrapper.get('input[aria-label="选择 A-001"]').element as HTMLInputElement).checked).toBe(true)
   })
 
   it('发布目录只读汇总审批发布流程生成的成品文件', async () => {

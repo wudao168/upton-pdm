@@ -196,7 +196,21 @@ if ($hasPreparedApiUpgrade) {
     Copy-Item -Path (Join-Path $preparedApiUpgrade '*') -Destination (Join-Path $localRoot 'api') -Recurse -Force
     Remove-Item -LiteralPath $preparedApiUpgrade -Recurse -Force
     if (-not $ServerOnly) {
-        Copy-Item -Path (Join-Path $preparedClientUpgrade '*') -Destination (Join-Path $localRoot 'client') -Recurse -Force
+        Get-ChildItem -LiteralPath $preparedClientUpgrade -Recurse -File | ForEach-Object {
+            $relativePath = $_.FullName.Substring($preparedClientUpgrade.Length).TrimStart('\')
+            $destinationPath = Join-Path (Join-Path $localRoot 'client') $relativePath
+            if (Test-Path -LiteralPath $destinationPath) {
+                $sourceHash = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash
+                $destinationHash = (Get-FileHash -LiteralPath $destinationPath -Algorithm SHA256).Hash
+                if ($sourceHash -eq $destinationHash) {
+                    return
+                }
+            }
+
+            $destinationDirectory = Split-Path -Parent $destinationPath
+            New-Item -ItemType Directory -Path $destinationDirectory -Force | Out-Null
+            Copy-Item -LiteralPath $_.FullName -Destination $destinationPath -Force
+        }
         Remove-Item -LiteralPath $preparedClientUpgrade -Recurse -Force
         Copy-Item -Path (Join-Path $preparedAddinUpgrade '*') -Destination (Join-Path $localRoot 'solidworks-addin') -Recurse -Force
         Remove-Item -LiteralPath $preparedAddinUpgrade -Recurse -Force

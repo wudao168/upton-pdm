@@ -143,7 +143,7 @@ export async function downloadProgramTemplate(templateId: string, fileName: stri
   anchor.href = url
   anchor.download = fileName
   anchor.click()
-  URL.revokeObjectURL(url)
+  window.setTimeout(() => URL.revokeObjectURL(url), 60_000)
 }
 
 export function setProgramTemplateArchived(templateId: string, archived: boolean, reason: string, token: string): Promise<ProgramTemplate> {
@@ -363,6 +363,7 @@ interface ApiReleasePackage {
   drawingPriority?: ReleasePackageSummary['drawingPriority']
   drawingRequiredOn?: string | null
   drawingDeliveryOverrides?: ReleasePackageSummary['drawingDeliveryOverrides']
+  bomItemDeliveryOverrides?: ReleasePackageSummary['bomItemDeliveryOverrides']
   changeReasonSelections?: ReleasePackageSummary['changeReasonSelections']
   formalSupplementPolicySnapshotted?: boolean
   formalSupplementMaximumCount?: number | null
@@ -1524,7 +1525,7 @@ export function listProductionDrawings(token: string, includeHistory = false): P
   return requestJson(`/api/production-drawings?includeHistory=${includeHistory}`, {}, token)
 }
 
-export async function downloadProductionDrawingArchive(projectId: string, versionIds: string[], format: 'Pdf' | 'Source', token: string): Promise<void> {
+export async function downloadProductionDrawingArchive(projectId: string, versionIds: string[], format: 'Pdf' | 'Step', token: string): Promise<void> {
   const headers = authenticatedHeaders(token)
   headers.set('Content-Type', 'application/json')
   const response = await fetch(`${apiBase}/api/projects/${projectId}/production-drawings/archive`, {
@@ -1540,7 +1541,7 @@ export async function downloadProductionDrawingArchive(projectId: string, versio
   const url = URL.createObjectURL(blob)
   const link = document.createElement('a')
   link.href = url
-  link.download = `生产图纸-${format === 'Pdf' ? 'PDF' : '源图'}.zip`
+  link.download = `生产图纸-${format === 'Pdf' ? 'PDF' : 'STEP'}.zip`
   link.click()
   window.setTimeout(() => URL.revokeObjectURL(url), 60000)
 }
@@ -2460,6 +2461,7 @@ function mapReleasePackage(releasePackage: ApiReleasePackage): ReleasePackageSum
     drawingPriority: releasePackage.drawingPriority ?? 'Normal',
     drawingRequiredOn: releasePackage.drawingRequiredOn ?? null,
     drawingDeliveryOverrides: releasePackage.drawingDeliveryOverrides ?? {},
+    bomItemDeliveryOverrides: releasePackage.bomItemDeliveryOverrides ?? {},
     changeReasonSelections: releasePackage.changeReasonSelections ?? [],
     formalSupplementPolicySnapshotted: releasePackage.formalSupplementPolicySnapshotted ?? false,
     formalSupplementMaximumCount: releasePackage.formalSupplementMaximumCount ?? null,

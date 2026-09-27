@@ -181,6 +181,7 @@ public sealed class BomHeaderServiceTests
         Assert.Equal(
             [ProjectBomHeaderKind.Master, ProjectBomHeaderKind.Standard],
             firstApplications.Select(application => application.BomHeaderKind).OrderBy(kind => kind).ToArray());
+        Assert.All(firstApplications, application => Assert.Equal("reviewer", application.RequestedBy));
         Assert.All(firstApplications, application => Assert.NotNull(application.MaterialCode));
 
         var repeated = await service.EnsureApplicationsAfterBomApprovalAsync(

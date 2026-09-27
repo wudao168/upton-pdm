@@ -62,6 +62,9 @@ public sealed class ApiSmokeTests : IClassFixture<PdmApiFactory>
         client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", CreateToken("admin", "Administrator"));
         var unknown = await client.PostAsJsonAsync(path, new { versionIds = new[] { Guid.NewGuid() }, format = "Pdf" });
         Assert.Equal(HttpStatusCode.BadRequest, unknown.StatusCode);
+        var source = await client.PostAsJsonAsync(path, new { versionIds = new[] { Guid.NewGuid() }, format = "Source" });
+        Assert.Equal(HttpStatusCode.BadRequest, source.StatusCode);
+        Assert.Contains("正式 STEP", await source.Content.ReadAsStringAsync(), StringComparison.Ordinal);
         var empty = await client.PostAsJsonAsync(path, new { versionIds = Array.Empty<Guid>(), format = "Source" });
         Assert.Equal(HttpStatusCode.BadRequest, empty.StatusCode);
     }

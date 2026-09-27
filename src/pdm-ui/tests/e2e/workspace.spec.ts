@@ -880,7 +880,7 @@ test('project plan stages can overlap and moving one stage keeps unrelated stage
       { stage: 'Preparation', startDate: '2026-09-16', durationDays: 10 },
     ],
     tasks: [
-      { id: 'design-task', name: '设计任务', stage: 'Design', assignee: 'admin', durationDays: 14, plannedStart: '2026-09-05', plannedFinish: '2026-09-18', completionPercent: 0, status: 'NotStarted', predecessorTaskIds: [], weight: 1, isMilestone: false, isRequired: true, sortOrder: 10 },
+      { id: 'design-task', name: '设计任务', stage: 'Design', assignee: 'admin', durationDays: 14, plannedStart: '2026-09-05', plannedFinish: '2026-09-18', completionPercent: 82, status: 'InProgress', predecessorTaskIds: [], weight: 1, isMilestone: false, isRequired: true, sortOrder: 10 },
       { id: 'prepare-task', name: '备料任务', stage: 'Preparation', assignee: 'admin', durationDays: 16, plannedStart: '2026-09-10', plannedFinish: '2026-09-25', completionPercent: 0, status: 'NotStarted', predecessorTaskIds: [], weight: 1, isMilestone: false, isRequired: true, sortOrder: 20 },
     ],
     createdBy: 'admin', createdAt: '2026-09-10T00:00:00Z', updatedBy: 'admin', updatedAt: '2026-09-10T00:00:00Z',
@@ -933,6 +933,7 @@ test('project plan stages can overlap and moving one stage keeps unrelated stage
   expect([...new Set(timelineRowHeights)]).toEqual([40])
   const stageBars = page.locator('.pdm-gantt-timeline-row.is-stage .pdm-gantt-bar')
   await expect(stageBars).toHaveCount(2)
+  await expect(stageBars.first().locator('b')).toHaveCSS('mix-blend-mode', 'difference')
   const boxes = await stageBars.evaluateAll(items => items.map(item => {
     const rect = item.getBoundingClientRect()
     return { left: rect.left, right: rect.right }
@@ -1572,6 +1573,30 @@ for (const scale of [
   })
 }
 
+test('controlled folders expose selection controls without recycle permission', async ({ page }, testInfo) => {
+  const consoleErrors: string[] = []
+  page.on('pageerror', error => consoleErrors.push(error.message))
+  page.on('console', message => { if (message.type() === 'error') consoleErrors.push(message.text()) })
+  await page.setViewportSize({ width: 1925, height: 1114 })
+  await page.goto('/')
+  const login = page.getByLabel('登录PLM')
+  await login.getByRole('textbox', { name: '账号' }).fill('engineer')
+  await login.getByRole('textbox', { name: '密码' }).fill('correct-password')
+  await login.getByRole('button', { name: '登录', exact: true }).click()
+  await enterProject(page)
+  await page.getByRole('button', { name: '文件', exact: true }).click()
+  await page.locator('.pdm-folder-pane .el-tree-node').filter({ hasText: 'PRJ-REAL-001-0' }).first().click()
+
+  const table = page.getByRole('table', { name: '受控图档' })
+  const selectAll = table.getByRole('checkbox', { name: '选择当前列表全部受控图档' })
+  await expect(selectAll).toBeVisible()
+  await selectAll.check()
+  await expect(table.locator('tbody input[type="checkbox"]:checked')).toHaveCount(3)
+  await page.screenshot({ path: testInfo.outputPath('controlled-folder-selection.png'), fullPage: false })
+  await expect(page.locator('vite-error-overlay')).toHaveCount(0)
+  expect(consoleErrors).toEqual([])
+})
+
 test('project file list provides a direct preview link and editable description', async ({ page }, testInfo) => {
   let savedDescription = ''
   await page.route(`**/api/projects/${projectId}/folders`, route => route.fulfill({ json: [
@@ -1934,12 +1959,14 @@ test('production drawings open by project and package, then download selected ve
     publishedAt: '2026-09-22T00:00:00Z', priority: 'Urgent', requiredOn: '2026-10-01',
     publishedBy: 'engineer', division: '机械事业部', projectManager: 'admin',
     isCurrent: true, pdfReady: true, legacyUnverified: false,
+    modelFiles: [{ documentId: 'model-d-100', versionId: 'model-v-d-100', drawingNumber: 'M-100', name: '三维装配', revision: 'B', stepReady: true }],
     bomItems: [{ sequence: 1, drawingNumber: 'MAT-100', name: '冻结机架', specification: 'MODEL-X', revision: 'B', remark: '先加工', material: '铝', surfaceTreatment: '阳极', heatTreatment: '无', quantity: 2, unit: '001', complete: true, brand: '自制' }],
   }
   const second = {
     ...first, documentId: 'cccccccc-cccc-cccc-cccc-cccccccccccc', versionId: '22222222-aaaa-aaaa-aaaa-aaaaaaaaaaaa',
     releasePackageId: '22222222-bbbb-bbbb-bbbb-bbbbbbbbbbbb', releasePackageNumber: 'RP-002',
-    drawingNumber: 'D-200', model: 'M-200', name: '机架图', publishedAt: '2026-09-23T00:00:00Z', pdfReady: false, bomItems: [], publishedBy: 'admin',
+    drawingNumber: 'D-200', model: 'M-200', name: '机架图', publishedAt: '2026-09-23T00:00:00Z', pdfReady: false,
+    modelFiles: [{ documentId: 'model-d-200', versionId: 'model-v-d-200', drawingNumber: 'M-200', name: '三维机架', revision: 'A', stepReady: false }], bomItems: [], publishedBy: 'admin',
   }
   const anotherProject = {
     ...first, projectId: '33333333-3333-3333-3333-333333333333', projectCode: 'P-002', projectName: '电气项目',
@@ -1971,7 +1998,19 @@ test('production drawings open by project and package, then download selected ve
   await expect(page.getByLabel('生产图纸中心')).toBeVisible()
   await expect(page.locator('.production-drawings__header')).toHaveCount(0)
   await expect(page.locator('.production-drawings__project')).toHaveCount(2)
+  await page.getByLabel('按项目号筛选').fill('P-002')
+  await expect(page.locator('.production-drawings__project')).toHaveCount(1)
+  await expect(page.locator('.production-drawings__project')).toContainText('P-002')
+  await page.getByLabel('按项目号筛选').fill('')
+  await page.getByLabel('按发布日期筛选').fill('2026-09-23')
+  await expect(page.locator('.production-drawings__project')).toHaveCount(1)
+  await expect(page.locator('.production-drawings__project')).toContainText('P-001')
+  await page.getByLabel('按发布日期筛选').fill('')
   await expect(page.locator('.production-drawings__project').first()).toContainText('P-001')
+  const projectMeta = page.locator('.production-drawings__project-meta').first()
+  await expect(projectMeta).toHaveText('2 张图纸2026-09-23')
+  await expect(projectMeta).not.toContainText('发布')
+  await expect(projectMeta).toHaveCSS('justify-content', 'space-between')
   await expect(page.locator('.production-drawings__project').first()).toHaveCSS('height', '40px')
   await expect(page.locator('.production-drawings__packages')).toHaveCount(0)
   await expect(page.getByLabel('按发布人筛选').locator('option[value="admin"]')).toHaveText('系统管理员')
@@ -1983,15 +2022,20 @@ test('production drawings open by project and package, then download selected ve
   await expect(page.locator('.production-drawings__project-header')).toHaveCount(0)
   await expect(page.locator('.production-drawings__projects h2')).toHaveCount(0)
   await expect(page.locator('.production-drawings__toolbar')).toHaveCount(0)
-  await expect(page.locator('.production-drawings__selection').getByRole('button', { name: '下载本包源图' })).toBeVisible()
+  await expect(page.locator('.production-drawings__selection').getByRole('button', { name: '下载本包 STEP' })).toBeVisible()
   await expect(page.locator('tbody')).toContainText('D-200')
   await page.locator('.production-drawings__package').filter({ hasText: 'RP-001' }).click()
   await expect(page.locator('tbody')).toContainText('MAT-100')
   await expect(page.locator('tbody')).not.toContainText('D-200')
-  await expect(page.locator('.production-drawings thead th')).toHaveText(['选择', '物料编码', '名称', '型号', '版本', '备注', '材质', '表面处理', '热处理', '数量', '图纸'])
+  await expect(page.locator('.production-drawings thead th')).toHaveText(['选择', '物料编码', '名称', '型号', '版本', '备注', '材质', '表面处理', '热处理', '数量', '图纸', '紧急程度', '需求货期'])
   await expect(page.locator('tbody')).toContainText('MAT-100')
   await expect(page.locator('tbody')).toContainText('冻结机架')
   await expect(page.locator('tbody')).toContainText('阳极')
+  await expect(page.locator('tbody')).toContainText('紧急')
+  await expect(page.locator('tbody')).toContainText('2026-10-01')
+  await expect(page.getByRole('button', { name: '下载 M-100 STEP' })).toBeVisible()
+  await expect(page.locator('.production-drawings thead th').nth(1)).toHaveCSS('text-align', 'center')
+  await expect(page.locator('.production-drawings tbody td').nth(1)).toHaveCSS('text-align', 'center')
   await page.screenshot({ path: join(tmpdir(), 'production-drawings-bom-default-desktop.png'), fullPage: false })
   await page.getByRole('button', { name: '列设置' }).click()
   const columnDialog = page.getByRole('dialog', { name: '生产图纸列设置' })
@@ -2002,6 +2046,10 @@ test('production drawings open by project and package, then download selected ve
   await expect(page.getByRole('columnheader', { name: '品牌' })).toBeVisible()
   await expect(page.locator('tbody')).toContainText('自制')
   await page.getByLabel('全选本包图纸').check()
+  const stepArchive = page.waitForEvent('download')
+  await page.getByRole('button', { name: '批量下载 STEP' }).click()
+  expect((await stepArchive).suggestedFilename()).toContain('生产图纸-STEP')
+  expect(archiveRequest).toEqual({ versionIds: [first.versionId], format: 'Step' })
   const download = page.waitForEvent('download')
   await page.getByRole('button', { name: '批量下载 PDF' }).click()
   expect((await download).suggestedFilename()).toContain('生产图纸')
@@ -2013,6 +2061,12 @@ test('production drawings open by project and package, then download selected ve
   await expect(page.locator('.production-drawings__project')).toHaveCount(1)
   await expect(page.locator('.production-drawings__package')).toHaveCount(1)
   await expect(page.locator('.production-drawings__package')).toContainText('RP-002')
+  await page.locator('.production-drawings__package').filter({ hasText: 'RP-002' }).click()
+  await expect(page.locator('tbody')).toContainText('STEP待转换')
+  await page.getByLabel('全选本包图纸').check()
+  await page.getByRole('button', { name: '批量下载 STEP' }).click()
+  await expect(page.getByRole('alert')).toContainText('不能用 SolidWorks 源文件替代')
+  expect(archiveRequest).toEqual({ versionIds: [first.versionId], format: 'Pdf' })
   await page.screenshot({ path: join(tmpdir(), 'production-drawings-filtered-desktop.png'), fullPage: false })
   await page.setViewportSize({ width: 390, height: 844 })
   await expect(page.locator('.production-drawings__project').filter({ hasText: 'P-001' })).toBeVisible()

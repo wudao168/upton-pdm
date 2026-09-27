@@ -65,7 +65,7 @@ describe('BomManager', () => {
     wrapper.unmount()
   })
 
-  it('标准件与电气件BOM不显示图纸列，也不出现2D/3D链接；非标件保留图纸列', async () => {
+  it('标准件与电气件BOM不显示图纸列，也不出现2D/3D链接；首次发布前的非标件显示图纸审批列', async () => {
     const row = (id: string, kind: string, drawingNumber: string, name: string) => ({
       id, kind, sequence: 1, drawingNumber, name, quantity: 1, unit: '个', revision: 'W1', complete: true, source: 'Auto',
       sourceDocumentId: 'document-1', sourceInstancePath: 'root/1',
@@ -92,7 +92,7 @@ describe('BomManager', () => {
 
     await wrapper.setProps({ requestedBomKind: 'NonStandard' })
     await flushPromises()
-    expect(headers()).toContain('图纸')
+    expect(headers()).toContain('图纸审批')
     wrapper.unmount()
   })
 
@@ -877,10 +877,10 @@ describe('BomManager', () => {
     expect((wrapper.get('.pdm-release-type-row select').element as HTMLSelectElement).value).toBe('StandardFormal')
     // 首次正式发布前不提供增补/变更。
     expect(wrapper.findAll('.pdm-release-type-row option').map(option => option.text()))
-      .toEqual(['标准件 · 长交期BOM发布', '标准件 · 正式发布'])
+      .toEqual(['标准件 · 长交期BOM发布', '标准件 · 正式发布', '普通', '优先', '紧急'])
 
     await wrapper.setProps({ releasePackages: [longLead, formal] })
-    expect(wrapper.findAll('.pdm-release-type-row option').map(option => option.text())).toEqual(['标准件 · 增补/变更'])
+    expect(wrapper.findAll('.pdm-release-type-row option').map(option => option.text())).toEqual(['标准件 · 增补/变更', '普通', '优先', '紧急'])
     expect((wrapper.get('.pdm-release-type-row select').element as HTMLSelectElement).value).toBe('StandardSupplement')
   })
 
@@ -1017,7 +1017,7 @@ describe('BomManager', () => {
     expect(wrapper.find('.pdm-bom-reconciliation').exists()).toBe(false)
   })
 
-  it('does not require a material code for non-standard items and keeps the drawing column free of review status', async () => {
+  it('shows drawing approval status instead of 2D and 3D before the first non-standard BOM release', async () => {
     const wrapper = mount(BomManager, {
       props: {
         standard: [], electrical: [], declarations: [], pending: false, editable: true,
@@ -1036,6 +1036,24 @@ describe('BomManager', () => {
     await nonStandardTab!.trigger('click')
     expect(wrapper.text()).not.toContain('缺少物料编码')
     expect(wrapper.get('.pdm-bom-data-status').text()).toBe('已完善')
+    expect(wrapper.findAll('thead th').map(header => header.text())).toContain('图纸审批')
+    expect(wrapper.get('.pdm-bom-drawing-review-status').text()).toBe('待发起')
+    expect(wrapper.get('.pdm-bom-drawing-review-status').attributes('title')).toBe('当前工程图尚未发起审核')
+    expect(wrapper.get('.pdm-bom-drawing-audit-cell').text()).not.toContain('2D')
+    expect(wrapper.get('.pdm-bom-drawing-audit-cell').text()).not.toContain('3D')
+  })
+
+  it('keeps 2D and 3D in the drawing column after the non-standard BOM is formally released', async () => {
+    const row: BomItem = { id: 'non-standard-released', kind: 'NonStandard', sequence: 1, drawingNumber: 'NS-001', name: '已发布非标件', quantity: 1, unit: '件', revision: 'W1', complete: true }
+    const release = { id: 'release-ns-1', number: 'RP-NS-1', scope: 'NonStandardWithDrawing', state: '已发布', nonStandardBomSnapshot: [] } as unknown as ReleasePackageSummary
+    const wrapper = mount(BomManager, {
+      props: { standard: [], electrical: [], nonStandard: [row], declarations: [], pending: false, releasePackages: [release] },
+    })
+
+    const nonStandardTab = wrapper.findAll('button[role="tab"]').find(tab => tab.text().includes('非标件BOM'))
+    await nonStandardTab!.trigger('click')
+    expect(wrapper.findAll('thead th').map(header => header.text())).toContain('图纸')
+    expect(wrapper.findAll('thead th').map(header => header.text())).not.toContain('图纸审批')
     expect(wrapper.find('.pdm-bom-drawing-review-status').exists()).toBe(false)
     expect(wrapper.get('.pdm-bom-drawing-audit-cell').text()).toBe('2D3D')
   })
@@ -1352,6 +1370,7 @@ describe('BomManager', () => {
           { id: 'drawing-1', projectId: 'project-1', drawingNumber: 'N-001', name: '非标工程图', fileName: 'N-001.SLDDRW', kind: 'Drawing', state: 'Released', revision: 'W2' },
         ],
         documentRelations: [{ modelDocumentId: 'model-1', drawingDocumentId: 'drawing-1' }], token: 'token-1',
+        releasePackages: [{ id: 'release-ns-drawings', number: 'RP-NS-2', scope: 'NonStandardWithDrawing', state: '已发布', nonStandardBomSnapshot: [] } as unknown as ReleasePackageSummary],
       },
     })
 

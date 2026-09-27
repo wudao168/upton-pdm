@@ -221,7 +221,7 @@ public sealed partial class InMemoryPdmRepository
         {
             var package = drawingReviewPackages.Values.FirstOrDefault(candidate => candidate.Items.Any(item => item.Id == itemId))
                 ?? throw new PdmNotFoundException("图纸审核项不存在。");
-            if (package.State is not (DrawingReviewPackageState.InReview or DrawingReviewPackageState.PendingSupervisorApproval))
+            if (package.State is not (DrawingReviewPackageState.InReview or DrawingReviewPackageState.PendingSupervisorApproval or DrawingReviewPackageState.ChangesRequested))
                 throw new PdmConflictException("当前图纸审核单不允许重新提交审核。");
             if (package.Items.Single(item => item.Id == itemId).DrawingState != DrawingReviewTargetState.ChangesRequested)
                 throw new PdmConflictException("只有已退回（待修改）的图档可以重新提交审核。");

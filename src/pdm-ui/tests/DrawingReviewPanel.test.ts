@@ -52,6 +52,60 @@ const candidate: DrawingReviewCandidate = {
 }
 
 describe('DrawingReviewPanel', () => {
+  it('无操作权限的图纸不可勾选，全选排除它们，权限变化清除选择', async () => {
+    const current: DrawingReviewPackage = { ...review, assignedReviewers: ['reviewer'], items: [
+      { ...review.items[0]!, drawingState: 'ChangesRequested' },
+      { ...review.items[0]!, id: 'item-2', modelDocumentId: 'model-2', drawingDocumentId: 'drawing-2', drawingNumber: 'A02', drawingState: 'Pending' },
+    ] }
+    const wrapper = mount(DrawingReviewPanel, {
+      global: { plugins: [ElementPlus] },
+      props: { packageId: review.id, packages: [current], candidates: [
+        { ...candidate, state: 'InReview', selectable: false },
+        { ...candidate, candidateId: 'candidate-2', modelDocumentId: 'model-2', drawingDocumentId: 'drawing-2', drawingNumber: 'A02', state: 'InReview', selectable: false },
+      ], currentUsername: 'submitter', ...permissions },
+    })
+    expect(wrapper.get('input[aria-label="选择图纸 A02"]').attributes('disabled')).toBeDefined()
+    await wrapper.get('input[aria-label="全选可操作图纸"]').setValue(true)
+    expect(wrapper.text()).toContain('已选 1 张')
+    await wrapper.setProps({ currentUsername: 'reviewer' })
+    expect(wrapper.text()).toContain('已选 0 张')
+    expect(wrapper.get('input[aria-label="选择图纸 A01-100"]').attributes('disabled')).toBeDefined()
+    expect(wrapper.get('input[aria-label="选择图纸 A02"]').attributes('disabled')).toBeUndefined()
+    wrapper.unmount()
+  })
+  it('多选退回图纸向统一批量入口传递完整列表', async () => {
+    const returned: DrawingReviewPackage = { ...review, items: [
+      { ...review.items[0]!, drawingState: 'ChangesRequested' },
+      { ...review.items[0]!, id: 'item-2', modelDocumentId: 'model-2', drawingDocumentId: 'drawing-2', drawingNumber: 'A02', drawingState: 'ChangesRequested' },
+    ] }
+    const wrapper = mount(DrawingReviewPanel, {
+      global: { plugins: [ElementPlus] },
+      props: { packageId: review.id, packages: [returned], candidates: [candidate,
+        { ...candidate, candidateId: 'candidate-2', modelDocumentId: 'model-2', drawingDocumentId: 'drawing-2', drawingNumber: 'A02' }],
+      currentUsername: 'submitter', ...permissions },
+    })
+    await wrapper.get('input[aria-label="全选可操作图纸"]').setValue(true)
+    const entries = [{ packageId: review.id, itemId: 'item-1' }, { packageId: review.id, itemId: 'item-2' }]
+    await wrapper.setProps({ selectedDocumentId: 'drawing-2' })
+    await wrapper.get('.drawing-review-overview__batch .is-submit').trigger('click')
+    expect(wrapper.emitted('resubmitBatch')).toEqual([[entries]])
+    expect(wrapper.text()).toContain('已选 0 张')
+    wrapper.unmount()
+  })
+  it('发起人勾选退回图纸可重新提交，其他人员不能代提交', async () => {
+    const returned: DrawingReviewPackage = { ...review, state: 'ChangesRequested', items: [{ ...review.items[0]!, drawingState: 'ChangesRequested' }] }
+    const wrapper = mount(DrawingReviewPanel, {
+      global: { plugins: [ElementPlus] },
+      props: { packageId: review.id, packages: [returned], candidates: [{ ...candidate, state: 'InReview', selectable: false }], currentUsername: 'submitter', ...permissions },
+    })
+    await wrapper.get('input[aria-label="全选可操作图纸"]').setValue(true)
+    expect(wrapper.get('.drawing-review-overview__batch .is-submit').text()).toBe('重新提交')
+    await wrapper.get('.drawing-review-overview__batch .is-submit').trigger('click')
+    expect(wrapper.emitted('resubmitBatch')).toEqual([[[{ packageId: review.id, itemId: 'item-1' }]]])
+    await wrapper.setProps({ currentUsername: 'reviewer' })
+    await wrapper.get('input[aria-label="全选可操作图纸"]').setValue(true)
+    expect(wrapper.find('.drawing-review-overview__batch .is-submit').exists()).toBe(false)
+  })
   it('没有审核单时从图档侧栏选择非标2D范围后发起审核', async () => {
     const wrapper = mount(DrawingReviewPanel, {
       global: { plugins: [ElementPlus] },
@@ -123,7 +177,7 @@ describe('DrawingReviewPanel', () => {
     expect(wrapper.text()).toContain('选择审核范围')
   })
 
-  it('明细分为待操作/已操作两页并可定位图纸', async () => {
+  it('明细合并显示并可按状态筛选和定位图纸', async () => {
     const candidates: DrawingReviewCandidate[] = [
       candidate,
       { ...candidate, candidateId: 'in-review', modelDocumentId: 'model-2', drawingDocumentId: 'drawing-2', drawingNumber: 'A01-200', state: 'InReview', selectable: false },
@@ -139,33 +193,32 @@ describe('DrawingReviewPanel', () => {
       props: { packageId: review.id, packages: [reviewWithSecondDrawing], candidates, selectedDocumentId: 'model-1', currentUsername: 'reviewer', ...permissions },
     })
 
-    // 默认「待操作」：待发起审核、待审核、不可发起（已批准属于已操作页）。
-    expect(wrapper.get('[role="tab"][aria-selected="true"]').text()).toBe('待操作（3）')
+    // 默认显示所有状态。
+    expect(wrapper.find('[role="tablist"]').exists()).toBe(false)
     const todoRows = wrapper.findAll('.drawing-review-overview__row')
-    expect(todoRows).toHaveLength(3)
+    expect(todoRows).toHaveLength(4)
     expect(wrapper.get('[aria-label="图纸审核状态表"]').text()).toContain('A01-100待发起审核')
     expect(wrapper.get('[aria-label="图纸审核状态表"]').text()).toContain('A01-200待审核')
     expect(wrapper.get('[aria-label="图纸审核状态表"]').text()).toContain('A01-400不可发起')
-    expect(wrapper.get('[aria-label="图纸审核状态表"]').text()).not.toContain('A01-300')
+    expect(wrapper.get('[aria-label="图纸审核状态表"]').text()).toContain('A01-300')
     expect(todoRows[1]!.classes()).toContain('is-warning')
-    expect(todoRows[2]!.classes()).toContain('is-neutral')
+    expect(todoRows[3]!.classes()).toContain('is-neutral')
 
     await todoRows[1]!.trigger('click')
     expect(wrapper.emitted('update:packageId')).toContainEqual(['review-1'])
     expect(wrapper.emitted('selectDocument')).toContainEqual(['drawing-2'])
 
-    // 切到「已操作」：只剩已批准的图纸。
-    const doneTab = wrapper.findAll('[role="tab"]').find(tab => tab.text().startsWith('已操作'))!
-    await doneTab.trigger('click')
+    // 筛选已批准的图纸。
+    await wrapper.get('select[aria-label="筛选图纸审核状态"]').setValue('已批准')
     const doneRows = wrapper.findAll('.drawing-review-overview__row')
     expect(doneRows).toHaveLength(1)
     expect(doneRows[0]!.text()).toContain('A01-300')
     expect(doneRows[0]!.text()).toContain('已批准')
     expect(doneRows[0]!.classes()).toContain('is-success')
 
-    // 状态下拉与选项卡叠加生效：只看待审核时，已操作页为空。
-    await wrapper.get('select[aria-label="筛选图纸审核状态"]').setValue('InReview')
-    expect(wrapper.findAll('[role="tab"]').map(tab => tab.text())).toEqual(['待操作（1）', '已操作（0）'])
+    // 筛选待审核的图纸。
+    await wrapper.get('select[aria-label="筛选图纸审核状态"]').setValue('待审核')
+    expect(wrapper.findAll('.drawing-review-overview__row')).toHaveLength(1)
   })
 
   it('状态表只显示状态，审核人或批准人放在悬停提示', async () => {
@@ -233,12 +286,12 @@ describe('DrawingReviewPanel', () => {
       props: { packageId: passedPackage.id, packages: [passedPackage], candidates, selectedDocumentId: 'drawing-1', currentUsername: 'reviewer', ...permissions },
     })
 
-    // 待批准（逐张已通过、等主管批准）仍属「待操作」；已退回归「已操作」。
+    // 待批准和已退回在同一列表，按实际状态筛选。
     const todoRows = wrapper.findAll('.drawing-review-overview__row')
-    expect(todoRows).toHaveLength(1)
+    expect(todoRows).toHaveLength(2)
     expect(todoRows[0]!.find('em').text()).toContain('待批准')
     expect(todoRows[0]!.classes()).toContain('is-pending')
-    await wrapper.findAll('[role="tab"]').find(tab => tab.text().startsWith('已操作'))!.trigger('click')
+    await wrapper.get('select[aria-label="筛选图纸审核状态"]').setValue('已退回（待修改）')
     const doneRows = wrapper.findAll('.drawing-review-overview__row')
     expect(doneRows).toHaveLength(1)
     expect(doneRows[0]!.find('em').text()).toContain('已退回（待修改）')
@@ -323,7 +376,30 @@ describe('DrawingReviewPanel', () => {
     })
 
     expect(wrapper.text()).toContain('审核：指定审核员 → 批准：机械主管')
+    expect(wrapper.text()).toContain('当前处理人（审核）：指定审核员')
     expect(wrapper.find('.drawing-review-decision-bar').exists()).toBe(false)
+  })
+
+  it('按当前批准节点显示主管为当前处理人', () => {
+    const unassignedWrapper = mount(DrawingReviewPanel, {
+      global: { plugins: [ElementPlus] },
+      props: { packageId: review.id, packages: [review], candidates: [candidate], selectedDocumentId: 'drawing-1', currentUsername: 'other', ...permissions },
+    })
+    const awaitingApproval: DrawingReviewPackage = {
+      ...review,
+      state: 'PendingSupervisorApproval',
+      assignedReviewers: ['reviewer'],
+      assignedReviewerNames: ['指定审核员'],
+      supervisor: 'manager',
+      supervisorName: '机械主管',
+    }
+    const wrapper = mount(DrawingReviewPanel, {
+      global: { plugins: [ElementPlus] },
+      props: { packageId: awaitingApproval.id, packages: [awaitingApproval], candidates: [candidate], selectedDocumentId: 'drawing-1', currentUsername: 'other', ...permissions },
+    })
+
+    expect(unassignedWrapper.text()).toContain('当前处理人（审核）：审核权限人员均可处理')
+    expect(wrapper.text()).toContain('当前处理人（批准）：机械主管')
   })
 
   it('未选择审核人时发起按钮置灰，选择多人后按并行提交', async () => {
@@ -470,20 +546,20 @@ describe('DrawingReviewPanel', () => {
     expect(wrapper.get('.drawing-review-panel').attributes('style') ?? '').not.toContain('--drawing-review-opacity')
   })
 
-  it('明细固定为待操作/已操作两页，且提示文案一致', async () => {
+  it('明细无分页，筛选无结果时显示空提示', async () => {
     const wrapper = mount(DrawingReviewPanel, {
       global: { plugins: [ElementPlus] },
       props: { packageId: '', packages: [], candidates: [candidate], selectedDocumentId: 'model-1', currentUsername: 'designer', ...permissions },
     })
 
     const tabs = wrapper.findAll('[role="tab"]').map(tab => tab.text())
-    expect(tabs).toEqual(['待操作（1）', '已操作（0）'])
+    expect(tabs).toEqual([])
     // 原状态下拉保留，选项卡只是加在列表上方。
     expect(wrapper.find('select[aria-label="筛选图纸审核状态"]').exists()).toBe(true)
-    expect(wrapper.find('.drawing-review-overview > .drawing-review-panel__tabs').exists()).toBe(true)
+    expect(wrapper.find('.drawing-review-overview > .drawing-review-panel__tabs').exists()).toBe(false)
 
-    await wrapper.findAll('[role="tab"]')[1]!.trigger('click')
-    expect(wrapper.get('[aria-label="图纸审核状态表"]').text()).toContain('还没有已处理（通过或退回）的图纸。')
+    await wrapper.get('select[aria-label="筛选图纸审核状态"]').setValue('已退回（待修改）')
+    expect(wrapper.get('[aria-label="图纸审核状态表"]').text()).toContain('没有符合筛选条件的图纸。')
   })
 
   it('明细支持勾选与全选，并可批量批准', async () => {
@@ -509,7 +585,7 @@ describe('DrawingReviewPanel', () => {
     })
 
     // 待批准仍属待操作，主管可勾选并全选。
-    expect(wrapper.get('[role="tab"][aria-selected="true"]').text()).toBe('待操作（2）')
+    expect(wrapper.find('[role="tablist"]').exists()).toBe(false)
     const boxes = wrapper.findAll('.drawing-review-overview__row input[type="checkbox"]')
     expect(boxes).toHaveLength(2)
     expect(boxes.every(box => box.attributes('disabled') === undefined)).toBe(true)

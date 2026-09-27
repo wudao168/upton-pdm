@@ -93,6 +93,7 @@ onBeforeUnmount(() => window.chrome?.webview?.removeEventListener?.('message', u
       @add-markup="addMarkup"
       @resolve-markup="(packageId, markupId) => send('resolve-markup', { packageId, markupId })"
       @decide="decide"
+      @resubmit-batch="entries => send('resubmit-batch', { entries })"
       @decide-supervisor="(packageId, decision, comment) => send('decide-supervisor', { packageId, decision, comment })"
     />
   </main>

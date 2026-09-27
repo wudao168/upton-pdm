@@ -941,7 +941,7 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
                    standard_bom_version_id, non_standard_bom_version_id, electrical_bom_version_id, standard_bom_revision, non_standard_bom_revision,
                    standard_bom_snapshot_json, non_standard_bom_snapshot_json, change_number, change_reason, change_reason_selections_json,
                    formal_supplement_policy_snapshotted, formal_supplement_maximum_count, formal_supplement_valid_days, effective_serial_from, effective_serial_to,
-                   drawing_priority, drawing_required_on, drawing_delivery_overrides_json,
+                   drawing_priority, drawing_required_on, drawing_delivery_overrides_json, bom_item_delivery_overrides_json,
                    published_at, published_path, publish_error, preview_state, preview_error, preview_attempts, preview_updated_at, created_at
             FROM release_package
             WHERE project_id = @ProjectId
@@ -1217,7 +1217,7 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
                    standard_bom_version_id, non_standard_bom_version_id, electrical_bom_version_id, standard_bom_revision, non_standard_bom_revision,
                    standard_bom_snapshot_json, non_standard_bom_snapshot_json, change_number, change_reason, change_reason_selections_json,
                    formal_supplement_policy_snapshotted, formal_supplement_maximum_count, formal_supplement_valid_days, effective_serial_from, effective_serial_to,
-                   drawing_priority, drawing_required_on, drawing_delivery_overrides_json,
+                   drawing_priority, drawing_required_on, drawing_delivery_overrides_json, bom_item_delivery_overrides_json,
                    published_at, published_path, publish_error, preview_state, preview_error, preview_attempts, preview_updated_at, created_at
             FROM release_package WHERE id = @PackageId
             """,
@@ -1713,6 +1713,8 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
             DrawingRequiredOn = row.DrawingRequiredOn.HasValue ? DateOnly.FromDateTime(row.DrawingRequiredOn.Value) : null,
             DrawingDeliveryOverrides = JsonSerializer.Deserialize<Dictionary<Guid, DrawingDeliveryOverride>>(
                 row.DrawingDeliveryOverridesJson ?? "{}", new JsonSerializerOptions(JsonSerializerDefaults.Web)) ?? new Dictionary<Guid, DrawingDeliveryOverride>(),
+            BomItemDeliveryOverrides = JsonSerializer.Deserialize<Dictionary<Guid, DrawingDeliveryOverride>>(
+                row.BomItemDeliveryOverridesJson ?? "{}", new JsonSerializerOptions(JsonSerializerDefaults.Web)) ?? new Dictionary<Guid, DrawingDeliveryOverride>(),
             ChangeReasonSelections = string.IsNullOrWhiteSpace(row.ChangeReasonSelectionsJson)
                 ? []
                 : JsonSerializer.Deserialize<List<ReleaseChangeReasonSelection>>(row.ChangeReasonSelectionsJson, new JsonSerializerOptions(JsonSerializerDefaults.Web)) ?? [],
@@ -1994,6 +1996,7 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
         public string DrawingPriority { get; init; } = "Normal";
         public DateTime? DrawingRequiredOn { get; init; }
         public string? DrawingDeliveryOverridesJson { get; init; }
+        public string? BomItemDeliveryOverridesJson { get; init; }
         public string? ChangeReasonSelectionsJson { get; init; }
         public bool FormalSupplementPolicySnapshotted { get; init; }
         public int? FormalSupplementMaximumCount { get; init; }

@@ -24,11 +24,15 @@ describe('ProductionDrawingCenter', () => {
     const wrapper = mount(ProductionDrawingCenter, { props: { token: 'token', canManage: false, username: 'tester' } })
     await flushPromises()
     expect(wrapper.find('.production-drawings__header').exists()).toBe(false)
+    expect(wrapper.get('.production-drawings__project-meta').text()).toBe('1 张图纸2026-09-23')
+    expect(wrapper.get('.production-drawings__project').text()).not.toContain('发布')
     await wrapper.get('.production-drawings__project').trigger('click')
-    expect(wrapper.findAll('thead th').map(cell => cell.text())).toEqual(['选择', '物料编码', '名称', '型号', '版本', '备注', '材质', '表面处理', '热处理', '数量', '图纸'])
+    expect(wrapper.findAll('thead th').map(cell => cell.text())).toEqual(['选择', '物料编码', '名称', '型号', '版本', '备注', '材质', '表面处理', '热处理', '数量', '图纸', '紧急程度', '需求货期'])
     expect(wrapper.get('tbody tr').text()).toContain('MAT-100')
     expect(wrapper.get('tbody tr').text()).toContain('先加工')
     expect(wrapper.get('tbody tr').text()).toContain('2')
+    expect(wrapper.get('tbody tr').text()).toContain('紧急')
+    expect(wrapper.get('tbody tr').text()).toContain('2026-10-01')
     await wrapper.get('.production-drawings__selection button.pdm-secondary-action').trigger('click')
     await wrapper.get('.production-drawings__column-options input[value="brand"]').setValue(true)
     await wrapper.get('.production-drawings__column-dialog footer .pdm-primary-action').trigger('click')
@@ -45,7 +49,7 @@ describe('ProductionDrawingCenter', () => {
     const other = { ...current, projectId: 'other', projectCode: 'P-002', projectName: '其他项目',
       documentId: 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb', versionId: 'other-version',
       releasePackageId: 'other-package', releasePackageNumber: 'RP-3', publishedBy: 'li',
-      division: '电气事业部', projectManager: 'manager-b' }
+      division: '电气事业部', projectManager: 'manager-b', publishedAt: '2026-09-24T00:00:00Z' }
     vi.spyOn(api, 'listProductionDrawings').mockResolvedValue([
       { ...current, publishedBy: 'wang', division: '机械事业部', projectManager: 'manager-a' },
       { ...old, publishedBy: 'li', division: '机械事业部', projectManager: 'manager-a' }, other,
@@ -56,6 +60,14 @@ describe('ProductionDrawingCenter', () => {
     })
     await flushPromises()
     expect(wrapper.findAll('.production-drawings__project')).toHaveLength(2)
+    await wrapper.get('input[aria-label="按项目号筛选"]').setValue('P-002')
+    expect(wrapper.findAll('.production-drawings__project')).toHaveLength(1)
+    expect(wrapper.get('.production-drawings__project').text()).toContain('P-002')
+    await wrapper.get('input[aria-label="按项目号筛选"]').setValue('')
+    await wrapper.get('input[aria-label="按发布日期筛选"]').setValue('2026-09-23')
+    expect(wrapper.findAll('.production-drawings__project')).toHaveLength(1)
+    expect(wrapper.get('.production-drawings__project').text()).toContain('P-001')
+    await wrapper.get('input[aria-label="按发布日期筛选"]').setValue('')
     expect(wrapper.get('select[aria-label="按发布人筛选"] option[value="wang"]').text()).toBe('王工')
     expect(wrapper.get('select[aria-label="按项目经理筛选"] option[value="manager-a"]').text()).toBe('张经理')
     await wrapper.get('select[aria-label="按事业部筛选"]').setValue('机械事业部')
@@ -106,8 +118,10 @@ describe('ProductionDrawingCenter', () => {
     wrapper.unmount()
   })
 
-  it('downloads selected formal sources as an archive and blocks pending PDFs', async () => {
-    vi.spyOn(api, 'listProductionDrawings').mockResolvedValue([current])
+  it('downloads selected formal STEP files as an archive and blocks pending PDFs', async () => {
+    vi.spyOn(api, 'listProductionDrawings').mockResolvedValue([{ ...current, modelFiles: [{
+      documentId: 'model-document', versionId: 'model-version', drawingNumber: 'M-100', name: '三维件', revision: 'A', stepReady: true,
+    }] }])
     const download = vi.spyOn(api, 'downloadProductionDrawingArchive').mockResolvedValue()
     const wrapper = mount(ProductionDrawingCenter, { props: { token: 'token', canManage: false } })
     await flushPromises()
@@ -115,10 +129,40 @@ describe('ProductionDrawingCenter', () => {
     await wrapper.get('input[aria-label="全选本包图纸"]').setValue(true)
     await wrapper.findAll('.production-drawings__selection button')[0].trigger('click')
     await flushPromises()
-    expect(download).toHaveBeenCalledWith('project', ['current'], 'Source', 'token')
+    expect(download).toHaveBeenCalledWith('project', ['current'], 'Step', 'token')
     await wrapper.findAll('.production-drawings__selection button')[1].trigger('click')
     expect(download).toHaveBeenCalledTimes(1)
     expect(wrapper.get('[role="alert"]').text()).toContain('PDF 待转换')
+    wrapper.unmount()
+  })
+
+  it('shows pending STEP state and never falls back to the native SolidWorks source', async () => {
+    vi.spyOn(api, 'listProductionDrawings').mockResolvedValue([{ ...current, modelFiles: [{
+      documentId: 'model-document', versionId: 'model-version', drawingNumber: 'M-100', name: '三维件', revision: 'A', stepReady: false,
+    }] }])
+    const download = vi.spyOn(api, 'downloadProductionDrawingArchive').mockResolvedValue()
+    const wrapper = mount(ProductionDrawingCenter, { props: { token: 'token', canManage: false } })
+    await flushPromises()
+    await wrapper.get('.production-drawings__project').trigger('click')
+    expect(wrapper.get('tbody tr').text()).toContain('STEP待转换')
+    await wrapper.get('input[aria-label="全选本包图纸"]').setValue(true)
+    await wrapper.findAll('.production-drawings__selection button')[0].trigger('click')
+    expect(download).not.toHaveBeenCalled()
+    expect(wrapper.get('[role="alert"]').text()).toContain('不能用 SolidWorks 源文件替代')
+    wrapper.unmount()
+  })
+
+  it('downloads the published model preview as STEP from the matching row', async () => {
+    vi.spyOn(api, 'listProductionDrawings').mockResolvedValue([{ ...current, modelFiles: [{
+      documentId: 'model-document', versionId: 'model-version', drawingNumber: 'M-100', name: '三维件', revision: 'A', stepReady: true,
+    }] }])
+    const download = vi.spyOn(api, 'downloadDocumentPreviewFile').mockResolvedValue()
+    const wrapper = mount(ProductionDrawingCenter, { props: { token: 'token', canManage: false } })
+    await flushPromises()
+    await wrapper.get('.production-drawings__project').trigger('click')
+    await wrapper.get('tbody tr').trigger('click')
+    await wrapper.findAll('.production-drawings__actions button')[1].trigger('click')
+    expect(download).toHaveBeenCalledWith('model-document', 'model-version', 'M-100_A.step', 'token')
     wrapper.unmount()
   })
 })

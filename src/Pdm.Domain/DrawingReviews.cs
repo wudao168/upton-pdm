@@ -100,7 +100,7 @@ public sealed record DrawingReviewPackage
     public IReadOnlyList<DrawingReviewMarkup> Markups { get; init; } = [];
 
     /// <summary>
-    /// 第一级图纸审核为并行节点：未指定审核人时由全部具备审图权限的人员处理，指定后由指定人员并行处理，任意一人通过即可。
+    /// 第一级图纸审核为并行节点：新审核单必须指定审核人，指定人员任意一人通过即可；空列表仅兼容历史未指定审核人的在途单据。
     /// </summary>
     public bool AllowsReviewer(string username) =>
         AssignedReviewers.Count == 0

@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { executeDrawingReviewBatch } from './drawingReviewBatch'
 import { clearGlobalStatus, ElMessage } from './statusMessage'
 import { ElMessageBox } from 'element-plus'
 import { computed, onBeforeUnmount, onMounted, provide, ref, watch } from 'vue'
@@ -239,15 +240,11 @@ function packageContainsDocument(review: DrawingReviewPackage, documentId: strin
   return Boolean(documentId && review.items.some(item => item.drawingDocumentId === documentId))
 }
 
-/** 批量审批：逐张按同一结论处理，退回共用同一份说明。 */
+/** 主管批准按审核单去重；审核和退回仍逐张处理。 */
 async function decideDrawingReviewBatch(entries: DrawingReviewBatchEntry[]) {
-  for (const entry of entries) {
-    if (entry.kind === 'supervisor') {
-      await workspace.decideDrawingReviewSupervisor(entry.packageId, entry.decision, entry.comment)
-    } else {
-      await workspace.decideDrawingReviewTarget(entry.packageId, entry.itemId, 'Drawing2D', entry.decision, entry.comment)
-    }
-  }
+  await executeDrawingReviewBatch(entries,
+    entry => workspace.decideDrawingReviewSupervisor(entry.packageId, entry.decision, entry.comment),
+    entry => workspace.decideDrawingReviewTarget(entry.packageId, entry.itemId, 'Drawing2D', entry.decision, entry.comment))
 }
 
 const selectedDrawingReviewPackage = computed(() => workspace.drawingReviews.value.find(item => item.id === drawingReviewPackageId.value)
@@ -302,12 +299,10 @@ const canWritebackSelectedDrawingReview = computed(() => {
   if (selectedDrawingReviewPackage.value?.state !== 'WritingProperties' || !selectedDrawingReviewItem.value) return false
   return selectedDrawingReviewItem.value.drawingState === 'Approved'
 })
-// 退回后由发起人或该图档设计者按最新存档版本重新提交审核（后端同样校验）。
+// 退回后只能由审核发起人按最新存档版本重新提交审核（后端同样校验）。
 const canResubmitSelectedDrawingReview = computed(() => workspace.hasPermission('drawing-review.submit')
   && selectedDrawingReviewItem.value?.drawingState === 'ChangesRequested'
-  && (selectedDrawingReviewPackage.value?.createdBy === workspace.currentUsername.value
-    || selectedDrawingReviewItem.value?.drawingCreatedBy === workspace.currentUsername.value
-    || canManageDrawingReviewWithdrawal.value))
+  && selectedDrawingReviewPackage.value?.createdBy === workspace.currentUsername.value)
 const canManageDrawingReviewWithdrawal = computed(() => workspace.hasRole('Administrator')
   || workspace.project.value.primaryProjectManager === workspace.currentUsername.value
   || (workspace.project.value.collaborativeProjectManagers ?? []).includes(workspace.currentUsername.value))
@@ -862,12 +857,18 @@ function handleReviewOverlayAction(event: MessageEvent) {
       reason?: string
       modelDocumentIds?: string[] | null
       assignedReviewers?: string[]
+      entries?: Array<{ packageId: string; itemId: string }>
       collapsed?: boolean
     }
   } | undefined
   if (message?.type !== 'review-overlay-action' || !message.payload?.action) return
   const payload = message.payload
   switch (payload.action) {
+    case 'resubmit-batch':
+      if (payload.entries?.length) void runOperation(async () => {
+        for (const entry of payload.entries!) await workspace.resubmitDrawingReviewItem(entry.packageId, entry.itemId)
+      }, '退回图纸已重新提交审核')
+      break
     case 'update-package':
       drawingReviewPackageId.value = payload.packageId ?? ''
       break
@@ -915,9 +916,10 @@ function handleReviewOverlayAction(event: MessageEvent) {
   }
 }
 
-watch(projectTab, tab => {
+watch([projectTab, activeView, () => workspace.project.value.id, () => workspace.drawingReviews.value.length > 0], ([tab, view, , hasReviews]) => {
   if (tab !== 'documents') drawingReviewPanelCollapsed.value = true
-}, { flush: 'sync' })
+  else if (view === 'workspace' && hasReviews) drawingReviewPanelCollapsed.value = false
+}, { flush: 'sync', immediate: true })
 
 watch(activeView, (view, previousView) => {
   if (previousView === 'workspace' && view !== 'workspace' && projectTab.value === 'documents') {
@@ -1215,6 +1217,7 @@ async function openWhereUsedParent(projectId: string, parentDocumentId: string) 
                         @decide="(packageId, itemId, target, decision, comment) => runOperation(() => workspace.decideDrawingReviewTarget(packageId, itemId, target, decision, comment), decision === 'Approve' ? '审核结果已记录' : '图纸已退回待修改')"
                         @decide-supervisor="(packageId, decision, comment) => runOperation(() => workspace.decideDrawingReviewSupervisor(packageId, decision, comment), decision === 'Approve' ? '已批准' : '图纸已退回待修改')"
                         @decide-batch="entries => runOperation(() => decideDrawingReviewBatch(entries), `批量审批已提交（${entries.length} 张）`)"
+                        @resubmit-batch="entries => runOperation(async () => { for (const entry of entries) await workspace.resubmitDrawingReviewItem(entry.packageId, entry.itemId) }, '退回图纸已重新提交审核')"
                       />
                       <!-- 审核结论栏由页面直接渲染进预览工具条的结论栏容器（网页端与客户端同一份 DOM），
                            常驻显示；不可操作时由结论栏自身禁用输入与按钮。 -->
@@ -1233,7 +1236,6 @@ async function openWhereUsedParent(projectId: string, parentDocumentId: string) 
                           @resolve-markup="(packageId, markupId) => runOperation(() => workspace.resolveDrawingReviewMarkup(packageId, markupId), '图纸批注已关闭')"
                           @decide="(packageId, itemId, target, decision, comment) => runOperation(() => workspace.decideDrawingReviewTarget(packageId, itemId, target, decision, comment), decision === 'Approve' ? '审核结果已记录' : '图纸已退回待修改')"
                           @decide-supervisor="(packageId, decision, comment) => runOperation(() => workspace.decideDrawingReviewSupervisor(packageId, decision, comment), decision === 'Approve' ? '已批准' : '图纸已退回待修改')"
-                          @resubmit="(packageId, itemId) => runOperation(() => workspace.resubmitDrawingReviewItem(packageId, itemId), '已按最新版本重新提交审核')"
                         />
                       </template>
                     </PreviewWorkspace>

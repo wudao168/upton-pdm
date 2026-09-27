@@ -53,6 +53,60 @@ public sealed class ReleasePreviewCoordinator(
     }
 }
 
+/// <summary>发布审批完成后的单飞协调器：审批接口只落库为“发布中”，实际发布在后台续跑。</summary>
+public sealed class ReleasePublishingCoordinator(
+    IServiceScopeFactory scopeFactory,
+    ILogger<ReleasePublishingCoordinator> logger,
+    IHostApplicationLifetime applicationLifetime)
+{
+    private readonly object gate = new();
+    private Task? activeRun;
+
+    public bool TryStart(string triggerKind)
+    {
+        lock (gate)
+        {
+            if (activeRun is { IsCompleted: false }) return false;
+            activeRun = RunAsync(triggerKind);
+            return true;
+        }
+    }
+
+    private async Task RunAsync(string triggerKind)
+    {
+        try
+        {
+            await using var scope = scopeFactory.CreateAsyncScope();
+            var repository = scope.ServiceProvider.GetRequiredService<IPdmRepository>();
+            var workflow = scope.ServiceProvider.GetRequiredService<PdmWorkflowService>();
+            foreach (var packageId in await repository.ListPublishingReleasePackageIdsAsync(20, applicationLifetime.ApplicationStopping))
+            {
+                try
+                {
+                    await workflow.ResumePublishAsync(packageId, applicationLifetime.ApplicationStopping);
+                    logger.LogInformation("后台发布完成 {PackageId}（{Trigger}）。", packageId, triggerKind);
+                }
+                catch (OperationCanceledException) when (applicationLifetime.ApplicationStopping.IsCancellationRequested)
+                {
+                    throw;
+                }
+                catch (Exception exception)
+                {
+                    logger.LogError(exception, "后台发布 {PackageId} 失败，已记录为发布失败。", packageId);
+                }
+            }
+        }
+        catch (OperationCanceledException) when (applicationLifetime.ApplicationStopping.IsCancellationRequested)
+        {
+            logger.LogInformation("后台发布任务随应用停止而中断。");
+        }
+        catch (Exception exception)
+        {
+            logger.LogError(exception, "后台发布任务执行失败，下一轮会继续重试。");
+        }
+    }
+}
+
 /// <summary>
 /// 启动时恢复被打断的发布：服务重启/崩溃会让发布包停在"发布中"、BOM 一直锁定，
 /// 这里统一标记为发布失败，让项目经理可以重新提交发布，避免整单卡死。
@@ -141,6 +195,35 @@ public sealed class ReleasePreviewRetryHostedService(
             catch (Exception exception)
             {
                 logger.LogError(exception, "发布转图定时重试循环异常，下一轮继续。");
+            }
+        }
+    }
+}
+
+/// <summary>兜底续跑后台发布，覆盖审批接口触发时已有任务正在执行的情况。</summary>
+public sealed class ReleasePublishingRetryHostedService(
+    ReleasePublishingCoordinator coordinator,
+    ILogger<ReleasePublishingRetryHostedService> logger) : BackgroundService
+{
+    private static readonly TimeSpan Interval = TimeSpan.FromSeconds(15);
+
+    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+    {
+        using var timer = new PeriodicTimer(Interval);
+        while (!stoppingToken.IsCancellationRequested)
+        {
+            try
+            {
+                coordinator.TryStart("Scheduled");
+                if (!await timer.WaitForNextTickAsync(stoppingToken)) break;
+            }
+            catch (OperationCanceledException)
+            {
+                break;
+            }
+            catch (Exception exception)
+            {
+                logger.LogError(exception, "后台发布定时续跑循环异常，下一轮继续。 ");
             }
         }
     }

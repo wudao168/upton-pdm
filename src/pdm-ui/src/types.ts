@@ -979,6 +979,9 @@ export interface ReleaseItemComment {
 export type ReleaseScope = 'LegacyCombined' | 'StandardLongLead' | 'StandardFormal' | 'StandardSupplement' | 'ElectricalFormal' | 'ElectricalSupplement' | 'NonStandardWithDrawing' | 'NonStandardLongLead' | 'NonStandardSupplement' | 'ElectricalLongLead'
 export type DrawingPriority = 'Normal' | 'Priority' | 'Urgent'
 export interface DrawingDeliveryOverride { priority: DrawingPriority; requiredOn: string }
+export interface ProductionDrawingModelFile {
+  documentId: string; versionId?: string | null; drawingNumber: string; name: string; revision: string; stepReady: boolean
+}
 export interface ProductionDrawingItem {
   projectId: string; projectCode: string; projectName: string
   publishedBy?: string | null; division?: string | null; projectManager?: string | null
@@ -986,6 +989,7 @@ export interface ProductionDrawingItem {
   drawingNumber: string; model: string; name: string; revision: string; publishedAt: string
   priority: DrawingPriority; requiredOn?: string | null; isCurrent: boolean; pdfReady: boolean
   legacyUnverified: boolean; supersededAt?: string | null
+  modelFiles?: ProductionDrawingModelFile[]
   bomItems?: BomItem[]
 }
 
@@ -998,6 +1002,7 @@ export interface CreateReleasePackageInput {
   drawingPriority?: DrawingPriority
   drawingRequiredOn?: string | null
   drawingDeliveryOverrides?: Record<string, DrawingDeliveryOverride>
+  bomItemDeliveryOverrides?: Record<string, DrawingDeliveryOverride>
 }
 
 export interface UpdateReleasePackageDraftInput {
@@ -1008,6 +1013,7 @@ export interface UpdateReleasePackageDraftInput {
   drawingPriority?: DrawingPriority
   drawingRequiredOn?: string | null
   drawingDeliveryOverrides?: Record<string, DrawingDeliveryOverride>
+  bomItemDeliveryOverrides?: Record<string, DrawingDeliveryOverride>
 }
 
 export interface ReleasePackageSummary {
@@ -1047,6 +1053,7 @@ export interface ReleasePackageSummary {
   drawingPriority?: DrawingPriority
   drawingRequiredOn?: string | null
   drawingDeliveryOverrides?: Record<string, DrawingDeliveryOverride>
+  bomItemDeliveryOverrides?: Record<string, DrawingDeliveryOverride>
   changeReasonSelections?: ReleaseChangeReasonSelection[]
   formalSupplementPolicySnapshotted?: boolean
   formalSupplementMaximumCount?: number | null

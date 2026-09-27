@@ -8,6 +8,14 @@ public sealed record ProductionDrawingProject(Guid Id, string Code, string Name)
     public string? ProjectManager { get; init; }
 }
 
+public sealed record ProductionDrawingModelFile(
+    Guid DocumentId,
+    Guid? VersionId,
+    string DrawingNumber,
+    string Name,
+    string Revision,
+    bool StepReady);
+
 public sealed record ProductionDrawingItem(
     Guid ProjectId,
     string ProjectCode,
@@ -29,6 +37,7 @@ public sealed record ProductionDrawingItem(
     DateTimeOffset? SupersededAt)
 {
     public IReadOnlyList<BomItem> BomItems { get; init; } = [];
+    public IReadOnlyList<ProductionDrawingModelFile> ModelFiles { get; init; } = [];
     public string PublishedBy { get; init; } = string.Empty;
     public string? Division { get; init; }
     public string? ProjectManager { get; init; }
@@ -44,8 +53,9 @@ public sealed class ProductionDrawingService(IPdmRepository repository)
         var results = new List<ProductionDrawingItem>();
         foreach (var project in projects.Where(item => !projectId.HasValue || item.Id == projectId.Value))
         {
-            var documents = (await repository.ListDocumentsAsync(project.Id, cancellationToken))
-                .Where(document => document.Kind == DocumentKind.Drawing)
+            var allDocuments = (await repository.ListDocumentsAsync(project.Id, cancellationToken))
+                .ToDictionary(document => document.Id);
+            var documents = allDocuments.Values.Where(document => document.Kind == DocumentKind.Drawing)
                 .ToDictionary(document => document.Id);
             if (documents.Count == 0) continue;
             var packages = (await repository.ListReleasePackagesAsync(project.Id, cancellationToken))
@@ -61,6 +71,15 @@ public sealed class ProductionDrawingService(IPdmRepository repository)
                 .ToDictionary(group => group.Key, group => group.OrderBy(item => item.Sequence).ToArray()));
             var allVersions = await repository.ListProjectDocumentVersionsAsync(project.Id, cancellationToken);
             var versionsById = allVersions.ToDictionary(version => version.Id);
+            var modelVersionsByPackage = allVersions
+                .Where(version => version.Status == DocumentVersionStatus.Released
+                    && version.ReleasePackageId.HasValue
+                    && packages.ContainsKey(version.ReleasePackageId.Value)
+                    && allDocuments.TryGetValue(version.DocumentId, out var modelDocument)
+                    && modelDocument.Kind is DocumentKind.Assembly or DocumentKind.Part)
+                .GroupBy(version => (PackageId: version.ReleasePackageId!.Value, version.DocumentId))
+                .ToDictionary(group => group.Key, group => group
+                    .OrderByDescending(version => version.CreatedAt).ThenByDescending(version => version.Id).First());
             var versions = allVersions
                 .Where(version => version.Status == DocumentVersionStatus.Released
                     && version.ReleasePackageId.HasValue
@@ -88,6 +107,22 @@ public sealed class ProductionDrawingService(IPdmRepository repository)
                         bomItems = package.NonStandardBomSnapshot
                             .Where(item => string.Equals(item.DrawingNumber, document.DrawingNumber, StringComparison.OrdinalIgnoreCase))
                             .OrderBy(item => item.Sequence).ToArray();
+                    var modelFiles = relatedModels.TryGetValue(document.Id, out modelIds)
+                        ? modelIds
+                            .Where(modelId => packageBomItems[package.Id].ContainsKey(modelId)
+                                && allDocuments.TryGetValue(modelId, out var modelDocument)
+                                && modelDocument.Kind is DocumentKind.Assembly or DocumentKind.Part)
+                            .OrderBy(modelId => allDocuments[modelId].DrawingNumber, StringComparer.OrdinalIgnoreCase)
+                            .Select(modelId =>
+                            {
+                                var modelDocument = allDocuments[modelId];
+                                modelVersionsByPackage.TryGetValue((package.Id, modelId), out var modelVersion);
+                                var stepReady = modelVersion?.Preview is { Format: DocumentPreviewFormat.Step } preview
+                                    && string.Equals(preview.SourceSha256, modelVersion.Sha256, StringComparison.OrdinalIgnoreCase);
+                                return new ProductionDrawingModelFile(modelId, modelVersion?.Id,
+                                    modelDocument.DrawingNumber, modelDocument.Name, modelVersion?.Revision.Display ?? "—", stepReady);
+                            }).ToArray()
+                        : [];
                     results.Add(new ProductionDrawingItem(
                         project.Id, project.Code, project.Name, document.Id, version.Id, package.Id, package.Number,
                         document.DrawingNumber, Model(version.PropertySnapshot, document), document.Name, version.Revision.Display,
@@ -99,7 +134,7 @@ public sealed class ProductionDrawingService(IPdmRepository repository)
                             && (legacy || string.Equals(version.Preview.SourceSha256, version.Sha256, StringComparison.OrdinalIgnoreCase)),
                         legacy,
                         version.Id == current.Id ? null : current.CreatedAt)
-                    { BomItems = bomItems, PublishedBy = version.CreatedBy, Division = project.Division, ProjectManager = project.ProjectManager });
+                    { BomItems = bomItems, ModelFiles = modelFiles, PublishedBy = version.CreatedBy, Division = project.Division, ProjectManager = project.ProjectManager });
                 }
             }
         }

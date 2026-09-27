@@ -144,7 +144,12 @@ public sealed class DrawingReviewWorkflowTests
             new DecideDrawingReviewSupervisorCommand(DrawingReviewDecision.RequestChanges, "整单退回"), "manager", UserRole.Administrator, default);
         Assert.Equal(DrawingReviewPackageState.ChangesRequested, package.State);
 
-        // 这种已退回的审核单此前既不能批准也不能撤销，会卡死；现在发起人可以撤回重新发起。
+        package = await workflow.ResubmitDrawingReviewItemAsync(package.Id, item.Id, "submitter", UserRole.Administrator, default);
+        Assert.Equal(DrawingReviewPackageState.InReview, package.State);
+        Assert.Equal(DrawingReviewTargetState.Pending, Assert.Single(package.Items).DrawingState);
+        Assert.Null(package.SupervisorReviewedAt);
+
+        // 发起人仍可撤销本单。
         package = await workflow.WithdrawDrawingReviewPackageAsync(package.Id, "改不动，撤回重新发起", "submitter", UserRole.Administrator, default);
         Assert.Equal(DrawingReviewPackageState.Withdrawn, package.State);
         Assert.Equal("submitter", package.WithdrawnBy);
@@ -197,10 +202,13 @@ public sealed class DrawingReviewWorkflowTests
         item = Assert.Single(package.Items);
         Assert.Equal(DrawingReviewTargetState.ChangesRequested, item.DrawingState);
 
-        // 非发起人且非该图档设计者不能代替提交。
+        // 非发起人（包括该图档设计者）不能代替重新提交。
         await repository.CreateUserAsync(new UserAccount(Guid.NewGuid(), "other-engineer", "其他工程师", "unused", UserRole.Engineer, true), default);
         await Assert.ThrowsAsync<UnauthorizedAccessException>(() => workflow.ResubmitDrawingReviewItemAsync(
             package.Id, item.Id, "other-engineer", UserRole.Engineer, default));
+        var designerBlocked = await Assert.ThrowsAsync<UnauthorizedAccessException>(() => workflow.ResubmitDrawingReviewItemAsync(
+            package.Id, item.Id, "designer", UserRole.Administrator, default));
+        Assert.Contains("审核发起人", designerBlocked.Message);
 
         // 审批退回本身不应限制重新提交；是否形成新存档版本由设计者自行决定。
         package = await workflow.ResubmitDrawingReviewItemAsync(package.Id, item.Id, "submitter", UserRole.Administrator, default);

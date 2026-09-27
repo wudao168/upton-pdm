@@ -1635,13 +1635,13 @@ public sealed class MaterialServiceTests
     }
 
     [Fact]
-    public async Task NonStandardBomMaterialCode_IsGeneratedWithoutMaterialCodeApplication()
+    public async Task NonStandardBomMaterialCode_IsGeneratedForDrawingNumberWithoutMaterialCodeApplication()
     {
         var service = CreateService(out var materials, out var repository, out _);
         var workflow = new PdmWorkflowService(repository, null!, null!, TimeProvider.System);
         var bom = await workflow.ReplaceBomAsync(ProjectId, BomKind.NonStandard,
         [
-            new BomItemInput(1, string.Empty, "安装板", 1, "001", "6061", "200x100", "W1", true)
+            new BomItemInput(1, "7002541.00-01", "安装板", 1, "001", "6061", "200x100", "W1", true)
         ], "admin", UserRole.Administrator, default);
 
         var generated = Assert.Single(await service.EnsureNonStandardMaterialsAsync(

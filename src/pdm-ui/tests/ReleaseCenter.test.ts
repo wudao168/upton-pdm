@@ -134,6 +134,20 @@ describe('ReleaseCenter', () => {
     expect(wrapper.get('.pdm-approval-chain .is-skipped').text()).toContain('本轮未到达')
   })
 
+  it('shows the completed approval state while publication continues in the background', () => {
+    const releasePackage: ReleasePackageSummary = {
+      id: 'release-publishing', number: 'RP-PUBLISHING-001', state: '发布中', scope: 'StandardFormal',
+      workflowVersion: 1, selectedBomItemIds: [], createsManufacturingBaseline: false, locksDocuments: false,
+      standardBomSnapshot: [], nonStandardBomSnapshot: [], electricalBomSnapshot: [], steps: [],
+    }
+    const wrapper = mount(ReleaseCenter, {
+      props: { releasePackage, username: 'designer', pending: false, progress: 0, error: '', canManage: false, canDecide: false },
+    })
+
+    expect(wrapper.get('.pdm-release-completion-status').text()).toContain('审批已完成')
+    expect(wrapper.get('.pdm-release-summary').text()).toContain('审批完成 · 后台发布中')
+  })
+
   it('requires a rejection reason and defaults blank approval comments to agreed', async () => {
     const releasePackage: ReleasePackageSummary = {
       id: 'release-current', number: 'RP-CURRENT-001', state: '审批中', scope: 'StandardFormal',
@@ -310,7 +324,7 @@ describe('ReleaseCenter', () => {
       },
     })
 
-    expect(wrapper.findAll('option').map(option => option.text())).toEqual([
+    expect(wrapper.findAll('.pdm-release-type-row > label:first-child option').map(option => option.text())).toEqual([
       '非标件 · 长交期BOM发布', '非标件BOM + 图纸 · 正式发布',
     ])
     expect(wrapper.get('.release-detail-picker legend').text()).toContain('选择长交期非标件')
@@ -349,6 +363,85 @@ describe('ReleaseCenter', () => {
       selectedBomItemIds: ['ns-ok'],
     })
     wrapper.unmount()
+  })
+
+  it('defaults the formal drawing delivery date to the assembly task start date', async () => {
+    const plan = { tasks: [{ stage: 'Assembly', plannedStart: '2026-11-02' }] }
+    const readPlan = vi.spyOn(api, 'readProjectPlan').mockResolvedValue(plan as never)
+    const wrapper = mount(ReleaseCenter, {
+      props: {
+        releasePackage: null, projectId: 'project-1', token: 'test-token', allowedScopes: ['NonStandardWithDrawing'], preferredScope: 'NonStandardWithDrawing',
+        releaseItems: [frozenItem('ns-formal')], username: 'engineer', pending: false, progress: 0, error: '', canManage: true, canDecide: false,
+      },
+    })
+
+    try {
+      await flushPromises()
+      expect((wrapper.get('input[aria-label="整包需求日期"]').element as HTMLInputElement).value).toBe('2026-11-02')
+      expect(wrapper.get('.pdm-release-assembly-note').text()).toBe('计划装配节点')
+      await wrapper.get('input[aria-label="整包需求日期"]').setValue('2026-11-03')
+      expect(wrapper.find('.pdm-release-assembly-note').exists()).toBe(false)
+    } finally {
+      readPlan.mockRestore()
+      wrapper.unmount()
+    }
+  })
+
+  it('defaults long-lead delivery dates to the assembly task start date', async () => {
+    const plan = { tasks: [{ stage: 'Assembly', plannedStart: '2026-11-02' }] }
+    const readPlan = vi.spyOn(api, 'readProjectPlan').mockResolvedValue(plan as never)
+    const wrapper = mount(ReleaseCenter, {
+      props: {
+        releasePackage: null, projectId: 'project-1', token: 'test-token', allowedScopes: ['StandardLongLead'], preferredScope: 'StandardLongLead',
+        releaseItems: [frozenItem('standard-long-lead')], username: 'engineer', pending: false, progress: 0, error: '', canManage: true, canDecide: false,
+      },
+    })
+
+    try {
+      await flushPromises()
+      expect((wrapper.get('input[aria-label="整包需求日期"]').element as HTMLInputElement).value).toBe('2026-11-02')
+      expect(wrapper.get('.pdm-release-assembly-note').text()).toBe('计划装配节点')
+    } finally {
+      readPlan.mockRestore()
+      wrapper.unmount()
+    }
+  })
+
+  it('keeps the four formal drawing release controls in the dedicated release row', () => {
+    const wrapper = mount(ReleaseCenter, {
+      props: {
+        releasePackage: null, allowedScopes: ['NonStandardWithDrawing'], preferredScope: 'NonStandardWithDrawing',
+        releaseItems: [frozenItem('ns-formal')], username: 'engineer', pending: false, progress: 0, error: '', canManage: true, canDecide: false,
+      },
+    })
+
+    expect(wrapper.get('.pdm-release-create-header').classes()).toContain('has-drawing-delivery')
+    expect(wrapper.findAll('.pdm-release-type-row > label').map(label => label.text().replace(/\s+/g, '')))
+      .toEqual(['发布类型非标件BOM+图纸·正式发布', '整套倍率', '整包紧急程度普通优先紧急', '整包需求日期'])
+    expect(wrapper.get('.pdm-release-draft-actions').element.parentElement).toBe(wrapper.get('.pdm-release-type-row').element)
+    wrapper.unmount()
+  })
+
+  it('defaults the drawing delivery date to ten days from today when no assembly start date is available', async () => {
+    const today = new Date()
+    today.setHours(0, 0, 0, 0)
+    today.setDate(today.getDate() + 10)
+    const expected = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`
+    const readPlan = vi.spyOn(api, 'readProjectPlan').mockResolvedValue(null)
+    const wrapper = mount(ReleaseCenter, {
+      props: {
+        releasePackage: null, projectId: 'project-1', token: 'test-token', allowedScopes: ['NonStandardWithDrawing'], preferredScope: 'NonStandardWithDrawing',
+        releaseItems: [frozenItem('ns-formal')], username: 'engineer', pending: false, progress: 0, error: '', canManage: true, canDecide: false,
+      },
+    })
+
+    try {
+      await flushPromises()
+      expect((wrapper.get('input[aria-label="整包需求日期"]').element as HTMLInputElement).value).toBe(expected)
+    } finally {
+      readPlan.mockRestore()
+      wrapper.unmount()
+    }
   })
 
   it('disables non-standard release selection until the current drawing version is approved', async () => {
@@ -467,7 +560,7 @@ describe('ReleaseCenter', () => {
 
     expect((wrapper.get('.pdm-release-type-row select').element as HTMLSelectElement).value).toBe('StandardFormal')
     await wrapper.setProps({ allowedScopes: ['StandardSupplement'], preferredScope: 'StandardSupplement', releasePackages: [publishedFormal('StandardFormal')] })
-    expect(wrapper.findAll('.pdm-release-type-row option').map(option => option.text())).toEqual(['标准件 · 增补/变更'])
+    expect(wrapper.findAll('.pdm-release-type-row > label:first-child option').map(option => option.text())).toEqual(['标准件 · 增补/变更'])
     expect((wrapper.get('.pdm-release-type-row select').element as HTMLSelectElement).value).toBe('StandardSupplement')
   })
 
@@ -482,7 +575,7 @@ describe('ReleaseCenter', () => {
     })
 
     // 尚未首次正式发布：只有长交期与正式发布。
-    expect(wrapper.findAll('.pdm-release-type-row option').map(option => option.text()))
+    expect(wrapper.findAll('.pdm-release-type-row > label:first-child option').map(option => option.text()))
       .toEqual(['标准件 · 长交期BOM发布', '标准件 · 正式发布'])
 
     // 首次正式发布完成后：只剩增补/变更，长交期不再可选。
@@ -493,7 +586,7 @@ describe('ReleaseCenter', () => {
         standardBomSnapshot: [], nonStandardBomSnapshot: [], electricalBomSnapshot: [], steps: [],
       }],
     })
-    expect(wrapper.findAll('.pdm-release-type-row option').map(option => option.text()))
+    expect(wrapper.findAll('.pdm-release-type-row > label:first-child option').map(option => option.text()))
       .toEqual(['标准件 · 增补/变更'])
   })
 
@@ -518,7 +611,7 @@ describe('ReleaseCenter', () => {
     const detail = wrapper.get('.release-detail-picker').element
     const table = wrapper.get('.release-detail-picker table').element
     const columnHeaders = wrapper.findAll('.release-detail-picker th').map(cell => cell.text())
-    expect(wrapper.findAll('.release-detail-picker col')).toHaveLength(10)
+    expect(wrapper.findAll('.release-detail-picker col')).toHaveLength(12)
     expect(wrapper.findAll('.release-detail-picker tbody tr').at(0)!.findAll('td.is-release-centered')).toHaveLength(6)
 
     await wrapper.get('.pdm-release-type-row select').setValue('StandardFormal')
@@ -530,14 +623,14 @@ describe('ReleaseCenter', () => {
     expect(wrapper.get('.release-detail-picker legend').text()).toContain('正式发布内容')
     expect(wrapper.findAll('.release-detail-picker tbody tr').at(0)!.findAll('td.is-release-centered')).toHaveLength(6)
 
-    // 正式发布完成后增补/变更才可选，切换后仍是同一套固定表头与明细表。
+    // 正式发布完成后增补/变更才可选，并继续保留逐项交付字段。
     await wrapper.setProps({ releasePackages: [publishedFormal('StandardFormal')] })
     await wrapper.get('.pdm-release-type-row select').setValue('StandardSupplement')
     expect(wrapper.get('.pdm-release-create-header').element).toBe(header)
     expect(wrapper.get('.pdm-release-parameter-slot').element).toBe(parameterSlot)
     expect(wrapper.get('.release-detail-picker').element).toBe(detail)
     expect(wrapper.get('.release-detail-picker table').element).toBe(table)
-    expect(wrapper.findAll('.release-detail-picker th').map(cell => cell.text())).toEqual([...columnHeaders, '变更明细（原值 → 新值）'])
+    expect(wrapper.findAll('.release-detail-picker th').map(cell => cell.text())).toEqual([...columnHeaders.slice(0, -2), '变更明细（原值 → 新值）', ...columnHeaders.slice(-2)])
     expect(wrapper.get('.release-detail-picker legend').text()).toContain('增补/变更内容')
     expect(wrapper.findAll('.release-detail-picker tbody tr').at(0)!.findAll('td.is-release-centered')).toHaveLength(6)
   })
@@ -557,8 +650,8 @@ describe('ReleaseCenter', () => {
     expect(wrapper.get('.pdm-release-draft-actions .pdm-primary-action').text()).toBe('创建草稿')
     expect(wrapper.text()).toContain('备注')
     expect(wrapper.get('textarea').attributes()).not.toHaveProperty('required')
-    expect(wrapper.findAll('.release-detail-picker th').map(cell => cell.text())).toEqual(['标记', '序号', '物料编码', '名称', '型号', '品牌', '可发布数量', '发布总数量', '备注', '发布状态'])
-    expect(wrapper.findAll('.release-detail-picker tbody tr').at(0)!.findAll('td').slice(1).map(cell => cell.text())).toEqual(['1', 'STD-001', '长交期件', 'M12', 'SMC', '1', '—', '提前采购', '剩余可发布'])
+    expect(wrapper.findAll('.release-detail-picker th').map(cell => cell.text())).toEqual(['标记', '序号', '物料编码', '名称', '型号', '品牌', '可发布数量', '发布总数量', '备注', '发布状态', '紧急程度', '需求时间'])
+    expect(wrapper.findAll('.release-detail-picker tbody tr').at(0)!.findAll('td').slice(1).map(cell => cell.text())).toEqual(['1', 'STD-001', '长交期件', 'M12', 'SMC', '1', '—', '提前采购', '剩余可发布', '普通优先紧急', ''])
     expect(wrapper.get('.pdm-release-draft-actions .pdm-primary-action').attributes()).toHaveProperty('disabled')
 
     await wrapper.get('input[aria-label="选择长交期物料 STD-001"]').setValue(true)
@@ -588,8 +681,8 @@ describe('ReleaseCenter', () => {
     const rows = wrapper.findAll('.release-detail-picker tbody tr')
     expect(rows).toHaveLength(2)
     expect(wrapper.text()).not.toContain('STD-003')
-    expect(rows.at(0)!.findAll('td').slice(1).map(cell => cell.text())).toEqual(['1', 'STD-001', '部分已发布件', '—', '—', '3', '—', '—', '剩余可发布'])
-    expect(rows.at(1)!.findAll('td').slice(1).map(cell => cell.text())).toEqual(['2', 'STD-002', '待发布件', 'M8', 'FESTO', '7', '—', '—', '剩余可发布'])
+    expect(rows.at(0)!.findAll('td').slice(1).map(cell => cell.text())).toEqual(['1', 'STD-001', '部分已发布件', '—', '—', '3', '—', '—', '剩余可发布', '普通优先紧急', ''])
+    expect(rows.at(1)!.findAll('td').slice(1).map(cell => cell.text())).toEqual(['2', 'STD-002', '待发布件', 'M8', 'FESTO', '7', '—', '—', '剩余可发布', '普通优先紧急', ''])
 
     await wrapper.get('input[aria-label="选择长交期物料 STD-001"]').setValue(true)
     await wrapper.get('input[aria-label="选择长交期物料 STD-002"]').setValue(true)
@@ -623,11 +716,13 @@ describe('ReleaseCenter', () => {
     expect(wrapper.get('select[aria-label="发布类型"]').attributes()).toHaveProperty('disabled')
     expect((wrapper.get('input[aria-label="本次发布数量 STD-001"]').element as HTMLInputElement).value).toBe('2')
     await wrapper.get('input[aria-label="本次发布数量 STD-001"]').setValue('1')
+    await wrapper.get('input[aria-label="整包需求日期"]').setValue('2026-10-09')
     await wrapper.get('textarea').setValue('调整数量')
     await wrapper.get('.pdm-release-draft-actions .pdm-primary-action').trigger('submit')
 
     expect(wrapper.emitted('updateDraft')).toEqual([['draft-long-lead', {
       changeReason: '调整数量', selectedBomItemIds: ['item-1'], selectedBomItemQuantities: { 'item-1': 1 }, wholeSetMultiplier: 1,
+      drawingPriority: 'Normal', drawingRequiredOn: '2026-10-09', drawingDeliveryOverrides: {}, bomItemDeliveryOverrides: {},
     }]])
   })
 
@@ -693,7 +788,7 @@ describe('ReleaseCenter', () => {
     expect(wrapper.text()).toContain('正式发布内容（已选 2 / 共 2 项 · 默认全选 · 整套倍率 ×1）')
     const rows = wrapper.findAll('.release-detail-picker tbody tr')
     expect(rows).toHaveLength(2)
-    expect(rows.at(0)!.findAll('td').map(cell => cell.text())).toEqual(['', '1', 'STD-001', '提前采购件', 'M12', 'SMC', '3', '3', '—', '已发布 1/4'])
+    expect(rows.at(0)!.findAll('td').map(cell => cell.text())).toEqual(['', '1', 'STD-001', '提前采购件', 'M12', 'SMC', '3', '3', '—', '已发布 1/4', '普通优先紧急', ''])
     expect(rows.at(1)!.text()).toContain('本次发布')
     expect(wrapper.findAll('input[aria-label^="本次发布物料"]').every(input => (input.element as HTMLInputElement).checked)).toBe(true)
 
@@ -701,10 +796,13 @@ describe('ReleaseCenter', () => {
     expect(wrapper.get('.release-detail-picker legend').text()).toContain('已选 1 / 共 2 项')
     expect(rows.at(0)!.findAll('td').at(7)!.text()).toBe('—')
     expect(rows.at(0)!.text()).toContain('本次不发布')
+    await wrapper.get('select[aria-label="STD-002紧急程度"]').setValue('Urgent')
+    await wrapper.get('input[aria-label="STD-002需求时间"]').setValue('2026-11-03')
     await wrapper.get('.pdm-release-draft-actions .pdm-primary-action').trigger('submit')
     expect(wrapper.emitted('create')?.at(0)?.at(0)).toMatchObject({
       scope: 'StandardFormal',
       selectedBomItemIds: ['item-3'],
+      bomItemDeliveryOverrides: { 'item-3': { priority: 'Urgent', requiredOn: '2026-11-03' } },
     })
 
     await wrapper.get('input[aria-label="本次发布物料 STD-002"]').setValue(false)
@@ -731,7 +829,7 @@ describe('ReleaseCenter', () => {
     expect(wrapper.get('.release-detail-picker legend').text()).toContain('已选 2 / 共 2 项')
     expect(wrapper.get('.release-detail-picker legend').text()).toContain('1 项已发布不再重复下发')
     const rows = wrapper.findAll('.release-detail-picker tbody tr')
-    expect(rows.at(0)!.findAll('td').map(cell => cell.text())).toEqual(['', '1', 'STD-001', '已提前发布件', '12X14', 'UPTON', '0', '0', '—', '已发布 1/1'])
+    expect(rows.at(0)!.findAll('td').map(cell => cell.text())).toEqual(['', '1', 'STD-001', '已提前发布件', '12X14', 'UPTON', '0', '0', '—', '已发布 1/1', '普通优先紧急', ''])
 
     const published = wrapper.get('input[aria-label="本次发布物料 STD-001"]')
     expect((published.element as HTMLInputElement).checked).toBe(true)
