@@ -21,7 +21,7 @@ foreach ($entry in @($manifest.files)) {
     if (-not [string]::Equals((Get-FileHash -LiteralPath $filePath -Algorithm SHA256).Hash, [string]$entry.sha256, [StringComparison]::OrdinalIgnoreCase)) { throw "部署包文件哈希不一致：$relativePath" }
 }
 $required = @(
-    'Server/app/Pdm.Api.exe', 'Server/app/Pdm.Api.dll', 'Server/app/wwwroot/index.html', 'Server/app/wwwroot/client-bootstrap.json',
+    'Server/app/Pdm.Api.exe', 'Server/app/Pdm.Api.dll', 'Server/app/hostfxr.dll', 'Server/app/hostpolicy.dll', 'Server/app/coreclr.dll', 'Server/app/wwwroot/index.html', 'Server/app/wwwroot/client-bootstrap.json',
     'Server/mysql-8.4.11-winx64.zip', 'Server/vc_redist.x64.exe', 'Server/Install-FullServerDeployment.ps1',
     'Client/manifest.json', 'Client/payload/desktop/Upton.Pdm.Desktop.exe', 'Client/payload/solidworks-addin/Upton.Pdm.SolidWorks.Addin.dll',
     'Client/prerequisites/MicrosoftEdgeWebView2RuntimeInstallerX64.exe', 'Client/prerequisites/NDP48-x86-x64-AllOS-ENU.exe',

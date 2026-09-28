@@ -25,6 +25,21 @@ const settings: PdmSystemSettings = {
 }
 
 describe('StorageSettings BOM property mappings', () => {
+  it('explains that project storage is grouped under the main project code', () => {
+    const wrapper = mount(StorageSettings, {
+      props: {
+        settings, equipmentTypes: [], numberingOptions: { organizations: [], projectTypes: [], equipmentTypes: [] }, pending: false,
+        onSaveSettings: vi.fn(), onSaveEquipmentType: vi.fn(), onUpdateCounters: vi.fn(),
+      },
+      global: { plugins: [ElementPlus] },
+    })
+
+    expect(wrapper.text()).toContain('主项目号作为容器')
+    expect(wrapper.text()).toContain('D:\\PDM\\Vault\\P700001\\P700001-0')
+    expect(wrapper.text()).toContain('D:\\PDM\\Release\\P700001\\P700001-1')
+    wrapper.unmount()
+  })
+
   it('saves an independently configurable material attachment root', async () => {
     const onSaveSettings = vi.fn().mockImplementation(async input => input)
     const wrapper = mount(StorageSettings, {

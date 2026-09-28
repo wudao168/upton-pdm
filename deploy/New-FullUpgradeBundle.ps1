@@ -40,12 +40,14 @@ Push-Location $root
 try {
     & $dotnet restore 'Pdm.slnx' --nologo -p:NuGetAudit=false
     if ($LASTEXITCODE -ne 0) { throw '解决方案还原失败。' }
+    & $dotnet restore 'src\Pdm.Api\Pdm.Api.csproj' --runtime win-x64 --nologo -p:NuGetAudit=false
+    if ($LASTEXITCODE -ne 0) { throw 'Windows x64 自包含 API 还原失败。' }
     & $dotnet build 'Pdm.slnx' --configuration Release --no-restore --nologo --disable-build-servers -m:1
     if ($LASTEXITCODE -ne 0) { throw '完整 Release 构建失败。' }
     & $dotnet test 'Pdm.slnx' --configuration Release --no-build --no-restore --nologo --disable-build-servers
     if ($LASTEXITCODE -ne 0) { throw '完整 Release 测试失败。' }
-    & $dotnet publish 'src\Pdm.Api\Pdm.Api.csproj' --configuration Release --no-restore --output $appOutput --nologo
-    if ($LASTEXITCODE -ne 0) { throw 'API 发布失败。' }
+    & $dotnet publish 'src\Pdm.Api\Pdm.Api.csproj' --configuration Release --runtime win-x64 --self-contained true --no-restore --output $appOutput --nologo
+    if ($LASTEXITCODE -ne 0) { throw 'Windows x64 自包含 API 发布失败。' }
 }
 finally { Pop-Location }
 

@@ -43,7 +43,11 @@ foreach ($entry in @($manifest.files)) {
 }
 
 $required = @(
+    'Server\app\Pdm.Api.exe',
     'Server\app\Pdm.Api.dll',
+    'Server\app\hostfxr.dll',
+    'Server\app\hostpolicy.dll',
+    'Server\app\coreclr.dll',
     'Server\app\Pdm.Infrastructure.dll',
     'Server\app\wwwroot\index.html',
     'Server\app\wwwroot\client-bootstrap.json',

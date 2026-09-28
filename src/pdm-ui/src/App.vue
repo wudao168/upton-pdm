@@ -1245,7 +1245,7 @@ async function openWhereUsedParent(projectId: string, parentDocumentId: string) 
               </template>
             </section>
             <ProcurementTracking v-if="projectTab === 'procurement'" :project-id="workspace.project.value.id" :token="workspace.getAccessToken()" :username="workspace.currentUsername.value" />
-            <AuditLog v-else-if="projectTab === 'records'" :entries="workspace.projectAuditEntries.value" :projects="workspace.projectAuditProjects.value" :project-id="workspace.project.value.id" :token="workspace.getAccessToken()" :can-add-manager-note="canAddProjectManagerNote" project-records-only hide-heading @refresh="runOperation(workspace.loadProjectAuditEntries, '项目记录已刷新')" />
+            <AuditLog v-else-if="projectTab === 'records'" :entries="workspace.projectAuditEntries.value" :projects="workspace.projectAuditProjects.value" :users="workspace.users.value" :project-id="workspace.project.value.id" :token="workspace.getAccessToken()" :can-add-manager-note="canAddProjectManagerNote" project-records-only hide-heading @refresh="runOperation(workspace.loadProjectAuditEntries, '项目记录已刷新')" />
             </div>
           </ProjectWorkspaceHeader>
         </section>

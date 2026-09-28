@@ -304,7 +304,8 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
                 projectId, code, command.Name, command.ProjectAlias, command.OrganizationId, organization.Name,
                 command.ProjectTypeCode, command.EquipmentTypeCode, customer.Code, customer.Name,
                 customerSequence, deviceModel, command.SignedDate, command.Quantity, null, null, command.Owner,
-                Path.Combine(command.VaultLocation, code), Path.Combine(command.ReleaseLocation, code), organization.ProjectCompanyCode, serialSequences)
+                StorageLocationPolicy.ProjectStorageLocation(command.VaultLocation, code, $"{code}-0"),
+                StorageLocationPolicy.ProjectStorageLocation(command.ReleaseLocation, code, $"{code}-0"), organization.ProjectCompanyCode, serialSequences)
                 with { RootProjectId = projectId, BomItemCategoryCode = command.BomItemCategoryCode, ResponsibleUsers = [command.Owner] };
             await InsertNumberedProjectAsync(connection, transaction, project, now, cancellationToken);
             await transaction.CommitAsync(cancellationToken);
@@ -350,6 +351,11 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
                 new { OrganizationId = parent.OrganizationId.Value }, transaction, cancellationToken: cancellationToken));
             var serialSequences = await ReserveSerialNumbersAsync(connection, transaction, parent.OrganizationId.Value, command.Quantity, cancellationToken);
             var code = $"{parent.Code}-{childSequence}";
+            var rootCode = parent.RootProjectId is { } rootProjectId && rootProjectId != parent.Id
+                ? await connection.ExecuteScalarAsync<string>(new CommandDefinition(
+                    "SELECT code FROM project WHERE id=@ProjectId", new { ProjectId = rootProjectId }, transaction, cancellationToken: cancellationToken))
+                : parent.Code;
+            if (string.IsNullOrWhiteSpace(rootCode)) throw new PdmRuleException("主项目号不存在。 ");
             var equipmentTypeCode = command.EquipmentTypeCode ?? parent.EquipmentTypeCode.Value;
             var deviceModel = $"{organization.ModelCompanyCode}-{equipmentTypeCode}-{parent.CustomerCode}-{parent.CustomerProjectSequence.Value:D3}-{BuildChildModelSuffix(parent.Code, childSequence)}";
             var responsibleUsers = (await connection.QueryAsync<string>(new CommandDefinition(
@@ -360,8 +366,9 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
                 Guid.NewGuid(), code, command.Name, command.ProjectAlias, parent.OrganizationId.Value, organization.Name,
                 parent.ProjectTypeCode, equipmentTypeCode, parent.CustomerCode, parent.CustomerName,
                 parent.CustomerProjectSequence.Value, deviceModel, DateOnly.FromDateTime(parent.SignedDate.Value), command.Quantity,
-                parent.Id, childSequence, parent.Owner, Path.Combine(command.VaultRoot ?? Path.GetDirectoryName(parent.VaultLocation)!, code),
-                Path.Combine(command.ReleaseRoot ?? Path.GetDirectoryName(parent.ReleaseLocation)!, code), organization.ProjectCompanyCode, serialSequences)
+                parent.Id, childSequence, parent.Owner,
+                StorageLocationPolicy.ProjectStorageLocation(command.VaultRoot ?? StorageLocationPolicy.ProjectStorageRoot(parent.VaultLocation, rootCode), rootCode, code),
+                StorageLocationPolicy.ProjectStorageLocation(command.ReleaseRoot ?? StorageLocationPolicy.ProjectStorageRoot(parent.ReleaseLocation, rootCode), rootCode, code), organization.ProjectCompanyCode, serialSequences)
                 with
                 {
                     RootProjectId = parent.RootProjectId ?? parent.Id,

@@ -82,6 +82,15 @@ if (-not (Test-Path -LiteralPath (Join-Path $appNext 'Pdm.Api.dll') -PathType Le
 if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $databaseBackup) -or (Get-Item -LiteralPath $databaseBackup).Length -eq 0) {
     throw '数据库备份失败，尚未替换任何程序文件。'
 }
+# MySQL conditional comments wrapping a trigger must not contain the SIGNAL
+# statement terminator before the closing comment.  Keep the dump compatible
+# with the bundled mysql client used for rollback.
+$dumpText = [IO.File]::ReadAllText($databaseBackup, [Text.Encoding]::UTF8)
+$signalTriggerPattern = '(?m)(/\*!\d+ TRIGGER [^\r\n]*SIGNAL SQLSTATE [^\r\n]*); (\*/;;)$'
+$normalizedDumpText = [Text.RegularExpressions.Regex]::Replace($dumpText, $signalTriggerPattern, '$1 $2')
+if ($normalizedDumpText -ne $dumpText) {
+    [IO.File]::WriteAllText($databaseBackup, $normalizedDumpText, [Text.UTF8Encoding]::new($false))
+}
 
 $apiRegistryPath = "HKLM:\SYSTEM\CurrentControlSet\Services\$serviceName"
 $previousEnvironment = @((Get-ItemProperty -LiteralPath $apiRegistryPath -Name Environment -ErrorAction SilentlyContinue).Environment)
@@ -91,6 +100,16 @@ $deploymentStarted = $false
 $originalAppMoved = $false
 $newAppActivated = $false
 $databaseMayHaveChanged = $false
+function Restore-DatabaseBackup {
+    param([string]$MySqlPath, [string]$ClientDefaultsPath, [string]$BackupPath)
+
+    # Do not pipe Get-Content to mysql: Windows PowerShell turns batched lines into
+    # text objects and can corrupt an extended INSERT in a SQL dump. cmd redirection
+    # passes the original backup bytes directly to mysql's standard input.
+    $command = '""{0}" --defaults-extra-file="{1}" --binary-mode=1 pdm < "{2}""' -f $MySqlPath, $ClientDefaultsPath, $BackupPath
+    & $env:ComSpec /d /s /c $command
+    if ($LASTEXITCODE -ne 0) { throw "数据库恢复失败，退出码：$LASTEXITCODE" }
+}
 try {
     Stop-Service -Name $serviceName -Force
     $service.WaitForStatus('Stopped', [TimeSpan]::FromSeconds(30))
@@ -187,8 +206,12 @@ catch {
         if ($databaseMayHaveChanged) {
             & $mysql "--defaults-extra-file=$rootClient" --execute 'DROP DATABASE IF EXISTS pdm; CREATE DATABASE pdm CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci;'
             if ($LASTEXITCODE -ne 0) { throw "程序升级失败且数据库重建失败。原始错误：$originalError" }
-            Get-Content -LiteralPath $databaseBackup -ReadCount 1000 | & $mysql "--defaults-extra-file=$rootClient" pdm
-            if ($LASTEXITCODE -ne 0) { throw "程序升级失败且数据库恢复失败。备份位于：$databaseBackup。原始错误：$originalError" }
+            try {
+                Restore-DatabaseBackup -MySqlPath $mysql -ClientDefaultsPath $rootClient -BackupPath $databaseBackup
+            }
+            catch {
+                throw "程序升级失败且数据库恢复失败。备份位于：$databaseBackup。原始错误：$originalError；恢复错误：$($_.Exception.Message)"
+            }
         }
         Start-Service -Name $serviceName
     }

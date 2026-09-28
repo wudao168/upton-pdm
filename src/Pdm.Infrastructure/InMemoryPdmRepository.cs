@@ -520,6 +520,7 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
                 }
 
                 var code = item.Id == project.Id ? rootCode : $"{rootCode}{item.Code[project.Code.Length..]}";
+                var storageProjectCode = item.Id == project.Id ? $"{rootCode}-0" : code;
                 var itemEquipmentTypeCode = item.Id == project.Id ? equipmentTypeCode : item.EquipmentTypeCode ?? equipmentTypeCode;
                 var updated = item with
                 {
@@ -537,8 +538,8 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
                     SignedDate = command.SignedDate,
                     Quantity = item.Id == project.Id ? command.Quantity : item.Quantity,
                     SerialNumbers = serials,
-                    VaultLocation = ReplaceTerminalDirectory(item.VaultLocation, code),
-                    ReleaseLocation = ReplaceTerminalDirectory(item.ReleaseLocation, code)
+                    VaultLocation = StorageLocationPolicy.RebaseProjectStorageLocation(item.VaultLocation, project.Code, rootCode, storageProjectCode),
+                    ReleaseLocation = StorageLocationPolicy.RebaseProjectStorageLocation(item.ReleaseLocation, project.Code, rootCode, storageProjectCode)
                 };
                 projects[item.Id] = updated;
             }
@@ -626,7 +627,9 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
             var projectId = Guid.NewGuid();
             var project = BuildNumberedProject(projectId, code, command.Name, command.ProjectAlias, organization, command.ProjectTypeCode,
                 command.EquipmentTypeCode, customer.Code, customer.Name, customerSequence, model, command.SignedDate,
-                command.Quantity, null, null, command.Owner, Path.Combine(command.VaultLocation, code), Path.Combine(command.ReleaseLocation, code), serials);
+                command.Quantity, null, null, command.Owner,
+                StorageLocationPolicy.ProjectStorageLocation(command.VaultLocation, code, $"{code}-0"),
+                StorageLocationPolicy.ProjectStorageLocation(command.ReleaseLocation, code, $"{code}-0"), serials);
             project = project with
             {
                 RootProjectId = projectId,
@@ -655,12 +658,16 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
             if (childSequence == 0) throw new PdmRuleException("该主项目的两位子项目号已用尽。");
             var serials = ReserveSerials(organization, command.Quantity);
             var code = $"{parent.Code}-{childSequence}";
+            var root = parent.RootProjectId is { } rootProjectId && projects.TryGetValue(rootProjectId, out var rootProject)
+                ? rootProject
+                : parent;
             var equipmentTypeCode = command.EquipmentTypeCode ?? parent.EquipmentTypeCode.Value;
             var model = $"{organization.ModelCompanyCode}-{equipmentTypeCode}-{parent.CustomerCode}-{parent.CustomerProjectSequence.Value:D3}-{BuildChildModelSuffix(parent.Code, childSequence)}";
             var project = BuildNumberedProject(Guid.NewGuid(), code, command.Name, command.ProjectAlias, organization, parent.ProjectTypeCode,
                 equipmentTypeCode, parent.CustomerCode, parent.CustomerName, parent.CustomerProjectSequence.Value, model,
                 parent.SignedDate.Value, command.Quantity, parent.Id, childSequence, parent.Owner,
-                Path.Combine(command.VaultRoot ?? systemSettings.VaultRoot, code), Path.Combine(command.ReleaseRoot ?? systemSettings.ReleaseRoot, code), serials);
+                StorageLocationPolicy.ProjectStorageLocation(command.VaultRoot ?? systemSettings.VaultRoot, root.Code, code),
+                StorageLocationPolicy.ProjectStorageLocation(command.ReleaseRoot ?? systemSettings.ReleaseRoot, root.Code, code), serials);
             project = project with
             {
                 RootProjectId = parent.RootProjectId ?? parent.Id,
@@ -964,12 +971,6 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
         var prefix = $"{project.ProjectTypeCode}{organization.ProjectCompanyCode}";
         var number = project.Code.StartsWith(prefix, StringComparison.OrdinalIgnoreCase) ? project.Code[prefix.Length..] : string.Empty;
         return number.Length == 5 && int.TryParse(number, out sequence);
-    }
-
-    private static string ReplaceTerminalDirectory(string path, string code)
-    {
-        var parent = Path.GetDirectoryName(path);
-        return string.IsNullOrWhiteSpace(parent) ? path : Path.Combine(parent, code);
     }
 
     public Task<IReadOnlyList<PdmDocument>> ListDocumentsAsync(Guid projectId, CancellationToken cancellationToken) =>

@@ -275,6 +275,7 @@ public sealed partial class MySqlPdmRepository
                 }
 
                 var code = item.Id == project.Id ? rootCode : $"{rootCode}{item.Code[project.Code.Length..]}";
+                var storageProjectCode = item.Id == project.Id ? $"{rootCode}-0" : code;
                 var itemEquipmentTypeCode = item.Id == project.Id ? equipmentTypeCode : item.EquipmentTypeCode ?? equipmentTypeCode;
                 await connection.ExecuteAsync(new CommandDefinition(
                     """
@@ -299,8 +300,8 @@ public sealed partial class MySqlPdmRepository
                         DeviceModel = $"{organization.ModelCompanyCode}-{itemEquipmentTypeCode}-{customer.Code}-{customerSequence:D3}-{BuildModelSuffixFromCode(code)}",
                         SignedDate = command.SignedDate.ToDateTime(TimeOnly.MinValue),
                         Quantity = quantity,
-                        VaultLocation = ReplaceTerminalDirectory(item.VaultLocation, code),
-                        ReleaseLocation = ReplaceTerminalDirectory(item.ReleaseLocation, code),
+                        VaultLocation = StorageLocationPolicy.RebaseProjectStorageLocation(item.VaultLocation, project.Code, rootCode, storageProjectCode),
+                        ReleaseLocation = StorageLocationPolicy.RebaseProjectStorageLocation(item.ReleaseLocation, project.Code, rootCode, storageProjectCode),
                         Now = now
                     }, transaction, cancellationToken: cancellationToken));
                 await ReplaceProjectSerialsAsync(connection, transaction, item.Id, serials, cancellationToken);
@@ -364,12 +365,6 @@ public sealed partial class MySqlPdmRepository
         await connection.ExecuteAsync(new CommandDefinition(
             "INSERT INTO project_serial_number(project_id,sequence_no,serial_number) VALUES(@ProjectId,@Sequence,@SerialNumber)",
             serialNumbers.Select((serial, index) => new { ProjectId = projectId, Sequence = index + 1, SerialNumber = serial }), transaction, cancellationToken: cancellationToken));
-    }
-
-    private static string ReplaceTerminalDirectory(string path, string code)
-    {
-        var parent = Path.GetDirectoryName(path);
-        return string.IsNullOrWhiteSpace(parent) ? path : Path.Combine(parent, code);
     }
 
     public async Task<Project> SetProjectExecutionUnitAsync(Guid projectId, Guid executionUnitId, string actor, CancellationToken cancellationToken)

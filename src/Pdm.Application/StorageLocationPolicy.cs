@@ -39,4 +39,27 @@ public static class StorageLocationPolicy
 
         return resolved;
     }
+
+    public static string ProjectStorageLocation(string storageRoot, string rootProjectCode, string projectCode)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(rootProjectCode);
+        ArgumentException.ThrowIfNullOrWhiteSpace(projectCode);
+        return ResolveUnder(storageRoot, Path.Combine(rootProjectCode, projectCode));
+    }
+
+    public static string RebaseProjectStorageLocation(string currentLocation, string previousRootProjectCode, string rootProjectCode, string projectCode)
+    {
+        var storageRoot = ProjectStorageRoot(currentLocation, previousRootProjectCode);
+        return ProjectStorageLocation(storageRoot, rootProjectCode, projectCode);
+    }
+
+    public static string ProjectStorageRoot(string projectLocation, string rootProjectCode)
+    {
+        var normalizedLocation = Normalize(projectLocation);
+        var parent = Path.GetDirectoryName(normalizedLocation)
+            ?? throw new PdmRuleException("项目存储位置无效。 ");
+        return string.Equals(Path.GetFileName(parent), rootProjectCode, StringComparison.OrdinalIgnoreCase)
+            ? Path.GetDirectoryName(parent) ?? throw new PdmRuleException("项目存储位置无效。 ")
+            : parent;
+    }
 }

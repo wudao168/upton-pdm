@@ -106,6 +106,33 @@ function Copy-WebUi([string]$destinationRoot) {
     }
 }
 
+function Invoke-Pnpm {
+    param(
+        [Parameter(Mandatory = $true, ValueFromRemainingArguments = $true)]
+        [string[]]$Arguments
+    )
+
+    $pnpmCommand = Get-Command pnpm.cmd -ErrorAction SilentlyContinue
+    if ($null -eq $pnpmCommand) {
+        $pnpmCommand = Get-Command pnpm -ErrorAction SilentlyContinue
+    }
+    if ($null -ne $pnpmCommand) {
+        & $pnpmCommand.Source @Arguments
+        return
+    }
+
+    $corepackCommand = Get-Command corepack.cmd -ErrorAction SilentlyContinue
+    if ($null -eq $corepackCommand) {
+        $corepackCommand = Get-Command corepack -ErrorAction SilentlyContinue
+    }
+    if ($null -ne $corepackCommand) {
+        & $corepackCommand.Source pnpm @Arguments
+        return
+    }
+
+    throw '未找到 pnpm。请安装 pnpm，或在 Node.js 环境中启用 Corepack 后重试。'
+}
+
 foreach ($directory in @(
     $runtimeRoot,
     $downloadRoot,
@@ -248,14 +275,20 @@ if (-not (Test-Path -LiteralPath $dotnetPath)) {
 
 Push-Location $projectRoot
 try {
-    pnpm.cmd install --frozen-lockfile
-    if ($LASTEXITCODE -ne 0) {
-        throw 'Frontend dependency restore failed.'
-    }
     if ($SkipUiBuild) {
+        $uiDistPath = Join-Path $projectRoot 'src\pdm-ui\dist'
+        foreach ($requiredFile in @('index.html', 'review-overlay.html')) {
+            if (-not (Test-Path -LiteralPath (Join-Path $uiDistPath $requiredFile) -PathType Leaf)) {
+                throw "Frontend build was skipped, but the required UI artifact is missing: $requiredFile"
+            }
+        }
         Write-Warning 'Frontend build skipped; reusing the existing verified production UI bundle.'
     } else {
-        pnpm.cmd ui:build
+        Invoke-Pnpm install --frozen-lockfile
+        if ($LASTEXITCODE -ne 0) {
+            throw 'Frontend dependency restore failed.'
+        }
+        Invoke-Pnpm ui:build
         if ($LASTEXITCODE -ne 0) {
             throw 'Frontend production build failed.'
         }

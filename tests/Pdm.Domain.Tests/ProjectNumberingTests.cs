@@ -49,6 +49,34 @@ public sealed class ProjectNumberingTests
     }
 
     [Fact]
+    public async Task ProjectStorageUsesTheMainProjectCodeAsItsContainer()
+    {
+        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var main = await repository.CreateNumberedProjectAsync(Command("主项目", quantity: 1), CancellationToken.None);
+        var child = await repository.CreateSubprojectAsync(new(main.Id, "子项目", null, 1), CancellationToken.None);
+
+        Assert.Equal(@"D:\PDM\Vault\P700001\P700001-0", main.VaultLocation);
+        Assert.Equal(@"D:\PDM\Release\P700001\P700001-0", main.ReleaseLocation);
+        Assert.Equal(@"D:\PDM\Vault\P700001\P700001-1", child.VaultLocation);
+        Assert.Equal(@"D:\PDM\Release\P700001\P700001-1", child.ReleaseLocation);
+    }
+
+    [Fact]
+    public async Task RenumberingKeepsTheMainProjectStorageInsideItsContainer()
+    {
+        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var main = await repository.CreateNumberedProjectAsync(Command("主项目", quantity: 1), CancellationToken.None);
+        var child = await repository.CreateSubprojectAsync(new(main.Id, "子项目", null, 1), CancellationToken.None);
+
+        await repository.UpdateProjectDetailsAsync(main.Id, new(
+            GuangzhouId, "W", 8, CustomerId, "重编号主项目", null, new DateOnly(2026, 8, 16), 1), CancellationToken.None);
+        var updatedChild = await repository.FindProjectAsync(child.Id, CancellationToken.None);
+
+        Assert.Equal(@"D:\PDM\Vault\W300001\W300001-0", (await repository.FindProjectAsync(main.Id, CancellationToken.None))!.VaultLocation);
+        Assert.Equal(@"D:\PDM\Release\W300001\W300001-1", updatedChild!.ReleaseLocation);
+    }
+
+    [Fact]
     public async Task EquipmentProjectCanBeRootOrNestedRecursivelyWithIndependentEquipmentTypes()
     {
         var repository = new InMemoryPdmRepository(TimeProvider.System);
@@ -66,6 +94,8 @@ public sealed class ProjectNumberingTests
         Assert.Equal("AK-8-C00465-001-01", equipment.DeviceModel);
         Assert.Equal("P700001-1-1", nestedEquipment.Code);
         Assert.Equal("AK-9-C00465-001-01-01", nestedEquipment.DeviceModel);
+        Assert.Equal(@"D:\PDM\Vault\P700001\P700001-1-1", nestedEquipment.VaultLocation);
+        Assert.Equal(@"D:\PDM\Release\P700001\P700001-1-1", nestedEquipment.ReleaseLocation);
         Assert.Null(equipmentRoot.ParentProjectId);
         Assert.Equal(equipmentRoot.Id, equipmentRoot.RootProjectId);
         Assert.Equal("0302", equipmentRoot.BomItemCategoryCode);

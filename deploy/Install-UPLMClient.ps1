@@ -38,6 +38,22 @@ function Assert-Hash([string]$Path, [string]$Expected) {
     $actual = (Get-FileHash -Algorithm SHA256 -LiteralPath $Path).Hash
     if (-not [string]::Equals($actual, $Expected, [StringComparison]::OrdinalIgnoreCase)) { throw "文件校验失败：$Path" }
 }
+
+function Get-WebView2RuntimeVersion {
+    $appId = '{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}'
+    foreach ($key in @(
+        "HKLM:\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\$appId",
+        "HKLM:\SOFTWARE\Microsoft\EdgeUpdate\Clients\$appId",
+        "HKCU:\Software\Microsoft\EdgeUpdate\Clients\$appId"
+    )) {
+        try {
+            $version = [string](Get-ItemPropertyValue -LiteralPath $key -Name 'pv' -ErrorAction Stop)
+            if (-not [string]::IsNullOrWhiteSpace($version)) { return $version }
+        }
+        catch { }
+    }
+    return ''
+}
 Assert-Hash (Join-Path $desktopSource 'Upton.Pdm.Desktop.exe') $manifest.desktopExeSha256
 Assert-Hash (Join-Path $addinSource 'Upton.Pdm.SolidWorks.Addin.dll') $manifest.addinDllSha256
 Assert-Hash $webViewInstaller $manifest.webView2Sha256
@@ -104,10 +120,19 @@ if ($net48Release -lt 528040) {
     if ($process.ExitCode -in @(1641, 3010)) { $rebootRequired = $true }
 }
 
-Write-InstallStep 2 '正在检查并更新 Microsoft Edge WebView2…'
-$process = Start-Process -FilePath $webViewInstaller -ArgumentList '/silent', '/install' -Wait -PassThru
-if ($process.ExitCode -notin @(0, 1641, 3010)) { throw "WebView2 Runtime 安装失败，退出码：$($process.ExitCode)" }
-if ($process.ExitCode -in @(1641, 3010)) { $rebootRequired = $true }
+$webView2Version = Get-WebView2RuntimeVersion
+if ([string]::IsNullOrWhiteSpace($webView2Version)) {
+    Write-InstallStep 2 '正在从安装包内置的离线 Microsoft Edge WebView2 Runtime 安装组件…'
+    $process = Start-Process -FilePath $webViewInstaller -ArgumentList '/silent', '/install' -Wait -PassThru
+    if ($process.ExitCode -notin @(0, 1641, 3010)) { throw "离线 WebView2 Runtime 安装失败，退出码：$($process.ExitCode)" }
+    if ($process.ExitCode -in @(1641, 3010)) { $rebootRequired = $true }
+    for ($attempt = 0; $attempt -lt 30 -and [string]::IsNullOrWhiteSpace($webView2Version); $attempt++) {
+        Start-Sleep -Seconds 2
+        $webView2Version = Get-WebView2RuntimeVersion
+    }
+    if ([string]::IsNullOrWhiteSpace($webView2Version)) { throw '离线 WebView2 Runtime 安装后未检测到运行时，请重启电脑后选择“修复”重试。' }
+}
+else { Write-InstallStep 2 "已检测到 Microsoft Edge WebView2 Runtime $webView2Version，跳过离线安装。" }
 
 Write-InstallStep 3 '正在注销并清理旧版客户端和 SolidWorks 插件…'
 Remove-PreviousUplmInstallation

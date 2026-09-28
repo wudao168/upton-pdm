@@ -24,6 +24,22 @@ function Assert-Hash([string]$Path, [string]$Expected) {
         throw "文件校验失败：$Path"
     }
 }
+
+function Get-WebView2RuntimeVersion {
+    $appId = '{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}'
+    foreach ($key in @(
+        "HKLM:\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\$appId",
+        "HKLM:\SOFTWARE\Microsoft\EdgeUpdate\Clients\$appId",
+        "HKCU:\Software\Microsoft\EdgeUpdate\Clients\$appId"
+    )) {
+        try {
+            $version = [string](Get-ItemPropertyValue -LiteralPath $key -Name 'pv' -ErrorAction Stop)
+            if (-not [string]::IsNullOrWhiteSpace($version)) { return $version }
+        }
+        catch { }
+    }
+    return ''
+}
 Assert-Hash (Join-Path $desktopSource 'Upton.Pdm.Desktop.exe') $manifest.desktopExeSha256
 Assert-Hash (Join-Path $addinSource 'Upton.Pdm.SolidWorks.Addin.dll') $manifest.addinDllSha256
 Assert-Hash $webViewInstaller $manifest.webView2Sha256
@@ -43,8 +59,8 @@ if ($net48Release -lt 528040) {
     if ($process.ExitCode -in @(1641, 3010)) { $rebootRequired = $true }
 }
 
-$webViewKey = 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}'
-if (-not (Test-Path -LiteralPath $webViewKey)) {
+$webView2Version = Get-WebView2RuntimeVersion
+if ([string]::IsNullOrWhiteSpace($webView2Version)) {
     $process = Start-Process -FilePath $webViewInstaller -ArgumentList '/silent','/install' -Wait -PassThru
     if ($process.ExitCode -notin @(0, 1641, 3010)) { throw "WebView2 Runtime 安装失败，退出码：$($process.ExitCode)" }
     if ($process.ExitCode -in @(1641, 3010)) { $rebootRequired = $true }

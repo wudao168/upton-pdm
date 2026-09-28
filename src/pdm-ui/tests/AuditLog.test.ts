@@ -2,7 +2,7 @@ import { flushPromises, mount } from '@vue/test-utils'
 import { describe, expect, it, vi } from 'vitest'
 import AuditLog from '../src/components/AuditLog.vue'
 
-const apiMocks = vi.hoisted(() => ({ addProjectManagerNote: vi.fn() }))
+const apiMocks = vi.hoisted(() => ({ addProjectManagerNote: vi.fn(), createProjectTodo: vi.fn() }))
 
 vi.mock('../src/api', () => apiMocks)
 vi.mock('../src/statusMessage', () => ({ ElMessage: { success: vi.fn(), error: vi.fn(), warning: vi.fn() } }))
@@ -10,17 +10,18 @@ vi.mock('../src/statusMessage', () => ({ ElMessage: { success: vi.fn(), error: v
 describe('AuditLog', () => {
   it('项目经理在记录页维护备注，其他用户仅查看日志', async () => {
     apiMocks.addProjectManagerNote.mockResolvedValue({})
-    const wrapper = mount(AuditLog, { props: { entries: [], projectId: 'project-1', token: 'token', canAddManagerNote: true } })
+    const wrapper = mount(AuditLog, { props: { entries: [], projectId: 'project-1', token: 'token', canAddManagerNote: true, projectRecordsOnly: true } })
 
-    await wrapper.get('textarea').setValue('采购风险已同步')
-    await wrapper.get('form').trigger('submit')
+    await wrapper.findAll('button').find(button => button.text() === '新增记录')!.trigger('click')
+    await wrapper.get('[aria-label="项目备注内容"]').setValue('采购风险已同步')
+    await wrapper.findAll('button').find(button => button.text() === '保存记录')!.trigger('click')
     await flushPromises()
 
     expect(apiMocks.addProjectManagerNote).toHaveBeenCalledWith('project-1', '采购风险已同步', 'token')
     expect(wrapper.emitted('refresh')).toEqual([[]])
 
     await wrapper.setProps({ canAddManagerNote: false })
-    expect(wrapper.find('form').exists()).toBe(false)
+    expect(wrapper.text()).not.toContain('新增记录')
   })
 
   it('项目记录只显示备注、待办推送、BOM发布和已完成任务', () => {
