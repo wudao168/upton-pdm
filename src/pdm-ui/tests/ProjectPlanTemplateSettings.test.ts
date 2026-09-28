@@ -1,10 +1,10 @@
-import ElementPlus from 'element-plus'
+import ElementPlus, { ElMessageBox } from 'element-plus'
 import { mount, flushPromises } from '@vue/test-utils'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import ProjectPlanTemplateSettings from '../src/components/ProjectPlanTemplateSettings.vue'
 import type { ProjectPlanTemplate } from '../src/types'
 
-const api = vi.hoisted(() => ({ listProjectPlanTemplates: vi.fn(), saveProjectPlanTemplate: vi.fn() }))
+const api = vi.hoisted(() => ({ listProjectPlanTemplates: vi.fn(), saveProjectPlanTemplate: vi.fn(), replaceSystemDefaultProjectPlanTemplate: vi.fn() }))
 vi.mock('../src/api', () => api)
 const template: ProjectPlanTemplate = {
   id: 'template', name: '设备模板', isActive: true, rowVersion: 1,
@@ -19,6 +19,7 @@ function render(canManage = true, currentUsername = 'admin') {
   return wrapper
 }
 beforeEach(() => {
+  vi.restoreAllMocks()
   vi.clearAllMocks()
   api.listProjectPlanTemplates.mockResolvedValue([structuredClone(template)])
   api.saveProjectPlanTemplate.mockImplementation(async (id, input) => ({ ...structuredClone(template), ...JSON.parse(JSON.stringify(input)), id: id || 'copy', rowVersion: 2 }))
@@ -222,5 +223,20 @@ describe('设置页项目计划模板', () => {
     expect(wrapper.text()).toContain('个人模板')
     expect(wrapper.find('fieldset').attributes('disabled')).toBeUndefined()
     expect(api.saveProjectPlanTemplate).not.toHaveBeenCalled()
+  })
+  it('管理员可将当前个人模板替换为系统默认模板', async () => {
+    const personal = { ...structuredClone(template), scope: 'Personal' as const, ownerUsername: 'admin', baseSystemTemplateId: 'system' }
+    const system = { ...structuredClone(template), id: 'system', scope: 'System' as const, rowVersion: 3 }
+    api.listProjectPlanTemplates.mockResolvedValueOnce([personal]).mockResolvedValueOnce([system])
+    api.saveProjectPlanTemplate.mockResolvedValue({ ...personal, rowVersion: 2 })
+    api.replaceSystemDefaultProjectPlanTemplate.mockResolvedValue(system)
+    vi.spyOn(ElMessageBox, 'confirm').mockResolvedValue('confirm' as never)
+    const wrapper = render()
+    await flushPromises()
+    expect(wrapper.findAll('button').map(button => button.text())).toContain('替换系统默认模板')
+    await wrapper.findAll('button').find(button => button.text() === '替换系统默认模板')!.trigger('click')
+    await flushPromises()
+    expect(api.replaceSystemDefaultProjectPlanTemplate).toHaveBeenCalledWith('template', 2, 'test')
+    expect(wrapper.find('input[aria-label="模板名称"]').element).toHaveProperty('value', '设备模板')
   })
 })

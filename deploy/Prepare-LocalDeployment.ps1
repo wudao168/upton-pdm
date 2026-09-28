@@ -76,6 +76,18 @@ function Write-Utf8File([string]$path, [string[]]$lines) {
     [IO.File]::WriteAllLines($path, $lines, $encoding)
 }
 
+function Get-Sha256([string]$path) {
+    $algorithm = [Security.Cryptography.SHA256]::Create()
+    $stream = [IO.File]::OpenRead($path)
+    try {
+        return ([BitConverter]::ToString($algorithm.ComputeHash($stream))).Replace('-', '')
+    }
+    finally {
+        $stream.Dispose()
+        $algorithm.Dispose()
+    }
+}
+
 function Protect-SecretFile([string]$path) {
     $account = [Security.Principal.WindowsIdentity]::GetCurrent().Name
     & icacls.exe $path /inheritance:r /grant:r "${account}:(F)" 'SYSTEM:(F)' 'Administrators:(F)' | Out-Null
@@ -311,7 +323,7 @@ if ($ServerOnly) {
         preparedAt = [DateTimeOffset]::Now.ToString('O')
         mysqlVersion = $MySqlVersion
         mysqlArchive = $mysqlArchive
-        mysqlArchiveSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $mysqlArchive).Hash
+        mysqlArchiveSha256 = Get-Sha256 $mysqlArchive
         mysqlHome = $mysqlHome
         localRoot = $localRoot
         apiPath = Join-Path $localRoot 'api\Pdm.Api.dll'
@@ -376,12 +388,12 @@ $bootstrap = [ordered]@{
     Desktop = [ordered]@{
         Version = $ReleaseVersion
         PackageUrl = "/updates/$([IO.Path]::GetFileName($desktopArchive))"
-        Sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $desktopArchive).Hash
+        Sha256 = Get-Sha256 $desktopArchive
     }
     SolidWorksAddin = [ordered]@{
         Version = $ReleaseVersion
         PackageUrl = "/updates/$([IO.Path]::GetFileName($addinArchive))"
-        Sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $addinArchive).Hash
+        Sha256 = Get-Sha256 $addinArchive
     }
 }
 Write-Utf8File (Join-Path $webRoot 'client-bootstrap.json') @(($bootstrap | ConvertTo-Json -Depth 8))
@@ -420,7 +432,7 @@ $receipt = [ordered]@{
     preparedAt = [DateTimeOffset]::Now.ToString('O')
     mysqlVersion = $MySqlVersion
     mysqlArchive = $mysqlArchive
-    mysqlArchiveSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $mysqlArchive).Hash
+    mysqlArchiveSha256 = Get-Sha256 $mysqlArchive
     mysqlHome = $mysqlHome
     localRoot = $localRoot
     apiPath = Join-Path $localRoot 'api\Pdm.Api.dll'

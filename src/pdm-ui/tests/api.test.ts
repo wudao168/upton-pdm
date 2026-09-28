@@ -3,6 +3,8 @@ import { downloadProductionDrawingArchive, downloadReleasePreviewArchive, mapApi
 
 describe('API JSON response handling', () => {
   afterEach(() => {
+    vi.restoreAllMocks()
+    vi.useRealTimers()
     vi.unstubAllGlobals()
     window.localStorage.clear()
   })
@@ -26,6 +28,15 @@ describe('API JSON response handling', () => {
     expect(mapped.previewUpdatedAt).toBe('2026-09-20T15:00:00Z')
   })
 
+  it.each(['Pdf', 'Step'] as const)('names %s archive with release package number', async format => {
+    vi.useFakeTimers()
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(new Blob(['zip']))))
+    vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:archive')
+    const click = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+    await downloadProductionDrawingArchive('project-1', ['version-1'], format, 'token', 'RP-P700012-0-20260927-4621D865')
+    expect((click.mock.instances[0] as HTMLAnchorElement).download).toBe(`RP-P700012-0-20260927-4621D865-${format === 'Pdf' ? 'PDF' : 'STEP'}.zip`)
+  })
+
   it.each([
     ['生产图纸', () => downloadProductionDrawingArchive('project-1', ['version-1'], 'Pdf', 'test-token')],
     ['发布转图', () => downloadReleasePreviewArchive('project-1', 'package-1', ['document-1'], 'test-token')],
@@ -41,4 +52,5 @@ describe('API JSON response handling', () => {
     expect(headers.get('X-Company-Id')).toBe('company-1')
     expect(headers.get('Content-Type')).toBe('application/json')
   })
+
 })

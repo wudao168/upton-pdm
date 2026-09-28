@@ -28,6 +28,12 @@ public static class ProjectPlanningEndpointExtensions
             return Results.Ok(await service.SaveTemplateAsync(templateId, request.ToCommand(), actor, role, cancellationToken));
         });
 
+        api.MapPost("/project-plan-templates/{templateId:guid}/replace-system-default", async (Guid templateId, ReplaceSystemDefaultProjectPlanTemplateRequest request, HttpContext context, ProjectPlanningService service, CancellationToken cancellationToken) =>
+        {
+            var (actor, role) = CurrentUser(context.User);
+            return Results.Ok(await service.ReplaceSystemDefaultTemplateAsync(templateId, request.ExpectedSourceRowVersion, actor, role, cancellationToken));
+        });
+
         api.MapGet("/projects/{projectId:guid}/plan", async (Guid projectId, HttpContext context, ProjectPlanningService service, CancellationToken cancellationToken) =>
         {
             var (actor, role) = CurrentUser(context.User);
@@ -139,6 +145,8 @@ public sealed record SaveProjectPlanTemplateRequest(string Name, string? Project
 {
     public SaveProjectPlanTemplateCommand ToCommand() => new(Name, ProjectTypeCode, IsActive, Tasks, ExpectedRowVersion, Stages, Scope, BaseSystemTemplateId, ProjectId);
 }
+
+public sealed record ReplaceSystemDefaultProjectPlanTemplateRequest(long ExpectedSourceRowVersion);
 
 public sealed record GenerateProjectPlanRequest(Guid TemplateId, DateOnly StartDate, int TotalDurationDays, bool ReplaceExisting, string? ChangeReason)
 {

@@ -183,7 +183,7 @@ async function locateScan() {
   error.value = ''
 }
 async function downloadBatch(items: ProductionDrawingItem[], format: 'Pdf' | 'Step') {
-  if (!project.value || !items.length || downloading.value) return
+  if (!project.value || !selectedPackage.value || !items.length || downloading.value) return
   if (format === 'Pdf' && items.some(item => !item.pdfReady)) {
     error.value = '所选图纸中有 PDF 待转换，不能用旧版替代；请稍后重试。'
     return
@@ -195,7 +195,7 @@ async function downloadBatch(items: ProductionDrawingItem[], format: 'Pdf' | 'St
   if (items.some(item => !item.isCurrent) && !window.confirm('所选图纸包含已被替代的历史正式版，确定下载？')) return
   downloading.value = true
   error.value = ''
-  try { await downloadProductionDrawingArchive(project.value.id, items.map(item => item.versionId), format, props.token) }
+  try { await downloadProductionDrawingArchive(project.value.id, items.map(item => item.versionId), format, props.token, selectedPackage.value.number) }
   catch (cause) { error.value = cause instanceof Error ? cause.message : '批量下载失败。' }
   finally { downloading.value = false }
 }

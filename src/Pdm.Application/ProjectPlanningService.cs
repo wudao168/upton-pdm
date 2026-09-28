@@ -82,6 +82,47 @@ public sealed class ProjectPlanningService(
         return saved;
     }
 
+    public async Task<ProjectPlanTemplate> ReplaceSystemDefaultTemplateAsync(Guid sourceTemplateId, long expectedSourceRowVersion, string actor, UserRole role, CancellationToken cancellationToken)
+    {
+        if (!CanManageTemplates(role)) throw new UnauthorizedAccessException("仅开发者和管理员可替换系统默认计划模板。");
+        var source = await plans.FindTemplateAsync(sourceTemplateId, cancellationToken)
+            ?? throw new PdmNotFoundException("计划模板不存在。");
+        if (source.RowVersion != expectedSourceRowVersion) throw new PdmConflictException("计划模板已被其他用户修改，请刷新后重试。");
+        source = await EffectiveTemplateAsync(NormalizeLegacyWorkflowTasks(source), cancellationToken);
+        var system = (await EnsureDefaultTemplateAsync(true, actor, cancellationToken))
+            .Where(item => item.Scope == ProjectPlanTemplateScope.System)
+            .OrderBy(item => item.CreatedAt)
+            .FirstOrDefault()
+            ?? throw new PdmRuleException("系统默认计划模板不存在。");
+        var now = timeProvider.GetUtcNow();
+        var replacement = system with
+        {
+            Name = Required(source.Name, 120, "模板名称"),
+            ProjectTypeCode = Optional(source.ProjectTypeCode, 64),
+            IsActive = true,
+            Tasks = source.Tasks,
+            Stages = source.Stages,
+            UpdatedBy = actor,
+            UpdatedAt = now
+        };
+        var normalizedTasks = replacement.Tasks.OrderBy(item => item.SortOrder).Select(item => item with
+        {
+            Id = item.Id == Guid.Empty ? Guid.NewGuid() : item.Id,
+            Name = Required(item.Name, 160, "任务名称"),
+            DurationRatio = Math.Round(item.DurationRatio, 4),
+            Weight = Math.Round(item.Weight, 4),
+            WorkflowKey = Optional(item.WorkflowKey, 80),
+            IsRequired = !string.IsNullOrWhiteSpace(item.WorkflowKey) || item.IsRequired
+        }).ToArray();
+        var stages = ValidateStages(replacement.Stages, normalizedTasks.Select(item => item.Stage));
+        ValidateTemplateTasks(normalizedTasks);
+        ValidateAllocation(stages, normalizedTasks);
+        var saved = await plans.SaveTemplateAsync(replacement with { Tasks = normalizedTasks, Stages = stages }, system.RowVersion, cancellationToken);
+        await AuditAsync(actor, "project-plan.template.replace-system-default", nameof(ProjectPlanTemplate), saved.Id,
+            $"以模板“{source.Name}”替换系统默认模板；{saved.Tasks.Count}项", cancellationToken);
+        return saved;
+    }
+
     public async Task<ProjectPlan?> GetPlanAsync(Guid projectId, string actor, UserRole role, CancellationToken cancellationToken)
     {
         await RequireReadAsync(projectId, actor, role, cancellationToken);

@@ -296,7 +296,6 @@ public sealed class ProgramTemplateService(
             ?? throw new PdmRuleException("上传人尚未配置主组织，无法确定电气审核人。");
         var reviewer = directory.Managers.FirstOrDefault(item => item.UnitId == primaryMembership.UnitId)?.PrimaryManager?.Trim();
         if (string.IsNullOrWhiteSpace(reviewer)) throw new PdmRuleException("上传人所属组织尚未配置主负责人，无法提交审核。");
-        if (string.Equals(reviewer, actor, StringComparison.OrdinalIgnoreCase)) throw new PdmRuleException("上传人不能审核自己的程序模板，请调整组织主负责人。");
         var reviewerAccount = await pdmRepository.FindUserAsync(reviewer, cancellationToken)
             ?? throw new PdmRuleException("组织主负责人账号不存在。");
         if (!reviewerAccount.IsActive || !await HasPermissionAsync(reviewerAccount.Username, reviewerAccount.Role, PermissionCodes.ProgramTemplateReview, cancellationToken))
@@ -306,13 +305,12 @@ public sealed class ProgramTemplateService(
         foreach (var user in await pdmRepository.ListUsersAsync(cancellationToken))
         {
             if (!user.IsActive) continue;
-            if (string.Equals(user.Username, actor, StringComparison.OrdinalIgnoreCase) || string.Equals(user.Username, reviewer, StringComparison.OrdinalIgnoreCase)) continue;
             // 批准池按“批准程序模板”权限判定：基础角色为标准化主管的自定义角色、被单独授权的人员都可进入，
             // 不再要求角色代码恰好等于 Approver（否则集团内只有极少数账号可用，容易整池为空）。
             if (await HasPermissionAsync(user.Username, user.Role, PermissionCodes.ProgramTemplateApprove, cancellationToken)) eligibleApprovers.Add(user);
         }
         if (eligibleApprovers.Count == 0)
-            throw new PdmRuleException("集团内没有可用的标准化主管批准人：请在“角色权限设置”为至少一个启用账号授予“批准程序模板”权限，并确保该账号不是提交人本人、也不是提交人所属部门的主负责人。");
+            throw new PdmRuleException("集团内没有可用的标准化主管批准人：请在“角色权限设置”为至少一个启用账号授予“批准程序模板”权限。");
 
         var now = timeProvider.GetUtcNow();
         var reviewTask = new ProgramTemplateApprovalTask(
@@ -347,8 +345,6 @@ public sealed class ProgramTemplateService(
         var template = await templates.FindAsync(revision.TemplateId, cancellationToken)
             ?? throw new PdmNotFoundException("程序模板不存在。");
         if (task.Decision is not null) throw new PdmConflictException("程序模板审批任务已经处理。");
-        if (string.Equals(revision.CreatedBy, actor, StringComparison.OrdinalIgnoreCase))
-            throw new UnauthorizedAccessException("上传人不能审核或批准自己的程序模板。");
 
         if (task.Stage == ProgramTemplateApprovalStage.Review)
         {
@@ -366,7 +362,6 @@ public sealed class ProgramTemplateService(
             await RequirePermissionAsync(actor, role, PermissionCodes.ProgramTemplateApprove, cancellationToken);
             var review = (await templates.ListRevisionTasksAsync(revision.Id, cancellationToken)).FirstOrDefault(item => item.Stage == ProgramTemplateApprovalStage.Review);
             if (review?.Decision != ProgramTemplateApprovalDecision.Approved) throw new PdmConflictException("程序模板尚未通过电气组织审核。");
-            if (string.Equals(review.DecisionBy, actor, StringComparison.OrdinalIgnoreCase)) throw new UnauthorizedAccessException("审核人不能同时执行最终批准。");
         }
 
         if (command.Decision == ProgramTemplateApprovalDecision.Rejected && string.IsNullOrWhiteSpace(command.Comment))

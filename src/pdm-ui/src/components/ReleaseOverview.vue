@@ -22,6 +22,7 @@ const previewItems = ref<ReleasePreviewItemResult[]>([])
 const previewLoading = ref(false)
 const previewBusy = ref(false)
 const previewPackageFilter = ref('')
+const previewLatestBomFilter = ref('')
 const previewPage = ref(1)
 const selectedPreviewKeys = ref<string[]>([])
 
@@ -47,9 +48,46 @@ const streams = [
 const previewPackages = computed(() => props.releasePackages
   .filter(item => item.state === '已发布' && item.previewState && item.previewState !== 'None')
   .sort((left, right) => (right.publishedAt ?? right.createdAt ?? '').localeCompare(left.publishedAt ?? left.createdAt ?? '')))
-const filteredPreviewItems = computed(() => previewPackageFilter.value
-  ? previewItems.value.filter(item => item.releasePackageId === previewPackageFilter.value)
-  : previewItems.value)
+const latestReleasedBomVersions = computed(() => (['Standard', 'NonStandard', 'Electrical'] as const)
+  .map(kind => props.versions
+    .filter(version => version.kind === kind && version.state === 'Released')
+    .sort((left, right) => right.versionNumber - left.versionNumber)[0])
+  .filter((version): version is BomVersion => Boolean(version)))
+const latestBomFilterOptions = computed(() => latestReleasedBomVersions.value.map(version => ({
+  ...version,
+  kindLabel: version.kind === 'Standard' ? '标准件BOM' : version.kind === 'NonStandard' ? '非标件BOM' : '电气BOM',
+})))
+const selectedLatestBomVersion = computed(() => latestBomFilterOptions.value.find(version => version.id === previewLatestBomFilter.value))
+function releaseBomVersionId(release: ReleasePackageSummary, kind: BomVersion['kind']) {
+  if (kind === 'Standard') return release.standardBomVersionId
+  if (kind === 'NonStandard') return release.nonStandardBomVersionId
+  return release.electricalBomVersionId
+}
+const selectedLatestBomRelease = computed(() => {
+  const bomVersion = selectedLatestBomVersion.value
+  if (!bomVersion) return undefined
+
+  const normalizedVersionId = bomVersion.id.toLocaleLowerCase()
+  const linkedRelease = previewPackages.value.find(release => releaseBomVersionId(release, bomVersion.kind)?.toLocaleLowerCase() === normalizedVersionId)
+  if (linkedRelease) return linkedRelease
+
+  // Some older packages lack their BOM-version link; use the newest package from that BOM stream.
+  const scopes: ReleaseScope[] = bomVersion.kind === 'Standard'
+    ? ['StandardLongLead', 'StandardFormal', 'StandardSupplement']
+    : bomVersion.kind === 'NonStandard'
+      ? ['NonStandardWithDrawing', 'NonStandardLongLead', 'NonStandardSupplement']
+      : ['ElectricalLongLead', 'ElectricalFormal', 'ElectricalSupplement']
+  return previewPackages.value.find(release => scopes.includes(release.scope))
+})
+const filteredPreviewItems = computed(() => {
+  let items = previewPackageFilter.value
+    ? previewItems.value.filter(item => item.releasePackageId === previewPackageFilter.value)
+    : previewItems.value
+  if (!selectedLatestBomVersion.value) return items
+  const packageId = selectedLatestBomRelease.value?.id
+  if (!packageId) return []
+  return items.filter(item => item.releasePackageId === packageId)
+})
 const previewPageCount = computed(() => Math.max(1, Math.ceil(filteredPreviewItems.value.length / PREVIEW_PAGE_SIZE)))
 const pagedPreviewItems = computed(() => filteredPreviewItems.value.slice((previewPage.value - 1) * PREVIEW_PAGE_SIZE, previewPage.value * PREVIEW_PAGE_SIZE))
 const selectedPreviewItems = computed(() => filteredPreviewItems.value.filter(item => selectedPreviewKeys.value.includes(previewItemKey(item))))
@@ -156,9 +194,10 @@ async function retrySelectedPreviewItems() {
 async function downloadPreviewItems(items: ReleasePreviewItemResult[]) {
   const targets = items.filter(item => item.succeeded)
   if (!props.projectId || !props.token || targets.length === 0) return
+  const releasePackageId = previewPackageFilter.value || selectedLatestBomRelease.value?.id || undefined
   previewBusy.value = true
   try {
-    await downloadReleasePreviewArchive(props.projectId, previewPackageFilter.value || undefined, targets.map(item => item.documentId), props.token)
+    await downloadReleasePreviewArchive(props.projectId, releasePackageId, targets.map(item => item.documentId), props.token)
   }
   catch (error) {
     ElMessage.error(error instanceof Error ? error.message : '打包下载失败')
@@ -192,6 +231,7 @@ function toggleSelectFailedItems() {
 
 watch(() => [props.projectId, props.token, props.releasePackages.map(item => `${item.id}:${item.previewState}:${item.previewUpdatedAt}`).join('|')], () => { void loadPreviewItems() }, { immediate: true })
 watch(previewPackageFilter, () => { previewPage.value = 1; selectedPreviewKeys.value = [] })
+watch(previewLatestBomFilter, () => { previewPage.value = 1; selectedPreviewKeys.value = [] })
 onMounted(() => { void loadPreviewItems() })
 
 function scopeLabel(scope: ReleaseScope) {
@@ -242,6 +282,12 @@ function baselineChangeNumber(baseline: ManufacturingBomBaseline) {
                 <option v-for="previewPackage in previewPackages" :key="previewPackage.id" :value="previewPackage.id">{{ previewPackage.number }}</option>
               </select>
             </label>
+            <label class="pdm-release-preview-filter">最新BOM
+              <select v-model="previewLatestBomFilter" aria-label="按最新BOM筛选">
+                <option value="">全部</option>
+                <option v-for="version in latestBomFilterOptions" :key="version.id" :value="version.id">{{ version.kindLabel }} · {{ version.label }}</option>
+              </select>
+            </label>
             <button type="button" :disabled="previewBusy || !failedPreviewItems.length" :title="allFailedSelected ? '取消选中当前筛选下的全部失败项' : '选中当前筛选下的全部失败项'" @click="toggleSelectFailedItems">选中失败（{{ failedPreviewItems.length }}）</button>
             <button type="button" :disabled="previewBusy || !selectedDownloadableItems.length" :title="selectedPreviewItems.length > selectedDownloadableItems.length ? '只打包下载勾选中已转出的 STEP/PDF' : ''" @click="downloadPreviewItems(selectedDownloadableItems)">下载选中（{{ selectedDownloadableItems.length }}）</button>
             <button type="button" :disabled="previewBusy || pending || !selectedFailedItems.length || canManageRelease === false" :title="retryPermissionHint" @click="retrySelectedPreviewItems">重试选中（{{ selectedFailedItems.length }}）</button>
@@ -283,7 +329,7 @@ function baselineChangeNumber(baseline: ManufacturingBomBaseline) {
             </div>
           </footer>
         </template>
-        <p v-else class="pdm-release-preview-empty">暂无图纸转出记录：非标件BOM+图纸发布后会自动转出 STEP/PDF。</p>
+        <p v-else class="pdm-release-preview-empty">{{ selectedLatestBomVersion ? '当前最新BOM版本没有关联的图纸转出记录。' : '暂无图纸转出记录：非标件BOM+图纸发布后会自动转出 STEP/PDF。' }}</p>
       </section>
       <section class="pdm-panel pdm-release-baseline-list">
         <header><h3>制造BOM基线</h3><small>仅当三条正式流都有有效版本时生成；长交期输出不改变基线。</small></header>

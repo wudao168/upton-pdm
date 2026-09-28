@@ -15,9 +15,7 @@ import type { PreviewAgentProbeResult, PreviewConversionSettings } from './types
 import type { AppendProjectValidationPlanItemsInput, ConfirmValidationPlanExecutionInput, ProjectValidationPlan, SaveProjectValidationPlanInput, SaveValidationCheckCategoryInput, SaveValidationCheckItemInput, UpdateProjectValidationPlanStandardsInput, ValidationCheckCatalog, ValidationCheckCategory, ValidationCheckItem, ValidationPlanAttachment, ValidationPlanApprovalTaskSummary, ValidationPlanExecutionRecord, ValidationPlanRecognitionDraft } from './types'
 import { sha256Hex } from './fileHash'
 
-const localDesktopOrigin = window.location.hostname === 'appassets.pdm.local'
-const needsLocalApiFallback = localDesktopOrigin || import.meta.env.MODE === 'test'
-const apiBase = (import.meta.env.VITE_PDM_API_BASE ?? (needsLocalApiFallback ? 'http://127.0.0.1:5080' : '')).replace(/\/$/, '')
+const apiBase = (import.meta.env.VITE_PDM_API_BASE ?? (import.meta.env.MODE === 'test' ? 'http://127.0.0.1:5080' : '')).replace(/\/$/, '')
 
 export class PdmApiError extends Error {
   constructor(message: string, public readonly status: number) {
@@ -1525,7 +1523,7 @@ export function listProductionDrawings(token: string, includeHistory = false): P
   return requestJson(`/api/production-drawings?includeHistory=${includeHistory}`, {}, token)
 }
 
-export async function downloadProductionDrawingArchive(projectId: string, versionIds: string[], format: 'Pdf' | 'Step', token: string): Promise<void> {
+export async function downloadProductionDrawingArchive(projectId: string, versionIds: string[], format: 'Pdf' | 'Step', token: string, releasePackageNumber = '生产图纸'): Promise<void> {
   const headers = authenticatedHeaders(token)
   headers.set('Content-Type', 'application/json')
   const response = await fetch(`${apiBase}/api/projects/${projectId}/production-drawings/archive`, {
@@ -1541,7 +1539,8 @@ export async function downloadProductionDrawingArchive(projectId: string, versio
   const url = URL.createObjectURL(blob)
   const link = document.createElement('a')
   link.href = url
-  link.download = `生产图纸-${format === 'Pdf' ? 'PDF' : 'STEP'}.zip`
+  const packageName = releasePackageNumber.replace(/[<>:"/\\|?*\x00-\x1f]/g, '_')
+  link.download = `${packageName}-${format === 'Pdf' ? 'PDF' : 'STEP'}.zip`
   link.click()
   window.setTimeout(() => URL.revokeObjectURL(url), 60000)
 }
@@ -1750,6 +1749,12 @@ export function saveProjectPlanTemplate(templateId: string | null, input: import
   return requestJson(templateId ? `/api/project-plan-templates/${templateId}` : '/api/project-plan-templates', {
     method: templateId ? 'PUT' : 'POST',
     body: JSON.stringify(input),
+  }, token)
+}
+
+export function replaceSystemDefaultProjectPlanTemplate(templateId: string, expectedSourceRowVersion: number, token: string): Promise<import('./types').ProjectPlanTemplate> {
+  return requestJson(`/api/project-plan-templates/${templateId}/replace-system-default`, {
+    method: 'POST', body: JSON.stringify({ expectedSourceRowVersion }),
   }, token)
 }
 

@@ -19,22 +19,26 @@ $cscCandidates = @(
 )
 $csc = $cscCandidates | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
 $bootstrapSource = Join-Path $PSScriptRoot 'ClientSetupBootstrap.cs'
+$uninstallBootstrapSource = Join-Path $PSScriptRoot 'ClientUninstallBootstrap.cs'
+$uninstallBootstrapExe = Join-Path $stage 'UPLM-Client-Uninstall.exe'
 
-foreach ($required in @($csc, $bootstrapSource, (Join-Path $source 'Install-ClientTestPackage.ps1'), (Join-Path $source 'manifest.json'), (Join-Path $source 'payload'), (Join-Path $source 'prerequisites'), (Join-Path $source 'server-publish'))) {
+foreach ($required in @($csc, $bootstrapSource, $uninstallBootstrapSource, (Join-Path $PSScriptRoot 'Install-UPLMClient.ps1'), (Join-Path $PSScriptRoot 'Uninstall-UPLMClient.ps1'), (Join-Path $source 'manifest.json'), (Join-Path $source 'payload'), (Join-Path $source 'prerequisites'), (Join-Path $source 'server-publish'))) {
     if ([string]::IsNullOrWhiteSpace($required) -or -not (Test-Path -LiteralPath $required)) { throw "缺少 EXE 打包输入：$required" }
 }
 
 if (Test-Path -LiteralPath $stage) { Remove-Item -LiteralPath $stage -Recurse -Force }
 New-Item -ItemType Directory -Path $payloadStage -Force | Out-Null
 New-Item -ItemType Directory -Path $setupContent -Force | Out-Null
-Copy-Item -LiteralPath (Join-Path $source 'Install-ClientTestPackage.ps1') -Destination $payloadStage
+Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'Install-UPLMClient.ps1') -Destination $payloadStage
+Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'Uninstall-UPLMClient.ps1') -Destination $payloadStage
 Copy-Item -LiteralPath (Join-Path $source 'manifest.json') -Destination $payloadStage
 Copy-Item -LiteralPath (Join-Path $source 'payload') -Destination (Join-Path $payloadStage 'payload') -Recurse
 Copy-Item -LiteralPath (Join-Path $source 'prerequisites') -Destination (Join-Path $payloadStage 'prerequisites') -Recurse
 $utf8Bom = New-Object Text.UTF8Encoding($true)
-$clientInstaller = Join-Path $payloadStage 'Install-ClientTestPackage.ps1'
+$clientInstaller = Join-Path $payloadStage 'Install-UPLMClient.ps1'
 [IO.File]::WriteAllText($clientInstaller, (Get-Content -LiteralPath $clientInstaller -Raw -Encoding UTF8), $utf8Bom)
-Compress-Archive -Path (Join-Path $payloadStage '*') -DestinationPath $payloadArchive -CompressionLevel Optimal
+$clientUninstaller = Join-Path $payloadStage 'Uninstall-UPLMClient.ps1'
+[IO.File]::WriteAllText($clientUninstaller, (Get-Content -LiteralPath $clientUninstaller -Raw -Encoding UTF8), $utf8Bom)
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'Run-ClientSetup.ps1') -Destination $setupContent
 $setupRunner = Join-Path $setupContent 'Run-ClientSetup.ps1'
 [IO.File]::WriteAllText($setupRunner, (Get-Content -LiteralPath $setupRunner -Raw -Encoding UTF8), $utf8Bom)
@@ -56,6 +60,13 @@ $manifestXml = @'
 
 & $csc /nologo /target:winexe /optimize+ /platform:anycpu /win32manifest:$bootstrapManifest /out:$bootstrapExe /reference:System.IO.Compression.dll /reference:System.IO.Compression.FileSystem.dll /reference:System.Windows.Forms.dll $bootstrapSource
 if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $bootstrapExe)) { throw "客户端自解压启动器编译失败，退出码：$LASTEXITCODE" }
+& $csc /nologo /target:winexe /optimize+ /platform:anycpu /win32manifest:$bootstrapManifest /out:$uninstallBootstrapExe /reference:System.Windows.Forms.dll $uninstallBootstrapSource
+if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $uninstallBootstrapExe)) { throw "客户端卸载启动器编译失败，退出码：$LASTEXITCODE" }
+Copy-Item -LiteralPath $uninstallBootstrapExe -Destination (Join-Path $payloadStage 'UPLM-Client-Uninstall.exe')
+if (Test-Path -LiteralPath $payloadArchive) { Remove-Item -LiteralPath $payloadArchive -Force }
+Compress-Archive -Path (Join-Path $payloadStage '*') -DestinationPath $payloadArchive -CompressionLevel Optimal
+if (Test-Path -LiteralPath $setupArchive) { Remove-Item -LiteralPath $setupArchive -Force }
+Compress-Archive -Path (Join-Path $setupContent '*') -DestinationPath $setupArchive -CompressionLevel NoCompression
 
 if (Test-Path -LiteralPath $outputExe) { Remove-Item -LiteralPath $outputExe -Force }
 $bootstrapLength = (Get-Item -LiteralPath $bootstrapExe).Length

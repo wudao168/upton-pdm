@@ -140,6 +140,46 @@ public sealed class ProgramTemplateWorkflowTests
     }
 
     [Fact]
+    public async Task UploaderCanReviewAndApproveOwnProgramTemplateWhenGrantedPermissions()
+    {
+        var clock = TimeProvider.System;
+        var pdmRepository = new InMemoryPdmRepository(clock);
+        var templateRepository = new InMemoryProgramTemplateRepository(clock);
+        var service = new ProgramTemplateService(templateRepository, pdmRepository, new UnusedProgramTemplateStorage(), clock);
+        await pdmRepository.CreateUserAsync(new(Guid.NewGuid(), "uploader", "上传人", "unused", UserRole.Administrator, true), default);
+        var organization = (await pdmRepository.GetOrganizationDirectoryAsync(default)).Organizations.First();
+        var unit = await pdmRepository.SaveOrganizationUnitAsync(new(null, organization.Id, null, "ELEC", "电气部", OrganizationUnitKind.Department, true, 1), default);
+        await pdmRepository.SetOrganizationMembershipsAsync("uploader", [unit.Id], unit.Id, default);
+        await pdmRepository.SetOrganizationUnitManagersAsync(unit.Id, "uploader", [], default);
+
+        var created = await service.CreateAsync(new CreateProgramTemplateCommand(
+            nameof(ProgramTemplateAssetType.PlcFunctionBlock), "自审模板", "逻辑运算", "允许具备权限的上传人自行完成审核。", "Siemens", "TIA Portal", "V19", "S7-1200",
+            [], "首版", [new(ProgramTemplateParameterDirection.Input, 0, "Enable", "BOOL", null, null, null)]),
+            "uploader", UserRole.Administrator, default);
+        var revision = created.Revisions.Single();
+        revision = await templateRepository.AttachFileAsync(revision.Id,
+            new(revision.Id, ProgramTemplateAttachmentKind.Package, "self.zip", "self/package.zip", 128, new string('A', 64), clock.GetUtcNow()),
+            revision.RowVersion, default);
+        revision = await templateRepository.AttachFileAsync(revision.Id,
+            new(revision.Id, ProgramTemplateAttachmentKind.TestEvidence, "self.pdf", "self/evidence.pdf", 64, new string('B', 64), clock.GetUtcNow()),
+            revision.RowVersion, default);
+
+        revision = await service.SubmitAsync(revision.Id, revision.RowVersion, "uploader", UserRole.Administrator, default);
+        Assert.Equal(ProgramTemplateRevisionState.PendingReview, revision.State);
+        var reviewTask = Assert.Single(await service.ListMyTasksAsync("uploader", UserRole.Administrator, default));
+        var reviewed = await service.DecideAsync(reviewTask.Id,
+            new(ProgramTemplateApprovalDecision.Approved, null, ProgramTemplateChecklist.For(ProgramTemplateTypeCatalog.ChecklistKind(null, created.AssetType)), reviewTask.RowVersion),
+            "uploader", UserRole.Administrator, default);
+        Assert.Equal(ProgramTemplateRevisionState.PendingApproval, reviewed.Revision.State);
+
+        var approvalTask = Assert.Single(await service.ListMyTasksAsync("uploader", UserRole.Administrator, default));
+        var approved = await service.DecideAsync(approvalTask.Id,
+            new(ProgramTemplateApprovalDecision.Approved, "本人批准发布", [], approvalTask.RowVersion),
+            "uploader", UserRole.Administrator, default);
+        Assert.Equal(ProgramTemplateRevisionState.Published, approved.Revision.State);
+    }
+
+    [Fact]
     public async Task ApproverPoolAcceptsApprovePermissionInsteadOfExactApproverRoleCode()
     {
         var clock = TimeProvider.System;

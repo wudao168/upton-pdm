@@ -402,7 +402,7 @@ async function saveProjectDetails() {
       const previewCustomerCode = selectedEditCustomer.value?.code ?? project.customerCode ?? '—'
       const modelPreview = `${organization?.modelCompanyCode ?? '—'}-${editForm.equipmentTypeCode}-${previewCustomerCode}-${previewCustomerCode === project.customerCode && editForm.organizationId === project.organizationId ? String(project.customerProjectSequence ?? 0).padStart(3, '0') : '新序号'}-00`
       await ElMessageBox.confirm(
-        `项目号：${project.code} → ${codePreview}\n型号：${project.deviceModel ?? '—'} → ${modelPreview}\n数量：${project.quantity} → ${editForm.quantity}\n\n减少数量会释放末尾序列号；所属公司或项目类型变化仅允许在图档入库前修改。`,
+        `项目号：${project.code} → ${codePreview}\n型号：${project.deviceModel ?? '—'} → ${modelPreview}\n数量：${project.quantity} → ${editForm.quantity}\n\n客户、设备类型、所属公司、项目类型和数量都会影响编号。减少数量会释放末尾序列号；项目或子项目已有审批或发布包时，不能修改这些编号资料。`,
         '确认修改编号资料',
         { type: 'warning', confirmButtonText: '确认修改', cancelButtonText: '取消' },
       )
@@ -541,7 +541,7 @@ function handleProjectAction(project: ProjectSummary, action: ProjectAction) {
         <label>订单日期<input v-model="editForm.signedDate" name="editSignedDate" type="date" :disabled="Boolean(editProject?.parentProjectId)"></label>
         <label>数量<input v-model.number="editForm.quantity" name="editQuantity" type="number" min="1" max="10000"></label>
         <p class="is-wide" v-if="editProject?.parentProjectId">设备子项目的编号资料继承上级项目；修改数量时系统会自动追加或释放序列号。</p>
-        <p class="is-wide" v-else>保存前会预览项目号、型号和数量变化。所属公司或项目类型变化会联动子项目编号；已有受控图档时禁止变更项目号。</p>
+        <p class="is-wide" v-else>保存前会预览项目号、型号和数量变化。客户、设备类型、所属公司、项目类型和数量都会影响编号；已有审批或发布包时禁止变更这些资料。</p>
       </form>
       <template #footer><button type="button" class="pdm-secondary-action" :disabled="pending" @click="editDialogOpen=false">取消</button><button type="button" class="pdm-primary-action" :disabled="pending" @click="saveProjectDetails">{{ pending ? '正在保存…' : '保存' }}</button></template>
     </el-dialog>

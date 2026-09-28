@@ -1,7 +1,7 @@
 import { flushPromises, mount } from '@vue/test-utils'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import ReleaseOverview from '../src/components/ReleaseOverview.vue'
-import type { ManufacturingBomBaseline, ReleasePackageSummary, ReleasePreviewItemResult } from '../src/types'
+import type { BomVersion, ManufacturingBomBaseline, ReleasePackageSummary, ReleasePreviewItemResult } from '../src/types'
 
 const api = vi.hoisted(() => ({
   listReleasePreviewItems: vi.fn(),
@@ -159,6 +159,84 @@ describe('ReleaseOverview', () => {
     expect(wrapper.get('.pdm-release-preview-table').text()).not.toContain('A-001')
     expect(wrapper.get('.pdm-release-preview-table').text()).toContain('B-001')
     expect(retryPackage.attributes('disabled')).toBeUndefined()
+  })
+
+  it('filters drawing conversions to the latest released BOM package and downloads every package output', async () => {
+    const olderPackage: ReleasePackageSummary = {
+      id: 'pkg-old', number: 'RP-N-001', state: '已发布', steps: [], scope: 'NonStandardWithDrawing', workflowVersion: 1,
+      selectedBomItemIds: [], createsManufacturingBaseline: false, locksDocuments: true,
+      standardBomSnapshot: [], nonStandardBomSnapshot: [], electricalBomSnapshot: [], nonStandardBomVersionId: 'ns-v1',
+      createdAt: '2026-09-20T08:00:00Z', previewState: 'Succeeded',
+    }
+    const currentPackage: ReleasePackageSummary = {
+      ...olderPackage, id: 'pkg-current', number: 'RP-N-002', nonStandardBomVersionId: 'ns-v2',
+      createdAt: '2026-09-27T08:00:00Z',
+    }
+    const versions: BomVersion[] = [
+      {
+        id: 'ns-v1', projectId: 'project-1', kind: 'NonStandard', versionNumber: 1, label: 'N-B01', state: 'Released',
+        items: [{ drawingNumber: '7080113.00-01', name: '旧物料', sequence: 1, quantity: 1, unit: '件', revision: 'A', complete: true }],
+        createdBy: 'admin', createdAt: '2026-09-20T08:00:00Z', updatedBy: 'admin', updatedAt: '2026-09-20T08:00:00Z',
+      },
+      {
+        id: 'ns-v2', projectId: 'project-1', kind: 'NonStandard', versionNumber: 2, label: 'N-B02', state: 'Released',
+        items: [{ drawingNumber: '7080113.00-02', name: '当前物料', sequence: 1, quantity: 1, unit: '件', revision: 'A', complete: true }],
+        createdBy: 'admin', createdAt: '2026-09-27T08:00:00Z', updatedBy: 'admin', updatedAt: '2026-09-27T08:00:00Z',
+      },
+    ]
+    api.listReleasePreviewItems.mockResolvedValue([
+      previewItem({ releasePackageId: 'pkg-old', releasePackageNumber: 'RP-N-001', documentId: 'doc-old', drawingNumber: '7080113.00-01', fileName: '7080113.00-01.SLDPRT' }),
+      previewItem({ releasePackageId: 'pkg-current', releasePackageNumber: 'RP-N-002', documentId: 'doc-current', drawingNumber: '7080113.00-02', fileName: '7080113.00-02.SLDPRT' }),
+      previewItem({ releasePackageId: 'pkg-current', releasePackageNumber: 'RP-N-002', documentId: 'doc-unrelated', drawingNumber: '7080113.00-99', fileName: '7080113.00-99.SLDPRT' }),
+    ])
+    api.downloadReleasePreviewArchive.mockResolvedValue(undefined)
+    const wrapper = mount(ReleaseOverview, {
+      props: { releasePackages: [olderPackage, currentPackage], versions, baselines: [], projectId: 'project-1', token: 'token' },
+    })
+    await flushPromises()
+
+    const bomFilter = wrapper.get('select[aria-label="按最新BOM筛选"]')
+    expect(bomFilter.findAll('option').map(option => option.text())).toEqual(['全部', '非标件BOM · N-B02'])
+    expect(wrapper.get('.pdm-release-preview-table').text()).toContain('7080113.00-01')
+    expect(wrapper.get('.pdm-release-preview-table').text()).toContain('7080113.00-99')
+
+    await bomFilter.setValue('ns-v2')
+    await flushPromises()
+    const filteredTable = wrapper.get('.pdm-release-preview-table')
+    expect(filteredTable.text()).toContain('7080113.00-02')
+    expect(filteredTable.text()).not.toContain('7080113.00-01')
+    expect(filteredTable.text()).toContain('7080113.00-99')
+    expect(wrapper.get('.pdm-release-preview-list header small').text()).toContain('成功 2')
+
+    await wrapper.findAll('button').find(button => button.text() === '全部下载')!.trigger('click')
+    await flushPromises()
+    expect(api.downloadReleasePreviewArchive).toHaveBeenCalledWith('project-1', 'pkg-current', ['doc-current', 'doc-unrelated'], 'token')
+  })
+
+  it('matches the latest compatible package when a legacy package has no BOM version link', async () => {
+    const drawing = { sequence: 1, drawingNumber: '7080113.00-02', name: '当前物料', quantity: 1, unit: '件', revision: 'A', complete: true }
+    const release: ReleasePackageSummary = {
+      id: 'pkg-snapshot', number: 'RP-N-003', state: '已发布', steps: [], scope: 'NonStandardWithDrawing', workflowVersion: 1,
+      selectedBomItemIds: [], createsManufacturingBaseline: false, locksDocuments: true,
+      standardBomSnapshot: [], nonStandardBomSnapshot: [], electricalBomSnapshot: [], previewState: 'Succeeded',
+    }
+    const version: BomVersion = {
+      id: 'ns-v3', projectId: 'project-1', kind: 'NonStandard', versionNumber: 3, label: 'N-B03', state: 'Released',
+      items: [drawing], createdBy: 'admin', createdAt: '2026-09-28T08:00:00Z', updatedBy: 'admin', updatedAt: '2026-09-28T08:00:00Z',
+    }
+    api.listReleasePreviewItems.mockResolvedValue([
+      previewItem({ releasePackageId: 'pkg-snapshot', releasePackageNumber: 'RP-N-003', documentId: 'doc-current', drawingNumber: drawing.drawingNumber }),
+    ])
+    const wrapper = mount(ReleaseOverview, {
+      props: { releasePackages: [release], versions: [version], baselines: [], projectId: 'project-1', token: 'token' },
+    })
+    await flushPromises()
+
+    await wrapper.get('select[aria-label="按最新BOM筛选"]').setValue('ns-v3')
+    await flushPromises()
+
+    expect(wrapper.get('.pdm-release-preview-table').text()).toContain(drawing.drawingNumber)
+    expect(wrapper.get('.pdm-release-preview-list header small').text()).toContain('成功 1')
   })
 
   it('still shows the change number when the package has its own one', () => {

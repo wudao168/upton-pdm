@@ -1,8 +1,9 @@
 <script setup lang="ts">
 import { ArrowDown, ArrowUp, ChevronDown, ChevronRight, Plus, RefreshCw } from '@lucide/vue'
 import { computed, nextTick, ref, watch } from 'vue'
+import { ElMessageBox } from 'element-plus'
 import { ElMessage } from '../statusMessage'
-import { listProjectPlanTemplates, saveProjectPlanTemplate } from '../api'
+import { listProjectPlanTemplates, replaceSystemDefaultProjectPlanTemplate, saveProjectPlanTemplate } from '../api'
 import type { ProjectPlanStageDefinition, ProjectPlanTemplate } from '../types'
 import { percent } from '../projectPlanAllocation'
 
@@ -26,6 +27,7 @@ const taskRatioTotal = computed(() => selectedGroup.value?.tasks.filter(task => 
 const fixedTaskDays = computed(() => selectedGroup.value?.tasks.filter(task => !task.isMilestone && task.fixedDurationDays != null).reduce((sum, task) => sum + task.fixedDurationDays!, 0) ?? 0)
 const canEditTemplate = computed(() => Boolean(templateDraft.value && (props.canManageSystem
   || templateDraft.value.scope === 'Personal' && templateDraft.value.ownerUsername?.toLowerCase() === props.currentUsername.toLowerCase())))
+const canReplaceSystemDefault = computed(() => props.canManageSystem && Boolean(templateDraft.value))
 const workflowOptions = [
   { value: 'project.start', label: '项目启动' },
   { value: 'design.mechanical', label: '机械设计' },
@@ -174,6 +176,31 @@ function copyTemplate() {
   }))
 }
 
+async function replaceSystemDefault() {
+  const draft = templateDraft.value
+  if (!draft || !canReplaceSystemDefault.value || saving.value) return
+  if (allocationError.value) return ElMessage.warning(allocationError.value)
+  try {
+    await ElMessageBox.confirm('将以当前模板覆盖系统默认模板。原系统模板的名称、阶段和任务配置会被替换，已生成的项目计划不受影响。', '替换系统默认模板', { confirmButtonText: '确认替换', cancelButtonText: '取消', type: 'warning' })
+  } catch { return }
+  saving.value = true
+  try {
+    const source = draft.scope === 'Personal' ? await saveProjectPlanTemplate(draft.rowVersion ? draft.id : null, {
+      name: draft.name, projectTypeCode: draft.projectTypeCode, isActive: draft.isActive, tasks: draft.tasks,
+      expectedRowVersion: draft.rowVersion || undefined, stages: draft.stages, scope: draft.scope ?? 'Personal',
+      baseSystemTemplateId: draft.baseSystemTemplateId, projectId: props.projectId,
+    }, props.token) : draft
+    const saved = await replaceSystemDefaultProjectPlanTemplate(source.id, source.rowVersion ?? 0, props.token)
+    templates.value = await listProjectPlanTemplates(props.token, true, props.projectId)
+    selectTemplate(saved.id)
+    ElMessage.success('当前模板已替换系统默认模板')
+  } catch (reason) {
+    ElMessage.error(reason instanceof Error ? reason.message : '替换系统默认模板失败')
+  } finally {
+    saving.value = false
+  }
+}
+
 function addStage(stages: ProjectPlanStageDefinition[]) {
   const stage = { code: crypto.randomUUID(), name: `新阶段${stages.length + 1}`, participatesInDelivery: true, durationRatio: 0, progressRatio: 0, independentDurationDays: 0 }
   stages.push(stage)
@@ -212,6 +239,7 @@ function removeTemplateTask(id: string) {
         <span class="pdm-template-scope" :class="templateDraft.scope === 'Personal' ? 'is-personal' : 'is-system'">{{ templateDraft.scope === 'Personal' ? '个人模板' : '系统模板' }}</span>
         <span v-if="!canEditTemplate">系统模板由管理员维护，可复制后按项目实际情况调整。</span>
         <button class="pdm-secondary-action" :disabled="saving" @click="copyTemplate">复制为个人模板</button>
+        <button v-if="canReplaceSystemDefault" class="pdm-primary-action" :disabled="saving" @click="replaceSystemDefault">替换系统默认模板</button>
       </div>
       <fieldset class="pdm-template-fields" :disabled="saving || !canEditTemplate">
         <div class="pdm-template-picker">

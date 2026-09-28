@@ -15,6 +15,7 @@ using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Web.Script.Serialization;
+using Microsoft.Win32;
 using System.Windows;
 using System.Windows.Interop;
 using System.Windows.Media;
@@ -250,6 +251,7 @@ public partial class MainWindow : Window
             UiHostName,
             uiFolder,
             CoreWebView2HostResourceAccessKind.DenyCors);
+        ConfigureLocalApiProxy(WorkspaceView.CoreWebView2);
         WorkspaceView.CoreWebView2.WebMessageReceived += OnWebMessageReceived;
         WorkspaceView.NavigationCompleted += async (_, args) =>
         {
@@ -403,10 +405,7 @@ public partial class MainWindow : Window
             return;
         }
 
-        var addinDirectory = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-            "UPLM",
-            "solidworks-addin");
+        var addinDirectory = ResolveSolidWorksAddinDirectory();
         if (!Directory.Exists(addinDirectory)) return;
 
         await ClientPackageUpdater.StageAsync(
@@ -429,6 +428,95 @@ public partial class MainWindow : Window
         {
             foreach (var process in solidWorksProcesses) process.Dispose();
         }
+    }
+
+    private void ConfigureLocalApiProxy(CoreWebView2 webView)
+    {
+        webView.AddWebResourceRequestedFilter($"https://{UiHostName}/api/*", CoreWebView2WebResourceContext.All);
+        webView.AddWebResourceRequestedFilter($"https://{UiHostName}/health", CoreWebView2WebResourceContext.All);
+        webView.WebResourceRequested += (_, args) => ProxyLocalApiRequest(webView, args);
+    }
+
+    private void ProxyLocalApiRequest(CoreWebView2 webView, CoreWebView2WebResourceRequestedEventArgs args)
+    {
+        var requestUri = new Uri(args.Request.Uri);
+        if (!string.Equals(requestUri.Host, UiHostName, StringComparison.OrdinalIgnoreCase)) return;
+
+        try
+        {
+            var targetUri = new Uri(new Uri(bootstrapConfiguration.ApiBaseUrl), requestUri.PathAndQuery.TrimStart('/'));
+            using (var request = new HttpRequestMessage(new HttpMethod(args.Request.Method), targetUri))
+            {
+                foreach (var name in new[] { "Accept", "Authorization", "X-Company-Id" })
+                {
+                    try
+                    {
+                        var value = args.Request.Headers.GetHeader(name);
+                        if (!string.IsNullOrWhiteSpace(value)) request.Headers.TryAddWithoutValidation(name, value);
+                    }
+                    catch
+                    {
+                        // The header was not set by this browser request.
+                    }
+                }
+
+                if (args.Request.Content != null)
+                {
+                    request.Content = new StreamContent(args.Request.Content);
+                    try
+                    {
+                        var contentType = args.Request.Headers.GetHeader("Content-Type");
+                        if (!string.IsNullOrWhiteSpace(contentType)) request.Content.Headers.TryAddWithoutValidation("Content-Type", contentType);
+                    }
+                    catch
+                    {
+                        // Requests without a content type are valid.
+                    }
+                }
+
+                using (var response = apiClient.SendAsync(request).GetAwaiter().GetResult())
+                {
+                    var body = new MemoryStream();
+                    response.Content.CopyToAsync(body).GetAwaiter().GetResult();
+                    body.Position = 0;
+                    var contentType = response.Content.Headers.ContentType?.ToString() ?? "application/octet-stream";
+                    args.Response = webView.Environment.CreateWebResourceResponse(
+                        body,
+                        (int)response.StatusCode,
+                        response.ReasonPhrase ?? string.Empty,
+                        $"Content-Type: {contentType}\r\nCache-Control: no-store");
+                }
+            }
+        }
+        catch (Exception exception)
+        {
+            var body = new MemoryStream(Encoding.UTF8.GetBytes($"{{\"message\":\"客户端无法连接服务器：{exception.Message.Replace("\\\"", "'")}\"}}"));
+            args.Response = webView.Environment.CreateWebResourceResponse(body, 502, "UPLM API proxy failed", "Content-Type: application/json\r\nCache-Control: no-store");
+        }
+    }
+
+    private static string ResolveSolidWorksAddinDirectory()
+    {
+        try
+        {
+            using (var uninstallKey = Registry.LocalMachine.OpenSubKey(@"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\UPLMClient"))
+            {
+                var installRoot = uninstallKey?.GetValue("InstallLocation") as string;
+                var addinDirectory = string.IsNullOrWhiteSpace(installRoot)
+                    ? string.Empty
+                    : Path.Combine(installRoot, "solidworks-addin");
+                if (File.Exists(Path.Combine(addinDirectory, "Upton.Pdm.SolidWorks.Addin.dll"))) return addinDirectory;
+            }
+        }
+        catch
+        {
+            // Use the historic per-user location below when the registry cannot be read.
+        }
+
+        return Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "UPLM",
+            "solidworks-addin");
     }
 
     private static string Serialize(object value) => new JavaScriptSerializer().Serialize(value);

@@ -297,7 +297,7 @@ public sealed partial class MySqlPdmRepository
                         CustomerName = customer.Name,
                         CustomerSequence = customerSequence,
                         DeviceModel = $"{organization.ModelCompanyCode}-{itemEquipmentTypeCode}-{customer.Code}-{customerSequence:D3}-{BuildModelSuffixFromCode(code)}",
-                        command.SignedDate,
+                        SignedDate = command.SignedDate.ToDateTime(TimeOnly.MinValue),
                         Quantity = quantity,
                         VaultLocation = ReplaceTerminalDirectory(item.VaultLocation, code),
                         ReleaseLocation = ReplaceTerminalDirectory(item.ReleaseLocation, code),

@@ -1152,6 +1152,26 @@ public sealed class ProjectPlanningServiceTests
         Assert.Equal(ProjectPlanApprovalStatus.Draft, draft.ApprovalStatus);
     }
 
+    [Fact]
+    public async Task Administrator_can_replace_the_system_default_with_a_personal_template()
+    {
+        var pdm = new InMemoryPdmRepository(TimeProvider.System);
+        var planning = new InMemoryProjectPlanningRepository();
+        var service = new ProjectPlanningService(planning, pdm, TimeProvider.System);
+        var project = await AssignProjectManager(pdm, Assert.Single(await pdm.ListProjectsAsync(default)));
+        var system = Assert.Single(await service.ListTemplatesAsync(false, "admin", UserRole.Administrator, default));
+        var personal = await service.SaveTemplateAsync(null, new("当前项目模板", "设备", true, system.Tasks.Select(task => task with { Name = task.Name == "电气设计与图纸" ? "当前项目设计" : task.Name }).ToArray(), null,
+            system.Stages, ProjectPlanTemplateScope.Personal, system.Id, project.Id), "admin", UserRole.Administrator, default);
+
+        var replaced = await service.ReplaceSystemDefaultTemplateAsync(personal.Id, personal.RowVersion, "admin", UserRole.Administrator, default);
+
+        Assert.Equal(system.Id, replaced.Id);
+        Assert.Equal("当前项目模板", replaced.Name);
+        Assert.Equal("设备", replaced.ProjectTypeCode);
+        Assert.Contains(replaced.Tasks, task => task.Name == "当前项目设计");
+        Assert.Equal(ProjectPlanTemplateScope.System, replaced.Scope);
+    }
+
     [Theory]
     [InlineData("developer", true)]
     [InlineData("Administrator", true)]

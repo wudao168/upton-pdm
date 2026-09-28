@@ -290,6 +290,7 @@ describe('ProjectManager', () => {
     await wrapper.vm.$nextTick()
 
     expect(wrapper.find('[aria-label="编辑项目基本信息"]').exists()).toBe(true)
+    expect(wrapper.text()).toContain('客户、设备类型、所属公司、项目类型和数量都会影响编号')
     await wrapper.get('input[name="editProjectName"]').setValue('气密设备升级版')
     await wrapper.get('input[name="editProjectAlias"]').setValue('气密升级')
     await wrapper.get('input[name="editSignedDate"]').setValue('2026-08-16')
