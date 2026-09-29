@@ -20,6 +20,27 @@ function mountTree(refreshing: boolean) {
 }
 
 describe('DocumentTree', () => {
+  it('renders large 2D drawing lists in bounded pages', async () => {
+    const drawings: DocumentNode[] = Array.from({ length: 161 }, (_, index) => ({
+      id: `drawing-${index}`, documentId: `document-${index}`,
+      drawingNumber: `DRW-${index}`, name: `图纸 ${index}`, fileName: `DRW-${index}.SLDDRW`,
+      kind: 'Drawing', configuration: 'Default', quantity: 1, version: 'W1', status: 'Normal', children: [],
+    }))
+    const wrapper = mount(DocumentTree, { props: {
+      query: '', filter: 'drawing', drawings, selectedId: '', allCount: 161,
+      modelCount: 0, drawingCount: 161, warningCount: 0,
+    } })
+
+    expect(wrapper.findAll('.pdm-drawing-list > li')).toHaveLength(81)
+    expect(wrapper.text()).toContain('第 1 / 3 页')
+    await wrapper.findAll('.pdm-drawing-pages button')[1].trigger('click')
+    expect(wrapper.text()).toContain('DRW-80')
+    expect(wrapper.text()).not.toContain('DRW-0')
+    await wrapper.findAll('.pdm-drawing-pages button')[1].trigger('click')
+    expect(wrapper.findAll('.pdm-drawing-list > li')).toHaveLength(2)
+    expect(wrapper.text()).toContain('DRW-160')
+  })
+
   it('rotates the refresh icon and blocks duplicate refresh clicks', async () => {
     const wrapper = mountTree(true)
     const button = wrapper.get('button[aria-label="正在刷新设计树"]')

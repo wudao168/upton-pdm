@@ -194,6 +194,9 @@
 .pdm-tree, .pdm-tree-children { margin: 0; padding: 0; list-style: none; }
 .pdm-tree { min-height: 0; flex: 1 1 auto; overflow-x: hidden; overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable; padding: 7px 0; }
 .pdm-drawing-list .pdm-tree-row { padding-left: 6px; }
+.pdm-drawing-pages { display: flex; align-items: center; justify-content: center; gap: 8px; padding: 10px 4px; color: var(--pdm-muted); font-size: 11px; }
+.pdm-drawing-pages button { padding: 4px 8px; border: 1px solid var(--pdm-border); border-radius: 4px; background: var(--pdm-surface); color: var(--pdm-text); cursor: pointer; }
+.pdm-drawing-pages button:disabled { opacity: .5; cursor: default; }
 .pdm-tree-empty { min-height: 0; flex: 1 1 auto; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 5px; padding: 18px; color: var(--pdm-muted); text-align: center; }
 .pdm-tree-empty strong { color: var(--pdm-text); font-size: 12px; }.pdm-tree-empty span { font-size: 11px; }
 .pdm-tree-row { width: 100%; min-height: 39px; display: flex; align-items: center; justify-content: space-between; gap: 4px; padding: 4px 6px 4px calc(5px + var(--tree-level) * 13px); border: 0; border-radius: 5px; background: transparent; color: var(--pdm-text); text-align: left; }

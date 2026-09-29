@@ -356,6 +356,7 @@ internal sealed class EDrawingsPreviewControl : Forms.UserControl
         try
         {
             dynamic control = viewer.ActiveControl;
+            ReleaseMarkupControl();
             markupControl = control.CoCreateInstance("{9FCFE7FE-2ED5-4720-94F9-6B712F7D11A2}");
             if (markupControl == null)
             {
@@ -437,7 +438,7 @@ internal sealed class EDrawingsPreviewControl : Forms.UserControl
         pendingRepaintAttempts = 0;
         pendingMarkupDisplayAttempts = 0;
         pendingMarkupPath = string.Empty;
-        markupControl = null;
+        ReleaseMarkupControl();
         documentReady = false;
         SetMarkupModified(false, true);
         if (!documentOpen)
@@ -459,6 +460,23 @@ internal sealed class EDrawingsPreviewControl : Forms.UserControl
             currentDocumentName = string.Empty;
             documentTransitioning = false;
             UpdateToolbarState();
+        }
+    }
+
+    private void ReleaseMarkupControl()
+    {
+        var control = markupControl;
+        markupControl = null;
+        if (control != null && Marshal.IsComObject(control))
+        {
+            try
+            {
+                Marshal.ReleaseComObject(control);
+            }
+            catch (InvalidComObjectException)
+            {
+                // The ActiveX control may have disconnected the markup object first.
+            }
         }
     }
 

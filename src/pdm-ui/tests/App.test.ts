@@ -1219,6 +1219,31 @@ describe('PLM client workspace', () => {
     expect(preview.find('#drawing-review-decision-host').exists()).toBe(true)
   })
 
+  it('waits for an explicit drawing selection before loading a 2D preview', async () => {
+    const postMessage = vi.fn()
+    Object.defineProperty(window, 'chrome', {
+      configurable: true,
+      value: { webview: { postMessage, addEventListener: vi.fn() } },
+    })
+    const wrapper = mount(App, { attachTo: document.body, global: { plugins: [ElementPlus] } })
+    await login(wrapper)
+    await projectTabByText(wrapper, '图档').trigger('click')
+    await flushPromises()
+    await buttonByText(wrapper, '加载交互预览').trigger('click')
+    await flushPromises()
+    const previewsBeforeSwitch = postMessage.mock.calls.filter(([message]) => message.type === 'preview-document').length
+
+    const drawingFilter = wrapper.findAll('button[role="tab"]').find(button => button.text().includes('2D'))
+    await drawingFilter!.trigger('click')
+    await flushPromises()
+    expect(postMessage.mock.calls.filter(([message]) => message.type === 'preview-document')).toHaveLength(previewsBeforeSwitch)
+
+    await wrapper.get('.pdm-drawing-list .pdm-tree-row').trigger('click')
+    await flushPromises()
+    expect(postMessage.mock.calls.filter(([message]) => message.type === 'preview-document')).toHaveLength(previewsBeforeSwitch + 1)
+    wrapper.unmount()
+  })
+
   it('switches the workbench and document pages and makes navigation buttons respond', async () => {
     const wrapper = mount(App, { attachTo: document.body, global: { plugins: [ElementPlus] } })
     await login(wrapper)
@@ -1473,7 +1498,12 @@ describe('PLM client workspace', () => {
     expect(drawingFilter).toBeTruthy()
     await drawingFilter!.trigger('click')
     await flushPromises()
-    // 交互预览已加载过，切换图档直接续用会话：不再清空预览，也不需要重新点击加载按钮。
+    // 切到 2D 不自动打开第一张图纸；用户明确选中后才加载交互预览。
+    expect(postMessage.mock.calls.filter(([message]) => message.type === 'preview-document')).toHaveLength(previewDocumentCalls)
+    const drawingRow = wrapper.findAll('.pdm-drawing-list .pdm-tree-row').find(row => row.text().includes('REAL-ASM-001'))
+    expect(drawingRow).toBeTruthy()
+    await drawingRow!.trigger('click')
+    await flushPromises()
     expect(postMessage).toHaveBeenCalledWith({
       type: 'preview-document',
       payload: {

@@ -888,14 +888,26 @@ internal sealed class BatchRenameControl : UserControl
     private void OnPreviewGridCellValueChanged(object sender, DataGridViewCellEventArgs eventArgs)
     {
         if (eventArgs.RowIndex < 0 || eventArgs.ColumnIndex != 0) return;
-        if (usesSharedPreviewGrid
-            && previewGrid.Rows[eventArgs.RowIndex].DataBoundItem is BatchPropertyEditItem item)
+        if (usesSharedPreviewGrid)
         {
-            foreach (var row in previewRows.Where(candidate => ReferenceEquals(candidate.Item, item)))
-            {
-                row.Selected = row.CanExecute && item.Selected;
-            }
-            RefreshSharedPreviewCells();
+            SynchronizeSharedSelection();
+            return;
+        }
+        RefreshApplyState();
+    }
+
+    internal void SynchronizeSharedSelection()
+    {
+        if (!usesSharedPreviewGrid || !previewCurrent) return;
+        var previewedItems = new HashSet<BatchPropertyEditItem>(previewRows.Select(row => row.Item));
+        if (items.Any(item => item.Selected && !previewedItems.Contains(item)))
+        {
+            InvalidatePreview();
+            return;
+        }
+        foreach (var row in previewRows)
+        {
+            row.Selected = row.CanExecute && row.Item?.Selected == true;
         }
         RefreshApplyState();
     }
@@ -1082,10 +1094,6 @@ internal sealed class BatchRenameControl : UserControl
             SetSharedRenameValueStyle(gridRow, itemRows.Any(row =>
                 !string.Equals(row.CurrentValue, row.NewValue, StringComparison.OrdinalIgnoreCase)
                 && (row.CanExecute || string.Equals(row.Status, "已完成", StringComparison.Ordinal))));
-            if (itemRows.Length > 0)
-            {
-                item.Selected = itemRows.Any(row => row.CanExecute && row.Selected);
-            }
         }
         previewGrid.Refresh();
     }

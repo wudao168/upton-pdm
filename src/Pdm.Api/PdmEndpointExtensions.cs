@@ -712,6 +712,31 @@ public static class PdmEndpointExtensions
             return Results.Ok(versions);
         });
 
+        api.MapGet("/documents/{documentId:guid}/preview-source-version", async (Guid documentId, Guid? versionId, HttpContext context, IPdmRepository repository, PdmWorkflowService workflow, CancellationToken cancellationToken) =>
+        {
+            var (actor, role) = CurrentUser(context.User);
+            await workflow.AuditVersionReadAsync(documentId, Guid.Empty, actor, role, "document.version.preview-source", cancellationToken);
+            var versions = await repository.ListDocumentVersionsAsync(documentId, cancellationToken);
+            var version = versionId.HasValue
+                ? versions.SingleOrDefault(item => item.Id == versionId.Value)
+                : versions.OrderByDescending(item => item.CreatedAt).FirstOrDefault();
+            if (version is null)
+            {
+                return Results.NotFound(new
+                {
+                    detail = versionId.HasValue
+                        ? "图纸审核绑定的版本不存在，不能继续审核。"
+                        : "该图档已登记，但尚未提交首个存档版本。装配体中可见的可能只是SolidWorks缓存几何，不是可下载的源文件；请从原始工作目录找回文件后完成首次存档。"
+                });
+            }
+
+            return Results.Ok(new DocumentPreviewSourceVersionResponse(
+                version.Id,
+                version.FileLength,
+                version.Sha256,
+                version.CreatedAt));
+        });
+
         api.MapGet("/documents/{documentId:guid}/versions/{versionId:guid}", async (Guid documentId, Guid versionId, HttpContext context, IPdmRepository repository, PdmWorkflowService workflow, CancellationToken cancellationToken) =>
         {
             var (actor, role) = CurrentUser(context.User);

@@ -1,12 +1,12 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { RotateCw, Search } from '@lucide/vue'
 import { postDesktopMessage } from '../api'
 import type { DocumentFilter, DocumentNode, DrawingReviewBadge, SolidWorksOpenMode, WorkspaceLocalFileState } from '../types'
 import CadDocumentIcon from './CadDocumentIcon.vue'
 import DocumentTreeNode from './DocumentTreeNode.vue'
 
-withDefaults(defineProps<{
+const props = withDefaults(defineProps<{
   root?: DocumentNode
   drawings: DocumentNode[]
   selectedId: string
@@ -27,6 +27,17 @@ const contextNode = ref<DocumentNode>()
 const contextLeft = ref(0)
 const contextTop = ref(0)
 const solidWorksAvailable = ref(false)
+const drawingPage = ref(0)
+const drawingList = ref<HTMLUListElement | null>(null)
+const drawingPageSize = 80
+const drawingPageCount = computed(() => Math.ceil(props.drawings.length / drawingPageSize))
+const visibleDrawings = computed(() => props.drawings.slice(drawingPage.value * drawingPageSize, (drawingPage.value + 1) * drawingPageSize))
+watch([() => props.drawings, query, filter], () => { drawingPage.value = 0 })
+
+function changeDrawingPage(page: number) {
+  drawingPage.value = page
+  if (drawingList.value) drawingList.value.scrollTop = 0
+}
 const filters: Array<{ value: DocumentFilter; label: string }> = [
   { value: 'all', label: '全部' },
   { value: 'model', label: '3D' },
@@ -105,8 +116,8 @@ onBeforeUnmount(() => {
       </button>
     </div>
     <div class="pdm-tree-columns" aria-hidden="true"><span>名称</span><span>本地状态 / PLM版本</span></div>
-    <ul v-if="filter === 'drawing' && drawings.length" class="pdm-tree pdm-drawing-list" aria-label="2D工程图列表">
-      <li v-for="drawing in drawings" :key="drawing.id">
+    <ul v-if="filter === 'drawing' && drawings.length" ref="drawingList" class="pdm-tree pdm-drawing-list" aria-label="2D工程图列表">
+      <li v-for="drawing in visibleDrawings" :key="drawing.id">
         <button
           type="button"
           class="pdm-tree-row"
@@ -117,6 +128,11 @@ onBeforeUnmount(() => {
           <span class="pdm-tree-row__content"><CadDocumentIcon :kind="drawing.kind" :status="drawing.status" :size="17" /><span class="pdm-tree-row__label"><strong>{{ drawing.drawingNumber }}</strong><small>{{ drawing.name }}</small></span></span>
           <span class="pdm-tree-row__version"><em>{{ drawing.version }}</em><small v-if="drawing.documentId && localStates[drawing.documentId]" class="pdm-local-state" :class="`is-${localStates[drawing.documentId].localState}`" :title="localStates[drawing.documentId].message">{{ localStates[drawing.documentId].localStateLabel }}</small><small v-if="drawing.documentId && reviewStates[drawing.documentId]" class="pdm-review-badge" :class="`is-${reviewStates[drawing.documentId].tone}`">{{ reviewStates[drawing.documentId].label }}</small></span>
         </button>
+      </li>
+      <li v-if="drawingPageCount > 1" class="pdm-drawing-pages">
+        <button type="button" :disabled="drawingPage === 0" @click="changeDrawingPage(drawingPage - 1)">上一页</button>
+        <span>第 {{ drawingPage + 1 }} / {{ drawingPageCount }} 页</span>
+        <button type="button" :disabled="drawingPage + 1 >= drawingPageCount" @click="changeDrawingPage(drawingPage + 1)">下一页</button>
       </li>
     </ul>
     <ul v-else-if="filter !== 'drawing' && root" class="pdm-tree" role="tree">

@@ -172,6 +172,41 @@ public sealed class ApiSmokeTests : IClassFixture<PdmApiFactory>
     }
 
     [Fact]
+    public async Task PreviewSourceVersionApi_DoesNotReturnLargeVersionSnapshots()
+    {
+        var repository = factory.Services.GetRequiredService<IPdmRepository>();
+        var project = await repository.CreateProjectAsync(
+            new CreateProjectCommand($"PREVIEW-SOURCE-{Guid.NewGuid():N}", "预览轻量版本接口验收", "admin", Path.GetTempPath(), Path.GetTempPath()),
+            "admin",
+            CancellationToken.None);
+        var document = await repository.RegisterDocumentAsync(
+            new RegisterDocumentCommand(project.Id, "PREVIEW-001", "大型装配", "PREVIEW-001.SLDASM", DocumentKind.Assembly),
+            "admin",
+            CancellationToken.None);
+        document = await repository.CheckoutAsync(document.Id, "admin", CancellationToken.None);
+        var root = new DocumentReferenceNode(Guid.NewGuid(), document.Id, document.DrawingNumber, document.FileName, document.Name, document.Kind, "Default", 1, ReferenceNodeStatus.Normal, document.Revision, "admin", []);
+        var snapshot = new CadReferenceSnapshot(Guid.NewGuid(), project.Id, document.Id, DateTimeOffset.UtcNow, "admin", root, new string('B', 64));
+        var largeSnapshotValue = new string('X', 3 * 1024 * 1024);
+        var checkIn = await repository.CheckInVersionAsync(document.Id, "admin", new DocumentVersionCommit(
+            new StoredFile(".versions/PREVIEW-001/W1/PREVIEW-001.SLDASM", 4096, new string('A', 64), DateTimeOffset.UtcNow),
+            "大型快照预览测试", new Dictionary<string, string?> { ["LargeSnapshot"] = largeSnapshotValue }, snapshot, [], []), CancellationToken.None);
+        var version = Assert.IsType<DocumentVersion>(checkIn.Version);
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", CreateToken("admin", "Administrator"));
+
+        var response = await client.GetAsync($"/api/documents/{document.Id}/preview-source-version?versionId={version.Id}");
+
+        response.EnsureSuccessStatusCode();
+        var responseText = await response.Content.ReadAsStringAsync();
+        Assert.True(responseText.Length < 1024, $"预览版本响应不应包含大型快照，实际长度：{responseText.Length}");
+        Assert.DoesNotContain("LargeSnapshot", responseText, StringComparison.Ordinal);
+        var previewSource = JsonSerializer.Deserialize<DocumentPreviewSourceVersionResponse>(responseText, new JsonSerializerOptions(JsonSerializerDefaults.Web));
+        Assert.NotNull(previewSource);
+        Assert.Equal(version.Id, previewSource.Id);
+        Assert.Equal(version.FileLength, previewSource.FileLength);
+        Assert.Equal(version.Sha256, previewSource.Sha256);
+    }
+
+    [Fact]
     public async Task BomPropertyMappings_AreReadableByAuthenticatedPluginUsers()
     {
         client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue(

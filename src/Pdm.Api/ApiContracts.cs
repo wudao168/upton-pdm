@@ -419,6 +419,12 @@ public sealed record ProjectVersionResponse(
     DateTimeOffset CreatedAt,
     string ChangeNote);
 
+public sealed record DocumentPreviewSourceVersionResponse(
+    Guid Id,
+    long FileLength,
+    string Sha256,
+    DateTimeOffset CreatedAt);
+
 public sealed record StartUploadRequest(Guid ProjectId, string FileName, long TotalLength, string Sha256);
 
 public sealed record CompleteUploadRequest(string RelativeTargetPath);

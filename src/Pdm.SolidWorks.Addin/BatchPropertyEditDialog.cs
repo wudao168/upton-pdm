@@ -2187,6 +2187,7 @@ internal sealed class BatchPropertyEditDialog : Form
         {
             item.Selected = selected;
         }
+        batchRenameControl?.SynchronizeSharedSelection();
         grid.Refresh();
         propertyCardGrid.Refresh();
         InvalidatePropertyCardConfirmation();

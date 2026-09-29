@@ -247,11 +247,7 @@ public partial class MainWindow : Window
         }
 
         await WorkspaceView.EnsureCoreWebView2Async();
-        WorkspaceView.CoreWebView2.SetVirtualHostNameToFolderMapping(
-            UiHostName,
-            uiFolder,
-            CoreWebView2HostResourceAccessKind.DenyCors);
-        ConfigureLocalApiProxy(WorkspaceView.CoreWebView2);
+        ConfigureLocalUiRequests(WorkspaceView.CoreWebView2, uiFolder);
         WorkspaceView.CoreWebView2.WebMessageReceived += OnWebMessageReceived;
         WorkspaceView.NavigationCompleted += async (_, args) =>
         {
@@ -259,6 +255,7 @@ public partial class MainWindow : Window
             {
                 if (usingServerUi && !attemptedLocalUiFallback)
                 {
+                    AppendClientDiagnostic($"服务器界面加载失败，使用内置界面：{args.WebErrorStatus} ui={bootstrapConfiguration.UiBaseUrl}");
                     attemptedLocalUiFallback = true;
                     usingServerUi = false;
                     var fallbackVersion = File.GetLastWriteTimeUtc(indexFile).Ticks;
@@ -430,11 +427,50 @@ public partial class MainWindow : Window
         }
     }
 
-    private void ConfigureLocalApiProxy(CoreWebView2 webView)
+    private void ConfigureLocalUiRequests(CoreWebView2 webView, string uiFolder)
     {
-        webView.AddWebResourceRequestedFilter($"https://{UiHostName}/api/*", CoreWebView2WebResourceContext.All);
-        webView.AddWebResourceRequestedFilter($"https://{UiHostName}/health", CoreWebView2WebResourceContext.All);
-        webView.WebResourceRequested += (_, args) => ProxyLocalApiRequest(webView, args);
+        // Virtual-host folder mapping bypasses WebResourceRequested, so serve both
+        // bundled assets and API requests through the same intercepted origin.
+        webView.AddWebResourceRequestedFilter($"https://{UiHostName}/*", CoreWebView2WebResourceContext.All);
+        webView.WebResourceRequested += (_, args) =>
+        {
+            var requestUri = new Uri(args.Request.Uri);
+            if (!string.Equals(requestUri.Host, UiHostName, StringComparison.OrdinalIgnoreCase)) return;
+            if (requestUri.AbsolutePath.StartsWith("/api/", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(requestUri.AbsolutePath, "/health", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(requestUri.AbsolutePath, "/client-bootstrap.json", StringComparison.OrdinalIgnoreCase))
+            {
+                ProxyLocalApiRequest(webView, args);
+            }
+            else
+            {
+                ServeLocalUiAsset(webView, args, requestUri, uiFolder);
+            }
+        };
+    }
+
+    private static void ServeLocalUiAsset(CoreWebView2 webView, CoreWebView2WebResourceRequestedEventArgs args, Uri requestUri, string uiFolder)
+    {
+        var root = Path.GetFullPath(uiFolder).TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
+        var relativePath = Uri.UnescapeDataString(requestUri.AbsolutePath).TrimStart('/').Replace('/', Path.DirectorySeparatorChar);
+        if (string.IsNullOrEmpty(relativePath)) relativePath = "index.html";
+        var filePath = Path.GetFullPath(Path.Combine(root, relativePath));
+        if (!filePath.StartsWith(root, StringComparison.OrdinalIgnoreCase) || !File.Exists(filePath))
+        {
+            args.Response = webView.Environment.CreateWebResourceResponse(new MemoryStream(), 404, "Not Found", "Cache-Control: no-store");
+            return;
+        }
+
+        var extension = Path.GetExtension(filePath).ToLowerInvariant();
+        var contentType = extension switch
+        {
+            ".js" or ".mjs" => "text/javascript",
+            ".wasm" => "application/wasm",
+            ".json" => "application/json",
+            _ => System.Web.MimeMapping.GetMimeMapping(filePath)
+        };
+        var stream = new MemoryStream(File.ReadAllBytes(filePath), writable: false);
+        args.Response = webView.Environment.CreateWebResourceResponse(stream, 200, "OK", $"Content-Type: {contentType}\r\nCache-Control: no-store");
     }
 
     private void ProxyLocalApiRequest(CoreWebView2 webView, CoreWebView2WebResourceRequestedEventArgs args)
@@ -1416,6 +1452,7 @@ public partial class MainWindow : Window
     private async Task PreviewDocumentAsync(IReadOnlyDictionary<string, object> payload)
     {
         var requestGeneration = Interlocked.Increment(ref previewRequestGeneration);
+        var previewStep = "读取预览版本";
         previewDocumentReady = false;
         previewDocumentId = null;
         previewVersionId = null;
@@ -1438,32 +1475,35 @@ public partial class MainWindow : Window
 
             previewRequestedDocumentId = documentId;
             var fileName = payload.TryGetValue("fileName", out var fileNameValue) ? Path.GetFileName(fileNameValue as string) : string.Empty;
-            using var versionsRequest = CreateApiRequest(HttpMethod.Get, $"/api/documents/{documentId}/versions");
-            using var versionsResponse = await apiClient.SendAsync(versionsRequest);
-            var versionsJson = await versionsResponse.Content.ReadAsStringAsync();
-            if (!versionsResponse.IsSuccessStatusCode)
-            {
-                throw new InvalidOperationException(ReadApiError(versionsJson, "版本记录读取失败。"));
-            }
-
-            var versions = new JavaScriptSerializer().Deserialize<VersionResponse[]>(versionsJson) ?? Array.Empty<VersionResponse>();
             Guid? requestedVersionId = null;
             if (payload.TryGetValue("versionId", out var versionIdValue)
                 && Guid.TryParse(versionIdValue as string, out var parsedVersionId))
             {
                 requestedVersionId = parsedVersionId;
             }
-            var version = requestedVersionId.HasValue
-                ? versions.SingleOrDefault(item => item.Id == requestedVersionId.Value)
-                    ?? throw new InvalidOperationException("图纸审核绑定的版本不存在，不能继续审核。")
-                : versions.OrderByDescending(item => item.CreatedAt).FirstOrDefault()
-                    ?? throw new InvalidOperationException("该图档已登记，但尚未提交首个存档版本。装配体中可见的可能只是SolidWorks缓存几何，不是可下载的源文件；请从原始工作目录找回文件后完成首次存档。");
+
+            var previewSourcePath = $"/api/documents/{documentId}/preview-source-version";
+            if (requestedVersionId.HasValue)
+            {
+                previewSourcePath += $"?versionId={requestedVersionId.Value:D}";
+            }
+            using var versionRequest = CreateApiRequest(HttpMethod.Get, previewSourcePath);
+            using var versionResponse = await apiClient.SendAsync(versionRequest);
+            var versionJson = await versionResponse.Content.ReadAsStringAsync();
+            if (!versionResponse.IsSuccessStatusCode)
+            {
+                throw new InvalidOperationException(ReadApiError(versionJson, "预览版本读取失败。"));
+            }
+
+            var version = new JavaScriptSerializer().Deserialize<VersionResponse>(versionJson)
+                ?? throw new InvalidOperationException("预览版本读取失败。");
             if (string.IsNullOrWhiteSpace(fileName)) fileName = "document.bin";
             var cacheDirectory = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "UPTON", "PDM", "Preview", documentId.ToString("N"), version.Id.ToString("N"));
             Directory.CreateDirectory(cacheDirectory);
             var cachedFile = Path.Combine(cacheDirectory, fileName);
             if (!await IsValidCacheAsync(cachedFile, version.FileLength, version.Sha256))
             {
+                previewStep = "下载预览源文件";
                 var temporaryFile = cachedFile + ".download";
                 if (File.Exists(temporaryFile)) File.Delete(temporaryFile);
                 using var fileRequest = CreateApiRequest(HttpMethod.Get, $"/api/documents/{documentId}/versions/{version.Id}/file?download=false");
@@ -1516,6 +1556,8 @@ public partial class MainWindow : Window
                 return;
             }
 
+            previewStep = "打开 eDrawings 预览";
+            DisposeEmbeddedPreview();
             EnsureEmbeddedPreview();
             embeddedPreview!.OpenDocument(cachedFile, markupPath);
             previewDocumentReady = true;
@@ -1535,11 +1577,17 @@ public partial class MainWindow : Window
             previewDocumentReady = false;
             previewDocumentId = null;
             previewVersionId = null;
+            var failedDocumentId = previewRequestedDocumentId;
             previewRequestedDocumentId = null;
             previewMarkupDirectory = string.Empty;
             PreviewFrame.Visibility = Visibility.Collapsed;
-            embeddedPreview?.CloseDocument();
-            await PublishPreviewStatusAsync("error", string.Empty, exception.Message);
+            DisposeEmbeddedPreview();
+            var server = apiClient.BaseAddress?.GetLeftPart(UriPartial.Authority) ?? bootstrapConfiguration.ApiBaseUrl;
+            AppendClientDiagnostic($"预览失败：step={previewStep} server={server} document={failedDocumentId} error={exception}");
+            var message = exception is HttpRequestException or TaskCanceledException
+                ? $"{previewStep}失败：无法连接 PLM 服务器（{server}）。{exception.GetBaseException().Message}"
+                : exception.Message;
+            await PublishPreviewStatusAsync("error", string.Empty, message);
         }
     }
 
@@ -1667,6 +1715,14 @@ public partial class MainWindow : Window
         embeddedPreview.MarkupModifiedChanged += modified => Dispatcher.BeginInvoke(new Action(() =>
             _ = PublishMarkupStatusAsync(modified ? "dirty" : "clean", modified ? "批注尚未保存。" : string.Empty)));
         EmbeddedPreviewHost.Child = embeddedPreview;
+    }
+
+    private void DisposeEmbeddedPreview()
+    {
+        if (embeddedPreview == null) return;
+        EmbeddedPreviewHost.Child = null;
+        embeddedPreview.Dispose();
+        embeddedPreview = null;
     }
 
     private void UpdatePreviewBounds(IReadOnlyDictionary<string, object> payload)
@@ -1846,7 +1902,7 @@ public partial class MainWindow : Window
         PreviewFrame.Visibility = Visibility.Collapsed;
         if (closeDocument)
         {
-            embeddedPreview?.CloseDocument();
+            DisposeEmbeddedPreview();
             previewDocumentId = null;
             previewVersionId = null;
             previewMarkupDirectory = string.Empty;
@@ -1988,9 +2044,7 @@ public partial class MainWindow : Window
             reviewOverlay = null;
         }
         HideEmbeddedPreview(false);
-        EmbeddedPreviewHost.Child = null;
-        embeddedPreview?.Dispose();
-        embeddedPreview = null;
+        DisposeEmbeddedPreview();
         apiClient.Dispose();
         lightweightPreviewGate.Dispose();
         treeThumbnailGate.Dispose();

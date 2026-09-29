@@ -304,7 +304,7 @@ export function usePdmWorkspace() {
   const currentProjectManagedDocuments = computed(() => managedDocuments.value.filter(document => document.projectId === project.value.id))
   const drawingNodes = computed(() => currentProjectManagedDocuments.value.map(managedDocumentNode).filter(node => node.kind === 'Drawing'))
   const documentDisplayRoot = computed(() => buildDocumentDisplayRoot(root.value, managedDocuments.value, project.value.id))
-  const selectedNode = computed(() => findNode(documentDisplayRoot.value, selectedId.value)
+  const selectedNode = computed(() => documentFilter.value === 'drawing' && !selectedId.value ? emptyRoot : findNode(documentDisplayRoot.value, selectedId.value)
     ?? managedDocumentNodes.value.find(node => node.id === selectedId.value)
     ?? documentDisplayRoot.value)
   const allBomItems = computed(() => [...standardBom.value, ...nonStandardBom.value, ...unclassifiedBom.value, ...electricalBom.value])
@@ -373,6 +373,11 @@ export function usePdmWorkspace() {
     if (!candidate && searchQuery.value.trim()) {
       searchQuery.value = ''
       candidate = resolveCandidate()
+    }
+    if (filter === 'drawing') {
+      selectedId.value = ''
+      postDesktopMessage('preview-host-hide')
+      return
     }
     if (candidate) selectNode(candidate)
   }
