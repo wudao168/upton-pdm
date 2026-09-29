@@ -341,6 +341,11 @@ internal static class ClientPackageUpdater
                     QuarantinePendingUpdate(pendingPath);
                     return false;
                 }
+                if (!IsUpdateAvailable(GetInstalledVersion(pending.TargetDirectory), pending.Version))
+                {
+                    QuarantinePendingUpdate(pendingPath);
+                    return false;
+                }
 
                 var scriptPath = Path.Combine(Path.GetDirectoryName(pendingPath), "apply-pending-update.ps1");
                 // 安装脚本必须带 UTF-8 BOM：Windows PowerShell 5.1 对无 BOM 的 .ps1 按 ANSI(GBK) 解码，
@@ -550,6 +555,16 @@ try {
   $target = [IO.Path]::GetFullPath([string]$pending.TargetDirectory)
   $payload = [IO.Path]::GetFullPath([string]$pending.PayloadDirectory)
   if (-not (Test-Path -LiteralPath $payload)) { throw 'Update payload is missing.' }
+  $installedMarker = Join-Path $target '.uplm-version'
+  if (Test-Path -LiteralPath $installedMarker) {
+    $installedText = ((Get-Content -LiteralPath $installedMarker -Raw -Encoding UTF8).Trim() -replace '^[Vv]', '' -split '-', 2)[0]
+    $pendingText = (([string]$pending.Version).Trim() -replace '^[Vv]', '' -split '-', 2)[0]
+    if ([Version]::Parse($pendingText) -le [Version]::Parse($installedText)) {
+      Remove-Item -LiteralPath $PendingPath -Force -ErrorAction SilentlyContinue
+      Remove-Item -LiteralPath $LaunchMarker -Force -ErrorAction SilentlyContinue
+      exit 0
+    }
+  }
   if ([string]$pending.Component -eq 'solidworks-addin') {
     # SolidWorks 还开着就先不动目录：保留待安装状态（不写 error.txt），等客户端轮询或插件下次检查时重试。
     if (-not (Wait-ForSolidWorksExit 1800)) {

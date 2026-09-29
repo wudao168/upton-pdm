@@ -222,6 +222,18 @@ internal static class BatchRenameRule
         return name;
     }
 
+    internal static string NormalizeManualFileBaseName(string requestedName, string extension)
+    {
+        var suppliedExtension = Path.GetExtension((requestedName ?? string.Empty).Trim());
+        if (new[] { ".SLDPRT", ".SLDASM", ".SLDDRW" }
+            .Contains(suppliedExtension, StringComparer.OrdinalIgnoreCase)
+            && !string.Equals(suppliedExtension, extension, StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidOperationException("新文件名的扩展名必须与原图档一致。");
+        }
+        return NormalizeFileBaseName(requestedName ?? string.Empty, extension);
+    }
+
     private static string RequiredSearch(string search)
     {
         if (string.IsNullOrEmpty(search))

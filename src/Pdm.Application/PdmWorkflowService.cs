@@ -1111,6 +1111,24 @@ public sealed class PdmWorkflowService(
         string? fileName = null,
         Guid? drawingReviewWritebackId = null)
     {
+        // The server may commit a version and lose the HTTP response during a restart.
+        // Replaying that exact stored file must return the committed version instead of
+        // failing because the successful check-in already released its edit session.
+        var current = await repository.FindDocumentAsync(documentId, cancellationToken)
+            ?? throw new PdmNotFoundException("图档不存在。 ");
+        if (current.CheckoutSessionId != checkoutSessionId)
+        {
+            await RequirePermissionAsync(actor, role, PermissionCodes.DocumentEdit, cancellationToken);
+            await RequireDocumentAccessAsync(documentId, actor, role, FolderAccess.View | FolderAccess.Edit, cancellationToken);
+            var latest = (await repository.ListDocumentVersionsAsync(documentId, cancellationToken)).FirstOrDefault();
+            if (current.CheckoutSessionId is null
+                && latest is not null
+                && string.Equals(latest.CreatedBy, actor, StringComparison.OrdinalIgnoreCase)
+                && string.Equals(latest.StorageRelativePath, file.RelativePath, StringComparison.OrdinalIgnoreCase)
+                && string.Equals(latest.Sha256, file.Sha256, StringComparison.OrdinalIgnoreCase)
+                && latest.FileLength == file.Length)
+                return new DocumentCheckInResult(current, latest, true);
+        }
         var validation = await ValidateCheckInRequestAsync(
             documentId,
             actor,

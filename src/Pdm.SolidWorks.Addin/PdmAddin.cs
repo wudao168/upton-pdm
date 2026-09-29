@@ -10037,11 +10037,28 @@ public sealed class PdmAddin : ISwAddin
         Guid projectId,
         CancellationToken cancellationToken)
     {
-        var unchanged = await apiClient.CompleteEditWithoutChangesAsync(
-            node.DocumentId.Value,
-            checkoutSessionId,
-            node.LatestStoredSha256,
-            cancellationToken);
+        DocumentDto unchanged;
+        try
+        {
+            unchanged = await apiClient.CompleteEditWithoutChangesAsync(
+                node.DocumentId.Value, checkoutSessionId, node.LatestStoredSha256, cancellationToken);
+        }
+        catch (Exception exception) when (exception is InvalidOperationException
+            || exception is HttpRequestException
+            || exception is TaskCanceledException && !cancellationToken.IsCancellationRequested)
+        {
+            // A previous check-in may have committed while its response was lost.
+            // Re-read both records before treating the local file as already archived.
+            var current = (await apiClient.GetDocumentsAsync(projectId, cancellationToken))
+                .FirstOrDefault(document => document.Id == node.DocumentId.Value);
+            var currentLatest = (await apiClient.GetVersionsAsync(node.DocumentId.Value, cancellationToken)).FirstOrDefault();
+            if (current == null || current.CheckoutSessionId.HasValue
+                || !string.IsNullOrWhiteSpace(current.CheckedOutBy)
+                || !VersionMatchesLocalFile(currentLatest, activePath, ComputeFileHash(activePath)))
+                throw;
+            unchanged = current;
+            latest = currentLatest;
+        }
         ApplyCheckedInDocumentToMatchingInstances(node, unchanged, latest);
         historicalEditContexts.Remove(node.DocumentId.Value);
         ProtectLoadedDocument(activePath);
@@ -10404,11 +10421,7 @@ public sealed class PdmAddin : ISwAddin
 
             if (!referenceChanged && (fileMatchesLatest || historicalEditMatchesLatest))
             {
-                var unchanged = await apiClient.CompleteEditWithoutChangesAsync(node.DocumentId.Value, checkoutSessionId, node.LatestStoredSha256, lifetime.Token);
-                ApplyCheckedInDocumentToMatchingInstances(node, unchanged, latestVersion);
-                historicalEditContexts.Remove(node.DocumentId.Value);
-                ProtectLoadedDocument(activePath);
-                RememberControlledVersionIdentityAndManifest(activePath, node.DocumentId.Value, projectId, latestVersion);
+                await CompleteUnchangedEditAsync(node, activePath, latestVersion, projectId, lifetime.Token);
                 taskPaneControl.SetTree(currentTree);
                 MessageBox.Show(taskPaneControl, string.Concat("未检测到变更，已结束编辑，版本仍为", node.Revision, "。"), "UPLM", MessageBoxButtons.OK, MessageBoxIcon.Information);
                 return;

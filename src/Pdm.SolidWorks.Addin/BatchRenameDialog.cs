@@ -223,6 +223,7 @@ internal sealed class BatchRenameControl : UserControl
     private readonly DataGridView previewGrid;
     private readonly bool usesSharedPreviewGrid;
     private readonly BindingList<BatchRenamePreviewRow> previewRows = new BindingList<BatchRenamePreviewRow>();
+    private readonly Dictionary<string, string> manualDocumentNames = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
     private readonly Button apply = new Button { Text = "执行", Enabled = false, AutoSize = true };
     private readonly Button propertyApply = new Button { Text = "执行", Enabled = false, AutoSize = false, Size = new Size(SharedControlWidth, SharedControlHeight) };
     private readonly Button documentApply = new Button { Text = "执行", Enabled = false, AutoSize = false, Size = new Size(SharedControlWidth, SharedControlHeight) };
@@ -816,6 +817,8 @@ internal sealed class BatchRenameControl : UserControl
             previewGrid.CellValueChanged += OnPreviewGridCellValueChanged;
             previewGrid.CurrentCellDirtyStateChanged += OnPreviewGridCurrentCellDirtyStateChanged;
             previewGrid.CellFormatting += OnSharedPreviewCellFormatting;
+            previewGrid.CellBeginEdit += OnSharedPreviewCellBeginEdit;
+            previewGrid.CellEndEdit += OnSharedPreviewCellEndEdit;
             return;
         }
 
@@ -852,7 +855,10 @@ internal sealed class BatchRenameControl : UserControl
             Name = name,
             HeaderText = header,
             Width = width,
-            ReadOnly = true,
+            ReadOnly = !string.Equals(name, SharedRenameValueColumnName, StringComparison.Ordinal),
+            ToolTipText = string.Equals(name, SharedRenameValueColumnName, StringComparison.Ordinal)
+                ? "勾选零件或装配体后，可直接输入新文件名；扩展名可省略。"
+                : string.Empty,
             SortMode = DataGridViewColumnSortMode.NotSortable
         };
         if (fill)
@@ -893,13 +899,54 @@ internal sealed class BatchRenameControl : UserControl
         if (columnName != SharedRenameFieldColumnName
             && columnName != SharedRenameValueColumnName
             && columnName != SharedRenameStatusColumnName) return;
-        eventArgs.Value = string.Empty;
+        var item = previewGrid.Rows[eventArgs.RowIndex].DataBoundItem as BatchPropertyEditItem;
+        eventArgs.Value = columnName == SharedRenameValueColumnName
+            && item != null
+            && manualDocumentNames.TryGetValue(ItemKey(item), out var manualName)
+                ? manualName
+                : string.Empty;
         eventArgs.FormattingApplied = true;
         if (columnName == SharedRenameValueColumnName)
         {
             eventArgs.CellStyle.BackColor = Color.White;
             eventArgs.CellStyle.ForeColor = previewGrid.DefaultCellStyle.ForeColor;
         }
+    }
+
+    private void OnSharedPreviewCellBeginEdit(object sender, DataGridViewCellCancelEventArgs eventArgs)
+    {
+        if (eventArgs.RowIndex < 0 || eventArgs.ColumnIndex < 0
+            || previewGrid.Columns[eventArgs.ColumnIndex].Name != SharedRenameValueColumnName)
+        {
+            return;
+        }
+        var gridRow = previewGrid.Rows[eventArgs.RowIndex];
+        var item = gridRow.DataBoundItem as BatchPropertyEditItem;
+        if (item?.Selected != true
+            || item.OperationItem.Node.Kind is not (CadDocumentKind.Part or CadDocumentKind.Assembly))
+        {
+            eventArgs.Cancel = true;
+            return;
+        }
+        gridRow.Cells[eventArgs.ColumnIndex].Value = manualDocumentNames.TryGetValue(ItemKey(item), out var manualName)
+            ? manualName
+            : string.Empty;
+    }
+
+    private void OnSharedPreviewCellEndEdit(object sender, DataGridViewCellEventArgs eventArgs)
+    {
+        if (eventArgs.RowIndex < 0 || eventArgs.ColumnIndex < 0
+            || previewGrid.Columns[eventArgs.ColumnIndex].Name != SharedRenameValueColumnName
+            || previewGrid.Rows[eventArgs.RowIndex].DataBoundItem is not BatchPropertyEditItem item)
+        {
+            return;
+        }
+        var name = previewGrid.Rows[eventArgs.RowIndex].Cells[eventArgs.ColumnIndex].Value?.ToString()?.Trim() ?? string.Empty;
+        var key = ItemKey(item);
+        if (string.IsNullOrEmpty(name)) manualDocumentNames.Remove(key);
+        else manualDocumentNames[key] = name;
+        ActivateSharedMode(1);
+        GeneratePreview(manualOnly: true);
     }
 
     private void OnPreviewGridCellValueChanged(object sender, DataGridViewCellEventArgs eventArgs)
@@ -944,6 +991,8 @@ internal sealed class BatchRenameControl : UserControl
             if (usesSharedPreviewGrid)
             {
                 previewGrid.CellFormatting -= OnSharedPreviewCellFormatting;
+                previewGrid.CellBeginEdit -= OnSharedPreviewCellBeginEdit;
+                previewGrid.CellEndEdit -= OnSharedPreviewCellEndEdit;
                 RemoveSharedPreviewColumn(SharedRenameFieldColumnName);
                 RemoveSharedPreviewColumn(SharedRenameValueColumnName);
                 RemoveSharedPreviewColumn(SharedRenameStatusColumnName);
@@ -1056,7 +1105,7 @@ internal sealed class BatchRenameControl : UserControl
         if (refreshSharedPreview) previewGrid.Invalidate();
     }
 
-    private void GeneratePreview()
+    private void GeneratePreview(bool manualOnly = false)
     {
         try
         {
@@ -1068,7 +1117,7 @@ internal sealed class BatchRenameControl : UserControl
             }
             else if (IsDocumentRename)
             {
-                GenerateDocumentPreview();
+                GenerateDocumentPreview(manualOnly);
             }
             else
             {
@@ -1158,32 +1207,46 @@ internal sealed class BatchRenameControl : UserControl
         UpdateSummary();
     }
 
-    private void GenerateDocumentPreview()
+    private void GenerateDocumentPreview(bool manualOnly)
     {
-        ValidateRuleInput();
+        manualOnly = manualOnly || (manualDocumentNames.Count > 0
+            && string.IsNullOrWhiteSpace(ActiveSearchText)
+            && string.IsNullOrWhiteSpace(ActiveReplacementText));
+        if (!manualOnly) ValidateRuleInput();
         var requests = new List<BatchDocumentRenameRequest>();
         foreach (var item in SelectedItems()
             .GroupBy(candidate => candidate.OperationItem.Node.FullPath ?? candidate.OperationItem.Node.NodeId.ToString(), StringComparer.OrdinalIgnoreCase)
-            .Select(group => group.First()))
+            .Select(group => group.First())
+            .Where(item => !manualOnly
+                || manualDocumentNames.ContainsKey(ItemKey(item))
+                || item.OperationItem.Node.Kind == CadDocumentKind.Drawing))
         {
             var extension = Path.GetExtension(item.FileName);
             var currentBaseName = Path.GetFileNameWithoutExtension(item.FileName);
-            var nextBaseName = Transform(currentBaseName);
+            var hasManualName = manualDocumentNames.TryGetValue(ItemKey(item), out var manualName);
+            var nextBaseName = hasManualName
+                ? manualName
+                : manualOnly ? currentBaseName : Transform(currentBaseName);
             var supported = item.OperationItem.Node.Kind == CadDocumentKind.Part
                 || item.OperationItem.Node.Kind == CadDocumentKind.Assembly;
-            var changed = !string.Equals(currentBaseName, nextBaseName, StringComparison.OrdinalIgnoreCase);
             var linkedDrawing = item.OperationItem.Node.Kind == CadDocumentKind.Drawing;
             var status = supported
-                ? changed ? "待检查" : "无变化"
+                ? "无变化"
                 : linkedDrawing ? "由关联模型联动处理" : "其他文件类型不支持";
             BatchDocumentRenameRequest request = null;
-            if (supported && changed)
+            if (supported)
             {
                 try
                 {
-                    nextBaseName = BatchRenameRule.NormalizeFileBaseName(nextBaseName, extension);
-                    request = new BatchDocumentRenameRequest(item, nextBaseName);
-                    requests.Add(request);
+                    nextBaseName = hasManualName
+                        ? BatchRenameRule.NormalizeManualFileBaseName(nextBaseName, extension)
+                        : BatchRenameRule.NormalizeFileBaseName(nextBaseName, extension);
+                    if (!string.Equals(currentBaseName, nextBaseName, StringComparison.OrdinalIgnoreCase))
+                    {
+                        request = new BatchDocumentRenameRequest(item, nextBaseName);
+                        requests.Add(request);
+                        status = "待检查";
+                    }
                 }
                 catch (Exception exception)
                 {
@@ -1196,7 +1259,9 @@ internal sealed class BatchRenameControl : UserControl
                 FileName = item.FileName,
                 Field = "图档文件名",
                 CurrentValue = item.FileName,
-                NewValue = string.Concat(nextBaseName, extension),
+                NewValue = hasManualName && request == null && status != "无变化"
+                    ? manualName
+                    : string.Concat(nextBaseName, extension),
                 Status = status,
                 CanExecute = request != null,
                 IsInformational = linkedDrawing,

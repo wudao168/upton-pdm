@@ -1546,6 +1546,34 @@ public sealed class DocumentVersionTests
         Assert.Equal("WRONG", Assert.IsType<DocumentVersion>(result.Version).PropertySnapshot["全局/UPLM_QR_CONTENT"]);
     }
 
+    [Fact]
+    public async Task ReplayingCommittedCheckIn_ReturnsSameVersionAfterResponseWasLost()
+    {
+        var repository = new Infrastructure.InMemoryPdmRepository(TimeProvider.System);
+        var project = Assert.Single(await repository.ListProjectsAsync(CancellationToken.None));
+        var workflow = new Application.PdmWorkflowService(repository, new RecordingFileStorage(), new NoOpPublisher(), TimeProvider.System);
+        var document = await repository.RegisterDocumentAsync(
+            new Application.RegisterDocumentCommand(project.Id, "RETRY-001", "Retry", "RETRY-001.SLDPRT", DocumentKind.Part),
+            "engineer", CancellationToken.None);
+        var sessionId = Guid.NewGuid();
+        document = await workflow.CheckoutAsync(document.Id, "engineer", UserRole.Administrator, sessionId, "test", CancellationToken.None);
+        var snapshot = new CadReferenceSnapshot(Guid.NewGuid(), project.Id, document.Id, DateTimeOffset.UtcNow,
+            "engineer", ReferenceRoot(document, "engineer"), new string('F', 64));
+        var file = new Application.StoredFile(".versions/RETRY-001/W1/RETRY-001.SLDPRT", 128, new string('2', 64), DateTimeOffset.UtcNow);
+
+        var first = await workflow.CheckInAsync(document.Id, "engineer", UserRole.Administrator, sessionId,
+            file, "first", new Dictionary<string, string?>(), snapshot, false, false, CancellationToken.None);
+        var replay = await workflow.CheckInAsync(document.Id, "engineer", UserRole.Administrator, sessionId,
+            file, "first", new Dictionary<string, string?>(), snapshot, false, false, CancellationToken.None);
+
+        Assert.Equal(first.Version?.Id, replay.Version?.Id);
+        Assert.Single(await repository.ListDocumentVersionsAsync(document.Id, CancellationToken.None));
+        await Assert.ThrowsAsync<Application.PdmConflictException>(() => workflow.CheckInAsync(
+            document.Id, "engineer", UserRole.Administrator, sessionId,
+            file with { RelativePath = ".versions/RETRY-001/W2/RETRY-001.SLDPRT" },
+            "different upload", new Dictionary<string, string?>(), snapshot, false, false, CancellationToken.None));
+    }
+
     private static async Task<PdmDocument> RegisterAndCheckInAsync(Infrastructure.InMemoryPdmRepository repository, Project project, string drawingNumber, string sha256)
     {
         var document = await repository.RegisterDocumentAsync(

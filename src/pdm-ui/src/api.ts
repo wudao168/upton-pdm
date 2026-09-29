@@ -152,6 +152,7 @@ export function setProgramTemplateArchived(templateId: string, archived: boolean
 
 export interface ProjectWorkspaceData {
   project: ProjectSummary
+  moduleErrors: Array<{ module: string; tab: 'documents' | 'files' | 'bom' | 'release'; message: string }>
   root: DocumentNode
   hasDocuments: boolean
   documents: ManagedDocument[]
@@ -2012,27 +2013,38 @@ export async function loadProjectWorkspace(projectId: string, token: string): Pr
   const project = await withApiContext('项目详情', requestJson<ApiProject>(`/api/projects/${projectId}`, {}, token))
   const mappedProject = mapProject(project)
   if (!mappedProject.canReadContent) {
-    return { project: mappedProject, root: emptyProjectRoot(project), hasDocuments: false, documents: [], documentRelations: [], folders: [], standardBom: [], nonStandardBom: [], unclassifiedBom: [], electricalBom: [], bomSourceData: [], bomEmptyDeclarations: [], bomVersions: [], bomBaselines: [], drawingReviews: [], materialCodeApplications: [], releasePackages: [], releasePackage: null }
+    return { project: mappedProject, moduleErrors: [], root: emptyProjectRoot(project), hasDocuments: false, documents: [], documentRelations: [], folders: [], standardBom: [], nonStandardBom: [], unclassifiedBom: [], electricalBom: [], bomSourceData: [], bomEmptyDeclarations: [], bomVersions: [], bomBaselines: [], drawingReviews: [], materialCodeApplications: [], releasePackages: [], releasePackage: null }
   }
 
+  const moduleErrors: ProjectWorkspaceData['moduleErrors'] = []
+  async function recover<T>(module: string, tab: ProjectWorkspaceData['moduleErrors'][number]['tab'], request: Promise<T>, fallback: T): Promise<T> {
+    try {
+      return await request
+    } catch (error) {
+      if (error instanceof PdmApiError && error.status === 401) throw error
+      moduleErrors.push({ module, tab, message: error instanceof Error ? error.message : '读取失败' })
+      return fallback
+    }
+  }
   const [documentWorkspace, folders, standard, nonStandard, unclassified, electrical, sourceData, bomEmptyDeclarations, bomVersions, bomBaselines, drawingReviews, materialCodeApplications, releasePackages] = await Promise.all([
-    withApiContext('图档工作区', loadProjectDocumentWorkspace(project.id, token)),
-    withApiContext('项目文件夹', listProjectFolders(project.id, token)),
-    withApiContext('标准件BOM', requestJson<ApiBomItem[]>(`/api/projects/${project.id}/boms/Standard`, {}, token)),
-    withApiContext('非标件BOM', requestJson<ApiBomItem[]>(`/api/projects/${project.id}/boms/NonStandard`, {}, token)),
-    withApiContext('待分类BOM', requestJson<ApiBomItem[]>(`/api/projects/${project.id}/boms/Unclassified`, {}, token)),
-    withApiContext('电气BOM', requestJson<ApiBomItem[]>(`/api/projects/${project.id}/boms/Electrical`, {}, token)),
-    withApiContext('BOM源数据', requestJson<ApiBomItem[]>(`/api/projects/${project.id}/bom-source-data`, {}, token)),
-    withApiContext('空BOM声明', requestJson<BomEmptyDeclaration[]>(`/api/projects/${project.id}/boms/empty-declarations`, {}, token)),
-    withApiContext('BOM版本', listBomVersions(project.id, token)),
-    withApiContext('制造基线', listBomBaselines(project.id, token)),
-    withApiContext('图纸审核', listDrawingReviews(project.id, token)),
-    withApiContext('料号申请', listMaterialCodeApplications(token, project.id)),
-    withApiContext('发布记录', requestJson<ApiReleasePackage[]>(`/api/projects/${project.id}/release-packages`, {}, token)),
+    recover('图档工作区', 'documents', withApiContext('图档工作区', loadProjectDocumentWorkspace(project.id, token)), { root: emptyProjectRoot(project), hasDocuments: false, documents: [], documentRelations: [] } as ProjectDocumentWorkspaceData),
+    recover('项目文件夹', 'files', listProjectFolders(project.id, token), [] as ProjectFolder[]),
+    recover('标准件BOM', 'bom', requestJson<ApiBomItem[]>(`/api/projects/${project.id}/boms/Standard`, {}, token), [] as ApiBomItem[]),
+    recover('非标件BOM', 'bom', requestJson<ApiBomItem[]>(`/api/projects/${project.id}/boms/NonStandard`, {}, token), [] as ApiBomItem[]),
+    recover('待分类BOM', 'bom', requestJson<ApiBomItem[]>(`/api/projects/${project.id}/boms/Unclassified`, {}, token), [] as ApiBomItem[]),
+    recover('电气BOM', 'bom', requestJson<ApiBomItem[]>(`/api/projects/${project.id}/boms/Electrical`, {}, token), [] as ApiBomItem[]),
+    recover('BOM源数据', 'bom', requestJson<ApiBomItem[]>(`/api/projects/${project.id}/bom-source-data`, {}, token), [] as ApiBomItem[]),
+    recover('空BOM声明', 'bom', requestJson<BomEmptyDeclaration[]>(`/api/projects/${project.id}/boms/empty-declarations`, {}, token), [] as BomEmptyDeclaration[]),
+    recover('BOM版本', 'bom', listBomVersions(project.id, token), [] as BomVersion[]),
+    recover('制造基线', 'release', listBomBaselines(project.id, token), [] as ManufacturingBomBaseline[]),
+    recover('图纸审核', 'documents', listDrawingReviews(project.id, token), [] as DrawingReviewPackage[]),
+    recover('料号申请', 'release', listMaterialCodeApplications(token, project.id), [] as MaterialCodeApplication[]),
+    recover('发布记录', 'release', requestJson<ApiReleasePackage[]>(`/api/projects/${project.id}/release-packages`, {}, token), [] as ApiReleasePackage[]),
   ])
 
   return {
     project: mappedProject,
+    moduleErrors,
     ...documentWorkspace,
     folders,
     standardBom: standard.map(mapBomItem),

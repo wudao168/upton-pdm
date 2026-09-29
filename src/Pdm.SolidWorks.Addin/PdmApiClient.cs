@@ -196,7 +196,7 @@ internal sealed class PdmApiClient : IDisposable
     public Task<EditSessionHeartbeatDto> HeartbeatEditSessionAsync(Guid sessionId, string machineName, IReadOnlyList<Guid> documentIds, CancellationToken cancellationToken) =>
         PostJsonAsync<EditSessionHeartbeatDto>(string.Concat("api/edit-sessions/", sessionId, "/heartbeat"), new { machineName, documentIds }, cancellationToken);
 
-    public Task<CheckInResultDto> CheckInAsync(
+    public async Task<CheckInResultDto> CheckInAsync(
         Guid documentId,
         Guid projectId,
         CadTreeNode root,
@@ -209,27 +209,40 @@ internal sealed class PdmApiClient : IDisposable
         string drawingNumber,
         string name,
         CancellationToken cancellationToken,
-        Guid? drawingReviewWritebackId = null) =>
-        PostJsonAsync<CheckInResultDto>(
-            string.Concat("api/documents/", documentId, "/checkin"),
-            new
+        Guid? drawingReviewWritebackId = null)
+    {
+        var payload = new
+        {
+            projectId,
+            root = ToRequestNode(root, true),
+            comment,
+            storageRelativePath = storedFile.RelativePath,
+            fileLength = storedFile.Length,
+            sha256 = storedFile.Sha256,
+            properties = MergeProperties(storedFile.Properties, modelProperties),
+            checkoutSessionId,
+            isProjectRoot,
+            forceVersion,
+            drawingNumber,
+            name,
+            fileName = root.FileName,
+            drawingReviewWritebackId
+        };
+        for (var attempt = 0; ; attempt++)
+        {
+            try
             {
-                projectId,
-                root = ToRequestNode(root, true),
-                comment,
-                storageRelativePath = storedFile.RelativePath,
-                fileLength = storedFile.Length,
-                sha256 = storedFile.Sha256,
-                properties = MergeProperties(storedFile.Properties, modelProperties),
-                checkoutSessionId,
-                isProjectRoot,
-                forceVersion,
-                drawingNumber,
-                name,
-                fileName = root.FileName,
-                drawingReviewWritebackId
-            },
-            cancellationToken);
+                return await PostJsonAsync<CheckInResultDto>(
+                    string.Concat("api/documents/", documentId, "/checkin"), payload, cancellationToken).ConfigureAwait(false);
+            }
+            catch (Exception exception) when (attempt < 2
+                && (exception is HttpRequestException
+                    || exception is TaskCanceledException && !cancellationToken.IsCancellationRequested))
+            {
+                await Task.Delay(TimeSpan.FromSeconds(2 * (attempt + 1)), cancellationToken).ConfigureAwait(false);
+            }
+        }
+    }
 
     public async Task PreflightCheckInAsync(
         Guid documentId,

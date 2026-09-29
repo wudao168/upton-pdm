@@ -594,6 +594,38 @@ describe('PLM client workspace', () => {
     restored.unmount()
   })
 
+  it('keeps the project available when only BOM versions fail to load', async () => {
+    const fetchWithProjects = globalThis.fetch
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) =>
+      String(input).endsWith(`/api/projects/${projectId}/bom-versions`)
+        ? Promise.resolve(json({ title: 'PLM服务发生内部错误' }, 500))
+        : fetchWithProjects(input, init)))
+    const wrapper = mount(App, { attachTo: document.body, global: { plugins: [ElementPlus] } })
+    await login(wrapper)
+
+    expect(wrapper.find('.pdm-project-workspace').exists()).toBe(true)
+    expect(wrapper.find('.pdm-workspace-state.is-error').exists()).toBe(false)
+    await projectTabByText(wrapper, 'BOM').trigger('click')
+    expect(wrapper.get('.pdm-module-error').text()).toContain('BOM版本：PLM服务发生内部错误')
+    expect(wrapper.get('.pdm-module-error button').text()).toBe('重试读取')
+    wrapper.unmount()
+  })
+
+  it('keeps project navigation available when an auxiliary startup feed fails', async () => {
+    const fetchWithProjects = globalThis.fetch
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) =>
+      String(input).endsWith('/api/customers')
+        ? Promise.resolve(json({ title: 'PLM服务发生内部错误' }, 500))
+        : fetchWithProjects(input, init)))
+    const wrapper = mount(App, { attachTo: document.body, global: { plugins: [ElementPlus] } })
+    await login(wrapper)
+
+    expect(wrapper.find('.pdm-project-workspace').exists()).toBe(true)
+    expect(wrapper.find('.pdm-workspace-state.is-error').exists()).toBe(false)
+    expect(wrapper.get('.pdm-module-error').text()).toContain('客户列表')
+    wrapper.unmount()
+  })
+
   it('keeps the selected child project when an older focus refresh finishes later', async () => {
     const child = {
       id: 'project-child',

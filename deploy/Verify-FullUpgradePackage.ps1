@@ -18,8 +18,12 @@ if ($manifest.format -ne 'upton-pdm-full-upgrade-v1') {
 if ([string]::IsNullOrWhiteSpace([string]$manifest.version)) {
     throw '升级包版本为空。'
 }
-if ([string]::IsNullOrWhiteSpace([string]$manifest.desktopVersion) -or
-    [string]::IsNullOrWhiteSpace([string]$manifest.solidWorksAddinVersion)) {
+$serverOnly = $manifest.scope -eq 'web-api-database-preview-worker'
+if (-not $serverOnly -and $manifest.scope -ne 'web-api-database-client-solidworks-addin-preview-worker') {
+    throw "不支持的升级范围：$($manifest.scope)"
+}
+if (-not $serverOnly -and ([string]::IsNullOrWhiteSpace([string]$manifest.desktopVersion) -or
+    [string]::IsNullOrWhiteSpace([string]$manifest.solidWorksAddinVersion))) {
     throw '升级包缺少独立的桌面客户端或 SolidWorks 插件版本。'
 }
 
@@ -50,29 +54,40 @@ $required = @(
     'Server\app\coreclr.dll',
     'Server\app\Pdm.Infrastructure.dll',
     'Server\app\wwwroot\index.html',
-    'Server\app\wwwroot\client-bootstrap.json',
     'Server\app\preview-worker\Upton.Pdm.SolidWorks.PreviewWorker.exe',
     'Server\app\preview-worker\SolidWorks.Interop.sldworks.dll',
     'Server\app\preview-worker\SolidWorks.Interop.swconst.dll',
     'Server\app\preview-worker\SolidWorks.Interop.swpublished.dll',
-    'Server\Install-FullUpgradeOnServer.ps1',
-    "Client\UPLM-Client-Setup-$($manifest.version).exe"
+    'Server\Install-FullUpgradeOnServer.ps1'
 )
+if (-not $serverOnly) {
+    $required += 'Server\app\wwwroot\client-bootstrap.json'
+    $required += "Client\UPLM-Client-Setup-$($manifest.version).exe"
+}
 foreach ($relativePath in $required) {
     if (-not (Test-Path -LiteralPath (Join-Path $packageRootFull $relativePath) -PathType Leaf)) {
         throw "完整升级包缺少必要文件：$relativePath"
     }
 }
 
-$bootstrap = Get-Content -LiteralPath (Join-Path $packageRootFull 'Server\app\wwwroot\client-bootstrap.json') -Raw -Encoding UTF8 | ConvertFrom-Json
-if ($bootstrap.ConfigurationVersion -ne $manifest.version) {
-    throw "客户端自动升级版本不匹配：$($bootstrap.ConfigurationVersion)"
+if (-not $serverOnly) {
+    $bootstrap = Get-Content -LiteralPath (Join-Path $packageRootFull 'Server\app\wwwroot\client-bootstrap.json') -Raw -Encoding UTF8 | ConvertFrom-Json
+    if ($bootstrap.ConfigurationVersion -ne $manifest.version) {
+        throw "客户端自动升级版本不匹配：$($bootstrap.ConfigurationVersion)"
+    }
+    if ($bootstrap.Desktop.Version -ne $manifest.desktopVersion) {
+        throw "桌面客户端版本不匹配：$($bootstrap.Desktop.Version)"
+    }
+    if ($bootstrap.SolidWorksAddin.Version -ne $manifest.solidWorksAddinVersion) {
+        throw "SolidWorks 插件版本不匹配：$($bootstrap.SolidWorksAddin.Version)"
+    }
 }
-if ($bootstrap.Desktop.Version -ne $manifest.desktopVersion) {
-    throw "桌面客户端版本不匹配：$($bootstrap.Desktop.Version)"
-}
-if ($bootstrap.SolidWorksAddin.Version -ne $manifest.solidWorksAddinVersion) {
-    throw "SolidWorks 插件版本不匹配：$($bootstrap.SolidWorksAddin.Version)"
+else {
+    foreach ($clientPath in @('Client', 'Server\app\wwwroot\client-bootstrap.json', 'Server\app\wwwroot\updates')) {
+        if (Test-Path -LiteralPath (Join-Path $packageRootFull $clientPath)) {
+            throw "仅服务器升级包意外包含客户端文件：$clientPath"
+        }
+    }
 }
 if (@($manifest.databaseMigrations).Count -eq 0) {
     throw '完整升级包没有数据库迁移清单。'

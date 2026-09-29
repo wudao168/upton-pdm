@@ -164,6 +164,8 @@
 .pdm-workspace-state { max-width: 560px; margin: 12vh auto 0; padding: 32px; text-align: center; }
 .pdm-workspace-state > .pdm-square-loader { margin-inline: auto; }.pdm-workspace-state h1 { margin: 12px 0 6px; font-size: 18px; font-weight: 500; }.pdm-workspace-state p { margin: 0; color: var(--pdm-muted); }
 .pdm-workspace-state.is-error h1 { color: var(--pdm-danger); }.pdm-state-actions { display: flex; justify-content: center; gap: 8px; margin-top: 18px; }
+.pdm-module-error { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 14px; margin: 8px 12px; padding: 10px 14px; border-color: #e9b5b5; color: var(--pdm-danger); font-size: 12px; }
+.pdm-module-error span { overflow-wrap: anywhere; }.pdm-module-error button { margin-left: auto; border: 1px solid currentColor; border-radius: 5px; padding: 4px 10px; background: transparent; color: inherit; cursor: pointer; }
 .pdm-standard-structure-state .pdm-standard-structure-cube { margin: 0 auto 22px; }
 .pdm-loading-host { position: relative; }
 .pdm-workspace { position: relative; min-height: 0; height: 100%; flex: 1 1 auto; display: grid; grid-template-columns: minmax(210px, 250px) minmax(0, 1fr); gap: var(--pdm-container-gap); align-items: stretch; overflow: hidden; }

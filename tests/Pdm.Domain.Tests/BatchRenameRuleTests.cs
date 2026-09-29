@@ -39,6 +39,15 @@ public sealed class BatchRenameRuleTests
     }
 
     [Fact]
+    public void ManualFileName_KeepsTheOriginalCadExtension()
+    {
+        Assert.Equal("新名称", BatchRenameRule.NormalizeManualFileBaseName("新名称", ".SLDPRT"));
+        Assert.Equal("新名称", BatchRenameRule.NormalizeManualFileBaseName("新名称.sldprt", ".SLDPRT"));
+        Assert.Throws<InvalidOperationException>(() => BatchRenameRule.NormalizeManualFileBaseName("新名称.SLDASM", ".SLDPRT"));
+        Assert.Throws<InvalidOperationException>(() => BatchRenameRule.NormalizeManualFileBaseName("错误/名称", ".SLDPRT"));
+    }
+
+    [Fact]
     public void HierarchyNumbering_UsesDotsForAssembliesAndDashesForParts()
     {
         var items = new[]

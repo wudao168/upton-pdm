@@ -15,6 +15,7 @@ $manifestPath = Join-Path $packageRoot 'manifest.json'
 $verifyScript = Join-Path $packageRoot 'Verify-FullUpgradePackage.ps1'
 & $verifyScript -PackageRoot $packageRoot
 $manifest = Get-Content -LiteralPath $manifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
+$serverOnly = $manifest.scope -eq 'web-api-database-preview-worker'
 
 $installRootFull = [IO.Path]::GetFullPath($InstallRoot).TrimEnd('\')
 $appTarget = Join-Path $installRootFull 'app'
@@ -54,6 +55,14 @@ catch {
 if ($preflightHealth.status -ne 'ok' -or $preflightHealth.database -ne 'MySql') {
     throw '升级前 API 或 MySQL 状态不健康，已停止升级。'
 }
+$previousBootstrap = $null
+if ($serverOnly) {
+    $previousBootstrapPath = Join-Path $appTarget 'wwwroot\client-bootstrap.json'
+    if (-not (Test-Path -LiteralPath $previousBootstrapPath -PathType Leaf)) {
+        throw '服务器原有客户端配置不存在，不能执行仅服务器升级。'
+    }
+    $previousBootstrap = Get-Content -LiteralPath $previousBootstrapPath -Raw -Encoding UTF8 | ConvertFrom-Json
+}
 
 $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
 $backupRoot = Join-Path $installRootFull "backup\full-upgrade-$stamp"
@@ -75,6 +84,14 @@ if ($LASTEXITCODE -ne 0) { throw '无法保护临时数据库备份凭据。' }
 
 New-Item -ItemType Directory -Path $appNext -Force | Out-Null
 Get-ChildItem -LiteralPath $appSource -Force | Copy-Item -Destination $appNext -Recurse -Force
+if ($serverOnly) {
+    $nextWebRoot = Join-Path $appNext 'wwwroot'
+    Copy-Item -LiteralPath $previousBootstrapPath -Destination $nextWebRoot -Force
+    $previousUpdates = Join-Path $appTarget 'wwwroot\updates'
+    if (Test-Path -LiteralPath $previousUpdates -PathType Container) {
+        Copy-Item -LiteralPath $previousUpdates -Destination $nextWebRoot -Recurse -Force
+    }
+}
 if (-not (Test-Path -LiteralPath (Join-Path $appNext 'Pdm.Api.dll') -PathType Leaf)) {
     throw '新的 API 暂存目录不完整，尚未切换服务器文件。'
 }
@@ -151,14 +168,23 @@ try {
     }
 
     $bootstrap = Invoke-RestMethod 'http://127.0.0.1:5173/client-bootstrap.json' -TimeoutSec 5
-    if ($bootstrap.ConfigurationVersion -ne $manifest.version) {
-        throw "服务器客户端升级版本错误：$($bootstrap.ConfigurationVersion)"
+    if ($serverOnly) {
+        if ($bootstrap.ConfigurationVersion -ne $previousBootstrap.ConfigurationVersion -or
+            $bootstrap.Desktop.Version -ne $previousBootstrap.Desktop.Version -or
+            $bootstrap.SolidWorksAddin.Version -ne $previousBootstrap.SolidWorksAddin.Version) {
+            throw '仅服务器升级后客户端版本发生变化，已停止升级。'
+        }
     }
-    if ($bootstrap.Desktop.Version -ne $manifest.desktopVersion) {
-        throw "服务器桌面客户端版本错误：$($bootstrap.Desktop.Version)"
-    }
-    if ($bootstrap.SolidWorksAddin.Version -ne $manifest.solidWorksAddinVersion) {
-        throw "服务器 SolidWorks 插件版本错误：$($bootstrap.SolidWorksAddin.Version)"
+    else {
+        if ($bootstrap.ConfigurationVersion -ne $manifest.version) {
+            throw "服务器客户端升级版本错误：$($bootstrap.ConfigurationVersion)"
+        }
+        if ($bootstrap.Desktop.Version -ne $manifest.desktopVersion) {
+            throw "服务器桌面客户端版本错误：$($bootstrap.Desktop.Version)"
+        }
+        if ($bootstrap.SolidWorksAddin.Version -ne $manifest.solidWorksAddinVersion) {
+            throw "服务器 SolidWorks 插件版本错误：$($bootstrap.SolidWorksAddin.Version)"
+        }
     }
     $web = Invoke-WebRequest 'http://127.0.0.1:5173/' -UseBasicParsing -TimeoutSec 5
     if ($web.StatusCode -ne 200) { throw "网页健康检查失败：HTTP $($web.StatusCode)" }
@@ -177,7 +203,7 @@ try {
         version = $manifest.version
         desktopVersion = $bootstrap.Desktop.Version
         solidWorksAddinVersion = $bootstrap.SolidWorksAddin.Version
-        scope = 'web-api-database-client-solidworks-addin-preview-worker'
+        scope = $manifest.scope
         backupRoot = $backupRoot
         databaseBackup = $databaseBackup
         migrationCount = @($manifest.databaseMigrations).Count
@@ -223,6 +249,11 @@ finally {
 }
 
 Write-Host "UPLM 全量升级完成：$($manifest.version)" -ForegroundColor Green
-Write-Host "桌面客户端版本：$($manifest.desktopVersion)；SolidWorks 插件版本：$($manifest.solidWorksAddinVersion)"
+Write-Host "桌面客户端版本：$($bootstrap.Desktop.Version)；SolidWorks 插件版本：$($bootstrap.SolidWorksAddin.Version)"
 Write-Host "API 与数据库备份：$backupRoot"
-Write-Host '现有客户端与 SolidWorks 插件将在程序正常退出后通过服务器发布文件自动升级。'
+if ($serverOnly) {
+    Write-Host '现有客户端配置和自动更新文件已保留，本次未提供或升级客户端。'
+}
+else {
+    Write-Host '现有客户端与 SolidWorks 插件将在程序正常退出后通过服务器发布文件自动升级。'
+}
