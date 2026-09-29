@@ -218,7 +218,7 @@ function hidePreview() {
 function requestLightweightPreview() {
   lightweightPreviewUrl.value = ''
   lightweightPreviewMessage.value = ''
-  lightweightPreviewState.value = 'loading'
+  lightweightPreviewState.value = props.selected.documentId ? 'loading' : 'unavailable'
   if (!props.desktopAvailable || !props.selected.documentId) return
   postDesktopMessage('lightweight-preview-request', { documentId: props.selected.documentId })
 }
@@ -386,6 +386,14 @@ watch([() => props.selected.id, () => props.reviewVersionId], () => {
   solidWorksPending.value = false
   solidWorksMessage.value = ''
   solidWorksError.value = false
+  if (!props.selected.documentId) {
+    hidePreview()
+    clearWebPreview()
+    previewState.value = 'idle'
+    previewError.value = ''
+    requestLightweightPreview()
+    return
+  }
   // 已经加载过预览时，同一项目内切换图档直接续用当前会话；只有首次加载需要手动触发。
   if (previewSessionActivated.value) {
     if (props.desktopAvailable) void startPreview()
@@ -566,9 +574,9 @@ onBeforeUnmount(() => {
               <FileSearch v-else :size="52" />
             </div>
             <div class="pdm-lightweight-preview-controls">
-              <h3>{{ lightweightPreviewState === 'loading' ? '正在读取轻量预览…' : lightweightPreviewState === 'ready' ? '本地轻量预览' : '暂无轻量预览' }}</h3>
-              <p>{{ selected.fileName }} · {{ displayedRevision }}</p>
-              <small>{{ lightweightPreviewState === 'unavailable' ? lightweightPreviewMessage : '当前仅显示本地只读缓存中的静态缩略图，不会启动 SolidWorks 或 eDrawings。' }}</small>
+              <h3>{{ !selected.documentId ? '请选择图纸' : lightweightPreviewState === 'loading' ? '正在读取轻量预览…' : lightweightPreviewState === 'ready' ? '本地轻量预览' : '暂无轻量预览' }}</h3>
+              <p v-if="selected.documentId">{{ selected.fileName }} · {{ displayedRevision }}</p>
+              <small>{{ !selected.documentId ? '在左侧列表选择图纸后显示预览。' : lightweightPreviewState === 'unavailable' ? lightweightPreviewMessage : '当前仅显示本地只读缓存中的静态缩略图，不会启动 SolidWorks 或 eDrawings。' }}</small>
               <button type="button" class="pdm-primary-action" :disabled="!selected.documentId" @click="startPreview">加载交互预览</button>
             </div>
           </div>

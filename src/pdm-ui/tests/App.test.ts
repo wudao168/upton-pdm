@@ -1232,10 +1232,38 @@ describe('PLM client workspace', () => {
     await buttonByText(wrapper, '加载交互预览').trigger('click')
     await flushPromises()
     const previewsBeforeSwitch = postMessage.mock.calls.filter(([message]) => message.type === 'preview-document').length
+    const baseFetch = globalThis.fetch
+    let completeReload: (() => void) | undefined
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      if (!completeReload && String(input).endsWith(`/api/projects/${projectId}/drawing-reviews`)) {
+        return new Promise<Response>(resolve => {
+          completeReload = () => { void baseFetch(input, init).then(resolve) }
+        })
+      }
+      return baseFetch(input, init)
+    }))
+    window.dispatchEvent(new Event('focus'))
+    await flushPromises()
+    expect(completeReload).toBeDefined()
 
     const drawingFilter = wrapper.findAll('button[role="tab"]').find(button => button.text().includes('2D'))
     await drawingFilter!.trigger('click')
     await flushPromises()
+    expect(postMessage.mock.calls.filter(([message]) => message.type === 'preview-document')).toHaveLength(previewsBeforeSwitch)
+    expect(wrapper.get('[aria-label="图档预览"]').text()).toContain('请选择图纸')
+    completeReload!()
+    await flushPromises()
+    expect(wrapper.get('[aria-label="图档预览"]').text()).toContain('请选择图纸')
+    expect(postMessage.mock.calls.filter(([message]) => message.type === 'preview-document')).toHaveLength(previewsBeforeSwitch)
+
+    window.dispatchEvent(new Event('focus'))
+    await flushPromises()
+    expect(wrapper.get('[aria-label="图档预览"]').text()).toContain('请选择图纸')
+    expect(postMessage.mock.calls.filter(([message]) => message.type === 'preview-document')).toHaveLength(previewsBeforeSwitch)
+
+    await drawingFilter!.trigger('click')
+    await flushPromises()
+    expect(wrapper.get('[aria-label="图档预览"]').text()).toContain('请选择图纸')
     expect(postMessage.mock.calls.filter(([message]) => message.type === 'preview-document')).toHaveLength(previewsBeforeSwitch)
 
     await wrapper.get('.pdm-drawing-list .pdm-tree-row').trigger('click')

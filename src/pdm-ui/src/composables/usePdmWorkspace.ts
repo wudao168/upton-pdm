@@ -309,6 +309,7 @@ export function usePdmWorkspace() {
     ?? documentDisplayRoot.value)
   const allBomItems = computed(() => [...standardBom.value, ...nonStandardBom.value, ...unclassifiedBom.value, ...electricalBom.value])
   function bomItemForNode(node: DocumentNode) {
+    if (!node.documentId && !node.drawingNumber) return undefined
     const items = allBomItems.value.filter(item => !item.manuallyExcluded)
     const documentId = node.documentId
     const configuration = node.configuration?.trim()
@@ -351,19 +352,24 @@ export function usePdmWorkspace() {
   }
 
   function setDocumentFilter(filter: DocumentFilter) {
+    if (filter === 'drawing') {
+      documentFilter.value = filter
+      if (selectedNode.value.kind !== 'Drawing') {
+        selectedId.value = ''
+        postDesktopMessage('preview-host-hide')
+      }
+      return
+    }
     documentFilter.value = filter
     const current = selectedNode.value
     const compatible = filter === 'all'
       || (filter === 'model' && current.kind !== 'Drawing')
-      || (filter === 'drawing' && current.kind === 'Drawing')
       || (filter === 'issue' && isIssue(current))
     if (compatible) return
 
     const resolveCandidate = () => {
-      const related = relatedNodes.value.find(node => filter === 'drawing' ? node.kind === 'Drawing' : filter === 'model' ? node.kind !== 'Drawing' : false)
-      return filter === 'drawing'
-        ? (related && matchesQuery(related, searchQuery.value) ? related : filteredDrawings.value[0])
-        : filter === 'issue'
+      const related = relatedNodes.value.find(node => filter === 'model' && node.kind !== 'Drawing')
+      return filter === 'issue'
           ? firstMatchingNode(filteredTree.value, isIssue)
           : filter === 'model'
             ? (related && matchesQuery(related, searchQuery.value) ? related : firstMatchingNode(filteredTree.value, node => node.kind !== 'Drawing'))
@@ -373,11 +379,6 @@ export function usePdmWorkspace() {
     if (!candidate && searchQuery.value.trim()) {
       searchQuery.value = ''
       candidate = resolveCandidate()
-    }
-    if (filter === 'drawing') {
-      selectedId.value = ''
-      postDesktopMessage('preview-host-hide')
-      return
     }
     if (candidate) selectNode(candidate)
   }
@@ -1318,9 +1319,10 @@ export function usePdmWorkspace() {
         return
       }
 
-      const previousSelectedId = selectedProject.id === project.value.id ? selectedId.value : ''
+      const keepSelection = selectedProject.id === project.value.id
       const data = await loadProjectWorkspace(selectedProject.id, accessToken)
       if (requestSequence !== reloadRequestSequence) return
+      const previousSelectedId = keepSelection ? selectedId.value : ''
       project.value = data.project
       projectFolders.value = data.folders
       managedDocuments.value = data.documents
@@ -1341,7 +1343,7 @@ export function usePdmWorkspace() {
       const selectedStillExists = previousSelectedId
         && (findNode(data.root, previousSelectedId)
           || data.documents.some(document => `document-${document.id}` === previousSelectedId))
-      selectedId.value = selectedStillExists ? previousSelectedId : data.root.id
+      selectedId.value = selectedStillExists ? previousSelectedId : documentFilter.value === 'drawing' ? '' : data.root.id
       ready.value = true
       serviceOnline.value = true
       if (pendingVersionComparison) {
@@ -1398,7 +1400,7 @@ export function usePdmWorkspace() {
       const selectedStillExists = previousSelectedId
         && (findNode(data.root, previousSelectedId)
           || data.documents.some(document => `document-${document.id}` === previousSelectedId))
-      if (!selectedStillExists) selectedId.value = data.root.id
+      if (!selectedStillExists) selectedId.value = documentFilter.value === 'drawing' ? '' : data.root.id
     } catch (error) {
       if (error instanceof PdmApiError && error.status === 401) handleSessionExpired()
     } finally {

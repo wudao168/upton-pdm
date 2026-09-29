@@ -815,6 +815,7 @@ internal sealed class BatchRenameControl : UserControl
             AddSharedPreviewColumn(SharedRenameStatusColumnName, "改名状态", 280, true);
             previewGrid.CellValueChanged += OnPreviewGridCellValueChanged;
             previewGrid.CurrentCellDirtyStateChanged += OnPreviewGridCurrentCellDirtyStateChanged;
+            previewGrid.CellFormatting += OnSharedPreviewCellFormatting;
             return;
         }
 
@@ -885,6 +886,22 @@ internal sealed class BatchRenameControl : UserControl
         }
     }
 
+    private void OnSharedPreviewCellFormatting(object sender, DataGridViewCellFormattingEventArgs eventArgs)
+    {
+        if (previewCurrent || eventArgs.RowIndex < 0 || eventArgs.ColumnIndex < 0) return;
+        var columnName = previewGrid.Columns[eventArgs.ColumnIndex].Name;
+        if (columnName != SharedRenameFieldColumnName
+            && columnName != SharedRenameValueColumnName
+            && columnName != SharedRenameStatusColumnName) return;
+        eventArgs.Value = string.Empty;
+        eventArgs.FormattingApplied = true;
+        if (columnName == SharedRenameValueColumnName)
+        {
+            eventArgs.CellStyle.BackColor = Color.White;
+            eventArgs.CellStyle.ForeColor = previewGrid.DefaultCellStyle.ForeColor;
+        }
+    }
+
     private void OnPreviewGridCellValueChanged(object sender, DataGridViewCellEventArgs eventArgs)
     {
         if (eventArgs.RowIndex < 0 || eventArgs.ColumnIndex != 0) return;
@@ -926,6 +943,7 @@ internal sealed class BatchRenameControl : UserControl
             previewGrid.CurrentCellDirtyStateChanged -= OnPreviewGridCurrentCellDirtyStateChanged;
             if (usesSharedPreviewGrid)
             {
+                previewGrid.CellFormatting -= OnSharedPreviewCellFormatting;
                 RemoveSharedPreviewColumn(SharedRenameFieldColumnName);
                 RemoveSharedPreviewColumn(SharedRenameValueColumnName);
                 RemoveSharedPreviewColumn(SharedRenameStatusColumnName);
@@ -1028,13 +1046,14 @@ internal sealed class BatchRenameControl : UserControl
 
     private void InvalidatePreview()
     {
+        var refreshSharedPreview = usesSharedPreviewGrid && previewCurrent;
         previewCurrent = false;
         apply.Enabled = false;
         propertyApply.Enabled = false;
         documentApply.Enabled = false;
         hierarchyApply.Enabled = false;
         summary.Text = previewRows.Count == 0 ? string.Empty : "条件已变化，请重新生成预览。";
-        if (usesSharedPreviewGrid) ClearSharedPreviewCells();
+        if (refreshSharedPreview) previewGrid.Invalidate();
     }
 
     private void GeneratePreview()
@@ -1064,17 +1083,6 @@ internal sealed class BatchRenameControl : UserControl
             previewCurrent = false;
             apply.Enabled = false;
             MessageBox.Show(this, exception.Message, "UPLM", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-        }
-    }
-
-    private void ClearSharedPreviewCells()
-    {
-        foreach (DataGridViewRow gridRow in previewGrid.Rows)
-        {
-            SetSharedCellValue(gridRow, SharedRenameFieldColumnName, string.Empty);
-            SetSharedCellValue(gridRow, SharedRenameValueColumnName, string.Empty);
-            SetSharedCellValue(gridRow, SharedRenameStatusColumnName, string.Empty);
-            SetSharedRenameValueStyle(gridRow, false);
         }
     }
 

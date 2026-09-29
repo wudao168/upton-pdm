@@ -2255,10 +2255,13 @@ public sealed class PdmAddin : ISwAddin
             {
                 AddBatchRenameError(errors, request.NodeId, "图档正在审批、审核锁定或已作废");
             }
-            if (node.IsExternalProvenance
-                || node.ProvenanceProjectId.HasValue && currentProjectId.HasValue && node.ProvenanceProjectId != currentProjectId)
+            if (node.IsExternalProvenance)
             {
-                AddBatchRenameError(errors, request.NodeId, "外部或跨项目引用不能批量重命名");
+                AddBatchRenameError(errors, request.NodeId, "工作区外的PLM来源副本不能批量重命名；请从所属项目打开受控图档");
+            }
+            else if (node.ProvenanceProjectId.HasValue && currentProjectId.HasValue && node.ProvenanceProjectId != currentProjectId)
+            {
+                AddBatchRenameError(errors, request.NodeId, "图档属于其他项目，不能在当前项目批量重命名");
             }
             if (node.DocumentId.HasValue && !IsCheckedOutByCurrentUser(node))
             {
