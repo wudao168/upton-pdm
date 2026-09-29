@@ -81,6 +81,24 @@ function Test-UplmInstallation([string]$Path) {
         (Test-Path -LiteralPath (Join-Path $Path 'solidworks-addin\Upton.Pdm.SolidWorks.Addin.dll') -PathType Leaf)
 }
 
+function Remove-UplmRegistrationResidue {
+    $solidWorksAddinGuid = '{BCFD8A8A-472B-42E2-AC62-58BC17773650}'
+    foreach ($registryPath in @(
+        'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\UPLMClient',
+        'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\UPLMClient',
+        "HKCU:\Software\SOLIDWORKS\AddInsStartup\$solidWorksAddinGuid",
+        "HKLM:\SOFTWARE\SOLIDWORKS\Addins\$solidWorksAddinGuid",
+        "HKCU:\Software\Classes\CLSID\$solidWorksAddinGuid",
+        "HKLM:\SOFTWARE\Classes\CLSID\$solidWorksAddinGuid",
+        'HKCU:\Software\Classes\Upton.Pdm.SolidWorks.Addin',
+        'HKLM:\SOFTWARE\Classes\Upton.Pdm.SolidWorks.Addin'
+    )) {
+        Remove-Item -LiteralPath $registryPath -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    Remove-ItemProperty -LiteralPath 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name UPLM -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath 'HKCU:\Software\UPTON\PDM Desktop' -Recurse -Force -ErrorAction SilentlyContinue
+}
+
 function Remove-PreviousUplmInstallation {
     Stop-PreviousDesktopClient
     $candidateRoots = New-Object System.Collections.Generic.List[string]
@@ -102,10 +120,7 @@ function Remove-PreviousUplmInstallation {
         }
         if (Test-Path -LiteralPath $candidate) { Remove-Item -LiteralPath $candidate -Recurse -Force }
     }
-    Remove-ItemProperty -LiteralPath 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name UPLM -ErrorAction SilentlyContinue
-    Remove-Item -LiteralPath 'HKCU:\Software\UPTON\PDM Desktop' -Recurse -Force -ErrorAction SilentlyContinue
-    Remove-Item -LiteralPath 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\UPLMClient' -Recurse -Force -ErrorAction SilentlyContinue
-    Remove-Item -LiteralPath 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\UPLMClient' -Recurse -Force -ErrorAction SilentlyContinue
+    Remove-UplmRegistrationResidue
     $oldShortcut = Join-Path ([Environment]::GetFolderPath('Desktop')) 'UPLM.lnk'
     Remove-Item -LiteralPath $oldShortcut -Force -ErrorAction SilentlyContinue
 }

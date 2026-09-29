@@ -1160,6 +1160,26 @@ describe('PLM client workspace', () => {
     expect(wrapper.text()).toContain('没有匹配的图档')
   })
 
+  it('shows a service connection error instead of the browser fetch error during login', async () => {
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.endsWith('/health')) return json({ status: 'ok' })
+      if (url.endsWith('/api/auth/login')) throw new TypeError('Failed to fetch')
+      return json({ title: `Unexpected URL: ${url}` }, 404)
+    }))
+    const wrapper = mount(App, { attachTo: document.body, global: { plugins: [ElementPlus] } })
+    try {
+      await openLogin(wrapper)
+      await wrapper.get('input[name="username"]').setValue('engineer')
+      await wrapper.get('input[name="password"]').setValue('correct-password')
+      await wrapper.get('form[aria-label="登录PLM"]').trigger('submit')
+      await flushPromises()
+
+      expect(wrapper.text()).toContain('无法连接 PLM 服务')
+      expect(wrapper.text()).not.toContain('Failed to fetch')
+    } finally { wrapper.unmount() }
+  })
+
   it('filters real 3D and 2D documents and keeps the preview panel minimal', async () => {
     nonStandardBomResponse = [{
       id: 'non-standard-root', kind: 'NonStandard', sequence: 1, drawingNumber: 'REAL-ASM-001', name: '真实总装配', quantity: 1,

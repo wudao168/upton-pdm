@@ -400,7 +400,12 @@ async function requestJson<T>(path: string, init: RequestInit = {}, token?: stri
   const activeCompanyId = window.localStorage.getItem('pdm_active_organization')
   if (activeCompanyId && (token || path === '/api/auth/resume')) headers.set('X-Company-Id', activeCompanyId)
 
-  const response = await fetch(`${apiBase}${path}`, { ...init, headers, cache: 'no-store' })
+  let response: Response
+  try {
+    response = await fetch(`${apiBase}${path}`, { ...init, headers, cache: 'no-store' })
+  } catch {
+    throw new PdmApiError('无法连接 PLM 服务。请检查网络连接或联系管理员确认服务是否运行。', 0)
+  }
   if (!response.ok) {
     if (response.status === 401 && path !== '/api/auth/login' && path !== '/api/auth/resume') {
       window.dispatchEvent(new CustomEvent('pdm-session-expired'))

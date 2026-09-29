@@ -1768,13 +1768,27 @@ public partial class MainWindow : Window
             return;
         }
 
-        System.Windows.Controls.Canvas.SetLeft(PreviewFrame, left);
-        System.Windows.Controls.Canvas.SetTop(PreviewFrame, top);
-        PreviewFrame.Width = width;
-        PreviewFrame.Height = height;
+        var geometryChanged = !AreClose(System.Windows.Controls.Canvas.GetLeft(PreviewFrame), left)
+            || !AreClose(System.Windows.Controls.Canvas.GetTop(PreviewFrame), top)
+            || !AreClose(PreviewFrame.Width, width)
+            || !AreClose(PreviewFrame.Height, height);
+        var wasVisible = PreviewFrame.Visibility == Visibility.Visible;
+        if (geometryChanged)
+        {
+            System.Windows.Controls.Canvas.SetLeft(PreviewFrame, left);
+            System.Windows.Controls.Canvas.SetTop(PreviewFrame, top);
+            PreviewFrame.Width = width;
+            PreviewFrame.Height = height;
+        }
         PreviewFrame.Visibility = Visibility.Visible;
-        embeddedPreview?.RefreshPreview();
+        if (geometryChanged || !wasVisible)
+        {
+            embeddedPreview?.RefreshPreview();
+        }
     }
+
+    private static bool AreClose(double first, double second)
+        => !double.IsNaN(first) && Math.Abs(first - second) < 0.1d;
 
     private void ApplyReviewOverlayBounds()
     {

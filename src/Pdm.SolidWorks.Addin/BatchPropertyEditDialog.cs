@@ -568,7 +568,7 @@ internal sealed class BatchPropertyEditDialog : Form
     private readonly IReadOnlyList<string> projectSerialNumbers;
     private readonly string rootFileName;
     private readonly Dictionary<CadDocumentKind, ComboBox> propertyCardSelectors = new Dictionary<CadDocumentKind, ComboBox>();
-    private readonly BindingList<BatchPropertyEditItem> rows;
+    private BindingList<BatchPropertyEditItem> rows;
     private readonly BindingList<PropertyWritebackPreviewItem> writebackRows;
     private readonly DataGridView grid = new DataGridView();
     private readonly DataGridView propertyCardGrid = new DataGridView();
@@ -1359,14 +1359,23 @@ internal sealed class BatchPropertyEditDialog : Form
                 .Distinct()
                 .ToArray();
         }
-        rows.RaiseListChangedEvents = false;
-        rows.Clear();
-        foreach (var item in filtered)
+        grid.EndEdit();
+        propertyCardGrid.EndEdit();
+        grid.SuspendLayout();
+        propertyCardGrid.SuspendLayout();
+        try
         {
-            rows.Add(item);
+            grid.DataSource = null;
+            propertyCardGrid.DataSource = null;
+            rows = new BindingList<BatchPropertyEditItem>(filtered.ToList());
+            grid.DataSource = rows;
+            propertyCardGrid.DataSource = rows;
         }
-        rows.RaiseListChangedEvents = true;
-        rows.ResetBindings();
+        finally
+        {
+            propertyCardGrid.ResumeLayout();
+            grid.ResumeLayout();
+        }
         RefreshDynamicPropertyColumns();
         InvalidatePropertyCardConfirmation();
         UpdateSummary();

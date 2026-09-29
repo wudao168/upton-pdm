@@ -554,7 +554,7 @@ public sealed class ApiSmokeTests : IClassFixture<PdmApiFactory>
         Assert.Matches("^AK-2-C00465-[0-9]{3}-00$", created.DeviceModel);
         Assert.Equal(2, created.SerialNumbers.Count);
         Assert.Equal(int.Parse(created.SerialNumbers[0]) + 1, int.Parse(created.SerialNumbers[1]));
-        Assert.Equal($@"D:\PDM\Vault\{created.Code}", created.VaultLocation);
+        Assert.Equal($@"D:\PDM\Vault\{created.Code}\{created.Code}-0", created.VaultLocation);
 
         var childResponse = await client.PostAsJsonAsync($"/api/projects/{created.Id}/children", new
         {

@@ -1,6 +1,9 @@
 import { expect, test } from '@playwright/test'
 
 test('PDF drawing renders pixels without native PDF plugin', async ({ page }) => {
+  await page.addInitScript(() => {
+    Reflect.deleteProperty(globalThis, 'Iterator')
+  })
   const objects = [
     '<< /Type /Catalog /Pages 2 0 R >>',
     '<< /Type /Pages /Kids [3 0 R] /Count 1 >>',

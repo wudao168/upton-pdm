@@ -287,6 +287,18 @@ if (Directory.Exists(deployedWebRoot))
         {
             // Windows PowerShell 5.1 Invoke-RestMethod decodes JSON without a charset as ISO-8859-1 and mangles Chinese text.
             Mappings = { [".zip"] = "application/zip", [".json"] = "application/json; charset=utf-8" }
+        },
+        OnPrepareResponse = context =>
+        {
+            var fileName = context.File.Name;
+            if (fileName is "index.html" or "review-overlay.html" or "client-bootstrap.json")
+            {
+                context.Context.Response.Headers.CacheControl = "no-store";
+            }
+            else if (context.Context.Request.Path.StartsWithSegments("/assets"))
+            {
+                context.Context.Response.Headers.CacheControl = "public, max-age=31536000, immutable";
+            }
         }
     });
 }
@@ -329,6 +341,12 @@ if (Directory.Exists(deployedWebRoot))
                 ? contentType
                 : "application/octet-stream";
             await context.Response.SendFileAsync(requestedFile);
+            return;
+        }
+
+        if (Path.HasExtension(relativePath))
+        {
+            context.Response.StatusCode = StatusCodes.Status404NotFound;
             return;
         }
 

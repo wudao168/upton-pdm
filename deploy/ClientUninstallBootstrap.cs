@@ -4,6 +4,7 @@ using System.IO;
 using System.Reflection;
 using System.Text;
 using System.Windows.Forms;
+using System.Linq;
 
 internal static class ClientUninstallBootstrap
 {
@@ -12,6 +13,23 @@ internal static class ClientUninstallBootstrap
     {
         try
         {
+            var principal = new System.Security.Principal.WindowsPrincipal(System.Security.Principal.WindowsIdentity.GetCurrent());
+            if (!principal.IsInRole(System.Security.Principal.WindowsBuiltInRole.Administrator))
+            {
+                var executablePath = Assembly.GetExecutingAssembly().Location;
+                using (var elevated = Process.Start(new ProcessStartInfo
+                {
+                    FileName = executablePath,
+                    Arguments = string.Join(" ", args.Select(argument => "\"" + argument.Replace("\"", "\\\"") + "\"")),
+                    Verb = "runas",
+                    UseShellExecute = true
+                }))
+                {
+                    elevated.WaitForExit();
+                    return elevated.ExitCode;
+                }
+            }
+
             var installRoot = ReadInstallRoot(args);
             var executableDirectory = Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location);
             var scriptPath = Path.Combine(executableDirectory, "Uninstall-UPLMClient.ps1");
@@ -52,6 +70,6 @@ internal static class ClientUninstallBootstrap
         {
             if (string.Equals(args[index], "--install-root", StringComparison.OrdinalIgnoreCase)) return args[index + 1];
         }
-        throw new InvalidDataException("卸载参数缺失。");
+        return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "UPLM");
     }
 }

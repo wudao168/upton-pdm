@@ -21,7 +21,7 @@ internal sealed class EDrawingsPreviewControl : Forms.UserControl
         "client-edrawings.log");
 
     private readonly EDrawingsAxHost viewer = new();
-    private readonly Forms.ToolStrip toolbar = new();
+    private readonly RecoveryToolStrip toolbar = new();
     private readonly Forms.Timer repaintTimer = new();
     private readonly Forms.Timer markupDisplayTimer = new();
     private readonly Forms.Timer markupStateTimer = new();
@@ -35,6 +35,7 @@ internal sealed class EDrawingsPreviewControl : Forms.UserControl
     private int pendingMarkupDisplayAttempts;
     private bool? lastMarkupModified;
     private bool documentOpen;
+    private bool documentReady;
     private bool documentTransitioning;
     private bool disposed;
     private PreviewButtonTheme buttonTheme = PreviewButtonTheme.Resolve("a");
@@ -76,6 +77,7 @@ internal sealed class EDrawingsPreviewControl : Forms.UserControl
         viewer.DocumentLoaded += OnDocumentLoaded;
 
         ConfigureToolbar();
+        toolbar.PaintResourceFailure += OnToolbarPaintResourceFailure;
         AddModeButton("select", "选择").Checked = true;
         AddModeButton("pan", "平移");
         AddModeButton("rotate", "旋转");
@@ -102,14 +104,14 @@ internal sealed class EDrawingsPreviewControl : Forms.UserControl
         Resize += (_, _) =>
         {
             LayoutOverlays();
-            ScheduleRefresh(2);
+            ScheduleRefresh(1);
         };
         VisibleChanged += (_, _) =>
         {
             if (Visible)
             {
                 LayoutOverlays();
-                ScheduleRefresh(4);
+                ScheduleRefresh(1);
             }
         };
 
@@ -126,15 +128,18 @@ internal sealed class EDrawingsPreviewControl : Forms.UserControl
         pendingMarkupPath = markupPath != null && File.Exists(markupPath) ? markupPath : string.Empty;
         WriteDiagnostic("open-start", documentName);
         documentTransitioning = true;
+        documentOpen = true;
+        documentReady = false;
+        currentDocumentName = documentName;
         try
         {
             viewer.OpenDocument(path);
-            documentOpen = true;
-            currentDocumentName = documentName;
-            WriteDiagnostic("open-complete", documentName);
+            WriteDiagnostic("open-accepted", documentName);
         }
         catch (Exception exception)
         {
+            documentOpen = false;
+            currentDocumentName = string.Empty;
             WriteDiagnostic("open-failed", $"{documentName} | {exception.GetType().Name}: {exception.Message}");
             throw;
         }
@@ -144,9 +149,7 @@ internal sealed class EDrawingsPreviewControl : Forms.UserControl
         }
         UpdateToolbarState();
         SetMarkupModified(false, true);
-        markupStateTimer.Start();
         LayoutOverlays();
-        ScheduleRefresh(3);
     }
 
     internal void SaveMarkup(string path)
@@ -176,12 +179,24 @@ internal sealed class EDrawingsPreviewControl : Forms.UserControl
             return;
         }
 
+        if (documentTransitioning)
+        {
+            BeginInvoke(new Action<string>(OnDocumentLoaded), fileName);
+            return;
+        }
+
         if (!documentOpen
-            || documentTransitioning
             || !string.Equals(Path.GetFileName(fileName), currentDocumentName, StringComparison.OrdinalIgnoreCase))
         {
             return;
         }
+
+        documentReady = true;
+        UpdateToolbarState();
+        markupStateTimer.Start();
+        LayoutOverlays();
+        ScheduleRefresh(1);
+        WriteDiagnostic("load-complete", Path.GetFileName(fileName));
 
         if (string.IsNullOrWhiteSpace(pendingMarkupPath))
         {
@@ -406,7 +421,7 @@ internal sealed class EDrawingsPreviewControl : Forms.UserControl
 
     internal void RefreshPreview()
     {
-        ScheduleRefresh(3);
+        ScheduleRefresh(1);
     }
 
     internal void CloseDocument()
@@ -423,6 +438,7 @@ internal sealed class EDrawingsPreviewControl : Forms.UserControl
         pendingMarkupDisplayAttempts = 0;
         pendingMarkupPath = string.Empty;
         markupControl = null;
+        documentReady = false;
         SetMarkupModified(false, true);
         if (!documentOpen)
         {
@@ -692,6 +708,11 @@ internal sealed class EDrawingsPreviewControl : Forms.UserControl
         toolbar.BringToFront();
     }
 
+    private void OnToolbarPaintResourceFailure(OutOfMemoryException exception)
+    {
+        WriteDiagnostic("toolbar-paint-recovered", $"{currentDocumentName} | {exception.Message}");
+    }
+
     private void ScheduleRefresh(int attempts)
     {
         if (!CanUseDocument || !IsHandleCreated || !Visible)
@@ -700,8 +721,10 @@ internal sealed class EDrawingsPreviewControl : Forms.UserControl
         }
 
         pendingRepaintAttempts = Math.Max(pendingRepaintAttempts, attempts);
-        repaintTimer.Stop();
-        repaintTimer.Start();
+        if (!repaintTimer.Enabled)
+        {
+            repaintTimer.Start();
+        }
     }
 
     private void OnRepaintTimerTick(object? sender, EventArgs eventArgs)
@@ -841,7 +864,6 @@ internal sealed class EDrawingsPreviewControl : Forms.UserControl
         // OpenDoc performs its own asynchronous scene updates. Forcing UpdateScene/Refresh
         // while the native control is loading or closing can enter EModelView.dll reentrantly.
         viewer.Invalidate(true);
-        LayoutOverlays();
     }
 
     private void UpdateToolbarState()
@@ -852,6 +874,7 @@ internal sealed class EDrawingsPreviewControl : Forms.UserControl
 
     private bool CanUseDocument => !disposed
         && documentOpen
+        && documentReady
         && !documentTransitioning
         && viewer.IsHandleCreated;
 
@@ -992,6 +1015,58 @@ internal sealed class EDrawingsPreviewControl : Forms.UserControl
         }
     }
 
+    private sealed class RecoveryToolStrip : Forms.ToolStrip
+    {
+        private const int WmPaint = 0x000F;
+        private bool recoveryPending;
+        private DateTime lastRecoveryUtc = DateTime.MinValue;
+
+        internal event Action<OutOfMemoryException>? PaintResourceFailure;
+
+        protected override void WndProc(ref Forms.Message message)
+        {
+            try
+            {
+                base.WndProc(ref message);
+            }
+            catch (OutOfMemoryException exception) when (message.Msg == WmPaint)
+            {
+                PaintResourceFailure?.Invoke(exception);
+                ScheduleHandleRecovery();
+            }
+        }
+
+        private void ScheduleHandleRecovery()
+        {
+            if (recoveryPending || IsDisposed || !IsHandleCreated
+                || DateTime.UtcNow - lastRecoveryUtc < TimeSpan.FromSeconds(2))
+            {
+                return;
+            }
+
+            recoveryPending = true;
+            try
+            {
+                BeginInvoke(new Action(() =>
+                {
+                    recoveryPending = false;
+                    lastRecoveryUtc = DateTime.UtcNow;
+                    if (IsDisposed)
+                    {
+                        return;
+                    }
+
+                    RecreateHandle();
+                    Invalidate();
+                }));
+            }
+            catch (InvalidOperationException)
+            {
+                recoveryPending = false;
+            }
+        }
+    }
+
     private sealed class PreviewButtonTheme
     {
         private PreviewButtonTheme(Color hoverBackground, Color activeBackground, Color border, Color activeBorder)
@@ -1072,8 +1147,6 @@ internal sealed class EDrawingsPreviewControl : Forms.UserControl
             ShowCompleteUi(control);
             ApplyDocumentSafety(control);
             control.OpenDoc(path, false, false, true, string.Empty);
-            ShowCompleteUi(control);
-            ApplyDocumentSafety(control);
         }
 
         internal void OpenMarkup(string path)
