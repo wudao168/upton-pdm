@@ -191,6 +191,8 @@ public sealed record DecideDrawingReviewSupervisorRequest(
 
 public sealed record UpdateRolePermissionsRequest(IReadOnlyList<string> Permissions);
 
+public sealed record UpdateProjectPermissionSettingsRequest(IReadOnlyDictionary<string, IReadOnlyList<string>> Rules);
+
 public sealed record CreateRoleRequest(string Name, string Description, string SourceRoleCode);
 
 public sealed record SaveProjectOrganizationRequest(string Name, string ProjectCompanyCode, string ModelCompanyCode, bool IsActive = true);

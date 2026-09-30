@@ -17,7 +17,7 @@ public static class ProjectContentResetEndpointExtensions
         api.MapPost("", async (Guid projectId, ResetProjectContentRequest request, HttpContext context, ProjectContentResetService service, CancellationToken cancellationToken) =>
         {
             var (actor, role) = CurrentUser(context.User);
-            return Results.Ok(await service.ResetAsync(projectId, request.IncludeChildren, request.Reason, request.Confirmation, actor, role, cancellationToken));
+            return Results.Ok(await service.ResetAsync(projectId, request.IncludeChildren, request.Reason, request.Confirmation, actor, role, cancellationToken, request.Force));
         });
         api.MapPost("/{snapshotId:guid}/restore", async (Guid projectId, Guid snapshotId, RestoreProjectContentRequest request, HttpContext context, ProjectContentResetService service, CancellationToken cancellationToken) =>
         {
@@ -34,5 +34,5 @@ public static class ProjectContentResetEndpointExtensions
     }
 }
 
-public sealed record ResetProjectContentRequest(bool IncludeChildren, string Reason, string Confirmation);
+public sealed record ResetProjectContentRequest(bool IncludeChildren, string Reason, string Confirmation, bool Force = false);
 public sealed record RestoreProjectContentRequest(string Confirmation);

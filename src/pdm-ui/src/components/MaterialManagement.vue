@@ -265,7 +265,7 @@ const categoryDraft = reactive<MaterialCategory>({
   sortOrder: 0, updatedBy: '', updatedAt: '', rowVersion: 0,
   currentSequence: 0,
 })
-const applicationWorkflowCompleted = (application: MaterialCodeApplication) => application.status === 'Rejected'
+const applicationWorkflowCompleted = (application: MaterialCodeApplication) => application.status === 'Rejected' || application.status === 'Withdrawn'
   || application.status === 'Approved' && application.workflowState === 'Completed'
 const approvedApplicationsAwaitingSync = computed(() => codeApplications.value
   .filter(application => application.status === 'Approved' && !applicationWorkflowCompleted(application)))
@@ -470,15 +470,17 @@ function workflowRowTargetLabel(row: MaterialCodeWorkflowRow) {
 function workflowRowStatusLabel(row: MaterialCodeWorkflowRow) {
   if (row.syncTask) return syncTaskStatusLabel(row.syncTask)
   if (row.approval?.status === 'Pending') return '待审批'
+  if (row.approval?.status === 'Withdrawn') return '已撤回'
   return row.approval?.status === 'Rejected' ? '已退回' : '已批准'
 }
 function workflowRowStatusType(row: MaterialCodeWorkflowRow) {
   if (row.syncTask) return syncTaskTagType(row.syncTask)
-  return row.approval?.status === 'Pending' ? 'warning' : row.approval?.status === 'Rejected' ? 'danger' : 'success'
+  return row.approval?.status === 'Pending' ? 'warning' : row.approval?.status === 'Rejected' || row.approval?.status === 'Withdrawn' ? 'danger' : 'success'
 }
 function workflowRowDescription(row: MaterialCodeWorkflowRow) {
   if (row.syncTask) return syncTaskError(row.syncTask) || '同步完成。'
   if (row.approval?.status === 'Pending') return '待审批后生成同步任务。'
+  if (row.approval?.status === 'Withdrawn') return '申请人已撤回。'
   if (row.approval?.status === 'Rejected') return row.approval.decisionComment || '已退回。'
   return '已批准，等待同步任务。'
 }

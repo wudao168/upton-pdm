@@ -299,6 +299,7 @@ public sealed class MaterialService(
     public async Task<IReadOnlyList<MaterialCodeResolution>> ApplyForMaterialCodesAsync(ApplyMaterialCodesCommand command, string actor, UserRole role, CancellationToken cancellationToken)
     {
         await RequirePermissionAsync(actor, role, PermissionCodes.BomEdit, cancellationToken);
+        await ProjectPermissionPolicy.RequireAsync(repository, command.ProjectId, actor, role, PermissionCodes.BomEdit, cancellationToken);
         var resolutions = await ResolveStandardBomMaterialsAsync(new(command.ProjectId, command.BomItemIds), actor, role, cancellationToken);
         var applicationItems = new Dictionary<Guid, BomItem>();
         foreach (var resolution in resolutions)
@@ -519,10 +520,31 @@ public sealed class MaterialService(
             throw new UnauthorizedAccessException("只有标准化角色可以处理料号申请。");
         var application = await materials.FindMaterialCodeApplicationAsync(applicationId, cancellationToken)
             ?? throw new PdmNotFoundException("料号申请不存在。");
+        if (!await repository.HasProjectContentReadAccessAsync(application.ProjectId, actor, role, cancellationToken))
+            throw new UnauthorizedAccessException("当前用户没有该项目的读取权限。");
         if (application.BomHeaderKind is not null && application.BomItemId is null)
             throw new PdmRuleException("BOM表头料号由系统自动审批，请在BOM多级总览查看进度或重试，不能人工批准或退回。");
         return await DecideMaterialCodeApplicationCoreAsync(
             application, expectedRowVersion, approved, comment, actor, false, cancellationToken, categoryCode);
+    }
+
+    public async Task<MaterialCodeApplication> WithdrawMaterialCodeApplicationAsync(Guid applicationId, long expectedRowVersion, string actor, UserRole role, CancellationToken cancellationToken)
+    {
+        await RequirePermissionAsync(actor, role, PermissionCodes.BomEdit, cancellationToken);
+        var application = await materials.FindMaterialCodeApplicationAsync(applicationId, cancellationToken)
+            ?? throw new PdmNotFoundException("料号申请不存在。");
+        if (application.BomHeaderKind is not null || application.BomItemId is null)
+            throw new PdmRuleException("只有标准件BOM料号申请可以撤回。");
+        if (!string.Equals(application.RequestedBy, actor, StringComparison.OrdinalIgnoreCase) && role != UserRole.Administrator)
+            throw new UnauthorizedAccessException("只有申请人或系统管理员可以撤回料号申请。");
+        if (!await repository.HasProjectContentReadAccessAsync(application.ProjectId, actor, role, cancellationToken))
+            throw new UnauthorizedAccessException("当前用户没有该项目的读取权限。");
+        if (application.Status != MaterialCodeApplicationStatus.Pending)
+            throw new PdmRuleException("只有待审批的料号申请可以撤回。");
+        var withdrawn = await materials.DecideMaterialCodeApplicationAsync(applicationId, expectedRowVersion,
+            MaterialCodeApplicationStatus.Withdrawn, actor, "申请人撤回", null, null, timeProvider.GetUtcNow(), cancellationToken);
+        await AuditAsync(actor, "material-code.application.withdraw", withdrawn.Id, $"撤回标准件料号申请：BOM {withdrawn.BomItemId}", cancellationToken);
+        return withdrawn;
     }
 
     public async Task<IReadOnlyList<(MaterialCodeApplication Application, PdmMaterial? Material, MaterialSyncTask? Task)>>
@@ -764,6 +786,7 @@ public sealed class MaterialService(
     public async Task<PdmMaterial> CreateFromBomAsync(CreateMaterialFromBomCommand command, string actor, UserRole role, CancellationToken cancellationToken)
     {
         await RequirePermissionAsync(actor, role, PermissionCodes.BomEdit, cancellationToken);
+        await ProjectPermissionPolicy.RequireAsync(repository, command.ProjectId, actor, role, PermissionCodes.BomEdit, cancellationToken);
         return await CreateFromBomCoreAsync(command, actor, cancellationToken);
     }
 
@@ -793,7 +816,7 @@ public sealed class MaterialService(
         var category = await RequireCreatableCategoryAsync(categoryCode ?? rule.U9CategoryCode, kind, cancellationToken, allowCategoryKindOverride: true);
         var materialKind = category.PdmKind ?? kind;
         decimal? weight = decimal.TryParse(item.Weight, NumberStyles.Number, CultureInfo.InvariantCulture, out var parsedWeight)
-            ? parsedWeight
+            ? parsedWeight == 0m ? null : parsedWeight
             : null;
         var now = timeProvider.GetUtcNow();
         var normalized = Normalize(Guid.NewGuid(), new SaveMaterialCommand(
@@ -1467,6 +1490,7 @@ public sealed class MaterialService(
     public async Task<PdmMaterial> LinkBomMaterialAsync(LinkBomMaterialCommand command, string actor, UserRole role, CancellationToken cancellationToken)
     {
         await RequirePermissionAsync(actor, role, PermissionCodes.BomEdit, cancellationToken);
+        await ProjectPermissionPolicy.RequireAsync(repository, command.ProjectId, actor, role, PermissionCodes.BomEdit, cancellationToken);
         var bomItem = await repository.FindBomItemAsync(command.ProjectId, command.BomItemId, cancellationToken)
             ?? throw new PdmNotFoundException("BOM物料不存在。");
         var material = await materials.FindMaterialAsync(command.MaterialId, cancellationToken)
@@ -1483,6 +1507,7 @@ public sealed class MaterialService(
     public async Task<PdmMaterial?> SetBomMaterialLinkByCodeAsync(Guid projectId, Guid bomItemId, string? materialCode, string actor, UserRole role, CancellationToken cancellationToken)
     {
         await RequirePermissionAsync(actor, role, PermissionCodes.BomEdit, cancellationToken);
+        await ProjectPermissionPolicy.RequireAsync(repository, projectId, actor, role, PermissionCodes.BomEdit, cancellationToken);
         var bomItem = await repository.FindBomItemAsync(projectId, bomItemId, cancellationToken)
             ?? throw new PdmNotFoundException("BOM物料不存在。");
         if (string.IsNullOrWhiteSpace(materialCode))
@@ -1504,6 +1529,7 @@ public sealed class MaterialService(
     public async Task<PdmMaterial> LinkAutomaticallyMatchedBomMaterialAsync(LinkBomMaterialCommand command, string actor, UserRole role, CancellationToken cancellationToken)
     {
         await RequirePermissionAsync(actor, role, PermissionCodes.BomEdit, cancellationToken);
+        await ProjectPermissionPolicy.RequireAsync(repository, command.ProjectId, actor, role, PermissionCodes.BomEdit, cancellationToken);
         var bomItem = await repository.FindBomItemAsync(command.ProjectId, command.BomItemId, cancellationToken)
             ?? throw new PdmNotFoundException("BOM物料不存在。");
         var material = await materials.FindMaterialAsync(command.MaterialId, cancellationToken)

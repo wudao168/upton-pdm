@@ -18,6 +18,13 @@ public sealed class MySqlProjectContentResetStore : IProjectContentResetStore
         "document", "document_version", "document_user_access", "project_file", "project_file_version"
     };
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
+    private static readonly string[] ForceableBlockers =
+    [
+        "存在正在审批的发布包，请先撤回或结束流程。",
+        "存在正在进行的图纸审核或属性写回。",
+        "存在已签出的图档，请先存档或释放编辑权限。",
+        "存在正在执行的CAD属性写回任务。"
+    ];
     private readonly string connectionString;
 
     public MySqlProjectContentResetStore(IOptions<PdmDatabaseOptions> options) => connectionString = options.Value.ConnectionString;
@@ -44,21 +51,23 @@ public sealed class MySqlProjectContentResetStore : IProjectContentResetStore
         var blockers = new List<string>();
         if (await ExistsAsync(connection, PublishedBomBlockerSql, ids, cancellationToken))
             blockers.Add("存在已发布的BOM，项目内容不能重置。");
-        if (await ExistsAsync(connection, "SELECT EXISTS(SELECT 1 FROM release_package WHERE project_id IN @Ids AND state IN ('ProcessReview','Approval','Publishing'))", ids, cancellationToken))
-            blockers.Add("存在正在审批或发布的发布包，请先撤回或结束流程。");
+        if (await ExistsAsync(connection, "SELECT EXISTS(SELECT 1 FROM release_package WHERE project_id IN @Ids AND state IN ('ProcessReview','Approval'))", ids, cancellationToken))
+            blockers.Add(ForceableBlockers[0]);
+        if (await ExistsAsync(connection, "SELECT EXISTS(SELECT 1 FROM release_package WHERE project_id IN @Ids AND state='Publishing')", ids, cancellationToken))
+            blockers.Add("存在正在向外部发布的发布包，请等待发布完成。");
         if (await ExistsAsync(connection, "SELECT EXISTS(SELECT 1 FROM drawing_review_package WHERE project_id IN @Ids AND state IN ('InReview','PendingSupervisorApproval','WritingProperties'))", ids, cancellationToken))
             blockers.Add("存在正在进行的图纸审核或属性写回。");
         if (await ExistsAsync(connection, "SELECT EXISTS(SELECT 1 FROM document WHERE project_id IN @Ids AND checked_out_by IS NOT NULL)", ids, cancellationToken))
             blockers.Add("存在已签出的图档，请先存档或释放编辑权限。");
-        if (await ExistsAsync(connection, "SELECT EXISTS(SELECT 1 FROM cad_property_writeback w INNER JOIN bom_item b ON b.id=w.bom_item_id WHERE b.project_id IN @Ids AND w.status IN ('Pending','InProgress'))", ids, cancellationToken))
+        if (await ExistsAsync(connection, "SELECT EXISTS(SELECT 1 FROM cad_property_writeback WHERE project_id IN @Ids AND status IN ('Pending','InProgress'))", ids, cancellationToken))
             blockers.Add("存在正在执行的CAD属性写回任务。");
         if (await HasPendingProjectOutboxAsync(connection, null, ids, cancellationToken))
             blockers.Add("存在尚未处理完成的外部集成事件，请等待同步完成后重试。");
 
-        return new(counts, blockers, counts.Values.Any(value => value > 0));
+        return new(counts, blockers, counts.Values.Any(value => value > 0), ForceableBlockers);
     }
 
-    public async Task<ProjectContentResetSnapshotSummary> ResetAsync(Guid projectId, string projectCode, IReadOnlyList<Guid> projectIds, string reason, string actor, DateTimeOffset now, CancellationToken cancellationToken)
+    public async Task<ProjectContentResetSnapshotSummary> ResetAsync(Guid projectId, string projectCode, IReadOnlyList<Guid> projectIds, string reason, string actor, DateTimeOffset now, bool force, CancellationToken cancellationToken)
     {
         await using var connection = await OpenAsync(cancellationToken);
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
@@ -68,7 +77,9 @@ public sealed class MySqlProjectContentResetStore : IProjectContentResetStore
         {
             await LockProjectsAsync(connection, transaction, ids, cancellationToken);
             var inspection = await InspectAsync(connection, transaction, ids, cancellationToken);
-            if (inspection.Blockers.Count > 0) throw new PdmRuleException(string.Join("；", inspection.Blockers));
+            var blockers = force ? inspection.Blockers.Except(ForceableBlockers).ToArray() : inspection.Blockers;
+            if (blockers.Count > 0) throw new PdmRuleException(string.Join("；", blockers));
+            if (force) await StopActiveWorkAsync(connection, transaction, ids, actor, now, cancellationToken);
 
             var payload = await CaptureAsync(connection, transaction, ids, snapshotId, cancellationToken);
             var compressed = Compress(JsonSerializer.Serialize(payload, JsonOptions));
@@ -167,12 +178,20 @@ public sealed class MySqlProjectContentResetStore : IProjectContentResetStore
         };
         var blockers = new List<string>();
         if (await ExistsAsync(connection, transaction, PublishedBomBlockerSql, ids, cancellationToken)) blockers.Add("存在已发布的BOM，项目内容不能重置");
-        if (await ExistsAsync(connection, transaction, "SELECT EXISTS(SELECT 1 FROM release_package WHERE project_id IN @Ids AND state IN ('ProcessReview','Approval','Publishing'))", ids, cancellationToken)) blockers.Add("存在正在审批或发布的发布包");
-        if (await ExistsAsync(connection, transaction, "SELECT EXISTS(SELECT 1 FROM drawing_review_package WHERE project_id IN @Ids AND state IN ('InReview','PendingSupervisorApproval','WritingProperties'))", ids, cancellationToken)) blockers.Add("存在正在进行的图纸审核或属性写回");
-        if (await ExistsAsync(connection, transaction, "SELECT EXISTS(SELECT 1 FROM document WHERE project_id IN @Ids AND checked_out_by IS NOT NULL)", ids, cancellationToken)) blockers.Add("存在已签出的图档");
-        if (await ExistsAsync(connection, transaction, "SELECT EXISTS(SELECT 1 FROM cad_property_writeback w INNER JOIN bom_item b ON b.id=w.bom_item_id WHERE b.project_id IN @Ids AND w.status IN ('Pending','InProgress'))", ids, cancellationToken)) blockers.Add("存在正在执行的CAD属性写回任务");
-        if (await HasPendingProjectOutboxAsync(connection, transaction, ids, cancellationToken)) blockers.Add("存在尚未处理完成的外部集成事件");
-        return new(counts, blockers, counts.Values.Any(value => value > 0));
+        if (await ExistsAsync(connection, transaction, "SELECT EXISTS(SELECT 1 FROM release_package WHERE project_id IN @Ids AND state IN ('ProcessReview','Approval'))", ids, cancellationToken)) blockers.Add(ForceableBlockers[0]);
+        if (await ExistsAsync(connection, transaction, "SELECT EXISTS(SELECT 1 FROM release_package WHERE project_id IN @Ids AND state='Publishing')", ids, cancellationToken)) blockers.Add("存在正在向外部发布的发布包，请等待发布完成。");
+        if (await ExistsAsync(connection, transaction, "SELECT EXISTS(SELECT 1 FROM drawing_review_package WHERE project_id IN @Ids AND state IN ('InReview','PendingSupervisorApproval','WritingProperties'))", ids, cancellationToken)) blockers.Add(ForceableBlockers[1]);
+        if (await ExistsAsync(connection, transaction, "SELECT EXISTS(SELECT 1 FROM document WHERE project_id IN @Ids AND checked_out_by IS NOT NULL)", ids, cancellationToken)) blockers.Add(ForceableBlockers[2]);
+        if (await ExistsAsync(connection, transaction, "SELECT EXISTS(SELECT 1 FROM cad_property_writeback WHERE project_id IN @Ids AND status IN ('Pending','InProgress'))", ids, cancellationToken)) blockers.Add(ForceableBlockers[3]);
+        if (await HasPendingProjectOutboxAsync(connection, transaction, ids, cancellationToken)) blockers.Add("存在尚未处理完成的外部集成事件，请等待同步完成后重试。");
+        return new(counts, blockers, counts.Values.Any(value => value > 0), ForceableBlockers);
+    }
+
+    private static async Task StopActiveWorkAsync(MySqlConnection connection, MySqlTransaction transaction, Guid[] ids, string actor, DateTimeOffset now, CancellationToken cancellationToken)
+    {
+        await connection.ExecuteAsync(new CommandDefinition(
+            "UPDATE document SET checked_out_by=NULL,checked_out_at=NULL,checkout_session_id=NULL,checkout_machine=NULL,checkout_last_heartbeat_at=NULL,checkout_lease_expires_at=NULL,checkout_release_requested_by=NULL,checkout_release_requested_at=NULL,checkout_release_request_reason=NULL,row_version=row_version+1,updated_at=@Now WHERE project_id IN @Ids AND checked_out_by IS NOT NULL; UPDATE cad_property_writeback SET status='Superseded',completed_at=@Now,last_error='管理员强制重置项目' WHERE project_id IN @Ids AND status IN ('Pending','InProgress'); UPDATE drawing_review_package SET state='Withdrawn',withdrawn_by=@Actor,withdrawn_at=@Now,withdrawal_reason='管理员强制重置项目' WHERE project_id IN @Ids AND state IN ('InReview','PendingSupervisorApproval','WritingProperties'); UPDATE approval_task task INNER JOIN release_package package ON package.id=task.release_package_id SET task.decision_by=@Actor,task.decision_value='Rejected',task.decision_comment='管理员强制重置项目',task.decided_at=@Now WHERE package.project_id IN @Ids AND package.state IN ('ProcessReview','Approval') AND task.decision_value IS NULL; UPDATE release_package SET state='Rejected',row_version=row_version+1 WHERE project_id IN @Ids AND state IN ('ProcessReview','Approval')",
+            new { Ids = ids, Actor = actor, Now = now.UtcDateTime }, transaction, cancellationToken: cancellationToken));
     }
 
     private static async Task<ResetPayload> CaptureAsync(MySqlConnection connection, MySqlTransaction transaction, Guid[] ids, Guid snapshotId, CancellationToken cancellationToken)
@@ -375,7 +394,7 @@ public sealed class MySqlProjectContentResetStore : IProjectContentResetStore
     private sealed record TableMeta(string Name, List<string> Columns, List<string> PrimaryKeys, List<ForeignKeyMeta> ForeignKeys);
     private sealed record ForeignKeyMeta(string ChildTable, string ChildColumn, string ParentTable, string ParentColumn);
     private sealed record ColumnRow(string TableName, string ColumnName, string Extra);
-    private sealed record KeyRow(string TableName, string ColumnName, int OrdinalPosition);
+    private sealed record KeyRow(string TableName, string ColumnName, uint OrdinalPosition);
     private sealed record ForeignKeyRow(string ChildTable, string ChildColumn, string ParentTable, string ParentColumn);
     private sealed record SnapshotRow(Guid Id, Guid ProjectId, string ProjectCode, string IncludedProjectIdsJson, string Reason, string SummaryJson, byte[]? PayloadJson, string CreatedBy, DateTime CreatedAt, DateTime ExpiresAt, string? RestoredBy, DateTime? RestoredAt, DateTime? PurgedAt);
 }

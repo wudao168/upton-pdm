@@ -34,6 +34,7 @@ const parent: ProjectSummary = {
   canManageMainStaffing: false,
   canAssignDesigners: false,
   canReadContent: true,
+  effectiveProjectPermissions: ['project.edit', 'project.child.create', 'project.delete', 'project.designer.assign'],
 }
 
 const child: ProjectSummary = {

@@ -11,6 +11,7 @@ interface ReviewOverlayState {
   packages: DrawingReviewPackage[]
   candidates: DrawingReviewCandidate[]
   reviewerOptions: Array<{ username: string; label: string }>
+  defaultReviewers: string[]
   selectedDocumentId?: string
   currentUsername: string
   pending: boolean
@@ -29,6 +30,7 @@ const state = reactive<ReviewOverlayState>({
   packages: [],
   candidates: [],
   reviewerOptions: [],
+  defaultReviewers: [],
   selectedDocumentId: undefined,
   currentUsername: '',
   pending: false,
@@ -72,6 +74,7 @@ onBeforeUnmount(() => window.chrome?.webview?.removeEventListener?.('message', u
       :packages="state.packages"
       :candidates="state.candidates"
       :reviewer-options="state.reviewerOptions"
+      :default-reviewers="state.defaultReviewers"
       :selected-document-id="state.selectedDocumentId"
       :current-username="state.currentUsername"
       :pending="state.pending"

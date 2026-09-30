@@ -47,6 +47,8 @@ public static class PermissionCodes
     public const string StorageSettingsManage = "settings.storage.manage";
     public const string RoleSettingsView = "system.role.view";
     public const string RoleSettingsEdit = "system.role.edit";
+    public const string ProjectPermissionSettingsView = "system.project-permission.view";
+    public const string ProjectPermissionSettingsEdit = "system.project-permission.edit";
     public const string AuditView = "audit.view";
 }
 
@@ -99,6 +101,8 @@ public static class RolePermissionCatalog
         new(PermissionCodes.StorageSettingsManage, "维护编号、设备类型和存储位置", "系统设置", Sensitive: true),
         new(PermissionCodes.RoleSettingsView, "查看角色权限", "角色权限"),
         new(PermissionCodes.RoleSettingsEdit, "修改角色权限", "角色权限", Sensitive: true),
+        new(PermissionCodes.ProjectPermissionSettingsView, "查看项目权限设置", "项目权限"),
+        new(PermissionCodes.ProjectPermissionSettingsEdit, "修改项目权限设置", "项目权限", Sensitive: true),
         new(PermissionCodes.AuditView, "查看全局审计", "系统审计", Sensitive: true)
     ];
 
@@ -140,6 +144,8 @@ public static class RolePermissionCatalog
                 PermissionCodes.StorageSettingsManage,
                 PermissionCodes.RoleSettingsView,
                 PermissionCodes.RoleSettingsEdit,
+                PermissionCodes.ProjectPermissionSettingsView,
+                PermissionCodes.ProjectPermissionSettingsEdit,
                 PermissionCodes.AuditView)
         };
 
@@ -232,6 +238,7 @@ public static class RolePermissionCatalog
         if (normalized.Contains(PermissionCodes.MaterialManage)) normalized.Add(PermissionCodes.MaterialApply);
         if (normalized.Contains(PermissionCodes.MaterialApply)) normalized.Add(PermissionCodes.MaterialView);
         if (normalized.Contains(PermissionCodes.RoleSettingsEdit)) normalized.Add(PermissionCodes.RoleSettingsView);
+        if (normalized.Contains(PermissionCodes.ProjectPermissionSettingsEdit)) normalized.Add(PermissionCodes.ProjectPermissionSettingsView);
         return normalized;
     }
 

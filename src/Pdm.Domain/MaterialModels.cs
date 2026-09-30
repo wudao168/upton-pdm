@@ -25,7 +25,8 @@ public enum MaterialCodeApplicationStatus
 {
     Pending = 0,
     Approved = 1,
-    Rejected = 2
+    Rejected = 2,
+    Withdrawn = 3
 }
 
 public enum MaterialCodeWorkflowState
@@ -36,7 +37,8 @@ public enum MaterialCodeWorkflowState
     PendingBomSync = 3,
     BomSyncFailed = 4,
     Completed = 5,
-    Rejected = 6
+    Rejected = 6,
+    Withdrawn = 7
 }
 
 public sealed record MaterialCodeApplication(

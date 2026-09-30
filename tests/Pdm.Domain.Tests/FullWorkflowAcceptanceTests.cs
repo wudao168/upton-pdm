@@ -55,7 +55,7 @@ public sealed class FullWorkflowAcceptanceTests
         var child = await workflow.CreateSubprojectAsync(new(root.Id, "QA全流程子项目一", "单元一", 1), "qa_pm", UserRole.Engineer, default);
         var sibling = await workflow.CreateSubprojectAsync(new(root.Id, "QA全流程子项目二", "单元二", 1), "qa_pm", UserRole.Engineer, default);
         child = await workflow.SetChildProjectManagerAsync(child.Id, "qa_pm", "qa_lead", UserRole.Approver, default);
-        child = await workflow.SetChildProjectDesignersAsync(child.Id, ["qa_engineer"], "qa_lead", UserRole.Approver, default);
+        child = await workflow.SetChildProjectDesignersAsync(child.Id, ["qa_engineer", "qa_electrical"], "qa_lead", UserRole.Approver, default);
         sibling = await workflow.SetChildProjectManagerAsync(sibling.Id, "qa_pm", "qa_pm", UserRole.Engineer, default);
         sibling = await workflow.SetChildProjectDesignersAsync(sibling.Id, ["qa_engineer"], "qa_pm", UserRole.Engineer, default);
 

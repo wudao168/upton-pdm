@@ -69,6 +69,8 @@ public sealed record Project(
 
     public bool CanReadContent { get; init; }
 
+    public IReadOnlyList<string> EffectiveProjectPermissions { get; init; } = [];
+
     public bool CanSubmitArchive { get; init; }
 
     public int? DocumentCount { get; init; }

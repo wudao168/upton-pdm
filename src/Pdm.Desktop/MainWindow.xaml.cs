@@ -63,6 +63,9 @@ public partial class MainWindow : Window
     private bool reviewOverlayVisible;
     private bool reviewOverlaySuspended;
     private bool previewDocumentReady;
+    private bool previewHostSuspended;
+    private bool previewNativeOpening;
+    private bool previewClosePending;
     private int previewRequestGeneration;
     private Guid? previewDocumentId;
     private Guid? previewVersionId;
@@ -217,7 +220,6 @@ public partial class MainWindow : Window
         try
         {
             bootstrapConfiguration = await ClientBootstrapLoader.LoadAsync(bootstrapLifetime.Token);
-            apiClient.BaseAddress = new Uri(bootstrapConfiguration.ApiBaseUrl, UriKind.Absolute);
             await InitializeWorkspaceAsync();
             _ = MonitorBootstrapAsync();
         }
@@ -272,6 +274,10 @@ public partial class MainWindow : Window
             {
                 LoadingPanel.Visibility = Visibility.Collapsed;
                 workspaceNavigationReady = true;
+                if (usingServerUi)
+                {
+                    AppendClientDiagnostic($"服务器界面加载完成：url={WorkspaceView.Source} configuration={bootstrapConfiguration.ConfigurationVersion}");
+                }
                 if (hideAfterStartupNavigation)
                 {
                     hideAfterStartupNavigation = false;
@@ -305,12 +311,14 @@ public partial class MainWindow : Window
             try
             {
                 await Task.Delay(TimeSpan.FromSeconds(Math.Max(5, bootstrapConfiguration.PollSeconds)), bootstrapLifetime.Token);
+                var retryServerUi = !usingServerUi;
                 var latest = await ClientBootstrapLoader.LoadAsync(bootstrapLifetime.Token);
                 bootstrapConfiguration = latest;
 
                 // 客户端界面必须与网页端一致：先按服务器版本刷新界面，再处理程序自更新。
                 // 自更新包下载/暂存失败不能挡住界面切换，否则客户端会一直停在旧版界面。
-                if (!string.Equals(appliedConfigurationVersion, latest.ConfigurationVersion, StringComparison.Ordinal)
+                if (retryServerUi
+                    || !string.Equals(appliedConfigurationVersion, latest.ConfigurationVersion, StringComparison.Ordinal)
                     || !string.Equals(appliedUiBaseUrl, latest.UiBaseUrl, StringComparison.OrdinalIgnoreCase))
                 {
                     var applied = await Dispatcher.InvokeAsync(() => ApplyServerUiConfiguration(latest));
@@ -318,7 +326,7 @@ public partial class MainWindow : Window
                     {
                         appliedConfigurationVersion = latest.ConfigurationVersion;
                         appliedUiBaseUrl = latest.UiBaseUrl;
-                        AppendClientDiagnostic($"界面已随服务器刷新：configuration={latest.ConfigurationVersion} ui={latest.UiBaseUrl}");
+                        AppendClientDiagnostic($"已请求从服务器加载界面：configuration={latest.ConfigurationVersion} ui={latest.UiBaseUrl}");
                     }
                 }
 
@@ -769,9 +777,16 @@ public partial class MainWindow : Window
 
         if (type == "preview-host-suspend")
         {
+            previewHostSuspended = true;
             PreviewFrame.Visibility = Visibility.Collapsed;
             reviewOverlaySuspended = true;
             HideReviewOverlay();
+            return;
+        }
+
+        if (type == "preview-host-resume")
+        {
+            previewHostSuspended = false;
             return;
         }
 
@@ -1453,6 +1468,7 @@ public partial class MainWindow : Window
     {
         var requestGeneration = Interlocked.Increment(ref previewRequestGeneration);
         var previewStep = "读取预览版本";
+        var nativeOpenStarted = false;
         previewDocumentReady = false;
         previewDocumentId = null;
         previewVersionId = null;
@@ -1495,7 +1511,7 @@ public partial class MainWindow : Window
                 throw new InvalidOperationException(ReadApiError(versionJson, "预览版本读取失败。"));
             }
 
-            var version = new JavaScriptSerializer().Deserialize<VersionResponse>(versionJson)
+            var version = new JavaScriptSerializer { MaxJsonLength = int.MaxValue }.Deserialize<VersionResponse>(versionJson)
                 ?? throw new InvalidOperationException("预览版本读取失败。");
             if (string.IsNullOrWhiteSpace(fileName)) fileName = "document.bin";
             var cacheDirectory = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "UPTON", "PDM", "Preview", documentId.ToString("N"), version.Id.ToString("N"));
@@ -1557,9 +1573,24 @@ public partial class MainWindow : Window
             }
 
             previewStep = "打开 eDrawings 预览";
-            DisposeEmbeddedPreview();
-            EnsureEmbeddedPreview();
-            embeddedPreview!.OpenDocument(cachedFile, markupPath);
+            nativeOpenStarted = true;
+            previewNativeOpening = true;
+            try
+            {
+                EnsureEmbeddedPreview();
+                embeddedPreview!.OpenDocument(cachedFile, markupPath);
+            }
+            finally
+            {
+                previewNativeOpening = false;
+            }
+            if (previewClosePending || requestGeneration != previewRequestGeneration)
+            {
+                previewClosePending = false;
+                embeddedPreview?.CloseDocument();
+                return;
+            }
+            nativeOpenStarted = false;
             previewDocumentReady = true;
             previewDocumentId = documentId;
             previewVersionId = version.Id;
@@ -1571,9 +1602,15 @@ public partial class MainWindow : Window
         {
             if (requestGeneration != previewRequestGeneration)
             {
+                if (nativeOpenStarted)
+                {
+                    previewClosePending = false;
+                    embeddedPreview?.CloseDocument();
+                }
                 return;
             }
 
+            previewClosePending = false;
             previewDocumentReady = false;
             previewDocumentId = null;
             previewVersionId = null;
@@ -1581,8 +1618,8 @@ public partial class MainWindow : Window
             previewRequestedDocumentId = null;
             previewMarkupDirectory = string.Empty;
             PreviewFrame.Visibility = Visibility.Collapsed;
-            DisposeEmbeddedPreview();
-            var server = apiClient.BaseAddress?.GetLeftPart(UriPartial.Authority) ?? bootstrapConfiguration.ApiBaseUrl;
+            embeddedPreview?.CloseDocument();
+            var server = new Uri(bootstrapConfiguration.ApiBaseUrl).GetLeftPart(UriPartial.Authority);
             AppendClientDiagnostic($"预览失败：step={previewStep} server={server} document={failedDocumentId} error={exception}");
             var message = exception is HttpRequestException or TaskCanceledException
                 ? $"{previewStep}失败：无法连接 PLM 服务器（{server}）。{exception.GetBaseException().Message}"
@@ -1739,7 +1776,6 @@ public partial class MainWindow : Window
         TryReadNumber(payload, "viewportHeight", out var viewportHeight);
         var visible = !payload.TryGetValue("visible", out var visibleValue) || Convert.ToBoolean(visibleValue);
         previewBounds = new PreviewHostBounds(left, top, width, height, viewportWidth, viewportHeight, visible);
-        reviewOverlaySuspended = false;
         ApplyPreviewSurfaces();
     }
 
@@ -1795,7 +1831,7 @@ public partial class MainWindow : Window
     private void ApplyPreviewBounds()
     {
         if (!IsVisible || WindowState == WindowState.Minimized
-            || !previewDocumentReady || previewBounds is not { Visible: true } bounds
+            || previewHostSuspended || !previewDocumentReady || previewBounds is not { Visible: true } bounds
             || bounds.Width < 80 || bounds.Height < 80
             || WorkspaceView.ActualWidth <= 0 || WorkspaceView.ActualHeight <= 0)
         {
@@ -1850,7 +1886,7 @@ public partial class MainWindow : Window
     {
         if (reviewOverlay == null
             || !IsVisible || WindowState == WindowState.Minimized
-            || reviewOverlaySuspended || !reviewOverlayVisible
+            || previewHostSuspended || reviewOverlaySuspended || !reviewOverlayVisible
             || reviewOverlayBounds is not { Visible: true } bounds
             || bounds.Width < 8 || bounds.Height < 8
             || WorkspaceView.ActualWidth <= 0 || WorkspaceView.ActualHeight <= 0)
@@ -1897,12 +1933,14 @@ public partial class MainWindow : Window
     private void HideEmbeddedPreview(bool closeDocument)
     {
         Interlocked.Increment(ref previewRequestGeneration);
+        previewHostSuspended = false;
         previewDocumentReady = false;
         previewRequestedDocumentId = null;
         PreviewFrame.Visibility = Visibility.Collapsed;
         if (closeDocument)
         {
-            DisposeEmbeddedPreview();
+            if (previewNativeOpening) previewClosePending = true;
+            else embeddedPreview?.CloseDocument();
             previewDocumentId = null;
             previewVersionId = null;
             previewMarkupDirectory = string.Empty;
@@ -2076,7 +2114,7 @@ public partial class MainWindow : Window
 
     private HttpRequestMessage CreateApiRequest(HttpMethod method, string path)
     {
-        var request = new HttpRequestMessage(method, path);
+        var request = new HttpRequestMessage(method, new Uri(new Uri(bootstrapConfiguration.ApiBaseUrl), path));
         request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", accessToken);
         if (!string.IsNullOrWhiteSpace(activeCompanyId)) request.Headers.Add("X-Company-Id", activeCompanyId);
         return request;

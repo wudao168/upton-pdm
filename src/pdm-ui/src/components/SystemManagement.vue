@@ -6,6 +6,7 @@ import StorageSettings from './StorageSettings.vue'
 import ApprovalWorkflowSettings from './ApprovalWorkflowSettings.vue'
 import FolderTemplateSettings from './FolderTemplateSettings.vue'
 import UserSettings from './UserSettings.vue'
+import ProjectPermissionSettings from './ProjectPermissionSettings.vue'
 import type { AuditEntry, CreateRoleInput, CrmConnectionTestResult, CrmCustomerSyncResult, CrmIntegrationSettings, EquipmentTypeDefinition, OrganizationDirectory, OrganizationUnit, PdmCustomer, PdmSystemSettings, PdmUser, ProjectFolderTemplateNode, ProjectNumberingOptions, ProjectOrganization, RolePermissionDirectory, SaveOrganizationUnitInput, SavePdmUserInput, SaveProjectOrganizationInput, UpdateCrmIntegrationInput } from '../types'
 
 const props = defineProps<{
@@ -44,12 +45,13 @@ const props = defineProps<{
 }>()
 defineEmits<{ refreshAudit: []; updateActiveOrganizationId: [organizationId: string] }>()
 
-type AdminTab = 'u9' | 'users' | 'folders' | 'settings' | 'approval' | 'audit'
+type AdminTab = 'u9' | 'users' | 'project-permissions' | 'folders' | 'settings' | 'approval' | 'audit'
 const activeTab = ref<AdminTab>('u9')
 const hasPermission = (code: string) => props.permissions.includes(code)
 const availableTabs = computed<AdminTab[]>(() => [
   (hasPermission('settings.customer.manage') || hasPermission('settings.storage.manage')) && 'u9',
   (hasPermission('settings.organization.manage') || hasPermission('system.role.view')) && 'users',
+  hasPermission('system.project-permission.view') && 'project-permissions',
   hasPermission('settings.folder.manage') && 'folders',
   hasPermission('settings.storage.manage') && 'settings',
   hasPermission('settings.storage.manage') && 'approval',
@@ -63,6 +65,7 @@ watch(availableTabs, tabs => { if (!tabs.includes(activeTab.value)) activeTab.va
     <nav class="pdm-admin-tabs" aria-label="系统管理功能">
       <button v-if="availableTabs.includes('u9')" type="button" :class="{ 'is-active': activeTab === 'u9' }" @click="activeTab='u9'">U9C接口</button>
       <button v-if="availableTabs.includes('users')" type="button" :class="{ 'is-active': activeTab === 'users' }" @click="activeTab='users'">用户设置</button>
+      <button v-if="availableTabs.includes('project-permissions')" type="button" :class="{ 'is-active': activeTab === 'project-permissions' }" @click="activeTab='project-permissions'">项目权限</button>
       <button v-if="availableTabs.includes('folders')" type="button" :class="{ 'is-active': activeTab === 'folders' }" @click="activeTab='folders'">文件夹模板</button>
       <button v-if="availableTabs.includes('settings')" type="button" :class="{ 'is-active': activeTab === 'settings' }" @click="activeTab='settings'">编号与存储</button>
       <button v-if="availableTabs.includes('approval')" type="button" :class="{ 'is-active': activeTab === 'approval' }" @click="activeTab='approval'">审批流程</button>
@@ -81,6 +84,7 @@ watch(availableTabs, tabs => { if (!tabs.includes(activeTab.value)) activeTab.va
       :on-sync-customers="onSyncCrmCustomers"
     />
     <UserSettings v-else-if="activeTab === 'users'" :directory="organizationDirectory" :role-directory="rolePermissionDirectory" :active-organization-id="activeOrganizationId" :permissions="permissions" :current-username="currentUsername" :platform-administrator="platformAdministrator" :pending="pending" :on-save-user="onSaveUser" :on-reset-password="onResetUserPassword" :on-save-role-permissions="onUpdateRolePermissions" :on-create-role="onCreateRole" :on-delete-role="onDeleteRole" :on-save-organization="onSaveOrganization" :on-save-unit="onSaveUnit" :on-update-memberships="onUpdateMemberships" :on-update-managers="onUpdateManagers" @update-active-organization-id="$emit('updateActiveOrganizationId', $event)" />
+    <ProjectPermissionSettings v-else-if="activeTab === 'project-permissions'" :token="token" :can-edit="hasPermission('system.project-permission.edit')" />
     <FolderTemplateSettings v-else-if="activeTab === 'folders'" :nodes="folderTemplate" :users="organizationDirectory.users" :roles="rolePermissionDirectory.roles" :pending="pending" :on-save="onSaveFolderTemplate" />
     <StorageSettings v-else-if="activeTab === 'settings'" :settings="settings" :token="token" :equipment-types="equipmentTypes" :numbering-options="numberingOptions" :pending="pending" :on-save-settings="onSaveSettings" :on-save-equipment-type="onSaveEquipmentType" :on-update-counters="onUpdateCounters" />
     <ApprovalWorkflowSettings v-else-if="activeTab === 'approval'" :settings="settings" :pending="pending" :on-save="onSaveSettings" />

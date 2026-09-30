@@ -5,7 +5,8 @@ namespace Upton.Pdm.Application;
 public sealed record ProjectContentResetInspection(
     IReadOnlyDictionary<string, int> Counts,
     IReadOnlyList<string> Blockers,
-    bool HasContent);
+    bool HasContent,
+    IReadOnlyList<string>? ForceableBlockers = null);
 
 public sealed record ProjectContentResetSnapshotSummary(
     Guid Id,
@@ -28,12 +29,13 @@ public sealed record ProjectContentResetReadiness(
     bool CanReset,
     IReadOnlyList<string> Blockers,
     IReadOnlyDictionary<string, int> Counts,
-    IReadOnlyList<ProjectContentResetSnapshotSummary> RestorableSnapshots);
+    IReadOnlyList<ProjectContentResetSnapshotSummary> RestorableSnapshots,
+    bool CanForceReset);
 
 public interface IProjectContentResetStore
 {
     Task<ProjectContentResetInspection> InspectAsync(IReadOnlyList<Guid> projectIds, CancellationToken cancellationToken);
-    Task<ProjectContentResetSnapshotSummary> ResetAsync(Guid projectId, string projectCode, IReadOnlyList<Guid> projectIds, string reason, string actor, DateTimeOffset now, CancellationToken cancellationToken);
+    Task<ProjectContentResetSnapshotSummary> ResetAsync(Guid projectId, string projectCode, IReadOnlyList<Guid> projectIds, string reason, string actor, DateTimeOffset now, bool force, CancellationToken cancellationToken);
     Task<IReadOnlyList<ProjectContentResetSnapshotSummary>> ListSnapshotsAsync(Guid projectId, CancellationToken cancellationToken);
     Task<ProjectContentResetSnapshotSummary?> FindSnapshotAsync(Guid snapshotId, CancellationToken cancellationToken);
     Task<ProjectContentResetSnapshotSummary> RestoreAsync(Guid snapshotId, string actor, DateTimeOffset now, CancellationToken cancellationToken);
@@ -54,7 +56,8 @@ public sealed class ProjectContentResetService(IPdmRepository repository, IProje
         var inspection = await store.InspectAsync(included.Select(item => item.Id).ToArray(), cancellationToken);
         var snapshots = await store.ListSnapshotsAsync(projectId, cancellationToken);
         return new(project, includeChildren, included, inspection.Blockers.Count == 0, inspection.Blockers, inspection.Counts,
-            snapshots.Where(item => item.RestoredAt is null && item.PurgedAt is null && item.ExpiresAt > timeProvider.GetUtcNow()).ToArray());
+            snapshots.Where(item => item.RestoredAt is null && item.PurgedAt is null && item.ExpiresAt > timeProvider.GetUtcNow()).ToArray(),
+            inspection.Blockers.Count > 0 && inspection.Blockers.All(blocker => inspection.ForceableBlockers?.Contains(blocker) == true));
     }
 
     public async Task<ProjectContentResetSnapshotSummary> ResetAsync(
@@ -64,22 +67,24 @@ public sealed class ProjectContentResetService(IPdmRepository repository, IProje
         string? confirmation,
         string actor,
         UserRole role,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        bool force = false)
     {
         reason = reason?.Trim();
         confirmation = confirmation?.Trim();
         if (string.IsNullOrWhiteSpace(reason)) throw new PdmRuleException("重置原因不能为空。");
         if (reason.Length > 500) throw new PdmRuleException("重置原因不能超过500个字符。");
         var readiness = await GetReadinessAsync(projectId, includeChildren, actor, role, cancellationToken);
-        if (!readiness.CanReset) throw new PdmRuleException(string.Join("；", readiness.Blockers));
+        if (!(force ? readiness.CanReset || readiness.CanForceReset : readiness.CanReset))
+            throw new PdmRuleException(string.Join("；", readiness.Blockers));
         if (!string.Equals(confirmation, readiness.Project.Code, StringComparison.OrdinalIgnoreCase))
             throw new PdmRuleException("确认文字必须与当前项目号完全一致。");
         if (!readiness.Counts.Values.Any(value => value > 0)) throw new PdmRuleException("当前项目没有可重置的内容。");
 
         var now = timeProvider.GetUtcNow();
-        var snapshot = await store.ResetAsync(projectId, readiness.Project.Code, readiness.IncludedProjects.Select(item => item.Id).ToArray(), reason, actor, now, cancellationToken);
+        var snapshot = await store.ResetAsync(projectId, readiness.Project.Code, readiness.IncludedProjects.Select(item => item.Id).ToArray(), reason, actor, now, force, cancellationToken);
         await repository.AppendAuditAsync(new AuditEntry(Guid.NewGuid(), now, actor, "project.content.reset", nameof(Project), projectId.ToString(),
-            $"{readiness.Project.Code} · 范围{readiness.IncludedProjects.Count}个项目号 · 原因：{reason} · {Retention.TotalDays:0}天内可整项恢复"), cancellationToken);
+            $"{readiness.Project.Code} · 范围{readiness.IncludedProjects.Count}个项目号 · {(force ? "管理员强制重置 · " : "")}原因：{reason} · {Retention.TotalDays:0}天内可整项恢复"), cancellationToken);
         return snapshot;
     }
 

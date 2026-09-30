@@ -142,6 +142,7 @@ public sealed class PdmAddin : ISwAddin
             scanner = new SolidWorksReferenceTreeScanner(application);
             addinDirectory = Path.GetDirectoryName(typeof(PdmAddin).Assembly.Location) ?? AppDomain.CurrentDomain.BaseDirectory;
             taskPaneControl = new PdmTaskPaneControl(ClientPackageUpdater.GetInstalledVersion(addinDirectory));
+            taskPaneControl.SetPlannedTaskScrollInterval(pluginSettings.PlannedTaskScrollIntervalSeconds);
             taskPaneControl.CreateControl();
             WireEvents();
             WireSolidWorksEvents();
@@ -302,6 +303,7 @@ public sealed class PdmAddin : ISwAddin
     {
         taskPaneControl.LoginRequested += OnLoginRequested;
         taskPaneControl.OpenClientRequested += OnOpenClientRequested;
+        taskPaneControl.PlannedTasksRefreshRequested += OnPlannedTasksRefreshRequested;
         taskPaneControl.RefreshRequested += OnRefreshRequested;
         taskPaneControl.NodeSelected += OnNodeSelected;
         taskPaneControl.OpenRequested += OnOpenRequested;
@@ -345,6 +347,7 @@ public sealed class PdmAddin : ISwAddin
 
         taskPaneControl.LoginRequested -= OnLoginRequested;
         taskPaneControl.OpenClientRequested -= OnOpenClientRequested;
+        taskPaneControl.PlannedTasksRefreshRequested -= OnPlannedTasksRefreshRequested;
         taskPaneControl.RefreshRequested -= OnRefreshRequested;
         taskPaneControl.NodeSelected -= OnNodeSelected;
         taskPaneControl.OpenRequested -= OnOpenRequested;
@@ -960,6 +963,7 @@ public sealed class PdmAddin : ISwAddin
         if (disconnecting
             || Volatile.Read(ref refreshSuppressionDepth) > 0
             || Volatile.Read(ref openOperationInProgress) > 0
+            || Volatile.Read(ref workspaceOperationInProgress) > 0
             || Volatile.Read(ref pendingTreeRefresh) == 0
             || !PendingTreeRefreshDebounceElapsed()
             || taskPaneControl == null
@@ -1187,6 +1191,7 @@ public sealed class PdmAddin : ISwAddin
             {
                 ServerAddress = serverAddress,
                 AutomaticUpdatesEnabled = pluginSettings?.AutomaticUpdatesEnabled != false,
+                PlannedTaskScrollIntervalSeconds = pluginSettings?.PlannedTaskScrollIntervalSeconds ?? 30,
                 UseCustomDrawingQrPosition = pluginSettings?.UseCustomDrawingQrPosition == true,
                 DrawingQrXMillimeters = pluginSettings?.DrawingQrXMillimeters ?? 0d,
                 DrawingQrYMillimeters = pluginSettings?.DrawingQrYMillimeters ?? 0d,
@@ -1196,8 +1201,8 @@ public sealed class PdmAddin : ISwAddin
             GetClientUpdateSnapshot(),
             GetClientUpdateSnapshot,
             TestPluginConnectionAsync,
-            address => CheckClientUpdateAsync(address, false, lifetime.Token, false),
-            address => CheckClientUpdateAsync(address, true, lifetime.Token, false),
+            address => CheckClientUpdateAsync(address, false, lifetime.Token),
+            address => CheckClientUpdateAsync(address, true, lifetime.Token),
             SavePluginSettingsAsync))
         {
             dialog.ShowDialog(taskPaneControl);
@@ -1235,11 +1240,45 @@ public sealed class PdmAddin : ISwAddin
         drawingQrPolicy = await apiClient.GetDrawingQrPolicyAsync(lifetime.Token);
         await RefreshUserDisplayNamesAsync();
         taskPaneControl.SetProjects(projects);
+        _ = RefreshPlannedTasksAsync();
         if (currentTree != null && application?.ActiveDoc != null)
         {
             await ResolveProjectForCurrentDocumentAsync(currentTree, DocumentIdentity(currentTree));
         }
         TryStartControlledOpenRequest();
+    }
+
+    private bool refreshingPlannedTasks;
+
+    private async void OnPlannedTasksRefreshRequested(object sender, EventArgs eventArgs)
+    {
+        await RefreshPlannedTasksAsync();
+    }
+
+    private async Task RefreshPlannedTasksAsync()
+    {
+        if (refreshingPlannedTasks || apiClient == null || !apiClient.IsAuthenticated) return;
+        refreshingPlannedTasks = true;
+        var username = authenticatedUsername;
+        try
+        {
+            var projects = await apiClient.GetProjectsAsync(lifetime.Token);
+            var messages = new List<string>();
+            foreach (var project in projects.Where(project => (project.Designers ?? new List<string>())
+                .Any(designer => string.Equals(designer, username, StringComparison.OrdinalIgnoreCase))).OrderBy(project => project.Code))
+            {
+                var plan = await apiClient.GetProjectPlanAsync(project.Id, lifetime.Token);
+                messages.AddRange((plan?.Tasks ?? new List<ProjectPlanTaskDto>())
+                    .Where(task => string.Equals(task.Assignee, username, StringComparison.OrdinalIgnoreCase))
+                    .OrderBy(task => task.PlannedFinish)
+                    .Select(task => string.Concat(project.Code, " · ", task.Name, "  计划完成：", task.PlannedFinish)));
+            }
+            if (string.Equals(username, authenticatedUsername, StringComparison.OrdinalIgnoreCase))
+                taskPaneControl?.SetPlannedTasks(messages);
+        }
+        catch (OperationCanceledException) { }
+        catch (Exception exception) { LogDiagnostic("RefreshPlannedTasks", exception); }
+        finally { refreshingPlannedTasks = false; }
     }
 
     private async Task RefreshUserDisplayNamesAsync()
@@ -1912,8 +1951,7 @@ public sealed class PdmAddin : ISwAddin
     private async Task<PluginUpdateSnapshot> CheckClientUpdateAsync(
         string serverAddress,
         bool install,
-        CancellationToken cancellationToken,
-        bool allowCache = true)
+        CancellationToken cancellationToken)
     {
         await clientUpdateGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
@@ -1931,11 +1969,11 @@ public sealed class PdmAddin : ISwAddin
                 AutomaticUpdatesEnabled = pluginSettings.AutomaticUpdatesEnabled
             };
             var bootstrap = string.IsNullOrWhiteSpace(settings.ServerAddress)
-                ? await ClientBootstrapLoader.LoadAsync(cancellationToken).ConfigureAwait(false)
+                ? await ClientBootstrapLoader.LoadAsync(cancellationToken, false).ConfigureAwait(false)
                 : await ClientBootstrapLoader.LoadAsync(
                     PluginSettingsStore.BuildBootstrapUrl(settings.ServerAddress),
                     cancellationToken,
-                    allowCache).ConfigureAwait(false);
+                    false).ConfigureAwait(false);
             var installedVersion = ClientPackageUpdater.GetInstalledVersion(addinDirectory);
             var availableVersion = bootstrap?.SolidWorksAddin?.Version?.Trim() ?? string.Empty;
             var checkedAt = DateTimeOffset.Now;
@@ -2031,6 +2069,17 @@ public sealed class PdmAddin : ISwAddin
             SetClientUpdateSnapshot(stagedSnapshot);
             return stagedSnapshot.Clone();
         }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        {
+            const string message = "连接更新服务器超时，请检查服务器地址和网络连接后重试。";
+            ChangeClientUpdateSnapshot(snapshot =>
+            {
+                snapshot.Busy = false;
+                snapshot.Status = message;
+                snapshot.LastCheckedAt = DateTimeOffset.Now;
+            });
+            throw new TimeoutException(message);
+        }
         catch (OperationCanceledException)
         {
             ChangeClientUpdateSnapshot(snapshot =>
@@ -2059,22 +2108,29 @@ public sealed class PdmAddin : ISwAddin
     private async Task<PluginConnectionResult> TestPluginConnectionAsync(string serverAddress)
     {
         var normalizedAddress = PluginSettingsStore.NormalizeServerAddress(serverAddress);
-        var bootstrap = await ClientBootstrapLoader.LoadAsync(
-            PluginSettingsStore.BuildBootstrapUrl(normalizedAddress),
-            lifetime.Token,
-            false).ConfigureAwait(false);
-        using (var client = new HttpClient { Timeout = TimeSpan.FromSeconds(8) })
-        using (var response = await client.GetAsync(
-            new Uri(new Uri(bootstrap.ApiBaseUrl), "health"),
-            lifetime.Token).ConfigureAwait(false))
+        try
         {
-            response.EnsureSuccessStatusCode();
+            var bootstrap = await ClientBootstrapLoader.LoadAsync(
+                PluginSettingsStore.BuildBootstrapUrl(normalizedAddress),
+                lifetime.Token,
+                false).ConfigureAwait(false);
+            using (var client = new HttpClient { Timeout = TimeSpan.FromSeconds(8) })
+            using (var response = await client.GetAsync(
+                new Uri(new Uri(bootstrap.ApiBaseUrl), "health"),
+                lifetime.Token).ConfigureAwait(false))
+            {
+                response.EnsureSuccessStatusCode();
+            }
+            return new PluginConnectionResult
+            {
+                Configuration = bootstrap,
+                Message = "连接成功，PLM服务正常"
+            };
         }
-        return new PluginConnectionResult
+        catch (OperationCanceledException) when (!lifetime.IsCancellationRequested)
         {
-            Configuration = bootstrap,
-            Message = "连接成功，PLM服务正常"
-        };
+            throw new TimeoutException("连接服务器超时，请检查服务器地址和网络连接后重试。");
+        }
     }
 
     private async Task<PluginConnectionResult> SavePluginSettingsAsync(PluginSettings requestedSettings)
@@ -2123,6 +2179,7 @@ public sealed class PdmAddin : ISwAddin
         {
             ServerAddress = normalizedAddress,
             AutomaticUpdatesEnabled = requestedSettings.AutomaticUpdatesEnabled,
+            PlannedTaskScrollIntervalSeconds = requestedSettings.PlannedTaskScrollIntervalSeconds,
             UseCustomDrawingQrPosition = requestedSettings.UseCustomDrawingQrPosition,
             DrawingQrXMillimeters = requestedSettings.DrawingQrXMillimeters,
             DrawingQrYMillimeters = requestedSettings.DrawingQrYMillimeters,
@@ -2131,6 +2188,7 @@ public sealed class PdmAddin : ISwAddin
         };
         PluginSettingsStore.Save(settings);
         pluginSettings = settings;
+        taskPaneControl.SetPlannedTaskScrollInterval(settings.PlannedTaskScrollIntervalSeconds);
         currentBootstrap = connection.Configuration;
 
         if (serverChanged)
@@ -5988,6 +6046,11 @@ public sealed class PdmAddin : ISwAddin
             : Interlocked.Exchange(ref openPropertyWritebackTab, 0) != 0
                 ? PropertyOperationMode.PropertyWriteback
                 : PropertyOperationMode.BatchEdit;
+        if (Volatile.Read(ref workspaceOperationInProgress) != 0)
+        {
+            ShowWorkspaceOperationBusy();
+            return;
+        }
         if (initialOperation == PropertyOperationMode.PropertyWriteback && !apiClient.IsAuthenticated)
         {
             ShowError("请先登录PLM。");
@@ -9857,6 +9920,7 @@ public sealed class PdmAddin : ISwAddin
         var uploadCopyPath = string.Empty;
         IModelDoc2 document = null;
         var openedForBatch = false;
+        var closedBatchDocument = false;
         var operationTimer = Stopwatch.StartNew();
         try
         {
@@ -9941,9 +10005,20 @@ public sealed class PdmAddin : ISwAddin
                 }
 
                 modelProperties = ReadCheckInProperties(document, node);
+                if (openedForBatch)
+                {
+                    CloseBatchOpenedDocument(document);
+                    if (FindLoadedDocument(documentPath) != null)
+                    {
+                        throw new IOException("SolidWorks未能关闭临时读取的图档，已停止提交存档：" + node.FileName);
+                    }
+                    document = null;
+                    openedForBatch = false;
+                    closedBatchDocument = true;
+                }
             }
 
-            localSha256 = preflight != null && preflight.MatchesCurrentFile(documentPath)
+            localSha256 = !closedBatchDocument && preflight != null && preflight.MatchesCurrentFile(documentPath)
                 ? preflight.LocalSha256
                 : await Task.Run(() => ComputeFileHash(documentPath), cancellationToken);
             if (identity == null

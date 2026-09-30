@@ -22,6 +22,7 @@ internal sealed class EDrawingsPreviewControl : Forms.UserControl
 
     private readonly EDrawingsAxHost viewer = new();
     private readonly RecoveryToolStrip toolbar = new();
+    private readonly Forms.TextBox measureResultBox = new();
     private readonly Forms.Timer repaintTimer = new();
     private readonly Forms.Timer markupDisplayTimer = new();
     private readonly Forms.Timer markupStateTimer = new();
@@ -37,6 +38,7 @@ internal sealed class EDrawingsPreviewControl : Forms.UserControl
     private bool documentOpen;
     private bool documentReady;
     private bool documentTransitioning;
+    private bool measureResultReadFailureLogged;
     private bool disposed;
     private PreviewButtonTheme buttonTheme = PreviewButtonTheme.Resolve("a");
 
@@ -92,8 +94,18 @@ internal sealed class EDrawingsPreviewControl : Forms.UserControl
         measureButton = AddModeButton("measure", "测量");
 
         Controls.Add(toolbar);
+        measureResultBox.ReadOnly = true;
+        measureResultBox.Multiline = true;
+        measureResultBox.ScrollBars = Forms.ScrollBars.Vertical;
+        measureResultBox.TabStop = false;
+        measureResultBox.BackColor = Color.FromArgb(237, 245, 255);
+        measureResultBox.BorderStyle = Forms.BorderStyle.FixedSingle;
+        measureResultBox.Font = new Font("Microsoft YaHei UI", 9F);
+        measureResultBox.Visible = false;
+        Controls.Add(measureResultBox);
         viewer.SendToBack();
         toolbar.BringToFront();
+        measureResultBox.BringToFront();
 
         repaintTimer.Interval = 220;
         repaintTimer.Tick += OnRepaintTimerTick;
@@ -356,7 +368,7 @@ internal sealed class EDrawingsPreviewControl : Forms.UserControl
         try
         {
             dynamic control = viewer.ActiveControl;
-            ReleaseMarkupControl();
+            markupControl = null;
             markupControl = control.CoCreateInstance("{9FCFE7FE-2ED5-4720-94F9-6B712F7D11A2}");
             if (markupControl == null)
             {
@@ -366,6 +378,10 @@ internal sealed class EDrawingsPreviewControl : Forms.UserControl
 
             dynamic markup = markupControl;
             markup.ViewOperator = 11;
+            measureResultReadFailureLogged = false;
+            measureResultBox.Text = string.Empty;
+            measureResultBox.Visible = false;
+            WriteDiagnostic("measure-activate", currentDocumentName);
             return true;
         }
         catch (Exception exception)
@@ -438,7 +454,10 @@ internal sealed class EDrawingsPreviewControl : Forms.UserControl
         pendingRepaintAttempts = 0;
         pendingMarkupDisplayAttempts = 0;
         pendingMarkupPath = string.Empty;
-        ReleaseMarkupControl();
+        markupControl = null;
+        measureResultReadFailureLogged = false;
+        measureResultBox.Text = string.Empty;
+        measureResultBox.Visible = false;
         documentReady = false;
         SetMarkupModified(false, true);
         if (!documentOpen)
@@ -460,23 +479,6 @@ internal sealed class EDrawingsPreviewControl : Forms.UserControl
             currentDocumentName = string.Empty;
             documentTransitioning = false;
             UpdateToolbarState();
-        }
-    }
-
-    private void ReleaseMarkupControl()
-    {
-        var control = markupControl;
-        markupControl = null;
-        if (control != null && Marshal.IsComObject(control))
-        {
-            try
-            {
-                Marshal.ReleaseComObject(control);
-            }
-            catch (InvalidComObjectException)
-            {
-                // The ActiveX control may have disconnected the markup object first.
-            }
         }
     }
 
@@ -712,6 +714,10 @@ internal sealed class EDrawingsPreviewControl : Forms.UserControl
         {
             item.Value.Checked = string.Equals(item.Key, command, StringComparison.OrdinalIgnoreCase);
         }
+        if (command != "measure")
+        {
+            measureResultBox.Visible = false;
+        }
     }
 
     private void LayoutOverlays()
@@ -724,6 +730,9 @@ internal sealed class EDrawingsPreviewControl : Forms.UserControl
         toolbar.PerformLayout();
         toolbar.Location = new Point(Math.Max(8, (ClientSize.Width - toolbar.Width) / 2), 10);
         toolbar.BringToFront();
+        measureResultBox.Size = new Size(Math.Min(460, Math.Max(120, ClientSize.Width - 24)), 90);
+        measureResultBox.Location = new Point(12, Math.Max(12, ClientSize.Height - measureResultBox.Height - 12));
+        measureResultBox.BringToFront();
     }
 
     private void OnToolbarPaintResourceFailure(OutOfMemoryException exception)
@@ -812,6 +821,32 @@ internal sealed class EDrawingsPreviewControl : Forms.UserControl
         catch
         {
             // The ActiveX control can briefly reject property reads while changing documents.
+        }
+
+        if (!measureButton.Checked || markupControl == null)
+        {
+            return;
+        }
+
+        try
+        {
+            dynamic markup = markupControl;
+            var result = Convert.ToString(markup.MeasureResultString) ?? string.Empty;
+            var text = string.IsNullOrWhiteSpace(result) ? string.Empty : $"测量结果\r\n{result}";
+            if (measureResultBox.Text != text)
+            {
+                measureResultBox.Text = text;
+                measureResultBox.Visible = text.Length > 0;
+                WriteDiagnostic("measure-result", $"{currentDocumentName} | {result.Replace('\r', ' ').Replace('\n', ' ')}");
+            }
+        }
+        catch (Exception exception)
+        {
+            if (!measureResultReadFailureLogged)
+            {
+                measureResultReadFailureLogged = true;
+                WriteDiagnostic("measure-result-read-failed", $"{currentDocumentName} | {exception.GetType().Name}: {exception.Message}");
+            }
         }
     }
 

@@ -82,6 +82,7 @@ public sealed class PdmWorkflowService(
     public async Task<Project> CreateSubprojectAsync(CreateSubprojectCommand command, string actor, UserRole role, CancellationToken cancellationToken)
     {
         await RequirePermissionAsync(actor, role, PermissionCodes.ProjectChildCreate, cancellationToken);
+        await ProjectPermissionPolicy.RequireAsync(repository, command.ParentProjectId, actor, role, PermissionCodes.ProjectChildCreate, cancellationToken);
         ValidateProjectDetails(command.Name, command.ProjectAlias, command.Quantity);
         if (!await repository.HasProjectReadAccessAsync(command.ParentProjectId, actor, role, cancellationToken))
             throw new UnauthorizedAccessException("当前用户没有该上级项目的访问权限。");
@@ -440,6 +441,17 @@ public sealed class PdmWorkflowService(
         return directory;
     }
 
+    public async Task<ProjectPermissionSettings> UpdateProjectPermissionSettingsAsync(ProjectPermissionSettings settings, string actor, UserRole role, CancellationToken cancellationToken)
+    {
+        await RequirePermissionAsync(actor, role, PermissionCodes.ProjectPermissionSettingsEdit, cancellationToken);
+        ProjectPermissionSettings saved;
+        try { saved = await repository.UpdateProjectPermissionSettingsAsync(settings.Normalize(), cancellationToken); }
+        catch (ArgumentException error) { throw new PdmRuleException(error.Message); }
+        await AuditAsync(actor, "project.permissions.update", nameof(ProjectPermissionSettings), "project-permissions",
+            string.Join('；', saved.Rules.Select(rule => $"{rule.Key}:{string.Join(',', rule.Value)}")), cancellationToken);
+        return saved;
+    }
+
     public async Task<RolePermissionDirectory> CreateRoleAsync(string name, string description, string sourceRoleCode, string actor, UserRole actorRole, CancellationToken cancellationToken)
     {
         await RequirePermissionAsync(actor, actorRole, PermissionCodes.RoleSettingsEdit, cancellationToken);
@@ -668,6 +680,7 @@ public sealed class PdmWorkflowService(
     public async Task<Project> UpdateProjectDetailsAsync(Guid projectId, UpdateProjectDetailsCommand command, string actor, UserRole role, CancellationToken cancellationToken)
     {
         await RequirePermissionAsync(actor, role, PermissionCodes.ProjectEdit, cancellationToken);
+        await ProjectPermissionPolicy.RequireAsync(repository, projectId, actor, role, PermissionCodes.ProjectEdit, cancellationToken);
         if (!await repository.HasProjectReadAccessAsync(projectId, actor, role, cancellationToken))
             throw new UnauthorizedAccessException("当前账号无权编辑该项目。");
         var project = await repository.FindProjectAsync(projectId, cancellationToken) ?? throw new PdmNotFoundException("项目不存在。");
@@ -760,6 +773,7 @@ public sealed class PdmWorkflowService(
     public async Task<Project> SetChildProjectDesignersAsync(Guid projectId, IReadOnlyList<string> designers, string actor, UserRole role, CancellationToken cancellationToken)
     {
         await RequirePermissionAsync(actor, role, PermissionCodes.ProjectDesignerAssign, cancellationToken);
+        await ProjectPermissionPolicy.RequireAsync(repository, projectId, actor, role, PermissionCodes.ProjectDesignerAssign, cancellationToken);
         var project = await repository.FindProjectAsync(projectId, cancellationToken) ?? throw new PdmNotFoundException("项目不存在。");
         var root = project.ParentProjectId is null
             ? project
@@ -788,6 +802,7 @@ public sealed class PdmWorkflowService(
     public async Task<Project> SetProjectPhaseOwnersAsync(Guid projectId, SetProjectPhaseOwnersCommand command, string actor, UserRole role, CancellationToken cancellationToken)
     {
         await RequirePermissionAsync(actor, role, PermissionCodes.ProjectDesignerAssign, cancellationToken);
+        await ProjectPermissionPolicy.RequireAsync(repository, projectId, actor, role, PermissionCodes.ProjectDesignerAssign, cancellationToken);
         var project = await repository.FindProjectAsync(projectId, cancellationToken) ?? throw new PdmNotFoundException("项目不存在。");
         var root = project.ParentProjectId is null
             ? project
@@ -821,6 +836,7 @@ public sealed class PdmWorkflowService(
     public async Task<Project> SetChildProjectManagerAsync(Guid projectId, string projectManager, string actor, UserRole role, CancellationToken cancellationToken)
     {
         await RequirePermissionAsync(actor, role, PermissionCodes.ProjectDesignerAssign, cancellationToken);
+        await ProjectPermissionPolicy.RequireAsync(repository, projectId, actor, role, PermissionCodes.ProjectDesignerAssign, cancellationToken);
         var child = await repository.FindProjectAsync(projectId, cancellationToken) ?? throw new PdmNotFoundException("子项目不存在。");
         if (child.ParentProjectId is null) throw new PdmRuleException("负责人只能配置到子项目。");
         var root = await repository.FindProjectAsync(child.RootProjectId ?? child.ParentProjectId.Value, cancellationToken) ?? throw new PdmNotFoundException("主项目不存在。");
@@ -845,6 +861,7 @@ public sealed class PdmWorkflowService(
     public async Task<Project> DeleteProjectAsync(Guid projectId, string actor, UserRole role, CancellationToken cancellationToken)
     {
         await RequirePermissionAsync(actor, role, PermissionCodes.ProjectDelete, cancellationToken);
+        await ProjectPermissionPolicy.RequireAsync(repository, projectId, actor, role, PermissionCodes.ProjectDelete, cancellationToken);
         var project = await repository.FindProjectAsync(projectId, cancellationToken)
             ?? throw new PdmNotFoundException("项目不存在。");
         await repository.DeleteProjectAsync(projectId, cancellationToken);
@@ -1929,6 +1946,7 @@ public sealed class PdmWorkflowService(
         CancellationToken cancellationToken)
     {
         await RequirePermissionAsync(actor, role, PermissionCodes.ReleaseManage, cancellationToken);
+        await ProjectPermissionPolicy.RequireAsync(repository, projectId, actor, role, PermissionCodes.ReleaseManage, cancellationToken);
         RequireMechanicalReleaseRole(ReleaseScope.LegacyCombined, role);
         var project = await repository.FindProjectAsync(projectId, cancellationToken)
             ?? throw new PdmNotFoundException("项目不存在。 ");
@@ -2053,6 +2071,7 @@ public sealed class PdmWorkflowService(
         wholeSetMultiplier = NormalizeWholeSetMultiplier(scope, wholeSetMultiplier);
         var project = await repository.FindProjectAsync(projectId, cancellationToken)
             ?? throw new PdmNotFoundException("项目不存在。");
+        await ProjectPermissionPolicy.RequireAsync(repository, projectId, actor, role, PermissionCodes.ReleaseManage, cancellationToken);
         var projectNumber = ProjectNumberPolicy.BusinessCode(project);
         var businessTime = timeProvider.GetUtcNow().ToOffset(TimeSpan.FromHours(8));
         number = $"RP-{projectNumber}-{businessTime:yyyyMMdd}-{Guid.NewGuid().ToString("N")[..8].ToUpperInvariant()}";
@@ -2180,6 +2199,7 @@ public sealed class PdmWorkflowService(
         await RequirePermissionAsync(actor, role, PermissionCodes.ReleaseManage, cancellationToken);
         var package = await repository.FindReleasePackageAsync(releasePackageId, cancellationToken)
             ?? throw new PdmNotFoundException("发布包不存在。");
+        await ProjectPermissionPolicy.RequireAsync(repository, package.ProjectId, actor, role, PermissionCodes.ReleaseManage, cancellationToken);
         RequireMechanicalReleaseRole(package.Scope, role);
         if (package.State != ReleasePackageState.Draft)
             throw new PdmConflictException("只有草稿发布包可以编辑，请刷新后重试。");
@@ -2303,6 +2323,7 @@ public sealed class PdmWorkflowService(
         await RequirePermissionAsync(actor, role, PermissionCodes.ReleaseManage, cancellationToken);
         var package = await repository.FindReleasePackageAsync(releasePackageId, cancellationToken)
             ?? throw new PdmNotFoundException("发布包不存在。");
+        await ProjectPermissionPolicy.RequireAsync(repository, package.ProjectId, actor, role, PermissionCodes.ReleaseManage, cancellationToken);
         RequireMechanicalReleaseRole(package.Scope, role);
         if (package.State != ReleasePackageState.Draft)
             throw new PdmConflictException("只有草稿发布包可以删除，请刷新后重试。");
@@ -2334,6 +2355,7 @@ public sealed class PdmWorkflowService(
         RequireMechanicalReleaseRole(package.Scope, role);
         if (!await repository.HasProjectContentReadAccessAsync(package.ProjectId, actor, role, cancellationToken))
             throw new UnauthorizedAccessException("当前用户没有该项目的操作权限。");
+        await ProjectPermissionPolicy.RequireAsync(repository, package.ProjectId, actor, role, PermissionCodes.ReleaseManage, cancellationToken);
         if (!IsLongLeadScope(package.Scope) || package.State != ReleasePackageState.Published)
             throw new PdmRuleException("只有已发布的长交期发布包可以重试U9C串联。");
         if (bomHeaderService is null || approvalU9Automation is null)
@@ -2417,7 +2439,7 @@ public sealed class PdmWorkflowService(
         UserRole role,
         CancellationToken cancellationToken)
     {
-        await RequireBomEditPermissionAsync(actor, role, kind, cancellationToken);
+        await RequireBomEditPermissionAsync(projectId, actor, role, kind, cancellationToken);
         if (kind is not (BomKind.Standard or BomKind.NonStandard or BomKind.Electrical))
             throw new PdmRuleException("BOM类型必须是标准件、非标件或电气。");
         _ = await repository.FindProjectAsync(projectId, cancellationToken)
@@ -2634,7 +2656,7 @@ public sealed class PdmWorkflowService(
 
     public async Task<BomGenerationResult> GenerateMechanicalBomAsync(Guid projectId, bool apply, string actor, UserRole role, CancellationToken cancellationToken)
     {
-        await RequireBomEditPermissionAsync(actor, role, BomKind.Standard, cancellationToken);
+        await RequireBomEditPermissionAsync(projectId, actor, role, BomKind.Standard, cancellationToken);
         if (!await repository.HasProjectContentReadAccessAsync(projectId, actor, role, cancellationToken))
             throw new UnauthorizedAccessException("当前用户没有该项目的操作权限。");
         await EnsureBomChangeAllowedAsync(projectId, cancellationToken, BomKind.Standard, BomKind.NonStandard);
@@ -2721,7 +2743,7 @@ public sealed class PdmWorkflowService(
 
     public async Task<IReadOnlyList<BomItem>> ResolveBomItemAsync(Guid projectId, Guid itemId, ResolveBomItemCommand command, string actor, UserRole role, CancellationToken cancellationToken)
     {
-        await RequireAnyBomEditPermissionAsync(actor, role, cancellationToken);
+        await RequireAnyBomEditPermissionAsync(projectId, actor, role, cancellationToken);
         if (!await repository.HasProjectContentReadAccessAsync(projectId, actor, role, cancellationToken))
             throw new UnauthorizedAccessException("当前用户没有该项目的操作权限。");
         var standard = (await repository.GetBomAsync(projectId, BomKind.Standard, cancellationToken)).ToList();
@@ -2731,7 +2753,7 @@ public sealed class PdmWorkflowService(
         var validationRules = (await repository.GetSystemSettingsAsync(cancellationToken)).ValidationRules;
         var item = standard.Concat(nonStandard).Concat(unclassified).Concat(electrical).FirstOrDefault(candidate => candidate.Id == itemId)
             ?? throw new PdmNotFoundException("BOM物料不存在。");
-        await RequireBomEditPermissionAsync(actor, role, new[] { item.Kind, command.TargetKind ?? item.Kind }, cancellationToken);
+        await RequireBomEditPermissionAsync(projectId, actor, role, new[] { item.Kind, command.TargetKind ?? item.Kind }, cancellationToken);
         await EnsureBomChangeAllowedAsync(projectId, cancellationToken, item.Kind, command.TargetKind ?? item.Kind);
         var now = timeProvider.GetUtcNow();
         if (string.Equals(command.Action, "merge-source", StringComparison.OrdinalIgnoreCase))
@@ -2812,7 +2834,7 @@ public sealed class PdmWorkflowService(
 
     public async Task<IReadOnlyList<BomItem>> BatchUpdateBomItemsAsync(Guid projectId, BatchUpdateBomItemsCommand command, string actor, UserRole role, CancellationToken cancellationToken)
     {
-        await RequireAnyBomEditPermissionAsync(actor, role, cancellationToken);
+        await RequireAnyBomEditPermissionAsync(projectId, actor, role, cancellationToken);
         if (!await repository.HasProjectContentReadAccessAsync(projectId, actor, role, cancellationToken))
             throw new UnauthorizedAccessException("当前用户没有该项目的操作权限。");
         var itemIds = command.ItemIds.Distinct().ToArray();
@@ -2854,7 +2876,7 @@ public sealed class PdmWorkflowService(
         var validationRules = (await repository.GetSystemSettingsAsync(cancellationToken)).ValidationRules;
         var originals = standard.Concat(nonStandard).Concat(unclassified).Concat(electrical).Concat(virtualItems).Where(item => itemIds.Contains(item.Id)).ToDictionary(item => item.Id);
         if (originals.Count != itemIds.Length) throw new PdmNotFoundException("选中的BOM物料已变化，请刷新后重新选择。");
-        await RequireBomEditPermissionAsync(actor, role, originals.Values.Select(item => item.Kind).Append(command.TargetKind ?? originals.Values.First().Kind), cancellationToken);
+        await RequireBomEditPermissionAsync(projectId, actor, role, originals.Values.Select(item => item.Kind).Append(command.TargetKind ?? originals.Values.First().Kind), cancellationToken);
         await EnsureBomChangeAllowedAsync(projectId, cancellationToken, originals.Values.Select(item => item.Kind).Append(command.TargetKind ?? originals.Values.First().Kind).ToArray());
         if (originals.Values.Any(item => item.IsManuallyExcluded))
             throw new PdmRuleException("回收站中的物料不能直接编辑，请先执行恢复。");
@@ -2975,7 +2997,7 @@ public sealed class PdmWorkflowService(
 
     public async Task<IReadOnlyList<BomItem>> RestoreBomItemsFromSourceAsync(Guid projectId, RestoreBomItemsFromSourceCommand command, string actor, UserRole role, CancellationToken cancellationToken)
     {
-        await RequireAnyBomEditPermissionAsync(actor, role, cancellationToken);
+        await RequireAnyBomEditPermissionAsync(projectId, actor, role, cancellationToken);
         if (!await repository.HasProjectContentReadAccessAsync(projectId, actor, role, cancellationToken))
             throw new UnauthorizedAccessException("当前用户没有该项目的操作权限。");
         var itemIds = command.ItemIds.Distinct().ToArray();
@@ -2988,7 +3010,7 @@ public sealed class PdmWorkflowService(
         var virtualItems = (await repository.GetBomAsync(projectId, BomKind.Virtual, cancellationToken)).ToArray();
         var originals = standard.Concat(nonStandard).Where(item => itemIds.Contains(item.Id)).ToDictionary(item => item.Id);
         if (originals.Count != itemIds.Length) throw new PdmRuleException("只能恢复标准件BOM或非标件BOM中的物料。");
-        await RequireBomEditPermissionAsync(actor, role, originals.Values.Select(item => item.Kind), cancellationToken);
+        await RequireBomEditPermissionAsync(projectId, actor, role, originals.Values.Select(item => item.Kind), cancellationToken);
         await EnsureBomChangeAllowedAsync(projectId, cancellationToken, originals.Values.Select(item => item.Kind).ToArray());
         if (originals.Values.Any(item => !item.SourceDocumentId.HasValue))
             throw new PdmRuleException("人工新增物料没有图档源数据，不能执行恢复源数据。");
@@ -3089,7 +3111,7 @@ public sealed class PdmWorkflowService(
 
     private async Task<BomSourceReclassificationPlan> PrepareBomSourceReclassificationAsync(Guid projectId, ReclassifyBomItemsFromSourceCommand command, string actor, UserRole role, CancellationToken cancellationToken)
     {
-        await RequireBomEditPermissionAsync(actor, role, BomKind.Standard, cancellationToken);
+        await RequireBomEditPermissionAsync(projectId, actor, role, BomKind.Standard, cancellationToken);
         if (!await repository.HasProjectContentReadAccessAsync(projectId, actor, role, cancellationToken))
             throw new UnauthorizedAccessException("当前用户没有该项目的操作权限。");
         if (command.TargetKind is not (BomKind.Standard or BomKind.NonStandard))
@@ -3187,7 +3209,7 @@ public sealed class PdmWorkflowService(
         UserRole role,
         CancellationToken cancellationToken)
     {
-        await RequireAnyBomEditPermissionAsync(actor, role, cancellationToken);
+        await RequireAnyBomEditPermissionAsync(projectId, actor, role, cancellationToken);
         if (!await repository.HasProjectContentReadAccessAsync(projectId, actor, role, cancellationToken))
             throw new UnauthorizedAccessException("当前用户没有该项目的操作权限。");
         var itemIds = command.ItemIds.Distinct().ToHashSet();
@@ -3205,7 +3227,7 @@ public sealed class PdmWorkflowService(
         var all = standard.Concat(nonStandard).Concat(electrical).ToArray();
         var selected = all.Where(item => itemIds.Contains(item.Id)).ToArray();
         if (selected.Length != itemIds.Count) throw new PdmNotFoundException("选中的BOM物料已变化，请刷新后重新选择。");
-        await RequireBomEditPermissionAsync(actor, role, selected.Select(item => item.Kind), cancellationToken);
+        await RequireBomEditPermissionAsync(projectId, actor, role, selected.Select(item => item.Kind), cancellationToken);
         if (selected.Any(item => item.IsManuallyExcluded)) throw new PdmRuleException("回收站物料不能设置发布状态，请先恢复物料。");
         if (command.Excluded && selected.Any(item => item.IsReleaseExcluded))
             throw new PdmRuleException("选中的物料中包含已设置为不发布的物料，请分开处理。");
@@ -3238,7 +3260,7 @@ public sealed class PdmWorkflowService(
 
     public async Task<IReadOnlyList<BomItem>> BatchDeleteBomItemsAsync(Guid projectId, BatchDeleteBomItemsCommand command, string actor, UserRole role, CancellationToken cancellationToken)
     {
-        await RequireAnyBomEditPermissionAsync(actor, role, cancellationToken);
+        await RequireAnyBomEditPermissionAsync(projectId, actor, role, cancellationToken);
         if (!await repository.HasProjectContentReadAccessAsync(projectId, actor, role, cancellationToken))
             throw new UnauthorizedAccessException("当前用户没有该项目的操作权限。");
         var itemIds = command.ItemIds.Distinct().ToHashSet();
@@ -3254,7 +3276,7 @@ public sealed class PdmWorkflowService(
         var all = standard.Concat(nonStandard).Concat(unclassified).Concat(electrical).ToArray();
         var selected = all.Where(item => itemIds.Contains(item.Id)).ToArray();
         if (selected.Length != itemIds.Count) throw new PdmNotFoundException("选中的BOM物料已变化，请刷新后重新选择。");
-        await RequireBomEditPermissionAsync(actor, role, selected.Select(item => item.Kind), cancellationToken);
+        await RequireBomEditPermissionAsync(projectId, actor, role, selected.Select(item => item.Kind), cancellationToken);
         await EnsureBomChangeAllowedAsync(projectId, cancellationToken, selected.Select(item => item.Kind).ToArray());
         if (selected.Any(item => item.IsManuallyExcluded)) throw new PdmRuleException("选中的BOM物料已在回收站中，请刷新后重试。");
 
@@ -3296,7 +3318,7 @@ public sealed class PdmWorkflowService(
 
     public async Task<IReadOnlyList<BomItem>> BatchRestoreBomItemsAsync(Guid projectId, BatchRestoreBomItemsCommand command, string actor, UserRole role, CancellationToken cancellationToken)
     {
-        await RequireAnyBomEditPermissionAsync(actor, role, cancellationToken);
+        await RequireAnyBomEditPermissionAsync(projectId, actor, role, cancellationToken);
         if (!await repository.HasProjectContentReadAccessAsync(projectId, actor, role, cancellationToken))
             throw new UnauthorizedAccessException("当前用户没有该项目的操作权限。");
         var itemIds = command.ItemIds.Distinct().ToHashSet();
@@ -3313,7 +3335,7 @@ public sealed class PdmWorkflowService(
         var all = standard.Concat(nonStandard).Concat(unclassified).Concat(electrical).ToArray();
         var selected = all.Where(item => itemIds.Contains(item.Id)).ToArray();
         if (selected.Length != itemIds.Count) throw new PdmNotFoundException("选中的回收站物料已变化，请刷新后重新选择。");
-        await RequireBomEditPermissionAsync(actor, role, selected.Select(item => item.Kind), cancellationToken);
+        await RequireBomEditPermissionAsync(projectId, actor, role, selected.Select(item => item.Kind), cancellationToken);
         await EnsureBomChangeAllowedAsync(projectId, cancellationToken, selected.Select(item => item.Kind).ToArray());
         if (selected.Any(item => !item.IsManuallyExcluded)) throw new PdmRuleException("选中的物料不在回收站中，请刷新后重试。");
         if (mode == "AsManual" && selected.Any(item => !item.SourceDocumentId.HasValue))
@@ -3377,7 +3399,7 @@ public sealed class PdmWorkflowService(
 
     public async Task<IReadOnlyList<BomItem>> PermanentlyDeleteManualBomItemsAsync(Guid projectId, PermanentlyDeleteManualBomItemsCommand command, string actor, UserRole role, CancellationToken cancellationToken)
     {
-        await RequireAnyBomEditPermissionAsync(actor, role, cancellationToken);
+        await RequireAnyBomEditPermissionAsync(projectId, actor, role, cancellationToken);
         if (!await repository.HasProjectContentReadAccessAsync(projectId, actor, role, cancellationToken))
             throw new UnauthorizedAccessException("当前用户没有该项目的操作权限。");
         var itemIds = command.ItemIds.Distinct().ToHashSet();
@@ -3392,7 +3414,7 @@ public sealed class PdmWorkflowService(
         var all = standard.Concat(nonStandard).Concat(unclassified).Concat(electrical).ToArray();
         var selected = all.Where(item => itemIds.Contains(item.Id)).ToArray();
         if (selected.Length != itemIds.Count) throw new PdmNotFoundException("选中的回收站物料已变化，请刷新后重新选择。");
-        await RequireBomEditPermissionAsync(actor, role, selected.Select(item => item.Kind), cancellationToken);
+        await RequireBomEditPermissionAsync(projectId, actor, role, selected.Select(item => item.Kind), cancellationToken);
         await EnsureBomChangeAllowedAsync(projectId, cancellationToken, selected.Select(item => item.Kind).ToArray());
         if (selected.Any(item => !item.IsManuallyExcluded)) throw new PdmRuleException("只能彻底删除已在回收站中的物料。");
         if (selected.Any(item => item.SourceDocumentId.HasValue)) throw new PdmRuleException("有图档来源的物料不能彻底删除，请恢复或保留在回收站中。");
@@ -3462,11 +3484,14 @@ public sealed class PdmWorkflowService(
 
     private async Task<IReadOnlyList<UserAccount>> ListDrawingReviewCandidateUsersAsync(Guid projectId, string actor, CancellationToken cancellationToken)
     {
+        var project = await repository.FindProjectAsync(projectId, cancellationToken)
+            ?? throw new PdmNotFoundException("项目不存在。");
         var candidates = new List<UserAccount>();
         foreach (var user in await repository.ListUsersAsync(cancellationToken))
         {
             if (!user.IsActive || string.Equals(user.Username, actor, StringComparison.OrdinalIgnoreCase)) continue;
-            if (!await repository.HasUserPermissionAsync(user.Username, user.Role, PermissionCodes.DrawingReviewDecide, cancellationToken)) continue;
+            if (!IsProjectDesignLead(project, user.Username)
+                && !await repository.HasUserPermissionAsync(user.Username, user.Role, PermissionCodes.DrawingReviewDecide, cancellationToken)) continue;
             if (!await repository.HasProjectContentReadAccessAsync(projectId, user.Username, user.Role, cancellationToken)) continue;
             candidates.Add(user);
         }
@@ -3526,7 +3551,8 @@ public sealed class PdmWorkflowService(
             if (!reviewer.IsActive) throw new PdmRuleException($"指定审核人 {reviewer.DisplayName} 已停用。");
             if (string.Equals(reviewer.Username, actor, StringComparison.OrdinalIgnoreCase))
                 throw new PdmRuleException("发起人不能同时作为指定审核人。");
-            if (!await repository.HasUserPermissionAsync(reviewer.Username, reviewer.Role, PermissionCodes.DrawingReviewDecide, cancellationToken))
+            if (!IsProjectDesignLead(project, reviewer.Username)
+                && !await repository.HasUserPermissionAsync(reviewer.Username, reviewer.Role, PermissionCodes.DrawingReviewDecide, cancellationToken))
                 throw new PdmRuleException($"指定审核人 {reviewer.DisplayName} 没有2D图纸审核权限，请先调整角色权限。");
             if (selected.Any(candidate => string.Equals(candidate.DrawingVersion?.CreatedBy, reviewer.Username, StringComparison.OrdinalIgnoreCase)))
                 throw new PdmRuleException($"指定审核人 {reviewer.DisplayName} 不能审核自己生成的图档版本，请选择其他人员。");
@@ -3857,11 +3883,19 @@ public sealed class PdmWorkflowService(
 
     public async Task<DrawingReviewPackage> DecideDrawingReviewTargetAsync(Guid packageId, Guid itemId, DecideDrawingReviewTargetCommand command, string actor, UserRole role, CancellationToken cancellationToken)
     {
-        await RequirePermissionAsync(actor, role, PermissionCodes.DrawingReviewDecide, cancellationToken);
         var package = await repository.FindDrawingReviewPackageAsync(packageId, cancellationToken)
             ?? throw new PdmNotFoundException("图纸审核单不存在。");
         if (!await repository.HasProjectContentReadAccessAsync(package.ProjectId, actor, role, cancellationToken))
             throw new UnauthorizedAccessException("当前用户没有该项目的操作权限。");
+        if (!await repository.HasUserPermissionAsync(actor, role, PermissionCodes.DrawingReviewDecide, cancellationToken))
+        {
+            var project = await repository.FindProjectAsync(package.ProjectId, cancellationToken)
+                ?? throw new PdmNotFoundException("项目不存在。");
+            if (package.State != DrawingReviewPackageState.InReview
+                || !package.AssignedReviewers.Contains(actor, StringComparer.OrdinalIgnoreCase)
+                || !IsProjectDesignLead(project, actor))
+                throw new UnauthorizedAccessException("当前角色未配置执行此操作的权限。");
+        }
         var item = package.Items.SingleOrDefault(candidate => candidate.Id == itemId)
             ?? throw new PdmNotFoundException("图纸审核项不存在。");
         if (command.Target != DrawingReviewTarget.Drawing2D)
@@ -4086,7 +4120,7 @@ public sealed class PdmWorkflowService(
 
     public async Task<BomEmptyDeclaration> SetBomEmptyDeclarationAsync(Guid projectId, BomKind kind, bool declaredEmpty, string actor, UserRole role, CancellationToken cancellationToken)
     {
-        await RequireBomEditPermissionAsync(actor, role, kind, cancellationToken);
+        await RequireBomEditPermissionAsync(projectId, actor, role, kind, cancellationToken);
         await EnsureBomChangeAllowedAsync(projectId, cancellationToken, kind);
         if (kind is not (BomKind.Standard or BomKind.NonStandard or BomKind.Electrical))
             throw new PdmRuleException("BOM类型必须是标准件、非标件或电气。");
@@ -4106,6 +4140,7 @@ public sealed class PdmWorkflowService(
         await RequirePermissionAsync(actor, role, PermissionCodes.ReleaseManage, cancellationToken);
         var package = await repository.FindReleasePackageAsync(releasePackageId, cancellationToken)
             ?? throw new PdmNotFoundException("发布包不存在。");
+        await ProjectPermissionPolicy.RequireAsync(repository, package.ProjectId, actor, role, PermissionCodes.ReleaseManage, cancellationToken);
         RequireMechanicalReleaseRole(package.Scope, role);
         if (IsLongLeadScope(package.Scope))
         {
@@ -4231,6 +4266,7 @@ public sealed class PdmWorkflowService(
         comment = RequiredComment(comment, "撤回原因");
         var package = await repository.FindReleasePackageAsync(releasePackageId, cancellationToken)
             ?? throw new PdmNotFoundException("发布包不存在。");
+        await ProjectPermissionPolicy.RequireAsync(repository, package.ProjectId, actor, role, PermissionCodes.ReleaseManage, cancellationToken);
         if (!await repository.HasProjectContentReadAccessAsync(package.ProjectId, actor, role, cancellationToken))
             throw new UnauthorizedAccessException("当前用户没有该项目的操作权限。");
         var withdrawn = await repository.WithdrawReleasePackageAsync(releasePackageId, actor, cancellationToken);
@@ -4243,6 +4279,8 @@ public sealed class PdmWorkflowService(
     {
         await RequirePermissionAsync(actor, role, PermissionCodes.ReleaseManage, cancellationToken);
         await RequireDocumentAccessAsync(documentId, actor, role, FolderAccess.View | FolderAccess.Edit | FolderAccess.Publish, cancellationToken);
+        var document = await RequireDocumentAsync(documentId, cancellationToken);
+        await ProjectPermissionPolicy.RequireAsync(repository, document.ProjectId, actor, role, PermissionCodes.ReleaseManage, cancellationToken);
         comment = RequiredComment(comment, "作废原因");
         var obsolete = await repository.ObsoleteDocumentAsync(documentId, actor, cancellationToken);
         await AuditAsync(actor, "document.obsolete", nameof(PdmDocument), documentId.ToString(), $"{obsolete.DrawingNumber}；{comment}", cancellationToken);
@@ -5395,6 +5433,7 @@ public sealed class PdmWorkflowService(
         await RequirePermissionAsync(actor, role, PermissionCodes.ReleaseManage, cancellationToken);
         var package = await repository.FindReleasePackageAsync(releasePackageId, cancellationToken)
             ?? throw new PdmNotFoundException("发布包不存在。");
+        await ProjectPermissionPolicy.RequireAsync(repository, package.ProjectId, actor, role, PermissionCodes.ReleaseManage, cancellationToken);
         if (!await repository.HasProjectContentReadAccessAsync(package.ProjectId, actor, role, cancellationToken))
             throw new UnauthorizedAccessException("当前用户没有该项目的操作权限。");
         if (package.State != ReleasePackageState.Published)
@@ -5535,6 +5574,10 @@ public sealed class PdmWorkflowService(
         || project.DesignLeads.Contains(actor, StringComparer.OrdinalIgnoreCase)
         || string.Equals(project.DesignLead, actor, StringComparison.OrdinalIgnoreCase);
 
+    private static bool IsProjectDesignLead(Project project, string actor) =>
+        project.DesignLeads.Contains(actor, StringComparer.OrdinalIgnoreCase)
+        || string.Equals(project.DesignLead, actor, StringComparison.OrdinalIgnoreCase);
+
     private static string RequiredReason(string reason)
     {
         reason = reason?.Trim() ?? string.Empty;
@@ -5645,21 +5688,21 @@ public sealed class PdmWorkflowService(
     private static string BomEditPermission(BomKind kind) =>
         kind == BomKind.Electrical ? PermissionCodes.BomElectricalEdit : PermissionCodes.BomMechanicalEdit;
 
-    private async Task RequireBomEditPermissionAsync(string actor, UserRole role, BomKind kind, CancellationToken cancellationToken) =>
-        await RequirePermissionAsync(actor, role, BomEditPermission(kind), cancellationToken);
+    private async Task RequireBomEditPermissionAsync(Guid projectId, string actor, UserRole role, BomKind kind, CancellationToken cancellationToken) =>
+        await ProjectPermissionPolicy.RequireAsync(repository, projectId, actor, role, BomEditPermission(kind), cancellationToken);
 
-    private async Task RequireBomEditPermissionAsync(string actor, UserRole role, IEnumerable<BomKind> kinds, CancellationToken cancellationToken)
+    private async Task RequireBomEditPermissionAsync(Guid projectId, string actor, UserRole role, IEnumerable<BomKind> kinds, CancellationToken cancellationToken)
     {
         foreach (var kind in kinds.Distinct())
-            await RequireBomEditPermissionAsync(actor, role, kind, cancellationToken);
+            await RequireBomEditPermissionAsync(projectId, actor, role, kind, cancellationToken);
     }
 
     /// <summary>BOM编辑入口先要求至少具备一类BOM明细编辑权限，具体分类权限在定位到物料后校验。</summary>
-    private async Task RequireAnyBomEditPermissionAsync(string actor, UserRole role, CancellationToken cancellationToken)
+    private async Task RequireAnyBomEditPermissionAsync(Guid projectId, string actor, UserRole role, CancellationToken cancellationToken)
     {
-        if (!await repository.HasUserPermissionAsync(actor, role, PermissionCodes.BomMechanicalEdit, cancellationToken)
-            && !await repository.HasUserPermissionAsync(actor, role, PermissionCodes.BomElectricalEdit, cancellationToken))
-            throw new UnauthorizedAccessException("当前角色未配置维护BOM明细的权限。");
+        if (!await ProjectPermissionPolicy.CanAsync(repository, projectId, actor, role, PermissionCodes.BomMechanicalEdit, cancellationToken)
+            && !await ProjectPermissionPolicy.CanAsync(repository, projectId, actor, role, PermissionCodes.BomElectricalEdit, cancellationToken))
+            throw new UnauthorizedAccessException("当前账号没有该项目的BOM明细操作权限。");
     }
 
     private async Task<PdmDocument> RequireDocumentAsync(Guid documentId, CancellationToken cancellationToken) =>

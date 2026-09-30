@@ -17,6 +17,7 @@ internal sealed class PluginSettingsDialog : Form
     private readonly Label lastCheckedAt = new Label();
     private readonly ProgressBar updateProgress = new ProgressBar();
     private readonly CheckBox automaticUpdates = new CheckBox();
+    private readonly ComboBox plannedTaskScrollInterval = new ComboBox();
     private readonly CheckBox useCustomDrawingQrPosition = new CheckBox();
     private readonly NumericUpDown drawingQrXMillimeters = new NumericUpDown();
     private readonly NumericUpDown drawingQrYMillimeters = new NumericUpDown();
@@ -57,7 +58,7 @@ internal sealed class PluginSettingsDialog : Form
         MaximizeBox = false;
         ShowInTaskbar = false;
         AutoScaleMode = AutoScaleMode.Dpi;
-        ClientSize = new Size(540, 716);
+        ClientSize = new Size(540, 780);
         Font = new Font("Microsoft YaHei UI", 9F);
 
         var root = new TableLayoutPanel
@@ -65,10 +66,11 @@ internal sealed class PluginSettingsDialog : Form
             Dock = DockStyle.Fill,
             Padding = new Padding(16),
             ColumnCount = 1,
-            RowCount = 4
+            RowCount = 5
         };
         root.RowStyles.Add(new RowStyle(SizeType.Absolute, 145F));
         root.RowStyles.Add(new RowStyle(SizeType.Absolute, 166F));
+        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 64F));
         root.RowStyles.Add(new RowStyle(SizeType.Percent, 100F));
         root.RowStyles.Add(new RowStyle(SizeType.Absolute, 44F));
         Controls.Add(root);
@@ -172,6 +174,21 @@ internal sealed class PluginSettingsDialog : Form
         qrPositionLayout.Controls.Add(qrPositionHint, 0, 4);
         root.Controls.Add(qrPositionGroup, 0, 1);
 
+        var taskGroup = new GroupBox { Text = "任务计划显示", Dock = DockStyle.Fill };
+        var taskLayout = new TableLayoutPanel { Dock = DockStyle.Fill, Padding = new Padding(10, 5, 10, 5), ColumnCount = 2, RowCount = 1 };
+        taskLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 130F));
+        taskLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100F));
+        taskLayout.Controls.Add(new Label { Text = "任务滚动间隔", Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleLeft }, 0, 0);
+        plannedTaskScrollInterval.DropDownStyle = ComboBoxStyle.DropDownList;
+        plannedTaskScrollInterval.Items.AddRange(new object[] { "15 秒", "30 秒", "60 秒" });
+        plannedTaskScrollInterval.SelectedIndex = initialSettings.PlannedTaskScrollIntervalSeconds == 15 ? 0
+            : initialSettings.PlannedTaskScrollIntervalSeconds == 60 ? 2 : 1;
+        plannedTaskScrollInterval.Dock = DockStyle.Fill;
+        plannedTaskScrollInterval.AccessibleName = "任务滚动间隔";
+        taskLayout.Controls.Add(plannedTaskScrollInterval, 1, 0);
+        taskGroup.Controls.Add(taskLayout);
+        root.Controls.Add(taskGroup, 0, 2);
+
         var updateGroup = new GroupBox { Text = "版本与更新", Dock = DockStyle.Fill };
         var updateLayout = new TableLayoutPanel
         {
@@ -219,7 +236,7 @@ internal sealed class PluginSettingsDialog : Form
         updateActions.Controls.Add(checkUpdateButton);
         updateLayout.Controls.Add(updateActions, 0, 6);
         updateLayout.SetColumnSpan(updateActions, 3);
-        root.Controls.Add(updateGroup, 0, 2);
+        root.Controls.Add(updateGroup, 0, 3);
 
         var footer = new FlowLayoutPanel
         {
@@ -240,7 +257,7 @@ internal sealed class PluginSettingsDialog : Form
         cancelButton.DialogResult = DialogResult.Cancel;
         footer.Controls.Add(saveButton);
         footer.Controls.Add(cancelButton);
-        root.Controls.Add(footer, 0, 3);
+        root.Controls.Add(footer, 0, 4);
 
         AcceptButton = saveButton;
         CancelButton = cancelButton;
@@ -327,6 +344,8 @@ internal sealed class PluginSettingsDialog : Form
         {
             var result = await saveSettings(new PluginSettings
             {
+                PlannedTaskScrollIntervalSeconds = plannedTaskScrollInterval.SelectedIndex == 0 ? 15
+                    : plannedTaskScrollInterval.SelectedIndex == 2 ? 60 : 30,
                 ServerAddress = serverAddress.Text,
                 AutomaticUpdatesEnabled = automaticUpdates.Checked,
                 UseCustomDrawingQrPosition = useCustomDrawingQrPosition.Checked,
@@ -356,6 +375,7 @@ internal sealed class PluginSettingsDialog : Form
         actionRunning = running;
         serverAddress.Enabled = !running;
         automaticUpdates.Enabled = !running;
+        plannedTaskScrollInterval.Enabled = !running;
         useCustomDrawingQrPosition.Enabled = !running;
         UpdateQrPositionControls();
         testConnectionButton.Enabled = !running;

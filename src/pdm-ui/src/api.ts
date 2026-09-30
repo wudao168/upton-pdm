@@ -221,6 +221,7 @@ interface ApiProject {
   canManageMainStaffing?: boolean
   canAssignDesigners?: boolean
   canReadContent?: boolean
+  effectiveProjectPermissions?: string[]
 }
 
 interface ApiRevision {
@@ -851,6 +852,10 @@ export function decideMaterialCodeApplication(applicationId: string, expectedRow
   return requestJson(`/api/material-code/applications/${applicationId}/decision`, { method: 'POST', body: JSON.stringify({ expectedRowVersion, approved, comment, categoryCode }) }, token)
 }
 
+export function withdrawMaterialCodeApplication(applicationId: string, expectedRowVersion: number, token: string): Promise<MaterialCodeApplication> {
+  return requestJson(`/api/material-code/applications/${applicationId}/withdraw`, { method: 'POST', body: JSON.stringify({ expectedRowVersion }) }, token)
+}
+
 export function approveMaterial(materialId: string, expectedRowVersion: number, token: string): Promise<{ material: PdmMaterial; task: MaterialSyncTask }> {
   return requestJson(`/api/materials/${materialId}/approve?expectedRowVersion=${expectedRowVersion}`, { method: 'POST' }, token)
 }
@@ -1187,6 +1192,14 @@ export async function getOrganizationDirectory(token: string): Promise<Organizat
 
 export function getRolePermissionDirectory(token: string): Promise<RolePermissionDirectory> {
   return requestJson('/api/role-permissions', {}, token)
+}
+
+export function getProjectPermissionSettings(token: string): Promise<import('./types').ProjectPermissionSettings> {
+  return requestJson('/api/project-permissions', {}, token)
+}
+
+export function updateProjectPermissionSettings(settings: import('./types').ProjectPermissionSettings, token: string): Promise<import('./types').ProjectPermissionSettings> {
+  return requestJson('/api/project-permissions', { method: 'PUT', body: JSON.stringify(settings) }, token)
 }
 
 export function updateRolePermissions(role: string, permissions: string[], token: string): Promise<RolePermissionDirectory> {
@@ -1902,8 +1915,8 @@ export function getProjectContentResetReadiness(projectId: string, includeChildr
   return requestJson(`/api/projects/${projectId}/content-reset/readiness?includeChildren=${includeChildren}`, {}, token)
 }
 
-export function resetProjectContent(projectId: string, includeChildren: boolean, reason: string, confirmation: string, token: string): Promise<import('./types').ProjectContentResetSnapshotSummary> {
-  return requestJson(`/api/projects/${projectId}/content-reset`, { method: 'POST', body: JSON.stringify({ includeChildren, reason, confirmation }) }, token)
+export function resetProjectContent(projectId: string, includeChildren: boolean, reason: string, confirmation: string, token: string, force = false): Promise<import('./types').ProjectContentResetSnapshotSummary> {
+  return requestJson(`/api/projects/${projectId}/content-reset`, { method: 'POST', body: JSON.stringify({ includeChildren, reason, confirmation, force }) }, token)
 }
 
 export function restoreProjectContent(projectId: string, snapshotId: string, confirmation: string, token: string): Promise<import('./types').ProjectContentResetSnapshotSummary> {
@@ -2165,6 +2178,7 @@ function mapProject(project: ApiProject): ProjectSummary {
     designLeads: project.designLeads?.length ? project.designLeads : project.designLead ? [project.designLead] : [],
     designers: project.designers ?? [],
     phaseOwners: project.phaseOwners ?? {},
+    effectiveProjectPermissions: project.effectiveProjectPermissions ?? [],
     documentCount: project.documentCount ?? undefined,
     modelDocumentCount: project.modelDocumentCount ?? undefined,
     drawingDocumentCount: project.drawingDocumentCount ?? undefined,

@@ -217,6 +217,51 @@ describe('PreviewWorkspace', () => {
     wrapper.unmount()
   })
 
+  it('does not restore a suspended native preview from stale bounds while another tab is active', async () => {
+    const postMessage = vi.fn()
+    Object.defineProperty(window, 'chrome', {
+      configurable: true,
+      value: { webview: { postMessage } },
+    })
+    const wrapper = mount(PreviewWorkspace, {
+      props: { selected, related: [], bomItem, desktopAvailable: true, active: true },
+    })
+    vi.spyOn(wrapper.get('.pdm-embedded-preview-slot').element, 'getBoundingClientRect').mockReturnValue({
+      left: 100, top: 100, right: 500, bottom: 500, width: 400, height: 400,
+    } as DOMRect)
+
+    await wrapper.setProps({ active: false })
+    postMessage.mockClear()
+    window.dispatchEvent(new Event('resize'))
+    await new Promise(resolve => setTimeout(resolve, 30))
+    expect(postMessage.mock.calls.some(([message]) => message.type === 'preview-host-bounds' || message.type === 'preview-host-resume')).toBe(false)
+
+    await wrapper.setProps({ active: true })
+    await new Promise(resolve => setTimeout(resolve, 30))
+    expect(postMessage).toHaveBeenCalledWith({ type: 'preview-host-resume', payload: undefined })
+    expect(postMessage.mock.calls.some(([message]) => message.type === 'preview-host-bounds')).toBe(true)
+    wrapper.unmount()
+  })
+
+  it('waits until the documents tab is active before opening a different selected document', async () => {
+    const postMessage = vi.fn()
+    Object.defineProperty(window, 'chrome', {
+      configurable: true,
+      value: { webview: { postMessage } },
+    })
+    const wrapper = mount(PreviewWorkspace, {
+      props: { selected, related: [], bomItem, desktopAvailable: true, active: true },
+    })
+    await wrapper.findAll('button').find(button => button.text() === '加载交互预览')!.trigger('click')
+    await wrapper.setProps({ active: false })
+    await wrapper.setProps({ selected: { ...selected, id: 'node-2', documentId: 'document-2', fileName: 'SECOND.SLDPRT' } })
+    expect(wrapper.emitted('preview')).toHaveLength(1)
+
+    await wrapper.setProps({ active: true })
+    expect(wrapper.emitted('preview')?.[1]?.[0]).toMatchObject({ documentId: 'document-2' })
+    wrapper.unmount()
+  })
+
   it('图档属性在顶栏常驻并允许折行，审批与批注工具在第二行', () => {
     const wrapper = mount(PreviewWorkspace, {
       props: { selected, related: [], bomItem },

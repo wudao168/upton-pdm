@@ -305,6 +305,17 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
             ApprovalWorkflows = ReleaseApprovalSettings.UseOrganizationHierarchy(systemSettings.ApprovalWorkflows)
         }));
 
+    private ProjectPermissionSettings projectPermissionSettings = ProjectPermissionSettings.Default;
+
+    public Task<ProjectPermissionSettings> GetProjectPermissionSettingsAsync(CancellationToken cancellationToken) =>
+        Task.FromResult(projectPermissionSettings);
+
+    public Task<ProjectPermissionSettings> UpdateProjectPermissionSettingsAsync(ProjectPermissionSettings settings, CancellationToken cancellationToken)
+    {
+        projectPermissionSettings = settings.Normalize();
+        return Task.FromResult(projectPermissionSettings);
+    }
+
     public Task<PdmSystemSettings> UpdateSystemSettingsAsync(PdmSystemSettings settings, CancellationToken cancellationToken)
     {
         systemSettings = BomPropertyMappingCatalog.Apply(settings with
@@ -1408,6 +1419,8 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
         lock (gate)
         {
             if (!cadPropertyWritebacks.TryGetValue(id, out var request)) throw new PdmNotFoundException("属性写回任务不存在。");
+            if (request.Status is not (CadPropertyWritebackStatus.Pending or CadPropertyWritebackStatus.InProgress))
+                throw new PdmConflictException("属性写回任务已结束，请刷新后重试。");
             var now = timeProvider.GetUtcNow();
             var updated = request with
             {
@@ -2598,8 +2611,8 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
         var drawingDocumentCount = documents.Values.Count(item => item.ProjectId == project.Id && item.Kind == DocumentKind.Drawing);
         var businessStatus = BuildBusinessStatus(project.Id);
         var rootDocumentCheckedOutBy = RootDocumentCheckedOutBy(project.Id);
-        if (role is UserRole.Administrator or UserRole.PlatformAdministrator || TenantContext.Current?.IsPlatformAdministrator == true)
-            return project with { CanAssignExecutionUnit = project.ParentProjectId is null, CanManageMainStaffing = project.ParentProjectId is null && project.ExecutionUnitId is not null, CanAssignDesigners = project.ExecutionUnitId is not null, CanReadContent = true, CanSubmitArchive = true, DocumentCount = documentCount, ModelDocumentCount = modelDocumentCount, DrawingDocumentCount = drawingDocumentCount, BusinessStatus = businessStatus, RootDocumentCheckedOutBy = rootDocumentCheckedOutBy };
+        if (role == UserRole.Administrator || TenantContext.Current?.HasRole("developer") == true)
+            return project with { CanAssignExecutionUnit = project.ParentProjectId is null, CanManageMainStaffing = project.ParentProjectId is null && project.ExecutionUnitId is not null, CanAssignDesigners = project.ExecutionUnitId is not null, CanReadContent = true, EffectiveProjectPermissions = ProjectPermissionSettings.Operations, CanSubmitArchive = true, DocumentCount = documentCount, ModelDocumentCount = modelDocumentCount, DrawingDocumentCount = drawingDocumentCount, BusinessStatus = businessStatus, RootDocumentCheckedOutBy = rootDocumentCheckedOutBy };
         var managesExecutionUnit = project.ExecutionUnitId is Guid executionUnitId
             && organizationManagers.TryGetValue(executionUnitId, out var managers)
             && (string.Equals(managers.PrimaryManager, actor, StringComparison.OrdinalIgnoreCase) || managers.CollaborativeManagers.Contains(actor, StringComparer.OrdinalIgnoreCase));
@@ -2613,12 +2626,20 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
             && organizationMemberships.TryGetValue(actor, out var supervisorMembership)
             && supervisorMembership.UnitIds.Any(unitId => IsUnitWithin(unitId, supervisorUnitId));
         var canReadContent = HasUserPermission(actor, role, PermissionCodes.ProjectContentView);
+        var canAssignDesigners = HasUserPermission(actor, role, PermissionCodes.ProjectDesignerAssign) && project.ExecutionUnitId is not null
+            && (managesExecutionUnit || isMechanicalSupervisor || belongsToProjectStaffing);
         return project with
         {
             CanAssignExecutionUnit = HasUserPermission(actor, role, PermissionCodes.ProjectExecutionAssign) && project.ParentProjectId is null && project.OrganizationId == UserPrimaryCompanyId(actor),
             CanManageMainStaffing = HasUserPermission(actor, role, PermissionCodes.ProjectStaffingManage) && canManage,
-            CanAssignDesigners = HasUserPermission(actor, role, PermissionCodes.ProjectDesignerAssign) && project.ExecutionUnitId is not null && (managesExecutionUnit || isMechanicalSupervisor || belongsToProjectStaffing),
+            CanAssignDesigners = canAssignDesigners,
             CanReadContent = canReadContent,
+            EffectiveProjectPermissions = canReadContent
+                ? ProjectPermissionPolicy.AllowedOperations(project, projects.GetValueOrDefault(project.RootProjectId ?? project.Id) ?? project, actor,
+                    PermissionsFor(actorAccount?.EffectiveRoleCodes ?? [role.ToString()], role), projectPermissionSettings)
+                    .Concat(canAssignDesigners ? [PermissionCodes.ProjectDesignerAssign] : [])
+                    .Distinct(StringComparer.Ordinal).ToArray()
+                : [],
             CanSubmitArchive = canReadContent
                 && HasUserPermission(actor, role, PermissionCodes.DocumentEdit)
                 && ProjectSubmissionPolicy.CanSubmitArchive(project, actor, false),

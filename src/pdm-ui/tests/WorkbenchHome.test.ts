@@ -114,10 +114,8 @@ describe('WorkbenchHome', () => {
         ],
         selected,
         hasDocuments: true,
-        documentCount: 48,
         modelCount: 30,
         drawingCount: 18,
-        warningCount: 0,
         bomPendingCount: 3,
         standardCount: 2,
         nonStandardCount: 1,
@@ -183,17 +181,11 @@ describe('WorkbenchHome', () => {
     expect(shippingCountdown.text()).not.toContain('计划发货')
     expect(wrapper.get('button[aria-label="查看待处理"]').text()).toContain('5')
     expect(wrapper.get('button[aria-label="查看关键物料"]').text()).toContain('1')
-    expect(wrapper.get('[aria-label="图档与审核"]').text()).toContain('3D 30')
-    expect(wrapper.get('[aria-label="图档与审核"]').text()).toContain('待审核 · 双审 2/4')
-    expect(wrapper.get('[aria-label="BOM与物料"]').text()).toContain('标准件 2')
-    expect(wrapper.get('[aria-label="BOM与物料"]').text()).toContain('待审 1 · 已批 1 · 退回 1')
-    expect(wrapper.get('[aria-label="BOM与物料"]').text()).toContain('待核对 2')
-    expect(wrapper.get('[aria-label="发布与备料"]').text()).toContain('关键物料1')
-    expect(wrapper.get('[aria-label="发布与备料"]').text()).toContain('未采购2')
+    expect(wrapper.get('[aria-label="项目核心业务概览"]').findAll('article')).toHaveLength(1)
     expect(wrapper.get('[aria-label="项目总览"]').text()).toContain('P700001')
     expect(wrapper.get('[aria-label="项目总览"]').text()).toContain('设计')
     expect(wrapper.get('[aria-label="项目总览"]').text()).toContain('工程师丁')
-    expect(wrapper.get('[aria-label="项目总览"]').findAll('thead th').map(cell => cell.text())).toEqual(['项目', '执行工程师', '当前阶段', '计划完成', '剩余工期', '进度', '阶段负责人', '当前子任务', '子任务状态', '备注日志'])
+    expect(wrapper.get('[aria-label="项目总览"]').findAll('thead th').map(cell => cell.text())).toEqual(['项目', '执行', '阶段', '计划完成', '剩余工期', '进度', '负责人', '当前', '状态', '备注'])
     const remainingWorkPeriod = wrapper.get('[aria-label="项目总览"]').find('td:nth-child(5) span')
     expect(remainingWorkPeriod.text()).toBe('逾期 6 天')
     const overdueTasks = wrapper.get('[aria-label="项目总览"]').find('td:nth-child(9) span')
@@ -204,7 +196,7 @@ describe('WorkbenchHome', () => {
     const currentStageFinish = wrapper.get('[aria-label="项目总览"]').find('td:nth-child(4)')
     expect(currentStageFinish.text()).toBe('2026/09/19')
     expect(currentStageFinish.attributes('title')).toContain('当前主任务“设计”')
-    expect(wrapper.get('[aria-label="项目总览"]').text()).toContain('备注日志')
+    expect(wrapper.get('[aria-label="项目总览"]').text()).toContain('备注')
     expect(wrapper.get('[aria-label="项目总览"]').text()).toContain('最新采购风险已同步')
     expect(wrapper.get('[aria-label="项目总览"]').text()).not.toContain('旧备注')
     expect(wrapper.get('[aria-label="项目总览"]').text()).toContain('完成图纸审核')
@@ -281,16 +273,8 @@ describe('WorkbenchHome', () => {
     expect(wrapper.get('[aria-label="项目团队"]').text()).not.toContain('执行工程师')
     expect(wrapper.get('[aria-label="项目团队"]').text()).not.toContain('配置负责人')
 
-    await wrapper.get('button[aria-label="进入项目图档"]').trigger('click')
-    await wrapper.get('button[aria-label="进入BOM数据"]').trigger('click')
     await wrapper.findAll('button').find(button => button.text().includes('进入项目计划'))!.trigger('click')
-    await wrapper.findAll('button').find(button => button.text().includes('查看备料'))!.trigger('click')
-    await wrapper.findAll('button').find(button => button.text().includes('查看发布'))!.trigger('click')
 
-    expect(wrapper.emitted('documents')).toEqual([[]])
-    expect(wrapper.emitted('bom')).toEqual([[]])
     expect(wrapper.emitted('projectPlan')).toEqual([[]])
-    expect(wrapper.emitted('procurement')).toEqual([[]])
-    expect(wrapper.emitted('release')).toEqual([[]])
   })
 })

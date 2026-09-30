@@ -1952,6 +1952,7 @@ public sealed class MySqlMaterialRepository : IMaterialRepository
         {
             MaterialCodeApplicationStatus.Pending => MaterialCodeWorkflowState.PendingApproval,
             MaterialCodeApplicationStatus.Rejected => MaterialCodeWorkflowState.Rejected,
+            MaterialCodeApplicationStatus.Withdrawn => MaterialCodeWorkflowState.Withdrawn,
             _ when workflowState == MaterialCodeWorkflowState.Completed => MaterialCodeWorkflowState.Completed,
             _ when !row.U9SyncConfirmed => taskStatus is MaterialSyncStatus.Failed or MaterialSyncStatus.NeedsReview
                 ? MaterialCodeWorkflowState.MaterialSyncFailed

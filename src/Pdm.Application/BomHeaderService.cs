@@ -58,7 +58,7 @@ public sealed partial class BomHeaderService(
         var project = await repository.FindProjectAsync(projectId, cancellationToken) ?? throw new PdmNotFoundException("项目不存在。");
         var bindings = (await repository.ListProjectBomHeaderBindingsAsync(projectId, cancellationToken)).ToDictionary(item => item.Kind);
         var applications = (await materials.ListMaterialCodeApplicationsAsync(projectId, null, cancellationToken)).ToList();
-        var canRetry = await repository.HasUserPermissionAsync(actor, role, PermissionCodes.BomEdit, cancellationToken);
+        var canRetry = await ProjectPermissionPolicy.CanAsync(repository, projectId, actor, role, PermissionCodes.BomEdit, cancellationToken);
         // 兼容旧版本仅在发布包审计中记录失败、申请仍为 Pending 的历史数据。
         var legacyAudits = applications.Any(application => application.Status == MaterialCodeApplicationStatus.Pending
             && string.IsNullOrWhiteSpace(application.WorkflowMessage))
@@ -91,6 +91,7 @@ public sealed partial class BomHeaderService(
 
     public async Task<ProjectBomHeader> BindMaterialAsync(Guid projectId, ProjectBomHeaderKind kind, Guid materialId, long expectedRowVersion, string actor, UserRole role, CancellationToken cancellationToken)
     {
+        await ProjectPermissionPolicy.RequireAsync(repository, projectId, actor, role, PermissionCodes.BomEdit, cancellationToken);
         if (!await repository.HasUserPermissionAsync(actor, role, PermissionCodes.BomEdit, cancellationToken))
             throw new UnauthorizedAccessException("当前角色未配置BOM编辑权限。");
         var project = await repository.FindProjectAsync(projectId, cancellationToken) ?? throw new PdmNotFoundException("项目不存在。");
@@ -109,6 +110,7 @@ public sealed partial class BomHeaderService(
 
     public async Task<BomHeaderGenerationResult> GenerateHierarchyMaterialsAsync(Guid projectId, string actor, UserRole role, CancellationToken cancellationToken)
     {
+        await ProjectPermissionPolicy.RequireAsync(repository, projectId, actor, role, PermissionCodes.BomEdit, cancellationToken);
         if (!await repository.HasUserPermissionAsync(actor, role, PermissionCodes.BomEdit, cancellationToken))
             throw new UnauthorizedAccessException("当前角色未配置BOM编辑权限。");
         var selectedProject = await repository.FindProjectAsync(projectId, cancellationToken) ?? throw new PdmNotFoundException("项目不存在。");
@@ -127,6 +129,8 @@ public sealed partial class BomHeaderService(
             .ThenBy(project => project.Code, StringComparer.OrdinalIgnoreCase)
             .ToArray();
         if (projects.Length == 0) throw new PdmNotFoundException("当前项目层级不存在或无权访问。");
+        foreach (var project in projects)
+            await ProjectPermissionPolicy.RequireAsync(repository, project.Id, actor, role, PermissionCodes.BomEdit, cancellationToken);
 
         var generatedCount = 0;
         var existingCount = 0;
@@ -391,8 +395,7 @@ public sealed partial class BomHeaderService(
         CancellationToken cancellationToken)
     {
         if (confirmation != "确认重试料号自动处理") throw new PdmRuleException("请确认重试料号自动处理后再执行。");
-        if (!await repository.HasUserPermissionAsync(actor, role, PermissionCodes.BomEdit, cancellationToken)
-            || !await repository.HasProjectContentReadAccessAsync(projectId, actor, role, cancellationToken))
+        if (!await ProjectPermissionPolicy.CanAsync(repository, projectId, actor, role, PermissionCodes.BomEdit, cancellationToken))
             throw new UnauthorizedAccessException("当前用户没有该项目的BOM料号重试权限。");
         var project = await repository.FindProjectAsync(projectId, cancellationToken) ?? throw new PdmNotFoundException("项目不存在。");
         var gate = AutomaticApplicationLocks.GetOrAdd(project.RootProjectId ?? project.Id, static _ => new SemaphoreSlim(1, 1));

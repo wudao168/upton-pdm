@@ -29,6 +29,13 @@ internal sealed class PdmTaskPaneControl : UserControl
     private readonly PdmRippleStatusIndicator serviceStatus = new PdmRippleStatusIndicator();
     private readonly Image headerLogoImage;
     private readonly TextBox currentProject = new TextBox();
+    private readonly Panel plannedTaskBar = new Panel();
+    private Label plannedTaskLabel = new Label();
+    private Label nextPlannedTaskLabel = new Label();
+    private readonly System.Windows.Forms.Timer plannedTaskTimer = new System.Windows.Forms.Timer { Interval = 30000 };
+    private readonly System.Windows.Forms.Timer plannedTaskAnimation = new System.Windows.Forms.Timer { Interval = 20 };
+    private string[] plannedTasks = Array.Empty<string>();
+    private int plannedTaskIndex;
     private readonly TextBox searchBox = new TextBox();
     private readonly LinkLabel treeHealth = new LinkLabel();
     private readonly TreeView structureTree = new TreeView();
@@ -49,6 +56,7 @@ internal sealed class PdmTaskPaneControl : UserControl
     private readonly PdmQuantityProgressBar workspaceOperationProgress = new PdmQuantityProgressBar();
     private readonly TabControl tabs = new TabControl();
     private readonly Panel tabsHost = new Panel();
+    private readonly Control projectPanel;
     private readonly Label pluginVersion = new Label();
     private readonly string installedPluginVersion;
     private readonly ProjectDocumentsControl projectDocuments = new ProjectDocumentsControl();
@@ -134,7 +142,7 @@ internal sealed class PdmTaskPaneControl : UserControl
         BackColor = Color.FromArgb(244, 247, 251);
 
         var header = BuildHeader();
-        var projectPanel = BuildProjectPanel();
+        projectPanel = BuildProjectPanel();
         ConfigureCheckoutReminder();
         BuildTabs();
         ConfigurePluginVersion();
@@ -160,6 +168,8 @@ internal sealed class PdmTaskPaneControl : UserControl
         {
             Interlocked.Increment(ref treeBuildGeneration);
             CancelActiveTreeBuild();
+            plannedTaskTimer.Dispose();
+            plannedTaskAnimation.Dispose();
             emphasizedNodeFont?.Dispose();
             structureImages?.Dispose();
             headerLogoImage?.Dispose();
@@ -170,6 +180,32 @@ internal sealed class PdmTaskPaneControl : UserControl
 
     public event EventHandler LoginRequested;
     public event EventHandler OpenClientRequested;
+    public event EventHandler PlannedTasksRefreshRequested;
+
+    public void SetPlannedTaskScrollInterval(int seconds)
+    {
+        RunOnUiThread(() => plannedTaskTimer.Interval = (seconds == 15 || seconds == 60 ? seconds : 30) * 1000);
+    }
+
+    public void SetPlannedTasks(IReadOnlyList<string> tasks)
+    {
+        RunOnUiThread(() =>
+        {
+            var updated = tasks?.ToArray() ?? Array.Empty<string>();
+            if (plannedTasks.SequenceEqual(updated)) return;
+            plannedTaskAnimation.Stop();
+            plannedTasks = updated;
+            plannedTaskIndex = 0;
+            plannedTaskLabel.Top = 0;
+            nextPlannedTaskLabel.Top = plannedTaskBar.ClientSize.Height;
+            plannedTaskLabel.Text = plannedTasks.Length == 0
+                ? (string.IsNullOrWhiteSpace(authenticatedUsername) ? "登录后显示本人负责的计划任务" : "暂无本人负责的计划任务")
+                : plannedTasks[0];
+            actionToolTip.SetToolTip(plannedTaskBar, string.Join("\r\n", plannedTasks));
+            plannedTaskTimer.Stop();
+            if (!string.IsNullOrWhiteSpace(authenticatedUsername)) plannedTaskTimer.Start();
+        });
+    }
     public event EventHandler RefreshRequested;
     public event EventHandler<CadTreeNodeEventArgs> NodeSelected;
     public event EventHandler<CadTreeNodeEventArgs> OpenRequested;
@@ -256,6 +292,8 @@ internal sealed class PdmTaskPaneControl : UserControl
             actionToolTip.SetToolTip(serviceStatus, active ? "PLM正在处理工作文件" : serviceStatus.AccessibleDescription);
             structureMenu.Enabled = !active;
             versionMenu.Enabled = !active;
+            tabsHost.Enabled = !active;
+            projectPanel.Enabled = !active;
             UseWaitCursor = active;
             UpdateSelected(SelectedNode);
             if (active)
@@ -352,6 +390,11 @@ internal sealed class PdmTaskPaneControl : UserControl
         RunOnUiThread(() =>
         {
             loginButton.Text = string.IsNullOrWhiteSpace(displayName) ? "登录" : displayName;
+            plannedTaskTimer.Stop();
+            SetPlannedTasks(Array.Empty<string>());
+            plannedTaskLabel.Text = string.IsNullOrWhiteSpace(authenticatedUsername)
+                ? "登录后显示本人负责的计划任务" : "暂无本人负责的计划任务";
+            if (!string.IsNullOrWhiteSpace(authenticatedUsername)) plannedTaskTimer.Start();
             loginButton.AccessibleDescription = string.IsNullOrWhiteSpace(username)
                 ? loginButton.Text
                 : string.Concat(loginButton.Text, "（", username, "）");
@@ -552,13 +595,13 @@ internal sealed class PdmTaskPaneControl : UserControl
 
     private Control BuildProjectPanel()
     {
-        var panel = new Panel { Dock = DockStyle.Top, Height = 51, BackColor = Color.White, Padding = new Padding(12, 7, 12, 8) };
+        var panel = new Panel { Dock = DockStyle.Top, Height = 87, BackColor = Color.White, Padding = new Padding(12, 7, 12, 8) };
         var actions = new TableLayoutPanel
         {
             Dock = DockStyle.Fill,
             Height = 36,
             ColumnCount = 5,
-            RowCount = 1,
+            RowCount = 3,
             Margin = Padding.Empty,
             Padding = new Padding(3)
         };
@@ -569,7 +612,9 @@ internal sealed class PdmTaskPaneControl : UserControl
         actions.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 6));
         var userButtonColumn = new ColumnStyle(SizeType.Absolute, 60);
         actions.ColumnStyles.Add(userButtonColumn);
-        actions.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        actions.RowStyles.Add(new RowStyle(SizeType.Percent, 50));
+        actions.RowStyles.Add(new RowStyle(SizeType.Absolute, 6));
+        actions.RowStyles.Add(new RowStyle(SizeType.Percent, 50));
         actions.SizeChanged += (_, _) =>
         {
             MatchProjectButtonWidths(actions, clientButtonColumn, userButtonColumn);
@@ -583,7 +628,7 @@ internal sealed class PdmTaskPaneControl : UserControl
         currentProject.Margin = Padding.Empty;
         currentProject.BackColor = Color.White;
         currentProject.AccessibleName = "当前项目号（只读）";
-        openClientButton.Text = "打开客户端";
+        openClientButton.Text = "客户端";
         ConfigureStructureToolbarButton(openClientButton);
         openClientButton.Click += (_, _) => OpenClientRequested?.Invoke(this, EventArgs.Empty);
         loginButton.Text = "登录";
@@ -592,6 +637,46 @@ internal sealed class PdmTaskPaneControl : UserControl
         actions.Controls.Add(currentProject, 0, 0);
         actions.Controls.Add(openClientButton, 2, 0);
         actions.Controls.Add(loginButton, 4, 0);
+        plannedTaskBar.Dock = DockStyle.Fill;
+        plannedTaskBar.Margin = Padding.Empty;
+        plannedTaskBar.BorderStyle = BorderStyle.FixedSingle;
+        plannedTaskBar.AccessibleName = "本人负责子任务计划完成日期";
+        foreach (var label in new[] { plannedTaskLabel, nextPlannedTaskLabel })
+        {
+            label.TextAlign = ContentAlignment.MiddleLeft;
+            label.AutoEllipsis = true;
+            plannedTaskBar.Controls.Add(label);
+        }
+        plannedTaskLabel.Text = "登录后显示本人负责的计划任务";
+        plannedTaskBar.SizeChanged += (_, _) =>
+        {
+            plannedTaskLabel.Size = nextPlannedTaskLabel.Size = plannedTaskBar.ClientSize;
+            plannedTaskLabel.Top = 0;
+            nextPlannedTaskLabel.Top = plannedTaskBar.ClientSize.Height;
+        };
+        plannedTaskTimer.Tick += (_, _) =>
+        {
+            PlannedTasksRefreshRequested?.Invoke(this, EventArgs.Empty);
+            if (plannedTasks.Length < 2) return;
+            plannedTaskIndex = (plannedTaskIndex + 1) % plannedTasks.Length;
+            nextPlannedTaskLabel.Text = plannedTasks[plannedTaskIndex];
+            nextPlannedTaskLabel.Top = plannedTaskBar.ClientSize.Height;
+            plannedTaskAnimation.Start();
+        };
+        plannedTaskAnimation.Tick += (_, _) =>
+        {
+            var offset = Math.Min(2, nextPlannedTaskLabel.Top);
+            plannedTaskLabel.Top -= offset;
+            nextPlannedTaskLabel.Top -= offset;
+            if (nextPlannedTaskLabel.Top > 0) return;
+            plannedTaskAnimation.Stop();
+            var previous = plannedTaskLabel;
+            plannedTaskLabel = nextPlannedTaskLabel;
+            nextPlannedTaskLabel = previous;
+            nextPlannedTaskLabel.Top = plannedTaskBar.ClientSize.Height;
+        };
+        actions.Controls.Add(plannedTaskBar, 0, 2);
+        actions.SetColumnSpan(plannedTaskBar, 5);
         panel.Controls.Add(actions);
         UpdateCurrentProjectDisplay();
         return panel;
@@ -2942,7 +3027,7 @@ internal sealed class PdmTaskPaneControl : UserControl
 
     private void ToggleHealthFilter(StructureHealthFilter filter)
     {
-        if (rootNode == null || filter == StructureHealthFilter.None
+        if (workspaceOperationActive || rootNode == null || filter == StructureHealthFilter.None
             || !EnumerateCadTree(rootNode).Any(node => MatchesHealthFilter(node, filter)))
         {
             return;

@@ -50,6 +50,11 @@ export interface ProjectSummary {
   canManageMainStaffing: boolean
   canAssignDesigners: boolean
   canReadContent: boolean
+  effectiveProjectPermissions?: string[]
+}
+
+export interface ProjectPermissionSettings {
+  rules: Record<string, string[]>
 }
 
 export interface ProjectCopyOptionsInput {
@@ -620,6 +625,7 @@ export interface ProjectContentResetReadiness {
   includeChildren: boolean
   includedProjects: ProjectSummary[]
   canReset: boolean
+  canForceReset: boolean
   blockers: string[]
   counts: Record<string, number>
   restorableSnapshots: ProjectContentResetSnapshotSummary[]
@@ -1561,8 +1567,8 @@ export interface ProjectBomHeader {
   applicationRowVersion?: number
 }
 
-export type MaterialCodeApplicationStatus = 'Pending' | 'Approved' | 'Rejected'
-export type MaterialCodeWorkflowState = 'PendingApproval' | 'PendingMaterialSync' | 'MaterialSyncFailed' | 'PendingBomSync' | 'BomSyncFailed' | 'Completed' | 'Rejected'
+export type MaterialCodeApplicationStatus = 'Pending' | 'Approved' | 'Rejected' | 'Withdrawn'
+export type MaterialCodeWorkflowState = 'PendingApproval' | 'PendingMaterialSync' | 'MaterialSyncFailed' | 'PendingBomSync' | 'BomSyncFailed' | 'Completed' | 'Rejected' | 'Withdrawn'
 export interface MaterialCodeApplication {
   id: string
   projectId: string

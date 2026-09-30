@@ -24,6 +24,31 @@ public sealed class DrawingReviewWorkflowTests
     }
 
     [Fact]
+    public async Task ProjectDesignLeadCanBeAssignedAndReviewWithoutGlobalDrawingReviewPermission()
+    {
+        var (repository, workflow, _, _) = await PrepareReviewAsync();
+        await repository.CreateUserAsync(new UserAccount(Guid.NewGuid(), "submitter", "发起人", "unused", UserRole.Engineer, true), default);
+        await repository.CreateUserAsync(new UserAccount(Guid.NewGuid(), "design-lead", "项目主设", "unused", UserRole.Engineer, true), default);
+        await repository.CreateUserAsync(new UserAccount(Guid.NewGuid(), "other-engineer", "其他工程师", "unused", UserRole.Engineer, true), default);
+        await repository.SetMainProjectStaffingAsync(ProjectId,
+            new SetMainProjectStaffingCommand("manager", [], ["design-lead"]), "admin", default);
+
+        Assert.False(await repository.HasUserPermissionAsync("design-lead", UserRole.Engineer, PermissionCodes.DrawingReviewDecide, default));
+        var reviewers = await workflow.ListDrawingReviewersAsync(ProjectId, "submitter", UserRole.Engineer, default);
+        Assert.Contains(reviewers, reviewer => reviewer.Username == "design-lead");
+        Assert.DoesNotContain(reviewers, reviewer => reviewer.Username == "other-engineer");
+
+        var package = await workflow.CreateDrawingReviewPackageAsync(
+            ProjectId, null, ["design-lead"], "submitter", UserRole.Engineer, default);
+        package = await workflow.DecideDrawingReviewTargetAsync(package.Id, package.Items[0].Id,
+            new DecideDrawingReviewTargetCommand(DrawingReviewTarget.Drawing2D, DrawingReviewDecision.Approve, "通过"),
+            "design-lead", UserRole.Engineer, default);
+
+        Assert.Equal("design-lead", Assert.Single(package.Items).DrawingReviewer);
+        Assert.Equal(DrawingReviewPackageState.PendingSupervisorApproval, package.State);
+    }
+
+    [Fact]
     public async Task AssignedReviewerCompletesItemsBeforeMechanicalSupervisorFinalApproval()
     {
         var (repository, workflow, model, drawing) = await PrepareReviewAsync();

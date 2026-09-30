@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { Boxes, CheckCircle2, ChevronRight, FolderTree, PackageCheck, UsersRound } from '@lucide/vue'
+import { CheckCircle2, ChevronRight, FolderTree, UsersRound } from '@lucide/vue'
 import { addProjectManagerNote, createProjectTodo, getMaterialRelationCompleteness, getProjectProcurementTracking, listProjectAudit, readProjectPlanPortfolio, readProjectValidationPlan } from '../api'
 import { ElMessage } from '../statusMessage'
 import { computed, reactive, ref, watch } from 'vue'
@@ -12,10 +12,8 @@ const props = defineProps<{
   selected: DocumentNode
   currentUsername?: string
   hasDocuments: boolean
-  documentCount: number
   modelCount: number
   drawingCount: number
-  warningCount: number
   bomPendingCount: number
   standardCount: number
   nonStandardCount: number
@@ -223,24 +221,6 @@ const staffingRows = computed(() => [
   { key: 'downstream', stage: '后续阶段', role: '各部门负责人', people: [] },
 ])
 
-const drawingReviewSummary = computed(() => {
-  const review = [...props.drawingReviews].sort((left, right) => right.createdAt.localeCompare(left.createdAt))[0]
-  if (!review) return '图纸审核：待发起审核'
-  const stateLabels = {
-    InReview: '待审核',
-    PendingSupervisorApproval: '待批准',
-    ChangesRequested: '已退回（待修改）',
-    WritingProperties: '已批准',
-    Approved: '已批准',
-    Stale: '版本冲突',
-    Withdrawn: '已撤销',
-  }
-  const reviewed = review.items.reduce((count, item) => count
-    + (['Approved', 'Marked'].includes(item.modelState) ? 1 : 0)
-    + (['Approved', 'Marked'].includes(item.drawingState) ? 1 : 0), 0)
-  return `图纸审核：${stateLabels[review.state]} · 双审 ${reviewed}/${review.items.length * 2}`
-})
-
 function drawingTargetSummary(target: DrawingReviewTarget) {
   const count = target === 'Model3D' ? props.modelCount : props.drawingCount
   if (count === 0) return '无图档'
@@ -276,7 +256,8 @@ function materialApplicationStatus(itemIds: string[]) {
   const pending = applications.filter(item => item.status === 'Pending').length
   const approved = applications.filter(item => item.status === 'Approved').length
   const rejected = applications.filter(item => item.status === 'Rejected').length
-  return [`待审${pending}`, `已批${approved}`, `退回${rejected}`].filter((_, index) => [pending, approved, rejected][index] > 0).join(' · ')
+  const withdrawn = applications.filter(item => item.status === 'Withdrawn').length
+  return [`待审${pending}`, `已批${approved}`, `退回${rejected}`, `撤回${withdrawn}`].filter((_, index) => [pending, approved, rejected, withdrawn][index] > 0).join(' · ')
 }
 
 const documentRows = computed(() => [
@@ -294,14 +275,6 @@ const bomApprovalSummary = computed(() => {
   if (!props.releasePackage) return 'BOM审批：未发起'
   const currentStep = props.releasePackage.steps.find(step => step.status === 'current')
   return `BOM审批：${props.releasePackage.state}${currentStep ? ` · ${currentStep.stage}` : ''}`
-})
-
-const materialApplicationSummary = computed(() => {
-  if (!props.materialApplications.length) return '物料申请：暂无'
-  const pending = props.materialApplications.filter(item => item.status === 'Pending').length
-  const approved = props.materialApplications.filter(item => item.status === 'Approved').length
-  const rejected = props.materialApplications.filter(item => item.status === 'Rejected').length
-  return `物料申请：待审 ${pending} · 已批 ${approved} · 退回 ${rejected}`
 })
 
 const stageNames: Record<string, string> = {
@@ -558,21 +531,7 @@ const teamRows = computed(() => [
 const teamRowPairs = computed(() => Array.from({ length: Math.ceil(teamRows.value.length / 2) }, (_, index) => teamRows.value.slice(index * 2, index * 2 + 2)))
 const latestReleasePackage = computed(() => props.releasePackage ?? [...props.releasePackages]
   .sort((left, right) => (right.createdAt ?? '').localeCompare(left.createdAt ?? ''))[0] ?? null)
-const releaseApprovalText = computed(() => {
-  const release = latestReleasePackage.value
-  if (!release) return '未发起'
-  const step = release.steps.find(item => item.status === 'current')
-  return `${release.state}${step ? ` · ${step.stage}` : ''}`
-})
 const criticalMaterialCount = computed(() => procurementTracking.value?.items?.filter(item => !!item.impactStage).length ?? null)
-const unpurchasedCount = computed(() => procurementTracking.value?.items?.filter(item => !(item.purchaseOrderNumbers ?? []).length).length ?? null)
-const relationSummary = computed(() => {
-  if (!relationCompleteness.value) return '关联核对 —'
-  if (!relationCompleteness.value.mainMaterialCount) return '关联配置 暂无'
-  return relationCompleteness.value.incompleteGroupCount
-    ? `关联待核对 ${relationCompleteness.value.incompleteGroupCount}`
-    : '关联物料 已核对'
-})
 const approvalCount = computed(() => {
   const drawing = props.drawingReviews.some(item => ['InReview', 'WritingProperties'].includes(item.state)) ? 1 : 0
   const validation = validationPlan.value?.state === 'PendingApproval' ? 1 : 0
@@ -611,28 +570,6 @@ const overviewAlerts = computed(() => [
       </section>
 
       <div class="pdm-overview-summary" aria-label="项目核心业务概览">
-        <article class="pdm-panel pdm-overview-card" aria-label="图档与审核">
-          <header><span class="is-blue"><FolderTree :size="18" /></span><h2>图档与审核</h2></header>
-          <strong class="pdm-overview-card__value">{{ documentCount }}</strong>
-          <div class="pdm-overview-card__facts"><span>3D <b>{{ modelCount }}</b></span><span>2D <b>{{ drawingCount }}</b></span></div>
-          <dl><div><dt>图纸审核</dt><dd>{{ drawingReviewSummary.replace('图纸审核：', '') }}</dd></div><div><dt>异常引用</dt><dd :class="{ 'is-danger': warningCount > 0 }">{{ warningCount }}</dd></div></dl>
-          <button type="button" class="pdm-overview-link" aria-label="进入项目图档" @click="emit('documents')">查看图档 <ChevronRight :size="13" /></button>
-        </article>
-
-        <article class="pdm-panel pdm-overview-card" aria-label="BOM与物料">
-          <header><span class="is-green"><Boxes :size="18" /></span><h2>BOM与物料</h2></header>
-          <strong class="pdm-overview-card__value">{{ standardCount + nonStandardCount + electricalCount }}</strong>
-          <div class="pdm-overview-card__facts"><span>标准件 <b>{{ standardCount }}</b></span><span>非标件 <b>{{ nonStandardCount }}</b></span><span>电气 <b>{{ electricalCount }}</b></span></div>
-          <dl><div><dt>待处理</dt><dd :class="{ 'is-warning': bomPendingCount > 0 }">{{ bomPendingCount }}</dd></div><div><dt>料号申请</dt><dd>{{ materialApplicationSummary.replace('物料申请：', '') }}</dd></div><div><dt>关联物料</dt><dd>{{ relationSummary.replace('关联', '') }}</dd></div></dl>
-          <button type="button" class="pdm-overview-link" aria-label="进入BOM数据" @click="emit('bom')">查看BOM <ChevronRight :size="13" /></button>
-        </article>
-
-        <article class="pdm-panel pdm-overview-card" aria-label="发布与备料">
-          <header><span class="is-orange"><PackageCheck :size="18" /></span><h2>发布与备料</h2></header>
-          <strong class="pdm-overview-card__value is-package">{{ latestReleasePackage?.number || '暂无发布包' }}</strong>
-          <dl><div><dt>发布审批</dt><dd>{{ releaseApprovalText }}</dd></div><div><dt>关键物料</dt><dd :class="{ 'is-danger': criticalMaterialCount }">{{ criticalMaterialCount ?? '—' }}</dd></div><div><dt>未采购</dt><dd :class="{ 'is-warning': unpurchasedCount }">{{ unpurchasedCount ?? '—' }}</dd></div></dl>
-          <div class="pdm-overview-card__actions"><button type="button" class="pdm-overview-link" @click="emit('release')">查看发布 <ChevronRight :size="13" /></button><button type="button" class="pdm-overview-link" @click="emit('procurement')">查看备料 <ChevronRight :size="13" /></button></div>
-        </article>
         <article class="pdm-panel pdm-overview-team" aria-label="项目团队">
           <header><span><UsersRound :size="18" /></span><h2>项目团队</h2><span class="pdm-overview-team__actions"><button v-if="rootProject.canManageMainStaffing" type="button" class="pdm-text-action" @click="openStaffingDialog">配置分工</button><button v-if="activeProject.canAssignDesigners" type="button" class="pdm-text-action" @click="openPhaseOwnerDrawer">配置负责人</button></span></header>
           <div class="pdm-overview-team__table-wrap"><table class="pdm-overview-team__table"><thead><tr><th>职责</th><th>负责人</th><th>职责</th><th>负责人</th></tr></thead><tbody><tr v-for="pair in teamRowPairs" :key="pair[0]?.key"><template v-for="row in pair" :key="row.key"><td class="is-role">{{ row.role }}</td><td :class="{ 'is-pending': !row.people.length }">{{ row.people.map(person => person.name).join('、') || '待分配' }}</td></template></tr></tbody></table></div>
@@ -643,7 +580,7 @@ const overviewAlerts = computed(() => [
         <article class="pdm-panel pdm-project-portfolio" aria-label="项目总览">
           <header><span><FolderTree :size="18" /></span><h2>项目总览</h2><p>当前主项目及全部子项目的阶段、负责人和计划风险</p><button type="button" class="pdm-overview-link" @click="emit('projectPlan')">进入项目计划 <ChevronRight :size="13" /></button></header>
           <div class="pdm-project-portfolio__table-wrap">
-            <table><thead><tr><th>项目</th><th>执行工程师</th><th>当前阶段</th><th>计划完成</th><th>剩余工期</th><th>进度</th><th>阶段负责人</th><th>当前子任务</th><th>子任务状态</th><th>备注日志</th></tr></thead><tbody>
+            <table><thead><tr><th>项目</th><th>执行</th><th>阶段</th><th>计划完成</th><th>剩余工期</th><th>进度</th><th>负责人</th><th>当前</th><th>状态</th><th>备注</th></tr></thead><tbody>
               <tr v-for="row in portfolioRows" :key="row.projectId" :class="{ 'is-root': row.isRoot }" tabindex="0" @click="emit('projectPlan')" @keydown.enter="emit('projectPlan')">
                 <td><strong>{{ row.projectCode }}</strong><small>{{ row.projectName }}</small></td><td :class="{ 'is-pending': row.engineers === '待分配' }">{{ row.engineers }}</td><td>{{ row.stageLabel }}</td><td :title="row.currentStageFinish ? `当前主任务“${row.stageLabel}”计划完成 ${displayDate(row.currentStageFinish)}` : '当前主任务未排期'">{{ displayDate(row.currentStageFinish) }}</td><td><span :class="`is-${row.remainingWorkPeriod.tone}`" :title="row.remainingWorkPeriod.basis">{{ row.remainingWorkPeriod.label }}</span></td><td><span class="pdm-project-portfolio__progress"><em>{{ row.hasPlan ? `${row.completionPercent}%` : '—' }}</em><i><em :style="{ width: `${row.completionPercent}%` }" /></i></span></td><td :class="{ 'is-pending': row.owner === '待分配' }">{{ row.owner }}</td><td class="pdm-project-portfolio__task" :title="row.currentTask?.name"><strong v-if="row.currentTask">{{ row.currentTask.name }}</strong><small v-if="row.currentTask">{{ personName(row.currentTask.assignee) }} · {{ displayDate(row.currentTask.plannedFinish) }}</small><span v-else>暂无待办</span></td><td><span class="pdm-project-portfolio__overdue" :class="`is-${row.overdueTaskSummary.tone}`" :title="row.overdueTaskSummary.basis"><i v-for="line in row.overdueTaskSummary.lines" :key="line">{{ line }}</i></span></td><td class="pdm-project-portfolio__notes" @click.stop><ol><li v-for="note in notesForProject(row.projectId)" :key="note.id"><span :title="note.detail">{{ personName(note.actor) }} · {{ note.occurredAt.replace('T', ' ').slice(5, 16) }} · {{ note.detail }}</span></li><li v-if="!notesForProject(row.projectId).length" class="is-empty">暂无备注</li></ol><button type="button" class="pdm-text-action" :aria-label="`维护 ${row.projectCode} 的记录`" @click="openManagerNote(row.projectId, row.projectCode, row.projectName)">记录</button></td>
               </tr>

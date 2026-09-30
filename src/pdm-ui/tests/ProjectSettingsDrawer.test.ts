@@ -111,4 +111,34 @@ describe('ProjectSettingsDrawer', () => {
     expect(wrapper.text()).toContain('系统管理员')
     expect(wrapper.text()).not.toContain('admin')
   })
+
+  it('仅在阻断任务可中断时显示管理员强制重置并提交强制标记', async () => {
+    api.getProjectContentResetReadiness.mockResolvedValue({
+      project: target, includeChildren: false, includedProjects: [target], canReset: false, canForceReset: true,
+      blockers: ['存在已签出的图档，请先存档或释放编辑权限。'], counts: { 受控图档: 2 }, restorableSnapshots: [],
+    })
+    api.resetProjectContent.mockResolvedValue({ id: 'snapshot-2' })
+    const wrapper = mount(ProjectSettingsDrawer, {
+      props: { modelValue: true, project: target, projects: [target], token: 'token', canCopyContent: false, canResetContent: true, pending: false },
+      global: { stubs: {
+        ElDrawer: { template: '<section><slot /><slot name="footer" /></section>' },
+        ElAlert: { props: ['title'], template: '<div>{{ title }}<slot /></div>' },
+        ElInput: { props: ['modelValue'], emits: ['update:modelValue'], template: '<textarea :value="modelValue" @input="$emit(\'update:modelValue\', $event.target.value)" />' },
+        ElCheckbox: { props: ['modelValue'], emits: ['update:modelValue', 'change'], template: '<label><input type="checkbox" :checked="modelValue" @change="$emit(\'update:modelValue\', $event.target.checked)" /><slot /></label>' },
+      } },
+    })
+    await flushPromises()
+
+    const button = wrapper.findAll('button').find(item => item.text() === '重置项目内容')!
+    expect(button.attributes('disabled')).toBeDefined()
+    await wrapper.findAll('input[type="checkbox"]')[1].setValue(true)
+    await wrapper.findAll('textarea')[0].setValue('清理测试项目')
+    await wrapper.findAll('textarea')[1].setValue(target.code)
+    vi.spyOn(ElMessageBox, 'confirm').mockResolvedValue('confirm' as never)
+    await wrapper.findAll('button').find(item => item.text() === '强制重置项目内容')!.trigger('click')
+    await flushPromises()
+
+    expect(api.resetProjectContent).toHaveBeenCalledWith(target.id, false, '清理测试项目', target.code, 'token', true)
+    wrapper.unmount()
+  })
 })

@@ -57,6 +57,9 @@ internal sealed class PdmApiClient : IDisposable
     public Task<List<ProjectDto>> GetProjectsAsync(CancellationToken cancellationToken) =>
         GetJsonAsync<List<ProjectDto>>("api/projects", cancellationToken);
 
+    public Task<ProjectPlanDto> GetProjectPlanAsync(Guid projectId, CancellationToken cancellationToken) =>
+        GetJsonAsync<ProjectPlanDto>(string.Concat("api/projects/", projectId, "/plan"), cancellationToken);
+
     public Task<OrganizationDirectoryDto> GetOrganizationDirectoryAsync(CancellationToken cancellationToken) =>
         GetJsonAsync<OrganizationDirectoryDto>("api/organization-directory", cancellationToken);
 
@@ -703,6 +706,18 @@ internal sealed class CompanyOptionDto
     public Guid Id { get; set; }
     public string Name { get; set; }
     public string Code { get; set; }
+}
+
+internal sealed class ProjectPlanDto
+{
+    public List<ProjectPlanTaskDto> Tasks { get; set; }
+}
+
+internal sealed class ProjectPlanTaskDto
+{
+    public string Name { get; set; }
+    public string Assignee { get; set; }
+    public string PlannedFinish { get; set; }
 }
 
 internal sealed class ProjectDto

@@ -17,7 +17,8 @@ function project(input: Partial<ProjectSummary> & Pick<ProjectSummary, 'id' | 'c
   return {
     owner: 'admin', stage: '设计', vaultName: 'vault', vaultLocation: '', releaseLocation: '', quantity: 1,
     serialNumbers: [], responsibleUsers: [], collaborativeProjectManagers: [], designers: [],
-    canAssignExecutionUnit: true, canManageMainStaffing: true, canAssignDesigners: true, canReadContent: true, ...input,
+    canAssignExecutionUnit: true, canManageMainStaffing: true, canAssignDesigners: true, canReadContent: true,
+    effectiveProjectPermissions: ['bom.edit'], ...input,
   }
 }
 
@@ -35,6 +36,33 @@ describe('BomHierarchyOverview', () => {
     }))
   })
   afterEach(() => vi.restoreAllMocks())
+
+  it('keeps the healthy projects visible when one child BOM version request fails', async () => {
+    const root = project({ id: 'root', code: 'P700004', name: '主项目' })
+    const first = project({ id: 'first', code: 'P700004-1', name: '子项目一', parentProjectId: 'root', rootProjectId: 'root' })
+    const second = project({ id: 'second', code: 'P700004-2', name: '子项目二', parentProjectId: 'root', rootProjectId: 'root' })
+    api.listBom.mockResolvedValue([item('A', '物料')])
+    api.listProjectBomHeaders.mockResolvedValue([])
+    api.listBomVersions.mockImplementation(async (projectId: string) => {
+      if (projectId === 'second') throw new Error('PLM服务发生内部错误')
+      return []
+    })
+    const wrapper = mount(BomHierarchyOverview, { props: { project: root, projects: [root, first, second], token: 'token', editable: true } })
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('部分项目BOM读取失败：P700004-2')
+    expect(wrapper.text()).toContain('P700004-2 · 子项目二：BOM版本：PLM服务发生内部错误')
+    expect(wrapper.findAll('tbody tr')).toHaveLength(6)
+    expect(wrapper.text()).toContain('P700004-1')
+    expect(wrapper.text()).toContain('待BOM发布后自动生成并同步 5 个BOM料号')
+
+    api.listBomVersions.mockResolvedValue([])
+    await wrapper.get('[aria-label="刷新多级BOM"]').trigger('click')
+    await flushPromises()
+    expect(wrapper.text()).not.toContain('部分项目BOM读取失败')
+    expect(wrapper.text()).toContain('待BOM发布后自动生成并同步 9 个BOM料号')
+    wrapper.unmount()
+  })
 
   it('collapses unnumbered children, preserves all master rows and counts, and remembers toggles on refresh', async () => {
     const root = project({ id: 'root', code: 'ROOT', name: '主项目' })
@@ -249,7 +277,8 @@ describe('BomHierarchyOverview', () => {
     api.listBom.mockRejectedValueOnce(new Error('刷新失败测试'))
     await button.trigger('click')
     await flushPromises()
-    expect(wrapper.get('[role="alert"]').text()).toBe('刷新失败测试')
+    expect(wrapper.get('[role="alert"]').text()).toContain('部分项目BOM读取失败：P-0302')
+    expect(wrapper.text()).toContain('P-0302 · 设备：标准件BOM：刷新失败测试')
     expect(button.attributes('disabled')).toBeUndefined()
   })
 

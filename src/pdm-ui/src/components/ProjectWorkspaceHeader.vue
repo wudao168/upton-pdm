@@ -34,8 +34,8 @@ function projectDesignLeads(project: ProjectSummary) {
 const tabs = [
   { key: 'overview', label: '概览', icon: LayoutDashboard },
   { key: 'files', label: '文件', icon: FolderOpen },
-  { key: 'project-plan', label: '项目计划', icon: Calendar },
-  { key: 'validation-plan', label: '验证计划', icon: ClipboardCheck },
+  { key: 'project-plan', label: '计划', icon: Calendar },
+  { key: 'validation-plan', label: '质量', icon: ClipboardCheck },
   { key: 'documents', label: '图档', icon: FolderTree },
   { key: 'bom', label: 'BOM', icon: Boxes },
   { key: 'release', label: '发布', icon: Rocket },

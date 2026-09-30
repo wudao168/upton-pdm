@@ -16,7 +16,7 @@ function json(value: unknown, status = 200) {
 }
 
 function installApiMock(projectsBeforeDefault: Array<Record<string, unknown>> = [], loginRoleCodes?: string[]) {
-  const projects: Array<Record<string, unknown>> = [...projectsBeforeDefault, { id: projectId, code: 'PRJ-REAL-001', name: '真实装配项目', owner: 'engineer', primaryProjectManager: 'engineer', collaborativeProjectManagers: [], responsibleUsers: ['engineer'], vaultLocation: 'D:\\PDM\\PRJ-REAL-001', releaseLocation: 'D:\\Release\\PRJ-REAL-001', isActive: true, quantity: 1, serialNumbers: [] }]
+  const projects: Array<Record<string, unknown>> = [...projectsBeforeDefault, { id: projectId, code: 'PRJ-REAL-001', name: '真实装配项目', owner: 'engineer', primaryProjectManager: 'engineer', collaborativeProjectManagers: [], responsibleUsers: ['engineer'], vaultLocation: 'D:\\PDM\\PRJ-REAL-001', releaseLocation: 'D:\\Release\\PRJ-REAL-001', isActive: true, quantity: 1, serialNumbers: [], effectiveProjectPermissions: ['project.edit', 'project.child.create', 'bom.edit', 'bom.mechanical.edit', 'bom.electrical.edit', 'validation-plan.edit', 'release.manage'] }]
   const customers = [{ id: 'customer-1', code: 'C00465', name: '中山比亚迪电子有限公司', isActive: true }]
   let crmSettings = { baseUrl: 'http://10.7.7.188/U9', username: 'pdm', passwordConfigured: true, autoSyncEnabled: false, autoSyncIntervalMinutes: 60, lastSyncAt: null as string | null, lastSyncCount: 0, lastAutoSyncAttemptAt: null as string | null, lastAutoSyncError: null as string | null }
   let u9Settings = { baseUrl: 'http://10.7.7.188/U9', enterpriseCode: '01', organizationCode: '7', userCode: 'pdm', clientId: 'PDM', clientSecretConfigured: true, itemCreatePath: '/webapi/ItemMaster/Create', itemQueryPath: '/webapi/ItemMaster/Query', itemModifyPath: '/webapi/ItemMaster/Modify', itemDeletePath: '/webapi/ItemMaster/Delete', unitCodeMappings: {}, writeEnabled: false }
@@ -338,7 +338,7 @@ describe('PLM client workspace', () => {
         await login(wrapper, false, username)
         await runProjectAction(wrapper, 'open')
         await flushPromises()
-        await projectTabByText(wrapper, '项目计划').trigger('click')
+        await projectTabByText(wrapper, '计划').trigger('click')
         await flushPromises()
         expect(wrapper.get('[data-test="project-plan-permission"]').text()).toBe(expected)
       } finally { wrapper.unmount() }
@@ -951,8 +951,8 @@ describe('PLM client workspace', () => {
     await flushPromises()
 
     expect(wrapper.text()).toContain('PRJ-REAL-001 · 真实装配项目')
-    expect(wrapper.get('button[aria-label="进入项目图档"]').text()).toContain('查看图档')
-    expect(wrapper.get('button[aria-label="进入BOM数据"]').text()).toContain('查看BOM')
+    expect(projectTabByText(wrapper, '图档').exists()).toBe(true)
+    expect(projectTabByText(wrapper, 'BOM').exists()).toBe(true)
     await projectTabByText(wrapper, '文件').trigger('click')
     await flushPromises()
     expect(wrapper.text()).toContain('项目文件夹')
@@ -1309,9 +1309,9 @@ describe('PLM client workspace', () => {
     await login(wrapper)
 
     await projectTabByText(wrapper, '概览').trigger('click')
-    expect(wrapper.get('[aria-label="工作台主页面"]').text()).toContain('图档与审核')
+    expect(wrapper.get('[aria-label="工作台主页面"]').text()).toContain('项目团队')
 
-    await wrapper.get('button[aria-label="进入项目图档"]').trigger('click')
+    await projectTabByText(wrapper, '图档').trigger('click')
     expect(wrapper.find('[aria-label="项目设计树"]').exists()).toBe(true)
 
     await projectTabByText(wrapper, 'BOM').trigger('click')

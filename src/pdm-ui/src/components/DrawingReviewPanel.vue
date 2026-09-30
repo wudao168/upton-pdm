@@ -14,6 +14,7 @@ const props = withDefaults(defineProps<{
   packages: DrawingReviewPackage[]
   candidates?: DrawingReviewCandidate[]
   reviewerOptions?: Array<{ username: string; label: string }>
+  defaultReviewers?: string[]
   selectedDocumentId?: string
   currentUsername: string
   pending: boolean
@@ -28,6 +29,7 @@ const props = withDefaults(defineProps<{
 }>(), {
   candidates: () => [],
   reviewerOptions: () => [],
+  defaultReviewers: () => [],
   canManageWithdraw: false,
   allowSelfReview: false,
   overlayHosted: false,
@@ -59,6 +61,10 @@ const scopeSearch = ref('')
 const overviewState = ref('All')
 const selectedCandidateIds = ref<string[]>([])
 const assignedReviewers = ref<string[]>([])
+const eligibleDefaultReviewers = computed(() => props.defaultReviewers.flatMap(username => {
+  const option = props.reviewerOptions.find(item => item.username.toLowerCase() === username.toLowerCase())
+  return option ? [option.username] : []
+}))
 
 const selectedPackageId = computed({
   get: () => props.packageId || props.packages[0]?.id || '',
@@ -226,7 +232,9 @@ function selectAllReadyCandidates() {
 function openScopeSelection() {
   scopeOpen.value = true
   scopeSearch.value = ''
-  assignedReviewers.value = props.reviewerOptions.length === 1 ? [props.reviewerOptions[0]!.username] : []
+  assignedReviewers.value = eligibleDefaultReviewers.value.length
+    ? [...eligibleDefaultReviewers.value]
+    : props.reviewerOptions.length === 1 ? [props.reviewerOptions[0]!.username] : []
   emit('refreshCandidates')
   selectAllReadyCandidates()
 }
@@ -236,7 +244,9 @@ const batchReviewers = computed(() => {
   const current = props.packages.find(item => item.id === props.packageId) ?? props.packages[0]
   if (current?.assignedReviewers?.length) return [...current.assignedReviewers]
   if (current?.assignedReviewer) return [current.assignedReviewer]
-  return props.reviewerOptions.length === 1 ? [props.reviewerOptions[0]!.username] : []
+  return eligibleDefaultReviewers.value.length
+    ? [...eligibleDefaultReviewers.value]
+    : props.reviewerOptions.length === 1 ? [props.reviewerOptions[0]!.username] : []
 })
 const batchReviewerHint = computed(() => batchReviewers.value.length
   ? `审核人：${batchReviewers.value.map(username => props.reviewerOptions.find(option => option.username === username)?.label ?? username).join('、')}`

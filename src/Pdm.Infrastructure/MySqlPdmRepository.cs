@@ -52,14 +52,15 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
     {
         if (!await HasUserPermissionAsync(actor, role, PermissionCodes.ProjectView, cancellationToken)) return [];
         var projects = await ListProjectsAsync(cancellationToken);
-        if (role is UserRole.Administrator or UserRole.PlatformAdministrator || TenantContext.Current?.IsPlatformAdministrator == true)
+        if (role == UserRole.Administrator || TenantContext.Current?.HasRole("developer") == true)
         {
             return projects.Select(ApplyAdministratorCapabilities).ToArray();
         }
 
         await using var connection = await OpenAsync(cancellationToken);
         var permissions = await GetUserPermissionsAsync(actor, role, cancellationToken);
-        return await ApplyCapabilitiesAsync(connection, projects, actor, permissions, cancellationToken);
+        var projectPermissions = await GetProjectPermissionSettingsAsync(cancellationToken);
+        return await ApplyCapabilitiesAsync(connection, projects, actor, permissions, projectPermissions, cancellationToken);
     }
 
     public async Task<Project?> FindProjectAsync(Guid projectId, CancellationToken cancellationToken)
@@ -897,9 +898,9 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
         var now = timeProvider.GetUtcNow().UtcDateTime;
         var affected = await connection.ExecuteAsync(new CommandDefinition(
-            "UPDATE cad_property_writeback SET status=@Status,started_at=CASE WHEN @Status='InProgress' THEN COALESCE(started_at,@Now) ELSE started_at END,completed_at=CASE WHEN @Status IN ('Succeeded','Conflict','Failed','Superseded') THEN @Now ELSE NULL END,result_version_id=@ResultVersionId,last_error=@Error WHERE id=@Id",
+            "UPDATE cad_property_writeback SET status=@Status,started_at=CASE WHEN @Status='InProgress' THEN COALESCE(started_at,@Now) ELSE started_at END,completed_at=CASE WHEN @Status IN ('Succeeded','Conflict','Failed','Superseded') THEN @Now ELSE NULL END,result_version_id=@ResultVersionId,last_error=@Error WHERE id=@Id AND status IN ('Pending','InProgress')",
             new { Id = id, Status = status.ToString(), ResultVersionId = resultVersionId, Error = error, Now = now }, transaction, cancellationToken: cancellationToken));
-        if (affected != 1) throw new PdmNotFoundException("属性写回任务不存在。");
+        if (affected != 1) throw new PdmConflictException("属性写回任务已结束或不存在，请刷新后重试。");
         await connection.ExecuteAsync(new CommandDefinition(
             """
             UPDATE bom_item b
@@ -1351,10 +1352,11 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
         CanManageMainStaffing = project.ParentProjectId is null && project.ExecutionUnitId is not null,
         CanAssignDesigners = project.ExecutionUnitId is not null,
         CanReadContent = true,
+        EffectiveProjectPermissions = ProjectPermissionSettings.Operations,
         CanSubmitArchive = true
     };
 
-    private static async Task<IReadOnlyList<Project>> ApplyCapabilitiesAsync(DbConnection connection, IReadOnlyList<Project> projects, string actor, IReadOnlySet<string> permissions, CancellationToken cancellationToken)
+    private static async Task<IReadOnlyList<Project>> ApplyCapabilitiesAsync(DbConnection connection, IReadOnlyList<Project> projects, string actor, IReadOnlySet<string> permissions, ProjectPermissionSettings projectPermissions, CancellationToken cancellationToken)
     {
         var managedUnitIds = (await connection.QueryAsync<Guid>(new CommandDefinition(
             "SELECT unit_id FROM organization_unit_manager WHERE username=@Actor", new { Actor = actor }, cancellationToken: cancellationToken))).ToHashSet();
@@ -1390,11 +1392,18 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
             var isMechanicalSupervisor = project.ExecutionUnitId is Guid supervisorUnitId
                 && actorRoleCodes.Contains("MechanicalManager", StringComparer.OrdinalIgnoreCase)
                 && IsActorWithin(supervisorUnitId);
+            var canAssignDesigners = permissions.Contains(PermissionCodes.ProjectDesignerAssign) && project.ExecutionUnitId is not null
+                && (managesExecutionUnit || isMechanicalSupervisor || belongsToProjectStaffing);
             return project with
             {
+                EffectiveProjectPermissions = canReadContent
+                    ? ProjectPermissionPolicy.AllowedOperations(project, projects.FirstOrDefault(item => item.Id == (project.RootProjectId ?? project.Id)) ?? project, actor, permissions, projectPermissions)
+                        .Concat(canAssignDesigners ? [PermissionCodes.ProjectDesignerAssign] : [])
+                        .Distinct(StringComparer.Ordinal).ToArray()
+                    : [],
                 CanAssignExecutionUnit = permissions.Contains(PermissionCodes.ProjectExecutionAssign) && project.ParentProjectId is null && project.OrganizationId == primaryCompanyId,
                 CanManageMainStaffing = permissions.Contains(PermissionCodes.ProjectStaffingManage) && project.ParentProjectId is null && project.ExecutionUnitId is not null && managedUnitIds.Contains(project.ExecutionUnitId.Value),
-                CanAssignDesigners = permissions.Contains(PermissionCodes.ProjectDesignerAssign) && project.ExecutionUnitId is not null && (managesExecutionUnit || isMechanicalSupervisor || belongsToProjectStaffing),
+                CanAssignDesigners = canAssignDesigners,
                 CanReadContent = canReadContent,
                 CanSubmitArchive = canReadContent
                     && permissions.Contains(PermissionCodes.DocumentEdit)

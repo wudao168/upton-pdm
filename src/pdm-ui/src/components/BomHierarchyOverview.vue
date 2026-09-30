@@ -27,6 +27,10 @@ const props = defineProps<{
   editable?: boolean
 }>()
 
+function canEditRow(project: ProjectSummary) {
+  return !!props.editable && (project.effectiveProjectPermissions?.includes('bom.edit') ?? false)
+}
+
 const categoryOrder: VisibleBomKind[] = ['Standard', 'NonStandard', 'Electrical']
 const categoryLabels: Record<VisibleBomKind, string> = {
   Standard: '标准件BOM',
@@ -39,6 +43,7 @@ const longLeadScopes: Record<VisibleBomKind, ReleaseScope> = {
   Electrical: 'ElectricalLongLead',
 }
 const detailCache = ref<Record<string, ProjectDetail>>({})
+const detailErrors = ref<Record<string, string>>({})
 const expandedProjects = ref<Record<string, boolean>>({})
 const loading = ref(false)
 const error = ref('')
@@ -232,12 +237,12 @@ const overviewRows = computed(() => orderedProjects.value.flatMap(({ project, de
     parentHeader: undefined,
   }, ...categoryRows]
 }))
-const visibleOverviewRows = computed(() => overviewRows.value.filter(row => row.isMaster || isProjectExpanded(row.project)))
+const visibleOverviewRows = computed(() => overviewRows.value.filter(row => row.isMaster || (!detailErrors.value[row.project.id] && isProjectExpanded(row.project))))
 
 function isHeaderEligible(row: (typeof overviewRows.value)[number]) {
   return !rootHasChildren.value || row.project.id !== rootProjectId.value || row.headerKind === 'Master'
 }
-const eligibleHeaderRows = computed(() => overviewRows.value.filter(isHeaderEligible))
+const eligibleHeaderRows = computed(() => overviewRows.value.filter(row => !detailErrors.value[row.project.id] && isHeaderEligible(row)))
 const missingHeaderCount = computed(() => eligibleHeaderRows.value.filter(row => !row.header?.materialId || row.header.applicationStatus === 'Rejected').length)
 const pendingHeaderCount = computed(() => eligibleHeaderRows.value.filter(row => row.header?.materialId && !row.header.materialCode).length)
 
@@ -254,7 +259,7 @@ function u9BomStateText(row: (typeof overviewRows.value)[number]) {
   if (state === 'create-pending') return '待自动创建'
   if (state === 'modify-pending') return '待同步子件'
   if (state === 'failed') return '检查失败'
-  return props.editable ? (row.releaseStatus === '正式发布' ? '检查同步' : '检查BOM状态') : '未检查'
+  return canEditRow(row.project) ? (row.releaseStatus === '正式发布' ? '检查同步' : '检查BOM状态') : '未检查'
 }
 
 /** 查到该BOM流在"已发布版本"里缺 U9C 正式料号的子件；查不到就按普通失败处理。 */
@@ -297,7 +302,7 @@ async function refreshU9BomStates() {
 }
 
 async function syncU9Bom(row: (typeof overviewRows.value)[number]) {
-  if (!props.editable || !isHeaderEligible(row) || !row.header?.materialCode || syncingRowKey.value) return
+  if (!canEditRow(row.project) || !isHeaderEligible(row) || !row.header?.materialCode || syncingRowKey.value) return
   const known = u9Blockers.value[row.key] ?? []
   if (known.length) { showU9Blockers(known); return }
   syncingRowKey.value = row.key
@@ -381,13 +386,17 @@ function headerCodeTitle(header?: ProjectBomHeader) {
 }
 
 async function fetchProjectDetail(projectId: string): Promise<ProjectDetail> {
+  async function fromModule<T>(module: string, request: Promise<T>): Promise<T> {
+    try { return await request }
+    catch (reason) { throw new Error(`${module}：${reason instanceof Error ? reason.message : '读取失败'}`) }
+  }
   const [standard, nonStandard, electrical, versions, headers, releases] = await Promise.all([
-    listBom(projectId, 'Standard', props.token),
-    listBom(projectId, 'NonStandard', props.token),
-    listBom(projectId, 'Electrical', props.token),
-    listBomVersions(projectId, props.token),
-    listProjectBomHeaders(projectId, props.token),
-    listReleasePackages(projectId, props.token),
+    fromModule('标准件BOM', listBom(projectId, 'Standard', props.token)),
+    fromModule('非标件BOM', listBom(projectId, 'NonStandard', props.token)),
+    fromModule('电气BOM', listBom(projectId, 'Electrical', props.token)),
+    fromModule('BOM版本', listBomVersions(projectId, props.token)),
+    fromModule('BOM表头', listProjectBomHeaders(projectId, props.token)),
+    fromModule('发布记录', listReleasePackages(projectId, props.token)),
   ])
   return { current: { Standard: standard, NonStandard: nonStandard, Electrical: electrical }, versions, headers, releases }
 }
@@ -399,8 +408,21 @@ async function loadOverview(force = false) {
   loading.value = true
   error.value = ''
   try {
-    const loaded = await Promise.all(projectsToLoad.map(async project => [project.id, await fetchProjectDetail(project.id)] as const))
-    detailCache.value = { ...detailCache.value, ...Object.fromEntries(loaded) }
+    const loaded = await Promise.allSettled(projectsToLoad.map(project => fetchProjectDetail(project.id)))
+    const nextDetails = { ...detailCache.value }
+    const nextErrors = { ...detailErrors.value }
+    loaded.forEach((result, index) => {
+      const project = projectsToLoad[index]
+      if (result.status === 'fulfilled') {
+        nextDetails[project.id] = result.value
+        delete nextErrors[project.id]
+      } else {
+        delete nextDetails[project.id]
+        nextErrors[project.id] = result.reason instanceof Error ? result.reason.message : '读取失败'
+      }
+    })
+    detailCache.value = nextDetails
+    detailErrors.value = nextErrors
     await refreshU9BomStates()
   } catch (reason) {
     error.value = reason instanceof Error ? reason.message : 'BOM层级状态加载失败'
@@ -424,6 +446,7 @@ watch([rootProjectId, () => props.token], () => { expandedProjects.value = {} })
 
 watch([rootProjectId, hierarchySignature, () => props.token], () => {
   detailCache.value = {}
+  detailErrors.value = {}
   void loadOverview(true)
 }, { immediate: true })
 </script>
@@ -431,8 +454,9 @@ watch([rootProjectId, hierarchySignature, () => props.token], () => {
 <template>
   <section class="bom-overview" aria-label="BOM多级总览">
     <div v-if="error" class="bom-overview__error" role="alert">{{ error }}</div>
+    <div v-if="Object.keys(detailErrors).length" class="bom-overview__error" role="alert">部分项目BOM读取失败：{{ hierarchyProjects.filter(project => detailErrors[project.id]).map(project => project.code).join('、') }}。其他项目仍可查看，请刷新重试。</div>
     <div class="bom-overview__generation">
-      <span v-if="editable">{{ missingHeaderCount ? `待BOM发布后自动生成并同步 ${missingHeaderCount} 个BOM料号` : pendingHeaderCount ? `${pendingHeaderCount} 个BOM料号尚未完成自动处理，请查看各行状态` : '全部BOM料号已由U9C回写' }}</span>
+      <span v-if="editable">{{ Object.keys(detailErrors).length && !eligibleHeaderRows.length ? '项目BOM读取失败，暂无法统计自动流程' : missingHeaderCount ? `待BOM发布后自动生成并同步 ${missingHeaderCount} 个BOM料号` : pendingHeaderCount ? `${pendingHeaderCount} 个BOM料号尚未完成自动处理，请查看各行状态` : '全部BOM料号已由U9C回写' }}</span>
       <button type="button" class="pdm-secondary-action" aria-label="刷新多级BOM" :disabled="loading || !!syncingRowKey || !token" @click="refreshOverview">{{ loading ? '刷新中…' : '刷新' }}</button>
     </div>
 
@@ -443,6 +467,8 @@ watch([rootProjectId, hierarchySignature, () => props.token], () => {
         </thead>
         <tbody>
           <tr v-for="row in visibleOverviewRows" :key="row.key" :class="{ 'is-master-row': row.isMaster }">
+            <td v-if="detailErrors[row.project.id]" colspan="12" class="bom-overview__project-error" :style="{ paddingLeft: `${row.depth * 18 + 8}px` }">{{ row.project.code }} · {{ row.project.name }}：{{ detailErrors[row.project.id] }}</td>
+            <template v-else>
             <td :title="`${row.project.code} · ${row.project.name}`">
               <span class="bom-overview__project" :style="{ paddingLeft: `${row.depth * 18}px` }"><button v-if="row.isMaster && row.project.parentProjectId" type="button" class="bom-overview__toggle" :aria-expanded="isProjectExpanded(row.project)" :aria-label="`${isProjectExpanded(row.project) ? '折叠' : '展开'}${row.project.code}的三类BOM`" @click="toggleProject(row.project)">{{ isProjectExpanded(row.project) ? '▾' : '▸' }}</button><i v-if="!row.isMaster">↳</i><strong v-if="row.isMaster">{{ row.project.code }}</strong><span v-if="row.isMaster">{{ row.project.name }} · 项目主BOM</span><button v-else type="button" class="bom-overview__link" :aria-label="`进入${row.project.code}的${row.label}`" :title="`进入${row.project.code}的${row.label}`" @click="emit('openBom', row.project.id, row.kind as VisibleBomKind)">{{ row.label }}</button></span>
             </td>
@@ -455,14 +481,15 @@ watch([rootProjectId, hierarchySignature, () => props.token], () => {
             <td><span :class="row.unresolvedCount ? 'is-warning' : 'is-success'">{{ row.unresolvedCount ? `${row.unresolvedCount} 项` : '正常' }}</span></td>
             <td :title="formatDate(row.releasedAt)">{{ formatDate(row.releasedAt) }}</td>
             <td :title="isHeaderEligible(row) ? headerCodeTitle(row.header) : '主项目已有子项目，本级三类BOM不生成料号'">
-              <button v-if="editable && row.header?.canRetryAutomatic" type="button" class="bom-overview__sync is-warning" :disabled="!!retryingApplicationId" :aria-label="`重试 ${row.project.code} ${row.headerKind} 料号自动处理`" @click="retryAutomatic(row.header)">{{ retryingApplicationId === row.header.applicationId ? '正在重试…' : automaticText(row.header) }}</button>
+              <button v-if="canEditRow(row.project) && row.header?.canRetryAutomatic" type="button" class="bom-overview__sync is-warning" :disabled="!!retryingApplicationId" :aria-label="`重试 ${row.project.code} ${row.headerKind} 料号自动处理`" @click="retryAutomatic(row.header)">{{ retryingApplicationId === row.header.applicationId ? '正在重试…' : automaticText(row.header) }}</button>
               <span v-else :class="row.header?.materialCode ? 'is-success' : row.header?.applicationId ? 'is-warning' : 'is-muted'">{{ !isHeaderEligible(row) && !row.header?.materialId ? '不生成' : automaticText(row.header) }}</span>
             </td>
             <td :title="headerCodeTitle(row.header)"><span :class="row.header?.materialCode ? 'is-success' : row.header?.materialId ? 'is-warning' : 'is-muted'">{{ !isHeaderEligible(row) && !row.header?.materialId ? '不生成' : row.header?.materialCode ? '已回写' : row.header?.automaticStatus === 'Failed' || row.header?.automaticStatus === 'WaitingRetry' ? '未同步' : row.header?.materialId ? '待同步' : '待生成' }}</span></td>
             <td>
-              <button v-if="editable && isHeaderEligible(row) && row.header?.materialCode" type="button" class="bom-overview__sync" :class="{ 'is-warning': u9BomStates[row.key] === 'blocked' }" :disabled="!!syncingRowKey" @click="syncU9Bom(row)">{{ syncingRowKey === row.key ? '检查中…' : u9BomStateText(row) }}</button>
+              <button v-if="canEditRow(row.project) && isHeaderEligible(row) && row.header?.materialCode" type="button" class="bom-overview__sync" :class="{ 'is-warning': u9BomStates[row.key] === 'blocked' }" :disabled="!!syncingRowKey" @click="syncU9Bom(row)">{{ syncingRowKey === row.key ? '检查中…' : u9BomStateText(row) }}</button>
               <span v-else :class="row.header?.materialCode ? 'is-muted' : 'is-warning'">{{ u9BomStateText(row) }}</span>
             </td>
+            </template>
           </tr>
           <tr v-if="!loading && overviewRows.length === 0"><td colspan="12" class="bom-overview__empty">当前范围没有可显示的BOM层级状态。</td></tr>
           <tr v-if="loading"><td colspan="12" class="bom-overview__empty">正在加载BOM层级状态…</td></tr>
@@ -476,5 +503,6 @@ watch([rootProjectId, hierarchySignature, () => props.token], () => {
 <style scoped>
 .bom-overview__toggle{display:inline-flex;flex:0 0 16px;width:16px;height:18px;align-items:center;justify-content:center;padding:0;border:0;background:transparent;color:var(--pdm-blue);font:inherit;cursor:pointer}.bom-overview__toggle:focus-visible{outline:2px solid var(--pdm-blue);outline-offset:1px}
 .bom-overview__link{min-width:0;overflow:hidden;padding:0;border:0;background:transparent;color:var(--pdm-blue);font:inherit;text-overflow:ellipsis;white-space:nowrap;cursor:pointer}.bom-overview__link:hover{text-decoration:underline}.bom-overview__link:focus-visible{outline:2px solid var(--pdm-blue);outline-offset:2px}
+.bom-overview__project-error{color:var(--pdm-danger)}
 .bom-overview{display:flex;min-height:560px;min-width:0;flex-direction:column;padding:0;border:1px solid var(--pdm-border);border-radius:7px;background:#fff}.bom-overview__error{margin:10px;padding:8px 10px;border-radius:5px;background:#fef2f2;color:var(--pdm-danger)}.bom-overview__generation{display:flex;min-height:38px;align-items:center;justify-content:flex-end;gap:10px;padding:5px 8px;border-bottom:1px solid var(--pdm-border);color:var(--pdm-muted)}.bom-overview__table-wrap{min-height:0;flex:1;overflow:auto;border-radius:6px}.bom-overview__table-wrap table{width:100%;table-layout:fixed;border-collapse:collapse;white-space:nowrap}.bom-overview__table-wrap th,.bom-overview__table-wrap td{overflow:hidden;padding:8px;border-bottom:1px solid var(--pdm-border);text-align:left;text-overflow:ellipsis}.bom-overview__table-wrap th{position:sticky;top:0;z-index:1;background:#f3f6fa}.bom-overview__table-wrap th:nth-child(1){width:205px}.bom-overview__table-wrap th:nth-child(2){width:85px}.bom-overview__table-wrap th:nth-child(3),.bom-overview__table-wrap th:nth-child(4){width:112px}.bom-overview__table-wrap th:nth-child(5){width:58px}.bom-overview__table-wrap th:nth-child(6){width:80px}.bom-overview__table-wrap th:nth-child(7){width:82px}.bom-overview__table-wrap th:nth-child(8){width:68px}.bom-overview__table-wrap th:nth-child(9){width:118px}.bom-overview__table-wrap th:nth-child(10){width:145px}.bom-overview__table-wrap th:nth-child(11){width:72px}.bom-overview__table-wrap th:nth-child(12){width:92px}.bom-overview__table-wrap tr.is-master-row td{background:#f8fafc;font-weight:600}.bom-overview__project{display:flex;min-width:0;align-items:center;gap:6px}.bom-overview__project i{color:var(--pdm-muted);font-style:normal}.bom-overview__project strong{flex:0 0 auto}.bom-overview__project span{overflow:hidden;color:var(--pdm-muted);text-overflow:ellipsis}.bom-overview__sync{border:0;background:transparent;color:var(--pdm-blue);cursor:pointer;font:inherit}.bom-overview__sync:disabled{cursor:wait;opacity:.6}.is-warning{color:var(--pdm-orange)}.is-success{color:var(--pdm-green)}.is-muted{color:var(--pdm-muted)}.bom-overview__empty{padding:24px;text-align:center;color:var(--pdm-muted)}
 </style>

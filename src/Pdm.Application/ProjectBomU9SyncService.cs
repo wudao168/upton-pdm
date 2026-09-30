@@ -452,10 +452,7 @@ public sealed class ProjectBomU9SyncService(
 
     private async Task DemandAccessAsync(Guid projectId, string actor, UserRole role, CancellationToken cancellationToken)
     {
-        if (!await repository.HasProjectReadAccessAsync(projectId, actor, role, cancellationToken))
-            throw new UnauthorizedAccessException("当前用户没有项目查看权限。");
-        if (!await repository.HasUserPermissionAsync(actor, role, PermissionCodes.BomEdit, cancellationToken))
-            throw new UnauthorizedAccessException("当前角色未配置BOM编辑权限。");
+        await ProjectPermissionPolicy.RequireAsync(repository, projectId, actor, role, PermissionCodes.BomEdit, cancellationToken);
     }
 
     private static IEnumerable<BomItem> EffectiveItems(IEnumerable<BomItem> items) =>

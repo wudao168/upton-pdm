@@ -41,6 +41,11 @@ internal static class ClientBootstrapLoader
         return await LoadAsync(ResolveBootstrapUrl(), cancellationToken).ConfigureAwait(false);
     }
 
+    public static async Task<ClientBootstrapConfiguration> LoadAsync(CancellationToken cancellationToken, bool allowCache)
+    {
+        return await LoadAsync(ResolveBootstrapUrl(), cancellationToken, allowCache).ConfigureAwait(false);
+    }
+
     public static async Task<ClientBootstrapConfiguration> LoadAsync(Uri bootstrapUrl, CancellationToken cancellationToken)
     {
         return await LoadAsync(bootstrapUrl, cancellationToken, true).ConfigureAwait(false);
@@ -54,7 +59,7 @@ internal static class ClientBootstrapLoader
         if (bootstrapUrl == null) throw new ArgumentNullException(nameof(bootstrapUrl));
         try
         {
-            using (var client = new HttpClient { Timeout = TimeSpan.FromSeconds(5) })
+            using (var client = new HttpClient { Timeout = TimeSpan.FromSeconds(allowCache ? 5 : 15) })
             using (var response = await client.GetAsync(bootstrapUrl, cancellationToken).ConfigureAwait(false))
             {
                 response.EnsureSuccessStatusCode();
@@ -68,7 +73,7 @@ internal static class ClientBootstrapLoader
         {
             if (!allowCache) throw;
             var cached = TryLoadCache(bootstrapUrl);
-            return cached ?? Normalize(new ClientBootstrapConfiguration(), new Uri(DefaultBootstrapUrl));
+            return cached ?? Normalize(new ClientBootstrapConfiguration(), bootstrapUrl);
         }
     }
 
@@ -132,8 +137,9 @@ internal static class ClientBootstrapLoader
     private static ClientBootstrapConfiguration Normalize(ClientBootstrapConfiguration configuration, Uri bootstrapUrl)
     {
         configuration = configuration ?? new ClientBootstrapConfiguration();
-        configuration.ApiBaseUrl = ResolveUrl(bootstrapUrl, configuration.ApiBaseUrl, "http://127.0.0.1:5080/");
         configuration.UiBaseUrl = ResolveUrl(bootstrapUrl, configuration.UiBaseUrl, "http://127.0.0.1:5173/");
+        // A cached loopback API address belongs to the server, not a remote client.
+        configuration.ApiBaseUrl = ResolveUrl(new Uri(configuration.UiBaseUrl), configuration.ApiBaseUrl, "http://127.0.0.1:5080/");
         configuration.PollSeconds = Math.Max(15, Math.Min(configuration.PollSeconds, 3600));
         configuration.Desktop = NormalizePackage(configuration.Desktop, bootstrapUrl);
         configuration.SolidWorksAddin = NormalizePackage(configuration.SolidWorksAddin, bootstrapUrl);
@@ -152,8 +158,12 @@ internal static class ClientBootstrapLoader
 
     private static string ResolveUrl(Uri bootstrapUrl, string value, string fallback)
     {
-        if (string.IsNullOrWhiteSpace(value)) return fallback;
-        return new Uri(bootstrapUrl, value).AbsoluteUri.TrimEnd('/') + "/";
+        var resolved = new Uri(bootstrapUrl, string.IsNullOrWhiteSpace(value) ? fallback : value);
+        if (!bootstrapUrl.IsLoopback && resolved.IsLoopback)
+        {
+            resolved = new Uri(bootstrapUrl, "/");
+        }
+        return resolved.AbsoluteUri.TrimEnd('/') + "/";
     }
 
     private sealed class BootstrapLocator

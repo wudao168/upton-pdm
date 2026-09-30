@@ -83,6 +83,7 @@ public sealed class MaterialRelationService(
     public async Task<MaterialRelationCompleteness> ApplyAsync(Guid projectId, IReadOnlyList<ApplyMaterialRelationsCommand> commands, string actor, UserRole role, CancellationToken cancellationToken)
     {
         await RequireAsync(actor, role, PermissionCodes.BomEdit, cancellationToken);
+        await ProjectPermissionPolicy.RequireAsync(repository, projectId, actor, role, PermissionCodes.BomEdit, cancellationToken);
         if (!await repository.HasProjectContentReadAccessAsync(projectId, actor, role, cancellationToken))
             throw new UnauthorizedAccessException("当前用户没有该项目的操作权限。");
         var activePackage = (await repository.ListReleasePackagesAsync(projectId, cancellationToken)).FirstOrDefault(item =>

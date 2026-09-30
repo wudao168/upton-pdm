@@ -300,6 +300,20 @@ public static class PdmEndpointExtensions
             return Results.Ok(MapRolePermissionDirectory(await workflow.DeleteRoleAsync(targetRole, actor, role, cancellationToken)));
         });
 
+        api.MapGet("/project-permissions", async (HttpContext context, IPdmRepository repository, CancellationToken cancellationToken) =>
+        {
+            var (actor, role) = CurrentUser(context.User);
+            return !await repository.HasUserPermissionAsync(actor, role, PermissionCodes.ProjectPermissionSettingsView, cancellationToken)
+                ? Results.Forbid()
+                : Results.Ok(await repository.GetProjectPermissionSettingsAsync(cancellationToken));
+        });
+
+        api.MapPut("/project-permissions", async (UpdateProjectPermissionSettingsRequest request, HttpContext context, PdmWorkflowService workflow, CancellationToken cancellationToken) =>
+        {
+            var (actor, role) = CurrentUser(context.User);
+            return Results.Ok(await workflow.UpdateProjectPermissionSettingsAsync(new(request.Rules), actor, role, cancellationToken));
+        });
+
         api.MapGet("/organization-directory", async (IPdmRepository repository, CancellationToken cancellationToken) =>
         {
             var directory = ScopeOrganizationDirectory(await repository.GetOrganizationDirectoryAsync(cancellationToken));
@@ -583,8 +597,8 @@ public static class PdmEndpointExtensions
         {
             var (actor, role) = CurrentUser(context.User);
             if (!await repository.HasUserPermissionAsync(actor, role, PermissionCodes.ProjectView, cancellationToken)) return Results.Forbid();
-            var project = await repository.FindProjectAsync(projectId, cancellationToken);
-            return project is null ? Results.NotFound() : Results.Ok(project with { CanReadContent = await repository.HasProjectContentReadAccessAsync(projectId, actor, role, cancellationToken) });
+            var project = (await repository.ListProjectsForUserAsync(actor, role, cancellationToken)).FirstOrDefault(item => item.Id == projectId);
+            return project is null ? Results.NotFound() : Results.Ok(project);
         });
 
         api.MapPut("/projects/{projectId:guid}/execution-unit", async (Guid projectId, UpdateProjectExecutionUnitRequest request, HttpContext context, PdmWorkflowService workflow, CancellationToken cancellationToken) =>

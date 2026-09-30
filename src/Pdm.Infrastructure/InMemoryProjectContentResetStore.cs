@@ -11,7 +11,7 @@ public sealed class InMemoryProjectContentResetStore : IProjectContentResetStore
     public Task<ProjectContentResetInspection> InspectAsync(IReadOnlyList<Guid> projectIds, CancellationToken cancellationToken) =>
         Task.FromResult(new ProjectContentResetInspection(new Dictionary<string, int>(), [], false));
 
-    public Task<ProjectContentResetSnapshotSummary> ResetAsync(Guid projectId, string projectCode, IReadOnlyList<Guid> projectIds, string reason, string actor, DateTimeOffset now, CancellationToken cancellationToken)
+    public Task<ProjectContentResetSnapshotSummary> ResetAsync(Guid projectId, string projectCode, IReadOnlyList<Guid> projectIds, string reason, string actor, DateTimeOffset now, bool force, CancellationToken cancellationToken)
     {
         var snapshot = new ProjectContentResetSnapshotSummary(Guid.NewGuid(), projectId, projectCode, projectIds, reason, new Dictionary<string, int>(), actor, now, now.AddDays(30), null, null, null);
         snapshots[snapshot.Id] = snapshot;

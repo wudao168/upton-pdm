@@ -200,6 +200,28 @@ public sealed partial class MySqlPdmRepository
         return BomPropertyMappingCatalog.Apply(settings);
     }
 
+    public async Task<ProjectPermissionSettings> GetProjectPermissionSettingsAsync(CancellationToken cancellationToken)
+    {
+        await using var connection = await OpenAsync(cancellationToken);
+        var json = await connection.ExecuteScalarAsync<string?>(new CommandDefinition(
+            "SELECT setting_value FROM pdm_system_setting WHERE setting_key='project_permission_settings'",
+            cancellationToken: cancellationToken));
+        return string.IsNullOrWhiteSpace(json)
+            ? ProjectPermissionSettings.Default
+            : (JsonSerializer.Deserialize<ProjectPermissionSettings>(json, jsonOptions) ?? ProjectPermissionSettings.Default).Normalize();
+    }
+
+    public async Task<ProjectPermissionSettings> UpdateProjectPermissionSettingsAsync(ProjectPermissionSettings settings, CancellationToken cancellationToken)
+    {
+        var normalized = settings.Normalize();
+        await using var connection = await OpenAsync(cancellationToken);
+        await connection.ExecuteAsync(new CommandDefinition(
+            "INSERT INTO pdm_system_setting(setting_key,setting_value,updated_at) VALUES('project_permission_settings',@Value,@Now) ON DUPLICATE KEY UPDATE setting_value=VALUES(setting_value),updated_at=VALUES(updated_at)",
+            new { Value = JsonSerializer.Serialize(normalized, jsonOptions), Now = timeProvider.GetUtcNow().UtcDateTime },
+            cancellationToken: cancellationToken));
+        return normalized;
+    }
+
     public async Task<PdmSystemSettings> UpdateSystemSettingsAsync(PdmSystemSettings settings, CancellationToken cancellationToken)
     {
         var now = timeProvider.GetUtcNow().UtcDateTime;

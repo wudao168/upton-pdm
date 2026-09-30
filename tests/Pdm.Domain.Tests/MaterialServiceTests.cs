@@ -1260,9 +1260,67 @@ public sealed class MaterialServiceTests
     }
 
     [Fact]
+    public async Task StandardBomMaterialCode_TreatsZeroBomWeightAsMissingWhenApproving()
+    {
+        var service = CreateService(out _, out var repository, out _);
+        var workflow = new PdmWorkflowService(repository, null!, null!, TimeProvider.System);
+        var item = Assert.Single(await workflow.ReplaceBomAsync(ProjectId, BomKind.Standard,
+        [
+            new BomItemInput(1, string.Empty, "磁性开关", 2, "001", null, "D-M9BL", "W1", true,
+                Brand: "亿格", Weight: "0.00")
+        ], "admin", UserRole.Administrator, default));
+
+        var application = Assert.IsType<MaterialCodeApplication>(Assert.Single(await service.ApplyForMaterialCodesAsync(
+            new(ProjectId, [item.Id]), "admin", UserRole.Administrator, default)).Application);
+        var decision = await service.DecideMaterialCodeApplicationAsync(
+            application.Id, application.RowVersion, true, "同意", "standardizer", UserRole.ProcessReviewer, default);
+
+        Assert.Equal(MaterialCodeApplicationStatus.Approved, decision.Application.Status);
+        Assert.Null(decision.Material?.Weight);
+        Assert.Null(decision.Material?.WeightUnit);
+        Assert.NotNull(decision.Task);
+    }
+
+    [Fact]
+    public async Task StandardBomMaterialCode_RequesterCanWithdrawPendingApplicationAndReapply()
+    {
+        var service = CreateService(out var materials, out var repository, out _);
+        await repository.SetChildProjectDesignersAsync(ProjectId, ["engineer"], "admin", default);
+        var workflow = new PdmWorkflowService(repository, null!, null!, TimeProvider.System);
+        var item = Assert.Single(await workflow.ReplaceBomAsync(ProjectId, BomKind.Standard,
+        [
+            new BomItemInput(1, string.Empty, "磁性开关", 2, "001", null, "D-M9BL", "W1", true,
+                Brand: "亿格")
+        ], "admin", UserRole.Administrator, default));
+        var first = Assert.IsType<MaterialCodeApplication>(Assert.Single(await service.ApplyForMaterialCodesAsync(
+            new(ProjectId, [item.Id]), "engineer", UserRole.Engineer, default)).Application);
+
+        await Assert.ThrowsAsync<UnauthorizedAccessException>(() => service.WithdrawMaterialCodeApplicationAsync(
+            first.Id, first.RowVersion, "another-engineer", UserRole.Engineer, default));
+        var withdrawn = await service.WithdrawMaterialCodeApplicationAsync(
+            first.Id, first.RowVersion, "engineer", UserRole.Engineer, default);
+
+        Assert.Equal(MaterialCodeApplicationStatus.Withdrawn, withdrawn.Status);
+        Assert.Equal(MaterialCodeWorkflowState.Withdrawn, (await materials.FindMaterialCodeApplicationAsync(first.Id, default))?.WorkflowState);
+        Assert.Empty(await materials.ListMaterialCodeApplicationsAsync(ProjectId, MaterialCodeApplicationStatus.Pending, default));
+        await Assert.ThrowsAsync<PdmRuleException>(() => service.WithdrawMaterialCodeApplicationAsync(
+            first.Id, withdrawn.RowVersion, "engineer", UserRole.Engineer, default));
+
+        var second = Assert.IsType<MaterialCodeApplication>(Assert.Single(await service.ApplyForMaterialCodesAsync(
+            new(ProjectId, [item.Id]), "engineer", UserRole.Engineer, default)).Application);
+        Assert.NotEqual(first.Id, second.Id);
+        Assert.Equal(MaterialCodeApplicationStatus.Pending, second.Status);
+        var approved = await service.DecideMaterialCodeApplicationAsync(
+            second.Id, second.RowVersion, true, "同意", "standardizer", UserRole.ProcessReviewer, default);
+        await Assert.ThrowsAsync<PdmRuleException>(() => service.WithdrawMaterialCodeApplicationAsync(
+            second.Id, approved.Application.RowVersion, "engineer", UserRole.Engineer, default));
+    }
+
+    [Fact]
     public async Task StandardizerCanChooseAnyCreatableCategoryWhenApprovingBomMaterialCode()
     {
         var service = CreateService(out var materials, out var repository, out _);
+        await repository.SetChildProjectDesignersAsync(ProjectId, ["engineer"], "admin", default);
         var workflow = new PdmWorkflowService(repository, null!, null!, TimeProvider.System);
         var category = (await materials.ListCategoriesAsync(true, default)).Single(item => item.Code == "0101");
         var item = Assert.Single(await workflow.ReplaceBomAsync(ProjectId, BomKind.Standard,

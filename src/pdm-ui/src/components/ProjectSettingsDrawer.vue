@@ -31,6 +31,7 @@ const resetPending = ref(false)
 const includeChildren = ref(false)
 const resetReason = ref('')
 const resetConfirmation = ref('')
+const forceReset = ref(false)
 type SettingsTab = 'copy' | 'reset'
 const activeSettingsTab = ref<SettingsTab>(props.canCopyContent ? 'copy' : 'reset')
 
@@ -55,6 +56,7 @@ function resetDangerForm() {
   includeChildren.value = false
   resetReason.value = ''
   resetConfirmation.value = ''
+  forceReset.value = false
 }
 
 function resetSettingsTab() {
@@ -121,6 +123,7 @@ async function executeProjectCopy() {
 
 async function refreshResetReadiness() {
   resetPending.value = true
+  forceReset.value = false
   try {
     resetReadiness.value = await getProjectContentResetReadiness(props.project.id, includeChildren.value, props.token ?? '')
   } catch (error) {
@@ -136,15 +139,15 @@ function formatResetDate(value: string) {
 }
 
 async function executeProjectReset() {
-  if (!resetReadiness.value?.canReset || !resetReason.value.trim() || resetConfirmation.value.trim().toLocaleLowerCase() !== props.project.code.toLocaleLowerCase()) return
+  if (!(resetReadiness.value?.canReset || (resetReadiness.value?.canForceReset && forceReset.value)) || !resetReason.value.trim() || resetConfirmation.value.trim().toLocaleLowerCase() !== props.project.code.toLocaleLowerCase()) return
   try {
     await ElMessageBox.confirm(
-      `确认重置“${props.project.code}”的项目内容？\n\n系统将保留项目基本信息和人员分配，清空所列业务内容，并创建可恢复30天的整项快照。该操作不能通过刷新页面撤销。`,
-      '确认重置项目内容',
-      { type: 'error', confirmButtonText: '确认重置', cancelButtonText: '取消' },
+      `确认${forceReset.value ? '强制' : ''}重置“${props.project.code}”的项目内容？\n\n${forceReset.value ? '系统将释放图档编辑权限，中断项目内进行中的审核、发布审批和 CAD 写回。未存档的客户端修改不会进入快照。\n\n' : ''}系统将保留项目基本信息和人员分配，清空所列业务内容，并创建可恢复30天的整项快照。该操作不能通过刷新页面撤销。`,
+      `确认${forceReset.value ? '强制' : ''}重置项目内容`,
+      { type: 'error', confirmButtonText: forceReset.value ? '确认强制重置' : '确认重置', cancelButtonText: '取消' },
     )
     resetPending.value = true
-    await resetProjectContent(props.project.id, includeChildren.value, resetReason.value.trim(), resetConfirmation.value.trim(), props.token ?? '')
+    await resetProjectContent(props.project.id, includeChildren.value, resetReason.value.trim(), resetConfirmation.value.trim(), props.token ?? '', forceReset.value)
     await props.onContentResetComplete?.()
     resetReason.value = ''
     resetConfirmation.value = ''
@@ -214,7 +217,7 @@ async function executeSnapshotRestore(snapshot: ProjectContentResetSnapshotSumma
       </section>
       <section v-if="canResetContent" v-show="activeSettingsTab === 'reset'" class="pdm-project-settings__section pdm-project-settings__danger" aria-labelledby="pdm-project-reset-settings-title">
         <header><h3 id="pdm-project-reset-settings-title">项目重置</h3><p>仅系统管理员可执行。保留项目基本信息和人员分配，业务内容进入可恢复30天的整项快照。</p></header>
-        <el-alert title="危险操作" type="error" :closable="false" description="如已发布BOM，或存在进行中的审批、发布、CAD属性写回、外部同步及已签出图档，服务端将拒绝重置。项目计划和验证计划会随项目内容一并进入快照。" />
+        <el-alert title="危险操作" type="error" :closable="false" description="普通重置会在存在签出或进行中的任务时被拒绝。管理员可强制中断项目内任务；已发布内容、正在向外部发布和待处理的外部同步仍会阻止重置。项目计划和验证计划会一并进入快照。" />
         <div class="pdm-reset-scope">
           <el-checkbox v-model="includeChildren" :disabled="resetPending" @change="refreshResetReadiness">同时重置下属子项目</el-checkbox>
           <button type="button" class="pdm-secondary-action" :disabled="resetPending" @click="refreshResetReadiness">{{ resetPending ? '正在检查…' : '重新检查范围' }}</button>
@@ -222,12 +225,14 @@ async function executeSnapshotRestore(snapshot: ProjectContentResetSnapshotSumma
         <template v-if="resetReadiness">
           <p class="pdm-counter-note">重置范围：{{ resetReadiness.includedProjects.map(item => item.code).join('、') }}</p>
           <div class="pdm-reset-counts"><span v-for="(count, label) in resetReadiness.counts" :key="label"><strong>{{ count }}</strong>{{ label }}</span></div>
-          <el-alert v-if="resetReadiness.blockers.length" title="当前不能重置" type="error" :closable="false"><ul><li v-for="blocker in resetReadiness.blockers" :key="blocker">{{ blocker }}</li></ul></el-alert>
+          <el-alert v-if="resetReadiness.blockers.length" :title="resetReadiness.canForceReset ? '普通重置受阻，可选择管理员强制重置' : '当前不能重置'" type="error" :closable="false"><ul><li v-for="blocker in resetReadiness.blockers" :key="blocker">{{ blocker }}</li></ul></el-alert>
           <div v-if="resetReadiness.restorableSnapshots.length" class="pdm-reset-snapshots"><strong>30天内可恢复的快照</strong><div v-for="snapshot in resetReadiness.restorableSnapshots" :key="snapshot.id"><span>{{ formatResetDate(snapshot.createdAt) }} · {{ displayUserName(snapshot.createdBy) }} · {{ snapshot.reason }}</span><button type="button" class="pdm-secondary-action" :disabled="resetPending" @click="executeSnapshotRestore(snapshot)">恢复</button></div></div>
-          <template v-if="resetReadiness.canReset && Object.values(resetReadiness.counts).some(count => count > 0)">
+          <el-checkbox v-if="resetReadiness.canForceReset" v-model="forceReset" :disabled="resetPending">管理员强制释放编辑权限并中断项目内任务</el-checkbox>
+          <p v-if="resetReadiness.canForceReset" class="pdm-counter-note is-warning">未存档的客户端修改不会进入快照；已发布内容、正在向外部发布和待处理的外部同步仍不能强制重置。</p>
+          <template v-if="(resetReadiness.canReset || resetReadiness.canForceReset) && Object.values(resetReadiness.counts).some(count => count > 0)">
             <label class="pdm-dialog-field">重置原因 <b>*</b><el-input v-model="resetReason" type="textarea" :rows="3" maxlength="500" show-word-limit placeholder="请填写可审计的重置原因" /></label>
             <label class="pdm-dialog-field">输入项目号确认 <b>*</b><el-input v-model="resetConfirmation" :placeholder="`请输入 ${project.code}`" /></label>
-            <button type="button" class="pdm-danger-action" :disabled="resetPending || !resetReason.trim() || resetConfirmation.trim().toLocaleLowerCase() !== project.code.toLocaleLowerCase()" @click="executeProjectReset">{{ resetPending ? '正在重置…' : '重置项目内容' }}</button>
+            <button type="button" class="pdm-danger-action" :disabled="resetPending || (!resetReadiness.canReset && !forceReset) || !resetReason.trim() || resetConfirmation.trim().toLocaleLowerCase() !== project.code.toLocaleLowerCase()" @click="executeProjectReset">{{ resetPending ? '正在重置…' : forceReset ? '强制重置项目内容' : '重置项目内容' }}</button>
           </template>
           <p v-else-if="resetReadiness.canReset" class="pdm-counter-note">当前项目没有可重置的业务内容。</p>
         </template>

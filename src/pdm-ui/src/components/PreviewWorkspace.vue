@@ -134,6 +134,10 @@ function saveMarkup() {
 
 function reportPreviewBounds() {
   if (!props.desktopAvailable) return
+  if (!props.active) {
+    suspendPreview()
+    return
+  }
   const slot = previewSlot.value
   if (!slot) return
   if (props.obscured) {
@@ -155,6 +159,7 @@ function reportPreviewBounds() {
     suspendPreview()
     return
   }
+  if (previewSuspended) postDesktopMessage('preview-host-resume')
   previewSuspended = false
   postDesktopMessage('preview-host-bounds', {
     left,
@@ -237,7 +242,7 @@ function normalizedPreviewFormat(value: string | number): 'Step' | 'Pdf' {
 }
 
 async function startPreview() {
-  if (!props.selected.documentId) return
+  if (!props.active || !props.selected.documentId) return
   previewSessionActivated.value = true
   if (!props.desktopAvailable) {
     clearWebPreview()
@@ -396,7 +401,13 @@ watch([() => props.selected.id, () => props.reviewVersionId], () => {
   }
   // 已经加载过预览时，同一项目内切换图档直接续用当前会话；只有首次加载需要手动触发。
   if (previewSessionActivated.value) {
-    if (props.desktopAvailable) void startPreview()
+    if (props.desktopAvailable) {
+      if (props.active) void startPreview()
+      else {
+        hidePreview()
+        previewState.value = 'idle'
+      }
+    }
     else void restartPreview()
     return
   }
@@ -410,6 +421,10 @@ watch([() => props.selected.id, () => props.reviewVersionId], () => {
 watch(() => props.active, active => {
   if (!props.desktopAvailable) return
   if (active) {
+    if (previewSessionActivated.value && previewState.value === 'idle' && props.selected.documentId) {
+      void startPreview()
+      return
+    }
     void nextTick(schedulePreviewBounds)
     return
   }

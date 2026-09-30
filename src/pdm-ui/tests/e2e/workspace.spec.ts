@@ -231,7 +231,7 @@ test('program template owner can delete a saved draft after confirmation', async
 })
 
 test('project overview renders five-stage progress and shipping countdown', async ({ page }, testInfo) => {
-  const overviewProject = { id: projectId, code: 'PRJ-REAL-001', name: '真实装配项目', owner: 'engineer', stage: 'Design', vaultLocation: 'D:\\PDM\\PRJ-REAL-001', releaseLocation: 'D:\\Release\\PRJ-REAL-001', isActive: true, organizationId: 'org-ks', quantity: 1, serialNumbers: ['70000001'], executionUnitName: '自动化事业部', primaryProjectManager: 'engineer', collaborativeProjectManagers: [], designLead: 'engineer', designers: ['engineer'], phaseOwners: { StandardProcurement: 'engineer' }, canAssignDesigners: true }
+  const overviewProject = { id: projectId, code: 'PRJ-REAL-001', name: '真实装配项目', owner: 'engineer', stage: 'Design', vaultLocation: 'D:\\PDM\\PRJ-REAL-001', releaseLocation: 'D:\\Release\\PRJ-REAL-001', isActive: true, organizationId: 'org-ks', quantity: 1, serialNumbers: ['70000001'], executionUnitName: '自动化事业部', primaryProjectManager: 'engineer', collaborativeProjectManagers: [], designLead: 'engineer', designers: ['engineer'], phaseOwners: { StandardProcurement: 'engineer' }, canManageMainStaffing: true, canAssignDesigners: true }
   await page.route('**/api/projects', route => route.fulfill({ json: [overviewProject] }))
   await page.route(`**/api/projects/${projectId}`, route => route.fulfill({ json: overviewProject }))
   await page.route(`**/api/projects/${projectId}/plan/portfolio`, route => route.fulfill({ json: {
@@ -311,13 +311,10 @@ test('project overview renders five-stage progress and shipping countdown', asyn
   expect(Math.abs(phaseTitle!.y - alertTitle!.y)).toBeLessThanOrEqual(1)
   expect(Math.abs(phaseProgress!.y - shippingDate!.y)).toBeLessThanOrEqual(1)
   expect(Math.abs(phaseProgress!.y - alertAction!.y)).toBeLessThanOrEqual(1)
-  await expect(overview.getByLabel('图档与审核')).toContainText('3D 41')
-  await expect(overview.getByLabel('图档与审核')).toContainText('2D 1')
-  await expect(overview.getByLabel('BOM与物料')).toContainText('关联物料待核对 2')
-  await expect(overview.getByLabel('发布与备料')).toContainText('关键物料1')
+  await expect(overview.getByLabel('项目核心业务概览').locator('article')).toHaveCount(1)
   await expect(overview.getByLabel('当前阶段任务')).toHaveCount(0)
   const portfolio = overview.getByLabel('项目总览')
-  await expect(portfolio.locator('thead th')).toHaveText(['项目', '执行工程师', '当前阶段', '计划完成', '剩余工期', '进度', '阶段负责人', '当前子任务', '子任务状态', '备注日志'])
+  await expect(portfolio.locator('thead th')).toHaveText(['项目', '执行', '阶段', '计划完成', '剩余工期', '进度', '负责人', '当前', '状态', '备注'])
   const portfolioRow = portfolio.locator('tbody tr').first()
   const portfolioProgress = portfolioRow.locator('.pdm-project-portfolio__progress')
   await expect(portfolioProgress.locator(':scope > em')).toHaveText('62%')
@@ -348,7 +345,7 @@ test('project overview renders five-stage progress and shipping countdown', asyn
   await expect(managerNoteDialog).toBeHidden()
   expect(todoRequest).toEqual({ content: '确认客户现场准备情况', dueDate: '2026-10-01', recipientUsernames: ['engineer'] })
   await expect(page.getByLabel('工作台主页面')).toBeVisible()
-  expect(await portfolio.locator('thead th').last().evaluate(cell => Math.round(cell.getBoundingClientRect().width))).toBeGreaterThanOrEqual(250)
+  expect(await portfolio.locator('thead th').last().evaluate(cell => cell.getBoundingClientRect().right <= cell.closest('.pdm-project-portfolio__table-wrap')!.getBoundingClientRect().right)).toBe(true)
   expect(await portfolio.locator('thead th, tbody tr:not(.is-empty) td').evaluateAll(cells => cells.every(cell => getComputedStyle(cell).textAlign === 'center'))).toBe(true)
   const notesLayout = await portfolioRow.locator('td').last().evaluate(cell => {
     const button = cell.querySelector('button')!
@@ -360,13 +357,38 @@ test('project overview renders five-stage progress and shipping countdown', asyn
   expect(notesLayout.rightInset).toBeGreaterThanOrEqual(5)
   await expect(overview.getByLabel('项目团队')).toContainText('真实工程师')
   expect(await overview.getByLabel('项目团队').evaluate(panel => panel.parentElement?.classList.contains('pdm-overview-summary'))).toBe(true)
-  expect(await overview.getByLabel('项目团队').evaluate(panel => panel.getBoundingClientRect().top)).toBeLessThan(await overview.getByLabel('图档与审核').evaluate(panel => panel.getBoundingClientRect().top))
   expect(await portfolio.evaluate(panel => panel.getBoundingClientRect().top)).toBeLessThanOrEqual(await overview.getByLabel('项目团队').evaluate(panel => panel.getBoundingClientRect().top))
   for (const phase of ['标准件采购', '非标件采购', '非标件生产', '机械装配', '电气装配', '电气调试', '验收']) await expect(overview.getByLabel('项目团队')).toContainText(phase)
   await expect(overview.getByLabel('项目团队')).toContainText('标准件采购真实工程师')
   await expect(overview.getByLabel('项目团队').locator('thead th')).toHaveText(['职责', '负责人', '职责', '负责人'])
   await expect(overview.getByLabel('项目团队').locator('tbody tr')).toHaveCount(5)
   await expect(overview.getByRole('button', { name: '配置负责人' })).toBeVisible()
+  await page.setViewportSize({ width: 1537, height: 889 })
+  const statusPanel = overview.getByLabel('项目状态与下一步')
+  const statusBounds = async () => {
+    const panel = (await statusPanel.boundingBox())!
+    const lastAlert = (await statusPanel.locator('.pdm-overview-alerts > :last-child').boundingBox())!
+    return { panel, lastAlert }
+  }
+  for (const width of [1537, 1285]) {
+    await page.setViewportSize({ width, height: 889 })
+    const { panel, lastAlert } = await statusBounds()
+    expect(lastAlert.x + lastAlert.width).toBeLessThanOrEqual(panel.x + panel.width + 1)
+    expect(lastAlert.y + lastAlert.height).toBeLessThanOrEqual(panel.y + panel.height + 1)
+  }
+  await page.setViewportSize({ width: 1537, height: 889 })
+  const teamActions = overview.getByLabel('项目团队').locator('.pdm-overview-team__actions')
+  expect(await teamActions.evaluate(element => getComputedStyle(element).display)).toBe('flex')
+  const [staffingButton, ownerButton] = await Promise.all([teamActions.getByRole('button', { name: '配置分工' }).boundingBox(), teamActions.getByRole('button', { name: '配置负责人' }).boundingBox()])
+  expect(Math.abs(staffingButton!.y - ownerButton!.y)).toBeLessThanOrEqual(1)
+  expect(await portfolio.locator('thead th').last().evaluate(cell => cell.getBoundingClientRect().right <= cell.closest('.pdm-project-portfolio__table-wrap')!.getBoundingClientRect().right)).toBe(true)
+  expect(await portfolioRow.locator('.pdm-project-portfolio__overdue').evaluate(element => getComputedStyle(element).textAlign)).toBe('center')
+  await page.screenshot({ path: join(tmpdir(), 'pdm-overview-1537x889.png') })
+  await teamActions.getByRole('button', { name: '配置分工' }).click()
+  const staffingDialog = page.getByRole('dialog', { name: '配置主项目分工 · PRJ-REAL-001' })
+  await expect(staffingDialog).toContainText('项目经理（限1名）')
+  await expect(staffingDialog).toContainText('主设（可多选）')
+  await staffingDialog.getByRole('button', { name: '取消' }).click()
   await expect(overview.getByLabel('项目位置')).toHaveCount(0)
   const overviewBox = await overview.boundingBox()
   expect(overviewBox).not.toBeNull()
@@ -374,8 +396,6 @@ test('project overview renders five-stage progress and shipping countdown', asyn
   expect(await overview.getByLabel('五阶段计划').locator('.pdm-overview-phase-plan').first().evaluate(element => getComputedStyle(element).fontSize)).toBe('11px')
   await expect(page.locator('vite-error-overlay')).toHaveCount(0)
   await page.screenshot({ path: testInfo.outputPath('project-overview-command-center.png') })
-  await overview.getByRole('button', { name: '进入BOM数据' }).click()
-  await expect(page.getByRole('button', { name: 'BOM', exact: true })).toHaveClass(/is-active/)
   expect(errors).toEqual([])
 })
 
@@ -761,7 +781,7 @@ test('project plan week header centers ISO week and places Monday day on the gri
   await login.getByRole('textbox', { name: '密码' }).fill('correct-password')
   await login.getByRole('button', { name: '登录', exact: true }).click()
   await enterProject(page)
-  await page.getByRole('button', { name: '项目计划', exact: true }).click()
+  await page.getByRole('button', { name: '计划', exact: true }).click()
 
   await page.getByLabel('甘特图缩放').getByRole('button', { name: '周', exact: true }).click()
   await expect(page.locator('.pdm-plan-switch')).toHaveText('休息日')
@@ -865,7 +885,7 @@ test('project plan toolbar uses uniform buttons and shows actual completion date
   await login.getByRole('textbox', { name: '密码' }).fill('correct-password')
   await login.getByRole('button', { name: '登录', exact: true }).click()
   await enterProject(page)
-  await page.getByRole('button', { name: '项目计划', exact: true }).click()
+  await page.getByRole('button', { name: '计划', exact: true }).click()
 
   const toolbar = page.locator('.pdm-plan-toolbar')
   await expect(toolbar).toBeVisible()
@@ -949,7 +969,7 @@ test('project plan stages can overlap and moving one stage keeps unrelated stage
   await login.getByRole('textbox', { name: '密码' }).fill('correct-password')
   await login.getByRole('button', { name: '登录', exact: true }).click()
   await enterProject(page)
-  await page.getByRole('button', { name: '项目计划', exact: true }).click()
+  await page.getByRole('button', { name: '计划', exact: true }).click()
 
   await expect(page.getByText(/拖动阶段条可整体平移/)).toHaveCount(0)
   await expect(page.getByText(/保存主项目计划会同步跟随且未批准/)).toHaveCount(0)
@@ -1110,12 +1130,12 @@ test('engineer logs in and reads the API-backed PLM workspace', async ({ page },
 
   await expect(page.locator('.pdm-project-sidebar__summary').getByText('PRJ-REAL-001 · 真实装配项目', { exact: true })).toBeVisible()
   await expect(page.getByRole('banner').getByText('真实工程师', { exact: true })).toBeVisible()
-  await expect(page.locator('.pdm-project-tabs button')).toHaveText(['概览', '文件', '项目计划', '验证计划', '图档', 'BOM', '发布', '备料', '记录', '设置'])
+  await expect(page.locator('.pdm-project-tabs button')).toHaveText(['概览', '文件', '计划', '质量', '图档', 'BOM', '发布', '备料', '记录', '设置'])
   await page.getByRole('button', { name: '文件', exact: true }).click()
   await expect(page.getByText('项目文件夹', { exact: true })).toBeVisible()
   await page.screenshot({ path: testInfo.outputPath('project-tabs-overview-file-project-plan-1920.png'), fullPage: false })
   await page.setViewportSize({ width: 1285, height: 1114 })
-  await expect(page.locator('.pdm-project-tabs button')).toHaveText(['概览', '文件', '项目计划', '验证计划', '图档', 'BOM', '发布', '备料', '记录', '设置'])
+  await expect(page.locator('.pdm-project-tabs button')).toHaveText(['概览', '文件', '计划', '质量', '图档', 'BOM', '发布', '备料', '记录', '设置'])
   await page.screenshot({ path: testInfo.outputPath('project-tabs-overview-file-project-plan-1285.png'), fullPage: false })
   await expect(page.locator('vite-error-overlay')).toHaveCount(0)
   expect(projectTabErrors).toEqual([])
@@ -1948,7 +1968,7 @@ test('validation plan selector keeps selections across categories and skips comp
   await loginForm.getByRole('textbox', { name: '账号' }).fill('engineer')
   await loginForm.getByRole('textbox', { name: '密码' }).fill('correct-password')
   await loginForm.getByRole('button', { name: '登录', exact: true }).click()
-  await page.getByRole('button', { name: '验证计划', exact: true }).click()
+  await page.getByRole('button', { name: '质量', exact: true }).click()
   await page.locator('.validation-plan-summary__table tbody tr').click()
   await page.getByRole('button', { name: '选取内容' }).click()
 

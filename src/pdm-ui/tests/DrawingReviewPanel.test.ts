@@ -429,6 +429,30 @@ describe('DrawingReviewPanel', () => {
     expect(wrapper.emitted('create')).toEqual([[['model-1'], ['reviewer-b']]])
   })
 
+  it('发起审核默认选择有审图权限的项目主设，批量发起也沿用该默认值', async () => {
+    const wrapper = mount(DrawingReviewPanel, {
+      global: { plugins: [ElementPlus] },
+      props: {
+        packageId: '', packages: [], candidates: [candidate], currentUsername: 'designer',
+        ...permissions,
+        reviewerOptions: [
+          { username: 'lead', label: '项目主设' },
+          { username: 'reviewer', label: '审图员' },
+        ],
+        defaultReviewers: ['lead', 'unqualified-lead'],
+      },
+    })
+
+    await wrapper.get('.drawing-review-toolbar__create').trigger('click')
+    expect(wrapper.findComponent({ name: 'ElSelect' }).props('modelValue')).toEqual(['lead'])
+    await wrapper.get('.drawing-review-panel__header .drawing-review-submit').trigger('click')
+    expect(wrapper.emitted('create')).toEqual([[['model-1'], ['lead']]])
+
+    await wrapper.get('input[aria-label="全选可操作图纸"]').setValue(true)
+    await wrapper.get('.drawing-review-overview__batch .is-submit').trigger('click')
+    expect(wrapper.emitted('create')).toEqual([[['model-1'], ['lead']], [['model-1'], ['lead']]])
+  })
+
   it('默认全选待审图纸，并可手工增选或取消已审核版本', async () => {
     const candidates: DrawingReviewCandidate[] = [
       candidate,

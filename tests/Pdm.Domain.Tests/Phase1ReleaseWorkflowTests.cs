@@ -1692,8 +1692,10 @@ public sealed class Phase1ReleaseWorkflowTests
 
         Assert.Equal(CadPropertyWritebackStatus.Superseded, all.Single(item => item.Id == first.Id).Status);
         Assert.Equal(CadPropertyWritebackStatus.Pending, all.Single(item => item.Id == second.Id).Status);
+        await Assert.ThrowsAsync<PdmConflictException>(() => repository.UpdateCadPropertyWritebackAsync(first.Id, CadPropertyWritebackStatus.InProgress, null, null, default));
         var completed = await repository.UpdateCadPropertyWritebackAsync(second.Id, CadPropertyWritebackStatus.Succeeded, Guid.NewGuid(), null, default);
         Assert.Equal(CadPropertyWritebackStatus.Succeeded, completed.Status);
+        await Assert.ThrowsAsync<PdmConflictException>(() => repository.UpdateCadPropertyWritebackAsync(second.Id, CadPropertyWritebackStatus.InProgress, null, null, default));
     }
 
     [Fact]

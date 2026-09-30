@@ -447,6 +447,8 @@ public interface IPdmRepository
     Task<EquipmentTypeDefinition> SaveEquipmentTypeAsync(int code, string name, bool isActive, CancellationToken cancellationToken);
     Task<PdmSystemSettings> GetSystemSettingsAsync(CancellationToken cancellationToken);
     Task<PdmSystemSettings> UpdateSystemSettingsAsync(PdmSystemSettings settings, CancellationToken cancellationToken);
+    Task<ProjectPermissionSettings> GetProjectPermissionSettingsAsync(CancellationToken cancellationToken);
+    Task<ProjectPermissionSettings> UpdateProjectPermissionSettingsAsync(ProjectPermissionSettings settings, CancellationToken cancellationToken);
     Task<IReadOnlyList<UserAccount>> ListUsersAsync(CancellationToken cancellationToken);
     Task<UserCompanyScope?> GetUserCompanyScopeAsync(string username, CancellationToken cancellationToken);
     Task<UserCompanyScope> SetUserCompanyScopeAsync(string username, Guid companyId, bool crossCompanyView, IReadOnlyList<Guid> accessibleCompanyIds, string actor, CancellationToken cancellationToken);

@@ -285,6 +285,7 @@ public sealed class InMemoryMaterialRepository : IMaterialRepository
         {
             MaterialCodeApplicationStatus.Pending => MaterialCodeWorkflowState.PendingApproval,
             MaterialCodeApplicationStatus.Rejected => MaterialCodeWorkflowState.Rejected,
+            MaterialCodeApplicationStatus.Withdrawn => MaterialCodeWorkflowState.Withdrawn,
             _ when recorded.State == MaterialCodeWorkflowState.Completed => MaterialCodeWorkflowState.Completed,
             _ when material?.U9SyncConfirmed != true => task?.Status is MaterialSyncStatus.Failed or MaterialSyncStatus.NeedsReview
                 ? MaterialCodeWorkflowState.MaterialSyncFailed

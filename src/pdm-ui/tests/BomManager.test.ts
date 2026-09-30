@@ -11,6 +11,7 @@ const materialApi = vi.hoisted(() => ({
   linkBomMaterial: vi.fn(),
   resolveBomMaterialCodes: vi.fn(),
   applyForBomMaterialCodes: vi.fn(),
+  withdrawMaterialCodeApplication: vi.fn(),
   previewBomSourceReclassification: vi.fn(),
   reclassifyBomItemsFromSource: vi.fn(),
   getMaterialRelationCompleteness: vi.fn(),
@@ -104,6 +105,7 @@ describe('BomManager', () => {
     materialApi.linkBomMaterial.mockReset()
     materialApi.resolveBomMaterialCodes.mockReset().mockResolvedValue([])
     materialApi.applyForBomMaterialCodes.mockReset().mockResolvedValue([])
+    materialApi.withdrawMaterialCodeApplication.mockReset()
     materialApi.previewBomSourceReclassification.mockReset()
     materialApi.reclassifyBomItemsFromSource.mockReset().mockResolvedValue([])
     materialApi.getMaterialRelationCompleteness.mockReset().mockResolvedValue({ projectId: 'project', isComplete: true, mainMaterialCount: 0, incompleteGroupCount: 0, mainMaterials: [] })
@@ -3030,6 +3032,34 @@ describe('BomManager', () => {
     await wrapper.get('input[aria-label="选择物料"]').setValue(true)
     const applyButton = wrapper.findAll('.pdm-bom-selection-actions button').find(button => button.text() === '申请料号')
     expect(applyButton?.attributes('disabled')).toBeDefined()
+  })
+
+  it('lets the original requester withdraw a pending BOM material-code application from its row', async () => {
+    const item: BomItem = { id: 'standard-switch', sequence: 1, drawingNumber: '', name: '磁性开关', specification: 'D-M9BL', brand: '亿格', quantity: 2, unit: '001', revision: 'W1', complete: true, source: 'Auto', sourceDocumentId: 'document-1' }
+    const application = { id: 'application-1', projectId: 'project-1', bomItemId: item.id, requestedBy: 'engineer', status: 'Pending', rowVersion: 3 }
+    materialApi.resolveBomMaterialCodes
+      .mockResolvedValueOnce([{ bomItemId: item.id, status: 'ApplicationPending', material: null, candidates: [], application, issues: [] }])
+      .mockResolvedValueOnce([{ bomItemId: item.id, status: 'NoMatch', material: null, candidates: [], application: null, issues: [] }])
+    materialApi.withdrawMaterialCodeApplication.mockResolvedValue({ ...application, status: 'Withdrawn', rowVersion: 4 })
+    vi.spyOn(ElMessageBox, 'confirm').mockResolvedValue('confirm' as never)
+    const wrapper = mount(BomManager, {
+      props: { standard: [item], nonStandard: [], electrical: [], declarations: [], pending: false, editable: true,
+        token: 'token', projectId: 'project-1', username: 'engineer' },
+    })
+
+    await wrapper.findAll('button[role="tab"]')[1].trigger('click')
+    await flushPromises()
+    expect(wrapper.get('.pdm-material-code-state.is-pending').text()).toBe('申请中')
+    await wrapper.setProps({ username: 'another-engineer' })
+    expect(wrapper.find('.pdm-material-code-withdraw').exists()).toBe(false)
+    await wrapper.setProps({ username: 'engineer' })
+    await wrapper.get('.pdm-material-code-withdraw').trigger('click')
+    await flushPromises()
+
+    expect(materialApi.withdrawMaterialCodeApplication).toHaveBeenCalledWith('application-1', 3, 'token')
+    expect(wrapper.find('.pdm-material-code-state.is-pending').exists()).toBe(false)
+    expect(wrapper.get('.pdm-material-code-action').text()).toBe('申请料号')
+    expect(wrapper.emitted('materialCodeChanged')).toHaveLength(1)
   })
 
   it('blocks standard material-code applications until name, model, and brand are complete', async () => {

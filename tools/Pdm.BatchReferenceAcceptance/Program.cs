@@ -51,7 +51,7 @@ internal static class Program
         Test("packed nested assemblies may reference sibling folders", TestNestedPackedAssembly);
         Test("new assemblies block original external files but allow target project controlled references", TestExternalReferences);
         Test("registration persists identity on the source even after UI tree refresh", TestRegistrationBinding);
-        Test("overall and property actions need a structure but no selected tree node", TestSelectionIndependentStructureActions);
+        Test("structure actions lock during workspace work and recover afterward", TestSelectionIndependentStructureActions);
         Test("binding failure stops before assigning an in-memory identity", TestBindingFailure);
         Test("incremental plan submits ten new files and parent, not ten unchanged originals", TestIncrementalPlan);
         Test("one project uses one visible working directory", TestProjectWorkspaceDirectory);
@@ -306,7 +306,10 @@ internal static class Program
     {
         using var pane = (Control)New("PdmTaskPaneControl", "");
         Call(pane, "SetAuthenticatedUser", "设计员", "designer");
-        Call(pane, "SetTree", Node("selection-independent/main.SLDASM", Guid.NewGuid(), 0));
+        var root = Node("selection-independent/main.SLDASM", Guid.NewGuid(), 0);
+        Set(root, "CurrentRevision", "W1");
+        Set(root, "LatestRevision", "W2");
+        Call(pane, "SetTree", root);
 
         var tree = (TreeView)Field(pane, "structureTree");
         var overall = (Button)Field(pane, "batchOperationButton");
@@ -314,6 +317,17 @@ internal static class Program
         Assert(tree.SelectedNode == null, "fixture unexpectedly selected a design-tree node");
         Assert(overall.Enabled, "overall action still requires a selected design-tree node");
         Assert(property.Enabled, "property action still requires a selected design-tree node");
+
+        Call(pane, "SetWorkspaceOperationState", true, "正在批量编辑本地属性");
+        Assert(!((Control)Field(pane, "tabsHost")).Enabled && !((Control)Field(pane, "projectPanel")).Enabled,
+            "plugin actions remain available during a workspace operation");
+        var healthFilterType = Type("PdmTaskPaneControl+StructureHealthFilter");
+        Call(pane, "ToggleHealthFilter", Enum.Parse(healthFilterType, "Outdated"));
+        Assert(Field(pane, "activeHealthFilter").Equals(Enum.Parse(healthFilterType, "None")),
+            "outdated-version filter ran during a workspace operation");
+        Call(pane, "SetWorkspaceOperationState", false, "");
+        Assert(((Control)Field(pane, "tabsHost")).Enabled && ((Control)Field(pane, "projectPanel")).Enabled,
+            "plugin actions did not recover after the workspace operation");
     }
 
     private static void TestBindingFailure()

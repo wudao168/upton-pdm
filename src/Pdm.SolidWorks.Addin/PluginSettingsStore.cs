@@ -15,6 +15,7 @@ internal sealed class PluginSettings
     public int SchemaVersion { get; set; } = 3;
     public string ServerAddress { get; set; } = string.Empty;
     public bool AutomaticUpdatesEnabled { get; set; } = true;
+    public int PlannedTaskScrollIntervalSeconds { get; set; } = 30;
     public bool UseCustomDrawingQrPosition { get; set; }
     public double DrawingQrXMillimeters { get; set; } = DefaultDrawingQrXMillimeters;
     public double DrawingQrYMillimeters { get; set; } = DefaultDrawingQrYMillimeters;
@@ -24,6 +25,8 @@ internal sealed class PluginSettings
     public void Normalize()
     {
         SchemaVersion = 3;
+        if (PlannedTaskScrollIntervalSeconds != 15 && PlannedTaskScrollIntervalSeconds != 30 && PlannedTaskScrollIntervalSeconds != 60)
+            PlannedTaskScrollIntervalSeconds = 30;
         DrawingQrXMillimeters = Clamp(DrawingQrXMillimeters, 0d, 2000d);
         DrawingQrYMillimeters = Clamp(DrawingQrYMillimeters, 0d, 2000d);
         DrawingQrLengthMillimeters = ClampSize(DrawingQrLengthMillimeters);

@@ -192,6 +192,12 @@ public static class MaterialEndpointExtensions
             return Results.Ok((await service.ListCodeApplicationsAsync(projectId, parsedStatus, actor, role, cancellationToken)).Select(MapApplication));
         });
 
+        api.MapPost("/material-code/applications/{applicationId:guid}/withdraw", async (Guid applicationId, WithdrawMaterialCodeApplicationRequest request, HttpContext context, MaterialService service, CancellationToken cancellationToken) =>
+        {
+            var (actor, role) = CurrentUser(context.User);
+            return Results.Ok(MapApplication(await service.WithdrawMaterialCodeApplicationAsync(applicationId, request.ExpectedRowVersion, actor, role, cancellationToken)));
+        });
+
         api.MapPost("/material-code/applications/{applicationId:guid}/decision", async (Guid applicationId, DecideMaterialCodeApplicationRequest request, HttpContext context, MaterialService service, MaterialSyncBatchService syncBatches, ApprovalU9AutomationService automation, CancellationToken cancellationToken) =>
         {
             var (actor, role) = CurrentUser(context.User);

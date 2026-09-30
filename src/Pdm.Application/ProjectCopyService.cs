@@ -141,8 +141,8 @@ public sealed class ProjectCopyService(
         var preview = await PreviewAsync(sourceProjectId, targetProjectId, options, actor, role, cancellationToken);
         if (!preview.CanExecute) throw new PdmConflictException(string.Join("；", preview.BlockingReasons));
         if (options.CopyModels || options.CopyDrawings) await RequirePermissionAsync(actor, role, PermissionCodes.DocumentEdit, cancellationToken);
-        if (options.CopyBom) await RequirePermissionAsync(actor, role, PermissionCodes.BomEdit, cancellationToken);
-        if (options.CopyValidationItems) await RequirePermissionAsync(actor, role, PermissionCodes.ValidationPlanEdit, cancellationToken);
+        if (options.CopyBom) await ProjectPermissionPolicy.RequireAsync(repository, targetProjectId, actor, role, PermissionCodes.BomEdit, cancellationToken);
+        if (options.CopyValidationItems) await ProjectPermissionPolicy.RequireAsync(repository, targetProjectId, actor, role, PermissionCodes.ValidationPlanEdit, cancellationToken);
 
         var source = await RequireProjectAsync(sourceProjectId, cancellationToken);
         var target = await RequireProjectAsync(targetProjectId, cancellationToken);
