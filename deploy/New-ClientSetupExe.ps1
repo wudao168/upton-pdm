@@ -58,7 +58,14 @@ $manifestXml = @'
 '@
 [IO.File]::WriteAllText($bootstrapManifest, $manifestXml, [Text.UTF8Encoding]::new($false))
 
-& $csc /nologo /target:winexe /optimize+ /platform:anycpu /win32manifest:$bootstrapManifest /out:$bootstrapExe /reference:System.IO.Compression.dll /reference:System.IO.Compression.FileSystem.dll /reference:System.Windows.Forms.dll $bootstrapSource
+$clientManifest = Get-Content -LiteralPath (Join-Path $source 'manifest.json') -Raw -Encoding UTF8 | ConvertFrom-Json
+$defaultServer = [Uri]([string]$clientManifest.serverBaseUrl)
+if (-not $defaultServer.IsAbsoluteUri -or $defaultServer.Scheme -notin @('http', 'https')) { throw 'Invalid package default server address.' }
+$defaultServerLiteral = $defaultServer.GetLeftPart([UriPartial]::Authority).Replace('\', '\\').Replace('"', '\"')
+$generatedBootstrap = Join-Path $stage 'ClientSetupBootstrap.cs'
+$bootstrapCode = (Get-Content -LiteralPath $bootstrapSource -Raw -Encoding UTF8).Replace('private const string DefaultServerBaseUrl = "http://127.0.0.1:5173";', ('private const string DefaultServerBaseUrl = "' + $defaultServerLiteral + '";'))
+[IO.File]::WriteAllText($generatedBootstrap, $bootstrapCode, $utf8Bom)
+& $csc /nologo /target:winexe /optimize+ /platform:anycpu /win32manifest:$bootstrapManifest /out:$bootstrapExe /reference:System.IO.Compression.dll /reference:System.IO.Compression.FileSystem.dll /reference:System.Windows.Forms.dll /reference:System.Web.Extensions.dll $generatedBootstrap
 if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $bootstrapExe)) { throw "客户端自解压启动器编译失败，退出码：$LASTEXITCODE" }
 & $csc /nologo /target:winexe /optimize+ /platform:anycpu /win32manifest:$bootstrapManifest /out:$uninstallBootstrapExe /reference:System.Windows.Forms.dll $uninstallBootstrapSource
 if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $uninstallBootstrapExe)) { throw "客户端卸载启动器编译失败，退出码：$LASTEXITCODE" }

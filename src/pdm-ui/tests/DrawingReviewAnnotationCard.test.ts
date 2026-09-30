@@ -1,4 +1,4 @@
-import { mount } from '@vue/test-utils'
+import { flushPromises, mount } from '@vue/test-utils'
 import { ElMessageBox } from 'element-plus'
 import ElementPlus from 'element-plus'
 import { describe, expect, it, vi } from 'vitest'
@@ -152,7 +152,7 @@ describe('DrawingReviewAnnotationCard', () => {
     confirm.mockRestore()
   })
 
-  it('待批准阶段：主管只能去明细勾选后批量批准，审图人看到撤销按钮', () => {
+  it('待批准阶段：主管可批准和退回，审图人看到撤销按钮', () => {
     const pending: DrawingReviewPackage = {
       ...review,
       state: 'PendingSupervisorApproval',
@@ -162,10 +162,10 @@ describe('DrawingReviewAnnotationCard', () => {
     }
 
     const supervisor = mountCard(pending, 'manager')
-    expect(supervisor.get('.drawing-review-decision-bar__hint').text()).toContain('请在下方明细中勾选图纸后批量批准')
-    expect(supervisor.find('.is-approve').exists()).toBe(false)
+    expect(supervisor.get('.drawing-review-decision-bar__hint').text()).toContain('批准将作用于整张审核单')
+    expect(supervisor.get('.is-approve').text()).toBe('批准')
     expect(supervisor.find('.is-revoke').exists()).toBe(false)
-    expect(supervisor.find('.is-reject').exists()).toBe(false)
+    expect(supervisor.find('.is-reject').exists()).toBe(true)
 
     const reviewer = mountCard(pending, 'reviewer')
     expect(reviewer.find('.is-approve').exists()).toBe(false)
@@ -268,7 +268,7 @@ describe('DrawingReviewAnnotationCard', () => {
     expect(wrapper.findAll('.drawing-review-decision-buttons button').every(button => button.attributes('disabled') === undefined)).toBe(true)
   })
 
-  it('机械主管节点不在结论条上直接批准，避免一次点击批准整单', async () => {
+  it('机械主管批准需要确认整单范围', async () => {
     const supervisorNode: DrawingReviewPackage = {
       ...review,
       state: 'PendingSupervisorApproval',
@@ -278,10 +278,15 @@ describe('DrawingReviewAnnotationCard', () => {
     }
     const wrapper = mountCard(supervisorNode, 'manager')
 
-    // 结论条不再提供整单批准按钮，批准只能由明细勾选后批量完成。
-    expect(wrapper.find('.drawing-review-decision-buttons .is-approve').exists()).toBe(false)
-    expect(wrapper.emitted('decideSupervisor')).toBeUndefined()
-    expect(wrapper.get('.drawing-review-decision-bar__hint').text()).toContain('批量批准')
+    // 批准按钮明确整单范围，并在确认后提交。
+    expect(wrapper.get('.drawing-review-decision-buttons .is-approve').text()).toBe('批准')
+    const confirm = vi.spyOn(ElMessageBox, 'confirm').mockResolvedValue({ action: 'confirm' } as never)
+    await wrapper.get('.is-approve').trigger('click')
+    await flushPromises()
+    expect(confirm).toHaveBeenCalledWith(expect.stringContaining('整张审核单'), '批准审核单', expect.any(Object))
+    expect(wrapper.emitted('decideSupervisor')![0]).toEqual(['review-1', 'Approve', ''])
+    confirm.mockRestore()
+    expect(wrapper.get('.drawing-review-decision-bar__hint').text()).toContain('整张审核单')
   })
 
   it('整单退回的历史审核单给出可执行的下一步说明', () => {

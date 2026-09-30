@@ -148,6 +148,23 @@ describe('ReleaseCenter', () => {
     expect(wrapper.get('.pdm-release-summary').text()).toContain('审批完成 · 后台发布中')
   })
 
+  it('shows the completed approval state while publication waits for conversion and supports retry', async () => {
+    const releasePackage: ReleasePackageSummary = {
+      id: 'release-publishing', number: 'RP-PUBLISHING-001', state: '发布中', previewState: 'Pending', previewError: '转图连接超时', scope: 'StandardFormal',
+      workflowVersion: 1, selectedBomItemIds: [], createsManufacturingBaseline: false, locksDocuments: false,
+      standardBomSnapshot: [], nonStandardBomSnapshot: [], electricalBomSnapshot: [], steps: [],
+    }
+    const wrapper = mount(ReleaseCenter, {
+      props: { releasePackage, username: 'designer', pending: false, progress: 0, error: '', canManage: false, canDecide: false },
+    })
+
+    expect(wrapper.get('.pdm-release-completion-status').text()).toContain('审批已完成')
+    expect(wrapper.get('.pdm-release-summary').text()).toContain('审批完成 · 等待转图')
+    const retry = wrapper.findAll('button').find(button => button.text() === '重试转图')!
+    await retry.trigger('click')
+    expect(wrapper.emitted('retryPreview')).toEqual([['release-publishing']])
+  })
+
   it('requires a rejection reason and defaults blank approval comments to agreed', async () => {
     const releasePackage: ReleasePackageSummary = {
       id: 'release-current', number: 'RP-CURRENT-001', state: '审批中', scope: 'StandardFormal',
@@ -356,6 +373,35 @@ describe('ReleaseCenter', () => {
     expect(wrapper.text()).toContain('当前发布范围包含未完成当前版本图纸审核的非标件')
     await wrapper.get('input[aria-label="整包需求日期"]').setValue('2026-10-01')
     await wrapper.get('input[aria-label="本次发布物料 NS-201"]').setValue(false)
+    expect(wrapper.get('.pdm-release-draft-actions .pdm-primary-action').attributes('disabled')).toBeUndefined()
+    await wrapper.get('.pdm-release-draft-actions .pdm-primary-action').trigger('submit')
+    expect(wrapper.emitted('create')?.at(0)?.at(0)).toMatchObject({
+      scope: 'NonStandardWithDrawing',
+      selectedBomItemIds: ['ns-ok'],
+    })
+    wrapper.unmount()
+  })
+
+  it('allows approved unnumbered items after unselecting unreviewed unnumbered items', async () => {
+    const approved: BomItem = { id: 'ns-ok', kind: 'NonStandard', sequence: 1, drawingNumber: '',
+      name: '已批准件', quantity: 1, unit: '个', revision: 'W1', complete: true, sourceDocumentId: 'model-ok' }
+    const pending: BomItem = { id: 'ns-pending', kind: 'NonStandard', sequence: 2, drawingNumber: '',
+      name: '待审图件', quantity: 1, unit: '个', revision: 'W1', complete: true, sourceDocumentId: 'model-pending' }
+    const wrapper = mount(ReleaseCenter, {
+      props: {
+        releasePackage: null, allowedScopes: ['NonStandardWithDrawing'], preferredScope: 'NonStandardWithDrawing',
+        releaseItems: [approved, pending], username: 'engineer', pending: false, progress: 0, error: '', canManage: true, canDecide: true,
+        drawingReviewCandidates: [
+          { candidateId: 'review-ok', bomItemId: 'ns-ok', modelDocumentId: 'model-ok', drawingNumber: '', name: '已批准件', bomKinds: ['NonStandard'], modelRevision: 'W1', drawingRevision: 'W1', state: 'ApprovedCurrent', selectable: false },
+          { candidateId: 'review-pending', bomItemId: 'ns-pending', modelDocumentId: 'model-pending', drawingNumber: '', name: '待审图件', bomKinds: ['NonStandard'], modelRevision: 'W1', drawingRevision: 'W1', state: 'Ready', reason: '当前工程图尚未发起审核', selectable: true },
+        ],
+      },
+    })
+
+    expect(wrapper.get('.pdm-release-draft-actions .pdm-primary-action').attributes()).toHaveProperty('disabled')
+    expect(wrapper.text()).toContain('当前发布范围包含未完成当前版本图纸审核的非标件')
+    await wrapper.get('input[aria-label="整包需求日期"]').setValue('2026-10-01')
+    await wrapper.findAll('input[aria-label^="本次发布物料"]')[1]!.setValue(false)
     expect(wrapper.get('.pdm-release-draft-actions .pdm-primary-action').attributes('disabled')).toBeUndefined()
     await wrapper.get('.pdm-release-draft-actions .pdm-primary-action').trigger('submit')
     expect(wrapper.emitted('create')?.at(0)?.at(0)).toMatchObject({

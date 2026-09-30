@@ -3,6 +3,7 @@ import { ElMessage } from '../statusMessage'
 import { ElMessageBox } from 'element-plus'
 import { onBeforeUnmount, onMounted, ref } from 'vue'
 import { postDesktopMessage } from '../api'
+import ServerConnectionSettings from './ServerConnectionSettings.vue'
 
 interface DesktopSettingsDetail {
   available?: boolean
@@ -120,7 +121,8 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <section class="pdm-project-manager" aria-label="客户端设置">
+  <section class="pdm-project-manager pdm-client-settings" aria-label="客户端设置">
+    <ServerConnectionSettings :report-errors="false" />
     <section class="pdm-panel pdm-manager-panel">
       <header class="pdm-manager-heading"><div><h2>PLM受控工作区</h2><p>客户端和SolidWorks插件共用此位置；日常打开、编辑和刷新都在工作区页面完成。</p></div></header>
       <label class="pdm-client-workspace-label">
@@ -151,3 +153,8 @@ onBeforeUnmount(() => {
     </section>
   </section>
 </template>
+
+<style scoped>
+.pdm-client-settings { gap: 16px; overflow-y: auto; }
+.pdm-client-settings :deep(.pdm-manager-panel) { height: auto; flex: 0 0 auto; }
+</style>

@@ -174,6 +174,10 @@ public sealed class ReleasePackagePublisherTests
         {
             await publisher.PrepareAsync(package, project, default);
 
+            converter.FinalizationError = new TimeoutException("转图连接超时");
+            var pending = await Assert.ThrowsAsync<ReleaseConversionPendingException>(() => publisher.PublishAsync(package, project, [source], default));
+            Assert.IsType<TimeoutException>(pending.InnerException);
+            converter.FinalizationError = null;
             var publication = await publisher.PublishAsync(package, project, [source], default);
 
             Assert.Equal(1, converter.Calls);
@@ -192,6 +196,13 @@ public sealed class ReleasePackagePublisherTests
 
     private sealed class RecordingServerPreviewConverter : IServerPreviewConverter
     {
+        public Exception? FinalizationError { get; set; }
+        public Task<IReadOnlyDictionary<Guid, FormalDrawingSource>> FinalizeDrawingsAsync(ReleasePackage package, Project project, IReadOnlyList<ReleasePreviewSource> sources, string stagingDirectory, CancellationToken cancellationToken)
+        {
+            if (FinalizationError is not null) throw FinalizationError;
+            return Task.FromResult<IReadOnlyDictionary<Guid, FormalDrawingSource>>(new Dictionary<Guid, FormalDrawingSource>());
+        }
+
         public int Calls { get; private set; }
 
         public async Task<IReadOnlyDictionary<Guid, DocumentPreviewArtifact>> GenerateAsync(

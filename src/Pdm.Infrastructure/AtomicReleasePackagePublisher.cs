@@ -134,10 +134,18 @@ public sealed class AtomicReleasePackagePublisher : IReleasePackagePublisher
             await PrepareAsync(package, project, cancellationToken);
 
         // 正式源图是交付的前提；PDF/STEP 转换仍可在发布后重试。
-        var formalDrawings = previewSources.Count == 0
-            ? new Dictionary<Guid, FormalDrawingSource>()
-            : new Dictionary<Guid, FormalDrawingSource>(await previewConverter.FinalizeDrawingsAsync(
-                package, project, previewSources, stagingDirectory, cancellationToken));
+        Dictionary<Guid, FormalDrawingSource> formalDrawings;
+        try
+        {
+            formalDrawings = previewSources.Count == 0
+                ? new Dictionary<Guid, FormalDrawingSource>()
+                : new Dictionary<Guid, FormalDrawingSource>(await previewConverter.FinalizeDrawingsAsync(
+                    package, project, previewSources, stagingDirectory, cancellationToken));
+        }
+        catch (Exception exception) when (exception is not PdmConflictException && !cancellationToken.IsCancellationRequested)
+        {
+            throw new ReleaseConversionPendingException(exception.Message, exception);
+        }
         var conversionSources = previewSources.Select(source => formalDrawings.TryGetValue(source.DocumentId, out var formal)
             ? source with { StorageRelativePath = formal.StorageRelativePath, FileLength = formal.FileLength, Sha256 = formal.Sha256, SourceSha256 = formal.Sha256 }
             : source).ToArray();
@@ -149,7 +157,7 @@ public sealed class AtomicReleasePackagePublisher : IReleasePackagePublisher
                 ? new Dictionary<Guid, DocumentPreviewArtifact>()
                 : new Dictionary<Guid, DocumentPreviewArtifact>(await previewConverter.GenerateAsync(package, project, conversionSources, stagingDirectory, cancellationToken));
         }
-        catch (Exception exception) when (exception is not OperationCanceledException)
+        catch (Exception exception) when (!cancellationToken.IsCancellationRequested)
         {
             previewError = exception.Message;
             previews = new Dictionary<Guid, DocumentPreviewArtifact>();

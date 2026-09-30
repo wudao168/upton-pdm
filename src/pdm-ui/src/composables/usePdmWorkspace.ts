@@ -715,7 +715,7 @@ export function usePdmWorkspace() {
     const [reviews, candidates, reviewers] = await Promise.all([
       listDrawingReviews(project.value.id, accessToken),
       listDrawingReviewCandidates(project.value.id, accessToken),
-      listDrawingReviewers(project.value.id, accessToken),
+      hasPermission('drawing-review.submit') ? listDrawingReviewers(project.value.id, accessToken) : Promise.resolve([]),
     ])
     drawingReviews.value = reviews
     drawingReviewCandidates.value = candidates

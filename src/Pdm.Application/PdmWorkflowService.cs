@@ -4454,6 +4454,17 @@ public sealed class PdmWorkflowService(
                 : [];
             publication = await publisher.PublishAsync(package, project, previewSources, cancellationToken);
         }
+        catch (ReleaseConversionPendingException exception)
+        {
+            var waiting = await repository.MarkReleasePreviewStateAsync(package.Id, ReleasePreviewState.Pending,
+                exception.Message, package.PreviewAttempts + 1, timeProvider.GetUtcNow(), cancellationToken);
+            await AuditAsync(actor, "release-package.conversion.pending", nameof(ReleasePackage), package.Id.ToString(), exception.Message, cancellationToken);
+            return waiting;
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
         catch (Exception exception)
         {
             await repository.MarkPublishFailedAsync(package.Id, exception.Message, cancellationToken);
@@ -5436,8 +5447,8 @@ public sealed class PdmWorkflowService(
         await ProjectPermissionPolicy.RequireAsync(repository, package.ProjectId, actor, role, PermissionCodes.ReleaseManage, cancellationToken);
         if (!await repository.HasProjectContentReadAccessAsync(package.ProjectId, actor, role, cancellationToken))
             throw new UnauthorizedAccessException("当前用户没有该项目的操作权限。");
-        if (package.State != ReleasePackageState.Published)
-            throw new PdmRuleException("只有已发布的发布包可以重试转图。");
+        if (package.State != ReleasePackageState.Published && package.State != ReleasePackageState.Publishing)
+            throw new PdmRuleException("只有审批完成等待转图或已发布的发布包可以重试转图。");
         var saved = await repository.MarkReleasePreviewStateAsync(releasePackageId, ReleasePreviewState.Pending, null, 0, timeProvider.GetUtcNow(), cancellationToken);
         await AuditAsync(actor, "release-package.preview.retry", nameof(ReleasePackage), releasePackageId.ToString(),
             $"{package.Number}；重新排队转图", cancellationToken);
@@ -6309,7 +6320,9 @@ public sealed class PdmWorkflowService(
         if (selectedItems.Length != selectedIds.Count)
             throw new PdmRuleException($"发布范围选择中包含已删除或不属于{label}BOM的物料。");
 
-        static string MaterialKey(BomItem item) => $"{item.DrawingNumber.Trim()}|{item.Unit.Trim()}";
+        static string MaterialKey(BomItem item) => string.IsNullOrWhiteSpace(item.DrawingNumber)
+            ? $"item:{item.Id:N}"
+            : $"material:{item.DrawingNumber.Trim()}|{item.Unit.Trim()}";
         var partiallySelectedGroup = items
             .GroupBy(MaterialKey, StringComparer.OrdinalIgnoreCase)
             .FirstOrDefault(group => group.Any(item => selectedIds.Contains(item.Id)) && group.Any(item => !selectedIds.Contains(item.Id)));

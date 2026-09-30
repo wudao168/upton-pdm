@@ -868,12 +868,16 @@ function handleReviewOverlayAction(event: MessageEvent) {
       modelDocumentIds?: string[] | null
       assignedReviewers?: string[]
       entries?: Array<{ packageId: string; itemId: string }>
+      decisionEntries?: DrawingReviewBatchEntry[]
       collapsed?: boolean
     }
   } | undefined
   if (message?.type !== 'review-overlay-action' || !message.payload?.action) return
   const payload = message.payload
   switch (payload.action) {
+    case 'decide-batch':
+      if (payload.decisionEntries?.length) void runOperation(() => decideDrawingReviewBatch(payload.decisionEntries!), '批量审批已提交')
+      break
     case 'resubmit-batch':
       if (payload.entries?.length) void runOperation(async () => {
         for (const entry of payload.entries!) await workspace.resubmitDrawingReviewItem(entry.packageId, entry.itemId)

@@ -1,6 +1,7 @@
 import ElementPlus from 'element-plus'
 import { flushPromises, mount } from '@vue/test-utils'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import DrawingReviewPanel from '../src/components/DrawingReviewPanel.vue'
 import DrawingReviewOverlayApp from '../src/components/DrawingReviewOverlayApp.vue'
 
 describe('DrawingReviewOverlayApp', () => {
@@ -45,6 +46,9 @@ describe('DrawingReviewOverlayApp', () => {
     }))
     await flushPromises()
 
+    const entries = [{ kind: 'supervisor', packageId: 'review-1', itemId: 'item-1', decision: 'Approve', comment: '' }]
+    wrapper.findComponent(DrawingReviewPanel).vm.$emit('decideBatch', entries)
+    expect(postMessage).toHaveBeenCalledWith({ type: 'review-overlay-action', payload: { action: 'decide-batch', decisionEntries: entries } })
     expect(wrapper.find('[aria-label="图纸审核面板"]').exists()).toBe(true)
     expect(wrapper.find('[aria-label="关闭图纸审核面板"]').exists()).toBe(false)
     await wrapper.get('[aria-label="折叠图纸审核栏"]').trigger('click')

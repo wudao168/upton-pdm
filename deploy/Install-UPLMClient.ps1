@@ -169,6 +169,10 @@ Copy-Item -LiteralPath $uninstallerSource -Destination $uninstallerScriptTarget 
 $locator = [ordered]@{ BootstrapUrl = "$ServerBaseUrl/client-bootstrap.json" } | ConvertTo-Json
 $utf8 = New-Object Text.UTF8Encoding($false)
 foreach ($target in @($desktopTarget, $addinTarget)) { [IO.File]::WriteAllText((Join-Path $target 'uplm-bootstrap.json'), $locator, $utf8) }
+$serverSettingsRoot = Join-Path $env:LOCALAPPDATA 'UPLM'
+New-Item -ItemType Directory -Path $serverSettingsRoot -Force | Out-Null
+$serverSettings = @{ ServerAddress = $serverUri.GetLeftPart([UriPartial]::Authority).TrimEnd('/') } | ConvertTo-Json
+[IO.File]::WriteAllText((Join-Path $serverSettingsRoot 'server-settings.json'), $serverSettings, $utf8)
 
 $regAsm = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\RegAsm.exe'
 $addinDll = Join-Path $addinTarget 'Upton.Pdm.SolidWorks.Addin.dll'

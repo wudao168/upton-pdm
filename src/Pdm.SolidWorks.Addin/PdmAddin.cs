@@ -153,8 +153,6 @@ public sealed class PdmAddin : ISwAddin
             RefreshTree(false);
             _ = LoginRememberedCredentialsAsync();
             SetInitialUpdateSnapshot();
-            // 插件自己无法在运行中替换 DLL：每次启动就把已下载的更新挂上安装脚本，关闭 SolidWorks 即完成安装。
-            ClientPackageUpdater.TryLaunchPendingUpdate("solidworks-addin", Process.GetCurrentProcess().Id, string.Empty);
             _ = MonitorClientUpdatesAsync();
             LogOperation("ConnectToSW success");
             return true;
@@ -1202,7 +1200,7 @@ public sealed class PdmAddin : ISwAddin
             GetClientUpdateSnapshot,
             TestPluginConnectionAsync,
             address => CheckClientUpdateAsync(address, false, lifetime.Token),
-            address => CheckClientUpdateAsync(address, true, lifetime.Token),
+            address => CheckClientUpdateAsync(address, true, lifetime.Token, true),
             SavePluginSettingsAsync))
         {
             dialog.ShowDialog(taskPaneControl);
@@ -1689,9 +1687,34 @@ public sealed class PdmAddin : ISwAddin
 
         var renameStatus = (swRenameDocumentError_e)assemblyModel.Extension.RenameDocument(newBaseName);
         assemblyModel.ClearSelection2(true);
+        if (renameStatus == swRenameDocumentError_e.swRenameDocumentError_PatternedComponent)
+        {
+            var components = ((assemblyModel as IAssemblyDoc)?.GetComponents(false) as object[] ?? Array.Empty<object>())
+                .OfType<IComponent2>();
+            foreach (var component in components)
+            {
+                if (!PathsEqual(component.GetPathName(), oldPath)) continue;
+                var patterned = false;
+                for (var ancestor = component; ancestor != null; ancestor = ancestor.GetParent())
+                {
+                    if (ancestor.IsPatternInstance())
+                    {
+                        patterned = true;
+                        break;
+                    }
+                }
+                if (patterned) continue;
+                assemblyModel.ClearSelection2(true);
+                var selectData = (assemblyModel.SelectionManager as ISelectionMgr)?.CreateSelectData();
+                if (!component.Select4(false, selectData, false)) continue;
+                renameStatus = (swRenameDocumentError_e)assemblyModel.Extension.RenameDocument(newBaseName);
+                assemblyModel.ClearSelection2(true);
+                if (renameStatus != swRenameDocumentError_e.swRenameDocumentError_PatternedComponent) break;
+            }
+        }
         if (renameStatus != swRenameDocumentError_e.swRenameDocumentError_None)
         {
-            throw new InvalidOperationException(RenameDocumentErrorText(renameStatus));
+            throw new InvalidOperationException(string.Concat(RenameDocumentErrorText(renameStatus), " 错误代码：", (int)renameStatus, "（", renameStatus, "）。"));
         }
 
         foreach (var matchingNode in EnumerateCadNodes(currentTree).Where(candidate => PathsEqual(candidate.FullPath, oldPath)))
@@ -1903,11 +1926,7 @@ public sealed class PdmAddin : ISwAddin
         PluginSettings settings,
         CancellationToken cancellationToken)
     {
-        return string.IsNullOrWhiteSpace(settings?.ServerAddress)
-            ? ClientBootstrapLoader.LoadAsync(cancellationToken)
-            : ClientBootstrapLoader.LoadAsync(
-                PluginSettingsStore.BuildBootstrapUrl(settings.ServerAddress),
-                cancellationToken);
+        return ClientBootstrapLoader.LoadAsync(cancellationToken);
     }
 
     private void SetInitialUpdateSnapshot()
@@ -1922,8 +1941,10 @@ public sealed class PdmAddin : ISwAddin
         {
             snapshot.AvailableVersion = pendingVersion;
             snapshot.Status = string.IsNullOrWhiteSpace(pendingError)
-                ? "更新包已下载，退出并重新打开SolidWorks后完成安装"
+                ? "更新包已下载，请点击安装更新"
                 : string.Concat("更新失败：", pendingError);
+            snapshot.UpdateAvailable = true;
+            snapshot.ReadyToInstall = ClientPackageUpdater.PendingUpdateHasFileHashes("solidworks-addin");
         }
         SetClientUpdateSnapshot(snapshot);
     }
@@ -1951,7 +1972,8 @@ public sealed class PdmAddin : ISwAddin
     private async Task<PluginUpdateSnapshot> CheckClientUpdateAsync(
         string serverAddress,
         bool install,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        bool launchInstaller = false)
     {
         await clientUpdateGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
@@ -1963,41 +1985,38 @@ public sealed class PdmAddin : ISwAddin
                 snapshot.Status = "正在检查更新…";
             });
 
-            var settings = new PluginSettings
-            {
-                ServerAddress = serverAddress ?? string.Empty,
-                AutomaticUpdatesEnabled = pluginSettings.AutomaticUpdatesEnabled
-            };
-            var bootstrap = string.IsNullOrWhiteSpace(settings.ServerAddress)
-                ? await ClientBootstrapLoader.LoadAsync(cancellationToken, false).ConfigureAwait(false)
-                : await ClientBootstrapLoader.LoadAsync(
-                    PluginSettingsStore.BuildBootstrapUrl(settings.ServerAddress),
-                    cancellationToken,
-                    false).ConfigureAwait(false);
             var installedVersion = ClientPackageUpdater.GetInstalledVersion(addinDirectory);
-            var availableVersion = bootstrap?.SolidWorksAddin?.Version?.Trim() ?? string.Empty;
             var checkedAt = DateTimeOffset.Now;
 
             var repairFailedUpdate = false;
             if (ClientPackageUpdater.TryGetPendingUpdate("solidworks-addin", out var pendingVersion, out var pendingError))
             {
-                repairFailedUpdate = !string.IsNullOrWhiteSpace(pendingError);
+                repairFailedUpdate = !string.IsNullOrWhiteSpace(pendingError)
+                    || !ClientPackageUpdater.PendingUpdateHasFileHashes("solidworks-addin");
                 if (!repairFailedUpdate)
                 {
-                    // 安装脚本可能被重启打断，这里每次检查都补挂一次；SolidWorks 运行中由脚本等退出后执行。
-                    ClientPackageUpdater.TryLaunchPendingUpdate("solidworks-addin", Process.GetCurrentProcess().Id, string.Empty);
+                    if (launchInstaller) LaunchVisiblePluginInstaller();
                     var pendingSnapshot = new PluginUpdateSnapshot
                     {
                         InstalledVersion = installedVersion,
-                        AvailableVersion = string.IsNullOrWhiteSpace(pendingVersion) ? availableVersion : pendingVersion,
+                        AvailableVersion = pendingVersion,
                         LastCheckedAt = checkedAt,
-                        Status = "更新包已下载，退出并重新打开SolidWorks后完成安装"
+                        Status = launchInstaller ? "安装窗口已打开，请保存图纸并关闭 SolidWorks，在安装窗口查看结果" : "更新包已下载，请点击安装更新",
+                        UpdateAvailable = !launchInstaller,
+                        ReadyToInstall = true,
+                        ProgressPercentage = 100
                     };
                     SetClientUpdateSnapshot(pendingSnapshot);
                     return pendingSnapshot.Clone();
                 }
             }
 
+            // 已下载并校验的包可以离线安装，不依赖再次连接更新服务器。
+            var bootstrap = string.IsNullOrWhiteSpace(serverAddress)
+                ? await ClientBootstrapLoader.LoadAsync(cancellationToken, false).ConfigureAwait(false)
+                : await ClientBootstrapLoader.LoadAsync(
+                    PluginSettingsStore.BuildBootstrapUrl(serverAddress), cancellationToken, false).ConfigureAwait(false);
+            var availableVersion = bootstrap?.SolidWorksAddin?.Version?.Trim() ?? string.Empty;
             var updateAvailable = repairFailedUpdate
                 || ClientPackageUpdater.IsUpdateAvailable(installedVersion, availableVersion);
             if (!updateAvailable)
@@ -2054,17 +2073,16 @@ public sealed class PdmAddin : ISwAddin
                 addinDirectory,
                 cancellationToken,
                 progress).ConfigureAwait(false);
-            ClientPackageUpdater.TryLaunchPendingUpdate(
-                "solidworks-addin",
-                Process.GetCurrentProcess().Id,
-                string.Empty);
+            if (launchInstaller) LaunchVisiblePluginInstaller();
             var stagedSnapshot = new PluginUpdateSnapshot
             {
                 InstalledVersion = installedVersion,
                 AvailableVersion = availableVersion,
                 LastCheckedAt = checkedAt,
                 ProgressPercentage = 100,
-                Status = "更新包已下载，退出并重新打开SolidWorks后完成安装"
+                Status = launchInstaller ? "安装窗口已打开，请保存图纸并关闭 SolidWorks，在安装窗口查看结果" : "更新包已下载，请点击安装更新",
+                UpdateAvailable = !launchInstaller,
+                ReadyToInstall = true
             };
             SetClientUpdateSnapshot(stagedSnapshot);
             return stagedSnapshot.Clone();
@@ -2103,6 +2121,12 @@ public sealed class PdmAddin : ISwAddin
         {
             clientUpdateGate.Release();
         }
+    }
+
+    private void LaunchVisiblePluginInstaller()
+    {
+        if (!ClientPackageUpdater.TryLaunchPendingUpdate("solidworks-addin", Process.GetCurrentProcess().Id, string.Empty, true))
+            throw new InvalidOperationException("未能打开安装窗口，可能已有安装进程。请检查更新状态后重试。");
     }
 
     private async Task<PluginConnectionResult> TestPluginConnectionAsync(string serverAddress)
@@ -2435,6 +2459,10 @@ public sealed class PdmAddin : ISwAddin
                 {
                     statuses[request.NodeId] = string.Concat("失败：", exception.Message);
                     LogDiagnostic(string.Concat("ExecuteBatchDocumentRenames.", node.FileName), exception);
+                    for (var remaining = index + 1; remaining < requests.Length; remaining++)
+                    {
+                        statuses[requests[remaining].NodeId] = string.Concat("未执行：因 ", node.FileName, " 改名失败而停止");
+                    }
                     break;
                 }
             }
@@ -2486,8 +2514,11 @@ public sealed class PdmAddin : ISwAddin
             case swRenameDocumentError_e.swRenameDocumentError_DocumentNotSaved:
                 return "该图档尚未保存，不能重命名。";
             case swRenameDocumentError_e.swRenameDocumentError_RoutingComponent:
+                return "布线零部件不支持直接重命名。";
             case swRenameDocumentError_e.swRenameDocumentError_ToolboxComponent:
+                return "Toolbox零部件不支持直接重命名。";
             case swRenameDocumentError_e.swRenameDocumentError_PatternedComponent:
+                return "选中的是阵列实例，且未找到可重命名的原始实例。";
             case swRenameDocumentError_e.swRenameDocumentError_VirtualComponent:
             case swRenameDocumentError_e.swRenameDocumentError_InvalidVirtualComponent:
                 return "该零部件类型不支持直接重命名。";

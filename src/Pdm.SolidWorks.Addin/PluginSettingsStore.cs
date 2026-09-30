@@ -3,6 +3,7 @@ using System;
 using System.IO;
 using System.Text;
 using System.Web.Script.Serialization;
+using Upton.Pdm.ClientShared;
 
 namespace Upton.Pdm.SolidWorks;
 
@@ -48,6 +49,13 @@ internal static class PluginSettingsStore
 
     public static PluginSettings Load()
     {
+        var settings = LoadSavedSettings();
+        settings.ServerAddress = ClientBootstrapLoader.GetServerAddress();
+        return settings;
+    }
+
+    private static PluginSettings LoadSavedSettings()
+    {
         try
         {
             var path = GetPath();
@@ -68,6 +76,7 @@ internal static class PluginSettingsStore
     {
         if (settings == null) throw new ArgumentNullException(nameof(settings));
         settings.Normalize();
+        ClientServerSettingsStore.Save(settings.ServerAddress);
         var path = GetPath();
         Directory.CreateDirectory(Path.GetDirectoryName(path));
         File.WriteAllText(path, Serializer.Serialize(settings), new UTF8Encoding(false));
@@ -75,35 +84,12 @@ internal static class PluginSettingsStore
 
     public static Uri BuildBootstrapUrl(string serverAddress)
     {
-        var value = (serverAddress ?? string.Empty).Trim();
-        if (!Uri.TryCreate(value, UriKind.Absolute, out var uri)
-            || (uri.Scheme != Uri.UriSchemeHttp && uri.Scheme != Uri.UriSchemeHttps))
-        {
-            throw new InvalidOperationException("服务器地址必须是完整的HTTP或HTTPS地址，例如：http://192.168.2.8:5173。");
-        }
-
-        var builder = new UriBuilder(uri);
-        var path = builder.Path.TrimEnd('/');
-        if (!path.EndsWith("/client-bootstrap.json", StringComparison.OrdinalIgnoreCase))
-        {
-            path = string.Concat(path, "/client-bootstrap.json");
-        }
-        builder.Path = path;
-        builder.Query = string.Empty;
-        builder.Fragment = string.Empty;
-        return builder.Uri;
+        return ClientServerSettingsStore.BuildBootstrapUrl(serverAddress);
     }
 
     public static string NormalizeServerAddress(string serverAddress)
     {
-        var bootstrapUrl = BuildBootstrapUrl(serverAddress);
-        var builder = new UriBuilder(bootstrapUrl)
-        {
-            Path = string.Empty,
-            Query = string.Empty,
-            Fragment = string.Empty
-        };
-        return builder.Uri.AbsoluteUri.TrimEnd('/');
+        return ClientServerSettingsStore.NormalizeServerAddress(serverAddress);
     }
 
     public static string ServerAddressFromConfiguration(Upton.Pdm.ClientShared.ClientBootstrapConfiguration configuration)
@@ -132,6 +118,7 @@ internal sealed class PluginUpdateSnapshot
     public DateTimeOffset? LastCheckedAt { get; set; }
     public int? ProgressPercentage { get; set; }
     public bool UpdateAvailable { get; set; }
+    public bool ReadyToInstall { get; set; }
     public bool Busy { get; set; }
 
     public PluginUpdateSnapshot Clone() => (PluginUpdateSnapshot)MemberwiseClone();

@@ -72,6 +72,17 @@ New-Item -ItemType Directory -Path $desktopTarget,$addinTarget -Force | Out-Null
 Copy-Item -Path (Join-Path $desktopSource '*') -Destination $desktopTarget -Recurse -Force
 Copy-Item -Path (Join-Path $addinSource '*') -Destination $addinTarget -Recurse -Force
 
+# 统一地址保存在用户配置目录中，客户端和插件共用，升级包不能覆盖。
+$serverSettingsRoot = Join-Path $env:LOCALAPPDATA 'UPLM'
+$serverSettingsPath = Join-Path $serverSettingsRoot 'server-settings.json'
+if (-not (Test-Path -LiteralPath $serverSettingsPath)) {
+    $serverUri = [Uri]([string]$manifest.serverBaseUrl)
+    if ($serverUri.Scheme -notin @('http', 'https')) { throw 'Invalid installer server address.' }
+    New-Item -ItemType Directory -Path $serverSettingsRoot -Force | Out-Null
+    $serverSettings = @{ ServerAddress = $serverUri.GetLeftPart([UriPartial]::Authority).TrimEnd('/') } | ConvertTo-Json
+    [IO.File]::WriteAllText($serverSettingsPath, $serverSettings, [Text.UTF8Encoding]::new($false))
+}
+
 $regAsm = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\RegAsm.exe'
 if (-not (Test-Path -LiteralPath $regAsm)) { throw '未找到 64 位 .NET Framework RegAsm。' }
 $addinDll = Join-Path $addinTarget 'Upton.Pdm.SolidWorks.Addin.dll'

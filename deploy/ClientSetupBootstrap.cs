@@ -133,12 +133,27 @@ internal sealed class ClientSetupForm : Form
 
 internal static class ClientSetupBootstrap
 {
+    private const string DefaultServerBaseUrl = "http://127.0.0.1:5173";
     [STAThread]
     private static int Main(string[] args)
     {
         Application.EnableVisualStyles(); Application.SetCompatibleTextRenderingDefault(false);
-        var request = new SetupRequest { ServerBaseUrl = ReadArgument(args, "--server") ?? "http://10.7.7.88:5173", InstallRoot = ReadArgument(args, "--install-root") ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "UPLM"), Mode = ReadArgument(args, "--mode") ?? "Install" };
+        var request = new SetupRequest { ServerBaseUrl = ReadArgument(args, "--server") ?? ReadSavedServerAddress() ?? DefaultServerBaseUrl, InstallRoot = ReadArgument(args, "--install-root") ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "UPLM"), Mode = ReadArgument(args, "--mode") ?? "Install" };
         Application.Run(new ClientSetupForm(request)); return 0;
     }
     private static string ReadArgument(string[] args, string name) { for (var index = 0; index < args.Length - 1; index++) if (string.Equals(args[index], name, StringComparison.OrdinalIgnoreCase)) return args[index + 1]; return null; }
+    private static string ReadSavedServerAddress()
+    {
+        try
+        {
+            var path = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "UPLM", "server-settings.json");
+            if (!File.Exists(path)) return null;
+            var settings = new System.Web.Script.Serialization.JavaScriptSerializer().Deserialize<System.Collections.Generic.Dictionary<string, object>>(File.ReadAllText(path, Encoding.UTF8));
+            object value; Uri uri;
+            if (settings != null && settings.TryGetValue("ServerAddress", out value) && Uri.TryCreate(value as string, UriKind.Absolute, out uri)
+                && (uri.Scheme == Uri.UriSchemeHttp || uri.Scheme == Uri.UriSchemeHttps)) return uri.GetLeftPart(UriPartial.Authority);
+        }
+        catch { }
+        return null;
+    }
 }

@@ -130,7 +130,11 @@ async function decideSupervisor(decision: DrawingReviewDecision) {
     ElMessage.warning('退回必须填写说明。')
     return
   }
-  // 通过/批准不再二次确认；退回仍需确认。
+  if (decision === 'Approve') {
+    await ElMessageBox.confirm('确认批准整张审核单的全部图纸？', '批准审核单', {
+      confirmButtonText: '确认批准', cancelButtonText: '取消', type: 'warning',
+    })
+  }
   if (decision !== 'Approve') {
     await ElMessageBox.confirm('确认退回设计修改？', '图纸审核确认', {
       confirmButtonText: '确认', cancelButtonText: '取消', type: 'warning',
@@ -169,7 +173,11 @@ async function revoke() {
     <span v-if="!itemChangesRequested" class="drawing-review-decision-bar__route">{{ decisionRouteLabel }}</span>
     <div class="drawing-review-decision-buttons">
       <template v-if="!canResubmit">
-        <span v-if="canActAsSupervisor" class="drawing-review-decision-bar__hint">请在下方明细中勾选图纸后批量批准</span>
+        <template v-if="canActAsSupervisor">
+          <span class="drawing-review-decision-bar__hint">批准将作用于整张审核单</span>
+          <button type="button" class="is-reject" :disabled="pending || !canAct" @click="submit('RequestChanges')"><X :size="14" />退回</button>
+          <button type="button" class="is-approve" :disabled="pending" @click="submit('Approve')"><Check :size="14" />批准</button>
+        </template>
         <template v-else>
           <button type="button" class="is-reject" :disabled="pending || !canAct" @click="submit('RequestChanges')"><X :size="14" />退回</button>
           <button

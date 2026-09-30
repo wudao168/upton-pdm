@@ -34,6 +34,7 @@ export default defineConfig({
       input: {
         main: `${projectRoot}index.html`,
         reviewOverlay: `${projectRoot}review-overlay.html`,
+        serverSettings: `${projectRoot}server-settings.html`,
       },
     },
   },

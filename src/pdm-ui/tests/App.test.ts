@@ -456,6 +456,22 @@ describe('PLM client workspace', () => {
     wrapper.unmount()
   })
 
+  it('loads review drawings without requesting submit-only reviewer options for a user without submit permission', async () => {
+    drawingReviewsResponse = [{ id: 'review-1', projectId, number: 'DR-TEST', state: 'WritingProperties', createdBy: 'designer', createdAt: '2026-09-30T00:00:00Z', markups: [], items: [{ id: 'item-1', drawingDocumentId: 'doc-drawing', drawingNumber: 'REAL-ASM-001', drawingState: 'Approved', modelState: 'NotRequired' }] }]
+    const originalFetch = vi.mocked(fetch).getMockImplementation()!
+    vi.mocked(fetch).mockImplementation((input, init) => String(input).endsWith('/drawing-reviewers')
+      ? Promise.resolve(json({ message: '当前角色未配置执行此操作的权限。' }, 403))
+      : originalFetch(input, init))
+    const wrapper = mount(App, { attachTo: document.body, global: { plugins: [ElementPlus] } })
+    await login(wrapper)
+    await projectTabByText(wrapper, '图档').trigger('click')
+    await flushPromises()
+    expect(vi.mocked(fetch).mock.calls.some(([input]) => String(input).endsWith('/drawing-reviewers'))).toBe(false)
+    expect(wrapper.get('[aria-label="图纸审核状态表"]').text()).toContain('REAL-ASM-001')
+    expect(wrapper.text()).not.toContain('当前角色未配置执行此操作的权限。')
+    wrapper.unmount()
+  })
+
   it('does not reload the preview when the drawing review panel is opened', async () => {
     const postMessage = vi.fn()
     Object.defineProperty(window, 'chrome', {

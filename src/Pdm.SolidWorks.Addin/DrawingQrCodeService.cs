@@ -42,7 +42,12 @@ internal static class DrawingQrCodeService
         if (sheetNames.Length == 0) throw new InvalidOperationException("工程图没有可写入二维码的图纸页。");
         var targets = policy.EverySheet ? sheetNames : sheetNames.Take(1).ToArray();
         EnsureSketchPicturesVisible(application);
-        if (IsCurrent(model, policy, pluginSettings, content, targets.Length)) return false;
+        var removedConstructionLine = RemoveQrConstructionLines(model, drawing, targets);
+        if (IsCurrent(model, policy, pluginSettings, content, targets.Length))
+        {
+            if (removedConstructionLine) model.ForceRebuild3(false);
+            return removedConstructionLine;
+        }
         var lengthMillimeters = ResolveSize(pluginSettings?.DrawingQrLengthMillimeters, policy.SizeMillimeters);
         var widthMillimeters = ResolveSize(pluginSettings?.DrawingQrWidthMillimeters, policy.SizeMillimeters);
 
@@ -83,6 +88,8 @@ internal static class DrawingQrCodeService
                 feature.Name = string.Concat(FeaturePrefix, index + 1);
             }
 
+            RemoveQrConstructionLines(model, drawing, targets);
+
             SetProperty(model, ContentProperty, content);
             SetProperty(model, RuleVersionProperty, policy.RuleVersion?.Trim() ?? string.Empty);
             SetProperty(model, SourcePropertyProperty, policy.SourceProperty?.Trim() ?? string.Empty);
@@ -98,6 +105,60 @@ internal static class DrawingQrCodeService
             model.GraphicsRedraw2();
             if (File.Exists(bitmapPath)) File.Delete(bitmapPath);
         }
+    }
+
+    private static bool RemoveQrConstructionLines(IModelDoc2 model, IDrawingDoc drawing, string[] sheets)
+    {
+        var originalSheet = (drawing.GetCurrentSheet() as ISheet)?.GetName();
+        var changed = false;
+        try
+        {
+            foreach (var name in sheets)
+            {
+                drawing.ActivateSheet(name);
+                var sheetFeature = FindFeature(model, name);
+                if (sheetFeature?.GetTypeName2() != "DrSheet") continue;
+                var feature = sheetFeature.GetFirstSubFeature() as IFeature;
+                while (feature != null)
+                {
+                    var sketch = feature.GetSpecificFeature2() as ISketch;
+                    var segments = sketch?.GetSketchSegments() as object[];
+                    // Only the solitary construction line in a QR-only sheet sketch is disposable.
+                    // Drawing views, sheet formats and sketches containing other geometry are excluded.
+                    if (segments?.Length == 1 && segments[0] is ISketchSegment segment
+                        && segment.GetType() == (int)swSketchSegments_e.swSketchLINE && segment.ConstructionGeometry
+                        && ContainsOnlyQrPictures(feature))
+                    {
+                        model.ClearSelection2(true);
+                        if (!segment.Select4(false, null) || !model.Extension.DeleteSelection2(0)
+                            || (sketch.GetSketchSegments() as object[])?.Length > 0)
+                            throw new InvalidOperationException("SolidWorks未能清理二维码辅助构造线。");
+                        changed = true;
+                    }
+                    feature = feature.GetNextSubFeature() as IFeature;
+                }
+            }
+            return changed;
+        }
+        finally
+        {
+            if (!string.IsNullOrWhiteSpace(originalSheet)) drawing.ActivateSheet(originalSheet);
+            model.ClearSelection2(true);
+            if (changed) model.GraphicsRedraw2();
+        }
+    }
+
+    private static bool ContainsOnlyQrPictures(IFeature sketchFeature)
+    {
+        var child = sketchFeature.GetFirstSubFeature() as IFeature;
+        if (child == null) return false;
+        while (child != null)
+        {
+            if (child.GetTypeName2() != "SketchBitmap"
+                || !(child.Name ?? string.Empty).StartsWith(FeaturePrefix, StringComparison.OrdinalIgnoreCase)) return false;
+            child = child.GetNextSubFeature() as IFeature;
+        }
+        return true;
     }
 
     private static double ResolveSize(double? configuredSize, int policySize)

@@ -12,9 +12,11 @@ public sealed partial class MySqlPdmRepository
     {
         await using var connection = await OpenAsync(cancellationToken);
         var rows = await connection.QueryAsync<BomVersionRow>(new CommandDefinition(
-            $"{BomVersionSelect} WHERE project_id=@ProjectId AND (@Kind IS NULL OR bom_kind=@Kind) ORDER BY bom_kind,version_number DESC",
+            $"{BomVersionSelect} WHERE project_id=@ProjectId AND (@Kind IS NULL OR bom_kind=@Kind)",
             new { ProjectId = projectId, Kind = kind?.ToString() }, cancellationToken: cancellationToken));
-        return rows.Select(MapBomVersion).ToArray();
+        // Sort in memory so MySQL does not include large BOM snapshots in its sort buffer.
+        return rows.OrderBy(row => row.BomKind, StringComparer.OrdinalIgnoreCase)
+            .ThenByDescending(row => row.VersionNumber).Select(MapBomVersion).ToArray();
     }
 
     public async Task<BomVersion?> FindBomVersionAsync(Guid projectId, Guid versionId, CancellationToken cancellationToken)

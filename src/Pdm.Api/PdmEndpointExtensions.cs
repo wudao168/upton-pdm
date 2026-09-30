@@ -1524,10 +1524,15 @@ public static class PdmEndpointExtensions
             return Results.Ok(await service.ListU9SyncBlockersAsync(projectId, cancellationToken));
         });
 
-        api.MapPost("/release-packages/{releasePackageId:guid}/preview/retry", async (Guid releasePackageId, HttpContext context, PdmWorkflowService workflow, ReleasePreviewCoordinator coordinator, CancellationToken cancellationToken) =>
+        api.MapPost("/release-packages/{releasePackageId:guid}/preview/retry", async (Guid releasePackageId, HttpContext context, PdmWorkflowService workflow, ReleasePreviewCoordinator coordinator, ReleasePublishingCoordinator publishingCoordinator, CancellationToken cancellationToken) =>
         {
             var (actor, role) = CurrentUser(context.User);
             var package = await workflow.DemandReleasePreviewRetryAsync(releasePackageId, actor, role, cancellationToken);
+            if (package.State == ReleasePackageState.Publishing)
+            {
+                publishingCoordinator.TryStart("ManualConversionRetry");
+                return Results.Accepted($"/api/projects/{package.ProjectId}/release-packages", new { Message = "已重新排队转图，完成后继续发布，无需重新审批。" });
+            }
             if (!coordinator.TryStart("Manual"))
                 return Results.Ok(new { Message = "转图任务已在后台运行，本次重试已排队。", Package = package.Number });
             return Results.Accepted($"/api/projects/{package.ProjectId}/release-packages", new { Message = "转图任务已在后台启动。" });

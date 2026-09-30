@@ -41,6 +41,7 @@ public partial class MainWindow : Window
     internal const string UiHostName = "appassets.pdm.local";
     private const int WindowMessageSystemCommand = 0x0112;
     private const int MenuExit = 0x1FE0;
+    private const int MenuServerSettings = 0x1FD0;
     private const uint MenuString = 0x0000;
     private const uint MenuSeparator = 0x0800;
     private readonly string[] startupArgs = Environment.GetCommandLineArgs().Skip(1).ToArray();
@@ -85,6 +86,7 @@ public partial class MainWindow : Window
     private ClientBootstrapConfiguration bootstrapConfiguration = new();
     private bool usingServerUi;
     private bool attemptedLocalUiFallback;
+    private bool showingServerSettings;
     private WorkspaceStateRequestContext? workspaceStateRequest;
     private WorkspaceLocalStateSnapshot? workspaceStateSnapshot;
     private FileSystemWatcher? workspaceWatcher;
@@ -311,8 +313,11 @@ public partial class MainWindow : Window
             try
             {
                 await Task.Delay(TimeSpan.FromSeconds(Math.Max(5, bootstrapConfiguration.PollSeconds)), bootstrapLifetime.Token);
+                if (showingServerSettings) continue;
+                var requestedServerAddress = ClientBootstrapLoader.GetServerAddress();
                 var retryServerUi = !usingServerUi;
                 var latest = await ClientBootstrapLoader.LoadAsync(bootstrapLifetime.Token);
+                if (!string.Equals(requestedServerAddress, ClientBootstrapLoader.GetServerAddress(), StringComparison.OrdinalIgnoreCase)) continue;
                 bootstrapConfiguration = latest;
 
                 // 客户端界面必须与网页端一致：先按服务器版本刷新界面，再处理程序自更新。
@@ -403,10 +408,9 @@ public partial class MainWindow : Window
         CancellationToken cancellationToken)
     {
         // 插件目录未必在 %LOCALAPPDATA%（开发机用 RegAsm /codebase 指向仓库目录），
-        // 所以已下载的待安装包按它自己记录的目标目录处理：只要 SolidWorks 没在运行就交给安装脚本。
+        // 已下载的插件包由插件设置页手动打开安装窗口，桌面客户端只负责下载。
         if (ClientPackageUpdater.TryGetPendingUpdate("solidworks-addin", out _, out _))
         {
-            if (!IsSolidWorksRunning()) ClientPackageUpdater.TryLaunchPendingUpdate("solidworks-addin", 0, string.Empty);
             return;
         }
 
@@ -419,20 +423,6 @@ public partial class MainWindow : Window
             addinDirectory,
             cancellationToken);
 
-        if (!IsSolidWorksRunning()) ClientPackageUpdater.TryLaunchPendingUpdate("solidworks-addin", 0, string.Empty);
-    }
-
-    private static bool IsSolidWorksRunning()
-    {
-        var solidWorksProcesses = Process.GetProcessesByName("SLDWORKS");
-        try
-        {
-            return solidWorksProcesses.Any(process => !process.HasExited);
-        }
-        finally
-        {
-            foreach (var process in solidWorksProcesses) process.Dispose();
-        }
     }
 
     private void ConfigureLocalUiRequests(CoreWebView2 webView, string uiFolder)
@@ -534,6 +524,7 @@ public partial class MainWindow : Window
         }
         catch (Exception exception)
         {
+            AppendClientDiagnostic($"客户端 API 代理连接失败：api={bootstrapConfiguration.ApiBaseUrl} path={requestUri.AbsolutePath} error={exception.GetType().Name}: {exception.Message}");
             var body = new MemoryStream(Encoding.UTF8.GetBytes($"{{\"message\":\"客户端无法连接服务器：{exception.Message.Replace("\\\"", "'")}\"}}"));
             args.Response = webView.Environment.CreateWebResourceResponse(body, 502, "UPLM API proxy failed", "Content-Type: application/json\r\nCache-Control: no-store");
         }
@@ -696,6 +687,11 @@ public partial class MainWindow : Window
             && message.TryGetValue("payload", out var desktopSettingsPayloadValue)
             && desktopSettingsPayloadValue is Dictionary<string, object> desktopSettingsPayload)
         {
+            if (desktopSettingsPayload.TryGetValue("serverAddress", out var serverAddressValue)
+                && serverAddressValue is string requestedServerAddress)
+            {
+                _ = UpdateServerAddressAsync(requestedServerAddress);
+            }
             if (desktopSettingsPayload.TryGetValue("startWithWindows", out var startWithWindowsValue)
                 && startWithWindowsValue is bool requestedStartWithWindows)
             {
@@ -1084,12 +1080,50 @@ public partial class MainWindow : Window
             closeBehavior = "notificationArea",
             workspaceRoot = WorkspaceSettingsStore.GetWorkspaceRoot(),
             defaultWorkspaceRoot = WorkspaceSettingsStore.DefaultWorkspaceRoot,
+            serverAddress = ClientBootstrapLoader.GetServerAddress(),
             error,
             message
         };
         var script = $"window.dispatchEvent(new CustomEvent('pdm-desktop-settings', {{ detail: {Serialize(detail)} }}));";
         try { await WorkspaceView.CoreWebView2.ExecuteScriptAsync(script); }
         catch (InvalidOperationException) { }
+    }
+
+    private async Task UpdateServerAddressAsync(string serverAddress)
+    {
+        try
+        {
+            var normalizedAddress = ClientServerSettingsStore.NormalizeServerAddress(serverAddress);
+            var latest = await ClientBootstrapLoader.LoadAsync(ClientServerSettingsStore.BuildBootstrapUrl(normalizedAddress), bootstrapLifetime.Token, false);
+            using (var response = await apiClient.GetAsync(new Uri(new Uri(latest.ApiBaseUrl), "health"), bootstrapLifetime.Token))
+            {
+                response.EnsureSuccessStatusCode();
+            }
+            ClientServerSettingsStore.Save(normalizedAddress);
+            HideEmbeddedPreview(true);
+            HideReviewOverlay();
+            accessToken = string.Empty;
+            activeCompanyId = string.Empty;
+            bootstrapConfiguration = latest;
+            showingServerSettings = false;
+            ApplyServerUiConfiguration(latest);
+        }
+        catch (OperationCanceledException) when (bootstrapLifetime.IsCancellationRequested) { }
+        catch (Exception exception)
+        {
+            await PublishDesktopSettingsAsync($"服务器设置未保存：{exception.Message}");
+        }
+    }
+
+    private void ShowServerSettings()
+    {
+        RestoreFromNotificationArea();
+        if (WorkspaceView.CoreWebView2 == null) return;
+        HideEmbeddedPreview(true);
+        HideReviewOverlay();
+        showingServerSettings = true;
+        usingServerUi = false;
+        WorkspaceView.Source = new Uri($"https://{UiHostName}/server-settings.html");
     }
 
     private async Task PublishClientVersionAsync()
@@ -1194,6 +1228,7 @@ public partial class MainWindow : Window
         if (systemMenu != IntPtr.Zero)
         {
             AppendMenu(systemMenu, MenuSeparator, UIntPtr.Zero, string.Empty);
+            AppendMenu(systemMenu, MenuString, new UIntPtr(MenuServerSettings), "服务器设置");
             AppendMenu(systemMenu, MenuString, new UIntPtr(MenuExit), "退出 UPLM");
         }
 
@@ -1212,6 +1247,11 @@ public partial class MainWindow : Window
     {
         if (message != WindowMessageSystemCommand) return IntPtr.Zero;
         var command = wParam.ToInt32();
+        if (command == MenuServerSettings)
+        {
+            ShowServerSettings();
+            handled = true;
+        }
         if (command == MenuExit)
         {
             HideToNotificationArea();
@@ -1265,9 +1305,12 @@ public partial class MainWindow : Window
         var menu = new WinForms.ContextMenuStrip();
         var openItem = new WinForms.ToolStripMenuItem("打开 UPLM");
         var exitItem = new WinForms.ToolStripMenuItem("退出 UPLM");
+        var serverItem = new WinForms.ToolStripMenuItem("服务器设置");
+        serverItem.Click += (_, _) => ShowServerSettings();
         openItem.Click += (_, _) => RestoreFromNotificationArea();
         exitItem.Click += (_, _) => ExitApplication();
         menu.Items.Add(openItem);
+        menu.Items.Add(serverItem);
         menu.Items.Add(new WinForms.ToolStripSeparator());
         menu.Items.Add(exitItem);
 

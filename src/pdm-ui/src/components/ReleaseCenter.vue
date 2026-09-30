@@ -169,7 +169,7 @@ const releaseWorkflowLabel = computed(() => {
   return `${workflowNames[releasePackage.workflowCode] ?? fallbackName} · 第${releasePackage.workflowVersion || 1}版`
 })
 const releaseStateLabel = computed(() => props.releasePackage?.state === '发布中'
-  ? '审批完成 · 后台发布中'
+  ? props.releasePackage.previewState === 'Pending' ? '审批完成 · 等待转图' : '审批完成 · 后台发布中'
   : props.releasePackage?.state ?? '')
 const releaseBomRevisionLabel = computed(() => {
   const releasePackage = props.releasePackage

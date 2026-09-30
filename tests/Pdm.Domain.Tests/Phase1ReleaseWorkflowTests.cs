@@ -1854,6 +1854,26 @@ public sealed class Phase1ReleaseWorkflowTests
     }
 
     [Fact]
+    public async Task ScopedFormal_UnnumberedItemsCanBeSelectedIndependently()
+    {
+        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        await ConfigureApprovalWorkflowsAsync(repository);
+        var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(), new RecordingPublisher(), TimeProvider.System);
+        foreach (var document in await repository.ListCheckedOutDocumentsAsync(default))
+            await repository.ForceReleaseCheckoutAsync(document.Id, "admin", "测试准备", default);
+        await PrepareApprovedNonStandardDrawingReviewAsync(repository, workflow);
+        var original = (await repository.GetBomAsync(ProjectId, BomKind.NonStandard, default)).First();
+        var selected = original with { DrawingNumber = "" };
+        var deferred = new BomItem(Guid.NewGuid(), ProjectId, BomKind.NonStandard, 2, "", "暂不发布件", 1, "个", null, "B", "W1", true);
+        await repository.ReplaceBomAsync(ProjectId, BomKind.NonStandard, [selected, deferred], default);
+        var package = await workflow.CreateScopedReleasePackageAsync(
+            ProjectId, null, string.Empty, string.Empty, "", "未指定", null,
+            ReleaseScope.NonStandardWithDrawing, [selected.Id], "admin", UserRole.Administrator, default);
+        Assert.Equal(selected.Id, Assert.Single(package.NonStandardBomSnapshot).Id);
+        Assert.Equal(2, (await repository.GetBomAsync(ProjectId, BomKind.NonStandard, default)).Count);
+    }
+
+    [Fact]
     public async Task ScopedStandardFormal_SelectsWholeMaterialGroupsAndDefersTheRestToSupplement()
     {
         var repository = new InMemoryPdmRepository(TimeProvider.System);
@@ -2860,6 +2880,31 @@ public sealed class Phase1ReleaseWorkflowTests
     }
 
     [Fact]
+    public async Task DrawingPublication_ConversionFailureWaitsAndCanResumeWithoutReapproval()
+    {
+        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var publisher = new RecordingPublisher { ConversionUnavailable = true };
+        var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(), publisher, TimeProvider.System);
+        foreach (var document in await repository.ListCheckedOutDocumentsAsync(default))
+            await repository.ForceReleaseCheckoutAsync(document.Id, "admin", "测试准备", default);
+        await PrepareApprovedNonStandardDrawingReviewAsync(repository, workflow);
+        var package = await workflow.CreateReleasePackageAsync(
+            ProjectId, null, $"RP-CONVERSION-WAIT-{Guid.NewGuid():N}", "admin", "admin", "admin", UserRole.Administrator, default);
+        await PublishAsync(workflow, package);
+        var waiting = (await repository.FindReleasePackageAsync(package.Id, default))!;
+        Assert.Equal(ReleasePackageState.Publishing, waiting.State);
+        Assert.Equal(ReleasePreviewState.Pending, waiting.PreviewState);
+        Assert.Contains("超时", waiting.PreviewError);
+        Assert.All(waiting.ApprovalTasks, task => Assert.Equal(ApprovalDecision.Approved, task.Decision));
+        Assert.DoesNotContain(await repository.ListProjectDocumentVersionsAsync(ProjectId, default), version => version.ReleasePackageId == package.Id);
+        await workflow.DemandReleasePreviewRetryAsync(package.Id, "admin", UserRole.Administrator, default);
+        publisher.ConversionUnavailable = false;
+        var published = await workflow.ResumePublishAsync(package.Id, default);
+        Assert.Equal(ReleasePackageState.Published, published.State);
+        Assert.All(published.ApprovalTasks, task => Assert.Equal(ApprovalDecision.Approved, task.Decision));
+    }
+
+    [Fact]
     public async Task DrawingPublication_StopsWithoutAFormalSourceAndDoesNotCreatePartialVersions()
     {
         var repository = new InMemoryPdmRepository(TimeProvider.System);
@@ -2902,12 +2947,14 @@ public sealed class Phase1ReleaseWorkflowTests
         /// <summary>模拟只有工程图转成功、模型转失败：预览只返回工程图。</summary>
         public bool PreviewOnlyDrawings { get; init; }
         public bool OmitFormalDrawings { get; init; }
+        public bool ConversionUnavailable { get; set; }
         public Task PrepareAsync(ReleasePackage package, Project project, CancellationToken cancellationToken) { PrepareCalls++; return Task.CompletedTask; }
         public Task DiscardDraftAsync(ReleasePackage package, Project project, CancellationToken cancellationToken) { DiscardCalls++; return Task.CompletedTask; }
         public Task ValidateAsync(ReleasePackage package, Project project, CancellationToken cancellationToken) { ValidateCalls++; return Task.CompletedTask; }
         public Task<ReleasePublication> PublishAsync(ReleasePackage package, Project project, IReadOnlyList<ReleasePreviewSource> sources, CancellationToken cancellationToken)
         {
             PublishCalls++;
+            if (ConversionUnavailable) throw new ReleaseConversionPendingException("转图服务器连接超时", new TimeoutException());
             PreviewSources = sources.ToArray();
             var previews = sources.ToDictionary(
                 source => source.DocumentId,

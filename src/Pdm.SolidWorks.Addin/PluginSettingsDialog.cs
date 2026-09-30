@@ -214,7 +214,7 @@ internal sealed class PluginSettingsDialog : Form
         updateLayout.Controls.Add(new Label { Text = "下载进度", Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleLeft }, 0, 4);
         updateLayout.Controls.Add(updateProgress, 1, 4);
         updateLayout.SetColumnSpan(updateProgress, 2);
-        automaticUpdates.Text = "启用自动更新";
+        automaticUpdates.Text = "自动检查并下载更新（安装需手动确认）";
         automaticUpdates.Checked = initialSettings.AutomaticUpdatesEnabled;
         automaticUpdates.Dock = DockStyle.Fill;
         updateLayout.Controls.Add(automaticUpdates, 0, 5);
@@ -229,7 +229,7 @@ internal sealed class PluginSettingsDialog : Form
         checkUpdateButton.Text = "检查更新";
         ConfigureDialogButton(checkUpdateButton);
         checkUpdateButton.Click += async (_, _) => await RunUpdateActionAsync(false);
-        installUpdateButton.Text = "立即更新";
+        installUpdateButton.Text = "安装更新";
         ConfigureDialogButton(installUpdateButton);
         installUpdateButton.Click += async (_, _) => await RunUpdateActionAsync(true);
         updateActions.Controls.Add(installUpdateButton);
@@ -383,12 +383,14 @@ internal sealed class PluginSettingsDialog : Form
         saveButton.Enabled = !running;
         cancelButton.Enabled = !running;
         var snapshot = readSnapshot();
+        installUpdateButton.Text = snapshot.ReadyToInstall ? "安装更新" : "下载并安装";
         installUpdateButton.Enabled = !running && snapshot.UpdateAvailable && !snapshot.Busy;
     }
 
     private void ApplySnapshot(PluginUpdateSnapshot snapshot)
     {
         snapshot = snapshot ?? new PluginUpdateSnapshot();
+        installUpdateButton.Text = snapshot.ReadyToInstall ? "安装更新" : "下载并安装";
         installedVersion.Text = DisplayVersion(snapshot.InstalledVersion);
         availableVersion.Text = DisplayVersion(snapshot.AvailableVersion);
         updateStatus.Text = snapshot.Status ?? string.Empty;

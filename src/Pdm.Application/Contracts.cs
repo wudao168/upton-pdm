@@ -706,6 +706,8 @@ public interface ITokenIssuer
     string Issue(UserAccount account, TimeSpan lifetime);
 }
 
+public sealed class ReleaseConversionPendingException(string message, Exception innerException) : Exception(message, innerException);
+
 public class PdmRuleException(string message) : InvalidOperationException(message);
 
 public sealed class U9MaterialCodeConflictException(string materialCode)

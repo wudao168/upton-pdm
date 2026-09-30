@@ -83,7 +83,8 @@ public sealed class ReleasePublishingCoordinator(
             {
                 try
                 {
-                    await workflow.ResumePublishAsync(packageId, applicationLifetime.ApplicationStopping);
+                    var result = await workflow.ResumePublishAsync(packageId, applicationLifetime.ApplicationStopping);
+                    if (result.State != Upton.Pdm.Domain.ReleasePackageState.Published) continue;
                     logger.LogInformation("后台发布完成 {PackageId}（{Trigger}）。", packageId, triggerKind);
                 }
                 catch (OperationCanceledException) when (applicationLifetime.ApplicationStopping.IsCancellationRequested)
