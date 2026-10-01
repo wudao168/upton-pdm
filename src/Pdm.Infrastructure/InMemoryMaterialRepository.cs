@@ -835,6 +835,10 @@ public sealed class InMemoryMaterialRepository : IMaterialRepository
             .Take(Math.Clamp(limit, 1, 50))
             .ToArray());
 
+    public Task<IReadOnlyList<MaterialSyncBatchItem>> ListSyncBatchItemsForTaskAsync(Guid taskId, CancellationToken cancellationToken) =>
+        Task.FromResult<IReadOnlyList<MaterialSyncBatchItem>>(syncBatches.Values.SelectMany(batch => batch.Items)
+            .Where(item => item.TaskId == taskId).ToArray());
+
     public Task<MaterialSyncBatchClaim?> ClaimNextSyncBatchItemAsync(
         DateTimeOffset now,
         DateTimeOffset leaseExpiresAt,

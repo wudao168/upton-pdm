@@ -25,7 +25,7 @@ const props = withDefaults(defineProps<{
   programTemplateTasks: () => [],
   onMarkAllNotificationsRead: async () => {},
 })
-defineEmits<{ open: [projectId: string, releasePackageId: string]; openValidationPlan: [projectId: string]; openNotification: [notification: UserNotification]; openMaterialApprovals: []; openProgramTemplate: [templateId: string]; refresh: [] }>()
+defineEmits<{ open: [projectId: string, releasePackageId: string]; openValidationPlan: [projectId: string, qualityAcceptance?: boolean]; openNotification: [notification: UserNotification]; openMaterialApprovals: []; openProgramTemplate: [templateId: string]; refresh: [] }>()
 
 type TaskFilter = 'all' | 'todo' | 'notification' | 'approval' | 'material' | 'program' | 'lock' | 'password'
 type TaskCenterRow = {
@@ -187,7 +187,7 @@ const rows = computed<TaskCenterRow[]>(() => [
     kind: 'approval' as const,
     status: '待审批',
     statusClass: 'is-remind',
-    title: task.kind === 'validationPlan' ? `${task.projectCode} 验证计划审批` : `${task.projectCode} BOM发布审批`,
+    title: task.kind === 'validationPlan' ? `${task.projectCode} ${task.qualityAcceptance ? '质量验收' : '验证计划'}审批` : `${task.projectCode} BOM发布审批`,
     content: task.kind === 'validationPlan' ? `${task.projectName} · R${task.validationPlanRevision} · ${task.stepName || stageLabel(task.stage)}` : `${task.projectName} · ${task.releasePackageNumber} · ${stageLabel(task.stage)}`,
     createdAt: task.createdAt,
     approval: task,
@@ -361,14 +361,14 @@ async function resetPassword(task: PasswordResetTask) {
         <table class="pdm-project-table pdm-task-table">
           <thead><tr><th>状态</th><th>标题</th><th>内容</th><th>创建时间</th><th>操作</th></tr></thead>
           <tbody>
-            <tr v-for="row in pagedRows" :key="row.key" :class="{ 'is-task-actionable': row.kind === 'todo' || row.kind === 'notification' || row.kind === 'approval' || row.kind === 'material' || row.kind === 'program' }" @click="row.notification ? $emit('openNotification', row.notification) : row.approval?.kind === 'validationPlan' ? $emit('openValidationPlan', row.approval.projectId) : row.approval ? $emit('open', row.approval.projectId, row.approval.releasePackageId!) : row.material ? $emit('openMaterialApprovals') : row.program ? $emit('openProgramTemplate', row.program.templateId) : undefined">
+            <tr v-for="row in pagedRows" :key="row.key" :class="{ 'is-task-actionable': row.kind === 'todo' || row.kind === 'notification' || row.kind === 'approval' || row.kind === 'material' || row.kind === 'program' }" @click="row.notification ? $emit('openNotification', row.notification) : row.approval?.kind === 'validationPlan' ? $emit('openValidationPlan', row.approval.projectId, row.approval.qualityAcceptance) : row.approval ? $emit('open', row.approval.projectId, row.approval.releasePackageId!) : row.material ? $emit('openMaterialApprovals') : row.program ? $emit('openProgramTemplate', row.program.templateId) : undefined">
               <td><span class="pdm-status" :class="row.statusClass">{{ row.status }}</span></td>
               <td><strong>{{ row.title }}</strong></td>
               <td :title="row.content">{{ row.content }}</td>
               <td>{{ formatDateTime(row.createdAt) }}</td>
               <td>
                 <button v-if="row.notification" type="button" class="pdm-text-action" @click.stop="$emit('openNotification', row.notification)">{{ notificationActionLabel(row.notification) }}</button>
-                <button v-else-if="row.approval?.kind === 'validationPlan'" type="button" class="pdm-text-action" @click.stop="$emit('openValidationPlan', row.approval.projectId)">查看</button>
+                <button v-else-if="row.approval?.kind === 'validationPlan'" type="button" class="pdm-text-action" @click.stop="$emit('openValidationPlan', row.approval.projectId, row.approval.qualityAcceptance)">查看</button>
                 <button v-else-if="row.approval" type="button" class="pdm-text-action" @click.stop="$emit('open', row.approval.projectId, row.approval.releasePackageId!)">查看</button>
                 <button v-else-if="row.material" type="button" class="pdm-text-action" @click.stop="$emit('openMaterialApprovals')">查看申请</button>
                 <button v-else-if="row.program" type="button" class="pdm-text-action" @click.stop="$emit('openProgramTemplate', row.program.templateId)">查看模板</button>

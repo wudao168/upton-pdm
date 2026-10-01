@@ -108,6 +108,9 @@ if (string.Equals(databaseOptions.Provider, "MySql", StringComparison.OrdinalIgn
     builder.Services.AddScoped<IMaterialRelationRepository, MySqlMaterialRelationRepository>();
     builder.Services.AddScoped<IProgramTemplateRepository, MySqlProgramTemplateRepository>();
     builder.Services.AddScoped<IValidationPlanRepository, MySqlValidationPlanRepository>();
+    builder.Services.AddKeyedScoped<IValidationPlanRepository>("quality", (provider, _) => new MySqlValidationPlanRepository(provider.GetRequiredService<IOptions<PdmDatabaseOptions>>(), true));
+    builder.Services.AddScoped<IProjectBudgetRepository, MySqlProjectBudgetRepository>();
+    builder.Services.AddScoped<IQualityInspectionRepository, MySqlQualityInspectionRepository>();
     builder.Services.AddScoped<IProjectPlanningRepository, MySqlProjectPlanningRepository>();
     builder.Services.AddScoped<IProjectContentResetStore, MySqlProjectContentResetStore>();
 }
@@ -123,6 +126,9 @@ else
     builder.Services.AddSingleton<IMaterialRelationRepository, InMemoryMaterialRelationRepository>();
     builder.Services.AddSingleton<IProgramTemplateRepository, InMemoryProgramTemplateRepository>();
     builder.Services.AddSingleton<IValidationPlanRepository, InMemoryValidationPlanRepository>();
+    builder.Services.AddKeyedSingleton<IValidationPlanRepository>("quality", new InMemoryValidationPlanRepository());
+    builder.Services.AddSingleton<IProjectBudgetRepository, InMemoryProjectBudgetRepository>();
+    builder.Services.AddSingleton<IQualityInspectionRepository, InMemoryQualityInspectionRepository>();
     builder.Services.AddSingleton<IProjectPlanningRepository, InMemoryProjectPlanningRepository>();
     builder.Services.AddSingleton<IProjectContentResetStore, InMemoryProjectContentResetStore>();
 }
@@ -171,7 +177,15 @@ builder.Services.AddScoped<ControlledDocumentRecycleService>();
 builder.Services.AddScoped<ProjectContentResetService>();
 builder.Services.AddScoped<BomHeaderService>();
 builder.Services.AddScoped<ValidationPlanService>();
+builder.Services.AddKeyedScoped<ValidationPlanService>("quality", (provider, _) => new ValidationPlanService(
+    provider.GetRequiredKeyedService<IValidationPlanRepository>("quality"), provider.GetRequiredService<IPdmRepository>(),
+    provider.GetRequiredService<IFileStorage>(), provider.GetRequiredService<IValidationPlanTextRecognitionService>(),
+    new ValidationPlanFileArchive(provider.GetRequiredService<IPdmRepository>(), provider.GetRequiredService<IProjectFileRepository>(), true),
+    provider.GetRequiredService<TimeProvider>(), true));
 builder.Services.AddScoped<ProjectPlanningService>();
+builder.Services.AddScoped<ProjectBudgetService>();
+builder.Services.AddScoped<BudgetAssessmentService>();
+builder.Services.AddScoped<QualityInspectionService>();
 builder.Services.AddScoped<U9MaterialIntegrationService>();
 builder.Services.AddScoped<U9MaterialFullSyncService>();
 builder.Services.AddSingleton<U9MaterialFullSyncCoordinator>();
@@ -320,7 +334,9 @@ app.MapControlledDocumentRecycleEndpoints();
 app.MapProjectContentResetEndpoints();
 app.MapU9BomEndpoints();
 app.MapValidationPlanEndpoints();
+app.MapQualityInspectionEndpoints();
 app.MapProjectPlanningEndpoints();
+app.MapProjectBudgetEndpoints();
 if (Directory.Exists(deployedWebRoot))
 {
     app.MapGet("/{**path}", async context =>

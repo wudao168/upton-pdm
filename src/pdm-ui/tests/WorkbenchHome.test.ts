@@ -5,6 +5,7 @@ import WorkbenchHome from '../src/components/WorkbenchHome.vue'
 import type { DocumentNode, ProjectSummary } from '../src/types'
 
 const apiMocks = vi.hoisted(() => ({
+  listProjectPlanVersions: vi.fn().mockResolvedValue([]),
   readProjectPlanPortfolio: vi.fn(),
   readProjectValidationPlan: vi.fn(),
   getMaterialRelationCompleteness: vi.fn(),
@@ -76,9 +77,9 @@ describe('WorkbenchHome', () => {
     apiMocks.readProjectPlanPortfolio.mockResolvedValue({
       rootProjectId: 'project-root', currentStage: 'Design', completionPercent: 62, laggingProjectCount: 0, riskProjectCount: 0, plannedFinish: '2026-10-18',
       projects: [{ projectId: 'project-root', projectCode: 'P700001', projectName: '气密设备', isRoot: true, hasPlan: true, currentStage: 'Design', completionPercent: 62, plannedFinish: '2026-10-18', isLagging: false, isAtRisk: false,
-        plan: { currentStage: 'Design', stages: [{ code: 'Design', name: '设计' }], tasks: [
-          { id: 'task-1', name: '完成图纸审核', stage: 'Design', assignee: 'engineer', plannedStart: '2026-09-16', plannedFinish: '2026-09-18', status: 'InProgress', sortOrder: 1 },
-          { id: 'task-2', name: '标准件BOM核对', stage: 'Design', assignee: 'lead', plannedStart: '2026-09-17', plannedFinish: '2026-09-19', status: 'NotStarted', sortOrder: 2 },
+        plan: { baselineVersion: 1, updatedAt: '2026-09-01', currentStage: 'Design', stages: [{ code: 'Design', name: '设计' }], tasks: [
+          { id: 'task-1', name: '完成图纸审核', stage: 'Design', assignee: 'engineer', plannedStart: '2026-09-16', plannedFinish: '2026-09-18', baselineStart: '2026-09-16', baselineFinish: '2026-09-18', status: 'InProgress', sortOrder: 1 },
+          { id: 'task-2', name: '标准件BOM核对', stage: 'Design', assignee: 'lead', plannedStart: '2026-09-17', plannedFinish: '2026-09-19', baselineStart: '2026-09-17', baselineFinish: '2026-09-19', status: 'NotStarted', sortOrder: 2 },
         ] } }],
     })
     apiMocks.readProjectValidationPlan.mockResolvedValue({ state: 'PendingApproval' })
@@ -156,14 +157,28 @@ describe('WorkbenchHome', () => {
         pending: false,
         token: 'token',
         canAddManagerNote: true,
-        onUpdateMainStaffing: async () => project,
-        onUpdateDesigners: async () => project,
-        onUpdatePhaseOwners: async () => project,
+        onUpdateMainStaffing: vi.fn(async () => project),
+        onUpdateDesigners: vi.fn(async () => project),
+        onUpdatePhaseOwners: vi.fn(async () => project),
       },
       global: { plugins: [ElementPlus] },
     })
     await flushPromises()
 
+    const initialRefreshCount = apiMocks.readProjectPlanPortfolio.mock.calls.length
+    await vi.advanceTimersByTimeAsync(299_999)
+    expect(apiMocks.readProjectPlanPortfolio).toHaveBeenCalledTimes(initialRefreshCount)
+    await vi.advanceTimersByTimeAsync(1)
+    await flushPromises()
+    expect(apiMocks.readProjectPlanPortfolio).toHaveBeenCalledTimes(initialRefreshCount + 1)
+    let finishBaselineRefresh!: (value: never[]) => void
+    apiMocks.listProjectPlanVersions.mockImplementationOnce(() => new Promise(resolve => { finishBaselineRefresh = resolve }))
+    await wrapper.get('[aria-label="刷新项目概览"]').trigger('click')
+    await flushPromises()
+    expect(wrapper.get('[aria-label="初始基线"]').find('.pdm-overview-timeline__segment').exists()).toBe(true)
+    finishBaselineRefresh([])
+    await flushPromises()
+    expect(apiMocks.readProjectPlanPortfolio).toHaveBeenCalledTimes(initialRefreshCount + 2)
     expect(wrapper.find('.pdm-project-overview-heading').exists()).toBe(false)
     expect(wrapper.text()).not.toContain('当前工作图档')
     expect(wrapper.text()).not.toContain('项目尚未关联图纸')
@@ -173,15 +188,17 @@ describe('WorkbenchHome', () => {
     expect(wrapper.get('[aria-label="项目状态与下一步"]').text()).toContain('设计阶段 · 正常')
     expect(wrapper.get('[aria-label="项目状态与下一步"]').text()).toContain('项目进度 62%')
     expect(wrapper.get('[aria-label="项目状态与下一步"]').text()).toContain('计划完成 2026/10/18')
-    expect(wrapper.get('[aria-label="五阶段计划"]').text()).toContain('设计')
-    expect(wrapper.get('[aria-label="五阶段计划"]').text()).toContain('计划 2026/09/16 - 2026/09/19')
+    expect(wrapper.get('[aria-label="三行项目进度"]').text()).toContain('设计')
+    expect(wrapper.get('[aria-label="当前计划"]').find('button').attributes('title')).toContain('2026-09-16 — 2026-09-19')
     const shippingCountdown = wrapper.get('[aria-label="发货倒计时"]')
     expect(shippingCountdown.text()).toContain('已超期6天')
     expect(shippingCountdown.text()).toContain('2026/09/19')
     expect(shippingCountdown.text()).not.toContain('计划发货')
     expect(wrapper.get('button[aria-label="查看待处理"]').text()).toContain('5')
-    expect(wrapper.get('button[aria-label="查看关键物料"]').text()).toContain('1')
-    expect(wrapper.get('[aria-label="项目核心业务概览"]').findAll('article')).toHaveLength(1)
+    expect(wrapper.find('button[aria-label="查看关键物料"]').exists()).toBe(false)
+    expect(wrapper.get('[aria-label="项目待办与风险"]').find('.pdm-overview-alerts').element.children).toHaveLength(3)
+    expect(wrapper.get('[aria-label="项目核心业务概览"]').find('[aria-label="项目团队"]').exists()).toBe(true)
+    expect(wrapper.get('[aria-label="项目核心业务概览"]').find('[aria-label="预留区域"]').exists()).toBe(true)
     expect(wrapper.get('[aria-label="项目总览"]').text()).toContain('P700001')
     expect(wrapper.get('[aria-label="项目总览"]').text()).toContain('设计')
     expect(wrapper.get('[aria-label="项目总览"]').text()).toContain('工程师丁')
@@ -239,12 +256,18 @@ describe('WorkbenchHome', () => {
     expect(wrapper.get('[aria-label="项目团队"]').text()).toContain('项目经理甲')
     expect(wrapper.get('[aria-label="项目团队"]').text()).toContain('主设丙')
     expect(wrapper.get('[aria-label="项目团队"]').text()).not.toContain('工程师丁')
-    expect(wrapper.get('[aria-label="项目团队"]').text()).toContain('配置分工')
-    expect(wrapper.get('[aria-label="项目团队"]').text()).toContain('配置负责人')
-    const configureOwners = wrapper.get('[aria-label="项目团队"]').findAll('button').find(button => button.text() === '配置负责人')!
+    expect(wrapper.get('[aria-label="项目团队"]').text()).toContain('配置团队')
+    expect(wrapper.get('[aria-label="项目团队"]').findAll('button')).toHaveLength(1)
+    const configureOwners = wrapper.get('[aria-label="项目团队"]').findAll('button').find(button => button.text() === '配置团队')!
     await configureOwners.trigger('click')
     await flushPromises()
     expect(document.body.querySelector('[aria-label="执行工程师"]')).not.toBeNull()
+    expect(document.body.querySelector('[aria-label="主项目分工"]')).not.toBeNull()
+    ;[...document.body.querySelectorAll<HTMLButtonElement>('button')].find(button => button.textContent === '保存配置')!.click()
+    await flushPromises()
+    expect(wrapper.props('onUpdateMainStaffing')).toHaveBeenCalledOnce()
+    expect(wrapper.props('onUpdateDesigners')).toHaveBeenCalledOnce()
+    expect(wrapper.props('onUpdatePhaseOwners')).toHaveBeenCalledOnce()
     for (const phase of ['标准件采购', '非标件采购', '非标件生产', '机械装配', '电气装配', '电气调试', '验收']) {
       expect(wrapper.get('[aria-label="项目团队"]').text()).toContain(phase)
     }
@@ -261,9 +284,9 @@ describe('WorkbenchHome', () => {
     expect(wrapper.find('[aria-label="当前阶段任务"]').exists()).toBe(false)
     expect(wrapper.find('[aria-label="项目位置"]').exists()).toBe(false)
 
-    await wrapper.findAll('button').find(button => button.text().includes('配置负责人'))!.trigger('click')
+    await wrapper.findAll('button').find(button => button.text().includes('配置团队'))!.trigger('click')
     await flushPromises()
-    expect(document.body.textContent).toContain('配置项目阶段负责人 · P700001')
+    expect(document.body.textContent).toContain('配置项目团队 · P700001')
     for (const phase of ['标准件采购', '非标件采购', '非标件生产', '机械装配', '电气装配', '电气调试', '验收']) {
       expect(document.body.textContent).toContain(phase)
     }
@@ -271,7 +294,7 @@ describe('WorkbenchHome', () => {
     await wrapper.setProps({ projects: [{ ...project, collaborativeProjectManagers: [] }, childProject] })
     await wrapper.setProps({ project: { ...childProject, canAssignDesigners: false }, projects: [project, { ...childProject, canAssignDesigners: false }] })
     expect(wrapper.get('[aria-label="项目团队"]').text()).not.toContain('执行工程师')
-    expect(wrapper.get('[aria-label="项目团队"]').text()).not.toContain('配置负责人')
+    expect(wrapper.get('[aria-label="项目团队"]').text()).toContain('配置团队')
 
     await wrapper.findAll('button').find(button => button.text().includes('进入项目计划'))!.trigger('click')
 

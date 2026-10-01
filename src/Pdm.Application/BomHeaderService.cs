@@ -47,8 +47,9 @@ public sealed partial class BomHeaderService(
     private static readonly ProjectBomHeaderKind[] MasterOnly = [ProjectBomHeaderKind.Master];
     private static readonly ConcurrentDictionary<Guid, SemaphoreSlim> AutomaticApplicationLocks = new();
     private static readonly ConcurrentDictionary<Guid, byte> RunningApplications = new();
+    private static readonly ConcurrentDictionary<Guid, DateTimeOffset> AutomaticRetryDue = new();
     private const string AutomaticFailurePrefix = "自动处理失败：";
-    // 队列标记持久化在现有工作流审计中；仅显式入队的记录可执行，历史失败不会启动即重试。
+    // 队列和失败原因持久化在现有工作流中；重启后重新登记失败申请的重试时间。
     private const string AutomaticQueuePrefix = "自动审批后台队列：";
 
     public async Task<IReadOnlyList<ProjectBomHeader>> ListAsync(Guid projectId, string actor, UserRole role, CancellationToken cancellationToken)
@@ -438,6 +439,7 @@ public sealed partial class BomHeaderService(
 
     public async Task<bool> ProcessAutomaticQueueAsync(CancellationToken cancellationToken)
     {
+        await QueueFailedAutomaticAsync(cancellationToken);
         var queued = (await materials.ListMaterialCodeApplicationsAsync(null, null, cancellationToken))
             .Where(application => application.BomHeaderKind is not null && IsQueued(application)).ToArray();
         var processed = false;
@@ -467,9 +469,8 @@ public sealed partial class BomHeaderService(
                     else if (current.Status == MaterialCodeApplicationStatus.Approved && current.SyncTaskId is Guid taskId)
                     {
                         // 中断恢复或重试复用原任务；已有批次则等待其完成，避免重复入队。
-                        var active = (await materials.ListRecentSyncBatchesAsync(actor, 100, cancellationToken))
-                            .Any(batch => batch.Items.Any(item => item.TaskId == taskId
-                                && item.Status is MaterialSyncBatchItemStatus.Queued or MaterialSyncBatchItemStatus.Running));
+                        var active = (await materials.ListSyncBatchItemsForTaskAsync(taskId, cancellationToken))
+                            .Any(item => item.Status is MaterialSyncBatchItemStatus.Queued or MaterialSyncBatchItemStatus.Running);
                         if (!active && current.SyncStatus != MaterialSyncStatus.Succeeded)
                             await syncBatches.CreateAutomaticAsync([taskId], actor, cancellationToken);
                         await materials.RecordMaterialCodeApplicationWorkflowAsync(current.Id,
@@ -491,6 +492,58 @@ public sealed partial class BomHeaderService(
             finally { gate.Release(); }
         }
         return processed;
+    }
+
+    private async Task QueueFailedAutomaticAsync(CancellationToken cancellationToken)
+    {
+        var applications = await materials.ListMaterialCodeApplicationsAsync(null, null, cancellationToken);
+        foreach (var application in applications.Where(item => item.BomHeaderKind is not null))
+        {
+            if (application.Status == MaterialCodeApplicationStatus.Rejected || application.SyncStatus == MaterialSyncStatus.Succeeded)
+            {
+                AutomaticRetryDue.TryRemove(application.Id, out _);
+                continue;
+            }
+            if (IsQueued(application)) continue;
+            var failed = application.WorkflowMessage?.StartsWith(AutomaticFailurePrefix, StringComparison.Ordinal) == true
+                || application.Status == MaterialCodeApplicationStatus.Approved
+                    && application.SyncTaskId is not null
+                    && (application.SyncStatus is MaterialSyncStatus.Failed or MaterialSyncStatus.NeedsReview);
+            if (application.Status == MaterialCodeApplicationStatus.Approved && application.SyncTaskId is Guid taskId)
+            {
+                var items = await materials.ListSyncBatchItemsForTaskAsync(taskId, cancellationToken);
+                if (items.Any(item => item.Status is MaterialSyncBatchItemStatus.Queued or MaterialSyncBatchItemStatus.Running)) continue;
+                failed |= items.Any(item => item.Status is MaterialSyncBatchItemStatus.Failed or MaterialSyncBatchItemStatus.Waiting);
+            }
+            if (!failed && application.Status == MaterialCodeApplicationStatus.Pending
+                && string.IsNullOrWhiteSpace(application.WorkflowMessage))
+            {
+                var audits = await repository.ListProjectAuditAsync(application.ProjectId, 500, cancellationToken);
+                failed = audits.Any(audit => audit.Action == "bom.header.application.auto-trigger-failed"
+                    && audit.OccurredAt >= application.RequestedAt);
+            }
+            if (!failed) continue;
+            var now = timeProvider.GetUtcNow();
+            var due = AutomaticRetryDue.GetOrAdd(application.Id, now.AddMinutes(1));
+            if (due > now) continue;
+            var project = await repository.FindProjectAsync(application.ProjectId, cancellationToken);
+            if (project is null) continue;
+            var gate = AutomaticApplicationLocks.GetOrAdd(project.RootProjectId ?? project.Id, static _ => new SemaphoreSlim(1, 1));
+            if (!await gate.WaitAsync(0, cancellationToken)) continue;
+            try
+            {
+                var current = await materials.FindMaterialCodeApplicationAsync(application.Id, cancellationToken);
+                var latest = LatestHeaderApplication(await materials.ListMaterialCodeApplicationsAsync(project.Id, null, cancellationToken), application.BomHeaderKind!.Value);
+                var binding = (await repository.ListProjectBomHeaderBindingsAsync(project.Id, cancellationToken))
+                    .SingleOrDefault(item => item.Kind == application.BomHeaderKind);
+                if (current is null || latest?.Id != current.Id || binding?.MaterialId != current.MaterialId
+                    || current.Status == MaterialCodeApplicationStatus.Rejected || IsQueued(current)
+                    || current.SyncStatus == MaterialSyncStatus.Succeeded) continue;
+                AutomaticRetryDue[current.Id] = now.AddMinutes(1);
+                await QueueAutomaticAsync([current], current.RequestedBy, cancellationToken);
+            }
+            finally { gate.Release(); }
+        }
     }
 
     private async Task<MaterialCodeApplication> CreateHeaderApplicationAsync(

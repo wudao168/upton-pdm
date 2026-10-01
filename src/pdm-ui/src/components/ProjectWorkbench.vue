@@ -196,7 +196,7 @@ const resourceConflicts = computed(() => {
     projectIds: item.projectIds,
     taskCount: item.tasks.size,
     start: item.starts.sort()[0]!,
-    finish: item.finishes.sort().at(-1)!,
+    finish: item.finishes.sort().slice(-1)[0]!,
   })).sort((left, right) => right.projects.length - left.projects.length || left.name.localeCompare(right.name, 'zh-CN'))
 })
 
@@ -277,7 +277,7 @@ const timelineBounds = computed(() => {
   const bounds = filteredRows.value.map(projectBounds).filter((item): item is { start: string; finish: string } => Boolean(item.start && item.finish))
   if (!bounds.length) return { start: dateOffset(today.value, -7), finish: dateOffset(today.value, 56) }
   const start = bounds.map(item => item.start).sort()[0]!
-  const finish = bounds.map(item => item.finish).sort().at(-1)!
+  const finish = bounds.map(item => item.finish).sort().slice(-1)[0]!
   return { start: dateOffset(start, -3), finish: dateOffset(finish, 3) }
 })
 const timelineDays = computed(() => Math.max(1, dayDiff(timelineBounds.value.start, timelineBounds.value.finish) + 1))

@@ -423,9 +423,10 @@ public sealed class BomHeaderServiceTests
     private static BomHeaderService CreateService(
         out InMemoryMaterialRepository materials,
         out InMemoryPdmRepository repository,
-        out AvailableCodeClient u9Client)
+        out AvailableCodeClient u9Client,
+        TimeProvider? clock = null)
     {
-        var time = TimeProvider.System;
+        var time = clock ?? TimeProvider.System;
         repository = new InMemoryPdmRepository(time);
         materials = new InMemoryMaterialRepository(time);
         materials.SaveIntegrationConfigurationAsync(new(
@@ -436,6 +437,81 @@ public sealed class BomHeaderServiceTests
         var materialService = new MaterialService(materials, repository, new TestProtector(), u9Client, time);
         var syncBatches = new MaterialSyncBatchService(materials, repository, time);
         return new BomHeaderService(repository, materials, materialService, syncBatches, time);
+    }
+
+    [Fact]
+    public async Task AutomaticFailure_RetriesPeriodicallyAndRecoversOriginalApplications()
+    {
+        var time = new RetryTimeProvider();
+        var service = CreateService(out var materials, out _, out var client, time);
+        client.ReferenceFailure = new TimeoutException("U9C查询超时");
+        await service.EnsureApplicationsAfterBomApprovalAsync(ProjectId, ProjectBomHeaderKind.Standard, "admin", default);
+        Assert.True(await service.ProcessAutomaticQueueAsync(default));
+        var original = (await materials.ListMaterialCodeApplicationsAsync(ProjectId, null, default)).Select(item => item.Id).Order().ToArray();
+        Assert.False(await service.ProcessAutomaticQueueAsync(default));
+        time.Now = time.Now.AddSeconds(59);
+        Assert.False(await service.ProcessAutomaticQueueAsync(default));
+        time.Now = time.Now.AddSeconds(1);
+        Assert.True(await service.ProcessAutomaticQueueAsync(default));
+        client.ReferenceFailure = null;
+        Assert.False(await service.ProcessAutomaticQueueAsync(default));
+        time.Now = time.Now.AddMinutes(1);
+        Assert.True(await service.ProcessAutomaticQueueAsync(default));
+        Assert.Equal(original, (await materials.ListMaterialCodeApplicationsAsync(ProjectId, null, default)).Select(item => item.Id).Order().ToArray());
+        Assert.Equal(2, (await materials.ListSyncTasksAsync(default)).Count);
+        Assert.False(await service.ProcessAutomaticQueueAsync(default));
+    }
+
+    private sealed class RetryTimeProvider : TimeProvider
+    {
+        public DateTimeOffset Now { get; set; } = DateTimeOffset.UtcNow;
+        public override DateTimeOffset GetUtcNow() => Now;
+    }
+
+    [Fact]
+    public async Task FailedSyncBatch_RetriesOriginalTaskAndDoesNotDuplicateActiveBatch()
+    {
+        var time = new RetryTimeProvider();
+        var service = CreateService(out var materials, out _, out _, time);
+        await service.EnsureApplicationsAfterBomApprovalAsync(ProjectId, ProjectBomHeaderKind.Standard, "admin", default);
+        await service.ProcessAutomaticQueueAsync(default);
+        var tasks = (await materials.ListSyncTasksAsync(default)).Select(item => item.Id).Order().ToArray();
+        var initialBatchCount = (await materials.ListRecentSyncBatchesAsync("admin", 100, default)).Count;
+        var claim = await materials.ClaimNextSyncBatchItemAsync(time.Now, time.Now.AddMinutes(15), default);
+        Assert.NotNull(claim);
+        await materials.CompleteSyncBatchItemAsync(claim.Batch.Id, claim.Item.Id, MaterialSyncBatchItemStatus.Failed,
+            "U9暂时不可达", time.Now, default);
+        Assert.False(await service.ProcessAutomaticQueueAsync(default));
+        time.Now = time.Now.AddMinutes(1);
+        Assert.True(await service.ProcessAutomaticQueueAsync(default));
+        var batches = await materials.ListRecentSyncBatchesAsync("admin", 100, default);
+        Assert.Equal(initialBatchCount + 1, batches.Count);
+        Assert.Equal(2, batches.SelectMany(batch => batch.Items).Count(item => item.TaskId == claim.Item.TaskId));
+        Assert.Equal(tasks, (await materials.ListSyncTasksAsync(default)).Select(item => item.Id).Order().ToArray());
+        time.Now = time.Now.AddMinutes(2);
+        Assert.False(await service.ProcessAutomaticQueueAsync(default));
+        Assert.Equal(initialBatchCount + 1, (await materials.ListRecentSyncBatchesAsync("admin", 100, default)).Count);
+    }
+
+    [Fact]
+    public async Task ManualRetry_BeforeAutomaticRetryDoesNotDuplicateApplicationsOrTasks()
+    {
+        var time = new RetryTimeProvider();
+        var service = CreateService(out var materials, out _, out var client, time);
+        client.ReferenceFailure = new TimeoutException("U9超时");
+        await service.EnsureApplicationsAfterBomApprovalAsync(ProjectId, ProjectBomHeaderKind.Standard, "admin", default);
+        await service.ProcessAutomaticQueueAsync(default);
+        await service.ProcessAutomaticQueueAsync(default);
+        var header = (await service.ListAsync(ProjectId, "admin", UserRole.Administrator, default)).First();
+        client.ReferenceFailure = null;
+        await service.RetryAutomaticAsync(ProjectId, header.Kind, header.ApplicationId!.Value,
+            header.ApplicationRowVersion, "确认重试料号自动处理", "admin", UserRole.Administrator, default);
+        await service.ProcessAutomaticQueueAsync(default);
+        time.Now = time.Now.AddMinutes(1);
+        await service.ProcessAutomaticQueueAsync(default);
+        Assert.Equal(2, (await materials.ListMaterialCodeApplicationsAsync(ProjectId, null, default)).Count);
+        Assert.Equal(2, (await materials.ListSyncTasksAsync(default)).Count);
+        Assert.Equal(2, (await materials.ListRecentSyncBatchesAsync("admin", 100, default)).SelectMany(batch => batch.Items).Count());
     }
 
     [Fact]

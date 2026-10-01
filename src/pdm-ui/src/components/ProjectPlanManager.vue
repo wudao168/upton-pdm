@@ -31,6 +31,7 @@ import ProjectPlanTemplateSettings from './ProjectPlanTemplateSettings.vue'
 const props = defineProps<{
   project: ProjectSummary
   projects: ProjectSummary[]
+  requestedTaskId?: string
   companyName?: string
   token: string
   currentUsername: string
@@ -39,7 +40,7 @@ const props = defineProps<{
   canEdit: boolean
   canManageSystemTemplates: boolean
 }>()
-const emit = defineEmits<{ switchProject: [projectId: string] }>()
+const emit = defineEmits<{ switchProject: [projectId: string]; taskRequestHandled: [] }>()
 const displayUserName = useUserDisplayName()
 
 type Zoom = 'month' | 'week' | 'day'
@@ -517,7 +518,7 @@ function stageWindows(owner: ProjectPlan): StageWindow[] {
   const groups = planStageGroups(owner)
   return groups.map(stage => {
     const startDate = stage.tasks.map(task => task.plannedStart).sort()[0]!
-    const finishDate = stage.tasks.map(task => task.plannedFinish).sort().at(-1)!
+    const finishDate = stage.tasks.map(task => task.plannedFinish).sort().slice(-1)[0]!
     return { stage: stage.code, startDate, durationDays: dayDiff(startDate, finishDate) + 1 }
   })
 }
@@ -533,7 +534,7 @@ function redistributeTasksToStageWindows(owner: ProjectPlan, windows: StageWindo
     const window = windowByStage.get(group.code)
     if (!window) continue
     const stageStart = group.tasks.map(task => task.plannedStart).sort()[0]!
-    const stageFinish = group.tasks.map(task => task.plannedFinish).sort().at(-1)!
+    const stageFinish = group.tasks.map(task => task.plannedFinish).sort().slice(-1)[0]!
     const oldSpan = dayDiff(stageStart, stageFinish) + 1
     const newSpan = window.durationDays
     for (const task of group.tasks) {
@@ -557,7 +558,7 @@ function redistributeTasksToStageWindows(owner: ProjectPlan, windows: StageWindo
     visiting.add(task.id)
     const predecessors = task.predecessorTaskIds.flatMap(id => byId.get(id) ? [resolve(byId.get(id)!)] : [])
     const mapped = proposed.get(task.id) ?? task
-    const earliestStart = predecessors.length ? predecessors.map(item => addDays(item.plannedFinish, 1)).sort().at(-1)! : mapped.plannedStart
+    const earliestStart = predecessors.length ? predecessors.map(item => addDays(item.plannedFinish, 1)).sort().slice(-1)[0]! : mapped.plannedStart
     const plannedStart = mapped.plannedStart < earliestStart ? earliestStart : mapped.plannedStart
     const durationDays = mapped.isMilestone ? 0 : dayDiff(mapped.plannedStart, mapped.plannedFinish) + 1
     const plannedFinish = mapped.isMilestone ? plannedStart
@@ -578,11 +579,11 @@ function stageRows(owner: ProjectPlan, level: number): TimelineRow[] {
       key, name: stage.name, level, stage: stage.code, isStage: true, taskCount: stage.tasks.length,
       projectId: owner.projectId, plan: owner, completion: stage.progress,
       start: window?.startDate ?? stage.tasks.map(task => task.plannedStart).sort()[0],
-      finish: window ? addDays(window.startDate, window.durationDays - 1) : stage.tasks.map(task => task.plannedFinish).sort().at(-1),
+      finish: window ? addDays(window.startDate, window.durationDays - 1) : stage.tasks.map(task => task.plannedFinish).sort().slice(-1)[0],
       actualFinish: stage.tasks.every(task => task.completionPercent === 100 && task.actualFinish)
-        ? stage.tasks.map(task => task.actualFinish!).sort().at(-1) : undefined,
+        ? stage.tasks.map(task => task.actualFinish!).sort().slice(-1)[0] : undefined,
       baselineStart: stage.tasks.flatMap(task => task.baselineStart ? [task.baselineStart] : []).sort()[0],
-      baselineFinish: stage.tasks.flatMap(task => task.baselineFinish ? [task.baselineFinish] : []).sort().at(-1),
+      baselineFinish: stage.tasks.flatMap(task => task.baselineFinish ? [task.baselineFinish] : []).sort().slice(-1)[0],
     }]
     if (!collapsedStages.value.has(key)) rows.push(...stage.tasks.map(task => taskRow(task, owner, owner.projectId, level + 1)))
     return rows
@@ -643,7 +644,7 @@ const timelineBounds = computed(() => {
     return { start, end, days: dayDiff(start, end) + 1 }
   }
   const first = values.sort()[0]!
-  const last = values.sort().at(-1)!
+  const last = values.sort().slice(-1)[0]!
   const paddedStart = addDays(first, -2)
   const paddedEnd = addDays(last, 2)
   const start = zoom.value === 'day' ? paddedStart : isoWeekStart(paddedStart)
@@ -719,9 +720,9 @@ function deliveryFinish(owner: ProjectPlan) {
     .map(task => task.plannedFinish)
     .filter(Boolean)
     .sort()
-  return finishes.at(-1) ?? owner.plannedFinish ?? ''
+  return finishes.slice(-1)[0] ?? owner.plannedFinish ?? ''
 }
-const shippingDate = computed(() => displayedPlans.value.map(deliveryFinish).filter(Boolean).sort().at(-1) ?? '')
+const shippingDate = computed(() => displayedPlans.value.map(deliveryFinish).filter(Boolean).sort().slice(-1)[0] ?? '')
 const shippingDateLeft = computed(() => shippingDate.value ? dayDiff(timelineBounds.value.start, shippingDate.value) * dayWidth.value : -1)
 const shippingCountdownDays = computed(() => shippingDate.value ? dayDiff(todayDate.value, shippingDate.value) : null)
 const shippingCountdown = computed(() => {
@@ -752,7 +753,7 @@ const activeStageSummary = computed(() => {
   if (portfolioMode.value || plan.value?.manualStage || !plan.value) return stageLabel(activeStage.value)
   return activeStageGroups.value.length ? activeStageGroups.value.map(stage => stage.name).join('、') : stageLabel(activeStage.value, plan.value)
 })
-const activeStageFinish = computed(() => activeStageGroups.value.flatMap(stage => stage.tasks.map(task => task.plannedFinish)).filter(Boolean).sort().at(-1) ?? '')
+const activeStageFinish = computed(() => activeStageGroups.value.flatMap(stage => stage.tasks.map(task => task.plannedFinish)).filter(Boolean).sort().slice(-1)[0] ?? '')
 const activeStageCountdownDays = computed(() => activeStageFinish.value ? dayDiff(todayDate.value, activeStageFinish.value) : null)
 const activeStageCountdown = computed(() => {
   if (activeStageCountdownDays.value === null) return ''
@@ -947,6 +948,12 @@ async function load() {
     inheritedParentPlan.value = Boolean(!loadedPlan && loadedParentPlan)
     plan.value = loadedPlan ?? loadedParentPlan
     portfolio.value = loadedPortfolio
+    if (props.requestedTaskId) {
+      masterPlanMode.value = true
+      const row = timelineRows.value.find(item => item.task?.id === props.requestedTaskId)
+      if (row) openTask(row)
+      emit('taskRequestHandled')
+    }
     if (!generateForm.templateId) generateForm.templateId = loadedTemplates.find(item => item.isActive && (!item.projectTypeCode || item.projectTypeCode === props.project.projectTypeCode))?.id ?? loadedTemplates[0]?.id ?? ''
   } catch (reason) {
     error.value = reason instanceof Error ? reason.message : '项目计划加载失败'

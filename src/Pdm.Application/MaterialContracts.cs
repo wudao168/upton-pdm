@@ -381,6 +381,7 @@ public interface IMaterialRepository
     Task<MaterialSyncBatch> CreateSyncBatchAsync(MaterialSyncBatch batch, CancellationToken cancellationToken);
     Task<MaterialSyncBatch?> FindSyncBatchAsync(Guid batchId, CancellationToken cancellationToken);
     Task<IReadOnlyList<MaterialSyncBatch>> ListRecentSyncBatchesAsync(string actor, int limit, CancellationToken cancellationToken);
+    Task<IReadOnlyList<MaterialSyncBatchItem>> ListSyncBatchItemsForTaskAsync(Guid taskId, CancellationToken cancellationToken);
     Task<MaterialSyncBatchClaim?> ClaimNextSyncBatchItemAsync(DateTimeOffset now, DateTimeOffset leaseExpiresAt, CancellationToken cancellationToken);
     Task<MaterialSyncBatch> CompleteSyncBatchItemAsync(
         Guid batchId,

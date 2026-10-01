@@ -26,7 +26,7 @@ function dayDiff(start: string, finish: string) { return Math.round((dateValue(f
 function addDays(value: string, days: number) { const date = dateValue(value); date.setDate(date.getDate() + days); return isoDate(date) }
 function deliveryFinish(plan: ProjectPlan) {
   const deliveryStages = new Set((plan.stages ?? []).filter(stage => stage.participatesInDelivery !== false).map(stage => stage.code))
-  return plan.tasks.filter(task => !plan.stages?.length || deliveryStages.has(task.stage)).map(task => task.plannedFinish).filter(Boolean).sort().at(-1) ?? plan.plannedFinish
+  return plan.tasks.filter(task => !plan.stages?.length || deliveryStages.has(task.stage)).map(task => task.plannedFinish).filter(Boolean).sort().slice(-1)[0] ?? plan.plannedFinish
 }
 function assigneeName(item: ProjectPlanExportItem, username?: string) { return username ? item.assigneeDisplayNames?.[username] ?? username : '—' }
 function taskRow(item: ProjectPlanExportItem, task: ProjectPlanTask) {
@@ -43,22 +43,22 @@ export function projectPlanGanttModel(items: ProjectPlanExportItem[]): GanttMode
   const values = items.flatMap(item => item.plan.tasks.flatMap(task => [task.plannedStart, task.plannedFinish]))
   const fallback = isoDate(new Date())
   const first = values.filter(Boolean).sort()[0] ?? fallback
-  const last = values.filter(Boolean).sort().at(-1) ?? first
+  const last = values.filter(Boolean).sort().slice(-1)[0] ?? first
   const start = addDays(first, -2)
   const finish = addDays(last, 2)
   const rows: GanttRow[] = []
   for (const item of items) {
     const sortedTasks = [...item.plan.tasks].sort((left, right) => left.sortOrder - right.sortOrder)
-    rows.push({ kind: 'project', label: `${item.projectCode} · ${item.projectName}`, assignee: '', progress: sortedTasks.length ? Math.round(sortedTasks.reduce((sum, task) => sum + task.completionPercent, 0) / sortedTasks.length) : 0, start: sortedTasks.map(task => task.plannedStart).sort()[0] ?? item.plan.plannedStart, finish: sortedTasks.map(task => task.plannedFinish).sort().at(-1) ?? item.plan.plannedFinish })
+    rows.push({ kind: 'project', label: `${item.projectCode} · ${item.projectName}`, assignee: '', progress: sortedTasks.length ? Math.round(sortedTasks.reduce((sum, task) => sum + task.completionPercent, 0) / sortedTasks.length) : 0, start: sortedTasks.map(task => task.plannedStart).sort()[0] ?? item.plan.plannedStart, finish: sortedTasks.map(task => task.plannedFinish).sort().slice(-1)[0] ?? item.plan.plannedFinish })
     const stageCodes = item.plan.stages?.map(stage => stage.code) ?? [...new Set(sortedTasks.map(task => task.stage))]
     for (const stageCode of stageCodes) {
       const tasks = sortedTasks.filter(task => task.stage === stageCode)
       if (!tasks.length) continue
-      rows.push({ kind: 'stage', label: item.plan.stages?.find(stage => stage.code === stageCode)?.name ?? stageCode, assignee: '', progress: Math.round(tasks.reduce((sum, task) => sum + task.completionPercent, 0) / tasks.length), start: tasks.map(task => task.plannedStart).sort()[0]!, finish: tasks.map(task => task.plannedFinish).sort().at(-1)! })
+      rows.push({ kind: 'stage', label: item.plan.stages?.find(stage => stage.code === stageCode)?.name ?? stageCode, assignee: '', progress: Math.round(tasks.reduce((sum, task) => sum + task.completionPercent, 0) / tasks.length), start: tasks.map(task => task.plannedStart).sort()[0]!, finish: tasks.map(task => task.plannedFinish).sort().slice(-1)[0]! })
       rows.push(...tasks.map(task => ({ kind: 'task' as const, label: task.name, assignee: assigneeName(item, task.assignee), progress: task.completionPercent, start: task.plannedStart, finish: task.plannedFinish, milestone: task.isMilestone })))
     }
   }
-  return { start, finish, days: dayDiff(start, finish) + 1, rows, shippingDate: items.map(item => deliveryFinish(item.plan)).filter(Boolean).sort().at(-1) ?? '', today: isoDate(new Date()) }
+  return { start, finish, days: dayDiff(start, finish) + 1, rows, shippingDate: items.map(item => deliveryFinish(item.plan)).filter(Boolean).sort().slice(-1)[0] ?? '', today: isoDate(new Date()) }
 }
 
 function safeName(value: string) { return value.replace(/[\\/:*?"<>|]/g, '_') }
@@ -76,7 +76,7 @@ function calendarBands(model: GanttModel, part: 'year' | 'month') {
     const date = dateValue(addDays(model.start, day))
     const key = part === 'year' ? String(date.getFullYear()) : `${date.getFullYear()}-${date.getMonth()}`
     const label = part === 'year' ? `${date.getFullYear()}年` : `${date.getMonth() + 1}月`
-    const previous = bands.at(-1)
+    const previous = bands.slice(-1)[0]
     if (previous?.key === key) previous.end = day
     else bands.push({ label, start: day, end: day, key })
   }

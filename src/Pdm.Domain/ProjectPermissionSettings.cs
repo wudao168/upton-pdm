@@ -15,6 +15,7 @@ public sealed record ProjectPermissionSettings(IReadOnlyDictionary<string, IRead
 {
     public static readonly string[] Operations =
     [
+        PermissionCodes.ProjectBudgetView,
         PermissionCodes.ProjectEdit,
         PermissionCodes.ProjectDelete,
         PermissionCodes.ProjectChildCreate,
@@ -28,9 +29,9 @@ public sealed record ProjectPermissionSettings(IReadOnlyDictionary<string, IRead
 
     public static ProjectPermissionSettings Default { get; } = new(new Dictionary<string, IReadOnlyList<string>>
     {
-        [ProjectPermissionPositions.MainManager] = [PermissionCodes.ProjectEdit, PermissionCodes.ProjectChildCreate, PermissionCodes.ProjectDesignerAssign, PermissionCodes.ValidationPlanEdit, PermissionCodes.ReleaseManage],
-        [ProjectPermissionPositions.ChildManager] = [PermissionCodes.ProjectEdit, PermissionCodes.ProjectDesignerAssign, PermissionCodes.ValidationPlanEdit, PermissionCodes.ReleaseManage],
-        [ProjectPermissionPositions.MainDesigner] = [PermissionCodes.ProjectDesignerAssign, PermissionCodes.BomEdit, PermissionCodes.BomMechanicalEdit, PermissionCodes.BomElectricalEdit, PermissionCodes.ValidationPlanEdit, PermissionCodes.ReleaseManage],
+        [ProjectPermissionPositions.MainManager] = [PermissionCodes.ProjectBudgetView,PermissionCodes.ProjectEdit, PermissionCodes.ProjectChildCreate, PermissionCodes.ProjectDesignerAssign, PermissionCodes.ValidationPlanEdit, PermissionCodes.ReleaseManage],
+        [ProjectPermissionPositions.ChildManager] = [PermissionCodes.ProjectBudgetView,PermissionCodes.ProjectEdit, PermissionCodes.ProjectDesignerAssign, PermissionCodes.ValidationPlanEdit, PermissionCodes.ReleaseManage],
+        [ProjectPermissionPositions.MainDesigner] = [PermissionCodes.ProjectBudgetView,PermissionCodes.ProjectDesignerAssign, PermissionCodes.BomEdit, PermissionCodes.BomMechanicalEdit, PermissionCodes.BomElectricalEdit, PermissionCodes.ValidationPlanEdit, PermissionCodes.ReleaseManage],
         [ProjectPermissionPositions.Engineer] = [PermissionCodes.BomEdit, PermissionCodes.BomMechanicalEdit, PermissionCodes.BomElectricalEdit, PermissionCodes.ValidationPlanEdit, PermissionCodes.ReleaseManage],
         [ProjectPermissionPositions.Other] = []
     });

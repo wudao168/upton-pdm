@@ -1366,6 +1366,49 @@ public sealed class ApiSmokeTests : IClassFixture<PdmApiFactory>
         await repository.DecideApprovalAsync(approvalTaskId, "release-comment-tester", ApprovalDecision.Approved, "测试清理", false, null, CancellationToken.None);
     }
 
+    [Theory]
+    [InlineData(false, "PlanDocument")]
+    [InlineData(false, "Evidence")]
+    [InlineData(true, "PlanDocument")]
+    [InlineData(true, "Evidence")]
+    public async Task ValidationAttachmentUpload_AcceptsBrowserKindsThroughComplete(bool quality, string kind)
+    {
+        var vault = Path.Combine(Path.GetTempPath(), "pdm-validation-upload-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(vault);
+        try
+        {
+            using var scope = factory.Services.CreateScope();
+            var repository = scope.ServiceProvider.GetRequiredService<IPdmRepository>();
+            var project = await repository.CreateProjectAsync(new CreateProjectCommand("QA-" + Guid.NewGuid().ToString("N"), "验证计划上传测试", "admin", vault, vault), "admin", default);
+            var service = quality ? scope.ServiceProvider.GetRequiredKeyedService<ValidationPlanService>("quality") : scope.ServiceProvider.GetRequiredService<ValidationPlanService>();
+            var plans = quality ? scope.ServiceProvider.GetRequiredKeyedService<IValidationPlanRepository>("quality") : scope.ServiceProvider.GetRequiredService<IValidationPlanRepository>();
+            var plan = await service.SavePlanAsync(project.Id, new(null, null, [new(null, "验证上传", null, null, null, null, null, null, 1)]), "admin", UserRole.Administrator, default);
+            var task = new ValidationPlanApprovalTask(Guid.NewGuid(), plan.Id, 1, ApprovalStage.Approval, "审核", "admin", null, null, null, DateTimeOffset.UtcNow, null);
+            await plans.SubmitAsync(plan.Id, plan.RowVersion, "qa", 1, [task], "admin", DateTimeOffset.UtcNow, default);
+            await plans.DecideAsync(task.Id, "admin", ApprovalDecision.Approved, "通过", DateTimeOffset.UtcNow, default);
+            client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", CreateToken("admin", "Administrator"));
+            var prefix = quality ? "/api/quality" : "/api";
+            var content = Encoding.UTF8.GetBytes("%PDF-1.4\n%%EOF");
+            var start = await client.PostAsJsonAsync(prefix + $"/validation-plans/{plan.Id}/attachment-uploads", new { kind, fileName = "qa-upload.pdf", totalLength = content.Length, sha256 = Convert.ToHexString(SHA256.HashData(content)) });
+            Assert.True(start.IsSuccessStatusCode, await start.Content.ReadAsStringAsync());
+            using var session = JsonDocument.Parse(await start.Content.ReadAsStringAsync());
+            var id = session.RootElement.GetProperty("id").GetGuid();
+            var chunk = await client.PutAsync($"/api/uploads/sessions/{id}/chunks/0", new ByteArrayContent(content));
+            Assert.True(chunk.IsSuccessStatusCode, await chunk.Content.ReadAsStringAsync());
+            var completed = await client.PostAsJsonAsync(prefix + $"/validation-plans/{plan.Id}/attachment-uploads/{id}/complete", new { kind });
+            Assert.True(completed.IsSuccessStatusCode, await completed.Content.ReadAsStringAsync());
+            using var attachment = JsonDocument.Parse(await completed.Content.ReadAsStringAsync());
+            var attachmentId = attachment.RootElement.GetProperty("id").GetGuid();
+            Assert.Equal(content, await client.GetByteArrayAsync(prefix + $"/validation-plan-attachments/{attachmentId}/download"));
+        }
+        finally
+        {
+            if (!Path.GetFullPath(vault).StartsWith(Path.GetFullPath(Path.GetTempPath()), StringComparison.OrdinalIgnoreCase)) throw new InvalidOperationException("Invalid test vault");
+            foreach (var file in Directory.EnumerateFiles(vault, "*", SearchOption.AllDirectories)) File.SetAttributes(file, FileAttributes.Normal);
+            Directory.Delete(vault, true);
+        }
+    }
+
     private static string CreateToken(string username, string role)
     {
         var credentials = new SigningCredentials(

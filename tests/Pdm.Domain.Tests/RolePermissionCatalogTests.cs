@@ -26,7 +26,7 @@ public sealed class RolePermissionCatalogTests
     [Fact]
     public void InitialRoles_ContainConfirmedBusinessRolesWithLeastPrivilegeDefaults()
     {
-        Assert.Equal(27, RolePermissionCatalog.Roles.Count);
+        Assert.Equal(28, RolePermissionCatalog.Roles.Count);
         Assert.Equal(RolePermissionCatalog.Roles.Count, RolePermissionCatalog.Roles.Select(role => role.RoleCode).Distinct(StringComparer.OrdinalIgnoreCase).Count());
         Assert.Contains(RolePermissionCatalog.Roles, role => role.Name == "机械工程师" && role.IsSystem);
         Assert.Contains(RolePermissionCatalog.Roles, role => role.Name == "标准化主管" && role.IsSystem);
@@ -42,6 +42,10 @@ public sealed class RolePermissionCatalogTests
         Assert.DoesNotContain(PermissionCodes.DrawingReviewSubmit, drawingReviewer);
         Assert.DoesNotContain(PermissionCodes.ApprovalDecide, drawingReviewer);
 
+        var finance = RolePermissionCatalog.InitialPermissions("Finance", UserRole.ProductionViewer);
+        Assert.Contains(PermissionCodes.ProjectBudgetActualEdit, finance);
+        Assert.DoesNotContain(PermissionCodes.ProjectBudgetEdit, finance);
+        Assert.DoesNotContain(PermissionCodes.ProjectBudgetActualEdit, RolePermissionCatalog.InitialPermissions("PlanningManager", UserRole.PlanningManager));
         var mechanical = RolePermissionCatalog.InitialPermissions(UserRole.Engineer.ToString(), UserRole.Engineer);
         Assert.Contains(PermissionCodes.DrawingReviewSubmit, mechanical);
         Assert.Contains(PermissionCodes.DrawingReviewAnnotate, mechanical);

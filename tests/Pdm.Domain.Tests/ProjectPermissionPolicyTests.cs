@@ -29,6 +29,9 @@ public sealed class ProjectPermissionPolicyTests
         Assert.True(ProjectPermissionPolicy.Allows(child, root, "manager", settings, PermissionCodes.ValidationPlanEdit));
         Assert.True(ProjectPermissionPolicy.Allows(child, root, "collaborator", settings, PermissionCodes.ReleaseManage));
         Assert.True(ProjectPermissionPolicy.Allows(child, root, "child-manager", settings, PermissionCodes.ValidationPlanEdit));
+        Assert.True(ProjectPermissionPolicy.Allows(child, root, "manager", settings, PermissionCodes.ProjectBudgetView));
+        Assert.True(ProjectPermissionPolicy.Allows(child, root, "child-manager", settings, PermissionCodes.ProjectBudgetView));
+        Assert.False(ProjectPermissionPolicy.Allows(root, root, "child-manager", settings, PermissionCodes.ProjectBudgetView));
         Assert.False(ProjectPermissionPolicy.Allows(root, root, "child-manager", settings, PermissionCodes.ValidationPlanEdit));
         Assert.False(ProjectPermissionPolicy.Allows(child, root, "manager", settings, PermissionCodes.BomMechanicalEdit));
         Assert.False(ProjectPermissionPolicy.Allows(child, root, "other", settings, PermissionCodes.ValidationPlanEdit));

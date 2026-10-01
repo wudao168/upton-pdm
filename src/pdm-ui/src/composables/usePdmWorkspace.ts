@@ -437,7 +437,7 @@ export function usePdmWorkspace() {
     }
     try {
       versions.value = await listDocumentVersions(documentId, accessToken)
-      leftVersionId.value = left && versions.value.some(version => version.id === left) ? left : versions.value.at(-1)?.id ?? ''
+      leftVersionId.value = left && versions.value.some(version => version.id === left) ? left : versions.value.slice(-1)[0]?.id ?? ''
       rightVersionId.value = right && versions.value.some(version => version.id === right) ? right : versions.value[0]?.id ?? ''
       await compareVersions()
     } catch (error) {
@@ -1799,8 +1799,8 @@ export function usePdmWorkspace() {
   onMounted(async () => {
     window.addEventListener('pdm-session-expired', handleSessionExpired)
     window.addEventListener('focus', refreshOpenProjectOnFocus)
-    projectSummaryTimer = window.setInterval(() => void refreshProjectSummaries(), 15_000)
-    projectDocumentTimer = window.setInterval(() => void refreshOpenProjectDocuments(), 5_000)
+    projectSummaryTimer = window.setInterval(() => void refreshProjectSummaries(), 300_000)
+    projectDocumentTimer = window.setInterval(() => void refreshOpenProjectDocuments(), 300_000)
     window.addEventListener('pdm-open-version-compare', async (event) => {
       const detail = (event as CustomEvent<{ documentId?: string; leftVersionId?: string; rightVersionId?: string }>).detail
       if (!detail?.documentId) return

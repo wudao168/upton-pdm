@@ -13,6 +13,7 @@ const positions = [
   { key: 'Other', name: '其他人员', description: '同公司其他项目' },
 ] as const
 const groups = [
+  { name: '预算', permissions: [{ code: 'project.budget.view', name: '查看项目预算' }] },
   { name: '项目管理', permissions: [
     { code: 'project.edit', name: '编辑项目信息' },
     { code: 'project.delete', name: '删除空项目' },

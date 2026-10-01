@@ -83,18 +83,23 @@ const u9BlockerDrawerBlockers = ref<U9SyncBlocker[]>([])
 const blockerCategoryByKind: Record<VisibleBomKind, string> = { Standard: '标准件', NonStandard: '非标件', Electrical: '电气件' }
 let automaticPoll: ReturnType<typeof setInterval> | undefined
 let pollingAutomatic = false
+let automaticPollCount = 0
 onMounted(() => {
   automaticPoll = setInterval(async () => {
     if (pollingAutomatic || loading.value) return
-    const targets = Object.entries(detailCache.value).filter(([, detail]) =>
-      detail.headers.some(header => ['ApprovalQueued', 'Running', 'Queued'].includes(header.automaticStatus ?? '')))
+    const checkBoms = ++automaticPollCount % 6 === 0
+    const targets = Object.entries(detailCache.value).filter(([, detail]) => checkBoms ||
+      detail.headers.some(header => ['ApprovalQueued', 'Running', 'Queued', 'Failed', 'WaitingRetry'].includes(header.automaticStatus ?? '')))
     if (!targets.length) return
     pollingAutomatic = true
     try {
       for (const [projectId, detail] of targets) {
-        const headers = await listProjectBomHeaders(projectId, props.token)
-        if (detailCache.value[projectId] === detail) detail.headers = headers
+        try {
+          const headers = await listProjectBomHeaders(projectId, props.token)
+          if (detailCache.value[projectId] === detail) detail.headers = headers
+        } catch { /* 单个项目读取失败不阻止其余项目更新。 */ }
       }
+      if (checkBoms) await refreshU9BomStates()
     } catch { /* 网络恢复后继续获取后台状态，不触发业务重试。 */ }
     finally { pollingAutomatic = false }
   }, 5000)
@@ -288,6 +293,7 @@ async function refreshU9BomStates() {
   const updates = await Promise.all(rows.map(async row => {
     try {
       const preview = await previewProjectBomU9Sync(row.project.id, row.headerKind, props.token)
+      u9Blockers.value = { ...u9Blockers.value, [row.key]: [] }
       return [row.key, viewStateFromPreview(preview)] as const
     } catch {
       const blockers = await findU9Blockers(row.project.id, row.headerKind)

@@ -10,7 +10,7 @@ public static class ValidationPlanWorkbook
 {
     private static readonly double[] ColumnWidths = [8, 16, 17, 17, 17, 17, 17, 17, 17, 17, 17];
 
-    public static byte[] Write(ValidationPlanExportData export)
+    public static byte[] Write(ValidationPlanExportData export, string title = "验证计划")
     {
         using var output = new MemoryStream();
         using (var archive = new ZipArchive(output, ZipArchiveMode.Create, true))
@@ -31,10 +31,10 @@ public static class ValidationPlanWorkbook
                   <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>
                 </Relationships>
                 """);
-            WriteText(archive, "xl/workbook.xml", """
+            WriteText(archive, "xl/workbook.xml", $"""
                 <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
                 <workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
-                  <sheets><sheet name="项目验证计划" sheetId="1" r:id="rId1"/></sheets>
+                  <sheets><sheet name="项目{title}" sheetId="1" r:id="rId1"/></sheets>
                 </workbook>
                 """);
             WriteText(archive, "xl/_rels/workbook.xml.rels", """
@@ -45,15 +45,15 @@ public static class ValidationPlanWorkbook
                 </Relationships>
                 """);
             WriteText(archive, "xl/styles.xml", StylesXml);
-            WriteWorksheet(archive, export);
+            WriteWorksheet(archive, export, title);
         }
         return output.ToArray();
     }
 
-    public static string FileName(ValidationPlanExportData export) =>
-        $"{Sanitize(export.Project.Code)}_验证计划_{export.ExportedAt:yyyyMMdd_HHmmss}.xlsx";
+    public static string FileName(ValidationPlanExportData export, string title = "验证计划") =>
+        $"{Sanitize(export.Project.Code)}_{title}_{export.ExportedAt:yyyyMMdd_HHmmss}.xlsx";
 
-    private static void WriteWorksheet(ZipArchive archive, ValidationPlanExportData export)
+    private static void WriteWorksheet(ZipArchive archive, ValidationPlanExportData export, string title)
     {
         var entry = archive.CreateEntry("xl/worksheets/sheet1.xml", CompressionLevel.Optimal);
         using var stream = entry.Open();
@@ -85,7 +85,7 @@ public static class ValidationPlanWorkbook
         }
         writer.WriteEndElement();
         writer.WriteStartElement("sheetData");
-        WriteRow(writer, 1, 34, 1, ["项目验证计划"]);
+        WriteRow(writer, 1, 34, 1, [$"项目{title}"]);
         WriteRow(writer, 2, 48, 2, ["说明：本计划由项目成员线上维护；需要数据支撑的验证项应填写实际数据。导出文件中的评审与会签栏用于打印签字。"]);
         WriteRow(writer, 3, 28, 3, ["编制", export.Plan.PreparedBy ?? export.Plan.UpdatedBy, null, null, "审核", export.ReviewPerson, null, null, "批准", export.ApprovalPerson, null]);
         WriteRow(writer, 4, 28, 3, ["项目号", export.Project.Code, null, null, "项目名称", export.Project.Name, null, null, "验证日期", Date(export.Plan.ValidationDate), null]);
@@ -117,7 +117,7 @@ public static class ValidationPlanWorkbook
             rowNumber++;
         }
 
-        WriteRow(writer, rowNumber, 34, 7, ["评审结果", "□ 本次项目验证计划通过", null, null, null, null, "□ 本次项目验证计划不通过"]);
+        WriteRow(writer, rowNumber, 34, 7, ["评审结果", $"□ 本次项目{title}通过", null, null, null, null, $"□ 本次项目{title}不通过"]);
         merges.Add($"B{rowNumber}:F{rowNumber}");
         merges.Add($"G{rowNumber}:K{rowNumber}");
         rowNumber++;

@@ -37,6 +37,35 @@ describe('BomHierarchyOverview', () => {
   })
   afterEach(() => vi.restoreAllMocks())
 
+  it('automatically refreshes failed applications and rechecks BOM after U9 recovers without browser writes', async () => {
+    vi.useFakeTimers()
+    const root = project({ id: 'root', code: 'P700013', name: '项目' })
+    const header = { projectId: 'root', kind: 'Master', materialId: 'material', materialCode: '03011000001', rowVersion: 1, automaticStatus: 'Failed' }
+    api.listBom.mockResolvedValue([])
+    api.listBomVersions.mockResolvedValue([])
+    api.listProjectBomHeaders.mockResolvedValue([header])
+    api.previewProjectBomU9Sync.mockRejectedValue(new Error('U9不可达'))
+    const wrapper = mount(BomHierarchyOverview, { props: { project: root, projects: [root], token: 'token', editable: true } })
+    try {
+      await flushPromises()
+      expect(wrapper.text()).toContain('检查失败')
+      api.listProjectBomHeaders.mockResolvedValue([{ ...header, automaticStatus: 'Completed' }])
+      await vi.advanceTimersByTimeAsync(5000)
+      await flushPromises()
+      expect(wrapper.text()).toContain('已自动批准')
+      api.previewProjectBomU9Sync.mockResolvedValue({ state: 'UpToDate', componentCount: 1 })
+      await vi.advanceTimersByTimeAsync(25000)
+      await flushPromises()
+      expect(wrapper.text()).toContain('已同步')
+      expect(wrapper.text()).not.toContain('检查失败')
+      expect(api.retryProjectBomHeaderAutomatic).not.toHaveBeenCalled()
+      expect(api.executeProjectBomU9Sync).not.toHaveBeenCalled()
+    } finally {
+      wrapper.unmount()
+      vi.useRealTimers()
+    }
+  })
+
   it('keeps the healthy projects visible when one child BOM version request fails', async () => {
     const root = project({ id: 'root', code: 'P700004', name: '主项目' })
     const first = project({ id: 'first', code: 'P700004-1', name: '子项目一', parentProjectId: 'root', rootProjectId: 'root' })

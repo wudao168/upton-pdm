@@ -6,20 +6,22 @@ namespace Upton.Pdm.Infrastructure;
 
 public sealed class ValidationPlanFileArchive(
     IPdmRepository repository,
-    IProjectFileRepository files) : IValidationPlanFileArchive
+    IProjectFileRepository files,
+    bool qualityAcceptance = false) : IValidationPlanFileArchive
 {
-    private const string FolderTemplateKey = "acceptance.validation-plan";
+    private string FolderTemplateKey => qualityAcceptance ? "acceptance.quality-acceptance" : "acceptance.validation-plan";
+    private string Title => qualityAcceptance ? "质量验收" : "验证计划";
 
     public async Task ArchiveWorkbookAsync(ValidationPlanExportData export, string actor, CancellationToken cancellationToken)
     {
         var folder = await FindFolderAsync(export.Project.Id, actor, cancellationToken);
         var effectiveAt = export.Plan.EffectiveAt ?? export.ExportedAt;
-        var fileName = $"{SafeFileName(export.Project.Code)}_验证计划_R{export.Plan.RevisionNumber:D3}_{effectiveAt:yyyyMMdd_HHmmss}.xlsx";
+        var fileName = $"{SafeFileName(export.Project.Code)}_{Title}_R{export.Plan.RevisionNumber:D3}_{effectiveAt:yyyyMMdd_HHmmss}.xlsx";
         if (await ContainsAsync(folder, fileName, null, cancellationToken)) return;
 
-        var content = ValidationPlanWorkbook.Write(export);
+        var content = ValidationPlanWorkbook.Write(export, Title);
         var versionId = Guid.NewGuid();
-        var relativePath = Path.Combine("验收资料", "验证计划", ".versions", $"R{export.Plan.RevisionNumber:D3}", "Generated", versionId.ToString("N"), fileName);
+        var relativePath = Path.Combine("验收资料", Title, ".versions", $"R{export.Plan.RevisionNumber:D3}", "Generated", versionId.ToString("N"), fileName);
         var absolutePath = StorageLocationPolicy.ResolveUnder(export.Project.VaultLocation, relativePath);
         Directory.CreateDirectory(Path.GetDirectoryName(absolutePath)!);
         var temporaryPath = absolutePath + ".tmp";
@@ -57,6 +59,7 @@ public sealed class ValidationPlanFileArchive(
 
     private async Task<ProjectFolder> FindFolderAsync(Guid projectId, string actor, CancellationToken cancellationToken)
     {
+        await repository.EnsureProjectFolderTreeAsync(projectId, cancellationToken);
         var folders = await repository.ListProjectFoldersAsync(projectId, actor, UserRole.Administrator, cancellationToken);
         return folders.FirstOrDefault(item => string.Equals(item.TemplateKey, FolderTemplateKey, StringComparison.OrdinalIgnoreCase))
             ?? throw new PdmNotFoundException("项目的验证计划归档文件夹不存在。");

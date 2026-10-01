@@ -32,9 +32,9 @@ const draft = {
 } as ProjectPlan
 const template = { ...metadata, id: 'template', name: '设备模板', isActive: true, createdBy: 'admin', rowVersion: 1, stages, tasks: [{ id: 'tt', name: '方案检查', stage: 'custom-review', durationRatio: .5, predecessorSortOrders: [], weight: 1, isRequired: true, isMilestone: false, defaultAssigneeRole: 'ProjectManager', sortOrder: 10 }] } as ProjectPlanTemplate
 const wrappers: ReturnType<typeof mount>[] = []
-function render(project = child) {
+function render(project = child, requestedTaskId?: string) {
   const names: Record<string, string> = { pm: '刘鹏搏', designer: '马文豪' }
-  const wrapper = mount(ProjectPlanManager, { attachTo: document.body, props: { project, projects: [root, child, target, approvedTarget], companyName: '昆山阿普顿自动化系统有限公司', token: 'test', currentUsername: 'pm', currentRole: 'ProjectManager', developer: false, canEdit: true, canManageSystemTemplates: false }, global: { plugins: [ElementPlus], provide: { [userDisplayNameKey as symbol]: (username?: string | null, emptyText = '—') => username ? names[username] ?? username : emptyText } } })
+  const wrapper = mount(ProjectPlanManager, { attachTo: document.body, props: { requestedTaskId, project, projects: [root, child, target, approvedTarget], companyName: '昆山阿普顿自动化系统有限公司', token: 'test', currentUsername: 'pm', currentRole: 'ProjectManager', developer: false, canEdit: true, canManageSystemTemplates: false }, global: { plugins: [ElementPlus], provide: { [userDisplayNameKey as symbol]: (username?: string | null, emptyText = '—') => username ? names[username] ?? username : emptyText } } })
   wrappers.push(wrapper)
   return wrapper
 }
@@ -64,6 +64,15 @@ beforeEach(() => {
 afterEach(() => { wrappers.splice(0).forEach(item => item.unmount()); document.body.innerHTML = ''; vi.restoreAllMocks() })
 
 describe('项目计划审批和配置', () => {
+  it('从概览节点进入主项目时打开对应任务而非子项目汇总', async () => {
+    const rootPlan = { ...structuredClone(draft), projectId: 'root' }
+    api.readProjectPlan.mockResolvedValue(rootPlan)
+    const wrapper = render(root, 'task')
+    await flushPromises()
+    expect(document.body.querySelector('[aria-label="任务名称"]')).not.toBeNull()
+    expect(wrapper.emitted('taskRequestHandled')).toHaveLength(1)
+  })
+
   it('可按主项目或多个子项目导出 Excel 和 PDF', async () => {
     const rootPlan = { ...structuredClone(draft), id: 'root-plan', projectId: 'root', tasks: [{ ...structuredClone(draft.tasks[0]!), assignee: 'pm' }] }
     api.readProjectPlan.mockResolvedValue(rootPlan)

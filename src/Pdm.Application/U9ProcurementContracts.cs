@@ -39,6 +39,7 @@ public sealed record U9ProcurementSourceRow(
     DateTimeOffset? DeliveryDate,
     DateTimeOffset? LatestDeliveryDate)
 {
+    public decimal? OrderNetAmount { get; init; }
     public string? SourcePoLineId { get; init; }
     public DateTimeOffset? SourceCreatedAt { get; init; }
     public string? BuyerName { get; init; }
@@ -110,6 +111,7 @@ public sealed record U9ProcurementSnapshotRow(
     DateTimeOffset? LatestDeliveryDate,
     DateTimeOffset RefreshedAt)
 {
+    public decimal? OrderNetAmount { get; init; }
     public string? SourcePoLineId { get; init; }
     public DateTimeOffset? SourceCreatedAt { get; init; }
     public string? BuyerName { get; init; }

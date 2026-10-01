@@ -16,11 +16,11 @@ public sealed class U9CreationReadbackTests
     {
         var handler = new Responses(
             """{"ResCode":0,"Data":[{"m_iD":101,"m_code":"TEST","m_mfgInfo":{"m_designationRule":1}}]}""",
-            JsonSerializer.Serialize(new { ResCode = 0, Data = new[] { new { ItemId = 101, IsExpandByOrder = value } } }));
+            JsonSerializer.Serialize(new { ResCode = 0, Data = new[] { new { ID = 101, MfgInfo = new { IsExpandByOrder = value } } } }));
         var result = await new U9OpenApiClient(new HttpClient(handler)).QueryItemsAsync(
             "http://u9.test", U9MaterialContract.QueryPath, "test-token", "[]", default);
         Assert.Equal(value.ToString().ToLowerInvariant(), Assert.Single(result.Items).CreationAttributes["MfgInfo.IsExpandByOrder"]);
-        Assert.Contains("i.ID IN (101)", handler.LastBody);
+        Assert.Contains("MfgInfo.IsExpandByOrder", handler.LastBody);
         Assert.Equal(2, handler.Calls);
     }
 
@@ -41,7 +41,7 @@ public sealed class U9CreationReadbackTests
     {
         var handler = new Responses(
             """{"ResCode":0,"Data":[{"m_itemMaster":{"m_iD":101,"m_code":"TEST"},"m_bOMVersionCode":"A1","m_lot":1,"m_bOMComponents":[{"m_sequence":10,"m_issueOrg":{"m_code":"7"}}]}]}""",
-            JsonSerializer.Serialize(new { ResCode = 0, Data = new[] { new { ItemId = 101, BOMVersionCode = "A1", Lot = 1, Sequence = 10, IsIssueOrgFixed = value, IsCharge = value, CostElementCode = "No101" } } }));
+            JsonSerializer.Serialize(new { ResCode = 0, Data = new[] { new { BOMMaster = new { ItemMaster = new { ID = 101 }, BOMVersionCode = "A1", Lot = 1 }, Sequence = 10, IsIssueOrgFixed = value, IsCharge = value, CostElement = new { Code = "No101" } } } }));
         var result = await new U9OpenApiClient(new HttpClient(handler)).QueryBomsAsync(
             "http://u9.test", U9BomContract.QueryPath, "test-token", "[]", default);
         var component = Assert.Single(Assert.Single(result.Boms).Components);
@@ -49,8 +49,8 @@ public sealed class U9CreationReadbackTests
         Assert.Equal(value, component.IsCharge);
         Assert.Equal("No101", component.CostElementCode);
         Assert.Equal("7", component.IssueOrgCode);
-        Assert.Contains("b.ItemMaster IN (101)", handler.LastBody);
-        Assert.Contains("CBO_CostElement", handler.LastBody);
+        Assert.Contains("BOMMaster.ItemMaster.ID", handler.LastBody);
+        Assert.Contains("CostElement.Code", handler.LastBody);
     }
 
     [Fact]

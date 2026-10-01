@@ -7,6 +7,20 @@ namespace Upton.Pdm.Tests;
 public sealed class U9ProcurementServiceTests
 {
     [Fact]
+    public async Task SettingsUpgradeRetiredSqlPathWithoutChangingSyncSchedule()
+    {
+        var time = TimeProvider.System;
+        var procurement = new InMemoryU9ProcurementRepository();
+        var original = await procurement.GetSettingsAsync(default);
+        var service = new U9ProcurementService(procurement, new InMemoryMaterialRepository(time),
+            new InMemoryPdmRepository(time), new InMemoryProjectPlanningRepository(), null!, null!, null!, time);
+        var settings = await service.GetSettingsAsync("admin", UserRole.Administrator, default);
+        Assert.Equal("/webapi/CommonEntity/Query", settings.QueryPath);
+        Assert.Equal(original.AutoSyncEnabled, settings.AutoSyncEnabled);
+        Assert.Equal(original.SyncIntervalMinutes, settings.SyncIntervalMinutes);
+    }
+
+    [Fact]
     public async Task ListProjectUsesCurrentImpactStageWithoutChangingPublishedDemand()
     {
         var time = TimeProvider.System;

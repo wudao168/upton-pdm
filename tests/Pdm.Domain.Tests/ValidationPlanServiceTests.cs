@@ -9,6 +9,94 @@ namespace Pdm.Domain.Tests;
 public sealed class ValidationPlanServiceTests
 {
     [Fact]
+    public async Task QualityAcceptance_IsIndependentFromValidationPlan()
+    {
+        var (validation, _, repository, storage, project) = await CreateFixtureAsync();
+        var quality = new ValidationPlanService(new InMemoryValidationPlanRepository(), repository, storage,
+            new StubRecognitionService(), new RecordingValidationPlanFileArchive(), TimeProvider.System, true);
+        await validation.SaveCategoryAsync(null, new("验证模板", 1, true, null), "developer", UserRole.Administrator, default);
+        await validation.SavePlanAsync(project.Id, new(null, null, [new(null, "验证内容", null, null, null, null, null, null, 1)]), "developer", UserRole.Administrator, default);
+        Assert.Empty((await quality.ListCatalogAsync(true, "developer", UserRole.Administrator, default)).Categories);
+        Assert.Null(await quality.GetPlanAsync(project.Id, "developer", UserRole.Administrator, default));
+        var acceptance = await quality.SavePlanAsync(project.Id, new(null, null, [new(null, "质量验收内容", null, null, null, null, null, null, 1)]), "developer", UserRole.Administrator, default);
+        Assert.Equal("质量验收内容", Assert.Single(acceptance.Items).ValidationContent);
+        Assert.Equal("验证内容", Assert.Single((await validation.GetPlanAsync(project.Id, "developer", UserRole.Administrator, default))!.Items).ValidationContent);
+    }
+
+    [Fact]
+    public async Task InspectionRecords_AllowMissingStationAndMultipleFiles()
+    {
+        var (_, _, repository, storage, project) = await CreateFixtureAsync();
+        var records = new InMemoryQualityInspectionRepository();
+        var service = new QualityInspectionService(records, repository, storage);
+        Assert.Empty(await service.ListAsync(project.Id, "developer", UserRole.Administrator, default));
+        var session = await service.StartAsync(project.Id, "平行度.pdf", 10, new string('A', 64), "developer", UserRole.Administrator, default);
+        Assert.Equal("", (await service.CompleteAsync(project.Id, session.Id, "assembly", "", "平行度", null, "developer", UserRole.Administrator, default)).Station);
+        await service.CompleteAsync(project.Id, session.Id, "assembly", "导轨站", "平行度", "0.01mm", "developer", UserRole.Administrator, default);
+        var second = await service.StartAsync(project.Id, "跳动.pdf", 10, new string('B', 64), "developer", UserRole.Administrator, default);
+        await service.CompleteAsync(project.Id, second.Id, "assembly", "导轨站", "跳动", null, "developer", UserRole.Administrator, default);
+        var saved = await service.ListAsync(project.Id, "developer", UserRole.Administrator, default);
+        Assert.Equal(3, saved.Count);
+        Assert.Equal(2, saved.Count(row => row.Station == "导轨站"));
+        Assert.Contains(saved, row => row.Remark == "0.01mm");
+        Assert.Contains("装配验收", storage.LastCompletedRelativePath);
+        Assert.Empty(await records.ListAsync(Guid.NewGuid(), default));
+    }
+
+    [Theory]
+    [InlineData("preAcceptance", "预验收")]
+    [InlineData("finalAcceptance", "终验收")]
+    public async Task CustomerAcceptance_SavesSeparateRecords(string kind, string folder)
+    {
+        var (_, _, repository, storage, project) = await CreateFixtureAsync();
+        var service = new QualityInspectionService(new InMemoryQualityInspectionRepository(), repository, storage);
+        var session = await service.StartAsync(project.Id, "报告.pdf", 10, new string('A', 64), "developer", UserRole.Administrator, default, kind);
+        var record = await service.CompleteAsync(project.Id, session.Id, kind, "", "客户验收报告", "确认", "developer", UserRole.Administrator, default);
+        Assert.Equal(kind, record.Kind);
+        Assert.Contains(folder, storage.LastCompletedRelativePath);
+        Assert.Equal("确认", Assert.Single(await service.ListAsync(project.Id, "developer", UserRole.Administrator, default)).Remark);
+    }
+
+    [Theory]
+    [InlineData("ProductionManager", "assembly")]
+    [InlineData("ProductionAssistant", "incoming")]
+    [InlineData("TechnicalAssistant", "preAcceptance")]
+    public async Task QualityDefaultUploaders_AllowResponsibleRoles(string roleCode, string kind)
+    {
+        var (_, _, repository, _, project) = await CreateFixtureAsync();
+        await repository.CreateUserAsync(new UserAccount(Guid.NewGuid(), "responsible", "负责人员", "unused", UserRole.ProductionViewer, true, RoleCode: roleCode), default);
+        Assert.True(await QualityUploadPolicy.CanAsync(repository, project.Id, kind, "responsible", UserRole.ProductionViewer, default));
+        Assert.False(await QualityUploadPolicy.CanAsync(repository, project.Id, "quality", "responsible", UserRole.ProductionViewer, default));
+    }
+
+    [Fact]
+    public async Task QualityDefaultUploaders_RespectDepartmentAndProjectAccess()
+    {
+        var (_, _, repository, _, project) = await CreateFixtureAsync();
+        var company = (await repository.GetOrganizationDirectoryAsync(default)).Organizations.First();
+        var unit = await repository.SaveOrganizationUnitAsync(new(null, company.Id, null, "QA", "质量部", OrganizationUnitKind.Department, true, 10), default);
+        await repository.CreateUserAsync(new UserAccount(Guid.NewGuid(), "quality-user", "质量人员", "unused", UserRole.ProductionViewer, true), default);
+        await repository.SetOrganizationMembershipsAsync("quality-user", [unit.Id], unit.Id, default);
+        // Reading project content is still required even for a default uploader.
+        var readable = await repository.HasProjectContentReadAccessAsync(project.Id, "quality-user", UserRole.ProductionViewer, default);
+        Assert.True(readable);
+        Assert.Equal(readable, await QualityUploadPolicy.CanAsync(repository, project.Id, "quality", "quality-user", UserRole.ProductionViewer, default));
+        Assert.False(await QualityUploadPolicy.CanAsync(repository, project.Id, "assembly", "quality-user", UserRole.ProductionViewer, default));
+        Assert.False(await QualityUploadPolicy.CanAsync(repository, Guid.NewGuid(), "quality", "quality-user", UserRole.ProductionViewer, default));
+    }
+
+    [Fact]
+    public async Task InspectionUpload_RejectsWrongProjectAndUnsupportedFile()
+    {
+        var (_, _, repository, storage, project) = await CreateFixtureAsync();
+        var service = new QualityInspectionService(new InMemoryQualityInspectionRepository(), repository, storage);
+        await Assert.ThrowsAsync<PdmRuleException>(() => service.StartAsync(project.Id, "file.exe", 10, new string('A', 64), "developer", UserRole.Administrator, default));
+        var wrong = await storage.StartUploadAsync(Guid.NewGuid(), "report.pdf", 10, new string('A', 64), default);
+        await Assert.ThrowsAsync<PdmConflictException>(() => service.CompleteAsync(project.Id, wrong.Id, "incoming", null, "三坐标", null, "developer", UserRole.Administrator, default));
+        await Assert.ThrowsAsync<UnauthorizedAccessException>(() => service.StartAsync(project.Id, "report.pdf", 10, new string('A', 64), "outsider", UserRole.ProductionViewer, default));
+    }
+
+    [Fact]
     public async Task SavePlanAsync_AllowsManualValidationItem()
     {
         var (service, _, _, _, project) = await CreateFixtureAsync();

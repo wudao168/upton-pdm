@@ -7,7 +7,7 @@ using Upton.Pdm.Domain;
 
 namespace Upton.Pdm.Infrastructure;
 
-public sealed class U9OpenApiClient(HttpClient httpClient) : IU9OpenApiClient, IU9InventoryClient, IU9ProcurementClient, IU9BomQueryClient
+public sealed partial class U9OpenApiClient(HttpClient httpClient) : IU9OpenApiClient, IU9InventoryClient, IU9ProcurementClient, IU9BomQueryClient
 {
     public async Task<U9AuthenticationResult> AuthenticateAsync(
         U9AuthenticationRequest request,
@@ -85,6 +85,8 @@ public sealed class U9OpenApiClient(HttpClient httpClient) : IU9OpenApiClient, I
         IReadOnlyCollection<string> projectCodes,
         CancellationToken cancellationToken)
     {
+        if (path.TrimEnd('/').Equals("/webapi/CommonEntity/Query", StringComparison.OrdinalIgnoreCase))
+            return await QueryProcurementEntitiesAsync(baseUrl, token, organizationCode, projectCodes, cancellationToken);
         var normalizedCodes = projectCodes
             .Where(code => !string.IsNullOrWhiteSpace(code))
             .Select(code => code.Trim())
@@ -125,7 +127,8 @@ public sealed class U9OpenApiClient(HttpClient httpClient) : IU9OpenApiClient, I
                 CAST(NULL AS DATETIME) AS MovementDate,
                 CAST(NULL AS DECIMAL(24,9)) AS MovementQuantity,
                 CAST(NULL AS NVARCHAR(100)) AS MovementUnit,
-                CAST(NULL AS VARCHAR(80)) AS SourcePoLineId
+                CAST(NULL AS VARCHAR(80)) AS SourcePoLineId,
+                CAST(NULL AS DECIMAL(24,9)) AS OrderNetAmount
             FROM PR_PR pr
             INNER JOIN PR_PRLine line ON line.PR=pr.ID
             INNER JOIN Base_Organization org ON org.ID=pr.Org
@@ -165,7 +168,8 @@ public sealed class U9OpenApiClient(HttpClient httpClient) : IU9OpenApiClient, I
                 CAST(NULL AS DATETIME) AS MovementDate,
                 CAST(NULL AS DECIMAL(24,9)) AS MovementQuantity,
                 CAST(NULL AS NVARCHAR(100)) AS MovementUnit,
-                CAST(NULL AS VARCHAR(80)) AS SourcePoLineId
+                CAST(NULL AS VARCHAR(80)) AS SourcePoLineId,
+                pol.NetMnyAC AS OrderNetAmount
             FROM PM_PurchaseOrder po
             INNER JOIN PM_POLine pol ON pol.PurchaseOrder=po.ID
             INNER JOIN PM_PODocType documentType ON documentType.ID=po.DocumentType
@@ -383,13 +387,13 @@ public sealed class U9OpenApiClient(HttpClient httpClient) : IU9OpenApiClient, I
         if (responseCode == 0 && itemIds.Length > 0)
         {
             var flags = await QueryCreationFlagsAsync(baseUrl, token,
-                $"SELECT i.ID AS ItemId,m.IsExpandByOrder FROM CBO_ItemMaster i JOIN CBO_MfgInfo m ON m.ID=i.MfgInfo WHERE i.ID IN ({string.Join(",", itemIds)})", cancellationToken);
+                "UFIDA.U9.CBO.SCM.Item.ItemMaster", ["ID", "MfgInfo.IsExpandByOrder"], "ID", itemIds, cancellationToken);
             items = items.Select(item =>
             {
-                var matches = flags.Where(row => ReadString(row, "ItemId") == item.U9ItemId).ToArray();
+                var matches = flags.Where(row => ReadString(row, "ID") == item.U9ItemId).ToArray();
                 var attributes = new Dictionary<string, string?>(item.CreationAttributes);
                 attributes["MfgInfo.IsExpandByOrder"] = matches.Length == 1
-                    ? ReadBool(matches[0], "IsExpandByOrder")?.ToString().ToLowerInvariant() : null;
+                    ? ReadEntityString(matches[0], "MfgInfo", "IsExpandByOrder")?.ToLowerInvariant() : null;
                 return item with { CreationAttributes = attributes };
             }).ToArray();
         }
@@ -493,33 +497,50 @@ public sealed class U9OpenApiClient(HttpClient httpClient) : IU9OpenApiClient, I
         if (responseCode == 0 && motherIds.Length > 0 && boms.Any(bom => bom.Components.Count > 0))
         {
             var flags = await QueryCreationFlagsAsync(baseUrl, token,
-                $"SELECT b.ItemMaster AS ItemId,b.BOMVersionCode,b.Lot,c.Sequence,c.IsIssueOrgFixed,c.IsCharge,e.Code AS CostElementCode FROM CBO_BOMMaster b JOIN CBO_BOMComponent c ON c.BOMMaster=b.ID LEFT JOIN CBO_CostElement e ON e.ID=c.CostElement WHERE b.ItemMaster IN ({string.Join(",", motherIds)})", cancellationToken);
+                "UFIDA.U9.CBO.MFG.BOM.BOMComponent",
+                ["BOMMaster.ItemMaster.ID", "BOMMaster.BOMVersionCode", "BOMMaster.Lot", "Sequence", "IsIssueOrgFixed", "IsCharge", "CostElement.Code"],
+                "BOMMaster.ItemMaster.ID", motherIds, cancellationToken);
             boms = boms.Select(bom => bom with { Components = bom.Components.Select(component =>
             {
-                var matches = flags.Where(row => ReadString(row, "ItemId") == bom.ItemId
-                    && ReadString(row, "BOMVersionCode") == bom.BomVersionCode && ReadInt(row, "Lot") == bom.Lot
+                var matches = flags.Where(row => TryGet(row, "BOMMaster", out var master)
+                    && ReadEntityString(master, "ItemMaster", "ID") == bom.ItemId
+                    && ReadString(master, "BOMVersionCode") == bom.BomVersionCode && ReadInt(master, "Lot") == bom.Lot
                     && ReadInt(row, "Sequence") == component.Sequence).ToArray();
                 return component with
                 {
                     IsIssueOrgFixed = matches.Length == 1 ? ReadBool(matches[0], "IsIssueOrgFixed") : null,
                     IsCharge = matches.Length == 1 ? ReadBool(matches[0], "IsCharge") : null,
-                    CostElementCode = matches.Length == 1 ? ReadString(matches[0], "CostElementCode") : null
+                    CostElementCode = matches.Length == 1 ? ReadEntityString(matches[0], "CostElement", "Code") : null
                 };
             }).ToArray() }).ToArray();
         }
         return new U9BomQueryResult(responseCode, ReadMessage(root), boms);
     }
 
-    private async Task<IReadOnlyList<JsonElement>> QueryCreationFlagsAsync(string baseUrl, string token, string sql, CancellationToken cancellationToken)
+    private async Task<IReadOnlyList<JsonElement>> QueryCreationFlagsAsync(string baseUrl, string token,
+        string entityFullName, string[] returnFields, string idField, long[] ids, CancellationToken cancellationToken)
     {
-        using var request = new HttpRequestMessage(HttpMethod.Post, BuildEndpoint(baseUrl, "/webapi/QueryCommon/QueryInfoBySql"))
-        { Content = new StringContent(JsonSerializer.Serialize(new { SqlString = sql }), Encoding.UTF8, "application/json") };
-        request.Headers.TryAddWithoutValidation("token", Required(token, "U9C Token"));
-        using var response = await SendAsync(request, "U9C创建属性回查", cancellationToken);
-        if (!response.IsSuccessStatusCode) throw new PdmRuleException($"U9C创建属性回查失败：HTTP {(int)response.StatusCode}。");
-        using var document = ParseJson(await response.Content.ReadAsStringAsync(cancellationToken), "U9C创建属性回查不是有效JSON。");
-        if (ReadInt(document.RootElement, "ResCode") != 0) throw new PdmRuleException("U9C创建属性回查失败，不能确认同步成功。");
-        return ReadDataRows(document.RootElement).Select(row => row.Clone()).ToArray();
+        const int pageSize = 200;
+        var results = new List<JsonElement>();
+        for (var page = 1; ; page++)
+        {
+            using var request = new HttpRequestMessage(HttpMethod.Post, BuildEndpoint(baseUrl, "/webapi/CommonEntity/Query"))
+            {
+                Content = new StringContent(JsonSerializer.Serialize(new {
+                    PageSize = pageSize, PageIndex = page, EntityFullName = entityFullName, ReturnFields = returnFields,
+                    Filters = new[] { new { Logic = "or", Filters = ids.Select(id => new { Field = idField, Operator = "eq", Value = id.ToString(System.Globalization.CultureInfo.InvariantCulture) }).ToArray() } }
+                }), Encoding.UTF8, "application/json")
+            };
+            request.Headers.TryAddWithoutValidation("token", Required(token, "U9C Token"));
+            using var response = await SendAsync(request, "U9C创建属性回查", cancellationToken);
+            if (!response.IsSuccessStatusCode) throw new PdmRuleException($"U9C创建属性回查失败：HTTP {(int)response.StatusCode}。");
+            using var document = ParseJson(await response.Content.ReadAsStringAsync(cancellationToken), "U9C创建属性回查不是有效JSON。");
+            var code = ReadInt(document.RootElement, "ResCode");
+            if (code != 0) throw new PdmRuleException($"U9C创建属性回查失败（ResCode={code}）：{ReadMessage(document.RootElement) ?? "未返回错误说明"}。");
+            var rows = ReadDataRows(document.RootElement).Select(row => row.Clone()).ToArray();
+            results.AddRange(rows);
+            if (rows.Length < pageSize) return results;
+        }
     }
 
     public async Task<U9BomOperationReference?> QueryBomOperationAsync(
@@ -716,6 +737,7 @@ public sealed class U9OpenApiClient(HttpClient httpClient) : IU9OpenApiClient, I
                 ReadDateTimeOffset(row, "DeliveryDate"),
                 ReadDateTimeOffset(row, "LatestDeliveryDate"))
             {
+                OrderNetAmount = ReadDecimal(row, "OrderNetAmount"),
                 SourceCreatedAt = ReadDateTimeOffset(row, "SourceCreatedAt"),
                 BuyerName = ReadString(row, "BuyerName"),
                 MovementDate = ReadWarehouseDate(row),

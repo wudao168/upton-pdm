@@ -1,7 +1,22 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { downloadProductionDrawingArchive, downloadReleasePreviewArchive, mapApiReleasePackage, readProjectValidationPlan } from '../src/api'
+import { downloadProductionDrawingArchive, downloadReleasePreviewArchive, listProjects, mapApiReleasePackage, readProjectValidationPlan } from '../src/api'
 
 describe('API JSON response handling', () => {
+  it('loads project paths when the browser does not support Array.at', async () => {
+    const descriptor = Object.getOwnPropertyDescriptor(Array.prototype, 'at')!
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify([
+      { id: 'project-1', code: 'P1', name: 'Project', owner: 'engineer', isActive: true, vaultLocation: 'D:\\PDM\\P1', releaseLocation: 'D:\\Release\\P1' },
+    ]), { status: 200 })))
+    Object.defineProperty(Array.prototype, 'at', { ...descriptor, value: undefined })
+    let projects
+    try {
+      projects = await listProjects('token')
+    } finally {
+      Object.defineProperty(Array.prototype, 'at', descriptor)
+    }
+    expect(projects[0]?.vaultName).toBe('P1')
+  })
+
   afterEach(() => {
     vi.restoreAllMocks()
     vi.useRealTimers()

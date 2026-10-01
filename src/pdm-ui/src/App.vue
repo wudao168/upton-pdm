@@ -10,7 +10,7 @@ import DocumentTree from './components/DocumentTree.vue'
 import DrawingReviewPanel from './components/DrawingReviewPanel.vue'
 import DrawingReviewAnnotationCard from './components/DrawingReviewAnnotationCard.vue'
 import ProjectFileLibrary from './components/ProjectFileLibrary.vue'
-import ValidationPlanManager from './components/ValidationPlanManager.vue'
+import QualityManager from './components/QualityManager.vue'
 import LoginView from './components/LoginView.vue'
 import MaterialManagement from './components/MaterialManagement.vue'
 import StandardLibrary from './components/StandardLibrary.vue'
@@ -21,6 +21,7 @@ import ProgramTemplateLibrary from './components/ProgramTemplateLibrary.vue'
 import ProjectManager from './components/ProjectManager.vue'
 import ProjectWorkbench from './components/ProjectWorkbench.vue'
 import ProjectPlanManager from './components/ProjectPlanManager.vue'
+import ProjectBudgetManager from './components/ProjectBudgetManager.vue'
 import ProjectWorkspaceHeader from './components/ProjectWorkspaceHeader.vue'
 import type { ProjectTab } from './components/ProjectWorkspaceHeader.vue'
 import ProcurementTracking from './components/ProcurementTracking.vue'
@@ -55,6 +56,7 @@ const workspaceLocalRefreshing = ref(false)
 const workspaceLocalStates = computed<Record<string, WorkspaceLocalFileState>>(() => Object.fromEntries((workspaceLocalSnapshot.value?.items ?? []).map(item => [item.documentId, item])))
 const selectedWorkspaceLocalState = computed(() => workspace.selectedNode.value.documentId ? workspaceLocalStates.value[workspace.selectedNode.value.documentId] : undefined)
 const canManageSystem = computed(() => desktopAvailable || ['settings.customer.manage', 'settings.organization.manage', 'settings.folder.manage', 'settings.storage.manage', 'system.role.view', 'system.project-permission.view', 'audit.view'].some(workspace.hasPermission))
+const requestedPlanTaskId = ref<string>()
 const projectTab = ref<ProjectTab>('overview')
 watch([activeView, projectTab, () => workspace.project.value.id], clearGlobalStatus, { flush: 'sync' })
 const mountedBomProjectId = ref('')
@@ -66,6 +68,7 @@ const drawingReviewPanelCollapsed = ref(false)
 const drawingReviewPackageId = ref('')
 const requestedReleasePackageId = ref('')
 const requestedValidationPlanProjectId = ref('')
+const requestedQualityAcceptance = ref(false)
 const requestedBomKind = ref<'Overview' | 'Source' | 'WearPart' | 'Release' | import('./types').BomKind>()
 // 记录BOM面板当前视图，用于让顶部“BOM / 发布”页签与实际内容保持一致。
 const activeBomKind = ref<string>()
@@ -581,7 +584,8 @@ async function openReleasePackage(projectId: string, releasePackageId: string) {
   }
 }
 
-async function openValidationPlan(projectId: string) {
+async function openValidationPlan(projectId: string, qualityAcceptance = false) {
+  requestedQualityAcceptance.value = qualityAcceptance
   requestedValidationPlanProjectId.value = ''
   if (await openManagedProject(projectId, 'validation-plan')) requestedValidationPlanProjectId.value = projectId
 }
@@ -625,7 +629,7 @@ function openProgramTemplate(templateId: string) {
 }
 
 type ProjectNavigationRequest = { projectId: string; tab: ProjectTab }
-const supportedProjectTabs: ProjectTab[] = ['overview', 'project-plan', 'files', 'validation-plan', 'documents', 'bom', 'release', 'procurement', 'records']
+const supportedProjectTabs: ProjectTab[] = ['overview', 'project-plan', 'budget', 'files', 'validation-plan', 'documents', 'bom', 'release', 'procurement', 'records']
 let pendingProjectNavigation: ProjectNavigationRequest | null = null
 let projectNavigationInProgress = false
 let initialPageRestored = false
@@ -1019,7 +1023,7 @@ async function openWhereUsedParent(projectId: string, parentDocumentId: string) 
             :on-mark-all-notifications-read="workspace.markAllNotificationsRead"
             @refresh="runOperation(workspace.loadMyApprovalTasks, '待办任务已刷新')"
             @open="(projectId, releasePackageId) => { messageDrawerOpen = false; openReleasePackage(projectId, releasePackageId) }"
-            @open-validation-plan="projectId => { messageDrawerOpen = false; openValidationPlan(projectId) }"
+            @open-validation-plan="(projectId, qualityAcceptance) => { messageDrawerOpen = false; openValidationPlan(projectId, qualityAcceptance) }"
             @open-notification="async notification => { messageDrawerOpen = false; await openNotification(notification) }"
             @open-material-approvals="() => { messageDrawerOpen = false; openMaterialApprovals() }"
             @open-program-template="templateId => { messageDrawerOpen = false; openProgramTemplate(templateId) }"
@@ -1192,14 +1196,15 @@ async function openWhereUsedParent(projectId: string, parentDocumentId: string) 
               :on-update-phase-owners="workspace.updateProjectPhaseOwners"
               @documents="openProjectTab('documents')"
               @bom="openProjectTab('bom')"
-              @project-plan="openProjectTab('project-plan')"
+              @project-plan="taskId => { requestedPlanTaskId = taskId; openProjectTab('project-plan') }"
               @validation-plan="openProjectTab('validation-plan')"
               @procurement="openProjectTab('procurement')"
               @release="openProjectTab('release')"
             />
             <ProjectFileLibrary v-else-if="projectTab === 'files' && !workspace.moduleErrors.value.some(error => error.tab === 'files' || error.module === '图档工作区')" :project-id="workspace.project.value.id" :token="workspace.getAccessToken()" :folders="workspace.projectFolders.value" :documents="workspace.managedDocuments.value" :users="workspace.users.value" :roles="workspace.rolePermissionDirectory.value.roles" :administrator="workspace.hasPermission('settings.folder.manage')" :can-recycle-documents="workspace.hasPermission('document.recycle')" :pending="workspace.operationPending.value" :on-update-permissions="workspace.updateProjectFolderPermissions" :on-reload="() => workspace.reload(workspace.project.value.id)" />
-            <ProjectPlanManager v-else-if="projectTab === 'project-plan'" :project="workspace.project.value" :projects="workspace.projects.value" :company-name="companyName" :token="workspace.getAccessToken()" :current-username="workspace.currentUsername.value" :current-role="workspace.currentRole.value" :developer="workspace.hasRole('developer')" :can-edit="canManageProjectPlan" :can-manage-system-templates="canManageProjectPlanTemplates" @switch-project="projectId => openManagedProject(projectId, 'project-plan')" />
-            <ValidationPlanManager v-else-if="projectTab === 'validation-plan'" :project-id="workspace.project.value.id" :project-code="workspace.project.value.code" :project-name="workspace.project.value.name" :projects="workspace.projects.value" :token="workspace.getAccessToken()" :current-username="workspace.currentUsername.value" :current-display-name="workspace.currentUser.value" :can-edit="workspace.project.value.effectiveProjectPermissions?.includes('validation-plan.edit') === true" :can-manage-catalog="workspace.hasPermission('validation-catalog.manage')" :can-decide-approval="workspace.hasPermission('approval.decide') || workspace.hasPermission('validation-plan.edit')" :requested-project-id="requestedValidationPlanProjectId" @request-handled="requestedValidationPlanProjectId = ''" />
+            <ProjectBudgetManager v-else-if="projectTab === 'budget'" :project="workspace.project.value" :token="workspace.getAccessToken()" />
+            <ProjectPlanManager :requested-task-id="requestedPlanTaskId" @task-request-handled="requestedPlanTaskId = undefined" v-else-if="projectTab === 'project-plan'" :project="workspace.project.value" :projects="workspace.projects.value" :company-name="companyName" :token="workspace.getAccessToken()" :current-username="workspace.currentUsername.value" :current-role="workspace.currentRole.value" :developer="workspace.hasRole('developer')" :can-edit="canManageProjectPlan" :can-manage-system-templates="canManageProjectPlanTemplates" @switch-project="projectId => openManagedProject(projectId, 'project-plan')" />
+            <QualityManager v-else-if="projectTab === 'validation-plan'" :project-id="workspace.project.value.id" :project-code="workspace.project.value.code" :project-name="workspace.project.value.name" :projects="workspace.projects.value" :token="workspace.getAccessToken()" :current-username="workspace.currentUsername.value" :current-display-name="workspace.currentUser.value" :can-edit="workspace.project.value.effectiveProjectPermissions?.includes('validation-plan.edit') === true" :can-manage-catalog="workspace.hasPermission('validation-catalog.manage')" :can-decide-approval="workspace.hasPermission('approval.decide') || workspace.hasPermission('validation-plan.edit')" :requested-project-id="requestedValidationPlanProjectId" :requested-quality-acceptance="requestedQualityAcceptance" @request-handled="requestedValidationPlanProjectId = ''" />
             <section v-if="mountedDocumentsProjectId === workspace.project.value.id && !workspace.moduleErrors.value.some(error => error.module === '图档工作区')" v-show="projectTab === 'documents'" class="pdm-document-workspace">
               <section v-if="!workspace.hasDocuments.value" class="pdm-panel pdm-workspace-state">
                 <h1>项目尚未关联CAD图纸</h1>

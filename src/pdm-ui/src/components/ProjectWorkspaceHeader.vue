@@ -1,12 +1,12 @@
 <script setup lang="ts">
-import { Boxes, Calendar, ClipboardCheck, ClipboardList, FolderOpen, FolderTree, LayoutDashboard, Rocket, Search, Settings, ShoppingCart } from '@lucide/vue'
+import { Boxes, Calendar, ClipboardCheck, ClipboardList, FolderOpen, FolderTree, LayoutDashboard, Rocket, Search, Settings, ShoppingCart, Wallet } from '@lucide/vue'
 import { ElMessageBox } from 'element-plus'
 import { computed, ref, watch } from 'vue'
 import type { ProjectCopyOptionsInput, ProjectCopyPreview, ProjectCopyResult, ProjectSummary } from '../types'
 import { useUserDisplayName } from '../userDisplay'
 import ProjectSettingsDrawer from './ProjectSettingsDrawer.vue'
 
-export type ProjectTab = 'overview' | 'project-plan' | 'files' | 'validation-plan' | 'documents' | 'bom' | 'release' | 'procurement' | 'records'
+export type ProjectTab = 'overview' | 'budget' | 'project-plan' | 'files' | 'validation-plan' | 'documents' | 'bom' | 'release' | 'procurement' | 'records'
 
 const props = defineProps<{
   project: ProjectSummary
@@ -35,6 +35,7 @@ const tabs = [
   { key: 'overview', label: '概览', icon: LayoutDashboard },
   { key: 'files', label: '文件', icon: FolderOpen },
   { key: 'project-plan', label: '计划', icon: Calendar },
+  { key: 'budget', label: '预算', icon: Wallet },
   { key: 'validation-plan', label: '质量', icon: ClipboardCheck },
   { key: 'documents', label: '图档', icon: FolderTree },
   { key: 'bom', label: 'BOM', icon: Boxes },

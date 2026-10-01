@@ -103,6 +103,8 @@ public sealed class MaterialU9SyncBatchHostedService(
         }
         catch (Exception exception)
         {
+            BomU9AutomationRetryQueue.Schedule(application.ProjectId, application.BomHeaderKind!.Value,
+                exception.Message, timeProvider.GetUtcNow());
             logger.LogWarning(exception, "BOM表头料号 {ApplicationId} 已同步，但自动续跑 U9C BOM 失败。", application.Id);
         }
     }

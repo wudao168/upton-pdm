@@ -457,8 +457,9 @@ public sealed class U9OpenApiClientTests
                 component.UsageQty, component.IssueUomCode, component.ParentQty, component.IsEffective,
                 component.Remark, component.IsPhantomPart));
         Assert.Equal("token-123", handler.Token);
-        Assert.Contains("/webapi/QueryCommon/QueryInfoBySql", handler.RequestUri);
-        Assert.Contains("b.ItemMaster IN (1001)", handler.RequestBody);
+        Assert.Contains("/webapi/CommonEntity/Query", handler.RequestUri);
+        Assert.Contains("BOMMaster.ItemMaster.ID", handler.RequestBody);
+        Assert.Contains("1001", handler.RequestBody);
         Assert.Null(component.IsIssueOrgFixed); // A missing supplemental row must not be treated as checked.
     }
 
@@ -517,6 +518,117 @@ public sealed class U9OpenApiClientTests
 
         Assert.NotNull(result);
         Assert.Equal((321L, 8L, otherId), (result.Id, result.CurrentSysVersion, result.OtherId));
+    }
+
+    [Fact]
+    public async Task QueryItems_ReadsManufacturingFlagsThroughFilteredCommonEntityQuery()
+    {
+        var handler = new SequenceHandler(
+            """{"ResCode":0,"Data":[{"ID":"1001","Code":"02011000009","MfgInfo":{"DesignationRule":1}}]}""",
+            """{"ResCode":0,"Data":[{"ID":"1001","MfgInfo":{"IsExpandByOrder":"True"}}]}""");
+        var client = new U9OpenApiClient(new HttpClient(handler));
+        var result = await client.QueryItemsAsync("http://u9.example.test/U9", "/webapi/ItemMaster/Query", "token", "[]", default);
+        Assert.Equal("true", Assert.Single(result.Items).CreationAttributes["MfgInfo.IsExpandByOrder"]);
+        var query = handler.Requests[1];
+        Assert.EndsWith("/webapi/CommonEntity/Query", query.Url);
+        using var json = JsonDocument.Parse(query.Body);
+        Assert.Equal("UFIDA.U9.CBO.SCM.Item.ItemMaster", json.RootElement.GetProperty("EntityFullName").GetString());
+        var filter = json.RootElement.GetProperty("Filters")[0].GetProperty("Filters")[0];
+        Assert.Equal("ID", filter.GetProperty("Field").GetString());
+        Assert.Equal("1001", filter.GetProperty("Value").GetString());
+    }
+
+    [Fact]
+    public async Task QueryBoms_PaginatesSupplementalFlagsAndMatchesNestedBomIdentity()
+    {
+        var firstPage = Enumerable.Range(1, 200).Select(sequence => new {
+            BOMMaster = new { ItemMaster = new { ID = "1001" }, BOMVersionCode = "A1", Lot = "1" },
+            Sequence = sequence.ToString(), IsIssueOrgFixed = "True", IsCharge = "True", CostElement = new { Code = "No101" }
+        }).ToArray();
+        var secondPage = new[] { new { BOMMaster = new { ItemMaster = new { ID = "1001" }, BOMVersionCode = "A1", Lot = "1" }, Sequence = "201", IsIssueOrgFixed = "True", IsCharge = "False", CostElement = new { Code = "No102" } } };
+        var handler = new SequenceHandler(
+            """{"ResCode":0,"Data":[{"ID":"5001","ItemMaster":{"ID":"1001","Code":"02011000008"},"BOMVersionCode":"A1","Lot":1,"BOMComponents":[{"Sequence":201,"ItemMaster":{"Code":"01020000001"}}]}]}""",
+            JsonSerializer.Serialize(new { ResCode=0, Data=firstPage }),
+            JsonSerializer.Serialize(new { ResCode=0, Data=secondPage }));
+        var client = new U9OpenApiClient(new HttpClient(handler));
+        var result = await client.QueryBomsAsync("http://u9.example.test/U9", U9BomContract.QueryPath, "token", "[]", default);
+        var component = Assert.Single(Assert.Single(result.Boms).Components);
+        Assert.True(component.IsIssueOrgFixed);
+        Assert.False(component.IsCharge);
+        Assert.Equal("No102", component.CostElementCode);
+        Assert.Equal(3, handler.Requests.Count);
+        using var last = JsonDocument.Parse(handler.Requests[2].Body);
+        Assert.Equal(2, last.RootElement.GetProperty("PageIndex").GetInt32());
+    }
+
+    [Fact]
+    public async Task QueryItems_PreservesSupplementalQueryFailureReason()
+    {
+        var handler = new SequenceHandler(
+            """{"ResCode":0,"Data":[{"ID":"1001","MfgInfo":{"DesignationRule":1}}]}""",
+            """{"ResCode":500,"ResMsg":"实体查询暂不可用"}""");
+        var client = new U9OpenApiClient(new HttpClient(handler));
+        var error = await Assert.ThrowsAsync<PdmRuleException>(() => client.QueryItemsAsync("http://u9.example.test/U9", "/webapi/ItemMaster/Query", "token", "[]", default));
+        Assert.Contains("ResCode=500", error.Message);
+        Assert.Contains("实体查询暂不可用", error.Message);
+    }
+
+    [Fact]
+    public async Task QueryProcurement_CommonEntityMapsNestedRowsAndPurchaseDeliveryDates()
+    {
+        const string empty = """{"ResCode":0,"Success":true,"Data":[]}""";
+        var handler = new SequenceHandler(empty,
+            """{"ResCode":0,"Data":[{"ID":"101","DocLineNo":"10","PR":{"DocNo":"PR1","Org":{"Code":"7"}},"Status":"已核准","ItemInfo":{"ItemCode":"M1","ItemName":"Part"},"Project":{"Code":"P1"},"ReqQtyReqUOM":"4","ApprovedQtyReqUOM":"4"}]}""",
+            """{"ResCode":0,"Data":[{"ID":"202","DocLineNo":"10","PurchaseOrder":{"DocNo":"PO1","Org":{"Code":"7"},"DocumentType":{"ShortName":"PO01"},"PurOper":{"Name":"Buyer"}},"Status":"自然关闭","ItemInfo":{"ItemCode":"M1","ItemName":"Part"},"SrcDocInfo":{"SrcDocLine":{"EntityID":"101"}},"PurQtyTU":"4","TotalRecievedQtyTU":"2"}]}""",
+            empty, empty, empty, empty,
+            """{"ResCode":0,"Data":[{"ID":"303","POLine":{"ID":"202"},"DeliveryDate":"2026-10-02 00:00:00","PlanArriveDate":"2026-10-03 00:00:00"}]}""");
+        var result = await new U9OpenApiClient(new HttpClient(handler)).QueryProcurementAsync(
+            "http://u9.example.test/U9", "/webapi/CommonEntity/Query", "token", "7", ["P1"], default);
+        Assert.Equal(2, result.Rows.Count);
+        Assert.Equal(2, result.Rows[0].LineStatus);
+        Assert.Equal(4m, result.Rows[0].RequestedQuantity);
+        Assert.Equal("101", result.Rows[1].SourcePrLineId);
+        Assert.Equal("Buyer", result.Rows[1].BuyerName);
+        Assert.Equal(new DateTime(2026, 10, 3), result.Rows[1].LatestDeliveryDate?.Date);
+        Assert.All(handler.Requests, request => {
+            Assert.EndsWith("/webapi/CommonEntity/Query", request.Url);
+            Assert.DoesNotContain("SqlString", request.Body);
+            Assert.DoesNotContain("OrderPrice", request.Body);
+        });
+        Assert.Contains("SrcDocInfo.SrcDocLine.EntityID", handler.Requests[2].Body);
+    }
+
+    [Fact]
+    public async Task QueryProcurement_CommonEntityFailureDoesNotReturnPartialSnapshot()
+    {
+        var handler = new SequenceHandler("""{"ResCode":0,"Data":[]}""",
+            """{"ResCode":500,"ResMsg":"实体查询失败"}""");
+        var error = await Assert.ThrowsAsync<PdmRuleException>(() => new U9OpenApiClient(new HttpClient(handler))
+            .QueryProcurementAsync("http://u9.example.test/U9", "/webapi/CommonEntity/Query", "token", "7", ["P1"], default));
+        Assert.Contains("实体查询失败", error.Message);
+    }
+
+    [Fact]
+    public async Task QueryProcurement_CommonEntityRejectsRepeatedPagination()
+    {
+        var page = JsonSerializer.Serialize(new { ResCode = 0, Data = Enumerable.Range(1, 200).Select(id => new { ID = id.ToString() }) });
+        var handler = new SequenceHandler("""{"ResCode":0,"Data":[]}""", page, page);
+        var error = await Assert.ThrowsAsync<PdmRuleException>(() => new U9OpenApiClient(new HttpClient(handler))
+            .QueryProcurementAsync("http://u9.example.test/U9", "/webapi/CommonEntity/Query", "token", "7", ["P1"], default));
+        Assert.Contains("重复ID", error.Message);
+        using var request = JsonDocument.Parse(handler.Requests[2].Body);
+        Assert.Equal(2, request.RootElement.GetProperty("PageIndex").GetInt32());
+    }
+
+    private sealed class SequenceHandler(params string[] responses) : HttpMessageHandler
+    {
+        public List<(string Url, string Body)> Requests { get; } = [];
+        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            var response = responses[Requests.Count];
+            Requests.Add((request.RequestUri!.ToString(), await request.Content!.ReadAsStringAsync(cancellationToken)));
+            return new(HttpStatusCode.OK) { Content = new StringContent(response, Encoding.UTF8, "application/json") };
+        }
     }
 
     private sealed class RecordingHandler(string responseJson) : HttpMessageHandler

@@ -120,6 +120,7 @@ public sealed class MySqlU9ProcurementRepository : IU9ProcurementRepository
                     PurchaseRemark = Clean(row.PurchaseRemark),
                     row.DeliveryDate,
                     row.LatestDeliveryDate,
+                    row.OrderNetAmount,
                     RefreshedAt = refreshedAt
                 }).ToArray();
             if (values.Length > 0)
@@ -130,12 +131,12 @@ public sealed class MySqlU9ProcurementRepository : IU9ProcurementRepository
                         line_number,line_status,is_canceled,business_date,material_code,item_name,specification,brand,
                         project_code,project_name,subproject,requested_quantity,approved_quantity,purchase_quantity,
                         arrived_quantity,purchase_remark,delivery_date,latest_delivery_date,refreshed_at,source_created_at,buyer_name,
-                        movement_date,movement_quantity,movement_unit,source_po_line_id)
+                        movement_date,movement_quantity,movement_unit,source_po_line_id,order_net_amount)
                     VALUES(@SnapshotRunId,@OrganizationCode,@RecordKind,@LineId,@SourcePrLineId,@DocumentNumber,
                         @LineNumber,@LineStatus,@IsCanceled,@BusinessDate,@MaterialCode,@ItemName,@Specification,@Brand,
                         @ProjectCode,@ProjectName,@Subproject,@RequestedQuantity,@ApprovedQuantity,@PurchaseQuantity,
                         @ArrivedQuantity,@PurchaseRemark,@DeliveryDate,@LatestDeliveryDate,@RefreshedAt,@SourceCreatedAt,@BuyerName,
-                        @MovementDate,@MovementQuantity,@MovementUnit,@SourcePoLineId)
+                        @MovementDate,@MovementQuantity,@MovementUnit,@SourcePoLineId,@OrderNetAmount)
                     """, values, transaction, cancellationToken: cancellationToken));
             }
             await connection.ExecuteAsync(new CommandDefinition(
@@ -221,6 +222,7 @@ public sealed class MySqlU9ProcurementRepository : IU9ProcurementRepository
         MovementDate = Utc(row.MovementDate),
         MovementQuantity = row.MovementQuantity,
         MovementUnit = row.MovementUnit,
+        OrderNetAmount = row.OrderNetAmount,
         SourcePoLineId = row.SourcePoLineId
     };
 
@@ -254,6 +256,7 @@ public sealed class MySqlU9ProcurementRepository : IU9ProcurementRepository
         public string RecordKind { get; init; } = string.Empty;
         public string LineId { get; init; } = string.Empty;
         public string? SourcePrLineId { get; init; }
+        public decimal? OrderNetAmount { get; init; }
         public string? SourcePoLineId { get; init; }
         public string DocumentNumber { get; init; } = string.Empty;
         public int LineNumber { get; init; }

@@ -2,6 +2,9 @@ namespace Upton.Pdm.Domain;
 
 public static class PermissionCodes
 {
+    public const string ProjectBudgetView = "project.budget.view";
+    public const string ProjectBudgetActualEdit = "project.budget.actual.edit";
+    public const string ProjectBudgetEdit = "project.budget.edit";
     public const string ProjectView = "project.view";
     public const string ProjectCreate = "project.create";
     public const string ProjectEdit = "project.edit";
@@ -56,6 +59,9 @@ public static class RolePermissionCatalog
 {
     public static IReadOnlyList<PermissionDefinition> Permissions { get; } =
     [
+        new(PermissionCodes.ProjectBudgetView, "查看项目预算", "项目预算", "查看未税预算、实际和预计成本；风险预留仅计划管理可见。"),
+        new(PermissionCodes.ProjectBudgetActualEdit, "维护实际成本及工时", "项目预算", "由财务人工登记实际金额和实际工时。", Sensitive: true),
+        new(PermissionCodes.ProjectBudgetEdit, "维护项目预算", "项目预算", "维护预算及剩余成本预估。", Sensitive: true),
         new(PermissionCodes.ProjectView, "查看项目清单", "项目管理", "查看当前公司项目元数据；项目图档与业务内容仍按内容权限和项目分工控制。"),
         new(PermissionCodes.ProjectCreate, "创建主项目", "项目管理"),
         new(PermissionCodes.ProjectEdit, "编辑项目基本信息", "项目管理", "可修改创建项目时填写的业务信息；涉及编号字段时由系统校验并重新生成。"),
@@ -131,7 +137,7 @@ public static class RolePermissionCatalog
                 PermissionCodes.ProgramTemplateView,
                 PermissionCodes.StandardLibraryView,
                 PermissionCodes.MaterialRelationView),
-            [UserRole.PlanningManager] = Set(PermissionCodes.ProjectView, PermissionCodes.ProjectExecutionAssign, PermissionCodes.ProjectContentView, PermissionCodes.ProgramTemplateView),
+            [UserRole.PlanningManager] = Set(PermissionCodes.ProjectBudgetView, PermissionCodes.ProjectBudgetEdit, PermissionCodes.ProjectView, PermissionCodes.ProjectExecutionAssign, PermissionCodes.ProjectContentView, PermissionCodes.ProgramTemplateView),
             [UserRole.ProcessReviewer] = Set(PermissionCodes.ProjectView, PermissionCodes.ProjectContentView, PermissionCodes.DrawingReviewAnnotate, PermissionCodes.DrawingReviewDecide, PermissionCodes.ApprovalDecide, PermissionCodes.ProgramTemplateView, PermissionCodes.StandardLibraryView, PermissionCodes.MaterialView, PermissionCodes.MaterialManage, PermissionCodes.MaterialRelationView, PermissionCodes.MaterialRelationManage, PermissionCodes.ValidationCatalogManage),
             [UserRole.Approver] = Set(PermissionCodes.ProjectView, PermissionCodes.ProjectContentView, PermissionCodes.DrawingReviewAnnotate, PermissionCodes.DrawingReviewDecide, PermissionCodes.ApprovalDecide, PermissionCodes.ProgramTemplateView, PermissionCodes.ProgramTemplateApprove, PermissionCodes.StandardLibraryView, PermissionCodes.MaterialView, PermissionCodes.MaterialManage, PermissionCodes.MaterialRelationView, PermissionCodes.MaterialRelationManage, PermissionCodes.MaterialRelationPublish, PermissionCodes.ValidationCatalogManage),
             [UserRole.ProductionViewer] = Set(PermissionCodes.ProjectView, PermissionCodes.ProjectContentView, PermissionCodes.ProgramTemplateView),
@@ -161,6 +167,7 @@ public static class RolePermissionCatalog
         new(UserRole.BusinessUnitManager.ToString(), "事业部经理", "负责事业部项目分工、审批及紧急代批。", UserRole.Approver, true),
         new(UserRole.ProcessReviewer.ToString(), "标准化工程师", "负责标准化检查并处理分配的审批任务。", UserRole.ProcessReviewer, true),
         new("ProjectManager", "项目经理", "负责项目建立、人员分工及发布组织。", UserRole.Engineer, true),
+        new("Finance", "财务", "登记项目实际成本及实际工时。", UserRole.ProductionViewer, true),
         new("SupplyChain", "供应链", "查看负责范围内的项目、BOM和生产资料。", UserRole.ProductionViewer, true),
         new("ProcurementSpecialist", "采购专员", "查看负责范围内的项目、BOM和采购资料。", UserRole.ProductionViewer, true),
         new("ProcurementManager", "采购经理", "查看采购资料并处理分配的审批任务。", UserRole.Approver, true),
@@ -193,6 +200,7 @@ public static class RolePermissionCatalog
             [UserRole.BusinessUnitManager.ToString()] = Set(PermissionCodes.ProjectView, PermissionCodes.ProjectStaffingManage, PermissionCodes.ProjectDesignerAssign, PermissionCodes.ProjectContentView, PermissionCodes.ValidationPlanEdit, PermissionCodes.ApprovalDecide, PermissionCodes.ApprovalEmergencySubstitute, PermissionCodes.ProgramTemplateView, PermissionCodes.ProgramTemplateReview),
             [UserRole.ProcessReviewer.ToString()] = Defaults[UserRole.ProcessReviewer],
             ["ProjectManager"] = Set(PermissionCodes.ProjectView, PermissionCodes.ProjectCreate, PermissionCodes.ProjectEdit, PermissionCodes.ProjectChildCreate, PermissionCodes.ProjectStaffingManage, PermissionCodes.ProjectDesignerAssign, PermissionCodes.ProjectContentView, PermissionCodes.ValidationPlanEdit, PermissionCodes.MaterialView, PermissionCodes.ReleaseManage, PermissionCodes.ProgramTemplateView),
+            ["Finance"] = Set(PermissionCodes.ProjectView, PermissionCodes.ProjectContentView, PermissionCodes.ProjectBudgetView, PermissionCodes.ProjectBudgetActualEdit),
             ["SupplyChain"] = Defaults[UserRole.ProductionViewer],
             ["ProcurementSpecialist"] = Defaults[UserRole.ProductionViewer],
             ["ProcurementManager"] = Set(PermissionCodes.ProjectView, PermissionCodes.ProjectContentView, PermissionCodes.DrawingReviewAnnotate, PermissionCodes.DrawingReviewDecide, PermissionCodes.ApprovalDecide, PermissionCodes.ProgramTemplateView, PermissionCodes.ProgramTemplateApprove, PermissionCodes.StandardLibraryView),
@@ -212,8 +220,10 @@ public static class RolePermissionCatalog
             ["developer"] = Defaults[UserRole.Administrator]
         };
 
+    private static readonly string[] BudgetViewerRoles = ["BusinessUnitManager", "MechanicalManager", "ProjectManager", "SupplyChain", "ProcurementSpecialist", "ProcurementManager", "ProductionManager", "MachiningSupervisor", "AssemblySupervisor", "ElectricalSupervisor"];
+
     public static IReadOnlySet<string> InitialPermissions(string roleCode, UserRole baseRole) =>
-        InitialRoleDefaults.GetValueOrDefault(roleCode, Defaults[baseRole]);
+        InitialRoleDefaults.GetValueOrDefault(roleCode, Defaults[baseRole]).Concat(BudgetViewerRoles.Contains(roleCode, StringComparer.OrdinalIgnoreCase) ? new[] { PermissionCodes.ProjectBudgetView } : Array.Empty<string>()).ToHashSet(StringComparer.Ordinal);
 
     public static bool IsKnown(string code) => Permissions.Any(permission => string.Equals(permission.Code, code, StringComparison.Ordinal));
 
@@ -237,6 +247,9 @@ public static class RolePermissionCatalog
         if (normalized.Contains(PermissionCodes.MaterialRelationManage) || normalized.Contains(PermissionCodes.MaterialRelationPublish)) normalized.Add(PermissionCodes.MaterialRelationView);
         if (normalized.Contains(PermissionCodes.MaterialManage)) normalized.Add(PermissionCodes.MaterialApply);
         if (normalized.Contains(PermissionCodes.MaterialApply)) normalized.Add(PermissionCodes.MaterialView);
+        if (normalized.Contains(PermissionCodes.ProjectBudgetActualEdit)) normalized.Add(PermissionCodes.ProjectBudgetView);
+        if (normalized.Contains(PermissionCodes.ProjectBudgetEdit)) normalized.Add(PermissionCodes.ProjectBudgetView);
+        if (normalized.Contains(PermissionCodes.ProjectBudgetView)) normalized.Add(PermissionCodes.ProjectContentView);
         if (normalized.Contains(PermissionCodes.RoleSettingsEdit)) normalized.Add(PermissionCodes.RoleSettingsView);
         if (normalized.Contains(PermissionCodes.ProjectPermissionSettingsEdit)) normalized.Add(PermissionCodes.ProjectPermissionSettingsView);
         return normalized;

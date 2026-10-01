@@ -49,6 +49,7 @@ public sealed class InMemoryU9ProcurementRepository : IU9ProcurementRepository
                 row.Subproject, row.RequestedQuantity, row.ApprovedQuantity, row.PurchaseQuantity,
                 row.ArrivedQuantity, row.PurchaseRemark, row.DeliveryDate, row.LatestDeliveryDate, refreshedAt)
             {
+                OrderNetAmount = row.OrderNetAmount,
                 SourcePoLineId = row.SourcePoLineId,
                 SourceCreatedAt = row.SourceCreatedAt,
                 BuyerName = row.BuyerName,

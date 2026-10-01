@@ -1214,6 +1214,7 @@ export interface AuditEntry {
 }
 
 export interface MyApprovalTask {
+  qualityAcceptance?: boolean
   id: string
   projectId: string
   projectCode: string
@@ -2560,6 +2561,7 @@ export interface ConfirmValidationPlanExecutionInput {
 }
 
 export interface ValidationPlanApprovalTaskSummary {
+  qualityAcceptance?: boolean
   id: string
   planId: string
   projectId: string

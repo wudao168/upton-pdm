@@ -43,6 +43,20 @@ const childPlan = {
 }
 
 describe('ValidationPlanManager', () => {
+  it('质量验收使用独立接口并显示独立标题', async () => {
+    const wrapper = mount(ValidationPlanManager, {
+      props: { qualityAcceptance: true, projectId: childProject.id, projectCode: childProject.code, projectName: childProject.name, projects: [rootProject, childProject], token: 'token', currentUsername: 'engineer', currentDisplayName: '工程师', canEdit: true, canManageCatalog: true },
+      global: { plugins: [ElementPlus] },
+    })
+    await flushPromises()
+    expect(wrapper.get('h2').text()).toBe('质量验收')
+    expect(api.readProjectValidationPlan).toHaveBeenCalledWith(childProject.id, 'token', '/quality')
+    await wrapper.findAll('tbody tr').find(row => row.text().includes(childProject.code))!.trigger('click')
+    await flushPromises()
+    expect(api.readValidationCheckCatalog).toHaveBeenCalledWith('token', false, '/quality')
+    wrapper.unmount()
+  })
+
   beforeEach(() => {
     vi.clearAllMocks()
     api.readValidationCheckCatalog.mockResolvedValue({ categories: [category], items: [item] })

@@ -1226,6 +1226,15 @@ public sealed class MySqlMaterialRepository : IMaterialRepository
         return results;
     }
 
+    public async Task<IReadOnlyList<MaterialSyncBatchItem>> ListSyncBatchItemsForTaskAsync(Guid taskId, CancellationToken cancellationToken)
+    {
+        await using var connection = await OpenAsync(cancellationToken);
+        var rows = await connection.QueryAsync<SyncBatchItemRow>(new CommandDefinition(
+            "SELECT * FROM u9_material_sync_batch_item WHERE task_id=@TaskId", new { TaskId = taskId },
+            cancellationToken: cancellationToken));
+        return rows.Select(MapBatchItem).ToArray();
+    }
+
     public async Task<MaterialSyncBatchClaim?> ClaimNextSyncBatchItemAsync(
         DateTimeOffset now,
         DateTimeOffset leaseExpiresAt,

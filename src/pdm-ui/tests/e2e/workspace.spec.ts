@@ -1,6 +1,167 @@
 import { expect, test, type Page } from '@playwright/test'
+import type { AssessmentGroup } from '../../src/projectBudget'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { budgetCategories, calculateBudgetRow, assessmentItemTotal, assessmentSum } from '../../src/projectBudget'
+
+test('project budget compares costs and saves manual amounts', async ({ page }, testInfo) => {
+  const errors: string[] = []
+  page.on('pageerror', error => errors.push(error.message))
+  let assessmentGroups: AssessmentGroup[] = []
+  let assessmentSaved = false
+  await page.route(`**/api/projects/${projectId}/budget/assessments`, async route => {
+    if (route.request().method() === 'PUT') {
+      const body = route.request().postDataJSON()
+      expect(body.groups[0].category).toBe('Standard')
+      expect(body.groups[1].category).toBe('Labor')
+      expect(body.groups[1].items[0].laborCategory).toBe('MechanicalDesign')
+      assessmentGroups = body.groups
+      assessmentSaved = true
+    }
+    const amounts = Object.fromEntries(['Standard', 'MechanicalDesign'].map(category => [category, assessmentSum(assessmentGroups.flatMap(group => group.items.filter(item => (group.category === 'Labor' ? item.laborCategory : group.category) === category).map(assessmentItemTotal)))]))
+    await route.fulfill({ json: { laborRates: { MechanicalDesign: 100 }, canEditLaborRates: false, sheets: [{ projectId, projectCode: 'PRJ-REAL-001', projectName: '真实装配项目', designLead: 'engineer', canEdit: true, rowVersion: assessmentSaved ? 2 : 1, groups: assessmentGroups, total: assessmentSum(assessmentGroups.flatMap(group => group.items.map(assessmentItemTotal))), updatedAt: null, updatedBy: null }], amounts } })
+  })
+  let saved = false
+  const rows = budgetCategories.filter(category => category.key !== 'RiskReserve').map(category => calculateBudgetRow({ category: category.key,
+    budgetAmount: 10000, actualAmount: 1000, remainingAmount: 0, plannedHours: 100, hourlyRate: 100,
+    actualHours: 10, actualHourlyRate: 100, remainingHours: 0, note: null }, null))
+  await page.route(`**/api/projects/${projectId}/budget`, async route => {
+    if (route.request().method() === 'PUT') {
+      const body = route.request().postDataJSON()
+      expect(body.lines.some((line: { category: string }) => line.category === 'RiskReserve')).toBe(false)
+      expect(body.lines.find((line: { category: string }) => line.category === 'Standard').budgetAmount).toBe(12000)
+      expect(body.lines.find((line: { category: string }) => line.category === 'MechanicalDesign').actualAmount).toBe(777)
+      expect(body.lines.find((line: { category: string }) => line.category === 'MechanicalDesign').actualHours).toBe(10)
+      saved = true
+    }
+    await route.fulfill({ json: { projectId, rows, orders: [], canEdit: true, canViewReserve: false,
+      rowVersion: saved ? 2 : 1, updatedAt: null, updatedBy: null } })
+  })
+  await page.goto('/')
+  const login = page.getByLabel('登录PLM')
+  await login.getByRole('textbox', { name: '账号' }).fill('engineer')
+  await login.getByRole('textbox', { name: '密码' }).fill('correct-password')
+  await login.getByRole('button', { name: '登录', exact: true }).click()
+  await enterProject(page)
+  await page.getByRole('navigation', { name: '项目功能' }).getByRole('button', { name: '预算', exact: true }).click()
+  const budget = page.locator('.pdm-budget')
+  await expect(budget.locator('.pdm-budget__cards article')).toHaveCount(4)
+  await expect(budget).not.toContainText('风险预留')
+  await expect(budget).not.toContainText('现场电气工程师调试')
+  await expect(budget.locator('thead tr')).toHaveCount(2)
+  await expect(budget.locator('thead th')).toHaveCount(14)
+  await expect(budget.locator('tfoot tr')).toHaveCount(2)
+  await expect(budget.locator('tfoot').first()).toContainText('50,000.00')
+  await expect(budget.locator('.pdm-budget__cards article').nth(1)).toContainText('10.0%')
+  await expect(budget.locator('.pdm-budget__cards article').nth(2)).toContainText('50.0%')
+  await expect(budget.getByLabel('计划工时', { exact: true })).toHaveCount(0)
+  expect(await budget.locator('th, td').evaluateAll(cells => cells.every(cell => getComputedStyle(cell).textAlign === 'center'))).toBe(true)
+  const widths = await budget.locator('.pdm-budget__costs thead').first().locator('th').evaluateAll(cells => cells.map(cell => cell.getBoundingClientRect().width))
+  const laborWidths = await budget.locator('.pdm-budget__costs thead').nth(1).locator('th').evaluateAll(cells => cells.map(cell => cell.getBoundingClientRect().width))
+  expect(laborWidths).toEqual(widths)
+  await budget.getByLabel('预算金额', { exact: true }).first().fill('999999999')
+  await budget.getByLabel('预算金额', { exact: true }).first().blur()
+  expect(await budget.locator('.pdm-budget__costs thead').first().locator('th').evaluateAll(cells => cells.map(cell => cell.getBoundingClientRect().width))).toEqual(widths)
+  await budget.getByLabel('预算金额', { exact: true }).first().fill('12000')
+  await budget.getByLabel('预算金额', { exact: true }).first().blur()
+  await budget.getByLabel('实际金额', { exact: true }).nth(5).fill('777')
+  await budget.getByLabel('实际金额', { exact: true }).nth(5).blur()
+  await budget.getByRole('button', { name: '保存预算' }).click()
+  await expect.poll(() => saved).toBe(true)
+  await expect(budget.getByRole('button', { name: '保存预算' })).toBeDisabled()
+  await expect(budget.locator('.pdm-budget__cards article').first()).toContainText('人民币壹拾万元整')
+  const amountFont = await budget.locator('.pdm-budget__card-value').nth(1).locator('strong').first().evaluate(element => getComputedStyle(element).fontSize)
+  expect(await budget.locator('.pdm-budget__ratio').first().evaluate(element => getComputedStyle(element).fontSize)).toBe(amountFont)
+  const actualRatio = budget.locator('.pdm-budget__ratio').first()
+  expect(await actualRatio.evaluate(node => Math.abs(node.getBoundingClientRect().right - node.parentElement!.getBoundingClientRect().right))).toBeLessThan(1)
+  await actualRatio.hover()
+  await expect(page.getByRole('tooltip')).toHaveCount(0)
+  expect(await actualRatio.evaluate(node => node.parentElement!.classList.contains('pdm-budget__card-value'))).toBe(true)
+  await page.mouse.move(0, 0)
+  await budget.getByRole('tab', { name: '预算评估', exact: true }).click()
+  const assessmentList = budget.locator('.pdm-budget-assessment__list')
+  await expect(assessmentList.locator('thead th').first()).toHaveText('项目号')
+  for (const width of [1518, 1024]) {
+    await page.setViewportSize({ width, height: 855 })
+    const columns = await assessmentList.locator('thead th').evaluateAll(cells => cells.map(cell => cell.getBoundingClientRect().width))
+    expect(Math.abs(columns[1]! / columns[0]! - 2)).toBeLessThan(.02)
+    expect(await assessmentList.evaluate(table => table.getBoundingClientRect().right <= window.innerWidth && table.parentElement!.scrollWidth <= table.parentElement!.clientWidth)).toBe(true)
+  }
+  await page.setViewportSize({ width: 1280, height: 720 })
+  await assessmentList.locator('tbody tr td').nth(1).click()
+  await budget.getByRole('button', { name: '添加分组' }).click()
+  await budget.getByLabel('分组名称').first().fill('标准件评估')
+  await budget.getByRole('button', { name: '添加明细' }).first().click()
+  await budget.getByLabel('明细名称').first().fill('气缸')
+  await budget.getByLabel('评估数量').fill('2')
+  await budget.getByLabel('评估单价').first().fill('125')
+  await budget.getByLabel('评估单价').first().blur()
+  await expect(budget.locator('.pdm-assessment-group tfoot')).toContainText('250.00')
+  await budget.getByRole('button', { name: '添加分组' }).click()
+  await budget.getByLabel('分组名称').nth(1).fill('机械设计评估')
+  await budget.locator('.pdm-assessment-group').nth(1).locator('.el-select__wrapper').first().click()
+  await page.getByRole('option', { name: '人工成本', exact: true }).click()
+  await budget.getByRole('button', { name: '添加明细' }).nth(1).click()
+  await expect(budget.locator('.pdm-assessment-group').nth(1).locator('header .el-select')).toHaveCount(1)
+  await budget.locator('.pdm-assessment-group').nth(1).locator('tbody .el-select__wrapper').click()
+  await page.getByRole('option', { name: '机械设计', exact: true }).click()
+  await budget.getByLabel('明细名称').nth(1).fill('设计工时')
+  await budget.getByLabel('评估工时').fill('3')
+  await expect(budget.getByLabel('评估单价')).toHaveCount(1)
+  await expect(budget.getByRole('button', { name: '工时单价设置' })).toHaveCount(0)
+  await expect(budget.locator('.pdm-budget-assessment > footer')).toContainText('550.00')
+  await page.screenshot({ path: testInfo.outputPath('project-budget-assessment.png'), fullPage: false })
+  await budget.getByRole('button', { name: '保存评估' }).click()
+  await expect.poll(() => assessmentSaved).toBe(true)
+  await budget.getByRole('tab', { name: '预算评估', exact: true }).click()
+  await expect(assessmentList.locator('thead th')).toHaveText(['项目号', '项目名称', '主设', '物料成本', '人工成本', '更新时间', '操作'])
+  await expect(assessmentList.locator('tbody tr').first().locator('td').nth(3)).toContainText('250.00')
+  await expect(assessmentList.locator('tbody tr').first().locator('td').nth(4)).toContainText('300.00')
+  await expect(assessmentList.locator('tfoot td').nth(0)).toContainText('250.00')
+  await expect(assessmentList.locator('tfoot td').nth(1)).toContainText('300.00')
+  await expect(assessmentList.locator('tfoot td').nth(2)).toContainText('550.00')
+  await page.screenshot({ path: testInfo.outputPath('project-budget-assessment-list.png'), fullPage: false })
+  await budget.getByRole('tab', { name: '预算汇总', exact: true }).click()
+  await expect(budget.locator('.pdm-budget__costs tbody').first().locator('tr').first().locator('td').nth(1)).toContainText('250.00')
+  await expect(budget.locator('.pdm-budget__costs tbody').nth(1).locator('tr').first().locator('td').nth(1)).toContainText('300.00')
+  await page.screenshot({ path: testInfo.outputPath('project-budget-desktop.png'), fullPage: false })
+  await page.setViewportSize({ width: 1024, height: 768 })
+  await expect(budget.locator('.pdm-budget__cards article')).toHaveCount(4)
+  await page.screenshot({ path: testInfo.outputPath('project-budget-compact.png'), fullPage: false })
+  expect(errors).toEqual([])
+})
+
+test('assessment labor rates are configured separately from design lead estimates', async ({ page }) => {
+  let rates: Record<string, number | null> = {}
+  let rateVersion = 0
+  const directory = () => ({ ratesProjectId: projectId, ratesRowVersion: rateVersion, canEditLaborRates: true, laborRates: rates, amounts: {}, sheets: [{ projectId, projectCode: 'PRJ-REAL-001', projectName: '真实装配项目', designLead: 'other', canEdit: false, rowVersion: rateVersion, groups: [], total: null, updatedAt: null, updatedBy: null }] })
+  await page.route(`**/api/projects/${projectId}/budget/assessments/labor-rates`, async route => {
+    const body = route.request().postDataJSON()
+    expect(body.expectedRowVersion).toBe(0)
+    expect(body.rates.MechanicalDesign).toBe(150)
+    rates = body.rates; rateVersion++
+    await route.fulfill({ json: directory() })
+  })
+  await page.route(`**/api/projects/${projectId}/budget/assessments`, route => route.fulfill({ json: directory() }))
+  await page.route(`**/api/projects/${projectId}/budget`, route => route.fulfill({ json: { projectId, rows: [], orders: [], canEdit: false, canViewReserve: false, rowVersion: rateVersion } }))
+  await page.goto('/')
+  const login = page.getByLabel('登录PLM')
+  await login.getByRole('textbox', { name: '账号' }).fill('engineer')
+  await login.getByRole('textbox', { name: '密码' }).fill('correct-password')
+  await login.getByRole('button', { name: '登录', exact: true }).click()
+  await enterProject(page)
+  await page.getByRole('navigation', { name: '项目功能' }).getByRole('button', { name: '预算', exact: true }).click()
+  await page.getByRole('tab', { name: '预算评估', exact: true }).click()
+  await page.getByRole('button', { name: '工时单价设置' }).click()
+  const dialog = page.getByRole('dialog', { name: '工时单价设置' })
+  await expect(dialog.locator('tbody tr')).toHaveCount(5)
+  await dialog.getByLabel('机械设计工时单价', { exact: true }).fill('150')
+  await dialog.getByRole('button', { name: '保存单价' }).click()
+  await expect.poll(() => rateVersion).toBe(1)
+  await expect(dialog).not.toBeVisible()
+  await page.getByRole('button', { name: '工时单价设置' }).click()
+  await expect(dialog.getByLabel('机械设计工时单价', { exact: true })).toHaveValue('150.00')
+})
 
 const projectId = '11111111-1111-1111-1111-111111111111'
 let materialCodeApplications: Array<Record<string, unknown>> = []
@@ -60,7 +221,7 @@ const referenceChildren = Array.from({ length: 40 }, (_, index) => ({
 test.beforeEach(async ({ page }) => {
   materialCodeApplications = []
   let currentUsername = 'engineer'
-  await page.route(/^http:\/\/127\.0\.0\.1:(?:5080|5173|519[3-5])\/(?:api(?:\/.*)?|health)(?:\?.*)?$/, async (route) => {
+  await page.route(/^http:\/\/(?:127\.0\.0\.1:(?:5080|5173|519[3-5])|192\.168\.2\.8:5173)\/(?:api(?:\/.*)?|health)(?:\?.*)?$/, async (route) => {
     const path = new URL(route.request().url()).pathname
     const fulfill = (body: unknown, status = 200) => route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(body) })
     if (path === '/health') return fulfill({ status: 'ok' })
@@ -193,7 +354,7 @@ test('program template owner can delete a saved draft after confirmation', async
     primaryCompanyId: 'org-ks', activeCompanyId: 'org-ks', activeCompanyName: '昆山阿普顿自动化系统有限公司', crossCompanyView: false,
     accessibleCompanies: [{ id: 'org-ks', name: '昆山阿普顿自动化系统有限公司', code: '7' }],
   } }))
-  await page.route(/^http:\/\/127\.0\.0\.1:(?:5080|5173|519[3-5])\/api\/program-templates(?:\/.*)?(?:\?.*)?$/, route => {
+  await page.route(/^http:\/\/(?:127\.0\.0\.1:(?:5080|5173|519[3-5])|192\.168\.2\.8:5173)\/api\/program-templates(?:\/.*)?(?:\?.*)?$/, route => {
     const url = new URL(route.request().url())
     if (url.pathname === '/api/program-templates/tasks/mine') return route.fulfill({ json: [] })
     if (url.pathname === '/api/program-templates/options') return route.fulfill({ json: { categories: [], vendors: [], platforms: [] } })
@@ -231,15 +392,20 @@ test('program template owner can delete a saved draft after confirmation', async
 })
 
 test('project overview renders five-stage progress and shipping countdown', async ({ page }, testInfo) => {
+  await page.clock.setFixedTime(new Date('2026-09-18T12:00:00+08:00'))
+  await page.route('**/api/quality/validation-plan-approval-tasks/mine', route => route.fulfill({ json: [] }))
   const overviewProject = { id: projectId, code: 'PRJ-REAL-001', name: '真实装配项目', owner: 'engineer', stage: 'Design', vaultLocation: 'D:\\PDM\\PRJ-REAL-001', releaseLocation: 'D:\\Release\\PRJ-REAL-001', isActive: true, organizationId: 'org-ks', quantity: 1, serialNumbers: ['70000001'], executionUnitName: '自动化事业部', primaryProjectManager: 'engineer', collaborativeProjectManagers: [], designLead: 'engineer', designers: ['engineer'], phaseOwners: { StandardProcurement: 'engineer' }, canManageMainStaffing: true, canAssignDesigners: true }
   await page.route('**/api/projects', route => route.fulfill({ json: [overviewProject] }))
   await page.route(`**/api/projects/${projectId}`, route => route.fulfill({ json: overviewProject }))
+  let isLagging = false
+  let isAtRisk = false
   await page.route(`**/api/projects/${projectId}/plan/portfolio`, route => route.fulfill({ json: {
     rootProjectId: projectId, currentStage: 'Design', completionPercent: 62, laggingProjectCount: 0, riskProjectCount: 0, plannedStart: '2026-08-01', plannedFinish: '2026-10-18',
-    projects: [{ projectId, projectCode: 'PRJ-REAL-001', projectName: '真实装配项目', isRoot: true, hasPlan: true, currentStage: 'Design', completionPercent: 62, plannedFinish: '2026-10-18', isLagging: false, isAtRisk: false, plan: {
+    projects: [{ projectId, projectCode: 'PRJ-REAL-001', projectName: '真实装配项目', isRoot: true, hasPlan: true, currentStage: 'Design', completionPercent: 62, plannedFinish: '2026-10-18', isLagging, isAtRisk, plan: {
       id: 'plan-1', projectId, currentStage: 'Design', plannedStart: '2026-08-01', plannedFinish: '2026-10-18', approvalStatus: 'Approved', stages: [{ code: 'Design', name: '设计' }], tasks: [
-        { id: 'task-drawing', name: '完成图纸审核', stage: 'Design', assignee: 'engineer', plannedStart: '2026-09-16', plannedFinish: '2026-09-18', completionPercent: 40, status: 'InProgress', predecessorTaskIds: [], weight: 1, isMilestone: false, isRequired: true, sortOrder: 1, durationDays: 3 },
+        { id: 'task-drawing', name: '完成图纸审核', stage: 'Design', assignee: 'engineer', plannedStart: '2026-09-16', plannedFinish: '2026-09-18', actualStart: isLagging || isAtRisk ? '2026-09-16' : undefined, actualFinish: isLagging || isAtRisk ? '2026-09-17' : undefined, completionPercent: 40, status: 'InProgress', predecessorTaskIds: [], weight: 1, isMilestone: false, isRequired: true, sortOrder: 1, durationDays: 3 },
         { id: 'task-bom', name: '标准件BOM核对', stage: 'Design', assignee: 'engineer', plannedStart: '2026-09-17', plannedFinish: '2026-09-19', completionPercent: 0, status: 'NotStarted', predecessorTaskIds: [], weight: 1, isMilestone: false, isRequired: true, sortOrder: 2, durationDays: 3 },
+        { id: 'task-material', name: '备料主任务', stage: 'MaterialPreparation', plannedStart: '2026-09-17', plannedFinish: '2026-09-19', completionPercent: 100, status: 'Completed', predecessorTaskIds: [], weight: 1, isMilestone: false, sortOrder: 3, durationDays: 3 },
       ],
     } }],
   } }))
@@ -271,47 +437,53 @@ test('project overview renders five-stage progress and shipping countdown', asyn
   await expect(overview.getByLabel('项目状态与下一步')).toContainText('设计阶段')
   await expect(overview.getByLabel('项目状态与下一步')).toContainText('项目进度 62%')
   await expect(overview.getByLabel('项目状态与下一步')).toContainText('2026/10/18')
-  await expect(overview.getByLabel('五阶段计划')).toContainText('设计')
-  await expect(overview.getByLabel('五阶段计划')).toContainText('计划 2026/09/16 - 2026/09/19')
-  await expect(overview.getByLabel('五阶段计划')).toContainText('完成 20%')
-  expect(await overview.getByLabel('五阶段计划').locator('.pdm-overview-phase-plan > span > i').first().evaluate(element => getComputedStyle(element).height)).toBe('10px')
-  await expect(overview.getByLabel('发货倒计时')).not.toContainText('计划发货')
-  await expect(overview.getByLabel('发货倒计时')).toContainText('2026/09/19')
-  await expect(overview.getByLabel('发货倒计时').locator('span')).toHaveText(/^(距发货|已超期)$/)
-  await expect(overview.getByLabel('发货倒计时').locator('strong')).toHaveText(/\d+天/)
-  expect(await overview.getByLabel('发货倒计时').locator('strong').evaluate(element => getComputedStyle(element).fontSize)).toBe('40px')
-  expect(await overview.getByLabel('发货倒计时').locator('strong').evaluate(element => getComputedStyle(element).gridColumnStart)).toBe('2')
-  expect(await overview.getByLabel('发货倒计时').locator('strong small').evaluate(element => getComputedStyle(element).fontSize)).toBe('12px')
-  expect(await overview.getByLabel('五阶段计划').locator('.pdm-overview-phase-plan strong').first().evaluate(element => getComputedStyle(element).fontSize)).toBe('14px')
-  expect(await overview.getByLabel('项目待办与风险').getByRole('button').first().locator('span').evaluate(element => getComputedStyle(element).fontSize)).toBe('14px')
-  expect(await overview.getByLabel('五阶段计划').locator('.pdm-overview-phase-plan').first().evaluate(element => getComputedStyle(element).gridTemplateRows)).toBe('18px 20px 16px')
-  expect(await overview.getByLabel('五阶段计划').locator('.pdm-overview-phase-plan').first().evaluate(element => getComputedStyle(element).rowGap)).toBe('4px')
-  expect(await overview.getByLabel('五阶段计划').locator('.pdm-overview-phase-plan').first().evaluate(element => getComputedStyle(element).justifyItems)).toBe('start')
-  expect(await overview.getByLabel('发货倒计时').evaluate(element => getComputedStyle(element).gridTemplateRows)).toBe('18px 20px 16px')
-  expect(await overview.getByLabel('发货倒计时').evaluate(element => getComputedStyle(element).rowGap)).toBe('4px')
-  expect(await overview.getByLabel('发货倒计时').evaluate(element => getComputedStyle(element).paddingLeft)).toBe('9px')
-  expect(await overview.getByLabel('项目待办与风险').getByRole('button').first().evaluate(element => getComputedStyle(element).alignItems)).toBe('flex-start')
-  expect(await overview.getByLabel('项目待办与风险').getByRole('button').first().evaluate(element => getComputedStyle(element).justifyItems)).toBe('start')
-  const [phaseCard, phaseTitle, phaseProgress, shippingCard, shippingTitle, shippingDate, alertCard, alertTitle, alertAction] = await Promise.all([
-    overview.getByLabel('五阶段计划').locator('.pdm-overview-phase-plan').first().boundingBox(),
-    overview.getByLabel('五阶段计划').locator('.pdm-overview-phase-plan > div').first().boundingBox(),
-    overview.getByLabel('五阶段计划').locator('.pdm-overview-phase-plan > span').first().boundingBox(),
-    overview.getByLabel('发货倒计时').boundingBox(),
-    overview.getByLabel('发货倒计时').locator('span').boundingBox(),
-    overview.getByLabel('发货倒计时').locator('em').boundingBox(),
-    overview.getByLabel('项目待办与风险').getByRole('button').first().boundingBox(),
-    overview.getByLabel('项目待办与风险').getByRole('button').first().locator('span').boundingBox(),
-    overview.getByLabel('项目待办与风险').getByRole('button').first().locator('em').boundingBox(),
-  ])
-  expect([phaseCard, phaseTitle, phaseProgress, shippingCard, shippingTitle, shippingDate, alertCard, alertTitle, alertAction].every(Boolean)).toBe(true)
-  expect(Math.abs(phaseTitle!.x - phaseCard!.x - 9)).toBeLessThanOrEqual(1)
-  expect(Math.abs(shippingTitle!.x - shippingCard!.x - 9)).toBeLessThanOrEqual(1)
-  expect(Math.abs(alertTitle!.x - alertCard!.x - 9)).toBeLessThanOrEqual(1)
-  expect(Math.abs(phaseTitle!.y - shippingTitle!.y)).toBeLessThanOrEqual(1)
-  expect(Math.abs(phaseTitle!.y - alertTitle!.y)).toBeLessThanOrEqual(1)
-  expect(Math.abs(phaseProgress!.y - shippingDate!.y)).toBeLessThanOrEqual(1)
-  expect(Math.abs(phaseProgress!.y - alertAction!.y)).toBeLessThanOrEqual(1)
-  await expect(overview.getByLabel('项目核心业务概览').locator('article')).toHaveCount(1)
+  await expect(overview.getByLabel('三行项目进度')).toContainText('设计')
+  await expect(overview.getByLabel('实际进度')).toContainText('未填报实际日期')
+  await expect(overview.getByLabel('当前计划').locator('button').first()).toHaveAttribute('title', /2026-09-16 — 2026-09-19/)
+  await expect(overview.getByLabel('初始基线')).toContainText('未建立基线')
+  await expect(overview.locator('.pdm-overview-timeline__legend')).toHaveCount(0)
+  await expect(overview.getByLabel('每日时间轴')).toHaveCount(0)
+  await expect(overview.locator('.pdm-overview-timeline__day-line')).toHaveCount(0)
+  await expect(overview.getByLabel('三行项目进度')).not.toContainText('今天')
+  await expect(overview.locator('.pdm-overview-timeline__milestone')).toHaveCount(0)
+  const dateArrows = overview.locator('.pdm-overview-timeline__today-arrow')
+  await expect(dateArrows).toHaveCount(1)
+  await expect(overview.getByLabel('实际进度').locator('.pdm-overview-timeline__today-arrow')).toHaveCount(0)
+  for (const arrow of await dateArrows.all()) {
+    await expect(arrow).toHaveClass(/is-success/)
+    await expect(arrow).toHaveAttribute('title', '2026-09-18 · 正常')
+    expect(await arrow.evaluate(element => getComputedStyle(element).borderBottomColor)).toBe('rgb(34, 163, 90)')
+  }
+  await overview.getByLabel('项目状态与下一步').screenshot({ path: testInfo.outputPath('timeline-no-actual-arrow.png') })
+  await expect(overview.locator('.pdm-overview-timeline__speeder')).toHaveCount(0)
+  isLagging = true
+  await overview.getByRole('button', { name: '刷新项目概览' }).click()
+  const speeder = overview.getByRole('img', { name: '已滞后，正在加速追赶' })
+  await expect(speeder).toBeVisible()
+  await expect(dateArrows).toHaveCount(2)
+  const arrowPositions = await dateArrows.evaluateAll(elements => elements.map(element => element.getBoundingClientRect().x))
+  expect(arrowPositions[0]).toBe(arrowPositions[1])
+  const actualBar = await overview.getByLabel('实际进度').locator('.pdm-overview-timeline__segment').boundingBox()
+  const speederBox = await speeder.boundingBox()
+  expect(speederBox!.x).toBeGreaterThan(actualBar!.x + actualBar!.width)
+  expect(speederBox!.height).toBeLessThanOrEqual(27)
+  expect(Math.abs(speederBox!.y + speederBox!.height / 2 - actualBar!.y - actualBar!.height / 2)).toBeLessThanOrEqual(.5)
+  expect(await speeder.locator('.pdm-overview-speeder__loader').evaluate(element => getComputedStyle(element).animationName)).toBe('pdm-speeder')
+  await overview.getByLabel('项目状态与下一步').screenshot({ path: testInfo.outputPath('timeline-speeder.png') })
+  await page.emulateMedia({ reducedMotion: 'reduce' })
+  expect(await speeder.locator('.pdm-overview-speeder__loader').evaluate(element => getComputedStyle(element).animationName)).toBe('none')
+  await page.emulateMedia({ reducedMotion: 'no-preference' })
+  isAtRisk = true
+  isLagging = false
+  await overview.getByRole('button', { name: '刷新项目概览' }).click()
+  await expect(overview.getByRole('img', { name: '有风险，正在加速追赶' })).toBeVisible()
+  await overview.getByLabel('项目状态与下一步').screenshot({ path: testInfo.outputPath('timeline-speeder-risk.png') })
+  isAtRisk = false
+  await overview.getByRole('button', { name: '刷新项目概览' }).click()
+  await expect(overview.getByRole('button', { name: '刷新项目概览' })).toBeEnabled()
+  await expect(overview.getByLabel('项目待办与风险').locator('.pdm-overview-alerts > *')).toHaveCount(3)
+  await expect(overview.getByRole('button', { name: '查看关键物料' })).toHaveCount(0)
+  await expect(overview.getByLabel('项目核心业务概览').locator('article')).toHaveCount(2)
   await expect(overview.getByLabel('当前阶段任务')).toHaveCount(0)
   const portfolio = overview.getByLabel('项目总览')
   await expect(portfolio.locator('thead th')).toHaveText(['项目', '执行', '阶段', '计划完成', '剩余工期', '进度', '负责人', '当前', '状态', '备注'])
@@ -325,8 +497,8 @@ test('project overview renders five-stage progress and shipping countdown', asyn
   await expect(portfolioRow.locator('td').nth(3)).toHaveText('2026/09/19')
   await expect(portfolioRow.locator('td').nth(3)).toHaveAttribute('title', /当前主任务“设计”/)
   await expect(portfolioRow.locator('td').nth(4)).toHaveText(/^(逾期 \d+ 天|剩余 \d+ 天)$/)
-  await expect(portfolioRow.locator('td').nth(8)).toContainText('完成图纸审核')
-  await expect(portfolioRow.locator('td').nth(8).locator('span')).toHaveAttribute('title', /完成图纸审核/)
+  await expect(portfolioRow.locator('td').nth(7)).toContainText('完成图纸审核')
+  await expect(portfolioRow.locator('td').nth(7)).toHaveAttribute('title', /完成图纸审核/)
   const manageRecord = portfolio.getByRole('button', { name: '维护 PRJ-REAL-001 的记录' })
   await expect(manageRecord).toBeVisible()
   await manageRecord.click()
@@ -362,38 +534,53 @@ test('project overview renders five-stage progress and shipping countdown', asyn
   await expect(overview.getByLabel('项目团队')).toContainText('标准件采购真实工程师')
   await expect(overview.getByLabel('项目团队').locator('thead th')).toHaveText(['职责', '负责人', '职责', '负责人'])
   await expect(overview.getByLabel('项目团队').locator('tbody tr')).toHaveCount(5)
-  await expect(overview.getByRole('button', { name: '配置负责人' })).toBeVisible()
+  await expect(overview.getByRole('button', { name: '配置团队' })).toBeVisible()
   await page.setViewportSize({ width: 1537, height: 889 })
   const statusPanel = overview.getByLabel('项目状态与下一步')
   const statusBounds = async () => {
     const panel = (await statusPanel.boundingBox())!
-    const lastAlert = (await statusPanel.locator('.pdm-overview-alerts > :last-child').boundingBox())!
+    const lastAlert = (await overview.getByLabel('项目待办与风险').locator('.pdm-overview-alerts > :last-child').boundingBox())!
     return { panel, lastAlert }
   }
   for (const width of [1537, 1285]) {
     await page.setViewportSize({ width, height: 889 })
     const { panel, lastAlert } = await statusBounds()
-    expect(lastAlert.x + lastAlert.width).toBeLessThanOrEqual(panel.x + panel.width + 1)
+    const alerts = (await overview.getByLabel('项目待办与风险').boundingBox())!
+    const team = (await overview.getByLabel('项目团队').boundingBox())!
+    const reserved = (await overview.getByLabel('预留区域').boundingBox())!
+    const containerGap = await overview.locator('.pdm-overview-layout').evaluate(element => parseFloat(getComputedStyle(element).rowGap))
+    expect(Math.abs(team.height - reserved.height)).toBeLessThanOrEqual(1)
+    expect(Math.abs(reserved.y - team.y - team.height - containerGap)).toBeLessThanOrEqual(1)
+    await expect(overview.getByLabel('预留区域')).toBeEmpty()
+    const teamCells = overview.getByLabel('项目团队').locator('th, td')
+    expect(await teamCells.evaluateAll(cells => cells.every(cell => getComputedStyle(cell).textAlign === 'center' && getComputedStyle(cell).verticalAlign === 'middle'))).toBe(true)
+    const teamRows = await overview.getByLabel('项目团队').locator('tr').evaluateAll(rows => rows.map(row => row.getBoundingClientRect().height))
+    expect(Math.max(...teamRows) - Math.min(...teamRows)).toBeLessThanOrEqual(1)
+    expect(Math.abs(alerts.x - team.x)).toBeLessThanOrEqual(2)
+    expect(Math.abs(alerts.x + alerts.width - team.x - team.width)).toBeLessThanOrEqual(2)
+    const left = (await overview.getByLabel('项目总览').boundingBox())!
+    expect(Math.abs(panel.x - left.x)).toBeLessThanOrEqual(1)
+    expect(Math.abs(panel.width - left.width)).toBeLessThanOrEqual(1)
+    expect(lastAlert.x + lastAlert.width).toBeLessThanOrEqual(alerts.x + alerts.width + 1)
     expect(lastAlert.y + lastAlert.height).toBeLessThanOrEqual(panel.y + panel.height + 1)
   }
   await page.setViewportSize({ width: 1537, height: 889 })
   const teamActions = overview.getByLabel('项目团队').locator('.pdm-overview-team__actions')
   expect(await teamActions.evaluate(element => getComputedStyle(element).display)).toBe('flex')
-  const [staffingButton, ownerButton] = await Promise.all([teamActions.getByRole('button', { name: '配置分工' }).boundingBox(), teamActions.getByRole('button', { name: '配置负责人' }).boundingBox()])
-  expect(Math.abs(staffingButton!.y - ownerButton!.y)).toBeLessThanOrEqual(1)
+  await expect(teamActions.getByRole('button', { name: '配置团队' })).toBeVisible()
   expect(await portfolio.locator('thead th').last().evaluate(cell => cell.getBoundingClientRect().right <= cell.closest('.pdm-project-portfolio__table-wrap')!.getBoundingClientRect().right)).toBe(true)
   expect(await portfolioRow.locator('.pdm-project-portfolio__overdue').evaluate(element => getComputedStyle(element).textAlign)).toBe('center')
   await page.screenshot({ path: join(tmpdir(), 'pdm-overview-1537x889.png') })
-  await teamActions.getByRole('button', { name: '配置分工' }).click()
-  const staffingDialog = page.getByRole('dialog', { name: '配置主项目分工 · PRJ-REAL-001' })
-  await expect(staffingDialog).toContainText('项目经理（限1名）')
-  await expect(staffingDialog).toContainText('主设（可多选）')
+  await teamActions.getByRole('button', { name: '配置团队' }).click()
+  const staffingDialog = page.getByRole('dialog', { name: '配置项目团队 · PRJ-REAL-001' })
+  await expect(staffingDialog).toContainText('负责主项目统筹，限选1名')
+  await expect(staffingDialog).toContainText('负责主项目设计统筹，可多选')
   await staffingDialog.getByRole('button', { name: '取消' }).click()
+  await expect(staffingDialog).toBeHidden()
   await expect(overview.getByLabel('项目位置')).toHaveCount(0)
   const overviewBox = await overview.boundingBox()
   expect(overviewBox).not.toBeNull()
   expect((overviewBox?.y ?? 0) + (overviewBox?.height ?? 0)).toBeLessThanOrEqual(page.viewportSize()!.height + 1)
-  expect(await overview.getByLabel('五阶段计划').locator('.pdm-overview-phase-plan').first().evaluate(element => getComputedStyle(element).fontSize)).toBe('11px')
   await expect(page.locator('vite-error-overlay')).toHaveCount(0)
   await page.screenshot({ path: testInfo.outputPath('project-overview-command-center.png') })
   expect(errors).toEqual([])
@@ -1833,7 +2020,7 @@ test('material relation editor keeps confirmed columns inside the dialog and sav
   let searchedByModel = false
   let savedBody: Record<string, unknown> | null = null
   await page.route('**/api/materials/page**', route => route.fulfill({ json: { items: [mainMaterial], total: 1, page: 1, pageSize: 50 } }))
-  await page.route(/^http:\/\/127\.0\.0\.1:(?:5080|5173|519[3-5])\/api\/materials(?:\?.*)?$/, route => {
+  await page.route(/^http:\/\/(?:127\.0\.0\.1:(?:5080|5173|519[3-5])|192\.168\.2\.8:5173)\/api\/materials(?:\?.*)?$/, route => {
     const query = new URL(route.request().url()).searchParams.get('query') ?? ''
     if (query.includes('MR-J3')) searchedByModel = true
     return route.fulfill({ json: query && !optionMaterial.specification.includes(query) ? [] : [mainMaterial, optionMaterial] })

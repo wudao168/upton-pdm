@@ -748,6 +748,8 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
+.procurement-tracking__heading{font-size:12px;--el-font-size-base:12px}
+.procurement-tracking__heading :deep(.el-button){font-size:12px}
 .procurement-tracking__filters{display:flex;flex-wrap:nowrap;align-items:center;gap:4px;flex:0 0 auto;margin:0;white-space:nowrap}
 .procurement-tracking__brand-filter{width:90px;flex:0 0 90px}
 .procurement-tracking__brand-filter{height:30px;box-sizing:border-box;border:1px solid var(--pdm-border);border-radius:4px;background:var(--pdm-panel,#fff);color:var(--pdm-text);font:inherit;font-size:12px;padding:0 8px;min-width:0}

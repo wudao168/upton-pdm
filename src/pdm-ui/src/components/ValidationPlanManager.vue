@@ -9,6 +9,7 @@ import type { ProjectSummary, ProjectValidationPlan, ProjectValidationPlanItem, 
 import { useUserDisplayName } from '../userDisplay'
 
 const props = defineProps<{
+  qualityAcceptance?: boolean
   projectId: string
   projectCode: string
   projectName: string
@@ -21,15 +22,18 @@ const props = defineProps<{
   canDecideApproval?: boolean
   requestedProjectId?: string
 }>()
-const emit = defineEmits<{ requestHandled: [] }>()
+const emit = defineEmits<{ requestHandled: []; viewChanged: [view: string] }>()
 
 const displayUserName = useUserDisplayName()
+const planScope = (): [] | [string] => props.qualityAcceptance ? ['/quality'] : []
+const readCatalog = () => props.qualityAcceptance ? readValidationCheckCatalog(props.token, false, '/quality') : readValidationCheckCatalog(props.token)
 
 const informationSources = ['技术协议', '技术方案', '内部评审', '客户评审']
 const customCategoryName = '自定义'
 const emptyCatalog = (): ValidationCheckCatalog => ({ categories: [], items: [] })
 const loading = ref(false)
 const view = ref<'summary' | 'detail'>('summary')
+watch(view, value => emit('viewChanged', value))
 const detailProject = ref<ProjectSummary | null>(null)
 const summaryPlans = ref<Record<string, ProjectValidationPlan | null>>({})
 const summaryErrors = ref<Record<string, boolean>>({})
@@ -172,7 +176,7 @@ async function loadSummary() {
       return
     }
     try {
-      plans[project.id] = await readProjectValidationPlan(project.id, props.token)
+      plans[project.id] = await readProjectValidationPlan(project.id, props.token, ...planScope())
     } catch {
       plans[project.id] = null
       errors[project.id] = true
@@ -207,12 +211,12 @@ async function loadDetail(projectId: string) {
   hydrating.value = true
   try {
     const [nextCatalog, nextPlan] = await Promise.all([
-      readValidationCheckCatalog(props.token),
-      readProjectValidationPlan(projectId, props.token),
+      readCatalog(),
+      readProjectValidationPlan(projectId, props.token, ...planScope()),
     ])
     catalog.value = nextCatalog
     hydratePlan(nextPlan)
-    executionRecords.value = nextPlan ? (await readValidationPlanExecutionRecords(nextPlan.id, props.token) ?? []) : []
+    executionRecords.value = nextPlan ? (await readValidationPlanExecutionRecords(nextPlan.id, props.token, ...planScope()) ?? []) : []
     dirty.value = false
   } catch (error) {
     ElMessage.error(errorMessage(error))
@@ -244,7 +248,7 @@ function currentShanghaiDate() {
 
 async function openSelection() {
   try {
-    catalog.value = await readValidationCheckCatalog(props.token)
+    catalog.value = await readCatalog()
     selectedItemIds.value = []
     selectionQuery.value = ''
     const currentCategory = activeCategories.value.find(item => item.id === selectionCategoryId.value && availableItemCount(item.id) > 0)
@@ -418,13 +422,13 @@ async function savePlan() {
       ? await appendProjectValidationPlanItems(activeDetailProject.value.id, {
           expectedRowVersion: plan.value.rowVersion,
           items: appendedRows.value.map((item, index) => serializePlanItem(item, index)),
-        }, props.token)
+        }, props.token, ...planScope())
       : await saveProjectValidationPlan(activeDetailProject.value.id, {
           preparedBy: preparedBy.value || null,
           validationDate: planDate.value || null,
           expectedRowVersion: plan.value?.rowVersion ?? null,
           items: rows.value.map(serializePlanItem),
-        }, props.token)
+        }, props.token, ...planScope())
     hydrating.value = true
     hydratePlan(saved)
     dirty.value = false
@@ -444,7 +448,7 @@ async function saveValidationStandards() {
     const saved = await updateProjectValidationPlanStandards(activeDetailProject.value.id, {
       expectedRowVersion: plan.value.rowVersion,
       items: standardChanges.value.map(item => ({ itemId: item.id, validationStandard: item.validationStandard || null })),
-    }, props.token)
+    }, props.token, ...planScope())
     hydrating.value = true
     hydratePlan(saved)
     dirty.value = false
@@ -465,7 +469,7 @@ async function exportPlan() {
   }
   exporting.value = true
   try {
-    await exportProjectValidationPlan(activeDetailProject.value.id, activeDetailProject.value.code, props.token)
+    await exportProjectValidationPlan(activeDetailProject.value.id, activeDetailProject.value.code, props.token, ...planScope())
     ElMessage.success('验证计划Excel已导出')
   } catch (error) {
     ElMessage.error(errorMessage(error))
@@ -477,7 +481,7 @@ async function exportPlan() {
 async function createRevision() {
   if (!activeDetailProject.value || !plan.value) return
   try {
-    const saved = await createProjectValidationPlanRevision(activeDetailProject.value.id, plan.value.rowVersion, props.token)
+    const saved = await createProjectValidationPlanRevision(activeDetailProject.value.id, plan.value.rowVersion, props.token, ...planScope())
     hydrating.value = true
     hydratePlan(saved)
     dirty.value = false
@@ -495,7 +499,7 @@ async function submitForApproval() {
   try {
     await ElMessageBox.confirm(`提交验证计划R${plan.value.revisionNumber}后，本版本在审批完成前不可修改。`, '提交验证计划审批', { type: 'warning', confirmButtonText: '提交审批', cancelButtonText: '取消' })
     submitting.value = true
-    hydratePlan(await submitProjectValidationPlan(activeDetailProject.value.id, plan.value.rowVersion, props.token))
+    hydratePlan(await submitProjectValidationPlan(activeDetailProject.value.id, plan.value.rowVersion, props.token, ...planScope()))
     dirty.value = false
     ElMessage.success('验证计划已提交审批')
   } catch (error) {
@@ -515,7 +519,7 @@ async function decideCurrent(decision: 'Approved' | 'Rejected') {
       confirmButtonText: decision === 'Approved' ? '批准' : '退回', cancelButtonText: '取消', type: decision === 'Approved' ? 'success' : 'warning',
     })
     submitting.value = true
-    hydratePlan(await decideValidationPlanApproval(task.id, decision, value, props.token))
+    hydratePlan(await decideValidationPlanApproval(task.id, decision, value, props.token, ...planScope()))
     dirty.value = false
     ElMessage.success(decision === 'Approved' ? '审批已流转' : '验证计划已退回')
   } catch (error) {
@@ -533,7 +537,7 @@ async function uploadFile(kind: 'PlanDocument' | 'Evidence', event: Event) {
   if (!file || !plan.value || !activeDetailProject.value) return
   uploading.value = true
   try {
-    const attachment = await uploadValidationPlanAttachment(plan.value.id, kind, file, props.token)
+    const attachment = await uploadValidationPlanAttachment(plan.value.id, kind, file, props.token, ...planScope())
     await loadDetail(activeDetailProject.value.id)
     ElMessage.success(kind === 'PlanDocument' ? '验证计划文件已归档' : '佐证附件已归档')
     if (kind === 'PlanDocument' && isRecognizableAttachment(attachment)) await recognizeAttachment(attachment)
@@ -551,7 +555,7 @@ function isRecognizableAttachment(file: ValidationPlanAttachment) {
 async function recognizeAttachment(file: ValidationPlanAttachment) {
   recognizing.value = true
   try {
-    const draft = await recognizeValidationPlanAttachment(file.id, props.token)
+    const draft = await recognizeValidationPlanAttachment(file.id, props.token, ...planScope())
     recognitionDraft.value = draft
     recognitionRows.value = draft.candidates.map(item => ({
       ...item,
@@ -591,8 +595,8 @@ async function confirmRecognition() {
         responsiblePerson: item.responsiblePerson || null,
         remark: item.remark || null,
       })),
-    }, props.token)
-    executionRecords.value = await readValidationPlanExecutionRecords(plan.value.id, props.token)
+    }, props.token, ...planScope())
+    executionRecords.value = await readValidationPlanExecutionRecords(plan.value.id, props.token, ...planScope())
     recognitionOpen.value = false
     ElMessage.success('识别结果已确认为验证执行记录')
   } catch (error) {
@@ -611,7 +615,7 @@ function planItemLabel(planItemId: string) {
 }
 
 async function downloadAttachment(id: string, fileName: string) {
-  try { await downloadValidationPlanAttachment(id, fileName, props.token) }
+  try { await downloadValidationPlanAttachment(id, fileName, props.token, ...planScope()) }
   catch (error) { ElMessage.error(errorMessage(error)) }
 }
 
@@ -623,7 +627,7 @@ async function openCatalogManager() {
 async function reloadCatalogManager(preferredCategoryId = catalogCategoryId.value) {
   catalogLoading.value = true
   try {
-    catalogAll.value = await readValidationCheckCatalog(props.token, true)
+    catalogAll.value = await readValidationCheckCatalog(props.token, true, ...planScope())
     catalogCategoryId.value = catalogAll.value.categories.some(item => item.id === preferredCategoryId)
       ? preferredCategoryId
       : catalogAll.value.categories[0]?.id ?? ''
@@ -639,7 +643,7 @@ function editCategory(category?: ValidationCheckCategory) {
     id: category.id, name: category.name, sortOrder: category.sortOrder, isActive: category.isActive,
     note: category.note ?? '', rowVersion: category.rowVersion,
   } : {
-    id: '', name: '', sortOrder: (catalogAll.value.categories.at(-1)?.sortOrder ?? 0) + 10,
+    id: '', name: '', sortOrder: (catalogAll.value.categories.slice(-1)[0]?.sortOrder ?? 0) + 10,
     isActive: true, note: '', rowVersion: 0,
   })
   categoryEditorOpen.value = true
@@ -654,10 +658,10 @@ async function submitCategory() {
       isActive: categoryForm.isActive,
       note: categoryForm.note || null,
       expectedRowVersion: categoryForm.id ? categoryForm.rowVersion : null,
-    }, props.token)
+    }, props.token, ...planScope())
     categoryEditorOpen.value = false
     await reloadCatalogManager(saved.id)
-    catalog.value = await readValidationCheckCatalog(props.token)
+    catalog.value = await readCatalog()
     ElMessage.success(categoryForm.id ? '验证分类已更新' : '验证分类已新增')
   } catch (error) {
     ElMessage.error(errorMessage(error))
@@ -668,7 +672,7 @@ async function removeCategory(category: ValidationCheckCategory) {
   if (category.itemCount || category.referenceCount) return ElMessage.warning('该分类包含检查项或已有项目引用，只能停用。')
   try {
     await ElMessageBox.confirm(`确定删除分类“${category.name}”？`, '删除验证分类', { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' })
-    await deleteValidationCheckCategory(category.id, category.rowVersion, props.token)
+    await deleteValidationCheckCategory(category.id, category.rowVersion, props.token, ...planScope())
     await reloadCatalogManager()
     ElMessage.success('验证分类已删除')
   } catch (error) {
@@ -684,7 +688,7 @@ function editItem(item?: ValidationCheckItem) {
     isActive: item.isActive, note: item.note ?? '', rowVersion: item.rowVersion,
   } : {
     id: '', categoryId, content: '', defaultInformationSource: '内部评审',
-    sortOrder: (managedItems.value.at(-1)?.sortOrder ?? 0) + 10, isActive: true, note: '', rowVersion: 0,
+    sortOrder: (managedItems.value.slice(-1)[0]?.sortOrder ?? 0) + 10, isActive: true, note: '', rowVersion: 0,
   })
   itemEditorOpen.value = true
 }
@@ -700,10 +704,10 @@ async function submitItem() {
       isActive: itemForm.isActive,
       note: itemForm.note || null,
       expectedRowVersion: itemForm.id ? itemForm.rowVersion : null,
-    }, props.token)
+    }, props.token, ...planScope())
     itemEditorOpen.value = false
     await reloadCatalogManager(saved.categoryId)
-    catalog.value = await readValidationCheckCatalog(props.token)
+    catalog.value = await readCatalog()
     ElMessage.success(itemForm.id ? '检查项已更新' : '检查项已新增')
   } catch (error) {
     ElMessage.error(errorMessage(error))
@@ -714,9 +718,9 @@ async function removeCatalogItem(item: ValidationCheckItem) {
   if (item.referenceCount) return ElMessage.warning('该检查项已有项目引用，只能停用。')
   try {
     await ElMessageBox.confirm('确定从全局库删除该检查项？', '删除检查项', { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' })
-    await deleteValidationCheckItem(item.id, item.rowVersion, props.token)
+    await deleteValidationCheckItem(item.id, item.rowVersion, props.token, ...planScope())
     await reloadCatalogManager(item.categoryId)
-    catalog.value = await readValidationCheckCatalog(props.token)
+    catalog.value = await readCatalog()
     ElMessage.success('检查项已删除')
   } catch (error) {
     if (error instanceof Error) ElMessage.error(errorMessage(error))
@@ -773,11 +777,11 @@ function approvalTaskStatus(task: ProjectValidationPlan['approvalTasks'][number]
 </script>
 
 <template>
-  <section class="pdm-panel pdm-manager-panel validation-plan" aria-label="项目验证计划">
-    <header v-if="view === 'summary'" class="validation-plan__toolbar">
-      <div>
-        <h2><ListChecks :size="18" />验证计划</h2>
-        <p>{{ rootProject?.code || projectCode }} · 主项目及子项目验证计划</p>
+  <section class="pdm-panel pdm-manager-panel validation-plan" :aria-label="qualityAcceptance ? '项目质量验收' : '项目验证计划'">
+    <header v-if="view === 'summary'" class="validation-plan__toolbar quality-section__toolbar">
+      <div class="quality-section__heading">
+        <h2><ListChecks :size="18" />{{ qualityAcceptance ? '质量验收' : '验证计划' }}</h2>
+        <p>{{ rootProject?.code || projectCode }} · 主项目及子项目{{ qualityAcceptance ? '质量验收' : '验证计划' }}</p>
       </div>
       <div class="validation-plan__actions">
         <button v-if="canManageCatalog" type="button" class="pdm-secondary-action" @click="openCatalogManager"><LibraryBig :size="14" />模板管理</button>
@@ -788,7 +792,7 @@ function approvalTaskStatus(task: ProjectValidationPlan['approvalTasks'][number]
       <div v-if="loading" class="validation-plan__empty">正在加载项目验证计划列表…</div>
       <div v-else class="validation-plan__table-scroll">
         <table class="validation-plan-summary__table">
-          <thead><tr><th>项目代号</th><th>项目名称</th><th>项目类型</th><th>验证项数</th><th>编制人</th><th>编制日期</th><th>最近保存</th><th>状态</th><th>验证计划</th><th>附件</th></tr></thead>
+          <thead><tr><th>项目代号</th><th>项目名称</th><th>项目类型</th><th>{{ qualityAcceptance ? '验收项数' : '验证项数' }}</th><th>编制人</th><th>编制日期</th><th>最近保存</th><th>状态</th><th>{{ qualityAcceptance ? '质量验收' : '验证计划' }}</th><th>附件</th></tr></thead>
           <tbody>
             <tr v-for="project in familyProjects" :key="project.id" :class="{ 'is-disabled': !project.canReadContent }" :tabindex="project.canReadContent ? 0 : -1" @click="openProjectPlan(project)" @keydown.enter.self.prevent="openProjectPlan(project)" @keydown.space.self.prevent="openProjectPlan(project)">
               <td><strong>{{ project.code }}</strong></td>
@@ -822,7 +826,7 @@ function approvalTaskStatus(task: ProjectValidationPlan['approvalTasks'][number]
     <template v-if="view !== 'summary'">
     <header class="validation-plan__toolbar">
       <div>
-        <h2><button type="button" class="validation-plan__back" title="返回验证计划列表" @click="backToSummary"><ArrowLeft :size="17" /></button><ListChecks :size="18" />验证计划</h2>
+        <h2><button type="button" class="validation-plan__back" title="返回验证计划列表" @click="backToSummary"><ArrowLeft :size="17" /></button><ListChecks :size="18" />{{ qualityAcceptance ? '质量验收' : '验证计划' }}</h2>
         <p>{{ activeDetailProject?.code }} · {{ activeDetailProject?.name }} · 从全局检查项库选取后形成项目快照</p>
       </div>
       <div class="validation-plan__actions">
@@ -856,7 +860,7 @@ function approvalTaskStatus(task: ProjectValidationPlan['approvalTasks'][number]
     <div v-if="loading" class="validation-plan__empty">正在加载验证计划…</div>
     <div v-else-if="rows.length" class="validation-plan__table-scroll">
       <table class="validation-plan__table">
-        <thead><tr><th>序号</th><th>分类</th><th>验证内容</th><th>验证标准</th><th>信息来源</th><th>验证日期</th><th>责任人</th><th>结果</th><th>审核人</th><th>备注</th><th>操作</th></tr></thead>
+        <thead><tr><th>序号</th><th>分类</th><th>{{ qualityAcceptance ? '验收内容' : '验证内容' }}</th><th>{{ qualityAcceptance ? '验收标准' : '验证标准' }}</th><th>信息来源</th><th>{{ qualityAcceptance ? '验收日期' : '验证日期' }}</th><th>责任人</th><th>结果</th><th>审核人</th><th>备注</th><th>操作</th></tr></thead>
         <tbody>
           <tr v-for="(row, index) in rows" :key="row.id" :data-row-index="index" :class="{ 'is-row-dragging': draggedRowIndex === index, 'is-drag-over-before': dragOverRowIndex === index && dragOverPosition === 'before', 'is-drag-over-after': dragOverRowIndex === index && dragOverPosition === 'after' }">
             <td class="is-sequence">{{ index + 1 }}</td>
@@ -874,7 +878,7 @@ function approvalTaskStatus(task: ProjectValidationPlan['approvalTasks'][number]
         </tbody>
       </table>
     </div>
-    <div v-else class="validation-plan__empty"><ListChecks :size="42" /><h3>当前项目还没有验证检查项</h3><p>按分类从全局检查项库选取，或直接添加自定义项。</p><div v-if="canAdd" class="validation-plan__actions"><button type="button" class="pdm-primary-action" @click="openSelection">选取内容</button><button type="button" class="pdm-secondary-action" aria-label="添加自定义项" @click="addCustomRow"><Plus :size="14" />添加自定义</button></div></div>
+    <div v-else class="validation-plan__empty"><ListChecks :size="42" /><h3>当前项目还没有{{ qualityAcceptance ? '质量验收' : '验证' }}检查项</h3><p>按分类从全局检查项库选取，或直接添加自定义项。</p><div v-if="canAdd" class="validation-plan__actions"><button type="button" class="pdm-primary-action" @click="openSelection">选取内容</button><button type="button" class="pdm-secondary-action" aria-label="添加自定义项" @click="addCustomRow"><Plus :size="14" />添加自定义</button></div></div>
     <section v-if="plan?.approvalTasks?.length || plan?.attachments?.length || executionRecords.length" class="validation-plan__records">
       <div v-if="plan?.approvalTasks?.length"><strong>审批记录</strong><span v-for="task in plan.approvalTasks" :key="task.id">{{ task.stepOrder }}. {{ task.stepName }} · {{ displayUserName(task.assignee, task.assignee) }} · {{ approvalTaskStatus(task) }}</span></div>
       <div v-if="plan?.attachments?.length"><strong>归档文件（验收资料 / 验证计划）</strong><div v-for="file in plan.attachments" :key="file.id" class="validation-plan__attachment-row"><button type="button" class="validation-plan__attachment" :title="`SHA-256 ${file.sha256}`" @click="downloadAttachment(file.id, file.originalFileName)">{{ file.kind === 'PlanDocument' || file.kind === 0 ? '验证计划' : '佐证附件' }} · {{ file.originalFileName }} · V{{ file.fileVersion }} · {{ fileSize(file.fileLength) }} · {{ displayUserName(file.uploadedBy, file.uploadedBy) }}</button><button v-if="normalizedState === 'Effective' && isRecognizableAttachment(file)" type="button" class="pdm-text-action" :disabled="recognizing" @click="recognizeAttachment(file)">{{ recognizing ? '识别中…' : '识别结果' }}</button></div></div>
@@ -894,7 +898,7 @@ function approvalTaskStatus(task: ProjectValidationPlan['approvalTasks'][number]
       <template #footer><span>已选择 {{ selectedRecognitionCount }} 项</span><button type="button" class="pdm-secondary-action" @click="recognitionOpen = false">取消</button><button type="button" class="pdm-primary-action" :disabled="!selectedRecognitionCount || confirmingRecognition" @click="confirmRecognition">{{ confirmingRecognition ? '确认中…' : '确认写入执行记录' }}</button></template>
     </el-dialog>
 
-    <el-dialog v-model="selectionOpen" class="validation-plan-selector-dialog" title="选择验证检查项" width="920px" append-to-body destroy-on-close>
+    <el-dialog v-model="selectionOpen" class="validation-plan-selector-dialog" :title="qualityAcceptance ? '选择质量验收检查项' : '选择验证检查项'" width="920px" append-to-body destroy-on-close>
       <div class="validation-selector">
         <aside><strong>检查分类</strong><button v-for="category in activeCategories" :key="category.id" type="button" :class="{ 'is-active': selectionCategoryId === category.id, 'is-complete': availableItemCount(category.id) === 0 }" @click="selectionCategoryId = category.id"><span>{{ category.name }}</span><small>{{ availableItemCount(category.id) }}</small></button></aside>
         <section><div class="validation-selector__filter"><label class="validation-selector__select-all"><input type="checkbox" :checked="allSelectableItemsSelected" :disabled="!selectableItems.length" @change="toggleSelectableItems(($event.target as HTMLInputElement).checked)">全选</label><input v-model="selectionQuery" type="search" placeholder="搜索检查项内容" aria-label="搜索验证检查项"></div><div class="validation-selector__items"><label v-for="item in selectableItems" :key="item.id"><input v-model="selectedItemIds" type="checkbox" :value="item.id"><span>{{ item.content }}</span><small>{{ item.defaultInformationSource }}</small></label><p v-if="!selectableItems.length">{{ availableItemCount(selectionCategoryId) === 0 && activeItemCount(selectionCategoryId) > 0 ? `该分类的 ${activeItemCount(selectionCategoryId)} 项已全部加入当前计划，请选择其他分类。` : selectionQuery.trim() ? '没有符合搜索条件的检查项。' : '当前分类没有可加入的检查项。' }}</p></div></section>
@@ -902,7 +906,7 @@ function approvalTaskStatus(task: ProjectValidationPlan['approvalTasks'][number]
       <template #footer><span>跨分类已选 {{ selectedItemIds.length }} 项</span><button type="button" class="pdm-secondary-action" @click="selectionOpen = false">取消</button><button type="button" class="pdm-primary-action" :disabled="!selectedItemIds.length" @click="appendSelectedItems">加入计划（{{ selectedItemIds.length }}）</button></template>
     </el-dialog>
 
-    <el-dialog v-model="catalogOpen" title="全局验证检查项库" width="1100px" append-to-body destroy-on-close>
+    <el-dialog v-model="catalogOpen" :title="qualityAcceptance ? '全局质量验收检查项库' : '全局验证检查项库'" width="1100px" append-to-body destroy-on-close>
       <div v-loading="catalogLoading" class="validation-catalog">
         <aside><header><strong>分类</strong><button type="button" class="pdm-text-action" @click="editCategory()">+ 新增</button></header><button v-for="category in catalogAll.categories" :key="category.id" type="button" :class="{ 'is-active': catalogCategoryId === category.id, 'is-disabled': !category.isActive }" @click="catalogCategoryId = category.id"><span>{{ category.name }}</span><small>{{ category.itemCount }}项</small></button></aside>
         <section>
@@ -940,9 +944,10 @@ function approvalTaskStatus(task: ProjectValidationPlan['approvalTasks'][number]
 .validation-plan__meta input { width:190px; height:30px; padding:0 9px; border:1px solid var(--pdm-border); border-radius:5px; background:var(--pdm-surface); color:var(--pdm-text); }
 .validation-plan__dirty { margin-left:auto; color:var(--pdm-orange); font-size:12px; }
 .validation-plan__table-scroll { min-height:0; flex:1 1 auto; overflow:auto; border:1px solid var(--pdm-border); border-radius:7px; }
-.validation-plan__table { width:100%; min-width:1500px; border-collapse:collapse; table-layout:fixed; font-size:12px; }
+.validation-plan__table { width:100%; min-width:0; border-collapse:collapse; table-layout:fixed; font-size:12px; }
 .validation-plan-summary__table { width:100%; min-width:1240px; border-collapse:collapse; table-layout:fixed; font-size:12px; }
 .validation-plan-summary__table th { position:sticky; top:0; z-index:1; padding:9px 6px; border:0; background:#f3f6f9; color:var(--pdm-muted); font-weight:500; text-align:center; vertical-align:middle; }
+.validation-plan-summary__table th:nth-child(7), .validation-plan-summary__table td:nth-child(7) { width:180px; white-space:nowrap; }
 .validation-plan-summary__table tbody tr { background:var(--pdm-surface); cursor:pointer; }
 .validation-plan-summary__table tbody tr:hover,.validation-plan-summary__table tbody tr:focus { background:var(--pdm-theme-accent-soft); outline:none; }
 .validation-plan-summary__table tbody tr.is-disabled { cursor:not-allowed; opacity:.55; }
@@ -956,15 +961,15 @@ function approvalTaskStatus(task: ProjectValidationPlan['approvalTasks'][number]
 .validation-plan-summary__status.is-加载失败 { background:#fff1f1; color:var(--pdm-danger); }
 .validation-plan__table th { position:sticky; top:0; z-index:1; padding:9px 3px; border:0; background:#f3f6f9; color:var(--pdm-muted); font-weight:500; text-align:center; vertical-align:middle; }
 .validation-plan__table tbody tr { background:var(--pdm-surface); }
-.validation-plan__table td { padding:0 3px; border:0; border-top:1px solid var(--pdm-border-soft); color:var(--pdm-text); text-align:center; vertical-align:middle; }
-.validation-plan__table th:nth-child(1){width:50px}.validation-plan__table th:nth-child(2){width:105px}.validation-plan__table th:nth-child(3){width:320px}.validation-plan__table th:nth-child(4){width:180px}.validation-plan__table th:nth-child(5){width:110px}.validation-plan__table th:nth-child(6){width:125px}.validation-plan__table th:nth-child(7){width:145px}.validation-plan__table th:nth-child(8){width:110px}.validation-plan__table th:nth-child(9){width:110px}.validation-plan__table th:nth-child(10){width:145px}.validation-plan__table th:nth-child(11){width:94px}
+.validation-plan__table td { overflow-wrap:anywhere; padding:0 3px; border:0; border-top:1px solid var(--pdm-border-soft); color:var(--pdm-text); text-align:center; vertical-align:middle; }
+.validation-plan__table th:nth-child(1){width:3%}.validation-plan__table th:nth-child(2){width:8%}.validation-plan__table th:nth-child(3){width:25%}.validation-plan__table th:nth-child(4){width:13%}.validation-plan__table th:nth-child(5){width:8%}.validation-plan__table th:nth-child(6){width:6%}.validation-plan__table th:nth-child(7){width:8%}.validation-plan__table th:nth-child(8){width:7%}.validation-plan__table th:nth-child(9){width:7%}.validation-plan__table th:nth-child(10){width:10%}.validation-plan__table th:nth-child(11){width:5%}
 .validation-plan__table input,.validation-plan__table select { box-sizing:border-box; width:100%; min-width:0; height:24px; padding:3px 2px; border:1px solid transparent; border-radius:4px; background:transparent; color:var(--pdm-text); font:inherit; text-align:center; }
 .validation-plan__table input:focus,.validation-plan__table select:focus { border-color:var(--pdm-blue); background:var(--pdm-surface); outline:2px solid var(--pdm-theme-accent-focus); }
 .validation-plan__table .is-standard,.validation-plan__table th:nth-child(4),.validation-plan__table .is-standard input { text-align:center; }
 .validation-plan__table input:disabled,.validation-plan__table select:disabled { border-color:transparent; background:transparent; color:inherit; opacity:1; }
 .validation-plan__date-cell { position:relative; }.validation-plan__date-cell input[type="date"] { position:absolute; width:1px; height:1px; opacity:0; pointer-events:none; }.validation-plan__date-cell button { display:inline-grid; place-items:center; width:24px; height:24px; padding:0; border:1px solid var(--pdm-theme-accent-border); border-radius:4px; background:var(--pdm-theme-accent-soft); color:var(--pdm-primary); }.validation-plan__date-cell button:disabled { opacity:.55; }.validation-plan__table .is-sequence { color:var(--pdm-muted); white-space:nowrap; }.validation-plan__drag-handle { display:inline-block; margin-right:4px; color:var(--pdm-primary); cursor:grab; touch-action:none; user-select:none; }.validation-plan__drag-handle:focus-visible { outline:2px solid var(--pdm-theme-accent-focus); outline-offset:2px; border-radius:2px; }.validation-plan__table tbody tr.is-row-dragging { opacity:.5; }.validation-plan__table tbody tr.is-drag-over-before { box-shadow:inset 0 2px 0 var(--pdm-primary); }.validation-plan__table tbody tr.is-drag-over-after { box-shadow:inset 0 -2px 0 var(--pdm-primary); }.validation-plan__table th:nth-child(3),.validation-plan__table .is-content { text-align:left; }.validation-plan__table .is-content { line-height:1.4; white-space:normal; }.validation-plan__table .is-content input { text-align:left; }
 .validation-plan__category { display:inline-block; padding:3px 7px; border-radius:999px; background:#e8f7f3; color:var(--pdm-green); }
-.validation-plan__row-actions { display:flex; justify-content:center; gap:5px; }.validation-plan__row-actions button { display:grid; place-items:center; width:18px; height:18px; padding:0; border:1px solid var(--pdm-theme-accent-border); border-radius:3px; background:var(--pdm-theme-accent-soft); color:var(--pdm-primary); }.validation-plan__row-actions button:last-child { border-color:#f3b3b3; background:#fff1f1; color:var(--pdm-danger); }
+.validation-plan__row-actions { display:flex; flex-wrap:wrap; justify-content:center; gap:5px; }.validation-plan__row-actions button { display:grid; place-items:center; width:18px; height:18px; padding:0; border:1px solid var(--pdm-theme-accent-border); border-radius:3px; background:var(--pdm-theme-accent-soft); color:var(--pdm-primary); }.validation-plan__row-actions button:last-child { border-color:#f3b3b3; background:#fff1f1; color:var(--pdm-danger); }
 .validation-plan__empty { min-height:0; flex:1 1 auto; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:8px; color:var(--pdm-muted); }.validation-plan__empty h3,.validation-plan__empty p { margin:0; }
 .validation-plan__footer { color:var(--pdm-muted); font-size:11px; }
 .validation-plan__file-input { display:none; }

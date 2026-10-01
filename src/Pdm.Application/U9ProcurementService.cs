@@ -117,7 +117,8 @@ public sealed class U9ProcurementService(
         CancellationToken cancellationToken)
     {
         await RequireManageAsync(actor, role, cancellationToken);
-        return await procurement.GetSettingsAsync(cancellationToken);
+        var settings = await procurement.GetSettingsAsync(cancellationToken);
+        return settings with { QueryPath = ProcurementQueryPath(settings.QueryPath) };
     }
 
     public Task<U9ProcurementSyncRun?> GetLatestRunAsync(CancellationToken cancellationToken) =>
@@ -134,7 +135,7 @@ public sealed class U9ProcurementService(
         await RequireManageAsync(actor, role, cancellationToken);
         if (syncIntervalMinutes is < 15 or > 1440)
             throw new PdmRuleException("采购跟踪自动同步间隔必须在15分钟到24小时之间。");
-        var normalizedPath = Required(queryPath, "采购查询接口路径");
+        var normalizedPath = ProcurementQueryPath(Required(queryPath, "采购查询接口路径"));
         if (!normalizedPath.StartsWith("/webapi/", StringComparison.OrdinalIgnoreCase))
             throw new PdmRuleException("采购查询接口路径必须以/webapi/开头。");
         var now = timeProvider.GetUtcNow();
@@ -294,9 +295,13 @@ public sealed class U9ProcurementService(
             configuration.ClientId,
             secret), cancellationToken);
         return await procurementClient.QueryProcurementAsync(
-            configuration.BaseUrl, queryPath, authentication.Token,
+            configuration.BaseUrl, ProcurementQueryPath(queryPath), authentication.Token,
             configuration.OrganizationCode, projectCodes, cancellationToken);
     }
+
+    private static string ProcurementQueryPath(string path) =>
+        path.TrimEnd('/').Equals("/webapi/QueryCommon/QueryInfoBySql", StringComparison.OrdinalIgnoreCase)
+            ? "/webapi/CommonEntity/Query" : path;
 
     private async Task<U9MaterialIntegrationConfiguration> RequireConfigurationAsync(CancellationToken cancellationToken)
     {
