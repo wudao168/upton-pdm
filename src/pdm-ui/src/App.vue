@@ -11,6 +11,7 @@ import DrawingReviewPanel from './components/DrawingReviewPanel.vue'
 import DrawingReviewAnnotationCard from './components/DrawingReviewAnnotationCard.vue'
 import ProjectFileLibrary from './components/ProjectFileLibrary.vue'
 import QualityManager from './components/QualityManager.vue'
+import ProjectInformation from './components/ProjectInformation.vue'
 import LoginView from './components/LoginView.vue'
 import MaterialManagement from './components/MaterialManagement.vue'
 import StandardLibrary from './components/StandardLibrary.vue'
@@ -629,7 +630,7 @@ function openProgramTemplate(templateId: string) {
 }
 
 type ProjectNavigationRequest = { projectId: string; tab: ProjectTab }
-const supportedProjectTabs: ProjectTab[] = ['overview', 'project-plan', 'budget', 'files', 'validation-plan', 'documents', 'bom', 'release', 'procurement', 'records']
+const supportedProjectTabs: ProjectTab[] = ['overview', 'information', 'project-plan', 'budget', 'files', 'validation-plan', 'documents', 'bom', 'release', 'procurement', 'records']
 let pendingProjectNavigation: ProjectNavigationRequest | null = null
 let projectNavigationInProgress = false
 let initialPageRestored = false
@@ -1055,6 +1056,7 @@ async function openWhereUsedParent(projectId: string, parentDocumentId: string) 
         </section>
         <ProjectManager
           v-else-if="activeView === 'projects'"
+          :token="workspace.getAccessToken()"
           :projects="workspace.projects.value"
           :numbering-options="workspace.projectNumberingOptions.value"
           :customers="workspace.customers.value"
@@ -1203,6 +1205,7 @@ async function openWhereUsedParent(projectId: string, parentDocumentId: string) 
             />
             <ProjectFileLibrary v-else-if="projectTab === 'files' && !workspace.moduleErrors.value.some(error => error.tab === 'files' || error.module === '图档工作区')" :project-id="workspace.project.value.id" :token="workspace.getAccessToken()" :folders="workspace.projectFolders.value" :documents="workspace.managedDocuments.value" :users="workspace.users.value" :roles="workspace.rolePermissionDirectory.value.roles" :administrator="workspace.hasPermission('settings.folder.manage')" :can-recycle-documents="workspace.hasPermission('document.recycle')" :pending="workspace.operationPending.value" :on-update-permissions="workspace.updateProjectFolderPermissions" :on-reload="() => workspace.reload(workspace.project.value.id)" />
             <ProjectBudgetManager v-else-if="projectTab === 'budget'" :project="workspace.project.value" :token="workspace.getAccessToken()" />
+            <ProjectInformation v-else-if="projectTab === 'information'" :project="workspace.project.value" :projects="workspace.projects.value" :token="workspace.getAccessToken()" />
             <ProjectPlanManager :requested-task-id="requestedPlanTaskId" @task-request-handled="requestedPlanTaskId = undefined" v-else-if="projectTab === 'project-plan'" :project="workspace.project.value" :projects="workspace.projects.value" :company-name="companyName" :token="workspace.getAccessToken()" :current-username="workspace.currentUsername.value" :current-role="workspace.currentRole.value" :developer="workspace.hasRole('developer')" :can-edit="canManageProjectPlan" :can-manage-system-templates="canManageProjectPlanTemplates" @switch-project="projectId => openManagedProject(projectId, 'project-plan')" />
             <QualityManager v-else-if="projectTab === 'validation-plan'" :project-id="workspace.project.value.id" :project-code="workspace.project.value.code" :project-name="workspace.project.value.name" :projects="workspace.projects.value" :token="workspace.getAccessToken()" :current-username="workspace.currentUsername.value" :current-display-name="workspace.currentUser.value" :can-edit="workspace.project.value.effectiveProjectPermissions?.includes('validation-plan.edit') === true" :can-manage-catalog="workspace.hasPermission('validation-catalog.manage')" :can-decide-approval="workspace.hasPermission('approval.decide') || workspace.hasPermission('validation-plan.edit')" :requested-project-id="requestedValidationPlanProjectId" :requested-quality-acceptance="requestedQualityAcceptance" @request-handled="requestedValidationPlanProjectId = ''" />
             <section v-if="mountedDocumentsProjectId === workspace.project.value.id && !workspace.moduleErrors.value.some(error => error.module === '图档工作区')" v-show="projectTab === 'documents'" class="pdm-document-workspace">

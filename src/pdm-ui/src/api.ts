@@ -1,4 +1,4 @@
-import type { ProjectBudget, BudgetLine } from './projectBudget'
+import type { ProjectBudget, BudgetLine, SettlementLine } from './projectBudget'
 import type { AddDrawingReviewMarkupInput, ApprovalStep, ApprovalU9AutomationResult, AuditEntry, BatchUpdateBomItemsInput, BomClassification, BomEmptyDeclaration, BomExportMode, BomGenerationResult, BomHeaderKind, BomItem, BomKind, BomValidationRules, BomVersion, BomVersionState, CreateProjectInput, CreateReleasePackageInput, CreateRoleInput, CreateSubprojectInput, CrmConnectionTestResult, CrmCustomerSyncResult, CrmIntegrationSettings, DocumentKind, DocumentModelDrawingRelation, DocumentNode, DocumentVersionComparison, DocumentVersionSummary, DocumentWhereUsed, DrawingReviewCandidate, DrawingReviewDecision, DrawingReviewPackage, DrawingReviewTarget, EditLockSummary, EngineeringKit, EngineeringKitExpansion, EquipmentTypeDefinition, FolderPermissionRule, MainProjectStaffingInput, ManagedDocument, ManufacturingBomBaseline, MaterialApprovalRule, MaterialAttachment, MaterialAttachmentKind, MaterialCategory, MaterialCategoryRule, MaterialCodeApplication, MaterialCodeApplicationStatus, MaterialCodeDecisionResult, MaterialCodeResolution, MaterialDuplicateRule, MaterialImportPreview, MaterialImportResult, MaterialKind, MaterialNumberingSettings, MaterialPage, MaterialRemovalReadiness, MaterialRemovalResult, MaterialSyncExecutionResult, MaterialSyncTask, MyApprovalTask, OrganizationDirectory, OrganizationUnit, PasswordResetTask, PdmCustomer, PdmMaterial, PdmSystemSettings, PdmUser, PdmUserProfile, ProgramTemplate, ProgramTemplateApprovalDecision, ProgramTemplateAttachmentKind, ProgramTemplateDraftInput, ProgramTemplateRevision, ProgramTemplateTask, ProgramTemplateVersionBump, ProjectBomHeader, ProjectBomU9SyncExecution, ProjectBomU9SyncPreview, ProjectFile, ProjectFileVersion, ProjectFolder, ProjectFolderTemplateNode, ProjectNumberingOptions, ProjectOrganization, ProjectProcurementTrackingResult, ProjectSummary, ProjectVersionItem, ReferenceStatus, ReleaseItemComment, ReleasePackageSummary, ReleaseScope, RolePermissionDirectory, SaveMaterialInput, SaveOrganizationUnitInput, SavePdmUserInput, SaveProjectOrganizationInput, StandardLibraryCategory, StandardLibraryMaterialPage, U9BomQueryExecution, U9BomQueryInput, U9BomWriteExecution, U9BomWriteInput, U9BomWritePreview, U9ConnectionTestResult, U9InventoryFilters, U9InventoryPage, U9InventorySyncSettings, U9InventorySyncStatusResponse, U9ItemQueryResult, U9MaterialFullSyncStatusResponse, U9MaterialIntegrationSettings, U9MaterialSampleImportResult, U9MaterialSamplePreview, U9ProcurementSyncSettings, U9ProcurementSyncStatusResponse, UpdateCrmIntegrationInput, UpdateProjectInput, UpdateReleasePackageDraftInput, UpdateU9MaterialIntegrationInput } from './types'
 import type { CadPropertyWritebackVersion } from './types'
 import type { DrawingDeliveryOverride, ProductionDrawingItem } from './types'
@@ -15,6 +15,25 @@ import type { MaterialRelationCompleteness, MaterialRelationTemplate, SaveMateri
 import type { PreviewAgentProbeResult, PreviewConversionSettings } from './types'
 import type { AppendProjectValidationPlanItemsInput, ConfirmValidationPlanExecutionInput, ProjectValidationPlan, SaveProjectValidationPlanInput, SaveValidationCheckCategoryInput, SaveValidationCheckItemInput, UpdateProjectValidationPlanStandardsInput, ValidationCheckCatalog, ValidationCheckCategory, ValidationCheckItem, ValidationPlanAttachment, ValidationPlanApprovalTaskSummary, ValidationPlanExecutionRecord, ValidationPlanRecognitionDraft } from './types'
 import { sha256Hex } from './fileHash'
+import type { NameplateTemplate, ProjectNameplate, ProjectNameplateView } from './projectNameplate'
+import type { ProjectContactInformation, ProjectContactInformationView } from './projectContactInformation'
+
+export function readProjectContactInformation(projectId: string, token: string) {
+  return requestJson<ProjectContactInformationView>(`/api/projects/${projectId}/contact-information`, {}, token)
+}
+export function saveProjectContactInformation(value: ProjectContactInformation, token: string) {
+  return requestJson<ProjectContactInformationView>(`/api/projects/${value.projectId}/contact-information`, { method: 'PUT', body: JSON.stringify({ ...value, expectedRowVersion: value.rowVersion }) }, token)
+}
+
+export function readProjectNameplate(projectId: string, token: string) {
+  return requestJson<ProjectNameplateView>(`/api/projects/${projectId}/nameplate`, {}, token)
+}
+export function saveProjectNameplate(value: ProjectNameplate, token: string) {
+  return requestJson<ProjectNameplateView>(`/api/projects/${value.projectId}/nameplate`, { method: 'PUT', body: JSON.stringify({ ...value, expectedRowVersion: value.rowVersion }) }, token)
+}
+export function saveNameplateTemplate(value: NameplateTemplate, token: string) {
+  return requestJson<NameplateTemplate>('/api/nameplate-template', { method: 'PUT', body: JSON.stringify(value) }, token)
+}
 
 const apiBase = (import.meta.env.VITE_PDM_API_BASE ?? (import.meta.env.MODE === 'test' ? 'http://127.0.0.1:5080' : '')).replace(/\/$/, '')
 
@@ -2601,6 +2620,15 @@ export function postDesktopMessage(type: string, payload?: unknown): void {
   window.chrome?.webview?.postMessage({ type, payload })
 }
 
+export function saveProjectSettlement(projectId: string, input: { lines: SettlementLine[]; expectedRowVersion: number }, token: string): Promise<ProjectBudget> {
+  return requestJson<ProjectBudget>(`/api/projects/${projectId}/budget/settlement`, { method: 'PUT', body: JSON.stringify(input) }, token)
+}
+export function saveProjectBonusRate(projectId: string, input: { rate: number; expectedRowVersion: number }, token: string): Promise<ProjectBudget> {
+  return requestJson<ProjectBudget>(`/api/projects/${projectId}/budget/bonus-rate`, { method: 'PUT', body: JSON.stringify(input) }, token)
+}
+export function addProjectBudgetNote(projectId: string, input: { category: string; content: string; expectedRowVersion: number }, token: string): Promise<ProjectBudget> {
+  return requestJson<ProjectBudget>(`/api/projects/${projectId}/budget/notes`, { method: 'POST', body: JSON.stringify(input) }, token)
+}
 export function getProjectBudget(projectId: string, token: string): Promise<ProjectBudget> {
   return requestJson<ProjectBudget>(`/api/projects/${projectId}/budget`, {}, token)
 }

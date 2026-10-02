@@ -11,6 +11,8 @@ public static class QualityUploadPolicy
         var directory = await repository.GetOrganizationDirectoryAsync(cancellationToken);
         var user = directory.Users.FirstOrDefault(x => x.IsActive && string.Equals(x.Username, actor, StringComparison.OrdinalIgnoreCase));
         if (user is null) return false;
+        if (user.EffectiveRoleCodes.Any(x => x is "QualityManager" or "QualityInspector")
+            && await repository.HasUserPermissionAsync(actor, role, PermissionCodes.ValidationPlanEdit, cancellationToken)) return true;
         var units = directory.Units.Where(x => x.IsActive && directory.Memberships.Any(m => m.UnitId == x.Id && string.Equals(m.Username, actor, StringComparison.OrdinalIgnoreCase))).ToArray();
         if (kind == "quality") return units.Any(x => x.Name.Contains("质量", StringComparison.OrdinalIgnoreCase));
         if (kind is "incoming" or "assembly") return user.EffectiveRoleCodes.Any(x => x is "ProductionManager" or "ProductionAssistant")

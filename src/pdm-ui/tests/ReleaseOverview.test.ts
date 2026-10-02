@@ -37,7 +37,8 @@ describe('ReleaseOverview', () => {
     const wrapper = mount(ReleaseOverview, { props: { releasePackages: [release], versions: [], baselines: [baseline] } })
 
     expect(wrapper.find('.pdm-release-overview-header').exists()).toBe(false)
-    expect(wrapper.findAll('.pdm-release-stream-card')).toHaveLength(4)
+    expect(wrapper.findAll('.pdm-release-stream-card')).toHaveLength(3)
+    expect(wrapper.text()).not.toContain('历史组合发布')
     expect(wrapper.text()).not.toContain('创建草稿')
     expect(wrapper.findAll('.pdm-release-baseline-list th').map(cell => cell.text())).toEqual(['基线', '变更单号', '生成时间'])
     expect(wrapper.text()).not.toContain('生效序列号')

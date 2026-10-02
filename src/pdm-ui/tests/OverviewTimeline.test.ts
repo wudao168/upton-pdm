@@ -7,6 +7,36 @@ const task = { id: 'design', name: '设计确认', stage: 'Design', plannedStart
 const plan = { tasks: [task] } as unknown as ProjectPlan
 
 describe('overview timeline', () => {
+  it('fills 82% of the planned stage width regardless of actual date duration', () => {
+    const progressPlan = { plannedStart: '2026-09-01', plannedFinish: '2026-09-30', tasks: [
+      { ...task, weight: 9, completionPercent: 80, actualStart: '2026-09-02', actualFinish: '2026-09-03' },
+      { ...task, id: 'design-2', weight: 1, completionPercent: 100, actualStart: '2026-09-02', actualFinish: '2026-09-03' },
+    ] } as unknown as ProjectPlan
+    const wrapper = mount(OverviewTimeline, { props: { plan: progressPlan, baseline: null, baselineUnavailable: false } })
+    const actual = wrapper.get('[aria-label="实际进度"] .pdm-overview-timeline__segment')
+    const planned = wrapper.get('[aria-label="当前计划"] .pdm-overview-timeline__segment')
+    const actualStyle = (actual.element as HTMLElement).style
+    const plannedStyle = (planned.element as HTMLElement).style
+    expect(actual.text()).toContain('82%')
+    expect(actualStyle.left).toBe(plannedStyle.left)
+    expect(parseFloat(actualStyle.width) / parseFloat(plannedStyle.width)).toBeCloseTo(.82)
+    wrapper.unmount()
+  })
+  it.each([
+    ['2026-09-24', '2026-09-24', 1],
+    ['2026-09-24', '2026-11-26', 10],
+    ['2026-01-01', '2026-12-31', 53],
+    ['2026-12-30', '2027-01-02', 2],
+  ])('shows weekly ticks for the planned range %s to %s', (plannedStart, plannedFinish, count) => {
+    const wrapper = mount(OverviewTimeline, { props: { plan: { tasks: [], plannedStart, plannedFinish } as unknown as ProjectPlan, baseline: null, baselineUnavailable: false } })
+    const ticks = wrapper.get('[aria-label="计划时间刻度"]').findAll('time')
+    const dates = ticks.map(tick => tick.attributes('datetime')!)
+    expect(dates[0]).toBe(plannedStart)
+    expect(dates.at(-1)).toBe(plannedFinish)
+    expect(dates).toHaveLength(count)
+    for (let index = 1; index < dates.length - 1; index++) expect((Date.parse(dates[index]!) - Date.parse(dates[index - 1]!)) / 86400000).toBe(7)
+    wrapper.unmount()
+  })
   it('keeps overlapping phases in one translucent row without shortening their date ranges', () => {
     const overlapping = { tasks: [task, { ...task, id: 'material', stage: 'MaterialPreparation', plannedStart: '2026-09-08', plannedFinish: '2026-09-15' }, { ...task, id: 'assembly', stage: 'Assembly', plannedStart: '2026-09-16', plannedFinish: '2026-09-20' }] } as unknown as ProjectPlan
     const wrapper = mount(OverviewTimeline, { props: { plan: overlapping, baseline: null, baselineUnavailable: false } })
@@ -31,7 +61,7 @@ describe('overview timeline', () => {
         expect(arrow.attributes('title')).toBe(`2026-09-06 · ${label}`)
       }
       expect(wrapper.get('[aria-label="初始基线"]').find('.pdm-overview-timeline__today-arrow').exists()).toBe(false)
-      expect(wrapper.find('.pdm-overview-timeline__speeder').exists()).toBe(progressTone !== 'success')
+      expect(wrapper.find('.pdm-overview-timeline__truck').exists()).toBe(true)
       expect(wrapper.find('.pdm-overview-timeline__today').exists()).toBe(false)
       wrapper.unmount()
     } finally { vi.useRealTimers() }
@@ -43,7 +73,7 @@ describe('overview timeline', () => {
     expect(wrapper.find('.pdm-overview-timeline__legend').exists()).toBe(false)
     expect(wrapper.find('[aria-label="每日时间轴"]').exists()).toBe(false)
     expect(wrapper.find('.pdm-overview-timeline__day-line').exists()).toBe(false)
-    expect(wrapper.get('.pdm-overview-timeline__dates').text()).toContain('共 12 天')
+    expect(wrapper.get('[aria-label="计划时间刻度"]').findAll('time').map(tick => tick.attributes('datetime'))).toEqual(['2026-09-01', '2026-09-08', '2026-09-12'])
     const actual = wrapper.get('[aria-label="实际进度"] .pdm-overview-timeline__segment')
     expect(actual.attributes('title')).toContain('2026-09-02 — 2026-09-11')
     expect(actual.text()).toContain('100%')
@@ -68,7 +98,7 @@ describe('overview timeline', () => {
 
   it('does not invent dates for missing actuals or missing initial baseline', () => {
     const wrapper = mount(OverviewTimeline, { props: { plan: { tasks: [{ ...task, actualStart: undefined, actualFinish: undefined }] } as unknown as ProjectPlan, baseline: null, baselineUnavailable: true, progressTone: 'danger' } })
-    expect(wrapper.find('.pdm-overview-timeline__speeder').exists()).toBe(false)
+    expect(wrapper.find('.pdm-overview-timeline__truck').exists()).toBe(true)
     expect(wrapper.get('[aria-label="实际进度"]').text()).toContain('未填报实际日期')
     expect(wrapper.get('[aria-label="初始基线"]').text()).toContain('历史缺失')
     expect(wrapper.get('[aria-label="初始基线"]').findAll('button')).toHaveLength(0)

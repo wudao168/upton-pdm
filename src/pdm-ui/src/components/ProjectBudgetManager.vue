@@ -5,6 +5,8 @@ import { getProjectBudget, saveProjectBudget, getBudgetAssessments } from '../ap
 import { budgetCategories, calculateBudgetRow, uppercaseMoney } from '../projectBudget'
 import type { BudgetLine, ProjectBudget, AssessmentDirectory } from '../projectBudget'
 import BudgetAssessmentManager from './BudgetAssessmentManager.vue'
+import BudgetNotesDialog from './BudgetNotesDialog.vue'
+import BudgetSettlementCards from './BudgetSettlementCards.vue'
 import { ElMessage } from '../statusMessage'
 
 const props = defineProps<{ project: { id: string }; token?: string }>()
@@ -17,6 +19,21 @@ const orderCategories = ref<Record<string, string>>({})
 const loading = ref(false)
 const saving = ref(false)
 const error = ref('')
+const noteCategory = ref<string | null>(null)
+const noteSaving = ref(false)
+const settlementSaving = ref(false)
+const categoryNotes = (category: string) => (budget.value?.notes ?? []).filter(note => note.category === category).slice().reverse()
+const latestNote = (category: string) => categoryNotes(category)[0]?.content ?? draft.value.find(line => line.category === category)?.note ?? ''
+function openNotes(category: string) { noteCategory.value = category }
+function settlementUpdated(result: ProjectBudget) {
+  if (budget.value && props.project.id === result.projectId) budget.value = { ...budget.value, settlementLines: result.settlementLines, settlementAmount: result.settlementAmount, bonusRate: result.bonusRate, bonusAmount: result.bonusAmount }
+  notesAdded(result)
+}
+function notesAdded(result: ProjectBudget) {
+  if (budget.value && props.project.id === result.projectId) budget.value = { ...budget.value, notes: result.notes, rowVersion: result.rowVersion, updatedBy: result.updatedBy, updatedAt: result.updatedAt }
+  const sheet = assessments.value.sheets.find(sheet => sheet.projectId === result.projectId)
+  if (sheet) { sheet.rowVersion = result.rowVersion; sheet.notes = result.notes?.filter(note => note.category === 'Assessment') ?? [] }
+}
 let loadSequence = 0
 const rows = computed(() => draft.value.map(input => {
   const orders = budget.value?.orders.filter(order => orderCategories.value[order.key] === input.category) ?? []
@@ -80,24 +97,26 @@ async function save() {
   } catch (cause) { ElMessage.error(cause instanceof Error ? cause.message : '预算保存失败') }
   finally { saving.value = false }
 }
-watch(() => [props.project.id, props.token], () => { subTab.value = 'summary'; assessmentDirty.value = false; load() }, { immediate: true })
+watch(() => [props.project.id, props.token], () => { subTab.value = 'summary'; assessmentDirty.value = false; noteCategory.value = null; load() }, { immediate: true })
 </script>
 
 <template>
   <section class="pdm-budget" v-loading="loading">
     <nav class="pdm-budget__tabs pdm-project-subtabs pdm-segmented" aria-label="预算页面" role="tablist"><button role="tab" :aria-selected="subTab === 'summary'" :class="{ 'is-active': subTab === 'summary' }" :disabled="assessmentDirty" @click="subTab = 'summary'">预算汇总</button><button role="tab" :aria-selected="subTab === 'assessment'" :class="{ 'is-active': subTab === 'assessment' }" :disabled="changed" @click="subTab = 'assessment'">预算评估</button></nav>
+    <BudgetNotesDialog v-if="budget" :model-value="noteCategory !== null" :project-id="project.id" :category="noteCategory ?? ''" :title="`${noteCategory ? name(noteCategory) : ''}备注`" :notes="budget.notes ?? []" :row-version="budget.rowVersion" :token="token" :busy="saving" @update:model-value="value => { if (!value) noteCategory = null }" @added="notesAdded" @saving="noteSaving = $event" />
     <el-alert v-if="error" :title="error" type="error" :closable="false" />
     <template v-if="budget">
-      <BudgetAssessmentManager v-if="subTab === 'assessment'" :directory="assessments" :token="token" @saved="load" @dirty="assessmentDirty = $event" />
+      <BudgetAssessmentManager v-if="subTab === 'assessment'" :directory="assessments" :token="token" @saved="load" @note-added="notesAdded" @dirty="assessmentDirty = $event" />
       <div v-if="subTab === 'summary'" class="pdm-budget__summary">
-      <div class="pdm-budget__cards">
-        <article v-for="card in cards" :key="card.title" :class="{ 'is-overrun': card.warning }"><div class="pdm-budget__card-heading"><span :title="card.title">{{ card.title }}</span></div><div class="pdm-budget__card-value"><strong>{{ money(card.value) }}</strong><strong v-if="card.proportion !== null" class="pdm-budget__ratio" :data-status="card.status">{{ card.proportion }}</strong></div><span><template v-if="card.value != null"><span class="pdm-budget__currency">人民币</span>{{ uppercaseMoney(card.value).slice(3) }}</template><template v-else>—</template></span></article>
+      <div class="pdm-budget__cards" :class="{ 'is-settlement-hidden': !budget.canViewSettlement }">
+        <BudgetSettlementCards :budget="budget" :token="token" :busy="saving || noteSaving" @updated="settlementUpdated" @saving="settlementSaving = $event" />
+        <article v-for="card in cards" :key="card.title" :class="{ 'is-overrun': card.warning }"><div class="pdm-budget__card-heading"><span :title="card.title">{{ card.title }}</span></div><div class="pdm-budget__card-value"><strong>{{ money(card.value) }}</strong><strong v-if="card.proportion !== null" class="pdm-budget__ratio" :data-status="card.status">{{ card.proportion }}</strong></div><span><template v-if="card.value != null"><span v-if="card.title !== '预算金额'" class="pdm-budget__currency">人民币</span>{{ uppercaseMoney(card.value).slice(3) }}</template><template v-else>—</template></span></article>
       </div>
       <section class="pdm-panel pdm-budget__section pdm-budget__costs">
         <div v-for="(group, index) in groups" :key="group.title" class="pdm-budget__group">
         <header><h3>{{ group.title }}</h3><div v-if="index === 0" class="pdm-budget__actions">
-          <button type="button" class="pdm-secondary-action" :disabled="loading || saving || changed" @click="load"><RefreshCw :size="14" />刷新</button>
-          <button v-if="budget?.canEdit" type="button" class="pdm-primary-action" :disabled="saving || loading || !changed" @click="save"><Save :size="14" />{{ saving ? '保存中…' : '保存预算' }}</button>
+          <button type="button" class="pdm-secondary-action" :disabled="loading || saving || noteSaving || settlementSaving || changed" @click="load"><RefreshCw :size="14" />刷新</button>
+          <button v-if="budget?.canEdit" type="button" class="pdm-primary-action" :disabled="saving || noteSaving || settlementSaving || loading || !changed" @click="save"><Save :size="14" />{{ saving ? '保存中…' : '保存预算' }}</button>
         </div></header>
         <div class="pdm-budget__scroll">
           <table>
@@ -113,7 +132,7 @@ watch(() => [props.project.id, props.token], () => { subTab.value = 'summary'; a
                 <td class="budget-actual"><el-input-number v-model="row.input.actualAmount" :controls="false" :min="0" :max="1000000000" :precision="2" :disabled="!(row.input.category === 'RiskReserve' ? budgetEditable : actualEditable)" aria-label="实际金额" /></td>
                 <td :class="{ 'is-overrun': (remaining(row) ?? 0) < 0 }">{{ money(remaining(row)) }}</td>
                 <td><span class="pdm-budget__alert" :data-status="usageAlert(row)">{{ alertName(usageAlert(row)) }}</span></td>
-                <td><el-input v-model="row.input.note" :disabled="!budgetEditable" maxlength="500" aria-label="费用备注" /></td>
+                <td><button type="button" class="pdm-budget__note-preview" :title="latestNote(row.input.category) || '添加备注'" :disabled="saving || noteSaving" :aria-label="`${name(row.input.category)}备注`" @click="openNotes(row.input.category)">{{ latestNote(row.input.category) || '添加备注' }}</button></td>
               </tr>
             </tbody>
             <tfoot><tr><th>合计</th><td>{{ money(groupTotals(group.rows).budgetAmount) }}</td><td>{{ money(groupTotals(group.rows).assessmentAmount) }}</td><td>{{ money(groupTotals(group.rows).actualAmount) }}</td><td :class="{ 'is-overrun': (groupTotals(group.rows).remaining ?? 0) < 0 }">{{ money(groupTotals(group.rows).remaining) }}</td><td><span class="pdm-budget__alert" :data-status="usageAlert(groupTotals(group.rows))">{{ alertName(usageAlert(groupTotals(group.rows))) }}</span></td><td>—</td></tr></tfoot>

@@ -8,6 +8,26 @@ namespace Pdm.Domain.Tests;
 
 public sealed class ValidationPlanServiceTests
 {
+    [Theory]
+    [InlineData("QualityManager", "质量经理")]
+    [InlineData("QualityInspector", "质量员")]
+    public async Task QualityRoles_ManageAllQualityKindsWithinReadableProjects(string roleCode, string name)
+    {
+        var definition = Assert.Single(RolePermissionCatalog.Roles, x => x.RoleCode == roleCode);
+        Assert.Equal(name, definition.Name);
+        Assert.Equal(UserRole.ProductionViewer, definition.BaseRole);
+        var permissions = RolePermissionCatalog.InitialPermissions(roleCode, definition.BaseRole);
+        Assert.Contains(PermissionCodes.ValidationPlanEdit, permissions);
+        Assert.DoesNotContain(PermissionCodes.RoleSettingsEdit, permissions);
+        Assert.DoesNotContain(PermissionCodes.DocumentEdit, permissions);
+        var (_, _, repository, _, project) = await CreateFixtureAsync();
+        await repository.CreateUserAsync(new UserAccount(Guid.NewGuid(), "quality-role", name, "unused", definition.BaseRole, true, RoleCode: roleCode), default);
+        foreach (var kind in new[] { "quality", "incoming", "assembly", "preAcceptance", "finalAcceptance" })
+        {
+            Assert.True(await QualityUploadPolicy.CanAsync(repository, project.Id, kind, "quality-role", definition.BaseRole, default));
+            Assert.False(await QualityUploadPolicy.CanAsync(repository, Guid.NewGuid(), kind, "quality-role", definition.BaseRole, default));
+        }
+    }
     [Fact]
     public async Task QualityAcceptance_IsIndependentFromValidationPlan()
     {

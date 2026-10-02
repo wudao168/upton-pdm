@@ -3,13 +3,18 @@ import { computed, ref, watch } from 'vue'
 import { Plus, Save, ArrowLeft, Trash2 } from '@lucide/vue'
 import { saveBudgetAssessment, saveAssessmentLaborRates } from '../api'
 import { assessmentItemTotal, assessmentSum, budgetCategories, uppercaseMoney } from '../projectBudget'
-import type { AssessmentDirectory, AssessmentGroup } from '../projectBudget'
+import type { AssessmentDirectory, AssessmentGroup, AssessmentSheet, ProjectBudget } from '../projectBudget'
+import BudgetNotesDialog from './BudgetNotesDialog.vue'
 import { ElMessage } from '../statusMessage'
 import { ElMessageBox } from 'element-plus'
 import { useUserDisplayName } from '../userDisplay'
 const props = defineProps<{ directory: AssessmentDirectory; token?: string }>()
-const emit = defineEmits<{ saved: []; dirty: [value: boolean] }>()
+const emit = defineEmits<{ saved: []; dirty: [value: boolean]; noteAdded: [result: ProjectBudget] }>()
 const displayUserName = useUserDisplayName()
+const noteProjectId = ref<string | null>(null)
+const noteSaving = ref(false)
+const noteSheet = computed(() => props.directory.sheets.find(item => item.projectId === noteProjectId.value))
+const latestNote = (sheet: AssessmentSheet) => sheet.notes?.at(-1)?.content ?? ''
 const selected = ref<string | null>(null)
 const draft = ref<AssessmentGroup[]>([])
 const saving = ref(false)
@@ -67,6 +72,7 @@ async function save() {
 </script>
 <template>
   <section class="pdm-panel pdm-budget-assessment">
+    <BudgetNotesDialog v-if="noteSheet" :model-value="noteProjectId !== null" :project-id="noteSheet.projectId" category="Assessment" :title="`${noteSheet.projectCode}评估备注`" :notes="noteSheet.notes ?? []" :row-version="noteSheet.rowVersion" :token="token" :busy="saving" @update:model-value="value => { if (!value) noteProjectId = null }" @added="emit('noteAdded', $event)" @saving="noteSaving = $event" />
     <el-dialog v-model="ratesVisible" title="工时单价设置" width="460px" :close-on-click-modal="false">
       <p class="pdm-budget__rates-scope">所有项目共用</p>
       <div class="pdm-budget__scroll"><table><thead><tr><th>人工类型</th><th>工时单价（元/人天）</th></tr></thead><tbody><tr v-for="category in laborCategories" :key="category.key"><td>{{ category.name }}</td><td><el-input-number v-model="ratesDraft[category.key]" :controls="false" :min="0" :max="1000000000" :precision="2" :disabled="saving" :aria-label="`${category.name}工时单价`" /></td></tr></tbody></table></div>
@@ -74,12 +80,12 @@ async function save() {
     </el-dialog>
     <template v-if="!sheet">
       <header><h3>预算评估</h3><button v-if="directory.canEditLaborRates" class="pdm-secondary-action" :disabled="saving" @click="openRates">工时单价设置</button></header>
-      <div class="pdm-budget__scroll"><table class="pdm-budget-assessment__list"><colgroup><col style="width:10%" /><col style="width:20%" /><col style="width:10%" /><col style="width:15%" /><col style="width:15%" /><col style="width:20%" /><col style="width:10%" /></colgroup><thead><tr><th>项目号</th><th>项目名称</th><th>主设</th><th>物料成本</th><th>人工成本</th><th>更新时间</th><th>操作</th></tr></thead><tbody>
-        <tr v-for="item in assessmentRows" :key="item.projectId" tabindex="0" :aria-label="`打开${item.projectCode}预算评估`" @click.stop="open(item.projectId)" @keydown.enter.self="open(item.projectId)" @keydown.space.self.prevent="open(item.projectId)"><td :title="item.projectCode">{{ item.projectCode }}</td><td :title="item.projectName">{{ item.projectName }}</td><td>{{ item.designLead ? item.designLead.split('、').map(value => displayUserName(value)).join('、') : '待分配' }}</td><td>{{ money(item.materialTotal) }}</td><td>{{ money(item.laborTotal) }}</td><td>{{ item.updatedAt ? new Date(item.updatedAt).toLocaleString('zh-CN') : '—' }}</td><td><button class="pdm-text-action" @click.stop="open(item.projectId)">{{ item.canEdit ? '编辑评估' : '查看评估' }}</button></td></tr>
-      </tbody><tfoot><tr><th colspan="3">汇总</th><td>{{ money(materialTotal) }}</td><td>{{ money(laborTotal) }}</td><td colspan="2">合计：{{ money(assessmentSum([materialTotal, laborTotal])) }}</td></tr></tfoot></table></div>
+      <div class="pdm-budget__scroll"><table class="pdm-budget-assessment__list"><colgroup><col style="width:9%" /><col style="width:18%" /><col style="width:9%" /><col style="width:12%" /><col style="width:12%" /><col style="width:15%" /><col style="width:16%" /><col style="width:9%" /></colgroup><thead><tr><th>项目号</th><th>项目名称</th><th>主设</th><th>物料成本</th><th>人工成本</th><th>备注</th><th>更新时间</th><th>操作</th></tr></thead><tbody>
+        <tr v-for="item in assessmentRows" :key="item.projectId" tabindex="0" :aria-label="`打开${item.projectCode}预算评估`" @click.stop="open(item.projectId)" @keydown.enter.self="open(item.projectId)" @keydown.space.self.prevent="open(item.projectId)"><td :title="item.projectCode">{{ item.projectCode }}</td><td :title="item.projectName">{{ item.projectName }}</td><td>{{ item.designLead ? item.designLead.split('、').map(value => displayUserName(value)).join('、') : '待分配' }}</td><td>{{ money(item.materialTotal) }}</td><td>{{ money(item.laborTotal) }}</td><td><button class="pdm-budget__note-preview" :aria-label="`${item.projectCode}评估备注`" :title="latestNote(item) || '添加备注'" :disabled="saving || noteSaving" @click.stop="noteProjectId = item.projectId" @keydown.stop>{{ latestNote(item) || '添加备注' }}</button></td><td>{{ item.updatedAt ? new Date(item.updatedAt).toLocaleString('zh-CN') : '—' }}</td><td><button class="pdm-text-action" @click.stop="open(item.projectId)">{{ item.canEdit ? '编辑评估' : '查看评估' }}</button></td></tr>
+      </tbody><tfoot><tr><th colspan="3">汇总</th><td>{{ money(materialTotal) }}</td><td>{{ money(laborTotal) }}</td><td colspan="3">合计：{{ money(assessmentSum([materialTotal, laborTotal])) }}</td></tr></tfoot></table></div>
     </template>
     <template v-else>
-      <header><div><h3>{{ sheet.projectCode }} · {{ sheet.projectName }}</h3></div><div class="pdm-budget__actions"><button v-if="directory.canEditLaborRates" class="pdm-secondary-action" :disabled="saving || dirty" @click="openRates">工时单价设置</button><button class="pdm-secondary-action" :disabled="saving" @click="back"><ArrowLeft :size="14" />返回列表</button><button v-if="sheet.canEdit" class="pdm-secondary-action" :disabled="saving" @click="addGroup"><Plus :size="14" />添加分组</button><button v-if="sheet.canEdit" class="pdm-primary-action" :disabled="saving || !dirty" @click="save"><Save :size="14" />{{ saving ? '保存中…' : '保存评估' }}</button></div></header>
+      <header><div class="pdm-assessment-title"><h3>{{ sheet.projectCode }} · {{ sheet.projectName }}</h3><button class="pdm-budget__note-preview" :aria-label="`${sheet.projectCode}评估备注`" :title="latestNote(sheet) || '添加备注'" :disabled="saving || noteSaving" @click="noteProjectId = sheet.projectId">{{ latestNote(sheet) || '添加备注' }}</button></div><div class="pdm-budget__actions"><button v-if="directory.canEditLaborRates" class="pdm-secondary-action" :disabled="saving || dirty" @click="openRates">工时单价设置</button><button class="pdm-secondary-action" :disabled="saving" @click="back"><ArrowLeft :size="14" />返回列表</button><button v-if="sheet.canEdit" class="pdm-secondary-action" :disabled="saving" @click="addGroup"><Plus :size="14" />添加分组</button><button v-if="sheet.canEdit" class="pdm-primary-action" :disabled="saving || noteSaving || !dirty" @click="save"><Save :size="14" />{{ saving ? '保存中…' : '保存评估' }}</button></div></header>
       <section v-for="(group, index) in draft" :key="group.id" class="pdm-assessment-group">
         <header><el-input v-model="group.name" :disabled="!editable" placeholder="分组名称" maxlength="100" aria-label="分组名称" /><el-select popper-class="pdm-budget-select-popper" v-model="group.category" :disabled="!editable" aria-label="分组类型"><el-option v-for="category in categories" :key="category.key" :label="category.name" :value="category.key" /></el-select><div class="pdm-budget__actions"><button v-if="sheet.canEdit" class="pdm-secondary-action" :disabled="saving" @click="addItem(group)"><Plus :size="14" />添加明细</button><button v-if="sheet.canEdit" class="pdm-text-action is-danger" :disabled="saving" @click="removeGroup(index)"><Trash2 :size="14" />删除分组</button></div></header>
         <div class="pdm-budget__scroll"><table><thead><tr><th>名称</th><th>{{ group.category === 'Labor' ? '人工类型' : '型号' }}</th><th>品牌</th><th>备注</th><th>{{ group.category === 'Labor' ? '工时（人/天）' : '数量' }}</th><th>{{ group.category === 'Labor' ? '工时单价（元）' : '单价（元）' }}</th><th>总价（元）</th><th v-if="sheet.canEdit">操作</th></tr></thead><tbody><tr v-for="(item, itemIndex) in group.items" :key="item.id">

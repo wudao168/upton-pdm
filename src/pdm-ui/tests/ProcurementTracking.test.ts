@@ -291,19 +291,24 @@ describe('ProcurementTracking', () => {
     const wrapper = mount(ProcurementTracking, { props: { projectId: 'project-1', token: 'token', username: 'engineer' }, global: { plugins: [ElementPlus] } })
     await flushPromises()
     const sequences = () => wrapper.findAll('.el-table__body tbody tr').map(row => row.find('td').text())
-    await wrapper.get('[aria-label="未入库"]').setValue(true)
+    await wrapper.get('[aria-label="筛选出入库状态"]').trigger('click')
+    await flushPromises()
+    document.querySelector<HTMLInputElement>('[aria-label="出入库状态多选项"] [aria-label="未入库"]')!.click()
+    await flushPromises()
     expect(sequences()).toEqual(['1', '3'])
-    await wrapper.get('[aria-label="未出库"]').setValue(true)
+    document.querySelector<HTMLInputElement>('[aria-label="出入库状态多选项"] [aria-label="未出库"]')!.click()
+    await flushPromises()
     expect(sequences()).toEqual(['1'])
-    await wrapper.get('[aria-label="未入库"]').setValue(false)
+    document.querySelector<HTMLInputElement>('[aria-label="出入库状态多选项"] [aria-label="未入库"]')!.click()
+    await flushPromises()
     expect(sequences()).toEqual(['1', '2'])
     await wrapper.findAll('button').find(button => button.text() === '重置筛选')!.trigger('click')
     expect(sequences()).toEqual(['1', '2', '3', '4'])
-    expect((wrapper.get('[aria-label="未出库"]').element as HTMLInputElement).checked).toBe(false)
+    expect(document.querySelector<HTMLInputElement>('[aria-label="出入库状态多选项"] [aria-label="未出库"]')!.checked).toBe(false)
     wrapper.unmount()
   })
 
-  it('默认保持原始顺序并可只看关键物料', async () => {
+  it('默认保持原始顺序且移除关键物料筛选', async () => {
     const result = await api.getProjectProcurementTracking()
     const first = result.items[0]
     api.getProjectProcurementTracking.mockResolvedValue({ ...result, items: [
@@ -315,8 +320,7 @@ describe('ProcurementTracking', () => {
     await flushPromises()
     const materialCodes = () => wrapper.findAll('.el-table__body tbody tr').map(row => row.findAll('td')[3].text())
     expect(materialCodes()).toEqual(['NONE', 'DEBUG', 'ASSEMBLY'])
-    await wrapper.get('[aria-label="只看关键物料"]').setValue(true)
-    expect(materialCodes()).toEqual(['DEBUG', 'ASSEMBLY'])
+    expect(wrapper.find('[aria-label="只看关键物料"]').exists()).toBe(false)
     wrapper.unmount()
   })
 
@@ -409,7 +413,7 @@ describe('ProcurementTracking', () => {
     expect(wrapper.findAll('.procurement-tracking__actions button').map(button => button.text())).toEqual(['列设置', '立即刷新', '库存设置', '导出 Excel'])
     expect(wrapper.get('.procurement-tracking__heading').element.lastElementChild?.classList.contains('procurement-tracking__updated')).toBe(true)
     expect(wrapper.get('[aria-label="采购跟踪筛选"]').element.nextElementSibling).toBe(wrapper.get('.procurement-tracking__actions').element)
-    expect(wrapper.findAll('.procurement-tracking__delay-filter').map(label => label.text())).toEqual(['交期不符', '未入库', '未出库', '关键'])
+    expect(wrapper.findAll('.procurement-tracking__delay-filter').map(label => label.text())).toEqual(['延期'])
     expect(wrapper.get('[aria-label="筛选品牌"]').attributes('list')).toBe('procurement-brands-project-1')
     expect(wrapper.get('[aria-label="筛选物料分类"]').findAll('option').map(option => option.text())).toEqual(['全部分类', '标准件', '非标件', '电气件'])
     expect(wrapper.get('[aria-label="筛选物料分类"]').element.parentElement?.classList.contains('procurement-tracking__kind-filter')).toBe(true)

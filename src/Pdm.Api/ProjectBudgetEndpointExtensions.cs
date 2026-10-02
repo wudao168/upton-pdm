@@ -15,6 +15,12 @@ public static class ProjectBudgetEndpointExtensions
             Results.Ok(await service.SaveAsync(projectId, command, Actor(context), Role(context), ct)));
         api.MapPut("/assessments/labor-rates", async (Guid projectId, SaveAssessmentLaborRatesCommand command, HttpContext context, BudgetAssessmentService service, CancellationToken ct) =>
             Results.Ok(await service.SaveLaborRatesAsync(projectId, command, Actor(context), Role(context), ct)));
+        api.MapPut("/settlement", async (Guid projectId, SaveProjectSettlementCommand command, HttpContext context, ProjectBudgetService service, CancellationToken ct) =>
+            Results.Ok(await service.SaveSettlementAsync(projectId, command, Actor(context), Role(context), ct)));
+        api.MapPut("/bonus-rate", async (Guid projectId, SaveProjectBonusRateCommand command, HttpContext context, ProjectBudgetService service, CancellationToken ct) =>
+            Results.Ok(await service.SaveBonusRateAsync(projectId, command, Actor(context), Role(context), ct)));
+        api.MapPost("/notes", async (Guid projectId, AddProjectBudgetNoteCommand command, HttpContext context, ProjectBudgetService service, CancellationToken ct) =>
+            Results.Ok(await service.AddNoteAsync(projectId, command, Actor(context), Role(context), ct)));
         api.MapGet("", async (Guid projectId, HttpContext context, ProjectBudgetService service, CancellationToken ct) =>
             Results.Ok(await service.GetAsync(projectId, Actor(context), Role(context), ct)));
         api.MapPut("", async (Guid projectId, SaveProjectBudgetCommand command, HttpContext context, ProjectBudgetService service, CancellationToken ct) =>

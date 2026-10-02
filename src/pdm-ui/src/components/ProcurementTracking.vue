@@ -175,9 +175,9 @@ const filterFields = [
 ] as const
 type FilterKey = typeof filterFields[number]['key']
 const multiFilterFields = filterFields.filter((field): field is Exclude<typeof filterFields[number], { key: 'brand' }> => field.key !== 'brand')
-const filters = reactive({ keyword: '', brand: '', bomKind: '', purchaseRequisitionStatus: [] as string[], purchaseOrderStatus: [] as string[], buyerName: [] as string[], impactedOnly: false, delayedOnly: false, unreceivedOnly: false, unissuedOnly: false })
+const filters = reactive({ keyword: '', brand: '', bomKind: '', purchaseRequisitionStatus: [] as string[], purchaseOrderStatus: [] as string[], buyerName: [] as string[], delayedOnly: false, unreceivedOnly: false, unissuedOnly: false })
 function resetFilters() {
-  Object.assign(filters, { keyword: '', brand: '', bomKind: '', purchaseRequisitionStatus: [], purchaseOrderStatus: [], buyerName: [], impactedOnly: false, delayedOnly: false, unreceivedOnly: false, unissuedOnly: false })
+  Object.assign(filters, { keyword: '', brand: '', bomKind: '', purchaseRequisitionStatus: [], purchaseOrderStatus: [], buyerName: [], delayedOnly: false, unreceivedOnly: false, unissuedOnly: false })
 }
 function filterValues(row: ProjectProcurementTrackingItem, key: FilterKey) {
   const value = row[key]?.trim() ?? ''
@@ -208,7 +208,6 @@ const filteredItems = computed(() => {
     && (!filters.brand || filterValues(row, 'brand').some(value => value.toLocaleLowerCase().includes(filters.brand.trim().toLocaleLowerCase())))
     && matchesBomKind(row)
     && multiFilterFields.every(({ key }) => !filters[key].length || filterValues(row, key).some(value => filters[key].includes(value)))
-    && (!filters.impactedOnly || !!row.impactStage)
     && (!filters.delayedOnly || hasDeliveryDelay(row))
     && (!filters.unreceivedOnly || !movementFor(row, 'receiptQuantity'))
     && (!filters.unissuedOnly || !movementFor(row, 'issueQuantity')))
@@ -632,7 +631,7 @@ onBeforeUnmount(() => {
       </label>
       <el-popover v-for="field in multiFilterFields" :key="field.key" placement="bottom-start" trigger="click" :width="190">
         <template #reference>
-          <button type="button" class="procurement-tracking__multi-filter" :class="{ 'has-value': filters[field.key].length }" :aria-label="`筛选${field.label}`">
+          <button type="button" class="procurement-tracking__multi-filter" :class="{ 'has-value': filters[field.key].length }" :aria-label="`筛选${field.label}`" :title="multiFilterSummary(field)">
             <span>{{ multiFilterSummary(field) }}</span><span aria-hidden="true">⌄</span>
           </button>
         </template>
@@ -642,10 +641,19 @@ onBeforeUnmount(() => {
           <button v-if="filters[field.key].length" type="button" @click="filters[field.key] = []">清空</button>
         </div>
       </el-popover>
-      <label class="procurement-tracking__delay-filter"><input v-model="filters.delayedOnly" type="checkbox" aria-label="交期不符">交期不符</label>
-      <label class="procurement-tracking__delay-filter"><input v-model="filters.unreceivedOnly" type="checkbox" aria-label="未入库">未入库</label>
-      <label class="procurement-tracking__delay-filter"><input v-model="filters.unissuedOnly" type="checkbox" aria-label="未出库">未出库</label>
-      <label class="procurement-tracking__delay-filter"><input v-model="filters.impactedOnly" type="checkbox" aria-label="只看关键物料">关键</label>
+      <el-popover placement="bottom-start" trigger="click" :width="190">
+        <template #reference>
+          <button type="button" class="procurement-tracking__multi-filter" :class="{ 'has-value': filters.unreceivedOnly || filters.unissuedOnly }" aria-label="筛选出入库状态" :title="filters.unreceivedOnly && filters.unissuedOnly ? '未入库、未出库' : filters.unreceivedOnly ? '未入库' : filters.unissuedOnly ? '未出库' : '全部出入库'">
+            <span>{{ filters.unreceivedOnly && filters.unissuedOnly ? '未入库 +1' : filters.unreceivedOnly ? '未入库' : filters.unissuedOnly ? '未出库' : '全部出入库' }}</span><span aria-hidden="true">⌄</span>
+          </button>
+        </template>
+        <div class="procurement-tracking__multi-options" aria-label="出入库状态多选项">
+          <label><input v-model="filters.unreceivedOnly" type="checkbox" aria-label="未入库">未入库</label>
+          <label><input v-model="filters.unissuedOnly" type="checkbox" aria-label="未出库">未出库</label>
+          <button v-if="filters.unreceivedOnly || filters.unissuedOnly" type="button" @click="filters.unreceivedOnly = false; filters.unissuedOnly = false">清空</button>
+        </div>
+      </el-popover>
+      <label class="procurement-tracking__delay-filter"><input v-model="filters.delayedOnly" type="checkbox" aria-label="延期">延期</label>
       <el-button @click="resetFilters">重置筛选</el-button>
       </div>
       <div class="procurement-tracking__actions">
@@ -716,7 +724,7 @@ onBeforeUnmount(() => {
       <button type="button" class="pdm-secondary-action" aria-label="备料明细下一页" :disabled="page >= pageCount" @click="page += 1">›</button>
     </div>
 
-    <el-dialog v-model="inventorySettingsVisible" title="库存汇总设置" width="520px" append-to-body>
+    <el-dialog class="procurement-tracking-dialog" v-model="inventorySettingsVisible" title="库存汇总设置" width="520px" append-to-body>
       <p class="procurement-tracking__settings-note">打开时从最新库存快照更新全部仓库清单，可逐仓勾选。默认选择项目仓、呆滞仓、常备仓、退料仓、应急仓。项目仓仅统计当前项目号（含子项目），其他仓库汇总该仓现存量；库存快照不表示实时可用量。</p>
       <p v-if="inventoryWarehousesLoading">正在更新仓库清单…</p>
       <el-alert v-else-if="inventoryWarehousesError" :title="inventoryWarehousesError" type="error" :closable="false" />
@@ -731,7 +739,7 @@ onBeforeUnmount(() => {
       </template>
     </el-dialog>
 
-    <el-dialog v-model="settingsVisible" title="采购跟踪列设置" width="520px" append-to-body>
+    <el-dialog class="procurement-tracking-dialog" v-model="settingsVisible" title="采购跟踪列设置" width="520px" append-to-body>
       <div class="procurement-tracking__settings-body">
       <p class="procurement-tracking__settings-note">可按当前账号选择显示列；价格、税额、币种及其他财务信息不提供。</p>
       <el-checkbox-group v-model="visibleKeys" class="procurement-tracking__column-list" aria-label="采购跟踪显示列">
@@ -748,27 +756,30 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
-.procurement-tracking__heading{font-size:12px;--el-font-size-base:12px}
-.procurement-tracking__heading :deep(.el-button){font-size:12px}
+.procurement-tracking__heading{font-size:11px;--el-font-size-base:11px}
+.procurement-tracking__heading :deep(.el-button){font-size:11px}
 .procurement-tracking__filters{display:flex;flex-wrap:nowrap;align-items:center;gap:4px;flex:0 0 auto;margin:0;white-space:nowrap}
 .procurement-tracking__brand-filter{width:90px;flex:0 0 90px}
-.procurement-tracking__brand-filter{height:30px;box-sizing:border-box;border:1px solid var(--pdm-border);border-radius:4px;background:var(--pdm-panel,#fff);color:var(--pdm-text);font:inherit;font-size:12px;padding:0 8px;min-width:0}
-.procurement-tracking__kind-filter{display:flex;width:100px;max-width:100%;height:30px;box-sizing:border-box;flex:0 0 100px;align-items:center;justify-content:space-between;gap:5px;padding:0 7px;border:1px solid var(--pdm-border);border-radius:4px;background:var(--pdm-panel,#fff);color:var(--pdm-text);font:inherit;font-size:12px;min-width:0;cursor:pointer}
-.procurement-tracking__kind-filter select{min-width:0;flex:1;height:100%;padding:0;border:0;background:transparent;color:inherit;font:inherit;font-size:12px;appearance:none;-webkit-appearance:none;cursor:pointer}
+.procurement-tracking__brand-filter{height:30px;box-sizing:border-box;border:1px solid var(--pdm-border);border-radius:4px;background:var(--pdm-panel,#fff);color:var(--pdm-text);font:inherit;font-size:11px;padding:0 8px;min-width:0}
+.procurement-tracking__kind-filter{display:flex;width:60px;max-width:100%;height:30px;box-sizing:border-box;flex:0 0 60px;align-items:center;justify-content:space-between;gap:5px;padding:0 7px;border:1px solid var(--pdm-border);border-radius:4px;background:var(--pdm-panel,#fff);color:var(--pdm-text);font:inherit;font-size:11px;min-width:0;cursor:pointer}
+.procurement-tracking__kind-filter select{min-width:0;flex:1;height:100%;padding:0;border:0;background:transparent;color:inherit;font:inherit;font-size:11px;appearance:none;-webkit-appearance:none;cursor:pointer}
 .procurement-tracking__kind-filter select:focus{outline:0}
 .procurement-tracking__movement{white-space:pre-line;line-height:18px;display:block}
 .procurement-tracking__movement.is-transfer{color:var(--pdm-orange)}
 .procurement-tracking__movement.is-stockin{color:var(--pdm-blue)}
-.procurement-tracking__search{height:30px;box-sizing:border-box;border:1px solid var(--pdm-border);border-radius:4px;background:var(--pdm-panel,#fff);color:var(--pdm-text);font:inherit;font-size:12px;padding:0 8px;min-width:0}
-.procurement-tracking__multi-filter{display:flex;width:100px;max-width:100%;height:30px;box-sizing:border-box;flex:0 0 100px;align-items:center;justify-content:space-between;gap:5px;padding:0 7px;border:1px solid var(--pdm-border);border-radius:4px;background:var(--pdm-panel,#fff);color:var(--pdm-text);font:inherit;font-size:12px;cursor:pointer}.procurement-tracking__multi-filter>span:first-child{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.procurement-tracking__multi-filter.has-value{border-color:var(--pdm-blue);color:var(--pdm-blue)}.procurement-tracking__search{width:168px;max-width:100%;flex:0 0 168px}
-.procurement-tracking__multi-options{display:grid;gap:7px;max-height:260px;overflow:auto}.procurement-tracking__multi-options label{display:flex;align-items:center;gap:7px;color:var(--pdm-text);font-size:12px}.procurement-tracking__multi-options>span{color:var(--pdm-muted);font-size:12px}.procurement-tracking__multi-options>button{justify-self:end;border:0;background:transparent;color:var(--pdm-blue);font-size:12px;cursor:pointer}
-.procurement-tracking__delay-filter{display:flex;align-items:center;gap:4px;font-size:12px;color:var(--pdm-text);white-space:nowrap}
+.procurement-tracking__search{height:30px;box-sizing:border-box;border:1px solid var(--pdm-border);border-radius:4px;background:var(--pdm-panel,#fff);color:var(--pdm-text);font:inherit;font-size:11px;padding:0 8px;min-width:0}
+.procurement-tracking__multi-filter{display:flex;width:60px;max-width:100%;height:30px;box-sizing:border-box;flex:0 0 60px;align-items:center;justify-content:space-between;gap:5px;padding:0 7px;border:1px solid var(--pdm-border);border-radius:4px;background:var(--pdm-panel,#fff);color:var(--pdm-text);font:inherit;font-size:11px;cursor:pointer}.procurement-tracking__multi-filter>span:first-child{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.procurement-tracking__multi-filter.has-value{border-color:var(--pdm-blue);color:var(--pdm-blue)}.procurement-tracking__search{width:168px;max-width:100%;flex:0 0 168px}
+.procurement-tracking__multi-options{display:grid;gap:7px;max-height:260px;overflow:auto}.procurement-tracking__multi-options label{display:flex;align-items:center;gap:7px;color:var(--pdm-text);font-size:11px}.procurement-tracking__multi-options>span{color:var(--pdm-muted);font-size:11px}.procurement-tracking__multi-options>button{justify-self:end;border:0;background:transparent;color:var(--pdm-blue);font-size:11px;cursor:pointer}
+.procurement-tracking__delay-filter{display:flex;align-items:center;gap:4px;font-size:11px;color:var(--pdm-text);white-space:nowrap}
 .procurement-tracking__filters .el-button{height:30px;margin:0;white-space:nowrap}
 .procurement-tracking__warehouse-list{display:flex;flex-direction:column;max-height:60vh;overflow:auto}
 .procurement-tracking__pagination{display:flex;flex:0 0 auto;align-items:center;justify-content:flex-end;gap:8px;padding:8px 10px;color:var(--pdm-muted);font-size:11px}
 .procurement-tracking__pagination select{height:28px;padding:0 24px 0 8px;border:1px solid var(--pdm-border);border-radius:5px;background:#fff;color:var(--pdm-text)}
-.procurement-tracking__pagination .pdm-secondary-action{width:28px;min-width:28px;height:28px;min-height:28px;padding:0}
-.procurement-tracking{display:flex;flex-direction:column;min-width:0;min-height:0;height:100%;padding:8px 18px 18px}.procurement-tracking__heading{display:flex;overflow-x:auto;overflow-y:hidden;align-items:center;justify-content:flex-start;gap:5px;min-height:30px;flex-shrink:0;margin-bottom:6px;white-space:nowrap}.procurement-tracking__actions{display:flex;align-items:center;gap:5px;flex-shrink:0;white-space:nowrap}.procurement-tracking__actions :deep(.el-button){box-sizing:border-box;width:66px;min-width:66px;height:30px;min-height:30px;flex:0 0 66px;margin:0;padding:0 5px;white-space:nowrap}.procurement-tracking__updated{margin-left:auto;flex-shrink:0;white-space:nowrap;color:var(--pdm-muted);font-size:12px}.procurement-tracking__table{min-height:0;flex:1 1 auto;margin-top:0}.procurement-tracking__settings-note{margin:0 0 12px;color:var(--pdm-muted);line-height:1.4}.procurement-tracking__column-list{display:grid;max-height:calc(100vh - 190px);grid-template-columns:repeat(2,minmax(0,1fr));gap:0;overflow:auto;border:1px solid #e2e8f0;border-radius:8px}.procurement-tracking__column-list :deep(.el-checkbox){box-sizing:border-box;width:100%;min-height:36px;margin:0;padding:7px 12px;border-bottom:1px solid #eef2f7}.procurement-tracking__column-list :deep(.el-checkbox:nth-child(odd)){border-right:1px solid #eef2f7}.procurement-tracking :deep(.is-procurement-late td.el-table__cell){background:#fff7ed!important}@media(max-width:1000px){.procurement-tracking__heading{flex-wrap:nowrap}}
+.procurement-tracking__pagination .pdm-secondary-action{width:60px;min-width:60px;height:28px;min-height:28px;padding:0}
+.procurement-tracking{display:flex;flex-direction:column;min-width:0;min-height:0;height:100%;padding:8px 18px 18px}.procurement-tracking__heading{display:flex;overflow-x:auto;overflow-y:hidden;align-items:center;justify-content:flex-start;gap:5px;min-height:30px;flex-shrink:0;margin-bottom:6px;white-space:nowrap}.procurement-tracking__actions{display:flex;align-items:center;gap:5px;flex-shrink:0;white-space:nowrap}.procurement-tracking__actions :deep(.el-button){box-sizing:border-box;width:60px;min-width:60px;height:30px;min-height:30px;flex:0 0 60px;margin:0;padding:0 5px;white-space:nowrap}.procurement-tracking__updated{margin-left:auto;flex-shrink:0;white-space:nowrap;color:var(--pdm-muted);font-size:11px}.procurement-tracking__table{min-height:0;flex:1 1 auto;margin-top:0}.procurement-tracking__settings-note{margin:0 0 12px;color:var(--pdm-muted);line-height:1.4}.procurement-tracking__column-list{display:grid;max-height:calc(100vh - 190px);grid-template-columns:repeat(2,minmax(0,1fr));gap:0;overflow:auto;border:1px solid #e2e8f0;border-radius:8px}.procurement-tracking__column-list :deep(.el-checkbox){box-sizing:border-box;width:100%;min-height:36px;margin:0;padding:7px 12px;border-bottom:1px solid #eef2f7}.procurement-tracking__column-list :deep(.el-checkbox:nth-child(odd)){border-right:1px solid #eef2f7}.procurement-tracking :deep(.is-procurement-late td.el-table__cell){background:#fff7ed!important}@media(max-width:1000px){.procurement-tracking__heading{flex-wrap:nowrap}}
+
+.procurement-tracking :deep(.el-button:not(.is-link):not(.is-circle):not(.el-button--text):not([aria-label])),:global(.procurement-tracking-dialog .el-button:not(.is-link):not(.is-circle):not(.el-button--text):not([aria-label])){box-sizing:border-box;width:60px;min-width:60px!important;flex:0 0 60px;padding-inline:3px!important;font-size:11px}
+.procurement-tracking__multi-options>button{width:60px;min-width:60px}
 </style>
 
 <style scoped>

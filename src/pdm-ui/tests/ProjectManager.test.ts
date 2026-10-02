@@ -95,7 +95,7 @@ describe('ProjectManager', () => {
     expect(wrapper.get('[aria-label="项目筛选"]').element.parentElement).toBe(wrapper.get('[aria-label="项目列表"]').element)
     expect(wrapper.find('.pdm-project-table-panel .pdm-panel-heading').exists()).toBe(false)
     expect(wrapper.findAllComponents({ name: 'ElDropdownItem' }).some(item => item.props('command') === 'copy-content')).toBe(false)
-    expect(headers).toEqual(['项目号', '项目名称', '别名', '型号', '序列号', '客户', '事业部', '项目经理', '主设／工程师', '状态', '订单日期', '操作'])
+    expect(headers).toEqual(['项目号', '项目名称', '别名', '型号', '序列号', '客户', '事业部', '项目经理', '主设／工程师', '状态', '订单日期', '铭牌', '操作'])
     expect(cells[1].text()).toBe('气密设备')
     expect(cells[2].text()).toBe('—')
     expect(cells[3].text()).toBe('AK-2-C001-001-00')

@@ -30,6 +30,23 @@ public sealed class BudgetAssessmentServiceTests
         await Assert.ThrowsAsync<PdmConflictException>(() => service.SaveAsync(root.Id, new(rootGroups, 1), "engineer", UserRole.Engineer, default));
     }
     [Fact]
+    public async Task AssessmentNotesAreSeparatePerProjectAndSurviveAssessmentEdits()
+    {
+        var (service, repository, store, root) = await Setup();
+        var child = await repository.CreateSubprojectAsync(new(root.Id, "子项目", null, 1), default);
+        var budget = new ProjectBudgetService(repository, store, new InMemoryU9ProcurementRepository(), TimeProvider.System, new InMemoryMaterialRepository(TimeProvider.System));
+        await budget.AddNoteAsync(root.Id, new("Assessment", "主项目评估备注", 0), "planner", UserRole.PlanningManager, default);
+        await budget.AddNoteAsync(child.Id, new("Assessment", "子项目评估备注", 0), "planner", UserRole.PlanningManager, default);
+        await budget.AddNoteAsync(root.Id, new("Standard", "标准件备注", 1), "planner", UserRole.PlanningManager, default);
+        var view = await service.GetAsync(root.Id, "planner", UserRole.PlanningManager, default);
+        Assert.Equal("主项目评估备注", Assert.Single(view.Sheets.Single(sheet => sheet.ProjectId == root.Id).Notes!).Content);
+        Assert.Equal("子项目评估备注", Assert.Single(view.Sheets.Single(sheet => sheet.ProjectId == child.Id).Notes!).Content);
+        var saved = await service.SaveAsync(root.Id, new([Group("Standard", null, 2, 100)], 2), "engineer", UserRole.Engineer, default);
+        Assert.Equal("主项目评估备注", Assert.Single(saved.Sheets.Single(sheet => sheet.ProjectId == root.Id).Notes!).Content);
+        Assert.Equal(200, saved.Amounts["Standard"]);
+    }
+
+    [Fact]
     public async Task OnlyDesignLeadCanWriteAndUnsupportedCategoriesAreRejected()
     {
         var (service, _, _, root) = await Setup();

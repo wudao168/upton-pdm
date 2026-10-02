@@ -23,12 +23,16 @@ export interface BudgetOrder {
   key: string; documentNumber: string; lineNumber: number; materialCode: string
   itemName: string; amount: number | null; category: string
 }
+export interface SettlementLine { content: string; unit: string | null; quantity: number | null; unitPrice: number | null; note: string | null }
+export interface BudgetNote { id: string; category: string; content: string; createdBy: string | null; createdAt: string | null }
 export interface ProjectBudget {
   projectId: string; rows: BudgetRow[]; orders: BudgetOrder[]
   budgetAmount: number | null; actualAmount: number | null
   estimatedAmount: number | null; overrunAmount: number | null
   canEdit: boolean; canEditBudget?: boolean; canEditActual?: boolean; canViewReserve: boolean; rowVersion: number
   updatedBy: string | null; updatedAt: string | null
+  notes?: BudgetNote[]
+  settlementLines?: SettlementLine[]; settlementAmount?: number | null; bonusRate?: number | null; bonusAmount?: number | null; canEditSettlement?: boolean; canViewSettlement?: boolean; canEditBonus?: boolean
 }
 export const budgetCategories = [
   { key: 'Standard', name: '标准件', labor: false },
@@ -60,7 +64,7 @@ export function calculateBudgetRow(input: BudgetLine, orderAmount: number | null
 
 export interface AssessmentItem { id: string; name: string; model: string | null; brand: string | null; note: string | null; quantity: number | null; unitPrice: number | null; laborCategory?: string | null }
 export interface AssessmentGroup { id: string; name: string; category: string; laborCategory: string | null; items: AssessmentItem[] }
-export interface AssessmentSheet { projectId: string; projectCode: string; projectName: string; designLead: string | null; canEdit: boolean; rowVersion: number; groups: AssessmentGroup[]; total: number | null; updatedBy: string | null; updatedAt: string | null }
+export interface AssessmentSheet { projectId: string; projectCode: string; projectName: string; designLead: string | null; canEdit: boolean; rowVersion: number; groups: AssessmentGroup[]; total: number | null; updatedBy: string | null; updatedAt: string | null; notes?: BudgetNote[] }
 export interface AssessmentDirectory { sheets: AssessmentSheet[]; amounts: Record<string, number | null>; ratesProjectId?: string; ratesRowVersion?: number; canEditLaborRates?: boolean; laborRates?: Record<string, number | null> }
 export const assessmentItemTotal = (item: AssessmentItem) => item.quantity == null || item.unitPrice == null ? null : Math.round((item.quantity * item.unitPrice + Number.EPSILON) * 100) / 100
 export const assessmentSum = (values: Array<number | null>) => values.some(value => value != null) ? values.reduce<number>((sum, value) => sum + (value ?? 0), 0) : null

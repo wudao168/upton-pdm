@@ -110,6 +110,8 @@ if (string.Equals(databaseOptions.Provider, "MySql", StringComparison.OrdinalIgn
     builder.Services.AddScoped<IValidationPlanRepository, MySqlValidationPlanRepository>();
     builder.Services.AddKeyedScoped<IValidationPlanRepository>("quality", (provider, _) => new MySqlValidationPlanRepository(provider.GetRequiredService<IOptions<PdmDatabaseOptions>>(), true));
     builder.Services.AddScoped<IProjectBudgetRepository, MySqlProjectBudgetRepository>();
+    builder.Services.AddScoped<IProjectNameplateRepository, MySqlProjectNameplateRepository>();
+    builder.Services.AddScoped<IProjectContactInformationRepository, MySqlProjectContactInformationRepository>();
     builder.Services.AddScoped<IQualityInspectionRepository, MySqlQualityInspectionRepository>();
     builder.Services.AddScoped<IProjectPlanningRepository, MySqlProjectPlanningRepository>();
     builder.Services.AddScoped<IProjectContentResetStore, MySqlProjectContentResetStore>();
@@ -128,6 +130,8 @@ else
     builder.Services.AddSingleton<IValidationPlanRepository, InMemoryValidationPlanRepository>();
     builder.Services.AddKeyedSingleton<IValidationPlanRepository>("quality", new InMemoryValidationPlanRepository());
     builder.Services.AddSingleton<IProjectBudgetRepository, InMemoryProjectBudgetRepository>();
+    builder.Services.AddSingleton<IProjectNameplateRepository, InMemoryProjectNameplateRepository>();
+    builder.Services.AddSingleton<IProjectContactInformationRepository, InMemoryProjectContactInformationRepository>();
     builder.Services.AddSingleton<IQualityInspectionRepository, InMemoryQualityInspectionRepository>();
     builder.Services.AddSingleton<IProjectPlanningRepository, InMemoryProjectPlanningRepository>();
     builder.Services.AddSingleton<IProjectContentResetStore, InMemoryProjectContentResetStore>();
@@ -184,6 +188,8 @@ builder.Services.AddKeyedScoped<ValidationPlanService>("quality", (provider, _) 
     provider.GetRequiredService<TimeProvider>(), true));
 builder.Services.AddScoped<ProjectPlanningService>();
 builder.Services.AddScoped<ProjectBudgetService>();
+builder.Services.AddScoped<ProjectNameplateService>();
+builder.Services.AddScoped<ProjectContactInformationService>();
 builder.Services.AddScoped<BudgetAssessmentService>();
 builder.Services.AddScoped<QualityInspectionService>();
 builder.Services.AddScoped<U9MaterialIntegrationService>();
@@ -337,6 +343,8 @@ app.MapValidationPlanEndpoints();
 app.MapQualityInspectionEndpoints();
 app.MapProjectPlanningEndpoints();
 app.MapProjectBudgetEndpoints();
+app.MapProjectNameplateEndpoints();
+app.MapProjectContactInformationEndpoints();
 if (Directory.Exists(deployedWebRoot))
 {
     app.MapGet("/{**path}", async context =>

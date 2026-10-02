@@ -1,4 +1,4 @@
-using Upton.Pdm.Application;
+﻿using Upton.Pdm.Application;
 using Upton.Pdm.Domain;
 using Upton.Pdm.Infrastructure;
 
@@ -6,6 +6,28 @@ namespace Upton.Pdm.Tests;
 
 public sealed class ProjectBudgetServiceTests
 {
+    [Fact]
+    public async Task SalesAssistantCanEnterSettlementButCannotChangeBonusOrBudget()
+    {
+        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var project = Assert.Single(await repository.ListProjectsAsync(default));
+        await repository.CreateUserAsync(new UserAccount(Guid.NewGuid(), "sales", "销售助理", "unused", UserRole.ProductionViewer, true, RoleCode: "SalesAssistant"), default);
+        var store = new InMemoryProjectBudgetRepository();
+        var service = new ProjectBudgetService(repository, store, new InMemoryU9ProcurementRepository(), TimeProvider.System, new InMemoryMaterialRepository(TimeProvider.System));
+        TenantContext.Set(new(Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid(), "sales", "SalesAssistant", false, new HashSet<string>()));
+        try
+        {
+            var saved = await service.SaveSettlementAsync(project.Id, new([new("设备款", "台", 2, 1000)], 0), "sales", UserRole.ProductionViewer, default);
+            Assert.Equal(2000m, saved.SettlementAmount);
+            Assert.True(saved.CanEditSettlement);
+            Assert.False(saved.CanEditBudget);
+            Assert.False(saved.CanEditActual);
+            Assert.False(saved.CanEditBonus);
+            await Assert.ThrowsAsync<UnauthorizedAccessException>(() => service.SaveBonusRateAsync(project.Id, new(.01m, saved.RowVersion), "sales", UserRole.ProductionViewer, default));
+            await Assert.ThrowsAsync<UnauthorizedAccessException>(() => service.SaveAsync(project.Id, new(saved.Rows.Select(x => x.Input).ToArray(), saved.RowVersion), "sales", UserRole.ProductionViewer, default));
+        }
+        finally { TenantContext.Clear(); }
+    }
     [Fact]
     public void OrdersAreNotAddedTwiceAndMissingCostsStayUnknown()
     {
@@ -140,6 +162,139 @@ public sealed class ProjectBudgetServiceTests
         await Assert.ThrowsAsync<UnauthorizedAccessException>(() => service.SaveAsync(project.Id, new(planning.Rows.Select(row => row.Input with { ActualAmount = 999 }).ToArray(), 1), "planner", UserRole.PlanningManager, default));
         var cleared = await service.SaveAsync(project.Id, new(saved.Rows.Select(row => row.Input with { ActualAmount = null }).ToArray(), 1), "unknown-engineer", UserRole.Engineer, default);
         Assert.Null(cleared.Rows.Single(row => row.Input.Category == "MechanicalDesign").ActualAmount);
+    }
+
+    [Fact]
+    public async Task BudgetViewersCanAppendNotesWithoutEditingAmountsAndHistorySurvivesBudgetSave()
+    {
+        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var project = Assert.Single(await repository.ListProjectsAsync(default));
+        await repository.SetRolePermissionsAsync("Engineer", [PermissionCodes.ProjectView, PermissionCodes.ProjectContentView, PermissionCodes.ProjectBudgetView], default);
+        var store = new InMemoryProjectBudgetRepository();
+        var service = new ProjectBudgetService(repository, store, new InMemoryU9ProcurementRepository(), TimeProvider.System, new InMemoryMaterialRepository(TimeProvider.System));
+        var lines = ProjectBudgetCategories.All.Select(category => new ProjectBudgetLine(category, BudgetAmount: 100, Note: category == "Standard" ? "历史内容" : null)).ToArray();
+        await store.SaveAsync(new(project.Id, lines, UpdatedBy: "planner", UpdatedAt: TimeProvider.System.GetUtcNow()), 0, default);
+        var first = await service.AddNoteAsync(project.Id, new("Standard", " 第一条 ", 1), "viewer", UserRole.Engineer, default);
+        Assert.False(first.CanEdit);
+        Assert.Equal("第一条", first.Notes!.Last().Content);
+        Assert.Equal("viewer", first.Notes!.Last().CreatedBy);
+        Assert.NotNull(first.Notes!.Last().CreatedAt);
+        Assert.Equal(100, first.Rows.Single(row => row.Input.Category == "Standard").BudgetAmount);
+        var second = await service.AddNoteAsync(project.Id, new("Standard", "第二条", 2), "planner", UserRole.PlanningManager, default);
+        Assert.Equal(new[] { "历史内容", "第一条", "第二条" }, second.Notes!.Select(note => note.Content));
+        await Assert.ThrowsAsync<PdmConflictException>(() => service.AddNoteAsync(project.Id, new("Standard", "过期请求", 2), "viewer", UserRole.Engineer, default));
+        var planning = await service.GetAsync(project.Id, "planner", UserRole.PlanningManager, default);
+        var saved = await service.SaveAsync(project.Id, new(planning.Rows.Select(row => row.Input with { BudgetAmount = 200 }).ToArray(), 3), "planner", UserRole.PlanningManager, default);
+        Assert.Equal(3, saved.Notes!.Count);
+        Assert.Equal("历史内容", saved.Notes[0].Content);
+        Assert.Equal(200, saved.Rows.Single(row => row.Input.Category == "Standard").BudgetAmount);
+    }
+
+    [Fact]
+    public async Task NotesRequireBudgetReadAccessAndRespectReserveVisibility()
+    {
+        var (service, _, projectId) = await Setup();
+        await Assert.ThrowsAsync<UnauthorizedAccessException>(() => service.AddNoteAsync(projectId, new("Standard", "备注", 0), "engineer", UserRole.Engineer, default));
+        await Assert.ThrowsAsync<UnauthorizedAccessException>(() => service.AddNoteAsync(projectId, new("RiskReserve", "备注", 0), "admin", UserRole.Administrator, default));
+        await Assert.ThrowsAsync<PdmRuleException>(() => service.AddNoteAsync(projectId, new("Standard", "  ", 0), "planner", UserRole.PlanningManager, default));
+        await Assert.ThrowsAsync<PdmRuleException>(() => service.AddNoteAsync(projectId, new("Invalid", "备注", 0), "planner", UserRole.PlanningManager, default));
+        await Assert.ThrowsAsync<PdmRuleException>(() => service.AddNoteAsync(projectId, new("Standard", new string('字', 501), 0), "planner", UserRole.PlanningManager, default));
+        await service.AddNoteAsync(projectId, new("RiskReserve", "保密备注", 0), "planner", UserRole.PlanningManager, default);
+        var admin = await service.GetAsync(projectId, "admin", UserRole.Administrator, default);
+        Assert.Empty(admin.Notes!);
+    }
+
+    [Theory]
+    [InlineData(10000, 0)]
+    [InlineData(199999.99, 0)]
+    [InlineData(200000, 1000)]
+    [InlineData(200001, 1000.01)]
+    public async Task BonusRequiresSettlementOfAtLeastTwoHundredThousand(decimal amount, decimal expected)
+    {
+        var (service, _, projectId) = await Setup();
+        var saved = await service.SaveSettlementAsync(projectId, new([new("结算", "项", 1, amount)], 0), "planner", UserRole.PlanningManager, default);
+        Assert.Equal(expected, saved.BonusAmount);
+    }
+
+    [Theory]
+    [InlineData("PlanningManager", true)]
+    [InlineData("SalesAssistant", true)]
+    [InlineData("BusinessUnitManager", true)]
+    [InlineData("Finance", true)]
+    [InlineData("Administrator", false)]
+    [InlineData("Engineer", false)]
+    public async Task SettlementIsVisibleOnlyToTheFourSpecifiedRoles(string roleCode, bool allowed)
+    {
+        var (service, _, projectId) = await Setup();
+        await service.SaveSettlementAsync(projectId, new([new("结算", "项", 1, 10000)], 0), "planner", UserRole.PlanningManager, default);
+        TenantContext.Set(new(Guid.NewGuid(), Guid.Empty, Guid.Empty, "admin", roleCode, false, new HashSet<string>()));
+        try
+        {
+            var view = await service.GetAsync(projectId, "admin", UserRole.Administrator, default);
+            Assert.Equal(allowed, view.CanViewSettlement);
+            Assert.Equal(allowed ? 10000m : (decimal?)null, view.SettlementAmount);
+            Assert.Equal(allowed ? 1 : 0, view.SettlementLines!.Count);
+            Assert.Equal(0m, view.BonusAmount);
+        }
+        finally { TenantContext.Clear(); }
+    }
+
+    [Fact]
+    public async Task SettlementTotalsAndBonusRatesPersistIndependentlyOfBudgetEdits()
+    {
+        var (service, store, projectId) = await Setup();
+        var initial = await service.GetAsync(projectId, "planner", UserRole.PlanningManager, default);
+        Assert.Equal(.005m, initial.BonusRate);
+        Assert.Null(initial.SettlementAmount);
+        Assert.True(initial.CanEditSettlement);
+        Assert.True(initial.CanEditBonus);
+        var saved = await service.SaveSettlementAsync(projectId, new([new("装配线", "套", 1, 1620000), new("追加工作", "项", 2, 1000), new("")], 0), "planner", UserRole.PlanningManager, default);
+        Assert.Equal(1622000, saved.SettlementAmount);
+        Assert.Equal(8110, saved.BonusAmount);
+        Assert.Equal(2, saved.SettlementLines!.Count);
+        var manager = await service.GetAsync(projectId, "manager", UserRole.BusinessUnitManager, default);
+        Assert.Equal(saved.SettlementAmount, manager.SettlementAmount);
+        Assert.Equal(saved.SettlementLines, manager.SettlementLines);
+        Assert.Equal(saved.BonusAmount, manager.BonusAmount);
+        Assert.Null(manager.BonusRate);
+        Assert.False(manager.CanEditSettlement);
+        Assert.False(manager.CanEditBonus);
+        var admin = await service.GetAsync(projectId, "admin", UserRole.Administrator, default);
+        Assert.Null(admin.BonusRate);
+        Assert.Equal(saved.BonusAmount, admin.BonusAmount);
+        Assert.False(admin.CanViewSettlement);
+        Assert.Null(admin.SettlementAmount);
+        Assert.Empty(admin.SettlementLines!);
+        var bonus = await service.SaveBonusRateAsync(projectId, new(.01m, 1), "planner", UserRole.PlanningManager, default);
+        Assert.Equal(16220, bonus.BonusAmount);
+        await Assert.ThrowsAsync<PdmConflictException>(() => service.SaveSettlementAsync(projectId, new([], 1), "planner", UserRole.PlanningManager, default));
+        await Assert.ThrowsAsync<PdmRuleException>(() => service.SaveBonusRateAsync(projectId, new(.010001m, 2), "planner", UserRole.PlanningManager, default));
+        await Assert.ThrowsAsync<PdmRuleException>(() => service.SaveBonusRateAsync(projectId, new(-.001m, 2), "planner", UserRole.PlanningManager, default));
+        await service.SaveAsync(projectId, new(bonus.Rows.Select(row => row.Input with { BudgetAmount = 1000 }).ToArray(), 2), "planner", UserRole.PlanningManager, default);
+        var loaded = await store.FindAsync(projectId, default);
+        Assert.Equal(2, loaded!.SettlementLines!.Count);
+        Assert.Equal(.01m, loaded.BonusRate);
+        await Assert.ThrowsAsync<PdmRuleException>(() => service.SaveSettlementAsync(projectId, new([new("无数量", UnitPrice: 10)], 3), "planner", UserRole.PlanningManager, default));
+        var cleared = await service.SaveSettlementAsync(projectId, new([], 3), "planner", UserRole.PlanningManager, default);
+        Assert.Null(cleared.SettlementAmount);
+        Assert.Null(cleared.BonusAmount);
+    }
+
+    [Fact]
+    public async Task SalesAssistantCanSettleButCannotChangeBonusAndAdministratorsCannotBypassRoles()
+    {
+        var (service, _, projectId) = await Setup();
+        await Assert.ThrowsAsync<UnauthorizedAccessException>(() => service.SaveSettlementAsync(projectId, new([], 0), "admin", UserRole.Administrator, default));
+        await Assert.ThrowsAsync<UnauthorizedAccessException>(() => service.SaveBonusRateAsync(projectId, new(.01m, 0), "admin", UserRole.Administrator, default));
+        TenantContext.Set(new(Guid.NewGuid(), Guid.Empty, Guid.Empty, "sales", "SalesAssistant", false,
+            new HashSet<string>([PermissionCodes.ProjectView, PermissionCodes.ProjectContentView, PermissionCodes.ProjectBudgetView])));
+        try {
+            var saved = await service.SaveSettlementAsync(projectId, new([new("销售结算", "套", 2, 1000)], 0), "admin", UserRole.Administrator, default);
+            Assert.True(saved.CanEditSettlement);
+            Assert.False(saved.CanEditBonus);
+            Assert.Equal(2000, saved.SettlementAmount);
+            await Assert.ThrowsAsync<UnauthorizedAccessException>(() => service.SaveBonusRateAsync(projectId, new(.01m, 1), "admin", UserRole.Administrator, default));
+        } finally { TenantContext.Clear(); }
     }
 
     private static async Task<(ProjectBudgetService, InMemoryProjectBudgetRepository, Guid)> Setup()

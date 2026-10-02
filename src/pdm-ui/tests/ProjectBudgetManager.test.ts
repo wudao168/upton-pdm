@@ -5,15 +5,41 @@ import ProjectBudgetManager from '../src/components/ProjectBudgetManager.vue'
 import { calculateBudgetRow, budgetCategories, uppercaseMoney } from '../src/projectBudget'
 import type { BudgetLine } from '../src/projectBudget'
 
-const api = vi.hoisted(() => ({ getBudgetAssessments: vi.fn(), getProjectBudget: vi.fn(), saveProjectBudget: vi.fn() }))
+const api = vi.hoisted(() => ({ getBudgetAssessments: vi.fn(), getProjectBudget: vi.fn(), saveProjectBudget: vi.fn(), addProjectBudgetNote: vi.fn() }))
 vi.mock('../src/api', () => api)
 const line = (category: string): BudgetLine => ({ category, budgetAmount: 1000, actualAmount: 100, remainingAmount: 0,
   plannedHours: 10, hourlyRate: 100, actualHours: 1, actualHourlyRate: 100, remainingHours: 0, note: null })
 const response = (editable = true) => ({ projectId: 'p1', rows: budgetCategories.filter(category => category.key !== 'RiskReserve').map(category => calculateBudgetRow(line(category.key), null)),
-  orders: [], canEdit: editable, canViewReserve: false, rowVersion: 1, updatedAt: null, updatedBy: null })
+  orders: [], canViewSettlement: true, canEdit: editable, canViewReserve: false, rowVersion: 1, updatedAt: null, updatedBy: null })
 beforeEach(() => { vi.clearAllMocks(); api.getBudgetAssessments.mockResolvedValue({ sheets: [], amounts: { Standard: 250, MechanicalDesign: 800 } }); api.getProjectBudget.mockResolvedValue(response()); api.saveProjectBudget.mockResolvedValue(response()) })
 
 describe('project budget', () => {
+  it('lets a viewer add notes, shows newest content, and opens the full history', async () => {
+    const oldNote = { id: 'n1', category: 'Standard', content: '原备注', createdBy: 'planner', createdAt: '2026-10-01T12:00:00Z' }
+    const newNote = { id: 'n2', category: 'Standard', content: '新备注', createdBy: 'viewer', createdAt: '2026-10-02T01:00:00Z' }
+    api.getProjectBudget.mockResolvedValue({ ...response(false), notes: [oldNote] })
+    api.addProjectBudgetNote.mockResolvedValue({ ...response(false), notes: [oldNote, newNote], rowVersion: 2 })
+    const wrapper = mount(ProjectBudgetManager, { attachTo: document.body, props: { project: { id: 'p1' }, token: 'token' }, global: { plugins: [ElementPlus] } })
+    await flushPromises()
+    expect(wrapper.find('button[aria-label="标准件备注"]').text()).toBe('原备注')
+    await wrapper.find('button[aria-label="标准件备注"]').trigger('click')
+    await flushPromises()
+    const dialog = document.body.querySelector('[role="dialog"]')!
+    expect(dialog.textContent).toContain('原备注')
+    const input = dialog.querySelector('textarea')!
+    input.value = '新备注'; input.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushPromises()
+    const add = Array.from(dialog.querySelectorAll('button')).find(button => button.textContent?.trim() === '添加备注')!
+    add.click(); await flushPromises()
+    expect(api.addProjectBudgetNote).toHaveBeenCalledWith('p1', { category: 'Standard', content: '新备注', expectedRowVersion: 1 }, 'token')
+    expect(wrapper.find('button[aria-label="标准件备注"]').text()).toBe('新备注')
+    expect(dialog.textContent).toContain('viewer')
+    expect(dialog.textContent).toContain('原备注')
+    expect(dialog.querySelector('article')?.textContent).toContain('新备注')
+    expect(wrapper.text()).not.toContain('保存预算')
+    wrapper.unmount()
+  })
+
   it('formats Chinese uppercase money across sections and cents', () => {
     expect(uppercaseMoney(900)).toBe('人民币玖佰元整')
     expect(uppercaseMoney(10001000.05)).toBe('人民币壹仟万壹仟元零伍分')
@@ -34,7 +60,7 @@ describe('project budget', () => {
   it('renders four summaries, excludes hidden reserve, and persists manual amounts', async () => {
     const wrapper = mount(ProjectBudgetManager, { props: { project: { id: 'p1' }, token: 'token' }, global: { plugins: [ElementPlus] } })
     await flushPromises()
-    expect(wrapper.findAll('.pdm-budget__cards article')).toHaveLength(4)
+    expect(wrapper.findAll('.pdm-budget__cards article')).toHaveLength(6)
     expect(wrapper.text()).not.toContain('风险预留')
     expect(wrapper.text()).not.toContain('现场电气工程师调试')
     expect(wrapper.findAll('thead tr')).toHaveLength(2)
@@ -46,8 +72,8 @@ describe('project budget', () => {
     expect(wrapper.findAll('tfoot tr')).toHaveLength(2)
     expect(wrapper.findAll('tfoot')[0]!.text()).toContain('¥ 5,000.00')
     expect(wrapper.findAll('tfoot')[0]!.text()).toContain('¥ 4,500.00')
-    expect(wrapper.findAll('.pdm-budget__cards article')[1]!.text()).toContain('10.0%')
-    expect(wrapper.findAll('.pdm-budget__cards article')[2]!.text()).toContain('50.0%')
+    expect(wrapper.findAll('.pdm-budget__cards article')[3]!.text()).toContain('10.0%')
+    expect(wrapper.findAll('.pdm-budget__cards article')[4]!.text()).toContain('50.0%')
     expect(wrapper.text()).toContain('剩余工时费用')
     expect(wrapper.find('[aria-label="计划工时"]').exists()).toBe(false)
     expect(wrapper.findAll('input[aria-label="预算金额"]')).toHaveLength(10)
@@ -73,7 +99,7 @@ describe('project budget', () => {
     expect(wrapper.findAll('tfoot')[0]!.text()).toContain('¥ 1,000.00')
     expect(wrapper.findAll('tfoot')[0]!.text()).toContain('¥ 900.00')
     expect(wrapper.findAll('tfoot')[0]!.text()).toContain('¥ 100.00')
-    expect(wrapper.findAll('.pdm-budget__cards article')[1]!.text()).toContain('90.0%')
+    expect(wrapper.findAll('.pdm-budget__cards article')[3]!.text()).toContain('90.0%')
     expect(wrapper.findAll('tfoot')[1]!.text()).toContain('未录入')
     wrapper.unmount()
   })

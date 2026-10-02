@@ -8,7 +8,7 @@ public sealed record BudgetAssessmentGroup(Guid Id, string Name, string Category
     IReadOnlyList<BudgetAssessmentItem> Items);
 public sealed record SaveBudgetAssessmentCommand(IReadOnlyList<BudgetAssessmentGroup> Groups, long ExpectedRowVersion);
 public sealed record BudgetAssessmentSheet(Guid ProjectId, string ProjectCode, string ProjectName, string? DesignLead,
-    bool CanEdit, long RowVersion, IReadOnlyList<BudgetAssessmentGroup> Groups, decimal? Total, string? UpdatedBy, DateTimeOffset? UpdatedAt);
+    bool CanEdit, long RowVersion, IReadOnlyList<BudgetAssessmentGroup> Groups, decimal? Total, string? UpdatedBy, DateTimeOffset? UpdatedAt, IReadOnlyList<ProjectBudgetNote>? Notes = null);
 public sealed record BudgetAssessmentDirectory(IReadOnlyList<BudgetAssessmentSheet> Sheets, IReadOnlyDictionary<string, decimal?> Amounts,
     Guid RatesProjectId, long RatesRowVersion, bool CanEditLaborRates, IReadOnlyDictionary<string, decimal?> LaborRates);
 public sealed record SaveAssessmentLaborRatesCommand(IReadOnlyDictionary<string, decimal?> Rates, long ExpectedRowVersion);
@@ -39,7 +39,7 @@ public sealed class BudgetAssessmentService(IPdmRepository repository, IProjectB
             var leads = item.DesignLeads.Count > 0 ? item.DesignLeads : !string.IsNullOrWhiteSpace(item.DesignLead) ? new[] { item.DesignLead! }
                 : root?.DesignLeads.Count > 0 ? root.DesignLeads : new[] { root?.DesignLead ?? "" };
             sheets.Add(new(item.Id, item.Code, item.Name, string.Join("、", leads.Where(value => !string.IsNullOrEmpty(value))),
-                leads.Contains(actor, StringComparer.OrdinalIgnoreCase), stored?.RowVersion ?? 0, groups, Sum(groups.Select(GroupTotal)), stored?.AssessmentUpdatedBy, stored?.AssessmentUpdatedAt));
+                leads.Contains(actor, StringComparer.OrdinalIgnoreCase), stored?.RowVersion ?? 0, groups, Sum(groups.Select(GroupTotal)), stored?.AssessmentUpdatedBy, stored?.AssessmentUpdatedAt, (stored?.Notes ?? []).Where(note => note.Category == "Assessment").ToArray()));
         }
         var amounts = new Dictionary<string, decimal?>();
         foreach (var category in new[] { "Standard", "Nonstandard", "Equipment" }.Concat(ProjectBudgetCategories.Labor))

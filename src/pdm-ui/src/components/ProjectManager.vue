@@ -3,10 +3,12 @@ import { ElMessage } from '../statusMessage'
 import { ElMessageBox } from 'element-plus'
 import { ChevronDown, ChevronRight, FolderKanban, FolderPlus, Search } from '@lucide/vue'
 import { computed, reactive, ref, watch } from 'vue'
+import ProjectNameplateDialog from './ProjectNameplateDialog.vue'
 import type { CreateProjectInput, CreateSubprojectInput, MainProjectStaffingInput, OrganizationDirectory, PdmCustomer, PdmUser, ProjectNumberingOptions, ProjectSummary, UpdateProjectInput } from '../types'
 
 const props = defineProps<{
   projects: ProjectSummary[]
+  token?: string
   numberingOptions: ProjectNumberingOptions
   customers: PdmCustomer[]
   users: PdmUser[]
@@ -33,6 +35,8 @@ type ProjectAction = 'edit' | 'delete' | 'configure-staffing' | 'create-child' |
 const dialogOpen = ref(false)
 const editDialogOpen = ref(false)
 const editProject = ref<ProjectSummary | null>(null)
+const nameplateProject = ref<ProjectSummary | null>(null)
+const nameplateOpen = ref(false)
 const childDialogOpen = ref(false)
 const childParent = ref<ProjectSummary | null>(null)
 const executionDialogOpen = ref(false)
@@ -503,7 +507,7 @@ function handleProjectAction(project: ProjectSummary, action: ProjectAction) {
         </div>
         <div v-if="visibleRootProjects.length" class="pdm-table-scroll pdm-project-number-scroll">
         <table class="pdm-project-table pdm-project-number-table">
-          <thead><tr><th>项目号</th><th>项目名称</th><th>别名</th><th>型号</th><th>序列号</th><th>客户</th><th>事业部</th><th>项目经理</th><th>主设／工程师</th><th>状态</th><th>订单日期</th><th>操作</th></tr></thead>
+          <thead><tr><th>项目号</th><th>项目名称</th><th>别名</th><th>型号</th><th>序列号</th><th>客户</th><th>事业部</th><th>项目经理</th><th>主设／工程师</th><th>状态</th><th>订单日期</th><th>铭牌</th><th>操作</th></tr></thead>
           <tbody>
             <tr v-for="row in visibleProjectRows" :key="row.project.id" :class="{ 'is-child': row.depth > 0 }">
               <td><div class="pdm-project-code-cell" :class="{ 'is-child-code': row.depth > 0 }" :style="{ paddingLeft: `${row.depth * 18}px` }"><button v-if="filteredChildrenByParent.has(row.project.id) && hierarchyFilter !== 'parent'" type="button" class="pdm-tree-toggle" :aria-label="`${isEffectivelyExpanded(row.project.id) ? '折叠' : '展开'}${row.project.code}的子项目`" @click="toggle(row.project.id)"><ChevronDown v-if="isEffectivelyExpanded(row.project.id)" :size="15" /><ChevronRight v-else :size="15" /></button><span v-else class="pdm-project-code-spacer"></span><button type="button" class="pdm-project-code-link" :aria-label="`进入项目 ${row.project.code}`" @click="emit('open', row.project.id)">{{ row.project.code }}</button><button v-if="row.depth === 0 && canCreateSubproject && row.project.effectiveProjectPermissions?.includes('project.child.create') && row.project.deviceModel" type="button" class="pdm-project-add-child" :aria-label="`为${row.project.code}创建子项目`" title="创建子项目" @click.stop="openChildDialog(row.project)"><FolderPlus :size="14" /></button><span v-else class="pdm-project-code-spacer"></span></div></td>
@@ -517,6 +521,7 @@ function handleProjectAction(project: ProjectSummary, action: ProjectAction) {
               <td><button v-if="row.depth === 0 && canManageMainStaffing(row.project)" type="button" class="pdm-project-assignment-button" :aria-label="`配置主设 ${row.project.code}`" title="点击配置主设" @click="openStaffingDialog(row.project)"><span>{{ designOwnerText(row.project) }}</span></button><button v-else-if="row.depth > 0 && row.project.canAssignDesigners && row.project.effectiveProjectPermissions?.includes('project.designer.assign')" type="button" class="pdm-project-assignment-button" :aria-label="`分配工程师 ${row.project.code}`" title="点击分配执行工程师" @click="openDesignerDialog(row.project)"><span>{{ designOwnerText(row.project) }}</span></button><div v-else class="pdm-project-cell-text" :title="designOwnerText(row.project)">{{ designOwnerText(row.project) }}</div></td>
               <td><span class="pdm-status" :class="row.project.stage === '进行中' ? 'is-ok' : 'is-warn'">{{ row.project.stage }}</span></td>
               <td class="pdm-project-order-date">{{ row.project.signedDate || '—' }}</td>
+              <td><button type="button" class="pdm-text-action" :disabled="!row.project.canReadContent || !token" :aria-label="`查看铭牌 ${row.project.code}`" @click="nameplateProject = row.project; nameplateOpen = true">查看铭牌</button></td>
               <td><el-dropdown :aria-label="`操作项目${row.project.code}`" trigger="click" placement="bottom-end" popper-class="pdm-project-action-menu" @command="handleProjectAction(row.project, $event)"><button type="button" class="pdm-project-action-trigger" :aria-label="`操作项目${row.project.code}`">操作<ChevronDown :size="13" /></button><template #dropdown><el-dropdown-menu><el-dropdown-item v-if="canEdit && row.project.effectiveProjectPermissions?.includes('project.edit')" command="edit">编辑项目</el-dropdown-item><el-dropdown-item v-if="row.depth === 0 && canManageMainStaffing(row.project)" command="configure-staffing">配置分工</el-dropdown-item><el-dropdown-item v-if="row.depth === 0 && canCreateSubproject && row.project.effectiveProjectPermissions?.includes('project.child.create') && row.project.deviceModel" command="create-child">创建设备子项目</el-dropdown-item><el-dropdown-item v-if="row.project.canAssignDesigners && row.project.effectiveProjectPermissions?.includes('project.designer.assign')" command="assign-designers">分配执行工程师</el-dropdown-item><el-dropdown-item v-if="canDelete && row.project.effectiveProjectPermissions?.includes('project.delete')" command="delete" divided>删除项目</el-dropdown-item></el-dropdown-menu></template></el-dropdown></td>
             </tr>
           </tbody>
@@ -600,5 +605,6 @@ function handleProjectAction(project: ProjectSummary, action: ProjectAction) {
       <template #footer><button type="button" class="pdm-secondary-action" :disabled="pending" @click="childDialogOpen=false">取消</button><button type="button" class="pdm-primary-action" :disabled="pending" @click="submitSubproject">{{ pending ? '正在创建…' : '创建子项目' }}</button></template>
     </el-dialog>
 
+    <ProjectNameplateDialog v-if="nameplateProject && token" v-model="nameplateOpen" :project="nameplateProject" :token="token" />
   </section>
 </template>
